@@ -66,6 +66,7 @@ func NewParser(r io.Reader, opts ...Option) *Parser {
 	for _, opt := range opts {
 		opt(&cfg)
 	}
+
 	if cfg.maxLineSize <= 0 {
 		cfg.maxLineSize = DefaultMaxLineSize
 	}
@@ -74,6 +75,7 @@ func NewParser(r io.Reader, opts ...Option) *Parser {
 	// Start with a modest buffer that grows up to the configured ceiling.
 	scanner.Buffer(make([]byte, 0, min(4096, cfg.maxLineSize)), cfg.maxLineSize)
 	scanner.Split(scanLines)
+
 	return &Parser{scanner: scanner}
 }
 
@@ -82,41 +84,17 @@ func NewParser(r io.Reader, opts ...Option) *Parser {
 // final event with no trailing blank line is still emitted.
 func (p *Parser) All() iter.Seq2[Event, error] {
 	return func(yield func(Event, error) bool) {
-		var (
-			ev       Event
-			data     strings.Builder
-			haveData bool
-			started  bool // any field seen for the current event
-		)
-
-		dispatch := func() bool {
-			if !started {
-				return true
-			}
-			out := ev
-			if haveData {
-				out.Data = data.String()
-			}
-			if out.Type == "" {
-				out.Type = defaultEventType
-			}
-
-			ev = Event{}
-			data.Reset()
-			haveData = false
-			started = false
-
-			return yield(out, nil)
-		}
+		var pending pendingEvent
 
 		for p.scanner.Scan() {
 			line := p.scanner.Bytes()
 
 			// A blank line dispatches the buffered event.
 			if len(line) == 0 {
-				if !dispatch() {
+				if ev, ok := pending.take(); ok && !yield(ev, nil) {
 					return
 				}
+
 				continue
 			}
 			// A line starting with a colon is a comment; ignore it.
@@ -124,52 +102,94 @@ func (p *Parser) All() iter.Seq2[Event, error] {
 				continue
 			}
 
-			field, value := splitField(line)
-			started = true
-
-			switch field {
-			case "event":
-				ev.Type = string(value)
-			case "data":
-				if haveData {
-					data.WriteByte('\n')
-				}
-				data.Write(value)
-				haveData = true
-			case "id":
-				// The spec ignores an id containing a NUL; LLM streams never
-				// send one, so accept the value as-is.
-				ev.ID = string(value)
-			case "retry":
-				ev.Retry = string(value)
-			default:
-				// Unknown fields are ignored per the spec.
-			}
+			pending.addLine(line)
 		}
 
 		if err := p.scanner.Err(); err != nil {
 			yield(Event{}, err)
 			return
 		}
+
 		// Emit a trailing event that had no terminating blank line.
-		dispatch()
+		if ev, ok := pending.take(); ok {
+			yield(ev, nil)
+		}
 	}
+}
+
+// pendingEvent accumulates the fields of the event currently being parsed.
+type pendingEvent struct {
+	ev       Event
+	data     strings.Builder
+	haveData bool
+	started  bool // any field seen for the current event
+}
+
+// addLine folds one non-blank, non-comment line into the pending event.
+func (p *pendingEvent) addLine(line []byte) {
+	field, value := splitField(line)
+	p.started = true
+
+	switch field {
+	case "event":
+		p.ev.Type = string(value)
+	case "data":
+		if p.haveData {
+			p.data.WriteByte('\n')
+		}
+
+		p.data.Write(value)
+
+		p.haveData = true
+	case "id":
+		// The spec ignores an id containing a NUL; LLM streams never send
+		// one, so accept the value as-is.
+		p.ev.ID = string(value)
+	case "retry":
+		p.ev.Retry = string(value)
+	default:
+		// Unknown fields are ignored per the spec.
+	}
+}
+
+// take returns the completed event and resets the accumulator. ok is false
+// when no fields were seen since the last take.
+func (p *pendingEvent) take() (Event, bool) {
+	if !p.started {
+		return Event{}, false
+	}
+
+	out := p.ev
+	if p.haveData {
+		out.Data = p.data.String()
+	}
+
+	if out.Type == "" {
+		out.Type = defaultEventType
+	}
+
+	p.ev = Event{}
+	p.data.Reset()
+	p.haveData = false
+	p.started = false
+
+	return out, true
 }
 
 // splitField splits a line into its field name and value, stripping one
 // optional space after the colon. A line with no colon is all field name with
 // an empty value.
 func splitField(line []byte) (field string, value []byte) {
-	colon := bytes.IndexByte(line, ':')
-	if colon < 0 {
+	name, rest, found := bytes.Cut(line, []byte{':'})
+	if !found {
 		return string(line), nil
 	}
-	name := string(line[:colon])
-	value = line[colon+1:]
-	if len(value) > 0 && value[0] == ' ' {
-		value = value[1:]
+
+	if len(rest) > 0 && rest[0] == ' ' {
+		rest = rest[1:]
 	}
-	return name, value
+
+	return string(name), rest
 }
 
 // scanLines is a bufio.SplitFunc that splits on LF and CRLF, returning each
@@ -179,6 +199,7 @@ func scanLines(data []byte, atEOF bool) (advance int, token []byte, err error) {
 	if atEOF && len(data) == 0 {
 		return 0, nil, nil
 	}
+
 	if i := bytes.IndexAny(data, "\r\n"); i >= 0 {
 		// Consume a CRLF pair as a single terminator.
 		if data[i] == '\r' && i+1 < len(data) && data[i+1] == '\n' {
@@ -189,10 +210,13 @@ func scanLines(data []byte, atEOF bool) (advance int, token []byte, err error) {
 		if data[i] == '\r' && i+1 == len(data) && !atEOF {
 			return 0, nil, nil
 		}
+
 		return i + 1, data[:i], nil
 	}
+
 	if atEOF {
 		return len(data), data, nil
 	}
+
 	return 0, nil, nil
 }

@@ -40,6 +40,7 @@ func TestChainOrder(t *testing.T) {
 	t.Parallel()
 
 	var order []string
+
 	base := &staticModel{resp: &ai.Response{Message: ai.AssistantText("ok")}}
 
 	model := ai.Chain(base,

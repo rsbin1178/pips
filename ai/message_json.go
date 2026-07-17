@@ -59,6 +59,7 @@ func (m Message) MarshalJSON() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	return json.Marshal(messageJSON{Role: m.Role, Parts: parts})
 }
 
@@ -68,12 +69,15 @@ func (m *Message) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
+
 	parts, err := decodeParts(raw.Parts)
 	if err != nil {
 		return err
 	}
+
 	m.Role = raw.Role
 	m.Parts = parts
+
 	return nil
 }
 
@@ -81,14 +85,17 @@ func encodeParts(parts []Part) ([]partEnvelope, error) {
 	if parts == nil {
 		return nil, nil
 	}
+
 	out := make([]partEnvelope, 0, len(parts))
 	for _, p := range parts {
 		env, err := encodePart(p)
 		if err != nil {
 			return nil, err
 		}
+
 		out = append(out, env)
 	}
+
 	return out, nil
 }
 
@@ -109,6 +116,7 @@ func encodePart(p Part) (partEnvelope, error) {
 		if err != nil {
 			return partEnvelope{}, err
 		}
+
 		return partEnvelope{
 			Type:       partTypeToolResult,
 			ToolCallID: p.ToolCallID,
@@ -129,14 +137,17 @@ func decodeParts(envs []partEnvelope) ([]Part, error) {
 	if envs == nil {
 		return nil, nil
 	}
+
 	out := make([]Part, 0, len(envs))
 	for _, env := range envs {
 		p, err := decodePart(env)
 		if err != nil {
 			return nil, err
 		}
+
 		out = append(out, p)
 	}
+
 	return out, nil
 }
 
@@ -157,6 +168,7 @@ func decodePart(env partEnvelope) (Part, error) {
 		if err != nil {
 			return nil, err
 		}
+
 		return ToolResultPart{
 			ToolCallID: env.ToolCallID,
 			Name:       env.Name,
@@ -172,5 +184,6 @@ func decodeSource(s *mediaSourceJSON) MediaSource {
 	if s == nil {
 		return MediaSource{}
 	}
+
 	return MediaSource{URL: s.URL, Data: s.Data, MIMEType: s.MIMEType}
 }

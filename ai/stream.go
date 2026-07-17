@@ -77,12 +77,15 @@ type StreamEvent struct {
 // error.
 func Collect(stream Stream) (*Response, error) {
 	acc := newAccumulator()
+
 	for ev, err := range stream {
 		if err != nil {
 			return acc.response(), err
 		}
+
 		acc.add(ev)
 	}
+
 	return acc.response(), nil
 }
 
@@ -121,12 +124,14 @@ func (a *accumulator) add(ev StreamEvent) {
 			a.flush()
 			a.open = StreamTextDelta
 		}
+
 		a.textBuf.WriteString(ev.Text)
 	case StreamReasoningDelta:
 		if a.open != StreamReasoningDelta {
 			a.flush()
 			a.open = StreamReasoningDelta
 		}
+
 		a.reasoningBuf.WriteString(ev.Text)
 	case StreamToolCallStart:
 		a.flush()
@@ -144,6 +149,7 @@ func (a *accumulator) add(ev StreamEvent) {
 		a.sealToolCall(ev.ToolCallIndex)
 	case StreamMessageEnd:
 		a.flush()
+
 		a.resp.FinishReason = ev.FinishReason
 		if ev.Usage != nil {
 			a.resp.Usage = *ev.Usage
@@ -166,6 +172,7 @@ func (a *accumulator) flush() {
 		}
 	default:
 	}
+
 	a.open = ""
 }
 
@@ -175,11 +182,14 @@ func (a *accumulator) sealToolCall(index int) {
 	if !ok {
 		return
 	}
+
 	buf := a.toolArgs[index]
+
 	call, _ := a.resp.Message.Parts[slot].(ToolCallPart)
 	if args := buf.String(); args != "" {
 		call.Args = JSON(args)
 	}
+
 	a.resp.Message.Parts[slot] = call
 	delete(a.toolArgs, index)
 }
@@ -187,9 +197,12 @@ func (a *accumulator) sealToolCall(index int) {
 // response finalizes and returns the accumulated Response.
 func (a *accumulator) response() *Response {
 	a.flush()
+
 	for index := range a.toolArgs {
 		a.sealToolCall(index)
 	}
+
 	resp := a.resp
+
 	return &resp
 }

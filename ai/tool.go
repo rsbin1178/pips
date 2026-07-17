@@ -104,6 +104,7 @@ func (s *Schema) MarshalJSON() ([]byte, error) {
 	case s.Type != "":
 		out.Type = s.Type
 	}
+
 	return json.Marshal(out)
 }
 
@@ -117,6 +118,7 @@ func (s *Schema) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
+
 	*s = Schema{
 		Description:          raw.Description,
 		Properties:           raw.Properties,
@@ -130,15 +132,18 @@ func (s *Schema) UnmarshalJSON(data []byte) error {
 	if len(raw.Type) == 0 {
 		return nil
 	}
+
 	var typeStr string
 	if err := json.Unmarshal(raw.Type, &typeStr); err == nil {
 		s.Type = typeStr
 		return nil
 	}
+
 	var types []string
 	if err := json.Unmarshal(raw.Type, &types); err != nil {
 		return err
 	}
+
 	for _, t := range types {
 		if t == "null" {
 			s.Nullable = true
@@ -146,5 +151,6 @@ func (s *Schema) UnmarshalJSON(data []byte) error {
 			s.Type = t
 		}
 	}
+
 	return nil
 }

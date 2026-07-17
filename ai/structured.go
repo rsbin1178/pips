@@ -34,21 +34,26 @@ type ResponseFormat struct {
 // usage accounting.
 func GenerateTyped[T any](ctx context.Context, model LanguageModel, req Request) (T, *Response, error) {
 	var out T
+
 	if req.ResponseFormat == nil {
 		schema, err := SchemaFor[T]()
 		if err != nil {
 			return out, nil, fmt.Errorf("ai: deriving schema for %T: %w", out, err)
 		}
+
 		req.ResponseFormat = &ResponseFormat{Name: "output", Schema: schema}
 	}
+
 	resp, err := model.Generate(ctx, req)
 	if err != nil {
 		return out, resp, err
 	}
+
 	text := resp.Text()
 	if err := json.Unmarshal([]byte(text), &out); err != nil {
 		return out, resp, fmt.Errorf("ai: decoding structured output into %T: %w", out, err)
 	}
+
 	return out, resp, nil
 }
 
@@ -66,15 +71,17 @@ func SchemaFor[T any]() (*Schema, error) {
 	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
+
 	if t.Kind() != reflect.Struct {
 		return nil, fmt.Errorf("ai: SchemaFor needs a struct type, got %s", t)
 	}
+
 	return schemaForType(t, make(map[reflect.Type]bool))
 }
 
 var (
-	timeType = reflect.TypeOf(time.Time{})
-	rawType  = reflect.TypeOf(json.RawMessage{})
+	timeType = reflect.TypeFor[time.Time]()
+	rawType  = reflect.TypeFor[json.RawMessage]()
 )
 
 func schemaForType(t reflect.Type, seen map[reflect.Type]bool) (*Schema, error) {
@@ -85,42 +92,24 @@ func schemaForType(t reflect.Type, seen map[reflect.Type]bool) (*Schema, error) 
 		return &Schema{}, nil
 	}
 
+	if scalar, ok := scalarSchema(t.Kind()); ok {
+		return scalar, nil
+	}
+
 	switch t.Kind() {
 	case reflect.Pointer:
 		inner, err := schemaForType(t.Elem(), seen)
 		if err != nil {
 			return nil, err
 		}
+
 		inner.Nullable = true
+
 		return inner, nil
-	case reflect.String:
-		return &Schema{Type: "string"}, nil
-	case reflect.Bool:
-		return &Schema{Type: "boolean"}, nil
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
-		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		return &Schema{Type: "integer"}, nil
-	case reflect.Float32, reflect.Float64:
-		return &Schema{Type: "number"}, nil
 	case reflect.Slice, reflect.Array:
-		if t.Elem().Kind() == reflect.Uint8 {
-			// []byte marshals as a base64 string.
-			return &Schema{Type: "string"}, nil
-		}
-		items, err := schemaForType(t.Elem(), seen)
-		if err != nil {
-			return nil, err
-		}
-		return &Schema{Type: "array", Items: items}, nil
+		return schemaForSequence(t, seen)
 	case reflect.Map:
-		if t.Key().Kind() != reflect.String {
-			return nil, fmt.Errorf("ai: SchemaFor supports only string map keys, got %s", t)
-		}
-		values, err := schemaForType(t.Elem(), seen)
-		if err != nil {
-			return nil, err
-		}
-		return &Schema{Type: "object", AdditionalProperties: values}, nil
+		return schemaForMap(t, seen)
 	case reflect.Struct:
 		return schemaForStruct(t, seen)
 	case reflect.Interface:
@@ -130,10 +119,56 @@ func schemaForType(t reflect.Type, seen map[reflect.Type]bool) (*Schema, error) 
 	}
 }
 
+func schemaForSequence(t reflect.Type, seen map[reflect.Type]bool) (*Schema, error) {
+	if t.Elem().Kind() == reflect.Uint8 {
+		// []byte marshals as a base64 string.
+		return &Schema{Type: "string"}, nil
+	}
+
+	items, err := schemaForType(t.Elem(), seen)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Schema{Type: "array", Items: items}, nil
+}
+
+func schemaForMap(t reflect.Type, seen map[reflect.Type]bool) (*Schema, error) {
+	if t.Key().Kind() != reflect.String {
+		return nil, fmt.Errorf("ai: SchemaFor supports only string map keys, got %s", t)
+	}
+
+	values, err := schemaForType(t.Elem(), seen)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Schema{Type: "object", AdditionalProperties: values}, nil
+}
+
+// scalarSchema maps primitive kinds to their schema; ok is false for
+// non-scalar kinds.
+func scalarSchema(kind reflect.Kind) (*Schema, bool) {
+	switch kind {
+	case reflect.String:
+		return &Schema{Type: "string"}, true
+	case reflect.Bool:
+		return &Schema{Type: "boolean"}, true
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return &Schema{Type: "integer"}, true
+	case reflect.Float32, reflect.Float64:
+		return &Schema{Type: "number"}, true
+	default:
+		return nil, false
+	}
+}
+
 func schemaForStruct(t reflect.Type, seen map[reflect.Type]bool) (*Schema, error) {
 	if seen[t] {
 		return nil, fmt.Errorf("ai: SchemaFor cannot describe recursive type %s", t)
 	}
+
 	seen[t] = true
 	defer delete(seen, t)
 
@@ -145,36 +180,43 @@ func schemaForStruct(t reflect.Type, seen map[reflect.Type]bool) (*Schema, error
 	if err := addStructFields(schema, t, seen); err != nil {
 		return nil, err
 	}
+
 	return schema, nil
 }
 
 func addStructFields(schema *Schema, t reflect.Type, seen map[reflect.Type]bool) error {
-	for i := range t.NumField() {
-		field := t.Field(i)
+	for field := range t.Fields() {
 		if !field.IsExported() {
 			continue
 		}
+
 		if field.Anonymous && field.Type.Kind() == reflect.Struct && !hasJSONName(field) {
 			// Embedded structs flatten, as encoding/json does.
 			if err := addStructFields(schema, field.Type, seen); err != nil {
 				return err
 			}
+
 			continue
 		}
+
 		name := jsonFieldName(field)
 		if name == "" {
 			continue
 		}
+
 		fieldSchema, err := schemaForType(field.Type, seen)
 		if err != nil {
 			return fmt.Errorf("field %s: %w", field.Name, err)
 		}
+
 		if desc := field.Tag.Get("description"); desc != "" {
 			fieldSchema.Description = desc
 		}
+
 		schema.Properties[name] = fieldSchema
 		schema.Required = append(schema.Required, name)
 	}
+
 	return nil
 }
 
@@ -183,10 +225,12 @@ func jsonFieldName(field reflect.StructField) string {
 	if tag == "-" {
 		return ""
 	}
+
 	name, _, _ := strings.Cut(tag, ",")
 	if name == "" {
 		return field.Name
 	}
+
 	return name
 }
 

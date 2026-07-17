@@ -14,11 +14,15 @@ import (
 
 func collect(t *testing.T, input string, opts ...sse.Option) []sse.Event {
 	t.Helper()
+
 	var events []sse.Event
+
 	for ev, err := range sse.NewParser(strings.NewReader(input), opts...).All() {
 		require.NoError(t, err)
+
 		events = append(events, ev)
 	}
+
 	return events
 }
 
@@ -133,12 +137,14 @@ func TestParserLineTooLong(t *testing.T) {
 	parser := sse.NewParser(strings.NewReader("data: "+big+"\n\n"), sse.WithMaxLineSize(1024))
 
 	var lastErr error
+
 	for _, err := range parser.All() {
 		if err != nil {
 			lastErr = err
 			break
 		}
 	}
+
 	require.Error(t, lastErr)
 	assert.ErrorIs(t, lastErr, bufio.ErrTooLong)
 }
@@ -147,14 +153,18 @@ func TestParserEarlyBreak(t *testing.T) {
 	t.Parallel()
 
 	input := "data: one\n\ndata: two\n\ndata: three\n\n"
+
 	var got []string
+
 	for ev, err := range sse.NewParser(strings.NewReader(input)).All() {
 		require.NoError(t, err)
+
 		got = append(got, ev.Data)
 		if len(got) == 2 {
 			break
 		}
 	}
+
 	assert.Equal(t, []string{"one", "two"}, got)
 }
 
@@ -169,6 +179,7 @@ func (r *failingReader) Read(p []byte) (int, error) {
 		r.done = true
 		return copy(p, r.data), nil
 	}
+
 	return 0, r.err
 }
 
@@ -178,15 +189,20 @@ func TestParserReadError(t *testing.T) {
 	boom := errors.New("connection reset")
 	parser := sse.NewParser(&failingReader{data: "data: partial\n\n", err: boom})
 
-	var events []sse.Event
-	var lastErr error
+	var (
+		events  []sse.Event
+		lastErr error
+	)
+
 	for ev, err := range parser.All() {
 		if err != nil {
 			lastErr = err
 			break
 		}
+
 		events = append(events, ev)
 	}
+
 	require.Len(t, events, 1)
 	assert.Equal(t, "partial", events[0].Data)
 	assert.ErrorIs(t, lastErr, boom)
@@ -195,7 +211,7 @@ func TestParserReadError(t *testing.T) {
 func FuzzParse(f *testing.F) {
 	f.Add("data: hello\n\n")
 	f.Add("event: e\r\ndata: {\"a\":1}\r\n\r\n")
-	f.Add(": comment\ndata:\ndata: b\n\nid: 7\ndata: x\n\n")
+	f.Add(": comment\ndata:\nb\n\nid: 7\ndata: x\n\n")
 	f.Add("data: [DONE]\n\n")
 	f.Add("\r\r\n\r")
 	f.Add("event\ndata\n\n")
@@ -211,6 +227,7 @@ func FuzzParse(f *testing.F) {
 			if ev.Type == "" {
 				t.Fatalf("dispatched event with empty type: %+v", ev)
 			}
+
 			if strings.ContainsRune(ev.Data, '\r') {
 				t.Fatalf("event data contains CR: %q", ev.Data)
 			}

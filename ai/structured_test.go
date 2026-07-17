@@ -18,6 +18,7 @@ func TestSchemaForBasicStruct(t *testing.T) {
 		City    string `json:"city"`
 		Country string `json:"country" description:"ISO country name"`
 	}
+
 	type Person struct {
 		Name      string          `json:"name"`
 		Age       int             `json:"age"`
@@ -65,6 +66,7 @@ func TestSchemaForEmbeddedStruct(t *testing.T) {
 	type Base struct {
 		ID string `json:"id"`
 	}
+
 	type Doc struct {
 		Base
 		Title string `json:"title"`
@@ -81,6 +83,7 @@ func TestSchemaForRejectsRecursionAndNonStructs(t *testing.T) {
 	type Node struct {
 		Children []*Node `json:"children"`
 	}
+
 	_, err := ai.SchemaFor[Node]()
 	require.ErrorContains(t, err, "recursive")
 
@@ -116,11 +119,13 @@ func (m *staticModel) Generate(_ context.Context, req ai.Request) (*ai.Response,
 
 func (m *staticModel) Stream(_ context.Context, req ai.Request) ai.Stream {
 	m.lastReq = req
+
 	return func(yield func(ai.StreamEvent, error) bool) {
 		if m.err != nil {
 			yield(ai.StreamEvent{}, m.err)
 			return
 		}
+
 		for _, p := range m.resp.Message.Parts {
 			if txt, ok := p.(ai.TextPart); ok {
 				if !yield(ai.StreamEvent{Type: ai.StreamTextDelta, Text: txt.Text}, nil) {
@@ -128,6 +133,7 @@ func (m *staticModel) Stream(_ context.Context, req ai.Request) ai.Stream {
 				}
 			}
 		}
+
 		yield(ai.StreamEvent{Type: ai.StreamMessageEnd, FinishReason: m.resp.FinishReason}, nil)
 	}
 }
@@ -169,6 +175,7 @@ func TestGenerateTypedDecodeError(t *testing.T) {
 	type Out struct {
 		N int `json:"n"`
 	}
+
 	model := &staticModel{resp: &ai.Response{Message: ai.AssistantText("not json")}}
 
 	_, _, err := ai.GenerateTyped[Out](t.Context(), model, ai.Request{})
