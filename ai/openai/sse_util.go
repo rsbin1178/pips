@@ -1,9 +1,12 @@
 package openai
 
 import (
+	"context"
+	"fmt"
 	"io"
 	"iter"
 
+	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/ai/internal/sse"
 )
 
@@ -19,4 +22,28 @@ func newSSEParser(r io.Reader, maxLineSize int) eventSource {
 	}
 
 	return sse.NewParser(r, opts...).All()
+}
+
+// streamEmitter maps a provider SSE event iterator onto ai.StreamEvents.
+type streamEmitter func(eventSource, func(ai.StreamEvent, error) bool)
+
+// runStream is the shared streaming skeleton for both API surfaces: encode the
+// request, open the SSE response, and drive the surface-specific emitter. On a
+// setup error it yields a single error event wrapped with label.
+func (m *Model) runStream(ctx context.Context, path, label string, body any, buildErr error, emit streamEmitter) ai.Stream {
+	return func(yield func(ai.StreamEvent, error) bool) {
+		if buildErr != nil {
+			yield(ai.StreamEvent{}, buildErr)
+			return
+		}
+
+		stream, err := m.client.PostStream(ctx, path, m.authHeaders(), body, decodeError)
+		if err != nil {
+			yield(ai.StreamEvent{}, fmt.Errorf("openai: %s stream: %w", label, err))
+			return
+		}
+		defer stream.Close() //nolint:errcheck // best-effort cleanup on all exit paths
+
+		emit(newSSEParser(stream, m.client.MaxStreamLineSize()), yield)
+	}
 }

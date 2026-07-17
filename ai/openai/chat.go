@@ -52,22 +52,8 @@ func (m *Model) generateChat(ctx context.Context, req ai.Request) (*ai.Response,
 }
 
 func (m *Model) streamChat(ctx context.Context, req ai.Request) ai.Stream {
-	return func(yield func(ai.StreamEvent, error) bool) {
-		body, err := m.chatRequestFrom(req, true)
-		if err != nil {
-			yield(ai.StreamEvent{}, err)
-			return
-		}
-
-		stream, err := m.client.PostStream(ctx, chatPath, m.authHeaders(), body, decodeError)
-		if err != nil {
-			yield(ai.StreamEvent{}, fmt.Errorf("openai: chat completions stream: %w", err))
-			return
-		}
-		defer stream.Close() //nolint:errcheck // best-effort cleanup on all exit paths
-
-		emitChatStream(newSSEParser(stream, m.client.MaxStreamLineSize()), yield)
-	}
+	body, err := m.chatRequestFrom(req, true)
+	return m.runStream(ctx, chatPath, "chat completions", body, err, emitChatStream)
 }
 
 // chatStreamState tracks what has been emitted so the SSE chunk sequence

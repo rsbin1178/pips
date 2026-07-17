@@ -1,0 +1,25 @@
+{
+  "id": "resp_abc123",
+  "object": "response",
+  "model": "gpt-5-2025-08-07",
+  "status": "completed",
+  "output": [
+    {
+      "type": "reasoning",
+      "id": "rs_1",
+      "summary": [ { "type": "summary_text", "text": "Simple factual question." } ]
+    },
+    {
+      "type": "message",
+      "id": "msg_1",
+      "role": "assistant",
+      "content": [ { "type": "output_text", "text": "The capital of France is Paris." } ]
+    }
+  ],
+  "usage": {
+    "input_tokens": 14,
+    "output_tokens": 20,
+    "input_tokens_details": { "cached_tokens": 6 },
+    "output_tokens_details": { "reasoning_tokens": 12 }
+  }
+}

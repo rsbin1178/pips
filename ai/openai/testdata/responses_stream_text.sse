@@ -1,0 +1,12 @@
+event: response.created
+data: {"type":"response.created","response":{"id":"resp_s1","model":"gpt-5-2025-08-07","status":"in_progress"}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","output_index":0,"delta":"Hel"}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","output_index":0,"delta":"lo!"}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_s1","model":"gpt-5-2025-08-07","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Hello!"}]}],"usage":{"input_tokens":9,"output_tokens":3}}}
+
