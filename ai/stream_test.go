@@ -99,6 +99,7 @@ func TestCollectMidStreamErrorReturnsPartial(t *testing.T) {
 		if !yield(ai.StreamEvent{Type: ai.StreamTextDelta, Text: "partial"}, nil) {
 			return
 		}
+
 		yield(ai.StreamEvent{}, boom)
 	}
 

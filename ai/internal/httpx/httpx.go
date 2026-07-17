@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
@@ -82,11 +83,13 @@ func New(cfg Config, defaultBaseURL string) *Client {
 	if rawURL == "" {
 		rawURL = defaultBaseURL
 	}
+
 	base, err := url.Parse(rawURL)
 	if err != nil {
 		c.initErr = fmt.Errorf("invalid base URL %q: %w", rawURL, err)
 		return c
 	}
+
 	switch {
 	case base.Scheme == "https":
 	case base.Scheme == "http" && cfg.AllowHTTP:
@@ -97,6 +100,7 @@ func New(cfg Config, defaultBaseURL string) *Client {
 		c.initErr = fmt.Errorf("unsupported base URL scheme %q", base.Scheme)
 		return c
 	}
+
 	c.base = base
 
 	if cfg.HTTPClient != nil {
@@ -104,6 +108,7 @@ func New(cfg Config, defaultBaseURL string) *Client {
 	} else {
 		c.httpClient = &http.Client{Transport: newTransport(cfg.AllowPrivateIPs)}
 	}
+
 	return c
 }
 
@@ -124,7 +129,7 @@ const maxErrorBodySize = 1 << 20
 // It returns the raw response bytes for Response.Raw. Non-2xx responses are
 // passed to decodeErr.
 func (c *Client) PostJSON(ctx context.Context, path string, headers http.Header, body, out any, decodeErr ErrorDecoder) ([]byte, error) {
-	resp, err := c.send(ctx, path, headers, body)
+	resp, err := c.send(ctx, path, headers, body) //nolint:bodyclose // closed by drainClose below
 	if err != nil {
 		return nil, err
 	}
@@ -134,14 +139,17 @@ func (c *Client) PostJSON(ctx context.Context, path string, headers http.Header,
 	if err != nil {
 		return nil, fmt.Errorf("reading response body: %w", err)
 	}
+
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, decodeErr(resp.StatusCode, retryAfter(resp), raw)
 	}
+
 	if out != nil {
 		if err := jsonx.Unmarshal(raw, out); err != nil {
 			return nil, fmt.Errorf("decoding response body: %w", err)
 		}
 	}
+
 	return raw, nil
 }
 
@@ -153,21 +161,26 @@ func (c *Client) PostStream(ctx context.Context, path string, headers http.Heade
 	if headers == nil {
 		headers = http.Header{}
 	}
+
 	headers = headers.Clone()
 	headers.Set("Accept", "text/event-stream")
 
-	resp, err := c.send(ctx, path, headers, body)
+	resp, err := c.send(ctx, path, headers, body) //nolint:bodyclose // closed on error paths here; success body is returned to the adapter, which owns closing it
 	if err != nil {
 		return nil, err
 	}
+
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		defer drainClose(resp.Body)
+
 		raw, readErr := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodySize))
 		if readErr != nil {
 			return nil, fmt.Errorf("reading error body (status %d): %w", resp.StatusCode, readErr)
 		}
+
 		return nil, decodeErr(resp.StatusCode, retryAfter(resp), raw)
 	}
+
 	return resp.Body, nil
 }
 
@@ -192,19 +205,18 @@ func (c *Client) send(ctx context.Context, path string, headers http.Header, bod
 	if err != nil {
 		return nil, err
 	}
+
 	req.Header.Set("Content-Type", "application/json")
-	for key, values := range headers {
-		req.Header[key] = values
-	}
+
+	maps.Copy(req.Header, headers)
 	// Config-level headers win over adapter headers.
-	for key, values := range c.header {
-		req.Header[key] = values
-	}
+	maps.Copy(req.Header, c.header)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
+
 	return resp, nil
 }
 
@@ -214,6 +226,7 @@ func splitQuery(path string) (rawPath, query string, ok bool) {
 			return path[:i], path[i+1:], true
 		}
 	}
+
 	return path, "", false
 }
 
@@ -223,14 +236,17 @@ func retryAfter(resp *http.Response) time.Duration {
 	if value == "" {
 		return 0
 	}
+
 	if secs, err := strconv.Atoi(value); err == nil && secs >= 0 {
 		return time.Duration(secs) * time.Second
 	}
+
 	if at, err := http.ParseTime(value); err == nil {
 		if d := time.Until(at); d > 0 {
 			return d
 		}
 	}
+
 	return 0
 }
 
@@ -250,6 +266,7 @@ func newTransport(allowPrivateIPs bool) *http.Transport {
 	if !allowPrivateIPs {
 		dialer.ControlContext = guardControl
 	}
+
 	return &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
 		DialContext:           dialer.DialContext,
@@ -273,13 +290,16 @@ func guardControl(_ context.Context, _, address string, _ syscall.RawConn) error
 	if err != nil {
 		return fmt.Errorf("ssrf guard: %w", err)
 	}
+
 	ip := net.ParseIP(host)
 	if ip == nil {
 		return fmt.Errorf("ssrf guard: unexpected non-IP address %q", host)
 	}
+
 	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
 		ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
 		return fmt.Errorf("ssrf guard: %s: %w", ip, ErrPrivateAddress)
 	}
+
 	return nil
 }

@@ -42,6 +42,8 @@ type Request struct {
 // Ptr returns a pointer to v. It keeps request literals terse:
 //
 //	ai.Request{Temperature: ai.Ptr(0.2), MaxTokens: ai.Ptr(1024)}
+//
+//go:fix inline
 func Ptr[T any](v T) *T {
-	return &v
+	return new(v)
 }

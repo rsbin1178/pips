@@ -122,6 +122,10 @@ linters:
       threshold: 100  # lower => stricter (tokens)
     errcheck:
       check-type-assertions: true
+    exhaustive:
+      # A switch with a default branch is exhaustive; we use defaults for
+      # forward compatibility with new enum values.
+      default-signifies-exhaustive: true
     funlen:
       lines: 120
       statements: 80

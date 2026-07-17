@@ -32,7 +32,7 @@ func TestPostJSONRoundTrip(t *testing.T) {
 		assert.Equal(t, "Bearer sk-test", r.Header.Get("Authorization"))
 		assert.Equal(t, "extra", r.Header.Get("X-Custom"))
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"echo":"ok"}`)
+		_, _ = fmt.Fprint(w, `{"echo":"ok"}`)
 	}))
 	defer server.Close()
 
@@ -46,6 +46,7 @@ func TestPostJSONRoundTrip(t *testing.T) {
 	var out struct {
 		Echo string `json:"echo"`
 	}
+
 	raw, err := client.PostJSON(t.Context(), "chat/completions", headers, map[string]string{"model": "x"}, &out, passErr)
 	require.NoError(t, err)
 	assert.Equal(t, "ok", out.Echo)
@@ -58,15 +59,18 @@ func TestPostJSONErrorDecoding(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Retry-After", "7")
 		w.WriteHeader(http.StatusTooManyRequests)
-		fmt.Fprint(w, `{"error":{"message":"slow down"}}`)
+		_, _ = fmt.Fprint(w, `{"error":{"message":"slow down"}}`)
 	}))
 	defer server.Close()
 
 	client := httpx.New(localConfig(), server.URL)
 
-	var gotStatus int
-	var gotRetry time.Duration
-	var gotBody []byte
+	var (
+		gotStatus int
+		gotRetry  time.Duration
+		gotBody   []byte
+	)
+
 	_, err := client.PostJSON(t.Context(), "x", nil, struct{}{}, nil,
 		func(status int, retryAfter time.Duration, body []byte) error {
 			gotStatus, gotRetry, gotBody = status, retryAfter, body
@@ -85,7 +89,7 @@ func TestPostStream(t *testing.T) {
 		assert.Equal(t, "text/event-stream", r.Header.Get("Accept"))
 		assert.Equal(t, "sse", r.URL.Query().Get("alt"))
 		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(w, "data: hi\n\n")
+		_, _ = fmt.Fprint(w, "data: hi\n\n")
 	}))
 	defer server.Close()
 
@@ -93,7 +97,8 @@ func TestPostStream(t *testing.T) {
 
 	body, err := client.PostStream(t.Context(), "models/gemini:streamGenerateContent?alt=sse", nil, struct{}{}, passErr)
 	require.NoError(t, err)
-	defer body.Close()
+
+	defer func() { _ = body.Close() }()
 
 	buf := make([]byte, 64)
 	n, _ := body.Read(buf)
@@ -105,7 +110,7 @@ func TestPostStreamErrorPath(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
-		fmt.Fprint(w, `{"error":"bad"}`)
+		_, _ = fmt.Fprint(w, `{"error":"bad"}`)
 	}))
 	defer server.Close()
 
@@ -135,7 +140,7 @@ func TestSSRFGuardBlocksLoopback(t *testing.T) {
 	t.Parallel()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprint(w, "{}")
+		_, _ = fmt.Fprint(w, "{}")
 	}))
 	defer server.Close()
 
@@ -150,9 +155,11 @@ func TestBaseURLPathPrefixPreserved(t *testing.T) {
 	t.Parallel()
 
 	var gotPath string
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
-		fmt.Fprint(w, "{}")
+
+		_, _ = fmt.Fprint(w, "{}")
 	}))
 	defer server.Close()
 

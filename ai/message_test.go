@@ -88,6 +88,7 @@ func TestMessageUnmarshalUnknownPart(t *testing.T) {
 	t.Parallel()
 
 	var m ai.Message
+
 	err := json.Unmarshal([]byte(`{"role":"user","parts":[{"type":"bogus"}]}`), &m)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "bogus")

@@ -37,7 +37,7 @@ func TestClassifyStatus(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(fmt.Sprintf("status_%d", tc.status), func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tc.want, ai.ClassifyStatus(tc.status)) //nolint:testifylint // comparing sentinel identity
+			assert.Equal(t, tc.want, ai.ClassifyStatus(tc.status))
 		})
 	}
 }
@@ -73,11 +73,11 @@ func TestErrorWithSentinel(t *testing.T) {
 	require.ErrorIs(t, base, ai.ErrInvalidRequest)
 }
 
-type timeoutErr struct{}
+type timeoutError struct{}
 
-func (timeoutErr) Error() string   { return "i/o timeout" }
-func (timeoutErr) Timeout() bool   { return true }
-func (timeoutErr) Temporary() bool { return true }
+func (timeoutError) Error() string   { return "i/o timeout" }
+func (timeoutError) Timeout() bool   { return true }
+func (timeoutError) Temporary() bool { return true }
 
 func TestIsRetryable(t *testing.T) {
 	t.Parallel()
@@ -99,7 +99,7 @@ func TestIsRetryable(t *testing.T) {
 		{"context canceled", context.Canceled, false},
 		{"context deadline", context.DeadlineExceeded, false},
 		{"wrapped cancel", fmt.Errorf("do: %w", context.Canceled), false},
-		{"net timeout", &net.OpError{Op: "dial", Err: timeoutErr{}}, true},
+		{"net timeout", &net.OpError{Op: "dial", Err: timeoutError{}}, true},
 		{"plain transport error", errors.New("connection reset by peer"), true},
 		{"wrapped rate limit", fmt.Errorf("call: %w", ai.NewError(ai.ProviderOpenAI, 429, "x")), true},
 	}

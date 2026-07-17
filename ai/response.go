@@ -78,32 +78,38 @@ type Response struct {
 // Text concatenates the response's text parts.
 func (r *Response) Text() string {
 	var b strings.Builder
+
 	for _, p := range r.Message.Parts {
 		if t, ok := p.(TextPart); ok {
 			b.WriteString(t.Text)
 		}
 	}
+
 	return b.String()
 }
 
 // Reasoning concatenates the response's reasoning parts.
 func (r *Response) Reasoning() string {
 	var b strings.Builder
+
 	for _, p := range r.Message.Parts {
 		if t, ok := p.(ReasoningPart); ok {
 			b.WriteString(t.Text)
 		}
 	}
+
 	return b.String()
 }
 
 // ToolCalls returns the tool invocations requested by the model, in order.
 func (r *Response) ToolCalls() []ToolCallPart {
 	var calls []ToolCallPart
+
 	for _, p := range r.Message.Parts {
 		if c, ok := p.(ToolCallPart); ok {
 			calls = append(calls, c)
 		}
 	}
+
 	return calls
 }
