@@ -38,6 +38,14 @@ const (
 
 const defaultBaseURL = "https://api.openai.com/v1"
 
+// Wire-format string constants shared by the Chat Completions and Responses
+// adapters.
+const (
+	typeFunction     = "function"
+	typeFunctionCall = "function_call"
+	typeMessage      = "message"
+)
+
 // Model is an ai.LanguageModel backed by the OpenAI API. Create one with
 // [New]; it is immutable and safe for concurrent use.
 type Model struct {

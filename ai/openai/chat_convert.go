@@ -174,7 +174,7 @@ func chatAssistantFrom(msg ai.Message) chatMessage {
 		if call, ok := part.(ai.ToolCallPart); ok {
 			out.ToolCalls = append(out.ToolCalls, chatToolCall{
 				ID:   call.ID,
-				Type: "function",
+				Type: typeFunction,
 				Function: chatFunctionCall{
 					Name:      call.Name,
 					Arguments: string(call.Args),
@@ -251,7 +251,7 @@ func chatToolsFrom(tools []ai.Tool) []chatTool {
 	out := make([]chatTool, 0, len(tools))
 	for _, tool := range tools {
 		out = append(out, chatTool{
-			Type: "function",
+			Type: typeFunction,
 			Function: chatFunctionDef{
 				Name:        tool.Name,
 				Description: tool.Description,
@@ -272,7 +272,7 @@ func chatToolChoiceFrom(choice ai.ToolChoice) any {
 	case ai.ToolChoiceRequired:
 		return "required"
 	case ai.ToolChoiceTool:
-		return chatToolChoiceForced{Type: "function", Function: chatToolChoiceName{Name: choice.Name}}
+		return chatToolChoiceForced{Type: typeFunction, Function: chatToolChoiceName{Name: choice.Name}}
 	default:
 		return nil
 	}
@@ -325,7 +325,7 @@ func finishReasonFromChat(reason string) ai.FinishReason {
 		return ai.FinishStop
 	case "length":
 		return ai.FinishLength
-	case "tool_calls", "function_call":
+	case "tool_calls", typeFunctionCall:
 		return ai.FinishToolCalls
 	case "content_filter":
 		return ai.FinishContentFilter
