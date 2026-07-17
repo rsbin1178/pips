@@ -77,6 +77,7 @@ func (e *Error) Unwrap() error {
 func (e *Error) WithSentinel(sentinel error) *Error {
 	clone := *e
 	clone.sentinel = sentinel
+
 	return &clone
 }
 
@@ -124,6 +125,7 @@ func IsRetryable(err error) bool {
 	if err == nil {
 		return false
 	}
+
 	switch {
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		// The caller's context is gone; retrying under it cannot succeed.
