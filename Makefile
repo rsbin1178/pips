@@ -48,11 +48,11 @@ tidy:
 audit:
 	$(GO) run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
-## deps-check: Verify the ai package depends only on stdlib and golang.org/x
+## deps-check: Verify ai packages depend only on stdlib + golang.org/x (no third-party modules)
 deps-check:
-	@deps=$$($(GO) list -deps ./ai/... | grep -v '^github.com/rsbin/pips' | grep '\.' | grep -v '^golang\.org/x/' || true); \
-	if [ -n "$$deps" ]; then \
-		echo "unexpected third-party dependencies:"; echo "$$deps"; exit 1; \
+	@mods=$$($(GO) list -deps -f '{{if .Module}}{{.Module.Path}}{{end}}' ./ai/... | sort -u | grep -v '^github.com/rsbin/pips$$' | grep -v '^golang.org/x/' || true); \
+	if [ -n "$$mods" ]; then \
+		echo "unexpected third-party module dependencies in ai:"; echo "$$mods"; exit 1; \
 	else \
 		echo "dependency policy OK (stdlib + golang.org/x only)"; \
 	fi
