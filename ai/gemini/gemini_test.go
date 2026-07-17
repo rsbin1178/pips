@@ -1,0 +1,300 @@
+package gemini_test
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/rsbin/pips/ai"
+	"github.com/rsbin/pips/ai/gemini"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func newTestModel(t *testing.T, handler http.HandlerFunc, opts ...gemini.Option) *gemini.Model {
+	t.Helper()
+
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+
+	base := []gemini.Option{
+		gemini.WithAPIKey("gm-test"),
+		gemini.WithBaseURL(server.URL + "/v1beta"),
+		gemini.WithAllowHTTP(),
+		gemini.WithAllowPrivateIPs(),
+	}
+
+	return gemini.New("gemini-2.5-flash", append(base, opts...)...)
+}
+
+func serveFixture(t *testing.T, name, wantPath string, captured *map[string]any) http.HandlerFunc {
+	t.Helper()
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, wantPath, r.URL.Path)
+		assert.Equal(t, "gm-test", r.Header.Get("x-goog-api-key"))
+
+		if captured != nil {
+			assert.NoError(t, json.NewDecoder(r.Body).Decode(captured))
+		}
+
+		data, err := os.ReadFile(filepath.Join("testdata", name)) //nolint:gosec // fixture path from test constants
+		assert.NoError(t, err)
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(data)
+	}
+}
+
+func serveSSE(t *testing.T, name string) http.HandlerFunc {
+	t.Helper()
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "sse", r.URL.Query().Get("alt"))
+
+		data, err := os.ReadFile(filepath.Join("testdata", name)) //nolint:gosec // fixture path from test constants
+		assert.NoError(t, err)
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write(data)
+	}
+}
+
+func as[T any](t *testing.T, v any) T {
+	t.Helper()
+
+	out, ok := v.(T)
+	require.True(t, ok, "expected %T, got %T (%v)", out, v, v)
+
+	return out
+}
+
+func TestGenerateText(t *testing.T) {
+	t.Parallel()
+
+	var captured map[string]any
+
+	model := newTestModel(t, serveFixture(t, "text.json", "/v1beta/models/gemini-2.5-flash:generateContent", &captured))
+
+	resp, err := model.Generate(t.Context(), ai.Request{
+		System:   "You are terse.",
+		Messages: []ai.Message{ai.UserText("Capital of France?")},
+	})
+	require.NoError(t, err)
+
+	// systemInstruction is a top-level field, not a message.
+	system := as[map[string]any](t, captured["systemInstruction"])
+	sysParts := as[[]any](t, system["parts"])
+	assert.Equal(t, "You are terse.", as[map[string]any](t, sysParts[0])["text"])
+
+	// Contents carry role "user".
+	contents := as[[]any](t, captured["contents"])
+	require.Len(t, contents, 1)
+	assert.Equal(t, "user", as[map[string]any](t, contents[0])["role"])
+
+	assert.Equal(t, "resp-abc123", resp.ID)
+	assert.Equal(t, ai.ProviderGemini, resp.Provider)
+	assert.Equal(t, "The capital of France is Paris.", resp.Text())
+	assert.Equal(t, ai.FinishStop, resp.FinishReason)
+	assert.Equal(t, 12, resp.Usage.InputTokens)
+	assert.Equal(t, 3, resp.Usage.CachedInputTokens)
+}
+
+func TestGenerateVisionWireFormat(t *testing.T) {
+	t.Parallel()
+
+	var captured map[string]any
+
+	model := newTestModel(t, serveFixture(t, "text.json", "/v1beta/models/gemini-2.5-flash:generateContent", &captured))
+
+	_, err := model.Generate(t.Context(), ai.Request{
+		Messages: []ai.Message{ai.User(
+			ai.Text("what is this?"),
+			ai.ImageData("image/png", []byte{1, 2, 3}),
+		)},
+	})
+	require.NoError(t, err)
+
+	contents := as[[]any](t, captured["contents"])
+	parts := as[[]any](t, as[map[string]any](t, contents[0])["parts"])
+	require.Len(t, parts, 2)
+
+	inline := as[map[string]any](t, as[map[string]any](t, parts[1])["inlineData"])
+	assert.Equal(t, "image/png", inline["mimeType"])
+	assert.Equal(t, "AQID", inline["data"])
+}
+
+func TestGenerateToolsSynthesizesID(t *testing.T) {
+	t.Parallel()
+
+	var captured map[string]any
+
+	model := newTestModel(t, serveFixture(t, "tools.json", "/v1beta/models/gemini-2.5-flash:generateContent", &captured))
+
+	resp, err := model.Generate(t.Context(), ai.Request{
+		Messages: []ai.Message{ai.UserText("weather in paris?")},
+		Tools: []ai.Tool{{
+			Name:        "get_weather",
+			InputSchema: &ai.Schema{Type: "object", Properties: map[string]*ai.Schema{"city": {Type: "string"}}, Required: []string{"city"}},
+		}},
+		ToolChoice: ai.ToolChoice{Mode: ai.ToolChoiceAuto},
+	})
+	require.NoError(t, err)
+
+	// functionDeclarations wire shape.
+	tools := as[[]any](t, captured["tools"])
+	decls := as[[]any](t, as[map[string]any](t, tools[0])["functionDeclarations"])
+	assert.Equal(t, "get_weather", as[map[string]any](t, decls[0])["name"])
+
+	// The response's STOP is normalized to tool_calls, and the id is
+	// synthesized since the wire supplied none.
+	assert.Equal(t, ai.FinishToolCalls, resp.FinishReason)
+	calls := resp.ToolCalls()
+	require.Len(t, calls, 1)
+	assert.Equal(t, "get_weather", calls[0].Name)
+	assert.NotEmpty(t, calls[0].ID)
+	assert.JSONEq(t, `{"city":"Paris","unit":"celsius"}`, string(calls[0].Args))
+}
+
+func TestToolResultRoundTripUsesSynthesizedID(t *testing.T) {
+	t.Parallel()
+
+	var captured map[string]any
+
+	model := newTestModel(t, serveFixture(t, "text.json", "/v1beta/models/gemini-2.5-flash:generateContent", &captured))
+
+	// A synthesized id (no embedded real id) should produce a functionResponse
+	// matched by name, with no id leaking onto the wire.
+	_, err := model.Generate(t.Context(), ai.Request{
+		Messages: []ai.Message{
+			ai.UserText("weather?"),
+			ai.Assistant(ai.ToolCallPart{ID: "call_0", Name: "get_weather", Args: ai.JSON(`{"city":"Paris"}`)}),
+			ai.ToolResultText("call_0", "get_weather", `{"temp":21}`),
+		},
+	})
+	require.NoError(t, err)
+
+	contents := as[[]any](t, captured["contents"])
+	require.Len(t, contents, 3)
+
+	toolMsg := as[map[string]any](t, contents[2])
+	assert.Equal(t, "user", toolMsg["role"])
+	fr := as[map[string]any](t, as[map[string]any](t, as[[]any](t, toolMsg["parts"])[0])["functionResponse"])
+	assert.Equal(t, "get_weather", fr["name"])
+	assert.NotContains(t, fr, "id") // synthesized id is not sent back
+	resp := as[map[string]any](t, fr["response"])
+	assert.InDelta(t, 21, as[float64](t, resp["temp"]), 1e-9)
+}
+
+func TestGeminiThreeToolIDRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	var captured map[string]any
+
+	model := newTestModel(t, func(w http.ResponseWriter, r *http.Request) {
+		assert.NoError(t, json.NewDecoder(r.Body).Decode(&captured))
+		w.Header().Set("Content-Type", "application/json")
+		// Gemini-3-style: functionCall carries a real id and thoughtSignature.
+		_, _ = w.Write([]byte(`{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"id":"fc-real-1","name":"get_weather","args":{"city":"Paris"}},"thoughtSignature":"sig-1"}]},"finishReason":"STOP","index":0}],"modelVersion":"gemini-3-flash","responseId":"r1"}`))
+	})
+
+	resp, err := model.Generate(t.Context(), ai.Request{Messages: []ai.Message{ai.UserText("weather?")}})
+	require.NoError(t, err)
+
+	call := resp.ToolCalls()[0]
+
+	// Feed the exact call id back as a tool result; the real id and signature
+	// must reappear on the wire.
+	_, err = model.Generate(t.Context(), ai.Request{
+		Messages: []ai.Message{
+			ai.UserText("weather?"),
+			ai.Assistant(call),
+			ai.ToolResultText(call.ID, "get_weather", `{"temp":21}`),
+		},
+	})
+	require.NoError(t, err)
+
+	contents := as[[]any](t, captured["contents"])
+	modelTurn := as[map[string]any](t, contents[1])
+	callPart := as[map[string]any](t, as[[]any](t, modelTurn["parts"])[0])
+	assert.Equal(t, "sig-1", callPart["thoughtSignature"])
+	fc := as[map[string]any](t, callPart["functionCall"])
+	assert.Equal(t, "fc-real-1", fc["id"])
+
+	toolTurn := as[map[string]any](t, contents[2])
+	fr := as[map[string]any](t, as[map[string]any](t, as[[]any](t, toolTurn["parts"])[0])["functionResponse"])
+	assert.Equal(t, "fc-real-1", fr["id"])
+}
+
+func TestStructuredOutputWireFormat(t *testing.T) {
+	t.Parallel()
+
+	var captured map[string]any
+
+	model := newTestModel(t, serveFixture(t, "text.json", "/v1beta/models/gemini-2.5-flash:generateContent", &captured))
+
+	_, err := model.Generate(t.Context(), ai.Request{
+		Messages: []ai.Message{ai.UserText("extract")},
+		ResponseFormat: &ai.ResponseFormat{
+			Schema: &ai.Schema{Type: "object", Properties: map[string]*ai.Schema{"temp": {Type: "number"}}, Required: []string{"temp"}},
+		},
+	})
+	require.NoError(t, err)
+
+	gc := as[map[string]any](t, captured["generationConfig"])
+	assert.Equal(t, "application/json", gc["responseMimeType"])
+	assert.Contains(t, gc, "responseSchema")
+}
+
+func TestThinkingWireFormat(t *testing.T) {
+	t.Parallel()
+
+	var captured map[string]any
+
+	model := newTestModel(t, serveFixture(t, "text.json", "/v1beta/models/gemini-2.5-flash:generateContent", &captured))
+
+	_, err := model.Generate(t.Context(), ai.Request{
+		Messages:  []ai.Message{ai.UserText("think")},
+		Reasoning: &ai.ReasoningConfig{Effort: ai.ReasoningLow, IncludeSummary: true},
+	})
+	require.NoError(t, err)
+
+	gc := as[map[string]any](t, captured["generationConfig"])
+	tc := as[map[string]any](t, gc["thinkingConfig"])
+	assert.InDelta(t, 2048, as[float64](t, tc["thinkingBudget"]), 1e-9)
+	assert.Equal(t, true, tc["includeThoughts"])
+}
+
+func TestErrorMapping(t *testing.T) {
+	t.Parallel()
+
+	model := newTestModel(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"code":429,"message":"Resource exhausted","status":"RESOURCE_EXHAUSTED"}}`))
+	})
+
+	_, err := model.Generate(t.Context(), ai.Request{Messages: []ai.Message{ai.UserText("hi")}})
+	require.ErrorIs(t, err, ai.ErrRateLimited)
+
+	var apiErr *ai.Error
+	require.ErrorAs(t, err, &apiErr)
+	assert.Equal(t, "RESOURCE_EXHAUSTED", apiErr.Type)
+	assert.Equal(t, "Resource exhausted", apiErr.Message)
+}
+
+func TestCountTokens(t *testing.T) {
+	t.Parallel()
+
+	model := newTestModel(t, func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/v1beta/models/gemini-2.5-flash:countTokens", r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"totalTokens":33}`))
+	})
+
+	n, err := model.CountTokens(t.Context(), ai.Request{Messages: []ai.Message{ai.UserText("count me")}})
+	require.NoError(t, err)
+	assert.Equal(t, 33, n)
+}
