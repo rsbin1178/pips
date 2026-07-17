@@ -126,6 +126,11 @@ linters:
       # A switch with a default branch is exhaustive; we use defaults for
       # forward compatibility with new enum values.
       default-signifies-exhaustive: true
+    govet:
+      disable:
+        # The inline analyzer reports "cannot inline: type parameter
+        # inference is not yet supported" on ordinary generic calls.
+        - inline
     funlen:
       lines: 120
       statements: 80
