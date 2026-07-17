@@ -55,6 +55,10 @@ type StreamEvent struct {
 
 	// Text is the fragment for text_delta and reasoning_delta.
 	Text string
+	// Signature carries a provider reasoning signature on reasoning_delta
+	// events (Anthropic signature_delta, Gemini thoughtSignature). It arrives
+	// with an empty Text and applies to the reasoning part being accumulated.
+	Signature string
 
 	// ToolCallIndex orders concurrent tool calls within the response; it is
 	// set on all tool_call_* events.
@@ -96,6 +100,7 @@ type accumulator struct {
 
 	textBuf      strings.Builder
 	reasoningBuf strings.Builder
+	reasoningSig string
 	// open tracks which buffer is accumulating so consecutive deltas of the
 	// same kind merge into one part while preserving overall order.
 	open StreamEventType
@@ -133,6 +138,10 @@ func (a *accumulator) add(ev StreamEvent) {
 		}
 
 		a.reasoningBuf.WriteString(ev.Text)
+
+		if ev.Signature != "" {
+			a.reasoningSig = ev.Signature
+		}
 	case StreamToolCallStart:
 		a.flush()
 		a.toolSlot[ev.ToolCallIndex] = len(a.resp.Message.Parts)
@@ -166,9 +175,14 @@ func (a *accumulator) flush() {
 			a.textBuf.Reset()
 		}
 	case StreamReasoningDelta:
-		if a.reasoningBuf.Len() > 0 {
-			a.resp.Message.Parts = append(a.resp.Message.Parts, ReasoningPart{Text: a.reasoningBuf.String()})
+		if a.reasoningBuf.Len() > 0 || a.reasoningSig != "" {
+			a.resp.Message.Parts = append(a.resp.Message.Parts, ReasoningPart{
+				Text:      a.reasoningBuf.String(),
+				Signature: a.reasoningSig,
+			})
 			a.reasoningBuf.Reset()
+
+			a.reasoningSig = ""
 		}
 	default:
 	}
