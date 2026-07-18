@@ -2,6 +2,12 @@ package gemini
 
 import "github.com/rsbin/pips/ai"
 
+// Gemini content roles (the wire has only these two).
+const (
+	roleUser  = "user"
+	roleModel = "model"
+)
+
 // Gemini wire types — the subset this adapter produces and consumes.
 
 type generateRequest struct {
@@ -71,13 +77,14 @@ type wireFunctionCallingConfig struct {
 }
 
 type generationConfig struct {
-	Temperature      *float64        `json:"temperature,omitempty"`
-	TopP             *float64        `json:"topP,omitempty"`
-	MaxOutputTokens  *int            `json:"maxOutputTokens,omitempty"`
-	StopSequences    []string        `json:"stopSequences,omitempty"`
-	ResponseMIMEType string          `json:"responseMimeType,omitempty"`
-	ResponseSchema   *ai.Schema      `json:"responseSchema,omitempty"`
-	ThinkingConfig   *thinkingConfig `json:"thinkingConfig,omitempty"`
+	Temperature        *float64        `json:"temperature,omitempty"`
+	TopP               *float64        `json:"topP,omitempty"`
+	MaxOutputTokens    *int            `json:"maxOutputTokens,omitempty"`
+	StopSequences      []string        `json:"stopSequences,omitempty"`
+	ResponseMIMEType   string          `json:"responseMimeType,omitempty"`
+	ResponseSchema     *ai.Schema      `json:"responseSchema,omitempty"`
+	ResponseModalities []string        `json:"responseModalities,omitempty"`
+	ThinkingConfig     *thinkingConfig `json:"thinkingConfig,omitempty"`
 }
 
 type thinkingConfig struct {
