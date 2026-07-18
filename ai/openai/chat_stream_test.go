@@ -3,8 +3,6 @@ package openai_test
 import (
 	"encoding/json"
 	"net/http"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -13,25 +11,86 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// serveSSE streams a .sse fixture file.
-func serveSSE(t *testing.T, name string) http.HandlerFunc {
+const chatTextStream = `data: {"id":"chatcmpl-s1","object":"chat.completion.chunk","model":"gpt-4o-2024-11-20","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-s1","object":"chat.completion.chunk","model":"gpt-4o-2024-11-20","choices":[{"index":0,"delta":{"content":"Hel"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-s1","object":"chat.completion.chunk","model":"gpt-4o-2024-11-20","choices":[{"index":0,"delta":{"content":"lo!"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-s1","object":"chat.completion.chunk","model":"gpt-4o-2024-11-20","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: {"id":"chatcmpl-s1","object":"chat.completion.chunk","model":"gpt-4o-2024-11-20","choices":[],"usage":{"prompt_tokens":9,"completion_tokens":3,"total_tokens":12}}
+
+data: [DONE]
+
+`
+
+const chatToolsStream = `data: {"id":"chatcmpl-s2","object":"chat.completion.chunk","model":"gpt-4o-2024-11-20","choices":[{"index":0,"delta":{"role":"assistant","content":null,"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"get_weather","arguments":""}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-s2","object":"chat.completion.chunk","model":"gpt-4o-2024-11-20","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"city\":"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-s2","object":"chat.completion.chunk","model":"gpt-4o-2024-11-20","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"Paris\"}"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-s2","object":"chat.completion.chunk","model":"gpt-4o-2024-11-20","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call_b","type":"function","function":{"name":"get_time","arguments":"{}"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-s2","object":"chat.completion.chunk","model":"gpt-4o-2024-11-20","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+
+data: {"id":"chatcmpl-s2","object":"chat.completion.chunk","model":"gpt-4o-2024-11-20","choices":[],"usage":{"prompt_tokens":50,"completion_tokens":20,"total_tokens":70}}
+
+data: [DONE]
+
+`
+
+const responsesTextStream = `event: response.created
+data: {"type":"response.created","response":{"id":"resp_s1","model":"gpt-5-2025-08-07","status":"in_progress"}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","output_index":0,"delta":"Hel"}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","output_index":0,"delta":"lo!"}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_s1","model":"gpt-5-2025-08-07","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Hello!"}]}],"usage":{"input_tokens":9,"output_tokens":3}}}
+
+`
+
+const responsesToolsStream = `event: response.created
+data: {"type":"response.created","response":{"id":"resp_s2","model":"gpt-5-2025-08-07","status":"in_progress"}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","call_id":"call_a","name":"get_weather"}}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\"city\":"}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"\"Paris\"}"}
+
+event: response.function_call_arguments.done
+data: {"type":"response.function_call_arguments.done","output_index":0}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_s2","model":"gpt-5-2025-08-07","status":"completed","output":[{"type":"function_call","call_id":"call_a","name":"get_weather","arguments":"{\"city\":\"Paris\"}"}],"usage":{"input_tokens":40,"output_tokens":15}}}
+
+`
+
+// serveSSE streams an in-memory event sequence.
+func serveSSE(t *testing.T, events string) http.HandlerFunc {
 	t.Helper()
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "text/event-stream", r.Header.Get("Accept"))
 
-		data, err := os.ReadFile(filepath.Join("testdata", name)) //nolint:gosec // fixture path built from test constants
-		assert.NoError(t, err)
-
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write(data)
+		_, _ = w.Write([]byte(events))
 	}
 }
 
 func TestChatStreamText(t *testing.T) {
 	t.Parallel()
 
-	model := newTestModel(t, serveSSE(t, "chat_stream_text.sse"))
+	model := newTestModel(t, serveSSE(t, chatTextStream))
 
 	var events []ai.StreamEvent
 
@@ -67,7 +126,7 @@ func TestChatStreamText(t *testing.T) {
 func TestChatStreamToolCalls(t *testing.T) {
 	t.Parallel()
 
-	model := newTestModel(t, serveSSE(t, "chat_stream_tools.sse"))
+	model := newTestModel(t, serveSSE(t, chatToolsStream))
 
 	resp, err := ai.Collect(model.Stream(t.Context(), ai.Request{
 		Messages: []ai.Message{ai.UserText("weather and time?")},

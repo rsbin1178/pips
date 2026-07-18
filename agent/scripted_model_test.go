@@ -9,12 +9,12 @@ import (
 	"github.com/rsbin/pips/ai"
 )
 
-// fakeModel plays a scripted sequence of turns. Generate consumes one turn
+// scriptedModel plays a deterministic sequence of turns. Generate consumes one turn
 // per call; Stream replays the same turn as streaming events, so both agent
 // paths run against identical scripts.
-type fakeModel struct {
+type scriptedModel struct {
 	mu       sync.Mutex
-	script   []fakeTurn
+	script   []scriptedTurn
 	pos      int
 	requests []ai.Request
 	// abandoned reports that a stream consumer stopped before the script
@@ -22,25 +22,25 @@ type fakeModel struct {
 	abandoned atomic.Bool
 }
 
-type fakeTurn struct {
+type scriptedTurn struct {
 	resp *ai.Response
 	err  error
 }
 
-var errScriptExhausted = errors.New("fake: script exhausted")
+var errScriptExhausted = errors.New("scripted model: script exhausted")
 
-func newFakeModel(turns ...fakeTurn) *fakeModel {
-	return &fakeModel{script: turns}
+func newScriptedModel(turns ...scriptedTurn) *scriptedModel {
+	return &scriptedModel{script: turns}
 }
 
-// reply scripts a successful model response.
-func reply(resp *ai.Response) fakeTurn {
-	return fakeTurn{resp: resp}
+// respond scripts a successful model response.
+func respond(resp *ai.Response) scriptedTurn {
+	return scriptedTurn{resp: resp}
 }
 
-// fail scripts a model error.
-func fail(err error) fakeTurn {
-	return fakeTurn{err: err}
+// failWith scripts a model error.
+func failWith(err error) scriptedTurn {
+	return scriptedTurn{err: err}
 }
 
 // textResponse builds a plain text assistant response.
@@ -70,14 +70,14 @@ func call(id, name, args string) ai.ToolCallPart {
 	return ai.ToolCallPart{ID: id, Name: name, Args: ai.JSON(args)}
 }
 
-func (m *fakeModel) take(req ai.Request) fakeTurn {
+func (m *scriptedModel) take(req ai.Request) scriptedTurn {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	m.requests = append(m.requests, req)
 
 	if m.pos >= len(m.script) {
-		return fakeTurn{err: errScriptExhausted}
+		return scriptedTurn{err: errScriptExhausted}
 	}
 
 	turn := m.script[m.pos]
@@ -87,14 +87,14 @@ func (m *fakeModel) take(req ai.Request) fakeTurn {
 }
 
 // Requests returns the requests observed so far.
-func (m *fakeModel) Requests() []ai.Request {
+func (m *scriptedModel) Requests() []ai.Request {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	return append([]ai.Request(nil), m.requests...)
 }
 
-func (m *fakeModel) Generate(_ context.Context, req ai.Request) (*ai.Response, error) {
+func (m *scriptedModel) Generate(_ context.Context, req ai.Request) (*ai.Response, error) {
 	turn := m.take(req)
 	if turn.err != nil {
 		return nil, turn.err
@@ -103,7 +103,7 @@ func (m *fakeModel) Generate(_ context.Context, req ai.Request) (*ai.Response, e
 	return turn.resp, nil
 }
 
-func (m *fakeModel) Stream(ctx context.Context, req ai.Request) ai.Stream {
+func (m *scriptedModel) Stream(ctx context.Context, req ai.Request) ai.Stream {
 	return func(yield func(ai.StreamEvent, error) bool) {
 		turn := m.take(req)
 		if turn.err != nil {
@@ -125,9 +125,11 @@ func (m *fakeModel) Stream(ctx context.Context, req ai.Request) ai.Stream {
 	}
 }
 
-func (m *fakeModel) Provider() ai.Provider         { return ai.Provider("fake") }
-func (m *fakeModel) ModelID() string               { return "fake-1" }
-func (m *fakeModel) Capabilities() ai.Capabilities { return ai.Capabilities{Text: true, Tools: true} }
+func (m *scriptedModel) Provider() ai.Provider { return ai.Provider("scripted") }
+func (m *scriptedModel) ModelID() string       { return "scripted-1" }
+func (m *scriptedModel) Capabilities() ai.Capabilities {
+	return ai.Capabilities{Text: true, Tools: true}
+}
 
 // streamEvents decomposes a response into the event sequence a provider
 // stream would produce; ai.Collect folds it back into an equal response.

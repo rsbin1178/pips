@@ -29,9 +29,9 @@ func addTool() agent.Tool {
 func TestRunToolLoop(t *testing.T) {
 	t.Parallel()
 
-	model := newFakeModel(
-		reply(callResponse(call("c1", "add", `{"a":2,"b":3}`))),
-		reply(textResponse("The answer is 5.")),
+	model := newScriptedModel(
+		respond(callResponse(call("c1", "add", `{"a":2,"b":3}`))),
+		respond(textResponse("The answer is 5.")),
 	)
 
 	a, err := agent.New(model, agent.WithTools(addTool()), agent.WithSystem("Be terse."))
@@ -76,9 +76,9 @@ func TestRunToolLoop(t *testing.T) {
 func TestStreamToolLoop(t *testing.T) {
 	t.Parallel()
 
-	model := newFakeModel(
-		reply(callResponse(call("c1", "add", `{"a":2,"b":3}`))),
-		reply(textResponse("5")),
+	model := newScriptedModel(
+		respond(callResponse(call("c1", "add", `{"a":2,"b":3}`))),
+		respond(textResponse("5")),
 	)
 
 	a, err := agent.New(model, agent.WithTools(addTool()))
@@ -133,7 +133,7 @@ func TestStreamToolLoop(t *testing.T) {
 func TestRunOnEvent(t *testing.T) {
 	t.Parallel()
 
-	model := newFakeModel(reply(textResponse("hi")))
+	model := newScriptedModel(respond(textResponse("hi")))
 
 	var types []agent.EventType
 
@@ -157,10 +157,10 @@ func TestRunOnEvent(t *testing.T) {
 func TestStopMaxTurns(t *testing.T) {
 	t.Parallel()
 
-	model := newFakeModel(
-		reply(callResponse(call("c1", "add", `{"a":1,"b":1}`))),
-		reply(callResponse(call("c2", "add", `{"a":2,"b":2}`))),
-		reply(callResponse(call("c3", "add", `{"a":3,"b":3}`))),
+	model := newScriptedModel(
+		respond(callResponse(call("c1", "add", `{"a":1,"b":1}`))),
+		respond(callResponse(call("c2", "add", `{"a":2,"b":2}`))),
+		respond(callResponse(call("c3", "add", `{"a":3,"b":3}`))),
 	)
 
 	a, err := agent.New(model, agent.WithTools(addTool()), agent.WithMaxTurns(2))
@@ -181,9 +181,9 @@ func TestStopBudget(t *testing.T) {
 	t.Parallel()
 
 	// Each scripted response costs 15 tokens; the budget allows one turn.
-	model := newFakeModel(
-		reply(callResponse(call("c1", "add", `{"a":1,"b":1}`))),
-		reply(callResponse(call("c2", "add", `{"a":2,"b":2}`))),
+	model := newScriptedModel(
+		respond(callResponse(call("c1", "add", `{"a":1,"b":1}`))),
+		respond(callResponse(call("c2", "add", `{"a":2,"b":2}`))),
 	)
 
 	a, err := agent.New(model, agent.WithTools(addTool()), agent.WithMaxTokens(15))
@@ -199,9 +199,9 @@ func TestStopBudget(t *testing.T) {
 func TestStopWhen(t *testing.T) {
 	t.Parallel()
 
-	model := newFakeModel(
-		reply(callResponse(call("c1", "add", `{"a":1,"b":1}`))),
-		reply(callResponse(call("c2", "add", `{"a":2,"b":2}`))),
+	model := newScriptedModel(
+		respond(callResponse(call("c1", "add", `{"a":1,"b":1}`))),
+		respond(callResponse(call("c2", "add", `{"a":2,"b":2}`))),
 	)
 
 	a, err := agent.New(model,
@@ -220,7 +220,7 @@ func TestStopWhen(t *testing.T) {
 func TestRunModelErrorFirstTurn(t *testing.T) {
 	t.Parallel()
 
-	model := newFakeModel(fail(errors.New("boom")))
+	model := newScriptedModel(failWith(errors.New("boom")))
 
 	a, err := agent.New(model)
 	require.NoError(t, err)
@@ -236,9 +236,9 @@ func TestRunModelErrorFirstTurn(t *testing.T) {
 func TestRunModelErrorMidRun(t *testing.T) {
 	t.Parallel()
 
-	model := newFakeModel(
-		reply(callResponse(call("c1", "add", `{"a":1,"b":1}`))),
-		fail(errors.New("boom")),
+	model := newScriptedModel(
+		respond(callResponse(call("c1", "add", `{"a":1,"b":1}`))),
+		failWith(errors.New("boom")),
 	)
 
 	a, err := agent.New(model, agent.WithTools(addTool()))
@@ -259,7 +259,7 @@ func TestRunModelErrorMidRun(t *testing.T) {
 func TestRunRequestEscapeHatch(t *testing.T) {
 	t.Parallel()
 
-	model := newFakeModel(reply(textResponse("ok")))
+	model := newScriptedModel(respond(textResponse("ok")))
 
 	a, err := agent.New(model, agent.WithRequest(func(req *ai.Request) {
 		req.Temperature = ai.Ptr(0.2)
@@ -278,7 +278,7 @@ func TestRunRequestEscapeHatch(t *testing.T) {
 func TestStreamBreakCancelsRun(t *testing.T) {
 	t.Parallel()
 
-	model := newFakeModel(reply(textResponse("a long answer")))
+	model := newScriptedModel(respond(textResponse("a long answer")))
 
 	a, err := agent.New(model)
 	require.NoError(t, err)
@@ -299,7 +299,7 @@ func TestStreamBreakCancelsRun(t *testing.T) {
 	assert.Empty(t, sess.Pending())
 
 	// The session is reusable after an abandoned stream.
-	model2 := newFakeModel(reply(textResponse("done")))
+	model2 := newScriptedModel(respond(textResponse("done")))
 	a2, err := agent.New(model2)
 	require.NoError(t, err)
 
@@ -322,8 +322,8 @@ func TestRunCancelDuringTool(t *testing.T) {
 			return "", ctx.Err()
 		})
 
-	model := newFakeModel(
-		reply(callResponse(call("c1", "block", `{}`), call("c2", "block", `{}`))),
+	model := newScriptedModel(
+		respond(callResponse(call("c1", "block", `{}`), call("c2", "block", `{}`))),
 	)
 
 	a, err := agent.New(model, agent.WithTools(blocking))
@@ -363,9 +363,9 @@ func TestRunActiveConflict(t *testing.T) {
 			return "done", nil
 		})
 
-	model := newFakeModel(
-		reply(callResponse(call("c1", "block", `{}`))),
-		reply(textResponse("ok")),
+	model := newScriptedModel(
+		respond(callResponse(call("c1", "block", `{}`))),
+		respond(textResponse("ok")),
 	)
 
 	a, err := agent.New(model, agent.WithTools(blocking))
@@ -391,7 +391,7 @@ func TestRunActiveConflict(t *testing.T) {
 func TestSessionJSONRoundTripContinues(t *testing.T) {
 	t.Parallel()
 
-	model := newFakeModel(reply(callResponse(call("c1", "add", `{"a":2,"b":3}`))))
+	model := newScriptedModel(respond(callResponse(call("c1", "add", `{"a":2,"b":3}`))))
 
 	a, err := agent.New(model, agent.WithTools(addTool()), agent.WithMaxTurns(1))
 	require.NoError(t, err)
@@ -411,7 +411,7 @@ func TestSessionJSONRoundTripContinues(t *testing.T) {
 	assert.Equal(t, sess.Messages(), restored.Messages())
 	assert.Equal(t, sess.Usage(), restored.Usage())
 
-	model2 := newFakeModel(reply(textResponse("The answer is 5.")))
+	model2 := newScriptedModel(respond(textResponse("The answer is 5.")))
 	a2, err := agent.New(model2, agent.WithTools(addTool()))
 	require.NoError(t, err)
 
@@ -429,7 +429,7 @@ func TestSessionJSONRoundTripContinues(t *testing.T) {
 func TestStreamModelErrorYieldsError(t *testing.T) {
 	t.Parallel()
 
-	model := newFakeModel(fail(errors.New("boom")))
+	model := newScriptedModel(failWith(errors.New("boom")))
 
 	a, err := agent.New(model)
 	require.NoError(t, err)
@@ -448,7 +448,7 @@ func TestStreamModelErrorYieldsError(t *testing.T) {
 func TestRunNoToolsSingleTurn(t *testing.T) {
 	t.Parallel()
 
-	model := newFakeModel(reply(textResponse("hello")))
+	model := newScriptedModel(respond(textResponse("hello")))
 
 	a, err := agent.New(model)
 	require.NoError(t, err)
@@ -474,9 +474,9 @@ func TestToolTimeout(t *testing.T) {
 			}
 		})
 
-	model := newFakeModel(
-		reply(callResponse(call("c1", "slow", `{}`))),
-		reply(textResponse("gave up")),
+	model := newScriptedModel(
+		respond(callResponse(call("c1", "slow", `{}`))),
+		respond(textResponse("gave up")),
 	)
 
 	a, err := agent.New(model,

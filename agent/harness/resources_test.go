@@ -70,7 +70,7 @@ func TestFormatSkillsPrompt(t *testing.T) {
 func TestHarnessSystemFuncSeesResources(t *testing.T) {
 	t.Parallel()
 
-	model := newFakeModel("m", textResponse("ok", 10))
+	model := newScriptedModel("m", textResponse("ok", 10))
 	sess := buildSession(t)
 
 	h, err := harness.New(model, sess,

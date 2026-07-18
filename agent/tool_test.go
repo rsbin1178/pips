@@ -91,7 +91,7 @@ func TestNewValidation(t *testing.T) {
 	_, err := agent.New(nil)
 	require.ErrorContains(t, err, "nil model")
 
-	model := newFakeModel()
+	model := newScriptedModel()
 
 	_, err = agent.New(model, agent.WithTools(addTool(), addTool()))
 	require.ErrorContains(t, err, "duplicate tool name")

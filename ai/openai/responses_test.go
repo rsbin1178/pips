@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/rsbin/pips/ai"
@@ -13,6 +11,49 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+const responsesTextResponse = `{
+  "id": "resp_abc123",
+  "object": "response",
+  "model": "gpt-5-2025-08-07",
+  "status": "completed",
+  "output": [
+    {
+      "type": "reasoning",
+      "id": "rs_1",
+      "summary": [ { "type": "summary_text", "text": "Simple factual question." } ]
+    },
+    {
+      "type": "message",
+      "id": "msg_1",
+      "role": "assistant",
+      "content": [ { "type": "output_text", "text": "The capital of France is Paris." } ]
+    }
+  ],
+  "usage": {
+    "input_tokens": 14,
+    "output_tokens": 20,
+    "input_tokens_details": { "cached_tokens": 6 },
+    "output_tokens_details": { "reasoning_tokens": 12 }
+  }
+}`
+
+const responsesToolsResponse = `{
+  "id": "resp_tool456",
+  "object": "response",
+  "model": "gpt-5-2025-08-07",
+  "status": "completed",
+  "output": [
+    {
+      "type": "function_call",
+      "id": "fc_1",
+      "call_id": "call_w1",
+      "name": "get_weather",
+      "arguments": "{\"city\":\"Paris\"}"
+    }
+  ],
+  "usage": { "input_tokens": 40, "output_tokens": 15 }
+}`
 
 // newResponsesModel builds a Model pinned to the Responses API surface.
 func newResponsesModel(t *testing.T, handler http.HandlerFunc) *openai.Model {
@@ -30,7 +71,7 @@ func newResponsesModel(t *testing.T, handler http.HandlerFunc) *openai.Model {
 	)
 }
 
-func serveResponsesFixture(t *testing.T, name string, captured *map[string]any) http.HandlerFunc {
+func serveResponsesJSON(t *testing.T, response string, captured *map[string]any) http.HandlerFunc {
 	t.Helper()
 
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -40,11 +81,8 @@ func serveResponsesFixture(t *testing.T, name string, captured *map[string]any) 
 			assert.NoError(t, json.NewDecoder(r.Body).Decode(captured))
 		}
 
-		data, err := os.ReadFile(filepath.Join("testdata", name)) //nolint:gosec // fixture path from test constants
-		assert.NoError(t, err)
-
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write(data)
+		_, _ = w.Write([]byte(response))
 	}
 }
 
@@ -53,7 +91,7 @@ func TestResponsesGenerateText(t *testing.T) {
 
 	var captured map[string]any
 
-	model := newResponsesModel(t, serveResponsesFixture(t, "responses_text.json", &captured))
+	model := newResponsesModel(t, serveResponsesJSON(t, responsesTextResponse, &captured))
 
 	resp, err := model.Generate(t.Context(), ai.Request{
 		System:    "You are terse.",
@@ -92,7 +130,7 @@ func TestResponsesVisionAndToolWireFormat(t *testing.T) {
 
 	var captured map[string]any
 
-	model := newResponsesModel(t, serveResponsesFixture(t, "responses_tools.json", &captured))
+	model := newResponsesModel(t, serveResponsesJSON(t, responsesToolsResponse, &captured))
 
 	resp, err := model.Generate(t.Context(), ai.Request{
 		Messages: []ai.Message{ai.User(
@@ -132,7 +170,7 @@ func TestResponsesToolResultHistoryWireFormat(t *testing.T) {
 
 	var captured map[string]any
 
-	model := newResponsesModel(t, serveResponsesFixture(t, "responses_text.json", &captured))
+	model := newResponsesModel(t, serveResponsesJSON(t, responsesTextResponse, &captured))
 
 	_, err := model.Generate(t.Context(), ai.Request{
 		Messages: []ai.Message{
@@ -161,7 +199,7 @@ func TestResponsesStructuredOutputWireFormat(t *testing.T) {
 
 	var captured map[string]any
 
-	model := newResponsesModel(t, serveResponsesFixture(t, "responses_text.json", &captured))
+	model := newResponsesModel(t, serveResponsesJSON(t, responsesTextResponse, &captured))
 
 	_, err := model.Generate(t.Context(), ai.Request{
 		Messages: []ai.Message{ai.UserText("extract")},
@@ -183,7 +221,7 @@ func TestResponsesStructuredOutputWireFormat(t *testing.T) {
 func TestResponsesStreamText(t *testing.T) {
 	t.Parallel()
 
-	model := newResponsesModel(t, serveSSE(t, "responses_stream_text.sse"))
+	model := newResponsesModel(t, serveSSE(t, responsesTextStream))
 
 	resp, err := ai.Collect(model.Stream(t.Context(), ai.Request{
 		Messages: []ai.Message{ai.UserText("hi")},
@@ -200,7 +238,7 @@ func TestResponsesStreamText(t *testing.T) {
 func TestResponsesStreamToolCall(t *testing.T) {
 	t.Parallel()
 
-	model := newResponsesModel(t, serveSSE(t, "responses_stream_tools.sse"))
+	model := newResponsesModel(t, serveSSE(t, responsesToolsStream))
 
 	resp, err := ai.Collect(model.Stream(t.Context(), ai.Request{
 		Messages: []ai.Message{ai.UserText("weather?")},
@@ -265,8 +303,8 @@ func TestAPIAutoRouting(t *testing.T) {
 func TestResponsesAndChatEquivalentShape(t *testing.T) {
 	t.Parallel()
 
-	chat := newTestModel(t, serveFixture(t, "chat_text.json", "/v1/chat/completions", nil))
-	responses := newResponsesModel(t, serveResponsesFixture(t, "responses_text.json", nil))
+	chat := newTestModel(t, serveJSON(t, chatTextResponse, "/v1/chat/completions", nil))
+	responses := newResponsesModel(t, serveResponsesJSON(t, responsesTextResponse, nil))
 
 	req := ai.Request{Messages: []ai.Message{ai.UserText("Capital of France?")}}
 

@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/rsbin/pips/ai"
@@ -13,6 +11,54 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+const textResponse = `{
+  "candidates": [
+    {
+      "content": {
+        "role": "model",
+        "parts": [ { "text": "The capital of France is Paris." } ]
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 12,
+    "candidatesTokenCount": 8,
+    "totalTokenCount": 20,
+    "cachedContentTokenCount": 3
+  },
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "resp-abc123"
+}`
+
+const toolsResponse = `{
+  "candidates": [
+    {
+      "content": {
+        "role": "model",
+        "parts": [
+          {
+            "functionCall": {
+              "name": "get_weather",
+              "args": { "city": "Paris", "unit": "celsius" }
+            }
+          }
+        ]
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 40,
+    "candidatesTokenCount": 15,
+    "totalTokenCount": 55
+  },
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "resp-tool456"
+}`
 
 func newTestModel(t *testing.T, handler http.HandlerFunc, opts ...gemini.Option) *gemini.Model {
 	t.Helper()
@@ -30,7 +76,7 @@ func newTestModel(t *testing.T, handler http.HandlerFunc, opts ...gemini.Option)
 	return gemini.New("gemini-2.5-flash", append(base, opts...)...)
 }
 
-func serveFixture(t *testing.T, name, wantPath string, captured *map[string]any) http.HandlerFunc {
+func serveJSON(t *testing.T, response, wantPath string, captured *map[string]any) http.HandlerFunc {
 	t.Helper()
 
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -41,25 +87,19 @@ func serveFixture(t *testing.T, name, wantPath string, captured *map[string]any)
 			assert.NoError(t, json.NewDecoder(r.Body).Decode(captured))
 		}
 
-		data, err := os.ReadFile(filepath.Join("testdata", name)) //nolint:gosec // fixture path from test constants
-		assert.NoError(t, err)
-
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write(data)
+		_, _ = w.Write([]byte(response))
 	}
 }
 
-func serveSSE(t *testing.T, name string) http.HandlerFunc {
+func serveSSE(t *testing.T, events string) http.HandlerFunc {
 	t.Helper()
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "sse", r.URL.Query().Get("alt"))
 
-		data, err := os.ReadFile(filepath.Join("testdata", name)) //nolint:gosec // fixture path from test constants
-		assert.NoError(t, err)
-
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write(data)
+		_, _ = w.Write([]byte(events))
 	}
 }
 
@@ -77,7 +117,7 @@ func TestGenerateText(t *testing.T) {
 
 	var captured map[string]any
 
-	model := newTestModel(t, serveFixture(t, "text.json", "/v1beta/models/gemini-2.5-flash:generateContent", &captured))
+	model := newTestModel(t, serveJSON(t, textResponse, "/v1beta/models/gemini-2.5-flash:generateContent", &captured))
 
 	resp, err := model.Generate(t.Context(), ai.Request{
 		System:   "You are terse.",
@@ -108,7 +148,7 @@ func TestGenerateVisionWireFormat(t *testing.T) {
 
 	var captured map[string]any
 
-	model := newTestModel(t, serveFixture(t, "text.json", "/v1beta/models/gemini-2.5-flash:generateContent", &captured))
+	model := newTestModel(t, serveJSON(t, textResponse, "/v1beta/models/gemini-2.5-flash:generateContent", &captured))
 
 	_, err := model.Generate(t.Context(), ai.Request{
 		Messages: []ai.Message{ai.User(
@@ -132,7 +172,7 @@ func TestGenerateToolsSynthesizesID(t *testing.T) {
 
 	var captured map[string]any
 
-	model := newTestModel(t, serveFixture(t, "tools.json", "/v1beta/models/gemini-2.5-flash:generateContent", &captured))
+	model := newTestModel(t, serveJSON(t, toolsResponse, "/v1beta/models/gemini-2.5-flash:generateContent", &captured))
 
 	resp, err := model.Generate(t.Context(), ai.Request{
 		Messages: []ai.Message{ai.UserText("weather in paris?")},
@@ -164,7 +204,7 @@ func TestToolResultRoundTripUsesSynthesizedID(t *testing.T) {
 
 	var captured map[string]any
 
-	model := newTestModel(t, serveFixture(t, "text.json", "/v1beta/models/gemini-2.5-flash:generateContent", &captured))
+	model := newTestModel(t, serveJSON(t, textResponse, "/v1beta/models/gemini-2.5-flash:generateContent", &captured))
 
 	// A synthesized id (no embedded real id) should produce a functionResponse
 	// matched by name, with no id leaking onto the wire.
@@ -234,7 +274,7 @@ func TestStructuredOutputWireFormat(t *testing.T) {
 
 	var captured map[string]any
 
-	model := newTestModel(t, serveFixture(t, "text.json", "/v1beta/models/gemini-2.5-flash:generateContent", &captured))
+	model := newTestModel(t, serveJSON(t, textResponse, "/v1beta/models/gemini-2.5-flash:generateContent", &captured))
 
 	_, err := model.Generate(t.Context(), ai.Request{
 		Messages: []ai.Message{ai.UserText("extract")},
@@ -254,7 +294,7 @@ func TestThinkingWireFormat(t *testing.T) {
 
 	var captured map[string]any
 
-	model := newTestModel(t, serveFixture(t, "text.json", "/v1beta/models/gemini-2.5-flash:generateContent", &captured))
+	model := newTestModel(t, serveJSON(t, textResponse, "/v1beta/models/gemini-2.5-flash:generateContent", &captured))
 
 	_, err := model.Generate(t.Context(), ai.Request{
 		Messages:  []ai.Message{ai.UserText("think")},
