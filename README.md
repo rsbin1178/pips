@@ -8,6 +8,9 @@ Go building blocks for AI applications. Current packages:
 - **`agent`** — agent runtime core on top of `ai`: the autonomous loop (model
   → tools → results → model), typed tools, event streaming, stop conditions,
   approval gates with pause/resume, and serializable sessions.
+- **`agent/harness`** — stateful orchestration over the runtime: persistent
+  session trees (JSONL) with branching, automatic context compaction, branch
+  summaries, and skill/prompt-template resources.
 
 > **Status: v0.** The API is under active development and may change without
 > notice. Pin a commit if you depend on it.
