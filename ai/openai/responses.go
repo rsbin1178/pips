@@ -23,7 +23,31 @@ func (m *Model) generateResponses(ctx context.Context, req ai.Request) (*ai.Resp
 		return nil, fmt.Errorf("openai: responses: %w", err)
 	}
 
+	if parsed.Status == "failed" && parsed.Error != nil {
+		return nil, responsesFailure(parsed.Error, raw)
+	}
+
 	return responseFromResponses(parsed, raw), nil
+}
+
+// responsesFailure builds an error for a response whose status is "failed",
+// so the failure code and message are not lost in Raw.
+func responsesFailure(e *responsesError, raw []byte) error {
+	apiErr := &ai.Error{
+		Provider: ai.ProviderOpenAI,
+		Code:     e.Code,
+		Message:  e.Message,
+		Raw:      raw,
+	}
+
+	switch e.Code {
+	case "rate_limit_exceeded":
+		return apiErr.WithSentinel(ai.ErrRateLimited)
+	case "server_error":
+		return apiErr.WithSentinel(ai.ErrOverloaded)
+	default:
+		return apiErr
+	}
 }
 
 func (m *Model) streamResponses(ctx context.Context, req ai.Request) ai.Stream {
@@ -81,13 +105,36 @@ func (d *responsesStreamState) handle(ev responsesStreamEvent, yield func(ai.Str
 		return d.handleArgsDelta(ev, yield)
 	case "response.function_call_arguments.done":
 		return d.handleArgsDone(ev, yield)
-	case "response.completed", "response.incomplete", "response.failed":
+	case "response.completed", "response.incomplete":
+		return d.handleTerminal(ev, yield)
+	case "response.failed":
+		if ev.Response != nil && ev.Response.Error != nil {
+			yield(ai.StreamEvent{}, responsesFailure(ev.Response.Error, nil))
+			return false
+		}
+
 		return d.handleTerminal(ev, yield)
 	case "error":
-		yield(ai.StreamEvent{}, &ai.Error{Provider: ai.ProviderOpenAI, Message: ev.Message})
+		yield(ai.StreamEvent{}, streamError(ev))
 		return false
 	default:
 		return true
+	}
+}
+
+// streamError builds an *ai.Error for a Responses mid-stream error event,
+// wrapping a class sentinel when the error code identifies one so errors.Is
+// behaves the same as on the HTTP-status path.
+func streamError(ev responsesStreamEvent) error {
+	apiErr := &ai.Error{Provider: ai.ProviderOpenAI, Code: ev.Code, Message: ev.Message}
+
+	switch ev.Code {
+	case "rate_limit_exceeded":
+		return apiErr.WithSentinel(ai.ErrRateLimited)
+	case "server_error":
+		return apiErr.WithSentinel(ai.ErrOverloaded)
+	default:
+		return apiErr
 	}
 }
 

@@ -92,7 +92,7 @@ func (d *streamDecoder) handle(env streamEnvelope, yield func(ai.StreamEvent, er
 			msg = env.Error.Message
 		}
 
-		yield(ai.StreamEvent{}, &ai.Error{Provider: ai.ProviderAnthropic, Type: errType(env.Error), Message: msg})
+		yield(ai.StreamEvent{}, streamErrorFrom(env.Error, msg))
 
 		return false
 	default:
@@ -228,4 +228,24 @@ func errType(e *streamError) string {
 	}
 
 	return e.Type
+}
+
+// streamErrorFrom builds an *ai.Error for a mid-stream error event, wrapping
+// the class sentinel that matches Anthropic's error type so errors.Is works
+// the same as on the HTTP-status path (e.g. overloaded_error → ErrOverloaded).
+func streamErrorFrom(e *streamError, msg string) error {
+	apiErr := &ai.Error{Provider: ai.ProviderAnthropic, Type: errType(e), Message: msg}
+
+	switch errType(e) {
+	case "overloaded_error", "api_error":
+		return apiErr.WithSentinel(ai.ErrOverloaded)
+	case "rate_limit_error":
+		return apiErr.WithSentinel(ai.ErrRateLimited)
+	case "authentication_error", "permission_error":
+		return apiErr.WithSentinel(ai.ErrAuth)
+	case "invalid_request_error", "not_found_error":
+		return apiErr.WithSentinel(ai.ErrInvalidRequest)
+	default:
+		return apiErr
+	}
 }
