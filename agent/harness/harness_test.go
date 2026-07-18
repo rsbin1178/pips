@@ -2,7 +2,9 @@ package harness_test
 
 import (
 	"context"
+	"errors"
 	"strconv"
+	"sync"
 	"testing"
 
 	"github.com/rsbin/pips/agent"
@@ -278,6 +280,244 @@ func TestHarnessPauseAndResolve(t *testing.T) {
 	assert.Equal(t, "resumed", final.Text())
 }
 
+func TestHarnessResolvesDurablePendingSubset(t *testing.T) {
+	t.Parallel()
+
+	model := newScriptedModel("m",
+		&ai.Response{
+			Message: ai.Assistant(
+				ai.ToolCallPart{ID: "c1", Name: "first"},
+				ai.ToolCallPart{ID: "c2", Name: "second"},
+			),
+			FinishReason: ai.FinishToolCalls,
+		},
+		textResponse("resumed after both decisions", 10),
+	)
+	sess := buildSession(t)
+
+	h, err := harness.New(model, sess, harness.WithAgentOptions(agent.WithBeforeTool(
+		func(context.Context, agent.ToolCallInfo) agent.Decision {
+			return agent.Decision{Action: agent.Pause}
+		},
+	)))
+	require.NoError(t, err)
+
+	result, err := h.Prompt(t.Context(), "go")
+	require.NoError(t, err)
+	require.Equal(t, agent.StopPaused, result.Stop)
+	require.Len(t, result.Pending, 2)
+
+	require.NoError(t, h.ResolveToolCalls(agent.ToolResolution{
+		ToolCallID: "c2", Content: agent.TextResult("approved second"),
+	}))
+
+	cctx, err := sess.Context()
+	require.NoError(t, err)
+
+	pending := agent.NewSession(cctx.Messages...).Pending()
+	require.Len(t, pending, 1)
+	assert.Equal(t, "c1", pending[0].ID)
+
+	// The unresolved call remains durable, so another prompt cannot bypass it.
+	entriesBefore := len(sess.Entries())
+	_, err = h.Prompt(t.Context(), "too early")
+	require.ErrorIs(t, err, agent.ErrPendingToolCalls)
+	assert.Len(t, sess.Entries(), entriesBefore, "rejected prompt is not persisted")
+
+	require.NoError(t, h.ResolveToolCalls(agent.ToolResolution{
+		ToolCallID: "c1", Content: agent.TextResult("rejected first"), IsError: true,
+	}))
+
+	final, err := h.Prompt(t.Context(), "continue")
+	require.NoError(t, err)
+	assert.Equal(t, "resumed after both decisions", final.Text())
+}
+
+func TestHarnessPendingApprovalPrecedesAutomaticCompaction(t *testing.T) {
+	t.Parallel()
+
+	sess := buildSession(t)
+	appendText(t, sess, ai.RoleUser, bigText(100), nil)
+
+	_, err := sess.AppendMessage(ai.Assistant(
+		ai.ToolCallPart{ID: "c1", Name: "approval"},
+	), &ai.Usage{InputTokens: 90_000})
+	require.NoError(t, err)
+
+	summarizer := newScriptedModel("summary", textResponse("must not compact", 10))
+	h, err := harness.New(newScriptedModel("main"), sess,
+		harness.WithCompaction(harness.Settings{ContextTokens: 100_000}),
+		harness.WithSummaryModel(summarizer),
+	)
+	require.NoError(t, err)
+
+	entriesBefore := len(sess.Entries())
+	_, err = h.Prompt(t.Context(), "must wait")
+	require.ErrorIs(t, err, agent.ErrPendingToolCalls)
+	assert.Len(t, sess.Entries(), entriesBefore)
+	assert.Empty(t, summarizer.Requests())
+}
+
+func TestHarnessPromptStreamMatchesObserverAndPersists(t *testing.T) {
+	t.Parallel()
+
+	model := newScriptedModel("m",
+		callResponse("c1", "add", `{"a":2,"b":3}`),
+		textResponse("It is 5.", 30),
+	)
+	sess := buildSession(t)
+
+	var observed []agent.EventType
+
+	h, err := harness.New(model, sess,
+		harness.WithTools(addTool()),
+		harness.WithOnEvent(func(_ context.Context, ev agent.Event) {
+			observed = append(observed, ev.Type)
+		}),
+	)
+	require.NoError(t, err)
+
+	var streamed []agent.EventType
+
+	for ev, err := range h.PromptStream(t.Context(), "2+3?") {
+		require.NoError(t, err)
+
+		streamed = append(streamed, ev.Type)
+	}
+
+	assert.Equal(t, observed, streamed)
+	assert.Equal(t, harness.PhaseIdle, h.Phase())
+	require.ErrorIs(t, h.Cancel(), harness.ErrIdle)
+
+	entries := sess.Entries()
+	require.Len(t, entries, 4)
+
+	text, ok := entries[3].Message.Parts[0].(ai.TextPart)
+	require.True(t, ok)
+	assert.Equal(t, "It is 5.", text.Text)
+}
+
+func TestHarnessInputGuardrailRejectsBeforePersistentPrompt(t *testing.T) {
+	t.Parallel()
+
+	model := newScriptedModel("m", textResponse("unused", 10))
+	sess := buildSession(t)
+	h, err := harness.New(model, sess, harness.WithAgentOptions(
+		agent.WithInputGuardrail(
+			"policy",
+			func(context.Context, agent.InputGuardrailInfo) error {
+				return errors.New("rejected")
+			},
+		),
+	))
+	require.NoError(t, err)
+
+	result, err := h.Prompt(t.Context(), "do not retain")
+	require.ErrorIs(t, err, agent.ErrGuardrail)
+	require.NotNil(t, result)
+	assert.NotEmpty(t, result.RunID)
+	assert.Empty(t, sess.Entries())
+	assert.Empty(t, model.Requests())
+	assert.Equal(t, harness.PhaseIdle, h.Phase())
+}
+
+func TestHarnessPromptStopsWhenPromptPersistenceFails(t *testing.T) {
+	t.Parallel()
+
+	sess, err := harness.NewSession(rejectingAppendStore{})
+	require.NoError(t, err)
+
+	model := newScriptedModel("m", textResponse("must not run", 10))
+	h, err := harness.New(model, sess)
+	require.NoError(t, err)
+
+	_, err = h.Prompt(t.Context(), "cannot persist")
+	require.ErrorIs(t, err, errRejectedAppend)
+	assert.Empty(t, model.Requests())
+	assert.Empty(t, sess.Entries())
+	assert.Equal(t, harness.PhaseIdle, h.Phase())
+}
+
+func TestHarnessPromptStreamEarlyBreakCleansUp(t *testing.T) {
+	t.Parallel()
+
+	model := newScriptedModel("m", textResponse("provisional", 10))
+	sess := buildSession(t)
+	h, err := harness.New(model, sess)
+	require.NoError(t, err)
+
+	for ev, streamErr := range h.PromptStream(t.Context(), "go") {
+		require.NoError(t, streamErr)
+
+		if ev.Type == agent.EventDelta && ev.Delta.Type == ai.StreamTextDelta {
+			break
+		}
+	}
+
+	assert.Equal(t, harness.PhaseIdle, h.Phase())
+	require.ErrorIs(t, h.Cancel(), harness.ErrIdle)
+
+	entries := sess.Entries()
+	require.Len(t, entries, 1)
+	assert.Equal(t, ai.RoleUser, entries[0].Message.Role)
+
+	text, ok := entries[0].Message.Parts[0].(ai.TextPart)
+	require.True(t, ok)
+	assert.Equal(t, "go", text.Text)
+}
+
+func TestHarnessCancelActivePrompt(t *testing.T) {
+	t.Parallel()
+
+	model := newBlockingModel()
+	sess := buildSession(t)
+	h, err := harness.New(model, sess)
+	require.NoError(t, err)
+
+	done := make(chan error, 1)
+
+	go func() {
+		_, promptErr := h.Prompt(context.Background(), "wait")
+		done <- promptErr
+	}()
+
+	<-model.started
+	require.NoError(t, h.Cancel())
+	require.ErrorIs(t, <-done, context.Canceled)
+	assert.Equal(t, harness.PhaseIdle, h.Phase())
+	require.ErrorIs(t, h.Cancel(), harness.ErrIdle)
+	require.Len(t, sess.Entries(), 1)
+}
+
+func TestHarnessPromptStreamCallerCancellation(t *testing.T) {
+	t.Parallel()
+
+	model := newBlockingModel()
+	sess := buildSession(t)
+	h, err := harness.New(model, sess)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+
+	go func() {
+		var streamErr error
+
+		for _, err := range h.PromptStream(ctx, "wait") {
+			if err != nil {
+				streamErr = err
+			}
+		}
+
+		done <- streamErr
+	}()
+
+	<-model.started
+	cancel()
+	require.ErrorIs(t, <-done, context.Canceled)
+	assert.Equal(t, harness.PhaseIdle, h.Phase())
+}
+
 func TestHarnessOnEventForwarding(t *testing.T) {
 	t.Parallel()
 
@@ -387,4 +627,49 @@ func TestHarnessSaveOnRunError(t *testing.T) {
 	entries := sess.Entries()
 	require.Len(t, entries, 3)
 	assert.Equal(t, harness.PhaseIdle, h.Phase())
+}
+
+type blockingModel struct {
+	started chan struct{}
+	once    sync.Once
+}
+
+func newBlockingModel() *blockingModel {
+	return &blockingModel{started: make(chan struct{})}
+}
+
+func (m *blockingModel) Generate(ctx context.Context, _ ai.Request) (*ai.Response, error) {
+	m.once.Do(func() { close(m.started) })
+	<-ctx.Done()
+
+	return nil, ctx.Err()
+}
+
+func (m *blockingModel) Stream(ctx context.Context, req ai.Request) ai.Stream {
+	return func(yield func(ai.StreamEvent, error) bool) {
+		_, err := m.Generate(ctx, req)
+		yield(ai.StreamEvent{}, err)
+	}
+}
+
+func (*blockingModel) Provider() ai.Provider { return ai.Provider("blocking") }
+func (*blockingModel) ModelID() string       { return "blocking-1" }
+func (*blockingModel) Capabilities() ai.Capabilities {
+	return ai.Capabilities{Text: true}
+}
+
+var errRejectedAppend = errors.New("store rejected append")
+
+type rejectingAppendStore struct{}
+
+func (rejectingAppendStore) Metadata() harness.Metadata {
+	return harness.Metadata{ID: "rejecting"}
+}
+
+func (rejectingAppendStore) Append(harness.Entry) error {
+	return errRejectedAppend
+}
+
+func (rejectingAppendStore) Entries() ([]harness.Entry, error) {
+	return nil, nil
 }

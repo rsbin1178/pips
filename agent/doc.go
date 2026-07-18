@@ -32,17 +32,22 @@
 //
 // A [WithBeforeTool] gate intercepts calls before execution: deny with a
 // reason the model sees, or pause the run for out-of-band approval and
-// resume it later via [Session.ResolvePending]. [WithAfterTool] inspects and
-// overrides executed results; [WithTransformContext] reshapes what each
-// model call sees (the context-compaction injection point); and
-// [WithPrepareTurn] swaps the model or commits a history rewrite between
-// turns.
+// resume it later via [Session.ResolveToolCalls] or [Session.ResolvePending].
+// [WithInputGuardrail] and [WithOutputGuardrail] validate conversation
+// boundaries, while [WithAfterTool] inspects and overrides executed results.
+// [WithTransformContext] reshapes what each model call sees (the
+// context-compaction injection point), and [WithPrepareTurn] swaps the model
+// or commits a history rewrite between turns.
 //
 // A running loop can be redirected without restarting: [Session.Steer]
 // injects messages before the next model call, and [Session.FollowUp] queues
 // work for after the model would otherwise finish. [AsTool] turns any agent
 // into another agent's tool for sub-agent delegation, and a tool returning
 // [ErrTerminate] ends the run from inside a tool batch.
+//
+// [WithName] labels an agent. Every event and result carries [RunMetadata];
+// nested agents inherit a parent run ID through context, and tools can read
+// the current identity with [RunMetadataFromContext].
 //
 // The package has no third-party runtime dependencies.
 package agent

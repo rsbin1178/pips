@@ -10,9 +10,21 @@ var (
 	ErrRunActive = errors.New("agent: session already has an active run")
 	// ErrPendingToolCalls means the session tail contains tool calls that have
 	// no results yet (a previous run stopped with [StopPaused], or a stream
-	// was abandoned mid-turn). Resolve them with [Session.ResolvePending]
-	// before starting another run.
+	// was abandoned mid-turn). Resolve them with [Session.ResolveToolCalls] or
+	// [Session.ResolvePending] before starting another run.
 	ErrPendingToolCalls = errors.New("agent: session has unresolved tool calls")
+	// ErrToolCallNotPending means a supplied tool resolution references a call
+	// that is not currently awaiting a result.
+	ErrToolCallNotPending = errors.New("agent: tool call is not pending")
+	// ErrInvalidToolResolution means a supplied resolution has an empty or
+	// duplicate tool-call ID.
+	ErrInvalidToolResolution = errors.New("agent: invalid tool resolution")
+	// ErrGuardrail classifies input and output validation failures. Extract a
+	// [GuardrailError] with [errors.As] for the phase, name, and cause.
+	ErrGuardrail = errors.New("agent: guardrail rejected the run")
+	// ErrSubagentPaused means an [AsTool] child requested durable approval,
+	// which the tool result contract cannot preserve across invocations.
+	ErrSubagentPaused = errors.New("agent: subagent paused with pending tool calls")
 	// ErrTerminate is a control sentinel (in the spirit of [io.EOF]) a tool
 	// returns alongside its parts to ask the run to stop after the current
 	// tool batch:

@@ -3,11 +3,21 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"sync"
 
 	"github.com/rsbin/pips/ai"
 )
+
+// ToolResolution supplies an out-of-band result for one pending tool call.
+// Content is returned to the model; IsError marks a rejection or failed
+// approval as a tool error rather than a run error.
+type ToolResolution struct {
+	ToolCallID string
+	Content    []ai.Part
+	IsError    bool
+}
 
 // Session holds the conversation state an agent runs against: the message
 // history and the token usage accumulated across runs. It is safe for
@@ -204,7 +214,77 @@ func (s *Session) pendingLocked() []ai.ToolCallPart {
 	return nil
 }
 
-// ResolvePending answers the session's pending tool calls: fn is invoked for
+// ResolveToolCalls answers any subset of the session's pending tool calls.
+// Resolutions are validated atomically and appended in the original call
+// order, regardless of argument order. Calls omitted from resolutions remain
+// pending and survive session serialization. It fails with [ErrRunActive]
+// during a run, [ErrInvalidToolResolution] for empty/duplicate IDs, or
+// [ErrToolCallNotPending] for a stale/unknown ID. An empty resolution list is
+// a no-op.
+func (s *Session) ResolveToolCalls(resolutions ...ToolResolution) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.running {
+		return ErrRunActive
+	}
+
+	if len(resolutions) == 0 {
+		return nil
+	}
+
+	pending := s.pendingLocked()
+	byID := make(map[string]ToolResolution, len(resolutions))
+
+	for _, resolution := range resolutions {
+		if resolution.ToolCallID == "" {
+			return fmt.Errorf("%w: empty tool-call ID", ErrInvalidToolResolution)
+		}
+
+		if _, duplicate := byID[resolution.ToolCallID]; duplicate {
+			return fmt.Errorf(
+				"%w: duplicate tool-call ID %q",
+				ErrInvalidToolResolution,
+				resolution.ToolCallID,
+			)
+		}
+
+		byID[resolution.ToolCallID] = resolution
+	}
+
+	pendingByID := make(map[string]ai.ToolCallPart, len(pending))
+	for _, call := range pending {
+		pendingByID[call.ID] = call
+	}
+
+	for id := range byID {
+		if _, ok := pendingByID[id]; !ok {
+			return fmt.Errorf("%w: %s", ErrToolCallNotPending, id)
+		}
+	}
+
+	parts := make([]ai.Part, 0, len(resolutions))
+
+	for _, call := range pending {
+		resolution, ok := byID[call.ID]
+		if !ok {
+			continue
+		}
+
+		parts = append(parts, ai.ToolResultPart{
+			ToolCallID: call.ID,
+			Name:       call.Name,
+			Content:    resolution.Content,
+			IsError:    resolution.IsError,
+		})
+	}
+
+	s.messages = append(s.messages, ai.Message{Role: ai.RoleTool, Parts: parts})
+
+	return nil
+}
+
+// ResolvePending answers all of the session's pending tool calls: fn is invoked for
 // each call in order, and the outcomes are appended as a single tool-result
 // message. An fn error becomes an error tool result carrying the error text
 // (return an error to reject a call), so the model learns the outcome either
@@ -225,25 +305,24 @@ func (s *Session) ResolvePending(ctx context.Context, fn func(ctx context.Contex
 		return nil
 	}
 
-	parts := make([]ai.Part, 0, len(pending))
+	resolutions := make([]ToolResolution, 0, len(pending))
 
 	for _, call := range pending {
-		result := ai.ToolResultPart{ToolCallID: call.ID, Name: call.Name}
-
 		content, err := fn(ctx, call)
 		if err != nil {
-			result.Content = TextResult(err.Error())
-			result.IsError = true
-		} else {
-			result.Content = content
+			resolutions = append(resolutions, ToolResolution{
+				ToolCallID: call.ID,
+				Content:    TextResult(err.Error()),
+				IsError:    true,
+			})
+
+			continue
 		}
 
-		parts = append(parts, result)
+		resolutions = append(resolutions, ToolResolution{ToolCallID: call.ID, Content: content})
 	}
 
-	s.Append(ai.Message{Role: ai.RoleTool, Parts: parts})
-
-	return nil
+	return s.ResolveToolCalls(resolutions...)
 }
 
 // begin marks the session as running after checking preconditions.
