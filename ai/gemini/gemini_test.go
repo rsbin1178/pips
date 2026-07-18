@@ -298,3 +298,32 @@ func TestCountTokens(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 33, n)
 }
+
+type weatherOut struct {
+	Temp float64 `json:"temp"`
+}
+
+// TestGenerateTypedThroughGenerateContent covers AC6 for Gemini: responseJson
+// output decodes into a typed value with the derived schema on the wire.
+func TestGenerateTypedThroughGenerateContent(t *testing.T) {
+	t.Parallel()
+
+	var captured map[string]any
+
+	model := newTestModel(t, func(w http.ResponseWriter, r *http.Request) {
+		assert.NoError(t, json.NewDecoder(r.Body).Decode(&captured))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"{\"temp\":21.5}"}]},"finishReason":"STOP"}],"responseId":"r9"}`))
+	})
+
+	got, resp, err := ai.GenerateTyped[weatherOut](t.Context(), model, ai.Request{
+		Messages: []ai.Message{ai.UserText("weather")},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.InDelta(t, 21.5, got.Temp, 1e-9)
+
+	gc := as[map[string]any](t, captured["generationConfig"])
+	assert.Equal(t, "application/json", gc["responseMimeType"])
+	assert.Contains(t, gc, "responseSchema")
+}
