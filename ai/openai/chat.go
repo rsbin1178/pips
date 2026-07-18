@@ -38,14 +38,14 @@ func (m *Model) generateChat(ctx context.Context, req ai.Request) (*ai.Response,
 
 	var parsed chatResponse
 
-	raw, err := m.client.PostJSON(ctx, chatPath, m.authHeaders(), body, &parsed, decodeError)
+	raw, err := m.client.PostJSON(ctx, chatPath, m.authHeaders(), body, &parsed, m.decodeError)
 	if err != nil {
-		return nil, fmt.Errorf("openai: chat completions: %w", err)
+		return nil, fmt.Errorf("%s: chat completions: %w", m.label(), err)
 	}
 
-	resp, err := responseFromChat(parsed, raw)
+	resp, err := responseFromChat(parsed, raw, m.provider)
 	if err != nil {
-		return nil, fmt.Errorf("openai: chat completions: %w", err)
+		return nil, fmt.Errorf("%s: chat completions: %w", m.label(), err)
 	}
 
 	return resp, nil
@@ -59,6 +59,7 @@ func (m *Model) streamChat(ctx context.Context, req ai.Request) ai.Stream {
 // chatStreamState tracks what has been emitted so the SSE chunk sequence
 // becomes a well-formed ai.Stream (start → deltas → tool ends → end).
 type chatStreamState struct {
+	provider  ai.Provider
 	startSent bool
 	endSent   bool
 	finish    ai.FinishReason
@@ -69,12 +70,12 @@ type chatStreamState struct {
 
 // emitChatStream drives the Chat Completions SSE dialect: JSON chunks under
 // "data:" lines, terminated by a [DONE] sentinel.
-func emitChatStream(events eventSource, yield func(ai.StreamEvent, error) bool) {
-	state := &chatStreamState{toolOpen: make(map[int]bool)}
+func emitChatStream(provider ai.Provider, events eventSource, yield func(ai.StreamEvent, error) bool) {
+	state := &chatStreamState{provider: provider, toolOpen: make(map[int]bool)}
 
 	for event, err := range events {
 		if err != nil {
-			yield(ai.StreamEvent{}, fmt.Errorf("openai: chat completions stream: %w", err))
+			yield(ai.StreamEvent{}, fmt.Errorf("%s: chat completions stream: %w", provider, err))
 			return
 		}
 
@@ -85,7 +86,7 @@ func emitChatStream(events eventSource, yield func(ai.StreamEvent, error) bool) 
 
 		var chunk chatResponse
 		if err := jsonx.Unmarshal([]byte(event.Data), &chunk); err != nil {
-			yield(ai.StreamEvent{}, fmt.Errorf("openai: decoding stream chunk: %w", err))
+			yield(ai.StreamEvent{}, fmt.Errorf("%s: decoding stream chunk: %w", provider, err))
 			return
 		}
 
@@ -106,7 +107,12 @@ func (s *chatStreamState) emitChunk(chunk chatResponse, yield func(ai.StreamEven
 	if !s.startSent {
 		s.startSent = true
 
-		if !yield(ai.StreamEvent{Type: ai.StreamMessageStart, ID: chunk.ID, Model: chunk.Model}, nil) {
+		if !yield(ai.StreamEvent{
+			Type:     ai.StreamMessageStart,
+			Provider: s.provider,
+			ID:       chunk.ID,
+			Model:    chunk.Model,
+		}, nil) {
 			return false
 		}
 	}
@@ -135,6 +141,10 @@ func (s *chatStreamState) emitChunk(chunk chatResponse, yield func(ai.StreamEven
 func (s *chatStreamState) emitDelta(delta chatChoiceMessage, yield func(ai.StreamEvent, error) bool) bool {
 	if delta.ReasoningContent != "" {
 		if !yield(ai.StreamEvent{Type: ai.StreamReasoningDelta, Text: delta.ReasoningContent}, nil) {
+			return false
+		}
+	} else if delta.Reasoning != "" {
+		if !yield(ai.StreamEvent{Type: ai.StreamReasoningDelta, Text: delta.Reasoning}, nil) {
 			return false
 		}
 	}

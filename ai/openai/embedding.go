@@ -25,7 +25,7 @@ func NewEmbeddingModel(model string, opts ...Option) *EmbeddingModel {
 }
 
 // Provider implements ai.EmbeddingModel.
-func (m *EmbeddingModel) Provider() ai.Provider { return ai.ProviderOpenAI }
+func (m *EmbeddingModel) Provider() ai.Provider { return m.model.provider }
 
 // ModelID implements ai.EmbeddingModel.
 func (m *EmbeddingModel) ModelID() string { return m.model.model }
@@ -59,9 +59,9 @@ func (m *EmbeddingModel) Embed(ctx context.Context, req ai.EmbeddingRequest) (*a
 
 	var parsed embeddingResponse
 
-	raw, err := m.model.client.PostJSON(ctx, embeddingsPath, m.model.authHeaders(), body, &parsed, decodeError)
+	raw, err := m.model.client.PostJSON(ctx, embeddingsPath, m.model.authHeaders(), body, &parsed, m.model.decodeError)
 	if err != nil {
-		return nil, fmt.Errorf("openai: embeddings: %w", err)
+		return nil, fmt.Errorf("%s: embeddings: %w", m.model.label(), err)
 	}
 
 	out := &ai.EmbeddingResponse{

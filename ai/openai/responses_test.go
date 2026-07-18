@@ -165,6 +165,32 @@ func TestResponsesVisionAndToolWireFormat(t *testing.T) {
 	assert.Equal(t, "get_weather", calls[0].Name)
 }
 
+func TestResponsesFileReferencesWireFormat(t *testing.T) {
+	t.Parallel()
+
+	var captured map[string]any
+
+	model := newResponsesModel(t, serveResponsesJSON(t, responsesTextResponse, &captured))
+
+	_, err := model.Generate(t.Context(), ai.Request{Messages: []ai.Message{ai.User(
+		ai.FileID("uploaded.pdf", "application/pdf", "file_123"),
+		ai.FileURL("remote.pdf", "application/pdf", "https://example.com/remote.pdf"),
+		ai.FileData("inline.pdf", "application/pdf", []byte("%PDF")),
+	)}})
+	require.NoError(t, err)
+
+	input := as[[]any](t, captured["input"])
+	content := as[[]any](t, as[map[string]any](t, input[0])["content"])
+	require.Len(t, content, 3)
+	assert.Equal(t, map[string]any{"type": "input_file", "file_id": "file_123"}, content[0])
+	assert.Equal(t, map[string]any{"type": "input_file", "file_url": "https://example.com/remote.pdf"}, content[1])
+	assert.Equal(t, map[string]any{
+		"type":      "input_file",
+		"filename":  "inline.pdf",
+		"file_data": "data:application/pdf;base64,JVBERg==",
+	}, content[2])
+}
+
 func TestResponsesToolResultHistoryWireFormat(t *testing.T) {
 	t.Parallel()
 
@@ -252,6 +278,40 @@ func TestResponsesStreamToolCall(t *testing.T) {
 	assert.Equal(t, "call_a", calls[0].ID)
 	assert.Equal(t, "get_weather", calls[0].Name)
 	assert.JSONEq(t, `{"city":"Paris"}`, string(calls[0].Args))
+}
+
+func TestResponsesStreamPreservesEncryptedReasoning(t *testing.T) {
+	t.Parallel()
+
+	const stream = `event: response.created
+data: {"type":"response.created","response":{"id":"resp_r1","model":"gpt-5","status":"in_progress"}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1"}}
+
+event: response.reasoning_summary_text.delta
+data: {"type":"response.reasoning_summary_text.delta","output_index":0,"delta":"checking"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_1","encrypted_content":"encrypted-state"}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","output_index":1,"delta":"done"}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_r1","model":"gpt-5","status":"completed","output":[],"usage":{"input_tokens":4,"output_tokens":5}}}
+
+`
+
+	model := newResponsesModel(t, serveSSE(t, stream))
+	resp, err := ai.Collect(model.Stream(t.Context(), ai.Request{Messages: []ai.Message{ai.UserText("check")}}))
+	require.NoError(t, err)
+	require.Len(t, resp.Message.Parts, 2)
+
+	reasoning := as[ai.ReasoningPart](t, resp.Message.Parts[0])
+	assert.Equal(t, "checking", reasoning.Text)
+	assert.NotEmpty(t, reasoning.Signature)
+	assert.Equal(t, ai.TextPart{Text: "done"}, resp.Message.Parts[1])
 }
 
 // TestAPIAutoRouting verifies AC3's routing half: reasoning-family models go

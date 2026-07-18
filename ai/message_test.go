@@ -27,6 +27,8 @@ func TestMessageJSONRoundTrip(t *testing.T) {
 				ai.ImageURL("https://example.com/cat.png"),
 				ai.ImageData("image/png", []byte{0x89, 0x50, 0x4e, 0x47}),
 				ai.FileData("report.pdf", "application/pdf", []byte("%PDF-1.7")),
+				ai.FileURL("audio.mp3", "audio/mpeg", "https://example.com/audio.mp3"),
+				ai.FileID("manual.pdf", "application/pdf", "file_123"),
 			),
 		},
 		{
@@ -92,4 +94,12 @@ func TestMessageUnmarshalUnknownPart(t *testing.T) {
 	err := json.Unmarshal([]byte(`{"role":"user","parts":[{"type":"bogus"}]}`), &m)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "bogus")
+}
+
+func TestMediaSourceKinds(t *testing.T) {
+	t.Parallel()
+
+	assert.True(t, ai.FileURL("x", "text/plain", "https://example.com/x").Source.IsURL())
+	assert.True(t, ai.FileID("x", "text/plain", "file_x").Source.IsID())
+	assert.False(t, ai.FileData("x", "text/plain", []byte("x")).Source.IsURL())
 }

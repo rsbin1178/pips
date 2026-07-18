@@ -12,7 +12,7 @@ import (
 // chatRequestFrom translates a portable request into the Chat Completions
 // wire shape.
 func (m *Model) chatRequestFrom(req ai.Request, stream bool) (any, error) {
-	messages, err := chatMessagesFrom(req)
+	messages, err := chatMessagesFrom(req, m.compat, m.label())
 	if err != nil {
 		return nil, err
 	}
@@ -28,51 +28,104 @@ func (m *Model) chatRequestFrom(req ai.Request, stream bool) (any, error) {
 		Stream:      stream,
 	}
 
-	if m.compat {
+	switch m.compat.resolvedMaxTokensField() {
+	case MaxTokensFieldLegacy:
 		out.MaxTokens = req.MaxTokens
-	} else {
+	case MaxTokensFieldCompletion:
 		out.MaxCompletionTokens = req.MaxTokens
+	default:
+		return nil, fmt.Errorf("%s: unsupported max-token field %q", m.label(), m.compat.MaxTokensField)
 	}
 
-	if stream && !m.compat {
-		out.StreamOptions = &chatStreamOptions{IncludeUsage: true}
+	if stream {
+		switch m.compat.resolvedStreamUsage() {
+		case StreamUsageInclude:
+			out.StreamOptions = &chatStreamOptions{IncludeUsage: true}
+		case StreamUsageOmit:
+		default:
+			return nil, fmt.Errorf("%s: unsupported stream-usage mode %q", m.label(), m.compat.StreamUsage)
+		}
 	}
 
 	if rf := req.ResponseFormat; rf != nil {
-		name := rf.Name
-		if name == "" {
-			name = "output"
-		}
+		switch m.compat.resolvedStructuredOutput() {
+		case StructuredOutputJSONSchema:
+			name := rf.Name
+			if name == "" {
+				name = "output"
+			}
 
-		out.ResponseFormat = &chatResponseFormat{
-			Type: "json_schema",
-			JSONSchema: &chatJSONSchema{
-				Name:        name,
-				Description: rf.Description,
-				Schema:      rf.Schema,
-				Strict:      rf.Strict,
-			},
+			out.ResponseFormat = &chatResponseFormat{
+				Type: "json_schema",
+				JSONSchema: &chatJSONSchema{
+					Name:        name,
+					Description: rf.Description,
+					Schema:      rf.Schema,
+					Strict:      rf.Strict,
+				},
+			}
+		case StructuredOutputJSONObject:
+			out.ResponseFormat = &chatResponseFormat{Type: "json_object"}
+		case StructuredOutputOmit:
+		default:
+			return nil, fmt.Errorf("%s: unsupported structured-output mode %q", m.label(), m.compat.StructuredOutput)
 		}
 	}
 
-	if req.Reasoning != nil && req.Reasoning.Effort != "" {
-		out.ReasoningEffort = string(req.Reasoning.Effort)
+	if err := applyChatReasoning(&out, req.Reasoning, m.compat, m.label()); err != nil {
+		return nil, err
 	}
 
-	return mergeExtraFields(out, requestOptions(req).ExtraFields)
+	return mergeExtraFields(out, requestOptions(req, m.provider).ExtraFields)
+}
+
+func applyChatReasoning(out *chatRequest, reasoning *ai.ReasoningConfig, compat Compatibility, label string) error {
+	if reasoning == nil {
+		return nil
+	}
+
+	effort := string(reasoning.Effort)
+
+	switch compat.resolvedChatReasoning() {
+	case ChatReasoningEffort:
+		out.ReasoningEffort = effort
+	case ChatReasoningObject:
+		if effort != "" {
+			out.Reasoning = &chatReasoning{Effort: effort}
+		}
+	case ChatReasoningDeepSeek:
+		out.Thinking = &chatThinking{Type: "enabled"}
+		if effort != "" {
+			out.ReasoningEffort = deepSeekReasoningEffort(reasoning.Effort)
+		}
+	case ChatReasoningOmit:
+	default:
+		return fmt.Errorf("%s: unsupported chat-reasoning format %q", label, compat.ChatReasoning)
+	}
+
+	return nil
+}
+
+func deepSeekReasoningEffort(effort ai.ReasoningEffort) string {
+	switch effort {
+	case ai.ReasoningLow, ai.ReasoningMedium, ai.ReasoningHigh:
+		return "high"
+	default:
+		return string(effort)
+	}
 }
 
 // chatMessagesFrom flattens the conversation into wire messages. The system
 // prompt becomes a leading system message; each tool result becomes its own
 // role:"tool" message, as the API requires.
-func chatMessagesFrom(req ai.Request) ([]chatMessage, error) {
+func chatMessagesFrom(req ai.Request, compat Compatibility, label string) ([]chatMessage, error) {
 	out := make([]chatMessage, 0, len(req.Messages)+1)
 	if req.System != "" {
 		out = append(out, chatMessage{Role: "system", Content: req.System})
 	}
 
 	for _, msg := range req.Messages {
-		converted, err := chatMessageFrom(msg)
+		converted, err := chatMessageFrom(msg, compat, label)
 		if err != nil {
 			return nil, err
 		}
@@ -83,7 +136,7 @@ func chatMessagesFrom(req ai.Request) ([]chatMessage, error) {
 	return out, nil
 }
 
-func chatMessageFrom(msg ai.Message) ([]chatMessage, error) {
+func chatMessageFrom(msg ai.Message, compat Compatibility, label string) ([]chatMessage, error) {
 	switch msg.Role {
 	case ai.RoleSystem:
 		return []chatMessage{{Role: "system", Content: textOf(msg.Parts)}}, nil
@@ -95,11 +148,11 @@ func chatMessageFrom(msg ai.Message) ([]chatMessage, error) {
 
 		return []chatMessage{{Role: "user", Content: content}}, nil
 	case ai.RoleAssistant:
-		return []chatMessage{chatAssistantFrom(msg)}, nil
+		return []chatMessage{chatAssistantFrom(msg, compat.ReasoningHistory)}, nil
 	case ai.RoleTool:
 		return chatToolResultsFrom(msg)
 	default:
-		return nil, fmt.Errorf("openai: unsupported message role %q", msg.Role)
+		return nil, fmt.Errorf("%s: unsupported message role %q", label, msg.Role)
 	}
 }
 
@@ -126,8 +179,13 @@ func chatContentFrom(parts []ai.Part) (any, error) {
 
 			out = append(out, chatContentPart{Type: "image_url", ImageURL: &chatImageURL{URL: url}})
 		case ai.FilePart:
+			if p.Source.IsID() {
+				out = append(out, chatContentPart{Type: "file", File: &chatFile{FileID: p.Source.ID}})
+				continue
+			}
+
 			if p.Source.IsURL() {
-				return nil, fmt.Errorf("openai: file parts require inline data, got URL %q: %w", p.Source.URL, ai.ErrUnsupported)
+				return nil, fmt.Errorf("openai: Chat Completions file parts do not accept URL %q: %w", p.Source.URL, ai.ErrUnsupported)
 			}
 
 			out = append(out, chatContentPart{Type: "file", File: &chatFile{
@@ -160,10 +218,9 @@ func dataURL(src ai.MediaSource) string {
 	return "data:" + src.MIMEType + ";base64," + base64.StdEncoding.EncodeToString(src.Data)
 }
 
-// chatAssistantFrom renders a prior assistant turn: text joins into content,
-// tool calls carry over, reasoning parts are dropped (the API does not accept
-// reasoning input).
-func chatAssistantFrom(msg ai.Message) chatMessage {
+// chatAssistantFrom renders a prior assistant turn. OpenAI drops reasoning;
+// compatible providers may require it on a provider-specific history field.
+func chatAssistantFrom(msg ai.Message, reasoningField ReasoningHistoryField) chatMessage {
 	out := chatMessage{Role: "assistant"}
 
 	if text := textOf(msg.Parts); text != "" {
@@ -171,13 +228,21 @@ func chatAssistantFrom(msg ai.Message) chatMessage {
 	}
 
 	for _, part := range msg.Parts {
-		if call, ok := part.(ai.ToolCallPart); ok {
+		switch p := part.(type) {
+		case ai.ReasoningPart:
+			switch reasoningField {
+			case ReasoningHistoryContent:
+				out.ReasoningContent += p.Text
+			case ReasoningHistoryReasoning:
+				out.Reasoning += p.Text
+			}
+		case ai.ToolCallPart:
 			out.ToolCalls = append(out.ToolCalls, chatToolCall{
-				ID:   call.ID,
+				ID:   p.ID,
 				Type: typeFunction,
 				Function: chatFunctionCall{
-					Name:      call.Name,
-					Arguments: string(call.Args),
+					Name:      p.Name,
+					Arguments: string(p.Args),
 				},
 			})
 		}
@@ -280,10 +345,10 @@ func chatToolChoiceFrom(choice ai.ToolChoice) any {
 
 // responseFromChat translates a Chat Completions response body into the
 // portable shape.
-func responseFromChat(body chatResponse, raw []byte) (*ai.Response, error) {
+func responseFromChat(body chatResponse, raw []byte, provider ai.Provider) (*ai.Response, error) {
 	if len(body.Choices) == 0 {
 		return nil, &ai.Error{
-			Provider: ai.ProviderOpenAI,
+			Provider: provider,
 			Message:  "response contained no choices",
 			Raw:      raw,
 		}
@@ -294,6 +359,8 @@ func responseFromChat(body chatResponse, raw []byte) (*ai.Response, error) {
 
 	if choice.Message.ReasoningContent != "" {
 		msg.Parts = append(msg.Parts, ai.ReasoningPart{Text: choice.Message.ReasoningContent})
+	} else if choice.Message.Reasoning != "" {
+		msg.Parts = append(msg.Parts, ai.ReasoningPart{Text: choice.Message.Reasoning})
 	}
 
 	if choice.Message.Content != nil && *choice.Message.Content != "" {
@@ -311,7 +378,7 @@ func responseFromChat(body chatResponse, raw []byte) (*ai.Response, error) {
 	return &ai.Response{
 		ID:           body.ID,
 		Model:        body.Model,
-		Provider:     ai.ProviderOpenAI,
+		Provider:     provider,
 		Message:      msg,
 		FinishReason: finishReasonFromChat(choice.FinishReason),
 		Usage:        usageFromChat(body.Usage),

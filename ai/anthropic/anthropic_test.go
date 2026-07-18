@@ -53,14 +53,9 @@ const structuredResponse = `{
   "role": "assistant",
   "model": "claude-sonnet-4-5-20250929",
   "content": [
-    {
-      "type": "tool_use",
-      "id": "toolu_s1",
-      "name": "weather",
-      "input": { "temp": 21.5 }
-    }
+    { "type": "text", "text": "{\"temp\":21.5}" }
   ],
-  "stop_reason": "tool_use",
+  "stop_reason": "end_turn",
   "usage": { "input_tokens": 30, "output_tokens": 12 }
 }`
 
@@ -258,7 +253,7 @@ func TestGenerateToolResultHistoryWireFormat(t *testing.T) {
 	assert.Equal(t, "toolu_w1", result["tool_use_id"])
 }
 
-func TestGenerateStructuredOutputForcesTool(t *testing.T) {
+func TestGenerateStructuredOutputNative(t *testing.T) {
 	t.Parallel()
 
 	var captured map[string]any
@@ -274,16 +269,13 @@ func TestGenerateStructuredOutputForcesTool(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Structured output is coerced via a forced tool call.
-	tools := as[[]any](t, captured["tools"])
-	require.Len(t, tools, 1)
-	assert.Equal(t, "weather", as[map[string]any](t, tools[0])["name"])
-	choice := as[map[string]any](t, captured["tool_choice"])
-	assert.Equal(t, "tool", choice["type"])
-	assert.Equal(t, "weather", choice["name"])
+	outputConfig := as[map[string]any](t, captured["output_config"])
+	format := as[map[string]any](t, outputConfig["format"])
+	assert.Equal(t, "json_schema", format["type"])
+	schema := as[map[string]any](t, format["schema"])
+	assert.Equal(t, "object", schema["type"])
+	assert.NotContains(t, captured, "tool_choice")
 
-	// The tool_use result is unwrapped to text, and the finish reason is
-	// normalized to stop (not tool_calls).
 	assert.JSONEq(t, `{"temp":21.5}`, resp.Text())
 	assert.Equal(t, ai.FinishStop, resp.FinishReason)
 }
@@ -327,6 +319,57 @@ func TestCacheControlViaProviderOptions(t *testing.T) {
 	assert.Equal(t, "ephemeral", cc["type"])
 }
 
+func TestAutomaticCacheControlWithTTL(t *testing.T) {
+	t.Parallel()
+
+	var captured map[string]any
+
+	model := newTestModel(t, serveJSON(t, textResponse, "/v1/messages", &captured))
+
+	_, err := model.Generate(t.Context(), ai.Request{
+		Messages: []ai.Message{ai.UserText("hi")},
+		ProviderOptions: map[ai.Provider]any{
+			ai.ProviderAnthropic: anthropic.RequestOptions{
+				AutomaticCache: true,
+				CacheTTL:       anthropic.CacheTTL1Hour,
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, map[string]any{"type": "ephemeral", "ttl": "1h"}, captured["cache_control"])
+}
+
+func TestProviderFileIDWireFormat(t *testing.T) {
+	t.Parallel()
+
+	var (
+		captured map[string]any
+		beta     []string
+	)
+
+	model := newTestModel(t, func(w http.ResponseWriter, r *http.Request) {
+		beta = r.Header.Values("anthropic-beta")
+		assert.NoError(t, json.NewDecoder(r.Body).Decode(&captured))
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(textResponse))
+	})
+
+	_, err := model.Generate(t.Context(), ai.Request{Messages: []ai.Message{ai.User(
+		ai.Text("summarize"),
+		ai.FileID("report.pdf", "application/pdf", "file_123"),
+	)}})
+	require.NoError(t, err)
+
+	messages := as[[]any](t, captured["messages"])
+	content := as[[]any](t, as[map[string]any](t, messages[0])["content"])
+	document := as[map[string]any](t, content[1])
+	assert.Equal(t, "document", document["type"])
+	assert.Equal(t, map[string]any{"type": "file", "file_id": "file_123"}, document["source"])
+	assert.Contains(t, beta, "files-api-2025-04-14")
+}
+
 func TestErrorMappingOverloaded(t *testing.T) {
 	t.Parallel()
 
@@ -368,8 +411,8 @@ type weatherOut struct {
 	Temp float64 `json:"temp"`
 }
 
-// TestGenerateTypedThroughMessages covers AC6 for Anthropic: the forced-tool
-// structured output round-trips into a typed value.
+// TestGenerateTypedThroughMessages covers Anthropic native structured output
+// round-tripping into a typed value.
 func TestGenerateTypedThroughMessages(t *testing.T) {
 	t.Parallel()
 

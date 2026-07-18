@@ -1,12 +1,13 @@
 // Package anthropic implements ai.LanguageModel against Anthropic's Messages
 // API (POST /v1/messages) without the vendor SDK. It supports text, vision,
-// tool use, structured output (via a forced tool call), extended thinking,
+// tool use, native structured output, extended thinking,
 // streaming, prompt caching, and the count_tokens endpoint.
 package anthropic
 
 import (
 	"net/http"
 	"os"
+	"slices"
 
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/ai/internal/httpx"
@@ -15,6 +16,7 @@ import (
 const (
 	defaultBaseURL    = "https://api.anthropic.com/v1"
 	defaultAPIVersion = "2023-06-01"
+	filesAPIBeta      = "files-api-2025-04-14"
 	// defaultMaxTokens is sent when a request omits MaxTokens, since the
 	// Messages API requires the field.
 	defaultMaxTokens = 4096
@@ -147,10 +149,12 @@ func (m *Model) Capabilities() ai.Capabilities {
 	return ai.Capabilities{
 		Text:             true,
 		Vision:           true,
+		Documents:        true,
 		Tools:            true,
 		StructuredOutput: true,
 		Reasoning:        true,
 		PromptCaching:    true,
+		TokenCounting:    true,
 	}
 }
 
@@ -168,4 +172,44 @@ func (m *Model) authHeaders() http.Header {
 	}
 
 	return h
+}
+
+func (m *Model) requestHeaders(req ai.Request) http.Header {
+	h := m.authHeaders()
+	if requestHasFileID(req) && !slices.Contains(h.Values("anthropic-beta"), filesAPIBeta) {
+		h.Add("anthropic-beta", filesAPIBeta)
+	}
+
+	return h
+}
+
+func requestHasFileID(req ai.Request) bool {
+	for _, msg := range req.Messages {
+		if partsHaveFileID(msg.Parts) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func partsHaveFileID(parts []ai.Part) bool {
+	for _, part := range parts {
+		switch p := part.(type) {
+		case ai.ImagePart:
+			if p.Source.IsID() {
+				return true
+			}
+		case ai.FilePart:
+			if p.Source.IsID() {
+				return true
+			}
+		case ai.ToolResultPart:
+			if partsHaveFileID(p.Content) {
+				return true
+			}
+		}
+	}
+
+	return false
 }

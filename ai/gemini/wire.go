@@ -13,6 +13,7 @@ const (
 type generateRequest struct {
 	Contents          []wireContent     `json:"contents"`
 	SystemInstruction *wireContent      `json:"systemInstruction,omitempty"`
+	CachedContent     string            `json:"cachedContent,omitempty"`
 	Tools             []wireTool        `json:"tools,omitempty"`
 	ToolConfig        *wireToolConfig   `json:"toolConfig,omitempty"`
 	GenerationConfig  *generationConfig `json:"generationConfig,omitempty"`

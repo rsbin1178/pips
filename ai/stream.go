@@ -24,7 +24,8 @@ type StreamEventType string
 // one message_start; any interleaving of text_delta, reasoning_delta, and
 // tool_call_start/tool_call_delta/tool_call_end groups; one message_end.
 const (
-	// StreamMessageStart opens the response; it carries ID and Model.
+	// StreamMessageStart opens the response; it carries Provider, ID, and
+	// Model.
 	StreamMessageStart StreamEventType = "message_start"
 	// StreamTextDelta carries a fragment of answer text in Text.
 	StreamTextDelta StreamEventType = "text_delta"
@@ -49,15 +50,17 @@ const (
 type StreamEvent struct {
 	Type StreamEventType
 
-	// ID and Model are set on message_start.
-	ID    string
-	Model string
+	// Provider, ID, and Model are set on message_start.
+	Provider Provider
+	ID       string
+	Model    string
 
 	// Text is the fragment for text_delta and reasoning_delta.
 	Text string
-	// Signature carries a provider reasoning signature on reasoning_delta
-	// events (Anthropic signature_delta, Gemini thoughtSignature). It arrives
-	// with an empty Text and applies to the reasoning part being accumulated.
+	// Signature carries opaque provider continuation state on reasoning_delta
+	// events (for example Anthropic signature_delta, Gemini thoughtSignature,
+	// or an OpenAI Responses reasoning item). It may arrive with an empty Text
+	// and applies to the reasoning part being accumulated.
 	Signature string
 
 	// ToolCallIndex orders concurrent tool calls within the response; it is
@@ -122,6 +125,7 @@ func newAccumulator() *accumulator {
 func (a *accumulator) add(ev StreamEvent) {
 	switch ev.Type {
 	case StreamMessageStart:
+		a.resp.Provider = ev.Provider
 		a.resp.ID = ev.ID
 		a.resp.Model = ev.Model
 	case StreamTextDelta:

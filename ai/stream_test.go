@@ -24,7 +24,12 @@ func TestCollectTextAndUsage(t *testing.T) {
 	t.Parallel()
 
 	resp, err := ai.Collect(events(
-		ai.StreamEvent{Type: ai.StreamMessageStart, ID: "resp_1", Model: "gpt-4o-2024-11-20"},
+		ai.StreamEvent{
+			Type:     ai.StreamMessageStart,
+			Provider: ai.ProviderGroq,
+			ID:       "resp_1",
+			Model:    "gpt-4o-2024-11-20",
+		},
 		ai.StreamEvent{Type: ai.StreamTextDelta, Text: "Hel"},
 		ai.StreamEvent{Type: ai.StreamTextDelta, Text: "lo"},
 		ai.StreamEvent{
@@ -37,6 +42,7 @@ func TestCollectTextAndUsage(t *testing.T) {
 
 	assert.Equal(t, "resp_1", resp.ID)
 	assert.Equal(t, "gpt-4o-2024-11-20", resp.Model)
+	assert.Equal(t, ai.ProviderGroq, resp.Provider)
 	assert.Equal(t, "Hello", resp.Text())
 	assert.Equal(t, ai.FinishStop, resp.FinishReason)
 	assert.Equal(t, 10, resp.Usage.InputTokens)

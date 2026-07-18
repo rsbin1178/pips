@@ -167,6 +167,54 @@ func TestGenerateVisionWireFormat(t *testing.T) {
 	assert.Equal(t, "AQID", inline["data"])
 }
 
+func TestCachedContentAndMediaURIWireFormat(t *testing.T) {
+	t.Parallel()
+
+	var captured map[string]any
+
+	model := newTestModel(t, serveJSON(t, textResponse, "/v1beta/models/gemini-2.5-flash:generateContent", &captured))
+
+	_, err := model.Generate(t.Context(), ai.Request{
+		Messages: []ai.Message{ai.User(
+			ai.Text("transcribe"),
+			ai.FileURL("audio.mp3", "audio/mpeg", "https://generativelanguage.googleapis.com/v1beta/files/audio-1"),
+		)},
+		ProviderOptions: map[ai.Provider]any{
+			ai.ProviderGemini: gemini.RequestOptions{CachedContent: "cachedContents/cache-1"},
+		},
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, "cachedContents/cache-1", captured["cachedContent"])
+	contents := as[[]any](t, captured["contents"])
+	parts := as[[]any](t, as[map[string]any](t, contents[0])["parts"])
+	fileData := as[map[string]any](t, as[map[string]any](t, parts[1])["fileData"])
+	assert.Equal(t, "audio/mpeg", fileData["mimeType"])
+	assert.Equal(t, "https://generativelanguage.googleapis.com/v1beta/files/audio-1", fileData["fileUri"])
+}
+
+func TestProviderFileIDIsRejected(t *testing.T) {
+	t.Parallel()
+
+	model := gemini.New("gemini-2.5-flash", gemini.WithAPIKey("key"))
+
+	_, err := model.Generate(t.Context(), ai.Request{Messages: []ai.Message{ai.User(
+		ai.FileID("audio.mp3", "audio/mpeg", "file_123"),
+	)}})
+	require.ErrorIs(t, err, ai.ErrUnsupported)
+}
+
+func TestCapabilities(t *testing.T) {
+	t.Parallel()
+
+	caps := gemini.New("gemini-2.5-flash", gemini.WithAPIKey("key")).Capabilities()
+	assert.True(t, caps.Documents)
+	assert.True(t, caps.AudioInput)
+	assert.True(t, caps.VideoInput)
+	assert.True(t, caps.PromptCaching)
+	assert.True(t, caps.TokenCounting)
+}
+
 func TestGenerateToolsSynthesizesID(t *testing.T) {
 	t.Parallel()
 

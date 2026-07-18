@@ -25,7 +25,7 @@ func NewImageModel(model string, opts ...Option) *ImageModel {
 }
 
 // Provider implements ai.ImageModel.
-func (m *ImageModel) Provider() ai.Provider { return ai.ProviderOpenAI }
+func (m *ImageModel) Provider() ai.Provider { return m.model.provider }
 
 // ModelID implements ai.ImageModel.
 func (m *ImageModel) ModelID() string { return m.model.model }
@@ -58,16 +58,16 @@ func (m *ImageModel) GenerateImages(ctx context.Context, req ai.ImageRequest) (*
 		N:       req.N,
 		Size:    req.Size,
 		Quality: req.Quality,
-	}, imageOptions(req).ExtraFields)
+	}, imageOptions(req, m.model.provider).ExtraFields)
 	if err != nil {
 		return nil, err
 	}
 
 	var parsed imageResponse
 
-	raw, err := m.model.client.PostJSON(ctx, imagesPath, m.model.authHeaders(), body, &parsed, decodeError)
+	raw, err := m.model.client.PostJSON(ctx, imagesPath, m.model.authHeaders(), body, &parsed, m.model.decodeError)
 	if err != nil {
-		return nil, fmt.Errorf("openai: images: %w", err)
+		return nil, fmt.Errorf("%s: images: %w", m.model.label(), err)
 	}
 
 	out := &ai.ImageResponse{Raw: raw}
@@ -95,10 +95,18 @@ type ImageOptions struct {
 	ExtraFields map[string]any
 }
 
-func imageOptions(req ai.ImageRequest) ImageOptions {
-	if raw, ok := req.ProviderOptions[ai.ProviderOpenAI]; ok {
+func imageOptions(req ai.ImageRequest, provider ai.Provider) ImageOptions {
+	if raw, ok := req.ProviderOptions[provider]; ok {
 		if opts, ok := raw.(ImageOptions); ok {
 			return opts
+		}
+	}
+
+	if provider != ai.ProviderOpenAI {
+		if raw, ok := req.ProviderOptions[ai.ProviderOpenAI]; ok {
+			if opts, ok := raw.(ImageOptions); ok {
+				return opts
+			}
 		}
 	}
 

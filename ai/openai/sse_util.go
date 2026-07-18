@@ -25,7 +25,7 @@ func newSSEParser(r io.Reader, maxLineSize int) eventSource {
 }
 
 // streamEmitter maps a provider SSE event iterator onto ai.StreamEvents.
-type streamEmitter func(eventSource, func(ai.StreamEvent, error) bool)
+type streamEmitter func(ai.Provider, eventSource, func(ai.StreamEvent, error) bool)
 
 // runStream is the shared streaming skeleton for both API surfaces: encode the
 // request, open the SSE response, and drive the surface-specific emitter. On a
@@ -37,13 +37,13 @@ func (m *Model) runStream(ctx context.Context, path, label string, body any, bui
 			return
 		}
 
-		stream, err := m.client.PostStream(ctx, path, m.authHeaders(), body, decodeError)
+		stream, err := m.client.PostStream(ctx, path, m.authHeaders(), body, m.decodeError)
 		if err != nil {
-			yield(ai.StreamEvent{}, fmt.Errorf("openai: %s stream: %w", label, err))
+			yield(ai.StreamEvent{}, fmt.Errorf("%s: %s stream: %w", m.label(), label, err))
 			return
 		}
 		defer stream.Close() //nolint:errcheck // best-effort cleanup on all exit paths
 
-		emit(newSSEParser(stream, m.client.MaxStreamLineSize()), yield)
+		emit(m.provider, newSSEParser(stream, m.client.MaxStreamLineSize()), yield)
 	}
 }
