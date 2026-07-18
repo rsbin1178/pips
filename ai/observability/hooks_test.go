@@ -11,19 +11,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-type fakeModel struct {
+type recordingModel struct {
 	resp    *ai.Response
 	err     error
 	events  []ai.StreamEvent
 	lastCtx context.Context //nolint:containedctx // captured only to assert context propagation
 }
 
-func (m *fakeModel) Generate(ctx context.Context, _ ai.Request) (*ai.Response, error) {
+func (m *recordingModel) Generate(ctx context.Context, _ ai.Request) (*ai.Response, error) {
 	m.lastCtx = ctx
 	return m.resp, m.err
 }
 
-func (m *fakeModel) Stream(ctx context.Context, _ ai.Request) ai.Stream {
+func (m *recordingModel) Stream(ctx context.Context, _ ai.Request) ai.Stream {
 	m.lastCtx = ctx
 
 	return func(yield func(ai.StreamEvent, error) bool) {
@@ -40,14 +40,14 @@ func (m *fakeModel) Stream(ctx context.Context, _ ai.Request) ai.Stream {
 	}
 }
 
-func (m *fakeModel) Provider() ai.Provider         { return ai.ProviderAnthropic }
-func (m *fakeModel) ModelID() string               { return "claude-x" }
-func (m *fakeModel) Capabilities() ai.Capabilities { return ai.Capabilities{Text: true} }
+func (m *recordingModel) Provider() ai.Provider         { return ai.ProviderAnthropic }
+func (m *recordingModel) ModelID() string               { return "claude-x" }
+func (m *recordingModel) Capabilities() ai.Capabilities { return ai.Capabilities{Text: true} }
 
 func TestGenerateHooks(t *testing.T) {
 	t.Parallel()
 
-	base := &fakeModel{resp: &ai.Response{
+	base := &recordingModel{resp: &ai.Response{
 		Message:      ai.AssistantText("hi"),
 		FinishReason: ai.FinishStop,
 		Usage:        ai.Usage{InputTokens: 5, OutputTokens: 2},
@@ -89,7 +89,7 @@ type ctxKey struct{}
 func TestGenerateErrorHook(t *testing.T) {
 	t.Parallel()
 
-	base := &fakeModel{err: errors.New("boom")}
+	base := &recordingModel{err: errors.New("boom")}
 
 	var gotErr error
 
@@ -105,7 +105,7 @@ func TestGenerateErrorHook(t *testing.T) {
 func TestStreamHooks(t *testing.T) {
 	t.Parallel()
 
-	base := &fakeModel{events: []ai.StreamEvent{
+	base := &recordingModel{events: []ai.StreamEvent{
 		{Type: ai.StreamTextDelta, Text: "hi"},
 		{Type: ai.StreamMessageEnd, FinishReason: ai.FinishStop, Usage: &ai.Usage{OutputTokens: 3}},
 	}}
@@ -132,7 +132,7 @@ func TestStreamHooks(t *testing.T) {
 func TestStreamErrorHook(t *testing.T) {
 	t.Parallel()
 
-	base := &fakeModel{err: errors.New("stream boom")}
+	base := &recordingModel{err: errors.New("stream boom")}
 
 	var gotErr error
 

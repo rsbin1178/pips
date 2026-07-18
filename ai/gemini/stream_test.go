@@ -8,10 +8,22 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const textStream = `data: {"candidates":[{"content":{"role":"model","parts":[{"text":"Hel"}]},"index":0}],"modelVersion":"gemini-2.5-flash","responseId":"resp-s1"}
+
+data: {"candidates":[{"content":{"role":"model","parts":[{"text":"lo!"}]},"index":0}]}
+
+data: {"candidates":[{"content":{"role":"model","parts":[{"text":""}]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":3,"totalTokenCount":8}}
+
+`
+
+const toolsStream = `data: {"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"get_weather","args":{"city":"Paris"}}}]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":40,"candidatesTokenCount":10,"totalTokenCount":50},"modelVersion":"gemini-2.5-flash","responseId":"resp-s2"}
+
+`
+
 func TestStreamText(t *testing.T) {
 	t.Parallel()
 
-	model := newTestModel(t, serveSSE(t, "stream_text.sse"))
+	model := newTestModel(t, serveSSE(t, textStream))
 
 	resp, err := ai.Collect(model.Stream(t.Context(), ai.Request{
 		Messages: []ai.Message{ai.UserText("hi")},
@@ -28,7 +40,7 @@ func TestStreamText(t *testing.T) {
 func TestStreamToolCall(t *testing.T) {
 	t.Parallel()
 
-	model := newTestModel(t, serveSSE(t, "stream_tools.sse"))
+	model := newTestModel(t, serveSSE(t, toolsStream))
 
 	resp, err := ai.Collect(model.Stream(t.Context(), ai.Request{
 		Messages: []ai.Message{ai.UserText("weather?")},

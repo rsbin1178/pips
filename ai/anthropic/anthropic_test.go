@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/rsbin/pips/ai"
@@ -13,6 +11,58 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+const textResponse = `{
+  "id": "msg_abc123",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-sonnet-4-5-20250929",
+  "content": [
+    { "type": "text", "text": "The capital of France is Paris." }
+  ],
+  "stop_reason": "end_turn",
+  "usage": {
+    "input_tokens": 14,
+    "output_tokens": 8,
+    "cache_read_input_tokens": 4,
+    "cache_creation_input_tokens": 0
+  }
+}`
+
+const toolsResponse = `{
+  "id": "msg_tool456",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-sonnet-4-5-20250929",
+  "content": [
+    { "type": "text", "text": "Let me check the weather." },
+    {
+      "type": "tool_use",
+      "id": "toolu_w1",
+      "name": "get_weather",
+      "input": { "city": "Paris", "unit": "celsius" }
+    }
+  ],
+  "stop_reason": "tool_use",
+  "usage": { "input_tokens": 80, "output_tokens": 40 }
+}`
+
+const structuredResponse = `{
+  "id": "msg_struct789",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-sonnet-4-5-20250929",
+  "content": [
+    {
+      "type": "tool_use",
+      "id": "toolu_s1",
+      "name": "weather",
+      "input": { "temp": 21.5 }
+    }
+  ],
+  "stop_reason": "tool_use",
+  "usage": { "input_tokens": 30, "output_tokens": 12 }
+}`
 
 func newTestModel(t *testing.T, handler http.HandlerFunc, opts ...anthropic.Option) *anthropic.Model {
 	t.Helper()
@@ -30,7 +80,7 @@ func newTestModel(t *testing.T, handler http.HandlerFunc, opts ...anthropic.Opti
 	return anthropic.New("claude-sonnet-4-5", append(base, opts...)...)
 }
 
-func serveFixture(t *testing.T, name, wantPath string, captured *map[string]any) http.HandlerFunc {
+func serveJSON(t *testing.T, response, wantPath string, captured *map[string]any) http.HandlerFunc {
 	t.Helper()
 
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -42,23 +92,17 @@ func serveFixture(t *testing.T, name, wantPath string, captured *map[string]any)
 			assert.NoError(t, json.NewDecoder(r.Body).Decode(captured))
 		}
 
-		data, err := os.ReadFile(filepath.Join("testdata", name)) //nolint:gosec // fixture path from test constants
-		assert.NoError(t, err)
-
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write(data)
+		_, _ = w.Write([]byte(response))
 	}
 }
 
-func serveSSE(t *testing.T, name string) http.HandlerFunc {
+func serveSSE(t *testing.T, events string) http.HandlerFunc {
 	t.Helper()
 
 	return func(w http.ResponseWriter, _ *http.Request) {
-		data, err := os.ReadFile(filepath.Join("testdata", name)) //nolint:gosec // fixture path from test constants
-		assert.NoError(t, err)
-
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write(data)
+		_, _ = w.Write([]byte(events))
 	}
 }
 
@@ -86,7 +130,7 @@ func TestGenerateText(t *testing.T) {
 
 	var captured map[string]any
 
-	model := newTestModel(t, serveFixture(t, "text.json", "/v1/messages", &captured))
+	model := newTestModel(t, serveJSON(t, textResponse, "/v1/messages", &captured))
 
 	resp, err := model.Generate(t.Context(), ai.Request{
 		System:    "You are terse.",
@@ -115,7 +159,7 @@ func TestGenerateDefaultMaxTokens(t *testing.T) {
 
 	var captured map[string]any
 
-	model := newTestModel(t, serveFixture(t, "text.json", "/v1/messages", &captured))
+	model := newTestModel(t, serveJSON(t, textResponse, "/v1/messages", &captured))
 
 	_, err := model.Generate(t.Context(), ai.Request{Messages: []ai.Message{ai.UserText("hi")}})
 	require.NoError(t, err)
@@ -128,7 +172,7 @@ func TestGenerateVisionWireFormat(t *testing.T) {
 
 	var captured map[string]any
 
-	model := newTestModel(t, serveFixture(t, "text.json", "/v1/messages", &captured))
+	model := newTestModel(t, serveJSON(t, textResponse, "/v1/messages", &captured))
 
 	_, err := model.Generate(t.Context(), ai.Request{
 		Messages: []ai.Message{ai.User(
@@ -155,7 +199,7 @@ func TestGenerateToolsRoundTrip(t *testing.T) {
 
 	var captured map[string]any
 
-	model := newTestModel(t, serveFixture(t, "tools.json", "/v1/messages", &captured))
+	model := newTestModel(t, serveJSON(t, toolsResponse, "/v1/messages", &captured))
 
 	resp, err := model.Generate(t.Context(), ai.Request{
 		Messages: []ai.Message{ai.UserText("weather in paris?")},
@@ -186,7 +230,7 @@ func TestGenerateToolResultHistoryWireFormat(t *testing.T) {
 
 	var captured map[string]any
 
-	model := newTestModel(t, serveFixture(t, "text.json", "/v1/messages", &captured))
+	model := newTestModel(t, serveJSON(t, textResponse, "/v1/messages", &captured))
 
 	_, err := model.Generate(t.Context(), ai.Request{
 		Messages: []ai.Message{
@@ -219,7 +263,7 @@ func TestGenerateStructuredOutputForcesTool(t *testing.T) {
 
 	var captured map[string]any
 
-	model := newTestModel(t, serveFixture(t, "structured.json", "/v1/messages", &captured))
+	model := newTestModel(t, serveJSON(t, structuredResponse, "/v1/messages", &captured))
 
 	resp, err := model.Generate(t.Context(), ai.Request{
 		Messages: []ai.Message{ai.UserText("weather")},
@@ -249,7 +293,7 @@ func TestThinkingWireFormat(t *testing.T) {
 
 	var captured map[string]any
 
-	model := newTestModel(t, serveFixture(t, "text.json", "/v1/messages", &captured))
+	model := newTestModel(t, serveJSON(t, textResponse, "/v1/messages", &captured))
 
 	_, err := model.Generate(t.Context(), ai.Request{
 		Messages:  []ai.Message{ai.UserText("think")},
@@ -267,7 +311,7 @@ func TestCacheControlViaProviderOptions(t *testing.T) {
 
 	var captured map[string]any
 
-	model := newTestModel(t, serveFixture(t, "text.json", "/v1/messages", &captured))
+	model := newTestModel(t, serveJSON(t, textResponse, "/v1/messages", &captured))
 
 	_, err := model.Generate(t.Context(), ai.Request{
 		System:   "big reusable prompt",
@@ -329,7 +373,7 @@ type weatherOut struct {
 func TestGenerateTypedThroughMessages(t *testing.T) {
 	t.Parallel()
 
-	model := newTestModel(t, serveFixture(t, "structured.json", "/v1/messages", nil))
+	model := newTestModel(t, serveJSON(t, structuredResponse, "/v1/messages", nil))
 
 	got, resp, err := ai.GenerateTyped[weatherOut](t.Context(), model, ai.Request{
 		Messages: []ai.Message{ai.UserText("weather")},

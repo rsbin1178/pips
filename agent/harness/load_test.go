@@ -101,7 +101,7 @@ Review $1.`)},
 func TestWithSkillsFSReachesSystemPrompt(t *testing.T) {
 	t.Parallel()
 
-	model := newFakeModel("m", textResponse("ok", 10))
+	model := newScriptedModel("m", textResponse("ok", 10))
 	sess := buildSession(t)
 
 	h, err := harness.New(model, sess, harness.WithSkillsFS(skillFS()))
@@ -118,7 +118,7 @@ func TestWithSkillsFSReachesSystemPrompt(t *testing.T) {
 func TestWithSkillsDirLoadFailure(t *testing.T) {
 	t.Parallel()
 
-	_, err := harness.New(newFakeModel("m"), buildSession(t),
+	_, err := harness.New(newScriptedModel("m"), buildSession(t),
 		harness.WithSkillsDir(t.TempDir()+"/missing"))
 	require.Error(t, err)
 }

@@ -57,14 +57,14 @@ func TestToolFailuresBecomeErrorResults(t *testing.T) {
 			panic("boom")
 		})
 
-	model := newFakeModel(
-		reply(callResponse(
+	model := newScriptedModel(
+		respond(callResponse(
 			call("c1", "failing", `{}`),
 			call("c2", "panicking", `{}`),
 			call("c3", "ghost", `{}`),  // not registered
 			call("c4", "add", `not{j`), // undecodable arguments
 		)),
-		reply(textResponse("noted")),
+		respond(textResponse("noted")),
 	)
 
 	a, err := agent.New(model, agent.WithTools(failing, panicking, addTool()))
@@ -110,13 +110,13 @@ func TestParallelToolsRunConcurrently(t *testing.T) {
 			return strconv.Itoa(args.N), nil
 		}))
 
-	model := newFakeModel(
-		reply(callResponse(
+	model := newScriptedModel(
+		respond(callResponse(
 			call("c1", "echo", `{"n":1}`),
 			call("c2", "echo", `{"n":2}`),
 			call("c3", "echo", `{"n":3}`),
 		)),
-		reply(textResponse("done")),
+		respond(textResponse("done")),
 	)
 
 	a, err := agent.New(model, agent.WithTools(echo))
@@ -159,14 +159,14 @@ func TestSerialToolBarriers(t *testing.T) {
 			return "ok", nil
 		})
 
-	model := newFakeModel(
-		reply(callResponse(
+	model := newScriptedModel(
+		respond(callResponse(
 			call("c1", "concurrent", `{}`),
 			call("c2", "concurrent", `{}`),
 			call("c3", "serial", `{}`),
 			call("c4", "concurrent", `{}`),
 		)),
-		reply(textResponse("done")),
+		respond(textResponse("done")),
 	)
 
 	a, err := agent.New(model, agent.WithTools(concurrent, serial))
@@ -184,9 +184,9 @@ func TestSerialToolBarriers(t *testing.T) {
 func TestGateDenyFeedsReasonToModel(t *testing.T) {
 	t.Parallel()
 
-	model := newFakeModel(
-		reply(callResponse(call("c1", "add", `{"a":1,"b":2}`))),
-		reply(textResponse("understood")),
+	model := newScriptedModel(
+		respond(callResponse(call("c1", "add", `{"a":1,"b":2}`))),
+		respond(textResponse("understood")),
 	)
 
 	a, err := agent.New(model,
@@ -219,13 +219,13 @@ func TestGateDenyFeedsReasonToModel(t *testing.T) {
 func TestGatePauseAndResume(t *testing.T) {
 	t.Parallel()
 
-	model := newFakeModel(
-		reply(callResponse(
+	model := newScriptedModel(
+		respond(callResponse(
 			call("c1", "add", `{"a":1,"b":1}`),
 			call("c2", "add", `{"a":2,"b":2}`),
 			call("c3", "add", `{"a":3,"b":3}`),
 		)),
-		reply(textResponse("resumed")),
+		respond(textResponse("resumed")),
 	)
 
 	// Pause on the second call: the first executes, the rest go pending.
@@ -289,7 +289,7 @@ func TestGatePauseAndResume(t *testing.T) {
 func TestGatePauseFirstCallLeavesNoToolMessage(t *testing.T) {
 	t.Parallel()
 
-	model := newFakeModel(reply(callResponse(call("c1", "add", `{"a":1,"b":1}`))))
+	model := newScriptedModel(respond(callResponse(call("c1", "add", `{"a":1,"b":1}`))))
 
 	a, err := agent.New(model,
 		agent.WithTools(addTool()),

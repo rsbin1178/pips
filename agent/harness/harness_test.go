@@ -26,7 +26,7 @@ func addTool() agent.Tool {
 func TestHarnessPromptPersistsRun(t *testing.T) {
 	t.Parallel()
 
-	model := newFakeModel("m",
+	model := newScriptedModel("m",
 		callResponse("c1", "add", `{"a":2,"b":3}`),
 		textResponse("It is 5.", 30),
 	)
@@ -73,7 +73,7 @@ func TestHarnessResumesAcrossInstances(t *testing.T) {
 	sess, err := harness.NewSession(store)
 	require.NoError(t, err)
 
-	first := newFakeModel("m", textResponse("first answer", 10))
+	first := newScriptedModel("m", textResponse("first answer", 10))
 
 	h, err := harness.New(first, sess)
 	require.NoError(t, err)
@@ -90,7 +90,7 @@ func TestHarnessResumesAcrossInstances(t *testing.T) {
 	restored, err := harness.NewSession(reopened)
 	require.NoError(t, err)
 
-	second := newFakeModel("m", textResponse("second answer", 20))
+	second := newScriptedModel("m", textResponse("second answer", 20))
 
 	h2, err := harness.New(second, restored)
 	require.NoError(t, err)
@@ -116,8 +116,8 @@ func TestHarnessAutoCompaction(t *testing.T) {
 	appendText(t, sess, ai.RoleUser, bigText(100), nil)
 	appendText(t, sess, ai.RoleAssistant, "done", nil)
 
-	summarizer := newFakeModel("sum", textResponse("## Goal\nSummarized.", 10))
-	model := newFakeModel("m", textResponse("fresh answer", 100))
+	summarizer := newScriptedModel("sum", textResponse("## Goal\nSummarized.", 10))
+	model := newScriptedModel("m", textResponse("fresh answer", 100))
 
 	h, err := harness.New(model, sess,
 		harness.WithCompaction(harness.Settings{ContextTokens: 100_000, KeepRecentTokens: 50}),
@@ -162,7 +162,7 @@ func TestHarnessBusy(t *testing.T) {
 			return "ok", nil
 		})
 
-	model := newFakeModel("m",
+	model := newScriptedModel("m",
 		callResponse("c1", "block", `{}`),
 		textResponse("done", 10),
 	)
@@ -200,10 +200,10 @@ func TestHarnessSetModelRecordsChange(t *testing.T) {
 
 	sess := buildSession(t)
 
-	h, err := harness.New(newFakeModel("first"), sess)
+	h, err := harness.New(newScriptedModel("first"), sess)
 	require.NoError(t, err)
 
-	replacement := newFakeModel("second", textResponse("from second", 10))
+	replacement := newScriptedModel("second", textResponse("from second", 10))
 	require.NoError(t, h.SetModel(replacement))
 
 	result, err := h.Prompt(t.Context(), "hi")
@@ -218,8 +218,8 @@ func TestHarnessSetModelRecordsChange(t *testing.T) {
 func TestHarnessNavigateWithSummary(t *testing.T) {
 	t.Parallel()
 
-	model := newFakeModel("m", textResponse("branch a result", 10))
-	summarizer := newFakeModel("sum", textResponse("## What was attempted\nBranch a.", 10))
+	model := newScriptedModel("m", textResponse("branch a result", 10))
+	summarizer := newScriptedModel("sum", textResponse("## What was attempted\nBranch a.", 10))
 	sess := buildSession(t)
 
 	h, err := harness.New(model, sess, harness.WithSummaryModel(summarizer))
@@ -245,7 +245,7 @@ func TestHarnessNavigateWithSummary(t *testing.T) {
 func TestHarnessPauseAndResolve(t *testing.T) {
 	t.Parallel()
 
-	model := newFakeModel("m",
+	model := newScriptedModel("m",
 		callResponse("c1", "add", `{"a":1,"b":1}`),
 		textResponse("resumed", 10),
 	)
@@ -281,7 +281,7 @@ func TestHarnessPauseAndResolve(t *testing.T) {
 func TestHarnessOnEventForwarding(t *testing.T) {
 	t.Parallel()
 
-	model := newFakeModel("m", textResponse("hi", 10))
+	model := newScriptedModel("m", textResponse("hi", 10))
 	sess := buildSession(t)
 
 	var events []agent.EventType
@@ -301,7 +301,7 @@ func TestHarnessOnEventForwarding(t *testing.T) {
 func TestHarnessPromptTemplate(t *testing.T) {
 	t.Parallel()
 
-	model := newFakeModel("m", textResponse("done", 10))
+	model := newScriptedModel("m", textResponse("done", 10))
 	sess := buildSession(t)
 
 	h, err := harness.New(model, sess, harness.WithTemplates(
@@ -323,7 +323,7 @@ func TestHarnessPromptTemplate(t *testing.T) {
 func TestHarnessSteeringMidRun(t *testing.T) {
 	t.Parallel()
 
-	model := newFakeModel("m",
+	model := newScriptedModel("m",
 		callResponse("c1", "poke", `{}`),
 		textResponse("steered", 10),
 	)
@@ -364,7 +364,7 @@ func TestHarnessSaveOnRunError(t *testing.T) {
 	t.Parallel()
 
 	// Turn one succeeds with a tool call; turn two's model call fails by
-	// exhausting the script... the fake returns text instead, so use a
+	// exhausting the script returns text instead, so use a
 	// cancelled context after the first turn via a tool.
 	ctx, cancel := context.WithCancel(t.Context())
 
@@ -374,7 +374,7 @@ func TestHarnessSaveOnRunError(t *testing.T) {
 			return "stopping", nil
 		})
 
-	model := newFakeModel("m", callResponse("c1", "stop", `{}`))
+	model := newScriptedModel("m", callResponse("c1", "stop", `{}`))
 	sess := buildSession(t)
 
 	h, err := harness.New(model, sess, harness.WithTools(stopper))
