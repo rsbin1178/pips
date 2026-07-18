@@ -83,23 +83,23 @@ func contentFrom(msg ai.Message) (*wireContent, error) {
 			return nil, err
 		}
 
-		return &wireContent{Role: "user", Parts: parts}, nil
+		return &wireContent{Role: roleUser, Parts: parts}, nil
 	case ai.RoleAssistant:
 		parts, err := modelPartsFrom(msg.Parts)
 		if err != nil {
 			return nil, err
 		}
 
-		return &wireContent{Role: "model", Parts: parts}, nil
+		return &wireContent{Role: roleModel, Parts: parts}, nil
 	case ai.RoleTool:
 		parts, err := functionResponseParts(msg.Parts)
 		if err != nil {
 			return nil, err
 		}
 
-		return &wireContent{Role: "user", Parts: parts}, nil
+		return &wireContent{Role: roleUser, Parts: parts}, nil
 	case ai.RoleSystem:
-		return &wireContent{Role: "user", Parts: []wirePart{{Text: textOf(msg.Parts)}}}, nil
+		return &wireContent{Role: roleUser, Parts: []wirePart{{Text: textOf(msg.Parts)}}}, nil
 	default:
 		return nil, fmt.Errorf("gemini: unsupported message role %q", msg.Role)
 	}
