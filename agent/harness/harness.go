@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"sync"
 
 	"github.com/rsbin/pips/agent"
@@ -38,6 +40,7 @@ type Harness struct {
 }
 
 type hconfig struct {
+	loaders      []func(*hconfig) error
 	tools        []agent.Tool
 	system       string
 	systemFn     func(SystemContext) string
@@ -72,6 +75,68 @@ func WithSystemFunc(fn func(SystemContext) string) Option {
 // prompt (see [FormatSkillsPrompt]).
 func WithSkills(skills ...Skill) Option {
 	return func(c *hconfig) { c.skills = append(c.skills, skills...) }
+}
+
+// WithSkillsDir loads skills from a directory tree at construction time
+// (see [LoadSkills]); [New] fails when loading does.
+func WithSkillsDir(dir string) Option {
+	return func(c *hconfig) {
+		c.loaders = append(c.loaders, func(c *hconfig) error { return loadSkillsInto(c, dir, nil) })
+	}
+}
+
+// WithSkillsFS is [WithSkillsDir] for any fs.FS — embedded assets included.
+func WithSkillsFS(fsys fs.FS) Option {
+	return func(c *hconfig) {
+		c.loaders = append(c.loaders, func(c *hconfig) error { return loadSkillsInto(c, "", fsys) })
+	}
+}
+
+// WithTemplatesDir loads prompt templates from a directory at construction
+// time (see [LoadTemplates]); [New] fails when loading does.
+func WithTemplatesDir(dir string) Option {
+	return func(c *hconfig) {
+		c.loaders = append(c.loaders, func(c *hconfig) error { return loadTemplatesInto(c, "", os.DirFS(dir)) })
+	}
+}
+
+// WithTemplatesFS is [WithTemplatesDir] for any fs.FS.
+func WithTemplatesFS(fsys fs.FS) Option {
+	return func(c *hconfig) {
+		c.loaders = append(c.loaders, func(c *hconfig) error { return loadTemplatesInto(c, "", fsys) })
+	}
+}
+
+func loadSkillsInto(c *hconfig, dir string, fsys fs.FS) error {
+	var (
+		skills []Skill
+		err    error
+	)
+
+	if fsys != nil {
+		skills, err = LoadSkillsFS(fsys)
+	} else {
+		skills, err = LoadSkills(dir)
+	}
+
+	if err != nil {
+		return err
+	}
+
+	c.skills = append(c.skills, skills...)
+
+	return nil
+}
+
+func loadTemplatesInto(c *hconfig, _ string, fsys fs.FS) error {
+	templates, err := LoadTemplatesFS(fsys)
+	if err != nil {
+		return err
+	}
+
+	c.templates = append(c.templates, templates...)
+
+	return nil
 }
 
 // WithTemplates registers prompt templates for [Harness.PromptTemplate].
@@ -118,6 +183,12 @@ func New(model ai.LanguageModel, sess *Session, opts ...Option) (*Harness, error
 	h := &Harness{phase: PhaseIdle, model: model, session: sess}
 	for _, opt := range opts {
 		opt(&h.cfg)
+	}
+
+	for _, load := range h.cfg.loaders {
+		if err := load(&h.cfg); err != nil {
+			return nil, err
+		}
 	}
 
 	return h, nil
