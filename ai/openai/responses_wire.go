@@ -88,6 +88,13 @@ type responsesResponse struct {
 	Output            []responseItem       `json:"output"`
 	Usage             *responsesUsage      `json:"usage"`
 	IncompleteDetails *responsesIncomplete `json:"incomplete_details"`
+	Error             *responsesError      `json:"error"`
+}
+
+// responsesError is the error object on a failed response.
+type responsesError struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
 }
 
 type responsesIncomplete struct {
@@ -113,5 +120,7 @@ type responsesStreamEvent struct {
 	OutputIndex int                `json:"output_index"`
 	Item        *responseItem      `json:"item"`
 	Response    *responsesResponse `json:"response"`
-	Message     string             `json:"message"` // error events
+	// error events
+	Message string `json:"message"`
+	Code    string `json:"code"`
 }

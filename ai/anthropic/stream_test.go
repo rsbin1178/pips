@@ -72,4 +72,7 @@ func TestStreamErrorEvent(t *testing.T) {
 	var apiErr *ai.Error
 	require.ErrorAs(t, gotErr, &apiErr)
 	assert.Equal(t, "overloaded_error", apiErr.Type)
+	// The mid-stream error wraps the same class sentinel as the HTTP path.
+	require.ErrorIs(t, gotErr, ai.ErrOverloaded)
+	assert.True(t, ai.IsRetryable(gotErr))
 }
