@@ -35,3 +35,4 @@ go.work.sum
 
 # Local agent settings
 .claude/settings.local.json
+**/research/vendor/

@@ -23,6 +23,10 @@ const (
 	// EventToolStart announces a tool call about to be gated and executed; it
 	// carries Call.
 	EventToolStart EventType = "tool_start"
+	// EventToolUpdate carries a partial-result update published by a running
+	// tool via [ReportProgress]; it carries Call and Update. Delivery is
+	// best-effort.
+	EventToolUpdate EventType = "tool_update"
 	// EventToolEnd reports a finished tool call; it carries Call and Result
 	// (denials and synthesized failures included).
 	EventToolEnd EventType = "tool_end"
@@ -49,9 +53,11 @@ type Event struct {
 	// Message is the appended message for message events.
 	Message *ai.Message
 
-	// Call is set on tool_start and tool_end; Result on tool_end.
+	// Call is set on tool_start, tool_update, and tool_end; Result on
+	// tool_end; Update on tool_update.
 	Call   *ai.ToolCallPart
 	Result *ai.ToolResultPart
+	Update []ai.Part
 
 	// Stop is set on run_end.
 	Stop StopReason
@@ -80,4 +86,9 @@ func toolEndEvent(turn int, call ai.ToolCallPart, result ai.ToolResultPart) Even
 	c, r := call, result
 
 	return Event{Type: EventToolEnd, Turn: turn, Call: &c, Result: &r}
+}
+
+func toolUpdateEvent(turn int, call ai.ToolCallPart, update []ai.Part) Event {
+	c := call
+	return Event{Type: EventToolUpdate, Turn: turn, Call: &c, Update: update}
 }

@@ -12,6 +12,9 @@ import (
 // blocks until the run terminates cleanly (see [StopReason]) or fails; on
 // failure the returned result carries what completed before the error.
 //
+// Mid-run, [Session.Steer] injects messages before the next model call and
+// [Session.FollowUp] queues work for after the model would otherwise finish.
+//
 // Run uses [ai.LanguageModel.Generate], so retry middleware on the model is
 // fully effective. Use [Agent.Stream] for incremental output.
 func (a *Agent) Run(ctx context.Context, sess *Session, msgs ...ai.Message) (*RunResult, error) {
@@ -75,7 +78,10 @@ func (a *Agent) loop(ctx context.Context, sess *Session, msgs []ai.Message, emit
 		return nil, nil
 	}
 
-	r := &run{agent: a, sess: sess, emit: emit, cancel: cancel, streaming: streaming}
+	r := &run{agent: a, sess: sess, emit: emit, cancel: cancel, streaming: streaming, model: a.model}
+
+	// Initial steering poll: pick up messages queued while no run was active.
+	r.pending = sess.drainSteering(a.cfg.steeringMode)
 
 	for turn := 1; ; turn++ {
 		result, next, err := r.turn(ctx, turn)
@@ -93,8 +99,19 @@ type run struct {
 	cancel    context.CancelFunc
 	streaming bool
 
+	// model serves the run's calls; WithPrepareTurn may swap it mid-run.
+	model ai.LanguageModel
+	// pending holds drained queue messages awaiting injection at the next
+	// turn start.
+	pending []ai.Message
+
 	usage    ai.Usage
 	lastResp *ai.Response
+}
+
+// partial assembles the result accompanying a run error.
+func (r *run) partial(turns int) *RunResult {
+	return &RunResult{Turns: turns, Usage: r.usage, Response: r.lastResp}
 }
 
 // turn performs one model call plus its tool executions. next reports
@@ -105,13 +122,25 @@ func (r *run) turn(ctx context.Context, turn int) (result *RunResult, next bool,
 		return nil, false, nil
 	}
 
-	resp, stopped, err := r.agent.callModel(ctx, turn, r.sess.Messages(), r.emit, r.streaming)
+	if !r.inject(turn) {
+		return nil, false, nil
+	}
+
+	msgs := r.sess.Messages()
+	if r.agent.cfg.transform != nil {
+		msgs, err = r.agent.cfg.transform(ctx, msgs)
+		if err != nil {
+			return r.partial(turn - 1), false, err
+		}
+	}
+
+	resp, stopped, err := r.agent.callModel(ctx, r.model, turn, msgs, r.emit, r.streaming)
 	if stopped {
 		return nil, false, nil
 	}
 
 	if err != nil {
-		return &RunResult{Turns: turn - 1, Usage: r.usage, Response: r.lastResp}, false, err
+		return r.partial(turn - 1), false, err
 	}
 
 	r.lastResp = resp
@@ -123,23 +152,42 @@ func (r *run) turn(ctx context.Context, turn int) (result *RunResult, next bool,
 		return nil, false, nil
 	}
 
-	calls := resp.ToolCalls()
-	if len(calls) == 0 {
-		if !r.emit(Event{Type: EventTurnEnd, Turn: turn, Usage: r.usage}) {
-			return nil, false, nil
-		}
-
-		result, err := r.finish(StopEndTurn, turn, nil)
-
-		return result, false, err
-	}
-
-	return r.toolPhase(ctx, turn, calls)
+	return r.toolPhase(ctx, turn, resp)
 }
 
-// toolPhase executes a turn's tool calls and decides how the loop proceeds.
-func (r *run) toolPhase(ctx context.Context, turn int, calls []ai.ToolCallPart) (result *RunResult, next bool, err error) {
-	outcome := r.agent.execBatch(ctx, r.cancel, turn, calls, r.emit)
+// inject appends and announces messages drained from the queues; false means
+// the stream consumer stopped.
+func (r *run) inject(turn int) bool {
+	for _, msg := range r.pending {
+		r.sess.Append(msg)
+
+		if !r.emit(messageEvent(turn, msg)) {
+			return false
+		}
+	}
+
+	r.pending = nil
+
+	return true
+}
+
+// toolPhase executes a turn's tool calls (if any) and decides how the loop
+// proceeds.
+func (r *run) toolPhase(ctx context.Context, turn int, resp *ai.Response) (result *RunResult, next bool, err error) {
+	calls := resp.ToolCalls()
+
+	var outcome batchOutcome
+
+	switch {
+	case len(calls) == 0:
+	case resp.FinishReason == ai.FinishLength:
+		// The response was cut off by the output-token limit, so every call
+		// may carry silently truncated arguments; fail the whole batch and
+		// let the model re-issue the calls (none are safe to execute).
+		outcome = r.truncatedBatch(turn, calls)
+	default:
+		outcome = r.agent.execBatch(ctx, r.cancel, turn, calls, r.emit)
+	}
 
 	if len(outcome.results) > 0 {
 		toolMsg := toolMessage(outcome.results)
@@ -163,13 +211,72 @@ func (r *run) toolPhase(ctx context.Context, turn int, calls []ai.ToolCallPart) 
 		return result, false, err
 	}
 
+	natural, naturalStop := len(calls) == 0, StopEndTurn
+	if outcome.terminated {
+		natural, naturalStop = true, StopTerminated
+	}
+
+	return r.decide(ctx, turn, natural, naturalStop)
+}
+
+// truncatedBatch synthesizes error results for a truncated turn's calls
+// without executing anything.
+func (r *run) truncatedBatch(turn int, calls []ai.ToolCallPart) batchOutcome {
+	const reason = "not executed: the response hit the output token limit, so " +
+		"the arguments may be truncated; re-issue the tool call with complete arguments"
+
+	results := make([]ai.ToolResultPart, len(calls))
+
+	for idx, call := range calls {
+		results[idx] = errorResult(call, reason)
+
+		if !r.emit(toolStartEvent(turn, call)) || !r.emit(toolEndEvent(turn, call, results[idx])) {
+			return batchOutcome{results: results[:idx+1], stopped: true}
+		}
+	}
+
+	return batchOutcome{results: results}
+}
+
+// decide runs the post-turn chain: the prepare-turn hook, then termination
+// against the queues. Natural stops (no tool calls, or a terminate hint) win
+// when nothing is queued; otherwise the stop conditions guard continuation,
+// and steering — then, on a natural stop, follow-ups — feed the next turn.
+func (r *run) decide(ctx context.Context, turn int, natural bool, naturalStop StopReason) (result *RunResult, next bool, err error) {
+	if fn := r.agent.cfg.prepareTurn; fn != nil {
+		update := fn(ctx, RunInfo{Turns: turn, Usage: r.usage, Response: r.lastResp})
+		if update.Model != nil {
+			r.model = update.Model
+		}
+
+		if update.ReplaceMessages != nil {
+			r.sess.Replace(update.ReplaceMessages...)
+		}
+	}
+
 	if err := ctx.Err(); err != nil {
-		return &RunResult{Turns: turn, Usage: r.usage, Response: r.lastResp}, false, err
+		return r.partial(turn), false, err
+	}
+
+	if natural && !r.sess.HasQueued() {
+		result, err := r.finish(naturalStop, turn, nil)
+		return result, false, err
 	}
 
 	if reason, stop := r.agent.shouldStop(turn, r.usage, r.lastResp); stop {
 		result, err := r.finish(reason, turn, nil)
 		return result, false, err
+	}
+
+	r.pending = r.sess.drainSteering(r.agent.cfg.steeringMode)
+
+	if natural && len(r.pending) == 0 {
+		r.pending = r.sess.drainFollowUps(r.agent.cfg.followUpMode)
+		if len(r.pending) == 0 {
+			// The queues emptied between HasQueued and the drains.
+			result, err := r.finish(naturalStop, turn, nil)
+			return result, false, err
+		}
 	}
 
 	return nil, true, nil
@@ -191,16 +298,16 @@ func (r *run) finish(stop StopReason, turns int, pending []ai.ToolCallPart) (*Ru
 // callModel performs one model call. When streaming, deltas tee through emit
 // while [ai.Collect] folds them into the completed response; stopped reports
 // that the consumer quit mid-stream.
-func (a *Agent) callModel(ctx context.Context, turn int, msgs []ai.Message, emit emitFunc, streaming bool) (resp *ai.Response, stopped bool, err error) {
+func (a *Agent) callModel(ctx context.Context, model ai.LanguageModel, turn int, msgs []ai.Message, emit emitFunc, streaming bool) (resp *ai.Response, stopped bool, err error) {
 	req := a.request(msgs)
 
 	if !streaming {
-		resp, err = a.model.Generate(ctx, req)
+		resp, err = model.Generate(ctx, req)
 		return resp, false, err
 	}
 
 	resp, err = ai.Collect(func(yield func(ai.StreamEvent, error) bool) {
-		for ev, streamErr := range a.model.Stream(ctx, req) {
+		for ev, streamErr := range model.Stream(ctx, req) {
 			if streamErr != nil {
 				yield(ai.StreamEvent{}, streamErr)
 				return
@@ -225,6 +332,7 @@ func (a *Agent) callModel(ctx context.Context, turn int, msgs []ai.Message, emit
 }
 
 // shouldStop checks the configured stop conditions after a completed turn.
+// It guards continuation only: a natural stop with empty queues wins first.
 func (a *Agent) shouldStop(turn int, usage ai.Usage, resp *ai.Response) (StopReason, bool) {
 	switch {
 	case a.cfg.maxTurns > 0 && turn >= a.cfg.maxTurns:
