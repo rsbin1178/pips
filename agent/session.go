@@ -21,6 +21,12 @@ type Session struct {
 	messages []ai.Message
 	usage    ai.Usage
 	running  bool
+
+	// steering and followUps queue messages for injection into a running
+	// loop (see Steer and FollowUp). They are runtime state and are not
+	// serialized.
+	steering  []ai.Message
+	followUps []ai.Message
 }
 
 // NewSession returns a session seeded with the given messages (for example a
@@ -54,6 +60,104 @@ func (s *Session) Usage() ai.Usage {
 	defer s.mu.Unlock()
 
 	return s.usage
+}
+
+// Replace swaps the entire message history for msgs. It is the commit point
+// for context compaction: rewrite the history out-of-band (or from a
+// [WithPrepareTurn] hook) and the next model call sees the new form. Usage
+// accounting and queued messages are unaffected.
+func (s *Session) Replace(msgs ...ai.Message) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.messages = slices.Clone(msgs)
+}
+
+// Steer queues messages for injection into the running loop: they are
+// appended at the start of the next turn, before the next model call, letting
+// a user redirect the agent mid-run. Queued messages survive until a run
+// drains them (see [WithSteeringMode]); pending steering also keeps the loop
+// going when the model would otherwise finish. Safe to call from any
+// goroutine, with or without an active run.
+func (s *Session) Steer(msgs ...ai.Message) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.steering = append(s.steering, msgs...)
+}
+
+// FollowUp queues messages that run only after the agent would otherwise
+// stop cleanly: when a turn produces no tool calls and no steering is queued,
+// follow-ups are injected and the loop continues instead of finishing. Safe
+// to call from any goroutine.
+func (s *Session) FollowUp(msgs ...ai.Message) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.followUps = append(s.followUps, msgs...)
+}
+
+// ClearSteering discards all queued steering messages.
+func (s *Session) ClearSteering() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.steering = nil
+}
+
+// ClearFollowUps discards all queued follow-up messages.
+func (s *Session) ClearFollowUps() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.followUps = nil
+}
+
+// HasQueued reports whether any steering or follow-up messages are queued.
+func (s *Session) HasQueued() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return len(s.steering) > 0 || len(s.followUps) > 0
+}
+
+// drainSteering removes and returns queued steering messages according to
+// mode: the oldest one ([DrainOne]) or all of them ([DrainAll]).
+func (s *Session) drainSteering(mode QueueMode) []ai.Message {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var drained []ai.Message
+
+	drained, s.steering = drainQueue(s.steering, mode)
+
+	return drained
+}
+
+// drainFollowUps removes and returns queued follow-up messages according to
+// mode.
+func (s *Session) drainFollowUps(mode QueueMode) []ai.Message {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var drained []ai.Message
+
+	drained, s.followUps = drainQueue(s.followUps, mode)
+
+	return drained
+}
+
+// drainQueue splits a queue according to mode. The drained slice is
+// capacity-capped so later appends to either side cannot alias.
+func drainQueue(queue []ai.Message, mode QueueMode) (drained, rest []ai.Message) {
+	switch {
+	case len(queue) == 0:
+		return nil, queue
+	case mode == DrainAll:
+		return queue, nil
+	default:
+		return queue[:1:1], queue[1:]
+	}
 }
 
 // Pending returns the tool calls at the session tail that have no matching

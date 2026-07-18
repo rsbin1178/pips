@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 
@@ -75,11 +76,13 @@ func TextResult(s string) []ai.Part {
 func NewTool[Args any](name, description string, fn func(ctx context.Context, args Args) (string, error)) Tool {
 	return NewToolParts(name, description, func(ctx context.Context, args Args) ([]ai.Part, error) {
 		text, err := fn(ctx, args)
-		if err != nil {
+		if err != nil && !errors.Is(err, ErrTerminate) {
 			return nil, err
 		}
 
-		return TextResult(text), nil
+		// ErrTerminate is a control sentinel: the text is a real result that
+		// must survive alongside it.
+		return TextResult(text), err
 	})
 }
 

@@ -79,8 +79,12 @@ fmt.Println(result.Text()) // model called add(2,3), saw "5", answered
 Tool failures become error results the model can react to — they never abort
 the run. `Agent.Stream` yields the loop as events (deltas, tool lifecycle,
 turn boundaries); a `WithBeforeTool` gate can deny calls or pause the run for
-human approval (`Session.ResolvePending` resumes it). Sessions serialize to
-JSON for persistence. See `examples/agent-*`.
+human approval (`Session.ResolvePending` resumes it). A running loop can be
+steered (`Session.Steer`) or given follow-up work (`Session.FollowUp`)
+without restarting; `WithTransformContext`/`WithPrepareTurn` provide the
+compaction and mid-run model-swap injection points; `agent.AsTool` nests
+agents as sub-agents. Sessions serialize to JSON for persistence. See
+`examples/agent-*`.
 
 ## Development
 

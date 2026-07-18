@@ -31,6 +31,19 @@ type Agent struct {
 	cfg   config
 }
 
+// QueueMode controls how many queued messages a drain point injects (see
+// [Session.Steer] and [Session.FollowUp]).
+type QueueMode int
+
+// Queue modes.
+const (
+	// DrainOne injects only the oldest queued message per drain point,
+	// leaving the rest queued for later points.
+	DrainOne QueueMode = iota
+	// DrainAll injects every queued message at each drain point.
+	DrainAll
+)
+
 type config struct {
 	system        string
 	tools         []Tool
@@ -38,8 +51,13 @@ type config struct {
 	maxTokens     int
 	toolTimeout   time.Duration
 	parallelTools int
+	steeringMode  QueueMode
+	followUpMode  QueueMode
 	stopWhen      func(RunInfo) bool
 	beforeTool    gate
+	afterTool     func(context.Context, ToolResultInfo) *ResultOverride
+	prepareTurn   func(context.Context, RunInfo) TurnUpdate
+	transform     func(context.Context, []ai.Message) ([]ai.Message, error)
 	onEvent       func(context.Context, Event)
 	requestFn     func(*ai.Request)
 }
@@ -95,6 +113,45 @@ func WithStopWhen(cond func(RunInfo) bool) Option {
 // [DecisionAction] for the available verdicts.
 func WithBeforeTool(fn func(ctx context.Context, info ToolCallInfo) Decision) Option {
 	return func(c *config) { c.beforeTool = fn }
+}
+
+// WithAfterTool installs a hook that runs after each executed tool call,
+// before its result is recorded and emitted. The returned [ResultOverride]
+// replaces result fields (nil keeps everything). The hook only sees calls
+// that actually executed — denials, unknown tools, undecodable arguments,
+// and cancellations skip it. It runs serially on the run's goroutine; a
+// panic converts the result into an error result.
+func WithAfterTool(fn func(ctx context.Context, info ToolResultInfo) *ResultOverride) Option {
+	return func(c *config) { c.afterTool = fn }
+}
+
+// WithPrepareTurn installs a hook that runs after each completed turn,
+// before the loop decides whether to continue. The returned [TurnUpdate]
+// can swap the model for subsequent turns or rewrite the session history
+// (the commit point for context compaction).
+func WithPrepareTurn(fn func(ctx context.Context, info RunInfo) TurnUpdate) Option {
+	return func(c *config) { c.prepareTurn = fn }
+}
+
+// WithTransformContext installs a transform applied to the session snapshot
+// before each model call — a non-destructive injection point for context
+// pruning or augmentation. The session itself is untouched; use
+// [WithPrepareTurn] or [Session.Replace] to rewrite history permanently. A
+// returned error terminates the run with that error.
+func WithTransformContext(fn func(ctx context.Context, msgs []ai.Message) ([]ai.Message, error)) Option {
+	return func(c *config) { c.transform = fn }
+}
+
+// WithSteeringMode sets how queued steering messages are drained (default
+// [DrainOne]).
+func WithSteeringMode(m QueueMode) Option {
+	return func(c *config) { c.steeringMode = m }
+}
+
+// WithFollowUpMode sets how queued follow-up messages are drained (default
+// [DrainOne]).
+func WithFollowUpMode(m QueueMode) Option {
+	return func(c *config) { c.followUpMode = m }
 }
 
 // WithOnEvent installs a callback receiving every run event, for both

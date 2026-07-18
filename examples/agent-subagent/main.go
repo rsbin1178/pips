@@ -1,7 +1,7 @@
-// Command agent-subagent nests one agent inside another as a tool: the outer
-// agent delegates research questions to an inner agent bound to its own model
-// and prompt. Sub-agents are just tools — the runtime needs no special
-// support.
+// Command agent-subagent nests one agent inside another as a tool via
+// agent.AsTool: the outer agent delegates research questions to an inner
+// agent bound to its own prompt, each invocation running in an isolated
+// session.
 package main
 
 import (
@@ -25,23 +25,9 @@ func main() {
 		log.Fatal(err)
 	}
 
-	// Each invocation gets a fresh session: sub-agent runs are isolated.
-	research := agent.NewTool("research", "Delegate a question to the research agent.",
-		func(ctx context.Context, args struct {
-			Question string `json:"question"`
-		},
-		) (string, error) {
-			result, err := researcher.Run(ctx, agent.NewSession(), ai.UserText(args.Question))
-			if err != nil {
-				return "", err
-			}
-
-			return result.Text(), nil
-		})
-
 	outer, err := agent.New(model,
 		agent.WithSystem("Delegate every factual question to the research tool, then synthesize."),
-		agent.WithTools(research),
+		agent.WithTools(agent.AsTool(researcher, "research", "Delegate a question to the research agent.")),
 	)
 	if err != nil {
 		log.Fatal(err)
