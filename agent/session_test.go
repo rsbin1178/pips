@@ -118,6 +118,102 @@ func TestSessionResolvePending(t *testing.T) {
 	assert.Len(t, sess.Messages(), 2)
 }
 
+func TestSessionResolveToolCallsSubsetInPendingOrder(t *testing.T) {
+	t.Parallel()
+
+	sess := agent.NewSession(ai.Assistant(
+		ai.ToolCallPart{ID: "c1", Name: "first"},
+		ai.ToolCallPart{ID: "c2", Name: "second"},
+		ai.ToolCallPart{ID: "c3", Name: "third"},
+	))
+
+	err := sess.ResolveToolCalls(
+		agent.ToolResolution{ToolCallID: "c3", Content: agent.TextResult("three")},
+		agent.ToolResolution{ToolCallID: "c1", Content: agent.TextResult("one")},
+	)
+	require.NoError(t, err)
+
+	pending := sess.Pending()
+	require.Len(t, pending, 1)
+	assert.Equal(t, "c2", pending[0].ID)
+
+	msgs := sess.Messages()
+	require.Len(t, msgs, 2)
+	require.Len(t, msgs[1].Parts, 2)
+
+	first, ok := msgs[1].Parts[0].(ai.ToolResultPart)
+	require.True(t, ok)
+
+	third, ok := msgs[1].Parts[1].(ai.ToolResultPart)
+	require.True(t, ok)
+
+	assert.Equal(t, "c1", first.ToolCallID)
+	assert.Equal(t, "first", first.Name)
+	assert.Equal(t, "c3", third.ToolCallID)
+
+	data, err := json.Marshal(sess)
+	require.NoError(t, err)
+
+	restored := agent.NewSession()
+	require.NoError(t, json.Unmarshal(data, restored))
+	require.Len(t, restored.Pending(), 1)
+	assert.Equal(t, "c2", restored.Pending()[0].ID)
+
+	require.NoError(t, restored.ResolveToolCalls(agent.ToolResolution{
+		ToolCallID: "c2", Content: agent.TextResult("two"), IsError: true,
+	}))
+	assert.Empty(t, restored.Pending())
+}
+
+func TestSessionResolveToolCallsValidationIsAtomic(t *testing.T) {
+	t.Parallel()
+
+	newSession := func() *agent.Session {
+		return agent.NewSession(ai.Assistant(
+			ai.ToolCallPart{ID: "c1", Name: "first"},
+			ai.ToolCallPart{ID: "c2", Name: "second"},
+		))
+	}
+
+	tests := []struct {
+		name        string
+		resolutions []agent.ToolResolution
+		want        error
+	}{
+		{
+			name:        "empty ID",
+			resolutions: []agent.ToolResolution{{Content: agent.TextResult("bad")}},
+			want:        agent.ErrInvalidToolResolution,
+		},
+		{
+			name: "duplicate ID",
+			resolutions: []agent.ToolResolution{
+				{ToolCallID: "c1"},
+				{ToolCallID: "c1"},
+			},
+			want: agent.ErrInvalidToolResolution,
+		},
+		{
+			name:        "stale ID",
+			resolutions: []agent.ToolResolution{{ToolCallID: "missing"}},
+			want:        agent.ErrToolCallNotPending,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			sess := newSession()
+			before := sess.Messages()
+			err := sess.ResolveToolCalls(tt.resolutions...)
+			require.ErrorIs(t, err, tt.want)
+			assert.Equal(t, before, sess.Messages())
+			assert.Len(t, sess.Pending(), 2)
+		})
+	}
+}
+
 func TestSessionJSONRoundTrip(t *testing.T) {
 	t.Parallel()
 

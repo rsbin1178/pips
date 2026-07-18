@@ -8,10 +8,12 @@ Go building blocks for AI applications. Current packages:
   for seven OpenAI-shaped services. No vendor SDKs.
 - **`agent`** — agent runtime core on top of `ai`: the autonomous loop (model
   → tools → results → model), typed tools, event streaming, stop conditions,
-  approval gates with pause/resume, and serializable sessions.
+  input/output guardrails, durable partial approvals, correlated nested runs,
+  and serializable sessions.
 - **`agent/harness`** — stateful orchestration over the runtime: persistent
   session trees (JSONL) with branching, automatic context compaction, branch
-  summaries, and skill/prompt-template resources.
+  summaries, streaming with active cancellation, and skill/prompt-template
+  resources.
 
 > **Status: v0.** The API is under active development and may change without
 > notice. Pin a commit if you depend on it.
@@ -125,11 +127,21 @@ fmt.Println(result.Text()) // model called add(2,3), saw "5", answered
 Tool failures become error results the model can react to — they never abort
 the run. `Agent.Stream` yields the loop as events (deltas, tool lifecycle,
 turn boundaries); a `WithBeforeTool` gate can deny calls or pause the run for
-human approval (`Session.ResolvePending` resumes it). A running loop can be
-steered (`Session.Steer`) or given follow-up work (`Session.FollowUp`)
-without restarting; `WithTransformContext`/`WithPrepareTurn` provide the
-compaction and mid-run model-swap injection points; `agent.AsTool` nests
-agents as sub-agents. Sessions serialize to JSON for persistence. See
+human approval (`Session.ResolveToolCalls` can resolve any durable subset).
+Named input/output guardrails validate the first input and each answer
+candidate before it is committed.
+Every event carries a run ID, parent run ID, agent name, and timestamp, so an
+`agent.AsTool` child can be attributed without a tracing dependency.
+
+A running loop can be steered (`Session.Steer`) or given follow-up work
+(`Session.FollowUp`) without restarting. `WithTransformContext` and
+`WithPrepareTurn` provide context curation and mid-run model-swap injection
+points. The harness adds append-only persistence, compaction, branching,
+`PromptStream`, and concurrent `Cancel`.
+
+Routing, parallel agents, manager-owned subagents, evaluator loops, durable
+checkpoints, and application-owned handoffs are ordinary Go composition, not
+a workflow DSL. See [Agent composition](docs/agents.md) and
 `examples/agent-*`.
 
 ## Development

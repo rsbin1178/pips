@@ -20,7 +20,8 @@ const (
 	StopBudget StopReason = "budget"
 	// StopPaused means a [WithBeforeTool] gate requested a pause. The
 	// unexecuted calls are in [RunResult.Pending]; resolve them with
-	// [Session.ResolvePending] and run again to continue.
+	// [Session.ResolveToolCalls] or [Session.ResolvePending] and run again to
+	// continue.
 	StopPaused StopReason = "paused"
 	// StopWhen means the [WithStopWhen] condition reported true.
 	StopWhen StopReason = "stop_when"
@@ -32,6 +33,7 @@ const (
 // RunInfo is a read-only snapshot of run progress, passed to the
 // [WithStopWhen] condition after each turn.
 type RunInfo struct {
+	RunMetadata
 	// Turns is the number of model calls made so far in this run.
 	Turns int
 	// Usage is the token usage accumulated by this run.
@@ -42,6 +44,7 @@ type RunInfo struct {
 
 // RunResult is the outcome of a completed run.
 type RunResult struct {
+	RunMetadata
 	// Stop is why the run terminated. It is empty when the run failed with an
 	// error.
 	Stop StopReason

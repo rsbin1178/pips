@@ -6,7 +6,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -51,19 +50,26 @@ func main() {
 	}
 
 	for result.Stop == agent.StopPaused {
-		err := sess.ResolvePending(ctx, func(_ context.Context, call ai.ToolCallPart) ([]ai.Part, error) {
+		// Resolve one durable call at a time. Any omitted calls remain pending,
+		// so the operator can approve a subset and resume this loop later.
+		for len(sess.Pending()) > 0 {
+			call := sess.Pending()[0]
 			fmt.Printf("approve %s(%s)? [y/N] ", call.Name, call.Args)
 
 			answer, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+			resolution := agent.ToolResolution{ToolCallID: call.ID}
+
 			if strings.TrimSpace(answer) != "y" {
-				return nil, errors.New("rejected by operator")
+				resolution.Content = agent.TextResult("rejected by operator")
+				resolution.IsError = true
+			} else {
+				// Approved: execute the real action out of band.
+				resolution.Content = agent.TextResult("deployed to production")
 			}
 
-			// Approved: execute the real action out of band.
-			return agent.TextResult("deployed to production"), nil
-		})
-		if err != nil {
-			log.Fatal(err)
+			if err := sess.ResolveToolCalls(resolution); err != nil {
+				log.Fatal(err)
+			}
 		}
 
 		if result, err = a.Run(ctx, sess); err != nil {

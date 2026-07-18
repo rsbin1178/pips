@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/rsbin/pips/ai"
 )
@@ -24,6 +25,10 @@ func AsTool(a *Agent, name, description string) Tool {
 			result, err := a.Run(ctx, NewSession(), ai.UserText(args.Prompt))
 			if err != nil {
 				return "", err
+			}
+
+			if result.Stop == StopPaused {
+				return "", fmt.Errorf("%w: %d", ErrSubagentPaused, len(result.Pending))
 			}
 
 			return result.Text(), nil

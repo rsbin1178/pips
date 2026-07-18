@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"iter"
+	"time"
 
 	"github.com/rsbin/pips/ai"
 )
@@ -18,15 +19,7 @@ import (
 // Run uses [ai.LanguageModel.Generate], so retry middleware on the model is
 // fully effective. Use [Agent.Stream] for incremental output.
 func (a *Agent) Run(ctx context.Context, sess *Session, msgs ...ai.Message) (*RunResult, error) {
-	emit := func(ev Event) bool {
-		if a.cfg.onEvent != nil {
-			a.cfg.onEvent(ctx, ev)
-		}
-
-		return true
-	}
-
-	return a.loop(ctx, sess, msgs, emit, false)
+	return a.loop(ctx, sess, msgs, func(Event) bool { return true }, false)
 }
 
 // Stream is [Agent.Run] as an event sequence: it yields run, turn, and tool
@@ -41,10 +34,6 @@ func (a *Agent) Stream(ctx context.Context, sess *Session, msgs ...ai.Message) i
 	return func(yield func(Event, error) bool) {
 		stopped := false
 		emit := func(ev Event) bool {
-			if a.cfg.onEvent != nil {
-				a.cfg.onEvent(ctx, ev)
-			}
-
 			if !yield(ev, nil) {
 				stopped = true
 				return false
@@ -72,13 +61,40 @@ func (a *Agent) loop(ctx context.Context, sess *Session, msgs []ai.Message, emit
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	sess.Append(msgs...)
+	meta := newRunMetadata(ctx, a.cfg.name)
+	ctx = withRunMetadata(ctx, meta)
+
+	deliver := emit
+	emit = func(ev Event) bool {
+		ev.RunID = meta.RunID
+		ev.ParentRunID = meta.ParentRunID
+		ev.Agent = meta.Agent
+		ev.Time = time.Now().UTC()
+
+		if a.cfg.onEvent != nil {
+			a.cfg.onEvent(ctx, ev)
+		}
+
+		return deliver(ev)
+	}
 
 	if !emit(Event{Type: EventRunStart}) {
 		return nil, nil
 	}
 
-	r := &run{agent: a, sess: sess, emit: emit, cancel: cancel, streaming: streaming, model: a.model}
+	r := &run{
+		agent: a, sess: sess, emit: emit, cancel: cancel, streaming: streaming,
+		model: a.model, meta: meta,
+	}
+	if err := checkInputGuardrails(ctx, a.cfg.inputGuards, InputGuardrailInfo{
+		RunMetadata: meta,
+		Session:     sess.Messages(),
+		Input:       msgs,
+	}); err != nil {
+		return r.partial(0), err
+	}
+
+	sess.Append(msgs...)
 
 	// Initial steering poll: pick up messages queued while no run was active.
 	r.pending = sess.drainSteering(a.cfg.steeringMode)
@@ -98,6 +114,7 @@ type run struct {
 	emit      emitFunc
 	cancel    context.CancelFunc
 	streaming bool
+	meta      RunMetadata
 
 	// model serves the run's calls; WithPrepareTurn may swap it mid-run.
 	model ai.LanguageModel
@@ -111,7 +128,12 @@ type run struct {
 
 // partial assembles the result accompanying a run error.
 func (r *run) partial(turns int) *RunResult {
-	return &RunResult{Turns: turns, Usage: r.usage, Response: r.lastResp}
+	return &RunResult{
+		RunMetadata: r.meta,
+		Turns:       turns,
+		Usage:       r.usage,
+		Response:    r.lastResp,
+	}
 }
 
 // turn performs one model call plus its tool executions. next reports
@@ -124,6 +146,10 @@ func (r *run) turn(ctx context.Context, turn int) (result *RunResult, next bool,
 
 	if !r.inject(turn) {
 		return nil, false, nil
+	}
+
+	if err := ctx.Err(); err != nil {
+		return r.partial(turn - 1), false, err
 	}
 
 	msgs := r.sess.Messages()
@@ -146,6 +172,22 @@ func (r *run) turn(ctx context.Context, turn int) (result *RunResult, next bool,
 	r.lastResp = resp
 	r.usage.Add(resp.Usage)
 	r.sess.addUsage(resp.Usage)
+
+	if len(resp.ToolCalls()) == 0 {
+		info := OutputGuardrailInfo{
+			RunInfo: RunInfo{
+				RunMetadata: r.meta,
+				Turns:       turn,
+				Usage:       r.usage,
+				Response:    resp,
+			},
+			Message: resp.Message,
+		}
+		if err := checkOutputGuardrails(ctx, r.agent.cfg.outputGuards, info); err != nil {
+			return r.partial(turn), false, err
+		}
+	}
+
 	r.sess.Append(resp.Message)
 
 	if !r.emit(messageEvent(turn, resp.Message)) {
@@ -244,7 +286,12 @@ func (r *run) truncatedBatch(turn int, calls []ai.ToolCallPart) batchOutcome {
 // and steering — then, on a natural stop, follow-ups — feed the next turn.
 func (r *run) decide(ctx context.Context, turn int, natural bool, naturalStop StopReason) (result *RunResult, next bool, err error) {
 	if fn := r.agent.cfg.prepareTurn; fn != nil {
-		update := fn(ctx, RunInfo{Turns: turn, Usage: r.usage, Response: r.lastResp})
+		update := fn(ctx, RunInfo{
+			RunMetadata: r.meta,
+			Turns:       turn,
+			Usage:       r.usage,
+			Response:    r.lastResp,
+		})
 		if update.Model != nil {
 			r.model = update.Model
 		}
@@ -263,7 +310,12 @@ func (r *run) decide(ctx context.Context, turn int, natural bool, naturalStop St
 		return result, false, err
 	}
 
-	if reason, stop := r.agent.shouldStop(turn, r.usage, r.lastResp); stop {
+	if reason, stop := r.agent.shouldStop(RunInfo{
+		RunMetadata: r.meta,
+		Turns:       turn,
+		Usage:       r.usage,
+		Response:    r.lastResp,
+	}); stop {
 		result, err := r.finish(reason, turn, nil)
 		return result, false, err
 	}
@@ -287,11 +339,12 @@ func (r *run) finish(stop StopReason, turns int, pending []ai.ToolCallPart) (*Ru
 	r.emit(Event{Type: EventRunEnd, Turn: turns, Stop: stop, Usage: r.usage})
 
 	return &RunResult{
-		Stop:     stop,
-		Turns:    turns,
-		Usage:    r.usage,
-		Response: r.lastResp,
-		Pending:  pending,
+		RunMetadata: r.meta,
+		Stop:        stop,
+		Turns:       turns,
+		Usage:       r.usage,
+		Response:    r.lastResp,
+		Pending:     pending,
 	}, nil
 }
 
@@ -333,13 +386,13 @@ func (a *Agent) callModel(ctx context.Context, model ai.LanguageModel, turn int,
 
 // shouldStop checks the configured stop conditions after a completed turn.
 // It guards continuation only: a natural stop with empty queues wins first.
-func (a *Agent) shouldStop(turn int, usage ai.Usage, resp *ai.Response) (StopReason, bool) {
+func (a *Agent) shouldStop(info RunInfo) (StopReason, bool) {
 	switch {
-	case a.cfg.maxTurns > 0 && turn >= a.cfg.maxTurns:
+	case a.cfg.maxTurns > 0 && info.Turns >= a.cfg.maxTurns:
 		return StopMaxTurns, true
-	case a.cfg.maxTokens > 0 && usage.InputTokens+usage.OutputTokens >= a.cfg.maxTokens:
+	case a.cfg.maxTokens > 0 && info.Usage.InputTokens+info.Usage.OutputTokens >= a.cfg.maxTokens:
 		return StopBudget, true
-	case a.cfg.stopWhen != nil && a.cfg.stopWhen(RunInfo{Turns: turn, Usage: usage, Response: resp}):
+	case a.cfg.stopWhen != nil && a.cfg.stopWhen(info):
 		return StopWhen, true
 	default:
 		return "", false
