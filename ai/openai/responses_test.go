@@ -282,3 +282,21 @@ func TestResponsesAndChatEquivalentShape(t *testing.T) {
 	assert.Equal(t, "The capital of France is Paris.", chatResp.Text())
 	assert.Equal(t, "The capital of France is Paris.", respResp.Text())
 }
+
+func TestResponsesFailedStatusSurfacesError(t *testing.T) {
+	t.Parallel()
+
+	model := newResponsesModel(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_f","status":"failed","error":{"code":"server_error","message":"model overloaded"},"output":[]}`))
+	})
+
+	_, err := model.Generate(t.Context(), ai.Request{Messages: []ai.Message{ai.UserText("hi")}})
+	require.Error(t, err)
+	require.ErrorIs(t, err, ai.ErrOverloaded)
+
+	var apiErr *ai.Error
+	require.ErrorAs(t, err, &apiErr)
+	assert.Equal(t, "server_error", apiErr.Code)
+	assert.Equal(t, "model overloaded", apiErr.Message)
+}
