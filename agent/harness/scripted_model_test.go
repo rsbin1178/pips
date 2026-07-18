@@ -8,9 +8,9 @@ import (
 	"github.com/rsbin/pips/ai"
 )
 
-// fakeModel plays scripted responses through Generate; the harness never
+// scriptedModel plays deterministic responses through Generate; the harness never
 // streams.
-type fakeModel struct {
+type scriptedModel struct {
 	mu       sync.Mutex
 	id       string
 	script   []*ai.Response
@@ -18,8 +18,8 @@ type fakeModel struct {
 	requests []ai.Request
 }
 
-func newFakeModel(id string, script ...*ai.Response) *fakeModel {
-	return &fakeModel{id: id, script: script}
+func newScriptedModel(id string, script ...*ai.Response) *scriptedModel {
+	return &scriptedModel{id: id, script: script}
 }
 
 func textResponse(text string, inTokens int) *ai.Response {
@@ -38,7 +38,7 @@ func callResponse(id, name, args string) *ai.Response {
 	}
 }
 
-func (m *fakeModel) Generate(_ context.Context, req ai.Request) (*ai.Response, error) {
+func (m *scriptedModel) Generate(_ context.Context, req ai.Request) (*ai.Response, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -54,7 +54,7 @@ func (m *fakeModel) Generate(_ context.Context, req ai.Request) (*ai.Response, e
 	return resp, nil
 }
 
-func (m *fakeModel) Stream(ctx context.Context, req ai.Request) ai.Stream {
+func (m *scriptedModel) Stream(ctx context.Context, req ai.Request) ai.Stream {
 	return func(yield func(ai.StreamEvent, error) bool) {
 		resp, err := m.Generate(ctx, req)
 		if err != nil {
@@ -75,13 +75,15 @@ func (m *fakeModel) Stream(ctx context.Context, req ai.Request) ai.Stream {
 	}
 }
 
-func (m *fakeModel) Requests() []ai.Request {
+func (m *scriptedModel) Requests() []ai.Request {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	return append([]ai.Request(nil), m.requests...)
 }
 
-func (m *fakeModel) Provider() ai.Provider         { return ai.Provider("fake") }
-func (m *fakeModel) ModelID() string               { return m.id }
-func (m *fakeModel) Capabilities() ai.Capabilities { return ai.Capabilities{Text: true, Tools: true} }
+func (m *scriptedModel) Provider() ai.Provider { return ai.Provider("scripted") }
+func (m *scriptedModel) ModelID() string       { return m.id }
+func (m *scriptedModel) Capabilities() ai.Capabilities {
+	return ai.Capabilities{Text: true, Tools: true}
+}

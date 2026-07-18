@@ -15,9 +15,9 @@ import (
 func TestSteeringInjectsBeforeNextTurn(t *testing.T) {
 	t.Parallel()
 
-	model := newFakeModel(
-		reply(callResponse(call("c1", "steerer", `{}`))),
-		reply(textResponse("adjusted")),
+	model := newScriptedModel(
+		respond(callResponse(call("c1", "steerer", `{}`))),
+		respond(textResponse("adjusted")),
 	)
 
 	sess := agent.NewSession()
@@ -53,9 +53,9 @@ func TestSteeringInjectsBeforeNextTurn(t *testing.T) {
 func TestSteeringExtendsFinishedRun(t *testing.T) {
 	t.Parallel()
 
-	model := newFakeModel(
-		reply(textResponse("first answer")),
-		reply(textResponse("second answer")),
+	model := newScriptedModel(
+		respond(textResponse("first answer")),
+		respond(textResponse("second answer")),
 	)
 
 	sess := agent.NewSession()
@@ -99,9 +99,9 @@ func TestSteeringDrainModes(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			model := newFakeModel(
-				reply(textResponse("a")),
-				reply(textResponse("b")),
+			model := newScriptedModel(
+				respond(textResponse("a")),
+				respond(textResponse("b")),
 			)
 
 			a, err := agent.New(model, agent.WithSteeringMode(tt.mode))
@@ -123,9 +123,9 @@ func TestSteeringDrainModes(t *testing.T) {
 func TestFollowUpRunsAfterFinish(t *testing.T) {
 	t.Parallel()
 
-	model := newFakeModel(
-		reply(textResponse("done with task one")),
-		reply(textResponse("done with task two")),
+	model := newScriptedModel(
+		respond(textResponse("done with task one")),
+		respond(textResponse("done with task two")),
 	)
 
 	a, err := agent.New(model)
@@ -151,7 +151,7 @@ func TestFollowUpRunsAfterFinish(t *testing.T) {
 func TestQueuesSurvivePause(t *testing.T) {
 	t.Parallel()
 
-	model := newFakeModel(reply(callResponse(call("c1", "add", `{"a":1,"b":1}`))))
+	model := newScriptedModel(respond(callResponse(call("c1", "add", `{"a":1,"b":1}`))))
 
 	a, err := agent.New(model,
 		agent.WithTools(addTool()),
@@ -174,7 +174,7 @@ func TestQueuesSurvivePause(t *testing.T) {
 func TestTransformContext(t *testing.T) {
 	t.Parallel()
 
-	model := newFakeModel(reply(textResponse("ok")))
+	model := newScriptedModel(respond(textResponse("ok")))
 
 	// Keep only the last message — a stand-in for compaction.
 	a, err := agent.New(model, agent.WithTransformContext(
@@ -196,7 +196,7 @@ func TestTransformContext(t *testing.T) {
 func TestTransformContextErrorFailsRun(t *testing.T) {
 	t.Parallel()
 
-	model := newFakeModel(reply(textResponse("unreached")))
+	model := newScriptedModel(respond(textResponse("unreached")))
 
 	a, err := agent.New(model, agent.WithTransformContext(
 		func(_ context.Context, _ []ai.Message) ([]ai.Message, error) {
@@ -212,9 +212,9 @@ func TestTransformContextErrorFailsRun(t *testing.T) {
 func TestAfterToolOverride(t *testing.T) {
 	t.Parallel()
 
-	model := newFakeModel(
-		reply(callResponse(call("c1", "add", `{"a":2,"b":2}`))),
-		reply(textResponse("done")),
+	model := newScriptedModel(
+		respond(callResponse(call("c1", "add", `{"a":2,"b":2}`))),
+		respond(textResponse("done")),
 	)
 
 	a, err := agent.New(model,
@@ -247,13 +247,13 @@ func TestAfterToolOverride(t *testing.T) {
 func TestAfterToolSkipsUnexecutedAndRecoversPanic(t *testing.T) {
 	t.Parallel()
 
-	model := newFakeModel(
-		reply(callResponse(
+	model := newScriptedModel(
+		respond(callResponse(
 			call("c1", "ghost", `{}`),              // unknown: hook must not fire
 			call("c2", "add", `{"a":1,"b":1}`),     // denied: hook must not fire
 			call("c3", "panicky", `{"a":1,"b":1}`), // executed: hook panics
 		)),
-		reply(textResponse("done")),
+		respond(textResponse("done")),
 	)
 
 	panicky := agent.NewTool("panicky", "Fine tool, hostile hook.",
@@ -301,7 +301,7 @@ func TestTerminateStopsRun(t *testing.T) {
 			return args.Answer, agent.ErrTerminate
 		})
 
-	model := newFakeModel(reply(callResponse(call("c1", "final_answer", `{"answer":"42"}`))))
+	model := newScriptedModel(respond(callResponse(call("c1", "final_answer", `{"answer":"42"}`))))
 
 	a, err := agent.New(model, agent.WithTools(final))
 	require.NoError(t, err)
@@ -329,9 +329,9 @@ func TestTerminateRequiresWholeBatch(t *testing.T) {
 			return "stop", agent.ErrTerminate
 		})
 
-	model := newFakeModel(
-		reply(callResponse(call("c1", "final", `{}`), call("c2", "add", `{"a":1,"b":1}`))),
-		reply(textResponse("kept going")),
+	model := newScriptedModel(
+		respond(callResponse(call("c1", "final", `{}`), call("c2", "add", `{"a":1,"b":1}`))),
+		respond(textResponse("kept going")),
 	)
 
 	a, err := agent.New(model, agent.WithTools(final, addTool()))
@@ -353,9 +353,9 @@ func TestTerminateStillDrainsFollowUps(t *testing.T) {
 			return "stop", agent.ErrTerminate
 		})
 
-	model := newFakeModel(
-		reply(callResponse(call("c1", "final", `{}`))),
-		reply(textResponse("follow-up handled")),
+	model := newScriptedModel(
+		respond(callResponse(call("c1", "final", `{}`))),
+		respond(textResponse("follow-up handled")),
 	)
 
 	a, err := agent.New(model, agent.WithTools(final))
@@ -375,8 +375,8 @@ func TestTerminateStillDrainsFollowUps(t *testing.T) {
 func TestPrepareTurnSwapsModelAndCompacts(t *testing.T) {
 	t.Parallel()
 
-	first := newFakeModel(reply(callResponse(call("c1", "add", `{"a":1,"b":1}`))))
-	second := newFakeModel(reply(textResponse("from the second model")))
+	first := newScriptedModel(respond(callResponse(call("c1", "add", `{"a":1,"b":1}`))))
+	second := newScriptedModel(respond(textResponse("from the second model")))
 
 	a, err := agent.New(first,
 		agent.WithTools(addTool()),
@@ -422,9 +422,9 @@ func TestTruncatedToolCallsAreNotExecuted(t *testing.T) {
 	truncated := callResponse(call("c1", "count", `{}`), call("c2", "count", `{}`))
 	truncated.FinishReason = ai.FinishLength
 
-	model := newFakeModel(
-		reply(truncated),
-		reply(textResponse("reissued")),
+	model := newScriptedModel(
+		respond(truncated),
+		respond(textResponse("reissued")),
 	)
 
 	a, err := agent.New(model, agent.WithTools(counter))
@@ -458,9 +458,9 @@ func TestReportProgressEvents(t *testing.T) {
 			return "done", nil
 		}))
 
-	model := newFakeModel(
-		reply(callResponse(call("c1", "slowly", `{}`), call("c2", "slowly", `{}`))),
-		reply(textResponse("ok")),
+	model := newScriptedModel(
+		respond(callResponse(call("c1", "slowly", `{}`), call("c2", "slowly", `{}`))),
+		respond(textResponse("ok")),
 	)
 
 	a, err := agent.New(model, agent.WithTools(slowly))
@@ -494,9 +494,9 @@ func TestReportProgressOutsideRunIsNoOp(t *testing.T) {
 func TestSteeringCannotOutrunMaxTurns(t *testing.T) {
 	t.Parallel()
 
-	model := newFakeModel(
-		reply(textResponse("one")),
-		reply(textResponse("two")),
+	model := newScriptedModel(
+		respond(textResponse("one")),
+		respond(textResponse("two")),
 	)
 
 	a, err := agent.New(model, agent.WithMaxTurns(1))
@@ -527,14 +527,14 @@ func TestSteeringCannotOutrunMaxTurns(t *testing.T) {
 func TestAsToolSubagent(t *testing.T) {
 	t.Parallel()
 
-	inner := newFakeModel(reply(textResponse("Paris")))
+	inner := newScriptedModel(respond(textResponse("Paris")))
 
 	researcher, err := agent.New(inner, agent.WithSystem("Answer in one word."))
 	require.NoError(t, err)
 
-	outer := newFakeModel(
-		reply(callResponse(call("c1", "research", `{"prompt":"capital of France?"}`))),
-		reply(textResponse("The capital is Paris.")),
+	outer := newScriptedModel(
+		respond(callResponse(call("c1", "research", `{"prompt":"capital of France?"}`))),
+		respond(textResponse("The capital is Paris.")),
 	)
 
 	main, err := agent.New(outer, agent.WithTools(agent.AsTool(researcher, "research", "Delegate a question.")))

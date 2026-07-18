@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -14,6 +12,70 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+const chatTextResponse = `{
+  "id": "chatcmpl-abc123",
+  "object": "chat.completion",
+  "created": 1755000000,
+  "model": "gpt-4o-2024-11-20",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "The capital of France is Paris."
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 14,
+    "completion_tokens": 8,
+    "total_tokens": 22,
+    "prompt_tokens_details": { "cached_tokens": 6 },
+    "completion_tokens_details": { "reasoning_tokens": 0 }
+  }
+}`
+
+const chatToolsResponse = `{
+  "id": "chatcmpl-tool456",
+  "object": "chat.completion",
+  "created": 1755000001,
+  "model": "gpt-4o-2024-11-20",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": null,
+        "tool_calls": [
+          {
+            "id": "call_w1",
+            "type": "function",
+            "function": {
+              "name": "get_weather",
+              "arguments": "{\"city\":\"Paris\",\"unit\":\"celsius\"}"
+            }
+          },
+          {
+            "id": "call_w2",
+            "type": "function",
+            "function": {
+              "name": "get_time",
+              "arguments": "{\"tz\":\"Europe/Paris\"}"
+            }
+          }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 80,
+    "completion_tokens": 40,
+    "total_tokens": 120
+  }
+}`
 
 // newTestModel builds a Model pointed at a fixture-serving httptest server
 // and returns the captured request bodies.
@@ -34,8 +96,8 @@ func newTestModel(t *testing.T, handler http.HandlerFunc, opts ...openai.Option)
 	return openai.New("gpt-4o", append(base, opts...)...)
 }
 
-// serveFixture replies with a JSON fixture and captures the request body.
-func serveFixture(t *testing.T, name, wantPath string, captured *map[string]any) http.HandlerFunc {
+// serveJSON replies with response and captures the request body.
+func serveJSON(t *testing.T, response, wantPath string, captured *map[string]any) http.HandlerFunc {
 	t.Helper()
 
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -49,11 +111,8 @@ func serveFixture(t *testing.T, name, wantPath string, captured *map[string]any)
 			*captured = body
 		}
 
-		data, err := os.ReadFile(filepath.Join("testdata", name)) //nolint:gosec // fixture path built from test constants
-		assert.NoError(t, err)
-
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write(data)
+		_, _ = w.Write([]byte(response))
 	}
 }
 
@@ -72,7 +131,7 @@ func TestChatGenerateText(t *testing.T) {
 
 	var captured map[string]any
 
-	model := newTestModel(t, serveFixture(t, "chat_text.json", "/v1/chat/completions", &captured))
+	model := newTestModel(t, serveJSON(t, chatTextResponse, "/v1/chat/completions", &captured))
 
 	resp, err := model.Generate(t.Context(), ai.Request{
 		System:      "You are terse.",
@@ -111,7 +170,7 @@ func TestChatGenerateVisionWireFormat(t *testing.T) {
 
 	var captured map[string]any
 
-	model := newTestModel(t, serveFixture(t, "chat_text.json", "/v1/chat/completions", &captured))
+	model := newTestModel(t, serveJSON(t, chatTextResponse, "/v1/chat/completions", &captured))
 
 	_, err := model.Generate(t.Context(), ai.Request{
 		Messages: []ai.Message{ai.User(
@@ -143,7 +202,7 @@ func TestChatGenerateToolsRoundTrip(t *testing.T) {
 
 	var captured map[string]any
 
-	model := newTestModel(t, serveFixture(t, "chat_tools.json", "/v1/chat/completions", &captured))
+	model := newTestModel(t, serveJSON(t, chatToolsResponse, "/v1/chat/completions", &captured))
 
 	weatherTool := ai.Tool{
 		Name:        "get_weather",
@@ -189,7 +248,7 @@ func TestChatToolResultAndAssistantHistoryWireFormat(t *testing.T) {
 
 	var captured map[string]any
 
-	model := newTestModel(t, serveFixture(t, "chat_text.json", "/v1/chat/completions", &captured))
+	model := newTestModel(t, serveJSON(t, chatTextResponse, "/v1/chat/completions", &captured))
 
 	_, err := model.Generate(t.Context(), ai.Request{
 		Messages: []ai.Message{
@@ -226,7 +285,7 @@ func TestChatStructuredOutputWireFormat(t *testing.T) {
 
 	var captured map[string]any
 
-	model := newTestModel(t, serveFixture(t, "chat_text.json", "/v1/chat/completions", &captured))
+	model := newTestModel(t, serveJSON(t, chatTextResponse, "/v1/chat/completions", &captured))
 
 	_, err := model.Generate(t.Context(), ai.Request{
 		Messages: []ai.Message{ai.UserText("extract")},
@@ -253,7 +312,7 @@ func TestChatCompatMode(t *testing.T) {
 	var captured map[string]any
 
 	model := newTestModel(t,
-		serveFixture(t, "chat_text.json", "/v1/chat/completions", &captured),
+		serveJSON(t, chatTextResponse, "/v1/chat/completions", &captured),
 		openai.WithCompatMode(),
 	)
 
@@ -272,7 +331,7 @@ func TestChatProviderOptionsExtraFields(t *testing.T) {
 
 	var captured map[string]any
 
-	model := newTestModel(t, serveFixture(t, "chat_text.json", "/v1/chat/completions", &captured))
+	model := newTestModel(t, serveJSON(t, chatTextResponse, "/v1/chat/completions", &captured))
 
 	_, err := model.Generate(t.Context(), ai.Request{
 		Messages: []ai.Message{ai.UserText("hi")},

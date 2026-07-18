@@ -148,7 +148,7 @@ func TestSummarizeEndToEnd(t *testing.T) {
 	prep := harness.Prepare(sess.Path(), harness.Settings{KeepRecentTokens: 200})
 	require.NotNil(t, prep)
 
-	summarizer := newFakeModel("sum", textResponse("## Goal\nDo the thing.", 10))
+	summarizer := newScriptedModel("sum", textResponse("## Goal\nDo the thing.", 10))
 
 	summary, err := harness.Summarize(t.Context(), summarizer, prep, harness.Settings{}, "focus on decisions")
 	require.NoError(t, err)
@@ -183,7 +183,7 @@ func TestSummarizeBranch(t *testing.T) {
 	root := appendText(t, sess, ai.RoleUser, "start", nil)
 	tip := appendText(t, sess, ai.RoleAssistant, "abandoned work", nil)
 
-	summarizer := newFakeModel("sum", textResponse("## What was attempted\nBranch work.", 10))
+	summarizer := newScriptedModel("sum", textResponse("## What was attempted\nBranch work.", 10))
 
 	summary, err := harness.SummarizeBranch(t.Context(), summarizer, sess, tip, root)
 	require.NoError(t, err)
