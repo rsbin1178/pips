@@ -19,6 +19,8 @@ type chatRequest struct {
 	StreamOptions       *chatStreamOptions  `json:"stream_options,omitempty"`
 	ResponseFormat      *chatResponseFormat `json:"response_format,omitempty"`
 	ReasoningEffort     string              `json:"reasoning_effort,omitempty"`
+	Reasoning           *chatReasoning      `json:"reasoning,omitempty"`
+	Thinking            *chatThinking       `json:"thinking,omitempty"`
 }
 
 type chatStreamOptions struct {
@@ -26,10 +28,12 @@ type chatStreamOptions struct {
 }
 
 type chatMessage struct {
-	Role       string         `json:"role"`
-	Content    any            `json:"content,omitempty"` // string or []chatContentPart
-	ToolCalls  []chatToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string         `json:"tool_call_id,omitempty"`
+	Role             string         `json:"role"`
+	Content          any            `json:"content,omitempty"` // string or []chatContentPart
+	ToolCalls        []chatToolCall `json:"tool_calls,omitempty"`
+	ToolCallID       string         `json:"tool_call_id,omitempty"`
+	ReasoningContent string         `json:"reasoning_content,omitempty"`
+	Reasoning        string         `json:"reasoning,omitempty"`
 }
 
 type chatContentPart struct {
@@ -46,6 +50,7 @@ type chatImageURL struct {
 type chatFile struct {
 	Filename string `json:"filename,omitempty"`
 	FileData string `json:"file_data,omitempty"` // data: URL
+	FileID   string `json:"file_id,omitempty"`
 }
 
 type chatToolCall struct {
@@ -82,8 +87,16 @@ type chatToolChoiceName struct {
 }
 
 type chatResponseFormat struct {
-	Type       string          `json:"type"` // "json_schema"
+	Type       string          `json:"type"` // "json_schema" | "json_object"
 	JSONSchema *chatJSONSchema `json:"json_schema,omitempty"`
+}
+
+type chatReasoning struct {
+	Effort string `json:"effort,omitempty"`
+}
+
+type chatThinking struct {
+	Type string `json:"type"` // "enabled"
 }
 
 type chatJSONSchema struct {
@@ -112,6 +125,7 @@ type chatChoiceMessage struct {
 	Content          *string        `json:"content"`
 	ToolCalls        []chatToolCall `json:"tool_calls,omitempty"`
 	ReasoningContent string         `json:"reasoning_content,omitempty"` // compat endpoints (DeepSeek, Ollama)
+	Reasoning        string         `json:"reasoning,omitempty"`         // compat endpoints (OpenRouter, Together)
 }
 
 type chatUsage struct {

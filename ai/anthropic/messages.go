@@ -18,15 +18,12 @@ func (m *Model) Generate(ctx context.Context, req ai.Request) (*ai.Response, err
 
 	var parsed messagesResponse
 
-	raw, err := m.client.PostJSON(ctx, messagesPath, m.authHeaders(), body, &parsed, decodeError)
+	raw, err := m.client.PostJSON(ctx, messagesPath, m.requestHeaders(req), body, &parsed, decodeError)
 	if err != nil {
 		return nil, fmt.Errorf("anthropic: messages: %w", err)
 	}
 
-	resp := responseFrom(parsed, raw, structuredToolNameFor(req))
-	resp.FinishReason = finishReasonForStructured(req, resp.FinishReason)
-
-	return resp, nil
+	return responseFrom(parsed, raw), nil
 }
 
 // Stream implements ai.LanguageModel.
@@ -38,13 +35,13 @@ func (m *Model) Stream(ctx context.Context, req ai.Request) ai.Stream {
 			return
 		}
 
-		stream, err := m.client.PostStream(ctx, messagesPath, m.authHeaders(), body, decodeError)
+		stream, err := m.client.PostStream(ctx, messagesPath, m.requestHeaders(req), body, decodeError)
 		if err != nil {
 			yield(ai.StreamEvent{}, fmt.Errorf("anthropic: messages stream: %w", err))
 			return
 		}
 		defer stream.Close() //nolint:errcheck // best-effort cleanup
 
-		newStreamDecoder(req).emit(newSSEParser(stream, m.client.MaxStreamLineSize()), yield)
+		newStreamDecoder().emit(newSSEParser(stream, m.client.MaxStreamLineSize()), yield)
 	}
 }

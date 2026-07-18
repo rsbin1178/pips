@@ -11,7 +11,7 @@ import (
 // shape. The system prompt becomes top-level instructions; messages become a
 // flat list of typed input items.
 func (m *Model) responsesRequestFrom(req ai.Request, stream bool) (any, error) {
-	input, err := responseInputFrom(req.Messages)
+	input, err := responseInputFrom(req.Messages, m.label())
 	if err != nil {
 		return nil, err
 	}
@@ -26,6 +26,9 @@ func (m *Model) responsesRequestFrom(req ai.Request, stream bool) (any, error) {
 		TopP:            req.TopP,
 		MaxOutputTokens: req.MaxTokens,
 		Stream:          stream,
+	}
+	if m.compat.IncludeEncryptedReasoning {
+		out.Include = []string{"reasoning.encrypted_content"}
 	}
 
 	if rf := req.ResponseFormat; rf != nil {
@@ -53,14 +56,14 @@ func (m *Model) responsesRequestFrom(req ai.Request, stream bool) (any, error) {
 		}
 	}
 
-	return mergeExtraFields(out, requestOptions(req).ExtraFields)
+	return mergeExtraFields(out, requestOptions(req, m.provider).ExtraFields)
 }
 
-func responseInputFrom(msgs []ai.Message) ([]responseItem, error) {
+func responseInputFrom(msgs []ai.Message, label string) ([]responseItem, error) {
 	var out []responseItem
 
 	for _, msg := range msgs {
-		items, err := responseItemsFrom(msg)
+		items, err := responseItemsFrom(msg, label)
 		if err != nil {
 			return nil, err
 		}
@@ -71,7 +74,7 @@ func responseInputFrom(msgs []ai.Message) ([]responseItem, error) {
 	return out, nil
 }
 
-func responseItemsFrom(msg ai.Message) ([]responseItem, error) {
+func responseItemsFrom(msg ai.Message, label string) ([]responseItem, error) {
 	switch msg.Role {
 	case ai.RoleSystem:
 		return []responseItem{{Type: typeMessage, Role: "system", Content: []responseContent{{Type: "input_text", Text: textOf(msg.Parts)}}}}, nil
@@ -87,7 +90,7 @@ func responseItemsFrom(msg ai.Message) ([]responseItem, error) {
 	case ai.RoleTool:
 		return responseToolOutputs(msg.Parts)
 	default:
-		return nil, fmt.Errorf("openai: unsupported message role %q", msg.Role)
+		return nil, fmt.Errorf("%s: unsupported message role %q", label, msg.Role)
 	}
 }
 
@@ -106,8 +109,14 @@ func responseUserContent(parts []ai.Part) ([]responseContent, error) {
 
 			out = append(out, responseContent{Type: "input_image", ImageURL: url})
 		case ai.FilePart:
+			if p.Source.IsID() {
+				out = append(out, responseContent{Type: "input_file", FileID: p.Source.ID})
+				continue
+			}
+
 			if p.Source.IsURL() {
-				return nil, fmt.Errorf("openai: file parts require inline data, got URL %q: %w", p.Source.URL, ai.ErrUnsupported)
+				out = append(out, responseContent{Type: "input_file", FileURL: p.Source.URL})
+				continue
 			}
 
 			out = append(out, responseContent{Type: "input_file", Filename: p.Name, FileData: dataURL(p.Source)})
@@ -120,18 +129,42 @@ func responseUserContent(parts []ai.Part) ([]responseContent, error) {
 }
 
 // responseAssistantItems renders a prior assistant turn. Text becomes an
-// output_text message; each tool call becomes its own function_call item.
-// Reasoning is dropped (the API reconstructs it from server-side state).
+// output_text message, replayable reasoning becomes a reasoning input item,
+// and each tool call becomes its own function_call item.
 func responseAssistantItems(parts []ai.Part) []responseItem {
 	var items []responseItem
 
 	var text []responseContent
 
+	flushText := func() {
+		if len(text) == 0 {
+			return
+		}
+
+		items = append(items, responseItem{Type: typeMessage, Role: "assistant", Content: text})
+		text = nil
+	}
+
 	for _, part := range parts {
 		switch p := part.(type) {
 		case ai.TextPart:
 			text = append(text, responseContent{Type: "output_text", Text: p.Text})
+		case ai.ReasoningPart:
+			state, ok := decodeResponsesReasoningState(p.Signature)
+			if !ok {
+				continue
+			}
+
+			flushText()
+
+			items = append(items, responseItem{
+				ID:               state.ID,
+				Type:             typeReasoning,
+				EncryptedContent: state.EncryptedContent,
+			})
 		case ai.ToolCallPart:
+			flushText()
+
 			items = append(items, responseItem{
 				Type:      typeFunctionCall,
 				CallID:    p.ID,
@@ -141,9 +174,7 @@ func responseAssistantItems(parts []ai.Part) []responseItem {
 		}
 	}
 
-	if len(text) > 0 {
-		items = append([]responseItem{{Type: typeMessage, Role: "assistant", Content: text}}, items...)
-	}
+	flushText()
 
 	return items
 }
@@ -202,7 +233,7 @@ func responsesToolChoiceFrom(choice ai.ToolChoice) any {
 
 // responseFromResponses translates a Responses response body into the
 // portable shape.
-func responseFromResponses(body responsesResponse, raw []byte) *ai.Response {
+func responseFromResponses(body responsesResponse, raw []byte, provider ai.Provider) *ai.Response {
 	msg := ai.Message{Role: ai.RoleAssistant}
 
 	for _, item := range body.Output {
@@ -212,7 +243,7 @@ func responseFromResponses(body responsesResponse, raw []byte) *ai.Response {
 	return &ai.Response{
 		ID:           body.ID,
 		Model:        body.Model,
-		Provider:     ai.ProviderOpenAI,
+		Provider:     provider,
 		Message:      msg,
 		FinishReason: finishReasonFromResponses(body),
 		Usage:        usageFromResponses(body.Usage),
@@ -228,14 +259,15 @@ func appendOutputItem(msg *ai.Message, item responseItem) {
 				msg.Parts = append(msg.Parts, ai.TextPart{Text: content.Text})
 			}
 		}
-	case "reasoning":
+	case typeReasoning:
 		var text strings.Builder
 		for _, s := range item.Summary {
 			text.WriteString(s.Text)
 		}
 
-		if text.Len() > 0 {
-			msg.Parts = append(msg.Parts, ai.ReasoningPart{Text: text.String()})
+		signature := encodeResponsesReasoningState(item)
+		if text.Len() > 0 || signature != "" {
+			msg.Parts = append(msg.Parts, ai.ReasoningPart{Text: text.String(), Signature: signature})
 		}
 	case typeFunctionCall:
 		msg.Parts = append(msg.Parts, ai.ToolCallPart{

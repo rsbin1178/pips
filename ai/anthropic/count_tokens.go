@@ -13,12 +13,13 @@ const countTokensPath = "messages/count_tokens"
 // fields the endpoint rejects (max_tokens, stream). cache_control markers are
 // also dropped: they create no breakpoint here and only bloat the body.
 type countTokensRequest struct {
-	Model      string          `json:"model"`
-	Messages   []wireMessage   `json:"messages"`
-	System     []wireTextBlock `json:"system,omitempty"`
-	Tools      []wireTool      `json:"tools,omitempty"`
-	ToolChoice *wireToolChoice `json:"tool_choice,omitempty"`
-	Thinking   *wireThinking   `json:"thinking,omitempty"`
+	Model        string            `json:"model"`
+	Messages     []wireMessage     `json:"messages"`
+	System       []wireTextBlock   `json:"system,omitempty"`
+	Tools        []wireTool        `json:"tools,omitempty"`
+	ToolChoice   *wireToolChoice   `json:"tool_choice,omitempty"`
+	Thinking     *wireThinking     `json:"thinking,omitempty"`
+	OutputConfig *wireOutputConfig `json:"output_config,omitempty"`
 }
 
 type countTokensResponse struct {
@@ -37,7 +38,7 @@ func (m *Model) CountTokens(ctx context.Context, req ai.Request) (int, error) {
 	body := countTokensRequest{
 		Model:    m.model,
 		Messages: messages,
-		System:   systemBlocksFrom(req.System, false),
+		System:   systemBlocksFrom(req.System, false, ""),
 	}
 
 	full := messagesRequest{}
@@ -47,9 +48,10 @@ func (m *Model) CountTokens(ctx context.Context, req ai.Request) (int, error) {
 	body.Tools = full.Tools
 	body.ToolChoice = full.ToolChoice
 	body.Thinking = full.Thinking
+	body.OutputConfig = full.OutputConfig
 
 	var parsed countTokensResponse
-	if _, err := m.client.PostJSON(ctx, countTokensPath, m.authHeaders(), body, &parsed, decodeError); err != nil {
+	if _, err := m.client.PostJSON(ctx, countTokensPath, m.requestHeaders(req), body, &parsed, decodeError); err != nil {
 		return 0, fmt.Errorf("anthropic: count_tokens: %w", err)
 	}
 

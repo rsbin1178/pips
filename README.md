@@ -4,7 +4,8 @@ Go building blocks for AI applications. Current packages:
 
 - **`ai`** — unified, provider-agnostic LLM client speaking the native wire
   protocols of **OpenAI** (Chat Completions + Responses), **Anthropic**
-  (Messages), and **Google Gemini** (generateContent). No vendor SDKs.
+  (Messages), and **Google Gemini** (generateContent), plus reviewed profiles
+  for seven OpenAI-shaped services. No vendor SDKs.
 - **`agent`** — agent runtime core on top of `ai`: the autonomous loop (model
   → tools → results → model), typed tools, event streaming, stop conditions,
   approval gates with pause/resume, and serializable sessions.
@@ -52,6 +53,48 @@ Switching to Anthropic or Gemini is a one-line change:
 ```go
 model := anthropic.New("claude-sonnet-4-5", anthropic.WithAPIKey(key))
 model := gemini.New("gemini-2.5-flash", gemini.WithAPIKey(key))
+```
+
+### OpenAI-shaped providers
+
+`ai/openai/compat` reuses the OpenAI protocol implementation while preserving
+the actual provider in responses, streams, errors, request options, endpoint
+defaults, and capability reports:
+
+```go
+import "github.com/rsbin/pips/ai/openai/compat"
+
+model := compat.DeepSeek("deepseek-reasoner")
+model := compat.XAI("grok-4") // Responses API, including encrypted reasoning replay
+```
+
+| Provider | Constructor | Default API | Credential |
+|---|---|---|---|
+| OpenAI | `openai.New` | Auto: Chat or Responses | `OPENAI_API_KEY` |
+| DeepSeek | `compat.DeepSeek` | Chat Completions | `DEEPSEEK_API_KEY` |
+| Groq | `compat.Groq` | Chat Completions | `GROQ_API_KEY` |
+| xAI | `compat.XAI` | Responses | `XAI_API_KEY` |
+| OpenRouter | `compat.OpenRouter` | Chat Completions | `OPENROUTER_API_KEY` |
+| Cerebras | `compat.Cerebras` | Chat Completions | `CEREBRAS_API_KEY` |
+| Together AI | `compat.Together` | Chat Completions | `TOGETHER_API_KEY` |
+| Mistral | `compat.Mistral` | Chat Completions | `MISTRAL_API_KEY` |
+
+Profiles encode documented wire differences such as token-limit fields,
+reasoning history, structured-output shape, and stream usage. Capabilities for
+routers and unknown model IDs are intentionally conservative. Native protocols
+such as Bedrock Converse, Vertex AI, Azure deployments, and Mistral
+Conversations are not represented as compatibility profiles.
+
+Provider-specific request options use the real provider key. For example,
+DeepSeek extras belong under `ai.ProviderDeepSeek`, not `ai.ProviderOpenAI`.
+Uploaded file IDs are provider-scoped; OpenAI Responses also accepts file URLs,
+Anthropic file IDs opt into its Files API beta automatically, and Gemini uses
+Files API URIs through `ai.FileURL`.
+
+Run the provider switcher with the matching credential in the environment:
+
+```sh
+go run ./examples/provider-switch -provider deepseek -model deepseek-chat
 ```
 
 See `examples/` for streaming, vision, tool calling, structured output, and

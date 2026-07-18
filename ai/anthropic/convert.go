@@ -14,11 +14,26 @@ type RequestOptions struct {
 	// CacheLastMessage places a cache_control breakpoint on the last content
 	// block of the last message, caching the conversation prefix up to there.
 	CacheLastMessage bool
+	// AutomaticCache enables Anthropic's top-level moving cache breakpoint.
+	AutomaticCache bool
+	// CacheTTL applies to automatic caching and explicit system/last-message
+	// breakpoints. Empty uses the provider's five-minute default.
+	CacheTTL CacheTTL
 	// ExtraFields is merged into the top level of the outgoing JSON request,
 	// overriding colliding keys — the escape hatch for parameters not modeled
 	// portably (top_k, metadata, service_tier, ...).
 	ExtraFields map[string]any
 }
+
+// CacheTTL selects the lifetime of an Anthropic prompt-cache breakpoint. The
+// empty value uses the provider's five-minute default without sending ttl.
+type CacheTTL string
+
+// Prompt-cache TTL values.
+const (
+	CacheTTL5Minutes CacheTTL = "5m"
+	CacheTTL1Hour    CacheTTL = "1h"
+)
 
 func requestOptions(req ai.Request) RequestOptions {
 	if raw, ok := req.ProviderOptions[ai.ProviderAnthropic]; ok {
@@ -30,10 +45,6 @@ func requestOptions(req ai.Request) RequestOptions {
 	return RequestOptions{}
 }
 
-// structuredToolName is the synthetic tool used to coerce structured output
-// on a provider that has no native JSON-schema response format.
-const structuredToolName = "structured_output"
-
 // requestFrom translates a portable request into the Messages wire shape.
 func (m *Model) requestFrom(req ai.Request, stream bool) (any, error) {
 	opts := requestOptions(req)
@@ -44,18 +55,21 @@ func (m *Model) requestFrom(req ai.Request, stream bool) (any, error) {
 	}
 
 	if opts.CacheLastMessage {
-		markLastMessageCached(messages)
+		markLastMessageCached(messages, opts.CacheTTL)
 	}
 
 	out := messagesRequest{
 		Model:       m.model,
 		Messages:    messages,
-		System:      systemBlocksFrom(req.System, opts.CacheSystem),
+		System:      systemBlocksFrom(req.System, opts.CacheSystem, opts.CacheTTL),
 		MaxTokens:   m.maxTokensFor(req),
 		Temperature: req.Temperature,
 		TopP:        req.TopP,
 		StopSeqs:    req.Stop,
 		Stream:      stream,
+	}
+	if opts.AutomaticCache {
+		out.CacheControl = cacheControlFrom(opts.CacheTTL)
 	}
 
 	applyTools(&out, req)
@@ -73,14 +87,14 @@ func (m *Model) maxTokensFor(req ai.Request) int {
 	return m.maxTokens
 }
 
-func systemBlocksFrom(system string, cache bool) []wireTextBlock {
+func systemBlocksFrom(system string, cache bool, ttl CacheTTL) []wireTextBlock {
 	if system == "" {
 		return nil
 	}
 
 	block := wireTextBlock{Type: blockTypeText, Text: system}
 	if cache {
-		block.CacheControl = &cacheControl{Type: "ephemeral"}
+		block.CacheControl = cacheControlFrom(ttl)
 	}
 
 	return []wireTextBlock{block}
@@ -88,7 +102,7 @@ func systemBlocksFrom(system string, cache bool) []wireTextBlock {
 
 // markLastMessageCached puts a cache breakpoint on the final block of the
 // final message, caching the conversation prefix up to that point.
-func markLastMessageCached(messages []wireMessage) {
+func markLastMessageCached(messages []wireMessage, ttl CacheTTL) {
 	if len(messages) == 0 {
 		return
 	}
@@ -98,7 +112,11 @@ func markLastMessageCached(messages []wireMessage) {
 		return
 	}
 
-	last.Content[len(last.Content)-1].CacheControl = &cacheControl{Type: "ephemeral"}
+	last.Content[len(last.Content)-1].CacheControl = cacheControlFrom(ttl)
+}
+
+func cacheControlFrom(ttl CacheTTL) *cacheControl {
+	return &cacheControl{Type: "ephemeral", TTL: string(ttl)}
 }
 
 func wireMessagesFrom(msgs []ai.Message) ([]wireMessage, error) {
@@ -225,6 +243,10 @@ func toolResultBlocksFrom(parts []ai.Part) ([]wireBlock, error) {
 }
 
 func sourceFrom(src ai.MediaSource) *wireSource {
+	if src.IsID() {
+		return &wireSource{Type: "file", FileID: src.ID}
+	}
+
 	if src.IsURL() {
 		return &wireSource{Type: "url", URL: src.URL}
 	}
@@ -265,37 +287,17 @@ func toolChoiceFrom(choice ai.ToolChoice) *wireToolChoice {
 	}
 }
 
-// applyStructuredOutput coerces schema-constrained JSON by declaring a single
-// tool whose input is the target schema and forcing its use. The response
-// converter turns that tool_use back into text so [ai.GenerateTyped] and
-// [ai.Response.Text] behave the same across providers.
+// applyStructuredOutput uses Anthropic's native JSON Schema output format.
 func applyStructuredOutput(out *messagesRequest, req ai.Request) {
 	rf := req.ResponseFormat
 	if rf == nil || rf.Schema == nil {
 		return
 	}
 
-	name := structuredToolNameFor(req)
-	out.Tools = append(out.Tools, wireTool{
-		Name:        name,
-		Description: rf.Description,
-		InputSchema: rf.Schema,
-	})
-	out.ToolChoice = &wireToolChoice{Type: "tool", Name: name}
-}
-
-// structuredToolNameFor returns the tool name used to coerce structured
-// output for req, or "" when the request did not request it.
-func structuredToolNameFor(req ai.Request) string {
-	if req.ResponseFormat == nil || req.ResponseFormat.Schema == nil {
-		return ""
-	}
-
-	if req.ResponseFormat.Name != "" {
-		return req.ResponseFormat.Name
-	}
-
-	return structuredToolName
+	out.OutputConfig = &wireOutputConfig{Format: &wireOutputFormat{
+		Type:   "json_schema",
+		Schema: rf.Schema,
+	}}
 }
 
 func applyThinking(out *messagesRequest, req ai.Request) {

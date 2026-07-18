@@ -44,16 +44,19 @@ const (
 	typeFunction     = "function"
 	typeFunctionCall = "function_call"
 	typeMessage      = "message"
+	typeReasoning    = "reasoning"
 )
 
 // Model is an ai.LanguageModel backed by the OpenAI API. Create one with
 // [New]; it is immutable and safe for concurrent use.
 type Model struct {
-	model  string
-	api    API
-	compat bool
-	client *httpx.Client
-	apiKey string
+	model        string
+	provider     ai.Provider
+	api          API
+	compat       Compatibility
+	capabilities *ai.Capabilities
+	client       *httpx.Client
+	apiKey       string
 }
 
 // Compile-time interface checks.
@@ -65,15 +68,21 @@ var (
 type Option func(*options)
 
 type options struct {
-	cfg    httpx.Config
-	api    API
-	compat bool
+	cfg          httpx.Config
+	api          API
+	provider     ai.Provider
+	compat       Compatibility
+	capabilities *ai.Capabilities
+	apiKeySet    bool
 }
 
 // WithAPIKey sets the API key. Defaults to the OPENAI_API_KEY environment
 // variable.
 func WithAPIKey(key string) Option {
-	return func(o *options) { o.cfg.APIKey = key }
+	return func(o *options) {
+		o.cfg.APIKey = key
+		o.apiKeySet = true
+	}
 }
 
 // WithBaseURL points the model at a different endpoint, including any path
@@ -107,11 +116,33 @@ func WithAPI(api API) Option {
 	return func(o *options) { o.api = api }
 }
 
+// WithProvider sets the service identity independently of the OpenAI wire
+// protocol. Use it for OpenAI-compatible providers so responses, errors,
+// streams, capabilities, and ProviderOptions retain the real identity.
+func WithProvider(provider ai.Provider) Option {
+	return func(o *options) { o.provider = provider }
+}
+
+// WithCapabilities overrides the static OpenAI model table. Compatible
+// provider profiles use conservative, provider-specific capability data.
+func WithCapabilities(capabilities ai.Capabilities) Option {
+	return func(o *options) { o.capabilities = &capabilities }
+}
+
+// WithCompatibility configures documented wire differences on an
+// OpenAI-shaped endpoint. Its zero value preserves OpenAI behavior.
+func WithCompatibility(compat Compatibility) Option {
+	return func(o *options) { o.compat = compat }
+}
+
 // WithCompatMode tunes requests for OpenAI-compatible third-party endpoints:
 // the deprecated max_tokens field is sent instead of max_completion_tokens,
 // and stream_options.include_usage is omitted. Combine with [WithBaseURL].
 func WithCompatMode() Option {
-	return func(o *options) { o.compat = true }
+	return func(o *options) {
+		o.compat.MaxTokensField = MaxTokensFieldLegacy
+		o.compat.StreamUsage = StreamUsageOmit
+	}
 }
 
 // WithAllowHTTP permits a plain-HTTP base URL (local inference servers).
@@ -134,29 +165,35 @@ func WithMaxStreamLineSize(n int) Option {
 // Configuration problems (such as an invalid base URL) surface on the first
 // call, not from New.
 func New(model string, opts ...Option) *Model {
-	o := options{api: APIAuto}
+	o := options{api: APIAuto, provider: ai.ProviderOpenAI}
 	for _, opt := range opts {
 		opt(&o)
 	}
 
-	if o.cfg.APIKey == "" {
+	if !o.apiKeySet {
 		o.cfg.APIKey = os.Getenv("OPENAI_API_KEY")
 	}
 
 	return &Model{
-		model:  model,
-		api:    cmp.Or(o.api, APIAuto),
-		compat: o.compat,
-		client: httpx.New(o.cfg, defaultBaseURL),
-		apiKey: o.cfg.APIKey,
+		model:        model,
+		provider:     cmp.Or(o.provider, ai.ProviderOpenAI),
+		api:          cmp.Or(o.api, APIAuto),
+		compat:       o.compat,
+		capabilities: o.capabilities,
+		client:       httpx.New(o.cfg, defaultBaseURL),
+		apiKey:       o.cfg.APIKey,
 	}
 }
 
 // Provider implements ai.LanguageModel.
-func (m *Model) Provider() ai.Provider { return ai.ProviderOpenAI }
+func (m *Model) Provider() ai.Provider { return m.provider }
 
 // ModelID implements ai.LanguageModel.
 func (m *Model) ModelID() string { return m.model }
+
+func (m *Model) label() string {
+	return string(m.provider)
+}
 
 // resolveAPI applies APIAuto routing for the bound model.
 func (m *Model) resolveAPI() API {

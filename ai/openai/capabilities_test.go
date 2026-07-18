@@ -15,9 +15,9 @@ func TestCapabilities(t *testing.T) {
 		model string
 		want  ai.Capabilities
 	}{
-		{"gpt-4o", ai.Capabilities{Text: true, Vision: true, Tools: true, StructuredOutput: true, PromptCaching: true}},
-		{"gpt-5", ai.Capabilities{Text: true, Vision: true, Tools: true, StructuredOutput: true, Reasoning: true, PromptCaching: true}},
-		{"o3-mini", ai.Capabilities{Text: true, Vision: true, Tools: true, StructuredOutput: true, Reasoning: true, PromptCaching: true}},
+		{"gpt-4o", ai.Capabilities{Text: true, Vision: true, Documents: true, Tools: true, StructuredOutput: true, PromptCaching: true}},
+		{"gpt-5", ai.Capabilities{Text: true, Vision: true, Documents: true, Tools: true, StructuredOutput: true, Reasoning: true, PromptCaching: true}},
+		{"o3-mini", ai.Capabilities{Text: true, Vision: true, Documents: true, Tools: true, StructuredOutput: true, Reasoning: true, PromptCaching: true}},
 		{"gpt-3.5-turbo", ai.Capabilities{Text: true, Tools: true}},
 	}
 	for _, tc := range cases {

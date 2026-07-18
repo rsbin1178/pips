@@ -17,12 +17,14 @@ type responsesRequest struct {
 	MaxOutputTokens *int                `json:"max_output_tokens,omitempty"`
 	Text            *responsesText      `json:"text,omitempty"`
 	Reasoning       *responsesReasoning `json:"reasoning,omitempty"`
+	Include         []string            `json:"include,omitempty"`
 	Stream          bool                `json:"stream,omitempty"`
 }
 
 // responseItem is one input or output item. Only the fields relevant to its
 // Type are populated; Type selects the shape.
 type responseItem struct {
+	ID      string            `json:"id,omitempty"`
 	Type    string            `json:"type,omitempty"` // "message"|"function_call"|"function_call_output"|"reasoning"
 	Role    string            `json:"role,omitempty"`
 	Content []responseContent `json:"content,omitempty"`
@@ -36,7 +38,9 @@ type responseItem struct {
 	Output string `json:"output,omitempty"`
 
 	// reasoning (output only)
-	Summary []responseSummary `json:"summary,omitempty"`
+	Summary          []responseSummary `json:"summary,omitempty"`
+	EncryptedContent string            `json:"encrypted_content,omitempty"`
+	Status           string            `json:"status,omitempty"`
 }
 
 type responseContent struct {
@@ -44,6 +48,8 @@ type responseContent struct {
 	Text     string `json:"text,omitempty"`
 	ImageURL string `json:"image_url,omitempty"`
 	FileData string `json:"file_data,omitempty"`
+	FileID   string `json:"file_id,omitempty"`
+	FileURL  string `json:"file_url,omitempty"`
 	Filename string `json:"filename,omitempty"`
 }
 

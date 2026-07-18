@@ -23,7 +23,7 @@ type Recipe struct {
 func main() {
 	model := openai.New("gpt-4o", openai.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
 	// Structured output is portable: anthropic.New / gemini.New work as-is
-	// (Anthropic uses a forced tool call, Gemini a response schema).
+	// (each adapter uses its provider's native schema format).
 
 	recipe, resp, err := ai.GenerateTyped[Recipe](context.Background(), model, ai.Request{
 		Messages: []ai.Message{ai.UserText(

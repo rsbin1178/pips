@@ -16,17 +16,28 @@ const (
 // Messages API wire types — the subset this adapter produces and consumes.
 
 type messagesRequest struct {
-	Model       string          `json:"model"`
-	Messages    []wireMessage   `json:"messages"`
-	System      []wireTextBlock `json:"system,omitempty"`
-	MaxTokens   int             `json:"max_tokens"`
-	Temperature *float64        `json:"temperature,omitempty"`
-	TopP        *float64        `json:"top_p,omitempty"`
-	StopSeqs    []string        `json:"stop_sequences,omitempty"`
-	Tools       []wireTool      `json:"tools,omitempty"`
-	ToolChoice  *wireToolChoice `json:"tool_choice,omitempty"`
-	Thinking    *wireThinking   `json:"thinking,omitempty"`
-	Stream      bool            `json:"stream,omitempty"`
+	Model        string            `json:"model"`
+	Messages     []wireMessage     `json:"messages"`
+	System       []wireTextBlock   `json:"system,omitempty"`
+	MaxTokens    int               `json:"max_tokens"`
+	Temperature  *float64          `json:"temperature,omitempty"`
+	TopP         *float64          `json:"top_p,omitempty"`
+	StopSeqs     []string          `json:"stop_sequences,omitempty"`
+	Tools        []wireTool        `json:"tools,omitempty"`
+	ToolChoice   *wireToolChoice   `json:"tool_choice,omitempty"`
+	Thinking     *wireThinking     `json:"thinking,omitempty"`
+	OutputConfig *wireOutputConfig `json:"output_config,omitempty"`
+	CacheControl *cacheControl     `json:"cache_control,omitempty"`
+	Stream       bool              `json:"stream,omitempty"`
+}
+
+type wireOutputConfig struct {
+	Format *wireOutputFormat `json:"format,omitempty"`
+}
+
+type wireOutputFormat struct {
+	Type   string     `json:"type"` // "json_schema"
+	Schema *ai.Schema `json:"schema"`
 }
 
 type wireThinking struct {
@@ -78,13 +89,15 @@ type wireTextBlock struct {
 // cacheControl marks a prompt-caching breakpoint.
 type cacheControl struct {
 	Type string `json:"type"` // "ephemeral"
+	TTL  string `json:"ttl,omitempty"`
 }
 
 type wireSource struct {
-	Type      string `json:"type"` // "base64" | "url"
+	Type      string `json:"type"` // "base64" | "url" | "file"
 	MediaType string `json:"media_type,omitempty"`
 	Data      string `json:"data,omitempty"`
 	URL       string `json:"url,omitempty"`
+	FileID    string `json:"file_id,omitempty"`
 }
 
 type wireTool struct {

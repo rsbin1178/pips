@@ -17,8 +17,10 @@ func TestCapabilities(t *testing.T) {
 	// (the package intentionally exposes no image/embedding constructor).
 	assert.True(t, caps.Text)
 	assert.True(t, caps.Vision)
+	assert.True(t, caps.Documents)
 	assert.True(t, caps.Tools)
 	assert.True(t, caps.Reasoning)
+	assert.True(t, caps.TokenCounting)
 	assert.False(t, caps.ImageGeneration)
 	assert.False(t, caps.Embeddings)
 }

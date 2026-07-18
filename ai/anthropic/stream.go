@@ -13,11 +13,8 @@ import (
 // content_block_start / content_block_delta* / content_block_stop, then
 // message_delta (carrying stop_reason and output usage) and message_stop.
 // Thinking blocks emit thinking_delta then signature_delta; tool_use blocks
-// emit input_json_delta. A structured-output tool call is rewritten into text
-// deltas so streaming matches the other providers.
+// emit input_json_delta.
 type streamDecoder struct {
-	structured bool // request used ResponseFormat (forced tool = the answer)
-
 	blockKind map[int]blockKind
 	toolIndex map[int]int // content-block index -> ai tool-call index
 	nextTool  int
@@ -36,14 +33,12 @@ const (
 	blockText
 	blockThinking
 	blockToolUse
-	blockStructured
 )
 
-func newStreamDecoder(req ai.Request) *streamDecoder {
+func newStreamDecoder() *streamDecoder {
 	return &streamDecoder{
-		structured: req.ResponseFormat != nil,
-		blockKind:  make(map[int]blockKind),
-		toolIndex:  make(map[int]int),
+		blockKind: make(map[int]blockKind),
+		toolIndex: make(map[int]int),
 	}
 }
 
@@ -112,7 +107,7 @@ func (d *streamDecoder) usage() *ai.Usage {
 }
 
 func (d *streamDecoder) handleMessageStart(env streamEnvelope, yield func(ai.StreamEvent, error) bool) bool {
-	ev := ai.StreamEvent{Type: ai.StreamMessageStart}
+	ev := ai.StreamEvent{Type: ai.StreamMessageStart, Provider: ai.ProviderAnthropic}
 	if env.Message != nil {
 		ev.ID = env.Message.ID
 		ev.Model = env.Message.Model
@@ -143,15 +138,8 @@ func (d *streamDecoder) handleBlockStart(env streamEnvelope, yield func(ai.Strea
 	return true
 }
 
-// startToolBlock begins a tool_use block. When the request coerced structured
-// output, its single forced tool is the answer, so its input is streamed as
-// text rather than a tool call.
+// startToolBlock begins a tool_use block.
 func (d *streamDecoder) startToolBlock(env streamEnvelope, yield func(ai.StreamEvent, error) bool) bool {
-	if d.structured {
-		d.blockKind[env.Index] = blockStructured
-		return true
-	}
-
 	d.blockKind[env.Index] = blockToolUse
 
 	toolIdx := d.nextTool
@@ -185,13 +173,8 @@ func (d *streamDecoder) handleBlockDelta(env streamEnvelope, yield func(ai.Strea
 	}
 }
 
-// handleInputDelta routes a tool input fragment: to a text delta for a
-// structured-output block, to a tool-call delta otherwise.
+// handleInputDelta routes a tool input fragment to its normalized tool call.
 func (d *streamDecoder) handleInputDelta(env streamEnvelope, yield func(ai.StreamEvent, error) bool) bool {
-	if d.blockKind[env.Index] == blockStructured {
-		return yield(ai.StreamEvent{Type: ai.StreamTextDelta, Text: env.Delta.PartialJSON}, nil)
-	}
-
 	return yield(ai.StreamEvent{
 		Type:          ai.StreamToolCallDelta,
 		ToolCallIndex: d.toolIndex[env.Index],
@@ -210,9 +193,6 @@ func (d *streamDecoder) handleBlockStop(env streamEnvelope, yield func(ai.Stream
 func (d *streamDecoder) handleMessageDelta(env streamEnvelope, _ func(ai.StreamEvent, error) bool) bool {
 	if env.Delta != nil && env.Delta.StopReason != "" {
 		d.finish = finishReasonFrom(env.Delta.StopReason)
-		if d.structured && d.finish == ai.FinishToolCalls {
-			d.finish = ai.FinishStop
-		}
 	}
 
 	if env.Usage != nil {

@@ -51,7 +51,12 @@ func (s *streamState) emitChunk(chunk generateResponse, yield func(ai.StreamEven
 	if !s.startSent {
 		s.startSent = true
 
-		if !yield(ai.StreamEvent{Type: ai.StreamMessageStart, ID: chunk.ResponseID, Model: chunk.ModelVersion}, nil) {
+		if !yield(ai.StreamEvent{
+			Type:     ai.StreamMessageStart,
+			Provider: ai.ProviderGemini,
+			ID:       chunk.ResponseID,
+			Model:    chunk.ModelVersion,
+		}, nil) {
 			return false
 		}
 	}
