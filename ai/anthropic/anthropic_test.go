@@ -319,3 +319,27 @@ func TestCountTokens(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 42, n)
 }
+
+type weatherOut struct {
+	Temp float64 `json:"temp"`
+}
+
+// TestGenerateTypedThroughMessages covers AC6 for Anthropic: the forced-tool
+// structured output round-trips into a typed value.
+func TestGenerateTypedThroughMessages(t *testing.T) {
+	t.Parallel()
+
+	model := newTestModel(t, serveFixture(t, "structured.json", "/v1/messages", nil))
+
+	got, resp, err := ai.GenerateTyped[weatherOut](t.Context(), model, ai.Request{
+		Messages: []ai.Message{ai.UserText("weather")},
+		ResponseFormat: &ai.ResponseFormat{
+			Name:   "weather",
+			Schema: &ai.Schema{Type: "object", Properties: map[string]*ai.Schema{"temp": {Type: "number"}}, Required: []string{"temp"}},
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.InDelta(t, 21.5, got.Temp, 1e-9)
+	assert.Equal(t, ai.FinishStop, resp.FinishReason)
+}
