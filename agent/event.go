@@ -1,6 +1,10 @@
 package agent
 
-import "github.com/rsbin/pips/ai"
+import (
+	"time"
+
+	"github.com/rsbin/pips/ai"
+)
 
 // EventType discriminates [Event] variants.
 type EventType string
@@ -43,6 +47,13 @@ const (
 // contents as read-only.
 type Event struct {
 	Type EventType
+	// RunID correlates every event in one invocation. ParentRunID links a
+	// nested invocation to the run whose tool or callback started it. Agent is
+	// the configured [Agent.Name], and Time is the UTC emission time.
+	RunID       string
+	ParentRunID string
+	Agent       string
+	Time        time.Time
 
 	// Turn is the 1-based turn number, 0 on run_start.
 	Turn int

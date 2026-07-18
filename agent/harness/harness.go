@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"iter"
 	"os"
 	"sync"
 
@@ -36,6 +37,7 @@ type Harness struct {
 	model   ai.LanguageModel
 	session *Session
 	active  *agent.Session
+	cancel  context.CancelFunc
 	cfg     hconfig
 }
 
@@ -246,6 +248,22 @@ func (h *Harness) FollowUp(msgs ...ai.Message) error {
 	return h.queue(func(s *agent.Session) { s.FollowUp(msgs...) })
 }
 
+// Cancel requests cancellation of the active prompt run. It is safe to call
+// concurrently and returns [ErrIdle] when no agent run is active.
+func (h *Harness) Cancel() error {
+	h.mu.Lock()
+	cancel := h.cancel
+	h.mu.Unlock()
+
+	if cancel == nil {
+		return ErrIdle
+	}
+
+	cancel()
+
+	return nil
+}
+
 func (h *Harness) queue(fn func(*agent.Session)) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -284,54 +302,162 @@ func (h *Harness) PromptTemplate(ctx context.Context, name string, args ...strin
 // are persisted at turn boundaries, with assistant entries carrying their
 // turn's usage; a failed run keeps everything recorded up to the failure.
 func (h *Harness) PromptMessages(ctx context.Context, msgs ...ai.Message) (*agent.RunResult, error) {
-	if err := h.enter(PhaseTurn); err != nil {
-		return nil, err
-	}
-	defer h.exit()
-
-	if h.cfg.compaction != nil && ShouldCompact(EstimateContext(h.session.Path()), *h.cfg.compaction) {
-		h.setPhase(PhaseCompaction)
-
-		if err := h.compact(ctx, ""); err != nil {
-			return nil, err
-		}
-
-		h.setPhase(PhaseTurn)
-	}
-
-	cctx, err := h.session.Context()
+	run, runCtx, err := h.preparePrompt(ctx, msgs)
 	if err != nil {
 		return nil, err
 	}
-
-	for _, msg := range msgs {
-		if _, err := h.session.AppendMessage(msg, nil); err != nil {
-			return nil, err
+	defer func() {
+		if run != nil {
+			_ = h.finishPrompt(run)
 		}
+	}()
+
+	result, runErr := run.runner.Run(runCtx, run.session, msgs...)
+	recorderErr := h.finishPrompt(run)
+	run = nil
+
+	if recorderErr != nil {
+		return result, recorderErr
 	}
-
-	rec := &recorder{session: h.session, user: h.cfg.onEvent}
-
-	ag, err := h.buildAgent(rec)
-	if err != nil {
-		return nil, err
-	}
-
-	runSess := agent.NewSession(cctx.Messages...)
-
-	h.mu.Lock()
-	h.active = runSess
-	h.mu.Unlock()
-
-	result, runErr := ag.Run(ctx, runSess, msgs...)
-
-	rec.flush(nil) // save-point: whatever the outcome, keep what completed
 
 	if runErr != nil {
 		return result, runErr
 	}
 
-	return result, rec.err
+	return result, nil
+}
+
+// PromptStream is the streaming form of [Harness.Prompt]. It persists the
+// same save points as the blocking path and restores the harness to idle when
+// the consumer stops early.
+func (h *Harness) PromptStream(ctx context.Context, text string) iter.Seq2[agent.Event, error] {
+	return h.PromptMessagesStream(ctx, ai.UserText(text))
+}
+
+// PromptMessagesStream is the streaming form of [Harness.PromptMessages].
+// Runtime events retain their original order. Normal completion, failure,
+// cancellation, and early iterator termination all preserve completed
+// messages and release the active prompt lifecycle.
+func (h *Harness) PromptMessagesStream(
+	ctx context.Context,
+	msgs ...ai.Message,
+) iter.Seq2[agent.Event, error] {
+	return func(yield func(agent.Event, error) bool) {
+		run, runCtx, err := h.preparePrompt(ctx, msgs)
+		if err != nil {
+			yield(agent.Event{}, err)
+			return
+		}
+
+		defer func() {
+			if run != nil {
+				_ = h.finishPrompt(run)
+			}
+		}()
+
+		for ev, streamErr := range run.runner.Stream(runCtx, run.session, msgs...) {
+			if streamErr != nil && run.recorder.err != nil {
+				streamErr = run.recorder.err
+			}
+
+			if !yield(ev, streamErr) || streamErr != nil {
+				return
+			}
+		}
+
+		recorderErr := h.finishPrompt(run)
+		run = nil
+
+		if recorderErr != nil {
+			yield(agent.Event{}, recorderErr)
+		}
+	}
+}
+
+type promptRun struct {
+	runner   *agent.Agent
+	session  *agent.Session
+	recorder *recorder
+	cancel   context.CancelFunc
+}
+
+func (h *Harness) preparePrompt(
+	ctx context.Context,
+	msgs []ai.Message,
+) (_ *promptRun, _ context.Context, err error) {
+	if err := h.enter(PhaseTurn); err != nil {
+		return nil, nil, err
+	}
+
+	prepared := false
+	defer func() {
+		if !prepared {
+			h.exit()
+		}
+	}()
+
+	cctx, err := h.session.Context()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	runSess := agent.NewSession(cctx.Messages...)
+	if len(runSess.Pending()) > 0 {
+		return nil, nil, agent.ErrPendingToolCalls
+	}
+
+	if h.cfg.compaction != nil && ShouldCompact(EstimateContext(h.session.Path()), *h.cfg.compaction) {
+		h.setPhase(PhaseCompaction)
+
+		if err := h.compact(ctx, ""); err != nil {
+			return nil, nil, err
+		}
+
+		h.setPhase(PhaseTurn)
+
+		cctx, err = h.session.Context()
+		if err != nil {
+			return nil, nil, err
+		}
+
+		runSess = agent.NewSession(cctx.Messages...)
+	}
+
+	rec := &recorder{
+		session: h.session,
+		user:    h.cfg.onEvent,
+		input:   append([]ai.Message(nil), msgs...),
+	}
+
+	ag, err := h.buildAgent(rec)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	runCtx, cancel := context.WithCancel(ctx)
+	rec.cancel = cancel
+
+	run := &promptRun{
+		runner: ag, session: runSess, recorder: rec,
+		cancel: cancel,
+	}
+
+	h.mu.Lock()
+	h.active = run.session
+	h.cancel = cancel
+	h.mu.Unlock()
+
+	prepared = true
+
+	return run, runCtx, nil
+}
+
+func (h *Harness) finishPrompt(run *promptRun) error {
+	run.cancel()
+	run.recorder.flush(nil) // save-point: whatever the outcome, keep what completed
+	h.exit()
+
+	return run.recorder.err
 }
 
 // ResolvePending answers tool calls left pending by a paused run (see
@@ -350,6 +476,34 @@ func (h *Harness) ResolvePending(ctx context.Context, fn func(ctx context.Contex
 
 	runSess := agent.NewSession(cctx.Messages...)
 	if err := runSess.ResolvePending(ctx, fn); err != nil {
+		return err
+	}
+
+	resolved := runSess.Messages()
+	for _, msg := range resolved[len(cctx.Messages):] {
+		if _, err := h.session.AppendMessage(msg, nil); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// ResolveToolCalls answers any subset of durable pending calls (see
+// [agent.Session.ResolveToolCalls]) and persists the new result message.
+func (h *Harness) ResolveToolCalls(resolutions ...agent.ToolResolution) error {
+	if err := h.enter(PhaseTurn); err != nil {
+		return err
+	}
+	defer h.exit()
+
+	cctx, err := h.session.Context()
+	if err != nil {
+		return err
+	}
+
+	runSess := agent.NewSession(cctx.Messages...)
+	if err := runSess.ResolveToolCalls(resolutions...); err != nil {
 		return err
 	}
 
@@ -499,6 +653,7 @@ func (h *Harness) exit() {
 	h.mu.Lock()
 	h.phase = PhaseIdle
 	h.active = nil
+	h.cancel = nil
 	h.mu.Unlock()
 }
 
@@ -508,6 +663,8 @@ func (h *Harness) exit() {
 type recorder struct {
 	session *Session
 	user    func(context.Context, agent.Event)
+	input   []ai.Message
+	cancel  context.CancelFunc
 
 	buffer  []ai.Message
 	lastCum ai.Usage
@@ -516,6 +673,8 @@ type recorder struct {
 
 func (r *recorder) onEvent(ctx context.Context, ev agent.Event) {
 	switch ev.Type {
+	case agent.EventTurnStart:
+		r.saveInput()
 	case agent.EventMessage:
 		r.buffer = append(r.buffer, *ev.Message)
 	case agent.EventTurnEnd:
@@ -528,6 +687,26 @@ func (r *recorder) onEvent(ctx context.Context, ev agent.Event) {
 	if r.user != nil {
 		r.user(ctx, ev)
 	}
+}
+
+// saveInput persists a prompt only after the runtime has passed pending-call
+// and input-guardrail checks and opened its first turn.
+func (r *recorder) saveInput() {
+	for _, msg := range r.input {
+		if _, err := r.session.AppendMessage(msg, nil); err != nil {
+			if r.err == nil {
+				r.err = err
+			}
+
+			if r.cancel != nil {
+				r.cancel()
+			}
+
+			break
+		}
+	}
+
+	r.input = nil
 }
 
 // flush persists buffered messages; usage (when known) lands on the turn's

@@ -383,6 +383,9 @@ func TestRunActiveConflict(t *testing.T) {
 
 	_, err = a.Run(t.Context(), sess, ai.UserText("again"))
 	require.ErrorIs(t, err, agent.ErrRunActive)
+	require.ErrorIs(t, sess.ResolveToolCalls(agent.ToolResolution{
+		ToolCallID: "c1", Content: agent.TextResult("out-of-band"),
+	}), agent.ErrRunActive)
 
 	close(release)
 	require.NoError(t, <-done)

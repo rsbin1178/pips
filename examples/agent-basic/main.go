@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -28,11 +29,26 @@ func main() {
 		})
 
 	a, err := agent.New(model,
+		agent.WithName("calculator"),
 		agent.WithSystem("Use the add tool for any arithmetic; never compute yourself."),
 		agent.WithTools(add),
+		agent.WithInputGuardrail("non-empty-input", func(_ context.Context, info agent.InputGuardrailInfo) error {
+			if len(info.Input) == 0 {
+				return errors.New("input is empty")
+			}
+
+			return nil
+		}),
+		agent.WithOutputGuardrail("non-empty-answer", func(_ context.Context, info agent.OutputGuardrailInfo) error {
+			if info.Response.Text() == "" {
+				return errors.New("answer is empty")
+			}
+
+			return nil
+		}),
 		agent.WithOnEvent(func(_ context.Context, ev agent.Event) {
 			if ev.Type == agent.EventToolEnd {
-				fmt.Printf("→ %s(%s)\n", ev.Call.Name, ev.Call.Args)
+				fmt.Printf("→ [%s] %s(%s)\n", ev.RunID, ev.Call.Name, ev.Call.Args)
 			}
 		}),
 	)

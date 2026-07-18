@@ -6,11 +6,15 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 
+	"github.com/rsbin/pips/agent"
 	"github.com/rsbin/pips/agent/harness"
+	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/ai/openai"
 )
 
@@ -48,12 +52,25 @@ func run() error {
 		prompt = os.Args[1]
 	}
 
-	result, err := h.Prompt(context.Background(), prompt)
-	if err != nil {
-		return err
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
+	for ev, err := range h.PromptStream(ctx, prompt) {
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				fmt.Println("\n[cancelled]")
+				return nil
+			}
+
+			return err
+		}
+
+		if ev.Type == agent.EventDelta && ev.Delta.Type == ai.StreamTextDelta {
+			fmt.Print(ev.Delta.Text)
+		}
 	}
 
-	fmt.Println(result.Text())
+	fmt.Println()
 	fmt.Printf("\n[%d entries in tree, session %s]\n", len(sess.Entries()), sess.Metadata().ID)
 
 	return nil

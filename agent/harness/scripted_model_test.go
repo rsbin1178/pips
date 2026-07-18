@@ -8,8 +8,7 @@ import (
 	"github.com/rsbin/pips/ai"
 )
 
-// scriptedModel plays deterministic responses through Generate; the harness never
-// streams.
+// scriptedModel plays deterministic responses through Generate and Stream.
 type scriptedModel struct {
 	mu       sync.Mutex
 	id       string
@@ -62,17 +61,48 @@ func (m *scriptedModel) Stream(ctx context.Context, req ai.Request) ai.Stream {
 			return
 		}
 
-		usage := resp.Usage
-		for _, part := range resp.Message.Parts {
-			if t, ok := part.(ai.TextPart); ok {
-				if !yield(ai.StreamEvent{Type: ai.StreamTextDelta, Text: t.Text}, nil) {
-					return
-				}
+		for _, ev := range responseEvents(resp) {
+			if !yield(ev, nil) {
+				return
 			}
 		}
-
-		yield(ai.StreamEvent{Type: ai.StreamMessageEnd, FinishReason: resp.FinishReason, Usage: &usage}, nil)
 	}
+}
+
+func responseEvents(resp *ai.Response) []ai.StreamEvent {
+	events := []ai.StreamEvent{{Type: ai.StreamMessageStart, ID: resp.ID, Model: resp.Model}}
+	toolIndex := 0
+
+	for _, part := range resp.Message.Parts {
+		switch part := part.(type) {
+		case ai.TextPart:
+			events = append(events, ai.StreamEvent{Type: ai.StreamTextDelta, Text: part.Text})
+		case ai.ToolCallPart:
+			events = append(events,
+				ai.StreamEvent{
+					Type:          ai.StreamToolCallStart,
+					ToolCallIndex: toolIndex,
+					ToolCallID:    part.ID,
+					ToolCallName:  part.Name,
+				},
+				ai.StreamEvent{
+					Type:          ai.StreamToolCallDelta,
+					ToolCallIndex: toolIndex,
+					ArgsDelta:     string(part.Args),
+				},
+				ai.StreamEvent{Type: ai.StreamToolCallEnd, ToolCallIndex: toolIndex},
+			)
+			toolIndex++
+		}
+	}
+
+	usage := resp.Usage
+
+	return append(events, ai.StreamEvent{
+		Type:         ai.StreamMessageEnd,
+		FinishReason: resp.FinishReason,
+		Usage:        &usage,
+	})
 }
 
 func (m *scriptedModel) Requests() []ai.Request {

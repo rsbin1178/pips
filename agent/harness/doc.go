@@ -19,12 +19,14 @@
 //	)
 //	result, err := h.Prompt(ctx, "Let's get to work.")
 //
-// Each prompt reconstructs context from the tree, runs the loop, and
-// persists every new message at turn boundaries (assistant entries carry
-// their turn's token usage), so a process can stop and resume mid-project.
-// When automatic compaction is enabled, oversized context is summarized —
-// with pi-style cut points that never separate a tool result from its call —
-// before the prompt runs.
+// Each prompt reconstructs context from the tree, runs the loop, and persists
+// every accepted message at turn boundaries (assistant entries carry their
+// turn's token usage), so a process can stop and resume mid-project.
+// [Harness.PromptStream] exposes the same lifecycle incrementally;
+// [Harness.Cancel] can stop the active prompt from another goroutine. When
+// automatic compaction is enabled, oversized context is summarized — with
+// pi-style cut points that never separate a tool result from its call — before
+// the prompt runs.
 //
 // The package has no third-party runtime dependencies.
 package harness
