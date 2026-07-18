@@ -17,6 +17,10 @@ type Skill struct {
 	Description string
 	// Content is the full instruction text.
 	Content string
+	// Source is the path the skill was loaded from (see [LoadSkills]); when
+	// set it is advertised to the model so file-capable agents can read the
+	// full instructions on demand.
+	Source string
 }
 
 // PromptTemplate is a reusable prompt with positional argument placeholders.
@@ -74,7 +78,13 @@ func FormatSkillsPrompt(skills []Skill) string {
 
 	for _, s := range skills {
 		b.WriteString("<skill>\n<name>" + s.Name + "</name>\n")
-		b.WriteString("<description>" + s.Description + "</description>\n</skill>\n")
+		b.WriteString("<description>" + s.Description + "</description>\n")
+
+		if s.Source != "" {
+			b.WriteString("<location>" + s.Source + "</location>\n")
+		}
+
+		b.WriteString("</skill>\n")
 	}
 
 	b.WriteString("</available-skills>")
