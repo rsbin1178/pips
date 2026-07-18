@@ -3,14 +3,11 @@ package anthropic
 import "github.com/rsbin/pips/ai"
 
 // responseFrom translates a Messages response body into the portable shape.
-// A single forced-tool structured-output call is unwrapped into text so the
-// document is available via [ai.Response.Text]. structuredTool is the name of
-// that forced tool, or "" when the request did not request structured output.
-func responseFrom(body messagesResponse, raw []byte, structuredTool string) *ai.Response {
+func responseFrom(body messagesResponse, raw []byte) *ai.Response {
 	msg := ai.Message{Role: ai.RoleAssistant}
 
 	for _, block := range body.Content {
-		if part := partFromBlock(block, structuredTool); part != nil {
+		if part := partFromBlock(block); part != nil {
 			msg.Parts = append(msg.Parts, part)
 		}
 	}
@@ -26,7 +23,7 @@ func responseFrom(body messagesResponse, raw []byte, structuredTool string) *ai.
 	}
 }
 
-func partFromBlock(block wireBlock, structuredTool string) ai.Part {
+func partFromBlock(block wireBlock) ai.Part {
 	switch block.Type {
 	case blockTypeText:
 		return ai.TextPart{Text: block.Text}
@@ -35,21 +32,10 @@ func partFromBlock(block wireBlock, structuredTool string) ai.Part {
 	case blockTypeRedactedThinking:
 		return ai.ReasoningPart{Redacted: true, Signature: block.Data}
 	case blockTypeToolUse:
-		return toolCallPartFrom(block, structuredTool)
+		return ai.ToolCallPart{ID: block.ID, Name: block.Name, Args: block.Input}
 	default:
 		return nil
 	}
-}
-
-// toolCallPartFrom converts a tool_use block. The structured-output tool call
-// is unwrapped: its JSON input becomes the message text, matching how the
-// other providers deliver schema-constrained output.
-func toolCallPartFrom(block wireBlock, structuredTool string) ai.Part {
-	if structuredTool != "" && block.Name == structuredTool {
-		return ai.TextPart{Text: string(block.Input)}
-	}
-
-	return ai.ToolCallPart{ID: block.ID, Name: block.Name, Args: block.Input}
 }
 
 func finishReasonFrom(reason string) ai.FinishReason {
@@ -76,15 +62,4 @@ func usageFrom(u wireUsage) ai.Usage {
 		CachedInputTokens: u.CacheReadInputTokens,
 		CacheWriteTokens:  u.CacheCreationInputTokens,
 	}
-}
-
-// finishReasonForStructured reports the finish reason to surface for a forced
-// structured-output call: the wire stop_reason is "tool_use", but from the
-// caller's perspective the model produced its (text) answer and stopped.
-func finishReasonForStructured(req ai.Request, wire ai.FinishReason) ai.FinishReason {
-	if req.ResponseFormat != nil && wire == ai.FinishToolCalls {
-		return ai.FinishStop
-	}
-
-	return wire
 }

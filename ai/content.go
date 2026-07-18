@@ -21,6 +21,19 @@ func FileData(name, mimeType string, data []byte) FilePart {
 	return FilePart{Name: name, Source: MediaSource{Data: data, MIMEType: mimeType}}
 }
 
+// FileURL returns a [FilePart] referencing a provider-accessible URL or file
+// URI. Providers differ in which URL schemes they accept.
+func FileURL(name, mimeType, url string) FilePart {
+	return FilePart{Name: name, Source: MediaSource{URL: url, MIMEType: mimeType}}
+}
+
+// FileID returns a [FilePart] referencing a file already uploaded to the
+// target provider. File IDs are provider-scoped and cannot be reused across
+// providers.
+func FileID(name, mimeType, id string) FilePart {
+	return FilePart{Name: name, Source: MediaSource{ID: id, MIMEType: mimeType}}
+}
+
 // User returns a user message from the given parts.
 func User(parts ...Part) Message {
 	return Message{Role: RoleUser, Parts: parts}

@@ -9,6 +9,10 @@ import (
 // Capabilities implements ai.LanguageModel with a static prefix table.
 // Unknown models report text-only; calls are never blocked by this data.
 func (m *Model) Capabilities() ai.Capabilities {
+	if m.capabilities != nil {
+		return *m.capabilities
+	}
+
 	return capabilitiesFor(m.model)
 }
 
@@ -22,6 +26,7 @@ func capabilitiesFor(model string) ai.Capabilities {
 		return ai.Capabilities{
 			Text:             true,
 			Vision:           true,
+			Documents:        true,
 			Tools:            true,
 			StructuredOutput: true,
 			Reasoning:        true,
@@ -32,6 +37,7 @@ func capabilitiesFor(model string) ai.Capabilities {
 		return ai.Capabilities{
 			Text:             true,
 			Vision:           true,
+			Documents:        true,
 			Tools:            true,
 			StructuredOutput: true,
 			PromptCaching:    true,

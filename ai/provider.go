@@ -6,9 +6,16 @@ type Provider string
 
 // Known providers.
 const (
-	ProviderOpenAI    Provider = "openai"
-	ProviderAnthropic Provider = "anthropic"
-	ProviderGemini    Provider = "gemini"
+	ProviderOpenAI     Provider = "openai"
+	ProviderAnthropic  Provider = "anthropic"
+	ProviderGemini     Provider = "gemini"
+	ProviderDeepSeek   Provider = "deepseek"
+	ProviderGroq       Provider = "groq"
+	ProviderXAI        Provider = "xai"
+	ProviderOpenRouter Provider = "openrouter"
+	ProviderCerebras   Provider = "cerebras"
+	ProviderTogether   Provider = "together"
+	ProviderMistral    Provider = "mistral"
 )
 
 // Capabilities reports, best effort, what a specific model supports. It is
@@ -19,6 +26,12 @@ type Capabilities struct {
 	Text bool
 	// Vision reports whether the model accepts image input.
 	Vision bool
+	// Documents reports whether the model accepts document/file input.
+	Documents bool
+	// AudioInput reports whether the model accepts audio input.
+	AudioInput bool
+	// VideoInput reports whether the model accepts video input.
+	VideoInput bool
 	// Tools reports whether the model supports tool / function calling.
 	Tools bool
 	// StructuredOutput reports whether the model supports schema-constrained
@@ -31,7 +44,11 @@ type Capabilities struct {
 	ImageGeneration bool
 	// Embeddings reports whether the model produces embeddings.
 	Embeddings bool
-	// PromptCaching reports whether the provider supports explicit prompt
-	// caching for this model.
+	// PromptCaching reports whether the provider supports prompt-cache reuse
+	// or cache-usage reporting for this model. Caching may be automatic or
+	// explicitly controlled by the request.
 	PromptCaching bool
+	// TokenCounting reports whether the model exposes a server-side token-count
+	// operation without running inference.
+	TokenCounting bool
 }

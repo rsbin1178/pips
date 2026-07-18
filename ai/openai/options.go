@@ -22,10 +22,18 @@ type RequestOptions struct {
 }
 
 // requestOptions extracts this provider's options from a request.
-func requestOptions(req ai.Request) RequestOptions {
-	if raw, ok := req.ProviderOptions[ai.ProviderOpenAI]; ok {
+func requestOptions(req ai.Request, provider ai.Provider) RequestOptions {
+	if raw, ok := req.ProviderOptions[provider]; ok {
 		if opts, ok := raw.(RequestOptions); ok {
 			return opts
+		}
+	}
+
+	if provider != ai.ProviderOpenAI {
+		if raw, ok := req.ProviderOptions[ai.ProviderOpenAI]; ok {
+			if opts, ok := raw.(RequestOptions); ok {
+				return opts
+			}
 		}
 	}
 
@@ -63,9 +71,9 @@ type errorBody struct {
 	} `json:"error"`
 }
 
-// decodeError builds the httpx.ErrorDecoder for this adapter.
-func decodeError(status int, retryAfter time.Duration, body []byte) error {
-	apiErr := ai.NewError(ai.ProviderOpenAI, status, string(body))
+// decodeError builds the httpx.ErrorDecoder for this model's provider.
+func (m *Model) decodeError(status int, retryAfter time.Duration, body []byte) error {
+	apiErr := ai.NewError(m.provider, status, string(body))
 	apiErr.RetryAfter = retryAfter
 	apiErr.Raw = body
 

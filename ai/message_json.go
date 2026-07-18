@@ -43,6 +43,7 @@ type partEnvelope struct {
 }
 
 type mediaSourceJSON struct {
+	ID       string `json:"id,omitempty"`
 	URL      string `json:"url,omitempty"`
 	Data     []byte `json:"data,omitempty"`
 	MIMEType string `json:"mime_type,omitempty"`
@@ -130,7 +131,7 @@ func encodePart(p Part) (partEnvelope, error) {
 }
 
 func encodeSource(s MediaSource) *mediaSourceJSON {
-	return &mediaSourceJSON{URL: s.URL, Data: s.Data, MIMEType: s.MIMEType}
+	return &mediaSourceJSON{ID: s.ID, URL: s.URL, Data: s.Data, MIMEType: s.MIMEType}
 }
 
 func decodeParts(envs []partEnvelope) ([]Part, error) {
@@ -185,5 +186,5 @@ func decodeSource(s *mediaSourceJSON) MediaSource {
 		return MediaSource{}
 	}
 
-	return MediaSource{URL: s.URL, Data: s.Data, MIMEType: s.MIMEType}
+	return MediaSource{ID: s.ID, URL: s.URL, Data: s.Data, MIMEType: s.MIMEType}
 }

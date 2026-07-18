@@ -111,9 +111,14 @@ func (m *Model) Capabilities() ai.Capabilities {
 	return ai.Capabilities{
 		Text:             true,
 		Vision:           true,
+		Documents:        true,
+		AudioInput:       true,
+		VideoInput:       true,
 		Tools:            true,
 		StructuredOutput: true,
 		Reasoning:        true,
+		PromptCaching:    true,
+		TokenCounting:    true,
 	}
 }
 

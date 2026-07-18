@@ -12,9 +12,12 @@ import (
 
 // RequestOptions is the gemini entry for [ai.Request.ProviderOptions].
 type RequestOptions struct {
+	// CachedContent references an explicit Gemini cache resource, for example
+	// "cachedContents/abc123".
+	CachedContent string
 	// ExtraFields is merged into the top level of the outgoing JSON request,
 	// overriding colliding keys — the escape hatch for parameters not modeled
-	// portably (safetySettings, cachedContent, topK, seed, ...).
+	// portably (safetySettings, topK, seed, ...).
 	ExtraFields map[string]any
 }
 
@@ -31,6 +34,8 @@ func requestOptions(req ai.Request) RequestOptions {
 // requestFrom translates a portable request into the generateContent wire
 // shape.
 func requestFrom(req ai.Request) (any, error) {
+	opts := requestOptions(req)
+
 	contents, err := contentsFrom(req.Messages)
 	if err != nil {
 		return nil, err
@@ -39,12 +44,13 @@ func requestFrom(req ai.Request) (any, error) {
 	out := generateRequest{
 		Contents:          contents,
 		SystemInstruction: systemInstructionFrom(req.System),
+		CachedContent:     opts.CachedContent,
 		Tools:             toolsFrom(req.Tools),
 		ToolConfig:        toolConfigFrom(req.ToolChoice),
 		GenerationConfig:  generationConfigFrom(req),
 	}
 
-	return mergeExtraFields(out, requestOptions(req).ExtraFields)
+	return mergeExtraFields(out, opts.ExtraFields)
 }
 
 func systemInstructionFrom(system string) *wireContent {
@@ -113,8 +119,16 @@ func userPartsFrom(parts []ai.Part) ([]wirePart, error) {
 		case ai.TextPart:
 			out = append(out, wirePart{Text: p.Text})
 		case ai.ImagePart:
+			if p.Source.IsID() {
+				return nil, fmt.Errorf("gemini: image parts require inline data or a file URI, got provider ID %q: %w", p.Source.ID, ai.ErrUnsupported)
+			}
+
 			out = append(out, mediaPartFrom(p.Source))
 		case ai.FilePart:
+			if p.Source.IsID() {
+				return nil, fmt.Errorf("gemini: file parts require inline data or a file URI, got provider ID %q: %w", p.Source.ID, ai.ErrUnsupported)
+			}
+
 			out = append(out, mediaPartFrom(p.Source))
 		default:
 			return nil, fmt.Errorf("gemini: part %T not supported in user messages", part)

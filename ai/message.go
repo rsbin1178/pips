@@ -59,9 +59,8 @@ type FilePart struct {
 type ReasoningPart struct {
 	// Text is the reasoning content. It is empty when Redacted is true.
 	Text string
-	// Signature is an opaque provider token that authenticates the reasoning
-	// block on a subsequent request (Anthropic returns one). Preserve it when
-	// echoing reasoning back to the provider.
+	// Signature is opaque provider continuation state for the reasoning block.
+	// Preserve it when echoing reasoning back to the same provider.
 	Signature string
 	// Redacted reports that the provider withheld the reasoning content while
 	// still requiring the block to be echoed back (via Signature) to continue
@@ -104,11 +103,15 @@ func (ToolCallPart) isPart()   {}
 func (ToolResultPart) isPart() {}
 
 // MediaSource locates binary media for an [ImagePart] or [FilePart]. Exactly
-// one of URL or Data should be set. When Data is set, MIMEType must describe
-// it (for example "image/png").
+// one of ID, URL, or Data should be set. When Data is set, MIMEType must
+// describe it (for example "image/png").
 type MediaSource struct {
+	// ID references a file already uploaded to the target provider. IDs are
+	// provider-scoped opaque values.
+	ID string
 	// URL is a remote location for the media. Providers that only accept
-	// inline bytes will reject a URL source.
+	// inline bytes will reject a URL source. Provider file URIs also use this
+	// field (for example a Gemini Files API URI).
 	URL string
 	// Data is the raw media bytes, used when the media is inlined rather than
 	// referenced by URL.
@@ -122,4 +125,9 @@ type MediaSource struct {
 // carrying inline bytes.
 func (s MediaSource) IsURL() bool {
 	return s.URL != ""
+}
+
+// IsID reports whether the source references a provider-uploaded file.
+func (s MediaSource) IsID() bool {
+	return s.ID != ""
 }

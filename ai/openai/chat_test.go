@@ -197,6 +197,39 @@ func TestChatGenerateVisionWireFormat(t *testing.T) {
 	}, content[2])
 }
 
+func TestChatGenerateFileIDWireFormat(t *testing.T) {
+	t.Parallel()
+
+	var captured map[string]any
+
+	model := newTestModel(t, serveJSON(t, chatTextResponse, "/v1/chat/completions", &captured))
+
+	_, err := model.Generate(t.Context(), ai.Request{Messages: []ai.Message{ai.User(
+		ai.Text("summarize"),
+		ai.FileID("report.pdf", "application/pdf", "file_123"),
+	)}})
+	require.NoError(t, err)
+
+	messages := as[[]any](t, captured["messages"])
+	content := as[[]any](t, as[map[string]any](t, messages[0])["content"])
+	require.Len(t, content, 2)
+	assert.Equal(t, map[string]any{
+		"type": "file",
+		"file": map[string]any{"file_id": "file_123"},
+	}, content[1])
+}
+
+func TestChatGenerateRejectsFileURL(t *testing.T) {
+	t.Parallel()
+
+	model := newTestModel(t, serveJSON(t, chatTextResponse, "/v1/chat/completions", nil))
+
+	_, err := model.Generate(t.Context(), ai.Request{Messages: []ai.Message{ai.User(
+		ai.FileURL("report.pdf", "application/pdf", "https://example.com/report.pdf"),
+	)}})
+	require.ErrorIs(t, err, ai.ErrUnsupported)
+}
+
 func TestChatGenerateToolsRoundTrip(t *testing.T) {
 	t.Parallel()
 

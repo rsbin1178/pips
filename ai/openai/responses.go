@@ -18,23 +18,23 @@ func (m *Model) generateResponses(ctx context.Context, req ai.Request) (*ai.Resp
 
 	var parsed responsesResponse
 
-	raw, err := m.client.PostJSON(ctx, responsesPath, m.authHeaders(), body, &parsed, decodeError)
+	raw, err := m.client.PostJSON(ctx, responsesPath, m.authHeaders(), body, &parsed, m.decodeError)
 	if err != nil {
-		return nil, fmt.Errorf("openai: responses: %w", err)
+		return nil, fmt.Errorf("%s: responses: %w", m.label(), err)
 	}
 
 	if parsed.Status == "failed" && parsed.Error != nil {
-		return nil, responsesFailure(parsed.Error, raw)
+		return nil, responsesFailure(m.provider, parsed.Error, raw)
 	}
 
-	return responseFromResponses(parsed, raw), nil
+	return responseFromResponses(parsed, raw, m.provider), nil
 }
 
 // responsesFailure builds an error for a response whose status is "failed",
 // so the failure code and message are not lost in Raw.
-func responsesFailure(e *responsesError, raw []byte) error {
+func responsesFailure(provider ai.Provider, e *responsesError, raw []byte) error {
 	apiErr := &ai.Error{
-		Provider: ai.ProviderOpenAI,
+		Provider: provider,
 		Code:     e.Code,
 		Message:  e.Message,
 		Raw:      raw,
@@ -59,12 +59,12 @@ func (m *Model) streamResponses(ctx context.Context, req ai.Request) ai.Stream {
 // SSE event's payload has a "type" field; the relevant ones are response
 // lifecycle, output_text/reasoning_summary deltas, and function-call item
 // add/args-delta.
-func emitResponsesStream(events eventSource, yield func(ai.StreamEvent, error) bool) {
-	d := &responsesStreamState{toolSlot: make(map[int]int)}
+func emitResponsesStream(provider ai.Provider, events eventSource, yield func(ai.StreamEvent, error) bool) {
+	d := &responsesStreamState{provider: provider, toolSlot: make(map[int]int)}
 
 	for event, err := range events {
 		if err != nil {
-			yield(ai.StreamEvent{}, fmt.Errorf("openai: responses stream: %w", err))
+			yield(ai.StreamEvent{}, fmt.Errorf("%s: responses stream: %w", provider, err))
 			return
 		}
 
@@ -74,7 +74,7 @@ func emitResponsesStream(events eventSource, yield func(ai.StreamEvent, error) b
 
 		var ev responsesStreamEvent
 		if err := jsonx.Unmarshal([]byte(event.Data), &ev); err != nil {
-			yield(ai.StreamEvent{}, fmt.Errorf("openai: decoding stream event: %w", err))
+			yield(ai.StreamEvent{}, fmt.Errorf("%s: decoding stream event: %w", provider, err))
 			return
 		}
 
@@ -85,6 +85,7 @@ func emitResponsesStream(events eventSource, yield func(ai.StreamEvent, error) b
 }
 
 type responsesStreamState struct {
+	provider  ai.Provider
 	startSent bool
 	// toolSlot maps a function_call output_index to its ai tool-call index.
 	toolSlot map[int]int
@@ -101,6 +102,8 @@ func (d *responsesStreamState) handle(ev responsesStreamEvent, yield func(ai.Str
 		return yield(ai.StreamEvent{Type: ai.StreamReasoningDelta, Text: ev.Delta}, nil)
 	case "response.output_item.added":
 		return d.handleItemAdded(ev, yield)
+	case "response.output_item.done":
+		return d.handleReasoningItem(ev, yield)
 	case "response.function_call_arguments.delta":
 		return d.handleArgsDelta(ev, yield)
 	case "response.function_call_arguments.done":
@@ -109,13 +112,13 @@ func (d *responsesStreamState) handle(ev responsesStreamEvent, yield func(ai.Str
 		return d.handleTerminal(ev, yield)
 	case "response.failed":
 		if ev.Response != nil && ev.Response.Error != nil {
-			yield(ai.StreamEvent{}, responsesFailure(ev.Response.Error, nil))
+			yield(ai.StreamEvent{}, responsesFailure(d.provider, ev.Response.Error, nil))
 			return false
 		}
 
 		return d.handleTerminal(ev, yield)
 	case "error":
-		yield(ai.StreamEvent{}, streamError(ev))
+		yield(ai.StreamEvent{}, streamError(d.provider, ev))
 		return false
 	default:
 		return true
@@ -125,8 +128,8 @@ func (d *responsesStreamState) handle(ev responsesStreamEvent, yield func(ai.Str
 // streamError builds an *ai.Error for a Responses mid-stream error event,
 // wrapping a class sentinel when the error code identifies one so errors.Is
 // behaves the same as on the HTTP-status path.
-func streamError(ev responsesStreamEvent) error {
-	apiErr := &ai.Error{Provider: ai.ProviderOpenAI, Code: ev.Code, Message: ev.Message}
+func streamError(provider ai.Provider, ev responsesStreamEvent) error {
+	apiErr := &ai.Error{Provider: provider, Code: ev.Code, Message: ev.Message}
 
 	switch ev.Code {
 	case "rate_limit_exceeded":
@@ -144,7 +147,7 @@ func (d *responsesStreamState) handleCreated(ev responsesStreamEvent, yield func
 	}
 
 	d.startSent = true
-	start := ai.StreamEvent{Type: ai.StreamMessageStart}
+	start := ai.StreamEvent{Type: ai.StreamMessageStart, Provider: d.provider}
 
 	if ev.Response != nil {
 		start.ID = ev.Response.ID
@@ -155,7 +158,15 @@ func (d *responsesStreamState) handleCreated(ev responsesStreamEvent, yield func
 }
 
 func (d *responsesStreamState) handleItemAdded(ev responsesStreamEvent, yield func(ai.StreamEvent, error) bool) bool {
-	if ev.Item == nil || ev.Item.Type != typeFunctionCall {
+	if ev.Item == nil {
+		return true
+	}
+
+	if ev.Item.Type == typeReasoning {
+		return d.handleReasoningItem(ev, yield)
+	}
+
+	if ev.Item.Type != typeFunctionCall {
 		return true
 	}
 
@@ -169,6 +180,19 @@ func (d *responsesStreamState) handleItemAdded(ev responsesStreamEvent, yield fu
 		ToolCallID:    ev.Item.CallID,
 		ToolCallName:  ev.Item.Name,
 	}, nil)
+}
+
+func (d *responsesStreamState) handleReasoningItem(ev responsesStreamEvent, yield func(ai.StreamEvent, error) bool) bool {
+	if ev.Item == nil || ev.Item.Type != typeReasoning {
+		return true
+	}
+
+	signature := encodeResponsesReasoningState(*ev.Item)
+	if signature == "" {
+		return true
+	}
+
+	return yield(ai.StreamEvent{Type: ai.StreamReasoningDelta, Signature: signature}, nil)
 }
 
 func (d *responsesStreamState) handleArgsDelta(ev responsesStreamEvent, yield func(ai.StreamEvent, error) bool) bool {
