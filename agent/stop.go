@@ -24,6 +24,9 @@ const (
 	StopPaused StopReason = "paused"
 	// StopWhen means the [WithStopWhen] condition reported true.
 	StopWhen StopReason = "stop_when"
+	// StopTerminated means every tool result in the final batch carried the
+	// [ErrTerminate] hint, ending the run at the tools' request.
+	StopTerminated StopReason = "terminated"
 )
 
 // RunInfo is a read-only snapshot of run progress, passed to the

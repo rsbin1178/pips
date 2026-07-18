@@ -13,4 +13,14 @@ var (
 	// was abandoned mid-turn). Resolve them with [Session.ResolvePending]
 	// before starting another run.
 	ErrPendingToolCalls = errors.New("agent: session has unresolved tool calls")
+	// ErrTerminate is a control sentinel (in the spirit of [io.EOF]) a tool
+	// returns alongside its parts to ask the run to stop after the current
+	// tool batch:
+	//
+	//	return agent.TextResult("final answer"), agent.ErrTerminate
+	//
+	// The parts are recorded as a successful result. The run stops with
+	// [StopTerminated] only when every result in the batch carries the hint
+	// (failed or denied calls never do); queued follow-ups still run first.
+	ErrTerminate = errors.New("agent: tool requested run termination")
 )
