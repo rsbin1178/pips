@@ -48,14 +48,17 @@ tidy:
 audit:
 	$(GO) run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
-## deps-check: Verify ai and agent packages depend only on stdlib + golang.org/x (no third-party modules)
+## deps-check: Verify core ai/agent packages use only stdlib + golang.org/x; compile optional integrations
 deps-check:
-	@mods=$$($(GO) list -deps -f '{{if .Module}}{{.Module.Path}}{{end}}' ./ai/... ./agent/... | sort -u | grep -v '^github.com/rsbin/pips$$' | grep -v '^golang.org/x/' || true); \
+	@core_pkgs=$$($(GO) list ./ai/... ./agent/... | grep -v '/agent/mcp$$'); \
+	mods=$$($(GO) list -deps -f '{{if .Module}}{{.Module.Path}}{{end}}' $$core_pkgs | sort -u | grep -v '^github.com/rsbin/pips$$' | grep -v '^golang.org/x/' || true); \
 	if [ -n "$$mods" ]; then \
-		echo "unexpected third-party module dependencies in ai/agent:"; echo "$$mods"; exit 1; \
+		echo "unexpected third-party module dependencies in core ai/agent:"; echo "$$mods"; exit 1; \
 	else \
-		echo "dependency policy OK (stdlib + golang.org/x only)"; \
+		echo "core dependency policy OK (stdlib + golang.org/x only)"; \
 	fi
+	@$(GO) list -deps ./agent/mcp >/dev/null
+	@echo "optional agent/mcp integration dependency graph OK"
 
 ## help: Show this help message
 help:

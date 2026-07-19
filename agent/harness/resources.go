@@ -77,11 +77,16 @@ func FormatSkillsPrompt(skills []Skill) string {
 	b.WriteString("The following skills provide specialized instructions:\n\n<available-skills>\n")
 
 	for _, s := range skills {
-		b.WriteString("<skill>\n<name>" + s.Name + "</name>\n")
-		b.WriteString("<description>" + s.Description + "</description>\n")
+		b.WriteString("<skill>\n<name>")
+		b.WriteString(s.Name)
+		b.WriteString("</name>\n<description>")
+		b.WriteString(s.Description)
+		b.WriteString("</description>\n")
 
 		if s.Source != "" {
-			b.WriteString("<location>" + s.Source + "</location>\n")
+			b.WriteString("<location>")
+			b.WriteString(s.Source)
+			b.WriteString("</location>\n")
 		}
 
 		b.WriteString("</skill>\n")
