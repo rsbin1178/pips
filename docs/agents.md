@@ -20,7 +20,8 @@ and the durable-state guidance in Anthropic's
 | `agent/harness` | Append-only session tree, JSONL storage, context reconstruction, compaction, branches, streaming prompt lifecycle, active cancellation, custom checkpoints | Autonomous scheduling, conversation ownership policy, vendor control plane |
 | `agent/continuation` | Durable cross-run lifecycle, limits, retry boundaries, waits, explicit wakeups | Completion criteria, cadence policy, scheduler, Team/Workflow state |
 | `agent/goal`, `agent/loop` | Optional completion and next-activation Controller policies | Lifecycle store, timers, queues, orchestration graphs |
-| Application | Routing, parallel requests, criteria/cadence configuration, timers and wake delivery, approval UI/policy, credential/model selection, handoffs, traces/evals storage | Runtime protocol internals |
+| `agent/team` | Fixed Lead/member identities, dependency tasks, assignment/claims, external attempt bindings, direct mailboxes, Team lifecycle | Agent provisioning, child execution, scheduler, Workflow graph, distributed coordination |
+| Application | Routing, parallel requests, member resource registry, child execution, criteria/cadence configuration, timers and wake delivery, approval UI/policy, credential/model selection, handoffs, traces/evals storage | Runtime protocol internals |
 
 ## Control and visibility
 
@@ -111,6 +112,22 @@ Decision stage without replaying completed Work.
 persist the next delay or signal. The Controller returns `Waiting`; a host timer
 index later calls `ResumeDue`, or an external event calls `Signal`. The package
 does not sleep, poll, parse cron, or catch up missed intervals.
+
+**Team coordination.** Use `agent/team` when independent durable member
+Sessions need shared tasks and direct coordination. The host creates the Team,
+registers each resource using a stable `SessionRef`, and gives members scoped
+`NewMemberToolset` or `NewLeadToolset` tools. A member claims at most one task;
+the host commits `StartTaskAttempt` before creating the referenced continuation
+and selecting that member's Harness Session. Goal and Loop are optional child
+Controller policies, not Team dependencies. Recovery calls
+`ActiveDispatches`/`InspectActiveAttempts` once and decides explicitly whether
+to create, resume, cancel, or reconcile a child. Do not turn this query into a
+polling loop inside the runtime.
+
+Team is not a Workflow engine. A Workflow may create tasks or Teams and react
+to their terminal state, but graph node scheduling, joins, dynamic fan-out,
+remote workers, leases, and distributed ownership remain application-layer
+control-plane concerns.
 
 **Handoffs.** When a specialist should own the conversation, the application
 must choose the destination session, filter or summarize transferred history,
