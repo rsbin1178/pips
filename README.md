@@ -17,6 +17,9 @@ Go building blocks for AI applications. Current packages:
 - **`agent/continuation`** — durable, host-driven execution across bounded
   agent runs: optimistic lifecycle state, cumulative limits, explicit retries,
   pause/cancel, and time/signal wakeups without a resident scheduler.
+- **`agent/team`** — durable coordination for a flat Team of independent Agent
+  sessions: fixed Lead authority, host-registered members, dependency tasks,
+  exclusive claims and attempts, direct mailboxes, and scoped Agent tools.
 - **`agent/goal`** — optional evidence-based completion policy over
   continuation, with custom or structured-output model evaluators.
 - **`agent/loop`** — optional fixed or dynamic activation policy that persists
@@ -178,6 +181,29 @@ Use each setup's `ControllerState` and `WorkInput` in
 `continuation.CreateRequest`; register the corresponding Controller in
 `continuation.Handlers`. Package examples show complete creation, advancement,
 and explicit Loop wakeup.
+
+`agent/team` coordinates multiple independent member Sessions without starting
+them. The embedding host registers member resource references, commits a task
+attempt with a stable continuation ID, then creates and drives that child:
+
+```go
+teamRuntime, _ := team.New(teamStore)
+started, err := teamRuntime.StartTaskAttempt(ctx, teamID,
+    team.StartTaskAttemptRequest{
+        Command: hostCommand,
+        TaskID: "review", AttemptID: "review-1",
+        ContinuationID: "review-execution-1",
+    })
+// Resolve started.Dispatch.SessionRef to one independent Harness Session,
+// then create and drive started.Dispatch.ContinuationID explicitly.
+```
+
+Member and Lead toolsets bind Team/member identity and derive durable command
+keys from provider ToolCall IDs. The model never supplies its actor, sender,
+revision, command ID, or IDs for model-created tasks/messages. Member
+registration and attempt start remain host-only. Team has no scheduler,
+provisioner, Workflow graph, remote runtime, or distributed control plane;
+applications compose those concerns above its finite command API.
 
 ### MCP tools
 
