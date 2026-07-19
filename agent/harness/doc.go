@@ -28,5 +28,8 @@
 // pi-style cut points that never separate a tool result from its call — before
 // the prompt runs.
 //
+// [ContinuationWorker] adapts one complete prompt run to the neutral
+// continuation lifecycle without making the Harness session control authority.
+//
 // The package has no third-party runtime dependencies.
 package harness
