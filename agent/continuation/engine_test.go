@@ -685,6 +685,17 @@ func TestJSONLStoreTornTailAndCommittedCorruption(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, execution.Revision, loaded.Execution.Revision)
 
+	reopenedEngine, err := New(reopened, WithClock(clock))
+	require.NoError(t, err)
+	cancelled, err := reopenedEngine.Cancel(
+		t.Context(), execution.ID, loaded.Execution.Revision, "recover after torn append",
+	)
+	require.NoError(t, err)
+	assert.Equal(t, StatusCancelled, cancelled.Status)
+	loaded, err = reopened.Load(t.Context(), execution.ID)
+	require.NoError(t, err)
+	assert.Equal(t, cancelled.Revision, loaded.Execution.Revision)
+
 	file, err = os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // test path is under t.TempDir.
 	require.NoError(t, err)
 	_, err = file.WriteString("broken\n")
