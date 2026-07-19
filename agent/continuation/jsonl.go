@@ -188,6 +188,10 @@ func (store *JSONLStore) CompareAndSwap(
 
 	defer func() { _ = file.Close() }()
 
+	if err := file.Truncate(size); err != nil {
+		return fmt.Errorf("continuation: truncate uncommitted execution tail: %w", err)
+	}
+
 	if _, err := file.Write(append(data, '\n')); err != nil {
 		return fmt.Errorf("continuation: append execution record: %w", err)
 	}
@@ -286,33 +290,39 @@ func (store *JSONLStore) read(id ID) ([]Record, int64, error) {
 		return nil, 0, ErrStoreFull
 	}
 
-	records, err := decodeExecutionFile(path, id, data, store.config.limits)
+	records, committedSize, err := decodeExecutionFile(path, id, data, store.config.limits)
 	if err != nil {
 		return nil, 0, err
 	}
 
-	return records, int64(len(data)), nil
+	return records, int64(committedSize), nil
 }
 
-func decodeExecutionFile(path string, id ID, data []byte, limits StoreLimits) ([]Record, error) {
-	lines, err := committedLines(path, data)
+func decodeExecutionFile(path string, id ID, data []byte, limits StoreLimits) ([]Record, int, error) {
+	lines, committedSize, err := committedLines(path, data)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	if err := validateExecutionHeader(path, id, lines[0]); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
-	return decodeRecordLines(path, id, lines[1:], limits)
+	records, err := decodeRecordLines(path, id, lines[1:], limits)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	return records, committedSize, nil
 }
 
-func committedLines(path string, data []byte) ([][]byte, error) {
+func committedLines(path string, data []byte) ([][]byte, int, error) {
 	if len(data) == 0 {
-		return nil, &CorruptStoreError{Path: path, Reason: "empty file"}
+		return nil, 0, &CorruptStoreError{Path: path, Reason: "empty file"}
 	}
 
 	terminated := data[len(data)-1] == '\n'
+	committedSize := len(data)
 
 	lines := bytes.Split(data, []byte{'\n'})
 	if terminated {
@@ -320,17 +330,18 @@ func committedLines(path string, data []byte) ([][]byte, error) {
 	} else {
 		last := lines[len(lines)-1]
 		if json.Valid(last) {
-			return nil, &CorruptStoreError{Path: path, Line: len(lines), Reason: "valid record lacks newline commit marker"}
+			return nil, 0, &CorruptStoreError{Path: path, Line: len(lines), Reason: "valid record lacks newline commit marker"}
 		}
 
+		committedSize -= len(last)
 		lines = lines[:len(lines)-1]
 	}
 
 	if len(lines) < 2 {
-		return nil, &CorruptStoreError{Path: path, Reason: "missing header or initial record"}
+		return nil, 0, &CorruptStoreError{Path: path, Reason: "missing header or initial record"}
 	}
 
-	return lines, nil
+	return lines, committedSize, nil
 }
 
 func validateExecutionHeader(path string, id ID, line []byte) error {
