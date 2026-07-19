@@ -255,6 +255,7 @@ type Decision struct {
 	Block     *Block         `json:"block,omitempty"`
 	Output    ai.JSON        `json:"output,omitempty"`
 	Progress  Progress       `json:"progress,omitempty"`
+	Usage     ai.Usage       `json:"usage,omitzero"`
 }
 
 // Attempt records the durable Work/Decision boundary.

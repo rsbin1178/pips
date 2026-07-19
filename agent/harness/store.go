@@ -6,8 +6,8 @@ import (
 	"time"
 )
 
-// Metadata identifies a stored session.
-type Metadata struct {
+// SessionMetadata identifies a stored session.
+type SessionMetadata struct {
 	// ID uniquely identifies the session.
 	ID string `json:"id"`
 	// CreatedAt is when the session was created.
@@ -23,7 +23,7 @@ type Metadata struct {
 // the owning Session serializes access.
 type Store interface {
 	// Metadata identifies the stored session.
-	Metadata() Metadata
+	Metadata() SessionMetadata
 	// Append persists one entry.
 	Append(e Entry) error
 	// Entries returns all entries in append order.
@@ -33,7 +33,7 @@ type Store interface {
 // MemoryStore is an in-memory [Store] for tests and ephemeral sessions.
 type MemoryStore struct {
 	mu      sync.Mutex
-	meta    Metadata
+	meta    SessionMetadata
 	entries []Entry
 }
 
@@ -44,11 +44,11 @@ func NewMemoryStore(id string) *MemoryStore {
 		id = newID()
 	}
 
-	return &MemoryStore{meta: Metadata{ID: id, CreatedAt: time.Now()}}
+	return &MemoryStore{meta: SessionMetadata{ID: id, CreatedAt: time.Now()}}
 }
 
 // Metadata implements [Store].
-func (m *MemoryStore) Metadata() Metadata {
+func (m *MemoryStore) Metadata() SessionMetadata {
 	return m.meta
 }
 

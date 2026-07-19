@@ -132,7 +132,7 @@ func (s *Session) HasQueued() bool {
 }
 
 // drainSteering removes and returns queued steering messages according to
-// mode: the oldest one ([DrainOne]) or all of them ([DrainAll]).
+// mode: the oldest one ([QueueDrainOne]) or all of them ([QueueDrainAll]).
 func (s *Session) drainSteering(mode QueueMode) []ai.Message {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -163,7 +163,7 @@ func drainQueue(queue []ai.Message, mode QueueMode) (drained, rest []ai.Message)
 	switch {
 	case len(queue) == 0:
 		return nil, queue
-	case mode == DrainAll:
+	case mode == QueueDrainAll:
 		return queue, nil
 	default:
 		return queue[:1:1], queue[1:]

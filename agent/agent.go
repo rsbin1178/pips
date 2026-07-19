@@ -37,11 +37,11 @@ type QueueMode int
 
 // Queue modes.
 const (
-	// DrainOne injects only the oldest queued message per drain point,
+	// QueueDrainOne injects only the oldest queued message per drain point,
 	// leaving the rest queued for later points.
-	DrainOne QueueMode = iota
-	// DrainAll injects every queued message at each drain point.
-	DrainAll
+	QueueDrainOne QueueMode = iota
+	// QueueDrainAll injects every queued message at each drain point.
+	QueueDrainAll
 )
 
 type config struct {
@@ -56,7 +56,7 @@ type config struct {
 	followUpMode  QueueMode
 	stopWhen      func(RunInfo) bool
 	beforeTool    gate
-	afterTool     func(context.Context, ToolResultInfo) *ResultOverride
+	afterTool     func(context.Context, ToolResultInfo) *ToolResultOverride
 	prepareTurn   func(context.Context, RunInfo) TurnUpdate
 	transform     func(context.Context, []ai.Message) ([]ai.Message, error)
 	onEvent       func(context.Context, Event)
@@ -119,18 +119,18 @@ func WithStopWhen(cond func(RunInfo) bool) Option {
 
 // WithBeforeTool installs a gate consulted before each tool call executes.
 // Gates run serially in call order on the run's goroutine. See
-// [DecisionAction] for the available verdicts.
-func WithBeforeTool(fn func(ctx context.Context, info ToolCallInfo) Decision) Option {
+// [ToolDecisionAction] for the available verdicts.
+func WithBeforeTool(fn func(ctx context.Context, info ToolCallInfo) ToolDecision) Option {
 	return func(c *config) { c.beforeTool = fn }
 }
 
 // WithAfterTool installs a hook that runs after each executed tool call,
-// before its result is recorded and emitted. The returned [ResultOverride]
+// before its result is recorded and emitted. The returned [ToolResultOverride]
 // replaces result fields (nil keeps everything). The hook only sees calls
 // that actually executed — denials, unknown tools, undecodable arguments,
 // and cancellations skip it. It runs serially on the run's goroutine; a
 // panic converts the result into an error result.
-func WithAfterTool(fn func(ctx context.Context, info ToolResultInfo) *ResultOverride) Option {
+func WithAfterTool(fn func(ctx context.Context, info ToolResultInfo) *ToolResultOverride) Option {
 	return func(c *config) { c.afterTool = fn }
 }
 
@@ -152,13 +152,13 @@ func WithTransformContext(fn func(ctx context.Context, msgs []ai.Message) ([]ai.
 }
 
 // WithSteeringMode sets how queued steering messages are drained (default
-// [DrainOne]).
+// [QueueDrainOne]).
 func WithSteeringMode(m QueueMode) Option {
 	return func(c *config) { c.steeringMode = m }
 }
 
 // WithFollowUpMode sets how queued follow-up messages are drained (default
-// [DrainOne]).
+// [QueueDrainOne]).
 func WithFollowUpMode(m QueueMode) Option {
 	return func(c *config) { c.followUpMode = m }
 }

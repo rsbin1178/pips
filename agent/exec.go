@@ -87,9 +87,9 @@ func (a *Agent) gateCalls(ctx context.Context, turn int, calls []ai.ToolCallPart
 
 		decision := a.cfg.beforeTool(ctx, info)
 		switch decision.Action {
-		case Pause:
+		case ToolDecisionPause:
 			return calls[:idx], denials[:idx], slices.Clone(calls[idx:])
-		case Deny:
+		case ToolDecisionDeny:
 			reason := decision.Reason
 			if reason == "" {
 				reason = "tool call denied"
@@ -97,7 +97,7 @@ func (a *Agent) gateCalls(ctx context.Context, turn int, calls []ai.ToolCallPart
 
 			result := errorResult(call, reason)
 			denials[idx] = &result
-		case Allow:
+		case ToolDecisionAllow:
 		}
 	}
 

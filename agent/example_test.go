@@ -88,12 +88,12 @@ func ExampleSession_ResolvePending() {
 
 	a, err := agent.New(model,
 		agent.WithTools(deploy),
-		agent.WithBeforeTool(func(_ context.Context, info agent.ToolCallInfo) agent.Decision {
+		agent.WithBeforeTool(func(_ context.Context, info agent.ToolCallInfo) agent.ToolDecision {
 			if info.Name == "deploy" {
-				return agent.Decision{Action: agent.Pause}
+				return agent.ToolDecision{Action: agent.ToolDecisionPause}
 			}
 
-			return agent.Decision{}
+			return agent.ToolDecision{}
 		}),
 	)
 	if err != nil {
