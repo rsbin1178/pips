@@ -14,6 +14,9 @@ Go building blocks for AI applications. Current packages:
   session trees (JSONL) with branching, automatic context compaction, branch
   summaries, streaming with active cancellation, and skill/prompt-template
   resources.
+- **`agent/continuation`** — durable, host-driven execution across bounded
+  agent runs: optimistic lifecycle state, cumulative limits, explicit retries,
+  pause/cancel, and time/signal wakeups without a resident scheduler.
 - **`agent/mcp`** — optional bridge from official Model Context Protocol client
   sessions to immutable `agent.Tool` snapshots, including progress and tool-list
   change notifications.
@@ -147,6 +150,14 @@ Routing, parallel agents, manager-owned subagents, evaluator loops, durable
 checkpoints, and application-owned handoffs are ordinary Go composition, not
 a workflow DSL. See [Agent composition](docs/agents.md) and
 `examples/agent-*`.
+
+Cross-run autonomy composes through `agent/continuation`: a Worker performs one
+bounded unit (the Harness adapter performs exactly one prompt run), then a
+Controller chooses continue, wait, block, complete, fail, or cancel. Goal and
+loop behavior are optional Controller policies. Team and workflow runtimes can
+reuse the neutral execution, signal, accounting, and lifecycle contracts
+without depending on those product policies. The host remains responsible for
+explicit wakeups; the package starts no scheduler or retry goroutine.
 
 ### MCP tools
 
