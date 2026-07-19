@@ -15,7 +15,7 @@
 //	sess, _ := harness.NewSession(store)
 //	h, _ := harness.New(model, sess,
 //	    harness.WithTools(myTools...),
-//	    harness.WithCompaction(harness.Settings{ContextTokens: 200_000}),
+//	    harness.WithCompaction(harness.CompactionSettings{ContextTokens: 200_000}),
 //	)
 //	result, err := h.Prompt(ctx, "Let's get to work.")
 //

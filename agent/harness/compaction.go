@@ -11,31 +11,31 @@ import (
 
 // Default compaction settings (mirroring pi's harness defaults).
 const (
-	DefaultReserveTokens    = 16384
-	DefaultKeepRecentTokens = 20000
+	DefaultCompactionReserveTokens    = 16384
+	DefaultCompactionKeepRecentTokens = 20000
 )
 
-// Settings tunes automatic compaction. ContextTokens must be set to the
+// CompactionSettings tunes automatic compaction. ContextTokens must be set to the
 // model's context-window budget — the ai package deliberately has no
 // per-model window table.
-type Settings struct {
+type CompactionSettings struct {
 	// ContextTokens is the total context budget compaction defends.
 	ContextTokens int
 	// ReserveTokens is kept free for the summarization prompt and the next
-	// turn's output (default [DefaultReserveTokens]).
+	// turn's output (default [DefaultCompactionReserveTokens]).
 	ReserveTokens int
 	// KeepRecentTokens is approximately how much recent history survives a
-	// compaction (default [DefaultKeepRecentTokens]).
+	// compaction (default [DefaultCompactionKeepRecentTokens]).
 	KeepRecentTokens int
 }
 
-func (s Settings) withDefaults() Settings {
+func (s CompactionSettings) withDefaults() CompactionSettings {
 	if s.ReserveTokens <= 0 {
-		s.ReserveTokens = DefaultReserveTokens
+		s.ReserveTokens = DefaultCompactionReserveTokens
 	}
 
 	if s.KeepRecentTokens <= 0 {
-		s.KeepRecentTokens = DefaultKeepRecentTokens
+		s.KeepRecentTokens = DefaultCompactionKeepRecentTokens
 	}
 
 	return s
@@ -43,7 +43,7 @@ func (s Settings) withDefaults() Settings {
 
 // ShouldCompact reports whether an estimated context size crosses the
 // compaction threshold.
-func ShouldCompact(tokens int, s Settings) bool {
+func ShouldCompact(tokens int, s CompactionSettings) bool {
 	return s.ContextTokens > 0 && tokens > s.ContextTokens-s.withDefaults().ReserveTokens
 }
 
@@ -146,9 +146,9 @@ func entryContextMessages(e Entry) []ai.Message {
 	}
 }
 
-// Preparation is a planned compaction, produced by [Prepare] and consumed by
-// [Summarize].
-type Preparation struct {
+// CompactionPlan is a planned compaction, produced by [PlanCompaction] and consumed by
+// [SummarizeCompaction].
+type CompactionPlan struct {
 	// FirstKeptID is the entry where retained history starts.
 	FirstKeptID string
 	// ToSummarize is the history being folded into the summary.
@@ -165,11 +165,11 @@ type Preparation struct {
 	Previous string
 }
 
-// Prepare plans a compaction of the branch: it finds the cut point that
+// PlanCompaction plans a compaction of the branch: it finds the cut point that
 // keeps roughly KeepRecentTokens of recent history (never separating a tool
 // result from its call) and collects the messages to summarize. It returns
 // nil when there is nothing to compact.
-func Prepare(path []Entry, settings Settings) *Preparation {
+func PlanCompaction(path []Entry, settings CompactionSettings) *CompactionPlan {
 	settings = settings.withDefaults()
 
 	if len(path) == 0 || path[len(path)-1].Kind == KindCompaction {
@@ -183,7 +183,7 @@ func Prepare(path []Entry, settings Settings) *Preparation {
 		return nil // nothing would be summarized
 	}
 
-	prep := &Preparation{
+	prep := &CompactionPlan{
 		FirstKeptID:  path[cut.firstKept].ID,
 		SplitTurn:    cut.splitTurn,
 		TokensBefore: EstimateContext(path),
@@ -390,12 +390,12 @@ Summarize the prefix to provide context for the retained suffix:
 Be concise. Focus on what's needed to understand the kept suffix.`
 )
 
-// Summarize generates the compaction summary for a prepared plan using the
+// SummarizeCompaction generates the compaction summary for a prepared plan using the
 // given model: the history summary (updating a previous one when present),
 // plus a separately summarized turn prefix for split turns. instructions
 // optionally focus the summary. Commit the result with
 // [Session.AppendCompaction].
-func Summarize(ctx context.Context, model ai.LanguageModel, prep *Preparation, settings Settings, instructions string) (string, error) {
+func SummarizeCompaction(ctx context.Context, model ai.LanguageModel, prep *CompactionPlan, settings CompactionSettings, instructions string) (string, error) {
 	settings = settings.withDefaults()
 
 	summary := "No prior history."

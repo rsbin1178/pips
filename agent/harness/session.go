@@ -49,7 +49,7 @@ func NewSession(store Store) (*Session, error) {
 }
 
 // Metadata identifies the underlying stored session.
-func (s *Session) Metadata() Metadata {
+func (s *Session) Metadata() SessionMetadata {
 	return s.store.Metadata()
 }
 

@@ -140,8 +140,8 @@ func TestContinuationWorkerPreservesPausedStopReason(t *testing.T) {
 	h, err := harness.New(model, session,
 		harness.WithTools(addTool()),
 		harness.WithAgentOptions(agent.WithBeforeTool(
-			func(context.Context, agent.ToolCallInfo) agent.Decision {
-				return agent.Decision{Action: agent.Pause}
+			func(context.Context, agent.ToolCallInfo) agent.ToolDecision {
+				return agent.ToolDecision{Action: agent.ToolDecisionPause}
 			},
 		)),
 	)

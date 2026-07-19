@@ -18,7 +18,9 @@ and the durable-state guidance in Anthropic's
 | --- | --- | --- |
 | `agent` runtime | Model/tool loop, typed tools, ordered events, run identity, guardrails, approval interruption, deterministic stops, progress, steering, context hooks | Persistence backend, workflow graph, business routing, tracing backend |
 | `agent/harness` | Append-only session tree, JSONL storage, context reconstruction, compaction, branches, streaming prompt lifecycle, active cancellation, custom checkpoints | Autonomous scheduling, conversation ownership policy, vendor control plane |
-| Application | Routing, parallel requests, evaluator criteria, approval UI/policy, credential/model selection, handoffs, traces/evals storage | Runtime protocol internals |
+| `agent/continuation` | Durable cross-run lifecycle, limits, retry boundaries, waits, explicit wakeups | Completion criteria, cadence policy, scheduler, Team/Workflow state |
+| `agent/goal`, `agent/loop` | Optional completion and next-activation Controller policies | Lifecycle store, timers, queues, orchestration graphs |
+| Application | Routing, parallel requests, criteria/cadence configuration, timers and wake delivery, approval UI/policy, credential/model selection, handoffs, traces/evals storage | Runtime protocol internals |
 
 ## Control and visibility
 
@@ -50,8 +52,8 @@ side-effect approval.
 
 ## Durable approvals
 
-A gate returns `agent.Pause` to stop with `agent.StopPaused`. Resolve any
-approved or rejected subset by call ID:
+A gate returns `agent.ToolDecision{Action: agent.ToolDecisionPause}` to stop
+with `agent.StopPaused`. Resolve any approved or rejected subset by call ID:
 
 ```go
 err := sess.ResolveToolCalls(agent.ToolResolution{
@@ -98,10 +100,17 @@ invocation has an isolated child session. A paused child becomes an explicit
 tool error because the simple tool contract cannot durably expose child
 approval state.
 
-**Evaluator-optimizer.** Keep the success criterion and iteration budget in a
-caller loop. Feed evaluator feedback through a new message or
-`Session.FollowUp`; bound the loop with application limits plus
-`WithMaxTurns`, `WithMaxTokens`, or `WithStopWhen`.
+**Evaluator-optimizer.** For iterations contained in one process/run, keep the
+criterion in a caller loop, feed feedback through a new message or
+`Session.FollowUp`, and bound it with `WithMaxTurns`, `WithMaxTokens`, or
+`WithStopWhen`. For a criterion that must survive bounded runs or restart, use
+`agent/goal` as a continuation Controller; evaluator failure then retries the
+Decision stage without replaying completed Work.
+
+**Repeated activation.** Use `agent/loop` when each completed bounded run must
+persist the next delay or signal. The Controller returns `Waiting`; a host timer
+index later calls `ResumeDue`, or an external event calls `Signal`. The package
+does not sleep, poll, parse cron, or catch up missed intervals.
 
 **Handoffs.** When a specialist should own the conversation, the application
 must choose the destination session, filter or summarize transferred history,

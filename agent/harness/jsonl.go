@@ -33,7 +33,7 @@ const (
 // single process and a single writing Session.
 type JSONLStore struct {
 	mu      sync.Mutex
-	meta    Metadata
+	meta    SessionMetadata
 	entries []Entry
 	file    *os.File
 }
@@ -63,7 +63,7 @@ func CreateJSONL(path, id string, extra map[string]string) (*JSONLStore, error) 
 	}
 
 	store := &JSONLStore{
-		meta: Metadata{ID: header.ID, CreatedAt: header.CreatedAt, Path: path, Extra: extra},
+		meta: SessionMetadata{ID: header.ID, CreatedAt: header.CreatedAt, Path: path, Extra: extra},
 		file: file,
 	}
 	if err := store.writeLine(header); err != nil {
@@ -121,14 +121,14 @@ func OpenJSONL(path string) (*JSONLStore, error) {
 	}
 
 	return &JSONLStore{
-		meta:    Metadata{ID: header.ID, CreatedAt: header.CreatedAt, Path: path, Extra: header.Extra},
+		meta:    SessionMetadata{ID: header.ID, CreatedAt: header.CreatedAt, Path: path, Extra: header.Extra},
 		entries: entries,
 		file:    file,
 	}, nil
 }
 
 // Metadata implements [Store].
-func (s *JSONLStore) Metadata() Metadata {
+func (s *JSONLStore) Metadata() SessionMetadata {
 	return s.meta
 }
 
@@ -202,7 +202,7 @@ func (r Repo) Open(id string) (*JSONLStore, error) {
 }
 
 // List returns metadata for every session in the repository directory.
-func (r Repo) List() ([]Metadata, error) {
+func (r Repo) List() ([]SessionMetadata, error) {
 	items, err := os.ReadDir(r.Dir)
 	if os.IsNotExist(err) {
 		return nil, nil
@@ -212,7 +212,7 @@ func (r Repo) List() ([]Metadata, error) {
 		return nil, fmt.Errorf("harness: list sessions: %w", err)
 	}
 
-	var metas []Metadata
+	var metas []SessionMetadata
 
 	for _, item := range items {
 		if item.IsDir() || !strings.HasSuffix(item.Name(), jsonlExt) {

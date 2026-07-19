@@ -48,7 +48,7 @@ type hconfig struct {
 	systemFn     func(SystemContext) string
 	skills       []Skill
 	templates    []PromptTemplate
-	compaction   *Settings
+	compaction   *CompactionSettings
 	summaryModel ai.LanguageModel
 	onEvent      func(context.Context, agent.Event)
 	agentOpts    []agent.Option
@@ -148,7 +148,7 @@ func WithTemplates(templates ...PromptTemplate) Option {
 
 // WithCompaction enables automatic compaction: before each prompt, when the
 // estimated context crosses the threshold, the harness compacts first.
-func WithCompaction(s Settings) Option {
+func WithCompaction(s CompactionSettings) Option {
 	return func(c *hconfig) { c.compaction = &s }
 }
 
@@ -530,17 +530,17 @@ func (h *Harness) Compact(ctx context.Context, instructions string) error {
 }
 
 func (h *Harness) compact(ctx context.Context, instructions string) error {
-	settings := Settings{}
+	settings := CompactionSettings{}
 	if h.cfg.compaction != nil {
 		settings = *h.cfg.compaction
 	}
 
-	prep := Prepare(h.session.Path(), settings)
+	prep := PlanCompaction(h.session.Path(), settings)
 	if prep == nil {
 		return ErrNothingToCompact
 	}
 
-	summary, err := Summarize(ctx, h.summaryModel(), prep, settings, instructions)
+	summary, err := SummarizeCompaction(ctx, h.summaryModel(), prep, settings, instructions)
 	if err != nil {
 		return err
 	}

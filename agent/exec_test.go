@@ -191,11 +191,11 @@ func TestGateDenyFeedsReasonToModel(t *testing.T) {
 
 	a, err := agent.New(model,
 		agent.WithTools(addTool()),
-		agent.WithBeforeTool(func(_ context.Context, info agent.ToolCallInfo) agent.Decision {
+		agent.WithBeforeTool(func(_ context.Context, info agent.ToolCallInfo) agent.ToolDecision {
 			assert.Equal(t, "add", info.Name)
 			assert.Equal(t, 1, info.Turn)
 
-			return agent.Denied("arithmetic is forbidden today")
+			return agent.DenyTool("arithmetic is forbidden today")
 		}),
 	)
 	require.NoError(t, err)
@@ -231,12 +231,12 @@ func TestGatePauseAndResume(t *testing.T) {
 	// Pause on the second call: the first executes, the rest go pending.
 	a, err := agent.New(model,
 		agent.WithTools(addTool()),
-		agent.WithBeforeTool(func(_ context.Context, info agent.ToolCallInfo) agent.Decision {
+		agent.WithBeforeTool(func(_ context.Context, info agent.ToolCallInfo) agent.ToolDecision {
 			if info.ID == "c2" {
-				return agent.Decision{Action: agent.Pause}
+				return agent.ToolDecision{Action: agent.ToolDecisionPause}
 			}
 
-			return agent.Decision{}
+			return agent.ToolDecision{}
 		}),
 	)
 	require.NoError(t, err)
@@ -293,8 +293,8 @@ func TestGatePauseFirstCallLeavesNoToolMessage(t *testing.T) {
 
 	a, err := agent.New(model,
 		agent.WithTools(addTool()),
-		agent.WithBeforeTool(func(_ context.Context, _ agent.ToolCallInfo) agent.Decision {
-			return agent.Decision{Action: agent.Pause}
+		agent.WithBeforeTool(func(_ context.Context, _ agent.ToolCallInfo) agent.ToolDecision {
+			return agent.ToolDecision{Action: agent.ToolDecisionPause}
 		}),
 	)
 	require.NoError(t, err)

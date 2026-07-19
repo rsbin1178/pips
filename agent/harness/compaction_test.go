@@ -31,10 +31,10 @@ func TestEstimateContextUsesUsageAndTail(t *testing.T) {
 func TestShouldCompact(t *testing.T) {
 	t.Parallel()
 
-	s := harness.Settings{ContextTokens: 100_000, ReserveTokens: 16_384}
+	s := harness.CompactionSettings{ContextTokens: 100_000, ReserveTokens: 16_384}
 	assert.False(t, harness.ShouldCompact(50_000, s))
 	assert.True(t, harness.ShouldCompact(90_000, s))
-	assert.False(t, harness.ShouldCompact(90_000, harness.Settings{}), "no window, never auto-compacts")
+	assert.False(t, harness.ShouldCompact(90_000, harness.CompactionSettings{}), "no window, never auto-compacts")
 }
 
 func TestPrepareCutsAtUserMessage(t *testing.T) {
@@ -48,7 +48,7 @@ func TestPrepareCutsAtUserMessage(t *testing.T) {
 	appendText(t, sess, ai.RoleAssistant, bigText(500), nil)
 
 	// keepRecent ≈ the last exchange: the cut lands on the second user turn.
-	prep := harness.Prepare(sess.Path(), harness.Settings{KeepRecentTokens: 800})
+	prep := harness.PlanCompaction(sess.Path(), harness.CompactionSettings{KeepRecentTokens: 800})
 	require.NotNil(t, prep)
 
 	assert.Equal(t, keep, prep.FirstKeptID)
@@ -77,7 +77,7 @@ func TestPrepareNeverCutsToolResults(t *testing.T) {
 
 	// keepRecent lands inside the tool result — the cut must move to a
 	// message boundary, never between the call and its result.
-	prep := harness.Prepare(sess.Path(), harness.Settings{KeepRecentTokens: 500})
+	prep := harness.PlanCompaction(sess.Path(), harness.CompactionSettings{KeepRecentTokens: 500})
 	require.NotNil(t, prep)
 
 	kept, ok := sess.Entry(prep.FirstKeptID)
@@ -97,7 +97,7 @@ func TestPrepareSplitTurn(t *testing.T) {
 	appendText(t, sess, ai.RoleAssistant, bigText(3000), nil)
 	appendText(t, sess, ai.RoleAssistant, bigText(400), nil) // kept suffix
 
-	prep := harness.Prepare(sess.Path(), harness.Settings{KeepRecentTokens: 500})
+	prep := harness.PlanCompaction(sess.Path(), harness.CompactionSettings{KeepRecentTokens: 500})
 	require.NotNil(t, prep)
 
 	// The cut lands on the giant mid-turn assistant message → split turn.
@@ -119,7 +119,7 @@ func TestPrepareIterativeCarriesPrevious(t *testing.T) {
 	appendText(t, sess, ai.RoleUser, bigText(800), nil)
 	appendText(t, sess, ai.RoleUser, bigText(200), nil)
 
-	prep := harness.Prepare(sess.Path(), harness.Settings{KeepRecentTokens: 100})
+	prep := harness.PlanCompaction(sess.Path(), harness.CompactionSettings{KeepRecentTokens: 100})
 	require.NotNil(t, prep)
 	assert.Equal(t, "earlier summary", prep.Previous)
 }
@@ -128,12 +128,12 @@ func TestPrepareNothingToCompact(t *testing.T) {
 	t.Parallel()
 
 	sess := buildSession(t)
-	assert.Nil(t, harness.Prepare(sess.Path(), harness.Settings{}), "empty session")
+	assert.Nil(t, harness.PlanCompaction(sess.Path(), harness.CompactionSettings{}), "empty session")
 
 	keep := appendText(t, sess, ai.RoleUser, "hi", nil)
 	_, err := sess.AppendCompaction("s", keep, 1)
 	require.NoError(t, err)
-	assert.Nil(t, harness.Prepare(sess.Path(), harness.Settings{}), "ends at a compaction")
+	assert.Nil(t, harness.PlanCompaction(sess.Path(), harness.CompactionSettings{}), "ends at a compaction")
 }
 
 func TestSummarizeEndToEnd(t *testing.T) {
@@ -145,12 +145,12 @@ func TestSummarizeEndToEnd(t *testing.T) {
 	appendText(t, sess, ai.RoleAssistant, bigText(500), nil)
 	appendText(t, sess, ai.RoleUser, bigText(200), nil)
 
-	prep := harness.Prepare(sess.Path(), harness.Settings{KeepRecentTokens: 200})
+	prep := harness.PlanCompaction(sess.Path(), harness.CompactionSettings{KeepRecentTokens: 200})
 	require.NotNil(t, prep)
 
 	summarizer := newScriptedModel("sum", textResponse("## Goal\nDo the thing.", 10))
 
-	summary, err := harness.Summarize(t.Context(), summarizer, prep, harness.Settings{}, "focus on decisions")
+	summary, err := harness.SummarizeCompaction(t.Context(), summarizer, prep, harness.CompactionSettings{}, "focus on decisions")
 	require.NoError(t, err)
 	assert.Equal(t, "## Goal\nDo the thing.", summary)
 

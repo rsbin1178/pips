@@ -258,8 +258,8 @@ func TestAsToolReportsPausedChild(t *testing.T) {
 		respond(callResponse(call("approval", "sensitive", `{}`))),
 	)
 	child, err := agent.New(childModel, agent.WithBeforeTool(
-		func(context.Context, agent.ToolCallInfo) agent.Decision {
-			return agent.Decision{Action: agent.Pause}
+		func(context.Context, agent.ToolCallInfo) agent.ToolDecision {
+			return agent.ToolDecision{Action: agent.ToolDecisionPause}
 		},
 	))
 	require.NoError(t, err)

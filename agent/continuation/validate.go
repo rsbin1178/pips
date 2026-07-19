@@ -126,6 +126,10 @@ func validateDecisionFields(decision Decision) error {
 		return err
 	}
 
+	if !validUsage(decision.Usage) {
+		return fmt.Errorf("%w: negative decision accounting", ErrInvalid)
+	}
+
 	for name, value := range map[string]ai.JSON{
 		"controller state": decision.State,
 		"next input":       decision.NextInput,
