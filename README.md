@@ -14,6 +14,9 @@ Go building blocks for AI applications. Current packages:
   session trees (JSONL) with branching, automatic context compaction, branch
   summaries, streaming with active cancellation, and skill/prompt-template
   resources.
+- **`agent/mcp`** — optional bridge from official Model Context Protocol client
+  sessions to immutable `agent.Tool` snapshots, including progress and tool-list
+  change notifications.
 
 > **Status: v0.** The API is under active development and may change without
 > notice. Pin a commit if you depend on it.
@@ -21,7 +24,8 @@ Go building blocks for AI applications. Current packages:
 ## Design highlights
 
 - **Zero third-party runtime dependencies** in the core (`stdlib` +
-  `golang.org/x` only) — verified by `make deps-check`.
+  `golang.org/x` only) — verified by `make deps-check`. Optional integrations
+  such as `agent/mcp` declare their protocol SDK dependencies separately.
 - **One request/response model** across providers: multi-modal messages
   (text, images, files), tool calling, structured output (JSON Schema),
   reasoning/thinking, usage accounting, normalized finish reasons and errors.
@@ -144,12 +148,59 @@ checkpoints, and application-owned handoffs are ordinary Go composition, not
 a workflow DSL. See [Agent composition](docs/agents.md) and
 `examples/agent-*`.
 
+### MCP tools
+
+`agent/mcp` uses the official Go MCP SDK for lifecycle negotiation, stdio,
+Streamable HTTP, cancellation, and all non-tool capabilities. The bridge maps
+one server's paginated tool list into a portable snapshot:
+
+```go
+import (
+    "os/exec"
+
+    sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
+    "github.com/rsbin/pips/agent"
+    agentmcp "github.com/rsbin/pips/agent/mcp"
+)
+
+transport := &sdkmcp.CommandTransport{
+    Command: exec.CommandContext(ctx, "my-mcp-server"),
+}
+client, err := agentmcp.Connect(ctx,
+    &sdkmcp.Implementation{Name: "pips-host", Version: "v0.1.0"},
+    transport,
+    agentmcp.WithToolNamePrefix("workspace"),
+)
+if err != nil {
+    return err
+}
+defer func() {
+    _ = client.Close()
+}()
+
+tools, err := client.Tools(ctx)
+if err != nil {
+    return err
+}
+runtime, err := agent.New(model,
+    agent.WithTools(tools...),
+    agent.WithBeforeTool(approvalGate),
+)
+```
+
+MCP annotations are untrusted hints, so the bridge never enables parallel
+execution or bypasses `WithBeforeTool` automatically. `ToolListChanged()` is a
+coalescing signal: fetch a new snapshot and construct the next immutable Agent
+when it fires. `Session()` exposes the official SDK session directly for
+prompts, resources, completions, roots, sampling, elicitation, and logging.
+Use `mcp.StreamableClientTransport` in place of `CommandTransport` for HTTP.
+
 ## Development
 
 ```sh
 make help        # list targets
 make all         # fmt + vet + lint + test + build
-make deps-check  # enforce the zero-dependency policy
+make deps-check  # enforce core dependency policy and compile optional integrations
 ```
 
 Requires Go 1.26+.

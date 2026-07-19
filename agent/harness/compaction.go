@@ -443,7 +443,9 @@ func summarizeMessages(ctx context.Context, model ai.LanguageModel, msgs []ai.Me
 	b.WriteString("\n</conversation>\n\n")
 
 	if req.previous != "" {
-		b.WriteString("<previous-summary>\n" + req.previous + "\n</previous-summary>\n\n")
+		b.WriteString("<previous-summary>\n")
+		b.WriteString(req.previous)
+		b.WriteString("\n</previous-summary>\n\n")
 	}
 
 	switch {
@@ -456,7 +458,8 @@ func summarizeMessages(ctx context.Context, model ai.LanguageModel, msgs []ai.Me
 	}
 
 	if req.instructions != "" {
-		b.WriteString("\n\nAdditional focus: " + req.instructions)
+		b.WriteString("\n\nAdditional focus: ")
+		b.WriteString(req.instructions)
 	}
 
 	resp, err := model.Generate(ctx, ai.Request{
@@ -477,16 +480,25 @@ func serializeConversation(msgs []ai.Message) string {
 	var b strings.Builder
 
 	for _, msg := range msgs {
-		b.WriteString("[" + string(msg.Role) + "]\n")
+		b.WriteByte('[')
+		b.WriteString(string(msg.Role))
+		b.WriteString("]\n")
 
 		for _, part := range msg.Parts {
 			switch p := part.(type) {
 			case ai.TextPart:
-				b.WriteString(p.Text + "\n")
+				b.WriteString(p.Text)
+				b.WriteByte('\n')
 			case ai.ToolCallPart:
-				b.WriteString("tool call " + p.Name + "(" + string(p.Args) + ")\n")
+				b.WriteString("tool call ")
+				b.WriteString(p.Name)
+				b.WriteByte('(')
+				b.WriteString(string(p.Args))
+				b.WriteString(")\n")
 			case ai.ToolResultPart:
-				b.WriteString("tool result " + p.Name + ": ")
+				b.WriteString("tool result ")
+				b.WriteString(p.Name)
+				b.WriteString(": ")
 
 				for _, c := range p.Content {
 					if t, ok := c.(ai.TextPart); ok {
@@ -494,14 +506,14 @@ func serializeConversation(msgs []ai.Message) string {
 					}
 				}
 
-				b.WriteString("\n")
+				b.WriteByte('\n')
 			case ai.ImagePart:
 				b.WriteString("[image]\n")
 			default:
 			}
 		}
 
-		b.WriteString("\n")
+		b.WriteByte('\n')
 	}
 
 	return strings.TrimRight(b.String(), "\n")
