@@ -41,7 +41,7 @@ func run() error {
 
 	h, err := harness.New(model, sess,
 		harness.WithSystem("You are a project assistant. Keep continuity across sessions."),
-		harness.WithCompaction(harness.Settings{ContextTokens: 128_000}),
+		harness.WithCompaction(harness.CompactionSettings{ContextTokens: 128_000}),
 	)
 	if err != nil {
 		return err

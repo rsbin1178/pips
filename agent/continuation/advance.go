@@ -406,6 +406,8 @@ func (engine *Engine) decisionOutcome(execution Execution, decision Decision, co
 	attempt.Decision = new(cloneDecision(decision))
 	attempt.Failure = nil
 	attempt.Interrupted = false
+
+	addDecisionAccounting(&execution.Accounting, decision)
 	execution.LastAttempt = cloneAttempt(attempt)
 
 	execution.CurrentAttempt = nil
@@ -519,6 +521,12 @@ func addWorkAccounting(accounting *Accounting, result WorkResult) {
 	accounting.Turns += max(result.Turns, 0)
 	if validUsage(result.Usage) {
 		accounting.Usage.Add(result.Usage)
+	}
+}
+
+func addDecisionAccounting(accounting *Accounting, decision Decision) {
+	if validUsage(decision.Usage) {
+		accounting.Usage.Add(decision.Usage)
 	}
 }
 

@@ -122,7 +122,7 @@ func TestHarnessAutoCompaction(t *testing.T) {
 	model := newScriptedModel("m", textResponse("fresh answer", 100))
 
 	h, err := harness.New(model, sess,
-		harness.WithCompaction(harness.Settings{ContextTokens: 100_000, KeepRecentTokens: 50}),
+		harness.WithCompaction(harness.CompactionSettings{ContextTokens: 100_000, KeepRecentTokens: 50}),
 		harness.WithSummaryModel(summarizer),
 	)
 	require.NoError(t, err)
@@ -257,8 +257,8 @@ func TestHarnessPauseAndResolve(t *testing.T) {
 	h, err := harness.New(model, sess,
 		harness.WithTools(addTool()),
 		harness.WithAgentOptions(agent.WithBeforeTool(
-			func(_ context.Context, _ agent.ToolCallInfo) agent.Decision {
-				return agent.Decision{Action: agent.Pause}
+			func(_ context.Context, _ agent.ToolCallInfo) agent.ToolDecision {
+				return agent.ToolDecision{Action: agent.ToolDecisionPause}
 			})),
 	)
 	require.NoError(t, err)
@@ -296,8 +296,8 @@ func TestHarnessResolvesDurablePendingSubset(t *testing.T) {
 	sess := buildSession(t)
 
 	h, err := harness.New(model, sess, harness.WithAgentOptions(agent.WithBeforeTool(
-		func(context.Context, agent.ToolCallInfo) agent.Decision {
-			return agent.Decision{Action: agent.Pause}
+		func(context.Context, agent.ToolCallInfo) agent.ToolDecision {
+			return agent.ToolDecision{Action: agent.ToolDecisionPause}
 		},
 	)))
 	require.NoError(t, err)
@@ -346,7 +346,7 @@ func TestHarnessPendingApprovalPrecedesAutomaticCompaction(t *testing.T) {
 
 	summarizer := newScriptedModel("summary", textResponse("must not compact", 10))
 	h, err := harness.New(newScriptedModel("main"), sess,
-		harness.WithCompaction(harness.Settings{ContextTokens: 100_000}),
+		harness.WithCompaction(harness.CompactionSettings{ContextTokens: 100_000}),
 		harness.WithSummaryModel(summarizer),
 	)
 	require.NoError(t, err)
@@ -662,8 +662,8 @@ var errRejectedAppend = errors.New("store rejected append")
 
 type rejectingAppendStore struct{}
 
-func (rejectingAppendStore) Metadata() harness.Metadata {
-	return harness.Metadata{ID: "rejecting"}
+func (rejectingAppendStore) Metadata() harness.SessionMetadata {
+	return harness.SessionMetadata{ID: "rejecting"}
 }
 
 func (rejectingAppendStore) Append(harness.Entry) error {

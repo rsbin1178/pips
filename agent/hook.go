@@ -11,14 +11,14 @@ type ToolResultInfo struct {
 	// Turn is the turn (1-based) that produced the call.
 	Turn int
 	// Result is the executed outcome (IsError reflects execution failures;
-	// terminate hints are visible via [ResultOverride], not here).
+	// terminate hints are visible via [ToolResultOverride], not here).
 	Result ai.ToolResultPart
 }
 
-// ResultOverride replaces fields of an executed tool result from a
+// ToolResultOverride replaces fields of an executed tool result from a
 // [WithAfterTool] hook. Each field is a full replacement; nil (or a nil
 // pointer) keeps the executed value. There is no deep merge.
-type ResultOverride struct {
+type ToolResultOverride struct {
 	// Content replaces the result content.
 	Content []ai.Part
 	// IsError replaces the error flag.

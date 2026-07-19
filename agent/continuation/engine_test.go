@@ -117,10 +117,14 @@ func TestAdvanceContinuesWithControllerInputAndCompletes(t *testing.T) {
 			return Decision{
 				Action: ActionContinue, NextInput: ai.JSON(`"second"`),
 				State: ai.JSON(`null`), Progress: ProgressChanged,
+				Usage: ai.Usage{InputTokens: 1, OutputTokens: 1},
 			}, nil
 		}
 
-		return Decision{Action: ActionComplete, Reason: "done", Output: ai.JSON(`{"ok":true}`)}, nil
+		return Decision{
+			Action: ActionComplete, Reason: "done", Output: ai.JSON(`{"ok":true}`),
+			Usage: ai.Usage{InputTokens: 1, OutputTokens: 1},
+		}, nil
 	})
 
 	execution, err := engine.Advance(t.Context(), execution.ID, execution.Revision, handlers(worker, controller))
@@ -135,11 +139,72 @@ func TestAdvanceContinuesWithControllerInputAndCompletes(t *testing.T) {
 	assert.Equal(t, "done", execution.Reason)
 	assert.Equal(t, 2, execution.Accounting.Attempts)
 	assert.Equal(t, 2, execution.Accounting.Turns)
-	assert.Equal(t, 10, execution.Accounting.Tokens())
+	assert.Equal(t, 14, execution.Accounting.Tokens())
+	require.NotNil(t, execution.LastAttempt)
+	require.NotNil(t, execution.LastAttempt.Decision)
+	assert.Equal(t, ai.Usage{InputTokens: 1, OutputTokens: 1}, execution.LastAttempt.Decision.Usage)
 	assert.Equal(t, []string{`"first"`, `"second"`}, inputs)
 
 	_, err = engine.Advance(t.Context(), execution.ID, execution.Revision, handlers(worker, controller))
 	assert.ErrorIs(t, err, ErrTerminal)
+}
+
+func TestDecisionUsageLimitPreventsAnotherWork(t *testing.T) {
+	t.Parallel()
+
+	engine, _, _ := newTestEngine(t)
+	execution := createTestExecution(t, engine, Limits{MaxAttempts: -1, MaxTokens: 6})
+
+	var workCalls atomic.Int64
+
+	worker := workerFunc(func(context.Context, WorkRequest) (WorkResult, error) {
+		workCalls.Add(1)
+
+		return WorkResult{
+			Usage: ai.Usage{InputTokens: 2, OutputTokens: 2}, Progress: ProgressChanged,
+		}, nil
+	})
+	controller := controllerFunc(func(context.Context, DecisionRequest) (Decision, error) {
+		return Decision{
+			Action: ActionContinue, Progress: ProgressChanged,
+			Usage: ai.Usage{InputTokens: 1, OutputTokens: 1},
+		}, nil
+	})
+
+	limited, err := engine.Advance(
+		t.Context(), execution.ID, execution.Revision, handlers(worker, controller),
+	)
+	require.NoError(t, err)
+	assert.Equal(t, StatusLimited, limited.Status)
+	assert.Equal(t, "maximum tokens reached", limited.Reason)
+	assert.Equal(t, 6, limited.Accounting.Tokens())
+	assert.Equal(t, int64(1), workCalls.Load())
+}
+
+func TestInvalidDecisionUsageInterruptsDecision(t *testing.T) {
+	t.Parallel()
+
+	engine, _, _ := newTestEngine(t)
+	execution := createTestExecution(t, engine, Limits{})
+	worker := workerFunc(func(context.Context, WorkRequest) (WorkResult, error) {
+		return changedWork(`{}`), nil
+	})
+	controller := controllerFunc(func(context.Context, DecisionRequest) (Decision, error) {
+		return Decision{
+			Action: ActionComplete, Usage: ai.Usage{InputTokens: -1},
+		}, nil
+	})
+
+	interrupted, err := engine.Advance(
+		t.Context(), execution.ID, execution.Revision, handlers(worker, controller),
+	)
+	require.ErrorIs(t, err, ErrInvalid)
+	assert.Equal(t, StatusInterrupted, interrupted.Status)
+	assert.Equal(t, PhaseDecision, interrupted.Phase)
+	assert.Equal(t, 5, interrupted.Accounting.Tokens())
+	require.NotNil(t, interrupted.CurrentAttempt)
+	require.NotNil(t, interrupted.CurrentAttempt.Work)
+	assert.Nil(t, interrupted.CurrentAttempt.Decision)
 }
 
 func TestControllerRetryKeepsAttemptAndDoesNotRerunWork(t *testing.T) {

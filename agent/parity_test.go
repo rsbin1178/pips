@@ -88,11 +88,11 @@ func TestSteeringDrainModes(t *testing.T) {
 		firstTurnMsgs int // messages in the first model request
 		turns         int
 	}{
-		// DrainOne injects the oldest message per turn: 1 steered message on
+		// QueueDrainOne injects the oldest message per turn: 1 steered message on
 		// turn one, the second extends the run.
-		{name: "one at a time", mode: agent.DrainOne, firstTurnMsgs: 2, turns: 2},
-		// DrainAll injects both up front.
-		{name: "all", mode: agent.DrainAll, firstTurnMsgs: 3, turns: 1},
+		{name: "one at a time", mode: agent.QueueDrainOne, firstTurnMsgs: 2, turns: 2},
+		// QueueDrainAll injects both up front.
+		{name: "all", mode: agent.QueueDrainAll, firstTurnMsgs: 3, turns: 1},
 	}
 
 	for _, tt := range tests {
@@ -155,8 +155,8 @@ func TestQueuesSurvivePause(t *testing.T) {
 
 	a, err := agent.New(model,
 		agent.WithTools(addTool()),
-		agent.WithBeforeTool(func(_ context.Context, _ agent.ToolCallInfo) agent.Decision {
-			return agent.Decision{Action: agent.Pause}
+		agent.WithBeforeTool(func(_ context.Context, _ agent.ToolCallInfo) agent.ToolDecision {
+			return agent.ToolDecision{Action: agent.ToolDecisionPause}
 		}),
 	)
 	require.NoError(t, err)
@@ -219,13 +219,13 @@ func TestAfterToolOverride(t *testing.T) {
 
 	a, err := agent.New(model,
 		agent.WithTools(addTool()),
-		agent.WithAfterTool(func(_ context.Context, info agent.ToolResultInfo) *agent.ResultOverride {
+		agent.WithAfterTool(func(_ context.Context, info agent.ToolResultInfo) *agent.ToolResultOverride {
 			assert.Equal(t, "add", info.Name)
 			assert.Equal(t, "4", resultText(t, info.Result))
 
 			isErr := true
 
-			return &agent.ResultOverride{
+			return &agent.ToolResultOverride{
 				Content: agent.TextResult("redacted"),
 				IsError: &isErr,
 			}
@@ -263,14 +263,14 @@ func TestAfterToolSkipsUnexecutedAndRecoversPanic(t *testing.T) {
 
 	a, err := agent.New(model,
 		agent.WithTools(addTool(), panicky),
-		agent.WithBeforeTool(func(_ context.Context, info agent.ToolCallInfo) agent.Decision {
+		agent.WithBeforeTool(func(_ context.Context, info agent.ToolCallInfo) agent.ToolDecision {
 			if info.ID == "c2" {
-				return agent.Denied("no")
+				return agent.DenyTool("no")
 			}
 
-			return agent.Decision{}
+			return agent.ToolDecision{}
 		}),
-		agent.WithAfterTool(func(_ context.Context, _ agent.ToolResultInfo) *agent.ResultOverride {
+		agent.WithAfterTool(func(_ context.Context, _ agent.ToolResultInfo) *agent.ToolResultOverride {
 			hooked.Add(1)
 			panic("hook bug")
 		}),

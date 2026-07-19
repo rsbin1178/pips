@@ -17,6 +17,10 @@ Go building blocks for AI applications. Current packages:
 - **`agent/continuation`** — durable, host-driven execution across bounded
   agent runs: optimistic lifecycle state, cumulative limits, explicit retries,
   pause/cancel, and time/signal wakeups without a resident scheduler.
+- **`agent/goal`** — optional evidence-based completion policy over
+  continuation, with custom or structured-output model evaluators.
+- **`agent/loop`** — optional fixed or dynamic activation policy that persists
+  waits while leaving timers and wake delivery to the host.
 - **`agent/mcp`** — optional bridge from official Model Context Protocol client
   sessions to immutable `agent.Tool` snapshots, including progress and tool-list
   change notifications.
@@ -146,18 +150,34 @@ A running loop can be steered (`Session.Steer`) or given follow-up work
 points. The harness adds append-only persistence, compaction, branching,
 `PromptStream`, and concurrent `Cancel`.
 
-Routing, parallel agents, manager-owned subagents, evaluator loops, durable
-checkpoints, and application-owned handoffs are ordinary Go composition, not
-a workflow DSL. See [Agent composition](docs/agents.md) and
+Routing, parallel agents, manager-owned subagents, in-run evaluator loops,
+durable checkpoints, and application-owned handoffs are ordinary Go
+composition, not a workflow DSL. See [Agent composition](docs/agents.md) and
 `examples/agent-*`.
 
 Cross-run autonomy composes through `agent/continuation`: a Worker performs one
 bounded unit (the Harness adapter performs exactly one prompt run), then a
-Controller chooses continue, wait, block, complete, fail, or cancel. Goal and
-loop behavior are optional Controller policies. Team and workflow runtimes can
-reuse the neutral execution, signal, accounting, and lifecycle contracts
-without depending on those product policies. The host remains responsible for
-explicit wakeups; the package starts no scheduler or retry goroutine.
+Controller chooses continue, wait, block, complete, fail, or cancel.
+`agent/goal` implements durable completion evaluation and `agent/loop`
+implements fixed or model-planned activation. Both are optional Agent-layer
+Controllers: Team and Workflow runtimes can use continuation without importing
+either package. The host remains responsible for calling `ResumeDue` or
+delivering a signal; no package starts a scheduler or retry goroutine.
+
+Policy setup names the continuation payloads explicitly:
+
+```go
+goalSetup, _ := goal.Prepare("all tests pass")
+goalController, _ := goal.NewController(evaluator)
+
+loopSetup, _ := loop.Prepare(ai.JSON(`{"prompt":"check deployment"}`))
+fixedLoop, _ := loop.Every(5 * time.Minute)
+```
+
+Use each setup's `ControllerState` and `WorkInput` in
+`continuation.CreateRequest`; register the corresponding Controller in
+`continuation.Handlers`. Package examples show complete creation, advancement,
+and explicit Loop wakeup.
 
 ### MCP tools
 
