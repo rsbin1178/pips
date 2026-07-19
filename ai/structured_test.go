@@ -104,6 +104,77 @@ func TestSchemaMarshalNullableType(t *testing.T) {
 	assert.True(t, back.Nullable)
 }
 
+func TestSchemaRoundTripsUnionAndExtraKeywords(t *testing.T) {
+	t.Parallel()
+
+	const input = `{
+		"$schema":"https://json-schema.org/draft/2020-12/schema",
+		"type":["string","integer","null"],
+		"oneOf":[{"type":"string","minLength":1},{"type":"integer","minimum":0}],
+		"default":0,
+		"$defs":{"label":{"type":"string","pattern":"^[a-z]+$"}}
+	}`
+
+	var schema ai.Schema
+	require.NoError(t, json.Unmarshal([]byte(input), &schema))
+	assert.Equal(t, []string{"string", "integer"}, schema.Types)
+	assert.Empty(t, schema.Type)
+	assert.True(t, schema.Nullable)
+	assert.Contains(t, schema.Extra, "oneOf")
+	assert.Contains(t, schema.Extra, "$defs")
+
+	output, err := json.Marshal(&schema)
+	require.NoError(t, err)
+	assert.JSONEq(t, input, string(output))
+}
+
+func TestSchemaTypedFieldsOverrideExtraKeywords(t *testing.T) {
+	t.Parallel()
+
+	schema := &ai.Schema{
+		Type:        "object",
+		Description: "typed",
+		Extra: map[string]json.RawMessage{
+			"type":          json.RawMessage(`"string"`),
+			"description":   json.RawMessage(`"extra"`),
+			"minProperties": json.RawMessage(`1`),
+		},
+	}
+
+	data, err := json.Marshal(schema)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"type":"object","description":"typed","minProperties":1}`, string(data))
+}
+
+func TestParseSchemaPreservesDynamicSchema(t *testing.T) {
+	t.Parallel()
+
+	const input = `{"type":"object","properties":{"anything":true},"enum":[9007199254740993]}`
+
+	schema, err := ai.ParseSchema([]byte(input))
+	require.NoError(t, err)
+
+	data, err := json.Marshal(schema)
+	require.NoError(t, err)
+	assert.JSONEq(t, input, string(data))
+	assert.Contains(t, string(data), "9007199254740993")
+
+	var boolean ai.Schema
+	require.NoError(t, json.Unmarshal([]byte("false"), &boolean))
+	data, err = json.Marshal(&boolean)
+	require.NoError(t, err)
+	assert.JSONEq(t, "false", string(data))
+}
+
+func TestParseSchemaRejectsInvalidRoot(t *testing.T) {
+	t.Parallel()
+
+	for _, input := range []string{"", "null", `"string"`, "[]", "{"} {
+		_, err := ai.ParseSchema([]byte(input))
+		require.Error(t, err, input)
+	}
+}
+
 // staticModel is a canned LanguageModel for exercising GenerateTyped and
 // middleware without HTTP.
 type staticModel struct {

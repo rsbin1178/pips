@@ -1,6 +1,11 @@
 package ai
 
-import "encoding/json"
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"slices"
+)
 
 // Tool declares a function the model may call. The model returns invocation
 // requests as [ToolCallPart]s; the application executes the call and replies
@@ -40,16 +45,24 @@ type ToolChoice struct {
 	Name string
 }
 
-// Schema is a pragmatic subset of JSON Schema (draft 2020-12) covering what
-// LLM tool declarations and structured output need. Zero-value fields are
-// omitted from the serialized schema.
+// Schema represents JSON Schema (draft 2020-12). Common tool and structured
+// output keywords have typed fields; Extra preserves other keywords during a
+// JSON round trip. Zero-value typed fields are omitted from serialized schemas.
 //
 // Schemas can be written as literals or derived from Go types with
 // [SchemaFor].
 type Schema struct {
+	// RawJSON is an opaque JSON Schema object or boolean. When set, it takes
+	// precedence over all typed fields during marshaling. Use ParseSchema for
+	// dynamic schemas that must be forwarded without normalization.
+	RawJSON json.RawMessage
+
 	// Type is a JSON Schema type: "object", "array", "string", "number",
 	// "integer", "boolean", or "null".
-	Type        string
+	Type string
+	// Types represents a union of non-null JSON Schema types. When non-empty,
+	// it takes precedence over Type. Nullable adds "null" to either form.
+	Types       []string
 	Description string
 
 	// Nullable widens Type to also accept null (serialized as
@@ -72,6 +85,11 @@ type Schema struct {
 	Enum    []any
 	Format  string
 	Pattern string
+
+	// Extra contains JSON Schema keywords without typed fields, such as
+	// oneOf, $defs, minimum, and default. Typed fields take precedence over
+	// entries with the same keyword.
+	Extra map[string]json.RawMessage
 }
 
 type schemaJSON struct {
@@ -88,6 +106,14 @@ type schemaJSON struct {
 
 // MarshalJSON implements [json.Marshaler], emitting standard JSON Schema.
 func (s *Schema) MarshalJSON() ([]byte, error) {
+	if len(s.RawJSON) > 0 {
+		if !json.Valid(s.RawJSON) {
+			return nil, errors.New("ai: invalid raw JSON Schema")
+		}
+
+		return bytes.Clone(s.RawJSON), nil
+	}
+
 	out := schemaJSON{
 		Description:          s.Description,
 		Properties:           s.Properties,
@@ -98,24 +124,80 @@ func (s *Schema) MarshalJSON() ([]byte, error) {
 		Format:               s.Format,
 		Pattern:              s.Pattern,
 	}
-	switch {
-	case s.Type != "" && s.Nullable:
-		out.Type = []string{s.Type, "null"}
-	case s.Type != "":
-		out.Type = s.Type
+	out.Type = s.jsonType()
+
+	data, err := json.Marshal(out)
+	if err != nil {
+		return nil, err
 	}
 
-	return json.Marshal(out)
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return nil, err
+	}
+
+	for keyword, value := range s.Extra {
+		if !knownSchemaKeyword(keyword) {
+			fields[keyword] = value
+		}
+	}
+
+	return json.Marshal(fields)
 }
 
-// UnmarshalJSON implements [json.Unmarshaler]. It accepts both scalar and
-// ["<type>","null"] forms of "type".
+func (s *Schema) jsonType() any {
+	types := s.Types
+	if len(types) == 0 && s.Type != "" {
+		types = []string{s.Type}
+	}
+
+	if s.Nullable && !slices.Contains(types, "null") {
+		types = append(append([]string(nil), types...), "null")
+	}
+
+	switch len(types) {
+	case 0:
+		if s.Nullable {
+			return "null"
+		}
+
+		return nil
+	case 1:
+		return types[0]
+	default:
+		return types
+	}
+}
+
+// UnmarshalJSON implements [json.Unmarshaler]. It accepts scalar and union
+// forms of "type" and preserves unmodeled keywords in Extra.
 func (s *Schema) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		raw, err := ParseSchema(trimmed)
+		if err != nil {
+			return err
+		}
+
+		*s = *raw
+
+		return nil
+	}
+
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+
 	var raw struct {
 		schemaJSON
 		Type json.RawMessage `json:"type"`
 	}
-	if err := json.Unmarshal(data, &raw); err != nil {
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+
+	if err := decoder.Decode(&raw); err != nil {
 		return err
 	}
 
@@ -128,6 +210,7 @@ func (s *Schema) UnmarshalJSON(data []byte) error {
 		Enum:                 raw.Enum,
 		Format:               raw.Format,
 		Pattern:              raw.Pattern,
+		Extra:                extraSchemaFields(fields),
 	}
 	if len(raw.Type) == 0 {
 		return nil
@@ -144,13 +227,61 @@ func (s *Schema) UnmarshalJSON(data []byte) error {
 		return err
 	}
 
-	for _, t := range types {
-		if t == "null" {
+	for _, schemaType := range types {
+		if schemaType == "null" {
 			s.Nullable = true
 		} else {
-			s.Type = t
+			s.Types = append(s.Types, schemaType)
 		}
 	}
 
+	if len(s.Types) == 1 {
+		s.Type = s.Types[0]
+		s.Types = nil
+	}
+
 	return nil
+}
+
+// ParseSchema validates and preserves a dynamic JSON Schema without
+// normalizing its keywords or numeric values. JSON Schema permits an object or
+// a boolean at every schema position.
+func ParseSchema(data []byte) (*Schema, error) {
+	trimmed := bytes.TrimSpace(data)
+	if !json.Valid(trimmed) {
+		return nil, errors.New("ai: invalid JSON Schema")
+	}
+
+	if len(trimmed) == 0 || (trimmed[0] != '{' && !bytes.Equal(trimmed, []byte("true")) &&
+		!bytes.Equal(trimmed, []byte("false"))) {
+		return nil, errors.New("ai: JSON Schema must be an object or boolean")
+	}
+
+	return &Schema{RawJSON: bytes.Clone(trimmed)}, nil
+}
+
+func extraSchemaFields(fields map[string]json.RawMessage) map[string]json.RawMessage {
+	extra := make(map[string]json.RawMessage)
+
+	for keyword, value := range fields {
+		if !knownSchemaKeyword(keyword) {
+			extra[keyword] = value
+		}
+	}
+
+	if len(extra) == 0 {
+		return nil
+	}
+
+	return extra
+}
+
+func knownSchemaKeyword(keyword string) bool {
+	switch keyword {
+	case "type", "description", "properties", "required", "additionalProperties",
+		"items", "enum", "format", "pattern":
+		return true
+	default:
+		return false
+	}
 }
