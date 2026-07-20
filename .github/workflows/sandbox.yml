@@ -7,6 +7,10 @@ on:
       - "go.mod"
       - "go.sum"
       - "internal/coding/execution/**"
+      - "internal/coding/approval/**"
+      - "internal/coding/changes/**"
+      - "internal/coding/tools/**"
+      - "internal/coding/workspace/**"
   push:
     branches:
       - main
@@ -15,6 +19,10 @@ on:
       - "go.mod"
       - "go.sum"
       - "internal/coding/execution/**"
+      - "internal/coding/approval/**"
+      - "internal/coding/changes/**"
+      - "internal/coding/tools/**"
+      - "internal/coding/workspace/**"
   workflow_dispatch:
 
 permissions:
@@ -46,11 +54,11 @@ jobs:
       - name: Install external sandbox runtime
         run: sudo apt-get update && sudo apt-get install --yes bubblewrap
       - name: Test execution package
-        run: go test -race ./internal/coding/execution/...
+        run: go test -race ./internal/coding/execution/... ./internal/coding/approval/... ./internal/coding/changes/... ./internal/coding/tools/...
       - name: Test real Linux sandbox
         env:
           PIPS_SANDBOX_INTEGRATION: "1"
-        run: go test -race ./internal/coding/execution/... -run 'Linux.*Integration' -count=3
+        run: go test -race ./internal/coding/execution/... ./internal/coding/changes/git ./internal/coding/tools -run 'Linux.*Integration|GitIntegration|ShellIntegration' -count=3
 
   macos:
     name: macOS sandbox (${{ matrix.arch }})
@@ -71,8 +79,8 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Test execution package
-        run: go test -race ./internal/coding/execution/...
+        run: go test -race ./internal/coding/execution/... ./internal/coding/approval/... ./internal/coding/changes/... ./internal/coding/tools/...
       - name: Test real macOS sandbox
         env:
           PIPS_SANDBOX_INTEGRATION: "1"
-        run: go test -race ./internal/coding/execution/... -run 'Darwin.*Integration' -count=3
+        run: go test -race ./internal/coding/execution/... ./internal/coding/changes/git ./internal/coding/tools -run 'Darwin.*Integration|GitIntegration|ShellIntegration' -count=3

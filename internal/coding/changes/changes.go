@@ -1,6 +1,6 @@
 // Package changes defines the application boundary for read-only workspace
-// change attribution. The production Git adapter is added with the P0-4
-// sandbox executor; this package deliberately contains no process execution.
+// change attribution. Concrete adapters live in subpackages; this package
+// deliberately contains no process execution.
 package changes
 
 import (
@@ -60,8 +60,9 @@ const (
 
 // Entry is one normalized workspace-relative changed path.
 type Entry struct {
-	Path string
-	Kind Kind
+	Path         string
+	PreviousPath string
+	Kind         Kind
 }
 
 // Report is an immutable-by-API change list and optional bounded diff.
@@ -88,6 +89,15 @@ func NewReport(entries []Entry, diff string, truncated bool) (Report, error) {
 
 		if !validKind(entry.Kind) {
 			return Report{}, fmt.Errorf("%w: entry %d has unknown kind %q", ErrInvalid, index, entry.Kind)
+		}
+
+		if entry.Kind == KindRenamed {
+			previous, err := workspace.NormalizePath(entry.PreviousPath, false)
+			if err != nil || previous != entry.PreviousPath || previous == entry.Path {
+				return Report{}, fmt.Errorf("%w: entry %d has invalid previous path", ErrInvalid, index)
+			}
+		} else if entry.PreviousPath != "" {
+			return Report{}, fmt.Errorf("%w: entry %d has unexpected previous path", ErrInvalid, index)
 		}
 
 		if _, duplicate := seen[entry.Path]; duplicate {
