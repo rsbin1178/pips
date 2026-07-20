@@ -122,6 +122,25 @@ func New(entries ...Entry) (*Catalog, error) {
 	return catalog, nil
 }
 
+// Merge combines immutable catalogs in argument order. It preserves each
+// entry's tool, provenance, risk, and tags, and returns an independent Catalog.
+// A nil input or duplicate tool name is an error; no inputs produce an empty
+// Catalog.
+func Merge(catalogs ...*Catalog) (*Catalog, error) {
+	for i, catalog := range catalogs {
+		if catalog == nil {
+			return nil, fmt.Errorf("catalog: merge catalog %d is nil", i)
+		}
+	}
+
+	var entries []Entry
+	for _, catalog := range catalogs {
+		entries = append(entries, catalog.entries...)
+	}
+
+	return New(entries...)
+}
+
 // Snapshot returns tools authorized for this tenant in registration order.
 func (c *Catalog) Snapshot(ctx context.Context, policy Policy) ([]agent.Tool, error) {
 	if c == nil {

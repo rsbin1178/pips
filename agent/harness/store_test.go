@@ -79,6 +79,38 @@ func TestJSONLRoundTripAllKinds(t *testing.T) {
 	assert.Equal(t, ai.Usage{InputTokens: 10, OutputTokens: 5}, *entries[1].Usage)
 }
 
+func TestJSONLPendingRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	path := t.TempDir() + "/pending.jsonl"
+	store, err := harness.CreateJSONL(path, "pending", nil)
+	require.NoError(t, err)
+
+	sess, err := harness.NewSession(store)
+	require.NoError(t, err)
+	_, err = sess.AppendMessage(ai.Assistant(
+		ai.ToolCallPart{ID: "c1", Name: "read_file", Args: ai.JSON(`{"path":"main.go"}`)},
+		ai.ToolCallPart{ID: "c2", Name: "search_text", Args: ai.JSON(`{"query":"main"}`)},
+	), nil)
+	require.NoError(t, err)
+	_, err = sess.AppendMessage(ai.ToolResultText("c1", "read_file", "ok"), nil)
+	require.NoError(t, err)
+	require.NoError(t, store.Close())
+
+	reopened, err := harness.OpenJSONL(path)
+	require.NoError(t, err)
+
+	defer reopened.Close() //nolint:errcheck // test cleanup
+
+	restored, err := harness.NewSession(reopened)
+	require.NoError(t, err)
+	pending, err := restored.Pending()
+	require.NoError(t, err)
+	require.Len(t, pending, 1)
+	assert.Equal(t, "c2", pending[0].ID)
+	assert.JSONEq(t, `{"query":"main"}`, string(pending[0].Args))
+}
+
 func TestOpenJSONLRejectsForeignFiles(t *testing.T) {
 	t.Parallel()
 

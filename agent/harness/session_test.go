@@ -1,6 +1,7 @@
 package harness_test
 
 import (
+	"fmt"
 	"os"
 	"testing"
 
@@ -9,6 +10,60 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestSessionPendingUsesActiveBranchAndCopiesArguments(t *testing.T) {
+	t.Parallel()
+
+	sess := buildSession(t)
+	root := appendText(t, sess, ai.RoleUser, "start", nil)
+	_, err := sess.AppendMessage(ai.Assistant(
+		ai.ToolCallPart{ID: "c1", Name: "read_file", Args: ai.JSON(`{"path":"a.go"}`)},
+		ai.ToolCallPart{ID: "c2", Name: "search_text", Args: ai.JSON(`{"query":"TODO"}`)},
+	), nil)
+	require.NoError(t, err)
+
+	_, err = sess.AppendCustom("approval", ai.JSON(`{"state":"pending"}`))
+	require.NoError(t, err)
+
+	pending, err := sess.Pending()
+	require.NoError(t, err)
+	require.Len(t, pending, 2)
+	assert.Equal(t, []string{"c1", "c2"}, []string{pending[0].ID, pending[1].ID})
+
+	pending[0].Args[0] = 'x'
+	again, err := sess.Pending()
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"path":"a.go"}`, string(again[0].Args))
+
+	resolved, err := sess.AppendMessage(ai.ToolResultText("c1", "read_file", "ok"), nil)
+	require.NoError(t, err)
+	pending, err = sess.Pending()
+	require.NoError(t, err)
+	require.Len(t, pending, 1)
+	assert.Equal(t, "c2", pending[0].ID)
+
+	require.NoError(t, sess.MoveTo(root, ""))
+	_, err = sess.AppendMessage(ai.Assistant(
+		ai.ToolCallPart{ID: "c3", Name: "review_code", Args: ai.JSON(`{}`)},
+	), nil)
+	require.NoError(t, err)
+	pending, err = sess.Pending()
+	require.NoError(t, err)
+	require.Len(t, pending, 1)
+	assert.Equal(t, "c3", pending[0].ID)
+
+	require.NoError(t, sess.MoveTo(resolved, ""))
+	pending, err = sess.Pending()
+	require.NoError(t, err)
+	require.Len(t, pending, 1)
+	assert.Equal(t, "c2", pending[0].ID)
+
+	_, err = sess.AppendMessage(ai.ToolResultText("c2", "search_text", "ok"), nil)
+	require.NoError(t, err)
+	pending, err = sess.Pending()
+	require.NoError(t, err)
+	assert.Empty(t, pending)
+}
 
 func writeFile(path, content string) error {
 	return os.WriteFile(path, []byte(content), 0o600)
@@ -117,4 +172,16 @@ func TestMoveToUnknownEntry(t *testing.T) {
 
 	sess := buildSession(t)
 	require.ErrorIs(t, sess.MoveTo("nope", ""), harness.ErrEntryNotFound)
+}
+
+func ExampleSession_Pending() {
+	store := harness.NewMemoryStore("example")
+	sess, _ := harness.NewSession(store)
+	_, _ = sess.AppendMessage(ai.Assistant(
+		ai.ToolCallPart{ID: "call-1", Name: "write_file", Args: ai.JSON(`{"path":"main.go"}`)},
+	), nil)
+
+	pending, _ := sess.Pending()
+	fmt.Println(pending[0].Name)
+	// Output: write_file
 }

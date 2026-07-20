@@ -3,6 +3,10 @@
 // with provenance and risk. A Policy then creates a tenant-scoped, deny-by-
 // default snapshot suitable for agent.WithTools.
 //
+// [Merge] combines several immutable Catalogs while preserving their entry
+// order and policy metadata. Duplicate tool names remain errors rather than
+// receiving an implicit precedence.
+//
 // ToolSearch implements optional, source-aware deferred discovery. With
 // ToolSearchOptions{Enabled: true}, local and Team tools stay direct while MCP
 // and extension tools are deferred by default; DeferredSources customizes that
