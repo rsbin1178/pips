@@ -252,12 +252,11 @@ func (a *Agent) Name() string {
 	return a.cfg.name
 }
 
-// request assembles the model request for one turn.
-func (a *Agent) request(msgs []ai.Message) ai.Request {
+func (a *Agent) requestWithTools(msgs []ai.Message, tools *toolbox) ai.Request {
 	req := ai.Request{
 		Messages: msgs,
 		System:   a.cfg.system,
-		Tools:    a.tools.decls,
+		Tools:    tools.decls,
 	}
 	if a.cfg.requestFn != nil {
 		a.cfg.requestFn(&req)

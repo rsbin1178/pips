@@ -1,6 +1,9 @@
 package harness
 
 import (
+	"fmt"
+	"maps"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -21,6 +24,23 @@ type Skill struct {
 	// set it is advertised to the model so file-capable agents can read the
 	// full instructions on demand.
 	Source string
+	// License is the optional skill license declaration.
+	License string
+	// Compatibility records optional host or environment requirements.
+	Compatibility string
+	// Metadata is the optional scalar metadata mapping from the manifest.
+	Metadata map[string]string
+	// AllowedTools is declarative metadata only. A host must still enforce its
+	// own Tool policy; this package never grants execution from a Skill.
+	AllowedTools []string
+}
+
+func cloneSkill(in Skill) Skill {
+	out := in
+	out.Metadata = maps.Clone(in.Metadata)
+	out.AllowedTools = slices.Clone(in.AllowedTools)
+
+	return out
 }
 
 // PromptTemplate is a reusable prompt with positional argument placeholders.
@@ -31,6 +51,30 @@ type PromptTemplate struct {
 	Description string
 	// Content is the template text; see [PromptTemplate.Format].
 	Content string
+}
+
+// ValidateTemplates checks names, content, and duplicate identities for a
+// complete prompt-template set.
+func ValidateTemplates(templates ...PromptTemplate) error {
+	seen := make(map[string]struct{}, len(templates))
+	for _, template := range templates {
+		name := strings.TrimSpace(template.Name)
+		if name == "" || name != template.Name || len(name) > 128 {
+			return fmt.Errorf("harness: invalid prompt template name %q", template.Name)
+		}
+
+		if strings.TrimSpace(template.Content) == "" {
+			return fmt.Errorf("harness: prompt template %q has empty content", name)
+		}
+
+		if _, duplicate := seen[name]; duplicate {
+			return fmt.Errorf("harness: duplicate prompt template %q", name)
+		}
+
+		seen[name] = struct{}{}
+	}
+
+	return nil
 }
 
 // Format substitutes arguments into the template: $1..$9 reference

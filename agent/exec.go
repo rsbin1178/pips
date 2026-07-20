@@ -40,11 +40,12 @@ type execOutcome struct {
 
 // execBatch gates and executes one turn's tool calls. cancel aborts the run
 // context when the consumer stops mid-batch so in-flight tools wind down.
-func (a *Agent) execBatch(ctx context.Context, cancel context.CancelFunc, turn int, calls []ai.ToolCallPart, emit emitFunc) batchOutcome {
+func (a *Agent) execBatch(ctx context.Context, tools *toolbox, cancel context.CancelFunc, turn int, calls []ai.ToolCallPart, emit emitFunc) batchOutcome {
 	runnable, denials, pending := a.gateCalls(ctx, turn, calls)
 
 	b := &batchExec{
 		agent:    a,
+		tools:    tools,
 		cancel:   cancel,
 		turn:     turn,
 		emitFn:   emit,
@@ -112,6 +113,7 @@ func (a *Agent) gateCalls(ctx context.Context, turn int, calls []ai.ToolCallPart
 // not concurrency-safe).
 type batchExec struct {
 	agent    *Agent
+	tools    *toolbox
 	cancel   context.CancelFunc
 	turn     int
 	emitFn   emitFunc
@@ -159,7 +161,7 @@ func (b *batchExec) step(ctx context.Context, idx int) {
 		return
 	}
 
-	if b.agent.tools.concurrent(call.Name) {
+	if b.tools.concurrent(call.Name) {
 		b.dispatch(ctx, idx)
 		return
 	}
@@ -173,7 +175,7 @@ func (b *batchExec) step(ctx context.Context, idx int) {
 	}
 
 	b.emit(toolStartEvent(b.turn, call))
-	b.outcomes[idx] = b.agent.runTool(b.reporterCtx(ctx, call), call)
+	b.outcomes[idx] = b.agent.runTool(b.reporterCtx(ctx, call), b.tools, call)
 	b.drainProgress()
 	b.finalize(ctx, idx)
 	b.emit(toolEndEvent(b.turn, call, b.outcomes[idx].part))
@@ -206,7 +208,7 @@ func (b *batchExec) dispatch(ctx context.Context, idx int) {
 			go func() {
 				defer func() { <-b.sem; b.done <- idx }()
 
-				b.outcomes[idx] = b.agent.runTool(toolCtx, call)
+				b.outcomes[idx] = b.agent.runTool(toolCtx, b.tools, call)
 			}()
 
 			return
@@ -345,8 +347,8 @@ func (b *batchExec) terminated() bool {
 // cancellation, timeout, execution error, panic — into an error tool result
 // the model can react to. A tool returning [ErrTerminate] produces a
 // successful result carrying the termination hint.
-func (a *Agent) runTool(ctx context.Context, call ai.ToolCallPart) execOutcome {
-	tool, ok := a.tools.byName[call.Name]
+func (a *Agent) runTool(ctx context.Context, tools *toolbox, call ai.ToolCallPart) execOutcome {
+	tool, ok := tools.byName[call.Name]
 	if !ok {
 		return execOutcome{part: errorResult(call, "unknown tool: "+call.Name)}
 	}
@@ -382,7 +384,7 @@ func (a *Agent) runTool(ctx context.Context, call ai.ToolCallPart) execOutcome {
 }
 
 // safeExec runs Exec with panic recovery, so a buggy tool degrades to an
-// error result instead of crashing the host.
+// error result instead of crashing the calling process.
 func safeExec(ctx context.Context, tool Tool, call ToolCall) (parts []ai.Part, err error) {
 	defer func() {
 		if r := recover(); r != nil {

@@ -1,6 +1,7 @@
 package harness_test
 
 import (
+	"os"
 	"testing"
 	"testing/fstest"
 
@@ -26,8 +27,7 @@ metadata:
   ignored: value
 ---
 Deploy steps.`)},
-		"unnamed/SKILL.md": &fstest.MapFile{Data: []byte("Just instructions, no frontmatter.")},
-		"docs/readme.md":   &fstest.MapFile{Data: []byte("not a skill")},
+		"docs/readme.md": &fstest.MapFile{Data: []byte("not a skill")},
 	}
 }
 
@@ -36,7 +36,7 @@ func TestLoadSkillsFS(t *testing.T) {
 
 	skills, err := harness.LoadSkillsFS(skillFS())
 	require.NoError(t, err)
-	require.Len(t, skills, 3)
+	require.Len(t, skills, 2)
 
 	byName := map[string]harness.Skill{}
 	for _, s := range skills {
@@ -53,23 +53,49 @@ func TestLoadSkillsFS(t *testing.T) {
 	deploy := byName["deploy"]
 	assert.Equal(t, "Deployment runbook for production.", deploy.Description)
 	assert.Equal(t, "Deploy steps.", deploy.Content)
+}
 
-	// No frontmatter: the directory names the skill, the body is content.
-	unnamed := byName["unnamed"]
-	assert.Equal(t, "Just instructions, no frontmatter.", unnamed.Content)
-	assert.Empty(t, unnamed.Description)
+func TestLoadSkillFSLoadsOnlyExplicitManifest(t *testing.T) {
+	t.Parallel()
+
+	skill, err := harness.LoadSkillFS(skillFS(), "review/SKILL.md")
+	require.NoError(t, err)
+	assert.Equal(t, "review", skill.Name)
+
+	_, err = harness.LoadSkillFS(skillFS(), "docs/readme.md")
+	require.ErrorContains(t, err, "invalid path")
 }
 
 func TestLoadSkillsFromRealDir(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	require.NoError(t, writeFile(dir+"/SKILL.md", "---\nname: root-skill\ndescription: d\n---\nbody"))
+	require.NoError(t, os.MkdirAll(dir+"/root-skill", 0o750))
+	require.NoError(t, writeFile(dir+"/root-skill/SKILL.md", "---\nname: root-skill\ndescription: d\n---\nbody"))
 
 	skills, err := harness.LoadSkills(dir)
 	require.NoError(t, err)
 	require.Len(t, skills, 1)
 	assert.Equal(t, "root-skill", skills[0].Name)
+}
+
+func TestLoadSkillsFSRejectsInvalidManifest(t *testing.T) {
+	t.Parallel()
+
+	_, err := harness.LoadSkillsFS(fstest.MapFS{
+		"bad/SKILL.md": &fstest.MapFile{Data: []byte("---\nname: Other\ndescription: d\n---\nbody")},
+	})
+	require.ErrorContains(t, err, "name must be")
+
+	_, err = harness.LoadSkillsFS(fstest.MapFS{
+		"bad/SKILL.md": &fstest.MapFile{Data: []byte("---\nname: bad\ndescription: d\nunknown: no\n---\nbody")},
+	})
+	require.ErrorContains(t, err, "unsupported manifest field")
+
+	_, err = harness.LoadSkillsFS(fstest.MapFS{
+		"bad/SKILL.md": &fstest.MapFile{Data: []byte("instructions only")},
+	})
+	require.ErrorContains(t, err, "requires YAML frontmatter")
 }
 
 func TestLoadTemplatesFS(t *testing.T) {
@@ -96,6 +122,23 @@ Review $1.`)},
 	assert.Equal(t, "Review a file.", byName["review"].Description)
 	assert.Equal(t, "Review $1.", byName["review"].Content)
 	assert.Equal(t, "No frontmatter here.", byName["plain"].Content)
+}
+
+func TestLoadTemplateFSLoadsOnlyExplicitTemplate(t *testing.T) {
+	t.Parallel()
+
+	fsys := fstest.MapFS{
+		"prompts/review.md": &fstest.MapFile{Data: []byte("Review $1.")},
+		"prompts/other.md":  &fstest.MapFile{Data: []byte("Other.")},
+	}
+
+	template, err := harness.LoadTemplateFS(fsys, "prompts/review.md")
+	require.NoError(t, err)
+	assert.Equal(t, "review", template.Name)
+	assert.Equal(t, "Review $1.", template.Content)
+
+	_, err = harness.LoadTemplateFS(fsys, "prompts")
+	require.ErrorContains(t, err, "invalid path")
 }
 
 func TestWithSkillsFSReachesSystemPrompt(t *testing.T) {
