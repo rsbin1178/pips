@@ -16,7 +16,7 @@ func ExampleConnect_stdio() {
 
 	client, err := agentmcp.Connect(
 		ctx,
-		&mcp.Implementation{Name: "pips-host", Version: "v0.1.0"},
+		&mcp.Implementation{Name: "pips-runtime", Version: "v0.1.0"},
 		transport,
 		agentmcp.WithToolNamePrefix("workspace"),
 	)
