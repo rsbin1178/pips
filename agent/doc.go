@@ -36,8 +36,9 @@
 // [WithInputGuardrail] and [WithOutputGuardrail] validate conversation
 // boundaries, while [WithAfterTool] inspects and overrides executed results.
 // [WithTransformContext] reshapes what each model call sees (the
-// context-compaction injection point), and [WithPrepareTurn] swaps the model
-// or commits a history rewrite between turns.
+// context-compaction injection point), and [WithPrepareTurn] swaps the model,
+// commits a history rewrite, or replaces the run-scoped tool snapshot between
+// turns.
 //
 // A running loop can be redirected without restarting: [Session.Steer]
 // injects messages before the next model call, and [Session.FollowUp] queues

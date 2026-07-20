@@ -84,7 +84,7 @@ func (a *Agent) loop(ctx context.Context, sess *Session, msgs []ai.Message, emit
 
 	r := &run{
 		agent: a, sess: sess, emit: emit, cancel: cancel, streaming: streaming,
-		model: a.model, meta: meta,
+		model: a.model, tools: a.tools, meta: meta,
 	}
 	if err := checkInputGuardrails(ctx, a.cfg.inputGuards, InputGuardrailInfo{
 		RunMetadata: meta,
@@ -118,6 +118,9 @@ type run struct {
 
 	// model serves the run's calls; WithPrepareTurn may swap it mid-run.
 	model ai.LanguageModel
+	// tools is the run-scoped immutable tool snapshot. Prepare-turn updates
+	// replace it only between turns, preserving declaration/execution parity.
+	tools *toolbox
 	// pending holds drained queue messages awaiting injection at the next
 	// turn start.
 	pending []ai.Message
@@ -160,7 +163,7 @@ func (r *run) turn(ctx context.Context, turn int) (result *RunResult, next bool,
 		}
 	}
 
-	resp, stopped, err := r.agent.callModel(ctx, r.model, turn, msgs, r.emit, r.streaming)
+	resp, stopped, err := r.agent.callModel(ctx, r.model, r.tools, turn, msgs, r.emit, r.streaming)
 	if stopped {
 		return nil, false, nil
 	}
@@ -228,7 +231,7 @@ func (r *run) toolPhase(ctx context.Context, turn int, resp *ai.Response) (resul
 		// let the model re-issue the calls (none are safe to execute).
 		outcome = r.truncatedBatch(turn, calls)
 	default:
-		outcome = r.agent.execBatch(ctx, r.cancel, turn, calls, r.emit)
+		outcome = r.agent.execBatch(ctx, r.tools, r.cancel, turn, calls, r.emit)
 	}
 
 	if len(outcome.results) > 0 {
@@ -286,18 +289,13 @@ func (r *run) truncatedBatch(turn int, calls []ai.ToolCallPart) batchOutcome {
 // and steering — then, on a natural stop, follow-ups — feed the next turn.
 func (r *run) decide(ctx context.Context, turn int, natural bool, naturalStop StopReason) (result *RunResult, next bool, err error) {
 	if fn := r.agent.cfg.prepareTurn; fn != nil {
-		update := fn(ctx, RunInfo{
+		if err := r.applyTurnUpdate(fn(ctx, RunInfo{
 			RunMetadata: r.meta,
 			Turns:       turn,
 			Usage:       r.usage,
 			Response:    r.lastResp,
-		})
-		if update.Model != nil {
-			r.model = update.Model
-		}
-
-		if update.ReplaceMessages != nil {
-			r.sess.Replace(update.ReplaceMessages...)
+		})); err != nil {
+			return r.partial(turn), false, err
 		}
 	}
 
@@ -334,6 +332,29 @@ func (r *run) decide(ctx context.Context, turn int, natural bool, naturalStop St
 	return nil, true, nil
 }
 
+func (r *run) applyTurnUpdate(update TurnUpdate) error {
+	if update.Model != nil {
+		r.model = update.Model
+	}
+
+	if update.ReplaceMessages != nil {
+		r.sess.Replace(update.ReplaceMessages...)
+	}
+
+	if update.Tools == nil {
+		return nil
+	}
+
+	tools, err := newToolbox(update.Tools)
+	if err != nil {
+		return err
+	}
+
+	r.tools = tools
+
+	return nil
+}
+
 // finish emits run_end and assembles the result of a clean termination.
 func (r *run) finish(stop StopReason, turns int, pending []ai.ToolCallPart) (*RunResult, error) {
 	r.emit(Event{Type: EventRunEnd, Turn: turns, Stop: stop, Usage: r.usage})
@@ -351,8 +372,8 @@ func (r *run) finish(stop StopReason, turns int, pending []ai.ToolCallPart) (*Ru
 // callModel performs one model call. When streaming, deltas tee through emit
 // while [ai.Collect] folds them into the completed response; stopped reports
 // that the consumer quit mid-stream.
-func (a *Agent) callModel(ctx context.Context, model ai.LanguageModel, turn int, msgs []ai.Message, emit emitFunc, streaming bool) (resp *ai.Response, stopped bool, err error) {
-	req := a.request(msgs)
+func (a *Agent) callModel(ctx context.Context, model ai.LanguageModel, tools *toolbox, turn int, msgs []ai.Message, emit emitFunc, streaming bool) (resp *ai.Response, stopped bool, err error) {
+	req := a.requestWithTools(msgs, tools)
 
 	if !streaming {
 		resp, err = model.Generate(ctx, req)
