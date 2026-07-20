@@ -57,6 +57,7 @@ type Policy struct {
 	sandbox       config.SandboxMode
 	approval      config.ApprovalMode
 	protected     []string
+	ceiling       Fingerprint
 }
 
 // Authorization binds a policy decision to one exact operation and workspace.
@@ -65,6 +66,7 @@ type Authorization struct {
 	workspaceKey string
 	sandbox      config.SandboxMode
 	contract     string
+	ceiling      Fingerprint
 }
 
 // NewPolicy validates a workspace-bound execution policy.
@@ -88,6 +90,7 @@ func NewPolicy(ws workspace.Workspace, cfg PolicyConfig) (Policy, error) {
 		sandbox:       cfg.Sandbox,
 		approval:      cfg.Approval,
 		protected:     protected,
+		ceiling:       protectedCeiling(protected),
 	}, nil
 }
 
@@ -234,6 +237,7 @@ func (p Policy) authorization(op Operation) Authorization {
 		workspaceKey: p.workspaceKey,
 		sandbox:      p.sandbox,
 		contract:     sandboxContract,
+		ceiling:      p.ceiling,
 	}
 }
 

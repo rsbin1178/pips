@@ -13,6 +13,7 @@ import (
 
 const (
 	operationSchema = "pips.coding.operation/v1alpha1"
+	policySchema    = "pips.coding.policy/v1alpha1"
 	sandboxContract = "pips.coding.sandbox/v1alpha1"
 )
 
@@ -57,6 +58,23 @@ func (o Operation) Fingerprint() Fingerprint {
 
 	for _, directory := range o.writeDirs {
 		encoder.file(directory)
+	}
+
+	var fingerprint Fingerprint
+	copy(fingerprint[:], digest.Sum(nil))
+
+	return fingerprint
+}
+
+func protectedCeiling(paths []string) Fingerprint {
+	digest := sha256.New()
+	encoder := fingerprintEncoder{hash: digest}
+	encoder.text(policySchema)
+	encoder.text(sandboxContract)
+	encoder.number(uint64(len(paths)))
+
+	for _, path := range paths {
+		encoder.text(path)
 	}
 
 	var fingerprint Fingerprint
