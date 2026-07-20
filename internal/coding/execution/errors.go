@@ -13,4 +13,12 @@ var (
 	ErrUnauthorized = errors.New("coding execution: unauthorized")
 	// ErrUnsupportedPlatform means the host cannot provide a required execution boundary.
 	ErrUnsupportedPlatform = errors.New("coding execution: unsupported platform")
+	// ErrSandboxUnavailable means the configured platform boundary failed its capability check.
+	ErrSandboxUnavailable = errors.New("coding execution: sandbox unavailable")
+	// ErrPlanUsed means a plan was already run or closed.
+	ErrPlanUsed = errors.New("coding execution: plan already consumed")
+	// ErrStart means the operating system did not start a validated plan.
+	ErrStart = errors.New("coding execution: process start failed")
+	// ErrOutputLimit means observed process output exceeded the operation hard limit.
+	ErrOutputLimit = errors.New("coding execution: output limit exceeded")
 )
