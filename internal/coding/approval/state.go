@@ -53,6 +53,22 @@ type State struct {
 	Unknown *Unknown
 }
 
+// NonInteractiveError projects a durable state into the fail-fast contract
+// used by non-interactive callers. Interactive callers should render Review
+// or Unknown and pass an explicit Resolution instead.
+func (s State) NonInteractiveError() error {
+	switch s.Kind {
+	case StateReady:
+		return nil
+	case StateReview:
+		return ErrApprovalRequired
+	case StateUnknown:
+		return ErrOutcomeUnknown
+	default:
+		return ErrJournalCorrupt
+	}
+}
+
 // Review describes a current pending operation requiring a user decision.
 type Review struct {
 	RequestID string
