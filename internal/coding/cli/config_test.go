@@ -7,9 +7,9 @@ import (
 	"testing"
 
 	"github.com/rsbin/pips/ai"
+	"github.com/rsbin/pips/internal/coding/cli"
 	"github.com/rsbin/pips/internal/coding/config"
 	"github.com/rsbin/pips/internal/coding/credential"
-	"github.com/rsbin/pips/internal/coding/frontend/cli"
 	"github.com/rsbin/pips/internal/coding/paths"
 	"github.com/rsbin/pips/internal/coding/session"
 	"github.com/rsbin/pips/internal/coding/workspace"
