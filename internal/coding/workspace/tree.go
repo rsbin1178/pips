@@ -154,6 +154,32 @@ func (t *Tree) Lstat(name string) (fs.FileInfo, error) {
 	return t.stat(name, false)
 }
 
+// Readlink returns the unexpanded target of a workspace symbolic link.
+func (t *Tree) Readlink(name string) (string, error) {
+	normalized, err := NormalizePath(name, false)
+	if err != nil {
+		return "", err
+	}
+
+	if t == nil {
+		return "", ErrClosed
+	}
+
+	t.lifecycle.RLock()
+	defer t.lifecycle.RUnlock()
+
+	if err := t.checkOpen(); err != nil {
+		return "", err
+	}
+
+	target, err := t.root.Readlink(filepath.FromSlash(normalized))
+	if err != nil {
+		return "", fmt.Errorf("coding workspace: read symbolic link %q: %w", normalized, err)
+	}
+
+	return target, nil
+}
+
 // ReadDir reads one directory without recursively following its entries.
 func (t *Tree) ReadDir(name string) ([]fs.DirEntry, error) {
 	file, err := t.Open(name)
