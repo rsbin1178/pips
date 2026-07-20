@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rsbin/pips/agent"
 	"github.com/rsbin/pips/ai"
 )
 
@@ -359,6 +360,24 @@ func (s *Session) Context() (Context, error) {
 	}
 
 	return out, nil
+}
+
+// Pending returns the unanswered tool calls on the active branch in call
+// order. A non-empty result means the conversation cannot continue until the
+// calls are resolved through the owning [Harness]. Returned arguments are
+// independent copies and may be retained or modified by the caller.
+func (s *Session) Pending() ([]ai.ToolCallPart, error) {
+	context, err := s.Context()
+	if err != nil {
+		return nil, fmt.Errorf("harness: pending calls: %w", err)
+	}
+
+	pending := agent.NewSession(context.Messages...).Pending()
+	for i := range pending {
+		pending[i].Args = slices.Clone(pending[i].Args)
+	}
+
+	return pending, nil
 }
 
 // contextEntries applies the compaction transform: the latest compaction
