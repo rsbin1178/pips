@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/rsbin/pips/ai"
+	"github.com/rsbin/pips/ai/openai"
 	"github.com/rsbin/pips/internal/coding/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -15,6 +16,7 @@ func TestDefaults(t *testing.T) {
 	cfg := config.Defaults()
 	assert.Empty(t, cfg.Model.Provider)
 	assert.Empty(t, cfg.Model.ID)
+	assert.Equal(t, openai.APIAuto, cfg.Model.API)
 	assert.False(t, cfg.ToolSearch)
 	assert.Equal(t, config.SandboxWorkspaceWrite, cfg.Sandbox)
 	assert.Equal(t, config.ApprovalOnRequest, cfg.Approval)
@@ -40,7 +42,11 @@ func TestValidateRuntime(t *testing.T) {
 		cfg  config.Config
 		ok   bool
 	}{
-		{name: "valid", cfg: config.Config{Model: config.ModelConfig{Provider: ai.ProviderOpenAI, ID: "model"}, Sandbox: config.SandboxWorkspaceWrite, Approval: config.ApprovalOnRequest}, ok: true},
+		{name: "valid", cfg: config.Config{Model: config.ModelConfig{Provider: ai.ProviderOpenAI, ID: "model", API: openai.APIResponses}, Sandbox: config.SandboxWorkspaceWrite, Approval: config.ApprovalOnRequest}, ok: true},
+		{name: "zero api is auto", cfg: config.Config{Model: config.ModelConfig{Provider: ai.ProviderAnthropic, ID: "model"}, Sandbox: config.SandboxWorkspaceWrite, Approval: config.ApprovalOnRequest}, ok: true},
+		{name: "non openai auto", cfg: config.Config{Model: config.ModelConfig{Provider: ai.ProviderGemini, ID: "model", API: openai.APIAuto}, Sandbox: config.SandboxWorkspaceWrite, Approval: config.ApprovalOnRequest}, ok: true},
+		{name: "non openai explicit api", cfg: config.Config{Model: config.ModelConfig{Provider: ai.ProviderAnthropic, ID: "model", API: openai.APIChatCompletions}, Sandbox: config.SandboxWorkspaceWrite, Approval: config.ApprovalOnRequest}},
+		{name: "unknown api", cfg: config.Config{Model: config.ModelConfig{Provider: ai.ProviderOpenAI, ID: "model", API: "unknown"}, Sandbox: config.SandboxWorkspaceWrite, Approval: config.ApprovalOnRequest}},
 		{name: "missing provider", cfg: config.Config{Model: config.ModelConfig{ID: "model"}, Sandbox: config.SandboxWorkspaceWrite, Approval: config.ApprovalOnRequest}},
 		{name: "unsupported provider", cfg: config.Config{Model: config.ModelConfig{Provider: ai.ProviderDeepSeek, ID: "model"}, Sandbox: config.SandboxWorkspaceWrite, Approval: config.ApprovalOnRequest}},
 		{name: "missing model", cfg: config.Config{Model: config.ModelConfig{Provider: ai.ProviderOpenAI}, Sandbox: config.SandboxWorkspaceWrite, Approval: config.ApprovalOnRequest}},
@@ -79,10 +85,20 @@ func TestParsers(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, config.ApprovalNever, approval)
 
+	api, err := config.ParseModelAPI(" responses ")
+	require.NoError(t, err)
+	assert.Equal(t, openai.APIResponses, api)
+
+	api, err = config.ParseModelAPI("")
+	require.NoError(t, err)
+	assert.Equal(t, openai.APIAuto, api)
+
 	_, err = config.ParseProvider("deepseek")
 	require.ErrorIs(t, err, config.ErrInvalid)
 	_, err = config.ParseSandboxMode("unknown")
 	require.ErrorIs(t, err, config.ErrInvalid)
 	_, err = config.ParseApprovalMode("unknown")
+	require.ErrorIs(t, err, config.ErrInvalid)
+	_, err = config.ParseModelAPI("unknown")
 	require.ErrorIs(t, err, config.ErrInvalid)
 }

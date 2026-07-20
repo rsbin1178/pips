@@ -20,6 +20,7 @@ const maxConfigFileSize = 1 << 20
 const (
 	ProviderEnv   = "PIPS_PROVIDER"
 	ModelEnv      = "PIPS_MODEL"
+	ModelAPIEnv   = "PIPS_MODEL_API"
 	ToolSearchEnv = "PIPS_TOOL_SEARCH"
 	SandboxEnv    = "PIPS_SANDBOX"
 	ApprovalEnv   = "PIPS_APPROVAL"
@@ -137,6 +138,7 @@ type fileConfig struct {
 type fileModel struct {
 	Provider *string `toml:"provider"`
 	ID       *string `toml:"id"`
+	API      *string `toml:"api"`
 }
 
 func loadFile(path, projectRoot string) (Patch, FileState, error) {
@@ -339,6 +341,15 @@ func decodeModel(value *fileModel) (Patch, error) {
 		patch.ModelID = &modelID
 	}
 
+	if value.API != nil {
+		api, err := ParseModelAPI(*value.API)
+		if err != nil {
+			return Patch{}, err
+		}
+
+		patch.ModelAPI = &api
+	}
+
 	return patch, nil
 }
 
@@ -367,6 +378,7 @@ func applyEnvironment(config *Config, lookup LookupEnv) error {
 	}{
 		{name: ProviderEnv, parse: providerPatch},
 		{name: ModelEnv, parse: modelPatch},
+		{name: ModelAPIEnv, parse: modelAPIPatch},
 		{name: ToolSearchEnv, parse: toolSearchPatch},
 		{name: SandboxEnv, parse: sandboxPatch},
 		{name: ApprovalEnv, parse: approvalPatch},
@@ -405,6 +417,7 @@ func applyFlagOverrides(config *Config, patch Patch) error {
 	}{
 		{field: FieldProvider, detail: "--provider", patch: Patch{Provider: validated.Provider}, set: validated.Provider != nil},
 		{field: FieldModelID, detail: "--model", patch: Patch{ModelID: validated.ModelID}, set: validated.ModelID != nil},
+		{field: FieldModelAPI, detail: "--model-api", patch: Patch{ModelAPI: validated.ModelAPI}, set: validated.ModelAPI != nil},
 		{field: FieldToolSearch, detail: "--tool-search", patch: Patch{ToolSearch: validated.ToolSearch}, set: validated.ToolSearch != nil},
 		{field: FieldSandbox, detail: "--sandbox", patch: Patch{Sandbox: validated.Sandbox}, set: validated.Sandbox != nil},
 		{field: FieldApproval, detail: "--approval", patch: Patch{Approval: validated.Approval}, set: validated.Approval != nil},
@@ -444,6 +457,15 @@ func validatePatch(patch Patch) (Patch, error) {
 		validated.ModelID = &modelID
 	}
 
+	if patch.ModelAPI != nil {
+		api, err := ParseModelAPI(string(*patch.ModelAPI))
+		if err != nil {
+			return Patch{}, err
+		}
+
+		validated.ModelAPI = &api
+	}
+
 	validated.ToolSearch = patch.ToolSearch
 	if patch.Sandbox != nil {
 		mode, err := ParseSandboxMode(string(*patch.Sandbox))
@@ -474,6 +496,11 @@ func providerPatch(value string) (Patch, error) {
 func modelPatch(value string) (Patch, error) {
 	modelID, err := parseModelID(value)
 	return Patch{ModelID: &modelID}, err
+}
+
+func modelAPIPatch(value string) (Patch, error) {
+	api, err := ParseModelAPI(value)
+	return Patch{ModelAPI: &api}, err
 }
 
 func toolSearchPatch(value string) (Patch, error) {

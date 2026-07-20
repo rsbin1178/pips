@@ -46,7 +46,11 @@ func New(
 
 	switch modelConfig.Provider {
 	case ai.ProviderOpenAI:
-		return openai.New(modelConfig.ID, openai.WithAPIKey(secret.APIKey())), nil
+		return openai.New(
+			modelConfig.ID,
+			openai.WithAPIKey(secret.APIKey()),
+			openai.WithAPI(modelConfig.API),
+		), nil
 	case ai.ProviderAnthropic:
 		return anthropic.New(modelConfig.ID, anthropic.WithAPIKey(secret.APIKey())), nil
 	case ai.ProviderGemini:

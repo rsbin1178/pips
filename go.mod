@@ -3,6 +3,7 @@ module github.com/rsbin/pips
 go 1.26.5
 
 require (
+	github.com/bmatcuk/doublestar/v4 v4.10.0
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 	github.com/pelletier/go-toml/v2 v2.3.1
 	github.com/spf13/cobra v1.10.2

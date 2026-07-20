@@ -31,6 +31,7 @@ type rootFlags struct {
 	configFile string
 	provider   string
 	model      string
+	modelAPI   string
 	toolSearch bool
 	sandbox    string
 	approval   string
@@ -76,6 +77,7 @@ func New(dependencies Dependencies) (*cobra.Command, error) {
 	persistent.StringVar(&flags.configFile, "config", "", "user configuration file")
 	persistent.StringVar(&flags.provider, "provider", "", "model provider")
 	persistent.StringVar(&flags.model, "model", "", "model ID")
+	persistent.StringVar(&flags.modelAPI, "model-api", "", "OpenAI API surface")
 	persistent.BoolVar(&flags.toolSearch, "tool-search", false, "enable deferred tool search")
 	persistent.StringVar(&flags.sandbox, "sandbox", "", "sandbox mode")
 	persistent.StringVar(&flags.approval, "approval", "", "approval mode")

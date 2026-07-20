@@ -13,6 +13,18 @@ import (
 var (
 	// ErrInvalid means a workspace path or identity is unusable.
 	ErrInvalid = errors.New("coding workspace: invalid workspace")
+	// ErrInvalidPath means a workspace-relative path is malformed.
+	ErrInvalidPath = errors.New("coding workspace: invalid path")
+	// ErrOutsideRoot means a path attempts to leave the workspace root.
+	ErrOutsideRoot = errors.New("coding workspace: path outside root")
+	// ErrSymlink means a mutation path traverses a symbolic link.
+	ErrSymlink = errors.New("coding workspace: symbolic link not allowed")
+	// ErrUnsupportedType means a path is not a regular file or directory.
+	ErrUnsupportedType = errors.New("coding workspace: unsupported file type")
+	// ErrChanged means a filesystem object changed during a guarded operation.
+	ErrChanged = errors.New("coding workspace: path changed")
+	// ErrClosed means an operation used a closed workspace tree.
+	ErrClosed = errors.New("coding workspace: tree closed")
 	// ErrUnsupportedPlatform means the current platform cannot supply the
 	// filesystem identity required for a safe trust decision.
 	ErrUnsupportedPlatform = errors.New("coding workspace: unsupported platform")

@@ -57,6 +57,7 @@ func newConfigShowCommand(dependencies Dependencies, flags *rootFlags) *cobra.Co
 			values := map[config.Field]string{
 				config.FieldProvider:   quotedOrUnset(string(state.config.Config.Model.Provider)),
 				config.FieldModelID:    quotedOrUnset(state.config.Config.Model.ID),
+				config.FieldModelAPI:   strconv.Quote(string(state.config.Config.Model.API)),
 				config.FieldToolSearch: strconv.FormatBool(state.config.Config.ToolSearch),
 				config.FieldSandbox:    strconv.Quote(string(state.config.Config.Sandbox)),
 				config.FieldApproval:   strconv.Quote(string(state.config.Config.Approval)),
