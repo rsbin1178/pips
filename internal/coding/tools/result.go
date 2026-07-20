@@ -48,19 +48,38 @@ type result struct {
 	Reason    string
 	Counts    ResultCounts
 	Next      ResultNext
+	Execution *ResultExecution
 	Body      string
+}
+
+// ResultExecution summarizes one bounded local process outcome.
+type ResultExecution struct {
+	Status     string                `json:"status"`
+	ExitCode   *int                  `json:"exit_code,omitempty"`
+	Signal     string                `json:"signal,omitempty"`
+	DurationMS int64                 `json:"duration_ms"`
+	Stdout     ResultExecutionStream `json:"stdout"`
+	Stderr     ResultExecutionStream `json:"stderr"`
+}
+
+// ResultExecutionStream summarizes observed output without embedding content.
+type ResultExecutionStream struct {
+	Bytes     int64 `json:"bytes"`
+	Truncated bool  `json:"truncated,omitempty"`
+	Sanitized bool  `json:"sanitized,omitempty"`
 }
 
 // ResultHeader is the machine-readable first line of every coding-tool result.
 type ResultHeader struct {
-	Schema    string       `json:"schema"`
-	OK        bool         `json:"ok"`
-	Tool      string       `json:"tool"`
-	Code      string       `json:"code,omitempty"`
-	Truncated bool         `json:"truncated,omitempty"`
-	Reason    string       `json:"reason,omitempty"`
-	Counts    ResultCounts `json:"counts,omitzero"`
-	Next      ResultNext   `json:"next,omitzero"`
+	Schema    string           `json:"schema"`
+	OK        bool             `json:"ok"`
+	Tool      string           `json:"tool"`
+	Code      string           `json:"code,omitempty"`
+	Truncated bool             `json:"truncated,omitempty"`
+	Reason    string           `json:"reason,omitempty"`
+	Counts    ResultCounts     `json:"counts,omitzero"`
+	Next      ResultNext       `json:"next,omitzero"`
+	Execution *ResultExecution `json:"execution,omitempty"`
 }
 
 func (r result) render() string {
@@ -73,6 +92,7 @@ func (r result) render() string {
 		Reason:    r.Reason,
 		Counts:    r.Counts,
 		Next:      r.Next,
+		Execution: r.Execution,
 	})
 	if err != nil {
 		panic(fmt.Sprintf("coding tools: render result header: %v", err))
@@ -121,11 +141,16 @@ func failure(tool string, err error) error {
 	}
 }
 
+//nolint:gocyclo // Stable error precedence is intentionally explicit and order-sensitive.
 func errorCode(err error) string {
 	var recovery *RecoveryError
+
+	var coded interface{ ToolErrorCode() string }
 	switch {
 	case errors.As(err, &recovery):
 		return "recovery_required"
+	case errors.As(err, &coded):
+		return coded.ToolErrorCode()
 	case errors.Is(err, context.Canceled):
 		return "canceled"
 	case errors.Is(err, context.DeadlineExceeded):
