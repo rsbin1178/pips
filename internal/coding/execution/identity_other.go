@@ -14,3 +14,5 @@ type fileObject struct {
 func fileIdentity(fs.FileInfo) (uint64, uint64, error) { return 0, 0, ErrUnsupportedPlatform }
 
 func executableMode(fs.FileMode) bool { return false }
+
+func fileLinkCount(fs.FileInfo) (uint64, error) { return 0, ErrUnsupportedPlatform }

@@ -10,11 +10,15 @@ import (
 	"strings"
 )
 
-const homeEnvironment = "HOME"
+const (
+	homeEnvironment = "HOME"
+	langEnvironment = "LANG"
+	pathEnvironment = "PATH"
+)
 
 var inheritedEnvironmentKeys = []string{
 	homeEnvironment,
-	"LANG",
+	langEnvironment,
 	"LC_ALL",
 	"LC_COLLATE",
 	"LC_CTYPE",
@@ -24,7 +28,7 @@ var inheritedEnvironmentKeys = []string{
 	"LC_TIME",
 	"LOGNAME",
 	"NO_COLOR",
-	"PATH",
+	pathEnvironment,
 	"TERM",
 	"USER",
 }
@@ -52,11 +56,11 @@ func environmentSnapshot(
 		values[variable.Name] = variable.Value
 	}
 
-	if path, ok := values["PATH"]; ok {
+	if path, ok := values[pathEnvironment]; ok {
 		if cleaned := cleanExecutablePath(path); cleaned != "" {
-			values["PATH"] = cleaned
+			values[pathEnvironment] = cleaned
 		} else {
-			delete(values, "PATH")
+			delete(values, pathEnvironment)
 		}
 	}
 
