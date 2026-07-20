@@ -8,7 +8,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/rsbin/pips/internal/coding/frontend/cli"
+	"github.com/rsbin/pips/internal/coding/cli"
 	"github.com/rsbin/pips/internal/coding/paths"
 )
 

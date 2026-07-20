@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rsbin/pips/internal/coding/frontend/cli"
+	"github.com/rsbin/pips/internal/coding/cli"
 	"github.com/rsbin/pips/internal/coding/paths"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
