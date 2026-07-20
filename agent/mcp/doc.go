@@ -7,6 +7,10 @@
 // Tool-list change signals tell applications when to obtain a new snapshot and
 // construct the next Agent; an already-running Agent is never mutated.
 //
+// Registry composes several connected Clients into atomic, versioned catalog
+// entries. It is deliberately pull-based: it neither reconnects transports nor
+// starts goroutines, so applications retain credential and scheduling policy.
+//
 // Remote tool metadata is untrusted. Use agent.WithBeforeTool to enforce
 // application policy or human approval, and only wrap a returned tool with
 // agent.Parallel after independently establishing that concurrent calls are
