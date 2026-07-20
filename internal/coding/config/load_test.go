@@ -191,6 +191,79 @@ func TestLoadUntrustedProjectIsNotDecoded(t *testing.T) {
 	assert.Empty(t, result.Config.Model.ID)
 }
 
+func TestLoadProjectCannotEnableFullAccess(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	projectFile := filepath.Join(dir, "project.toml")
+	writeFile(t, projectFile, "sandbox = \"full-access\"\n")
+
+	_, err := config.Load(config.LoadOptions{
+		ProjectRoot:    dir,
+		ProjectFile:    projectFile,
+		ProjectTrusted: true,
+		LookupEnv: mapLookup(map[string]string{
+			config.SandboxEnv: "workspace-write",
+		}),
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, config.ErrInvalid)
+	assert.Contains(t, err.Error(), projectFile)
+}
+
+func TestLoadUserSourcesCanEnableFullAccess(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		options func(*testing.T) config.LoadOptions
+		want    config.SourceKind
+	}{
+		{
+			name: "user file",
+			options: func(t *testing.T) config.LoadOptions {
+				path := filepath.Join(t.TempDir(), "config.toml")
+				writeFile(t, path, "sandbox = \"full-access\"\n")
+
+				return config.LoadOptions{UserFile: path}
+			},
+			want: config.SourceUserFile,
+		},
+		{
+			name: "environment",
+			options: func(*testing.T) config.LoadOptions {
+				return config.LoadOptions{LookupEnv: mapLookup(map[string]string{
+					config.SandboxEnv: "full-access",
+				})}
+			},
+			want: config.SourceEnvironment,
+		},
+		{
+			name: "flag",
+			options: func(*testing.T) config.LoadOptions {
+				mode := config.SandboxFullAccess
+
+				return config.LoadOptions{FlagOverrides: config.Patch{Sandbox: &mode}}
+			},
+			want: config.SourceFlag,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			result, err := config.Load(tt.options(t))
+			require.NoError(t, err)
+			assert.Equal(t, config.SandboxFullAccess, result.Config.Sandbox)
+
+			source, ok := result.Config.Source(config.FieldSandbox)
+			require.True(t, ok)
+			assert.Equal(t, tt.want, source.Kind)
+		})
+	}
+}
+
 func TestLoadExplicitFalseOverridesLowerLayer(t *testing.T) {
 	t.Parallel()
 
