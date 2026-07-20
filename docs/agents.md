@@ -20,7 +20,7 @@ and the durable-state guidance in Anthropic's
 | `agent/harness` | Append-only session tree, JSONL storage, context reconstruction, compaction, branches, streaming prompt lifecycle, active cancellation, custom checkpoints | Autonomous scheduling, conversation ownership policy, vendor control plane |
 | `agent/continuation` | Durable cross-run lifecycle, limits, retry boundaries, waits, explicit wakeups | Completion criteria, cadence policy, scheduler, Team/Workflow state |
 | `agent/goal`, `agent/loop` | Optional completion and next-activation Controller policies | Lifecycle store, timers, queues, orchestration graphs |
-| `agent/team` | Fixed Lead/member identities, dependency tasks, assignment/claims, external attempt bindings, direct mailboxes, Team lifecycle | Agent provisioning, child execution, scheduler, Workflow graph, distributed coordination |
+| `agent/team` | Fixed Lead/member identities, dependency tasks, assignment/claims, direct mailboxes, Team lifecycle, and optional synchronous attempt composition | Agent provisioning, model/Harness ownership, scheduler, Workflow graph, distributed coordination |
 | Application | Routing, parallel requests, member resource registry, child execution, criteria/cadence configuration, timers and wake delivery, approval UI/policy, credential/model selection, handoffs, traces/evals storage | Runtime protocol internals |
 
 ## Control and visibility
@@ -90,6 +90,23 @@ restart but should not consume context.
 `WithPrepareTurn` can swap a configured model between turns. Credential lookup
 belongs to the provider/model layer, not the loop.
 
+**Skills and tools.** `harness.LoadSkills` validates Agent Skills `SKILL.md`
+frontmatter and builds a `SkillCatalog`. Descriptions are advertised for
+selection; an application explicitly calls `catalog.Activate(name)` to obtain
+the full instructions and an activation record. Supporting `scripts/` remain
+files in the Skill workflow, not model tools. Expose a script only by wrapping
+its constrained argument surface as an `agent.Tool` or serving it over MCP.
+
+Use `agent/catalog` at the application composition root to label local, MCP,
+extension, and Team tool snapshots with provenance and risk, then construct a
+tenant-specific deny-by-default `catalog.Policy`. `ToolSearch` is explicitly
+enabled with `ToolSearchOptions{Enabled: true}`. It keeps local and Team tools
+direct while deferring MCP and extension sources by default; use
+`DeferredSources` to override this. `search.AgentOptions(ctx)` installs the
+initial direct snapshot and prepare hook; each selected result is re-authorized
+before the following turn receives its declaration and executor. With the zero
+options value, all authorized tools are exposed directly.
+
 **Parallelization.** Mark only concurrency-safe tools with `agent.Parallel`.
 For independent agent requests, run separate sessions in goroutines and join
 them in the caller. An `Agent` is immutable and concurrent-safe; a `Session`
@@ -109,20 +126,21 @@ criterion in a caller loop, feed feedback through a new message or
 Decision stage without replaying completed Work.
 
 **Repeated activation.** Use `agent/loop` when each completed bounded run must
-persist the next delay or signal. The Controller returns `Waiting`; a host timer
+persist the next delay or signal. The Controller returns `Waiting`; an application timer
 index later calls `ResumeDue`, or an external event calls `Signal`. The package
 does not sleep, poll, parse cron, or catch up missed intervals.
 
 **Team coordination.** Use `agent/team` when independent durable member
-Sessions need shared tasks and direct coordination. The host creates the Team,
+Sessions need shared tasks and direct coordination. The Coordinator creates the Team,
 registers each resource using a stable `SessionRef`, and gives members scoped
-`NewMemberToolset` or `NewLeadToolset` tools. A member claims at most one task;
-the host commits `StartTaskAttempt` before creating the referenced continuation
-and selecting that member's Harness Session. Goal and Loop are optional child
-Controller policies, not Team dependencies. Recovery calls
-`ActiveDispatches`/`InspectActiveAttempts` once and decides explicitly whether
-to create, resume, cancel, or reconcile a child. Do not turn this query into a
-polling loop inside the runtime.
+`NewMemberToolset` or `NewLeadToolset` tools. For the standard one-task flow,
+`team.NewAttemptRuntime` owns claim → start → mailbox snapshot → continuation
+create/drive → result projection → acknowledgement/messages → finish. The
+application provides only an `AttemptWorkerFactory` (for its model/Harness and
+input) and an `AttemptResultProjector` (for result schema and recipients).
+The runtime persists the Team binding before it creates the child, can create a
+missing child after restart, and has no polling loop or goroutine. Goal and Loop
+remain optional child Controller policies, not Team dependencies.
 
 Team is not a Workflow engine. A Workflow may create tasks or Teams and react
 to their terminal state, but graph node scheduling, joins, dynamic fan-out,
