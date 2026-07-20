@@ -12,6 +12,8 @@ import (
 	"github.com/rsbin/pips/internal/coding/workspace"
 )
 
+const maxConfiguredProtectedPaths = 32
+
 // Verdict identifies a policy outcome.
 type Verdict uint8
 
@@ -154,6 +156,10 @@ func validatePolicyConfig(cfg PolicyConfig) error {
 }
 
 func canonicalProtectedPaths(ws workspace.Workspace, configured []string) ([]string, error) {
+	if len(configured) > maxConfiguredProtectedPaths {
+		return nil, fmt.Errorf("%w: too many protected paths", ErrInvalidPolicy)
+	}
+
 	paths := slices.Clone(configured)
 
 	paths = append(paths, string(filepath.Separator), filepath.Join(ws.Root(), ".git"))
