@@ -532,7 +532,7 @@ func TestPauseActiveWorkRequiresRetry(t *testing.T) {
 	assert.Equal(t, int64(2), calls.Load())
 }
 
-func TestHostCancellationInterruptsWithoutProductCancel(t *testing.T) {
+func TestDriveContextCancellationInterruptsWithoutProductCancel(t *testing.T) {
 	t.Parallel()
 
 	engine, _, _ := newTestEngine(t)
@@ -545,7 +545,7 @@ func TestHostCancellationInterruptsWithoutProductCancel(t *testing.T) {
 		return WorkResult{Progress: ProgressUnknown}, ctx.Err()
 	})
 	controller := controllerFunc(func(context.Context, DecisionRequest) (Decision, error) {
-		t.Fatal("controller must not run after host cancellation")
+		t.Fatal("controller must not run after context cancellation")
 
 		return Decision{}, nil
 	})

@@ -48,7 +48,7 @@ func WithClock(clock Clock) Option {
 	}
 }
 
-// WithIDSource replaces ID generation for deterministic hosts and tests.
+// WithIDSource replaces ID generation for deterministic applications and tests.
 func WithIDSource(source IDSource) Option {
 	return func(config *engineConfig) error {
 		if source == nil {

@@ -58,7 +58,7 @@ func TestJSONLStoreReopensAndHandlesCommitMarkers(t *testing.T) {
 	team, err = recoveryEngine.RegisterMember(t.Context(), team.ID, RegisterMemberRequest{
 		Command: CommandMetadata{
 			ID: "after-torn-tail", ExpectedRevision: team.Revision,
-			Actor: Actor{Kind: ActorKindHostRuntime, ID: "recovery-host"},
+			Actor: Actor{Kind: ActorKindCoordinator, ID: "recovery-coordinator"},
 		},
 		Member: MemberSpec{
 			ID: "after-tail", Name: "After Tail", Role: "verify recovery",
@@ -90,11 +90,11 @@ func TestMemoryStoreCASAllowsOneConcurrentCommand(t *testing.T) {
 
 	requests := []RegisterMemberRequest{
 		{
-			Command: runtime.host(team.Revision),
+			Command: runtime.coordinator(team.Revision),
 			Member:  MemberSpec{ID: "one", Name: "One", Role: "worker", SessionRef: "one"},
 		},
 		{
-			Command: runtime.host(team.Revision),
+			Command: runtime.coordinator(team.Revision),
 			Member:  MemberSpec{ID: "two", Name: "Two", Role: "worker", SessionRef: "two"},
 		},
 	}
@@ -143,7 +143,7 @@ func TestStoreListIsLexicographicAndDefensive(t *testing.T) {
 
 	for _, id := range []ID{"team-c", "team-a", "team-b"} {
 		_, err = runtime.engine.Create(t.Context(), CreateRequest{
-			Command: runtime.host(0), ID: id, Objective: "objective",
+			Command: runtime.coordinator(0), ID: id, Objective: "objective",
 			Lead: MemberSpec{
 				ID: "lead", Name: "Lead", Role: "lead", SessionRef: "session-" + string(id),
 			},
@@ -192,7 +192,7 @@ func TestEngineRejectsInvalidCustomStoreRecords(t *testing.T) {
 	_, err = engine.RegisterMember(t.Context(), team.ID, RegisterMemberRequest{
 		Command: CommandMetadata{
 			ID: "command", ExpectedRevision: team.Revision,
-			Actor: Actor{Kind: ActorKindHostRuntime, ID: "host"},
+			Actor: Actor{Kind: ActorKindCoordinator, ID: "coordinator"},
 		},
 		Member: MemberSpec{ID: "worker", Name: "Worker", Role: "work", SessionRef: "session"},
 	})
@@ -213,7 +213,7 @@ func TestStoreRejectsDuplicateEventID(t *testing.T) {
 
 	team, err := engine.Create(t.Context(), CreateRequest{
 		Command: CommandMetadata{
-			ID: "create", Actor: Actor{Kind: ActorKindHostRuntime, ID: "host"},
+			ID: "create", Actor: Actor{Kind: ActorKindCoordinator, ID: "coordinator"},
 		},
 		ID: "team-events", Objective: "objective",
 		Lead: MemberSpec{ID: "lead", Name: "Lead", Role: "lead", SessionRef: "session"},
@@ -223,7 +223,7 @@ func TestStoreRejectsDuplicateEventID(t *testing.T) {
 	_, err = engine.RegisterMember(t.Context(), team.ID, RegisterMemberRequest{
 		Command: CommandMetadata{
 			ID: "register", ExpectedRevision: team.Revision,
-			Actor: Actor{Kind: ActorKindHostRuntime, ID: "host"},
+			Actor: Actor{Kind: ActorKindCoordinator, ID: "coordinator"},
 		},
 		Member: MemberSpec{ID: "worker", Name: "Worker", Role: "work", SessionRef: "worker"},
 	})

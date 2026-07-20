@@ -11,10 +11,10 @@ func ExampleEngine() {
 	ctx := context.Background()
 	store, _ := team.NewMemoryStore()
 	runtime, _ := team.New(store)
-	host := team.Actor{Kind: team.ActorKindHostRuntime, ID: "cli"}
+	coordinator := team.Actor{Kind: team.ActorKindCoordinator, ID: "cli"}
 
 	group, _ := runtime.Create(ctx, team.CreateRequest{
-		Command: team.CommandMetadata{ID: "create", Actor: host},
+		Command: team.CommandMetadata{ID: "create", Actor: coordinator},
 		ID:      "release-team", Objective: "prepare the release",
 		Lead: team.MemberSpec{
 			ID: "lead", Name: "Lead", Role: "coordinate",
@@ -23,7 +23,7 @@ func ExampleEngine() {
 	})
 	group, _ = runtime.RegisterMember(ctx, group.ID, team.RegisterMemberRequest{
 		Command: team.CommandMetadata{
-			ID: "register", ExpectedRevision: group.Revision, Actor: host,
+			ID: "register", ExpectedRevision: group.Revision, Actor: coordinator,
 		},
 		Member: team.MemberSpec{
 			ID: "reviewer", Name: "Reviewer", Role: "review",
@@ -46,7 +46,7 @@ func ExampleEngine() {
 	})
 	started, _ := runtime.StartTaskAttempt(ctx, group.ID, team.StartTaskAttemptRequest{
 		Command: team.CommandMetadata{
-			ID: "start", ExpectedRevision: group.Revision, Actor: host,
+			ID: "start", ExpectedRevision: group.Revision, Actor: coordinator,
 		},
 		TaskID: "review", AttemptID: "review-1", ContinuationID: "review-execution-1",
 	})

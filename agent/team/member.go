@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// RegisterMember registers one host-owned Agent resource.
+// RegisterMember registers one coordinator-managed Agent resource.
 func (engine *Engine) RegisterMember(
 	ctx context.Context,
 	id ID,
@@ -24,7 +24,7 @@ func (engine *Engine) RegisterMember(
 				return transitionFields{}, err
 			}
 
-			if err := requireHost(request.Command.Actor); err != nil {
+			if err := requireCoordinator(request.Command.Actor); err != nil {
 				return transitionFields{}, err
 			}
 
@@ -95,7 +95,7 @@ func (engine *Engine) DisableMember(
 				return transitionFields{}, err
 			}
 
-			if err := requireHost(request.Command.Actor); err != nil {
+			if err := requireCoordinator(request.Command.Actor); err != nil {
 				return transitionFields{}, err
 			}
 
@@ -158,7 +158,7 @@ func (engine *Engine) EnableMember(
 				return transitionFields{}, err
 			}
 
-			if err := requireHost(request.Command.Actor); err != nil {
+			if err := requireCoordinator(request.Command.Actor); err != nil {
 				return transitionFields{}, err
 			}
 

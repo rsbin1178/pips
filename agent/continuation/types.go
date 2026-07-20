@@ -23,7 +23,7 @@ type HandlerRef struct {
 	Version string `json:"version"`
 }
 
-// Target identifies host-owned work without prescribing its domain.
+// Target identifies application-owned work without prescribing its domain.
 type Target struct {
 	Kind string `json:"kind"`
 	ID   string `json:"id"`
@@ -105,7 +105,7 @@ const (
 	CauseRecovery         Cause = "recovery"
 )
 
-// YieldReason says why Drive returned control to its host.
+// YieldReason says why Drive returned control to its caller.
 type YieldReason string
 
 // Drive yield reasons.
@@ -141,7 +141,7 @@ type Activation struct {
 	Payload  ai.JSON          `json:"payload,omitempty"`
 }
 
-// SignalSpec selects one exact, host-delivered signal key.
+// SignalSpec selects one exact, application-delivered signal key.
 type SignalSpec struct {
 	Key string `json:"key"`
 }
@@ -299,7 +299,7 @@ type Execution struct {
 	UpdatedAt       time.Time      `json:"updated_at"`
 }
 
-// Worker performs one bounded unit of host-defined work.
+// Worker performs one bounded unit of application-defined work.
 type Worker interface {
 	Run(context.Context, WorkRequest) (WorkResult, error)
 }
@@ -359,7 +359,7 @@ type ListPage struct {
 	NextCursor string
 }
 
-// Gate lets a host yield before an Advance without mutating state.
+// Gate lets a caller yield before an Advance without mutating state.
 type Gate func(context.Context, Execution) (bool, error)
 
 // DriveOptions bounds synchronous advancement.
