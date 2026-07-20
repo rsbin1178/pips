@@ -31,3 +31,12 @@ func fileIdentity(info fs.FileInfo) (uint64, uint64, error) {
 }
 
 func executableMode(mode fs.FileMode) bool { return mode.Perm()&0o111 != 0 }
+
+func fileLinkCount(info fs.FileInfo) (uint64, error) {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, fmt.Errorf("%w: filesystem metadata unavailable", ErrUnsupportedPlatform)
+	}
+
+	return uint64(stat.Nlink), nil
+}

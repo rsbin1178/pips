@@ -50,5 +50,3 @@ func (unavailableBackend) probe(context.Context, probeRequest) (Capabilities, er
 func (unavailableBackend) compile(context.Context, compileRequest) (launchSpec, []io.Closer, error) {
 	return launchSpec{}, nil, ErrUnsupportedPlatform
 }
-
-func platformBackend() backend { return unavailableBackend{} }
