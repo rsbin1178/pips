@@ -90,6 +90,16 @@ func TestChangeValuesRejectInvalidInput(t *testing.T) {
 		{Path: "file", Kind: changes.KindModified},
 	}, "", false)
 	require.ErrorIs(t, err, changes.ErrInvalid)
+
+	_, err = changes.NewReport([]changes.Entry{{
+		Path: "new.go", Kind: changes.KindRenamed,
+	}}, "", false)
+	require.ErrorIs(t, err, changes.ErrInvalid)
+
+	_, err = changes.NewReport([]changes.Entry{{
+		Path: "new.go", PreviousPath: "old.go", Kind: changes.KindModified,
+	}}, "", false)
+	require.ErrorIs(t, err, changes.ErrInvalid)
 }
 
 func TestCodingToolsCloseChangeInspectionBoundary(t *testing.T) {
