@@ -50,7 +50,7 @@ audit:
 
 ## deps-check: Verify core ai/agent packages use only stdlib + golang.org/x; compile optional integrations
 deps-check:
-	@core_pkgs=$$($(GO) list ./ai/... ./agent/... | grep -v '/agent/mcp$$'); \
+	@core_pkgs=$$($(GO) list ./ai/... ./agent/... | grep -Ev '/agent/(mcp|observability/otel)$$'); \
 	mods=$$($(GO) list -deps -f '{{if .Module}}{{.Module.Path}}{{end}}' $$core_pkgs | sort -u | grep -v '^github.com/rsbin/pips$$' | grep -v '^golang.org/x/' || true); \
 	if [ -n "$$mods" ]; then \
 		echo "unexpected third-party module dependencies in core ai/agent:"; echo "$$mods"; exit 1; \
@@ -59,6 +59,8 @@ deps-check:
 	fi
 	@$(GO) list -deps ./agent/mcp >/dev/null
 	@echo "optional agent/mcp integration dependency graph OK"
+	@$(GO) list -deps ./agent/observability/otel >/dev/null
+	@echo "optional agent/observability/otel integration dependency graph OK"
 
 ## help: Show this help message
 help:
