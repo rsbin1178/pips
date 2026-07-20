@@ -119,6 +119,31 @@ func TestControllerPersistsThroughHarnessSession(t *testing.T) {
 	assert.Equal(t, ai.RoleTool, modelContext.Messages[1].Role)
 }
 
+func TestStateNonInteractiveError(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		state State
+		err   error
+	}{
+		{state: State{Kind: StateReady}},
+		{state: State{Kind: StateReview}, err: ErrApprovalRequired},
+		{state: State{Kind: StateUnknown}, err: ErrOutcomeUnknown},
+		{state: State{}, err: ErrJournalCorrupt},
+	}
+
+	for _, test := range tests {
+		err := test.state.NonInteractiveError()
+		if test.err == nil {
+			require.NoError(t, err)
+
+			continue
+		}
+
+		require.ErrorIs(t, err, test.err)
+	}
+}
+
 type unusedApprovalModel struct{}
 
 func (unusedApprovalModel) Generate(context.Context, ai.Request) (*ai.Response, error) {

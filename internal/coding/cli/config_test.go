@@ -2,6 +2,7 @@ package cli_test
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -10,6 +11,7 @@ import (
 	"github.com/rsbin/pips/internal/coding/cli"
 	"github.com/rsbin/pips/internal/coding/config"
 	"github.com/rsbin/pips/internal/coding/credential"
+	"github.com/rsbin/pips/internal/coding/execution"
 	"github.com/rsbin/pips/internal/coding/paths"
 	"github.com/rsbin/pips/internal/coding/session"
 	"github.com/rsbin/pips/internal/coding/workspace"
@@ -180,6 +182,73 @@ id = "claude-test"
 	assert.NotContains(t, err.Error(), secret)
 }
 
+func TestDoctorChecksSandboxAndWarnsForFullAccess(t *testing.T) {
+	t.Parallel()
+
+	fixture := newCLIFixture(t)
+	writeCLIFile(t, fixture.layout.ConfigFile(), `
+sandbox = "workspace-write"
+[model]
+provider = "openai"
+id = "test-model"
+`)
+
+	dependencies := fixture.dependencies(map[string]string{credential.APIKeyEnv: "secret"})
+	probeCalls := 0
+	dependencies.SandboxProbe = func(
+		context.Context,
+		workspace.Workspace,
+	) (execution.Capabilities, error) {
+		probeCalls++
+
+		return execution.Capabilities{
+			Platform:         "test",
+			WorkspaceWrite:   true,
+			NetworkIsolation: true,
+			ProcessIsolation: true,
+		}, nil
+	}
+
+	output, err := executeWithDependencies(t, dependencies, "doctor")
+	require.NoError(t, err)
+	assert.Equal(t, 1, probeCalls)
+	assert.Contains(t, output, "sandbox ok platform=test")
+	assert.Contains(t, output, "sandbox notice home_readable=true")
+
+	writeCLIFile(t, fixture.layout.ConfigFile(), `
+sandbox = "full-access"
+[model]
+provider = "openai"
+id = "test-model"
+`)
+	output, err = executeWithDependencies(t, dependencies, "doctor")
+	require.NoError(t, err)
+	assert.Equal(t, 1, probeCalls)
+	assert.Contains(t, output, "sandbox warning mode=full-access isolation=none source=user_file")
+}
+
+func TestDoctorFailsWhenNativeSandboxIsUnavailable(t *testing.T) {
+	t.Parallel()
+
+	fixture := newCLIFixture(t)
+	writeCLIFile(t, fixture.layout.ConfigFile(), `
+[model]
+provider = "openai"
+id = "test-model"
+`)
+
+	dependencies := fixture.dependencies(map[string]string{credential.APIKeyEnv: "secret"})
+	dependencies.SandboxProbe = func(
+		context.Context,
+		workspace.Workspace,
+	) (execution.Capabilities, error) {
+		return execution.Capabilities{}, execution.ErrSandboxUnavailable
+	}
+
+	_, err := executeWithDependencies(t, dependencies, "doctor")
+	require.ErrorIs(t, err, execution.ErrSandboxUnavailable)
+}
+
 func TestSessionListFiltersCurrentWorkspace(t *testing.T) {
 	t.Parallel()
 
@@ -266,6 +335,17 @@ func (f cliFixture) dependencies(environment map[string]string) cli.Dependencies
 			return value, ok
 		},
 		WorkingDir: func() (string, error) { return f.workspaceDir, nil },
+		SandboxProbe: func(
+			context.Context,
+			workspace.Workspace,
+		) (execution.Capabilities, error) {
+			return execution.Capabilities{
+				Platform:         "test",
+				WorkspaceWrite:   true,
+				NetworkIsolation: true,
+				ProcessIsolation: true,
+			}, nil
+		},
 	}
 }
 

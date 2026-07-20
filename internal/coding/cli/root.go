@@ -7,7 +7,9 @@ import (
 	"os"
 
 	"github.com/rsbin/pips/internal/coding/credential"
+	"github.com/rsbin/pips/internal/coding/execution"
 	"github.com/rsbin/pips/internal/coding/paths"
+	"github.com/rsbin/pips/internal/coding/workspace"
 	"github.com/spf13/cobra"
 )
 
@@ -18,12 +20,17 @@ type BuildInfo struct {
 	Date    string
 }
 
+// SandboxProbe checks the native workspace-write boundary for one Workspace.
+// It is injectable so command tests do not depend on the host sandbox.
+type SandboxProbe func(context.Context, workspace.Workspace) (execution.Capabilities, error)
+
 // Dependencies are process-level inputs shared by command handlers.
 type Dependencies struct {
-	Build      BuildInfo
-	Paths      paths.Layout
-	LookupEnv  credential.LookupEnv
-	WorkingDir func() (string, error)
+	Build        BuildInfo
+	Paths        paths.Layout
+	LookupEnv    credential.LookupEnv
+	WorkingDir   func() (string, error)
+	SandboxProbe SandboxProbe
 }
 
 type rootFlags struct {
@@ -50,6 +57,10 @@ func New(dependencies Dependencies) (*cobra.Command, error) {
 
 	if dependencies.WorkingDir == nil {
 		dependencies.WorkingDir = os.Getwd
+	}
+
+	if dependencies.SandboxProbe == nil {
+		dependencies.SandboxProbe = nativeSandboxProbe(dependencies)
 	}
 
 	flags := &rootFlags{}
