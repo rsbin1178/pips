@@ -37,6 +37,26 @@ Go building blocks for AI applications. Current packages:
 > **Status: v0.** The API is under active development and may change without
 > notice. Pin a commit if you depend on it.
 
+## Coding agent status
+
+`cmd/pips` is being built as a local, terminal-first coding agent. Its P0
+execution foundation now includes Workspace-confined file tools, durable Shell
+approval, native OS command isolation, and read-only Git change attribution.
+The interactive Runtime and TUI are the next implementation stages; the
+current command exposes configuration, session inspection, and `doctor`.
+
+The default `workspace-write` mode never falls back to an unsandboxed command.
+It uses macOS Seatbelt or an externally installed Linux/WSL2 Bubblewrap runtime,
+and fails closed when the real capability probe does not pass. Native Windows
+is not supported; use a verified WSL2 environment. `full-access` is an explicit,
+unsandboxed user override and is never accepted from project configuration.
+
+Run `API_KEY=... go run ./cmd/pips doctor --provider <provider> --model <model>`
+to validate the selected model credential and the actual local Sandbox. The
+probe also reports process-isolation strength. See
+[Coding execution security](docs/coding-security.md) for the threat model,
+runtime requirements, HOME-read limitation, and container guidance.
+
 ## Design highlights
 
 - **Zero third-party runtime dependencies** in the core (`stdlib` +
