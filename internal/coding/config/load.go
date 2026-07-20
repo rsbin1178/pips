@@ -107,6 +107,10 @@ func Load(options LoadOptions) (Result, error) {
 			return Result{}, projectErr
 		}
 
+		if err := validateProjectPatch(options.ProjectFile, projectPatch); err != nil {
+			return Result{}, err
+		}
+
 		result.ProjectFile.State = projectState
 		if projectState == FileStateLoaded {
 			result.Config = apply(result.Config, projectPatch, Source{
@@ -126,6 +130,19 @@ func Load(options LoadOptions) (Result, error) {
 	}
 
 	return result, nil
+}
+
+func validateProjectPatch(path string, patch Patch) error {
+	if patch.Sandbox != nil && *patch.Sandbox == SandboxFullAccess {
+		return fmt.Errorf(
+			"coding config: %q: %w: project configuration cannot enable sandbox %q",
+			path,
+			ErrInvalid,
+			SandboxFullAccess,
+		)
+	}
+
+	return nil
 }
 
 type fileConfig struct {
