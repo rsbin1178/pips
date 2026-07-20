@@ -104,6 +104,41 @@ func TestPlanRejectsMismatchedAuthorizationAndChangedExecutable(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvalidOperation)
 }
 
+func TestPlanBindsProtectedPolicyCeiling(t *testing.T) {
+	t.Parallel()
+
+	fixture := newExecutorFixture(t)
+	protected := filepath.Join(fixture.base, "protected")
+	require.NoError(t, os.Mkdir(protected, 0o700))
+	operation, err := NewOperation(t.Context(), fixture.workspace, fixture.operationSpec("printf never"))
+	require.NoError(t, err)
+	policy, err := NewPolicy(fixture.workspace, PolicyConfig{
+		Sandbox:       config.SandboxWorkspaceWrite,
+		Approval:      config.ApprovalOnRequest,
+		SandboxSource: config.Source{Kind: config.SourceDefault},
+		Protected:     []string{protected},
+	})
+	require.NoError(t, err)
+
+	decision := policy.Evaluate(operation)
+	authorization, ok := decision.Authorization()
+	require.True(t, ok)
+
+	executor := fixture.executor(t, fakeBackend{compileFn: directCompile()}, systemRunnerDependencies())
+	_, err = executor.Plan(t.Context(), operation, authorization)
+	require.ErrorIs(t, err, ErrUnauthorized)
+
+	executor, err = newExecutor(fixture.workspace, ExecutorConfig{
+		TempRoot:    fixture.tempRoot,
+		Environment: mapLookup(nil),
+		Protected:   []string{protected},
+	}, fakeBackend{compileFn: directCompile()}, systemRunnerDependencies())
+	require.NoError(t, err)
+	plan, err := executor.Plan(t.Context(), operation, authorization)
+	require.NoError(t, err)
+	require.NoError(t, plan.Close())
+}
+
 func TestClosedPlanCannotRunAndCleanupIsIdempotent(t *testing.T) {
 	t.Parallel()
 

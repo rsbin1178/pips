@@ -29,6 +29,7 @@ type compileRequest struct {
 	workspaceRoot string
 	privateDir    string
 	environment   []string
+	protected     []string
 }
 
 type launchSpec struct {
