@@ -26,6 +26,7 @@ tool_search = true
 [model]
 provider = "openai"
 id = "user-model"
+api = "responses"
 `)
 	projectFile := filepath.Join(fixture.workspaceDir, ".pips", "config.toml")
 	writeCLIFile(t, projectFile, `
@@ -33,22 +34,26 @@ tool_search = true
 [model]
 provider = "anthropic"
 id = "project-model"
+api = "auto"
 `)
 
 	dependencies := fixture.dependencies(map[string]string{
-		config.ModelEnv: "env-model",
+		config.ModelEnv:    "env-model",
+		config.ModelAPIEnv: "responses",
 	})
 	output, err := executeWithDependencies(
 		t,
 		dependencies,
 		"config",
 		"show",
+		"--model-api=chat_completions",
 		"--tool-search=false",
 	)
 	require.NoError(t, err)
 	assert.Contains(t, output, "state=untrusted")
 	assert.Contains(t, output, `model.provider = "openai" # source=user_file detail="`)
 	assert.Contains(t, output, `model.id = "env-model" # source=environment detail="PIPS_MODEL"`)
+	assert.Contains(t, output, `model.api = "chat_completions" # source=flag detail="--model-api"`)
 	assert.Contains(t, output, `tool_search = false # source=flag detail="--tool-search"`)
 	assert.NotContains(t, output, "project-model")
 
@@ -60,6 +65,7 @@ id = "project-model"
 	require.NoError(t, err)
 	assert.Contains(t, output, "state=loaded")
 	assert.Contains(t, output, `model.provider = "anthropic" # source=project_file detail="`)
+	assert.Contains(t, output, `model.api = "responses" # source=environment detail="PIPS_MODEL_API"`)
 	assert.Contains(t, output, `tool_search = true # source=project_file detail="`)
 }
 
@@ -108,6 +114,20 @@ func TestConfigValidateRequiresRuntimeModel(t *testing.T) {
 	)
 	require.NoError(t, err)
 	assert.Equal(t, "configuration valid\n", output)
+
+	_, err = executeWithDependencies(
+		t,
+		fixture.dependencies(nil),
+		"config",
+		"validate",
+		"--provider",
+		"gemini",
+		"--model",
+		"gemini-test",
+		"--model-api",
+		"responses",
+	)
+	require.ErrorIs(t, err, config.ErrInvalid)
 }
 
 func TestConfigCustomPathIsWorkingDirectoryRelative(t *testing.T) {

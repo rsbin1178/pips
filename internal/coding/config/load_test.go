@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/rsbin/pips/ai"
+	"github.com/rsbin/pips/ai/openai"
 	"github.com/rsbin/pips/internal/coding/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -26,6 +27,7 @@ approval = "never"
 [model]
 provider = "openai"
 id = "user-model"
+api = "responses"
 `)
 	writeFile(t, projectFile, `
 tool_search = false
@@ -34,17 +36,20 @@ approval = "on-request"
 [model]
 provider = "anthropic"
 id = "project-model"
+api = "auto"
 `)
 
 	environment := map[string]string{
 		config.ProviderEnv:   "gemini",
 		config.ModelEnv:      "env-model",
+		config.ModelAPIEnv:   "responses",
 		config.ToolSearchEnv: "true",
 		config.SandboxEnv:    "full-access",
 		config.ApprovalEnv:   "never",
 	}
 	flagProvider := ai.ProviderOpenAI
 	flagModel := "flag-model"
+	flagModelAPI := openai.APIChatCompletions
 	flagToolSearch := false
 	flagSandbox := config.SandboxWorkspaceWrite
 	flagApproval := config.ApprovalOnRequest
@@ -58,6 +63,7 @@ id = "project-model"
 		FlagOverrides: config.Patch{
 			Provider:   &flagProvider,
 			ModelID:    &flagModel,
+			ModelAPI:   &flagModelAPI,
 			ToolSearch: &flagToolSearch,
 			Sandbox:    &flagSandbox,
 			Approval:   &flagApproval,
@@ -69,6 +75,7 @@ id = "project-model"
 	assert.Equal(t, config.FileStateLoaded, result.ProjectFile.State)
 	assert.Equal(t, flagProvider, result.Config.Model.Provider)
 	assert.Equal(t, flagModel, result.Config.Model.ID)
+	assert.Equal(t, flagModelAPI, result.Config.Model.API)
 	assert.False(t, result.Config.ToolSearch)
 	assert.Equal(t, flagSandbox, result.Config.Sandbox)
 	assert.Equal(t, flagApproval, result.Config.Approval)
@@ -76,6 +83,7 @@ id = "project-model"
 	wantDetails := map[config.Field]string{
 		config.FieldProvider:   "--provider",
 		config.FieldModelID:    "--model",
+		config.FieldModelAPI:   "--model-api",
 		config.FieldToolSearch: "--tool-search",
 		config.FieldSandbox:    "--sandbox",
 		config.FieldApproval:   "--approval",
@@ -230,6 +238,7 @@ func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 		{name: "unknown nested field", content: "[model]\nprovider = \"openai\"\ntypo = true\n", want: config.ErrDecode},
 		{name: "invalid syntax", content: "model = [", want: config.ErrDecode},
 		{name: "unsupported provider", content: "[model]\nprovider = \"deepseek\"\n", want: config.ErrInvalid},
+		{name: "unsupported model api", content: "[model]\napi = \"legacy\"\n", want: config.ErrInvalid},
 		{name: "empty model", content: "[model]\nid = \"  \"\n", want: config.ErrInvalid},
 		{name: "invalid sandbox", content: "sandbox = \"escape\"\n", want: config.ErrInvalid},
 		{name: "invalid approval", content: "approval = \"sometimes\"\n", want: config.ErrInvalid},
@@ -259,6 +268,7 @@ func TestLoadRejectsInvalidEnvironment(t *testing.T) {
 		{name: "empty provider", key: config.ProviderEnv},
 		{name: "empty model", key: config.ModelEnv},
 		{name: "model control character", key: config.ModelEnv, value: "model\ninjected"},
+		{name: "bad model api", key: config.ModelAPIEnv, value: "legacy"},
 		{name: "bad bool", key: config.ToolSearchEnv, value: "sometimes"},
 		{name: "bad sandbox", key: config.SandboxEnv, value: "escape"},
 		{name: "bad approval", key: config.ApprovalEnv, value: "sometimes"},

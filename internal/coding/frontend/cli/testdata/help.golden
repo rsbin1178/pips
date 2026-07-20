@@ -17,6 +17,7 @@ Flags:
       --config string      user configuration file
   -h, --help               help for pips
       --model string       model ID
+      --model-api string   OpenAI API surface
       --provider string    model provider
       --sandbox string     sandbox mode
       --tool-search        enable deferred tool search

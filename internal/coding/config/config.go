@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/rsbin/pips/ai"
+	"github.com/rsbin/pips/ai/openai"
 )
 
 // ErrInvalid means a configuration value or combination is invalid.
@@ -20,6 +21,7 @@ type Field string
 const (
 	FieldProvider   Field = "model.provider"
 	FieldModelID    Field = "model.id"
+	FieldModelAPI   Field = "model.api"
 	FieldToolSearch Field = "tool_search"
 	FieldSandbox    Field = "sandbox"
 	FieldApproval   Field = "approval"
@@ -28,6 +30,7 @@ const (
 var fields = []Field{
 	FieldProvider,
 	FieldModelID,
+	FieldModelAPI,
 	FieldToolSearch,
 	FieldSandbox,
 	FieldApproval,
@@ -76,6 +79,7 @@ const (
 type ModelConfig struct {
 	Provider ai.Provider
 	ID       string
+	API      openai.API
 }
 
 // Config is the final immutable-by-convention application configuration.
@@ -93,6 +97,7 @@ type Config struct {
 type Patch struct {
 	Provider   *ai.Provider
 	ModelID    *string
+	ModelAPI   *openai.API
 	ToolSearch *bool
 	Sandbox    *SandboxMode
 	Approval   *ApprovalMode
@@ -110,6 +115,7 @@ func Defaults() Config {
 	}
 
 	return Config{
+		Model:    ModelConfig{API: openai.APIAuto},
 		Sandbox:  SandboxWorkspaceWrite,
 		Approval: ApprovalOnRequest,
 		sources:  sources,
@@ -138,6 +144,20 @@ func (c Config) ValidateRuntime() error {
 		return err
 	}
 
+	api, err := ParseModelAPI(string(c.Model.API))
+	if err != nil {
+		return err
+	}
+
+	if c.Model.Provider != ai.ProviderOpenAI && api != openai.APIAuto {
+		return fmt.Errorf(
+			"%w: model api %q is only supported by provider %q",
+			ErrInvalid,
+			api,
+			ai.ProviderOpenAI,
+		)
+	}
+
 	if err := validateSandbox(c.Sandbox); err != nil {
 		return err
 	}
@@ -157,6 +177,22 @@ func ParseProvider(value string) (ai.Provider, error) {
 	}
 
 	return provider, nil
+}
+
+// ParseModelAPI parses an OpenAI API surface. An empty value has the same
+// meaning as the zero-value model configuration: automatic selection.
+func ParseModelAPI(value string) (openai.API, error) {
+	api := openai.API(strings.TrimSpace(value))
+	if api == "" {
+		return openai.APIAuto, nil
+	}
+
+	switch api {
+	case openai.APIAuto, openai.APIChatCompletions, openai.APIResponses:
+		return api, nil
+	default:
+		return "", fmt.Errorf("%w: unsupported model api %q", ErrInvalid, value)
+	}
 }
 
 // ParseSandboxMode parses a supported sandbox mode.
@@ -223,6 +259,11 @@ func apply(config Config, patch Patch, source Source) Config {
 	if patch.ModelID != nil {
 		config.Model.ID = *patch.ModelID
 		config.sources[FieldModelID] = source
+	}
+
+	if patch.ModelAPI != nil {
+		config.Model.API = *patch.ModelAPI
+		config.sources[FieldModelAPI] = source
 	}
 
 	if patch.ToolSearch != nil {
