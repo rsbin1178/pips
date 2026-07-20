@@ -207,7 +207,7 @@ func TestLoadProjectCannotEnableFullAccess(t *testing.T) {
 		}),
 	})
 	require.Error(t, err)
-	assert.ErrorIs(t, err, config.ErrInvalid)
+	require.ErrorIs(t, err, config.ErrInvalid)
 	assert.Contains(t, err.Error(), projectFile)
 }
 
@@ -222,6 +222,8 @@ func TestLoadUserSourcesCanEnableFullAccess(t *testing.T) {
 		{
 			name: "user file",
 			options: func(t *testing.T) config.LoadOptions {
+				t.Helper()
+
 				path := filepath.Join(t.TempDir(), "config.toml")
 				writeFile(t, path, "sandbox = \"full-access\"\n")
 
