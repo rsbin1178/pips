@@ -28,6 +28,7 @@ type ExecutorConfig struct {
 	Environment func(string) (string, bool)
 	TermGrace   time.Duration
 	DrainGrace  time.Duration
+	Protected   []string
 }
 
 // Executor prepares and runs authorized operations for one workspace.
@@ -40,6 +41,8 @@ type Executor struct {
 	drainGrace  time.Duration
 	backend     backend
 	deps        runnerDependencies
+	protected   []string
+	ceiling     Fingerprint
 }
 
 // NewExecutor constructs an executor using the current platform backend.
@@ -80,6 +83,11 @@ func newExecutor(
 		return nil, err
 	}
 
+	protected, err := canonicalProtectedPaths(ws, cfg.Protected)
+	if err != nil {
+		return nil, err
+	}
+
 	return &Executor{
 		workspace:   ws,
 		tempRoot:    tempObject.path,
@@ -89,6 +97,8 @@ func newExecutor(
 		drainGrace:  drainGrace,
 		backend:     platform,
 		deps:        deps,
+		protected:   protected,
+		ceiling:     protectedCeiling(protected),
 	}, nil
 }
 
@@ -221,6 +231,7 @@ func (e *Executor) compilePlan(
 		workspaceRoot: e.workspace.Root(),
 		privateDir:    privateObject.path,
 		environment:   environment,
+		protected:     slices.Clone(e.protected),
 	}
 
 	launch, resources, err := e.compileLaunch(ctx, auth.sandbox, request)
@@ -276,7 +287,8 @@ func (e *Executor) validateAuthorization(op Operation, auth Authorization) error
 	fingerprint := op.Fingerprint()
 	if auth.contract != sandboxContract || auth.workspaceKey == "" ||
 		subtle.ConstantTimeCompare([]byte(auth.workspaceKey), []byte(e.workspace.Identity().Key())) != 1 ||
-		subtle.ConstantTimeCompare(auth.fingerprint[:], fingerprint[:]) != 1 {
+		subtle.ConstantTimeCompare(auth.fingerprint[:], fingerprint[:]) != 1 ||
+		subtle.ConstantTimeCompare(auth.ceiling[:], e.ceiling[:]) != 1 {
 		return ErrUnauthorized
 	}
 
