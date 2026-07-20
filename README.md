@@ -14,19 +14,25 @@ Go building blocks for AI applications. Current packages:
   session trees (JSONL) with branching, automatic context compaction, branch
   summaries, streaming with active cancellation, and skill/prompt-template
   resources.
-- **`agent/continuation`** — durable, host-driven execution across bounded
+- **`agent/continuation`** — durable, application-driven execution across bounded
   agent runs: optimistic lifecycle state, cumulative limits, explicit retries,
   pause/cancel, and time/signal wakeups without a resident scheduler.
 - **`agent/team`** — durable coordination for a flat Team of independent Agent
-  sessions: fixed Lead authority, host-registered members, dependency tasks,
+  sessions: fixed Lead authority, coordinator-registered members, dependency tasks,
   exclusive claims and attempts, direct mailboxes, and scoped Agent tools.
 - **`agent/goal`** — optional evidence-based completion policy over
   continuation, with custom or structured-output model evaluators.
 - **`agent/loop`** — optional fixed or dynamic activation policy that persists
-  waits while leaving timers and wake delivery to the host.
+  waits while leaving timers and wake delivery to the application.
 - **`agent/mcp`** — optional bridge from official Model Context Protocol client
   sessions to immutable `agent.Tool` snapshots, including progress and tool-list
   change notifications.
+- **`agent/extension`** — trusted, compiled-in contribution composition with
+  capability negotiation, deterministic hooks, lifecycle rollback, and leased
+  immutable generations.
+- **`agent/bundle`** — bounded local bundle manifests that select registered
+  Extensions and declarative Skills, prompts, and typed assets without loading
+  code or executing bundled scripts.
 
 > **Status: v0.** The API is under active development and may change without
 > notice. Pin a commit if you depend on it.
@@ -164,7 +170,7 @@ Controller chooses continue, wait, block, complete, fail, or cancel.
 `agent/goal` implements durable completion evaluation and `agent/loop`
 implements fixed or model-planned activation. Both are optional Agent-layer
 Controllers: Team and Workflow runtimes can use continuation without importing
-either package. The host remains responsible for calling `ResumeDue` or
+either package. The application remains responsible for calling `ResumeDue` or
 delivering a signal; no package starts a scheduler or retry goroutine.
 
 Policy setup names the continuation payloads explicitly:
@@ -183,27 +189,80 @@ Use each setup's `ControllerState` and `WorkInput` in
 and explicit Loop wakeup.
 
 `agent/team` coordinates multiple independent member Sessions without starting
-them. The embedding host registers member resource references, commits a task
-attempt with a stable continuation ID, then creates and drives that child:
+them. The application Coordinator registers member resource references. For a
+standard durable task attempt, `AttemptRuntime` removes the repeated Team and
+Continuation choreography while retaining application ownership of the worker,
+model/Harness, and result schema:
 
 ```go
-teamRuntime, _ := team.New(teamStore)
-started, err := teamRuntime.StartTaskAttempt(ctx, teamID,
-    team.StartTaskAttemptRequest{
-        Command: hostCommand,
-        TaskID: "review", AttemptID: "review-1",
-        ContinuationID: "review-execution-1",
-    })
-// Resolve started.Dispatch.SessionRef to one independent Harness Session,
-// then create and drive started.Dispatch.ContinuationID explicitly.
+attempts, _ := team.NewAttemptRuntime(teamRuntime, continuations,
+    workerFactory, resultProjector,
+    team.WithAttemptCoordinator(coordinator),
+    team.WithAttemptHandlers(workerRef, controllerRef, controller),
+)
+result, err := attempts.Run(ctx, team.AttemptRunRequest{
+    TeamID: teamID, TaskID: "review", AttemptID: "review-1",
+    ContinuationID: "review-execution-1",
+})
+// workerFactory resolves result.Dispatch.SessionRef to its independent Harness
+// Session; resultProjector maps terminal evidence to Team result/messages.
 ```
 
 Member and Lead toolsets bind Team/member identity and derive durable command
 keys from provider ToolCall IDs. The model never supplies its actor, sender,
 revision, command ID, or IDs for model-created tasks/messages. Member
-registration and attempt start remain host-only. Team has no scheduler,
+registration and attempt start remain Coordinator-only. Team has no scheduler,
 provisioner, Workflow graph, remote runtime, or distributed control plane;
 applications compose those concerns above its finite command API.
+
+### Extensions and local Bundles
+
+`agent/extension` is the atomic activation boundary for trusted Go behavior.
+An Extension returns declarative tools, Skills, prompt templates, AI
+middleware, Agent hooks, typed assets, and an optional lifecycle. The Runtime
+validates and starts the complete next generation before publishing it;
+in-flight `Activation` leases keep the prior generation alive until released.
+There is deliberately no application framework or generic `Host` object.
+
+`agent/bundle` is the distribution layer above it. A strict
+`pips.bundle/v1alpha1` JSON manifest may select only Extensions registered by
+the embedding application and may load bounded local resources:
+
+```go
+loader, err := bundle.Open("./bundles/review")
+if err != nil {
+    return err
+}
+defer loader.Close()
+
+bundle, err := loader.Load(ctx, bundle.DefaultManifestPath, bundle.Settings{
+    Scope: bundle.ScopeProject,
+    Trust: bundle.TrustApproved, // required explicitly for project Bundles
+})
+if err != nil {
+    return err
+}
+
+runtime, err := extension.New(extension.WithExtensions(reviewExtension))
+if err != nil {
+    return err
+}
+activation, err := bundle.Activate(ctx, runtime)
+if err != nil {
+    return err
+}
+defer activation.Release(ctx)
+
+snapshot := activation.Snapshot()
+model = snapshot.Model(model)
+agentOptions, err := snapshot.AgentOptions(ctx, toolPolicy)
+```
+
+Skill `scripts/` directories are never executable capabilities by themselves.
+A script becomes callable only when trusted application code explicitly wraps
+it as an `agent.Tool`, or exposes it through an application-owned MCP adapter.
+The P0 Bundle loader starts no goroutines, subprocesses, network clients,
+package installers, shared libraries, or WASM runtimes.
 
 ### MCP tools
 
@@ -224,7 +283,7 @@ transport := &sdkmcp.CommandTransport{
     Command: exec.CommandContext(ctx, "my-mcp-server"),
 }
 client, err := agentmcp.Connect(ctx,
-    &sdkmcp.Implementation{Name: "pips-host", Version: "v0.1.0"},
+    &sdkmcp.Implementation{Name: "pips-runtime", Version: "v0.1.0"},
     transport,
     agentmcp.WithToolNamePrefix("workspace"),
 )
