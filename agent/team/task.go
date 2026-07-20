@@ -80,7 +80,7 @@ func (engine *Engine) CreateTask(
 				return transitionFields{}, err
 			}
 
-			if err := requireLeadOrHost(*team, request.Command.Actor); err != nil {
+			if err := requireLeadOrCoordinator(*team, request.Command.Actor); err != nil {
 				return transitionFields{}, err
 			}
 
@@ -175,7 +175,7 @@ func (engine *Engine) AssignTask(
 				return transitionFields{}, err
 			}
 
-			if err := requireLeadOrHost(*team, request.Command.Actor); err != nil {
+			if err := requireLeadOrCoordinator(*team, request.Command.Actor); err != nil {
 				return transitionFields{}, err
 			}
 
@@ -238,7 +238,7 @@ func (engine *Engine) UnassignTask(
 				return transitionFields{}, err
 			}
 
-			if err := requireLeadOrHost(*team, request.Command.Actor); err != nil {
+			if err := requireLeadOrCoordinator(*team, request.Command.Actor); err != nil {
 				return transitionFields{}, err
 			}
 
@@ -422,7 +422,7 @@ func (engine *Engine) RetryTask(
 				return transitionFields{}, err
 			}
 
-			if err := requireLeadOrHost(*team, request.Command.Actor); err != nil {
+			if err := requireLeadOrCoordinator(*team, request.Command.Actor); err != nil {
 				return transitionFields{}, err
 			}
 
@@ -482,7 +482,7 @@ func (engine *Engine) CancelTask(
 				return transitionFields{}, err
 			}
 
-			if err := requireLeadOrHost(*team, request.Command.Actor); err != nil {
+			if err := requireLeadOrCoordinator(*team, request.Command.Actor); err != nil {
 				return transitionFields{}, err
 			}
 
@@ -526,7 +526,7 @@ func (engine *Engine) CancelTask(
 }
 
 func requireTaskOperator(team Team, actor Actor, claimant MemberID) error {
-	if actor.Kind == ActorKindHostRuntime {
+	if actor.Kind == ActorKindCoordinator {
 		return nil
 	}
 

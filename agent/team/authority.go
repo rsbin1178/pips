@@ -8,16 +8,16 @@ func requireActive(team Team, operation string) error {
 	return nil
 }
 
-func requireHost(actor Actor) error {
-	if actor.Kind != ActorKindHostRuntime {
+func requireCoordinator(actor Actor) error {
+	if actor.Kind != ActorKindCoordinator {
 		return ErrUnauthorized
 	}
 
 	return nil
 }
 
-func requireLeadOrHost(team Team, actor Actor) error {
-	if actor.Kind == ActorKindHostRuntime {
+func requireLeadOrCoordinator(team Team, actor Actor) error {
+	if actor.Kind == ActorKindCoordinator {
 		return nil
 	}
 

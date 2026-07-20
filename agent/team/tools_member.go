@@ -138,7 +138,7 @@ type finishTaskAttemptArguments struct {
 	ContinuationID continuation.ID `json:"continuation_id" description:"Bound continuation execution ID."`
 	Outcome        AttemptOutcome  `json:"outcome" description:"Terminal outcome: completed or failed."`
 	Result         ai.JSON         `json:"result,omitempty" description:"Bounded JSON result."`
-	Artifacts      []Artifact      `json:"artifacts,omitempty" description:"Opaque host-owned artifact references."`
+	Artifacts      []Artifact      `json:"artifacts,omitempty" description:"Opaque coordinator-managed artifact references."`
 	Reason         string          `json:"reason,omitempty" description:"Required failure reason or optional completion note."`
 }
 

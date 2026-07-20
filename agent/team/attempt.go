@@ -44,7 +44,7 @@ func (engine *Engine) StartTaskAttempt(
 				return transitionFields{}, err
 			}
 
-			if err := requireHost(request.Command.Actor); err != nil {
+			if err := requireCoordinator(request.Command.Actor); err != nil {
 				return transitionFields{}, err
 			}
 
@@ -187,7 +187,7 @@ func (engine *Engine) FinishTaskAttempt(
 				if actorErr != nil || member.ID != attempt.MemberID || member.ID != task.ClaimedMemberID {
 					return transitionFields{}, ErrUnauthorized
 				}
-			} else if err := requireHost(request.Command.Actor); err != nil {
+			} else if err := requireCoordinator(request.Command.Actor); err != nil {
 				return transitionFields{}, err
 			}
 

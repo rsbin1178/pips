@@ -99,7 +99,7 @@ func (engine *Engine) Create(ctx context.Context, request CreateRequest) (Team, 
 		return Team{}, err
 	}
 
-	if request.Command.Actor.Kind != ActorKindHostRuntime {
+	if request.Command.Actor.Kind != ActorKindCoordinator {
 		return Team{}, ErrUnauthorized
 	}
 
