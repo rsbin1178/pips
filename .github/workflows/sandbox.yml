@@ -58,7 +58,7 @@ jobs:
       - name: Test real Linux sandbox
         env:
           PIPS_SANDBOX_INTEGRATION: "1"
-        run: go test -race ./internal/coding/execution/... ./internal/coding/changes/git ./internal/coding/tools -run 'Linux.*Integration|GitIntegration|ShellIntegration' -count=3
+        run: go test -race ./internal/coding/execution/... ./internal/coding/changes/git ./internal/coding/tools -run 'Linux.*Integration|GitIntegration|ShellIntegration|CodingFlowIntegration' -count=3
 
   macos:
     name: macOS sandbox (${{ matrix.arch }})
@@ -83,4 +83,4 @@ jobs:
       - name: Test real macOS sandbox
         env:
           PIPS_SANDBOX_INTEGRATION: "1"
-        run: go test -race ./internal/coding/execution/... ./internal/coding/changes/git ./internal/coding/tools -run 'Darwin.*Integration|GitIntegration|ShellIntegration' -count=3
+        run: go test -race ./internal/coding/execution/... ./internal/coding/changes/git ./internal/coding/tools -run 'Darwin.*Integration|GitIntegration|ShellIntegration|CodingFlowIntegration' -count=3

@@ -7,6 +7,7 @@ import (
 	"github.com/rsbin/pips/agent/harness"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding/config"
+	"github.com/rsbin/pips/internal/coding/execution"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -269,6 +270,81 @@ func TestControllerSessionGrantMatchesExactFingerprint(t *testing.T) {
 	assert.Equal(t, 2, fixture.executor.runCount)
 }
 
+func TestControllerSessionGrantSurvivesControllerRestart(t *testing.T) {
+	t.Parallel()
+
+	fixture := newControllerFixture(t, true, config.ApprovalOnRequest)
+	fixture.session.addPending(controlledCall("call-1", `same operation`))
+
+	state, err := fixture.controller.Reconcile(t.Context(), nil)
+	require.NoError(t, err)
+	require.NotNil(t, state.Review)
+
+	state, err = fixture.controller.Resolve(t.Context(), Resolution{
+		RequestID: state.Review.RequestID,
+		Choice:    ChoiceAllowSession,
+	}, nil)
+	require.NoError(t, err)
+	require.Equal(t, StateReady, state.Kind)
+
+	fixture.session.addPending(controlledCall("call-2", `same operation`))
+	restartedExecutor := newFakeControllerExecutor(fixture.session)
+	restarted, err := newController(
+		fixture.controller.workspace,
+		fixture.session,
+		fixture.session,
+		&fakePendingRunner{},
+		fixture.controller.policy,
+		restartedExecutor,
+		fixture.handler,
+	)
+	require.NoError(t, err)
+
+	state, err = restarted.Reconcile(t.Context(), nil)
+	require.NoError(t, err)
+	assert.Equal(t, StateReady, state.Kind)
+	assert.Equal(t, 1, restartedExecutor.runCount)
+}
+
+func TestControllerRestartExposesUnknownWithoutReexecution(t *testing.T) {
+	t.Parallel()
+
+	fixture := newControllerFixture(t, true, config.ApprovalOnRequest)
+	fixture.session.addPending(controlledCall("call-1", `true`))
+
+	state, err := fixture.controller.Reconcile(t.Context(), nil)
+	require.NoError(t, err)
+	require.NotNil(t, state.Review)
+
+	fixture.session.resolveFailures = 1
+	_, err = fixture.controller.Resolve(t.Context(), Resolution{
+		RequestID: state.Review.RequestID,
+		Choice:    ChoiceAllowOnce,
+	}, nil)
+	require.ErrorIs(t, err, errInjected)
+	require.Equal(t, 1, fixture.executor.runCount)
+
+	restartedExecutor := newFakeControllerExecutor(fixture.session)
+	restarted, err := newController(
+		fixture.controller.workspace,
+		fixture.session,
+		fixture.session,
+		&fakePendingRunner{},
+		fixture.controller.policy,
+		restartedExecutor,
+		fixture.handler,
+	)
+	require.NoError(t, err)
+
+	state, err = restarted.Reconcile(t.Context(), nil)
+	require.NoError(t, err)
+	require.Equal(t, StateUnknown, state.Kind)
+	require.NotNil(t, state.Unknown)
+	assert.Equal(t, 1, state.Unknown.Attempt)
+	assert.Zero(t, restartedExecutor.prepareCount)
+	assert.Zero(t, restartedExecutor.runCount)
+}
+
 func TestControllerStopsPendingSuffixAtReviewBarrier(t *testing.T) {
 	t.Parallel()
 
@@ -402,6 +478,40 @@ func TestControllerApprovalNeverDeniesWithoutExecution(t *testing.T) {
 	assert.Zero(t, fixture.executor.runCount)
 	require.Len(t, fixture.session.resolved, 1)
 	assert.True(t, fixture.session.resolved[0].IsError)
+}
+
+func TestControllerSandboxUnavailableDoesNotExecute(t *testing.T) {
+	t.Parallel()
+
+	fixture := newControllerFixture(t, true, config.ApprovalOnRequest)
+	fixture.session.addPending(controlledCall("call-1", `true`))
+
+	state, err := fixture.controller.Reconcile(t.Context(), nil)
+	require.NoError(t, err)
+	require.NotNil(t, state.Review)
+
+	fixture.executor.prepareErr = execution.ErrSandboxUnavailable
+	_, err = fixture.controller.Resolve(t.Context(), Resolution{
+		RequestID: state.Review.RequestID,
+		Choice:    ChoiceAllowOnce,
+	}, nil)
+	require.ErrorIs(t, err, execution.ErrSandboxUnavailable)
+	assert.Equal(t, 1, fixture.executor.prepareCount)
+	assert.Zero(t, fixture.executor.runCount)
+}
+
+func TestControllerNonInteractiveReviewFailsWithoutExecution(t *testing.T) {
+	t.Parallel()
+
+	fixture := newControllerFixture(t, true, config.ApprovalOnRequest)
+	fixture.session.addPending(controlledCall("call-1", `true`))
+
+	state, err := fixture.controller.Reconcile(t.Context(), nil)
+	require.NoError(t, err)
+	require.Equal(t, StateReview, state.Kind)
+	require.ErrorIs(t, state.NonInteractiveError(), ErrApprovalRequired)
+	assert.Zero(t, fixture.executor.prepareCount)
+	assert.Zero(t, fixture.executor.runCount)
 }
 
 func TestControllerStaleReviewCannotAuthorizeChangedOperation(t *testing.T) {
