@@ -129,6 +129,15 @@ func parseFlagOverrides(cmd *cobra.Command, flags *rootFlags) (config.Patch, err
 		patch.ModelID = &modelID
 	}
 
+	if isFlagChanged(cmd, "model-api") {
+		api, err := config.ParseModelAPI(flags.modelAPI)
+		if err != nil {
+			return config.Patch{}, fmt.Errorf("coding cli: --model-api: %w", err)
+		}
+
+		patch.ModelAPI = &api
+	}
+
 	if isFlagChanged(cmd, "tool-search") {
 		patch.ToolSearch = &flags.toolSearch
 	}

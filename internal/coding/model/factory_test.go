@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/rsbin/pips/ai"
+	"github.com/rsbin/pips/ai/openai"
 	"github.com/rsbin/pips/internal/coding/config"
 	"github.com/rsbin/pips/internal/coding/credential"
 	"github.com/rsbin/pips/internal/coding/model"
@@ -68,6 +69,19 @@ func TestNewRejectsInvalidInputs(t *testing.T) {
 
 	_, err = model.New(canceled, config.ModelConfig{Provider: ai.ProviderOpenAI, ID: "model"}, validStore)
 	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestNewRejectsProviderSpecificAPIBeforeCredentialLookup(t *testing.T) {
+	t.Parallel()
+
+	store := &credentialStore{}
+	_, err := model.New(t.Context(), config.ModelConfig{
+		Provider: ai.ProviderAnthropic,
+		ID:       "model",
+		API:      openai.APIResponses,
+	}, store)
+	require.ErrorIs(t, err, model.ErrInvalid)
+	assert.Empty(t, store.provider)
 }
 
 func TestNewPropagatesCredentialErrorWithoutSecret(t *testing.T) {
