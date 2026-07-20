@@ -465,11 +465,3 @@ func removeOwnedDarwinProbe(parent, child fileObject) error {
 
 	return nil
 }
-
-func shellSingleQuote(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
-}
-
-func sameFileObject(left, right fileObject) bool {
-	return left.path == right.path && left.device == right.device && left.inode == right.inode
-}

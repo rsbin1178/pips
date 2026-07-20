@@ -1,0 +1,78 @@
+name: Sandbox
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/sandbox.yml"
+      - "go.mod"
+      - "go.sum"
+      - "internal/coding/execution/**"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/sandbox.yml"
+      - "go.mod"
+      - "go.sum"
+      - "internal/coding/execution/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sandbox-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Linux sandbox (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install external sandbox runtime
+        run: sudo apt-get update && sudo apt-get install --yes bubblewrap
+      - name: Test execution package
+        run: go test -race ./internal/coding/execution/...
+      - name: Test real Linux sandbox
+        env:
+          PIPS_SANDBOX_INTEGRATION: "1"
+        run: go test -race ./internal/coding/execution/... -run 'Linux.*Integration' -count=3
+
+  macos:
+    name: macOS sandbox (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-13
+            arch: amd64
+          - runner: macos-14
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Test execution package
+        run: go test -race ./internal/coding/execution/...
+      - name: Test real macOS sandbox
+        env:
+          PIPS_SANDBOX_INTEGRATION: "1"
+        run: go test -race ./internal/coding/execution/... -run 'Darwin.*Integration' -count=3
