@@ -47,6 +47,7 @@ type hconfig struct {
 	system       string
 	systemFn     func(SystemContext) string
 	skills       []Skill
+	skillCatalog *SkillCatalog
 	templates    []PromptTemplate
 	compaction   *CompactionSettings
 	summaryModel ai.LanguageModel
@@ -77,6 +78,13 @@ func WithSystemFunc(fn func(SystemContext) string) Option {
 // prompt (see [FormatSkillsPrompt]).
 func WithSkills(skills ...Skill) Option {
 	return func(c *hconfig) { c.skills = append(c.skills, skills...) }
+}
+
+// WithSkillCatalog registers a validated catalog. Its discovery entries are
+// included in the system prompt; applications can retain the catalog to
+// explicitly activate full instructions and inspect activation records.
+func WithSkillCatalog(catalog *SkillCatalog) Option {
+	return func(c *hconfig) { c.skillCatalog = catalog }
 }
 
 // WithSkillsDir loads skills from a directory tree at construction time
@@ -193,7 +201,31 @@ func New(model ai.LanguageModel, sess *Session, opts ...Option) (*Harness, error
 		}
 	}
 
+	if h.cfg.skillCatalog != nil && len(h.cfg.skills) > 0 {
+		return nil, errors.New("harness: WithSkillCatalog cannot be combined with WithSkills")
+	}
+
+	if h.cfg.skillCatalog == nil {
+		catalog, err := NewSkillCatalog(h.cfg.skills...)
+		if err != nil {
+			return nil, err
+		}
+
+		h.cfg.skillCatalog = catalog
+	}
+
+	h.cfg.skills = h.cfg.skillCatalog.List()
+	if err := ValidateTemplates(h.cfg.templates...); err != nil {
+		return nil, err
+	}
+
 	return h, nil
+}
+
+// SkillCatalog returns the harness's validated skill catalog. It is safe to
+// use concurrently with prompt runs; activation audit records are synchronized.
+func (h *Harness) SkillCatalog() *SkillCatalog {
+	return h.cfg.skillCatalog
 }
 
 // Session returns the underlying session tree.

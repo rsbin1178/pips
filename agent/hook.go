@@ -35,4 +35,10 @@ type TurnUpdate struct {
 	// ReplaceMessages, when non-nil, replaces the session history via
 	// [Session.Replace] — the commit point for context compaction.
 	ReplaceMessages []ai.Message
+	// Tools, when non-nil, replaces the complete tool snapshot used for all
+	// subsequent model calls and executions in this run. The replacement is
+	// validated before it takes effect, so a declaration can never be shown to
+	// the model without the matching executable implementation. This enables
+	// deferred tool discovery without mutating the Agent shared by other runs.
+	Tools []Tool
 }

@@ -52,6 +52,27 @@ func TestPromptTemplateFormat(t *testing.T) {
 	}
 }
 
+func TestValidateTemplates(t *testing.T) {
+	t.Parallel()
+
+	require.NoError(t, harness.ValidateTemplates(
+		harness.PromptTemplate{Name: "review", Content: "Review $1."},
+		harness.PromptTemplate{Name: "summary", Content: "Summarize $1."},
+	))
+
+	for _, templates := range [][]harness.PromptTemplate{
+		{{Name: "", Content: "content"}},
+		{{Name: " review ", Content: "content"}},
+		{{Name: "review", Content: ""}},
+		{
+			{Name: "review", Content: "one"},
+			{Name: "review", Content: "two"},
+		},
+	} {
+		require.Error(t, harness.ValidateTemplates(templates...))
+	}
+}
+
 func TestFormatSkillsPrompt(t *testing.T) {
 	t.Parallel()
 
