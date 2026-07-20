@@ -72,8 +72,8 @@ func validateReason(reason string, required bool) error {
 
 func validateActor(actor Actor) error {
 	switch actor.Kind {
-	case ActorKindHostRuntime:
-		return validateText("host runtime actor id", actor.ID, maxIDLength, true)
+	case ActorKindCoordinator:
+		return validateText("coordinator actor id", actor.ID, maxIDLength, true)
 	case ActorKindMember:
 		return validateSafeID("member actor id", actor.ID)
 	default:
@@ -886,31 +886,31 @@ func validateCauseReferences(transition Transition) error {
 
 //nolint:gocyclo // Transition authority is an explicit cause-to-actor policy table.
 func validateTransitionAuthority(team Team, transition Transition) error {
-	host := transition.Actor.Kind == ActorKindHostRuntime
+	coordinator := transition.Actor.Kind == ActorKindCoordinator
 	memberID := MemberID(transition.Actor.ID)
-	leadOrHost := host || memberID == team.LeadMemberID
+	leadOrCoordinator := coordinator || memberID == team.LeadMemberID
 
 	switch transition.Cause {
 	case CauseCreate, CauseMemberRegistered, CauseMemberDisabled, CauseMemberEnabled,
 		CauseTaskAttemptStarted:
-		if !host {
-			return fmt.Errorf("%w: transition requires host runtime actor", ErrInvalid)
+		if !coordinator {
+			return fmt.Errorf("%w: transition requires coordinator actor", ErrInvalid)
 		}
 	case CauseTaskCreated, CauseTaskAssigned, CauseTaskUnassigned, CauseTaskRetried,
 		CauseTaskCancelled, CauseTeamCompleted, CauseTeamFailed, CauseTeamCancelled:
-		if !leadOrHost {
-			return fmt.Errorf("%w: transition requires lead or host actor", ErrInvalid)
+		if !leadOrCoordinator {
+			return fmt.Errorf("%w: transition requires lead or coordinator actor", ErrInvalid)
 		}
 	case CauseTaskClaimed, CauseMessageSent, CauseMessagesAcknowledged:
 		if transition.Actor.Kind != ActorKindMember || memberID != transition.MemberID {
 			return fmt.Errorf("%w: transition requires matching member actor", ErrInvalid)
 		}
 	case CauseTaskReleased:
-		if !host && memberID != team.LeadMemberID && memberID != transition.MemberID {
+		if !coordinator && memberID != team.LeadMemberID && memberID != transition.MemberID {
 			return fmt.Errorf("%w: release transition actor is unauthorized", ErrInvalid)
 		}
 	case CauseTaskAttemptCompleted, CauseTaskAttemptFailed:
-		if !host && memberID != transition.MemberID {
+		if !coordinator && memberID != transition.MemberID {
 			return fmt.Errorf("%w: attempt transition actor is unauthorized", ErrInvalid)
 		}
 	default:

@@ -39,7 +39,7 @@ func (engine *Engine) CompleteTeam(
 				return transitionFields{}, err
 			}
 
-			if err := requireLeadOrHost(*team, request.Command.Actor); err != nil {
+			if err := requireLeadOrCoordinator(*team, request.Command.Actor); err != nil {
 				return transitionFields{}, err
 			}
 
@@ -124,7 +124,7 @@ func (engine *Engine) terminalizeTeam(
 				return transitionFields{}, err
 			}
 
-			if err := requireLeadOrHost(*team, command.Actor); err != nil {
+			if err := requireLeadOrCoordinator(*team, command.Actor); err != nil {
 				return transitionFields{}, err
 			}
 

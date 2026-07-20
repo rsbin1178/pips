@@ -126,7 +126,7 @@ func (binding *toolBinding) retryTaskTool() agent.Tool {
 
 type completeTeamArguments struct {
 	Output    ai.JSON    `json:"output,omitempty" description:"Optional bounded final JSON output."`
-	Artifacts []Artifact `json:"artifacts,omitempty" description:"Opaque host-owned artifact references."`
+	Artifacts []Artifact `json:"artifacts,omitempty" description:"Opaque coordinator-managed artifact references."`
 	Reason    string     `json:"reason,omitempty" description:"Optional completion note."`
 }
 

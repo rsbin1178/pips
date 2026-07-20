@@ -48,11 +48,11 @@ func newMemoryTestRuntime(t *testing.T) *testRuntime {
 	return newTestRuntime(t, store)
 }
 
-func (runtime *testRuntime) host(revision Revision) CommandMetadata {
+func (runtime *testRuntime) coordinator(revision Revision) CommandMetadata {
 	return CommandMetadata{
 		ID:               CommandID(fmt.Sprintf("command-%d", runtime.commands.Add(1))),
 		ExpectedRevision: revision,
-		Actor:            Actor{Kind: ActorKindHostRuntime, ID: "test-host"},
+		Actor:            Actor{Kind: ActorKindCoordinator, ID: "test-coordinator"},
 	}
 }
 
@@ -68,7 +68,7 @@ func createTestTeam(t *testing.T, runtime *testRuntime) Team {
 	t.Helper()
 
 	team, err := runtime.engine.Create(t.Context(), CreateRequest{
-		Command: runtime.host(0), ID: "team-1", Objective: "Ship a reliable change",
+		Command: runtime.coordinator(0), ID: "team-1", Objective: "Ship a reliable change",
 		Lead: MemberSpec{
 			ID: "lead", Name: "Lead", Role: "coordinate and implement",
 			SessionRef: "session-lead",
@@ -83,7 +83,7 @@ func registerWorker(t *testing.T, runtime *testRuntime, team Team) Team {
 	t.Helper()
 
 	team, err := runtime.engine.RegisterMember(t.Context(), team.ID, RegisterMemberRequest{
-		Command: runtime.host(team.Revision),
+		Command: runtime.coordinator(team.Revision),
 		Member: MemberSpec{
 			ID: "worker", Name: "Worker", Role: "implement",
 			SessionRef: "session-worker",
@@ -102,7 +102,7 @@ func TestCreateIsIdempotentAndRejectsCommandReuse(t *testing.T) {
 	runtime := newTestRuntime(t, store)
 
 	request := CreateRequest{
-		Command: runtime.host(0), ID: "team-idempotent", Objective: "objective",
+		Command: runtime.coordinator(0), ID: "team-idempotent", Objective: "objective",
 		Lead: MemberSpec{ID: "lead", Name: "Lead", Role: "lead", SessionRef: "session"},
 	}
 	created, err := runtime.engine.Create(t.Context(), request)
@@ -153,7 +153,7 @@ func TestTaskAttemptLifecyclePromotesDependenciesAndReplaysExactRecord(t *testin
 	require.NoError(t, err)
 
 	started, err := runtime.engine.StartTaskAttempt(t.Context(), team.ID, StartTaskAttemptRequest{
-		Command: runtime.host(team.Revision), TaskID: "foundation",
+		Command: runtime.coordinator(team.Revision), TaskID: "foundation",
 		AttemptID: "attempt-1", ContinuationID: "execution-1",
 	})
 	require.NoError(t, err)
@@ -177,7 +177,7 @@ func TestTaskAttemptLifecyclePromotesDependenciesAndReplaysExactRecord(t *testin
 	assert.Equal(t, completed, replayed)
 
 	_, err = runtime.engine.FinishTaskAttempt(t.Context(), team.ID, FinishTaskAttemptRequest{
-		Command: runtime.host(completed.Revision), TaskID: "foundation",
+		Command: runtime.coordinator(completed.Revision), TaskID: "foundation",
 		AttemptID: "attempt-1", ContinuationID: "execution-1",
 		Outcome: AttemptOutcomeCompleted,
 	})
@@ -193,7 +193,7 @@ func TestFailedTaskMustBeRetriedOrCancelledBeforeCompletion(t *testing.T) {
 	var err error
 
 	team, err = runtime.engine.CreateTask(t.Context(), team.ID, CreateTaskRequest{
-		Command: runtime.host(team.Revision), TaskID: "task", Title: "Task", AttemptLimit: 1,
+		Command: runtime.coordinator(team.Revision), TaskID: "task", Title: "Task", AttemptLimit: 1,
 	})
 	require.NoError(t, err)
 	team, err = runtime.engine.ClaimTask(t.Context(), team.ID, ClaimTaskRequest{
@@ -201,7 +201,7 @@ func TestFailedTaskMustBeRetriedOrCancelledBeforeCompletion(t *testing.T) {
 	})
 	require.NoError(t, err)
 	started, err := runtime.engine.StartTaskAttempt(t.Context(), team.ID, StartTaskAttemptRequest{
-		Command: runtime.host(team.Revision), TaskID: "task",
+		Command: runtime.coordinator(team.Revision), TaskID: "task",
 		AttemptID: "attempt", ContinuationID: "execution",
 	})
 	require.NoError(t, err)
@@ -263,7 +263,7 @@ func TestMailboxOrderingAcknowledgementAndScopedSender(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvalidState)
 
 	_, err = runtime.engine.SendMessage(t.Context(), team.ID, SendMessageRequest{
-		Command: runtime.host(team.Revision), MessageID: "message-2",
+		Command: runtime.coordinator(team.Revision), MessageID: "message-2",
 		RecipientID: "worker", Body: ai.JSON(`{"text":"spoof"}`),
 	})
 	require.ErrorIs(t, err, ErrUnauthorized)
@@ -287,7 +287,7 @@ func TestCancellationDispatchAndFiniteInspection(t *testing.T) {
 	var err error
 
 	team, err = runtime.engine.CreateTask(t.Context(), team.ID, CreateTaskRequest{
-		Command: runtime.host(team.Revision), TaskID: "task", Title: "Task", AttemptLimit: 2,
+		Command: runtime.coordinator(team.Revision), TaskID: "task", Title: "Task", AttemptLimit: 2,
 	})
 	require.NoError(t, err)
 	team, err = runtime.engine.ClaimTask(t.Context(), team.ID, ClaimTaskRequest{
@@ -295,7 +295,7 @@ func TestCancellationDispatchAndFiniteInspection(t *testing.T) {
 	})
 	require.NoError(t, err)
 	started, err := runtime.engine.StartTaskAttempt(t.Context(), team.ID, StartTaskAttemptRequest{
-		Command: runtime.host(team.Revision), TaskID: "task",
+		Command: runtime.coordinator(team.Revision), TaskID: "task",
 		AttemptID: "attempt", ContinuationID: "execution",
 	})
 	require.NoError(t, err)
@@ -311,7 +311,7 @@ func TestCancellationDispatchAndFiniteInspection(t *testing.T) {
 	assert.Equal(t, AttemptInspectionMissing, inspections[0].State)
 
 	team, err = runtime.engine.CancelTeam(t.Context(), team.ID, CancelTeamRequest{
-		Command: runtime.host(started.Team.Revision), Reason: "host shutdown",
+		Command: runtime.coordinator(started.Team.Revision), Reason: "coordinator shutdown",
 	})
 	require.NoError(t, err)
 	cancellations, err := runtime.engine.CancellationDispatches(t.Context(), team.ID)
@@ -320,7 +320,7 @@ func TestCancellationDispatchAndFiniteInspection(t *testing.T) {
 	assert.Equal(t, continuation.ID("execution"), cancellations[0].ContinuationID)
 
 	_, err = runtime.engine.FinishTaskAttempt(t.Context(), team.ID, FinishTaskAttemptRequest{
-		Command: runtime.host(team.Revision), TaskID: "task", AttemptID: "attempt",
+		Command: runtime.coordinator(team.Revision), TaskID: "task", AttemptID: "attempt",
 		ContinuationID: "execution", Outcome: AttemptOutcomeCompleted,
 	})
 	require.ErrorIs(t, err, ErrTerminal)
@@ -335,7 +335,7 @@ func TestConcurrentTaskClaimHasOneWinner(t *testing.T) {
 	var err error
 
 	team, err = runtime.engine.RegisterMember(t.Context(), team.ID, RegisterMemberRequest{
-		Command: runtime.host(team.Revision),
+		Command: runtime.coordinator(team.Revision),
 		Member: MemberSpec{
 			ID: "worker-2", Name: "Worker Two", Role: "implement",
 			SessionRef: "session-worker-2",
@@ -343,7 +343,7 @@ func TestConcurrentTaskClaimHasOneWinner(t *testing.T) {
 	})
 	require.NoError(t, err)
 	team, err = runtime.engine.CreateTask(t.Context(), team.ID, CreateTaskRequest{
-		Command: runtime.host(team.Revision), TaskID: "race-task",
+		Command: runtime.coordinator(team.Revision), TaskID: "race-task",
 		Title: "Claim once", AttemptLimit: 1,
 	})
 	require.NoError(t, err)
@@ -388,19 +388,19 @@ func TestConcurrentTaskClaimHasOneWinner(t *testing.T) {
 	assert.NotEmpty(t, loaded.Tasks[0].ClaimedMemberID)
 }
 
-func TestMemberDisableRequiresHostAndIdleMember(t *testing.T) {
+func TestMemberDisableRequiresCoordinatorAndIdleMember(t *testing.T) {
 	t.Parallel()
 
 	runtime := newMemoryTestRuntime(t)
 	team := registerWorker(t, runtime, createTestTeam(t, runtime))
 
 	_, err := runtime.engine.DisableMember(t.Context(), team.ID, DisableMemberRequest{
-		Command: runtime.host(team.Revision), MemberID: "lead", Reason: "not allowed",
+		Command: runtime.coordinator(team.Revision), MemberID: "lead", Reason: "not allowed",
 	})
 	require.ErrorIs(t, err, ErrUnauthorized)
 
 	team, err = runtime.engine.CreateTask(t.Context(), team.ID, CreateTaskRequest{
-		Command: runtime.host(team.Revision), TaskID: "task", Title: "Task", AttemptLimit: 1,
+		Command: runtime.coordinator(team.Revision), TaskID: "task", Title: "Task", AttemptLimit: 1,
 	})
 	require.NoError(t, err)
 	team, err = runtime.engine.ClaimTask(t.Context(), team.ID, ClaimTaskRequest{
@@ -409,7 +409,7 @@ func TestMemberDisableRequiresHostAndIdleMember(t *testing.T) {
 	require.NoError(t, err)
 
 	_, err = runtime.engine.DisableMember(t.Context(), team.ID, DisableMemberRequest{
-		Command: runtime.host(team.Revision), MemberID: "worker", Reason: "maintenance",
+		Command: runtime.coordinator(team.Revision), MemberID: "worker", Reason: "maintenance",
 	})
 	require.ErrorIs(t, err, ErrMemberBusy)
 
@@ -418,7 +418,7 @@ func TestMemberDisableRequiresHostAndIdleMember(t *testing.T) {
 	})
 	require.NoError(t, err)
 	team, err = runtime.engine.DisableMember(t.Context(), team.ID, DisableMemberRequest{
-		Command: runtime.host(team.Revision), MemberID: "worker", Reason: "maintenance",
+		Command: runtime.coordinator(team.Revision), MemberID: "worker", Reason: "maintenance",
 	})
 	require.NoError(t, err)
 
@@ -429,7 +429,7 @@ func TestMemberDisableRequiresHostAndIdleMember(t *testing.T) {
 	require.ErrorIs(t, err, ErrUnauthorized)
 
 	team, err = runtime.engine.EnableMember(t.Context(), team.ID, EnableMemberRequest{
-		Command: runtime.host(team.Revision), MemberID: "worker",
+		Command: runtime.coordinator(team.Revision), MemberID: "worker",
 	})
 	require.NoError(t, err)
 	assert.Equal(t, MemberStatusActive, team.Members[1].Status)
@@ -444,7 +444,7 @@ func TestTaskAssignmentRetryAndSecondAttemptCompletion(t *testing.T) {
 	var err error
 
 	team, err = runtime.engine.CreateTask(t.Context(), team.ID, CreateTaskRequest{
-		Command: runtime.host(team.Revision), TaskID: "task", Title: "Task", AttemptLimit: 2,
+		Command: runtime.coordinator(team.Revision), TaskID: "task", Title: "Task", AttemptLimit: 2,
 	})
 	require.NoError(t, err)
 	team, err = runtime.engine.AssignTask(t.Context(), team.ID, AssignTaskRequest{
@@ -469,7 +469,7 @@ func TestTaskAssignmentRetryAndSecondAttemptCompletion(t *testing.T) {
 	})
 	require.NoError(t, err)
 	started, err := runtime.engine.StartTaskAttempt(t.Context(), team.ID, StartTaskAttemptRequest{
-		Command: runtime.host(team.Revision), TaskID: "task",
+		Command: runtime.coordinator(team.Revision), TaskID: "task",
 		AttemptID: "attempt-1", ContinuationID: "execution-1",
 	})
 	require.NoError(t, err)
@@ -490,7 +490,7 @@ func TestTaskAssignmentRetryAndSecondAttemptCompletion(t *testing.T) {
 	})
 	require.NoError(t, err)
 	started, err = runtime.engine.StartTaskAttempt(t.Context(), team.ID, StartTaskAttemptRequest{
-		Command: runtime.host(team.Revision), TaskID: "task",
+		Command: runtime.coordinator(team.Revision), TaskID: "task",
 		AttemptID: "attempt-2", ContinuationID: "execution-2",
 	})
 	require.NoError(t, err)
@@ -521,7 +521,7 @@ func TestFailTeamIsExplicitAndTerminal(t *testing.T) {
 	assert.Equal(t, StatusFailed, failed.Status)
 
 	_, err = runtime.engine.CreateTask(t.Context(), team.ID, CreateTaskRequest{
-		Command: runtime.host(failed.Revision), TaskID: "late", Title: "Late", AttemptLimit: 1,
+		Command: runtime.coordinator(failed.Revision), TaskID: "late", Title: "Late", AttemptLimit: 1,
 	})
 	require.ErrorIs(t, err, ErrTerminal)
 }

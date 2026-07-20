@@ -427,7 +427,7 @@ func (engine *Engine) Cancel(
 	return cloneExecution(next.Execution), nil
 }
 
-// Fail records an explicit host terminal failure.
+// Fail records an explicit caller-requested terminal failure.
 func (engine *Engine) Fail(
 	ctx context.Context,
 	id ID,

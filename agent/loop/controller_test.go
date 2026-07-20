@@ -41,7 +41,7 @@ func (function loopWorkerFunc) Run(
 	return function(ctx, request)
 }
 
-func TestEveryWaitsForExplicitHostWakeAndDoesNotCatchUp(t *testing.T) {
+func TestEveryWaitsForExplicitWakeAndDoesNotCatchUp(t *testing.T) {
 	t.Parallel()
 
 	clock := &loopClock{now: time.Date(2026, time.July, 19, 8, 0, 0, 0, time.UTC)}

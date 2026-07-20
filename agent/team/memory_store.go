@@ -7,7 +7,7 @@ import (
 	"sync"
 )
 
-// MemoryStore is a bounded in-memory Store for tests and ephemeral hosts.
+// MemoryStore is a bounded in-memory Store for tests and ephemeral coordinators.
 type MemoryStore struct {
 	mu       sync.Mutex
 	config   storeConfig

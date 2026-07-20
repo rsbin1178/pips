@@ -94,7 +94,7 @@ type ActorKind string
 
 // Actor kinds.
 const (
-	ActorKindHostRuntime ActorKind = "host_runtime"
+	ActorKindCoordinator ActorKind = "coordinator"
 	ActorKindMember      ActorKind = "member"
 )
 
@@ -123,7 +123,7 @@ type Limits struct {
 	MaxJSONBytes           int `json:"max_json_bytes"`
 }
 
-// Artifact is an opaque host-owned result reference. It must not contain
+// Artifact is an opaque coordinator-managed result reference. It must not contain
 // credentials or raw secret material.
 type Artifact struct {
 	Kind      string `json:"kind"`
@@ -132,7 +132,7 @@ type Artifact struct {
 	MediaType string `json:"media_type,omitempty"`
 }
 
-// MemberSpec registers one host-owned Agent resource with a Team.
+// MemberSpec registers one coordinator-managed Agent resource with a Team.
 type MemberSpec struct {
 	ID                   MemberID `json:"id"`
 	Name                 string   `json:"name"`
@@ -154,7 +154,7 @@ type Member struct {
 	DisabledAt           time.Time    `json:"disabled_at,omitzero"`
 }
 
-// Attempt records one host-started task execution.
+// Attempt records one coordinator-started task execution.
 type Attempt struct {
 	ID             AttemptID       `json:"id"`
 	Number         int             `json:"number"`
@@ -294,7 +294,7 @@ type MessagePage struct {
 	NextAfter uint64
 }
 
-// Dispatch is immutable host input for one committed task attempt.
+// Dispatch is immutable coordinator input for one committed task attempt.
 type Dispatch struct {
 	TeamID               ID
 	TeamRevision         Revision
@@ -357,7 +357,7 @@ type CreateRequest struct {
 	Limits    Limits
 }
 
-// RegisterMemberRequest registers one host-owned member resource.
+// RegisterMemberRequest registers one coordinator-managed member resource.
 type RegisterMemberRequest struct {
 	Command CommandMetadata
 	Member  MemberSpec

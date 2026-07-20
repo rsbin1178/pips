@@ -45,7 +45,7 @@ func TestContinuationCrashWindowsWithLocalStores(t *testing.T) {
 			team := registerWorker(t, runtime, createTestTeam(t, runtime))
 
 			team, err = runtime.engine.CreateTask(t.Context(), team.ID, CreateTaskRequest{
-				Command: runtime.host(team.Revision), TaskID: "task",
+				Command: runtime.coordinator(team.Revision), TaskID: "task",
 				Title: "Run in an independent session", AttemptLimit: 2,
 			})
 			require.NoError(t, err)
@@ -54,7 +54,7 @@ func TestContinuationCrashWindowsWithLocalStores(t *testing.T) {
 			})
 			require.NoError(t, err)
 			started, err := runtime.engine.StartTaskAttempt(t.Context(), team.ID, StartTaskAttemptRequest{
-				Command: runtime.host(team.Revision), TaskID: "task",
+				Command: runtime.coordinator(team.Revision), TaskID: "task",
 				AttemptID: "attempt", ContinuationID: "child-execution",
 			})
 			require.NoError(t, err)
@@ -100,7 +100,7 @@ func TestContinuationCrashWindowsWithLocalStores(t *testing.T) {
 			finish := FinishTaskAttemptRequest{
 				Command: CommandMetadata{
 					ID: "reconcile-terminal", ExpectedRevision: started.Team.Revision,
-					Actor: Actor{Kind: ActorKindHostRuntime, ID: "restart-host"},
+					Actor: Actor{Kind: ActorKindCoordinator, ID: "restart-coordinator"},
 				},
 				TaskID: "task", AttemptID: "attempt", ContinuationID: "child-execution",
 				Outcome: AttemptOutcomeFailed, Reason: "child cancelled",
@@ -141,7 +141,7 @@ func TestDispatchSelectsIndependentHarnessSession(t *testing.T) {
 	runtime := newMemoryTestRuntime(t)
 	team := registerWorker(t, runtime, createTestTeam(t, runtime))
 	team, err := runtime.engine.CreateTask(t.Context(), team.ID, CreateTaskRequest{
-		Command: runtime.host(team.Revision), TaskID: "task",
+		Command: runtime.coordinator(team.Revision), TaskID: "task",
 		Title: "Independent work", Payload: ai.JSON(`{"input":1}`), AttemptLimit: 1,
 	})
 	require.NoError(t, err)
@@ -150,7 +150,7 @@ func TestDispatchSelectsIndependentHarnessSession(t *testing.T) {
 	})
 	require.NoError(t, err)
 	started, err := runtime.engine.StartTaskAttempt(t.Context(), team.ID, StartTaskAttemptRequest{
-		Command: runtime.host(team.Revision), TaskID: "task",
+		Command: runtime.coordinator(team.Revision), TaskID: "task",
 		AttemptID: "attempt", ContinuationID: "execution",
 	})
 	require.NoError(t, err)
