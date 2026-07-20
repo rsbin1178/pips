@@ -16,14 +16,60 @@ type service struct {
 	patchFault patchFault
 }
 
+type catalogConfig struct {
+	shell agent.Tool
+}
+
+// CatalogOption adds an explicitly constructed coding tool.
+type CatalogOption func(*catalogConfig) error
+
+// WithControlledShell adds the shell wrapper returned by approval.Controller.
+// Passing the raw ShellHandler is impossible because it does not implement
+// agent.Tool.
+func WithControlledShell(tool agent.Tool) CatalogOption {
+	return func(cfg *catalogConfig) error {
+		if tool == nil {
+			return errors.New("coding tools: nil controlled shell")
+		}
+
+		if tool.Decl().Name != shellName {
+			return errors.New("coding tools: controlled shell has unexpected name")
+		}
+
+		if cfg.shell != nil {
+			return errors.New("coding tools: controlled shell already configured")
+		}
+
+		cfg.shell = tool
+
+		return nil
+	}
+}
+
 // NewCatalog returns the application-owned coding tool catalog.
-func NewCatalog(tree *workspace.Tree, limits Limits) (*catalog.Catalog, error) {
+func NewCatalog(
+	tree *workspace.Tree,
+	limits Limits,
+	options ...CatalogOption,
+) (*catalog.Catalog, error) {
 	if tree == nil {
 		return nil, errors.New("coding tools: nil workspace tree")
 	}
 
 	if err := validateLimits(limits); err != nil {
 		return nil, err
+	}
+
+	config := catalogConfig{}
+
+	for _, option := range options {
+		if option == nil {
+			return nil, errors.New("coding tools: nil catalog option")
+		}
+
+		if err := option(&config); err != nil {
+			return nil, err
+		}
 	}
 
 	service := &service{tree: tree, limits: limits}
@@ -53,13 +99,23 @@ func NewCatalog(tree *workspace.Tree, limits Limits) (*catalog.Catalog, error) {
 		service.applyPatch,
 	)
 
-	return catalog.New(
+	entries := []catalog.Entry{
 		localEntry(read, catalog.RiskRead, "filesystem"),
 		localEntry(list, catalog.RiskRead, "filesystem"),
 		localEntry(find, catalog.RiskRead, "filesystem", "search"),
 		localEntry(search, catalog.RiskRead, "filesystem", "search"),
 		localEntry(patch, catalog.RiskWrite, "filesystem", "mutation"),
-	)
+	}
+	if config.shell != nil {
+		entries = append(entries, localEntry(
+			config.shell,
+			catalog.RiskPrivileged,
+			"process",
+			"shell",
+		))
+	}
+
+	return catalog.New(entries...)
 }
 
 func localEntry(tool agent.Tool, risk catalog.Risk, tags ...string) catalog.Entry {
