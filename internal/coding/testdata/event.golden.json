@@ -1,0 +1,26 @@
+{
+  "schema": "pips.coding.event/v1alpha1",
+  "sequence": 42,
+  "time": "2026-07-21T08:30:00.123Z",
+  "session_id": "session-1",
+  "interaction_id": "interaction-1",
+  "run_id": "run-1",
+  "type": "tool.completed",
+  "payload": {
+    "turn": 2,
+    "call": {
+      "id": "call-1",
+      "name": "shell"
+    },
+    "result": {
+      "role": "tool",
+      "parts": [
+        {
+          "type": "tool_result",
+          "name": "shell",
+          "tool_call_id": "call-1"
+        }
+      ]
+    }
+  }
+}
