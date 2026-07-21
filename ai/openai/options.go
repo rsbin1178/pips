@@ -1,7 +1,6 @@
 package openai
 
 import (
-	"maps"
 	"time"
 
 	"github.com/rsbin/pips/ai"
@@ -11,13 +10,18 @@ import (
 // RequestOptions is the openai entry for [ai.Request.ProviderOptions]:
 //
 //	req.ProviderOptions = map[ai.Provider]any{
-//	    ai.ProviderOpenAI: openai.RequestOptions{ExtraFields: map[string]any{"seed": 7}},
+//	    ai.ProviderOpenAI: openai.RequestOptions{ExtraFields: map[string]any{"service_tier": "flex"}},
 //	}
 type RequestOptions struct {
+	// MinP is a compatible-provider sampling cutoff not shared by the native
+	// OpenAI, Anthropic, and Gemini protocols.
+	MinP *float64
+	// RepetitionPenalty is a compatible-provider sampling control.
+	RepetitionPenalty *float64
 	// ExtraFields is merged into the top level of the outgoing JSON request
-	// body after translation, overriding colliding keys. It is the escape
-	// hatch for provider parameters the portable [ai.Request] does not model
-	// (seed, logit_bias, user, parallel_tool_calls, service_tier, ...).
+	// body after translation using bounded recursive add-only semantics. It is
+	// the escape hatch for non-reserved provider parameters the portable
+	// [ai.Request] does not model (logit_bias, user, service_tier, ...).
 	ExtraFields map[string]any
 }
 
@@ -43,23 +47,15 @@ func requestOptions(req ai.Request, provider ai.Provider) RequestOptions {
 // mergeExtraFields folds opts.ExtraFields into an already-encoded JSON
 // object. A no-op when there are no extras.
 func mergeExtraFields(body any, extra map[string]any) (any, error) {
-	if len(extra) == 0 {
-		return body, nil
-	}
-
-	encoded, err := jsonx.Marshal(body)
-	if err != nil {
-		return nil, err
-	}
-
-	var asMap map[string]any
-	if err := jsonx.Unmarshal(encoded, &asMap); err != nil {
-		return nil, err
-	}
-
-	maps.Copy(asMap, extra)
-
-	return asMap, nil
+	return jsonx.MergeExtraFields(body, extra,
+		"model", "input", "messages", "instructions", "tools", "tool_choice",
+		"stream", "stream_options", "response_format", "text", "temperature", "top_p",
+		"top_k", "min_p", "max_tokens", "max_completion_tokens", "max_output_tokens",
+		"stop", "reasoning", "reasoning_effort", "thinking", "seed",
+		"frequency_penalty", "presence_penalty", "repetition_penalty", "logprobs",
+		"top_logprobs", "include", "store", "background", "previous_response_id",
+		"conversation", "prompt", "n", "size", "quality",
+	)
 }
 
 // errorBody is OpenAI's error envelope, shared by both API surfaces.

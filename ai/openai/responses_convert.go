@@ -1,3 +1,4 @@
+//nolint:wsl_v5 // Wire validation and translation stay locally auditable.
 package openai
 
 import (
@@ -10,7 +11,32 @@ import (
 // responsesRequestFrom translates a portable request into the Responses wire
 // shape. The system prompt becomes top-level instructions; messages become a
 // flat list of typed input items.
+//
+//nolint:gocyclo // Unsupported-option checks and wire fields remain auditable together.
 func (m *Model) responsesRequestFrom(req ai.Request, stream bool) (any, error) {
+	if req.TopK != nil || req.Seed != nil || req.FrequencyPenalty != nil ||
+		req.PresencePenalty != nil || len(req.Stop) != 0 {
+		return nil, fmt.Errorf(
+			"%s: request option is not supported by Responses: %w",
+			m.label(),
+			ai.ErrUnsupported,
+		)
+	}
+	if req.Reasoning != nil && req.Reasoning.BudgetTokens != 0 {
+		return nil, fmt.Errorf(
+			"%s: reasoning budget is not supported by Responses: %w",
+			m.label(),
+			ai.ErrUnsupported,
+		)
+	}
+	if req.Reasoning != nil && req.Reasoning.Mode == ai.ReasoningModeAdaptive {
+		return nil, fmt.Errorf(
+			"%s: adaptive reasoning is not supported by Responses: %w",
+			m.label(),
+			ai.ErrUnsupported,
+		)
+	}
+
 	input, err := responseInputFrom(req.Messages, m.label())
 	if err != nil {
 		return nil, err
@@ -26,6 +52,16 @@ func (m *Model) responsesRequestFrom(req ai.Request, stream bool) (any, error) {
 		TopP:            req.TopP,
 		MaxOutputTokens: req.MaxTokens,
 		Stream:          stream,
+	}
+	if req.LogProbs != nil {
+		if !req.LogProbs.Enabled {
+			return nil, fmt.Errorf(
+				"%s: disabling logprobs is not supported by Responses: %w",
+				m.label(),
+				ai.ErrUnsupported,
+			)
+		}
+		out.TopLogProbs = &req.LogProbs.Top
 	}
 	if m.compat.IncludeEncryptedReasoning {
 		out.Include = []string{"reasoning.encrypted_content"}
@@ -46,7 +82,11 @@ func (m *Model) responsesRequestFrom(req ai.Request, stream bool) (any, error) {
 	}
 
 	if req.Reasoning != nil {
-		r := &responsesReasoning{Effort: string(req.Reasoning.Effort)}
+		effort := string(req.Reasoning.Effort)
+		if req.Reasoning.Mode == ai.ReasoningModeDisabled {
+			effort = string(ai.ReasoningNone)
+		}
+		r := &responsesReasoning{Effort: effort}
 		if req.Reasoning.IncludeSummary {
 			r.Summary = "auto"
 		}

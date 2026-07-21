@@ -115,12 +115,10 @@ func TestDeepSeekReasoningToolContinuation(t *testing.T) {
 			ai.ToolResultText("call_1", "search", "result"),
 		},
 		MaxTokens: ai.Ptr(256),
+		Seed:      ai.Ptr[int64](7),
 		Reasoning: &ai.ReasoningConfig{Effort: ai.ReasoningLow},
 		ResponseFormat: &ai.ResponseFormat{
 			Name: "answer", Schema: &ai.Schema{Type: "object"}, Strict: true,
-		},
-		ProviderOptions: map[ai.Provider]any{
-			ai.ProviderDeepSeek: openai.RequestOptions{ExtraFields: map[string]any{"seed": 7}},
 		},
 	})
 	require.NoError(t, err)

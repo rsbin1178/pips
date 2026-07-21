@@ -9,14 +9,16 @@ import (
 
 // Generate implements ai.LanguageModel.
 func (m *Model) Generate(ctx context.Context, req ai.Request) (*ai.Response, error) {
-	body, err := requestFrom(req)
+	body, err := requestFrom(req, m.provider)
 	if err != nil {
 		return nil, err
 	}
 
 	var parsed generateResponse
 
-	raw, err := m.client.PostJSON(ctx, m.methodPath("generateContent"), m.authHeaders(), body, &parsed, decodeError)
+	raw, err := m.client.PostJSON(
+		ctx, m.methodPath("generateContent"), m.authHeaders(), body, &parsed, decodeError(m.provider),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("gemini: generateContent: %w", err)
 	}
@@ -27,7 +29,7 @@ func (m *Model) Generate(ctx context.Context, req ai.Request) (*ai.Response, err
 // Stream implements ai.LanguageModel.
 func (m *Model) Stream(ctx context.Context, req ai.Request) ai.Stream {
 	return func(yield func(ai.StreamEvent, error) bool) {
-		body, err := requestFrom(req)
+		body, err := requestFrom(req, m.provider)
 		if err != nil {
 			yield(ai.StreamEvent{}, err)
 			return
@@ -35,7 +37,7 @@ func (m *Model) Stream(ctx context.Context, req ai.Request) ai.Stream {
 
 		path := m.methodPath("streamGenerateContent") + "?alt=sse"
 
-		stream, err := m.client.PostStream(ctx, path, m.authHeaders(), body, decodeError)
+		stream, err := m.client.PostStream(ctx, path, m.authHeaders(), body, decodeError(m.provider))
 		if err != nil {
 			yield(ai.StreamEvent{}, fmt.Errorf("gemini: streamGenerateContent: %w", err))
 			return

@@ -22,6 +22,7 @@ type messagesRequest struct {
 	MaxTokens    int               `json:"max_tokens"`
 	Temperature  *float64          `json:"temperature,omitempty"`
 	TopP         *float64          `json:"top_p,omitempty"`
+	TopK         *int              `json:"top_k,omitempty"`
 	StopSeqs     []string          `json:"stop_sequences,omitempty"`
 	Tools        []wireTool        `json:"tools,omitempty"`
 	ToolChoice   *wireToolChoice   `json:"tool_choice,omitempty"`
@@ -33,6 +34,7 @@ type messagesRequest struct {
 
 type wireOutputConfig struct {
 	Format *wireOutputFormat `json:"format,omitempty"`
+	Effort string            `json:"effort,omitempty"`
 }
 
 type wireOutputFormat struct {
@@ -41,8 +43,8 @@ type wireOutputFormat struct {
 }
 
 type wireThinking struct {
-	Type         string `json:"type"` // "enabled"
-	BudgetTokens int    `json:"budget_tokens"`
+	Type         string `json:"type"` // "enabled" | "adaptive" | "disabled"
+	BudgetTokens int    `json:"budget_tokens,omitempty"`
 }
 
 type wireMessage struct {

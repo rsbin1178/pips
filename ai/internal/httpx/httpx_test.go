@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -149,6 +150,30 @@ func TestSSRFGuardBlocksLoopback(t *testing.T) {
 	_, err := client.PostJSON(t.Context(), "x", nil, struct{}{}, nil, passErr)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, httpx.ErrPrivateAddress)
+}
+
+func TestDefaultClientDoesNotFollowRedirects(t *testing.T) {
+	t.Parallel()
+
+	var targetCalls atomic.Int32
+
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		targetCalls.Add(1)
+
+		_, _ = fmt.Fprint(w, `{"unexpected":true}`)
+	}))
+	defer target.Close()
+
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", target.URL+"/private")
+		w.WriteHeader(http.StatusTemporaryRedirect)
+	}))
+	defer redirect.Close()
+
+	client := httpx.New(localConfig(), redirect.URL)
+	_, err := client.PostJSON(t.Context(), "x", nil, struct{}{}, nil, passErr)
+	require.ErrorContains(t, err, "status=307")
+	assert.Zero(t, targetCalls.Load())
 }
 
 func TestBaseURLPathPrefixPreserved(t *testing.T) {

@@ -22,10 +22,14 @@ const (
 	defaultMaxTokens = 4096
 )
 
+// DefaultBaseURL returns the official Anthropic Messages endpoint used by New.
+func DefaultBaseURL() string { return defaultBaseURL }
+
 // Model is an ai.LanguageModel backed by the Anthropic Messages API. Create
 // one with [New]; it is immutable and safe for concurrent use.
 type Model struct {
 	model      string
+	provider   ai.Provider
 	apiVersion string
 	beta       []string
 	maxTokens  int
@@ -44,9 +48,16 @@ type Option func(*options)
 
 type options struct {
 	cfg        httpx.Config
+	provider   ai.Provider
 	apiVersion string
 	beta       []string
 	maxTokens  int
+}
+
+// WithProvider sets the service identity independently from the Anthropic
+// wire protocol. It is intended for compatible gateways and self-hosted APIs.
+func WithProvider(provider ai.Provider) Option {
+	return func(o *options) { o.provider = provider }
 }
 
 // WithAPIKey sets the API key. Defaults to the ANTHROPIC_API_KEY environment
@@ -116,7 +127,11 @@ func WithMaxStreamLineSize(n int) Option {
 // New returns a Model bound to the given model ID (for example
 // "claude-sonnet-4-5"). Configuration problems surface on the first call.
 func New(model string, opts ...Option) *Model {
-	o := options{apiVersion: defaultAPIVersion, maxTokens: defaultMaxTokens}
+	o := options{
+		apiVersion: defaultAPIVersion,
+		maxTokens:  defaultMaxTokens,
+		provider:   ai.ProviderAnthropic,
+	}
 	for _, opt := range opts {
 		opt(&o)
 	}
@@ -127,6 +142,7 @@ func New(model string, opts ...Option) *Model {
 
 	return &Model{
 		model:      model,
+		provider:   o.provider,
 		apiVersion: o.apiVersion,
 		beta:       o.beta,
 		maxTokens:  o.maxTokens,
@@ -136,7 +152,7 @@ func New(model string, opts ...Option) *Model {
 }
 
 // Provider implements ai.LanguageModel.
-func (m *Model) Provider() ai.Provider { return ai.ProviderAnthropic }
+func (m *Model) Provider() ai.Provider { return m.provider }
 
 // ModelID implements ai.LanguageModel.
 func (m *Model) ModelID() string { return m.model }

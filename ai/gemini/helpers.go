@@ -1,7 +1,6 @@
 package gemini
 
 import (
-	"maps"
 	"strings"
 	"time"
 
@@ -24,23 +23,16 @@ func textOf(parts []ai.Part) string {
 // mergeExtraFields folds provider-option extras into an already-structured
 // request body. A no-op when there are no extras.
 func mergeExtraFields(body any, extra map[string]any) (any, error) {
-	if len(extra) == 0 {
-		return body, nil
-	}
-
-	encoded, err := jsonx.Marshal(body)
-	if err != nil {
-		return nil, err
-	}
-
-	var asMap map[string]any
-	if err := jsonx.Unmarshal(encoded, &asMap); err != nil {
-		return nil, err
-	}
-
-	maps.Copy(asMap, extra)
-
-	return asMap, nil
+	return jsonx.MergeExtraFields(body, extra,
+		"contents", "systemInstruction", "cachedContent", "tools", "toolConfig",
+		"generationConfig.temperature", "generationConfig.topP", "generationConfig.topK",
+		"generationConfig.maxOutputTokens", "generationConfig.stopSequences",
+		"generationConfig.responseMimeType", "generationConfig.responseSchema",
+		"generationConfig.seed", "generationConfig.frequencyPenalty",
+		"generationConfig.presencePenalty", "generationConfig.responseLogprobs",
+		"generationConfig.logprobs", "generationConfig.responseModalities",
+		"generationConfig.thinkingConfig",
+	)
 }
 
 // errorBody is Gemini's error envelope.
@@ -52,16 +44,18 @@ type errorBody struct {
 	} `json:"error"`
 }
 
-func decodeError(status int, retryAfter time.Duration, body []byte) error {
-	apiErr := ai.NewError(ai.ProviderGemini, status, string(body))
-	apiErr.RetryAfter = retryAfter
-	apiErr.Raw = body
+func decodeError(provider ai.Provider) func(int, time.Duration, []byte) error {
+	return func(status int, retryAfter time.Duration, body []byte) error {
+		apiErr := ai.NewError(provider, status, string(body))
+		apiErr.RetryAfter = retryAfter
+		apiErr.Raw = body
 
-	var parsed errorBody
-	if err := jsonx.Unmarshal(body, &parsed); err == nil && parsed.Error.Message != "" {
-		apiErr.Message = parsed.Error.Message
-		apiErr.Type = parsed.Error.Status
+		var parsed errorBody
+		if err := jsonx.Unmarshal(body, &parsed); err == nil && parsed.Error.Message != "" {
+			apiErr.Message = parsed.Error.Message
+			apiErr.Type = parsed.Error.Status
+		}
+
+		return apiErr
 	}
-
-	return apiErr
 }

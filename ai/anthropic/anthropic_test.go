@@ -298,6 +298,86 @@ func TestThinkingWireFormat(t *testing.T) {
 	assert.InDelta(t, 16384, as[float64](t, thinking["budget_tokens"]), 1e-9)
 }
 
+func TestAdaptiveThinkingAndTypedSamplingWireFormat(t *testing.T) {
+	t.Parallel()
+
+	var captured map[string]any
+
+	model := newTestModel(t, serveJSON(t, textResponse, "/v1/messages", &captured))
+
+	_, err := model.Generate(t.Context(), ai.Request{
+		Messages: []ai.Message{ai.UserText("think")},
+		TopK:     ai.Ptr(50),
+		Stop:     []string{"done"},
+		Reasoning: &ai.ReasoningConfig{
+			Mode:   ai.ReasoningModeAdaptive,
+			Effort: ai.ReasoningMax,
+		},
+	})
+	require.NoError(t, err)
+
+	assert.InDelta(t, 50, as[float64](t, captured["top_k"]), 1e-9)
+	assert.Equal(t, []any{"done"}, as[[]any](t, captured["stop_sequences"]))
+	thinking := as[map[string]any](t, captured["thinking"])
+	assert.Equal(t, "adaptive", thinking["type"])
+	assert.NotContains(t, thinking, "budget_tokens")
+	outputConfig := as[map[string]any](t, captured["output_config"])
+	assert.Equal(t, "max", outputConfig["effort"])
+}
+
+func TestNoneThinkingDisablesAndUnmappedEffortFails(t *testing.T) {
+	t.Parallel()
+
+	var captured map[string]any
+
+	model := newTestModel(t, serveJSON(t, textResponse, "/v1/messages", &captured))
+
+	_, err := model.Generate(t.Context(), ai.Request{
+		Messages:  []ai.Message{ai.UserText("think")},
+		Reasoning: &ai.ReasoningConfig{Effort: ai.ReasoningNone},
+	})
+	require.NoError(t, err)
+
+	thinking := as[map[string]any](t, captured["thinking"])
+	assert.Equal(t, "disabled", thinking["type"])
+
+	_, err = model.Generate(t.Context(), ai.Request{
+		Messages:  []ai.Message{ai.UserText("think")},
+		Reasoning: &ai.ReasoningConfig{Effort: ai.ReasoningXHigh},
+	})
+	require.ErrorIs(t, err, ai.ErrUnsupported)
+
+	_, err = model.Generate(t.Context(), ai.Request{
+		Messages: []ai.Message{ai.UserText("think")},
+		Reasoning: &ai.ReasoningConfig{
+			Mode:   ai.ReasoningModeAdaptive,
+			Effort: ai.ReasoningMinimal,
+		},
+	})
+	require.ErrorIs(t, err, ai.ErrUnsupported)
+}
+
+func TestProviderOptionsRejectOutputConfigWhenUnset(t *testing.T) {
+	t.Parallel()
+
+	model := newTestModel(t, func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("unsafe extension reached HTTP")
+
+		_, _ = w.Write([]byte(textResponse))
+	})
+
+	_, err := model.Generate(t.Context(), ai.Request{
+		Messages: []ai.Message{ai.UserText("hi")},
+		ProviderOptions: map[ai.Provider]any{
+			ai.ProviderAnthropic: anthropic.RequestOptions{
+				ExtraFields: map[string]any{"output_config": map[string]any{"effort": "high"}},
+			},
+		},
+	})
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "reserved")
+}
+
 func TestCacheControlViaProviderOptions(t *testing.T) {
 	t.Parallel()
 

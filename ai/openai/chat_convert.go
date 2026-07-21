@@ -1,3 +1,4 @@
+//nolint:wsl_v5 // Wire translation keeps presence-aware assignments adjacent.
 package openai
 
 import (
@@ -11,6 +12,8 @@ import (
 
 // chatRequestFrom translates a portable request into the Chat Completions
 // wire shape.
+//
+//nolint:gocyclo // Each branch is an independently documented wire option.
 func (m *Model) chatRequestFrom(req ai.Request, stream bool) (any, error) {
 	messages, err := chatMessagesFrom(req, m.compat, m.label())
 	if err != nil {
@@ -18,14 +21,30 @@ func (m *Model) chatRequestFrom(req ai.Request, stream bool) (any, error) {
 	}
 
 	out := chatRequest{
-		Model:       m.model,
-		Messages:    messages,
-		Tools:       chatToolsFrom(req.Tools),
-		ToolChoice:  chatToolChoiceFrom(req.ToolChoice),
-		Temperature: req.Temperature,
-		TopP:        req.TopP,
-		Stop:        req.Stop,
-		Stream:      stream,
+		Model:            m.model,
+		Messages:         messages,
+		Tools:            chatToolsFrom(req.Tools),
+		ToolChoice:       chatToolChoiceFrom(req.ToolChoice),
+		Temperature:      req.Temperature,
+		TopP:             req.TopP,
+		Seed:             req.Seed,
+		FrequencyPenalty: req.FrequencyPenalty,
+		PresencePenalty:  req.PresencePenalty,
+		Stop:             req.Stop,
+		Stream:           stream,
+	}
+	providerOptions := requestOptions(req, m.provider)
+	if m.provider == ai.ProviderOpenAI && req.TopK != nil {
+		return nil, fmt.Errorf("%s: top-k sampling: %w", m.label(), ai.ErrUnsupported)
+	}
+	out.TopK = req.TopK
+	out.MinP = providerOptions.MinP
+	out.RepetitionPenalty = providerOptions.RepetitionPenalty
+	if req.LogProbs != nil {
+		out.LogProbs = &req.LogProbs.Enabled
+		if req.LogProbs.Top != 0 {
+			out.TopLogProbs = &req.LogProbs.Top
+		}
 	}
 
 	switch m.compat.resolvedMaxTokensField() {
@@ -76,12 +95,18 @@ func (m *Model) chatRequestFrom(req ai.Request, stream bool) (any, error) {
 		return nil, err
 	}
 
-	return mergeExtraFields(out, requestOptions(req, m.provider).ExtraFields)
+	return mergeExtraFields(out, providerOptions.ExtraFields)
 }
 
 func applyChatReasoning(out *chatRequest, reasoning *ai.ReasoningConfig, compat Compatibility, label string) error {
 	if reasoning == nil {
 		return nil
+	}
+	if reasoning.BudgetTokens != 0 || reasoning.IncludeSummary {
+		return fmt.Errorf("%s: reasoning budget or inclusion: %w", label, ai.ErrUnsupported)
+	}
+	if reasoning.Mode == ai.ReasoningModeAdaptive || reasoning.Mode == ai.ReasoningModeDisabled {
+		return fmt.Errorf("%s: reasoning mode %q: %w", label, reasoning.Mode, ai.ErrUnsupported)
 	}
 
 	effort := string(reasoning.Effort)
@@ -99,6 +124,7 @@ func applyChatReasoning(out *chatRequest, reasoning *ai.ReasoningConfig, compat 
 			out.ReasoningEffort = deepSeekReasoningEffort(reasoning.Effort)
 		}
 	case ChatReasoningOmit:
+		return fmt.Errorf("%s: reasoning disabled by compatibility profile: %w", label, ai.ErrUnsupported)
 	default:
 		return fmt.Errorf("%s: unsupported chat-reasoning format %q", label, compat.ChatReasoning)
 	}
