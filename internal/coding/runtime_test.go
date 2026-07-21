@@ -14,6 +14,8 @@ import (
 	"github.com/rsbin/pips/agent"
 	"github.com/rsbin/pips/agent/catalog"
 	"github.com/rsbin/pips/agent/extension"
+	agentobservability "github.com/rsbin/pips/agent/observability"
+	agentotel "github.com/rsbin/pips/agent/observability/otel"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding/approval"
 	"github.com/rsbin/pips/internal/coding/changes"
@@ -48,6 +50,184 @@ func TestRuntimePromptStreamsAndPersistsOneInteraction(t *testing.T) {
 	require.NoError(t, runtime.Close(t.Context()))
 	assert.Equal(t, PhaseClosed, runtime.Snapshot().Phase)
 	require.NoError(t, runtime.Close(t.Context()))
+}
+
+func TestValidateOpenOptionsRejectsNilObservers(t *testing.T) {
+	t.Parallel()
+
+	base := t.TempDir()
+	workspacePath := base + "/workspace"
+	require.NoError(t, mkdirPrivate(workspacePath))
+	ws, err := workspace.Open(workspacePath)
+	require.NoError(t, err)
+	layout, err := paths.New(base + "/home")
+	require.NoError(t, err)
+	cfg := config.Defaults()
+	cfg.Model.Provider = ai.ProviderOpenAI
+	cfg.Model.ID = "runtime-test"
+	options := OpenOptions{Workspace: ws, Config: cfg, Paths: layout}
+
+	options.AgentObservers = []func(context.Context, agent.Event){nil}
+	require.ErrorIs(t, validateOpenOptions(options), ErrRuntimeInvalid)
+	options.AgentObservers = nil
+	options.TelemetryObservers = []TelemetryObserver{nil}
+	require.ErrorIs(t, validateOpenOptions(options), ErrRuntimeInvalid)
+}
+
+func TestRuntimeTelemetryObserverFailuresAreIsolated(t *testing.T) {
+	t.Parallel()
+
+	const privatePayload = "telemetry-observer-private-payload"
+
+	var mu sync.Mutex
+	errorCalls, panicCalls := 0, 0
+	observed := make([]TelemetryEvent, 0, 16)
+	runtime := openTestRuntimeWithTelemetry(
+		t,
+		newRuntimeModel(runtimeTextResponse("done")),
+		TelemetryObserverFunc(func(_ context.Context, event TelemetryEvent) error {
+			if event.Type != EventInteractionStarted {
+				return nil
+			}
+
+			mu.Lock()
+			errorCalls++
+			mu.Unlock()
+
+			return errors.New(privatePayload)
+		}),
+		TelemetryObserverFunc(func(_ context.Context, event TelemetryEvent) error {
+			if event.Type != EventInteractionStarted {
+				return nil
+			}
+
+			mu.Lock()
+			panicCalls++
+			mu.Unlock()
+			panic(privatePayload)
+		}),
+		TelemetryObserverFunc(func(_ context.Context, event TelemetryEvent) error {
+			mu.Lock()
+			observed = append(observed, event)
+			mu.Unlock()
+
+			return nil
+		}),
+	)
+
+	events := collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("hello")))
+	assert.Equal(t, InteractionSucceeded, runtime.Snapshot().Interaction.Outcome)
+	assert.Equal(t, 2, countDiagnostic(events, componentTelemetry, "observer_disabled"))
+	for _, event := range events {
+		diagnostic, ok := event.Payload.(IntegrationDiagnostic)
+		if ok {
+			assert.NotContains(t, diagnostic.Message, privatePayload)
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, 1, errorCalls)
+	assert.Equal(t, 1, panicCalls)
+	assert.Contains(t, telemetryTypes(observed), EventSessionOpened)
+	assert.Contains(t, telemetryTypes(observed), EventInteractionCompleted)
+}
+
+func TestRuntimeTelemetrySessionOpenFailureBecomesSnapshotDiagnostic(t *testing.T) {
+	t.Parallel()
+
+	calls := 0
+	runtime := openTestRuntimeWithTelemetry(
+		t,
+		newRuntimeModel(runtimeTextResponse("done")),
+		TelemetryObserverFunc(func(context.Context, TelemetryEvent) error {
+			calls++
+
+			return errors.New("session exporter unavailable")
+		}),
+	)
+
+	snapshot := runtime.Snapshot()
+	require.Len(t, snapshot.Diagnostics, 1)
+	assert.Equal(t, componentTelemetry, snapshot.Diagnostics[0].Component)
+	assert.Equal(t, "observer_disabled", snapshot.Diagnostics[0].Code)
+
+	collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("hello")))
+	assert.Equal(t, 1, calls)
+	assert.Equal(t, InteractionSucceeded, runtime.Snapshot().Interaction.Outcome)
+}
+
+func TestRuntimeTelemetryObserverBackpressuresSynchronously(t *testing.T) {
+	t.Parallel()
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	observer := TelemetryObserverFunc(func(_ context.Context, event TelemetryEvent) error {
+		if event.Type == EventInteractionStarted {
+			close(entered)
+			<-release
+		}
+
+		return nil
+	})
+	runtime := openTestRuntimeWithTelemetry(
+		t,
+		newRuntimeModel(runtimeTextResponse("done")),
+		observer,
+	)
+
+	type result struct {
+		events []Event
+		err    error
+	}
+	done := make(chan result, 1)
+	go func() {
+		value := result{}
+		runtime.Prompt(t.Context(), ai.UserText("hello"))(func(event Event, err error) bool {
+			if err != nil {
+				value.err = err
+
+				return false
+			}
+			value.events = append(value.events, event)
+
+			return true
+		})
+		done <- value
+	}()
+
+	<-entered
+	select {
+	case <-done:
+		t.Fatal("prompt completed while the synchronous observer was blocked")
+	default:
+	}
+	close(release)
+
+	value := <-done
+	require.NoError(t, value.err)
+	assert.Contains(t, eventTypes(value.events), EventInteractionCompleted)
+	assert.Equal(t, InteractionSucceeded, runtime.Snapshot().Interaction.Outcome)
+}
+
+func TestRuntimeComposesRawAgentObserversAtHarnessBoundary(t *testing.T) {
+	t.Parallel()
+
+	recorder := agentobservability.NewRecorder()
+	otelObserver, err := agentotel.New(agentotel.Config{})
+	require.NoError(t, err)
+	runtime := openTestRuntimeWithAgentObservers(
+		t,
+		newRuntimeModel(runtimeTextResponse("done")),
+		recorder.Observe,
+		otelObserver.Observe,
+	)
+
+	collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("hello")))
+	metrics := recorder.Metrics()
+	assert.Equal(t, uint64(1), metrics.RunsStarted)
+	assert.Equal(t, uint64(1), metrics.RunsCompleted)
+	assert.Equal(t, InteractionSucceeded, runtime.Snapshot().Interaction.Outcome)
 }
 
 func TestRuntimeApprovalPauseAndDenyContinuation(t *testing.T) {
@@ -305,6 +485,36 @@ func TestRuntimeCloseCancelsAndWaitsForActivePrompt(t *testing.T) {
 	require.NoError(t, runtime.Close(t.Context()))
 }
 
+func TestCleanupStackClosesResourcesInReverseAndJoinsErrors(t *testing.T) {
+	t.Parallel()
+
+	firstErr := errors.New("inspector close failed")
+	secondErr := errors.New("extension close failed")
+	var order []string
+	stack := &cleanupStack{}
+	for _, resource := range []struct {
+		name string
+		err  error
+	}{
+		{name: "tree"},
+		{name: "session"},
+		{name: "inspector", err: firstErr},
+		{name: "mcp"},
+		{name: "extension", err: secondErr},
+	} {
+		stack.add(func(context.Context) error {
+			order = append(order, resource.name)
+
+			return resource.err
+		})
+	}
+
+	err := stack.close(t.Context())
+	require.ErrorIs(t, err, firstErr)
+	require.ErrorIs(t, err, secondErr)
+	assert.Equal(t, []string{"extension", "mcp", "inspector", "session", "tree"}, order)
+}
+
 func TestRuntimeReloadInstallsAtIdleBoundary(t *testing.T) {
 	t.Parallel()
 
@@ -387,6 +597,42 @@ func openTestRuntime(t *testing.T, model ai.LanguageModel) *Runtime {
 	return openTestRuntimeAt(t, t.TempDir(), SessionTarget{}, model)
 }
 
+func openTestRuntimeWithTelemetry(
+	t *testing.T,
+	model ai.LanguageModel,
+	observers ...TelemetryObserver,
+) *Runtime {
+	t.Helper()
+
+	return openTestRuntimeConfigured(
+		t,
+		t.TempDir(),
+		SessionTarget{},
+		model,
+		nil,
+		nil,
+		observers,
+	)
+}
+
+func openTestRuntimeWithAgentObservers(
+	t *testing.T,
+	model ai.LanguageModel,
+	observers ...func(context.Context, agent.Event),
+) *Runtime {
+	t.Helper()
+
+	return openTestRuntimeConfigured(
+		t,
+		t.TempDir(),
+		SessionTarget{},
+		model,
+		nil,
+		observers,
+		nil,
+	)
+}
+
 func openTestRuntimeWithExtensions(
 	t *testing.T,
 	model ai.LanguageModel,
@@ -423,6 +669,20 @@ func openTestRuntimeAtWithExtensions(
 ) *Runtime {
 	t.Helper()
 
+	return openTestRuntimeConfigured(t, base, target, model, extensions, nil, nil)
+}
+
+func openTestRuntimeConfigured(
+	t *testing.T,
+	base string,
+	target SessionTarget,
+	model ai.LanguageModel,
+	extensions []extension.Extension,
+	agentObservers []func(context.Context, agent.Event),
+	telemetry []TelemetryObserver,
+) *Runtime {
+	t.Helper()
+
 	workspacePath := base + "/workspace"
 	require.NoError(t, mkdirPrivate(workspacePath))
 
@@ -437,12 +697,14 @@ func openTestRuntimeAtWithExtensions(
 	cfg.Model.ID = "runtime-test"
 
 	runtime, err := Open(t.Context(), OpenOptions{
-		Workspace:  ws,
-		Config:     cfg,
-		Paths:      layout,
-		Session:    target,
-		Model:      model,
-		Extensions: extensions,
+		Workspace:          ws,
+		Config:             cfg,
+		Paths:              layout,
+		Session:            target,
+		Model:              model,
+		Extensions:         extensions,
+		AgentObservers:     agentObservers,
+		TelemetryObservers: telemetry,
 		Execution: ExecutionOptions{
 			SandboxProbe: func(context.Context, *execution.Executor) error { return nil },
 		},
@@ -530,6 +792,27 @@ func hasDiagnostic(events []Event, code string) bool {
 	}
 
 	return false
+}
+
+func countDiagnostic(events []Event, component, code string) int {
+	count := 0
+	for _, event := range events {
+		diagnostic, ok := event.Payload.(IntegrationDiagnostic)
+		if ok && diagnostic.Component == component && diagnostic.Code == code {
+			count++
+		}
+	}
+
+	return count
+}
+
+func telemetryTypes(events []TelemetryEvent) []EventType {
+	values := make([]EventType, len(events))
+	for index, event := range events {
+		values[index] = event.Type
+	}
+
+	return values
 }
 
 func countRole(messages []ai.Message, role ai.Role) int {

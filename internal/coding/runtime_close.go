@@ -75,11 +75,7 @@ func (r *Runtime) Close(ctx context.Context) error {
 }
 
 func (r *Runtime) closeResources(ctx context.Context, current *interaction) error {
-	emitter := &eventEmitter{
-		runtime: r,
-		yield:   func(Event, error) bool { return true },
-		alive:   true,
-	}
+	emitter := newEventEmitter(ctx, r, func(Event, error) bool { return true }, true)
 
 	errs := make([]error, 0, 8)
 	if current != nil {
@@ -101,23 +97,13 @@ func (r *Runtime) closeResources(ctx context.Context, current *interaction) erro
 		errs = append(errs, err)
 	}
 
-	if err := r.extensions.Shutdown(ctx); err != nil {
-		errs = append(errs, err)
-	}
-
-	if err := r.connections.Close(); err != nil {
-		errs = append(errs, err)
-	}
-
-	if err := r.inspector.Close(); err != nil {
-		errs = append(errs, err)
-	}
-
-	if err := r.handle.Close(); err != nil {
-		errs = append(errs, err)
-	}
-
-	if err := r.tree.Close(); err != nil {
+	resources := &cleanupStack{}
+	resources.add(func(context.Context) error { return r.tree.Close() })
+	resources.add(func(context.Context) error { return r.handle.Close() })
+	resources.add(func(context.Context) error { return r.inspector.Close() })
+	resources.add(func(context.Context) error { return r.connections.Close() })
+	resources.add(r.extensions.Shutdown)
+	if err := resources.close(ctx); err != nil {
 		errs = append(errs, err)
 	}
 
