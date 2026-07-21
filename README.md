@@ -42,8 +42,11 @@ Go building blocks for AI applications. Current packages:
 `cmd/pips` is being built as a local, terminal-first coding agent. Its P0
 execution foundation now includes Workspace-confined file tools, durable Shell
 approval, native OS command isolation, and read-only Git change attribution.
-The interactive Runtime and TUI are the next implementation stages; the
-current command exposes configuration, session inspection, and `doctor`.
+The single-session Runtime now composes durable Harness state, immutable
+Extension/Skill/MCP generations, approval continuation, change attribution,
+typed product events, and optional telemetry. CLI event rendering and the
+single-column TUI are the next implementation stages; the current command
+exposes configuration, session inspection, and `doctor`.
 
 The default `workspace-write` mode never falls back to an unsandboxed command.
 It uses macOS Seatbelt or an externally installed Linux/WSL2 Bubblewrap runtime,
@@ -56,6 +59,30 @@ to validate the selected model credential and the actual local Sandbox. The
 probe also reports process-isolation strength. See
 [Coding execution security](docs/coding-security.md) for the threat model,
 runtime requirements, HOME-read limitation, and container guidance.
+
+Coding observability has two deliberate inputs. Raw `agent.Event` observers
+receive run/turn/tool signals through the Harness boundary; content-free
+`coding.TelemetryEvent` observers receive session, interaction, approval,
+change, and integration signals. The optional Coding OpenTelemetry adapter
+accepts application-owned providers and never creates exporters or shuts down
+providers:
+
+```go
+productOTel, _ := codingotel.New(codingotel.Config{
+    TracerProvider: tracerProvider,
+    MeterProvider:  meterProvider,
+})
+
+runtime, _ := coding.Open(ctx, coding.OpenOptions{
+    // Workspace, Config, Paths, Model/Credentials, and Execution omitted.
+    AgentObservers:     []func(context.Context, agent.Event){recorder.Observe, rawOTel.Observe},
+    TelemetryObservers: []coding.TelemetryObserver{productOTel},
+})
+```
+
+Callbacks are synchronous and isolated per observer. Applications should use
+OTel batch processors for slow export; the Runtime intentionally owns no
+unbounded observability queue.
 
 ## Design highlights
 
