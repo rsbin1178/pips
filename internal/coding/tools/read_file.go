@@ -110,7 +110,10 @@ func (s *service) readFile(ctx context.Context, args readFileArgs) (string, erro
 				available := max(s.limits.OutputBytes-len(prefix)-1, 0)
 
 				short, _ := truncateUTF8(text, available)
-				body.WriteString(prefix + short + "\n")
+
+				body.WriteString(prefix)
+				body.WriteString(short)
+				body.WriteByte('\n')
 
 				returned++
 				nextOffset = lineNumber + 1

@@ -9,6 +9,7 @@ import (
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/ai/openai"
 	"github.com/rsbin/pips/internal/coding/config"
+	"github.com/rsbin/pips/internal/coding/paths"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -420,11 +421,11 @@ func TestLoadRejectsUnsafeFiles(t *testing.T) {
 		root := t.TempDir()
 		outside := t.TempDir()
 		writeFile(t, filepath.Join(outside, "config.toml"), "tool_search = true\n")
-		require.NoError(t, os.Symlink(outside, filepath.Join(root, ".pips")))
+		require.NoError(t, os.Symlink(outside, filepath.Join(root, paths.ProjectRoot())))
 
 		_, err := config.Load(config.LoadOptions{
 			ProjectRoot:    root,
-			ProjectFile:    filepath.Join(root, ".pips", "config.toml"),
+			ProjectFile:    filepath.Join(root, filepath.FromSlash(paths.ProjectConfigFile())),
 			ProjectTrusted: true,
 		})
 		require.Error(t, err)
