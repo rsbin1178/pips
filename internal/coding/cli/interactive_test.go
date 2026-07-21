@@ -92,7 +92,7 @@ func TestInteractiveTrustDecisionDoesNotLoadProjectConfig(t *testing.T) {
 	layout, err := paths.New(userRoot)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(layout.ConfigFile(), []byte(`
-model = "openai/user-model"
+[providers.openai.models."user-model"]
 `), 0o600))
 
 	projectRoot := filepath.Join(workspaceRoot, paths.ProjectRoot())

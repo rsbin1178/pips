@@ -290,7 +290,7 @@ func newControllerFixture(t *testing.T) *controllerFixture {
 		{Ref: config.ModelRef{Provider: ai.ProviderAnthropic, Model: "unavailable"}},
 	}
 	initial := modelcatalog.ResolvedModel{
-		Ref: cfg.Model, API: config.APIResponses,
+		Ref: cfg.Model, Protocol: config.ProtocolOpenAIResponses,
 		Endpoint: modelcatalog.Endpoint{BaseURL: "https://api.openai.com/v1"},
 	}
 

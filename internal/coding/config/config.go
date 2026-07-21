@@ -78,15 +78,16 @@ const (
 	ApprovalNever     ApprovalMode = "never"
 )
 
-// API identifies the provider wire protocol used by a model.
-type API string
+// Protocol identifies the provider adapter and wire surface used by a model.
+type Protocol string
 
-// Supported wire protocols.
+// Supported provider protocols.
 const (
-	APIResponses         API = "responses"
-	APIChatCompletions   API = "chat_completions"
-	APIAnthropicMessages API = "anthropic_messages"
-	APIGenerateContent   API = "generate_content"
+	ProtocolOpenAIAuto            Protocol = "openai/auto"
+	ProtocolOpenAIChatCompletions Protocol = "openai/chat_completions"
+	ProtocolOpenAIResponses       Protocol = "openai/responses"
+	ProtocolAnthropicMessages     Protocol = "anthropic/messages"
+	ProtocolGeminiGenerateContent Protocol = "gemini/generate_content"
 )
 
 // ReasoningLevel is a model-defined, ordered reasoning capability value.
@@ -197,7 +198,7 @@ func (c CompatibilityConfig) Resolve(base openai.Compatibility) openai.Compatibi
 // intentionally absent and are acquired from credential.Store at runtime.
 type ProviderConfig struct {
 	BaseURL         string
-	API             API
+	Protocol        Protocol
 	AllowHTTP       bool
 	AllowPrivateIPs bool
 	Compatibility   CompatibilityConfig
@@ -288,7 +289,7 @@ type VariantConfig struct {
 // ModelConfig contains local metadata and request defaults for one model.
 type ModelConfig struct {
 	Ref                   ModelRef
-	API                   API
+	Protocol              Protocol
 	ContextWindow         int
 	ReasoningLevels       []ReasoningLevel
 	DefaultReasoningLevel *ReasoningLevel
@@ -398,6 +399,13 @@ func (c Config) Source(field Field) (Source, bool) {
 // executable runtime. modelcatalog performs endpoint/protocol resolution.
 func (c Config) ValidateRuntime() error {
 	if c.Model.String() == "" {
+		if len(c.Models) > 1 {
+			return fmt.Errorf(
+				"%w: multiple models are configured; set default = true on one model or select one with PIPS_MODEL/--model",
+				ErrInvalid,
+			)
+		}
+
 		return fmt.Errorf("%w: model is required in provider/model form", ErrInvalid)
 	}
 	if _, err := ParseModelRef(c.Model.String()); err != nil {
@@ -431,14 +439,28 @@ func ParseProvider(value string) (ai.Provider, error) {
 	return ai.Provider(parsed), nil
 }
 
-// ParseAPI parses a supported wire protocol.
-func ParseAPI(value string) (API, error) {
-	api := API(strings.TrimSpace(value))
-	switch api {
-	case APIResponses, APIChatCompletions, APIAnthropicMessages, APIGenerateContent:
-		return api, nil
+// ParseProtocol parses a supported provider protocol.
+func ParseProtocol(value string) (Protocol, error) {
+	protocol := Protocol(strings.TrimSpace(value))
+	switch protocol {
+	case ProtocolOpenAIAuto,
+		ProtocolOpenAIChatCompletions,
+		ProtocolOpenAIResponses,
+		ProtocolAnthropicMessages,
+		ProtocolGeminiGenerateContent:
+		return protocol, nil
 	default:
-		return "", fmt.Errorf("%w: unsupported model api %q", ErrInvalid, value)
+		return "", fmt.Errorf("%w: unsupported model protocol %q", ErrInvalid, value)
+	}
+}
+
+// IsOpenAIProtocol reports whether protocol uses an OpenAI wire surface.
+func IsOpenAIProtocol(protocol Protocol) bool {
+	switch protocol {
+	case ProtocolOpenAIAuto, ProtocolOpenAIChatCompletions, ProtocolOpenAIResponses:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -532,8 +554,8 @@ func validateRegistry(c Config) error {
 		if parsed, err := ParseProvider(string(provider)); err != nil || parsed != provider {
 			return fmt.Errorf("%w: invalid provider definition %q", ErrInvalid, provider)
 		}
-		if definition.API != "" {
-			if _, err := ParseAPI(string(definition.API)); err != nil {
+		if definition.Protocol != "" {
+			if _, err := ParseProtocol(string(definition.Protocol)); err != nil {
 				return err
 			}
 		}
@@ -558,15 +580,15 @@ func validateModel(model ModelConfig) error {
 	if _, err := ParseModelRef(model.Ref.String()); err != nil {
 		return err
 	}
-	if model.API != "" {
-		if _, err := ParseAPI(string(model.API)); err != nil {
+	if model.Protocol != "" {
+		if _, err := ParseProtocol(string(model.Protocol)); err != nil {
 			return err
 		}
 	}
 	if model.ContextWindow < 0 {
 		return fmt.Errorf("%w: model %q context window cannot be negative", ErrInvalid, model.Ref)
 	}
-	if err := validateOptions(model.Options, "model "+model.Ref.String()+" options"); err != nil {
+	if err := validateOptions(model.Options, "model "+model.Ref.String()+" request"); err != nil {
 		return err
 	}
 
@@ -605,7 +627,7 @@ func validateModel(model ModelConfig) error {
 				return fmt.Errorf("%w: model %q variant %q reasoning %q is not supported", ErrInvalid, model.Ref, name, *variant.ReasoningLevel)
 			}
 		}
-		if err := validateOptions(variant.Options, "model "+model.Ref.String()+" variant "+name); err != nil {
+		if err := validateOptions(variant.Options, "model "+model.Ref.String()+" variant "+name+" request"); err != nil {
 			return err
 		}
 	}

@@ -76,10 +76,10 @@ func newConfigShowCommand(dependencies Dependencies, flags *rootFlags) *cobra.Co
 			}
 			if _, err := fmt.Fprintf(
 				output,
-				"resolved.api = %q\nresolved.base_url = %q # origin=%s\n"+
+				"resolved.protocol = %q\nresolved.base_url = %q # origin=%s\n"+
 					"resolved.context_window = %d\n"+
 					"resolved.extra_body = <redacted> # keys=%d bytes=%d\n",
-				resolved.API,
+				resolved.Protocol,
 				resolved.Endpoint.BaseURL,
 				resolved.Endpoint.Origin,
 				resolved.Limits.ContextWindow,
@@ -111,7 +111,7 @@ func newConfigShowCommand(dependencies Dependencies, flags *rootFlags) *cobra.Co
 			for _, option := range typedOptions {
 				if _, err := fmt.Fprintf(
 					output,
-					"resolved.options.%s = %s\n",
+					"resolved.request.%s = %s\n",
 					option.name,
 					option.value,
 				); err != nil {

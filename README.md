@@ -55,7 +55,14 @@ and fails closed when the real capability probe does not pass. Native Windows
 is not supported; use a verified WSL2 environment. `full-access` is an explicit,
 unsandboxed user override.
 
-Configure `model = "openai/model-id"` in `~/.pips/config.toml`, then run
+Configure a model in `~/.pips/config.toml`, for example:
+
+```toml
+[providers.openai.models."model-id"]
+```
+
+A single configured model is selected automatically; with multiple models,
+mark one `default = true` or use `PIPS_MODEL`/`--model`. Then run
 `API_KEY=... go run ./cmd/pips doctor`
 to validate the selected model credential and the actual local Sandbox. The
 probe also reports process-isolation strength. See

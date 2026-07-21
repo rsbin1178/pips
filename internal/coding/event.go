@@ -15,6 +15,7 @@ import (
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding/approval"
 	"github.com/rsbin/pips/internal/coding/changes"
+	"github.com/rsbin/pips/internal/coding/config"
 )
 
 const (
@@ -548,12 +549,13 @@ func validCode(value string) bool {
 }
 
 func validProvider(provider ai.Provider) bool {
-	switch provider {
-	case "", ai.ProviderOpenAI, ai.ProviderAnthropic, ai.ProviderGemini:
+	if provider == "" {
 		return true
-	default:
-		return false
 	}
+
+	parsed, err := config.ParseProvider(string(provider))
+
+	return err == nil && parsed == provider
 }
 
 func validSessionCloseReason(reason SessionCloseReason) bool {
