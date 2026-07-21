@@ -54,7 +54,7 @@ func TestCompletionGoldenDigests(t *testing.T) {
 func TestNewReturnsFreshCommandTrees(t *testing.T) {
 	t.Parallel()
 
-	first, err := execute(t, "--provider", "openai", "version")
+	first, err := execute(t, "--model", "openai/gpt", "version")
 	require.NoError(t, err)
 	second, err := execute(t, "version")
 	require.NoError(t, err)

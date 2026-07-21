@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"iter"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -14,13 +15,14 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/ai/openai"
 	"github.com/rsbin/pips/internal/coding"
 	"github.com/rsbin/pips/internal/coding/approval"
 	"github.com/rsbin/pips/internal/coding/config"
+	"github.com/rsbin/pips/internal/coding/modelcatalog"
 	"github.com/rsbin/pips/internal/coding/session"
 )
+
+const defaultSelectionLabel = "default"
 
 type overlayKind uint8
 
@@ -43,8 +45,8 @@ type overlayState struct {
 	loading     bool
 	sessions    []session.Metadata
 	choices     []approval.Choice
-	model       config.ModelConfig
-	modelDirty  bool
+	models      []modelcatalog.Entry
+	selection   modelcatalog.Selection
 	controlling bool
 	offset      int
 }
@@ -99,7 +101,15 @@ func (m *Model) openOverlay(kind overlayKind) tea.Cmd {
 			return overlayDataMsg{kind: overlaySession, sessions: values, err: err}
 		}
 	case overlayModel:
-		m.overlay.model = m.controller.Model().Config
+		state := m.controller.Model()
+		m.overlay.models = m.controller.Models()
+		m.overlay.selection = state.Selection
+		for index, entry := range m.filteredModels() {
+			if entry.Ref == state.Resolved.Ref {
+				m.overlay.cursor = index
+				break
+			}
+		}
 	case overlayCommand, overlayApproval:
 		m.overlay.cursor = 0
 	case overlayNone, overlayDiff, overlayHelp, overlayStatus:
@@ -268,10 +278,10 @@ func (m *Model) updateSessionOverlay(message tea.KeyPressMsg) (tea.Model, tea.Cm
 			return m, nil
 		}
 
-		return m, m.runControl(operationResume, filtered[m.overlay.cursor].ID, config.ModelConfig{})
+		return m, m.runControl(operationResume, filtered[m.overlay.cursor].ID, modelcatalog.Selection{})
 	case "n":
 		if m.state.Phase == coding.PhaseIdle {
-			return m, m.runControl(operationNew, "", config.ModelConfig{})
+			return m, m.runControl(operationNew, "", modelcatalog.Selection{})
 		}
 	case "backspace":
 		m.overlay.query = trimLastRune(m.overlay.query)
@@ -288,62 +298,70 @@ func (m *Model) updateSessionOverlay(message tea.KeyPressMsg) (tea.Model, tea.Cm
 
 func (m *Model) updateModelOverlay(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := message.String()
+	filtered := m.filteredModels()
 	switch key {
 	case "up":
-		m.overlay.cursor = wrapIndex(m.overlay.cursor-1, 3)
+		m.overlay.cursor = wrapIndex(m.overlay.cursor-1, len(filtered))
 	case keyDown, keyTab:
-		m.overlay.cursor = wrapIndex(m.overlay.cursor+1, 3)
-	case "left":
-		m.cycleModelField(-1)
-	case "right":
-		m.cycleModelField(1)
+		m.overlay.cursor = wrapIndex(m.overlay.cursor+1, len(filtered))
+	case "v":
+		m.cycleVariant(1)
+	case "V":
+		m.cycleVariant(-1)
+	case "r":
+		m.cycleReasoning(1)
+	case "R":
+		m.cycleReasoning(-1)
 	case "ctrl+u":
-		if m.overlay.cursor == 1 {
-			m.overlay.model.ID = ""
-			m.overlay.modelDirty = true
-		}
+		m.overlay.query = ""
+		m.overlay.cursor = 0
 	case "backspace":
-		if m.overlay.cursor == 1 {
-			m.overlay.model.ID = trimLastRune(m.overlay.model.ID)
-			m.overlay.modelDirty = true
-		}
+		m.overlay.query = trimLastRune(m.overlay.query)
+		m.overlay.cursor = 0
 	case keyEnter:
-		return m, m.runControl(operationModel, "", m.overlay.model)
+		if len(filtered) == 0 {
+			return m, nil
+		}
+		m.selectOverlayModel(filtered[m.overlay.cursor])
+
+		return m, m.runControl(operationModel, "", m.overlay.selection)
 	default:
-		if m.overlay.cursor == 1 && message.Key().Text != "" {
-			if !m.overlay.modelDirty {
-				m.overlay.model.ID = ""
-				m.overlay.modelDirty = true
-			}
-			m.overlay.model.ID += message.Key().Text
+		if message.Key().Text != "" {
+			m.overlay.query += message.Key().Text
+			m.overlay.cursor = 0
 		}
 	}
 
 	return m, nil
 }
 
-func (m *Model) cycleModelField(direction int) {
-	switch m.overlay.cursor {
-	case 0:
-		providers := []ai.Provider{
-			ai.ProviderOpenAI,
-			ai.ProviderAnthropic,
-			ai.ProviderGemini,
-		}
-		index := slices.Index(providers, m.overlay.model.Provider)
-		m.overlay.model.Provider = providers[wrapIndex(index+direction, len(providers))]
-		if m.overlay.model.Provider != ai.ProviderOpenAI {
-			m.overlay.model.API = openai.APIAuto
-		}
-	case 2:
-		if m.overlay.model.Provider != ai.ProviderOpenAI {
-			m.overlay.model.API = openai.APIAuto
+func (m *Model) cycleVariant(direction int) {
+	entry, ok := m.overlayModelEntry()
+	if !ok {
+		return
+	}
+	m.selectOverlayModel(entry)
+	variants := append([]string{""}, entry.Variants...)
+	index := slices.Index(variants, m.overlay.selection.Variant)
+	m.overlay.selection.Variant = variants[wrapIndex(index+direction, len(variants))]
+}
 
-			return
-		}
-		apis := []openai.API{openai.APIAuto, openai.APIResponses, openai.APIChatCompletions}
-		index := slices.Index(apis, m.overlay.model.API)
-		m.overlay.model.API = apis[wrapIndex(index+direction, len(apis))]
+func (m *Model) cycleReasoning(direction int) {
+	entry, ok := m.overlayModelEntry()
+	if !ok {
+		return
+	}
+	m.selectOverlayModel(entry)
+	levels := append([]config.ReasoningLevel{""}, entry.ReasoningLevels...)
+	current := config.ReasoningLevel("")
+	if m.overlay.selection.ReasoningOverride != nil {
+		current = *m.overlay.selection.ReasoningOverride
+	}
+	next := levels[wrapIndex(slices.Index(levels, current)+direction, len(levels))]
+	if next == "" {
+		m.overlay.selection.ReasoningOverride = nil
+	} else {
+		m.overlay.selection.ReasoningOverride = new(next)
 	}
 }
 
@@ -383,7 +401,7 @@ func (m *Model) executeCommand(command commandDescriptor) (tea.Model, tea.Cmd) {
 
 	switch command.name {
 	case "new":
-		return m, m.runControl(operationNew, "", config.ModelConfig{})
+		return m, m.runControl(operationNew, "", modelcatalog.Selection{})
 	case "resume":
 		return m, m.openOverlay(overlaySession)
 	case "model":
@@ -391,7 +409,7 @@ func (m *Model) executeCommand(command commandDescriptor) (tea.Model, tea.Cmd) {
 	case "diff":
 		return m, m.openOverlay(overlayDiff)
 	case "reload":
-		return m, m.runControl(operationReload, "", config.ModelConfig{})
+		return m, m.runControl(operationReload, "", modelcatalog.Selection{})
 	case "status":
 		return m, m.openOverlay(overlayStatus)
 	case "help":
@@ -406,7 +424,7 @@ func (m *Model) executeCommand(command commandDescriptor) (tea.Model, tea.Cmd) {
 func (m *Model) runControl(
 	operation controlOperation,
 	sessionID string,
-	selected config.ModelConfig,
+	selected modelcatalog.Selection,
 ) tea.Cmd {
 	m.overlay.loading = true
 	m.overlay.controlling = true
@@ -426,6 +444,33 @@ func (m *Model) runControl(
 		}
 
 		return controlResultMsg{operation: operation, err: err}
+	}
+}
+
+func (m *Model) filteredModels() []modelcatalog.Entry {
+	query := strings.ToLower(strings.TrimSpace(m.overlay.query))
+	filtered := make([]modelcatalog.Entry, 0, len(m.overlay.models))
+	for _, entry := range m.overlay.models {
+		if query == "" || strings.Contains(strings.ToLower(entry.Ref.String()), query) {
+			filtered = append(filtered, entry)
+		}
+	}
+
+	return filtered
+}
+
+func (m *Model) overlayModelEntry() (modelcatalog.Entry, bool) {
+	filtered := m.filteredModels()
+	if len(filtered) == 0 {
+		return modelcatalog.Entry{}, false
+	}
+
+	return filtered[m.overlay.cursor], true
+}
+
+func (m *Model) selectOverlayModel(entry modelcatalog.Entry) {
+	if m.overlay.selection.Ref != entry.Ref {
+		m.overlay.selection = modelcatalog.Selection{Ref: entry.Ref}
 	}
 }
 
@@ -508,13 +553,22 @@ func (m *Model) overlayContent() string {
 		modelState := m.controller.Model()
 		configState := m.controller.Config()
 		content = fmt.Sprintf(
-			"Status\n\nWorkspace: %s\nSession: %s\nModel: %s/%s\n"+
+			"Status\n\nWorkspace: %s\nSession: %s\nModel: %s\n"+
+				"Variant: %s\nReasoning: %s\nAPI: %s\nEndpoint: %s (%s)\n"+
+				"Context: %s\nModel output: %s\nRequest output: %s\n"+
 				"Process override: %t\nPhase: %s\nSandbox: %s\nApproval: %s\n"+
 				"Tool search: %t\nPending approval: %s\nDetached: %t",
 			m.options.Workspace,
 			m.state.SessionID,
-			modelState.Config.Provider,
-			modelState.Config.ID,
+			modelState.Resolved.Ref,
+			valueOrDefault(modelState.Resolved.Variant),
+			reasoningOrDefault(modelState.Resolved.ReasoningLevel),
+			modelState.Resolved.API,
+			modelState.Resolved.Endpoint.BaseURL,
+			modelState.Resolved.Endpoint.Origin,
+			knownLimit(modelState.Resolved.Limits.ContextWindow),
+			knownLimit(modelState.Resolved.Limits.MaxOutputTokens),
+			optionalInt(modelState.Resolved.Options.MaxOutputTokens),
 			modelState.Overridden,
 			m.state.Phase,
 			configState.Sandbox,
@@ -623,21 +677,66 @@ func (m *Model) sessionOverlayContent() string {
 }
 
 func (m *Model) modelOverlayContent() string {
-	values := []string{
-		"Provider: " + string(m.overlay.model.Provider),
-		"Model ID: " + m.overlay.model.ID,
-		"OpenAI API: " + string(m.overlay.model.API),
-	}
-	for index := range values {
+	lines := []string{"Switch model (current process only)", "", "Filter: " + m.overlay.query, ""}
+	values := m.filteredModels()
+	for index, entry := range values {
 		prefix := "  "
 		if index == m.overlay.cursor {
 			prefix = "> "
 		}
-		values[index] = prefix + values[index]
+		lines = append(lines, prefix+entry.Ref.String())
+	}
+	if len(values) == 0 {
+		lines = append(lines, "No matching models.")
+	} else if entry, ok := m.overlayModelEntry(); ok {
+		variant := defaultSelectionLabel
+		reasoning := defaultSelectionLabel
+		if m.overlay.selection.Ref == entry.Ref {
+			variant = valueOrDefault(m.overlay.selection.Variant)
+			reasoning = reasoningOrDefault(m.overlay.selection.ReasoningOverride)
+		}
+		lines = append(
+			lines,
+			"",
+			"Variant: "+variant,
+			"Reasoning: "+reasoning,
+		)
+	}
+	lines = append(lines, "", "↑/↓ model · type search · v/V variant · r/R reasoning · Enter apply")
+
+	return strings.Join(lines, "\n")
+}
+
+func valueOrDefault(value string) string {
+	if value == "" {
+		return defaultSelectionLabel
 	}
 
-	return "Switch model (current process only)\n\n" + strings.Join(values, "\n") +
-		"\n\n↑/↓ field · ←/→ choice · type model ID · Ctrl+U clear · Enter apply"
+	return value
+}
+
+func reasoningOrDefault(value *config.ReasoningLevel) string {
+	if value == nil || *value == "" {
+		return defaultSelectionLabel
+	}
+
+	return string(*value)
+}
+
+func knownLimit(value int) string {
+	if value == 0 {
+		return "unknown"
+	}
+
+	return strconv.Itoa(value)
+}
+
+func optionalInt(value *int) string {
+	if value == nil {
+		return "provider default"
+	}
+
+	return strconv.Itoa(*value)
 }
 
 func (m *Model) commandOverlayContent() string {

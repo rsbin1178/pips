@@ -18,6 +18,7 @@ import (
 	"github.com/rsbin/pips/internal/coding/config"
 	"github.com/rsbin/pips/internal/coding/credential"
 	"github.com/rsbin/pips/internal/coding/model"
+	"github.com/rsbin/pips/internal/coding/modelcatalog"
 	"github.com/rsbin/pips/internal/coding/session"
 )
 
@@ -36,7 +37,8 @@ var (
 
 // ModelState describes the model effective for the current process.
 type ModelState struct {
-	Config     config.ModelConfig
+	Selection  modelcatalog.Selection
+	Resolved   modelcatalog.ResolvedModel
 	Overridden bool
 }
 
@@ -56,7 +58,7 @@ type runtimeOpener func(context.Context, coding.OpenOptions) (runtimeInstance, e
 
 type modelFactory func(
 	context.Context,
-	config.ModelConfig,
+	modelcatalog.ResolvedModel,
 	credential.Store,
 ) (ai.LanguageModel, error)
 
@@ -73,14 +75,18 @@ type dependencies struct {
 type Controller struct {
 	mu sync.Mutex
 
-	base       coding.OpenOptions
-	effective  config.Config
-	model      ai.LanguageModel
-	runtime    runtimeInstance
-	sessionID  string
-	lastState  coding.State
-	overridden bool
-	active     int
+	base         coding.OpenOptions
+	effective    config.Config
+	catalog      modelcatalog.Catalog
+	selection    modelcatalog.Selection
+	resolved     modelcatalog.ResolvedModel
+	baseResolved modelcatalog.ResolvedModel
+	model        ai.LanguageModel
+	runtime      runtimeInstance
+	sessionID    string
+	lastState    coding.State
+	overridden   bool
+	active       int
 
 	replacing   bool
 	replaceDone chan struct{}
@@ -95,6 +101,8 @@ type Controller struct {
 type replacement struct {
 	runtime    runtimeInstance
 	config     config.Config
+	selection  modelcatalog.Selection
+	resolved   modelcatalog.ResolvedModel
 	model      ai.LanguageModel
 	sessionID  string
 	state      coding.State
@@ -120,33 +128,47 @@ func newController(
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	catalog, err := modelcatalog.New(options.Config)
+	if err != nil {
+		return nil, err
+	}
+	selection := modelcatalog.SelectionFromConfig(options.Config)
+	resolved, err := catalog.Resolve(selection)
+	if err != nil {
+		return nil, err
+	}
 
-	boundModel, err := prepareModel(ctx, options, deps.newModel)
+	boundModel, err := prepareModel(ctx, options, resolved, deps.newModel)
 	if err != nil {
 		return nil, err
 	}
 
 	base := cloneOpenOptions(options)
 	base.Model = nil
+	base.Resolved = modelcatalog.ResolvedModel{}
 
 	opened, state, err := openRuntime(
 		ctx,
 		deps.openRuntime,
-		openOptions(base, options.Config, boundModel, options.Session.ID),
+		openOptions(base, options.Config, resolved, boundModel, options.Session.ID),
 	)
 	if err != nil {
 		return nil, err
 	}
 
 	return &Controller{
-		base:      base,
-		effective: options.Config,
-		model:     boundModel,
-		runtime:   opened,
-		sessionID: state.SessionID,
-		lastState: state,
-		closeDone: make(chan struct{}),
-		deps:      deps,
+		base:         base,
+		effective:    options.Config.Clone(),
+		catalog:      catalog,
+		selection:    selection,
+		resolved:     resolved.Clone(),
+		baseResolved: resolved.Clone(),
+		model:        boundModel,
+		runtime:      opened,
+		sessionID:    state.SessionID,
+		lastState:    state,
+		closeDone:    make(chan struct{}),
+		deps:         deps,
 	}, nil
 }
 
@@ -246,7 +268,29 @@ func (c *Controller) Model() ModelState {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	return ModelState{Config: c.effective.Model, Overridden: c.overridden}
+	return ModelState{
+		Selection: modelcatalog.Selection{
+			Ref: c.selection.Ref, Variant: c.selection.Variant,
+			ReasoningOverride: cloneReasoning(c.selection.ReasoningOverride),
+		},
+		Resolved: c.resolved.Clone(), Overridden: c.overridden,
+	}
+}
+
+// Models returns the immutable local catalog entries available to the TUI.
+func (c *Controller) Models() []modelcatalog.Entry {
+	if c == nil {
+		return nil
+	}
+
+	c.mu.Lock()
+	catalog := c.catalog
+	c.mu.Unlock()
+	if catalog == nil {
+		return nil
+	}
+
+	return catalog.List()
 }
 
 // Config returns the effective process-local configuration. The value does
@@ -259,7 +303,7 @@ func (c *Controller) Config() config.Config {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	return c.effective
+	return c.effective.Clone()
 }
 
 // Detached reports whether replacement and rollback both failed.
@@ -306,7 +350,7 @@ func (c *Controller) ListSessions(ctx context.Context) ([]session.Metadata, erro
 
 // NewSession replaces the current Runtime with a new writable Session.
 func (c *Controller) NewSession(ctx context.Context) error {
-	return c.replace(ctx, "", config.ModelConfig{}, false)
+	return c.replace(ctx, "", modelcatalog.Selection{}, false)
 }
 
 // ResumeSession replaces the current Runtime with an existing Session.
@@ -315,12 +359,12 @@ func (c *Controller) ResumeSession(ctx context.Context, id string) error {
 		return fmt.Errorf("%w: %w", ErrInvalid, err)
 	}
 
-	return c.replace(ctx, id, config.ModelConfig{}, false)
+	return c.replace(ctx, id, modelcatalog.Selection{}, false)
 }
 
 // SwitchModel replaces the current Runtime using a process-local model
 // override. It does not modify Session history or configuration files.
-func (c *Controller) SwitchModel(ctx context.Context, selected config.ModelConfig) error {
+func (c *Controller) SwitchModel(ctx context.Context, selected modelcatalog.Selection) error {
 	return c.replace(ctx, "", selected, true)
 }
 
@@ -455,7 +499,7 @@ func (c *Controller) release() {
 func (c *Controller) replace(
 	ctx context.Context,
 	sessionID string,
-	selected config.ModelConfig,
+	selected modelcatalog.Selection,
 	isModelSwitch bool,
 ) error {
 	current, err := c.beginReplacement()
@@ -469,37 +513,46 @@ func (c *Controller) replace(
 	}
 
 	targetConfig := current.config
+	targetSelection := current.selection
+	targetResolved := current.resolved
 	targetModel := current.model
 	targetOverride := current.overridden
 	if isModelSwitch {
-		targetConfig.Model = selected
-		if err := targetConfig.ValidateRuntime(); err != nil {
+		targetResolved, err = c.catalog.Resolve(selected)
+		if err != nil {
 			c.finishReplacement(current)
 
 			return fmt.Errorf("%w: %w", ErrInvalid, err)
 		}
-
-		if selected == current.config.Model {
+		targetSelection = modelcatalog.Selection{
+			Ref: selected.Ref, Variant: selected.Variant,
+			ReasoningOverride: cloneReasoning(selected.ReasoningOverride),
+		}
+		if targetResolved.Equal(current.resolved) {
 			c.finishReplacement(current)
 
 			return nil
 		}
 
-		targetModel, err = c.deps.newModel(ctx, selected, c.base.Credentials)
+		targetConfig = targetConfig.Clone()
+		targetConfig.Model = targetResolved.Ref
+		targetConfig.Variant = targetResolved.Variant
+		targetConfig.Reasoning = cloneReasoning(targetResolved.ReasoningLevel)
+		targetModel, err = c.deps.newModel(ctx, targetResolved, c.base.Credentials)
 		if err != nil {
 			c.finishReplacement(current)
 
 			return err
 		}
-		if err := validateModel(targetModel, selected); err != nil {
+		if err := validateModel(targetModel, targetResolved); err != nil {
 			c.finishReplacement(current)
 
 			return err
 		}
-		targetOverride = selected != c.base.Config.Model
+		targetOverride = !targetResolved.Equal(c.baseResolved)
 	}
 
-	if targetID == current.sessionID && targetConfig.Model == current.config.Model {
+	if targetID == current.sessionID && targetResolved.Equal(current.resolved) {
 		c.finishReplacement(current)
 
 		return nil
@@ -512,7 +565,7 @@ func (c *Controller) replace(
 	target, state, err := openRuntime(
 		ctx,
 		c.deps.openRuntime,
-		openOptions(c.base, targetConfig, targetModel, targetID),
+		openOptions(c.base, targetConfig, targetResolved, targetModel, targetID),
 	)
 	if err != nil {
 		return c.rollback(ctx, current, err)
@@ -521,6 +574,8 @@ func (c *Controller) replace(
 	c.finishReplacement(replacement{
 		runtime:    target,
 		config:     targetConfig,
+		selection:  targetSelection,
+		resolved:   targetResolved,
 		model:      targetModel,
 		sessionID:  state.SessionID,
 		state:      state,
@@ -551,8 +606,13 @@ func (c *Controller) beginReplacement() (replacement, error) {
 	c.replacing = true
 	c.replaceDone = make(chan struct{})
 	current := replacement{
-		runtime:    c.runtime,
-		config:     c.effective,
+		runtime: c.runtime,
+		config:  c.effective.Clone(),
+		selection: modelcatalog.Selection{
+			Ref: c.selection.Ref, Variant: c.selection.Variant,
+			ReasoningOverride: cloneReasoning(c.selection.ReasoningOverride),
+		},
+		resolved:   c.resolved.Clone(),
 		model:      c.model,
 		sessionID:  c.sessionID,
 		overridden: c.overridden,
@@ -580,7 +640,7 @@ func (c *Controller) rollback(
 	restored, state, err := openRuntime(
 		restoreCtx,
 		c.deps.openRuntime,
-		openOptions(c.base, previous.config, previous.model, previous.sessionID),
+		openOptions(c.base, previous.config, previous.resolved, previous.model, previous.sessionID),
 	)
 	if err != nil {
 		previous.runtime = nil
@@ -601,6 +661,8 @@ func (c *Controller) finishReplacement(next replacement) {
 	c.mu.Lock()
 	c.runtime = next.runtime
 	c.effective = next.config
+	c.selection = next.selection
+	c.resolved = next.resolved.Clone()
 	c.model = next.model
 	c.sessionID = next.sessionID
 	c.lastState = next.state.Clone()
@@ -617,33 +679,34 @@ func (c *Controller) finishReplacement(next replacement) {
 func prepareModel(
 	ctx context.Context,
 	options coding.OpenOptions,
+	resolved modelcatalog.ResolvedModel,
 	factory modelFactory,
 ) (ai.LanguageModel, error) {
 	if options.Model == nil {
-		prepared, err := factory(ctx, options.Config.Model, options.Credentials)
+		prepared, err := factory(ctx, resolved, options.Credentials)
 		if err != nil {
 			return nil, err
 		}
 
-		if err := validateModel(prepared, options.Config.Model); err != nil {
+		if err := validateModel(prepared, resolved); err != nil {
 			return nil, err
 		}
 
 		return prepared, nil
 	}
 
-	if err := validateModel(options.Model, options.Config.Model); err != nil {
+	if err := validateModel(options.Model, resolved); err != nil {
 		return nil, err
 	}
 
 	return options.Model, nil
 }
 
-func validateModel(bound ai.LanguageModel, selected config.ModelConfig) error {
+func validateModel(bound ai.LanguageModel, selected modelcatalog.ResolvedModel) error {
 	if bound == nil {
 		return fmt.Errorf("%w: model factory returned nil", ErrInvalid)
 	}
-	if bound.Provider() != selected.Provider || bound.ModelID() != selected.ID {
+	if bound.Provider() != selected.Ref.Provider || bound.ModelID() != selected.Ref.Model {
 		return fmt.Errorf("%w: model does not match configuration", ErrInvalid)
 	}
 
@@ -676,8 +739,8 @@ func openRuntime(
 
 	state := runtime.Snapshot()
 	if !state.SessionOpen || state.SessionID == "" ||
-		state.Provider != options.Config.Model.Provider ||
-		state.ModelID != options.Config.Model.ID {
+		state.Provider != options.Resolved.Ref.Provider ||
+		state.ModelID != options.Resolved.Ref.Model {
 		closeErr := closeRuntimeBounded(ctx, runtime)
 
 		return nil, coding.State{}, errors.Join(
@@ -692,11 +755,13 @@ func openRuntime(
 func openOptions(
 	base coding.OpenOptions,
 	effective config.Config,
+	resolved modelcatalog.ResolvedModel,
 	boundModel ai.LanguageModel,
 	sessionID string,
 ) coding.OpenOptions {
 	options := cloneOpenOptions(base)
 	options.Config = effective
+	options.Resolved = resolved.Clone()
 	options.Model = boundModel
 	options.Session = coding.SessionTarget{ID: sessionID}
 
@@ -704,11 +769,23 @@ func openOptions(
 }
 
 func cloneOpenOptions(options coding.OpenOptions) coding.OpenOptions {
+	options.Config = options.Config.Clone()
+	options.Resolved = options.Resolved.Clone()
 	options.Extensions = slices.Clone(options.Extensions)
 	options.AgentObservers = slices.Clone(options.AgentObservers)
 	options.TelemetryObservers = slices.Clone(options.TelemetryObservers)
 
 	return options
+}
+
+func cloneReasoning(
+	value *config.ReasoningLevel,
+) *config.ReasoningLevel {
+	if value == nil {
+		return nil
+	}
+
+	return new(*value)
 }
 
 func closeRuntimeBounded(ctx context.Context, runtime runtimeInstance) error {

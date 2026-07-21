@@ -24,7 +24,8 @@ func newDoctorCommand(dependencies Dependencies, flags *rootFlags) *cobra.Comman
 				return err
 			}
 
-			if err := state.config.Config.ValidateRuntime(); err != nil {
+			_, resolved, err := resolveConfiguredModel(state.config.Config)
+			if err != nil {
 				return err
 			}
 
@@ -33,7 +34,7 @@ func newDoctorCommand(dependencies Dependencies, flags *rootFlags) *cobra.Comman
 				return err
 			}
 
-			if _, err := store.Get(cmd.Context(), state.config.Config.Model.Provider); err != nil {
+			if _, err := store.Get(cmd.Context(), resolved.Ref.Provider); err != nil {
 				return err
 			}
 
@@ -44,10 +45,10 @@ func newDoctorCommand(dependencies Dependencies, flags *rootFlags) *cobra.Comman
 
 			_, err = fmt.Fprintf(
 				cmd.OutOrStdout(),
-				"workspace ok %q\nproject_config %s %q\nconfiguration ok\ncredential ok %s\n%s",
+				"workspace ok %q\nconfig_file %s %q\nconfiguration ok\ncredential ok %s\n%s",
 				state.workspace.workspace.Root(),
-				state.config.ProjectFile.State,
-				state.config.ProjectFile.Path,
+				state.config.ConfigFile.State,
+				state.config.ConfigFile.Path,
 				credential.APIKeyEnv,
 				sandboxStatus,
 			)

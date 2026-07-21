@@ -18,46 +18,50 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestConfigShowResolvesLayersAndChangedFlags(t *testing.T) {
+func TestConfigShowResolvesSelectedFileAndChangedFlags(t *testing.T) {
 	t.Parallel()
 
 	fixture := newCLIFixture(t)
 	writeCLIFile(t, fixture.layout.ConfigFile(), `
 tool_search = true
-[model]
-provider = "openai"
-id = "user-model"
-api = "responses"
+model = "openai/user-model"
+
+[[models]]
+id = "openai/env-model"
+reasoning_levels = ["low", "high"]
+
+[models.options]
+temperature = 0.25
+logprobs = true
 `)
 	projectFile := filepath.Join(
 		fixture.workspaceDir,
-		filepath.FromSlash(paths.ProjectConfigFile()),
+		filepath.FromSlash(paths.ProjectRoot()),
+		"config.toml",
 	)
 	writeCLIFile(t, projectFile, `
 tool_search = true
-[model]
-provider = "anthropic"
-id = "project-model"
-api = "auto"
+model = "anthropic/project-model"
 `)
 
 	dependencies := fixture.dependencies(map[string]string{
-		config.ModelEnv:    "env-model",
-		config.ModelAPIEnv: "responses",
+		config.ModelEnv: "openai/env-model",
 	})
 	output, err := executeWithDependencies(
 		t,
 		dependencies,
 		"config",
 		"show",
-		"--model-api=chat_completions",
+		"--reasoning=high",
 		"--tool-search=false",
 	)
 	require.NoError(t, err)
-	assert.Contains(t, output, "state=untrusted")
-	assert.Contains(t, output, `model.provider = "openai" # source=user_file detail="`)
-	assert.Contains(t, output, `model.id = "env-model" # source=environment detail="PIPS_MODEL"`)
-	assert.Contains(t, output, `model.api = "chat_completions" # source=flag detail="--model-api"`)
+	assert.Contains(t, output, `config_file = "`+fixture.layout.ConfigFile()+`" # state=loaded`)
+	assert.Contains(t, output, `model = "openai/env-model" # source=environment detail="PIPS_MODEL"`)
+	assert.Contains(t, output, `reasoning = "high" # source=flag detail="--reasoning"`)
+	assert.Contains(t, output, `resolved.api = "responses"`)
+	assert.Contains(t, output, `resolved.options.temperature = 0.25`)
+	assert.Contains(t, output, `resolved.options.logprobs = true`)
 	assert.Contains(t, output, `tool_search = false # source=flag detail="--tool-search"`)
 	assert.NotContains(t, output, "project-model")
 
@@ -67,10 +71,10 @@ api = "auto"
 
 	output, err = executeWithDependencies(t, dependencies, "config", "show")
 	require.NoError(t, err)
-	assert.Contains(t, output, "state=loaded")
-	assert.Contains(t, output, `model.provider = "anthropic" # source=project_file detail="`)
-	assert.Contains(t, output, `model.api = "responses" # source=environment detail="PIPS_MODEL_API"`)
-	assert.Contains(t, output, `tool_search = true # source=project_file detail="`)
+	assert.Contains(t, output, `model = "openai/env-model" # source=environment detail="PIPS_MODEL"`)
+	assert.Contains(t, output, `resolved.api = "responses"`)
+	assert.Contains(t, output, `tool_search = true # source=config_file detail="`)
+	assert.NotContains(t, output, "project-model")
 }
 
 func TestConfigPathDoesNotDecodeFiles(t *testing.T) {
@@ -89,7 +93,7 @@ func TestConfigPathDoesNotDecodeFiles(t *testing.T) {
 	)
 	require.NoError(t, err)
 	assert.Contains(t, output, `workspace = "`+opened.Root()+`"`)
-	assert.Contains(t, output, `user_file = "`+fixture.layout.ConfigFile()+`"`)
+	assert.Contains(t, output, `config_file = "`+fixture.layout.ConfigFile()+`"`)
 	assert.Contains(t, output, "project_trusted = false")
 }
 
@@ -111,27 +115,32 @@ func TestConfigValidateRequiresRuntimeModel(t *testing.T) {
 		fixture.dependencies(nil),
 		"config",
 		"validate",
-		"--provider",
-		"gemini",
 		"--model",
-		"gemini-test",
+		"gemini/gemini-test",
 	)
 	require.NoError(t, err)
 	assert.Equal(t, "configuration valid\n", output)
 
-	_, err = executeWithDependencies(
-		t,
-		fixture.dependencies(nil),
-		"config",
-		"validate",
-		"--provider",
-		"gemini",
-		"--model",
-		"gemini-test",
-		"--model-api",
-		"responses",
-	)
-	require.ErrorIs(t, err, config.ErrInvalid)
+	for _, legacy := range []struct {
+		name  string
+		value string
+	}{
+		{name: "provider", value: "gemini"},
+		{name: "model-api", value: "responses"},
+	} {
+		_, err = executeWithDependencies(
+			t,
+			fixture.dependencies(nil),
+			"config",
+			"validate",
+			"--"+legacy.name,
+			legacy.value,
+			"--model",
+			"gemini/gemini-test",
+		)
+		require.ErrorIs(t, err, config.ErrMigration)
+		require.ErrorContains(t, err, "--"+legacy.name+" was removed")
+	}
 }
 
 func TestConfigCustomPathIsWorkingDirectoryRelative(t *testing.T) {
@@ -139,7 +148,7 @@ func TestConfigCustomPathIsWorkingDirectoryRelative(t *testing.T) {
 
 	fixture := newCLIFixture(t)
 	custom := filepath.Join(fixture.workspaceDir, "custom.toml")
-	writeCLIFile(t, custom, "tool_search = true\n")
+	writeCLIFile(t, custom, "model = \"openai/custom\"\ntool_search = true\n")
 
 	output, err := executeWithDependencies(
 		t,
@@ -150,7 +159,7 @@ func TestConfigCustomPathIsWorkingDirectoryRelative(t *testing.T) {
 		"show",
 	)
 	require.NoError(t, err)
-	assert.Contains(t, output, `user_file = "`+custom+`" # state=loaded`)
+	assert.Contains(t, output, `config_file = "`+custom+`" # state=loaded`)
 }
 
 func TestDoctorUsesOnlyProviderNeutralAPIKey(t *testing.T) {
@@ -158,9 +167,7 @@ func TestDoctorUsesOnlyProviderNeutralAPIKey(t *testing.T) {
 
 	fixture := newCLIFixture(t)
 	writeCLIFile(t, fixture.layout.ConfigFile(), `
-[model]
-provider = "anthropic"
-id = "claude-test"
+model = "anthropic/claude-test"
 `)
 
 	const secret = "doctor-secret"
@@ -190,9 +197,7 @@ func TestDoctorChecksSandboxAndWarnsForFullAccess(t *testing.T) {
 	fixture := newCLIFixture(t)
 	writeCLIFile(t, fixture.layout.ConfigFile(), `
 sandbox = "workspace-write"
-[model]
-provider = "openai"
-id = "test-model"
+model = "openai/test-model"
 `)
 
 	dependencies := fixture.dependencies(map[string]string{credential.APIKeyEnv: "secret"})
@@ -219,14 +224,12 @@ id = "test-model"
 
 	writeCLIFile(t, fixture.layout.ConfigFile(), `
 sandbox = "full-access"
-[model]
-provider = "openai"
-id = "test-model"
+model = "openai/test-model"
 `)
 	output, err = executeWithDependencies(t, dependencies, "doctor")
 	require.NoError(t, err)
 	assert.Equal(t, 1, probeCalls)
-	assert.Contains(t, output, "sandbox warning mode=full-access isolation=none source=user_file")
+	assert.Contains(t, output, "sandbox warning mode=full-access isolation=none source=config_file")
 }
 
 func TestDoctorFailsWhenNativeSandboxIsUnavailable(t *testing.T) {
@@ -234,9 +237,7 @@ func TestDoctorFailsWhenNativeSandboxIsUnavailable(t *testing.T) {
 
 	fixture := newCLIFixture(t)
 	writeCLIFile(t, fixture.layout.ConfigFile(), `
-[model]
-provider = "openai"
-id = "test-model"
+model = "openai/test-model"
 `)
 
 	dependencies := fixture.dependencies(map[string]string{credential.APIKeyEnv: "secret"})
@@ -299,8 +300,8 @@ func TestVersionDoesNotLoadInvalidConfiguration(t *testing.T) {
 	output, err := executeWithDependencies(
 		t,
 		fixture.dependencies(nil),
-		"--provider",
-		"not-a-provider",
+		"--model",
+		"not-canonical",
 		"version",
 	)
 	require.NoError(t, err)

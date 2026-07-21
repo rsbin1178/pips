@@ -72,7 +72,7 @@ func openScriptedController(t *testing.T) *runtimecontrol.Controller {
 
 	cfg := config.Defaults()
 	cfg.Model.Provider = ai.ProviderOpenAI
-	cfg.Model.ID = "tui-scripted"
+	cfg.Model.Model = "tui-scripted"
 
 	script := &tuiScriptedModel{responses: []*ai.Response{
 		{

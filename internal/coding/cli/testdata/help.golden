@@ -17,11 +17,11 @@ Flags:
       --approval string    approval mode
       --config string      user configuration file
   -h, --help               help for pips
-      --model string       model ID
-      --model-api string   OpenAI API surface
-      --provider string    model provider
+      --model string       model in provider/model form
+      --reasoning string   model reasoning level
       --sandbox string     sandbox mode
       --tool-search        enable deferred tool search
+      --variant string     named model request preset
       --workspace string   workspace root (default ".")
 
 Use "pips [command] --help" for more information about a command.

@@ -217,8 +217,7 @@ func TestExecCommandAssemblesOptionsAndTrustsWorkspace(t *testing.T) {
 
 	lookup := func(name string) (string, bool) {
 		values := map[string]string{
-			config.ProviderEnv: "openai",
-			config.ModelEnv:    "test-model",
+			config.ModelEnv: "openai/test-model",
 		}
 		value, ok := values[name]
 
@@ -252,7 +251,7 @@ func TestExecCommandAssemblesOptionsAndTrustsWorkspace(t *testing.T) {
 	assert.True(t, opened.Trusted)
 	assert.Equal(t, layout.Root(), opened.Paths.Root())
 	assert.Equal(t, ai.ProviderOpenAI, opened.Config.Model.Provider)
-	assert.Equal(t, "test-model", opened.Config.Model.ID)
+	assert.Equal(t, "test-model", opened.Config.Model.Model)
 	assert.Equal(t, config.SandboxWorkspaceWrite, opened.Config.Sandbox)
 	assert.Equal(t, config.ApprovalOnRequest, opened.Config.Approval)
 	assert.NotNil(t, opened.Credentials)
@@ -275,7 +274,7 @@ func TestExecCommandAssemblesOptionsAndTrustsWorkspace(t *testing.T) {
 	assert.NotContains(t, secondStderr.String(), "workspace trusted")
 }
 
-func TestExecTrustEnablesProjectConfigForCurrentRun(t *testing.T) {
+func TestExecTrustDoesNotLoadProjectConfigForCurrentRun(t *testing.T) {
 	t.Parallel()
 
 	base := t.TempDir()
@@ -289,6 +288,12 @@ func TestExecTrustEnablesProjectConfigForCurrentRun(t *testing.T) {
 
 	layout, err := paths.New(base + "/home")
 	require.NoError(t, err)
+	require.NoError(t, mkdirAllPrivate(layout.Root()))
+	require.NoError(t, os.WriteFile(
+		layout.ConfigFile(),
+		[]byte("model = \"openai/user-model\"\n"),
+		0o600,
+	))
 
 	dependencies := Dependencies{
 		Paths:      layout,
@@ -314,8 +319,8 @@ func TestExecTrustEnablesProjectConfigForCurrentRun(t *testing.T) {
 
 	require.NoError(t, command.ExecuteContext(t.Context()))
 	assert.True(t, opened.Trusted)
-	assert.Equal(t, "project-model", opened.Config.Model.ID)
-	assert.Equal(t, config.SourceProjectFile, sourceKind(opened.Config, config.FieldModelID))
+	assert.Equal(t, "user-model", opened.Config.Model.Model)
+	assert.Equal(t, config.SourceConfigFile, sourceKind(opened.Config, config.FieldModel))
 }
 
 func TestExecInvalidInputDoesNotTrustOrOpen(t *testing.T) {
@@ -368,7 +373,7 @@ func TestExecRunnerUsesRealCodingRuntime(t *testing.T) {
 
 			cfg := config.Defaults()
 			cfg.Model.Provider = ai.ProviderOpenAI
-			cfg.Model.ID = "cli-integration"
+			cfg.Model.Model = "cli-integration"
 
 			runtime, err := coding.Open(t.Context(), coding.OpenOptions{
 				Workspace: ws,

@@ -16,7 +16,9 @@ import (
 	"github.com/rsbin/pips/internal/coding/config"
 	"github.com/rsbin/pips/internal/coding/credential"
 	"github.com/rsbin/pips/internal/coding/execution"
+	"github.com/rsbin/pips/internal/coding/generation"
 	"github.com/rsbin/pips/internal/coding/model"
+	"github.com/rsbin/pips/internal/coding/modelcatalog"
 	"github.com/rsbin/pips/internal/coding/paths"
 	"github.com/rsbin/pips/internal/coding/session"
 	"github.com/rsbin/pips/internal/coding/workspace"
@@ -162,8 +164,11 @@ func TestExitCode(t *testing.T) {
 		{name: "usage", err: fmt.Errorf("outer: %w", ErrUsage), want: ExitUsage},
 		{name: "prompt usage", err: coding.ErrInvalidPrompt, want: ExitUsage},
 		{name: "config usage", err: config.ErrInvalid, want: ExitUsage},
+		{name: "config migration", err: config.ErrMigration, want: ExitUsage},
 		{name: "credential usage", err: credential.ErrNotFound, want: ExitUsage},
+		{name: "generation usage", err: generation.ErrInvalid, want: ExitUsage},
 		{name: "model usage", err: model.ErrInvalid, want: ExitUsage},
+		{name: "catalog usage", err: modelcatalog.ErrInvalid, want: ExitUsage},
 		{name: "paths usage", err: paths.ErrInvalid, want: ExitUsage},
 		{name: "session usage", err: session.ErrInvalid, want: ExitUsage},
 		{name: "workspace usage", err: workspace.ErrInvalid, want: ExitUsage},
