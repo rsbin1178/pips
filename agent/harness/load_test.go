@@ -155,7 +155,8 @@ func TestWithSkillsFSReachesSystemPrompt(t *testing.T) {
 
 	system := model.Requests()[0].System
 	assert.Contains(t, system, "<name>review</name>")
-	assert.Contains(t, system, "<location>review/SKILL.md</location>")
+	assert.Contains(t, system, `Use the "skill" tool`)
+	assert.NotContains(t, system, "<location>")
 }
 
 func TestWithSkillsDirLoadFailure(t *testing.T) {

@@ -19,8 +19,11 @@ func TestNew(t *testing.T) {
 
 	assert.Equal(t, base, layout.Root())
 	assert.Equal(t, filepath.Join(base, "config.toml"), layout.ConfigFile())
-	assert.Equal(t, filepath.Join(base, "trust.json"), layout.TrustFile())
+	assert.Equal(t, filepath.Join(base, "workspaces.json"), layout.WorkspacesFile())
 	assert.Equal(t, filepath.Join(base, "sessions"), layout.SessionsDir())
+	assert.Equal(t, filepath.Join(base, "skills"), layout.SkillsDir())
+	assert.Equal(t, filepath.Join(base, "bundles"), layout.BundlesDir())
+	assert.Equal(t, filepath.Join(base, "mcp.json"), layout.MCPFile())
 }
 
 func TestNewRejectsEmptyPath(t *testing.T) {

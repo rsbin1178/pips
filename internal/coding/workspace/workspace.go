@@ -80,7 +80,7 @@ func Open(path string) (Workspace, error) {
 // Root returns the canonical absolute workspace path.
 func (w Workspace) Root() string { return w.root }
 
-// Identity returns the canonical filesystem identity used by the trust store.
+// Identity returns the canonical filesystem identity used by the workspace store.
 func (w Workspace) Identity() Identity { return w.identity }
 
 // Identity binds trust to both a canonical path and the filesystem object
@@ -101,7 +101,7 @@ func (i Identity) Device() uint64 { return i.device }
 // Inode returns the platform inode number included in the identity.
 func (i Identity) Inode() uint64 { return i.inode }
 
-// Key returns a versioned, opaque key for persistence in a trust store.
+// Key returns a versioned, opaque key for persistence in a workspace store.
 func (i Identity) Key() string {
 	payload := make([]byte, 1+8+len(i.path)+8+8)
 	payload[0] = 1

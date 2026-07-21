@@ -2,6 +2,7 @@ package harness
 
 import (
 	"fmt"
+	"html"
 	"maps"
 	"slices"
 	"strconv"
@@ -20,9 +21,8 @@ type Skill struct {
 	Description string
 	// Content is the full instruction text.
 	Content string
-	// Source is the path the skill was loaded from (see [LoadSkills]); when
-	// set it is advertised to the model so file-capable agents can read the
-	// full instructions on demand.
+	// Source records application-owned provenance. Skill discovery and the
+	// activation Tool never expose it to the model.
 	Source string
 	// License is the optional skill license declaration.
 	License string
@@ -118,20 +118,16 @@ func FormatSkillsPrompt(skills []Skill) string {
 
 	var b strings.Builder
 
-	b.WriteString("The following skills provide specialized instructions:\n\n<available-skills>\n")
+	b.WriteString("The following skills provide specialized instructions. " +
+		"Use the \"" + SkillToolName + "\" tool with an exact skill name to load its full instructions.\n\n" +
+		"<available-skills>\n")
 
 	for _, s := range skills {
 		b.WriteString("<skill>\n<name>")
 		b.WriteString(s.Name)
 		b.WriteString("</name>\n<description>")
-		b.WriteString(s.Description)
+		b.WriteString(html.EscapeString(s.Description))
 		b.WriteString("</description>\n")
-
-		if s.Source != "" {
-			b.WriteString("<location>")
-			b.WriteString(s.Source)
-			b.WriteString("</location>\n")
-		}
 
 		b.WriteString("</skill>\n")
 	}

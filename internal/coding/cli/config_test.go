@@ -64,7 +64,7 @@ api = "auto"
 
 	opened, err := workspace.Open(fixture.workspaceDir)
 	require.NoError(t, err)
-	require.NoError(t, workspace.NewTrustStore(fixture.layout.TrustFile()).Trust(opened.Identity()))
+	require.NoError(t, workspace.NewStore(fixture.layout.WorkspacesFile()).Trust(opened.Identity()))
 
 	output, err = executeWithDependencies(t, dependencies, "config", "show")
 	require.NoError(t, err)
