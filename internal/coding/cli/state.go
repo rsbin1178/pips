@@ -8,11 +8,10 @@ import (
 	"strings"
 
 	"github.com/rsbin/pips/internal/coding/config"
+	"github.com/rsbin/pips/internal/coding/paths"
 	"github.com/rsbin/pips/internal/coding/workspace"
 	"github.com/spf13/cobra"
 )
-
-const projectConfigPath = ".pips/config.toml"
 
 type workspaceState struct {
 	workspace   workspace.Workspace
@@ -74,7 +73,7 @@ func resolveWorkspaceState(
 		workspace:   opened,
 		isTrusted:   isTrusted,
 		userFile:    userFile,
-		projectFile: filepath.Join(opened.Root(), filepath.FromSlash(projectConfigPath)),
+		projectFile: filepath.Join(opened.Root(), filepath.FromSlash(paths.ProjectConfigFile())),
 	}, nil
 }
 

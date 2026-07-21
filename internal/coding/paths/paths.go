@@ -4,11 +4,18 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 )
 
-const applicationDir = "pips"
+const (
+	// HomeEnv overrides the default ~/.pips product root.
+	HomeEnv        = "PIPS_HOME"
+	productDir     = ".pips"
+	projectDir     = ".pips"
+	configFileName = "config.toml"
+)
 
 // ErrInvalid means the user configuration root cannot define a safe layout.
 var ErrInvalid = errors.New("coding paths: invalid user configuration directory")
@@ -22,37 +29,69 @@ type Layout struct {
 	sessionsDir string
 }
 
-// New returns the application layout below userConfigDir.
-func New(userConfigDir string) (Layout, error) {
-	if strings.TrimSpace(userConfigDir) == "" {
+// New returns an application layout rooted exactly at root.
+func New(root string) (Layout, error) {
+	if strings.TrimSpace(root) == "" {
 		return Layout{}, fmt.Errorf("%w: empty path", ErrInvalid)
 	}
 
-	abs, err := filepath.Abs(userConfigDir)
+	if strings.ContainsRune(root, '\x00') {
+		return Layout{}, fmt.Errorf("%w: path contains NUL", ErrInvalid)
+	}
+
+	abs, err := filepath.Abs(root)
 	if err != nil {
 		return Layout{}, fmt.Errorf("%w: %w", ErrInvalid, err)
 	}
 
-	root := filepath.Join(abs, applicationDir)
-
 	return Layout{
-		root:        root,
-		configFile:  filepath.Join(root, "config.toml"),
-		trustFile:   filepath.Join(root, "trust.json"),
-		sessionsDir: filepath.Join(root, "sessions"),
+		root:        abs,
+		configFile:  filepath.Join(abs, configFileName),
+		trustFile:   filepath.Join(abs, "trust.json"),
+		sessionsDir: filepath.Join(abs, "sessions"),
 	}, nil
 }
 
-// Default returns the layout below the operating system user configuration
-// directory.
+// Default returns the user layout selected by PIPS_HOME or ~/.pips.
 func Default() (Layout, error) {
-	dir, err := os.UserConfigDir()
-	if err != nil {
-		return Layout{}, fmt.Errorf("coding paths: locate user configuration directory: %w", err)
+	if configured, ok := os.LookupEnv(HomeEnv); ok && configured != "" {
+		if strings.TrimSpace(configured) == "" ||
+			!filepath.IsAbs(configured) || filepath.Clean(configured) != configured {
+			return Layout{}, fmt.Errorf(
+				"%w: %s must be a clean absolute path",
+				ErrInvalid,
+				HomeEnv,
+			)
+		}
+
+		return New(configured)
 	}
 
-	return New(dir)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return Layout{}, fmt.Errorf("coding paths: locate user home directory: %w", err)
+	}
+
+	return New(filepath.Join(home, productDir))
 }
+
+// ProjectRoot returns the workspace-relative product directory.
+func ProjectRoot() string { return projectDir }
+
+// ProjectConfigFile returns the workspace-relative project configuration path.
+func ProjectConfigFile() string { return path.Join(projectDir, configFileName) }
+
+// ProjectPermissionsFile returns the workspace-relative local permission path.
+func ProjectPermissionsFile() string { return path.Join(projectDir, "permissions.toml") }
+
+// ProjectMCPFile returns the workspace-relative MCP configuration path.
+func ProjectMCPFile() string { return path.Join(projectDir, "mcp.json") }
+
+// ProjectSkillsDir returns the workspace-relative project skills directory.
+func ProjectSkillsDir() string { return path.Join(projectDir, "skills") }
+
+// ProjectBundlesDir returns the workspace-relative project bundle directory.
+func ProjectBundlesDir() string { return path.Join(projectDir, "bundles") }
 
 // Root returns the application's user configuration directory.
 func (l Layout) Root() string { return l.root }

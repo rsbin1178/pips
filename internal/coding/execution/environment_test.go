@@ -23,6 +23,7 @@ func TestEnvironmentSnapshotUsesAllowlistAndPrivatePaths(t *testing.T) {
 		"LD_PRELOAD":   "must-not-appear",
 		"OTEL_HEADERS": "must-not-appear",
 		"PATH":         strings.Join([]string{"/usr/bin", ".", "relative", "/bin", "/usr/bin", ""}, string(os.PathListSeparator)),
+		"PIPS_HOME":    "must-not-appear",
 	}
 
 	environment, err := environmentSnapshot(mapLookup(parent), privateDir, []EnvVar{
@@ -42,6 +43,7 @@ func TestEnvironmentSnapshotUsesAllowlistAndPrivatePaths(t *testing.T) {
 	assert.NotContains(t, values, "HTTPS_PROXY")
 	assert.NotContains(t, values, "LD_PRELOAD")
 	assert.NotContains(t, values, "OTEL_HEADERS")
+	assert.NotContains(t, values, "PIPS_HOME")
 	assert.True(t, slices.IsSorted(environment))
 
 	for _, name := range []string{"tmp", "cache", "go-cache", "go-tmp"} {
