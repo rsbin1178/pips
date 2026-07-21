@@ -10,7 +10,6 @@ import (
 
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding"
-	"github.com/rsbin/pips/internal/coding/credential"
 	"github.com/rsbin/pips/internal/coding/session"
 	"github.com/rsbin/pips/internal/coding/workspace"
 	"github.com/spf13/cobra"
@@ -84,25 +83,9 @@ func newExecCommand(
 				return err
 			}
 
-			if err := state.config.Config.ValidateRuntime(); err != nil {
-				return err
-			}
-
-			credentials, err := credential.NewEnvironmentStore(dependencies.LookupEnv)
+			options, err := newRuntimeOpenOptions(dependencies, state, flags.session)
 			if err != nil {
 				return err
-			}
-
-			options := coding.OpenOptions{
-				Workspace:   state.workspace.workspace,
-				Trusted:     state.workspace.isTrusted,
-				Config:      state.config.Config,
-				Paths:       dependencies.Paths,
-				Session:     coding.SessionTarget{ID: flags.session},
-				Credentials: credentials,
-				Execution: coding.ExecutionOptions{
-					Environment: dependencies.LookupEnv,
-				},
 			}
 
 			runtime, err := opener(cmd.Context(), options)
