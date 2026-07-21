@@ -19,6 +19,16 @@ type Request struct {
 	Temperature *float64
 	// TopP is the nucleus-sampling cutoff. Nil sends nothing.
 	TopP *float64
+	// TopK limits sampling to the k most likely tokens. Nil sends nothing.
+	TopK *int
+	// Seed requests deterministic sampling when the provider supports it.
+	Seed *int64
+	// FrequencyPenalty discourages tokens based on occurrence frequency.
+	FrequencyPenalty *float64
+	// PresencePenalty discourages tokens that have already appeared.
+	PresencePenalty *float64
+	// LogProbs requests token log probabilities.
+	LogProbs *LogProbsConfig
 	// MaxTokens caps generated tokens. Nil lets the adapter choose: providers
 	// that require the field (Anthropic) get a sensible default; others get
 	// nothing.
@@ -37,6 +47,12 @@ type Request struct {
 	// and type-asserts the value to its documented options type; unknown keys
 	// are ignored.
 	ProviderOptions map[Provider]any
+}
+
+// LogProbsConfig controls portable token log-probability output.
+type LogProbsConfig struct {
+	Enabled bool
+	Top     int
 }
 
 // Ptr returns a pointer to v. It keeps request literals terse:

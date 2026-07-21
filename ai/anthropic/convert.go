@@ -1,3 +1,4 @@
+//nolint:wsl_v5 // Wire translation keeps presence-aware assignments adjacent.
 package anthropic
 
 import (
@@ -19,9 +20,9 @@ type RequestOptions struct {
 	// CacheTTL applies to automatic caching and explicit system/last-message
 	// breakpoints. Empty uses the provider's five-minute default.
 	CacheTTL CacheTTL
-	// ExtraFields is merged into the top level of the outgoing JSON request,
-	// overriding colliding keys — the escape hatch for parameters not modeled
-	// portably (top_k, metadata, service_tier, ...).
+	// ExtraFields is merged into the outgoing JSON request using bounded
+	// recursive add-only semantics. It is the escape hatch for non-reserved
+	// parameters not modeled portably (metadata, service_tier, ...).
 	ExtraFields map[string]any
 }
 
@@ -35,10 +36,17 @@ const (
 	CacheTTL1Hour    CacheTTL = "1h"
 )
 
-func requestOptions(req ai.Request) RequestOptions {
-	if raw, ok := req.ProviderOptions[ai.ProviderAnthropic]; ok {
+func requestOptions(req ai.Request, provider ai.Provider) RequestOptions {
+	if raw, ok := req.ProviderOptions[provider]; ok {
 		if opts, ok := raw.(RequestOptions); ok {
 			return opts
+		}
+	}
+	if provider != ai.ProviderAnthropic {
+		if raw, ok := req.ProviderOptions[ai.ProviderAnthropic]; ok {
+			if opts, ok := raw.(RequestOptions); ok {
+				return opts
+			}
 		}
 	}
 
@@ -47,7 +55,15 @@ func requestOptions(req ai.Request) RequestOptions {
 
 // requestFrom translates a portable request into the Messages wire shape.
 func (m *Model) requestFrom(req ai.Request, stream bool) (any, error) {
-	opts := requestOptions(req)
+	if req.Seed != nil || req.FrequencyPenalty != nil ||
+		req.PresencePenalty != nil || req.LogProbs != nil {
+		return nil, fmt.Errorf("anthropic: request option is unsupported: %w", ai.ErrUnsupported)
+	}
+	if err := validateThinking(req.Reasoning); err != nil {
+		return nil, err
+	}
+
+	opts := requestOptions(req, m.provider)
 
 	messages, err := wireMessagesFrom(req.Messages)
 	if err != nil {
@@ -65,6 +81,7 @@ func (m *Model) requestFrom(req ai.Request, stream bool) (any, error) {
 		MaxTokens:   m.maxTokensFor(req),
 		Temperature: req.Temperature,
 		TopP:        req.TopP,
+		TopK:        req.TopK,
 		StopSeqs:    req.Stop,
 		Stream:      stream,
 	}
@@ -304,6 +321,24 @@ func applyThinking(out *messagesRequest, req ai.Request) {
 	if req.Reasoning == nil {
 		return
 	}
+	if req.Reasoning.Mode == ai.ReasoningModeDisabled {
+		out.Thinking = &wireThinking{Type: "disabled"}
+		return
+	}
+	if req.Reasoning.Effort == ai.ReasoningNone {
+		out.Thinking = &wireThinking{Type: "disabled"}
+		return
+	}
+	if req.Reasoning.Mode == ai.ReasoningModeAdaptive {
+		out.Thinking = &wireThinking{Type: "adaptive"}
+		if req.Reasoning.Effort != "" {
+			if out.OutputConfig == nil {
+				out.OutputConfig = &wireOutputConfig{}
+			}
+			out.OutputConfig.Effort = string(req.Reasoning.Effort)
+		}
+		return
+	}
 
 	budget := req.Reasoning.BudgetTokens
 	if budget == 0 {
@@ -318,6 +353,42 @@ func applyThinking(out *messagesRequest, req ai.Request) {
 	// The API requires max_tokens > thinking budget.
 	if out.MaxTokens <= budget {
 		out.MaxTokens = budget + defaultMaxTokens
+	}
+}
+
+func validateThinking(reasoning *ai.ReasoningConfig) error {
+	if reasoning == nil || reasoning.Mode == ai.ReasoningModeDisabled {
+		return nil
+	}
+	if reasoning.Mode == ai.ReasoningModeAdaptive {
+		if reasoning.BudgetTokens != 0 {
+			return fmt.Errorf("anthropic: adaptive reasoning cannot use a token budget: %w", ai.ErrUnsupported)
+		}
+		switch reasoning.Effort {
+		case "", ai.ReasoningNone, ai.ReasoningLow, ai.ReasoningMedium,
+			ai.ReasoningHigh, ai.ReasoningXHigh, ai.ReasoningMax:
+			return nil
+		default:
+			return fmt.Errorf(
+				"anthropic: adaptive reasoning effort %q: %w",
+				reasoning.Effort,
+				ai.ErrUnsupported,
+			)
+		}
+	}
+	if reasoning.BudgetTokens != 0 || reasoning.Effort == "" ||
+		reasoning.Effort == ai.ReasoningNone {
+		return nil
+	}
+	switch reasoning.Effort {
+	case ai.ReasoningLow, ai.ReasoningMedium, ai.ReasoningHigh:
+		return nil
+	default:
+		return fmt.Errorf(
+			"anthropic: reasoning effort %q requires adaptive mode or a token budget: %w",
+			reasoning.Effort,
+			ai.ErrUnsupported,
+		)
 	}
 }
 

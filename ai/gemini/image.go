@@ -24,7 +24,7 @@ func NewImageModel(model string, opts ...Option) *ImageModel {
 }
 
 // Provider implements ai.ImageModel.
-func (m *ImageModel) Provider() ai.Provider { return ai.ProviderGemini }
+func (m *ImageModel) Provider() ai.Provider { return m.model.provider }
 
 // ModelID implements ai.ImageModel.
 func (m *ImageModel) ModelID() string { return m.model.model }
@@ -46,7 +46,10 @@ func (m *ImageModel) GenerateImages(ctx context.Context, req ai.ImageRequest) (*
 
 	var parsed generateResponse
 
-	raw, err := m.model.client.PostJSON(ctx, m.model.methodPath("generateContent"), m.model.authHeaders(), merged, &parsed, decodeError)
+	raw, err := m.model.client.PostJSON(
+		ctx, m.model.methodPath("generateContent"), m.model.authHeaders(), merged, &parsed,
+		decodeError(m.model.provider),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("gemini: image generateContent: %w", err)
 	}

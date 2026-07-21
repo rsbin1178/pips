@@ -51,7 +51,9 @@ func (m *Model) CountTokens(ctx context.Context, req ai.Request) (int, error) {
 	body.OutputConfig = full.OutputConfig
 
 	var parsed countTokensResponse
-	if _, err := m.client.PostJSON(ctx, countTokensPath, m.requestHeaders(req), body, &parsed, decodeError); err != nil {
+	if _, err := m.client.PostJSON(
+		ctx, countTokensPath, m.requestHeaders(req), body, &parsed, decodeError(m.provider),
+	); err != nil {
 		return 0, fmt.Errorf("anthropic: count_tokens: %w", err)
 	}
 

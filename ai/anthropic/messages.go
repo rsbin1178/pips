@@ -18,7 +18,9 @@ func (m *Model) Generate(ctx context.Context, req ai.Request) (*ai.Response, err
 
 	var parsed messagesResponse
 
-	raw, err := m.client.PostJSON(ctx, messagesPath, m.requestHeaders(req), body, &parsed, decodeError)
+	raw, err := m.client.PostJSON(
+		ctx, messagesPath, m.requestHeaders(req), body, &parsed, decodeError(m.provider),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("anthropic: messages: %w", err)
 	}
@@ -35,7 +37,9 @@ func (m *Model) Stream(ctx context.Context, req ai.Request) ai.Stream {
 			return
 		}
 
-		stream, err := m.client.PostStream(ctx, messagesPath, m.requestHeaders(req), body, decodeError)
+		stream, err := m.client.PostStream(
+			ctx, messagesPath, m.requestHeaders(req), body, decodeError(m.provider),
+		)
 		if err != nil {
 			yield(ai.StreamEvent{}, fmt.Errorf("anthropic: messages stream: %w", err))
 			return

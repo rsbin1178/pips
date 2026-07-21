@@ -14,6 +14,7 @@ type responsesRequest struct {
 	ToolChoice      any                 `json:"tool_choice,omitempty"`
 	Temperature     *float64            `json:"temperature,omitempty"`
 	TopP            *float64            `json:"top_p,omitempty"`
+	TopLogProbs     *int                `json:"top_logprobs,omitempty"`
 	MaxOutputTokens *int                `json:"max_output_tokens,omitempty"`
 	Text            *responsesText      `json:"text,omitempty"`
 	Reasoning       *responsesReasoning `json:"reasoning,omitempty"`

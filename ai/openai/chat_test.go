@@ -370,15 +370,90 @@ func TestChatProviderOptionsExtraFields(t *testing.T) {
 		Messages: []ai.Message{ai.UserText("hi")},
 		ProviderOptions: map[ai.Provider]any{
 			ai.ProviderOpenAI: openai.RequestOptions{ExtraFields: map[string]any{
-				"seed": 7,
-				"user": "tester",
+				"service_tier": "flex",
+				"user":         "tester",
 			}},
 		},
 	})
 	require.NoError(t, err)
 
-	assert.InDelta(t, 7, as[float64](t, captured["seed"]), 1e-9)
+	assert.Equal(t, "flex", captured["service_tier"])
 	assert.Equal(t, "tester", captured["user"])
+}
+
+func TestChatProviderOptionsRejectTypedFieldWhenUnset(t *testing.T) {
+	t.Parallel()
+
+	model := newTestModel(t, func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("unsafe extension reached HTTP")
+
+		_, _ = w.Write([]byte(chatTextResponse))
+	})
+
+	_, err := model.Generate(t.Context(), ai.Request{
+		Messages: []ai.Message{ai.UserText("hi")},
+		ProviderOptions: map[ai.Provider]any{
+			ai.ProviderOpenAI: openai.RequestOptions{
+				ExtraFields: map[string]any{"top_k": 40},
+			},
+		},
+	})
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "reserved")
+}
+
+func TestChatRejectsUnrepresentableReasoning(t *testing.T) {
+	t.Parallel()
+
+	model := newTestModel(t, func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("unsupported reasoning reached HTTP")
+
+		_, _ = w.Write([]byte(chatTextResponse))
+	})
+
+	_, err := model.Generate(t.Context(), ai.Request{
+		Messages:  []ai.Message{ai.UserText("hi")},
+		Reasoning: &ai.ReasoningConfig{BudgetTokens: 4096},
+	})
+	require.ErrorIs(t, err, ai.ErrUnsupported)
+}
+
+func TestChatCompatibleTypedGenerationControls(t *testing.T) {
+	t.Parallel()
+
+	var captured map[string]any
+
+	provider := ai.Provider("compatible")
+	model := newTestModel(
+		t,
+		serveJSON(t, chatTextResponse, "/v1/chat/completions", &captured),
+		openai.WithProvider(provider),
+	)
+
+	_, err := model.Generate(t.Context(), ai.Request{
+		Messages:         []ai.Message{ai.UserText("hi")},
+		TopK:             ai.Ptr(40),
+		Seed:             ai.Ptr(int64(0)),
+		FrequencyPenalty: ai.Ptr(0.25),
+		PresencePenalty:  ai.Ptr(-0.5),
+		LogProbs:         &ai.LogProbsConfig{Enabled: true, Top: 3},
+		ProviderOptions: map[ai.Provider]any{
+			provider: openai.RequestOptions{
+				MinP:              ai.Ptr(0.1),
+				RepetitionPenalty: ai.Ptr(1.05),
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	assert.InDelta(t, 40, as[float64](t, captured["top_k"]), 1e-9)
+	assert.InDelta(t, 0, as[float64](t, captured["seed"]), 1e-9)
+	assert.InDelta(t, 0.25, as[float64](t, captured["frequency_penalty"]), 1e-9)
+	assert.InDelta(t, -0.5, as[float64](t, captured["presence_penalty"]), 1e-9)
+	assert.Equal(t, true, captured["logprobs"])
+	assert.InDelta(t, 3, as[float64](t, captured["top_logprobs"]), 1e-9)
+	assert.InDelta(t, 0.1, as[float64](t, captured["min_p"]), 1e-9)
+	assert.InDelta(t, 1.05, as[float64](t, captured["repetition_penalty"]), 1e-9)
 }
 
 func TestChatErrorMapping(t *testing.T) {

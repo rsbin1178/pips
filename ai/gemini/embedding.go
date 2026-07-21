@@ -23,7 +23,7 @@ func NewEmbeddingModel(model string, opts ...Option) *EmbeddingModel {
 }
 
 // Provider implements ai.EmbeddingModel.
-func (m *EmbeddingModel) Provider() ai.Provider { return ai.ProviderGemini }
+func (m *EmbeddingModel) Provider() ai.Provider { return m.model.provider }
 
 // ModelID implements ai.EmbeddingModel.
 func (m *EmbeddingModel) ModelID() string { return m.model.model }
@@ -60,7 +60,10 @@ func (m *EmbeddingModel) Embed(ctx context.Context, req ai.EmbeddingRequest) (*a
 
 	var parsed batchEmbedResponse
 
-	raw, err := m.model.client.PostJSON(ctx, m.model.methodPath("batchEmbedContents"), m.model.authHeaders(), body, &parsed, decodeError)
+	raw, err := m.model.client.PostJSON(
+		ctx, m.model.methodPath("batchEmbedContents"), m.model.authHeaders(), body, &parsed,
+		decodeError(m.model.provider),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("gemini: batchEmbedContents: %w", err)
 	}
