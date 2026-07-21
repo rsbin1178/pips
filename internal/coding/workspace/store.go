@@ -1,14 +1,19 @@
 package workspace
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/rsbin/pips/internal/coding/jsonx"
 )
@@ -30,7 +35,36 @@ var (
 	ErrUnsupportedStoreSchema = errors.New("coding workspace: unsupported store schema")
 	// ErrStoreTooLarge means the store exceeds its bounded input size.
 	ErrStoreTooLarge = errors.New("coding workspace: store too large")
+	// ErrWorkspaceUnknown means a permission was recorded before its Workspace
+	// was explicitly trusted.
+	ErrWorkspaceUnknown = errors.New("coding workspace: workspace is not trusted")
 )
+
+// PermissionKind identifies a typed workspace-scoped authority.
+type PermissionKind string
+
+// Supported permission kinds.
+const (
+	PermissionMCPServer PermissionKind = "mcp_server"
+)
+
+// PermissionDecision is an explicit local allow or deny decision.
+type PermissionDecision string
+
+// Supported permission decisions.
+const (
+	PermissionAllow PermissionDecision = "allow"
+	PermissionDeny  PermissionDecision = "deny"
+)
+
+// Permission binds one local decision to a normalized resource fingerprint.
+type Permission struct {
+	Kind        PermissionKind     `json:"kind"`
+	ResourceID  string             `json:"resource_id"`
+	Fingerprint string             `json:"fingerprint"`
+	Decision    PermissionDecision `json:"decision"`
+	DecidedAt   time.Time          `json:"decided_at"`
+}
 
 // Store records workspace-scoped user decisions outside project directories.
 // The file is read lazily and mutations are serialized per Store instance.
@@ -114,6 +148,90 @@ func (s *Store) Trust(identity Identity) error {
 	return s.write(data)
 }
 
+// SetPermission records a typed decision for an already trusted Workspace.
+func (s *Store) SetPermission(identity Identity, permission Permission) error {
+	if err := s.validate(identity); err != nil {
+		return err
+	}
+
+	permission.DecidedAt = permission.DecidedAt.UTC()
+	if err := validatePermission(permission); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	data, exists, err := s.load()
+	if err != nil {
+		return err
+	}
+
+	if !exists {
+		return ErrWorkspaceUnknown
+	}
+
+	record, exists := data.Workspaces[identity.Key()]
+	if !exists || record.Path != identity.Path() ||
+		record.Device != identity.Device() || record.Inode != identity.Inode() {
+		return ErrWorkspaceUnknown
+	}
+
+	replaced := false
+
+	for index := range record.Permissions {
+		current := record.Permissions[index]
+		if current.Kind == permission.Kind && current.ResourceID == permission.ResourceID {
+			record.Permissions[index] = permission
+			replaced = true
+
+			break
+		}
+	}
+
+	if !replaced {
+		record.Permissions = append(record.Permissions, permission)
+	}
+
+	slices.SortFunc(record.Permissions, comparePermissions)
+	data.Workspaces[identity.Key()] = record
+
+	return s.write(data)
+}
+
+// Permission returns one typed decision for identity and resourceID.
+func (s *Store) Permission(
+	identity Identity,
+	kind PermissionKind,
+	resourceID string,
+) (Permission, bool, error) {
+	if err := s.validate(identity); err != nil {
+		return Permission{}, false, err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	data, exists, err := s.load()
+	if err != nil || !exists {
+		return Permission{}, false, err
+	}
+
+	record, exists := data.Workspaces[identity.Key()]
+	if !exists || record.Path != identity.Path() ||
+		record.Device != identity.Device() || record.Inode != identity.Inode() {
+		return Permission{}, false, nil
+	}
+
+	for _, permission := range record.Permissions {
+		if permission.Kind == kind && permission.ResourceID == resourceID {
+			return permission, true, nil
+		}
+	}
+
+	return Permission{}, false, nil
+}
+
 func (s *Store) validate(identity Identity) error {
 	if s == nil || s.path == "" {
 		return fmt.Errorf("%w: empty workspace store path", ErrInvalid)
@@ -132,10 +250,11 @@ type storeFile struct {
 }
 
 type workspaceRecord struct {
-	Path      string    `json:"path"`
-	Device    uint64    `json:"device"`
-	Inode     uint64    `json:"inode"`
-	TrustedAt time.Time `json:"trusted_at"`
+	Path        string       `json:"path"`
+	Device      uint64       `json:"device"`
+	Inode       uint64       `json:"inode"`
+	TrustedAt   time.Time    `json:"trusted_at"`
+	Permissions []Permission `json:"permissions,omitempty"`
 }
 
 func (s *Store) load() (storeFile, bool, error) {
@@ -253,7 +372,73 @@ func validateWorkspaceRecord(key string, record workspaceRecord) error {
 		return fmt.Errorf("coding workspace: record identity does not match key %q", key)
 	}
 
+	seen := make(map[string]struct{}, len(record.Permissions))
+	for index, permission := range record.Permissions {
+		if err := validatePermission(permission); err != nil {
+			return fmt.Errorf("coding workspace: permission %d for %q: %w", index, key, err)
+		}
+
+		permissionKey := string(permission.Kind) + "\x00" + permission.ResourceID
+		if _, duplicate := seen[permissionKey]; duplicate {
+			return fmt.Errorf("coding workspace: duplicate permission for %q", key)
+		}
+
+		seen[permissionKey] = struct{}{}
+	}
+
 	return nil
+}
+
+func validatePermission(permission Permission) error {
+	if permission.Kind != PermissionMCPServer {
+		return errors.New("unsupported permission kind")
+	}
+
+	if !validPermissionResourceID(permission.ResourceID) {
+		return errors.New("invalid permission resource ID")
+	}
+
+	decoded, err := hex.DecodeString(permission.Fingerprint)
+	if err != nil || len(decoded) != 32 || strings.ToLower(permission.Fingerprint) != permission.Fingerprint {
+		return errors.New("invalid permission fingerprint")
+	}
+
+	if permission.Decision != PermissionAllow && permission.Decision != PermissionDeny {
+		return errors.New("invalid permission decision")
+	}
+
+	if permission.DecidedAt.IsZero() {
+		return errors.New("missing permission timestamp")
+	}
+
+	_, offset := permission.DecidedAt.Zone()
+	if offset != 0 {
+		return errors.New("permission timestamp is not UTC")
+	}
+
+	return nil
+}
+
+func validPermissionResourceID(value string) bool {
+	if value == "" || len(value) > 128 || !utf8.ValidString(value) {
+		return false
+	}
+
+	for _, character := range value {
+		if unicode.IsControl(character) || unicode.IsSpace(character) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func comparePermissions(left, right Permission) int {
+	if compared := strings.Compare(string(left.Kind), string(right.Kind)); compared != 0 {
+		return compared
+	}
+
+	return strings.Compare(left.ResourceID, right.ResourceID)
 }
 
 func (s *Store) write(data storeFile) error {

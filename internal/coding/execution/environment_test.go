@@ -26,7 +26,7 @@ func TestEnvironmentSnapshotUsesAllowlistAndPrivatePaths(t *testing.T) {
 		"PIPS_HOME":    "must-not-appear",
 	}
 
-	environment, err := environmentSnapshot(mapLookup(parent), privateDir, []EnvVar{
+	environment, err := NewChildEnvironment(mapLookup(parent), privateDir, []EnvVar{
 		{Name: "GIT_PAGER", Value: "cat"},
 		{Name: "HOME", Value: "/override/home"},
 		{Name: "TMPDIR", Value: "/must/not/win"},
@@ -56,7 +56,7 @@ func TestEnvironmentSnapshotUsesAllowlistAndPrivatePaths(t *testing.T) {
 func TestEnvironmentSnapshotRejectsMissingLookup(t *testing.T) {
 	t.Parallel()
 
-	_, err := environmentSnapshot(nil, t.TempDir(), nil)
+	_, err := NewChildEnvironment(nil, t.TempDir(), nil)
 	require.ErrorIs(t, err, ErrInvalidOperation)
 }
 
