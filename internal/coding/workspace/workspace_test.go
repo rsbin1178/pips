@@ -4,7 +4,9 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/rsbin/pips/internal/coding/workspace"
 	"github.com/stretchr/testify/assert"
@@ -202,4 +204,50 @@ func TestStoreRejectsOversizedInput(t *testing.T) {
 
 	_, err = workspace.NewStore(storePath).IsTrusted(ws.Identity())
 	require.ErrorIs(t, err, workspace.ErrStoreTooLarge)
+}
+
+func TestStorePermissionRequiresTrustAndReplacesByTypedIdentity(t *testing.T) {
+	t.Parallel()
+
+	base := t.TempDir()
+	root := filepath.Join(base, "workspace")
+	require.NoError(t, os.Mkdir(root, 0o750))
+
+	ws, err := workspace.Open(root)
+	require.NoError(t, err)
+
+	store := workspace.NewStore(filepath.Join(base, "private", "workspaces.json"))
+	permission := workspace.Permission{
+		Kind:        workspace.PermissionMCPServer,
+		ResourceID:  "filesystem",
+		Fingerprint: strings.Repeat("a", 64),
+		Decision:    workspace.PermissionAllow,
+		DecidedAt:   time.Date(2026, time.July, 21, 12, 0, 0, 0, time.UTC),
+	}
+
+	require.ErrorIs(t, store.SetPermission(ws.Identity(), permission), workspace.ErrWorkspaceUnknown)
+	require.NoError(t, store.Trust(ws.Identity()))
+	require.NoError(t, store.SetPermission(ws.Identity(), permission))
+
+	stored, exists, err := store.Permission(
+		ws.Identity(),
+		workspace.PermissionMCPServer,
+		"filesystem",
+	)
+	require.NoError(t, err)
+	require.True(t, exists)
+	assert.Equal(t, permission, stored)
+
+	permission.Fingerprint = strings.Repeat("b", 64)
+	permission.Decision = workspace.PermissionDeny
+	require.NoError(t, store.SetPermission(ws.Identity(), permission))
+
+	stored, exists, err = store.Permission(
+		ws.Identity(),
+		workspace.PermissionMCPServer,
+		"filesystem",
+	)
+	require.NoError(t, err)
+	require.True(t, exists)
+	assert.Equal(t, permission, stored)
 }

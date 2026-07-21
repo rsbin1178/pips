@@ -221,7 +221,7 @@ func (e *Executor) compilePlan(
 	auth Authorization,
 	privateObject fileObject,
 ) (*Plan, error) {
-	environment, err := environmentSnapshot(e.environment, privateObject.path, op.env)
+	environment, err := NewChildEnvironment(e.environment, privateObject.path, op.env)
 	if err != nil {
 		return nil, err
 	}
