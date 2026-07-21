@@ -30,7 +30,10 @@ provider = "openai"
 id = "user-model"
 api = "responses"
 `)
-	projectFile := filepath.Join(fixture.workspaceDir, ".pips", "config.toml")
+	projectFile := filepath.Join(
+		fixture.workspaceDir,
+		filepath.FromSlash(paths.ProjectConfigFile()),
+	)
 	writeCLIFile(t, projectFile, `
 tool_search = true
 [model]
@@ -320,7 +323,8 @@ func newCLIFixture(t *testing.T) cliFixture {
 	t.Helper()
 
 	workspaceDir := t.TempDir()
-	layout, err := paths.New(t.TempDir())
+	productRoot := filepath.Join(t.TempDir(), ".pips")
+	layout, err := paths.New(productRoot)
 	require.NoError(t, err)
 
 	return cliFixture{workspaceDir: workspaceDir, layout: layout}

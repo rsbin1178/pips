@@ -77,7 +77,11 @@ func (s *service) applyPatch(ctx context.Context, args applyPatchArgs) (string, 
 			kind = "D"
 		}
 
-		body.WriteString(kind + " " + change.path + "\n")
+		body.WriteString(kind)
+		body.WriteByte(' ')
+		body.WriteString(change.path)
+		body.WriteByte('\n')
+
 		written += len(change.after)
 	}
 
