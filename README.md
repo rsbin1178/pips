@@ -44,10 +44,10 @@ execution foundation now includes Workspace-confined file tools, durable Shell
 approval, native OS command isolation, and read-only Git change attribution.
 The single-session Runtime now composes durable Harness state, immutable
 Extension/Skill/MCP generations, approval continuation, change attribution,
-typed product events, and optional telemetry. CLI event rendering and the
-non-interactive `exec` path are now available; the single-column TUI is the
-next implementation stage. The command also exposes configuration, session
-inspection, and `doctor`.
+typed product events, and optional telemetry. The default command now opens a
+single-column, chat-first TUI; `exec` remains the non-interactive adapter for
+scripts and CI. The command also exposes configuration, session inspection,
+and `doctor`.
 
 The default `workspace-write` mode never falls back to an unsandboxed command.
 It uses macOS Seatbelt or an externally installed Linux/WSL2 Bubblewrap runtime,
@@ -99,6 +99,51 @@ runtime, _ := coding.Open(ctx, coding.OpenOptions{
 Callbacks are synchronous and isolated per observer. Applications should use
 OTel batch processors for slow export; the Runtime intentionally owns no
 unbounded observability queue.
+
+### Interactive coding agent
+
+Configure `~/.pips/config.toml`, export the provider-neutral `API_KEY`, and run
+`pips` in a real terminal:
+
+```sh
+API_KEY=... go run ./cmd/pips
+```
+
+The first visit to a Workspace asks whether project `.pips` configuration and
+resources may be loaded. Trust does not approve tools, MCP servers, Shell
+commands, or full access. A denial continues with user configuration only.
+Non-TTY input and `TERM=dumb` fail before Workspace configuration or
+credentials are acquired and direct the caller to `pips exec`.
+
+The TUI is intentionally single-column: transcript, a 1–8 line composer, and a
+compact status line. All operations have keyboard paths; the mouse is used only
+for transcript scrolling.
+
+| Action | Key |
+|---|---|
+| Send / steer while running | `Enter` |
+| Queue follow-up while running | `Tab` |
+| Insert newline | `Ctrl+J` or `Shift+Enter` when supported |
+| Open command palette | `/` on an empty composer or `Ctrl+K` |
+| Expand/collapse latest tool | `Ctrl+T` |
+| Scroll / return to latest | `PageUp`, `PageDown`, `End`, or mouse wheel |
+| Cancel operation / clear draft / confirm exit | `Ctrl+C` or `Esc` |
+
+The command palette provides `/new`, `/resume`, `/model`, `/diff`, `/reload`,
+`/status`, `/help`, and `/quit`. Approval is fail-closed: review defaults to
+deny, Enter applies only the highlighted Runtime-provided choice, and an
+unknown outcome exposes only retry, mark-failed, or acknowledge when the
+Runtime declares them.
+
+`/model` changes the effective model only for the current pips process. Later
+new or resumed sessions in that process inherit the selection, but Session
+history and `config.toml` are not modified. Restarting pips returns to the
+normal default/user/project/env/flag configuration merge. Existing Session
+model metadata is tolerated for compatibility and ignored.
+
+Set `NO_COLOR=1` for an ASCII, color-free view. The TUI uses the alternate
+screen and restores terminal mode before closing its Runtime, including
+Ctrl+C, SIGINT/SIGTERM, startup failure, and normal exit paths.
 
 ## Design highlights
 
