@@ -24,13 +24,11 @@ func TestConfigShowResolvesSelectedFileAndChangedFlags(t *testing.T) {
 	fixture := newCLIFixture(t)
 	writeCLIFile(t, fixture.layout.ConfigFile(), `
 tool_search = true
-model = "openai/user-model"
 
-[[models]]
-id = "openai/env-model"
+[providers.openai.models."env-model"]
 reasoning_levels = ["low", "high"]
 
-[models.options]
+[providers.openai.models."env-model".request]
 max_output_tokens = 8192
 temperature = 0.25
 logprobs = true
@@ -60,11 +58,11 @@ model = "anthropic/project-model"
 	assert.Contains(t, output, `config_file = "`+fixture.layout.ConfigFile()+`" # state=loaded`)
 	assert.Contains(t, output, `model = "openai/env-model" # source=environment detail="PIPS_MODEL"`)
 	assert.Contains(t, output, `reasoning = "high" # source=flag detail="--reasoning"`)
-	assert.Contains(t, output, `resolved.api = "responses"`)
+	assert.Contains(t, output, `resolved.protocol = "openai/responses"`)
 	assert.Contains(t, output, `resolved.context_window = 0`)
-	assert.Contains(t, output, `resolved.options.max_output_tokens = 8192`)
-	assert.Contains(t, output, `resolved.options.temperature = 0.25`)
-	assert.Contains(t, output, `resolved.options.logprobs = true`)
+	assert.Contains(t, output, `resolved.request.max_output_tokens = 8192`)
+	assert.Contains(t, output, `resolved.request.temperature = 0.25`)
+	assert.Contains(t, output, `resolved.request.logprobs = true`)
 	assert.Contains(t, output, `tool_search = false # source=flag detail="--tool-search"`)
 	assert.NotContains(t, output, "model_max_output_tokens")
 	assert.NotContains(t, output, "project-model")
@@ -76,7 +74,7 @@ model = "anthropic/project-model"
 	output, err = executeWithDependencies(t, dependencies, "config", "show")
 	require.NoError(t, err)
 	assert.Contains(t, output, `model = "openai/env-model" # source=environment detail="PIPS_MODEL"`)
-	assert.Contains(t, output, `resolved.api = "responses"`)
+	assert.Contains(t, output, `resolved.protocol = "openai/responses"`)
 	assert.Contains(t, output, `tool_search = true # source=config_file detail="`)
 	assert.NotContains(t, output, "project-model")
 }
@@ -152,7 +150,7 @@ func TestConfigCustomPathIsWorkingDirectoryRelative(t *testing.T) {
 
 	fixture := newCLIFixture(t)
 	custom := filepath.Join(fixture.workspaceDir, "custom.toml")
-	writeCLIFile(t, custom, "model = \"openai/custom\"\ntool_search = true\n")
+	writeCLIFile(t, custom, "tool_search = true\n[providers.openai.models.custom]\n")
 
 	output, err := executeWithDependencies(
 		t,
@@ -171,7 +169,7 @@ func TestDoctorUsesOnlyProviderNeutralAPIKey(t *testing.T) {
 
 	fixture := newCLIFixture(t)
 	writeCLIFile(t, fixture.layout.ConfigFile(), `
-model = "anthropic/claude-test"
+[providers.anthropic.models."claude-test"]
 `)
 
 	const secret = "doctor-secret"
@@ -201,7 +199,7 @@ func TestDoctorChecksSandboxAndWarnsForFullAccess(t *testing.T) {
 	fixture := newCLIFixture(t)
 	writeCLIFile(t, fixture.layout.ConfigFile(), `
 sandbox = "workspace-write"
-model = "openai/test-model"
+[providers.openai.models."test-model"]
 `)
 
 	dependencies := fixture.dependencies(map[string]string{credential.APIKeyEnv: "secret"})
@@ -228,7 +226,7 @@ model = "openai/test-model"
 
 	writeCLIFile(t, fixture.layout.ConfigFile(), `
 sandbox = "full-access"
-model = "openai/test-model"
+[providers.openai.models."test-model"]
 `)
 	output, err = executeWithDependencies(t, dependencies, "doctor")
 	require.NoError(t, err)
@@ -241,7 +239,7 @@ func TestDoctorFailsWhenNativeSandboxIsUnavailable(t *testing.T) {
 
 	fixture := newCLIFixture(t)
 	writeCLIFile(t, fixture.layout.ConfigFile(), `
-model = "openai/test-model"
+[providers.openai.models."test-model"]
 `)
 
 	dependencies := fixture.dependencies(map[string]string{credential.APIKeyEnv: "secret"})

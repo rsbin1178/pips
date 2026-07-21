@@ -198,18 +198,22 @@ func (m *Model) label() string {
 	return string(m.provider)
 }
 
-// resolveAPI applies APIAuto routing for the bound model.
-func (m *Model) resolveAPI() API {
-	if m.api != APIAuto {
-		return m.api
+// ResolveAPI applies the shared APIAuto routing policy for model. Explicit API
+// selections are returned unchanged.
+func ResolveAPI(model string, requested API) API {
+	if requested != APIAuto {
+		return requested
 	}
 
-	if isReasoningModel(m.model) {
+	if isReasoningModel(model) {
 		return APIResponses
 	}
 
 	return APIChatCompletions
 }
+
+// resolveAPI applies APIAuto routing for the bound model.
+func (m *Model) resolveAPI() API { return ResolveAPI(m.model, m.api) }
 
 // isReasoningModel reports whether the model belongs to a reasoning family
 // that requires (or works best on) the Responses API.

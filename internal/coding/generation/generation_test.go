@@ -22,7 +22,7 @@ func TestCompileAppliesFillOnlyDefaults(t *testing.T) {
 	level := config.ReasoningLevel("high")
 	policy, err := generation.Compile(modelcatalog.ResolvedModel{
 		Ref:            config.ModelRef{Provider: ai.ProviderOpenAI, Model: "gpt"},
-		API:            config.APIChatCompletions,
+		Protocol:       config.ProtocolOpenAIChatCompletions,
 		ReasoningLevel: &level,
 		Options: config.ModelOptions{
 			MaxOutputTokens: &maximum,
@@ -65,16 +65,16 @@ func TestCompileRejectsUnsupportedAndReservedOptions(t *testing.T) {
 
 	seed := int64(7)
 	_, err := generation.Compile(modelcatalog.ResolvedModel{
-		Ref:     config.ModelRef{Provider: ai.ProviderOpenAI, Model: "gpt"},
-		API:     config.APIResponses,
-		Options: config.ModelOptions{Seed: &seed},
+		Ref:      config.ModelRef{Provider: ai.ProviderOpenAI, Model: "gpt"},
+		Protocol: config.ProtocolOpenAIResponses,
+		Options:  config.ModelOptions{Seed: &seed},
 	})
 	require.ErrorIs(t, err, generation.ErrInvalid)
 
 	_, err = generation.Compile(modelcatalog.ResolvedModel{
-		Ref:     config.ModelRef{Provider: ai.ProviderOpenAI, Model: "gpt"},
-		API:     config.APIResponses,
-		Options: config.ModelOptions{ExtraBody: map[string]any{"model": "override"}},
+		Ref:      config.ModelRef{Provider: ai.ProviderOpenAI, Model: "gpt"},
+		Protocol: config.ProtocolOpenAIResponses,
+		Options:  config.ModelOptions{ExtraBody: map[string]any{"model": "override"}},
 	})
 	require.ErrorIs(t, err, generation.ErrInvalid)
 }
@@ -98,73 +98,73 @@ func TestCompileRejectsReasoningThatWouldBeDropped(t *testing.T) {
 		{
 			name: "enabled mode without a control",
 			model: modelcatalog.ResolvedModel{
-				Ref: config.ModelRef{Provider: ai.ProviderOpenAI, Model: "gpt"},
-				API: config.APIResponses, Options: config.ModelOptions{ReasoningMode: &enabled},
+				Ref:      config.ModelRef{Provider: ai.ProviderOpenAI, Model: "gpt"},
+				Protocol: config.ProtocolOpenAIResponses, Options: config.ModelOptions{ReasoningMode: &enabled},
 			},
 		},
 		{
 			name: "responses adaptive mode",
 			model: modelcatalog.ResolvedModel{
-				Ref: config.ModelRef{Provider: ai.ProviderOpenAI, Model: "gpt"},
-				API: config.APIResponses, Options: config.ModelOptions{ReasoningMode: &adaptive},
+				Ref:      config.ModelRef{Provider: ai.ProviderOpenAI, Model: "gpt"},
+				Protocol: config.ProtocolOpenAIResponses, Options: config.ModelOptions{ReasoningMode: &adaptive},
 			},
 		},
 		{
 			name: "chat budget",
 			model: modelcatalog.ResolvedModel{
-				Ref: config.ModelRef{Provider: ai.ProviderOpenAI, Model: "gpt"},
-				API: config.APIChatCompletions, Options: config.ModelOptions{ReasoningBudget: &budget},
+				Ref:      config.ModelRef{Provider: ai.ProviderOpenAI, Model: "gpt"},
+				Protocol: config.ProtocolOpenAIChatCompletions, Options: config.ModelOptions{ReasoningBudget: &budget},
 			},
 		},
 		{
 			name: "chat include",
 			model: modelcatalog.ResolvedModel{
-				Ref: config.ModelRef{Provider: ai.ProviderOpenAI, Model: "gpt"},
-				API: config.APIChatCompletions, Options: config.ModelOptions{IncludeReasoning: &include},
+				Ref:      config.ModelRef{Provider: ai.ProviderOpenAI, Model: "gpt"},
+				Protocol: config.ProtocolOpenAIChatCompletions, Options: config.ModelOptions{IncludeReasoning: &include},
 			},
 		},
 		{
 			name: "chat disabled mode",
 			model: modelcatalog.ResolvedModel{
-				Ref: config.ModelRef{Provider: ai.ProviderOpenAI, Model: "gpt"},
-				API: config.APIChatCompletions, Options: config.ModelOptions{ReasoningMode: &disabled},
+				Ref:      config.ModelRef{Provider: ai.ProviderOpenAI, Model: "gpt"},
+				Protocol: config.ProtocolOpenAIChatCompletions, Options: config.ModelOptions{ReasoningMode: &disabled},
 			},
 		},
 		{
 			name: "chat compatibility omits selected reasoning",
 			model: modelcatalog.ResolvedModel{
-				Ref: config.ModelRef{Provider: "compatible", Model: "model"},
-				API: config.APIChatCompletions, ReasoningLevel: &high,
+				Ref:      config.ModelRef{Provider: "compatible", Model: "model"},
+				Protocol: config.ProtocolOpenAIChatCompletions, ReasoningLevel: &high,
 				Compatibility: openai.Compatibility{ChatReasoning: openai.ChatReasoningOmit},
 			},
 		},
 		{
 			name: "anthropic legacy mode cannot map xhigh",
 			model: modelcatalog.ResolvedModel{
-				Ref: config.ModelRef{Provider: ai.ProviderAnthropic, Model: "claude"},
-				API: config.APIAnthropicMessages, ReasoningLevel: &xhigh,
+				Ref:      config.ModelRef{Provider: ai.ProviderAnthropic, Model: "claude"},
+				Protocol: config.ProtocolAnthropicMessages, ReasoningLevel: &xhigh,
 			},
 		},
 		{
 			name: "anthropic adaptive mode rejects minimal",
 			model: modelcatalog.ResolvedModel{
-				Ref: config.ModelRef{Provider: ai.ProviderAnthropic, Model: "claude"},
-				API: config.APIAnthropicMessages, ReasoningLevel: &minimal,
+				Ref:      config.ModelRef{Provider: ai.ProviderAnthropic, Model: "claude"},
+				Protocol: config.ProtocolAnthropicMessages, ReasoningLevel: &minimal,
 				Options: config.ModelOptions{ReasoningMode: &adaptive},
 			},
 		},
 		{
 			name: "gemini adaptive mode",
 			model: modelcatalog.ResolvedModel{
-				Ref: config.ModelRef{Provider: ai.ProviderGemini, Model: "gemini"},
-				API: config.APIGenerateContent, Options: config.ModelOptions{ReasoningMode: &adaptive},
+				Ref:      config.ModelRef{Provider: ai.ProviderGemini, Model: "gemini"},
+				Protocol: config.ProtocolGeminiGenerateContent, Options: config.ModelOptions{ReasoningMode: &adaptive},
 			},
 		},
 		{
 			name: "gemini native level rejects xhigh",
 			model: modelcatalog.ResolvedModel{
-				Ref: config.ModelRef{Provider: ai.ProviderGemini, Model: "gemini"},
-				API: config.APIGenerateContent, ReasoningLevel: &xhigh,
+				Ref:      config.ModelRef{Provider: ai.ProviderGemini, Model: "gemini"},
+				Protocol: config.ProtocolGeminiGenerateContent, ReasoningLevel: &xhigh,
 			},
 		},
 	}
@@ -184,8 +184,8 @@ func TestCompileAllowsBudgetMappedGeminiReasoning(t *testing.T) {
 	xhigh := config.ReasoningLevel(ai.ReasoningXHigh)
 	budget := 4096
 	_, err := generation.Compile(modelcatalog.ResolvedModel{
-		Ref: config.ModelRef{Provider: ai.ProviderGemini, Model: "gemini"},
-		API: config.APIGenerateContent, ReasoningLevel: &xhigh,
+		Ref:      config.ModelRef{Provider: ai.ProviderGemini, Model: "gemini"},
+		Protocol: config.ProtocolGeminiGenerateContent, ReasoningLevel: &xhigh,
 		Options: config.ModelOptions{ReasoningBudget: &budget},
 	})
 	require.NoError(t, err)
@@ -196,14 +196,14 @@ func TestCompileRejectsGeminiOutOfRangeControls(t *testing.T) {
 
 	seed := int64(1 << 31)
 	_, err := generation.Compile(modelcatalog.ResolvedModel{
-		Ref:     config.ModelRef{Provider: ai.ProviderGemini, Model: "gemini"},
-		API:     config.APIGenerateContent,
-		Options: config.ModelOptions{Seed: &seed},
+		Ref:      config.ModelRef{Provider: ai.ProviderGemini, Model: "gemini"},
+		Protocol: config.ProtocolGeminiGenerateContent,
+		Options:  config.ModelOptions{Seed: &seed},
 	})
 	require.ErrorIs(t, err, generation.ErrInvalid)
 	require.ErrorContains(t, err, "provider gemini")
 	require.ErrorContains(t, err, "model gemini")
-	require.ErrorContains(t, err, "api generate_content")
+	require.ErrorContains(t, err, "protocol gemini/generate_content")
 	require.ErrorContains(t, err, "reasoning \"<provider-default>\"")
-	require.ErrorContains(t, err, "options.seed")
+	require.ErrorContains(t, err, "request.seed")
 }
