@@ -2,7 +2,6 @@ package cli
 
 import (
 	"fmt"
-	"strconv"
 	"time"
 
 	"github.com/rsbin/pips/internal/coding/session"
@@ -57,11 +56,9 @@ func newSessionListCommand(dependencies Dependencies, flags *rootFlags) *cobra.C
 
 				if _, err := fmt.Fprintf(
 					cmd.OutOrStdout(),
-					"%s\t%s\t%s\t%s\n",
+					"%s\t%s\n",
 					meta.ID,
 					meta.CreatedAt.UTC().Format(time.RFC3339Nano),
-					meta.Provider,
-					strconv.Quote(meta.ModelID),
 				); err != nil {
 					return err
 				}

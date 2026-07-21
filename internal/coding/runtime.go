@@ -495,8 +495,6 @@ func openSession(
 	if options.Session.ID == "" {
 		handle, err := repository.Create(ctx, session.CreateOptions{
 			WorkspaceID: options.Workspace.Identity().Key(),
-			Provider:    options.Config.Model.Provider,
-			ModelID:     options.Config.Model.ID,
 		})
 
 		return handle, false, err
@@ -507,16 +505,6 @@ func openSession(
 	})
 	if err != nil {
 		return nil, true, err
-	}
-
-	metadata := handle.Metadata()
-	if metadata.Provider != options.Config.Model.Provider || metadata.ModelID != options.Config.Model.ID {
-		if _, err := handle.Session().AppendModelChange(
-			options.Config.Model.Provider,
-			options.Config.Model.ID,
-		); err != nil {
-			return nil, true, errors.Join(err, handle.Close())
-		}
 	}
 
 	return handle, true, nil
