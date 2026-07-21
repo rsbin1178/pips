@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding/cli"
 	"github.com/rsbin/pips/internal/coding/config"
 	"github.com/rsbin/pips/internal/coding/credential"
@@ -263,8 +262,6 @@ func TestSessionListFiltersCurrentWorkspace(t *testing.T) {
 	require.NoError(t, err)
 	currentHandle, err := repository.Create(t.Context(), session.CreateOptions{
 		WorkspaceID: current.Identity().Key(),
-		Provider:    ai.ProviderOpenAI,
-		ModelID:     "current-model",
 	})
 	require.NoError(t, err)
 
@@ -276,8 +273,6 @@ func TestSessionListFiltersCurrentWorkspace(t *testing.T) {
 	require.NoError(t, err)
 	otherHandle, err := repository.Create(t.Context(), session.CreateOptions{
 		WorkspaceID: other.Identity().Key(),
-		Provider:    ai.ProviderGemini,
-		ModelID:     "other-model",
 	})
 	require.NoError(t, err)
 
@@ -292,9 +287,7 @@ func TestSessionListFiltersCurrentWorkspace(t *testing.T) {
 	)
 	require.NoError(t, err)
 	assert.Contains(t, output, currentID)
-	assert.Contains(t, output, "current-model")
 	assert.NotContains(t, output, otherID)
-	assert.NotContains(t, output, "other-model")
 }
 
 func TestVersionDoesNotLoadInvalidConfiguration(t *testing.T) {
