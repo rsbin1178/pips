@@ -67,6 +67,23 @@ type ApprovalState struct {
 	Unknown  *ApprovalUnknown  `json:"unknown,omitempty"`
 }
 
+// NonInteractiveError projects the approval overlay into the fail-fast
+// contract shared by non-interactive frontends.
+func (state ApprovalState) NonInteractiveError() error {
+	kind := approval.Kind("")
+
+	switch state.Kind {
+	case ApprovalNone:
+		kind = approval.StateReady
+	case ApprovalReview:
+		kind = approval.StateReview
+	case ApprovalUncertain:
+		kind = approval.StateUnknown
+	}
+
+	return (approval.State{Kind: kind}).NonInteractiveError()
+}
+
 // State is the complete reducer projection used by interactive and
 // non-interactive frontends. Use [State.Clone] when retaining a snapshot.
 type State struct {
