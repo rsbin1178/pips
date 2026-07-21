@@ -464,6 +464,7 @@ func (r *Runtime) openInteraction(
 		harness.WithAgentOptions(append(
 			composed.AgentOptions(),
 			agent.WithToolTimeout(r.opts.ToolTimeout),
+			agent.WithRequest(r.requestPolicy),
 		)...),
 		harness.WithOnEvent(func(eventCtx context.Context, event agent.Event) {
 			extensionObserver.observe(eventCtx, event)

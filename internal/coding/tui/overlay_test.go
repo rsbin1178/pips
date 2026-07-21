@@ -11,10 +11,10 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/ai/openai"
 	"github.com/rsbin/pips/internal/coding"
 	"github.com/rsbin/pips/internal/coding/approval"
 	"github.com/rsbin/pips/internal/coding/config"
+	"github.com/rsbin/pips/internal/coding/modelcatalog"
 	"github.com/rsbin/pips/internal/coding/runtimecontrol"
 	"github.com/rsbin/pips/internal/coding/session"
 	"github.com/stretchr/testify/assert"
@@ -140,17 +140,18 @@ func TestModelOverlayAppliesTypedProcessSelection(t *testing.T) {
 	controller := newOverlayController(readyState())
 	model := readyModelWithController(t, controller, true)
 	model.openOverlay(overlayModel)
-	model.overlay.model = config.ModelConfig{
-		Provider: ai.ProviderOpenAI,
-		ID:       "next-model",
-		API:      openai.APIResponses,
-	}
+	model.overlay.query = "next-model"
+	model.Update(key("v"))
+	model.Update(key("r"))
 
 	_, command := model.Update(key("enter"))
 	require.NotNil(t, command)
 	model.Update(command())
 	require.Len(t, controller.models, 1)
-	assert.Equal(t, "next-model", controller.models[0].ID)
+	assert.Equal(t, "next-model", controller.models[0].Ref.Model)
+	assert.Equal(t, "fast", controller.models[0].Variant)
+	require.NotNil(t, controller.models[0].ReasoningOverride)
+	assert.Equal(t, config.ReasoningLevel("low"), *controller.models[0].ReasoningOverride)
 	assert.Equal(t, "next-model", model.state.ModelID)
 	assert.Equal(t, overlayNone, model.overlay.kind)
 }
@@ -225,7 +226,8 @@ type overlayController struct {
 	resolutions []approval.Resolution
 	sessions    []session.Metadata
 	resumed     []string
-	models      []config.ModelConfig
+	models      []modelcatalog.Selection
+	entries     []modelcatalog.Entry
 	newCalls    int
 }
 
@@ -233,6 +235,14 @@ func newOverlayController(state coding.State) *overlayController {
 	return &overlayController{
 		interactionController: interactionController{
 			stubController: stubController{state: state},
+		},
+		entries: []modelcatalog.Entry{
+			{Ref: config.ModelRef{Provider: state.Provider, Model: state.ModelID}},
+			{
+				Ref:             config.ModelRef{Provider: ai.ProviderOpenAI, Model: "next-model"},
+				Variants:        []string{"fast"},
+				ReasoningLevels: []config.ReasoningLevel{"low", "high"},
+			},
 		},
 	}
 }
@@ -273,21 +283,32 @@ func (c *overlayController) ResumeSession(_ context.Context, id string) error {
 
 func (c *overlayController) SwitchModel(
 	_ context.Context,
-	selected config.ModelConfig,
+	selected modelcatalog.Selection,
 ) error {
 	c.models = append(c.models, selected)
-	c.state.Provider = selected.Provider
-	c.state.ModelID = selected.ID
+	c.state.Provider = selected.Ref.Provider
+	c.state.ModelID = selected.Ref.Model
 
 	return nil
 }
 
 func (c *overlayController) Model() runtimecontrol.ModelState {
-	return runtimecontrol.ModelState{Config: config.ModelConfig{
-		Provider: c.state.Provider,
-		ID:       c.state.ModelID,
-		API:      openai.APIAuto,
-	}, Overridden: len(c.models) > 0}
+	selection := modelcatalog.Selection{
+		Ref: config.ModelRef{Provider: c.state.Provider, Model: c.state.ModelID},
+	}
+	if len(c.models) > 0 {
+		selection = c.models[len(c.models)-1]
+	}
+
+	return runtimecontrol.ModelState{
+		Selection:  selection,
+		Resolved:   modelcatalog.ResolvedModel{Ref: selection.Ref, Variant: selection.Variant},
+		Overridden: len(c.models) > 0,
+	}
+}
+
+func (c *overlayController) Models() []modelcatalog.Entry {
+	return append([]modelcatalog.Entry(nil), c.entries...)
 }
 
 func (*overlayController) Detached() bool { return false }

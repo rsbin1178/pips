@@ -20,10 +20,9 @@ import (
 //nolint:paralleltest // An opt-in real-provider smoke must not compete for rate limits.
 func TestProviderSmoke(t *testing.T) {
 	if os.Getenv("PIPS_PROVIDER_SMOKE") != "1" {
-		t.Skip("set PIPS_PROVIDER_SMOKE=1 with API_KEY, PIPS_PROVIDER, and PIPS_MODEL")
+		t.Skip("set PIPS_PROVIDER_SMOKE=1 with API_KEY and canonical PIPS_MODEL")
 	}
 
-	provider := requiredSmokeEnvironment(t, "PIPS_PROVIDER")
 	modelID := requiredSmokeEnvironment(t, "PIPS_MODEL")
 	apiKey := requiredSmokeEnvironment(t, "API_KEY")
 	workspace := t.TempDir()
@@ -39,13 +38,9 @@ func TestProviderSmoke(t *testing.T) {
 
 	arguments := []string{
 		"--workspace", workspace,
-		"--provider", provider,
 		"--model", modelID,
 		"--sandbox", "full-access",
 		"--approval", "never",
-	}
-	if surface := strings.TrimSpace(os.Getenv("PIPS_MODEL_API")); surface != "" {
-		arguments = append(arguments, "--model-api", surface)
 	}
 	arguments = append(arguments, "exec", "--output", "jsonl", "Reply with a brief acknowledgement.")
 

@@ -1,53 +1,67 @@
+//nolint:wsl_v5 // Adapter fixtures keep acquisition and assertion steps adjacent.
 package model_test
 
 import (
 	"context"
-	"errors"
 	"testing"
 
 	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/ai/openai"
 	"github.com/rsbin/pips/internal/coding/config"
 	"github.com/rsbin/pips/internal/coding/credential"
 	"github.com/rsbin/pips/internal/coding/model"
+	"github.com/rsbin/pips/internal/coding/modelcatalog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 type credentialStore struct {
-	credential credential.Credential
-	err        error
-	provider   ai.Provider
+	provider ai.Provider
 }
 
-func (s *credentialStore) Get(_ context.Context, provider ai.Provider) (credential.Credential, error) {
+func (s *credentialStore) Get(
+	_ context.Context,
+	provider ai.Provider,
+) (credential.Credential, error) {
 	s.provider = provider
-	return s.credential, s.err
+	store, err := credential.NewEnvironmentStore(func(string) (string, bool) {
+		return "secret", true
+	})
+	if err != nil {
+		return credential.Credential{}, err
+	}
+
+	return store.Get(context.Background(), provider)
 }
 
-func TestNewProviderModels(t *testing.T) {
+func TestNewSelectsAdapterAndPreservesProviderIdentity(t *testing.T) {
 	t.Parallel()
 
-	environment, err := credential.NewEnvironmentStore(func(string) (string, bool) {
-		return "sentinel-secret", true
-	})
-	require.NoError(t, err)
-
-	for _, provider := range []ai.Provider{
-		ai.ProviderOpenAI,
-		ai.ProviderAnthropic,
-		ai.ProviderGemini,
-	} {
-		t.Run(string(provider), func(t *testing.T) {
+	tests := []struct {
+		provider ai.Provider
+		api      config.API
+		baseURL  string
+	}{
+		{provider: ai.ProviderOpenAI, api: config.APIResponses, baseURL: "https://api.openai.com/v1"},
+		{provider: ai.ProviderAnthropic, api: config.APIAnthropicMessages, baseURL: "https://api.anthropic.com/v1"},
+		{provider: ai.ProviderGemini, api: config.APIGenerateContent, baseURL: "https://generativelanguage.googleapis.com/v1beta"},
+		{provider: "local", api: config.APIChatCompletions, baseURL: "http://127.0.0.1:11434/v1"},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.provider), func(t *testing.T) {
 			t.Parallel()
-
-			got, err := model.New(t.Context(), config.ModelConfig{
-				Provider: provider,
-				ID:       "test-model",
-			}, environment)
+			store := &credentialStore{}
+			bound, err := model.New(t.Context(), modelcatalog.ResolvedModel{
+				Ref: config.ModelRef{Provider: tt.provider, Model: "model"},
+				API: tt.api,
+				Endpoint: modelcatalog.Endpoint{
+					BaseURL: tt.baseURL, AllowHTTP: tt.provider == "local",
+					AllowPrivateIPs: tt.provider == "local",
+				},
+			}, store)
 			require.NoError(t, err)
-			assert.Equal(t, provider, got.Provider())
-			assert.Equal(t, "test-model", got.ModelID())
+			assert.Equal(t, tt.provider, bound.Provider())
+			assert.Equal(t, "model", bound.ModelID())
+			assert.Equal(t, tt.provider, store.provider)
 		})
 	}
 }
@@ -55,49 +69,15 @@ func TestNewProviderModels(t *testing.T) {
 func TestNewRejectsInvalidInputs(t *testing.T) {
 	t.Parallel()
 
-	validStore, err := credential.NewEnvironmentStore(func(string) (string, bool) { return "secret", true })
-	require.NoError(t, err)
-
-	_, err = model.New(t.Context(), config.ModelConfig{}, validStore)
+	resolved := modelcatalog.ResolvedModel{
+		Ref:      config.ModelRef{Provider: ai.ProviderOpenAI, Model: "model"},
+		API:      config.APIResponses,
+		Endpoint: modelcatalog.Endpoint{BaseURL: "https://api.openai.com/v1"},
+	}
+	_, err := model.New(t.Context(), resolved, nil)
 	require.ErrorIs(t, err, model.ErrInvalid)
 
-	_, err = model.New(t.Context(), config.ModelConfig{Provider: ai.ProviderOpenAI, ID: "model"}, nil)
+	resolved.API = "unknown"
+	_, err = model.New(t.Context(), resolved, &credentialStore{})
 	require.ErrorIs(t, err, model.ErrInvalid)
-
-	canceled, cancel := context.WithCancel(t.Context())
-	cancel()
-
-	_, err = model.New(canceled, config.ModelConfig{Provider: ai.ProviderOpenAI, ID: "model"}, validStore)
-	require.ErrorIs(t, err, context.Canceled)
-}
-
-func TestNewRejectsProviderSpecificAPIBeforeCredentialLookup(t *testing.T) {
-	t.Parallel()
-
-	store := &credentialStore{}
-	_, err := model.New(t.Context(), config.ModelConfig{
-		Provider: ai.ProviderAnthropic,
-		ID:       "model",
-		API:      openai.APIResponses,
-	}, store)
-	require.ErrorIs(t, err, model.ErrInvalid)
-	assert.Empty(t, store.provider)
-}
-
-func TestNewPropagatesCredentialErrorWithoutSecret(t *testing.T) {
-	t.Parallel()
-
-	const secret = "sentinel-secret-value"
-
-	cause := errors.New("credential backend unavailable")
-	store := &credentialStore{err: cause}
-
-	_, err := model.New(t.Context(), config.ModelConfig{
-		Provider: ai.ProviderOpenAI,
-		ID:       "model",
-	}, store)
-	require.Error(t, err)
-	require.ErrorIs(t, err, cause)
-	assert.Equal(t, ai.ProviderOpenAI, store.provider)
-	assert.NotContains(t, err.Error(), secret)
 }

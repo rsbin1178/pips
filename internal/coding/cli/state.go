@@ -1,3 +1,4 @@
+//nolint:wsl_v5 // Flag presence and typed patch assignments stay adjacent.
 package cli
 
 import (
@@ -8,16 +9,14 @@ import (
 	"strings"
 
 	"github.com/rsbin/pips/internal/coding/config"
-	"github.com/rsbin/pips/internal/coding/paths"
 	"github.com/rsbin/pips/internal/coding/workspace"
 	"github.com/spf13/cobra"
 )
 
 type workspaceState struct {
-	workspace   workspace.Workspace
-	isTrusted   bool
-	userFile    string
-	projectFile string
+	workspace  workspace.Workspace
+	isTrusted  bool
+	configFile string
 }
 
 type commandState struct {
@@ -61,19 +60,18 @@ func resolveWorkspaceState(
 		return workspaceState{}, err
 	}
 
-	userFile := dependencies.Paths.ConfigFile()
+	configFile := dependencies.Paths.ConfigFile()
 	if strings.TrimSpace(flags.configFile) != "" {
-		userFile, err = resolvePath(workingDir, flags.configFile)
+		configFile, err = resolvePath(workingDir, flags.configFile)
 		if err != nil {
 			return workspaceState{}, fmt.Errorf("coding cli: user configuration path: %w", err)
 		}
 	}
 
 	return workspaceState{
-		workspace:   opened,
-		isTrusted:   isTrusted,
-		userFile:    userFile,
-		projectFile: filepath.Join(opened.Root(), filepath.FromSlash(paths.ProjectConfigFile())),
+		workspace:  opened,
+		isTrusted:  isTrusted,
+		configFile: configFile,
 	}, nil
 }
 
@@ -102,12 +100,9 @@ func loadResolvedCommandState(
 	}
 
 	loaded, err := config.Load(config.LoadOptions{
-		UserFile:       resolved.userFile,
-		ProjectRoot:    resolved.workspace.Root(),
-		ProjectFile:    resolved.projectFile,
-		ProjectTrusted: resolved.isTrusted,
-		LookupEnv:      config.LookupEnv(dependencies.LookupEnv),
-		FlagOverrides:  overrides,
+		ConfigFile:    resolved.configFile,
+		LookupEnv:     config.LookupEnv(dependencies.LookupEnv),
+		FlagOverrides: overrides,
 	})
 	if err != nil {
 		return commandState{}, err
@@ -119,31 +114,26 @@ func loadResolvedCommandState(
 func parseFlagOverrides(cmd *cobra.Command, flags *rootFlags) (config.Patch, error) {
 	var patch config.Patch
 
-	if isFlagChanged(cmd, "provider") {
-		provider, err := config.ParseProvider(flags.provider)
-		if err != nil {
-			return config.Patch{}, fmt.Errorf("coding cli: --provider: %w", err)
-		}
-
-		patch.Provider = &provider
-	}
-
 	if isFlagChanged(cmd, "model") {
-		if strings.TrimSpace(flags.model) == "" {
-			return config.Patch{}, fmt.Errorf("coding cli: --model: %w: model id is empty", config.ErrInvalid)
-		}
-
-		modelID := strings.TrimSpace(flags.model)
-		patch.ModelID = &modelID
-	}
-
-	if isFlagChanged(cmd, "model-api") {
-		api, err := config.ParseModelAPI(flags.modelAPI)
+		ref, err := config.ParseModelRef(flags.model)
 		if err != nil {
-			return config.Patch{}, fmt.Errorf("coding cli: --model-api: %w", err)
+			return config.Patch{}, fmt.Errorf("coding cli: --model: %w", err)
 		}
-
-		patch.ModelAPI = &api
+		patch.Model = &ref
+	}
+	if isFlagChanged(cmd, "variant") {
+		variant, err := config.ParseVariant(flags.variant)
+		if err != nil {
+			return config.Patch{}, fmt.Errorf("coding cli: --variant: %w", err)
+		}
+		patch.Variant = &variant
+	}
+	if isFlagChanged(cmd, "reasoning") {
+		level, err := config.ParseReasoningLevel(flags.reasoning)
+		if err != nil {
+			return config.Patch{}, fmt.Errorf("coding cli: --reasoning: %w", err)
+		}
+		patch.Reasoning = &level
 	}
 
 	if isFlagChanged(cmd, "tool-search") {

@@ -53,9 +53,10 @@ The default `workspace-write` mode never falls back to an unsandboxed command.
 It uses macOS Seatbelt or an externally installed Linux/WSL2 Bubblewrap runtime,
 and fails closed when the real capability probe does not pass. Native Windows
 is not supported; use a verified WSL2 environment. `full-access` is an explicit,
-unsandboxed user override and is never accepted from project configuration.
+unsandboxed user override.
 
-Run `API_KEY=... go run ./cmd/pips doctor --provider <provider> --model <model>`
+Configure `model = "openai/model-id"` in `~/.pips/config.toml`, then run
+`API_KEY=... go run ./cmd/pips doctor`
 to validate the selected model credential and the actual local Sandbox. The
 probe also reports process-isolation strength. See
 [Coding execution security](docs/coding-security.md) for the threat model,
@@ -65,7 +66,7 @@ Run one request with a plain final answer on stdout:
 
 ```sh
 API_KEY=... go run ./cmd/pips exec \
-  --provider <provider> --model <model> \
+  --model <provider>/<model> \
   "explain the failing tests"
 ```
 
@@ -109,9 +110,10 @@ Configure `~/.pips/config.toml`, export the provider-neutral `API_KEY`, and run
 API_KEY=... go run ./cmd/pips
 ```
 
-The first visit to a Workspace asks whether project `.pips` configuration and
-resources may be loaded. Trust does not approve tools, MCP servers, Shell
-commands, or full access. A denial continues with user configuration only.
+The first visit to a Workspace asks whether project `.pips` resources may be
+loaded. Trust does not approve tools, MCP servers, Shell commands, or full
+access. Main configuration always comes from `~/.pips/config.toml` or the one
+file selected by `--config`; project trust does not change it.
 Non-TTY input and `TERM=dumb` fail before Workspace configuration or
 credentials are acquired and direct the caller to `pips exec`.
 
@@ -138,8 +140,8 @@ Runtime declares them.
 `/model` changes the effective model only for the current pips process. Later
 new or resumed sessions in that process inherit the selection, but Session
 history and `config.toml` are not modified. Restarting pips returns to the
-normal default/user/project/env/flag configuration merge. Existing Session
-model metadata is tolerated for compatibility and ignored.
+normal default/user-file/env/flag selection. Existing Session model metadata
+is tolerated for compatibility and ignored.
 
 Set `NO_COLOR=1` for an ASCII, color-free view. The TUI uses the alternate
 screen and restores terminal mode before closing its Runtime, including

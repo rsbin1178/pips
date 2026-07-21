@@ -1,3 +1,4 @@
+//nolint:wsl_v5 // File safety setup and assertions stay adjacent.
 package config_test
 
 import (
@@ -7,302 +8,93 @@ import (
 	"testing"
 
 	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/ai/openai"
 	"github.com/rsbin/pips/internal/coding/config"
-	"github.com/rsbin/pips/internal/coding/paths"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func TestLoadPrecedenceAndProvenance(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	userFile := filepath.Join(dir, "user.toml")
-	projectFile := filepath.Join(dir, "project.toml")
-
-	writeFile(t, userFile, `
-tool_search = true
-sandbox = "full-access"
-approval = "never"
-[model]
-provider = "openai"
-id = "user-model"
-api = "responses"
-`)
-	writeFile(t, projectFile, `
-tool_search = false
-sandbox = "workspace-write"
-approval = "on-request"
-[model]
-provider = "anthropic"
-id = "project-model"
-api = "auto"
-`)
-
-	environment := map[string]string{
-		config.ProviderEnv:   "gemini",
-		config.ModelEnv:      "env-model",
-		config.ModelAPIEnv:   "responses",
-		config.ToolSearchEnv: "true",
-		config.SandboxEnv:    "full-access",
-		config.ApprovalEnv:   "never",
-	}
-	flagProvider := ai.ProviderOpenAI
-	flagModel := "flag-model"
-	flagModelAPI := openai.APIChatCompletions
-	flagToolSearch := false
-	flagSandbox := config.SandboxWorkspaceWrite
-	flagApproval := config.ApprovalOnRequest
-
-	result, err := config.Load(config.LoadOptions{
-		UserFile:       userFile,
-		ProjectRoot:    dir,
-		ProjectFile:    projectFile,
-		ProjectTrusted: true,
-		LookupEnv:      mapLookup(environment),
-		FlagOverrides: config.Patch{
-			Provider:   &flagProvider,
-			ModelID:    &flagModel,
-			ModelAPI:   &flagModelAPI,
-			ToolSearch: &flagToolSearch,
-			Sandbox:    &flagSandbox,
-			Approval:   &flagApproval,
-		},
-	})
-	require.NoError(t, err)
-
-	assert.Equal(t, config.FileStateLoaded, result.UserFile.State)
-	assert.Equal(t, config.FileStateLoaded, result.ProjectFile.State)
-	assert.Equal(t, flagProvider, result.Config.Model.Provider)
-	assert.Equal(t, flagModel, result.Config.Model.ID)
-	assert.Equal(t, flagModelAPI, result.Config.Model.API)
-	assert.False(t, result.Config.ToolSearch)
-	assert.Equal(t, flagSandbox, result.Config.Sandbox)
-	assert.Equal(t, flagApproval, result.Config.Approval)
-
-	wantDetails := map[config.Field]string{
-		config.FieldProvider:   "--provider",
-		config.FieldModelID:    "--model",
-		config.FieldModelAPI:   "--model-api",
-		config.FieldToolSearch: "--tool-search",
-		config.FieldSandbox:    "--sandbox",
-		config.FieldApproval:   "--approval",
-	}
-	for field, wantDetail := range wantDetails {
-		source, ok := result.Config.Source(field)
-		require.True(t, ok)
-		assert.Equal(t, config.SourceFlag, source.Kind)
-		assert.Equal(t, wantDetail, source.Detail)
-	}
-}
-
-func TestLoadLayerSources(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name           string
-		user           string
-		project        string
-		projectTrusted bool
-		environment    map[string]string
-		wantModel      string
-		wantSource     config.Source
-	}{
-		{
-			name:       "default",
-			wantSource: config.Source{Kind: config.SourceDefault, Detail: "built-in"},
-		},
-		{
-			name:       "user file",
-			user:       "[model]\nid = \"user\"\n",
-			wantModel:  "user",
-			wantSource: config.Source{Kind: config.SourceUserFile},
-		},
-		{
-			name:           "project file",
-			user:           "[model]\nid = \"user\"\n",
-			project:        "[model]\nid = \"project\"\n",
-			projectTrusted: true,
-			wantModel:      "project",
-			wantSource:     config.Source{Kind: config.SourceProjectFile},
-		},
-		{
-			name:        "environment",
-			user:        "[model]\nid = \"user\"\n",
-			environment: map[string]string{config.ModelEnv: "environment"},
-			wantModel:   "environment",
-			wantSource:  config.Source{Kind: config.SourceEnvironment, Detail: config.ModelEnv},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			dir := t.TempDir()
-			userFile := filepath.Join(dir, "user.toml")
-			projectFile := filepath.Join(dir, "project.toml")
-
-			if tt.user != "" {
-				writeFile(t, userFile, tt.user)
-			}
-
-			if tt.project != "" {
-				writeFile(t, projectFile, tt.project)
-			}
-
-			result, err := config.Load(config.LoadOptions{
-				UserFile:       userFile,
-				ProjectRoot:    dir,
-				ProjectFile:    projectFile,
-				ProjectTrusted: tt.projectTrusted,
-				LookupEnv:      mapLookup(tt.environment),
-			})
-			require.NoError(t, err)
-			assert.Equal(t, tt.wantModel, result.Config.Model.ID)
-
-			source, ok := result.Config.Source(config.FieldModelID)
-			require.True(t, ok)
-			assert.Equal(t, tt.wantSource.Kind, source.Kind)
-
-			if tt.wantSource.Detail == "" && source.Kind != config.SourceDefault {
-				if source.Kind == config.SourceUserFile {
-					assert.Equal(t, userFile, source.Detail)
-				} else {
-					assert.Equal(t, projectFile, source.Detail)
-				}
-			} else {
-				assert.Equal(t, tt.wantSource.Detail, source.Detail)
-			}
-		})
-	}
-}
-
-func TestLoadUntrustedProjectIsNotDecoded(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	projectFile := filepath.Join(dir, "project.toml")
-	writeFile(t, projectFile, "this is not TOML")
-
-	result, err := config.Load(config.LoadOptions{ProjectFile: projectFile})
-	require.NoError(t, err)
-	assert.Equal(t, config.FileStateUntrusted, result.ProjectFile.State)
-	assert.Empty(t, result.Config.Model.ID)
-}
-
-func TestLoadProjectCannotEnableFullAccess(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	projectFile := filepath.Join(dir, "project.toml")
-	writeFile(t, projectFile, "sandbox = \"full-access\"\n")
-
-	_, err := config.Load(config.LoadOptions{
-		ProjectRoot:    dir,
-		ProjectFile:    projectFile,
-		ProjectTrusted: true,
-		LookupEnv: mapLookup(map[string]string{
-			config.SandboxEnv: "workspace-write",
-		}),
-	})
-	require.Error(t, err)
-	require.ErrorIs(t, err, config.ErrInvalid)
-	assert.Contains(t, err.Error(), projectFile)
-}
-
-func TestLoadUserSourcesCanEnableFullAccess(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name    string
-		options func(*testing.T) config.LoadOptions
-		want    config.SourceKind
-	}{
-		{
-			name: "user file",
-			options: func(t *testing.T) config.LoadOptions {
-				t.Helper()
-
-				path := filepath.Join(t.TempDir(), "config.toml")
-				writeFile(t, path, "sandbox = \"full-access\"\n")
-
-				return config.LoadOptions{UserFile: path}
-			},
-			want: config.SourceUserFile,
-		},
-		{
-			name: "environment",
-			options: func(*testing.T) config.LoadOptions {
-				return config.LoadOptions{LookupEnv: mapLookup(map[string]string{
-					config.SandboxEnv: "full-access",
-				})}
-			},
-			want: config.SourceEnvironment,
-		},
-		{
-			name: "flag",
-			options: func(*testing.T) config.LoadOptions {
-				mode := config.SandboxFullAccess
-
-				return config.LoadOptions{FlagOverrides: config.Patch{Sandbox: &mode}}
-			},
-			want: config.SourceFlag,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			result, err := config.Load(tt.options(t))
-			require.NoError(t, err)
-			assert.Equal(t, config.SandboxFullAccess, result.Config.Sandbox)
-
-			source, ok := result.Config.Source(config.FieldSandbox)
-			require.True(t, ok)
-			assert.Equal(t, tt.want, source.Kind)
-		})
-	}
-}
-
-func TestLoadExplicitFalseOverridesLowerLayer(t *testing.T) {
+func TestLoadRegistryAndSelectionPrecedence(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "config.toml")
-	writeFile(t, path, "tool_search = true\n")
+	writeFile(t, path, `
+model = "openai/gpt-file"
+variant = "balanced"
+reasoning = "medium"
+tool_search = true
+
+[providers.local]
+api = "chat_completions"
+base_url = "http://127.0.0.1:11434/v1"
+allow_http = true
+allow_private_ips = true
+
+[[models]]
+id = "openai/gpt-file"
+context_window = 200000
+max_output_tokens = 100000
+reasoning_levels = ["low", "medium", "high"]
+default_reasoning_level = "medium"
+default_variant = "balanced"
+
+[models.options]
+temperature = 0.2
+stop = ["END"]
+
+[models.options.extra_body]
+service_tier = "flex"
+
+[models.variants.balanced]
+reasoning_level = "medium"
+max_output_tokens = 8192
+`)
+
+	flagRef := config.ModelRef{Provider: ai.ProviderAnthropic, Model: "claude"}
+	flagVariant := "deep"
+	flagReasoning := config.ReasoningLevel("high")
 	result, err := config.Load(config.LoadOptions{
-		UserFile: path,
+		ConfigFile: path,
 		LookupEnv: mapLookup(map[string]string{
-			config.ToolSearchEnv: "false",
+			config.ModelEnv: "gemini/gemini-env",
+		}),
+		FlagOverrides: config.Patch{
+			Model: &flagRef, Variant: &flagVariant, Reasoning: &flagReasoning,
+		},
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, flagRef, result.Config.Model)
+	assert.Equal(t, flagVariant, result.Config.Variant)
+	assert.Equal(t, flagReasoning, *result.Config.Reasoning)
+	assert.Equal(t, config.FileStateLoaded, result.ConfigFile.State)
+	require.Len(t, result.Config.Models, 1)
+	assert.Equal(t, 200000, result.Config.Models[0].ContextWindow)
+	assert.InDelta(t, 0.2, *result.Config.Models[0].Options.Temperature, 1e-9)
+	assert.Equal(t, 8192, *result.Config.Models[0].Variants["balanced"].Options.MaxOutputTokens)
+	assert.Equal(t, config.APIChatCompletions, result.Config.Providers["local"].API)
+
+	source, ok := result.Config.Source(config.FieldModel)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceFlag, source.Kind)
+	assert.Equal(t, "--model", source.Detail)
+
+	targetDefaults, err := config.Load(config.LoadOptions{
+		ConfigFile: path,
+		LookupEnv: mapLookup(map[string]string{
+			config.ModelEnv: "anthropic/claude",
 		}),
 	})
 	require.NoError(t, err)
-	assert.False(t, result.Config.ToolSearch)
-
-	source, ok := result.Config.Source(config.FieldToolSearch)
+	assert.Equal(t, "anthropic/claude", targetDefaults.Config.Model.String())
+	assert.Empty(t, targetDefaults.Config.Variant)
+	assert.Nil(t, targetDefaults.Config.Reasoning)
+	variantSource, ok := targetDefaults.Config.Source(config.FieldVariant)
 	require.True(t, ok)
-	assert.Equal(t, config.SourceEnvironment, source.Kind)
-	assert.Equal(t, config.ToolSearchEnv, source.Detail)
+	assert.Equal(t, config.SourceEnvironment, variantSource.Kind)
+	assert.Equal(t, config.ModelEnv, variantSource.Detail)
 }
 
-func TestLoadMissingFiles(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	result, err := config.Load(config.LoadOptions{
-		UserFile:       filepath.Join(dir, "missing-user.toml"),
-		ProjectRoot:    dir,
-		ProjectFile:    filepath.Join(dir, "missing-project.toml"),
-		ProjectTrusted: true,
-	})
-	require.NoError(t, err)
-	assert.Equal(t, config.FileStateAbsent, result.UserFile.State)
-	assert.Equal(t, config.FileStateAbsent, result.ProjectFile.State)
-}
-
-func TestLoadRejectsInvalidConfiguration(t *testing.T) {
+func TestLoadRejectsLegacyAndInvalidConfiguration(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -310,150 +102,57 @@ func TestLoadRejectsInvalidConfiguration(t *testing.T) {
 		content string
 		want    error
 	}{
-		{name: "unknown top-level field", content: "api_key = \"secret\"\n", want: config.ErrDecode},
-		{name: "unknown nested field", content: "[model]\nprovider = \"openai\"\ntypo = true\n", want: config.ErrDecode},
-		{name: "invalid syntax", content: "model = [", want: config.ErrDecode},
-		{name: "unsupported provider", content: "[model]\nprovider = \"deepseek\"\n", want: config.ErrInvalid},
-		{name: "unsupported model api", content: "[model]\napi = \"legacy\"\n", want: config.ErrInvalid},
-		{name: "empty model", content: "[model]\nid = \"  \"\n", want: config.ErrInvalid},
-		{name: "invalid sandbox", content: "sandbox = \"escape\"\n", want: config.ErrInvalid},
-		{name: "invalid approval", content: "approval = \"sometimes\"\n", want: config.ErrInvalid},
+		{name: "legacy model table", content: "[model]\nprovider = \"openai\"\nid = \"gpt\"\n", want: config.ErrMigration},
+		{name: "unknown top level", content: "api_key = \"secret\"\n", want: config.ErrDecode},
+		{name: "unknown option", content: "[[models]]\nid = \"openai/gpt\"\n[models.options]\ntypo = true\n", want: config.ErrDecode},
+		{name: "duplicate model", content: "[[models]]\nid = \"openai/gpt\"\n[[models]]\nid = \"openai/gpt\"\n", want: config.ErrInvalid},
+		{name: "invalid default variant", content: "[[models]]\nid = \"openai/gpt\"\ndefault_variant = \"missing\"\n", want: config.ErrInvalid},
+		{name: "credential shaped extra", content: "[[models]]\nid = \"openai/gpt\"\n[models.options.extra_body]\napi_key = \"secret\"\n", want: config.ErrInvalid},
+		{name: "datetime extra", content: "[[models]]\nid = \"openai/gpt\"\n[models.options.extra_body]\ncreated_at = 2026-07-21T12:00:00Z\n", want: config.ErrInvalid},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-
 			path := filepath.Join(t.TempDir(), "config.toml")
 			writeFile(t, path, tt.content)
-			_, err := config.Load(config.LoadOptions{UserFile: path})
-			require.Error(t, err)
-			assert.ErrorIs(t, err, tt.want)
+			_, err := config.Load(config.LoadOptions{ConfigFile: path})
+			require.ErrorIs(t, err, tt.want)
 		})
 	}
 }
 
-func TestLoadRejectsInvalidEnvironment(t *testing.T) {
+func TestLoadRejectsRemovedEnvironment(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name  string
-		key   string
-		value string
-	}{
-		{name: "empty provider", key: config.ProviderEnv},
-		{name: "empty model", key: config.ModelEnv},
-		{name: "model control character", key: config.ModelEnv, value: "model\ninjected"},
-		{name: "bad model api", key: config.ModelAPIEnv, value: "legacy"},
-		{name: "bad bool", key: config.ToolSearchEnv, value: "sometimes"},
-		{name: "bad sandbox", key: config.SandboxEnv, value: "escape"},
-		{name: "bad approval", key: config.ApprovalEnv, value: "sometimes"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			_, err := config.Load(config.LoadOptions{
-				LookupEnv: mapLookup(map[string]string{tt.key: tt.value}),
-			})
-			require.Error(t, err)
-			require.ErrorIs(t, err, config.ErrInvalid)
-			assert.Contains(t, err.Error(), tt.key)
-		})
+	for _, name := range []string{"PIPS_PROVIDER", "PIPS_MODEL_API"} {
+		_, err := config.Load(config.LoadOptions{LookupEnv: mapLookup(map[string]string{name: "value"})})
+		require.ErrorIs(t, err, config.ErrMigration)
+		assert.Contains(t, err.Error(), name)
 	}
 }
 
-func TestLoadRejectsInvalidFlagPatch(t *testing.T) {
-	t.Parallel()
-
-	provider := ai.Provider("unsupported")
-	_, err := config.Load(config.LoadOptions{
-		FlagOverrides: config.Patch{Provider: &provider},
-	})
-	require.Error(t, err)
-	require.ErrorIs(t, err, config.ErrInvalid)
-	assert.Contains(t, err.Error(), "flags")
-}
-
-func TestLoadRequiresRootForTrustedProjectFile(t *testing.T) {
-	t.Parallel()
-
-	_, err := config.Load(config.LoadOptions{
-		ProjectFile:    "project.toml",
-		ProjectTrusted: true,
-	})
-	require.Error(t, err)
-	assert.ErrorIs(t, err, config.ErrFile)
-}
-
-func TestLoadRejectsUnsafeFiles(t *testing.T) {
-	t.Parallel()
-
-	t.Run("directory as user file", func(t *testing.T) {
-		t.Parallel()
-
-		_, err := config.Load(config.LoadOptions{UserFile: t.TempDir()})
-		require.Error(t, err)
-		assert.ErrorIs(t, err, config.ErrFile)
-	})
-
-	t.Run("project symlink", func(t *testing.T) {
-		t.Parallel()
-
-		dir := t.TempDir()
-		target := filepath.Join(dir, "target.toml")
-		link := filepath.Join(dir, "project.toml")
-
-		writeFile(t, target, "tool_search = true\n")
-		require.NoError(t, os.Symlink(target, link))
-
-		_, err := config.Load(config.LoadOptions{
-			ProjectRoot: dir, ProjectFile: link, ProjectTrusted: true,
-		})
-		require.Error(t, err)
-		assert.ErrorIs(t, err, config.ErrFile)
-	})
-
-	t.Run("project parent symlink", func(t *testing.T) {
-		t.Parallel()
-
-		root := t.TempDir()
-		outside := t.TempDir()
-		writeFile(t, filepath.Join(outside, "config.toml"), "tool_search = true\n")
-		require.NoError(t, os.Symlink(outside, filepath.Join(root, paths.ProjectRoot())))
-
-		_, err := config.Load(config.LoadOptions{
-			ProjectRoot:    root,
-			ProjectFile:    filepath.Join(root, filepath.FromSlash(paths.ProjectConfigFile())),
-			ProjectTrusted: true,
-		})
-		require.Error(t, err)
-		assert.ErrorIs(t, err, config.ErrFile)
-	})
-
-	t.Run("oversized user file", func(t *testing.T) {
-		t.Parallel()
-
-		path := filepath.Join(t.TempDir(), "config.toml")
-		writeFile(t, path, strings.Repeat("#", (1<<20)+1))
-		_, err := config.Load(config.LoadOptions{UserFile: path})
-		require.Error(t, err)
-		assert.ErrorIs(t, err, config.ErrFile)
-	})
-}
-
-func TestLoadAllowsUserFileSymlink(t *testing.T) {
+func TestLoadMissingUnsafeAndSymlinkFiles(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	target := filepath.Join(dir, "target.toml")
-	link := filepath.Join(dir, "config.toml")
+	result, err := config.Load(config.LoadOptions{ConfigFile: filepath.Join(dir, "missing.toml")})
+	require.NoError(t, err)
+	assert.Equal(t, config.FileStateAbsent, result.ConfigFile.State)
 
+	_, err = config.Load(config.LoadOptions{ConfigFile: dir})
+	require.ErrorIs(t, err, config.ErrFile)
+
+	oversized := filepath.Join(dir, "oversized.toml")
+	writeFile(t, oversized, strings.Repeat("#", (1<<20)+1))
+	_, err = config.Load(config.LoadOptions{ConfigFile: oversized})
+	require.ErrorIs(t, err, config.ErrFile)
+
+	target := filepath.Join(dir, "target.toml")
+	link := filepath.Join(dir, "link.toml")
 	writeFile(t, target, "tool_search = true\n")
 	require.NoError(t, os.Symlink(target, link))
-
-	result, err := config.Load(config.LoadOptions{UserFile: link})
+	result, err = config.Load(config.LoadOptions{ConfigFile: link})
 	require.NoError(t, err)
 	assert.True(t, result.Config.ToolSearch)
 }

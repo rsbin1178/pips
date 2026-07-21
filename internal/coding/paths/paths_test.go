@@ -86,7 +86,6 @@ func TestProjectPaths(t *testing.T) {
 	t.Parallel()
 
 	assert.Equal(t, ".pips", paths.ProjectRoot())
-	assert.Equal(t, ".pips/config.toml", paths.ProjectConfigFile())
 	assert.Equal(t, ".pips/permissions.toml", paths.ProjectPermissionsFile())
 	assert.Equal(t, ".pips/mcp.json", paths.ProjectMCPFile())
 	assert.Equal(t, ".pips/skills", paths.ProjectSkillsDir())

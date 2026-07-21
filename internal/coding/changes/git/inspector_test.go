@@ -241,7 +241,7 @@ func newGitFixtureAtRoot(t *testing.T, root string, limits Limits) *gitFixture {
 	policy, err := execution.NewPolicy(ws, execution.PolicyConfig{
 		Sandbox:       config.SandboxFullAccess,
 		Approval:      config.ApprovalNever,
-		SandboxSource: config.Source{Kind: config.SourceUserFile},
+		SandboxSource: config.Source{Kind: config.SourceConfigFile},
 	})
 	require.NoError(t, err)
 

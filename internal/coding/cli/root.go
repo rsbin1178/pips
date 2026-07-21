@@ -9,6 +9,7 @@ import (
 
 	term "github.com/charmbracelet/x/term"
 	"github.com/rsbin/pips/internal/coding"
+	"github.com/rsbin/pips/internal/coding/config"
 	"github.com/rsbin/pips/internal/coding/credential"
 	"github.com/rsbin/pips/internal/coding/execution"
 	"github.com/rsbin/pips/internal/coding/paths"
@@ -54,9 +55,9 @@ type Dependencies struct {
 type rootFlags struct {
 	workspace  string
 	configFile string
-	provider   string
 	model      string
-	modelAPI   string
+	variant    string
+	reasoning  string
 	toolSearch bool
 	sandbox    string
 	approval   string
@@ -117,6 +118,7 @@ func New(dependencies Dependencies) (*cobra.Command, error) {
 			return runInteractive(cmd, dependencies, flags)
 		},
 	}
+	root.PersistentPreRunE = rejectLegacyFlags
 	root.CompletionOptions.DisableDefaultCmd = true
 	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
 		return fmt.Errorf("%w: flags: %w", ErrUsage, err)
@@ -125,12 +127,22 @@ func New(dependencies Dependencies) (*cobra.Command, error) {
 	persistent := root.PersistentFlags()
 	persistent.StringVar(&flags.workspace, "workspace", ".", "workspace root")
 	persistent.StringVar(&flags.configFile, "config", "", "user configuration file")
-	persistent.StringVar(&flags.provider, "provider", "", "model provider")
-	persistent.StringVar(&flags.model, "model", "", "model ID")
-	persistent.StringVar(&flags.modelAPI, "model-api", "", "OpenAI API surface")
+	persistent.StringVar(&flags.model, "model", "", "model in provider/model form")
+	persistent.StringVar(&flags.variant, "variant", "", "named model request preset")
+	persistent.StringVar(&flags.reasoning, "reasoning", "", "model reasoning level")
 	persistent.BoolVar(&flags.toolSearch, "tool-search", false, "enable deferred tool search")
 	persistent.StringVar(&flags.sandbox, "sandbox", "", "sandbox mode")
 	persistent.StringVar(&flags.approval, "approval", "", "approval mode")
+	persistent.String("provider", "", "removed provider selector")
+	persistent.String("model-api", "", "removed model API selector")
+
+	if err := persistent.MarkHidden("provider"); err != nil {
+		return nil, fmt.Errorf("coding cli: hide removed --provider flag: %w", err)
+	}
+
+	if err := persistent.MarkHidden("model-api"); err != nil {
+		return nil, fmt.Errorf("coding cli: hide removed --model-api flag: %w", err)
+	}
 
 	root.AddCommand(
 		newExecCommand(dependencies, flags, func(
@@ -147,6 +159,20 @@ func New(dependencies Dependencies) (*cobra.Command, error) {
 	)
 
 	return root, nil
+}
+
+func rejectLegacyFlags(cmd *cobra.Command, _ []string) error {
+	for _, name := range []string{"provider", "model-api"} {
+		if isFlagChanged(cmd, name) {
+			return fmt.Errorf(
+				"%w: --%s was removed; use --model provider/model and configure api under [providers.<id>]",
+				config.ErrMigration,
+				name,
+			)
+		}
+	}
+
+	return nil
 }
 
 func detectTerminal(input io.Reader, output io.Writer) (bool, bool) {

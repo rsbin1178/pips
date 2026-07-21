@@ -20,8 +20,8 @@ const (
 // ErrInvalid means the user configuration root cannot define a safe layout.
 var ErrInvalid = errors.New("coding paths: invalid user configuration directory")
 
-// Layout contains all user-owned P0 persistence paths. Project configuration
-// remains workspace-relative and is not part of this layout.
+// Layout contains all user-owned P0 persistence paths. Project-scoped product
+// resources remain workspace-relative and are not part of this layout.
 type Layout struct {
 	root           string
 	configFile     string
@@ -83,9 +83,6 @@ func Default() (Layout, error) {
 
 // ProjectRoot returns the workspace-relative product directory.
 func ProjectRoot() string { return projectDir }
-
-// ProjectConfigFile returns the workspace-relative project configuration path.
-func ProjectConfigFile() string { return path.Join(projectDir, configFileName) }
 
 // ProjectPermissionsFile returns the workspace-relative local permission path.
 func ProjectPermissionsFile() string { return path.Join(projectDir, "permissions.toml") }

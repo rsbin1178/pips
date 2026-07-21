@@ -65,7 +65,7 @@ func TestValidateOpenOptionsRejectsNilObservers(t *testing.T) {
 	require.NoError(t, err)
 	cfg := config.Defaults()
 	cfg.Model.Provider = ai.ProviderOpenAI
-	cfg.Model.ID = "runtime-test"
+	cfg.Model.Model = "runtime-test"
 	options := OpenOptions{Workspace: ws, Config: cfg, Paths: layout}
 
 	options.AgentObservers = []func(context.Context, agent.Event){nil}
@@ -737,7 +737,7 @@ func openTestRuntimeConfigured(
 
 	cfg := config.Defaults()
 	cfg.Model.Provider = ai.ProviderOpenAI
-	cfg.Model.ID = "runtime-test"
+	cfg.Model.Model = "runtime-test"
 
 	runtime, err := Open(t.Context(), OpenOptions{
 		Workspace:          ws,
