@@ -31,6 +31,7 @@ id = "openai/env-model"
 reasoning_levels = ["low", "high"]
 
 [models.options]
+max_output_tokens = 8192
 temperature = 0.25
 logprobs = true
 `)
@@ -60,9 +61,12 @@ model = "anthropic/project-model"
 	assert.Contains(t, output, `model = "openai/env-model" # source=environment detail="PIPS_MODEL"`)
 	assert.Contains(t, output, `reasoning = "high" # source=flag detail="--reasoning"`)
 	assert.Contains(t, output, `resolved.api = "responses"`)
+	assert.Contains(t, output, `resolved.context_window = 0`)
+	assert.Contains(t, output, `resolved.options.max_output_tokens = 8192`)
 	assert.Contains(t, output, `resolved.options.temperature = 0.25`)
 	assert.Contains(t, output, `resolved.options.logprobs = true`)
 	assert.Contains(t, output, `tool_search = false # source=flag detail="--tool-search"`)
+	assert.NotContains(t, output, "model_max_output_tokens")
 	assert.NotContains(t, output, "project-model")
 
 	opened, err := workspace.Open(fixture.workspaceDir)

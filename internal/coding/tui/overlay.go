@@ -555,7 +555,7 @@ func (m *Model) overlayContent() string {
 		content = fmt.Sprintf(
 			"Status\n\nWorkspace: %s\nSession: %s\nModel: %s\n"+
 				"Variant: %s\nReasoning: %s\nAPI: %s\nEndpoint: %s (%s)\n"+
-				"Context: %s\nModel output: %s\nRequest output: %s\n"+
+				"Context: %s\nRequest output: %s\n"+
 				"Process override: %t\nPhase: %s\nSandbox: %s\nApproval: %s\n"+
 				"Tool search: %t\nPending approval: %s\nDetached: %t",
 			m.options.Workspace,
@@ -567,7 +567,6 @@ func (m *Model) overlayContent() string {
 			modelState.Resolved.Endpoint.BaseURL,
 			modelState.Resolved.Endpoint.Origin,
 			knownLimit(modelState.Resolved.Limits.ContextWindow),
-			knownLimit(modelState.Resolved.Limits.MaxOutputTokens),
 			optionalInt(modelState.Resolved.Options.MaxOutputTokens),
 			modelState.Overridden,
 			m.state.Phase,

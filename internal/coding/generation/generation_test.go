@@ -16,6 +16,7 @@ func TestCompileAppliesFillOnlyDefaults(t *testing.T) {
 	t.Parallel()
 
 	maximum := 8192
+	explicitMaximum := 2048
 	defaultTemperature := 0.2
 	explicitTemperature := 0.7
 	level := config.ReasoningLevel("high")
@@ -37,12 +38,13 @@ func TestCompileAppliesFillOnlyDefaults(t *testing.T) {
 		},
 	}
 	request := ai.Request{
+		MaxTokens:       &explicitMaximum,
 		Temperature:     &explicitTemperature,
 		ProviderOptions: explicitProviderOptions,
 	}
 	policy(&request)
 	assert.InDelta(t, explicitTemperature, *request.Temperature, 1e-9)
-	assert.Equal(t, maximum, *request.MaxTokens)
+	assert.Equal(t, explicitMaximum, *request.MaxTokens)
 	assert.Equal(t, ai.ReasoningHigh, request.Reasoning.Effort)
 	resolvedOptions, ok := request.ProviderOptions[ai.ProviderOpenAI].(openai.RequestOptions)
 	require.True(t, ok)
@@ -52,6 +54,10 @@ func TestCompileAppliesFillOnlyDefaults(t *testing.T) {
 	originalOptions, ok := explicitProviderOptions[ai.ProviderOpenAI].(openai.RequestOptions)
 	require.True(t, ok)
 	assert.NotContains(t, originalOptions.ExtraFields, "service_tier")
+
+	defaulted := ai.Request{}
+	policy(&defaulted)
+	assert.Equal(t, maximum, *defaulted.MaxTokens)
 }
 
 func TestCompileRejectsUnsupportedAndReservedOptions(t *testing.T) {

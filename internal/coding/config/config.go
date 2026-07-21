@@ -216,8 +216,8 @@ func (p ProviderConfig) Equal(other ProviderConfig) bool {
 	return reflect.DeepEqual(p, other)
 }
 
-// ModelOptions are presence-aware per-request defaults. Metadata limits live
-// on ModelConfig instead and are never sent to a provider.
+// ModelOptions are presence-aware per-request defaults. Context-window
+// metadata lives on ModelConfig instead and is never sent to a provider.
 type ModelOptions struct {
 	MaxOutputTokens   *int
 	Temperature       *float64
@@ -290,7 +290,6 @@ type ModelConfig struct {
 	Ref                   ModelRef
 	API                   API
 	ContextWindow         int
-	MaxOutputTokens       int
 	ReasoningLevels       []ReasoningLevel
 	DefaultReasoningLevel *ReasoningLevel
 	ReasoningBudgets      map[ReasoningLevel]int
@@ -564,8 +563,8 @@ func validateModel(model ModelConfig) error {
 			return err
 		}
 	}
-	if model.ContextWindow < 0 || model.MaxOutputTokens < 0 {
-		return fmt.Errorf("%w: model %q capacity cannot be negative", ErrInvalid, model.Ref)
+	if model.ContextWindow < 0 {
+		return fmt.Errorf("%w: model %q context window cannot be negative", ErrInvalid, model.Ref)
 	}
 	if err := validateOptions(model.Options, "model "+model.Ref.String()+" options"); err != nil {
 		return err
