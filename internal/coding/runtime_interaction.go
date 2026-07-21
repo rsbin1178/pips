@@ -297,6 +297,11 @@ func (r *Runtime) beginOperation(
 	if err := parent.Err(); err != nil {
 		return nil, nil, err
 	}
+	if kind == operationPrompt {
+		if err := validatePromptMessages(messages); err != nil {
+			return nil, nil, fmt.Errorf("%w: %w", ErrRuntimeInvalid, err)
+		}
+	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -311,10 +316,6 @@ func (r *Runtime) beginOperation(
 
 	switch kind {
 	case operationPrompt:
-		if len(messages) == 0 {
-			return nil, nil, fmt.Errorf("%w: prompt messages are required", ErrRuntimeInvalid)
-		}
-
 		if r.state.Phase != PhaseIdle || r.interaction != nil || r.recovery.PendingID != "" {
 			return nil, nil, stateError(string(kind), r.state.Phase, ErrRuntimePending)
 		}
@@ -759,7 +760,7 @@ func approvalUnknown(unknown approval.Unknown) ApprovalUnknown {
 
 	fingerprint := unknown.Fingerprint.String()
 	if fingerprint == "0000000000000000000000000000000000000000000000000000000000000000" {
-		fingerprint = "unknown"
+		fingerprint = string(ApprovalUncertain)
 	}
 
 	callID := unknown.CallID

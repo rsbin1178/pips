@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/rsbin/pips/internal/coding"
 	"github.com/rsbin/pips/internal/coding/credential"
 	"github.com/rsbin/pips/internal/coding/execution"
 	"github.com/rsbin/pips/internal/coding/paths"
@@ -80,7 +81,7 @@ func New(dependencies Dependencies) (*cobra.Command, error) {
 	}
 	root.CompletionOptions.DisableDefaultCmd = true
 	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
-		return fmt.Errorf("coding cli: flags: %w", err)
+		return fmt.Errorf("%w: flags: %w", ErrUsage, err)
 	})
 
 	persistent := root.PersistentFlags()
@@ -94,6 +95,12 @@ func New(dependencies Dependencies) (*cobra.Command, error) {
 	persistent.StringVar(&flags.approval, "approval", "", "approval mode")
 
 	root.AddCommand(
+		newExecCommand(dependencies, flags, func(
+			ctx context.Context,
+			options coding.OpenOptions,
+		) (execRuntime, error) {
+			return coding.Open(ctx, options)
+		}),
 		newConfigCommand(dependencies, flags),
 		newSessionCommand(dependencies, flags),
 		newDoctorCommand(dependencies, flags),

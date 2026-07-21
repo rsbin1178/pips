@@ -87,6 +87,15 @@ func loadCommandState(
 		return commandState{}, err
 	}
 
+	return loadResolvedCommandState(cmd, dependencies, flags, resolved)
+}
+
+func loadResolvedCommandState(
+	cmd *cobra.Command,
+	dependencies Dependencies,
+	flags *rootFlags,
+	resolved workspaceState,
+) (commandState, error) {
 	overrides, err := parseFlagOverrides(cmd, flags)
 	if err != nil {
 		return commandState{}, err
