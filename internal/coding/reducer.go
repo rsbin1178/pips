@@ -384,10 +384,36 @@ func (state *State) apply(event Event) error {
 		state.Diagnostics = append(state.Diagnostics, payload)
 	case RuntimeError:
 		lastError := payload
+
 		state.LastError = &lastError
+		if payload.Fatal {
+			state.failActiveRun(event.RunID)
+		}
 	}
 
 	return nil
+}
+
+func (state *State) failActiveRun(runID string) {
+	for index := range state.Tools {
+		tool := &state.Tools[index]
+		if tool.Status == ToolStatusRunning && (runID == "" || tool.RunID == runID) {
+			tool.Status = ToolStatusCompleted
+			delete(state.activeTools, toolStateKey(tool.RunID, tool.Call.ID))
+		}
+	}
+
+	for index := range state.Runs {
+		run := &state.Runs[index]
+		if run.Active && (runID == "" || run.ID == runID) {
+			run.Active = false
+			run.TurnOpen = false
+			delete(state.activeRuns, run.ID)
+			delete(state.openTurns, run.ID)
+		}
+	}
+
+	state.Draft = nil
 }
 
 func (state *State) requireInteraction(interactionID string) error {
