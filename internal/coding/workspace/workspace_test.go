@@ -49,7 +49,7 @@ func TestOpenRejectsInvalidWorkspace(t *testing.T) {
 	}
 }
 
-func TestTrustStoreRoundTripAndReplacement(t *testing.T) {
+func TestStoreRoundTripAndReplacement(t *testing.T) {
 	t.Parallel()
 
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
@@ -63,8 +63,8 @@ func TestTrustStoreRoundTripAndReplacement(t *testing.T) {
 	ws, err := workspace.Open(root)
 	require.NoError(t, err)
 
-	storePath := filepath.Join(base, "private", "trust.json")
-	store := workspace.NewTrustStore(storePath)
+	storePath := filepath.Join(base, "private", "workspaces.json")
+	store := workspace.NewStore(storePath)
 
 	trusted, err := store.IsTrusted(ws.Identity())
 	require.NoError(t, err)
@@ -72,7 +72,7 @@ func TestTrustStoreRoundTripAndReplacement(t *testing.T) {
 
 	require.NoError(t, store.Trust(ws.Identity()))
 
-	trusted, err = workspace.NewTrustStore(storePath).IsTrusted(ws.Identity())
+	trusted, err = workspace.NewStore(storePath).IsTrusted(ws.Identity())
 	require.NoError(t, err)
 	assert.True(t, trusted)
 
@@ -95,7 +95,7 @@ func TestTrustStoreRoundTripAndReplacement(t *testing.T) {
 	assert.False(t, trusted)
 }
 
-func TestTrustStoreRejectsUnsafeOrUnknownData(t *testing.T) {
+func TestStoreRejectsUnsafeOrUnknownData(t *testing.T) {
 	t.Parallel()
 
 	base := t.TempDir()
@@ -110,10 +110,38 @@ func TestTrustStoreRejectsUnsafeOrUnknownData(t *testing.T) {
 		mode    os.FileMode
 		want    error
 	}{
-		{name: "unknown field", content: `{"version":1,"workspaces":{},"extra":true}`, mode: 0o600},
-		{name: "unknown version", content: `{"version":2,"workspaces":{}}`, mode: 0o600, want: workspace.ErrUnsupportedTrustVersion},
-		{name: "trailing value", content: `{"version":1,"workspaces":{}} {}`, mode: 0o600},
-		{name: "broad permissions", content: `{"version":1,"workspaces":{}}`, mode: 0o644, want: workspace.ErrInsecurePermissions},
+		{
+			name:    "unknown field",
+			content: `{"schema":"pips.workspaces/v1alpha1","workspaces":{},"extra":true}`,
+			mode:    0o600,
+		},
+		{
+			name:    "unknown schema",
+			content: `{"schema":"pips.workspaces/v2","workspaces":{}}`,
+			mode:    0o600,
+			want:    workspace.ErrUnsupportedStoreSchema,
+		},
+		{
+			name:    "duplicate key",
+			content: `{"schema":"pips.workspaces/v1alpha1","schema":"pips.workspaces/v1alpha1","workspaces":{}}`,
+			mode:    0o600,
+		},
+		{
+			name:    "null workspaces",
+			content: `{"schema":"pips.workspaces/v1alpha1","workspaces":null}`,
+			mode:    0o600,
+		},
+		{
+			name:    "trailing value",
+			content: `{"schema":"pips.workspaces/v1alpha1","workspaces":{}} {}`,
+			mode:    0o600,
+		},
+		{
+			name:    "broad permissions",
+			content: `{"schema":"pips.workspaces/v1alpha1","workspaces":{}}`,
+			mode:    0o644,
+			want:    workspace.ErrInsecurePermissions,
+		},
 	}
 
 	for _, tt := range tests {
@@ -122,10 +150,10 @@ func TestTrustStoreRejectsUnsafeOrUnknownData(t *testing.T) {
 
 			dir := filepath.Join(base, tt.name)
 			require.NoError(t, os.Mkdir(dir, 0o700))
-			path := filepath.Join(dir, "trust.json")
+			path := filepath.Join(dir, "workspaces.json")
 			require.NoError(t, os.WriteFile(path, []byte(tt.content), tt.mode))
 
-			_, err := workspace.NewTrustStore(path).IsTrusted(ws.Identity())
+			_, err := workspace.NewStore(path).IsTrusted(ws.Identity())
 			require.Error(t, err)
 
 			if tt.want != nil {
@@ -135,7 +163,7 @@ func TestTrustStoreRejectsUnsafeOrUnknownData(t *testing.T) {
 	}
 }
 
-func TestTrustStoreRejectsSymlink(t *testing.T) {
+func TestStoreRejectsSymlink(t *testing.T) {
 	t.Parallel()
 
 	base := t.TempDir()
@@ -145,12 +173,33 @@ func TestTrustStoreRejectsSymlink(t *testing.T) {
 	require.NoError(t, err)
 
 	target := filepath.Join(base, "target.json")
-	require.NoError(t, os.WriteFile(target, []byte(`{"version":1,"workspaces":{}}`), 0o600))
+	require.NoError(t, os.WriteFile(
+		target,
+		[]byte(`{"schema":"pips.workspaces/v1alpha1","workspaces":{}}`),
+		0o600,
+	))
 
-	link := filepath.Join(base, "trust.json")
+	link := filepath.Join(base, "workspaces.json")
 	require.NoError(t, os.Symlink(target, link))
 
-	_, err = workspace.NewTrustStore(link).IsTrusted(ws.Identity())
+	_, err = workspace.NewStore(link).IsTrusted(ws.Identity())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not a regular file")
+}
+
+func TestStoreRejectsOversizedInput(t *testing.T) {
+	t.Parallel()
+
+	base := t.TempDir()
+	root := filepath.Join(base, "workspace")
+	require.NoError(t, os.Mkdir(root, 0o750))
+
+	ws, err := workspace.Open(root)
+	require.NoError(t, err)
+
+	storePath := filepath.Join(base, "workspaces.json")
+	require.NoError(t, os.WriteFile(storePath, make([]byte, (4<<20)+1), 0o600))
+
+	_, err = workspace.NewStore(storePath).IsTrusted(ws.Identity())
+	require.ErrorIs(t, err, workspace.ErrStoreTooLarge)
 }

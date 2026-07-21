@@ -1,13 +1,11 @@
 package coding
 
 import (
-	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 
 	"github.com/rsbin/pips/ai"
+	"github.com/rsbin/pips/internal/coding/jsonx"
 )
 
 const maxEncodedEventBytes = 4 << 20
@@ -177,108 +175,7 @@ func decodePayload[T EventPayload](data []byte) (EventPayload, error) {
 }
 
 func strictDecode(data []byte, target any) error {
-	if err := rejectDuplicateJSONKeys(data); err != nil {
-		return err
-	}
-
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-
-	if err := decoder.Decode(target); err != nil {
-		return err
-	}
-
-	var extra any
-	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return errors.New("multiple JSON values")
-		}
-
-		return err
-	}
-
-	return nil
-}
-
-func rejectDuplicateJSONKeys(data []byte) error {
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	if err := checkJSONValue(decoder); err != nil {
-		return err
-	}
-
-	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return errors.New("multiple JSON values")
-		}
-
-		return err
-	}
-
-	return nil
-}
-
-//nolint:gocyclo // Recursive JSON object/array parsing keeps duplicate detection in one pass.
-func checkJSONValue(decoder *json.Decoder) error {
-	token, err := decoder.Token()
-	if err != nil {
-		return err
-	}
-
-	delimiter, ok := token.(json.Delim)
-	if !ok {
-		return nil
-	}
-
-	switch delimiter {
-	case '{':
-		seen := make(map[string]struct{})
-
-		for decoder.More() {
-			keyToken, keyErr := decoder.Token()
-			if keyErr != nil {
-				return keyErr
-			}
-
-			key, keyOK := keyToken.(string)
-			if !keyOK {
-				return errors.New("object key is not a string")
-			}
-
-			if _, duplicate := seen[key]; duplicate {
-				return fmt.Errorf("duplicate object key %q", key)
-			}
-
-			seen[key] = struct{}{}
-
-			if valueErr := checkJSONValue(decoder); valueErr != nil {
-				return valueErr
-			}
-		}
-	case '[':
-		for decoder.More() {
-			if valueErr := checkJSONValue(decoder); valueErr != nil {
-				return valueErr
-			}
-		}
-	default:
-		return errors.New("unexpected closing delimiter")
-	}
-
-	closing, err := decoder.Token()
-	if err != nil {
-		return err
-	}
-
-	expected := json.Delim('}')
-	if delimiter == '[' {
-		expected = ']'
-	}
-
-	if closing != expected {
-		return errors.New("mismatched JSON delimiter")
-	}
-
-	return nil
+	return jsonx.Decode(data, target)
 }
 
 func validateNestedPayloadJSON(eventType EventType, data []byte) error {

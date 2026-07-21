@@ -23,10 +23,13 @@ var ErrInvalid = errors.New("coding paths: invalid user configuration directory"
 // Layout contains all user-owned P0 persistence paths. Project configuration
 // remains workspace-relative and is not part of this layout.
 type Layout struct {
-	root        string
-	configFile  string
-	trustFile   string
-	sessionsDir string
+	root           string
+	configFile     string
+	workspacesFile string
+	sessionsDir    string
+	skillsDir      string
+	bundlesDir     string
+	mcpFile        string
 }
 
 // New returns an application layout rooted exactly at root.
@@ -45,10 +48,13 @@ func New(root string) (Layout, error) {
 	}
 
 	return Layout{
-		root:        abs,
-		configFile:  filepath.Join(abs, configFileName),
-		trustFile:   filepath.Join(abs, "trust.json"),
-		sessionsDir: filepath.Join(abs, "sessions"),
+		root:           abs,
+		configFile:     filepath.Join(abs, configFileName),
+		workspacesFile: filepath.Join(abs, "workspaces.json"),
+		sessionsDir:    filepath.Join(abs, "sessions"),
+		skillsDir:      filepath.Join(abs, "skills"),
+		bundlesDir:     filepath.Join(abs, "bundles"),
+		mcpFile:        filepath.Join(abs, "mcp.json"),
 	}, nil
 }
 
@@ -99,8 +105,17 @@ func (l Layout) Root() string { return l.root }
 // ConfigFile returns the user TOML configuration path.
 func (l Layout) ConfigFile() string { return l.configFile }
 
-// TrustFile returns the workspace trust-store path.
-func (l Layout) TrustFile() string { return l.trustFile }
+// WorkspacesFile returns the workspace state store path.
+func (l Layout) WorkspacesFile() string { return l.workspacesFile }
 
 // SessionsDir returns the Harness session repository path.
 func (l Layout) SessionsDir() string { return l.sessionsDir }
+
+// SkillsDir returns the user skill directory.
+func (l Layout) SkillsDir() string { return l.skillsDir }
+
+// BundlesDir returns the user bundle directory.
+func (l Layout) BundlesDir() string { return l.bundlesDir }
+
+// MCPFile returns the user MCP configuration path.
+func (l Layout) MCPFile() string { return l.mcpFile }
