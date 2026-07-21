@@ -20,7 +20,7 @@ import (
 func TestHelpGolden(t *testing.T) {
 	t.Parallel()
 
-	output, err := execute(t)
+	output, err := execute(t, "--help")
 	require.NoError(t, err)
 	assert.Equal(t, readGolden(t, "help.golden"), output)
 }

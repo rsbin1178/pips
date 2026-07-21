@@ -4,12 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 
+	term "github.com/charmbracelet/x/term"
 	"github.com/rsbin/pips/internal/coding"
 	"github.com/rsbin/pips/internal/coding/credential"
 	"github.com/rsbin/pips/internal/coding/execution"
 	"github.com/rsbin/pips/internal/coding/paths"
+	"github.com/rsbin/pips/internal/coding/runtimecontrol"
+	"github.com/rsbin/pips/internal/coding/tui"
 	"github.com/rsbin/pips/internal/coding/workspace"
 	"github.com/spf13/cobra"
 )
@@ -25,6 +29,15 @@ type BuildInfo struct {
 // It is injectable so command tests do not depend on the host sandbox.
 type SandboxProbe func(context.Context, workspace.Workspace) (execution.Capabilities, error)
 
+// TerminalDetector reports whether both interactive streams are terminals.
+type TerminalDetector func(io.Reader, io.Writer) (bool, bool)
+
+// TUIRunner starts one interactive Program.
+type TUIRunner func(context.Context, tui.Options) error
+
+// ControllerOpener opens the lifecycle controller consumed by the TUI.
+type ControllerOpener func(context.Context, coding.OpenOptions) (tui.Controller, error)
+
 // Dependencies are process-level inputs shared by command handlers.
 type Dependencies struct {
 	Build        BuildInfo
@@ -32,6 +45,10 @@ type Dependencies struct {
 	LookupEnv    credential.LookupEnv
 	WorkingDir   func() (string, error)
 	SandboxProbe SandboxProbe
+	Terminal     TerminalDetector
+	RunTUI       TUIRunner
+	OpenControl  ControllerOpener
+	Environment  []string
 }
 
 type rootFlags struct {
@@ -64,6 +81,27 @@ func New(dependencies Dependencies) (*cobra.Command, error) {
 		dependencies.SandboxProbe = nativeSandboxProbe(dependencies)
 	}
 
+	if dependencies.Terminal == nil {
+		dependencies.Terminal = detectTerminal
+	}
+
+	if dependencies.RunTUI == nil {
+		dependencies.RunTUI = tui.Run
+	}
+
+	if dependencies.OpenControl == nil {
+		dependencies.OpenControl = func(
+			ctx context.Context,
+			options coding.OpenOptions,
+		) (tui.Controller, error) {
+			return runtimecontrol.New(ctx, options)
+		}
+	}
+
+	if dependencies.Environment == nil {
+		dependencies.Environment = os.Environ()
+	}
+
 	flags := &rootFlags{}
 	root := &cobra.Command{
 		Use:           "pips",
@@ -76,7 +114,7 @@ func New(dependencies Dependencies) (*cobra.Command, error) {
 				return err
 			}
 
-			return cmd.Help()
+			return runInteractive(cmd, dependencies, flags)
 		},
 	}
 	root.CompletionOptions.DisableDefaultCmd = true
@@ -109,6 +147,14 @@ func New(dependencies Dependencies) (*cobra.Command, error) {
 	)
 
 	return root, nil
+}
+
+func detectTerminal(input io.Reader, output io.Writer) (bool, bool) {
+	inputFile, inputOK := input.(interface{ Fd() uintptr })
+	outputFile, outputOK := output.(interface{ Fd() uintptr })
+
+	return inputOK && term.IsTerminal(inputFile.Fd()),
+		outputOK && term.IsTerminal(outputFile.Fd())
 }
 
 func checkContext(ctx context.Context) error {
