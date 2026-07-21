@@ -12,6 +12,14 @@ type chatRequest struct {
 	ToolChoice          any                 `json:"tool_choice,omitempty"`
 	Temperature         *float64            `json:"temperature,omitempty"`
 	TopP                *float64            `json:"top_p,omitempty"`
+	TopK                *int                `json:"top_k,omitempty"`
+	MinP                *float64            `json:"min_p,omitempty"`
+	Seed                *int64              `json:"seed,omitempty"`
+	FrequencyPenalty    *float64            `json:"frequency_penalty,omitempty"`
+	PresencePenalty     *float64            `json:"presence_penalty,omitempty"`
+	RepetitionPenalty   *float64            `json:"repetition_penalty,omitempty"`
+	LogProbs            *bool               `json:"logprobs,omitempty"`
+	TopLogProbs         *int                `json:"top_logprobs,omitempty"`
 	MaxCompletionTokens *int                `json:"max_completion_tokens,omitempty"`
 	MaxTokens           *int                `json:"max_tokens,omitempty"` // compat mode only
 	Stop                []string            `json:"stop,omitempty"`

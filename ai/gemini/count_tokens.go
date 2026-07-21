@@ -15,13 +15,15 @@ type countTokensResponse struct {
 // It returns the request's input-token count without running inference. The
 // endpoint accepts the same body shape as generateContent.
 func (m *Model) CountTokens(ctx context.Context, req ai.Request) (int, error) {
-	body, err := requestFrom(req)
+	body, err := requestFrom(req, m.provider)
 	if err != nil {
 		return 0, err
 	}
 
 	var parsed countTokensResponse
-	if _, err := m.client.PostJSON(ctx, m.methodPath("countTokens"), m.authHeaders(), body, &parsed, decodeError); err != nil {
+	if _, err := m.client.PostJSON(
+		ctx, m.methodPath("countTokens"), m.authHeaders(), body, &parsed, decodeError(m.provider),
+	); err != nil {
 		return 0, fmt.Errorf("gemini: countTokens: %w", err)
 	}
 

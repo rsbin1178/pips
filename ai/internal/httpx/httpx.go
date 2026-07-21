@@ -106,7 +106,12 @@ func New(cfg Config, defaultBaseURL string) *Client {
 	if cfg.HTTPClient != nil {
 		c.httpClient = cfg.HTTPClient
 	} else {
-		c.httpClient = &http.Client{Transport: newTransport(cfg.AllowPrivateIPs)}
+		c.httpClient = &http.Client{
+			Transport: newTransport(cfg.AllowPrivateIPs),
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		}
 	}
 
 	return c

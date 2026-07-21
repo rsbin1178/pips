@@ -38,6 +38,9 @@ const (
 
 const defaultBaseURL = "https://api.openai.com/v1"
 
+// DefaultBaseURL returns the official OpenAI API endpoint used by New.
+func DefaultBaseURL() string { return defaultBaseURL }
+
 // Wire-format string constants shared by the Chat Completions and Responses
 // adapters.
 const (

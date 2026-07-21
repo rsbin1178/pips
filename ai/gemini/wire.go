@@ -80,6 +80,12 @@ type wireFunctionCallingConfig struct {
 type generationConfig struct {
 	Temperature        *float64        `json:"temperature,omitempty"`
 	TopP               *float64        `json:"topP,omitempty"`
+	TopK               *int            `json:"topK,omitempty"`
+	Seed               *int64          `json:"seed,omitempty"`
+	FrequencyPenalty   *float64        `json:"frequencyPenalty,omitempty"`
+	PresencePenalty    *float64        `json:"presencePenalty,omitempty"`
+	ResponseLogProbs   *bool           `json:"responseLogprobs,omitempty"`
+	LogProbs           *int            `json:"logprobs,omitempty"`
 	MaxOutputTokens    *int            `json:"maxOutputTokens,omitempty"`
 	StopSequences      []string        `json:"stopSequences,omitempty"`
 	ResponseMIMEType   string          `json:"responseMimeType,omitempty"`
@@ -89,8 +95,9 @@ type generationConfig struct {
 }
 
 type thinkingConfig struct {
-	ThinkingBudget  *int `json:"thinkingBudget,omitempty"`
-	IncludeThoughts bool `json:"includeThoughts,omitempty"`
+	ThinkingBudget  *int   `json:"thinkingBudget,omitempty"`
+	ThinkingLevel   string `json:"thinkingLevel,omitempty"`
+	IncludeThoughts bool   `json:"includeThoughts,omitempty"`
 }
 
 type generateResponse struct {

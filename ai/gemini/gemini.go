@@ -14,12 +14,16 @@ import (
 
 const defaultBaseURL = "https://generativelanguage.googleapis.com/v1beta"
 
+// DefaultBaseURL returns the official Gemini endpoint used by New.
+func DefaultBaseURL() string { return defaultBaseURL }
+
 // Model is an ai.LanguageModel backed by the Gemini API. Create one with
 // [New]; it is immutable and safe for concurrent use.
 type Model struct {
-	model  string
-	client *httpx.Client
-	apiKey string
+	model    string
+	provider ai.Provider
+	client   *httpx.Client
+	apiKey   string
 }
 
 // Compile-time interface checks.
@@ -32,7 +36,14 @@ var (
 type Option func(*options)
 
 type options struct {
-	cfg httpx.Config
+	cfg      httpx.Config
+	provider ai.Provider
+}
+
+// WithProvider sets the service identity independently from the Gemini wire
+// protocol. It is intended for compatible gateways and self-hosted APIs.
+func WithProvider(provider ai.Provider) Option {
+	return func(o *options) { o.provider = provider }
 }
 
 // WithAPIKey sets the API key. Defaults to the GEMINI_API_KEY environment
@@ -83,7 +94,7 @@ func WithMaxStreamLineSize(n int) Option {
 // New returns a Model bound to the given model ID (for example
 // "gemini-2.5-flash"). Configuration problems surface on the first call.
 func New(model string, opts ...Option) *Model {
-	o := options{}
+	o := options{provider: ai.ProviderGemini}
 	for _, opt := range opts {
 		opt(&o)
 	}
@@ -93,14 +104,15 @@ func New(model string, opts ...Option) *Model {
 	}
 
 	return &Model{
-		model:  model,
-		client: httpx.New(o.cfg, defaultBaseURL),
-		apiKey: o.cfg.APIKey,
+		model:    model,
+		provider: o.provider,
+		client:   httpx.New(o.cfg, defaultBaseURL),
+		apiKey:   o.cfg.APIKey,
 	}
 }
 
 // Provider implements ai.LanguageModel.
-func (m *Model) Provider() ai.Provider { return ai.ProviderGemini }
+func (m *Model) Provider() ai.Provider { return m.provider }
 
 // ModelID implements ai.LanguageModel.
 func (m *Model) ModelID() string { return m.model }

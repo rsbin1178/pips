@@ -125,6 +125,48 @@ func TestResponsesGenerateText(t *testing.T) {
 	assert.Equal(t, 12, resp.Usage.ReasoningTokens)
 }
 
+func TestResponsesTypedGenerationControls(t *testing.T) {
+	t.Parallel()
+
+	var captured map[string]any
+
+	model := newResponsesModel(t, serveResponsesJSON(t, responsesTextResponse, &captured))
+
+	_, err := model.Generate(t.Context(), ai.Request{
+		Messages:    []ai.Message{ai.UserText("hi")},
+		Temperature: ai.Ptr(0.0),
+		TopP:        ai.Ptr(0.9),
+		MaxTokens:   ai.Ptr(2048),
+		LogProbs:    &ai.LogProbsConfig{Enabled: true, Top: 0},
+	})
+	require.NoError(t, err)
+
+	assert.InDelta(t, 0, as[float64](t, captured["temperature"]), 1e-9)
+	assert.InDelta(t, 0.9, as[float64](t, captured["top_p"]), 1e-9)
+	assert.InDelta(t, 2048, as[float64](t, captured["max_output_tokens"]), 1e-9)
+	assert.InDelta(t, 0, as[float64](t, captured["top_logprobs"]), 1e-9)
+}
+
+func TestResponsesDisabledReasoningUsesNoneEffort(t *testing.T) {
+	t.Parallel()
+
+	var captured map[string]any
+
+	model := newResponsesModel(t, serveResponsesJSON(t, responsesTextResponse, &captured))
+
+	_, err := model.Generate(t.Context(), ai.Request{
+		Messages: []ai.Message{ai.UserText("hi")},
+		Reasoning: &ai.ReasoningConfig{
+			Mode:   ai.ReasoningModeDisabled,
+			Effort: ai.ReasoningHigh,
+		},
+	})
+	require.NoError(t, err)
+
+	reasoning := as[map[string]any](t, captured["reasoning"])
+	assert.Equal(t, "none", reasoning["effort"])
+}
+
 func TestResponsesVisionAndToolWireFormat(t *testing.T) {
 	t.Parallel()
 

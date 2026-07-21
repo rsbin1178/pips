@@ -352,8 +352,101 @@ func TestThinkingWireFormat(t *testing.T) {
 
 	gc := as[map[string]any](t, captured["generationConfig"])
 	tc := as[map[string]any](t, gc["thinkingConfig"])
-	assert.InDelta(t, 2048, as[float64](t, tc["thinkingBudget"]), 1e-9)
+	assert.Equal(t, "LOW", tc["thinkingLevel"])
+	assert.NotContains(t, tc, "thinkingBudget")
 	assert.Equal(t, true, tc["includeThoughts"])
+}
+
+func TestTypedGenerationControlsAndThinkingBudgetWireFormat(t *testing.T) {
+	t.Parallel()
+
+	var captured map[string]any
+
+	model := newTestModel(t, serveJSON(t, textResponse, "/v1beta/models/gemini-2.5-flash:generateContent", &captured))
+
+	_, err := model.Generate(t.Context(), ai.Request{
+		Messages:         []ai.Message{ai.UserText("think")},
+		TopK:             ai.Ptr(32),
+		Seed:             ai.Ptr(int64(0)),
+		FrequencyPenalty: ai.Ptr(0.2),
+		PresencePenalty:  ai.Ptr(-0.1),
+		LogProbs:         &ai.LogProbsConfig{Enabled: true, Top: 4},
+		Reasoning: &ai.ReasoningConfig{
+			BudgetTokens:   4096,
+			IncludeSummary: true,
+		},
+	})
+	require.NoError(t, err)
+
+	config := as[map[string]any](t, captured["generationConfig"])
+	assert.InDelta(t, 32, as[float64](t, config["topK"]), 1e-9)
+	assert.InDelta(t, 0, as[float64](t, config["seed"]), 1e-9)
+	assert.InDelta(t, 0.2, as[float64](t, config["frequencyPenalty"]), 1e-9)
+	assert.InDelta(t, -0.1, as[float64](t, config["presencePenalty"]), 1e-9)
+	assert.Equal(t, true, config["responseLogprobs"])
+	assert.InDelta(t, 4, as[float64](t, config["logprobs"]), 1e-9)
+	thinking := as[map[string]any](t, config["thinkingConfig"])
+	assert.InDelta(t, 4096, as[float64](t, thinking["thinkingBudget"]), 1e-9)
+	assert.NotContains(t, thinking, "thinkingLevel")
+	assert.Equal(t, true, thinking["includeThoughts"])
+}
+
+func TestNoneThinkingDisablesAndAdaptiveFails(t *testing.T) {
+	t.Parallel()
+
+	var captured map[string]any
+
+	model := newTestModel(t, serveJSON(t, textResponse, "/v1beta/models/gemini-2.5-flash:generateContent", &captured))
+
+	_, err := model.Generate(t.Context(), ai.Request{
+		Messages:  []ai.Message{ai.UserText("think")},
+		Reasoning: &ai.ReasoningConfig{Effort: ai.ReasoningNone},
+	})
+	require.NoError(t, err)
+	config := as[map[string]any](t, captured["generationConfig"])
+	thinking := as[map[string]any](t, config["thinkingConfig"])
+	assert.InDelta(t, 0, as[float64](t, thinking["thinkingBudget"]), 1e-9)
+
+	_, err = model.Generate(t.Context(), ai.Request{
+		Messages:  []ai.Message{ai.UserText("think")},
+		Reasoning: &ai.ReasoningConfig{Mode: ai.ReasoningModeAdaptive},
+	})
+	require.ErrorIs(t, err, ai.ErrUnsupported)
+
+	_, err = model.Generate(t.Context(), ai.Request{
+		Messages: []ai.Message{ai.UserText("think")},
+		Seed:     ai.Ptr(int64(1 << 31)),
+	})
+	require.ErrorIs(t, err, ai.ErrInvalidRequest)
+
+	_, err = model.Generate(t.Context(), ai.Request{
+		Messages:  []ai.Message{ai.UserText("think")},
+		Reasoning: &ai.ReasoningConfig{Effort: ai.ReasoningXHigh},
+	})
+	require.ErrorIs(t, err, ai.ErrUnsupported)
+}
+
+func TestProviderOptionsRejectResponseModalitiesWhenUnset(t *testing.T) {
+	t.Parallel()
+
+	model := newTestModel(t, func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("unsafe extension reached HTTP")
+
+		_, _ = w.Write([]byte(textResponse))
+	})
+
+	_, err := model.Generate(t.Context(), ai.Request{
+		Messages: []ai.Message{ai.UserText("hi")},
+		ProviderOptions: map[ai.Provider]any{
+			ai.ProviderGemini: gemini.RequestOptions{
+				ExtraFields: map[string]any{
+					"generationConfig": map[string]any{"responseModalities": []any{"IMAGE"}},
+				},
+			},
+		},
+	})
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "reserved")
 }
 
 func TestErrorMapping(t *testing.T) {

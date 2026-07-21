@@ -1,8 +1,10 @@
+//nolint:wsl_v5 // Wire translation keeps presence-aware assignments adjacent.
 package gemini
 
 import (
 	"encoding/base64"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 
@@ -15,16 +17,23 @@ type RequestOptions struct {
 	// CachedContent references an explicit Gemini cache resource, for example
 	// "cachedContents/abc123".
 	CachedContent string
-	// ExtraFields is merged into the top level of the outgoing JSON request,
-	// overriding colliding keys — the escape hatch for parameters not modeled
-	// portably (safetySettings, topK, seed, ...).
+	// ExtraFields is merged into the outgoing JSON request using bounded
+	// recursive add-only semantics. It is the escape hatch for non-reserved
+	// parameters not modeled portably (for example safetySettings).
 	ExtraFields map[string]any
 }
 
-func requestOptions(req ai.Request) RequestOptions {
-	if raw, ok := req.ProviderOptions[ai.ProviderGemini]; ok {
+func requestOptions(req ai.Request, provider ai.Provider) RequestOptions {
+	if raw, ok := req.ProviderOptions[provider]; ok {
 		if opts, ok := raw.(RequestOptions); ok {
 			return opts
+		}
+	}
+	if provider != ai.ProviderGemini {
+		if raw, ok := req.ProviderOptions[ai.ProviderGemini]; ok {
+			if opts, ok := raw.(RequestOptions); ok {
+				return opts
+			}
 		}
 	}
 
@@ -33,8 +42,14 @@ func requestOptions(req ai.Request) RequestOptions {
 
 // requestFrom translates a portable request into the generateContent wire
 // shape.
-func requestFrom(req ai.Request) (any, error) {
-	opts := requestOptions(req)
+func requestFrom(req ai.Request, provider ai.Provider) (any, error) {
+	if err := validateGenerationControls(req); err != nil {
+		return nil, err
+	}
+	if req.Reasoning != nil && req.Reasoning.Mode == ai.ReasoningModeAdaptive {
+		return nil, fmt.Errorf("gemini: adaptive reasoning is unsupported: %w", ai.ErrUnsupported)
+	}
+	opts := requestOptions(req, provider)
 
 	contents, err := contentsFrom(req.Messages)
 	if err != nil {
@@ -51,6 +66,68 @@ func requestFrom(req ai.Request) (any, error) {
 	}
 
 	return mergeExtraFields(out, opts.ExtraFields)
+}
+
+func validateGenerationControls(req ai.Request) error {
+	rules := []struct {
+		invalid bool
+		message string
+	}{
+		{outside(req.Temperature, 0, 2), "temperature must be within 0..2"},
+		{outside(req.TopP, 0, 1), "top-p must be within 0..1"},
+		{outsidePositiveInt32(req.TopK), fmt.Sprintf("top-k must be within 1..%d", math.MaxInt32)},
+		{outsideSignedInt32(req.Seed), "seed must fit int32"},
+		{outside(req.FrequencyPenalty, -2, 2), "frequency penalty must be within -2..2"},
+		{outside(req.PresencePenalty, -2, 2), "presence penalty must be within -2..2"},
+		{outsidePositiveInt32(req.MaxTokens), fmt.Sprintf("max tokens must be within 1..%d", math.MaxInt32)},
+		{invalidLogProbs(req.LogProbs), "top logprobs must be within 0..20"},
+		{invalidThinkingBudget(req.Reasoning), fmt.Sprintf("thinking budget must be within 0..%d", math.MaxInt32)},
+	}
+	for _, rule := range rules {
+		if rule.invalid {
+			return fmt.Errorf("gemini: %s: %w", rule.message, ai.ErrInvalidRequest)
+		}
+	}
+	if req.Reasoning != nil && !validThinkingLevel(req.Reasoning) {
+		return fmt.Errorf("gemini: unsupported thinking level %q: %w", req.Reasoning.Effort, ai.ErrUnsupported)
+	}
+
+	return nil
+}
+
+func validThinkingLevel(value *ai.ReasoningConfig) bool {
+	if value.Mode == ai.ReasoningModeDisabled {
+		return true
+	}
+
+	switch value.Effort {
+	case "", ai.ReasoningNone, ai.ReasoningMinimal, ai.ReasoningLow,
+		ai.ReasoningMedium, ai.ReasoningHigh:
+		return true
+	default:
+		return value.BudgetTokens != 0
+	}
+}
+
+func outsidePositiveInt32(value *int) bool {
+	return value != nil && (*value <= 0 || int64(*value) > math.MaxInt32)
+}
+
+func outsideSignedInt32(value *int64) bool {
+	return value != nil && (*value < math.MinInt32 || *value > math.MaxInt32)
+}
+
+func invalidLogProbs(value *ai.LogProbsConfig) bool {
+	return value != nil && (value.Top < 0 || value.Top > 20)
+}
+
+func invalidThinkingBudget(value *ai.ReasoningConfig) bool {
+	return value != nil && (value.BudgetTokens < 0 || int64(value.BudgetTokens) > math.MaxInt32)
+}
+
+func outside(value *float64, minimum, maximum float64) bool {
+	return value != nil && (math.IsNaN(*value) || math.IsInf(*value, 0) ||
+		*value < minimum || *value > maximum)
 }
 
 func systemInstructionFrom(system string) *wireContent {
@@ -251,10 +328,20 @@ func toolConfigFrom(choice ai.ToolChoice) *wireToolConfig {
 
 func generationConfigFrom(req ai.Request) *generationConfig {
 	cfg := &generationConfig{
-		Temperature:     req.Temperature,
-		TopP:            req.TopP,
-		MaxOutputTokens: req.MaxTokens,
-		StopSequences:   req.Stop,
+		Temperature:      req.Temperature,
+		TopP:             req.TopP,
+		TopK:             req.TopK,
+		Seed:             req.Seed,
+		FrequencyPenalty: req.FrequencyPenalty,
+		PresencePenalty:  req.PresencePenalty,
+		MaxOutputTokens:  req.MaxTokens,
+		StopSequences:    req.Stop,
+	}
+	if req.LogProbs != nil {
+		cfg.ResponseLogProbs = &req.LogProbs.Enabled
+		if req.LogProbs.Top != 0 {
+			cfg.LogProbs = &req.LogProbs.Top
+		}
 	}
 
 	if rf := req.ResponseFormat; rf != nil && rf.Schema != nil {
@@ -277,17 +364,20 @@ func thinkingConfigFrom(r *ai.ReasoningConfig) *thinkingConfig {
 	if r == nil {
 		return nil
 	}
-
-	budget := r.BudgetTokens
-	if budget == 0 {
-		budget = budgetFromEffort(r.Effort)
+	if r.Mode == ai.ReasoningModeDisabled || r.Effort == ai.ReasoningNone {
+		budget := 0
+		return &thinkingConfig{ThinkingBudget: &budget, IncludeThoughts: r.IncludeSummary}
 	}
 
-	if budget == 0 && !r.IncludeSummary {
+	budget := r.BudgetTokens
+	if budget == 0 && r.Effort == "" && !r.IncludeSummary {
 		return nil
 	}
 
 	tc := &thinkingConfig{IncludeThoughts: r.IncludeSummary}
+	if r.Effort != "" && r.BudgetTokens == 0 {
+		tc.ThinkingLevel = strings.ToUpper(string(r.Effort))
+	}
 	if budget != 0 {
 		tc.ThinkingBudget = &budget
 	}
@@ -295,21 +385,10 @@ func thinkingConfigFrom(r *ai.ReasoningConfig) *thinkingConfig {
 	return tc
 }
 
-func budgetFromEffort(effort ai.ReasoningEffort) int {
-	switch effort {
-	case ai.ReasoningLow:
-		return 2048
-	case ai.ReasoningMedium:
-		return 8192
-	case ai.ReasoningHigh:
-		return 16384
-	default:
-		return 0
-	}
-}
-
 func isEmptyGenerationConfig(cfg *generationConfig) bool {
-	return cfg.Temperature == nil && cfg.TopP == nil && cfg.MaxOutputTokens == nil &&
+	return cfg.Temperature == nil && cfg.TopP == nil && cfg.TopK == nil && cfg.Seed == nil &&
+		cfg.FrequencyPenalty == nil && cfg.PresencePenalty == nil &&
+		cfg.ResponseLogProbs == nil && cfg.LogProbs == nil && cfg.MaxOutputTokens == nil &&
 		len(cfg.StopSequences) == 0 && cfg.ResponseMIMEType == "" &&
 		cfg.ResponseSchema == nil && cfg.ThinkingConfig == nil
 }

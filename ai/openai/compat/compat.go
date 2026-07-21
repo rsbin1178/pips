@@ -5,15 +5,41 @@
 // provider identity, credentials, endpoints, capabilities, and documented wire
 // differences explicit. Native protocols such as Bedrock Converse and Vertex
 // AI are not compatibility profiles.
+//
+//nolint:wsl_v5 // Profile lookup and defensive copying form one operation.
 package compat
 
 import (
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/ai/openai"
 )
+
+// Lookup returns a defensive copy of a reviewed OpenAI-compatible provider
+// profile. It lets applications build registries without duplicating endpoint
+// and wire-compatibility knowledge.
+func Lookup(provider ai.Provider) (Profile, bool) {
+	profiles := map[ai.Provider]Profile{
+		ai.ProviderDeepSeek:   deepSeekProfile,
+		ai.ProviderGroq:       groqProfile,
+		ai.ProviderXAI:        xaiProfile,
+		ai.ProviderOpenRouter: openRouterProfile,
+		ai.ProviderCerebras:   cerebrasProfile,
+		ai.ProviderTogether:   togetherProfile,
+		ai.ProviderMistral:    mistralProfile,
+	}
+
+	profile, ok := profiles[provider]
+	if !ok {
+		return Profile{}, false
+	}
+	profile.APIKeyEnv = slices.Clone(profile.APIKeyEnv)
+
+	return profile, true
+}
 
 // Profile describes one OpenAI-shaped service. Named constructors in this
 // package provide reviewed profiles; New also accepts custom profiles for
