@@ -32,12 +32,12 @@ allow_private_ips = true
 [[models]]
 id = "openai/gpt-file"
 context_window = 200000
-max_output_tokens = 100000
 reasoning_levels = ["low", "medium", "high"]
 default_reasoning_level = "medium"
 default_variant = "balanced"
 
 [models.options]
+max_output_tokens = 4096
 temperature = 0.2
 stop = ["END"]
 
@@ -69,6 +69,7 @@ max_output_tokens = 8192
 	assert.Equal(t, config.FileStateLoaded, result.ConfigFile.State)
 	require.Len(t, result.Config.Models, 1)
 	assert.Equal(t, 200000, result.Config.Models[0].ContextWindow)
+	assert.Equal(t, 4096, *result.Config.Models[0].Options.MaxOutputTokens)
 	assert.InDelta(t, 0.2, *result.Config.Models[0].Options.Temperature, 1e-9)
 	assert.Equal(t, 8192, *result.Config.Models[0].Variants["balanced"].Options.MaxOutputTokens)
 	assert.Equal(t, config.APIChatCompletions, result.Config.Providers["local"].API)
@@ -98,11 +99,18 @@ func TestLoadRejectsLegacyAndInvalidConfiguration(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name    string
-		content string
-		want    error
+		name     string
+		content  string
+		want     error
+		wantText string
 	}{
 		{name: "legacy model table", content: "[model]\nprovider = \"openai\"\nid = \"gpt\"\n", want: config.ErrMigration},
+		{
+			name:     "removed model output limit",
+			content:  "[[models]]\nid = \"openai/gpt\"\nmax_output_tokens = 8192\n",
+			want:     config.ErrMigration,
+			wantText: "move the value to [models.options]",
+		},
 		{name: "unknown top level", content: "api_key = \"secret\"\n", want: config.ErrDecode},
 		{name: "unknown option", content: "[[models]]\nid = \"openai/gpt\"\n[models.options]\ntypo = true\n", want: config.ErrDecode},
 		{name: "duplicate model", content: "[[models]]\nid = \"openai/gpt\"\n[[models]]\nid = \"openai/gpt\"\n", want: config.ErrInvalid},
@@ -118,6 +126,9 @@ func TestLoadRejectsLegacyAndInvalidConfiguration(t *testing.T) {
 			writeFile(t, path, tt.content)
 			_, err := config.Load(config.LoadOptions{ConfigFile: path})
 			require.ErrorIs(t, err, tt.want)
+			if tt.wantText != "" {
+				assert.ErrorContains(t, err, tt.wantText)
+			}
 		})
 	}
 }

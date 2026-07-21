@@ -71,7 +71,6 @@ model = "openai/gpt-model-id"
 [[models]]
 id = "openai/gpt-model-id"
 context_window = 200000
-max_output_tokens = 100000
 reasoning_levels = ["low", "medium", "high", "xhigh"]
 default_reasoning_level = "medium"
 default_variant = "balanced"
@@ -91,6 +90,8 @@ max_output_tokens = 32768
 [[models]]
 id = "anthropic/claude-model-id"
 context_window = 200000
+
+[models.options]
 max_output_tokens = 64000
 ```
 
@@ -108,9 +109,9 @@ allow_private_ips = true
 [[models]]
 id = "local/qwen2.5-coder:7b"
 context_window = 32768
-max_output_tokens = 4096
 
 [models.options]
+max_output_tokens = 4096
 top_k = 40
 seed = 7
 
@@ -125,12 +126,17 @@ typed request options. Pips does not contact a remote model catalog; only the
 current model and local `[[models]]` entries appear in `/model`. Unknown model
 capacity remains unknown rather than being guessed.
 
+`context_window` is local context-capacity metadata. Request output is
+configured only with `[models.options].max_output_tokens` (or a variant
+override); that value is compiled into the provider request and may be
+overridden by an explicit per-call limit.
+
 Reasoning levels are model capabilities, but native protocol vocabularies are
 still validated before a request. For budget-based Anthropic or Gemini models,
 use `reasoning_budgets = { low = 2048, high = 8192 }`; selecting a mapped level
 sends the numeric budget instead of an incompatible native effort enum.
 
-`pips config show` prints the resolved API, endpoint origin, model capacities,
+`pips config show` prints the resolved API, endpoint origin, context capacity,
 and every effective typed request option. Raw `extra_body` values stay hidden;
 only their top-level key count and encoded byte count are shown.
 

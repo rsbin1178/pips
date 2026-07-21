@@ -198,6 +198,18 @@ func TestLongDiffOverlayScrollsWithKeyboard(t *testing.T) {
 	assert.Contains(t, model.View().Content, "diff line 01")
 }
 
+func TestStatusOverlayShowsOnlyRequestOutputLimit(t *testing.T) {
+	t.Parallel()
+
+	model := readyModelWithController(t, newOverlayController(readyState()), true)
+	model.openOverlay(overlayStatus)
+	content := model.overlayContent()
+
+	assert.Contains(t, content, "Context:")
+	assert.Contains(t, content, "Request output:")
+	assert.NotContains(t, content, "Model output:")
+}
+
 func approvalReviewState() coding.State {
 	state := readyState()
 	state.Phase = coding.PhasePaused
