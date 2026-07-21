@@ -45,8 +45,9 @@ approval, native OS command isolation, and read-only Git change attribution.
 The single-session Runtime now composes durable Harness state, immutable
 Extension/Skill/MCP generations, approval continuation, change attribution,
 typed product events, and optional telemetry. CLI event rendering and the
-single-column TUI are the next implementation stages; the current command
-exposes configuration, session inspection, and `doctor`.
+non-interactive `exec` path are now available; the single-column TUI is the
+next implementation stage. The command also exposes configuration, session
+inspection, and `doctor`.
 
 The default `workspace-write` mode never falls back to an unsandboxed command.
 It uses macOS Seatbelt or an externally installed Linux/WSL2 Bubblewrap runtime,
@@ -59,6 +60,21 @@ to validate the selected model credential and the actual local Sandbox. The
 probe also reports process-isolation strength. See
 [Coding execution security](docs/coding-security.md) for the threat model,
 runtime requirements, HOME-read limitation, and container guidance.
+
+Run one request with a plain final answer on stdout:
+
+```sh
+API_KEY=... go run ./cmd/pips exec \
+  --provider <provider> --model <model> \
+  "explain the failing tests"
+```
+
+Prompts can also come from stdin (`printf 'review this change' | pips exec` or
+`pips exec -`). Use `--output jsonl` for safe, schema-versioned Runtime events,
+`--session <id>` to continue an exact session, and `--trust-workspace` to
+persist the explicit decision that enables project `.pips` resources. See the
+[Coding CLI contract](docs/coding-cli.md) for output, exit-code, signal, and
+security details.
 
 Coding observability has two deliberate inputs. Raw `agent.Event` observers
 receive run/turn/tool signals through the Harness boundary; content-free

@@ -352,6 +352,9 @@ func validateSessionID(id string) error {
 	return nil
 }
 
+// ValidateID verifies that id is safe to use as a durable session name.
+func ValidateID(id string) error { return validateSessionID(id) }
+
 func secureSessionDirectory(path string) error {
 	if err := os.MkdirAll(path, 0o750); err != nil {
 		return fmt.Errorf("coding session: create repository: %w", err)
