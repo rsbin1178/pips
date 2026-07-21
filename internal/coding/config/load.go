@@ -132,17 +132,17 @@ type fileProvider struct {
 }
 
 type fileModel struct {
-	ID                    string                 `toml:"id"`
-	API                   *string                `toml:"api"`
-	ContextWindow         *int                   `toml:"context_window"`
-	MaxOutputTokens       *int                   `toml:"max_output_tokens"`
-	ReasoningLevels       []string               `toml:"reasoning_levels"`
-	DefaultReasoningLevel *string                `toml:"default_reasoning_level"`
-	ReasoningBudgets      map[string]int         `toml:"reasoning_budgets"`
-	DefaultVariant        *string                `toml:"default_variant"`
-	Compatibility         fileCompatibility      `toml:"compatibility"`
-	Options               fileOptions            `toml:"options"`
-	Variants              map[string]fileVariant `toml:"variants"`
+	ID                     string                 `toml:"id"`
+	API                    *string                `toml:"api"`
+	ContextWindow          *int                   `toml:"context_window"`
+	RemovedMaxOutputTokens *int                   `toml:"max_output_tokens"`
+	ReasoningLevels        []string               `toml:"reasoning_levels"`
+	DefaultReasoningLevel  *string                `toml:"default_reasoning_level"`
+	ReasoningBudgets       map[string]int         `toml:"reasoning_budgets"`
+	DefaultVariant         *string                `toml:"default_variant"`
+	Compatibility          fileCompatibility      `toml:"compatibility"`
+	Options                fileOptions            `toml:"options"`
+	Variants               map[string]fileVariant `toml:"variants"`
 }
 
 type fileVariant struct {
@@ -401,6 +401,13 @@ func decodeProvider(value fileProvider) (ProviderConfig, error) {
 
 //nolint:gocyclo // One decoder owns the complete model schema and path context.
 func decodeModel(value fileModel) (ModelConfig, error) {
+	if value.RemovedMaxOutputTokens != nil {
+		return ModelConfig{}, fmt.Errorf(
+			"%w: model-level max_output_tokens was removed; move the value to [models.options]",
+			ErrMigration,
+		)
+	}
+
 	ref, err := ParseModelRef(value.ID)
 	if err != nil {
 		return ModelConfig{}, err
@@ -418,9 +425,6 @@ func decodeModel(value fileModel) (ModelConfig, error) {
 	}
 	if value.ContextWindow != nil {
 		result.ContextWindow = *value.ContextWindow
-	}
-	if value.MaxOutputTokens != nil {
-		result.MaxOutputTokens = *value.MaxOutputTokens
 	}
 	for _, raw := range value.ReasoningLevels {
 		level, parseErr := ParseReasoningLevel(raw)

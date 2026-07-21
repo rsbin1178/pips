@@ -42,10 +42,9 @@ type Endpoint struct {
 	Origin          string
 }
 
-// Limits are local metadata and are never sent as request options.
+// Limits are local context metadata and are never sent as request options.
 type Limits struct {
-	ContextWindow   int
-	MaxOutputTokens int
+	ContextWindow int
 }
 
 // ResolvedModel is an immutable-by-convention runtime snapshot.
@@ -82,7 +81,6 @@ func (m ResolvedModel) Equal(other ResolvedModel) bool {
 type Entry struct {
 	Ref              config.ModelRef
 	ContextWindow    int
-	MaxOutputTokens  int
 	ReasoningLevels  []config.ReasoningLevel
 	DefaultReasoning *config.ReasoningLevel
 	Variants         []string
@@ -242,7 +240,7 @@ func (r *registry) resolve(selection Selection) (ResolvedModel, error) {
 		Ref:              ref,
 		API:              api,
 		Endpoint:         provider.endpoint,
-		Limits:           Limits{ContextWindow: model.ContextWindow, MaxOutputTokens: model.MaxOutputTokens},
+		Limits:           Limits{ContextWindow: model.ContextWindow},
 		Compatibility:    compatibility,
 		Options:          options,
 		Variant:          variantName,
@@ -374,7 +372,6 @@ func entryFrom(model config.ModelConfig) Entry {
 
 	return Entry{
 		Ref: model.Ref, ContextWindow: model.ContextWindow,
-		MaxOutputTokens:  model.MaxOutputTokens,
 		ReasoningLevels:  slices.Clone(model.ReasoningLevels),
 		DefaultReasoning: clonePointer(model.DefaultReasoningLevel),
 		Variants:         variants, DefaultVariant: model.DefaultVariant,

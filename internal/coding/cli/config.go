@@ -77,13 +77,12 @@ func newConfigShowCommand(dependencies Dependencies, flags *rootFlags) *cobra.Co
 			if _, err := fmt.Fprintf(
 				output,
 				"resolved.api = %q\nresolved.base_url = %q # origin=%s\n"+
-					"resolved.context_window = %d\nresolved.model_max_output_tokens = %d\n"+
+					"resolved.context_window = %d\n"+
 					"resolved.extra_body = <redacted> # keys=%d bytes=%d\n",
 				resolved.API,
 				resolved.Endpoint.BaseURL,
 				resolved.Endpoint.Origin,
 				resolved.Limits.ContextWindow,
-				resolved.Limits.MaxOutputTokens,
 				len(resolved.Options.ExtraBody),
 				len(extraBytes),
 			); err != nil {

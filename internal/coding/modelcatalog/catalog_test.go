@@ -23,7 +23,6 @@ func TestResolveInheritanceVariantAndReasoning(t *testing.T) {
 		Models: []config.ModelConfig{{
 			Ref:                   config.ModelRef{Provider: ai.ProviderOpenAI, Model: "gpt"},
 			ContextWindow:         200000,
-			MaxOutputTokens:       100000,
 			ReasoningLevels:       []config.ReasoningLevel{"low", medium, high},
 			DefaultReasoningLevel: &medium,
 			ReasoningBudgets:      map[config.ReasoningLevel]int{high: 16000},
