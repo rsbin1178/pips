@@ -2,6 +2,7 @@ package coding
 
 import (
 	"encoding/json"
+	"time"
 
 	"github.com/rsbin/pips/agent"
 	"github.com/rsbin/pips/ai"
@@ -162,6 +163,7 @@ func safeMessage(message ai.Message) ai.Message {
 // provider-response identifiers.
 type TelemetryEvent struct {
 	Type           EventType          `json:"type"`
+	Time           time.Time          `json:"time"`
 	Provider       ai.Provider        `json:"provider,omitempty"`
 	ModelID        string             `json:"model_id,omitempty"`
 	Agent          string             `json:"agent,omitempty"`
@@ -175,6 +177,7 @@ type TelemetryEvent struct {
 	Changes        int                `json:"changes,omitempty"`
 	DurationMillis int64              `json:"duration_ms,omitempty"`
 	Usage          TokenUsage         `json:"usage"`
+	Resumed        bool               `json:"resumed,omitempty"`
 	Failed         bool               `json:"failed,omitempty"`
 }
 
@@ -186,11 +189,16 @@ func Telemetry(event Event) (TelemetryEvent, error) {
 		return TelemetryEvent{}, err
 	}
 
-	projected := TelemetryEvent{Type: event.Type}
+	projected := TelemetryEvent{Type: event.Type, Time: event.Time}
 	switch value := event.Payload.(type) {
 	case SessionOpened:
 		projected.Provider = value.Provider
 		projected.ModelID = value.ModelID
+		projected.Resumed = value.Resumed
+	case SessionClosed:
+		projected.Code = string(value.Reason)
+	case InteractionStarted:
+		projected.Resumed = value.Resumed
 	case InteractionCompleted:
 		projected.Outcome = value.Outcome
 		projected.DurationMillis = value.DurationMillis
@@ -237,7 +245,7 @@ func Telemetry(event Event) (TelemetryEvent, error) {
 	case RuntimeError:
 		projected.Code = value.Code
 		projected.Failed = true
-	case SessionClosed, InteractionStarted, TurnStarted, MessageCommitted:
+	case TurnStarted, MessageCommitted:
 	}
 
 	return projected, nil

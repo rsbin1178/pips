@@ -83,7 +83,10 @@ type OpenOptions struct {
 	Execution   ExecutionOptions
 	Extensions  []extension.Extension
 
-	AgentObservers []func(context.Context, agent.Event)
+	// AgentObservers receive raw run, turn, and tool events. TelemetryObservers
+	// receive the content-free Coding product projection.
+	AgentObservers     []func(context.Context, agent.Event)
+	TelemetryObservers []TelemetryObserver
 }
 
 // Runtime is the Coding Agent composition root for one Workspace and one
@@ -115,6 +118,7 @@ type Runtime struct {
 	resolver    activeResolver
 	pending     pendingRunner
 	observers   *agentObservers
+	telemetry   *telemetryObservers
 
 	writer      *eventWriter
 	interaction *interaction
@@ -317,6 +321,7 @@ func Open(ctx context.Context, options OpenOptions) (_ *Runtime, returnErr error
 		resources:   loadedResources,
 		trusted:     options.Trusted,
 		observers:   newAgentObservers(options.AgentObservers),
+		telemetry:   newTelemetryObservers(options.TelemetryObservers),
 		closeDone:   make(chan struct{}),
 	}
 
@@ -359,10 +364,9 @@ func Open(ctx context.Context, options OpenOptions) (_ *Runtime, returnErr error
 		return nil, err
 	}
 
-	runtime.recordOpenDiagnostics(loadedResources, connections)
+	runtime.observeSessionOpened(ctx, resumed)
+	runtime.recordOpenDiagnostics(ctx, loadedResources, connections)
 	stack.values = nil
-
-	_ = resumed // Retained by SessionOpened when an application adds an open-event adapter.
 
 	return runtime, nil
 }
@@ -384,6 +388,12 @@ func validateOpenOptions(options OpenOptions) error {
 	for _, observer := range options.AgentObservers {
 		if observer == nil {
 			return fmt.Errorf("%w: nil Agent observer", ErrRuntimeInvalid)
+		}
+	}
+
+	for _, observer := range options.TelemetryObservers {
+		if observer == nil {
+			return fmt.Errorf("%w: nil Telemetry observer", ErrRuntimeInvalid)
 		}
 	}
 
@@ -567,32 +577,26 @@ func activateResources(
 }
 
 func (r *Runtime) recordOpenDiagnostics(
+	ctx context.Context,
 	loaded resource.Result,
 	connections *codingmcp.Connections,
 ) {
 	for _, diagnostic := range loaded.Diagnostics() {
-		r.recordDiagnostic(IntegrationDiagnostic{
+		r.recordDiagnostic(ctx, IntegrationDiagnostic{
 			Component: "resource", Code: diagnostic.Code, Message: diagnostic.Message,
 		})
 	}
 
 	for _, diagnostic := range connections.Diagnostics() {
-		r.recordDiagnostic(IntegrationDiagnostic{
+		r.recordDiagnostic(ctx, IntegrationDiagnostic{
 			Component: componentMCP, Code: diagnostic.Code, Message: diagnostic.Message, Disabled: true,
 		})
 	}
 }
 
-func (r *Runtime) recordDiagnostic(diagnostic IntegrationDiagnostic) {
-	event, err := r.writer.write("", "", EventIntegrationDiagnostic, diagnostic)
-	if err != nil {
-		return
-	}
-
-	next, err := Reduce(r.state, event)
-	if err == nil {
-		r.state = next
-	}
+func (r *Runtime) recordDiagnostic(ctx context.Context, diagnostic IntegrationDiagnostic) {
+	emitter := newEventEmitter(ctx, r, nil, false)
+	_ = emitter.emit("", "", EventIntegrationDiagnostic, diagnostic)
 }
 
 type agentObservers struct {
@@ -781,8 +785,8 @@ func (r *Runtime) Reload(ctx context.Context) error {
 	previous := r.connections
 	r.connections = connections
 	r.resources = loaded
-	r.recordOpenDiagnostics(loaded, connections)
 	r.mu.Unlock()
+	r.recordOpenDiagnostics(ctx, loaded, connections)
 
 	return previous.Close()
 }

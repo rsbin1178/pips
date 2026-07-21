@@ -24,9 +24,26 @@ import (
 var errConsumerStopped = errors.New("coding runtime: event consumer stopped")
 
 type eventEmitter struct {
-	runtime *Runtime
-	yield   func(Event, error) bool
-	alive   bool
+	runtime          *Runtime
+	observeTelemetry func(Event) []IntegrationDiagnostic
+	yield            func(Event, error) bool
+	alive            bool
+}
+
+func newEventEmitter(
+	ctx context.Context,
+	runtime *Runtime,
+	yield func(Event, error) bool,
+	alive bool,
+) *eventEmitter {
+	return &eventEmitter{
+		runtime: runtime,
+		observeTelemetry: func(event Event) []IntegrationDiagnostic {
+			return runtime.observeEvent(ctx, event)
+		},
+		yield: yield,
+		alive: alive,
+	}
 }
 
 func (e *eventEmitter) emit(
@@ -54,8 +71,27 @@ func (e *eventEmitter) publish(event Event) error {
 		return err
 	}
 
+	diagnostics := e.observeTelemetry(event)
+
+	consumerStopped := false
 	if e.alive && !e.yield(event, nil) {
 		e.alive = false
+		consumerStopped = true
+	}
+
+	for _, diagnostic := range diagnostics {
+		if err := e.emit("", "", EventIntegrationDiagnostic, diagnostic); err != nil {
+			if errors.Is(err, errConsumerStopped) {
+				consumerStopped = true
+
+				continue
+			}
+
+			return err
+		}
+	}
+
+	if consumerStopped {
 		return errConsumerStopped
 	}
 
@@ -83,7 +119,7 @@ func (r *Runtime) run(
 	}
 	defer r.endOperation(operation)
 
-	emitter := &eventEmitter{runtime: r, yield: yield, alive: true}
+	emitter := newEventEmitter(ctx, r, yield, true)
 
 	var current *interaction
 	switch kind {
