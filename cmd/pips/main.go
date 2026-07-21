@@ -1,4 +1,6 @@
 // Command pips runs the terminal-first coding agent application.
+//
+//nolint:wsl_v5 // Process lifecycle steps stay grouped by ownership.
 package main
 
 import (
@@ -9,6 +11,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	term "github.com/charmbracelet/x/term"
 	"github.com/rsbin/pips/internal/coding/cli"
 	"github.com/rsbin/pips/internal/coding/paths"
 )
@@ -35,23 +38,8 @@ func run(args []string, stdin, stdout, stderr *os.File) int {
 	signal.Notify(sigpipe, syscall.SIGPIPE)
 	defer signal.Stop(sigpipe)
 
-	ioDone := make(chan struct{})
-
-	ioStopped := make(chan struct{})
-	go func() {
-		defer close(ioStopped)
-
-		select {
-		case <-commandCtx.Done():
-			_ = stdout.Close()
-		case <-ioDone:
-		}
-	}()
-
-	defer func() {
-		close(ioDone)
-		<-ioStopped
-	}()
+	stopOutputWatcher := watchPipeOutput(commandCtx, stdout)
+	defer stopOutputWatcher()
 
 	layout, err := paths.Default()
 	if err != nil {
@@ -94,6 +82,29 @@ func run(args []string, stdin, stdout, stderr *os.File) int {
 	}
 
 	return cli.ExitSuccess
+}
+
+func watchPipeOutput(ctx context.Context, output *os.File) func() {
+	if output == nil || term.IsTerminal(output.Fd()) {
+		return func() {}
+	}
+
+	done := make(chan struct{})
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+
+		select {
+		case <-ctx.Done():
+			_ = output.Close()
+		case <-done:
+		}
+	}()
+
+	return func() {
+		close(done)
+		<-stopped
+	}
 }
 
 func onlyContextCanceled(err error) bool {
