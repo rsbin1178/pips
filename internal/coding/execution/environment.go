@@ -33,7 +33,10 @@ var inheritedEnvironmentKeys = []string{
 	"USER",
 }
 
-func environmentSnapshot(
+// NewChildEnvironment builds a sorted, minimal child-process environment.
+// Only the fixed inheritance allowlist and validated trusted overrides are
+// included; private cache/temp paths are always created below privateDir.
+func NewChildEnvironment(
 	lookup func(string) (string, bool),
 	privateDir string,
 	overrides []EnvVar,
@@ -42,7 +45,12 @@ func environmentSnapshot(
 		return nil, fmt.Errorf("%w: environment lookup is required", ErrInvalidOperation)
 	}
 
-	values := make(map[string]string, len(inheritedEnvironmentKeys)+len(overrides)+4)
+	validated, err := canonicalEnvironment(overrides)
+	if err != nil {
+		return nil, err
+	}
+
+	values := make(map[string]string, len(inheritedEnvironmentKeys)+len(validated)+4)
 	for _, name := range inheritedEnvironmentKeys {
 		value, ok := lookup(name)
 		if !ok || !validPlainText(value, true) {
@@ -52,7 +60,7 @@ func environmentSnapshot(
 		values[name] = value
 	}
 
-	for _, variable := range overrides {
+	for _, variable := range validated {
 		values[variable.Name] = variable.Value
 	}
 
