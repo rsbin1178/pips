@@ -1,3 +1,4 @@
+//nolint:wsl_v5 // Test setup and mutation assertions stay adjacent.
 package config_test
 
 import (
@@ -14,91 +15,100 @@ func TestDefaults(t *testing.T) {
 	t.Parallel()
 
 	cfg := config.Defaults()
-	assert.Empty(t, cfg.Model.Provider)
-	assert.Empty(t, cfg.Model.ID)
-	assert.Equal(t, openai.APIAuto, cfg.Model.API)
+	assert.Empty(t, cfg.Model.String())
+	assert.Empty(t, cfg.Providers)
+	assert.Empty(t, cfg.Models)
 	assert.False(t, cfg.ToolSearch)
 	assert.Equal(t, config.SandboxWorkspaceWrite, cfg.Sandbox)
 	assert.Equal(t, config.ApprovalOnRequest, cfg.Approval)
-
 	for _, field := range config.Fields() {
 		source, ok := cfg.Source(field)
 		require.True(t, ok)
 		assert.Equal(t, config.SourceDefault, source.Kind)
-		assert.Equal(t, "built-in", source.Detail)
-	}
-
-	fields := config.Fields()
-	fields[0] = "changed"
-
-	assert.Equal(t, config.FieldProvider, config.Fields()[0])
-}
-
-func TestValidateRuntime(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-		cfg  config.Config
-		ok   bool
-	}{
-		{name: "valid", cfg: config.Config{Model: config.ModelConfig{Provider: ai.ProviderOpenAI, ID: "model", API: openai.APIResponses}, Sandbox: config.SandboxWorkspaceWrite, Approval: config.ApprovalOnRequest}, ok: true},
-		{name: "zero api is auto", cfg: config.Config{Model: config.ModelConfig{Provider: ai.ProviderAnthropic, ID: "model"}, Sandbox: config.SandboxWorkspaceWrite, Approval: config.ApprovalOnRequest}, ok: true},
-		{name: "non openai auto", cfg: config.Config{Model: config.ModelConfig{Provider: ai.ProviderGemini, ID: "model", API: openai.APIAuto}, Sandbox: config.SandboxWorkspaceWrite, Approval: config.ApprovalOnRequest}, ok: true},
-		{name: "non openai explicit api", cfg: config.Config{Model: config.ModelConfig{Provider: ai.ProviderAnthropic, ID: "model", API: openai.APIChatCompletions}, Sandbox: config.SandboxWorkspaceWrite, Approval: config.ApprovalOnRequest}},
-		{name: "unknown api", cfg: config.Config{Model: config.ModelConfig{Provider: ai.ProviderOpenAI, ID: "model", API: "unknown"}, Sandbox: config.SandboxWorkspaceWrite, Approval: config.ApprovalOnRequest}},
-		{name: "missing provider", cfg: config.Config{Model: config.ModelConfig{ID: "model"}, Sandbox: config.SandboxWorkspaceWrite, Approval: config.ApprovalOnRequest}},
-		{name: "unsupported provider", cfg: config.Config{Model: config.ModelConfig{Provider: ai.ProviderDeepSeek, ID: "model"}, Sandbox: config.SandboxWorkspaceWrite, Approval: config.ApprovalOnRequest}},
-		{name: "missing model", cfg: config.Config{Model: config.ModelConfig{Provider: ai.ProviderOpenAI}, Sandbox: config.SandboxWorkspaceWrite, Approval: config.ApprovalOnRequest}},
-		{name: "bad sandbox", cfg: config.Config{Model: config.ModelConfig{Provider: ai.ProviderOpenAI, ID: "model"}, Sandbox: "bad", Approval: config.ApprovalOnRequest}},
-		{name: "bad approval", cfg: config.Config{Model: config.ModelConfig{Provider: ai.ProviderOpenAI, ID: "model"}, Sandbox: config.SandboxWorkspaceWrite, Approval: "bad"}},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			err := tt.cfg.ValidateRuntime()
-			if tt.ok {
-				require.NoError(t, err)
-				return
-			}
-
-			require.Error(t, err)
-			assert.ErrorIs(t, err, config.ErrInvalid)
-		})
 	}
 }
 
-func TestParsers(t *testing.T) {
+func TestParseModelRef(t *testing.T) {
 	t.Parallel()
 
-	provider, err := config.ParseProvider(" anthropic ")
+	ref, err := config.ParseModelRef(" openrouter/anthropic/claude ")
 	require.NoError(t, err)
-	assert.Equal(t, ai.ProviderAnthropic, provider)
+	assert.Equal(t, ai.ProviderOpenRouter, ref.Provider)
+	assert.Equal(t, "anthropic/claude", ref.Model)
+	assert.Equal(t, "openrouter/anthropic/claude", ref.String())
 
-	sandbox, err := config.ParseSandboxMode("full-access")
-	require.NoError(t, err)
-	assert.Equal(t, config.SandboxFullAccess, sandbox)
+	for _, value := range []string{"", "openai", "/model", "OpenAI/model", "openai/"} {
+		_, err := config.ParseModelRef(value)
+		require.ErrorIs(t, err, config.ErrInvalid)
+	}
+}
 
-	approval, err := config.ParseApprovalMode("never")
-	require.NoError(t, err)
-	assert.Equal(t, config.ApprovalNever, approval)
+func TestValidateRuntimeRegistry(t *testing.T) {
+	t.Parallel()
 
-	api, err := config.ParseModelAPI(" responses ")
-	require.NoError(t, err)
-	assert.Equal(t, openai.APIResponses, api)
+	level := config.ReasoningLevel("high")
+	valid := config.Config{
+		Model: config.ModelRef{Provider: ai.ProviderOpenAI, Model: "gpt"},
+		Models: []config.ModelConfig{{
+			Ref:                   config.ModelRef{Provider: ai.ProviderOpenAI, Model: "gpt"},
+			ReasoningLevels:       []config.ReasoningLevel{"low", "high"},
+			DefaultReasoningLevel: &level,
+			Variants:              map[string]config.VariantConfig{},
+		}},
+		Sandbox:  config.SandboxWorkspaceWrite,
+		Approval: config.ApprovalOnRequest,
+	}
+	require.NoError(t, valid.ValidateRuntime())
 
-	api, err = config.ParseModelAPI("")
-	require.NoError(t, err)
-	assert.Equal(t, openai.APIAuto, api)
+	duplicate := valid.Clone()
+	duplicate.Models = append(duplicate.Models, duplicate.Models[0])
+	require.ErrorIs(t, duplicate.ValidateRuntime(), config.ErrInvalid)
 
-	_, err = config.ParseProvider("deepseek")
-	require.ErrorIs(t, err, config.ErrInvalid)
-	_, err = config.ParseSandboxMode("unknown")
-	require.ErrorIs(t, err, config.ErrInvalid)
-	_, err = config.ParseApprovalMode("unknown")
-	require.ErrorIs(t, err, config.ErrInvalid)
-	_, err = config.ParseModelAPI("unknown")
-	require.ErrorIs(t, err, config.ErrInvalid)
+	badDefault := valid.Clone()
+	unsupported := config.ReasoningLevel("xhigh")
+	badDefault.Models[0].DefaultReasoningLevel = &unsupported
+	require.ErrorIs(t, badDefault.ValidateRuntime(), config.ErrInvalid)
+}
+
+func TestCloneDetachesNestedValues(t *testing.T) {
+	t.Parallel()
+
+	stops := []string{"end"}
+	providerMaxTokens := openai.MaxTokensFieldLegacy
+	modelStreamUsage := openai.StreamUsageOmit
+	cfg := config.Config{
+		Providers: map[ai.Provider]config.ProviderConfig{
+			ai.ProviderOpenAI: {
+				Compatibility: config.CompatibilityConfig{MaxTokensField: &providerMaxTokens},
+			},
+		},
+		Models: []config.ModelConfig{{
+			Ref:           config.ModelRef{Provider: ai.ProviderOpenAI, Model: "gpt"},
+			Compatibility: config.CompatibilityConfig{StreamUsage: &modelStreamUsage},
+			Options: config.ModelOptions{
+				Stop:      &stops,
+				ExtraBody: map[string]any{"nested": map[string]any{"value": true}},
+			},
+			Variants: map[string]config.VariantConfig{},
+		}},
+	}
+
+	cloned := cfg.Clone()
+	assert.True(t, cfg.Equal(cloned))
+	provider := cloned.Providers[ai.ProviderOpenAI]
+	*provider.Compatibility.MaxTokensField = openai.MaxTokensFieldCompletion
+	cloned.Providers[ai.ProviderOpenAI] = provider
+	*cloned.Models[0].Compatibility.StreamUsage = openai.StreamUsageInclude
+	(*cloned.Models[0].Options.Stop)[0] = "changed"
+	clonedNested, ok := cloned.Models[0].Options.ExtraBody["nested"].(map[string]any)
+	require.True(t, ok)
+	clonedNested["value"] = false
+
+	assert.Equal(t, "end", (*cfg.Models[0].Options.Stop)[0])
+	assert.Equal(t, openai.MaxTokensFieldLegacy, *cfg.Providers[ai.ProviderOpenAI].Compatibility.MaxTokensField)
+	assert.Equal(t, openai.StreamUsageOmit, *cfg.Models[0].Compatibility.StreamUsage)
+	assert.False(t, cfg.Equal(cloned))
+	originalNested, ok := cfg.Models[0].Options.ExtraBody["nested"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, true, originalNested["value"])
 }

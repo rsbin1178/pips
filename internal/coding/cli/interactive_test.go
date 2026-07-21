@@ -83,24 +83,22 @@ func TestInteractiveTerminalFailurePrecedesWorkspaceAcquisition(t *testing.T) {
 	}
 }
 
-func TestInteractiveTrustDecisionControlsProjectConfigLoading(t *testing.T) {
+func TestInteractiveTrustDecisionDoesNotLoadProjectConfig(t *testing.T) {
 	t.Parallel()
 
 	workspaceRoot := t.TempDir()
 	userRoot := t.TempDir()
+	require.NoError(t, os.Chmod(userRoot, 0o700)) //nolint:gosec // Directory traversal requires owner execute permission.
 	layout, err := paths.New(userRoot)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(layout.ConfigFile(), []byte(`
-[model]
-provider = "openai"
-id = "user-model"
-api = "responses"
+model = "openai/user-model"
 `), 0o600))
 
 	projectRoot := filepath.Join(workspaceRoot, paths.ProjectRoot())
 	require.NoError(t, os.MkdirAll(projectRoot, 0o700))
 	require.NoError(t, os.WriteFile(
-		filepath.Join(workspaceRoot, filepath.FromSlash(paths.ProjectConfigFile())),
+		filepath.Join(projectRoot, "config.toml"),
 		[]byte("this is not toml ="),
 		0o600,
 	))
@@ -108,16 +106,15 @@ api = "responses"
 	tests := []struct {
 		name         string
 		trustProject bool
-		wantErr      bool
-		wantOpened   bool
 	}{
-		{name: "deny ignores project", trustProject: false, wantOpened: true},
-		{name: "allow loads project", trustProject: true, wantErr: true},
+		{name: "deny ignores project", trustProject: false},
+		{name: "allow still ignores project", trustProject: true},
 	}
 
 	for _, test := range tests { //nolint:paralleltest // The deny/allow sequence shares one trust store.
 		t.Run(test.name, func(t *testing.T) {
 			opened := false
+			openedTrusted := false
 			command, err := New(Dependencies{
 				Paths:      layout,
 				WorkingDir: func() (string, error) { return workspaceRoot, nil },
@@ -132,10 +129,11 @@ api = "responses"
 					return true, true
 				},
 				OpenControl: func(
-					context.Context,
-					coding.OpenOptions,
+					_ context.Context,
+					options coding.OpenOptions,
 				) (tui.Controller, error) {
 					opened = true
+					openedTrusted = options.Trusted
 
 					return nil, nil
 				},
@@ -150,13 +148,9 @@ api = "responses"
 			command.SetIn(bytes.NewBuffer(nil))
 			command.SetOut(new(bytes.Buffer))
 
-			err = command.ExecuteContext(t.Context())
-			if test.wantErr {
-				require.Error(t, err)
-			} else {
-				require.NoError(t, err)
-			}
-			assert.Equal(t, test.wantOpened, opened)
+			require.NoError(t, command.ExecuteContext(t.Context()))
+			assert.True(t, opened)
+			assert.Equal(t, test.trustProject, openedTrusted)
 		})
 	}
 }

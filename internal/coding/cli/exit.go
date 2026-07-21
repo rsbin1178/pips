@@ -9,7 +9,9 @@ import (
 	"github.com/rsbin/pips/internal/coding/config"
 	"github.com/rsbin/pips/internal/coding/credential"
 	"github.com/rsbin/pips/internal/coding/execution"
+	"github.com/rsbin/pips/internal/coding/generation"
 	"github.com/rsbin/pips/internal/coding/model"
+	"github.com/rsbin/pips/internal/coding/modelcatalog"
 	"github.com/rsbin/pips/internal/coding/paths"
 	"github.com/rsbin/pips/internal/coding/session"
 	"github.com/rsbin/pips/internal/coding/workspace"
@@ -92,8 +94,11 @@ func isUsageError(err error) bool {
 		config.ErrInvalid,
 		config.ErrFile,
 		config.ErrDecode,
+		config.ErrMigration,
 		credential.ErrNotFound,
+		generation.ErrInvalid,
 		model.ErrInvalid,
+		modelcatalog.ErrInvalid,
 		paths.ErrInvalid,
 		session.ErrInvalid,
 		workspace.ErrInvalid,

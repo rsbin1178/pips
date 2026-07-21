@@ -139,7 +139,7 @@ func validatePolicyConfig(cfg PolicyConfig) error {
 	case config.SandboxWorkspaceWrite:
 	case config.SandboxFullAccess:
 		switch cfg.SandboxSource.Kind {
-		case config.SourceUserFile, config.SourceEnvironment, config.SourceFlag:
+		case config.SourceConfigFile, config.SourceEnvironment, config.SourceFlag:
 		default:
 			return fmt.Errorf("%w: full access requires an explicit user-controlled source", ErrInvalidPolicy)
 		}

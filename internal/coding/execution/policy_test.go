@@ -58,7 +58,7 @@ func TestPolicyDecisionMatrix(t *testing.T) {
 	fullAccess := mustPolicy(t, fixture, execution.PolicyConfig{
 		Sandbox:       config.SandboxFullAccess,
 		Approval:      config.ApprovalNever,
-		SandboxSource: config.Source{Kind: config.SourceUserFile},
+		SandboxSource: config.Source{Kind: config.SourceConfigFile},
 	})
 	decision = fullAccess.Evaluate(expanded)
 	assert.Equal(t, execution.VerdictAllow, decision.Verdict())
@@ -74,7 +74,7 @@ func TestPolicyRejectsUnsafeConfigurationAndProtectedWrites(t *testing.T) {
 	t.Parallel()
 
 	fixture := newOperationFixture(t)
-	for _, source := range []config.SourceKind{config.SourceDefault, config.SourceProjectFile, "unknown"} {
+	for _, source := range []config.SourceKind{config.SourceDefault, "project_file", "unknown"} {
 		_, err := execution.NewPolicy(fixture.workspace, execution.PolicyConfig{
 			Sandbox:       config.SandboxFullAccess,
 			Approval:      config.ApprovalOnRequest,
@@ -83,7 +83,7 @@ func TestPolicyRejectsUnsafeConfigurationAndProtectedWrites(t *testing.T) {
 		require.ErrorIs(t, err, execution.ErrInvalidPolicy)
 	}
 
-	for _, source := range []config.SourceKind{config.SourceUserFile, config.SourceEnvironment, config.SourceFlag} {
+	for _, source := range []config.SourceKind{config.SourceConfigFile, config.SourceEnvironment, config.SourceFlag} {
 		_, err := execution.NewPolicy(fixture.workspace, execution.PolicyConfig{
 			Sandbox:       config.SandboxFullAccess,
 			Approval:      config.ApprovalOnRequest,

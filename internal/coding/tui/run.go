@@ -17,6 +17,7 @@ import (
 	"github.com/rsbin/pips/internal/coding"
 	"github.com/rsbin/pips/internal/coding/approval"
 	"github.com/rsbin/pips/internal/coding/config"
+	"github.com/rsbin/pips/internal/coding/modelcatalog"
 	"github.com/rsbin/pips/internal/coding/runtimecontrol"
 	"github.com/rsbin/pips/internal/coding/session"
 )
@@ -60,12 +61,13 @@ type Controller interface {
 	Snapshot() coding.State
 	SessionID() string
 	Model() runtimecontrol.ModelState
+	Models() []modelcatalog.Entry
 	Config() config.Config
 	Detached() bool
 	ListSessions(context.Context) ([]session.Metadata, error)
 	NewSession(context.Context) error
 	ResumeSession(context.Context, string) error
-	SwitchModel(context.Context, config.ModelConfig) error
+	SwitchModel(context.Context, modelcatalog.Selection) error
 	Close(context.Context) error
 }
 

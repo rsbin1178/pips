@@ -102,7 +102,7 @@ func (r *Runtime) observeSessionOpened(ctx context.Context, resumed bool) {
 		Type:     EventSessionOpened,
 		Time:     time.Now().UTC(),
 		Provider: r.config.Model.Provider,
-		ModelID:  r.config.Model.ID,
+		ModelID:  r.config.Model.Model,
 		Resumed:  resumed,
 	})
 	for _, diagnostic := range diagnostics {

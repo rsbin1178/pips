@@ -10,11 +10,11 @@ import (
 	"testing"
 
 	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/ai/openai"
 	"github.com/rsbin/pips/internal/coding"
 	"github.com/rsbin/pips/internal/coding/approval"
 	"github.com/rsbin/pips/internal/coding/config"
 	"github.com/rsbin/pips/internal/coding/credential"
+	"github.com/rsbin/pips/internal/coding/modelcatalog"
 	"github.com/rsbin/pips/internal/coding/paths"
 	"github.com/rsbin/pips/internal/coding/session"
 	"github.com/rsbin/pips/internal/coding/workspace"
@@ -30,26 +30,25 @@ func TestControllerModelOverrideAppliesToLaterSessions(t *testing.T) {
 	require.NoError(t, err)
 	initialID := controller.SessionID()
 
-	selected := config.ModelConfig{
-		Provider: ai.ProviderAnthropic,
-		ID:       "configured-next",
-		API:      openai.APIAuto,
+	selected := modelcatalog.Selection{
+		Ref: config.ModelRef{Provider: ai.ProviderAnthropic, Model: "configured-next"},
 	}
 	require.NoError(t, controller.SwitchModel(t.Context(), selected))
-	assert.Equal(t, ModelState{Config: selected, Overridden: true}, controller.Model())
+	assert.Equal(t, selected.Ref, controller.Model().Resolved.Ref)
+	assert.True(t, controller.Model().Overridden)
 	assert.Equal(t, initialID, fixture.opener.calls[1].Session.ID)
-	assert.Equal(t, selected, fixture.opener.calls[1].Config.Model)
+	assert.Equal(t, selected.Ref, fixture.opener.calls[1].Resolved.Ref)
 
 	previousID := controller.SessionID()
 	require.NoError(t, controller.NewSession(t.Context()))
 	assert.NotEqual(t, previousID, controller.SessionID())
 	assert.Empty(t, fixture.opener.calls[2].Session.ID)
-	assert.Equal(t, selected, fixture.opener.calls[2].Config.Model)
+	assert.Equal(t, selected.Ref, fixture.opener.calls[2].Resolved.Ref)
 
 	require.NoError(t, controller.ResumeSession(t.Context(), "saved-session"))
 	assert.Equal(t, "saved-session", controller.SessionID())
 	assert.Equal(t, "saved-session", fixture.opener.calls[3].Session.ID)
-	assert.Equal(t, selected, fixture.opener.calls[3].Config.Model)
+	assert.Equal(t, selected.Ref, fixture.opener.calls[3].Resolved.Ref)
 	require.NoError(t, controller.Close(t.Context()))
 
 	restarted := newControllerFixture(t)
@@ -59,9 +58,8 @@ func TestControllerModelOverrideAppliesToLaterSessions(t *testing.T) {
 		restarted.dependencies(),
 	)
 	require.NoError(t, err)
-	assert.Equal(t, ModelState{
-		Config: restarted.options.Config.Model,
-	}, restartedController.Model())
+	assert.Equal(t, restarted.options.Config.Model, restartedController.Model().Resolved.Ref)
+	assert.False(t, restartedController.Model().Overridden)
 	require.NoError(t, restartedController.Close(t.Context()))
 }
 
@@ -76,15 +74,13 @@ func TestControllerFailedReplacementRestoresPreviousRuntime(t *testing.T) {
 	require.NoError(t, err)
 	originalID := controller.SessionID()
 
-	err = controller.SwitchModel(t.Context(), config.ModelConfig{
-		Provider: ai.ProviderAnthropic,
-		ID:       "unavailable",
-		API:      openai.APIAuto,
+	err = controller.SwitchModel(t.Context(), modelcatalog.Selection{
+		Ref: config.ModelRef{Provider: ai.ProviderAnthropic, Model: "unavailable"},
 	})
 	require.ErrorIs(t, err, targetErr)
 	assert.False(t, controller.Detached())
 	assert.Equal(t, originalID, controller.SessionID())
-	assert.Equal(t, fixture.options.Config.Model, controller.Model().Config)
+	assert.Equal(t, fixture.options.Config.Model, controller.Model().Resolved.Ref)
 	assert.False(t, controller.Model().Overridden)
 	require.Len(t, fixture.opener.runtimes, 2)
 	assert.Equal(t, 1, fixture.opener.runtimes[0].closeCalls())
@@ -104,7 +100,7 @@ func TestControllerModelPreparationFailureKeepsCurrentRuntime(t *testing.T) {
 			name: "factory error",
 			newModel: func(
 				context.Context,
-				config.ModelConfig,
+				modelcatalog.ResolvedModel,
 				credential.Store,
 			) (ai.LanguageModel, error) {
 				return nil, modelErr
@@ -115,13 +111,11 @@ func TestControllerModelPreparationFailureKeepsCurrentRuntime(t *testing.T) {
 			name: "mismatched model",
 			newModel: func(
 				context.Context,
-				config.ModelConfig,
+				modelcatalog.ResolvedModel,
 				credential.Store,
 			) (ai.LanguageModel, error) {
-				return &controlModel{config: config.ModelConfig{
-					Provider: ai.ProviderOpenAI,
-					ID:       "wrong-model",
-					API:      openai.APIResponses,
+				return &controlModel{resolved: modelcatalog.ResolvedModel{
+					Ref: config.ModelRef{Provider: ai.ProviderOpenAI, Model: "wrong-model"},
 				}}, nil
 			},
 			wantErr: ErrInvalid,
@@ -142,15 +136,13 @@ func TestControllerModelPreparationFailureKeepsCurrentRuntime(t *testing.T) {
 
 			fixture.newModel = test.newModel
 			controller.deps = fixture.dependencies()
-			err = controller.SwitchModel(t.Context(), config.ModelConfig{
-				Provider: ai.ProviderAnthropic,
-				ID:       "configured-next",
-				API:      openai.APIAuto,
+			err = controller.SwitchModel(t.Context(), modelcatalog.Selection{
+				Ref: config.ModelRef{Provider: ai.ProviderAnthropic, Model: "configured-next"},
 			})
 			require.ErrorIs(t, err, test.wantErr)
 			assert.Equal(t, 0, fixture.opener.runtimes[0].closeCalls())
 			assert.Len(t, fixture.opener.calls, 1)
-			assert.Equal(t, fixture.options.Config.Model, controller.Model().Config)
+			assert.Equal(t, fixture.options.Config.Model, controller.Model().Resolved.Ref)
 			assert.False(t, controller.Model().Overridden)
 			require.NoError(t, controller.Close(t.Context()))
 		})
@@ -161,11 +153,11 @@ func TestControllerRejectsInvalidOptionsBeforeModelConstruction(t *testing.T) {
 	t.Parallel()
 
 	fixture := newControllerFixture(t)
-	fixture.options.Config.Model.ID = ""
+	fixture.options.Config.Model = config.ModelRef{}
 	called := false
 	fixture.newModel = func(
 		context.Context,
-		config.ModelConfig,
+		modelcatalog.ResolvedModel,
 		credential.Store,
 	) (ai.LanguageModel, error) {
 		called = true
@@ -292,10 +284,14 @@ func newControllerFixture(t *testing.T) *controllerFixture {
 	require.NoError(t, err)
 
 	cfg := config.Defaults()
-	cfg.Model = config.ModelConfig{
-		Provider: ai.ProviderOpenAI,
-		ID:       "configured-start",
-		API:      openai.APIResponses,
+	cfg.Model = config.ModelRef{Provider: ai.ProviderOpenAI, Model: "configured-start"}
+	cfg.Models = []config.ModelConfig{
+		{Ref: config.ModelRef{Provider: ai.ProviderAnthropic, Model: "configured-next"}},
+		{Ref: config.ModelRef{Provider: ai.ProviderAnthropic, Model: "unavailable"}},
+	}
+	initial := modelcatalog.ResolvedModel{
+		Ref: cfg.Model, API: config.APIResponses,
+		Endpoint: modelcatalog.Endpoint{BaseURL: "https://api.openai.com/v1"},
 	}
 
 	return &controllerFixture{
@@ -303,7 +299,7 @@ func newControllerFixture(t *testing.T) *controllerFixture {
 			Workspace: openedWorkspace,
 			Config:    cfg,
 			Paths:     layout,
-			Model:     &controlModel{config: cfg.Model},
+			Model:     &controlModel{resolved: initial},
 		},
 		opener: &scriptedRuntimeOpener{
 			failures: make(map[int]error),
@@ -317,10 +313,10 @@ func (f *controllerFixture) dependencies() dependencies {
 	if newModel == nil {
 		newModel = func(
 			_ context.Context,
-			selected config.ModelConfig,
+			selected modelcatalog.ResolvedModel,
 			_ credential.Store,
 		) (ai.LanguageModel, error) {
-			return &controlModel{config: selected}, nil
+			return &controlModel{resolved: selected}, nil
 		}
 	}
 
@@ -365,8 +361,8 @@ func (o *scriptedRuntimeOpener) open(
 	runtime := &fakeRuntime{state: coding.State{
 		SessionID:   sessionID,
 		SessionOpen: true,
-		Provider:    options.Config.Model.Provider,
-		ModelID:     options.Config.Model.ID,
+		Provider:    options.Resolved.Ref.Provider,
+		ModelID:     options.Resolved.Ref.Model,
 		Phase:       phase,
 	}}
 	o.runtimes = append(o.runtimes, runtime)
@@ -433,7 +429,7 @@ func (r *fakeRuntime) closeCalls() int {
 }
 
 type controlModel struct {
-	config config.ModelConfig
+	resolved modelcatalog.ResolvedModel
 }
 
 func (*controlModel) Generate(context.Context, ai.Request) (*ai.Response, error) {
@@ -444,6 +440,6 @@ func (*controlModel) Stream(context.Context, ai.Request) ai.Stream {
 	return func(func(ai.StreamEvent, error) bool) {}
 }
 
-func (m *controlModel) Provider() ai.Provider       { return m.config.Provider }
-func (m *controlModel) ModelID() string             { return m.config.ID }
+func (m *controlModel) Provider() ai.Provider       { return m.resolved.Ref.Provider }
+func (m *controlModel) ModelID() string             { return m.resolved.Ref.Model }
 func (*controlModel) Capabilities() ai.Capabilities { return ai.Capabilities{} }

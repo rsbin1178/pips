@@ -25,17 +25,120 @@ The root configuration flags remain available to `exec`, for example:
 
 ```sh
 API_KEY=... pips exec \
-  --provider openai \
-  --model model-id \
-  --model-api responses \
+  --model openai/model-id \
+  --reasoning high \
+  --variant deep \
   --sandbox workspace-write \
   "fix the build"
 ```
 
+The default configuration is `~/.pips/config.toml`. `--config <path>` selects
+one replacement file; it does not inherit the default file, and project
+`.pips/config.toml` is never discovered implicitly. `PIPS_MODEL`,
+`PIPS_REASONING`, and `PIPS_VARIANT` mirror the three selection flags. API
+surface and endpoint are registry data, not command-line fields. The removed
+`--provider`, `--model-api`, `PIPS_PROVIDER`, `PIPS_MODEL_API`, and `[model]`
+table are rejected rather than normalized.
+
+A higher-priority `--model` or `PIPS_MODEL` selection starts from that target
+model's default variant and reasoning; it never inherits those choices from the
+lower-priority model. Pass `--variant`/`--reasoning` (or their environment
+counterparts) together when an explicit target preset is wanted.
+
+A minimal official model is one line:
+
+```toml
+model = "anthropic/model-id"
+```
+
+OpenAI uses Responses by default. Select Chat Completions for one model with a
+model-level API override:
+
+```toml
+model = "openai/chat-model-id"
+
+[[models]]
+id = "openai/chat-model-id"
+api = "chat_completions"
+```
+
+One file can define multiple selectable models, model-specific reasoning
+levels, and named request presets:
+
+```toml
+model = "openai/gpt-model-id"
+
+[[models]]
+id = "openai/gpt-model-id"
+context_window = 200000
+max_output_tokens = 100000
+reasoning_levels = ["low", "medium", "high", "xhigh"]
+default_reasoning_level = "medium"
+default_variant = "balanced"
+
+[models.options]
+max_output_tokens = 8192
+temperature = 0.2
+top_p = 0.95
+
+[models.variants.balanced]
+reasoning_level = "medium"
+
+[models.variants.deep]
+reasoning_level = "xhigh"
+max_output_tokens = 32768
+
+[[models]]
+id = "anthropic/claude-model-id"
+context_window = 200000
+max_output_tokens = 64000
+```
+
+Connection settings are defined once per provider and inherited by its models:
+
+```toml
+model = "local/qwen2.5-coder:7b"
+
+[providers.local]
+api = "chat_completions"
+base_url = "http://127.0.0.1:11434/v1"
+allow_http = true
+allow_private_ips = true
+
+[[models]]
+id = "local/qwen2.5-coder:7b"
+context_window = 32768
+max_output_tokens = 4096
+
+[models.options]
+top_k = 40
+seed = 7
+
+[models.options.extra_body]
+service_tier = "flex"
+```
+
+Supported protocol values are `responses`, `chat_completions`,
+`anthropic_messages`, and `generate_content`. `extra_body` is bounded and
+add-only: it cannot replace authentication, model/input/tool/session fields or
+typed request options. Pips does not contact a remote model catalog; only the
+current model and local `[[models]]` entries appear in `/model`. Unknown model
+capacity remains unknown rather than being guessed.
+
+Reasoning levels are model capabilities, but native protocol vocabularies are
+still validated before a request. For budget-based Anthropic or Gemini models,
+use `reasoning_budgets = { low = 2048, high = 8192 }`; selecting a mapped level
+sends the numeric budget instead of an incompatible native effort enum.
+
+`pips config show` prints the resolved API, endpoint origin, model capacities,
+and every effective typed request option. Raw `extra_body` values stay hidden;
+only their top-level key count and encoded byte count are shown.
+
 `--trust-workspace` records the canonical workspace identity in `~/.pips` and
-enables project `.pips` configuration, Skills, Bundles, and MCP definitions for
-this invocation. It does not grant a tool approval, approve an MCP server, or
-enable Full Access. The trust decision is audited on stderr.
+enables project `.pips` Skills, Bundles, and MCP definitions for this
+invocation. It does not enable project configuration, grant a tool approval,
+approve an MCP server, or enable Full Access. The trust decision is audited on
+stderr.
 
 `--session <id>` reopens only that durable session in the current workspace. A
 reopened pending operation is reconciled first. If a human decision is still

@@ -25,8 +25,10 @@ import (
 	"github.com/rsbin/pips/internal/coding/config"
 	"github.com/rsbin/pips/internal/coding/credential"
 	"github.com/rsbin/pips/internal/coding/execution"
+	"github.com/rsbin/pips/internal/coding/generation"
 	codingmcp "github.com/rsbin/pips/internal/coding/mcp"
 	"github.com/rsbin/pips/internal/coding/model"
+	"github.com/rsbin/pips/internal/coding/modelcatalog"
 	"github.com/rsbin/pips/internal/coding/paths"
 	"github.com/rsbin/pips/internal/coding/resource"
 	"github.com/rsbin/pips/internal/coding/session"
@@ -80,6 +82,7 @@ type OpenOptions struct {
 
 	Credentials credential.Store
 	Model       ai.LanguageModel
+	Resolved    modelcatalog.ResolvedModel
 	Execution   ExecutionOptions
 	Extensions  []extension.Extension
 
@@ -95,12 +98,14 @@ type Runtime struct {
 	mu    sync.Mutex
 	state State
 
-	workspace workspace.Workspace
-	tree      *workspace.Tree
-	config    config.Config
-	paths     paths.Layout
-	opts      ExecutionOptions
-	model     ai.LanguageModel
+	workspace     workspace.Workspace
+	tree          *workspace.Tree
+	config        config.Config
+	paths         paths.Layout
+	opts          ExecutionOptions
+	model         ai.LanguageModel
+	resolved      modelcatalog.ResolvedModel
+	requestPolicy generation.Policy
 
 	handle      *session.Handle
 	session     *harness.Session
@@ -201,15 +206,24 @@ func Open(ctx context.Context, options OpenOptions) (_ *Runtime, returnErr error
 	}
 	stack.add(func(context.Context) error { return tree.Close() })
 
+	resolved, err := resolveOpenModel(options)
+	if err != nil {
+		return nil, err
+	}
+	requestPolicy, err := generation.Compile(resolved)
+	if err != nil {
+		return nil, err
+	}
+
 	baseModel := options.Model
 	if baseModel == nil {
-		baseModel, err = model.New(ctx, options.Config.Model, options.Credentials)
+		baseModel, err = model.New(ctx, resolved, options.Credentials)
 		if err != nil {
 			return nil, err
 		}
 	}
-	if baseModel.Provider() != options.Config.Model.Provider ||
-		baseModel.ModelID() != options.Config.Model.ID {
+	if baseModel.Provider() != resolved.Ref.Provider ||
+		baseModel.ModelID() != resolved.Ref.Model {
 		return nil, fmt.Errorf("%w: model override does not match configuration", ErrRuntimeInvalid)
 	}
 
@@ -303,26 +317,28 @@ func Open(ctx context.Context, options OpenOptions) (_ *Runtime, returnErr error
 	}
 
 	runtime := &Runtime{
-		workspace:   options.Workspace,
-		tree:        tree,
-		config:      options.Config,
-		paths:       options.Paths,
-		opts:        configured,
-		model:       baseModel,
-		handle:      handle,
-		session:     handle.Session(),
-		policy:      policy,
-		executor:    executor,
-		inspector:   inspector,
-		permissions: permissions,
-		connections: connections,
-		extensions:  extensionRuntime,
-		compiled:    slices.Clone(options.Extensions),
-		resources:   loadedResources,
-		trusted:     options.Trusted,
-		observers:   newAgentObservers(options.AgentObservers),
-		telemetry:   newTelemetryObservers(options.TelemetryObservers),
-		closeDone:   make(chan struct{}),
+		workspace:     options.Workspace,
+		tree:          tree,
+		config:        options.Config.Clone(),
+		paths:         options.Paths,
+		opts:          configured,
+		model:         baseModel,
+		resolved:      resolved,
+		requestPolicy: requestPolicy,
+		handle:        handle,
+		session:       handle.Session(),
+		policy:        policy,
+		executor:      executor,
+		inspector:     inspector,
+		permissions:   permissions,
+		connections:   connections,
+		extensions:    extensionRuntime,
+		compiled:      slices.Clone(options.Extensions),
+		resources:     loadedResources,
+		trusted:       options.Trusted,
+		observers:     newAgentObservers(options.AgentObservers),
+		telemetry:     newTelemetryObservers(options.TelemetryObservers),
+		closeDone:     make(chan struct{}),
 	}
 
 	runtime.journal, err = newInteractionJournal(runtime.session, nil)
@@ -340,8 +356,8 @@ func Open(ctx context.Context, options OpenOptions) (_ *Runtime, returnErr error
 	}
 	bootstrap, err := BootstrapState(BootstrapOptions{
 		SessionID:           handle.Metadata().ID,
-		Provider:            options.Config.Model.Provider,
-		ModelID:             options.Config.Model.ID,
+		Provider:            resolved.Ref.Provider,
+		ModelID:             resolved.Ref.Model,
 		Path:                runtime.session.Path(),
 		HasPendingToolCalls: len(pending) > 0,
 	})
@@ -369,6 +385,26 @@ func Open(ctx context.Context, options OpenOptions) (_ *Runtime, returnErr error
 	stack.values = nil
 
 	return runtime, nil
+}
+
+func resolveOpenModel(options OpenOptions) (modelcatalog.ResolvedModel, error) {
+	if options.Resolved.Ref.String() != "" {
+		if options.Resolved.Ref != options.Config.Model {
+			return modelcatalog.ResolvedModel{}, fmt.Errorf(
+				"%w: resolved model does not match configuration selection",
+				ErrRuntimeInvalid,
+			)
+		}
+
+		return options.Resolved.Clone(), nil
+	}
+
+	catalog, err := modelcatalog.New(options.Config)
+	if err != nil {
+		return modelcatalog.ResolvedModel{}, err
+	}
+
+	return catalog.Resolve(modelcatalog.SelectionFromConfig(options.Config))
 }
 
 func validateOpenOptions(options OpenOptions) error {
