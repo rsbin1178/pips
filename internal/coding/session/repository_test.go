@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/rsbin/pips/ai"
+	"github.com/rsbin/pips/agent/harness"
 	"github.com/rsbin/pips/internal/coding/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -20,16 +20,12 @@ func TestRepositoryCreateOpenListAndLock(t *testing.T) {
 
 	handle, err := repo.Create(t.Context(), session.CreateOptions{
 		WorkspaceID: "workspace-key",
-		Provider:    ai.ProviderOpenAI,
-		ModelID:     "test-model",
 	})
 	require.NoError(t, err)
 
 	meta := handle.Metadata()
 	assert.NotEmpty(t, meta.ID)
 	assert.Equal(t, "workspace-key", meta.WorkspaceID)
-	assert.Equal(t, ai.ProviderOpenAI, meta.Provider)
-	assert.Equal(t, "test-model", meta.ModelID)
 	assert.NotNil(t, handle.Session())
 
 	_, err = repo.Open(t.Context(), session.OpenOptions{ID: meta.ID, WorkspaceID: "workspace-key"})
@@ -60,8 +56,6 @@ func TestRepositoryRejectsWorkspaceMismatchAndReleasesLock(t *testing.T) {
 	require.NoError(t, err)
 	handle, err := repo.Create(t.Context(), session.CreateOptions{
 		WorkspaceID: "workspace-one",
-		Provider:    ai.ProviderAnthropic,
-		ModelID:     "model",
 	})
 	require.NoError(t, err)
 
@@ -99,12 +93,39 @@ func TestRepositoryRejectsInvalidInputAndCancellation(t *testing.T) {
 
 	_, err = repo.Create(canceled, session.CreateOptions{
 		WorkspaceID: "workspace",
-		Provider:    ai.ProviderGemini,
-		ModelID:     "model",
 	})
 	require.ErrorIs(t, err, context.Canceled)
 	_, err = repo.List(canceled)
 	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestRepositoryIgnoresLegacyModelMetadata(t *testing.T) {
+	t.Parallel()
+
+	repo, err := session.NewRepository(filepath.Join(t.TempDir(), "sessions"))
+	require.NoError(t, err)
+
+	legacy, err := (harness.Repo{Dir: repo.Dir()}).Create("legacy", map[string]string{
+		"pips.coding.workspace_id": "workspace-key",
+		"pips.coding.provider":     "anthropic",
+		"pips.coding.model_id":     "legacy-model",
+	})
+	require.NoError(t, err)
+	require.NoError(t, legacy.Close())
+
+	handle, err := repo.Open(t.Context(), session.OpenOptions{
+		ID:          "legacy",
+		WorkspaceID: "workspace-key",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "legacy", handle.Metadata().ID)
+	assert.Equal(t, "workspace-key", handle.Metadata().WorkspaceID)
+	require.NoError(t, handle.Close())
+
+	metas, err := repo.List(t.Context())
+	require.NoError(t, err)
+	require.Len(t, metas, 1)
+	assert.Equal(t, handle.Metadata(), metas[0])
 }
 
 func TestRepositoryRejectsInsecureDirectoryAndLock(t *testing.T) {

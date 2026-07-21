@@ -14,6 +14,7 @@ import (
 	"github.com/rsbin/pips/agent"
 	"github.com/rsbin/pips/agent/catalog"
 	"github.com/rsbin/pips/agent/extension"
+	"github.com/rsbin/pips/agent/harness"
 	agentobservability "github.com/rsbin/pips/agent/observability"
 	agentotel "github.com/rsbin/pips/agent/observability/otel"
 	"github.com/rsbin/pips/ai"
@@ -589,6 +590,48 @@ func TestRuntimeLiveDurableStateMatchesReopenBootstrap(t *testing.T) {
 	)
 	assert.Equal(t, want, second.Snapshot().Durable())
 	require.NoError(t, second.Close(t.Context()))
+}
+
+func TestRuntimeResumeUsesConfigurationInsteadOfLegacyModelChange(t *testing.T) {
+	t.Parallel()
+
+	base := t.TempDir()
+	first := openTestRuntimeAt(
+		t,
+		base,
+		SessionTarget{},
+		newRuntimeModel(runtimeTextResponse("first")),
+	)
+	_, err := first.session.AppendModelChange(ai.ProviderAnthropic, "legacy-model")
+	require.NoError(t, err)
+	sessionID := first.handle.Metadata().ID
+	require.NoError(t, first.Close(t.Context()))
+
+	secondModel := newRuntimeModel(runtimeTextResponse("configured"))
+	second := openTestRuntimeAt(
+		t,
+		base,
+		SessionTarget{ID: sessionID},
+		secondModel,
+	)
+	assert.Equal(t, ai.ProviderOpenAI, second.Snapshot().Provider)
+	assert.Equal(t, "runtime-test", second.Snapshot().ModelID)
+	assert.Equal(t, 1, countHarnessKind(second.session.Path(), harness.KindModelChange))
+
+	collectRuntimeEvents(t, second.Prompt(t.Context(), ai.UserText("continue")))
+	require.Len(t, secondModel.Requests(), 1)
+	require.NoError(t, second.Close(t.Context()))
+}
+
+func countHarnessKind(entries []harness.Entry, kind harness.Kind) int {
+	count := 0
+	for _, entry := range entries {
+		if entry.Kind == kind {
+			count++
+		}
+	}
+
+	return count
 }
 
 func openTestRuntime(t *testing.T, model ai.LanguageModel) *Runtime {

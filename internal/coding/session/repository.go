@@ -15,14 +15,9 @@ import (
 	"unicode"
 
 	"github.com/rsbin/pips/agent/harness"
-	"github.com/rsbin/pips/ai"
 )
 
-const (
-	extraWorkspaceID = "pips.coding.workspace_id"
-	extraProvider    = "pips.coding.provider"
-	extraModelID     = "pips.coding.model_id"
-)
+const extraWorkspaceID = "pips.coding.workspace_id"
 
 var (
 	// ErrInvalid means repository, session, or metadata input is invalid.
@@ -73,8 +68,6 @@ func (r *Repository) Dir() string {
 // CreateOptions are the non-secret attributes persisted in a session header.
 type CreateOptions struct {
 	WorkspaceID string
-	Provider    ai.Provider
-	ModelID     string
 }
 
 // OpenOptions identify a stored session and the workspace allowed to own it.
@@ -89,8 +82,6 @@ type Metadata struct {
 	CreatedAt   time.Time
 	Path        string
 	WorkspaceID string
-	Provider    ai.Provider
-	ModelID     string
 }
 
 // Handle owns a locked, writable Harness session.
@@ -172,8 +163,6 @@ func (r *Repository) Create(ctx context.Context, options CreateOptions) (*Handle
 
 	extra := map[string]string{
 		extraWorkspaceID: options.WorkspaceID,
-		extraProvider:    string(options.Provider),
-		extraModelID:     options.ModelID,
 	}
 
 	store, err := r.repo.Create(id, extra)
@@ -185,8 +174,6 @@ func (r *Repository) Create(ctx context.Context, options CreateOptions) (*Handle
 }
 
 // Open locks and opens a stored session after verifying its workspace owner.
-// The stored provider/model describe the initial model and do not prevent a
-// later runtime from recording an explicit model change.
 func (r *Repository) Open(ctx context.Context, options OpenOptions) (*Handle, error) {
 	if err := r.validate(); err != nil {
 		return nil, err
@@ -282,10 +269,7 @@ func newHandle(
 
 func projectMetadata(stored harness.SessionMetadata) (Metadata, error) {
 	workspaceID := stored.Extra[extraWorkspaceID]
-	provider := ai.Provider(stored.Extra[extraProvider])
-
-	modelID := stored.Extra[extraModelID]
-	if stored.ID == "" || workspaceID == "" || provider == "" || modelID == "" {
+	if stored.ID == "" || workspaceID == "" {
 		return Metadata{}, fmt.Errorf("%w: session %q has incomplete coding metadata", ErrInvalid, stored.ID)
 	}
 
@@ -294,22 +278,12 @@ func projectMetadata(stored harness.SessionMetadata) (Metadata, error) {
 		CreatedAt:   stored.CreatedAt,
 		Path:        stored.Path,
 		WorkspaceID: workspaceID,
-		Provider:    provider,
-		ModelID:     modelID,
 	}, nil
 }
 
 func validateCreateOptions(options CreateOptions) error {
 	if strings.TrimSpace(options.WorkspaceID) == "" {
 		return fmt.Errorf("%w: empty workspace identity", ErrInvalid)
-	}
-
-	if options.Provider == "" {
-		return fmt.Errorf("%w: empty provider", ErrInvalid)
-	}
-
-	if strings.TrimSpace(options.ModelID) == "" {
-		return fmt.Errorf("%w: empty model id", ErrInvalid)
 	}
 
 	return nil

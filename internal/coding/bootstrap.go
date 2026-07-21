@@ -65,9 +65,6 @@ func BootstrapState(options BootstrapOptions) (BootstrapResult, error) {
 				!validIdentifierText(entry.ModelID, maxEventIDBytes, false) {
 				return BootstrapResult{}, protocolError("invalid model-change entry %q", entry.ID)
 			}
-
-			state.Provider = entry.Provider
-			state.ModelID = entry.ModelID
 		case harness.KindCompaction, harness.KindBranchSummary, harness.KindCustom,
 			harness.KindLabel, harness.KindName, harness.KindLeaf:
 		default:
