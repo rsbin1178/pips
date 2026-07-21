@@ -54,7 +54,7 @@ func resolveWorkspaceState(
 		return workspaceState{}, err
 	}
 
-	store := workspace.NewTrustStore(dependencies.Paths.TrustFile())
+	store := workspace.NewStore(dependencies.Paths.WorkspacesFile())
 
 	isTrusted, err := store.IsTrusted(opened.Identity())
 	if err != nil {
