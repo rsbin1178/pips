@@ -56,6 +56,29 @@ func TestEventTaxonomyRoundTrip(t *testing.T) {
 	}
 }
 
+func TestValidateEventAcceptsCustomProviderIdentity(t *testing.T) {
+	t.Parallel()
+
+	provider := ai.Provider("opencode-go")
+
+	events := []Event{
+		newSessionEvent(EventSessionOpened, SessionOpened{
+			Provider: provider, ModelID: "deepseek-v4-flash",
+		}),
+		newTestEvent(EventMessageDelta, MessageDelta{
+			Kind: ai.StreamMessageStart, Provider: provider, Model: "deepseek-v4-flash",
+		}),
+	}
+	for _, event := range events {
+		require.NoError(t, ValidateEvent(event))
+	}
+
+	invalid := newSessionEvent(EventSessionOpened, SessionOpened{
+		Provider: "OpenCode", ModelID: "deepseek-v4-flash",
+	})
+	require.ErrorIs(t, ValidateEvent(invalid), ErrInvalidEvent)
+}
+
 func TestEventRejectsDirectJSONMarshal(t *testing.T) {
 	t.Parallel()
 

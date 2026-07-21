@@ -19,8 +19,8 @@ import (
 	"github.com/rsbin/pips/internal/coding/modelcatalog"
 )
 
-// ErrInvalid means resolved defaults cannot be represented by the target API.
-var ErrInvalid = errors.New("coding generation: invalid options")
+// ErrInvalid means resolved defaults cannot be represented by the target protocol.
+var ErrInvalid = errors.New("coding generation: invalid request defaults")
 
 // Policy applies immutable fill-only defaults to a request.
 type Policy func(*ai.Request)
@@ -30,11 +30,11 @@ func Compile(model modelcatalog.ResolvedModel) (Policy, error) {
 	options := model.Options.Clone()
 	if err := validate(model, options); err != nil {
 		return nil, fmt.Errorf(
-			"%w: provider %s model %s api %s variant %q reasoning %q: %w",
+			"%w: provider %s model %s protocol %s variant %q reasoning %q: %w",
 			ErrInvalid,
 			model.Ref.Provider,
 			model.Ref.Model,
-			model.API,
+			model.Protocol,
 			model.Variant,
 			reasoningLabel(model.ReasoningLevel),
 			err,
@@ -56,67 +56,67 @@ func validate(model modelcatalog.ResolvedModel, options config.ModelOptions) err
 		return err
 	}
 	if options.TopLogProbs != nil && options.LogProbs == nil {
-		return errors.New("options.top_logprobs requires options.logprobs")
+		return errors.New("request.top_logprobs requires request.logprobs")
 	}
 	if options.TopLogProbs != nil && (*options.TopLogProbs < 0 || *options.TopLogProbs > 20) {
-		return errors.New("options.top_logprobs is outside 0..20")
+		return errors.New("request.top_logprobs is outside 0..20")
 	}
 	if options.LogProbs != nil && !*options.LogProbs && options.TopLogProbs != nil {
-		return errors.New("options.top_logprobs requires options.logprobs=true")
+		return errors.New("request.top_logprobs requires request.logprobs=true")
 	}
 
-	switch model.API {
-	case config.APIResponses:
+	switch model.Protocol {
+	case config.ProtocolOpenAIResponses:
 		if path := firstPresent([]optionPresence{
-			{"options.top_k", options.TopK != nil},
-			{"options.seed", options.Seed != nil},
-			{"options.frequency_penalty", options.FrequencyPenalty != nil},
-			{"options.presence_penalty", options.PresencePenalty != nil},
-			{"options.min_p", options.MinP != nil},
-			{"options.repetition_penalty", options.RepetitionPenalty != nil},
-			{"options.stop", options.Stop != nil},
-			{"options.reasoning_budget", options.ReasoningBudget != nil},
+			{"request.top_k", options.TopK != nil},
+			{"request.seed", options.Seed != nil},
+			{"request.frequency_penalty", options.FrequencyPenalty != nil},
+			{"request.presence_penalty", options.PresencePenalty != nil},
+			{"request.min_p", options.MinP != nil},
+			{"request.repetition_penalty", options.RepetitionPenalty != nil},
+			{"request.stop", options.Stop != nil},
+			{"request.reasoning_budget", options.ReasoningBudget != nil},
 		}); path != "" {
 			return fmt.Errorf("%s is unsupported by Responses", path)
 		}
 		if options.ReasoningMode != nil && *options.ReasoningMode == config.ReasoningAdaptive {
-			return errors.New("options.reasoning_mode=adaptive is unsupported by Responses")
+			return errors.New("request.reasoning_mode=adaptive is unsupported by Responses")
 		}
 		if options.LogProbs != nil && !*options.LogProbs {
-			return errors.New("options.logprobs=false is unsupported by Responses")
+			return errors.New("request.logprobs=false is unsupported by Responses")
 		}
-	case config.APIChatCompletions:
+	case config.ProtocolOpenAIChatCompletions:
 		if model.Ref.Provider == ai.ProviderOpenAI && options.TopK != nil {
-			return errors.New("options.top_k is unsupported by OpenAI Chat Completions")
+			return errors.New("request.top_k is unsupported by OpenAI Chat Completions")
 		}
 		if options.ReasoningBudget != nil {
-			return errors.New("options.reasoning_budget is unsupported by Chat Completions")
+			return errors.New("request.reasoning_budget is unsupported by Chat Completions")
 		}
 		if options.IncludeReasoning != nil {
-			return errors.New("options.include_reasoning is unsupported by Chat Completions")
+			return errors.New("request.include_reasoning is unsupported by Chat Completions")
 		}
 		if options.ReasoningMode != nil &&
 			(*options.ReasoningMode == config.ReasoningAdaptive ||
 				*options.ReasoningMode == config.ReasoningDisabled) {
-			return errors.New("options.reasoning_mode is unsupported by Chat Completions")
+			return errors.New("request.reasoning_mode is unsupported by Chat Completions")
 		}
 		if model.Compatibility.ChatReasoning == openai.ChatReasoningOmit && hasReasoning(model, options) {
 			return errors.New("reasoning selection is disabled by compatibility.chat_reasoning=omit")
 		}
-	case config.APIAnthropicMessages:
+	case config.ProtocolAnthropicMessages:
 		if path := firstPresent([]optionPresence{
-			{"options.seed", options.Seed != nil},
-			{"options.frequency_penalty", options.FrequencyPenalty != nil},
-			{"options.presence_penalty", options.PresencePenalty != nil},
-			{"options.min_p", options.MinP != nil},
-			{"options.repetition_penalty", options.RepetitionPenalty != nil},
-			{"options.logprobs", options.LogProbs != nil},
+			{"request.seed", options.Seed != nil},
+			{"request.frequency_penalty", options.FrequencyPenalty != nil},
+			{"request.presence_penalty", options.PresencePenalty != nil},
+			{"request.min_p", options.MinP != nil},
+			{"request.repetition_penalty", options.RepetitionPenalty != nil},
+			{"request.logprobs", options.LogProbs != nil},
 		}); path != "" {
 			return fmt.Errorf("%s is unsupported by Anthropic Messages", path)
 		}
 		if options.ReasoningMode != nil && *options.ReasoningMode == config.ReasoningAdaptive &&
 			options.ReasoningBudget != nil {
-			return errors.New("options.reasoning_mode=adaptive conflicts with options.reasoning_budget")
+			return errors.New("request.reasoning_mode=adaptive conflicts with request.reasoning_budget")
 		}
 		if options.ReasoningMode != nil && *options.ReasoningMode == config.ReasoningAdaptive &&
 			!anthropicAdaptiveEffort(model.ReasoningLevel) {
@@ -126,17 +126,17 @@ func validate(model modelcatalog.ResolvedModel, options config.ModelOptions) err
 			)
 		}
 		if legacyAnthropicEffortUnsupported(model, options) {
-			return errors.New("reasoning selection requires options.reasoning_mode=adaptive or options.reasoning_budget")
+			return errors.New("reasoning selection requires request.reasoning_mode=adaptive or request.reasoning_budget")
 		}
-	case config.APIGenerateContent:
+	case config.ProtocolGeminiGenerateContent:
 		if options.MinP != nil {
-			return errors.New("options.min_p is unsupported by Gemini GenerateContent")
+			return errors.New("request.min_p is unsupported by Gemini GenerateContent")
 		}
 		if options.RepetitionPenalty != nil {
-			return errors.New("options.repetition_penalty is unsupported by Gemini GenerateContent")
+			return errors.New("request.repetition_penalty is unsupported by Gemini GenerateContent")
 		}
 		if options.ReasoningMode != nil && *options.ReasoningMode == config.ReasoningAdaptive {
-			return errors.New("options.reasoning_mode=adaptive is unsupported by Gemini GenerateContent")
+			return errors.New("request.reasoning_mode=adaptive is unsupported by Gemini GenerateContent")
 		}
 		if !geminiThinkingLevel(
 			model.ReasoningLevel,
@@ -152,11 +152,11 @@ func validate(model modelcatalog.ResolvedModel, options config.ModelOptions) err
 			return err
 		}
 	default:
-		return fmt.Errorf("unknown api %q", model.API)
+		return fmt.Errorf("unknown protocol %q", model.Protocol)
 	}
 
-	if err := validateExtra(model.API, options.ExtraBody); err != nil {
-		return fmt.Errorf("options.extra_body: %w", err)
+	if err := validateExtra(model.Protocol, options.ExtraBody); err != nil {
+		return fmt.Errorf("request.extra_body: %w", err)
 	}
 
 	return nil
@@ -203,10 +203,10 @@ func validateReasoningShape(
 	}
 	if *options.ReasoningMode == config.ReasoningDisabled {
 		if options.ReasoningBudget != nil {
-			return errors.New("options.reasoning_mode=disabled conflicts with options.reasoning_budget")
+			return errors.New("request.reasoning_mode=disabled conflicts with request.reasoning_budget")
 		}
 		if options.IncludeReasoning != nil && *options.IncludeReasoning {
-			return errors.New("options.reasoning_mode=disabled conflicts with options.include_reasoning=true")
+			return errors.New("request.reasoning_mode=disabled conflicts with request.include_reasoning=true")
 		}
 
 		return nil
@@ -215,12 +215,12 @@ func validateReasoningShape(
 		model.ReasoningLevel != nil || options.ReasoningBudget != nil {
 		return nil
 	}
-	if model.API == config.APIChatCompletions &&
+	if model.Protocol == config.ProtocolOpenAIChatCompletions &&
 		model.Compatibility.ChatReasoning == openai.ChatReasoningDeepSeek {
 		return nil
 	}
 
-	return errors.New("options.reasoning_mode=enabled requires a reasoning selection or budget")
+	return errors.New("request.reasoning_mode=enabled requires a reasoning selection or budget")
 }
 
 type optionPresence struct {
@@ -251,14 +251,14 @@ func validateGeminiRanges(options config.ModelOptions) error {
 		invalid bool
 		message string
 	}{
-		{outside(options.Temperature, 0, 2), "options.temperature is outside the Gemini 0..2 range"},
-		{outside(options.TopP, 0, 1), "options.top_p is outside the Gemini 0..1 range"},
-		{outsidePositiveInt32(options.TopK), "options.top_k is outside the Gemini 1..int32 range"},
-		{outsideSignedInt32(options.Seed), "options.seed exceeds the Gemini int32 range"},
-		{outside(options.FrequencyPenalty, -2, 2), "options.frequency_penalty is outside the Gemini -2..2 range"},
-		{outside(options.PresencePenalty, -2, 2), "options.presence_penalty is outside the Gemini -2..2 range"},
-		{outsidePositiveInt32(options.MaxOutputTokens), "options.max_output_tokens is outside the Gemini 1..int32 range"},
-		{outsidePositiveInt32(options.ReasoningBudget), "options.reasoning_budget is outside the Gemini 1..int32 range"},
+		{outside(options.Temperature, 0, 2), "request.temperature is outside the Gemini 0..2 range"},
+		{outside(options.TopP, 0, 1), "request.top_p is outside the Gemini 0..1 range"},
+		{outsidePositiveInt32(options.TopK), "request.top_k is outside the Gemini 1..int32 range"},
+		{outsideSignedInt32(options.Seed), "request.seed exceeds the Gemini int32 range"},
+		{outside(options.FrequencyPenalty, -2, 2), "request.frequency_penalty is outside the Gemini -2..2 range"},
+		{outside(options.PresencePenalty, -2, 2), "request.presence_penalty is outside the Gemini -2..2 range"},
+		{outsidePositiveInt32(options.MaxOutputTokens), "request.max_output_tokens is outside the Gemini 1..int32 range"},
+		{outsidePositiveInt32(options.ReasoningBudget), "request.reasoning_budget is outside the Gemini 1..int32 range"},
 	}
 	for _, rule := range rules {
 		if rule.invalid {
@@ -301,7 +301,7 @@ func legacyAnthropicEffortUnsupported(
 	}
 }
 
-func validateExtra(api config.API, extra map[string]any) error {
+func validateExtra(protocol config.Protocol, extra map[string]any) error {
 	if len(extra) == 0 {
 		return nil
 	}
@@ -314,14 +314,14 @@ func validateExtra(api config.API, extra map[string]any) error {
 		"logprobs", "top_logprobs", "store", "background", "conversation",
 		"previous_response_id", "cachedContent",
 	}
-	switch api {
-	case config.APIResponses:
+	switch protocol {
+	case config.ProtocolOpenAIResponses:
 		reserved = append(reserved, "include")
-	case config.APIChatCompletions:
+	case config.ProtocolOpenAIChatCompletions:
 		reserved = append(reserved, "reasoning_effort")
-	case config.APIAnthropicMessages:
+	case config.ProtocolAnthropicMessages:
 		reserved = append(reserved, "output_config", "cache_control")
-	case config.APIGenerateContent:
+	case config.ProtocolGeminiGenerateContent:
 		reserved = append(reserved,
 			"generationConfig.temperature", "generationConfig.topP", "generationConfig.topK",
 			"generationConfig.maxOutputTokens", "generationConfig.stopSequences",
@@ -331,6 +331,8 @@ func validateExtra(api config.API, extra map[string]any) error {
 			"generationConfig.logprobs", "generationConfig.responseModalities",
 			"generationConfig.thinkingConfig",
 		)
+	case config.ProtocolOpenAIAuto:
+		return errors.New("unresolved openai/auto protocol")
 	}
 
 	return ai.ValidateRequestBodyExtension(extra, reserved...)
@@ -379,21 +381,23 @@ func applyProviderOptions(
 	if request.ProviderOptions == nil {
 		request.ProviderOptions = map[ai.Provider]any{}
 	}
-	switch model.API {
-	case config.APIResponses, config.APIChatCompletions:
+	switch model.Protocol {
+	case config.ProtocolOpenAIResponses, config.ProtocolOpenAIChatCompletions:
 		current, _ := request.ProviderOptions[model.Ref.Provider].(openai.RequestOptions)
 		fillPointer(&current.MinP, options.MinP)
 		fillPointer(&current.RepetitionPenalty, options.RepetitionPenalty)
 		current.ExtraFields = fillExtra(current.ExtraFields, options.ExtraBody)
 		request.ProviderOptions[model.Ref.Provider] = current
-	case config.APIAnthropicMessages:
+	case config.ProtocolAnthropicMessages:
 		current, _ := request.ProviderOptions[model.Ref.Provider].(anthropic.RequestOptions)
 		current.ExtraFields = fillExtra(current.ExtraFields, options.ExtraBody)
 		request.ProviderOptions[model.Ref.Provider] = current
-	case config.APIGenerateContent:
+	case config.ProtocolGeminiGenerateContent:
 		current, _ := request.ProviderOptions[model.Ref.Provider].(gemini.RequestOptions)
 		current.ExtraFields = fillExtra(current.ExtraFields, options.ExtraBody)
 		request.ProviderOptions[model.Ref.Provider] = current
+	case config.ProtocolOpenAIAuto:
+		// Compile rejects unresolved protocols before constructing this policy.
 	}
 }
 

@@ -35,8 +35,8 @@ API_KEY=... pips exec \
 The default configuration is `~/.pips/config.toml`. `--config <path>` selects
 one replacement file; it does not inherit the default file, and project
 `.pips/config.toml` is never discovered implicitly. `PIPS_MODEL`,
-`PIPS_REASONING`, and `PIPS_VARIANT` mirror the three selection flags. API
-surface and endpoint are registry data, not command-line fields. The removed
+`PIPS_REASONING`, and `PIPS_VARIANT` mirror the three selection flags. Protocol
+and endpoint are registry data, not command-line fields. The removed
 `--provider`, `--model-api`, `PIPS_PROVIDER`, `PIPS_MODEL_API`, and `[model]`
 table are rejected rather than normalized.
 
@@ -45,98 +45,96 @@ model's default variant and reasoning; it never inherits those choices from the
 lower-priority model. Pass `--variant`/`--reasoning` (or their environment
 counterparts) together when an explicit target preset is wanted.
 
-A minimal official model is one line:
+A minimal model on a built-in provider needs only its nested model table:
 
 ```toml
-model = "anthropic/model-id"
+[providers.anthropic.models."model-id"]
 ```
 
-OpenAI uses Responses by default. Select Chat Completions for one model with a
-model-level API override:
+When the file contains exactly one model, Pips selects it automatically. For
+multiple models, set `default = true` on one model, or select one for the
+process with `PIPS_MODEL`/`--model`. OpenAI uses Responses by default. Select
+Chat Completions for one model with a model-level protocol override:
 
 ```toml
-model = "openai/chat-model-id"
-
-[[models]]
-id = "openai/chat-model-id"
-api = "chat_completions"
+[providers.openai.models."chat-model-id"]
+protocol = "openai/chat_completions"
 ```
 
 One file can define multiple selectable models, model-specific reasoning
 levels, and named request presets:
 
 ```toml
-model = "openai/gpt-model-id"
-
-[[models]]
-id = "openai/gpt-model-id"
+[providers.openai.models."gpt-model-id"]
+default = true
 context_window = 200000
 reasoning_levels = ["low", "medium", "high", "xhigh"]
 default_reasoning_level = "medium"
 default_variant = "balanced"
 
-[models.options]
+[providers.openai.models."gpt-model-id".request]
 max_output_tokens = 8192
 temperature = 0.2
 top_p = 0.95
 
-[models.variants.balanced]
+[providers.openai.models."gpt-model-id".variants.balanced]
 reasoning_level = "medium"
 
-[models.variants.deep]
+[providers.openai.models."gpt-model-id".variants.deep]
 reasoning_level = "xhigh"
+
+[providers.openai.models."gpt-model-id".variants.deep.request]
 max_output_tokens = 32768
 
-[[models]]
-id = "anthropic/claude-model-id"
+[providers.anthropic.models."claude-model-id"]
 context_window = 200000
 
-[models.options]
+[providers.anthropic.models."claude-model-id".request]
 max_output_tokens = 64000
 ```
 
 Connection settings are defined once per provider and inherited by its models:
 
 ```toml
-model = "local/qwen2.5-coder:7b"
-
 [providers.local]
-api = "chat_completions"
+protocol = "openai/chat_completions"
 base_url = "http://127.0.0.1:11434/v1"
 allow_http = true
 allow_private_ips = true
 
-[[models]]
-id = "local/qwen2.5-coder:7b"
+[providers.local.models."qwen2.5-coder:7b"]
 context_window = 32768
 
-[models.options]
+[providers.local.models."qwen2.5-coder:7b".request]
 max_output_tokens = 4096
 top_k = 40
 seed = 7
 
-[models.options.extra_body]
+[providers.local.models."qwen2.5-coder:7b".request.extra_body]
 service_tier = "flex"
 ```
 
-Supported protocol values are `responses`, `chat_completions`,
-`anthropic_messages`, and `generate_content`. `extra_body` is bounded and
+Supported protocol values are `openai/auto`, `openai/chat_completions`,
+`openai/responses`, `anthropic/messages`, and `gemini/generate_content`.
+`openai/auto` is resolved once from the model ID before Runtime construction.
+Custom provider IDs require both `base_url` and `protocol`; their IDs remain the
+connection identity shown in the TUI and events. `extra_body` is bounded and
 add-only: it cannot replace authentication, model/input/tool/session fields or
 typed request options. Pips does not contact a remote model catalog; only the
-current model and local `[[models]]` entries appear in `/model`. Unknown model
-capacity remains unknown rather than being guessed.
+current model and locally configured nested model tables appear in `/model`.
+Unknown model capacity remains unknown rather than being guessed.
 
 `context_window` is local context-capacity metadata. Request output is
-configured only with `[models.options].max_output_tokens` (or a variant
-override); that value is compiled into the provider request and may be
-overridden by an explicit per-call limit.
+configured only with a model or variant `request.max_output_tokens`; that value
+is compiled into the provider request and may be overridden by an explicit
+per-call limit.
 
 Reasoning levels are model capabilities, but native protocol vocabularies are
 still validated before a request. For budget-based Anthropic or Gemini models,
 use `reasoning_budgets = { low = 2048, high = 8192 }`; selecting a mapped level
 sends the numeric budget instead of an incompatible native effort enum.
 
-`pips config show` prints the resolved API, endpoint origin, context capacity,
+`pips config show` prints the resolved protocol, endpoint origin, context capacity,
 and every effective typed request option. Raw `extra_body` values stay hidden;
 only their top-level key count and encoded byte count are shown.
 

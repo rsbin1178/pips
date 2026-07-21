@@ -291,7 +291,7 @@ func TestExecTrustDoesNotLoadProjectConfigForCurrentRun(t *testing.T) {
 	require.NoError(t, mkdirAllPrivate(layout.Root()))
 	require.NoError(t, os.WriteFile(
 		layout.ConfigFile(),
-		[]byte("model = \"openai/user-model\"\n"),
+		[]byte("[providers.openai.models.\"user-model\"]\n"),
 		0o600,
 	))
 

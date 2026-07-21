@@ -42,13 +42,13 @@ func New(
 		return nil, fmt.Errorf("coding model: credential for %s: %w", resolved.Ref.Provider, err)
 	}
 
-	switch resolved.API {
-	case config.APIResponses, config.APIChatCompletions:
+	switch resolved.Protocol {
+	case config.ProtocolOpenAIResponses, config.ProtocolOpenAIChatCompletions:
 		options := []openai.Option{
 			openai.WithAPIKey(secret.APIKey()),
 			openai.WithProvider(resolved.Ref.Provider),
 			openai.WithBaseURL(resolved.Endpoint.BaseURL),
-			openai.WithAPI(openAIAPI(resolved.API)),
+			openai.WithAPI(openAIAPI(resolved.Protocol)),
 			openai.WithCompatibility(resolved.Compatibility),
 		}
 		if resolved.Endpoint.AllowHTTP {
@@ -59,7 +59,7 @@ func New(
 		}
 
 		return openai.New(resolved.Ref.Model, options...), nil
-	case config.APIAnthropicMessages:
+	case config.ProtocolAnthropicMessages:
 		options := []anthropic.Option{
 			anthropic.WithAPIKey(secret.APIKey()),
 			anthropic.WithProvider(resolved.Ref.Provider),
@@ -73,7 +73,7 @@ func New(
 		}
 
 		return anthropic.New(resolved.Ref.Model, options...), nil
-	case config.APIGenerateContent:
+	case config.ProtocolGeminiGenerateContent:
 		options := []gemini.Option{
 			gemini.WithAPIKey(secret.APIKey()),
 			gemini.WithProvider(resolved.Ref.Provider),
@@ -88,12 +88,12 @@ func New(
 
 		return gemini.New(resolved.Ref.Model, options...), nil
 	default:
-		return nil, fmt.Errorf("%w: unsupported api %q", ErrInvalid, resolved.API)
+		return nil, fmt.Errorf("%w: unsupported protocol %q", ErrInvalid, resolved.Protocol)
 	}
 }
 
-func openAIAPI(api config.API) openai.API {
-	if api == config.APIResponses {
+func openAIAPI(protocol config.Protocol) openai.API {
+	if protocol == config.ProtocolOpenAIResponses {
 		return openai.APIResponses
 	}
 

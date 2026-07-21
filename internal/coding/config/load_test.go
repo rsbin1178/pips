@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/rsbin/pips/ai"
+	"github.com/rsbin/pips/ai/openai"
 	"github.com/rsbin/pips/internal/coding/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -18,34 +19,43 @@ func TestLoadRegistryAndSelectionPrecedence(t *testing.T) {
 
 	path := filepath.Join(t.TempDir(), "config.toml")
 	writeFile(t, path, `
-model = "openai/gpt-file"
 variant = "balanced"
 reasoning = "medium"
 tool_search = true
 
 [providers.local]
-api = "chat_completions"
+protocol = "openai/chat_completions"
 base_url = "http://127.0.0.1:11434/v1"
 allow_http = true
 allow_private_ips = true
 
-[[models]]
-id = "openai/gpt-file"
+[providers.local.compatibility]
+max_tokens_field = "max_tokens"
+
+[providers.openai.models."gpt-file"]
 context_window = 200000
 reasoning_levels = ["low", "medium", "high"]
 default_reasoning_level = "medium"
 default_variant = "balanced"
 
-[models.options]
+[providers.openai.models."gpt-file".reasoning_budgets]
+high = 16000
+
+[providers.openai.models."gpt-file".compatibility]
+stream_usage = "omit"
+
+[providers.openai.models."gpt-file".request]
 max_output_tokens = 4096
 temperature = 0.2
 stop = ["END"]
 
-[models.options.extra_body]
+[providers.openai.models."gpt-file".request.extra_body]
 service_tier = "flex"
 
-[models.variants.balanced]
+[providers.openai.models."gpt-file".variants.balanced]
 reasoning_level = "medium"
+
+[providers.openai.models."gpt-file".variants.balanced.request]
 max_output_tokens = 8192
 `)
 
@@ -72,7 +82,18 @@ max_output_tokens = 8192
 	assert.Equal(t, 4096, *result.Config.Models[0].Options.MaxOutputTokens)
 	assert.InDelta(t, 0.2, *result.Config.Models[0].Options.Temperature, 1e-9)
 	assert.Equal(t, 8192, *result.Config.Models[0].Variants["balanced"].Options.MaxOutputTokens)
-	assert.Equal(t, config.APIChatCompletions, result.Config.Providers["local"].API)
+	assert.Equal(t, 16000, result.Config.Models[0].ReasoningBudgets["high"])
+	assert.Equal(t, openai.StreamUsageOmit, *result.Config.Models[0].Compatibility.StreamUsage)
+	assert.Equal(
+		t,
+		openai.MaxTokensFieldLegacy,
+		*result.Config.Providers["local"].Compatibility.MaxTokensField,
+	)
+	assert.Equal(
+		t,
+		config.ProtocolOpenAIChatCompletions,
+		result.Config.Providers["local"].Protocol,
+	)
 
 	source, ok := result.Config.Source(config.FieldModel)
 	require.True(t, ok)
@@ -95,6 +116,80 @@ max_output_tokens = 8192
 	assert.Equal(t, config.ModelEnv, variantSource.Detail)
 }
 
+func TestLoadInfersAndSortsNestedModels(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, `
+[providers.zeta]
+protocol = "openai/chat_completions"
+base_url = "https://zeta.example/v1"
+
+[providers.zeta.models."org/model-b"]
+
+[providers.zeta.models."model-a"]
+default = true
+
+[providers.alpha.models."model-c"]
+`)
+
+	result, err := config.Load(config.LoadOptions{ConfigFile: path})
+	require.NoError(t, err)
+
+	assert.Equal(t, "zeta/model-a", result.Config.Model.String())
+	require.Len(t, result.Config.Models, 3)
+	assert.Equal(t, "alpha/model-c", result.Config.Models[0].Ref.String())
+	assert.Equal(t, "zeta/model-a", result.Config.Models[1].Ref.String())
+	assert.Equal(t, "zeta/org/model-b", result.Config.Models[2].Ref.String())
+}
+
+func TestLoadInfersOnlyNestedModel(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, `
+[providers.opencode-go]
+protocol = "openai/chat_completions"
+base_url = "https://opencode.ai/zen/go/v1"
+
+[providers.opencode-go.models."deepseek-v4-flash"]
+context_window = 1000000
+request.max_output_tokens = 65536
+`)
+
+	result, err := config.Load(config.LoadOptions{ConfigFile: path})
+	require.NoError(t, err)
+
+	assert.Equal(t, "opencode-go/deepseek-v4-flash", result.Config.Model.String())
+	require.Len(t, result.Config.Models, 1)
+	assert.Equal(t, 1000000, result.Config.Models[0].ContextWindow)
+	assert.Equal(t, 65536, *result.Config.Models[0].Options.MaxOutputTokens)
+}
+
+func TestLoadMultipleModelsRequireDefaultOrProcessSelection(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, `
+[providers.openai.models.one]
+[providers.openai.models.two]
+`)
+
+	result, err := config.Load(config.LoadOptions{ConfigFile: path})
+	require.NoError(t, err)
+	assert.Empty(t, result.Config.Model.String())
+	err = result.Config.ValidateRuntime()
+	require.ErrorIs(t, err, config.ErrInvalid)
+	require.ErrorContains(t, err, "default = true")
+
+	result, err = config.Load(config.LoadOptions{
+		ConfigFile: path,
+		LookupEnv:  mapLookup(map[string]string{config.ModelEnv: "openai/two"}),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "openai/two", result.Config.Model.String())
+}
+
 func TestLoadRejectsLegacyAndInvalidConfiguration(t *testing.T) {
 	t.Parallel()
 
@@ -106,17 +201,39 @@ func TestLoadRejectsLegacyAndInvalidConfiguration(t *testing.T) {
 	}{
 		{name: "legacy model table", content: "[model]\nprovider = \"openai\"\nid = \"gpt\"\n", want: config.ErrMigration},
 		{
-			name:     "removed model output limit",
-			content:  "[[models]]\nid = \"openai/gpt\"\nmax_output_tokens = 8192\n",
+			name:     "legacy model selector",
+			content:  "model = \"openai/gpt\"\n",
 			want:     config.ErrMigration,
-			wantText: "move the value to [models.options]",
+			wantText: "default = true",
+		},
+		{name: "legacy flat models", content: "[[models]]\nid = \"openai/gpt\"\n", want: config.ErrMigration},
+		{
+			name:    "legacy provider api",
+			content: "[providers.openai]\napi = \"responses\"\n",
+			want:    config.ErrMigration, wantText: "protocol",
+		},
+		{
+			name:    "legacy model api",
+			content: "[providers.openai.models.gpt]\napi = \"responses\"\n",
+			want:    config.ErrMigration, wantText: "protocol",
+		},
+		{
+			name:    "legacy model options",
+			content: "[providers.openai.models.gpt.options]\nmax_output_tokens = 8192\n",
+			want:    config.ErrMigration, wantText: "request",
+		},
+		{
+			name:    "legacy variant request fields",
+			content: "[providers.openai.models.gpt.variants.deep]\nmax_output_tokens = 8192\n",
+			want:    config.ErrMigration, wantText: "under request",
 		},
 		{name: "unknown top level", content: "api_key = \"secret\"\n", want: config.ErrDecode},
-		{name: "unknown option", content: "[[models]]\nid = \"openai/gpt\"\n[models.options]\ntypo = true\n", want: config.ErrDecode},
-		{name: "duplicate model", content: "[[models]]\nid = \"openai/gpt\"\n[[models]]\nid = \"openai/gpt\"\n", want: config.ErrInvalid},
-		{name: "invalid default variant", content: "[[models]]\nid = \"openai/gpt\"\ndefault_variant = \"missing\"\n", want: config.ErrInvalid},
-		{name: "credential shaped extra", content: "[[models]]\nid = \"openai/gpt\"\n[models.options.extra_body]\napi_key = \"secret\"\n", want: config.ErrInvalid},
-		{name: "datetime extra", content: "[[models]]\nid = \"openai/gpt\"\n[models.options.extra_body]\ncreated_at = 2026-07-21T12:00:00Z\n", want: config.ErrInvalid},
+		{name: "unknown request", content: "[providers.openai.models.gpt.request]\ntypo = true\n", want: config.ErrDecode},
+		{name: "duplicate nested model", content: "[providers.openai.models.gpt]\n[providers.openai.models.gpt]\n", want: config.ErrDecode},
+		{name: "multiple defaults", content: "[providers.openai.models.one]\ndefault = true\n[providers.openai.models.two]\ndefault = true\n", want: config.ErrInvalid},
+		{name: "invalid default variant", content: "[providers.openai.models.gpt]\ndefault_variant = \"missing\"\n", want: config.ErrInvalid},
+		{name: "credential shaped extra", content: "[providers.openai.models.gpt.request.extra_body]\napi_key = \"secret\"\n", want: config.ErrInvalid},
+		{name: "datetime extra", content: "[providers.openai.models.gpt.request.extra_body]\ncreated_at = 2026-07-21T12:00:00Z\n", want: config.ErrInvalid},
 	}
 
 	for _, tt := range tests {

@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -113,41 +114,39 @@ func Load(options LoadOptions) (Result, error) {
 }
 
 type fileConfig struct {
-	Model      *string                 `toml:"model"`
 	Variant    *string                 `toml:"variant"`
 	Reasoning  *string                 `toml:"reasoning"`
 	Providers  map[string]fileProvider `toml:"providers"`
-	Models     []fileModel             `toml:"models"`
 	ToolSearch *bool                   `toml:"tool_search"`
 	Sandbox    *string                 `toml:"sandbox"`
 	Approval   *string                 `toml:"approval"`
 }
 
 type fileProvider struct {
-	BaseURL         *string           `toml:"base_url"`
-	API             *string           `toml:"api"`
-	AllowHTTP       *bool             `toml:"allow_http"`
-	AllowPrivateIPs *bool             `toml:"allow_private_ips"`
-	Compatibility   fileCompatibility `toml:"compatibility"`
+	BaseURL         *string              `toml:"base_url"`
+	Protocol        *string              `toml:"protocol"`
+	AllowHTTP       *bool                `toml:"allow_http"`
+	AllowPrivateIPs *bool                `toml:"allow_private_ips"`
+	Compatibility   fileCompatibility    `toml:"compatibility"`
+	Models          map[string]fileModel `toml:"models"`
 }
 
 type fileModel struct {
-	ID                     string                 `toml:"id"`
-	API                    *string                `toml:"api"`
-	ContextWindow          *int                   `toml:"context_window"`
-	RemovedMaxOutputTokens *int                   `toml:"max_output_tokens"`
-	ReasoningLevels        []string               `toml:"reasoning_levels"`
-	DefaultReasoningLevel  *string                `toml:"default_reasoning_level"`
-	ReasoningBudgets       map[string]int         `toml:"reasoning_budgets"`
-	DefaultVariant         *string                `toml:"default_variant"`
-	Compatibility          fileCompatibility      `toml:"compatibility"`
-	Options                fileOptions            `toml:"options"`
-	Variants               map[string]fileVariant `toml:"variants"`
+	Default               bool                   `toml:"default"`
+	Protocol              *string                `toml:"protocol"`
+	ContextWindow         *int                   `toml:"context_window"`
+	ReasoningLevels       []string               `toml:"reasoning_levels"`
+	DefaultReasoningLevel *string                `toml:"default_reasoning_level"`
+	ReasoningBudgets      map[string]int         `toml:"reasoning_budgets"`
+	DefaultVariant        *string                `toml:"default_variant"`
+	Compatibility         fileCompatibility      `toml:"compatibility"`
+	Request               fileOptions            `toml:"request"`
+	Variants              map[string]fileVariant `toml:"variants"`
 }
 
 type fileVariant struct {
-	ReasoningLevel *string `toml:"reasoning_level"`
-	fileOptions
+	ReasoningLevel *string     `toml:"reasoning_level"`
+	Request        fileOptions `toml:"request"`
 }
 
 type fileOptions struct {
@@ -263,7 +262,7 @@ func readInspectedFile(abs, path string, expected os.FileInfo) ([]byte, error) {
 }
 
 func decodeFile(path string, data []byte) (fileLayer, error) {
-	if err := rejectLegacyModelTable(data); err != nil {
+	if err := rejectLegacySchema(data); err != nil {
 		return fileLayer{}, fmt.Errorf("coding config: %q: %w", path, err)
 	}
 
@@ -290,35 +289,143 @@ func decodeFile(path string, data []byte) (fileLayer, error) {
 	return layer, nil
 }
 
-func rejectLegacyModelTable(data []byte) error {
+func rejectLegacySchema(data []byte) error {
 	var raw map[string]any
-	if err := toml.Unmarshal(data, &raw); err == nil {
-		_, legacy := raw["model"].(map[string]any)
-		if !legacy {
-			return nil
-		}
-
+	if err := toml.Unmarshal(data, &raw); err != nil {
+		return fmt.Errorf("%w: %w", ErrDecode, err)
+	}
+	if _, exists := raw["model"]; exists {
 		return fmt.Errorf(
-			"%w: replace [model] with model = \"provider/model-id\"; configure endpoints under [providers.<id>]",
+			"%w: remove top-level model; a single nested model is selected automatically, or set default = true on one nested model",
 			ErrMigration,
+		)
+	}
+	if _, exists := raw["models"]; exists {
+		return fmt.Errorf(
+			"%w: replace [[models]] with [providers.<provider>.models.\"<model-id>\"]",
+			ErrMigration,
+		)
+	}
+
+	providers, ok := raw["providers"].(map[string]any)
+	if !ok {
+		return nil
+	}
+
+	return rejectLegacyProviders(providers)
+}
+
+func rejectLegacyProviders(providers map[string]any) error {
+	for _, provider := range sortedMapKeys(providers) {
+		definition, ok := providers[provider].(map[string]any)
+		if !ok {
+			continue
+		}
+		if err := rejectLegacyProvider(provider, definition); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func rejectLegacyProvider(provider string, definition map[string]any) error {
+	if _, exists := definition["api"]; exists {
+		return fmt.Errorf(
+			"%w: provider %q api was renamed to protocol",
+			ErrMigration,
+			provider,
+		)
+	}
+	models, ok := definition["models"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	for _, model := range sortedMapKeys(models) {
+		metadata, ok := models[model].(map[string]any)
+		if !ok {
+			continue
+		}
+		if err := rejectLegacyModel(provider+"/"+model, metadata); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func rejectLegacyModel(ref string, metadata map[string]any) error {
+	if _, exists := metadata["api"]; exists {
+		return fmt.Errorf("%w: model %q api was renamed to protocol", ErrMigration, ref)
+	}
+	if _, exists := metadata["options"]; exists {
+		return fmt.Errorf("%w: model %q options was renamed to request", ErrMigration, ref)
+	}
+	if _, exists := metadata["max_output_tokens"]; exists {
+		return fmt.Errorf(
+			"%w: model %q max_output_tokens moved to request.max_output_tokens",
+			ErrMigration,
+			ref,
+		)
+	}
+	variants, ok := metadata["variants"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	for _, variant := range sortedMapKeys(variants) {
+		preset, ok := variants[variant].(map[string]any)
+		if !ok {
+			continue
+		}
+		if err := rejectLegacyVariant(ref, variant, preset); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func rejectLegacyVariant(ref, variant string, preset map[string]any) error {
+	if _, exists := preset["options"]; exists {
+		return fmt.Errorf(
+			"%w: model %q variant %q options was renamed to request",
+			ErrMigration,
+			ref,
+			variant,
+		)
+	}
+	if hasLegacyRequestField(preset) {
+		return fmt.Errorf(
+			"%w: model %q variant %q request fields moved under request",
+			ErrMigration,
+			ref,
+			variant,
 		)
 	}
 
 	return nil
 }
 
+func hasLegacyRequestField(values map[string]any) bool {
+	for _, field := range []string{
+		"max_output_tokens", "temperature", "top_p", "top_k", "min_p", "seed",
+		"frequency_penalty", "presence_penalty", "repetition_penalty", "stop",
+		"logprobs", "top_logprobs", "reasoning_mode", "reasoning_budget",
+		"include_reasoning", "extra_body",
+	} {
+		if _, exists := values[field]; exists {
+			return true
+		}
+	}
+
+	return false
+}
+
 //nolint:gocyclo // Strict TOML presence is translated field by field.
 func decodeLayer(value fileConfig) (fileLayer, error) {
 	layer := fileLayer{
 		providers: make(map[ai.Provider]ProviderConfig, len(value.Providers)),
-		models:    make([]ModelConfig, 0, len(value.Models)),
-	}
-	if value.Model != nil {
-		ref, err := ParseModelRef(*value.Model)
-		if err != nil {
-			return fileLayer{}, err
-		}
-		layer.patch.Model = &ref
+		models:    []ModelConfig{},
 	}
 	if value.Variant != nil {
 		variant, err := ParseVariant(*value.Variant)
@@ -350,7 +457,9 @@ func decodeLayer(value fileConfig) (fileLayer, error) {
 		layer.patch.Approval = &mode
 	}
 
-	for key, raw := range value.Providers {
+	defaultModels := []ModelRef{}
+	for _, key := range sortedMapKeys(value.Providers) {
+		raw := value.Providers[key]
 		provider, err := ParseProvider(key)
 		if err != nil {
 			return fileLayer{}, err
@@ -360,13 +469,29 @@ func decodeLayer(value fileConfig) (fileLayer, error) {
 			return fileLayer{}, fmt.Errorf("provider %q: %w", key, err)
 		}
 		layer.providers[provider] = definition
-	}
-	for index, raw := range value.Models {
-		definition, err := decodeModel(raw)
-		if err != nil {
-			return fileLayer{}, fmt.Errorf("models[%d]: %w", index, err)
+		for _, modelID := range sortedMapKeys(raw.Models) {
+			model, isDefault, decodeErr := decodeModel(provider, modelID, raw.Models[modelID])
+			if decodeErr != nil {
+				return fileLayer{}, fmt.Errorf(
+					"provider %q model %q: %w",
+					provider,
+					modelID,
+					decodeErr,
+				)
+			}
+			layer.models = append(layer.models, model)
+			if isDefault {
+				defaultModels = append(defaultModels, model.Ref)
+			}
 		}
-		layer.models = append(layer.models, definition)
+	}
+	if len(defaultModels) > 1 {
+		return fileLayer{}, fmt.Errorf("%w: multiple models set default = true", ErrInvalid)
+	}
+	if len(defaultModels) == 1 {
+		layer.patch.Model = clonePointer(&defaultModels[0])
+	} else if len(layer.models) == 1 {
+		layer.patch.Model = clonePointer(&layer.models[0].Ref)
 	}
 
 	return layer, nil
@@ -377,12 +502,12 @@ func decodeProvider(value fileProvider) (ProviderConfig, error) {
 	if value.BaseURL != nil {
 		result.BaseURL = strings.TrimSpace(*value.BaseURL)
 	}
-	if value.API != nil {
-		api, err := ParseAPI(*value.API)
+	if value.Protocol != nil {
+		protocol, err := ParseProtocol(*value.Protocol)
 		if err != nil {
 			return ProviderConfig{}, err
 		}
-		result.API = api
+		result.Protocol = protocol
 	}
 	if value.AllowHTTP != nil {
 		result.AllowHTTP = *value.AllowHTTP
@@ -400,27 +525,20 @@ func decodeProvider(value fileProvider) (ProviderConfig, error) {
 }
 
 //nolint:gocyclo // One decoder owns the complete model schema and path context.
-func decodeModel(value fileModel) (ModelConfig, error) {
-	if value.RemovedMaxOutputTokens != nil {
-		return ModelConfig{}, fmt.Errorf(
-			"%w: model-level max_output_tokens was removed; move the value to [models.options]",
-			ErrMigration,
-		)
-	}
-
-	ref, err := ParseModelRef(value.ID)
+func decodeModel(provider ai.Provider, modelID string, value fileModel) (ModelConfig, bool, error) {
+	parsedModelID, err := parseIdentifier("model id", modelID, 512, true)
 	if err != nil {
-		return ModelConfig{}, err
+		return ModelConfig{}, false, err
 	}
 	result := ModelConfig{
-		Ref:              ref,
+		Ref:              ModelRef{Provider: provider, Model: parsedModelID},
 		ReasoningBudgets: make(map[ReasoningLevel]int, len(value.ReasoningBudgets)),
 		Variants:         make(map[string]VariantConfig, len(value.Variants)),
 	}
-	if value.API != nil {
-		result.API, err = ParseAPI(*value.API)
+	if value.Protocol != nil {
+		result.Protocol, err = ParseProtocol(*value.Protocol)
 		if err != nil {
-			return ModelConfig{}, err
+			return ModelConfig{}, false, err
 		}
 	}
 	if value.ContextWindow != nil {
@@ -429,59 +547,70 @@ func decodeModel(value fileModel) (ModelConfig, error) {
 	for _, raw := range value.ReasoningLevels {
 		level, parseErr := ParseReasoningLevel(raw)
 		if parseErr != nil {
-			return ModelConfig{}, parseErr
+			return ModelConfig{}, false, parseErr
 		}
 		result.ReasoningLevels = append(result.ReasoningLevels, level)
 	}
 	if value.DefaultReasoningLevel != nil {
 		level, parseErr := ParseReasoningLevel(*value.DefaultReasoningLevel)
 		if parseErr != nil {
-			return ModelConfig{}, parseErr
+			return ModelConfig{}, false, parseErr
 		}
 		result.DefaultReasoningLevel = &level
 	}
 	for raw, budget := range value.ReasoningBudgets {
 		level, parseErr := ParseReasoningLevel(raw)
 		if parseErr != nil {
-			return ModelConfig{}, parseErr
+			return ModelConfig{}, false, parseErr
 		}
 		result.ReasoningBudgets[level] = budget
 	}
 	if value.DefaultVariant != nil {
 		result.DefaultVariant, err = ParseVariant(*value.DefaultVariant)
 		if err != nil {
-			return ModelConfig{}, err
+			return ModelConfig{}, false, err
 		}
 	}
 	result.Compatibility, err = decodeCompatibility(value.Compatibility)
 	if err != nil {
-		return ModelConfig{}, err
+		return ModelConfig{}, false, err
 	}
-	result.Options, err = decodeOptions(value.Options)
+	result.Options, err = decodeOptions(value.Request)
 	if err != nil {
-		return ModelConfig{}, err
+		return ModelConfig{}, false, err
 	}
-	for name, raw := range value.Variants {
+	for _, name := range sortedMapKeys(value.Variants) {
+		raw := value.Variants[name]
 		variantName, parseErr := ParseVariant(name)
 		if parseErr != nil {
-			return ModelConfig{}, parseErr
+			return ModelConfig{}, false, parseErr
 		}
 		variant := VariantConfig{}
 		if raw.ReasoningLevel != nil {
 			level, levelErr := ParseReasoningLevel(*raw.ReasoningLevel)
 			if levelErr != nil {
-				return ModelConfig{}, levelErr
+				return ModelConfig{}, false, levelErr
 			}
 			variant.ReasoningLevel = &level
 		}
-		variant.Options, parseErr = decodeOptions(raw.fileOptions)
+		variant.Options, parseErr = decodeOptions(raw.Request)
 		if parseErr != nil {
-			return ModelConfig{}, parseErr
+			return ModelConfig{}, false, parseErr
 		}
 		result.Variants[variantName] = variant
 	}
 
-	return result, nil
+	return result, value.Default, nil
+}
+
+func sortedMapKeys[Value any](values map[string]Value) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+
+	return keys
 }
 
 func decodeOptions(value fileOptions) (ModelOptions, error) {
@@ -499,7 +628,7 @@ func decodeOptions(value fileOptions) (ModelOptions, error) {
 		result.ReasoningMode = &mode
 	}
 
-	return result, validateOptions(result, "options")
+	return result, validateOptions(result, "request")
 }
 
 //nolint:gocyclo // Every enum is validated before entering the runtime snapshot.
@@ -554,7 +683,7 @@ func applyEnvironment(value *Config, lookup LookupEnv) error {
 	}
 	for _, legacy := range []string{"PIPS_PROVIDER", "PIPS_MODEL_API"} {
 		if _, set := lookup(legacy); set {
-			return fmt.Errorf("%w: %s was removed; use PIPS_MODEL=provider/model and configure api under [providers.<id>]", ErrMigration, legacy)
+			return fmt.Errorf("%w: %s was removed; use PIPS_MODEL=provider/model and configure protocol under [providers.<id>]", ErrMigration, legacy)
 		}
 	}
 

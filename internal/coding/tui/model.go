@@ -322,19 +322,7 @@ func (m *Model) View() tea.View {
 
 	switch m.lifecycle {
 	case lifecycleTrust:
-		decision := "Deny"
-		if m.allow {
-			decision = "Allow"
-		}
-		content = fmt.Sprintf(
-			"Pips needs your trust decision\n\nWorkspace: %s\n\n"+
-				"Trust enables this project's .pips configuration and resources.\n"+
-				"It does not approve tools, MCP servers, or full access.\n\n"+
-				"Selected: %s%s\n\n←/→ choose • Enter confirm • a allow • d deny",
-			m.options.Workspace,
-			decision,
-			trustErrorMessage(m.err),
-		)
+		content = m.trustView()
 	case lifecycleLoading:
 		content = "Starting Pips…"
 	case lifecycleReady:
@@ -359,22 +347,7 @@ func (m *Model) updateKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	switch m.lifecycle {
 	case lifecycleTrust:
-		switch key {
-		case "left", "right", keyTab:
-			m.allow = !m.allow
-		case "a":
-			m.allow = true
-
-			return m.confirmTrust()
-		case "d", keyEscape:
-			m.allow = false
-
-			return m.confirmTrust()
-		case keyEnter:
-			return m.confirmTrust()
-		case keyCtrlC, "q":
-			return m, tea.Quit
-		}
+		return m.updateTrustKey(key)
 	case lifecycleLoading:
 		return m, nil
 	case lifecycleReady, lifecycleFatal:
@@ -387,6 +360,99 @@ func (m *Model) updateKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func (m *Model) updateTrustKey(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "up":
+		m.allow = true
+	case "down":
+		m.allow = false
+	case "left", "right", keyTab:
+		m.allow = !m.allow
+	case "a":
+		m.allow = true
+
+		return m.confirmTrust()
+	case "d", keyEscape:
+		m.allow = false
+
+		return m.confirmTrust()
+	case keyEnter:
+		return m.confirmTrust()
+	case keyCtrlC, "q":
+		return m, tea.Quit
+	}
+
+	return m, nil
+}
+
+func (m *Model) trustView() string {
+	title := "Pips needs your trust decision"
+	workspaceLabel := "Workspace:"
+	trustWord := "Trust"
+	projectRoot := ".pips"
+	help := "Up/Down choose • Enter confirm • a allow • d deny"
+	if !m.options.NoColor {
+		accent := lipgloss.Color("#5FAFFF")
+		muted := lipgloss.Color("#8B949E")
+		if m.theme == themeLight {
+			accent = lipgloss.Color("#0969DA")
+			muted = lipgloss.Color("#57606A")
+		}
+		title = lipgloss.NewStyle().Bold(true).Foreground(accent).Render(title)
+		workspaceLabel = lipgloss.NewStyle().Bold(true).Render(workspaceLabel)
+		trustWord = lipgloss.NewStyle().Bold(true).Foreground(accent).Render(trustWord)
+		projectRoot = lipgloss.NewStyle().Bold(true).Foreground(accent).Render(projectRoot)
+		help = lipgloss.NewStyle().Bold(true).Foreground(muted).Render(help)
+	}
+
+	content := strings.Join([]string{
+		title,
+		"",
+		workspaceLabel + " " + m.options.Workspace,
+		"",
+		trustWord + " enables this project's " + projectRoot + " resources.",
+		"It does not load project config or approve tools, MCP servers, or full access.",
+		"",
+		m.trustChoice("Allow", "Enable project Skills, Bundles, MCP, and permissions", m.allow),
+		m.trustChoice("Deny", "Continue without trusting this workspace", !m.allow),
+		"",
+		help,
+	}, "\n")
+	content += trustErrorMessage(m.err)
+
+	width := max(1, m.width)
+	lines := strings.Split(content, "\n")
+	for index, line := range lines {
+		lines[index] = ansi.Truncate(line, width, "…")
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+func (m *Model) trustChoice(label, description string, selected bool) string {
+	marker := " "
+	if selected {
+		marker = ">"
+	}
+	line := fmt.Sprintf("%s %-5s %s", marker, label, description)
+	if m.options.NoColor {
+		return line
+	}
+
+	color := lipgloss.Color("#5FAFFF")
+	if !selected {
+		color = lipgloss.Color("#8B949E")
+	}
+	if m.theme == themeLight {
+		color = lipgloss.Color("#0969DA")
+		if !selected {
+			color = lipgloss.Color("#57606A")
+		}
+	}
+
+	return lipgloss.NewStyle().Bold(true).Foreground(color).Render(line)
 }
 
 //nolint:gocyclo,nestif,gocritic // Contextual input precedence is an explicit product state machine.

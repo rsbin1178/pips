@@ -50,7 +50,7 @@ type Limits struct {
 // ResolvedModel is an immutable-by-convention runtime snapshot.
 type ResolvedModel struct {
 	Ref              config.ModelRef
-	API              config.API
+	Protocol         config.Protocol
 	Endpoint         Endpoint
 	Limits           Limits
 	Compatibility    openai.Compatibility
@@ -102,7 +102,7 @@ type registry struct {
 
 type providerDefinition struct {
 	endpoint      Endpoint
-	api           config.API
+	protocol      config.Protocol
 	compatibility openai.Compatibility
 }
 
@@ -181,16 +181,17 @@ func (r *registry) resolve(selection Selection) (ResolvedModel, error) {
 		return ResolvedModel{}, fmt.Errorf("%w: provider %q is not configured", ErrInvalid, ref.Provider)
 	}
 
-	api := provider.api
-	if model.API != "" {
-		api = model.API
+	protocol := provider.protocol
+	if model.Protocol != "" {
+		protocol = model.Protocol
 	}
-	if api == "" {
-		return ResolvedModel{}, fmt.Errorf("%w: model %q has no wire api", ErrInvalid, ref)
+	if protocol == "" {
+		return ResolvedModel{}, fmt.Errorf("%w: model %q has no protocol", ErrInvalid, ref)
 	}
-	openAIShaped := api == config.APIResponses || api == config.APIChatCompletions
+	protocol = resolveProtocol(ref.Model, protocol)
+	openAIShaped := config.IsOpenAIProtocol(protocol)
 	if !openAIShaped && !reflect.DeepEqual(model.Compatibility, config.CompatibilityConfig{}) {
-		return ResolvedModel{}, fmt.Errorf("%w: model %q compatibility requires an OpenAI-shaped api", ErrInvalid, ref)
+		return ResolvedModel{}, fmt.Errorf("%w: model %q compatibility requires an OpenAI protocol", ErrInvalid, ref)
 	}
 	compatibility := openai.Compatibility{}
 	if openAIShaped {
@@ -238,7 +239,7 @@ func (r *registry) resolve(selection Selection) (ResolvedModel, error) {
 
 	return ResolvedModel{
 		Ref:              ref,
-		API:              api,
+		Protocol:         protocol,
 		Endpoint:         provider.endpoint,
 		Limits:           Limits{ContextWindow: model.ContextWindow},
 		Compatibility:    compatibility,
@@ -270,15 +271,15 @@ func resolveProviders(overrides map[ai.Provider]config.ProviderConfig) (map[ai.P
 	providers := map[ai.Provider]providerDefinition{
 		ai.ProviderOpenAI: {
 			endpoint: Endpoint{BaseURL: openai.DefaultBaseURL(), Origin: originBuiltIn},
-			api:      config.APIResponses,
+			protocol: config.ProtocolOpenAIResponses,
 		},
 		ai.ProviderAnthropic: {
 			endpoint: Endpoint{BaseURL: anthropic.DefaultBaseURL(), Origin: originBuiltIn},
-			api:      config.APIAnthropicMessages,
+			protocol: config.ProtocolAnthropicMessages,
 		},
 		ai.ProviderGemini: {
 			endpoint: Endpoint{BaseURL: gemini.DefaultBaseURL(), Origin: originBuiltIn},
-			api:      config.APIGenerateContent,
+			protocol: config.ProtocolGeminiGenerateContent,
 		},
 	}
 	for _, provider := range []ai.Provider{
@@ -296,28 +297,28 @@ func resolveProviders(overrides map[ai.Provider]config.ProviderConfig) (map[ai.P
 		}
 		providers[provider] = providerDefinition{
 			endpoint: Endpoint{BaseURL: profile.BaseURL, Origin: originBuiltIn},
-			api:      apiFromOpenAI(profile.API), compatibility: profile.Compatibility,
+			protocol: protocolFromOpenAI(profile.API), compatibility: profile.Compatibility,
 		}
 	}
 
 	for provider, override := range overrides {
 		definition, reviewed := providers[provider]
-		if !reviewed && (override.BaseURL == "" || override.API == "") {
-			return nil, fmt.Errorf("%w: custom provider %q requires base_url and api", ErrInvalid, provider)
+		if !reviewed && (override.BaseURL == "" || override.Protocol == "") {
+			return nil, fmt.Errorf("%w: custom provider %q requires base_url and protocol", ErrInvalid, provider)
 		}
 		if override.BaseURL != "" {
 			definition.endpoint.BaseURL = override.BaseURL
 			definition.endpoint.Origin = "config"
 		}
-		if override.API != "" {
-			definition.api = override.API
+		if override.Protocol != "" {
+			definition.protocol = override.Protocol
 		}
 		definition.endpoint.AllowHTTP = override.AllowHTTP
 		definition.endpoint.AllowPrivateIPs = override.AllowPrivateIPs
 		definition.compatibility = override.Compatibility.Resolve(definition.compatibility)
-		openAIShaped := definition.api == config.APIResponses || definition.api == config.APIChatCompletions
+		openAIShaped := config.IsOpenAIProtocol(definition.protocol)
 		if !openAIShaped && !reflect.DeepEqual(override.Compatibility, config.CompatibilityConfig{}) {
-			return nil, fmt.Errorf("%w: provider %q compatibility requires an OpenAI-shaped api", ErrInvalid, provider)
+			return nil, fmt.Errorf("%w: provider %q compatibility requires an OpenAI protocol", ErrInvalid, provider)
 		}
 		if err := validateEndpoint(provider, definition.endpoint); err != nil {
 			return nil, err
@@ -378,12 +379,22 @@ func entryFrom(model config.ModelConfig) Entry {
 	}
 }
 
-func apiFromOpenAI(api openai.API) config.API {
+func protocolFromOpenAI(api openai.API) config.Protocol {
 	if api == openai.APIResponses {
-		return config.APIResponses
+		return config.ProtocolOpenAIResponses
 	}
 
-	return config.APIChatCompletions
+	return config.ProtocolOpenAIChatCompletions
+}
+
+func resolveProtocol(modelID string, protocol config.Protocol) config.Protocol {
+	if protocol != config.ProtocolOpenAIAuto {
+		return protocol
+	}
+
+	resolved := openai.ResolveAPI(modelID, openai.APIAuto)
+
+	return protocolFromOpenAI(resolved)
 }
 
 func clonePointer[T any](value *T) *T {

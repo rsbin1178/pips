@@ -38,21 +38,21 @@ func TestNewSelectsAdapterAndPreservesProviderIdentity(t *testing.T) {
 
 	tests := []struct {
 		provider ai.Provider
-		api      config.API
+		protocol config.Protocol
 		baseURL  string
 	}{
-		{provider: ai.ProviderOpenAI, api: config.APIResponses, baseURL: "https://api.openai.com/v1"},
-		{provider: ai.ProviderAnthropic, api: config.APIAnthropicMessages, baseURL: "https://api.anthropic.com/v1"},
-		{provider: ai.ProviderGemini, api: config.APIGenerateContent, baseURL: "https://generativelanguage.googleapis.com/v1beta"},
-		{provider: "local", api: config.APIChatCompletions, baseURL: "http://127.0.0.1:11434/v1"},
+		{provider: ai.ProviderOpenAI, protocol: config.ProtocolOpenAIResponses, baseURL: "https://api.openai.com/v1"},
+		{provider: ai.ProviderAnthropic, protocol: config.ProtocolAnthropicMessages, baseURL: "https://api.anthropic.com/v1"},
+		{provider: ai.ProviderGemini, protocol: config.ProtocolGeminiGenerateContent, baseURL: "https://generativelanguage.googleapis.com/v1beta"},
+		{provider: "local", protocol: config.ProtocolOpenAIChatCompletions, baseURL: "http://127.0.0.1:11434/v1"},
 	}
 	for _, tt := range tests {
 		t.Run(string(tt.provider), func(t *testing.T) {
 			t.Parallel()
 			store := &credentialStore{}
 			bound, err := model.New(t.Context(), modelcatalog.ResolvedModel{
-				Ref: config.ModelRef{Provider: tt.provider, Model: "model"},
-				API: tt.api,
+				Ref:      config.ModelRef{Provider: tt.provider, Model: "model"},
+				Protocol: tt.protocol,
 				Endpoint: modelcatalog.Endpoint{
 					BaseURL: tt.baseURL, AllowHTTP: tt.provider == "local",
 					AllowPrivateIPs: tt.provider == "local",
@@ -71,13 +71,13 @@ func TestNewRejectsInvalidInputs(t *testing.T) {
 
 	resolved := modelcatalog.ResolvedModel{
 		Ref:      config.ModelRef{Provider: ai.ProviderOpenAI, Model: "model"},
-		API:      config.APIResponses,
+		Protocol: config.ProtocolOpenAIResponses,
 		Endpoint: modelcatalog.Endpoint{BaseURL: "https://api.openai.com/v1"},
 	}
 	_, err := model.New(t.Context(), resolved, nil)
 	require.ErrorIs(t, err, model.ErrInvalid)
 
-	resolved.API = "unknown"
+	resolved.Protocol = "unknown"
 	_, err = model.New(t.Context(), resolved, &credentialStore{})
 	require.ErrorIs(t, err, model.ErrInvalid)
 }

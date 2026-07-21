@@ -53,6 +53,20 @@ func TestRuntimePromptStreamsAndPersistsOneInteraction(t *testing.T) {
 	require.NoError(t, runtime.Close(t.Context()))
 }
 
+func TestRuntimeOpensCustomProviderMetadata(t *testing.T) {
+	t.Parallel()
+
+	provider := ai.Provider("opencode-go")
+	runtime := openTestRuntime(
+		t,
+		newRuntimeModelFor(provider, "deepseek-v4-flash"),
+	)
+
+	snapshot := runtime.Snapshot()
+	assert.Equal(t, provider, snapshot.Provider)
+	assert.Equal(t, "deepseek-v4-flash", snapshot.ModelID)
+}
+
 func TestValidateOpenOptionsRejectsNilObservers(t *testing.T) {
 	t.Parallel()
 
@@ -736,8 +750,14 @@ func openTestRuntimeConfigured(
 	require.NoError(t, err)
 
 	cfg := config.Defaults()
-	cfg.Model.Provider = ai.ProviderOpenAI
-	cfg.Model.Model = "runtime-test"
+	cfg.Model.Provider = model.Provider()
+	cfg.Model.Model = model.ModelID()
+	if model.Provider() == "opencode-go" {
+		cfg.Providers[model.Provider()] = config.ProviderConfig{
+			BaseURL:  "https://opencode.ai/zen/go/v1",
+			Protocol: config.ProtocolOpenAIChatCompletions,
+		}
+	}
 
 	runtime, err := Open(t.Context(), OpenOptions{
 		Workspace:          ws,
@@ -871,12 +891,22 @@ func countRole(messages []ai.Message, role ai.Role) int {
 
 type runtimeModel struct {
 	mu        sync.Mutex
+	provider  ai.Provider
+	modelID   string
 	responses []*ai.Response
 	requests  []ai.Request
 }
 
 func newRuntimeModel(responses ...*ai.Response) *runtimeModel {
-	return &runtimeModel{responses: responses}
+	return newRuntimeModelFor(ai.ProviderOpenAI, "runtime-test", responses...)
+}
+
+func newRuntimeModelFor(
+	provider ai.Provider,
+	modelID string,
+	responses ...*ai.Response,
+) *runtimeModel {
+	return &runtimeModel{provider: provider, modelID: modelID, responses: responses}
 }
 
 func (m *runtimeModel) Generate(_ context.Context, request ai.Request) (*ai.Response, error) {
@@ -910,8 +940,8 @@ func (m *runtimeModel) Stream(ctx context.Context, request ai.Request) ai.Stream
 	}
 }
 
-func (m *runtimeModel) Provider() ai.Provider { return ai.ProviderOpenAI }
-func (m *runtimeModel) ModelID() string       { return "runtime-test" }
+func (m *runtimeModel) Provider() ai.Provider { return m.provider }
+func (m *runtimeModel) ModelID() string       { return m.modelID }
 func (m *runtimeModel) Capabilities() ai.Capabilities {
 	return ai.Capabilities{Text: true, Tools: true}
 }

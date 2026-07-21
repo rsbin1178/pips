@@ -43,6 +43,26 @@ func TestParseModelRef(t *testing.T) {
 	}
 }
 
+func TestParseProtocol(t *testing.T) {
+	t.Parallel()
+
+	values := []config.Protocol{
+		config.ProtocolOpenAIAuto,
+		config.ProtocolOpenAIChatCompletions,
+		config.ProtocolOpenAIResponses,
+		config.ProtocolAnthropicMessages,
+		config.ProtocolGeminiGenerateContent,
+	}
+	for _, value := range values {
+		parsed, err := config.ParseProtocol(string(value))
+		require.NoError(t, err)
+		assert.Equal(t, value, parsed)
+	}
+
+	_, err := config.ParseProtocol("chat_completions")
+	require.ErrorIs(t, err, config.ErrInvalid)
+}
+
 func TestValidateRuntimeRegistry(t *testing.T) {
 	t.Parallel()
 

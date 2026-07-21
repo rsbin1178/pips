@@ -42,7 +42,7 @@ func TestResolveInheritanceVariantAndReasoning(t *testing.T) {
 
 	resolved, err := catalog.Resolve(modelcatalog.Selection{Ref: cfg.Model, Variant: "deep"})
 	require.NoError(t, err)
-	assert.Equal(t, config.APIResponses, resolved.API)
+	assert.Equal(t, config.ProtocolOpenAIResponses, resolved.Protocol)
 	assert.Equal(t, "https://api.openai.com/v1", resolved.Endpoint.BaseURL)
 	assert.Equal(t, high, *resolved.ReasoningLevel)
 	assert.Equal(t, 16000, *resolved.Options.ReasoningBudget)
@@ -61,6 +61,38 @@ func TestResolveInheritanceVariantAndReasoning(t *testing.T) {
 	assert.Nil(t, adaptiveResolved.Options.ReasoningBudget)
 }
 
+func TestCatalogResolvesOpenAIAutoBeforeReturningSnapshot(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		model string
+		want  config.Protocol
+	}{
+		{name: "reasoning family", model: "gpt-5", want: config.ProtocolOpenAIResponses},
+		{name: "compatible regular model", model: "deepseek-v4-flash", want: config.ProtocolOpenAIChatCompletions},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := config.Config{
+				Model: config.ModelRef{Provider: ai.ProviderOpenAI, Model: tt.model},
+				Providers: map[ai.Provider]config.ProviderConfig{
+					ai.ProviderOpenAI: {Protocol: config.ProtocolOpenAIAuto},
+				},
+				Sandbox: config.SandboxWorkspaceWrite, Approval: config.ApprovalOnRequest,
+			}
+			catalog, err := modelcatalog.New(cfg)
+			require.NoError(t, err)
+			resolved, err := catalog.Resolve(modelcatalog.Selection{Ref: cfg.Model})
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, resolved.Protocol)
+			assert.NotEqual(t, config.ProtocolOpenAIAuto, resolved.Protocol)
+		})
+	}
+}
+
 func TestCatalogCustomProviderAndUnknownCurrent(t *testing.T) {
 	t.Parallel()
 
@@ -68,7 +100,7 @@ func TestCatalogCustomProviderAndUnknownCurrent(t *testing.T) {
 		Model: config.ModelRef{Provider: "local", Model: "qwen"},
 		Providers: map[ai.Provider]config.ProviderConfig{
 			"local": {
-				BaseURL: "http://127.0.0.1:11434/v1", API: config.APIChatCompletions,
+				BaseURL: "http://127.0.0.1:11434/v1", Protocol: config.ProtocolOpenAIChatCompletions,
 				AllowHTTP: true, AllowPrivateIPs: true,
 			},
 		},
@@ -91,8 +123,8 @@ func TestCatalogDropsOpenAICompatibilityForNonOpenAIModelOverride(t *testing.T) 
 	cfg := config.Config{
 		Model: config.ModelRef{Provider: ai.ProviderDeepSeek, Model: "native"},
 		Models: []config.ModelConfig{{
-			Ref: config.ModelRef{Provider: ai.ProviderDeepSeek, Model: "native"},
-			API: config.APIAnthropicMessages,
+			Ref:      config.ModelRef{Provider: ai.ProviderDeepSeek, Model: "native"},
+			Protocol: config.ProtocolAnthropicMessages,
 		}},
 		Providers: map[ai.Provider]config.ProviderConfig{},
 		Sandbox:   config.SandboxWorkspaceWrite,
@@ -103,7 +135,7 @@ func TestCatalogDropsOpenAICompatibilityForNonOpenAIModelOverride(t *testing.T) 
 
 	resolved, err := catalog.Resolve(modelcatalog.Selection{Ref: cfg.Model})
 	require.NoError(t, err)
-	assert.Equal(t, config.APIAnthropicMessages, resolved.API)
+	assert.Equal(t, config.ProtocolAnthropicMessages, resolved.Protocol)
 	assert.Equal(t, openai.Compatibility{}, resolved.Compatibility)
 }
 
@@ -113,7 +145,7 @@ func TestCatalogRejectsUnsafeCustomEndpointAndUnknownSelection(t *testing.T) {
 	cfg := config.Config{
 		Model: config.ModelRef{Provider: "local", Model: "qwen"},
 		Providers: map[ai.Provider]config.ProviderConfig{
-			"local": {BaseURL: "http://127.0.0.1:11434/v1", API: config.APIChatCompletions},
+			"local": {BaseURL: "http://127.0.0.1:11434/v1", Protocol: config.ProtocolOpenAIChatCompletions},
 		},
 		Sandbox:  config.SandboxWorkspaceWrite,
 		Approval: config.ApprovalOnRequest,
@@ -122,7 +154,7 @@ func TestCatalogRejectsUnsafeCustomEndpointAndUnknownSelection(t *testing.T) {
 	require.ErrorIs(t, err, modelcatalog.ErrInvalid)
 
 	cfg.Providers["local"] = config.ProviderConfig{
-		BaseURL: "http://127.0.0.1:11434/v1", API: config.APIChatCompletions,
+		BaseURL: "http://127.0.0.1:11434/v1", Protocol: config.ProtocolOpenAIChatCompletions,
 		AllowHTTP: true, AllowPrivateIPs: true,
 	}
 	catalog, err := modelcatalog.New(cfg)
@@ -161,7 +193,7 @@ func TestCatalogEndpointValidationMatrix(t *testing.T) {
 				Model: config.ModelRef{Provider: "custom", Model: "model"},
 				Providers: map[ai.Provider]config.ProviderConfig{
 					"custom": {
-						BaseURL: tt.baseURL, API: config.APIChatCompletions,
+						BaseURL: tt.baseURL, Protocol: config.ProtocolOpenAIChatCompletions,
 						AllowHTTP: tt.allowHTTP, AllowPrivateIPs: tt.allowPrivate,
 					},
 				},

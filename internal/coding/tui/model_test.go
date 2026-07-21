@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding"
 	"github.com/rsbin/pips/internal/coding/config"
@@ -32,7 +33,9 @@ func TestTrustDefaultsToDenyAndBootstrapsSelection(t *testing.T) {
 	view := model.View()
 	assert.True(t, view.AltScreen)
 	assert.Equal(t, tea.MouseModeCellMotion, view.MouseMode)
-	assert.Contains(t, view.Content, "Selected: Deny")
+	assert.Contains(t, view.Content, "  Allow")
+	assert.Contains(t, view.Content, "> Deny")
+	assert.NotContains(t, view.Content, "Selected:")
 
 	updated, command := model.Update(key("enter"))
 	require.Same(t, model, updated)
@@ -43,6 +46,43 @@ func TestTrustDefaultsToDenyAndBootstrapsSelection(t *testing.T) {
 	assert.Nil(t, command)
 	assert.Equal(t, []bool{false}, decisions)
 	assert.Contains(t, model.View().Content, "openai/test-model")
+}
+
+func TestTrustListSupportsArrowNavigationAndNarrowNoColor(t *testing.T) {
+	t.Parallel()
+
+	model := newModel(t.Context(), Options{
+		Workspace: "/workspace/with/a/long/name",
+		NoColor:   true,
+		Bootstrap: func(context.Context, bool) (Controller, error) { return nil, nil },
+	})
+	model.Update(tea.WindowSizeMsg{Width: 28, Height: 12})
+
+	model.Update(key("up"))
+	assert.True(t, model.allow)
+	assert.Contains(t, model.View().Content, "> Allow")
+	assert.Contains(t, model.View().Content, "  Deny")
+
+	model.Update(key("down"))
+	assert.False(t, model.allow)
+	assert.Contains(t, model.View().Content, "> Deny")
+	assert.NotContains(t, model.View().Content, "\x1b[")
+	for line := range strings.SplitSeq(model.View().Content, "\n") {
+		assert.LessOrEqual(t, ansi.StringWidth(line), 28)
+	}
+}
+
+func TestTrustListHighlightsColorSelection(t *testing.T) {
+	t.Parallel()
+
+	model := newModel(t.Context(), Options{
+		Workspace: "/workspace",
+		Bootstrap: func(context.Context, bool) (Controller, error) { return nil, nil },
+	})
+
+	content := model.View().Content
+	assert.Contains(t, content, "> Deny")
+	assert.Contains(t, content, "\x1b[")
 }
 
 func TestTrustAllowsExplicitKeyboardSelection(t *testing.T) {
