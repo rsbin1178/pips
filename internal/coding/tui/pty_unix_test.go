@@ -29,6 +29,7 @@ import (
 func TestPTYLifecycleRestoresTerminalBeforeControllerClose(t *testing.T) {
 	if os.Getenv("PIPS_TUI_PTY_HELPER") == "1" {
 		controller := &ptyController{Controller: openScriptedController(t)}
+		_, _ = os.Stdout.WriteString("SHELL_HISTORY_MARKER\n")
 		err := Run(context.Background(), Options{
 			Input:       os.Stdin,
 			Output:      os.Stdout,
@@ -99,7 +100,7 @@ func TestPTYLifecycleRestoresTerminalBeforeControllerClose(t *testing.T) {
 			"\x1b[<32;11;5M",
 	))
 	require.NoError(t, err)
-	waitForPTYOutput(t, &output, "scripted final answer", 5*time.Second)
+	waitForPTYOutput(t, &output, "[✻ Worked for ", 5*time.Second)
 	_, err = master.Write([]byte{0x03})
 	require.NoError(t, err)
 	time.Sleep(500 * time.Millisecond)
@@ -138,14 +139,20 @@ func TestPTYLifecycleRestoresTerminalBeforeControllerClose(t *testing.T) {
 	}
 
 	value := output.String()
-	enter := strings.Index(value, "\x1b[?1049h")
-	exit := strings.LastIndex(value, "\x1b[?1049l")
+	reset := strings.LastIndex(value, resetTerminalInteraction)
 	closed := strings.LastIndex(value, "CONTROLLER_CLOSED")
-	assert.GreaterOrEqual(t, enter, 0, "alternate screen was not entered")
-	assert.Greater(t, exit, enter, "alternate screen was not restored")
-	assert.Greater(t, closed, exit, "controller closed before terminal restoration")
+	assert.NotContains(t, value, "\x1b[?1049h", "alternate screen must remain disabled")
+	assert.NotContains(t, value, "\x1b[?1007h", "alternate scroll must remain disabled")
+	assert.NotContains(t, value, "\x1b[?1002h", "cell mouse reporting must remain disabled")
+	assert.NotContains(t, value, "\x1b[?1003h", "all-motion mouse reporting must remain disabled")
+	assert.GreaterOrEqual(t, reset, 0, "terminal interaction modes were not reset")
+	assert.Greater(t, closed, reset, "controller closed before terminal restoration")
+	assert.Contains(t, value, "SHELL_HISTORY_MARKER")
+	assert.Contains(t, value, "Pips")
+	assert.Contains(t, value, "Terminal coding agent")
 	assert.Contains(t, value, "PROMPT_LINES=4")
 	assert.Contains(t, value, "scripted final answer")
+	assert.Contains(t, value, "[✻ Worked for ")
 }
 
 type synchronizedBuffer struct {

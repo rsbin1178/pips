@@ -9,7 +9,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"time"
 	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
@@ -19,7 +18,6 @@ import (
 	"github.com/rsbin/pips/internal/coding/approval"
 	"github.com/rsbin/pips/internal/coding/config"
 	"github.com/rsbin/pips/internal/coding/modelcatalog"
-	"github.com/rsbin/pips/internal/coding/session"
 )
 
 const defaultSelectionLabel = "default"
@@ -30,9 +28,7 @@ const (
 	overlayNone overlayKind = iota
 	overlayApproval
 	overlayDiff
-	overlaySession
 	overlayModel
-	overlayCommand
 	overlayHelp
 	overlayStatus
 	overlayTree
@@ -45,7 +41,6 @@ type overlayState struct {
 	query       string
 	err         error
 	loading     bool
-	sessions    []session.Metadata
 	choices     []approval.Choice
 	models      []modelcatalog.Entry
 	selection   modelcatalog.Selection
@@ -57,11 +52,10 @@ type overlayState struct {
 }
 
 type overlayDataMsg struct {
-	kind     overlayKind
-	sessions []session.Metadata
-	err      error
-	tree     coding.SessionTree
-	preview  coding.CompactionPreview
+	kind    overlayKind
+	err     error
+	tree    coding.SessionTree
+	preview coding.CompactionPreview
 }
 
 type controlOperation uint8
@@ -79,38 +73,10 @@ type controlResultMsg struct {
 	err       error
 }
 
-type commandDescriptor struct {
-	name        string
-	description string
-	idleOnly    bool
-}
-
-var commands = []commandDescriptor{
-	{name: "new", description: "start a new session", idleOnly: true},
-	{name: "resume", description: "resume a workspace session", idleOnly: true},
-	{name: "model", description: "switch the process-local model", idleOnly: true},
-	{name: "tree", description: "navigate the current session tree", idleOnly: true},
-	{name: "fork", description: "fork a node into a new session", idleOnly: true},
-	{name: "compact", description: "preview and compact older context", idleOnly: true},
-	{name: "diff", description: "inspect workspace changes"},
-	{name: "reload", description: "reload resources and integrations", idleOnly: true},
-	{name: "status", description: "show runtime status"},
-	{name: "help", description: "show keyboard help"},
-	{name: "quit", description: "exit Pips"},
-}
-
 func (m *Model) openOverlay(kind overlayKind) tea.Cmd {
 	m.overlay = overlayState{kind: kind}
 
 	switch kind {
-	case overlaySession:
-		m.overlay.loading = true
-
-		return func() tea.Msg {
-			values, err := m.controller.ListSessions(m.ctx)
-
-			return overlayDataMsg{kind: overlaySession, sessions: values, err: err}
-		}
 	case overlayModel:
 		state := m.controller.Model()
 		m.overlay.models = m.controller.Models()
@@ -137,7 +103,7 @@ func (m *Model) openOverlay(kind overlayKind) tea.Cmd {
 
 			return overlayDataMsg{kind: overlayCompact, preview: value, err: err}
 		}
-	case overlayCommand, overlayApproval:
+	case overlayApproval:
 		m.overlay.cursor = 0
 	case overlayNone, overlayDiff, overlayHelp, overlayStatus:
 	}
@@ -155,6 +121,12 @@ func (m *Model) syncApprovalOverlay() {
 	}
 
 	choices := approvalChoices(m.state.Approval)
+	if m.commandPicker.open {
+		m.closeCommandPicker(true)
+	}
+	if m.sessionPicker.open {
+		m.closeSessionPicker(true)
+	}
 	cursor := 0
 	if m.state.Approval.Kind == coding.ApprovalReview {
 		if index := slices.Index(choices, approval.ChoiceDeny); index >= 0 {
@@ -191,12 +163,8 @@ func (m *Model) updateOverlayKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch m.overlay.kind {
 	case overlayApproval:
 		return m.updateApprovalOverlay(key)
-	case overlaySession:
-		return m.updateSessionOverlay(message)
 	case overlayModel:
 		return m.updateModelOverlay(message)
-	case overlayCommand:
-		return m.updateCommandOverlay(message)
 	case overlayTree:
 		return m.updateTreeOverlay(message)
 	case overlayCompact:
@@ -353,37 +321,6 @@ func (m *Model) resolveApprovalChoice(choice approval.Choice) (tea.Model, tea.Cm
 	})
 }
 
-func (m *Model) updateSessionOverlay(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	key := message.String()
-	filtered := m.filteredSessions()
-	switch key {
-	case "up":
-		m.overlay.cursor = wrapIndex(m.overlay.cursor-1, len(filtered))
-	case keyDown, keyTab:
-		m.overlay.cursor = wrapIndex(m.overlay.cursor+1, len(filtered))
-	case keyEnter:
-		if len(filtered) == 0 || m.state.Phase != coding.PhaseIdle {
-			return m, nil
-		}
-
-		return m, m.runControl(operationResume, filtered[m.overlay.cursor].ID, modelcatalog.Selection{})
-	case "n":
-		if m.state.Phase == coding.PhaseIdle {
-			return m, m.runControl(operationNew, "", modelcatalog.Selection{})
-		}
-	case keyBackspace:
-		m.overlay.query = trimLastRune(m.overlay.query)
-		m.overlay.cursor = 0
-	default:
-		if message.Key().Text != "" {
-			m.overlay.query += message.Key().Text
-			m.overlay.cursor = 0
-		}
-	}
-
-	return m, nil
-}
-
 func (m *Model) updateModelOverlay(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := message.String()
 	filtered := m.filteredModels()
@@ -453,77 +390,25 @@ func (m *Model) cycleReasoning(direction int) {
 	}
 }
 
-func (m *Model) updateCommandOverlay(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	key := message.String()
-	filtered := m.filteredCommands()
-	switch key {
-	case "up":
-		m.overlay.cursor = wrapIndex(m.overlay.cursor-1, len(filtered))
-	case keyDown, keyTab:
-		m.overlay.cursor = wrapIndex(m.overlay.cursor+1, len(filtered))
-	case keyEnter:
-		if len(filtered) == 0 {
-			return m, nil
-		}
-
-		return m.executeCommand(filtered[m.overlay.cursor])
-	case keyBackspace:
-		m.overlay.query = trimLastRune(m.overlay.query)
-		m.overlay.cursor = 0
-	default:
-		if message.Key().Text != "" && message.Key().Text != "/" {
-			m.overlay.query += message.Key().Text
-			m.overlay.cursor = 0
-		}
-	}
-
-	return m, nil
-}
-
-//nolint:gocyclo // The closed command inventory is dispatched in one auditable switch.
-func (m *Model) executeCommand(command commandDescriptor) (tea.Model, tea.Cmd) {
-	if command.idleOnly && m.actionContext() != contextIdle {
-		m.overlay.err = fmt.Errorf("/%s is available only while idle", command.name)
-
-		return m, nil
-	}
-
-	switch command.name {
-	case "new":
-		return m, m.runControl(operationNew, "", modelcatalog.Selection{})
-	case "resume":
-		return m, m.openOverlay(overlaySession)
-	case "model":
-		return m, m.openOverlay(overlayModel)
-	case "tree":
-		return m, m.openTreeOverlay(false)
-	case "fork":
-		return m, m.openTreeOverlay(true)
-	case "compact":
-		return m, m.openOverlay(overlayCompact)
-	case "diff":
-		return m, m.openOverlay(overlayDiff)
-	case "reload":
-		return m, m.runControl(operationReload, "", modelcatalog.Selection{})
-	case "status":
-		return m, m.openOverlay(overlayStatus)
-	case "help":
-		return m, m.openOverlay(overlayHelp)
-	case "quit":
-		return m, tea.Quit
-	default:
-		return m, nil
-	}
-}
-
 func (m *Model) runControl(
 	operation controlOperation,
 	sessionID string,
 	selected modelcatalog.Selection,
 ) tea.Cmd {
-	m.overlay.loading = true
-	m.overlay.controlling = true
-	m.overlay.err = nil
+	switch {
+	case m.commandPicker.open:
+		m.commandPicker.loading = true
+		m.commandPicker.controlling = true
+		m.commandPicker.err = nil
+	case m.sessionPicker.open:
+		m.sessionPicker.loading = true
+		m.sessionPicker.controlling = true
+		m.sessionPicker.err = nil
+	default:
+		m.overlay.loading = true
+		m.overlay.controlling = true
+		m.overlay.err = nil
+	}
 
 	return func() tea.Msg {
 		var err error
@@ -569,37 +454,6 @@ func (m *Model) selectOverlayModel(entry modelcatalog.Entry) {
 	if m.overlay.selection.Ref != entry.Ref {
 		m.overlay.selection = modelcatalog.Selection{Ref: entry.Ref}
 	}
-}
-
-func (m *Model) filteredCommands() []commandDescriptor {
-	query := strings.ToLower(strings.TrimSpace(m.overlay.query))
-	filtered := make([]commandDescriptor, 0, len(commands))
-	for _, command := range commands {
-		if query == "" || strings.Contains(command.name, query) ||
-			strings.Contains(command.description, query) {
-			filtered = append(filtered, command)
-		}
-	}
-
-	return filtered
-}
-
-func (m *Model) filteredSessions() []session.Metadata {
-	query := strings.ToLower(strings.TrimSpace(m.overlay.query))
-	filtered := make([]session.Metadata, 0, len(m.overlay.sessions))
-	for _, value := range m.overlay.sessions {
-		created := strings.ToLower(value.CreatedAt.Local().Format(time.DateTime))
-		if query == "" || strings.Contains(strings.ToLower(value.ID), query) ||
-			strings.Contains(created, query) ||
-			strings.Contains(strings.ToLower(value.ParentSessionID), query) ||
-			strings.Contains(strings.ToLower(value.Name), query) ||
-			strings.Contains(strings.ToLower(value.Preview), query) ||
-			strings.Contains(strings.ToLower(value.CurrentLeafID), query) {
-			filtered = append(filtered, value)
-		}
-	}
-
-	return filtered
 }
 
 func (m *Model) filteredTreeNodes() []coding.SessionNode {
@@ -648,7 +502,6 @@ func (m *Model) renderOverlay(base string) string {
 	).Render()
 }
 
-//nolint:gocyclo // The sealed Overlay union renders from one exhaustive dispatcher.
 func (m *Model) overlayContent() string {
 	var content string
 	switch m.overlay.kind {
@@ -656,15 +509,13 @@ func (m *Model) overlayContent() string {
 		content = m.approvalOverlayContent()
 	case overlayDiff:
 		content = m.diffOverlayContent()
-	case overlaySession:
-		content = m.sessionOverlayContent()
 	case overlayModel:
 		content = m.modelOverlayContent()
-	case overlayCommand:
-		content = m.commandOverlayContent()
 	case overlayHelp:
 		content = "Help\n\n" + renderActionHelp(defaultActions, m.actionContext()) +
-			"\n\nCtrl+J / Shift+Enter newline\nMouse wheel scrolls; all other mouse input is ignored."
+			"\n\nCtrl+J / Shift+Enter newline\n" +
+			"The terminal owns conversation history: use its wheel or scrollback keys to navigate, " +
+			"and drag normally to select and copy text."
 	case overlayStatus:
 		modelState := m.controller.Model()
 		configState := m.controller.Config()
@@ -770,55 +621,6 @@ func (m *Model) diffOverlayContent() string {
 	if m.state.Changes.Diff != "" {
 		lines = append(lines, "", m.state.Changes.Diff)
 	}
-
-	return strings.Join(lines, "\n")
-}
-
-func (m *Model) sessionOverlayContent() string {
-	lines := []string{"Sessions", "", "Filter: " + m.overlay.query, ""}
-	values := m.filteredSessions()
-	if m.overlay.loading {
-		return strings.Join(lines, "\n")
-	}
-	if len(values) == 0 {
-		lines = append(lines, "No matching sessions.")
-	}
-	for index, value := range values {
-		prefix := "  "
-		if index == m.overlay.cursor {
-			prefix = "> "
-		}
-		title := value.Name
-		if title == "" {
-			title = value.ID
-		}
-		lines = append(lines, fmt.Sprintf(
-			"%s%s  %s",
-			prefix,
-			title,
-			value.CreatedAt.Local().Format(time.DateTime),
-		))
-		if value.Name != "" {
-			lines = append(lines, "    "+value.ID)
-		}
-		if value.Preview != "" {
-			lines = append(lines, "    "+value.Preview)
-		}
-		countSuffix := ""
-		if value.Truncated {
-			countSuffix = "+"
-		}
-		if value.NodeCount > 0 || value.BranchCount > 0 {
-			lines = append(lines, fmt.Sprintf(
-				"    %d%s nodes · %d%s branches",
-				value.NodeCount, countSuffix, value.BranchCount, countSuffix,
-			))
-		}
-		if value.ParentSessionID != "" {
-			lines = append(lines, "    fork of "+value.ParentSessionID+" @ "+value.ParentEntryID)
-		}
-	}
-	lines = append(lines, "", "Enter resume · n new · Esc close")
 
 	return strings.Join(lines, "\n")
 }
@@ -981,29 +783,6 @@ func optionalInt(value *int) string {
 	}
 
 	return strconv.Itoa(*value)
-}
-
-func (m *Model) commandOverlayContent() string {
-	lines := []string{"Commands", "", "/" + m.overlay.query, ""}
-	for index, command := range m.filteredCommands() {
-		prefix := "  "
-		if index == m.overlay.cursor {
-			prefix = "> "
-		}
-		disabled := ""
-		if command.idleOnly && m.state.Phase != coding.PhaseIdle {
-			disabled = " (idle only)"
-		}
-		lines = append(lines, fmt.Sprintf(
-			"%s/%-8s %s%s",
-			prefix,
-			command.name,
-			command.description,
-			disabled,
-		))
-	}
-
-	return strings.Join(lines, "\n")
 }
 
 func renderChoices(choices []approval.Choice, cursor int) string {

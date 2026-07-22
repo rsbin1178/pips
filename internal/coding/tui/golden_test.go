@@ -9,7 +9,6 @@ import (
 	"strings"
 	"testing"
 
-	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding"
@@ -50,12 +49,13 @@ func TestViewGoldenDigests(t *testing.T) {
 			controller := stubController{state: test.state}
 			model := readyModelWithController(t, controller, test.noColor)
 			model.theme = test.theme
-			if !test.noColor && test.theme == themeLight {
-				model.composer.SetStyles(textarea.DefaultLightStyles())
-			}
+			model.composer.SetStyles(composerStyles(test.theme, test.noColor))
 			model.Update(tea.WindowSizeMsg{Width: test.width, Height: test.height})
+			model.resetScrollback()
+			stable := model.takeStableTimeline()
 			model.rerenderTranscript(true)
-			digest := sha256.Sum256([]byte(model.View().Content))
+			content := stable + "\n--- managed tail ---\n" + model.View().Content
+			digest := sha256.Sum256([]byte(content))
 			assert.Equal(t, want[test.name], hex.EncodeToString(digest[:]))
 		})
 	}

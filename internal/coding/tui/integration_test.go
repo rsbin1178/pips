@@ -7,6 +7,8 @@ import (
 	"iter"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"sync"
 	"testing"
 
@@ -28,10 +30,32 @@ func TestScriptedRuntimeMatchesTUIStateAndReplay(t *testing.T) {
 	controller := &recordingController{Controller: openScriptedController(t)}
 	model := readyModelWithController(t, controller, true)
 	initial := model.state.Clone()
+	sessions, err := controller.ListSessions(t.Context())
+	require.NoError(t, err)
+	assert.Empty(t, sessions)
+
+	var invalidPromptErr error
+	for _, promptErr := range controller.Prompt(t.Context(), ai.UserText("bad\x00prompt")) {
+		invalidPromptErr = errors.Join(invalidPromptErr, promptErr)
+	}
+	require.Error(t, invalidPromptErr)
+	sessions, err = controller.ListSessions(t.Context())
+	require.NoError(t, err)
+	assert.Empty(t, sessions)
+
+	previousID := controller.SessionID()
+	require.NoError(t, controller.NewSession(t.Context()))
+	assert.NotEqual(t, previousID, controller.SessionID())
+	sessions, err = controller.ListSessions(t.Context())
+	require.NoError(t, err)
+	assert.Empty(t, sessions)
+	model.state = controller.Snapshot()
+	initial = model.state.Clone()
+
 	model.composer.SetValue("read the fixture")
 
 	_, command := model.Update(key("enter"))
-	driveModelCommands(t, model, command)
+	printed := driveModelCommandsCapture(t, model, command)
 
 	snapshot := controller.Snapshot()
 	assert.Equal(t, snapshot.Sequence, model.state.Sequence)
@@ -42,7 +66,23 @@ func TestScriptedRuntimeMatchesTUIStateAndReplay(t *testing.T) {
 	assert.Equal(t, coding.PhaseIdle, model.state.Phase)
 	assert.False(t, model.state.Interaction.Active)
 	assert.Greater(t, model.state.Sequence, initial.Sequence)
-	assert.Contains(t, model.View().Content, "scripted final answer")
+	assert.Contains(t, printed, "scripted final answer")
+	assert.Contains(t, printed, "[✻ Worked for ")
+	userIndex := strings.Index(printed, "read the fixture")
+	toolIndex := strings.Index(printed, "read_file · completed")
+	answerIndex := strings.Index(printed, "scripted final answer")
+	completionIndex := strings.Index(printed, "[✻ Worked for ")
+	require.GreaterOrEqual(t, userIndex, 0)
+	require.GreaterOrEqual(t, toolIndex, 0)
+	require.GreaterOrEqual(t, answerIndex, 0)
+	require.GreaterOrEqual(t, completionIndex, 0)
+	assert.Less(t, userIndex, toolIndex)
+	assert.Less(t, toolIndex, answerIndex)
+	assert.Less(t, answerIndex, completionIndex)
+	sessions, err = controller.ListSessions(t.Context())
+	require.NoError(t, err)
+	require.Len(t, sessions, 1)
+	assert.Equal(t, "read the fixture", sessions[0].Preview)
 
 	replayed := initial
 	for _, event := range controller.events {
@@ -110,7 +150,14 @@ func openScriptedController(t *testing.T) *runtimecontrol.Controller {
 func driveModelCommands(t *testing.T, model *Model, initial tea.Cmd) {
 	t.Helper()
 
+	driveModelCommandsCapture(t, model, initial)
+}
+
+func driveModelCommandsCapture(t *testing.T, model *Model, initial tea.Cmd) string {
+	t.Helper()
+
 	commands := []tea.Cmd{initial}
+	printed := make([]string, 0)
 	for steps := 0; len(commands) > 0 && steps < 10_000; steps++ {
 		command := commands[0]
 		commands = commands[1:]
@@ -123,6 +170,28 @@ func driveModelCommands(t *testing.T, model *Model, initial tea.Cmd) {
 			commands = append(commands, batch...)
 			continue
 		}
+		value := reflect.ValueOf(message)
+		if value.IsValid() && value.Type().PkgPath() == "charm.land/bubbletea/v2" {
+			switch value.Type().Name() {
+			case "sequenceMsg":
+				sequence := make([]tea.Cmd, value.Len())
+				for index := range value.Len() {
+					command, ok := value.Index(index).Interface().(tea.Cmd)
+					require.True(t, ok)
+					sequence[index] = command
+				}
+				commands = append(sequence, commands...)
+
+				continue
+			case "printLineMessage":
+				printed = append(printed, value.FieldByName("messageBody").String())
+
+				continue
+			}
+		}
+		if _, ok := message.(activityTickMsg); ok {
+			continue
+		}
 
 		_, next := model.Update(message)
 		if next != nil {
@@ -132,6 +201,8 @@ func driveModelCommands(t *testing.T, model *Model, initial tea.Cmd) {
 
 	assert.Empty(t, commands)
 	assert.Nil(t, model.bridge)
+
+	return strings.Join(printed, "\n")
 }
 
 type tuiScriptedModel struct {

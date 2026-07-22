@@ -107,7 +107,7 @@ type ForkOptions struct {
 
 // Handle owns a locked, writable Harness session.
 type Handle struct {
-	store   *harness.JSONLStore
+	store   sessionStore
 	session *harness.Session
 	meta    Metadata
 	lock    sessionLock
@@ -129,6 +129,11 @@ func (h *Handle) Session() *harness.Session {
 func (h *Handle) Metadata() Metadata {
 	if h == nil {
 		return Metadata{}
+	}
+	if h.store != nil {
+		if meta, err := projectMetadata(h.store.Metadata()); err == nil {
+			return meta
+		}
 	}
 
 	return h.meta
@@ -158,7 +163,8 @@ func (h *Handle) Close() error {
 	return h.closeErr
 }
 
-// Create creates and locks a new session.
+// Create reserves and locks a new session. Its JSONL file is created when the
+// owning Harness Session persists its first entry.
 func (r *Repository) Create(ctx context.Context, options CreateOptions) (*Handle, error) {
 	if err := r.validate(); err != nil {
 		return nil, err
@@ -186,12 +192,14 @@ func (r *Repository) Create(ctx context.Context, options CreateOptions) (*Handle
 		extraWorkspaceID: options.WorkspaceID,
 	}
 
-	store, err := r.repo.Create(id, extra)
-	if err != nil {
-		return nil, errors.Join(err, lock.Close())
-	}
+	store := newDeferredStore(r.repo, harness.SessionMetadata{
+		ID:        id,
+		CreatedAt: time.Now().UTC(),
+		Path:      r.sessionPath(id),
+		Extra:     extra,
+	})
 
-	return newHandle(store, lock, options.WorkspaceID)
+	return newProvisionalHandle(store, lock, options.WorkspaceID)
 }
 
 // Open locks and opens a stored session after verifying its workspace owner.
@@ -237,17 +245,11 @@ func (r *Repository) Fork(
 	if err := r.validate(); err != nil {
 		return nil, err
 	}
-	if source == nil || source.session == nil || source.meta.WorkspaceID == "" ||
-		filepath.Dir(source.meta.Path) != r.dir {
-		return nil, fmt.Errorf("%w: source session does not belong to repository", ErrInvalid)
-	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if options.AtEntryID != "" {
-		if _, ok := source.session.Entry(options.AtEntryID); !ok {
-			return nil, fmt.Errorf("%w: fork entry %q does not exist", ErrInvalid, options.AtEntryID)
-		}
+	if err := r.validateForkSource(source, options.AtEntryID); err != nil {
+		return nil, err
 	}
 
 	id, err := newSessionID()
@@ -272,6 +274,23 @@ func (r *Repository) Fork(
 	}
 
 	return newHandle(store, lock, source.meta.WorkspaceID)
+}
+
+func (r *Repository) validateForkSource(source *Handle, atEntryID string) error {
+	if source == nil || source.session == nil || source.meta.WorkspaceID == "" ||
+		filepath.Dir(source.meta.Path) != r.dir {
+		return fmt.Errorf("%w: source session does not belong to repository", ErrInvalid)
+	}
+	if len(source.session.Entries()) == 0 {
+		return fmt.Errorf("%w: cannot fork provisional session", ErrInvalid)
+	}
+	if atEntryID != "" {
+		if _, ok := source.session.Entry(atEntryID); !ok {
+			return fmt.Errorf("%w: fork entry %q does not exist", ErrInvalid, atEntryID)
+		}
+	}
+
+	return nil
 }
 
 // List returns typed session metadata in newest-first order without taking
@@ -303,6 +322,9 @@ func (r *Repository) List(ctx context.Context) ([]Metadata, error) {
 		if prefixErr != nil {
 			meta.Truncated = true
 		} else {
+			if len(prefix.Entries) == 0 {
+				continue
+			}
 			projectSessionPrefix(&meta, prefix)
 		}
 
@@ -334,6 +356,31 @@ func newHandle(
 		return nil, errors.Join(err, store.Close(), lock.Close())
 	}
 
+	if meta.WorkspaceID != workspaceID {
+		return nil, errors.Join(
+			fmt.Errorf("%w: session %q", ErrWorkspaceMismatch, meta.ID),
+			store.Close(),
+			lock.Close(),
+		)
+	}
+
+	sess, err := harness.NewSession(store)
+	if err != nil {
+		return nil, errors.Join(err, store.Close(), lock.Close())
+	}
+
+	return &Handle{store: store, session: sess, meta: meta, lock: lock}, nil
+}
+
+func newProvisionalHandle(
+	store sessionStore,
+	lock sessionLock,
+	workspaceID string,
+) (*Handle, error) {
+	meta, err := projectMetadata(store.Metadata())
+	if err != nil {
+		return nil, errors.Join(err, store.Close(), lock.Close())
+	}
 	if meta.WorkspaceID != workspaceID {
 		return nil, errors.Join(
 			fmt.Errorf("%w: session %q", ErrWorkspaceMismatch, meta.ID),

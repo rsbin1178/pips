@@ -156,6 +156,16 @@ func (state State) Clone() State {
 	return cloned
 }
 
+// IsSessionProvisional reports whether the current Session has no accepted
+// interaction or legacy durable conversation state yet.
+func (state State) IsSessionProvisional() bool {
+	hasInteraction := state.Interaction.ID != ""
+	hasTranscript := len(state.Transcript) != 0
+	hasTree := state.Tree.TotalNodes != 0 || len(state.Tree.Nodes) != 0 || state.Tree.LeafID != ""
+
+	return !hasInteraction && !hasTranscript && !hasTree
+}
+
 // DurableState is the restart-stable subset of [State].
 type DurableState struct {
 	SessionID   string           `json:"session_id"`

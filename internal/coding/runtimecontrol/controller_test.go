@@ -36,7 +36,8 @@ func TestControllerModelOverrideAppliesToLaterSessions(t *testing.T) {
 	require.NoError(t, controller.SwitchModel(t.Context(), selected))
 	assert.Equal(t, selected.Ref, controller.Model().Resolved.Ref)
 	assert.True(t, controller.Model().Overridden)
-	assert.Equal(t, initialID, fixture.opener.calls[1].Session.ID)
+	assert.Empty(t, fixture.opener.calls[1].Session.ID)
+	assert.NotEqual(t, initialID, controller.SessionID())
 	assert.Equal(t, selected.Ref, fixture.opener.calls[1].Resolved.Ref)
 
 	previousID := controller.SessionID()
@@ -98,11 +99,32 @@ func TestControllerFailedReplacementRestoresPreviousRuntime(t *testing.T) {
 	})
 	require.ErrorIs(t, err, targetErr)
 	assert.False(t, controller.Detached())
-	assert.Equal(t, originalID, controller.SessionID())
+	assert.NotEqual(t, originalID, controller.SessionID())
+	assert.Empty(t, fixture.opener.calls[1].Session.ID)
+	assert.Empty(t, fixture.opener.calls[2].Session.ID)
 	assert.Equal(t, fixture.options.Config.Model, controller.Model().Resolved.Ref)
 	assert.False(t, controller.Model().Overridden)
 	require.Len(t, fixture.opener.runtimes, 2)
 	assert.Equal(t, 1, fixture.opener.runtimes[0].closeCalls())
+	require.NoError(t, controller.Close(t.Context()))
+}
+
+func TestControllerModelSwitchReopensDurableSession(t *testing.T) {
+	t.Parallel()
+
+	fixture := newControllerFixture(t)
+	controller, err := newController(t.Context(), fixture.options, fixture.dependencies())
+	require.NoError(t, err)
+	initialID := controller.SessionID()
+	fixture.opener.runtimes[0].setState(func(state *coding.State) {
+		state.Interaction.ID = "interaction-1"
+	})
+
+	require.NoError(t, controller.SwitchModel(t.Context(), modelcatalog.Selection{
+		Ref: config.ModelRef{Provider: ai.ProviderAnthropic, Model: "configured-next"},
+	}))
+	assert.Equal(t, initialID, controller.SessionID())
+	assert.Equal(t, initialID, fixture.opener.calls[1].Session.ID)
 	require.NoError(t, controller.Close(t.Context()))
 }
 
@@ -451,6 +473,13 @@ func (r *fakeRuntime) Snapshot() coding.State {
 	defer r.mu.Unlock()
 
 	return r.state.Clone()
+}
+
+func (r *fakeRuntime) setState(update func(*coding.State)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	update(&r.state)
 }
 
 func (r *fakeRuntime) Close(context.Context) error {
