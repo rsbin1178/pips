@@ -263,6 +263,8 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.overlay.loading = false
 		m.overlay.err = message.err
 		m.overlay.sessions = message.sessions
+		m.overlay.tree = message.tree.Clone()
+		m.overlay.preview = message.preview
 		m.overlay.cursor = 0
 
 		return m, nil

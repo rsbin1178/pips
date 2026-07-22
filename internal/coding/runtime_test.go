@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"iter"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -637,6 +638,133 @@ func TestRuntimeResumeUsesConfigurationInsteadOfLegacyModelChange(t *testing.T) 
 	require.NoError(t, second.Close(t.Context()))
 }
 
+func TestRuntimeManualCompactionRejectsStalePreviewAndCommitsFreshPlan(t *testing.T) {
+	t.Parallel()
+
+	model := newRuntimeModel(runtimeTextResponse("## Goal\nContinue the implementation."))
+	runtime := openTestRuntime(t, model)
+	configureRuntimeCompaction(runtime, 2000, 300, 1000, 64)
+	runtime.requestPolicy = func(request *ai.Request) {
+		if request.Temperature == nil {
+			request.Temperature = ai.Ptr(0.25)
+		}
+	}
+	appendRuntimeHistory(t, runtime, 800, 800, 600, 600)
+
+	preview, err := runtime.PreviewCompaction(t.Context())
+	require.NoError(t, err)
+	require.True(t, preview.Available)
+	assert.NotEmpty(t, preview.Token)
+	assert.Equal(t, 1700, preview.ThresholdTokens)
+
+	_, err = runtime.session.AppendMessage(ai.UserText("changed after preview"), nil)
+	require.NoError(t, err)
+	before := countHarnessKind(runtime.session.Path(), harness.KindCompaction)
+	_, staleErr := collectRuntimeResult(runtime.Compact(t.Context(), CompactionRequest{
+		PreviewToken: preview.Token,
+	}))
+	require.ErrorIs(t, staleErr, ErrCompactionStale)
+	assert.Equal(t, before, countHarnessKind(runtime.session.Path(), harness.KindCompaction))
+
+	fresh, err := runtime.PreviewCompaction(t.Context())
+	require.NoError(t, err)
+	require.True(t, fresh.Available)
+	events := collectRuntimeEvents(t, runtime.Compact(t.Context(), CompactionRequest{
+		PreviewToken: fresh.Token,
+		Instructions: "Preserve implementation decisions.",
+	}))
+	assert.Contains(t, eventTypes(events), EventCompactionStarted)
+	assert.Contains(t, eventTypes(events), EventCompactionCompleted)
+	assert.Contains(t, eventTypes(events), EventSessionTreeChanged)
+	assert.Equal(t, before+1, countHarnessKind(runtime.session.Path(), harness.KindCompaction))
+	requests := model.Requests()
+	require.Len(t, requests, 1)
+	require.NotNil(t, requests[0].MaxTokens)
+	assert.Equal(t, 64, *requests[0].MaxTokens)
+	require.NotNil(t, requests[0].Temperature)
+	assert.InDelta(t, 0.25, *requests[0].Temperature, 1e-9)
+}
+
+func TestRuntimeAutomaticCompactionPrecedesInteractionCommit(t *testing.T) {
+	t.Parallel()
+
+	model := newRuntimeModel(
+		runtimeTextResponse("## Goal\nRetain earlier context."),
+		runtimeTextResponse("done"),
+	)
+	runtime := openTestRuntime(t, model)
+	configureRuntimeCompaction(runtime, 1800, 300, 1000, 64)
+	appendRuntimeHistory(t, runtime, 700, 700, 700, 700)
+	before := len(runtime.session.Path())
+
+	events := collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("new goal")))
+	types := eventTypes(events)
+	compactIndex := slices.Index(types, EventCompactionStarted)
+	interactionIndex := slices.Index(types, EventInteractionStarted)
+	require.GreaterOrEqual(t, compactIndex, 0)
+	require.GreaterOrEqual(t, interactionIndex, 0)
+	assert.Less(t, compactIndex, interactionIndex)
+
+	path := runtime.session.Path()
+	require.Greater(t, len(path), before)
+	assert.Equal(t, harness.KindCompaction, path[before].Kind,
+		"automatic compaction must commit before the interaction journal and user goal")
+	requests := model.Requests()
+	require.Len(t, requests, 2)
+	require.NotNil(t, requests[0].MaxTokens)
+	assert.Equal(t, 64, *requests[0].MaxTokens)
+	assert.True(t, requestContainsText(requests[1], "new goal"))
+}
+
+func TestRuntimeAutomaticCompactionSuppressesRetryOnUnchangedLeaf(t *testing.T) {
+	t.Parallel()
+
+	model := newRuntimeModel()
+	runtime := openTestRuntime(t, model)
+	configureRuntimeCompaction(runtime, 1800, 300, 1000, 64)
+	appendRuntimeHistory(t, runtime, 700, 700, 700, 700)
+	before := runtime.session.Entries()
+
+	_, firstErr := collectRuntimeResult(runtime.Prompt(t.Context(), ai.UserText("new goal")))
+	require.Error(t, firstErr)
+	assert.Equal(t, before, runtime.session.Entries(), "failed automatic compaction must not commit the goal")
+	require.Len(t, model.Requests(), 1)
+
+	_, secondErr := collectRuntimeResult(runtime.Prompt(t.Context(), ai.UserText("new goal")))
+	require.ErrorIs(t, secondErr, ErrCompactionRetrySuppressed)
+	assert.Equal(t, before, runtime.session.Entries())
+	assert.Len(t, model.Requests(), 1, "unchanged history must not call the failing summarizer again")
+}
+
+func TestRuntimeNavigateRebuildsTranscriptAndSurvivesReopen(t *testing.T) {
+	t.Parallel()
+
+	base := t.TempDir()
+	first := openTestRuntimeAt(t, base, SessionTarget{}, newRuntimeModel())
+	root, err := first.session.AppendMessage(ai.UserText("root goal"), nil)
+	require.NoError(t, err)
+	abandoned, err := first.session.AppendMessage(ai.AssistantText("abandoned answer"), nil)
+	require.NoError(t, err)
+
+	events := collectRuntimeEvents(t, first.Navigate(t.Context(), root, false))
+	assert.Contains(t, eventTypes(events), EventSessionNavigated)
+	assert.Contains(t, eventTypes(events), EventSessionTreeChanged)
+	state := first.Snapshot()
+	require.Len(t, state.Transcript, 1)
+	assert.Equal(t, ai.UserText("root goal"), state.Transcript[0])
+	node, ok := findSessionNode(state.Tree, abandoned)
+	require.True(t, ok)
+	assert.False(t, node.OnActivePath)
+	expectedTree := state.Tree.Clone()
+	sessionID := first.handle.Metadata().ID
+	require.NoError(t, first.Close(t.Context()))
+
+	reopened := openTestRuntimeAt(t, base, SessionTarget{ID: sessionID}, newRuntimeModel())
+	reopenedState := reopened.Snapshot()
+	assert.Equal(t, expectedTree, reopenedState.Tree)
+	assert.Equal(t, state.Transcript, reopenedState.Transcript)
+}
+
 func countHarnessKind(entries []harness.Entry, kind harness.Kind) int {
 	count := 0
 	for _, entry := range entries {
@@ -646,6 +774,74 @@ func countHarnessKind(entries []harness.Entry, kind harness.Kind) int {
 	}
 
 	return count
+}
+
+func configureRuntimeCompaction(
+	runtime *Runtime,
+	contextWindow int,
+	reserve int,
+	keepRecent int,
+	summaryMax int,
+) {
+	runtime.resolved.Limits.ContextWindow = contextWindow
+	runtime.config.Compaction = config.CompactionConfig{
+		Enabled: true, ReserveTokens: reserve, KeepRecentTokens: keepRecent,
+		SummaryMaxTokens: summaryMax,
+	}
+}
+
+func appendRuntimeHistory(t *testing.T, runtime *Runtime, tokenSizes ...int) {
+	t.Helper()
+
+	for index, tokens := range tokenSizes {
+		role := ai.RoleUser
+		if index%2 == 1 {
+			role = ai.RoleAssistant
+		}
+		_, err := runtime.session.AppendMessage(ai.Message{
+			Role: role, Parts: []ai.Part{ai.Text(strings.Repeat("word", tokens))},
+		}, nil)
+		require.NoError(t, err)
+	}
+}
+
+func collectRuntimeResult(sequence iter.Seq2[Event, error]) ([]Event, error) {
+	var events []Event
+	var resultErr error
+	sequence(func(event Event, err error) bool {
+		if err != nil {
+			resultErr = errors.Join(resultErr, err)
+
+			return true
+		}
+		events = append(events, event)
+
+		return true
+	})
+
+	return events, resultErr
+}
+
+func requestContainsText(request ai.Request, expected string) bool {
+	for _, message := range request.Messages {
+		for _, part := range message.Parts {
+			if value, ok := part.(ai.TextPart); ok && strings.Contains(value.Text, expected) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+func findSessionNode(tree SessionTree, id string) (SessionNode, bool) {
+	for _, node := range tree.Nodes {
+		if node.ID == id {
+			return node, true
+		}
+	}
+
+	return SessionNode{}, false
 }
 
 func openTestRuntime(t *testing.T, model ai.LanguageModel) *Runtime {

@@ -1,3 +1,4 @@
+//nolint:wsl_v5 // Closed event protocol validation keeps related checks adjacent.
 package coding
 
 import (
@@ -12,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/rsbin/pips/agent"
+	"github.com/rsbin/pips/agent/harness"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding/approval"
 	"github.com/rsbin/pips/internal/coding/changes"
@@ -45,6 +47,11 @@ type EventType string
 const (
 	EventSessionOpened         EventType = "session.opened"
 	EventSessionClosed         EventType = "session.closed"
+	EventSessionTreeChanged    EventType = "session.tree_changed"
+	EventSessionNavigated      EventType = "session.navigated"
+	EventSessionForked         EventType = "session.forked"
+	EventCompactionStarted     EventType = "compaction.started"
+	EventCompactionCompleted   EventType = "compaction.completed"
 	EventInteractionStarted    EventType = "interaction.started"
 	EventInteractionCompleted  EventType = "interaction.completed"
 	EventRunStarted            EventType = "run.started"
@@ -130,6 +137,41 @@ const (
 // SessionClosed carries the final session ownership outcome.
 type SessionClosed struct {
 	Reason SessionCloseReason `json:"reason"`
+}
+
+// SessionTreeChanged replaces the reducer's durable bounded tree projection.
+type SessionTreeChanged struct {
+	Tree       SessionTree  `json:"tree"`
+	Transcript []ai.Message `json:"transcript"`
+}
+
+// SessionNavigated records one successful same-file leaf change.
+type SessionNavigated struct {
+	FromID      string `json:"from_id,omitempty"`
+	ToID        string `json:"to_id,omitempty"`
+	WithSummary bool   `json:"with_summary"`
+}
+
+// SessionForked records lineage after a new durable Session is created.
+type SessionForked struct {
+	SourceSessionID string `json:"source_session_id"`
+	TargetSessionID string `json:"target_session_id"`
+	AtEntryID       string `json:"at_entry_id,omitempty"`
+}
+
+// CompactionStarted announces a manual or automatic compaction before model I/O.
+type CompactionStarted struct {
+	Mode    CompactionMode    `json:"mode"`
+	Preview CompactionPreview `json:"preview"`
+}
+
+// CompactionCompleted announces one durably committed compaction.
+type CompactionCompleted struct {
+	Mode           CompactionMode `json:"mode"`
+	TokensBefore   int            `json:"tokens_before"`
+	TokensAfter    int            `json:"tokens_after"`
+	FirstKeptID    string         `json:"first_kept_id"`
+	DurationMillis int64          `json:"duration_ms"`
 }
 
 // InteractionStarted opens one user interaction, including approval continuations.
@@ -304,6 +346,11 @@ type RuntimeError struct {
 
 func (SessionOpened) eventPayload()         {}
 func (SessionClosed) eventPayload()         {}
+func (SessionTreeChanged) eventPayload()    {}
+func (SessionNavigated) eventPayload()      {}
+func (SessionForked) eventPayload()         {}
+func (CompactionStarted) eventPayload()     {}
+func (CompactionCompleted) eventPayload()   {}
 func (InteractionStarted) eventPayload()    {}
 func (InteractionCompleted) eventPayload()  {}
 func (RunStarted) eventPayload()            {}
@@ -362,7 +409,9 @@ func ValidateEvent(event Event) error {
 
 func validateEnvelopeIDs(event Event) error {
 	switch event.Type {
-	case EventSessionOpened, EventSessionClosed:
+	case EventSessionOpened, EventSessionClosed, EventSessionTreeChanged,
+		EventSessionNavigated, EventSessionForked, EventCompactionStarted,
+		EventCompactionCompleted:
 		if event.InteractionID != "" || event.RunID != "" {
 			return invalidEvent("session event has interaction or run id")
 		}
@@ -389,7 +438,7 @@ func validateEnvelopeIDs(event Event) error {
 	return nil
 }
 
-//nolint:gocyclo,cyclop,maintidx // Closed taxonomy validation is deliberately exhaustive.
+//nolint:gocyclo,cyclop,funlen,maintidx // Closed taxonomy validation is deliberately exhaustive.
 func validatePayload(eventType EventType, payload EventPayload) error {
 	switch value := payload.(type) {
 	case SessionOpened:
@@ -400,6 +449,40 @@ func validatePayload(eventType EventType, payload EventPayload) error {
 		}
 	case SessionClosed:
 		if eventType != EventSessionClosed || !validSessionCloseReason(value.Reason) {
+			return invalidPayload(eventType, payload)
+		}
+	case SessionTreeChanged:
+		if eventType != EventSessionTreeChanged || validateSessionTree(value.Tree) != nil ||
+			len(value.Transcript) > maxEventItems {
+			return invalidPayload(eventType, payload)
+		}
+		for _, message := range value.Transcript {
+			if validateMessage(message) != nil {
+				return invalidPayload(eventType, payload)
+			}
+		}
+	case SessionNavigated:
+		if eventType != EventSessionNavigated || validateOptionalID(value.FromID) != nil ||
+			validateOptionalID(value.ToID) != nil {
+			return invalidPayload(eventType, payload)
+		}
+	case SessionForked:
+		if eventType != EventSessionForked ||
+			validateEventID("source session id", value.SourceSessionID, true) != nil ||
+			validateEventID("target session id", value.TargetSessionID, true) != nil ||
+			validateOptionalID(value.AtEntryID) != nil || value.SourceSessionID == value.TargetSessionID {
+			return invalidPayload(eventType, payload)
+		}
+	case CompactionStarted:
+		if eventType != EventCompactionStarted || !validCompactionMode(value.Mode) ||
+			validateCompactionPreview(value.Preview, true) != nil {
+			return invalidPayload(eventType, payload)
+		}
+	case CompactionCompleted:
+		if eventType != EventCompactionCompleted || !validCompactionMode(value.Mode) ||
+			value.TokensBefore < 0 || value.TokensAfter < 0 ||
+			value.TokensAfter > value.TokensBefore || validateEventID("first kept id", value.FirstKeptID, true) != nil ||
+			value.DurationMillis < 0 || value.DurationMillis > maxEventDurationMS {
 			return invalidPayload(eventType, payload)
 		}
 	case InteractionStarted:
@@ -485,6 +568,69 @@ func validatePayload(eventType EventType, payload EventPayload) error {
 		}
 	default:
 		return invalidPayload(eventType, payload)
+	}
+
+	return nil
+}
+
+//nolint:gocyclo // Flat graph invariants are validated together to stay auditable.
+func validateSessionTree(tree SessionTree) error {
+	if validateEventID("tree session id", tree.SessionID, true) != nil ||
+		validateOptionalID(tree.LeafID) != nil ||
+		!validBoundedText(tree.Name, maxDiagnosticMessage, true) ||
+		tree.TotalNodes < 0 || tree.TotalNodes < len(tree.Nodes) || tree.MaxDepth < 0 ||
+		len(tree.Nodes) > maxEventItems {
+		return errors.New("invalid session tree")
+	}
+	seen := make(map[string]struct{}, len(tree.Nodes))
+	current := 0
+	for _, node := range tree.Nodes {
+		if validateEventID("tree node id", node.ID, true) != nil ||
+			validateOptionalID(node.ParentID) != nil || !validSessionNodeKind(node.Kind) ||
+			node.CreatedAt.IsZero() || node.Depth < 0 || node.Depth > harness.DefaultTreeMaxDepth ||
+			!validBoundedText(node.Label, maxDiagnosticMessage, true) {
+			return errors.New("invalid session tree node")
+		}
+		if _, duplicate := seen[node.ID]; duplicate {
+			return errors.New("duplicate session tree node")
+		}
+		if node.ParentID != "" {
+			if _, ok := seen[node.ParentID]; !ok && !tree.Truncated {
+				return errors.New("session tree parent is missing")
+			}
+		}
+		seen[node.ID] = struct{}{}
+		if node.Current {
+			current++
+			if node.ID != tree.LeafID || !node.OnActivePath {
+				return errors.New("session tree current leaf is inconsistent")
+			}
+		}
+	}
+	if tree.LeafID != "" && !tree.Truncated && current != 1 {
+		return errors.New("session tree current leaf is missing")
+	}
+	if tree.LeafID == "" && current != 0 {
+		return errors.New("root session tree has a current node")
+	}
+
+	return nil
+}
+
+//nolint:gocyclo // Presence and numeric invariants form one immutable preview contract.
+func validateCompactionPreview(value CompactionPreview, requireAvailable bool) error {
+	if requireAvailable && !value.Available || value.EstimatedTokens < 0 || value.ThresholdTokens < 0 ||
+		value.SummarizedMessages < 0 || value.KeptMessages < 0 ||
+		!validBoundedText(value.DisabledReason, maxDiagnosticMessage, true) ||
+		validateOptionalID(value.FirstKeptID) != nil ||
+		!validIdentifierText(value.Token, 128, !value.Available) {
+		return errors.New("invalid compaction preview")
+	}
+	if value.Available && (value.Token == "" || value.FirstKeptID == "" || value.DisabledReason != "") {
+		return errors.New("available compaction preview is incomplete")
+	}
+	if !value.Available && (value.Token != "" || value.FirstKeptID != "") {
+		return errors.New("disabled compaction preview carries a plan")
 	}
 
 	return nil

@@ -16,6 +16,15 @@ var (
 	ErrRuntimeNotPaused = errors.New("coding runtime: not paused")
 	// ErrRuntimeInvalid means Runtime construction input is incomplete or inconsistent.
 	ErrRuntimeInvalid = errors.New("coding runtime: invalid options")
+	// ErrCompactionUnavailable means current configuration or history cannot
+	// produce a safe compaction plan.
+	ErrCompactionUnavailable = errors.New("coding runtime: compaction unavailable")
+	// ErrCompactionStale means history changed after preview and confirmation
+	// must be requested again.
+	ErrCompactionStale = errors.New("coding runtime: compaction preview is stale")
+	// ErrCompactionRetrySuppressed prevents automatic compaction thrashing on
+	// an unchanged leaf after a prior model or persistence failure.
+	ErrCompactionRetrySuppressed = errors.New("coding runtime: automatic compaction retry suppressed")
 )
 
 // RuntimeStateError reports a stable rejected operation and the phase that

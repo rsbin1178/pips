@@ -1,3 +1,4 @@
+//nolint:wsl_v5 // Reducer fixtures keep transition and assertion groups adjacent.
 package coding
 
 import (
@@ -76,6 +77,59 @@ func TestReduceReturnsDefensiveState(t *testing.T) {
 	snapshotText, ok := snapshot.Transcript[0].Parts[0].(ai.TextPart)
 	require.True(t, ok)
 	assert.Equal(t, "working", snapshotText.Text)
+}
+
+func TestReduceSessionTreeAndCompactionLifecycle(t *testing.T) {
+	t.Parallel()
+
+	tree := SessionTree{
+		SessionID: "session-1", LeafID: "node-1", TotalNodes: 1,
+		Nodes: []SessionNode{{
+			ID: "node-1", Kind: SessionNodeMessage, CreatedAt: eventTestTime,
+			Current: true, OnActivePath: true,
+		}},
+	}
+	preview := CompactionPreview{
+		Available: true, Token: "preview-token", EstimatedTokens: 3000,
+		ThresholdTokens: 2000, SummarizedMessages: 2, KeptMessages: 1,
+		FirstKeptID: "node-1",
+	}
+	events := []Event{
+		newSessionEvent(EventSessionOpened, SessionOpened{
+			Provider: ai.ProviderOpenAI, ModelID: "gpt-test",
+		}),
+		newSessionEvent(EventSessionTreeChanged, SessionTreeChanged{
+			Tree: tree, Transcript: []ai.Message{ai.UserText("goal")},
+		}),
+		newSessionEvent(EventCompactionStarted, CompactionStarted{
+			Mode: CompactionManual, Preview: preview,
+		}),
+		newSessionEvent(EventCompactionCompleted, CompactionCompleted{
+			Mode: CompactionManual, TokensBefore: 3000, TokensAfter: 900,
+			FirstKeptID: "node-1", DurationMillis: 20,
+		}),
+		newSessionEvent(EventSessionNavigated, SessionNavigated{
+			FromID: "node-2", ToID: "node-1",
+		}),
+		newSessionEvent(EventSessionForked, SessionForked{
+			SourceSessionID: "session-1", TargetSessionID: "session-2", AtEntryID: "node-1",
+		}),
+	}
+
+	var state State
+	for index := range events {
+		events[index].Sequence = uint64(index + 1)
+		var err error
+		state, err = Reduce(state, events[index])
+		require.NoError(t, err)
+	}
+
+	assert.Equal(t, tree, state.Tree)
+	require.Len(t, state.Transcript, 1)
+	assert.False(t, state.Compaction.Active)
+	assert.Equal(t, CompactionManual, state.Compaction.Mode)
+	assert.Equal(t, 3000, state.Compaction.TokensBefore)
+	assert.Equal(t, 900, state.Compaction.TokensAfter)
 }
 
 func TestReduceRejectsProtocolViolations(t *testing.T) {

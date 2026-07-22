@@ -63,6 +63,25 @@ func TestControllerModelOverrideAppliesToLaterSessions(t *testing.T) {
 	require.NoError(t, restartedController.Close(t.Context()))
 }
 
+func TestControllerForkReplacesSessionWithoutChangingEffectiveModel(t *testing.T) {
+	t.Parallel()
+
+	fixture := newControllerFixture(t)
+	controller, err := newController(t.Context(), fixture.options, fixture.dependencies())
+	require.NoError(t, err)
+	wantModel := controller.Model()
+	sourceID := controller.SessionID()
+
+	require.NoError(t, controller.ForkSession(t.Context(), "node-1"))
+	assert.Equal(t, sourceID+"-fork", controller.SessionID())
+	assert.Equal(t, wantModel, controller.Model())
+	require.Len(t, fixture.opener.calls, 2)
+	assert.Equal(t, sourceID+"-fork", fixture.opener.calls[1].Session.ID)
+	assert.Equal(t, wantModel.Resolved, fixture.opener.calls[1].Resolved)
+	assert.Equal(t, 1, fixture.opener.runtimes[0].closeCalls())
+	require.NoError(t, controller.Close(t.Context()))
+}
+
 func TestControllerFailedReplacementRestoresPreviousRuntime(t *testing.T) {
 	t.Parallel()
 
@@ -404,6 +423,28 @@ func (*fakeRuntime) Steer(...ai.Message) error    { return nil }
 func (*fakeRuntime) FollowUp(...ai.Message) error { return nil }
 func (*fakeRuntime) Cancel() error                { return nil }
 func (*fakeRuntime) Reload(context.Context) error { return nil }
+func (r *fakeRuntime) Tree(context.Context) (coding.SessionTree, error) {
+	return r.state.Tree.Clone(), nil
+}
+
+func (*fakeRuntime) PreviewCompaction(context.Context) (coding.CompactionPreview, error) {
+	return coding.CompactionPreview{}, nil
+}
+
+func (*fakeRuntime) Navigate(context.Context, string, bool) iter.Seq2[coding.Event, error] {
+	return func(func(coding.Event, error) bool) {}
+}
+
+func (*fakeRuntime) Compact(
+	context.Context,
+	coding.CompactionRequest,
+) iter.Seq2[coding.Event, error] {
+	return func(func(coding.Event, error) bool) {}
+}
+
+func (r *fakeRuntime) Fork(_ context.Context, _ string) (string, error) {
+	return r.state.SessionID + "-fork", nil
+}
 
 func (r *fakeRuntime) Snapshot() coding.State {
 	r.mu.Lock()

@@ -46,6 +46,11 @@ type runtimeInstance interface {
 	Prompt(context.Context, ...ai.Message) iter.Seq2[coding.Event, error]
 	Continue(context.Context) iter.Seq2[coding.Event, error]
 	Resolve(context.Context, approval.Resolution) iter.Seq2[coding.Event, error]
+	Tree(context.Context) (coding.SessionTree, error)
+	PreviewCompaction(context.Context) (coding.CompactionPreview, error)
+	Navigate(context.Context, string, bool) iter.Seq2[coding.Event, error]
+	Compact(context.Context, coding.CompactionRequest) iter.Seq2[coding.Event, error]
+	Fork(context.Context, string) (string, error)
 	Steer(...ai.Message) error
 	FollowUp(...ai.Message) error
 	Cancel() error
@@ -197,6 +202,54 @@ func (c *Controller) Resolve(
 ) iter.Seq2[coding.Event, error] {
 	return c.sequence(func(runtime runtimeInstance) iter.Seq2[coding.Event, error] {
 		return runtime.Resolve(ctx, resolution)
+	})
+}
+
+// Tree returns the current Runtime's bounded Session tree.
+func (c *Controller) Tree(ctx context.Context) (coding.SessionTree, error) {
+	var tree coding.SessionTree
+	err := c.withRuntime(func(runtime runtimeInstance) error {
+		var err error
+		tree, err = runtime.Tree(ctx)
+
+		return err
+	})
+
+	return tree, err
+}
+
+// PreviewCompaction returns a point-in-time manual compaction plan.
+func (c *Controller) PreviewCompaction(ctx context.Context) (coding.CompactionPreview, error) {
+	var preview coding.CompactionPreview
+	err := c.withRuntime(func(runtime runtimeInstance) error {
+		var err error
+		preview, err = runtime.PreviewCompaction(ctx)
+
+		return err
+	})
+
+	return preview, err
+}
+
+// Navigate moves the active leaf while holding the Controller lease through
+// the complete event sequence.
+func (c *Controller) Navigate(
+	ctx context.Context,
+	entryID string,
+	summarize bool,
+) iter.Seq2[coding.Event, error] {
+	return c.sequence(func(runtime runtimeInstance) iter.Seq2[coding.Event, error] {
+		return runtime.Navigate(ctx, entryID, summarize)
+	})
+}
+
+// Compact confirms and executes a manual compaction.
+func (c *Controller) Compact(
+	ctx context.Context,
+	request coding.CompactionRequest,
+) iter.Seq2[coding.Event, error] {
+	return c.sequence(func(runtime runtimeInstance) iter.Seq2[coding.Event, error] {
+		return runtime.Compact(ctx, request)
 	})
 }
 
@@ -360,6 +413,40 @@ func (c *Controller) ResumeSession(ctx context.Context, id string) error {
 	}
 
 	return c.replace(ctx, id, modelcatalog.Selection{}, false)
+}
+
+// ForkSession creates a new Session from one node and replaces the current
+// Runtime with it while preserving the effective process-local model.
+func (c *Controller) ForkSession(ctx context.Context, entryID string) error {
+	current, err := c.beginReplacement()
+	if err != nil {
+		return err
+	}
+
+	targetID, err := current.runtime.Fork(ctx, entryID)
+	if err != nil {
+		c.finishReplacement(current)
+
+		return err
+	}
+	if err := closeRuntimeBounded(ctx, current.runtime); err != nil {
+		return c.rollback(ctx, current, fmt.Errorf("runtime control: close source runtime: %w", err))
+	}
+	target, state, err := openRuntime(
+		ctx,
+		c.deps.openRuntime,
+		openOptions(c.base, current.config, current.resolved, current.model, targetID),
+	)
+	if err != nil {
+		return c.rollback(ctx, current, err)
+	}
+
+	current.runtime = target
+	current.sessionID = state.SessionID
+	current.state = state
+	c.finishReplacement(current)
+
+	return nil
 }
 
 // SwitchModel replaces the current Runtime using a process-local model

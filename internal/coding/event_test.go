@@ -1,3 +1,4 @@
+//nolint:wsl_v5 // Protocol fixtures keep encode, disclosure, and telemetry assertions grouped.
 package coding
 
 import (
@@ -139,6 +140,15 @@ func TestUnmarshalEventRejectsNestedUnknownAndDuplicateFields(t *testing.T) {
 
 	sessionEvent, err := MarshalEvent(eventCases()[0].event)
 	require.NoError(t, err)
+	var treeEvent []byte
+	for _, test := range eventCases() {
+		if test.event.Type == EventSessionTreeChanged {
+			treeEvent, err = MarshalEvent(test.event)
+			require.NoError(t, err)
+			break
+		}
+	}
+	require.NotEmpty(t, treeEvent)
 
 	tests := []struct {
 		name string
@@ -177,6 +187,15 @@ func TestUnmarshalEventRejectsNestedUnknownAndDuplicateFields(t *testing.T) {
 				string(encodedMessage),
 				`"text":"done"`,
 				`"text":"done","text":"again"`,
+				1,
+			),
+		},
+		{
+			name: "unknown tree transcript field",
+			data: strings.Replace(
+				string(treeEvent),
+				`"role":"user"`,
+				`"role":"user","unknown":true`,
 				1,
 			),
 		},
@@ -402,6 +421,43 @@ func eventCases() []eventCase {
 		{name: "session closed", event: newSessionEvent(
 			EventSessionClosed, SessionClosed{Reason: SessionClosedNormally},
 		)},
+		{name: "session tree changed", event: newSessionEvent(
+			EventSessionTreeChanged, SessionTreeChanged{
+				Tree: SessionTree{
+					SessionID: "session-1", Name: "implementation", LeafID: "node-1",
+					TotalNodes: 1, Nodes: []SessionNode{{
+						ID: "node-1", Kind: SessionNodeMessage, CreatedAt: eventTestTime,
+						Current: true, OnActivePath: true,
+					}},
+				},
+				Transcript: []ai.Message{ai.UserText("continue")},
+			},
+		)},
+		{name: "session navigated", event: newSessionEvent(
+			EventSessionNavigated,
+			SessionNavigated{FromID: "node-2", ToID: "node-1", WithSummary: true},
+		)},
+		{name: "session forked", event: newSessionEvent(
+			EventSessionForked,
+			SessionForked{
+				SourceSessionID: "session-1", TargetSessionID: "session-2", AtEntryID: "node-1",
+			},
+		)},
+		{name: "compaction started", event: newSessionEvent(
+			EventCompactionStarted,
+			CompactionStarted{Mode: CompactionManual, Preview: CompactionPreview{
+				Available: true, Token: "preview-token", EstimatedTokens: 3000,
+				ThresholdTokens: 2000, SummarizedMessages: 4, KeptMessages: 2,
+				FirstKeptID: "node-1",
+			}},
+		)},
+		{name: "compaction completed", event: newSessionEvent(
+			EventCompactionCompleted,
+			CompactionCompleted{
+				Mode: CompactionManual, TokensBefore: 3000, TokensAfter: 900,
+				FirstKeptID: "node-1", DurationMillis: 25,
+			},
+		)},
 		{name: "interaction started", event: newInteractionEvent(
 			EventInteractionStarted, InteractionStarted{Resumed: true},
 		)},
@@ -476,6 +532,40 @@ func eventCases() []eventCase {
 			EventError, RuntimeError{Code: "model_failed", Message: "request failed", Fatal: true},
 		)},
 	}
+}
+
+func TestSessionTreeSafeProjectionScrubsContentAndTelemetryIsContentFree(t *testing.T) {
+	t.Parallel()
+
+	const secret = "private-session-content"
+	event := newSessionEvent(EventSessionTreeChanged, SessionTreeChanged{
+		Tree: SessionTree{
+			SessionID: "session-1", Name: secret, LeafID: "node-1", TotalNodes: 1,
+			Nodes: []SessionNode{{
+				ID: "node-1", Kind: SessionNodeMessage, CreatedAt: eventTestTime,
+				Label: secret, Current: true, OnActivePath: true,
+			}},
+		},
+		Transcript: []ai.Message{
+			ai.UserText(secret),
+			ai.ToolResultText("call-1", "shell", secret),
+			ai.AssistantText("public answer"),
+		},
+	})
+
+	safe, err := Project(event, DisclosureSafe)
+	require.NoError(t, err)
+	encoded, err := json.Marshal(safe)
+	require.NoError(t, err)
+	assert.NotContains(t, string(encoded), secret)
+	assert.Contains(t, string(encoded), "public answer")
+
+	telemetry, err := Telemetry(event)
+	require.NoError(t, err)
+	encodedTelemetry, err := json.Marshal(telemetry)
+	require.NoError(t, err)
+	assert.NotContains(t, string(encodedTelemetry), secret)
+	assert.Equal(t, 1, telemetry.Nodes)
 }
 
 func newSessionEvent(eventType EventType, payload EventPayload) Event {

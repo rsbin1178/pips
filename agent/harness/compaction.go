@@ -1,3 +1,4 @@
+//nolint:wsl_v5 // Token accounting stages intentionally stay grouped.
 package harness
 
 import (
@@ -13,6 +14,9 @@ import (
 const (
 	DefaultCompactionReserveTokens    = 16384
 	DefaultCompactionKeepRecentTokens = 20000
+	// DefaultCompactionSummaryTokens bounds summary generation independently
+	// from the output space reserved for the next conversation turn.
+	DefaultCompactionSummaryTokens = 4096
 )
 
 // CompactionSettings tunes automatic compaction. ContextTokens must be set to the
@@ -27,6 +31,10 @@ type CompactionSettings struct {
 	// KeepRecentTokens is approximately how much recent history survives a
 	// compaction (default [DefaultCompactionKeepRecentTokens]).
 	KeepRecentTokens int
+	// SummaryTokens is the maximum output budget for the generated summary
+	// (default [DefaultCompactionSummaryTokens]). It is deliberately distinct
+	// from ReserveTokens, which protects the following normal model request.
+	SummaryTokens int
 }
 
 func (s CompactionSettings) withDefaults() CompactionSettings {
@@ -37,6 +45,9 @@ func (s CompactionSettings) withDefaults() CompactionSettings {
 	if s.KeepRecentTokens <= 0 {
 		s.KeepRecentTokens = DefaultCompactionKeepRecentTokens
 	}
+	if s.SummaryTokens <= 0 {
+		s.SummaryTokens = DefaultCompactionSummaryTokens
+	}
 
 	return s
 }
@@ -44,7 +55,9 @@ func (s CompactionSettings) withDefaults() CompactionSettings {
 // ShouldCompact reports whether an estimated context size crosses the
 // compaction threshold.
 func ShouldCompact(tokens int, s CompactionSettings) bool {
-	return s.ContextTokens > 0 && tokens > s.ContextTokens-s.withDefaults().ReserveTokens
+	s = s.withDefaults()
+
+	return s.ContextTokens > s.ReserveTokens && tokens > s.ContextTokens-s.ReserveTokens
 }
 
 // estimatedImageTokens approximates one image as 4800 characters, matching
@@ -94,10 +107,18 @@ func partsChars(parts []ai.Part) int {
 // assistant usage (provider-reported input plus output) plus the
 // heuristically estimated messages after it.
 func EstimateContext(path []Entry) int {
+	contextPath := contextEntries(path)
+	contextIDs := make(map[string]struct{}, len(contextPath))
+	for _, entry := range contextPath {
+		contextIDs[entry.ID] = struct{}{}
+	}
 	lastUsage := -1
 
 	for i, e := range path {
 		if e.Kind == KindMessage && e.Usage != nil {
+			if _, visible := contextIDs[e.ID]; !visible {
+				continue
+			}
 			lastUsage = i
 		}
 	}
@@ -107,7 +128,7 @@ func EstimateContext(path []Entry) int {
 		tokens = path[lastUsage].Usage.InputTokens + path[lastUsage].Usage.OutputTokens
 	}
 
-	for _, e := range contextEntries(path) {
+	for _, e := range contextPath {
 		if lastUsage >= 0 && !entryAfter(path, e.ID, lastUsage) {
 			continue
 		}
@@ -404,7 +425,7 @@ func SummarizeCompaction(ctx context.Context, model ai.LanguageModel, prep *Comp
 		var err error
 
 		summary, err = summarizeMessages(ctx, model, prep.ToSummarize, summaryRequest{
-			maxTokens:    settings.ReserveTokens * 8 / 10,
+			maxTokens:    settings.SummaryTokens,
 			previous:     prep.Previous,
 			instructions: instructions,
 		})
@@ -418,7 +439,7 @@ func SummarizeCompaction(ctx context.Context, model ai.LanguageModel, prep *Comp
 	}
 
 	prefix, err := summarizeMessages(ctx, model, prep.TurnPrefix, summaryRequest{
-		maxTokens:  settings.ReserveTokens / 2,
+		maxTokens:  max(settings.SummaryTokens/2, 1),
 		turnPrefix: true,
 	})
 	if err != nil {

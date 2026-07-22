@@ -1,7 +1,9 @@
+//nolint:wsl_v5 // Store lifecycle fixtures keep actions and assertions adjacent.
 package harness_test
 
 import (
 	"fmt"
+	"os"
 	"testing"
 
 	"github.com/rsbin/pips/agent/harness"
@@ -123,6 +125,7 @@ func TestOpenJSONLRejectsForeignFiles(t *testing.T) {
 		{"not json", "hello\n"},
 		{"wrong type", `{"type":"other","version":1,"id":"x"}` + "\n"},
 		{"wrong version", `{"type":"harness_session","version":99,"id":"x"}` + "\n"},
+		{"unknown header field", `{"type":"harness_session","version":1,"id":"x","created_at":"2026-01-01T00:00:00Z","future":true}` + "\n"},
 	}
 
 	for i, tt := range tests {
@@ -136,6 +139,68 @@ func TestOpenJSONLRejectsForeignFiles(t *testing.T) {
 			require.Error(t, err)
 		})
 	}
+}
+
+func TestRepoListReadsOnlyHeader(t *testing.T) {
+	t.Parallel()
+
+	repo := harness.Repo{Dir: t.TempDir()}
+	store, err := repo.Create("header-only", map[string]string{"workspace": "w"})
+	require.NoError(t, err)
+	path := store.Metadata().Path
+	require.NoError(t, store.Close())
+	require.NoError(t, os.WriteFile(path, append(mustReadFile(t, path), []byte("not-json\n")...), 0o600))
+
+	metas, err := repo.List()
+	require.NoError(t, err)
+	require.Len(t, metas, 1)
+	assert.Equal(t, "header-only", metas[0].ID)
+	assert.Equal(t, "w", metas[0].Extra["workspace"])
+
+	_, err = repo.Open("header-only")
+	require.Error(t, err, "full open still validates every entry")
+}
+
+func TestReadJSONLPrefixIsValidatedBoundedAndDefensive(t *testing.T) {
+	t.Parallel()
+
+	path := t.TempDir() + "/prefix.jsonl"
+	store, err := harness.CreateJSONL(path, "prefix", map[string]string{"workspace": "w"})
+	require.NoError(t, err)
+	sess, err := harness.NewSession(store)
+	require.NoError(t, err)
+	appendText(t, sess, ai.RoleUser, "first", nil)
+	appendText(t, sess, ai.RoleAssistant, "second", nil)
+	require.NoError(t, sess.SetName("bounded"))
+	require.NoError(t, store.Close())
+
+	full, err := harness.ReadJSONLPrefix(path, harness.JSONLPrefixLimits{})
+	require.NoError(t, err)
+	assert.Equal(t, "prefix", full.Metadata.ID)
+	assert.Equal(t, "w", full.Metadata.Extra["workspace"])
+	assert.False(t, full.Truncated)
+	require.Len(t, full.Entries, 3)
+
+	bounded, err := harness.ReadJSONLPrefix(path, harness.JSONLPrefixLimits{MaxEntries: 1})
+	require.NoError(t, err)
+	assert.True(t, bounded.Truncated)
+	require.Len(t, bounded.Entries, 1)
+	bounded.Metadata.Extra["workspace"] = "changed"
+	bounded.Entries[0].Message.Parts[0] = ai.Text("changed")
+
+	again, err := harness.ReadJSONLPrefix(path, harness.JSONLPrefixLimits{MaxEntries: 1})
+	require.NoError(t, err)
+	assert.Equal(t, "w", again.Metadata.Extra["workspace"])
+	assert.Equal(t, ai.Text("first"), again.Entries[0].Message.Parts[0])
+}
+
+func mustReadFile(t *testing.T, path string) []byte {
+	t.Helper()
+
+	data, err := os.ReadFile(path) //nolint:gosec // path is created inside the test's private temp directory
+	require.NoError(t, err)
+
+	return data
 }
 
 func TestRepoLifecycle(t *testing.T) {
@@ -201,4 +266,40 @@ func TestRepoFork(t *testing.T) {
 	cctx, err := fsess.Context()
 	require.NoError(t, err)
 	require.Len(t, cctx.Messages, 1)
+}
+
+func TestRepoForkNormalizesReferencesOutsideSelectedBranch(t *testing.T) {
+	t.Parallel()
+
+	repo := harness.Repo{Dir: t.TempDir()}
+	store, err := repo.Create("src", nil)
+	require.NoError(t, err)
+	sess, err := harness.NewSession(store)
+	require.NoError(t, err)
+	root := appendText(t, sess, ai.RoleUser, "root", nil)
+	abandoned := appendText(t, sess, ai.RoleAssistant, "old branch", nil)
+	require.NoError(t, sess.MoveTo(root, "old branch summary"))
+	require.NoError(t, sess.SetLabel(abandoned, "outside selected path"))
+	current := appendText(t, sess, ai.RoleAssistant, "current branch", nil)
+	before := sess.Entries()
+
+	forked, err := repo.ForkSession(sess, current, "fork", nil)
+	require.NoError(t, err)
+	defer forked.Close() //nolint:errcheck // test cleanup
+	assert.Equal(t, before, sess.Entries())
+
+	forkedSession, err := harness.NewSession(forked)
+	require.NoError(t, err)
+	assert.Equal(t, current, forkedSession.LeafID())
+	assert.Empty(t, forkedSession.Labels())
+	entries := forkedSession.Entries()
+	require.Len(t, entries, 3)
+	assert.Equal(t, harness.KindBranchSummary, entries[1].Kind)
+	assert.Equal(t, "root", entries[1].FromID)
+	assert.Equal(t, entries[1].ID, entries[2].ParentID)
+
+	contextValue, err := forkedSession.Context()
+	require.NoError(t, err)
+	require.Len(t, contextValue.Messages, 3)
+	assert.Equal(t, ai.AssistantText("current branch"), contextValue.Messages[2])
 }

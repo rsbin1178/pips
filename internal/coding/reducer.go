@@ -1,3 +1,4 @@
+//nolint:wsl_v5 // State-machine transitions intentionally keep checks and commits adjacent.
 package coding
 
 import (
@@ -102,6 +103,8 @@ type State struct {
 	Changes     *WorkspaceChanged       `json:"changes,omitempty"`
 	Diagnostics []IntegrationDiagnostic `json:"diagnostics"`
 	LastError   *RuntimeError           `json:"last_error,omitempty"`
+	Tree        SessionTree             `json:"tree"`
+	Compaction  CompactionState         `json:"compaction"`
 
 	activeRuns  map[string]int
 	openTurns   map[string]int
@@ -142,6 +145,7 @@ func (state State) Clone() State {
 	}
 
 	cloned.Diagnostics = slices.Clone(state.Diagnostics)
+	cloned.Tree = state.Tree.Clone()
 	if state.LastError != nil {
 		lastError := *state.LastError
 		cloned.LastError = &lastError
@@ -161,6 +165,8 @@ type DurableState struct {
 	Interaction InteractionState `json:"interaction"`
 	Transcript  []ai.Message     `json:"transcript"`
 	Approval    ApprovalState    `json:"approval"`
+	Tree        SessionTree      `json:"tree"`
+	Compaction  CompactionState  `json:"compaction"`
 }
 
 // Durable returns the state subset reconstructed from Harness persistence.
@@ -175,6 +181,8 @@ func (state State) Durable() DurableState {
 		Interaction: cloned.Interaction,
 		Transcript:  cloned.Transcript,
 		Approval:    cloned.Approval,
+		Tree:        cloned.Tree,
+		Compaction:  cloned.Compaction,
 	}
 }
 
@@ -222,6 +230,36 @@ func (state *State) apply(event Event) error {
 
 		state.SessionOpen = false
 		state.Phase = PhaseClosed
+	case SessionTreeChanged:
+		if !state.SessionOpen || payload.Tree.SessionID != state.SessionID {
+			return protocolError("session tree does not match the open session")
+		}
+		state.Tree = payload.Tree.Clone()
+		state.Transcript = cloneMessages(payload.Transcript)
+	case SessionNavigated:
+		if !state.SessionOpen || state.Phase != PhaseIdle || state.Interaction.Active {
+			return protocolError("session cannot navigate in its current state")
+		}
+	case SessionForked:
+		if !state.SessionOpen || state.Phase != PhaseIdle || state.Interaction.Active ||
+			payload.SourceSessionID != state.SessionID {
+			return protocolError("session cannot fork in its current state")
+		}
+	case CompactionStarted:
+		if !state.SessionOpen || state.Phase != PhaseIdle || state.Interaction.Active || state.Compaction.Active {
+			return protocolError("compaction cannot start in its current state")
+		}
+		state.Compaction = CompactionState{Active: true, Mode: payload.Mode, Preview: payload.Preview}
+	case CompactionCompleted:
+		if !state.Compaction.Active || state.Compaction.Mode != payload.Mode ||
+			state.Compaction.Preview.FirstKeptID != payload.FirstKeptID {
+			return protocolError("compaction cannot complete in its current state")
+		}
+		state.Compaction = CompactionState{
+			Mode: payload.Mode, Preview: state.Compaction.Preview,
+			TokensBefore: payload.TokensBefore, TokensAfter: payload.TokensAfter,
+			FirstKeptID: payload.FirstKeptID, DurationMillis: payload.DurationMillis,
+		}
 	case InteractionStarted:
 		if !state.SessionOpen || state.Interaction.Active {
 			return protocolError("interaction cannot start in its current state")
@@ -406,6 +444,7 @@ func (state *State) apply(event Event) error {
 		if payload.Fatal {
 			state.failActiveRun(event.RunID)
 		}
+		state.Compaction.Active = false
 	}
 
 	return nil

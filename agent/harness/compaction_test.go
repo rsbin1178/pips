@@ -35,6 +35,7 @@ func TestShouldCompact(t *testing.T) {
 	assert.False(t, harness.ShouldCompact(50_000, s))
 	assert.True(t, harness.ShouldCompact(90_000, s))
 	assert.False(t, harness.ShouldCompact(90_000, harness.CompactionSettings{}), "no window, never auto-compacts")
+	assert.False(t, harness.ShouldCompact(1, harness.CompactionSettings{ContextTokens: 1000, ReserveTokens: 1000}))
 }
 
 func TestPrepareCutsAtUserMessage(t *testing.T) {
@@ -124,6 +125,19 @@ func TestPrepareIterativeCarriesPrevious(t *testing.T) {
 	assert.Equal(t, "earlier summary", prep.Previous)
 }
 
+func TestEstimateContextDropsUsageHiddenByCompaction(t *testing.T) {
+	t.Parallel()
+
+	sess := buildSession(t)
+	appendText(t, sess, ai.RoleUser, bigText(2000), nil)
+	appendText(t, sess, ai.RoleAssistant, "old", &ai.Usage{InputTokens: 9000, OutputTokens: 1000})
+	keep := appendText(t, sess, ai.RoleUser, bigText(100), nil)
+	_, err := sess.AppendCompaction("small summary", keep, 10000)
+	require.NoError(t, err)
+
+	assert.Less(t, harness.EstimateContext(sess.Path()), 1000)
+}
+
 func TestPrepareNothingToCompact(t *testing.T) {
 	t.Parallel()
 
@@ -165,6 +179,7 @@ func TestSummarizeEndToEnd(t *testing.T) {
 	assert.Contains(t, prompt.Text, "## Goal")
 	assert.Contains(t, prompt.Text, "Additional focus: focus on decisions")
 	require.NotNil(t, reqs[0].MaxTokens)
+	assert.Equal(t, harness.DefaultCompactionSummaryTokens, *reqs[0].MaxTokens)
 
 	// Commit and verify reconstruction shrinks.
 	_, err = sess.AppendCompaction(summary, prep.FirstKeptID, prep.TokensBefore)

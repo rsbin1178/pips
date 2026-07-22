@@ -120,6 +120,12 @@ func (r *Runtime) run(
 	defer r.endOperation(operation)
 
 	emitter := newEventEmitter(ctx, r, yield, true)
+	if kind == operationPrompt {
+		if err := r.maybeCompact(ctx, emitter); err != nil {
+			r.emitStructuralError("automatic_compaction_failed", "Automatic compaction failed", err, emitter)
+			return
+		}
+	}
 
 	var current *interaction
 	switch kind {
@@ -202,6 +208,8 @@ func (r *Runtime) run(
 		if err == nil {
 			err = r.handleApprovalState(ctx, current, approvalState, emitter)
 		}
+	case operationPreview, operationCompact, operationNavigate, operationFork:
+		err = fmt.Errorf("%w: structural operation entered interaction driver", ErrRuntimeInvalid)
 	}
 
 	if err != nil {
@@ -326,6 +334,10 @@ func (r *Runtime) beginOperation(
 	case operationResolve:
 		if r.state.Phase != PhasePaused || r.interaction == nil {
 			return nil, nil, stateError(string(kind), r.state.Phase, ErrRuntimeNotPaused)
+		}
+	case operationPreview, operationCompact, operationNavigate, operationFork:
+		if r.state.Phase != PhaseIdle || r.interaction != nil || r.recovery.PendingID != "" {
+			return nil, nil, stateError(string(kind), r.state.Phase, ErrRuntimePending)
 		}
 	default:
 		return nil, nil, fmt.Errorf("%w: unknown operation", ErrRuntimeInvalid)
@@ -838,6 +850,9 @@ func (r *Runtime) finishInteraction(
 	}
 
 	if err := emitter.emit(current.id, "", EventStatusChanged, StatusChanged{Phase: PhaseIdle}); err != nil {
+		errs = append(errs, err)
+	}
+	if err := r.emitTreeChanged(ctx, emitter); err != nil {
 		errs = append(errs, err)
 	}
 

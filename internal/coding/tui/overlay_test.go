@@ -210,6 +210,68 @@ func TestStatusOverlayShowsOnlyRequestOutputLimit(t *testing.T) {
 	assert.NotContains(t, content, "Model output:")
 }
 
+func TestTreeOverlayFiltersNavigatesWithSummaryAndForks(t *testing.T) {
+	t.Parallel()
+
+	controller := newOverlayController(readyState())
+	controller.tree = coding.SessionTree{
+		SessionID: "session-1", LeafID: "node-second", TotalNodes: 2,
+		Nodes: []coding.SessionNode{
+			{
+				ID: "node-first", Kind: coding.SessionNodeMessage, CreatedAt: time.Unix(1, 0).UTC(),
+				OnActivePath: true,
+			},
+			{
+				ID: "node-second", ParentID: "node-first", Kind: coding.SessionNodeMessage,
+				CreatedAt: time.Unix(2, 0).UTC(), Current: true, OnActivePath: true, Depth: 1,
+			},
+		},
+	}
+	model := readyModelWithController(t, controller, true)
+	load := model.openTreeOverlay(false)
+	model.Update(load())
+	model.Update(tea.KeyPressMsg{Text: "first"})
+	require.Len(t, model.filteredTreeNodes(), 1)
+	_, navigate := model.Update(key("s"))
+	driveModelCommands(t, model, navigate)
+	require.Len(t, controller.navigations, 1)
+	assert.Equal(t, "node-first", controller.navigations[0].entryID)
+	assert.True(t, controller.navigations[0].summarize)
+
+	load = model.openTreeOverlay(true)
+	model.Update(load())
+	model.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	_, fork := model.Update(key("enter"))
+	require.NotNil(t, fork)
+	model.Update(fork())
+	assert.Equal(t, []string{"node-second"}, controller.forks)
+	assert.Equal(t, overlayNone, model.overlay.kind)
+}
+
+func TestCompactOverlayCancelDoesNothingAndConfirmUsesPreviewToken(t *testing.T) {
+	t.Parallel()
+
+	controller := newOverlayController(readyState())
+	controller.preview = coding.CompactionPreview{
+		Available: true, Token: "preview-token", EstimatedTokens: 3000,
+		ThresholdTokens: 2000, SummarizedMessages: 4, KeptMessages: 2,
+		FirstKeptID: "node-first",
+	}
+	model := readyModelWithController(t, controller, true)
+	load := model.openOverlay(overlayCompact)
+	model.Update(load())
+	model.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	assert.Empty(t, controller.compactions)
+	assert.Equal(t, overlayNone, model.overlay.kind)
+
+	load = model.openOverlay(overlayCompact)
+	model.Update(load())
+	_, compact := model.Update(key("enter"))
+	driveModelCommands(t, model, compact)
+	require.Len(t, controller.compactions, 1)
+	assert.Equal(t, "preview-token", controller.compactions[0].PreviewToken)
+}
+
 func approvalReviewState() coding.State {
 	state := readyState()
 	state.Phase = coding.PhasePaused
@@ -241,6 +303,14 @@ type overlayController struct {
 	models      []modelcatalog.Selection
 	entries     []modelcatalog.Entry
 	newCalls    int
+	tree        coding.SessionTree
+	preview     coding.CompactionPreview
+	navigations []struct {
+		entryID   string
+		summarize bool
+	}
+	compactions []coding.CompactionRequest
+	forks       []string
 }
 
 func newOverlayController(state coding.State) *overlayController {
@@ -279,6 +349,36 @@ func (c *overlayController) ListSessions(context.Context) ([]session.Metadata, e
 	return append([]session.Metadata(nil), c.sessions...), nil
 }
 
+func (c *overlayController) Tree(context.Context) (coding.SessionTree, error) {
+	return c.tree.Clone(), nil
+}
+
+func (c *overlayController) PreviewCompaction(context.Context) (coding.CompactionPreview, error) {
+	return c.preview, nil
+}
+
+func (c *overlayController) Navigate(
+	_ context.Context,
+	entryID string,
+	summarize bool,
+) iter.Seq2[coding.Event, error] {
+	c.navigations = append(c.navigations, struct {
+		entryID   string
+		summarize bool
+	}{entryID: entryID, summarize: summarize})
+
+	return func(func(coding.Event, error) bool) {}
+}
+
+func (c *overlayController) Compact(
+	_ context.Context,
+	request coding.CompactionRequest,
+) iter.Seq2[coding.Event, error] {
+	c.compactions = append(c.compactions, request)
+
+	return func(func(coding.Event, error) bool) {}
+}
+
 func (c *overlayController) NewSession(context.Context) error {
 	c.newCalls++
 	c.state.SessionID = "new-session"
@@ -289,6 +389,13 @@ func (c *overlayController) NewSession(context.Context) error {
 func (c *overlayController) ResumeSession(_ context.Context, id string) error {
 	c.resumed = append(c.resumed, id)
 	c.state.SessionID = id
+
+	return nil
+}
+
+func (c *overlayController) ForkSession(_ context.Context, entryID string) error {
+	c.forks = append(c.forks, entryID)
+	c.state.SessionID = "forked-session"
 
 	return nil
 }
