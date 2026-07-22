@@ -269,6 +269,8 @@ func TestSessionListFiltersCurrentWorkspace(t *testing.T) {
 	require.NoError(t, err)
 
 	currentID := currentHandle.Metadata().ID
+	_, err = currentHandle.Session().AppendCustom("test.started", nil)
+	require.NoError(t, err)
 	require.NoError(t, currentHandle.Close())
 
 	otherDir := t.TempDir()
@@ -280,6 +282,8 @@ func TestSessionListFiltersCurrentWorkspace(t *testing.T) {
 	require.NoError(t, err)
 
 	otherID := otherHandle.Metadata().ID
+	_, err = otherHandle.Session().AppendCustom("test.started", nil)
+	require.NoError(t, err)
 	require.NoError(t, otherHandle.Close())
 
 	output, err := executeWithDependencies(

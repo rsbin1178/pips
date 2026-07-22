@@ -73,67 +73,6 @@ func TestUnknownApprovalRejectsUnlistedShortcuts(t *testing.T) {
 	assert.Equal(t, approval.ChoiceRetry, controller.resolutions[0].Choice)
 }
 
-func TestCommandOverlayDisablesRuntimeReplacementUnlessIdle(t *testing.T) {
-	t.Parallel()
-
-	state := readyState()
-	state.Phase = coding.PhaseRunning
-	state.Interaction.Active = true
-	controller := newOverlayController(state)
-	model := readyModelWithController(t, controller, true)
-	model.openOverlay(overlayCommand)
-
-	_, command := model.executeCommand(commands[0])
-	assert.Nil(t, command)
-	require.Error(t, model.overlay.err)
-	assert.Contains(t, model.overlay.err.Error(), "idle")
-	assert.Zero(t, controller.newCalls)
-}
-
-func TestSessionOverlayFiltersAndResumes(t *testing.T) {
-	t.Parallel()
-
-	controller := newOverlayController(readyState())
-	controller.sessions = []session.Metadata{
-		{ID: "alpha", CreatedAt: time.Unix(1, 0).UTC()},
-		{ID: "beta", CreatedAt: time.Unix(2, 0).UTC()},
-	}
-	model := readyModelWithController(t, controller, true)
-	command := model.openOverlay(overlaySession)
-	model.Update(command())
-	model.overlay.query = "1970"
-	require.Len(t, model.filteredSessions(), 2)
-	model.overlay.query = ""
-	model.Update(tea.KeyPressMsg{Text: "bet"})
-	require.Len(t, model.filteredSessions(), 1)
-
-	_, command = model.Update(key("enter"))
-	require.NotNil(t, command)
-	model.Update(command())
-	assert.Equal(t, []string{"beta"}, controller.resumed)
-	assert.Equal(t, "beta", model.state.SessionID)
-	assert.Equal(t, overlayNone, model.overlay.kind)
-}
-
-func TestControlOverlayAcceptsOnlyOneSubmission(t *testing.T) {
-	t.Parallel()
-
-	controller := newOverlayController(readyState())
-	controller.sessions = []session.Metadata{{ID: "alpha", CreatedAt: time.Unix(1, 0).UTC()}}
-	model := readyModelWithController(t, controller, true)
-	load := model.openOverlay(overlaySession)
-	model.Update(load())
-
-	_, command := model.Update(key("enter"))
-	require.NotNil(t, command)
-	_, duplicate := model.Update(key("enter"))
-	assert.Nil(t, duplicate)
-	assert.True(t, model.overlay.controlling)
-
-	model.Update(command())
-	assert.Equal(t, []string{"alpha"}, controller.resumed)
-}
-
 func TestModelOverlayAppliesTypedProcessSelection(t *testing.T) {
 	t.Parallel()
 
@@ -208,6 +147,19 @@ func TestStatusOverlayShowsOnlyRequestOutputLimit(t *testing.T) {
 	assert.Contains(t, content, "Context:")
 	assert.Contains(t, content, "Request output:")
 	assert.NotContains(t, content, "Model output:")
+}
+
+func TestHelpExplainsMouseSelectionAndWheelScrolling(t *testing.T) {
+	t.Parallel()
+
+	model := readyModel(t, true)
+	model.openOverlay(overlayHelp)
+	content := model.overlayContent()
+
+	assert.Contains(t, content, "terminal owns conversation history")
+	assert.Contains(t, content, "drag normally to select and copy text")
+	assert.NotContains(t, content, "PgUp/PgDown/End")
+	assert.NotContains(t, content, "/mouse")
 }
 
 func TestTreeOverlayFiltersNavigatesWithSummaryAndForks(t *testing.T) {

@@ -79,6 +79,33 @@ func TestReduceReturnsDefensiveState(t *testing.T) {
 	assert.Equal(t, "working", snapshotText.Text)
 }
 
+func TestStateIsSessionProvisional(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		state State
+		want  bool
+	}{
+		{name: "empty", state: State{}, want: true},
+		{
+			name:  "interaction journal",
+			state: State{Interaction: InteractionState{ID: "interaction-1"}},
+		},
+		{name: "legacy transcript", state: State{Transcript: []ai.Message{ai.UserText("hello")}}},
+		{name: "durable tree", state: State{Tree: SessionTree{TotalNodes: 1}}},
+		{name: "bounded tree node", state: State{Tree: SessionTree{Nodes: []SessionNode{{ID: "node-1"}}}}},
+		{name: "tree leaf", state: State{Tree: SessionTree{LeafID: "node-1"}}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, test.want, test.state.IsSessionProvisional())
+		})
+	}
+}
+
 func TestReduceSessionTreeAndCompactionLifecycle(t *testing.T) {
 	t.Parallel()
 

@@ -4,11 +4,13 @@ package tui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"iter"
 	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding"
@@ -31,8 +33,8 @@ func TestTrustDefaultsToDenyAndBootstrapsSelection(t *testing.T) {
 	})
 
 	view := model.View()
-	assert.True(t, view.AltScreen)
-	assert.Equal(t, tea.MouseModeCellMotion, view.MouseMode)
+	assert.False(t, view.AltScreen)
+	assert.Equal(t, tea.MouseModeNone, view.MouseMode)
 	assert.Contains(t, view.Content, "  Allow")
 	assert.Contains(t, view.Content, "> Deny")
 	assert.NotContains(t, view.Content, "Selected:")
@@ -43,7 +45,8 @@ func TestTrustDefaultsToDenyAndBootstrapsSelection(t *testing.T) {
 	result := command()
 	updated, command = model.Update(result)
 	require.Same(t, model, updated)
-	assert.Nil(t, command)
+	require.NotNil(t, command)
+	assert.Contains(t, driveModelCommandsCapture(t, model, command), "Pips")
 	assert.Equal(t, []bool{false}, decisions)
 	assert.Contains(t, model.View().Content, "openai/test-model")
 }
@@ -148,30 +151,162 @@ func TestReadyLayoutSupportsResizeMultilineAndNoColor(t *testing.T) {
 	model.setLayout()
 	view := model.View()
 
-	assert.Equal(t, 40, model.viewport.Width())
 	assert.GreaterOrEqual(t, model.composer.Height(), 3)
 	assert.LessOrEqual(t, model.composer.Height(), composerMaxLines)
-	assert.True(t, view.AltScreen)
-	assert.Equal(t, tea.MouseModeCellMotion, view.MouseMode)
+	assert.False(t, view.AltScreen)
+	assert.Equal(t, tea.MouseModeNone, view.MouseMode)
 	assert.NotContains(t, view.Content, "\x1b[")
+	assert.Equal(t, 2, strings.Count(view.Content, strings.Repeat("-", 40)))
+	assert.NotContains(t, view.Content, "ctrl+j newline")
+	assert.Equal(t, 1, strings.Count(view.Content, inputArrow))
+	lines := strings.Split(view.Content, "\n")
+	for index := range lines {
+		lines[index] = strings.TrimRight(lines[index], " ")
+	}
+	assert.Contains(t, lines, inputArrow+" one")
+	assert.Contains(t, lines, "  two")
+	assert.Contains(t, lines, "  three")
+	require.NotNil(t, view.Cursor)
+	composerLine := lineContaining(lines, inputArrow+" one")
+	require.NotEqual(t, -1, composerLine)
+	assert.Equal(t, composerLine+model.composer.Cursor().Y, view.Cursor.Y)
+	assert.Equal(t, strings.Repeat("-", 40), lines[composerLine-1])
+	assert.Empty(t, lines[composerLine-2])
 }
 
-func TestReadyOnlyMouseWheelChangesTranscriptScroll(t *testing.T) {
+func TestReadyStatusLineUsesProvisionalLabelAndStyledSegments(t *testing.T) {
+	t.Parallel()
+
+	model := readyModel(t, false)
+	status := model.statusLine()
+	assert.Equal(t, "workspace  ·  new  ·  openai/test-model  ·  idle", ansi.Strip(status))
+	assert.Contains(t, status, "\x1b[")
+
+	model.state.Interaction.ID = "interaction-1"
+	assert.Contains(t, ansi.Strip(model.statusLine()), "session-1")
+	assert.NotContains(t, ansi.Strip(model.statusLine()), " ·  new  · ")
+}
+
+func TestReadyComposerUsesArrowWithoutPlaceholder(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, inputPromptWidth, ansi.StringWidth(inputArrow)+1)
+
+	model := readyModel(t, false)
+	styles := model.composer.Styles()
+	palette := paletteFor(themeDark)
+	assert.Equal(t, palette.composerPrompt, styles.Focused.Prompt.GetForeground())
+	assert.Empty(t, model.composer.Placeholder)
+
+	view := ansi.Strip(model.composer.View())
+	assert.NotContains(t, view, "Ask Pips")
+	assert.Contains(t, view, inputArrow)
+	assert.Equal(t, 1, strings.Count(view, inputArrow))
+}
+
+func TestReadyLongCompletionMarkerStaysVisibleAtBottom(t *testing.T) {
+	t.Parallel()
+
+	model := readyModel(t, true)
+	model.Update(tea.WindowSizeMsg{Width: 40, Height: 12})
+	model.state.Transcript = []ai.Message{
+		ai.UserText("explain it"),
+		ai.AssistantText(strings.Repeat("long response line\n\n", 20)),
+	}
+	model.renderTranscript(true)
+	model.recordCompletion(coding.Event{
+		InteractionID: "interaction-1",
+		Type:          coding.EventInteractionCompleted,
+		Payload: coding.InteractionCompleted{
+			Outcome: coding.InteractionSucceeded, DurationMillis: 7_000,
+		},
+	})
+	model.renderTranscript(false)
+
+	assert.Contains(t, model.View().Content, "[✻ Worked for 7s]")
+}
+
+func TestReadyBoundsLongLiveTailToTerminalHeight(t *testing.T) {
+	t.Parallel()
+
+	model := readyModel(t, true)
+	model.Update(tea.WindowSizeMsg{Width: 40, Height: 12})
+	model.state.Phase = coding.PhaseRunning
+	model.state.Interaction.Active = true
+	lines := make([]string, 30)
+	for index := range lines {
+		lines[index] = fmt.Sprintf("stream line %02d", index)
+	}
+	model.state.Draft = []coding.MessageDelta{{
+		Kind: ai.StreamTextDelta,
+		Text: strings.Join(lines, "\n"),
+	}}
+	model.rerenderTranscript(false)
+
+	view := model.View()
+	assert.LessOrEqual(t, lipgloss.Height(view.Content), model.height)
+	assert.Contains(t, ansi.Strip(view.Content), "stream line 29")
+	assert.NotContains(t, ansi.Strip(view.Content), "stream line 00")
+	require.NotNil(t, view.Cursor)
+	assert.Less(t, view.Cursor.Y, model.height)
+
+	model.state.Transcript = []ai.Message{ai.AssistantText(strings.Join(lines, "\n"))}
+	model.state.Draft = nil
+	committed := model.takeStableTimeline()
+	assert.Contains(t, committed, "stream line 00")
+	assert.Contains(t, committed, "stream line 29")
+}
+
+func TestReadyRecordsCompletionMarkerOnceAndClearsInvalidAnchors(t *testing.T) {
+	t.Parallel()
+
+	model := readyModel(t, true)
+	model.state.Transcript = []ai.Message{
+		ai.UserText("question"),
+		ai.AssistantText("answer"),
+	}
+	event := coding.Event{
+		InteractionID: "interaction-1",
+		Type:          coding.EventInteractionCompleted,
+		Payload: coding.InteractionCompleted{
+			Outcome: coding.InteractionSucceeded, DurationMillis: 7_000,
+		},
+	}
+	model.recordCompletion(event)
+	model.recordCompletion(event)
+
+	require.Len(t, model.completionMarkers, 1)
+	rendered := renderTimeline(
+		model.timelineBlocks(), model.markdown, 80, themeDark, true,
+	)
+	assert.Equal(t, 1, strings.Count(rendered, "[✻ Worked for 7s]"))
+
+	model.recordCompletion(coding.Event{Type: coding.EventSessionNavigated})
+	assert.Empty(t, model.completionMarkers)
+
+	for index := range maxCompletionMarkers + 1 {
+		bounded := event
+		bounded.InteractionID = fmt.Sprintf("interaction-%d", index)
+		model.recordCompletion(bounded)
+	}
+	require.Len(t, model.completionMarkers, maxCompletionMarkers)
+	assert.Equal(t, "interaction-1", model.completionMarkers[0].interactionID)
+
+	model.expanded["tool-1"] = true
+	model.Update(controlResultMsg{operation: operationNew})
+	assert.Empty(t, model.completionMarkers)
+	assert.Empty(t, model.expanded)
+}
+
+func TestReadyLeavesSelectionAndScrollbackToTerminal(t *testing.T) {
 	t.Parallel()
 
 	model := readyModel(t, false)
 	model.Update(tea.WindowSizeMsg{Width: 30, Height: 8})
-	for index := range 30 {
-		model.state.Transcript = append(
-			model.state.Transcript,
-			ai.UserText(strings.Repeat("line ", index+1)),
-		)
-	}
-	model.renderTranscript(true)
-	require.True(t, model.viewport.AtBottom())
+	assert.False(t, model.View().AltScreen)
+	assert.Equal(t, tea.MouseModeNone, model.View().MouseMode)
 
 	before := model.composer.Value()
-	beforeOffset := model.viewport.YOffset()
 	ignored := []tea.MouseMsg{
 		tea.MouseClickMsg{X: 3, Y: 3, Button: tea.MouseLeft},
 		tea.MouseReleaseMsg{X: 3, Y: 3, Button: tea.MouseLeft},
@@ -181,14 +316,20 @@ func TestReadyOnlyMouseWheelChangesTranscriptScroll(t *testing.T) {
 		updated, command := model.Update(message)
 		require.Same(t, model, updated)
 		assert.Nil(t, command)
-		assert.Equal(t, beforeOffset, model.viewport.YOffset())
 		assert.Equal(t, before, model.composer.Value())
 	}
 
 	updated, command := model.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
 	require.Same(t, model, updated)
 	assert.Nil(t, command)
-	assert.Less(t, model.viewport.YOffset(), beforeOffset)
+
+	model.composer.SetValue("first\nsecond")
+	model.setLayout()
+	require.Equal(t, 1, model.composer.Line())
+	updated, command = model.Update(tea.KeyPressMsg{Code: tea.KeyUp})
+	require.Same(t, model, updated)
+	assert.Nil(t, command)
+	assert.Equal(t, 0, model.composer.Line())
 }
 
 func TestReadyCoalescesRenderTicks(t *testing.T) {
@@ -205,7 +346,7 @@ func TestReadyCoalescesRenderTicks(t *testing.T) {
 	assert.NotNil(t, model.requestRender())
 }
 
-func TestReadyScrollingDoesNotForceBottom(t *testing.T) {
+func TestReadyCommitsLongHistoryOutsideManagedView(t *testing.T) {
 	t.Parallel()
 
 	model := readyModel(t, true)
@@ -215,19 +356,12 @@ func TestReadyScrollingDoesNotForceBottom(t *testing.T) {
 		messages = append(messages, ai.UserText(strings.Repeat("line ", index+1)))
 	}
 	model.state.Transcript = messages
-	model.renderTranscript(true)
-	require.True(t, model.viewport.AtBottom())
-	model.viewport.PageUp()
-	require.False(t, model.viewport.AtBottom())
+	committed := model.takeStableTimeline()
+	model.rerenderTranscript(false)
 
-	model.state.Transcript = append(model.state.Transcript, ai.Assistant(ai.Text("new")))
-	model.renderTranscript(false)
-	assert.False(t, model.viewport.AtBottom())
-	assert.Equal(t, 1, model.unseen)
-
-	model.Update(tea.KeyPressMsg{Code: tea.KeyEnd})
-	assert.True(t, model.viewport.AtBottom())
-	assert.Zero(t, model.unseen)
+	assert.Contains(t, committed, "line ")
+	assert.NotContains(t, model.View().Content, "line ")
+	assert.NotContains(t, ansi.Strip(model.statusLine()), " new")
 }
 
 func TestReadyPromptUsesOneBridgeAndFinishes(t *testing.T) {
@@ -239,10 +373,7 @@ func TestReadyPromptUsesOneBridgeAndFinishes(t *testing.T) {
 
 	_, start := model.Update(key("enter"))
 	require.NotNil(t, start)
-	_, wait := model.Update(start())
-	require.NotNil(t, wait)
-	_, command := model.Update(wait())
-	assert.Nil(t, command)
+	driveModelCommands(t, model, start)
 	assert.Nil(t, model.bridge)
 	require.Len(t, controller.prompts, 1)
 	assert.Equal(t, "hello", visibleMessageText(controller.prompts[0]))
@@ -311,7 +442,10 @@ func TestStartingBridgeCancellationWaitsForLateBridge(t *testing.T) {
 	})
 	_, stop := model.Update(bridgeStartedMsg{bridge: late})
 	require.NotNil(t, stop)
-	model.Update(stop())
+	commands, ok := stop().(tea.BatchMsg)
+	require.True(t, ok)
+	require.NotEmpty(t, commands)
+	model.Update(commands[0]())
 	assert.Nil(t, model.bridge)
 	assert.False(t, model.starting)
 	assert.False(t, model.cancelStart)
@@ -369,10 +503,13 @@ func TestReadyRunningCtrlCCancelsAndWaitsForBridge(t *testing.T) {
 
 	_, cancel := model.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	require.NotNil(t, cancel)
+	assert.True(t, model.canceling)
+	assert.Contains(t, model.View().Content, "Interrupting…")
 	model.Update(cancel())
 	assert.Equal(t, 1, controller.canceled)
 	assert.Nil(t, model.bridge)
 	assert.False(t, model.waiting)
+	assert.False(t, model.canceling)
 	assert.Equal(t, coding.PhaseIdle, model.state.Phase)
 }
 
@@ -401,11 +538,23 @@ func TestReadyToolDetailsToggleNeverShowsReasoning(t *testing.T) {
 	model := readyModelWithController(t, stubController{state: state}, true)
 	assert.NotContains(t, model.View().Content, "visible result")
 
-	model.Update(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
-	assert.Contains(t, model.View().Content, "visible result")
-	assert.NotContains(t, model.View().Content, secret)
-	model.Update(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
-	assert.NotContains(t, model.View().Content, "visible result")
+	_, command := model.Update(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
+	require.NotNil(t, command)
+	assert.True(t, model.expanded["call-1"])
+	detail := renderTimelineContent(
+		model.expandTimelineBlocks(
+			[]timelineBlock{projectTool(state.Tools[0])},
+			state.Tools,
+		),
+		model.markdown,
+		model.width,
+		model.theme,
+		model.options.NoColor,
+	)
+	assert.Contains(t, detail, "visible result")
+	assert.NotContains(t, detail, secret)
+	_, command = model.Update(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
+	assert.Nil(t, command)
 }
 
 func readyModel(t *testing.T, noColor bool) *Model {
