@@ -56,10 +56,11 @@ type JSONLPrefix struct {
 // memory, so reads never touch the file after opening. A file expects a
 // single process and a single writing Session.
 type JSONLStore struct {
-	mu      sync.Mutex
-	meta    SessionMetadata
-	entries []Entry
-	file    *os.File
+	mu       sync.Mutex
+	meta     SessionMetadata
+	entries  []Entry
+	file     *os.File
+	identity os.FileInfo
 }
 
 // CreateJSONL creates a new session file at path (parent directories
@@ -77,6 +78,13 @@ func CreateJSONL(path, id string, extra map[string]string) (*JSONLStore, error) 
 	if err != nil {
 		return nil, fmt.Errorf("harness: create session file: %w", err)
 	}
+	identity, err := file.Stat()
+	if err != nil {
+		return nil, errors.Join(
+			fmt.Errorf("harness: inspect created session file: %w", err),
+			file.Close(),
+		)
+	}
 
 	header := jsonlHeader{
 		Type:      jsonlHeaderType,
@@ -87,12 +95,12 @@ func CreateJSONL(path, id string, extra map[string]string) (*JSONLStore, error) 
 	}
 
 	store := &JSONLStore{
-		meta: SessionMetadata{ID: header.ID, CreatedAt: header.CreatedAt, Path: path, Extra: extra},
-		file: file,
+		meta:     SessionMetadata{ID: header.ID, CreatedAt: header.CreatedAt, Path: path, Extra: extra},
+		file:     file,
+		identity: identity,
 	}
 	if err := store.writeLine(header); err != nil {
 		_ = file.Close()
-		_ = os.Remove(path)
 		return nil, err
 	}
 
@@ -104,25 +112,23 @@ func CreateJSONL(path, id string, extra map[string]string) (*JSONLStore, error) 
 //
 //nolint:gocyclo // Bounded read, strict decode, validation, and append-open form one audit boundary.
 func OpenJSONL(path string) (*JSONLStore, error) {
-	info, err := os.Stat(path)
+	file, info, err := openRegularJSONL(path, os.O_RDWR|os.O_APPEND)
 	if err != nil {
-		return nil, fmt.Errorf("harness: inspect session file: %w", err)
+		return nil, fmt.Errorf("harness: open session file: %w", err)
 	}
+	keepOpen := false
+	defer func() {
+		if !keepOpen {
+			_ = file.Close()
+		}
+	}()
 	if info.Size() > maxSessionFileSize {
 		return nil, fmt.Errorf("harness: %s: session file exceeds %d bytes", path, maxSessionFileSize)
 	}
 
-	file, err := os.Open(path) //nolint:gosec // caller-chosen session path is the API
-	if err != nil {
-		return nil, fmt.Errorf("harness: open session file: %w", err)
-	}
 	data, err := io.ReadAll(io.LimitReader(file, maxSessionFileSize+1))
-	closeErr := file.Close()
 	if err != nil {
 		return nil, fmt.Errorf("harness: read session file: %w", err)
-	}
-	if closeErr != nil {
-		return nil, fmt.Errorf("harness: close session file: %w", closeErr)
 	}
 	if len(data) > maxSessionFileSize {
 		return nil, fmt.Errorf("harness: %s: session file exceeds %d bytes", path, maxSessionFileSize)
@@ -162,16 +168,15 @@ func OpenJSONL(path string) (*JSONLStore, error) {
 		entries = append(entries, fromEnvelope(env))
 	}
 
-	file, err = os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // caller-chosen session path is the API
-	if err != nil {
-		return nil, fmt.Errorf("harness: open session file for append: %w", err)
+	store := &JSONLStore{
+		meta:     SessionMetadata{ID: header.ID, CreatedAt: header.CreatedAt, Path: path, Extra: mapsClone(header.Extra)},
+		entries:  cloneEntries(entries),
+		file:     file,
+		identity: info,
 	}
+	keepOpen = true
 
-	return &JSONLStore{
-		meta:    SessionMetadata{ID: header.ID, CreatedAt: header.CreatedAt, Path: path, Extra: mapsClone(header.Extra)},
-		entries: cloneEntries(entries),
-		file:    file,
-	}, nil
+	return store, nil
 }
 
 // Metadata implements [Store].
@@ -216,6 +221,10 @@ func (s *JSONLStore) Close() error {
 }
 
 func (s *JSONLStore) writeLine(v any) error {
+	if err := s.ensurePathIdentityLocked(); err != nil {
+		return err
+	}
+
 	blob, err := json.Marshal(v)
 	if err != nil {
 		return fmt.Errorf("harness: encode session line: %w", err)
@@ -231,6 +240,27 @@ func (s *JSONLStore) writeLine(v any) error {
 	}
 	if err := s.file.Sync(); err != nil {
 		return fmt.Errorf("harness: sync session line: %w", err)
+	}
+
+	return nil
+}
+
+func (s *JSONLStore) ensurePathIdentityLocked() error {
+	if s.file == nil || s.identity == nil {
+		return errors.New("harness: session store is closed")
+	}
+
+	opened, err := s.file.Stat()
+	if err != nil {
+		return fmt.Errorf("harness: inspect open session file: %w", err)
+	}
+	current, err := os.Lstat(s.meta.Path)
+	if err != nil {
+		return fmt.Errorf("harness: inspect session path before append: %w", err)
+	}
+	if !opened.Mode().IsRegular() || !current.Mode().IsRegular() ||
+		!os.SameFile(s.identity, opened) || !os.SameFile(s.identity, current) {
+		return fmt.Errorf("harness: session path no longer identifies the opened regular file: %s", s.meta.Path)
 	}
 
 	return nil
@@ -280,7 +310,7 @@ func mapsClone(value map[string]string) map[string]string {
 // ReadJSONLMetadata reads and validates only the bounded header line. It does
 // not open an append handle or scan conversation entries.
 func ReadJSONLMetadata(path string) (SessionMetadata, error) {
-	file, err := os.Open(path) //nolint:gosec // caller-chosen session path is the API
+	file, _, err := openRegularJSONL(path, os.O_RDONLY)
 	if err != nil {
 		return SessionMetadata{}, fmt.Errorf("harness: open session metadata: %w", err)
 	}
@@ -325,16 +355,11 @@ func ReadJSONLPrefix(path string, limits JSONLPrefixLimits) (JSONLPrefix, error)
 		limits.MaxEntries = maxSessionEntries
 	}
 
-	file, err := os.Open(path) //nolint:gosec // caller-chosen session path is the API
+	file, info, err := openRegularJSONL(path, os.O_RDONLY)
 	if err != nil {
 		return JSONLPrefix{}, fmt.Errorf("harness: open session prefix: %w", err)
 	}
 	defer file.Close() //nolint:errcheck // read-only descriptor
-
-	info, err := file.Stat()
-	if err != nil {
-		return JSONLPrefix{}, fmt.Errorf("harness: inspect session prefix: %w", err)
-	}
 	if info.Size() > maxSessionFileSize {
 		return JSONLPrefix{}, fmt.Errorf(
 			"harness: %s: session file exceeds %d bytes", path, maxSessionFileSize,
@@ -481,7 +506,7 @@ func (r Repo) List() ([]SessionMetadata, error) {
 	var metas []SessionMetadata
 
 	for _, item := range items {
-		if item.IsDir() || !strings.HasSuffix(item.Name(), jsonlExt) {
+		if item.IsDir() || item.Type()&os.ModeSymlink != 0 || !strings.HasSuffix(item.Name(), jsonlExt) {
 			continue
 		}
 
@@ -494,6 +519,38 @@ func (r Repo) List() ([]SessionMetadata, error) {
 	}
 
 	return metas, nil
+}
+
+func openRegularJSONL(path string, flags int) (*os.File, os.FileInfo, error) {
+	before, err := os.Lstat(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !before.Mode().IsRegular() {
+		return nil, nil, fmt.Errorf("session path is not a regular file: %s", path)
+	}
+
+	file, err := os.OpenFile(path, flags, 0) //nolint:gosec // caller-chosen session path is the API
+	if err != nil {
+		return nil, nil, err
+	}
+	opened, err := file.Stat()
+	if err != nil {
+		return nil, nil, errors.Join(err, file.Close())
+	}
+	current, err := os.Lstat(path)
+	if err != nil {
+		return nil, nil, errors.Join(err, file.Close())
+	}
+	if !opened.Mode().IsRegular() || !current.Mode().IsRegular() ||
+		!os.SameFile(before, opened) || !os.SameFile(opened, current) {
+		return nil, nil, errors.Join(
+			fmt.Errorf("session path changed while opening regular file: %s", path),
+			file.Close(),
+		)
+	}
+
+	return file, opened, nil
 }
 
 // Delete removes the stored session with the given id.

@@ -1,0 +1,48 @@
+name: Quality
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Go quality and security
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Test
+        run: go test ./...
+      - name: Race-test Agent and Coding
+        run: go test -race ./agent/... ./internal/coding/...
+      - name: Provider adapter and scripted smoke
+        run: make provider-smoke
+      - name: Vet
+        run: go vet ./...
+      - name: Lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
+          args: ./...
+      - name: Build
+        run: go build ./...
+      - name: Verify modules
+        run: go mod verify
+      - name: Audit reachable vulnerabilities
+        run: go tool govulncheck ./...
+      - name: Check core dependency direction
+        run: make deps-check

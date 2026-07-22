@@ -213,3 +213,29 @@ func TestRepositoryRejectsInsecureDirectoryAndLock(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "do not follow", string(content))
 }
+
+func TestRepositoryRejectsInsecureSessionFileMode(t *testing.T) {
+	t.Parallel()
+
+	for _, mode := range []os.FileMode{0o640, 0o644} {
+		t.Run(mode.String(), func(t *testing.T) {
+			t.Parallel()
+
+			repo, err := session.NewRepository(filepath.Join(t.TempDir(), "sessions"))
+			require.NoError(t, err)
+			handle, err := repo.Create(t.Context(), session.CreateOptions{WorkspaceID: "workspace-key"})
+			require.NoError(t, err)
+			id := handle.Metadata().ID
+			path := handle.Metadata().Path
+			require.NoError(t, handle.Close())
+			require.NoError(t, os.Chmod(path, mode))
+
+			_, err = repo.Open(t.Context(), session.OpenOptions{
+				ID: id, WorkspaceID: "workspace-key",
+			})
+			require.ErrorIs(t, err, session.ErrInvalid)
+			_, err = repo.List(t.Context())
+			require.ErrorIs(t, err, session.ErrInvalid)
+		})
+	}
+}
