@@ -13,6 +13,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding"
 	"github.com/rsbin/pips/internal/coding/approval"
@@ -22,7 +23,19 @@ import (
 	"github.com/rsbin/pips/internal/coding/session"
 )
 
-const controllerCloseTimeout = 10 * time.Second
+const (
+	controllerCloseTimeout   = 10 * time.Second
+	resetTerminalInteraction = "\x1b[?1007l" +
+		ansi.ResetModeMouseX10 +
+		ansi.ResetModeMouseNormal +
+		ansi.ResetModeMouseHighlight +
+		ansi.ResetModeMouseButtonEvent +
+		ansi.ResetModeMouseAnyEvent +
+		ansi.ResetModeMouseExtUtf8 +
+		ansi.ResetModeMouseExtSgr +
+		ansi.ResetModeMouseExtUrxvt +
+		ansi.ResetModeMouseExtSgrPixel
+)
 
 var errInvalidOptions = errors.New("coding tui: invalid options")
 
@@ -101,6 +114,16 @@ func Run(ctx context.Context, options Options) (returnErr error) {
 		return err
 	}
 
+	if err := resetTerminalModes(options.Output); err != nil {
+		return fmt.Errorf("coding tui: reset terminal interaction modes: %w", err)
+	}
+	terminalRestored := false
+	defer func() {
+		if !terminalRestored {
+			returnErr = errors.Join(returnErr, resetTerminalModes(options.Output))
+		}
+	}()
+
 	var owned struct {
 		sync.Mutex
 		controller Controller
@@ -130,6 +153,13 @@ func Run(ctx context.Context, options Options) (returnErr error) {
 
 	_, runErr := program.Run()
 	returnErr = runErr
+	if resetErr := resetTerminalModes(options.Output); resetErr != nil {
+		retryErr := resetTerminalModes(options.Output)
+		returnErr = errors.Join(returnErr, resetErr, retryErr)
+		terminalRestored = retryErr == nil
+	} else {
+		terminalRestored = true
+	}
 	cleanupCtx, cleanupCancel := context.WithTimeout(
 		context.WithoutCancel(ctx),
 		controllerCloseTimeout,
@@ -142,6 +172,22 @@ func Run(ctx context.Context, options Options) (returnErr error) {
 	returnErr = errors.Join(returnErr, closeController(ctx, controller))
 
 	return returnErr
+}
+
+func resetTerminalModes(output io.Writer) error {
+	return writeTerminalControl(output, resetTerminalInteraction)
+}
+
+func writeTerminalControl(output io.Writer, sequence string) error {
+	written, err := io.WriteString(output, sequence)
+	if err != nil {
+		return err
+	}
+	if written != len(sequence) {
+		return io.ErrShortWrite
+	}
+
+	return nil
 }
 
 func validateOptions(options Options) error {

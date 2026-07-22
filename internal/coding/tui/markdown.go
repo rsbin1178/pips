@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"charm.land/glamour/v2"
+	glamouransi "charm.land/glamour/v2/ansi"
 	"charm.land/glamour/v2/styles"
 )
 
@@ -73,16 +74,8 @@ func (r *markdownRenderer) render(
 		return entry.value, nil
 	}
 
-	style := styles.DarkStyle
-	if theme == themeLight {
-		style = styles.LightStyle
-	}
-	if noColor {
-		style = styles.AsciiStyle
-	}
-
 	renderer, err := glamour.NewTermRenderer(
-		glamour.WithStandardStyle(style),
+		glamour.WithStyles(markdownStyle(theme, noColor)),
 		glamour.WithWordWrap(width),
 	)
 	if err != nil {
@@ -93,10 +86,30 @@ func (r *markdownRenderer) render(
 	if err != nil {
 		return content, fmt.Errorf("coding tui: render markdown: %w", err)
 	}
-	rendered = strings.TrimRight(rendered, "\n")
+	rendered = strings.Trim(rendered, "\n")
 	r.insert(markdownEntry{key: key, value: rendered})
 
 	return rendered, nil
+}
+
+func markdownStyle(theme colorTheme, noColor bool) glamouransi.StyleConfig {
+	style := styles.DarkStyleConfig
+	if theme == themeLight {
+		style = styles.LightStyleConfig
+	}
+	if noColor {
+		style = styles.ASCIIStyleConfig
+	}
+
+	style.H1.Prefix = ""
+	style.H1.Suffix = ""
+	style.H2.Prefix = ""
+	style.H3.Prefix = ""
+	style.H4.Prefix = ""
+	style.H5.Prefix = ""
+	style.H6.Prefix = ""
+
+	return style
 }
 
 func (r *markdownRenderer) insert(entry markdownEntry) {

@@ -595,7 +595,7 @@ func (c *Controller) replace(
 	}
 
 	targetID := sessionID
-	if isModelSwitch {
+	if isModelSwitch && !current.state.IsSessionProvisional() {
 		targetID = current.sessionID
 	}
 
@@ -723,11 +723,15 @@ func (c *Controller) rollback(
 ) error {
 	restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), runtimeCloseTimeout)
 	defer cancel()
+	restoreID := previous.sessionID
+	if previous.state.IsSessionProvisional() {
+		restoreID = ""
+	}
 
 	restored, state, err := openRuntime(
 		restoreCtx,
 		c.deps.openRuntime,
-		openOptions(c.base, previous.config, previous.resolved, previous.model, previous.sessionID),
+		openOptions(c.base, previous.config, previous.resolved, previous.model, restoreID),
 	)
 	if err != nil {
 		previous.runtime = nil

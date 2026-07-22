@@ -7,7 +7,6 @@ import (
 	"bytes"
 	"io"
 	"os"
-	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -107,8 +106,7 @@ func testInteractiveSignal(t *testing.T, signal os.Signal, code int) {
 	}
 
 	value := output.String()
-	enter := strings.Index(value, "\x1b[?1049h")
-	exit := strings.LastIndex(value, "\x1b[?1049l")
-	assert.GreaterOrEqual(t, enter, 0)
-	assert.Greater(t, exit, enter)
+	assert.NotContains(t, value, "\x1b[?1049h")
+	assert.Contains(t, value, "\x1b[?1007l")
+	assert.NotContains(t, value, "\x1b[?1007h")
 }

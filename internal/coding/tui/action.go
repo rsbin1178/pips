@@ -35,9 +35,6 @@ const (
 	actionCommand    actionID = "command"
 	actionHelp       actionID = "help"
 	actionToggleTool actionID = "toggle_tool"
-	actionScrollUp   actionID = "scroll_up"
-	actionScrollDown actionID = "scroll_down"
-	actionBottom     actionID = "bottom"
 	actionCancel     actionID = "cancel"
 )
 
@@ -84,24 +81,6 @@ var defaultActions = []actionBinding{
 		Contexts: []actionContext{contextIdle, contextRunning, contextPaused},
 		Keys:     []string{"ctrl+t"},
 		Label:    "tool details",
-	},
-	{
-		ID:       actionScrollUp,
-		Contexts: []actionContext{contextIdle, contextRunning, contextPaused},
-		Keys:     []string{"pgup"},
-		Label:    "scroll up",
-	},
-	{
-		ID:       actionScrollDown,
-		Contexts: []actionContext{contextIdle, contextRunning, contextPaused},
-		Keys:     []string{"pgdown"},
-		Label:    "scroll down",
-	},
-	{
-		ID:       actionBottom,
-		Contexts: []actionContext{contextIdle, contextRunning, contextPaused},
-		Keys:     []string{"end"},
-		Label:    "latest",
 	},
 	{
 		ID:       actionCancel,

@@ -88,26 +88,70 @@ func TestRepositoryCreateOpenListAndLock(t *testing.T) {
 	assert.NotEmpty(t, meta.ID)
 	assert.Equal(t, "workspace-key", meta.WorkspaceID)
 	assert.NotNil(t, handle.Session())
+	_, err = os.Stat(meta.Path)
+	require.ErrorIs(t, err, os.ErrNotExist)
+
+	metas, err := repo.List(t.Context())
+	require.NoError(t, err)
+	assert.Empty(t, metas)
 
 	_, err = repo.Open(t.Context(), session.OpenOptions{ID: meta.ID, WorkspaceID: "workspace-key"})
 	require.Error(t, err)
 	require.ErrorIs(t, err, session.ErrLocked)
 
-	metas, err := repo.List(t.Context())
+	_, err = handle.Session().AppendCustom("test.started", nil)
+	require.NoError(t, err)
+	info, err := os.Stat(meta.Path)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+
+	metas, err = repo.List(t.Context())
 	require.NoError(t, err)
 	require.Len(t, metas, 1)
-	assert.Equal(t, meta, metas[0])
+	assert.Equal(t, meta.ID, metas[0].ID)
+	assert.Equal(t, meta.WorkspaceID, metas[0].WorkspaceID)
 
 	require.NoError(t, handle.Close())
 	require.NoError(t, handle.Close())
 
 	reopened, err := repo.Open(t.Context(), session.OpenOptions{ID: meta.ID, WorkspaceID: "workspace-key"})
 	require.NoError(t, err)
+	entries := reopened.Session().Entries()
+	require.Len(t, entries, 1)
+	assert.Equal(t, harness.KindCustom, entries[0].Kind)
 	require.NoError(t, reopened.Close())
 
 	lockInfo, err := os.Stat(filepath.Join(repo.Dir(), meta.ID+".lock"))
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0o600), lockInfo.Mode().Perm())
+}
+
+func TestRepositoryCloseProvisionalDoesNotPersist(t *testing.T) {
+	t.Parallel()
+
+	repo, err := session.NewRepository(filepath.Join(t.TempDir(), "sessions"))
+	require.NoError(t, err)
+	handle, err := repo.Create(t.Context(), session.CreateOptions{WorkspaceID: "workspace-key"})
+	require.NoError(t, err)
+	meta := handle.Metadata()
+
+	_, err = repo.Fork(t.Context(), handle, session.ForkOptions{})
+	require.ErrorIs(t, err, session.ErrInvalid)
+	require.NoError(t, handle.Close())
+	require.NoError(t, handle.Close())
+	_, err = os.Stat(meta.Path)
+	require.ErrorIs(t, err, os.ErrNotExist)
+
+	metas, err := repo.List(t.Context())
+	require.NoError(t, err)
+	assert.Empty(t, metas)
+	_, err = repo.Open(t.Context(), session.OpenOptions{
+		ID: meta.ID, WorkspaceID: "workspace-key",
+	})
+	require.Error(t, err)
+	require.NotErrorIs(t, err, session.ErrLocked)
+	_, err = handle.Session().AppendCustom("test.started", nil)
+	require.Error(t, err)
 }
 
 func TestRepositoryRejectsWorkspaceMismatchAndReleasesLock(t *testing.T) {
@@ -121,6 +165,8 @@ func TestRepositoryRejectsWorkspaceMismatchAndReleasesLock(t *testing.T) {
 	require.NoError(t, err)
 
 	id := handle.Metadata().ID
+	_, err = handle.Session().AppendCustom("test.started", nil)
+	require.NoError(t, err)
 	require.NoError(t, handle.Close())
 
 	_, err = repo.Open(t.Context(), session.OpenOptions{ID: id, WorkspaceID: "workspace-two"})
@@ -172,7 +218,16 @@ func TestRepositoryIgnoresLegacyModelMetadata(t *testing.T) {
 		"pips.coding.model_id":     "legacy-model",
 	})
 	require.NoError(t, err)
+	legacySession, err := harness.NewSession(legacy)
+	require.NoError(t, err)
+	_, err = legacySession.AppendModelChange("anthropic", "legacy-model")
+	require.NoError(t, err)
 	require.NoError(t, legacy.Close())
+	empty, err := (harness.Repo{Dir: repo.Dir()}).Create("empty", map[string]string{
+		"pips.coding.workspace_id": "workspace-key",
+	})
+	require.NoError(t, err)
+	require.NoError(t, empty.Close())
 
 	handle, err := repo.Open(t.Context(), session.OpenOptions{
 		ID:          "legacy",
@@ -186,7 +241,8 @@ func TestRepositoryIgnoresLegacyModelMetadata(t *testing.T) {
 	metas, err := repo.List(t.Context())
 	require.NoError(t, err)
 	require.Len(t, metas, 1)
-	assert.Equal(t, handle.Metadata(), metas[0])
+	assert.Equal(t, handle.Metadata().ID, metas[0].ID)
+	assert.Equal(t, handle.Metadata().WorkspaceID, metas[0].WorkspaceID)
 }
 
 func TestRepositoryRejectsInsecureDirectoryAndLock(t *testing.T) {
@@ -227,6 +283,8 @@ func TestRepositoryRejectsInsecureSessionFileMode(t *testing.T) {
 			require.NoError(t, err)
 			id := handle.Metadata().ID
 			path := handle.Metadata().Path
+			_, err = handle.Session().AppendCustom("test.started", nil)
+			require.NoError(t, err)
 			require.NoError(t, handle.Close())
 			require.NoError(t, os.Chmod(path, mode))
 
