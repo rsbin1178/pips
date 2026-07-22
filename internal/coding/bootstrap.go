@@ -1,3 +1,4 @@
+//nolint:wsl_v5 // Durable replay steps intentionally remain in append order.
 package coding
 
 import (
@@ -14,6 +15,7 @@ type BootstrapOptions struct {
 	ModelID             string
 	Path                []harness.Entry
 	HasPendingToolCalls bool
+	Tree                harness.TreeSnapshot
 }
 
 // BootstrapResult contains restart state and the interaction journal projection.
@@ -52,6 +54,12 @@ func BootstrapState(options BootstrapOptions) (BootstrapResult, error) {
 		SessionID: options.SessionID, SessionOpen: true,
 		Provider: options.Provider, ModelID: options.ModelID, Phase: PhaseIdle,
 	}
+	if options.Tree.SessionID != "" {
+		state.Tree, err = sessionTreeFromHarness(options.Tree)
+		if err != nil || state.Tree.SessionID != options.SessionID || validateSessionTree(state.Tree) != nil {
+			return BootstrapResult{}, protocolError("invalid durable session tree")
+		}
+	}
 	for _, entry := range options.Path {
 		switch entry.Kind {
 		case harness.KindMessage:
@@ -67,9 +75,17 @@ func BootstrapState(options BootstrapOptions) (BootstrapResult, error) {
 			}
 		case harness.KindCompaction, harness.KindBranchSummary, harness.KindCustom,
 			harness.KindLabel, harness.KindName, harness.KindLeaf:
+			if entry.Kind == harness.KindCompaction {
+				state.Compaction = CompactionState{
+					TokensBefore: entry.TokensBefore, FirstKeptID: entry.FirstKeptID,
+				}
+			}
 		default:
 			return BootstrapResult{}, protocolError("unknown Harness entry kind %q", entry.Kind)
 		}
+	}
+	if len(state.Transcript) > maxEventItems {
+		state.Transcript = state.Transcript[len(state.Transcript)-maxEventItems:]
 	}
 
 	if recovery.LastID != "" {

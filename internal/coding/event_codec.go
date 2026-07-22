@@ -1,3 +1,4 @@
+//nolint:wsl_v5 // Strict nested decode steps intentionally stay adjacent.
 package coding
 
 import (
@@ -124,6 +125,16 @@ func decodeEventPayload(eventType EventType, data []byte) (EventPayload, error) 
 		return decodePayload[SessionOpened](data)
 	case EventSessionClosed:
 		return decodePayload[SessionClosed](data)
+	case EventSessionTreeChanged:
+		return decodePayload[SessionTreeChanged](data)
+	case EventSessionNavigated:
+		return decodePayload[SessionNavigated](data)
+	case EventSessionForked:
+		return decodePayload[SessionForked](data)
+	case EventCompactionStarted:
+		return decodePayload[CompactionStarted](data)
+	case EventCompactionCompleted:
+		return decodePayload[CompactionCompleted](data)
 	case EventInteractionStarted:
 		return decodePayload[InteractionStarted](data)
 	case EventInteractionCompleted:
@@ -180,6 +191,21 @@ func strictDecode(data []byte, target any) error {
 
 func validateNestedPayloadJSON(eventType EventType, data []byte) error {
 	switch eventType {
+	case EventSessionTreeChanged:
+		var payload struct {
+			Tree       SessionTree       `json:"tree"`
+			Transcript []json.RawMessage `json:"transcript"`
+		}
+		if err := strictDecode(data, &payload); err != nil {
+			return err
+		}
+		for _, message := range payload.Transcript {
+			if err := validateStrictMessageJSON(message); err != nil {
+				return err
+			}
+		}
+
+		return nil
 	case EventMessageCommitted:
 		var payload struct {
 			Message json.RawMessage `json:"message"`

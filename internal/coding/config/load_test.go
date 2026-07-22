@@ -23,6 +23,12 @@ variant = "balanced"
 reasoning = "medium"
 tool_search = true
 
+[compaction]
+enabled = true
+reserve_tokens = 32768
+keep_recent_tokens = 24000
+summary_max_tokens = 4096
+
 [providers.local]
 protocol = "openai/chat_completions"
 base_url = "http://127.0.0.1:11434/v1"
@@ -84,6 +90,9 @@ max_output_tokens = 8192
 	assert.Equal(t, 8192, *result.Config.Models[0].Variants["balanced"].Options.MaxOutputTokens)
 	assert.Equal(t, 16000, result.Config.Models[0].ReasoningBudgets["high"])
 	assert.Equal(t, openai.StreamUsageOmit, *result.Config.Models[0].Compatibility.StreamUsage)
+	assert.Equal(t, config.CompactionConfig{
+		Enabled: true, ReserveTokens: 32768, KeepRecentTokens: 24000, SummaryMaxTokens: 4096,
+	}, result.Config.Compaction)
 	assert.Equal(
 		t,
 		openai.MaxTokensFieldLegacy,
@@ -228,6 +237,8 @@ func TestLoadRejectsLegacyAndInvalidConfiguration(t *testing.T) {
 			want:    config.ErrMigration, wantText: "under request",
 		},
 		{name: "unknown top level", content: "api_key = \"secret\"\n", want: config.ErrDecode},
+		{name: "unknown compaction", content: "[compaction]\ntypo = true\n", want: config.ErrDecode},
+		{name: "invalid compaction", content: "[compaction]\nsummary_max_tokens = 30000\n", want: config.ErrInvalid},
 		{name: "unknown request", content: "[providers.openai.models.gpt.request]\ntypo = true\n", want: config.ErrDecode},
 		{name: "duplicate nested model", content: "[providers.openai.models.gpt]\n[providers.openai.models.gpt]\n", want: config.ErrDecode},
 		{name: "multiple defaults", content: "[providers.openai.models.one]\ndefault = true\n[providers.openai.models.two]\ndefault = true\n", want: config.ErrInvalid},

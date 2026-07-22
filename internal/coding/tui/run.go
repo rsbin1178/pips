@@ -54,6 +54,10 @@ type Controller interface {
 	Prompt(context.Context, ...ai.Message) iter.Seq2[coding.Event, error]
 	Continue(context.Context) iter.Seq2[coding.Event, error]
 	Resolve(context.Context, approval.Resolution) iter.Seq2[coding.Event, error]
+	Tree(context.Context) (coding.SessionTree, error)
+	PreviewCompaction(context.Context) (coding.CompactionPreview, error)
+	Navigate(context.Context, string, bool) iter.Seq2[coding.Event, error]
+	Compact(context.Context, coding.CompactionRequest) iter.Seq2[coding.Event, error]
 	Steer(...ai.Message) error
 	FollowUp(...ai.Message) error
 	Cancel() error
@@ -67,6 +71,7 @@ type Controller interface {
 	ListSessions(context.Context) ([]session.Metadata, error)
 	NewSession(context.Context) error
 	ResumeSession(context.Context, string) error
+	ForkSession(context.Context, string) error
 	SwitchModel(context.Context, modelcatalog.Selection) error
 	Close(context.Context) error
 }

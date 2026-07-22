@@ -1,3 +1,4 @@
+//nolint:wsl_v5 // Privacy projection steps intentionally stay adjacent per payload.
 package coding
 
 import (
@@ -117,6 +118,16 @@ func projectSafePayload(payload EventPayload) EventPayload {
 	case WorkspaceChanged:
 		value.Diff = ""
 		return value
+	case SessionTreeChanged:
+		value.Tree.Name = ""
+		for index := range value.Tree.Nodes {
+			value.Tree.Nodes[index].Label = ""
+		}
+		for index := range value.Transcript {
+			value.Transcript[index] = safeMessage(value.Transcript[index])
+		}
+
+		return value
 	case IntegrationDiagnostic:
 		value.Message = ""
 		return value
@@ -175,6 +186,10 @@ type TelemetryEvent struct {
 	Code           string             `json:"code,omitempty"`
 	Turns          int                `json:"turns,omitempty"`
 	Changes        int                `json:"changes,omitempty"`
+	Nodes          int                `json:"nodes,omitempty"`
+	CompactionMode CompactionMode     `json:"compaction_mode,omitempty"`
+	TokensBefore   int                `json:"tokens_before,omitempty"`
+	TokensAfter    int                `json:"tokens_after,omitempty"`
 	DurationMillis int64              `json:"duration_ms,omitempty"`
 	Usage          TokenUsage         `json:"usage"`
 	Resumed        bool               `json:"resumed,omitempty"`
@@ -197,6 +212,20 @@ func Telemetry(event Event) (TelemetryEvent, error) {
 		projected.Resumed = value.Resumed
 	case SessionClosed:
 		projected.Code = string(value.Reason)
+	case SessionTreeChanged:
+		projected.Nodes = len(value.Tree.Nodes)
+	case SessionNavigated:
+		projected.Code = "navigated"
+	case SessionForked:
+		projected.Code = "forked"
+	case CompactionStarted:
+		projected.CompactionMode = value.Mode
+		projected.TokensBefore = value.Preview.EstimatedTokens
+	case CompactionCompleted:
+		projected.CompactionMode = value.Mode
+		projected.TokensBefore = value.TokensBefore
+		projected.TokensAfter = value.TokensAfter
+		projected.DurationMillis = value.DurationMillis
 	case InteractionStarted:
 		projected.Resumed = value.Resumed
 	case InteractionCompleted:

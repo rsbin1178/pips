@@ -1,3 +1,4 @@
+//nolint:wsl_v5 // Store-before-memory transaction steps intentionally stay adjacent.
 package harness
 
 import (
@@ -32,6 +33,10 @@ func NewSession(store Store) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
+	entries = cloneEntries(entries)
+	if err := validateEntries(entries); err != nil {
+		return nil, err
+	}
 
 	s := &Session{store: store, entries: entries, byID: make(map[string]int, len(entries))}
 
@@ -51,7 +56,7 @@ func NewSession(store Store) (*Session, error) {
 
 // Metadata identifies the underlying stored session.
 func (s *Session) Metadata() SessionMetadata {
-	return s.store.Metadata()
+	return cloneMetadata(s.store.Metadata())
 }
 
 // LeafID returns the active tree position ("" when at the root).
@@ -67,7 +72,7 @@ func (s *Session) Entries() []Entry {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	return slices.Clone(s.entries)
+	return cloneEntries(s.entries)
 }
 
 // Entry returns the entry with the given ID.
@@ -80,7 +85,7 @@ func (s *Session) Entry(id string) (Entry, bool) {
 		return Entry{}, false
 	}
 
-	return s.entries[idx], true
+	return cloneEntry(s.entries[idx]), true
 }
 
 // Path returns the active branch in conversation order: the entries from the
@@ -91,7 +96,7 @@ func (s *Session) Path() []Entry {
 
 	path, _ := s.pathLocked(s.leaf)
 
-	return path
+	return cloneEntries(path)
 }
 
 // pathFrom returns the branch ending at the given entry.
@@ -99,7 +104,9 @@ func (s *Session) pathFrom(id string) ([]Entry, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	return s.pathLocked(id)
+	path, err := s.pathLocked(id)
+
+	return cloneEntries(path), err
 }
 
 func (s *Session) pathLocked(id string) ([]Entry, error) {
@@ -129,14 +136,22 @@ func (s *Session) append(e Entry) (string, error) {
 }
 
 func (s *Session) appendLocked(e Entry) (string, error) {
+	return s.appendUnderLocked(s.leaf, e)
+}
+
+func (s *Session) appendUnderLocked(parentID string, e Entry) (string, error) {
 	e.ID = newID()
-	e.ParentID = s.leaf
+	e.ParentID = parentID
 	e.Time = time.Now().UTC()
+	if err := validateEntryPayload(e); err != nil {
+		return "", fmt.Errorf("%w: %w", ErrInvalidEntry, err)
+	}
 
 	if err := s.store.Append(e); err != nil {
 		return "", err
 	}
 
+	e = cloneEntry(e)
 	s.byID[e.ID] = len(s.entries)
 	s.entries = append(s.entries, e)
 
@@ -153,7 +168,7 @@ func (s *Session) appendLocked(e Entry) (string, error) {
 // accounting (recorded for assistant messages so compaction can estimate
 // context size from provider counts).
 func (s *Session) AppendMessage(msg ai.Message, usage *ai.Usage) (string, error) {
-	m := msg
+	m := cloneMessage(msg)
 	return s.append(Entry{Kind: KindMessage, Message: &m, Usage: usage})
 }
 
@@ -171,6 +186,9 @@ func (s *Session) AppendCompaction(summary, firstKeptID string, tokensBefore int
 	if _, ok := s.byID[firstKeptID]; !ok {
 		return "", fmt.Errorf("%w: %s", ErrEntryNotFound, firstKeptID)
 	}
+	if !s.ancestorLocked(firstKeptID, s.leaf) {
+		return "", fmt.Errorf("%w: compaction boundary %s is not on the active path", ErrInvalidEntry, firstKeptID)
+	}
 
 	return s.appendLocked(Entry{
 		Kind:         KindCompaction,
@@ -182,7 +200,7 @@ func (s *Session) AppendCompaction(summary, firstKeptID string, tokensBefore int
 
 // AppendCustom records application data; it never enters model context.
 func (s *Session) AppendCustom(customType string, data ai.JSON) (string, error) {
-	return s.append(Entry{Kind: KindCustom, Custom: customType, Data: data})
+	return s.append(Entry{Kind: KindCustom, Custom: customType, Data: slices.Clone(data)})
 }
 
 // SetLabel attaches a label to the target entry; an empty label clears it.
@@ -204,21 +222,7 @@ func (s *Session) Labels() map[string]string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	labels := make(map[string]string)
-
-	for _, e := range s.entries {
-		if e.Kind != KindLabel {
-			continue
-		}
-
-		if e.Label == "" {
-			delete(labels, e.TargetID)
-		} else {
-			labels[e.TargetID] = e.Label
-		}
-	}
-
-	return labels
+	return labelsFromEntries(s.entries)
 }
 
 // SetName records the session's human-readable name.
@@ -232,15 +236,7 @@ func (s *Session) Name() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	name := ""
-
-	for _, e := range s.entries {
-		if e.Kind == KindName {
-			name = e.Name
-		}
-	}
-
-	return name
+	return nameFromEntries(s.entries)
 }
 
 // MoveTo re-points the leaf to the given entry ("" for the root), branching
@@ -259,22 +255,37 @@ func (s *Session) MoveTo(entryID, summary string) error {
 		}
 	}
 
-	if _, err := s.appendLocked(Entry{Kind: KindLeaf, LeafID: entryID}); err != nil {
-		return err
-	}
-
 	if summary == "" {
-		return nil
+		_, err := s.appendLocked(Entry{Kind: KindLeaf, LeafID: entryID})
+
+		return err
 	}
 
 	from := oldLeaf
 	if from == "" {
-		from = "root"
+		from = rootEntryID
 	}
 
-	_, err := s.appendLocked(Entry{Kind: KindBranchSummary, Summary: summary, FromID: from})
+	_, err := s.appendUnderLocked(entryID, Entry{
+		Kind: KindBranchSummary, Summary: summary, FromID: from,
+	})
 
 	return err
+}
+
+func (s *Session) ancestorLocked(ancestor, leaf string) bool {
+	for remaining := len(s.entries) + 1; leaf != "" && remaining > 0; remaining-- {
+		if leaf == ancestor {
+			return true
+		}
+		index, ok := s.byID[leaf]
+		if !ok {
+			return false
+		}
+		leaf = s.entries[index].ParentID
+	}
+
+	return false
 }
 
 // CommonAncestor returns the deepest entry present on both branches ending
@@ -344,7 +355,7 @@ func (s *Session) Context() (Context, error) {
 	for _, e := range contextEntries(path) {
 		switch e.Kind {
 		case KindMessage:
-			out.Messages = append(out.Messages, *e.Message)
+			out.Messages = append(out.Messages, cloneMessage(*e.Message))
 		case KindCompaction:
 			out.Messages = append(out.Messages, ai.UserText(CompactionPrefix+e.Summary))
 		case KindBranchSummary:

@@ -21,11 +21,23 @@ func TestDefaults(t *testing.T) {
 	assert.False(t, cfg.ToolSearch)
 	assert.Equal(t, config.SandboxWorkspaceWrite, cfg.Sandbox)
 	assert.Equal(t, config.ApprovalOnRequest, cfg.Approval)
+	assert.Equal(t, config.DefaultCompactionConfig(), cfg.Compaction)
 	for _, field := range config.Fields() {
 		source, ok := cfg.Source(field)
 		require.True(t, ok)
 		assert.Equal(t, config.SourceDefault, source.Kind)
 	}
+}
+
+func TestValidateCompactionConfig(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Defaults()
+	cfg.Model = config.ModelRef{Provider: ai.ProviderOpenAI, Model: "gpt"}
+	require.NoError(t, cfg.ValidateRuntime())
+
+	cfg.Compaction.SummaryMaxTokens = cfg.Compaction.KeepRecentTokens + 1
+	require.ErrorIs(t, cfg.ValidateRuntime(), config.ErrInvalid)
 }
 
 func TestParseModelRef(t *testing.T) {
