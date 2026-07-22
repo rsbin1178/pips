@@ -1,7 +1,9 @@
 package coding
 
 import (
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/rsbin/pips/agent/harness"
 	"github.com/rsbin/pips/ai"
@@ -34,4 +36,39 @@ func TestBootstrapStateRejectsInvalidCustomProviderMetadata(t *testing.T) {
 		SessionID: "session-1", Provider: "OpenCode", ModelID: "model",
 	})
 	require.ErrorIs(t, err, ErrInvalidEvent)
+}
+
+func TestBootstrapStateRebuildsBoundedTranscriptTreeAndCompaction(t *testing.T) {
+	t.Parallel()
+
+	path := make([]harness.Entry, 0, maxEventItems+6)
+	for index := range maxEventItems + 5 {
+		message := ai.UserText(fmt.Sprintf("message-%d", index))
+		path = append(path, harness.Entry{
+			Kind: harness.KindMessage, ID: fmt.Sprintf("entry-%d", index), Message: &message,
+		})
+	}
+
+	path = append(path, harness.Entry{
+		Kind: harness.KindCompaction, ID: "compact", Summary: "summary",
+		FirstKeptID: "entry-4090", TokensBefore: 9000,
+	})
+	tree := harness.TreeSnapshot{
+		SessionID: "session-1", LeafID: "compact", TotalNodes: 1,
+		Nodes: []harness.TreeNode{{
+			ID: "compact", Kind: harness.KindCompaction, CreatedAt: time.Now().UTC(),
+			Current: true, OnActivePath: true, HasSummary: true, Compacted: true,
+		}},
+	}
+
+	result, err := BootstrapState(BootstrapOptions{
+		SessionID: "session-1", Provider: ai.ProviderOpenAI, ModelID: "gpt-test",
+		Path: path, Tree: tree,
+	})
+	require.NoError(t, err)
+	require.Len(t, result.State.Transcript, maxEventItems)
+	assert.Equal(t, ai.UserText("message-5"), result.State.Transcript[0])
+	assert.Equal(t, tree.LeafID, result.State.Tree.LeafID)
+	assert.Equal(t, 9000, result.State.Compaction.TokensBefore)
+	assert.Equal(t, "entry-4090", result.State.Compaction.FirstKeptID)
 }

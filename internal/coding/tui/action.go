@@ -11,12 +11,13 @@ import (
 type actionContext string
 
 const (
-	keyEnter  = "enter"
-	keyTab    = "tab"
-	keyCtrlC  = "ctrl+c"
-	keyEscape = "esc"
-	keyDown   = "down"
-	appTitle  = "Pips"
+	keyEnter     = "enter"
+	keyTab       = "tab"
+	keyCtrlC     = "ctrl+c"
+	keyEscape    = "esc"
+	keyDown      = "down"
+	keyBackspace = "backspace"
+	appTitle     = "Pips"
 )
 
 const (

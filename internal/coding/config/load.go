@@ -71,9 +71,10 @@ type Result struct {
 }
 
 type fileLayer struct {
-	patch     Patch
-	providers map[ai.Provider]ProviderConfig
-	models    []ModelConfig
+	patch      Patch
+	providers  map[ai.Provider]ProviderConfig
+	models     []ModelConfig
+	compaction *CompactionConfig
 }
 
 // Load resolves one configuration snapshot in increasing precedence order.
@@ -98,6 +99,9 @@ func Load(options LoadOptions) (Result, error) {
 		})
 		result.Config.Providers = layer.providers
 		result.Config.Models = layer.models
+		if layer.compaction != nil {
+			result.Config.Compaction = *layer.compaction
+		}
 	}
 
 	if err := applyEnvironment(&result.Config, options.LookupEnv); err != nil {
@@ -120,6 +124,14 @@ type fileConfig struct {
 	ToolSearch *bool                   `toml:"tool_search"`
 	Sandbox    *string                 `toml:"sandbox"`
 	Approval   *string                 `toml:"approval"`
+	Compaction *fileCompaction         `toml:"compaction"`
+}
+
+type fileCompaction struct {
+	Enabled          *bool `toml:"enabled"`
+	ReserveTokens    *int  `toml:"reserve_tokens"`
+	KeepRecentTokens *int  `toml:"keep_recent_tokens"`
+	SummaryMaxTokens *int  `toml:"summary_max_tokens"`
 }
 
 type fileProvider struct {
@@ -421,11 +433,30 @@ func hasLegacyRequestField(values map[string]any) bool {
 	return false
 }
 
-//nolint:gocyclo // Strict TOML presence is translated field by field.
+//nolint:gocyclo,nestif // Strict TOML presence is translated field by field.
 func decodeLayer(value fileConfig) (fileLayer, error) {
 	layer := fileLayer{
 		providers: make(map[ai.Provider]ProviderConfig, len(value.Providers)),
 		models:    []ModelConfig{},
+	}
+	if value.Compaction != nil {
+		compaction := DefaultCompactionConfig()
+		if value.Compaction.Enabled != nil {
+			compaction.Enabled = *value.Compaction.Enabled
+		}
+		if value.Compaction.ReserveTokens != nil {
+			compaction.ReserveTokens = *value.Compaction.ReserveTokens
+		}
+		if value.Compaction.KeepRecentTokens != nil {
+			compaction.KeepRecentTokens = *value.Compaction.KeepRecentTokens
+		}
+		if value.Compaction.SummaryMaxTokens != nil {
+			compaction.SummaryMaxTokens = *value.Compaction.SummaryMaxTokens
+		}
+		if err := validateCompaction(compaction); err != nil {
+			return fileLayer{}, err
+		}
+		layer.compaction = &compaction
 	}
 	if value.Variant != nil {
 		variant, err := ParseVariant(*value.Variant)

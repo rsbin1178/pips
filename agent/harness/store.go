@@ -1,7 +1,8 @@
+//nolint:wsl_v5 // Metadata normalization and ownership steps intentionally stay adjacent.
 package harness
 
 import (
-	"slices"
+	"maps"
 	"sync"
 	"time"
 )
@@ -49,7 +50,7 @@ func NewMemoryStore(id string) *MemoryStore {
 
 // Metadata implements [Store].
 func (m *MemoryStore) Metadata() SessionMetadata {
-	return m.meta
+	return cloneMetadata(m.meta)
 }
 
 // Append implements [Store].
@@ -57,7 +58,7 @@ func (m *MemoryStore) Append(e Entry) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.entries = append(m.entries, e)
+	m.entries = append(m.entries, cloneEntry(e))
 
 	return nil
 }
@@ -67,5 +68,20 @@ func (m *MemoryStore) Entries() ([]Entry, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	return slices.Clone(m.entries), nil
+	return cloneEntries(m.entries), nil
+}
+
+// NewMemoryStoreWithMetadata returns an empty in-memory store with explicit
+// metadata. It is useful for applications that need lineage on ephemeral
+// sessions while preserving [NewMemoryStore]'s compact constructor.
+func NewMemoryStoreWithMetadata(metadata SessionMetadata) *MemoryStore {
+	if metadata.ID == "" {
+		metadata.ID = newID()
+	}
+	if metadata.CreatedAt.IsZero() {
+		metadata.CreatedAt = time.Now().UTC()
+	}
+	metadata.Extra = maps.Clone(metadata.Extra)
+
+	return &MemoryStore{meta: metadata}
 }

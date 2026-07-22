@@ -11,6 +11,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/rsbin/pips/agent/harness"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/ai/openai"
 )
@@ -300,6 +301,25 @@ type ModelConfig struct {
 	Variants              map[string]VariantConfig
 }
 
+// CompactionConfig controls context compaction. Capacity comes from the
+// selected model; these values only describe product policy and budgets.
+type CompactionConfig struct {
+	Enabled          bool
+	ReserveTokens    int
+	KeepRecentTokens int
+	SummaryMaxTokens int
+}
+
+// DefaultCompactionConfig returns the safe product defaults.
+func DefaultCompactionConfig() CompactionConfig {
+	return CompactionConfig{
+		Enabled:          true,
+		ReserveTokens:    harness.DefaultCompactionReserveTokens,
+		KeepRecentTokens: harness.DefaultCompactionKeepRecentTokens,
+		SummaryMaxTokens: harness.DefaultCompactionSummaryTokens,
+	}
+}
+
 // Clone returns a fully detached model definition.
 func (m ModelConfig) Clone() ModelConfig {
 	cloned := m
@@ -333,6 +353,7 @@ type Config struct {
 	ToolSearch bool
 	Sandbox    SandboxMode
 	Approval   ApprovalMode
+	Compaction CompactionConfig
 
 	sources map[Field]Source
 }
@@ -359,10 +380,11 @@ func Defaults() Config {
 	}
 
 	return Config{
-		Providers: map[ai.Provider]ProviderConfig{},
-		Sandbox:   SandboxWorkspaceWrite,
-		Approval:  ApprovalOnRequest,
-		sources:   sources,
+		Providers:  map[ai.Provider]ProviderConfig{},
+		Sandbox:    SandboxWorkspaceWrite,
+		Approval:   ApprovalOnRequest,
+		Compaction: DefaultCompactionConfig(),
+		sources:    sources,
 	}
 }
 
@@ -417,8 +439,32 @@ func (c Config) ValidateRuntime() error {
 	if err := validateApproval(c.Approval); err != nil {
 		return err
 	}
+	if err := validateCompaction(c.Compaction); err != nil {
+		return err
+	}
 
 	return validateRegistry(c)
+}
+
+func validateCompaction(value CompactionConfig) error {
+	if !value.Enabled && value.ReserveTokens == 0 && value.KeepRecentTokens == 0 &&
+		value.SummaryMaxTokens == 0 {
+		return nil
+	}
+	if value.ReserveTokens <= 0 || value.KeepRecentTokens <= 0 || value.SummaryMaxTokens <= 0 {
+		return fmt.Errorf(
+			"%w: compaction token budgets must be positive",
+			ErrInvalid,
+		)
+	}
+	if value.SummaryMaxTokens > value.KeepRecentTokens {
+		return fmt.Errorf(
+			"%w: compaction summary_max_tokens cannot exceed keep_recent_tokens",
+			ErrInvalid,
+		)
+	}
+
+	return nil
 }
 
 // ParseProvider parses a stable provider identifier. Custom providers are

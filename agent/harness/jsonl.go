@@ -1,12 +1,16 @@
+//nolint:wsl_v5 // JSONL transaction and rollback stages intentionally stay adjacent.
 package harness
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"maps"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -22,10 +26,30 @@ type jsonlHeader struct {
 }
 
 const (
-	jsonlHeaderType = "harness_session"
-	jsonlVersion    = 1
-	jsonlExt        = ".jsonl"
+	jsonlHeaderType    = "harness_session"
+	jsonlVersion       = 1
+	jsonlExt           = ".jsonl"
+	maxSessionFileSize = 128 << 20
+	maxSessionLineSize = 16 << 20
+	maxSessionEntries  = 100_000
+	defaultPrefixBytes = 2 << 20
+	defaultPrefixItems = 2048
 )
+
+// JSONLPrefixLimits bound the read-only prefix used by session pickers and
+// indexes. Zero values select conservative defaults.
+type JSONLPrefixLimits struct {
+	MaxBytes   int
+	MaxEntries int
+}
+
+// JSONLPrefix is a validated, bounded prefix of one session file. Truncated
+// reports that more durable data exists after Entries.
+type JSONLPrefix struct {
+	Metadata  SessionMetadata
+	Entries   []Entry
+	Truncated bool
+}
 
 // JSONLStore persists a session as a JSON-Lines file: a header line followed
 // by one entry per line, appended as the session grows. Entries are cached in
@@ -68,6 +92,7 @@ func CreateJSONL(path, id string, extra map[string]string) (*JSONLStore, error) 
 	}
 	if err := store.writeLine(header); err != nil {
 		_ = file.Close()
+		_ = os.Remove(path)
 		return nil, err
 	}
 
@@ -76,60 +101,82 @@ func CreateJSONL(path, id string, extra map[string]string) (*JSONLStore, error) 
 
 // OpenJSONL opens an existing session file, validating its header and
 // loading all entries.
+//
+//nolint:gocyclo // Bounded read, strict decode, validation, and append-open form one audit boundary.
 func OpenJSONL(path string) (*JSONLStore, error) {
-	data, err := os.ReadFile(path) //nolint:gosec // caller-chosen session path is the API
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("harness: inspect session file: %w", err)
+	}
+	if info.Size() > maxSessionFileSize {
+		return nil, fmt.Errorf("harness: %s: session file exceeds %d bytes", path, maxSessionFileSize)
+	}
+
+	file, err := os.Open(path) //nolint:gosec // caller-chosen session path is the API
 	if err != nil {
 		return nil, fmt.Errorf("harness: open session file: %w", err)
 	}
+	data, err := io.ReadAll(io.LimitReader(file, maxSessionFileSize+1))
+	closeErr := file.Close()
+	if err != nil {
+		return nil, fmt.Errorf("harness: read session file: %w", err)
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("harness: close session file: %w", closeErr)
+	}
+	if len(data) > maxSessionFileSize {
+		return nil, fmt.Errorf("harness: %s: session file exceeds %d bytes", path, maxSessionFileSize)
+	}
 
-	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
-	if len(lines) == 0 || lines[0] == "" {
+	lines := bytes.Split(bytes.TrimRight(data, "\n"), []byte{'\n'})
+	if len(lines) == 0 || len(lines[0]) == 0 {
 		return nil, fmt.Errorf("harness: %s: empty session file", path)
+	}
+	if len(lines)-1 > maxSessionEntries {
+		return nil, fmt.Errorf("harness: %s: session exceeds %d entries", path, maxSessionEntries)
 	}
 
 	var header jsonlHeader
-	if err := json.Unmarshal([]byte(lines[0]), &header); err != nil {
+	if err := decodeStrictLine(lines[0], &header); err != nil {
 		return nil, fmt.Errorf("harness: %s: invalid session header: %w", path, err)
 	}
-
-	if header.Type != jsonlHeaderType || header.ID == "" {
-		return nil, fmt.Errorf("harness: %s: not a harness session file", path)
-	}
-
-	if header.Version != jsonlVersion {
-		return nil, fmt.Errorf("harness: %s: unsupported session version %d", path, header.Version)
+	if err := validateHeader(path, header); err != nil {
+		return nil, err
 	}
 
 	entries := make([]Entry, 0, len(lines)-1)
 
 	for i, line := range lines[1:] {
-		if line == "" {
+		if len(line) == 0 {
 			continue
+		}
+		if len(line) > maxSessionLineSize {
+			return nil, fmt.Errorf("harness: %s: line %d exceeds %d bytes", path, i+2, maxSessionLineSize)
 		}
 
 		var env entryJSON
-		if err := json.Unmarshal([]byte(line), &env); err != nil {
+		if err := decodeStrictLine(line, &env); err != nil {
 			return nil, fmt.Errorf("harness: %s: line %d: %w", path, i+2, err)
 		}
 
 		entries = append(entries, fromEnvelope(env))
 	}
 
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // caller-chosen session path is the API
+	file, err = os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // caller-chosen session path is the API
 	if err != nil {
 		return nil, fmt.Errorf("harness: open session file for append: %w", err)
 	}
 
 	return &JSONLStore{
-		meta:    SessionMetadata{ID: header.ID, CreatedAt: header.CreatedAt, Path: path, Extra: header.Extra},
-		entries: entries,
+		meta:    SessionMetadata{ID: header.ID, CreatedAt: header.CreatedAt, Path: path, Extra: mapsClone(header.Extra)},
+		entries: cloneEntries(entries),
 		file:    file,
 	}, nil
 }
 
 // Metadata implements [Store].
 func (s *JSONLStore) Metadata() SessionMetadata {
-	return s.meta
+	return cloneMetadata(s.meta)
 }
 
 // Append implements [Store], writing the entry through to disk.
@@ -141,7 +188,7 @@ func (s *JSONLStore) Append(e Entry) error {
 		return err
 	}
 
-	s.entries = append(s.entries, e)
+	s.entries = append(s.entries, cloneEntry(e))
 
 	return nil
 }
@@ -151,7 +198,7 @@ func (s *JSONLStore) Entries() ([]Entry, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	return slices.Clone(s.entries), nil
+	return cloneEntries(s.entries), nil
 }
 
 // Close releases the underlying file. The store is unusable afterwards.
@@ -159,7 +206,13 @@ func (s *JSONLStore) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	return s.file.Close()
+	if s.file == nil {
+		return nil
+	}
+	err := s.file.Close()
+	s.file = nil
+
+	return err
 }
 
 func (s *JSONLStore) writeLine(v any) error {
@@ -176,8 +229,211 @@ func (s *JSONLStore) writeLine(v any) error {
 	if err := w.Flush(); err != nil {
 		return fmt.Errorf("harness: write session line: %w", err)
 	}
+	if err := s.file.Sync(); err != nil {
+		return fmt.Errorf("harness: sync session line: %w", err)
+	}
 
 	return nil
+}
+
+func decodeStrictLine(data []byte, target any) error {
+	if len(data) > maxSessionLineSize {
+		return fmt.Errorf("line exceeds %d bytes", maxSessionLineSize)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("multiple JSON values")
+		}
+
+		return err
+	}
+
+	return nil
+}
+
+func validateHeader(path string, header jsonlHeader) error {
+	if header.Type != jsonlHeaderType || header.ID == "" {
+		return fmt.Errorf("harness: %s: not a harness session file", path)
+	}
+	if header.Version != jsonlVersion {
+		return fmt.Errorf("harness: %s: unsupported session version %d", path, header.Version)
+	}
+	if header.CreatedAt.IsZero() {
+		return fmt.Errorf("harness: %s: session header has no creation time", path)
+	}
+	if err := validateSessionID(header.ID); err != nil {
+		return fmt.Errorf("harness: %s: invalid session header: %w", path, err)
+	}
+
+	return nil
+}
+
+func mapsClone(value map[string]string) map[string]string {
+	return maps.Clone(value)
+}
+
+// ReadJSONLMetadata reads and validates only the bounded header line. It does
+// not open an append handle or scan conversation entries.
+func ReadJSONLMetadata(path string) (SessionMetadata, error) {
+	file, err := os.Open(path) //nolint:gosec // caller-chosen session path is the API
+	if err != nil {
+		return SessionMetadata{}, fmt.Errorf("harness: open session metadata: %w", err)
+	}
+	defer file.Close() //nolint:errcheck // read-only descriptor
+
+	reader := bufio.NewReaderSize(io.LimitReader(file, maxSessionLineSize+1), 64<<10)
+	line, err := reader.ReadBytes('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return SessionMetadata{}, fmt.Errorf("harness: read session metadata: %w", err)
+	}
+	line = bytes.TrimSuffix(line, []byte{'\n'})
+	var header jsonlHeader
+	if err := decodeStrictLine(line, &header); err != nil {
+		return SessionMetadata{}, fmt.Errorf("harness: %s: invalid session header: %w", path, err)
+	}
+	if err := validateHeader(path, header); err != nil {
+		return SessionMetadata{}, err
+	}
+
+	return SessionMetadata{
+		ID: header.ID, CreatedAt: header.CreatedAt, Path: path, Extra: mapsClone(header.Extra),
+	}, nil
+}
+
+// ReadJSONLPrefix reads a bounded, validated prefix without opening an append
+// handle. It is intended for list/index projections that must not load an
+// unbounded transcript. A line crossing the byte budget is left unread from
+// the result and sets Truncated instead of being treated as corruption.
+//
+//nolint:gocyclo // Budgeted line reading and sequential graph validation stay explicit.
+func ReadJSONLPrefix(path string, limits JSONLPrefixLimits) (JSONLPrefix, error) {
+	if limits.MaxBytes <= 0 {
+		limits.MaxBytes = defaultPrefixBytes
+	}
+	if limits.MaxEntries <= 0 {
+		limits.MaxEntries = defaultPrefixItems
+	}
+	if limits.MaxBytes > maxSessionFileSize {
+		limits.MaxBytes = maxSessionFileSize
+	}
+	if limits.MaxEntries > maxSessionEntries {
+		limits.MaxEntries = maxSessionEntries
+	}
+
+	file, err := os.Open(path) //nolint:gosec // caller-chosen session path is the API
+	if err != nil {
+		return JSONLPrefix{}, fmt.Errorf("harness: open session prefix: %w", err)
+	}
+	defer file.Close() //nolint:errcheck // read-only descriptor
+
+	info, err := file.Stat()
+	if err != nil {
+		return JSONLPrefix{}, fmt.Errorf("harness: inspect session prefix: %w", err)
+	}
+	if info.Size() > maxSessionFileSize {
+		return JSONLPrefix{}, fmt.Errorf(
+			"harness: %s: session file exceeds %d bytes", path, maxSessionFileSize,
+		)
+	}
+
+	reader := bufio.NewReaderSize(file, 4<<10)
+	headerLine, consumed, complete, err := readBoundedJSONLLine(reader, maxSessionLineSize, maxSessionLineSize)
+	if err != nil {
+		return JSONLPrefix{}, fmt.Errorf("harness: read session prefix: %w", err)
+	}
+	if !complete || len(headerLine) == 0 {
+		return JSONLPrefix{}, fmt.Errorf("harness: %s: empty session file", path)
+	}
+	var header jsonlHeader
+	if err := decodeStrictLine(headerLine, &header); err != nil {
+		return JSONLPrefix{}, fmt.Errorf("harness: %s: invalid session header: %w", path, err)
+	}
+	if err := validateHeader(path, header); err != nil {
+		return JSONLPrefix{}, err
+	}
+
+	result := JSONLPrefix{Metadata: SessionMetadata{
+		ID: header.ID, CreatedAt: header.CreatedAt, Path: path, Extra: mapsClone(header.Extra),
+	}}
+	seen := make(map[string]int, min(limits.MaxEntries, 256))
+	for len(result.Entries) < limits.MaxEntries && consumed < limits.MaxBytes {
+		line, read, lineComplete, readErr := readBoundedJSONLLine(
+			reader, maxSessionLineSize, limits.MaxBytes-consumed,
+		)
+		consumed += read
+		if readErr != nil {
+			return JSONLPrefix{}, fmt.Errorf("harness: read session prefix: %w", readErr)
+		}
+		if !lineComplete {
+			result.Truncated = true
+			break
+		}
+		if len(line) == 0 {
+			if consumed >= int(info.Size()) {
+				break
+			}
+			continue
+		}
+
+		var env entryJSON
+		if err := decodeStrictLine(line, &env); err != nil {
+			return JSONLPrefix{}, fmt.Errorf(
+				"harness: %s: entry %d: %w", path, len(result.Entries)+1, err,
+			)
+		}
+		entry := fromEnvelope(env)
+		if err := validateStoredEntry(entry, seen, result.Entries); err != nil {
+			return JSONLPrefix{}, fmt.Errorf(
+				"%w: entry %d: %w", ErrSessionCorrupt, len(result.Entries)+1, err,
+			)
+		}
+		seen[entry.ID] = len(result.Entries)
+		result.Entries = append(result.Entries, entry)
+	}
+	if consumed < int(info.Size()) {
+		result.Truncated = true
+	}
+	result.Entries = cloneEntries(result.Entries)
+
+	return result, nil
+}
+
+func readBoundedJSONLLine(
+	reader *bufio.Reader,
+	lineLimit int,
+	byteBudget int,
+) ([]byte, int, bool, error) {
+	if byteBudget <= 0 {
+		return nil, 0, false, nil
+	}
+	line := make([]byte, 0, min(byteBudget, 4<<10))
+	consumed := 0
+	for {
+		fragment, err := reader.ReadSlice('\n')
+		consumed += len(fragment)
+		if consumed > byteBudget {
+			return nil, consumed, false, nil
+		}
+		if len(line)+len(fragment) > lineLimit {
+			return nil, consumed, false, fmt.Errorf("line exceeds %d bytes", lineLimit)
+		}
+		line = append(line, fragment...)
+		switch {
+		case err == nil:
+			return bytes.TrimSuffix(line, []byte{'\n'}), consumed, true, nil
+		case errors.Is(err, bufio.ErrBufferFull):
+			continue
+		case errors.Is(err, io.EOF):
+			return line, consumed, true, nil
+		default:
+			return nil, consumed, false, err
+		}
+	}
 }
 
 // Repo manages a directory of JSONL session files, one file per session
@@ -193,12 +449,22 @@ func (r Repo) Create(id string, extra map[string]string) (*JSONLStore, error) {
 		id = newID()
 	}
 
-	return CreateJSONL(filepath.Join(r.Dir, id+jsonlExt), id, extra)
+	path, err := r.sessionPath(id)
+	if err != nil {
+		return nil, err
+	}
+
+	return CreateJSONL(path, id, mapsClone(extra))
 }
 
 // Open opens the stored session with the given id.
 func (r Repo) Open(id string) (*JSONLStore, error) {
-	return OpenJSONL(filepath.Join(r.Dir, id+jsonlExt))
+	path, err := r.sessionPath(id)
+	if err != nil {
+		return nil, err
+	}
+
+	return OpenJSONL(path)
 }
 
 // List returns metadata for every session in the repository directory.
@@ -219,13 +485,12 @@ func (r Repo) List() ([]SessionMetadata, error) {
 			continue
 		}
 
-		store, err := OpenJSONL(filepath.Join(r.Dir, item.Name()))
+		meta, err := ReadJSONLMetadata(filepath.Join(r.Dir, item.Name()))
 		if err != nil {
 			continue // skip foreign or corrupt files
 		}
 
-		metas = append(metas, store.Metadata())
-		_ = store.Close()
+		metas = append(metas, meta)
 	}
 
 	return metas, nil
@@ -233,7 +498,11 @@ func (r Repo) List() ([]SessionMetadata, error) {
 
 // Delete removes the stored session with the given id.
 func (r Repo) Delete(id string) error {
-	if err := os.Remove(filepath.Join(r.Dir, id+jsonlExt)); err != nil {
+	path, err := r.sessionPath(id)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil {
 		return fmt.Errorf("harness: delete session: %w", err)
 	}
 
@@ -255,26 +524,142 @@ func (r Repo) Fork(sourceID, atEntryID, newID string) (*JSONLStore, error) {
 		return nil, err
 	}
 
+	return r.ForkSession(sess, atEntryID, newID, nil)
+}
+
+// ForkSession failure-atomically copies a validated source path into a new
+// stored Session. extra overlays source header metadata; nil preserves it.
+// The source Session remains unchanged and may stay open under its writer lock.
+//
+//nolint:gocyclo // Failure-atomic resource acquisition and cleanup remain in commit order.
+func (r Repo) ForkSession(
+	source *Session,
+	atEntryID string,
+	newID string,
+	extra map[string]string,
+) (*JSONLStore, error) {
+	if source == nil {
+		return nil, errors.New("harness: fork nil session")
+	}
+
 	if atEntryID == "" {
-		atEntryID = sess.LeafID()
+		atEntryID = source.LeafID()
 	}
 
-	path, err := sess.pathFrom(atEntryID)
+	path, err := source.pathFrom(atEntryID)
 	if err != nil {
 		return nil, err
 	}
+	path = normalizeForkPath(path)
 
-	forked, err := r.Create(newID, source.Metadata().Extra)
+	if newID == "" {
+		newID = newIDValue()
+	}
+	targetPath, err := r.sessionPath(newID)
 	if err != nil {
 		return nil, err
 	}
+	if err := os.MkdirAll(r.Dir, 0o750); err != nil {
+		return nil, fmt.Errorf("harness: create session dir: %w", err)
+	}
+	temp, err := os.CreateTemp(r.Dir, ".fork-*.tmp")
+	if err != nil {
+		return nil, err
+	}
+	tempPath := temp.Name()
+	if err := temp.Close(); err != nil {
+		_ = os.Remove(tempPath)
+
+		return nil, err
+	}
+	if err := os.Remove(tempPath); err != nil {
+		return nil, err
+	}
+	metadata := source.Metadata()
+	metadataExtra := metadata.Extra
+	if extra != nil {
+		metadataExtra = mapsClone(metadataExtra)
+		maps.Copy(metadataExtra, extra)
+	}
+	forked, err := CreateJSONL(tempPath, newID, metadataExtra)
+	if err != nil {
+		return nil, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = forked.Close()
+			_ = os.Remove(tempPath)
+		}
+	}()
 
 	for _, entry := range path {
 		if err := forked.Append(entry); err != nil {
-			_ = forked.Close()
 			return nil, err
 		}
 	}
+	if err := forked.Close(); err != nil {
+		return nil, err
+	}
+	if err := os.Link(tempPath, targetPath); err != nil {
+		return nil, fmt.Errorf("harness: commit fork: %w", err)
+	}
+	if err := os.Remove(tempPath); err != nil {
+		_ = os.Remove(targetPath)
 
-	return forked, nil
+		return nil, fmt.Errorf("harness: commit fork cleanup: %w", err)
+	}
+	committed = true
+
+	return OpenJSONL(targetPath)
 }
+
+// normalizeForkPath makes a selected linear branch self-contained. Labels
+// targeting an omitted sibling branch have no effect in the fork and are
+// dropped. Branch summaries keep their content, while an omitted source is
+// represented by the existing root sentinel. Parent links are then rebuilt
+// over the retained entries so later nodes never reference dropped metadata.
+func normalizeForkPath(path []Entry) []Entry {
+	normalized := make([]Entry, 0, len(path))
+	retained := make(map[string]struct{}, len(path))
+	parentID := ""
+	for _, entry := range path {
+		if entry.Kind == KindLabel {
+			if _, ok := retained[entry.TargetID]; !ok {
+				continue
+			}
+		}
+		entry.ParentID = parentID
+		if entry.Kind == KindBranchSummary && entry.FromID != rootEntryID {
+			if _, ok := retained[entry.FromID]; !ok {
+				entry.FromID = rootEntryID
+			}
+		}
+		normalized = append(normalized, entry)
+		retained[entry.ID] = struct{}{}
+		parentID = entry.ID
+	}
+
+	return cloneEntries(normalized)
+}
+
+func (r Repo) sessionPath(id string) (string, error) {
+	if err := validateSessionID(id); err != nil {
+		return "", err
+	}
+
+	return filepath.Join(r.Dir, id+jsonlExt), nil
+}
+
+func validateSessionID(id string) error {
+	if err := validateID("session id", id, false); err != nil {
+		return err
+	}
+	if strings.ContainsAny(id, `/\\`) || id == "." || id == ".." {
+		return fmt.Errorf("harness: invalid session id %q", id)
+	}
+
+	return nil
+}
+
+func newIDValue() string { return newID() }

@@ -1,3 +1,4 @@
+//nolint:wsl_v5 // Closed payload copy branches intentionally stay compact.
 package coding
 
 import (
@@ -19,6 +20,18 @@ func cloneEventPayload(payload EventPayload) EventPayload {
 	case SessionOpened:
 		return value
 	case SessionClosed:
+		return value
+	case SessionTreeChanged:
+		value.Tree = value.Tree.Clone()
+		value.Transcript = cloneMessages(value.Transcript)
+		return value
+	case SessionNavigated:
+		return value
+	case SessionForked:
+		return value
+	case CompactionStarted:
+		return value
+	case CompactionCompleted:
 		return value
 	case InteractionStarted:
 		return value

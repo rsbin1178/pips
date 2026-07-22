@@ -46,6 +46,24 @@ func TestObserverEmitsContentFreeProductSignals(t *testing.T) {
 			Type: coding.EventWorkspaceChanged, Time: at.Add(2 * time.Second), Changes: 2,
 		},
 		{
+			Type: coding.EventSessionTreeChanged, Time: at.Add(2500 * time.Millisecond), Nodes: 4,
+		},
+		{
+			Type: coding.EventSessionNavigated, Time: at.Add(2600 * time.Millisecond), Code: "navigated",
+		},
+		{
+			Type: coding.EventSessionForked, Time: at.Add(2700 * time.Millisecond), Code: "forked",
+		},
+		{
+			Type: coding.EventCompactionStarted, Time: at.Add(2800 * time.Millisecond),
+			CompactionMode: coding.CompactionAutomatic, TokensBefore: 3000,
+		},
+		{
+			Type: coding.EventCompactionCompleted, Time: at.Add(2900 * time.Millisecond),
+			CompactionMode: coding.CompactionAutomatic, TokensBefore: 3000,
+			TokensAfter: 900, DurationMillis: 25,
+		},
+		{
 			Type: coding.EventIntegrationDiagnostic, Time: at.Add(3 * time.Second),
 			Component: "mcp", Code: "connect_failed", Failed: true,
 		},
@@ -74,6 +92,11 @@ func TestObserverEmitsContentFreeProductSignals(t *testing.T) {
 		"coding.session.opened",
 		"coding.approval.required",
 		"coding.workspace.changed",
+		"coding.session.tree.changed",
+		"coding.session.navigated",
+		"coding.session.forked",
+		"coding.compaction.started",
+		"coding.compaction.completed",
 		"coding.integration.diagnostic",
 		"coding.interaction",
 		"coding.session.closed",

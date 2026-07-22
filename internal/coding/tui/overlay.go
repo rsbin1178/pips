@@ -35,6 +35,8 @@ const (
 	overlayCommand
 	overlayHelp
 	overlayStatus
+	overlayTree
+	overlayCompact
 )
 
 type overlayState struct {
@@ -49,12 +51,17 @@ type overlayState struct {
 	selection   modelcatalog.Selection
 	controlling bool
 	offset      int
+	tree        coding.SessionTree
+	preview     coding.CompactionPreview
+	forkMode    bool
 }
 
 type overlayDataMsg struct {
 	kind     overlayKind
 	sessions []session.Metadata
 	err      error
+	tree     coding.SessionTree
+	preview  coding.CompactionPreview
 }
 
 type controlOperation uint8
@@ -64,6 +71,7 @@ const (
 	operationResume
 	operationModel
 	operationReload
+	operationFork
 )
 
 type controlResultMsg struct {
@@ -81,6 +89,9 @@ var commands = []commandDescriptor{
 	{name: "new", description: "start a new session", idleOnly: true},
 	{name: "resume", description: "resume a workspace session", idleOnly: true},
 	{name: "model", description: "switch the process-local model", idleOnly: true},
+	{name: "tree", description: "navigate the current session tree", idleOnly: true},
+	{name: "fork", description: "fork a node into a new session", idleOnly: true},
+	{name: "compact", description: "preview and compact older context", idleOnly: true},
 	{name: "diff", description: "inspect workspace changes"},
 	{name: "reload", description: "reload resources and integrations", idleOnly: true},
 	{name: "status", description: "show runtime status"},
@@ -109,6 +120,22 @@ func (m *Model) openOverlay(kind overlayKind) tea.Cmd {
 				m.overlay.cursor = index
 				break
 			}
+		}
+	case overlayTree:
+		m.overlay.loading = true
+
+		return func() tea.Msg {
+			value, err := m.controller.Tree(m.ctx)
+
+			return overlayDataMsg{kind: overlayTree, tree: value, err: err}
+		}
+	case overlayCompact:
+		m.overlay.loading = true
+
+		return func() tea.Msg {
+			value, err := m.controller.PreviewCompaction(m.ctx)
+
+			return overlayDataMsg{kind: overlayCompact, preview: value, err: err}
 		}
 	case overlayCommand, overlayApproval:
 		m.overlay.cursor = 0
@@ -170,6 +197,10 @@ func (m *Model) updateOverlayKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.updateModelOverlay(message)
 	case overlayCommand:
 		return m.updateCommandOverlay(message)
+	case overlayTree:
+		return m.updateTreeOverlay(message)
+	case overlayCompact:
+		return m.updateCompactOverlay(key)
 	case overlayDiff, overlayHelp, overlayStatus:
 		return m.updateReadOnlyOverlay(key)
 	case overlayNone:
@@ -177,6 +208,63 @@ func (m *Model) updateOverlayKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	default:
 		return m, nil
 	}
+}
+
+func (m *Model) openTreeOverlay(forkMode bool) tea.Cmd {
+	command := m.openOverlay(overlayTree)
+	m.overlay.forkMode = forkMode
+
+	return command
+}
+
+func (m *Model) updateTreeOverlay(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	values := m.filteredTreeNodes()
+	key := message.String()
+	switch key {
+	case "up", "k":
+		m.overlay.cursor = wrapIndex(m.overlay.cursor-1, len(values))
+	case keyDown, "j", keyTab:
+		m.overlay.cursor = wrapIndex(m.overlay.cursor+1, len(values))
+	case keyBackspace:
+		m.overlay.query = trimLastRune(m.overlay.query)
+		m.overlay.cursor = 0
+	case "f":
+		m.overlay.forkMode = true
+	case keyEnter, "s":
+		if len(values) == 0 || m.overlay.loading || m.state.Phase != coding.PhaseIdle {
+			return m, nil
+		}
+		entryID := values[m.overlay.cursor].ID
+		if m.overlay.forkMode {
+			return m, m.runControl(operationFork, entryID, modelcatalog.Selection{})
+		}
+		summarize := key == "s"
+		m.overlay = overlayState{}
+
+		return m, m.startStream(func(ctx context.Context) iter.Seq2[coding.Event, error] {
+			return m.controller.Navigate(ctx, entryID, summarize)
+		})
+	default:
+		if message.Key().Text != "" {
+			m.overlay.query += message.Key().Text
+			m.overlay.cursor = 0
+		}
+	}
+
+	return m, nil
+}
+
+func (m *Model) updateCompactOverlay(key string) (tea.Model, tea.Cmd) {
+	if key != keyEnter || m.overlay.loading || !m.overlay.preview.Available ||
+		m.state.Phase != coding.PhaseIdle {
+		return m, nil
+	}
+	request := coding.CompactionRequest{PreviewToken: m.overlay.preview.Token}
+	m.overlay = overlayState{}
+
+	return m, m.startStream(func(ctx context.Context) iter.Seq2[coding.Event, error] {
+		return m.controller.Compact(ctx, request)
+	})
 }
 
 func (m *Model) updateReadOnlyOverlay(key string) (tea.Model, tea.Cmd) {
@@ -283,7 +371,7 @@ func (m *Model) updateSessionOverlay(message tea.KeyPressMsg) (tea.Model, tea.Cm
 		if m.state.Phase == coding.PhaseIdle {
 			return m, m.runControl(operationNew, "", modelcatalog.Selection{})
 		}
-	case "backspace":
+	case keyBackspace:
 		m.overlay.query = trimLastRune(m.overlay.query)
 		m.overlay.cursor = 0
 	default:
@@ -315,7 +403,7 @@ func (m *Model) updateModelOverlay(message tea.KeyPressMsg) (tea.Model, tea.Cmd)
 	case "ctrl+u":
 		m.overlay.query = ""
 		m.overlay.cursor = 0
-	case "backspace":
+	case keyBackspace:
 		m.overlay.query = trimLastRune(m.overlay.query)
 		m.overlay.cursor = 0
 	case keyEnter:
@@ -379,7 +467,7 @@ func (m *Model) updateCommandOverlay(message tea.KeyPressMsg) (tea.Model, tea.Cm
 		}
 
 		return m.executeCommand(filtered[m.overlay.cursor])
-	case "backspace":
+	case keyBackspace:
 		m.overlay.query = trimLastRune(m.overlay.query)
 		m.overlay.cursor = 0
 	default:
@@ -392,6 +480,7 @@ func (m *Model) updateCommandOverlay(message tea.KeyPressMsg) (tea.Model, tea.Cm
 	return m, nil
 }
 
+//nolint:gocyclo // The closed command inventory is dispatched in one auditable switch.
 func (m *Model) executeCommand(command commandDescriptor) (tea.Model, tea.Cmd) {
 	if command.idleOnly && m.actionContext() != contextIdle {
 		m.overlay.err = fmt.Errorf("/%s is available only while idle", command.name)
@@ -406,6 +495,12 @@ func (m *Model) executeCommand(command commandDescriptor) (tea.Model, tea.Cmd) {
 		return m, m.openOverlay(overlaySession)
 	case "model":
 		return m, m.openOverlay(overlayModel)
+	case "tree":
+		return m, m.openTreeOverlay(false)
+	case "fork":
+		return m, m.openTreeOverlay(true)
+	case "compact":
+		return m, m.openOverlay(overlayCompact)
 	case "diff":
 		return m, m.openOverlay(overlayDiff)
 	case "reload":
@@ -441,6 +536,8 @@ func (m *Model) runControl(
 			err = m.controller.SwitchModel(m.ctx, selected)
 		case operationReload:
 			err = m.controller.Reload(m.ctx)
+		case operationFork:
+			err = m.controller.ForkSession(m.ctx, sessionID)
 		}
 
 		return controlResultMsg{operation: operation, err: err}
@@ -493,8 +590,26 @@ func (m *Model) filteredSessions() []session.Metadata {
 	for _, value := range m.overlay.sessions {
 		created := strings.ToLower(value.CreatedAt.Local().Format(time.DateTime))
 		if query == "" || strings.Contains(strings.ToLower(value.ID), query) ||
-			strings.Contains(created, query) {
+			strings.Contains(created, query) ||
+			strings.Contains(strings.ToLower(value.ParentSessionID), query) ||
+			strings.Contains(strings.ToLower(value.Name), query) ||
+			strings.Contains(strings.ToLower(value.Preview), query) ||
+			strings.Contains(strings.ToLower(value.CurrentLeafID), query) {
 			filtered = append(filtered, value)
+		}
+	}
+
+	return filtered
+}
+
+func (m *Model) filteredTreeNodes() []coding.SessionNode {
+	query := strings.ToLower(strings.TrimSpace(m.overlay.query))
+	filtered := make([]coding.SessionNode, 0, len(m.overlay.tree.Nodes))
+	for _, node := range m.overlay.tree.Nodes {
+		if query == "" || strings.Contains(strings.ToLower(node.ID), query) ||
+			strings.Contains(strings.ToLower(node.Label), query) ||
+			strings.Contains(string(node.Kind), query) {
+			filtered = append(filtered, node)
 		}
 	}
 
@@ -533,6 +648,7 @@ func (m *Model) renderOverlay(base string) string {
 	).Render()
 }
 
+//nolint:gocyclo // The sealed Overlay union renders from one exhaustive dispatcher.
 func (m *Model) overlayContent() string {
 	var content string
 	switch m.overlay.kind {
@@ -556,6 +672,7 @@ func (m *Model) overlayContent() string {
 			"Status\n\nWorkspace: %s\nSession: %s\nModel: %s\n"+
 				"Variant: %s\nReasoning: %s\nProtocol: %s\nEndpoint: %s (%s)\n"+
 				"Context: %s\nRequest output: %s\n"+
+				"Compaction: %t (reserve %d · keep %d · summary max %d)\n"+
 				"Process override: %t\nPhase: %s\nSandbox: %s\nApproval: %s\n"+
 				"Tool search: %t\nPending approval: %s\nDetached: %t",
 			m.options.Workspace,
@@ -568,6 +685,10 @@ func (m *Model) overlayContent() string {
 			modelState.Resolved.Endpoint.Origin,
 			knownLimit(modelState.Resolved.Limits.ContextWindow),
 			optionalInt(modelState.Resolved.Options.MaxOutputTokens),
+			configState.Compaction.Enabled,
+			configState.Compaction.ReserveTokens,
+			configState.Compaction.KeepRecentTokens,
+			configState.Compaction.SummaryMaxTokens,
 			modelState.Overridden,
 			m.state.Phase,
 			configState.Sandbox,
@@ -589,6 +710,10 @@ func (m *Model) overlayContent() string {
 			}
 			content += "\n" + strings.Join(lines, "\n")
 		}
+	case overlayTree:
+		content = m.treeOverlayContent()
+	case overlayCompact:
+		content = m.compactOverlayContent()
 	case overlayNone:
 	}
 	if m.overlay.loading {
@@ -663,14 +788,134 @@ func (m *Model) sessionOverlayContent() string {
 		if index == m.overlay.cursor {
 			prefix = "> "
 		}
+		title := value.Name
+		if title == "" {
+			title = value.ID
+		}
 		lines = append(lines, fmt.Sprintf(
 			"%s%s  %s",
 			prefix,
-			value.ID,
+			title,
 			value.CreatedAt.Local().Format(time.DateTime),
 		))
+		if value.Name != "" {
+			lines = append(lines, "    "+value.ID)
+		}
+		if value.Preview != "" {
+			lines = append(lines, "    "+value.Preview)
+		}
+		countSuffix := ""
+		if value.Truncated {
+			countSuffix = "+"
+		}
+		if value.NodeCount > 0 || value.BranchCount > 0 {
+			lines = append(lines, fmt.Sprintf(
+				"    %d%s nodes · %d%s branches",
+				value.NodeCount, countSuffix, value.BranchCount, countSuffix,
+			))
+		}
+		if value.ParentSessionID != "" {
+			lines = append(lines, "    fork of "+value.ParentSessionID+" @ "+value.ParentEntryID)
+		}
 	}
 	lines = append(lines, "", "Enter resume · n new · Esc close")
+
+	return strings.Join(lines, "\n")
+}
+
+func (m *Model) treeOverlayContent() string {
+	title := "Session tree"
+	if m.overlay.forkMode {
+		title = "Fork session from node"
+	}
+	lines := []string{title, "", "Filter: " + m.overlay.query, ""}
+	if m.overlay.loading {
+		return strings.Join(lines, "\n")
+	}
+	values := m.filteredTreeNodes()
+	if len(values) == 0 {
+		lines = append(lines, "No matching nodes.")
+	}
+	for index, node := range values {
+		cursor := "  "
+		if index == m.overlay.cursor {
+			cursor = "> "
+		}
+		path := " "
+		if node.OnActivePath {
+			path = "*"
+		}
+		current := ""
+		if node.Current {
+			current = " [current]"
+		}
+		label := ""
+		if node.Label != "" {
+			label = "  " + node.Label
+		}
+		indent := strings.Repeat("  ", min(node.Depth, 12))
+		lines = append(lines, fmt.Sprintf(
+			"%s%s%s%s  %s  %s%s%s",
+			cursor, path, indent, treeConnector(node.Depth), shortDisplayID(node.ID),
+			node.Kind, label, current,
+		))
+	}
+	if m.overlay.tree.Truncated {
+		lines = append(lines, "", fmt.Sprintf(
+			"Showing %d of %d nodes (bounded).",
+			len(m.overlay.tree.Nodes), m.overlay.tree.TotalNodes,
+		))
+	}
+	if m.overlay.forkMode {
+		lines = append(lines, "", "↑/↓ choose · type search · Enter fork · Esc cancel")
+	} else {
+		lines = append(lines, "", "Enter navigate · s navigate with summary · f fork mode · Esc close")
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+func treeConnector(depth int) string {
+	if depth == 0 {
+		return "─ "
+	}
+
+	return "└ "
+}
+
+func shortDisplayID(value string) string {
+	const limit = 12
+	if utf8.RuneCountInString(value) <= limit {
+		return value
+	}
+
+	runes := []rune(value)
+
+	return string(runes[:limit]) + "…"
+}
+
+func (m *Model) compactOverlayContent() string {
+	lines := []string{"Compact context", ""}
+	if m.overlay.loading {
+		return strings.Join(lines, "\n")
+	}
+	preview := m.overlay.preview
+	if !preview.Available {
+		lines = append(lines, "Unavailable: "+preview.DisabledReason, "", "Esc close")
+
+		return strings.Join(lines, "\n")
+	}
+	lines = append(lines,
+		fmt.Sprintf("Estimated context: %d tokens", preview.EstimatedTokens),
+		fmt.Sprintf("Automatic threshold: %d tokens", preview.ThresholdTokens),
+		fmt.Sprintf("Messages summarized: %d", preview.SummarizedMessages),
+		fmt.Sprintf("Messages retained: %d", preview.KeptMessages),
+	)
+	if preview.SplitTurn {
+		lines = append(lines, "The cut splits a large turn; its prefix is summarized separately.")
+	}
+	lines = append(lines, "", "Compaction may omit details. The durable branch remains recoverable.",
+		"Enter confirm · Esc cancel")
 
 	return strings.Join(lines, "\n")
 }

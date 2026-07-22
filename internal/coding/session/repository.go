@@ -1,3 +1,4 @@
+//nolint:wsl_v5 // Lock, durable store, and lineage acquisition stay in transaction order.
 package session
 
 import (
@@ -15,9 +16,15 @@ import (
 	"unicode"
 
 	"github.com/rsbin/pips/agent/harness"
+	"github.com/rsbin/pips/ai"
 )
 
-const extraWorkspaceID = "pips.coding.workspace_id"
+const (
+	extraWorkspaceID       = "pips.coding.workspace_id"
+	extraParentSessionID   = "pips.coding.parent_session_id"
+	extraParentEntryID     = "pips.coding.parent_entry_id"
+	maxSessionPreviewRunes = 160
+)
 
 var (
 	// ErrInvalid means repository, session, or metadata input is invalid.
@@ -78,10 +85,24 @@ type OpenOptions struct {
 
 // Metadata is the typed coding projection of Harness session metadata.
 type Metadata struct {
-	ID          string
-	CreatedAt   time.Time
-	Path        string
-	WorkspaceID string
+	ID              string
+	CreatedAt       time.Time
+	Path            string
+	WorkspaceID     string
+	ParentSessionID string
+	ParentEntryID   string
+	Name            string
+	Preview         string
+	CurrentLeafID   string
+	NodeCount       int
+	BranchCount     int
+	Truncated       bool
+}
+
+// ForkOptions select the source node copied into a new Session. An empty node
+// selects the source's current leaf.
+type ForkOptions struct {
+	AtEntryID string
 }
 
 // Handle owns a locked, writable Harness session.
@@ -204,6 +225,53 @@ func (r *Repository) Open(ctx context.Context, options OpenOptions) (*Handle, er
 	return newHandle(store, lock, options.WorkspaceID)
 }
 
+// Fork creates and locks a failure-atomic copy of source's selected path. The
+// source remains open and unchanged; callers own the returned Handle.
+func (r *Repository) Fork(
+	ctx context.Context,
+	source *Handle,
+	options ForkOptions,
+) (*Handle, error) {
+	if err := r.validate(); err != nil {
+		return nil, err
+	}
+	if source == nil || source.session == nil || source.meta.WorkspaceID == "" ||
+		filepath.Dir(source.meta.Path) != r.dir {
+		return nil, fmt.Errorf("%w: source session does not belong to repository", ErrInvalid)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if options.AtEntryID != "" {
+		if _, ok := source.session.Entry(options.AtEntryID); !ok {
+			return nil, fmt.Errorf("%w: fork entry %q does not exist", ErrInvalid, options.AtEntryID)
+		}
+	}
+
+	id, err := newSessionID()
+	if err != nil {
+		return nil, err
+	}
+	lock, err := acquireSessionLock(ctx, r.lockPath(id))
+	if err != nil {
+		return nil, err
+	}
+	parentEntryID := options.AtEntryID
+	if parentEntryID == "" {
+		parentEntryID = source.session.LeafID()
+	}
+	store, err := r.repo.ForkSession(source.session, options.AtEntryID, id, map[string]string{
+		extraWorkspaceID:     source.meta.WorkspaceID,
+		extraParentSessionID: source.meta.ID,
+		extraParentEntryID:   parentEntryID,
+	})
+	if err != nil {
+		return nil, errors.Join(err, lock.Close())
+	}
+
+	return newHandle(store, lock, source.meta.WorkspaceID)
+}
+
 // List returns typed session metadata in newest-first order without taking
 // writer locks.
 func (r *Repository) List(ctx context.Context) ([]Metadata, error) {
@@ -225,6 +293,12 @@ func (r *Repository) List(ctx context.Context) ([]Metadata, error) {
 		meta, err := projectMetadata(value)
 		if err != nil {
 			return nil, err
+		}
+		prefix, prefixErr := harness.ReadJSONLPrefix(value.Path, harness.JSONLPrefixLimits{})
+		if prefixErr != nil {
+			meta.Truncated = true
+		} else {
+			projectSessionPrefix(&meta, prefix)
 		}
 
 		metas = append(metas, meta)
@@ -274,11 +348,80 @@ func projectMetadata(stored harness.SessionMetadata) (Metadata, error) {
 	}
 
 	return Metadata{
-		ID:          stored.ID,
-		CreatedAt:   stored.CreatedAt,
-		Path:        stored.Path,
-		WorkspaceID: workspaceID,
+		ID:              stored.ID,
+		CreatedAt:       stored.CreatedAt,
+		Path:            stored.Path,
+		WorkspaceID:     workspaceID,
+		ParentSessionID: stored.Extra[extraParentSessionID],
+		ParentEntryID:   stored.Extra[extraParentEntryID],
 	}, nil
+}
+
+func projectSessionPrefix(meta *Metadata, prefix harness.JSONLPrefix) {
+	if meta == nil {
+		return
+	}
+
+	children := make(map[string]int)
+	for _, entry := range prefix.Entries {
+		switch entry.Kind {
+		case harness.KindLeaf:
+			meta.CurrentLeafID = entry.LeafID
+		default:
+			meta.CurrentLeafID = entry.ID
+			meta.NodeCount++
+			children[entry.ParentID]++
+			if children[entry.ParentID] == 2 {
+				meta.BranchCount++
+			}
+		}
+		if entry.Kind == harness.KindName {
+			meta.Name = entry.Name
+		}
+		if meta.Preview == "" && entry.Kind == harness.KindMessage && entry.Message != nil &&
+			entry.Message.Role == ai.RoleUser {
+			meta.Preview = firstMessageText(*entry.Message)
+		}
+	}
+	meta.Truncated = prefix.Truncated
+}
+
+func firstMessageText(message ai.Message) string {
+	for _, part := range message.Parts {
+		if value, ok := part.(ai.TextPart); ok {
+			return collapsePreview(value.Text, maxSessionPreviewRunes)
+		}
+	}
+
+	return ""
+}
+
+func collapsePreview(value string, limit int) string {
+	var result strings.Builder
+	space := false
+	count := 0
+	truncated := false
+	for _, current := range value {
+		if unicode.IsSpace(current) {
+			space = result.Len() > 0
+			continue
+		}
+		if count == limit {
+			truncated = true
+			break
+		}
+		if space {
+			result.WriteByte(' ')
+			space = false
+		}
+		result.WriteRune(current)
+		count++
+	}
+	if truncated {
+		result.WriteRune('…')
+	}
+
+	return result.String()
 }
 
 func validateCreateOptions(options CreateOptions) error {

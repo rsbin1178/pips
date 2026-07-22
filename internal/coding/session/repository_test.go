@@ -1,3 +1,4 @@
+//nolint:wsl_v5 // Repository lifecycle fixtures keep actions and assertions adjacent.
 package session_test
 
 import (
@@ -7,10 +8,70 @@ import (
 	"testing"
 
 	"github.com/rsbin/pips/agent/harness"
+	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestRepositoryForkPreservesSourceAndProjectsBoundedPickerMetadata(t *testing.T) {
+	t.Parallel()
+
+	repo, err := session.NewRepository(filepath.Join(t.TempDir(), "sessions"))
+	require.NoError(t, err)
+	source, err := repo.Create(t.Context(), session.CreateOptions{WorkspaceID: "workspace-key"})
+	require.NoError(t, err)
+	first, err := source.Session().AppendMessage(ai.UserText("  inspect\n the session tree  "), nil)
+	require.NoError(t, err)
+	_, err = source.Session().AppendMessage(ai.AssistantText("first branch"), nil)
+	require.NoError(t, err)
+	require.NoError(t, source.Session().MoveTo(first, ""))
+	_, err = source.Session().AppendMessage(ai.AssistantText("second branch"), nil)
+	require.NoError(t, err)
+	require.NoError(t, source.Session().SetName("tree work"))
+	before := source.Session().Entries()
+
+	forked, err := repo.Fork(t.Context(), source, session.ForkOptions{AtEntryID: first})
+	require.NoError(t, err)
+	assert.Equal(t, before, source.Session().Entries())
+	assert.Equal(t, source.Metadata().ID, forked.Metadata().ParentSessionID)
+	assert.Equal(t, first, forked.Metadata().ParentEntryID)
+	require.Len(t, forked.Session().Entries(), 1)
+
+	_, err = repo.Open(t.Context(), session.OpenOptions{
+		ID: forked.Metadata().ID, WorkspaceID: "workspace-key",
+	})
+	require.ErrorIs(t, err, session.ErrLocked)
+
+	metas, err := repo.List(t.Context())
+	require.NoError(t, err)
+	require.Len(t, metas, 2)
+	var sourceMeta, forkMeta session.Metadata
+	for _, meta := range metas {
+		if meta.ID == source.Metadata().ID {
+			sourceMeta = meta
+		} else if meta.ID == forked.Metadata().ID {
+			forkMeta = meta
+		}
+	}
+	assert.Equal(t, "tree work", sourceMeta.Name)
+	assert.Equal(t, "inspect the session tree", sourceMeta.Preview)
+	assert.GreaterOrEqual(t, sourceMeta.BranchCount, 1)
+	assert.False(t, sourceMeta.Truncated)
+	assert.Equal(t, "inspect the session tree", forkMeta.Preview)
+	assert.Equal(t, 1, forkMeta.NodeCount)
+	assert.Equal(t, source.Metadata().ID, forkMeta.ParentSessionID)
+
+	forkID := forked.Metadata().ID
+	require.NoError(t, forked.Close())
+	reopened, err := repo.Open(t.Context(), session.OpenOptions{
+		ID: forkID, WorkspaceID: "workspace-key",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, source.Metadata().ID, reopened.Metadata().ParentSessionID)
+	require.NoError(t, reopened.Close())
+	require.NoError(t, source.Close())
+}
 
 func TestRepositoryCreateOpenListAndLock(t *testing.T) {
 	t.Parallel()

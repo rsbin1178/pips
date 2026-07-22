@@ -108,6 +108,7 @@ type Runtime struct {
 	requestPolicy generation.Policy
 
 	handle      *session.Handle
+	repository  *session.Repository
 	session     *harness.Session
 	journal     *interactionJournal
 	policy      execution.Policy
@@ -130,11 +131,12 @@ type Runtime struct {
 	active      *runtimeOperation
 	recovery    InteractionRecovery
 
-	closing        bool
-	cleanupRunning bool
-	closed         bool
-	closeDone      chan struct{}
-	closeErr       error
+	closing                    bool
+	cleanupRunning             bool
+	closed                     bool
+	closeDone                  chan struct{}
+	closeErr                   error
+	autoCompactionFailureToken string
 }
 
 type runtimeOperation struct {
@@ -326,6 +328,7 @@ func Open(ctx context.Context, options OpenOptions) (_ *Runtime, returnErr error
 		resolved:      resolved,
 		requestPolicy: requestPolicy,
 		handle:        handle,
+		repository:    repository,
 		session:       handle.Session(),
 		policy:        policy,
 		executor:      executor,
@@ -354,12 +357,17 @@ func Open(ctx context.Context, options OpenOptions) (_ *Runtime, returnErr error
 	if err != nil {
 		return nil, err
 	}
+	treeSnapshot, err := runtime.session.Tree(harness.TreeLimits{})
+	if err != nil {
+		return nil, err
+	}
 	bootstrap, err := BootstrapState(BootstrapOptions{
 		SessionID:           handle.Metadata().ID,
 		Provider:            resolved.Ref.Provider,
 		ModelID:             resolved.Ref.Model,
 		Path:                runtime.session.Path(),
 		HasPendingToolCalls: len(pending) > 0,
+		Tree:                treeSnapshot,
 	})
 	if err != nil {
 		return nil, err
@@ -718,6 +726,10 @@ const (
 	operationPrompt   runtimeOperationKind = "prompt"
 	operationContinue runtimeOperationKind = "continue"
 	operationResolve  runtimeOperationKind = "resolve"
+	operationPreview  runtimeOperationKind = "preview compaction"
+	operationCompact  runtimeOperationKind = "compact"
+	operationNavigate runtimeOperationKind = "navigate"
+	operationFork     runtimeOperationKind = "fork"
 )
 
 func (r *Runtime) runSequence(

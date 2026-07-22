@@ -36,6 +36,8 @@ const (
 	// KindLeaf records the active tree position; the last one wins. An empty
 	// LeafID means the root.
 	KindLeaf Kind = "leaf"
+
+	rootEntryID = "root"
 )
 
 // Entry is one node of a session tree. Entries form the tree through

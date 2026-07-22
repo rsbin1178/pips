@@ -145,6 +145,19 @@ func (o *Observer) Observe(ctx context.Context, event coding.TelemetryEvent) err
 		o.instant(ctx, "coding.error", event, []attribute.KeyValue{
 			attribute.String("coding.error.code", event.Code),
 		}, true)
+	case coding.EventSessionTreeChanged:
+		o.instant(ctx, "coding.session.tree.changed", event, []attribute.KeyValue{
+			attribute.Int("coding.session.nodes", event.Nodes),
+		}, false)
+	case coding.EventSessionNavigated, coding.EventSessionForked:
+		o.instant(ctx, "coding.session."+event.Code, event, nil, false)
+	case coding.EventCompactionStarted, coding.EventCompactionCompleted:
+		o.instant(ctx, "coding.compaction."+compactionLifecycle(event.Type), event, []attribute.KeyValue{
+			attribute.String("coding.compaction.mode", string(event.CompactionMode)),
+			attribute.Int("coding.compaction.tokens_before", event.TokensBefore),
+			attribute.Int("coding.compaction.tokens_after", event.TokensAfter),
+			attribute.Int64("coding.compaction.duration_ms", event.DurationMillis),
+		}, event.Failed)
 	case coding.EventInteractionStarted, coding.EventRunStarted, coding.EventRunCompleted,
 		coding.EventTurnStarted, coding.EventTurnCompleted, coding.EventMessageCommitted,
 		coding.EventMessageDelta, coding.EventToolStarted, coding.EventToolUpdated,
@@ -154,6 +167,14 @@ func (o *Observer) Observe(ctx context.Context, event coding.TelemetryEvent) err
 	}
 
 	return nil
+}
+
+func compactionLifecycle(eventType coding.EventType) string {
+	if eventType == coding.EventCompactionStarted {
+		return "started"
+	}
+
+	return "completed"
 }
 
 func (o *Observer) observeSession(ctx context.Context, event coding.TelemetryEvent) {
