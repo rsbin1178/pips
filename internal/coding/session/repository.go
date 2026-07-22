@@ -211,10 +211,12 @@ func (r *Repository) Open(ctx context.Context, options OpenOptions) (*Handle, er
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-
 	lock, err := acquireSessionLock(ctx, r.lockPath(options.ID))
 	if err != nil {
 		return nil, err
+	}
+	if err := secureSessionFile(r.sessionPath(options.ID)); err != nil {
+		return nil, errors.Join(err, lock.Close())
 	}
 
 	store, err := r.repo.Open(options.ID)
@@ -290,6 +292,9 @@ func (r *Repository) List(ctx context.Context) ([]Metadata, error) {
 
 	metas := make([]Metadata, 0, len(stored))
 	for _, value := range stored {
+		if err := secureSessionFile(value.Path); err != nil {
+			return nil, err
+		}
 		meta, err := projectMetadata(value)
 		if err != nil {
 			return nil, err
@@ -320,6 +325,10 @@ func newHandle(
 	lock sessionLock,
 	workspaceID string,
 ) (*Handle, error) {
+	if err := secureSessionFile(store.Metadata().Path); err != nil {
+		return nil, errors.Join(err, store.Close(), lock.Close())
+	}
+
 	meta, err := projectMetadata(store.Metadata())
 	if err != nil {
 		return nil, errors.Join(err, store.Close(), lock.Close())
@@ -442,6 +451,10 @@ func (r *Repository) validate() error {
 
 func (r *Repository) lockPath(id string) string {
 	return filepath.Join(r.dir, id+".lock")
+}
+
+func (r *Repository) sessionPath(id string) string {
+	return filepath.Join(r.dir, id+".jsonl")
 }
 
 func newSessionID() (string, error) {
