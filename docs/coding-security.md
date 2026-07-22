@@ -23,8 +23,12 @@ approval Controller can expose its guarded wrapper.
 | --- | --- | --- |
 | macOS | System `/usr/bin/sandbox-exec` (Seatbelt) | A real read/write/network capability probe must pass. Seatbelt is deprecated by Apple, so it remains a replaceable backend rather than an application contract. Process-tree cleanup is weaker than a PID namespace. |
 | Linux | Rootless Bubblewrap at `/usr/bin/bwrap` or `/bin/bwrap`, plus supported seccomp architecture | A real namespace, mount, PID, network, and seccomp probe must pass. Pips does not install Bubblewrap or change AppArmor/user-namespace settings. |
-| WSL2 | Same Bubblewrap contract as Linux | Supported only when WSL2 and the complete native probe pass. Cross-compilation is not evidence of runtime support. |
-| WSL1 / native Windows | No P0 backend | Commands fail as unsupported. Use WSL2 after verifying it with `pips doctor`, or run the whole application in a container/VM. |
+| WSL2 | Same Bubblewrap contract as Linux | Conditional, not part of the formal P0 matrix. A release may claim WSL2 support only after the complete native smoke passes in WSL2; cross-compilation is not evidence. |
+| WSL1 / native Windows | No P0 backend | Commands fail as unsupported. Use a verified WSL2 environment conditionally, or run the whole application in a container/VM. |
+
+The release-blocking P0 matrix is macOS and native Linux on amd64/arm64. A
+successful `pips doctor` proves the current machine's capability but does not by
+itself replace the release's native platform-runner evidence.
 
 `pips doctor` validates configuration and the provider-neutral `API_KEY`. In
 `workspace-write` mode it then runs the real native Sandbox probe and reports

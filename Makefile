@@ -1,6 +1,7 @@
 GO=go
 
-.PHONY: all build test test-short cover fuzz lint lint-fix fmt vet tidy audit deps-check help
+.PHONY: all build test test-short cover fuzz lint lint-fix fmt vet tidy audit deps-check \
+	mod-verify p0-verify provider-smoke sandbox-smoke help
 
 all: fmt vet lint test build
 
@@ -46,7 +47,40 @@ tidy:
 
 ## audit: Check dependencies for known vulnerabilities
 audit:
-	$(GO) run golang.org/x/vuln/cmd/govulncheck@latest ./...
+	$(GO) tool govulncheck ./...
+
+## mod-verify: Verify downloaded module content against go.sum
+mod-verify:
+	$(GO) mod verify
+
+## provider-smoke: Test all provider wire adapters and the scripted Coding/TUI flow; real smoke is explicit opt-in
+provider-smoke:
+	$(GO) test ./ai/openai/... ./ai/anthropic ./ai/gemini ./internal/coding/model ./internal/coding/generation
+	$(GO) test -race ./internal/coding/tui -run '^TestScriptedRuntimeMatchesTUIStateAndReplay$$' -count=1
+	@if [ "$${PIPS_PROVIDER_SMOKE:-}" = "1" ]; then \
+		$(GO) test ./internal/coding/tui -run '^TestProviderSmoke$$' -count=1; \
+	else \
+		echo "real provider smoke SKIP (set PIPS_PROVIDER_SMOKE=1, PIPS_MODEL, and API_KEY to opt in)"; \
+	fi
+
+## sandbox-smoke: Run the current platform's real native sandbox attack and Coding flow matrix
+sandbox-smoke:
+	PIPS_SANDBOX_INTEGRATION=1 $(GO) test -race \
+		./internal/coding/execution/... ./internal/coding/changes/git ./internal/coding/tools \
+		-run 'Darwin.*Integration|Linux.*Integration|GitIntegration|ShellIntegration|CodingFlowIntegration' \
+		-count=3
+
+## p0-verify: Run the reproducible Coding Agent P0 quality and security gates
+p0-verify:
+	$(GO) test ./...
+	$(GO) test -race ./agent/... ./internal/coding/...
+	$(MAKE) provider-smoke
+	$(GO) vet ./...
+	golangci-lint run ./...
+	$(GO) build ./...
+	$(MAKE) mod-verify
+	$(MAKE) audit
+	$(MAKE) deps-check
 
 ## deps-check: Verify core ai/agent packages use only stdlib + golang.org/x; compile optional integrations
 deps-check:

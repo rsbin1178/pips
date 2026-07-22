@@ -50,10 +50,11 @@ scripts and CI. The command also exposes configuration, session inspection,
 and `doctor`.
 
 The default `workspace-write` mode never falls back to an unsandboxed command.
-It uses macOS Seatbelt or an externally installed Linux/WSL2 Bubblewrap runtime,
-and fails closed when the real capability probe does not pass. Native Windows
-is not supported; use a verified WSL2 environment. `full-access` is an explicit,
-unsandboxed user override.
+The formal P0 support matrix is macOS Seatbelt and native Linux Bubblewrap, and
+both fail closed when the real capability probe does not pass. WSL2 uses the
+Linux backend but remains conditional until the same native smoke matrix passes
+in the target environment. Native Windows and WSL1 are not supported.
+`full-access` is an explicit, unsandboxed user override.
 
 Configure a model in `~/.pips/config.toml`, for example:
 
