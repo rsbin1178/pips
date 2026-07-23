@@ -19,6 +19,8 @@ import (
 	"github.com/rsbin/pips/internal/coding/workspace"
 )
 
+const readToolName = "read"
+
 // ExecutionOptions provides embedder/test overrides without adding a user
 // configuration protocol in P1. A zero Limits value selects DefaultLimits.
 type ExecutionOptions struct {
@@ -38,7 +40,8 @@ type Config struct {
 
 // Manager owns at most one live child execution and all of its cleanup.
 type Manager struct {
-	mu sync.Mutex
+	mu        sync.Mutex
+	journalMu sync.Mutex
 
 	config       Config
 	limits       Limits
@@ -57,6 +60,7 @@ type Execution struct {
 	cancel  context.CancelFunc
 	done    chan struct{}
 	child   *session.Handle
+	tracker *runTracker
 
 	cancelOnce sync.Once
 	mu         sync.Mutex
@@ -125,7 +129,7 @@ func buildReadTools(config Config) ([]agent.Tool, error) {
 		return nil, err
 	}
 
-	names := []string{"read", "ls", "glob", "grep"}
+	names := []string{readToolName, "ls", "glob", "grep"}
 	policy := catalog.Policy{
 		TenantID:  config.Parent.Metadata().WorkspaceID,
 		Allowlist: slices.Clone(names),
@@ -210,18 +214,20 @@ func (m *Manager) Start(
 		TaskPreview:     preview(request.Task),
 		Time:            time.Now().UTC(),
 	}
-	if err := appendMirrored(child.Session(), m.config.Parent.Session(), created); err != nil {
+	if err := m.appendMirrored(child.Session(), created); err != nil {
 		m.clearStarting()
 		return nil, errors.Join(err, child.Close())
 	}
 
 	runCtx, cancel := context.WithTimeout(ctx, m.limits.MaxDuration)
+	tracker := newRunTracker(created.Time, m.limits.MaxToolCalls)
 	execution := &Execution{
 		manager: m,
 		request: request,
 		cancel:  cancel,
 		done:    make(chan struct{}),
 		child:   child,
+		tracker: tracker,
 	}
 	m.mu.Lock()
 	if m.closed {
@@ -232,7 +238,7 @@ func (m *Manager) Start(
 		terminal.State = StateCanceled
 		terminal.Code = "manager_closed"
 		terminal.Time = time.Now().UTC()
-		persistErr := appendMirrored(child.Session(), m.config.Parent.Session(), terminal)
+		persistErr := m.appendMirrored(child.Session(), terminal)
 		closeErr := child.Close()
 
 		m.clearStarting()
@@ -353,6 +359,9 @@ type runTracker struct {
 	value     any
 	text      string
 	err       error
+	activity  Activity
+	toolIndex map[string]int
+	maxTools  int
 }
 
 type progressSnapshot struct {
@@ -360,6 +369,22 @@ type progressSnapshot struct {
 	turns     int
 	toolCalls int
 	usage     ai.Usage
+}
+
+func newRunTracker(startedAt time.Time, maxTools int) *runTracker {
+	if startedAt.IsZero() {
+		startedAt = time.Now().UTC()
+	}
+
+	return &runTracker{
+		activity: Activity{
+			Revision: 1, Phase: ActivityPhaseStarting,
+			StartedAt: startedAt, UpdatedAt: startedAt,
+			Tools: []ToolActivity{},
+		},
+		toolIndex: make(map[string]int),
+		maxTools:  maxTools,
+	}
 }
 
 func (m *Manager) run(
@@ -370,8 +395,11 @@ func (m *Manager) run(
 	created record,
 	observerErr error,
 ) {
-	startedAt := time.Now()
-	tracker := &runTracker{err: observerErr}
+	tracker := execution.tracker
+	tracker.mu.Lock()
+	tracker.err = observerErr
+	startedAt := tracker.activity.StartedAt
+	tracker.mu.Unlock()
 
 	spec, specErr := specFor(execution.request.Role)
 	if specErr != nil {
@@ -481,13 +509,13 @@ func (m *Manager) observeChild(
 	tracker *runTracker,
 	event agent.Event,
 ) {
-	snapshot, needsStart := trackChildEvent(tracker, event)
+	snapshot, needsStart, visibleChange := trackChildEvent(tracker, event)
 
 	if needsStart {
 		m.recordChildStart(ctx, child, observer, created, tracker, event)
 	}
 
-	if event.Type == agent.EventTurnEnd || event.Type == agent.EventToolEnd {
+	if visibleChange && event.Type != agent.EventRunStart {
 		m.emitChildProgress(ctx, child, observer, created, tracker, event, snapshot)
 	}
 
@@ -496,7 +524,10 @@ func (m *Manager) observeChild(
 	}
 }
 
-func trackChildEvent(tracker *runTracker, event agent.Event) (progressSnapshot, bool) {
+func trackChildEvent(
+	tracker *runTracker,
+	event agent.Event,
+) (progressSnapshot, bool, bool) {
 	tracker.mu.Lock()
 	defer tracker.mu.Unlock()
 
@@ -514,10 +545,184 @@ func trackChildEvent(tracker *runTracker, event agent.Event) (progressSnapshot, 
 		tracker.runID = event.RunID
 	}
 
+	visibleChange := tracker.trackActivityLocked(event)
+
 	return progressSnapshot{
 		runID: tracker.runID, turns: tracker.turns,
 		toolCalls: tracker.toolCalls, usage: tracker.usage,
-	}, needsStart
+	}, needsStart, visibleChange
+}
+
+func (t *runTracker) trackActivityLocked(event agent.Event) bool {
+	changed := false
+
+	switch event.Type {
+	case agent.EventRunStart:
+		t.activity.RunID = event.RunID
+		changed = true
+	case agent.EventTurnStart:
+		t.activity.Phase = ActivityPhaseThinking
+		changed = true
+	case agent.EventMessage:
+		changed = t.trackMessageActivityLocked(event)
+	case agent.EventToolStart:
+		changed = t.trackToolStartLocked(event)
+	case agent.EventToolUpdate:
+		changed = t.trackToolUpdateLocked(event)
+	case agent.EventToolEnd:
+		changed = t.trackToolEndLocked(event)
+	case agent.EventTurnEnd:
+		t.activity.Phase = ActivityPhaseThinking
+		changed = true
+	case agent.EventRunEnd:
+		t.activity.Phase = ActivityPhaseFinalizing
+		changed = true
+	case agent.EventDelta:
+	}
+
+	if event.Turn > t.activity.Turn {
+		t.activity.Turn = event.Turn
+	}
+
+	if !changed {
+		return false
+	}
+
+	t.activity.Revision++
+	t.activity.UpdatedAt = activityEventTime(event.Time)
+
+	return true
+}
+
+func (t *runTracker) trackMessageActivityLocked(event agent.Event) bool {
+	if event.Message == nil || event.Message.Role != ai.RoleAssistant ||
+		messageHasToolCall(*event.Message) {
+		return false
+	}
+
+	t.activity.Phase = ActivityPhaseFinalizing
+
+	return true
+}
+
+func (t *runTracker) trackToolStartLocked(event agent.Event) bool {
+	if event.Call == nil || t.upsertToolLocked(event, ToolStatusRunning) < 0 {
+		return false
+	}
+
+	t.activity.Phase = ActivityPhaseWorking
+
+	return true
+}
+
+func (t *runTracker) trackToolUpdateLocked(event agent.Event) bool {
+	if event.Call == nil {
+		return false
+	}
+
+	index := t.upsertToolLocked(event, ToolStatusRunning)
+	if index < 0 {
+		return false
+	}
+
+	t.activity.Tools[index].Update = cloneTranscriptMessage(ai.Message{
+		Role: ai.RoleTool, Parts: event.Update,
+	})
+	t.activity.Phase = ActivityPhaseWorking
+
+	return true
+}
+
+func (t *runTracker) trackToolEndLocked(event agent.Event) bool {
+	if event.Call == nil || event.Result == nil {
+		return false
+	}
+
+	index := t.upsertToolLocked(event, ToolStatusCompleted)
+	if index < 0 {
+		return false
+	}
+
+	t.activity.Tools[index].Result = cloneTranscriptMessage(ai.Message{
+		Role: ai.RoleTool, Parts: []ai.Part{*event.Result},
+	})
+	t.activity.Phase = ActivityPhaseThinking
+
+	return true
+}
+
+func (t *runTracker) upsertToolLocked(event agent.Event, status ToolStatus) int {
+	call := *event.Call
+	if call.ID == "" || call.Name == "" {
+		return -1
+	}
+
+	call.Args = slices.Clone(call.Args)
+	if index, ok := t.toolIndex[call.ID]; ok {
+		t.activity.Tools[index].RunID = event.RunID
+		t.activity.Tools[index].Turn = event.Turn
+		t.activity.Tools[index].Call = call
+		t.activity.Tools[index].Status = status
+
+		return index
+	}
+
+	index := len(t.activity.Tools)
+	if index >= t.maxTools {
+		return -1
+	}
+
+	t.toolIndex[call.ID] = index
+	t.activity.Tools = append(t.activity.Tools, ToolActivity{
+		RunID: event.RunID, Turn: event.Turn, Call: call, Status: status,
+	})
+
+	return index
+}
+
+func activityEventTime(value time.Time) time.Time {
+	if value.IsZero() {
+		return time.Now().UTC()
+	}
+
+	return value
+}
+
+func messageHasToolCall(message ai.Message) bool {
+	for _, part := range message.Parts {
+		if _, ok := part.(ai.ToolCallPart); ok {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (t *runTracker) activitySnapshot() Activity {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	return cloneActivity(t.activity)
+}
+
+func (t *runTracker) snapshot() (progressSnapshot, Activity) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	return progressSnapshot{
+		runID: t.runID, turns: t.turns, toolCalls: t.toolCalls, usage: t.usage,
+	}, cloneActivity(t.activity)
+}
+
+func cloneActivity(value Activity) Activity {
+	value.Tools = slices.Clone(value.Tools)
+	for index := range value.Tools {
+		value.Tools[index].Call.Args = slices.Clone(value.Tools[index].Call.Args)
+		value.Tools[index].Update = cloneTranscriptMessage(value.Tools[index].Update)
+		value.Tools[index].Result = cloneTranscriptMessage(value.Tools[index].Result)
+	}
+
+	return value
 }
 
 func (m *Manager) recordChildStart(
@@ -533,7 +738,7 @@ func (m *Manager) recordChildStart(
 	started.ChildRunID = event.RunID
 	started.Time = event.Time
 
-	if err := appendMirrored(child.Session(), m.config.Parent.Session(), started); err != nil {
+	if err := m.appendMirrored(child.Session(), started); err != nil {
 		m.failChildObservation(child.Metadata().ID, tracker, err)
 	}
 
@@ -642,7 +847,7 @@ func (m *Manager) finishExecution(
 	terminal.DurationMillis = result.Duration.Milliseconds()
 	terminal.ResultBytes = len(text)
 	terminal.Time = time.Now().UTC()
-	persistErr := appendMirrored(child.Session(), m.config.Parent.Session(), terminal)
+	persistErr := m.appendMirrored(child.Session(), terminal)
 	closeErr := child.Close()
 	cleanupErr := errors.Join(trackedErr, persistErr, closeErr)
 
