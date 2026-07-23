@@ -56,16 +56,21 @@ func TestManagerRunsEachRoleWithExactReadOnlyCatalog(t *testing.T) {
 
 			requests := model.Requests()
 			require.Len(t, requests, 1)
-			assert.Equal(t, []string{"read", "ls", "glob", "grep"}, toolNames(requests[0].Tools))
+			assert.Equal(t, []string{readToolName, "ls", "glob", "grep"}, toolNames(requests[0].Tools))
 			require.NotNil(t, requests[0].ResponseFormat)
 			assert.True(t, requests[0].ResponseFormat.Strict)
 			require.NotNil(t, requests[0].MaxTokens)
 			assert.Equal(t, DefaultLimits().MaxOutputTokens, *requests[0].MaxTokens)
-			require.Len(t, events, 4)
+			require.GreaterOrEqual(t, len(events), 4)
 			assert.Equal(t, StateCreated, events[0].State)
 			assert.Equal(t, StateRunning, events[1].State)
-			assert.True(t, events[2].Progress)
-			assert.Equal(t, StateSucceeded, events[3].State)
+
+			for _, event := range events[2 : len(events)-1] {
+				assert.True(t, event.Progress)
+				assert.Equal(t, StateRunning, event.State)
+			}
+
+			assert.Equal(t, StateSucceeded, events[len(events)-1].State)
 
 			summaries, err := fixture.manager.List(t.Context())
 			require.NoError(t, err)
@@ -80,6 +85,114 @@ func TestManagerRunsEachRoleWithExactReadOnlyCatalog(t *testing.T) {
 			assert.Equal(t, ai.RoleAssistant, detail.Transcript[1].Role)
 		})
 	}
+}
+
+func TestRunTrackerProjectsDefensiveLiveActivity(t *testing.T) {
+	t.Parallel()
+
+	startedAt := time.Date(2026, time.July, 23, 10, 0, 0, 0, time.UTC)
+	tracker := newRunTracker(startedAt, DefaultLimits().MaxToolCalls)
+	call := ai.ToolCallPart{
+		ID: "call-1", Name: readToolName, Args: ai.JSON(`{"path":"internal/coding/runtime.go"}`),
+	}
+
+	events := []agent.Event{
+		{Type: agent.EventRunStart, RunID: "run-1", Time: startedAt},
+		{Type: agent.EventTurnStart, RunID: "run-1", Turn: 1, Time: startedAt.Add(time.Second)},
+		{
+			Type: agent.EventToolStart, RunID: "run-1", Turn: 1,
+			Time: startedAt.Add(2 * time.Second), Call: &call,
+		},
+		{
+			Type: agent.EventToolUpdate, RunID: "run-1", Turn: 1,
+			Time: startedAt.Add(3 * time.Second), Call: &call,
+			Update: []ai.Part{ai.TextPart{Text: "reading"}},
+		},
+	}
+	for _, event := range events {
+		trackChildEvent(tracker, event)
+	}
+
+	activity := tracker.activitySnapshot()
+	assert.Equal(t, ActivityPhaseWorking, activity.Phase)
+	assert.Equal(t, "run-1", activity.RunID)
+	assert.Equal(t, 1, activity.Turn)
+	assert.Equal(t, uint64(5), activity.Revision)
+	require.Len(t, activity.Tools, 1)
+	assert.Equal(t, ToolStatusRunning, activity.Tools[0].Status)
+	assert.Equal(t, "reading", messageText(activity.Tools[0].Update))
+
+	activity.Tools[0].Call.Args[0] = '['
+	activity.Tools[0].Update.Parts[0] = ai.TextPart{Text: "mutated"}
+
+	second := tracker.activitySnapshot()
+	assert.JSONEq(t, `{"path":"internal/coding/runtime.go"}`, string(second.Tools[0].Call.Args))
+	assert.Equal(t, "reading", messageText(second.Tools[0].Update))
+}
+
+func TestManagerInspectOverlaysInFlightToolActivity(t *testing.T) {
+	t.Parallel()
+
+	call := ai.ToolCallPart{
+		ID: "call-1", Name: readToolName, Args: ai.JSON(`{"path":"sentinel.txt"}`),
+	}
+	model := &testModel{responses: []*ai.Response{
+		responseToolCall(call),
+		responseText(`{"summary":"done","evidence":[],"unknowns":[]}`),
+	}}
+	fixture := newManagerFixture(t, model)
+	require.NoError(t, os.WriteFile(
+		filepath.Join(fixture.root, "sentinel.txt"), []byte("content"), 0o600,
+	))
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+
+	var (
+		enteredOnce sync.Once
+		releaseOnce sync.Once
+	)
+
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+
+	fixture.manager.config.AgentObservers = []func(context.Context, agent.Event){
+		func(_ context.Context, event agent.Event) {
+			if event.Type != agent.EventToolStart {
+				return
+			}
+
+			enteredOnce.Do(func() { close(entered) })
+			<-release
+		},
+	}
+
+	execution, err := fixture.manager.Start(
+		t.Context(), Request{Role: RoleExplore, Task: "Read the sentinel."}, nil,
+	)
+	require.NoError(t, err)
+	<-entered
+
+	detail, err := fixture.manager.Inspect(t.Context(), execution.child.Metadata().ID)
+	require.NoError(t, err)
+	assert.Equal(t, StateRunning, detail.Summary.State)
+	assert.Equal(t, 1, detail.Summary.Turns)
+	assert.Equal(t, 1, detail.Summary.ToolCalls)
+	assert.Positive(t, detail.Summary.Duration)
+	assert.Equal(t, ActivityPhaseWorking, detail.Activity.Phase)
+	require.Len(t, detail.Activity.Tools, 1)
+	assert.Equal(t, ToolStatusRunning, detail.Activity.Tools[0].Status)
+	assert.Equal(t, "call-1", detail.Activity.Tools[0].Call.ID)
+
+	releaseOnce.Do(func() { close(release) })
+
+	result, err := execution.Wait(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, OutcomeSucceeded, result.Outcome)
+
+	replayed, err := fixture.manager.Inspect(t.Context(), result.ChildSessionID)
+	require.NoError(t, err)
+	assert.Equal(t, Activity{}, replayed.Activity)
+	assert.Equal(t, StateSucceeded, replayed.Summary.State)
 }
 
 func TestManagerOmitsNativeSchemaForModelWithoutStructuredOutput(t *testing.T) {
@@ -156,7 +269,7 @@ func TestManagerOmitsNativeSchemaForModelWithoutStructuredOutput(t *testing.T) {
 			assert.Nil(t, requests[0].ResponseFormat)
 			assert.Equal(
 				t,
-				[]string{"read", "ls", "glob", "grep"},
+				[]string{readToolName, "ls", "glob", "grep"},
 				toolNames(requests[0].Tools),
 			)
 			assert.Contains(t, requests[0].System, "Native structured output is unavailable")
@@ -450,9 +563,23 @@ func (m *testModel) Stream(ctx context.Context, request ai.Request) ai.Stream {
 
 		yield(ai.StreamEvent{Type: ai.StreamMessageStart, Provider: response.Provider, Model: response.Model}, nil)
 
-		for _, part := range response.Message.Parts {
-			if text, ok := part.(ai.TextPart); ok {
+		for index, part := range response.Message.Parts {
+			switch value := part.(type) {
+			case ai.TextPart:
+				text := value
 				yield(ai.StreamEvent{Type: ai.StreamTextDelta, Text: text.Text}, nil)
+			case ai.ToolCallPart:
+				yield(ai.StreamEvent{
+					Type: ai.StreamToolCallStart, ToolCallIndex: index,
+					ToolCallID: value.ID, ToolCallName: value.Name,
+				}, nil)
+				yield(ai.StreamEvent{
+					Type: ai.StreamToolCallDelta, ToolCallIndex: index,
+					ArgsDelta: string(value.Args),
+				}, nil)
+				yield(ai.StreamEvent{
+					Type: ai.StreamToolCallEnd, ToolCallIndex: index,
+				}, nil)
 			}
 		}
 
@@ -508,6 +635,15 @@ func responseText(text string) *ai.Response {
 		Provider: ai.ProviderOpenAI, Model: "subagent-test",
 		Message: ai.AssistantText(text), FinishReason: ai.FinishStop,
 		Usage: ai.Usage{InputTokens: 100, OutputTokens: 20},
+	}
+}
+
+func responseToolCall(call ai.ToolCallPart) *ai.Response {
+	return &ai.Response{
+		Provider: ai.ProviderOpenAI, Model: "subagent-test",
+		Message:      ai.Message{Role: ai.RoleAssistant, Parts: []ai.Part{call}},
+		FinishReason: ai.FinishToolCalls,
+		Usage:        ai.Usage{InputTokens: 100, OutputTokens: 20},
 	}
 }
 

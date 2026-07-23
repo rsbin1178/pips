@@ -141,6 +141,13 @@ func appendMirrored(child, parent *harness.Session, value record) error {
 	return nil
 }
 
+func (m *Manager) appendMirrored(child *harness.Session, value record) error {
+	m.journalMu.Lock()
+	defer m.journalMu.Unlock()
+
+	return appendMirrored(child, m.config.Parent.Session(), value)
+}
+
 func records(entries []harness.Entry) ([]record, error) {
 	values := make([]record, 0)
 

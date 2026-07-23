@@ -39,33 +39,41 @@ const (
 )
 
 type overlayState struct {
-	kind        overlayKind
-	cursor      int
-	query       string
-	err         error
-	loading     bool
-	choices     []approval.Choice
-	models      []modelcatalog.Entry
-	selection   modelcatalog.Selection
-	controlling bool
-	offset      int
-	tree        coding.SessionTree
-	preview     coding.CompactionPreview
-	forkMode    bool
-	agents      []subagent.Summary
-	agentDetail *subagent.Detail
-	toolDetail  *toolDetailView
+	kind           overlayKind
+	cursor         int
+	query          string
+	err            error
+	loading        bool
+	refreshing     bool
+	refreshPending bool
+	refreshErr     error
+	generation     uint64
+	childSessionID string
+	choices        []approval.Choice
+	models         []modelcatalog.Entry
+	selection      modelcatalog.Selection
+	controlling    bool
+	offset         int
+	tree           coding.SessionTree
+	preview        coding.CompactionPreview
+	forkMode       bool
+	agents         []subagent.Summary
+	agentDetail    *subagent.Detail
+	toolDetail     *toolDetailView
 }
 
 type overlayDataMsg struct {
-	kind      overlayKind
-	err       error
-	tree      coding.SessionTree
-	preview   coding.CompactionPreview
-	agents    []subagent.Summary
-	detail    subagent.Detail
-	hasAgents bool
-	hasDetail bool
+	kind           overlayKind
+	err            error
+	tree           coding.SessionTree
+	preview        coding.CompactionPreview
+	agents         []subagent.Summary
+	detail         subagent.Detail
+	hasAgents      bool
+	hasDetail      bool
+	background     bool
+	generation     uint64
+	childSessionID string
 }
 
 type controlOperation uint8
@@ -84,7 +92,7 @@ type controlResultMsg struct {
 }
 
 func (m *Model) openOverlay(kind overlayKind) tea.Cmd {
-	m.overlay = overlayState{kind: kind}
+	m.overlay = overlayState{kind: kind, generation: m.nextOverlayGeneration()}
 
 	switch kind {
 	case overlayModel:
@@ -100,27 +108,35 @@ func (m *Model) openOverlay(kind overlayKind) tea.Cmd {
 	case overlayTree:
 		m.overlay.loading = true
 
+		generation := m.overlay.generation
 		return func() tea.Msg {
 			value, err := m.controller.Tree(m.ctx)
 
-			return overlayDataMsg{kind: overlayTree, tree: value, err: err}
+			return overlayDataMsg{
+				kind: overlayTree, tree: value, err: err, generation: generation,
+			}
 		}
 	case overlayCompact:
 		m.overlay.loading = true
 
+		generation := m.overlay.generation
 		return func() tea.Msg {
 			value, err := m.controller.PreviewCompaction(m.ctx)
 
-			return overlayDataMsg{kind: overlayCompact, preview: value, err: err}
+			return overlayDataMsg{
+				kind: overlayCompact, preview: value, err: err, generation: generation,
+			}
 		}
 	case overlayAgents:
 		m.overlay.loading = true
 
+		generation := m.overlay.generation
 		return func() tea.Msg {
 			values, err := m.controller.ListSubagents(m.ctx)
 
 			return overlayDataMsg{
 				kind: overlayAgents, agents: values, hasAgents: true, err: err,
+				generation: generation,
 			}
 		}
 	case overlayApproval:
@@ -129,6 +145,12 @@ func (m *Model) openOverlay(kind overlayKind) tea.Cmd {
 	}
 
 	return nil
+}
+
+func (m *Model) nextOverlayGeneration() uint64 {
+	m.overlaySeq++
+
+	return m.overlaySeq
 }
 
 func (m *Model) syncApprovalOverlay() {
@@ -224,6 +246,12 @@ func (m *Model) handleDetailOverlayClose(key string) (tea.Cmd, bool) {
 
 	m.overlay.agentDetail = nil
 	m.overlay.offset = 0
+	m.overlay.loading = false
+	m.overlay.refreshing = false
+	m.overlay.refreshPending = false
+	m.overlay.refreshErr = nil
+	m.overlay.childSessionID = ""
+	m.overlay.generation = m.nextOverlayGeneration()
 
 	return nil, true
 }

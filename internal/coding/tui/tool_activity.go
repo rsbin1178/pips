@@ -561,6 +561,31 @@ func renderToolActivityBlock(
 	theme colorTheme,
 	noColor bool,
 ) string {
+	return renderToolActivityBlockWithLimit(
+		block,
+		width,
+		theme,
+		noColor,
+		compactExploreRows,
+	)
+}
+
+func renderDetailedToolActivityBlock(
+	block timelineBlock,
+	width int,
+	theme colorTheme,
+	noColor bool,
+) string {
+	return renderToolActivityBlockWithLimit(block, width, theme, noColor, 0)
+}
+
+func renderToolActivityBlockWithLimit(
+	block timelineBlock,
+	width int,
+	theme colorTheme,
+	noColor bool,
+	exploreLimit int,
+) string {
 	if len(block.tools) == 0 {
 		return ""
 	}
@@ -570,7 +595,7 @@ func renderToolActivityBlock(
 	class := block.tools[0].class
 	glyph, verb, subject := toolActivityHeading(class, state, block.tools)
 	heading := renderToolHeading(glyph, verb, subject, state, width, theme, noColor)
-	rows := toolActivityRows(class, block.tools)
+	rows := toolActivityRows(class, block.tools, exploreLimit)
 	if len(rows) == 0 {
 		return heading
 	}
@@ -587,7 +612,13 @@ func renderToolActivityBlock(
 		}
 		if !noColor {
 			rows[index] = lipgloss.NewStyle().
-				Foreground(toolActivityRowColor(class, index, block.tools, paletteFor(theme))).
+				Foreground(toolActivityRowColor(
+					class,
+					index,
+					block.tools,
+					exploreLimit,
+					paletteFor(theme),
+				)).
 				Render(rows[index])
 		}
 	}
@@ -599,10 +630,11 @@ func toolActivityRowColor(
 	class toolActivityClass,
 	index int,
 	activities []toolActivity,
+	exploreLimit int,
 	palette colorPalette,
 ) color.Color {
 	if class != toolClassExplore || index >= len(activities) ||
-		(len(activities) > compactExploreRows && index == compactExploreRows) {
+		(exploreLimit > 0 && len(activities) > exploreLimit && index == exploreLimit) {
 		return palette.muted
 	}
 
@@ -764,11 +796,19 @@ func renderToolHeading(
 	return ansi.Truncate(heading, max(1, width), "…")
 }
 
-func toolActivityRows(class toolActivityClass, activities []toolActivity) []string {
+func toolActivityRows(
+	class toolActivityClass,
+	activities []toolActivity,
+	exploreLimit int,
+) []string {
 	switch class {
 	case toolClassExplore:
-		rows := make([]string, 0, min(len(activities), compactExploreRows))
-		for _, activity := range activities[:min(len(activities), compactExploreRows)] {
+		visible := len(activities)
+		if exploreLimit > 0 {
+			visible = min(visible, exploreLimit)
+		}
+		rows := make([]string, 0, visible)
+		for _, activity := range activities[:visible] {
 			row := strings.TrimSpace(activity.action + " " + activity.subject)
 			if activity.state == toolStateFailed || activity.state == toolStateInterrupted {
 				row += " · " + toolActivityReason(activity)

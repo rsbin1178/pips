@@ -99,6 +99,7 @@ type Model struct {
 	sessionPicker     sessionPickerState
 	sessionPickerSeq  uint64
 	overlay           overlayState
+	overlaySeq        uint64
 	completionMarkers []completionMarker
 	activity          activityIndicator
 	refreshCursor     bool
@@ -265,8 +266,14 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.setLayout()
 		return m, m.commitStableTimeline()
 	case overlayDataMsg:
-		if message.kind != m.overlay.kind {
+		if message.kind != m.overlay.kind ||
+			message.generation != m.overlay.generation ||
+			(message.childSessionID != "" &&
+				message.childSessionID != m.overlay.childSessionID) {
 			return m, nil
+		}
+		if message.background {
+			return m.applyAgentDetailRefresh(message)
 		}
 		m.overlay.loading = false
 		m.overlay.err = message.err
@@ -281,6 +288,11 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.overlay.agentDetail = &detail
 		}
 		m.overlay.cursor = 0
+		if m.overlay.refreshPending && m.overlay.agentDetail != nil {
+			m.overlay.refreshPending = false
+
+			return m, m.refreshAgentDetail()
+		}
 
 		return m, nil
 	case sessionPickerDataMsg:
@@ -995,15 +1007,16 @@ func (m *Model) updateStream(message streamItemMsg) (tea.Model, tea.Cmd) {
 
 	m.reduceStreamItem(message.item)
 	m.setLayout()
+	refresh := m.invalidateAgentDetail(message.item)
 
 	m.waiting = true
 	wait := m.bridge.wait()
 	commit := m.commitStableTimeline()
 	if commit != nil {
-		return m, tea.Sequence(commit, wait)
+		return m, tea.Sequence(commit, tea.Batch(wait, refresh))
 	}
 
-	return m, tea.Batch(wait, m.requestRender())
+	return m, tea.Batch(wait, m.requestRender(), refresh)
 }
 
 func (m *Model) reduceStreamItem(item streamItem) {

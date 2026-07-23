@@ -127,10 +127,61 @@ type Summary struct {
 	Code           string
 }
 
-// Detail extends Summary with the validated role result and transcript.
+// ActivityPhase describes the currently observable child execution phase.
+type ActivityPhase string
+
+const (
+	// ActivityPhaseUnknown means live phase data is unavailable.
+	ActivityPhaseUnknown ActivityPhase = ""
+	// ActivityPhaseStarting means the child run is being initialized.
+	ActivityPhaseStarting ActivityPhase = "starting"
+	// ActivityPhaseThinking means the child is between observable Tool calls.
+	ActivityPhaseThinking ActivityPhase = "thinking"
+	// ActivityPhaseWorking means the child is executing an observable Tool.
+	ActivityPhaseWorking ActivityPhase = "working"
+	// ActivityPhaseFinalizing means the child is validating its final result.
+	ActivityPhaseFinalizing ActivityPhase = "finalizing"
+)
+
+// ToolStatus is the observable lifecycle of one child Tool call.
+type ToolStatus string
+
+const (
+	// ToolStatusUnknown means Tool lifecycle data is unavailable.
+	ToolStatusUnknown ToolStatus = ""
+	// ToolStatusRunning means the Tool has started but has not completed.
+	ToolStatusRunning ToolStatus = "running"
+	// ToolStatusCompleted means the Tool has produced its terminal result.
+	ToolStatusCompleted ToolStatus = "completed"
+)
+
+// ToolActivity is one ordered, bounded child Tool observation.
+type ToolActivity struct {
+	RunID  string
+	Turn   int
+	Call   ai.ToolCallPart
+	Status ToolStatus
+	Update ai.Message
+	Result ai.Message
+}
+
+// Activity is an immutable point-in-time view of an active child execution.
+// It is presentation state and is not persisted in the parent lifecycle.
+type Activity struct {
+	Revision  uint64
+	Phase     ActivityPhase
+	StartedAt time.Time
+	UpdatedAt time.Time
+	RunID     string
+	Turn      int
+	Tools     []ToolActivity
+}
+
+// Detail extends Summary with durable replay data and optional live activity.
 type Detail struct {
 	Summary    Summary
 	Transcript []ai.Message
+	Activity   Activity
 	Result     any
 }
 
