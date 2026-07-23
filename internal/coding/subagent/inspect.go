@@ -76,6 +76,9 @@ func (m *Manager) Inspect(
 		return Detail{}, fmt.Errorf("%w: invalid child session id", ErrInvalid)
 	}
 
+	m.journalMu.Lock()
+	defer m.journalMu.Unlock()
+
 	selected, err := m.findSummary(ctx, childSessionID)
 	if err != nil {
 		return Detail{}, err
@@ -140,6 +143,10 @@ func (m *Manager) inspectChild(
 	}
 
 	detail := Detail{Summary: selected, Transcript: contextValue.Messages}
+	if selected.State == StateCreated || selected.State == StateRunning {
+		detail = m.overlayLiveDetail(detail)
+	}
+
 	if selected.State == StateSucceeded {
 		text, ok := finalAssistantText(detail.Transcript)
 		if !ok {
@@ -228,9 +235,29 @@ func finalAssistantText(messages []ai.Message) (string, bool) {
 
 func cloneDetail(value Detail) Detail {
 	value.Transcript = cloneTranscript(value.Transcript)
+	value.Activity = cloneActivity(value.Activity)
 	value.Result = cloneResult(Result{Role: value.Summary.Role, Value: value.Result}).Value
 
 	return value
+}
+
+func (m *Manager) overlayLiveDetail(detail Detail) Detail {
+	active := m.activeExecution(detail.Summary.ChildSessionID)
+	if active == nil || active.tracker == nil {
+		return detail
+	}
+
+	snapshot, activity := active.tracker.snapshot()
+	detail.Activity = activity
+	detail.Summary.Turns = snapshot.turns
+	detail.Summary.ToolCalls = snapshot.toolCalls
+
+	detail.Summary.Usage = snapshot.usage
+	if !activity.StartedAt.IsZero() {
+		detail.Summary.Duration = max(0, time.Since(activity.StartedAt))
+	}
+
+	return detail
 }
 
 func cloneTranscript(messages []ai.Message) []ai.Message {

@@ -196,9 +196,11 @@ func TestAgentsCommandOpensCurrentSessionListAndDetail(t *testing.T) {
 	require.NotNil(t, inspect)
 	driveModelCommands(t, model, inspect)
 	content := model.View().Content
-	assert.Contains(t, content, "Subagent detail")
+	assert.Contains(t, content, "• Explored")
+	assert.Contains(t, content, "Task")
 	assert.Contains(t, content, "child-1")
 	assert.Contains(t, content, "Found it.")
+	assert.NotContains(t, content, "Transcript")
 
 	model.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	assert.Nil(t, model.overlay.agentDetail)
