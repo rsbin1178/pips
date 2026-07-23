@@ -1,8 +1,11 @@
 package tui
 
 import (
+	"strconv"
 	"strings"
+	"unicode"
 
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -45,7 +48,9 @@ func (m *Model) syncStreamingDraft(source string) (string, bool) {
 	// CommonMark soft-breaks can merge the following source row into that visual
 	// row, and committing it early would make line-count finalization drop text.
 	target := max(0, len(completeLines)-streamLiveTailHeight)
-	if tableStart, active := activeMarkdownTableStart(completeSource); active {
+
+	tableStart, tableActive := activeMarkdownTableStart(completeSource)
+	if tableActive {
 		target = len(m.renderStreamingLines(completeSource[:tableStart], stream.width))
 	}
 
@@ -60,15 +65,20 @@ func (m *Model) syncStreamingDraft(source string) (string, bool) {
 	promoted := strings.Join(completeLines[start:target], "\n")
 	stream.emitted += target - start
 
-	allLines := m.renderStreamingLines(source, stream.width)
-	tailStart := min(stream.emitted, len(allLines))
+	if tableActive {
+		stream.tail = m.renderStreamingTablePreview(completeSource[tableStart:])
+	} else {
+		allLines := m.renderStreamingLines(source, stream.width)
+		tailStart := min(stream.emitted, len(allLines))
 
-	tailLines := allLines[tailStart:]
-	if len(tailLines) > streamLiveTailHeight {
-		tailLines = tailLines[len(tailLines)-streamLiveTailHeight:]
+		tailLines := allLines[tailStart:]
+		if len(tailLines) > streamLiveTailHeight {
+			tailLines = tailLines[len(tailLines)-streamLiveTailHeight:]
+		}
+
+		stream.tail = strings.Join(tailLines, "\n")
 	}
 
-	stream.tail = strings.Join(tailLines, "\n")
 	if stream.tail == "" {
 		stream.tail = streamTailPlaceholder
 	} else {
@@ -76,6 +86,72 @@ func (m *Model) syncStreamingDraft(source string) (string, bool) {
 	}
 
 	return promoted, continuation
+}
+
+func (m *Model) renderStreamingTablePreview(source string) string {
+	label, row := streamingTablePreview(source)
+	if !m.options.NoColor {
+		label = lipgloss.NewStyle().
+			Foreground(paletteFor(m.theme).muted).
+			Render(label)
+	}
+
+	if row == "" {
+		return label
+	}
+
+	return label + " · " + row
+}
+
+func streamingTablePreview(source string) (string, string) {
+	lines := completedMarkdownLines(source)
+	if len(lines) < 2 || !markdownTableDelimiter(lines[1].text) {
+		return "Table · preparing…", ""
+	}
+
+	rowCount := 0
+	latestRow := ""
+
+	for _, line := range lines[2:] {
+		if !markdownTableRow(line.text) {
+			break
+		}
+
+		rowCount++
+		latestRow = normalizeTablePreviewRow(line.text)
+	}
+
+	if rowCount == 0 {
+		return "Table · 0 rows", ""
+	}
+
+	if rowCount == 1 {
+		return "Table · 1 row", latestRow
+	}
+
+	return "Table · " + strconv.Itoa(rowCount) + " rows", latestRow
+}
+
+func normalizeTablePreviewRow(row string) string {
+	row = ansi.Strip(row)
+	row = strings.Map(func(character rune) rune {
+		if unicode.IsControl(character) {
+			return -1
+		}
+
+		return character
+	}, row)
+
+	row = strings.TrimSpace(row)
+	if strings.HasPrefix(row, "|") {
+		row = strings.TrimSpace(row[1:])
+	}
+
+	if strings.HasSuffix(row, "|") {
+		row = strings.TrimSpace(row[:len(row)-1])
+	}
+
+	return row
 }
 
 func completedStreamSource(source string) string {

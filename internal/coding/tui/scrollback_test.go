@@ -423,14 +423,16 @@ func TestScrollbackUpdatesOneSubagentCardAndCommitsOnlyTerminal(t *testing.T) {
 	active := renderTimelineContent(
 		model.activeTimelineBlocks(), model.markdown, model.width, model.theme, true,
 	)
-	assert.Contains(t, active, "✻ Planning…")
+	assert.Contains(t, active, "✻ Plan · Plan the change")
+	assert.Contains(t, active, "Running")
 	assert.NotContains(t, active, subagent.ToolName)
 
 	model.state.Subagents[0].State = subagent.StateSucceeded
 	model.state.Subagents[0].Code = "ok"
 	model.state.Subagents[0].DurationMillis = 2_000
 	committed := model.takeStableTimeline()
-	assert.Contains(t, committed, "✻ Planned · 2s")
+	assert.Contains(t, committed, "✓ Plan · Plan the change")
+	assert.Contains(t, committed, "Completed in 2s")
 	assert.Empty(t, model.takeStableTimeline())
 }
 

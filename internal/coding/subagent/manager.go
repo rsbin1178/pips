@@ -125,18 +125,19 @@ func buildReadTools(config Config) ([]agent.Tool, error) {
 		return nil, err
 	}
 
+	names := []string{"read", "ls", "glob", "grep"}
 	policy := catalog.Policy{
 		TenantID:  config.Parent.Metadata().WorkspaceID,
-		Allowlist: []string{"read", "ls", "glob", "grep"},
+		Allowlist: slices.Clone(names),
 		MaxRisk:   catalog.RiskRead,
 	}
 
-	readTools, err := local.Tools(context.TODO(), policy, "read", "ls", "glob", "grep")
+	readTools, err := local.Tools(context.TODO(), policy, names...)
 	if err != nil {
 		return nil, err
 	}
 
-	for index, name := range []string{"read", "ls", "glob", "grep"} {
+	for index, name := range names {
 		if readTools[index].Decl().Name != name {
 			return nil, fmt.Errorf("%w: read-only catalog mismatch", ErrInvalid)
 		}
@@ -378,6 +379,17 @@ func (m *Manager) run(
 		return
 	}
 
+	useNativeResponseFormat := m.config.Model.Capabilities().StructuredOutput
+
+	instructions, instructionsErr := spec.instructionsFor(useNativeResponseFormat)
+	if instructionsErr != nil {
+		m.finishExecution(
+			ctx, execution, child, observer, created, tracker, startedAt, nil, instructionsErr,
+		)
+
+		return
+	}
+
 	onEvent := func(eventCtx context.Context, event agent.Event) {
 		m.observeChild(eventCtx, child, observer, created, tracker, event)
 	}
@@ -411,7 +423,7 @@ func (m *Manager) run(
 		) error {
 			text := messageText(info.Message)
 
-			value, err := spec.decode(text, m.limits)
+			value, err := spec.decodeResult(text, m.limits, !useNativeResponseFormat)
 			if err != nil {
 				return err
 			}
@@ -432,8 +444,11 @@ func (m *Manager) run(
 				request.MaxTokens = ai.Ptr(m.limits.MaxOutputTokens)
 			}
 
-			request.ResponseFormat = &ai.ResponseFormat{
-				Name: spec.name, Schema: spec.schema, Strict: true,
+			request.ResponseFormat = nil
+			if useNativeResponseFormat {
+				request.ResponseFormat = &ai.ResponseFormat{
+					Name: spec.name, Schema: spec.schema, Strict: true,
+				}
 			}
 		}),
 	}
@@ -441,7 +456,7 @@ func (m *Manager) run(
 	childHarness, err := harness.New(
 		m.config.Model,
 		child.Session(),
-		harness.WithSystem(spec.instructions),
+		harness.WithSystem(instructions),
 		harness.WithTools(m.tools...),
 		harness.WithOnEvent(onEvent),
 		harness.WithAgentOptions(options...),

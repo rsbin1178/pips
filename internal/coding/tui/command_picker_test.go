@@ -205,7 +205,7 @@ func TestAgentsCommandOpensCurrentSessionListAndDetail(t *testing.T) {
 	assert.Equal(t, overlayAgents, model.overlay.kind)
 }
 
-func TestCtrlTOpensSubagentFromDurableToolEnvelope(t *testing.T) {
+func TestCtrlTTogglesSubagentDetailFromDurableToolEnvelope(t *testing.T) {
 	t.Parallel()
 
 	state := readyState()
@@ -225,12 +225,17 @@ func TestCtrlTOpensSubagentFromDurableToolEnvelope(t *testing.T) {
 	}}
 	model := readyModelWithController(t, controller, true)
 
-	command := model.toggleLatestTool()
+	_, command := model.Update(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
 	require.NotNil(t, command)
 	driveModelCommands(t, model, command)
 	assert.Equal(t, []string{"child-durable"}, controller.agentInspections)
 	assert.Equal(t, overlayAgents, model.overlay.kind)
 	assert.NotNil(t, model.overlay.agentDetail)
+
+	model.Update(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
+	assert.Equal(t, overlayNone, model.overlay.kind)
+	assert.Nil(t, model.overlay.agentDetail)
+	assert.True(t, model.composer.Focused())
 }
 
 func lineIndexes(lines []string, value string) []int {

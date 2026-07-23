@@ -72,10 +72,11 @@ func TestStreamingTableStaysMutableUntilFinalized(t *testing.T) {
 	model.state.Draft = []coding.MessageDelta{{Kind: ai.StreamTextDelta, Text: source}}
 	first := commandOutput(model.commitStableTimeline())
 	assert.NotContains(t, ansi.Strip(first), "name")
+	assert.Equal(t, "Table · preparing…", ansi.Strip(model.streaming.tail))
 
 	managedHeight := lipgloss.Height(model.View().Content)
 
-	delta := "| --- | --- |\n| alpha | one |\n| beta | two |\n"
+	delta := "| --- | --- |\n| alpha"
 	source += delta
 	model.state.Draft = append(model.state.Draft, coding.MessageDelta{
 		Kind: ai.StreamTextDelta,
@@ -83,15 +84,102 @@ func TestStreamingTableStaysMutableUntilFinalized(t *testing.T) {
 	})
 	second := commandOutput(model.commitStableTimeline())
 	assert.NotContains(t, ansi.Strip(second), "alpha")
+	assert.Equal(t, "Table · 0 rows", ansi.Strip(model.streaming.tail))
+	assert.Equal(t, managedHeight, lipgloss.Height(model.View().Content))
+
+	delta = " | one |\n| beta"
+	source += delta
+	model.state.Draft = append(model.state.Draft, coding.MessageDelta{
+		Kind: ai.StreamTextDelta,
+		Text: delta,
+	})
+	third := commandOutput(model.commitStableTimeline())
+	assert.NotContains(t, ansi.Strip(third), "alpha")
+	assert.Equal(t, "Table · 1 row · alpha | one", ansi.Strip(model.streaming.tail))
+	assert.Equal(t, managedHeight, lipgloss.Height(model.View().Content))
+
+	delta = " | two"
+	source += delta
+	model.state.Draft = append(model.state.Draft, coding.MessageDelta{
+		Kind: ai.StreamTextDelta,
+		Text: delta,
+	})
+	fourth := commandOutput(model.commitStableTimeline())
+	assert.Empty(t, fourth)
+	assert.Equal(
+		t,
+		"Table · 1 row · alpha | one",
+		ansi.Strip(model.streaming.tail),
+		"an incomplete row must not change the table preview",
+	)
+	assert.Equal(t, managedHeight, lipgloss.Height(model.View().Content))
+
+	delta = " |\n"
+	source += delta
+	model.state.Draft = append(model.state.Draft, coding.MessageDelta{
+		Kind: ai.StreamTextDelta,
+		Text: delta,
+	})
+	fifth := commandOutput(model.commitStableTimeline())
+	assert.NotContains(t, ansi.Strip(fifth), "beta")
+	assert.Equal(t, "Table · 2 rows · beta | two", ansi.Strip(model.streaming.tail))
 	assert.Equal(t, managedHeight, lipgloss.Height(model.View().Content))
 
 	model.state.Transcript = []ai.Message{ai.AssistantText(source)}
 	model.state.Draft = nil
 	final := commandOutput(model.commitStableTimeline())
-	combined := ansi.Strip(first + "\n" + second + "\n" + final)
+	combined := ansi.Strip(strings.Join(
+		[]string{first, second, third, fourth, fifth, final},
+		"\n",
+	))
 
 	for _, value := range []string{"alpha", "beta", "one", "two"} {
 		assert.Equalf(t, 1, strings.Count(combined, value), "cell %q", value)
+	}
+
+	assert.NotContains(t, combined, "Table ·")
+}
+
+func TestStreamingLongTableKeepsFixedPreviewHeight(t *testing.T) {
+	t.Parallel()
+
+	model := readyModel(t, true)
+	model.Update(tea.WindowSizeMsg{Width: 48, Height: 14})
+	model.scrollbackOutput = false
+	model.state.Phase = coding.PhaseRunning
+	model.state.Interaction.Active = true
+
+	var source strings.Builder
+
+	source.WriteString("| name | result |\n| --- | --- |\n")
+	model.state.Draft = []coding.MessageDelta{{
+		Kind: ai.StreamTextDelta,
+		Text: source.String(),
+	}}
+	assert.Empty(t, commandOutput(model.commitStableTimeline()))
+	managedHeight := lipgloss.Height(model.View().Content)
+
+	for index := 1; index <= 40; index++ {
+		delta := fmt.Sprintf("| row_%02d | value_%02d |\n", index, index)
+		source.WriteString(delta)
+		model.state.Draft = append(model.state.Draft, coding.MessageDelta{
+			Kind: ai.StreamTextDelta,
+			Text: delta,
+		})
+
+		assert.Empty(t, commandOutput(model.commitStableTimeline()))
+		assert.Contains(t, ansi.Strip(model.streaming.tail), fmt.Sprintf("Table · %d ", index))
+		assert.Equal(t, managedHeight, lipgloss.Height(model.View().Content))
+	}
+
+	model.state.Transcript = []ai.Message{ai.AssistantText(source.String())}
+	model.state.Draft = nil
+	final := ansi.Strip(commandOutput(model.commitStableTimeline()))
+	assert.NotContains(t, final, "Table ·")
+
+	for index := 1; index <= 40; index++ {
+		assert.Equal(t, 1, strings.Count(final, fmt.Sprintf("row_%02d", index)))
+		assert.Equal(t, 1, strings.Count(final, fmt.Sprintf("value_%02d", index)))
 	}
 }
 
