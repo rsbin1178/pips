@@ -488,6 +488,12 @@ func (r *Runtime) openInteraction(
 	}
 
 	policy := catalog.AllowAll(r.workspace.Identity().Key(), catalog.RiskPrivileged)
+	descriptors, err := merged.Search(ctx, policy, "")
+	if err != nil {
+		return nil, err
+	}
+	current.changeTracker = newInteractionChangeTracker(r.inspector, descriptors)
+
 	search, err := catalog.NewToolSearch(merged, policy, catalog.ToolSearchOptions{
 		Enabled: r.config.ToolSearch,
 	})
@@ -511,6 +517,7 @@ func (r *Runtime) openInteraction(
 	controlHooks := extensionHooks
 	controlHooks.Observe = nil
 	composed := extension.ComposeHooks(
+		extension.Hooks{BeforeTool: current.changeTracker.beforeTool},
 		controlHooks,
 		extension.Hooks{BeforeTool: r.controller.BeforeTool},
 		extension.Hooks{PrepareTurn: search.PrepareTurn},
@@ -546,21 +553,14 @@ func (r *Runtime) openInteraction(
 	current.search = search
 	current.observer = extensionObserver
 
-	baseline, captureErr := r.inspector.Capture(ctx)
-	if captureErr == nil {
-		current.baseline = baseline
-		current.hasBaseline = true
-	} else {
-		code := "capture_failed"
-		if errors.Is(captureErr, git.ErrNotRepository) {
-			code = "not_repository"
+	if resumed {
+		pending, err := r.session.Pending()
+		if err != nil {
+			return nil, err
 		}
 
-		if err := emitter.emit(interactionID, "", EventIntegrationDiagnostic, IntegrationDiagnostic{
-			Component: "changes", Code: code,
-			Message:  "workspace change attribution is unavailable for this interaction",
-			Disabled: true,
-		}); err != nil {
+		current.changeTracker.preparePending(ctx, pending)
+		if err := r.emitChangeDiagnostic(current, emitter); err != nil {
 			r.pending.clear()
 			r.resolver.set(nil)
 
@@ -653,6 +653,9 @@ func (r *Runtime) driveHarness(
 			if err := r.emitObserverDiagnostics(current, emitter); err != nil {
 				return "", err
 			}
+			if err := r.emitChangeDiagnostic(current, emitter); err != nil {
+				return "", err
+			}
 		}
 
 		if streamErr != nil {
@@ -692,6 +695,18 @@ func (r *Runtime) emitObserverDiagnostics(
 	}
 
 	return nil
+}
+
+func (r *Runtime) emitChangeDiagnostic(
+	current *interaction,
+	emitter *eventEmitter,
+) error {
+	diagnostic, ok := current.changeTracker.drainDiagnostic()
+	if !ok {
+		return nil
+	}
+
+	return emitter.emit(current.id, "", EventIntegrationDiagnostic, diagnostic)
 }
 
 func (r *Runtime) emitRunError(
@@ -860,16 +875,16 @@ func (r *Runtime) finishInteraction(
 	}
 
 	errs := make([]error, 0, 4)
-	if current.hasBaseline {
-		report, err := r.inspector.Changes(ctx, current.baseline)
-		if err != nil {
-			diagnosticErr := emitter.emit(current.id, "", EventIntegrationDiagnostic, IntegrationDiagnostic{
-				Component: "changes", Code: "report_failed",
-				Message:  "workspace change attribution failed",
-				Disabled: true,
-			})
-			errs = append(errs, diagnosticErr)
-		} else if err := emitter.emit(
+	if err := r.emitChangeDiagnostic(current, emitter); err != nil {
+		errs = append(errs, err)
+	}
+
+	report, hasReport := current.changeTracker.finish(ctx)
+	if err := r.emitChangeDiagnostic(current, emitter); err != nil {
+		errs = append(errs, err)
+	}
+	if hasReport {
+		if err := emitter.emit(
 			current.id,
 			"",
 			EventWorkspaceChanged,

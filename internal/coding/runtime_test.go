@@ -41,6 +41,9 @@ func TestRuntimePromptStreamsAndPersistsOneInteraction(t *testing.T) {
 	assert.Contains(t, eventTypes(events), EventInteractionStarted)
 	assert.Contains(t, eventTypes(events), EventRunCompleted)
 	assert.Contains(t, eventTypes(events), EventInteractionCompleted)
+	assert.NotContains(t, eventTypes(events), EventWorkspaceChanged)
+	assert.Zero(t, countDiagnostic(events, "changes", "report_failed"))
+	assert.Zero(t, countDiagnostic(events, "changes", "not_repository"))
 
 	snapshot := runtime.Snapshot()
 	assert.Equal(t, PhaseIdle, snapshot.Phase)
@@ -402,6 +405,12 @@ func TestRuntimeContinueRestoresPendingInteraction(t *testing.T) {
 
 	continued := collectRuntimeEvents(t, second.Continue(t.Context()))
 	assert.Contains(t, eventTypes(continued), EventApprovalRequired)
+	assert.Equal(t, 1, countDiagnostic(continued, "changes", "not_repository"))
+	assert.Less(
+		t,
+		slices.Index(eventTypes(continued), EventIntegrationDiagnostic),
+		slices.Index(eventTypes(continued), EventApprovalRequired),
+	)
 	requestID := second.Snapshot().Approval.Required.RequestID
 
 	collectRuntimeEvents(t, second.Resolve(t.Context(), approval.Resolution{

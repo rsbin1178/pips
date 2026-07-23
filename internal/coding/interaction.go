@@ -13,7 +13,6 @@ import (
 	"github.com/rsbin/pips/agent/extension"
 	"github.com/rsbin/pips/agent/harness"
 	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/internal/coding/changes"
 	"github.com/rsbin/pips/internal/coding/execution"
 )
 
@@ -27,8 +26,7 @@ type interaction struct {
 	activation    *extension.Activation
 	harness       *harness.Harness
 	search        *catalog.ToolSearch
-	baseline      changes.Snapshot
-	hasBaseline   bool
+	changeTracker *interactionChangeTracker
 	usage         TokenUsage
 	subagentUsage map[string]struct{}
 	runIDs        []string
