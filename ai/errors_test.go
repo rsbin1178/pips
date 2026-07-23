@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"testing"
 	"time"
 
@@ -100,6 +101,14 @@ func TestIsRetryable(t *testing.T) {
 		{"context deadline", context.DeadlineExceeded, false},
 		{"wrapped cancel", fmt.Errorf("do: %w", context.Canceled), false},
 		{"net timeout", &net.OpError{Op: "dial", Err: timeoutError{}}, true},
+		{
+			"TLS handshake timeout",
+			fmt.Errorf(
+				"openai stream: %w",
+				&url.Error{Op: "Post", URL: "https://example.invalid", Err: errors.New("net/http: TLS handshake timeout")},
+			),
+			true,
+		},
 		{"plain transport error", errors.New("connection reset by peer"), true},
 		{"wrapped rate limit", fmt.Errorf("call: %w", ai.NewError(ai.ProviderOpenAI, 429, "x")), true},
 	}

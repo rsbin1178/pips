@@ -58,7 +58,7 @@ func New(
 			options = append(options, openai.WithAllowPrivateIPs())
 		}
 
-		return openai.New(resolved.Ref.Model, options...), nil
+		return withCodingRetry(openai.New(resolved.Ref.Model, options...)), nil
 	case config.ProtocolAnthropicMessages:
 		options := []anthropic.Option{
 			anthropic.WithAPIKey(secret.APIKey()),
@@ -72,7 +72,7 @@ func New(
 			options = append(options, anthropic.WithAllowPrivateIPs())
 		}
 
-		return anthropic.New(resolved.Ref.Model, options...), nil
+		return withCodingRetry(anthropic.New(resolved.Ref.Model, options...)), nil
 	case config.ProtocolGeminiGenerateContent:
 		options := []gemini.Option{
 			gemini.WithAPIKey(secret.APIKey()),
@@ -86,7 +86,7 @@ func New(
 			options = append(options, gemini.WithAllowPrivateIPs())
 		}
 
-		return gemini.New(resolved.Ref.Model, options...), nil
+		return withCodingRetry(gemini.New(resolved.Ref.Model, options...)), nil
 	default:
 		return nil, fmt.Errorf("%w: unsupported protocol %q", ErrInvalid, resolved.Protocol)
 	}
