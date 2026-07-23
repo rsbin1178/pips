@@ -17,6 +17,7 @@ import (
 	"github.com/rsbin/pips/internal/coding/modelcatalog"
 	"github.com/rsbin/pips/internal/coding/paths"
 	"github.com/rsbin/pips/internal/coding/session"
+	"github.com/rsbin/pips/internal/coding/subagent"
 	"github.com/rsbin/pips/internal/coding/workspace"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -466,6 +467,14 @@ func (*fakeRuntime) Compact(
 
 func (r *fakeRuntime) Fork(_ context.Context, _ string) (string, error) {
 	return r.state.SessionID + "-fork", nil
+}
+
+func (*fakeRuntime) ListSubagents(context.Context) ([]subagent.Summary, error) {
+	return nil, nil
+}
+
+func (*fakeRuntime) InspectSubagent(context.Context, string) (subagent.Detail, error) {
+	return subagent.Detail{}, nil
 }
 
 func (r *fakeRuntime) Snapshot() coding.State {

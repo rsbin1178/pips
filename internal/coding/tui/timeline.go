@@ -3,12 +3,14 @@ package tui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding"
+	"github.com/rsbin/pips/internal/coding/subagent"
 )
 
 type blockKind uint8
@@ -22,6 +24,7 @@ const (
 	blockChange
 	blockError
 	blockCompletion
+	blockSubagent
 )
 
 type timelineBlock struct {
@@ -31,6 +34,7 @@ type timelineBlock struct {
 	body     string
 	status   string
 	position int
+	rendered bool
 }
 
 type completionMarker struct {
@@ -42,7 +46,7 @@ type completionMarker struct {
 
 //nolint:gocyclo // One projection pass makes every public Coding event visibly exhaustive.
 func projectTimeline(state coding.State) []timelineBlock {
-	blocks := make([]timelineBlock, 0, len(state.Transcript)+len(state.Tools)+4)
+	blocks := make([]timelineBlock, 0, len(state.Transcript)+len(state.Tools)+len(state.Subagents)+4)
 	tools := make(map[string]coding.ToolState, len(state.Tools))
 	for _, tool := range state.Tools {
 		tools[tool.Call.ID] = tool
@@ -59,6 +63,10 @@ func projectTimeline(state coding.State) []timelineBlock {
 				}
 				tool, exists := tools[result.ToolCallID]
 				if !exists {
+					continue
+				}
+				if tool.Call.Name == subagent.ToolName {
+					projectedTools[result.ToolCallID] = struct{}{}
 					continue
 				}
 				block := projectTool(tool)
@@ -96,9 +104,16 @@ func projectTimeline(state coding.State) []timelineBlock {
 		if _, exists := projectedTools[tool.Call.ID]; exists {
 			continue
 		}
+		if tool.Call.Name == subagent.ToolName {
+			continue
+		}
 		block := projectTool(tool)
 		block.position = len(state.Transcript)
 		blocks = append(blocks, block)
+	}
+
+	for _, child := range state.Subagents {
+		blocks = append(blocks, projectSubagent(child, len(state.Transcript)))
 	}
 
 	draft := visibleDraftText(state.Draft)
@@ -142,6 +157,77 @@ func projectTimeline(state coding.State) []timelineBlock {
 	}
 
 	return blocks
+}
+
+func projectSubagent(value coding.SubagentState, position int) timelineBlock {
+	roleRunning, roleDone := subagentRoleLabels(value.Role)
+	title := "✻ " + roleRunning + "…"
+	status := string(value.State)
+	if isTerminalSubagent(value.State) {
+		title = terminalSubagentTitle(roleDone, value)
+	}
+
+	return timelineBlock{
+		kind: blockSubagent, id: value.ChildSessionID, title: title,
+		body: value.TaskPreview, status: status, position: position,
+	}
+}
+
+func terminalSubagentTitle(roleDone string, value coding.SubagentState) string {
+	title := "✻ " + roleDone
+	facts := subagentFacts(value)
+	if len(facts) > 0 {
+		title += " · " + strings.Join(facts, " · ")
+	}
+	if value.State != subagent.StateSucceeded && value.Code != "" {
+		title += " · " + value.Code
+	}
+
+	return title
+}
+
+func subagentFacts(value coding.SubagentState) []string {
+	facts := make([]string, 0, 3)
+	if value.DurationMillis > 0 {
+		facts = append(facts, formatInteractionDuration(value.DurationMillis))
+	}
+	if value.ToolCalls > 0 {
+		facts = append(facts, fmt.Sprintf("%d tools", value.ToolCalls))
+	}
+	if tokens := value.Usage.InputTokens + value.Usage.OutputTokens; tokens > 0 {
+		facts = append(facts, compactTokenCount(tokens)+" tokens")
+	}
+
+	return facts
+}
+
+func subagentRoleLabels(role subagent.Role) (string, string) {
+	switch role {
+	case subagent.RoleExplore:
+		return "Exploring", "Explored"
+	case subagent.RolePlan:
+		return "Planning", "Planned"
+	case subagent.RoleReview:
+		return "Reviewing", "Reviewed"
+	default:
+		return "Working", "Worked"
+	}
+}
+
+func isTerminalSubagent(state subagent.State) bool {
+	return state == subagent.StateSucceeded || state == subagent.StateFailed ||
+		state == subagent.StateCanceled || state == subagent.StateInterrupted
+}
+
+func compactTokenCount(value int) string {
+	if value < 1000 {
+		return strconv.Itoa(value)
+	}
+	if value < 1000000 {
+		return fmt.Sprintf("%.1fk", float64(value)/1000)
+	}
+
+	return fmt.Sprintf("%.1fm", float64(value)/1000000)
 }
 
 func insertCompletionMarkers(
@@ -336,21 +422,25 @@ func renderTimelineBlock(
 	noColor bool,
 ) string {
 	body := block.body
-	if block.kind == blockAssistant || block.kind == blockDraft {
+	if !block.rendered && (block.kind == blockAssistant || block.kind == blockDraft) {
 		if value, err := markdown.render(body, max(1, width-2), theme, noColor); err == nil {
 			body = value
 		}
 	}
 
 	title := block.title
-	if block.status != "" {
+	if block.status != "" && block.kind != blockSubagent {
 		if title != "" {
 			title += " · "
 		}
 		title += block.status
 	}
 	if title != "" && !noColor {
-		title = timelineTitleStyle(block.kind, theme).Render(title)
+		style := timelineTitleStyle(block.kind, theme)
+		if block.kind == blockSubagent {
+			style = subagentTitleStyle(block.status, theme)
+		}
+		title = style.Render(title)
 	}
 	if strings.TrimSpace(body) == "" {
 		return title
@@ -428,6 +518,11 @@ func timelineTitleStyle(kind blockKind, theme colorTheme) lipgloss.Style {
 	case blockError:
 		color = "#FF5F5F"
 	case blockCompletion:
+	case blockSubagent:
+		color = "#AF87FF"
+		if theme == themeLight {
+			color = "#8250DF"
+		}
 	case blockDiagnostic:
 		if theme == themeLight {
 			color = "#586069"
@@ -435,4 +530,20 @@ func timelineTitleStyle(kind blockKind, theme colorTheme) lipgloss.Style {
 	}
 
 	return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(color))
+}
+
+func subagentTitleStyle(status string, theme colorTheme) lipgloss.Style {
+	palette := paletteFor(theme)
+	color := palette.model
+	switch subagent.State(status) {
+	case subagent.StateCreated, subagent.StateRunning:
+	case subagent.StateSucceeded:
+		color = palette.idle
+	case subagent.StateFailed:
+		color = palette.error
+	case subagent.StateCanceled, subagent.StateInterrupted:
+		color = palette.warning
+	}
+
+	return lipgloss.NewStyle().Bold(true).Foreground(color)
 }

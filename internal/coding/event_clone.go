@@ -63,6 +63,8 @@ func cloneEventPayload(payload EventPayload) EventPayload {
 		value.Result = cloneMessage(value.Result)
 
 		return value
+	case SubagentLifecycle:
+		return value
 	case ApprovalRequired:
 		return cloneApprovalRequired(value)
 	case ApprovalUnknown:

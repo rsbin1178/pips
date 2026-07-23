@@ -73,6 +73,12 @@ func TestObserverEmitsContentFreeProductSignals(t *testing.T) {
 			Usage: coding.TokenUsage{InputTokens: 11, OutputTokens: 3},
 		},
 		{
+			Type: coding.EventSubagentCompleted, Time: at.Add(4500 * time.Millisecond),
+			SubagentRole: "explore", SubagentState: "succeeded",
+			ModelID: "openai/test", Code: "ok", Turns: 2, ToolCalls: 8,
+			DurationMillis: 125, Usage: coding.TokenUsage{InputTokens: 100, OutputTokens: 20},
+		},
+		{
 			Type: coding.EventSessionClosed, Time: at.Add(5 * time.Second), Code: "closed",
 		},
 	}
@@ -99,6 +105,7 @@ func TestObserverEmitsContentFreeProductSignals(t *testing.T) {
 		"coding.compaction.completed",
 		"coding.integration.diagnostic",
 		"coding.interaction",
+		"coding.subagent.completed",
 		"coding.session.closed",
 	}, names)
 
@@ -116,6 +123,8 @@ func TestObserverEmitsContentFreeProductSignals(t *testing.T) {
 		"pips.coding.approvals",
 		"pips.coding.workspace.changes",
 		"pips.coding.integration.diagnostics",
+		"pips.coding.subagents",
+		"pips.coding.subagent.duration",
 	}, meterProvider.instrumentNames())
 }
 

@@ -79,7 +79,7 @@ func TestAgentProjectorMapsLifecycle(t *testing.T) {
 	projector, err := newAgentProjector(writer, "interaction-1")
 	require.NoError(t, err)
 
-	call := ai.ToolCallPart{ID: "call-1", Name: "read_file", Args: ai.JSON(`{"path":"main.go"}`)}
+	call := ai.ToolCallPart{ID: "call-1", Name: "read", Args: ai.JSON(`{"path":"main.go"}`)}
 	result := ai.ToolResultPart{
 		ToolCallID: call.ID, Name: call.Name, Content: []ai.Part{ai.Text("done")},
 	}

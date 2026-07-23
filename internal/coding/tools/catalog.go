@@ -73,25 +73,25 @@ func NewCatalog(
 	}
 
 	service := &service{tree: tree, limits: limits}
-	read := agent.Parallel(agent.NewTool(
-		readFileName,
+	readTool := agent.Parallel(agent.NewTool(
+		readName,
 		"Read a bounded range of lines from a workspace text file. Use offset to continue truncated output.",
-		service.readFile,
+		service.read,
 	))
-	list := agent.Parallel(agent.NewTool(
-		listDirName,
+	lsTool := agent.Parallel(agent.NewTool(
+		lsName,
 		"List one workspace directory in stable name order without recursive traversal.",
-		service.listDir,
+		service.ls,
 	))
-	find := agent.Parallel(agent.NewTool(
-		findFilesName,
+	globTool := agent.Parallel(agent.NewTool(
+		globName,
 		"Find workspace files with a slash-separated glob. Use ** for recursive matching.",
-		service.findFiles,
+		service.glob,
 	))
-	search := agent.Parallel(agent.NewTool(
-		searchTextName,
-		"Search bounded workspace text files using literal text or a Go RE2 regular expression.",
-		service.searchText,
+	grepTool := agent.Parallel(agent.NewTool(
+		grepName,
+		"Search bounded workspace text files using a Go RE2 regular expression. Set fixed_strings for literal matching.",
+		service.grep,
 	))
 	patch := agent.NewTool(
 		applyPatchName,
@@ -100,10 +100,10 @@ func NewCatalog(
 	)
 
 	entries := []catalog.Entry{
-		localEntry(read, catalog.RiskRead, "filesystem"),
-		localEntry(list, catalog.RiskRead, "filesystem"),
-		localEntry(find, catalog.RiskRead, "filesystem", "search"),
-		localEntry(search, catalog.RiskRead, "filesystem", "search"),
+		localEntry(readTool, catalog.RiskRead, "filesystem"),
+		localEntry(lsTool, catalog.RiskRead, "filesystem"),
+		localEntry(globTool, catalog.RiskRead, "filesystem", "search"),
+		localEntry(grepTool, catalog.RiskRead, "filesystem", "search"),
 		localEntry(patch, catalog.RiskWrite, "filesystem", "mutation"),
 	}
 	if config.shell != nil {

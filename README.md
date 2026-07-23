@@ -42,6 +42,10 @@ Go building blocks for AI applications. Current packages:
 `cmd/pips` is being built as a local, terminal-first coding agent. Its P0
 execution foundation now includes Workspace-confined file tools, durable Shell
 approval, native OS command isolation, and read-only Git change attribution.
+It also includes durable, read-only Explore, Plan, and Review specialists
+invoked through the synchronous `run_subagent` Tool. Each specialist receives
+only `read`, `ls`, `glob`, and `grep`, with an independent transcript and
+bounded execution budget.
 The single-session Runtime now composes durable Harness state, immutable
 Extension/Skill/MCP generations, approval continuation, change attribution,
 typed product events, and optional telemetry. The default command now opens a
@@ -87,8 +91,8 @@ security details.
 
 Coding observability has two deliberate inputs. Raw `agent.Event` observers
 receive run/turn/tool signals through the Harness boundary; content-free
-`coding.TelemetryEvent` observers receive session, interaction, approval,
-change, and integration signals. The optional Coding OpenTelemetry adapter
+`coding.TelemetryEvent` observers receive session, interaction, subagent,
+approval, change, and integration signals. The optional Coding OpenTelemetry adapter
 accepts application-owned providers and never creates exporters or shuts down
 providers:
 
@@ -139,8 +143,13 @@ for transcript scrolling.
 | Scroll / return to latest | `PageUp`, `PageDown`, `End`, or mouse wheel |
 | Cancel operation / clear draft / confirm exit | `Ctrl+C` or `Esc` |
 
-The command palette provides `/new`, `/resume`, `/model`, `/diff`, `/reload`,
-`/status`, `/help`, and `/quit`. Approval is fail-closed: review defaults to
+`Ctrl+T` opens the dedicated child detail when the latest Tool is
+`run_subagent`; other Tools retain ordinary expansion behavior.
+
+The command palette provides `/new`, `/resume`, `/agents`, `/model`, `/tree`,
+`/fork`, `/compact`, `/diff`, `/reload`, `/status`, `/help`, and `/quit`.
+`/agents` lists only the specialists owned by the current conversation and can
+open their durable transcript and structured result. Approval is fail-closed: review defaults to
 deny, Enter applies only the highlighted Runtime-provided choice, and an
 unknown outcome exposes only retry, mark-failed, or acknowledge when the
 Runtime declares them.
@@ -151,8 +160,9 @@ history and `config.toml` are not modified. Restarting pips returns to the
 normal default/user-file/env/flag selection. Existing Session model metadata
 is tolerated for compatibility and ignored.
 
-Set `NO_COLOR=1` for an ASCII, color-free view. The TUI uses the alternate
-screen and restores terminal mode before closing its Runtime, including
+Set `NO_COLOR=1` for an ASCII, color-free view. The TUI stays in the terminal's
+main buffer so stable conversation output remains selectable and scrollable,
+and restores terminal mode before closing its Runtime, including
 Ctrl+C, SIGINT/SIGTERM, startup failure, and normal exit paths.
 
 ## Design highlights

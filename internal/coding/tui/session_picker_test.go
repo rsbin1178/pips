@@ -38,11 +38,19 @@ func TestSessionPickerFiltersAndResumesExactlyOnce(t *testing.T) {
 	assert.Nil(t, duplicate)
 	assert.True(t, model.sessionPicker.controlling)
 
-	model.Update(resume())
+	_, committed := model.Update(resume())
+	driveModelCommands(t, model, committed)
 	assert.Equal(t, []string{"beta"}, controller.resumed)
 	assert.Equal(t, "beta", model.state.SessionID)
 	assert.False(t, model.sessionPicker.open)
 	assert.Empty(t, model.composer.Value())
+	assert.True(t, model.composer.Focused())
+	view := model.View()
+	require.NotNil(t, view.Cursor)
+	lines := strings.Split(ansi.Strip(view.Content), "\n")
+	composerLine := lineContaining(lines, inputArrow)
+	require.NotEqual(t, -1, composerLine)
+	assert.Equal(t, composerLine+model.composer.Cursor().Y, view.Cursor.Y)
 }
 
 func TestSessionPickerRendersFullWidthSearchAndSessionMetadata(t *testing.T) {

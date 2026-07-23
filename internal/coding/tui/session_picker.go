@@ -82,6 +82,7 @@ func (m *Model) closeSessionPicker(restoreInput bool) {
 	} else {
 		m.composer.Reset()
 	}
+	m.composer.Focus()
 	m.setLayout()
 }
 

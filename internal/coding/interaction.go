@@ -20,18 +20,36 @@ import (
 const maxPendingErrorBytes = 16 << 10
 
 type interaction struct {
-	id          string
-	startedAt   time.Time
-	resumed     bool
-	activation  *extension.Activation
-	harness     *harness.Harness
-	search      *catalog.ToolSearch
-	baseline    changes.Snapshot
-	hasBaseline bool
-	usage       TokenUsage
-	runIDs      []string
-	activeRunID string
-	observer    *guardedAgentObserver
+	mu            sync.Mutex
+	id            string
+	startedAt     time.Time
+	resumed       bool
+	activation    *extension.Activation
+	harness       *harness.Harness
+	search        *catalog.ToolSearch
+	baseline      changes.Snapshot
+	hasBaseline   bool
+	usage         TokenUsage
+	subagentUsage map[string]struct{}
+	runIDs        []string
+	activeRunID   string
+	observer      *guardedAgentObserver
+}
+
+func (i *interaction) addSubagentUsage(childSessionID string, usage TokenUsage) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	if i.subagentUsage == nil {
+		i.subagentUsage = make(map[string]struct{})
+	}
+
+	if _, exists := i.subagentUsage[childSessionID]; exists {
+		return
+	}
+
+	i.subagentUsage[childSessionID] = struct{}{}
+	addUsage(&i.usage, usage)
 }
 
 type guardedAgentObserver struct {
@@ -179,6 +197,14 @@ func (r *pendingRunner) RunPending(
 
 	tool := snapshot.tools[call.Name]
 	if tool == nil {
+		if isLegacyCodingTool(call.Name) {
+			return nil, fmt.Errorf(
+				"%w: legacy_tool_call_unresolved (%s)",
+				ErrLegacyToolCallUnresolved,
+				call.Name,
+			)
+		}
+
 		return nil, fmt.Errorf("coding runtime: pending tool %q is unavailable", call.Name)
 	}
 
@@ -261,6 +287,15 @@ func (r *pendingRunner) RunPending(
 	}()
 
 	return tool.Exec(toolCtx, call)
+}
+
+func isLegacyCodingTool(name string) bool {
+	switch name {
+	case "read_file", "list_dir", "find_files", "search_text":
+		return true
+	default:
+		return false
+	}
 }
 
 func callPendingGate(

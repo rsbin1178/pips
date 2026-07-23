@@ -68,7 +68,7 @@ func visualIdleState() coding.State {
 		ai.AssistantText("## Event bridge\n\nThe bridge is **bounded** and cancellation-aware."),
 	}
 	state.Tools = []coding.ToolState{{
-		Call:   coding.ToolCall{ID: "call-1", Name: "read_file"},
+		Call:   coding.ToolCall{ID: "call-1", Name: "read"},
 		Status: coding.ToolStatusCompleted,
 	}}
 	state.Changes = &coding.WorkspaceChanged{

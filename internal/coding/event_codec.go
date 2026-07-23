@@ -157,6 +157,10 @@ func decodeEventPayload(eventType EventType, data []byte) (EventPayload, error) 
 		return decodePayload[ToolUpdated](data)
 	case EventToolCompleted:
 		return decodePayload[ToolCompleted](data)
+	case EventSubagentCreated, EventSubagentStarted, EventSubagentProgress,
+		EventSubagentCompleted, EventSubagentFailed, EventSubagentCanceled,
+		EventSubagentInterrupted:
+		return decodePayload[SubagentLifecycle](data)
 	case EventApprovalRequired:
 		return decodePayload[ApprovalRequired](data)
 	case EventApprovalUnknown:

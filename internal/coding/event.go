@@ -18,6 +18,7 @@ import (
 	"github.com/rsbin/pips/internal/coding/approval"
 	"github.com/rsbin/pips/internal/coding/changes"
 	"github.com/rsbin/pips/internal/coding/config"
+	"github.com/rsbin/pips/internal/coding/subagent"
 )
 
 const (
@@ -63,6 +64,13 @@ const (
 	EventToolStarted           EventType = "tool.started"
 	EventToolUpdated           EventType = "tool.updated"
 	EventToolCompleted         EventType = "tool.completed"
+	EventSubagentCreated       EventType = "subagent.created"
+	EventSubagentStarted       EventType = "subagent.started"
+	EventSubagentProgress      EventType = "subagent.progress"
+	EventSubagentCompleted     EventType = "subagent.completed"
+	EventSubagentFailed        EventType = "subagent.failed"
+	EventSubagentCanceled      EventType = "subagent.canceled"
+	EventSubagentInterrupted   EventType = "subagent.interrupted"
 	EventApprovalRequired      EventType = "approval.required"
 	EventApprovalUnknown       EventType = "approval.unknown"
 	EventApprovalResolved      EventType = "approval.resolved"
@@ -268,6 +276,25 @@ type ToolCompleted struct {
 	Result ai.Message `json:"result"`
 }
 
+// SubagentLifecycle is one content-bounded specialist lifecycle projection.
+// Child transcript, Tool arguments, paths, and structured results are loaded
+// from the child Session only and never copied into this payload.
+type SubagentLifecycle struct {
+	Role           subagent.Role    `json:"role"`
+	State          subagent.State   `json:"state"`
+	ChildSessionID string           `json:"child_session_id"`
+	ParentRunID    string           `json:"parent_run_id"`
+	ChildRunID     string           `json:"child_run_id,omitempty"`
+	Model          string           `json:"model"`
+	TaskPreview    string           `json:"task_preview,omitempty"`
+	Code           string           `json:"code,omitempty"`
+	Stop           agent.StopReason `json:"stop,omitempty"`
+	Turns          int              `json:"turns"`
+	ToolCalls      int              `json:"tool_calls"`
+	Usage          TokenUsage       `json:"usage"`
+	DurationMillis int64            `json:"duration_ms"`
+}
+
 // ApprovalRequired describes an exact pending operation for the approval overlay.
 type ApprovalRequired struct {
 	RequestID     string            `json:"request_id"`
@@ -362,6 +389,7 @@ func (MessageDelta) eventPayload()          {}
 func (ToolStarted) eventPayload()           {}
 func (ToolUpdated) eventPayload()           {}
 func (ToolCompleted) eventPayload()         {}
+func (SubagentLifecycle) eventPayload()     {}
 func (ApprovalRequired) eventPayload()      {}
 func (ApprovalUnknown) eventPayload()       {}
 func (ApprovalResolved) eventPayload()      {}
@@ -423,7 +451,9 @@ func validateEnvelopeIDs(event Event) error {
 		}
 	case EventRunStarted, EventRunCompleted, EventTurnStarted, EventTurnCompleted,
 		EventMessageCommitted, EventMessageDelta, EventToolStarted, EventToolUpdated,
-		EventToolCompleted:
+		EventToolCompleted, EventSubagentCreated, EventSubagentStarted,
+		EventSubagentProgress, EventSubagentCompleted, EventSubagentFailed,
+		EventSubagentCanceled, EventSubagentInterrupted:
 		if event.InteractionID == "" || event.RunID == "" {
 			return invalidEvent("%s requires interaction and run ids", event.Type)
 		}
@@ -536,6 +566,10 @@ func validatePayload(eventType EventType, payload EventPayload) error {
 			validateToolMessage(value.Result, value.Call.ID, true) != nil {
 			return invalidPayload(eventType, payload)
 		}
+	case SubagentLifecycle:
+		if validateSubagentLifecycle(eventType, value) != nil {
+			return invalidPayload(eventType, payload)
+		}
 	case ApprovalRequired:
 		if eventType != EventApprovalRequired || validateApprovalRequired(value) != nil {
 			return invalidPayload(eventType, payload)
@@ -568,6 +602,87 @@ func validatePayload(eventType EventType, payload EventPayload) error {
 		}
 	default:
 		return invalidPayload(eventType, payload)
+	}
+
+	return nil
+}
+
+func validateSubagentLifecycle(eventType EventType, value SubagentLifecycle) error {
+	if err := validateSubagentLifecycleFields(value); err != nil {
+		return err
+	}
+
+	expected, err := expectedSubagentEvent(eventType, value.State)
+	if err != nil {
+		return err
+	}
+	if expected != eventType {
+		return errors.New("subagent event type and state differ")
+	}
+
+	return validateSubagentStateFields(value)
+}
+
+func validateSubagentLifecycleFields(value SubagentLifecycle) error {
+	if validateEventID("child session id", value.ChildSessionID, true) != nil ||
+		validateEventID("parent run id", value.ParentRunID, true) != nil ||
+		validateOptionalID(value.ChildRunID) != nil ||
+		!validIdentifierText(value.Model, maxEventIDBytes, false) ||
+		!validBoundedText(value.TaskPreview, 1024, true) ||
+		value.Turns < 0 || value.ToolCalls < 0 || !validTokenUsage(value.Usage) ||
+		value.DurationMillis < 0 || value.DurationMillis > maxEventDurationMS {
+		return errors.New("invalid subagent lifecycle fields")
+	}
+	switch value.Role {
+	case subagent.RoleExplore, subagent.RolePlan, subagent.RoleReview:
+	default:
+		return errors.New("invalid subagent role")
+	}
+
+	return nil
+}
+
+func expectedSubagentEvent(eventType EventType, state subagent.State) (EventType, error) {
+	switch state {
+	case subagent.StateCreated:
+		return EventSubagentCreated, nil
+	case subagent.StateRunning:
+		if eventType == EventSubagentProgress {
+			return EventSubagentProgress, nil
+		}
+
+		return EventSubagentStarted, nil
+	case subagent.StateSucceeded:
+		return EventSubagentCompleted, nil
+	case subagent.StateFailed:
+		return EventSubagentFailed, nil
+	case subagent.StateCanceled:
+		return EventSubagentCanceled, nil
+	case subagent.StateInterrupted:
+		return EventSubagentInterrupted, nil
+	default:
+		return "", errors.New("invalid subagent state")
+	}
+}
+
+func validateSubagentStateFields(value SubagentLifecycle) error {
+	if value.State == subagent.StateCreated {
+		if value.ChildRunID != "" || value.Code != "" || value.DurationMillis != 0 {
+			return errors.New("invalid created subagent")
+		}
+		return nil
+	}
+	if value.State == subagent.StateRunning {
+		if value.ChildRunID == "" || value.Code != "" || value.DurationMillis != 0 {
+			return errors.New("invalid running subagent")
+		}
+		return nil
+	}
+	if !validCode(value.Code) {
+		return errors.New("terminal subagent requires a code")
+	}
+	if value.Stop != "" && !validStopReason(value.Stop) {
+		return errors.New("invalid subagent stop reason")
 	}
 
 	return nil

@@ -17,6 +17,7 @@ import (
 	"github.com/rsbin/pips/internal/coding/modelcatalog"
 	"github.com/rsbin/pips/internal/coding/runtimecontrol"
 	"github.com/rsbin/pips/internal/coding/session"
+	"github.com/rsbin/pips/internal/coding/subagent"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -261,8 +262,11 @@ type overlayController struct {
 		entryID   string
 		summarize bool
 	}
-	compactions []coding.CompactionRequest
-	forks       []string
+	compactions      []coding.CompactionRequest
+	forks            []string
+	agents           []subagent.Summary
+	agentDetail      subagent.Detail
+	agentInspections []string
 }
 
 func newOverlayController(state coding.State) *overlayController {
@@ -299,6 +303,16 @@ func (*overlayController) Continue(context.Context) iter.Seq2[coding.Event, erro
 
 func (c *overlayController) ListSessions(context.Context) ([]session.Metadata, error) {
 	return append([]session.Metadata(nil), c.sessions...), nil
+}
+
+func (c *overlayController) ListSubagents(context.Context) ([]subagent.Summary, error) {
+	return append([]subagent.Summary(nil), c.agents...), nil
+}
+
+func (c *overlayController) InspectSubagent(_ context.Context, childSessionID string) (subagent.Detail, error) {
+	c.agentInspections = append(c.agentInspections, childSessionID)
+
+	return c.agentDetail, nil
 }
 
 func (c *overlayController) Tree(context.Context) (coding.SessionTree, error) {

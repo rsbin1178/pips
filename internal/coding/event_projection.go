@@ -118,6 +118,9 @@ func projectSafePayload(payload EventPayload) EventPayload {
 	case WorkspaceChanged:
 		value.Diff = ""
 		return value
+	case SubagentLifecycle:
+		value.TaskPreview = ""
+		return value
 	case SessionTreeChanged:
 		value.Tree.Name = ""
 		for index := range value.Tree.Nodes {
@@ -178,7 +181,10 @@ type TelemetryEvent struct {
 	Provider       ai.Provider        `json:"provider,omitempty"`
 	ModelID        string             `json:"model_id,omitempty"`
 	Agent          string             `json:"agent,omitempty"`
+	SubagentRole   string             `json:"subagent_role,omitempty"`
+	SubagentState  string             `json:"subagent_state,omitempty"`
 	Tool           string             `json:"tool,omitempty"`
+	ToolCalls      int                `json:"tool_calls,omitempty"`
 	Stop           agent.StopReason   `json:"stop,omitempty"`
 	Phase          Phase              `json:"phase,omitempty"`
 	Outcome        InteractionOutcome `json:"outcome,omitempty"`
@@ -256,6 +262,8 @@ func Telemetry(event Event) (TelemetryEvent, error) {
 	case ToolCompleted:
 		projected.Tool = value.Call.Name
 		projected.Failed = toolMessageFailed(value.Result)
+	case SubagentLifecycle:
+		projectSubagentTelemetry(&projected, event.Type, value)
 	case ApprovalRequired:
 		projected.Tool = value.Tool
 	case ApprovalUnknown:
@@ -278,6 +286,25 @@ func Telemetry(event Event) (TelemetryEvent, error) {
 	}
 
 	return projected, nil
+}
+
+func projectSubagentTelemetry(
+	projected *TelemetryEvent,
+	eventType EventType,
+	value SubagentLifecycle,
+) {
+	projected.SubagentRole = string(value.Role)
+	projected.SubagentState = string(value.State)
+	projected.Agent = "subagent/" + string(value.Role)
+	projected.ModelID = value.Model
+	projected.Code = value.Code
+	projected.Stop = value.Stop
+	projected.Turns = value.Turns
+	projected.ToolCalls = value.ToolCalls
+	projected.DurationMillis = value.DurationMillis
+	projected.Usage = value.Usage
+	projected.Failed = eventType == EventSubagentFailed ||
+		eventType == EventSubagentCanceled || eventType == EventSubagentInterrupted
 }
 
 func toolMessageFailed(message ai.Message) bool {
