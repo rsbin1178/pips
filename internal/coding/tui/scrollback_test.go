@@ -1,3 +1,4 @@
+//nolint:wsl_v5 // Scrollback transitions and their exact-once assertions stay paired.
 package tui
 
 import (
@@ -49,7 +50,7 @@ func TestScrollbackCommitsStableBlocksOnlyOnce(t *testing.T) {
 	require.NotEmpty(t, committed)
 	assert.Contains(t, committed, "inspect the repository")
 	assert.Contains(t, committed, "I found the package.")
-	assert.Contains(t, committed, "read")
+	assert.Contains(t, committed, "Read")
 	assert.NotContains(t, committed, "still changing")
 	assert.Empty(t, model.takeStableTimeline())
 
@@ -63,7 +64,7 @@ func TestScrollbackCommitsStableBlocksOnlyOnce(t *testing.T) {
 	assert.Contains(t, active, "still changing")
 	assert.NotContains(t, active, "inspect the repository")
 	assert.NotContains(t, active, "I found the package.")
-	assert.NotContains(t, active, "read")
+	assert.NotContains(t, active, "Read")
 }
 
 func TestScrollbackKeepsConversationGapAcrossIncrementalCommits(t *testing.T) {
@@ -393,8 +394,8 @@ func TestScrollbackLeavesRunningToolInManagedTail(t *testing.T) {
 	}
 
 	committed := model.takeStableTimeline()
-	assert.Contains(t, committed, "read")
-	assert.NotContains(t, committed, "shell")
+	assert.Contains(t, committed, "Read")
+	assert.NotContains(t, committed, "Running")
 
 	active := renderTimelineContent(
 		model.activeTimelineBlocks(),
@@ -403,8 +404,159 @@ func TestScrollbackLeavesRunningToolInManagedTail(t *testing.T) {
 		model.theme,
 		model.options.NoColor,
 	)
-	assert.NotContains(t, active, "read")
-	assert.Contains(t, active, "shell")
+	assert.NotContains(t, active, "Read")
+	assert.Contains(t, active, "Running")
+}
+
+func TestScrollbackHoldsExplorationGroupUntilAssistantResponse(t *testing.T) {
+	t.Parallel()
+
+	model := readyModel(t, true)
+	model.state.Phase = coding.PhaseRunning
+	model.state.Interaction = coding.InteractionState{ID: "interaction-1", Active: true}
+	model.state.Transcript = []ai.Message{
+		ai.UserText("inspect it"),
+		ai.Assistant(ai.ToolCallPart{
+			ID: "call-1", Name: "read", Args: ai.JSON(`{"path":"model.go"}`),
+		}),
+		codingToolResultFor("call-1", "read", "file contents"),
+	}
+	model.state.Tools = []coding.ToolState{{
+		RunID: "run-1", Turn: 1,
+		Call: coding.ToolCall{
+			ID: "call-1", Name: "read", Arguments: ai.JSON(`{"path":"model.go"}`),
+		},
+		Status: coding.ToolStatusCompleted,
+		Result: codingToolResultFor("call-1", "read", "file contents"),
+	}}
+
+	first := model.takeStableTimeline()
+	assert.Contains(t, first, "inspect it")
+	assert.NotContains(t, first, "Explored")
+	active := model.renderTimelineBlocks(model.activeTimelineBlocks())
+	assert.Contains(t, active, "• Explored")
+	assert.Contains(t, active, "Read model.go")
+
+	model.state.Draft = []coding.MessageDelta{{
+		Kind: ai.StreamTextDelta, Text: "The file contains the state machine.",
+	}}
+	committed := model.takeStableTimeline()
+	assert.Contains(t, committed, "• Explored")
+	assert.Contains(t, committed, "Read model.go")
+	assert.Empty(t, model.takeStableTimeline())
+}
+
+func TestScrollbackDoesNotTreatOlderAssistantTextAsExploreBoundary(t *testing.T) {
+	t.Parallel()
+
+	state := readyState()
+	state.Phase = coding.PhaseRunning
+	state.Interaction = coding.InteractionState{ID: "interaction-1", Active: true}
+	state.Transcript = []ai.Message{
+		ai.UserText("Inspect the TUI."),
+		ai.AssistantText("I will inspect it now."),
+	}
+	state.Tools = []coding.ToolState{{
+		RunID: "run-1",
+		Call: coding.ToolCall{
+			ID: "call-1", Name: toolNameRead, Arguments: ai.JSON(`{"path":"timeline.go"}`),
+		},
+		Status: coding.ToolStatusCompleted,
+		Result: codingToolResultFor("call-1", toolNameRead, "timeline"),
+	}}
+	state.Runs = []coding.RunState{{ID: "run-1", Active: true}}
+	model := readyModelWithController(t, stubController{state: state}, true)
+	model.resetScrollback()
+
+	stable := model.takeStableTimeline()
+	assert.NotContains(t, stable, "Explored")
+	assert.Contains(t, model.renderTimelineBlocks(model.activeTimelineBlocks()), "• Explored")
+}
+
+func TestScrollbackGroupsSequentialExplorationAndCommitsOnce(t *testing.T) {
+	t.Parallel()
+
+	model := readyModel(t, true)
+	model.state.Phase = coding.PhaseRunning
+	model.state.Interaction = coding.InteractionState{ID: "interaction-1", Active: true}
+	model.state.Tools = []coding.ToolState{
+		{
+			RunID: "run-1",
+			Call: coding.ToolCall{
+				ID: "call-1", Name: "read", Arguments: ai.JSON(`{"path":"timeline.go"}`),
+			},
+			Status: coding.ToolStatusCompleted,
+			Result: codingToolResultFor("call-1", "read", "timeline"),
+		},
+		{
+			RunID: "run-1",
+			Call: coding.ToolCall{
+				ID: "call-2", Name: "grep",
+				Arguments: ai.JSON(`{"pattern":"ToolState","path":"internal/coding"}`),
+			},
+			Status: coding.ToolStatusRunning,
+		},
+	}
+
+	assert.Empty(t, model.takeStableTimeline())
+	active := model.renderTimelineBlocks(model.activeTimelineBlocks())
+	assert.Equal(t, 1, strings.Count(active, "Exploring"))
+	assert.Contains(t, active, "Read timeline.go")
+	assert.Contains(t, active, "Search ToolState in internal/coding")
+
+	model.state.Tools[1].Status = coding.ToolStatusCompleted
+	model.state.Tools[1].Result = codingToolResultFor("call-2", "grep", "one match")
+	assert.Empty(t, model.takeStableTimeline())
+
+	model.state.Tools = append(model.state.Tools, coding.ToolState{
+		RunID: "run-1",
+		Call: coding.ToolCall{
+			ID: "call-3", Name: "shell", Arguments: ai.JSON(`{"command":"go test ./..."}`),
+		},
+		Status: coding.ToolStatusRunning,
+	})
+	committed := model.takeStableTimeline()
+	assert.Equal(t, 1, strings.Count(committed, "Explored"))
+	assert.Contains(t, committed, "Read timeline.go")
+	assert.Contains(t, committed, "Search ToolState in internal/coding")
+	assert.NotContains(t, committed, "go test")
+
+	active = model.renderTimelineBlocks(model.activeTimelineBlocks())
+	assert.Contains(t, active, "Running go test ./...")
+	assert.Empty(t, model.takeStableTimeline())
+}
+
+func TestScrollbackReconstructsDurableToolAndSuppressesLateDuplicate(t *testing.T) {
+	t.Parallel()
+
+	model := readyModel(t, true)
+	model.state.Transcript = []ai.Message{
+		ai.Assistant(ai.ToolCallPart{
+			ID: "call-1", Name: "grep",
+			Args: ai.JSON(`{"pattern":"projectTimeline","path":"internal/coding/tui"}`),
+		}),
+		codingToolResultFor("call-1", "grep", "timeline.go:49"),
+	}
+
+	committed := model.takeStableTimeline()
+	assert.Contains(t, committed, "• Explored")
+	assert.Contains(t, committed, "Search projectTimeline in internal/coding/tui")
+	assert.Empty(t, model.takeStableTimeline())
+
+	model.state.Phase = coding.PhaseRunning
+	model.state.Interaction = coding.InteractionState{ID: "interaction-1", Active: true}
+	result := ai.ToolResultText("call-2", "exa.web_search_exa", "No results")
+	model.state.Tools = []coding.ToolState{{
+		Call: coding.ToolCall{
+			ID: "call-2", Name: "exa.web_search_exa",
+			Arguments: ai.JSON(`{"query":"Bubble Tea"}`),
+		},
+		Status: coding.ToolStatusCompleted, Result: result,
+	}}
+	assert.Contains(t, model.takeStableTimeline(), "Called\n  └ exa.web_search_exa")
+
+	model.state.Transcript = append(model.state.Transcript, result)
+	assert.Empty(t, model.takeStableTimeline())
 }
 
 func TestScrollbackUpdatesOneSubagentCardAndCommitsOnlyTerminal(t *testing.T) {
@@ -423,7 +575,7 @@ func TestScrollbackUpdatesOneSubagentCardAndCommitsOnlyTerminal(t *testing.T) {
 	active := renderTimelineContent(
 		model.activeTimelineBlocks(), model.markdown, model.width, model.theme, true,
 	)
-	assert.Contains(t, active, "✻ Plan · Plan the change")
+	assert.Contains(t, active, "✻ Planning · Plan the change")
 	assert.Contains(t, active, "Running")
 	assert.NotContains(t, active, subagent.ToolName)
 
@@ -431,7 +583,7 @@ func TestScrollbackUpdatesOneSubagentCardAndCommitsOnlyTerminal(t *testing.T) {
 	model.state.Subagents[0].Code = "ok"
 	model.state.Subagents[0].DurationMillis = 2_000
 	committed := model.takeStableTimeline()
-	assert.Contains(t, committed, "✓ Plan · Plan the change")
+	assert.Contains(t, committed, "• Planned · Plan the change")
 	assert.Contains(t, committed, "Completed in 2s")
 	assert.Empty(t, model.takeStableTimeline())
 }

@@ -69,7 +69,7 @@ func TestScriptedRuntimeMatchesTUIStateAndReplay(t *testing.T) {
 	assert.Contains(t, printed, "scripted final answer")
 	assert.Contains(t, printed, "[✻ Worked for ")
 	userIndex := strings.Index(printed, "read the fixture")
-	toolIndex := strings.Index(printed, "read · completed")
+	toolIndex := strings.Index(printed, "• Explored")
 	answerIndex := strings.Index(printed, "scripted final answer")
 	completionIndex := strings.Index(printed, "[✻ Worked for ")
 	require.GreaterOrEqual(t, userIndex, 0)
