@@ -36,6 +36,7 @@ type timelineBlock struct {
 	status   string
 	position int
 	rendered bool
+	tools    []toolActivity
 }
 
 type completionMarker struct {
@@ -45,76 +46,77 @@ type completionMarker struct {
 	durationMillis int64
 }
 
-//nolint:gocyclo // One projection pass makes every public Coding event visibly exhaustive.
 func projectTimeline(state coding.State) []timelineBlock {
-	blocks := make([]timelineBlock, 0, len(state.Transcript)+len(state.Tools)+len(state.Subagents)+4)
-	tools := make(map[string]coding.ToolState, len(state.Tools))
-	for _, tool := range state.Tools {
-		tools[tool.Call.ID] = tool
-	}
-	projectedTools := make(map[string]struct{}, len(state.Tools))
+	return projectTimelineExcludingTools(state, nil)
+}
 
+// projectTimelineExcludingTools is used by the append-only scrollback path to
+// suppress transcript Tool results whose compact card was already committed.
+//
+//nolint:gocyclo // One projection pass makes every public Coding event visibly exhaustive.
+func projectTimelineExcludingTools(
+	state coding.State,
+	excluded map[string]struct{},
+) []timelineBlock {
+	blocks := make([]timelineBlock, 0, len(state.Transcript)+len(state.Tools)+len(state.Subagents)+4)
+	activities := projectToolActivities(state, excluded)
+	activityIndex := 0
 	for messageIndex, message := range state.Transcript {
 		position := messageIndex + 1
-		if message.Role == ai.RoleTool {
-			for _, part := range message.Parts {
-				result, ok := part.(ai.ToolResultPart)
-				if !ok {
-					continue
-				}
-				tool, exists := tools[result.ToolCallID]
-				if !exists {
-					continue
-				}
-				if tool.Call.Name == subagent.ToolName {
-					projectedTools[result.ToolCallID] = struct{}{}
-					continue
-				}
-				block := projectTool(tool)
-				block.position = position
-				blocks = append(blocks, block)
-				projectedTools[result.ToolCallID] = struct{}{}
-			}
-
-			continue
-		}
-
 		body := visibleMessageText(message)
-		if body == "" {
-			continue
+		if body != "" {
+			switch message.Role {
+			case ai.RoleUser:
+				blocks = append(blocks, timelineBlock{
+					kind: blockUser, body: body, position: position,
+				})
+			case ai.RoleAssistant:
+				blocks = append(blocks, timelineBlock{
+					kind: blockAssistant, body: body, position: position,
+				})
+			case ai.RoleSystem:
+				blocks = append(blocks, timelineBlock{
+					kind: blockDiagnostic, title: "System", body: body, position: position,
+				})
+			case ai.RoleTool:
+			}
 		}
 
-		switch message.Role {
-		case ai.RoleUser:
-			blocks = append(blocks, timelineBlock{
-				kind: blockUser, body: body, position: position,
-			})
-		case ai.RoleAssistant:
-			blocks = append(blocks, timelineBlock{
-				kind: blockAssistant, body: body, position: position,
-			})
-		case ai.RoleSystem:
-			blocks = append(blocks, timelineBlock{
-				kind: blockDiagnostic, title: "System", body: body, position: position,
-			})
-		case ai.RoleTool:
+		for activityIndex < len(activities) && activities[activityIndex].position <= position {
+			activity := activities[activityIndex]
+			activityIndex++
+			if activity.name == subagent.ToolName {
+				if block, ok := projectSubagentToolActivity(activity, state.Subagents); ok {
+					blocks = append(blocks, block)
+				}
+				continue
+			}
+			blocks = append(blocks, projectToolActivity(activity))
 		}
 	}
 
-	for _, tool := range state.Tools {
-		if _, exists := projectedTools[tool.Call.ID]; exists {
+	for activityIndex < len(activities) {
+		activity := activities[activityIndex]
+		activityIndex++
+		if activity.name == subagent.ToolName {
+			if block, ok := projectSubagentToolActivity(activity, state.Subagents); ok {
+				blocks = append(blocks, block)
+			}
 			continue
 		}
-		if tool.Call.Name == subagent.ToolName {
-			continue
-		}
-		block := projectTool(tool)
-		block.position = len(state.Transcript)
-		blocks = append(blocks, block)
+		blocks = append(blocks, projectToolActivity(activity))
 	}
 
 	for _, child := range state.Subagents {
-		blocks = append(blocks, projectSubagent(child, len(state.Transcript)))
+		block := projectSubagent(child, len(state.Transcript))
+		for _, activity := range activities {
+			if activity.name == subagent.ToolName && activity.runID == child.ParentRunID {
+				block.tools = []toolActivity{activity}
+
+				break
+			}
+		}
+		blocks = append(blocks, block)
 	}
 
 	draft := visibleDraftText(state.Draft)
@@ -157,19 +159,78 @@ func projectTimeline(state coding.State) []timelineBlock {
 		})
 	}
 
-	return blocks
+	return groupExploreBlocks(blocks)
+}
+
+func projectSubagentToolActivity(
+	activity toolActivity,
+	live []coding.SubagentState,
+) (timelineBlock, bool) {
+	for _, child := range live {
+		if activity.runID != "" && child.ParentRunID == activity.runID {
+			return timelineBlock{}, false
+		}
+	}
+
+	value, ok := projectDurableSubagent(activity)
+	if !ok {
+		return timelineBlock{}, false
+	}
+	for _, child := range live {
+		if value.ChildSessionID != "" && child.ChildSessionID == value.ChildSessionID {
+			return timelineBlock{}, false
+		}
+	}
+
+	block := projectSubagent(value, activity.position)
+	block.tools = []toolActivity{activity}
+
+	return block, true
+}
+
+func projectToolActivity(activity toolActivity) timelineBlock {
+	return timelineBlock{
+		kind: blockTool, id: activity.id, position: activity.position,
+		tools: []toolActivity{activity},
+	}
+}
+
+func groupExploreBlocks(blocks []timelineBlock) []timelineBlock {
+	grouped := make([]timelineBlock, 0, len(blocks))
+	for _, block := range blocks {
+		isExplore := block.kind == blockTool && len(block.tools) == 1 &&
+			block.tools[0].class == toolClassExplore
+		if !isExplore || len(grouped) == 0 {
+			grouped = append(grouped, block)
+
+			continue
+		}
+
+		previous := &grouped[len(grouped)-1]
+		if previous.kind != blockTool || len(previous.tools) == 0 ||
+			previous.tools[0].class != toolClassExplore {
+			grouped = append(grouped, block)
+
+			continue
+		}
+
+		previous.tools = append(previous.tools, block.tools...)
+		previous.id = block.id
+	}
+
+	return grouped
 }
 
 func projectSubagent(value coding.SubagentState, position int) timelineBlock {
 	return timelineBlock{
 		kind: blockSubagent, id: value.ChildSessionID,
-		title: subagentRoleLabel(value.Role), body: oneLineSubagentTask(value.TaskPreview),
+		title: subagentActivityLabel(value.Role, value.State), body: oneLineSubagentTask(value.TaskPreview),
 		meta: subagentMetadata(value), status: string(value.State), position: position,
 	}
 }
 
 func oneLineSubagentTask(value string) string {
-	return strings.Join(strings.Fields(ansi.Strip(value)), " ")
+	return oneLineToolText(value)
 }
 
 func subagentMetadata(value coding.SubagentState) string {
@@ -182,7 +243,7 @@ func subagentMetadata(value coding.SubagentState) string {
 	case subagent.StateFailed:
 		label = "Failed"
 		if value.Code != "" {
-			label += ": " + humanizeSubagentCode(value.Code)
+			label += ": " + humanizeStatusCode(value.Code)
 		}
 		durationPrefix = " after "
 	case subagent.StateCanceled:
@@ -212,27 +273,59 @@ func subagentMetadata(value coding.SubagentState) string {
 	return label + " · " + strings.Join(facts, " · ")
 }
 
-func subagentRoleLabel(role subagent.Role) string {
+//nolint:gocyclo // The closed role/lifecycle matrix is the explicit product vocabulary.
+func subagentActivityLabel(role subagent.Role, state subagent.State) string {
+	running := state == subagent.StateCreated || state == subagent.StateRunning
+	succeeded := state == subagent.StateSucceeded
+	interrupted := state == subagent.StateCanceled || state == subagent.StateInterrupted
+
 	switch role {
 	case subagent.RoleExplore:
-		return "Explore"
+		switch {
+		case running:
+			return "Exploring"
+		case succeeded:
+			return "Explored"
+		case interrupted:
+			return "Explore interrupted"
+		default:
+			return "Explore failed"
+		}
 	case subagent.RolePlan:
-		return "Plan"
+		switch {
+		case running:
+			return "Planning"
+		case succeeded:
+			return "Planned"
+		case interrupted:
+			return "Plan interrupted"
+		default:
+			return "Plan failed"
+		}
 	case subagent.RoleReview:
-		return "Review"
+		switch {
+		case running:
+			return "Reviewing"
+		case succeeded:
+			return "Reviewed"
+		case interrupted:
+			return "Review interrupted"
+		default:
+			return "Review failed"
+		}
 	default:
 		return "Subagent"
 	}
 }
 
-func humanizeSubagentCode(value string) string {
+func humanizeStatusCode(value string) string {
 	return strings.ReplaceAll(strings.TrimSpace(value), "_", " ")
 }
 
 func subagentStateGlyph(state subagent.State) string {
 	switch state {
 	case subagent.StateSucceeded:
-		return "✓"
+		return "•"
 	case subagent.StateFailed:
 		return "✗"
 	case subagent.StateCanceled, subagent.StateInterrupted:
@@ -337,15 +430,6 @@ func formatInteractionDuration(milliseconds int64) string {
 	}
 
 	return strings.Join(parts, " ")
-}
-
-func projectTool(tool coding.ToolState) timelineBlock {
-	return timelineBlock{
-		kind:   blockTool,
-		id:     tool.Call.ID,
-		title:  tool.Call.Name,
-		status: string(tool.Status),
-	}
 }
 
 func visibleToolMessage(message ai.Message) string {
@@ -453,6 +537,9 @@ func renderTimelineBlock(
 ) string {
 	if block.kind == blockSubagent {
 		return renderSubagentBlock(block, width, theme, noColor)
+	}
+	if block.kind == blockTool {
+		return renderToolActivityBlock(block, width, theme, noColor)
 	}
 
 	return renderRegularTimelineBlock(block, markdown, width, theme, noColor)

@@ -1,3 +1,4 @@
+//nolint:wsl_v5 // Append-only cursor transitions stay adjacent to their guards.
 package tui
 
 import (
@@ -9,7 +10,9 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding"
+	"github.com/rsbin/pips/internal/coding/subagent"
 )
 
 // scrollbackCursor separates immutable conversation history from the live
@@ -20,6 +23,7 @@ type scrollbackCursor struct {
 	tools       int
 	subagents   int
 	diagnostics int
+	toolIDs     map[string]struct{}
 	completions map[string]struct{}
 	changes     projectionFingerprint
 	lastError   projectionFingerprint
@@ -176,6 +180,7 @@ func (m *Model) takeStableTimeline() string {
 	return m.renderTimelineBlocks(m.takeStableTimelineBlocks())
 }
 
+//nolint:gocyclo // One cursor transaction atomically advances every durable projection.
 func (m *Model) takeStableTimelineBlocks() []timelineBlock {
 	m.reconcileScrollback()
 
@@ -183,6 +188,12 @@ func (m *Model) takeStableTimelineBlocks() []timelineBlock {
 	for stableTools < len(m.state.Tools) &&
 		m.state.Tools[stableTools].Status == coding.ToolStatusCompleted {
 		stableTools++
+	}
+
+	stableMessages := len(m.state.Transcript)
+	if exploreStart, held := m.openTrailingExploreGroup(stableTools); held {
+		stableTools = exploreStart
+		stableMessages = m.heldExploreMessageFrontier(exploreStart)
 	}
 
 	stableSubagents := m.scrollback.subagents
@@ -193,7 +204,7 @@ func (m *Model) takeStableTimelineBlocks() []timelineBlock {
 
 	delta := m.state.Clone()
 
-	delta.Transcript = delta.Transcript[m.scrollback.messages:]
+	delta.Transcript = delta.Transcript[m.scrollback.messages:stableMessages]
 	delta.Draft = nil
 	delta.Tools = delta.Tools[m.scrollback.tools:stableTools]
 	delta.Subagents = delta.Subagents[m.scrollback.subagents:stableSubagents]
@@ -210,8 +221,7 @@ func (m *Model) takeStableTimelineBlocks() []timelineBlock {
 		delta.LastError = nil
 	}
 
-	blocks := projectTimeline(delta)
-	blocks = m.expandTimelineBlocks(blocks, delta.Tools)
+	blocks := projectTimelineExcludingTools(delta, m.scrollback.toolIDs)
 
 	for _, marker := range m.pendingCompletionMarkers() {
 		if block, ok := projectCompletionMarker(marker); ok {
@@ -228,7 +238,24 @@ func (m *Model) takeStableTimelineBlocks() []timelineBlock {
 		})
 	}
 
-	m.scrollback.messages = len(m.state.Transcript)
+	for _, block := range blocks {
+		m.markToolActivitiesCommitted(block)
+	}
+	for index := m.scrollback.tools; index < stableTools; index++ {
+		m.markToolIDCommitted(m.state.Tools[index].Call.ID)
+	}
+	for index := m.scrollback.subagents; index < stableSubagents; index++ {
+		child := m.state.Subagents[index]
+		for _, tool := range m.state.Tools {
+			if tool.Call.Name == subagent.ToolName && tool.RunID == child.ParentRunID {
+				m.markToolIDCommitted(tool.Call.ID)
+
+				break
+			}
+		}
+	}
+
+	m.scrollback.messages = stableMessages
 	m.scrollback.tools = stableTools
 	m.scrollback.subagents = stableSubagents
 	m.scrollback.diagnostics = len(m.state.Diagnostics)
@@ -268,7 +295,7 @@ func (m *Model) activeTimelineBlocks() []timelineBlock {
 		active.LastError = nil
 	}
 
-	blocks := m.expandTimelineBlocks(projectTimeline(active), active.Tools)
+	blocks := projectTimelineExcludingTools(active, m.scrollback.toolIDs)
 	for _, marker := range m.pendingCompletionMarkers() {
 		if block, ok := projectCompletionMarker(marker); ok {
 			blocks = append(blocks, block)
@@ -293,6 +320,162 @@ func (m *Model) activeTimelineBlocks() []timelineBlock {
 	}
 
 	return blocks
+}
+
+// openTrailingExploreGroup reports the completed-tool frontier that must stay
+// mutable. An exploration group is held until another Tool class begins,
+// visible assistant output starts, or its owning run/interaction terminates.
+func (m *Model) openTrailingExploreGroup(stableTools int) (int, bool) {
+	cursor := m.scrollback.tools
+	if cursor >= len(m.state.Tools) {
+		return stableTools, false
+	}
+
+	if stableTools < len(m.state.Tools) {
+		if !isExploreToolName(m.state.Tools[stableTools].Call.Name) {
+			return stableTools, false
+		}
+
+		start := stableTools
+		for start > cursor && isExploreToolName(m.state.Tools[start-1].Call.Name) {
+			start--
+		}
+
+		return start, true
+	}
+
+	if stableTools == cursor || !isExploreToolName(m.state.Tools[stableTools-1].Call.Name) {
+		return stableTools, false
+	}
+
+	start := stableTools - 1
+	for start > cursor && isExploreToolName(m.state.Tools[start-1].Call.Name) {
+		start--
+	}
+	if m.exploreGroupHasBoundary(start, stableTools) {
+		return stableTools, false
+	}
+
+	return start, true
+}
+
+func (m *Model) exploreGroupHasBoundary(start, end int) bool {
+	if visibleDraftText(m.state.Draft) != "" || !m.state.Interaction.Active {
+		return true
+	}
+	if m.state.Phase == coding.PhaseIdle || m.state.Phase == coding.PhaseClosing ||
+		m.state.Phase == coding.PhaseClosed {
+		return true
+	}
+
+	groupIDs := make(map[string]struct{}, end-start)
+	for _, tool := range m.state.Tools[start:end] {
+		groupIDs[tool.Call.ID] = struct{}{}
+	}
+	latest := latestToolMessagePosition(m.state.Transcript, groupIDs)
+	if latest > 0 && hasVisibleAssistantMessage(m.state.Transcript[latest:]) {
+		return true
+	}
+
+	lastRunID := m.state.Tools[end-1].RunID
+	if lastRunID == "" {
+		return false
+	}
+	for _, run := range m.state.Runs {
+		if run.ID == lastRunID {
+			return !run.Active
+		}
+	}
+
+	return false
+}
+
+func hasVisibleAssistantMessage(transcript []ai.Message) bool {
+	for _, message := range transcript {
+		if message.Role == ai.RoleAssistant && visibleMessageText(message) != "" {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (m *Model) heldExploreMessageFrontier(start int) int {
+	groupIDs := make(map[string]struct{})
+	for index := start; index < len(m.state.Tools); index++ {
+		tool := m.state.Tools[index]
+		if !isExploreToolName(tool.Call.Name) {
+			break
+		}
+		groupIDs[tool.Call.ID] = struct{}{}
+	}
+
+	frontier := earliestToolCallPosition(m.state.Transcript, groupIDs)
+	return max(m.scrollback.messages, frontier)
+}
+
+func latestToolMessagePosition(
+	transcript []ai.Message,
+	ids map[string]struct{},
+) int {
+	latest := 0
+	for messageIndex, message := range transcript {
+		for _, part := range message.Parts {
+			switch value := part.(type) {
+			case ai.ToolCallPart:
+				if _, ok := ids[value.ID]; ok {
+					latest = messageIndex + 1
+				}
+			case ai.ToolResultPart:
+				if _, ok := ids[value.ToolCallID]; ok {
+					latest = messageIndex + 1
+				}
+			}
+		}
+	}
+
+	return latest
+}
+
+func earliestToolCallPosition(
+	transcript []ai.Message,
+	ids map[string]struct{},
+) int {
+	for messageIndex, message := range transcript {
+		for _, part := range message.Parts {
+			call, ok := part.(ai.ToolCallPart)
+			if !ok {
+				continue
+			}
+			if _, exists := ids[call.ID]; exists {
+				return messageIndex + 1
+			}
+		}
+	}
+
+	return 0
+}
+
+func isExploreToolName(name string) bool {
+	return name == toolNameRead || name == toolNameList ||
+		name == toolNameGlob || name == toolNameSearch
+}
+
+func (m *Model) markToolActivitiesCommitted(block timelineBlock) {
+	for _, id := range toolActivityIDs(block) {
+		m.markToolIDCommitted(id)
+	}
+}
+
+func (m *Model) markToolIDCommitted(id string) {
+	if id == "" {
+		return
+	}
+	if m.scrollback.toolIDs == nil {
+		m.scrollback.toolIDs = make(map[string]struct{})
+	}
+
+	m.scrollback.toolIDs[id] = struct{}{}
 }
 
 func (m *Model) reconcileScrollback() {

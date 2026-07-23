@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"iter"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -98,7 +99,6 @@ type Model struct {
 	sessionPicker     sessionPickerState
 	sessionPickerSeq  uint64
 	overlay           overlayState
-	expanded          map[string]bool
 	completionMarkers []completionMarker
 	activity          activityIndicator
 	refreshCursor     bool
@@ -139,7 +139,6 @@ func newModel(ctx context.Context, options Options) *Model {
 		composer:  composer,
 		markdown:  newMarkdownRenderer(markdownCacheCapacity),
 		theme:     themeDark,
-		expanded:  make(map[string]bool),
 		activity:  newActivityIndicator(),
 	}
 	model.setLayout()
@@ -324,7 +323,6 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		switch message.operation {
 		case operationNew, operationResume, operationFork:
 			m.completionMarkers = nil
-			m.expanded = make(map[string]bool)
 			m.resetScrollback()
 		case operationModel, operationReload:
 		}
@@ -811,7 +809,6 @@ func (m *Model) renderTranscriptContent(forceBottom, newContent bool) {
 
 func (m *Model) timelineBlocks() []timelineBlock {
 	blocks := insertCompletionMarkers(projectTimeline(m.state), m.completionMarkers)
-	blocks = m.expandTimelineBlocks(blocks, m.state.Tools)
 	if m.streamErr != nil {
 		blocks = append(blocks, timelineBlock{
 			kind: blockError, title: "Operation", body: safeError(m.streamErr),
@@ -821,63 +818,43 @@ func (m *Model) timelineBlocks() []timelineBlock {
 	return blocks
 }
 
-func (m *Model) expandTimelineBlocks(
-	blocks []timelineBlock,
-	tools []coding.ToolState,
-) []timelineBlock {
-	for index := range blocks {
-		block := &blocks[index]
-		if block.kind != blockTool || !m.expanded[block.id] {
-			continue
-		}
-		for _, tool := range tools {
-			if tool.Call.ID != block.id {
-				continue
-			}
-
-			detail := "Arguments: " + strings.TrimSpace(string(tool.Call.Arguments))
-			if update := visibleToolMessage(tool.Update); update != "" {
-				detail += "\nProgress: " + update
-			}
-			if result := visibleToolMessage(tool.Result); result != "" {
-				detail += "\nResult: " + result
-			}
-			block.body = truncateText(detail, 8<<10)
-			block.status += " · expanded"
-
-			break
-		}
-	}
-	return blocks
-}
-
 func (m *Model) toggleLatestTool() tea.Cmd {
-	if len(m.state.Tools) == 0 {
-		return nil
-	}
-
-	latest := m.state.Tools[len(m.state.Tools)-1]
-	if latest.Call.Name == subagent.ToolName {
-		if childSessionID := subagentChildSessionID(latest, m.state.Subagents); childSessionID != "" {
-			return m.openAgentDetail(childSessionID)
+	if len(m.state.Tools) > 0 {
+		latest := m.state.Tools[len(m.state.Tools)-1]
+		if latest.Call.Name == subagent.ToolName {
+			childSessionID := subagentChildSessionID(latest, m.state.Subagents)
+			if childSessionID != "" {
+				return m.openAgentDetail(childSessionID)
+			}
 		}
 	}
-	id := latest.Call.ID
-	if len(m.state.Tools)-1 < m.scrollback.tools {
-		if m.expanded[id] {
+
+	blocks := projectTimeline(m.state)
+	for _, block := range slices.Backward(blocks) {
+		switch block.kind {
+		case blockSubagent:
+			if block.id != "" {
+				return m.openAgentDetail(block.id)
+			}
+			if len(block.tools) > 0 {
+				detail := newToolDetailView(block)
+				m.overlay = overlayState{
+					kind: overlayToolDetail, toolDetail: &detail,
+				}
+			}
+
 			return nil
+		case blockTool:
+			detail := newToolDetailView(block)
+			m.overlay = overlayState{
+				kind: overlayToolDetail, toolDetail: &detail,
+			}
+
+			return nil
+		case blockUser, blockAssistant, blockDraft, blockDiagnostic,
+			blockChange, blockError, blockCompletion:
 		}
-		m.expanded[id] = true
-		blocks := m.expandTimelineBlocks([]timelineBlock{projectTool(latest)}, []coding.ToolState{latest})
-		content := renderTimelineContent(
-			blocks, m.markdown, m.width, m.theme, m.options.NoColor,
-		)
-
-		return m.printScrollback(content)
 	}
-
-	m.expanded[id] = !m.expanded[id]
-	m.rerenderTranscript(false)
 
 	return nil
 }

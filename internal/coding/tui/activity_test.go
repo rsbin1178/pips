@@ -81,7 +81,7 @@ func TestResolveActivity(t *testing.T) {
 					Status: coding.ToolStatusRunning,
 				},
 			)},
-			kind: activityTool, label: "Running read…", visible: true,
+			kind: activityTool, label: activityLabelExploring, visible: true,
 		},
 		{
 			name: "parallel tools", context: activityContext{state: withTools(
@@ -95,7 +95,7 @@ func TestResolveActivity(t *testing.T) {
 					Status: coding.ToolStatusRunning,
 				},
 			)},
-			kind: activityTool, label: activityLabelTools, detail: "2 active", visible: true,
+			kind: activityTool, label: activityLabelExploring, detail: "2 actions", visible: true,
 		},
 		{
 			name: "subagent uses role activity", context: activityContext{state: withSubagents(
@@ -108,7 +108,7 @@ func TestResolveActivity(t *testing.T) {
 				),
 				coding.SubagentState{Role: subagent.RoleExplore, State: subagent.StateRunning},
 			)},
-			kind: activityTool, label: "Exploring…", visible: true,
+			kind: activityTool, label: activityLabelExploring, visible: true,
 		},
 		{
 			name: "approval takes priority over tool", context: activityContext{state: withApproval(
@@ -157,6 +157,62 @@ func TestResolveActivity(t *testing.T) {
 			assert.Equal(t, test.label, status.label)
 			assert.Equal(t, test.detail, status.detail)
 			assert.NotContains(t, status.label, "private reasoning")
+		})
+	}
+}
+
+func TestResolveActivityUsesSemanticToolLabels(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		tool   coding.ToolState
+		label  string
+		detail string
+	}{
+		{
+			name: "shell command",
+			tool: coding.ToolState{
+				Call: coding.ToolCall{
+					ID: "call-1", Name: "shell", Arguments: ai.JSON(`{"command":"go test ./..."}`),
+				},
+				Status: coding.ToolStatusRunning,
+			},
+			label: "Running…", detail: "go test ./...",
+		},
+		{
+			name: "workspace update",
+			tool: coding.ToolState{
+				Call:   coding.ToolCall{ID: "call-1", Name: "apply_patch"},
+				Status: coding.ToolStatusRunning,
+			},
+			label: "Updating workspace…",
+		},
+		{
+			name: "extension call",
+			tool: coding.ToolState{
+				Call: coding.ToolCall{
+					ID: "call-1", Name: "exa.web_search_exa",
+					Arguments: ai.JSON(`{"query":"Codex CLI"}`),
+				},
+				Status: coding.ToolStatusRunning,
+			},
+			label: "Calling…", detail: "exa.web_search_exa",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			status, visible := resolveActivity(activityContext{state: withTools(
+				coding.State{Phase: coding.PhaseRunning},
+				test.tool,
+			)})
+			assert.True(t, visible)
+			assert.Equal(t, activityTool, status.kind)
+			assert.Equal(t, test.label, status.label)
+			assert.Equal(t, test.detail, status.detail)
 		})
 	}
 }
