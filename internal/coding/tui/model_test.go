@@ -292,10 +292,13 @@ func TestReadyRecordsCompletionMarkerOnceAndClearsInvalidAnchors(t *testing.T) {
 	require.Len(t, model.completionMarkers, maxCompletionMarkers)
 	assert.Equal(t, "interaction-1", model.completionMarkers[0].interactionID)
 
-	model.expanded["tool-1"] = true
+	detail := newToolDetailView(timelineBlock{kind: blockTool, tools: []toolActivity{{
+		id: "tool-1", name: "read", class: toolClassExplore,
+	}}})
+	model.overlay = overlayState{kind: overlayToolDetail, toolDetail: &detail}
 	model.Update(controlResultMsg{operation: operationNew})
 	assert.Empty(t, model.completionMarkers)
-	assert.Empty(t, model.expanded)
+	assert.Equal(t, overlayNone, model.overlay.kind)
 }
 
 func TestReadyLeavesSelectionAndScrollbackToTerminal(t *testing.T) {
@@ -537,24 +540,51 @@ func TestReadyToolDetailsToggleNeverShowsReasoning(t *testing.T) {
 	}}
 	model := readyModelWithController(t, stubController{state: state}, true)
 	assert.NotContains(t, model.View().Content, "visible result")
+	scrollbackOutput := model.scrollbackOutput
 
 	_, command := model.Update(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
-	require.NotNil(t, command)
-	assert.True(t, model.expanded["call-1"])
-	detail := renderTimelineContent(
-		model.expandTimelineBlocks(
-			[]timelineBlock{projectTool(state.Tools[0])},
-			state.Tools,
-		),
-		model.markdown,
-		model.width,
-		model.theme,
-		model.options.NoColor,
-	)
+	assert.Nil(t, command)
+	assert.Equal(t, scrollbackOutput, model.scrollbackOutput)
+	assert.Equal(t, overlayToolDetail, model.overlay.kind)
+	detail := model.toolDetailOverlayContent()
 	assert.Contains(t, detail, "visible result")
 	assert.NotContains(t, detail, secret)
 	_, command = model.Update(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
 	assert.Nil(t, command)
+	assert.Equal(t, overlayNone, model.overlay.kind)
+	assert.Equal(t, scrollbackOutput, model.scrollbackOutput)
+	assert.True(t, model.composer.Focused())
+}
+
+func TestReadyToolDetailsToggleOpensLatestExplorationGroup(t *testing.T) {
+	t.Parallel()
+
+	state := readyState()
+	state.Tools = []coding.ToolState{
+		{
+			Call: coding.ToolCall{
+				ID: "call-1", Name: "read", Arguments: ai.JSON(`{"path":"model.go"}`),
+			},
+			Status: coding.ToolStatusCompleted,
+			Result: codingToolResultFor("call-1", "read", "model contents"),
+		},
+		{
+			Call: coding.ToolCall{
+				ID: "call-2", Name: "grep",
+				Arguments: ai.JSON(`{"pattern":"toggleLatestTool","path":"internal/coding/tui"}`),
+			},
+			Status: coding.ToolStatusCompleted,
+			Result: codingToolResultFor("call-2", "grep", "one match"),
+		},
+	}
+	model := readyModelWithController(t, stubController{state: state}, true)
+
+	_, command := model.Update(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
+	assert.Nil(t, command)
+	assert.Equal(t, overlayToolDetail, model.overlay.kind)
+	detail := model.toolDetailOverlayContent()
+	assert.Contains(t, detail, "Read model.go")
+	assert.Contains(t, detail, "Search toggleLatestTool in internal/coding/tui")
 }
 
 func readyModel(t *testing.T, noColor bool) *Model {

@@ -68,8 +68,14 @@ func visualIdleState() coding.State {
 		ai.AssistantText("## Event bridge\n\nThe bridge is **bounded** and cancellation-aware."),
 	}
 	state.Tools = []coding.ToolState{{
-		Call:   coding.ToolCall{ID: "call-1", Name: "read"},
+		Call: coding.ToolCall{
+			ID: "call-1", Name: "read",
+			Arguments: ai.JSON(`{"path":"internal/coding/tui/bridge.go"}`),
+		},
 		Status: coding.ToolStatusCompleted,
+		Result: codingToolResultFor(
+			"call-1", "read", "package tui",
+		),
 	}}
 	state.Changes = &coding.WorkspaceChanged{
 		Entries: []coding.WorkspaceChange{{Path: "internal/coding/tui/bridge.go"}},
@@ -88,7 +94,10 @@ func visualRunningState() coding.State {
 		Text: "I am checking the changed packages and will summarize the result.",
 	}}
 	state.Tools = []coding.ToolState{{
-		Call:   coding.ToolCall{ID: "call-1", Name: "shell"},
+		Call: coding.ToolCall{
+			ID: "call-1", Name: "shell",
+			Arguments: ai.JSON(`{"command":"go test ./internal/coding/..."}`),
+		},
 		Status: coding.ToolStatusRunning,
 	}}
 

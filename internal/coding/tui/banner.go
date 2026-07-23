@@ -9,7 +9,10 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
-const maxStartupBannerWidth = 72
+const (
+	maxStartupBannerWidth = 72
+	workspaceLabel        = "workspace"
+)
 
 type startupBannerContext struct {
 	width     int
@@ -71,7 +74,7 @@ func renderStartupBanner(context startupBannerContext) string {
 
 	workspace := strings.TrimSpace(context.workspace)
 	if workspace == "" || workspace == "." || workspace == string(filepath.Separator) {
-		workspace = "workspace"
+		workspace = workspaceLabel
 	}
 
 	detail := workspace + "  ·  " + context.model

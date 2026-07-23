@@ -10,7 +10,6 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding"
 	"github.com/rsbin/pips/internal/coding/subagent"
 )
@@ -174,13 +173,15 @@ func (m *Model) agentDetailContent(detail subagent.Detail) string {
 
 	lines = append(lines, "", "Transcript")
 
-	for _, message := range detail.Transcript {
-		content := renderChildMessage(message)
-		if strings.TrimSpace(content) == "" {
-			continue
-		}
-
-		lines = append(lines, "", strings.ToUpper(string(message.Role))+":", content)
+	transcript := renderTimelineContent(
+		projectTimeline(coding.State{Transcript: detail.Transcript}),
+		m.markdown,
+		max(1, m.width),
+		m.theme,
+		m.options.NoColor,
+	)
+	if strings.TrimSpace(transcript) != "" {
+		lines = append(lines, "", transcript)
 	}
 
 	if detail.Result != nil {
@@ -192,35 +193,6 @@ func (m *Model) agentDetailContent(detail subagent.Detail) string {
 	lines = append(lines, "", "↑/↓ or PgUp/PgDn scroll · Esc back · Ctrl+T close")
 
 	return strings.Join(lines, "\n")
-}
-
-func renderChildMessage(message ai.Message) string {
-	parts := make([]string, 0, len(message.Parts))
-	for _, part := range message.Parts {
-		switch value := part.(type) {
-		case ai.TextPart:
-			parts = append(parts, value.Text)
-		case ai.ReasoningPart:
-			if value.Redacted {
-				parts = append(parts, "[reasoning redacted]")
-			} else {
-				parts = append(parts, "[reasoning]\n"+value.Text)
-			}
-		case ai.ToolCallPart:
-			parts = append(parts, fmt.Sprintf("[tool %s]\n%s", value.Name, value.Args))
-		case ai.ToolResultPart:
-			parts = append(parts, fmt.Sprintf(
-				"[tool result %s]\n%s", value.Name,
-				visibleToolMessage(ai.Message{Parts: value.Content}),
-			))
-		case ai.ImagePart:
-			parts = append(parts, "[image]")
-		case ai.FilePart:
-			parts = append(parts, "[file "+value.Name+"]")
-		}
-	}
-
-	return strings.TrimSpace(strings.Join(parts, "\n"))
 }
 
 func relativeTime(value time.Time) string {
@@ -251,7 +223,7 @@ func (m *Model) agentsView() tea.View {
 	}
 
 	content = fitOverlayContent(content, max(1, m.width), max(1, m.height), m.overlay.offset)
-	if !m.options.NoColor {
+	if !m.options.NoColor && m.overlay.agentDetail == nil {
 		content = lipgloss.NewStyle().Foreground(paletteFor(m.theme).workspace).Render(content)
 	}
 

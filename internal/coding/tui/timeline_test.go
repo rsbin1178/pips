@@ -46,7 +46,8 @@ func TestTimelineNeverProjectsReasoningOrSignatures(t *testing.T) {
 	assert.Contains(t, rendered, "question")
 	assert.Contains(t, rendered, "visible answer")
 	assert.Contains(t, rendered, "visible draft")
-	assert.Contains(t, rendered, "read · running")
+	assert.Contains(t, rendered, "✻ Exploring")
+	assert.Contains(t, rendered, "Read")
 	assert.NotContains(t, rendered, secret)
 }
 
@@ -101,7 +102,7 @@ func TestTimelineUsesDedicatedSubagentCardWithoutGenericTool(t *testing.T) {
 	require.Len(t, blocks, 1)
 	assert.Equal(t, blockSubagent, blocks[0].kind)
 	rendered := renderTimeline(blocks, newMarkdownRenderer(4), 80, themeDark, true)
-	assert.Contains(t, rendered, "✓ Explore · Locate the composition root")
+	assert.Contains(t, rendered, "• Explored · Locate the composition root")
 	assert.Contains(t, rendered, "Completed in 12s · 8 tools · 14.2k tokens")
 	assert.NotContains(t, rendered, subagent.ToolName)
 	assert.NotContains(t, rendered, "internal envelope")
@@ -122,7 +123,7 @@ func TestTimelineSubagentCardsKeepTaskPrimaryAndHumanizeFailure(t *testing.T) {
 				Role: subagent.RolePlan, State: subagent.StateRunning,
 				TaskPreview: "Map the runtime", ToolCalls: 2,
 			},
-			primary:   "✻ Plan · Map the runtime",
+			primary:   "✻ Planning · Map the runtime",
 			secondary: "Running · 2 tools",
 		},
 		{
@@ -132,7 +133,7 @@ func TestTimelineSubagentCardsKeepTaskPrimaryAndHumanizeFailure(t *testing.T) {
 				TaskPreview: "Check the patch", Code: "invalid_result",
 				DurationMillis: 5_000, ToolCalls: 3,
 			},
-			primary:   "✗ Review · Check the patch",
+			primary:   "✗ Review failed · Check the patch",
 			secondary: "Failed: invalid result after 5s · 3 tools",
 		},
 	}
@@ -175,7 +176,7 @@ func TestTimelineSubagentCardStaysTwoRowsOnNarrowTerminal(t *testing.T) {
 		for _, line := range lines {
 			assert.LessOrEqual(t, ansi.StringWidth(line), 24)
 		}
-		assert.Contains(t, ansi.Strip(lines[0]), "✻ Explore")
+		assert.Contains(t, ansi.Strip(lines[0]), "✻ Exploring")
 		assert.Contains(t, ansi.Strip(lines[1]), "Running")
 		if !noColor {
 			assert.Contains(t, rendered, "\x1b[")

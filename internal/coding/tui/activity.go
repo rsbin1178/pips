@@ -35,6 +35,7 @@ const (
 	activityLabelPreparing    = "Preparing…"
 	activityLabelWorking      = "Working…"
 	activityLabelThinking     = "Thinking…"
+	activityLabelExploring    = "Exploring…"
 	activityLabelResponding   = "Responding…"
 	activityLabelTools        = "Running tools…"
 	activityLabelApproval     = "Waiting for approval…"
@@ -157,21 +158,28 @@ func resolveBlockingActivity(context activityContext) (activityStatus, bool) {
 }
 
 func resolveProgressActivity(context activityContext) (activityStatus, bool) {
-	if name, count := runningTools(context.state.Tools); count > 0 {
-		if count == 1 {
-			label := fmt.Sprintf("Running %s…", name)
-			if name == subagent.ToolName {
-				label = runningSubagentLabel(context.state.Subagents)
+	if activities := runningToolActivities(context.state.Tools); len(activities) > 0 {
+		if len(activities) == 1 {
+			activity := activities[0]
+			if activity.name == subagent.ToolName {
+				return activityStatus{
+					kind: activityTool, label: runningSubagentLabel(context.state.Subagents),
+				}, true
 			}
 
+			return semanticToolActivityStatus(activity), true
+		}
+
+		if allExplorationActivities(activities) {
 			return activityStatus{
-				kind: activityTool, label: label,
+				kind: activityTool, label: activityLabelExploring,
+				detail: fmt.Sprintf("%d actions", len(activities)),
 			}, true
 		}
 
 		return activityStatus{
 			kind: activityTool, label: activityLabelTools,
-			detail: fmt.Sprintf("%d active", count),
+			detail: fmt.Sprintf("%d active", len(activities)),
 		}, true
 	}
 
@@ -197,6 +205,50 @@ func resolveProgressActivity(context activityContext) (activityStatus, bool) {
 	return activityStatus{}, false
 }
 
+func semanticToolActivityStatus(activity toolActivity) activityStatus {
+	status := activityStatus{kind: activityTool}
+
+	switch activity.class {
+	case toolClassExplore:
+		status.label = activityLabelExploring
+		status.detail = activity.subject
+	case toolClassShell:
+		status.label = "Running…"
+		status.detail = activity.subject
+	case toolClassPatch:
+		status.label = "Updating workspace…"
+	case toolClassGeneric:
+		status.label = "Calling…"
+		status.detail = activity.name
+	}
+
+	return status
+}
+
+func runningToolActivities(values []coding.ToolState) []toolActivity {
+	state := coding.State{Tools: values}
+	projected := projectToolActivities(state, nil)
+
+	running := make([]toolActivity, 0, len(projected))
+	for _, activity := range projected {
+		if activity.state == toolStateRunning {
+			running = append(running, activity)
+		}
+	}
+
+	return running
+}
+
+func allExplorationActivities(activities []toolActivity) bool {
+	for _, activity := range activities {
+		if activity.class != toolClassExplore {
+			return false
+		}
+	}
+
+	return len(activities) > 0
+}
+
 func runningSubagentLabel(values []coding.SubagentState) string {
 	for _, value := range slices.Backward(values) {
 		if value.State != subagent.StateCreated && value.State != subagent.StateRunning {
@@ -205,7 +257,7 @@ func runningSubagentLabel(values []coding.SubagentState) string {
 
 		switch value.Role {
 		case subagent.RoleExplore:
-			return "Exploring…"
+			return activityLabelExploring
 		case subagent.RolePlan:
 			return "Planning…"
 		case subagent.RoleReview:
@@ -227,22 +279,6 @@ func resolvePhaseActivity(phase coding.Phase) (activityStatus, bool) {
 	default:
 		return activityStatus{}, false
 	}
-}
-
-func runningTools(tools []coding.ToolState) (string, int) {
-	name := ""
-	count := 0
-
-	for _, tool := range tools {
-		if tool.Status != coding.ToolStatusRunning {
-			continue
-		}
-
-		name = tool.Call.Name
-		count++
-	}
-
-	return name, count
 }
 
 func hasDraftKind(deltas []coding.MessageDelta, kind ai.StreamEventType) bool {

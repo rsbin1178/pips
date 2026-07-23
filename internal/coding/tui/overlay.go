@@ -34,6 +34,7 @@ const (
 	overlayStatus
 	overlayTree
 	overlayCompact
+	overlayToolDetail
 	overlayAgents
 )
 
@@ -53,6 +54,7 @@ type overlayState struct {
 	forkMode    bool
 	agents      []subagent.Summary
 	agentDetail *subagent.Detail
+	toolDetail  *toolDetailView
 }
 
 type overlayDataMsg struct {
@@ -123,7 +125,7 @@ func (m *Model) openOverlay(kind overlayKind) tea.Cmd {
 		}
 	case overlayApproval:
 		m.overlay.cursor = 0
-	case overlayNone, overlayDiff, overlayHelp, overlayStatus:
+	case overlayNone, overlayDiff, overlayHelp, overlayStatus, overlayToolDetail:
 	}
 
 	return nil
@@ -172,7 +174,7 @@ func (m *Model) updateOverlayKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.overlay.controlling {
 		return m, nil
 	}
-	if command, handled := m.handleAgentOverlayClose(key); handled {
+	if command, handled := m.handleDetailOverlayClose(key); handled {
 		return m, command
 	}
 	if m.overlay.kind != overlayApproval && isOverlayDismissKey(key) {
@@ -190,7 +192,7 @@ func (m *Model) updateOverlayKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.updateTreeOverlay(message)
 	case overlayCompact:
 		return m.updateCompactOverlay(key)
-	case overlayDiff, overlayHelp, overlayStatus:
+	case overlayDiff, overlayHelp, overlayStatus, overlayToolDetail:
 		return m.updateReadOnlyOverlay(key)
 	case overlayAgents:
 		return m.updateAgentsOverlay(message)
@@ -201,7 +203,13 @@ func (m *Model) updateOverlayKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
-func (m *Model) handleAgentOverlayClose(key string) (tea.Cmd, bool) {
+func (m *Model) handleDetailOverlayClose(key string) (tea.Cmd, bool) {
+	if m.overlay.kind == overlayToolDetail &&
+		(key == "ctrl+t" || isOverlayDismissKey(key)) {
+		m.overlay = overlayState{}
+
+		return m.composer.Focus(), true
+	}
 	if m.overlay.kind != overlayAgents {
 		return nil, false
 	}
@@ -581,12 +589,24 @@ func (m *Model) baseOverlayContent() string {
 		content = m.treeOverlayContent()
 	case overlayCompact:
 		content = m.compactOverlayContent()
+	case overlayToolDetail:
+		content = m.toolDetailOverlayContent()
 	case overlayAgents:
 		content = m.agentsOverlayContent()
 	case overlayNone:
 	}
 
 	return content
+}
+
+func (m *Model) toolDetailOverlayContent() string {
+	if m.overlay.toolDetail == nil {
+		return "Tool details\n\nNo Tool activity is available."
+	}
+
+	detail := m.overlay.toolDetail
+	return detail.title + "\n\n" + detail.content +
+		"\n\n↑/↓ or PgUp/PgDn scroll · Ctrl+T/Esc close"
 }
 
 func (m *Model) statusOverlayContent() string {
