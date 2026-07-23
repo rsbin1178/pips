@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding"
+	"github.com/rsbin/pips/internal/coding/subagent"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -95,6 +96,19 @@ func TestResolveActivity(t *testing.T) {
 				},
 			)},
 			kind: activityTool, label: activityLabelTools, detail: "2 active", visible: true,
+		},
+		{
+			name: "subagent uses role activity", context: activityContext{state: withSubagents(
+				withTools(
+					running,
+					coding.ToolState{
+						Call:   coding.ToolCall{ID: "call-1", Name: subagent.ToolName},
+						Status: coding.ToolStatusRunning,
+					},
+				),
+				coding.SubagentState{Role: subagent.RoleExplore, State: subagent.StateRunning},
+			)},
+			kind: activityTool, label: "Exploring…", visible: true,
 		},
 		{
 			name: "approval takes priority over tool", context: activityContext{state: withApproval(
@@ -290,6 +304,12 @@ func withTools(state coding.State, tools ...coding.ToolState) coding.State {
 
 func withApproval(state coding.State, kind coding.ApprovalKind) coding.State {
 	state.Approval = coding.ApprovalState{Kind: kind}
+
+	return state
+}
+
+func withSubagents(state coding.State, values ...coding.SubagentState) coding.State {
+	state.Subagents = values
 
 	return state
 }

@@ -80,7 +80,7 @@ var defaultActions = []actionBinding{
 		ID:       actionToggleTool,
 		Contexts: []actionContext{contextIdle, contextRunning, contextPaused},
 		Keys:     []string{"ctrl+t"},
-		Label:    "tool details",
+		Label:    "latest details",
 	},
 	{
 		ID:       actionCancel,

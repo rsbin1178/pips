@@ -82,6 +82,91 @@ func TestManagerRunsEachRoleWithExactReadOnlyCatalog(t *testing.T) {
 	}
 }
 
+func TestManagerOmitsNativeSchemaForModelWithoutStructuredOutput(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		role        Role
+		text        string
+		schemaField string
+		want        any
+	}{
+		{
+			name:        "explore Chinese text",
+			role:        RoleExplore,
+			text:        "兼容模型返回的自然语言总结。",
+			schemaField: `"evidence"`,
+			want: ExploreResult{
+				Summary:  "兼容模型返回的自然语言总结。",
+				Evidence: []Evidence{},
+				Unknowns: []string{},
+			},
+		},
+		{
+			name:        "plan sentence",
+			role:        RolePlan,
+			text:        "plan subagent 工作正常",
+			schemaField: `"steps"`,
+			want: PlanResult{
+				Summary:      "plan subagent 工作正常",
+				Assumptions:  []string{},
+				Steps:        []PlanStep{},
+				Risks:        []string{},
+				Verification: []string{},
+			},
+		},
+		{
+			name:        "review sentence",
+			role:        RoleReview,
+			text:        "review subagent 工作正常",
+			schemaField: `"findings"`,
+			want: ReviewResult{
+				Summary:       "review subagent 工作正常",
+				Findings:      []ReviewFinding{},
+				ResidualRisks: []string{},
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			capabilities := ai.Capabilities{Text: true, Tools: true}
+			model := &testModel{
+				responses:            []*ai.Response{responseText(test.text)},
+				capabilities:         &capabilities,
+				rejectResponseFormat: true,
+			}
+			fixture := newManagerFixture(t, model)
+			execution, err := fixture.manager.Start(
+				t.Context(),
+				Request{Role: test.role, Task: "Inspect the implementation."},
+				nil,
+			)
+			require.NoError(t, err)
+
+			result, err := execution.Wait(t.Context())
+			require.NoError(t, err)
+			assert.Equal(t, OutcomeSucceeded, result.Outcome)
+			assert.Equal(t, test.want, result.Value)
+
+			requests := model.Requests()
+			require.Len(t, requests, 1)
+			assert.Nil(t, requests[0].ResponseFormat)
+			assert.Equal(
+				t,
+				[]string{"read", "ls", "glob", "grep"},
+				toolNames(requests[0].Tools),
+			)
+			assert.Contains(t, requests[0].System, "Native structured output is unavailable")
+			assert.Contains(t, requests[0].System, test.schemaField)
+			require.NotNil(t, requests[0].MaxTokens)
+			assert.Equal(t, DefaultLimits().MaxOutputTokens, *requests[0].MaxTokens)
+		})
+	}
+}
+
 func TestManagerIsSerialCancelableAndLeavesWorkspaceUnchanged(t *testing.T) {
 	t.Parallel()
 
@@ -182,9 +267,11 @@ func TestManagerInspectUsesPersistedLimitsAndRejectsOtherParent(t *testing.T) {
 func TestManagerFailsMalformedResultWithDurableReference(t *testing.T) {
 	t.Parallel()
 
-	fixture := newManagerFixture(t, &testModel{responses: []*ai.Response{
-		responseText(`{"summary":`),
-	}})
+	capabilities := ai.Capabilities{Text: true, Tools: true}
+	fixture := newManagerFixture(t, &testModel{
+		responses:    []*ai.Response{responseText(`{"summary":`)},
+		capabilities: &capabilities,
+	})
 	execution, err := fixture.manager.Start(
 		t.Context(), Request{Role: RoleExplore, Task: "Inspect."}, nil,
 	)
@@ -199,6 +286,32 @@ func TestManagerFailsMalformedResultWithDurableReference(t *testing.T) {
 	require.NoError(t, inspectErr)
 	assert.Equal(t, StateFailed, detail.Summary.State)
 	assert.Nil(t, detail.Result)
+}
+
+func TestManagerKeepsValidExploreResultWhenOneEvidenceItemIsInvalid(t *testing.T) {
+	t.Parallel()
+
+	fixture := newManagerFixture(t, &testModel{responses: []*ai.Response{responseText(
+		`{"summary":"Located the runtime.","evidence":[` +
+			`{"path":"internal/coding/runtime.go","start_line":1,"end_line":4,"claim":"Defines the runtime."},` +
+			`{"path":"internal/coding/open.go","start_line":20,"end_line":0,"claim":"Invalid range."}` +
+			`],"unknowns":[]}`,
+	)}})
+	execution, err := fixture.manager.Start(
+		t.Context(), Request{Role: RoleExplore, Task: "Locate the runtime."}, nil,
+	)
+	require.NoError(t, err)
+
+	result, err := execution.Wait(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, OutcomeSucceeded, result.Outcome)
+	assert.Equal(t, "ok", result.Code)
+
+	value, ok := result.Value.(ExploreResult)
+	require.True(t, ok)
+	require.Len(t, value.Evidence, 1)
+	assert.Equal(t, "internal/coding/runtime.go", value.Evidence[0].Path)
+	assert.Equal(t, []string{exploreEvidenceOmissionNotice}, value.Unknowns)
 }
 
 func TestManagerReportsWallTimeAndCumulativeTokenBudgets(t *testing.T) {
@@ -301,9 +414,11 @@ func newManagerFixtureWithOptions(
 }
 
 type testModel struct {
-	mu        sync.Mutex
-	responses []*ai.Response
-	requests  []ai.Request
+	mu                   sync.Mutex
+	responses            []*ai.Response
+	requests             []ai.Request
+	capabilities         *ai.Capabilities
+	rejectResponseFormat bool
 }
 
 func (m *testModel) Generate(_ context.Context, request ai.Request) (*ai.Response, error) {
@@ -311,6 +426,10 @@ func (m *testModel) Generate(_ context.Context, request ai.Request) (*ai.Respons
 	defer m.mu.Unlock()
 
 	m.requests = append(m.requests, request)
+	if m.rejectResponseFormat && request.ResponseFormat != nil {
+		return nil, errors.New("test model rejects response format")
+	}
+
 	if len(m.responses) == 0 {
 		return nil, errors.New("test model exhausted")
 	}
@@ -346,7 +465,11 @@ func (m *testModel) Stream(ctx context.Context, request ai.Request) ai.Stream {
 
 func (*testModel) Provider() ai.Provider { return ai.ProviderOpenAI }
 func (*testModel) ModelID() string       { return "subagent-test" }
-func (*testModel) Capabilities() ai.Capabilities {
+func (m *testModel) Capabilities() ai.Capabilities {
+	if m.capabilities != nil {
+		return *m.capabilities
+	}
+
 	return ai.Capabilities{Text: true, Tools: true, StructuredOutput: true}
 }
 

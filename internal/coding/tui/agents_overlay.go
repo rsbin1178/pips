@@ -148,7 +148,7 @@ func (m *Model) agentsOverlayContent() string {
 		)
 	}
 
-	lines = append(lines, "", "↑/↓ choose · type to search · Enter inspect · Esc close")
+	lines = append(lines, "", "↑/↓ choose · type to search · Enter inspect · Ctrl+T/Esc close")
 
 	return strings.Join(lines, "\n")
 }
@@ -189,7 +189,7 @@ func (m *Model) agentDetailContent(detail subagent.Detail) string {
 		}
 	}
 
-	lines = append(lines, "", "↑/↓ or PgUp/PgDn scroll · Esc back")
+	lines = append(lines, "", "↑/↓ or PgUp/PgDn scroll · Esc back · Ctrl+T close")
 
 	return strings.Join(lines, "\n")
 }
