@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"image/color"
+	"slices"
 	"strings"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding"
+	"github.com/rsbin/pips/internal/coding/subagent"
 )
 
 type activityKind uint8
@@ -157,8 +159,13 @@ func resolveBlockingActivity(context activityContext) (activityStatus, bool) {
 func resolveProgressActivity(context activityContext) (activityStatus, bool) {
 	if name, count := runningTools(context.state.Tools); count > 0 {
 		if count == 1 {
+			label := fmt.Sprintf("Running %s…", name)
+			if name == subagent.ToolName {
+				label = runningSubagentLabel(context.state.Subagents)
+			}
+
 			return activityStatus{
-				kind: activityTool, label: fmt.Sprintf("Running %s…", name),
+				kind: activityTool, label: label,
 			}, true
 		}
 
@@ -188,6 +195,25 @@ func resolveProgressActivity(context activityContext) (activityStatus, bool) {
 	}
 
 	return activityStatus{}, false
+}
+
+func runningSubagentLabel(values []coding.SubagentState) string {
+	for _, value := range slices.Backward(values) {
+		if value.State != subagent.StateCreated && value.State != subagent.StateRunning {
+			continue
+		}
+
+		switch value.Role {
+		case subagent.RoleExplore:
+			return "Exploring…"
+		case subagent.RolePlan:
+			return "Planning…"
+		case subagent.RoleReview:
+			return "Reviewing…"
+		}
+	}
+
+	return "Running subagent…"
 }
 
 func resolvePhaseActivity(phase coding.Phase) (activityStatus, bool) {

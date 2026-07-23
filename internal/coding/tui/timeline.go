@@ -32,6 +32,7 @@ type timelineBlock struct {
 	id       string
 	title    string
 	body     string
+	meta     string
 	status   string
 	position int
 	rendered bool
@@ -160,37 +161,43 @@ func projectTimeline(state coding.State) []timelineBlock {
 }
 
 func projectSubagent(value coding.SubagentState, position int) timelineBlock {
-	roleRunning, roleDone := subagentRoleLabels(value.Role)
-	title := "✻ " + roleRunning + "…"
-	status := string(value.State)
-	if isTerminalSubagent(value.State) {
-		title = terminalSubagentTitle(roleDone, value)
-	}
-
 	return timelineBlock{
-		kind: blockSubagent, id: value.ChildSessionID, title: title,
-		body: value.TaskPreview, status: status, position: position,
+		kind: blockSubagent, id: value.ChildSessionID,
+		title: subagentRoleLabel(value.Role), body: oneLineSubagentTask(value.TaskPreview),
+		meta: subagentMetadata(value), status: string(value.State), position: position,
 	}
 }
 
-func terminalSubagentTitle(roleDone string, value coding.SubagentState) string {
-	title := "✻ " + roleDone
-	facts := subagentFacts(value)
-	if len(facts) > 0 {
-		title += " · " + strings.Join(facts, " · ")
-	}
-	if value.State != subagent.StateSucceeded && value.Code != "" {
-		title += " · " + value.Code
-	}
-
-	return title
+func oneLineSubagentTask(value string) string {
+	return strings.Join(strings.Fields(ansi.Strip(value)), " ")
 }
 
-func subagentFacts(value coding.SubagentState) []string {
-	facts := make([]string, 0, 3)
+func subagentMetadata(value coding.SubagentState) string {
+	label := "Running"
+	durationPrefix := " for "
+	switch value.State {
+	case subagent.StateSucceeded:
+		label = "Completed"
+		durationPrefix = " in "
+	case subagent.StateFailed:
+		label = "Failed"
+		if value.Code != "" {
+			label += ": " + humanizeSubagentCode(value.Code)
+		}
+		durationPrefix = " after "
+	case subagent.StateCanceled:
+		label = "Canceled"
+		durationPrefix = " after "
+	case subagent.StateInterrupted:
+		label = "Interrupted"
+		durationPrefix = " after "
+	case subagent.StateCreated, subagent.StateRunning:
+	}
 	if value.DurationMillis > 0 {
-		facts = append(facts, formatInteractionDuration(value.DurationMillis))
+		label += durationPrefix + formatInteractionDuration(value.DurationMillis)
 	}
+
+	facts := make([]string, 0, 2)
 	if value.ToolCalls > 0 {
 		facts = append(facts, fmt.Sprintf("%d tools", value.ToolCalls))
 	}
@@ -198,19 +205,42 @@ func subagentFacts(value coding.SubagentState) []string {
 		facts = append(facts, compactTokenCount(tokens)+" tokens")
 	}
 
-	return facts
+	if len(facts) == 0 {
+		return label
+	}
+
+	return label + " · " + strings.Join(facts, " · ")
 }
 
-func subagentRoleLabels(role subagent.Role) (string, string) {
+func subagentRoleLabel(role subagent.Role) string {
 	switch role {
 	case subagent.RoleExplore:
-		return "Exploring", "Explored"
+		return "Explore"
 	case subagent.RolePlan:
-		return "Planning", "Planned"
+		return "Plan"
 	case subagent.RoleReview:
-		return "Reviewing", "Reviewed"
+		return "Review"
 	default:
-		return "Working", "Worked"
+		return "Subagent"
+	}
+}
+
+func humanizeSubagentCode(value string) string {
+	return strings.ReplaceAll(strings.TrimSpace(value), "_", " ")
+}
+
+func subagentStateGlyph(state subagent.State) string {
+	switch state {
+	case subagent.StateSucceeded:
+		return "✓"
+	case subagent.StateFailed:
+		return "✗"
+	case subagent.StateCanceled, subagent.StateInterrupted:
+		return "!"
+	case subagent.StateCreated, subagent.StateRunning:
+		return "✻"
+	default:
+		return "·"
 	}
 }
 
@@ -421,6 +451,20 @@ func renderTimelineBlock(
 	theme colorTheme,
 	noColor bool,
 ) string {
+	if block.kind == blockSubagent {
+		return renderSubagentBlock(block, width, theme, noColor)
+	}
+
+	return renderRegularTimelineBlock(block, markdown, width, theme, noColor)
+}
+
+func renderRegularTimelineBlock(
+	block timelineBlock,
+	markdown *markdownRenderer,
+	width int,
+	theme colorTheme,
+	noColor bool,
+) string {
 	body := block.body
 	if !block.rendered && (block.kind == blockAssistant || block.kind == blockDraft) {
 		if value, err := markdown.render(body, max(1, width-2), theme, noColor); err == nil {
@@ -429,7 +473,7 @@ func renderTimelineBlock(
 	}
 
 	title := block.title
-	if block.status != "" && block.kind != blockSubagent {
+	if block.status != "" {
 		if title != "" {
 			title += " · "
 		}
@@ -437,9 +481,6 @@ func renderTimelineBlock(
 	}
 	if title != "" && !noColor {
 		style := timelineTitleStyle(block.kind, theme)
-		if block.kind == blockSubagent {
-			style = subagentTitleStyle(block.status, theme)
-		}
 		title = style.Render(title)
 	}
 	if strings.TrimSpace(body) == "" {
@@ -450,6 +491,33 @@ func renderTimelineBlock(
 	}
 
 	return title + "\n" + body
+}
+
+func renderSubagentBlock(
+	block timelineBlock,
+	width int,
+	theme colorTheme,
+	noColor bool,
+) string {
+	width = max(1, width)
+	prefix := subagentStateGlyph(subagent.State(block.status)) + " " + block.title
+	heading := prefix
+	if block.body != "" {
+		heading += " · " + block.body
+	}
+	metadata := "  " + block.meta
+	if noColor {
+		return ansi.Truncate(heading, width, "…") + "\n" + ansi.Truncate(metadata, width, "…")
+	}
+
+	palette := paletteFor(theme)
+	heading = subagentTitleStyle(block.status, theme).Render(prefix)
+	if block.body != "" {
+		heading += lipgloss.NewStyle().Foreground(palette.workspace).Render(" · " + block.body)
+	}
+	metadata = lipgloss.NewStyle().Foreground(palette.muted).Render(metadata)
+
+	return ansi.Truncate(heading, width, "…") + "\n" + ansi.Truncate(metadata, width, "…")
 }
 
 func renderUserMessage(body string, width int, theme colorTheme, noColor bool) string {

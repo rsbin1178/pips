@@ -101,10 +101,86 @@ func TestTimelineUsesDedicatedSubagentCardWithoutGenericTool(t *testing.T) {
 	require.Len(t, blocks, 1)
 	assert.Equal(t, blockSubagent, blocks[0].kind)
 	rendered := renderTimeline(blocks, newMarkdownRenderer(4), 80, themeDark, true)
-	assert.Contains(t, rendered, "✻ Explored · 12s · 8 tools · 14.2k tokens")
-	assert.Contains(t, rendered, "Locate the composition root")
+	assert.Contains(t, rendered, "✓ Explore · Locate the composition root")
+	assert.Contains(t, rendered, "Completed in 12s · 8 tools · 14.2k tokens")
 	assert.NotContains(t, rendered, subagent.ToolName)
 	assert.NotContains(t, rendered, "internal envelope")
+}
+
+func TestTimelineSubagentCardsKeepTaskPrimaryAndHumanizeFailure(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		value     coding.SubagentState
+		primary   string
+		secondary string
+	}{
+		{
+			name: "running",
+			value: coding.SubagentState{
+				Role: subagent.RolePlan, State: subagent.StateRunning,
+				TaskPreview: "Map the runtime", ToolCalls: 2,
+			},
+			primary:   "✻ Plan · Map the runtime",
+			secondary: "Running · 2 tools",
+		},
+		{
+			name: "failed",
+			value: coding.SubagentState{
+				Role: subagent.RoleReview, State: subagent.StateFailed,
+				TaskPreview: "Check the patch", Code: "invalid_result",
+				DurationMillis: 5_000, ToolCalls: 3,
+			},
+			primary:   "✗ Review · Check the patch",
+			secondary: "Failed: invalid result after 5s · 3 tools",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			rendered := renderTimeline(
+				[]timelineBlock{projectSubagent(test.value, 0)},
+				newMarkdownRenderer(4),
+				80,
+				themeDark,
+				true,
+			)
+			assert.Contains(t, rendered, test.primary)
+			assert.Contains(t, rendered, test.secondary)
+			assert.NotContains(t, rendered, "invalid_result")
+		})
+	}
+}
+
+func TestTimelineSubagentCardStaysTwoRowsOnNarrowTerminal(t *testing.T) {
+	t.Parallel()
+
+	for _, noColor := range []bool{true, false} {
+		rendered := renderTimeline(
+			[]timelineBlock{projectSubagent(coding.SubagentState{
+				Role: subagent.RoleExplore, State: subagent.StateRunning,
+				TaskPreview: "Inspect a deliberately long task description without wrapping",
+				ToolCalls:   12,
+			}, 0)},
+			newMarkdownRenderer(4),
+			24,
+			themeDark,
+			noColor,
+		)
+		lines := strings.Split(rendered, "\n")
+		require.Len(t, lines, 2)
+		for _, line := range lines {
+			assert.LessOrEqual(t, ansi.StringWidth(line), 24)
+		}
+		assert.Contains(t, ansi.Strip(lines[0]), "✻ Explore")
+		assert.Contains(t, ansi.Strip(lines[1]), "Running")
+		if !noColor {
+			assert.Contains(t, rendered, "\x1b[")
+		}
+	}
 }
 
 func TestTimelinePlacesCompletedToolBeforeFollowingAnswer(t *testing.T) {

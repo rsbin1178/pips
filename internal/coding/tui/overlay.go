@@ -172,8 +172,8 @@ func (m *Model) updateOverlayKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.overlay.controlling {
 		return m, nil
 	}
-	if m.closeAgentDetail(key) {
-		return m, nil
+	if command, handled := m.handleAgentOverlayClose(key); handled {
+		return m, command
 	}
 	if m.overlay.kind != overlayApproval && isOverlayDismissKey(key) {
 		m.overlay = overlayState{}
@@ -201,16 +201,23 @@ func (m *Model) updateOverlayKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
-func (m *Model) closeAgentDetail(key string) bool {
-	if m.overlay.kind != overlayAgents || m.overlay.agentDetail == nil ||
-		!isOverlayDismissKey(key) {
-		return false
+func (m *Model) handleAgentOverlayClose(key string) (tea.Cmd, bool) {
+	if m.overlay.kind != overlayAgents {
+		return nil, false
+	}
+	if key == "ctrl+t" {
+		m.overlay = overlayState{}
+
+		return m.composer.Focus(), true
+	}
+	if m.overlay.agentDetail == nil || !isOverlayDismissKey(key) {
+		return nil, false
 	}
 
 	m.overlay.agentDetail = nil
 	m.overlay.offset = 0
 
-	return true
+	return nil, true
 }
 
 func isOverlayDismissKey(key string) bool {
