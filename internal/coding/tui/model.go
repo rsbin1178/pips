@@ -17,6 +17,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding"
+	"github.com/rsbin/pips/internal/coding/subagent"
 )
 
 const (
@@ -82,6 +83,7 @@ type Model struct {
 	timeline          string
 	scrollback        scrollbackCursor
 	scrollbackOutput  bool
+	streaming         streamProjection
 	renderWait        bool
 	bridge            *eventBridge
 	starting          bool
@@ -99,6 +101,8 @@ type Model struct {
 	expanded          map[string]bool
 	completionMarkers []completionMarker
 	activity          activityIndicator
+	refreshCursor     bool
+	cursorRefreshSeq  uint64
 }
 
 func newModel(ctx context.Context, options Options) *Model {
@@ -269,6 +273,14 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.overlay.err = message.err
 		m.overlay.tree = message.tree.Clone()
 		m.overlay.preview = message.preview
+		if message.hasAgents {
+			m.overlay.agents = message.agents
+			m.overlay.cursor = 0
+		}
+		if message.hasDetail {
+			detail := message.detail
+			m.overlay.agentDetail = &detail
+		}
 		m.overlay.cursor = 0
 
 		return m, nil
@@ -351,6 +363,24 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case renderTickMsg:
 		m.renderWait = false
 		m.renderTranscript(false)
+
+		return m, nil
+	case scrollbackRenderReadyMsg:
+		return m, nil
+	case scrollbackCursorRefreshMsg:
+		if message.sequence != m.cursorRefreshSeq {
+			return m, nil
+		}
+		m.refreshCursor = true
+
+		return m, tea.Tick(renderFrame, func(time.Time) tea.Msg {
+			return scrollbackCursorRefreshDoneMsg(message)
+		})
+	case scrollbackCursorRefreshDoneMsg:
+		if message.sequence != m.cursorRefreshSeq {
+			return m, nil
+		}
+		m.refreshCursor = false
 
 		return m, nil
 	case activityTickMsg:
@@ -587,6 +617,9 @@ func (m *Model) readyView() tea.View {
 	if m.sessionPicker.open {
 		return m.sessionPickerView()
 	}
+	if m.overlay.kind == overlayAgents {
+		return m.agentsView()
+	}
 
 	separator := strings.Repeat("─", max(1, m.width))
 	if m.options.NoColor {
@@ -642,6 +675,9 @@ func (m *Model) readyView() tea.View {
 	}
 	if view.Cursor != nil {
 		view.Cursor.Y += composerOffset
+		if m.refreshCursor {
+			view.Cursor.Blink = !view.Cursor.Blink
+		}
 	}
 
 	return view
@@ -821,6 +857,11 @@ func (m *Model) toggleLatestTool() tea.Cmd {
 	}
 
 	latest := m.state.Tools[len(m.state.Tools)-1]
+	if latest.Call.Name == subagent.ToolName {
+		if childSessionID := subagentChildSessionID(latest, m.state.Subagents); childSessionID != "" {
+			return m.openAgentDetail(childSessionID)
+		}
+	}
 	id := latest.Call.ID
 	if len(m.state.Tools)-1 < m.scrollback.tools {
 		if m.expanded[id] {
@@ -886,6 +927,16 @@ func (m *Model) actionContext() actionContext {
 }
 
 type renderTickMsg struct{}
+
+type scrollbackCursorRefreshMsg struct {
+	sequence uint64
+}
+
+type scrollbackRenderReadyMsg struct{}
+
+type scrollbackCursorRefreshDoneMsg struct {
+	sequence uint64
+}
 
 func (m *Model) submit(actionCtx actionContext) tea.Cmd {
 	text := strings.TrimSpace(m.composer.Value())

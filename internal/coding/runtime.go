@@ -32,6 +32,7 @@ import (
 	"github.com/rsbin/pips/internal/coding/paths"
 	"github.com/rsbin/pips/internal/coding/resource"
 	"github.com/rsbin/pips/internal/coding/session"
+	"github.com/rsbin/pips/internal/coding/subagent"
 	"github.com/rsbin/pips/internal/coding/tools"
 	"github.com/rsbin/pips/internal/coding/workspace"
 )
@@ -68,6 +69,7 @@ type ExecutionOptions struct {
 	MCPLimits      codingmcp.Limits
 	ToolLimits     tools.Limits
 	GitLimits      git.Limits
+	Subagent       subagent.ExecutionOptions
 }
 
 // OpenOptions explicitly bind one Runtime to one Workspace, configuration,
@@ -125,6 +127,7 @@ type Runtime struct {
 	pending     pendingRunner
 	observers   *agentObservers
 	telemetry   *telemetryObservers
+	subagents   *subagent.Manager
 
 	writer      *eventWriter
 	interaction *interaction
@@ -357,6 +360,18 @@ func Open(ctx context.Context, options OpenOptions) (_ *Runtime, returnErr error
 	if err != nil {
 		return nil, err
 	}
+	for _, call := range pending {
+		if isLegacyCodingTool(call.Name) {
+			return nil, fmt.Errorf(
+				"%w: legacy_tool_call_unresolved (%s)",
+				ErrLegacyToolCallUnresolved,
+				call.Name,
+			)
+		}
+	}
+	if err := subagent.Reconcile(ctx, repository, handle); err != nil {
+		return nil, fmt.Errorf("coding runtime: reconcile subagents: %w", err)
+	}
 	treeSnapshot, err := runtime.session.Tree(harness.TreeLimits{})
 	if err != nil {
 		return nil, err
@@ -387,6 +402,19 @@ func Open(ctx context.Context, options OpenOptions) (_ *Runtime, returnErr error
 	if err != nil {
 		return nil, err
 	}
+	runtime.subagents, err = subagent.New(subagent.Config{
+		Repository:     repository,
+		Parent:         handle,
+		Tree:           tree,
+		Model:          baseModel,
+		RequestPolicy:  requestPolicy,
+		Options:        configured.Subagent,
+		AgentObservers: []func(context.Context, agent.Event){runtime.observers.observe},
+	})
+	if err != nil {
+		return nil, err
+	}
+	stack.add(runtime.subagents.Close)
 
 	runtime.observeSessionOpened(ctx, resumed)
 	runtime.recordOpenDiagnostics(ctx, loadedResources, connections)

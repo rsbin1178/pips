@@ -26,7 +26,7 @@ func TestCatalogMetadataAndConcurrency(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Len(t, descriptors, 5)
-	assert.Equal(t, []string{"read_file", "list_dir", "find_files", "search_text", "apply_patch"}, []string{
+	assert.Equal(t, []string{"read", "ls", "glob", "grep", "apply_patch"}, []string{
 		descriptors[0].Name,
 		descriptors[1].Name,
 		descriptors[2].Name,
@@ -55,9 +55,21 @@ func TestCatalogMetadataAndConcurrency(t *testing.T) {
 			assert.False(t, ok)
 		}
 	}
+
+	grepDeclaration := fixture.tools["grep"].Decl()
+	require.NotNil(t, grepDeclaration.InputSchema)
+	assert.Equal(
+		t,
+		[]string{"pattern", "fixed_strings", "path", "glob", "case_sensitive", "offset", "limit"},
+		grepDeclaration.InputSchema.Required,
+	)
+	assert.Contains(t, grepDeclaration.InputSchema.Properties, "fixed_strings")
+	assert.True(t, grepDeclaration.InputSchema.Properties["fixed_strings"].Nullable)
+	assert.NotContains(t, grepDeclaration.InputSchema.Properties, "query")
+	assert.NotContains(t, grepDeclaration.InputSchema.Properties, "regex")
 }
 
-func TestReadFilePaginatesAndRejectsUnsafeContent(t *testing.T) {
+func TestReadPaginatesAndRejectsUnsafeContent(t *testing.T) {
 	t.Parallel()
 
 	limits := tools.DefaultLimits()
@@ -65,12 +77,12 @@ func TestReadFilePaginatesAndRejectsUnsafeContent(t *testing.T) {
 	fixture := newToolFixture(t, limits)
 	fixture.write("file.txt", "alpha\nbeta\ngamma\n")
 
-	text, err := fixture.exec(t.Context(), "read_file", `{"path":"file.txt","offset":2,"limit":1}`)
+	text, err := fixture.exec(t.Context(), "read", `{"path":"file.txt","offset":2,"limit":1}`)
 	require.NoError(t, err)
 	header, body, err := tools.ParseResult(text)
 	require.NoError(t, err)
 	assert.True(t, header.OK)
-	assert.Equal(t, "read_file", header.Tool)
+	assert.Equal(t, "read", header.Tool)
 	assert.True(t, header.Truncated)
 	assert.Equal(t, "lines", header.Reason)
 	require.NotNil(t, header.Next.Offset)
@@ -78,7 +90,7 @@ func TestReadFilePaginatesAndRejectsUnsafeContent(t *testing.T) {
 	assert.Equal(t, "2: beta\n", body)
 
 	fixture.write("binary", "text\x00data")
-	_, err = fixture.exec(t.Context(), "read_file", `{"path":"binary"}`)
+	_, err = fixture.exec(t.Context(), "read", `{"path":"binary"}`)
 	require.Error(t, err)
 	header, _, parseErr := tools.ParseResult(err.Error())
 	require.NoError(t, parseErr)
@@ -87,7 +99,7 @@ func TestReadFilePaginatesAndRejectsUnsafeContent(t *testing.T) {
 
 	outside := filepath.Join(t.TempDir(), "outside")
 	require.NoError(t, os.WriteFile(outside, []byte("sentinel"), 0o600))
-	_, err = fixture.exec(t.Context(), "read_file", `{"path":"../outside"}`)
+	_, err = fixture.exec(t.Context(), "read", `{"path":"../outside"}`)
 	require.Error(t, err)
 	header, _, parseErr = tools.ParseResult(err.Error())
 	require.NoError(t, parseErr)
@@ -95,7 +107,7 @@ func TestReadFilePaginatesAndRejectsUnsafeContent(t *testing.T) {
 	assert.Equal(t, "sentinel", string(mustRead(t, outside)))
 }
 
-func TestListDirIsStableTypedAndPaginated(t *testing.T) {
+func TestLSIsStableTypedAndPaginated(t *testing.T) {
 	t.Parallel()
 
 	limits := tools.DefaultLimits()
@@ -106,7 +118,7 @@ func TestListDirIsStableTypedAndPaginated(t *testing.T) {
 	require.NoError(t, os.Mkdir(filepath.Join(fixture.root, "dir"), 0o700))
 	require.NoError(t, os.Symlink("a.txt", filepath.Join(fixture.root, "link")))
 
-	text, err := fixture.exec(t.Context(), "list_dir", `{}`)
+	text, err := fixture.exec(t.Context(), "ls", `{}`)
 	require.NoError(t, err)
 	header, body, err := tools.ParseResult(text)
 	require.NoError(t, err)
@@ -115,7 +127,7 @@ func TestListDirIsStableTypedAndPaginated(t *testing.T) {
 	require.NotNil(t, header.Next.Offset)
 	assert.Equal(t, 2, *header.Next.Offset)
 
-	text, err = fixture.exec(t.Context(), "list_dir", `{"offset":2,"limit":2}`)
+	text, err = fixture.exec(t.Context(), "ls", `{"offset":2,"limit":2}`)
 	require.NoError(t, err)
 	header, body, err = tools.ParseResult(text)
 	require.NoError(t, err)
@@ -123,7 +135,7 @@ func TestListDirIsStableTypedAndPaginated(t *testing.T) {
 	assert.Equal(t, "dir/\nlink@\n", body)
 }
 
-func TestFindFilesUsesRecursiveGlobWithoutFollowingSymlinks(t *testing.T) {
+func TestGlobUsesRecursivePatternWithoutFollowingSymlinks(t *testing.T) {
 	t.Parallel()
 
 	fixture := newToolFixture(t, tools.DefaultLimits())
@@ -133,7 +145,7 @@ func TestFindFilesUsesRecursiveGlobWithoutFollowingSymlinks(t *testing.T) {
 	fixture.write(".git/config", "secret")
 	require.NoError(t, os.Symlink("nested", filepath.Join(fixture.root, "linked")))
 
-	text, err := fixture.exec(t.Context(), "find_files", `{"pattern":"**/*.go"}`)
+	text, err := fixture.exec(t.Context(), "glob", `{"pattern":"**/*.go"}`)
 	require.NoError(t, err)
 	header, body, err := tools.ParseResult(text)
 	require.NoError(t, err)
@@ -142,19 +154,19 @@ func TestFindFilesUsesRecursiveGlobWithoutFollowingSymlinks(t *testing.T) {
 	assert.NotContains(t, body, ".git")
 	assert.NotContains(t, body, "linked")
 
-	_, err = fixture.exec(t.Context(), "find_files", `{"pattern":"**","path":"linked"}`)
+	_, err = fixture.exec(t.Context(), "glob", `{"pattern":"**","path":"linked"}`)
 	require.Error(t, err)
 	header, _, parseErr := tools.ParseResult(err.Error())
 	require.NoError(t, parseErr)
 	assert.Equal(t, "symlink_not_allowed", header.Code)
 }
 
-func TestSearchTextSupportsGlobCaseAndContinuation(t *testing.T) {
+func TestGrepSupportsGlobCaseAndContinuation(t *testing.T) {
 	t.Parallel()
 
 	limits := tools.DefaultLimits()
-	limits.SearchMatches = 1
-	limits.SearchLineBytes = 16
+	limits.GrepMatches = 1
+	limits.GrepLineBytes = 16
 	fixture := newToolFixture(t, limits)
 	fixture.write("a.go", "first Needle line that is long\nnone\n")
 	fixture.write("nested/b.go", "needle second\n")
@@ -164,8 +176,8 @@ func TestSearchTextSupportsGlobCaseAndContinuation(t *testing.T) {
 
 	text, err := fixture.exec(
 		t.Context(),
-		"search_text",
-		`{"query":"needle","glob":"**/*.go","case_sensitive":false,"limit":1}`,
+		"grep",
+		`{"pattern":"needle","glob":"**/*.go","case_sensitive":false,"limit":1}`,
 	)
 	require.NoError(t, err)
 	header, body, err := tools.ParseResult(text)
@@ -180,19 +192,42 @@ func TestSearchTextSupportsGlobCaseAndContinuation(t *testing.T) {
 
 	text, err = fixture.exec(
 		t.Context(),
-		"search_text",
-		`{"query":"needle","glob":"**/*.go","case_sensitive":false,"offset":1,"limit":1}`,
+		"grep",
+		`{"pattern":"needle","glob":"**/*.go","case_sensitive":false,"offset":1,"limit":1}`,
 	)
 	require.NoError(t, err)
 	_, body, err = tools.ParseResult(text)
 	require.NoError(t, err)
 	assert.Equal(t, "nested/b.go:1:1:needle second\n", body)
 
-	_, err = fixture.exec(t.Context(), "search_text", `{"query":"[","regex":true}`)
+	_, err = fixture.exec(t.Context(), "grep", `{"pattern":"["}`)
 	require.Error(t, err)
 	header, _, parseErr := tools.ParseResult(err.Error())
 	require.NoError(t, parseErr)
 	assert.Equal(t, "invalid_argument", header.Code)
+}
+
+func TestGrepUsesRegexByDefaultAndSupportsFixedStrings(t *testing.T) {
+	t.Parallel()
+
+	fixture := newToolFixture(t, tools.DefaultLimits())
+	fixture.write("values.txt", "alpha[beta\nalphaXbeta\n")
+
+	text, err := fixture.exec(t.Context(), "grep", `{"pattern":"alpha.beta"}`)
+	require.NoError(t, err)
+	_, body, err := tools.ParseResult(text)
+	require.NoError(t, err)
+	assert.Equal(t, "values.txt:1:1:alpha[beta\nvalues.txt:2:1:alphaXbeta\n", body)
+
+	text, err = fixture.exec(
+		t.Context(),
+		"grep",
+		`{"pattern":"alpha[beta","fixed_strings":true}`,
+	)
+	require.NoError(t, err)
+	_, body, err = tools.ParseResult(text)
+	require.NoError(t, err)
+	assert.Equal(t, "values.txt:1:1:alpha[beta\n", body)
 }
 
 func TestApplyPatchAddsUpdatesDeletesAndPreservesMode(t *testing.T) {
@@ -250,12 +285,12 @@ func TestReadToolsHonorCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
-	for _, name := range []string{"read_file", "list_dir", "find_files", "search_text"} {
+	for _, name := range []string{"read", "ls", "glob", "grep"} {
 		args := map[string]string{
-			"read_file":   `{"path":"file"}`,
-			"list_dir":    `{}`,
-			"find_files":  `{"pattern":"**"}`,
-			"search_text": `{"query":"content"}`,
+			"read": `{"path":"file"}`,
+			"ls":   `{}`,
+			"glob": `{"pattern":"**"}`,
+			"grep": `{"pattern":"content"}`,
 		}[name]
 		_, err := fixture.exec(ctx, name, args)
 		require.Error(t, err)
@@ -266,7 +301,7 @@ func TestReadToolsHonorCanceledContext(t *testing.T) {
 func TestResultParserRejectsUnknownEnvelope(t *testing.T) {
 	t.Parallel()
 
-	_, _, err := tools.ParseResult(`{"schema":"other","ok":true,"tool":"read_file"}`)
+	_, _, err := tools.ParseResult(`{"schema":"other","ok":true,"tool":"read"}`)
 	require.Error(t, err)
 	_, _, err = tools.ParseResult(`not json`)
 	require.Error(t, err)

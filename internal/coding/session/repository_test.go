@@ -126,6 +126,72 @@ func TestRepositoryCreateOpenListAndLock(t *testing.T) {
 	assert.Equal(t, os.FileMode(0o600), lockInfo.Mode().Perm())
 }
 
+func TestRepositorySeparatesConversationAndSubagentSessions(t *testing.T) {
+	t.Parallel()
+
+	repo, err := session.NewRepository(filepath.Join(t.TempDir(), "sessions"))
+	require.NoError(t, err)
+	conversation, err := repo.Create(t.Context(), session.CreateOptions{
+		WorkspaceID: "workspace-key",
+	})
+	require.NoError(t, err)
+	_, err = conversation.Session().AppendMessage(ai.UserText("parent question"), nil)
+	require.NoError(t, err)
+
+	child, err := repo.Create(t.Context(), session.CreateOptions{
+		WorkspaceID:     "workspace-key",
+		Kind:            session.KindSubagent,
+		ParentSessionID: conversation.Metadata().ID,
+		ParentRunID:     "run-parent",
+		Agent:           "explore",
+	})
+	require.NoError(t, err)
+	_, err = child.Session().AppendMessage(ai.UserText("inspect the package"), nil)
+	require.NoError(t, err)
+
+	conversations, err := repo.List(t.Context())
+	require.NoError(t, err)
+	require.Len(t, conversations, 1)
+	assert.Equal(t, conversation.Metadata().ID, conversations[0].ID)
+	assert.Equal(t, session.KindConversation, conversations[0].Kind)
+
+	children, err := repo.ListSubagents(
+		t.Context(),
+		"workspace-key",
+		conversation.Metadata().ID,
+	)
+	require.NoError(t, err)
+	require.Len(t, children, 1)
+	assert.Equal(t, child.Metadata().ID, children[0].ID)
+	assert.Equal(t, session.KindSubagent, children[0].Kind)
+	assert.Equal(t, "run-parent", children[0].ParentRunID)
+	assert.Equal(t, "explore", children[0].Agent)
+	assert.Equal(t, "inspect the package", children[0].Preview)
+
+	require.NoError(t, child.Close())
+	require.NoError(t, conversation.Close())
+}
+
+func TestRepositoryRejectsInvalidSubagentLineage(t *testing.T) {
+	t.Parallel()
+
+	repo, err := session.NewRepository(filepath.Join(t.TempDir(), "sessions"))
+	require.NoError(t, err)
+
+	_, err = repo.Create(t.Context(), session.CreateOptions{
+		WorkspaceID: "workspace-key",
+		Kind:        session.KindSubagent,
+		Agent:       "explore",
+	})
+	require.ErrorIs(t, err, session.ErrInvalid)
+	_, err = repo.Create(t.Context(), session.CreateOptions{
+		WorkspaceID:     "workspace-key",
+		Kind:            session.KindConversation,
+		ParentSessionID: "parent",
+	})
+	require.ErrorIs(t, err, session.ErrInvalid)
+}
+
 func TestRepositoryCloseProvisionalDoesNotPersist(t *testing.T) {
 	t.Parallel()
 

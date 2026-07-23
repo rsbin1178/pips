@@ -12,13 +12,13 @@ type Limits struct {
 	FileBytes       int64
 	ReadLines       int
 	ListEntries     int
-	FindEntries     int
-	SearchMatches   int
-	SearchLineBytes int
+	GlobEntries     int
+	GrepMatches     int
+	GrepLineBytes   int
 	ScanEntries     int
-	SearchFiles     int
-	FindTimeout     time.Duration
-	SearchTimeout   time.Duration
+	GrepFiles       int
+	GlobTimeout     time.Duration
+	GrepTimeout     time.Duration
 	PatchBytes      int
 	PatchFiles      int
 	PatchTotalBytes int64
@@ -32,13 +32,13 @@ func DefaultLimits() Limits {
 		FileBytes:       8 << 20,
 		ReadLines:       2_000,
 		ListEntries:     500,
-		FindEntries:     1_000,
-		SearchMatches:   100,
-		SearchLineBytes: 500,
+		GlobEntries:     1_000,
+		GrepMatches:     100,
+		GrepLineBytes:   500,
 		ScanEntries:     100_000,
-		SearchFiles:     10_000,
-		FindTimeout:     10 * time.Second,
-		SearchTimeout:   30 * time.Second,
+		GrepFiles:       10_000,
+		GlobTimeout:     10 * time.Second,
+		GrepTimeout:     30 * time.Second,
 		PatchBytes:      1 << 20,
 		PatchFiles:      128,
 		PatchTotalBytes: 16 << 20,
@@ -51,11 +51,11 @@ func validateLimits(limits Limits) error {
 		limits.OutputBytes,
 		limits.ReadLines,
 		limits.ListEntries,
-		limits.FindEntries,
-		limits.SearchMatches,
-		limits.SearchLineBytes,
+		limits.GlobEntries,
+		limits.GrepMatches,
+		limits.GrepLineBytes,
 		limits.ScanEntries,
-		limits.SearchFiles,
+		limits.GrepFiles,
 		limits.PatchBytes,
 		limits.PatchFiles,
 	}
@@ -74,7 +74,7 @@ func validateLimits(limits Limits) error {
 	}
 
 	for name, value := range map[string]time.Duration{
-		"find": limits.FindTimeout, "search": limits.SearchTimeout, "patch": limits.PatchTimeout,
+		"glob": limits.GlobTimeout, "grep": limits.GrepTimeout, "patch": limits.PatchTimeout,
 	} {
 		if value <= 0 || value > 5*time.Minute {
 			return fmt.Errorf("coding tools: %s timeout is outside safe range", name)

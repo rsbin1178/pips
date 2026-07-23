@@ -69,7 +69,7 @@ func TestScriptedRuntimeMatchesTUIStateAndReplay(t *testing.T) {
 	assert.Contains(t, printed, "scripted final answer")
 	assert.Contains(t, printed, "[✻ Worked for ")
 	userIndex := strings.Index(printed, "read the fixture")
-	toolIndex := strings.Index(printed, "read_file · completed")
+	toolIndex := strings.Index(printed, "read · completed")
 	answerIndex := strings.Index(printed, "scripted final answer")
 	completionIndex := strings.Index(printed, "[✻ Worked for ")
 	require.GreaterOrEqual(t, userIndex, 0)
@@ -119,7 +119,7 @@ func openScriptedController(t *testing.T) *runtimecontrol.Controller {
 			Provider: ai.ProviderOpenAI,
 			Model:    "tui-scripted",
 			Message: ai.Assistant(ai.ToolCallPart{
-				ID: "call-1", Name: "read_file", Args: ai.JSON(`{"path":"fixture.txt"}`),
+				ID: "call-1", Name: "read", Args: ai.JSON(`{"path":"fixture.txt"}`),
 			}),
 			FinishReason: ai.FinishToolCalls,
 		},

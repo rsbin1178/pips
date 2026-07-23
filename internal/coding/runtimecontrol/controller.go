@@ -20,6 +20,7 @@ import (
 	"github.com/rsbin/pips/internal/coding/model"
 	"github.com/rsbin/pips/internal/coding/modelcatalog"
 	"github.com/rsbin/pips/internal/coding/session"
+	"github.com/rsbin/pips/internal/coding/subagent"
 )
 
 const runtimeCloseTimeout = 10 * time.Second
@@ -51,6 +52,8 @@ type runtimeInstance interface {
 	Navigate(context.Context, string, bool) iter.Seq2[coding.Event, error]
 	Compact(context.Context, coding.CompactionRequest) iter.Seq2[coding.Event, error]
 	Fork(context.Context, string) (string, error)
+	ListSubagents(context.Context) ([]subagent.Summary, error)
+	InspectSubagent(context.Context, string) (subagent.Detail, error)
 	Steer(...ai.Message) error
 	FollowUp(...ai.Message) error
 	Cancel() error
@@ -399,6 +402,35 @@ func (c *Controller) ListSessions(ctx context.Context) ([]session.Metadata, erro
 	}
 
 	return filtered, nil
+}
+
+// ListSubagents returns children owned by the currently selected Session.
+func (c *Controller) ListSubagents(ctx context.Context) ([]subagent.Summary, error) {
+	var values []subagent.Summary
+	err := c.withRuntime(func(runtime runtimeInstance) error {
+		var err error
+		values, err = runtime.ListSubagents(ctx)
+
+		return err
+	})
+
+	return values, err
+}
+
+// InspectSubagent loads one child owned by the currently selected Session.
+func (c *Controller) InspectSubagent(
+	ctx context.Context,
+	childSessionID string,
+) (subagent.Detail, error) {
+	var value subagent.Detail
+	err := c.withRuntime(func(runtime runtimeInstance) error {
+		var err error
+		value, err = runtime.InspectSubagent(ctx, childSessionID)
+
+		return err
+	})
+
+	return value, err
 }
 
 // NewSession replaces the current Runtime with a new writable Session.

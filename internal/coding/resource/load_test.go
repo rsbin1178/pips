@@ -243,7 +243,7 @@ func writeSkill(
 
 	allowed := ""
 	if allowedTools {
-		allowed = "allowed-tools: [shell, read_file]\n"
+		allowed = "allowed-tools: [shell, read]\n"
 	}
 
 	manifest := fmt.Sprintf(

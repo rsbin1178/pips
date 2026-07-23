@@ -7,7 +7,7 @@ import (
 )
 
 func FuzzParseResult(f *testing.F) {
-	f.Add(`{"schema":"pips.coding.tool_result/v1alpha1","ok":true,"tool":"read_file"}` + "\n\nbody")
+	f.Add(`{"schema":"pips.coding.tool_result/v1alpha1","ok":true,"tool":"read"}` + "\n\nbody")
 	f.Add("not-json\n\nbody")
 	f.Add("")
 

@@ -13,6 +13,7 @@ import (
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding/approval"
 	"github.com/rsbin/pips/internal/coding/changes"
+	"github.com/rsbin/pips/internal/coding/subagent"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -307,6 +308,14 @@ func TestSafeDisclosureMatrix(t *testing.T) {
 			retained: "main.go",
 		},
 		{
+			name: "subagent task preview",
+			event: newTestEvent(EventSubagentCreated, SubagentLifecycle{
+				Role: subagent.RoleExplore, State: subagent.StateCreated,
+				ChildSessionID: "child-1", ParentRunID: "run-1",
+				Model: "openai/test", TaskPreview: secret,
+			}),
+		},
+		{
 			name: "diagnostic detail",
 			event: newStatusEvent(EventIntegrationDiagnostic, IntegrationDiagnostic{
 				Component: "mcp", Code: "connect_failed", Message: secret,
@@ -349,7 +358,7 @@ func TestProjectReturnsDefensiveContent(t *testing.T) {
 	arguments := ai.JSON(`{"path":"main.go"}`)
 	event := newTestEvent(EventToolStarted, ToolStarted{
 		Turn: 1,
-		Call: ToolCall{ID: "call-1", Name: "read_file", Arguments: arguments},
+		Call: ToolCall{ID: "call-1", Name: "read", Arguments: arguments},
 	})
 
 	projected, err := Project(event, DisclosureContent)
@@ -411,7 +420,7 @@ func FuzzUnmarshalEvent(f *testing.F) {
 }
 
 func eventCases() []eventCase {
-	toolCall := ToolCall{ID: "call-1", Name: "read_file", Arguments: ai.JSON(`{"path":"main.go"}`)}
+	toolCall := ToolCall{ID: "call-1", Name: "read", Arguments: ai.JSON(`{"path":"main.go"}`)}
 	usage := TokenUsage{InputTokens: 10, OutputTokens: 5, ReasoningTokens: 1}
 
 	return []eventCase{
@@ -492,6 +501,64 @@ func eventCases() []eventCase {
 			Turn: 1, Call: toolCall,
 			Result: ai.ToolResultText(toolCall.ID, toolCall.Name, "done"),
 		})},
+		{name: "subagent created", event: newTestEvent(
+			EventSubagentCreated,
+			SubagentLifecycle{
+				Role: subagent.RoleExplore, State: subagent.StateCreated,
+				ChildSessionID: "child-1", ParentRunID: "run-1",
+				Model: "openai/test", TaskPreview: "inspect runtime",
+			},
+		)},
+		{name: "subagent started", event: newTestEvent(
+			EventSubagentStarted,
+			SubagentLifecycle{
+				Role: subagent.RoleExplore, State: subagent.StateRunning,
+				ChildSessionID: "child-1", ParentRunID: "run-1", ChildRunID: "child-run",
+				Model: "openai/test", TaskPreview: "inspect runtime",
+			},
+		)},
+		{name: "subagent progress", event: newTestEvent(
+			EventSubagentProgress,
+			SubagentLifecycle{
+				Role: subagent.RoleExplore, State: subagent.StateRunning,
+				ChildSessionID: "child-1", ParentRunID: "run-1", ChildRunID: "child-run",
+				Model: "openai/test", TaskPreview: "inspect runtime",
+				Turns: 1, ToolCalls: 2, Usage: usage,
+			},
+		)},
+		{name: "subagent completed", event: newTestEvent(
+			EventSubagentCompleted,
+			SubagentLifecycle{
+				Role: subagent.RoleExplore, State: subagent.StateSucceeded,
+				ChildSessionID: "child-1", ParentRunID: "run-1", ChildRunID: "child-run",
+				Model: "openai/test", TaskPreview: "inspect runtime", Code: "ok",
+				Stop: agent.StopEndTurn, Turns: 1, ToolCalls: 2, Usage: usage, DurationMillis: 25,
+			},
+		)},
+		{name: "subagent failed", event: newTestEvent(
+			EventSubagentFailed,
+			SubagentLifecycle{
+				Role: subagent.RolePlan, State: subagent.StateFailed,
+				ChildSessionID: "child-2", ParentRunID: "run-1", ChildRunID: "child-run-2",
+				Model: "openai/test", Code: "invalid_result", Turns: 1, Usage: usage,
+			},
+		)},
+		{name: "subagent canceled", event: newTestEvent(
+			EventSubagentCanceled,
+			SubagentLifecycle{
+				Role: subagent.RoleReview, State: subagent.StateCanceled,
+				ChildSessionID: "child-3", ParentRunID: "run-1",
+				Model: "openai/test", Code: "canceled", DurationMillis: 5,
+			},
+		)},
+		{name: "subagent interrupted", event: newTestEvent(
+			EventSubagentInterrupted,
+			SubagentLifecycle{
+				Role: subagent.RoleReview, State: subagent.StateInterrupted,
+				ChildSessionID: "child-4", ParentRunID: "run-1", ChildRunID: "child-run-4",
+				Model: "openai/test", Code: "process_interrupted", DurationMillis: 5,
+			},
+		)},
 		{name: "approval required", event: newInteractionEvent(
 			EventApprovalRequired,
 			ApprovalRequired{
