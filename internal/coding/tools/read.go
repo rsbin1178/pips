@@ -13,29 +13,29 @@ import (
 	"github.com/rsbin/pips/internal/coding/workspace"
 )
 
-const readFileName = "read_file"
+const readName = "read"
 
-type readFileArgs struct {
+type readArgs struct {
 	Path   string `json:"path" description:"Workspace-relative file path"`
 	Offset *int   `json:"offset" description:"Optional 1-based starting line"`
 	Limit  *int   `json:"limit" description:"Optional maximum number of lines"`
 }
 
 //nolint:gocyclo // Pagination, UTF-8 validation, and two budgets form one streaming read state machine.
-func (s *service) readFile(ctx context.Context, args readFileArgs) (string, error) {
+func (s *service) read(ctx context.Context, args readArgs) (string, error) {
 	name, err := workspaceFilePath(args.Path)
 	if err != nil {
-		return "", failure(readFileName, err)
+		return "", failure(readName, err)
 	}
 
 	offset, limit, err := lineWindow(args.Offset, args.Limit, s.limits.ReadLines)
 	if err != nil {
-		return "", failure(readFileName, err)
+		return "", failure(readName, err)
 	}
 
 	file, _, err := openRegular(ctx, s.tree, name, s.limits.FileBytes)
 	if err != nil {
-		return "", failure(readFileName, err)
+		return "", failure(readName, err)
 	}
 	defer func() { _ = file.Close() }()
 
@@ -43,15 +43,15 @@ func (s *service) readFile(ctx context.Context, args readFileArgs) (string, erro
 
 	sampled, sampleErr := file.Read(sample)
 	if sampleErr != nil && sampleErr != io.EOF {
-		return "", failure(readFileName, fmt.Errorf("coding tools: sample %q: %w", name, sampleErr))
+		return "", failure(readName, fmt.Errorf("coding tools: sample %q: %w", name, sampleErr))
 	}
 
 	if bytes.IndexByte(sample[:sampled], 0) >= 0 {
-		return "", failure(readFileName, fmt.Errorf("%w: %q", errBinaryFile, name))
+		return "", failure(readName, fmt.Errorf("%w: %q", errBinaryFile, name))
 	}
 
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return "", failure(readFileName, fmt.Errorf("coding tools: rewind %q: %w", name, err))
+		return "", failure(readName, fmt.Errorf("coding tools: rewind %q: %w", name, err))
 	}
 
 	reader := bufio.NewReaderSize(file, 64<<10)
@@ -66,12 +66,12 @@ func (s *service) readFile(ctx context.Context, args readFileArgs) (string, erro
 
 	for {
 		if err := ctx.Err(); err != nil {
-			return "", failure(readFileName, err)
+			return "", failure(readName, err)
 		}
 
 		line, readErr := reader.ReadString('\n')
 		if readErr != nil && readErr != io.EOF {
-			return "", failure(readFileName, fmt.Errorf("coding tools: read %q: %w", name, readErr))
+			return "", failure(readName, fmt.Errorf("coding tools: read %q: %w", name, readErr))
 		}
 
 		if len(line) == 0 && readErr == io.EOF {
@@ -81,7 +81,7 @@ func (s *service) readFile(ctx context.Context, args readFileArgs) (string, erro
 		lineNumber++
 
 		if bytes.IndexByte([]byte(line), 0) >= 0 || !utf8.ValidString(line) {
-			return "", failure(readFileName, fmt.Errorf("%w: %q", errBinaryFile, name))
+			return "", failure(readName, fmt.Errorf("%w: %q", errBinaryFile, name))
 		}
 
 		if lineNumber < offset {
@@ -135,7 +135,7 @@ func (s *service) readFile(ctx context.Context, args readFileArgs) (string, erro
 	}
 
 	value := result{
-		OK: true, Tool: readFileName, Body: body.String(), Truncated: truncated, Reason: reason,
+		OK: true, Tool: readName, Body: body.String(), Truncated: truncated, Reason: reason,
 		Counts: ResultCounts{Lines: returned, Bytes: body.Len()},
 	}
 	if truncated {

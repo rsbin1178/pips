@@ -520,14 +520,14 @@ func TestReadyToolDetailsToggleNeverShowsReasoning(t *testing.T) {
 	state := readyState()
 	state.Tools = []coding.ToolState{{
 		Call: coding.ToolCall{
-			ID: "call-1", Name: "read_file", Arguments: ai.JSON(`{"path":"main.go"}`),
+			ID: "call-1", Name: "read", Arguments: ai.JSON(`{"path":"main.go"}`),
 		},
 		Status: coding.ToolStatusCompleted,
 		Result: ai.Message{
 			Role: ai.RoleTool,
 			Parts: []ai.Part{ai.ToolResultPart{
 				ToolCallID: "call-1",
-				Name:       "read_file",
+				Name:       "read",
 				Content: []ai.Part{
 					ai.TextPart{Text: "visible result"},
 					ai.ReasoningPart{Text: secret, Signature: secret},

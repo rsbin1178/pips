@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding"
+	"github.com/rsbin/pips/internal/coding/subagent"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -29,7 +30,7 @@ func TestTimelineNeverProjectsReasoningOrSignatures(t *testing.T) {
 			{Kind: ai.StreamTextDelta, Text: "visible draft"},
 		},
 		Tools: []coding.ToolState{{
-			Call:   coding.ToolCall{ID: "call-1", Name: "read_file"},
+			Call:   coding.ToolCall{ID: "call-1", Name: "read"},
 			Status: coding.ToolStatusRunning,
 		}},
 	}
@@ -45,7 +46,7 @@ func TestTimelineNeverProjectsReasoningOrSignatures(t *testing.T) {
 	assert.Contains(t, rendered, "question")
 	assert.Contains(t, rendered, "visible answer")
 	assert.Contains(t, rendered, "visible draft")
-	assert.Contains(t, rendered, "read_file · running")
+	assert.Contains(t, rendered, "read · running")
 	assert.NotContains(t, rendered, secret)
 }
 
@@ -76,17 +77,47 @@ func TestTimelineSummarizesChangesAndDiagnostics(t *testing.T) {
 	assert.NotContains(t, rendered, "diff --git")
 }
 
+func TestTimelineUsesDedicatedSubagentCardWithoutGenericTool(t *testing.T) {
+	t.Parallel()
+
+	state := coding.State{
+		Transcript: []ai.Message{
+			ai.ToolResultText("call-1", subagent.ToolName, "internal envelope"),
+		},
+		Tools: []coding.ToolState{{
+			RunID:  "run-1",
+			Call:   coding.ToolCall{ID: "call-1", Name: subagent.ToolName},
+			Status: coding.ToolStatusCompleted,
+		}},
+		Subagents: []coding.SubagentState{{
+			ChildSessionID: "child-1", ParentRunID: "run-1",
+			Role: subagent.RoleExplore, State: subagent.StateSucceeded,
+			TaskPreview: "Locate the composition root", Model: "openai/test",
+			Turns: 2, ToolCalls: 8, DurationMillis: 12_000,
+			Usage: coding.TokenUsage{InputTokens: 14_000, OutputTokens: 200},
+		}},
+	}
+	blocks := projectTimeline(state)
+	require.Len(t, blocks, 1)
+	assert.Equal(t, blockSubagent, blocks[0].kind)
+	rendered := renderTimeline(blocks, newMarkdownRenderer(4), 80, themeDark, true)
+	assert.Contains(t, rendered, "✻ Explored · 12s · 8 tools · 14.2k tokens")
+	assert.Contains(t, rendered, "Locate the composition root")
+	assert.NotContains(t, rendered, subagent.ToolName)
+	assert.NotContains(t, rendered, "internal envelope")
+}
+
 func TestTimelinePlacesCompletedToolBeforeFollowingAnswer(t *testing.T) {
 	t.Parallel()
 
 	state := coding.State{
 		Transcript: []ai.Message{
 			ai.UserText("read it"),
-			ai.ToolResultText("call-1", "read_file", "file content"),
+			ai.ToolResultText("call-1", "read", "file content"),
 			ai.AssistantText("final answer"),
 		},
 		Tools: []coding.ToolState{{
-			Call:   coding.ToolCall{ID: "call-1", Name: "read_file"},
+			Call:   coding.ToolCall{ID: "call-1", Name: "read"},
 			Status: coding.ToolStatusCompleted,
 		}},
 	}

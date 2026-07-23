@@ -24,6 +24,7 @@ import (
 	"github.com/rsbin/pips/internal/coding/config"
 	"github.com/rsbin/pips/internal/coding/execution"
 	"github.com/rsbin/pips/internal/coding/paths"
+	"github.com/rsbin/pips/internal/coding/subagent"
 	"github.com/rsbin/pips/internal/coding/workspace"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -52,6 +53,77 @@ func TestRuntimePromptStreamsAndPersistsOneInteraction(t *testing.T) {
 	require.NoError(t, runtime.Close(t.Context()))
 	assert.Equal(t, PhaseClosed, runtime.Snapshot().Phase)
 	require.NoError(t, runtime.Close(t.Context()))
+}
+
+func TestRuntimeRunsReadOnlySubagentWithoutProjectingChildTranscript(t *testing.T) {
+	t.Parallel()
+
+	model := newRuntimeModel(
+		runtimeToolResponse(
+			"delegate-1",
+			"run_subagent",
+			`{"role":"explore","task":"Locate the runtime composition root."}`,
+		),
+		runtimeTextResponse(`{"summary":"located","evidence":[],"unknowns":[]}`),
+		runtimeTextResponse("parent answer"),
+	)
+	telemetry := make([]TelemetryEvent, 0)
+	runtime := openTestRuntimeWithTelemetry(
+		t,
+		model,
+		TelemetryObserverFunc(func(_ context.Context, event TelemetryEvent) error {
+			telemetry = append(telemetry, event)
+
+			return nil
+		}),
+	)
+
+	events := collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("inspect")))
+	types := eventTypes(events)
+	assert.Contains(t, types, EventSubagentCreated)
+	assert.Contains(t, types, EventSubagentStarted)
+	assert.Contains(t, types, EventSubagentProgress)
+	assert.Contains(t, types, EventSubagentCompleted)
+	for _, event := range events {
+		if delta, ok := event.Payload.(MessageDelta); ok {
+			assert.NotContains(t, delta.Text, `"summary":"located"`)
+		}
+	}
+
+	snapshot := runtime.Snapshot()
+	require.Len(t, snapshot.Subagents, 1)
+	child := snapshot.Subagents[0]
+	assert.Equal(t, subagent.RoleExplore, child.Role)
+	assert.Equal(t, subagent.StateSucceeded, child.State)
+	assert.NotEmpty(t, child.ChildSessionID)
+	assert.NotEmpty(t, child.ParentRunID)
+	assert.NotEmpty(t, child.ChildRunID)
+	assert.Equal(t, TokenUsage{
+		InputTokens: 30, OutputTokens: 6,
+	}, snapshot.Interaction.Usage)
+
+	requests := model.Requests()
+	require.Len(t, requests, 3)
+	assert.Contains(t, toolNamesFromRequest(requests[0]), "run_subagent")
+	assert.Equal(t, []string{"read", "ls", "glob", "grep"}, toolNamesFromRequest(requests[1]))
+	assert.Contains(t, toolNamesFromRequest(requests[2]), "run_subagent")
+
+	summaries, err := runtime.ListSubagents(t.Context())
+	require.NoError(t, err)
+	require.Len(t, summaries, 1)
+	detail, err := runtime.InspectSubagent(t.Context(), summaries[0].ChildSessionID)
+	require.NoError(t, err)
+	assert.IsType(t, subagent.ExploreResult{}, detail.Result)
+	require.Len(t, detail.Transcript, 2)
+	assert.Equal(t, ai.RoleUser, detail.Transcript[0].Role)
+	assert.Equal(t, ai.RoleAssistant, detail.Transcript[1].Role)
+
+	for _, event := range telemetry {
+		encoded := fmt.Sprintf("%#v", event)
+		assert.NotContains(t, encoded, "Locate the runtime")
+		assert.NotContains(t, encoded, child.ChildSessionID)
+		assert.NotContains(t, encoded, child.ChildRunID)
+	}
 }
 
 func TestRuntimeOpensCustomProviderMetadata(t *testing.T) {
@@ -547,7 +619,7 @@ func TestRuntimeReadPatchControlledShellAndAnswer(t *testing.T) {
 	t.Parallel()
 
 	model := newRuntimeModel(
-		runtimeToolResponse("call-read", "read_file", `{"path":"main.txt"}`),
+		runtimeToolResponse("call-read", "read", `{"path":"main.txt"}`),
 		runtimeToolResponse(
 			"call-patch",
 			"apply_patch",
@@ -1083,6 +1155,15 @@ func countRole(messages []ai.Message, role ai.Role) int {
 	}
 
 	return count
+}
+
+func toolNamesFromRequest(request ai.Request) []string {
+	values := make([]string, len(request.Tools))
+	for index, tool := range request.Tools {
+		values[index] = tool.Name
+	}
+
+	return values
 }
 
 type runtimeModel struct {

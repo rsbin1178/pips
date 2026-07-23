@@ -139,11 +139,11 @@ func TestCodingToolsCloseChangeInspectionBoundary(t *testing.T) {
 	baseline, err := inspector.Capture(t.Context())
 	require.NoError(t, err)
 
-	read := executeTool(t, byName, "read_file", `{"path":"code.go"}`)
+	read := executeTool(t, byName, "read", `{"path":"code.go"}`)
 	assert.Contains(t, read, "needle old")
-	found := executeTool(t, byName, "find_files", `{"pattern":"**/*.go"}`)
+	found := executeTool(t, byName, "glob", `{"pattern":"**/*.go"}`)
 	assert.Contains(t, found, "code.go")
-	searched := executeTool(t, byName, "search_text", `{"query":"needle"}`)
+	searched := executeTool(t, byName, "grep", `{"pattern":"needle"}`)
 	assert.Contains(t, searched, "code.go:2")
 	executeTool(t, byName, "apply_patch", `{"patch":"*** Begin Patch\n*** Update File: code.go\n@@\n-// needle old\n+// needle new\n*** End Patch\n"}`)
 

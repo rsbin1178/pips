@@ -9,7 +9,10 @@ import (
 	"github.com/rsbin/pips/agent"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding/approval"
+	"github.com/rsbin/pips/internal/coding/subagent"
 )
+
+const maxRecentSubagents = 128
 
 // InteractionState is the current or most recently completed user interaction.
 type InteractionState struct {
@@ -49,6 +52,23 @@ type ToolState struct {
 	Status ToolStatus `json:"status"`
 	Update ai.Message `json:"update"`
 	Result ai.Message `json:"result"`
+}
+
+// SubagentState is the bounded recent lifecycle projection used by live
+// frontends. Durable list/detail data is loaded from child Sessions.
+type SubagentState struct {
+	ChildSessionID string         `json:"child_session_id"`
+	ParentRunID    string         `json:"parent_run_id"`
+	ChildRunID     string         `json:"child_run_id,omitempty"`
+	Role           subagent.Role  `json:"role"`
+	State          subagent.State `json:"state"`
+	TaskPreview    string         `json:"task_preview,omitempty"`
+	Model          string         `json:"model"`
+	Code           string         `json:"code,omitempty"`
+	Turns          int            `json:"turns"`
+	ToolCalls      int            `json:"tool_calls"`
+	Usage          TokenUsage     `json:"usage"`
+	DurationMillis int64          `json:"duration_ms"`
 }
 
 // ApprovalKind identifies the approval overlay content.
@@ -99,6 +119,7 @@ type State struct {
 	Draft       []MessageDelta          `json:"draft"`
 	Runs        []RunState              `json:"runs"`
 	Tools       []ToolState             `json:"tools"`
+	Subagents   []SubagentState         `json:"subagents"`
 	Approval    ApprovalState           `json:"approval"`
 	Changes     *WorkspaceChanged       `json:"changes,omitempty"`
 	Diagnostics []IntegrationDiagnostic `json:"diagnostics"`
@@ -137,6 +158,7 @@ func (state State) Clone() State {
 		tool.Result = cloneMessage(tool.Result)
 		cloned.Tools[index] = tool
 	}
+	cloned.Subagents = slices.Clone(state.Subagents)
 
 	cloned.Approval = cloneApprovalState(state.Approval)
 	if state.Changes != nil {
@@ -407,6 +429,10 @@ func (state *State) apply(event Event) error {
 		state.Tools[index].Status = ToolStatusCompleted
 		state.Tools[index].Result = cloneMessage(payload.Result)
 		delete(state.activeTools, toolStateKey(event.RunID, payload.Call.ID))
+	case SubagentLifecycle:
+		if err := state.applySubagent(event, payload); err != nil {
+			return err
+		}
 	case ApprovalRequired:
 		if err := state.requireInteraction(event.InteractionID); err != nil || state.Approval.Kind != ApprovalNone {
 			return protocolError("approval request cannot be displayed")
@@ -458,6 +484,100 @@ func (state *State) apply(event Event) error {
 	}
 
 	return nil
+}
+
+func (state *State) applySubagent(event Event, payload SubagentLifecycle) error {
+	if err := state.requireInteraction(event.InteractionID); err != nil {
+		return err
+	}
+	if event.RunID != payload.ParentRunID {
+		return protocolError("subagent parent run does not match event run")
+	}
+
+	index := state.subagentIndex(payload.ChildSessionID)
+	if index < 0 {
+		var err error
+
+		index, err = state.appendSubagent(payload)
+		if err != nil {
+			return err
+		}
+	} else {
+		if err := validateSubagentTransition(state.Subagents[index], event.Type, payload); err != nil {
+			return err
+		}
+	}
+
+	state.Subagents[index] = SubagentState{
+		ChildSessionID: payload.ChildSessionID, ParentRunID: payload.ParentRunID,
+		ChildRunID: payload.ChildRunID, Role: payload.Role, State: payload.State,
+		TaskPreview: payload.TaskPreview, Model: payload.Model, Code: payload.Code,
+		Turns: payload.Turns, ToolCalls: payload.ToolCalls, Usage: payload.Usage,
+		DurationMillis: payload.DurationMillis,
+	}
+
+	return nil
+}
+
+func (state *State) subagentIndex(childSessionID string) int {
+	for index := range state.Subagents {
+		if state.Subagents[index].ChildSessionID == childSessionID {
+			return index
+		}
+	}
+
+	return -1
+}
+
+func (state *State) appendSubagent(payload SubagentLifecycle) (int, error) {
+	if payload.State != subagent.StateCreated {
+		return -1, protocolError("subagent %q did not start with created", payload.ChildSessionID)
+	}
+
+	state.Subagents = append(state.Subagents, SubagentState{})
+	if len(state.Subagents) > maxRecentSubagents {
+		state.Subagents = slices.Clone(state.Subagents[len(state.Subagents)-maxRecentSubagents:])
+	}
+
+	return len(state.Subagents) - 1, nil
+}
+
+func validateSubagentTransition(
+	previous SubagentState,
+	eventType EventType,
+	payload SubagentLifecycle,
+) error {
+	if isTerminalSubagentState(previous.State) {
+		return protocolError("subagent %q changed after terminal", payload.ChildSessionID)
+	}
+	if !sameSubagentIdentity(previous, payload) {
+		return protocolError("subagent %q changed immutable identity", payload.ChildSessionID)
+	}
+
+	if !validSubagentTransition(previous.State, eventType, payload.State) {
+		return protocolError("subagent %q has an invalid transition", payload.ChildSessionID)
+	}
+
+	return nil
+}
+
+func sameSubagentIdentity(previous SubagentState, payload SubagentLifecycle) bool {
+	return previous.ParentRunID == payload.ParentRunID && previous.Role == payload.Role &&
+		previous.Model == payload.Model && previous.TaskPreview == payload.TaskPreview &&
+		(previous.ChildRunID == "" || previous.ChildRunID == payload.ChildRunID)
+}
+
+func validSubagentTransition(previous subagent.State, eventType EventType, next subagent.State) bool {
+	return previous == subagent.StateCreated &&
+		(eventType == EventSubagentStarted || eventType == EventSubagentFailed ||
+			eventType == EventSubagentCanceled || eventType == EventSubagentInterrupted) ||
+		previous == subagent.StateRunning &&
+			(eventType == EventSubagentProgress || isTerminalSubagentState(next))
+}
+
+func isTerminalSubagentState(state subagent.State) bool {
+	return state == subagent.StateSucceeded || state == subagent.StateFailed ||
+		state == subagent.StateCanceled || state == subagent.StateInterrupted
 }
 
 func (state *State) failActiveRun(runID string) {

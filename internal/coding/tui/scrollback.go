@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -17,6 +18,7 @@ import (
 type scrollbackCursor struct {
 	messages    int
 	tools       int
+	subagents   int
 	diagnostics int
 	completions map[string]struct{}
 	changes     projectionFingerprint
@@ -26,32 +28,75 @@ type scrollbackCursor struct {
 
 type projectionFingerprint [sha256.Size]byte
 
+type scrollbackWrite struct {
+	content      string
+	continuation bool
+}
+
 func (m *Model) resetScrollback() {
 	m.scrollback = scrollbackCursor{}
+	m.streaming.reset()
 	m.timeline = ""
 }
 
 func (m *Model) commitStableTimeline() tea.Cmd {
-	content := m.takeStableTimeline()
+	managedHeight := lipgloss.Height(m.readyView().Content)
+	blocks := m.takeStableTimelineBlocks()
+	writes := m.streamingScrollbackWrites(blocks)
 	m.rerenderTranscript(false)
+	waitForRender := managedHeight != lipgloss.Height(m.readyView().Content)
 
-	return m.printScrollback(content)
+	return m.printScrollbackWritesAfterRender(writes, waitForRender)
 }
 
 // printScrollback is the single boundary for output that leaves Bubble Tea's
 // managed inline frame. Projection resets do not reset this latch because the
 // terminal's native history survives New, Resume, Fork, and model changes.
 func (m *Model) printScrollback(content string) tea.Cmd {
-	if content == "" {
-		return nil
+	return m.printScrollbackWrites([]scrollbackWrite{{content: content}})
+}
+
+func (m *Model) printScrollbackWrites(writes []scrollbackWrite) tea.Cmd {
+	return m.printScrollbackWritesAfterRender(writes, true)
+}
+
+func (m *Model) printScrollbackWritesAfterRender(
+	writes []scrollbackWrite,
+	waitForRender bool,
+) tea.Cmd {
+	var content strings.Builder
+
+	hasOutput := m.scrollbackOutput
+
+	for _, write := range writes {
+		if write.content == "" {
+			continue
+		}
+
+		switch {
+		case content.Len() > 0 && write.continuation:
+			content.WriteByte('\n')
+		case content.Len() > 0:
+			content.WriteString(strings.Repeat("\n", conversationGapHeight+1))
+		case hasOutput && !write.continuation:
+			content.WriteString(strings.Repeat("\n", conversationGapHeight))
+		}
+
+		content.WriteString(write.content)
+
+		hasOutput = true
 	}
 
-	if m.scrollbackOutput {
-		content = strings.Repeat("\n", conversationGapHeight) + content
+	if content.Len() == 0 {
+		return nil
 	}
 
 	m.scrollbackOutput = true
 
+	return m.printPreparedScrollback(content.String(), waitForRender)
+}
+
+func (m *Model) printPreparedScrollback(content string, waitForRender bool) tea.Cmd {
 	// Bubble Tea's inline insertAbove implementation first reserves physical
 	// rows below the managed frame. One insert must therefore fit in the
 	// currently unused terminal rows; a multi-screen Println otherwise scrolls
@@ -60,7 +105,18 @@ func (m *Model) printScrollback(content string) tea.Cmd {
 	maximumRows := max(1, m.height-managedHeight)
 	chunks := splitScrollbackContent(content, m.width, maximumRows)
 
-	commands := make([]tea.Cmd, 0, len(chunks))
+	commands := make([]tea.Cmd, 0, len(chunks)+2)
+	// The renderer flushes on its own frame clock. When a multi-line live
+	// draft becomes stable, the Model has already removed it from the managed
+	// View, but insertAbove can still observe the previous full-height cell
+	// buffer if Println runs immediately. Give the shrunken View one complete
+	// renderer window before Bubble Tea performs terminal-relative insertions.
+	if waitForRender {
+		commands = append(commands, tea.Tick(renderFrame, func(time.Time) tea.Msg {
+			return scrollbackRenderReadyMsg{}
+		}))
+	}
+
 	for _, chunk := range chunks {
 		if chunk == "" {
 			// insertAbove ignores an empty body, so retain a deliberately blank
@@ -70,6 +126,18 @@ func (m *Model) printScrollback(content string) tea.Cmd {
 
 		commands = append(commands, tea.Println(chunk))
 	}
+
+	// Bubble Tea v2.0.8 resets its renderer cursor after insertAbove, then
+	// skips an identical View. Keep a cursor-only change alive across one
+	// renderer frame so it cannot be coalesced with its restoration. The
+	// generation prevents overlapping stable commits from clearing a newer
+	// refresh before Bubble Tea restores the Composer coordinates.
+	m.cursorRefreshSeq++
+	sequence := m.cursorRefreshSeq
+
+	commands = append(commands, func() tea.Msg {
+		return scrollbackCursorRefreshMsg{sequence: sequence}
+	})
 
 	return tea.Sequence(commands...)
 }
@@ -105,6 +173,10 @@ func splitScrollbackContent(content string, width, maximumRows int) []string {
 // delta to print. Keeping projection separate from the Tea command makes the
 // append-only contract directly testable.
 func (m *Model) takeStableTimeline() string {
+	return m.renderTimelineBlocks(m.takeStableTimelineBlocks())
+}
+
+func (m *Model) takeStableTimelineBlocks() []timelineBlock {
 	m.reconcileScrollback()
 
 	stableTools := m.scrollback.tools
@@ -113,11 +185,18 @@ func (m *Model) takeStableTimeline() string {
 		stableTools++
 	}
 
+	stableSubagents := m.scrollback.subagents
+	for stableSubagents < len(m.state.Subagents) &&
+		isTerminalSubagent(m.state.Subagents[stableSubagents].State) {
+		stableSubagents++
+	}
+
 	delta := m.state.Clone()
 
 	delta.Transcript = delta.Transcript[m.scrollback.messages:]
 	delta.Draft = nil
 	delta.Tools = delta.Tools[m.scrollback.tools:stableTools]
+	delta.Subagents = delta.Subagents[m.scrollback.subagents:stableSubagents]
 
 	delta.Diagnostics = delta.Diagnostics[m.scrollback.diagnostics:]
 
@@ -151,6 +230,7 @@ func (m *Model) takeStableTimeline() string {
 
 	m.scrollback.messages = len(m.state.Transcript)
 	m.scrollback.tools = stableTools
+	m.scrollback.subagents = stableSubagents
 	m.scrollback.diagnostics = len(m.state.Diagnostics)
 	m.scrollback.changes = changes
 
@@ -160,15 +240,13 @@ func (m *Model) takeStableTimeline() string {
 		m.scrollback.streamError = streamError
 	}
 
-	content := renderTimelineContent(
-		blocks,
-		m.markdown,
-		m.width,
-		m.theme,
-		m.options.NoColor,
-	)
+	return blocks
+}
 
-	return content
+func (m *Model) renderTimelineBlocks(blocks []timelineBlock) string {
+	return renderTimelineContent(
+		blocks, m.markdown, m.width, m.theme, m.options.NoColor,
+	)
 }
 
 func (m *Model) activeTimelineBlocks() []timelineBlock {
@@ -178,6 +256,7 @@ func (m *Model) activeTimelineBlocks() []timelineBlock {
 
 	active.Transcript = active.Transcript[m.scrollback.messages:]
 	active.Tools = active.Tools[m.scrollback.tools:]
+	active.Subagents = active.Subagents[m.scrollback.subagents:]
 
 	active.Diagnostics = active.Diagnostics[m.scrollback.diagnostics:]
 
@@ -203,12 +282,23 @@ func (m *Model) activeTimelineBlocks() []timelineBlock {
 		})
 	}
 
+	if m.streaming.active {
+		for index := range blocks {
+			if blocks[index].kind == blockDraft {
+				blocks[index] = m.streamingTailBlock(blocks[index])
+
+				break
+			}
+		}
+	}
+
 	return blocks
 }
 
 func (m *Model) reconcileScrollback() {
 	if m.scrollback.messages > len(m.state.Transcript) ||
 		m.scrollback.tools > len(m.state.Tools) ||
+		m.scrollback.subagents > len(m.state.Subagents) ||
 		m.scrollback.diagnostics > len(m.state.Diagnostics) {
 		m.resetScrollback()
 	}

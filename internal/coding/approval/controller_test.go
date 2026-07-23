@@ -353,9 +353,9 @@ func TestControllerStopsPendingSuffixAtReviewBarrier(t *testing.T) {
 	fixture.pending.trace = &trace
 	fixture.executor.trace = &trace
 	fixture.session.addPending(
-		ai.ToolCallPart{ID: "ordinary-1", Name: "read_file", Args: ai.JSON(`{}`)},
+		ai.ToolCallPart{ID: "ordinary-1", Name: "read", Args: ai.JSON(`{}`)},
 		controlledCall("call-1", `true`),
-		ai.ToolCallPart{ID: "ordinary-2", Name: "list_dir", Args: ai.JSON(`{}`)},
+		ai.ToolCallPart{ID: "ordinary-2", Name: "ls", Args: ai.JSON(`{}`)},
 	)
 
 	state, err := fixture.controller.Reconcile(t.Context(), nil)
@@ -394,7 +394,7 @@ func TestControllerDirectExecutionRepairsAfterHarnessPersistence(t *testing.T) {
 	decision = fixture.controller.BeforeTool(t.Context(), agent.ToolCallInfo{ToolCall: nextCall})
 	assert.Equal(t, agent.ToolDecisionPause, decision.Action)
 	decision = fixture.controller.BeforeTool(t.Context(), agent.ToolCallInfo{
-		ToolCall: agent.ToolCall{ID: "ordinary", Name: "read_file", Args: ai.JSON(`{}`)},
+		ToolCall: agent.ToolCall{ID: "ordinary", Name: "read", Args: ai.JSON(`{}`)},
 	})
 	assert.Equal(t, agent.ToolDecisionPause, decision.Action)
 

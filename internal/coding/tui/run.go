@@ -21,6 +21,7 @@ import (
 	"github.com/rsbin/pips/internal/coding/modelcatalog"
 	"github.com/rsbin/pips/internal/coding/runtimecontrol"
 	"github.com/rsbin/pips/internal/coding/session"
+	"github.com/rsbin/pips/internal/coding/subagent"
 )
 
 const (
@@ -82,6 +83,8 @@ type Controller interface {
 	Config() config.Config
 	Detached() bool
 	ListSessions(context.Context) ([]session.Metadata, error)
+	ListSubagents(context.Context) ([]subagent.Summary, error)
+	InspectSubagent(context.Context, string) (subagent.Detail, error)
 	NewSession(context.Context) error
 	ResumeSession(context.Context, string) error
 	ForkSession(context.Context, string) error

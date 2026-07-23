@@ -8,18 +8,18 @@ import (
 	"strings"
 )
 
-const listDirName = "list_dir"
+const lsName = "ls"
 
-type listDirArgs struct {
+type lsArgs struct {
 	Path   *string `json:"path" description:"Optional workspace-relative directory path; defaults to the workspace root"`
 	Offset *int    `json:"offset" description:"Optional zero-based entry offset"`
 	Limit  *int    `json:"limit" description:"Optional maximum number of entries"`
 }
 
 //nolint:gocyclo // Entry typing and pagination share one small bounded rendering loop.
-func (s *service) listDir(ctx context.Context, args listDirArgs) (string, error) {
+func (s *service) ls(ctx context.Context, args lsArgs) (string, error) {
 	if err := ctx.Err(); err != nil {
-		return "", failure(listDirName, err)
+		return "", failure(lsName, err)
 	}
 
 	name := "."
@@ -29,17 +29,17 @@ func (s *service) listDir(ctx context.Context, args listDirArgs) (string, error)
 
 	normalized, err := inspectTraversalBase(s.tree, name)
 	if err != nil {
-		return "", failure(listDirName, err)
+		return "", failure(lsName, err)
 	}
 
 	offset, limit, err := entryWindow(args.Offset, args.Limit, s.limits.ListEntries)
 	if err != nil {
-		return "", failure(listDirName, err)
+		return "", failure(lsName, err)
 	}
 
 	entries, err := s.tree.ReadDir(normalized)
 	if err != nil {
-		return "", failure(listDirName, err)
+		return "", failure(lsName, err)
 	}
 
 	slices.SortFunc(entries, func(a, b fs.DirEntry) int { return strings.Compare(a.Name(), b.Name()) })
@@ -53,7 +53,7 @@ func (s *service) listDir(ctx context.Context, args listDirArgs) (string, error)
 
 	for index := offset; index < len(entries); index++ {
 		if err := ctx.Err(); err != nil {
-			return "", failure(listDirName, err)
+			return "", failure(lsName, err)
 		}
 
 		if returned >= limit {
@@ -88,7 +88,7 @@ func (s *service) listDir(ctx context.Context, args listDirArgs) (string, error)
 	}
 
 	value := result{
-		OK: true, Tool: listDirName, Body: body.String(), Truncated: truncated, Reason: reason,
+		OK: true, Tool: lsName, Body: body.String(), Truncated: truncated, Reason: reason,
 		Counts: ResultCounts{Entries: returned, Bytes: body.Len()},
 	}
 	if truncated {

@@ -21,8 +21,11 @@ import (
 
 const (
 	extraWorkspaceID       = "pips.coding.workspace_id"
+	extraKind              = "pips.coding.session_kind"
 	extraParentSessionID   = "pips.coding.parent_session_id"
 	extraParentEntryID     = "pips.coding.parent_entry_id"
+	extraParentRunID       = "pips.coding.parent_run_id"
+	extraAgent             = "pips.coding.agent"
 	maxSessionPreviewRunes = 160
 )
 
@@ -44,6 +47,17 @@ type Repository struct {
 	dir  string
 	repo harness.Repo
 }
+
+// Kind identifies the product role of a durable Session.
+type Kind string
+
+const (
+	// KindConversation is a resumable user conversation. It is also the
+	// interpretation of legacy headers that do not contain a kind.
+	KindConversation Kind = "conversation"
+	// KindSubagent is an internal child transcript owned by one conversation.
+	KindSubagent Kind = "subagent"
+)
 
 // NewRepository returns a session repository rooted at dir.
 func NewRepository(dir string) (*Repository, error) {
@@ -74,7 +88,11 @@ func (r *Repository) Dir() string {
 
 // CreateOptions are the non-secret attributes persisted in a session header.
 type CreateOptions struct {
-	WorkspaceID string
+	WorkspaceID     string
+	Kind            Kind
+	ParentSessionID string
+	ParentRunID     string
+	Agent           string
 }
 
 // OpenOptions identify a stored session and the workspace allowed to own it.
@@ -89,8 +107,11 @@ type Metadata struct {
 	CreatedAt       time.Time
 	Path            string
 	WorkspaceID     string
+	Kind            Kind
 	ParentSessionID string
 	ParentEntryID   string
+	ParentRunID     string
+	Agent           string
 	Name            string
 	Preview         string
 	CurrentLeafID   string
@@ -188,8 +209,15 @@ func (r *Repository) Create(ctx context.Context, options CreateOptions) (*Handle
 		return nil, err
 	}
 
+	kind := normalizedKind(options.Kind)
 	extra := map[string]string{
 		extraWorkspaceID: options.WorkspaceID,
+		extraKind:        string(kind),
+	}
+	if kind == KindSubagent {
+		extra[extraParentSessionID] = options.ParentSessionID
+		extra[extraParentRunID] = options.ParentRunID
+		extra[extraAgent] = options.Agent
 	}
 
 	store := newDeferredStore(r.repo, harness.SessionMetadata{
@@ -266,6 +294,7 @@ func (r *Repository) Fork(
 	}
 	store, err := r.repo.ForkSession(source.session, options.AtEntryID, id, map[string]string{
 		extraWorkspaceID:     source.meta.WorkspaceID,
+		extraKind:            string(KindConversation),
 		extraParentSessionID: source.meta.ID,
 		extraParentEntryID:   parentEntryID,
 	})
@@ -311,11 +340,14 @@ func (r *Repository) List(ctx context.Context) ([]Metadata, error) {
 
 	metas := make([]Metadata, 0, len(stored))
 	for _, value := range stored {
-		if err := secureSessionFile(value.Path); err != nil {
-			return nil, err
-		}
 		meta, err := projectMetadata(value)
 		if err != nil {
+			return nil, err
+		}
+		if meta.Kind != KindConversation {
+			continue
+		}
+		if err := secureSessionFile(value.Path); err != nil {
 			return nil, err
 		}
 		prefix, prefixErr := harness.ReadJSONLPrefix(value.Path, harness.JSONLPrefixLimits{})
@@ -340,6 +372,83 @@ func (r *Repository) List(ctx context.Context) ([]Metadata, error) {
 	})
 
 	return metas, nil
+}
+
+// ListSubagents returns newest-first child metadata for exactly one Workspace
+// and parent conversation without taking writer locks.
+func (r *Repository) ListSubagents(
+	ctx context.Context,
+	workspaceID string,
+	parentSessionID string,
+) ([]Metadata, error) {
+	if err := r.validate(); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(workspaceID) == "" || validateSessionID(parentSessionID) != nil {
+		return nil, fmt.Errorf("%w: invalid subagent owner", ErrInvalid)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	stored, err := r.repo.List()
+	if err != nil {
+		return nil, err
+	}
+
+	metas := make([]Metadata, 0)
+	for _, value := range stored {
+		meta, matches, projectErr := projectSubagentListMetadata(
+			value,
+			workspaceID,
+			parentSessionID,
+		)
+		if projectErr != nil {
+			return nil, projectErr
+		}
+		if !matches {
+			continue
+		}
+
+		metas = append(metas, meta)
+	}
+
+	slices.SortFunc(metas, func(a, b Metadata) int {
+		if order := b.CreatedAt.Compare(a.CreatedAt); order != 0 {
+			return order
+		}
+
+		return strings.Compare(a.ID, b.ID)
+	})
+
+	return metas, nil
+}
+
+func projectSubagentListMetadata(
+	value harness.SessionMetadata,
+	workspaceID string,
+	parentSessionID string,
+) (Metadata, bool, error) {
+	meta, err := projectMetadata(value)
+	if err != nil {
+		return Metadata{}, false, err
+	}
+	if meta.Kind != KindSubagent || meta.WorkspaceID != workspaceID ||
+		meta.ParentSessionID != parentSessionID {
+		return Metadata{}, false, nil
+	}
+	if err := secureSessionFile(value.Path); err != nil {
+		return Metadata{}, false, err
+	}
+
+	prefix, err := harness.ReadJSONLPrefix(value.Path, harness.JSONLPrefixLimits{})
+	if err != nil {
+		meta.Truncated = true
+	} else {
+		projectSessionPrefix(&meta, prefix)
+	}
+
+	return meta, true, nil
 }
 
 func newHandle(
@@ -403,13 +512,28 @@ func projectMetadata(stored harness.SessionMetadata) (Metadata, error) {
 		return Metadata{}, fmt.Errorf("%w: session %q has incomplete coding metadata", ErrInvalid, stored.ID)
 	}
 
+	kind := normalizedKind(Kind(stored.Extra[extraKind]))
+	if !validKind(kind) {
+		return Metadata{}, fmt.Errorf("%w: session %q has invalid kind", ErrInvalid, stored.ID)
+	}
+	if kind == KindSubagent {
+		parentSessionID := stored.Extra[extraParentSessionID]
+		agent := stored.Extra[extraAgent]
+		if validateSessionID(parentSessionID) != nil || strings.TrimSpace(agent) == "" {
+			return Metadata{}, fmt.Errorf("%w: subagent session %q has incomplete lineage", ErrInvalid, stored.ID)
+		}
+	}
+
 	return Metadata{
 		ID:              stored.ID,
 		CreatedAt:       stored.CreatedAt,
 		Path:            stored.Path,
 		WorkspaceID:     workspaceID,
+		Kind:            kind,
 		ParentSessionID: stored.Extra[extraParentSessionID],
 		ParentEntryID:   stored.Extra[extraParentEntryID],
+		ParentRunID:     stored.Extra[extraParentRunID],
+		Agent:           stored.Extra[extraAgent],
 	}, nil
 }
 
@@ -485,7 +609,34 @@ func validateCreateOptions(options CreateOptions) error {
 		return fmt.Errorf("%w: empty workspace identity", ErrInvalid)
 	}
 
+	kind := normalizedKind(options.Kind)
+	if !validKind(kind) {
+		return fmt.Errorf("%w: invalid session kind %q", ErrInvalid, options.Kind)
+	}
+	if kind == KindConversation {
+		if options.ParentSessionID != "" || options.ParentRunID != "" || options.Agent != "" {
+			return fmt.Errorf("%w: conversation cannot declare subagent lineage", ErrInvalid)
+		}
+
+		return nil
+	}
+	if validateSessionID(options.ParentSessionID) != nil || strings.TrimSpace(options.Agent) == "" {
+		return fmt.Errorf("%w: subagent requires parent session and agent", ErrInvalid)
+	}
+
 	return nil
+}
+
+func normalizedKind(kind Kind) Kind {
+	if kind == "" {
+		return KindConversation
+	}
+
+	return kind
+}
+
+func validKind(kind Kind) bool {
+	return kind == KindConversation || kind == KindSubagent
 }
 
 func (r *Repository) validate() error {

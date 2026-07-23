@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -24,6 +25,7 @@ import (
 var errConsumerStopped = errors.New("coding runtime: event consumer stopped")
 
 type eventEmitter struct {
+	mu               sync.Mutex
 	runtime          *Runtime
 	observeTelemetry func(Event) []IntegrationDiagnostic
 	yield            func(Event, error) bool
@@ -52,15 +54,42 @@ func (e *eventEmitter) emit(
 	eventType EventType,
 	payload EventPayload,
 ) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	return e.emitLocked(interactionID, runID, eventType, payload)
+}
+
+func (e *eventEmitter) emitLocked(
+	interactionID string,
+	runID string,
+	eventType EventType,
+	payload EventPayload,
+) error {
 	event, err := e.runtime.writer.write(interactionID, runID, eventType, payload)
 	if err != nil {
 		return err
 	}
 
-	return e.publish(event)
+	return e.publishLocked(event)
 }
 
-func (e *eventEmitter) publish(event Event) error {
+func (e *eventEmitter) publishAgent(
+	projector *agentProjector,
+	event agent.Event,
+) (Event, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	projected, err := projector.project(event)
+	if err != nil {
+		return Event{}, err
+	}
+
+	return projected, e.publishLocked(projected)
+}
+
+func (e *eventEmitter) publishLocked(event Event) error {
 	e.runtime.mu.Lock()
 	next, err := Reduce(e.runtime.state, event)
 	if err == nil {
@@ -80,7 +109,7 @@ func (e *eventEmitter) publish(event Event) error {
 	}
 
 	for _, diagnostic := range diagnostics {
-		if err := e.emit("", "", EventIntegrationDiagnostic, diagnostic); err != nil {
+		if err := e.emitLocked("", "", EventIntegrationDiagnostic, diagnostic); err != nil {
 			if errors.Is(err, errConsumerStopped) {
 				consumerStopped = true
 
@@ -368,6 +397,9 @@ func (r *Runtime) openInteraction(
 	resumed bool,
 	emitter *eventEmitter,
 ) (_ *interaction, returnErr error) {
+	current := &interaction{
+		id: interactionID, startedAt: time.Now().UTC(), resumed: resumed,
+	}
 	if snapshot, attempted, err := r.connections.RefreshChanged(ctx); err != nil {
 		_ = emitter.emit("", "", EventIntegrationDiagnostic, IntegrationDiagnostic{
 			Component: componentMCP, Code: "refresh_failed",
@@ -430,12 +462,27 @@ func (r *Runtime) openInteraction(
 		return nil, err
 	}
 
+	subagentTools, err := catalog.New(catalog.Local(
+		"coding.subagent",
+		catalog.RiskRead,
+		r.subagents.Tool(r.subagentObserver(current, emitter)),
+	)...)
+	if err != nil {
+		return nil, err
+	}
+
 	mcpCatalog, err := catalog.New(r.connections.Snapshot().Entries...)
 	if err != nil {
 		return nil, err
 	}
 
-	merged, err := catalog.Merge(localCatalog, skillTools, snapshot.Catalog(), mcpCatalog)
+	merged, err := catalog.Merge(
+		localCatalog,
+		subagentTools,
+		skillTools,
+		snapshot.Catalog(),
+		mcpCatalog,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -494,10 +541,10 @@ func (r *Runtime) openInteraction(
 	}
 	r.resolver.set(value)
 
-	current := &interaction{
-		id: interactionID, startedAt: time.Now().UTC(), resumed: resumed,
-		activation: activation, harness: value, search: search, observer: extensionObserver,
-	}
+	current.activation = activation
+	current.harness = value
+	current.search = search
+	current.observer = extensionObserver
 
 	baseline, captureErr := r.inspector.Capture(ctx)
 	if captureErr == nil {
@@ -572,7 +619,7 @@ func (r *Runtime) driveHarness(
 	inputPending := cloneMessages(messages)
 	for event, streamErr := range current.harness.PromptMessagesStream(ctx, messages...) {
 		if event.Type != "" {
-			projected, projectErr := projector.project(event)
+			projected, projectErr := emitter.publishAgent(projector, event)
 			if projectErr != nil {
 				return "", projectErr
 			}
@@ -586,10 +633,6 @@ func (r *Runtime) driveHarness(
 			if _, ok := projected.Payload.(RunStarted); ok {
 				current.activeRunID = projected.RunID
 				current.runIDs = append(current.runIDs, projected.RunID)
-			}
-
-			if err := emitter.publish(projected); err != nil {
-				return "", err
 			}
 
 			if event.Type == agent.EventTurnStart && len(inputPending) > 0 {

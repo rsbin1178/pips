@@ -14,23 +14,23 @@ import (
 	"github.com/bmatcuk/doublestar/v4"
 )
 
-const searchTextName = "search_text"
+const grepName = "grep"
 
-type searchTextArgs struct {
-	Query         string  `json:"query" description:"Literal text or Go RE2 regular expression"`
+type grepArgs struct {
+	Pattern       string  `json:"pattern" description:"Go RE2 regular expression, or literal text when fixed_strings is true"`
+	FixedStrings  *bool   `json:"fixed_strings" description:"Treat pattern as literal text instead of a regular expression"`
 	Path          *string `json:"path" description:"Optional workspace-relative base directory"`
 	Glob          *string `json:"glob" description:"Optional slash-separated file glob"`
-	Regex         *bool   `json:"regex" description:"Whether query is a regular expression"`
 	CaseSensitive *bool   `json:"case_sensitive" description:"Whether matching is case-sensitive"`
 	Offset        *int    `json:"offset" description:"Optional zero-based matching-line offset"`
 	Limit         *int    `json:"limit" description:"Optional maximum number of matching lines"`
 }
 
 //nolint:gocyclo,funlen // Walk policy and global pagination remain in one ordered traversal state machine.
-func (s *service) searchText(ctx context.Context, args searchTextArgs) (string, error) {
+func (s *service) grep(ctx context.Context, args grepArgs) (string, error) {
 	expression, err := compileSearch(args)
 	if err != nil {
-		return "", failure(searchTextName, err)
+		return "", failure(grepName, err)
 	}
 
 	base := "."
@@ -40,36 +40,36 @@ func (s *service) searchText(ctx context.Context, args searchTextArgs) (string, 
 
 	base, err = inspectTraversalBase(s.tree, base)
 	if err != nil {
-		return "", failure(searchTextName, err)
+		return "", failure(grepName, err)
 	}
 
 	glob := ""
 	if args.Glob != nil && *args.Glob != "" {
 		glob, err = validatePattern(*args.Glob)
 		if err != nil {
-			return "", failure(searchTextName, err)
+			return "", failure(grepName, err)
 		}
 	}
 
-	offset, limit, err := entryWindow(args.Offset, args.Limit, s.limits.SearchMatches)
+	offset, limit, err := entryWindow(args.Offset, args.Limit, s.limits.GrepMatches)
 	if err != nil {
-		return "", failure(searchTextName, err)
+		return "", failure(grepName, err)
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, s.limits.SearchTimeout)
+	ctx, cancel := context.WithTimeout(ctx, s.limits.GrepTimeout)
 	defer cancel()
 
 	fileSystem := s.tree.FileSystem()
 	if base != "." {
 		fileSystem, err = fs.Sub(fileSystem, base)
 		if err != nil {
-			return "", failure(searchTextName, fmt.Errorf("coding tools: open search base %q: %w", base, err))
+			return "", failure(grepName, fmt.Errorf("coding tools: open search base %q: %w", base, err))
 		}
 	}
 
 	var body strings.Builder
 
-	value := result{OK: true, Tool: searchTextName}
+	value := result{OK: true, Tool: grepName}
 	matched := 0
 	lastProgress := time.Now()
 
@@ -129,7 +129,7 @@ func (s *service) searchText(ctx context.Context, args searchTextArgs) (string, 
 			}
 		}
 
-		if value.Counts.Files >= s.limits.SearchFiles {
+		if value.Counts.Files >= s.limits.GrepFiles {
 			value.Truncated = true
 			value.Reason = "files"
 			setNextOffset(&value, matched)
@@ -181,7 +181,7 @@ func (s *service) searchText(ctx context.Context, args searchTextArgs) (string, 
 				return errWalkComplete
 			}
 
-			shown, lineTruncated := truncateUTF8(line, s.limits.SearchLineBytes)
+			shown, lineTruncated := truncateUTF8(line, s.limits.GrepLineBytes)
 
 			entry := workspacePath + ":" + strconv.Itoa(index+1) + ":" + strconv.Itoa(location[0]+1) + ":" + shown + "\n"
 			if !appendBounded(&body, entry, s.limits.OutputBytes) {
@@ -202,7 +202,7 @@ func (s *service) searchText(ctx context.Context, args searchTextArgs) (string, 
 		}
 
 		if time.Since(lastProgress) >= 250*time.Millisecond {
-			reportToolProgress(ctx, searchTextName, value.Counts)
+			reportToolProgress(ctx, grepName, value.Counts)
 
 			lastProgress = time.Now()
 		}
@@ -210,7 +210,7 @@ func (s *service) searchText(ctx context.Context, args searchTextArgs) (string, 
 		return nil
 	})
 	if walkErr != nil && !errors.Is(walkErr, errWalkComplete) {
-		return "", failure(searchTextName, fmt.Errorf("coding tools: search text: %w", walkErr))
+		return "", failure(grepName, fmt.Errorf("coding tools: grep: %w", walkErr))
 	}
 
 	value.Body = body.String()
@@ -219,14 +219,14 @@ func (s *service) searchText(ctx context.Context, args searchTextArgs) (string, 
 	return value.render(), nil
 }
 
-func compileSearch(args searchTextArgs) (*regexp.Regexp, error) {
-	if strings.TrimSpace(args.Query) == "" {
-		return nil, fmt.Errorf("%w: query is required", errInvalidArgument)
+func compileSearch(args grepArgs) (*regexp.Regexp, error) {
+	if strings.TrimSpace(args.Pattern) == "" {
+		return nil, fmt.Errorf("%w: pattern is required", errInvalidArgument)
 	}
 
-	pattern := regexp.QuoteMeta(args.Query)
-	if args.Regex != nil && *args.Regex {
-		pattern = args.Query
+	pattern := args.Pattern
+	if args.FixedStrings != nil && *args.FixedStrings {
+		pattern = regexp.QuoteMeta(pattern)
 	}
 
 	caseSensitive := true

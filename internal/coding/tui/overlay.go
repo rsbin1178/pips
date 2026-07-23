@@ -18,6 +18,7 @@ import (
 	"github.com/rsbin/pips/internal/coding/approval"
 	"github.com/rsbin/pips/internal/coding/config"
 	"github.com/rsbin/pips/internal/coding/modelcatalog"
+	"github.com/rsbin/pips/internal/coding/subagent"
 )
 
 const defaultSelectionLabel = "default"
@@ -33,6 +34,7 @@ const (
 	overlayStatus
 	overlayTree
 	overlayCompact
+	overlayAgents
 )
 
 type overlayState struct {
@@ -49,13 +51,19 @@ type overlayState struct {
 	tree        coding.SessionTree
 	preview     coding.CompactionPreview
 	forkMode    bool
+	agents      []subagent.Summary
+	agentDetail *subagent.Detail
 }
 
 type overlayDataMsg struct {
-	kind    overlayKind
-	err     error
-	tree    coding.SessionTree
-	preview coding.CompactionPreview
+	kind      overlayKind
+	err       error
+	tree      coding.SessionTree
+	preview   coding.CompactionPreview
+	agents    []subagent.Summary
+	detail    subagent.Detail
+	hasAgents bool
+	hasDetail bool
 }
 
 type controlOperation uint8
@@ -102,6 +110,16 @@ func (m *Model) openOverlay(kind overlayKind) tea.Cmd {
 			value, err := m.controller.PreviewCompaction(m.ctx)
 
 			return overlayDataMsg{kind: overlayCompact, preview: value, err: err}
+		}
+	case overlayAgents:
+		m.overlay.loading = true
+
+		return func() tea.Msg {
+			values, err := m.controller.ListSubagents(m.ctx)
+
+			return overlayDataMsg{
+				kind: overlayAgents, agents: values, hasAgents: true, err: err,
+			}
 		}
 	case overlayApproval:
 		m.overlay.cursor = 0
@@ -154,7 +172,10 @@ func (m *Model) updateOverlayKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.overlay.controlling {
 		return m, nil
 	}
-	if m.overlay.kind != overlayApproval && (key == keyEscape || key == keyCtrlC) {
+	if m.closeAgentDetail(key) {
+		return m, nil
+	}
+	if m.overlay.kind != overlayApproval && isOverlayDismissKey(key) {
 		m.overlay = overlayState{}
 
 		return m, nil
@@ -171,11 +192,29 @@ func (m *Model) updateOverlayKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.updateCompactOverlay(key)
 	case overlayDiff, overlayHelp, overlayStatus:
 		return m.updateReadOnlyOverlay(key)
+	case overlayAgents:
+		return m.updateAgentsOverlay(message)
 	case overlayNone:
 		return m, nil
 	default:
 		return m, nil
 	}
+}
+
+func (m *Model) closeAgentDetail(key string) bool {
+	if m.overlay.kind != overlayAgents || m.overlay.agentDetail == nil ||
+		!isOverlayDismissKey(key) {
+		return false
+	}
+
+	m.overlay.agentDetail = nil
+	m.overlay.offset = 0
+
+	return true
+}
+
+func isOverlayDismissKey(key string) bool {
+	return key == keyEscape || key == keyCtrlC
 }
 
 func (m *Model) openTreeOverlay(forkMode bool) tea.Cmd {
@@ -503,7 +542,20 @@ func (m *Model) renderOverlay(base string) string {
 }
 
 func (m *Model) overlayContent() string {
+	content := m.baseOverlayContent()
+	if m.overlay.loading {
+		content += "\n\nWorking…"
+	}
+	if m.overlay.err != nil {
+		content += "\n\nError: " + safeError(m.overlay.err)
+	}
+
+	return content
+}
+
+func (m *Model) baseOverlayContent() string {
 	var content string
+
 	switch m.overlay.kind {
 	case overlayApproval:
 		content = m.approvalOverlayContent()
@@ -517,64 +569,66 @@ func (m *Model) overlayContent() string {
 			"The terminal owns conversation history: use its wheel or scrollback keys to navigate, " +
 			"and drag normally to select and copy text."
 	case overlayStatus:
-		modelState := m.controller.Model()
-		configState := m.controller.Config()
-		content = fmt.Sprintf(
-			"Status\n\nWorkspace: %s\nSession: %s\nModel: %s\n"+
-				"Variant: %s\nReasoning: %s\nProtocol: %s\nEndpoint: %s (%s)\n"+
-				"Context: %s\nRequest output: %s\n"+
-				"Compaction: %t (reserve %d · keep %d · summary max %d)\n"+
-				"Process override: %t\nPhase: %s\nSandbox: %s\nApproval: %s\n"+
-				"Tool search: %t\nPending approval: %s\nDetached: %t",
-			m.options.Workspace,
-			m.state.SessionID,
-			modelState.Resolved.Ref,
-			valueOrDefault(modelState.Resolved.Variant),
-			reasoningOrDefault(modelState.Resolved.ReasoningLevel),
-			modelState.Resolved.Protocol,
-			modelState.Resolved.Endpoint.BaseURL,
-			modelState.Resolved.Endpoint.Origin,
-			knownLimit(modelState.Resolved.Limits.ContextWindow),
-			optionalInt(modelState.Resolved.Options.MaxOutputTokens),
-			configState.Compaction.Enabled,
-			configState.Compaction.ReserveTokens,
-			configState.Compaction.KeepRecentTokens,
-			configState.Compaction.SummaryMaxTokens,
-			modelState.Overridden,
-			m.state.Phase,
-			configState.Sandbox,
-			configState.Approval,
-			configState.ToolSearch,
-			m.state.Approval.Kind,
-			m.controller.Detached(),
-		)
-		if len(m.state.Diagnostics) > 0 {
-			content += "\n\nIntegrations:"
-			lines := make([]string, 0, len(m.state.Diagnostics))
-			for _, diagnostic := range m.state.Diagnostics {
-				lines = append(lines, fmt.Sprintf(
-					"- %s/%s: %s",
-					diagnostic.Component,
-					diagnostic.Code,
-					diagnostic.Message,
-				))
-			}
-			content += "\n" + strings.Join(lines, "\n")
-		}
+		content = m.statusOverlayContent()
 	case overlayTree:
 		content = m.treeOverlayContent()
 	case overlayCompact:
 		content = m.compactOverlayContent()
+	case overlayAgents:
+		content = m.agentsOverlayContent()
 	case overlayNone:
-	}
-	if m.overlay.loading {
-		content += "\n\nWorking…"
-	}
-	if m.overlay.err != nil {
-		content += "\n\nError: " + safeError(m.overlay.err)
 	}
 
 	return content
+}
+
+func (m *Model) statusOverlayContent() string {
+	modelState := m.controller.Model()
+	configState := m.controller.Config()
+	content := fmt.Sprintf(
+		"Status\n\nWorkspace: %s\nSession: %s\nModel: %s\n"+
+			"Variant: %s\nReasoning: %s\nProtocol: %s\nEndpoint: %s (%s)\n"+
+			"Context: %s\nRequest output: %s\n"+
+			"Compaction: %t (reserve %d · keep %d · summary max %d)\n"+
+			"Process override: %t\nPhase: %s\nSandbox: %s\nApproval: %s\n"+
+			"Tool search: %t\nPending approval: %s\nDetached: %t",
+		m.options.Workspace,
+		m.state.SessionID,
+		modelState.Resolved.Ref,
+		valueOrDefault(modelState.Resolved.Variant),
+		reasoningOrDefault(modelState.Resolved.ReasoningLevel),
+		modelState.Resolved.Protocol,
+		modelState.Resolved.Endpoint.BaseURL,
+		modelState.Resolved.Endpoint.Origin,
+		knownLimit(modelState.Resolved.Limits.ContextWindow),
+		optionalInt(modelState.Resolved.Options.MaxOutputTokens),
+		configState.Compaction.Enabled,
+		configState.Compaction.ReserveTokens,
+		configState.Compaction.KeepRecentTokens,
+		configState.Compaction.SummaryMaxTokens,
+		modelState.Overridden,
+		m.state.Phase,
+		configState.Sandbox,
+		configState.Approval,
+		configState.ToolSearch,
+		m.state.Approval.Kind,
+		m.controller.Detached(),
+	)
+	if len(m.state.Diagnostics) == 0 {
+		return content
+	}
+
+	lines := make([]string, 0, len(m.state.Diagnostics))
+	for _, diagnostic := range m.state.Diagnostics {
+		lines = append(lines, fmt.Sprintf(
+			"- %s/%s: %s",
+			diagnostic.Component,
+			diagnostic.Code,
+			diagnostic.Message,
+		))
+	}
+
+	return content + "\n\nIntegrations:\n" + strings.Join(lines, "\n")
 }
 
 func (m *Model) approvalOverlayContent() string {

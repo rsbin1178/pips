@@ -8,6 +8,7 @@ import (
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding/approval"
 	"github.com/rsbin/pips/internal/coding/changes"
+	"github.com/rsbin/pips/internal/coding/subagent"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -213,9 +214,69 @@ func TestReduceRejectsProtocolViolations(t *testing.T) {
 	})
 }
 
+func TestReduceSubagentLifecycleIsBoundedAndStrict(t *testing.T) {
+	t.Parallel()
+
+	events := []Event{
+		newSessionEvent(EventSessionOpened, SessionOpened{
+			Provider: ai.ProviderOpenAI, ModelID: "gpt-test",
+		}),
+		newInteractionEvent(EventInteractionStarted, InteractionStarted{}),
+		newStatusEvent(EventStatusChanged, StatusChanged{Phase: PhaseRunning}),
+		newTestEvent(EventRunStarted, RunStarted{Agent: "coding"}),
+		newTestEvent(EventSubagentCreated, SubagentLifecycle{
+			Role: subagent.RoleExplore, State: subagent.StateCreated,
+			ChildSessionID: "child-1", ParentRunID: "run-1",
+			Model: "openai/test", TaskPreview: "inspect",
+		}),
+		newTestEvent(EventSubagentStarted, SubagentLifecycle{
+			Role: subagent.RoleExplore, State: subagent.StateRunning,
+			ChildSessionID: "child-1", ParentRunID: "run-1", ChildRunID: "child-run",
+			Model: "openai/test", TaskPreview: "inspect",
+		}),
+		newTestEvent(EventSubagentProgress, SubagentLifecycle{
+			Role: subagent.RoleExplore, State: subagent.StateRunning,
+			ChildSessionID: "child-1", ParentRunID: "run-1", ChildRunID: "child-run",
+			Model: "openai/test", TaskPreview: "inspect", Turns: 1, ToolCalls: 2,
+		}),
+		newTestEvent(EventSubagentCompleted, SubagentLifecycle{
+			Role: subagent.RoleExplore, State: subagent.StateSucceeded,
+			ChildSessionID: "child-1", ParentRunID: "run-1", ChildRunID: "child-run",
+			Model: "openai/test", TaskPreview: "inspect", Code: "ok",
+			Stop: agent.StopEndTurn, Turns: 1, ToolCalls: 2,
+		}),
+	}
+	var state State
+	for index := range events {
+		events[index].Sequence = uint64(index + 1)
+		var err error
+		state, err = Reduce(state, events[index])
+		require.NoError(t, err)
+	}
+	require.Len(t, state.Subagents, 1)
+	assert.Equal(t, subagent.StateSucceeded, state.Subagents[0].State)
+
+	late := events[6]
+	late.Sequence = state.Sequence + 1
+	_, err := Reduce(state, late)
+	require.ErrorIs(t, err, ErrEventProtocol)
+	assert.Equal(t, uint64(len(events)), state.Sequence)
+
+	progressBeforeStart := events[:5]
+	progress := events[6]
+	progress.Sequence = uint64(len(progressBeforeStart) + 1)
+	var before State
+	for _, event := range progressBeforeStart {
+		before, err = Reduce(before, event)
+		require.NoError(t, err)
+	}
+	_, err = Reduce(before, progress)
+	require.ErrorIs(t, err, ErrEventProtocol)
+}
+
 func reducerEvents() []Event {
 	usage := TokenUsage{InputTokens: 10, OutputTokens: 5}
-	call := ToolCall{ID: "call-1", Name: "read_file", Arguments: ai.JSON(`{"path":"main.go"}`)}
+	call := ToolCall{ID: "call-1", Name: "read", Arguments: ai.JSON(`{"path":"main.go"}`)}
 
 	events := []Event{
 		newSessionEvent(EventSessionOpened, SessionOpened{

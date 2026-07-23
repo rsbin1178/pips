@@ -16,6 +16,10 @@ var (
 	ErrRuntimeNotPaused = errors.New("coding runtime: not paused")
 	// ErrRuntimeInvalid means Runtime construction input is incomplete or inconsistent.
 	ErrRuntimeInvalid = errors.New("coding runtime: invalid options")
+	// ErrLegacyToolCallUnresolved means a resumed Session contains a pending
+	// call for a removed pre-P1 Coding Tool protocol. It is never replayed or
+	// guessed under the replacement name.
+	ErrLegacyToolCallUnresolved = errors.New("coding runtime: legacy tool call unresolved")
 	// ErrCompactionUnavailable means current configuration or history cannot
 	// produce a safe compaction plan.
 	ErrCompactionUnavailable = errors.New("coding runtime: compaction unavailable")

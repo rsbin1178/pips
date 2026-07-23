@@ -38,6 +38,8 @@ type Observer struct {
 	approvals           metric.Int64Counter
 	workspaceChanges    metric.Int64Counter
 	diagnostics         metric.Int64Counter
+	subagents           metric.Int64Counter
+	subagentDuration    metric.Int64Histogram
 }
 
 // New constructs an observer using application-owned or global providers.
@@ -105,6 +107,24 @@ func New(config Config) (*Observer, error) {
 		return nil, fmt.Errorf("coding otel diagnostics counter: %w", err)
 	}
 
+	subagents, err := meter.Int64Counter(
+		"pips.coding.subagents",
+		metric.WithDescription("Coding subagent lifecycle events."),
+		metric.WithUnit("{event}"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("coding otel subagents counter: %w", err)
+	}
+
+	subagentDuration, err := meter.Int64Histogram(
+		"pips.coding.subagent.duration",
+		metric.WithDescription("Terminal Coding subagent duration."),
+		metric.WithUnit("ms"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("coding otel subagent duration: %w", err)
+	}
+
 	return &Observer{
 		tracer:              tp.Tracer(instrumentationName),
 		sessions:            sessions,
@@ -113,6 +133,8 @@ func New(config Config) (*Observer, error) {
 		approvals:           approvals,
 		workspaceChanges:    workspaceChanges,
 		diagnostics:         diagnostics,
+		subagents:           subagents,
+		subagentDuration:    subagentDuration,
 	}, nil
 }
 
@@ -158,6 +180,11 @@ func (o *Observer) Observe(ctx context.Context, event coding.TelemetryEvent) err
 			attribute.Int("coding.compaction.tokens_after", event.TokensAfter),
 			attribute.Int64("coding.compaction.duration_ms", event.DurationMillis),
 		}, event.Failed)
+	case coding.EventSubagentCreated, coding.EventSubagentStarted,
+		coding.EventSubagentProgress, coding.EventSubagentCompleted,
+		coding.EventSubagentFailed, coding.EventSubagentCanceled,
+		coding.EventSubagentInterrupted:
+		o.observeSubagent(ctx, event)
 	case coding.EventInteractionStarted, coding.EventRunStarted, coding.EventRunCompleted,
 		coding.EventTurnStarted, coding.EventTurnCompleted, coding.EventMessageCommitted,
 		coding.EventMessageDelta, coding.EventToolStarted, coding.EventToolUpdated,
@@ -167,6 +194,36 @@ func (o *Observer) Observe(ctx context.Context, event coding.TelemetryEvent) err
 	}
 
 	return nil
+}
+
+func (o *Observer) observeSubagent(ctx context.Context, event coding.TelemetryEvent) {
+	attrs := []attribute.KeyValue{
+		attribute.String("coding.subagent.role", event.SubagentRole),
+		attribute.String("coding.subagent.state", event.SubagentState),
+		attribute.String("coding.subagent.model", event.ModelID),
+		attribute.String("coding.subagent.code", event.Code),
+		attribute.String("coding.subagent.stop", string(event.Stop)),
+		attribute.Int("coding.subagent.turns", event.Turns),
+		attribute.Int("coding.subagent.tool_calls", event.ToolCalls),
+		attribute.Int64("coding.subagent.duration_ms", event.DurationMillis),
+		attribute.Int("coding.usage.input_tokens", event.Usage.InputTokens),
+		attribute.Int("coding.usage.output_tokens", event.Usage.OutputTokens),
+		attribute.Int("coding.usage.reasoning_tokens", event.Usage.ReasoningTokens),
+	}
+	metricAttrs := []attribute.KeyValue{
+		attribute.String("coding.subagent.role", event.SubagentRole),
+		attribute.String("coding.subagent.state", event.SubagentState),
+	}
+	o.subagents.Add(ctx, 1, metric.WithAttributes(metricAttrs...))
+	if event.Type == coding.EventSubagentCompleted || event.Type == coding.EventSubagentFailed ||
+		event.Type == coding.EventSubagentCanceled || event.Type == coding.EventSubagentInterrupted {
+		o.subagentDuration.Record(
+			ctx,
+			event.DurationMillis,
+			metric.WithAttributes(metricAttrs...),
+		)
+	}
+	o.instant(ctx, "coding."+string(event.Type), event, attrs, event.Failed)
 }
 
 func compactionLifecycle(eventType coding.EventType) string {

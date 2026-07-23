@@ -13,11 +13,11 @@ import (
 	"github.com/rsbin/pips/agent"
 )
 
-const findFilesName = "find_files"
+const globName = "glob"
 
 var errWalkComplete = errors.New("coding tools: walk complete")
 
-type findFilesArgs struct {
+type globArgs struct {
 	Pattern string  `json:"pattern" description:"Slash-separated glob pattern; use ** for recursive matching"`
 	Path    *string `json:"path" description:"Optional workspace-relative base directory"`
 	Offset  *int    `json:"offset" description:"Optional zero-based matching-file offset"`
@@ -25,10 +25,10 @@ type findFilesArgs struct {
 }
 
 //nolint:gocyclo,funlen // Walk policy, matching, pagination, and progress share one ordered callback.
-func (s *service) findFiles(ctx context.Context, args findFilesArgs) (string, error) {
+func (s *service) glob(ctx context.Context, args globArgs) (string, error) {
 	pattern, err := validatePattern(args.Pattern)
 	if err != nil {
-		return "", failure(findFilesName, err)
+		return "", failure(globName, err)
 	}
 
 	base := "."
@@ -38,28 +38,28 @@ func (s *service) findFiles(ctx context.Context, args findFilesArgs) (string, er
 
 	base, err = inspectTraversalBase(s.tree, base)
 	if err != nil {
-		return "", failure(findFilesName, err)
+		return "", failure(globName, err)
 	}
 
-	offset, limit, err := entryWindow(args.Offset, args.Limit, s.limits.FindEntries)
+	offset, limit, err := entryWindow(args.Offset, args.Limit, s.limits.GlobEntries)
 	if err != nil {
-		return "", failure(findFilesName, err)
+		return "", failure(globName, err)
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, s.limits.FindTimeout)
+	ctx, cancel := context.WithTimeout(ctx, s.limits.GlobTimeout)
 	defer cancel()
 
 	fileSystem := s.tree.FileSystem()
 	if base != "." {
 		fileSystem, err = fs.Sub(fileSystem, base)
 		if err != nil {
-			return "", failure(findFilesName, fmt.Errorf("coding tools: open search base %q: %w", base, err))
+			return "", failure(globName, fmt.Errorf("coding tools: open search base %q: %w", base, err))
 		}
 	}
 
 	var body strings.Builder
 
-	value := result{OK: true, Tool: findFilesName}
+	value := result{OK: true, Tool: globName}
 	matched := 0
 	lastProgress := time.Now()
 
@@ -144,7 +144,7 @@ func (s *service) findFiles(ctx context.Context, args findFilesArgs) (string, er
 
 		value.Counts.Bytes = body.Len()
 		if time.Since(lastProgress) >= 250*time.Millisecond {
-			reportToolProgress(ctx, findFilesName, value.Counts)
+			reportToolProgress(ctx, globName, value.Counts)
 
 			lastProgress = time.Now()
 		}
@@ -152,7 +152,7 @@ func (s *service) findFiles(ctx context.Context, args findFilesArgs) (string, er
 		return nil
 	})
 	if walkErr != nil && !errors.Is(walkErr, errWalkComplete) {
-		return "", failure(findFilesName, fmt.Errorf("coding tools: find files: %w", walkErr))
+		return "", failure(globName, fmt.Errorf("coding tools: glob: %w", walkErr))
 	}
 
 	value.Body = body.String()

@@ -4,11 +4,14 @@ package tui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding"
 	"github.com/rsbin/pips/internal/coding/session"
+	"github.com/rsbin/pips/internal/coding/subagent"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -161,6 +164,73 @@ func TestResumeCommandOpensFullWidthSessionPicker(t *testing.T) {
 	assert.True(t, model.sessionPicker.open)
 	assert.Equal(t, overlayNone, model.overlay.kind)
 	assert.Contains(t, model.View().Content, "Resume session")
+}
+
+func TestAgentsCommandOpensCurrentSessionListAndDetail(t *testing.T) {
+	t.Parallel()
+
+	controller := newOverlayController(readyState())
+	summary := subagent.Summary{
+		ChildSessionID: "child-1", Role: subagent.RoleExplore,
+		State: subagent.StateSucceeded, TaskPreview: "Locate runtime wiring",
+		Model: "openai/test", CreatedAt: time.Now().Add(-time.Minute),
+		Duration: 2 * time.Second, Code: "ok",
+	}
+	controller.agents = []subagent.Summary{summary}
+	controller.agentDetail = subagent.Detail{Summary: summary, Result: subagent.ExploreResult{
+		Summary: "Found it.",
+	}}
+	model := readyModelWithController(t, controller, true)
+	model.openCommandPicker()
+	for _, character := range "agents" {
+		model.Update(tea.KeyPressMsg{Text: string(character)})
+	}
+
+	_, load := model.Update(key("enter"))
+	require.NotNil(t, load)
+	driveModelCommands(t, model, load)
+	assert.Equal(t, overlayAgents, model.overlay.kind)
+	assert.Contains(t, model.View().Content, "Locate runtime wiring")
+
+	_, inspect := model.Update(key("enter"))
+	require.NotNil(t, inspect)
+	driveModelCommands(t, model, inspect)
+	content := model.View().Content
+	assert.Contains(t, content, "Subagent detail")
+	assert.Contains(t, content, "child-1")
+	assert.Contains(t, content, "Found it.")
+
+	model.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	assert.Nil(t, model.overlay.agentDetail)
+	assert.Equal(t, overlayAgents, model.overlay.kind)
+}
+
+func TestCtrlTOpensSubagentFromDurableToolEnvelope(t *testing.T) {
+	t.Parallel()
+
+	state := readyState()
+	state.Tools = []coding.ToolState{{
+		RunID:  "parent-run",
+		Call:   coding.ToolCall{ID: "call-1", Name: subagent.ToolName},
+		Status: coding.ToolStatusCompleted,
+		Result: ai.ToolResultText(
+			"call-1",
+			subagent.ToolName,
+			`{"schema":"`+subagent.ResultSchema+`","child_session_id":"child-durable"}`,
+		),
+	}}
+	controller := newOverlayController(state)
+	controller.agentDetail = subagent.Detail{Summary: subagent.Summary{
+		ChildSessionID: "child-durable", Role: subagent.RoleReview,
+	}}
+	model := readyModelWithController(t, controller, true)
+
+	command := model.toggleLatestTool()
+	require.NotNil(t, command)
+	driveModelCommands(t, model, command)
+	assert.Equal(t, []string{"child-durable"}, controller.agentInspections)
+	assert.Equal(t, overlayAgents, model.overlay.kind)
+	assert.NotNil(t, model.overlay.agentDetail)
 }
 
 func lineIndexes(lines []string, value string) []int {

@@ -76,21 +76,21 @@ func TestResolveActivity(t *testing.T) {
 			name: "one running tool", context: activityContext{state: withTools(
 				running,
 				coding.ToolState{
-					Call:   coding.ToolCall{ID: "call-1", Name: "read_file"},
+					Call:   coding.ToolCall{ID: "call-1", Name: "read"},
 					Status: coding.ToolStatusRunning,
 				},
 			)},
-			kind: activityTool, label: "Running read_file…", visible: true,
+			kind: activityTool, label: "Running read…", visible: true,
 		},
 		{
 			name: "parallel tools", context: activityContext{state: withTools(
 				running,
 				coding.ToolState{
-					Call:   coding.ToolCall{ID: "call-1", Name: "read_file"},
+					Call:   coding.ToolCall{ID: "call-1", Name: "read"},
 					Status: coding.ToolStatusRunning,
 				},
 				coding.ToolState{
-					Call:   coding.ToolCall{ID: "call-2", Name: "search_text"},
+					Call:   coding.ToolCall{ID: "call-2", Name: "grep"},
 					Status: coding.ToolStatusRunning,
 				},
 			)},
@@ -151,15 +151,15 @@ func TestActivityIndicatorRendersSemanticColorAndNoColorFallback(t *testing.T) {
 	t.Parallel()
 
 	indicator := newActivityIndicator()
-	status := activityStatus{kind: activityTool, label: "Running read_file…", detail: "workspace"}
+	status := activityStatus{kind: activityTool, label: "Running read…", detail: "workspace"}
 
 	colored := indicator.View(status, themeDark, false)
 	assert.Contains(t, colored, "\x1b[")
-	assert.Equal(t, "✻ Running read_file… · workspace", ansi.Strip(colored))
+	assert.Equal(t, "✻ Running read… · workspace", ansi.Strip(colored))
 
 	plain := indicator.View(status, themeDark, true)
 	assert.NotContains(t, plain, "\x1b[")
-	assert.Equal(t, "✻ Running read_file… · workspace", plain)
+	assert.Equal(t, "✻ Running read… · workspace", plain)
 
 	for _, frame := range activitySpinner.Frames {
 		assert.Equal(t, 1, ansi.StringWidth(frame))
@@ -307,7 +307,7 @@ func TestActivityLabelsRemainSingleLine(t *testing.T) {
 		activityLabelPreparing,
 		activityLabelThinking,
 		activityLabelResponding,
-		"Running read_file…",
+		"Running read…",
 		activityLabelApproval,
 		activityLabelRecovery,
 		activityLabelCompacting,
