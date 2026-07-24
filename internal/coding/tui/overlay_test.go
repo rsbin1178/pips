@@ -28,33 +28,36 @@ func TestApprovalOverlayDefaultsToDenyAndUsesExactResolution(t *testing.T) {
 	state := approvalReviewState()
 	controller := newOverlayController(state)
 	model := readyModelWithController(t, controller, true)
-	require.Equal(t, overlayApproval, model.overlay.kind)
-	require.Equal(t, approval.ChoiceDeny, model.overlay.choices[model.overlay.cursor])
+	require.Equal(t, promptApproval, model.prompt.kind)
+	require.Equal(t, approval.ChoiceDeny, model.prompt.choices[model.prompt.cursor])
 	assert.Contains(t, model.View().Content, "shell -lc make test")
+	assert.Contains(t, model.View().Content, "△ Approval required")
 
 	model.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
-	assert.Equal(t, overlayApproval, model.overlay.kind)
-	assert.Equal(t, approval.ChoiceDeny, model.overlay.choices[model.overlay.cursor])
+	assert.Equal(t, promptApproval, model.prompt.kind)
+	assert.Equal(t, approval.ChoiceDeny, model.prompt.choices[model.prompt.cursor])
 
 	_, command := model.Update(key("enter"))
 	driveModelCommands(t, model, command)
 	require.Len(t, controller.resolutions, 1)
 	assert.Equal(t, approval.ChoiceDeny, controller.resolutions[0].Choice)
-	assert.Equal(t, overlayNone, model.overlay.kind)
+	assert.Equal(t, promptNone, model.prompt.kind)
 }
 
 func TestApprovalOverlayClosesSubagentRoute(t *testing.T) {
 	t.Parallel()
 
 	model := readyModelWithController(t, newOverlayController(approvalReviewState()), true)
-	model.subagentRoute = subagentRouteState{
-		open: true, childSessionID: "child-1",
+	model.route = routeState{
+		kind: routeSubagent, childSessionID: "child-1",
 	}
+	model.composer.Blur()
 
-	model.syncApprovalOverlay()
+	model.syncApprovalPrompt()
 
-	assert.False(t, model.subagentRoute.open)
-	assert.Equal(t, overlayApproval, model.overlay.kind)
+	assert.Equal(t, routeNone, model.route.kind)
+	assert.Equal(t, promptApproval, model.prompt.kind)
+	assert.True(t, model.composer.Focused())
 }
 
 func TestUnknownApprovalRejectsUnlistedShortcuts(t *testing.T) {
@@ -88,13 +91,13 @@ func TestUnknownApprovalRejectsUnlistedShortcuts(t *testing.T) {
 	assert.Equal(t, approval.ChoiceRetry, controller.resolutions[0].Choice)
 }
 
-func TestModelOverlayAppliesTypedProcessSelection(t *testing.T) {
+func TestModelPickerAppliesTypedProcessSelection(t *testing.T) {
 	t.Parallel()
 
 	controller := newOverlayController(readyState())
 	model := readyModelWithController(t, controller, true)
-	model.openOverlay(overlayModel)
-	model.overlay.query = "next-model"
+	model.openModelPicker()
+	model.picker.query = "next-model"
 	model.Update(key("v"))
 	model.Update(key("r"))
 
@@ -107,10 +110,31 @@ func TestModelOverlayAppliesTypedProcessSelection(t *testing.T) {
 	require.NotNil(t, controller.models[0].ReasoningOverride)
 	assert.Equal(t, config.ReasoningLevel("low"), *controller.models[0].ReasoningOverride)
 	assert.Equal(t, "next-model", model.state.ModelID)
-	assert.Equal(t, overlayNone, model.overlay.kind)
+	assert.Equal(t, pickerNone, model.picker.kind)
 }
 
-func TestOverlayRenderingIsKeyboardOnlyNarrowAndNoColor(t *testing.T) {
+func TestModelPickerRendersInlineBelowComposerAndOwnsTyping(t *testing.T) {
+	t.Parallel()
+
+	model := readyModelWithController(t, newOverlayController(readyState()), true)
+	model.Update(tea.WindowSizeMsg{Width: 72, Height: 20})
+	model.openModelPicker()
+
+	view := model.View()
+	lines := strings.Split(view.Content, "\n")
+	composerLine := lineContaining(lines, inputArrow)
+	pickerLine := lineContaining(lines, "Model · current process only")
+	require.GreaterOrEqual(t, composerLine, 0)
+	assert.Greater(t, pickerLine, composerLine)
+	assert.Nil(t, view.Cursor)
+	assert.NotContains(t, view.Content, "Switch model (current process only)")
+
+	model.Update(tea.KeyPressMsg{Text: "next"})
+	assert.Equal(t, "next", model.picker.query)
+	assert.Empty(t, model.composer.Value())
+}
+
+func TestDiffInspectionPrintsPlainNarrowOutput(t *testing.T) {
 	t.Parallel()
 
 	model := readyModel(t, true)
@@ -119,20 +143,14 @@ func TestOverlayRenderingIsKeyboardOnlyNarrowAndNoColor(t *testing.T) {
 		Entries: []coding.WorkspaceChange{{Path: "main.go", Kind: "modified"}},
 		Diff:    "diff --git a/main.go b/main.go\n-old\n+new",
 	}
-	model.openOverlay(overlayDiff)
-	view := model.View()
-	assert.Contains(t, view.Content, "Workspace changes")
-	assert.NotContains(t, view.Content, "\x1b[")
-	assert.Nil(t, view.Cursor)
-
-	before := model.overlay
-	model.Update(tea.MouseClickMsg{X: 2, Y: 2, Button: tea.MouseLeft})
-	assert.Equal(t, before, model.overlay)
-	model.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
-	assert.Equal(t, overlayNone, model.overlay.kind)
+	printed := commandOutput(model.printDiff())
+	assert.Contains(t, printed, "Workspace changes")
+	assert.Contains(t, printed, "+new")
+	assert.NotContains(t, printed, "\x1b[")
+	assert.Equal(t, routeNone, model.route.kind)
 }
 
-func TestLongDiffOverlayScrollsWithKeyboard(t *testing.T) {
+func TestLongDiffInspectionPrintIncludesFullReport(t *testing.T) {
 	t.Parallel()
 
 	model := readyModel(t, true)
@@ -142,34 +160,27 @@ func TestLongDiffOverlayScrollsWithKeyboard(t *testing.T) {
 		lines[index] = fmt.Sprintf("diff line %02d", index+1)
 	}
 	model.state.Changes = &coding.WorkspaceChanged{Diff: strings.Join(lines, "\n")}
-	model.openOverlay(overlayDiff)
-
-	assert.Contains(t, model.View().Content, "diff line 01")
-	assert.NotContains(t, model.View().Content, "diff line 30")
-	model.Update(tea.KeyPressMsg{Code: tea.KeyEnd})
-	assert.Contains(t, model.View().Content, "diff line 30")
-	model.Update(tea.KeyPressMsg{Code: tea.KeyHome})
-	assert.Contains(t, model.View().Content, "diff line 01")
+	printed := commandOutput(model.printDiff())
+	assert.Contains(t, printed, "diff line 01")
+	assert.Contains(t, printed, "diff line 30")
 }
 
-func TestStatusOverlayShowsOnlyRequestOutputLimit(t *testing.T) {
+func TestStatusInspectionShowsOnlyRequestOutputLimit(t *testing.T) {
 	t.Parallel()
 
 	model := readyModelWithController(t, newOverlayController(readyState()), true)
-	model.openOverlay(overlayStatus)
-	content := model.overlayContent()
+	content := model.statusContent()
 
 	assert.Contains(t, content, "Context:")
 	assert.Contains(t, content, "Request output:")
 	assert.NotContains(t, content, "Model output:")
 }
 
-func TestHelpExplainsMouseSelectionAndWheelScrolling(t *testing.T) {
+func TestHelpInspectionExplainsMouseSelectionAndWheelScrolling(t *testing.T) {
 	t.Parallel()
 
 	model := readyModel(t, true)
-	model.openOverlay(overlayHelp)
-	content := model.overlayContent()
+	content := commandOutput(model.printHelp())
 
 	assert.Contains(t, content, "terminal owns conversation history")
 	assert.Contains(t, content, "drag normally to select and copy text")
@@ -195,7 +206,7 @@ func TestTreeOverlayFiltersNavigatesWithSummaryAndForks(t *testing.T) {
 		},
 	}
 	model := readyModelWithController(t, controller, true)
-	load := model.openTreeOverlay(false)
+	load := model.openTreeRoute(false)
 	model.Update(load())
 	model.Update(tea.KeyPressMsg{Text: "first"})
 	require.Len(t, model.filteredTreeNodes(), 1)
@@ -205,17 +216,17 @@ func TestTreeOverlayFiltersNavigatesWithSummaryAndForks(t *testing.T) {
 	assert.Equal(t, "node-first", controller.navigations[0].entryID)
 	assert.True(t, controller.navigations[0].summarize)
 
-	load = model.openTreeOverlay(true)
+	load = model.openTreeRoute(true)
 	model.Update(load())
 	model.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	_, fork := model.Update(key("enter"))
 	require.NotNil(t, fork)
 	model.Update(fork())
 	assert.Equal(t, []string{"node-second"}, controller.forks)
-	assert.Equal(t, overlayNone, model.overlay.kind)
+	assert.Equal(t, routeNone, model.route.kind)
 }
 
-func TestCompactOverlayCancelDoesNothingAndConfirmUsesPreviewToken(t *testing.T) {
+func TestCompactPromptCancelDoesNothingAndConfirmUsesPreviewToken(t *testing.T) {
 	t.Parallel()
 
 	controller := newOverlayController(readyState())
@@ -225,13 +236,13 @@ func TestCompactOverlayCancelDoesNothingAndConfirmUsesPreviewToken(t *testing.T)
 		FirstKeptID: "node-first",
 	}
 	model := readyModelWithController(t, controller, true)
-	load := model.openOverlay(overlayCompact)
+	load := model.openCompactPrompt()
 	model.Update(load())
 	model.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	assert.Empty(t, controller.compactions)
-	assert.Equal(t, overlayNone, model.overlay.kind)
+	assert.Equal(t, promptNone, model.prompt.kind)
 
-	load = model.openOverlay(overlayCompact)
+	load = model.openCompactPrompt()
 	model.Update(load())
 	_, compact := model.Update(key("enter"))
 	driveModelCommands(t, model, compact)

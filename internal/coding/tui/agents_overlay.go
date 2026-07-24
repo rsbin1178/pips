@@ -1,3 +1,4 @@
+//nolint:wsl_v5 // Full-area agent routes keep their transition and rendering details adjacent.
 package tui
 
 import (
@@ -19,17 +20,10 @@ type subagentToolEnvelope struct {
 	ChildSessionID string `json:"child_session_id"`
 }
 
-type subagentRouteState struct {
-	open           bool
-	loading        bool
-	refreshing     bool
-	refreshPending bool
-	err            error
-	refreshErr     error
-	generation     uint64
-	childSessionID string
-	detail         *subagent.Detail
-	offset         int
+type agentsRouteDataMsg struct {
+	generation uint64
+	agents     []subagent.Summary
+	err        error
 }
 
 type subagentRouteDataMsg struct {
@@ -72,8 +66,26 @@ func subagentChildSessionID(
 	return ""
 }
 
-func (m *Model) updateAgentsOverlay(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	if m.overlay.loading {
+func (m *Model) openAgentsRoute() tea.Cmd {
+	m.routeSeq++
+	m.route = routeState{kind: routeAgents, loading: true, generation: m.routeSeq}
+	m.composer.Blur()
+	generation := m.route.generation
+
+	return func() tea.Msg {
+		values, err := m.controller.ListSubagents(m.ctx)
+
+		return agentsRouteDataMsg{generation: generation, agents: values, err: err}
+	}
+}
+
+func (m *Model) updateAgentsRouteKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if key := message.String(); key == keyEscape || key == keyCtrlT || key == keyCtrlC {
+		m.route = routeState{}
+
+		return m, m.composer.Focus()
+	}
+	if m.route.loading {
 		return m, nil
 	}
 
@@ -81,27 +93,27 @@ func (m *Model) updateAgentsOverlay(message tea.KeyPressMsg) (tea.Model, tea.Cmd
 
 	switch message.String() {
 	case "up", "k":
-		m.overlay.cursor = wrapIndex(m.overlay.cursor-1, len(values))
+		m.route.cursor = wrapIndex(m.route.cursor-1, len(values))
 	case keyDown, "j", keyTab:
-		m.overlay.cursor = wrapIndex(m.overlay.cursor+1, len(values))
+		m.route.cursor = wrapIndex(m.route.cursor+1, len(values))
 	case "ctrl+u":
-		m.overlay.query = ""
-		m.overlay.cursor = 0
+		m.route.query = ""
+		m.route.cursor = 0
 	case keyBackspace:
-		m.overlay.query = trimLastRune(m.overlay.query)
-		m.overlay.cursor = 0
+		m.route.query = trimLastRune(m.route.query)
+		m.route.cursor = 0
 	case keyEnter:
 		if len(values) == 0 {
 			return m, nil
 		}
 
-		childSessionID := values[m.overlay.cursor].ChildSessionID
+		childSessionID := values[m.route.cursor].ChildSessionID
 
 		return m, m.openSubagentRoute(childSessionID)
 	default:
 		if text := message.Key().Text; text != "" {
-			m.overlay.query += text
-			m.overlay.cursor = 0
+			m.route.query += text
+			m.route.cursor = 0
 		}
 	}
 
@@ -109,10 +121,10 @@ func (m *Model) updateAgentsOverlay(message tea.KeyPressMsg) (tea.Model, tea.Cmd
 }
 
 func (m *Model) filteredAgents() []subagent.Summary {
-	query := strings.ToLower(strings.TrimSpace(m.overlay.query))
+	query := strings.ToLower(strings.TrimSpace(m.route.query))
 
-	values := make([]subagent.Summary, 0, len(m.overlay.agents))
-	for _, value := range m.overlay.agents {
+	values := make([]subagent.Summary, 0, len(m.route.agents))
+	for _, value := range m.route.agents {
 		if query == "" || strings.Contains(strings.ToLower(value.TaskPreview), query) ||
 			strings.Contains(string(value.Role), query) ||
 			strings.Contains(string(value.State), query) {
@@ -123,9 +135,9 @@ func (m *Model) filteredAgents() []subagent.Summary {
 	return values
 }
 
-func (m *Model) agentsOverlayContent() string {
-	lines := []string{"Subagents", "", "Search: " + m.overlay.query, ""}
-	if m.overlay.loading {
+func (m *Model) agentsRouteContent() string {
+	lines := []string{"Subagents", "", "Search: " + m.route.query, ""}
+	if m.route.loading {
 		return strings.Join(append(lines, "Loading…"), "\n")
 	}
 
@@ -136,7 +148,7 @@ func (m *Model) agentsOverlayContent() string {
 
 	for index, value := range values {
 		marker := "  "
-		if index == m.overlay.cursor {
+		if index == m.route.cursor {
 			marker = "› "
 		}
 
@@ -259,6 +271,7 @@ func subagentCompletionMarker(detail subagent.Detail) (timelineBlock, bool) {
 		afterMessages:  len(detail.Transcript),
 		outcome:        outcome,
 		durationMillis: detail.Summary.Duration.Milliseconds(),
+		model:          detail.Summary.Model,
 	})
 }
 
@@ -431,13 +444,13 @@ func relativeTime(value time.Time) string {
 	return fmt.Sprintf("%dd ago", int(duration.Hours()/24))
 }
 
-func (m *Model) agentsView() tea.View {
-	content := m.agentsOverlayContent()
-	if m.overlay.err != nil {
-		content += "\n\nError: " + safeError(m.overlay.err)
+func (m *Model) agentsRouteView() tea.View {
+	content := m.agentsRouteContent()
+	if m.route.err != nil {
+		content += "\n\nError: " + safeError(m.route.err)
 	}
 
-	content = fitScrollableContent(content, max(1, m.width), max(1, m.height), m.overlay.offset)
+	content = fitScrollableContent(content, max(1, m.width), max(1, m.height), m.route.offset)
 	if !m.options.NoColor {
 		content = lipgloss.NewStyle().Foreground(paletteFor(m.theme).workspace).Render(content)
 	}
@@ -455,17 +468,25 @@ func (m *Model) updateSubagentRouteKey(message tea.KeyPressMsg) (tea.Model, tea.
 
 	switch key {
 	case keyCtrlT, keyCtrlC:
-		m.subagentRoute = subagentRouteState{}
-		m.overlay = overlayState{}
+		m.route = routeState{}
 
 		return m, m.composer.Focus()
 	case keyEscape:
-		m.subagentRoute = subagentRouteState{}
-		if m.overlay.kind == overlayAgents {
+		if len(m.route.agents) > 0 {
+			m.route.kind = routeAgents
+			m.route.loading = false
+			m.route.err = nil
+			m.route.offset = 0
+			m.route.childSessionID = ""
+			m.route.detail = nil
+			m.route.refreshing = false
+			m.route.refreshPending = false
+			m.route.refreshErr = nil
+
 			return m, nil
 		}
 
-		return m, m.openOverlay(overlayAgents)
+		return m, m.openAgentsRoute()
 	}
 
 	visible := max(1, m.height-3)
@@ -473,17 +494,17 @@ func (m *Model) updateSubagentRouteKey(message tea.KeyPressMsg) (tea.Model, tea.
 
 	switch key {
 	case "up", "k":
-		m.subagentRoute.offset = max(0, m.subagentRoute.offset-1)
+		m.route.offset = max(0, m.route.offset-1)
 	case keyDown, "j":
-		m.subagentRoute.offset = min(maximum, m.subagentRoute.offset+1)
+		m.route.offset = min(maximum, m.route.offset+1)
 	case "pgup":
-		m.subagentRoute.offset = max(0, m.subagentRoute.offset-visible)
+		m.route.offset = max(0, m.route.offset-visible)
 	case "pgdown":
-		m.subagentRoute.offset = min(maximum, m.subagentRoute.offset+visible)
+		m.route.offset = min(maximum, m.route.offset+visible)
 	case "home":
-		m.subagentRoute.offset = 0
+		m.route.offset = 0
 	case "end":
-		m.subagentRoute.offset = maximum
+		m.route.offset = maximum
 	}
 
 	return m, nil
@@ -503,22 +524,22 @@ func (m *Model) subagentRouteView() tea.View {
 
 	body := "Loading subagent activity…"
 
-	if m.subagentRoute.detail != nil {
-		body = m.subagentRouteContent(*m.subagentRoute.detail)
+	if m.route.detail != nil {
+		body = m.subagentRouteContent(*m.route.detail)
 	}
 
-	if m.subagentRoute.err != nil {
-		body += "\n\nError: " + safeError(m.subagentRoute.err)
+	if m.route.err != nil {
+		body += "\n\nError: " + safeError(m.route.err)
 	}
 
-	if m.subagentRoute.refreshErr != nil {
-		body += "\n\nRefresh: " + safeError(m.subagentRoute.refreshErr)
+	if m.route.refreshErr != nil {
+		body += "\n\nRefresh: " + safeError(m.route.refreshErr)
 	}
 
 	footer := m.subagentRouteStatusLine()
 	bodyHeight := max(0, height-2)
 
-	body = fitScrollableContent(body, width, bodyHeight, m.subagentRoute.offset)
+	body = fitScrollableContent(body, width, bodyHeight, m.route.offset)
 	if padding := bodyHeight - lipgloss.Height(body); padding > 0 {
 		body += strings.Repeat("\n", padding)
 	}
@@ -534,8 +555,8 @@ func (m *Model) subagentRouteView() tea.View {
 func (m *Model) subagentRouteStatusLine() string {
 	values := []string{"pips", "subagent", "loading"}
 
-	if m.subagentRoute.detail != nil {
-		summary := m.subagentRoute.detail.Summary
+	if m.route.detail != nil {
+		summary := m.route.detail.Summary
 
 		values = []string{"pips", string(summary.Role) + " subagent"}
 
@@ -560,13 +581,15 @@ func (m *Model) subagentRouteStatusLine() string {
 }
 
 func (m *Model) openSubagentRoute(childSessionID string) tea.Cmd {
-	m.subagentRouteSeq++
-	m.subagentRoute = subagentRouteState{
-		open: true, loading: true, generation: m.subagentRouteSeq,
-		childSessionID: childSessionID,
+	previous := m.route
+	m.routeSeq++
+	m.route = routeState{
+		kind: routeSubagent, loading: true, generation: m.routeSeq,
+		childSessionID: childSessionID, agents: previous.agents,
+		query: previous.query, cursor: previous.cursor,
 	}
 	m.composer.Blur()
-	generation := m.subagentRoute.generation
+	generation := m.route.generation
 
 	return func() tea.Msg {
 		detail, err := m.controller.InspectSubagent(m.ctx, childSessionID)
@@ -579,13 +602,13 @@ func (m *Model) openSubagentRoute(childSessionID string) tea.Cmd {
 }
 
 func (m *Model) invalidateAgentDetail(item streamItem) tea.Cmd {
-	if item.err != nil || !m.subagentRoute.open ||
-		m.subagentRoute.childSessionID == "" {
+	if item.err != nil || m.route.kind != routeSubagent ||
+		m.route.childSessionID == "" {
 		return nil
 	}
 
 	lifecycle, ok := item.event.Payload.(coding.SubagentLifecycle)
-	if !ok || lifecycle.ChildSessionID != m.subagentRoute.childSessionID {
+	if !ok || lifecycle.ChildSessionID != m.route.childSessionID {
 		return nil
 	}
 
@@ -593,19 +616,19 @@ func (m *Model) invalidateAgentDetail(item streamItem) tea.Cmd {
 }
 
 func (m *Model) refreshSubagentRoute() tea.Cmd {
-	if !m.subagentRoute.open || m.subagentRoute.childSessionID == "" {
+	if m.route.kind != routeSubagent || m.route.childSessionID == "" {
 		return nil
 	}
 
-	if m.subagentRoute.loading || m.subagentRoute.refreshing {
-		m.subagentRoute.refreshPending = true
+	if m.route.loading || m.route.refreshing {
+		m.route.refreshPending = true
 
 		return nil
 	}
 
-	m.subagentRoute.refreshing = true
-	generation := m.subagentRoute.generation
-	childSessionID := m.subagentRoute.childSessionID
+	m.route.refreshing = true
+	generation := m.route.generation
+	childSessionID := m.route.childSessionID
 
 	return func() tea.Msg {
 		detail, err := m.controller.InspectSubagent(m.ctx, childSessionID)
@@ -618,40 +641,40 @@ func (m *Model) refreshSubagentRoute() tea.Cmd {
 }
 
 func (m *Model) applySubagentRouteRefresh(message subagentRouteDataMsg) (tea.Model, tea.Cmd) {
-	m.subagentRoute.refreshing = false
+	m.route.refreshing = false
 	if message.err != nil {
-		m.subagentRoute.refreshErr = message.err
+		m.route.refreshErr = message.err
 	} else if message.hasDetail {
-		wasAtBottom := m.subagentRoute.offset >= m.subagentRouteMaximumOffset()
-		previousOffset := m.subagentRoute.offset
+		wasAtBottom := m.route.offset >= m.subagentRouteMaximumOffset()
+		previousOffset := m.route.offset
 		detail := message.detail
-		m.subagentRoute.detail = &detail
-		m.subagentRoute.refreshErr = nil
+		m.route.detail = &detail
+		m.route.refreshErr = nil
 
 		maximum := m.subagentRouteMaximumOffset()
 		if wasAtBottom {
-			m.subagentRoute.offset = maximum
+			m.route.offset = maximum
 		} else {
-			m.subagentRoute.offset = min(previousOffset, maximum)
+			m.route.offset = min(previousOffset, maximum)
 		}
 	}
 
-	if !m.subagentRoute.refreshPending {
+	if !m.route.refreshPending {
 		return m, nil
 	}
 
-	m.subagentRoute.refreshPending = false
+	m.route.refreshPending = false
 
 	return m, m.refreshSubagentRoute()
 }
 
 func (m *Model) subagentRouteMaximumOffset() int {
-	if m.subagentRoute.detail == nil {
+	if m.route.detail == nil {
 		return 0
 	}
 
 	visible := max(1, m.height-3)
-	lineCount := strings.Count(m.subagentRouteContent(*m.subagentRoute.detail), "\n") + 1
+	lineCount := strings.Count(m.subagentRouteContent(*m.route.detail), "\n") + 1
 
 	return max(0, lineCount-visible)
 }

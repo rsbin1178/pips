@@ -77,55 +77,18 @@ func renderStartupBanner(context startupBannerContext) string {
 		workspace = workspaceLabel
 	}
 
-	detail := workspace + "  ·  " + context.model
-	hint := "Type / for commands"
-	title := "Pips"
-	tagline := "Terminal coding agent"
-
-	if width < 24 {
-		lines := []string{
-			ansi.Truncate(title, width, "…"),
-			ansi.Truncate(tagline, width, "…"),
-			ansi.Truncate(detail, width, "…"),
-			ansi.Truncate(hint, width, "…"),
-		}
-
-		if !context.noColor {
-			palette := paletteFor(context.theme)
-			lines[0] = lipgloss.NewStyle().Bold(true).Foreground(palette.session).Render(lines[0])
-			lines[1] = lipgloss.NewStyle().Foreground(palette.workspace).Render(lines[1])
-			lines[2] = lipgloss.NewStyle().Foreground(palette.model).Render(lines[2])
-			lines[3] = lipgloss.NewStyle().Foreground(palette.muted).Render(lines[3])
-		}
-
-		return strings.Join(lines, "\n")
+	lines := []string{
+		ansi.Truncate("✻ "+appTitle, width, "…"),
+		ansi.Truncate(workspace+"  ·  "+context.model, width, "…"),
+		ansi.Truncate("Type / for commands", width, "…"),
 	}
-
-	innerWidth := width - 4
-	detail = ansi.Truncate(detail, innerWidth, "…")
-	hint = ansi.Truncate(hint, innerWidth, "…")
 
 	if !context.noColor {
 		palette := paletteFor(context.theme)
-		title = lipgloss.NewStyle().Bold(true).Foreground(palette.session).Render(title)
-		tagline = lipgloss.NewStyle().Foreground(palette.workspace).Render(tagline)
-		detail = lipgloss.NewStyle().Foreground(palette.model).Render(detail)
-		hint = lipgloss.NewStyle().Foreground(palette.muted).Render(hint)
+		lines[0] = lipgloss.NewStyle().Bold(true).Foreground(palette.session).Render(lines[0])
+		lines[1] = lipgloss.NewStyle().Foreground(palette.muted).Render(lines[1])
+		lines[2] = lipgloss.NewStyle().Foreground(palette.muted).Render(lines[2])
 	}
 
-	content := strings.Join([]string{
-		title + "  " + tagline,
-		detail,
-		hint,
-	}, "\n")
-
-	style := lipgloss.NewStyle().
-		Width(innerWidth).
-		Padding(0, 1).
-		Border(lipgloss.RoundedBorder(), true)
-	if !context.noColor {
-		style = style.BorderForeground(paletteFor(context.theme).separator)
-	}
-
-	return style.Render(content)
+	return strings.Join(lines, "\n")
 }

@@ -29,20 +29,20 @@ func TestSessionPickerFiltersAndResumesExactlyOnce(t *testing.T) {
 	driveModelCommands(t, model, load)
 
 	model.Update(tea.KeyPressMsg{Text: "bet"})
-	assert.Equal(t, "bet", model.sessionPicker.search.Value())
+	assert.Equal(t, "bet", model.route.search.Value())
 	require.Len(t, model.filteredSessionPickerValues(), 1)
 
 	_, resume := model.Update(key("enter"))
 	require.NotNil(t, resume)
 	_, duplicate := model.Update(key("enter"))
 	assert.Nil(t, duplicate)
-	assert.True(t, model.sessionPicker.controlling)
+	assert.True(t, model.route.controlling)
 
 	_, committed := model.Update(resume())
 	driveModelCommands(t, model, committed)
 	assert.Equal(t, []string{"beta"}, controller.resumed)
 	assert.Equal(t, "beta", model.state.SessionID)
-	assert.False(t, model.sessionPicker.open)
+	assert.Equal(t, routeNone, model.route.kind)
 	assert.Empty(t, model.composer.Value())
 	assert.True(t, model.composer.Focused())
 	view := model.View()
@@ -58,10 +58,10 @@ func TestSessionPickerRendersFullWidthSearchAndSessionMetadata(t *testing.T) {
 
 	model := readyModelWithController(t, newOverlayController(readyState()), true)
 	model.Update(tea.WindowSizeMsg{Width: 72, Height: 24})
-	model.sessionPicker = newSessionPickerState("draft", themeDark, true)
+	model.route = newSessionPickerState("draft", themeDark, true)
 	model.setLayout()
-	model.sessionPicker.openedAt = time.Unix(7*60*60, 0).UTC()
-	model.sessionPicker.sessions = []session.Metadata{
+	model.route.openedAt = time.Unix(7*60*60, 0).UTC()
+	model.route.sessions = []session.Metadata{
 		{
 			ID: "private-id", Preview: "How does cancellation work?", Name: "runtime research",
 			CreatedAt: time.Unix(60*60, 0).UTC(), NodeCount: 12, BranchCount: 2,
@@ -95,7 +95,7 @@ func TestSessionPickerEscapeRestoresComposerDraft(t *testing.T) {
 	model.Update(tea.KeyPressMsg{Text: "query"})
 
 	model.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
-	assert.False(t, model.sessionPicker.open)
+	assert.Equal(t, routeNone, model.route.kind)
 	assert.Equal(t, "keep this", model.composer.Value())
 	require.NotNil(t, model.View().Cursor)
 }
@@ -105,17 +105,17 @@ func TestSessionPickerKeepsSelectedWrappedRowVisibleInSmallTerminal(t *testing.T
 
 	model := readyModel(t, true)
 	model.Update(tea.WindowSizeMsg{Width: 32, Height: 14})
-	model.sessionPicker = newSessionPickerState("", themeDark, true)
+	model.route = newSessionPickerState("", themeDark, true)
 	model.setLayout()
-	model.sessionPicker.openedAt = time.Unix(10_000, 0).UTC()
+	model.route.openedAt = time.Unix(10_000, 0).UTC()
 	for index := range 8 {
-		model.sessionPicker.sessions = append(model.sessionPicker.sessions, session.Metadata{
+		model.route.sessions = append(model.route.sessions, session.Metadata{
 			ID:        "session-" + string(rune('a'+index)),
 			Preview:   "A deliberately wrapped session title number " + string(rune('1'+index)),
 			CreatedAt: time.Unix(int64(index), 0).UTC(),
 		})
 	}
-	model.sessionPicker.cursor = 7
+	model.route.cursor = 7
 
 	content := ansi.Strip(model.View().Content)
 	assert.Contains(t, content, "› A deliberately wrapped")
@@ -146,11 +146,11 @@ func TestSessionPickerShowsLoadingEmptyAndErrorStates(t *testing.T) {
 			t.Parallel()
 
 			model := readyModel(t, true)
-			model.sessionPicker = newSessionPickerState("", themeDark, true)
+			model.route = newSessionPickerState("", themeDark, true)
 			model.setLayout()
-			model.sessionPicker.loading = test.loading
-			model.sessionPicker.controlling = test.name == "resuming"
-			model.sessionPicker.err = test.err
+			model.route.loading = test.loading
+			model.route.controlling = test.name == "resuming"
+			model.route.err = test.err
 			assert.Contains(t, model.View().Content, test.want)
 		})
 	}
@@ -160,14 +160,14 @@ func TestSessionPickerIgnoresStaleLoadResult(t *testing.T) {
 	t.Parallel()
 
 	model := readyModel(t, true)
-	model.sessionPicker = newSessionPickerState("", themeDark, true)
-	model.sessionPicker.generation = 2
+	model.route = newSessionPickerState("", themeDark, true)
+	model.route.generation = 2
 	model.Update(sessionPickerDataMsg{
 		generation: 1,
 		sessions:   []session.Metadata{{ID: "stale", Preview: "stale"}},
 	})
 
-	assert.Empty(t, model.sessionPicker.sessions)
+	assert.Empty(t, model.route.sessions)
 }
 
 func TestRelativeSessionTimeUsesStableReadableUnits(t *testing.T) {
@@ -201,14 +201,14 @@ func TestSessionPickerApprovalPreemptsAndRestoresDraft(t *testing.T) {
 	t.Parallel()
 
 	model := readyModel(t, true)
-	model.sessionPicker = newSessionPickerState("keep this", themeDark, true)
+	model.route = newSessionPickerState("keep this", themeDark, true)
 	model.setLayout()
 	model.state = approvalReviewState()
-	model.syncApprovalOverlay()
+	model.syncApprovalPrompt()
 
-	assert.False(t, model.sessionPicker.open)
+	assert.Equal(t, routeNone, model.route.kind)
 	assert.Equal(t, "keep this", model.composer.Value())
-	assert.Equal(t, overlayApproval, model.overlay.kind)
+	assert.Equal(t, promptApproval, model.prompt.kind)
 }
 
 func TestSessionPickerRejectsResumeOutsideIdle(t *testing.T) {
@@ -218,9 +218,9 @@ func TestSessionPickerRejectsResumeOutsideIdle(t *testing.T) {
 	state.Phase = coding.PhaseRunning
 	controller := newOverlayController(state)
 	model := readyModelWithController(t, controller, true)
-	model.sessionPicker = newSessionPickerState("", themeDark, true)
+	model.route = newSessionPickerState("", themeDark, true)
 	model.setLayout()
-	model.sessionPicker.sessions = []session.Metadata{{ID: "alpha", Preview: "question"}}
+	model.route.sessions = []session.Metadata{{ID: "alpha", Preview: "question"}}
 
 	_, command := model.Update(key("enter"))
 	assert.Nil(t, command)

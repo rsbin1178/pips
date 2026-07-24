@@ -156,21 +156,22 @@ func TestReadyLayoutSupportsResizeMultilineAndNoColor(t *testing.T) {
 	assert.False(t, view.AltScreen)
 	assert.Equal(t, tea.MouseModeNone, view.MouseMode)
 	assert.NotContains(t, view.Content, "\x1b[")
-	assert.Equal(t, 2, strings.Count(view.Content, strings.Repeat("-", 40)))
+	assert.NotContains(t, view.Content, strings.Repeat("-", 40))
 	assert.NotContains(t, view.Content, "ctrl+j newline")
 	assert.Equal(t, 1, strings.Count(view.Content, inputArrow))
 	lines := strings.Split(view.Content, "\n")
 	for index := range lines {
 		lines[index] = strings.TrimRight(lines[index], " ")
 	}
-	assert.Contains(t, lines, inputArrow+" one")
-	assert.Contains(t, lines, "  two")
-	assert.Contains(t, lines, "  three")
+	assert.NotEqual(t, -1, lineContaining(lines, "│ "+inputArrow+" one"))
+	assert.NotEqual(t, -1, lineContaining(lines, "│   two"))
+	assert.NotEqual(t, -1, lineContaining(lines, "│   three"))
 	require.NotNil(t, view.Cursor)
 	composerLine := lineContaining(lines, inputArrow+" one")
 	require.NotEqual(t, -1, composerLine)
 	assert.Equal(t, composerLine+model.composer.Cursor().Y, view.Cursor.Y)
-	assert.Equal(t, strings.Repeat("-", 40), lines[composerLine-1])
+	assert.Equal(t, model.composer.Cursor().X+2, view.Cursor.X)
+	assert.Equal(t, "┌"+strings.Repeat("─", 34)+"┐", lines[composerLine-1])
 	assert.Empty(t, lines[composerLine-2])
 }
 
@@ -202,6 +203,10 @@ func TestReadyComposerUsesArrowWithoutPlaceholder(t *testing.T) {
 	assert.NotContains(t, view, "Ask Pips")
 	assert.Contains(t, view, inputArrow)
 	assert.Equal(t, 1, strings.Count(view, inputArrow))
+	assert.Contains(t, ansi.Strip(model.View().Content), "╭")
+
+	model.Update(tea.WindowSizeMsg{Width: 23, Height: 10})
+	assert.NotContains(t, ansi.Strip(model.View().Content), "╭")
 }
 
 func TestReadyLongCompletionMarkerStaysVisibleAtBottom(t *testing.T) {
@@ -223,7 +228,7 @@ func TestReadyLongCompletionMarkerStaysVisibleAtBottom(t *testing.T) {
 	})
 	model.renderTranscript(false)
 
-	assert.Contains(t, model.View().Content, "[✻ Worked for 7s]")
+	assert.Contains(t, model.View().Content, "▣ openai/test-model · 7s")
 }
 
 func TestReadyBoundsLongLiveTailToTerminalHeight(t *testing.T) {
@@ -279,7 +284,7 @@ func TestReadyRecordsCompletionMarkerOnceAndClearsInvalidAnchors(t *testing.T) {
 	rendered := renderTimeline(
 		model.timelineBlocks(), model.markdown, 80, themeDark, true,
 	)
-	assert.Equal(t, 1, strings.Count(rendered, "[✻ Worked for 7s]"))
+	assert.Equal(t, 1, strings.Count(rendered, "▣ openai/test-model · 7s"))
 
 	model.recordCompletion(coding.Event{Type: coding.EventSessionNavigated})
 	assert.Empty(t, model.completionMarkers)
@@ -295,10 +300,10 @@ func TestReadyRecordsCompletionMarkerOnceAndClearsInvalidAnchors(t *testing.T) {
 	detail := newToolDetailView(timelineBlock{kind: blockTool, tools: []toolActivity{{
 		id: "tool-1", name: "read", class: toolClassExplore,
 	}}})
-	model.overlay = overlayState{kind: overlayToolDetail, toolDetail: &detail}
+	model.openToolDetailRoute(detail)
 	model.Update(controlResultMsg{operation: operationNew})
 	assert.Empty(t, model.completionMarkers)
-	assert.Equal(t, overlayNone, model.overlay.kind)
+	assert.Equal(t, routeToolDetail, model.route.kind)
 }
 
 func TestReadyLeavesSelectionAndScrollbackToTerminal(t *testing.T) {
@@ -545,13 +550,13 @@ func TestReadyToolDetailsToggleNeverShowsReasoning(t *testing.T) {
 	_, command := model.Update(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
 	assert.Nil(t, command)
 	assert.Equal(t, scrollbackOutput, model.scrollbackOutput)
-	assert.Equal(t, overlayToolDetail, model.overlay.kind)
-	detail := model.toolDetailOverlayContent()
+	assert.Equal(t, routeToolDetail, model.route.kind)
+	detail := model.toolDetailRouteContent()
 	assert.Contains(t, detail, "visible result")
 	assert.NotContains(t, detail, secret)
 	_, command = model.Update(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
 	assert.Nil(t, command)
-	assert.Equal(t, overlayNone, model.overlay.kind)
+	assert.Equal(t, routeNone, model.route.kind)
 	assert.Equal(t, scrollbackOutput, model.scrollbackOutput)
 	assert.True(t, model.composer.Focused())
 }
@@ -581,8 +586,8 @@ func TestReadyToolDetailsToggleOpensLatestExplorationGroup(t *testing.T) {
 
 	_, command := model.Update(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
 	assert.Nil(t, command)
-	assert.Equal(t, overlayToolDetail, model.overlay.kind)
-	detail := model.toolDetailOverlayContent()
+	assert.Equal(t, routeToolDetail, model.route.kind)
+	detail := model.toolDetailRouteContent()
 	assert.Contains(t, detail, "Read model.go")
 	assert.Contains(t, detail, "Search toggleLatestTool in internal/coding/tui")
 }

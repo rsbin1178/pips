@@ -15,51 +15,45 @@ const (
 )
 
 type colorPalette struct {
-	separator             color.Color
-	composerPrompt        color.Color
-	userMessageBackground color.Color
-	userMessageText       color.Color
-	muted                 color.Color
-	workspace             color.Color
-	session               color.Color
-	model                 color.Color
-	idle                  color.Color
-	active                color.Color
-	warning               color.Color
-	error                 color.Color
+	separator      color.Color
+	composerPrompt color.Color
+	muted          color.Color
+	workspace      color.Color
+	session        color.Color
+	model          color.Color
+	idle           color.Color
+	active         color.Color
+	warning        color.Color
+	error          color.Color
 }
 
 func paletteFor(theme colorTheme) colorPalette {
 	if theme == themeLight {
 		return colorPalette{
-			separator:             lipgloss.Color("#D0D7DE"),
-			composerPrompt:        lipgloss.Color("#57606A"),
-			userMessageBackground: lipgloss.Color("#E6E8EB"),
-			userMessageText:       lipgloss.Color("#24292F"),
-			muted:                 lipgloss.Color("#57606A"),
-			workspace:             lipgloss.Color("#24292F"),
-			session:               lipgloss.Color("#0969DA"),
-			model:                 lipgloss.Color("#8250DF"),
-			idle:                  lipgloss.Color("#1A7F37"),
-			active:                lipgloss.Color("#9A6700"),
-			warning:               lipgloss.Color("#BC4C00"),
-			error:                 lipgloss.Color("#CF222E"),
+			separator:      lipgloss.Color("#D0D7DE"),
+			composerPrompt: lipgloss.Color("#57606A"),
+			muted:          lipgloss.Color("#57606A"),
+			workspace:      lipgloss.Color("#24292F"),
+			session:        lipgloss.Color("#0969DA"),
+			model:          lipgloss.Color("#8250DF"),
+			idle:           lipgloss.Color("#1A7F37"),
+			active:         lipgloss.Color("#9A6700"),
+			warning:        lipgloss.Color("#BC4C00"),
+			error:          lipgloss.Color("#CF222E"),
 		}
 	}
 
 	return colorPalette{
-		separator:             lipgloss.Color("#3F4752"),
-		composerPrompt:        lipgloss.Color("#6E7681"),
-		userMessageBackground: lipgloss.Color("#35343E"),
-		userMessageText:       lipgloss.Color("#E6EDF3"),
-		muted:                 lipgloss.Color("#8B949E"),
-		workspace:             lipgloss.Color("#E6EDF3"),
-		session:               lipgloss.Color("#5FAFFF"),
-		model:                 lipgloss.Color("#AF87FF"),
-		idle:                  lipgloss.Color("#5FD7AF"),
-		active:                lipgloss.Color("#FFD75F"),
-		warning:               lipgloss.Color("#FFAF5F"),
-		error:                 lipgloss.Color("#FF5F5F"),
+		separator:      lipgloss.Color("#3F4752"),
+		composerPrompt: lipgloss.Color("#6E7681"),
+		muted:          lipgloss.Color("#8B949E"),
+		workspace:      lipgloss.Color("#E6EDF3"),
+		session:        lipgloss.Color("#5FAFFF"),
+		model:          lipgloss.Color("#AF87FF"),
+		idle:           lipgloss.Color("#5FD7AF"),
+		active:         lipgloss.Color("#FFD75F"),
+		warning:        lipgloss.Color("#FFAF5F"),
+		error:          lipgloss.Color("#FF5F5F"),
 	}
 }
 
