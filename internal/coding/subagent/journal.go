@@ -47,46 +47,52 @@ type record struct {
 }
 
 type recordLimits struct {
-	MaxTurns         int   `json:"max_turns"`
-	MaxTokens        int   `json:"max_tokens"`
-	MaxToolCalls     int   `json:"max_tool_calls"`
-	MaxDurationNanos int64 `json:"max_duration_nanos"`
-	MaxOutputTokens  int   `json:"max_output_tokens"`
-	MaxTaskBytes     int   `json:"max_task_bytes"`
-	MaxResultBytes   int   `json:"max_result_bytes"`
-	MaxResultItems   int   `json:"max_result_items"`
-	MaxFieldBytes    int   `json:"max_field_bytes"`
+	MaxTurns              int   `json:"max_turns"`
+	FinalizationTurns     int   `json:"finalization_turns,omitempty"`
+	RepeatedToolCallLimit int   `json:"repeated_tool_call_limit,omitempty"`
+	MaxTokens             int   `json:"max_tokens"`
+	MaxToolCalls          int   `json:"max_tool_calls"`
+	MaxDurationNanos      int64 `json:"max_duration_nanos"`
+	MaxOutputTokens       int   `json:"max_output_tokens"`
+	MaxTaskBytes          int   `json:"max_task_bytes"`
+	MaxResultBytes        int   `json:"max_result_bytes"`
+	MaxResultItems        int   `json:"max_result_items"`
+	MaxFieldBytes         int   `json:"max_field_bytes"`
 }
 
 func journalLimits(value Limits) recordLimits {
 	return recordLimits{
-		MaxTurns:         value.MaxTurns,
-		MaxTokens:        value.MaxTokens,
-		MaxToolCalls:     value.MaxToolCalls,
-		MaxDurationNanos: int64(value.MaxDuration),
-		MaxOutputTokens:  value.MaxOutputTokens,
-		MaxTaskBytes:     value.MaxTaskBytes,
-		MaxResultBytes:   value.MaxResultBytes,
-		MaxResultItems:   value.MaxResultItems,
-		MaxFieldBytes:    value.MaxFieldBytes,
+		MaxTurns:              value.MaxTurns,
+		FinalizationTurns:     value.FinalizationTurns,
+		RepeatedToolCallLimit: value.RepeatedToolCallLimit,
+		MaxTokens:             value.MaxTokens,
+		MaxToolCalls:          value.MaxToolCalls,
+		MaxDurationNanos:      int64(value.MaxDuration),
+		MaxOutputTokens:       value.MaxOutputTokens,
+		MaxTaskBytes:          value.MaxTaskBytes,
+		MaxResultBytes:        value.MaxResultBytes,
+		MaxResultItems:        value.MaxResultItems,
+		MaxFieldBytes:         value.MaxFieldBytes,
 	}
 }
 
 func (l recordLimits) validate() error {
-	return validateLimits(l.limits())
+	return validateLimits(normalizeLimits(l.limits()))
 }
 
 func (l recordLimits) limits() Limits {
 	return Limits{
-		MaxTurns:        l.MaxTurns,
-		MaxTokens:       l.MaxTokens,
-		MaxToolCalls:    l.MaxToolCalls,
-		MaxDuration:     time.Duration(l.MaxDurationNanos),
-		MaxOutputTokens: l.MaxOutputTokens,
-		MaxTaskBytes:    l.MaxTaskBytes,
-		MaxResultBytes:  l.MaxResultBytes,
-		MaxResultItems:  l.MaxResultItems,
-		MaxFieldBytes:   l.MaxFieldBytes,
+		MaxTurns:              l.MaxTurns,
+		FinalizationTurns:     l.FinalizationTurns,
+		RepeatedToolCallLimit: l.RepeatedToolCallLimit,
+		MaxTokens:             l.MaxTokens,
+		MaxToolCalls:          l.MaxToolCalls,
+		MaxDuration:           time.Duration(l.MaxDurationNanos),
+		MaxOutputTokens:       l.MaxOutputTokens,
+		MaxTaskBytes:          l.MaxTaskBytes,
+		MaxResultBytes:        l.MaxResultBytes,
+		MaxResultItems:        l.MaxResultItems,
+		MaxFieldBytes:         l.MaxFieldBytes,
 	}
 }
 

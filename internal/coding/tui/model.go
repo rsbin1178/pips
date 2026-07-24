@@ -98,6 +98,8 @@ type Model struct {
 	commandPicker     commandPickerState
 	sessionPicker     sessionPickerState
 	sessionPickerSeq  uint64
+	subagentRoute     subagentRouteState
+	subagentRouteSeq  uint64
 	overlay           overlayState
 	overlaySeq        uint64
 	completionMarkers []completionMarker
@@ -267,13 +269,8 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.commitStableTimeline()
 	case overlayDataMsg:
 		if message.kind != m.overlay.kind ||
-			message.generation != m.overlay.generation ||
-			(message.childSessionID != "" &&
-				message.childSessionID != m.overlay.childSessionID) {
+			message.generation != m.overlay.generation {
 			return m, nil
-		}
-		if message.background {
-			return m.applyAgentDetailRefresh(message)
 		}
 		m.overlay.loading = false
 		m.overlay.err = message.err
@@ -283,15 +280,26 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.overlay.agents = message.agents
 			m.overlay.cursor = 0
 		}
+		m.overlay.cursor = 0
+		return m, nil
+	case subagentRouteDataMsg:
+		if !m.subagentRoute.open || message.generation != m.subagentRoute.generation ||
+			message.childSessionID != m.subagentRoute.childSessionID {
+			return m, nil
+		}
+		if message.background {
+			return m.applySubagentRouteRefresh(message)
+		}
+		m.subagentRoute.loading = false
+		m.subagentRoute.err = message.err
 		if message.hasDetail {
 			detail := message.detail
-			m.overlay.agentDetail = &detail
+			m.subagentRoute.detail = &detail
 		}
-		m.overlay.cursor = 0
-		if m.overlay.refreshPending && m.overlay.agentDetail != nil {
-			m.overlay.refreshPending = false
+		if m.subagentRoute.refreshPending && m.subagentRoute.detail != nil {
+			m.subagentRoute.refreshPending = false
 
-			return m, m.refreshAgentDetail()
+			return m, m.refreshSubagentRoute()
 		}
 
 		return m, nil
@@ -559,6 +567,9 @@ func (m *Model) trustChoice(label, description string, selected bool) string {
 
 //nolint:gocyclo,nestif,gocritic // Contextual input precedence is an explicit product state machine.
 func (m *Model) updateReadyKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if m.subagentRoute.open {
+		return m.updateSubagentRouteKey(message)
+	}
 	if m.overlay.kind != overlayNone {
 		return m.updateOverlayKey(message)
 	}
@@ -624,6 +635,9 @@ func (m *Model) updateReadyKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) readyView() tea.View {
+	if m.subagentRoute.open {
+		return m.subagentRouteView()
+	}
 	if m.sessionPicker.open {
 		return m.sessionPickerView()
 	}
@@ -817,6 +831,23 @@ func (m *Model) renderTranscriptContent(forceBottom, newContent bool) {
 		m.theme,
 		m.options.NoColor,
 	)
+	if m.managedTimelineNeedsLeadingGap(blocks) {
+		m.timeline = strings.Repeat("\n", conversationGapHeight) + m.timeline
+	}
+}
+
+// managedTimelineNeedsLeadingGap owns the seam between terminal-native
+// scrollback and Bubble Tea's mutable tail. Once stream rows have been
+// promoted, the remaining draft is a continuation and must stay adjacent.
+func (m *Model) managedTimelineNeedsLeadingGap(blocks []timelineBlock) bool {
+	if !m.scrollbackOutput || len(blocks) == 0 || m.timeline == "" {
+		return false
+	}
+	if m.streaming.active && m.streaming.emitted > 0 && blocks[0].kind == blockDraft {
+		return false
+	}
+
+	return true
 }
 
 func (m *Model) timelineBlocks() []timelineBlock {
@@ -836,7 +867,7 @@ func (m *Model) toggleLatestTool() tea.Cmd {
 		if latest.Call.Name == subagent.ToolName {
 			childSessionID := subagentChildSessionID(latest, m.state.Subagents)
 			if childSessionID != "" {
-				return m.openAgentDetail(childSessionID)
+				return m.openSubagentRoute(childSessionID)
 			}
 		}
 	}
@@ -846,7 +877,7 @@ func (m *Model) toggleLatestTool() tea.Cmd {
 		switch block.kind {
 		case blockSubagent:
 			if block.id != "" {
-				return m.openAgentDetail(block.id)
+				return m.openSubagentRoute(block.id)
 			}
 			if len(block.tools) > 0 {
 				detail := newToolDetailView(block)

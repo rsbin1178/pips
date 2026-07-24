@@ -122,9 +122,12 @@ func TestTimelineSubagentCardsKeepTaskPrimaryAndHumanizeFailure(t *testing.T) {
 			value: coding.SubagentState{
 				Role: subagent.RolePlan, State: subagent.StateRunning,
 				TaskPreview: "Map the runtime", ToolCalls: 2,
+				Activity: subagent.ActivitySummary{
+					Action: subagent.ActivityActionRead, Target: "internal/coding/runtime.go",
+				},
 			},
 			primary:   "✻ Planning · Map the runtime",
-			secondary: "Running · 2 tools",
+			secondary: "Read internal/coding/runtime.go · 2 tools",
 		},
 		{
 			name: "failed",
@@ -154,6 +157,25 @@ func TestTimelineSubagentCardsKeepTaskPrimaryAndHumanizeFailure(t *testing.T) {
 			assert.NotContains(t, rendered, "invalid_result")
 		})
 	}
+}
+
+func TestTimelineCompactsAdjacentOperationCards(t *testing.T) {
+	t.Parallel()
+
+	blocks := []timelineBlock{
+		projectSubagent(coding.SubagentState{
+			ChildSessionID: "child-1", Role: subagent.RoleExplore,
+			State: subagent.StateSucceeded, TaskPreview: "Inspect runtime",
+		}, 0),
+		projectSubagent(coding.SubagentState{
+			ChildSessionID: "child-2", Role: subagent.RoleReview,
+			State: subagent.StateSucceeded, TaskPreview: "Review runtime",
+		}, 0),
+	}
+
+	rendered := renderTimeline(blocks, newMarkdownRenderer(4), 80, themeDark, true)
+	assert.NotContains(t, rendered, "Completed\n\n• Reviewed")
+	assert.Contains(t, rendered, "Completed\n• Reviewed")
 }
 
 func TestTimelineSubagentCardStaysTwoRowsOnNarrowTerminal(t *testing.T) {

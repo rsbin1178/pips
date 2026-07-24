@@ -98,6 +98,7 @@ type Event struct {
 	ChildRunID      string
 	Model           string
 	TaskPreview     string
+	Activity        ActivitySummary
 	Code            string
 	Stop            agent.StopReason
 	Turns           int
@@ -142,6 +143,28 @@ const (
 	// ActivityPhaseFinalizing means the child is validating its final result.
 	ActivityPhaseFinalizing ActivityPhase = "finalizing"
 )
+
+// ActivityAction is one sanitized semantic action suitable for parent UI
+// projection. It deliberately excludes raw Tool arguments and results.
+type ActivityAction string
+
+const (
+	// ActivityActionRead means the child is reading a workspace file.
+	ActivityActionRead ActivityAction = "read"
+	// ActivityActionSearch means the child is searching workspace text.
+	ActivityActionSearch ActivityAction = "search"
+	// ActivityActionGlob means the child is matching workspace paths.
+	ActivityActionGlob ActivityAction = "glob"
+	// ActivityActionList means the child is listing a workspace directory.
+	ActivityActionList ActivityAction = "list"
+)
+
+// ActivitySummary is a bounded, content-safe description of the child's
+// latest observable action. Target is a workspace-relative path or pattern.
+type ActivitySummary struct {
+	Action ActivityAction `json:"action"`
+	Target string         `json:"target"`
+}
 
 // ToolStatus is the observable lifecycle of one child Tool call.
 type ToolStatus string

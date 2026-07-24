@@ -120,6 +120,8 @@ func projectSafePayload(payload EventPayload) EventPayload {
 		return value
 	case SubagentLifecycle:
 		value.TaskPreview = ""
+		value.Activity.Action = ""
+		value.Activity.Target = ""
 		return value
 	case SessionTreeChanged:
 		value.Tree.Name = ""

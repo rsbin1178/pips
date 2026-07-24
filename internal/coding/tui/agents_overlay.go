@@ -2,7 +2,6 @@ package tui
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -10,6 +9,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/rsbin/pips/internal/coding"
 	"github.com/rsbin/pips/internal/coding/subagent"
 )
@@ -17,6 +17,28 @@ import (
 type subagentToolEnvelope struct {
 	Schema         string `json:"schema"`
 	ChildSessionID string `json:"child_session_id"`
+}
+
+type subagentRouteState struct {
+	open           bool
+	loading        bool
+	refreshing     bool
+	refreshPending bool
+	err            error
+	refreshErr     error
+	generation     uint64
+	childSessionID string
+	detail         *subagent.Detail
+	offset         int
+}
+
+type subagentRouteDataMsg struct {
+	detail         subagent.Detail
+	err            error
+	hasDetail      bool
+	background     bool
+	generation     uint64
+	childSessionID string
 }
 
 func subagentChildSessionID(
@@ -55,10 +77,6 @@ func (m *Model) updateAgentsOverlay(message tea.KeyPressMsg) (tea.Model, tea.Cmd
 		return m, nil
 	}
 
-	if m.overlay.agentDetail != nil {
-		return m.updateReadOnlyOverlay(message.String())
-	}
-
 	values := m.filteredAgents()
 
 	switch message.String() {
@@ -77,20 +95,9 @@ func (m *Model) updateAgentsOverlay(message tea.KeyPressMsg) (tea.Model, tea.Cmd
 			return m, nil
 		}
 
-		m.overlay.loading = true
-		m.overlay.err = nil
 		childSessionID := values[m.overlay.cursor].ChildSessionID
-		m.overlay.childSessionID = childSessionID
-		generation := m.overlay.generation
 
-		return m, func() tea.Msg {
-			detail, err := m.controller.InspectSubagent(m.ctx, childSessionID)
-
-			return overlayDataMsg{
-				kind: overlayAgents, detail: detail, hasDetail: err == nil, err: err,
-				generation: generation, childSessionID: childSessionID,
-			}
-		}
+		return m, m.openSubagentRoute(childSessionID)
 	default:
 		if text := message.Key().Text; text != "" {
 			m.overlay.query += text
@@ -117,10 +124,6 @@ func (m *Model) filteredAgents() []subagent.Summary {
 }
 
 func (m *Model) agentsOverlayContent() string {
-	if m.overlay.agentDetail != nil {
-		return m.agentDetailContent(*m.overlay.agentDetail)
-	}
-
 	lines := []string{"Subagents", "", "Search: " + m.overlay.query, ""}
 	if m.overlay.loading {
 		return strings.Join(append(lines, "Loading…"), "\n")
@@ -155,79 +158,25 @@ func (m *Model) agentsOverlayContent() string {
 	return strings.Join(lines, "\n")
 }
 
-func (m *Model) agentDetailContent(detail subagent.Detail) string {
+func (m *Model) subagentRouteContent(detail subagent.Detail) string {
 	value := detail.Summary
 	active := value.State == subagent.StateCreated || value.State == subagent.StateRunning
 
-	duration := value.Duration
-	if active && !detail.Activity.StartedAt.IsZero() {
-		duration = max(0, time.Since(detail.Activity.StartedAt))
-	}
-
-	heading := subagentStateGlyph(value.State) + " " + subagentActivityLabel(value.Role, value.State)
-
-	facts := []string{formatInteractionDuration(duration.Milliseconds())}
-	if value.ToolCalls > 0 {
-		facts = append(facts, fmt.Sprintf("%d tools", value.ToolCalls))
-	}
-
-	if tokens := value.Usage.InputTokens + value.Usage.OutputTokens; tokens > 0 {
-		facts = append(facts, compactTokenCount(tokens)+" tokens")
-	}
-
-	heading += " · " + strings.Join(facts, " · ")
-	if !m.options.NoColor {
-		heading = subagentTitleStyle(string(value.State), m.theme).Render(heading)
-	}
-
-	lines := []string{heading, "", "Task", "  " + safeDetailText(value.TaskPreview)}
-	activities := projectSubagentDetailTools(detail)
-	running, completed := partitionSubagentDetailTools(activities)
-
-	if active {
-		lines = append(lines, "", "Now")
-		if len(running) > 0 {
-			lines = append(lines, renderSubagentDetailTools(
-				running, m.width, m.theme, m.options.NoColor,
-			))
-		} else {
-			lines = append(lines, "  "+subagentPhaseLabel(detail.Activity.Phase))
-		}
-	}
-
-	if value.State == subagent.StateSucceeded {
-		lines = append(lines, "", "Result")
-		lines = append(lines, renderSubagentResult(detail.Result)...)
-	} else if isTerminalSubagent(value.State) {
-		lines = append(lines, "", "Outcome", "  "+subagentOutcomeText(value))
-	}
-
-	lines = append(lines, "", "Activity")
-	if len(completed) == 0 {
-		lines = append(lines, "  No completed tool activity recorded.")
-	} else {
-		lines = append(lines, renderSubagentDetailTools(
-			completed, m.width, m.theme, m.options.NoColor,
-		))
-	}
-
-	lines = append(lines,
-		"", "Details",
-		fmt.Sprintf("  %s · turn %d · %d tools", safeDetailText(value.Model), value.Turns, value.ToolCalls),
-		fmt.Sprintf("  %d input · %d output · %d reasoning",
-			value.Usage.InputTokens, value.Usage.OutputTokens, value.Usage.ReasoningTokens),
-		"  child session "+safeDetailText(value.ChildSessionID),
+	flow := m.renderTimelineBlocksWithOptions(
+		projectSubagentTimeline(detail),
+		timelineRenderOptions{expandToolResults: true},
 	)
-	if value.Code != "" {
-		lines = append(lines, "  outcome "+humanizeStatusCode(value.Code))
+	switch {
+	case flow != "":
+		return flow
+	case active:
+		return "✻ " + subagentPhaseLabel(detail.Activity.Phase)
+	default:
+		return subagentOutcomeText(value)
 	}
-
-	lines = append(lines, "", "↑/↓ or PgUp/PgDn scroll · Esc back · Ctrl+T close")
-
-	return strings.Join(lines, "\n")
 }
 
-func projectSubagentDetailTools(detail subagent.Detail) []toolActivity {
+func projectSubagentTimeline(detail subagent.Detail) []timelineBlock {
 	state := coding.State{Transcript: detail.Transcript}
 
 	state.Tools = make([]coding.ToolState, 0, len(detail.Activity.Tools))
@@ -249,46 +198,68 @@ func projectSubagentDetailTools(detail subagent.Detail) []toolActivity {
 		})
 	}
 
-	return projectToolActivities(state, nil)
-}
+	blocks := projectTimeline(state)
+	for index := range blocks {
+		if blocks[index].kind == blockAssistant {
+			blocks[index].body = sanitizeToolText(blocks[index].body)
+		}
+	}
 
-func partitionSubagentDetailTools(values []toolActivity) ([]toolActivity, []toolActivity) {
-	running := make([]toolActivity, 0, len(values))
+	if detail.Summary.State == subagent.StateSucceeded {
+		for index, block := range slices.Backward(blocks) {
+			if block.kind != blockAssistant {
+				continue
+			}
 
-	completed := make([]toolActivity, 0, len(values))
-	for _, value := range values {
-		if value.state == toolStateRunning {
-			running = append(running, value)
-			continue
+			blocks[index].body = strings.TrimSpace(strings.Join(
+				renderSubagentResult(detail.Result), "\n",
+			))
+			blocks[index].rendered = true
+
+			break
+		}
+	} else if isTerminalSubagent(detail.Summary.State) {
+		body := humanizeStatusCode(detail.Summary.Code)
+		if body == "" {
+			body = subagentOutcomeText(detail.Summary)
 		}
 
-		completed = append(completed, value)
+		blocks = append(blocks, timelineBlock{
+			kind: blockError, title: subagentActivityLabel(
+				detail.Summary.Role,
+				detail.Summary.State,
+			),
+			body: body, position: len(detail.Transcript),
+		})
 	}
 
-	return running, completed
+	if marker, ok := subagentCompletionMarker(detail); ok {
+		blocks = append(blocks, marker)
+	}
+
+	return blocks
 }
 
-func renderSubagentDetailTools(
-	values []toolActivity,
-	width int,
-	theme colorTheme,
-	noColor bool,
-) string {
-	blocks := make([]timelineBlock, 0, len(values))
-	for _, value := range values {
-		blocks = append(blocks, projectToolActivity(value))
+func subagentCompletionMarker(detail subagent.Detail) (timelineBlock, bool) {
+	var outcome coding.InteractionOutcome
+
+	switch detail.Summary.State {
+	case subagent.StateSucceeded:
+		outcome = coding.InteractionSucceeded
+	case subagent.StateFailed:
+		outcome = coding.InteractionFailed
+	case subagent.StateCanceled, subagent.StateInterrupted:
+		outcome = coding.InteractionCanceled
+	case subagent.StateCreated, subagent.StateRunning:
+		return timelineBlock{}, false
 	}
 
-	blocks = groupExploreBlocks(blocks)
-
-	rendered := make([]string, 0, len(blocks))
-	for _, block := range blocks {
-		rendered = append(rendered, renderDetailedToolActivityBlock(
-			block, max(1, width), theme, noColor,
-		))
-	}
-
-	return strings.Join(rendered, "\n\n")
+	return projectCompletionMarker(completionMarker{
+		interactionID:  detail.Summary.ChildSessionID,
+		afterMessages:  len(detail.Transcript),
+		outcome:        outcome,
+		durationMillis: detail.Summary.Duration.Milliseconds(),
+	})
 }
 
 func subagentPhaseLabel(phase subagent.ActivityPhase) string {
@@ -466,12 +437,8 @@ func (m *Model) agentsView() tea.View {
 		content += "\n\nError: " + safeError(m.overlay.err)
 	}
 
-	if m.overlay.refreshErr != nil {
-		content += "\n\nRefresh: " + safeError(m.overlay.refreshErr)
-	}
-
-	content = fitOverlayContent(content, max(1, m.width), max(1, m.height), m.overlay.offset)
-	if !m.options.NoColor && m.overlay.agentDetail == nil {
+	content = fitScrollableContent(content, max(1, m.width), max(1, m.height), m.overlay.offset)
+	if !m.options.NoColor {
 		content = lipgloss.NewStyle().Foreground(paletteFor(m.theme).workspace).Render(content)
 	}
 
@@ -483,100 +450,208 @@ func (m *Model) agentsView() tea.View {
 	return view
 }
 
-func (m *Model) openAgentDetail(childSessionID string) tea.Cmd {
-	generation := m.nextOverlayGeneration()
-	m.overlay = overlayState{
-		kind: overlayAgents, loading: true, generation: generation,
-		childSessionID: childSessionID,
+func (m *Model) updateSubagentRouteKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	key := message.String()
+
+	switch key {
+	case keyCtrlT, keyCtrlC:
+		m.subagentRoute = subagentRouteState{}
+		m.overlay = overlayState{}
+
+		return m, m.composer.Focus()
+	case keyEscape:
+		m.subagentRoute = subagentRouteState{}
+		if m.overlay.kind == overlayAgents {
+			return m, nil
+		}
+
+		return m, m.openOverlay(overlayAgents)
 	}
 
-	return func() tea.Msg {
-		values, listErr := m.controller.ListSubagents(m.ctx)
-		detail, inspectErr := m.controller.InspectSubagent(m.ctx, childSessionID)
+	visible := max(1, m.height-3)
+	maximum := m.subagentRouteMaximumOffset()
 
-		return overlayDataMsg{
-			kind: overlayAgents, agents: values, hasAgents: true,
-			detail: detail, hasDetail: inspectErr == nil,
-			err:        errors.Join(listErr, inspectErr),
+	switch key {
+	case "up", "k":
+		m.subagentRoute.offset = max(0, m.subagentRoute.offset-1)
+	case keyDown, "j":
+		m.subagentRoute.offset = min(maximum, m.subagentRoute.offset+1)
+	case "pgup":
+		m.subagentRoute.offset = max(0, m.subagentRoute.offset-visible)
+	case "pgdown":
+		m.subagentRoute.offset = min(maximum, m.subagentRoute.offset+visible)
+	case "home":
+		m.subagentRoute.offset = 0
+	case "end":
+		m.subagentRoute.offset = maximum
+	}
+
+	return m, nil
+}
+
+func (m *Model) subagentRouteView() tea.View {
+	width := max(1, m.width)
+	height := max(1, m.height)
+
+	separator := strings.Repeat("-", width)
+
+	if !m.options.NoColor {
+		separator = lipgloss.NewStyle().Foreground(
+			paletteFor(m.theme).separator,
+		).Render(strings.Repeat("─", width))
+	}
+
+	body := "Loading subagent activity…"
+
+	if m.subagentRoute.detail != nil {
+		body = m.subagentRouteContent(*m.subagentRoute.detail)
+	}
+
+	if m.subagentRoute.err != nil {
+		body += "\n\nError: " + safeError(m.subagentRoute.err)
+	}
+
+	if m.subagentRoute.refreshErr != nil {
+		body += "\n\nRefresh: " + safeError(m.subagentRoute.refreshErr)
+	}
+
+	footer := m.subagentRouteStatusLine()
+	bodyHeight := max(0, height-2)
+
+	body = fitScrollableContent(body, width, bodyHeight, m.subagentRoute.offset)
+	if padding := bodyHeight - lipgloss.Height(body); padding > 0 {
+		body += strings.Repeat("\n", padding)
+	}
+
+	view := tea.NewView(lipgloss.JoinVertical(lipgloss.Left, body, separator, footer))
+	view.AltScreen = false
+	view.MouseMode = tea.MouseModeNone
+	view.WindowTitle = appTitle
+
+	return view
+}
+
+func (m *Model) subagentRouteStatusLine() string {
+	values := []string{"pips", "subagent", "loading"}
+
+	if m.subagentRoute.detail != nil {
+		summary := m.subagentRoute.detail.Summary
+
+		values = []string{"pips", string(summary.Role) + " subagent"}
+
+		if model := safeDetailText(summary.Model); model != "" {
+			values = append(values, model)
+		}
+
+		values = append(values, string(summary.State))
+	}
+
+	values = append(values, "Ctrl+T parent", "Esc subagents")
+
+	if !m.options.NoColor {
+		palette := paletteFor(m.theme)
+		values[0] = lipgloss.NewStyle().Bold(true).Foreground(palette.workspace).Render(values[0])
+		values[1] = lipgloss.NewStyle().Bold(true).Foreground(palette.session).Render(values[1])
+		values[len(values)-2] = lipgloss.NewStyle().Foreground(palette.muted).Render(values[len(values)-2])
+		values[len(values)-1] = lipgloss.NewStyle().Foreground(palette.muted).Render(values[len(values)-1])
+	}
+
+	return ansi.Truncate(strings.Join(values, "  ·  "), max(1, m.width), "…")
+}
+
+func (m *Model) openSubagentRoute(childSessionID string) tea.Cmd {
+	m.subagentRouteSeq++
+	m.subagentRoute = subagentRouteState{
+		open: true, loading: true, generation: m.subagentRouteSeq,
+		childSessionID: childSessionID,
+	}
+	m.composer.Blur()
+	generation := m.subagentRoute.generation
+
+	return func() tea.Msg {
+		detail, err := m.controller.InspectSubagent(m.ctx, childSessionID)
+
+		return subagentRouteDataMsg{
+			detail: detail, hasDetail: err == nil, err: err,
 			generation: generation, childSessionID: childSessionID,
 		}
 	}
 }
 
 func (m *Model) invalidateAgentDetail(item streamItem) tea.Cmd {
-	if item.err != nil || m.overlay.kind != overlayAgents ||
-		m.overlay.childSessionID == "" {
+	if item.err != nil || !m.subagentRoute.open ||
+		m.subagentRoute.childSessionID == "" {
 		return nil
 	}
 
 	lifecycle, ok := item.event.Payload.(coding.SubagentLifecycle)
-	if !ok || lifecycle.ChildSessionID != m.overlay.childSessionID {
+	if !ok || lifecycle.ChildSessionID != m.subagentRoute.childSessionID {
 		return nil
 	}
 
-	return m.refreshAgentDetail()
+	return m.refreshSubagentRoute()
 }
 
-func (m *Model) refreshAgentDetail() tea.Cmd {
-	if m.overlay.kind != overlayAgents || m.overlay.childSessionID == "" {
+func (m *Model) refreshSubagentRoute() tea.Cmd {
+	if !m.subagentRoute.open || m.subagentRoute.childSessionID == "" {
 		return nil
 	}
 
-	if m.overlay.loading || m.overlay.refreshing {
-		m.overlay.refreshPending = true
+	if m.subagentRoute.loading || m.subagentRoute.refreshing {
+		m.subagentRoute.refreshPending = true
 
 		return nil
 	}
 
-	m.overlay.refreshing = true
-	generation := m.overlay.generation
-	childSessionID := m.overlay.childSessionID
+	m.subagentRoute.refreshing = true
+	generation := m.subagentRoute.generation
+	childSessionID := m.subagentRoute.childSessionID
 
 	return func() tea.Msg {
 		detail, err := m.controller.InspectSubagent(m.ctx, childSessionID)
 
-		return overlayDataMsg{
-			kind: overlayAgents, detail: detail, hasDetail: err == nil, err: err,
+		return subagentRouteDataMsg{
+			detail: detail, hasDetail: err == nil, err: err,
 			background: true, generation: generation, childSessionID: childSessionID,
 		}
 	}
 }
 
-func (m *Model) applyAgentDetailRefresh(message overlayDataMsg) (tea.Model, tea.Cmd) {
-	m.overlay.refreshing = false
+func (m *Model) applySubagentRouteRefresh(message subagentRouteDataMsg) (tea.Model, tea.Cmd) {
+	m.subagentRoute.refreshing = false
 	if message.err != nil {
-		m.overlay.refreshErr = message.err
+		m.subagentRoute.refreshErr = message.err
 	} else if message.hasDetail {
-		wasAtBottom := m.overlay.offset >= m.agentDetailMaximumOffset()
-		previousOffset := m.overlay.offset
+		wasAtBottom := m.subagentRoute.offset >= m.subagentRouteMaximumOffset()
+		previousOffset := m.subagentRoute.offset
 		detail := message.detail
-		m.overlay.agentDetail = &detail
-		m.overlay.refreshErr = nil
+		m.subagentRoute.detail = &detail
+		m.subagentRoute.refreshErr = nil
 
-		maximum := m.agentDetailMaximumOffset()
+		maximum := m.subagentRouteMaximumOffset()
 		if wasAtBottom {
-			m.overlay.offset = maximum
+			m.subagentRoute.offset = maximum
 		} else {
-			m.overlay.offset = min(previousOffset, maximum)
+			m.subagentRoute.offset = min(previousOffset, maximum)
 		}
 	}
 
-	if !m.overlay.refreshPending {
+	if !m.subagentRoute.refreshPending {
 		return m, nil
 	}
 
-	m.overlay.refreshPending = false
+	m.subagentRoute.refreshPending = false
 
-	return m, m.refreshAgentDetail()
+	return m, m.refreshSubagentRoute()
 }
 
-func (m *Model) agentDetailMaximumOffset() int {
-	if m.overlay.agentDetail == nil {
+func (m *Model) subagentRouteMaximumOffset() int {
+	if m.subagentRoute.detail == nil {
 		return 0
 	}
 
-	visible := max(1, m.height-5)
-	lineCount := strings.Count(m.agentDetailContent(*m.overlay.agentDetail), "\n") + 1
+	visible := max(1, m.height-3)
+	lineCount := strings.Count(m.subagentRouteContent(*m.subagentRoute.detail), "\n") + 1
 
 	return max(0, lineCount-visible)
 }

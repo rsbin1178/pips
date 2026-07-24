@@ -14,6 +14,7 @@ const (
 	keyEnter     = "enter"
 	keyTab       = "tab"
 	keyCtrlC     = "ctrl+c"
+	keyCtrlT     = "ctrl+t"
 	keyEscape    = "esc"
 	keyDown      = "down"
 	keyBackspace = "backspace"
@@ -79,7 +80,7 @@ var defaultActions = []actionBinding{
 	{
 		ID:       actionToggleTool,
 		Contexts: []actionContext{contextIdle, contextRunning, contextPaused},
-		Keys:     []string{"ctrl+t"},
+		Keys:     []string{keyCtrlT},
 		Label:    "latest details",
 	},
 	{

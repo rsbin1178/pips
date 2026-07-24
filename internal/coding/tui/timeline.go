@@ -27,6 +27,13 @@ const (
 	blockSubagent
 )
 
+type timelineSpacing uint8
+
+const (
+	spacingConversation timelineSpacing = iota
+	spacingCompact
+)
+
 type timelineBlock struct {
 	kind     blockKind
 	id       string
@@ -36,7 +43,12 @@ type timelineBlock struct {
 	status   string
 	position int
 	rendered bool
+	spacing  timelineSpacing
 	tools    []toolActivity
+}
+
+type timelineRenderOptions struct {
+	expandToolResults bool
 }
 
 type completionMarker struct {
@@ -47,19 +59,17 @@ type completionMarker struct {
 }
 
 func projectTimeline(state coding.State) []timelineBlock {
-	return projectTimelineExcludingTools(state, nil)
+	return projectTimelineExcluding(state, nil, nil)
 }
 
-// projectTimelineExcludingTools is used by the append-only scrollback path to
-// suppress transcript Tool results whose compact card was already committed.
-//
-//nolint:gocyclo // One projection pass makes every public Coding event visibly exhaustive.
-func projectTimelineExcludingTools(
+//nolint:gocyclo,cyclop // One pass keeps messages, Tools, and child identities in durable order.
+func projectTimelineExcluding(
 	state coding.State,
-	excluded map[string]struct{},
+	excludedTools map[string]struct{},
+	excludedSubagents map[string]struct{},
 ) []timelineBlock {
 	blocks := make([]timelineBlock, 0, len(state.Transcript)+len(state.Tools)+len(state.Subagents)+4)
-	activities := projectToolActivities(state, excluded)
+	activities := projectToolActivities(state, excludedTools)
 	activityIndex := 0
 	for messageIndex, message := range state.Transcript {
 		position := messageIndex + 1
@@ -86,7 +96,9 @@ func projectTimelineExcludingTools(
 			activity := activities[activityIndex]
 			activityIndex++
 			if activity.name == subagent.ToolName {
-				if block, ok := projectSubagentToolActivity(activity, state.Subagents); ok {
+				if block, ok := projectSubagentToolActivity(
+					activity, state.Subagents, excludedSubagents,
+				); ok {
 					blocks = append(blocks, block)
 				}
 				continue
@@ -99,7 +111,9 @@ func projectTimelineExcludingTools(
 		activity := activities[activityIndex]
 		activityIndex++
 		if activity.name == subagent.ToolName {
-			if block, ok := projectSubagentToolActivity(activity, state.Subagents); ok {
+			if block, ok := projectSubagentToolActivity(
+				activity, state.Subagents, excludedSubagents,
+			); ok {
 				blocks = append(blocks, block)
 			}
 			continue
@@ -108,6 +122,10 @@ func projectTimelineExcludingTools(
 	}
 
 	for _, child := range state.Subagents {
+		if _, committed := excludedSubagents[child.ChildSessionID]; committed &&
+			child.ChildSessionID != "" {
+			continue
+		}
 		block := projectSubagent(child, len(state.Transcript))
 		for _, activity := range activities {
 			if activity.name == subagent.ToolName && activity.runID == child.ParentRunID {
@@ -165,6 +183,7 @@ func projectTimelineExcludingTools(
 func projectSubagentToolActivity(
 	activity toolActivity,
 	live []coding.SubagentState,
+	excluded map[string]struct{},
 ) (timelineBlock, bool) {
 	for _, child := range live {
 		if activity.runID != "" && child.ParentRunID == activity.runID {
@@ -174,6 +193,9 @@ func projectSubagentToolActivity(
 
 	value, ok := projectDurableSubagent(activity)
 	if !ok {
+		return timelineBlock{}, false
+	}
+	if _, committed := excluded[value.ChildSessionID]; committed && value.ChildSessionID != "" {
 		return timelineBlock{}, false
 	}
 	for _, child := range live {
@@ -191,7 +213,7 @@ func projectSubagentToolActivity(
 func projectToolActivity(activity toolActivity) timelineBlock {
 	return timelineBlock{
 		kind: blockTool, id: activity.id, position: activity.position,
-		tools: []toolActivity{activity},
+		spacing: spacingCompact, tools: []toolActivity{activity},
 	}
 }
 
@@ -226,6 +248,7 @@ func projectSubagent(value coding.SubagentState, position int) timelineBlock {
 		kind: blockSubagent, id: value.ChildSessionID,
 		title: subagentActivityLabel(value.Role, value.State), body: oneLineSubagentTask(value.TaskPreview),
 		meta: subagentMetadata(value), status: string(value.State), position: position,
+		spacing: spacingCompact,
 	}
 }
 
@@ -253,6 +276,9 @@ func subagentMetadata(value coding.SubagentState) string {
 		label = "Interrupted"
 		durationPrefix = " after "
 	case subagent.StateCreated, subagent.StateRunning:
+		if activity := subagentActivitySummary(value.Activity); activity != "" {
+			label = activity
+		}
 	}
 	if value.DurationMillis > 0 {
 		label += durationPrefix + formatInteractionDuration(value.DurationMillis)
@@ -271,6 +297,29 @@ func subagentMetadata(value coding.SubagentState) string {
 	}
 
 	return label + " · " + strings.Join(facts, " · ")
+}
+
+func subagentActivitySummary(value subagent.ActivitySummary) string {
+	verb := ""
+	switch value.Action {
+	case subagent.ActivityActionRead:
+		verb = "Read"
+	case subagent.ActivityActionSearch:
+		verb = "Search"
+	case subagent.ActivityActionGlob:
+		verb = "Glob"
+	case subagent.ActivityActionList:
+		verb = "List"
+	case "":
+		return ""
+	default:
+		return ""
+	}
+	if value.Target == "" {
+		return verb
+	}
+
+	return verb + " " + value.Target
 }
 
 //nolint:gocyclo // The closed role/lifecycle matrix is the explicit product vocabulary.
@@ -498,6 +547,24 @@ func renderTimelineContent(
 	theme colorTheme,
 	noColor bool,
 ) string {
+	return renderTimelineContentWithOptions(
+		blocks,
+		markdown,
+		width,
+		theme,
+		noColor,
+		timelineRenderOptions{},
+	)
+}
+
+func renderTimelineContentWithOptions(
+	blocks []timelineBlock,
+	markdown *markdownRenderer,
+	width int,
+	theme colorTheme,
+	noColor bool,
+	options timelineRenderOptions,
+) string {
 	if len(blocks) == 0 {
 		return ""
 	}
@@ -520,12 +587,37 @@ func renderTimelineContent(
 			continue
 		}
 
-		rendered = append(rendered, renderTimelineBlock(block, markdown, width, theme, noColor))
+		rendered = append(rendered, renderTimelineBlockWithOptions(
+			block,
+			markdown,
+			width,
+			theme,
+			noColor,
+			options,
+		))
 	}
 
-	separator := strings.Repeat("\n", conversationGapHeight+1)
+	var content strings.Builder
+	for index, value := range rendered {
+		if index > 0 {
+			content.WriteString(strings.Repeat("\n", timelineGap(blocks[index-1], blocks[index])))
+		}
+		content.WriteString(value)
+	}
 
-	return strings.Join(rendered, separator)
+	return content.String()
+}
+
+func timelineGap(previous, next timelineBlock) int {
+	if compactTimelineBlock(previous) && compactTimelineBlock(next) {
+		return 1
+	}
+
+	return conversationGapHeight + 1
+}
+
+func compactTimelineBlock(block timelineBlock) bool {
+	return block.spacing == spacingCompact
 }
 
 func renderTimelineBlock(
@@ -535,10 +627,32 @@ func renderTimelineBlock(
 	theme colorTheme,
 	noColor bool,
 ) string {
+	return renderTimelineBlockWithOptions(
+		block,
+		markdown,
+		width,
+		theme,
+		noColor,
+		timelineRenderOptions{},
+	)
+}
+
+func renderTimelineBlockWithOptions(
+	block timelineBlock,
+	markdown *markdownRenderer,
+	width int,
+	theme colorTheme,
+	noColor bool,
+	options timelineRenderOptions,
+) string {
 	if block.kind == blockSubagent {
 		return renderSubagentBlock(block, width, theme, noColor)
 	}
 	if block.kind == blockTool {
+		if options.expandToolResults {
+			return renderExpandedToolActivityBlock(block, width, theme, noColor)
+		}
+
 		return renderToolActivityBlock(block, width, theme, noColor)
 	}
 
