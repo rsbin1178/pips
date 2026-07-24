@@ -30,12 +30,12 @@ func TestStartupBannerPrintsOnceBeforeStableTimeline(t *testing.T) {
 	printed := driveModelCommandsCapture(t, model, command)
 
 	assert.Contains(t, printed, "Pips")
-	assert.Contains(t, printed, "Terminal coding agent")
+	assert.Contains(t, printed, "✻ Pips")
 	assert.Contains(t, printed, "workspace")
 	assert.Contains(t, printed, "openai/test-model")
 	assert.Contains(t, printed, "Type / for commands")
 	assert.Less(t, strings.Index(printed, "Pips"), strings.Index(printed, "inspect the repository"))
-	assert.NotContains(t, model.View().Content, "Terminal coding agent")
+	assert.NotContains(t, model.View().Content, "✻ Pips")
 	assert.NotContains(t, model.View().Content, "Start a conversation")
 
 	model.resetScrollback()
@@ -53,7 +53,7 @@ func TestNewSessionBannerPrintsOnlyAfterSuccessfulNew(t *testing.T) {
 		_, command := model.Update(controlResultMsg{operation: operationNew})
 		newOutput := driveModelCommandsCapture(t, model, command)
 		assert.Equal(t, 1, strings.Count(newOutput, "Pips"))
-		assert.Contains(t, newOutput, "Terminal coding agent")
+		assert.Contains(t, newOutput, "✻ Pips")
 	}
 
 	operations := []controlOperation{

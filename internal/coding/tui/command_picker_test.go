@@ -28,8 +28,8 @@ func TestCommandPickerDisablesRuntimeReplacementUnlessIdle(t *testing.T) {
 
 	_, command := model.executeCommand(commands[0])
 	assert.Nil(t, command)
-	require.Error(t, model.commandPicker.err)
-	assert.Contains(t, model.commandPicker.err.Error(), "idle")
+	require.Error(t, model.picker.err)
+	assert.Contains(t, model.picker.err.Error(), "idle")
 	assert.Zero(t, controller.newCalls)
 }
 
@@ -46,18 +46,16 @@ func TestCommandPickerRendersBelowComposerAndFiltersInPlace(t *testing.T) {
 	lines := strings.Split(content, "\n")
 	composerLine := lineContaining(lines, inputArrow+" /res")
 	resumeLine := lineContaining(lines, "› /resume")
-	ruleLines := lineIndexes(lines, strings.Repeat("─", 64))
 
 	require.GreaterOrEqual(t, composerLine, 0)
 	require.Greater(t, resumeLine, composerLine)
-	require.Len(t, ruleLines, 2)
-	assert.Less(t, ruleLines[0], composerLine)
-	assert.Greater(t, ruleLines[1], composerLine)
-	assert.Less(t, ruleLines[1], resumeLine)
+	assert.True(t, strings.HasPrefix(lines[composerLine-1], "╭"))
+	assert.True(t, strings.HasPrefix(lines[composerLine+1], "╰"))
+	assert.Less(t, composerLine+1, resumeLine)
 	assert.NotContains(t, content, "Commands\n")
 	assert.NotContains(t, content, "openai/test-model")
 	assert.Contains(t, view.Content, "\x1b[")
-	assert.True(t, model.commandPicker.open)
+	assert.Equal(t, pickerCommand, model.picker.kind)
 	require.NotNil(t, view.Cursor)
 }
 
@@ -117,12 +115,12 @@ func TestCommandPickerRestoresDraftAndUsesBoundedNoColorWindow(t *testing.T) {
 	assert.LessOrEqual(t, strings.Count(content, "\n"), 9)
 
 	model.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
-	assert.False(t, model.commandPicker.open)
+	assert.Equal(t, pickerNone, model.picker.kind)
 	assert.Equal(t, "keep this draft", model.composer.Value())
 
 	model.openCommandPicker()
 	model.Update(tea.KeyPressMsg{Code: tea.KeyBackspace})
-	assert.False(t, model.commandPicker.open)
+	assert.Equal(t, pickerNone, model.picker.kind)
 	assert.Equal(t, "keep this draft", model.composer.Value())
 }
 
@@ -135,7 +133,7 @@ func TestCommandPickerReplacementIsSingleFlightAndClearsCommandInput(t *testing.
 
 	_, command := model.Update(key("enter"))
 	require.NotNil(t, command)
-	assert.True(t, model.commandPicker.controlling)
+	assert.True(t, model.picker.controlling)
 	assert.Equal(t, "/new", model.composer.Value())
 	_, duplicate := model.Update(key("enter"))
 	assert.Nil(t, duplicate)
@@ -143,9 +141,9 @@ func TestCommandPickerReplacementIsSingleFlightAndClearsCommandInput(t *testing.
 	_, commit := model.Update(command())
 	printed := driveModelCommandsCapture(t, model, commit)
 	assert.Equal(t, 1, controller.newCalls)
-	assert.False(t, model.commandPicker.open)
+	assert.Equal(t, pickerNone, model.picker.kind)
 	assert.Empty(t, model.composer.Value())
-	assert.Contains(t, printed, "Terminal coding agent")
+	assert.Contains(t, printed, "✻ Pips")
 }
 
 func TestResumeCommandOpensFullWidthSessionPicker(t *testing.T) {
@@ -161,8 +159,7 @@ func TestResumeCommandOpensFullWidthSessionPicker(t *testing.T) {
 	require.NotNil(t, load)
 	driveModelCommands(t, model, load)
 
-	assert.True(t, model.sessionPicker.open)
-	assert.Equal(t, overlayNone, model.overlay.kind)
+	assert.Equal(t, routeSessions, model.route.kind)
 	assert.Contains(t, model.View().Content, "Resume session")
 }
 
@@ -194,25 +191,23 @@ func TestAgentsCommandOpensCurrentSessionListAndDetail(t *testing.T) {
 	_, load := model.Update(key("enter"))
 	require.NotNil(t, load)
 	driveModelCommands(t, model, load)
-	assert.Equal(t, overlayAgents, model.overlay.kind)
+	assert.Equal(t, routeAgents, model.route.kind)
 	assert.Contains(t, model.View().Content, "Locate runtime wiring")
 
 	_, inspect := model.Update(key("enter"))
 	require.NotNil(t, inspect)
 	driveModelCommands(t, model, inspect)
 	content := model.View().Content
-	assert.True(t, model.subagentRoute.open)
-	assert.Equal(t, overlayAgents, model.overlay.kind)
+	assert.Equal(t, routeSubagent, model.route.kind)
 	assert.Contains(t, content, "❯ Locate runtime wiring.")
 	assert.Contains(t, content, "Found it.")
-	assert.Contains(t, content, "[✻ Worked for 2s]")
+	assert.Contains(t, content, "▣ openai/test · 2s")
 	assert.NotContains(t, content, "Subagent · explore · succeeded")
 	assert.NotContains(t, content, "Activity")
 	assert.NotContains(t, content, "Details")
 
 	model.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
-	assert.False(t, model.subagentRoute.open)
-	assert.Equal(t, overlayAgents, model.overlay.kind)
+	assert.Equal(t, routeAgents, model.route.kind)
 }
 
 func TestCtrlTTogglesSubagentDetailFromDurableToolEnvelope(t *testing.T) {
@@ -239,25 +234,12 @@ func TestCtrlTTogglesSubagentDetailFromDurableToolEnvelope(t *testing.T) {
 	require.NotNil(t, command)
 	driveModelCommands(t, model, command)
 	assert.Equal(t, []string{"child-durable"}, controller.agentInspections)
-	assert.Equal(t, overlayNone, model.overlay.kind)
-	assert.True(t, model.subagentRoute.open)
-	assert.NotNil(t, model.subagentRoute.detail)
+	assert.Equal(t, routeSubagent, model.route.kind)
+	assert.NotNil(t, model.route.detail)
 	assert.NotContains(t, model.View().Content, "Subagent · review")
 
 	model.Update(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
-	assert.Equal(t, overlayNone, model.overlay.kind)
-	assert.False(t, model.subagentRoute.open)
-	assert.Nil(t, model.subagentRoute.detail)
+	assert.Equal(t, routeNone, model.route.kind)
+	assert.Nil(t, model.route.detail)
 	assert.True(t, model.composer.Focused())
-}
-
-func lineIndexes(lines []string, value string) []int {
-	indexes := make([]int, 0)
-	for index, line := range lines {
-		if line == value {
-			indexes = append(indexes, index)
-		}
-	}
-
-	return indexes
 }

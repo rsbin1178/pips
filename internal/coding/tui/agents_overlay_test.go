@@ -71,7 +71,7 @@ func TestSubagentDetailUsesSemanticToolProjection(t *testing.T) {
 	assert.Equal(t, 1, strings.Count(content, "Read model.go"))
 	assert.Contains(t, content, "Located the TUI projection.")
 	assert.Contains(t, content, "agents_overlay.go:1-40")
-	assert.Contains(t, content, "[✻ Worked for 0s]")
+	assert.Contains(t, content, "▣ 0s")
 	assert.NotContains(t, content, "\nActivity\n")
 	assert.NotContains(t, content, "\nResult\n")
 	assert.NotContains(t, content, "\nDetails\n")
@@ -152,7 +152,7 @@ func TestSubagentDetailShowsToolFailureOutputInline(t *testing.T) {
 	content := readyModel(t, true).subagentRouteContent(detail)
 	assert.Contains(t, content, "Read missing.go · not found")
 	assert.Contains(t, content, "missing.go: no such file")
-	assert.Contains(t, content, "Explore failed\nexecution failed")
+	assert.Contains(t, content, "▌ Explore failed\n▌ execution failed")
 }
 
 func TestSubagentDetailExpandedToolResultIsBoundedAndRedacted(t *testing.T) {
@@ -306,8 +306,8 @@ func TestSubagentRouteUsesMainSurfaceWithoutPanelChrome(t *testing.T) {
 		},
 	}
 	model := readyModel(t, true)
-	model.subagentRoute = subagentRouteState{
-		open: true, childSessionID: "child-1", detail: &detail,
+	model.route = routeState{
+		kind: routeSubagent, childSessionID: "child-1", detail: &detail,
 	}
 
 	view := model.View()
@@ -324,14 +324,13 @@ func TestSubagentRouteEscapeReturnsToAgentList(t *testing.T) {
 	t.Parallel()
 
 	model := readyModel(t, true)
-	model.subagentRoute = subagentRouteState{
-		open: true, childSessionID: "child-1",
+	model.route = routeState{
+		kind: routeSubagent, childSessionID: "child-1",
 	}
 
 	_, command := model.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	require.NotNil(t, command)
-	assert.False(t, model.subagentRoute.open)
-	assert.Equal(t, overlayAgents, model.overlay.kind)
+	assert.Equal(t, routeAgents, model.route.kind)
 }
 
 func TestSubagentDetailRefreshIsCoalescedAndRejectsStaleResults(t *testing.T) {
@@ -342,16 +341,16 @@ func TestSubagentDetailRefreshIsCoalescedAndRejectsStaleResults(t *testing.T) {
 		ChildSessionID: "child-1", Role: subagent.RoleExplore,
 		State: subagent.StateRunning, TaskPreview: "old task",
 	}}
-	model.subagentRoute = subagentRouteState{
-		open: true, generation: 7, childSessionID: "child-1",
+	model.route = routeState{
+		kind: routeSubagent, generation: 7, childSessionID: "child-1",
 		detail: &oldDetail,
 	}
 
 	first := model.refreshSubagentRoute()
 	require.NotNil(t, first)
-	assert.True(t, model.subagentRoute.refreshing)
+	assert.True(t, model.route.refreshing)
 	assert.Nil(t, model.refreshSubagentRoute())
-	assert.True(t, model.subagentRoute.refreshPending)
+	assert.True(t, model.route.refreshPending)
 
 	newDetail := oldDetail
 	newDetail.Summary.TaskPreview = "new task"
@@ -360,9 +359,9 @@ func TestSubagentDetailRefreshIsCoalescedAndRejectsStaleResults(t *testing.T) {
 		background: true, hasDetail: true, detail: newDetail,
 	})
 	require.NotNil(t, followUp)
-	assert.True(t, model.subagentRoute.refreshing)
-	assert.False(t, model.subagentRoute.refreshPending)
-	assert.Equal(t, "new task", model.subagentRoute.detail.Summary.TaskPreview)
+	assert.True(t, model.route.refreshing)
+	assert.False(t, model.route.refreshPending)
+	assert.Equal(t, "new task", model.route.detail.Summary.TaskPreview)
 
 	stale := newDetail
 	stale.Summary.TaskPreview = "stale task"
@@ -370,14 +369,14 @@ func TestSubagentDetailRefreshIsCoalescedAndRejectsStaleResults(t *testing.T) {
 		generation: 6, childSessionID: "child-1",
 		background: true, hasDetail: true, detail: stale,
 	})
-	assert.Equal(t, "new task", model.subagentRoute.detail.Summary.TaskPreview)
+	assert.Equal(t, "new task", model.route.detail.Summary.TaskPreview)
 
 	model.Update(subagentRouteDataMsg{
 		generation: 7, childSessionID: "child-1",
 		background: true, err: errors.New("temporary inspect failure"),
 	})
-	assert.Equal(t, "new task", model.subagentRoute.detail.Summary.TaskPreview)
-	assert.EqualError(t, model.subagentRoute.refreshErr, "temporary inspect failure")
+	assert.Equal(t, "new task", model.route.detail.Summary.TaskPreview)
+	assert.EqualError(t, model.route.refreshErr, "temporary inspect failure")
 }
 
 func TestSubagentDetailRefreshFiltersUnrelatedChildren(t *testing.T) {
@@ -385,8 +384,8 @@ func TestSubagentDetailRefreshFiltersUnrelatedChildren(t *testing.T) {
 
 	model := readyModel(t, true)
 	detail := subagent.Detail{Summary: subagent.Summary{ChildSessionID: "child-1"}}
-	model.subagentRoute = subagentRouteState{
-		open: true, generation: 1, childSessionID: "child-1",
+	model.route = routeState{
+		kind: routeSubagent, generation: 1, childSessionID: "child-1",
 		detail: &detail,
 	}
 
@@ -394,11 +393,11 @@ func TestSubagentDetailRefreshFiltersUnrelatedChildren(t *testing.T) {
 		Payload: coding.SubagentLifecycle{ChildSessionID: "child-2"},
 	}})
 	assert.Nil(t, command)
-	assert.False(t, model.subagentRoute.refreshing)
+	assert.False(t, model.route.refreshing)
 
 	command = model.invalidateAgentDetail(streamItem{event: coding.Event{
 		Payload: coding.SubagentLifecycle{ChildSessionID: "child-1"},
 	}})
 	require.NotNil(t, command)
-	assert.True(t, model.subagentRoute.refreshing)
+	assert.True(t, model.route.refreshing)
 }

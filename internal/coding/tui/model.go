@@ -95,13 +95,11 @@ type Model struct {
 	canceling         bool
 	exitArmed         bool
 	bannerPrinted     bool
-	commandPicker     commandPickerState
-	sessionPicker     sessionPickerState
-	sessionPickerSeq  uint64
-	subagentRoute     subagentRouteState
-	subagentRouteSeq  uint64
-	overlay           overlayState
-	overlaySeq        uint64
+	picker            pickerState
+	route             routeState
+	routeSeq          uint64
+	prompt            promptState
+	promptSeq         uint64
 	completionMarkers []completionMarker
 	activity          activityIndicator
 	refreshCursor     bool
@@ -181,8 +179,8 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.theme = themeLight
 		}
 		m.composer.SetStyles(composerStyles(m.theme, m.options.NoColor))
-		if m.sessionPicker.open {
-			m.sessionPicker.search.SetStyles(sessionSearchStyles(m.theme, m.options.NoColor))
+		if m.route.kind == routeSessions {
+			m.route.search.SetStyles(sessionSearchStyles(m.theme, m.options.NoColor))
 		}
 		m.rerenderTranscript(false)
 
@@ -210,7 +208,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.state = message.controller.Snapshot()
 		m.resetScrollback()
 		m.lifecycle = lifecycleReady
-		m.syncApprovalOverlay()
+		m.syncApprovalPrompt()
 		m.setLayout()
 		commit := m.commitStartupOutput()
 
@@ -252,7 +250,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if message.beforeStart {
 			m.streamErr = errors.Join(m.streamErr, message.err)
 			m.state = m.controller.Snapshot()
-			m.syncApprovalOverlay()
+			m.syncApprovalPrompt()
 			m.setLayout()
 			return m, m.commitStableTimeline()
 		}
@@ -264,77 +262,87 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.canceling = false
 		m.streamErr = errors.Join(m.streamErr, message.err)
 		m.state = m.controller.Snapshot()
-		m.syncApprovalOverlay()
+		m.syncApprovalPrompt()
 		m.setLayout()
 		return m, m.commitStableTimeline()
-	case overlayDataMsg:
-		if message.kind != m.overlay.kind ||
-			message.generation != m.overlay.generation {
-			return m, nil
-		}
-		m.overlay.loading = false
-		m.overlay.err = message.err
-		m.overlay.tree = message.tree.Clone()
-		m.overlay.preview = message.preview
-		if message.hasAgents {
-			m.overlay.agents = message.agents
-			m.overlay.cursor = 0
-		}
-		m.overlay.cursor = 0
-		return m, nil
 	case subagentRouteDataMsg:
-		if !m.subagentRoute.open || message.generation != m.subagentRoute.generation ||
-			message.childSessionID != m.subagentRoute.childSessionID {
+		if m.route.kind != routeSubagent || message.generation != m.route.generation ||
+			message.childSessionID != m.route.childSessionID {
 			return m, nil
 		}
 		if message.background {
 			return m.applySubagentRouteRefresh(message)
 		}
-		m.subagentRoute.loading = false
-		m.subagentRoute.err = message.err
+		m.route.loading = false
+		m.route.err = message.err
 		if message.hasDetail {
 			detail := message.detail
-			m.subagentRoute.detail = &detail
+			m.route.detail = &detail
 		}
-		if m.subagentRoute.refreshPending && m.subagentRoute.detail != nil {
-			m.subagentRoute.refreshPending = false
+		if m.route.refreshPending && m.route.detail != nil {
+			m.route.refreshPending = false
 
 			return m, m.refreshSubagentRoute()
 		}
 
 		return m, nil
 	case sessionPickerDataMsg:
-		if !m.sessionPicker.open || message.generation != m.sessionPicker.generation {
+		if m.route.kind != routeSessions || message.generation != m.route.generation {
 			return m, nil
 		}
-		m.sessionPicker.loading = false
-		m.sessionPicker.err = message.err
-		m.sessionPicker.sessions = message.sessions
-		m.sessionPicker.cursor = 0
+		m.route.loading = false
+		m.route.err = message.err
+		m.route.sessions = message.sessions
+		m.route.cursor = 0
+
+		return m, nil
+	case agentsRouteDataMsg:
+		if m.route.kind != routeAgents || message.generation != m.route.generation {
+			return m, nil
+		}
+		m.route.loading = false
+		m.route.err = message.err
+		m.route.agents = message.agents
+		m.route.cursor = 0
+
+		return m, nil
+	case treeRouteDataMsg:
+		if m.route.kind != routeTree || message.generation != m.route.generation {
+			return m, nil
+		}
+		m.route.loading = false
+		m.route.err = message.err
+		m.route.tree = message.tree.Clone()
+		m.route.cursor = 0
+
+		return m, nil
+	case compactPreviewMsg:
+		if m.prompt.kind != promptCompact || message.generation != m.prompt.generation {
+			return m, nil
+		}
+		m.prompt.loading = false
+		m.prompt.err = message.err
+		m.prompt.preview = message.preview
 
 		return m, nil
 	case controlResultMsg:
-		commandControl := m.commandPicker.open && m.commandPicker.controlling
-		sessionControl := m.sessionPicker.open && m.sessionPicker.controlling
+		pickerControl := m.picker.kind != pickerNone && m.picker.controlling
+		routeControl := m.route.kind != routeNone && m.route.controlling
 		switch {
-		case commandControl:
-			m.commandPicker.loading = false
-			m.commandPicker.controlling = false
-		case sessionControl:
-			m.sessionPicker.loading = false
-			m.sessionPicker.controlling = false
-		default:
-			m.overlay.loading = false
+		case pickerControl:
+			m.picker.loading = false
+			m.picker.controlling = false
+		case routeControl:
+			m.route.loading = false
+			m.route.controlling = false
 		}
 		m.state = m.controller.Snapshot()
 		if message.err != nil {
 			switch {
-			case commandControl:
-				m.commandPicker.err = message.err
-			case sessionControl:
-				m.sessionPicker.err = message.err
-			default:
-				m.overlay.err = message.err
+			case pickerControl:
+				m.picker.err = message.err
+			case routeControl:
+				m.route.err = message.err
 			}
 			m.renderTranscript(false)
 
@@ -347,16 +355,23 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		case operationModel, operationReload:
 		}
 		switch {
-		case commandControl:
-			m.closeCommandPicker(false)
-		case sessionControl:
-			m.closeSessionPicker(false)
+		case pickerControl:
+			if m.picker.kind == pickerCommand {
+				m.closeCommandPicker(false)
+			} else {
+				m.picker = pickerState{}
+			}
+		case routeControl:
+			if m.route.kind == routeSessions {
+				m.closeSessionPicker(false)
+			} else {
+				m.route = routeState{}
+			}
 		default:
-			m.commandPicker = commandPickerState{}
+			m.picker = pickerState{}
 		}
-		m.overlay = overlayState{}
 		m.streamErr = nil
-		m.syncApprovalOverlay()
+		m.syncApprovalPrompt()
 		var commit tea.Cmd
 		switch message.operation {
 		case operationNew:
@@ -409,9 +424,9 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.activity.Update(message)
 	default:
 		if m.lifecycle == lifecycleReady {
-			if m.sessionPicker.open {
+			if m.route.kind == routeSessions {
 				var command tea.Cmd
-				m.sessionPicker.search, command = m.sessionPicker.search.Update(message)
+				m.route.search, command = m.route.search.Update(message)
 
 				return m, command
 			}
@@ -567,19 +582,15 @@ func (m *Model) trustChoice(label, description string, selected bool) string {
 
 //nolint:gocyclo,nestif,gocritic // Contextual input precedence is an explicit product state machine.
 func (m *Model) updateReadyKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	if m.subagentRoute.open {
-		return m.updateSubagentRouteKey(message)
+	if m.route.kind != routeNone {
+		return m.updateRouteKey(message)
 	}
-	if m.overlay.kind != overlayNone {
-		return m.updateOverlayKey(message)
+	if m.prompt.kind != promptNone {
+		return m.updatePromptKey(message)
 	}
-	if m.sessionPicker.open {
-		return m.updateSessionPickerKey(message)
+	if m.picker.kind != pickerNone {
+		return m.updatePickerKey(message)
 	}
-	if m.commandPicker.open {
-		return m.updateCommandPickerKey(message)
-	}
-
 	key := message.String()
 	context := m.actionContext()
 	action, matched := resolveAction(defaultActions, context, key)
@@ -621,7 +632,7 @@ func (m *Model) updateReadyKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 
-			return m, m.openOverlay(overlayHelp)
+			return m, m.printHelp()
 		}
 
 		return m, nil
@@ -635,40 +646,33 @@ func (m *Model) updateReadyKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) readyView() tea.View {
-	if m.subagentRoute.open {
-		return m.subagentRouteView()
-	}
-	if m.sessionPicker.open {
-		return m.sessionPickerView()
-	}
-	if m.overlay.kind == overlayAgents {
-		return m.agentsView()
+	if m.route.kind != routeNone {
+		return m.routeView()
 	}
 
-	separator := strings.Repeat("─", max(1, m.width))
-	if m.options.NoColor {
-		separator = strings.Repeat("-", max(1, m.width))
-	} else {
-		separator = lipgloss.NewStyle().Foreground(paletteFor(m.theme).separator).Render(separator)
-	}
-
-	footer := make([]string, 0, 7)
+	footer := make([]string, 0, 5)
 	if activity := m.activityLine(); activity != "" {
 		for range conversationGapHeight {
 			footer = append(footer, "")
 		}
 		footer = append(footer, activity)
 	}
+	if prompt := m.promptView(); prompt != "" {
+		footer = append(footer, prompt)
+	}
 	for range conversationGapHeight {
 		footer = append(footer, "")
 	}
-	footer = append(footer, separator)
 	composerFooterIndex := len(footer)
-	footer = append(footer, m.composer.View(), separator)
-	if m.commandPicker.open {
+	footer = append(footer, m.composerBox())
+	if m.picker.kind != pickerNone {
 		usedHeight := lipgloss.Height(lipgloss.JoinVertical(lipgloss.Left, footer...))
 		availableRows := max(1, m.height-usedHeight)
-		footer = append(footer, m.commandPickerView(availableRows))
+		if m.picker.kind == pickerModel {
+			footer = append(footer, m.pickerView(availableRows))
+		} else {
+			footer = append(footer, m.commandPickerView(availableRows))
+		}
 	} else {
 		footer = append(footer, ansi.Truncate(m.statusLine(), max(1, m.width), "…"))
 	}
@@ -689,16 +693,18 @@ func (m *Model) readyView() tea.View {
 	))
 	content := lipgloss.JoinVertical(lipgloss.Left, parts...)
 	view := tea.NewView(content)
-	view.SetContent(m.renderOverlay(content))
+	view.SetContent(content)
 	view.AltScreen = false
 	view.MouseMode = tea.MouseModeNone
 	view.WindowTitle = appTitle
 	view.Cursor = m.composer.Cursor()
-	if m.overlay.kind != overlayNone {
+	if m.prompt.kind != promptNone || m.picker.kind == pickerModel {
 		view.Cursor = nil
 	}
 	if view.Cursor != nil {
-		view.Cursor.Y += composerOffset
+		cursorX, cursorY := m.composerBoxCursorOffset()
+		view.Cursor.X += cursorX
+		view.Cursor.Y += composerOffset + cursorY
 		if m.refreshCursor {
 			view.Cursor.Blink = !view.Cursor.Blink
 		}
@@ -770,16 +776,54 @@ func (m *Model) statusExtras() []string {
 
 func (m *Model) setLayout() {
 	width := max(1, m.width)
-	m.composer.SetWidth(width)
+	m.composer.SetWidth(m.composerContentWidth())
 	composerHeight := max(1, min(composerMaxLines, m.composer.Height()))
 	m.composer.SetHeight(composerHeight)
-	if m.sessionPicker.open {
+	if m.route.kind == routeSessions {
 		innerWidth := max(1, width-4)
-		m.sessionPicker.search.SetWidth(max(
+		m.route.search.SetWidth(max(
 			1,
 			innerWidth-ansi.StringWidth(sessionPickerSearchPrompt),
 		))
 	}
+}
+
+func (m *Model) composerBox() string {
+	if !m.hasComposerBox() {
+		return m.composer.View()
+	}
+
+	style := lipgloss.NewStyle().
+		Width(m.composerContentWidth()).
+		Padding(0, 1).
+		Border(lipgloss.RoundedBorder(), true)
+	if m.options.NoColor {
+		style = style.Border(lipgloss.NormalBorder(), true)
+	} else {
+		style = style.BorderForeground(paletteFor(m.theme).separator)
+	}
+
+	return style.Render(m.composer.View())
+}
+
+func (m *Model) hasComposerBox() bool {
+	return m.width >= 24
+}
+
+func (m *Model) composerContentWidth() int {
+	if m.hasComposerBox() {
+		return max(1, m.width-4)
+	}
+
+	return max(1, m.width)
+}
+
+func (m *Model) composerBoxCursorOffset() (int, int) {
+	if !m.hasComposerBox() {
+		return 0, 0
+	}
+
+	return 2, 1
 }
 
 func (m *Model) activityStatus() (activityStatus, bool) {
@@ -881,17 +925,13 @@ func (m *Model) toggleLatestTool() tea.Cmd {
 			}
 			if len(block.tools) > 0 {
 				detail := newToolDetailView(block)
-				m.overlay = overlayState{
-					kind: overlayToolDetail, toolDetail: &detail,
-				}
+				m.openToolDetailRoute(detail)
 			}
 
 			return nil
 		case blockTool:
 			detail := newToolDetailView(block)
-			m.overlay = overlayState{
-				kind: overlayToolDetail, toolDetail: &detail,
-			}
+			m.openToolDetailRoute(detail)
 
 			return nil
 		case blockUser, blockAssistant, blockDraft, blockDiagnostic,
@@ -1071,7 +1111,7 @@ func (m *Model) reduceStreamItem(item streamItem) {
 		m.resetScrollback()
 	}
 	m.recordCompletion(item.event)
-	m.syncApprovalOverlay()
+	m.syncApprovalPrompt()
 }
 
 func (m *Model) recordCompletion(event coding.Event) {
@@ -1100,10 +1140,25 @@ func (m *Model) recordCompletion(event coding.Event) {
 		afterMessages:  len(m.state.Transcript),
 		outcome:        completed.Outcome,
 		durationMillis: completed.DurationMillis,
+		model:          m.modelLabel(),
 	})
 	if len(m.completionMarkers) > maxCompletionMarkers {
 		first := len(m.completionMarkers) - maxCompletionMarkers
 		m.completionMarkers = append([]completionMarker(nil), m.completionMarkers[first:]...)
+	}
+}
+
+// modelLabel is captured on each completion marker so a later model switch
+// cannot rewrite the provider/model attribution of an earlier interaction.
+func (m *Model) modelLabel() string {
+	provider := string(m.state.Provider)
+	switch {
+	case provider == "":
+		return m.state.ModelID
+	case m.state.ModelID == "":
+		return provider
+	default:
+		return provider + "/" + m.state.ModelID
 	}
 }
 
@@ -1117,7 +1172,7 @@ func (m *Model) finishStream() tea.Cmd {
 		)
 	}
 	m.state = snapshot
-	m.syncApprovalOverlay()
+	m.syncApprovalPrompt()
 	m.bridge = nil
 	m.starting = false
 	m.waiting = false
