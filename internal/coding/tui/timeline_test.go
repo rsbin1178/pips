@@ -2,6 +2,7 @@
 package tui
 
 import (
+	"image/color"
 	"strings"
 	"testing"
 
@@ -303,15 +304,10 @@ func TestTimelineRendersUserMessageAsArrowBlock(t *testing.T) {
 	assert.Contains(t, colored, "\x1b[")
 	assert.Equal(t, 1, strings.Count(ansi.Strip(colored), inputArrow))
 	for line := range strings.SplitSeq(colored, "\n") {
-		assert.Equal(t, 40, ansi.StringWidth(line))
+		assert.LessOrEqual(t, ansi.StringWidth(line), 40)
 	}
 
-	for _, theme := range []colorTheme{themeDark, themeLight} {
-		palette := paletteFor(theme)
-		style := userMessageStyle(theme)
-		assert.Equal(t, palette.userMessageText, style.GetForeground())
-		assert.Equal(t, palette.userMessageBackground, style.GetBackground())
-	}
+	assert.NotContains(t, colored, "48;")
 }
 
 func TestTimelineWrapsUserMessageAfterFirstLineArrow(t *testing.T) {
@@ -404,10 +400,12 @@ func TestTimelinePlacesCompletionMarkersAtInteractionBoundaries(t *testing.T) {
 		{
 			interactionID: "interaction-1", afterMessages: 2,
 			outcome: coding.InteractionSucceeded, durationMillis: 65_000,
+			model: "openai/test-model",
 		},
 		{
 			interactionID: "interaction-2", afterMessages: 4,
 			outcome: coding.InteractionCanceled, durationMillis: 12_000,
+			model: "openai/test-model",
 		},
 	})
 
@@ -427,8 +425,47 @@ func TestTimelinePlacesCompletionMarkersAtInteractionBoundaries(t *testing.T) {
 		blocks[4].kind,
 		blocks[5].kind,
 	})
-	assert.Equal(t, "[✻ Worked for 1m 5s]", blocks[2].body)
-	assert.Equal(t, "[Interrupted after 12s]", blocks[5].body)
+	assert.Equal(t, "▣ openai/test-model · 1m 5s", blocks[2].body)
+	assert.Equal(t, "▣ openai/test-model · 12s · interrupted", blocks[5].body)
+}
+
+func TestTimelineCompletionMarkerUsesOutcomeGlyphColor(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		outcome coding.InteractionOutcome
+		color   color.Color
+	}{
+		{name: "succeeded", outcome: coding.InteractionSucceeded, color: paletteFor(themeDark).idle},
+		{name: "canceled", outcome: coding.InteractionCanceled, color: paletteFor(themeDark).muted},
+		{name: "failed", outcome: coding.InteractionFailed, color: paletteFor(themeDark).error},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			block, ok := projectCompletionMarker(completionMarker{
+				outcome: test.outcome, durationMillis: 7_000, model: "openai/test-model",
+			})
+			require.True(t, ok)
+			assert.Equal(t, "▣ openai/test-model · 7s"+completionOutcomeSuffix(test.outcome), block.body)
+			assert.Equal(t, test.color, completionGlyphStyle(block.status, themeDark).GetForeground())
+			assert.Equal(t, block.body, renderCompletionMarker(block, themeDark, true))
+			assert.Equal(t, block.body, ansi.Strip(renderCompletionMarker(block, themeDark, false)))
+		})
+	}
+}
+
+func completionOutcomeSuffix(outcome coding.InteractionOutcome) string {
+	switch outcome {
+	case coding.InteractionCanceled:
+		return " · interrupted"
+	case coding.InteractionFailed:
+		return " · failed"
+	default:
+		return ""
+	}
 }
 
 func TestTimelineFailureKeepsErrorAndCancellationSuppressesIt(t *testing.T) {
@@ -440,16 +477,19 @@ func TestTimelineFailureKeepsErrorAndCancellationSuppressesIt(t *testing.T) {
 	}
 	failedBlocks := insertCompletionMarkers(projectTimeline(failed), []completionMarker{{
 		interactionID: "failed", outcome: coding.InteractionFailed, durationMillis: 12_000,
+		model: "openai/test-model",
 	}})
 	require.Len(t, failedBlocks, 2)
 	assert.Equal(t, blockError, failedBlocks[0].kind)
-	assert.Equal(t, "[Failed after 12s]", failedBlocks[1].body)
+	assert.Equal(t, "▣ openai/test-model · 12s · failed", failedBlocks[1].body)
+	assert.Equal(t, "▌ provider unavailable (provider_failed)", renderTimeline(failedBlocks[:1], newMarkdownRenderer(8), 80, themeDark, true))
 
 	canceled := failed
 	canceled.Interaction.Outcome = coding.InteractionCanceled
 	canceledBlocks := insertCompletionMarkers(projectTimeline(canceled), []completionMarker{{
 		interactionID: "canceled", outcome: coding.InteractionCanceled, durationMillis: 12_000,
+		model: "openai/test-model",
 	}})
 	require.Len(t, canceledBlocks, 1)
-	assert.Equal(t, "[Interrupted after 12s]", canceledBlocks[0].body)
+	assert.Equal(t, "▣ openai/test-model · 12s · interrupted", canceledBlocks[0].body)
 }

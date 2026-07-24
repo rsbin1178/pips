@@ -762,7 +762,7 @@ func TestScrollbackCompletionTrackingSurvivesBoundedMarkerWindow(t *testing.T) {
 			model.completionMarkers = model.completionMarkers[1:]
 		}
 
-		assert.Contains(t, model.takeStableTimeline(), "[✻ Worked for 0s]")
+		assert.Contains(t, model.takeStableTimeline(), "▣ 0s")
 	}
 }
 

@@ -17,15 +17,10 @@ type commandDescriptor struct {
 	idleOnly    bool
 }
 
-type commandPickerState struct {
-	open          bool
-	cursor        int
-	query         string
-	previousInput string
-	err           error
-	loading       bool
-	controlling   bool
-}
+const (
+	commandDiff   = "diff"
+	commandStatus = "status"
+)
 
 var commands = []commandDescriptor{
 	{name: "new", description: "start a new session", idleOnly: true},
@@ -35,20 +30,20 @@ var commands = []commandDescriptor{
 	{name: "tree", description: "navigate the current session tree", idleOnly: true},
 	{name: "fork", description: "fork a node into a new session", idleOnly: true},
 	{name: "compact", description: "preview and compact older context", idleOnly: true},
-	{name: "diff", description: "inspect workspace changes"},
+	{name: commandDiff, description: "inspect workspace changes"},
 	{name: "reload", description: "reload resources and integrations", idleOnly: true},
-	{name: "status", description: "show runtime status"},
-	{name: "help", description: "show keyboard help"},
+	{name: commandStatus, description: "show runtime status"},
+	{name: string(actionHelp), description: "show keyboard help"},
 	{name: "quit", description: "exit Pips"},
 }
 
 func (m *Model) openCommandPicker() {
-	if m.commandPicker.open {
+	if m.picker.kind == pickerCommand {
 		return
 	}
 
-	m.commandPicker = commandPickerState{
-		open:          true,
+	m.picker = pickerState{
+		kind:          pickerCommand,
 		previousInput: m.composer.Value(),
 	}
 	m.syncCommandInput()
@@ -56,9 +51,9 @@ func (m *Model) openCommandPicker() {
 }
 
 func (m *Model) closeCommandPicker(restoreInput bool) {
-	previousInput := m.commandPicker.previousInput
+	previousInput := m.picker.previousInput
 
-	m.commandPicker = commandPickerState{}
+	m.picker = pickerState{}
 	if restoreInput {
 		m.composer.SetValue(previousInput)
 	} else {
@@ -69,11 +64,12 @@ func (m *Model) closeCommandPicker(restoreInput bool) {
 }
 
 func (m *Model) syncCommandInput() {
-	m.composer.SetValue("/" + m.commandPicker.query)
+	m.composer.SetValue("/" + m.picker.query)
 }
 
+//nolint:gocyclo // Command-picker key handling keeps every terminal transition in one place.
 func (m *Model) updateCommandPickerKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	if m.commandPicker.controlling {
+	if m.picker.kind != pickerCommand || m.picker.controlling {
 		return m, nil
 	}
 
@@ -88,37 +84,37 @@ func (m *Model) updateCommandPickerKey(message tea.KeyPressMsg) (tea.Model, tea.
 
 	switch key {
 	case "up":
-		m.commandPicker.cursor = wrapIndex(m.commandPicker.cursor-1, len(filtered))
+		m.picker.cursor = wrapIndex(m.picker.cursor-1, len(filtered))
 	case keyDown, keyTab:
-		m.commandPicker.cursor = wrapIndex(m.commandPicker.cursor+1, len(filtered))
+		m.picker.cursor = wrapIndex(m.picker.cursor+1, len(filtered))
 	case keyEnter:
 		if len(filtered) == 0 {
 			return m, nil
 		}
 
-		return m.executeCommand(filtered[m.commandPicker.cursor])
+		return m.executeCommand(filtered[m.picker.cursor])
 	case "ctrl+u":
-		m.commandPicker.query = ""
-		m.commandPicker.cursor = 0
-		m.commandPicker.err = nil
+		m.picker.query = ""
+		m.picker.cursor = 0
+		m.picker.err = nil
 		m.syncCommandInput()
 	case keyBackspace:
-		if m.commandPicker.query == "" {
+		if m.picker.query == "" {
 			m.closeCommandPicker(true)
 
 			return m, nil
 		}
 
-		m.commandPicker.query = trimLastRune(m.commandPicker.query)
-		m.commandPicker.cursor = 0
-		m.commandPicker.err = nil
+		m.picker.query = trimLastRune(m.picker.query)
+		m.picker.cursor = 0
+		m.picker.err = nil
 		m.syncCommandInput()
 	default:
 		text := message.Key().Text
 		if text != "" && text != "/" {
-			m.commandPicker.query += text
-			m.commandPicker.cursor = 0
-			m.commandPicker.err = nil
+			m.picker.query += text
+			m.picker.cursor = 0
+			m.picker.err = nil
 			m.syncCommandInput()
 		}
 	}
@@ -131,57 +127,58 @@ func (m *Model) updateCommandPickerKey(message tea.KeyPressMsg) (tea.Model, tea.
 //nolint:gocyclo // The closed command inventory is dispatched in one auditable switch.
 func (m *Model) executeCommand(command commandDescriptor) (tea.Model, tea.Cmd) {
 	if command.idleOnly && m.actionContext() != contextIdle {
-		m.commandPicker.err = fmt.Errorf("/%s is available only while idle", command.name)
+		m.picker.err = fmt.Errorf("/%s is available only while idle", command.name)
 
 		return m, nil
 	}
 
-	m.commandPicker.query = command.name
-	m.commandPicker.err = nil
+	m.picker.query = command.name
+	m.picker.err = nil
 	m.syncCommandInput()
 
 	switch command.name {
 	case "new":
 		return m, m.runControl(operationNew, "", modelcatalog.Selection{})
 	case "resume":
-		previousInput := m.commandPicker.previousInput
+		previousInput := m.picker.previousInput
 		m.closeCommandPicker(false)
 
 		return m, m.openSessionPicker(previousInput)
 	case "model":
 		m.closeCommandPicker(false)
+		m.openModelPicker()
 
-		return m, m.openOverlay(overlayModel)
+		return m, nil
 	case "agents":
 		m.closeCommandPicker(false)
 
-		return m, m.openOverlay(overlayAgents)
+		return m, m.openAgentsRoute()
 	case "tree":
 		m.closeCommandPicker(false)
 
-		return m, m.openTreeOverlay(false)
+		return m, m.openTreeRoute(false)
 	case "fork":
 		m.closeCommandPicker(false)
 
-		return m, m.openTreeOverlay(true)
+		return m, m.openTreeRoute(true)
 	case "compact":
 		m.closeCommandPicker(false)
 
-		return m, m.openOverlay(overlayCompact)
-	case "diff":
+		return m, m.openCompactPrompt()
+	case commandDiff:
 		m.closeCommandPicker(false)
 
-		return m, m.openOverlay(overlayDiff)
+		return m, m.printDiff()
 	case "reload":
 		return m, m.runControl(operationReload, "", modelcatalog.Selection{})
-	case "status":
+	case commandStatus:
 		m.closeCommandPicker(false)
 
-		return m, m.openOverlay(overlayStatus)
-	case "help":
+		return m, m.printStatus()
+	case string(actionHelp):
 		m.closeCommandPicker(false)
 
-		return m, m.openOverlay(overlayHelp)
+		return m, m.printHelp()
 	case "quit":
 		m.closeCommandPicker(false)
 
@@ -192,7 +189,7 @@ func (m *Model) executeCommand(command commandDescriptor) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) filteredCommands() []commandDescriptor {
-	query := strings.ToLower(strings.TrimSpace(m.commandPicker.query))
+	query := strings.ToLower(strings.TrimSpace(m.picker.query))
 
 	filtered := make([]commandDescriptor, 0, len(commands))
 	for _, command := range commands {
@@ -206,15 +203,15 @@ func (m *Model) filteredCommands() []commandDescriptor {
 }
 
 func (m *Model) commandPickerView(maxHeight int) string {
-	if !m.commandPicker.open {
+	if m.picker.kind != pickerCommand {
 		return ""
 	}
 
 	footer := ""
-	if m.commandPicker.loading {
+	if m.picker.loading {
 		footer = "Working…"
-	} else if m.commandPicker.err != nil {
-		footer = "Error: " + safeError(m.commandPicker.err)
+	} else if m.picker.err != nil {
+		footer = "Error: " + safeError(m.picker.err)
 	}
 
 	if footer != "" {
@@ -235,11 +232,11 @@ func (m *Model) commandPickerView(maxHeight int) string {
 	for index := range filtered {
 		rows[index] = m.renderCommandPickerRow(
 			filtered[index],
-			index == m.commandPicker.cursor,
+			index == m.picker.cursor,
 		)
 		heights[index] = lipgloss.Height(rows[index])
 	}
-	start, end := selectionWindowByHeight(heights, m.commandPicker.cursor, max(1, maxHeight))
+	start, end := selectionWindowByHeight(heights, m.picker.cursor, max(1, maxHeight))
 	visible := truncateHeight(strings.Join(rows[start:end], "\n"), max(1, maxHeight))
 
 	if footer != "" {
@@ -278,7 +275,7 @@ func (m *Model) renderCommandPickerRow(command commandDescriptor, selected bool)
 		palette := paletteFor(m.theme)
 		matchStyle := lipgloss.NewStyle().Bold(true).Foreground(palette.model)
 		for index := range lines {
-			lines[index] = highlightCommandMatch(lines[index], m.commandPicker.query, matchStyle)
+			lines[index] = highlightCommandMatch(lines[index], m.picker.query, matchStyle)
 			if selected {
 				lines[index] = lipgloss.NewStyle().Foreground(palette.session).Render(lines[index])
 			}
@@ -310,7 +307,7 @@ func (m *Model) styleCommandPickerFooter(value string) string {
 	}
 
 	color := paletteFor(m.theme).muted
-	if m.commandPicker.err != nil {
+	if m.picker.err != nil {
 		color = paletteFor(m.theme).error
 	}
 

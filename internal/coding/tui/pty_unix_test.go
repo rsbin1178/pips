@@ -100,7 +100,7 @@ func TestPTYLifecycleRestoresTerminalBeforeControllerClose(t *testing.T) {
 			"\x1b[<32;11;5M",
 	))
 	require.NoError(t, err)
-	waitForPTYOutput(t, &output, "[✻ Worked for ", 5*time.Second)
+	waitForPTYOutput(t, &output, "▣ openai/tui-scripted ·", 5*time.Second)
 	_, err = master.Write([]byte{0x03})
 	require.NoError(t, err)
 	time.Sleep(500 * time.Millisecond)
@@ -149,10 +149,10 @@ func TestPTYLifecycleRestoresTerminalBeforeControllerClose(t *testing.T) {
 	assert.Greater(t, closed, reset, "controller closed before terminal restoration")
 	assert.Contains(t, value, "SHELL_HISTORY_MARKER")
 	assert.Contains(t, value, "Pips")
-	assert.Contains(t, value, "Terminal coding agent")
+	assert.Contains(t, value, "✻ Pips")
 	assert.Contains(t, value, "PROMPT_LINES=4")
 	assert.Contains(t, value, "scripted final answer")
-	assert.Contains(t, value, "[✻ Worked for ")
+	assert.Contains(t, value, "▣ openai/tui-scripted ·")
 }
 
 type synchronizedBuffer struct {

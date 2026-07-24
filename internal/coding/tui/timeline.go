@@ -34,6 +34,11 @@ const (
 	spacingCompact
 )
 
+const (
+	completionGlyph = "▣"
+	errorAccentBar  = "▌"
+)
+
 type timelineBlock struct {
 	kind     blockKind
 	id       string
@@ -56,6 +61,7 @@ type completionMarker struct {
 	afterMessages  int
 	outcome        coding.InteractionOutcome
 	durationMillis int64
+	model          string
 }
 
 func projectTimeline(state coding.State) []timelineBlock {
@@ -172,7 +178,7 @@ func projectTimelineExcluding(
 
 	if state.LastError != nil && state.Interaction.Outcome != coding.InteractionCanceled {
 		blocks = append(blocks, timelineBlock{
-			kind: blockError, title: "Error", body: state.LastError.Message,
+			kind: blockError, body: state.LastError.Message,
 			status: state.LastError.Code, position: len(state.Transcript),
 		})
 	}
@@ -436,18 +442,22 @@ func insertCompletionMarkers(
 }
 
 func projectCompletionMarker(marker completionMarker) (timelineBlock, bool) {
-	duration := formatInteractionDuration(marker.durationMillis)
-	body := ""
+	suffix := ""
 	switch marker.outcome {
 	case coding.InteractionSucceeded:
-		body = "[✻ Worked for " + duration + "]"
 	case coding.InteractionCanceled:
-		body = "[Interrupted after " + duration + "]"
+		suffix = " · interrupted"
 	case coding.InteractionFailed:
-		body = "[Failed after " + duration + "]"
+		suffix = " · failed"
 	default:
 		return timelineBlock{}, false
 	}
+
+	body := completionGlyph + " "
+	if marker.model != "" {
+		body += marker.model + " · "
+	}
+	body += formatInteractionDuration(marker.durationMillis) + suffix
 
 	return timelineBlock{
 		kind: blockCompletion, body: body, status: string(marker.outcome),
@@ -578,11 +588,7 @@ func renderTimelineContentWithOptions(
 		}
 
 		if block.kind == blockCompletion {
-			content := block.body
-			if !noColor {
-				content = completionStyle(block.status, theme).Render(content)
-			}
-			rendered = append(rendered, content)
+			rendered = append(rendered, renderCompletionMarker(block, theme, noColor))
 
 			continue
 		}
@@ -666,6 +672,10 @@ func renderRegularTimelineBlock(
 	theme colorTheme,
 	noColor bool,
 ) string {
+	if block.kind == blockError {
+		return renderErrorBlock(block, width, theme, noColor)
+	}
+
 	body := block.body
 	if !block.rendered && (block.kind == blockAssistant || block.kind == blockDraft) {
 		if value, err := markdown.render(body, max(1, width-2), theme, noColor); err == nil {
@@ -745,27 +755,86 @@ func renderUserMessage(body string, width int, theme colorTheme, noColor bool) s
 		return content
 	}
 
-	return userMessageStyle(theme).
-		Width(width).
+	return lipgloss.NewStyle().
+		Foreground(paletteFor(theme).workspace).
 		Render(content)
 }
 
-func userMessageStyle(theme colorTheme) lipgloss.Style {
-	palette := paletteFor(theme)
+func renderErrorBlock(block timelineBlock, width int, theme colorTheme, noColor bool) string {
+	width = max(1, width)
+	body := strings.TrimSpace(block.body)
+	if block.status != "" {
+		first, rest, wrapped := strings.Cut(body, "\n")
+		if first == "" {
+			first = block.status
+		} else {
+			first += " (" + block.status + ")"
+		}
+		body = first
+		if wrapped {
+			body += "\n" + rest
+		}
+	}
+	if block.title != "" {
+		if body == "" {
+			body = block.title
+		} else {
+			body = block.title + "\n" + body
+		}
+	}
 
-	return lipgloss.NewStyle().
-		Foreground(palette.userMessageText).
-		Background(palette.userMessageBackground)
+	barWidth := ansi.StringWidth(errorAccentBar) + 1
+	if width > barWidth {
+		body = lipgloss.Wrap(body, width-barWidth, "")
+	}
+
+	lines := strings.Split(body, "\n")
+	if noColor {
+		for index := range lines {
+			lines[index] = strings.TrimRight(errorAccentBar+" "+lines[index], " ")
+		}
+
+		return strings.Join(lines, "\n")
+	}
+
+	palette := paletteFor(theme)
+	bar := lipgloss.NewStyle().Foreground(palette.error).Render(errorAccentBar)
+	text := lipgloss.NewStyle().Foreground(palette.muted)
+	for index := range lines {
+		if lines[index] == "" {
+			lines[index] = bar
+
+			continue
+		}
+		lines[index] = bar + " " + text.Render(lines[index])
+	}
+
+	return strings.Join(lines, "\n")
 }
 
-func completionStyle(status string, theme colorTheme) lipgloss.Style {
+func renderCompletionMarker(block timelineBlock, theme colorTheme, noColor bool) string {
+	if noColor {
+		return block.body
+	}
+
+	glyph, rest, found := strings.Cut(block.body, " ")
+	if !found {
+		return completionGlyphStyle(block.status, theme).Render(block.body)
+	}
+
+	muted := lipgloss.NewStyle().Foreground(paletteFor(theme).muted)
+
+	return completionGlyphStyle(block.status, theme).Render(glyph) + " " + muted.Render(rest)
+}
+
+func completionGlyphStyle(status string, theme colorTheme) lipgloss.Style {
 	palette := paletteFor(theme)
 	color := palette.muted
 	switch coding.InteractionOutcome(status) {
 	case coding.InteractionSucceeded:
 		color = palette.idle
 	case coding.InteractionCanceled:
-		color = palette.warning
+		color = palette.muted
 	case coding.InteractionFailed:
 		color = palette.error
 	}

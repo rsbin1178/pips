@@ -75,7 +75,7 @@ var defaultActions = []actionBinding{
 		ID:       actionHelp,
 		Contexts: []actionContext{contextIdle, contextRunning, contextPaused},
 		Keys:     []string{"ctrl+?"},
-		Label:    "help",
+		Label:    string(actionHelp),
 	},
 	{
 		ID:       actionToggleTool,

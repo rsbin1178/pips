@@ -17,26 +17,13 @@ import (
 
 const sessionPickerSearchPrompt = "⌕ "
 
-type sessionPickerState struct {
-	open          bool
-	generation    uint64
-	search        textinput.Model
-	cursor        int
-	sessions      []session.Metadata
-	previousInput string
-	openedAt      time.Time
-	err           error
-	loading       bool
-	controlling   bool
-}
-
 type sessionPickerDataMsg struct {
 	generation uint64
 	sessions   []session.Metadata
 	err        error
 }
 
-func newSessionPickerState(previousInput string, theme colorTheme, noColor bool) sessionPickerState {
+func newSessionPickerState(previousInput string, theme colorTheme, noColor bool) routeState {
 	search := textinput.New()
 	search.Prompt = sessionPickerSearchPrompt
 	search.Placeholder = "Search…"
@@ -44,8 +31,8 @@ func newSessionPickerState(previousInput string, theme colorTheme, noColor bool)
 	search.SetStyles(sessionSearchStyles(theme, noColor))
 	search.Focus()
 
-	return sessionPickerState{
-		open:          true,
+	return routeState{
+		kind:          routeSessions,
 		search:        search,
 		previousInput: previousInput,
 		openedAt:      time.Now(),
@@ -53,13 +40,13 @@ func newSessionPickerState(previousInput string, theme colorTheme, noColor bool)
 }
 
 func (m *Model) openSessionPicker(previousInput string) tea.Cmd {
-	m.sessionPickerSeq++
-	m.sessionPicker = newSessionPickerState(previousInput, m.theme, m.options.NoColor)
-	m.sessionPicker.generation = m.sessionPickerSeq
-	m.sessionPicker.loading = true
+	m.routeSeq++
+	m.route = newSessionPickerState(previousInput, m.theme, m.options.NoColor)
+	m.route.generation = m.routeSeq
+	m.route.loading = true
 	m.composer.Reset()
 	m.setLayout()
-	generation := m.sessionPicker.generation
+	generation := m.route.generation
 
 	load := func() tea.Msg {
 		values, err := m.controller.ListSessions(m.ctx)
@@ -71,12 +58,12 @@ func (m *Model) openSessionPicker(previousInput string) tea.Cmd {
 		}
 	}
 
-	return tea.Batch(m.sessionPicker.search.Focus(), load)
+	return tea.Batch(m.route.search.Focus(), load)
 }
 
 func (m *Model) closeSessionPicker(restoreInput bool) {
-	previousInput := m.sessionPicker.previousInput
-	m.sessionPicker = sessionPickerState{}
+	previousInput := m.route.previousInput
+	m.route = routeState{}
 	if restoreInput {
 		m.composer.SetValue(previousInput)
 	} else {
@@ -87,7 +74,7 @@ func (m *Model) closeSessionPicker(restoreInput bool) {
 }
 
 func (m *Model) updateSessionPickerKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	if m.sessionPicker.controlling {
+	if m.route.kind != routeSessions || m.route.controlling {
 		return m, nil
 	}
 
@@ -101,26 +88,26 @@ func (m *Model) updateSessionPickerKey(message tea.KeyPressMsg) (tea.Model, tea.
 	values := m.filteredSessionPickerValues()
 	switch key {
 	case "up", "ctrl+p":
-		m.sessionPicker.cursor = wrapIndex(m.sessionPicker.cursor-1, len(values))
+		m.route.cursor = wrapIndex(m.route.cursor-1, len(values))
 	case keyDown, keyTab, "ctrl+n":
-		m.sessionPicker.cursor = wrapIndex(m.sessionPicker.cursor+1, len(values))
+		m.route.cursor = wrapIndex(m.route.cursor+1, len(values))
 	case keyEnter:
-		if len(values) == 0 || m.sessionPicker.loading || m.state.Phase != coding.PhaseIdle {
+		if len(values) == 0 || m.route.loading || m.state.Phase != coding.PhaseIdle {
 			return m, nil
 		}
 
 		return m, m.runControl(
 			operationResume,
-			values[m.sessionPicker.cursor].ID,
+			values[m.route.cursor].ID,
 			modelcatalog.Selection{},
 		)
 	default:
-		before := m.sessionPicker.search.Value()
+		before := m.route.search.Value()
 		var command tea.Cmd
-		m.sessionPicker.search, command = m.sessionPicker.search.Update(message)
-		if m.sessionPicker.search.Value() != before {
-			m.sessionPicker.cursor = 0
-			m.sessionPicker.err = nil
+		m.route.search, command = m.route.search.Update(message)
+		if m.route.search.Value() != before {
+			m.route.cursor = 0
+			m.route.err = nil
 		}
 
 		return m, command
@@ -130,9 +117,9 @@ func (m *Model) updateSessionPickerKey(message tea.KeyPressMsg) (tea.Model, tea.
 }
 
 func (m *Model) filteredSessionPickerValues() []session.Metadata {
-	query := strings.ToLower(strings.TrimSpace(m.sessionPicker.search.Value()))
-	filtered := make([]session.Metadata, 0, len(m.sessionPicker.sessions))
-	for _, value := range m.sessionPicker.sessions {
+	query := strings.ToLower(strings.TrimSpace(m.route.search.Value()))
+	filtered := make([]session.Metadata, 0, len(m.route.sessions))
+	for _, value := range m.route.sessions {
 		created := strings.ToLower(value.CreatedAt.Local().Format(time.DateTime))
 		matches := query == "" ||
 			strings.Contains(strings.ToLower(value.ID), query) ||
@@ -155,7 +142,7 @@ func (m *Model) sessionPickerView() tea.View {
 	view.AltScreen = false
 	view.MouseMode = tea.MouseModeNone
 	view.WindowTitle = appTitle
-	view.Cursor = m.sessionPicker.search.Cursor()
+	view.Cursor = m.route.search.Cursor()
 	if view.Cursor != nil {
 		view.Cursor.X += searchX
 		view.Cursor.Y += searchY
@@ -178,8 +165,8 @@ func (m *Model) sessionPickerContent() (string, int, int) {
 	}
 	search := m.sessionPickerSearchBox(width)
 	prefix := []string{invocation, "", separator, "", title, "", search}
-	searchY := lipgloss.Height(lipgloss.JoinVertical(lipgloss.Left, prefix[:len(prefix)-1]...)) + 1
-	searchX := 2
+	searchY := lipgloss.Height(lipgloss.JoinVertical(lipgloss.Left, prefix[:len(prefix)-1]...))
+	searchX := 0
 	footer := sessionPickerFooter(width)
 	if !m.options.NoColor {
 		footer = lipgloss.NewStyle().Foreground(paletteFor(m.theme).muted).Render(footer)
@@ -218,31 +205,18 @@ func (m *Model) sessionPickerSeparator(width int) string {
 }
 
 func (m *Model) sessionPickerSearchBox(width int) string {
-	if width < 5 {
-		return ansi.Truncate(m.sessionPicker.search.View(), width, "…")
-	}
-
-	innerWidth := max(1, width-4)
-	border := lipgloss.RoundedBorder()
-	style := lipgloss.NewStyle().Width(innerWidth).Padding(0, 1).Border(border, true)
-	if m.options.NoColor {
-		style = style.Border(lipgloss.NormalBorder(), true)
-	} else {
-		style = style.BorderForeground(paletteFor(m.theme).separator)
-	}
-
-	return style.Render(m.sessionPicker.search.View())
+	return ansi.Truncate(m.route.search.View(), max(1, width), "…")
 }
 
 func (m *Model) sessionPickerList(maximum int) string {
-	if m.sessionPicker.controlling {
+	if m.route.controlling {
 		return m.styleSessionPickerNotice("Resuming session…", false)
 	}
-	if m.sessionPicker.loading {
+	if m.route.loading {
 		return m.styleSessionPickerNotice("Loading sessions…", false)
 	}
-	if m.sessionPicker.err != nil {
-		return m.styleSessionPickerNotice("Error: "+safeError(m.sessionPicker.err), true)
+	if m.route.err != nil {
+		return m.styleSessionPickerNotice("Error: "+safeError(m.route.err), true)
 	}
 
 	values := m.filteredSessionPickerValues()
@@ -253,10 +227,10 @@ func (m *Model) sessionPickerList(maximum int) string {
 	rows := make([]string, len(values))
 	heights := make([]int, len(values))
 	for index, value := range values {
-		rows[index] = m.renderSessionPickerRow(value, index == m.sessionPicker.cursor)
+		rows[index] = m.renderSessionPickerRow(value, index == m.route.cursor)
 		heights[index] = lipgloss.Height(rows[index]) + 1
 	}
-	start, end := selectionWindowByHeight(heights, m.sessionPicker.cursor, maximum)
+	start, end := selectionWindowByHeight(heights, m.route.cursor, maximum)
 	visible := strings.Join(rows[start:end], "\n\n")
 
 	return truncateHeight(visible, maximum)
@@ -267,7 +241,7 @@ func (m *Model) renderSessionPickerRow(value session.Metadata, selected bool) st
 	contentWidth := max(1, width-inputPromptWidth)
 	title, identityLines := sessionPickerIdentity(value)
 	titleLines := strings.Split(lipgloss.Wrap(title, contentWidth, ""), "\n")
-	query := m.sessionPicker.search.Value()
+	query := m.route.search.Value()
 	for index := range titleLines {
 		prefix := strings.Repeat(" ", inputPromptWidth)
 		if index == 0 && selected {
@@ -319,7 +293,7 @@ func sessionPickerIdentity(value session.Metadata) (string, []string) {
 }
 
 func (m *Model) sessionPickerMetadata(value session.Metadata) string {
-	parts := []string{relativeSessionTime(value.CreatedAt, m.sessionPicker.openedAt)}
+	parts := []string{relativeSessionTime(value.CreatedAt, m.route.openedAt)}
 	countSuffix := ""
 	if value.Truncated {
 		countSuffix = "+"

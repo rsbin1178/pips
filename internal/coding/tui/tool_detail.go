@@ -5,12 +5,73 @@ import (
 	"fmt"
 	"strings"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/rsbin/pips/internal/coding/tools"
 )
 
 type toolDetailView struct {
 	title   string
 	content string
+}
+
+func (m *Model) openToolDetailRoute(detail toolDetailView) {
+	m.route = routeState{kind: routeToolDetail, toolDetail: &detail}
+	m.composer.Blur()
+}
+
+func (m *Model) updateToolDetailRouteKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	key := message.String()
+	if key == keyCtrlT || key == keyEscape || key == keyCtrlC {
+		m.route = routeState{}
+
+		return m, m.composer.Focus()
+	}
+
+	visible := max(1, m.height)
+	lineCount := strings.Count(m.toolDetailRouteContent(), "\n") + 1
+	maximum := max(0, lineCount-visible)
+	switch key {
+	case "up", "k":
+		m.route.offset = max(0, m.route.offset-1)
+	case keyDown, "j":
+		m.route.offset = min(maximum, m.route.offset+1)
+	case "pgup":
+		m.route.offset = max(0, m.route.offset-visible)
+	case "pgdown":
+		m.route.offset = min(maximum, m.route.offset+visible)
+	case "home":
+		m.route.offset = 0
+	case "end":
+		m.route.offset = maximum
+	}
+
+	return m, nil
+}
+
+func (m *Model) toolDetailRouteContent() string {
+	if m.route.toolDetail == nil {
+		return "Tool details\n\nNo Tool activity is available."
+	}
+
+	detail := m.route.toolDetail
+
+	return detail.title + "\n\n" + detail.content +
+		"\n\n↑/↓ or PgUp/PgDn scroll · Ctrl+T/Esc close"
+}
+
+func (m *Model) toolDetailRouteView() tea.View {
+	content := fitScrollableContent(
+		m.toolDetailRouteContent(),
+		max(1, m.width),
+		max(1, m.height),
+		m.route.offset,
+	)
+	view := tea.NewView(content)
+	view.AltScreen = false
+	view.MouseMode = tea.MouseModeNone
+	view.WindowTitle = appTitle
+
+	return view
 }
 
 func newToolDetailView(block timelineBlock) toolDetailView {
