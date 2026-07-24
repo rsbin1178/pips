@@ -297,4 +297,23 @@ func TestLimitsRejectUnsafeOverrides(t *testing.T) {
 	limits = DefaultLimits()
 	limits.MaxDuration = 31 * time.Minute
 	require.ErrorIs(t, validateLimits(limits), ErrInvalid)
+	limits = DefaultLimits()
+	limits.FinalizationTurns = limits.MaxTurns
+	require.ErrorIs(t, validateLimits(limits), ErrInvalid)
+	limits = DefaultLimits()
+	limits.RepeatedToolCallLimit = 17
+	require.ErrorIs(t, validateLimits(limits), ErrInvalid)
+}
+
+func TestNormalizeLimitsPreservesOlderPolicyRecords(t *testing.T) {
+	t.Parallel()
+
+	limits := DefaultLimits()
+	limits.FinalizationTurns = 0
+	limits.RepeatedToolCallLimit = 0
+
+	normalized := normalizeLimits(limits)
+	assert.Equal(t, DefaultLimits().FinalizationTurns, normalized.FinalizationTurns)
+	assert.Equal(t, DefaultLimits().RepeatedToolCallLimit, normalized.RepeatedToolCallLimit)
+	require.NoError(t, validateLimits(normalized))
 }

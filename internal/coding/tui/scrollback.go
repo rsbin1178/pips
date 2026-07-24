@@ -15,19 +15,23 @@ import (
 	"github.com/rsbin/pips/internal/coding/subagent"
 )
 
+const maxCommittedSubagentIDs = 256
+
 // scrollbackCursor separates immutable conversation history from the live
 // tail Bubble Tea still owns. Stable blocks are printed above the inline
 // Program once, so the terminal can retain, select, and scroll them natively.
 type scrollbackCursor struct {
-	messages    int
-	tools       int
-	subagents   int
-	diagnostics int
-	toolIDs     map[string]struct{}
-	completions map[string]struct{}
-	changes     projectionFingerprint
-	lastError   projectionFingerprint
-	streamError string
+	messages      int
+	tools         int
+	subagents     int
+	diagnostics   int
+	toolIDs       map[string]struct{}
+	subagentIDs   map[string]struct{}
+	subagentOrder []string
+	completions   map[string]struct{}
+	changes       projectionFingerprint
+	lastError     projectionFingerprint
+	streamError   string
 }
 
 type projectionFingerprint [sha256.Size]byte
@@ -185,15 +189,27 @@ func (m *Model) takeStableTimelineBlocks() []timelineBlock {
 	m.reconcileScrollback()
 
 	stableTools := m.scrollback.tools
+	heldSubagentTool := ""
 	for stableTools < len(m.state.Tools) &&
 		m.state.Tools[stableTools].Status == coding.ToolStatusCompleted {
+		if m.holdCompletedSubagentTool(m.state.Tools[stableTools]) {
+			heldSubagentTool = m.state.Tools[stableTools].Call.ID
+			break
+		}
 		stableTools++
+	}
+	if heldSubagentTool == "" && stableTools < len(m.state.Tools) &&
+		m.state.Tools[stableTools].Call.Name == subagent.ToolName {
+		heldSubagentTool = m.state.Tools[stableTools].Call.ID
 	}
 
 	stableMessages := len(m.state.Transcript)
+	if heldSubagentTool != "" {
+		stableMessages = m.heldToolMessageFrontier(heldSubagentTool)
+	}
 	if exploreStart, held := m.openTrailingExploreGroup(stableTools); held {
 		stableTools = exploreStart
-		stableMessages = m.heldExploreMessageFrontier(exploreStart)
+		stableMessages = min(stableMessages, m.heldExploreMessageFrontier(exploreStart))
 	}
 
 	stableSubagents := m.scrollback.subagents
@@ -221,7 +237,7 @@ func (m *Model) takeStableTimelineBlocks() []timelineBlock {
 		delta.LastError = nil
 	}
 
-	blocks := projectTimelineExcludingTools(delta, m.scrollback.toolIDs)
+	blocks := projectTimelineExcluding(delta, m.scrollback.toolIDs, m.scrollback.subagentIDs)
 
 	for _, marker := range m.pendingCompletionMarkers() {
 		if block, ok := projectCompletionMarker(marker); ok {
@@ -240,6 +256,7 @@ func (m *Model) takeStableTimelineBlocks() []timelineBlock {
 
 	for _, block := range blocks {
 		m.markToolActivitiesCommitted(block)
+		m.markSubagentCommitted(block)
 	}
 	for index := m.scrollback.tools; index < stableTools; index++ {
 		m.markToolIDCommitted(m.state.Tools[index].Call.ID)
@@ -271,8 +288,15 @@ func (m *Model) takeStableTimelineBlocks() []timelineBlock {
 }
 
 func (m *Model) renderTimelineBlocks(blocks []timelineBlock) string {
-	return renderTimelineContent(
-		blocks, m.markdown, m.width, m.theme, m.options.NoColor,
+	return m.renderTimelineBlocksWithOptions(blocks, timelineRenderOptions{})
+}
+
+func (m *Model) renderTimelineBlocksWithOptions(
+	blocks []timelineBlock,
+	options timelineRenderOptions,
+) string {
+	return renderTimelineContentWithOptions(
+		blocks, m.markdown, m.width, m.theme, m.options.NoColor, options,
 	)
 }
 
@@ -295,7 +319,7 @@ func (m *Model) activeTimelineBlocks() []timelineBlock {
 		active.LastError = nil
 	}
 
-	blocks := projectTimelineExcludingTools(active, m.scrollback.toolIDs)
+	blocks := projectTimelineExcluding(active, m.scrollback.toolIDs, m.scrollback.subagentIDs)
 	for _, marker := range m.pendingCompletionMarkers() {
 		if block, ok := projectCompletionMarker(marker); ok {
 			blocks = append(blocks, block)
@@ -320,6 +344,42 @@ func (m *Model) activeTimelineBlocks() []timelineBlock {
 	}
 
 	return blocks
+}
+
+func (m *Model) holdCompletedSubagentTool(tool coding.ToolState) bool {
+	if tool.Call.Name != subagent.ToolName {
+		return false
+	}
+
+	for _, child := range m.state.Subagents {
+		if tool.RunID != "" && child.ParentRunID == tool.RunID {
+			return !isTerminalSubagent(child.State)
+		}
+	}
+
+	if m.state.Interaction.Active {
+		return true
+	}
+	for _, run := range m.state.Runs {
+		if run.ID == tool.RunID {
+			return run.Active
+		}
+	}
+
+	return false
+}
+
+func (m *Model) heldToolMessageFrontier(callID string) int {
+	for messageIndex, message := range m.state.Transcript {
+		for _, part := range message.Parts {
+			call, ok := part.(ai.ToolCallPart)
+			if ok && call.ID == callID {
+				return max(m.scrollback.messages, messageIndex)
+			}
+		}
+	}
+
+	return m.scrollback.messages
 }
 
 // openTrailingExploreGroup reports the completed-tool frontier that must stay
@@ -476,6 +536,28 @@ func (m *Model) markToolIDCommitted(id string) {
 	}
 
 	m.scrollback.toolIDs[id] = struct{}{}
+}
+
+func (m *Model) markSubagentCommitted(block timelineBlock) {
+	if block.kind != blockSubagent || block.id == "" {
+		return
+	}
+	if m.scrollback.subagentIDs == nil {
+		m.scrollback.subagentIDs = make(map[string]struct{})
+	}
+	if _, committed := m.scrollback.subagentIDs[block.id]; committed {
+		return
+	}
+
+	m.scrollback.subagentIDs[block.id] = struct{}{}
+	m.scrollback.subagentOrder = append(m.scrollback.subagentOrder, block.id)
+	if len(m.scrollback.subagentOrder) <= maxCommittedSubagentIDs {
+		return
+	}
+
+	oldest := m.scrollback.subagentOrder[0]
+	delete(m.scrollback.subagentIDs, oldest)
+	m.scrollback.subagentOrder = m.scrollback.subagentOrder[1:]
 }
 
 func (m *Model) reconcileScrollback() {

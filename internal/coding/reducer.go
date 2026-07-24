@@ -57,18 +57,19 @@ type ToolState struct {
 // SubagentState is the bounded recent lifecycle projection used by live
 // frontends. Durable list/detail data is loaded from child Sessions.
 type SubagentState struct {
-	ChildSessionID string         `json:"child_session_id"`
-	ParentRunID    string         `json:"parent_run_id"`
-	ChildRunID     string         `json:"child_run_id,omitempty"`
-	Role           subagent.Role  `json:"role"`
-	State          subagent.State `json:"state"`
-	TaskPreview    string         `json:"task_preview,omitempty"`
-	Model          string         `json:"model"`
-	Code           string         `json:"code,omitempty"`
-	Turns          int            `json:"turns"`
-	ToolCalls      int            `json:"tool_calls"`
-	Usage          TokenUsage     `json:"usage"`
-	DurationMillis int64          `json:"duration_ms"`
+	ChildSessionID string                   `json:"child_session_id"`
+	ParentRunID    string                   `json:"parent_run_id"`
+	ChildRunID     string                   `json:"child_run_id,omitempty"`
+	Role           subagent.Role            `json:"role"`
+	State          subagent.State           `json:"state"`
+	TaskPreview    string                   `json:"task_preview,omitempty"`
+	Activity       subagent.ActivitySummary `json:"activity,omitzero"`
+	Model          string                   `json:"model"`
+	Code           string                   `json:"code,omitempty"`
+	Turns          int                      `json:"turns"`
+	ToolCalls      int                      `json:"tool_calls"`
+	Usage          TokenUsage               `json:"usage"`
+	DurationMillis int64                    `json:"duration_ms"`
 }
 
 // ApprovalKind identifies the approval overlay content.
@@ -508,10 +509,16 @@ func (state *State) applySubagent(event Event, payload SubagentLifecycle) error 
 		}
 	}
 
+	activity := payload.Activity
+	if activity == (subagent.ActivitySummary{}) {
+		activity = state.Subagents[index].Activity
+	}
+
 	state.Subagents[index] = SubagentState{
 		ChildSessionID: payload.ChildSessionID, ParentRunID: payload.ParentRunID,
 		ChildRunID: payload.ChildRunID, Role: payload.Role, State: payload.State,
-		TaskPreview: payload.TaskPreview, Model: payload.Model, Code: payload.Code,
+		TaskPreview: payload.TaskPreview, Activity: activity,
+		Model: payload.Model, Code: payload.Code,
 		Turns: payload.Turns, ToolCalls: payload.ToolCalls, Usage: payload.Usage,
 		DurationMillis: payload.DurationMillis,
 	}

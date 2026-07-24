@@ -106,9 +106,15 @@ func TestResolveActivity(t *testing.T) {
 						Status: coding.ToolStatusRunning,
 					},
 				),
-				coding.SubagentState{Role: subagent.RoleExplore, State: subagent.StateRunning},
+				coding.SubagentState{
+					Role: subagent.RoleExplore, State: subagent.StateRunning,
+					Activity: subagent.ActivitySummary{
+						Action: subagent.ActivityActionRead, Target: "runtime.go",
+					},
+				},
 			)},
-			kind: activityTool, label: activityLabelExploring, visible: true,
+			kind: activityTool, label: activityLabelExploring,
+			detail: "Read runtime.go", visible: true,
 		},
 		{
 			name: "approval takes priority over tool", context: activityContext{state: withApproval(

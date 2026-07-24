@@ -43,6 +43,20 @@ func TestApprovalOverlayDefaultsToDenyAndUsesExactResolution(t *testing.T) {
 	assert.Equal(t, overlayNone, model.overlay.kind)
 }
 
+func TestApprovalOverlayClosesSubagentRoute(t *testing.T) {
+	t.Parallel()
+
+	model := readyModelWithController(t, newOverlayController(approvalReviewState()), true)
+	model.subagentRoute = subagentRouteState{
+		open: true, childSessionID: "child-1",
+	}
+
+	model.syncApprovalOverlay()
+
+	assert.False(t, model.subagentRoute.open)
+	assert.Equal(t, overlayApproval, model.overlay.kind)
+}
+
 func TestUnknownApprovalRejectsUnlistedShortcuts(t *testing.T) {
 	t.Parallel()
 
