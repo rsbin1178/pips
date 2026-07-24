@@ -100,6 +100,47 @@ func TestScrollbackKeepsConversationGapAcrossIncrementalCommits(t *testing.T) {
 	assert.True(t, strings.HasPrefix(resumed, strings.Repeat("\n", conversationGapHeight)))
 }
 
+func TestManagedAssistantTailOwnsNativeScrollbackBoundaryImmediately(t *testing.T) {
+	t.Parallel()
+
+	model := readyModel(t, true)
+	model.state.Transcript = []ai.Message{ai.UserText("inspect the spacing")}
+	assert.Contains(t, commandOutput(model.commitStableTimeline()), "inspect the spacing")
+
+	model.state.Draft = []coding.MessageDelta{{
+		Kind: ai.StreamTextDelta,
+		Text: "I will inspect it now.",
+	}}
+	model.renderTranscript(false)
+
+	assert.True(
+		t,
+		strings.HasPrefix(model.timeline, strings.Repeat("\n", conversationGapHeight)),
+		"the mutable response must not wait for stable scrollback promotion to gain its conversation gap",
+	)
+	assert.Contains(t, model.timeline, "I will inspect it now.")
+}
+
+func TestManagedStreamingContinuationDoesNotRepeatNativeBoundary(t *testing.T) {
+	t.Parallel()
+
+	model := readyModel(t, true)
+	model.scrollbackOutput = true
+	model.streaming = streamProjection{
+		active:  true,
+		emitted: 1,
+		tail:    "continued row",
+	}
+	model.state.Draft = []coding.MessageDelta{{
+		Kind: ai.StreamTextDelta,
+		Text: "continued row",
+	}}
+	model.renderTranscript(false)
+
+	assert.False(t, strings.HasPrefix(model.timeline, "\n"))
+	assert.Contains(t, model.timeline, "continued row")
+}
+
 func TestScrollbackSplitsLongOutputWithinInlineInsertionBudget(t *testing.T) {
 	t.Parallel()
 
@@ -567,6 +608,13 @@ func TestScrollbackUpdatesOneSubagentCardAndCommitsOnlyTerminal(t *testing.T) {
 		Call:   coding.ToolCall{ID: "call-1", Name: subagent.ToolName},
 		Status: coding.ToolStatusRunning,
 	}}
+	model.state.Transcript = []ai.Message{
+		ai.Assistant(ai.ToolCallPart{
+			ID: "call-1", Name: subagent.ToolName,
+			Args: ai.JSON(`{"role":"plan","task":"Plan the change"}`),
+		}),
+		model.state.Tools[0].Result,
+	}
 	model.state.Subagents = []coding.SubagentState{{
 		ChildSessionID: "child-1", Role: subagent.RolePlan,
 		State: subagent.StateRunning, TaskPreview: "Plan the change", Model: "openai/test",
@@ -586,6 +634,100 @@ func TestScrollbackUpdatesOneSubagentCardAndCommitsOnlyTerminal(t *testing.T) {
 	assert.Contains(t, committed, "• Planned · Plan the change")
 	assert.Contains(t, committed, "Completed in 2s")
 	assert.Empty(t, model.takeStableTimeline())
+}
+
+func TestScrollbackHoldsCompletedSubagentToolUntilLifecycleIsTerminal(t *testing.T) {
+	t.Parallel()
+
+	model := readyModel(t, true)
+	model.state.Phase = coding.PhaseRunning
+	model.state.Interaction = coding.InteractionState{ID: "interaction-1", Active: true}
+	model.state.Tools = []coding.ToolState{{
+		RunID: "parent-run",
+		Call: coding.ToolCall{
+			ID: "call-1", Name: subagent.ToolName,
+			Arguments: ai.JSON(`{"role":"plan","task":"Plan the change"}`),
+		},
+		Status: coding.ToolStatusCompleted,
+		Result: ai.ToolResultText(
+			"call-1",
+			subagent.ToolName,
+			`{"schema":"pips.coding.subagent.result/v1alpha1","role":"plan","child_session_id":"child-1","outcome":"succeeded","code":"ok","duration_millis":2000}`,
+		),
+	}}
+	model.state.Transcript = []ai.Message{
+		ai.Assistant(ai.ToolCallPart{
+			ID: "call-1", Name: subagent.ToolName,
+			Args: ai.JSON(`{"role":"plan","task":"Plan the change"}`),
+		}),
+		model.state.Tools[0].Result,
+	}
+	model.state.Subagents = []coding.SubagentState{{
+		ChildSessionID: "child-1", ParentRunID: "parent-run",
+		Role: subagent.RolePlan, State: subagent.StateRunning,
+		TaskPreview: "Plan the change", Model: "openai/test",
+	}}
+
+	assert.Empty(t, model.takeStableTimeline())
+	active := renderTimelineContent(
+		model.activeTimelineBlocks(), model.markdown, model.width, model.theme, true,
+	)
+	assert.Equal(t, 1, strings.Count(active, "Planning · Plan the change"))
+
+	model.state.Subagents[0].State = subagent.StateSucceeded
+	model.state.Subagents[0].Code = "ok"
+	model.state.Subagents[0].DurationMillis = 2_000
+	committed := model.takeStableTimeline()
+	assert.Equal(t, 1, strings.Count(committed, "Planned · Plan the change"))
+	assert.Empty(t, model.takeStableTimeline())
+}
+
+func TestScrollbackSuppressesLateLifecycleAfterDurableSubagentRecovery(t *testing.T) {
+	t.Parallel()
+
+	model := readyModel(t, true)
+	model.state.Tools = []coding.ToolState{{
+		RunID: "parent-run",
+		Call: coding.ToolCall{
+			ID: "call-1", Name: subagent.ToolName,
+			Arguments: ai.JSON(`{"role":"explore","task":"Inspect runtime"}`),
+		},
+		Status: coding.ToolStatusCompleted,
+		Result: ai.ToolResultText(
+			"call-1",
+			subagent.ToolName,
+			`{"schema":"pips.coding.subagent.result/v1alpha1","role":"explore","child_session_id":"child-1","outcome":"succeeded","code":"ok","duration_millis":1000}`,
+		),
+	}}
+
+	recovered := model.takeStableTimeline()
+	assert.Equal(t, 1, strings.Count(recovered, "Explored · Inspect runtime"))
+
+	model.state.Subagents = []coding.SubagentState{{
+		ChildSessionID: "child-1", ParentRunID: "parent-run",
+		Role: subagent.RoleExplore, State: subagent.StateSucceeded,
+		TaskPreview: "Inspect runtime", Model: "openai/test", Code: "ok",
+	}}
+	assert.Empty(t, model.takeStableTimeline())
+	assert.Empty(t, renderTimelineContent(
+		model.activeTimelineBlocks(), model.markdown, model.width, model.theme, true,
+	))
+}
+
+func TestScrollbackBoundsCommittedSubagentIdentityLedger(t *testing.T) {
+	t.Parallel()
+
+	model := readyModel(t, true)
+	for index := range maxCommittedSubagentIDs + 1 {
+		model.markSubagentCommitted(timelineBlock{
+			kind: blockSubagent, id: fmt.Sprintf("child-%d", index),
+		})
+	}
+
+	assert.Len(t, model.scrollback.subagentIDs, maxCommittedSubagentIDs)
+	assert.Len(t, model.scrollback.subagentOrder, maxCommittedSubagentIDs)
+	assert.NotContains(t, model.scrollback.subagentIDs, "child-0")
+	assert.Contains(t, model.scrollback.subagentIDs, fmt.Sprintf("child-%d", maxCommittedSubagentIDs))
 }
 
 func TestScrollbackResetReprojectsNavigatedSession(t *testing.T) {

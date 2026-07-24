@@ -24,6 +24,7 @@ import (
 const (
 	compactToolPreviewLines = 4
 	compactExploreRows      = 6
+	maximumExpandedToolRows = 256
 	maximumToolDetailBytes  = 16 << 10
 	toolNameRead            = "read"
 	toolNameList            = "ls"
@@ -570,13 +571,196 @@ func renderToolActivityBlock(
 	)
 }
 
-func renderDetailedToolActivityBlock(
+type expandedToolRow struct {
+	prefix string
+	text   string
+	state  toolActivityState
+	output bool
+}
+
+func renderExpandedToolActivityBlock(
 	block timelineBlock,
 	width int,
 	theme colorTheme,
 	noColor bool,
 ) string {
-	return renderToolActivityBlockWithLimit(block, width, theme, noColor, 0)
+	if len(block.tools) == 0 {
+		return ""
+	}
+	width = max(1, width)
+
+	state := combinedToolState(block.tools)
+	class := block.tools[0].class
+	glyph, verb, subject := toolActivityHeading(class, state, block.tools)
+	lines := []string{renderToolHeading(glyph, verb, subject, state, width, theme, noColor)}
+	for _, row := range expandedToolActivityRows(class, block.tools, width) {
+		lines = append(lines, renderExpandedToolRow(row, width, theme, noColor))
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+func expandedToolActivityRows(
+	class toolActivityClass,
+	activities []toolActivity,
+	width int,
+) []expandedToolRow {
+	rows := make([]expandedToolRow, 0, len(activities)*2)
+
+	switch class {
+	case toolClassExplore:
+		for index, activity := range activities {
+			last := index == len(activities)-1
+			branch := "  ├ "
+			outputBranch := "  │   └ "
+			outputContinuation := "  │     "
+			if last {
+				branch = "  └ "
+				outputBranch = "      └ "
+				outputContinuation = "        "
+			}
+
+			rows = append(rows, expandedToolRow{
+				prefix: branch,
+				text:   expandedToolCallLabel(activity),
+				state:  activity.state,
+			})
+			appendExpandedToolOutput(
+				&rows,
+				activity,
+				outputBranch,
+				outputContinuation,
+				width,
+			)
+		}
+	case toolClassGeneric:
+		activity := activities[0]
+		rows = append(rows, expandedToolRow{
+			prefix: "  └ ", text: expandedToolCallLabel(activity), state: activity.state,
+		})
+		appendExpandedToolOutput(&rows, activity, "      └ ", "        ", width)
+	case toolClassShell, toolClassPatch:
+		appendExpandedToolOutput(&rows, activities[0], "  └ ", "    ", width)
+	}
+
+	return rows
+}
+
+func expandedToolCallLabel(activity toolActivity) string {
+	label := strings.TrimSpace(activity.action + " " + activity.subject)
+	if activity.class == toolClassGeneric {
+		label = activity.invocation
+	}
+	if label == "" {
+		label = activity.name
+	}
+	if activity.state == toolStateFailed || activity.state == toolStateInterrupted {
+		label += " · " + toolActivityReason(activity)
+	}
+
+	return label
+}
+
+func appendExpandedToolOutput(
+	rows *[]expandedToolRow,
+	activity toolActivity,
+	firstPrefix string,
+	continuationPrefix string,
+	width int,
+) {
+	output := expandedToolOutput(activity)
+	if output == "" {
+		return
+	}
+
+	first := true
+	outputRows := 0
+	for logicalLine := range strings.SplitSeq(output, "\n") {
+		prefix := continuationPrefix
+		if first {
+			prefix = firstPrefix
+		}
+		available := max(1, width-lipgloss.Width(prefix))
+		var wrapped string
+		if available <= 8 {
+			wrapped = ansi.Truncate(logicalLine, available, "…")
+		} else {
+			wrapped = lipgloss.Wrap(logicalLine, available, "")
+		}
+
+		for line := range strings.SplitSeq(wrapped, "\n") {
+			if outputRows >= maximumExpandedToolRows {
+				*rows = append(*rows, expandedToolRow{
+					prefix: continuationPrefix,
+					text:   "… output truncated …",
+					state:  activity.state,
+					output: true,
+				})
+
+				return
+			}
+
+			prefix = continuationPrefix
+			if first {
+				prefix = firstPrefix
+			}
+			*rows = append(*rows, expandedToolRow{
+				prefix: prefix,
+				text:   line,
+				state:  activity.state,
+				output: true,
+			})
+			first = false
+			outputRows++
+		}
+	}
+}
+
+func expandedToolOutput(activity toolActivity) string {
+	parts := make([]string, 0, 2)
+	if facts := toolResultFacts(activity); facts != "" {
+		parts = append(parts, facts)
+	}
+	if result := toolDetailResult(activity); result != "" {
+		parts = append(parts, result)
+	} else if update := truncateText(
+		sanitizeToolText(activity.update), maximumToolDetailBytes,
+	); update != "" {
+		parts = append(parts, update)
+	}
+
+	return strings.Join(parts, "\n")
+}
+
+func renderExpandedToolRow(
+	row expandedToolRow,
+	width int,
+	theme colorTheme,
+	noColor bool,
+) string {
+	line := ansi.Truncate(row.prefix+row.text, max(1, width), "…")
+	if noColor {
+		return line
+	}
+
+	palette := paletteFor(theme)
+	tone := palette.idle
+	if row.output {
+		tone = palette.muted
+	}
+	switch row.state {
+	case toolStateRunning:
+		if !row.output {
+			tone = palette.model
+		}
+	case toolStateFailed:
+		tone = palette.error
+	case toolStateInterrupted:
+		tone = palette.warning
+	case toolStateSucceeded:
+	}
+
+	return lipgloss.NewStyle().Foreground(tone).Render(line)
 }
 
 func renderToolActivityBlockWithLimit(

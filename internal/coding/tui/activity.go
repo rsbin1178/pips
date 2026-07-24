@@ -162,9 +162,7 @@ func resolveProgressActivity(context activityContext) (activityStatus, bool) {
 		if len(activities) == 1 {
 			activity := activities[0]
 			if activity.name == subagent.ToolName {
-				return activityStatus{
-					kind: activityTool, label: runningSubagentLabel(context.state.Subagents),
-				}, true
+				return runningSubagentStatus(context.state.Subagents), true
 			}
 
 			return semanticToolActivityStatus(activity), true
@@ -249,7 +247,9 @@ func allExplorationActivities(activities []toolActivity) bool {
 	return len(activities) > 0
 }
 
-func runningSubagentLabel(values []coding.SubagentState) string {
+//nolint:wsl_v5 // Role and semantic detail form one compact live status.
+func runningSubagentStatus(values []coding.SubagentState) activityStatus {
+	status := activityStatus{kind: activityTool, label: "Running subagent…"}
 	for _, value := range slices.Backward(values) {
 		if value.State != subagent.StateCreated && value.State != subagent.StateRunning {
 			continue
@@ -257,15 +257,18 @@ func runningSubagentLabel(values []coding.SubagentState) string {
 
 		switch value.Role {
 		case subagent.RoleExplore:
-			return activityLabelExploring
+			status.label = activityLabelExploring
 		case subagent.RolePlan:
-			return "Planning…"
+			status.label = "Planning…"
 		case subagent.RoleReview:
-			return "Reviewing…"
+			status.label = "Reviewing…"
 		}
+		status.detail = subagentActivitySummary(value.Activity)
+
+		return status
 	}
 
-	return "Running subagent…"
+	return status
 }
 
 func resolvePhaseActivity(phase coding.Phase) (activityStatus, bool) {

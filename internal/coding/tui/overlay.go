@@ -39,41 +39,32 @@ const (
 )
 
 type overlayState struct {
-	kind           overlayKind
-	cursor         int
-	query          string
-	err            error
-	loading        bool
-	refreshing     bool
-	refreshPending bool
-	refreshErr     error
-	generation     uint64
-	childSessionID string
-	choices        []approval.Choice
-	models         []modelcatalog.Entry
-	selection      modelcatalog.Selection
-	controlling    bool
-	offset         int
-	tree           coding.SessionTree
-	preview        coding.CompactionPreview
-	forkMode       bool
-	agents         []subagent.Summary
-	agentDetail    *subagent.Detail
-	toolDetail     *toolDetailView
+	kind        overlayKind
+	cursor      int
+	query       string
+	err         error
+	loading     bool
+	generation  uint64
+	choices     []approval.Choice
+	models      []modelcatalog.Entry
+	selection   modelcatalog.Selection
+	controlling bool
+	offset      int
+	tree        coding.SessionTree
+	preview     coding.CompactionPreview
+	forkMode    bool
+	agents      []subagent.Summary
+	toolDetail  *toolDetailView
 }
 
 type overlayDataMsg struct {
-	kind           overlayKind
-	err            error
-	tree           coding.SessionTree
-	preview        coding.CompactionPreview
-	agents         []subagent.Summary
-	detail         subagent.Detail
-	hasAgents      bool
-	hasDetail      bool
-	background     bool
-	generation     uint64
-	childSessionID string
+	kind       overlayKind
+	err        error
+	tree       coding.SessionTree
+	preview    coding.CompactionPreview
+	agents     []subagent.Summary
+	hasAgents  bool
+	generation uint64
 }
 
 type controlOperation uint8
@@ -161,6 +152,9 @@ func (m *Model) syncApprovalOverlay() {
 
 		return
 	}
+	if m.subagentRoute.open {
+		m.subagentRoute = subagentRouteState{}
+	}
 
 	choices := approvalChoices(m.state.Approval)
 	if m.commandPicker.open {
@@ -227,33 +221,18 @@ func (m *Model) updateOverlayKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 func (m *Model) handleDetailOverlayClose(key string) (tea.Cmd, bool) {
 	if m.overlay.kind == overlayToolDetail &&
-		(key == "ctrl+t" || isOverlayDismissKey(key)) {
+		(key == keyCtrlT || isOverlayDismissKey(key)) {
 		m.overlay = overlayState{}
 
 		return m.composer.Focus(), true
 	}
-	if m.overlay.kind != overlayAgents {
-		return nil, false
-	}
-	if key == "ctrl+t" {
+	if m.overlay.kind == overlayAgents && key == keyCtrlT {
 		m.overlay = overlayState{}
 
 		return m.composer.Focus(), true
 	}
-	if m.overlay.agentDetail == nil || !isOverlayDismissKey(key) {
-		return nil, false
-	}
 
-	m.overlay.agentDetail = nil
-	m.overlay.offset = 0
-	m.overlay.loading = false
-	m.overlay.refreshing = false
-	m.overlay.refreshPending = false
-	m.overlay.refreshErr = nil
-	m.overlay.childSessionID = ""
-	m.overlay.generation = m.nextOverlayGeneration()
-
-	return nil, true
+	return nil, false
 }
 
 func isOverlayDismissKey(key string) bool {
@@ -562,7 +541,7 @@ func (m *Model) renderOverlay(base string) string {
 	if m.width < 32 {
 		boxWidth = max(1, m.width)
 	}
-	content = fitOverlayContent(content, boxWidth-4, max(1, m.height-4), m.overlay.offset)
+	content = fitScrollableContent(content, boxWidth-4, max(1, m.height-4), m.overlay.offset)
 
 	border := lipgloss.RoundedBorder()
 	style := lipgloss.NewStyle().Width(max(1, boxWidth-4)).Padding(1)
@@ -907,7 +886,7 @@ func renderChoices(choices []approval.Choice, cursor int) string {
 	return strings.Join(lines, "\n")
 }
 
-func fitOverlayContent(content string, width, height, offset int) string {
+func fitScrollableContent(content string, width, height, offset int) string {
 	lines := strings.Split(content, "\n")
 	if len(lines) > height {
 		visible := max(1, height-1)

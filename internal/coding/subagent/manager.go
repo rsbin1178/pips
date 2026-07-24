@@ -2,13 +2,17 @@ package subagent
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path"
 	"slices"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/rsbin/pips/agent"
 	"github.com/rsbin/pips/agent/catalog"
@@ -19,7 +23,12 @@ import (
 	"github.com/rsbin/pips/internal/coding/workspace"
 )
 
-const readToolName = "read"
+const (
+	readToolName   = "read"
+	listToolName   = "ls"
+	globToolName   = "glob"
+	searchToolName = "grep"
+)
 
 // ExecutionOptions provides embedder/test overrides without adding a user
 // configuration protocol in P1. A zero Limits value selects DefaultLimits.
@@ -81,6 +90,8 @@ func New(config Config) (*Manager, error) {
 		limits = DefaultLimits()
 	}
 
+	limits = normalizeLimits(limits)
+
 	if err := validateLimits(limits); err != nil {
 		return nil, err
 	}
@@ -129,7 +140,7 @@ func buildReadTools(config Config) ([]agent.Tool, error) {
 		return nil, err
 	}
 
-	names := []string{readToolName, "ls", "glob", "grep"}
+	names := []string{readToolName, listToolName, globToolName, searchToolName}
 	policy := catalog.Policy{
 		TenantID:  config.Parent.Metadata().WorkspaceID,
 		Allowlist: slices.Clone(names),
@@ -350,18 +361,24 @@ func (m *Manager) Close(ctx context.Context) error {
 type runTracker struct {
 	mu sync.Mutex
 
-	started   bool
-	runID     string
-	turns     int
-	toolCalls int
-	exhausted bool
-	usage     ai.Usage
-	value     any
-	text      string
-	err       error
-	activity  Activity
-	toolIndex map[string]int
-	maxTools  int
+	started              bool
+	runID                string
+	turns                int
+	toolCalls            int
+	exhausted            bool
+	finalizing           bool
+	finalizationInjected bool
+	lastToolFingerprint  [sha256.Size]byte
+	repeatedToolCalls    int
+	repeatWarningIssued  bool
+	usage                ai.Usage
+	value                any
+	text                 string
+	err                  error
+	activity             Activity
+	activitySummary      ActivitySummary
+	toolIndex            map[string]int
+	maxTools             int
 }
 
 type progressSnapshot struct {
@@ -369,6 +386,7 @@ type progressSnapshot struct {
 	turns     int
 	toolCalls int
 	usage     ai.Usage
+	activity  ActivitySummary
 }
 
 func newRunTracker(startedAt time.Time, maxTools int) *runTracker {
@@ -421,12 +439,42 @@ func (m *Manager) run(
 	onEvent := func(eventCtx context.Context, event agent.Event) {
 		m.observeChild(eventCtx, child, observer, created, tracker, event)
 	}
-	options := []agent.Option{
-		agent.WithName("subagent/" + string(execution.request.Role)),
+	options := m.agentOptions(execution.request.Role, child, tracker, spec, useNativeResponseFormat)
+
+	childHarness, err := harness.New(
+		m.config.Model,
+		child.Session(),
+		harness.WithSystem(instructions),
+		harness.WithTools(m.tools...),
+		harness.WithOnEvent(onEvent),
+		harness.WithAgentOptions(options...),
+	)
+	if err == nil {
+		var result *agent.RunResult
+
+		result, err = childHarness.Prompt(ctx, execution.request.Task)
+		m.finishExecution(ctx, execution, child, observer, created, tracker, startedAt, result, err)
+
+		return
+	}
+
+	m.finishExecution(ctx, execution, child, observer, created, tracker, startedAt, nil, err)
+}
+
+//nolint:gocyclo,wsl_v5 // Each option keeps its execution boundary beside the policy it enforces.
+func (m *Manager) agentOptions(
+	role Role,
+	child *session.Handle,
+	tracker *runTracker,
+	spec roleSpec,
+	useNativeResponseFormat bool,
+) []agent.Option {
+	return []agent.Option{
+		agent.WithName("subagent/" + string(role)),
 		agent.WithMaxTurns(m.limits.MaxTurns),
 		agent.WithMaxTokens(m.limits.MaxTokens),
 		agent.WithParallelTools(1),
-		agent.WithBeforeTool(func(_ context.Context, _ agent.ToolCallInfo) agent.ToolDecision {
+		agent.WithBeforeTool(func(_ context.Context, info agent.ToolCallInfo) agent.ToolDecision {
 			tracker.mu.Lock()
 			defer tracker.mu.Unlock()
 
@@ -436,6 +484,22 @@ func (m *Manager) run(
 			}
 
 			tracker.toolCalls++
+			switch tracker.trackToolFingerprintLocked(
+				info.ToolCall,
+				m.limits.RepeatedToolCallLimit,
+			) {
+			case repeatedToolContinue:
+			case repeatedToolWarn:
+				return agent.DenyTool(
+					"identical tool call repeated; choose a different action or finalize from existing evidence",
+				)
+			case repeatedToolFinalize:
+				tracker.finalizing = true
+
+				return agent.DenyTool(
+					"identical tool call repeated after a no-progress warning; finalize from existing evidence",
+				)
+			}
 
 			return agent.ToolDecision{}
 		}),
@@ -444,6 +508,43 @@ func (m *Manager) run(
 			defer tracker.mu.Unlock()
 
 			return tracker.exhausted
+		}),
+		agent.WithPrepareTurn(func(_ context.Context, info agent.RunInfo) agent.TurnUpdate {
+			tracker.mu.Lock()
+			workingTurns := m.limits.MaxTurns - m.limits.FinalizationTurns
+			shouldFinalize := tracker.finalizing || info.Turns >= workingTurns
+			alreadyFinalizing := tracker.finalizing && tracker.finalizationInjected
+			if shouldFinalize {
+				tracker.finalizing = true
+			}
+			tracker.mu.Unlock()
+
+			if !shouldFinalize || alreadyFinalizing {
+				return agent.TurnUpdate{}
+			}
+
+			contextSnapshot, err := child.Session().Context()
+			if err != nil {
+				tracker.mu.Lock()
+				tracker.err = errors.Join(tracker.err, err)
+				tracker.mu.Unlock()
+
+				return agent.TurnUpdate{}
+			}
+
+			messages := append(
+				slices.Clone(contextSnapshot.Messages),
+				ai.UserText(finalizationInstruction),
+			)
+
+			tracker.mu.Lock()
+			tracker.finalizationInjected = true
+			tracker.mu.Unlock()
+
+			return agent.TurnUpdate{
+				ReplaceMessages: messages,
+				Tools:           []agent.Tool{},
+			}
 		}),
 		agent.WithOutputGuardrail("subagent_result", func(
 			_ context.Context,
@@ -480,25 +581,59 @@ func (m *Manager) run(
 			}
 		}),
 	}
+}
 
-	childHarness, err := harness.New(
-		m.config.Model,
-		child.Session(),
-		harness.WithSystem(instructions),
-		harness.WithTools(m.tools...),
-		harness.WithOnEvent(onEvent),
-		harness.WithAgentOptions(options...),
-	)
-	if err == nil {
-		var result *agent.RunResult
+const finalizationInstruction = `[System] The evidence-gathering phase is complete and tools are now disabled.
+Return the required final response now using only evidence already collected.
+Do not request more tools or describe unfinished work.`
 
-		result, err = childHarness.Prompt(ctx, execution.request.Task)
-		m.finishExecution(ctx, execution, child, observer, created, tracker, startedAt, result, err)
+type repeatedToolAction uint8
 
-		return
+const (
+	repeatedToolContinue repeatedToolAction = iota
+	repeatedToolWarn
+	repeatedToolFinalize
+)
+
+func (t *runTracker) trackToolFingerprintLocked(call agent.ToolCall, limit int) repeatedToolAction {
+	fingerprint := toolFingerprint(call)
+	if fingerprint == t.lastToolFingerprint {
+		t.repeatedToolCalls++
+	} else {
+		t.lastToolFingerprint = fingerprint
+		t.repeatedToolCalls = 1
+		t.repeatWarningIssued = false
 	}
 
-	m.finishExecution(ctx, execution, child, observer, created, tracker, startedAt, nil, err)
+	if t.repeatedToolCalls < limit {
+		return repeatedToolContinue
+	}
+
+	if !t.repeatWarningIssued {
+		t.repeatWarningIssued = true
+
+		return repeatedToolWarn
+	}
+
+	return repeatedToolFinalize
+}
+
+func toolFingerprint(call agent.ToolCall) [sha256.Size]byte {
+	arguments := call.Args
+
+	var decoded any
+	if err := json.Unmarshal(call.Args, &decoded); err == nil {
+		if canonical, marshalErr := json.Marshal(decoded); marshalErr == nil {
+			arguments = canonical
+		}
+	}
+
+	input := make([]byte, 0, len(call.Name)+1+len(arguments))
+	input = append(input, call.Name...)
+	input = append(input, 0)
+	input = append(input, arguments...)
+
+	return sha256.Sum256(input)
 }
 
 func (m *Manager) observeChild(
@@ -550,6 +685,7 @@ func trackChildEvent(
 	return progressSnapshot{
 		runID: tracker.runID, turns: tracker.turns,
 		toolCalls: tracker.toolCalls, usage: tracker.usage,
+		activity: tracker.activitySummary,
 	}, needsStart, visibleChange
 }
 
@@ -610,6 +746,7 @@ func (t *runTracker) trackToolStartLocked(event agent.Event) bool {
 		return false
 	}
 
+	t.activitySummary = summarizeToolActivity(*event.Call)
 	t.activity.Phase = ActivityPhaseWorking
 
 	return true
@@ -711,7 +848,100 @@ func (t *runTracker) snapshot() (progressSnapshot, Activity) {
 
 	return progressSnapshot{
 		runID: t.runID, turns: t.turns, toolCalls: t.toolCalls, usage: t.usage,
+		activity: t.activitySummary,
 	}, cloneActivity(t.activity)
+}
+
+//nolint:wsl_v5 // Each known Tool keeps decode, semantic mapping, and scope assembly together.
+func summarizeToolActivity(call ai.ToolCallPart) ActivitySummary {
+	var arguments struct {
+		Path    string `json:"path"`
+		Pattern string `json:"pattern"`
+	}
+	if err := json.Unmarshal(call.Args, &arguments); err != nil {
+		return ActivitySummary{}
+	}
+
+	summary := ActivitySummary{}
+	switch call.Name {
+	case readToolName:
+		summary.Action = ActivityActionRead
+		summary.Target = safeActivityPath(arguments.Path)
+	case searchToolName:
+		summary.Action = ActivityActionSearch
+		summary.Target = arguments.Pattern
+		if scope := safeActivityPath(arguments.Path); scope != "" {
+			summary.Target += " in " + scope
+		}
+	case globToolName:
+		summary.Action = ActivityActionGlob
+		summary.Target = arguments.Pattern
+		if scope := safeActivityPath(arguments.Path); scope != "" {
+			summary.Target += " in " + scope
+		}
+	case listToolName:
+		summary.Action = ActivityActionList
+		summary.Target = safeActivityPath(arguments.Path)
+		if summary.Target == "" {
+			summary.Target = "."
+		}
+	default:
+		return ActivitySummary{}
+	}
+
+	summary.Target = boundedActivityTarget(summary.Target)
+	if summary.Target == "" {
+		return ActivitySummary{}
+	}
+
+	return summary
+}
+
+//nolint:wsl_v5 // Normalization and rejection form one disclosure boundary.
+func safeActivityPath(value string) string {
+	value = boundedActivityTarget(value)
+	normalized := strings.ReplaceAll(value, "\\", "/")
+	cleaned := path.Clean(normalized)
+	if strings.HasPrefix(normalized, "/") || cleaned == ".." ||
+		strings.HasPrefix(cleaned, "../") ||
+		len(normalized) >= 2 && normalized[1] == ':' {
+		return ""
+	}
+
+	return value
+}
+
+//nolint:wsl_v5 // Sanitization and both bounds are one disclosure operation.
+func boundedActivityTarget(value string) string {
+	value = strings.Map(func(character rune) rune {
+		if unicode.IsControl(character) {
+			return ' '
+		}
+
+		return character
+	}, value)
+	value = strings.Join(strings.Fields(value), " ")
+	const (
+		maximumRunes = 160
+		maximumBytes = 512
+	)
+	if utf8.RuneCountInString(value) <= maximumRunes && len(value) <= maximumBytes {
+		return value
+	}
+
+	var bounded strings.Builder
+	runeCount := 0
+	for _, character := range value {
+		if runeCount >= maximumRunes-1 ||
+			bounded.Len()+utf8.RuneLen(character)+len("…") > maximumBytes {
+			break
+		}
+		bounded.WriteRune(character)
+		runeCount++
+	}
+	bounded.WriteString("…")
+
+	return bounded.String()
 }
 
 func cloneActivity(value Activity) Activity {
@@ -763,6 +993,7 @@ func (m *Manager) emitChildProgress(
 	progress.Turns = snapshot.turns
 	progress.ToolCalls = snapshot.toolCalls
 	progress.Usage = snapshot.usage
+	progress.Activity = snapshot.activity
 	progress.Time = event.Time
 
 	if err := emitObserver(ctx, observer, progress); err != nil {
@@ -801,6 +1032,7 @@ func (m *Manager) finishExecution(
 	toolCalls := tracker.toolCalls
 	usage := tracker.usage
 	exhausted := tracker.exhausted
+	activity := tracker.activitySummary
 	tracker.mu.Unlock()
 
 	if trackedErr != nil {
@@ -858,7 +1090,9 @@ func (m *Manager) finishExecution(
 		finalErr = fmt.Errorf("coding subagent: %s (%s)", result.Outcome, result.Code)
 	}
 
-	observerErr := emitObserver(context.WithoutCancel(ctx), observer, eventFromRecord(terminal))
+	terminalEvent := eventFromRecord(terminal)
+	terminalEvent.Activity = activity
+	observerErr := emitObserver(context.WithoutCancel(ctx), observer, terminalEvent)
 	finalErr = errors.Join(finalErr, observerErr)
 	cleanupErr = errors.Join(cleanupErr, observerErr)
 

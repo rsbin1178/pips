@@ -313,6 +313,9 @@ func TestSafeDisclosureMatrix(t *testing.T) {
 				Role: subagent.RoleExplore, State: subagent.StateCreated,
 				ChildSessionID: "child-1", ParentRunID: "run-1",
 				Model: "openai/test", TaskPreview: secret,
+				Activity: subagent.ActivitySummary{
+					Action: subagent.ActivityActionRead, Target: secret,
+				},
 			}),
 		},
 		{
@@ -523,6 +526,9 @@ func eventCases() []eventCase {
 				Role: subagent.RoleExplore, State: subagent.StateRunning,
 				ChildSessionID: "child-1", ParentRunID: "run-1", ChildRunID: "child-run",
 				Model: "openai/test", TaskPreview: "inspect runtime",
+				Activity: subagent.ActivitySummary{
+					Action: subagent.ActivityActionSearch, Target: "Runtime in internal/coding",
+				},
 				Turns: 1, ToolCalls: 2, Usage: usage,
 			},
 		)},
@@ -532,6 +538,9 @@ func eventCases() []eventCase {
 				Role: subagent.RoleExplore, State: subagent.StateSucceeded,
 				ChildSessionID: "child-1", ParentRunID: "run-1", ChildRunID: "child-run",
 				Model: "openai/test", TaskPreview: "inspect runtime", Code: "ok",
+				Activity: subagent.ActivitySummary{
+					Action: subagent.ActivityActionSearch, Target: "Runtime in internal/coding",
+				},
 				Stop: agent.StopEndTurn, Turns: 1, ToolCalls: 2, Usage: usage, DurationMillis: 25,
 			},
 		)},

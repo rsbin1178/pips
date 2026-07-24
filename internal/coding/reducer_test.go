@@ -238,6 +238,9 @@ func TestReduceSubagentLifecycleIsBoundedAndStrict(t *testing.T) {
 			Role: subagent.RoleExplore, State: subagent.StateRunning,
 			ChildSessionID: "child-1", ParentRunID: "run-1", ChildRunID: "child-run",
 			Model: "openai/test", TaskPreview: "inspect", Turns: 1, ToolCalls: 2,
+			Activity: subagent.ActivitySummary{
+				Action: subagent.ActivityActionRead, Target: "runtime.go",
+			},
 		}),
 		newTestEvent(EventSubagentCompleted, SubagentLifecycle{
 			Role: subagent.RoleExplore, State: subagent.StateSucceeded,
@@ -255,6 +258,9 @@ func TestReduceSubagentLifecycleIsBoundedAndStrict(t *testing.T) {
 	}
 	require.Len(t, state.Subagents, 1)
 	assert.Equal(t, subagent.StateSucceeded, state.Subagents[0].State)
+	assert.Equal(t, subagent.ActivitySummary{
+		Action: subagent.ActivityActionRead, Target: "runtime.go",
+	}, state.Subagents[0].Activity)
 
 	late := events[6]
 	late.Sequence = state.Sequence + 1

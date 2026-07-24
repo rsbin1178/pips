@@ -177,9 +177,14 @@ func TestAgentsCommandOpensCurrentSessionListAndDetail(t *testing.T) {
 		Duration: 2 * time.Second, Code: "ok",
 	}
 	controller.agents = []subagent.Summary{summary}
-	controller.agentDetail = subagent.Detail{Summary: summary, Result: subagent.ExploreResult{
-		Summary: "Found it.",
-	}}
+	controller.agentDetail = subagent.Detail{
+		Summary: summary,
+		Transcript: []ai.Message{
+			ai.UserText("Locate runtime wiring."),
+			ai.AssistantText(`{"summary":"Found it.","evidence":[],"unknowns":[]}`),
+		},
+		Result: subagent.ExploreResult{Summary: "Found it."},
+	}
 	model := readyModelWithController(t, controller, true)
 	model.openCommandPicker()
 	for _, character := range "agents" {
@@ -196,14 +201,17 @@ func TestAgentsCommandOpensCurrentSessionListAndDetail(t *testing.T) {
 	require.NotNil(t, inspect)
 	driveModelCommands(t, model, inspect)
 	content := model.View().Content
-	assert.Contains(t, content, "• Explored")
-	assert.Contains(t, content, "Task")
-	assert.Contains(t, content, "child-1")
+	assert.True(t, model.subagentRoute.open)
+	assert.Equal(t, overlayAgents, model.overlay.kind)
+	assert.Contains(t, content, "❯ Locate runtime wiring.")
 	assert.Contains(t, content, "Found it.")
-	assert.NotContains(t, content, "Transcript")
+	assert.Contains(t, content, "[✻ Worked for 2s]")
+	assert.NotContains(t, content, "Subagent · explore · succeeded")
+	assert.NotContains(t, content, "Activity")
+	assert.NotContains(t, content, "Details")
 
 	model.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
-	assert.Nil(t, model.overlay.agentDetail)
+	assert.False(t, model.subagentRoute.open)
 	assert.Equal(t, overlayAgents, model.overlay.kind)
 }
 
@@ -231,12 +239,15 @@ func TestCtrlTTogglesSubagentDetailFromDurableToolEnvelope(t *testing.T) {
 	require.NotNil(t, command)
 	driveModelCommands(t, model, command)
 	assert.Equal(t, []string{"child-durable"}, controller.agentInspections)
-	assert.Equal(t, overlayAgents, model.overlay.kind)
-	assert.NotNil(t, model.overlay.agentDetail)
+	assert.Equal(t, overlayNone, model.overlay.kind)
+	assert.True(t, model.subagentRoute.open)
+	assert.NotNil(t, model.subagentRoute.detail)
+	assert.NotContains(t, model.View().Content, "Subagent · review")
 
 	model.Update(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
 	assert.Equal(t, overlayNone, model.overlay.kind)
-	assert.Nil(t, model.overlay.agentDetail)
+	assert.False(t, model.subagentRoute.open)
+	assert.Nil(t, model.subagentRoute.detail)
 	assert.True(t, model.composer.Focused())
 }
 

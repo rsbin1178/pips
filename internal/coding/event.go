@@ -280,19 +280,20 @@ type ToolCompleted struct {
 // Child transcript, Tool arguments, paths, and structured results are loaded
 // from the child Session only and never copied into this payload.
 type SubagentLifecycle struct {
-	Role           subagent.Role    `json:"role"`
-	State          subagent.State   `json:"state"`
-	ChildSessionID string           `json:"child_session_id"`
-	ParentRunID    string           `json:"parent_run_id"`
-	ChildRunID     string           `json:"child_run_id,omitempty"`
-	Model          string           `json:"model"`
-	TaskPreview    string           `json:"task_preview,omitempty"`
-	Code           string           `json:"code,omitempty"`
-	Stop           agent.StopReason `json:"stop,omitempty"`
-	Turns          int              `json:"turns"`
-	ToolCalls      int              `json:"tool_calls"`
-	Usage          TokenUsage       `json:"usage"`
-	DurationMillis int64            `json:"duration_ms"`
+	Role           subagent.Role            `json:"role"`
+	State          subagent.State           `json:"state"`
+	ChildSessionID string                   `json:"child_session_id"`
+	ParentRunID    string                   `json:"parent_run_id"`
+	ChildRunID     string                   `json:"child_run_id,omitempty"`
+	Model          string                   `json:"model"`
+	TaskPreview    string                   `json:"task_preview,omitempty"`
+	Activity       subagent.ActivitySummary `json:"activity,omitzero"`
+	Code           string                   `json:"code,omitempty"`
+	Stop           agent.StopReason         `json:"stop,omitempty"`
+	Turns          int                      `json:"turns"`
+	ToolCalls      int                      `json:"tool_calls"`
+	Usage          TokenUsage               `json:"usage"`
+	DurationMillis int64                    `json:"duration_ms"`
 }
 
 // ApprovalRequired describes an exact pending operation for the approval overlay.
@@ -623,12 +624,14 @@ func validateSubagentLifecycle(eventType EventType, value SubagentLifecycle) err
 	return validateSubagentStateFields(value)
 }
 
+//nolint:gocyclo // Closed lifecycle/action enums are validated together at the event boundary.
 func validateSubagentLifecycleFields(value SubagentLifecycle) error {
 	if validateEventID("child session id", value.ChildSessionID, true) != nil ||
 		validateEventID("parent run id", value.ParentRunID, true) != nil ||
 		validateOptionalID(value.ChildRunID) != nil ||
 		!validIdentifierText(value.Model, maxEventIDBytes, false) ||
 		!validBoundedText(value.TaskPreview, 1024, true) ||
+		!validBoundedText(value.Activity.Target, 512, true) ||
 		value.Turns < 0 || value.ToolCalls < 0 || !validTokenUsage(value.Usage) ||
 		value.DurationMillis < 0 || value.DurationMillis > maxEventDurationMS {
 		return errors.New("invalid subagent lifecycle fields")
@@ -638,8 +641,25 @@ func validateSubagentLifecycleFields(value SubagentLifecycle) error {
 	default:
 		return errors.New("invalid subagent role")
 	}
+	if !validSubagentActivity(value.Activity) {
+		return errors.New("invalid subagent activity")
+	}
 
 	return nil
+}
+
+func validSubagentActivity(value subagent.ActivitySummary) bool {
+	if value.Action == "" {
+		return value.Target == ""
+	}
+
+	switch value.Action {
+	case subagent.ActivityActionRead, subagent.ActivityActionSearch,
+		subagent.ActivityActionGlob, subagent.ActivityActionList:
+		return value.Target != ""
+	default:
+		return false
+	}
 }
 
 func expectedSubagentEvent(eventType EventType, state subagent.State) (EventType, error) {

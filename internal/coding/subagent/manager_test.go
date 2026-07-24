@@ -3,13 +3,16 @@ package subagent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/rsbin/pips/agent"
 	"github.com/rsbin/pips/ai"
@@ -85,6 +88,67 @@ func TestManagerRunsEachRoleWithExactReadOnlyCatalog(t *testing.T) {
 			assert.Equal(t, ai.RoleAssistant, detail.Transcript[1].Role)
 		})
 	}
+}
+
+func TestSummarizeToolActivityExposesOnlyBoundedSemanticFields(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		call ai.ToolCallPart
+		want ActivitySummary
+	}{
+		{
+			name: "read",
+			call: ai.ToolCallPart{Name: "read", Args: ai.JSON(`{"path":"internal/coding/runtime.go","token":"secret"}`)},
+			want: ActivitySummary{Action: ActivityActionRead, Target: "internal/coding/runtime.go"},
+		},
+		{
+			name: "search",
+			call: ai.ToolCallPart{Name: "grep", Args: ai.JSON(`{"pattern":"SubagentState","path":"internal/coding"}`)},
+			want: ActivitySummary{Action: ActivityActionSearch, Target: "SubagentState in internal/coding"},
+		},
+		{
+			name: "control characters",
+			call: ai.ToolCallPart{Name: "read", Args: ai.JSON("{\"path\":\"a\\n\\u0001b\"}")},
+			want: ActivitySummary{Action: ActivityActionRead, Target: "a b"},
+		},
+		{
+			name: "unknown tool",
+			call: ai.ToolCallPart{Name: "shell", Args: ai.JSON(`{"command":"print secret"}`)},
+		},
+		{
+			name: "outside workspace",
+			call: ai.ToolCallPart{Name: "read", Args: ai.JSON(`{"path":"safe/../../secret"}`)},
+		},
+		{
+			name: "invalid arguments",
+			call: ai.ToolCallPart{Name: "read", Args: ai.JSON(`{`)},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, test.want, summarizeToolActivity(test.call))
+		})
+	}
+}
+
+func TestSummarizeToolActivityBoundsMultibyteTarget(t *testing.T) {
+	t.Parallel()
+
+	summary := summarizeToolActivity(ai.ToolCallPart{
+		Name: readToolName,
+		Args: ai.JSON(fmt.Sprintf(`{"path":"%s"}`, strings.Repeat("🙂", 200))),
+	})
+
+	assert.Equal(t, ActivityActionRead, summary.Action)
+	assert.LessOrEqual(t, len(summary.Target), 512)
+	assert.LessOrEqual(t, utf8.RuneCountInString(summary.Target), 160)
+	assert.True(t, utf8.ValidString(summary.Target))
+	assert.True(t, strings.HasSuffix(summary.Target, "…"))
 }
 
 func TestRunTrackerProjectsDefensiveLiveActivity(t *testing.T) {
@@ -193,6 +257,182 @@ func TestManagerInspectOverlaysInFlightToolActivity(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, Activity{}, replayed.Activity)
 	assert.Equal(t, StateSucceeded, replayed.Summary.State)
+}
+
+func TestManagerReservesFinalTurnWithoutTools(t *testing.T) {
+	t.Parallel()
+
+	limits := DefaultLimits()
+	limits.MaxTurns = 3
+	first := ai.ToolCallPart{
+		ID: "call-1", Name: readToolName, Args: ai.JSON(`{"path":"first.txt"}`),
+	}
+	second := ai.ToolCallPart{
+		ID: "call-2", Name: readToolName, Args: ai.JSON(`{"path":"second.txt"}`),
+	}
+	model := &testModel{responses: []*ai.Response{
+		responseToolCall(first),
+		responseToolCall(second),
+		responseText(`{"summary":"done","evidence":[],"unknowns":[]}`),
+	}}
+	fixture := newManagerFixtureWithOptions(t, model, ExecutionOptions{Limits: limits})
+	require.NoError(t, os.WriteFile(filepath.Join(fixture.root, "first.txt"), []byte("first"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(fixture.root, "second.txt"), []byte("second"), 0o600))
+
+	execution, err := fixture.manager.Start(
+		t.Context(), Request{Role: RoleExplore, Task: "Read both files."}, nil,
+	)
+	require.NoError(t, err)
+	result, err := execution.Wait(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, OutcomeSucceeded, result.Outcome)
+	assert.Equal(t, agent.StopEndTurn, result.Stop)
+	assert.Equal(t, 3, result.Turns)
+
+	requests := model.Requests()
+	require.Len(t, requests, 3)
+	assert.NotEmpty(t, requests[0].Tools)
+	assert.NotEmpty(t, requests[1].Tools)
+	assert.Empty(t, requests[2].Tools)
+	assert.Equal(t, finalizationInstruction, messageText(requests[2].Messages[len(requests[2].Messages)-1]))
+}
+
+//nolint:wsl_v5 // Scripted turns and filesystem fixtures intentionally stay adjacent.
+func TestManagerAllowsProductiveWorkBeyondFormerTwelveTurnLimit(t *testing.T) {
+	t.Parallel()
+
+	const workingTurns = 13
+	responses := make([]*ai.Response, 0, workingTurns+1)
+	for index := range workingTurns {
+		responses = append(responses, responseToolCall(ai.ToolCallPart{
+			ID: fmt.Sprintf("call-%d", index+1), Name: readToolName,
+			Args: ai.JSON(fmt.Sprintf(`{"path":"file-%d.txt"}`, index+1)),
+		}))
+	}
+	responses = append(
+		responses,
+		responseText(`{"summary":"done","evidence":[],"unknowns":[]}`),
+	)
+
+	model := &testModel{responses: responses}
+	fixture := newManagerFixture(t, model)
+	for index := range workingTurns {
+		require.NoError(t, os.WriteFile(
+			filepath.Join(fixture.root, fmt.Sprintf("file-%d.txt", index+1)),
+			[]byte("content"),
+			0o600,
+		))
+	}
+
+	execution, err := fixture.manager.Start(
+		t.Context(), Request{Role: RoleExplore, Task: "Inspect every fixture."}, nil,
+	)
+	require.NoError(t, err)
+	result, err := execution.Wait(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, OutcomeSucceeded, result.Outcome)
+	assert.Equal(t, workingTurns+1, result.Turns)
+
+	requests := model.Requests()
+	require.Len(t, requests, workingTurns+1)
+	assert.NotEmpty(t, requests[workingTurns].Tools)
+}
+
+//nolint:wsl_v5 // Scripted repeated calls and finalization assertions form one scenario.
+func TestManagerWarnsThenFinalizesAfterRepeatedToolCalls(t *testing.T) {
+	t.Parallel()
+
+	limits := DefaultLimits()
+	limits.MaxTurns = 6
+	repeatLimit := DefaultLimits().RepeatedToolCallLimit
+	responses := make([]*ai.Response, 0, repeatLimit+2)
+	for index := range repeatLimit + 1 {
+		responses = append(responses, responseToolCall(ai.ToolCallPart{
+			ID: fmt.Sprintf("call-%d", index+1), Name: readToolName,
+			Args: ai.JSON(`{"path":"sentinel.txt"}`),
+		}))
+	}
+	responses = append(
+		responses,
+		responseText(`{"summary":"bounded","evidence":[],"unknowns":[]}`),
+	)
+
+	model := &testModel{responses: responses}
+	fixture := newManagerFixtureWithOptions(t, model, ExecutionOptions{Limits: limits})
+	require.NoError(t, os.WriteFile(
+		filepath.Join(fixture.root, "sentinel.txt"), []byte("content"), 0o600,
+	))
+
+	execution, err := fixture.manager.Start(
+		t.Context(), Request{Role: RoleExplore, Task: "Avoid looping."}, nil,
+	)
+	require.NoError(t, err)
+	result, err := execution.Wait(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, OutcomeSucceeded, result.Outcome)
+	assert.Equal(t, repeatLimit+2, result.Turns)
+
+	requests := model.Requests()
+	require.Len(t, requests, repeatLimit+2)
+	assert.NotEmpty(t, requests[repeatLimit].Tools)
+	assert.Empty(t, requests[len(requests)-1].Tools)
+	assert.Equal(
+		t,
+		finalizationInstruction,
+		messageText(requests[len(requests)-1].Messages[len(requests[len(requests)-1].Messages)-1]),
+	)
+}
+
+//nolint:wsl_v5 // Scripted repeated calls and recovery assertions form one scenario.
+func TestManagerRecoversWhenToolCallChangesAfterRepeatWarning(t *testing.T) {
+	t.Parallel()
+
+	limits := DefaultLimits()
+	limits.MaxTurns = 7
+	repeatLimit := limits.RepeatedToolCallLimit
+	responses := make([]*ai.Response, 0, repeatLimit+2)
+	for index := range repeatLimit {
+		responses = append(responses, responseToolCall(ai.ToolCallPart{
+			ID: fmt.Sprintf("repeat-%d", index+1), Name: readToolName,
+			Args: ai.JSON(`{"path":"sentinel.txt"}`),
+		}))
+	}
+	responses = append(
+		responses,
+		responseToolCall(ai.ToolCallPart{
+			ID: "different", Name: readToolName,
+			Args: ai.JSON(`{"path":"recovery.txt"}`),
+		}),
+		responseText(`{"summary":"recovered","evidence":[],"unknowns":[]}`),
+	)
+
+	model := &testModel{responses: responses}
+	fixture := newManagerFixtureWithOptions(t, model, ExecutionOptions{Limits: limits})
+	require.NoError(t, os.WriteFile(
+		filepath.Join(fixture.root, "sentinel.txt"), []byte("content"), 0o600,
+	))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(fixture.root, "recovery.txt"), []byte("content"), 0o600,
+	))
+
+	execution, err := fixture.manager.Start(
+		t.Context(), Request{Role: RoleExplore, Task: "Recover from a repeated read."}, nil,
+	)
+	require.NoError(t, err)
+	result, err := execution.Wait(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, OutcomeSucceeded, result.Outcome)
+	assert.Equal(t, repeatLimit+2, result.Turns)
+
+	requests := model.Requests()
+	require.Len(t, requests, repeatLimit+2)
+	for _, request := range requests {
+		assert.NotEmpty(t, request.Tools)
+		assert.NotEqual(
+			t, finalizationInstruction,
+			messageText(request.Messages[len(request.Messages)-1]),
+		)
+	}
 }
 
 func TestManagerOmitsNativeSchemaForModelWithoutStructuredOutput(t *testing.T) {
