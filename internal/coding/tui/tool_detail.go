@@ -14,17 +14,14 @@ type toolDetailView struct {
 	content string
 }
 
-func (m *Model) openToolDetailRoute(detail toolDetailView) {
-	m.route = routeState{kind: routeToolDetail, toolDetail: &detail}
-	m.composer.Blur()
+func (m *Model) openToolDetailRoute(detail toolDetailView) tea.Cmd {
+	return m.requestRouteOpen(routeOpenRequest{kind: routeToolDetail, toolDetail: &detail})
 }
 
 func (m *Model) updateToolDetailRouteKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := message.String()
 	if key == keyCtrlT || key == keyEscape || key == keyCtrlC {
-		m.route = routeState{}
-
-		return m, m.composer.Focus()
+		return m, m.closeRouteToParent()
 	}
 
 	visible := max(1, m.height)

@@ -93,6 +93,10 @@ func subagentChildSessionID(
 }
 
 func (m *Model) openAgentsRoute() tea.Cmd {
+	return m.requestRouteOpen(routeOpenRequest{kind: routeAgents})
+}
+
+func (m *Model) activateAgentsRoute() tea.Cmd {
 	m.routeSeq++
 	m.route = routeState{kind: routeAgents, loading: true, generation: m.routeSeq}
 	m.composer.Blur()
@@ -108,9 +112,7 @@ func (m *Model) openAgentsRoute() tea.Cmd {
 //nolint:gocyclo // The keyboard map is kept explicit for the full-width route.
 func (m *Model) updateAgentsRouteKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if key := message.String(); key == keyEscape || key == keyCtrlT || key == keyCtrlC {
-		m.route = routeState{}
-
-		return m, m.composer.Focus()
+		return m, m.closeRouteToParent()
 	}
 	if m.route.loading {
 		return m, nil
@@ -540,9 +542,7 @@ func (m *Model) updateSubagentRouteKey(message tea.KeyPressMsg) (tea.Model, tea.
 
 	switch key {
 	case keyCtrlT, keyCtrlC:
-		m.route = routeState{}
-
-		return m, m.composer.Focus()
+		return m, m.closeRouteToParent()
 	case keyEscape:
 		if len(m.route.agents) > 0 {
 			m.route.kind = routeAgents
@@ -670,13 +670,18 @@ func (m *Model) subagentRouteStatusLine() string {
 
 func (m *Model) openSubagentRoute(childSessionID string) tea.Cmd {
 	previous := m.route
+
+	return m.requestRouteOpen(newSubagentRouteRequest(previous, childSessionID))
+}
+
+func (m *Model) activateSubagentRoute(request routeOpenRequest) tea.Cmd {
 	m.routeSeq++
 	m.route = routeState{
 		kind: routeSubagent, loading: true, generation: m.routeSeq,
-		childSessionID: childSessionID, agents: previous.agents,
-		query: previous.query, cursor: previous.cursor,
+		childSessionID: request.childSessionID, agents: request.agents,
+		query: request.query, cursor: request.cursor,
 	}
-	if child, ok := m.childStates[childSessionID]; ok {
+	if child, ok := m.childStates[request.childSessionID]; ok {
 		state := child.Clone()
 		m.route.childState = &state
 	}
@@ -684,14 +689,14 @@ func (m *Model) openSubagentRoute(childSessionID string) tea.Cmd {
 	generation := m.route.generation
 
 	return func() tea.Msg {
-		state, stateErr := m.controller.InspectSubagentState(m.ctx, childSessionID)
-		detail, detailErr := m.controller.InspectSubagent(m.ctx, childSessionID)
+		state, stateErr := m.controller.InspectSubagentState(m.ctx, request.childSessionID)
+		detail, detailErr := m.controller.InspectSubagent(m.ctx, request.childSessionID)
 
 		return subagentRouteDataMsg{
 			detail: detail, hasDetail: detailErr == nil,
 			state: state, hasState: stateErr == nil,
 			err:        errors.Join(stateErr, detailErr),
-			generation: generation, childSessionID: childSessionID,
+			generation: generation, childSessionID: request.childSessionID,
 		}
 	}
 }

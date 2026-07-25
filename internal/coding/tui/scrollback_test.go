@@ -100,6 +100,126 @@ func TestScrollbackKeepsConversationGapAcrossIncrementalCommits(t *testing.T) {
 	assert.True(t, strings.HasPrefix(resumed, strings.Repeat("\n", conversationGapHeight)))
 }
 
+func TestParentScrollbackDefersWhileFullAreaRouteOwnsView(t *testing.T) {
+	t.Parallel()
+
+	model := readyModel(t, true)
+	model.route = routeState{kind: routeSubagent, childSessionID: "child-1"}
+	model.state.Transcript = []ai.Message{ai.UserText("keep this in the parent")}
+	model.state.Draft = []coding.MessageDelta{{
+		Kind: ai.StreamTextDelta,
+		Text: "parent response is still changing",
+	}}
+
+	command := model.commitStableTimeline()
+
+	assert.Nil(t, command)
+	assert.Zero(t, model.scrollback.messages)
+	assert.Zero(t, model.scrollback.tools)
+	assert.False(t, model.streaming.active)
+}
+
+func TestFullAreaRouteWaitsForIssuedScrollback(t *testing.T) {
+	t.Parallel()
+
+	model := readyModel(t, true)
+	model.Update(tea.WindowSizeMsg{Width: 48, Height: 14})
+	model.presentation = presentationState{}
+
+	write := model.printScrollback("parent row before route transition")
+	require.NotNil(t, write)
+	model.state.Transcript = []ai.Message{ai.UserText("arrived during the issued write")}
+
+	model.openSubagentRoute("child-1")
+	assert.Equal(
+		t,
+		routeNone,
+		model.route.kind,
+		"the parent must retain presentation ownership until issued Println messages finish",
+	)
+	assert.Zero(
+		t,
+		model.scrollback.messages,
+		"a pending route must not start a competing parent scrollback transaction",
+	)
+
+	for _, message := range sequenceMessages(t, write) {
+		model.Update(message)
+	}
+
+	assert.Equal(t, routeSubagent, model.route.kind)
+	assert.Equal(t, "child-1", model.route.childSessionID)
+}
+
+func TestReturningFromSubagentFlushesHiddenParentStreamOnce(t *testing.T) {
+	t.Parallel()
+
+	model := readyModel(t, true)
+	model.Update(tea.WindowSizeMsg{Width: 64, Height: 16})
+	model.presentation = presentationState{}
+	model.scrollbackOutput = false
+	model.state.Phase = coding.PhaseRunning
+	model.state.Interaction.Active = true
+	model.state.Transcript = []ai.Message{ai.UserText("design the middleware")}
+	model.state.Draft = []coding.MessageDelta{{
+		Kind: ai.StreamTextDelta,
+		Text: "first parent row\npartial",
+	}}
+
+	beforeRoute := driveModelCommandsCapture(t, model, model.commitStableTimeline())
+	require.Contains(t, ansi.Strip(beforeRoute), "design the middleware")
+
+	model.route = routeState{kind: routeSubagent, childSessionID: "child-1"}
+	model.state.Phase = coding.PhaseIdle
+	model.state.Interaction = coding.InteractionState{}
+	model.state.Transcript = []ai.Message{
+		ai.UserText("design the middleware"),
+		ai.AssistantText("first parent row\npartial response completed"),
+	}
+	model.state.Draft = nil
+	model.state.Tools = []coding.ToolState{{
+		Call:   coding.ToolCall{ID: "call-1", Name: "read"},
+		Status: coding.ToolStatusCompleted,
+	}}
+
+	assert.Nil(t, model.commitStableTimeline())
+
+	_, command := model.Update(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
+	require.NotNil(t, command)
+	afterRoute := driveModelCommandsCapture(t, model, command)
+	combined := ansi.Strip(beforeRoute + "\n" + afterRoute)
+
+	assert.Equal(t, routeNone, model.route.kind)
+	assert.Equal(t, 1, strings.Count(combined, "design the middleware"))
+	assert.Equal(t, 1, strings.Count(combined, "first parent row"))
+	assert.Equal(t, 1, strings.Count(combined, "partial response completed"))
+	assert.Equal(t, 1, strings.Count(combined, "Read"))
+	assert.Less(t, strings.Index(combined, "design the middleware"), strings.Index(combined, "first parent row"))
+	assert.Less(t, strings.Index(combined, "first parent row"), strings.Index(combined, "Read"))
+}
+
+func TestApprovalCancelsPendingRouteTransition(t *testing.T) {
+	t.Parallel()
+
+	model := readyModel(t, true)
+	model.presentation = presentationState{}
+	write := model.printScrollback("parent output before approval")
+	require.NotNil(t, write)
+
+	model.openSubagentRoute("child-1")
+	require.True(t, model.presentation.pendingRoute.pending())
+	model.state = approvalReviewState()
+	model.syncApprovalPrompt()
+
+	for _, message := range sequenceMessages(t, write) {
+		model.Update(message)
+	}
+
+	assert.Equal(t, routeNone, model.route.kind)
+	assert.False(t, model.presentation.pendingRoute.pending())
+	assert.Equal(t, promptApproval, model.prompt.kind)
+}
+
 func TestManagedAssistantTailOwnsNativeScrollbackBoundaryImmediately(t *testing.T) {
 	t.Parallel()
 
@@ -322,6 +442,39 @@ func TestScrollbackFlushesShrunkenManagedViewBeforeInlineInsert(t *testing.T) {
 	)
 }
 
+func TestBubbleTeaRouteTransitionFollowsNativeScrollbackInsert(t *testing.T) {
+	t.Parallel()
+
+	model := readyModel(t, true)
+	model.Update(tea.WindowSizeMsg{Width: 40, Height: 10})
+	model.presentation = presentationState{}
+	probe := &routeBarrierRenderProbe{Model: model}
+
+	var output bytes.Buffer
+	program := tea.NewProgram(
+		probe,
+		tea.WithInput(nil),
+		tea.WithOutput(&output),
+		tea.WithEnvironment([]string{"TERM=xterm-256color", "NO_COLOR=1"}),
+		tea.WithWindowSize(40, 10),
+		tea.WithFPS(60),
+		tea.WithoutSignalHandler(),
+	)
+
+	_, err := program.Run()
+	require.NoError(t, err)
+	assert.Equal(t, routeNone, probe.routeAtPrint)
+	assert.Equal(t, routeNone, probe.routeBeforeDone)
+	assert.Equal(t, routeToolDetail, probe.routeAfterDone)
+
+	rendered := ansi.Strip(output.String())
+	parentAt := strings.Index(rendered, "PARENT-NATIVE")
+	childAt := strings.Index(rendered, "CHILD-ROUTE")
+	require.GreaterOrEqual(t, parentAt, 0)
+	require.GreaterOrEqual(t, childAt, 0)
+	assert.Less(t, parentAt, childAt)
+}
+
 func TestStreamingDraftPromotesCompletedRowsAndKeepsManagedFrameStable(t *testing.T) {
 	t.Parallel()
 
@@ -415,6 +568,43 @@ func (p *cursorRefreshRenderProbe) Init() tea.Cmd {
 
 func (p *cursorRefreshRenderProbe) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	_, command := p.Model.Update(message)
+
+	return p, command
+}
+
+type routeBarrierRenderProbe struct {
+	*Model
+	routeAtPrint    routeKind
+	routeBeforeDone routeKind
+	routeAfterDone  routeKind
+}
+
+func (p *routeBarrierRenderProbe) Init() tea.Cmd {
+	write := p.printScrollback("PARENT-NATIVE")
+	_ = p.openToolDetailRoute(toolDetailView{
+		title: "CHILD-ROUTE", content: "route owns the managed frame",
+	})
+
+	return tea.Sequence(
+		write,
+		tea.Tick(4*renderFrame, func(time.Time) tea.Msg { return tea.Quit() }),
+	)
+}
+
+func (p *routeBarrierRenderProbe) Update(message tea.Msg) (tea.Model, tea.Cmd) {
+	value := reflect.ValueOf(message)
+	if value.IsValid() && value.Type().PkgPath() == "charm.land/bubbletea/v2" &&
+		value.Type().Name() == "printLineMessage" {
+		p.routeAtPrint = p.route.kind
+	}
+	if _, ok := message.(scrollbackWriteDoneMsg); ok {
+		p.routeBeforeDone = p.route.kind
+	}
+
+	_, command := p.Model.Update(message)
+	if _, ok := message.(scrollbackWriteDoneMsg); ok {
+		p.routeAfterDone = p.route.kind
+	}
 
 	return p, command
 }

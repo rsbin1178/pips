@@ -19,6 +19,10 @@ type treeRouteDataMsg struct {
 }
 
 func (m *Model) openTreeRoute(forkMode bool) tea.Cmd {
+	return m.requestRouteOpen(routeOpenRequest{kind: routeTree, forkMode: forkMode})
+}
+
+func (m *Model) activateTreeRoute(forkMode bool) tea.Cmd {
 	m.routeSeq++
 	m.route = routeState{kind: routeTree, loading: true, generation: m.routeSeq, forkMode: forkMode}
 	m.composer.Blur()
@@ -34,9 +38,7 @@ func (m *Model) openTreeRoute(forkMode bool) tea.Cmd {
 func (m *Model) updateTreeRouteKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := message.String()
 	if key == keyEscape || key == keyCtrlC {
-		m.route = routeState{}
-
-		return m, m.composer.Focus()
+		return m, m.closeRouteToParent()
 	}
 
 	values := m.filteredTreeNodes()
