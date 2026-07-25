@@ -300,7 +300,7 @@ func TestReadyRecordsCompletionMarkerOnceAndClearsInvalidAnchors(t *testing.T) {
 	detail := newToolDetailView(timelineBlock{kind: blockTool, tools: []toolActivity{{
 		id: "tool-1", name: "read", class: toolClassExplore,
 	}}})
-	model.openToolDetailRoute(detail)
+	driveModelCommands(t, model, model.openToolDetailRoute(detail))
 	model.Update(controlResultMsg{operation: operationNew})
 	assert.Empty(t, model.completionMarkers)
 	assert.Equal(t, routeToolDetail, model.route.kind)
@@ -641,6 +641,11 @@ func readyModelWithController(
 	_, command := model.Update(bootstrapResult{controller: controller})
 	if model.starting {
 		driveModelCommands(t, model, command)
+	} else {
+		// Most unit tests intentionally skip the startup command. Discard the
+		// matching presentation transaction as well so later route assertions
+		// do not wait for a command this harness chose not to execute.
+		model.presentation = presentationState{}
 	}
 
 	return model

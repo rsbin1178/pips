@@ -42,6 +42,10 @@ func (m *Model) resetScrollback() {
 }
 
 func (m *Model) commitStableTimeline() tea.Cmd {
+	if m.route.kind != routeNone || m.presentation.pendingRoute.pending() {
+		return nil
+	}
+
 	managedHeight := lipgloss.Height(m.readyView().Content)
 	blocks := m.takeStableTimelineBlocks()
 	writes := m.streamingScrollbackWrites(blocks)
@@ -107,7 +111,8 @@ func (m *Model) printPreparedScrollback(content string, waitForRender bool) tea.
 	maximumRows := max(1, m.height-managedHeight)
 	chunks := splitScrollbackContent(content, m.width, maximumRows)
 
-	commands := make([]tea.Cmd, 0, len(chunks)+2)
+	writeSequence := m.presentation.beginScrollbackWrite()
+	commands := make([]tea.Cmd, 0, len(chunks)+3)
 	// The renderer flushes on its own frame clock. When a multi-line live
 	// draft becomes stable, the Model has already removed it from the managed
 	// View, but insertAbove can still observe the previous full-height cell
@@ -128,6 +133,10 @@ func (m *Model) printPreparedScrollback(content string, waitForRender bool) tea.
 
 		commands = append(commands, tea.Println(chunk))
 	}
+
+	commands = append(commands, func() tea.Msg {
+		return scrollbackWriteDoneMsg{sequence: writeSequence}
+	})
 
 	// Bubble Tea v2.0.8 resets its renderer cursor after insertAbove, then
 	// skips an identical View. Keep a cursor-only change alive across one

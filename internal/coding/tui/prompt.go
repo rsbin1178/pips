@@ -62,9 +62,10 @@ func (m *Model) syncApprovalPrompt() {
 	if m.picker.kind == pickerCommand {
 		m.closeCommandPicker(true)
 	}
+	m.presentation.pendingRoute = routeOpenRequest{}
 	hadRoute := m.route.kind != routeNone
 	if m.route.kind == routeSessions {
-		m.closeSessionPicker(true)
+		m.dismissSessionPicker(true)
 	} else {
 		m.route = routeState{}
 	}

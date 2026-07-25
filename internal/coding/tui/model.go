@@ -100,6 +100,7 @@ type Model struct {
 	picker            pickerState
 	route             routeState
 	routeSeq          uint64
+	presentation      presentationState
 	prompt            promptState
 	promptSeq         uint64
 	completionMarkers []completionMarker
@@ -426,7 +427,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case routeControl:
 			if m.route.kind == routeSessions {
-				m.closeSessionPicker(false)
+				m.dismissSessionPicker(false)
 			} else {
 				m.route = routeState{}
 			}
@@ -467,6 +468,8 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case scrollbackRenderReadyMsg:
 		return m, nil
+	case scrollbackWriteDoneMsg:
+		return m, m.finishScrollbackWrite(message.sequence)
 	case scrollbackCursorRefreshMsg:
 		if message.sequence != m.cursorRefreshSeq {
 			return m, nil
@@ -991,9 +994,8 @@ func (m *Model) toggleLatestTool() tea.Cmd {
 				return m.openSubagentRoute(block.tools[0].childSessionID)
 			}
 			detail := newToolDetailView(block)
-			m.openToolDetailRoute(detail)
 
-			return nil
+			return m.openToolDetailRoute(detail)
 		case blockUser, blockAssistant, blockDraft, blockDiagnostic,
 			blockChange, blockError, blockCompletion:
 		}
@@ -1049,6 +1051,10 @@ func (m *Model) actionContext() actionContext {
 type renderTickMsg struct{}
 
 type scrollbackCursorRefreshMsg struct {
+	sequence uint64
+}
+
+type scrollbackWriteDoneMsg struct {
 	sequence uint64
 }
 
