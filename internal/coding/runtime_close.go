@@ -62,6 +62,7 @@ func (r *Runtime) Close(ctx context.Context) error {
 		r.mu.Unlock()
 
 		err := r.closeResources(ctx, current)
+		r.publisher.close()
 
 		r.mu.Lock()
 		r.closeErr = err
@@ -92,6 +93,14 @@ func (r *Runtime) closeResources(ctx context.Context, current *interaction) erro
 	if err := emitter.emit("", "", EventStatusChanged, StatusChanged{Phase: PhaseClosing}); err != nil {
 		errs = append(errs, err)
 	}
+	if err := r.stopNotificationCoordinator(ctx); err != nil {
+		errs = append(errs, err)
+	}
+	// Children stop while the parent Session is still open so their terminal
+	// lifecycle and durable completion notification can be committed safely.
+	if err := r.subagents.Close(ctx); err != nil {
+		errs = append(errs, err)
+	}
 
 	if err := emitter.emit("", "", EventSessionClosed, SessionClosed{Reason: SessionClosedNormally}); err != nil {
 		errs = append(errs, err)
@@ -103,7 +112,6 @@ func (r *Runtime) closeResources(ctx context.Context, current *interaction) erro
 	resources.add(func(context.Context) error { return r.inspector.Close() })
 	resources.add(func(context.Context) error { return r.connections.Close() })
 	resources.add(r.extensions.Shutdown)
-	resources.add(r.subagents.Close)
 	if err := resources.close(ctx); err != nil {
 		errs = append(errs, err)
 	}

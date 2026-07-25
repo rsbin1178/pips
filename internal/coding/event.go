@@ -182,9 +182,24 @@ type CompactionCompleted struct {
 	DurationMillis int64          `json:"duration_ms"`
 }
 
-// InteractionStarted opens one user interaction, including approval continuations.
+// InteractionSource identifies why an interaction was opened.
+type InteractionSource string
+
+const (
+	// InteractionSourceUser is the ordinary user-driven flow.
+	InteractionSourceUser InteractionSource = ""
+	// InteractionSourceAgentNotification is a Runtime-generated continuation
+	// for one or more completed background children.
+	InteractionSourceAgentNotification InteractionSource = "agent_notification"
+)
+
+// InteractionStarted opens one interaction, including approval continuations
+// and Runtime-generated Agent completion continuations.
 type InteractionStarted struct {
-	Resumed bool `json:"resumed"`
+	Resumed           bool              `json:"resumed"`
+	Source            InteractionSource `json:"source,omitempty"`
+	RootInteractionID string            `json:"root_interaction_id,omitempty"`
+	NotificationIDs   []string          `json:"notification_ids,omitempty"`
 }
 
 // InteractionOutcome classifies a terminal user interaction.
@@ -230,7 +245,8 @@ type TurnCompleted struct {
 
 // MessageCommitted carries one message durably appended to the Harness session.
 type MessageCommitted struct {
-	Message ai.Message `json:"message"`
+	Message   ai.Message `json:"message"`
+	Synthetic bool       `json:"synthetic,omitempty"`
 }
 
 // MessageDelta is one provider-neutral model streaming increment.
@@ -280,20 +296,24 @@ type ToolCompleted struct {
 // Child transcript, Tool arguments, paths, and structured results are loaded
 // from the child Session only and never copied into this payload.
 type SubagentLifecycle struct {
-	Role           subagent.Role            `json:"role"`
-	State          subagent.State           `json:"state"`
-	ChildSessionID string                   `json:"child_session_id"`
-	ParentRunID    string                   `json:"parent_run_id"`
-	ChildRunID     string                   `json:"child_run_id,omitempty"`
-	Model          string                   `json:"model"`
-	TaskPreview    string                   `json:"task_preview,omitempty"`
-	Activity       subagent.ActivitySummary `json:"activity,omitzero"`
-	Code           string                   `json:"code,omitempty"`
-	Stop           agent.StopReason         `json:"stop,omitempty"`
-	Turns          int                      `json:"turns"`
-	ToolCalls      int                      `json:"tool_calls"`
-	Usage          TokenUsage               `json:"usage"`
-	DurationMillis int64                    `json:"duration_ms"`
+	Role                subagent.Role            `json:"role"`
+	State               subagent.State           `json:"state"`
+	ChildSessionID      string                   `json:"child_session_id"`
+	ParentInteractionID string                   `json:"parent_interaction_id,omitempty"`
+	ParentRunID         string                   `json:"parent_run_id"`
+	ParentToolCallID    string                   `json:"parent_tool_call_id,omitempty"`
+	RootInteractionID   string                   `json:"root_interaction_id,omitempty"`
+	Delivery            subagent.Delivery        `json:"delivery,omitempty"`
+	ChildRunID          string                   `json:"child_run_id,omitempty"`
+	Model               string                   `json:"model"`
+	TaskPreview         string                   `json:"task_preview,omitempty"`
+	Activity            subagent.ActivitySummary `json:"activity,omitzero"`
+	Code                string                   `json:"code,omitempty"`
+	Stop                agent.StopReason         `json:"stop,omitempty"`
+	Turns               int                      `json:"turns"`
+	ToolCalls           int                      `json:"tool_calls"`
+	Usage               TokenUsage               `json:"usage"`
+	DurationMillis      int64                    `json:"duration_ms"`
 }
 
 // ApprovalRequired describes an exact pending operation for the approval overlay.
@@ -517,7 +537,23 @@ func validatePayload(eventType EventType, payload EventPayload) error {
 			return invalidPayload(eventType, payload)
 		}
 	case InteractionStarted:
-		if eventType != EventInteractionStarted {
+		if eventType != EventInteractionStarted ||
+			(value.Source != InteractionSourceUser &&
+				value.Source != InteractionSourceAgentNotification) ||
+			len(value.NotificationIDs) > maxEventItems {
+			return invalidPayload(eventType, payload)
+		}
+		if value.Source == InteractionSourceAgentNotification {
+			if validateEventID("root interaction id", value.RootInteractionID, true) != nil ||
+				len(value.NotificationIDs) == 0 {
+				return invalidPayload(eventType, payload)
+			}
+			for _, id := range value.NotificationIDs {
+				if validateEventID("notification id", id, true) != nil {
+					return invalidPayload(eventType, payload)
+				}
+			}
+		} else if value.RootInteractionID != "" || len(value.NotificationIDs) != 0 {
 			return invalidPayload(eventType, payload)
 		}
 	case InteractionCompleted:
@@ -627,7 +663,10 @@ func validateSubagentLifecycle(eventType EventType, value SubagentLifecycle) err
 //nolint:gocyclo // Closed lifecycle/action enums are validated together at the event boundary.
 func validateSubagentLifecycleFields(value SubagentLifecycle) error {
 	if validateEventID("child session id", value.ChildSessionID, true) != nil ||
+		validateOptionalID(value.ParentInteractionID) != nil ||
 		validateEventID("parent run id", value.ParentRunID, true) != nil ||
+		validateOptionalID(value.ParentToolCallID) != nil ||
+		validateOptionalID(value.RootInteractionID) != nil ||
 		validateOptionalID(value.ChildRunID) != nil ||
 		!validIdentifierText(value.Model, maxEventIDBytes, false) ||
 		!validBoundedText(value.TaskPreview, 1024, true) ||
@@ -635,6 +674,17 @@ func validateSubagentLifecycleFields(value SubagentLifecycle) error {
 		value.Turns < 0 || value.ToolCalls < 0 || !validTokenUsage(value.Usage) ||
 		value.DurationMillis < 0 || value.DurationMillis > maxEventDurationMS {
 		return errors.New("invalid subagent lifecycle fields")
+	}
+	if value.Delivery != "" && value.Delivery != subagent.DeliveryForeground &&
+		value.Delivery != subagent.DeliveryBackground {
+		return errors.New("invalid subagent delivery")
+	}
+	if value.ParentInteractionID == "" {
+		if value.ParentToolCallID != "" || value.RootInteractionID != "" {
+			return errors.New("incomplete subagent ownership")
+		}
+	} else if value.ParentToolCallID == "" || value.RootInteractionID == "" {
+		return errors.New("incomplete subagent ownership")
 	}
 	switch value.Role {
 	case subagent.RoleExplore, subagent.RolePlan, subagent.RoleReview:

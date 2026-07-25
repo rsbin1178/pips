@@ -24,7 +24,6 @@ const (
 	blockChange
 	blockError
 	blockCompletion
-	blockSubagent
 )
 
 type timelineSpacing uint8
@@ -44,7 +43,6 @@ type timelineBlock struct {
 	id       string
 	title    string
 	body     string
-	meta     string
 	status   string
 	position int
 	rendered bool
@@ -65,22 +63,26 @@ type completionMarker struct {
 }
 
 func projectTimeline(state coding.State) []timelineBlock {
-	return projectTimelineExcluding(state, nil, nil)
+	return projectTimelineExcluding(state, nil)
 }
 
 //nolint:gocyclo,cyclop // One pass keeps messages, Tools, and child identities in durable order.
 func projectTimelineExcluding(
 	state coding.State,
 	excludedTools map[string]struct{},
-	excludedSubagents map[string]struct{},
 ) []timelineBlock {
-	blocks := make([]timelineBlock, 0, len(state.Transcript)+len(state.Tools)+len(state.Subagents)+4)
+	blocks := make([]timelineBlock, 0, len(state.Transcript)+len(state.Tools)+4)
 	activities := projectToolActivities(state, excludedTools)
+	syntheticMessages := make(map[int]struct{}, len(state.SyntheticMessages))
+	for _, index := range state.SyntheticMessages {
+		syntheticMessages[index] = struct{}{}
+	}
 	activityIndex := 0
 	for messageIndex, message := range state.Transcript {
 		position := messageIndex + 1
 		body := visibleMessageText(message)
-		if body != "" {
+		_, synthetic := syntheticMessages[messageIndex]
+		if body != "" && !synthetic {
 			switch message.Role {
 			case ai.RoleUser:
 				blocks = append(blocks, timelineBlock{
@@ -101,12 +103,9 @@ func projectTimelineExcluding(
 		for activityIndex < len(activities) && activities[activityIndex].position <= position {
 			activity := activities[activityIndex]
 			activityIndex++
-			if activity.name == subagent.ToolName {
-				if block, ok := projectSubagentToolActivity(
-					activity, state.Subagents, excludedSubagents,
-				); ok {
-					blocks = append(blocks, block)
-				}
+			if isSubagentToolName(activity.name) {
+				blocks = append(blocks, projectSubagentToolActivity(activity, state.Subagents))
+
 				continue
 			}
 			blocks = append(blocks, projectToolActivity(activity))
@@ -116,31 +115,12 @@ func projectTimelineExcluding(
 	for activityIndex < len(activities) {
 		activity := activities[activityIndex]
 		activityIndex++
-		if activity.name == subagent.ToolName {
-			if block, ok := projectSubagentToolActivity(
-				activity, state.Subagents, excludedSubagents,
-			); ok {
-				blocks = append(blocks, block)
-			}
+		if isSubagentToolName(activity.name) {
+			blocks = append(blocks, projectSubagentToolActivity(activity, state.Subagents))
+
 			continue
 		}
 		blocks = append(blocks, projectToolActivity(activity))
-	}
-
-	for _, child := range state.Subagents {
-		if _, committed := excludedSubagents[child.ChildSessionID]; committed &&
-			child.ChildSessionID != "" {
-			continue
-		}
-		block := projectSubagent(child, len(state.Transcript))
-		for _, activity := range activities {
-			if activity.name == subagent.ToolName && activity.runID == child.ParentRunID {
-				block.tools = []toolActivity{activity}
-
-				break
-			}
-		}
-		blocks = append(blocks, block)
 	}
 
 	draft := visibleDraftText(state.Draft)
@@ -189,31 +169,67 @@ func projectTimelineExcluding(
 func projectSubagentToolActivity(
 	activity toolActivity,
 	live []coding.SubagentState,
-	excluded map[string]struct{},
-) (timelineBlock, bool) {
-	for _, child := range live {
-		if activity.runID != "" && child.ParentRunID == activity.runID {
-			return timelineBlock{}, false
+) timelineBlock {
+	value, found := matchingSubagent(activity, live)
+	if !found {
+		value, found = projectDurableSubagent(activity)
+	}
+	if found {
+		activity = enrichSubagentToolActivity(activity, value)
+	}
+
+	return projectToolActivity(activity)
+}
+
+func matchingSubagent(
+	activity toolActivity,
+	values []coding.SubagentState,
+) (coding.SubagentState, bool) {
+	for _, value := range values {
+		if activity.id != "" && value.ParentToolCallID == activity.id {
+			return value, true
+		}
+	}
+	for _, value := range values {
+		if value.ParentToolCallID == "" && activity.runID != "" &&
+			value.ParentRunID == activity.runID {
+			return value, true
 		}
 	}
 
-	value, ok := projectDurableSubagent(activity)
-	if !ok {
-		return timelineBlock{}, false
-	}
-	if _, committed := excluded[value.ChildSessionID]; committed && value.ChildSessionID != "" {
-		return timelineBlock{}, false
-	}
-	for _, child := range live {
-		if value.ChildSessionID != "" && child.ChildSessionID == value.ChildSessionID {
-			return timelineBlock{}, false
-		}
+	return coding.SubagentState{}, false
+}
+
+func enrichSubagentToolActivity(
+	activity toolActivity,
+	value coding.SubagentState,
+) toolActivity {
+	activity.class = toolClassSubagent
+	activity.childSessionID = value.ChildSessionID
+	activity.action = subagentActivityLabel(value.Role, value.State)
+	activity.subject = oneLineSubagentTask(value.TaskPreview)
+	activity.invocation = ""
+	activity.update = ""
+	activity.result = ""
+	activity.body = ""
+	activity.preview = []string{subagentMetadata(value)}
+
+	switch value.State {
+	case subagent.StateCreated, subagent.StateRunning:
+		activity.state = toolStateRunning
+	case subagent.StateSucceeded:
+		activity.state = toolStateSucceeded
+	case subagent.StateFailed:
+		activity.state = toolStateFailed
+	case subagent.StateCanceled, subagent.StateInterrupted:
+		activity.state = toolStateInterrupted
 	}
 
-	block := projectSubagent(value, activity.position)
-	block.tools = []toolActivity{activity}
+	return activity
+}
 
-	return block, true
+func isSubagentToolName(name string) bool {
+	return name == subagent.ToolName || name == subagent.SpawnToolName
 }
 
 func projectToolActivity(activity toolActivity) timelineBlock {
@@ -247,15 +263,6 @@ func groupExploreBlocks(blocks []timelineBlock) []timelineBlock {
 	}
 
 	return grouped
-}
-
-func projectSubagent(value coding.SubagentState, position int) timelineBlock {
-	return timelineBlock{
-		kind: blockSubagent, id: value.ChildSessionID,
-		title: subagentActivityLabel(value.Role, value.State), body: oneLineSubagentTask(value.TaskPreview),
-		meta: subagentMetadata(value), status: string(value.State), position: position,
-		spacing: spacingCompact,
-	}
 }
 
 func oneLineSubagentTask(value string) string {
@@ -375,21 +382,6 @@ func subagentActivityLabel(role subagent.Role, state subagent.State) string {
 
 func humanizeStatusCode(value string) string {
 	return strings.ReplaceAll(strings.TrimSpace(value), "_", " ")
-}
-
-func subagentStateGlyph(state subagent.State) string {
-	switch state {
-	case subagent.StateSucceeded:
-		return "•"
-	case subagent.StateFailed:
-		return "✗"
-	case subagent.StateCanceled, subagent.StateInterrupted:
-		return "!"
-	case subagent.StateCreated, subagent.StateRunning:
-		return "✻"
-	default:
-		return "·"
-	}
 }
 
 func isTerminalSubagent(state subagent.State) bool {
@@ -651,9 +643,6 @@ func renderTimelineBlockWithOptions(
 	noColor bool,
 	options timelineRenderOptions,
 ) string {
-	if block.kind == blockSubagent {
-		return renderSubagentBlock(block, width, theme, noColor)
-	}
 	if block.kind == blockTool {
 		if options.expandToolResults {
 			return renderExpandedToolActivityBlock(block, width, theme, noColor)
@@ -702,33 +691,6 @@ func renderRegularTimelineBlock(
 	}
 
 	return title + "\n" + body
-}
-
-func renderSubagentBlock(
-	block timelineBlock,
-	width int,
-	theme colorTheme,
-	noColor bool,
-) string {
-	width = max(1, width)
-	prefix := subagentStateGlyph(subagent.State(block.status)) + " " + block.title
-	heading := prefix
-	if block.body != "" {
-		heading += " · " + block.body
-	}
-	metadata := "  " + block.meta
-	if noColor {
-		return ansi.Truncate(heading, width, "…") + "\n" + ansi.Truncate(metadata, width, "…")
-	}
-
-	palette := paletteFor(theme)
-	heading = subagentTitleStyle(block.status, theme).Render(prefix)
-	if block.body != "" {
-		heading += lipgloss.NewStyle().Foreground(palette.workspace).Render(" · " + block.body)
-	}
-	metadata = lipgloss.NewStyle().Foreground(palette.muted).Render(metadata)
-
-	return ansi.Truncate(heading, width, "…") + "\n" + ansi.Truncate(metadata, width, "…")
 }
 
 func renderUserMessage(body string, width int, theme colorTheme, noColor bool) string {
@@ -856,11 +818,6 @@ func timelineTitleStyle(kind blockKind, theme colorTheme) lipgloss.Style {
 	case blockError:
 		color = "#FF5F5F"
 	case blockCompletion:
-	case blockSubagent:
-		color = "#AF87FF"
-		if theme == themeLight {
-			color = "#8250DF"
-		}
 	case blockDiagnostic:
 		if theme == themeLight {
 			color = "#586069"
@@ -868,20 +825,4 @@ func timelineTitleStyle(kind blockKind, theme colorTheme) lipgloss.Style {
 	}
 
 	return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(color))
-}
-
-func subagentTitleStyle(status string, theme colorTheme) lipgloss.Style {
-	palette := paletteFor(theme)
-	color := palette.model
-	switch subagent.State(status) {
-	case subagent.StateCreated, subagent.StateRunning:
-	case subagent.StateSucceeded:
-		color = palette.idle
-	case subagent.StateFailed:
-		color = palette.error
-	case subagent.StateCanceled, subagent.StateInterrupted:
-		color = palette.warning
-	}
-
-	return lipgloss.NewStyle().Bold(true).Foreground(color)
 }

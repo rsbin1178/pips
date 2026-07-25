@@ -1,3 +1,4 @@
+//nolint:wsl_v5 // Foreground execution and durable fallback stay adjacent.
 package subagent
 
 import (
@@ -43,11 +44,17 @@ type toolResult struct {
 type managerTool struct {
 	manager  *Manager
 	observer Observer
+	owner    Ownership
 	decl     ai.Tool
 }
 
 // Tool returns the serial main-agent adapter for this manager.
 func (m *Manager) Tool(observer Observer) agent.Tool {
+	return m.ToolFor(Ownership{}, observer)
+}
+
+// ToolFor returns the run_subagent adapter bound to one parent interaction.
+func (m *Manager) ToolFor(owner Ownership, observer Observer) agent.Tool {
 	schema, err := ai.SchemaFor[toolArgs]()
 	if err != nil {
 		panic(fmt.Sprintf("coding subagent: derive tool schema: %v", err))
@@ -58,6 +65,7 @@ func (m *Manager) Tool(observer Observer) agent.Tool {
 	return &managerTool{
 		manager:  m,
 		observer: observer,
+		owner:    owner,
 		decl: ai.Tool{
 			Name:        ToolName,
 			Description: "Run one bounded read-only explore, plan, or review specialist and return its structured result.",
@@ -74,7 +82,13 @@ func (t *managerTool) Exec(ctx context.Context, call agent.ToolCall) ([]ai.Part,
 		return nil, err
 	}
 
-	execution, err := t.manager.Start(ctx, Request(args), t.observer)
+	request := Request{Role: args.Role, Task: args.Task}
+	request.Ownership = t.owner
+	if request.Ownership.ParentInteractionID != "" {
+		request.Ownership.ParentToolCallID = call.ID
+	}
+	request.Delivery = DeliveryForeground
+	execution, err := t.manager.Start(ctx, request, t.observer)
 	if err != nil {
 		return nil, err
 	}

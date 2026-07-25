@@ -26,6 +26,7 @@ import (
 	"github.com/rsbin/pips/internal/coding/credential"
 	"github.com/rsbin/pips/internal/coding/execution"
 	"github.com/rsbin/pips/internal/coding/generation"
+	"github.com/rsbin/pips/internal/coding/instructions"
 	codingmcp "github.com/rsbin/pips/internal/coding/mcp"
 	"github.com/rsbin/pips/internal/coding/model"
 	"github.com/rsbin/pips/internal/coding/modelcatalog"
@@ -100,36 +101,40 @@ type Runtime struct {
 	mu    sync.Mutex
 	state State
 
-	workspace     workspace.Workspace
-	tree          *workspace.Tree
-	config        config.Config
-	paths         paths.Layout
-	opts          ExecutionOptions
-	model         ai.LanguageModel
-	resolved      modelcatalog.ResolvedModel
-	requestPolicy generation.Policy
+	workspace           workspace.Workspace
+	tree                *workspace.Tree
+	config              config.Config
+	paths               paths.Layout
+	opts                ExecutionOptions
+	model               ai.LanguageModel
+	resolved            modelcatalog.ResolvedModel
+	requestPolicy       generation.Policy
+	instructionResolver *instructions.Resolver
 
-	handle      *session.Handle
-	repository  *session.Repository
-	session     *harness.Session
-	journal     *interactionJournal
-	policy      execution.Policy
-	executor    *execution.Executor
-	inspector   *git.Inspector
-	permissions *codingmcp.Permissions
-	connections *codingmcp.Connections
-	extensions  *extension.Runtime
-	compiled    []extension.Extension
-	resources   resource.Result
-	trusted     bool
-	controller  *approval.Controller
-	resolver    activeResolver
-	pending     pendingRunner
-	observers   *agentObservers
-	telemetry   *telemetryObservers
-	subagents   *subagent.Manager
+	handle        *session.Handle
+	repository    *session.Repository
+	session       *harness.Session
+	journal       *interactionJournal
+	policy        execution.Policy
+	executor      *execution.Executor
+	inspector     *git.Inspector
+	permissions   *codingmcp.Permissions
+	connections   *codingmcp.Connections
+	extensions    *extension.Runtime
+	compiled      []extension.Extension
+	resources     resource.Result
+	trusted       bool
+	controller    *approval.Controller
+	resolver      activeResolver
+	pending       pendingRunner
+	observers     *agentObservers
+	telemetry     *telemetryObservers
+	subagents     *subagent.Manager
+	notifications *subagent.NotificationInbox
+	children      map[string]*childProjection
 
 	writer      *eventWriter
+	publisher   *eventPublisher
 	interaction *interaction
 	active      *runtimeOperation
 	recovery    InteractionRecovery
@@ -140,6 +145,14 @@ type Runtime struct {
 	closeDone                  chan struct{}
 	closeErr                   error
 	autoCompactionFailureToken string
+
+	notificationMu       sync.Mutex
+	notificationCancel   context.CancelFunc
+	notificationSignal   chan struct{}
+	notificationDone     chan struct{}
+	notificationInflight map[string]struct{}
+	notificationMessages map[string][]string
+	notificationBatches  map[string]int
 }
 
 type runtimeOperation struct {
@@ -210,6 +223,11 @@ func Open(ctx context.Context, options OpenOptions) (_ *Runtime, returnErr error
 		return nil, fmt.Errorf("coding runtime: open workspace tree: %w", err)
 	}
 	stack.add(func(context.Context) error { return tree.Close() })
+
+	instructionResolver, err := instructions.New(tree, instructions.DefaultLimits())
+	if err != nil {
+		return nil, fmt.Errorf("coding runtime: open project instructions: %w", err)
+	}
 
 	resolved, err := resolveOpenModel(options)
 	if err != nil {
@@ -322,29 +340,30 @@ func Open(ctx context.Context, options OpenOptions) (_ *Runtime, returnErr error
 	}
 
 	runtime := &Runtime{
-		workspace:     options.Workspace,
-		tree:          tree,
-		config:        options.Config.Clone(),
-		paths:         options.Paths,
-		opts:          configured,
-		model:         baseModel,
-		resolved:      resolved,
-		requestPolicy: requestPolicy,
-		handle:        handle,
-		repository:    repository,
-		session:       handle.Session(),
-		policy:        policy,
-		executor:      executor,
-		inspector:     inspector,
-		permissions:   permissions,
-		connections:   connections,
-		extensions:    extensionRuntime,
-		compiled:      slices.Clone(options.Extensions),
-		resources:     loadedResources,
-		trusted:       options.Trusted,
-		observers:     newAgentObservers(options.AgentObservers),
-		telemetry:     newTelemetryObservers(options.TelemetryObservers),
-		closeDone:     make(chan struct{}),
+		workspace:           options.Workspace,
+		tree:                tree,
+		config:              options.Config.Clone(),
+		paths:               options.Paths,
+		opts:                configured,
+		model:               baseModel,
+		resolved:            resolved,
+		requestPolicy:       requestPolicy,
+		instructionResolver: instructionResolver,
+		handle:              handle,
+		repository:          repository,
+		session:             handle.Session(),
+		policy:              policy,
+		executor:            executor,
+		inspector:           inspector,
+		permissions:         permissions,
+		connections:         connections,
+		extensions:          extensionRuntime,
+		compiled:            slices.Clone(options.Extensions),
+		resources:           loadedResources,
+		trusted:             options.Trusted,
+		observers:           newAgentObservers(options.AgentObservers),
+		telemetry:           newTelemetryObservers(options.TelemetryObservers),
+		closeDone:           make(chan struct{}),
 	}
 
 	runtime.journal, err = newInteractionJournal(runtime.session, nil)
@@ -372,6 +391,18 @@ func Open(ctx context.Context, options OpenOptions) (_ *Runtime, returnErr error
 	if err := subagent.Reconcile(ctx, repository, handle); err != nil {
 		return nil, fmt.Errorf("coding runtime: reconcile subagents: %w", err)
 	}
+	notificationLimits := configured.Subagent.Limits
+	if notificationLimits == (subagent.Limits{}) {
+		notificationLimits = subagent.DefaultLimits()
+	}
+	runtime.notifications, err = subagent.NewNotificationInbox(
+		runtime.session,
+		handle.Metadata().ID,
+		notificationLimits.MaxResultBytes,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("coding runtime: open Agent notification inbox: %w", err)
+	}
 	treeSnapshot, err := runtime.session.Tree(harness.TreeLimits{})
 	if err != nil {
 		return nil, err
@@ -389,6 +420,8 @@ func Open(ctx context.Context, options OpenOptions) (_ *Runtime, returnErr error
 	}
 	runtime.state = bootstrap.State
 	runtime.recovery = bootstrap.Recovery
+	runtime.publisher = newEventPublisher(runtime)
+	runtime.children = make(map[string]*childProjection)
 
 	runtime.controller, err = approval.New(
 		options.Workspace,
@@ -403,6 +436,7 @@ func Open(ctx context.Context, options OpenOptions) (_ *Runtime, returnErr error
 		return nil, err
 	}
 	runtime.subagents, err = subagent.New(subagent.Config{
+		Context:        ctx,
 		Repository:     repository,
 		Parent:         handle,
 		Tree:           tree,
@@ -410,14 +444,19 @@ func Open(ctx context.Context, options OpenOptions) (_ *Runtime, returnErr error
 		RequestPolicy:  requestPolicy,
 		Options:        configured.Subagent,
 		AgentObservers: []func(context.Context, agent.Event){runtime.observers.observe},
+		EventObservers: []subagent.AgentEventObserver{runtime.observeChildAgentEvent},
 	})
 	if err != nil {
 		return nil, err
 	}
 	stack.add(runtime.subagents.Close)
+	if err := runtime.recoverAgentNotifications(ctx); err != nil {
+		return nil, err
+	}
 
 	runtime.observeSessionOpened(ctx, resumed)
 	runtime.recordOpenDiagnostics(ctx, loadedResources, connections)
+	runtime.startNotificationCoordinator(ctx)
 	stack.values = nil
 
 	return runtime, nil
@@ -659,6 +698,29 @@ func (r *Runtime) recordDiagnostic(ctx context.Context, diagnostic IntegrationDi
 	_ = emitter.emit("", "", EventIntegrationDiagnostic, diagnostic)
 }
 
+// ObserveEvents atomically returns the current State and a subscription that
+// begins after that State. It is the preferred bootstrap and resubscribe API
+// for interactive frontends.
+func (r *Runtime) ObserveEvents() (EventObservation, error) {
+	if r == nil || r.publisher == nil {
+		return EventObservation{}, ErrRuntimeClosed
+	}
+
+	return r.publisher.observe()
+}
+
+// SubscribeEvents replays Runtime events after cursor when they remain in the
+// bounded hub. Callers receiving [ErrEventGap] must use [Runtime.ObserveEvents].
+func (r *Runtime) SubscribeEvents(afterCursor uint64) (*EventSubscription, error) {
+	if r == nil || r.publisher == nil {
+		return nil, ErrRuntimeClosed
+	}
+
+	subscription, _, err := r.publisher.hub.subscribe(afterCursor)
+
+	return subscription, err
+}
+
 type agentObservers struct {
 	mu       sync.Mutex
 	values   []func(context.Context, agent.Event)
@@ -731,12 +793,12 @@ func (r *Runtime) Snapshot() State {
 
 // Prompt starts one new interaction. Iteration owns cancellation and cleanup.
 func (r *Runtime) Prompt(ctx context.Context, messages ...ai.Message) iter.Seq2[Event, error] {
-	return r.runSequence(ctx, operationPrompt, approval.Resolution{}, messages)
+	return r.runSequence(ctx, operationPrompt, approval.Resolution{}, messages, nil)
 }
 
 // Continue reconciles a durable pending interaction after reopening a session.
 func (r *Runtime) Continue(ctx context.Context) iter.Seq2[Event, error] {
-	return r.runSequence(ctx, operationContinue, approval.Resolution{}, nil)
+	return r.runSequence(ctx, operationContinue, approval.Resolution{}, nil, nil)
 }
 
 // Resolve applies one explicit approval decision and continues only when the
@@ -745,19 +807,20 @@ func (r *Runtime) Resolve(
 	ctx context.Context,
 	resolution approval.Resolution,
 ) iter.Seq2[Event, error] {
-	return r.runSequence(ctx, operationResolve, resolution, nil)
+	return r.runSequence(ctx, operationResolve, resolution, nil, nil)
 }
 
 type runtimeOperationKind string
 
 const (
-	operationPrompt   runtimeOperationKind = "prompt"
-	operationContinue runtimeOperationKind = "continue"
-	operationResolve  runtimeOperationKind = "resolve"
-	operationPreview  runtimeOperationKind = "preview compaction"
-	operationCompact  runtimeOperationKind = "compact"
-	operationNavigate runtimeOperationKind = "navigate"
-	operationFork     runtimeOperationKind = "fork"
+	operationPrompt            runtimeOperationKind = "prompt"
+	operationContinue          runtimeOperationKind = "continue"
+	operationResolve           runtimeOperationKind = "resolve"
+	operationPreview           runtimeOperationKind = "preview compaction"
+	operationCompact           runtimeOperationKind = "compact"
+	operationNavigate          runtimeOperationKind = "navigate"
+	operationFork              runtimeOperationKind = "fork"
+	operationAgentNotification runtimeOperationKind = "agent notification"
 )
 
 func (r *Runtime) runSequence(
@@ -765,6 +828,7 @@ func (r *Runtime) runSequence(
 	kind runtimeOperationKind,
 	resolution approval.Resolution,
 	messages []ai.Message,
+	notification *notificationOperation,
 ) iter.Seq2[Event, error] {
 	cloned := cloneMessages(messages)
 
@@ -774,7 +838,7 @@ func (r *Runtime) runSequence(
 			return
 		}
 
-		r.run(ctx, kind, resolution, cloned, yield)
+		r.run(ctx, kind, resolution, cloned, notification, yield)
 	}
 }
 

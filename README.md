@@ -42,10 +42,13 @@ Go building blocks for AI applications. Current packages:
 `cmd/pips` is being built as a local, terminal-first coding agent. Its P0
 execution foundation now includes Workspace-confined file tools, durable Shell
 approval, native OS command isolation, and read-only Git change attribution.
-It also includes durable, read-only Explore, Plan, and Review specialists
-invoked through the synchronous `run_subagent` Tool. Each specialist receives
-only `read`, `ls`, `glob`, and `grep`, with an independent transcript and
-bounded execution budget.
+It also includes durable, read-only Explore, Plan, and Review specialists.
+The synchronous `run_subagent` Tool waits for one specialist; the asynchronous
+`spawn_agent` Tool returns an `agent_id` immediately and delivers its terminal
+result back to the parent Agent automatically. Both paths share the same
+bounded manager, journal, permissions, result validation, and ordinary child
+Session timeline. Each specialist receives only `read`, `ls`, `glob`, and
+`grep`.
 The single-session Runtime now composes durable Harness state, immutable
 Extension/Skill/MCP generations, approval continuation, change attribution,
 typed product events, and optional telemetry. The default command now opens a
@@ -139,17 +142,21 @@ for transcript scrolling.
 | Queue follow-up while running | `Tab` |
 | Insert newline | `Ctrl+J` or `Shift+Enter` when supported |
 | Open command palette | `/` on an empty composer or `Ctrl+K` |
-| Expand/collapse latest tool | `Ctrl+T` |
+| Open latest tool / child Agent timeline; return to parent | `Ctrl+T` |
 | Scroll / return to latest | `PageUp`, `PageDown`, `End`, or mouse wheel |
 | Cancel operation / clear draft / confirm exit | `Ctrl+C` or `Esc` |
 
-`Ctrl+T` opens the dedicated child detail when the latest Tool is
-`run_subagent`; other Tools retain ordinary expansion behavior.
+In the parent conversation, `run_subagent` and `spawn_agent` remain ordinary
+inline Tool activities; no duplicate Agent card is created. `Ctrl+T` opens the
+selected child's full-width ordinary Session timeline, including visible
+assistant output and Tool activity, and toggles back to the parent. Other Tools
+retain ordinary detail behavior.
 
 The command palette provides `/new`, `/resume`, `/agents`, `/model`, `/tree`,
 `/fork`, `/compact`, `/diff`, `/reload`, `/status`, `/help`, and `/quit`.
-`/agents` lists only the specialists owned by the current conversation and can
-open their durable transcript and structured result. Approval is fail-closed: review defaults to
+`/agents` lists only the specialists owned by the current conversation, orders
+running work first, opens the full child timeline with Enter, and cancels the
+selected running child with `c`. Approval is fail-closed: review defaults to
 deny, Enter applies only the highlighted Runtime-provided choice, and an
 unknown outcome exposes only retry, mark-failed, or acknowledge when the
 Runtime declares them.

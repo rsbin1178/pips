@@ -592,6 +592,28 @@ func TestReadyToolDetailsToggleOpensLatestExplorationGroup(t *testing.T) {
 	assert.Contains(t, detail, "Search toggleLatestTool in internal/coding/tui")
 }
 
+func TestSubscriptionSnapshotCommitsMissedStableTimeline(t *testing.T) {
+	t.Parallel()
+
+	model := readyModel(t, true)
+	state := readyState()
+	state.Transcript = []ai.Message{
+		ai.UserText("Inspect the event bridge."),
+		ai.AssistantText("The subscription snapshot recovered the missing output."),
+	}
+
+	_, command := model.Update(subscriptionStartedMsg{
+		supported: true,
+		observation: coding.EventObservation{
+			State: state,
+		},
+		bridge: &subscriptionBridge{},
+	})
+
+	require.NotNil(t, command)
+	assert.Equal(t, len(state.Transcript), model.scrollback.messages)
+}
+
 func readyModel(t *testing.T, noColor bool) *Model {
 	t.Helper()
 

@@ -87,6 +87,7 @@ func BootstrapState(options BootstrapOptions) (BootstrapResult, error) {
 	if len(state.Transcript) > maxEventItems {
 		state.Transcript = state.Transcript[len(state.Transcript)-maxEventItems:]
 	}
+	state.SyntheticMessages = syntheticMessageIndexes(state.Transcript)
 
 	if recovery.LastID != "" {
 		state.Interaction = InteractionState{
