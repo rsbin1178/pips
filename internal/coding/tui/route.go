@@ -17,6 +17,7 @@ type routeKind uint8
 const (
 	routeNone routeKind = iota
 	routeSessions
+	routeSkills
 	routeAgents
 	routeSubagent
 	routeTree
@@ -37,6 +38,9 @@ type routeState struct {
 
 	search        textinput.Model
 	sessions      []session.Metadata
+	skills        []coding.SkillSummary
+	diagnostics   []coding.SkillDiagnostic
+	showDetails   bool
 	previousInput string
 	openedAt      time.Time
 
@@ -132,6 +136,8 @@ func (m *Model) activateRoute(request routeOpenRequest) tea.Cmd {
 	switch request.kind {
 	case routeSessions:
 		return m.activateSessionPicker(request.previousInput)
+	case routeSkills:
+		return m.activateSkillsRoute(request.previousInput)
 	case routeAgents:
 		return m.activateAgentsRoute()
 	case routeSubagent:
@@ -189,6 +195,8 @@ func (m *Model) updateRouteKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch m.route.kind {
 	case routeSessions:
 		return m.updateSessionPickerKey(message)
+	case routeSkills:
+		return m.updateSkillsRouteKey(message)
 	case routeAgents:
 		return m.updateAgentsRouteKey(message)
 	case routeSubagent:
@@ -208,6 +216,8 @@ func (m *Model) routeView() tea.View {
 	switch m.route.kind {
 	case routeSessions:
 		return m.sessionPickerView()
+	case routeSkills:
+		return m.skillsRouteView()
 	case routeAgents:
 		return m.agentsRouteView()
 	case routeSubagent:

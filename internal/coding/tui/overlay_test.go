@@ -294,6 +294,7 @@ type overlayController struct {
 	agentInspections []string
 	agentCanceled    []string
 	skillSnapshot    coding.SkillSnapshot
+	skillErr         error
 }
 
 func newOverlayController(state coding.State) *overlayController {
@@ -334,6 +335,24 @@ func (c *overlayController) ListSessions(context.Context) ([]session.Metadata, e
 
 func (c *overlayController) Skills(context.Context) (coding.SkillSnapshot, error) {
 	return c.skillSnapshot.Clone(), nil
+}
+
+func (c *overlayController) SetSkillEnabled(
+	_ context.Context,
+	id coding.SkillID,
+	enabled bool,
+) error {
+	if c.skillErr != nil {
+		return c.skillErr
+	}
+	for index := range c.skillSnapshot.Skills {
+		if c.skillSnapshot.Skills[index].ID == id {
+			c.skillSnapshot.Skills[index].Enabled = enabled
+			return nil
+		}
+	}
+
+	return fmt.Errorf("unknown Skill %q", id)
 }
 
 func (c *overlayController) ListSubagents(context.Context) ([]subagent.Summary, error) {

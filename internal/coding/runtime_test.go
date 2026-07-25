@@ -1358,6 +1358,30 @@ func openTestRuntimeConfigured(
 ) *Runtime {
 	t.Helper()
 
+	return openTestRuntimeConfiguredWithTrust(
+		t,
+		base,
+		target,
+		model,
+		extensions,
+		agentObservers,
+		telemetry,
+		false,
+	)
+}
+
+func openTestRuntimeConfiguredWithTrust(
+	t *testing.T,
+	base string,
+	target SessionTarget,
+	model ai.LanguageModel,
+	extensions []extension.Extension,
+	agentObservers []func(context.Context, agent.Event),
+	telemetry []TelemetryObserver,
+	trusted bool,
+) *Runtime {
+	t.Helper()
+
 	workspacePath := base + "/workspace"
 	require.NoError(t, mkdirPrivate(workspacePath))
 
@@ -1379,6 +1403,7 @@ func openTestRuntimeConfigured(
 
 	runtime, err := Open(t.Context(), OpenOptions{
 		Workspace:          ws,
+		Trusted:            trusted,
 		Config:             cfg,
 		Paths:              layout,
 		Session:            target,

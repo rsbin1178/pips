@@ -8,6 +8,7 @@ import (
 
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding/instructions"
+	"github.com/rsbin/pips/internal/coding/skillsettings"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -125,6 +126,236 @@ func TestRuntimeDoesNotExposeUnselectedUserOnlySkill(t *testing.T) {
 	assert.NotContains(t, requests[0].System, "PRIVATE_REVIEW_INSTRUCTIONS")
 	assert.NotContains(t, requests[0].System, "<available-skills>")
 	assert.NotContains(t, toolNamesFromRequest(requests[0]), "skill")
+}
+
+func TestRuntimeSkillPolicyDisablesInjectionAndPersists(t *testing.T) {
+	t.Parallel()
+
+	base := t.TempDir()
+	skillDir := base + "/home/skills/review"
+	require.NoError(t, os.MkdirAll(skillDir, 0o700))
+	require.NoError(t, os.WriteFile(
+		skillDir+"/SKILL.md",
+		[]byte("---\nname: review\ndescription: Review carefully\n---\nDISABLED_REVIEW_INSTRUCTIONS\n"),
+		0o600,
+	))
+
+	firstModel := newRuntimeModel(runtimeTextResponse("done"))
+	first := openTestRuntimeConfiguredWithTrust(
+		t, base, SessionTarget{}, firstModel, nil, nil, nil, true,
+	)
+	snapshot, err := first.Skills(t.Context())
+	require.NoError(t, err)
+	require.Len(t, snapshot.Skills, 1)
+	assert.NotEmpty(t, snapshot.Skills[0].ID)
+	assert.True(t, snapshot.Skills[0].Enabled)
+
+	require.NoError(t, first.SetSkillEnabled(t.Context(), snapshot.Skills[0].ID, false))
+	snapshot, err = first.Skills(t.Context())
+	require.NoError(t, err)
+	require.Len(t, snapshot.Skills, 1)
+	assert.False(t, snapshot.Skills[0].Enabled)
+
+	collectRuntimeEvents(t, first.Prompt(t.Context(), ai.UserText("$review inspect this")))
+	requests := firstModel.Requests()
+	require.Len(t, requests, 1)
+	assert.NotContains(t, requests[0].System, "DISABLED_REVIEW_INSTRUCTIONS")
+	assert.NotContains(t, requests[0].System, "<available-skills>")
+	assert.NotContains(t, toolNamesFromRequest(requests[0]), "skill")
+	require.NoError(t, first.Close(t.Context()))
+
+	second := openTestRuntimeConfiguredWithTrust(
+		t,
+		base,
+		SessionTarget{},
+		newRuntimeModel(runtimeTextResponse("done")),
+		nil,
+		nil,
+		nil,
+		true,
+	)
+	persisted, err := second.Skills(t.Context())
+	require.NoError(t, err)
+	require.Len(t, persisted.Skills, 1)
+	assert.Equal(t, snapshot.Skills[0].ID, persisted.Skills[0].ID)
+	assert.False(t, persisted.Skills[0].Enabled)
+}
+
+func TestRuntimeSkillDiagnosticsStayOutOfTimeline(t *testing.T) {
+	t.Parallel()
+
+	base := t.TempDir()
+	skillDir := base + "/home/skills/review"
+	require.NoError(t, os.MkdirAll(skillDir, 0o700))
+	require.NoError(t, os.WriteFile(
+		skillDir+"/SKILL.md",
+		[]byte("---\nname: review\ndescription: Review carefully\nmetadata:\n  count: 2\n---\nREVIEW\n"),
+		0o600,
+	))
+
+	runtime := openTestRuntimeAt(
+		t,
+		base,
+		SessionTarget{},
+		newRuntimeModel(runtimeTextResponse("done")),
+	)
+	snapshot, err := runtime.Skills(t.Context())
+	require.NoError(t, err)
+	require.NotEmpty(t, snapshot.Diagnostics)
+
+	for _, diagnostic := range runtime.Snapshot().Diagnostics {
+		assert.NotEqual(t, "resource", diagnostic.Component)
+	}
+	events := collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("inspect")))
+	for _, event := range events {
+		diagnostic, ok := event.Payload.(IntegrationDiagnostic)
+		if ok {
+			assert.NotEqual(t, "resource", diagnostic.Component)
+		}
+	}
+}
+
+func TestRuntimeRejectsUntrustedStaleBusyAndFailedSkillMutations(t *testing.T) {
+	t.Parallel()
+
+	t.Run("untrusted", func(t *testing.T) {
+		t.Parallel()
+
+		base := t.TempDir()
+		writeRuntimeTestSkill(t, base, "POLICY_TEST")
+		runtime := openTestRuntimeAt(
+			t, base, SessionTarget{}, newRuntimeModel(runtimeTextResponse("done")),
+		)
+		snapshot, err := runtime.Skills(t.Context())
+		require.NoError(t, err)
+		require.Len(t, snapshot.Skills, 1)
+		require.ErrorIs(
+			t,
+			runtime.SetSkillEnabled(t.Context(), snapshot.Skills[0].ID, false),
+			skillsettings.ErrUntrusted,
+		)
+	})
+
+	t.Run("stale and busy", func(t *testing.T) {
+		t.Parallel()
+
+		base := t.TempDir()
+		writeRuntimeTestSkill(t, base, "POLICY_TEST")
+		runtime := openTestRuntimeConfiguredWithTrust(
+			t,
+			base,
+			SessionTarget{},
+			newRuntimeModel(runtimeTextResponse("done")),
+			nil,
+			nil,
+			nil,
+			true,
+		)
+		require.ErrorIs(
+			t,
+			runtime.SetSkillEnabled(t.Context(), SkillID("stale"), false),
+			ErrRuntimeInvalid,
+		)
+		snapshot, err := runtime.Skills(t.Context())
+		require.NoError(t, err)
+		require.Len(t, snapshot.Skills, 1)
+
+		runtime.mu.Lock()
+		runtime.state.Phase = PhaseRunning
+		runtime.mu.Unlock()
+		require.ErrorIs(
+			t,
+			runtime.SetSkillEnabled(t.Context(), snapshot.Skills[0].ID, false),
+			ErrRuntimeBusy,
+		)
+		runtime.mu.Lock()
+		runtime.state.Phase = PhaseIdle
+		runtime.mu.Unlock()
+	})
+
+	t.Run("unsafe file preserves policy", func(t *testing.T) {
+		t.Parallel()
+
+		base := t.TempDir()
+		writeRuntimeTestSkill(t, base, "POLICY_TEST")
+		runtime := openTestRuntimeConfiguredWithTrust(
+			t,
+			base,
+			SessionTarget{},
+			newRuntimeModel(runtimeTextResponse("done")),
+			nil,
+			nil,
+			nil,
+			true,
+		)
+		snapshot, err := runtime.Skills(t.Context())
+		require.NoError(t, err)
+		require.Len(t, snapshot.Skills, 1)
+		projectDir := base + "/workspace/.pips"
+		require.NoError(t, os.MkdirAll(projectDir, 0o700))
+		require.NoError(t, os.WriteFile( //nolint:gosec // Broad mode is the unsafe-file test input.
+			projectDir+"/skills.toml",
+			[]byte("schema = \""+skillsettings.Schema+"\"\n"),
+			0o644,
+		))
+		require.ErrorIs(
+			t,
+			runtime.SetSkillEnabled(t.Context(), snapshot.Skills[0].ID, false),
+			skillsettings.ErrUnsafeFile,
+		)
+		unchanged, err := runtime.Skills(t.Context())
+		require.NoError(t, err)
+		assert.True(t, unchanged.Skills[0].Enabled)
+	})
+}
+
+func TestRuntimeReloadPublishesProjectSkillPolicy(t *testing.T) {
+	t.Parallel()
+
+	base := t.TempDir()
+	writeRuntimeTestSkill(t, base, "POLICY_TEST")
+	runtime := openTestRuntimeConfiguredWithTrust(
+		t,
+		base,
+		SessionTarget{},
+		newRuntimeModel(runtimeTextResponse("done")),
+		nil,
+		nil,
+		nil,
+		true,
+	)
+	snapshot, err := runtime.Skills(t.Context())
+	require.NoError(t, err)
+	require.Len(t, snapshot.Skills, 1)
+	assert.True(t, snapshot.Skills[0].Enabled)
+
+	projectDir := base + "/workspace/.pips"
+	require.NoError(t, os.MkdirAll(projectDir, 0o700))
+	require.NoError(t, os.WriteFile(
+		projectDir+"/skills.toml",
+		[]byte("schema = \""+skillsettings.Schema+"\"\n\n"+
+			"[[disabled]]\nsource = \"user:pips/review/SKILL.md\"\nname = \"review\"\n"),
+		0o600,
+	))
+	require.NoError(t, runtime.Reload(t.Context()))
+
+	reloaded, err := runtime.Skills(t.Context())
+	require.NoError(t, err)
+	require.Len(t, reloaded.Skills, 1)
+	assert.Equal(t, snapshot.Skills[0].ID, reloaded.Skills[0].ID)
+	assert.False(t, reloaded.Skills[0].Enabled)
+}
+
+func writeRuntimeTestSkill(t *testing.T, base, content string) {
+	t.Helper()
+
+	skillDir := base + "/home/skills/review"
+	require.NoError(t, os.MkdirAll(skillDir, 0o700))
+	require.NoError(t, os.WriteFile(
+		skillDir+"/SKILL.md",
+		[]byte("---\nname: review\ndescription: Review carefully\n---\n"+content+"\n"),
+		0o600,
+	))
 }
 
 func TestRuntimeRejectsInvalidProjectInstructionsBeforeModelRequest(t *testing.T) {

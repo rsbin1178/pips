@@ -411,20 +411,16 @@ func (r *Runtime) openInteraction(
 	}()
 
 	snapshot := activation.Snapshot()
-	skills, diagnostics, err := r.resources.ResolveSkills(snapshot.SkillEntries()...)
+	resolvedSkills, err := resolveSkillSet(
+		r.resources,
+		snapshot.SkillEntries(),
+		r.skillPolicy,
+	)
 	if err != nil {
 		return nil, err
 	}
 
-	for _, diagnostic := range diagnostics {
-		if err := emitter.emit(interactionID, "", EventIntegrationDiagnostic, IntegrationDiagnostic{
-			Component: "resource", Code: diagnostic.Code, Message: diagnostic.Message,
-		}); err != nil {
-			return nil, err
-		}
-	}
-
-	skillCatalog, err := harness.NewSkillCatalog(skills...)
+	skillCatalog, err := harness.NewSkillCatalog(resolvedSkills.enabledSkills()...)
 	if err != nil {
 		return nil, err
 	}

@@ -3,8 +3,11 @@ package coding
 import (
 	"testing"
 
+	"github.com/rsbin/pips/agent/extension"
 	"github.com/rsbin/pips/agent/harness"
 	"github.com/rsbin/pips/ai"
+	"github.com/rsbin/pips/internal/coding/resource"
+	"github.com/rsbin/pips/internal/coding/skillsettings"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -80,4 +83,31 @@ func TestSkillSourceDoesNotExposePaths(t *testing.T) {
 	assert.Equal(t, SkillSourceUserAgents, skillSource("user:agents/review/SKILL.md"))
 	assert.Equal(t, SkillSourceExtension, skillSource("extension:compiled"))
 	assert.Equal(t, SkillSourceUnknown, skillSource("/Users/private/skill"))
+}
+
+func TestResolvedSkillSetKeepsDisabledMetadataOutOfEffectiveCatalog(t *testing.T) {
+	t.Parallel()
+
+	ref := skillsettings.Ref{Source: "extension:review", Name: "go-review"}
+	resolved, err := resolveSkillSet(
+		resource.Result{},
+		[]extension.SkillEntry{{
+			Skill: harness.Skill{
+				Name: "go-review", Description: "Review Go", Content: "instructions",
+			},
+			Origin: extension.Origin{ExtensionID: "review"},
+		}},
+		skillsettings.Empty().WithDisabled(ref, true),
+	)
+	require.NoError(t, err)
+	assert.Empty(t, resolved.enabledSkills())
+
+	snapshot := resolved.snapshot()
+	require.Len(t, snapshot.Skills, 1)
+	assert.Equal(t, skillIdentifier(ref), snapshot.Skills[0].ID)
+	assert.False(t, snapshot.Skills[0].Enabled)
+	assert.Equal(t, SkillSourceExtension, snapshot.Skills[0].Source)
+	actual, found := resolved.ref(snapshot.Skills[0].ID)
+	assert.True(t, found)
+	assert.Equal(t, ref, actual)
 }

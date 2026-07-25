@@ -156,7 +156,7 @@ func (m *Model) filteredSkills() []coding.SkillSummary {
 	query := strings.ToLower(strings.TrimSpace(m.picker.query))
 	filtered := make([]coding.SkillSummary, 0, len(m.picker.skills))
 	for _, skill := range m.picker.skills {
-		if !skill.UserInvocable {
+		if !skill.Enabled || !skill.UserInvocable {
 			continue
 		}
 
