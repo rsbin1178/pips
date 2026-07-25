@@ -8,6 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/rsbin/pips/internal/coding"
 	"github.com/rsbin/pips/internal/coding/config"
 	"github.com/rsbin/pips/internal/coding/modelcatalog"
 )
@@ -20,6 +21,7 @@ const (
 	pickerNone pickerKind = iota
 	pickerCommand
 	pickerModel
+	pickerSkill
 )
 
 type pickerState struct {
@@ -30,8 +32,15 @@ type pickerState struct {
 	loading       bool
 	controlling   bool
 	models        []modelcatalog.Entry
+	skills        []coding.SkillSummary
+	diagnostics   int
 	selection     modelcatalog.Selection
 	previousInput string
+	previousLine  int
+	previousCol   int
+	tokenStart    int
+	tokenEnd      int
+	generation    uint64
 }
 
 func (m *Model) openModelPicker() {
@@ -61,6 +70,8 @@ func (m *Model) updatePickerKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case pickerCommand:
 		return m.updateCommandPickerKey(message)
 	case pickerModel:
+	case pickerSkill:
+		return m.updateSkillPickerKey(message)
 	default:
 		return m, nil
 	}
@@ -86,7 +97,7 @@ func (m *Model) updatePickerKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.cyclePickerReasoning(1)
 	case "R":
 		m.cyclePickerReasoning(-1)
-	case "ctrl+u":
+	case keyCtrlU:
 		m.picker.query = ""
 		m.picker.cursor = 0
 	case keyBackspace:

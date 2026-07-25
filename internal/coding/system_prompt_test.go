@@ -1,3 +1,4 @@
+//nolint:wsl_v5 // Runtime setup, prompt execution, and request assertions stay grouped.
 package coding
 
 import (
@@ -69,6 +70,61 @@ func TestRuntimeInjectsMainSystemPromptAndProjectInstructions(t *testing.T) {
 	assert.Contains(t, request.System, `"apply_patch"`)
 	assert.Contains(t, request.System, `"run_subagent"`)
 	assert.Contains(t, request.System, `"spawn_agent"`)
+}
+
+func TestRuntimeExplicitUserSkillIsInteractionScoped(t *testing.T) {
+	t.Parallel()
+
+	base := t.TempDir()
+	skillDir := base + "/home/skills/review"
+	require.NoError(t, os.MkdirAll(skillDir, 0o700))
+	require.NoError(t, os.WriteFile(
+		skillDir+"/SKILL.md",
+		[]byte("---\nname: review\ndescription: Review carefully\ndisable-model-invocation: true\n---\nEXPLICIT_REVIEW_INSTRUCTIONS\n"),
+		0o600,
+	))
+
+	model := newRuntimeModel(runtimeTextResponse("done"))
+	runtime := openTestRuntimeAt(t, base, SessionTarget{}, model)
+
+	snapshot, err := runtime.Skills(t.Context())
+	require.NoError(t, err)
+	require.Len(t, snapshot.Skills, 1)
+	assert.True(t, snapshot.Skills[0].UserInvocable)
+	assert.False(t, snapshot.Skills[0].ModelInvocable)
+	assert.Equal(t, SkillSourceUserPips, snapshot.Skills[0].Source)
+
+	collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("$review inspect this")))
+	requests := model.Requests()
+	require.Len(t, requests, 1)
+	assert.Contains(t, requests[0].System, "# Explicitly selected Skills")
+	assert.Contains(t, requests[0].System, "EXPLICIT_REVIEW_INSTRUCTIONS")
+	assert.NotContains(t, requests[0].System, "<available-skills>")
+	assert.Contains(t, toolNamesFromRequest(requests[0]), "skill")
+	assert.True(t, requestContainsText(requests[0], "$review inspect this"))
+}
+
+func TestRuntimeDoesNotExposeUnselectedUserOnlySkill(t *testing.T) {
+	t.Parallel()
+
+	base := t.TempDir()
+	skillDir := base + "/home/skills/review"
+	require.NoError(t, os.MkdirAll(skillDir, 0o700))
+	require.NoError(t, os.WriteFile(
+		skillDir+"/SKILL.md",
+		[]byte("---\nname: review\ndescription: Review carefully\ndisable-model-invocation: true\n---\nPRIVATE_REVIEW_INSTRUCTIONS\n"),
+		0o600,
+	))
+
+	model := newRuntimeModel(runtimeTextResponse("done"))
+	runtime := openTestRuntimeAt(t, base, SessionTarget{}, model)
+	collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("inspect this")))
+
+	requests := model.Requests()
+	require.Len(t, requests, 1)
+	assert.NotContains(t, requests[0].System, "PRIVATE_REVIEW_INSTRUCTIONS")
+	assert.NotContains(t, requests[0].System, "<available-skills>")
+	assert.NotContains(t, toolNamesFromRequest(requests[0]), "skill")
 }
 
 func TestRuntimeRejectsInvalidProjectInstructionsBeforeModelRequest(t *testing.T) {

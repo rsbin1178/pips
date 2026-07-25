@@ -125,8 +125,9 @@ Configure `~/.pips/config.toml`, export the provider-neutral `API_KEY`, and run
 API_KEY=... go run ./cmd/pips
 ```
 
-The first visit to a Workspace asks whether project `.pips` resources may be
-loaded. Trust does not approve tools, MCP servers, Shell commands, or full
+The first visit to a Workspace asks whether project resources may be loaded.
+Trust enables Pips-native `.pips` resources and shared `.agents/skills`, but
+does not approve tools, Skill scripts, MCP servers, Shell commands, or full
 access. Main configuration always comes from `~/.pips/config.toml` or the one
 file selected by `--config`; project trust does not change it.
 Non-TTY input and `TERM=dumb` fail before Workspace configuration or
@@ -152,8 +153,14 @@ selected child's full-width ordinary Session timeline, including visible
 assistant output and Tool activity, and toggles back to the parent. Other Tools
 retain ordinary detail behavior.
 
-The command palette provides `/new`, `/resume`, `/agents`, `/model`, `/tree`,
-`/fork`, `/compact`, `/diff`, `/reload`, `/status`, `/help`, and `/quit`.
+The command palette provides `/new`, `/resume`, `/agents`, `/skills`, `/model`,
+`/tree`, `/fork`, `/compact`, `/diff`, `/reload`, `/status`, `/help`, and
+`/quit`. `/skills` browses user-invocable Skills from native
+`~/.pips/skills`/`.pips/skills` and shared
+`~/.agents/skills`/`.agents/skills` roots. Type `$` at a token boundary to
+filter the same list and insert an exact `$skill-name` reference. Explicit
+references apply only to that request; unknown tokens such as `$HOME` remain
+ordinary text.
 `/agents` lists only the specialists owned by the current conversation, orders
 running work first, opens the full child timeline with Enter, and cancels the
 selected running child with `c`. Approval is fail-closed: review defaults to

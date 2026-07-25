@@ -46,6 +46,7 @@ type systemPromptOptions struct {
 	WorkspaceTrusted    bool
 	ToolNames           []string
 	ProjectInstructions string
+	ExplicitSkills      string
 }
 
 type systemPromptEnvironment struct {
@@ -88,6 +89,12 @@ func buildCodingSystemPrompt(options systemPromptOptions) (string, error) {
 	if projectInstructions != "" {
 		prompt.WriteString("\n\n# Project instructions\n\n")
 		prompt.WriteString(projectInstructions)
+	}
+
+	explicitSkills := strings.TrimSpace(options.ExplicitSkills)
+	if explicitSkills != "" {
+		prompt.WriteString("\n\n# Explicitly selected Skills\n\n")
+		prompt.WriteString(explicitSkills)
 	}
 
 	return prompt.String(), nil

@@ -144,8 +144,12 @@ func (r *Runtime) run(
 			return
 		}
 
+		var promptMessages []ai.Message
+		if kind == operationPrompt {
+			promptMessages = messages
+		}
 		current, err = r.openInteraction(
-			ctx, interactionID, false, emitter, started,
+			ctx, interactionID, false, emitter, started, promptMessages,
 		)
 		if err != nil {
 			outcome := InteractionFailed
@@ -181,6 +185,7 @@ func (r *Runtime) run(
 			true,
 			emitter,
 			InteractionStarted{Resumed: true},
+			nil,
 		)
 		if err == nil {
 			err = r.reconcileAndContinue(ctx, current, emitter)
@@ -372,6 +377,7 @@ func (r *Runtime) openInteraction(
 	resumed bool,
 	emitter *eventEmitter,
 	started InteractionStarted,
+	promptMessages []ai.Message,
 ) (_ *interaction, returnErr error) {
 	current := &interaction{
 		id: interactionID, rootInteractionID: interactionID,
@@ -422,8 +428,20 @@ func (r *Runtime) openInteraction(
 	if err != nil {
 		return nil, err
 	}
-
-	skillTool, err := harness.NewSkillTool(skillCatalog)
+	userSkillCatalog, err := skillCatalog.ForUser()
+	if err != nil {
+		return nil, err
+	}
+	explicitNames := explicitSkillNames(promptMessages, userSkillCatalog)
+	explicitSkills, err := activateExplicitSkills(skillCatalog, explicitNames)
+	if err != nil {
+		return nil, err
+	}
+	modelSkillCatalog, err := skillCatalog.ForModel()
+	if err != nil {
+		return nil, err
+	}
+	toolSkillCatalog, err := skillCatalog.ForModelWith(explicitNames...)
 	if err != nil {
 		return nil, err
 	}
@@ -442,9 +460,19 @@ func (r *Runtime) openInteraction(
 		return nil, err
 	}
 
-	skillTools, err := catalog.New(catalog.Local("coding.skills", catalog.RiskRead, skillTool)...)
+	skillTools, err := catalog.New()
 	if err != nil {
 		return nil, err
+	}
+	if len(toolSkillCatalog.List()) > 0 {
+		skillTool, err := harness.NewSkillTool(toolSkillCatalog)
+		if err != nil {
+			return nil, err
+		}
+		skillTools, err = catalog.New(catalog.Local("coding.skills", catalog.RiskRead, skillTool)...)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	childOwner := subagent.Ownership{
@@ -507,6 +535,7 @@ func (r *Runtime) openInteraction(
 		WorkspaceTrusted:    r.trusted,
 		ToolNames:           agentToolNames(visibleTools),
 		ProjectInstructions: projectInstructions.SystemPrompt(),
+		ExplicitSkills:      explicitSkills,
 	})
 	if err != nil {
 		return nil, err
@@ -532,7 +561,7 @@ func (r *Runtime) openInteraction(
 	harnessOptions := []harness.Option{
 		harness.WithTools(visibleTools...),
 		harness.WithSystem(systemPrompt),
-		harness.WithSkillCatalog(skillCatalog),
+		harness.WithSkillCatalog(modelSkillCatalog),
 		harness.WithTemplates(snapshot.Prompts()...),
 		harness.WithAgentOptions(append(
 			composed.AgentOptions(),

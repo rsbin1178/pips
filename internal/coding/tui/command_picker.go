@@ -26,6 +26,7 @@ var commands = []commandDescriptor{
 	{name: "new", description: "start a new session", idleOnly: true},
 	{name: "resume", description: "resume a workspace session", idleOnly: true},
 	{name: "agents", description: "inspect read-only specialist runs", idleOnly: true},
+	{name: "skills", description: "browse and select available Skills", idleOnly: true},
 	{name: "model", description: "switch the process-local model", idleOnly: true},
 	{name: "tree", description: "navigate the current session tree", idleOnly: true},
 	{name: "fork", description: "fork a node into a new session", idleOnly: true},
@@ -93,7 +94,7 @@ func (m *Model) updateCommandPickerKey(message tea.KeyPressMsg) (tea.Model, tea.
 		}
 
 		return m.executeCommand(filtered[m.picker.cursor])
-	case "ctrl+u":
+	case keyCtrlU:
 		m.picker.query = ""
 		m.picker.cursor = 0
 		m.picker.err = nil
@@ -153,6 +154,11 @@ func (m *Model) executeCommand(command commandDescriptor) (tea.Model, tea.Cmd) {
 		m.closeCommandPicker(false)
 
 		return m, m.openAgentsRoute()
+	case "skills":
+		previousInput := m.picker.previousInput
+		m.closeCommandPicker(false)
+
+		return m, m.openSkillPickerForInput(previousInput)
 	case "tree":
 		m.closeCommandPicker(false)
 

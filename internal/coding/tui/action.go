@@ -15,6 +15,7 @@ const (
 	keyTab       = "tab"
 	keyCtrlC     = "ctrl+c"
 	keyCtrlT     = "ctrl+t"
+	keyCtrlU     = "ctrl+u"
 	keyEscape    = "esc"
 	keyDown      = "down"
 	keyBackspace = "backspace"

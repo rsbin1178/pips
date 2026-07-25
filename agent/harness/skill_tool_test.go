@@ -1,3 +1,4 @@
+//nolint:wsl_v5 // Tool declaration and execution assertions stay grouped.
 package harness_test
 
 import (
@@ -21,6 +22,10 @@ func TestSkillToolActivatesExactSkillAndAudits(t *testing.T) {
 		License: "MIT", Compatibility: "Go 1.25",
 		Metadata:     map[string]string{"area": "quality"},
 		AllowedTools: []string{"shell"},
+		Resources: []harness.SkillResource{
+			{Path: "references/guide.md", Size: 5, Text: true, Content: "guide"},
+			{Path: "assets/logo.png", Size: 10},
+		},
 	})
 	require.NoError(t, err)
 
@@ -42,16 +47,81 @@ func TestSkillToolActivatesExactSkillAndAudits(t *testing.T) {
 		"instructions":"full instructions",
 		"license":"MIT",
 		"compatibility":"Go 1.25",
-		"metadata":{"area":"quality"}
+		"metadata":{"area":"quality"},
+		"resources":[
+			{"path":"references/guide.md","size":5,"text":true},
+			{"path":"assets/logo.png","size":10,"text":false}
+		]
 	}`, text.Text)
 	assert.NotContains(t, text.Text, "/private/user")
 	assert.NotContains(t, text.Text, "allowed_tools")
 	assert.NotContains(t, text.Text, "shell")
+	assert.Contains(t, text.Text, `"resources"`)
+	assert.NotContains(t, text.Text, `"content":"guide"`)
 
 	activations := catalogue.Activations()
 	require.Len(t, activations, 1)
 	assert.Equal(t, "go-review", activations[0].Skill.Name)
 	assert.False(t, activations[0].ActivatedAt.IsZero())
+}
+
+func TestSkillToolUsesDynamicNameSchemaAndReadsTextResource(t *testing.T) {
+	t.Parallel()
+
+	catalogue, err := harness.NewSkillCatalog(
+		harness.Skill{
+			Name:        "go-review",
+			Description: "Review Go code",
+			Content:     "full instructions",
+			Resources: []harness.SkillResource{
+				{Path: "references/guide.md", Size: 5, Text: true, Content: "guide"},
+				{Path: "assets/logo.png", Size: 10},
+			},
+		},
+		harness.Skill{
+			Name:        "deploy",
+			Description: "Deploy safely",
+			Content:     "deploy instructions",
+		},
+	)
+	require.NoError(t, err)
+
+	tool, err := harness.NewSkillTool(catalogue)
+	require.NoError(t, err)
+	declaration := tool.Decl()
+	require.NotNil(t, declaration.InputSchema)
+	assert.Equal(t, []any{"deploy", "go-review"}, declaration.InputSchema.Properties["name"].Enum)
+	assert.Contains(t, declaration.InputSchema.Properties, "resource")
+	assert.Equal(t, false, declaration.InputSchema.AdditionalProperties)
+
+	parts, err := tool.Exec(t.Context(), agent.ToolCall{
+		ID:   "call-1",
+		Name: harness.SkillToolName,
+		Args: ai.JSON(`{"name":"go-review","resource":"references/guide.md"}`),
+	})
+	require.NoError(t, err)
+	require.Len(t, parts, 1)
+	text, ok := parts[0].(ai.TextPart)
+	require.True(t, ok)
+	assert.JSONEq(t, `{
+		"name":"go-review",
+		"resource":"references/guide.md",
+		"content":"guide"
+	}`, text.Text)
+
+	_, err = tool.Exec(t.Context(), agent.ToolCall{
+		ID:   "call-2",
+		Name: harness.SkillToolName,
+		Args: ai.JSON(`{"name":"go-review","resource":"assets/logo.png"}`),
+	})
+	require.ErrorContains(t, err, "is not a text resource")
+
+	_, err = tool.Exec(t.Context(), agent.ToolCall{
+		ID:   "call-3",
+		Name: harness.SkillToolName,
+		Args: ai.JSON(`{"name":"go-review","unknown":true}`),
+	})
+	require.ErrorContains(t, err, "unknown field")
 }
 
 func TestSkillToolRejectsUnknownNameWithoutAudit(t *testing.T) {

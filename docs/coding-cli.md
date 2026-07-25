@@ -139,10 +139,16 @@ and every effective typed request option. Raw `extra_body` values stay hidden;
 only their top-level key count and encoded byte count are shown.
 
 `--trust-workspace` records the canonical workspace identity in `~/.pips` and
-enables project `.pips` Skills, Bundles, and MCP definitions for this
-invocation. It does not enable project configuration, grant a tool approval,
-approve an MCP server, or enable Full Access. The trust decision is audited on
-stderr.
+enables project `.pips` Skills/Bundles/MCP plus shared `.agents/skills` for
+this invocation. It does not enable project configuration, grant a tool or
+Skill-script approval, approve an MCP server, or enable Full Access. The trust
+decision is audited on stderr.
+
+User Skills are discovered from `~/.pips/skills` and the ecosystem-standard
+`~/.agents/skills`; `PIPS_HOME` moves only the native Pips root. In interactive
+mode, `/skills` browses the effective user-invocable set and `$skill-name`
+selects a Skill for one request. The same exact-reference semantics apply to
+`pips exec`; unknown dollar tokens remain unchanged.
 
 `--session <id>` reopens only that durable session in the current workspace. A
 reopened pending operation is reconciled first. If a human decision is still
