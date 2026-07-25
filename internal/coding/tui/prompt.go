@@ -64,9 +64,14 @@ func (m *Model) syncApprovalPrompt() {
 	}
 	m.presentation.pendingRoute = routeOpenRequest{}
 	hadRoute := m.route.kind != routeNone
-	if m.route.kind == routeSessions {
+	switch m.route.kind {
+	case routeSessions:
 		m.dismissSessionPicker(true)
-	} else {
+	case routeSkills:
+		previousInput := m.route.previousInput
+		m.route = routeState{}
+		m.composer.SetValue(previousInput)
+	default:
 		m.route = routeState{}
 	}
 	if hadRoute {

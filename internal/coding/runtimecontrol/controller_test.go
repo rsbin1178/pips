@@ -481,6 +481,8 @@ func (*fakeRuntime) Skills(context.Context) (coding.SkillSnapshot, error) {
 	return coding.SkillSnapshot{}, nil
 }
 
+func (*fakeRuntime) SetSkillEnabled(context.Context, coding.SkillID, bool) error { return nil }
+
 func (r *fakeRuntime) Snapshot() coding.State {
 	r.mu.Lock()
 	defer r.mu.Unlock()

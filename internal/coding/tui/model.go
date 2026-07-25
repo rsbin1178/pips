@@ -184,7 +184,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.theme = themeLight
 		}
 		m.composer.SetStyles(composerStyles(m.theme, m.options.NoColor))
-		if m.route.kind == routeSessions {
+		if m.route.kind == routeSessions || m.route.kind == routeSkills {
 			m.route.search.SetStyles(sessionSearchStyles(m.theme, m.options.NoColor))
 		}
 		m.rerenderTranscript(false)
@@ -351,6 +351,34 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.route.cursor = 0
 
 		return m, nil
+	case skillsRouteDataMsg:
+		if m.route.kind != routeSkills || message.generation != m.route.generation {
+			return m, nil
+		}
+		m.route.loading = false
+		m.route.err = message.err
+		m.route.skills = slices.Clone(message.snapshot.Skills)
+		m.route.diagnostics = slices.Clone(message.snapshot.Diagnostics)
+		m.route.cursor = 0
+
+		return m, nil
+	case skillToggleResultMsg:
+		if m.route.kind != routeSkills || message.generation != m.route.generation {
+			return m, nil
+		}
+		m.route.controlling = false
+		m.route.err = message.err
+		if message.err != nil {
+			return m, nil
+		}
+		for index := range m.route.skills {
+			if m.route.skills[index].ID == message.id {
+				m.route.skills[index].Enabled = message.enabled
+				break
+			}
+		}
+
+		return m, nil
 	case agentsRouteDataMsg:
 		if m.route.kind != routeAgents || message.generation != m.route.generation {
 			return m, nil
@@ -439,7 +467,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.picker = pickerState{}
 			}
 		case routeControl:
-			if m.route.kind == routeSessions {
+			if m.route.kind == routeSessions || m.route.kind == routeSkills {
 				m.dismissSessionPicker(false)
 			} else {
 				m.route = routeState{}
@@ -869,12 +897,8 @@ func (m *Model) setLayout() {
 	m.composer.SetWidth(m.composerContentWidth())
 	composerHeight := max(1, min(composerMaxLines, m.composer.Height()))
 	m.composer.SetHeight(composerHeight)
-	if m.route.kind == routeSessions {
-		innerWidth := max(1, width-4)
-		m.route.search.SetWidth(max(
-			1,
-			innerWidth-ansi.StringWidth(sessionPickerSearchPrompt),
-		))
+	if m.route.kind == routeSessions || m.route.kind == routeSkills {
+		m.route.search.SetWidth(routeSearchInputWidth(width))
 	}
 }
 

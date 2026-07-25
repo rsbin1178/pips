@@ -74,6 +74,8 @@ func TestSessionPickerRendersFullWidthSearchAndSessionMetadata(t *testing.T) {
 	assert.Contains(t, content, inputArrow+" /resume")
 	assert.Contains(t, content, "Resume session")
 	assert.Contains(t, content, "Search…")
+	assert.Contains(t, content, "┌")
+	assert.Contains(t, content, "└")
 	assert.Contains(t, content, "› How does cancellation work?")
 	assert.Contains(t, content, "runtime research")
 	assert.Contains(t, content, "6 hours ago · 12 nodes · 2 branches")

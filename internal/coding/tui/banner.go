@@ -77,10 +77,11 @@ func renderStartupBanner(context startupBannerContext) string {
 		workspace = workspaceLabel
 	}
 
+	innerWidth := max(1, width-4)
 	lines := []string{
-		ansi.Truncate("✻ "+appTitle, width, "…"),
-		ansi.Truncate(workspace+"  ·  "+context.model, width, "…"),
-		ansi.Truncate("Type / for commands", width, "…"),
+		ansi.Truncate("✻ "+appTitle, innerWidth, "…"),
+		ansi.Truncate(workspace+"  ·  "+context.model, innerWidth, "…"),
+		ansi.Truncate("Type / for commands", innerWidth, "…"),
 	}
 
 	if !context.noColor {
@@ -90,5 +91,20 @@ func renderStartupBanner(context startupBannerContext) string {
 		lines[2] = lipgloss.NewStyle().Foreground(palette.muted).Render(lines[2])
 	}
 
-	return strings.Join(lines, "\n")
+	content := strings.Join(lines, "\n")
+	if width < 8 {
+		return ansi.Truncate(content, width, "…")
+	}
+
+	style := lipgloss.NewStyle().
+		Width(innerWidth).
+		Padding(0, 1).
+		Border(lipgloss.RoundedBorder(), true)
+	if context.noColor {
+		style = style.Border(lipgloss.NormalBorder(), true)
+	} else {
+		style = style.BorderForeground(paletteFor(context.theme).separator)
+	}
+
+	return style.Render(content)
 }

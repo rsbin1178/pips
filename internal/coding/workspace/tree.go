@@ -485,6 +485,23 @@ func (d *MutationDir) OpenFile(name string, flag int, perm fs.FileMode) (*os.Fil
 	return file, nil
 }
 
+// Mkdir creates one direct child directory without following symbolic links.
+func (d *MutationDir) Mkdir(name string, perm fs.FileMode) error {
+	if err := d.checkBase(name); err != nil {
+		return err
+	}
+
+	if err := d.root.Mkdir(name, perm.Perm()); err != nil {
+		return fmt.Errorf(
+			"coding workspace: create mutation directory %q: %w",
+			d.display(name),
+			err,
+		)
+	}
+
+	return nil
+}
+
 // Link creates a hard link between two direct children. It fails when the new
 // name already exists, which makes it suitable for guarded backup creation.
 func (d *MutationDir) Link(oldName, newName string) error {
