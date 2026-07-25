@@ -1,3 +1,4 @@
+//nolint:wsl_v5 // Catalog defensive-copy and filtering steps intentionally remain adjacent.
 package harness
 
 import (
@@ -99,6 +100,67 @@ func (c *SkillCatalog) Search(query string) []Skill {
 	return matches
 }
 
+// ForUser returns a catalog containing only skills that permit explicit user
+// invocation. Full instructions remain protected by Activate.
+func (c *SkillCatalog) ForUser() (*SkillCatalog, error) {
+	return c.filter(func(skill Skill) bool { return skill.UserInvocable() })
+}
+
+// ForModel returns a catalog containing only skills that permit autonomous
+// model discovery and activation. Full instructions remain protected by
+// Activate.
+func (c *SkillCatalog) ForModel() (*SkillCatalog, error) {
+	return c.filter(func(skill Skill) bool { return skill.ModelInvocable() })
+}
+
+// ForModelWith returns the model-invocable catalog plus explicitly named
+// skills. It lets an application honor user-only selections for one request
+// without making every user-only skill autonomously available to the model.
+func (c *SkillCatalog) ForModelWith(names ...string) (*SkillCatalog, error) {
+	selected := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		if c == nil {
+			return nil, errors.New("harness: nil skill catalog")
+		}
+		if _, ok := c.byName[name]; !ok {
+			return nil, fmt.Errorf("harness: unknown skill %q", name)
+		}
+		selected[name] = struct{}{}
+	}
+
+	return c.filter(func(skill Skill) bool {
+		_, explicitlySelected := selected[skill.Name]
+
+		return skill.ModelInvocable() || explicitlySelected
+	})
+}
+
+// Resource returns one exact resource from a skill. Callers must explicitly
+// request both the skill and slash-relative resource path. Binary resources
+// contain metadata only; applications decide whether and how to expose them.
+func (c *SkillCatalog) Resource(name, resourcePath string) (SkillResource, error) {
+	if c == nil {
+		return SkillResource{}, errors.New("harness: nil skill catalog")
+	}
+
+	skill, ok := c.byName[name]
+	if !ok {
+		return SkillResource{}, fmt.Errorf("harness: unknown skill %q", name)
+	}
+
+	for _, resource := range skill.Resources {
+		if resource.Path == resourcePath {
+			return resource, nil
+		}
+	}
+
+	return SkillResource{}, fmt.Errorf(
+		"harness: skill %q has unknown resource %q",
+		name,
+		resourcePath,
+	)
+}
+
 // Activate returns a skill's full content and appends an in-memory audit
 // record. Hosts that persist audit data should copy Activations after a run.
 func (c *SkillCatalog) Activate(name string) (SkillActivation, error) {
@@ -146,14 +208,40 @@ func validateSkill(skill Skill) error {
 		return fmt.Errorf("harness: skill %q description must be non-empty and at most 1024 bytes", skill.Name)
 	}
 
+	if skill.Invocation > SkillInvocationDisabled {
+		return fmt.Errorf("harness: skill %q has invalid invocation policy", skill.Name)
+	}
+
+	if err := validateSkillResources(skill); err != nil {
+		return err
+	}
+
 	return nil
 }
 
 func discoverySkill(skill Skill) Skill {
 	skill = cloneSkill(skill)
 	skill.Content = ""
+	for i := range skill.Resources {
+		skill.Resources[i].Content = ""
+	}
 
 	return skill
+}
+
+func (c *SkillCatalog) filter(keep func(Skill) bool) (*SkillCatalog, error) {
+	if c == nil {
+		return nil, errors.New("harness: nil skill catalog")
+	}
+
+	skills := make([]Skill, 0, len(c.list))
+	for _, skill := range c.list {
+		if keep(skill) {
+			skills = append(skills, cloneSkill(skill))
+		}
+	}
+
+	return NewSkillCatalog(skills...)
 }
 
 func cloneActivation(record SkillActivation) SkillActivation {

@@ -477,6 +477,10 @@ func (*fakeRuntime) InspectSubagent(context.Context, string) (subagent.Detail, e
 	return subagent.Detail{}, nil
 }
 
+func (*fakeRuntime) Skills(context.Context) (coding.SkillSnapshot, error) {
+	return coding.SkillSnapshot{}, nil
+}
+
 func (r *fakeRuntime) Snapshot() coding.State {
 	r.mu.Lock()
 	defer r.mu.Unlock()

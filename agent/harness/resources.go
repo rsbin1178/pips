@@ -4,12 +4,39 @@ import (
 	"fmt"
 	"html"
 	"maps"
+	"path"
 	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/rsbin/pips/ai"
 )
+
+// SkillInvocation controls whether a Skill can be selected by a user, a
+// model, both, or neither. The zero value preserves the historical behavior
+// and allows both invocation paths.
+type SkillInvocation uint8
+
+const (
+	// SkillInvocationDefault allows both user and model invocation.
+	SkillInvocationDefault SkillInvocation = iota
+	// SkillInvocationUserOnly allows explicit user invocation only.
+	SkillInvocationUserOnly
+	// SkillInvocationModelOnly allows autonomous model invocation only.
+	SkillInvocationModelOnly
+	// SkillInvocationDisabled keeps the Skill unavailable to both paths.
+	SkillInvocationDisabled
+)
+
+// SkillResource is one immutable, bounded resource bundled with a Skill.
+// Path is slash-relative to the Skill directory. Text content is available
+// only when Text is true; binary resources expose metadata but not content.
+type SkillResource struct {
+	Path    string
+	Size    int64
+	Text    bool
+	Content string
+}
 
 // Skill is an instruction resource surfaced to the model through the system
 // prompt. Applications own loading skills (from SKILL.md files or anywhere
@@ -33,14 +60,70 @@ type Skill struct {
 	// AllowedTools is declarative metadata only. A host must still enforce its
 	// own Tool policy; this package never grants execution from a Skill.
 	AllowedTools []string
+	// Invocation controls user and model discovery. Its zero value allows both.
+	Invocation SkillInvocation
+	// Resources contains immutable application-validated sibling resources.
+	Resources []SkillResource
+}
+
+// UserInvocable reports whether a user may explicitly select the Skill.
+func (s Skill) UserInvocable() bool {
+	return s.Invocation == SkillInvocationDefault || s.Invocation == SkillInvocationUserOnly
+}
+
+// ModelInvocable reports whether the model may discover and activate the Skill.
+func (s Skill) ModelInvocable() bool {
+	return s.Invocation == SkillInvocationDefault || s.Invocation == SkillInvocationModelOnly
 }
 
 func cloneSkill(in Skill) Skill {
 	out := in
 	out.Metadata = maps.Clone(in.Metadata)
 	out.AllowedTools = slices.Clone(in.AllowedTools)
+	out.Resources = slices.Clone(in.Resources)
 
 	return out
+}
+
+func validateSkillResources(skill Skill) error {
+	seen := make(map[string]struct{}, len(skill.Resources))
+
+	for _, resource := range skill.Resources {
+		if !validSkillResourcePath(resource.Path) {
+			return fmt.Errorf("harness: skill %q has invalid resource path %q", skill.Name, resource.Path)
+		}
+
+		if resource.Size < 0 {
+			return fmt.Errorf("harness: skill %q resource %q has negative size", skill.Name, resource.Path)
+		}
+
+		if !resource.Text && resource.Content != "" {
+			return fmt.Errorf("harness: skill %q binary resource %q contains text", skill.Name, resource.Path)
+		}
+
+		if _, ok := seen[resource.Path]; ok {
+			return fmt.Errorf("harness: skill %q has duplicate resource %q", skill.Name, resource.Path)
+		}
+
+		seen[resource.Path] = struct{}{}
+	}
+
+	return nil
+}
+
+func validSkillResourcePath(value string) bool {
+	if value == "" || path.IsAbs(value) || path.Clean(value) != value ||
+		value == "." || strings.HasPrefix(value, "../") || strings.ContainsRune(value, '\\') {
+		return false
+	}
+
+	for _, char := range value {
+		if char < ' ' || char == '\x7f' {
+			return false
+		}
+	}
+
+	return true
 }
 
 // PromptTemplate is a reusable prompt with positional argument placeholders.

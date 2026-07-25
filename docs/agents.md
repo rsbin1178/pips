@@ -91,11 +91,14 @@ restart but should not consume context.
 belongs to the provider/model layer, not the loop.
 
 **Skills and tools.** `harness.LoadSkills` validates Agent Skills `SKILL.md`
-frontmatter and builds a `SkillCatalog`. Descriptions are advertised for
+YAML frontmatter and builds a `SkillCatalog`. Descriptions are advertised for
 selection; an application explicitly calls `catalog.Activate(name)` to obtain
-the full instructions and an activation record. Supporting `scripts/` remain
-files in the Skill workflow, not model tools. Expose a script only by wrapping
-its constrained argument surface as an `agent.Tool` or serving it over MCP.
+the full instructions and an activation record. `NewSkillTool` uses an exact
+dynamic name enum and can progressively read one catalogued UTF-8 text
+resource. Supporting `scripts/`, `references/`, and `assets/` remain resources,
+not model tools. Expose a script only by wrapping its constrained argument
+surface as an `agent.Tool` or serving it over MCP; `allowed-tools` is
+declarative metadata and never grants permission.
 
 Use `agent/catalog` at the application composition root to label local, MCP,
 extension, and Team tool snapshots with provenance and risk, then construct a

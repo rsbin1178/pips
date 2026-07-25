@@ -98,6 +98,7 @@ type Model struct {
 	exitArmed         bool
 	bannerPrinted     bool
 	picker            pickerState
+	pickerSeq         uint64
 	route             routeState
 	routeSeq          uint64
 	presentation      presentationState
@@ -377,6 +378,18 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.prompt.loading = false
 		m.prompt.err = message.err
 		m.prompt.preview = message.preview
+
+		return m, nil
+	case skillPickerDataMsg:
+		if m.picker.kind != pickerSkill || message.generation != m.picker.generation {
+			return m, nil
+		}
+		m.picker.loading = false
+		m.picker.err = message.err
+		m.picker.skills = slices.Clone(message.snapshot.Skills)
+		m.picker.diagnostics = len(message.snapshot.Diagnostics)
+		m.picker.cursor = 0
+		m.setLayout()
 
 		return m, nil
 	case controlResultMsg:
@@ -710,11 +723,15 @@ func (m *Model) updateReadyKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	var command tea.Cmd
 	m.composer, command = m.composer.Update(message)
+	if context == contextIdle && message.Key().Text == "$" && m.canOpenSkillPickerAtCursor() {
+		return m, tea.Batch(command, m.openSkillPickerAfterDollar())
+	}
 	m.setLayout()
 
 	return m, command
 }
 
+//nolint:gocyclo // Footer composition follows the explicit route/prompt/picker state machine.
 func (m *Model) readyView() tea.View {
 	if m.route.kind != routeNone {
 		return m.routeView()
@@ -738,9 +755,12 @@ func (m *Model) readyView() tea.View {
 	if m.picker.kind != pickerNone {
 		usedHeight := lipgloss.Height(lipgloss.JoinVertical(lipgloss.Left, footer...))
 		availableRows := max(1, m.height-usedHeight)
-		if m.picker.kind == pickerModel {
+		switch m.picker.kind {
+		case pickerModel:
 			footer = append(footer, m.pickerView(availableRows))
-		} else {
+		case pickerSkill:
+			footer = append(footer, m.skillPickerView(availableRows))
+		default:
 			footer = append(footer, m.commandPickerView(availableRows))
 		}
 	} else {

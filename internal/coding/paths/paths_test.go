@@ -1,3 +1,4 @@
+//nolint:wsl_v5 // Layout construction and path assertions stay grouped.
 package paths_test
 
 import (
@@ -22,6 +23,7 @@ func TestNew(t *testing.T) {
 	assert.Equal(t, filepath.Join(base, "workspaces.json"), layout.WorkspacesFile())
 	assert.Equal(t, filepath.Join(base, "sessions"), layout.SessionsDir())
 	assert.Equal(t, filepath.Join(base, "skills"), layout.SkillsDir())
+	assert.Empty(t, layout.AgentSkillsDir())
 	assert.Equal(t, filepath.Join(base, "bundles"), layout.BundlesDir())
 	assert.Equal(t, filepath.Join(base, "mcp.json"), layout.MCPFile())
 }
@@ -49,6 +51,7 @@ func TestDefault(t *testing.T) {
 	home, err := os.UserHomeDir()
 	require.NoError(t, err)
 	assert.Equal(t, filepath.Join(home, ".pips"), layout.Root())
+	assert.Equal(t, filepath.Join(home, ".agents", "skills"), layout.AgentSkillsDir())
 }
 
 func TestDefaultUsesPIPSHome(t *testing.T) {
@@ -58,6 +61,21 @@ func TestDefaultUsesPIPSHome(t *testing.T) {
 	layout, err := paths.Default()
 	require.NoError(t, err)
 	assert.Equal(t, root, layout.Root())
+	home, err := os.UserHomeDir()
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(home, ".agents", "skills"), layout.AgentSkillsDir())
+}
+
+func TestWithAgentSkillsDir(t *testing.T) {
+	t.Parallel()
+
+	layout, err := paths.New(t.TempDir())
+	require.NoError(t, err)
+
+	shared := t.TempDir()
+	layout, err = layout.WithAgentSkillsDir(shared)
+	require.NoError(t, err)
+	assert.Equal(t, shared, layout.AgentSkillsDir())
 }
 
 func TestDefaultRejectsRelativePIPSHome(t *testing.T) {
@@ -89,5 +107,6 @@ func TestProjectPaths(t *testing.T) {
 	assert.Equal(t, ".pips/permissions.toml", paths.ProjectPermissionsFile())
 	assert.Equal(t, ".pips/mcp.json", paths.ProjectMCPFile())
 	assert.Equal(t, ".pips/skills", paths.ProjectSkillsDir())
+	assert.Equal(t, ".agents/skills", paths.ProjectAgentSkillsDir())
 	assert.Equal(t, ".pips/bundles", paths.ProjectBundlesDir())
 }

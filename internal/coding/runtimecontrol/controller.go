@@ -54,6 +54,7 @@ type runtimeInstance interface {
 	Fork(context.Context, string) (string, error)
 	ListSubagents(context.Context) ([]subagent.Summary, error)
 	InspectSubagent(context.Context, string) (subagent.Detail, error)
+	Skills(context.Context) (coding.SkillSnapshot, error)
 	Steer(...ai.Message) error
 	FollowUp(...ai.Message) error
 	Cancel() error
@@ -219,6 +220,19 @@ func (c *Controller) Tree(ctx context.Context) (coding.SessionTree, error) {
 	})
 
 	return tree, err
+}
+
+// Skills returns the current Runtime's content-free Skill discovery snapshot.
+func (c *Controller) Skills(ctx context.Context) (coding.SkillSnapshot, error) {
+	var snapshot coding.SkillSnapshot
+	err := c.withRuntime(func(runtime runtimeInstance) error {
+		var err error
+		snapshot, err = runtime.Skills(ctx)
+
+		return err
+	})
+
+	return snapshot.Clone(), err
 }
 
 // PreviewCompaction returns a point-in-time manual compaction plan.
