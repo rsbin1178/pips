@@ -40,6 +40,12 @@ func newSessionPickerState(previousInput string, theme colorTheme, noColor bool)
 }
 
 func (m *Model) openSessionPicker(previousInput string) tea.Cmd {
+	return m.requestRouteOpen(routeOpenRequest{
+		kind: routeSessions, previousInput: previousInput,
+	})
+}
+
+func (m *Model) activateSessionPicker(previousInput string) tea.Cmd {
 	m.routeSeq++
 	m.route = newSessionPickerState(previousInput, m.theme, m.options.NoColor)
 	m.route.generation = m.routeSeq
@@ -61,7 +67,13 @@ func (m *Model) openSessionPicker(previousInput string) tea.Cmd {
 	return tea.Batch(m.route.search.Focus(), load)
 }
 
-func (m *Model) closeSessionPicker(restoreInput bool) {
+func (m *Model) closeSessionPicker(restoreInput bool) tea.Cmd {
+	m.dismissSessionPicker(restoreInput)
+
+	return tea.Sequence(m.commitStableTimeline(), m.composer.Focus())
+}
+
+func (m *Model) dismissSessionPicker(restoreInput bool) {
 	previousInput := m.route.previousInput
 	m.route = routeState{}
 	if restoreInput {
@@ -69,7 +81,6 @@ func (m *Model) closeSessionPicker(restoreInput bool) {
 	} else {
 		m.composer.Reset()
 	}
-	m.composer.Focus()
 	m.setLayout()
 }
 
@@ -80,9 +91,7 @@ func (m *Model) updateSessionPickerKey(message tea.KeyPressMsg) (tea.Model, tea.
 
 	key := message.String()
 	if key == keyEscape || key == keyCtrlC {
-		m.closeSessionPicker(true)
-
-		return m, nil
+		return m, m.closeSessionPicker(true)
 	}
 
 	values := m.filteredSessionPickerValues()
