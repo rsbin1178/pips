@@ -1,10 +1,11 @@
-//nolint:wsl_v5 // Interaction transitions keep durable and reducer commits adjacent.
+//nolint:containedctx,wsl_v5 // Operation emitters intentionally retain one scoped call context.
 package coding
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	goruntime "runtime"
 	"slices"
 	"sync"
 	"time"
@@ -19,17 +20,18 @@ import (
 	"github.com/rsbin/pips/internal/coding/changes"
 	"github.com/rsbin/pips/internal/coding/changes/git"
 	codingmcp "github.com/rsbin/pips/internal/coding/mcp"
+	"github.com/rsbin/pips/internal/coding/subagent"
 	"github.com/rsbin/pips/internal/coding/tools"
 )
 
 var errConsumerStopped = errors.New("coding runtime: event consumer stopped")
 
 type eventEmitter struct {
-	mu               sync.Mutex
-	runtime          *Runtime
-	observeTelemetry func(Event) []IntegrationDiagnostic
-	yield            func(Event, error) bool
-	alive            bool
+	mu        sync.Mutex
+	ctx       context.Context
+	publisher *eventPublisher
+	yield     func(Event, error) bool
+	alive     bool
 }
 
 func newEventEmitter(
@@ -39,12 +41,7 @@ func newEventEmitter(
 	alive bool,
 ) *eventEmitter {
 	return &eventEmitter{
-		runtime: runtime,
-		observeTelemetry: func(event Event) []IntegrationDiagnostic {
-			return runtime.observeEvent(ctx, event)
-		},
-		yield: yield,
-		alive: alive,
+		ctx: ctx, publisher: runtime.publisher, yield: yield, alive: alive,
 	}
 }
 
@@ -57,21 +54,7 @@ func (e *eventEmitter) emit(
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	return e.emitLocked(interactionID, runID, eventType, payload)
-}
-
-func (e *eventEmitter) emitLocked(
-	interactionID string,
-	runID string,
-	eventType EventType,
-	payload EventPayload,
-) error {
-	event, err := e.runtime.writer.write(interactionID, runID, eventType, payload)
-	if err != nil {
-		return err
-	}
-
-	return e.publishLocked(event)
+	return e.publisher.emit(e.ctx, e, interactionID, runID, eventType, payload)
 }
 
 func (e *eventEmitter) publishAgent(
@@ -81,54 +64,26 @@ func (e *eventEmitter) publishAgent(
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	projected, err := projector.project(event)
-	if err != nil {
-		return Event{}, err
-	}
-
-	return projected, e.publishLocked(projected)
+	return e.publisher.publishAgent(e.ctx, e, projector, event)
 }
 
-func (e *eventEmitter) publishLocked(event Event) error {
-	e.runtime.mu.Lock()
-	next, err := Reduce(e.runtime.state, event)
-	if err == nil {
-		e.runtime.state = next
+func (e *eventEmitter) deliver(event Event) bool {
+	if e == nil || !e.alive {
+		return true
 	}
-	e.runtime.mu.Unlock()
-	if err != nil {
-		return err
-	}
-
-	diagnostics := e.observeTelemetry(event)
-
-	consumerStopped := false
-	if e.alive && !e.yield(event, nil) {
+	if !e.yield(event, nil) {
 		e.alive = false
-		consumerStopped = true
+
+		return false
 	}
 
-	for _, diagnostic := range diagnostics {
-		if err := e.emitLocked("", "", EventIntegrationDiagnostic, diagnostic); err != nil {
-			if errors.Is(err, errConsumerStopped) {
-				consumerStopped = true
-
-				continue
-			}
-
-			return err
-		}
-	}
-
-	if consumerStopped {
-		return errConsumerStopped
-	}
-
-	return nil
+	return true
 }
 
 func (e *eventEmitter) fail(err error) {
-	if err != nil && e.alive {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err != nil && e.alive && e.yield != nil {
 		e.yield(Event{}, err)
 	}
 }
@@ -139,6 +94,7 @@ func (r *Runtime) run(
 	kind runtimeOperationKind,
 	resolution approval.Resolution,
 	messages []ai.Message,
+	notification *notificationOperation,
 	yield func(Event, error) bool,
 ) {
 	ctx, operation, err := r.beginOperation(parent, kind, messages)
@@ -149,7 +105,7 @@ func (r *Runtime) run(
 	defer r.endOperation(operation)
 
 	emitter := newEventEmitter(ctx, r, yield, true)
-	if kind == operationPrompt {
+	if kind == operationPrompt || kind == operationAgentNotification {
 		if err := r.maybeCompact(ctx, emitter); err != nil {
 			r.emitStructuralError("automatic_compaction_failed", "Automatic compaction failed", err, emitter)
 			return
@@ -158,18 +114,24 @@ func (r *Runtime) run(
 
 	var current *interaction
 	switch kind {
-	case operationPrompt:
+	case operationPrompt, operationAgentNotification:
 		interactionID, startErr := r.journal.start()
 		if startErr != nil {
 			emitter.fail(startErr)
 			return
 		}
 
+		started := InteractionStarted{}
+		if notification != nil {
+			started.Source = InteractionSourceAgentNotification
+			started.RootInteractionID = notification.rootInteractionID
+			started.NotificationIDs = slices.Clone(notification.notificationIDs)
+		}
 		if err = emitter.emit(
 			interactionID,
 			"",
 			EventInteractionStarted,
-			InteractionStarted{},
+			started,
 		); err != nil {
 			finishErr := r.finishUnopenedInteraction(
 				interactionID,
@@ -182,7 +144,9 @@ func (r *Runtime) run(
 			return
 		}
 
-		current, err = r.openInteraction(ctx, interactionID, false, emitter)
+		current, err = r.openInteraction(
+			ctx, interactionID, false, emitter, started,
+		)
 		if err != nil {
 			outcome := InteractionFailed
 			if errors.Is(err, errConsumerStopped) || errors.Is(err, context.Canceled) {
@@ -211,7 +175,13 @@ func (r *Runtime) run(
 			return
 		}
 	case operationContinue:
-		current, err = r.openInteraction(ctx, r.recovery.PendingID, true, emitter)
+		current, err = r.openInteraction(
+			ctx,
+			r.recovery.PendingID,
+			true,
+			emitter,
+			InteractionStarted{Resumed: true},
+		)
 		if err == nil {
 			err = r.reconcileAndContinue(ctx, current, emitter)
 		}
@@ -334,7 +304,7 @@ func (r *Runtime) beginOperation(
 	if err := parent.Err(); err != nil {
 		return nil, nil, err
 	}
-	if kind == operationPrompt {
+	if kind == operationPrompt || kind == operationAgentNotification {
 		if err := validatePromptMessages(messages); err != nil {
 			return nil, nil, fmt.Errorf("%w: %w", ErrRuntimeInvalid, err)
 		}
@@ -352,7 +322,10 @@ func (r *Runtime) beginOperation(
 	}
 
 	switch kind {
-	case operationPrompt:
+	case operationPrompt, operationAgentNotification:
+		if kind == operationAgentNotification && len(messages) != 1 {
+			return nil, nil, fmt.Errorf("%w: invalid Agent notification operation", ErrRuntimeInvalid)
+		}
 		if r.state.Phase != PhaseIdle || r.interaction != nil || r.recovery.PendingID != "" {
 			return nil, nil, stateError(string(kind), r.state.Phase, ErrRuntimePending)
 		}
@@ -388,6 +361,8 @@ func (r *Runtime) endOperation(operation *runtimeOperation) {
 	}
 	close(operation.done)
 	r.mu.Unlock()
+	r.releaseUndeliveredNotificationClaims()
+	r.signalNotifications()
 }
 
 //nolint:gocyclo,funlen // Snapshot construction preserves catalog and lease rollback boundaries.
@@ -396,9 +371,19 @@ func (r *Runtime) openInteraction(
 	interactionID string,
 	resumed bool,
 	emitter *eventEmitter,
+	started InteractionStarted,
 ) (_ *interaction, returnErr error) {
 	current := &interaction{
-		id: interactionID, startedAt: time.Now().UTC(), resumed: resumed,
+		id: interactionID, rootInteractionID: interactionID,
+		startedAt: time.Now().UTC(), resumed: resumed,
+		source: started.Source, notificationIDs: slices.Clone(started.NotificationIDs),
+	}
+	if started.RootInteractionID != "" {
+		current.rootInteractionID = started.RootInteractionID
+	}
+	projectInstructions, err := r.instructionResolver.Resolve(ctx, ".")
+	if err != nil {
+		return nil, fmt.Errorf("coding runtime: resolve project instructions: %w", err)
 	}
 	if snapshot, attempted, err := r.connections.RefreshChanged(ctx); err != nil {
 		_ = emitter.emit("", "", EventIntegrationDiagnostic, IntegrationDiagnostic{
@@ -462,10 +447,17 @@ func (r *Runtime) openInteraction(
 		return nil, err
 	}
 
+	childOwner := subagent.Ownership{
+		ParentSessionID:     r.handle.Metadata().ID,
+		ParentInteractionID: current.id,
+		RootInteractionID:   current.rootInteractionID,
+	}
+	childObserver := r.subagentObserver(current, emitter)
 	subagentTools, err := catalog.New(catalog.Local(
 		"coding.subagent",
 		catalog.RiskRead,
-		r.subagents.Tool(r.subagentObserver(current, emitter)),
+		r.subagents.ToolFor(childOwner, childObserver),
+		r.subagents.SpawnToolFor(childOwner, childObserver),
 	)...)
 	if err != nil {
 		return nil, err
@@ -505,6 +497,20 @@ func (r *Runtime) openInteraction(
 	if err != nil {
 		return nil, err
 	}
+	systemPrompt, err := buildCodingSystemPrompt(systemPromptOptions{
+		Model:               r.resolved.Ref.String(),
+		WorkingDirectory:    r.workspace.Root(),
+		Platform:            goruntime.GOOS,
+		Date:                time.Now().Format(time.DateOnly),
+		Sandbox:             string(r.config.Sandbox),
+		Approval:            string(r.config.Approval),
+		WorkspaceTrusted:    r.trusted,
+		ToolNames:           agentToolNames(visibleTools),
+		ProjectInstructions: projectInstructions.SystemPrompt(),
+	})
+	if err != nil {
+		return nil, err
+	}
 
 	allTools, err := merged.Snapshot(ctx, policy)
 	if err != nil {
@@ -525,6 +531,7 @@ func (r *Runtime) openInteraction(
 
 	harnessOptions := []harness.Option{
 		harness.WithTools(visibleTools...),
+		harness.WithSystem(systemPrompt),
 		harness.WithSkillCatalog(skillCatalog),
 		harness.WithTemplates(snapshot.Prompts()...),
 		harness.WithAgentOptions(append(
@@ -584,6 +591,15 @@ func (r *Runtime) openInteraction(
 	return current, nil
 }
 
+func agentToolNames(values []agent.Tool) []string {
+	result := make([]string, len(values))
+	for index, tool := range values {
+		result[index] = tool.Decl().Name
+	}
+
+	return result
+}
+
 func appendUniqueTools(values []agent.Tool, additions ...agent.Tool) []agent.Tool {
 	result := slices.Clone(values)
 	seen := make(map[string]struct{}, len(result)+len(additions))
@@ -614,6 +630,7 @@ func (r *Runtime) driveHarness(
 	if err != nil {
 		return "", err
 	}
+	projector.synthetic = r.isAgentNotificationMessage
 
 	var stop agent.StopReason
 	inputPending := cloneMessages(messages)
@@ -622,6 +639,11 @@ func (r *Runtime) driveHarness(
 			projected, projectErr := emitter.publishAgent(projector, event)
 			if projectErr != nil {
 				return "", projectErr
+			}
+			if event.Type == agent.EventMessage && event.Message != nil {
+				if err := r.acknowledgeNotificationMessage(*event.Message); err != nil {
+					return "", err
+				}
 			}
 
 			if completed, ok := projected.Payload.(RunCompleted); ok {
@@ -641,8 +663,14 @@ func (r *Runtime) driveHarness(
 						current.id,
 						event.RunID,
 						EventMessageCommitted,
-						MessageCommitted{Message: message},
+						MessageCommitted{
+							Message:   message,
+							Synthetic: current.source == InteractionSourceAgentNotification,
+						},
 					); err != nil {
+						return "", err
+					}
+					if err := r.acknowledgeNotificationMessage(message); err != nil {
 						return "", err
 					}
 				}
@@ -1037,12 +1065,19 @@ func (r *Runtime) Cancel() error {
 
 	operation := r.active
 	phase := r.state.Phase
+	rootInteractionID := ""
+	if r.interaction != nil {
+		rootInteractionID = r.interaction.rootInteractionID
+	}
 	r.mu.Unlock()
 	if operation == nil {
 		return stateError("cancel", phase, ErrRuntimeBusy)
 	}
 
 	operation.cancel()
+	if r.subagents != nil {
+		r.subagents.CancelRoot(rootInteractionID)
+	}
 
 	return nil
 }

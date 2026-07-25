@@ -4,6 +4,7 @@ package tui
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -62,7 +63,7 @@ func TestSubagentDetailUsesSemanticToolProjection(t *testing.T) {
 	}
 	model := readyModel(t, true)
 
-	content := model.subagentRouteContent(detail)
+	content := testSubagentRouteContent(model, detail)
 	assert.Contains(t, content, "• Explored")
 	assert.Contains(t, content, "❯ Inspect the TUI.")
 	assert.Contains(t, content, "I will inspect the TUI projection.")
@@ -112,8 +113,8 @@ func TestSubagentDetailExpandsEveryToolResultInChronologicalFlow(t *testing.T) {
 	}
 	model := readyModel(t, true)
 
-	compact := model.renderTimelineBlocks(projectSubagentTimeline(detail))
-	content := model.subagentRouteContent(detail)
+	compact := model.renderTimelineBlocks(projectTimeline(testSubagentState(detail)))
+	content := testSubagentRouteContent(model, detail)
 
 	assert.Contains(t, compact, "more actions (ctrl+t for details)")
 	assert.NotContains(t, compact, "package-7/file.go")
@@ -149,7 +150,7 @@ func TestSubagentDetailShowsToolFailureOutputInline(t *testing.T) {
 		},
 	}
 
-	content := readyModel(t, true).subagentRouteContent(detail)
+	content := testSubagentRouteContent(readyModel(t, true), detail)
 	assert.Contains(t, content, "Read missing.go · not found")
 	assert.Contains(t, content, "missing.go: no such file")
 	assert.Contains(t, content, "▌ Explore failed\n▌ execution failed")
@@ -177,8 +178,8 @@ func TestSubagentDetailExpandedToolResultIsBoundedAndRedacted(t *testing.T) {
 	coloredModel := readyModel(t, false)
 	coloredModel.width = 24
 
-	plain := plainModel.subagentRouteContent(detail)
-	colored := coloredModel.subagentRouteContent(detail)
+	plain := testSubagentRouteContent(plainModel, detail)
+	colored := testSubagentRouteContent(coloredModel, detail)
 
 	assert.Contains(t, plain, "[sensitive")
 	assert.Contains(t, plain, "result omitted]")
@@ -212,8 +213,8 @@ func TestSubagentDetailUsesMainTimelineInformationFlow(t *testing.T) {
 	}
 	model := readyModel(t, true)
 
-	wantFlow := model.renderTimelineBlocks(projectSubagentTimeline(detail))
-	content := model.subagentRouteContent(detail)
+	wantFlow := model.renderTimelineBlocks(projectTimeline(testSubagentState(detail)))
+	content := testSubagentRouteContent(model, detail)
 
 	assert.Contains(t, content, wantFlow)
 	assert.Less(t, strings.Index(content, "❯ Inspect main.go completely."),
@@ -249,7 +250,7 @@ func TestSubagentDetailShowsChronologicalCurrentActivity(t *testing.T) {
 		},
 	}
 
-	content := readyModel(t, true).subagentRouteContent(detail)
+	content := testSubagentRouteContent(readyModel(t, true), detail)
 	assert.NotContains(t, content, "Subagent · plan · running")
 	assert.Contains(t, content, "❯ Plan the activity view in full.")
 	assert.Contains(t, content, "I will inspect the current detail projection first.")
@@ -282,7 +283,7 @@ func TestSubagentDetailKeepsEveryChronologicalToolAction(t *testing.T) {
 		},
 	}
 
-	content := readyModel(t, true).subagentRouteContent(detail)
+	content := testSubagentRouteContent(readyModel(t, true), detail)
 	assert.Contains(t, content, "First I will read.")
 	assert.Contains(t, content, "Read first.go")
 	assert.Contains(t, content, "Next I will search.")
@@ -306,8 +307,10 @@ func TestSubagentRouteUsesMainSurfaceWithoutPanelChrome(t *testing.T) {
 		},
 	}
 	model := readyModel(t, true)
+	state := testSubagentState(detail)
 	model.route = routeState{
 		kind: routeSubagent, childSessionID: "child-1", detail: &detail,
+		childState: &state,
 	}
 
 	view := model.View()
@@ -318,6 +321,108 @@ func TestSubagentRouteUsesMainSurfaceWithoutPanelChrome(t *testing.T) {
 	assert.NotContains(t, view.Content, "╭")
 	assert.NotContains(t, view.Content, "╰")
 	assert.Nil(t, view.Cursor)
+}
+
+func TestSubagentRouteRendersOrdinaryLiveState(t *testing.T) {
+	t.Parallel()
+
+	call := coding.ToolCall{
+		ID: "call-1", Name: toolNameRead, Arguments: ai.JSON(`{"path":"runtime.go"}`),
+	}
+	state := coding.State{
+		Transcript: []ai.Message{
+			ai.UserText("Inspect runtime.go."),
+			ai.AssistantText("I will inspect the runtime."),
+		},
+		Tools: []coding.ToolState{{
+			RunID: "child-run", Turn: 1, Call: call, Status: coding.ToolStatusRunning,
+		}},
+		Draft: []coding.MessageDelta{{Kind: ai.StreamTextDelta, Text: "Reading now…"}},
+	}
+	detail := subagent.Detail{Summary: subagent.Summary{
+		ChildSessionID: "child-1", Role: subagent.RoleExplore,
+		State: subagent.StateRunning, Model: "openai/model",
+	}}
+	model := readyModel(t, true)
+
+	content := model.subagentRouteContent(state, &detail)
+	assert.Contains(t, content, "❯ Inspect runtime.go.")
+	assert.Contains(t, content, "I will inspect the runtime.")
+	assert.Contains(t, content, "✻ Exploring")
+	assert.Contains(t, content, "Read runtime.go")
+	assert.Contains(t, content, "Reading now…")
+	assert.NotContains(t, content, "Subagent detail")
+	assert.NotContains(t, content, "Activity")
+}
+
+func TestSubagentRouteKeepsAssistantOutputUntilValidatedResultArrives(t *testing.T) {
+	t.Parallel()
+
+	detail := subagent.Detail{
+		Summary: subagent.Summary{
+			ChildSessionID: "child-1",
+			Role:           subagent.RolePlan,
+			State:          subagent.StateSucceeded,
+		},
+		Transcript: []ai.Message{
+			ai.UserText("Plan the change."),
+			ai.AssistantText("First inspect the runtime, then update its tests."),
+		},
+	}
+	model := readyModel(t, true)
+
+	content := model.subagentRouteContent(testSubagentState(detail), &detail)
+	assert.Contains(t, content, "First inspect the runtime, then update its tests.")
+}
+
+func TestAgentsRouteCancelsSelectedChild(t *testing.T) {
+	t.Parallel()
+
+	controller := newOverlayController(readyState())
+	controller.agents = []subagent.Summary{{
+		ChildSessionID: "child-1", Role: subagent.RolePlan,
+		State: subagent.StateRunning, TaskPreview: "Plan the change",
+	}}
+	model := readyModelWithController(t, controller, true)
+	model.route = routeState{
+		kind: routeAgents, generation: 4, agents: controller.agents,
+	}
+
+	_, command := model.Update(key("c"))
+	require.NotNil(t, command)
+	driveModelCommands(t, model, command)
+	assert.Equal(t, []string{"child-1"}, controller.agentCanceled)
+	assert.False(t, model.route.controlling)
+}
+
+func testSubagentRouteContent(model *Model, detail subagent.Detail) string {
+	state := testSubagentState(detail)
+
+	return model.subagentRouteContent(state, &detail)
+}
+
+func testSubagentState(detail subagent.Detail) coding.State {
+	state := coding.State{Transcript: detail.Transcript}
+	state.Tools = make([]coding.ToolState, 0, len(detail.Activity.Tools))
+	for _, value := range detail.Activity.Tools {
+		status := coding.ToolStatusCompleted
+		if value.Status == subagent.ToolStatusRunning {
+			status = coding.ToolStatusRunning
+		}
+		state.Tools = append(state.Tools, coding.ToolState{
+			RunID: value.RunID,
+			Turn:  value.Turn,
+			Call: coding.ToolCall{
+				ID: value.Call.ID, Name: value.Call.Name,
+				Arguments: slices.Clone(value.Call.Args),
+			},
+			Status: status,
+			Update: value.Update,
+			Result: value.Result,
+		})
+	}
+
+	return state
 }
 
 func TestSubagentRouteEscapeReturnsToAgentList(t *testing.T) {
@@ -396,7 +501,9 @@ func TestSubagentDetailRefreshFiltersUnrelatedChildren(t *testing.T) {
 	assert.False(t, model.route.refreshing)
 
 	command = model.invalidateAgentDetail(streamItem{event: coding.Event{
-		Payload: coding.SubagentLifecycle{ChildSessionID: "child-1"},
+		Payload: coding.SubagentLifecycle{
+			ChildSessionID: "child-1", State: subagent.StateSucceeded,
+		},
 	}})
 	require.NotNil(t, command)
 	assert.True(t, model.route.refreshing)

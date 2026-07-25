@@ -19,19 +19,22 @@ import (
 const maxPendingErrorBytes = 16 << 10
 
 type interaction struct {
-	mu            sync.Mutex
-	id            string
-	startedAt     time.Time
-	resumed       bool
-	activation    *extension.Activation
-	harness       *harness.Harness
-	search        *catalog.ToolSearch
-	changeTracker *interactionChangeTracker
-	usage         TokenUsage
-	subagentUsage map[string]struct{}
-	runIDs        []string
-	activeRunID   string
-	observer      *guardedAgentObserver
+	mu                sync.Mutex
+	id                string
+	rootInteractionID string
+	source            InteractionSource
+	notificationIDs   []string
+	startedAt         time.Time
+	resumed           bool
+	activation        *extension.Activation
+	harness           *harness.Harness
+	search            *catalog.ToolSearch
+	changeTracker     *interactionChangeTracker
+	usage             TokenUsage
+	subagentUsage     map[string]struct{}
+	runIDs            []string
+	activeRunID       string
+	observer          *guardedAgentObserver
 }
 
 func (i *interaction) addSubagentUsage(childSessionID string, usage TokenUsage) {

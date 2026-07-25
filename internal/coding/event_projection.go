@@ -236,6 +236,7 @@ func Telemetry(event Event) (TelemetryEvent, error) {
 		projected.DurationMillis = value.DurationMillis
 	case InteractionStarted:
 		projected.Resumed = value.Resumed
+		projected.Code = string(value.Source)
 	case InteractionCompleted:
 		projected.Outcome = value.Outcome
 		projected.DurationMillis = value.DurationMillis

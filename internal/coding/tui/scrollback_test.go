@@ -616,22 +616,23 @@ func TestScrollbackUpdatesOneSubagentCardAndCommitsOnlyTerminal(t *testing.T) {
 		model.state.Tools[0].Result,
 	}
 	model.state.Subagents = []coding.SubagentState{{
-		ChildSessionID: "child-1", Role: subagent.RolePlan,
+		ChildSessionID: "child-1", ParentToolCallID: "call-1", Role: subagent.RolePlan,
 		State: subagent.StateRunning, TaskPreview: "Plan the change", Model: "openai/test",
 	}}
 	assert.Empty(t, model.takeStableTimeline())
 	active := renderTimelineContent(
 		model.activeTimelineBlocks(), model.markdown, model.width, model.theme, true,
 	)
-	assert.Contains(t, active, "✻ Planning · Plan the change")
+	assert.Contains(t, active, "✻ Planning Plan the change")
 	assert.Contains(t, active, "Running")
 	assert.NotContains(t, active, subagent.ToolName)
 
 	model.state.Subagents[0].State = subagent.StateSucceeded
 	model.state.Subagents[0].Code = "ok"
 	model.state.Subagents[0].DurationMillis = 2_000
+	model.state.Tools[0].Status = coding.ToolStatusCompleted
 	committed := model.takeStableTimeline()
-	assert.Contains(t, committed, "• Planned · Plan the change")
+	assert.Contains(t, committed, "• Planned Plan the change")
 	assert.Contains(t, committed, "Completed in 2s")
 	assert.Empty(t, model.takeStableTimeline())
 }
@@ -663,7 +664,7 @@ func TestScrollbackHoldsCompletedSubagentToolUntilLifecycleIsTerminal(t *testing
 		model.state.Tools[0].Result,
 	}
 	model.state.Subagents = []coding.SubagentState{{
-		ChildSessionID: "child-1", ParentRunID: "parent-run",
+		ChildSessionID: "child-1", ParentRunID: "parent-run", ParentToolCallID: "call-1",
 		Role: subagent.RolePlan, State: subagent.StateRunning,
 		TaskPreview: "Plan the change", Model: "openai/test",
 	}}
@@ -672,13 +673,13 @@ func TestScrollbackHoldsCompletedSubagentToolUntilLifecycleIsTerminal(t *testing
 	active := renderTimelineContent(
 		model.activeTimelineBlocks(), model.markdown, model.width, model.theme, true,
 	)
-	assert.Equal(t, 1, strings.Count(active, "Planning · Plan the change"))
+	assert.Equal(t, 1, strings.Count(active, "Planning Plan the change"))
 
 	model.state.Subagents[0].State = subagent.StateSucceeded
 	model.state.Subagents[0].Code = "ok"
 	model.state.Subagents[0].DurationMillis = 2_000
 	committed := model.takeStableTimeline()
-	assert.Equal(t, 1, strings.Count(committed, "Planned · Plan the change"))
+	assert.Equal(t, 1, strings.Count(committed, "Planned Plan the change"))
 	assert.Empty(t, model.takeStableTimeline())
 }
 
@@ -701,7 +702,7 @@ func TestScrollbackSuppressesLateLifecycleAfterDurableSubagentRecovery(t *testin
 	}}
 
 	recovered := model.takeStableTimeline()
-	assert.Equal(t, 1, strings.Count(recovered, "Explored · Inspect runtime"))
+	assert.Equal(t, 1, strings.Count(recovered, "Explored Inspect runtime"))
 
 	model.state.Subagents = []coding.SubagentState{{
 		ChildSessionID: "child-1", ParentRunID: "parent-run",
@@ -712,22 +713,6 @@ func TestScrollbackSuppressesLateLifecycleAfterDurableSubagentRecovery(t *testin
 	assert.Empty(t, renderTimelineContent(
 		model.activeTimelineBlocks(), model.markdown, model.width, model.theme, true,
 	))
-}
-
-func TestScrollbackBoundsCommittedSubagentIdentityLedger(t *testing.T) {
-	t.Parallel()
-
-	model := readyModel(t, true)
-	for index := range maxCommittedSubagentIDs + 1 {
-		model.markSubagentCommitted(timelineBlock{
-			kind: blockSubagent, id: fmt.Sprintf("child-%d", index),
-		})
-	}
-
-	assert.Len(t, model.scrollback.subagentIDs, maxCommittedSubagentIDs)
-	assert.Len(t, model.scrollback.subagentOrder, maxCommittedSubagentIDs)
-	assert.NotContains(t, model.scrollback.subagentIDs, "child-0")
-	assert.Contains(t, model.scrollback.subagentIDs, fmt.Sprintf("child-%d", maxCommittedSubagentIDs))
 }
 
 func TestScrollbackResetReprojectsNavigatedSession(t *testing.T) {

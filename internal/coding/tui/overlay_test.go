@@ -292,6 +292,7 @@ type overlayController struct {
 	agents           []subagent.Summary
 	agentDetail      subagent.Detail
 	agentInspections []string
+	agentCanceled    []string
 }
 
 func newOverlayController(state coding.State) *overlayController {
@@ -338,6 +339,26 @@ func (c *overlayController) InspectSubagent(_ context.Context, childSessionID st
 	c.agentInspections = append(c.agentInspections, childSessionID)
 
 	return c.agentDetail, nil
+}
+
+func (c *overlayController) InspectSubagentState(
+	_ context.Context,
+	_ string,
+) (coding.State, error) {
+	return testSubagentState(c.agentDetail), nil
+}
+
+func (*overlayController) WaitSubagent(
+	context.Context,
+	string,
+) (subagent.Result, error) {
+	return subagent.Result{}, nil
+}
+
+func (c *overlayController) CancelSubagent(_ context.Context, childSessionID string) error {
+	c.agentCanceled = append(c.agentCanceled, childSessionID)
+
+	return nil
 }
 
 func (c *overlayController) Tree(context.Context) (coding.SessionTree, error) {

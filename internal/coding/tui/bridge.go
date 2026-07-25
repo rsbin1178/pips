@@ -39,6 +39,28 @@ type streamItemMsg struct {
 	ok     bool
 }
 
+type eventObserver interface {
+	ObserveEvents() (coding.EventObservation, error)
+}
+
+type subscriptionBridge struct {
+	subscription *coding.EventSubscription
+}
+
+type subscriptionStartedMsg struct {
+	observation coding.EventObservation
+	bridge      *subscriptionBridge
+	supported   bool
+	err         error
+}
+
+type subscriptionEventMsg struct {
+	bridge *subscriptionBridge
+	record coding.EventRecord
+	err    error
+	ok     bool
+}
+
 func startBridge(parent context.Context, operation streamOperation) *eventBridge {
 	ctx, cancel := context.WithCancel(parent) //nolint:gosec // eventBridge.stop owns cancel.
 	bridge := &eventBridge{
@@ -104,4 +126,48 @@ func (b *eventBridge) stopped() <-chan struct{} {
 	}
 
 	return b.done
+}
+
+func startSubscription(controller Controller) subscriptionStartedMsg {
+	observer, ok := controller.(eventObserver)
+	if !ok {
+		return subscriptionStartedMsg{supported: false}
+	}
+
+	observation, err := observer.ObserveEvents()
+	if err != nil {
+		return subscriptionStartedMsg{supported: true, err: err}
+	}
+	if observation.Subscription == nil {
+		return subscriptionStartedMsg{
+			supported: true,
+			err:       errors.New("coding tui: event observation has no subscription"),
+		}
+	}
+
+	return subscriptionStartedMsg{
+		observation: observation,
+		bridge:      &subscriptionBridge{subscription: observation.Subscription},
+		supported:   true,
+	}
+}
+
+func (b *subscriptionBridge) wait() tea.Cmd {
+	return func() tea.Msg {
+		record, ok := <-b.subscription.Events()
+		var err error
+		if !ok {
+			err = b.subscription.Err()
+		}
+
+		return subscriptionEventMsg{bridge: b, record: record, err: err, ok: ok}
+	}
+}
+
+func (b *subscriptionBridge) stop() {
+	if b == nil || b.subscription == nil {
+		return
+	}
+
+	b.subscription.Close()
 }

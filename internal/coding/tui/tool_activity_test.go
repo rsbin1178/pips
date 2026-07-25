@@ -335,7 +335,7 @@ func TestTimelineRendersGenericCallAndBoundedResult(t *testing.T) {
 	assert.Contains(t, rendered, "No search results found.")
 }
 
-func TestTimelineReconstructsDurableSubagentCard(t *testing.T) {
+func TestTimelineReconstructsDurableSubagentToolActivity(t *testing.T) {
 	t.Parallel()
 
 	result := ai.ToolResultText(
@@ -358,7 +358,7 @@ func TestTimelineReconstructsDurableSubagentCard(t *testing.T) {
 		themeDark,
 		true,
 	)
-	assert.Contains(t, rendered, "• Explored · Audit the Tool presentation paths")
+	assert.Contains(t, rendered, "• Explored Audit the Tool presentation paths")
 	assert.Contains(t, rendered, "Completed in 23s · 8 tools · 1.5k tokens")
 	assert.NotContains(t, rendered, "run_subagent")
 	assert.NotContains(t, rendered, "child-1")

@@ -218,6 +218,9 @@ func semanticToolActivityStatus(activity toolActivity) activityStatus {
 	case toolClassGeneric:
 		status.label = "Calling…"
 		status.detail = activity.name
+	case toolClassSubagent:
+		status.label = activity.action + "…"
+		status.detail = activity.subject
 	}
 
 	return status

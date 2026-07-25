@@ -1,3 +1,4 @@
+//nolint:containedctx,wsl_v5 // Manager owns a Runtime lifecycle context and structured children.
 package subagent
 
 import (
@@ -33,11 +34,15 @@ const (
 // ExecutionOptions provides embedder/test overrides without adding a user
 // configuration protocol in P1. A zero Limits value selects DefaultLimits.
 type ExecutionOptions struct {
-	Limits Limits
+	Limits                       Limits
+	MaxConcurrent                int
+	MaxSpawnedPerRootInteraction int
+	MaxAutoFollowUps             int
 }
 
 // Config contains the application-owned dependencies for one parent Session.
 type Config struct {
+	Context        context.Context
 	Repository     *session.Repository
 	Parent         *session.Handle
 	Tree           *workspace.Tree
@@ -45,20 +50,31 @@ type Config struct {
 	RequestPolicy  func(*ai.Request)
 	Options        ExecutionOptions
 	AgentObservers []func(context.Context, agent.Event)
+	EventObservers []AgentEventObserver
 }
 
-// Manager owns at most one live child execution and all of its cleanup.
+// Manager owns a bounded set of live child executions and all of their cleanup.
 type Manager struct {
 	mu        sync.Mutex
 	journalMu sync.Mutex
 
-	config       Config
-	limits       Limits
-	tools        []agent.Tool
-	active       *Execution
-	starting     bool
-	startingDone chan struct{}
-	closed       bool
+	config           Config
+	limits           Limits
+	tools            []agent.Tool
+	lifecycle        context.Context
+	cancel           context.CancelFunc
+	active           map[string]*Execution
+	starting         int
+	startingDone     chan struct{}
+	spawned          map[string]int
+	maxConcurrent    int
+	maxSpawned       int
+	maxAutoFollowUps int
+	runs             sync.WaitGroup
+	waitOnce         sync.Once
+	waitDone         chan struct{}
+	cleanupErr       error
+	closed           bool
 }
 
 // Execution is one cancelable, waitable child lifetime. It intentionally does
@@ -76,10 +92,13 @@ type Execution struct {
 	result     Result
 	err        error
 	cleanupErr error
+	stopParent func() bool
 }
 
 // New constructs a current-parent child manager. Call Reconcile before New so
 // interrupted child journals are repaired before the manager accepts work.
+//
+//nolint:gocyclo // Construction validates all concurrency and execution bounds in one place.
 func New(config Config) (*Manager, error) {
 	if err := validateManagerConfig(config); err != nil {
 		return nil, err
@@ -102,8 +121,47 @@ func New(config Config) (*Manager, error) {
 	}
 
 	config.AgentObservers = slices.Clone(config.AgentObservers)
+	config.EventObservers = slices.Clone(config.EventObservers)
 
-	return &Manager{config: config, limits: limits, tools: readTools}, nil
+	maxConcurrent := config.Options.MaxConcurrent
+	if maxConcurrent == 0 {
+		maxConcurrent = 4
+	}
+	maxSpawned := config.Options.MaxSpawnedPerRootInteraction
+	if maxSpawned == 0 {
+		maxSpawned = 8
+	}
+	maxAutoFollowUps := config.Options.MaxAutoFollowUps
+	if maxAutoFollowUps == 0 {
+		maxAutoFollowUps = 4
+	}
+	if maxConcurrent < 1 || maxConcurrent > 32 || maxSpawned < 1 || maxSpawned > 128 ||
+		maxAutoFollowUps < 1 || maxAutoFollowUps > 32 {
+		return nil, fmt.Errorf("%w: invalid manager concurrency limits", ErrInvalid)
+	}
+	lifecycleBase := config.Context
+	if lifecycleBase == nil {
+		lifecycleBase = context.Background()
+	}
+	lifecycle, cancel := context.WithCancel(context.WithoutCancel(lifecycleBase))
+
+	return &Manager{
+		config: config, limits: limits, tools: readTools,
+		lifecycle: lifecycle, cancel: cancel,
+		active: make(map[string]*Execution), spawned: make(map[string]int),
+		maxConcurrent: maxConcurrent, maxSpawned: maxSpawned,
+		maxAutoFollowUps: maxAutoFollowUps,
+		waitDone:         make(chan struct{}),
+	}, nil
+}
+
+// MaxAutoFollowUps returns the validated Runtime coordination bound.
+func (m *Manager) MaxAutoFollowUps() int {
+	if m == nil {
+		return 0
+	}
+
+	return m.maxAutoFollowUps
 }
 
 func validateManagerConfig(config Config) error {
@@ -124,6 +182,11 @@ func validateManagerConfig(config Config) error {
 	for _, observer := range config.AgentObservers {
 		if observer == nil {
 			return fmt.Errorf("%w: nil agent observer", ErrInvalid)
+		}
+	}
+	for _, observer := range config.EventObservers {
+		if observer == nil {
+			return fmt.Errorf("%w: nil child event observer", ErrInvalid)
 		}
 	}
 
@@ -161,7 +224,7 @@ func buildReadTools(config Config) ([]agent.Tool, error) {
 	return readTools, nil
 }
 
-// Start acquires the single execution slot and starts one owned goroutine.
+// Start reserves one bounded execution slot and starts one owned goroutine.
 func (m *Manager) Start(
 	ctx context.Context,
 	request Request,
@@ -178,72 +241,76 @@ func (m *Manager) Start(
 	if err := validateRequest(request, m.limits); err != nil {
 		return nil, err
 	}
-
-	m.mu.Lock()
-	if m.closed {
-		m.mu.Unlock()
-		return nil, ErrClosed
+	request = m.normalizeRequest(ctx, request)
+	if err := m.reserveStart(request); err != nil {
+		return nil, err
 	}
+	startSucceeded := false
+	defer func() { m.finishStarting(request, startSucceeded) }()
 
-	if m.starting || m.active != nil {
-		m.mu.Unlock()
-		return nil, ErrBusy
-	}
-
-	m.starting = true
-	m.startingDone = make(chan struct{})
-	m.mu.Unlock()
+	startCtx, cancelStart := context.WithCancel(ctx)
+	stopLifecycle := context.AfterFunc(m.lifecycle, cancelStart)
+	defer func() {
+		stopLifecycle()
+		cancelStart()
+	}()
 
 	parentMeta := m.config.Parent.Metadata()
 
-	parentRunID := ""
-	if metadata, ok := agent.RunMetadataFromContext(ctx); ok {
-		parentRunID = metadata.RunID
-	}
-
-	child, err := m.config.Repository.Create(ctx, session.CreateOptions{
+	child, err := m.config.Repository.Create(startCtx, session.CreateOptions{
 		WorkspaceID:     parentMeta.WorkspaceID,
 		Kind:            session.KindSubagent,
 		ParentSessionID: parentMeta.ID,
-		ParentRunID:     parentRunID,
+		ParentRunID:     request.Ownership.ParentRunID,
 		Agent:           string(request.Role),
 	})
 	if err != nil {
-		m.clearStarting()
 		return nil, err
 	}
 
 	created := record{
-		Schema:          recordSchema,
-		State:           StateCreated,
-		Role:            request.Role,
-		ChildSessionID:  child.Metadata().ID,
-		ParentSessionID: parentMeta.ID,
-		ParentRunID:     parentRunID,
-		Model:           modelName(m.config.Model),
-		Limits:          journalLimits(m.limits),
-		TaskPreview:     preview(request.Task),
-		Time:            time.Now().UTC(),
+		Schema:              recordSchema,
+		State:               StateCreated,
+		Role:                request.Role,
+		ChildSessionID:      child.Metadata().ID,
+		ParentSessionID:     parentMeta.ID,
+		ParentInteractionID: request.Ownership.ParentInteractionID,
+		ParentRunID:         request.Ownership.ParentRunID,
+		ParentToolCallID:    request.Ownership.ParentToolCallID,
+		RootInteractionID:   request.Ownership.RootInteractionID,
+		Delivery:            request.Delivery,
+		Model:               modelName(m.config.Model),
+		Limits:              journalLimits(m.limits),
+		TaskPreview:         preview(request.Task),
+		Time:                time.Now().UTC(),
 	}
 	if err := m.appendMirrored(child.Session(), created); err != nil {
-		m.clearStarting()
 		return nil, errors.Join(err, child.Close())
 	}
+	startSucceeded = true
 
-	runCtx, cancel := context.WithTimeout(ctx, m.limits.MaxDuration)
+	runCtx, cancel := context.WithTimeout(m.lifecycle, m.limits.MaxDuration)
+	var stopParent func() bool
+	if request.Delivery == DeliveryForeground {
+		stopParent = context.AfterFunc(ctx, cancel)
+	}
 	tracker := newRunTracker(created.Time, m.limits.MaxToolCalls)
 	execution := &Execution{
-		manager: m,
-		request: request,
-		cancel:  cancel,
-		done:    make(chan struct{}),
-		child:   child,
-		tracker: tracker,
+		manager:    m,
+		request:    request,
+		cancel:     cancel,
+		done:       make(chan struct{}),
+		child:      child,
+		tracker:    tracker,
+		stopParent: stopParent,
 	}
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
 		cancel()
+		if stopParent != nil {
+			stopParent()
+		}
 
 		terminal := created
 		terminal.State = StateCanceled
@@ -252,13 +319,11 @@ func (m *Manager) Start(
 		persistErr := m.appendMirrored(child.Session(), terminal)
 		closeErr := child.Close()
 
-		m.clearStarting()
-
 		return nil, errors.Join(ErrClosed, persistErr, closeErr)
 	}
 
-	m.active = execution
-	m.finishStartingLocked()
+	m.active[created.ChildSessionID] = execution
+	m.runs.Add(1)
 	m.mu.Unlock()
 
 	observerErr := emitObserver(runCtx, observer, eventFromRecord(created))
@@ -266,24 +331,76 @@ func (m *Manager) Start(
 		execution.Cancel()
 	}
 
-	go m.run(runCtx, execution, child, observer, created, observerErr)
+	go func() {
+		defer m.runs.Done()
+		m.run(runCtx, execution, child, observer, created, observerErr)
+	}()
 
 	return execution, nil
 }
 
-func (m *Manager) clearStarting() {
+func (m *Manager) reserveStart(request Request) error {
 	m.mu.Lock()
-	m.finishStartingLocked()
-	m.mu.Unlock()
-}
+	defer m.mu.Unlock()
+	if m.closed {
+		return ErrClosed
+	}
+	if len(m.active)+m.starting >= m.maxConcurrent {
+		if m.maxConcurrent == 1 {
+			return ErrBusy
+		}
 
-func (m *Manager) finishStartingLocked() {
-	if m.startingDone != nil {
-		close(m.startingDone)
+		return ErrCapacity
+	}
+	if request.Delivery == DeliveryBackground {
+		root := request.Ownership.RootInteractionID
+		if root == "" || m.spawned[root] >= m.maxSpawned {
+			return ErrSpawnLimit
+		}
+		m.spawned[root]++
 	}
 
-	m.starting = false
-	m.startingDone = nil
+	if m.starting == 0 {
+		m.startingDone = make(chan struct{})
+	}
+	m.starting++
+
+	return nil
+}
+
+func (m *Manager) normalizeRequest(ctx context.Context, request Request) Request {
+	request.Ownership.ParentSessionID = m.config.Parent.Metadata().ID
+	if metadata, ok := agent.RunMetadataFromContext(ctx); ok {
+		request.Ownership.ParentRunID = metadata.RunID
+	}
+	if request.Ownership.RootInteractionID == "" {
+		request.Ownership.RootInteractionID = request.Ownership.ParentInteractionID
+	}
+	if request.Delivery == "" {
+		request.Delivery = DeliveryForeground
+	}
+
+	return request
+}
+
+func (m *Manager) finishStarting(request Request, succeeded bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !succeeded && request.Delivery == DeliveryBackground {
+		root := request.Ownership.RootInteractionID
+		if m.spawned[root] > 1 {
+			m.spawned[root]--
+		} else {
+			delete(m.spawned, root)
+		}
+	}
+	if m.starting > 0 {
+		m.starting--
+	}
+	if m.starting == 0 && m.startingDone != nil {
+		close(m.startingDone)
+		m.startingDone = nil
+	}
 }
 
 // Wait waits for terminal persistence or for only this wait context to end.
@@ -313,48 +430,131 @@ func (e *Execution) Cancel() {
 	e.cancelOnce.Do(e.cancel)
 }
 
-// Close stops admission, cancels the active child, and waits for its terminal
+// Wait waits for one owned child to become terminal. A child that already
+// completed is reconstructed from its durable journal.
+func (m *Manager) Wait(ctx context.Context, childSessionID string) (Result, error) {
+	if m == nil {
+		return Result{}, ErrClosed
+	}
+	if err := session.ValidateID(childSessionID); err != nil {
+		return Result{}, fmt.Errorf("%w: invalid child session id", ErrInvalid)
+	}
+	if active := m.activeExecution(childSessionID); active != nil {
+		return active.Wait(ctx)
+	}
+
+	detail, err := m.Inspect(ctx, childSessionID)
+	if err != nil {
+		return Result{}, err
+	}
+	result := resultFromDetail(detail)
+	if result.Outcome == OutcomeSucceeded {
+		return result, nil
+	}
+
+	return result, fmt.Errorf("coding subagent: %s (%s)", result.Outcome, result.Code)
+}
+
+// Cancel cancels one running child. Repeating cancellation, including after
+// the child is terminal, is safe.
+func (m *Manager) Cancel(ctx context.Context, childSessionID string) error {
+	if m == nil {
+		return ErrClosed
+	}
+	if err := session.ValidateID(childSessionID); err != nil {
+		return fmt.Errorf("%w: invalid child session id", ErrInvalid)
+	}
+	if active := m.activeExecution(childSessionID); active != nil {
+		active.Cancel()
+
+		return nil
+	}
+
+	_, err := m.findSummary(ctx, childSessionID)
+
+	return err
+}
+
+// CancelRoot cancels every running background child created by one root
+// interaction and returns the number of cancellation requests issued.
+func (m *Manager) CancelRoot(rootInteractionID string) int {
+	if m == nil || rootInteractionID == "" {
+		return 0
+	}
+
+	m.mu.Lock()
+	values := make([]*Execution, 0, len(m.active))
+	for _, execution := range m.active {
+		if execution.request.Delivery == DeliveryBackground &&
+			execution.request.Ownership.RootInteractionID == rootInteractionID {
+			values = append(values, execution)
+		}
+	}
+	m.mu.Unlock()
+
+	for _, execution := range values {
+		execution.Cancel()
+	}
+
+	return len(values)
+}
+
+func resultFromDetail(detail Detail) Result {
+	value := detail.Summary
+	result := Result{
+		Role: value.Role, ChildSessionID: value.ChildSessionID,
+		Code: value.Code, Turns: value.Turns, ToolCalls: value.ToolCalls,
+		Usage: value.Usage, Duration: value.Duration, Value: detail.Result,
+	}
+	switch value.State {
+	case StateSucceeded:
+		result.Outcome = OutcomeSucceeded
+	case StateCanceled:
+		result.Outcome = OutcomeCanceled
+	case StateInterrupted:
+		result.Outcome = OutcomeInterrupted
+	case StateCreated, StateRunning, StateFailed:
+		result.Outcome = OutcomeFailed
+	}
+
+	return result
+}
+
+// Close stops admission, cancels every child, and waits for terminal
 // persistence before returning.
 func (m *Manager) Close(ctx context.Context) error {
 	if m == nil {
 		return nil
 	}
 
-	for {
-		m.mu.Lock()
-		m.closed = true
-		active := m.active
-		startingDone := m.startingDone
-		m.mu.Unlock()
-
-		if active != nil {
-			active.Cancel()
-			result, err := active.Wait(ctx)
-			active.mu.Lock()
-			cleanupErr := active.cleanupErr
-			active.mu.Unlock()
-
-			if cleanupErr != nil {
-				return cleanupErr
-			}
-
-			if result.Outcome == OutcomeCanceled && ctx.Err() == nil {
-				return nil
-			}
-
-			return err
-		}
-
-		if startingDone == nil {
-			return nil
-		}
-
+	m.mu.Lock()
+	m.closed = true
+	m.cancel()
+	startingDone := m.startingDone
+	m.mu.Unlock()
+	if startingDone != nil {
 		select {
 		case <-startingDone:
-			continue
 		case <-ctx.Done():
 			return ctx.Err()
 		}
+	}
+
+	m.waitOnce.Do(func() {
+		go func() {
+			m.runs.Wait()
+			close(m.waitDone)
+		}()
+	})
+	select {
+	case <-m.waitDone:
+		m.mu.Lock()
+		err := m.cleanupErr
+		m.mu.Unlock()
+
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
@@ -437,7 +637,15 @@ func (m *Manager) run(
 	}
 
 	onEvent := func(eventCtx context.Context, event agent.Event) {
-		m.observeChild(eventCtx, child, observer, created, tracker, event)
+		m.observeChild(
+			eventCtx,
+			child,
+			observer,
+			execution.request,
+			created,
+			tracker,
+			event,
+		)
 	}
 	options := m.agentOptions(execution.request.Role, child, tracker, spec, useNativeResponseFormat)
 
@@ -640,6 +848,7 @@ func (m *Manager) observeChild(
 	ctx context.Context,
 	child *session.Handle,
 	observer Observer,
+	request Request,
 	created record,
 	tracker *runTracker,
 	event agent.Event,
@@ -656,6 +865,16 @@ func (m *Manager) observeChild(
 
 	for _, rawObserver := range m.config.AgentObservers {
 		emitRawObserver(ctx, rawObserver, event)
+	}
+	for _, childObserver := range m.config.EventObservers {
+		if err := emitChildEventObserver(ctx, childObserver, AgentEvent{
+			ChildSessionID: child.Metadata().ID,
+			Ownership:      executionOwnership(created),
+			Task:           request.Task,
+			Event:          event,
+		}); err != nil {
+			m.failChildObservation(child.Metadata().ID, tracker, err)
+		}
 	}
 }
 
@@ -1092,6 +1311,8 @@ func (m *Manager) finishExecution(
 
 	terminalEvent := eventFromRecord(terminal)
 	terminalEvent.Activity = activity
+	terminalResult := cloneResult(result)
+	terminalEvent.Result = &terminalResult
 	observerErr := emitObserver(context.WithoutCancel(ctx), observer, terminalEvent)
 	finalErr = errors.Join(finalErr, observerErr)
 	cleanupErr = errors.Join(cleanupErr, observerErr)
@@ -1101,10 +1322,14 @@ func (m *Manager) finishExecution(
 	execution.err = finalErr
 	execution.cleanupErr = cleanupErr
 	execution.mu.Unlock()
-	m.mu.Lock()
-	if m.active == execution {
-		m.active = nil
+	if execution.stopParent != nil {
+		execution.stopParent()
 	}
+	m.mu.Lock()
+	if m.active[terminal.ChildSessionID] == execution {
+		delete(m.active, terminal.ChildSessionID)
+	}
+	m.cleanupErr = errors.Join(m.cleanupErr, cleanupErr)
 	m.mu.Unlock()
 	close(execution.done)
 }
@@ -1113,12 +1338,13 @@ func (m *Manager) activeExecution(childSessionID string) *Execution {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if m.active == nil || m.active.child == nil ||
-		m.active.child.Metadata().ID != childSessionID {
+	active := m.active[childSessionID]
+	if active == nil || active.child == nil ||
+		active.child.Metadata().ID != childSessionID {
 		return nil
 	}
 
-	return m.active
+	return active
 }
 
 func classifyOutcome(
@@ -1199,21 +1425,25 @@ func stateForOutcome(outcome Outcome) State {
 
 func eventFromRecord(value record) Event {
 	return Event{
-		State:           value.State,
-		Role:            value.Role,
-		ChildSessionID:  value.ChildSessionID,
-		ParentSessionID: value.ParentSessionID,
-		ParentRunID:     value.ParentRunID,
-		ChildRunID:      value.ChildRunID,
-		Model:           value.Model,
-		TaskPreview:     value.TaskPreview,
-		Code:            value.Code,
-		Stop:            agent.StopReason(value.Stop),
-		Turns:           value.Turns,
-		ToolCalls:       value.ToolCalls,
-		Usage:           value.Usage,
-		Duration:        time.Duration(value.DurationMillis) * time.Millisecond,
-		Time:            value.Time,
+		State:               value.State,
+		Role:                value.Role,
+		ChildSessionID:      value.ChildSessionID,
+		ParentSessionID:     value.ParentSessionID,
+		ParentInteractionID: value.ParentInteractionID,
+		ParentRunID:         value.ParentRunID,
+		ParentToolCallID:    value.ParentToolCallID,
+		RootInteractionID:   value.RootInteractionID,
+		Delivery:            value.Delivery,
+		ChildRunID:          value.ChildRunID,
+		Model:               value.Model,
+		TaskPreview:         value.TaskPreview,
+		Code:                value.Code,
+		Stop:                agent.StopReason(value.Stop),
+		Turns:               value.Turns,
+		ToolCalls:           value.ToolCalls,
+		Usage:               value.Usage,
+		Duration:            time.Duration(value.DurationMillis) * time.Millisecond,
+		Time:                value.Time,
 	}
 }
 
@@ -1229,6 +1459,30 @@ func emitObserver(ctx context.Context, observer Observer, event Event) (err erro
 	}()
 
 	return observer(ctx, event)
+}
+
+func emitChildEventObserver(
+	ctx context.Context,
+	observer AgentEventObserver,
+	event AgentEvent,
+) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("coding subagent: child event observer panicked: %v", recovered)
+		}
+	}()
+
+	return observer(ctx, event)
+}
+
+func executionOwnership(value record) Ownership {
+	return Ownership{
+		ParentSessionID:     value.ParentSessionID,
+		ParentInteractionID: value.ParentInteractionID,
+		ParentRunID:         value.ParentRunID,
+		ParentToolCallID:    value.ParentToolCallID,
+		RootInteractionID:   value.RootInteractionID,
+	}
 }
 
 func emitRawObserver(ctx context.Context, observer func(context.Context, agent.Event), event agent.Event) {

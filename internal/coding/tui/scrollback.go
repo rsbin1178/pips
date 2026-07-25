@@ -12,26 +12,20 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding"
-	"github.com/rsbin/pips/internal/coding/subagent"
 )
-
-const maxCommittedSubagentIDs = 256
 
 // scrollbackCursor separates immutable conversation history from the live
 // tail Bubble Tea still owns. Stable blocks are printed above the inline
 // Program once, so the terminal can retain, select, and scroll them natively.
 type scrollbackCursor struct {
-	messages      int
-	tools         int
-	subagents     int
-	diagnostics   int
-	toolIDs       map[string]struct{}
-	subagentIDs   map[string]struct{}
-	subagentOrder []string
-	completions   map[string]struct{}
-	changes       projectionFingerprint
-	lastError     projectionFingerprint
-	streamError   string
+	messages    int
+	tools       int
+	diagnostics int
+	toolIDs     map[string]struct{}
+	completions map[string]struct{}
+	changes     projectionFingerprint
+	lastError   projectionFingerprint
+	streamError string
 }
 
 type projectionFingerprint [sha256.Size]byte
@@ -199,7 +193,7 @@ func (m *Model) takeStableTimelineBlocks() []timelineBlock {
 		stableTools++
 	}
 	if heldSubagentTool == "" && stableTools < len(m.state.Tools) &&
-		m.state.Tools[stableTools].Call.Name == subagent.ToolName {
+		isSubagentToolName(m.state.Tools[stableTools].Call.Name) {
 		heldSubagentTool = m.state.Tools[stableTools].Call.ID
 	}
 
@@ -212,18 +206,16 @@ func (m *Model) takeStableTimelineBlocks() []timelineBlock {
 		stableMessages = min(stableMessages, m.heldExploreMessageFrontier(exploreStart))
 	}
 
-	stableSubagents := m.scrollback.subagents
-	for stableSubagents < len(m.state.Subagents) &&
-		isTerminalSubagent(m.state.Subagents[stableSubagents].State) {
-		stableSubagents++
-	}
-
 	delta := m.state.Clone()
 
 	delta.Transcript = delta.Transcript[m.scrollback.messages:stableMessages]
+	delta.SyntheticMessages = sliceSyntheticMessageIndexes(
+		m.state.SyntheticMessages,
+		m.scrollback.messages,
+		stableMessages,
+	)
 	delta.Draft = nil
 	delta.Tools = delta.Tools[m.scrollback.tools:stableTools]
-	delta.Subagents = delta.Subagents[m.scrollback.subagents:stableSubagents]
 
 	delta.Diagnostics = delta.Diagnostics[m.scrollback.diagnostics:]
 
@@ -237,7 +229,7 @@ func (m *Model) takeStableTimelineBlocks() []timelineBlock {
 		delta.LastError = nil
 	}
 
-	blocks := projectTimelineExcluding(delta, m.scrollback.toolIDs, m.scrollback.subagentIDs)
+	blocks := projectTimelineExcluding(delta, m.scrollback.toolIDs)
 
 	for _, marker := range m.pendingCompletionMarkers() {
 		if block, ok := projectCompletionMarker(marker); ok {
@@ -256,25 +248,12 @@ func (m *Model) takeStableTimelineBlocks() []timelineBlock {
 
 	for _, block := range blocks {
 		m.markToolActivitiesCommitted(block)
-		m.markSubagentCommitted(block)
 	}
 	for index := m.scrollback.tools; index < stableTools; index++ {
 		m.markToolIDCommitted(m.state.Tools[index].Call.ID)
 	}
-	for index := m.scrollback.subagents; index < stableSubagents; index++ {
-		child := m.state.Subagents[index]
-		for _, tool := range m.state.Tools {
-			if tool.Call.Name == subagent.ToolName && tool.RunID == child.ParentRunID {
-				m.markToolIDCommitted(tool.Call.ID)
-
-				break
-			}
-		}
-	}
-
 	m.scrollback.messages = stableMessages
 	m.scrollback.tools = stableTools
-	m.scrollback.subagents = stableSubagents
 	m.scrollback.diagnostics = len(m.state.Diagnostics)
 	m.scrollback.changes = changes
 
@@ -306,8 +285,12 @@ func (m *Model) activeTimelineBlocks() []timelineBlock {
 	active := m.state.Clone()
 
 	active.Transcript = active.Transcript[m.scrollback.messages:]
+	active.SyntheticMessages = sliceSyntheticMessageIndexes(
+		m.state.SyntheticMessages,
+		m.scrollback.messages,
+		len(m.state.Transcript),
+	)
 	active.Tools = active.Tools[m.scrollback.tools:]
-	active.Subagents = active.Subagents[m.scrollback.subagents:]
 
 	active.Diagnostics = active.Diagnostics[m.scrollback.diagnostics:]
 
@@ -319,7 +302,7 @@ func (m *Model) activeTimelineBlocks() []timelineBlock {
 		active.LastError = nil
 	}
 
-	blocks := projectTimelineExcluding(active, m.scrollback.toolIDs, m.scrollback.subagentIDs)
+	blocks := projectTimelineExcluding(active, m.scrollback.toolIDs)
 	for _, marker := range m.pendingCompletionMarkers() {
 		if block, ok := projectCompletionMarker(marker); ok {
 			blocks = append(blocks, block)
@@ -347,12 +330,14 @@ func (m *Model) activeTimelineBlocks() []timelineBlock {
 }
 
 func (m *Model) holdCompletedSubagentTool(tool coding.ToolState) bool {
-	if tool.Call.Name != subagent.ToolName {
+	if !isSubagentToolName(tool.Call.Name) {
 		return false
 	}
 
 	for _, child := range m.state.Subagents {
-		if tool.RunID != "" && child.ParentRunID == tool.RunID {
+		if (child.ParentToolCallID != "" && child.ParentToolCallID == tool.Call.ID) ||
+			(child.ParentToolCallID == "" && tool.RunID != "" &&
+				child.ParentRunID == tool.RunID) {
 			return !isTerminalSubagent(child.State)
 		}
 	}
@@ -367,6 +352,17 @@ func (m *Model) holdCompletedSubagentTool(tool coding.ToolState) bool {
 	}
 
 	return false
+}
+
+func sliceSyntheticMessageIndexes(values []int, start, end int) []int {
+	result := make([]int, 0, len(values))
+	for _, value := range values {
+		if value >= start && value < end {
+			result = append(result, value-start)
+		}
+	}
+
+	return result
 }
 
 func (m *Model) heldToolMessageFrontier(callID string) int {
@@ -538,32 +534,9 @@ func (m *Model) markToolIDCommitted(id string) {
 	m.scrollback.toolIDs[id] = struct{}{}
 }
 
-func (m *Model) markSubagentCommitted(block timelineBlock) {
-	if block.kind != blockSubagent || block.id == "" {
-		return
-	}
-	if m.scrollback.subagentIDs == nil {
-		m.scrollback.subagentIDs = make(map[string]struct{})
-	}
-	if _, committed := m.scrollback.subagentIDs[block.id]; committed {
-		return
-	}
-
-	m.scrollback.subagentIDs[block.id] = struct{}{}
-	m.scrollback.subagentOrder = append(m.scrollback.subagentOrder, block.id)
-	if len(m.scrollback.subagentOrder) <= maxCommittedSubagentIDs {
-		return
-	}
-
-	oldest := m.scrollback.subagentOrder[0]
-	delete(m.scrollback.subagentIDs, oldest)
-	m.scrollback.subagentOrder = m.scrollback.subagentOrder[1:]
-}
-
 func (m *Model) reconcileScrollback() {
 	if m.scrollback.messages > len(m.state.Transcript) ||
 		m.scrollback.tools > len(m.state.Tools) ||
-		m.scrollback.subagents > len(m.state.Subagents) ||
 		m.scrollback.diagnostics > len(m.state.Diagnostics) {
 		m.resetScrollback()
 	}

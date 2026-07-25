@@ -173,7 +173,7 @@ func (m *Manager) childHandle(
 ) (*session.Handle, bool, error) {
 	m.mu.Lock()
 
-	active := m.active
+	active := m.active[childSessionID]
 	if active != nil && active.child != nil && active.child.Metadata().ID == childSessionID {
 		child := active.child
 		m.mu.Unlock()
@@ -208,6 +208,8 @@ func validateLineage(parent, child session.Metadata, value record) error {
 func summaryFrom(meta session.Metadata, value record) Summary {
 	return Summary{
 		ChildSessionID: meta.ID,
+		Ownership:      executionOwnership(value),
+		Delivery:       value.Delivery,
 		Role:           value.Role,
 		State:          value.State,
 		TaskPreview:    value.TaskPreview,

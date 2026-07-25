@@ -1,7 +1,9 @@
+//nolint:wsl_v5 // Concurrent execution fixtures keep actions beside assertions.
 package subagent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -524,7 +526,7 @@ func TestManagerIsSerialCancelableAndLeavesWorkspaceUnchanged(t *testing.T) {
 	t.Parallel()
 
 	model := &blockingTestModel{entered: make(chan struct{})}
-	fixture := newManagerFixture(t, model)
+	fixture := newManagerFixtureWithOptions(t, model, ExecutionOptions{MaxConcurrent: 1})
 	path := filepath.Join(fixture.root, "sentinel.txt")
 	require.NoError(t, os.WriteFile(path, []byte("unchanged"), 0o600))
 
@@ -548,6 +550,138 @@ func TestManagerIsSerialCancelableAndLeavesWorkspaceUnchanged(t *testing.T) {
 	content, err := fs.ReadFile(fixture.tree.FileSystem(), "sentinel.txt")
 	require.NoError(t, err)
 	assert.Equal(t, "unchanged", string(content))
+}
+
+func TestManagerEnforcesConcurrentCapacity(t *testing.T) {
+	t.Parallel()
+
+	model := &blockingTestModel{entered: make(chan struct{})}
+	fixture := newManagerFixtureWithOptions(t, model, ExecutionOptions{MaxConcurrent: 4})
+	executions := make([]*Execution, 0, 4)
+	for index := range 4 {
+		execution, err := fixture.manager.Start(t.Context(), Request{
+			Role: RoleExplore, Task: fmt.Sprintf("Wait %d.", index),
+		}, nil)
+		require.NoError(t, err)
+		executions = append(executions, execution)
+	}
+
+	_, err := fixture.manager.Start(
+		t.Context(), Request{Role: RolePlan, Task: "Over capacity."}, nil,
+	)
+	require.ErrorIs(t, err, ErrCapacity)
+
+	for _, execution := range executions {
+		execution.Cancel()
+	}
+	for _, execution := range executions {
+		result, waitErr := execution.Wait(t.Context())
+		require.ErrorIs(t, waitErr, context.Canceled)
+		assert.Equal(t, OutcomeCanceled, result.Outcome)
+	}
+}
+
+func TestManagerWaitReconstructsCompletedChild(t *testing.T) {
+	t.Parallel()
+
+	fixture := newManagerFixture(t, &testModel{responses: []*ai.Response{
+		responseText(`{"summary":"done","evidence":[],"unknowns":[]}`),
+	}})
+	execution, err := fixture.manager.Start(
+		t.Context(), Request{Role: RoleExplore, Task: "Inspect."}, nil,
+	)
+	require.NoError(t, err)
+	completed, err := execution.Wait(t.Context())
+	require.NoError(t, err)
+
+	reconstructed, err := fixture.manager.Wait(t.Context(), completed.ChildSessionID)
+	require.NoError(t, err)
+	assert.Equal(t, completed.ChildSessionID, reconstructed.ChildSessionID)
+	assert.Equal(t, OutcomeSucceeded, reconstructed.Outcome)
+	assert.IsType(t, ExploreResult{}, reconstructed.Value)
+}
+
+func TestManagerCancelRootOnlyCancelsMatchingBackgroundChildren(t *testing.T) {
+	t.Parallel()
+
+	model := &blockingTestModel{entered: make(chan struct{})}
+	fixture := newManagerFixtureWithOptions(t, model, ExecutionOptions{MaxConcurrent: 4})
+	start := func(root, callID string) *Execution {
+		execution, err := fixture.manager.Start(t.Context(), Request{
+			Role: RoleExplore, Task: "Wait.", Delivery: DeliveryBackground,
+			Ownership: Ownership{
+				ParentInteractionID: root, ParentRunID: "parent-run",
+				ParentToolCallID: callID, RootInteractionID: root,
+			},
+		}, nil)
+		require.NoError(t, err)
+
+		return execution
+	}
+
+	first := start("root-1", "call-1")
+	second := start("root-1", "call-2")
+	other := start("root-2", "call-3")
+	<-model.entered
+
+	assert.Equal(t, 2, fixture.manager.CancelRoot("root-1"))
+	for _, execution := range []*Execution{first, second} {
+		result, err := execution.Wait(t.Context())
+		require.ErrorIs(t, err, context.Canceled)
+		assert.Equal(t, OutcomeCanceled, result.Outcome)
+	}
+	select {
+	case <-other.done:
+		require.FailNow(t, "unrelated child was canceled")
+	case <-time.After(25 * time.Millisecond):
+	}
+	require.NoError(t, fixture.manager.Cancel(t.Context(), other.child.Metadata().ID))
+	_, err := other.Wait(t.Context())
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestSpawnToolSurvivesCallContextAndEnforcesRootLimit(t *testing.T) {
+	t.Parallel()
+
+	model := &blockingTestModel{entered: make(chan struct{})}
+	fixture := newManagerFixtureWithOptions(t, model, ExecutionOptions{
+		MaxConcurrent: 4, MaxSpawnedPerRootInteraction: 2,
+	})
+	tool := fixture.manager.SpawnToolFor(Ownership{
+		ParentInteractionID: "interaction-1", RootInteractionID: "interaction-1",
+	}, nil)
+
+	callCtx, cancelCall := context.WithCancel(t.Context())
+	parts, err := tool.Exec(callCtx, agent.ToolCall{
+		ID: "spawn-1", Name: SpawnToolName,
+		Args: ai.JSON(`{"role":"explore","task":"Wait for cancellation."}`),
+	})
+	require.NoError(t, err)
+	cancelCall()
+
+	var first spawnResult
+	require.NoError(t, json.Unmarshal([]byte(messageText(ai.Message{
+		Role: ai.RoleTool, Parts: parts,
+	})), &first))
+	assert.Equal(t, SpawnResultSchema, first.Schema)
+	firstExecution := fixture.manager.activeExecution(first.AgentID)
+	require.NotNil(t, firstExecution)
+	select {
+	case <-firstExecution.done:
+		require.FailNow(t, "background execution was canceled with its Tool context")
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	_, err = tool.Exec(t.Context(), agent.ToolCall{
+		ID: "spawn-2", Name: SpawnToolName,
+		Args: ai.JSON(`{"role":"plan","task":"Wait too."}`),
+	})
+	require.NoError(t, err)
+	_, err = tool.Exec(t.Context(), agent.ToolCall{
+		ID: "spawn-3", Name: SpawnToolName,
+		Args: ai.JSON(`{"role":"review","task":"Exceed the root limit."}`),
+	})
+	require.ErrorIs(t, err, ErrSpawnLimit)
 }
 
 func TestRunSubagentToolHasStableSchemaAndEnvelope(t *testing.T) {

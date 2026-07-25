@@ -43,6 +43,7 @@ type routeState struct {
 
 	childSessionID string
 	detail         *subagent.Detail
+	childState     *coding.State
 	refreshing     bool
 	refreshPending bool
 	refreshErr     error

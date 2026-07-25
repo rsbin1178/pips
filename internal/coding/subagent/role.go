@@ -183,6 +183,7 @@ func unwrapJSONFence(value string) (string, bool) {
 	return inner, true
 }
 
+//nolint:gocyclo // Request ownership and role constraints are one strict admission boundary.
 func validateRequest(request Request, limits Limits) error {
 	if _, err := specFor(request.Role); err != nil {
 		return err
@@ -195,6 +196,18 @@ func validateRequest(request Request, limits Limits) error {
 
 	if len(request.Task) > limits.MaxTaskBytes {
 		return fmt.Errorf("%w: task exceeds %d bytes", ErrInvalid, limits.MaxTaskBytes)
+	}
+
+	if request.Delivery != "" && request.Delivery != DeliveryForeground &&
+		request.Delivery != DeliveryBackground {
+		return fmt.Errorf("%w: invalid delivery mode", ErrInvalid)
+	}
+
+	if request.Delivery == DeliveryBackground &&
+		(request.Ownership.ParentInteractionID == "" ||
+			request.Ownership.ParentToolCallID == "" ||
+			request.Ownership.RootInteractionID == "") {
+		return fmt.Errorf("%w: background execution requires complete ownership", ErrInvalid)
 	}
 
 	for _, current := range request.Task {
