@@ -1,3 +1,4 @@
+//nolint:wsl_v5 // Strict journal validation keeps related field checks adjacent.
 package subagent
 
 import (
@@ -26,24 +27,28 @@ const (
 )
 
 type record struct {
-	Schema          string       `json:"schema"`
-	State           State        `json:"state"`
-	Role            Role         `json:"role"`
-	ChildSessionID  string       `json:"child_session_id"`
-	ParentSessionID string       `json:"parent_session_id"`
-	ParentRunID     string       `json:"parent_run_id,omitempty"`
-	ChildRunID      string       `json:"child_run_id,omitempty"`
-	Model           string       `json:"model"`
-	Limits          recordLimits `json:"limits"`
-	TaskPreview     string       `json:"task_preview,omitempty"`
-	Code            string       `json:"code,omitempty"`
-	Stop            string       `json:"stop,omitempty"`
-	Turns           int          `json:"turns,omitempty"`
-	ToolCalls       int          `json:"tool_calls,omitempty"`
-	Usage           ai.Usage     `json:"usage"`
-	DurationMillis  int64        `json:"duration_millis,omitempty"`
-	ResultBytes     int          `json:"result_bytes,omitempty"`
-	Time            time.Time    `json:"time"`
+	Schema              string       `json:"schema"`
+	State               State        `json:"state"`
+	Role                Role         `json:"role"`
+	ChildSessionID      string       `json:"child_session_id"`
+	ParentSessionID     string       `json:"parent_session_id"`
+	ParentInteractionID string       `json:"parent_interaction_id,omitempty"`
+	ParentRunID         string       `json:"parent_run_id,omitempty"`
+	ParentToolCallID    string       `json:"parent_tool_call_id,omitempty"`
+	RootInteractionID   string       `json:"root_interaction_id,omitempty"`
+	Delivery            Delivery     `json:"delivery,omitempty"`
+	ChildRunID          string       `json:"child_run_id,omitempty"`
+	Model               string       `json:"model"`
+	Limits              recordLimits `json:"limits"`
+	TaskPreview         string       `json:"task_preview,omitempty"`
+	Code                string       `json:"code,omitempty"`
+	Stop                string       `json:"stop,omitempty"`
+	Turns               int          `json:"turns,omitempty"`
+	ToolCalls           int          `json:"tool_calls,omitempty"`
+	Usage               ai.Usage     `json:"usage"`
+	DurationMillis      int64        `json:"duration_millis,omitempty"`
+	ResultBytes         int          `json:"result_bytes,omitempty"`
+	Time                time.Time    `json:"time"`
 }
 
 type recordLimits struct {
@@ -233,7 +238,22 @@ func validateRecordBase(value record) error {
 
 func validRecordIdentity(value record) bool {
 	return value.Schema == recordSchema && value.ChildSessionID != "" &&
-		value.ParentSessionID != "" && value.Model != "" && !value.Time.IsZero()
+		value.ParentSessionID != "" && value.Model != "" && !value.Time.IsZero() &&
+		validRecordOwnership(value)
+}
+
+func validRecordOwnership(value record) bool {
+	if value.Delivery != "" && value.Delivery != DeliveryForeground &&
+		value.Delivery != DeliveryBackground {
+		return false
+	}
+	if value.ParentInteractionID == "" {
+		return value.ParentToolCallID == "" && value.RootInteractionID == ""
+	}
+
+	return validJournalText(value.ParentInteractionID) &&
+		validJournalText(value.ParentToolCallID) && value.ParentToolCallID != "" &&
+		validJournalText(value.RootInteractionID) && value.RootInteractionID != ""
 }
 
 func validRecordCounters(value record) bool {
@@ -351,7 +371,11 @@ func sameExecution(left, right record) bool {
 	return left.Schema == right.Schema && left.Role == right.Role &&
 		left.ChildSessionID == right.ChildSessionID &&
 		left.ParentSessionID == right.ParentSessionID &&
-		left.ParentRunID == right.ParentRunID && left.Model == right.Model &&
+		left.ParentInteractionID == right.ParentInteractionID &&
+		left.ParentRunID == right.ParentRunID &&
+		left.ParentToolCallID == right.ParentToolCallID &&
+		left.RootInteractionID == right.RootInteractionID &&
+		left.Delivery == right.Delivery && left.Model == right.Model &&
 		left.Limits == right.Limits && left.TaskPreview == right.TaskPreview
 }
 

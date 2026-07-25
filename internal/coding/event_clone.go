@@ -34,6 +34,7 @@ func cloneEventPayload(payload EventPayload) EventPayload {
 	case CompactionCompleted:
 		return value
 	case InteractionStarted:
+		value.NotificationIDs = slices.Clone(value.NotificationIDs)
 		return value
 	case InteractionCompleted:
 		return value

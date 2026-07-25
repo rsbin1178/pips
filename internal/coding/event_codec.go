@@ -212,7 +212,8 @@ func validateNestedPayloadJSON(eventType EventType, data []byte) error {
 		return nil
 	case EventMessageCommitted:
 		var payload struct {
-			Message json.RawMessage `json:"message"`
+			Message   json.RawMessage `json:"message"`
+			Synthetic bool            `json:"synthetic,omitempty"`
 		}
 		if err := strictDecode(data, &payload); err != nil {
 			return err

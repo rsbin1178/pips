@@ -85,6 +85,9 @@ type Controller interface {
 	ListSessions(context.Context) ([]session.Metadata, error)
 	ListSubagents(context.Context) ([]subagent.Summary, error)
 	InspectSubagent(context.Context, string) (subagent.Detail, error)
+	InspectSubagentState(context.Context, string) (coding.State, error)
+	WaitSubagent(context.Context, string) (subagent.Result, error)
+	CancelSubagent(context.Context, string) error
 	NewSession(context.Context) error
 	ResumeSession(context.Context, string) error
 	ForkSession(context.Context, string) error
@@ -168,6 +171,7 @@ func Run(ctx context.Context, options Options) (returnErr error) {
 		controllerCloseTimeout,
 	)
 	returnErr = errors.Join(returnErr, model.stopStream(cleanupCtx))
+	model.stopSubscription()
 	cleanupCancel()
 	owned.Lock()
 	controller := owned.controller

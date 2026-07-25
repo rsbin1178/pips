@@ -79,7 +79,7 @@ func TestTimelineSummarizesChangesAndDiagnostics(t *testing.T) {
 	assert.NotContains(t, rendered, "diff --git")
 }
 
-func TestTimelineUsesDedicatedSubagentCardWithoutGenericTool(t *testing.T) {
+func TestTimelineProjectsSubagentAsOriginalToolActivity(t *testing.T) {
 	t.Parallel()
 
 	state := coding.State{
@@ -101,110 +101,77 @@ func TestTimelineUsesDedicatedSubagentCardWithoutGenericTool(t *testing.T) {
 	}
 	blocks := projectTimeline(state)
 	require.Len(t, blocks, 1)
-	assert.Equal(t, blockSubagent, blocks[0].kind)
+	assert.Equal(t, blockTool, blocks[0].kind)
+	require.Len(t, blocks[0].tools, 1)
+	assert.Equal(t, "call-1", blocks[0].tools[0].id)
+	assert.Equal(t, "child-1", blocks[0].tools[0].childSessionID)
 	rendered := renderTimeline(blocks, newMarkdownRenderer(4), 80, themeDark, true)
-	assert.Contains(t, rendered, "• Explored · Locate the composition root")
+	assert.Contains(t, rendered, "• Explored Locate the composition root")
 	assert.Contains(t, rendered, "Completed in 12s · 8 tools · 14.2k tokens")
 	assert.NotContains(t, rendered, subagent.ToolName)
 	assert.NotContains(t, rendered, "internal envelope")
 }
 
-func TestTimelineSubagentCardsKeepTaskPrimaryAndHumanizeFailure(t *testing.T) {
+func TestTimelineProjectsSpawnAgentInOriginalToolRow(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name      string
-		value     coding.SubagentState
-		primary   string
-		secondary string
-	}{
-		{
-			name: "running",
-			value: coding.SubagentState{
-				Role: subagent.RolePlan, State: subagent.StateRunning,
-				TaskPreview: "Map the runtime", ToolCalls: 2,
-				Activity: subagent.ActivitySummary{
-					Action: subagent.ActivityActionRead, Target: "internal/coding/runtime.go",
-				},
-			},
-			primary:   "✻ Planning · Map the runtime",
-			secondary: "Read internal/coding/runtime.go · 2 tools",
+	state := coding.State{
+		Transcript: []ai.Message{
+			ai.Assistant(ai.ToolCallPart{
+				ID: "spawn-1", Name: subagent.SpawnToolName,
+				Args: ai.JSON(`{"role":"review","task":"Review the runtime"}`),
+			}),
+			ai.ToolResultText(
+				"spawn-1", subagent.SpawnToolName,
+				`{"schema":"pips.coding.agent.spawn/v1alpha1","agent_id":"child-1","role":"review","state":"running"}`,
+			),
 		},
-		{
-			name: "failed",
-			value: coding.SubagentState{
-				Role: subagent.RoleReview, State: subagent.StateFailed,
-				TaskPreview: "Check the patch", Code: "invalid_result",
-				DurationMillis: 5_000, ToolCalls: 3,
+		Tools: []coding.ToolState{{
+			RunID: "run-1",
+			Call: coding.ToolCall{
+				ID: "spawn-1", Name: subagent.SpawnToolName,
+				Arguments: ai.JSON(`{"role":"review","task":"Review the runtime"}`),
 			},
-			primary:   "✗ Review failed · Check the patch",
-			secondary: "Failed: invalid result after 5s · 3 tools",
-		},
+			Status: coding.ToolStatusCompleted,
+		}},
+		Subagents: []coding.SubagentState{{
+			ChildSessionID: "child-1", ParentRunID: "run-1",
+			ParentToolCallID: "spawn-1", Role: subagent.RoleReview,
+			State: subagent.StateRunning, TaskPreview: "Review the runtime",
+			ToolCalls: 2,
+			Activity: subagent.ActivitySummary{
+				Action: subagent.ActivityActionRead, Target: "internal/coding/runtime.go",
+			},
+		}},
 	}
 
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-
-			rendered := renderTimeline(
-				[]timelineBlock{projectSubagent(test.value, 0)},
-				newMarkdownRenderer(4),
-				80,
-				themeDark,
-				true,
-			)
-			assert.Contains(t, rendered, test.primary)
-			assert.Contains(t, rendered, test.secondary)
-			assert.NotContains(t, rendered, "invalid_result")
-		})
-	}
+	blocks := projectTimeline(state)
+	require.Len(t, blocks, 1)
+	assert.Equal(t, blockTool, blocks[0].kind)
+	assert.Equal(t, "spawn-1", blocks[0].id)
+	rendered := renderTimeline(blocks, newMarkdownRenderer(4), 100, themeDark, true)
+	assert.Contains(t, rendered, "✻ Reviewing Review the runtime")
+	assert.Contains(t, rendered, "Read internal/coding/runtime.go · 2 tools")
+	assert.NotContains(t, rendered, subagent.SpawnToolName)
+	assert.NotContains(t, rendered, "pips.coding.agent.spawn")
 }
 
-func TestTimelineCompactsAdjacentOperationCards(t *testing.T) {
+func TestTimelineHidesSyntheticAgentNotificationInput(t *testing.T) {
 	t.Parallel()
 
-	blocks := []timelineBlock{
-		projectSubagent(coding.SubagentState{
-			ChildSessionID: "child-1", Role: subagent.RoleExplore,
-			State: subagent.StateSucceeded, TaskPreview: "Inspect runtime",
-		}, 0),
-		projectSubagent(coding.SubagentState{
-			ChildSessionID: "child-2", Role: subagent.RoleReview,
-			State: subagent.StateSucceeded, TaskPreview: "Review runtime",
-		}, 0),
+	state := coding.State{
+		Transcript: []ai.Message{
+			ai.UserText("internal agent completion envelope"),
+			ai.AssistantText("The background review completed."),
+		},
+		SyntheticMessages: []int{0},
 	}
 
-	rendered := renderTimeline(blocks, newMarkdownRenderer(4), 80, themeDark, true)
-	assert.NotContains(t, rendered, "Completed\n\n• Reviewed")
-	assert.Contains(t, rendered, "Completed\n• Reviewed")
-}
-
-func TestTimelineSubagentCardStaysTwoRowsOnNarrowTerminal(t *testing.T) {
-	t.Parallel()
-
-	for _, noColor := range []bool{true, false} {
-		rendered := renderTimeline(
-			[]timelineBlock{projectSubagent(coding.SubagentState{
-				Role: subagent.RoleExplore, State: subagent.StateRunning,
-				TaskPreview: "Inspect a deliberately long task description without wrapping",
-				ToolCalls:   12,
-			}, 0)},
-			newMarkdownRenderer(4),
-			24,
-			themeDark,
-			noColor,
-		)
-		lines := strings.Split(rendered, "\n")
-		require.Len(t, lines, 2)
-		for _, line := range lines {
-			assert.LessOrEqual(t, ansi.StringWidth(line), 24)
-		}
-		assert.Contains(t, ansi.Strip(lines[0]), "✻ Exploring")
-		assert.Contains(t, ansi.Strip(lines[1]), "Running")
-		if !noColor {
-			assert.Contains(t, rendered, "\x1b[")
-		}
-	}
+	rendered := renderTimeline(
+		projectTimeline(state), newMarkdownRenderer(4), 80, themeDark, true,
+	)
+	assert.NotContains(t, rendered, "internal agent completion envelope")
+	assert.Contains(t, rendered, "The background review completed.")
 }
 
 func TestTimelinePlacesCompletedToolBeforeFollowingAnswer(t *testing.T) {

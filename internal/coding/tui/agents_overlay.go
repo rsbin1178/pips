@@ -3,14 +3,17 @@ package tui
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding"
 	"github.com/rsbin/pips/internal/coding/subagent"
 )
@@ -18,6 +21,7 @@ import (
 type subagentToolEnvelope struct {
 	Schema         string `json:"schema"`
 	ChildSessionID string `json:"child_session_id"`
+	AgentID        string `json:"agent_id"`
 }
 
 type agentsRouteDataMsg struct {
@@ -28,13 +32,22 @@ type agentsRouteDataMsg struct {
 
 type subagentRouteDataMsg struct {
 	detail         subagent.Detail
+	state          coding.State
 	err            error
 	hasDetail      bool
+	hasState       bool
 	background     bool
 	generation     uint64
 	childSessionID string
 }
 
+type subagentCancelResultMsg struct {
+	generation     uint64
+	childSessionID string
+	err            error
+}
+
+//nolint:gocyclo // Exact envelopes and legacy ownership fallback share one bounded decoder.
 func subagentChildSessionID(
 	tool coding.ToolState,
 	children []coding.SubagentState,
@@ -44,9 +57,17 @@ func subagentChildSessionID(
 		var envelope subagentToolEnvelope
 
 		decoder := json.NewDecoder(strings.NewReader(text[offset:]))
-		if decoder.Decode(&envelope) == nil &&
-			envelope.Schema == subagent.ResultSchema && envelope.ChildSessionID != "" {
-			return envelope.ChildSessionID
+		if decoder.Decode(&envelope) == nil {
+			switch envelope.Schema {
+			case subagent.ResultSchema:
+				if envelope.ChildSessionID != "" {
+					return envelope.ChildSessionID
+				}
+			case subagent.SpawnResultSchema:
+				if envelope.AgentID != "" {
+					return envelope.AgentID
+				}
+			}
 		}
 
 		next := strings.IndexByte(text[offset+1:], '{')
@@ -58,7 +79,12 @@ func subagentChildSessionID(
 	}
 
 	for _, v := range slices.Backward(children) {
-		if v.ParentRunID == tool.RunID {
+		if tool.Call.ID != "" && v.ParentToolCallID == tool.Call.ID {
+			return v.ChildSessionID
+		}
+	}
+	for _, v := range slices.Backward(children) {
+		if v.ParentToolCallID == "" && v.ParentRunID == tool.RunID {
 			return v.ChildSessionID
 		}
 	}
@@ -79,6 +105,7 @@ func (m *Model) openAgentsRoute() tea.Cmd {
 	}
 }
 
+//nolint:gocyclo // The keyboard map is kept explicit for the full-width route.
 func (m *Model) updateAgentsRouteKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if key := message.String(); key == keyEscape || key == keyCtrlT || key == keyCtrlC {
 		m.route = routeState{}
@@ -110,6 +137,14 @@ func (m *Model) updateAgentsRouteKey(message tea.KeyPressMsg) (tea.Model, tea.Cm
 		childSessionID := values[m.route.cursor].ChildSessionID
 
 		return m, m.openSubagentRoute(childSessionID)
+	case "c":
+		if len(values) == 0 || m.route.controlling {
+			return m, nil
+		}
+
+		childSessionID := values[m.route.cursor].ChildSessionID
+
+		return m, m.cancelSubagent(childSessionID)
 	default:
 		if text := message.Key().Text; text != "" {
 			m.route.query += text
@@ -131,6 +166,17 @@ func (m *Model) filteredAgents() []subagent.Summary {
 			values = append(values, value)
 		}
 	}
+	sort.SliceStable(values, func(left, right int) bool {
+		leftRunning := values[left].State == subagent.StateCreated ||
+			values[left].State == subagent.StateRunning
+		rightRunning := values[right].State == subagent.StateCreated ||
+			values[right].State == subagent.StateRunning
+		if leftRunning != rightRunning {
+			return leftRunning
+		}
+
+		return values[left].CreatedAt.After(values[right].CreatedAt)
+	})
 
 	return values
 }
@@ -165,91 +211,117 @@ func (m *Model) agentsRouteContent() string {
 		)
 	}
 
-	lines = append(lines, "", "↑/↓ choose · type to search · Enter inspect · Ctrl+T/Esc close")
+	lines = append(lines, "", "↑/↓ choose · type to search · Enter inspect · c cancel · Ctrl+T/Esc close")
 
 	return strings.Join(lines, "\n")
 }
 
-func (m *Model) subagentRouteContent(detail subagent.Detail) string {
-	value := detail.Summary
-	active := value.State == subagent.StateCreated || value.State == subagent.StateRunning
-
-	flow := m.renderTimelineBlocksWithOptions(
-		projectSubagentTimeline(detail),
-		timelineRenderOptions{expandToolResults: true},
-	)
-	switch {
-	case flow != "":
-		return flow
-	case active:
-		return "✻ " + subagentPhaseLabel(detail.Activity.Phase)
-	default:
-		return subagentOutcomeText(value)
+func (m *Model) updateSubagentRouteSummary(event coding.Event) {
+	if m.route.kind != routeAgents && m.route.kind != routeSubagent {
+		return
 	}
-}
-
-func projectSubagentTimeline(detail subagent.Detail) []timelineBlock {
-	state := coding.State{Transcript: detail.Transcript}
-
-	state.Tools = make([]coding.ToolState, 0, len(detail.Activity.Tools))
-	for _, value := range detail.Activity.Tools {
-		status := coding.ToolStatusCompleted
-		if value.Status == subagent.ToolStatusRunning {
-			status = coding.ToolStatusRunning
-		}
-
-		state.Tools = append(state.Tools, coding.ToolState{
-			RunID: value.RunID,
-			Turn:  value.Turn,
-			Call: coding.ToolCall{
-				ID: value.Call.ID, Name: value.Call.Name, Arguments: slices.Clone(value.Call.Args),
-			},
-			Status: status,
-			Update: value.Update,
-			Result: value.Result,
-		})
+	lifecycle, ok := event.Payload.(coding.SubagentLifecycle)
+	if !ok || lifecycle.ChildSessionID == "" {
+		return
 	}
 
-	blocks := projectTimeline(state)
-	for index := range blocks {
-		if blocks[index].kind == blockAssistant {
-			blocks[index].body = sanitizeToolText(blocks[index].body)
-		}
-	}
-
-	if detail.Summary.State == subagent.StateSucceeded {
-		for index, block := range slices.Backward(blocks) {
-			if block.kind != blockAssistant {
-				continue
-			}
-
-			blocks[index].body = strings.TrimSpace(strings.Join(
-				renderSubagentResult(detail.Result), "\n",
-			))
-			blocks[index].rendered = true
+	index := -1
+	for candidate := range m.route.agents {
+		if m.route.agents[candidate].ChildSessionID == lifecycle.ChildSessionID {
+			index = candidate
 
 			break
 		}
-	} else if isTerminalSubagent(detail.Summary.State) {
-		body := humanizeStatusCode(detail.Summary.Code)
-		if body == "" {
-			body = subagentOutcomeText(detail.Summary)
-		}
-
-		blocks = append(blocks, timelineBlock{
-			kind: blockError, title: subagentActivityLabel(
-				detail.Summary.Role,
-				detail.Summary.State,
-			),
-			body: body, position: len(detail.Transcript),
+	}
+	if index < 0 {
+		m.route.agents = append(m.route.agents, subagent.Summary{
+			ChildSessionID: lifecycle.ChildSessionID,
+			CreatedAt:      event.Time,
 		})
+		index = len(m.route.agents) - 1
 	}
 
-	if marker, ok := subagentCompletionMarker(detail); ok {
-		blocks = append(blocks, marker)
+	value := &m.route.agents[index]
+	value.Ownership = subagent.Ownership{
+		ParentSessionID:     m.state.SessionID,
+		ParentInteractionID: lifecycle.ParentInteractionID,
+		ParentRunID:         lifecycle.ParentRunID, ParentToolCallID: lifecycle.ParentToolCallID,
+		RootInteractionID: lifecycle.RootInteractionID,
+	}
+	value.Delivery = lifecycle.Delivery
+	value.Role = lifecycle.Role
+	value.State = lifecycle.State
+	value.TaskPreview = lifecycle.TaskPreview
+	value.Model = lifecycle.Model
+	value.Duration = time.Duration(lifecycle.DurationMillis) * time.Millisecond
+	value.Turns = lifecycle.Turns
+	value.ToolCalls = lifecycle.ToolCalls
+	value.Usage = ai.Usage{
+		InputTokens: lifecycle.Usage.InputTokens, OutputTokens: lifecycle.Usage.OutputTokens,
+		ReasoningTokens:   lifecycle.Usage.ReasoningTokens,
+		CachedInputTokens: lifecycle.Usage.CachedInputTokens,
+		CacheWriteTokens:  lifecycle.Usage.CacheWriteTokens,
+	}
+	value.Code = lifecycle.Code
+
+	if m.route.kind == routeSubagent && m.route.childSessionID == lifecycle.ChildSessionID &&
+		m.route.detail != nil {
+		m.route.detail.Summary = *value
+	}
+}
+
+//nolint:gocyclo,nestif // Terminal result/error enrichment remains adjacent to ordinary timeline projection.
+func (m *Model) subagentRouteContent(state coding.State, detail *subagent.Detail) string {
+	blocks := projectTimeline(state)
+	if detail != nil {
+		if detail.Summary.State == subagent.StateSucceeded && detail.Result != nil {
+			for index, block := range slices.Backward(blocks) {
+				if block.kind != blockAssistant {
+					continue
+				}
+
+				blocks[index].body = strings.TrimSpace(strings.Join(
+					renderSubagentResult(detail.Result), "\n",
+				))
+				blocks[index].rendered = true
+
+				break
+			}
+		} else if isTerminalSubagent(detail.Summary.State) && state.LastError == nil {
+			body := humanizeStatusCode(detail.Summary.Code)
+			if body == "" {
+				body = subagentOutcomeText(detail.Summary)
+			}
+			blocks = append(blocks, timelineBlock{
+				kind: blockError, title: subagentActivityLabel(
+					detail.Summary.Role,
+					detail.Summary.State,
+				),
+				body: body, position: len(state.Transcript),
+			})
+		}
+		if marker, ok := subagentCompletionMarker(*detail); ok {
+			blocks = append(blocks, marker)
+		}
 	}
 
-	return blocks
+	flow := m.renderTimelineBlocksWithOptions(
+		blocks,
+		timelineRenderOptions{expandToolResults: true},
+	)
+	if flow != "" {
+		return flow
+	}
+	if detail == nil {
+		return "Loading subagent activity…"
+	}
+
+	value := detail.Summary
+	if value.State == subagent.StateCreated || value.State == subagent.StateRunning {
+		return "✻ " + subagentPhaseLabel(detail.Activity.Phase)
+	}
+
+	return subagentOutcomeText(value)
 }
 
 func subagentCompletionMarker(detail subagent.Detail) (timelineBlock, bool) {
@@ -479,6 +551,7 @@ func (m *Model) updateSubagentRouteKey(message tea.KeyPressMsg) (tea.Model, tea.
 			m.route.offset = 0
 			m.route.childSessionID = ""
 			m.route.detail = nil
+			m.route.childState = nil
 			m.route.refreshing = false
 			m.route.refreshPending = false
 			m.route.refreshErr = nil
@@ -487,6 +560,9 @@ func (m *Model) updateSubagentRouteKey(message tea.KeyPressMsg) (tea.Model, tea.
 		}
 
 		return m, m.openAgentsRoute()
+	}
+	if key == "c" && !m.route.controlling {
+		return m, m.cancelSubagent(m.route.childSessionID)
 	}
 
 	visible := max(1, m.height-3)
@@ -510,6 +586,18 @@ func (m *Model) updateSubagentRouteKey(message tea.KeyPressMsg) (tea.Model, tea.
 	return m, nil
 }
 
+func (m *Model) cancelSubagent(childSessionID string) tea.Cmd {
+	m.route.controlling = true
+	generation := m.route.generation
+
+	return func() tea.Msg {
+		return subagentCancelResultMsg{
+			generation: generation, childSessionID: childSessionID,
+			err: m.controller.CancelSubagent(m.ctx, childSessionID),
+		}
+	}
+}
+
 func (m *Model) subagentRouteView() tea.View {
 	width := max(1, m.width)
 	height := max(1, m.height)
@@ -524,8 +612,8 @@ func (m *Model) subagentRouteView() tea.View {
 
 	body := "Loading subagent activity…"
 
-	if m.route.detail != nil {
-		body = m.subagentRouteContent(*m.route.detail)
+	if m.route.childState != nil {
+		body = m.subagentRouteContent(*m.route.childState, m.route.detail)
 	}
 
 	if m.route.err != nil {
@@ -588,14 +676,21 @@ func (m *Model) openSubagentRoute(childSessionID string) tea.Cmd {
 		childSessionID: childSessionID, agents: previous.agents,
 		query: previous.query, cursor: previous.cursor,
 	}
+	if child, ok := m.childStates[childSessionID]; ok {
+		state := child.Clone()
+		m.route.childState = &state
+	}
 	m.composer.Blur()
 	generation := m.route.generation
 
 	return func() tea.Msg {
-		detail, err := m.controller.InspectSubagent(m.ctx, childSessionID)
+		state, stateErr := m.controller.InspectSubagentState(m.ctx, childSessionID)
+		detail, detailErr := m.controller.InspectSubagent(m.ctx, childSessionID)
 
 		return subagentRouteDataMsg{
-			detail: detail, hasDetail: err == nil, err: err,
+			detail: detail, hasDetail: detailErr == nil,
+			state: state, hasState: stateErr == nil,
+			err:        errors.Join(stateErr, detailErr),
 			generation: generation, childSessionID: childSessionID,
 		}
 	}
@@ -608,7 +703,8 @@ func (m *Model) invalidateAgentDetail(item streamItem) tea.Cmd {
 	}
 
 	lifecycle, ok := item.event.Payload.(coding.SubagentLifecycle)
-	if !ok || lifecycle.ChildSessionID != m.route.childSessionID {
+	if !ok || lifecycle.ChildSessionID != m.route.childSessionID ||
+		!isTerminalSubagent(lifecycle.State) {
 		return nil
 	}
 
@@ -631,24 +727,34 @@ func (m *Model) refreshSubagentRoute() tea.Cmd {
 	childSessionID := m.route.childSessionID
 
 	return func() tea.Msg {
-		detail, err := m.controller.InspectSubagent(m.ctx, childSessionID)
+		state, stateErr := m.controller.InspectSubagentState(m.ctx, childSessionID)
+		detail, detailErr := m.controller.InspectSubagent(m.ctx, childSessionID)
 
 		return subagentRouteDataMsg{
-			detail: detail, hasDetail: err == nil, err: err,
+			detail: detail, hasDetail: detailErr == nil,
+			state: state, hasState: stateErr == nil,
+			err:        errors.Join(stateErr, detailErr),
 			background: true, generation: generation, childSessionID: childSessionID,
 		}
 	}
 }
 
+//nolint:nestif // Refresh preserves scroll anchoring while applying two independently available views.
 func (m *Model) applySubagentRouteRefresh(message subagentRouteDataMsg) (tea.Model, tea.Cmd) {
 	m.route.refreshing = false
-	if message.err != nil {
+	if message.err != nil && !message.hasState && !message.hasDetail {
 		m.route.refreshErr = message.err
-	} else if message.hasDetail {
+	} else if message.hasState || message.hasDetail {
 		wasAtBottom := m.route.offset >= m.subagentRouteMaximumOffset()
 		previousOffset := m.route.offset
-		detail := message.detail
-		m.route.detail = &detail
+		if message.hasState {
+			state := message.state
+			m.route.childState = &state
+		}
+		if message.hasDetail {
+			detail := message.detail
+			m.route.detail = &detail
+		}
 		m.route.refreshErr = nil
 
 		maximum := m.subagentRouteMaximumOffset()
@@ -669,12 +775,14 @@ func (m *Model) applySubagentRouteRefresh(message subagentRouteDataMsg) (tea.Mod
 }
 
 func (m *Model) subagentRouteMaximumOffset() int {
-	if m.route.detail == nil {
+	if m.route.childState == nil {
 		return 0
 	}
 
 	visible := max(1, m.height-3)
-	lineCount := strings.Count(m.subagentRouteContent(*m.route.detail), "\n") + 1
+	lineCount := strings.Count(
+		m.subagentRouteContent(*m.route.childState, m.route.detail), "\n",
+	) + 1
 
 	return max(0, lineCount-visible)
 }

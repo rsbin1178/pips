@@ -18,7 +18,6 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding"
-	"github.com/rsbin/pips/internal/coding/subagent"
 )
 
 const (
@@ -78,6 +77,7 @@ type Model struct {
 
 	controller        Controller
 	state             coding.State
+	childStates       map[string]coding.State
 	composer          textarea.Model
 	markdown          *markdownRenderer
 	theme             colorTheme
@@ -87,6 +87,8 @@ type Model struct {
 	streaming         streamProjection
 	renderWait        bool
 	bridge            *eventBridge
+	subscription      *subscriptionBridge
+	subscriptionMode  bool
 	starting          bool
 	cancelStart       bool
 	waiting           bool
@@ -132,15 +134,16 @@ func newModel(ctx context.Context, options Options) *Model {
 	composer.SetStyles(composerStyles(themeDark, options.NoColor))
 
 	model := &Model{
-		ctx:       ctx,
-		options:   options,
-		lifecycle: lifecycle,
-		width:     defaultWidth,
-		height:    defaultHeight,
-		composer:  composer,
-		markdown:  newMarkdownRenderer(markdownCacheCapacity),
-		theme:     themeDark,
-		activity:  newActivityIndicator(),
+		ctx:         ctx,
+		options:     options,
+		lifecycle:   lifecycle,
+		width:       defaultWidth,
+		height:      defaultHeight,
+		composer:    composer,
+		markdown:    newMarkdownRenderer(markdownCacheCapacity),
+		theme:       themeDark,
+		activity:    newActivityIndicator(),
+		childStates: make(map[string]coding.State),
 	}
 	model.setLayout()
 
@@ -212,7 +215,36 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.setLayout()
 		commit := m.commitStartupOutput()
 
-		return m, tea.Sequence(commit, tea.Batch(m.composer.Focus(), m.continueIfPaused()))
+		return m, tea.Sequence(commit, tea.Batch(m.composer.Focus(), m.startSubscription()))
+	case subscriptionStartedMsg:
+		m.subscriptionMode = message.supported
+		if message.err != nil {
+			m.streamErr = message.err
+			m.setLayout()
+
+			return m, m.commitStableTimeline()
+		}
+		if !message.supported {
+			return m, m.continueIfPaused()
+		}
+		if m.subscription != nil {
+			m.subscription.stop()
+		}
+
+		m.subscription = message.bridge
+		m.state = message.observation.State
+		m.childStates = cloneChildStates(message.observation.Children)
+		m.syncApprovalPrompt()
+		m.setLayout()
+		commit := m.commitStableTimeline()
+		wait := tea.Batch(message.bridge.wait(), m.continueIfPaused())
+		if commit != nil {
+			return m, tea.Sequence(commit, wait)
+		}
+
+		return m, wait
+	case subscriptionEventMsg:
+		return m.updateSubscription(message)
 	case bridgeStartedMsg:
 		m.starting = false
 		if m.bridge != nil {
@@ -249,7 +281,9 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case cancelResultMsg:
 		if message.beforeStart {
 			m.streamErr = errors.Join(m.streamErr, message.err)
-			m.state = m.controller.Snapshot()
+			if !m.subscriptionMode {
+				m.state = m.controller.Snapshot()
+			}
 			m.syncApprovalPrompt()
 			m.setLayout()
 			return m, m.commitStableTimeline()
@@ -261,7 +295,9 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.waiting = false
 		m.canceling = false
 		m.streamErr = errors.Join(m.streamErr, message.err)
-		m.state = m.controller.Snapshot()
+		if !m.subscriptionMode {
+			m.state = m.controller.Snapshot()
+		}
 		m.syncApprovalPrompt()
 		m.setLayout()
 		return m, m.commitStableTimeline()
@@ -274,16 +310,33 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m.applySubagentRouteRefresh(message)
 		}
 		m.route.loading = false
-		m.route.err = message.err
+		if message.hasState || message.hasDetail {
+			m.route.err = nil
+		} else {
+			m.route.err = message.err
+		}
+		if message.hasState {
+			state := message.state
+			m.route.childState = &state
+		}
 		if message.hasDetail {
 			detail := message.detail
 			m.route.detail = &detail
 		}
-		if m.route.refreshPending && m.route.detail != nil {
+		if m.route.refreshPending && m.route.childState != nil {
 			m.route.refreshPending = false
 
 			return m, m.refreshSubagentRoute()
 		}
+
+		return m, nil
+	case subagentCancelResultMsg:
+		if (m.route.kind != routeAgents && m.route.kind != routeSubagent) ||
+			message.generation != m.route.generation {
+			return m, nil
+		}
+		m.route.controlling = false
+		m.route.err = message.err
 
 		return m, nil
 	case sessionPickerDataMsg:
@@ -328,6 +381,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case controlResultMsg:
 		pickerControl := m.picker.kind != pickerNone && m.picker.controlling
 		routeControl := m.route.kind != routeNone && m.route.controlling
+		replacementControl := message.operation != operationReload
 		switch {
 		case pickerControl:
 			m.picker.loading = false
@@ -336,7 +390,12 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.route.loading = false
 			m.route.controlling = false
 		}
-		m.state = m.controller.Snapshot()
+		if replacementControl {
+			m.stopSubscription()
+			m.state = m.controller.Snapshot()
+		} else if !m.subscriptionMode {
+			m.state = m.controller.Snapshot()
+		}
 		if message.err != nil {
 			switch {
 			case pickerControl:
@@ -345,6 +404,10 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.route.err = message.err
 			}
 			m.renderTranscript(false)
+
+			if replacementControl {
+				return m, m.startSubscription()
+			}
 
 			return m, nil
 		}
@@ -378,6 +441,10 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			commit = m.commitNewSessionOutput()
 		default:
 			commit = m.commitStableTimeline()
+		}
+
+		if replacementControl {
+			return m, tea.Sequence(commit, m.startSubscription())
 		}
 
 		return m, tea.Sequence(commit, m.continueIfPaused())
@@ -908,7 +975,7 @@ func (m *Model) timelineBlocks() []timelineBlock {
 func (m *Model) toggleLatestTool() tea.Cmd {
 	if len(m.state.Tools) > 0 {
 		latest := m.state.Tools[len(m.state.Tools)-1]
-		if latest.Call.Name == subagent.ToolName {
+		if isSubagentToolName(latest.Call.Name) {
 			childSessionID := subagentChildSessionID(latest, m.state.Subagents)
 			if childSessionID != "" {
 				return m.openSubagentRoute(childSessionID)
@@ -919,17 +986,10 @@ func (m *Model) toggleLatestTool() tea.Cmd {
 	blocks := projectTimeline(m.state)
 	for _, block := range slices.Backward(blocks) {
 		switch block.kind {
-		case blockSubagent:
-			if block.id != "" {
-				return m.openSubagentRoute(block.id)
-			}
-			if len(block.tools) > 0 {
-				detail := newToolDetailView(block)
-				m.openToolDetailRoute(detail)
-			}
-
-			return nil
 		case blockTool:
+			if len(block.tools) > 0 && block.tools[0].childSessionID != "" {
+				return m.openSubagentRoute(block.tools[0].childSessionID)
+			}
 			detail := newToolDetailView(block)
 			m.openToolDetailRoute(detail)
 
@@ -1076,6 +1136,12 @@ func (m *Model) updateStream(message streamItemMsg) (tea.Model, tea.Cmd) {
 		return m, m.finishStream()
 	}
 
+	if m.subscriptionMode && message.item.err == nil {
+		m.waiting = true
+
+		return m, m.bridge.wait()
+	}
+
 	m.reduceStreamItem(message.item)
 	m.setLayout()
 	refresh := m.invalidateAgentDetail(message.item)
@@ -1100,7 +1166,9 @@ func (m *Model) reduceStreamItem(item streamItem) {
 	next, err := coding.Reduce(m.state, item.event)
 	if err != nil {
 		m.streamErr = err
-		m.bridge.once.Do(m.bridge.cancel)
+		if m.bridge != nil {
+			m.bridge.once.Do(m.bridge.cancel)
+		}
 
 		return
 	}
@@ -1163,15 +1231,17 @@ func (m *Model) modelLabel() string {
 }
 
 func (m *Model) finishStream() tea.Cmd {
-	snapshot := m.controller.Snapshot()
-	if m.streamErr == nil && snapshot.Sequence != m.state.Sequence {
-		m.streamErr = fmt.Errorf(
-			"coding tui: event stream stopped at sequence %d; runtime is at %d",
-			m.state.Sequence,
-			snapshot.Sequence,
-		)
+	if !m.subscriptionMode {
+		snapshot := m.controller.Snapshot()
+		if m.streamErr == nil && snapshot.Sequence != m.state.Sequence {
+			m.streamErr = fmt.Errorf(
+				"coding tui: event stream stopped at sequence %d; runtime is at %d",
+				m.state.Sequence,
+				snapshot.Sequence,
+			)
+		}
+		m.state = snapshot
 	}
-	m.state = snapshot
 	m.syncApprovalPrompt()
 	m.bridge = nil
 	m.starting = false
@@ -1232,6 +1302,92 @@ func (m *Model) stopStream(ctx context.Context) error {
 	m.setLayout()
 
 	return err
+}
+
+func (m *Model) startSubscription() tea.Cmd {
+	if m.controller == nil {
+		return nil
+	}
+
+	return func() tea.Msg {
+		return startSubscription(m.controller)
+	}
+}
+
+func (m *Model) updateSubscription(message subscriptionEventMsg) (tea.Model, tea.Cmd) {
+	if message.bridge == nil || message.bridge != m.subscription {
+		return m, nil
+	}
+	if !message.ok {
+		m.subscription = nil
+		if message.err != nil && !errors.Is(message.err, coding.ErrEventGap) {
+			m.streamErr = message.err
+		}
+		if m.picker.controlling || m.route.controlling {
+			return m, nil
+		}
+
+		return m, m.startSubscription()
+	}
+
+	m.reduceObservedEvent(message.record.Event)
+	m.setLayout()
+	refresh := m.invalidateAgentDetail(streamItem{event: message.record.Event})
+	wait := message.bridge.wait()
+	commit := m.commitStableTimeline()
+	if commit != nil {
+		return m, tea.Sequence(commit, tea.Batch(wait, refresh))
+	}
+
+	return m, tea.Batch(wait, m.requestRender(), refresh)
+}
+
+func (m *Model) reduceObservedEvent(event coding.Event) {
+	if m.state.SessionID == "" || event.SessionID == m.state.SessionID {
+		m.reduceStreamItem(streamItem{event: event})
+		m.updateSubagentRouteSummary(event)
+
+		return
+	}
+
+	state := m.childStates[event.SessionID]
+	wasAtBottom := m.route.kind == routeSubagent &&
+		m.route.childSessionID == event.SessionID &&
+		m.route.offset >= m.subagentRouteMaximumOffset()
+	next, err := coding.Reduce(state, event)
+	if err != nil {
+		m.streamErr = fmt.Errorf("coding tui: reduce child %s: %w", event.SessionID, err)
+
+		return
+	}
+	m.childStates[event.SessionID] = next
+	if m.route.kind == routeSubagent && m.route.childSessionID == event.SessionID {
+		child := next.Clone()
+		m.route.childState = &child
+		if wasAtBottom {
+			m.route.offset = m.subagentRouteMaximumOffset()
+		} else {
+			m.route.offset = min(m.route.offset, m.subagentRouteMaximumOffset())
+		}
+	}
+}
+
+func cloneChildStates(values map[string]coding.State) map[string]coding.State {
+	cloned := make(map[string]coding.State, len(values))
+	for childSessionID, state := range values {
+		cloned[childSessionID] = state.Clone()
+	}
+
+	return cloned
+}
+
+func (m *Model) stopSubscription() {
+	if m == nil || m.subscription == nil {
+		return
+	}
+
+	m.subscription.stop()
+	m.subscription = nil
 }
 
 func (m *Model) confirmTrust() (tea.Model, tea.Cmd) {

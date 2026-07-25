@@ -303,6 +303,28 @@ func (c *Controller) Snapshot() coding.State {
 	return runtime.Snapshot()
 }
 
+// ObserveEvents atomically attaches to the current Runtime's event stream.
+// The short Controller lease prevents replacement between selecting the
+// Runtime and creating its snapshot-backed subscription.
+func (c *Controller) ObserveEvents() (coding.EventObservation, error) {
+	var observation coding.EventObservation
+	err := c.withRuntime(func(runtime runtimeInstance) error {
+		observer, ok := runtime.(interface {
+			ObserveEvents() (coding.EventObservation, error)
+		})
+		if !ok {
+			return fmt.Errorf("%w: runtime does not support event observation", ErrInvalid)
+		}
+
+		var err error
+		observation, err = observer.ObserveEvents()
+
+		return err
+	})
+
+	return observation, err
+}
+
 // SessionID returns the currently selected Session ID.
 func (c *Controller) SessionID() string {
 	if c == nil {
@@ -431,6 +453,70 @@ func (c *Controller) InspectSubagent(
 	})
 
 	return value, err
+}
+
+// InspectSubagentState loads the ordinary Session State for one child.
+//
+//nolint:dupl // Typed optional Runtime capabilities deliberately share the same lock boundary.
+func (c *Controller) InspectSubagentState(
+	ctx context.Context,
+	childSessionID string,
+) (coding.State, error) {
+	var value coding.State
+	err := c.withRuntime(func(runtime runtimeInstance) error {
+		inspector, ok := runtime.(interface {
+			InspectSubagentState(context.Context, string) (coding.State, error)
+		})
+		if !ok {
+			return fmt.Errorf("%w: runtime does not expose child state", ErrInvalid)
+		}
+
+		var err error
+		value, err = inspector.InspectSubagentState(ctx, childSessionID)
+
+		return err
+	})
+
+	return value, err
+}
+
+// WaitSubagent waits for one child owned by the selected Session.
+//
+//nolint:dupl // Typed optional Runtime capabilities deliberately share the same lock boundary.
+func (c *Controller) WaitSubagent(
+	ctx context.Context,
+	childSessionID string,
+) (subagent.Result, error) {
+	var value subagent.Result
+	err := c.withRuntime(func(runtime runtimeInstance) error {
+		waiter, ok := runtime.(interface {
+			WaitSubagent(context.Context, string) (subagent.Result, error)
+		})
+		if !ok {
+			return fmt.Errorf("%w: runtime does not expose child wait", ErrInvalid)
+		}
+
+		var err error
+		value, err = waiter.WaitSubagent(ctx, childSessionID)
+
+		return err
+	})
+
+	return value, err
+}
+
+// CancelSubagent requests cancellation of one child owned by the selected Session.
+func (c *Controller) CancelSubagent(ctx context.Context, childSessionID string) error {
+	return c.withRuntime(func(runtime runtimeInstance) error {
+		canceler, ok := runtime.(interface {
+			CancelSubagent(context.Context, string) error
+		})
+		if !ok {
+			return fmt.Errorf("%w: runtime does not expose child cancel", ErrInvalid)
+		}
+
+		return canceler.CancelSubagent(ctx, childSessionID)
+	})
 }
 
 // NewSession replaces the current Runtime with a new writable Session.

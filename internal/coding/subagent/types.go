@@ -14,8 +14,13 @@ import (
 var (
 	// ErrInvalid means configuration, request, or durable data is invalid.
 	ErrInvalid = errors.New("coding subagent: invalid input")
-	// ErrBusy means the manager already owns its single child execution.
+	// ErrBusy preserves the single-slot compatibility error when a manager is
+	// configured with MaxConcurrent equal to one.
 	ErrBusy = errors.New("coding subagent: busy")
+	// ErrCapacity means the Runtime's concurrent child limit is exhausted.
+	ErrCapacity = errors.New("coding subagent: capacity exhausted")
+	// ErrSpawnLimit means one root interaction exhausted its child budget.
+	ErrSpawnLimit = errors.New("coding subagent: spawn limit exhausted")
 	// ErrClosed means the manager no longer accepts executions.
 	ErrClosed = errors.New("coding subagent: closed")
 	// ErrInvalidResult means a specialist returned malformed or unsafe output.
@@ -66,10 +71,32 @@ const (
 	StateInterrupted State = "interrupted"
 )
 
+// Delivery selects whether the parent Tool waits for the child or returns
+// immediately while the Runtime retains execution ownership.
+type Delivery string
+
+const (
+	// DeliveryForeground is the existing run_subagent behavior.
+	DeliveryForeground Delivery = "foreground"
+	// DeliveryBackground is used by spawn_agent.
+	DeliveryBackground Delivery = "background"
+)
+
+// Ownership is the immutable parent location of one child execution.
+type Ownership struct {
+	ParentSessionID     string
+	ParentInteractionID string
+	ParentRunID         string
+	ParentToolCallID    string
+	RootInteractionID   string
+}
+
 // Request describes one bounded specialist delegation.
 type Request struct {
-	Role Role
-	Task string
+	Role      Role
+	Task      string
+	Ownership Ownership
+	Delivery  Delivery
 }
 
 // Result is the terminal execution result returned to the parent Tool.
@@ -89,23 +116,30 @@ type Result struct {
 
 // Event is one content-bounded child lifecycle update.
 type Event struct {
-	Progress        bool
-	State           State
-	Role            Role
-	ChildSessionID  string
-	ParentSessionID string
-	ParentRunID     string
-	ChildRunID      string
-	Model           string
-	TaskPreview     string
-	Activity        ActivitySummary
-	Code            string
-	Stop            agent.StopReason
-	Turns           int
-	ToolCalls       int
-	Usage           ai.Usage
-	Duration        time.Duration
-	Time            time.Time
+	Progress            bool
+	State               State
+	Role                Role
+	ChildSessionID      string
+	ParentSessionID     string
+	ParentInteractionID string
+	ParentRunID         string
+	ParentToolCallID    string
+	RootInteractionID   string
+	Delivery            Delivery
+	ChildRunID          string
+	Model               string
+	TaskPreview         string
+	Activity            ActivitySummary
+	Code                string
+	Stop                agent.StopReason
+	Turns               int
+	ToolCalls           int
+	Usage               ai.Usage
+	Duration            time.Duration
+	Time                time.Time
+	// Result is present only on an in-process terminal callback. It is never
+	// copied into the parent lifecycle event or telemetry projection.
+	Result *Result
 }
 
 // Observer synchronously receives child lifecycle events. Implementations
@@ -113,9 +147,24 @@ type Event struct {
 // error when the parent event stream can no longer accept the lifecycle.
 type Observer func(context.Context, Event) error
 
+// AgentEvent associates one raw child Agent event with its stable child
+// Session and immutable ownership.
+type AgentEvent struct {
+	ChildSessionID string
+	Ownership      Ownership
+	Task           string
+	Event          agent.Event
+}
+
+// AgentEventObserver receives raw child events for ordinary Session-state
+// projection. Returning an error cancels that child execution.
+type AgentEventObserver func(context.Context, AgentEvent) error
+
 // Summary is the durable current-parent list projection.
 type Summary struct {
 	ChildSessionID string
+	Ownership      Ownership
+	Delivery       Delivery
 	Role           Role
 	State          State
 	TaskPreview    string

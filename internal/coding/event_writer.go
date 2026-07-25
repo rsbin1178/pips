@@ -1,3 +1,4 @@
+//nolint:wsl_v5 // Event projection keeps payload construction adjacent to validation.
 package coding
 
 import (
@@ -6,6 +7,7 @@ import (
 	"time"
 
 	"github.com/rsbin/pips/agent"
+	"github.com/rsbin/pips/ai"
 )
 
 type eventClock func() time.Time
@@ -70,6 +72,7 @@ func (w *eventWriter) writeAt(
 type agentProjector struct {
 	writer        *eventWriter
 	interactionID string
+	synthetic     func(ai.Message) bool
 }
 
 func newAgentProjector(writer *eventWriter, interactionID string) (*agentProjector, error) {
@@ -112,6 +115,11 @@ func (p *agentProjector) project(event agent.Event) (Event, error) {
 
 		eventType = EventMessageCommitted
 		payload = MessageCommitted{Message: cloneMessage(*event.Message)}
+		if p.synthetic != nil {
+			payload = MessageCommitted{
+				Message: cloneMessage(*event.Message), Synthetic: p.synthetic(*event.Message),
+			}
+		}
 	case agent.EventToolStart:
 		if event.Call == nil {
 			return Event{}, invalidEvent("agent tool-start event has no call")

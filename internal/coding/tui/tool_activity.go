@@ -42,6 +42,7 @@ const (
 	toolClassExplore
 	toolClassShell
 	toolClassPatch
+	toolClassSubagent
 )
 
 type toolActivityState uint8
@@ -54,24 +55,25 @@ const (
 )
 
 type toolActivity struct {
-	id         string
-	name       string
-	runID      string
-	turn       int
-	position   int
-	order      int
-	class      toolActivityClass
-	state      toolActivityState
-	action     string
-	subject    string
-	invocation string
-	arguments  ai.JSON
-	update     string
-	result     string
-	body       string
-	header     codingtools.ResultHeader
-	hasHeader  bool
-	preview    []string
+	id             string
+	name           string
+	runID          string
+	childSessionID string
+	turn           int
+	position       int
+	order          int
+	class          toolActivityClass
+	state          toolActivityState
+	action         string
+	subject        string
+	invocation     string
+	arguments      ai.JSON
+	update         string
+	result         string
+	body           string
+	header         codingtools.ResultHeader
+	hasHeader      bool
+	preview        []string
 }
 
 type toolActivityRecord struct {
@@ -316,6 +318,11 @@ func describeToolCall(call coding.ToolCall) (toolActivityClass, string, string) 
 		)
 	case toolNamePatch:
 		return toolClassPatch, "Update", workspaceLabel
+	case subagent.ToolName, subagent.SpawnToolName:
+		role := subagent.Role(toolArgumentString(arguments, "role"))
+
+		return toolClassSubagent, subagentActivityLabel(role, subagent.StateRunning),
+			oneLineSubagentTask(toolArgumentString(arguments, "task"))
 	default:
 		return toolClassGeneric, "Call", call.Name
 	}
@@ -432,7 +439,7 @@ func compactToolPreview(activity toolActivity) []string {
 		}
 
 		return patchResultLines(activity.body, compactToolPreviewLines)
-	case toolClassGeneric:
+	case toolClassGeneric, toolClassSubagent:
 		lines := boundedToolLines(activity.body, 2)
 		if len(lines) > 0 {
 			return lines
@@ -639,6 +646,9 @@ func expandedToolActivityRows(
 			prefix: "  └ ", text: expandedToolCallLabel(activity), state: activity.state,
 		})
 		appendExpandedToolOutput(&rows, activity, "      └ ", "        ", width)
+	case toolClassSubagent:
+		activity := activities[0]
+		appendExpandedToolOutput(&rows, activity, "  └ ", "    ", width)
 	case toolClassShell, toolClassPatch:
 		appendExpandedToolOutput(&rows, activities[0], "  └ ", "    ", width)
 	}
@@ -924,6 +934,8 @@ func toolActivityHeading(
 		}
 
 		return glyph, verb, ""
+	case toolClassSubagent:
+		return glyph, activity.action, activity.subject
 	}
 
 	return glyph, activity.action, activity.subject
@@ -1008,6 +1020,8 @@ func toolActivityRows(
 		return activities[0].preview
 	case toolClassGeneric:
 		return append([]string{activities[0].invocation}, activities[0].preview...)
+	case toolClassSubagent:
+		return activities[0].preview
 	default:
 		return nil
 	}

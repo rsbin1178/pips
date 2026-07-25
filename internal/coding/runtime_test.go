@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/rsbin/pips/agent"
 	"github.com/rsbin/pips/agent/catalog"
@@ -58,6 +59,276 @@ func TestRuntimePromptStreamsAndPersistsOneInteraction(t *testing.T) {
 	require.NoError(t, runtime.Close(t.Context()))
 }
 
+func TestRuntimeObservationMatchesOperationIterator(t *testing.T) {
+	t.Parallel()
+
+	runtime := openTestRuntime(t, newRuntimeModel(runtimeTextResponse("done")))
+	observation, err := runtime.ObserveEvents()
+	require.NoError(t, err)
+	t.Cleanup(observation.Subscription.Close)
+	assert.Equal(t, runtime.Snapshot(), observation.State)
+
+	events := collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("hello")))
+	records := make([]EventRecord, 0, len(events))
+	for range events {
+		select {
+		case record := <-observation.Subscription.Events():
+			records = append(records, record)
+		case <-time.After(time.Second):
+			require.FailNow(t, "timed out waiting for observed event")
+		}
+	}
+
+	require.Len(t, records, len(events))
+	for index, event := range events {
+		assert.Equal(t, event, records[index].Event)
+		assert.Equal(t, observation.Cursor+uint64(index)+1, records[index].Cursor)
+	}
+}
+
+func TestRuntimeSlowObservationDoesNotStopPrompt(t *testing.T) {
+	t.Parallel()
+
+	runtime := openTestRuntime(t, newRuntimeModel(runtimeTextResponse("done")))
+	runtime.publisher.mu.Lock()
+	runtime.publisher.hub.close()
+	runtime.publisher.hub = newEventHub(8, 1)
+	runtime.publisher.mu.Unlock()
+
+	observation, err := runtime.ObserveEvents()
+	require.NoError(t, err)
+	t.Cleanup(observation.Subscription.Close)
+
+	events := collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("hello")))
+	assert.Contains(t, eventTypes(events), EventInteractionCompleted)
+	assert.Equal(t, InteractionSucceeded, runtime.Snapshot().Interaction.Outcome)
+
+	for range observation.Subscription.Events() {
+		continue
+	}
+	assert.ErrorIs(t, observation.Subscription.Err(), ErrEventGap)
+}
+
+func TestRuntimeClosingSubscriptionDoesNotCancelPrompt(t *testing.T) {
+	t.Parallel()
+
+	runtime := openTestRuntime(t, newRuntimeModel(runtimeTextResponse("done")))
+	observation, err := runtime.ObserveEvents()
+	require.NoError(t, err)
+	observation.Subscription.Close()
+
+	events := collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("hello")))
+	assert.Contains(t, eventTypes(events), EventInteractionCompleted)
+	assert.Equal(t, InteractionSucceeded, runtime.Snapshot().Interaction.Outcome)
+}
+
+func TestRuntimeClosePublishesTerminalEventsBeforeClosingSubscription(t *testing.T) {
+	t.Parallel()
+
+	runtime := openTestRuntime(t, newRuntimeModel())
+	observation, err := runtime.ObserveEvents()
+	require.NoError(t, err)
+
+	require.NoError(t, runtime.Close(t.Context()))
+	var types []EventType
+	for record := range observation.Subscription.Events() {
+		types = append(types, record.Event.Type)
+	}
+
+	require.NoError(t, observation.Subscription.Err())
+	require.GreaterOrEqual(t, len(types), 2)
+	assert.Equal(t, []EventType{EventStatusChanged, EventSessionClosed}, types[len(types)-2:])
+}
+
+func TestRuntimeDeliversIdleAgentNotificationAsSyntheticInteraction(t *testing.T) {
+	t.Parallel()
+
+	model := newRuntimeModel(runtimeTextResponse("completion handled"))
+	runtime := openTestRuntime(t, model)
+	notification := testAgentNotification(runtime, "s-child-idle", "root-idle")
+	require.NoError(t, runtime.notifications.Enqueue(notification))
+	runtime.signalNotifications()
+
+	require.Eventually(t, func() bool {
+		pending, err := runtime.notifications.Pending()
+		return err == nil && len(pending) == 0 && runtime.Snapshot().Phase == PhaseIdle
+	}, 2*time.Second, 10*time.Millisecond)
+
+	state := runtime.Snapshot()
+	assert.Equal(t, InteractionSourceAgentNotification, state.Interaction.Source)
+	assert.Equal(t, "root-idle", state.Interaction.RootInteractionID)
+	require.Len(t, state.Transcript, 2)
+	assert.Equal(t, []int{0}, state.SyntheticMessages)
+	assert.Equal(t, ai.RoleUser, state.Transcript[0].Role)
+	assert.Equal(t, ai.RoleAssistant, state.Transcript[1].Role)
+
+	requests := model.Requests()
+	require.Len(t, requests, 1)
+	assert.True(t, requestContainsText(requests[0], agentNotificationSchema))
+}
+
+func TestRuntimeHoldsAgentNotificationWhilePaused(t *testing.T) {
+	t.Parallel()
+
+	model := newRuntimeModel(runtimeTextResponse("completion handled"))
+	runtime := openTestRuntime(t, model)
+	runtime.mu.Lock()
+	runtime.state.Phase = PhasePaused
+	runtime.mu.Unlock()
+
+	notification := testAgentNotification(runtime, "s-child-paused", "root-paused")
+	require.NoError(t, runtime.notifications.Enqueue(notification))
+	runtime.signalNotifications()
+	time.Sleep(50 * time.Millisecond)
+	pending, err := runtime.notifications.Pending()
+	require.NoError(t, err)
+	require.Len(t, pending, 1)
+	assert.Empty(t, model.Requests())
+
+	runtime.mu.Lock()
+	runtime.state.Phase = PhaseIdle
+	runtime.mu.Unlock()
+	runtime.signalNotifications()
+	require.Eventually(t, func() bool {
+		pending, pendingErr := runtime.notifications.Pending()
+		return pendingErr == nil && len(pending) == 0 && runtime.Snapshot().Phase == PhaseIdle
+	}, 2*time.Second, 10*time.Millisecond)
+	assert.Len(t, model.Requests(), 1)
+}
+
+func TestRuntimeBatchesAgentNotificationsForSameRoot(t *testing.T) {
+	t.Parallel()
+
+	model := newRuntimeModel(runtimeTextResponse("both completions handled"))
+	runtime := openTestRuntime(t, model)
+	first := testAgentNotification(runtime, "s-child-batch-1", "root-batch")
+	second := testAgentNotification(runtime, "s-child-batch-2", "root-batch")
+	require.NoError(t, runtime.notifications.Enqueue(first))
+	require.NoError(t, runtime.notifications.Enqueue(second))
+	runtime.signalNotifications()
+
+	require.Eventually(t, func() bool {
+		pending, err := runtime.notifications.Pending()
+		return err == nil && len(pending) == 0 && runtime.Snapshot().Phase == PhaseIdle
+	}, 2*time.Second, 10*time.Millisecond)
+	requests := model.Requests()
+	require.Len(t, requests, 1)
+	assert.True(t, requestContainsText(requests[0], first.AgentID))
+	assert.True(t, requestContainsText(requests[0], second.AgentID))
+	assert.Equal(t, []int{0}, runtime.Snapshot().SyntheticMessages)
+}
+
+func TestRuntimeQueuesAgentNotificationIntoMatchingActiveInteraction(t *testing.T) {
+	t.Parallel()
+
+	model := newNotificationFollowUpModel()
+	runtime := openTestRuntime(t, model)
+	type promptResult struct {
+		events []Event
+		err    error
+	}
+	done := make(chan promptResult, 1)
+	go func() {
+		var result promptResult
+		for event, err := range runtime.Prompt(t.Context(), ai.UserText("start")) {
+			if err != nil {
+				result.err = err
+				break
+			}
+			result.events = append(result.events, event)
+		}
+		done <- result
+	}()
+	select {
+	case <-model.started:
+	case <-time.After(time.Second):
+		require.FailNow(t, "parent model did not start")
+	}
+
+	runtime.mu.Lock()
+	require.NotNil(t, runtime.interaction)
+	rootID := runtime.interaction.rootInteractionID
+	runtime.mu.Unlock()
+	notification := testAgentNotification(runtime, "s-child-active", rootID)
+	require.NoError(t, runtime.notifications.Enqueue(notification))
+	runtime.signalNotifications()
+	require.Eventually(t, func() bool {
+		runtime.notificationMu.Lock()
+		defer runtime.notificationMu.Unlock()
+		_, ok := runtime.notificationInflight[notification.ID]
+		return ok
+	}, time.Second, 5*time.Millisecond)
+	close(model.release)
+
+	select {
+	case result := <-done:
+		require.NoError(t, result.err)
+		assert.Contains(t, eventTypes(result.events), EventInteractionCompleted)
+	case <-time.After(2 * time.Second):
+		require.FailNow(t, "active notification interaction did not complete")
+	}
+	require.Eventually(t, func() bool {
+		pending, err := runtime.notifications.Pending()
+		return err == nil && len(pending) == 0
+	}, time.Second, 5*time.Millisecond)
+
+	state := runtime.Snapshot()
+	require.Len(t, state.Transcript, 4)
+	assert.Equal(t, []int{2}, state.SyntheticMessages)
+	assert.Equal(t, "initial answer", runtimeMessageText(state.Transcript[1]))
+	assert.Equal(t, "completion handled", runtimeMessageText(state.Transcript[3]))
+}
+
+func TestRuntimeSpawnAgentCompletesAfterParentAndAutomaticallyContinues(t *testing.T) {
+	t.Parallel()
+
+	model := newBackgroundSpawnRuntimeModel()
+	runtime := openTestRuntime(t, model)
+	events := collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("delegate")))
+	assert.Contains(t, eventTypes(events), EventInteractionCompleted)
+	select {
+	case <-model.childStarted:
+	case <-time.After(time.Second):
+		require.FailNow(t, "background child did not start")
+	}
+	assert.Equal(t, PhaseIdle, runtime.Snapshot().Phase)
+
+	close(model.releaseChild)
+	require.Eventually(t, func() bool {
+		state := runtime.Snapshot()
+		pending, err := runtime.notifications.Pending()
+		return err == nil && len(pending) == 0 && state.Phase == PhaseIdle &&
+			len(state.Subagents) == 1 && state.Subagents[0].State == subagent.StateSucceeded &&
+			len(state.Transcript) == 6
+	}, 3*time.Second, 10*time.Millisecond)
+
+	state := runtime.Snapshot()
+	assert.Equal(t, subagent.DeliveryBackground, state.Subagents[0].Delivery)
+	assert.Equal(t, []int{4}, state.SyntheticMessages)
+	assert.Equal(t, "background completion handled", runtimeMessageText(state.Transcript[5]))
+	assert.Equal(t, 3, model.MainCalls())
+}
+
+func testAgentNotification(
+	runtime *Runtime,
+	agentID string,
+	rootID string,
+) subagent.Notification {
+	return subagent.Notification{
+		ID: agentID, AgentID: agentID,
+		Ownership: subagent.Ownership{
+			ParentSessionID:     runtime.handle.Metadata().ID,
+			ParentInteractionID: rootID,
+			ParentRunID:         "run-parent", ParentToolCallID: "call-parent",
+			RootInteractionID: rootID,
+		},
+		Role: subagent.RoleExplore, Outcome: subagent.OutcomeSucceeded,
+		Code: "ok", TaskPreview: "inspect runtime",
+		Result: ai.JSON(`{"summary":"done","evidence":[],"unknowns":[]}`),
+		Usage:  ai.Usage{InputTokens: 12, OutputTokens: 4}, TerminalAt: time.Now().UTC(),
+	}
+}
+
 func TestRuntimeRunsReadOnlySubagentWithoutProjectingChildTranscript(t *testing.T) {
 	t.Parallel()
 
@@ -80,6 +351,9 @@ func TestRuntimeRunsReadOnlySubagentWithoutProjectingChildTranscript(t *testing.
 			return nil
 		}),
 	)
+	observation, err := runtime.ObserveEvents()
+	require.NoError(t, err)
+	t.Cleanup(observation.Subscription.Close)
 
 	events := collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("inspect")))
 	types := eventTypes(events)
@@ -101,6 +375,10 @@ func TestRuntimeRunsReadOnlySubagentWithoutProjectingChildTranscript(t *testing.
 	assert.NotEmpty(t, child.ChildSessionID)
 	assert.NotEmpty(t, child.ParentRunID)
 	assert.NotEmpty(t, child.ChildRunID)
+	assert.Equal(t, snapshot.Interaction.ID, child.ParentInteractionID)
+	assert.Equal(t, "delegate-1", child.ParentToolCallID)
+	assert.Equal(t, snapshot.Interaction.ID, child.RootInteractionID)
+	assert.Equal(t, subagent.DeliveryForeground, child.Delivery)
 	assert.Equal(t, TokenUsage{
 		InputTokens: 30, OutputTokens: 6,
 	}, snapshot.Interaction.Usage)
@@ -120,6 +398,37 @@ func TestRuntimeRunsReadOnlySubagentWithoutProjectingChildTranscript(t *testing.
 	require.Len(t, detail.Transcript, 2)
 	assert.Equal(t, ai.RoleUser, detail.Transcript[0].Role)
 	assert.Equal(t, ai.RoleAssistant, detail.Transcript[1].Role)
+	childState, err := runtime.InspectSubagentState(t.Context(), child.ChildSessionID)
+	require.NoError(t, err)
+	waited, err := runtime.WaitSubagent(t.Context(), child.ChildSessionID)
+	require.NoError(t, err)
+	assert.Equal(t, child.ChildSessionID, waited.ChildSessionID)
+	assert.Equal(t, subagent.OutcomeSucceeded, waited.Outcome)
+	require.NoError(t, runtime.CancelSubagent(t.Context(), child.ChildSessionID))
+	assert.Equal(t, child.ChildSessionID, childState.SessionID)
+	assert.Equal(t, InteractionSucceeded, childState.Interaction.Outcome)
+	assert.False(t, childState.Interaction.Active)
+	require.Len(t, childState.Transcript, 2)
+	assert.Equal(t, ai.RoleUser, childState.Transcript[0].Role)
+	assert.Equal(t, ai.RoleAssistant, childState.Transcript[1].Role)
+	require.Len(t, childState.Runs, 1)
+	assert.False(t, childState.Runs[0].Active)
+
+	after, err := runtime.ObserveEvents()
+	require.NoError(t, err)
+	after.Subscription.Close()
+	// The in-memory test hub bounds this delta well below the platform int limit.
+	count := int(after.Cursor - observation.Cursor) //nolint:gosec // Test hub capacity bounds the delta.
+	records := receiveRuntimeRecords(t, observation.Subscription, count)
+	childEventTypes := make([]EventType, 0)
+	for _, record := range records {
+		if record.Event.SessionID == child.ChildSessionID {
+			childEventTypes = append(childEventTypes, record.Event.Type)
+		}
+	}
+	assert.Contains(t, childEventTypes, EventSessionOpened)
+	assert.Contains(t, childEventTypes, EventMessageCommitted)
+	assert.Contains(t, childEventTypes, EventInteractionCompleted)
 
 	for _, event := range telemetry {
 		encoded := fmt.Sprintf("%#v", event)
@@ -127,6 +436,27 @@ func TestRuntimeRunsReadOnlySubagentWithoutProjectingChildTranscript(t *testing.
 		assert.NotContains(t, encoded, child.ChildSessionID)
 		assert.NotContains(t, encoded, child.ChildRunID)
 	}
+}
+
+func receiveRuntimeRecords(
+	t *testing.T,
+	subscription *EventSubscription,
+	count int,
+) []EventRecord {
+	t.Helper()
+
+	records := make([]EventRecord, 0, count)
+	for range count {
+		select {
+		case record, ok := <-subscription.Events():
+			require.True(t, ok)
+			records = append(records, record)
+		case <-time.After(time.Second):
+			require.FailNow(t, "timed out waiting for Runtime event record")
+		}
+	}
+
+	return records
 }
 
 func TestRuntimeOpensCustomProviderMetadata(t *testing.T) {
@@ -915,6 +1245,17 @@ func requestContainsText(request ai.Request, expected string) bool {
 	return false
 }
 
+func runtimeMessageText(message ai.Message) string {
+	var value strings.Builder
+	for _, part := range message.Parts {
+		if text, ok := part.(ai.TextPart); ok {
+			value.WriteString(text.Text)
+		}
+	}
+
+	return value.String()
+}
+
 func findSessionNode(tree SessionTree, id string) (SessionNode, bool) {
 	for _, node := range tree.Nodes {
 		if node.ID == id {
@@ -1294,6 +1635,155 @@ func runtimeResponseEvents(response *ai.Response) []ai.StreamEvent {
 }
 
 var _ ai.LanguageModel = (*runtimeModel)(nil)
+
+type notificationFollowUpModel struct {
+	mu      sync.Mutex
+	started chan struct{}
+	release chan struct{}
+	calls   int
+}
+
+func newNotificationFollowUpModel() *notificationFollowUpModel {
+	return &notificationFollowUpModel{
+		started: make(chan struct{}), release: make(chan struct{}),
+	}
+}
+
+func (m *notificationFollowUpModel) Generate(
+	ctx context.Context,
+	request ai.Request,
+) (*ai.Response, error) {
+	m.mu.Lock()
+	m.calls++
+	call := m.calls
+	m.mu.Unlock()
+
+	switch call {
+	case 1:
+		close(m.started)
+		select {
+		case <-m.release:
+			return runtimeTextResponse("initial answer"), nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	case 2:
+		if !requestContainsText(request, agentNotificationSchema) {
+			return nil, errors.New("notification follow-up is missing from model context")
+		}
+
+		return runtimeTextResponse("completion handled"), nil
+	default:
+		return nil, errors.New("notification follow-up model script exhausted")
+	}
+}
+
+func (m *notificationFollowUpModel) Stream(ctx context.Context, request ai.Request) ai.Stream {
+	return func(yield func(ai.StreamEvent, error) bool) {
+		response, err := m.Generate(ctx, request)
+		if err != nil {
+			yield(ai.StreamEvent{}, err)
+			return
+		}
+		for _, event := range runtimeResponseEvents(response) {
+			if !yield(event, nil) {
+				return
+			}
+		}
+	}
+}
+
+func (*notificationFollowUpModel) Provider() ai.Provider { return ai.ProviderOpenAI }
+func (*notificationFollowUpModel) ModelID() string       { return "runtime-test" }
+func (*notificationFollowUpModel) Capabilities() ai.Capabilities {
+	return ai.Capabilities{Text: true, Tools: true}
+}
+
+var _ ai.LanguageModel = (*notificationFollowUpModel)(nil)
+
+type backgroundSpawnRuntimeModel struct {
+	mu           sync.Mutex
+	mainCalls    int
+	childOnce    sync.Once
+	childStarted chan struct{}
+	releaseChild chan struct{}
+}
+
+func newBackgroundSpawnRuntimeModel() *backgroundSpawnRuntimeModel {
+	return &backgroundSpawnRuntimeModel{
+		childStarted: make(chan struct{}), releaseChild: make(chan struct{}),
+	}
+}
+
+func (m *backgroundSpawnRuntimeModel) Generate(
+	ctx context.Context,
+	request ai.Request,
+) (*ai.Response, error) {
+	if strings.Contains(request.System, "You are a read-only specialist") {
+		m.childOnce.Do(func() { close(m.childStarted) })
+		select {
+		case <-m.releaseChild:
+			return runtimeTextResponse(
+				`{"summary":"background done","evidence":[],"unknowns":[]}`,
+			), nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+
+	m.mu.Lock()
+	m.mainCalls++
+	call := m.mainCalls
+	m.mu.Unlock()
+	switch call {
+	case 1:
+		return runtimeToolResponse(
+			"spawn-1",
+			"spawn_agent",
+			`{"role":"explore","task":"Inspect the runtime in the background."}`,
+		), nil
+	case 2:
+		return runtimeTextResponse("parent continued"), nil
+	case 3:
+		if !requestContainsText(request, agentNotificationSchema) {
+			return nil, errors.New("background completion is missing from parent context")
+		}
+
+		return runtimeTextResponse("background completion handled"), nil
+	default:
+		return nil, errors.New("background spawn model script exhausted")
+	}
+}
+
+func (m *backgroundSpawnRuntimeModel) Stream(ctx context.Context, request ai.Request) ai.Stream {
+	return func(yield func(ai.StreamEvent, error) bool) {
+		response, err := m.Generate(ctx, request)
+		if err != nil {
+			yield(ai.StreamEvent{}, err)
+			return
+		}
+		for _, event := range runtimeResponseEvents(response) {
+			if !yield(event, nil) {
+				return
+			}
+		}
+	}
+}
+
+func (*backgroundSpawnRuntimeModel) Provider() ai.Provider { return ai.ProviderOpenAI }
+func (*backgroundSpawnRuntimeModel) ModelID() string       { return "runtime-test" }
+func (*backgroundSpawnRuntimeModel) Capabilities() ai.Capabilities {
+	return ai.Capabilities{Text: true, Tools: true, StructuredOutput: true}
+}
+
+func (m *backgroundSpawnRuntimeModel) MainCalls() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.mainCalls
+}
+
+var _ ai.LanguageModel = (*backgroundSpawnRuntimeModel)(nil)
 
 var errRuntimeModelFailure = errors.New("runtime model failed")
 

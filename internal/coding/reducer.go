@@ -16,11 +16,13 @@ const maxRecentSubagents = 128
 
 // InteractionState is the current or most recently completed user interaction.
 type InteractionState struct {
-	ID      string             `json:"id,omitempty"`
-	Active  bool               `json:"active"`
-	Resumed bool               `json:"resumed"`
-	Outcome InteractionOutcome `json:"outcome,omitempty"`
-	Usage   TokenUsage         `json:"usage"`
+	ID                string             `json:"id,omitempty"`
+	Active            bool               `json:"active"`
+	Resumed           bool               `json:"resumed"`
+	Source            InteractionSource  `json:"source,omitempty"`
+	RootInteractionID string             `json:"root_interaction_id,omitempty"`
+	Outcome           InteractionOutcome `json:"outcome,omitempty"`
+	Usage             TokenUsage         `json:"usage"`
 }
 
 // RunState is one Agent invocation projected for frontend rendering.
@@ -57,19 +59,23 @@ type ToolState struct {
 // SubagentState is the bounded recent lifecycle projection used by live
 // frontends. Durable list/detail data is loaded from child Sessions.
 type SubagentState struct {
-	ChildSessionID string                   `json:"child_session_id"`
-	ParentRunID    string                   `json:"parent_run_id"`
-	ChildRunID     string                   `json:"child_run_id,omitempty"`
-	Role           subagent.Role            `json:"role"`
-	State          subagent.State           `json:"state"`
-	TaskPreview    string                   `json:"task_preview,omitempty"`
-	Activity       subagent.ActivitySummary `json:"activity,omitzero"`
-	Model          string                   `json:"model"`
-	Code           string                   `json:"code,omitempty"`
-	Turns          int                      `json:"turns"`
-	ToolCalls      int                      `json:"tool_calls"`
-	Usage          TokenUsage               `json:"usage"`
-	DurationMillis int64                    `json:"duration_ms"`
+	ChildSessionID      string                   `json:"child_session_id"`
+	ParentInteractionID string                   `json:"parent_interaction_id,omitempty"`
+	ParentRunID         string                   `json:"parent_run_id"`
+	ParentToolCallID    string                   `json:"parent_tool_call_id,omitempty"`
+	RootInteractionID   string                   `json:"root_interaction_id,omitempty"`
+	Delivery            subagent.Delivery        `json:"delivery,omitempty"`
+	ChildRunID          string                   `json:"child_run_id,omitempty"`
+	Role                subagent.Role            `json:"role"`
+	State               subagent.State           `json:"state"`
+	TaskPreview         string                   `json:"task_preview,omitempty"`
+	Activity            subagent.ActivitySummary `json:"activity,omitzero"`
+	Model               string                   `json:"model"`
+	Code                string                   `json:"code,omitempty"`
+	Turns               int                      `json:"turns"`
+	ToolCalls           int                      `json:"tool_calls"`
+	Usage               TokenUsage               `json:"usage"`
+	DurationMillis      int64                    `json:"duration_ms"`
 }
 
 // ApprovalKind identifies the approval overlay content.
@@ -109,24 +115,27 @@ func (state ApprovalState) NonInteractiveError() error {
 // State is the complete reducer projection used by interactive and
 // non-interactive frontends. Use [State.Clone] when retaining a snapshot.
 type State struct {
-	Sequence    uint64                  `json:"sequence"`
-	SessionID   string                  `json:"session_id,omitempty"`
-	SessionOpen bool                    `json:"session_open"`
-	Provider    ai.Provider             `json:"provider,omitempty"`
-	ModelID     string                  `json:"model_id,omitempty"`
-	Phase       Phase                   `json:"phase,omitempty"`
-	Interaction InteractionState        `json:"interaction"`
-	Transcript  []ai.Message            `json:"transcript"`
-	Draft       []MessageDelta          `json:"draft"`
-	Runs        []RunState              `json:"runs"`
-	Tools       []ToolState             `json:"tools"`
-	Subagents   []SubagentState         `json:"subagents"`
-	Approval    ApprovalState           `json:"approval"`
-	Changes     *WorkspaceChanged       `json:"changes,omitempty"`
-	Diagnostics []IntegrationDiagnostic `json:"diagnostics"`
-	LastError   *RuntimeError           `json:"last_error,omitempty"`
-	Tree        SessionTree             `json:"tree"`
-	Compaction  CompactionState         `json:"compaction"`
+	Sequence    uint64           `json:"sequence"`
+	SessionID   string           `json:"session_id,omitempty"`
+	SessionOpen bool             `json:"session_open"`
+	Provider    ai.Provider      `json:"provider,omitempty"`
+	ModelID     string           `json:"model_id,omitempty"`
+	Phase       Phase            `json:"phase,omitempty"`
+	Interaction InteractionState `json:"interaction"`
+	Transcript  []ai.Message     `json:"transcript"`
+	// SyntheticMessages contains transcript indexes owned by Runtime-generated
+	// protocol input. Frontends render them as neutral activity, not user chat.
+	SyntheticMessages []int                   `json:"synthetic_messages,omitempty"`
+	Draft             []MessageDelta          `json:"draft"`
+	Runs              []RunState              `json:"runs"`
+	Tools             []ToolState             `json:"tools"`
+	Subagents         []SubagentState         `json:"subagents"`
+	Approval          ApprovalState           `json:"approval"`
+	Changes           *WorkspaceChanged       `json:"changes,omitempty"`
+	Diagnostics       []IntegrationDiagnostic `json:"diagnostics"`
+	LastError         *RuntimeError           `json:"last_error,omitempty"`
+	Tree              SessionTree             `json:"tree"`
+	Compaction        CompactionState         `json:"compaction"`
 
 	activeRuns  map[string]int
 	openTurns   map[string]int
@@ -141,6 +150,7 @@ func (state State) Clone() State {
 	for index, message := range state.Transcript {
 		cloned.Transcript[index] = cloneMessage(message)
 	}
+	cloned.SyntheticMessages = slices.Clone(state.SyntheticMessages)
 
 	cloned.Draft = slices.Clone(state.Draft)
 	for index := range cloned.Draft {
@@ -191,15 +201,16 @@ func (state State) IsSessionProvisional() bool {
 
 // DurableState is the restart-stable subset of [State].
 type DurableState struct {
-	SessionID   string           `json:"session_id"`
-	SessionOpen bool             `json:"session_open"`
-	Provider    ai.Provider      `json:"provider,omitempty"`
-	ModelID     string           `json:"model_id,omitempty"`
-	Interaction InteractionState `json:"interaction"`
-	Transcript  []ai.Message     `json:"transcript"`
-	Approval    ApprovalState    `json:"approval"`
-	Tree        SessionTree      `json:"tree"`
-	Compaction  CompactionState  `json:"compaction"`
+	SessionID         string           `json:"session_id"`
+	SessionOpen       bool             `json:"session_open"`
+	Provider          ai.Provider      `json:"provider,omitempty"`
+	ModelID           string           `json:"model_id,omitempty"`
+	Interaction       InteractionState `json:"interaction"`
+	Transcript        []ai.Message     `json:"transcript"`
+	SyntheticMessages []int            `json:"synthetic_messages,omitempty"`
+	Approval          ApprovalState    `json:"approval"`
+	Tree              SessionTree      `json:"tree"`
+	Compaction        CompactionState  `json:"compaction"`
 }
 
 // Durable returns the state subset reconstructed from Harness persistence.
@@ -207,15 +218,16 @@ func (state State) Durable() DurableState {
 	cloned := state.Clone()
 
 	return DurableState{
-		SessionID:   cloned.SessionID,
-		SessionOpen: cloned.SessionOpen,
-		Provider:    cloned.Provider,
-		ModelID:     cloned.ModelID,
-		Interaction: cloned.Interaction,
-		Transcript:  cloned.Transcript,
-		Approval:    cloned.Approval,
-		Tree:        cloned.Tree,
-		Compaction:  cloned.Compaction,
+		SessionID:         cloned.SessionID,
+		SessionOpen:       cloned.SessionOpen,
+		Provider:          cloned.Provider,
+		ModelID:           cloned.ModelID,
+		Interaction:       cloned.Interaction,
+		Transcript:        cloned.Transcript,
+		SyntheticMessages: cloned.SyntheticMessages,
+		Approval:          cloned.Approval,
+		Tree:              cloned.Tree,
+		Compaction:        cloned.Compaction,
 	}
 }
 
@@ -269,6 +281,7 @@ func (state *State) apply(event Event) error {
 		}
 		state.Tree = payload.Tree.Clone()
 		state.Transcript = cloneMessages(payload.Transcript)
+		state.SyntheticMessages = syntheticMessageIndexes(state.Transcript)
 	case SessionNavigated:
 		if !state.SessionOpen || state.Phase != PhaseIdle || state.Interaction.Active {
 			return protocolError("session cannot navigate in its current state")
@@ -300,6 +313,7 @@ func (state *State) apply(event Event) error {
 
 		state.Interaction = InteractionState{
 			ID: event.InteractionID, Active: true, Resumed: payload.Resumed,
+			Source: payload.Source, RootInteractionID: payload.RootInteractionID,
 		}
 		state.Draft = nil
 		state.Approval = ApprovalState{}
@@ -384,6 +398,9 @@ func (state *State) apply(event Event) error {
 		}
 
 		state.Transcript = append(state.Transcript, cloneMessage(payload.Message))
+		if payload.Synthetic {
+			state.SyntheticMessages = append(state.SyntheticMessages, len(state.Transcript)-1)
+		}
 		state.Draft = nil
 	case MessageDelta:
 		if _, err := state.activeRun(event.RunID); err != nil {
@@ -488,15 +505,23 @@ func (state *State) apply(event Event) error {
 }
 
 func (state *State) applySubagent(event Event, payload SubagentLifecycle) error {
-	if err := state.requireInteraction(event.InteractionID); err != nil {
-		return err
+	if payload.ParentInteractionID != "" && payload.ParentInteractionID != event.InteractionID {
+		return protocolError("subagent parent interaction does not match event interaction")
 	}
 	if event.RunID != payload.ParentRunID {
 		return protocolError("subagent parent run does not match event run")
 	}
+	if payload.State == subagent.StateCreated && payload.ParentToolCallID != "" {
+		if _, ok := state.activeTools[toolStateKey(event.RunID, payload.ParentToolCallID)]; !ok {
+			return protocolError("subagent parent tool call is not active")
+		}
+	}
 
 	index := state.subagentIndex(payload.ChildSessionID)
 	if index < 0 {
+		if err := state.requireInteraction(event.InteractionID); err != nil {
+			return err
+		}
 		var err error
 
 		index, err = state.appendSubagent(payload)
@@ -515,8 +540,13 @@ func (state *State) applySubagent(event Event, payload SubagentLifecycle) error 
 	}
 
 	state.Subagents[index] = SubagentState{
-		ChildSessionID: payload.ChildSessionID, ParentRunID: payload.ParentRunID,
-		ChildRunID: payload.ChildRunID, Role: payload.Role, State: payload.State,
+		ChildSessionID:      payload.ChildSessionID,
+		ParentInteractionID: payload.ParentInteractionID,
+		ParentRunID:         payload.ParentRunID,
+		ParentToolCallID:    payload.ParentToolCallID,
+		RootInteractionID:   payload.RootInteractionID,
+		Delivery:            payload.Delivery,
+		ChildRunID:          payload.ChildRunID, Role: payload.Role, State: payload.State,
 		TaskPreview: payload.TaskPreview, Activity: activity,
 		Model: payload.Model, Code: payload.Code,
 		Turns: payload.Turns, ToolCalls: payload.ToolCalls, Usage: payload.Usage,
@@ -569,7 +599,11 @@ func validateSubagentTransition(
 }
 
 func sameSubagentIdentity(previous SubagentState, payload SubagentLifecycle) bool {
-	return previous.ParentRunID == payload.ParentRunID && previous.Role == payload.Role &&
+	return previous.ParentInteractionID == payload.ParentInteractionID &&
+		previous.ParentRunID == payload.ParentRunID &&
+		previous.ParentToolCallID == payload.ParentToolCallID &&
+		previous.RootInteractionID == payload.RootInteractionID &&
+		previous.Delivery == payload.Delivery && previous.Role == payload.Role &&
 		previous.Model == payload.Model && previous.TaskPreview == payload.TaskPreview &&
 		(previous.ChildRunID == "" || previous.ChildRunID == payload.ChildRunID)
 }

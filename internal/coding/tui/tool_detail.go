@@ -86,6 +86,8 @@ func newToolDetailView(block timelineBlock) toolDetailView {
 			title = "Workspace update details"
 		case toolClassGeneric:
 			title = "Tool call details"
+		case toolClassSubagent:
+			title = "Agent activity details"
 		}
 	}
 
