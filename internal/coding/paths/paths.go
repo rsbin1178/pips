@@ -14,6 +14,7 @@ const (
 	HomeEnv        = "PIPS_HOME"
 	productDir     = ".pips"
 	projectDir     = ".pips"
+	agentDir       = ".agents"
 	configFileName = "config.toml"
 )
 
@@ -28,6 +29,7 @@ type Layout struct {
 	workspacesFile string
 	sessionsDir    string
 	skillsDir      string
+	agentSkillsDir string
 	bundlesDir     string
 	mcpFile        string
 }
@@ -60,6 +62,11 @@ func New(root string) (Layout, error) {
 
 // Default returns the user layout selected by PIPS_HOME or ~/.pips.
 func Default() (Layout, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return Layout{}, fmt.Errorf("coding paths: locate user home directory: %w", err)
+	}
+
 	if configured, ok := os.LookupEnv(HomeEnv); ok && configured != "" {
 		if strings.TrimSpace(configured) == "" ||
 			!filepath.IsAbs(configured) || filepath.Clean(configured) != configured {
@@ -70,15 +77,48 @@ func Default() (Layout, error) {
 			)
 		}
 
-		return New(configured)
+		layout, err := New(configured)
+		if err != nil {
+			return Layout{}, err
+		}
+
+		layout.agentSkillsDir = filepath.Join(home, agentDir, "skills")
+
+		return layout, nil
 	}
 
-	home, err := os.UserHomeDir()
+	layout, err := New(filepath.Join(home, productDir))
 	if err != nil {
-		return Layout{}, fmt.Errorf("coding paths: locate user home directory: %w", err)
+		return Layout{}, err
 	}
 
-	return New(filepath.Join(home, productDir))
+	layout.agentSkillsDir = filepath.Join(home, agentDir, "skills")
+
+	return layout, nil
+}
+
+// WithAgentSkillsDir returns a copy that discovers shared Agent Skills from
+// directory. An empty directory disables the shared user root. This is mainly
+// useful for embedders and hermetic tests; Default configures ~/.agents/skills.
+func (l Layout) WithAgentSkillsDir(directory string) (Layout, error) {
+	if directory == "" {
+		l.agentSkillsDir = ""
+
+		return l, nil
+	}
+
+	if strings.ContainsRune(directory, '\x00') {
+		return Layout{}, fmt.Errorf("%w: Agent Skills path contains NUL", ErrInvalid)
+	}
+
+	abs, err := filepath.Abs(directory)
+	if err != nil {
+		return Layout{}, fmt.Errorf("%w: Agent Skills path: %w", ErrInvalid, err)
+	}
+
+	l.agentSkillsDir = abs
+
+	return l, nil
 }
 
 // ProjectRoot returns the workspace-relative product directory.
@@ -92,6 +132,10 @@ func ProjectMCPFile() string { return path.Join(projectDir, "mcp.json") }
 
 // ProjectSkillsDir returns the workspace-relative project skills directory.
 func ProjectSkillsDir() string { return path.Join(projectDir, "skills") }
+
+// ProjectAgentSkillsDir returns the workspace-relative shared Agent Skills
+// directory.
+func ProjectAgentSkillsDir() string { return path.Join(agentDir, "skills") }
 
 // ProjectBundlesDir returns the workspace-relative project bundle directory.
 func ProjectBundlesDir() string { return path.Join(projectDir, "bundles") }
@@ -110,6 +154,10 @@ func (l Layout) SessionsDir() string { return l.sessionsDir }
 
 // SkillsDir returns the user skill directory.
 func (l Layout) SkillsDir() string { return l.skillsDir }
+
+// AgentSkillsDir returns the shared user Agent Skills directory. It is empty
+// for layouts built with New unless explicitly configured.
+func (l Layout) AgentSkillsDir() string { return l.agentSkillsDir }
 
 // BundlesDir returns the user bundle directory.
 func (l Layout) BundlesDir() string { return l.bundlesDir }

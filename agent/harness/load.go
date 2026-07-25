@@ -1,13 +1,18 @@
+//nolint:wsl_v5 // Manifest decoding keeps each field's validation and assignment adjacent.
 package harness
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path"
 	"regexp"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 // skillFileName is the per-skill manifest, following the agentskills.io
@@ -15,15 +20,24 @@ import (
 // YAML frontmatter carrying name and description.
 const skillFileName = "SKILL.md"
 
+// SkillDiagnostic describes a non-fatal compatibility decision made while
+// loading one Skill manifest. Messages are intended for application logs;
+// callers should use Code and Field for stable presentation.
+type SkillDiagnostic struct {
+	Code    string
+	Field   string
+	Message string
+}
+
 // LoadSkills loads skills from a directory tree (see [LoadSkillsFS]).
 func LoadSkills(dir string) ([]Skill, error) {
 	return LoadSkillsFS(os.DirFS(dir))
 }
 
 // LoadSkillsFS walks fsys for Agent Skills standard manifests. Every skill
-// must have a valid SKILL.md YAML frontmatter, a standards-compliant name and
-// description, and a directory matching its name. It never executes bundled
-// scripts or reads references on the model's behalf.
+// must have a valid SKILL.md YAML frontmatter and a standards-compliant name
+// and description. It never executes bundled scripts or reads references on
+// the model's behalf.
 func LoadSkillsFS(fsys fs.FS) ([]Skill, error) {
 	var skills []Skill
 
@@ -36,7 +50,7 @@ func LoadSkillsFS(fsys fs.FS) ([]Skill, error) {
 			return nil
 		}
 
-		skill, err := loadSkill(fsys, p)
+		skill, _, err := loadSkill(fsys, p)
 		if err != nil {
 			return err
 		}
@@ -56,47 +70,71 @@ func LoadSkillsFS(fsys fs.FS) ([]Skill, error) {
 // when a caller has an explicit resource list and must not discover sibling
 // skills implicitly.
 func LoadSkillFS(fsys fs.FS, p string) (Skill, error) {
+	skill, _, err := LoadSkillFSWithDiagnostics(fsys, p)
+
+	return skill, err
+}
+
+// LoadSkillFSWithDiagnostics loads one explicit Agent Skills manifest and
+// reports non-fatal ecosystem compatibility decisions. It never discovers
+// sibling Skills or reads sibling resources.
+func LoadSkillFSWithDiagnostics(
+	fsys fs.FS,
+	p string,
+) (Skill, []SkillDiagnostic, error) {
 	if fsys == nil {
-		return Skill{}, errors.New("harness: load skill: nil filesystem")
+		return Skill{}, nil, errors.New("harness: load skill: nil filesystem")
 	}
 
 	if !fs.ValidPath(p) || p == "." || path.Base(p) != skillFileName {
-		return Skill{}, fmt.Errorf("harness: load skill: invalid path %q", p)
+		return Skill{}, nil, fmt.Errorf("harness: load skill: invalid path %q", p)
 	}
 
-	skill, err := loadSkill(fsys, p)
+	skill, diagnostics, err := loadSkill(fsys, p)
 	if err != nil {
-		return Skill{}, fmt.Errorf("harness: load skill %q: %w", p, err)
+		return Skill{}, nil, fmt.Errorf("harness: load skill %q: %w", p, err)
 	}
 
-	return skill, nil
+	return skill, diagnostics, nil
 }
 
-func loadSkill(fsys fs.FS, p string) (Skill, error) {
+func loadSkill(fsys fs.FS, p string) (Skill, []SkillDiagnostic, error) {
 	data, err := fs.ReadFile(fsys, p)
 	if err != nil {
-		return Skill{}, err
+		return Skill{}, nil, err
 	}
 
-	manifest, body, err := parseSkillManifest(string(data))
+	manifest, body, diagnostics, err := parseSkillManifest(string(data))
 	if err != nil {
-		return Skill{}, fmt.Errorf("%s: %w", p, err)
+		return Skill{}, nil, fmt.Errorf("%s: %w", p, err)
 	}
 
 	parent := path.Base(path.Dir(p))
 	if manifest.name == "" {
 		manifest.name = parent
+		diagnostics = append(diagnostics, SkillDiagnostic{
+			Code:    "name_defaulted",
+			Field:   string(KindName),
+			Message: "skill name defaulted from its directory",
+		})
+	} else if manifest.name != parent {
+		diagnostics = append(diagnostics, SkillDiagnostic{
+			Code:    "directory_name_mismatch",
+			Field:   string(KindName),
+			Message: "skill name does not match its directory",
+		})
 	}
 
 	if !skillNamePattern.MatchString(manifest.name) || len(manifest.name) > 64 {
-		return Skill{}, fmt.Errorf("%s: name must be 1-64 lowercase letters, numbers, or single hyphens", p)
+		return Skill{}, nil, fmt.Errorf("%s: name must be 1-64 lowercase letters, numbers, or single hyphens", p)
 	}
 
 	return Skill{
 		Name: manifest.name, Description: manifest.description, Content: body, Source: p,
 		License: manifest.license, Compatibility: manifest.compatibility,
 		Metadata: manifest.metadata, AllowedTools: manifest.allowedTools,
-	}, nil
+		Invocation: manifest.invocation,
+	}, diagnostics, nil
 }
 
 var skillNamePattern = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
@@ -108,260 +146,272 @@ type skillManifest struct {
 	compatibility string
 	metadata      map[string]string
 	allowedTools  []string
+	invocation    SkillInvocation
 }
 
-func parseSkillManifest(content string) (skillManifest, string, error) {
+func parseSkillManifest(content string) (skillManifest, string, []SkillDiagnostic, error) {
 	content = strings.ReplaceAll(content, "\r\n", "\n")
 	if strings.HasPrefix(content, "\ufeff") {
-		return skillManifest{}, "", errors.New("skill manifest must not start with a byte order mark")
+		return skillManifest{}, "", nil, errors.New("skill manifest must not start with a byte order mark")
 	}
 
 	if !strings.HasPrefix(content, "---\n") {
-		return skillManifest{}, "", errors.New("skill manifest requires YAML frontmatter")
+		return skillManifest{}, "", nil, errors.New("skill manifest requires YAML frontmatter")
 	}
 
 	rest := strings.TrimPrefix(content, "---\n")
 
-	front, body, found := strings.Cut(rest, "\n---")
-	if !found || (body != "" && !strings.HasPrefix(body, "\n")) {
-		return skillManifest{}, "", errors.New("skill manifest has no closing frontmatter delimiter")
+	delimiter := strings.Index(rest, "\n---\n")
+	delimiterBytes := len("\n---\n")
+	if delimiter < 0 && strings.HasSuffix(rest, "\n---") {
+		delimiter = len(rest) - len("\n---")
+		delimiterBytes = len("\n---")
+	}
+	if delimiter < 0 {
+		return skillManifest{}, "", nil, errors.New("skill manifest has no closing frontmatter delimiter")
 	}
 
-	body = strings.TrimPrefix(body, "\n")
+	front := rest[:delimiter]
+	body := rest[delimiter+delimiterBytes:]
 
-	manifest, err := decodeSkillManifest(front)
+	manifest, diagnostics, err := decodeSkillManifest(front)
 	if err != nil {
-		return skillManifest{}, "", err
+		return skillManifest{}, "", nil, err
 	}
 
 	if strings.TrimSpace(manifest.description) == "" || len(manifest.description) > 1024 {
-		return skillManifest{}, "", errors.New("description must be non-empty and at most 1024 bytes")
+		return skillManifest{}, "", nil, errors.New("description must be non-empty and at most 1024 bytes")
 	}
 
 	if manifest.compatibility != "" && len(manifest.compatibility) > 500 {
-		return skillManifest{}, "", errors.New("compatibility exceeds 500 bytes")
+		return skillManifest{}, "", nil, errors.New("compatibility exceeds 500 bytes")
 	}
 
 	body = strings.TrimSpace(body)
 	if body == "" {
-		return skillManifest{}, "", errors.New("skill instructions must not be empty")
+		return skillManifest{}, "", nil, errors.New("skill instructions must not be empty")
 	}
 
-	return manifest, body, nil
+	return manifest, body, diagnostics, nil
 }
 
-// decodeSkillManifest accepts the strict scalar subset required by the Agent
-// Skills manifest schema. Keeping this parser local preserves the core's
-// stdlib-only dependency boundary while rejecting unsupported YAML features
-// rather than silently interpreting them differently from another host.
-//
-//nolint:funlen,gocyclo,nestif // Each accepted manifest field has a distinct strict validation rule.
-func decodeSkillManifest(front string) (skillManifest, error) {
-	manifest := skillManifest{metadata: make(map[string]string)}
-	seen := map[string]struct{}{}
-	current := ""
+//nolint:gocyclo // Supported standard and compatibility fields stay explicit in one decoder.
+func decodeSkillManifest(front string) (skillManifest, []SkillDiagnostic, error) {
+	decoder := yaml.NewDecoder(bytes.NewBufferString(front))
 
-	for line := range strings.Lines(front) {
-		line = strings.TrimSuffix(line, "\n")
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
+	var document yaml.Node
+	if err := decoder.Decode(&document); err != nil {
+		return skillManifest{}, nil, fmt.Errorf("decode YAML frontmatter: %w", err)
+	}
 
-		if strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t") {
-			indented := strings.TrimSpace(line)
+	var extra yaml.Node
+	if err := decoder.Decode(&extra); err != nil && !errors.Is(err, io.EOF) {
+		return skillManifest{}, nil, fmt.Errorf("decode YAML frontmatter: %w", err)
+	} else if err == nil {
+		return skillManifest{}, nil, errors.New("skill frontmatter must contain one YAML document")
+	}
 
-			switch current {
-			case "description":
-				manifest.description = appendScalarLine(manifest.description, indented)
-			case "metadata":
-				key, value, ok := strings.Cut(indented, ":")
-				if !ok || strings.TrimSpace(key) == "" {
-					return skillManifest{}, errors.New("invalid metadata entry")
-				}
+	if len(document.Content) != 1 || document.Content[0].Kind != yaml.MappingNode {
+		return skillManifest{}, nil, errors.New("skill frontmatter must be a YAML mapping")
+	}
 
-				key = strings.TrimSpace(key)
-				if _, exists := manifest.metadata[key]; exists {
-					return skillManifest{}, fmt.Errorf("metadata field %q is duplicated", key)
-				}
+	root := document.Content[0]
+	if err := validateSkillYAMLNode(root); err != nil {
+		return skillManifest{}, nil, err
+	}
 
-				decoded, err := manifestScalar(value, "metadata."+key)
-				if err != nil {
-					return skillManifest{}, err
-				}
+	manifest := skillManifest{metadata: map[string]string{}}
+	diagnostics := []SkillDiagnostic{}
+	userInvocable := true
+	modelInvocable := true
 
-				manifest.metadata[key] = decoded
-			case "allowed-tools":
-				if !strings.HasPrefix(indented, "- ") {
-					return skillManifest{}, errors.New("allowed-tools list entry must start with '- '")
-				}
-
-				decoded, err := manifestScalar(strings.TrimPrefix(indented, "- "), "allowed-tools")
-				if err != nil || decoded == "" {
-					return skillManifest{}, errors.New("allowed-tools must not contain an empty tool name")
-				}
-
-				manifest.allowedTools = append(manifest.allowedTools, decoded)
-			default:
-				return skillManifest{}, errors.New("unsupported indented manifest value")
-			}
-
-			continue
-		}
-
-		key, value, ok := strings.Cut(line, ":")
-		if !ok || strings.TrimSpace(key) == "" {
-			return skillManifest{}, errors.New("invalid manifest field")
-		}
-
-		key = strings.TrimSpace(key)
-		if _, ok := seen[key]; ok {
-			return skillManifest{}, fmt.Errorf("manifest field %q is duplicated", key)
-		}
-
-		seen[key] = struct{}{}
-		current = key
+	for index := 0; index < len(root.Content); index += 2 {
+		key := root.Content[index].Value
+		value := root.Content[index+1]
 
 		switch key {
 		case "name":
-			value, err := manifestScalar(value, key)
+			decoded, err := skillYAMLString(value, key)
 			if err != nil {
-				return skillManifest{}, err
+				return skillManifest{}, nil, err
 			}
-
-			manifest.name = value
+			manifest.name = decoded
 		case "description":
-			value, err := manifestScalar(value, key)
+			decoded, err := skillYAMLString(value, key)
 			if err != nil {
-				return skillManifest{}, err
+				return skillManifest{}, nil, err
 			}
-
-			manifest.description = value
+			manifest.description = decoded
 		case "license":
-			value, err := manifestScalar(value, key)
+			decoded, err := skillYAMLString(value, key)
 			if err != nil {
-				return skillManifest{}, err
+				return skillManifest{}, nil, err
 			}
-
-			manifest.license = value
+			manifest.license = decoded
 		case "compatibility":
-			value, err := manifestScalar(value, key)
+			decoded, err := skillYAMLString(value, key)
 			if err != nil {
-				return skillManifest{}, err
+				return skillManifest{}, nil, err
 			}
-
-			manifest.compatibility = value
-		case "allowed-tools":
-			tools, err := manifestStrings(value, key)
-			if err != nil {
-				return skillManifest{}, err
-			}
-
-			manifest.allowedTools = tools
+			manifest.compatibility = decoded
 		case "metadata":
-			value = strings.TrimSpace(value)
-			switch {
-			case value == "":
-			case strings.HasPrefix(value, "{") && strings.HasSuffix(value, "}"):
-				metadata, err := inlineMetadata(value)
-				if err != nil {
-					return skillManifest{}, err
-				}
-
-				manifest.metadata = metadata
-			default:
-				return skillManifest{}, errors.New("metadata must be a mapping")
+			metadata, ignored, err := decodeSkillMetadata(value)
+			if err != nil {
+				return skillManifest{}, nil, err
 			}
+			manifest.metadata = metadata
+			diagnostics = append(diagnostics, ignored...)
+		case "allowed-tools":
+			tools, err := decodeSkillAllowedTools(value)
+			if err != nil {
+				return skillManifest{}, nil, err
+			}
+			manifest.allowedTools = tools
+		case "user-invocable":
+			if err := value.Decode(&userInvocable); err != nil || value.Tag != "!!bool" {
+				return skillManifest{}, nil, errors.New("user-invocable must be a boolean")
+			}
+		case "disable-model-invocation":
+			var disabled bool
+			if err := value.Decode(&disabled); err != nil || value.Tag != "!!bool" {
+				return skillManifest{}, nil, errors.New("disable-model-invocation must be a boolean")
+			}
+			modelInvocable = !disabled
+		case "argument-hint", "context", "agent":
+			diagnostics = append(diagnostics, SkillDiagnostic{
+				Code:    "unsupported_field",
+				Field:   key,
+				Message: "client-specific field is declarative only and was ignored",
+			})
 		default:
-			return skillManifest{}, fmt.Errorf("unsupported manifest field %q", key)
+			diagnostics = append(diagnostics, SkillDiagnostic{
+				Code:    "unknown_field",
+				Field:   key,
+				Message: "unknown skill field was ignored",
+			})
 		}
 	}
 
-	return manifest, nil
+	manifest.invocation = normalizeSkillInvocation(userInvocable, modelInvocable)
+
+	return manifest, diagnostics, nil
 }
 
-func manifestScalar(value, field string) (string, error) {
-	value = strings.TrimSpace(value)
-	if value == "" || value == "null" || value == "~" {
+func validateSkillYAMLNode(node *yaml.Node) error {
+	if node == nil {
+		return errors.New("skill frontmatter contains an empty YAML node")
+	}
+
+	if node.Kind == yaml.AliasNode {
+		return errors.New("skill frontmatter must not contain YAML aliases")
+	}
+
+	if node.Kind == yaml.MappingNode {
+		seen := make(map[string]struct{}, len(node.Content)/2)
+		for index := 0; index < len(node.Content); index += 2 {
+			key := node.Content[index]
+			if key.Kind != yaml.ScalarNode || key.Tag != "!!str" || key.Value == "" {
+				return errors.New("skill frontmatter mapping keys must be non-empty strings")
+			}
+
+			if key.Value == "<<" {
+				return errors.New("skill frontmatter must not contain YAML merge keys")
+			}
+
+			if _, ok := seen[key.Value]; ok {
+				return fmt.Errorf("manifest field %q is duplicated", key.Value)
+			}
+			seen[key.Value] = struct{}{}
+		}
+	}
+
+	for _, child := range node.Content {
+		if err := validateSkillYAMLNode(child); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func skillYAMLString(node *yaml.Node, field string) (string, error) {
+	if node.Kind != yaml.ScalarNode || node.Tag != "!!str" {
 		return "", fmt.Errorf("%s must be a string", field)
 	}
 
-	if value == ">" || value == ">-" {
-		return "", nil
-	}
-
-	if len(value) >= 2 && ((value[0] == '"' && value[len(value)-1] == '"') || (value[0] == '\'' && value[len(value)-1] == '\'')) {
-		return value[1 : len(value)-1], nil
-	}
-
-	if strings.ContainsAny(value, "[]{}") || strings.HasPrefix(value, "-") {
-		return "", fmt.Errorf("%s uses an unsupported YAML value", field)
-	}
-
-	return value, nil
+	return node.Value, nil
 }
 
-func manifestStrings(value, field string) ([]string, error) {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return nil, nil
+func decodeSkillMetadata(node *yaml.Node) (map[string]string, []SkillDiagnostic, error) {
+	if node.Kind != yaml.MappingNode {
+		return nil, nil, errors.New("metadata must be a mapping")
 	}
 
-	if strings.HasPrefix(value, "[") && strings.HasSuffix(value, "]") {
-		value = strings.TrimSpace(value[1 : len(value)-1])
-	}
+	metadata := make(map[string]string, len(node.Content)/2)
+	diagnostics := []SkillDiagnostic{}
 
-	values := strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' })
-	if len(values) == 0 {
-		return nil, fmt.Errorf("%s must be a string or a list of strings", field)
-	}
-
-	for i, item := range values {
-		decoded, err := manifestScalar(item, field)
-		if err != nil || decoded == "" {
-			return nil, fmt.Errorf("%s must not contain an empty tool name", field)
+	for index := 0; index < len(node.Content); index += 2 {
+		key := node.Content[index].Value
+		value := node.Content[index+1]
+		if value.Kind != yaml.ScalarNode || value.Tag != "!!str" {
+			diagnostics = append(diagnostics, SkillDiagnostic{
+				Code:    "metadata_value_ignored",
+				Field:   "metadata." + key,
+				Message: "non-string metadata value was ignored",
+			})
+			continue
 		}
 
-		values[i] = decoded
+		metadata[key] = value.Value
+	}
+
+	return metadata, diagnostics, nil
+}
+
+func decodeSkillAllowedTools(node *yaml.Node) ([]string, error) {
+	values := []string{}
+
+	switch node.Kind {
+	case yaml.ScalarNode:
+		value, err := skillYAMLString(node, "allowed-tools")
+		if err != nil {
+			return nil, err
+		}
+		values = strings.FieldsFunc(value, func(r rune) bool {
+			return r == ',' || r == ' ' || r == '\t' || r == '\n'
+		})
+	case yaml.SequenceNode:
+		for _, item := range node.Content {
+			value, err := skillYAMLString(item, "allowed-tools")
+			if err != nil {
+				return nil, err
+			}
+			values = append(values, value)
+		}
+	default:
+		return nil, errors.New("allowed-tools must be a string or a list of strings")
+	}
+
+	for _, value := range values {
+		if strings.TrimSpace(value) == "" {
+			return nil, errors.New("allowed-tools must not contain an empty tool name")
+		}
 	}
 
 	return values, nil
 }
 
-func inlineMetadata(value string) (map[string]string, error) {
-	metadata := make(map[string]string)
-
-	for item := range strings.SplitSeq(strings.TrimSpace(value[1:len(value)-1]), ",") {
-		key, rawValue, ok := strings.Cut(item, ":")
-		if !ok {
-			return nil, errors.New("invalid inline metadata entry")
-		}
-
-		key, err := manifestScalar(key, "metadata key")
-		if err != nil || key == "" {
-			return nil, errors.New("metadata contains an empty key")
-		}
-
-		decoded, err := manifestScalar(rawValue, "metadata."+key)
-		if err != nil {
-			return nil, err
-		}
-
-		if _, exists := metadata[key]; exists {
-			return nil, fmt.Errorf("metadata field %q is duplicated", key)
-		}
-
-		metadata[key] = decoded
+func normalizeSkillInvocation(userInvocable, modelInvocable bool) SkillInvocation {
+	switch {
+	case userInvocable && modelInvocable:
+		return SkillInvocationDefault
+	case userInvocable:
+		return SkillInvocationUserOnly
+	case modelInvocable:
+		return SkillInvocationModelOnly
+	default:
+		return SkillInvocationDisabled
 	}
-
-	return metadata, nil
-}
-
-func appendScalarLine(current, line string) string {
-	if current == "" {
-		return line
-	}
-
-	return current + " " + line
 }
 
 // LoadTemplates loads prompt templates from a directory (see

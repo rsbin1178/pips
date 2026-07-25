@@ -125,7 +125,7 @@ func (m *Model) updateAgentsRouteKey(message tea.KeyPressMsg) (tea.Model, tea.Cm
 		m.route.cursor = wrapIndex(m.route.cursor-1, len(values))
 	case keyDown, "j", keyTab:
 		m.route.cursor = wrapIndex(m.route.cursor+1, len(values))
-	case "ctrl+u":
+	case keyCtrlU:
 		m.route.query = ""
 		m.route.cursor = 0
 	case keyBackspace:

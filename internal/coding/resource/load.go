@@ -1,15 +1,19 @@
+//nolint:wsl_v5 // Resource acquisition, diagnostics, and bounded reads stay adjacent.
 package resource
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/rsbin/pips/agent/bundle"
 	"github.com/rsbin/pips/agent/harness"
@@ -18,8 +22,10 @@ import (
 
 const (
 	priorityExtension = iota
-	priorityUser
-	priorityProject
+	priorityUserAgents
+	priorityUserPips
+	priorityProjectAgents
+	priorityProjectPips
 )
 
 type discoveryBudget struct {
@@ -41,11 +47,35 @@ func Load(ctx context.Context, options Options) (Result, error) {
 
 	budget := &discoveryBudget{}
 	contentBudget := &readBudget{maximum: options.Limits.MaxTotalSkillBytes}
+	resourceBudget := &readBudget{maximum: options.Limits.MaxTotalResourceBytes}
 
-	userSkills, err := loadUserSkills(ctx, options, budget, contentBudget)
+	userPips, diagnostics, err := loadUserSkillRoot(
+		ctx,
+		options.Paths.SkillsDir(),
+		"user:pips/",
+		priorityUserPips,
+		options.Limits,
+		budget,
+		contentBudget,
+		resourceBudget,
+	)
 	if err != nil {
 		return Result{}, err
 	}
+	userAgents, userAgentDiagnostics, err := loadUserSkillRoot(
+		ctx,
+		options.Paths.AgentSkillsDir(),
+		"user:agents/",
+		priorityUserAgents,
+		options.Limits,
+		budget,
+		contentBudget,
+		resourceBudget,
+	)
+	if err != nil {
+		return Result{}, err
+	}
+	diagnostics = append(diagnostics, userAgentDiagnostics...)
 
 	userBundles, err := loadUserBundles(ctx, options, budget)
 	if err != nil {
@@ -53,15 +83,42 @@ func Load(ctx context.Context, options Options) (Result, error) {
 	}
 
 	var (
-		projectSkills  []skillEntry
-		projectBundles []*bundle.Bundle
+		projectPips        []skillEntry
+		projectAgents      []skillEntry
+		projectBundles     []*bundle.Bundle
+		projectDiagnostics []Diagnostic
 	)
 
 	if options.ProjectTrusted {
-		projectSkills, err = loadProjectSkills(ctx, options, budget, contentBudget)
+		projectPips, projectDiagnostics, err = loadProjectSkillRoot(
+			ctx,
+			options,
+			paths.ProjectSkillsDir(),
+			"project:pips/",
+			priorityProjectPips,
+			budget,
+			contentBudget,
+			resourceBudget,
+		)
 		if err != nil {
 			return Result{}, err
 		}
+		diagnostics = append(diagnostics, projectDiagnostics...)
+
+		projectAgents, projectDiagnostics, err = loadProjectSkillRoot(
+			ctx,
+			options,
+			paths.ProjectAgentSkillsDir(),
+			"project:agents/",
+			priorityProjectAgents,
+			budget,
+			contentBudget,
+			resourceBudget,
+		)
+		if err != nil {
+			return Result{}, err
+		}
+		diagnostics = append(diagnostics, projectDiagnostics...)
 
 		projectBundles, err = loadProjectBundles(ctx, options, budget)
 		if err != nil {
@@ -69,9 +126,9 @@ func Load(ctx context.Context, options Options) (Result, error) {
 		}
 	}
 
-	direct := slices.Concat(userSkills, projectSkills)
+	direct := slices.Concat(userAgents, userPips, projectAgents, projectPips)
 
-	direct, diagnostics, err := mergeSkillEntries(direct, nil)
+	direct, diagnostics, err = mergeSkillEntries(direct, diagnostics)
 	if err != nil {
 		return Result{}, err
 	}
@@ -105,11 +162,14 @@ func validateOptions(options Options) error {
 	return nil
 }
 
+//nolint:gocyclo // The flat validation intentionally audits every independent budget.
 func validateLimits(limits Limits) error {
 	if limits.MaxEntries <= 0 || limits.MaxSkillManifests <= 0 ||
 		limits.MaxBundleManifests <= 0 || limits.MaxDepth <= 0 ||
 		limits.MaxPathBytes <= 0 || limits.MaxSkillBytes <= 0 ||
-		limits.MaxTotalSkillBytes <= 0 {
+		limits.MaxTotalSkillBytes <= 0 || limits.MaxResourcesPerSkill <= 0 ||
+		limits.MaxResourceBytes <= 0 || limits.MaxSkillResourceBytes <= 0 ||
+		limits.MaxTotalResourceBytes <= 0 {
 		return fmt.Errorf("%w: every discovery limit must be positive", ErrInvalid)
 	}
 
@@ -122,48 +182,62 @@ func validateLimits(limits Limits) error {
 	return nil
 }
 
-func loadUserSkills(
+func loadUserSkillRoot(
 	ctx context.Context,
-	options Options,
+	directory string,
+	provenance string,
+	priority int,
+	limits Limits,
 	budget *discoveryBudget,
 	contentBudget *readBudget,
-) ([]skillEntry, error) {
-	fsys, closeFS, exists, err := openUserDirectory(options.Paths.SkillsDir())
+	resourceBudget *readBudget,
+) ([]skillEntry, []Diagnostic, error) {
+	if directory == "" {
+		return nil, nil, nil
+	}
+
+	fsys, closeFS, exists, err := openUserDirectory(directory)
 	if err != nil || !exists {
-		return nil, err
+		return nil, nil, err
 	}
 	defer func() { _ = closeFS() }()
 
 	return loadDirectSkills(
 		ctx,
 		fsys,
-		"user:skills/",
-		priorityUser,
-		options.Limits,
+		provenance,
+		priority,
+		limits,
 		budget,
 		contentBudget,
+		resourceBudget,
 	)
 }
 
-func loadProjectSkills(
+func loadProjectSkillRoot(
 	ctx context.Context,
 	options Options,
+	directory string,
+	provenance string,
+	priority int,
 	budget *discoveryBudget,
 	contentBudget *readBudget,
-) ([]skillEntry, error) {
-	fys, exists, err := projectSubFS(options, paths.ProjectSkillsDir())
+	resourceBudget *readBudget,
+) ([]skillEntry, []Diagnostic, error) {
+	fys, exists, err := projectSubFS(options, directory)
 	if err != nil || !exists {
-		return nil, err
+		return nil, nil, err
 	}
 
 	return loadDirectSkills(
 		ctx,
 		fys,
-		"project:"+paths.ProjectSkillsDir()+"/",
-		priorityProject,
+		provenance,
+		priority,
 		options.Limits,
 		budget,
 		contentBudget,
+		resourceBudget,
 	)
 }
 
@@ -175,37 +249,77 @@ func loadDirectSkills(
 	limits Limits,
 	budget *discoveryBudget,
 	contentBudget *readBudget,
-) ([]skillEntry, error) {
+	resourceBudget *readBudget,
+) ([]skillEntry, []Diagnostic, error) {
 	manifestPaths, err := discoverSkillManifests(ctx, fys, limits, budget)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	bounded := boundedFS{fsys: fys, budget: contentBudget, maxFile: limits.MaxSkillBytes}
 	entries := make([]skillEntry, 0, len(manifestPaths))
+	var diagnostics []Diagnostic
+	manifestRoots := make(map[string]struct{}, len(manifestPaths))
+	for _, manifestPath := range manifestPaths {
+		manifestRoots[path.Dir(manifestPath)] = struct{}{}
+	}
 
 	for _, manifestPath := range manifestPaths {
 		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-
-		skill, err := harness.LoadSkillFS(bounded, manifestPath)
-		if err != nil {
-			return nil, fmt.Errorf("coding resource: load Skill %q: %w", manifestPath, err)
+			return nil, nil, err
 		}
 
 		provenance := provenancePrefix + manifestPath
+		skill, skillDiagnostics, err := harness.LoadSkillFSWithDiagnostics(bounded, manifestPath)
+		if err != nil {
+			if errors.Is(err, ErrLimitExceeded) {
+				return nil, nil, fmt.Errorf("coding resource: load Skill %q: %w", manifestPath, err)
+			}
+
+			diagnostics = append(diagnostics, Diagnostic{
+				Code:     "skill_invalid",
+				Resource: provenance,
+				Message:  err.Error(),
+			})
+
+			continue
+		}
+
+		for _, diagnostic := range skillDiagnostics {
+			diagnostics = append(diagnostics, Diagnostic{
+				Code:     "skill_" + diagnostic.Code,
+				Resource: provenance,
+				Message:  diagnostic.Message,
+			})
+		}
+
+		resources, resourceDiagnostics, err := loadSkillResources(
+			ctx,
+			fys,
+			path.Dir(manifestPath),
+			manifestRoots,
+			provenance,
+			limits,
+			resourceBudget,
+		)
+		if err != nil {
+			return nil, nil, err
+		}
+		diagnostics = append(diagnostics, resourceDiagnostics...)
+
 		skill.Source = provenance
 		skill.AllowedTools = nil
+		skill.Resources = resources
 
 		entries = append(entries, skillEntry{
 			skill:      skill,
 			provenance: provenance,
 			priority:   priority,
+			direct:     true,
 		})
 	}
 
-	return entries, nil
+	return entries, diagnostics, nil
 }
 
 func discoverSkillManifests(
@@ -238,7 +352,7 @@ func discoverSkillManifests(
 			return fmt.Errorf("%w: resource path %q exceeds depth %d", ErrLimitExceeded, name, limits.MaxDepth)
 		}
 
-		if entry.IsDir() || entry.Name() != "SKILL.md" {
+		if entry.IsDir() || entry.Name() != "SKILL.md" || !entry.Type().IsRegular() {
 			return nil
 		}
 
@@ -258,6 +372,196 @@ func discoverSkillManifests(
 	slices.Sort(manifests)
 
 	return manifests, nil
+}
+
+//nolint:gocyclo,funlen // One walk callback keeps filesystem safety and all budgets auditable.
+func loadSkillResources(
+	ctx context.Context,
+	fys fs.FS,
+	skillRoot string,
+	manifestRoots map[string]struct{},
+	provenance string,
+	limits Limits,
+	totalBudget *readBudget,
+) ([]harness.SkillResource, []Diagnostic, error) {
+	resources := make([]harness.SkillResource, 0)
+	var diagnostics []Diagnostic
+	var skillBytes int64
+
+	err := fs.WalkDir(fys, skillRoot, func(name string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		if name != skillRoot {
+			if _, nestedSkill := manifestRoots[name]; nestedSkill && entry.IsDir() {
+				return fs.SkipDir
+			}
+		}
+
+		if entry.IsDir() || name == path.Join(skillRoot, "SKILL.md") {
+			return nil
+		}
+
+		relative := strings.TrimPrefix(name, skillRoot+"/")
+		if relative == name || !fs.ValidPath(relative) || relative == "." {
+			diagnostics = append(diagnostics, skillResourceDiagnostic(
+				provenance,
+				"skill_resource_ignored",
+				"resource has an invalid relative path",
+			))
+
+			return nil
+		}
+
+		if len(relative) > limits.MaxPathBytes || strings.Count(relative, "/")+1 > limits.MaxDepth {
+			diagnostics = append(diagnostics, skillResourceDiagnostic(
+				provenance,
+				"skill_resource_ignored",
+				fmt.Sprintf("resource %q exceeds path limits", relative),
+			))
+
+			return nil
+		}
+
+		info, inspectionDiagnostic := inspectSkillResource(entry, provenance, relative)
+		if inspectionDiagnostic != nil {
+			diagnostics = append(diagnostics, *inspectionDiagnostic)
+
+			return nil
+		}
+
+		if len(resources) >= limits.MaxResourcesPerSkill {
+			diagnostics = append(diagnostics, skillResourceDiagnostic(
+				provenance,
+				"skill_resource_limit",
+				fmt.Sprintf("resources beyond the first %d were ignored", limits.MaxResourcesPerSkill),
+			))
+
+			return fs.SkipAll
+		}
+
+		if info.Size() > limits.MaxResourceBytes ||
+			skillBytes > limits.MaxSkillResourceBytes-info.Size() {
+			diagnostics = append(diagnostics, skillResourceDiagnostic(
+				provenance,
+				"skill_resource_limit",
+				fmt.Sprintf("resource %q exceeds Skill resource limits", relative),
+			))
+
+			return nil
+		}
+
+		content, err := readResourceFile(fys, name, limits.MaxResourceBytes)
+		if err != nil {
+			if errors.Is(err, ErrLimitExceeded) {
+				diagnostics = append(diagnostics, skillResourceDiagnostic(
+					provenance,
+					"skill_resource_limit",
+					fmt.Sprintf("resource %q exceeds %d bytes", relative, limits.MaxResourceBytes),
+				))
+
+				return nil
+			}
+
+			diagnostics = append(diagnostics, skillResourceDiagnostic(
+				provenance,
+				"skill_resource_ignored",
+				fmt.Sprintf("resource %q cannot be read", relative),
+			))
+
+			return nil
+		}
+
+		if !totalBudget.add(int64(len(content))) {
+			return fmt.Errorf(
+				"%w: aggregate Skill resources exceed %d bytes",
+				ErrLimitExceeded,
+				limits.MaxTotalResourceBytes,
+			)
+		}
+
+		skillBytes += int64(len(content))
+		textResource := utf8.Valid(content) && !bytes.ContainsRune(content, '\x00')
+		resource := harness.SkillResource{
+			Path: relative,
+			Size: int64(len(content)),
+			Text: textResource,
+		}
+		if textResource {
+			resource.Content = string(content)
+		}
+
+		resources = append(resources, resource)
+
+		return nil
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("coding resource: load Skill resources: %w", err)
+	}
+
+	slices.SortFunc(resources, func(left, right harness.SkillResource) int {
+		return strings.Compare(left.Path, right.Path)
+	})
+	slices.SortFunc(diagnostics, compareDiagnostic)
+
+	return resources, diagnostics, nil
+}
+
+func readResourceFile(fys fs.FS, name string, maximum int64) ([]byte, error) {
+	file, err := fys.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = file.Close() }()
+
+	content, err := io.ReadAll(io.LimitReader(file, maximum+1))
+	if err != nil {
+		return nil, err
+	}
+
+	if int64(len(content)) > maximum {
+		return nil, fmt.Errorf("%w: resource %q exceeds %d bytes", ErrLimitExceeded, name, maximum)
+	}
+
+	return content, nil
+}
+
+func skillResourceDiagnostic(provenance, code, message string) Diagnostic {
+	return Diagnostic{Code: code, Resource: provenance, Message: message}
+}
+
+func inspectSkillResource(
+	entry fs.DirEntry,
+	provenance string,
+	relative string,
+) (fs.FileInfo, *Diagnostic) {
+	info, err := entry.Info()
+	if err != nil {
+		diagnostic := skillResourceDiagnostic(
+			provenance,
+			"skill_resource_ignored",
+			fmt.Sprintf("resource %q cannot be inspected", relative),
+		)
+
+		return nil, &diagnostic
+	}
+
+	if entry.Type()&fs.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		diagnostic := skillResourceDiagnostic(
+			provenance,
+			"skill_resource_ignored",
+			fmt.Sprintf("resource %q is not a regular file", relative),
+		)
+
+		return nil, &diagnostic
+	}
+
+	return info, nil
 }
 
 func loadUserBundles(

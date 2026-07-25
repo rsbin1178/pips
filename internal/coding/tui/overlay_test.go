@@ -293,6 +293,7 @@ type overlayController struct {
 	agentDetail      subagent.Detail
 	agentInspections []string
 	agentCanceled    []string
+	skillSnapshot    coding.SkillSnapshot
 }
 
 func newOverlayController(state coding.State) *overlayController {
@@ -329,6 +330,10 @@ func (*overlayController) Continue(context.Context) iter.Seq2[coding.Event, erro
 
 func (c *overlayController) ListSessions(context.Context) ([]session.Metadata, error) {
 	return append([]session.Metadata(nil), c.sessions...), nil
+}
+
+func (c *overlayController) Skills(context.Context) (coding.SkillSnapshot, error) {
+	return c.skillSnapshot.Clone(), nil
 }
 
 func (c *overlayController) ListSubagents(context.Context) ([]subagent.Summary, error) {

@@ -86,6 +86,7 @@ type Controller interface {
 	ListSubagents(context.Context) ([]subagent.Summary, error)
 	InspectSubagent(context.Context, string) (subagent.Detail, error)
 	InspectSubagentState(context.Context, string) (coding.State, error)
+	Skills(context.Context) (coding.SkillSnapshot, error)
 	WaitSubagent(context.Context, string) (subagent.Result, error)
 	CancelSubagent(context.Context, string) error
 	NewSession(context.Context) error

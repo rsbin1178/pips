@@ -53,4 +53,85 @@ func TestSkillCatalogRejectsInvalidSkill(t *testing.T) {
 
 	_, err = harness.NewSkillCatalog(harness.Skill{Name: "good", Content: "c"})
 	require.ErrorContains(t, err, "description")
+
+	_, err = harness.NewSkillCatalog(harness.Skill{
+		Name:        "good",
+		Description: "description",
+		Content:     "content",
+		Resources: []harness.SkillResource{
+			{Path: "../outside", Size: 1, Text: true, Content: "x"},
+		},
+	})
+	require.ErrorContains(t, err, "invalid resource path")
+}
+
+func TestSkillCatalogFiltersInvocationAndReadsResources(t *testing.T) {
+	t.Parallel()
+
+	catalog, err := harness.NewSkillCatalog(
+		harness.Skill{
+			Name:        "both",
+			Description: "Both paths",
+			Content:     "instructions",
+			Resources: []harness.SkillResource{
+				{Path: "references/guide.md", Size: 5, Text: true, Content: "guide"},
+				{Path: "assets/image.png", Size: 10},
+			},
+		},
+		harness.Skill{
+			Name:        "user-only",
+			Description: "User path",
+			Content:     "instructions",
+			Invocation:  harness.SkillInvocationUserOnly,
+		},
+		harness.Skill{
+			Name:        "model-only",
+			Description: "Model path",
+			Content:     "instructions",
+			Invocation:  harness.SkillInvocationModelOnly,
+		},
+		harness.Skill{
+			Name:        "disabled",
+			Description: "Neither path",
+			Content:     "instructions",
+			Invocation:  harness.SkillInvocationDisabled,
+		},
+	)
+	require.NoError(t, err)
+
+	userCatalog, err := catalog.ForUser()
+	require.NoError(t, err)
+	modelCatalog, err := catalog.ForModel()
+	require.NoError(t, err)
+	toolCatalog, err := catalog.ForModelWith("user-only")
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"both", "user-only"}, skillNames(userCatalog.List()))
+	assert.Equal(t, []string{"both", "model-only"}, skillNames(modelCatalog.List()))
+	assert.Equal(t, []string{"both", "model-only", "user-only"}, skillNames(toolCatalog.List()))
+
+	listed := catalog.List()
+	require.NotEmpty(t, listed[0].Resources)
+	assert.Empty(t, listed[0].Resources[0].Content)
+
+	resource, err := catalog.Resource("both", "references/guide.md")
+	require.NoError(t, err)
+	assert.Equal(t, "guide", resource.Content)
+
+	resource.Content = "mutated"
+	resource, err = catalog.Resource("both", "references/guide.md")
+	require.NoError(t, err)
+	assert.Equal(t, "guide", resource.Content)
+
+	_, err = catalog.Resource("both", "missing.md")
+	require.ErrorContains(t, err, `unknown resource "missing.md"`)
+}
+
+func skillNames(skills []harness.Skill) []string {
+	names := make([]string, 0, len(skills))
+	for _, skill := range skills {
+		names = append(names, skill.Name)
+	}
+
+	return names
 }

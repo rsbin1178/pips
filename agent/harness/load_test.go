@@ -88,14 +88,140 @@ func TestLoadSkillsFSRejectsInvalidManifest(t *testing.T) {
 	require.ErrorContains(t, err, "name must be")
 
 	_, err = harness.LoadSkillsFS(fstest.MapFS{
-		"bad/SKILL.md": &fstest.MapFile{Data: []byte("---\nname: bad\ndescription: d\nunknown: no\n---\nbody")},
+		"bad/SKILL.md": &fstest.MapFile{Data: []byte("---\nname: bad\ndescription: d\nname: duplicate\n---\nbody")},
 	})
-	require.ErrorContains(t, err, "unsupported manifest field")
+	require.ErrorContains(t, err, "duplicated")
 
 	_, err = harness.LoadSkillsFS(fstest.MapFS{
 		"bad/SKILL.md": &fstest.MapFile{Data: []byte("instructions only")},
 	})
 	require.ErrorContains(t, err, "requires YAML frontmatter")
+}
+
+func TestLoadSkillFSWithDiagnosticsSupportsEcosystemFrontmatter(t *testing.T) {
+	t.Parallel()
+
+	fSys := fstest.MapFS{
+		"actual-dir/SKILL.md": &fstest.MapFile{Data: []byte(`---
+name: declared-name
+description: >-
+  Review code with
+  the project conventions.
+license: MIT
+compatibility: Go 1.26+
+metadata:
+  author: pips
+  version: "1"
+  openclaw:
+    emoji: test
+allowed-tools: Read Grep Bash(go:*)
+user-invocable: false
+disable-model-invocation: false
+argument-hint: "[path]"
+unknown-extension:
+  enabled: true
+---
+Review the selected code.`)},
+	}
+
+	skill, diagnostics, err := harness.LoadSkillFSWithDiagnostics(
+		fSys,
+		"actual-dir/SKILL.md",
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "declared-name", skill.Name)
+	assert.Equal(t, "Review code with the project conventions.", skill.Description)
+	assert.Equal(t, []string{"Read", "Grep", "Bash(go:*)"}, skill.AllowedTools)
+	assert.Equal(t, map[string]string{"author": "pips", "version": "1"}, skill.Metadata)
+	assert.False(t, skill.UserInvocable())
+	assert.True(t, skill.ModelInvocable())
+	assert.Equal(t, harness.SkillInvocationModelOnly, skill.Invocation)
+
+	codes := make([]string, 0, len(diagnostics))
+	for _, diagnostic := range diagnostics {
+		codes = append(codes, diagnostic.Code)
+	}
+
+	assert.ElementsMatch(t, []string{
+		"directory_name_mismatch",
+		"metadata_value_ignored",
+		"unsupported_field",
+		"unknown_field",
+	}, codes)
+}
+
+func TestLoadSkillFSWithDiagnosticsDefaultsMissingName(t *testing.T) {
+	t.Parallel()
+
+	skill, diagnostics, err := harness.LoadSkillFSWithDiagnostics(
+		fstest.MapFS{
+			"review/SKILL.md": &fstest.MapFile{Data: []byte("---\ndescription: Review code.\n---\nInstructions.")},
+		},
+		"review/SKILL.md",
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "review", skill.Name)
+	require.Len(t, diagnostics, 1)
+	assert.Equal(t, "name_defaulted", diagnostics[0].Code)
+}
+
+func TestLoadSkillFSWithDiagnosticsNormalizesInvocation(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name                   string
+		frontmatter            string
+		expected               harness.SkillInvocation
+		expectedUserInvocable  bool
+		expectedModelInvocable bool
+	}{
+		{
+			name:                   "default",
+			expected:               harness.SkillInvocationDefault,
+			expectedUserInvocable:  true,
+			expectedModelInvocable: true,
+		},
+		{
+			name:                   "user only",
+			frontmatter:            "disable-model-invocation: true\n",
+			expected:               harness.SkillInvocationUserOnly,
+			expectedUserInvocable:  true,
+			expectedModelInvocable: false,
+		},
+		{
+			name:                   "model only",
+			frontmatter:            "user-invocable: false\n",
+			expected:               harness.SkillInvocationModelOnly,
+			expectedUserInvocable:  false,
+			expectedModelInvocable: true,
+		},
+		{
+			name:                   "disabled",
+			frontmatter:            "user-invocable: false\ndisable-model-invocation: true\n",
+			expected:               harness.SkillInvocationDisabled,
+			expectedUserInvocable:  false,
+			expectedModelInvocable: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			manifest := "---\nname: review\ndescription: Review code.\n" +
+				tt.frontmatter + "---\nInstructions."
+			skill, _, err := harness.LoadSkillFSWithDiagnostics(
+				fstest.MapFS{
+					"review/SKILL.md": &fstest.MapFile{Data: []byte(manifest)},
+				},
+				"review/SKILL.md",
+			)
+			require.NoError(t, err)
+			assert.Equal(t, tt.expected, skill.Invocation)
+			assert.Equal(t, tt.expectedUserInvocable, skill.UserInvocable())
+			assert.Equal(t, tt.expectedModelInvocable, skill.ModelInvocable())
+		})
+	}
 }
 
 func TestLoadTemplatesFS(t *testing.T) {
@@ -171,7 +297,7 @@ func TestWithSkillsDirLoadFailure(t *testing.T) {
 func TestLoadSkillsRealTree(t *testing.T) {
 	t.Parallel()
 
-	skills, err := harness.LoadSkills("../../.agent/skills")
+	skills, err := harness.LoadSkills("../../.agents/skills")
 	require.NoError(t, err)
 	require.NotEmpty(t, skills)
 

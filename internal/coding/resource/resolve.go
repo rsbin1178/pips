@@ -1,3 +1,4 @@
+//nolint:wsl_v5 // Winner selection and diagnostic normalization stay adjacent.
 package resource
 
 import (
@@ -43,13 +44,31 @@ func mergeSkillEntries(
 		}
 
 		if current.priority == candidate.priority {
-			return nil, nil, fmt.Errorf(
-				"%w: skill %q from %q and %q",
-				ErrDuplicate,
-				candidate.skill.Name,
-				current.provenance,
-				candidate.provenance,
-			)
+			if !current.direct || !candidate.direct {
+				return nil, nil, fmt.Errorf(
+					"%w: skill %q from %q and %q",
+					ErrDuplicate,
+					candidate.skill.Name,
+					current.provenance,
+					candidate.provenance,
+				)
+			}
+
+			winner, suppressed := current, candidate
+			if strings.Compare(candidate.provenance, current.provenance) < 0 {
+				winner, suppressed = candidate, current
+				byName[candidate.skill.Name] = candidate
+			}
+
+			diagnostics = append(diagnostics, Diagnostic{
+				Code:       "skill_suppressed",
+				Resource:   candidate.skill.Name,
+				Winner:     winner.provenance,
+				Suppressed: suppressed.provenance,
+				Message:    "same-precedence Skill was deterministically suppressed",
+			})
+
+			continue
 		}
 
 		winner, suppressed := current, candidate
@@ -70,6 +89,16 @@ func mergeSkillEntries(
 	result := make([]skillEntry, 0, len(byName))
 	for _, entry := range byName {
 		result = append(result, entry)
+	}
+	for index := range diagnostics {
+		if diagnostics[index].Code != "skill_suppressed" {
+			continue
+		}
+
+		winner, ok := byName[diagnostics[index].Resource]
+		if ok {
+			diagnostics[index].Winner = winner.provenance
+		}
 	}
 
 	slices.SortFunc(result, func(left, right skillEntry) int {

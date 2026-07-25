@@ -27,27 +27,35 @@ var (
 
 // Limits bound discovery and reads across direct Skills and Bundle manifests.
 type Limits struct {
-	MaxEntries         int
-	MaxSkillManifests  int
-	MaxBundleManifests int
-	MaxDepth           int
-	MaxPathBytes       int
-	MaxSkillBytes      int64
-	MaxTotalSkillBytes int64
-	Bundle             bundle.Limits
+	MaxEntries            int
+	MaxSkillManifests     int
+	MaxBundleManifests    int
+	MaxDepth              int
+	MaxPathBytes          int
+	MaxSkillBytes         int64
+	MaxTotalSkillBytes    int64
+	MaxResourcesPerSkill  int
+	MaxResourceBytes      int64
+	MaxSkillResourceBytes int64
+	MaxTotalResourceBytes int64
+	Bundle                bundle.Limits
 }
 
 // DefaultLimits returns conservative local resource bounds.
 func DefaultLimits() Limits {
 	return Limits{
-		MaxEntries:         4_096,
-		MaxSkillManifests:  256,
-		MaxBundleManifests: 64,
-		MaxDepth:           12,
-		MaxPathBytes:       4 << 10,
-		MaxSkillBytes:      1 << 20,
-		MaxTotalSkillBytes: 8 << 20,
-		Bundle:             bundle.DefaultLimits(),
+		MaxEntries:            4_096,
+		MaxSkillManifests:     256,
+		MaxBundleManifests:    64,
+		MaxDepth:              12,
+		MaxPathBytes:          4 << 10,
+		MaxSkillBytes:         1 << 20,
+		MaxTotalSkillBytes:    8 << 20,
+		MaxResourcesPerSkill:  128,
+		MaxResourceBytes:      1 << 20,
+		MaxSkillResourceBytes: 4 << 20,
+		MaxTotalResourceBytes: 16 << 20,
+		Bundle:                bundle.DefaultLimits(),
 	}
 }
 
@@ -79,6 +87,7 @@ type skillEntry struct {
 	skill      harness.Skill
 	provenance string
 	priority   int
+	direct     bool
 }
 
 // Bundles returns loaded Bundles in deterministic discovery order.
@@ -114,6 +123,7 @@ func (r Result) ResolveSkills(entries ...extension.SkillEntry) ([]harness.Skill,
 func cloneSkill(skill harness.Skill) harness.Skill {
 	skill.Metadata = maps.Clone(skill.Metadata)
 	skill.AllowedTools = slices.Clone(skill.AllowedTools)
+	skill.Resources = slices.Clone(skill.Resources)
 
 	return skill
 }
