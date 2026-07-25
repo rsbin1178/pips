@@ -189,6 +189,51 @@ func TestTreeDetectsReplacementAndClose(t *testing.T) {
 	assert.ErrorIs(t, tree.Mutate(t.Context(), func(*workspace.Mutation) error { return nil }), workspace.ErrClosed)
 }
 
+func TestMutationDirMkdirCreatesDirectChild(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	tree := openTree(t, root)
+
+	err := tree.Mutate(t.Context(), func(mutation *workspace.Mutation) error {
+		directory, openErr := mutation.OpenDir(".")
+		if openErr != nil {
+			return openErr
+		}
+		defer func() { _ = directory.Close() }()
+
+		return directory.Mkdir(".pips", 0o700)
+	})
+	require.NoError(t, err)
+
+	info, err := os.Stat(filepath.Join(root, ".pips"))
+	require.NoError(t, err)
+	assert.True(t, info.IsDir())
+	assert.Equal(t, fs.FileMode(0o700), info.Mode().Perm())
+}
+
+func TestMutationDirMkdirRejectsInvalidOrExistingChild(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(root, "existing"), 0o700))
+	tree := openTree(t, root)
+
+	err := tree.Mutate(t.Context(), func(mutation *workspace.Mutation) error {
+		directory, openErr := mutation.OpenDir(".")
+		if openErr != nil {
+			return openErr
+		}
+		defer func() { _ = directory.Close() }()
+
+		require.Error(t, directory.Mkdir("../outside", 0o700))
+		require.Error(t, directory.Mkdir("existing", 0o700))
+
+		return nil
+	})
+	require.NoError(t, err)
+}
+
 func TestTreeMutationHonorsCanceledContext(t *testing.T) {
 	t.Parallel()
 

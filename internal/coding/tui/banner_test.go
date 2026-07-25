@@ -34,6 +34,8 @@ func TestStartupBannerPrintsOnceBeforeStableTimeline(t *testing.T) {
 	assert.Contains(t, printed, "workspace")
 	assert.Contains(t, printed, "openai/test-model")
 	assert.Contains(t, printed, "Type / for commands")
+	assert.Contains(t, printed, "┌")
+	assert.Contains(t, printed, "└")
 	assert.Less(t, strings.Index(printed, "Pips"), strings.Index(printed, "inspect the repository"))
 	assert.NotContains(t, model.View().Content, "✻ Pips")
 	assert.NotContains(t, model.View().Content, "Start a conversation")

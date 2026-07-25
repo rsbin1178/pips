@@ -55,6 +55,7 @@ type runtimeInstance interface {
 	ListSubagents(context.Context) ([]subagent.Summary, error)
 	InspectSubagent(context.Context, string) (subagent.Detail, error)
 	Skills(context.Context) (coding.SkillSnapshot, error)
+	SetSkillEnabled(context.Context, coding.SkillID, bool) error
 	Steer(...ai.Message) error
 	FollowUp(...ai.Message) error
 	Cancel() error
@@ -233,6 +234,17 @@ func (c *Controller) Skills(ctx context.Context) (coding.SkillSnapshot, error) {
 	})
 
 	return snapshot.Clone(), err
+}
+
+// SetSkillEnabled persists one project-scoped Skill enablement decision.
+func (c *Controller) SetSkillEnabled(
+	ctx context.Context,
+	id coding.SkillID,
+	enabled bool,
+) error {
+	return c.withRuntime(func(runtime runtimeInstance) error {
+		return runtime.SetSkillEnabled(ctx, id, enabled)
+	})
 }
 
 // PreviewCompaction returns a point-in-time manual compaction plan.

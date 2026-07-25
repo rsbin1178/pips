@@ -107,6 +107,7 @@ func TestProjectPaths(t *testing.T) {
 	assert.Equal(t, ".pips/permissions.toml", paths.ProjectPermissionsFile())
 	assert.Equal(t, ".pips/mcp.json", paths.ProjectMCPFile())
 	assert.Equal(t, ".pips/skills", paths.ProjectSkillsDir())
+	assert.Equal(t, ".pips/skills.toml", paths.ProjectSkillsFile())
 	assert.Equal(t, ".agents/skills", paths.ProjectAgentSkillsDir())
 	assert.Equal(t, ".pips/bundles", paths.ProjectBundlesDir())
 }

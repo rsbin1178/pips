@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -15,8 +14,6 @@ import (
 	"github.com/rsbin/pips/internal/coding/session"
 )
 
-const sessionPickerSearchPrompt = "⌕ "
-
 type sessionPickerDataMsg struct {
 	generation uint64
 	sessions   []session.Metadata
@@ -24,16 +21,9 @@ type sessionPickerDataMsg struct {
 }
 
 func newSessionPickerState(previousInput string, theme colorTheme, noColor bool) routeState {
-	search := textinput.New()
-	search.Prompt = sessionPickerSearchPrompt
-	search.Placeholder = "Search…"
-	search.SetVirtualCursor(false)
-	search.SetStyles(sessionSearchStyles(theme, noColor))
-	search.Focus()
-
 	return routeState{
 		kind:          routeSessions,
-		search:        search,
+		search:        newRouteSearch(theme, noColor),
 		previousInput: previousInput,
 		openedAt:      time.Now(),
 	}
@@ -147,20 +137,8 @@ func (m *Model) filteredSessionPickerValues() []session.Metadata {
 
 func (m *Model) sessionPickerView() tea.View {
 	content, searchX, searchY := m.sessionPickerContent()
-	view := tea.NewView(content)
-	view.AltScreen = false
-	view.MouseMode = tea.MouseModeNone
-	view.WindowTitle = appTitle
-	view.Cursor = m.route.search.Cursor()
-	if view.Cursor != nil {
-		view.Cursor.X += searchX
-		view.Cursor.Y += searchY
-		if view.Cursor.X >= max(1, m.width) || view.Cursor.Y >= max(1, m.height) {
-			view.Cursor = nil
-		}
-	}
 
-	return view
+	return m.searchableRouteView(content, searchX, searchY)
 }
 
 func (m *Model) sessionPickerContent() (string, int, int) {
@@ -172,22 +150,37 @@ func (m *Model) sessionPickerContent() (string, int, int) {
 	if !m.options.NoColor {
 		title = lipgloss.NewStyle().Bold(true).Foreground(paletteFor(m.theme).session).Render(title)
 	}
-	search := m.sessionPickerSearchBox(width)
+	search, searchX, searchInnerY := m.routeSearchBox(width)
 	prefix := []string{invocation, "", separator, "", title, "", search}
-	searchY := lipgloss.Height(lipgloss.JoinVertical(lipgloss.Left, prefix[:len(prefix)-1]...))
-	searchX := 0
+	listPadding := true
+	if height < 18 {
+		prefix = []string{invocation, separator, title, search}
+		listPadding = false
+	}
+	searchY := lipgloss.Height(lipgloss.JoinVertical(
+		lipgloss.Left,
+		prefix[:len(prefix)-1]...,
+	)) + searchInnerY
 	footer := sessionPickerFooter(width)
 	if !m.options.NoColor {
 		footer = lipgloss.NewStyle().Foreground(paletteFor(m.theme).muted).Render(footer)
 	}
 	footer = ansi.Truncate(footer, width, "…")
 
-	fixedHeight := lipgloss.Height(lipgloss.JoinVertical(lipgloss.Left, prefix...)) + 3
+	paddingHeight := 3
+	if !listPadding {
+		paddingHeight = 0
+	}
+	fixedHeight := lipgloss.Height(lipgloss.JoinVertical(lipgloss.Left, prefix...)) + paddingHeight
 	available := max(1, height-fixedHeight)
 	list := m.sessionPickerList(available)
 	parts := make([]string, 0, len(prefix)+4)
 	parts = append(parts, prefix...)
-	parts = append(parts, "", list, "", footer)
+	if listPadding {
+		parts = append(parts, "", list, "", footer)
+	} else {
+		parts = append(parts, list, footer)
+	}
 	content := lipgloss.JoinVertical(lipgloss.Left, parts...)
 
 	return truncateHeight(content, height), searchX, searchY
@@ -211,10 +204,6 @@ func (m *Model) sessionPickerSeparator(width int) string {
 	}
 
 	return lipgloss.NewStyle().Foreground(paletteFor(m.theme).session).Render(value)
-}
-
-func (m *Model) sessionPickerSearchBox(width int) string {
-	return ansi.Truncate(m.route.search.View(), max(1, width), "…")
 }
 
 func (m *Model) sessionPickerList(maximum int) string {

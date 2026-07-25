@@ -33,6 +33,7 @@ import (
 	"github.com/rsbin/pips/internal/coding/paths"
 	"github.com/rsbin/pips/internal/coding/resource"
 	"github.com/rsbin/pips/internal/coding/session"
+	"github.com/rsbin/pips/internal/coding/skillsettings"
 	"github.com/rsbin/pips/internal/coding/subagent"
 	"github.com/rsbin/pips/internal/coding/tools"
 	"github.com/rsbin/pips/internal/coding/workspace"
@@ -123,6 +124,8 @@ type Runtime struct {
 	extensions    *extension.Runtime
 	compiled      []extension.Extension
 	resources     resource.Result
+	skillSettings *skillsettings.Manager
+	skillPolicy   skillsettings.Snapshot
 	trusted       bool
 	controller    *approval.Controller
 	resolver      activeResolver
@@ -297,6 +300,17 @@ func Open(ctx context.Context, options OpenOptions) (_ *Runtime, returnErr error
 	}
 	stack.add(func(context.Context) error { return inspector.Close() })
 
+	skillSettings, err := skillsettings.New(skillsettings.Options{
+		Tree: tree, Git: inspector, Trusted: options.Trusted, Limits: skillsettings.DefaultLimits(),
+	})
+	if err != nil {
+		return nil, err
+	}
+	skillPolicy, err := skillSettings.Load(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	loadedResources, err := resource.Load(ctx, resource.Options{
 		Paths: options.Paths, Tree: tree, ProjectTrusted: options.Trusted,
 		Limits: configured.ResourceLimits,
@@ -360,6 +374,8 @@ func Open(ctx context.Context, options OpenOptions) (_ *Runtime, returnErr error
 		extensions:          extensionRuntime,
 		compiled:            slices.Clone(options.Extensions),
 		resources:           loadedResources,
+		skillSettings:       skillSettings,
+		skillPolicy:         skillPolicy,
 		trusted:             options.Trusted,
 		observers:           newAgentObservers(options.AgentObservers),
 		telemetry:           newTelemetryObservers(options.TelemetryObservers),
@@ -455,7 +471,7 @@ func Open(ctx context.Context, options OpenOptions) (_ *Runtime, returnErr error
 	}
 
 	runtime.observeSessionOpened(ctx, resumed)
-	runtime.recordOpenDiagnostics(ctx, loadedResources, connections)
+	runtime.recordOpenDiagnostics(ctx, connections)
 	runtime.startNotificationCoordinator(ctx)
 	stack.values = nil
 
@@ -677,15 +693,8 @@ func activateResources(
 
 func (r *Runtime) recordOpenDiagnostics(
 	ctx context.Context,
-	loaded resource.Result,
 	connections *codingmcp.Connections,
 ) {
-	for _, diagnostic := range loaded.Diagnostics() {
-		r.recordDiagnostic(ctx, IntegrationDiagnostic{
-			Component: "resource", Code: diagnostic.Code, Message: diagnostic.Message,
-		})
-	}
-
 	for _, diagnostic := range connections.Diagnostics() {
 		r.recordDiagnostic(ctx, IntegrationDiagnostic{
 			Component: componentMCP, Code: diagnostic.Code, Message: diagnostic.Message, Disabled: true,
@@ -885,6 +894,10 @@ func (r *Runtime) Reload(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	nextSkillPolicy, err := r.skillSettings.Load(reloadCtx)
+	if err != nil {
+		return err
+	}
 
 	options := OpenOptions{
 		Workspace: r.workspace, Trusted: r.trusted, Paths: r.paths,
@@ -913,8 +926,9 @@ func (r *Runtime) Reload(ctx context.Context) error {
 	previous := r.connections
 	r.connections = connections
 	r.resources = loaded
+	r.skillPolicy = nextSkillPolicy
 	r.mu.Unlock()
-	r.recordOpenDiagnostics(ctx, loaded, connections)
+	r.recordOpenDiagnostics(ctx, connections)
 
 	return previous.Close()
 }

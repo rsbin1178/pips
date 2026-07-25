@@ -133,6 +133,9 @@ func ProjectMCPFile() string { return path.Join(projectDir, "mcp.json") }
 // ProjectSkillsDir returns the workspace-relative project skills directory.
 func ProjectSkillsDir() string { return path.Join(projectDir, "skills") }
 
+// ProjectSkillsFile returns the workspace-relative local Skill settings path.
+func ProjectSkillsFile() string { return path.Join(projectDir, "skills.toml") }
+
 // ProjectAgentSkillsDir returns the workspace-relative shared Agent Skills
 // directory.
 func ProjectAgentSkillsDir() string { return path.Join(agentDir, "skills") }

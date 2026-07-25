@@ -26,7 +26,7 @@ var commands = []commandDescriptor{
 	{name: "new", description: "start a new session", idleOnly: true},
 	{name: "resume", description: "resume a workspace session", idleOnly: true},
 	{name: "agents", description: "inspect read-only specialist runs", idleOnly: true},
-	{name: "skills", description: "browse and select available Skills", idleOnly: true},
+	{name: "skills", description: "enable or disable project Skills", idleOnly: true},
 	{name: "model", description: "switch the process-local model", idleOnly: true},
 	{name: "tree", description: "navigate the current session tree", idleOnly: true},
 	{name: "fork", description: "fork a node into a new session", idleOnly: true},
@@ -158,7 +158,7 @@ func (m *Model) executeCommand(command commandDescriptor) (tea.Model, tea.Cmd) {
 		previousInput := m.picker.previousInput
 		m.closeCommandPicker(false)
 
-		return m, m.openSkillPickerForInput(previousInput)
+		return m, m.openSkillsRoute(previousInput)
 	case "tree":
 		m.closeCommandPicker(false)
 
