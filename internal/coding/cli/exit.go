@@ -22,7 +22,8 @@ const (
 	ExitSuccess     = 0
 	ExitFailure     = 1
 	ExitUsage       = 2
-	ExitApproval    = 3
+	ExitInput       = 3
+	ExitApproval    = ExitInput
 	ExitSecurity    = 4
 	ExitInterrupted = 130
 	ExitTerminated  = 143
@@ -58,6 +59,7 @@ func ExitCode(err error) int {
 
 func isApprovalError(err error) bool {
 	return matchesAny(err,
+		coding.ErrInputRequired,
 		approval.ErrApprovalRequired,
 		approval.ErrOutcomeUnknown,
 		approval.ErrInvalidResolution,

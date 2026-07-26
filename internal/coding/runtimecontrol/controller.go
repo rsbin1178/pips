@@ -15,10 +15,12 @@ import (
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding"
 	"github.com/rsbin/pips/internal/coding/approval"
+	"github.com/rsbin/pips/internal/coding/changes"
 	"github.com/rsbin/pips/internal/coding/config"
 	"github.com/rsbin/pips/internal/coding/credential"
 	"github.com/rsbin/pips/internal/coding/model"
 	"github.com/rsbin/pips/internal/coding/modelcatalog"
+	"github.com/rsbin/pips/internal/coding/question"
 	"github.com/rsbin/pips/internal/coding/session"
 	"github.com/rsbin/pips/internal/coding/subagent"
 )
@@ -43,10 +45,22 @@ type ModelState struct {
 	Overridden bool
 }
 
+// ModeState describes the configured and effective process-local operating mode.
+type ModeState struct {
+	Current    coding.OperatingMode
+	Configured coding.OperatingMode
+	Overridden bool
+}
+
 type runtimeInstance interface {
 	Prompt(context.Context, ...ai.Message) iter.Seq2[coding.Event, error]
 	Continue(context.Context) iter.Seq2[coding.Event, error]
 	Resolve(context.Context, approval.Resolution) iter.Seq2[coding.Event, error]
+	ResolveQuestion(context.Context, question.Resolution) iter.Seq2[coding.Event, error]
+	RejectQuestion(context.Context, string, string) iter.Seq2[coding.Event, error]
+	SetMode(context.Context, coding.OperatingMode) error
+	WorkspaceStatus(context.Context) (changes.WorktreeStatus, error)
+	PlanDocumentPath() (string, error)
 	Tree(context.Context) (coding.SessionTree, error)
 	PreviewCompaction(context.Context) (coding.CompactionPreview, error)
 	Navigate(context.Context, string, bool) iter.Seq2[coding.Event, error]
@@ -96,6 +110,9 @@ type Controller struct {
 	sessionID    string
 	lastState    coding.State
 	overridden   bool
+	mode         coding.OperatingMode
+	baseMode     coding.OperatingMode
+	modeOverride bool
 	active       int
 
 	replacing   bool
@@ -177,6 +194,8 @@ func newController(
 		runtime:      opened,
 		sessionID:    state.SessionID,
 		lastState:    state,
+		mode:         options.Config.Mode,
+		baseMode:     options.Config.Mode,
 		closeDone:    make(chan struct{}),
 		deps:         deps,
 	}, nil
@@ -210,6 +229,29 @@ func (c *Controller) Resolve(
 	})
 }
 
+// ResolveQuestion delegates one exact structured input response.
+func (c *Controller) ResolveQuestion(
+	ctx context.Context,
+	resolution question.Resolution,
+) iter.Seq2[coding.Event, error] {
+	cloned := question.CloneResolution(resolution)
+
+	return c.sequence(func(runtime runtimeInstance) iter.Seq2[coding.Event, error] {
+		return runtime.ResolveQuestion(ctx, cloned)
+	})
+}
+
+// RejectQuestion delegates one explicit structured-input cancellation.
+func (c *Controller) RejectQuestion(
+	ctx context.Context,
+	requestID string,
+	schemaDigest string,
+) iter.Seq2[coding.Event, error] {
+	return c.sequence(func(runtime runtimeInstance) iter.Seq2[coding.Event, error] {
+		return runtime.RejectQuestion(ctx, requestID, schemaDigest)
+	})
+}
+
 // Tree returns the current Runtime's bounded Session tree.
 func (c *Controller) Tree(ctx context.Context) (coding.SessionTree, error) {
 	var tree coding.SessionTree
@@ -221,6 +263,35 @@ func (c *Controller) Tree(ctx context.Context) (coding.SessionTree, error) {
 	})
 
 	return tree, err
+}
+
+// WorkspaceStatus returns a bounded point-in-time Git snapshot while holding
+// the Controller lease against Runtime replacement.
+func (c *Controller) WorkspaceStatus(
+	ctx context.Context,
+) (changes.WorktreeStatus, error) {
+	var status changes.WorktreeStatus
+	err := c.withRuntime(func(runtime runtimeInstance) error {
+		var err error
+		status, err = runtime.WorkspaceStatus(ctx)
+
+		return err
+	})
+
+	return status, err
+}
+
+// PlanDocumentPath returns the current Session's private Plan display path.
+func (c *Controller) PlanDocumentPath() (string, error) {
+	var path string
+	err := c.withRuntime(func(runtime runtimeInstance) error {
+		var err error
+		path, err = runtime.PlanDocumentPath()
+
+		return err
+	})
+
+	return path, err
 }
 
 // Skills returns the current Runtime's content-free Skill discovery snapshot.
@@ -379,6 +450,43 @@ func (c *Controller) Model() ModelState {
 		},
 		Resolved: c.resolved.Clone(), Overridden: c.overridden,
 	}
+}
+
+// Mode returns the configured and effective process-local operating mode.
+func (c *Controller) Mode() ModeState {
+	if c == nil {
+		return ModeState{}
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return ModeState{
+		Current: c.mode, Configured: c.baseMode, Overridden: c.modeOverride,
+	}
+}
+
+// SetMode changes the current Runtime and Controller state under one lease.
+// It neither persists configuration nor writes Session history.
+func (c *Controller) SetMode(ctx context.Context, mode coding.OperatingMode) error {
+	runtime, release, err := c.acquire()
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	if err := runtime.SetMode(ctx, mode); err != nil {
+		return err
+	}
+
+	c.mu.Lock()
+	c.mode = mode
+	c.modeOverride = mode != c.baseMode
+	c.effective.Mode = mode
+	c.lastState = runtime.Snapshot()
+	c.mu.Unlock()
+
+	return nil
 }
 
 // Models returns the immutable local catalog entries available to the TUI.
@@ -902,6 +1010,8 @@ func (c *Controller) finishReplacement(next replacement) {
 	c.sessionID = next.sessionID
 	c.lastState = next.state.Clone()
 	c.overridden = next.overridden
+	c.mode = next.config.Mode
+	c.modeOverride = c.mode != c.baseMode
 	done := c.replaceDone
 	c.replaceDone = nil
 	c.replacing = false
@@ -975,7 +1085,7 @@ func openRuntime(
 	state := runtime.Snapshot()
 	if !state.SessionOpen || state.SessionID == "" ||
 		state.Provider != options.Resolved.Ref.Provider ||
-		state.ModelID != options.Resolved.Ref.Model {
+		state.ModelID != options.Resolved.Ref.Model || state.Mode != options.Config.Mode {
 		closeErr := closeRuntimeBounded(ctx, runtime)
 
 		return nil, coding.State{}, errors.Join(

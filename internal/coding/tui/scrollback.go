@@ -130,7 +130,6 @@ func (m *Model) printPreparedScrollback(content string, waitForRender bool) tea.
 			// physical row with a zero-width terminal reset sequence.
 			chunk = "\x1b[0m"
 		}
-
 		commands = append(commands, tea.Println(chunk))
 	}
 

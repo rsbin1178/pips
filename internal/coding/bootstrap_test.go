@@ -19,6 +19,7 @@ func TestBootstrapStateAcceptsCustomProviderMetadata(t *testing.T) {
 		SessionID: "session-1",
 		Provider:  provider,
 		ModelID:   "deepseek-v4-flash",
+		Mode:      ModeAgent,
 		Path: []harness.Entry{{
 			Kind: harness.KindModelChange, ID: "entry-1",
 			Provider: provider, ModelID: "deepseek-v4-flash",
@@ -33,7 +34,7 @@ func TestBootstrapStateRejectsInvalidCustomProviderMetadata(t *testing.T) {
 	t.Parallel()
 
 	_, err := BootstrapState(BootstrapOptions{
-		SessionID: "session-1", Provider: "OpenCode", ModelID: "model",
+		SessionID: "session-1", Provider: "OpenCode", ModelID: "model", Mode: ModeAgent,
 	})
 	require.ErrorIs(t, err, ErrInvalidEvent)
 }
@@ -63,7 +64,7 @@ func TestBootstrapStateRebuildsBoundedTranscriptTreeAndCompaction(t *testing.T) 
 
 	result, err := BootstrapState(BootstrapOptions{
 		SessionID: "session-1", Provider: ai.ProviderOpenAI, ModelID: "gpt-test",
-		Path: path, Tree: tree,
+		Mode: ModePlan, Path: path, Tree: tree,
 	})
 	require.NoError(t, err)
 	require.Len(t, result.State.Transcript, maxEventItems)
@@ -71,4 +72,5 @@ func TestBootstrapStateRebuildsBoundedTranscriptTreeAndCompaction(t *testing.T) 
 	assert.Equal(t, tree.LeafID, result.State.Tree.LeafID)
 	assert.Equal(t, 9000, result.State.Compaction.TokensBefore)
 	assert.Equal(t, "entry-4090", result.State.Compaction.FirstKeptID)
+	assert.Equal(t, ModePlan, result.State.Mode)
 }

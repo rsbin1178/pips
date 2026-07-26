@@ -22,6 +22,7 @@ func TestNew(t *testing.T) {
 	assert.Equal(t, filepath.Join(base, "config.toml"), layout.ConfigFile())
 	assert.Equal(t, filepath.Join(base, "workspaces.json"), layout.WorkspacesFile())
 	assert.Equal(t, filepath.Join(base, "sessions"), layout.SessionsDir())
+	assert.Equal(t, filepath.Join(base, "plans"), layout.PlansDir())
 	assert.Equal(t, filepath.Join(base, "skills"), layout.SkillsDir())
 	assert.Empty(t, layout.AgentSkillsDir())
 	assert.Equal(t, filepath.Join(base, "bundles"), layout.BundlesDir())

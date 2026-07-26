@@ -28,17 +28,37 @@ API_KEY=... pips exec \
   --model openai/model-id \
   --reasoning high \
   --variant deep \
+  --mode plan \
   --sandbox workspace-write \
-  "fix the build"
+  "plan the build fix"
 ```
 
 The default configuration is `~/.pips/config.toml`. `--config <path>` selects
 one replacement file; it does not inherit the default file, and project
 `.pips/config.toml` is never discovered implicitly. `PIPS_MODEL`,
-`PIPS_REASONING`, and `PIPS_VARIANT` mirror the three selection flags. Protocol
-and endpoint are registry data, not command-line fields. The removed
+`PIPS_REASONING`, `PIPS_VARIANT`, and `PIPS_MODE` mirror their selection flags.
+Operating mode uses `agent < config.toml < PIPS_MODE < --mode`; supported values
+are exactly `agent` and `plan`. Protocol and endpoint are registry data, not
+command-line fields. The removed
 `--provider`, `--model-api`, `PIPS_PROVIDER`, `PIPS_MODEL_API`, and `[model]`
 table are rejected rather than normalized.
+
+A minimal mode and model configuration is:
+
+```toml
+mode = "agent"
+
+[providers.anthropic.models."model-id"]
+```
+
+`pips exec --mode plan` uses the same Runtime but exposes only read-only
+workspace/external capabilities plus the session-bound Plan document at
+`~/.pips/plans/<session-id>.md`. The model never supplies its path. New Plan
+documents are created only by the first successful `write_plan`; Resume reuses
+the binding and Fork copies an existing snapshot. Completing the document does
+not switch to Agent Mode or authorize implementation. Plan Mode is a capability
+boundary, not secret isolation: files readable by the Pips process remain
+readable.
 
 A higher-priority `--model` or `PIPS_MODEL` selection starts from that target
 model's default variant and reasoning; it never inherits those choices from the
@@ -153,6 +173,9 @@ selects a Skill for one request. The same exact-reference semantics apply to
 `--session <id>` reopens only that durable session in the current workspace. A
 reopened pending operation is reconciled first. If a human decision is still
 needed, `exec` exits with code 3 without approving, retrying, or resolving it.
+The same applies when `ask_user` requests structured input: non-interactive
+execution returns classified `input_required` rather than selecting an answer
+or waiting indefinitely.
 
 ## Output
 
@@ -176,7 +199,7 @@ prefix and the process exits nonzero.
 | 0 | Successful interaction and cleanup |
 | 1 | Runtime, provider, output, or cleanup failure |
 | 2 | Invalid input, flags, configuration, credential, workspace, or session |
-| 3 | Approval/recovery decision required or denied |
+| 3 | Approval/recovery decision or structured user input required/denied |
 | 4 | Sandbox, policy, authorization, or workspace-integrity failure |
 | 130 | Interrupted (`SIGINT`) |
 | 143 | Terminated (`SIGTERM`) |

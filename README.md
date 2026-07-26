@@ -66,6 +66,8 @@ in the target environment. Native Windows and WSL1 are not supported.
 Configure a model in `~/.pips/config.toml`, for example:
 
 ```toml
+mode = "agent"
+
 [providers.openai.models."model-id"]
 ```
 
@@ -141,6 +143,7 @@ for transcript scrolling.
 |---|---|
 | Send / steer while running | `Enter` |
 | Queue follow-up while running | `Tab` |
+| Toggle Agent / Plan Mode while idle | `Shift+Tab` |
 | Insert newline | `Ctrl+J` or `Shift+Enter` when supported |
 | Open command palette | `/` on an empty composer or `Ctrl+K` |
 | Open latest tool / child Agent timeline; return to parent | `Ctrl+T` |
@@ -153,9 +156,9 @@ selected child's full-width ordinary Session timeline, including visible
 assistant output and Tool activity, and toggles back to the parent. Other Tools
 retain ordinary detail behavior.
 
-The command palette provides `/new`, `/resume`, `/agents`, `/skills`, `/model`,
-`/tree`, `/fork`, `/compact`, `/diff`, `/reload`, `/status`, `/help`, and
-`/quit`. `/skills` browses user-invocable Skills from native
+The command palette provides `/new`, `/resume`, `/plan`, `/mode`, `/agents`,
+`/skills`, `/model`, `/tree`, `/fork`, `/compact`, `/review`, `/diff`,
+`/reload`, `/status`, `/help`, and `/quit`. `/skills` browses user-invocable Skills from native
 `~/.pips/skills`/`.pips/skills` and shared
 `~/.agents/skills`/`.agents/skills` roots. Type `$` at a token boundary to
 filter the same list and insert an exact `$skill-name` reference. Explicit
@@ -173,6 +176,24 @@ new or resumed sessions in that process inherit the selection, but Session
 history and `config.toml` are not modified. Restarting pips returns to the
 normal default/user-file/env/flag selection. Existing Session model metadata
 is tolerated for compatibility and ignored.
+
+Operating mode is process-local. Configure `mode = "agent"` or `mode = "plan"`,
+or override it with `PIPS_MODE`/`--mode`. `/plan` enters Plan Mode and `/mode`
+selects either mode; neither action edits configuration or Session history.
+Plan Mode removes workspace writes, arbitrary Shell, privileged MCP/Extension
+tools, and other external side effects at the Runtime capability boundary. Its
+only write exception is the current private document at
+`~/.pips/plans/<session-id>.md`; the model cannot select that path. New creates
+the document lazily, Resume reuses it, and Fork copies an existing snapshot.
+Finishing a plan never grants implementation permission or switches modes.
+Plan Mode can still read files visible to the process, so it is not a secret
+isolation boundary.
+
+`/diff` asynchronously reads fresh Git branch, staged, unstaged, conflict, and
+untracked state without modifying the repository. Product metadata under
+`.pips` is omitted. Pips never automatically stages, commits, resets, cleans,
+stashes, switches branches, or rewrites history. Interaction-only changes stay
+separately labeled as `Pips-attributed changes`.
 
 Set `NO_COLOR=1` for an ASCII, color-free view. The TUI stays in the terminal's
 main buffer so stable conversation output remains selectable and scrollable,

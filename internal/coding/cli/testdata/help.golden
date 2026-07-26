@@ -17,6 +17,7 @@ Flags:
       --approval string    approval mode
       --config string      user configuration file
   -h, --help               help for pips
+      --mode string        operating mode (agent or plan)
       --model string       model in provider/model form
       --reasoning string   model reasoning level
       --sandbox string     sandbox mode

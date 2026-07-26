@@ -6,6 +6,7 @@ import (
 
 	"github.com/rsbin/pips/agent"
 	"github.com/rsbin/pips/ai"
+	"github.com/rsbin/pips/internal/coding/question"
 )
 
 func cloneEvent(event Event) Event {
@@ -32,6 +33,8 @@ func cloneEventPayload(payload EventPayload) EventPayload {
 	case CompactionStarted:
 		return value
 	case CompactionCompleted:
+		return value
+	case ModeChanged:
 		return value
 	case InteractionStarted:
 		value.NotificationIDs = slices.Clone(value.NotificationIDs)
@@ -71,6 +74,14 @@ func cloneEventPayload(payload EventPayload) EventPayload {
 	case ApprovalUnknown:
 		return cloneApprovalUnknown(value)
 	case ApprovalResolved:
+		return value
+	case QuestionRequired:
+		value.Request = question.CloneRequest(value.Request)
+		return value
+	case QuestionResolved:
+		value.Resolution = question.CloneResolution(value.Resolution)
+		return value
+	case QuestionRejected:
 		return value
 	case WorkspaceChanged:
 		return cloneWorkspaceChanged(value)

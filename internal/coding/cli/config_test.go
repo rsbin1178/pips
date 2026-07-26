@@ -24,6 +24,7 @@ func TestConfigShowResolvesSelectedFileAndChangedFlags(t *testing.T) {
 	fixture := newCLIFixture(t)
 	writeCLIFile(t, fixture.layout.ConfigFile(), `
 tool_search = true
+mode = "plan"
 
 [providers.openai.models."env-model"]
 reasoning_levels = ["low", "high"]
@@ -64,6 +65,7 @@ model = "anthropic/project-model"
 	assert.Contains(t, output, `resolved.request.temperature = 0.25`)
 	assert.Contains(t, output, `resolved.request.logprobs = true`)
 	assert.Contains(t, output, `tool_search = false # source=flag detail="--tool-search"`)
+	assert.Contains(t, output, `mode = "plan" # source=config_file detail="`)
 	assert.NotContains(t, output, "model_max_output_tokens")
 	assert.NotContains(t, output, "project-model")
 
@@ -76,6 +78,7 @@ model = "anthropic/project-model"
 	assert.Contains(t, output, `model = "openai/env-model" # source=environment detail="PIPS_MODEL"`)
 	assert.Contains(t, output, `resolved.protocol = "openai/responses"`)
 	assert.Contains(t, output, `tool_search = true # source=config_file detail="`)
+	assert.Contains(t, output, `mode = "plan" # source=config_file detail="`)
 	assert.NotContains(t, output, "project-model")
 }
 

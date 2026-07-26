@@ -2,6 +2,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding"
+	"github.com/rsbin/pips/internal/coding/question"
 	"github.com/rsbin/pips/internal/coding/subagent"
 )
 
@@ -20,6 +22,7 @@ const (
 	blockAssistant
 	blockDraft
 	blockTool
+	blockQuestion
 	blockDiagnostic
 	blockChange
 	blockError
@@ -103,6 +106,13 @@ func projectTimelineExcluding(
 		for activityIndex < len(activities) && activities[activityIndex].position <= position {
 			activity := activities[activityIndex]
 			activityIndex++
+			if block, visible := projectQuestionToolActivity(activity); activity.name == question.ToolName {
+				if visible {
+					blocks = append(blocks, block)
+				}
+
+				continue
+			}
 			if isSubagentToolName(activity.name) {
 				blocks = append(blocks, projectSubagentToolActivity(activity, state.Subagents))
 
@@ -115,6 +125,13 @@ func projectTimelineExcluding(
 	for activityIndex < len(activities) {
 		activity := activities[activityIndex]
 		activityIndex++
+		if block, visible := projectQuestionToolActivity(activity); activity.name == question.ToolName {
+			if visible {
+				blocks = append(blocks, block)
+			}
+
+			continue
+		}
 		if isSubagentToolName(activity.name) {
 			blocks = append(blocks, projectSubagentToolActivity(activity, state.Subagents))
 
@@ -137,7 +154,7 @@ func projectTimelineExcluding(
 			summary += " · diff truncated"
 		}
 		blocks = append(blocks, timelineBlock{
-			kind: blockChange, title: "Changes", body: summary,
+			kind: blockChange, title: "Pips-attributed changes", body: summary,
 			position: len(state.Transcript),
 		})
 	}
@@ -237,6 +254,74 @@ func projectToolActivity(activity toolActivity) timelineBlock {
 		kind: blockTool, id: activity.id, position: activity.position,
 		spacing: spacingCompact, tools: []toolActivity{activity},
 	}
+}
+
+func projectQuestionToolActivity(activity toolActivity) (timelineBlock, bool) {
+	if activity.name != question.ToolName {
+		return timelineBlock{}, false
+	}
+	if activity.state == toolStateRunning {
+		return timelineBlock{}, false
+	}
+
+	block := timelineBlock{
+		kind: blockQuestion, position: activity.position,
+		spacing: spacingCompact,
+	}
+	if activity.state == toolStateFailed || activity.state == toolStateInterrupted {
+		block.title = "Question canceled"
+		block.body = "No answer was submitted."
+
+		return block, true
+	}
+
+	var spec question.Spec
+	if err := json.Unmarshal(activity.arguments, &spec); err != nil ||
+		question.ValidateSpec(spec) != nil {
+		block.title = "Question answered"
+		block.body = "Structured response submitted."
+
+		return block, true
+	}
+
+	var result struct {
+		Answers []question.Answer `json:"answers"`
+		Chat    string            `json:"chat"`
+	}
+	if err := json.Unmarshal([]byte(activity.result), &result); err != nil {
+		block.title = "Question answered"
+		block.body = "Structured response submitted."
+
+		return block, true
+	}
+	if result.Chat != "" {
+		block.title = "Discussed question"
+		block.body = result.Chat
+
+		return block, true
+	}
+	if len(result.Answers) != len(spec.Questions) {
+		block.title = "Question answered"
+		block.body = "Structured response submitted."
+
+		return block, true
+	}
+
+	lines := make([]string, 0, len(result.Answers))
+	for index, answer := range result.Answers {
+		value := answer.Custom
+		if value == "" {
+			value = strings.Join(answer.Selections, ", ")
+		}
+		if value == "" {
+			value = "Answered"
+		}
+		lines = append(lines, spec.Questions[index].Header+": "+value)
+	}
+	block.title = "Answered questions"
+	block.body = strings.Join(lines, "\n")
+
+	return block, true
 }
 
 func groupExploreBlocks(blocks []timelineBlock) []timelineBlock {
@@ -813,6 +898,8 @@ func timelineTitleStyle(kind blockKind, theme colorTheme) lipgloss.Style {
 		color = "#AF87FF"
 	case blockTool:
 		color = "#5FD7AF"
+	case blockQuestion:
+		color = "#5FAFFF"
 	case blockChange:
 		color = "#87D75F"
 	case blockError:

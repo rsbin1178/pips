@@ -8,7 +8,11 @@ import (
 	"github.com/rsbin/pips/internal/coding/workspace"
 )
 
-const localCatalogID = "coding"
+const (
+	localCatalogID = "coding"
+	tagBuiltin     = "builtin"
+	tagCoding      = "coding"
+)
 
 type service struct {
 	tree       *workspace.Tree
@@ -126,6 +130,6 @@ func localEntry(tool agent.Tool, risk catalog.Risk, tags ...string) catalog.Entr
 			ID:   localCatalogID,
 		},
 		Risk: risk,
-		Tags: append([]string{"builtin", "coding"}, tags...),
+		Tags: append([]string{tagBuiltin, tagCoding}, tags...),
 	}
 }

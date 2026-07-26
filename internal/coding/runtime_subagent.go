@@ -109,12 +109,16 @@ func (r *Runtime) openChildProjection(ctx context.Context, event subagent.Event)
 		eventTime,
 		"",
 		EventSessionOpened,
-		SessionOpened{Provider: r.model.Provider(), ModelID: r.model.ModelID()},
+		SessionOpened{
+			Provider: r.model.Provider(), ModelID: r.model.ModelID(),
+			Mode: r.currentOperatingMode(),
+		},
 	); err != nil {
 		return err
 	}
 	if err := publisher.publishChildGeneratedLocked(
-		ctx, child, eventTime, "", EventInteractionStarted, InteractionStarted{},
+		ctx, child, eventTime, "", EventInteractionStarted,
+		InteractionStarted{Mode: r.currentOperatingMode()},
 	); err != nil {
 		return err
 	}
@@ -308,7 +312,8 @@ func (r *Runtime) InspectSubagentState(
 
 	state := State{
 		SessionID: childSessionID, SessionOpen: true,
-		Provider: r.model.Provider(), ModelID: r.model.ModelID(), Phase: PhaseIdle,
+		Provider: r.model.Provider(), ModelID: r.model.ModelID(),
+		Mode: r.currentOperatingMode(), Phase: PhaseIdle,
 		Transcript: cloneMessages(detail.Transcript),
 		Interaction: InteractionState{
 			ID: childSessionID, Outcome: childInteractionOutcome(detail.Summary.State),

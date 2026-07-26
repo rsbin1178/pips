@@ -1,6 +1,7 @@
 package harness_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/rsbin/pips/agent/harness"
@@ -111,4 +112,24 @@ func TestHarnessSystemFuncSeesResources(t *testing.T) {
 	system := model.Requests()[0].System
 	assert.Contains(t, system, "assembled")
 	assert.Contains(t, system, "<name>s1</name>", "skills block appended")
+}
+
+func TestHarnessSystemSuffixFollowsSkillsIndex(t *testing.T) {
+	t.Parallel()
+
+	model := newScriptedModel("m", textResponse("ok", 10))
+	sess := buildSession(t)
+	h, err := harness.New(model, sess,
+		harness.WithSystem("stable-base"),
+		harness.WithSkills(harness.Skill{Name: "s1", Description: "d"}),
+		harness.WithSystemSuffix("interaction-suffix"),
+	)
+	require.NoError(t, err)
+
+	_, err = h.Prompt(t.Context(), "hi")
+	require.NoError(t, err)
+
+	system := model.Requests()[0].System
+	assert.Less(t, strings.Index(system, "stable-base"), strings.Index(system, "<available-skills>"))
+	assert.Less(t, strings.Index(system, "</available-skills>"), strings.Index(system, "interaction-suffix"))
 }

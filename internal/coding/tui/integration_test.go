@@ -110,7 +110,16 @@ func openScriptedController(t *testing.T) *runtimecontrol.Controller {
 	layout, err := paths.New(filepath.Join(root, "home"))
 	require.NoError(t, err)
 
-	cfg := config.Defaults()
+	sandbox := config.SandboxFullAccess
+	approvalMode := config.ApprovalNever
+	loaded, err := config.Load(config.LoadOptions{
+		ConfigFile: filepath.Join(root, "absent-config.toml"),
+		FlagOverrides: config.Patch{
+			Sandbox: &sandbox, Approval: &approvalMode,
+		},
+	})
+	require.NoError(t, err)
+	cfg := loaded.Config
 	cfg.Model.Provider = ai.ProviderOpenAI
 	cfg.Model.Model = "tui-scripted"
 

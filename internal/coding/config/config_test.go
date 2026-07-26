@@ -19,6 +19,7 @@ func TestDefaults(t *testing.T) {
 	assert.Empty(t, cfg.Providers)
 	assert.Empty(t, cfg.Models)
 	assert.False(t, cfg.ToolSearch)
+	assert.Equal(t, config.ModeAgent, cfg.Mode)
 	assert.Equal(t, config.SandboxWorkspaceWrite, cfg.Sandbox)
 	assert.Equal(t, config.ApprovalOnRequest, cfg.Approval)
 	assert.Equal(t, config.DefaultCompactionConfig(), cfg.Compaction)
@@ -26,6 +27,30 @@ func TestDefaults(t *testing.T) {
 		source, ok := cfg.Source(field)
 		require.True(t, ok)
 		assert.Equal(t, config.SourceDefault, source.Kind)
+	}
+}
+
+func TestValidateRuntimeAllowsLegacyZeroValueMode(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Defaults()
+	cfg.Mode = ""
+	cfg.Model = config.ModelRef{Provider: ai.ProviderOpenAI, Model: "test"}
+	require.NoError(t, cfg.ValidateRuntime())
+}
+
+func TestParseOperatingMode(t *testing.T) {
+	t.Parallel()
+
+	for _, value := range []config.OperatingMode{config.ModeAgent, config.ModePlan} {
+		parsed, err := config.ParseOperatingMode(" " + string(value) + " ")
+		require.NoError(t, err)
+		assert.Equal(t, value, parsed)
+	}
+
+	for _, value := range []string{"", "build", "PLAN"} {
+		_, err := config.ParseOperatingMode(value)
+		require.ErrorIs(t, err, config.ErrInvalid)
 	}
 }
 
@@ -87,6 +112,7 @@ func TestValidateRuntimeRegistry(t *testing.T) {
 			DefaultReasoningLevel: &level,
 			Variants:              map[string]config.VariantConfig{},
 		}},
+		Mode:     config.ModeAgent,
 		Sandbox:  config.SandboxWorkspaceWrite,
 		Approval: config.ApprovalOnRequest,
 	}

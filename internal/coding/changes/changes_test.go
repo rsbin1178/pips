@@ -102,6 +102,37 @@ func TestChangeValuesRejectInvalidInput(t *testing.T) {
 	require.ErrorIs(t, err, changes.ErrInvalid)
 }
 
+func TestWorktreeStatusRejectsUnsafeMetadata(t *testing.T) {
+	t.Parallel()
+
+	validEntry := changes.StatusEntry{
+		Path: "main.go", Index: changes.PathModified, Submodule: "N...",
+	}
+	_, err := changes.NewWorktreeStatus(
+		true,
+		changes.Branch{Head: "main\x1b[2J"},
+		[]changes.StatusEntry{validEntry},
+		changes.DiffSection{},
+		changes.DiffSection{},
+		changes.DiffSection{},
+		0,
+	)
+	require.ErrorIs(t, err, changes.ErrInvalid)
+
+	invalidSubmodule := validEntry
+	invalidSubmodule.Submodule = "Sbad"
+	_, err = changes.NewWorktreeStatus(
+		true,
+		changes.Branch{Head: "main"},
+		[]changes.StatusEntry{invalidSubmodule},
+		changes.DiffSection{},
+		changes.DiffSection{},
+		changes.DiffSection{},
+		0,
+	)
+	require.ErrorIs(t, err, changes.ErrInvalid)
+}
+
 func TestCodingToolsCloseChangeInspectionBoundary(t *testing.T) {
 	t.Parallel()
 

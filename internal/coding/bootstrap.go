@@ -13,6 +13,7 @@ type BootstrapOptions struct {
 	SessionID           string
 	Provider            ai.Provider
 	ModelID             string
+	Mode                OperatingMode
 	Path                []harness.Entry
 	HasPendingToolCalls bool
 	Tree                harness.TreeSnapshot
@@ -37,6 +38,9 @@ func BootstrapState(options BootstrapOptions) (BootstrapResult, error) {
 		(options.Provider == "") != (options.ModelID == "") {
 		return BootstrapResult{}, invalidEvent("invalid bootstrap model metadata")
 	}
+	if !validOperatingMode(options.Mode) {
+		return BootstrapResult{}, invalidEvent("invalid bootstrap operating mode")
+	}
 
 	recovery, err := replayInteractionJournal(options.Path)
 	if err != nil {
@@ -52,7 +56,7 @@ func BootstrapState(options BootstrapOptions) (BootstrapResult, error) {
 
 	state := State{
 		SessionID: options.SessionID, SessionOpen: true,
-		Provider: options.Provider, ModelID: options.ModelID, Phase: PhaseIdle,
+		Provider: options.Provider, ModelID: options.ModelID, Mode: options.Mode, Phase: PhaseIdle,
 	}
 	if options.Tree.SessionID != "" {
 		state.Tree, err = sessionTreeFromHarness(options.Tree)
@@ -98,7 +102,7 @@ func BootstrapState(options BootstrapOptions) (BootstrapResult, error) {
 	if recovery.PendingID != "" {
 		if options.HasPendingToolCalls {
 			state.Interaction = InteractionState{
-				ID: recovery.PendingID, Active: true, Resumed: true,
+				ID: recovery.PendingID, Active: true, Resumed: true, Mode: options.Mode,
 			}
 			state.Phase = PhasePaused
 		} else {

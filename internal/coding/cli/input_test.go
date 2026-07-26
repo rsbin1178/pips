@@ -173,6 +173,7 @@ func TestExitCode(t *testing.T) {
 		{name: "session usage", err: session.ErrInvalid, want: ExitUsage},
 		{name: "workspace usage", err: workspace.ErrInvalid, want: ExitUsage},
 		{name: "approval", err: approval.ErrApprovalRequired, want: ExitApproval},
+		{name: "structured input", err: coding.ErrInputRequired, want: ExitInput},
 		{name: "unknown approval", err: approval.ErrOutcomeUnknown, want: ExitApproval},
 		{name: "denied approval", err: approval.ErrDenied, want: ExitApproval},
 		{name: "security", err: execution.ErrSandboxUnavailable, want: ExitSecurity},

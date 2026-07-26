@@ -2,12 +2,17 @@
 package tui
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"iter"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/rsbin/pips/ai"
+	"github.com/rsbin/pips/internal/coding"
 	"github.com/rsbin/pips/internal/coding/modelcatalog"
 )
 
@@ -25,12 +30,15 @@ const (
 var commands = []commandDescriptor{
 	{name: "new", description: "start a new session", idleOnly: true},
 	{name: "resume", description: "resume a workspace session", idleOnly: true},
+	{name: "plan", description: "enter read-only Plan Mode", idleOnly: true},
+	{name: "mode", description: "switch Agent or Plan operating mode", idleOnly: true},
 	{name: "agents", description: "inspect read-only specialist runs", idleOnly: true},
 	{name: "skills", description: "enable or disable project Skills", idleOnly: true},
 	{name: "model", description: "switch the process-local model", idleOnly: true},
 	{name: "tree", description: "navigate the current session tree", idleOnly: true},
 	{name: "fork", description: "fork a node into a new session", idleOnly: true},
 	{name: "compact", description: "preview and compact older context", idleOnly: true},
+	{name: "review", description: "review workspace changes in Plan Mode", idleOnly: true},
 	{name: commandDiff, description: "inspect workspace changes"},
 	{name: "reload", description: "reload resources and integrations", idleOnly: true},
 	{name: commandStatus, description: "show runtime status"},
@@ -138,6 +146,13 @@ func (m *Model) executeCommand(command commandDescriptor) (tea.Model, tea.Cmd) {
 	m.syncCommandInput()
 
 	switch command.name {
+	case "plan":
+		return m, m.runModeControl(coding.ModePlan)
+	case "mode":
+		m.closeCommandPicker(false)
+		m.openModePicker()
+
+		return m, nil
 	case "new":
 		return m, m.runControl(operationNew, "", modelcatalog.Selection{})
 	case "resume":
@@ -171,10 +186,23 @@ func (m *Model) executeCommand(command commandDescriptor) (tea.Model, tea.Cmd) {
 		m.closeCommandPicker(false)
 
 		return m, m.openCompactPrompt()
+	case "review":
+		if m.controller.Mode().Current != coding.ModePlan {
+			m.picker.err = errors.New("/review is available only in Plan Mode")
+
+			return m, nil
+		}
+		m.closeCommandPicker(false)
+
+		return m, m.startStream(func(ctx context.Context) iter.Seq2[coding.Event, error] {
+			return m.controller.Prompt(ctx, ai.UserText(
+				"Review the current workspace changes. Identify correctness, security, and test risks. Do not modify files.",
+			))
+		})
 	case commandDiff:
 		m.closeCommandPicker(false)
 
-		return m, m.printDiff()
+		return m, m.loadWorkspaceStatus()
 	case "reload":
 		return m, m.runControl(operationReload, "", modelcatalog.Selection{})
 	case commandStatus:

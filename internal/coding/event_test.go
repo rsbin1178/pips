@@ -13,6 +13,7 @@ import (
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding/approval"
 	"github.com/rsbin/pips/internal/coding/changes"
+	"github.com/rsbin/pips/internal/coding/question"
 	"github.com/rsbin/pips/internal/coding/subagent"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -425,6 +426,22 @@ func FuzzUnmarshalEvent(f *testing.F) {
 func eventCases() []eventCase {
 	toolCall := ToolCall{ID: "call-1", Name: "read", Arguments: ai.JSON(`{"path":"main.go"}`)}
 	usage := TokenUsage{InputTokens: 10, OutputTokens: 5, ReasoningTokens: 1}
+	request, err := question.NewRequest("question-1", "call-1", question.Spec{
+		Questions: []question.Question{{
+			Header: "Scope", Question: "Which scope?",
+			Options: []question.Option{
+				{Label: "Core", Description: "Core implementation"},
+				{Label: "Tests", Description: "Test coverage"},
+			},
+		}},
+	})
+	if err != nil {
+		panic(err)
+	}
+	resolution := question.Resolution{
+		RequestID: request.ID, SchemaDigest: request.SchemaDigest,
+		Answers: []question.Answer{{Selections: []string{"Core"}}},
+	}
 
 	return []eventCase{
 		{name: "session opened", event: newSessionEvent(EventSessionOpened, SessionOpened{
@@ -469,6 +486,9 @@ func eventCases() []eventCase {
 				Mode: CompactionManual, TokensBefore: 3000, TokensAfter: 900,
 				FirstKeptID: "node-1", DurationMillis: 25,
 			},
+		)},
+		{name: "mode changed", event: newSessionEvent(
+			EventModeChanged, ModeChanged{Mode: ModePlan},
 		)},
 		{name: "interaction started", event: newInteractionEvent(
 			EventInteractionStarted, InteractionStarted{Resumed: true},
@@ -590,6 +610,18 @@ func eventCases() []eventCase {
 			EventApprovalResolved,
 			ApprovalResolved{RequestID: "request-1", Choice: approval.ChoiceAllowOnce},
 		)},
+		{name: "question required", event: newInteractionEvent(
+			EventQuestionRequired,
+			QuestionRequired{Request: request, Count: len(request.Questions)},
+		)},
+		{name: "question resolved", event: newInteractionEvent(
+			EventQuestionResolved,
+			QuestionResolved{Resolution: resolution, AnswerCount: len(resolution.Answers)},
+		)},
+		{name: "question rejected", event: newInteractionEvent(
+			EventQuestionRejected,
+			QuestionRejected{RequestID: request.ID, SchemaDigest: request.SchemaDigest},
+		)},
 		{name: "workspace changed", event: newInteractionEvent(
 			EventWorkspaceChanged,
 			WorkspaceChanged{
@@ -645,6 +677,19 @@ func TestSessionTreeSafeProjectionScrubsContentAndTelemetryIsContentFree(t *test
 }
 
 func newSessionEvent(eventType EventType, payload EventPayload) Event {
+	switch value := payload.(type) {
+	case SessionOpened:
+		if value.Mode == "" {
+			value.Mode = ModeAgent
+		}
+		payload = value
+	case InteractionStarted:
+		if value.Mode == "" {
+			value.Mode = ModeAgent
+		}
+		payload = value
+	}
+
 	return Event{
 		Schema: EventSchema, Sequence: 1, Time: eventTestTime,
 		SessionID: "session-1", Type: eventType, Payload: payload,

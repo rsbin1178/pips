@@ -17,6 +17,8 @@ const (
 	keyCtrlT     = "ctrl+t"
 	keyCtrlU     = "ctrl+u"
 	keyEscape    = "esc"
+	keyLeft      = "left"
+	keyRight     = "right"
 	keyDown      = "down"
 	keyBackspace = "backspace"
 	appTitle     = "Pips"
@@ -38,6 +40,7 @@ const (
 	actionHelp       actionID = "help"
 	actionToggleTool actionID = "toggle_tool"
 	actionCancel     actionID = "cancel"
+	actionToggleMode actionID = "toggle_mode"
 )
 
 type actionBinding struct {
@@ -65,6 +68,12 @@ var defaultActions = []actionBinding{
 		Contexts: []actionContext{contextRunning},
 		Keys:     []string{keyTab},
 		Label:    "follow up",
+	},
+	{
+		ID:       actionToggleMode,
+		Contexts: []actionContext{contextIdle},
+		Keys:     []string{"shift+tab"},
+		Label:    "toggle mode",
 	},
 	{
 		ID:       actionCommand,

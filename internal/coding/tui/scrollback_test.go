@@ -91,7 +91,8 @@ func TestScrollbackKeepsConversationGapAcrossIncrementalCommits(t *testing.T) {
 	assert.Contains(
 		t,
 		combined,
-		"first answer"+strings.Repeat("\n", conversationGapHeight+1)+"❯ second question",
+		"first answer"+strings.Repeat("\n", conversationGapHeight+1)+
+			"❯ second question",
 	)
 
 	model.resetScrollback()

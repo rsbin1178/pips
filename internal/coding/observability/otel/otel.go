@@ -36,6 +36,7 @@ type Observer struct {
 	interactions        metric.Int64Counter
 	interactionDuration metric.Int64Histogram
 	approvals           metric.Int64Counter
+	questions           metric.Int64Counter
 	workspaceChanges    metric.Int64Counter
 	diagnostics         metric.Int64Counter
 	subagents           metric.Int64Counter
@@ -88,6 +89,14 @@ func New(config Config) (*Observer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("coding otel approvals counter: %w", err)
 	}
+	questions, err := meter.Int64Counter(
+		"pips.coding.questions",
+		metric.WithDescription("Coding structured-question lifecycle events."),
+		metric.WithUnit("{event}"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("coding otel questions counter: %w", err)
+	}
 
 	workspaceChanges, err := meter.Int64Counter(
 		"pips.coding.workspace.changes",
@@ -131,6 +140,7 @@ func New(config Config) (*Observer, error) {
 		interactions:        interactions,
 		interactionDuration: duration,
 		approvals:           approvals,
+		questions:           questions,
 		workspaceChanges:    workspaceChanges,
 		diagnostics:         diagnostics,
 		subagents:           subagents,
@@ -140,6 +150,8 @@ func New(config Config) (*Observer, error) {
 
 // Observe translates one content-free product event. Calls are synchronous;
 // applications should use an OTel batch processor when export may block.
+//
+//nolint:gocyclo // The event-family dispatch remains exhaustive and explicit.
 func (o *Observer) Observe(ctx context.Context, event coding.TelemetryEvent) error {
 	if o == nil {
 		return nil
@@ -152,6 +164,12 @@ func (o *Observer) Observe(ctx context.Context, event coding.TelemetryEvent) err
 		o.observeInteraction(ctx, event)
 	case coding.EventApprovalRequired, coding.EventApprovalUnknown, coding.EventApprovalResolved:
 		o.observeApproval(ctx, event)
+	case coding.EventQuestionRequired, coding.EventQuestionResolved, coding.EventQuestionRejected:
+		o.observeQuestion(ctx, event)
+	case coding.EventModeChanged:
+		o.instant(ctx, "coding.mode.changed", event, []attribute.KeyValue{
+			attribute.String("coding.mode", string(event.Mode)),
+		}, false)
 	case coding.EventWorkspaceChanged:
 		attrs := []attribute.KeyValue{attribute.Int("coding.workspace.changes", event.Changes)}
 		o.workspaceChanges.Add(ctx, int64(event.Changes))
@@ -307,6 +325,27 @@ func (o *Observer) observeApproval(ctx context.Context, event coding.TelemetryEv
 	attrs = append(attrs, attribute.String("coding.approval.state", state))
 	o.approvals.Add(ctx, 1, metric.WithAttributes(attrs...))
 	o.instant(ctx, "coding.approval."+state, event, attrs, failed)
+}
+
+func (o *Observer) observeQuestion(ctx context.Context, event coding.TelemetryEvent) {
+	state := "required"
+	attrs := []attribute.KeyValue{attribute.Int("coding.question.count", event.Questions)}
+	switch event.Type {
+	case coding.EventQuestionResolved:
+		state = "resolved"
+		attrs = []attribute.KeyValue{
+			attribute.Int("coding.question.answers", event.Answers),
+			attribute.Bool("coding.question.chat", event.Chat),
+		}
+	case coding.EventQuestionRejected:
+		state = "rejected"
+	case coding.EventQuestionRequired:
+	default:
+		return
+	}
+	attrs = append(attrs, attribute.String("coding.question.state", state))
+	o.questions.Add(ctx, 1, metric.WithAttributes(attrs...))
+	o.instant(ctx, "coding.question."+state, event, attrs, false)
 }
 
 func (o *Observer) instant(

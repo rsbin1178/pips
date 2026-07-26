@@ -12,10 +12,12 @@ import (
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding"
 	"github.com/rsbin/pips/internal/coding/approval"
+	"github.com/rsbin/pips/internal/coding/changes"
 	"github.com/rsbin/pips/internal/coding/config"
 	"github.com/rsbin/pips/internal/coding/credential"
 	"github.com/rsbin/pips/internal/coding/modelcatalog"
 	"github.com/rsbin/pips/internal/coding/paths"
+	"github.com/rsbin/pips/internal/coding/question"
 	"github.com/rsbin/pips/internal/coding/session"
 	"github.com/rsbin/pips/internal/coding/subagent"
 	"github.com/rsbin/pips/internal/coding/workspace"
@@ -63,6 +65,42 @@ func TestControllerModelOverrideAppliesToLaterSessions(t *testing.T) {
 	assert.Equal(t, restarted.options.Config.Model, restartedController.Model().Resolved.Ref)
 	assert.False(t, restartedController.Model().Overridden)
 	require.NoError(t, restartedController.Close(t.Context()))
+}
+
+func TestControllerModeOverrideAppliesToReplacementAndRollback(t *testing.T) {
+	t.Parallel()
+
+	fixture := newControllerFixture(t)
+	controller, err := newController(t.Context(), fixture.options, fixture.dependencies())
+	require.NoError(t, err)
+
+	require.NoError(t, controller.SetMode(t.Context(), coding.ModePlan))
+	assert.Equal(t, ModeState{
+		Current: coding.ModePlan, Configured: coding.ModeAgent, Overridden: true,
+	}, controller.Mode())
+	assert.Equal(t, coding.ModePlan, controller.Config().Mode)
+	assert.Equal(t, coding.ModePlan, controller.Snapshot().Mode)
+
+	require.NoError(t, controller.SwitchModel(t.Context(), modelcatalog.Selection{
+		Ref: config.ModelRef{Provider: ai.ProviderAnthropic, Model: "configured-next"},
+	}))
+	assert.Equal(t, coding.ModePlan, fixture.opener.calls[1].Config.Mode)
+	assert.Equal(t, coding.ModePlan, controller.Mode().Current)
+
+	require.NoError(t, controller.NewSession(t.Context()))
+	assert.Equal(t, coding.ModePlan, fixture.opener.calls[2].Config.Mode)
+	require.NoError(t, controller.ResumeSession(t.Context(), "saved-session"))
+	assert.Equal(t, coding.ModePlan, fixture.opener.calls[3].Config.Mode)
+	require.NoError(t, controller.ForkSession(t.Context(), "node-1"))
+	assert.Equal(t, coding.ModePlan, fixture.opener.calls[4].Config.Mode)
+
+	fixture.opener.failures[5] = errors.New("target open failed")
+	err = controller.NewSession(t.Context())
+	require.Error(t, err)
+	assert.Equal(t, coding.ModePlan, fixture.opener.calls[5].Config.Mode)
+	assert.Equal(t, coding.ModePlan, fixture.opener.calls[6].Config.Mode)
+	assert.Equal(t, coding.ModePlan, controller.Mode().Current)
+	require.NoError(t, controller.Close(t.Context()))
 }
 
 func TestControllerForkReplacesSessionWithoutChangingEffectiveModel(t *testing.T) {
@@ -405,6 +443,7 @@ func (o *scriptedRuntimeOpener) open(
 		SessionOpen: true,
 		Provider:    options.Resolved.Ref.Provider,
 		ModelID:     options.Resolved.Ref.Model,
+		Mode:        options.Config.Mode,
 		Phase:       phase,
 	}}
 	o.runtimes = append(o.runtimes, runtime)
@@ -440,6 +479,43 @@ func (*fakeRuntime) Resolve(
 	approval.Resolution,
 ) iter.Seq2[coding.Event, error] {
 	return func(func(coding.Event, error) bool) {}
+}
+
+func (*fakeRuntime) ResolveQuestion(
+	context.Context,
+	question.Resolution,
+) iter.Seq2[coding.Event, error] {
+	return func(func(coding.Event, error) bool) {}
+}
+
+func (*fakeRuntime) RejectQuestion(
+	context.Context,
+	string,
+	string,
+) iter.Seq2[coding.Event, error] {
+	return func(func(coding.Event, error) bool) {}
+}
+
+func (r *fakeRuntime) SetMode(_ context.Context, mode coding.OperatingMode) error {
+	r.setState(func(state *coding.State) { state.Mode = mode })
+
+	return nil
+}
+
+func (*fakeRuntime) WorkspaceStatus(context.Context) (changes.WorktreeStatus, error) {
+	return changes.NewWorktreeStatus(
+		false,
+		changes.Branch{},
+		nil,
+		changes.DiffSection{},
+		changes.DiffSection{},
+		changes.DiffSection{},
+		0,
+	)
+}
+
+func (r *fakeRuntime) PlanDocumentPath() (string, error) {
+	return "/plans/" + r.state.SessionID + ".md", nil
 }
 
 func (*fakeRuntime) Steer(...ai.Message) error    { return nil }

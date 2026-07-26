@@ -297,6 +297,22 @@ func (f *gitFixture) commitAll(message string) {
 func (f *gitFixture) git(arguments ...string) {
 	f.t.Helper()
 
+	result := f.runGit(arguments...)
+	require.Equal(f.t, execution.StatusExited, result.Status)
+	require.Zero(f.t, result.ExitCode, string(streamContent(result.Stderr)))
+}
+
+func (f *gitFixture) gitExpectExit(code int, arguments ...string) {
+	f.t.Helper()
+
+	result := f.runGit(arguments...)
+	require.Equal(f.t, execution.StatusExited, result.Status)
+	require.Equal(f.t, code, result.ExitCode, string(streamContent(result.Stderr)))
+}
+
+func (f *gitFixture) runGit(arguments ...string) execution.Result {
+	f.t.Helper()
+
 	operation, err := execution.NewOperation(f.t.Context(), f.workspace, execution.OperationSpec{
 		Kind:       execution.KindGit,
 		Tool:       "git_test_setup",
@@ -321,8 +337,8 @@ func (f *gitFixture) git(arguments ...string) {
 
 	result, err := f.executor.Execute(f.t.Context(), operation, authorization, nil)
 	require.NoError(f.t, err)
-	require.Equal(f.t, execution.StatusExited, result.Status)
-	require.Zero(f.t, result.ExitCode, string(streamContent(result.Stderr)))
+
+	return result
 }
 
 func (f *gitFixture) indexDigest() [sha256.Size]byte {

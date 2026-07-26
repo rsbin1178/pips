@@ -166,6 +166,10 @@ func runExecOperation(
 		return coding.State{}, 0, err
 	}
 
+	if err := state.Question.NonInteractiveError(); err != nil {
+		return coding.State{}, 0, err
+	}
+
 	if state.Phase != coding.PhaseIdle || state.Interaction.Active {
 		return coding.State{}, 0, errors.New("coding cli: runtime did not settle before prompt")
 	}
@@ -178,6 +182,10 @@ func runExecOperation(
 
 	finalState := runtime.Snapshot()
 	if err := finalState.Approval.NonInteractiveError(); err != nil {
+		return coding.State{}, 0, err
+	}
+
+	if err := finalState.Question.NonInteractiveError(); err != nil {
 		return coding.State{}, 0, err
 	}
 

@@ -18,7 +18,7 @@ func TestEventWriterAssignsSequenceAfterValidation(t *testing.T) {
 	writer, err := newEventWriter("session-1", func() time.Time { return eventTestTime })
 	require.NoError(t, err)
 
-	first, err := writer.write("", "", EventSessionOpened, SessionOpened{})
+	first, err := writer.write("", "", EventSessionOpened, SessionOpened{Mode: ModeAgent})
 	require.NoError(t, err)
 	assert.Equal(t, uint64(1), first.Sequence)
 

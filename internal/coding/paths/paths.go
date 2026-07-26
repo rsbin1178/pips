@@ -28,6 +28,7 @@ type Layout struct {
 	configFile     string
 	workspacesFile string
 	sessionsDir    string
+	plansDir       string
 	skillsDir      string
 	agentSkillsDir string
 	bundlesDir     string
@@ -54,6 +55,7 @@ func New(root string) (Layout, error) {
 		configFile:     filepath.Join(abs, configFileName),
 		workspacesFile: filepath.Join(abs, "workspaces.json"),
 		sessionsDir:    filepath.Join(abs, "sessions"),
+		plansDir:       filepath.Join(abs, "plans"),
 		skillsDir:      filepath.Join(abs, "skills"),
 		bundlesDir:     filepath.Join(abs, "bundles"),
 		mcpFile:        filepath.Join(abs, "mcp.json"),
@@ -154,6 +156,9 @@ func (l Layout) WorkspacesFile() string { return l.workspacesFile }
 
 // SessionsDir returns the Harness session repository path.
 func (l Layout) SessionsDir() string { return l.sessionsDir }
+
+// PlansDir returns the private user-level Plan document directory.
+func (l Layout) PlansDir() string { return l.plansDir }
 
 // SkillsDir returns the user skill directory.
 func (l Layout) SkillsDir() string { return l.skillsDir }

@@ -23,6 +23,7 @@ import (
 const (
 	defaultWidth          = 80
 	defaultHeight         = 24
+	statusHorizontalInset = 2
 	composerMaxLines      = 8
 	conversationGapHeight = 1
 	renderFrame           = 33 * time.Millisecond
@@ -75,39 +76,43 @@ type Model struct {
 	allow     bool
 	err       error
 
-	controller        Controller
-	state             coding.State
-	childStates       map[string]coding.State
-	composer          textarea.Model
-	markdown          *markdownRenderer
-	theme             colorTheme
-	timeline          string
-	scrollback        scrollbackCursor
-	scrollbackOutput  bool
-	streaming         streamProjection
-	renderWait        bool
-	bridge            *eventBridge
-	subscription      *subscriptionBridge
-	subscriptionMode  bool
-	starting          bool
-	cancelStart       bool
-	waiting           bool
-	streamErr         error
-	queued            int
-	canceling         bool
-	exitArmed         bool
-	bannerPrinted     bool
-	picker            pickerState
-	pickerSeq         uint64
-	route             routeState
-	routeSeq          uint64
-	presentation      presentationState
-	prompt            promptState
-	promptSeq         uint64
-	completionMarkers []completionMarker
-	activity          activityIndicator
-	refreshCursor     bool
-	cursorRefreshSeq  uint64
+	controller         Controller
+	state              coding.State
+	childStates        map[string]coding.State
+	composer           textarea.Model
+	markdown           *markdownRenderer
+	theme              colorTheme
+	timeline           string
+	scrollback         scrollbackCursor
+	scrollbackOutput   bool
+	streaming          streamProjection
+	renderWait         bool
+	bridge             *eventBridge
+	subscription       *subscriptionBridge
+	subscriptionMode   bool
+	starting           bool
+	cancelStart        bool
+	waiting            bool
+	streamErr          error
+	queued             int
+	canceling          bool
+	exitArmed          bool
+	bannerPrinted      bool
+	picker             pickerState
+	pickerSeq          uint64
+	route              routeState
+	routeSeq           uint64
+	presentation       presentationState
+	prompt             promptState
+	promptSeq          uint64
+	completionMarkers  []completionMarker
+	worktreeLoading    bool
+	worktreeGeneration uint64
+	worktreeCancel     context.CancelFunc
+	worktreeSummary    string
+	activity           activityIndicator
+	refreshCursor      bool
+	cursorRefreshSeq   uint64
 }
 
 func newModel(ctx context.Context, options Options) *Model {
@@ -132,7 +137,7 @@ func newModel(ctx context.Context, options Options) *Model {
 	composer.MaxHeight = composerMaxLines
 	composer.MaxContentHeight = 200
 	composer.SetVirtualCursor(false)
-	composer.SetWidth(defaultWidth)
+	composer.SetWidth(composerEditorWidth(defaultWidth))
 	composer.SetStyles(composerStyles(themeDark, options.NoColor))
 
 	model := &Model{
@@ -171,7 +176,7 @@ func (m *Model) Init() tea.Cmd {
 func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch message := message.(type) {
 	case tea.WindowSizeMsg:
-		m.width = message.Width
+		m.width = max(1, message.Width)
 		m.height = message.Height
 		m.setLayout()
 		m.rerenderTranscript(false)
@@ -184,6 +189,9 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.theme = themeLight
 		}
 		m.composer.SetStyles(composerStyles(m.theme, m.options.NoColor))
+		if m.prompt.kind == promptQuestion {
+			m.prompt.question.editor.SetStyles(composerStyles(m.theme, m.options.NoColor))
+		}
 		if m.route.kind == routeSessions || m.route.kind == routeSkills {
 			m.route.search.SetStyles(sessionSearchStyles(m.theme, m.options.NoColor))
 		}
@@ -423,7 +431,8 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case controlResultMsg:
 		pickerControl := m.picker.kind != pickerNone && m.picker.controlling
 		routeControl := m.route.kind != routeNone && m.route.controlling
-		replacementControl := message.operation != operationReload
+		replacementControl := message.operation != operationReload &&
+			message.operation != operationMode
 		switch {
 		case pickerControl:
 			m.picker.loading = false
@@ -457,7 +466,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		case operationNew, operationResume, operationFork:
 			m.completionMarkers = nil
 			m.resetScrollback()
-		case operationModel, operationReload:
+		case operationModel, operationReload, operationMode:
 		}
 		switch {
 		case pickerControl:
@@ -490,6 +499,30 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		return m, tea.Sequence(commit, m.continueIfPaused())
+	case workspaceStatusResultMsg:
+		if message.generation != m.worktreeGeneration {
+			return m, nil
+		}
+		if m.worktreeCancel != nil {
+			m.worktreeCancel()
+			m.worktreeCancel = nil
+		}
+		m.worktreeLoading = false
+		if message.err != nil {
+			return m, m.printInspection(
+				"Workspace changes",
+				"Unable to inspect Git status: "+safeError(message.err),
+			)
+		}
+		m.worktreeSummary = compactWorktreeSummary(message.status)
+
+		return m, m.printInspection(
+			"Workspace changes",
+			strings.TrimPrefix(
+				worktreeStatusContent(message.status),
+				"Workspace changes\n\n",
+			),
+		)
 	case exitResetMsg:
 		m.exitArmed = false
 
@@ -604,7 +637,7 @@ func (m *Model) updateTrustKey(key string) (tea.Model, tea.Cmd) {
 		m.allow = true
 	case "down":
 		m.allow = false
-	case "left", "right", keyTab:
+	case keyLeft, keyRight, keyTab:
 		m.allow = !m.allow
 	case "a":
 		m.allow = true
@@ -703,6 +736,11 @@ func (m *Model) updateReadyKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.updatePickerKey(message)
 	}
 	key := message.String()
+	if m.worktreeLoading && (key == keyCtrlC || key == keyEscape) {
+		m.cancelWorkspaceStatus()
+
+		return m, nil
+	}
 	context := m.actionContext()
 	action, matched := resolveAction(defaultActions, context, key)
 	if key == "/" && m.composer.Value() != "" {
@@ -736,6 +774,13 @@ func (m *Model) updateReadyKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, m.queueMessage(commandFollowUp)
 		case actionToggleTool:
 			return m, m.toggleLatestTool()
+		case actionToggleMode:
+			mode := coding.ModePlan
+			if m.controller.Mode().Current == coding.ModePlan {
+				mode = coding.ModeAgent
+			}
+
+			return m, m.runModeControl(mode)
 		case actionCommand, actionHelp:
 			if action == actionCommand {
 				m.openCommandPicker()
@@ -766,6 +811,8 @@ func (m *Model) readyView() tea.View {
 	}
 
 	footer := make([]string, 0, 5)
+	promptFooterIndex := -1
+	promptContent := ""
 	if activity := m.activityLine(); activity != "" {
 		for range conversationGapHeight {
 			footer = append(footer, "")
@@ -773,6 +820,8 @@ func (m *Model) readyView() tea.View {
 		footer = append(footer, activity)
 	}
 	if prompt := m.promptView(); prompt != "" {
+		promptFooterIndex = len(footer)
+		promptContent = prompt
 		footer = append(footer, prompt)
 	}
 	for range conversationGapHeight {
@@ -786,13 +835,15 @@ func (m *Model) readyView() tea.View {
 		switch m.picker.kind {
 		case pickerModel:
 			footer = append(footer, m.pickerView(availableRows))
+		case pickerMode:
+			footer = append(footer, m.modePickerView(availableRows))
 		case pickerSkill:
 			footer = append(footer, m.skillPickerView(availableRows))
 		default:
 			footer = append(footer, m.commandPickerView(availableRows))
 		}
 	} else {
-		footer = append(footer, ansi.Truncate(m.statusLine(), max(1, m.width), "…"))
+		footer = append(footer, m.statusLineView())
 	}
 
 	parts := make([]string, 0, len(footer)+1)
@@ -804,6 +855,10 @@ func (m *Model) readyView() tea.View {
 		parts = append(parts, timeline)
 	}
 	composerIndex := len(parts) + composerFooterIndex
+	promptIndex := -1
+	if promptFooterIndex >= 0 {
+		promptIndex = len(parts) + promptFooterIndex
+	}
 	parts = append(parts, footer...)
 	composerOffset := lipgloss.Height(lipgloss.JoinVertical(
 		lipgloss.Left,
@@ -816,8 +871,22 @@ func (m *Model) readyView() tea.View {
 	view.MouseMode = tea.MouseModeNone
 	view.WindowTitle = appTitle
 	view.Cursor = m.composer.Cursor()
-	if m.prompt.kind != promptNone || m.picker.kind == pickerModel {
+	if m.prompt.kind != promptNone || m.picker.kind == pickerModel || m.picker.kind == pickerMode {
 		view.Cursor = nil
+	}
+	if m.prompt.kind == promptQuestion &&
+		m.prompt.question.editing != questionEditNone && promptIndex >= 0 {
+		if cursorX, cursorY, ok := m.questionEditorOffset(promptContent); ok {
+			view.Cursor = m.prompt.question.editor.Cursor()
+			if view.Cursor != nil {
+				promptOffset := lipgloss.Height(lipgloss.JoinVertical(
+					lipgloss.Left,
+					parts[:promptIndex]...,
+				))
+				view.Cursor.X += cursorX
+				view.Cursor.Y += promptOffset + cursorY
+			}
+		}
 	}
 	if view.Cursor != nil {
 		cursorX, cursorY := m.composerBoxCursorOffset()
@@ -829,6 +898,18 @@ func (m *Model) readyView() tea.View {
 	}
 
 	return view
+}
+
+func (m *Model) questionEditorOffset(prompt string) (int, int, bool) {
+	editor := m.prompt.question.editor.View()
+	before, _, ok := strings.Cut(prompt, editor)
+	if !ok {
+		return 0, 0, false
+	}
+	prefix := before
+	lineStart := strings.LastIndex(prefix, "\n") + 1
+
+	return ansi.StringWidth(prefix[lineStart:]), strings.Count(prefix, "\n"), true
 }
 
 func (m *Model) statusLine() string {
@@ -852,11 +933,18 @@ func (m *Model) statusLine() string {
 		fmt.Sprintf("%s/%s", m.state.Provider, m.state.ModelID),
 		phaseLabel,
 	}
+	width := m.statusLineWidth()
+	mode := statusModeLabel(m.state.Mode, width)
 	if !m.options.NoColor {
 		palette := paletteFor(m.theme)
 		values[0] = lipgloss.NewStyle().Bold(true).Foreground(palette.workspace).Render(values[0])
 		values[1] = lipgloss.NewStyle().Bold(true).Foreground(palette.session).Render(values[1])
 		values[2] = lipgloss.NewStyle().Foreground(palette.model).Render(values[2])
+		modeColor := palette.model
+		if m.state.Mode == coding.ModePlan {
+			modeColor = palette.session
+		}
+		mode = lipgloss.NewStyle().Bold(true).Foreground(modeColor).Render(mode)
 		values[3] = lipgloss.NewStyle().Bold(true).Foreground(
 			phaseColor(m.state, phase, palette),
 		).Render(values[3])
@@ -865,13 +953,83 @@ func (m *Model) statusLine() string {
 	if !m.options.NoColor {
 		separator = lipgloss.NewStyle().Foreground(paletteFor(m.theme).muted).Render(separator)
 	}
-	status := strings.Join(values, separator)
+	head := strings.Join(values[:3], separator)
+	tail := []string{values[3]}
 	extras := m.statusExtras()
 	if len(extras) > 0 {
-		status += separator + strings.Join(extras, separator)
+		tail = append(tail, extras...)
 	}
 
-	return status
+	leftWidth := width
+	if mode != "" {
+		leftWidth = max(0, width-ansi.StringWidth(mode)-1)
+	}
+	left := fitStatusLeft(head, strings.Join(tail, separator), separator, leftWidth)
+	if mode == "" {
+		return ansi.Truncate(left, width, "…")
+	}
+
+	return alignStatusLine(left, mode, width)
+}
+
+func statusModeLabel(mode coding.OperatingMode, width int) string {
+	if mode != coding.ModePlan {
+		return ""
+	}
+
+	switch {
+	case width >= 64:
+		return "Plan mode (shift+tab to cycle)"
+	case width >= 24:
+		return "Plan mode"
+	default:
+		return "plan"
+	}
+}
+
+func (m *Model) statusLineView() string {
+	inset := min(statusHorizontalInset, max(0, (m.width-1)/2))
+
+	return strings.Repeat(" ", inset) + m.statusLine()
+}
+
+func (m *Model) statusLineWidth() int {
+	inset := min(statusHorizontalInset, max(0, (m.width-1)/2))
+
+	return max(1, m.width-(inset*2))
+}
+
+func alignStatusLine(left, right string, width int) string {
+	rightWidth := ansi.StringWidth(right)
+	if rightWidth >= width {
+		return ansi.Truncate(right, width, "…")
+	}
+
+	left = ansi.Truncate(left, width-rightWidth-1, "…")
+	padding := max(1, width-ansi.StringWidth(left)-rightWidth)
+
+	return left + strings.Repeat(" ", padding) + right
+}
+
+func fitStatusLeft(head, tail, separator string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+
+	full := head + separator + tail
+	if ansi.StringWidth(full) <= width {
+		return full
+	}
+
+	tailWidth := ansi.StringWidth(tail)
+	separatorWidth := ansi.StringWidth(separator)
+	if tailWidth+separatorWidth >= width {
+		return ansi.Truncate(tail, width, "…")
+	}
+
+	head = ansi.Truncate(head, width-tailWidth-separatorWidth, "…")
+
+	return head + separator + tail
 }
 
 func (m *Model) statusExtras() []string {
@@ -881,6 +1039,9 @@ func (m *Model) statusExtras() []string {
 	}
 	if m.exitArmed {
 		extras = append(extras, "press Ctrl+C again to quit")
+	}
+	if m.worktreeLoading {
+		extras = append(extras, "inspecting Git")
 	}
 	if !m.options.NoColor {
 		style := lipgloss.NewStyle().Foreground(paletteFor(m.theme).muted)
@@ -894,9 +1055,12 @@ func (m *Model) statusExtras() []string {
 
 func (m *Model) setLayout() {
 	width := max(1, m.width)
-	m.composer.SetWidth(m.composerContentWidth())
+	m.composer.SetWidth(composerEditorWidth(width))
 	composerHeight := max(1, min(composerMaxLines, m.composer.Height()))
 	m.composer.SetHeight(composerHeight)
+	if m.prompt.kind == promptQuestion {
+		m.prompt.question.editor.SetWidth(max(1, width-4))
+	}
 	if m.route.kind == routeSessions || m.route.kind == routeSkills {
 		m.route.search.SetWidth(routeSearchInputWidth(width))
 	}
@@ -908,7 +1072,7 @@ func (m *Model) composerBox() string {
 	}
 
 	style := lipgloss.NewStyle().
-		Width(m.composerContentWidth()).
+		Width(max(1, m.width)).
 		Padding(0, 1).
 		Border(lipgloss.RoundedBorder(), true)
 	if m.options.NoColor {
@@ -924,12 +1088,12 @@ func (m *Model) hasComposerBox() bool {
 	return m.width >= 24
 }
 
-func (m *Model) composerContentWidth() int {
-	if m.hasComposerBox() {
-		return max(1, m.width-4)
+func composerEditorWidth(width int) int {
+	if width >= 24 {
+		return max(1, width-4)
 	}
 
-	return max(1, m.width)
+	return max(1, width)
 }
 
 func (m *Model) composerBoxCursorOffset() (int, int) {
@@ -1040,7 +1204,7 @@ func (m *Model) toggleLatestTool() tea.Cmd {
 			detail := newToolDetailView(block)
 
 			return m.openToolDetailRoute(detail)
-		case blockUser, blockAssistant, blockDraft, blockDiagnostic,
+		case blockUser, blockAssistant, blockDraft, blockQuestion, blockDiagnostic,
 			blockChange, blockError, blockCompletion:
 		}
 	}

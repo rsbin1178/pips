@@ -22,6 +22,7 @@ func TestLoadRegistryAndSelectionPrecedence(t *testing.T) {
 variant = "balanced"
 reasoning = "medium"
 tool_search = true
+mode = "plan"
 
 [compaction]
 enabled = true
@@ -68,13 +69,15 @@ max_output_tokens = 8192
 	flagRef := config.ModelRef{Provider: ai.ProviderAnthropic, Model: "claude"}
 	flagVariant := "deep"
 	flagReasoning := config.ReasoningLevel("high")
+	flagMode := config.ModePlan
 	result, err := config.Load(config.LoadOptions{
 		ConfigFile: path,
 		LookupEnv: mapLookup(map[string]string{
 			config.ModelEnv: "gemini/gemini-env",
+			config.ModeEnv:  "agent",
 		}),
 		FlagOverrides: config.Patch{
-			Model: &flagRef, Variant: &flagVariant, Reasoning: &flagReasoning,
+			Model: &flagRef, Variant: &flagVariant, Reasoning: &flagReasoning, Mode: &flagMode,
 		},
 	})
 	require.NoError(t, err)
@@ -82,6 +85,7 @@ max_output_tokens = 8192
 	assert.Equal(t, flagRef, result.Config.Model)
 	assert.Equal(t, flagVariant, result.Config.Variant)
 	assert.Equal(t, flagReasoning, *result.Config.Reasoning)
+	assert.Equal(t, config.ModePlan, result.Config.Mode)
 	assert.Equal(t, config.FileStateLoaded, result.ConfigFile.State)
 	require.Len(t, result.Config.Models, 1)
 	assert.Equal(t, 200000, result.Config.Models[0].ContextWindow)
@@ -108,21 +112,31 @@ max_output_tokens = 8192
 	require.True(t, ok)
 	assert.Equal(t, config.SourceFlag, source.Kind)
 	assert.Equal(t, "--model", source.Detail)
+	modeSource, ok := result.Config.Source(config.FieldMode)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceFlag, modeSource.Kind)
+	assert.Equal(t, "--mode", modeSource.Detail)
 
 	targetDefaults, err := config.Load(config.LoadOptions{
 		ConfigFile: path,
 		LookupEnv: mapLookup(map[string]string{
 			config.ModelEnv: "anthropic/claude",
+			config.ModeEnv:  "agent",
 		}),
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "anthropic/claude", targetDefaults.Config.Model.String())
 	assert.Empty(t, targetDefaults.Config.Variant)
 	assert.Nil(t, targetDefaults.Config.Reasoning)
+	assert.Equal(t, config.ModeAgent, targetDefaults.Config.Mode)
 	variantSource, ok := targetDefaults.Config.Source(config.FieldVariant)
 	require.True(t, ok)
 	assert.Equal(t, config.SourceEnvironment, variantSource.Kind)
 	assert.Equal(t, config.ModelEnv, variantSource.Detail)
+	modeSource, ok = targetDefaults.Config.Source(config.FieldMode)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceEnvironment, modeSource.Kind)
+	assert.Equal(t, config.ModeEnv, modeSource.Detail)
 }
 
 func TestLoadInfersAndSortsNestedModels(t *testing.T) {

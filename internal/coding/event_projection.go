@@ -115,6 +115,15 @@ func projectSafePayload(payload EventPayload) EventPayload {
 		value.Reason = ""
 
 		return value
+	case QuestionRequired:
+		value.Request.Questions = nil
+		value.Redacted = true
+		return value
+	case QuestionResolved:
+		value.Resolution.Answers = nil
+		value.Resolution.Chat = ""
+		value.Redacted = true
+		return value
 	case WorkspaceChanged:
 		value.Diff = ""
 		return value
@@ -189,12 +198,16 @@ type TelemetryEvent struct {
 	ToolCalls      int                `json:"tool_calls,omitempty"`
 	Stop           agent.StopReason   `json:"stop,omitempty"`
 	Phase          Phase              `json:"phase,omitempty"`
+	Mode           OperatingMode      `json:"mode,omitempty"`
 	Outcome        InteractionOutcome `json:"outcome,omitempty"`
 	Component      string             `json:"component,omitempty"`
 	Code           string             `json:"code,omitempty"`
 	Turns          int                `json:"turns,omitempty"`
 	Changes        int                `json:"changes,omitempty"`
 	Nodes          int                `json:"nodes,omitempty"`
+	Questions      int                `json:"questions,omitempty"`
+	Answers        int                `json:"answers,omitempty"`
+	Chat           bool               `json:"chat,omitempty"`
 	CompactionMode CompactionMode     `json:"compaction_mode,omitempty"`
 	TokensBefore   int                `json:"tokens_before,omitempty"`
 	TokensAfter    int                `json:"tokens_after,omitempty"`
@@ -206,7 +219,7 @@ type TelemetryEvent struct {
 
 // Telemetry projects one validated event into content-free observability data.
 //
-//nolint:gocyclo,cyclop // The telemetry table is deliberately exhaustive.
+//nolint:funlen,gocyclo,cyclop // The telemetry table is deliberately exhaustive.
 func Telemetry(event Event) (TelemetryEvent, error) {
 	if err := ValidateEvent(event); err != nil {
 		return TelemetryEvent{}, err
@@ -218,6 +231,7 @@ func Telemetry(event Event) (TelemetryEvent, error) {
 		projected.Provider = value.Provider
 		projected.ModelID = value.ModelID
 		projected.Resumed = value.Resumed
+		projected.Mode = value.Mode
 	case SessionClosed:
 		projected.Code = string(value.Reason)
 	case SessionTreeChanged:
@@ -234,9 +248,12 @@ func Telemetry(event Event) (TelemetryEvent, error) {
 		projected.TokensBefore = value.TokensBefore
 		projected.TokensAfter = value.TokensAfter
 		projected.DurationMillis = value.DurationMillis
+	case ModeChanged:
+		projected.Mode = value.Mode
 	case InteractionStarted:
 		projected.Resumed = value.Resumed
 		projected.Code = string(value.Source)
+		projected.Mode = value.Mode
 	case InteractionCompleted:
 		projected.Outcome = value.Outcome
 		projected.DurationMillis = value.DurationMillis
@@ -274,6 +291,13 @@ func Telemetry(event Event) (TelemetryEvent, error) {
 		projected.Code = "outcome_unknown"
 	case ApprovalResolved:
 		projected.Code = string(value.Choice)
+	case QuestionRequired:
+		projected.Questions = value.Count
+	case QuestionResolved:
+		projected.Answers = value.AnswerCount
+		projected.Chat = value.Chat
+	case QuestionRejected:
+		projected.Code = "rejected"
 	case WorkspaceChanged:
 		projected.Changes = len(value.Entries)
 	case StatusChanged:
