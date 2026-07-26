@@ -205,7 +205,7 @@ func (r *Runtime) finishChildProjection(ctx context.Context, event subagent.Even
 		"",
 		EventInteractionCompleted,
 		InteractionCompleted{
-			Outcome: outcome, Usage: tokenUsageFromAI(event.Usage),
+			Outcome: outcome, Stop: event.Stop, Usage: tokenUsageFromAI(event.Usage),
 			DurationMillis: event.Duration.Milliseconds(),
 		},
 	); err != nil {

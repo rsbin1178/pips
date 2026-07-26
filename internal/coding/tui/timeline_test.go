@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/x/ansi"
+	"github.com/rsbin/pips/agent"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding"
 	"github.com/rsbin/pips/internal/coding/question"
@@ -51,6 +52,33 @@ func TestTimelineHidesPendingQuestionToolActivity(t *testing.T) {
 	}}}
 
 	assert.Empty(t, projectTimeline(state))
+}
+
+func TestTimelineDistinguishesRejectedAndInvalidQuestions(t *testing.T) {
+	t.Parallel()
+
+	questionCall := func(id string) ai.ToolCallPart {
+		return ai.ToolCallPart{
+			ID: id, Name: question.ToolName,
+			Args: ai.JSON(`{"questions":[{"header":"Framework","question":"Choose one","options":[{"label":"React","description":"Components"},{"label":"Vue","description":"Progressive"}]}]}`),
+		}
+	}
+	state := coding.State{Transcript: []ai.Message{
+		ai.Assistant(questionCall("invalid")),
+		ai.ToolResultError(
+			"invalid", question.ToolName,
+			"invalid ask_user arguments: question 1 must have two to four options",
+		),
+		ai.Assistant(questionCall("rejected")),
+		ai.ToolResultError("rejected", question.ToolName, question.RejectionToolResult),
+	}}
+
+	blocks := projectTimeline(state)
+	require.Len(t, blocks, 2)
+	assert.Equal(t, "Question failed", blocks[0].title)
+	assert.Contains(t, blocks[0].body, "two to four options")
+	assert.Equal(t, "Question canceled", blocks[1].title)
+	assert.Equal(t, "No answer was submitted.", blocks[1].body)
 }
 
 func TestTimelineNeverProjectsReasoningOrSignatures(t *testing.T) {
@@ -441,21 +469,28 @@ func TestTimelineCompletionMarkerUsesOutcomeGlyphColor(t *testing.T) {
 	tests := []struct {
 		name    string
 		outcome coding.InteractionOutcome
+		stop    agent.StopReason
 		color   color.Color
 	}{
 		{name: "succeeded", outcome: coding.InteractionSucceeded, color: paletteFor(themeDark).idle},
 		{name: "canceled", outcome: coding.InteractionCanceled, color: paletteFor(themeDark).muted},
 		{name: "failed", outcome: coding.InteractionFailed, color: paletteFor(themeDark).error},
+		{
+			name: "incomplete", outcome: coding.InteractionIncomplete,
+			stop: agent.StopBudget, color: paletteFor(themeDark).error,
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
 			block, ok := projectCompletionMarker(completionMarker{
-				outcome: test.outcome, durationMillis: 7_000, model: "openai/test-model",
+				outcome: test.outcome, stop: test.stop,
+				durationMillis: 7_000, model: "openai/test-model",
 			})
 			require.True(t, ok)
-			assert.Equal(t, "▣ openai/test-model · 7s"+completionOutcomeSuffix(test.outcome), block.body)
+			assert.Equal(t, "▣ openai/test-model · 7s"+
+				completionOutcomeSuffix(test.outcome, test.stop), block.body)
 			assert.Equal(t, test.color, completionGlyphStyle(block.status, themeDark).GetForeground())
 			assert.Equal(t, block.body, renderCompletionMarker(block, themeDark, true))
 			assert.Equal(t, block.body, ansi.Strip(renderCompletionMarker(block, themeDark, false)))
@@ -463,12 +498,17 @@ func TestTimelineCompletionMarkerUsesOutcomeGlyphColor(t *testing.T) {
 	}
 }
 
-func completionOutcomeSuffix(outcome coding.InteractionOutcome) string {
+func completionOutcomeSuffix(
+	outcome coding.InteractionOutcome,
+	stop agent.StopReason,
+) string {
 	switch outcome {
 	case coding.InteractionCanceled:
 		return " · interrupted"
 	case coding.InteractionFailed:
 		return " · failed"
+	case coding.InteractionIncomplete:
+		return " · incomplete (" + string(stop) + ")"
 	default:
 		return ""
 	}

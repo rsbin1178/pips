@@ -13,6 +13,10 @@ import (
 )
 
 const (
+	minQuestionCount    = 1
+	maxQuestionCount    = 4
+	minOptionCount      = 2
+	maxOptionCount      = 4
 	maxHeaderBytes      = 64
 	maxQuestionBytes    = 4096
 	maxLabelBytes       = 128
@@ -71,16 +75,22 @@ type Resolution struct {
 //
 //nolint:gocyclo // Nested schema bounds are intentionally validated in one pass.
 func ValidateSpec(spec Spec) error {
-	if len(spec.Questions) < 1 || len(spec.Questions) > 4 {
+	if len(spec.Questions) < minQuestionCount || len(spec.Questions) > maxQuestionCount {
 		return fmt.Errorf("%w: expected one to four questions", ErrInvalid)
 	}
 
 	headers := make(map[string]struct{}, len(spec.Questions))
 	for index, item := range spec.Questions {
-		if !validText(item.Header, maxHeaderBytes) ||
-			!validText(item.Question, maxQuestionBytes) ||
-			len(item.Options) < 2 || len(item.Options) > 4 {
-			return fmt.Errorf("%w: question %d is malformed", ErrInvalid, index+1)
+		if !validText(item.Header, maxHeaderBytes) {
+			return fmt.Errorf("%w: question %d requires a short header", ErrInvalid, index+1)
+		}
+
+		if !validText(item.Question, maxQuestionBytes) {
+			return fmt.Errorf("%w: question %d requires prompt text", ErrInvalid, index+1)
+		}
+
+		if len(item.Options) < minOptionCount || len(item.Options) > maxOptionCount {
+			return fmt.Errorf("%w: question %d must have two to four options", ErrInvalid, index+1)
 		}
 
 		if _, exists := headers[item.Header]; exists {
@@ -90,11 +100,32 @@ func ValidateSpec(spec Spec) error {
 		headers[item.Header] = struct{}{}
 
 		labels := make(map[string]struct{}, len(item.Options))
-		for _, option := range item.Options {
-			if !validText(option.Label, maxLabelBytes) ||
-				!validText(option.Description, maxDescriptionBytes) ||
-				!validOptionalText(option.Preview, maxPreviewBytes) {
-				return fmt.Errorf("%w: question %d has a malformed option", ErrInvalid, index+1)
+		for optionIndex, option := range item.Options {
+			if !validText(option.Label, maxLabelBytes) {
+				return fmt.Errorf(
+					"%w: question %d option %d requires a short label",
+					ErrInvalid,
+					index+1,
+					optionIndex+1,
+				)
+			}
+
+			if !validText(option.Description, maxDescriptionBytes) {
+				return fmt.Errorf(
+					"%w: question %d option %d requires a description",
+					ErrInvalid,
+					index+1,
+					optionIndex+1,
+				)
+			}
+
+			if !validOptionalText(option.Preview, maxPreviewBytes) {
+				return fmt.Errorf(
+					"%w: question %d option %d preview is too large or invalid",
+					ErrInvalid,
+					index+1,
+					optionIndex+1,
+				)
 			}
 
 			if _, exists := labels[option.Label]; exists {

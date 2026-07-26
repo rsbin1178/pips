@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"slices"
 
+	"github.com/rsbin/pips/agent"
 	"github.com/rsbin/pips/agent/harness"
 	"github.com/rsbin/pips/ai"
 )
@@ -28,6 +29,7 @@ type interactionRecord struct {
 	Event         interactionJournalEvent `json:"event"`
 	InteractionID string                  `json:"interaction_id"`
 	Outcome       InteractionOutcome      `json:"outcome,omitempty"`
+	Stop          agent.StopReason        `json:"stop,omitempty"`
 	Usage         *TokenUsage             `json:"usage,omitempty"`
 	DurationMS    int64                   `json:"duration_ms,omitempty"`
 }
@@ -80,6 +82,7 @@ func (journal *interactionJournal) start() (string, error) {
 func (journal *interactionJournal) complete(
 	interactionID string,
 	outcome InteractionOutcome,
+	stop agent.StopReason,
 	usage TokenUsage,
 	durationMillis int64,
 ) error {
@@ -91,13 +94,17 @@ func (journal *interactionJournal) complete(
 		return invalidEvent("unknown interaction outcome %q", outcome)
 	}
 
+	if !validInteractionStop(outcome, stop) {
+		return invalidEvent("invalid stop %q for interaction outcome %q", stop, outcome)
+	}
+
 	if !validTokenUsage(usage) || durationMillis < 0 || durationMillis > maxEventDurationMS {
 		return invalidEvent("invalid terminal interaction accounting")
 	}
 
 	return journal.append(interactionRecord{
 		Event: interactionTerminalEvent, InteractionID: interactionID, Outcome: outcome,
-		Usage: &usage, DurationMS: durationMillis,
+		Stop: stop, Usage: &usage, DurationMS: durationMillis,
 	})
 }
 
@@ -124,6 +131,7 @@ type InteractionRecovery struct {
 	InterruptedIDs []string
 	LastID         string
 	LastOutcome    InteractionOutcome
+	LastStop       agent.StopReason
 	LastUsage      TokenUsage
 	LastDurationMS int64
 }
@@ -180,6 +188,7 @@ func replayInteractionJournal(path []harness.Entry) (InteractionRecovery, error)
 
 			recovery.LastID = record.InteractionID
 			recovery.LastOutcome = record.Outcome
+			recovery.LastStop = record.Stop
 			recovery.LastUsage = *record.Usage
 			recovery.LastDurationMS = record.DurationMS
 			recovery.PendingID = ""
@@ -201,13 +210,11 @@ func decodeInteractionRecord(data ai.JSON) (interactionRecord, error) {
 
 	switch record.Event {
 	case interactionStartedEvent:
-		if record.Outcome != "" || record.Usage != nil || record.DurationMS != 0 {
+		if record.Outcome != "" || record.Stop != "" || record.Usage != nil || record.DurationMS != 0 {
 			return interactionRecord{}, errors.New("started record has terminal fields")
 		}
 	case interactionTerminalEvent:
-		if !validInteractionOutcome(record.Outcome) || record.Usage == nil ||
-			!validTokenUsage(*record.Usage) || record.DurationMS < 0 ||
-			record.DurationMS > maxEventDurationMS {
+		if !validTerminalInteractionRecord(record) {
 			return interactionRecord{}, errors.New("terminal record has an invalid outcome")
 		}
 	default:
@@ -215,6 +222,16 @@ func decodeInteractionRecord(data ai.JSON) (interactionRecord, error) {
 	}
 
 	return record, nil
+}
+
+func validTerminalInteractionRecord(record interactionRecord) bool {
+	if !validInteractionOutcome(record.Outcome) ||
+		!validInteractionStop(record.Outcome, record.Stop) || record.Usage == nil {
+		return false
+	}
+
+	return validTokenUsage(*record.Usage) && record.DurationMS >= 0 &&
+		record.DurationMS <= maxEventDurationMS
 }
 
 func newInteractionID() (string, error) {

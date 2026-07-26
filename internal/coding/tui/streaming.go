@@ -1,12 +1,14 @@
 package tui
 
 import (
+	"slices"
 	"strconv"
 	"strings"
 	"unicode"
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/rsbin/pips/ai"
 )
 
 const (
@@ -203,7 +205,15 @@ func (m *Model) streamingScrollbackWrites(blocks []timelineBlock) []scrollbackWr
 
 	writes := make([]scrollbackWrite, 0, 3)
 
-	assistantIndex := m.streamingAssistantIndex(blocks)
+	assistantIndex := m.matchingStreamingAssistantIndex(blocks)
+	if assistantIndex < 0 {
+		if m.hasPendingStreamingAssistant() {
+			return m.timelineScrollbackWrite(blocks)
+		}
+
+		assistantIndex = m.streamingAssistantIndex(blocks)
+	}
+
 	if assistantIndex < 0 {
 		if remaining := m.streamingRemaining(m.streaming.source); remaining != "" {
 			writes = append(writes, scrollbackWrite{
@@ -249,21 +259,45 @@ func (m *Model) timelineScrollbackWrite(blocks []timelineBlock) []scrollbackWrit
 }
 
 func (m *Model) streamingAssistantIndex(blocks []timelineBlock) int {
+	if exact := m.matchingStreamingAssistantIndex(blocks); exact >= 0 {
+		return exact
+	}
+
+	for index, block := range slices.Backward(blocks) {
+		if block.kind == blockAssistant {
+			return index
+		}
+	}
+
+	return -1
+}
+
+func (m *Model) matchingStreamingAssistantIndex(blocks []timelineBlock) int {
 	streamSource := strings.TrimSpace(m.streaming.source)
-	fallback := -1
 
 	for index := range blocks {
 		if blocks[index].kind != blockAssistant {
 			continue
 		}
 
-		fallback = index
 		if strings.TrimSpace(blocks[index].body) == streamSource {
 			return index
 		}
 	}
 
-	return fallback
+	return -1
+}
+
+func (m *Model) hasPendingStreamingAssistant() bool {
+	streamSource := strings.TrimSpace(m.streaming.source)
+	for _, message := range m.state.Transcript[m.scrollback.messages:] {
+		if message.Role == ai.RoleAssistant &&
+			strings.TrimSpace(visibleMessageText(message)) == streamSource {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (m *Model) streamingRemaining(source string) string {

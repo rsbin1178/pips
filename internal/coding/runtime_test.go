@@ -60,6 +60,89 @@ func TestRuntimePromptStreamsAndPersistsOneInteraction(t *testing.T) {
 	require.NoError(t, runtime.Close(t.Context()))
 }
 
+func TestRuntimeMainAgentRunsPastGenericTurnDefault(t *testing.T) {
+	t.Parallel()
+
+	responses := make([]*ai.Response, 0, agent.DefaultMaxTurns+2)
+	for turn := 1; turn <= agent.DefaultMaxTurns+1; turn++ {
+		responses = append(responses, runtimeToolResponse(
+			fmt.Sprintf("call-%d", turn), "ls", `{"path":"."}`,
+		))
+	}
+	responses = append(responses, runtimeTextResponse("done after the default boundary"))
+
+	model := newRuntimeModel(responses...)
+	runtime := openTestRuntime(t, model)
+	configureRuntimeCompaction(runtime, 1_000_000, 100, 100, 64)
+
+	events := collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("inspect repeatedly")))
+	assert.Equal(t, 1, countEventType(events, EventRunStarted))
+	assert.Equal(t, 1, countEventType(events, EventRunCompleted))
+	assert.Zero(t, countEventType(events, EventCompactionStarted))
+	assert.Len(t, model.Requests(), agent.DefaultMaxTurns+2)
+
+	state := runtime.Snapshot()
+	assert.Equal(t, InteractionSucceeded, state.Interaction.Outcome)
+	assert.Equal(t, agent.StopEndTurn, state.Interaction.Stop)
+	assert.Equal(t, agent.DefaultMaxTurns+2, state.Runs[len(state.Runs)-1].Turn)
+}
+
+func TestRuntimeCompactsUnlimitedRunOnlyAfterContextThreshold(t *testing.T) {
+	t.Parallel()
+
+	toolResponse := runtimeToolResponse("call-read", "read", `{"path":"large.txt"}`)
+	toolResponse.Usage.InputTokens = 1_800
+	model := newRuntimeModel(
+		toolResponse,
+		runtimeTextResponse("## Goal\nPreserve the earlier work."),
+		runtimeTextResponse("done after compaction"),
+	)
+	runtime := openTestRuntime(t, model)
+	appendRuntimeHistory(t, runtime, 425, 425, 425, 425)
+	require.NoError(t, os.WriteFile(
+		filepath.Join(runtime.workspace.Root(), "large.txt"),
+		[]byte("small file"),
+		0o600,
+	))
+	configureRuntimeCompaction(runtime, 2_000, 300, 2_100, 64)
+
+	events := collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("read the file")))
+	types := eventTypes(events)
+	compactIndex := slices.Index(types, EventCompactionStarted)
+	require.Greater(t, compactIndex, slices.Index(types, EventTurnCompleted))
+	nextTurnOffset := slices.Index(types[compactIndex+1:], EventTurnStarted)
+	require.GreaterOrEqual(t, nextTurnOffset, 0)
+	assert.Equal(t, 1, countEventType(events, EventCompactionStarted))
+	assert.Equal(t, 1, countEventType(events, EventRunStarted))
+	assert.Equal(t, 1, countEventType(events, EventRunCompleted))
+	assert.Equal(t, 1, countHarnessKind(runtime.session.Path(), harness.KindCompaction))
+	assert.Len(t, model.Requests(), 3)
+	assert.Equal(t, InteractionSucceeded, runtime.Snapshot().Interaction.Outcome)
+}
+
+func TestTerminalInteractionOutcomePreservesNonNaturalStops(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		stop     agent.StopReason
+		outcome  InteractionOutcome
+		terminal bool
+	}{
+		{stop: agent.StopEndTurn, outcome: InteractionSucceeded, terminal: true},
+		{stop: agent.StopTerminated, outcome: InteractionSucceeded, terminal: true},
+		{stop: agent.StopPaused},
+		{stop: agent.StopMaxTurns, outcome: InteractionIncomplete, terminal: true},
+		{stop: agent.StopBudget, outcome: InteractionIncomplete, terminal: true},
+		{stop: agent.StopWhen, outcome: InteractionIncomplete, terminal: true},
+	}
+
+	for _, test := range tests {
+		outcome, terminal := terminalInteractionOutcome(test.stop)
+		assert.Equal(t, test.outcome, outcome, test.stop)
+		assert.Equal(t, test.terminal, terminal, test.stop)
+	}
+}
+
 func TestRuntimeObservationMatchesOperationIterator(t *testing.T) {
 	t.Parallel()
 
@@ -913,6 +996,45 @@ func TestRuntimeCloseCancelsAndWaitsForActivePrompt(t *testing.T) {
 	require.ErrorIs(t, <-promptDone, context.Canceled)
 	assert.Equal(t, PhaseClosed, runtime.Snapshot().Phase)
 	require.NoError(t, runtime.Close(t.Context()))
+}
+
+func TestRuntimeCloseAfterCanceledForegroundSubagentDoesNotReuseStoppedIterator(t *testing.T) {
+	t.Parallel()
+
+	model := newCanceledForegroundSubagentRuntimeModel()
+	runtime := openTestRuntime(t, model)
+	promptCtx, cancelPrompt := context.WithCancel(t.Context())
+	promptDone := make(chan error, 1)
+	go func() {
+		var promptErr error
+		for _, err := range runtime.Prompt(promptCtx, ai.UserText("delegate")) {
+			if err != nil {
+				promptErr = errors.Join(promptErr, err)
+			}
+		}
+		promptDone <- promptErr
+	}()
+
+	select {
+	case <-model.childStarted:
+	case <-t.Context().Done():
+		t.Fatal("foreground child did not start")
+	}
+	cancelPrompt()
+
+	select {
+	case promptErr := <-promptDone:
+		require.ErrorIs(t, promptErr, context.Canceled)
+	case <-t.Context().Done():
+		t.Fatal("parent prompt did not stop after cancellation")
+	}
+
+	close(model.releaseChild)
+	require.NoError(t, runtime.Close(t.Context()))
+	snapshot := runtime.Snapshot()
+	assert.Equal(t, PhaseClosed, snapshot.Phase)
+	require.Len(t, snapshot.Subagents, 1)
+	assert.Equal(t, subagent.StateCanceled, snapshot.Subagents[0].State)
 }
 
 func TestCleanupStackClosesResourcesInReverseAndJoinsErrors(t *testing.T) {
@@ -1875,6 +1997,77 @@ func (m *backgroundSpawnRuntimeModel) MainCalls() int {
 }
 
 var _ ai.LanguageModel = (*backgroundSpawnRuntimeModel)(nil)
+
+type canceledForegroundSubagentRuntimeModel struct {
+	mu           sync.Mutex
+	mainCalls    int
+	childOnce    sync.Once
+	childStarted chan struct{}
+	releaseChild chan struct{}
+}
+
+func newCanceledForegroundSubagentRuntimeModel() *canceledForegroundSubagentRuntimeModel {
+	return &canceledForegroundSubagentRuntimeModel{
+		childStarted: make(chan struct{}), releaseChild: make(chan struct{}),
+	}
+}
+
+func (m *canceledForegroundSubagentRuntimeModel) Generate(
+	ctx context.Context,
+	request ai.Request,
+) (*ai.Response, error) {
+	if strings.Contains(request.System, "You are a read-only specialist") {
+		m.childOnce.Do(func() { close(m.childStarted) })
+		<-m.releaseChild
+
+		return nil, ctx.Err()
+	}
+
+	m.mu.Lock()
+	m.mainCalls++
+	call := m.mainCalls
+	m.mu.Unlock()
+	if call != 1 {
+		return nil, errors.New("foreground cancellation model script exhausted")
+	}
+
+	return runtimeToolResponse(
+		"delegate-cancel",
+		"run_subagent",
+		`{"role":"explore","task":"Wait until the parent is canceled."}`,
+	), nil
+}
+
+func (m *canceledForegroundSubagentRuntimeModel) Stream(
+	ctx context.Context,
+	request ai.Request,
+) ai.Stream {
+	return func(yield func(ai.StreamEvent, error) bool) {
+		response, err := m.Generate(ctx, request)
+		if err != nil {
+			yield(ai.StreamEvent{}, err)
+
+			return
+		}
+		for _, event := range runtimeResponseEvents(response) {
+			if !yield(event, nil) {
+				return
+			}
+		}
+	}
+}
+
+func (*canceledForegroundSubagentRuntimeModel) Provider() ai.Provider {
+	return ai.ProviderOpenAI
+}
+
+func (*canceledForegroundSubagentRuntimeModel) ModelID() string { return "runtime-test" }
+
+func (*canceledForegroundSubagentRuntimeModel) Capabilities() ai.Capabilities {
+	return ai.Capabilities{Text: true, Tools: true, StructuredOutput: true}
+}
+
+var _ ai.LanguageModel = (*canceledForegroundSubagentRuntimeModel)(nil)
 
 var errRuntimeModelFailure = errors.New("runtime model failed")
 

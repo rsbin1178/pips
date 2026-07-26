@@ -31,6 +31,7 @@ type interaction struct {
 	search            *catalog.ToolSearch
 	changeTracker     *interactionChangeTracker
 	usage             TokenUsage
+	stop              agent.StopReason
 	subagentUsage     map[string]struct{}
 	runIDs            []string
 	activeRunID       string

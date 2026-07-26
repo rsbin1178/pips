@@ -61,6 +61,32 @@ func TestRunMetadataDecoratesEventsContextAndResult(t *testing.T) {
 	}
 }
 
+func TestPrepareTurnErrorStopsBeforeNextModelCall(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("context rewrite failed")
+	model := newScriptedModel(
+		respond(callResponse(call("c1", "lookup", `{}`))),
+		respond(textResponse("must not run")),
+	)
+	tool := agent.NewTool("lookup", "lookup", func(context.Context, struct{}) (string, error) {
+		return "ok", nil
+	})
+	a, err := agent.New(
+		model,
+		agent.WithTools(tool),
+		agent.WithPrepareTurn(func(context.Context, agent.RunInfo) agent.TurnUpdate {
+			return agent.TurnUpdate{Err: wantErr}
+		}),
+	)
+	require.NoError(t, err)
+
+	result, err := a.Run(t.Context(), agent.NewSession(), ai.UserText("go"))
+	require.ErrorIs(t, err, wantErr)
+	assert.Equal(t, 1, result.Turns)
+	assert.Len(t, model.Requests(), 1)
+}
+
 func TestNestedAgentRunLinksParentMetadata(t *testing.T) {
 	t.Parallel()
 

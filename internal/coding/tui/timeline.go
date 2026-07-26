@@ -9,6 +9,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/rsbin/pips/agent"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding"
 	"github.com/rsbin/pips/internal/coding/question"
@@ -61,6 +62,7 @@ type completionMarker struct {
 	interactionID  string
 	afterMessages  int
 	outcome        coding.InteractionOutcome
+	stop           agent.StopReason
 	durationMillis int64
 	model          string
 }
@@ -268,20 +270,37 @@ func projectQuestionToolActivity(activity toolActivity) (timelineBlock, bool) {
 		kind: blockQuestion, position: activity.position,
 		spacing: spacingCompact,
 	}
-	if activity.state == toolStateFailed || activity.state == toolStateInterrupted {
+	if (activity.state == toolStateFailed || activity.state == toolStateInterrupted) &&
+		activity.result == question.RejectionToolResult {
 		block.title = "Question canceled"
 		block.body = "No answer was submitted."
 
 		return block, true
 	}
+	if activity.state == toolStateFailed || activity.state == toolStateInterrupted {
+		block.title = "Question failed"
+		block.body = oneLineToolText(activity.result)
+		if block.body == "" {
+			block.body = "The structured question could not be opened."
+		}
 
+		return block, true
+	}
+
+	return projectAnsweredQuestionActivity(block, activity), true
+}
+
+func projectAnsweredQuestionActivity(
+	block timelineBlock,
+	activity toolActivity,
+) timelineBlock {
 	var spec question.Spec
 	if err := json.Unmarshal(activity.arguments, &spec); err != nil ||
 		question.ValidateSpec(spec) != nil {
 		block.title = "Question answered"
 		block.body = "Structured response submitted."
 
-		return block, true
+		return block
 	}
 
 	var result struct {
@@ -292,19 +311,19 @@ func projectQuestionToolActivity(activity toolActivity) (timelineBlock, bool) {
 		block.title = "Question answered"
 		block.body = "Structured response submitted."
 
-		return block, true
+		return block
 	}
 	if result.Chat != "" {
 		block.title = "Discussed question"
 		block.body = result.Chat
 
-		return block, true
+		return block
 	}
 	if len(result.Answers) != len(spec.Questions) {
 		block.title = "Question answered"
 		block.body = "Structured response submitted."
 
-		return block, true
+		return block
 	}
 
 	lines := make([]string, 0, len(result.Answers))
@@ -321,7 +340,7 @@ func projectQuestionToolActivity(activity toolActivity) (timelineBlock, bool) {
 	block.title = "Answered questions"
 	block.body = strings.Join(lines, "\n")
 
-	return block, true
+	return block
 }
 
 func groupExploreBlocks(blocks []timelineBlock) []timelineBlock {
@@ -526,6 +545,8 @@ func projectCompletionMarker(marker completionMarker) (timelineBlock, bool) {
 		suffix = " · interrupted"
 	case coding.InteractionFailed:
 		suffix = " · failed"
+	case coding.InteractionIncomplete:
+		suffix = " · incomplete (" + string(marker.stop) + ")"
 	default:
 		return timelineBlock{}, false
 	}
@@ -883,6 +904,8 @@ func completionGlyphStyle(status string, theme colorTheme) lipgloss.Style {
 	case coding.InteractionCanceled:
 		color = palette.muted
 	case coding.InteractionFailed:
+		color = palette.error
+	case coding.InteractionIncomplete:
 		color = palette.error
 	}
 

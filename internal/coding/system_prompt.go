@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+
+	"github.com/rsbin/pips/internal/coding/question"
 )
 
 const codingSystemPrompt = `You are Pips, a terminal-first coding agent operating in the user's local workspace. Be precise, safe, and useful.
@@ -193,6 +195,11 @@ func writeModeGuidance(prompt *strings.Builder, mode OperatingMode, toolNames []
 
 	if _, ok := available["tool_search"]; ok {
 		prompt.WriteString("- Built-in tools are already visible. Use tool_search only when an Extension or MCP tool is needed, then use the discovered tool directly.\n")
+	}
+
+	if _, ok := available[question.ToolName]; ok {
+		prompt.WriteString("- Prefer ask_user when a decision would materially affect the work and can be expressed as bounded choices; use its structured options instead of presenting a selection menu in assistant text.\n")
+		prompt.WriteString("- Continue independently when the answer can be inferred safely or deferred without materially changing the result.\n")
 	}
 
 	if _, ok := available["run_subagent"]; ok {
