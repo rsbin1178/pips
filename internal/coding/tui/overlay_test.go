@@ -13,6 +13,7 @@ import (
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding"
 	"github.com/rsbin/pips/internal/coding/approval"
+	"github.com/rsbin/pips/internal/coding/changes"
 	"github.com/rsbin/pips/internal/coding/config"
 	"github.com/rsbin/pips/internal/coding/modelcatalog"
 	"github.com/rsbin/pips/internal/coding/runtimecontrol"
@@ -144,10 +145,83 @@ func TestDiffInspectionPrintsPlainNarrowOutput(t *testing.T) {
 		Diff:    "diff --git a/main.go b/main.go\n-old\n+new",
 	}
 	printed := commandOutput(model.printDiff())
-	assert.Contains(t, printed, "Workspace changes")
+	assert.Contains(t, printed, "Pips-attributed changes")
 	assert.Contains(t, printed, "+new")
 	assert.NotContains(t, printed, "\x1b[")
 	assert.Equal(t, routeNone, model.route.kind)
+}
+
+func TestDiffCommandLoadsFreshWorktreeStatusAsynchronously(t *testing.T) {
+	t.Parallel()
+
+	status, err := changes.NewWorktreeStatus(
+		true,
+		changes.Branch{Head: "main", Ahead: 1},
+		[]changes.StatusEntry{
+			{
+				Path: "runtime.go", Index: changes.PathModified,
+				Worktree: changes.PathModified,
+			},
+			{Path: "notes.md", Worktree: changes.PathUntracked},
+		},
+		changes.DiffSection{
+			Summary: changes.DiffSummary{Files: 1, Additions: 2, Deletions: 1},
+			Diff:    "diff --git a/runtime.go b/runtime.go\n-old\n+new",
+		},
+		changes.DiffSection{
+			Summary: changes.DiffSummary{Files: 1, Additions: 1},
+		},
+		changes.DiffSection{
+			Summary: changes.DiffSummary{Files: 1, Additions: 3},
+			Diff:    "+notes",
+		},
+		1,
+	)
+	require.NoError(t, err)
+	controller := &worktreeController{
+		overlayController: newOverlayController(readyState()),
+		status:            status,
+	}
+	model := readyModelWithController(t, controller, true)
+
+	command := model.loadWorkspaceStatus()
+	require.NotNil(t, command)
+	assert.True(t, model.worktreeLoading)
+	assert.Contains(t, model.statusLine(), "inspecting Git")
+	_, printedCommand := model.Update(command())
+	printed := commandOutput(printedCommand)
+
+	assert.False(t, model.worktreeLoading)
+	assert.Contains(t, printed, "Workspace changes · main ↑1 ↓0")
+	assert.Contains(t, printed, "Staged (1 files, +2 -1)")
+	assert.Contains(t, printed, "M  runtime.go")
+	assert.Contains(t, printed, "Untracked (1 files, +3 -0)")
+	assert.Contains(t, printed, "Protected product metadata omitted: 1 path(s)")
+	assert.Contains(t, model.statusContent(), "Repository: main ↑1 ↓0 · 2 changed")
+	assert.Equal(t, 1, controller.calls)
+}
+
+func TestDiffInspectionCanBeCanceledWithoutPrintingAnError(t *testing.T) {
+	t.Parallel()
+
+	controller := &cancelWorktreeController{
+		overlayController: newOverlayController(readyState()),
+		started:           make(chan struct{}),
+	}
+	model := readyModelWithController(t, controller, true)
+	command := model.loadWorkspaceStatus()
+	require.NotNil(t, command)
+
+	result := make(chan tea.Msg, 1)
+	go func() { result <- command() }()
+	<-controller.started
+	_, cancelCommand := model.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	assert.Nil(t, cancelCommand)
+	assert.False(t, model.worktreeLoading)
+
+	_, staleCommand := model.Update(<-result)
+	assert.Nil(t, staleCommand)
+	assert.Empty(t, model.worktreeSummary)
 }
 
 func TestLongDiffInspectionPrintIncludesFullReport(t *testing.T) {
@@ -295,6 +369,32 @@ type overlayController struct {
 	agentCanceled    []string
 	skillSnapshot    coding.SkillSnapshot
 	skillErr         error
+}
+
+type worktreeController struct {
+	*overlayController
+	status changes.WorktreeStatus
+	calls  int
+}
+
+type cancelWorktreeController struct {
+	*overlayController
+	started chan struct{}
+}
+
+func (c *cancelWorktreeController) WorkspaceStatus(
+	ctx context.Context,
+) (changes.WorktreeStatus, error) {
+	close(c.started)
+	<-ctx.Done()
+
+	return changes.WorktreeStatus{}, ctx.Err()
+}
+
+func (c *worktreeController) WorkspaceStatus(context.Context) (changes.WorktreeStatus, error) {
+	c.calls++
+
+	return c.status, nil
 }
 
 func newOverlayController(state coding.State) *overlayController {

@@ -22,6 +22,7 @@ const (
 	pickerCommand
 	pickerModel
 	pickerSkill
+	pickerMode
 )
 
 type pickerState struct {
@@ -58,6 +59,15 @@ func (m *Model) openModelPicker() {
 	}
 }
 
+func (m *Model) openModePicker() {
+	state := m.controller.Mode()
+	cursor := 0
+	if state.Current == coding.ModePlan {
+		cursor = 1
+	}
+	m.picker = pickerState{kind: pickerMode, cursor: cursor}
+}
+
 func (m *Model) closePicker() tea.Cmd {
 	m.picker = pickerState{}
 
@@ -72,6 +82,8 @@ func (m *Model) updatePickerKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case pickerModel:
 	case pickerSkill:
 		return m.updateSkillPickerKey(message)
+	case pickerMode:
+		return m.updateModePickerKey(message)
 	default:
 		return m, nil
 	}
@@ -118,6 +130,60 @@ func (m *Model) updatePickerKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func (m *Model) updateModePickerKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if m.picker.controlling {
+		return m, nil
+	}
+	if key := message.String(); key == keyEscape || key == keyCtrlC {
+		return m, m.closePicker()
+	}
+
+	modes := []coding.OperatingMode{coding.ModeAgent, coding.ModePlan}
+	switch message.String() {
+	case "up", keyLeft, "k":
+		m.picker.cursor = wrapIndex(m.picker.cursor-1, len(modes))
+	case keyDown, keyRight, "j", keyTab:
+		m.picker.cursor = wrapIndex(m.picker.cursor+1, len(modes))
+	case keyEnter:
+		return m, m.runModeControl(modes[m.picker.cursor])
+	}
+
+	return m, nil
+}
+
+func (m *Model) modePickerView(maxHeight int) string {
+	if m.picker.kind != pickerMode {
+		return ""
+	}
+
+	current := m.controller.Mode().Current
+	lines := []string{"Operating mode · current process only"}
+	for index, mode := range []coding.OperatingMode{coding.ModeAgent, coding.ModePlan} {
+		prefix := "  "
+		if index == m.picker.cursor {
+			prefix = "› "
+		}
+		suffix := ""
+		if mode == current {
+			suffix = "  current"
+		}
+		line := prefix + string(mode) + suffix
+		if !m.options.NoColor && index == m.picker.cursor {
+			line = lipgloss.NewStyle().Foreground(paletteFor(m.theme).session).Render(line)
+		}
+		lines = append(lines, line)
+	}
+	lines = append(lines, "↑/↓ choose · Enter apply · Esc cancel")
+	if m.picker.loading {
+		lines = append(lines, "Working…")
+	}
+	if m.picker.err != nil {
+		lines = append(lines, "Error: "+safeError(m.picker.err))
+	}
+
+	return truncateHeight(strings.Join(lines, "\n"), max(1, maxHeight))
 }
 
 func (m *Model) filteredPickerModels() []modelcatalog.Entry {

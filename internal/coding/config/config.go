@@ -28,6 +28,7 @@ const (
 	FieldVariant    Field = "variant"
 	FieldReasoning  Field = "reasoning"
 	FieldToolSearch Field = "tool_search"
+	FieldMode       Field = "mode"
 	FieldSandbox    Field = "sandbox"
 	FieldApproval   Field = "approval"
 )
@@ -37,6 +38,7 @@ var fields = []Field{
 	FieldVariant,
 	FieldReasoning,
 	FieldToolSearch,
+	FieldMode,
 	FieldSandbox,
 	FieldApproval,
 }
@@ -77,6 +79,15 @@ type ApprovalMode string
 const (
 	ApprovalOnRequest ApprovalMode = "on-request"
 	ApprovalNever     ApprovalMode = "never"
+)
+
+// OperatingMode selects the Coding Agent capability policy.
+type OperatingMode string
+
+// Supported Coding Agent operating modes.
+const (
+	ModeAgent OperatingMode = "agent"
+	ModePlan  OperatingMode = "plan"
 )
 
 // Protocol identifies the provider adapter and wire surface used by a model.
@@ -351,6 +362,7 @@ type Config struct {
 	Providers  map[ai.Provider]ProviderConfig
 	Models     []ModelConfig
 	ToolSearch bool
+	Mode       OperatingMode
 	Sandbox    SandboxMode
 	Approval   ApprovalMode
 	Compaction CompactionConfig
@@ -366,6 +378,7 @@ type Patch struct {
 	Variant    *string
 	Reasoning  *ReasoningLevel
 	ToolSearch *bool
+	Mode       *OperatingMode
 	Sandbox    *SandboxMode
 	Approval   *ApprovalMode
 }
@@ -381,6 +394,7 @@ func Defaults() Config {
 
 	return Config{
 		Providers:  map[ai.Provider]ProviderConfig{},
+		Mode:       ModeAgent,
 		Sandbox:    SandboxWorkspaceWrite,
 		Approval:   ApprovalOnRequest,
 		Compaction: DefaultCompactionConfig(),
@@ -435,6 +449,11 @@ func (c Config) ValidateRuntime() error {
 	}
 	if err := validateSandbox(c.Sandbox); err != nil {
 		return err
+	}
+	if c.Mode != "" {
+		if err := validateOperatingMode(c.Mode); err != nil {
+			return err
+		}
 	}
 	if err := validateApproval(c.Approval); err != nil {
 		return err
@@ -542,6 +561,16 @@ func ParseApprovalMode(value string) (ApprovalMode, error) {
 	return mode, nil
 }
 
+// ParseOperatingMode parses a supported Coding Agent capability policy.
+func ParseOperatingMode(value string) (OperatingMode, error) {
+	mode := OperatingMode(strings.TrimSpace(value))
+	if err := validateOperatingMode(mode); err != nil {
+		return "", err
+	}
+
+	return mode, nil
+}
+
 func validateSandbox(mode SandboxMode) error {
 	switch mode {
 	case SandboxWorkspaceWrite, SandboxFullAccess:
@@ -557,6 +586,15 @@ func validateApproval(mode ApprovalMode) error {
 		return nil
 	default:
 		return fmt.Errorf("%w: unsupported approval mode %q", ErrInvalid, mode)
+	}
+}
+
+func validateOperatingMode(mode OperatingMode) error {
+	switch mode {
+	case ModeAgent, ModePlan:
+		return nil
+	default:
+		return fmt.Errorf("%w: unsupported operating mode %q", ErrInvalid, mode)
 	}
 }
 
@@ -581,6 +619,10 @@ func apply(value Config, patch Patch, source Source) Config {
 	if patch.ToolSearch != nil {
 		value.ToolSearch = *patch.ToolSearch
 		value.sources[FieldToolSearch] = source
+	}
+	if patch.Mode != nil {
+		value.Mode = *patch.Mode
+		value.sources[FieldMode] = source
 	}
 	if patch.Sandbox != nil {
 		value.Sandbox = *patch.Sandbox

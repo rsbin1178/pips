@@ -2,13 +2,18 @@
 package coding
 
 import (
+	"context"
 	"os"
 	"strings"
 	"testing"
 
 	"github.com/rsbin/pips/ai"
+	"github.com/rsbin/pips/internal/coding/config"
+	"github.com/rsbin/pips/internal/coding/execution"
 	"github.com/rsbin/pips/internal/coding/instructions"
+	"github.com/rsbin/pips/internal/coding/paths"
 	"github.com/rsbin/pips/internal/coding/skillsettings"
+	"github.com/rsbin/pips/internal/coding/workspace"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -24,6 +29,7 @@ func TestBuildCodingSystemPromptComposesDeterministicLayers(t *testing.T) {
 		Sandbox:             "workspace-write",
 		Approval:            "on-request",
 		WorkspaceTrusted:    true,
+		Mode:                ModeAgent,
 		ToolNames:           []string{"tool_search", "read", "read", "spawn_agent"},
 		ProjectInstructions: "<project_instructions>Keep the boundary.</project_instructions>",
 	})
@@ -38,6 +44,35 @@ func TestBuildCodingSystemPromptComposesDeterministicLayers(t *testing.T) {
 	assert.NotContains(t, prompt, "Use run_subagent for one bounded specialist result")
 	assert.Less(t, strings.Index(prompt, "# Runtime environment"), strings.Index(prompt, "# Tool guidance"))
 	assert.Less(t, strings.Index(prompt, "# Tool guidance"), strings.Index(prompt, "# Project instructions"))
+}
+
+func TestBuildCodingSystemPromptKeepsSharedPrefixStableAcrossModes(t *testing.T) {
+	t.Parallel()
+
+	base := systemPromptOptions{
+		Model: "example/model", WorkingDirectory: "/workspace", Platform: "linux",
+		Date: "2026-07-25", Sandbox: "workspace-write", Approval: "on-request",
+		WorkspaceTrusted: true, ProjectInstructions: "Keep the boundary.",
+	}
+	agentOptions := base
+	agentOptions.Mode = ModeAgent
+	agentOptions.ToolNames = []string{"read", "shell", "apply_patch"}
+	planOptions := base
+	planOptions.Mode = ModePlan
+	planOptions.PlanDocument = "session-bound:s-1"
+	planOptions.ToolNames = []string{"read", "read_plan", "write_plan"}
+
+	agentParts, err := buildCodingSystemPromptParts(agentOptions)
+	require.NoError(t, err)
+	planParts, err := buildCodingSystemPromptParts(planOptions)
+	require.NoError(t, err)
+
+	assert.Equal(t, agentParts.SharedPrefix, planParts.SharedPrefix)
+	assert.NotEqual(t, agentParts.Suffix, planParts.Suffix)
+	assert.NotContains(t, agentParts.SharedPrefix, "operating_mode")
+	assert.NotContains(t, agentParts.SharedPrefix, "visible_tools")
+	assert.Contains(t, planParts.Suffix, `"operating_mode": "plan"`)
+	assert.Contains(t, planParts.Suffix, "write_plan")
 }
 
 func TestRuntimeInjectsMainSystemPromptAndProjectInstructions(t *testing.T) {
@@ -141,7 +176,7 @@ func TestRuntimeSkillPolicyDisablesInjectionAndPersists(t *testing.T) {
 	))
 
 	firstModel := newRuntimeModel(runtimeTextResponse("done"))
-	first := openTestRuntimeConfiguredWithTrust(
+	first := openFullAccessTestRuntimeConfiguredWithTrust(
 		t, base, SessionTarget{}, firstModel, nil, nil, nil, true,
 	)
 	snapshot, err := first.Skills(t.Context())
@@ -164,7 +199,7 @@ func TestRuntimeSkillPolicyDisablesInjectionAndPersists(t *testing.T) {
 	assert.NotContains(t, toolNamesFromRequest(requests[0]), "skill")
 	require.NoError(t, first.Close(t.Context()))
 
-	second := openTestRuntimeConfiguredWithTrust(
+	second := openFullAccessTestRuntimeConfiguredWithTrust(
 		t,
 		base,
 		SessionTarget{},
@@ -241,7 +276,7 @@ func TestRuntimeRejectsUntrustedStaleBusyAndFailedSkillMutations(t *testing.T) {
 
 		base := t.TempDir()
 		writeRuntimeTestSkill(t, base, "POLICY_TEST")
-		runtime := openTestRuntimeConfiguredWithTrust(
+		runtime := openFullAccessTestRuntimeConfiguredWithTrust(
 			t,
 			base,
 			SessionTarget{},
@@ -278,7 +313,7 @@ func TestRuntimeRejectsUntrustedStaleBusyAndFailedSkillMutations(t *testing.T) {
 
 		base := t.TempDir()
 		writeRuntimeTestSkill(t, base, "POLICY_TEST")
-		runtime := openTestRuntimeConfiguredWithTrust(
+		runtime := openFullAccessTestRuntimeConfiguredWithTrust(
 			t,
 			base,
 			SessionTarget{},
@@ -314,7 +349,7 @@ func TestRuntimeReloadPublishesProjectSkillPolicy(t *testing.T) {
 
 	base := t.TempDir()
 	writeRuntimeTestSkill(t, base, "POLICY_TEST")
-	runtime := openTestRuntimeConfiguredWithTrust(
+	runtime := openFullAccessTestRuntimeConfiguredWithTrust(
 		t,
 		base,
 		SessionTarget{},
@@ -367,16 +402,22 @@ func TestRuntimeRejectsInvalidProjectInstructionsBeforeModelRequest(t *testing.T
 	require.NoError(t, os.WriteFile(workspacePath+"/AGENTS.md", []byte{'p', 0, 's'}, 0o600))
 
 	model := newRuntimeModel(runtimeTextResponse("must not run"))
-	runtime := openTestRuntimeAt(t, base, SessionTarget{}, model)
+	openedWorkspace, err := workspace.Open(workspacePath)
+	require.NoError(t, err)
+	layout, err := paths.New(base + "/home")
+	require.NoError(t, err)
+	cfg := config.Defaults()
+	cfg.Model = config.ModelRef{Provider: model.Provider(), Model: model.ModelID()}
+	_, err = Open(t.Context(), OpenOptions{
+		Workspace: openedWorkspace,
+		Config:    cfg,
+		Paths:     layout,
+		Model:     model,
+		Execution: ExecutionOptions{
+			SandboxProbe: func(context.Context, *execution.Executor) error { return nil },
+		},
+	})
 
-	var runErr error
-
-	for _, err := range runtime.Prompt(t.Context(), ai.UserText("inspect")) {
-		if err != nil {
-			runErr = err
-		}
-	}
-
-	require.ErrorIs(t, runErr, instructions.ErrBinary)
+	require.ErrorIs(t, err, instructions.ErrBinary)
 	assert.Empty(t, model.Requests())
 }

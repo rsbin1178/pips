@@ -59,6 +59,7 @@ type rootFlags struct {
 	variant    string
 	reasoning  string
 	toolSearch bool
+	mode       string
 	sandbox    string
 	approval   string
 }
@@ -131,6 +132,7 @@ func New(dependencies Dependencies) (*cobra.Command, error) {
 	persistent.StringVar(&flags.variant, "variant", "", "named model request preset")
 	persistent.StringVar(&flags.reasoning, "reasoning", "", "model reasoning level")
 	persistent.BoolVar(&flags.toolSearch, "tool-search", false, "enable deferred tool search")
+	persistent.StringVar(&flags.mode, "mode", "", "operating mode (agent or plan)")
 	persistent.StringVar(&flags.sandbox, "sandbox", "", "sandbox mode")
 	persistent.StringVar(&flags.approval, "approval", "", "approval mode")
 	persistent.String("provider", "", "removed provider selector")

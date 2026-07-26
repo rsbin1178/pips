@@ -9,10 +9,49 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding"
+	"github.com/rsbin/pips/internal/coding/question"
 	"github.com/rsbin/pips/internal/coding/subagent"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestTimelineProjectsQuestionResultSemantically(t *testing.T) {
+	t.Parallel()
+
+	state := coding.State{Transcript: []ai.Message{
+		ai.Assistant(ai.ToolCallPart{
+			ID: "question-1", Name: question.ToolName,
+			Args: ai.JSON(`{"questions":[{"header":"Framework","question":"Choose one","options":[{"label":"React","description":"Components"},{"label":"Vue","description":"Progressive"}]}]}`),
+		}),
+		ai.ToolResultText(
+			"question-1", question.ToolName,
+			`{"answers":[{"selections":["React"]}]}`,
+		),
+	}}
+
+	blocks := projectTimeline(state)
+	require.Len(t, blocks, 1)
+	assert.Equal(t, blockQuestion, blocks[0].kind)
+	rendered := renderTimeline(blocks, newMarkdownRenderer(4), 80, themeDark, true)
+	assert.Contains(t, rendered, "Answered questions")
+	assert.Contains(t, rendered, "Framework: React")
+	assert.NotContains(t, rendered, question.ToolName)
+	assert.NotContains(t, rendered, "selections")
+}
+
+func TestTimelineHidesPendingQuestionToolActivity(t *testing.T) {
+	t.Parallel()
+
+	state := coding.State{Tools: []coding.ToolState{{
+		Call: coding.ToolCall{
+			ID: "question-1", Name: question.ToolName,
+			Arguments: ai.JSON(`{"questions":[{"header":"Framework","question":"Choose one","options":[{"label":"React","description":"Components"},{"label":"Vue","description":"Progressive"}]}]}`),
+		},
+		Status: coding.ToolStatusRunning,
+	}}}
+
+	assert.Empty(t, projectTimeline(state))
+}
 
 func TestTimelineNeverProjectsReasoningOrSignatures(t *testing.T) {
 	t.Parallel()

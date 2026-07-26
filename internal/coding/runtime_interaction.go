@@ -20,6 +20,7 @@ import (
 	"github.com/rsbin/pips/internal/coding/changes"
 	"github.com/rsbin/pips/internal/coding/changes/git"
 	codingmcp "github.com/rsbin/pips/internal/coding/mcp"
+	"github.com/rsbin/pips/internal/coding/question"
 	"github.com/rsbin/pips/internal/coding/subagent"
 	"github.com/rsbin/pips/internal/coding/tools"
 )
@@ -92,12 +93,12 @@ func (e *eventEmitter) fail(err error) {
 func (r *Runtime) run(
 	parent context.Context,
 	kind runtimeOperationKind,
-	resolution approval.Resolution,
+	resolution runtimeResolution,
 	messages []ai.Message,
 	notification *notificationOperation,
 	yield func(Event, error) bool,
 ) {
-	ctx, operation, err := r.beginOperation(parent, kind, messages)
+	ctx, operation, err := r.beginOperation(parent, kind, resolution, messages)
 	if err != nil {
 		yield(Event{}, err)
 		return
@@ -121,7 +122,7 @@ func (r *Runtime) run(
 			return
 		}
 
-		started := InteractionStarted{}
+		started := InteractionStarted{Mode: r.currentOperatingMode()}
 		if notification != nil {
 			started.Source = InteractionSourceAgentNotification
 			started.RootInteractionID = notification.rootInteractionID
@@ -184,7 +185,7 @@ func (r *Runtime) run(
 			r.recovery.PendingID,
 			true,
 			emitter,
-			InteractionStarted{Resumed: true},
+			InteractionStarted{Resumed: true, Mode: r.currentOperatingMode()},
 			nil,
 		)
 		if err == nil {
@@ -196,21 +197,69 @@ func (r *Runtime) run(
 		r.mu.Unlock()
 
 		var approvalState approval.State
-		approvalState, err = r.controller.Resolve(ctx, resolution, nil)
+		approvalState, err = r.controller.Resolve(ctx, resolution.approval, nil)
 		if err == nil {
 			err = emitter.emit(
 				current.id,
 				"",
 				EventApprovalResolved,
 				ApprovalResolved{
-					RequestID: resolution.RequestID,
-					Choice:    resolution.Choice,
+					RequestID: resolution.approval.RequestID,
+					Choice:    resolution.approval.Choice,
 				},
 			)
 		}
 
 		if err == nil {
 			err = r.handleApprovalState(ctx, current, approvalState, emitter)
+		}
+	case operationResolveQuestion:
+		r.mu.Lock()
+		current = r.interaction
+		r.mu.Unlock()
+
+		err = r.questions.Resolve(resolution.question)
+		if err == nil {
+			err = emitter.emit(
+				current.id,
+				"",
+				EventQuestionResolved,
+				QuestionResolved{
+					Resolution:  question.CloneResolution(resolution.question),
+					AnswerCount: len(resolution.question.Answers),
+					Chat:        resolution.question.Chat != "",
+				},
+			)
+		}
+		if err == nil {
+			err = r.reconcileAndContinue(ctx, current, emitter)
+		}
+	case operationRejectQuestion:
+		r.mu.Lock()
+		current = r.interaction
+		r.mu.Unlock()
+
+		if resolution.rejection == nil {
+			err = fmt.Errorf("%w: missing question rejection", ErrRuntimeInvalid)
+			break
+		}
+		err = r.questions.Reject(
+			resolution.rejection.requestID,
+			resolution.rejection.schemaDigest,
+		)
+		if err == nil {
+			err = emitter.emit(
+				current.id,
+				"",
+				EventQuestionRejected,
+				QuestionRejected{
+					RequestID:    resolution.rejection.requestID,
+					SchemaDigest: resolution.rejection.schemaDigest,
+				},
+			)
+		}
+		if err == nil {
+			err = r.reconcileAndContinue(ctx, current, emitter)
 		}
 	case operationPreview, operationCompact, operationNavigate, operationFork:
 		err = fmt.Errorf("%w: structural operation entered interaction driver", ErrRuntimeInvalid)
@@ -304,6 +353,7 @@ func (r *Runtime) finishUnopenedInteraction(
 func (r *Runtime) beginOperation(
 	parent context.Context,
 	kind runtimeOperationKind,
+	resolution runtimeResolution,
 	messages []ai.Message,
 ) (context.Context, *runtimeOperation, error) {
 	if err := parent.Err(); err != nil {
@@ -338,9 +388,25 @@ func (r *Runtime) beginOperation(
 		if r.state.Phase != PhasePaused || r.interaction != nil || r.recovery.PendingID == "" {
 			return nil, nil, stateError(string(kind), r.state.Phase, ErrRuntimeNotPaused)
 		}
-	case operationResolve:
+	case operationResolve, operationResolveQuestion, operationRejectQuestion:
 		if r.state.Phase != PhasePaused || r.interaction == nil {
 			return nil, nil, stateError(string(kind), r.state.Phase, ErrRuntimeNotPaused)
+		}
+		if kind == operationResolveQuestion {
+			if r.state.Question.Required == nil ||
+				question.ValidateResolution(
+					*r.state.Question.Required,
+					resolution.question,
+				) != nil {
+				return nil, nil, fmt.Errorf("%w: invalid question resolution", ErrRuntimeInvalid)
+			}
+		}
+		if kind == operationRejectQuestion {
+			if resolution.rejection == nil || r.state.Question.Required == nil ||
+				r.state.Question.Required.ID != resolution.rejection.requestID ||
+				r.state.Question.Required.SchemaDigest != resolution.rejection.schemaDigest {
+				return nil, nil, fmt.Errorf("%w: invalid question rejection", ErrRuntimeInvalid)
+			}
 		}
 	case operationPreview, operationCompact, operationNavigate, operationFork:
 		if r.state.Phase != PhaseIdle || r.interaction != nil || r.recovery.PendingID != "" {
@@ -386,10 +452,6 @@ func (r *Runtime) openInteraction(
 	}
 	if started.RootInteractionID != "" {
 		current.rootInteractionID = started.RootInteractionID
-	}
-	projectInstructions, err := r.instructionResolver.Resolve(ctx, ".")
-	if err != nil {
-		return nil, fmt.Errorf("coding runtime: resolve project instructions: %w", err)
 	}
 	if snapshot, attempted, err := r.connections.RefreshChanged(ctx); err != nil {
 		_ = emitter.emit("", "", EventIntegrationDiagnostic, IntegrationDiagnostic{
@@ -455,6 +517,14 @@ func (r *Runtime) openInteraction(
 	if err != nil {
 		return nil, err
 	}
+	planCatalog, err := tools.NewPlanCatalog(r.plans, r.planRef)
+	if err != nil {
+		return nil, err
+	}
+	questionCatalog, err := r.questions.Catalog()
+	if err != nil {
+		return nil, err
+	}
 
 	skillTools, err := catalog.New()
 	if err != nil {
@@ -494,6 +564,8 @@ func (r *Runtime) openInteraction(
 
 	merged, err := catalog.Merge(
 		localCatalog,
+		planCatalog,
+		questionCatalog,
 		subagentTools,
 		skillTools,
 		snapshot.Catalog(),
@@ -503,12 +575,18 @@ func (r *Runtime) openInteraction(
 		return nil, err
 	}
 
-	policy := catalog.AllowAll(r.workspace.Identity().Key(), catalog.RiskPrivileged)
+	policy, err := catalogPolicyForMode(started.Mode, r.workspace.Identity().Key())
+	if err != nil {
+		return nil, err
+	}
 	descriptors, err := merged.Search(ctx, policy, "")
 	if err != nil {
 		return nil, err
 	}
-	current.changeTracker = newInteractionChangeTracker(r.inspector, descriptors)
+	changeDescriptors := slices.DeleteFunc(slices.Clone(descriptors), func(value catalog.Descriptor) bool {
+		return value.Source.Kind == catalog.SourceLocal && value.Source.ID == tools.PlanCatalogID
+	})
+	current.changeTracker = newInteractionChangeTracker(r.inspector, changeDescriptors)
 
 	search, err := catalog.NewToolSearch(merged, policy, catalog.ToolSearchOptions{
 		Enabled: r.config.ToolSearch,
@@ -521,16 +599,18 @@ func (r *Runtime) openInteraction(
 	if err != nil {
 		return nil, err
 	}
-	systemPrompt, err := buildCodingSystemPrompt(systemPromptOptions{
+	systemPrompt, err := buildCodingSystemPromptParts(systemPromptOptions{
 		Model:               r.resolved.Ref.String(),
 		WorkingDirectory:    r.workspace.Root(),
 		Platform:            goruntime.GOOS,
-		Date:                time.Now().Format(time.DateOnly),
+		Date:                r.promptDate,
 		Sandbox:             string(r.config.Sandbox),
 		Approval:            string(r.config.Approval),
 		WorkspaceTrusted:    r.trusted,
+		Mode:                started.Mode,
+		PlanDocument:        planDocumentReference(started.Mode, r.handle.Metadata().ID),
 		ToolNames:           agentToolNames(visibleTools),
-		ProjectInstructions: projectInstructions.SystemPrompt(),
+		ProjectInstructions: r.projectInstructions,
 		ExplicitSkills:      explicitSkills,
 	})
 	if err != nil {
@@ -548,6 +628,8 @@ func (r *Runtime) openInteraction(
 	controlHooks := extensionHooks
 	controlHooks.Observe = nil
 	composed := extension.ComposeHooks(
+		extension.Hooks{BeforeTool: leasedToolGuard(started.Mode, descriptors, r.config.ToolSearch)},
+		extension.Hooks{BeforeTool: r.questions.BeforeTool},
 		extension.Hooks{BeforeTool: current.changeTracker.beforeTool},
 		controlHooks,
 		extension.Hooks{BeforeTool: r.controller.BeforeTool},
@@ -556,7 +638,8 @@ func (r *Runtime) openInteraction(
 
 	harnessOptions := []harness.Option{
 		harness.WithTools(visibleTools...),
-		harness.WithSystem(systemPrompt),
+		harness.WithSystem(systemPrompt.SharedPrefix),
+		harness.WithSystemSuffix(systemPrompt.Suffix),
 		harness.WithSkillCatalog(modelSkillCatalog),
 		harness.WithTemplates(snapshot.Prompts()...),
 		harness.WithAgentOptions(append(
@@ -781,11 +864,57 @@ func (r *Runtime) emitRunError(
 	})
 }
 
+//nolint:nestif // Question recovery must precede and exclude approval recovery.
 func (r *Runtime) reconcileAndContinue(
 	ctx context.Context,
 	current *interaction,
 	emitter *eventEmitter,
 ) error {
+	pending, err := r.session.Pending()
+	if err != nil {
+		return err
+	}
+	request, err := r.questions.Reconcile(pending)
+	if err != nil {
+		return err
+	}
+	if request != nil {
+		state := r.Snapshot()
+		if state.Approval.Kind != ApprovalNone {
+			return fmt.Errorf("%w: question and approval cannot be pending together", ErrRuntimeInvalid)
+		}
+		if state.Phase == PhaseRunning {
+			if err := emitter.emit(
+				current.id,
+				"",
+				EventStatusChanged,
+				StatusChanged{Phase: PhasePaused},
+			); err != nil {
+				return err
+			}
+		}
+
+		state = r.Snapshot()
+		if state.Question.Required != nil {
+			if state.Question.Required.ID == request.ID &&
+				state.Question.Required.SchemaDigest == request.SchemaDigest {
+				return nil
+			}
+
+			return fmt.Errorf("%w: another question is already displayed", ErrRuntimeInvalid)
+		}
+
+		return emitter.emit(
+			current.id,
+			"",
+			EventQuestionRequired,
+			QuestionRequired{
+				Request: question.CloneRequest(*request),
+				Count:   len(request.Questions),
+			},
+		)
+	}
+
 	state, err := r.controller.Reconcile(ctx, nil)
 	if err != nil {
 		return err
@@ -1108,7 +1237,8 @@ func (r *Runtime) Cancel() error {
 }
 
 var (
-	_ approval.PendingRunner = (*pendingRunner)(nil)
-	_ approval.Resolver      = (*activeResolver)(nil)
-	_ codingmcp.ProjectGit   = (*git.Inspector)(nil)
+	_ approval.PendingRunner    = (*pendingRunner)(nil)
+	_ approval.Resolver         = (*activeResolver)(nil)
+	_ codingmcp.ProjectGit      = (*git.Inspector)(nil)
+	_ changes.WorktreeInspector = (*git.Inspector)(nil)
 )

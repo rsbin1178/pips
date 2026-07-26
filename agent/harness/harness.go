@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"iter"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/rsbin/pips/agent"
@@ -46,6 +47,7 @@ type hconfig struct {
 	tools        []agent.Tool
 	system       string
 	systemFn     func(SystemContext) string
+	systemSuffix string
 	skills       []Skill
 	skillCatalog *SkillCatalog
 	templates    []PromptTemplate
@@ -72,6 +74,14 @@ func WithSystem(s string) Option {
 // block is appended to its result. It overrides [WithSystem].
 func WithSystemFunc(fn func(SystemContext) string) Option {
 	return func(c *hconfig) { c.systemFn = fn }
+}
+
+// WithSystemSuffix appends an application-owned suffix after the generated
+// available-Skills block. It is intended for interaction-scoped context and
+// explicitly activated Skill instructions that must not rewrite the stable
+// system prefix.
+func WithSystemSuffix(s string) Option {
+	return func(c *hconfig) { c.systemSuffix = s }
 }
 
 // WithSkills registers skills, surfaced to the model through the system
@@ -637,8 +647,8 @@ func (h *Harness) buildAgent(rec *recorder) (*agent.Agent, error) {
 	return agent.New(model, opts...)
 }
 
-// systemPrompt assembles the effective system prompt: the configured base
-// (static or callback) plus the skills block.
+// systemPrompt assembles the effective system prompt in the stable order:
+// configured base, generated Skills index, then application-owned suffix.
 func (h *Harness) systemPrompt() string {
 	base := h.cfg.system
 	if h.cfg.systemFn != nil {
@@ -650,16 +660,15 @@ func (h *Harness) systemPrompt() string {
 		})
 	}
 
-	block := FormatSkillsPrompt(h.cfg.skills)
+	parts := make([]string, 0, 3)
 
-	switch {
-	case base == "":
-		return block
-	case block == "":
-		return base
-	default:
-		return base + "\n\n" + block
+	for _, part := range []string{base, FormatSkillsPrompt(h.cfg.skills), h.cfg.systemSuffix} {
+		if part != "" {
+			parts = append(parts, part)
+		}
 	}
+
+	return strings.Join(parts, "\n\n")
 }
 
 func (h *Harness) enter(p Phase) error {

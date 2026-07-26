@@ -16,6 +16,9 @@ var (
 	ErrRuntimeNotPaused = errors.New("coding runtime: not paused")
 	// ErrRuntimeInvalid means Runtime construction input is incomplete or inconsistent.
 	ErrRuntimeInvalid = errors.New("coding runtime: invalid options")
+	// ErrInputRequired means a non-interactive client encountered a structured
+	// user question that it must not answer implicitly.
+	ErrInputRequired = errors.New("coding runtime: structured user input required")
 	// ErrLegacyToolCallUnresolved means a resumed Session contains a pending
 	// call for a removed pre-P1 Coding Tool protocol. It is never replayed or
 	// guessed under the replacement name.

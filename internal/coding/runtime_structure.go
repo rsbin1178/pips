@@ -15,6 +15,7 @@ import (
 
 	"github.com/rsbin/pips/agent/harness"
 	"github.com/rsbin/pips/ai"
+	"github.com/rsbin/pips/internal/coding/plandoc"
 	"github.com/rsbin/pips/internal/coding/session"
 )
 
@@ -52,7 +53,7 @@ func (r *Runtime) PreviewCompaction(ctx context.Context) (CompactionPreview, err
 	if r == nil {
 		return CompactionPreview{}, ErrRuntimeClosed
 	}
-	_, operation, err := r.beginOperation(ctx, operationPreview, nil)
+	_, operation, err := r.beginOperation(ctx, operationPreview, runtimeResolution{}, nil)
 	if err != nil {
 		return CompactionPreview{}, err
 	}
@@ -75,7 +76,9 @@ func (r *Runtime) Navigate(
 			yield(Event{}, ErrRuntimeClosed)
 			return
 		}
-		operationCtx, operation, err := r.beginOperation(ctx, operationNavigate, nil)
+		operationCtx, operation, err := r.beginOperation(
+			ctx, operationNavigate, runtimeResolution{}, nil,
+		)
 		if err != nil {
 			yield(Event{}, err)
 			return
@@ -121,7 +124,9 @@ func (r *Runtime) Compact(
 			yield(Event{}, ErrRuntimeClosed)
 			return
 		}
-		operationCtx, operation, err := r.beginOperation(ctx, operationCompact, nil)
+		operationCtx, operation, err := r.beginOperation(
+			ctx, operationCompact, runtimeResolution{}, nil,
+		)
 		if err != nil {
 			yield(Event{}, err)
 			return
@@ -161,7 +166,9 @@ func (r *Runtime) Fork(ctx context.Context, entryID string) (string, error) {
 	if r == nil {
 		return "", ErrRuntimeClosed
 	}
-	operationCtx, operation, err := r.beginOperation(ctx, operationFork, nil)
+	operationCtx, operation, err := r.beginOperation(
+		ctx, operationFork, runtimeResolution{}, nil,
+	)
 	if err != nil {
 		return "", err
 	}
@@ -176,8 +183,12 @@ func (r *Runtime) Fork(ctx context.Context, entryID string) (string, error) {
 		return "", err
 	}
 	targetID := target.Metadata().ID
-	if err := target.Close(); err != nil {
-		return "", err
+	targetPlanRef := plandoc.Ref{
+		SessionID: targetID, WorkspaceID: target.Metadata().WorkspaceID,
+	}
+	planErr := r.plans.Fork(operationCtx, r.planRef, targetPlanRef)
+	if err := errors.Join(planErr, target.Close()); err != nil {
+		return targetID, err
 	}
 	emitter := newEventEmitter(operationCtx, r, nil, false)
 	if err := emitter.emit("", "", EventSessionForked, SessionForked{

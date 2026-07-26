@@ -25,6 +25,7 @@ const (
 	VariantEnv    = "PIPS_VARIANT"
 	ReasoningEnv  = "PIPS_REASONING"
 	ToolSearchEnv = "PIPS_TOOL_SEARCH"
+	ModeEnv       = "PIPS_MODE"
 	SandboxEnv    = "PIPS_SANDBOX"
 	ApprovalEnv   = "PIPS_APPROVAL"
 )
@@ -122,6 +123,7 @@ type fileConfig struct {
 	Reasoning  *string                 `toml:"reasoning"`
 	Providers  map[string]fileProvider `toml:"providers"`
 	ToolSearch *bool                   `toml:"tool_search"`
+	Mode       *string                 `toml:"mode"`
 	Sandbox    *string                 `toml:"sandbox"`
 	Approval   *string                 `toml:"approval"`
 	Compaction *fileCompaction         `toml:"compaction"`
@@ -473,6 +475,13 @@ func decodeLayer(value fileConfig) (fileLayer, error) {
 		layer.patch.Reasoning = &level
 	}
 	layer.patch.ToolSearch = value.ToolSearch
+	if value.Mode != nil {
+		mode, err := ParseOperatingMode(*value.Mode)
+		if err != nil {
+			return fileLayer{}, err
+		}
+		layer.patch.Mode = &mode
+	}
 	if value.Sandbox != nil {
 		mode, err := ParseSandboxMode(*value.Sandbox)
 		if err != nil {
@@ -726,6 +735,7 @@ func applyEnvironment(value *Config, lookup LookupEnv) error {
 		{name: VariantEnv, parse: variantPatch},
 		{name: ReasoningEnv, parse: reasoningPatch},
 		{name: ToolSearchEnv, parse: toolSearchPatch},
+		{name: ModeEnv, parse: operatingModePatch},
 		{name: SandboxEnv, parse: sandboxPatch},
 		{name: ApprovalEnv, parse: approvalPatch},
 	}
@@ -758,6 +768,7 @@ func applyFlagOverrides(value *Config, patch Patch) error {
 		{detail: "--variant", patch: Patch{Variant: validated.Variant}, set: validated.Variant != nil},
 		{detail: "--reasoning", patch: Patch{Reasoning: validated.Reasoning}, set: validated.Reasoning != nil},
 		{detail: "--tool-search", patch: Patch{ToolSearch: validated.ToolSearch}, set: validated.ToolSearch != nil},
+		{detail: "--mode", patch: Patch{Mode: validated.Mode}, set: validated.Mode != nil},
 		{detail: "--sandbox", patch: Patch{Sandbox: validated.Sandbox}, set: validated.Sandbox != nil},
 		{detail: "--approval", patch: Patch{Approval: validated.Approval}, set: validated.Approval != nil},
 	}
@@ -794,6 +805,13 @@ func validatePatch(patch Patch) (Patch, error) {
 		result.Reasoning = &level
 	}
 	result.ToolSearch = patch.ToolSearch
+	if patch.Mode != nil {
+		mode, err := ParseOperatingMode(string(*patch.Mode))
+		if err != nil {
+			return Patch{}, err
+		}
+		result.Mode = &mode
+	}
 	if patch.Sandbox != nil {
 		mode, err := ParseSandboxMode(string(*patch.Sandbox))
 		if err != nil {
@@ -833,6 +851,12 @@ func toolSearchPatch(value string) (Patch, error) {
 		return Patch{}, fmt.Errorf("%w: invalid boolean %q", ErrInvalid, value)
 	}
 	return Patch{ToolSearch: &enabled}, nil
+}
+
+func operatingModePatch(value string) (Patch, error) {
+	mode, err := ParseOperatingMode(value)
+
+	return Patch{Mode: &mode}, err
 }
 
 func sandboxPatch(value string) (Patch, error) {
