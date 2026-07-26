@@ -14,7 +14,9 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding"
+	"github.com/rsbin/pips/internal/coding/changes"
 	"github.com/rsbin/pips/internal/coding/config"
+	"github.com/rsbin/pips/internal/coding/runtimecontrol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -171,7 +173,7 @@ func TestReadyLayoutSupportsResizeMultilineAndNoColor(t *testing.T) {
 	require.NotEqual(t, -1, composerLine)
 	assert.Equal(t, composerLine+model.composer.Cursor().Y, view.Cursor.Y)
 	assert.Equal(t, model.composer.Cursor().X+2, view.Cursor.X)
-	assert.Equal(t, "┌"+strings.Repeat("─", 34)+"┐", lines[composerLine-1])
+	assert.Equal(t, "┌"+strings.Repeat("─", model.width-2)+"┐", lines[composerLine-1])
 	assert.Empty(t, lines[composerLine-2])
 }
 
@@ -180,12 +182,50 @@ func TestReadyStatusLineUsesProvisionalLabelAndStyledSegments(t *testing.T) {
 
 	model := readyModel(t, false)
 	status := model.statusLine()
-	assert.Equal(t, "workspace  ·  new  ·  openai/test-model  ·  idle", ansi.Strip(status))
+	plain := ansi.Strip(status)
+	assert.LessOrEqual(t, ansi.StringWidth(status), model.statusLineWidth())
+	assert.Contains(t, plain, "workspace  ·  new  ·  openai/test-model  ·  idle")
+	assert.NotContains(t, plain, "Agent mode")
+	assert.NotContains(t, plain, "shift+tab to cycle")
 	assert.Contains(t, status, "\x1b[")
 
 	model.state.Interaction.ID = "interaction-1"
 	assert.Contains(t, ansi.Strip(model.statusLine()), "session-1")
 	assert.NotContains(t, ansi.Strip(model.statusLine()), " ·  new  · ")
+}
+
+func TestReadyStatusLineKeepsModeAtRightEdgeOnNarrowTerminal(t *testing.T) {
+	t.Parallel()
+
+	model := readyModel(t, true)
+	model.state.Mode = coding.ModePlan
+	model.Update(tea.WindowSizeMsg{Width: 40, Height: 10})
+
+	status := model.statusLine()
+	assert.Equal(t, model.statusLineWidth(), ansi.StringWidth(status))
+	assert.True(t, strings.HasSuffix(status, "Plan mode"))
+	assert.NotContains(t, status, " ·  plan  · ")
+}
+
+func TestReadyViewUsesFullTerminalWidthWithInsetStatus(t *testing.T) {
+	t.Parallel()
+
+	model := readyModel(t, true)
+	model.state.Mode = coding.ModePlan
+	model.Update(tea.WindowSizeMsg{Width: 200, Height: 20})
+	view := model.View()
+	lines := strings.Split(view.Content, "\n")
+
+	assert.Equal(t, 200, model.width)
+	require.NotEqual(t, -1, lineContaining(lines, "┌"))
+	composerLine := lines[lineContaining(lines, "┌")]
+	statusLine := lines[lineContaining(lines, "Plan mode")]
+	visibleStatusLine := strings.TrimRight(statusLine, " ")
+	assert.Equal(t, 200, ansi.StringWidth(composerLine))
+	assert.Equal(t, 198, ansi.StringWidth(visibleStatusLine))
+	assert.True(t, strings.HasPrefix(composerLine, "┌"))
+	assert.True(t, strings.HasPrefix(statusLine, "  "))
+	assert.True(t, strings.HasSuffix(visibleStatusLine, "Plan mode (shift+tab to cycle)"))
 }
 
 func TestReadyComposerUsesArrowWithoutPlaceholder(t *testing.T) {
@@ -665,6 +705,7 @@ func readyState() coding.State {
 		SessionOpen: true,
 		Provider:    ai.ProviderOpenAI,
 		ModelID:     "test-model",
+		Mode:        coding.ModeAgent,
 		Phase:       coding.PhaseIdle,
 	}
 }
@@ -675,6 +716,27 @@ type stubController struct {
 }
 
 func (c stubController) Snapshot() coding.State { return c.state.Clone() }
+func (c stubController) Mode() runtimecontrol.ModeState {
+	mode := c.state.Mode
+	if mode == "" {
+		mode = coding.ModeAgent
+	}
+
+	return runtimecontrol.ModeState{Current: mode, Configured: mode}
+}
+func (stubController) SetMode(context.Context, coding.OperatingMode) error { return nil }
+func (stubController) WorkspaceStatus(context.Context) (changes.WorktreeStatus, error) {
+	return changes.NewWorktreeStatus(
+		false,
+		changes.Branch{},
+		nil,
+		changes.DiffSection{},
+		changes.DiffSection{},
+		changes.DiffSection{},
+		0,
+	)
+}
+
 func (c stubController) Config() config.Config {
 	value := config.Defaults()
 	value.Model.Provider = c.state.Provider

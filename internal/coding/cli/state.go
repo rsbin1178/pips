@@ -111,6 +111,7 @@ func loadResolvedCommandState(
 	return commandState{workspace: resolved, config: loaded}, nil
 }
 
+//nolint:gocyclo // Each independently optional root flag has typed validation.
 func parseFlagOverrides(cmd *cobra.Command, flags *rootFlags) (config.Patch, error) {
 	var patch config.Patch
 
@@ -138,6 +139,14 @@ func parseFlagOverrides(cmd *cobra.Command, flags *rootFlags) (config.Patch, err
 
 	if isFlagChanged(cmd, "tool-search") {
 		patch.ToolSearch = &flags.toolSearch
+	}
+	if isFlagChanged(cmd, "mode") {
+		mode, err := config.ParseOperatingMode(flags.mode)
+		if err != nil {
+			return config.Patch{}, fmt.Errorf("coding cli: --mode: %w", err)
+		}
+
+		patch.Mode = &mode
 	}
 
 	if isFlagChanged(cmd, "sandbox") {

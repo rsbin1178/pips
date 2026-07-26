@@ -2,7 +2,10 @@
 package tui
 
 import (
+	"errors"
+
 	tea "charm.land/bubbletea/v2"
+	"github.com/rsbin/pips/internal/coding"
 	"github.com/rsbin/pips/internal/coding/modelcatalog"
 )
 
@@ -14,11 +17,24 @@ const (
 	operationModel
 	operationReload
 	operationFork
+	operationMode
 )
 
 type controlResultMsg struct {
 	operation controlOperation
 	err       error
+}
+
+func (m *Model) runModeControl(mode coding.OperatingMode) tea.Cmd {
+	if m.picker.kind != pickerNone {
+		m.picker.loading = true
+		m.picker.controlling = true
+		m.picker.err = nil
+	}
+
+	return func() tea.Msg {
+		return controlResultMsg{operation: operationMode, err: m.controller.SetMode(m.ctx, mode)}
+	}
 }
 
 func (m *Model) runControl(
@@ -50,6 +66,8 @@ func (m *Model) runControl(
 			err = m.controller.Reload(m.ctx)
 		case operationFork:
 			err = m.controller.ForkSession(m.ctx, sessionID)
+		case operationMode:
+			err = errors.New("coding tui: mode changes require runModeControl")
 		}
 
 		return controlResultMsg{operation: operation, err: err}

@@ -17,8 +17,10 @@ import (
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding"
 	"github.com/rsbin/pips/internal/coding/approval"
+	"github.com/rsbin/pips/internal/coding/changes"
 	"github.com/rsbin/pips/internal/coding/config"
 	"github.com/rsbin/pips/internal/coding/modelcatalog"
+	"github.com/rsbin/pips/internal/coding/question"
 	"github.com/rsbin/pips/internal/coding/runtimecontrol"
 	"github.com/rsbin/pips/internal/coding/session"
 	"github.com/rsbin/pips/internal/coding/subagent"
@@ -68,6 +70,8 @@ type Controller interface {
 	Prompt(context.Context, ...ai.Message) iter.Seq2[coding.Event, error]
 	Continue(context.Context) iter.Seq2[coding.Event, error]
 	Resolve(context.Context, approval.Resolution) iter.Seq2[coding.Event, error]
+	ResolveQuestion(context.Context, question.Resolution) iter.Seq2[coding.Event, error]
+	RejectQuestion(context.Context, string, string) iter.Seq2[coding.Event, error]
 	Tree(context.Context) (coding.SessionTree, error)
 	PreviewCompaction(context.Context) (coding.CompactionPreview, error)
 	Navigate(context.Context, string, bool) iter.Seq2[coding.Event, error]
@@ -79,6 +83,9 @@ type Controller interface {
 	Snapshot() coding.State
 	SessionID() string
 	Model() runtimecontrol.ModelState
+	Mode() runtimecontrol.ModeState
+	SetMode(context.Context, coding.OperatingMode) error
+	WorkspaceStatus(context.Context) (changes.WorktreeStatus, error)
 	Models() []modelcatalog.Entry
 	Config() config.Config
 	Detached() bool

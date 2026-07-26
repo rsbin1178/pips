@@ -67,6 +67,7 @@ func newConfigShowCommand(dependencies Dependencies, flags *rootFlags) *cobra.Co
 				config.FieldVariant:    quotedOrUnset(state.config.Config.Variant),
 				config.FieldReasoning:  optionalReasoning(state.config.Config.Reasoning),
 				config.FieldToolSearch: strconv.FormatBool(state.config.Config.ToolSearch),
+				config.FieldMode:       strconv.Quote(string(state.config.Config.Mode)),
 				config.FieldSandbox:    strconv.Quote(string(state.config.Config.Sandbox)),
 				config.FieldApproval:   strconv.Quote(string(state.config.Config.Approval)),
 			}

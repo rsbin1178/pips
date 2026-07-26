@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"iter"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -735,7 +736,9 @@ func TestRuntimeContinueRestoresPendingInteraction(t *testing.T) {
 
 	continued := collectRuntimeEvents(t, second.Continue(t.Context()))
 	assert.Contains(t, eventTypes(continued), EventApprovalRequired)
-	assert.Equal(t, 1, countDiagnostic(continued, "changes", "not_repository"))
+	changeDiagnostics := countDiagnostic(continued, "changes", "not_repository") +
+		countDiagnostic(continued, "changes", "capture_git_failed")
+	assert.Equal(t, 1, changeDiagnostics)
 	assert.Less(
 		t,
 		slices.Index(eventTypes(continued), EventIntegrationDiagnostic),
@@ -1382,6 +1385,57 @@ func openTestRuntimeConfiguredWithTrust(
 ) *Runtime {
 	t.Helper()
 
+	return openTestRuntimeConfiguredWithSandbox(
+		t,
+		base,
+		target,
+		model,
+		extensions,
+		agentObservers,
+		telemetry,
+		trusted,
+		config.SandboxWorkspaceWrite,
+	)
+}
+
+func openFullAccessTestRuntimeConfiguredWithTrust(
+	t *testing.T,
+	base string,
+	target SessionTarget,
+	model ai.LanguageModel,
+	extensions []extension.Extension,
+	agentObservers []func(context.Context, agent.Event),
+	telemetry []TelemetryObserver,
+	trusted bool,
+) *Runtime {
+	t.Helper()
+
+	return openTestRuntimeConfiguredWithSandbox(
+		t,
+		base,
+		target,
+		model,
+		extensions,
+		agentObservers,
+		telemetry,
+		trusted,
+		config.SandboxFullAccess,
+	)
+}
+
+func openTestRuntimeConfiguredWithSandbox(
+	t *testing.T,
+	base string,
+	target SessionTarget,
+	model ai.LanguageModel,
+	extensions []extension.Extension,
+	agentObservers []func(context.Context, agent.Event),
+	telemetry []TelemetryObserver,
+	trusted bool,
+	sandbox config.SandboxMode,
+) *Runtime {
+	t.Helper()
+
 	workspacePath := base + "/workspace"
 	require.NoError(t, mkdirPrivate(workspacePath))
 
@@ -1392,6 +1446,18 @@ func openTestRuntimeConfiguredWithTrust(
 	require.NoError(t, err)
 
 	cfg := config.Defaults()
+	if sandbox == config.SandboxFullAccess {
+		loaded, loadErr := config.Load(config.LoadOptions{
+			ConfigFile: filepath.Join(base, "absent-test-config.toml"),
+			FlagOverrides: config.Patch{
+				Sandbox: &sandbox,
+			},
+		})
+		require.NoError(t, loadErr)
+		cfg = loaded.Config
+	} else {
+		cfg.Sandbox = sandbox
+	}
 	cfg.Model.Provider = model.Provider()
 	cfg.Model.Model = model.ModelID()
 	if model.Provider() == "opencode-go" {

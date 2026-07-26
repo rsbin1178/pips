@@ -135,6 +135,8 @@ func decodeEventPayload(eventType EventType, data []byte) (EventPayload, error) 
 		return decodePayload[CompactionStarted](data)
 	case EventCompactionCompleted:
 		return decodePayload[CompactionCompleted](data)
+	case EventModeChanged:
+		return decodePayload[ModeChanged](data)
 	case EventInteractionStarted:
 		return decodePayload[InteractionStarted](data)
 	case EventInteractionCompleted:
@@ -167,6 +169,12 @@ func decodeEventPayload(eventType EventType, data []byte) (EventPayload, error) 
 		return decodePayload[ApprovalUnknown](data)
 	case EventApprovalResolved:
 		return decodePayload[ApprovalResolved](data)
+	case EventQuestionRequired:
+		return decodePayload[QuestionRequired](data)
+	case EventQuestionResolved:
+		return decodePayload[QuestionResolved](data)
+	case EventQuestionRejected:
+		return decodePayload[QuestionRejected](data)
 	case EventWorkspaceChanged:
 		return decodePayload[WorkspaceChanged](data)
 	case EventStatusChanged:

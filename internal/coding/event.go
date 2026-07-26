@@ -3,6 +3,8 @@ package coding
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +20,7 @@ import (
 	"github.com/rsbin/pips/internal/coding/approval"
 	"github.com/rsbin/pips/internal/coding/changes"
 	"github.com/rsbin/pips/internal/coding/config"
+	"github.com/rsbin/pips/internal/coding/question"
 	"github.com/rsbin/pips/internal/coding/subagent"
 )
 
@@ -53,6 +56,7 @@ const (
 	EventSessionForked         EventType = "session.forked"
 	EventCompactionStarted     EventType = "compaction.started"
 	EventCompactionCompleted   EventType = "compaction.completed"
+	EventModeChanged           EventType = "mode.changed"
 	EventInteractionStarted    EventType = "interaction.started"
 	EventInteractionCompleted  EventType = "interaction.completed"
 	EventRunStarted            EventType = "run.started"
@@ -74,6 +78,9 @@ const (
 	EventApprovalRequired      EventType = "approval.required"
 	EventApprovalUnknown       EventType = "approval.unknown"
 	EventApprovalResolved      EventType = "approval.resolved"
+	EventQuestionRequired      EventType = "question.required"
+	EventQuestionResolved      EventType = "question.resolved"
+	EventQuestionRejected      EventType = "question.rejected"
 	EventWorkspaceChanged      EventType = "workspace.changed"
 	EventStatusChanged         EventType = "status.changed"
 	EventIntegrationDiagnostic EventType = "integration.diagnostic"
@@ -127,9 +134,10 @@ type TokenUsage struct {
 
 // SessionOpened carries the initial durable session metadata.
 type SessionOpened struct {
-	Resumed  bool        `json:"resumed"`
-	Provider ai.Provider `json:"provider,omitempty"`
-	ModelID  string      `json:"model_id,omitempty"`
+	Resumed  bool          `json:"resumed"`
+	Provider ai.Provider   `json:"provider,omitempty"`
+	ModelID  string        `json:"model_id,omitempty"`
+	Mode     OperatingMode `json:"mode"`
 }
 
 // SessionCloseReason classifies why a Runtime stopped owning a session.
@@ -182,6 +190,11 @@ type CompactionCompleted struct {
 	DurationMillis int64          `json:"duration_ms"`
 }
 
+// ModeChanged records one process-local capability-policy transition.
+type ModeChanged struct {
+	Mode OperatingMode `json:"mode"`
+}
+
 // InteractionSource identifies why an interaction was opened.
 type InteractionSource string
 
@@ -197,6 +210,7 @@ const (
 // and Runtime-generated Agent completion continuations.
 type InteractionStarted struct {
 	Resumed           bool              `json:"resumed"`
+	Mode              OperatingMode     `json:"mode"`
 	Source            InteractionSource `json:"source,omitempty"`
 	RootInteractionID string            `json:"root_interaction_id,omitempty"`
 	NotificationIDs   []string          `json:"notification_ids,omitempty"`
@@ -346,6 +360,27 @@ type ApprovalResolved struct {
 	Choice    approval.Choice `json:"choice"`
 }
 
+// QuestionRequired pauses one interaction for structured user input.
+type QuestionRequired struct {
+	Request  question.Request `json:"request"`
+	Count    int              `json:"count"`
+	Redacted bool             `json:"redacted,omitempty"`
+}
+
+// QuestionResolved carries the one accepted structured or chat response.
+type QuestionResolved struct {
+	Resolution  question.Resolution `json:"resolution"`
+	AnswerCount int                 `json:"answer_count"`
+	Chat        bool                `json:"chat"`
+	Redacted    bool                `json:"redacted,omitempty"`
+}
+
+// QuestionRejected records an explicit cancellation without fabricating an answer.
+type QuestionRejected struct {
+	RequestID    string `json:"request_id"`
+	SchemaDigest string `json:"schema_digest"`
+}
+
 // WorkspaceChange is one normalized workspace-relative path change.
 type WorkspaceChange struct {
 	Path         string       `json:"path"`
@@ -399,6 +434,7 @@ func (SessionNavigated) eventPayload()      {}
 func (SessionForked) eventPayload()         {}
 func (CompactionStarted) eventPayload()     {}
 func (CompactionCompleted) eventPayload()   {}
+func (ModeChanged) eventPayload()           {}
 func (InteractionStarted) eventPayload()    {}
 func (InteractionCompleted) eventPayload()  {}
 func (RunStarted) eventPayload()            {}
@@ -414,6 +450,9 @@ func (SubagentLifecycle) eventPayload()     {}
 func (ApprovalRequired) eventPayload()      {}
 func (ApprovalUnknown) eventPayload()       {}
 func (ApprovalResolved) eventPayload()      {}
+func (QuestionRequired) eventPayload()      {}
+func (QuestionResolved) eventPayload()      {}
+func (QuestionRejected) eventPayload()      {}
 func (WorkspaceChanged) eventPayload()      {}
 func (StatusChanged) eventPayload()         {}
 func (IntegrationDiagnostic) eventPayload() {}
@@ -460,12 +499,13 @@ func validateEnvelopeIDs(event Event) error {
 	switch event.Type {
 	case EventSessionOpened, EventSessionClosed, EventSessionTreeChanged,
 		EventSessionNavigated, EventSessionForked, EventCompactionStarted,
-		EventCompactionCompleted:
+		EventCompactionCompleted, EventModeChanged:
 		if event.InteractionID != "" || event.RunID != "" {
 			return invalidEvent("session event has interaction or run id")
 		}
 	case EventInteractionStarted, EventInteractionCompleted,
 		EventApprovalRequired, EventApprovalUnknown, EventApprovalResolved,
+		EventQuestionRequired, EventQuestionResolved, EventQuestionRejected,
 		EventWorkspaceChanged:
 		if event.InteractionID == "" || event.RunID != "" {
 			return invalidEvent("%s requires only an interaction id", event.Type)
@@ -495,7 +535,7 @@ func validatePayload(eventType EventType, payload EventPayload) error {
 	case SessionOpened:
 		if eventType != EventSessionOpened || !validProvider(value.Provider) ||
 			!validIdentifierText(value.ModelID, maxEventIDBytes, true) ||
-			(value.Provider == "") != (value.ModelID == "") {
+			(value.Provider == "") != (value.ModelID == "") || !validOperatingMode(value.Mode) {
 			return invalidPayload(eventType, payload)
 		}
 	case SessionClosed:
@@ -536,8 +576,13 @@ func validatePayload(eventType EventType, payload EventPayload) error {
 			value.DurationMillis < 0 || value.DurationMillis > maxEventDurationMS {
 			return invalidPayload(eventType, payload)
 		}
+	case ModeChanged:
+		if eventType != EventModeChanged || !validOperatingMode(value.Mode) {
+			return invalidPayload(eventType, payload)
+		}
 	case InteractionStarted:
 		if eventType != EventInteractionStarted ||
+			!validOperatingMode(value.Mode) ||
 			(value.Source != InteractionSourceUser &&
 				value.Source != InteractionSourceAgentNotification) ||
 			len(value.NotificationIDs) > maxEventItems {
@@ -620,6 +665,20 @@ func validatePayload(eventType EventType, payload EventPayload) error {
 			!validApprovalChoice(value.Choice) {
 			return invalidPayload(eventType, payload)
 		}
+	case QuestionRequired:
+		if eventType != EventQuestionRequired || validateQuestionRequired(value) != nil {
+			return invalidPayload(eventType, payload)
+		}
+	case QuestionResolved:
+		if eventType != EventQuestionResolved || validateQuestionResolved(value) != nil {
+			return invalidPayload(eventType, payload)
+		}
+	case QuestionRejected:
+		if eventType != EventQuestionRejected ||
+			validateEventID("question request id", value.RequestID, true) != nil ||
+			!validDigest(value.SchemaDigest) {
+			return invalidPayload(eventType, payload)
+		}
 	case WorkspaceChanged:
 		if eventType != EventWorkspaceChanged || validateWorkspaceChanged(value) != nil {
 			return invalidPayload(eventType, payload)
@@ -642,6 +701,54 @@ func validatePayload(eventType EventType, payload EventPayload) error {
 	}
 
 	return nil
+}
+
+func validateQuestionRequired(value QuestionRequired) error {
+	if value.Count < 1 || value.Count > 4 || value.Count != len(value.Request.Questions) && !value.Redacted {
+		return errors.New("invalid question count")
+	}
+	if value.Redacted {
+		if len(value.Request.Questions) != 0 ||
+			validateEventID("question request id", value.Request.ID, true) != nil ||
+			validateEventID("question tool call id", value.Request.ToolCallID, true) != nil ||
+			!validDigest(value.Request.SchemaDigest) {
+			return errors.New("invalid redacted question request")
+		}
+
+		return nil
+	}
+
+	return question.ValidateRequest(value.Request)
+}
+
+func validateQuestionResolved(value QuestionResolved) error {
+	if value.AnswerCount < 0 || value.AnswerCount > 4 ||
+		(!value.Redacted && value.Chat != (value.Resolution.Chat != "")) {
+		return errors.New("invalid question resolution summary")
+	}
+	if value.Redacted {
+		if len(value.Resolution.Answers) != 0 || value.Resolution.Chat != "" ||
+			validateEventID("question request id", value.Resolution.RequestID, true) != nil ||
+			!validDigest(value.Resolution.SchemaDigest) {
+			return errors.New("invalid redacted question resolution")
+		}
+
+		return nil
+	}
+	if value.AnswerCount != len(value.Resolution.Answers) {
+		return errors.New("invalid question answer count")
+	}
+
+	return question.ValidateResolutionShape(value.Resolution)
+}
+
+func validDigest(value string) bool {
+	if len(value) != sha256.Size*2 {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+
+	return err == nil
 }
 
 func validateSubagentLifecycle(eventType EventType, value SubagentLifecycle) error {

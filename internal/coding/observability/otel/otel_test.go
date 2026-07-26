@@ -43,6 +43,16 @@ func TestObserverEmitsContentFreeProductSignals(t *testing.T) {
 			Type: coding.EventApprovalRequired, Time: at.Add(time.Second), Tool: "shell",
 		},
 		{
+			Type: coding.EventQuestionRequired, Time: at.Add(1500 * time.Millisecond), Questions: 2,
+		},
+		{
+			Type: coding.EventQuestionResolved, Time: at.Add(1600 * time.Millisecond),
+			Answers: 2,
+		},
+		{
+			Type: coding.EventModeChanged, Time: at.Add(1700 * time.Millisecond), Mode: coding.ModePlan,
+		},
+		{
 			Type: coding.EventWorkspaceChanged, Time: at.Add(2 * time.Second), Changes: 2,
 		},
 		{
@@ -97,6 +107,9 @@ func TestObserverEmitsContentFreeProductSignals(t *testing.T) {
 	assert.ElementsMatch(t, []string{
 		"coding.session.opened",
 		"coding.approval.required",
+		"coding.question.required",
+		"coding.question.resolved",
+		"coding.mode.changed",
 		"coding.workspace.changed",
 		"coding.session.tree.changed",
 		"coding.session.navigated",
@@ -121,6 +134,7 @@ func TestObserverEmitsContentFreeProductSignals(t *testing.T) {
 		"pips.coding.interactions",
 		"pips.coding.interaction.duration",
 		"pips.coding.approvals",
+		"pips.coding.questions",
 		"pips.coding.workspace.changes",
 		"pips.coding.integration.diagnostics",
 		"pips.coding.subagents",

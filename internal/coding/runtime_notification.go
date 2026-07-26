@@ -13,7 +13,6 @@ import (
 
 	"github.com/rsbin/pips/agent/harness"
 	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/internal/coding/approval"
 	"github.com/rsbin/pips/internal/coding/subagent"
 )
 
@@ -234,7 +233,7 @@ func (r *Runtime) deliverNotificationBatch(ctx context.Context) {
 	for _, runErr := range r.runSequence(
 		ctx,
 		operationAgentNotification,
-		approval.Resolution{},
+		runtimeResolution{},
 		[]ai.Message{message},
 		operation,
 	) {

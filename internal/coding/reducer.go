@@ -9,6 +9,7 @@ import (
 	"github.com/rsbin/pips/agent"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding/approval"
+	"github.com/rsbin/pips/internal/coding/question"
 	"github.com/rsbin/pips/internal/coding/subagent"
 )
 
@@ -19,6 +20,7 @@ type InteractionState struct {
 	ID                string             `json:"id,omitempty"`
 	Active            bool               `json:"active"`
 	Resumed           bool               `json:"resumed"`
+	Mode              OperatingMode      `json:"mode,omitempty"`
 	Source            InteractionSource  `json:"source,omitempty"`
 	RootInteractionID string             `json:"root_interaction_id,omitempty"`
 	Outcome           InteractionOutcome `json:"outcome,omitempty"`
@@ -95,6 +97,20 @@ type ApprovalState struct {
 	Unknown  *ApprovalUnknown  `json:"unknown,omitempty"`
 }
 
+// QuestionState is the current Runtime-owned structured input request.
+type QuestionState struct {
+	Required *question.Request `json:"required,omitempty"`
+}
+
+// NonInteractiveError fails closed when structured input is pending.
+func (state QuestionState) NonInteractiveError() error {
+	if state.Required != nil {
+		return ErrInputRequired
+	}
+
+	return nil
+}
+
 // NonInteractiveError projects the approval overlay into the fail-fast
 // contract shared by non-interactive frontends.
 func (state ApprovalState) NonInteractiveError() error {
@@ -120,6 +136,7 @@ type State struct {
 	SessionOpen bool             `json:"session_open"`
 	Provider    ai.Provider      `json:"provider,omitempty"`
 	ModelID     string           `json:"model_id,omitempty"`
+	Mode        OperatingMode    `json:"mode"`
 	Phase       Phase            `json:"phase,omitempty"`
 	Interaction InteractionState `json:"interaction"`
 	Transcript  []ai.Message     `json:"transcript"`
@@ -131,6 +148,7 @@ type State struct {
 	Tools             []ToolState             `json:"tools"`
 	Subagents         []SubagentState         `json:"subagents"`
 	Approval          ApprovalState           `json:"approval"`
+	Question          QuestionState           `json:"question"`
 	Changes           *WorkspaceChanged       `json:"changes,omitempty"`
 	Diagnostics       []IntegrationDiagnostic `json:"diagnostics"`
 	LastError         *RuntimeError           `json:"last_error,omitempty"`
@@ -172,6 +190,10 @@ func (state State) Clone() State {
 	cloned.Subagents = slices.Clone(state.Subagents)
 
 	cloned.Approval = cloneApprovalState(state.Approval)
+	if state.Question.Required != nil {
+		request := question.CloneRequest(*state.Question.Required)
+		cloned.Question.Required = &request
+	}
 	if state.Changes != nil {
 		changes := cloneWorkspaceChanged(*state.Changes)
 		cloned.Changes = &changes
@@ -216,6 +238,9 @@ type DurableState struct {
 // Durable returns the state subset reconstructed from Harness persistence.
 func (state State) Durable() DurableState {
 	cloned := state.Clone()
+	// Operating mode is process-local. Keep the interaction shape durable, but
+	// never let a reopened session infer its next capability policy from history.
+	cloned.Interaction.Mode = ""
 
 	return DurableState{
 		SessionID:         cloned.SessionID,
@@ -267,9 +292,10 @@ func (state *State) apply(event Event) error {
 		state.SessionOpen = true
 		state.Provider = payload.Provider
 		state.ModelID = payload.ModelID
+		state.Mode = payload.Mode
 		state.Phase = PhaseIdle
 	case SessionClosed:
-		if !state.SessionOpen || state.Interaction.Active {
+		if !state.SessionOpen || state.Interaction.Active || state.Question.Required != nil {
 			return protocolError("session cannot close in its current state")
 		}
 
@@ -306,22 +332,30 @@ func (state *State) apply(event Event) error {
 			TokensBefore: payload.TokensBefore, TokensAfter: payload.TokensAfter,
 			FirstKeptID: payload.FirstKeptID, DurationMillis: payload.DurationMillis,
 		}
+	case ModeChanged:
+		if !state.SessionOpen || state.Phase != PhaseIdle || state.Interaction.Active ||
+			state.Compaction.Active || state.Approval.Kind != ApprovalNone ||
+			state.Question.Required != nil {
+			return protocolError("mode cannot change in its current state")
+		}
+		state.Mode = payload.Mode
 	case InteractionStarted:
-		if !state.SessionOpen || state.Interaction.Active {
+		if !state.SessionOpen || state.Interaction.Active || payload.Mode != state.Mode {
 			return protocolError("interaction cannot start in its current state")
 		}
 
 		state.Interaction = InteractionState{
 			ID: event.InteractionID, Active: true, Resumed: payload.Resumed,
-			Source: payload.Source, RootInteractionID: payload.RootInteractionID,
+			Mode: payload.Mode, Source: payload.Source, RootInteractionID: payload.RootInteractionID,
 		}
 		state.Draft = nil
 		state.Approval = ApprovalState{}
+		state.Question = QuestionState{}
 		state.Changes = nil
 		state.LastError = nil
 	case InteractionCompleted:
 		if !state.Interaction.Active || state.Interaction.ID != event.InteractionID ||
-			len(state.activeRuns) > 0 || len(state.activeTools) > 0 {
+			len(state.activeRuns) > 0 || len(state.activeTools) > 0 || state.Question.Required != nil {
 			return protocolError("interaction cannot complete in its current state")
 		}
 
@@ -330,6 +364,7 @@ func (state *State) apply(event Event) error {
 		state.Interaction.Usage = payload.Usage
 		state.Draft = nil
 		state.Approval = ApprovalState{}
+		state.Question = QuestionState{}
 	case RunStarted:
 		if err := state.requireInteraction(event.InteractionID); err != nil {
 			return err
@@ -476,6 +511,31 @@ func (state *State) apply(event Event) error {
 		}
 
 		state.Approval = ApprovalState{}
+	case QuestionRequired:
+		if err := state.requireInteraction(event.InteractionID); err != nil ||
+			state.Question.Required != nil || state.Approval.Kind != ApprovalNone || payload.Redacted {
+			return protocolError("question request cannot be displayed")
+		}
+
+		request := question.CloneRequest(payload.Request)
+		state.Question.Required = &request
+	case QuestionResolved:
+		if err := state.requireInteraction(event.InteractionID); err != nil ||
+			state.Question.Required == nil || payload.Redacted ||
+			question.ValidateResolution(*state.Question.Required, payload.Resolution) != nil {
+			return protocolError("question resolution does not match displayed request")
+		}
+
+		state.Question = QuestionState{}
+	case QuestionRejected:
+		if err := state.requireInteraction(event.InteractionID); err != nil ||
+			state.Question.Required == nil ||
+			state.Question.Required.ID != payload.RequestID ||
+			state.Question.Required.SchemaDigest != payload.SchemaDigest {
+			return protocolError("question rejection does not match displayed request")
+		}
+
+		state.Question = QuestionState{}
 	case WorkspaceChanged:
 		if err := state.requireInteraction(event.InteractionID); err != nil {
 			return err

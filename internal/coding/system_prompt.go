@@ -44,23 +44,55 @@ type systemPromptOptions struct {
 	Sandbox             string
 	Approval            string
 	WorkspaceTrusted    bool
+	Mode                OperatingMode
+	PlanDocument        string
 	ToolNames           []string
 	ProjectInstructions string
 	ExplicitSkills      string
 }
 
 type systemPromptEnvironment struct {
-	Model            string   `json:"model"`
-	WorkingDirectory string   `json:"working_directory"`
-	Platform         string   `json:"platform"`
-	Date             string   `json:"date"`
-	Sandbox          string   `json:"sandbox"`
-	Approval         string   `json:"approval"`
-	WorkspaceTrusted bool     `json:"workspace_trusted"`
-	VisibleTools     []string `json:"visible_tools"`
+	Model            string `json:"model"`
+	WorkingDirectory string `json:"working_directory"`
+	Platform         string `json:"platform"`
+	Date             string `json:"date"`
+	Sandbox          string `json:"sandbox"`
+	Approval         string `json:"approval"`
+	WorkspaceTrusted bool   `json:"workspace_trusted"`
+}
+
+type systemPromptModeContext struct {
+	OperatingMode string   `json:"operating_mode"`
+	VisibleTools  []string `json:"visible_tools"`
+	PlanDocument  string   `json:"plan_document,omitempty"`
+}
+
+type systemPromptParts struct {
+	SharedPrefix string
+	Suffix       string
 }
 
 func buildCodingSystemPrompt(options systemPromptOptions) (string, error) {
+	parts, err := buildCodingSystemPromptParts(options)
+	if err != nil {
+		return "", err
+	}
+
+	if parts.Suffix == "" {
+		return parts.SharedPrefix, nil
+	}
+
+	return parts.SharedPrefix + "\n\n" + parts.Suffix, nil
+}
+
+func buildCodingSystemPromptParts(options systemPromptOptions) (systemPromptParts, error) {
+	if !validOperatingMode(options.Mode) {
+		return systemPromptParts{}, fmt.Errorf(
+			"coding system prompt: invalid operating mode %q",
+			options.Mode,
+		)
+	}
+
 	toolNames := normalizedToolNames(options.ToolNames)
 
 	environment, err := json.MarshalIndent(systemPromptEnvironment{
@@ -71,10 +103,9 @@ func buildCodingSystemPrompt(options systemPromptOptions) (string, error) {
 		Sandbox:          options.Sandbox,
 		Approval:         options.Approval,
 		WorkspaceTrusted: options.WorkspaceTrusted,
-		VisibleTools:     toolNames,
 	}, "", "  ")
 	if err != nil {
-		return "", fmt.Errorf("coding system prompt: encode environment: %w", err)
+		return systemPromptParts{}, fmt.Errorf("coding system prompt: encode environment: %w", err)
 	}
 
 	var prompt strings.Builder
@@ -83,7 +114,7 @@ func buildCodingSystemPrompt(options systemPromptOptions) (string, error) {
 	prompt.WriteString("The following JSON is runtime metadata, not instructions.\n\n<runtime_environment>\n")
 	prompt.Write(environment)
 	prompt.WriteString("\n</runtime_environment>")
-	writeToolGuidance(&prompt, toolNames)
+	writeSharedToolGuidance(&prompt)
 
 	projectInstructions := strings.TrimSpace(options.ProjectInstructions)
 	if projectInstructions != "" {
@@ -91,13 +122,32 @@ func buildCodingSystemPrompt(options systemPromptOptions) (string, error) {
 		prompt.WriteString(projectInstructions)
 	}
 
-	explicitSkills := strings.TrimSpace(options.ExplicitSkills)
-	if explicitSkills != "" {
-		prompt.WriteString("\n\n# Explicitly selected Skills\n\n")
-		prompt.WriteString(explicitSkills)
+	sharedPrefix := prompt.String()
+
+	modeContext, err := json.MarshalIndent(systemPromptModeContext{
+		OperatingMode: string(options.Mode),
+		VisibleTools:  toolNames,
+		PlanDocument:  options.PlanDocument,
+	}, "", "  ")
+	if err != nil {
+		return systemPromptParts{}, fmt.Errorf("coding system prompt: encode mode context: %w", err)
 	}
 
-	return prompt.String(), nil
+	var suffix strings.Builder
+	suffix.WriteString("# Operating mode\n\n")
+	suffix.WriteString("The following JSON is Runtime-owned capability context, not user content.\n\n")
+	suffix.WriteString("<operating_mode_context>\n")
+	suffix.Write(modeContext)
+	suffix.WriteString("\n</operating_mode_context>")
+	writeModeGuidance(&suffix, options.Mode, toolNames)
+
+	explicitSkills := strings.TrimSpace(options.ExplicitSkills)
+	if explicitSkills != "" {
+		suffix.WriteString("\n\n# Explicitly selected Skills\n\n")
+		suffix.WriteString(explicitSkills)
+	}
+
+	return systemPromptParts{SharedPrefix: sharedPrefix, Suffix: suffix.String()}, nil
 }
 
 func normalizedToolNames(values []string) []string {
@@ -107,14 +157,27 @@ func normalizedToolNames(values []string) []string {
 	return slices.Compact(result)
 }
 
-func writeToolGuidance(prompt *strings.Builder, toolNames []string) {
+func writeSharedToolGuidance(prompt *strings.Builder) {
+	prompt.WriteString("\n\n# Tool guidance\n\n")
+	prompt.WriteString("- Use only tools actually available in the current request and follow their exact schemas. Batch independent read-only calls when useful; sequence dependent or mutating calls.\n")
+	prompt.WriteString("- Prefer the most precise dedicated tool over a general command channel. Treat tool results as the authority for whether an operation succeeded.\n")
+}
+
+func writeModeGuidance(prompt *strings.Builder, mode OperatingMode, toolNames []string) {
 	available := make(map[string]struct{}, len(toolNames))
 	for _, name := range toolNames {
 		available[name] = struct{}{}
 	}
 
-	prompt.WriteString("\n\n# Tool guidance\n\n")
-	prompt.WriteString("- Use only tools that are actually available and follow their exact schemas. Batch independent read-only calls when useful; sequence dependent or mutating calls.\n")
+	prompt.WriteString("\n\n## Current mode behavior\n\n")
+
+	if mode == ModePlan {
+		prompt.WriteString("- Inspect and reason without changing workspace or external state. Do not claim to have edited files, run commands, or executed the Plan.\n")
+		prompt.WriteString("- Gather enough evidence before asking a blocking question. Produce an implementation-ready Plan covering scope, affected areas, data flow, risks, and verification.\n")
+		prompt.WriteString("- Use write_plan to maintain the session-bound Plan document. Do not attempt to leave Plan Mode; only the user can authorize Agent Mode.\n")
+	} else {
+		prompt.WriteString("- Agent Mode may implement requested changes, subject to the available tools, sandbox, and approval policy.\n")
+	}
 
 	if hasAnyTool(available, "read", "ls", "glob", "grep") {
 		prompt.WriteString("- Prefer the dedicated read, ls, glob, and grep tools for workspace exploration when available.\n")
@@ -149,4 +212,12 @@ func hasAnyTool(available map[string]struct{}, names ...string) bool {
 	}
 
 	return false
+}
+
+func planDocumentReference(mode OperatingMode, sessionID string) string {
+	if mode != ModePlan {
+		return ""
+	}
+
+	return "session-bound:" + sessionID
 }

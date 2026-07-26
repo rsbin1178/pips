@@ -162,7 +162,7 @@ func TestBootstrapStateMatchesLiveDurableState(t *testing.T) {
 
 	bootstrapped, err := BootstrapState(BootstrapOptions{
 		SessionID: "session-1", Provider: ai.ProviderOpenAI, ModelID: "gpt-test",
-		Path: session.Path(),
+		Mode: ModeAgent, Path: session.Path(),
 	})
 	require.NoError(t, err)
 	assert.Equal(t, live.Durable(), bootstrapped.State.Durable())
@@ -186,6 +186,7 @@ func TestBootstrapStateRecoversOnlyDurablePendingInteraction(t *testing.T) {
 
 	resumed, err := BootstrapState(BootstrapOptions{
 		SessionID: "session-1", Path: session.Path(), HasPendingToolCalls: true,
+		Mode: ModePlan,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "interaction-1", resumed.Recovery.PendingID)
@@ -195,6 +196,7 @@ func TestBootstrapStateRecoversOnlyDurablePendingInteraction(t *testing.T) {
 
 	interrupted, err := BootstrapState(BootstrapOptions{
 		SessionID: "session-1", Path: session.Path(), HasPendingToolCalls: false,
+		Mode: ModeAgent,
 	})
 	require.NoError(t, err)
 	assert.Empty(t, interrupted.Recovery.PendingID)

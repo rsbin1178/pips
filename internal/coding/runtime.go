@@ -31,6 +31,8 @@ import (
 	"github.com/rsbin/pips/internal/coding/model"
 	"github.com/rsbin/pips/internal/coding/modelcatalog"
 	"github.com/rsbin/pips/internal/coding/paths"
+	"github.com/rsbin/pips/internal/coding/plandoc"
+	"github.com/rsbin/pips/internal/coding/question"
 	"github.com/rsbin/pips/internal/coding/resource"
 	"github.com/rsbin/pips/internal/coding/session"
 	"github.com/rsbin/pips/internal/coding/skillsettings"
@@ -111,11 +113,15 @@ type Runtime struct {
 	resolved            modelcatalog.ResolvedModel
 	requestPolicy       generation.Policy
 	instructionResolver *instructions.Resolver
+	promptDate          string
+	projectInstructions string
 
 	handle        *session.Handle
 	repository    *session.Repository
 	session       *harness.Session
 	journal       *interactionJournal
+	plans         plandoc.Repository
+	planRef       plandoc.Ref
 	policy        execution.Policy
 	executor      *execution.Executor
 	inspector     *git.Inspector
@@ -128,6 +134,7 @@ type Runtime struct {
 	skillPolicy   skillsettings.Snapshot
 	trusted       bool
 	controller    *approval.Controller
+	questions     *question.Controller
 	resolver      activeResolver
 	pending       pendingRunner
 	observers     *agentObservers
@@ -231,6 +238,10 @@ func Open(ctx context.Context, options OpenOptions) (_ *Runtime, returnErr error
 	if err != nil {
 		return nil, fmt.Errorf("coding runtime: open project instructions: %w", err)
 	}
+	projectInstructions, err := instructionResolver.Resolve(ctx, ".")
+	if err != nil {
+		return nil, fmt.Errorf("coding runtime: resolve project instructions: %w", err)
+	}
 
 	resolved, err := resolveOpenModel(options)
 	if err != nil {
@@ -263,6 +274,13 @@ func Open(ctx context.Context, options OpenOptions) (_ *Runtime, returnErr error
 		return nil, err
 	}
 	stack.add(func(context.Context) error { return handle.Close() })
+	planRepository, err := plandoc.New(options.Paths.PlansDir(), plandoc.DefaultLimits())
+	if err != nil {
+		return nil, err
+	}
+	planRef := plandoc.Ref{
+		SessionID: handle.Metadata().ID, WorkspaceID: handle.Metadata().WorkspaceID,
+	}
 
 	policy, err := newRuntimePolicy(options)
 	if err != nil {
@@ -363,9 +381,13 @@ func Open(ctx context.Context, options OpenOptions) (_ *Runtime, returnErr error
 		resolved:            resolved,
 		requestPolicy:       requestPolicy,
 		instructionResolver: instructionResolver,
+		promptDate:          time.Now().Format(time.DateOnly),
+		projectInstructions: projectInstructions.SystemPrompt(),
 		handle:              handle,
 		repository:          repository,
 		session:             handle.Session(),
+		plans:               planRepository,
+		planRef:             planRef,
 		policy:              policy,
 		executor:            executor,
 		inspector:           inspector,
@@ -427,6 +449,7 @@ func Open(ctx context.Context, options OpenOptions) (_ *Runtime, returnErr error
 		SessionID:           handle.Metadata().ID,
 		Provider:            resolved.Ref.Provider,
 		ModelID:             resolved.Ref.Model,
+		Mode:                options.Config.Mode,
 		Path:                runtime.session.Path(),
 		HasPendingToolCalls: len(pending) > 0,
 		Tree:                treeSnapshot,
@@ -448,6 +471,10 @@ func Open(ctx context.Context, options OpenOptions) (_ *Runtime, returnErr error
 		executor,
 		tools.NewShellHandler(),
 	)
+	if err != nil {
+		return nil, err
+	}
+	runtime.questions, err = question.NewController(&runtime.resolver)
 	if err != nil {
 		return nil, err
 	}
@@ -800,14 +827,79 @@ func (r *Runtime) Snapshot() State {
 	return r.state.Clone()
 }
 
+func (r *Runtime) currentOperatingMode() OperatingMode {
+	if r == nil {
+		return ModeAgent
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return r.state.Mode
+}
+
+// SetMode changes the process-local capability policy at an idle boundary.
+// Existing interactions retain the mode leased when they started.
+//
+//nolint:gocyclo // Runtime lifecycle and pending-state guards remain explicit.
+func (r *Runtime) SetMode(ctx context.Context, mode OperatingMode) error {
+	if r == nil {
+		return ErrRuntimeClosed
+	}
+	if !validOperatingMode(mode) {
+		return fmt.Errorf("%w: unsupported operating mode %q", ErrRuntimeInvalid, mode)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	r.mu.Lock()
+	if r.closed || r.closing {
+		phase := r.state.Phase
+		r.mu.Unlock()
+
+		return stateError("set mode", phase, ErrRuntimeClosed)
+	}
+	if r.active != nil || r.interaction != nil || r.state.Phase != PhaseIdle ||
+		r.state.Compaction.Active || r.state.Approval.Kind != ApprovalNone ||
+		r.state.Question.Required != nil {
+		phase := r.state.Phase
+		r.mu.Unlock()
+
+		return stateError("set mode", phase, ErrRuntimeBusy)
+	}
+	if r.state.Mode == mode {
+		r.mu.Unlock()
+
+		return nil
+	}
+
+	operationCtx, cancel := context.WithCancel(ctx)
+	operation := &runtimeOperation{cancel: cancel, done: make(chan struct{})}
+	r.active = operation
+	r.mu.Unlock()
+	defer r.endOperation(operation)
+
+	emitter := newEventEmitter(operationCtx, r, nil, false)
+	if err := emitter.emit("", "", EventModeChanged, ModeChanged{Mode: mode}); err != nil {
+		return err
+	}
+
+	r.mu.Lock()
+	r.config.Mode = mode
+	r.mu.Unlock()
+
+	return nil
+}
+
 // Prompt starts one new interaction. Iteration owns cancellation and cleanup.
 func (r *Runtime) Prompt(ctx context.Context, messages ...ai.Message) iter.Seq2[Event, error] {
-	return r.runSequence(ctx, operationPrompt, approval.Resolution{}, messages, nil)
+	return r.runSequence(ctx, operationPrompt, runtimeResolution{}, messages, nil)
 }
 
 // Continue reconciles a durable pending interaction after reopening a session.
 func (r *Runtime) Continue(ctx context.Context) iter.Seq2[Event, error] {
-	return r.runSequence(ctx, operationContinue, approval.Resolution{}, nil, nil)
+	return r.runSequence(ctx, operationContinue, runtimeResolution{}, nil, nil)
 }
 
 // Resolve applies one explicit approval decision and continues only when the
@@ -816,7 +908,51 @@ func (r *Runtime) Resolve(
 	ctx context.Context,
 	resolution approval.Resolution,
 ) iter.Seq2[Event, error] {
-	return r.runSequence(ctx, operationResolve, resolution, nil, nil)
+	return r.runSequence(ctx, operationResolve, runtimeResolution{approval: resolution}, nil, nil)
+}
+
+// ResolveQuestion durably records one exact structured response and resumes
+// the paused interaction.
+func (r *Runtime) ResolveQuestion(
+	ctx context.Context,
+	resolution question.Resolution,
+) iter.Seq2[Event, error] {
+	return r.runSequence(
+		ctx,
+		operationResolveQuestion,
+		runtimeResolution{question: question.CloneResolution(resolution)},
+		nil,
+		nil,
+	)
+}
+
+// RejectQuestion records an explicit cancellation and lets the Agent decide
+// whether it can continue without the requested input.
+func (r *Runtime) RejectQuestion(
+	ctx context.Context,
+	requestID string,
+	schemaDigest string,
+) iter.Seq2[Event, error] {
+	return r.runSequence(
+		ctx,
+		operationRejectQuestion,
+		runtimeResolution{rejection: &questionRejection{
+			requestID: requestID, schemaDigest: schemaDigest,
+		}},
+		nil,
+		nil,
+	)
+}
+
+type runtimeResolution struct {
+	approval  approval.Resolution
+	question  question.Resolution
+	rejection *questionRejection
+}
+
+type questionRejection struct {
+	requestID    string
+	schemaDigest string
 }
 
 type runtimeOperationKind string
@@ -825,6 +961,8 @@ const (
 	operationPrompt            runtimeOperationKind = "prompt"
 	operationContinue          runtimeOperationKind = "continue"
 	operationResolve           runtimeOperationKind = "resolve"
+	operationResolveQuestion   runtimeOperationKind = "resolve question"
+	operationRejectQuestion    runtimeOperationKind = "reject question"
 	operationPreview           runtimeOperationKind = "preview compaction"
 	operationCompact           runtimeOperationKind = "compact"
 	operationNavigate          runtimeOperationKind = "navigate"
@@ -835,7 +973,7 @@ const (
 func (r *Runtime) runSequence(
 	ctx context.Context,
 	kind runtimeOperationKind,
-	resolution approval.Resolution,
+	resolution runtimeResolution,
 	messages []ai.Message,
 	notification *notificationOperation,
 ) iter.Seq2[Event, error] {
@@ -898,6 +1036,10 @@ func (r *Runtime) Reload(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	nextProjectInstructions, err := r.instructionResolver.Resolve(reloadCtx, ".")
+	if err != nil {
+		return fmt.Errorf("coding runtime: resolve project instructions: %w", err)
+	}
 
 	options := OpenOptions{
 		Workspace: r.workspace, Trusted: r.trusted, Paths: r.paths,
@@ -927,6 +1069,7 @@ func (r *Runtime) Reload(ctx context.Context) error {
 	r.connections = connections
 	r.resources = loaded
 	r.skillPolicy = nextSkillPolicy
+	r.projectInstructions = nextProjectInstructions.SystemPrompt()
 	r.mu.Unlock()
 	r.recordOpenDiagnostics(ctx, connections)
 
