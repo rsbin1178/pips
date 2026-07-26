@@ -21,6 +21,18 @@ type Tool struct {
 	InputSchema *Schema
 }
 
+// EffectiveInputSchema returns the JSON Schema Provider adapters should
+// advertise for the tool. A nil InputSchema means the tool takes no
+// arguments, which is represented on the wire as an explicit empty object
+// schema. Non-nil schemas are returned unchanged.
+func (t Tool) EffectiveInputSchema() *Schema {
+	if t.InputSchema != nil {
+		return t.InputSchema
+	}
+
+	return &Schema{RawJSON: json.RawMessage(`{"type":"object","properties":{}}`)}
+}
+
 // ToolChoiceMode controls whether the model may, must, or must not call tools.
 type ToolChoiceMode string
 

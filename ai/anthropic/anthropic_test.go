@@ -198,18 +198,31 @@ func TestGenerateToolsRoundTrip(t *testing.T) {
 
 	resp, err := model.Generate(t.Context(), ai.Request{
 		Messages: []ai.Message{ai.UserText("weather in paris?")},
-		Tools: []ai.Tool{{
-			Name:        "get_weather",
-			Description: "Get current weather",
-			InputSchema: &ai.Schema{Type: "object", Properties: map[string]*ai.Schema{"city": {Type: "string"}}, Required: []string{"city"}},
-		}},
+		Tools: []ai.Tool{
+			{
+				Name:        "get_weather",
+				Description: "Get current weather",
+				InputSchema: &ai.Schema{Type: "object", Properties: map[string]*ai.Schema{"city": {Type: "string"}}, Required: []string{"city"}},
+			},
+			{Name: "ping"},
+		},
 		ToolChoice: ai.ToolChoice{Mode: ai.ToolChoiceAuto},
 	})
 	require.NoError(t, err)
 
 	tools := as[[]any](t, captured["tools"])
-	require.Len(t, tools, 1)
-	assert.Equal(t, "get_weather", as[map[string]any](t, tools[0])["name"])
+	require.Len(t, tools, 2)
+	tool := as[map[string]any](t, tools[0])
+	assert.Equal(t, "get_weather", tool["name"])
+	params := as[map[string]any](t, tool["input_schema"])
+	assert.Contains(t, as[map[string]any](t, params["properties"]), "city")
+	assert.Equal(t, []any{"city"}, params["required"])
+
+	noArgs := as[map[string]any](t, tools[1])
+	assert.Equal(t, "ping", noArgs["name"])
+	noArgsParams := as[map[string]any](t, noArgs["input_schema"])
+	assert.Equal(t, "object", noArgsParams["type"])
+	assert.Empty(t, as[map[string]any](t, noArgsParams["properties"]))
 	assert.Equal(t, map[string]any{"type": "auto"}, captured["tool_choice"])
 
 	assert.Equal(t, ai.FinishToolCalls, resp.FinishReason)

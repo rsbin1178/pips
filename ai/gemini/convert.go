@@ -297,7 +297,7 @@ func toolsFrom(tools []ai.Tool) []wireTool {
 		decls = append(decls, wireFunctionDecl{
 			Name:        tool.Name,
 			Description: tool.Description,
-			Parameters:  tool.InputSchema,
+			Parameters:  tool.EffectiveInputSchema(),
 		})
 	}
 

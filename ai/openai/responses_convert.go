@@ -249,7 +249,7 @@ func responsesToolsFrom(tools []ai.Tool) []responsesTool {
 			Type:        typeFunction,
 			Name:        tool.Name,
 			Description: tool.Description,
-			Parameters:  tool.InputSchema,
+			Parameters:  tool.EffectiveInputSchema(),
 		})
 	}
 
