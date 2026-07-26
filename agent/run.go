@@ -333,6 +333,10 @@ func (r *run) decide(ctx context.Context, turn int, natural bool, naturalStop St
 }
 
 func (r *run) applyTurnUpdate(update TurnUpdate) error {
+	if update.Err != nil {
+		return update.Err
+	}
+
 	if update.Model != nil {
 		r.model = update.Model
 	}

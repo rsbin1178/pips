@@ -12,6 +12,7 @@ import (
 	"github.com/rsbin/pips/internal/coding/execution"
 	"github.com/rsbin/pips/internal/coding/instructions"
 	"github.com/rsbin/pips/internal/coding/paths"
+	"github.com/rsbin/pips/internal/coding/question"
 	"github.com/rsbin/pips/internal/coding/skillsettings"
 	"github.com/rsbin/pips/internal/coding/workspace"
 	"github.com/stretchr/testify/assert"
@@ -73,6 +74,33 @@ func TestBuildCodingSystemPromptKeepsSharedPrefixStableAcrossModes(t *testing.T)
 	assert.NotContains(t, agentParts.SharedPrefix, "visible_tools")
 	assert.Contains(t, planParts.Suffix, `"operating_mode": "plan"`)
 	assert.Contains(t, planParts.Suffix, "write_plan")
+}
+
+func TestBuildCodingSystemPromptPrefersStructuredQuestionsWhenAvailable(t *testing.T) {
+	t.Parallel()
+
+	base := systemPromptOptions{
+		Model: "example/model", WorkingDirectory: "/workspace", Platform: "linux",
+		Date: "2026-07-25", Sandbox: "workspace-write", Approval: "on-request",
+		WorkspaceTrusted: true,
+	}
+
+	for _, mode := range []OperatingMode{ModeAgent, ModePlan} {
+		options := base
+		options.Mode = mode
+		options.ToolNames = []string{question.ToolName, "read"}
+
+		prompt, err := buildCodingSystemPrompt(options)
+		require.NoError(t, err)
+		assert.Contains(t, prompt, "Prefer ask_user when a decision would materially affect the work")
+		assert.Contains(t, prompt, "Continue independently when the answer can be inferred safely")
+	}
+
+	base.Mode = ModePlan
+	base.ToolNames = []string{"read"}
+	prompt, err := buildCodingSystemPrompt(base)
+	require.NoError(t, err)
+	assert.NotContains(t, prompt, "Prefer ask_user")
 }
 
 func TestRuntimeInjectsMainSystemPromptAndProjectInstructions(t *testing.T) {

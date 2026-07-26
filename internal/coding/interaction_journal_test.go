@@ -31,7 +31,7 @@ func TestInteractionJournalLifecycle(t *testing.T) {
 	assert.Equal(t, "interaction-1", recovery.PendingID)
 
 	usage := TokenUsage{InputTokens: 4, OutputTokens: 2}
-	require.NoError(t, journal.complete(interactionID, InteractionSucceeded, usage, 25))
+	require.NoError(t, journal.complete(interactionID, InteractionSucceeded, "", usage, 25))
 
 	recovery, err = journal.replay()
 	require.NoError(t, err)
@@ -45,6 +45,32 @@ func TestInteractionJournalLifecycle(t *testing.T) {
 	require.Len(t, path, 2)
 	assert.Equal(t, interactionCustomType, path[0].Custom)
 	assert.Equal(t, interactionCustomType, path[1].Custom)
+}
+
+func TestInteractionJournalPersistsIncompleteStop(t *testing.T) {
+	t.Parallel()
+
+	session, err := harness.NewSession(harness.NewMemoryStore("session-1"))
+	require.NoError(t, err)
+	journal, err := newInteractionJournal(session, func() (string, error) {
+		return "interaction-1", nil
+	})
+	require.NoError(t, err)
+
+	interactionID, err := journal.start()
+	require.NoError(t, err)
+	require.NoError(t, journal.complete(
+		interactionID,
+		InteractionIncomplete,
+		agent.StopBudget,
+		TokenUsage{InputTokens: 10},
+		25,
+	))
+
+	recovery, err := journal.replay()
+	require.NoError(t, err)
+	assert.Equal(t, InteractionIncomplete, recovery.LastOutcome)
+	assert.Equal(t, agent.StopBudget, recovery.LastStop)
 }
 
 func TestReplayInteractionJournalMarksSupersededStartInterrupted(t *testing.T) {
@@ -132,7 +158,7 @@ func TestBootstrapStateMatchesLiveDurableState(t *testing.T) {
 	require.NoError(t, err)
 
 	usage := TokenUsage{InputTokens: 8, OutputTokens: 3}
-	require.NoError(t, journal.complete(interactionID, InteractionSucceeded, usage, 50))
+	require.NoError(t, journal.complete(interactionID, InteractionSucceeded, "", usage, 50))
 
 	liveEvents := []Event{
 		newSessionEvent(EventSessionOpened, SessionOpened{

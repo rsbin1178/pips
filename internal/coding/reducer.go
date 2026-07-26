@@ -24,6 +24,7 @@ type InteractionState struct {
 	Source            InteractionSource  `json:"source,omitempty"`
 	RootInteractionID string             `json:"root_interaction_id,omitempty"`
 	Outcome           InteractionOutcome `json:"outcome,omitempty"`
+	Stop              agent.StopReason   `json:"stop,omitempty"`
 	Usage             TokenUsage         `json:"usage"`
 }
 
@@ -318,7 +319,7 @@ func (state *State) apply(event Event) error {
 			return protocolError("session cannot fork in its current state")
 		}
 	case CompactionStarted:
-		if !state.SessionOpen || state.Phase != PhaseIdle || state.Interaction.Active || state.Compaction.Active {
+		if !state.canStartCompaction(payload.Mode) {
 			return protocolError("compaction cannot start in its current state")
 		}
 		state.Compaction = CompactionState{Active: true, Mode: payload.Mode, Preview: payload.Preview}
@@ -361,6 +362,7 @@ func (state *State) apply(event Event) error {
 
 		state.Interaction.Active = false
 		state.Interaction.Outcome = payload.Outcome
+		state.Interaction.Stop = payload.Stop
 		state.Interaction.Usage = payload.Usage
 		state.Draft = nil
 		state.Approval = ApprovalState{}
@@ -562,6 +564,34 @@ func (state *State) apply(event Event) error {
 	}
 
 	return nil
+}
+
+func (state *State) canStartCompaction(mode CompactionMode) bool {
+	if !state.SessionOpen || state.Compaction.Active {
+		return false
+	}
+	if state.Phase == PhaseIdle && !state.Interaction.Active {
+		return true
+	}
+
+	return state.canStartAutomaticCompaction(mode)
+}
+
+func (state *State) canStartAutomaticCompaction(mode CompactionMode) bool {
+	if mode != CompactionAutomatic || state.Phase != PhaseRunning || !state.Interaction.Active {
+		return false
+	}
+	if len(state.activeRuns) != 1 || len(state.openTurns) != 0 || len(state.activeTools) != 0 {
+		return false
+	}
+	if state.Approval.Kind != ApprovalNone || state.Question.Required != nil {
+		return false
+	}
+	if len(state.Draft) != 0 {
+		return false
+	}
+
+	return true
 }
 
 func (state *State) applySubagent(event Event, payload SubagentLifecycle) error {

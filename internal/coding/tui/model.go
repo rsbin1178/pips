@@ -1421,6 +1421,7 @@ func (m *Model) recordCompletion(event coding.Event) {
 		interactionID:  event.InteractionID,
 		afterMessages:  len(m.state.Transcript),
 		outcome:        completed.Outcome,
+		stop:           completed.Stop,
 		durationMillis: completed.DurationMillis,
 		model:          m.modelLabel(),
 	})

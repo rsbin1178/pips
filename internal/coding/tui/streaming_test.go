@@ -11,6 +11,7 @@ import (
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestStreamingCodeBlockKeepsOneManagedTailAndCommitsEveryRowOnce(t *testing.T) {
@@ -205,6 +206,46 @@ func TestInterruptedStreamingDraftFlushesUncommittedTail(t *testing.T) {
 	combined := ansi.Strip(first + "\n" + final)
 	assert.Equal(t, 1, strings.Count(combined, "completed row"))
 	assert.Equal(t, 1, strings.Count(combined, "unfinished tail"))
+	assert.False(t, model.streaming.active)
+}
+
+func TestStreamingWaitsForMatchingDurableAssistantPromotion(t *testing.T) {
+	t.Parallel()
+
+	model := readyModel(t, true)
+	model.Update(tea.WindowSizeMsg{Width: 48, Height: 14})
+	model.scrollbackOutput = false
+	model.state.Phase = coding.PhaseRunning
+	model.state.Interaction.Active = true
+
+	source := "```text\nfirst row\nmiddle row\nsecond row"
+	promoted, _ := model.syncStreamingDraft(source)
+	require.NotEmpty(t, promoted)
+
+	model.state.Transcript = []ai.Message{ai.AssistantText(source)}
+
+	writes := model.streamingScrollbackWrites(nil)
+	assert.Empty(t, writes)
+	assert.True(t, model.streaming.active)
+	assert.True(t, model.hasPendingStreamingAssistant())
+
+	active := ansi.Strip(model.renderTimelineBlocks(model.activeTimelineBlocks()))
+	assert.NotContains(t, active, "first row")
+	assert.Contains(t, active, "second row")
+
+	stable := []timelineBlock{{kind: blockAssistant, body: source}}
+	finalWrites := model.streamingScrollbackWrites(stable)
+
+	finalParts := make([]string, len(finalWrites))
+	for index := range finalWrites {
+		finalParts[index] = finalWrites[index].content
+	}
+
+	final := strings.Join(finalParts, "\n")
+	combined := ansi.Strip(promoted + "\n" + final)
+	assert.Equal(t, 1, strings.Count(combined, "first row"))
+	assert.Equal(t, 1, strings.Count(combined, "middle row"))
+	assert.Equal(t, 1, strings.Count(combined, "second row"))
 	assert.False(t, model.streaming.active)
 }
 

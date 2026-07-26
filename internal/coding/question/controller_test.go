@@ -3,7 +3,9 @@ package question_test
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/rsbin/pips/agent"
 	"github.com/rsbin/pips/agent/catalog"
@@ -93,7 +95,48 @@ func TestControllerRejectsMalformedStaleAndCanceledInput(t *testing.T) {
 	rejectedText, ok := resolver.resolutions[0].Content[0].(ai.TextPart)
 	require.True(t, ok)
 	assert.NotContains(t, rejectedText.Text, "React")
+	assert.Equal(t, question.RejectionToolResult, rejectedText.Text)
 	require.ErrorIs(t, controller.Reject(request.ID, request.SchemaDigest), question.ErrNoPending)
+}
+
+func TestControllerExplainsInvalidChoiceCount(t *testing.T) {
+	t.Parallel()
+
+	controller, err := question.NewController(&recordingResolver{})
+	require.NoError(t, err)
+
+	spec := testSpec()
+	spec.Questions[0].Options = append(
+		spec.Questions[0].Options,
+		question.Option{Label: "Svelte", Description: "Compiler-first framework"},
+		question.Option{Label: "Solid", Description: "Fine-grained reactivity"},
+		question.Option{Label: "Other", Description: "Another framework"},
+	)
+	args, err := json.Marshal(spec)
+	require.NoError(t, err)
+
+	decision := controller.BeforeTool(t.Context(), agent.ToolCallInfo{ToolCall: agent.ToolCall{
+		ID: "too-many-options", Name: question.ToolName, Args: args,
+	}})
+
+	assert.Equal(t, agent.ToolDecisionDeny, decision.Action)
+	assert.Contains(t, decision.Reason, "two to four options")
+}
+
+func TestControllerBoundsInvalidArgumentFeedback(t *testing.T) {
+	t.Parallel()
+
+	controller, err := question.NewController(&recordingResolver{})
+	require.NoError(t, err)
+
+	decision := controller.BeforeTool(t.Context(), agent.ToolCallInfo{ToolCall: agent.ToolCall{
+		ID: "oversize-error", Name: question.ToolName,
+		Args: ai.JSON(`{"` + strings.Repeat("x", 2048) + `":true}`),
+	}})
+
+	assert.Equal(t, agent.ToolDecisionDeny, decision.Action)
+	assert.LessOrEqual(t, len(decision.Reason), 1024)
+	assert.True(t, utf8.ValidString(decision.Reason))
 }
 
 func TestQuestionCatalogHasExactProvenanceAndSchema(t *testing.T) {
@@ -108,6 +151,36 @@ func TestQuestionCatalogHasExactProvenanceAndSchema(t *testing.T) {
 	require.Len(t, descriptors, 1)
 	assert.Equal(t, question.ToolName, descriptors[0].Name)
 	assert.Equal(t, question.CatalogID, descriptors[0].Source.ID)
+
+	tools, err := catalogValue.Snapshot(t.Context(), catalogPolicy())
+	require.NoError(t, err)
+	require.Len(t, tools, 1)
+	declaration := tools[0].Decl()
+	assert.Contains(t, declaration.Description, "Prefer structured choices")
+	assert.Contains(t, declaration.Description, "assistant text")
+
+	schema := declaration.InputSchema
+	require.NotNil(t, schema)
+	assert.Equal(t, []string{"questions"}, schema.Required)
+	questions := schema.Properties["questions"]
+	require.NotNil(t, questions)
+	assert.JSONEq(t, "1", string(questions.Extra["minItems"]))
+	assert.JSONEq(t, "4", string(questions.Extra["maxItems"]))
+	require.NotNil(t, questions.Items)
+	assert.ElementsMatch(t, []string{"header", "question", "options"}, questions.Items.Required)
+	assert.NotContains(t, questions.Items.Required, "multiple")
+	options := questions.Items.Properties["options"]
+	require.NotNil(t, options)
+	assert.JSONEq(t, "2", string(options.Extra["minItems"]))
+	assert.JSONEq(t, "4", string(options.Extra["maxItems"]))
+	require.NotNil(t, options.Items)
+	assert.ElementsMatch(t, []string{"label", "description"}, options.Items.Required)
+	assert.NotContains(t, options.Items.Required, "preview")
+
+	wireSchema, err := json.Marshal(schema)
+	require.NoError(t, err)
+	assert.Contains(t, string(wireSchema), `"minItems":1`)
+	assert.Contains(t, string(wireSchema), `"maxItems":4`)
 }
 
 func catalogPolicy() catalog.Policy {

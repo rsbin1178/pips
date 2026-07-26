@@ -325,11 +325,18 @@ func (m *Model) activeTimelineBlocks() []timelineBlock {
 	}
 
 	if m.streaming.active {
+		replaced := false
 		for index := range blocks {
 			if blocks[index].kind == blockDraft {
 				blocks[index] = m.streamingTailBlock(blocks[index])
+				replaced = true
 
 				break
+			}
+		}
+		if !replaced {
+			if index := m.matchingStreamingAssistantIndex(blocks); index >= 0 {
+				blocks[index] = m.streamingTailBlock(blocks[index])
 			}
 		}
 	}

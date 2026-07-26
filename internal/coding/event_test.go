@@ -495,7 +495,10 @@ func eventCases() []eventCase {
 		)},
 		{name: "interaction completed", event: newInteractionEvent(
 			EventInteractionCompleted,
-			InteractionCompleted{Outcome: InteractionSucceeded, Usage: usage, DurationMillis: 250},
+			InteractionCompleted{
+				Outcome: InteractionSucceeded, Stop: agent.StopEndTurn,
+				Usage: usage, DurationMillis: 250,
+			},
 		)},
 		{name: "run started", event: newTestEvent(
 			EventRunStarted, RunStarted{Agent: "coding", ParentRunID: "parent-run"},

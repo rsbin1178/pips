@@ -221,14 +221,16 @@ type InteractionOutcome string
 
 // Interaction outcomes.
 const (
-	InteractionSucceeded InteractionOutcome = "succeeded"
-	InteractionFailed    InteractionOutcome = "failed"
-	InteractionCanceled  InteractionOutcome = "canceled"
+	InteractionSucceeded  InteractionOutcome = "succeeded"
+	InteractionFailed     InteractionOutcome = "failed"
+	InteractionCanceled   InteractionOutcome = "canceled"
+	InteractionIncomplete InteractionOutcome = "incomplete"
 )
 
 // InteractionCompleted closes one user interaction.
 type InteractionCompleted struct {
 	Outcome        InteractionOutcome `json:"outcome"`
+	Stop           agent.StopReason   `json:"stop,omitempty"`
 	Usage          TokenUsage         `json:"usage"`
 	DurationMillis int64              `json:"duration_ms"`
 }
@@ -603,6 +605,7 @@ func validatePayload(eventType EventType, payload EventPayload) error {
 		}
 	case InteractionCompleted:
 		if eventType != EventInteractionCompleted || !validInteractionOutcome(value.Outcome) ||
+			!validInteractionStop(value.Outcome, value.Stop) ||
 			value.DurationMillis < 0 || value.DurationMillis > maxEventDurationMS ||
 			!validTokenUsage(value.Usage) {
 			return invalidPayload(eventType, payload)
@@ -1007,7 +1010,27 @@ func validSessionCloseReason(reason SessionCloseReason) bool {
 
 func validInteractionOutcome(outcome InteractionOutcome) bool {
 	switch outcome {
-	case InteractionSucceeded, InteractionFailed, InteractionCanceled:
+	case InteractionSucceeded, InteractionFailed, InteractionCanceled, InteractionIncomplete:
+		return true
+	default:
+		return false
+	}
+}
+
+func validInteractionStop(outcome InteractionOutcome, stop agent.StopReason) bool {
+	if stop == "" {
+		return outcome != InteractionIncomplete
+	}
+	if !validStopReason(stop) {
+		return false
+	}
+
+	switch outcome {
+	case InteractionSucceeded:
+		return stop == agent.StopEndTurn || stop == agent.StopTerminated
+	case InteractionIncomplete:
+		return stop == agent.StopMaxTurns || stop == agent.StopBudget || stop == agent.StopWhen
+	case InteractionFailed, InteractionCanceled:
 		return true
 	default:
 		return false

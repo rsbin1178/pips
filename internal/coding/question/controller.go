@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/rsbin/pips/agent"
 	"github.com/rsbin/pips/agent/catalog"
@@ -20,6 +22,10 @@ const (
 	CatalogID = "coding.question"
 	// ToolName is the provider-neutral structured user-question capability.
 	ToolName = "ask_user"
+	// RejectionToolResult is the durable result of an explicit user cancellation.
+	RejectionToolResult = "The user canceled this question without selecting an answer."
+	maxToolErrorBytes   = 1024
+	schemaTypeString    = "string"
 )
 
 var (
@@ -49,14 +55,25 @@ func NewController(resolver Resolver) (*Controller, error) {
 		return nil, errors.New("coding question: nil resolver")
 	}
 
-	controller := &Controller{resolver: resolver}
-	controller.tool = agent.NewTool(
+	baseTool := agent.NewTool(
 		ToolName,
-		"Ask the user one to four structured questions when a decision is required.",
+		"Ask the user one to four structured questions when a decision materially affects the work. "+
+			"Each question must contain two to four concrete options; Pips adds custom-response "+
+			"and discussion choices, so do not add an Other option. Prefer structured choices "+
+			"over listing selectable options in assistant text.",
 		func(context.Context, Spec) (string, error) {
 			return "", errors.New("ask_user requires Runtime-mediated user input")
 		},
 	)
+	declaration := baseTool.Decl()
+	declaration.InputSchema = inputSchema()
+	controller := &Controller{
+		resolver: resolver,
+		tool: declaredTool{
+			Tool:        baseTool,
+			declaration: declaration,
+		},
+	}
 
 	return controller, nil
 }
@@ -92,7 +109,7 @@ func (c *Controller) BeforeTool(_ context.Context, info agent.ToolCallInfo) agen
 		ID: info.ID, Name: info.Name, Args: info.Args,
 	})
 	if err != nil {
-		return agent.DenyTool("invalid ask_user arguments")
+		return agent.DenyTool(invalidArgumentsReason(err))
 	}
 
 	c.mu.Lock()
@@ -200,7 +217,7 @@ func (c *Controller) Reject(requestID, schemaDigest string) error {
 
 	if err := c.resolver.ResolveToolCalls(agent.ToolResolution{
 		ToolCallID: c.pending.ToolCallID,
-		Content:    agent.TextResult("The user canceled this question without selecting an answer."),
+		Content:    agent.TextResult(RejectionToolResult),
 		IsError:    true,
 	}); err != nil {
 		return fmt.Errorf("coding question: persist rejection: %w", err)
@@ -209,6 +226,89 @@ func (c *Controller) Reject(requestID, schemaDigest string) error {
 	c.pending = nil
 
 	return nil
+}
+
+func invalidArgumentsReason(err error) string {
+	message := "invalid ask_user arguments: " + err.Error()
+	if len(message) <= maxToolErrorBytes {
+		return message
+	}
+
+	end := maxToolErrorBytes - len("...")
+	for end > 0 && !utf8.ValidString(message[:end]) {
+		end--
+	}
+
+	return message[:end] + "..."
+}
+
+type declaredTool struct {
+	agent.Tool
+	declaration ai.Tool
+}
+
+func (t declaredTool) Decl() ai.Tool {
+	return t.declaration
+}
+
+func inputSchema() *ai.Schema {
+	option := &ai.Schema{
+		Type:                 "object",
+		AdditionalProperties: false,
+		Properties: map[string]*ai.Schema{
+			"label": {
+				Type: schemaTypeString, Description: "Short answer label shown in the selector.",
+			},
+			"description": {
+				Type: schemaTypeString, Description: "One sentence explaining the impact or trade-off.",
+			},
+			"preview": {
+				Type: schemaTypeString, Description: "Optional bounded Markdown preview for this choice.",
+			},
+		},
+		Required: []string{"label", "description"},
+	}
+	options := &ai.Schema{
+		Type: "array", Items: option,
+		Description: "Two to four concrete choices. Do not add Other; Pips provides a custom response.",
+		Extra: map[string]json.RawMessage{
+			"minItems": json.RawMessage(strconv.Itoa(minOptionCount)),
+			"maxItems": json.RawMessage(strconv.Itoa(maxOptionCount)),
+		},
+	}
+	item := &ai.Schema{
+		Type:                 "object",
+		AdditionalProperties: false,
+		Properties: map[string]*ai.Schema{
+			"header": {
+				Type: schemaTypeString, Description: "Short section label for the question.",
+			},
+			"question": {
+				Type: schemaTypeString, Description: "The decision the user needs to make.",
+			},
+			"options": options,
+			"multiple": {
+				Type: "boolean", Description: "Set true only when multiple choices may be selected.",
+			},
+		},
+		Required: []string{"header", "question", "options"},
+	}
+
+	return &ai.Schema{
+		Type:                 "object",
+		AdditionalProperties: false,
+		Properties: map[string]*ai.Schema{
+			"questions": {
+				Type: "array", Items: item,
+				Description: "One to four independent decisions to ask in one interaction.",
+				Extra: map[string]json.RawMessage{
+					"minItems": json.RawMessage(strconv.Itoa(minQuestionCount)),
+					"maxItems": json.RawMessage(strconv.Itoa(maxQuestionCount)),
+				},
+			},
+		},
+		Required: []string{"questions"},
+	}
 }
 
 func requestFromCall(call ai.ToolCallPart) (Request, error) {

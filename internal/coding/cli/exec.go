@@ -244,9 +244,10 @@ func validateSuccessfulInteraction(state coding.State) error {
 	if state.Interaction.Active || state.Phase != coding.PhaseIdle ||
 		state.Interaction.Outcome != coding.InteractionSucceeded {
 		return fmt.Errorf(
-			"coding cli: interaction ended without success (phase=%s outcome=%s active=%t)",
+			"coding cli: interaction ended without success (phase=%s outcome=%s stop=%s active=%t)",
 			state.Phase,
 			state.Interaction.Outcome,
+			state.Interaction.Stop,
 			state.Interaction.Active,
 		)
 	}

@@ -256,6 +256,7 @@ func Telemetry(event Event) (TelemetryEvent, error) {
 		projected.Mode = value.Mode
 	case InteractionCompleted:
 		projected.Outcome = value.Outcome
+		projected.Stop = value.Stop
 		projected.DurationMillis = value.DurationMillis
 		projected.Usage = value.Usage
 		projected.Failed = value.Outcome == InteractionFailed
