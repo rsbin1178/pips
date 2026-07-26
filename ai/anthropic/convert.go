@@ -280,7 +280,7 @@ func applyTools(out *messagesRequest, req ai.Request) {
 		out.Tools = append(out.Tools, wireTool{
 			Name:        tool.Name,
 			Description: tool.Description,
-			InputSchema: tool.InputSchema,
+			InputSchema: tool.EffectiveInputSchema(),
 		})
 	}
 
