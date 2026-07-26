@@ -251,20 +251,28 @@ func TestChatGenerateToolsRoundTrip(t *testing.T) {
 
 	resp, err := model.Generate(t.Context(), ai.Request{
 		Messages:   []ai.Message{ai.UserText("weather in paris?")},
-		Tools:      []ai.Tool{weatherTool},
+		Tools:      []ai.Tool{weatherTool, {Name: "ping"}},
 		ToolChoice: ai.ToolChoice{Mode: ai.ToolChoiceAuto},
 	})
 	require.NoError(t, err)
 
 	// Outgoing tools.
 	tools := as[[]any](t, captured["tools"])
-	require.Len(t, tools, 1)
+	require.Len(t, tools, 2)
 	fn := as[map[string]any](t, as[map[string]any](t, tools[0])["function"])
 	assert.Equal(t, "get_weather", fn["name"])
 	assert.Equal(t, "auto", captured["tool_choice"])
 
 	params := as[map[string]any](t, fn["parameters"])
 	assert.Equal(t, "object", params["type"])
+	assert.Contains(t, as[map[string]any](t, params["properties"]), "city")
+	assert.Equal(t, []any{"city"}, params["required"])
+
+	noArgs := as[map[string]any](t, as[map[string]any](t, tools[1])["function"])
+	assert.Equal(t, "ping", noArgs["name"])
+	noArgsParams := as[map[string]any](t, noArgs["parameters"])
+	assert.Equal(t, "object", noArgsParams["type"])
+	assert.Empty(t, as[map[string]any](t, noArgsParams["properties"]))
 
 	// Normalized tool calls.
 	assert.Equal(t, ai.FinishToolCalls, resp.FinishReason)

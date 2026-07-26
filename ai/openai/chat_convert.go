@@ -346,7 +346,7 @@ func chatToolsFrom(tools []ai.Tool) []chatTool {
 			Function: chatFunctionDef{
 				Name:        tool.Name,
 				Description: tool.Description,
-				Parameters:  tool.InputSchema,
+				Parameters:  tool.EffectiveInputSchema(),
 			},
 		})
 	}

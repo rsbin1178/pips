@@ -224,10 +224,13 @@ func TestGenerateToolsSynthesizesID(t *testing.T) {
 
 	resp, err := model.Generate(t.Context(), ai.Request{
 		Messages: []ai.Message{ai.UserText("weather in paris?")},
-		Tools: []ai.Tool{{
-			Name:        "get_weather",
-			InputSchema: &ai.Schema{Type: "object", Properties: map[string]*ai.Schema{"city": {Type: "string"}}, Required: []string{"city"}},
-		}},
+		Tools: []ai.Tool{
+			{
+				Name:        "get_weather",
+				InputSchema: &ai.Schema{Type: "object", Properties: map[string]*ai.Schema{"city": {Type: "string"}}, Required: []string{"city"}},
+			},
+			{Name: "ping"},
+		},
 		ToolChoice: ai.ToolChoice{Mode: ai.ToolChoiceAuto},
 	})
 	require.NoError(t, err)
@@ -235,7 +238,18 @@ func TestGenerateToolsSynthesizesID(t *testing.T) {
 	// functionDeclarations wire shape.
 	tools := as[[]any](t, captured["tools"])
 	decls := as[[]any](t, as[map[string]any](t, tools[0])["functionDeclarations"])
-	assert.Equal(t, "get_weather", as[map[string]any](t, decls[0])["name"])
+	require.Len(t, decls, 2)
+	decl := as[map[string]any](t, decls[0])
+	assert.Equal(t, "get_weather", decl["name"])
+	params := as[map[string]any](t, decl["parameters"])
+	assert.Contains(t, as[map[string]any](t, params["properties"]), "city")
+	assert.Equal(t, []any{"city"}, params["required"])
+
+	noArgs := as[map[string]any](t, decls[1])
+	assert.Equal(t, "ping", noArgs["name"])
+	noArgsParams := as[map[string]any](t, noArgs["parameters"])
+	assert.Equal(t, "object", noArgsParams["type"])
+	assert.Empty(t, as[map[string]any](t, noArgsParams["properties"]))
 
 	// The response's STOP is normalized to tool_calls, and the id is
 	// synthesized since the wire supplied none.

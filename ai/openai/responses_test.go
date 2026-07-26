@@ -179,10 +179,13 @@ func TestResponsesVisionAndToolWireFormat(t *testing.T) {
 			ai.Text("what is this?"),
 			ai.ImageData("image/png", []byte{1, 2, 3}),
 		)},
-		Tools: []ai.Tool{{
-			Name:        "get_weather",
-			InputSchema: &ai.Schema{Type: "object", Properties: map[string]*ai.Schema{"city": {Type: "string"}}, Required: []string{"city"}},
-		}},
+		Tools: []ai.Tool{
+			{
+				Name:        "get_weather",
+				InputSchema: &ai.Schema{Type: "object", Properties: map[string]*ai.Schema{"city": {Type: "string"}}, Required: []string{"city"}},
+			},
+			{Name: "ping"},
+		},
 	})
 	require.NoError(t, err)
 
@@ -195,9 +198,19 @@ func TestResponsesVisionAndToolWireFormat(t *testing.T) {
 
 	// Tools are flat (no nested "function" wrapper).
 	tools := as[[]any](t, captured["tools"])
+	require.Len(t, tools, 2)
 	tool := as[map[string]any](t, tools[0])
 	assert.Equal(t, "function", tool["type"])
 	assert.Equal(t, "get_weather", tool["name"])
+	params := as[map[string]any](t, tool["parameters"])
+	assert.Contains(t, as[map[string]any](t, params["properties"]), "city")
+	assert.Equal(t, []any{"city"}, params["required"])
+
+	noArgs := as[map[string]any](t, tools[1])
+	assert.Equal(t, "ping", noArgs["name"])
+	noArgsParams := as[map[string]any](t, noArgs["parameters"])
+	assert.Equal(t, "object", noArgsParams["type"])
+	assert.Empty(t, as[map[string]any](t, noArgsParams["properties"]))
 
 	// function_call output normalizes to tool_calls.
 	assert.Equal(t, ai.FinishToolCalls, resp.FinishReason)
