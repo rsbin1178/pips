@@ -176,6 +176,12 @@ func composePrepareTurns(values []func(context.Context, agent.RunInfo) agent.Tur
 
 		for _, prepare := range values {
 			update := prepare(ctx, info)
+			if update.Err != nil {
+				combined.Err = update.Err
+
+				return combined
+			}
+
 			if update.Model != nil {
 				combined.Model = update.Model
 			}

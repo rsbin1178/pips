@@ -89,6 +89,22 @@ func (e *eventEmitter) fail(err error) {
 	}
 }
 
+// detachConsumer ends the operation-local iterator lease without closing the
+// Runtime event publisher. Observers retained by longer-lived children may
+// still commit durable events, but they must never call yield after the
+// iterator producer returns.
+func (e *eventEmitter) detachConsumer() {
+	if e == nil {
+		return
+	}
+
+	e.mu.Lock()
+	e.ctx = context.WithoutCancel(e.ctx)
+	e.yield = nil
+	e.alive = false
+	e.mu.Unlock()
+}
+
 //nolint:gocyclo,funlen // Prompt/continue/resolve share one auditable transition driver.
 func (r *Runtime) run(
 	parent context.Context,
@@ -106,6 +122,7 @@ func (r *Runtime) run(
 	defer r.endOperation(operation)
 
 	emitter := newEventEmitter(ctx, r, yield, true)
+	defer emitter.detachConsumer()
 	if kind == operationPrompt || kind == operationAgentNotification {
 		if err := r.maybeCompact(ctx, emitter); err != nil {
 			r.emitStructuralError("automatic_compaction_failed", "Automatic compaction failed", err, emitter)
@@ -303,11 +320,12 @@ func (r *Runtime) run(
 			return
 		}
 
-		if stop != agent.StopPaused {
+		if outcome, terminal := terminalInteractionOutcome(stop); terminal {
+			current.stop = stop
 			finishErr := r.finishInteraction(
 				context.WithoutCancel(ctx),
 				current,
-				InteractionSucceeded,
+				outcome,
 				emitter,
 			)
 			emitter.fail(finishErr)
@@ -333,12 +351,23 @@ func (r *Runtime) run(
 	}
 }
 
+func terminalInteractionOutcome(stop agent.StopReason) (InteractionOutcome, bool) {
+	switch stop {
+	case agent.StopEndTurn, agent.StopTerminated:
+		return InteractionSucceeded, true
+	case agent.StopPaused:
+		return "", false
+	default:
+		return InteractionIncomplete, true
+	}
+}
+
 func (r *Runtime) finishUnopenedInteraction(
 	interactionID string,
 	outcome InteractionOutcome,
 	emitter *eventEmitter,
 ) error {
-	journalErr := r.journal.complete(interactionID, outcome, TokenUsage{}, 0)
+	journalErr := r.journal.complete(interactionID, outcome, "", TokenUsage{}, 0)
 	eventErr := emitter.emit(
 		interactionID,
 		"",
@@ -634,6 +663,7 @@ func (r *Runtime) openInteraction(
 		controlHooks,
 		extension.Hooks{BeforeTool: r.controller.BeforeTool},
 		extension.Hooks{PrepareTurn: search.PrepareTurn},
+		extension.Hooks{PrepareTurn: r.compactMainContext(emitter)},
 	)
 
 	harnessOptions := []harness.Option{
@@ -644,6 +674,7 @@ func (r *Runtime) openInteraction(
 		harness.WithTemplates(snapshot.Prompts()...),
 		harness.WithAgentOptions(append(
 			composed.AgentOptions(),
+			agent.WithMaxTurns(0),
 			agent.WithToolTimeout(r.opts.ToolTimeout),
 			agent.WithRequest(r.requestPolicy),
 		)...),
@@ -697,6 +728,31 @@ func (r *Runtime) openInteraction(
 	activation = nil
 
 	return current, nil
+}
+
+func (r *Runtime) compactMainContext(
+	emitter *eventEmitter,
+) func(context.Context, agent.RunInfo) agent.TurnUpdate {
+	return func(ctx context.Context, info agent.RunInfo) agent.TurnUpdate {
+		if info.Response == nil || len(info.Response.ToolCalls()) == 0 {
+			return agent.TurnUpdate{}
+		}
+
+		before := r.session.LeafID()
+		if err := r.maybeCompact(ctx, emitter); err != nil {
+			return agent.TurnUpdate{Err: fmt.Errorf("coding runtime: compact context: %w", err)}
+		}
+		if r.session.LeafID() == before {
+			return agent.TurnUpdate{}
+		}
+
+		contextValue, err := r.session.Context()
+		if err != nil {
+			return agent.TurnUpdate{Err: fmt.Errorf("coding runtime: load compacted context: %w", err)}
+		}
+
+		return agent.TurnUpdate{ReplaceMessages: contextValue.Messages}
+	}
 }
 
 func agentToolNames(values []agent.Tool) []string {
@@ -1079,12 +1135,15 @@ func (r *Runtime) finishInteraction(
 	duration := max(time.Since(current.startedAt), time.Duration(0))
 	durationMillis := min(duration.Milliseconds(), maxEventDurationMS)
 
-	if err := r.journal.complete(current.id, outcome, current.usage, durationMillis); err != nil {
+	if err := r.journal.complete(
+		current.id, outcome, current.stop, current.usage, durationMillis,
+	); err != nil {
 		errs = append(errs, err)
 	}
 
 	if err := emitter.emit(current.id, "", EventInteractionCompleted, InteractionCompleted{
-		Outcome: outcome, Usage: current.usage, DurationMillis: durationMillis,
+		Outcome: outcome, Stop: current.stop, Usage: current.usage,
+		DurationMillis: durationMillis,
 	}); err != nil {
 		errs = append(errs, err)
 	}

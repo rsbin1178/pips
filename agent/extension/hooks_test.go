@@ -208,6 +208,32 @@ func TestComposeHooksMergesPrepareTurnUpdates(t *testing.T) {
 	}
 }
 
+func TestComposeHooksStopsPrepareTurnPipelineOnError(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("prepare failed")
+	called := false
+	hooks := extension.ComposeHooks(
+		extension.Hooks{PrepareTurn: func(context.Context, agent.RunInfo) agent.TurnUpdate {
+			return agent.TurnUpdate{Err: wantErr}
+		}},
+		extension.Hooks{PrepareTurn: func(context.Context, agent.RunInfo) agent.TurnUpdate {
+			called = true
+
+			return agent.TurnUpdate{}
+		}},
+	)
+
+	update := hooks.PrepareTurn(context.Background(), agent.RunInfo{})
+	if !errors.Is(update.Err, wantErr) {
+		t.Fatalf("prepare error = %v, want %v", update.Err, wantErr)
+	}
+
+	if called {
+		t.Fatal("prepare hook after failure was called")
+	}
+}
+
 func resultText(result ai.ToolResultPart) string {
 	if len(result.Content) == 0 {
 		return ""

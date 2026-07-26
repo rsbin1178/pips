@@ -30,6 +30,10 @@ type ToolResultOverride struct {
 // TurnUpdate adjusts the run between turns, returned by a [WithPrepareTurn]
 // hook. The zero value changes nothing.
 type TurnUpdate struct {
+	// Err aborts the run before another model call. Hook composition stops at
+	// the first error so an application can make a failed context rewrite an
+	// explicit run failure instead of continuing with stale messages.
+	Err error
 	// Model, when non-nil, serves all subsequent model calls of this run.
 	Model ai.LanguageModel
 	// ReplaceMessages, when non-nil, replaces the session history via
