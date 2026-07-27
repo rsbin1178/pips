@@ -23,6 +23,12 @@ func TestNew(t *testing.T) {
 	assert.Equal(t, filepath.Join(base, "workspaces.json"), layout.WorkspacesFile())
 	assert.Equal(t, filepath.Join(base, "sessions"), layout.SessionsDir())
 	assert.Equal(t, filepath.Join(base, "plans"), layout.PlansDir())
+	assert.Equal(t, filepath.Join(base, "teams"), layout.TeamsDir())
+	assert.Equal(t, filepath.Join(base, "teams", "aggregates"), layout.TeamAggregatesDir())
+	assert.Equal(t, filepath.Join(base, "teams", "continuations"), layout.TeamContinuationsDir())
+	assert.Equal(t, filepath.Join(base, "teams", "resources"), layout.TeamResourcesDir())
+	assert.Equal(t, filepath.Join(base, "teams", "leases"), layout.TeamLeasesDir())
+	assert.Equal(t, base+"-worktrees", layout.WorktreesRoot())
 	assert.Equal(t, filepath.Join(base, "skills"), layout.SkillsDir())
 	assert.Empty(t, layout.AgentSkillsDir())
 	assert.Equal(t, filepath.Join(base, "bundles"), layout.BundlesDir())
@@ -40,6 +46,14 @@ func TestNewRejectsNULPath(t *testing.T) {
 	t.Parallel()
 
 	_, err := paths.New("invalid\x00path")
+	require.ErrorIs(t, err, paths.ErrInvalid)
+}
+
+func TestNewRejectsFilesystemRoot(t *testing.T) {
+	t.Parallel()
+
+	root := filepath.VolumeName(t.TempDir()) + string(filepath.Separator)
+	_, err := paths.New(root)
 	require.ErrorIs(t, err, paths.ErrInvalid)
 }
 
