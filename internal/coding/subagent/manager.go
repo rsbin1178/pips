@@ -47,6 +47,8 @@ type Config struct {
 	Parent         *session.Handle
 	Tree           *workspace.Tree
 	Model          ai.LanguageModel
+	SummaryModel   ai.LanguageModel
+	Compaction     *harness.CompactionSettings
 	RequestPolicy  func(*ai.Request)
 	Options        ExecutionOptions
 	AgentObservers []func(context.Context, agent.Event)
@@ -54,6 +56,8 @@ type Config struct {
 }
 
 // Manager owns a bounded set of live child executions and all of their cleanup.
+// Each admitted child runs until natural completion, cancellation, an explicit
+// positive execution limit, or a structural safety policy stops it.
 type Manager struct {
 	mu        sync.Mutex
 	journalMu sync.Mutex
@@ -122,6 +126,10 @@ func New(config Config) (*Manager, error) {
 
 	config.AgentObservers = slices.Clone(config.AgentObservers)
 	config.EventObservers = slices.Clone(config.EventObservers)
+	if config.Compaction != nil {
+		settings := *config.Compaction
+		config.Compaction = &settings
+	}
 
 	maxConcurrent := config.Options.MaxConcurrent
 	if maxConcurrent == 0 {
@@ -179,6 +187,17 @@ func validateManagerConfig(config Config) error {
 		return fmt.Errorf("%w: parent must be a conversation", ErrInvalid)
 	}
 
+	if err := validateManagerObservers(config); err != nil {
+		return err
+	}
+	if err := validateCompactionDependencies(config); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func validateManagerObservers(config Config) error {
 	for _, observer := range config.AgentObservers {
 		if observer == nil {
 			return fmt.Errorf("%w: nil agent observer", ErrInvalid)
@@ -188,6 +207,31 @@ func validateManagerConfig(config Config) error {
 		if observer == nil {
 			return fmt.Errorf("%w: nil child event observer", ErrInvalid)
 		}
+	}
+
+	return nil
+}
+
+func validateCompactionDependencies(config Config) error {
+	if config.Compaction == nil {
+		if config.SummaryModel != nil {
+			return fmt.Errorf("%w: summary model requires child compaction", ErrInvalid)
+		}
+
+		return nil
+	}
+	if config.SummaryModel == nil ||
+		!validModelIdentity(string(config.SummaryModel.Provider())) ||
+		!validModelIdentity(config.SummaryModel.ModelID()) {
+		return fmt.Errorf("%w: child compaction requires a valid summary model", ErrInvalid)
+	}
+
+	settings := *config.Compaction
+	usable := settings.ContextTokens - settings.ReserveTokens
+	if settings.ContextTokens <= 0 || settings.ReserveTokens <= 0 || usable <= 0 ||
+		settings.KeepRecentTokens <= 0 || settings.KeepRecentTokens > usable ||
+		settings.SummaryTokens <= 0 {
+		return fmt.Errorf("%w: invalid child compaction settings", ErrInvalid)
 	}
 
 	return nil
@@ -224,7 +268,7 @@ func buildReadTools(config Config) ([]agent.Tool, error) {
 	return readTools, nil
 }
 
-// Start reserves one bounded execution slot and starts one owned goroutine.
+// Start reserves one execution slot and starts one owned goroutine.
 func (m *Manager) Start(
 	ctx context.Context,
 	request Request,
@@ -289,12 +333,20 @@ func (m *Manager) Start(
 	}
 	startSucceeded = true
 
-	runCtx, cancel := context.WithTimeout(m.lifecycle, m.limits.MaxDuration)
+	var (
+		runCtx context.Context
+		cancel context.CancelFunc
+	)
+	if m.limits.MaxDuration > 0 {
+		runCtx, cancel = context.WithTimeout(m.lifecycle, m.limits.MaxDuration)
+	} else {
+		runCtx, cancel = context.WithCancel(m.lifecycle)
+	}
 	var stopParent func() bool
 	if request.Delivery == DeliveryForeground {
 		stopParent = context.AfterFunc(ctx, cancel)
 	}
-	tracker := newRunTracker(created.Time, m.limits.MaxToolCalls)
+	tracker := newRunTracker(created.Time, m.limits.MaxActivityTools)
 	execution := &Execution{
 		manager:    m,
 		request:    request,
@@ -565,9 +617,10 @@ type runTracker struct {
 	runID                string
 	turns                int
 	toolCalls            int
-	exhausted            bool
-	finalizing           bool
+	stopCause            runStopCause
+	finalizationCause    finalizationCause
 	finalizationInjected bool
+	stopAfterTurn        int
 	lastToolFingerprint  [sha256.Size]byte
 	repeatedToolCalls    int
 	repeatWarningIssued  bool
@@ -580,6 +633,22 @@ type runTracker struct {
 	toolIndex            map[string]int
 	maxTools             int
 }
+
+type runStopCause uint8
+
+const (
+	runStopNone runStopCause = iota
+	runStopMaxToolCalls
+	runStopNoProgress
+)
+
+type finalizationCause uint8
+
+const (
+	finalizationNone finalizationCause = iota
+	finalizationTurnBudget
+	finalizationNoProgress
+)
 
 type progressSnapshot struct {
 	runID     string
@@ -686,8 +755,8 @@ func (m *Manager) agentOptions(
 			tracker.mu.Lock()
 			defer tracker.mu.Unlock()
 
-			if tracker.toolCalls >= m.limits.MaxToolCalls {
-				tracker.exhausted = true
+			if m.limits.MaxToolCalls > 0 && tracker.toolCalls >= m.limits.MaxToolCalls {
+				tracker.stopCause = runStopMaxToolCalls
 				return agent.DenyTool("subagent tool-call budget exhausted")
 			}
 
@@ -702,7 +771,9 @@ func (m *Manager) agentOptions(
 					"identical tool call repeated; choose a different action or finalize from existing evidence",
 				)
 			case repeatedToolFinalize:
-				tracker.finalizing = true
+				if tracker.finalizationCause == finalizationNone {
+					tracker.finalizationCause = finalizationNoProgress
+				}
 
 				return agent.DenyTool(
 					"identical tool call repeated after a no-progress warning; finalize from existing evidence",
@@ -711,48 +782,24 @@ func (m *Manager) agentOptions(
 
 			return agent.ToolDecision{}
 		}),
-		agent.WithStopWhen(func(agent.RunInfo) bool {
+		agent.WithStopWhen(func(info agent.RunInfo) bool {
 			tracker.mu.Lock()
 			defer tracker.mu.Unlock()
 
-			return tracker.exhausted
+			if tracker.stopCause == runStopMaxToolCalls {
+				return true
+			}
+			if tracker.finalizationCause == finalizationNoProgress &&
+				tracker.finalizationInjected && info.Turns >= tracker.stopAfterTurn {
+				tracker.stopCause = runStopNoProgress
+
+				return true
+			}
+
+			return false
 		}),
-		agent.WithPrepareTurn(func(_ context.Context, info agent.RunInfo) agent.TurnUpdate {
-			tracker.mu.Lock()
-			workingTurns := m.limits.MaxTurns - m.limits.FinalizationTurns
-			shouldFinalize := tracker.finalizing || info.Turns >= workingTurns
-			alreadyFinalizing := tracker.finalizing && tracker.finalizationInjected
-			if shouldFinalize {
-				tracker.finalizing = true
-			}
-			tracker.mu.Unlock()
-
-			if !shouldFinalize || alreadyFinalizing {
-				return agent.TurnUpdate{}
-			}
-
-			contextSnapshot, err := child.Session().Context()
-			if err != nil {
-				tracker.mu.Lock()
-				tracker.err = errors.Join(tracker.err, err)
-				tracker.mu.Unlock()
-
-				return agent.TurnUpdate{}
-			}
-
-			messages := append(
-				slices.Clone(contextSnapshot.Messages),
-				ai.UserText(finalizationInstruction),
-			)
-
-			tracker.mu.Lock()
-			tracker.finalizationInjected = true
-			tracker.mu.Unlock()
-
-			return agent.TurnUpdate{
-				ReplaceMessages: messages,
-				Tools:           []agent.Tool{},
-			}
+		agent.WithPrepareTurn(func(ctx context.Context, info agent.RunInfo) agent.TurnUpdate {
+			return m.prepareChildTurn(ctx, info, child, tracker)
 		}),
 		agent.WithOutputGuardrail("subagent_result", func(
 			_ context.Context,
@@ -789,6 +836,135 @@ func (m *Manager) agentOptions(
 			}
 		}),
 	}
+}
+
+func (m *Manager) prepareChildTurn(
+	ctx context.Context,
+	info agent.RunInfo,
+	child *session.Handle,
+	tracker *runTracker,
+) agent.TurnUpdate {
+	finalization, alreadyInjected, skip := m.childPreparationState(info, tracker)
+	if skip {
+		return agent.TurnUpdate{}
+	}
+
+	// The convergence turn is deliberately terminal. Compacting after it would
+	// add model I/O without giving the child another productive turn.
+	if finalization == finalizationNoProgress && alreadyInjected {
+		return agent.TurnUpdate{}
+	}
+
+	messages, err := m.compactChildAfterToolTurn(ctx, info, child)
+	if err != nil {
+		return agent.TurnUpdate{Err: err}
+	}
+
+	shouldFinalize, alreadyInjected := m.markChildFinalization(info.Turns, tracker)
+
+	if !shouldFinalize || alreadyInjected {
+		if messages == nil {
+			return agent.TurnUpdate{}
+		}
+
+		return agent.TurnUpdate{ReplaceMessages: messages}
+	}
+
+	return childFinalizationUpdate(child, messages)
+}
+
+func (m *Manager) childPreparationState(
+	info agent.RunInfo,
+	tracker *runTracker,
+) (finalizationCause, bool, bool) {
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
+
+	stopForTokens := m.limits.MaxTokens > 0 &&
+		info.Usage.InputTokens+info.Usage.OutputTokens >= m.limits.MaxTokens
+	skip := tracker.stopCause != runStopNone || stopForTokens
+
+	return tracker.finalizationCause, tracker.finalizationInjected, skip
+}
+
+func (m *Manager) markChildFinalization(turns int, tracker *runTracker) (bool, bool) {
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
+
+	if tracker.finalizationCause == finalizationNone && m.limits.MaxTurns > 0 &&
+		m.limits.FinalizationTurns > 0 &&
+		turns >= m.limits.MaxTurns-m.limits.FinalizationTurns {
+		tracker.finalizationCause = finalizationTurnBudget
+	}
+	shouldFinalize := tracker.finalizationCause != finalizationNone
+	alreadyInjected := tracker.finalizationInjected
+	if shouldFinalize && !alreadyInjected {
+		tracker.finalizationInjected = true
+		if tracker.finalizationCause == finalizationNoProgress {
+			tracker.stopAfterTurn = turns + 1
+		}
+	}
+
+	return shouldFinalize, alreadyInjected
+}
+
+func childFinalizationUpdate(
+	child *session.Handle,
+	messages []ai.Message,
+) agent.TurnUpdate {
+	if messages == nil {
+		contextSnapshot, err := child.Session().Context()
+		if err != nil {
+			return agent.TurnUpdate{
+				Err: fmt.Errorf("coding subagent: load finalization context: %w", err),
+			}
+		}
+		messages = slices.Clone(contextSnapshot.Messages)
+	}
+	messages = append(messages, ai.UserText(finalizationInstruction))
+
+	return agent.TurnUpdate{
+		ReplaceMessages: messages,
+		Tools:           []agent.Tool{},
+	}
+}
+
+func (m *Manager) compactChildAfterToolTurn(
+	ctx context.Context,
+	info agent.RunInfo,
+	child *session.Handle,
+) ([]ai.Message, error) {
+	if m.config.Compaction == nil || info.Response == nil ||
+		len(info.Response.ToolCalls()) == 0 {
+		return nil, nil
+	}
+
+	settings := *m.config.Compaction
+	path := child.Session().Path()
+	if !harness.ShouldCompact(harness.EstimateContext(path), settings) ||
+		harness.PlanCompaction(path, settings) == nil {
+		return nil, nil
+	}
+
+	compactor, err := harness.New(
+		m.config.Model,
+		child.Session(),
+		harness.WithCompaction(settings),
+		harness.WithSummaryModel(m.config.SummaryModel),
+	)
+	if err == nil {
+		err = compactor.Compact(ctx, "")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("coding subagent: compact child context: %w", err)
+	}
+
+	contextSnapshot, err := child.Session().Context()
+	if err != nil {
+		return nil, fmt.Errorf("coding subagent: reload compacted child context: %w", err)
+	}
+
+	return slices.Clone(contextSnapshot.Messages), nil
 }
 
 const finalizationInstruction = `[System] The evidence-gathering phase is complete and tools are now disabled.
@@ -961,10 +1137,11 @@ func (t *runTracker) trackMessageActivityLocked(event agent.Event) bool {
 }
 
 func (t *runTracker) trackToolStartLocked(event agent.Event) bool {
-	if event.Call == nil || t.upsertToolLocked(event, ToolStatusRunning) < 0 {
+	if event.Call == nil {
 		return false
 	}
 
+	t.upsertToolLocked(event, ToolStatusRunning)
 	t.activitySummary = summarizeToolActivity(*event.Call)
 	t.activity.Phase = ActivityPhaseWorking
 
@@ -977,13 +1154,11 @@ func (t *runTracker) trackToolUpdateLocked(event agent.Event) bool {
 	}
 
 	index := t.upsertToolLocked(event, ToolStatusRunning)
-	if index < 0 {
-		return false
+	if index >= 0 {
+		t.activity.Tools[index].Update = cloneTranscriptMessage(ai.Message{
+			Role: ai.RoleTool, Parts: event.Update,
+		})
 	}
-
-	t.activity.Tools[index].Update = cloneTranscriptMessage(ai.Message{
-		Role: ai.RoleTool, Parts: event.Update,
-	})
 	t.activity.Phase = ActivityPhaseWorking
 
 	return true
@@ -995,13 +1170,11 @@ func (t *runTracker) trackToolEndLocked(event agent.Event) bool {
 	}
 
 	index := t.upsertToolLocked(event, ToolStatusCompleted)
-	if index < 0 {
-		return false
+	if index >= 0 {
+		t.activity.Tools[index].Result = cloneTranscriptMessage(ai.Message{
+			Role: ai.RoleTool, Parts: []ai.Part{*event.Result},
+		})
 	}
-
-	t.activity.Tools[index].Result = cloneTranscriptMessage(ai.Message{
-		Role: ai.RoleTool, Parts: []ai.Part{*event.Result},
-	})
 	t.activity.Phase = ActivityPhaseThinking
 
 	return true
@@ -1250,7 +1423,9 @@ func (m *Manager) finishExecution(
 	turns := tracker.turns
 	toolCalls := tracker.toolCalls
 	usage := tracker.usage
-	exhausted := tracker.exhausted
+	stopCause := tracker.stopCause
+	convergenceActive := tracker.finalizationCause == finalizationNoProgress &&
+		tracker.finalizationInjected
 	activity := tracker.activitySummary
 	tracker.mu.Unlock()
 
@@ -1274,13 +1449,15 @@ func (m *Manager) finishExecution(
 		result.Usage = runResult.Usage
 	}
 
-	tokenExceeded := result.Usage.InputTokens+result.Usage.OutputTokens > m.limits.MaxTokens
+	tokenExceeded := m.limits.MaxTokens > 0 &&
+		result.Usage.InputTokens+result.Usage.OutputTokens > m.limits.MaxTokens
 
 	result.Outcome, result.Code = classifyOutcome(
 		runErr,
 		runResult,
 		value,
-		exhausted,
+		stopCause,
+		convergenceActive,
 		tokenExceeded,
 	)
 	if result.Outcome != OutcomeSucceeded {
@@ -1351,7 +1528,8 @@ func classifyOutcome(
 	runErr error,
 	runResult *agent.RunResult,
 	value any,
-	exhausted bool,
+	stopCause runStopCause,
+	convergenceActive bool,
 	tokenExceeded bool,
 ) (Outcome, string) {
 	if outcome, code, canceled := canceledOutcome(runErr); canceled {
@@ -1359,6 +1537,10 @@ func classifyOutcome(
 	}
 
 	if errors.Is(runErr, ErrInvalidResult) || errors.Is(runErr, agent.ErrGuardrail) {
+		if convergenceActive {
+			return OutcomeFailed, "no_progress"
+		}
+
 		return OutcomeFailed, "invalid_result"
 	}
 
@@ -1366,8 +1548,11 @@ func classifyOutcome(
 		return OutcomeFailed, "execution_failed"
 	}
 
-	if exhausted {
+	if stopCause == runStopMaxToolCalls {
 		return OutcomeFailed, "max_tool_calls"
+	}
+	if stopCause == runStopNoProgress {
+		return OutcomeFailed, "no_progress"
 	}
 
 	if tokenExceeded {

@@ -75,10 +75,53 @@ func TestTimelineDistinguishesRejectedAndInvalidQuestions(t *testing.T) {
 
 	blocks := projectTimeline(state)
 	require.Len(t, blocks, 2)
-	assert.Equal(t, "Question failed", blocks[0].title)
+	assert.Equal(t, questionFailedTitle, blocks[0].title)
 	assert.Contains(t, blocks[0].body, "two to four options")
 	assert.Equal(t, "Question canceled", blocks[1].title)
 	assert.Equal(t, "No answer was submitted.", blocks[1].body)
+}
+
+func TestTimelineUsesUniformInterBlockSpacing(t *testing.T) {
+	t.Parallel()
+
+	blocks := []timelineBlock{
+		{kind: blockAssistant, body: "assistant", rendered: true},
+		{kind: blockQuestion, title: questionFailedTitle, body: "first failure"},
+		{kind: blockQuestion, title: questionFailedTitle, body: "second failure"},
+	}
+	rendered := renderTimeline(
+		blocks,
+		newMarkdownRenderer(4),
+		80,
+		themeDark,
+		true,
+	)
+	separator := strings.Repeat("\n", conversationGapHeight+1)
+	assert.Equal(t, strings.Join([]string{
+		"assistant",
+		questionFailedTitle + "\nfirst failure",
+		questionFailedTitle + "\nsecond failure",
+	}, separator), rendered)
+}
+
+func TestTimelineUsesUniformOuterContentMargin(t *testing.T) {
+	t.Parallel()
+
+	rendered := renderTimeline(
+		[]timelineBlock{
+			{kind: blockAssistant, body: "assistant"},
+			{kind: blockQuestion, title: questionFailedTitle, body: "failure"},
+		},
+		newMarkdownRenderer(4),
+		80,
+		themeDark,
+		true,
+	)
+	lines := strings.Split(rendered, "\n")
+	require.NotEmpty(t, lines)
+	assert.False(t, strings.HasPrefix(lines[0], " "))
+	assert.Equal(t, "assistant", strings.TrimRight(lines[0], " "))
+	assert.Contains(t, lines, questionFailedTitle)
 }
 
 func TestTimelineNeverProjectsReasoningOrSignatures(t *testing.T) {

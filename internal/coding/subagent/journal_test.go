@@ -1,6 +1,7 @@
 package subagent
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -11,6 +12,30 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestRecordLimitsRoundTripUnlimitedDefaultsAndAcceptLegacyOmissions(t *testing.T) {
+	t.Parallel()
+
+	current := journalLimits(DefaultLimits())
+	data, err := json.Marshal(current)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `"max_turns":0`)
+	assert.Contains(t, string(data), `"max_tokens":0`)
+	assert.Contains(t, string(data), `"max_tool_calls":0`)
+	assert.Contains(t, string(data), `"max_duration_nanos":0`)
+
+	var decoded recordLimits
+	require.NoError(t, json.Unmarshal(data, &decoded))
+	assert.Equal(t, current, decoded)
+	require.NoError(t, decoded.validate())
+
+	legacy := legacyBoundedRecordLimits()
+	require.NoError(t, legacy.validate())
+	normalized := normalizeLimits(legacy.limits())
+	assert.Equal(t, 1, normalized.FinalizationTurns)
+	assert.Equal(t, DefaultLimits().RepeatedToolCallLimit, normalized.RepeatedToolCallLimit)
+	assert.Equal(t, DefaultLimits().MaxActivityTools, normalized.MaxActivityTools)
+}
 
 func TestReconcileMarksOrphanRunningInterruptedAndRepairsParent(t *testing.T) {
 	t.Parallel()
@@ -27,7 +52,7 @@ func TestReconcileMarksOrphanRunningInterruptedAndRepairsParent(t *testing.T) {
 		Schema: recordSchema, State: StateCreated, Role: RoleExplore,
 		ChildSessionID: child.Metadata().ID, ParentSessionID: parent.Metadata().ID,
 		ParentRunID: "parent-run", Model: "openai/test", TaskPreview: "inspect",
-		Limits: journalLimits(DefaultLimits()), Time: time.Now().UTC(),
+		Limits: legacyBoundedRecordLimits(), Time: time.Now().UTC(),
 	}
 	require.NoError(t, appendMirrored(child.Session(), parent.Session(), created))
 	started := created
@@ -56,6 +81,19 @@ func TestReconcileMarksOrphanRunningInterruptedAndRepairsParent(t *testing.T) {
 	}
 
 	assert.Equal(t, 1, terminalCount)
+}
+
+func legacyBoundedRecordLimits() recordLimits {
+	value := journalLimits(DefaultLimits())
+	value.MaxTurns = 26
+	value.MaxTokens = 120_000
+	value.MaxToolCalls = 64
+	value.MaxDurationNanos = int64(5 * time.Minute)
+	value.FinalizationTurns = 0
+	value.RepeatedToolCallLimit = 0
+	value.MaxActivityTools = 0
+
+	return value
 }
 
 func TestReconcileRepairsMissingParentTerminalFromChild(t *testing.T) {

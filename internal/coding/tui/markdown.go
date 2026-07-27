@@ -101,6 +101,8 @@ func markdownStyle(theme colorTheme, noColor bool) glamouransi.StyleConfig {
 		style = styles.ASCIIStyleConfig
 	}
 
+	outerMargin := uint(0)
+	style.Document.Margin = &outerMargin
 	style.H1.Prefix = ""
 	style.H1.Suffix = ""
 	style.H2.Prefix = ""

@@ -3,8 +3,6 @@ package subagent
 import (
 	"fmt"
 	"time"
-
-	"github.com/rsbin/pips/agent"
 )
 
 // Limits bounds one child execution and its persisted projections.
@@ -15,6 +13,7 @@ type Limits struct {
 	MaxTokens             int
 	MaxToolCalls          int
 	MaxDuration           time.Duration
+	MaxActivityTools      int
 	MaxOutputTokens       int
 	MaxTaskBytes          int
 	MaxResultBytes        int
@@ -22,15 +21,13 @@ type Limits struct {
 	MaxFieldBytes         int
 }
 
-// DefaultLimits returns the production P1 child execution budgets.
+// DefaultLimits returns the production child execution policy. Total turns,
+// cumulative tokens, tool calls, and wall time are unlimited by default;
+// payloads and live projections remain bounded independently.
 func DefaultLimits() Limits {
 	return Limits{
-		MaxTurns:              agent.DefaultMaxTurns + 1,
-		FinalizationTurns:     1,
 		RepeatedToolCallLimit: 3,
-		MaxTokens:             120_000,
-		MaxToolCalls:          64,
-		MaxDuration:           5 * time.Minute,
+		MaxActivityTools:      256,
 		MaxOutputTokens:       16_384,
 		MaxTaskBytes:          64 << 10,
 		MaxResultBytes:        32 << 10,
@@ -41,25 +38,61 @@ func DefaultLimits() Limits {
 
 func normalizeLimits(limits Limits) Limits {
 	defaults := DefaultLimits()
-	if limits.FinalizationTurns == 0 {
-		limits.FinalizationTurns = defaults.FinalizationTurns
+
+	if limits.MaxTurns > 0 && limits.FinalizationTurns == 0 {
+		limits.FinalizationTurns = 1
 	}
 
 	if limits.RepeatedToolCallLimit == 0 {
 		limits.RepeatedToolCallLimit = defaults.RepeatedToolCallLimit
 	}
 
+	if limits.MaxActivityTools == 0 {
+		limits.MaxActivityTools = defaults.MaxActivityTools
+	}
+
 	return limits
 }
 
 func validateLimits(limits Limits) error {
+	if err := validateExecutionLimits(limits); err != nil {
+		return err
+	}
+
+	if err := validateBoundedLimits(limits); err != nil {
+		return err
+	}
+
+	return validateLimitRelationships(limits)
+}
+
+func validateExecutionLimits(limits Limits) error {
+	values := []struct {
+		name  string
+		value int
+	}{
+		{"turns", limits.MaxTurns},
+		{"finalization turns", limits.FinalizationTurns},
+		{"tokens", limits.MaxTokens},
+		{"tool calls", limits.MaxToolCalls},
+	}
+	for _, value := range values {
+		if value.value < 0 {
+			return fmt.Errorf("%w: %s limit must be non-negative", ErrInvalid, value.name)
+		}
+	}
+
+	if limits.MaxDuration < 0 {
+		return fmt.Errorf("%w: duration limit must be non-negative", ErrInvalid)
+	}
+
+	return nil
+}
+
+func validateBoundedLimits(limits Limits) error {
 	hard := Limits{
-		MaxTurns:              64,
-		FinalizationTurns:     8,
 		RepeatedToolCallLimit: 16,
-		MaxTokens:             1_000_000,
-		MaxToolCalls:          256,
-		MaxDuration:           30 * time.Minute,
+		MaxActivityTools:      1024,
 		MaxOutputTokens:       131_072,
 		MaxTaskBytes:          1 << 20,
 		MaxResultBytes:        1 << 20,
@@ -72,11 +105,8 @@ func validateLimits(limits Limits) error {
 		value int
 		max   int
 	}{
-		{"turns", limits.MaxTurns, hard.MaxTurns},
-		{"finalization turns", limits.FinalizationTurns, hard.FinalizationTurns},
 		{"repeated tool calls", limits.RepeatedToolCallLimit, hard.RepeatedToolCallLimit},
-		{"tokens", limits.MaxTokens, hard.MaxTokens},
-		{"tool calls", limits.MaxToolCalls, hard.MaxToolCalls},
+		{"activity tools", limits.MaxActivityTools, hard.MaxActivityTools},
 		{"output tokens", limits.MaxOutputTokens, hard.MaxOutputTokens},
 		{"task bytes", limits.MaxTaskBytes, hard.MaxTaskBytes},
 		{"result bytes", limits.MaxResultBytes, hard.MaxResultBytes},
@@ -89,15 +119,20 @@ func validateLimits(limits Limits) error {
 		}
 	}
 
-	if limits.FinalizationTurns >= limits.MaxTurns {
+	return nil
+}
+
+func validateLimitRelationships(limits Limits) error {
+	if limits.MaxTurns == 0 && limits.FinalizationTurns != 0 {
+		return fmt.Errorf("%w: unlimited turns cannot reserve finalization turns", ErrInvalid)
+	}
+
+	if limits.MaxTurns > 0 && limits.FinalizationTurns >= limits.MaxTurns {
 		return fmt.Errorf("%w: finalization turns must be below the total turn limit", ErrInvalid)
 	}
 
-	if limits.MaxDuration <= 0 || limits.MaxDuration > hard.MaxDuration {
-		return fmt.Errorf("%w: duration limit must be within 1ns..%s", ErrInvalid, hard.MaxDuration)
-	}
-
-	if limits.MaxFieldBytes > limits.MaxResultBytes || limits.MaxOutputTokens > limits.MaxTokens {
+	if limits.MaxFieldBytes > limits.MaxResultBytes ||
+		limits.MaxTokens > 0 && limits.MaxOutputTokens > limits.MaxTokens {
 		return fmt.Errorf("%w: conflicting result or token limits", ErrInvalid)
 	}
 

@@ -30,16 +30,10 @@ const (
 	blockCompletion
 )
 
-type timelineSpacing uint8
-
 const (
-	spacingConversation timelineSpacing = iota
-	spacingCompact
-)
-
-const (
-	completionGlyph = "▣"
-	errorAccentBar  = "▌"
+	completionGlyph     = "▣"
+	errorAccentBar      = "▌"
+	questionFailedTitle = "Question failed"
 )
 
 type timelineBlock struct {
@@ -50,7 +44,6 @@ type timelineBlock struct {
 	status   string
 	position int
 	rendered bool
-	spacing  timelineSpacing
 	tools    []toolActivity
 }
 
@@ -254,7 +247,7 @@ func isSubagentToolName(name string) bool {
 func projectToolActivity(activity toolActivity) timelineBlock {
 	return timelineBlock{
 		kind: blockTool, id: activity.id, position: activity.position,
-		spacing: spacingCompact, tools: []toolActivity{activity},
+		tools: []toolActivity{activity},
 	}
 }
 
@@ -268,7 +261,6 @@ func projectQuestionToolActivity(activity toolActivity) (timelineBlock, bool) {
 
 	block := timelineBlock{
 		kind: blockQuestion, position: activity.position,
-		spacing: spacingCompact,
 	}
 	if (activity.state == toolStateFailed || activity.state == toolStateInterrupted) &&
 		activity.result == question.RejectionToolResult {
@@ -278,7 +270,7 @@ func projectQuestionToolActivity(activity toolActivity) (timelineBlock, bool) {
 		return block, true
 	}
 	if activity.state == toolStateFailed || activity.state == toolStateInterrupted {
-		block.title = "Question failed"
+		block.title = questionFailedTitle
 		block.body = oneLineToolText(activity.result)
 		if block.body == "" {
 			block.body = "The structured question could not be opened."
@@ -704,24 +696,12 @@ func renderTimelineContentWithOptions(
 	var content strings.Builder
 	for index, value := range rendered {
 		if index > 0 {
-			content.WriteString(strings.Repeat("\n", timelineGap(blocks[index-1], blocks[index])))
+			content.WriteString(strings.Repeat("\n", conversationGapHeight+1))
 		}
 		content.WriteString(value)
 	}
 
 	return content.String()
-}
-
-func timelineGap(previous, next timelineBlock) int {
-	if compactTimelineBlock(previous) && compactTimelineBlock(next) {
-		return 1
-	}
-
-	return conversationGapHeight + 1
-}
-
-func compactTimelineBlock(block timelineBlock) bool {
-	return block.spacing == spacingCompact
 }
 
 func renderTimelineBlock(
@@ -773,7 +753,7 @@ func renderRegularTimelineBlock(
 
 	body := block.body
 	if !block.rendered && (block.kind == blockAssistant || block.kind == blockDraft) {
-		if value, err := markdown.render(body, max(1, width-2), theme, noColor); err == nil {
+		if value, err := markdown.render(body, max(1, width), theme, noColor); err == nil {
 			body = value
 		}
 	}

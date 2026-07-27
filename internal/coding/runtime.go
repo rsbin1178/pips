@@ -478,12 +478,29 @@ func Open(ctx context.Context, options OpenOptions) (_ *Runtime, returnErr error
 	if err != nil {
 		return nil, err
 	}
+	childCompactionSettings, compactionDisabled := effectiveCompactionSettings(
+		runtime.config.Compaction,
+		resolved,
+	)
+	var (
+		childCompaction   *harness.CompactionSettings
+		childSummaryModel ai.LanguageModel
+	)
+	if compactionDisabled == "" {
+		childCompaction = &childCompactionSettings
+		childSummaryModel = requestPolicyModel{
+			LanguageModel: baseModel,
+			apply:         requestPolicy,
+		}
+	}
 	runtime.subagents, err = subagent.New(subagent.Config{
 		Context:        ctx,
 		Repository:     repository,
 		Parent:         handle,
 		Tree:           tree,
 		Model:          baseModel,
+		SummaryModel:   childSummaryModel,
+		Compaction:     childCompaction,
 		RequestPolicy:  requestPolicy,
 		Options:        configured.Subagent,
 		AgentObservers: []func(context.Context, agent.Event){runtime.observers.observe},

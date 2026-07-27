@@ -15,6 +15,8 @@ import (
 
 	"github.com/rsbin/pips/agent/harness"
 	"github.com/rsbin/pips/ai"
+	"github.com/rsbin/pips/internal/coding/config"
+	"github.com/rsbin/pips/internal/coding/modelcatalog"
 	"github.com/rsbin/pips/internal/coding/plandoc"
 	"github.com/rsbin/pips/internal/coding/session"
 )
@@ -234,39 +236,19 @@ func (r *Runtime) prepareCompaction() (
 	*harness.CompactionPlan,
 	harness.CompactionSettings,
 ) {
-	configured := r.config.Compaction
-	if !configured.Enabled {
-		return CompactionPreview{DisabledReason: "automatic and manual compaction are disabled"}, nil,
-			harness.CompactionSettings{}
-	}
-	contextTokens := r.resolved.Limits.ContextWindow
-	if contextTokens <= 0 {
-		return CompactionPreview{DisabledReason: "the selected model has no context_window metadata"}, nil,
-			harness.CompactionSettings{}
-	}
-	reserve := configured.ReserveTokens
-	if r.resolved.Options.MaxOutputTokens != nil {
-		reserve = max(reserve, *r.resolved.Options.MaxOutputTokens)
-	}
-	if reserve >= contextTokens {
+	settings, disabledReason := effectiveCompactionSettings(r.config.Compaction, r.resolved)
+	if disabledReason != "" {
 		return CompactionPreview{
 			EstimatedTokens: harness.EstimateContext(r.session.Path()),
-			DisabledReason:  "request max output and reserve consume the model context window",
+			DisabledReason:  disabledReason,
 		}, nil, harness.CompactionSettings{}
-	}
-	usable := contextTokens - reserve
-	settings := harness.CompactionSettings{
-		ContextTokens:    contextTokens,
-		ReserveTokens:    reserve,
-		KeepRecentTokens: min(configured.KeepRecentTokens, max(usable*3/4, 1)),
-		SummaryTokens:    configured.SummaryMaxTokens,
 	}
 	path := r.session.Path()
 	plan := harness.PlanCompaction(path, settings)
 	estimated := harness.EstimateContext(path)
 	preview := CompactionPreview{
 		EstimatedTokens: estimated,
-		ThresholdTokens: contextTokens - reserve,
+		ThresholdTokens: settings.ContextTokens - settings.ReserveTokens,
 	}
 	if plan == nil {
 		preview.DisabledReason = "the active branch has no compactable history"
@@ -286,6 +268,35 @@ func (r *Runtime) prepareCompaction() (
 	)
 
 	return preview, plan, settings
+}
+
+func effectiveCompactionSettings(
+	configured config.CompactionConfig,
+	resolved modelcatalog.ResolvedModel,
+) (harness.CompactionSettings, string) {
+	if !configured.Enabled {
+		return harness.CompactionSettings{}, "automatic and manual compaction are disabled"
+	}
+	contextTokens := resolved.Limits.ContextWindow
+	if contextTokens <= 0 {
+		return harness.CompactionSettings{}, "the selected model has no context_window metadata"
+	}
+	reserve := configured.ReserveTokens
+	if resolved.Options.MaxOutputTokens != nil {
+		reserve = max(reserve, *resolved.Options.MaxOutputTokens)
+	}
+	if reserve >= contextTokens {
+		return harness.CompactionSettings{},
+			"request max output and reserve consume the model context window"
+	}
+	usable := contextTokens - reserve
+
+	return harness.CompactionSettings{
+		ContextTokens:    contextTokens,
+		ReserveTokens:    reserve,
+		KeepRecentTokens: min(configured.KeepRecentTokens, max(usable*3/4, 1)),
+		SummaryTokens:    configured.SummaryMaxTokens,
+	}, ""
 }
 
 func (r *Runtime) executeCompaction(
