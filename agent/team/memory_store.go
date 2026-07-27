@@ -215,4 +215,122 @@ func (store *MemoryStore) History(ctx context.Context, id ID) ([]Record, error) 
 	return cloneRecords(records), nil
 }
 
+// Changes implements Store.
+func (store *MemoryStore) Changes(
+	ctx context.Context,
+	id ID,
+	options ChangeOptions,
+) (ChangePage, error) {
+	if err := ctx.Err(); err != nil {
+		return ChangePage{}, err
+	}
+
+	options, err := validateChangeOptions(options)
+	if err != nil {
+		return ChangePage{}, err
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	records, exists := store.records[id]
+	if !exists {
+		return ChangePage{}, ErrNotFound
+	}
+
+	page := ChangePage{
+		Changes:   make([]Change, 0, min(options.Limit, len(records))),
+		NextAfter: options.AfterRevision,
+	}
+	for _, record := range records {
+		if record.Team.Revision <= options.AfterRevision {
+			continue
+		}
+
+		if len(page.Changes) == options.Limit {
+			break
+		}
+
+		page.Changes = append(page.Changes, cloneChange(Change{
+			Transition: record.Transition,
+			Message:    record.Message,
+		}))
+		page.NextAfter = record.Team.Revision
+	}
+
+	return page, nil
+}
+
+// LoadMessage implements Store.
+func (store *MemoryStore) LoadMessage(
+	ctx context.Context,
+	id ID,
+	messageID MessageID,
+) (Message, error) {
+	if err := ctx.Err(); err != nil {
+		return Message{}, err
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	records, exists := store.records[id]
+	if !exists {
+		return Message{}, ErrNotFound
+	}
+
+	for _, record := range records {
+		if record.Message != nil && record.Message.ID == messageID {
+			return cloneMessage(*record.Message), nil
+		}
+	}
+
+	return Message{}, ErrNotFound
+}
+
+// Mailbox implements Store.
+func (store *MemoryStore) Mailbox(
+	ctx context.Context,
+	id ID,
+	memberID MemberID,
+	options MailboxOptions,
+) (MessagePage, error) {
+	if err := ctx.Err(); err != nil {
+		return MessagePage{}, err
+	}
+
+	options, err := validateMailboxOptions(options)
+	if err != nil {
+		return MessagePage{}, err
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	records, exists := store.records[id]
+	if !exists {
+		return MessagePage{}, ErrNotFound
+	}
+
+	page := MessagePage{
+		Messages:  make([]Message, 0, min(options.Limit, len(records))),
+		NextAfter: options.AfterSequence,
+	}
+	for _, record := range records {
+		if record.Message == nil || record.Message.RecipientID != memberID ||
+			record.Message.Sequence <= options.AfterSequence {
+			continue
+		}
+
+		if len(page.Messages) == options.Limit {
+			break
+		}
+
+		page.Messages = append(page.Messages, cloneMessage(*record.Message))
+		page.NextAfter = record.Message.Sequence
+	}
+
+	return page, nil
+}
+
 var _ Store = (*MemoryStore)(nil)

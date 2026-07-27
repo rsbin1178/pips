@@ -6,17 +6,20 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/rsbin/pips/internal/jsonx"
 )
 
 const (
 	teamHeaderType = "team_aggregate"
-	teamVersion    = 1
+	teamVersion    = 2
 	teamFileExt    = ".jsonl"
 )
 
@@ -29,9 +32,10 @@ type teamHeader struct {
 
 // JSONLStore is a bounded single-process directory Store.
 type JSONLStore struct {
-	mu     sync.Mutex
-	dir    string
-	config storeConfig
+	mu            sync.Mutex
+	dir           string
+	config        storeConfig
+	migrationHook func(migrationStage) error
 }
 
 // NewJSONLStore opens a directory-backed Team store.
@@ -53,6 +57,8 @@ func NewJSONLStore(dir string, options ...StoreOption) (*JSONLStore, error) {
 }
 
 // Create implements Store.
+//
+//nolint:gocyclo // Creation keeps private-file lifecycle, durability, and rollback in one transaction.
 func (store *JSONLStore) Create(ctx context.Context, record Record) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -96,10 +102,19 @@ func (store *JSONLStore) Create(ctx context.Context, record Record) error {
 		return fmt.Errorf("team: create aggregate file: %w", err)
 	}
 
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		_ = os.Remove(path)
+
+		return fmt.Errorf("team: secure aggregate file: %w", err)
+	}
+
 	committed := false
 
 	defer func() {
-		_ = file.Close()
+		if file != nil {
+			_ = file.Close()
+		}
 
 		if !committed {
 			_ = os.Remove(path)
@@ -120,6 +135,16 @@ func (store *JSONLStore) Create(ctx context.Context, record Record) error {
 		return fmt.Errorf("team: sync aggregate file: %w", err)
 	}
 
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("team: close aggregate file: %w", err)
+	}
+
+	file = nil
+
+	if err := syncTeamDirectory(store.dir); err != nil {
+		return err
+	}
+
 	committed = true
 
 	return nil
@@ -134,7 +159,7 @@ func (store *JSONLStore) Load(ctx context.Context, id ID) (Record, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 
-	records, _, err := store.read(id)
+	records, _, _, err := store.read(id)
 	if err != nil {
 		return Record{}, err
 	}
@@ -143,6 +168,8 @@ func (store *JSONLStore) Load(ctx context.Context, id ID) (Record, error) {
 }
 
 // CompareAndSwap implements Store.
+//
+//nolint:gocyclo // CAS keeps migration, identity pinning, tail repair, and append in one transaction.
 func (store *JSONLStore) CompareAndSwap(
 	ctx context.Context,
 	id ID,
@@ -161,7 +188,7 @@ func (store *JSONLStore) CompareAndSwap(
 	store.mu.Lock()
 	defer store.mu.Unlock()
 
-	records, size, err := store.read(id)
+	records, size, version, err := store.read(id)
 	if err != nil {
 		return err
 	}
@@ -175,8 +202,22 @@ func (store *JSONLStore) CompareAndSwap(
 		return ErrCommandConflict
 	}
 
-	if len(records) >= store.config.limits.MaxTransitions ||
-		size+int64(len(data)+1) > store.config.limits.MaxFileBytes {
+	if len(records) >= store.config.limits.MaxTransitions {
+		return ErrStoreFull
+	}
+
+	if version == 1 {
+		size, err = store.rewriteV2(id, records)
+		if err != nil {
+			return err
+		}
+
+		if err := store.runMigrationHook(migrationBeforeAppend); err != nil {
+			return err
+		}
+	}
+
+	if size+int64(len(data)+1) > store.config.limits.MaxFileBytes {
 		return ErrStoreFull
 	}
 
@@ -185,11 +226,25 @@ func (store *JSONLStore) CompareAndSwap(
 		return err
 	}
 
+	identity, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("team: inspect aggregate for append: %w", err)
+	}
+
+	if err := validateTeamFileInfo(path, identity); err != nil {
+		return err
+	}
+
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // Team ID validation confines the path to the configured directory.
 	if err != nil {
 		return fmt.Errorf("team: open aggregate for append: %w", err)
 	}
 	defer func() { _ = file.Close() }()
+
+	opened, err := file.Stat()
+	if err != nil || !os.SameFile(identity, opened) {
+		return &CorruptStoreError{Path: path, Reason: "aggregate changed while opening for append", Err: err}
+	}
 
 	if err := file.Truncate(size); err != nil {
 		return fmt.Errorf("team: truncate uncommitted aggregate tail: %w", err)
@@ -201,6 +256,15 @@ func (store *JSONLStore) CompareAndSwap(
 
 	if err := file.Sync(); err != nil {
 		return fmt.Errorf("team: sync aggregate record: %w", err)
+	}
+
+	current, err := os.Lstat(path)
+	if err != nil || !os.SameFile(opened, current) {
+		return &CorruptStoreError{Path: path, Reason: "aggregate changed while appending", Err: err}
+	}
+
+	if err := validateTeamFileInfo(path, current); err != nil {
+		return err
 	}
 
 	return nil
@@ -219,7 +283,7 @@ func (store *JSONLStore) LoadCommand(
 	store.mu.Lock()
 	defer store.mu.Unlock()
 
-	records, _, err := store.read(id)
+	records, _, _, err := store.read(id)
 	if err != nil {
 		return Record{}, err
 	}
@@ -267,7 +331,7 @@ func (store *JSONLStore) List(ctx context.Context, options ListOptions) (ListPag
 
 	page := ListPage{Teams: make([]Team, 0, count)}
 	for _, rawID := range ids[:count] {
-		records, _, readErr := store.read(ID(rawID))
+		records, _, _, readErr := store.read(ID(rawID))
 		if readErr != nil {
 			return ListPage{}, readErr
 		}
@@ -291,7 +355,7 @@ func (store *JSONLStore) History(ctx context.Context, id ID) ([]Record, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 
-	records, _, err := store.read(id)
+	records, _, _, err := store.read(id)
 	if err != nil {
 		return nil, err
 	}
@@ -299,49 +363,170 @@ func (store *JSONLStore) History(ctx context.Context, id ID) ([]Record, error) {
 	return cloneRecords(records), nil
 }
 
-func (store *JSONLStore) read(id ID) ([]Record, int64, error) {
-	path, err := store.path(id)
-	if err != nil {
-		return nil, 0, err
+// Changes implements Store.
+func (store *JSONLStore) Changes(
+	ctx context.Context,
+	id ID,
+	options ChangeOptions,
+) (ChangePage, error) {
+	if err := ctx.Err(); err != nil {
+		return ChangePage{}, err
 	}
 
-	data, err := os.ReadFile(path) //nolint:gosec // Team ID validation confines the path to the configured directory.
+	options, err := validateChangeOptions(options)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, 0, ErrNotFound
+		return ChangePage{}, err
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	records, _, _, err := store.read(id)
+	if err != nil {
+		return ChangePage{}, err
+	}
+
+	page := ChangePage{
+		Changes:   make([]Change, 0, min(options.Limit, len(records))),
+		NextAfter: options.AfterRevision,
+	}
+	for _, record := range records {
+		if record.Team.Revision <= options.AfterRevision {
+			continue
 		}
 
-		return nil, 0, fmt.Errorf("team: read aggregate file: %w", err)
+		if len(page.Changes) == options.Limit {
+			break
+		}
+
+		page.Changes = append(page.Changes, cloneChange(Change{
+			Transition: record.Transition,
+			Message:    record.Message,
+		}))
+		page.NextAfter = record.Team.Revision
 	}
 
-	if int64(len(data)) > store.config.limits.MaxFileBytes {
-		return nil, 0, ErrStoreFull
-	}
-
-	records, committedSize, err := decodeTeamFile(path, id, data, store.config.limits)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	return records, int64(committedSize), nil
+	return page, nil
 }
 
-func decodeTeamFile(path string, id ID, data []byte, limits StoreLimits) ([]Record, int, error) {
+// LoadMessage implements Store.
+func (store *JSONLStore) LoadMessage(
+	ctx context.Context,
+	id ID,
+	messageID MessageID,
+) (Message, error) {
+	if err := ctx.Err(); err != nil {
+		return Message{}, err
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	records, _, _, err := store.read(id)
+	if err != nil {
+		return Message{}, err
+	}
+
+	for _, record := range records {
+		if record.Message != nil && record.Message.ID == messageID {
+			return cloneMessage(*record.Message), nil
+		}
+	}
+
+	return Message{}, ErrNotFound
+}
+
+// Mailbox implements Store.
+func (store *JSONLStore) Mailbox(
+	ctx context.Context,
+	id ID,
+	memberID MemberID,
+	options MailboxOptions,
+) (MessagePage, error) {
+	if err := ctx.Err(); err != nil {
+		return MessagePage{}, err
+	}
+
+	options, err := validateMailboxOptions(options)
+	if err != nil {
+		return MessagePage{}, err
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	records, _, _, err := store.read(id)
+	if err != nil {
+		return MessagePage{}, err
+	}
+
+	page := MessagePage{
+		Messages:  make([]Message, 0, min(options.Limit, len(records))),
+		NextAfter: options.AfterSequence,
+	}
+	for _, record := range records {
+		if record.Message == nil || record.Message.RecipientID != memberID ||
+			record.Message.Sequence <= options.AfterSequence {
+			continue
+		}
+
+		if len(page.Messages) == options.Limit {
+			break
+		}
+
+		page.Messages = append(page.Messages, cloneMessage(*record.Message))
+		page.NextAfter = record.Message.Sequence
+	}
+
+	return page, nil
+}
+
+func (store *JSONLStore) read(id ID) ([]Record, int64, int, error) {
+	path, err := store.path(id)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+
+	data, err := readTeamFile(path, store.config.limits.MaxFileBytes)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, 0, 0, ErrNotFound
+		}
+
+		return nil, 0, 0, fmt.Errorf("team: read aggregate file: %w", err)
+	}
+
+	records, committedSize, version, err := decodeTeamFile(path, id, data, store.config.limits)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+
+	return records, int64(committedSize), version, nil
+}
+
+func decodeTeamFile(path string, id ID, data []byte, limits StoreLimits) ([]Record, int, int, error) {
 	lines, committedSize, err := committedTeamLines(path, data)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 
-	if err := validateTeamHeader(path, id, lines[0]); err != nil {
-		return nil, 0, err
-	}
-
-	records, err := decodeTeamRecordLines(path, id, lines[1:], limits)
+	version, err := validateTeamHeader(path, id, lines[0])
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 
-	return records, committedSize, nil
+	var records []Record
+	if version == 1 {
+		records, err = decodeLegacyRecordLines(path, id, lines[1:], limits)
+	} else {
+		records, err = decodeTeamRecordLines(path, id, lines[1:], limits)
+	}
+
+	if err != nil {
+		return nil, 0, 0, err
+	}
+
+	return records, committedSize, version, nil
 }
 
 func committedTeamLines(path string, data []byte) ([][]byte, int, error) {
@@ -374,21 +559,21 @@ func committedTeamLines(path string, data []byte) ([][]byte, int, error) {
 	return lines, committedSize, nil
 }
 
-func validateTeamHeader(path string, id ID, line []byte) error {
+func validateTeamHeader(path string, id ID, line []byte) (int, error) {
 	var header teamHeader
-	if err := json.Unmarshal(line, &header); err != nil {
-		return &CorruptStoreError{Path: path, Line: 1, Reason: "invalid header", Err: err}
+	if err := decodeStrictJSON(line, &header); err != nil {
+		return 0, &CorruptStoreError{Path: path, Line: 1, Reason: "invalid header", Err: err}
 	}
 
 	if header.Type != teamHeaderType || header.ID != id {
-		return &CorruptStoreError{Path: path, Line: 1, Reason: "foreign header or ID mismatch"}
+		return 0, &CorruptStoreError{Path: path, Line: 1, Reason: "foreign header or ID mismatch"}
 	}
 
-	if header.Version != teamVersion {
-		return &CorruptStoreError{Path: path, Line: 1, Reason: "unsupported version"}
+	if header.Version != 1 && header.Version != teamVersion {
+		return 0, &CorruptStoreError{Path: path, Line: 1, Reason: "unsupported version"}
 	}
 
-	return nil
+	return header.Version, nil
 }
 
 func decodeTeamRecordLines(path string, id ID, lines [][]byte, limits StoreLimits) ([]Record, error) {
@@ -440,7 +625,7 @@ func decodeTeamRecordLine(path string, id ID, line []byte, lineNumber, maxBytes 
 	}
 
 	var record Record
-	if err := json.Unmarshal(line, &record); err != nil {
+	if err := decodeStrictJSON(line, &record); err != nil {
 		return Record{}, &CorruptStoreError{
 			Path: path, Line: lineNumber, Reason: "invalid record", Err: err,
 		}
@@ -496,6 +681,78 @@ func (store *JSONLStore) path(id ID) (string, error) {
 	}
 
 	return filepath.Join(store.dir, string(id)+teamFileExt), nil
+}
+
+func decodeStrictJSON(data []byte, value any) error {
+	return jsonx.Decode(data, value)
+}
+
+func readTeamFile(path string, maximum int64) (_ []byte, returnErr error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := validateTeamFileInfo(path, info); err != nil {
+		return nil, err
+	}
+
+	file, err := os.Open(path) //nolint:gosec // Team ID validation confines the path to the configured directory.
+	if err != nil {
+		return nil, err
+	}
+	defer func() { returnErr = errors.Join(returnErr, file.Close()) }()
+
+	opened, err := file.Stat()
+	if err != nil || !os.SameFile(info, opened) {
+		return nil, &CorruptStoreError{Path: path, Reason: "aggregate changed while opening", Err: err}
+	}
+
+	data, err := io.ReadAll(io.LimitReader(file, maximum+1))
+	if err != nil {
+		return nil, err
+	}
+
+	if int64(len(data)) > maximum {
+		return nil, ErrStoreFull
+	}
+
+	current, err := os.Lstat(path)
+	if err != nil || !os.SameFile(opened, current) {
+		return nil, &CorruptStoreError{Path: path, Reason: "aggregate changed while reading", Err: err}
+	}
+
+	if err := validateTeamFileInfo(path, current); err != nil {
+		return nil, err
+	}
+
+	return data, nil
+}
+
+func syncTeamDirectory(path string) error {
+	directory, err := os.Open(path) //nolint:gosec // Store constructor owns this configured directory.
+	if err != nil {
+		return fmt.Errorf("team: open store directory for sync: %w", err)
+	}
+
+	syncErr := directory.Sync()
+
+	closeErr := directory.Close()
+	if err := errors.Join(syncErr, closeErr); err != nil {
+		return fmt.Errorf("team: sync store directory: %w", err)
+	}
+
+	return nil
+}
+
+func validateTeamFileInfo(path string, info os.FileInfo) error {
+	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+		return &CorruptStoreError{
+			Path: path, Reason: "aggregate must be a private regular file",
+		}
+	}
+
+	return nil
 }
 
 var _ Store = (*JSONLStore)(nil)

@@ -157,14 +157,14 @@ func TestDispatchSelectsIndependentHarnessSession(t *testing.T) {
 
 	leadSession, err := harness.NewSession(harness.NewMemoryStore("session-lead"))
 	require.NoError(t, err)
-	workerSession, err := harness.NewSession(harness.NewMemoryStore(started.Dispatch.SessionRef))
+	workerSession, err := harness.NewSession(harness.NewMemoryStore("session-worker-attempt-1"))
 	require.NoError(t, err)
 	workerHarness, err := harness.New(&harnessTextModel{}, workerSession)
 	require.NoError(t, err)
 	result, err := workerHarness.Prompt(t.Context(), started.Dispatch.Title)
 	require.NoError(t, err)
 
-	assert.Equal(t, "session-worker", workerSession.Metadata().ID)
+	assert.Equal(t, "session-worker-attempt-1", workerSession.Metadata().ID)
 	assert.Equal(t, "independent result", result.Text())
 	assert.Empty(t, leadSession.Entries())
 	assert.Len(t, workerSession.Entries(), 2)

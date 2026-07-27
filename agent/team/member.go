@@ -52,7 +52,6 @@ func (engine *Engine) RegisterMember(
 
 			team.Members = append(team.Members, Member{
 				ID: request.Member.ID, Name: request.Member.Name, Role: request.Member.Role,
-				SessionRef:           request.Member.SessionRef,
 				CapabilityProfileRef: request.Member.CapabilityProfileRef,
 				Status:               MemberStatusActive, RegisteredAt: now,
 			})

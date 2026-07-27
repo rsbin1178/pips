@@ -205,7 +205,7 @@ func (app *terminalApp) printStatus(group team.Team, turns int) error {
 		turns,
 		completed,
 		len(group.Tasks),
-		len(group.Messages),
+		group.NextMessageSequence-1,
 	)
 }
 

@@ -2,6 +2,7 @@ package team
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -64,7 +65,8 @@ func (engine *Engine) SendMessage(
 				return transitionFields{}, err
 			}
 
-			if len(team.Messages) >= team.Limits.MaxMessages {
+			// Limits are resolved as positive bounded values before any Team is stored.
+			if team.NextMessageSequence-1 >= uint64(team.Limits.MaxMessages) { //nolint:gosec // Proven non-negative and bounded by resolveLimits.
 				return transitionFields{}, fmt.Errorf(
 					"%w: message count exceeds %d",
 					ErrTooLarge,
@@ -76,7 +78,8 @@ func (engine *Engine) SendMessage(
 				return transitionFields{}, err
 			}
 
-			if _, _, found := findMember(*team, request.RecipientID); !found {
+			recipient, recipientIndex, found := findMember(*team, request.RecipientID)
+			if !found {
 				return transitionFields{}, ErrNotFound
 			}
 
@@ -86,15 +89,19 @@ func (engine *Engine) SendMessage(
 				}
 			}
 
-			for _, message := range team.Messages {
-				if message.ID == request.MessageID {
-					return transitionFields{}, ErrExists
-				}
+			if _, loadErr := engine.store.LoadMessage(ctx, id, request.MessageID); loadErr == nil {
+				return transitionFields{}, ErrExists
+			} else if !errors.Is(loadErr, ErrNotFound) {
+				return transitionFields{}, loadErr
 			}
 
 			if request.ReplyToID != "" {
-				parent, found := findMessage(*team, request.ReplyToID)
-				if !found || !sameConversation(parent, sender.ID, request.RecipientID) {
+				parent, loadErr := engine.store.LoadMessage(ctx, id, request.ReplyToID)
+				if loadErr != nil || !sameConversation(parent, sender.ID, request.RecipientID) {
+					if loadErr != nil && !errors.Is(loadErr, ErrNotFound) {
+						return transitionFields{}, loadErr
+					}
+
 					return transitionFields{}, fmt.Errorf("%w: invalid message reply target", ErrInvalid)
 				}
 			}
@@ -105,11 +112,13 @@ func (engine *Engine) SendMessage(
 				TaskID: request.TaskID, ReplyToID: request.ReplyToID,
 				Body: cloneJSON(request.Body), SentAt: now,
 			}
-			team.Messages = append(team.Messages, message)
 			team.NextMessageSequence++
+			recipient.MailboxDelivered = message.Sequence
+			team.Members[recipientIndex] = recipient
 
 			return transitionFields{
 				cause: CauseMessageSent, memberID: sender.ID, messageID: request.MessageID,
+				message: &message,
 			}, nil
 		},
 	)
@@ -117,12 +126,11 @@ func (engine *Engine) SendMessage(
 		return MessageSend{}, err
 	}
 
-	message, found := findMessage(record.Team, request.MessageID)
-	if !found {
+	if record.Message == nil || record.Message.ID != request.MessageID {
 		return MessageSend{}, fmt.Errorf("%w: committed message missing", ErrCorruptStore)
 	}
 
-	return MessageSend{Team: cloneTeam(record.Team), Message: cloneMessage(message)}, nil
+	return MessageSend{Team: cloneTeam(record.Team), Message: cloneMessage(*record.Message)}, nil
 }
 
 // Mailbox returns one ordered page of messages for a recipient.
@@ -150,24 +158,23 @@ func (engine *Engine) Mailbox(
 		return MessagePage{}, ErrNotFound
 	}
 
-	page := MessagePage{Messages: make([]Message, 0, options.Limit)}
-	for _, message := range team.Messages {
-		if message.RecipientID != memberID || message.Sequence <= options.AfterSequence {
-			continue
-		}
-
-		if len(page.Messages) == options.Limit {
-			break
-		}
-
-		page.Messages = append(page.Messages, cloneMessage(message))
+	page, err := engine.store.Mailbox(ctx, id, memberID, options)
+	if err != nil {
+		return MessagePage{}, err
 	}
 
-	if len(page.Messages) > 0 {
-		page.NextAfter = page.Messages[len(page.Messages)-1].Sequence
+	// Re-read after the mailbox query so a concurrent delivery cannot make a
+	// valid page appear newer than the snapshot used for member existence.
+	latest, err := engine.Get(ctx, id)
+	if err != nil {
+		return MessagePage{}, err
 	}
 
-	return page, nil
+	if err := validateMessagePage(latest, memberID, page, options); err != nil {
+		return MessagePage{}, err
+	}
+
+	return cloneMessagePage(page), nil
 }
 
 // AcknowledgeMessages advances the member actor's mailbox cursor.
@@ -199,15 +206,7 @@ func (engine *Engine) AcknowledgeMessages(
 				}
 			}
 
-			lastDelivered := uint64(0)
-
-			for _, message := range team.Messages {
-				if message.RecipientID == member.ID {
-					lastDelivered = message.Sequence
-				}
-			}
-
-			if request.ThroughSequence > lastDelivered {
+			if request.ThroughSequence > member.MailboxDelivered {
 				return transitionFields{}, fmt.Errorf(
 					"%w: acknowledgement exceeds last delivered sequence",
 					ErrInvalid,
@@ -227,14 +226,4 @@ func (engine *Engine) AcknowledgeMessages(
 	}
 
 	return cloneTeam(record.Team), nil
-}
-
-func findMessage(team Team, id MessageID) (Message, bool) {
-	for _, message := range team.Messages {
-		if message.ID == id {
-			return message, true
-		}
-	}
-
-	return Message{}, false
 }

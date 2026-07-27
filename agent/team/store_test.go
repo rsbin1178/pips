@@ -62,7 +62,6 @@ func TestJSONLStoreReopensAndHandlesCommitMarkers(t *testing.T) {
 		},
 		Member: MemberSpec{
 			ID: "after-tail", Name: "After Tail", Role: "verify recovery",
-			SessionRef: "session-after-tail",
 		},
 	})
 	require.NoError(t, err)
@@ -80,6 +79,21 @@ func TestJSONLStoreReopensAndHandlesCommitMarkers(t *testing.T) {
 	require.ErrorIs(t, err, ErrCorruptStore)
 }
 
+func TestJSONLStoreRejectsNonPrivateJournal(t *testing.T) {
+	t.Parallel()
+
+	dir := filepath.Join(t.TempDir(), "teams")
+	store, err := NewJSONLStore(dir)
+	require.NoError(t, err)
+	runtime := newTestRuntime(t, store)
+	group := createTestTeam(t, runtime)
+	path := filepath.Join(dir, string(group.ID)+teamFileExt)
+	require.NoError(t, os.Chmod(path, 0o640)) //nolint:gosec // Deliberately verifies rejection of a group-readable journal.
+
+	_, err = store.Load(t.Context(), group.ID)
+	require.ErrorIs(t, err, ErrCorruptStore)
+}
+
 func TestMemoryStoreCASAllowsOneConcurrentCommand(t *testing.T) {
 	t.Parallel()
 
@@ -91,11 +105,11 @@ func TestMemoryStoreCASAllowsOneConcurrentCommand(t *testing.T) {
 	requests := []RegisterMemberRequest{
 		{
 			Command: runtime.coordinator(team.Revision),
-			Member:  MemberSpec{ID: "one", Name: "One", Role: "worker", SessionRef: "one"},
+			Member:  MemberSpec{ID: "one", Name: "One", Role: "worker"},
 		},
 		{
 			Command: runtime.coordinator(team.Revision),
-			Member:  MemberSpec{ID: "two", Name: "Two", Role: "worker", SessionRef: "two"},
+			Member:  MemberSpec{ID: "two", Name: "Two", Role: "worker"},
 		},
 	}
 
@@ -144,9 +158,7 @@ func TestStoreListIsLexicographicAndDefensive(t *testing.T) {
 	for _, id := range []ID{"team-c", "team-a", "team-b"} {
 		_, err = runtime.engine.Create(t.Context(), CreateRequest{
 			Command: runtime.coordinator(0), ID: id, Objective: "objective",
-			Lead: MemberSpec{
-				ID: "lead", Name: "Lead", Role: "lead", SessionRef: "session-" + string(id),
-			},
+			Lead: MemberSpec{ID: "lead", Name: "Lead", Role: "lead"},
 		})
 		require.NoError(t, err)
 	}
@@ -194,7 +206,7 @@ func TestEngineRejectsInvalidCustomStoreRecords(t *testing.T) {
 			ID: "command", ExpectedRevision: team.Revision,
 			Actor: Actor{Kind: ActorKindCoordinator, ID: "coordinator"},
 		},
-		Member: MemberSpec{ID: "worker", Name: "Worker", Role: "work", SessionRef: "session"},
+		Member: MemberSpec{ID: "worker", Name: "Worker", Role: "work"},
 	})
 	require.ErrorIs(t, err, ErrCorruptStore)
 }
@@ -216,7 +228,7 @@ func TestStoreRejectsDuplicateEventID(t *testing.T) {
 			ID: "create", Actor: Actor{Kind: ActorKindCoordinator, ID: "coordinator"},
 		},
 		ID: "team-events", Objective: "objective",
-		Lead: MemberSpec{ID: "lead", Name: "Lead", Role: "lead", SessionRef: "session"},
+		Lead: MemberSpec{ID: "lead", Name: "Lead", Role: "lead"},
 	})
 	require.NoError(t, err)
 
@@ -225,7 +237,7 @@ func TestStoreRejectsDuplicateEventID(t *testing.T) {
 			ID: "register", ExpectedRevision: team.Revision,
 			Actor: Actor{Kind: ActorKindCoordinator, ID: "coordinator"},
 		},
-		Member: MemberSpec{ID: "worker", Name: "Worker", Role: "work", SessionRef: "worker"},
+		Member: MemberSpec{ID: "worker", Name: "Worker", Role: "work"},
 	})
 	require.ErrorIs(t, err, ErrInvalid)
 }

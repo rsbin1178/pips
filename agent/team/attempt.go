@@ -342,8 +342,8 @@ func dispatchFor(team Team, task Task, attempt Attempt) Dispatch {
 	return Dispatch{
 		TeamID: team.ID, TeamRevision: team.Revision, Objective: team.Objective,
 		MemberID: member.ID, MemberName: member.Name, MemberRole: member.Role,
-		SessionRef: member.SessionRef, CapabilityProfileRef: member.CapabilityProfileRef,
-		TaskID: task.ID, AttemptID: attempt.ID, ContinuationID: attempt.ContinuationID,
+		CapabilityProfileRef: member.CapabilityProfileRef,
+		TaskID:               task.ID, AttemptID: attempt.ID, ContinuationID: attempt.ContinuationID,
 		Title: task.Title, Description: task.Description, Payload: cloneJSON(task.Payload),
 		DependencyIDs: slices.Clone(task.DependencyIDs),
 	}

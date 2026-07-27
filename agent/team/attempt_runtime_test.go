@@ -82,9 +82,16 @@ func TestAttemptRuntimeRunsDurableLifecycleInOrder(t *testing.T) {
 	assert.Equal(t, continuation.StatusCompleted, result.Execution.Status)
 	assert.Equal(t, TaskStatusCompleted, result.Team.Tasks[0].Status)
 	assert.Equal(t, uint64(1), result.Team.Members[1].MailboxAcknowledged)
-	require.Len(t, result.Team.Messages, 2)
-	assert.Equal(t, MemberID("worker"), result.Team.Messages[1].SenderID)
-	assert.Equal(t, TaskID("task"), result.Team.Messages[1].TaskID)
+	leadMailbox, err := teamRuntime.engine.Mailbox(
+		t.Context(),
+		team.ID,
+		"lead",
+		MailboxOptions{Limit: 10},
+	)
+	require.NoError(t, err)
+	require.Len(t, leadMailbox.Messages, 1)
+	assert.Equal(t, MemberID("worker"), leadMailbox.Messages[0].SenderID)
+	assert.Equal(t, TaskID("task"), leadMailbox.Messages[0].TaskID)
 
 	history, err := teamRuntime.engine.History(t.Context(), team.ID)
 	require.NoError(t, err)

@@ -33,6 +33,7 @@ type Layout struct {
 	teamAggregatesDir    string
 	teamContinuationsDir string
 	teamResourcesDir     string
+	teamControlDir       string
 	teamLeasesDir        string
 	worktreesRoot        string
 	skillsDir            string
@@ -73,6 +74,7 @@ func New(root string) (Layout, error) {
 		teamAggregatesDir:    filepath.Join(teamsDir, "aggregates"),
 		teamContinuationsDir: filepath.Join(teamsDir, "continuations"),
 		teamResourcesDir:     filepath.Join(teamsDir, "resources"),
+		teamControlDir:       filepath.Join(teamsDir, "control"),
 		teamLeasesDir:        filepath.Join(teamsDir, "leases"),
 		worktreesRoot:        worktreesRoot,
 		skillsDir:            filepath.Join(abs, "skills"),
@@ -190,6 +192,9 @@ func (l Layout) TeamContinuationsDir() string { return l.teamContinuationsDir }
 
 // TeamResourcesDir returns the Team application resource journal directory.
 func (l Layout) TeamResourcesDir() string { return l.teamResourcesDir }
+
+// TeamControlDir returns the operator Team control journal directory.
+func (l Layout) TeamControlDir() string { return l.teamControlDir }
 
 // TeamLeasesDir returns the retained Team lease directory.
 func (l Layout) TeamLeasesDir() string { return l.teamLeasesDir }

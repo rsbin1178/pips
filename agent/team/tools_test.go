@@ -100,11 +100,16 @@ func TestMemberMessageToolBindsSenderAndRequiresCallID(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	loaded, err := runtime.engine.Get(t.Context(), team.ID)
+	mailbox, err := runtime.engine.Mailbox(
+		t.Context(),
+		team.ID,
+		"lead",
+		MailboxOptions{Limit: 10},
+	)
 	require.NoError(t, err)
-	require.Len(t, loaded.Messages, 1)
-	assert.Equal(t, MemberID("worker"), loaded.Messages[0].SenderID)
-	assert.Equal(t, MemberID("lead"), loaded.Messages[0].RecipientID)
+	require.Len(t, mailbox.Messages, 1)
+	assert.Equal(t, MemberID("worker"), mailbox.Messages[0].SenderID)
+	assert.Equal(t, MemberID("lead"), mailbox.Messages[0].RecipientID)
 }
 
 type teamToolModel struct {

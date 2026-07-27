@@ -3,7 +3,7 @@ package jsonx_test
 import (
 	"testing"
 
-	"github.com/rsbin/pips/internal/coding/jsonx"
+	"github.com/rsbin/pips/internal/jsonx"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
