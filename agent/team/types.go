@@ -9,7 +9,7 @@ import (
 	"github.com/rsbin/pips/ai"
 )
 
-const schemaVersion = 1
+const schemaVersion = 2
 
 // ID identifies one durable Team aggregate.
 type ID string
@@ -137,7 +137,6 @@ type MemberSpec struct {
 	ID                   MemberID `json:"id"`
 	Name                 string   `json:"name"`
 	Role                 string   `json:"role"`
-	SessionRef           string   `json:"session_ref"`
 	CapabilityProfileRef string   `json:"capability_profile_ref,omitempty"`
 }
 
@@ -146,9 +145,9 @@ type Member struct {
 	ID                   MemberID     `json:"id"`
 	Name                 string       `json:"name"`
 	Role                 string       `json:"role"`
-	SessionRef           string       `json:"session_ref"`
 	CapabilityProfileRef string       `json:"capability_profile_ref,omitempty"`
 	Status               MemberStatus `json:"status"`
+	MailboxDelivered     uint64       `json:"mailbox_delivered"`
 	MailboxAcknowledged  uint64       `json:"mailbox_acknowledged"`
 	RegisteredAt         time.Time    `json:"registered_at"`
 	DisabledAt           time.Time    `json:"disabled_at,omitzero"`
@@ -207,7 +206,6 @@ type Team struct {
 	LeadMemberID        MemberID   `json:"lead_member_id"`
 	Members             []Member   `json:"members"`
 	Tasks               []Task     `json:"tasks"`
-	Messages            []Message  `json:"messages"`
 	NextMessageSequence uint64     `json:"next_message_sequence"`
 	Limits              Limits     `json:"limits"`
 	Reason              string     `json:"reason,omitempty"`
@@ -263,11 +261,13 @@ type Transition struct {
 	Reason        string    `json:"reason,omitempty"`
 }
 
-// Record is one full post-command Team snapshot.
+// Record is one full post-command coordination snapshot plus an optional
+// immutable message delta.
 type Record struct {
 	SchemaVersion int        `json:"schema_version"`
 	Team          Team       `json:"team"`
 	Transition    Transition `json:"transition"`
+	Message       *Message   `json:"message,omitempty"`
 }
 
 // ListOptions bounds one lexicographically ordered Store page.
@@ -294,6 +294,24 @@ type MessagePage struct {
 	NextAfter uint64
 }
 
+// ChangeOptions selects transitions after an exclusive Team revision.
+type ChangeOptions struct {
+	AfterRevision Revision
+	Limit         int
+}
+
+// Change is one durable Team transition and its optional message delta.
+type Change struct {
+	Transition Transition
+	Message    *Message
+}
+
+// ChangePage is one bounded page of Team changes.
+type ChangePage struct {
+	Changes   []Change
+	NextAfter Revision
+}
+
 // Dispatch is immutable coordinator input for one committed task attempt.
 type Dispatch struct {
 	TeamID               ID
@@ -302,7 +320,6 @@ type Dispatch struct {
 	MemberID             MemberID
 	MemberName           string
 	MemberRole           string
-	SessionRef           string
 	CapabilityProfileRef string
 	TaskID               TaskID
 	AttemptID            AttemptID

@@ -83,7 +83,7 @@ func TestRunCompletesTeamAgainstChatCompletionsEndpoint(t *testing.T) {
 	}
 }
 
-func TestRunTerminalKeepsMemberSessionsAcrossTurns(t *testing.T) {
+func TestRunTerminalUsesIndependentAttemptSessions(t *testing.T) {
 	t.Parallel()
 
 	responses := []string{
@@ -119,9 +119,9 @@ func TestRunTerminalKeepsMemberSessionsAcrossTurns(t *testing.T) {
 	firstResearchMessages := requestMessages(t, requests[0])
 
 	secondResearchMessages := requestMessages(t, requests[3])
-	if len(secondResearchMessages) <= len(firstResearchMessages) {
+	if len(secondResearchMessages) != len(firstResearchMessages) {
 		t.Errorf(
-			"second researcher context has %d messages, want more than first turn's %d",
+			"second researcher context has %d messages, want independent baseline %d",
 			len(secondResearchMessages),
 			len(firstResearchMessages),
 		)

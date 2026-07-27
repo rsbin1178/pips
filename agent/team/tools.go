@@ -17,7 +17,6 @@ import (
 type ToolCommandContext struct {
 	TeamID     ID       `json:"team_id"`
 	MemberID   MemberID `json:"member_id"`
-	SessionRef string   `json:"session_ref"`
 	ToolName   string   `json:"tool_name"`
 	ToolCallID string   `json:"tool_call_id"`
 }
@@ -80,11 +79,10 @@ func (toolset *Toolset) Tools() []agent.Tool {
 }
 
 type toolBinding struct {
-	engine     *Engine
-	teamID     ID
-	memberID   MemberID
-	sessionRef string
-	commands   ToolCommandIDSource
+	engine   *Engine
+	teamID   ID
+	memberID MemberID
+	commands ToolCommandIDSource
 }
 
 func newToolset(
@@ -134,7 +132,7 @@ func newToolset(
 
 	binding := &toolBinding{
 		engine: engine, teamID: teamID, memberID: memberID,
-		sessionRef: member.SessionRef, commands: config.commands,
+		commands: config.commands,
 	}
 
 	tools := binding.memberTools()
@@ -160,7 +158,7 @@ func (binding *toolBinding) metadata(
 
 	commandID, err := binding.commands(ToolCommandContext{
 		TeamID: binding.teamID, MemberID: binding.memberID,
-		SessionRef: binding.sessionRef, ToolName: call.Name, ToolCallID: call.ID,
+		ToolName: call.Name, ToolCallID: call.ID,
 	})
 	if err != nil {
 		return CommandMetadata{}, fmt.Errorf("team: derive tool command ID: %w", err)

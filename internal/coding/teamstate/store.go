@@ -20,7 +20,7 @@ import (
 	"time"
 
 	"github.com/rsbin/pips/agent/team"
-	"github.com/rsbin/pips/internal/coding/jsonx"
+	"github.com/rsbin/pips/internal/jsonx"
 )
 
 const (

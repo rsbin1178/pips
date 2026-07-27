@@ -18,7 +18,6 @@ func ExampleEngine() {
 		ID:      "release-team", Objective: "prepare the release",
 		Lead: team.MemberSpec{
 			ID: "lead", Name: "Lead", Role: "coordinate",
-			SessionRef: "session-lead",
 		},
 	})
 	group, _ = runtime.RegisterMember(ctx, group.ID, team.RegisterMemberRequest{
@@ -27,7 +26,6 @@ func ExampleEngine() {
 		},
 		Member: team.MemberSpec{
 			ID: "reviewer", Name: "Reviewer", Role: "review",
-			SessionRef: "session-reviewer",
 		},
 	})
 	group, _ = runtime.CreateTask(ctx, group.ID, team.CreateTaskRequest{
@@ -51,9 +49,9 @@ func ExampleEngine() {
 		TaskID: "review", AttemptID: "review-1", ContinuationID: "review-execution-1",
 	})
 
-	fmt.Println(started.Dispatch.MemberID, started.Dispatch.SessionRef)
+	fmt.Println(started.Dispatch.MemberID)
 	fmt.Println(started.Dispatch.TaskID, started.Dispatch.ContinuationID)
 	// Output:
-	// reviewer session-reviewer
+	// reviewer
 	// review review-execution-1
 }

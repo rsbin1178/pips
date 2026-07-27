@@ -153,11 +153,10 @@ func (engine *Engine) Create(ctx context.Context, request CreateRequest) (Team, 
 		LeadMemberID:  request.Lead.ID,
 		Members: []Member{{
 			ID: request.Lead.ID, Name: request.Lead.Name, Role: request.Lead.Role,
-			SessionRef:           request.Lead.SessionRef,
 			CapabilityProfileRef: request.Lead.CapabilityProfileRef,
 			Status:               MemberStatusActive, RegisteredAt: now,
 		}},
-		Tasks: make([]Task, 0), Messages: make([]Message, 0),
+		Tasks:               make([]Task, 0),
 		NextMessageSequence: 1, Limits: limits, CreatedAt: now, UpdatedAt: now,
 	}
 
@@ -238,6 +237,33 @@ func (engine *Engine) History(ctx context.Context, id ID) ([]Record, error) {
 	return cloneRecords(records), nil
 }
 
+// Changes returns a bounded page after an exclusive Team revision.
+func (engine *Engine) Changes(
+	ctx context.Context,
+	id ID,
+	options ChangeOptions,
+) (ChangePage, error) {
+	if err := validateSafeID("Team id", string(id)); err != nil {
+		return ChangePage{}, err
+	}
+
+	options, err := validateChangeOptions(options)
+	if err != nil {
+		return ChangePage{}, err
+	}
+
+	page, err := engine.store.Changes(ctx, id, options)
+	if err != nil {
+		return ChangePage{}, err
+	}
+
+	if err := validateChangePage(id, page, options); err != nil {
+		return ChangePage{}, err
+	}
+
+	return cloneChangePage(page), nil
+}
+
 type transitionFields struct {
 	cause     Cause
 	taskID    TaskID
@@ -245,6 +271,7 @@ type transitionFields struct {
 	attemptID AttemptID
 	messageID MessageID
 	reason    string
+	message   *Message
 }
 
 type mutation func(*Team, time.Time) (transitionFields, error)
@@ -313,6 +340,7 @@ func (engine *Engine) apply(
 			AttemptID: fields.attemptID, MessageID: fields.messageID,
 			From: current.Team.Status, To: nextTeam.Status, Reason: fields.reason,
 		},
+		Message: fields.message,
 	}
 
 	if err := engine.store.CompareAndSwap(ctx, id, command.ExpectedRevision, next); err != nil {

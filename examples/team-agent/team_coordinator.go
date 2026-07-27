@@ -33,7 +33,6 @@ type teamCoordinator struct {
 	output           io.Writer
 	stream           io.Writer
 	coordinatorActor team.Actor
-	sessions         map[team.MemberID]*harness.Session
 }
 
 type memberWorkInput struct {
@@ -115,15 +114,11 @@ func (coordinator *teamCoordinator) Run(ctx context.Context) error {
 	return coordinator.printSummary(ctx, group, result.Answer)
 }
 
-// Start 创建一个可承载多轮终端会话的 Team，成员 Session 会在后续轮次复用。
+// Start 创建一个可承载多轮终端会话的 Team。每次 Attempt 使用新的 Session。
 func (coordinator *teamCoordinator) Start(ctx context.Context) (team.Team, error) {
 	group, err := coordinator.createTeam(ctx)
 	if err != nil {
 		return team.Team{}, err
-	}
-
-	if coordinator.sessions == nil {
-		coordinator.sessions = make(map[team.MemberID]*harness.Session)
 	}
 
 	if err := coordinator.printf(
@@ -204,10 +199,9 @@ func (coordinator *teamCoordinator) createTeam(ctx context.Context) (team.Team, 
 		Objective: "Answer terminal requests through research, drafting, and Lead review " +
 			"without inventing unsupported claims.",
 		Lead: team.MemberSpec{
-			ID:         "lead",
-			Name:       "Conversation Lead",
-			Role:       "Coordinate work and approve each final answer.",
-			SessionRef: "session-terminal-lead",
+			ID:   "lead",
+			Name: "Conversation Lead",
+			Role: "Coordinate work and approve each final answer.",
 		},
 	})
 	if err != nil {
@@ -216,16 +210,14 @@ func (coordinator *teamCoordinator) createTeam(ctx context.Context) (team.Team, 
 
 	members := []team.MemberSpec{
 		{
-			ID:         "researcher",
-			Name:       "Conversation Researcher",
-			Role:       "Analyze requests, collect relevant facts, and identify uncertainty.",
-			SessionRef: "session-terminal-researcher",
+			ID:   "researcher",
+			Name: "Conversation Researcher",
+			Role: "Analyze requests, collect relevant facts, and identify uncertainty.",
 		},
 		{
-			ID:         "writer",
-			Name:       "Conversation Writer",
-			Role:       "Turn research evidence into a direct answer for the user.",
-			SessionRef: "session-terminal-writer",
+			ID:   "writer",
+			Name: "Conversation Writer",
+			Role: "Turn research evidence into a direct answer for the user.",
 		},
 	}
 
@@ -364,9 +356,8 @@ func (coordinator *teamCoordinator) newMemberWorker(dispatch team.Dispatch) (con
 		return nil, err
 	}
 
-	// 每个成员使用自己的 SessionRef，成员之间不共享模型上下文，只通过 Team mailbox 协作。
-	// 同一成员的 Session 会跨终端轮次复用，因此后续问题能延续该成员自己的上下文。
-	session, err := coordinator.memberSession(dispatch.MemberID, dispatch.SessionRef)
+	// Member 是逻辑身份；每个 Attempt 使用独立 Session，只通过 Team mailbox 协作。
+	session, err := newAttemptSession(dispatch.MemberID, dispatch.AttemptID)
 	if err != nil {
 		return nil, err
 	}
@@ -462,7 +453,7 @@ func (coordinator *teamCoordinator) synthesizeAsLead(
 	request string,
 	tasks turnTaskIDs,
 ) (string, team.Team, error) {
-	// Lead 也是一个拥有独立 Session 的 Agent。这里读取 writer 的 mailbox 消息并生成最终稿。
+	// Lead 也是一个逻辑 Member。这里为本轮生成独立 Session，并读取 writer 的 mailbox。
 	group, err := coordinator.teams.Get(ctx, teamID)
 	if err != nil {
 		return "", team.Team{}, err
@@ -485,7 +476,7 @@ func (coordinator *teamCoordinator) synthesizeAsLead(
 		return "", team.Team{}, err
 	}
 
-	session, err := coordinator.memberSession("lead", "session-terminal-lead")
+	session, err := newAttemptSession("lead", team.AttemptID("lead-"+string(tasks.Draft)))
 	if err != nil {
 		return "", team.Team{}, err
 	}
@@ -539,9 +530,9 @@ func (coordinator *teamCoordinator) synthesizeAsLead(
 }
 
 func (coordinator *teamCoordinator) printSummary(ctx context.Context, group team.Team, briefing string) error {
-	history, err := coordinator.teams.History(ctx, group.ID)
+	changes, err := coordinator.teams.Changes(ctx, group.ID, team.ChangeOptions{Limit: 1_000})
 	if err != nil {
-		return fmt.Errorf("load Team history: %w", err)
+		return fmt.Errorf("load Team changes: %w", err)
 	}
 
 	if err := coordinator.printf("\nTeam status: %s (revision %d)\n", group.Status, group.Revision); err != nil {
@@ -561,8 +552,8 @@ func (coordinator *teamCoordinator) printSummary(ctx context.Context, group team
 
 	if err := coordinator.printf(
 		"Messages: %d; durable transitions: %d\n",
-		len(group.Messages),
-		len(history),
+		group.NextMessageSequence-1,
+		len(changes.Changes),
 	); err != nil {
 		return err
 	}
@@ -594,22 +585,13 @@ func memberCommand(id string, revision team.Revision, memberID team.MemberID) te
 	}
 }
 
-func (coordinator *teamCoordinator) memberSession(
+func newAttemptSession(
 	memberID team.MemberID,
-	sessionRef string,
+	attemptID team.AttemptID,
 ) (*harness.Session, error) {
-	if session, ok := coordinator.sessions[memberID]; ok {
-		return session, nil
-	}
-
-	session, err := harness.NewSession(harness.NewMemoryStore(sessionRef))
-	if err != nil {
-		return nil, err
-	}
-
-	coordinator.sessions[memberID] = session
-
-	return session, nil
+	return harness.NewSession(harness.NewMemoryStore(
+		"session-" + string(memberID) + "-" + string(attemptID),
+	))
 }
 
 func memberMailboxCursor(group team.Team, memberID team.MemberID) uint64 {

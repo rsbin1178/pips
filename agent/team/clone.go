@@ -41,11 +41,6 @@ func cloneTeam(in Team) Team {
 		out.Tasks[i] = cloneTask(in.Tasks[i])
 	}
 
-	out.Messages = make([]Message, len(in.Messages))
-	for i := range in.Messages {
-		out.Messages[i] = cloneMessage(in.Messages[i])
-	}
-
 	out.Output = cloneJSON(in.Output)
 	out.Artifacts = cloneArtifacts(in.Artifacts)
 
@@ -54,7 +49,34 @@ func cloneTeam(in Team) Team {
 
 func cloneRecord(in Record) Record {
 	out := in
+
 	out.Team = cloneTeam(in.Team)
+	if in.Message != nil {
+		message := cloneMessage(*in.Message)
+		out.Message = &message
+	}
+
+	return out
+}
+
+func cloneChange(in Change) Change {
+	out := in
+	if in.Message != nil {
+		message := cloneMessage(*in.Message)
+		out.Message = &message
+	}
+
+	return out
+}
+
+func cloneChangePage(in ChangePage) ChangePage {
+	out := ChangePage{
+		Changes:   make([]Change, len(in.Changes)),
+		NextAfter: in.NextAfter,
+	}
+	for index := range in.Changes {
+		out.Changes[index] = cloneChange(in.Changes[index])
+	}
 
 	return out
 }

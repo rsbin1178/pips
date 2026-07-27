@@ -14,7 +14,6 @@ import (
 	"strings"
 
 	"github.com/rsbin/pips/agent/continuation"
-	"github.com/rsbin/pips/agent/harness"
 	"github.com/rsbin/pips/agent/team"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/ai/openai"
@@ -114,7 +113,6 @@ func newTeamCoordinator(config modelConfig, progress, stream io.Writer) (*teamCo
 			Kind: team.ActorKindCoordinator,
 			ID:   "team-agent-example",
 		},
-		sessions: make(map[team.MemberID]*harness.Session),
 	}
 	attempts, err := team.NewAttemptRuntime(
 		teamEngine,

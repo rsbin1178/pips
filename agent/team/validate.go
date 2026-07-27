@@ -26,6 +26,8 @@ const (
 	maxMediaTypeBytes    = 256
 	defaultMailboxPage   = 100
 	maxMailboxPage       = 1_000
+	defaultChangePage    = 100
+	maxChangePage        = 1_000
 )
 
 var safeIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
@@ -111,10 +113,6 @@ func validateMemberSpec(spec MemberSpec) error {
 	}
 
 	if err := validateText("member role", spec.Role, maxRoleBytes, true); err != nil {
-		return err
-	}
-
-	if err := validateText("session reference", spec.SessionRef, maxReferenceBytes, true); err != nil {
 		return err
 	}
 
@@ -208,12 +206,12 @@ func validateTeam(team Team) error {
 		return err
 	}
 
-	tasks, err := validateTasks(team, members)
+	_, err = validateTasks(team, members)
 	if err != nil {
 		return err
 	}
 
-	if err := validateMessages(team, members, tasks); err != nil {
+	if err := validateMailboxState(team); err != nil {
 		return err
 	}
 
@@ -232,7 +230,7 @@ func validateMembers(team Team) (map[MemberID]Member, error) {
 	for _, member := range team.Members {
 		spec := MemberSpec{
 			ID: member.ID, Name: member.Name, Role: member.Role,
-			SessionRef: member.SessionRef, CapabilityProfileRef: member.CapabilityProfileRef,
+			CapabilityProfileRef: member.CapabilityProfileRef,
 		}
 		if err := validateMemberSpec(spec); err != nil {
 			return nil, err
@@ -542,67 +540,15 @@ func validateDependencyGraph(tasks map[TaskID]Task) error {
 	return nil
 }
 
-//nolint:gocyclo // Mailbox replay validation keeps ordering and reference checks atomic.
-func validateMessages(team Team, members map[MemberID]Member, tasks map[TaskID]Task) error {
-	if len(team.Messages) > team.Limits.MaxMessages {
-		return fmt.Errorf("%w: message count exceeds %d", ErrTooLarge, team.Limits.MaxMessages)
-	}
-
-	if team.NextMessageSequence != uint64(len(team.Messages))+1 {
+func validateMailboxState(team Team) error {
+	if team.NextMessageSequence < 1 ||
+		team.NextMessageSequence > uint64(team.Limits.MaxMessages)+1 { //nolint:gosec // resolveLimits proves this positive bounded conversion.
 		return fmt.Errorf("%w: invalid next message sequence", ErrInvalid)
 	}
 
-	messages := make(map[MessageID]Message, len(team.Messages))
-	lastDelivered := make(map[MemberID]uint64, len(members))
-
-	for i, message := range team.Messages {
-		if err := validateSafeID("message id", string(message.ID)); err != nil {
-			return err
-		}
-
-		if _, exists := messages[message.ID]; exists {
-			return fmt.Errorf("%w: duplicate message id %q", ErrInvalid, message.ID)
-		}
-
-		if message.Sequence != uint64(i)+1 || message.SentAt.IsZero() {
-			return fmt.Errorf("%w: invalid message sequence or time", ErrInvalid)
-		}
-
-		if _, exists := members[message.SenderID]; !exists {
-			return fmt.Errorf("%w: message sender does not exist", ErrInvalid)
-		}
-
-		if _, exists := members[message.RecipientID]; !exists {
-			return fmt.Errorf("%w: message recipient does not exist", ErrInvalid)
-		}
-
-		if message.TaskID != "" {
-			if _, exists := tasks[message.TaskID]; !exists {
-				return fmt.Errorf("%w: message task does not exist", ErrInvalid)
-			}
-		}
-
-		if message.ReplyToID != "" {
-			parent, exists := messages[message.ReplyToID]
-			if !exists || !sameConversation(parent, message.SenderID, message.RecipientID) {
-				return fmt.Errorf("%w: invalid message reply target", ErrInvalid)
-			}
-		}
-
-		if message.Body == nil {
-			return fmt.Errorf("%w: message body is nil", ErrInvalid)
-		}
-
-		if err := validateJSON("message body", message.Body, team.Limits.MaxJSONBytes); err != nil {
-			return err
-		}
-
-		messages[message.ID] = message
-		lastDelivered[message.RecipientID] = message.Sequence
-	}
-
 	for _, member := range team.Members {
-		if member.MailboxAcknowledged > lastDelivered[member.ID] {
+		if member.MailboxAcknowledged > member.MailboxDelivered ||
+			member.MailboxDelivered >= team.NextMessageSequence {
 			return fmt.Errorf("%w: mailbox acknowledgement exceeds delivery", ErrInvalid)
 		}
 	}
@@ -634,6 +580,10 @@ func validateTeamLifecycle(team Team) error {
 func validateRecord(record Record) error {
 	if record.SchemaVersion != schemaVersion || record.Transition.SchemaVersion != schemaVersion {
 		return fmt.Errorf("%w: unsupported record schema version", ErrInvalid)
+	}
+
+	if err := validateStoredTransition(record.Transition); err != nil {
+		return err
 	}
 
 	if err := validateTeam(record.Team); err != nil {
@@ -675,7 +625,64 @@ func validateRecord(record Record) error {
 		return err
 	}
 
-	return validateTransitionReferences(record.Team, transition)
+	if err := validateRecordMessage(record); err != nil {
+		return err
+	}
+
+	return validateTransitionReferences(record.Team, transition, record.Message)
+}
+
+//nolint:gocyclo // Message records deliberately verify every atomic transition field.
+func validateRecordMessage(record Record) error {
+	if record.Transition.Cause != CauseMessageSent {
+		if record.Message != nil {
+			return fmt.Errorf("%w: non-message transition carries message delta", ErrInvalid)
+		}
+
+		return nil
+	}
+
+	if record.Message == nil {
+		return fmt.Errorf("%w: message transition lacks message delta", ErrInvalid)
+	}
+
+	message := *record.Message
+	if err := validateSafeID("message id", string(message.ID)); err != nil {
+		return err
+	}
+
+	if message.ID != record.Transition.MessageID ||
+		message.SenderID != record.Transition.MemberID ||
+		message.SentAt != record.Transition.At ||
+		message.Sequence+1 != record.Team.NextMessageSequence {
+		return fmt.Errorf("%w: message delta does not match transition", ErrInvalid)
+	}
+
+	members := make(map[MemberID]bool, len(record.Team.Members))
+	for _, member := range record.Team.Members {
+		members[member.ID] = true
+	}
+
+	if !members[message.SenderID] || !members[message.RecipientID] {
+		return fmt.Errorf("%w: message member does not exist", ErrInvalid)
+	}
+
+	recipient, _, _ := findMember(record.Team, message.RecipientID)
+	if recipient.MailboxDelivered != message.Sequence {
+		return fmt.Errorf("%w: message delivery cursor mismatch", ErrInvalid)
+	}
+
+	if message.TaskID != "" {
+		if _, _, found := findTask(record.Team, message.TaskID); !found {
+			return fmt.Errorf("%w: message task does not exist", ErrInvalid)
+		}
+	}
+
+	if message.Body == nil {
+		return fmt.Errorf("%w: message body is nil", ErrInvalid)
+	}
+
+	return validateJSON("message body", message.Body, record.Team.Limits.MaxJSONBytes)
 }
 
 func validateCreateRecord(record Record) error {
@@ -707,6 +714,67 @@ func validateNextRecord(previous Record, expected Revision, next Record) error {
 		return fmt.Errorf("%w: record does not continue revision %d", ErrInvalid, expected)
 	}
 
+	if err := validateMailboxTransition(previous.Team, next); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+//nolint:gocyclo // Cross-revision cursor checks intentionally keep delivery and acknowledgement atomic.
+func validateMailboxTransition(previous Team, next Record) error {
+	expectedSequence := previous.NextMessageSequence
+	if next.Message != nil {
+		expectedSequence++
+	}
+
+	if next.Team.NextMessageSequence != expectedSequence {
+		return fmt.Errorf("%w: message sequence changed without one message delta", ErrInvalid)
+	}
+
+	previousMembers := make(map[MemberID]Member, len(previous.Members))
+	for _, member := range previous.Members {
+		previousMembers[member.ID] = member
+	}
+
+	seen := make(map[MemberID]bool, len(next.Team.Members))
+	for _, member := range next.Team.Members {
+		seen[member.ID] = true
+
+		before, existed := previousMembers[member.ID]
+		if !existed {
+			if member.MailboxDelivered != 0 || member.MailboxAcknowledged != 0 {
+				return fmt.Errorf("%w: new member has mailbox state", ErrInvalid)
+			}
+
+			continue
+		}
+
+		expectedDelivered := before.MailboxDelivered
+		if next.Message != nil && next.Message.RecipientID == member.ID {
+			expectedDelivered = next.Message.Sequence
+		}
+
+		if member.MailboxDelivered != expectedDelivered {
+			return fmt.Errorf("%w: mailbox delivery cursor changed without matching message", ErrInvalid)
+		}
+
+		if next.Transition.Cause == CauseMessagesAcknowledged &&
+			next.Transition.MemberID == member.ID {
+			if member.MailboxAcknowledged < before.MailboxAcknowledged {
+				return fmt.Errorf("%w: mailbox acknowledgement decreased", ErrInvalid)
+			}
+		} else if member.MailboxAcknowledged != before.MailboxAcknowledged {
+			return fmt.Errorf("%w: mailbox acknowledgement changed without matching transition", ErrInvalid)
+		}
+	}
+
+	for id := range previousMembers {
+		if !seen[id] {
+			return fmt.Errorf("%w: member mailbox state disappeared", ErrInvalid)
+		}
+	}
+
 	return nil
 }
 
@@ -732,6 +800,22 @@ func validateMailboxOptions(options MailboxOptions) (MailboxOptions, error) {
 			"%w: mailbox limit must be between 1 and %d",
 			ErrInvalid,
 			maxMailboxPage,
+		)
+	}
+
+	return options, nil
+}
+
+func validateChangeOptions(options ChangeOptions) (ChangeOptions, error) {
+	if options.Limit == 0 {
+		options.Limit = defaultChangePage
+	}
+
+	if options.Limit < 1 || options.Limit > maxChangePage {
+		return ChangeOptions{}, fmt.Errorf(
+			"%w: change limit must be between 1 and %d",
+			ErrInvalid,
+			maxChangePage,
 		)
 	}
 
@@ -784,7 +868,7 @@ func validCause(cause Cause) bool {
 }
 
 //nolint:gocyclo // Audit reference validation checks every optional identity class together.
-func validateTransitionReferences(team Team, transition Transition) error {
+func validateTransitionReferences(team Team, transition Transition, message *Message) error {
 	members := make(map[MemberID]bool, len(team.Members))
 	for _, member := range team.Members {
 		members[member.ID] = true
@@ -798,11 +882,6 @@ func validateTransitionReferences(team Team, transition Transition) error {
 		for _, attempt := range task.Attempts {
 			attempts[attempt.ID] = true
 		}
-	}
-
-	messages := make(map[MessageID]bool, len(team.Messages))
-	for _, message := range team.Messages {
-		messages[message.ID] = true
 	}
 
 	if transition.Actor.Kind == ActorKindMember && !members[MemberID(transition.Actor.ID)] {
@@ -823,7 +902,7 @@ func validateTransitionReferences(team Team, transition Transition) error {
 		return fmt.Errorf("%w: transition attempt does not exist", ErrInvalid)
 	}
 
-	if transition.MessageID != "" && !messages[transition.MessageID] {
+	if transition.MessageID != "" && (message == nil || message.ID != transition.MessageID) {
 		return fmt.Errorf("%w: transition message does not exist", ErrInvalid)
 	}
 
@@ -835,7 +914,7 @@ func validateTransitionReferences(team Team, transition Transition) error {
 		return err
 	}
 
-	return validateCauseState(team, tasks, messages, transition)
+	return validateCauseState(team, tasks, message, transition)
 }
 
 func validateCauseReferences(transition Transition) error {
@@ -924,7 +1003,7 @@ func validateTransitionAuthority(team Team, transition Transition) error {
 func validateCauseState(
 	team Team,
 	tasks map[TaskID]Task,
-	messages map[MessageID]bool,
+	message *Message,
 	transition Transition,
 ) error {
 	task := tasks[transition.TaskID]
@@ -970,11 +1049,10 @@ func validateCauseState(
 			return fmt.Errorf("%w: cancellation transition state mismatch", ErrInvalid)
 		}
 	case CauseMessageSent:
-		if !messages[transition.MessageID] {
+		if message == nil || message.ID != transition.MessageID {
 			return fmt.Errorf("%w: message transition state mismatch", ErrInvalid)
 		}
 
-		message, _ := findMessage(team, transition.MessageID)
 		if message.SenderID != transition.MemberID {
 			return fmt.Errorf("%w: message transition sender mismatch", ErrInvalid)
 		}
