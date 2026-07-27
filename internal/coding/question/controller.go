@@ -15,7 +15,7 @@ import (
 	"github.com/rsbin/pips/agent"
 	"github.com/rsbin/pips/agent/catalog"
 	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/internal/coding/jsonx"
+	"github.com/rsbin/pips/internal/jsonx"
 )
 
 const (

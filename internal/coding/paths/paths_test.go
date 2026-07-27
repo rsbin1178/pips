@@ -27,6 +27,7 @@ func TestNew(t *testing.T) {
 	assert.Equal(t, filepath.Join(base, "teams", "aggregates"), layout.TeamAggregatesDir())
 	assert.Equal(t, filepath.Join(base, "teams", "continuations"), layout.TeamContinuationsDir())
 	assert.Equal(t, filepath.Join(base, "teams", "resources"), layout.TeamResourcesDir())
+	assert.Equal(t, filepath.Join(base, "teams", "control"), layout.TeamControlDir())
 	assert.Equal(t, filepath.Join(base, "teams", "leases"), layout.TeamLeasesDir())
 	assert.Equal(t, base+"-worktrees", layout.WorktreesRoot())
 	assert.Equal(t, filepath.Join(base, "skills"), layout.SkillsDir())

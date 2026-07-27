@@ -21,6 +21,9 @@ type Store interface {
 	LoadCommand(context.Context, ID, CommandID) (Record, error)
 	List(context.Context, ListOptions) (ListPage, error)
 	History(context.Context, ID) ([]Record, error)
+	Changes(context.Context, ID, ChangeOptions) (ChangePage, error)
+	LoadMessage(context.Context, ID, MessageID) (Message, error)
+	Mailbox(context.Context, ID, MemberID, MailboxOptions) (MessagePage, error)
 }
 
 // StoreLimits bound local Team store resource use.

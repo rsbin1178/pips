@@ -121,7 +121,7 @@ group, _ := runtime.Create(ctx, team.CreateRequest{
     ID:        "demo-team",
     Objective: "完成一次协作任务",
     Lead: team.MemberSpec{
-        ID: "lead", Name: "Lead", Role: "协调任务", SessionRef: "session-lead",
+        ID: "lead", Name: "Lead", Role: "协调任务",
     },
 })
 

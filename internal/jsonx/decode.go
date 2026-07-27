@@ -1,5 +1,4 @@
-// Package jsonx provides strict JSON decoding for Coding application stores
-// and protocols.
+// Package jsonx provides strict JSON decoding for internal stores and protocols.
 package jsonx
 
 import (
@@ -12,9 +11,9 @@ import (
 
 var (
 	// ErrDuplicateKey means an object declares the same key more than once.
-	ErrDuplicateKey = errors.New("coding json: duplicate object key")
+	ErrDuplicateKey = errors.New("json: duplicate object key")
 	// ErrMultipleValues means input contains more than one top-level value.
-	ErrMultipleValues = errors.New("coding json: multiple values")
+	ErrMultipleValues = errors.New("json: multiple values")
 )
 
 // Decode decodes exactly one JSON value, rejects duplicate keys at every
@@ -84,7 +83,7 @@ func scanValue(decoder *json.Decoder) error {
 
 			key, keyOK := keyToken.(string)
 			if !keyOK {
-				return errors.New("coding json: object key is not a string")
+				return errors.New("json: object key is not a string")
 			}
 
 			if _, duplicate := seen[key]; duplicate {
@@ -104,7 +103,7 @@ func scanValue(decoder *json.Decoder) error {
 			}
 		}
 	default:
-		return errors.New("coding json: unexpected closing delimiter")
+		return errors.New("json: unexpected closing delimiter")
 	}
 
 	closing, err := decoder.Token()
@@ -118,7 +117,7 @@ func scanValue(decoder *json.Decoder) error {
 	}
 
 	if closing != expected {
-		return errors.New("coding json: mismatched delimiter")
+		return errors.New("json: mismatched delimiter")
 	}
 
 	return nil

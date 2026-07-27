@@ -71,7 +71,6 @@ func createTestTeam(t *testing.T, runtime *testRuntime) Team {
 		Command: runtime.coordinator(0), ID: "team-1", Objective: "Ship a reliable change",
 		Lead: MemberSpec{
 			ID: "lead", Name: "Lead", Role: "coordinate and implement",
-			SessionRef: "session-lead",
 		},
 	})
 	require.NoError(t, err)
@@ -86,7 +85,6 @@ func registerWorker(t *testing.T, runtime *testRuntime, team Team) Team {
 		Command: runtime.coordinator(team.Revision),
 		Member: MemberSpec{
 			ID: "worker", Name: "Worker", Role: "implement",
-			SessionRef: "session-worker",
 		},
 	})
 	require.NoError(t, err)
@@ -103,7 +101,7 @@ func TestCreateIsIdempotentAndRejectsCommandReuse(t *testing.T) {
 
 	request := CreateRequest{
 		Command: runtime.coordinator(0), ID: "team-idempotent", Objective: "objective",
-		Lead: MemberSpec{ID: "lead", Name: "Lead", Role: "lead", SessionRef: "session"},
+		Lead: MemberSpec{ID: "lead", Name: "Lead", Role: "lead"},
 	}
 	created, err := runtime.engine.Create(t.Context(), request)
 	require.NoError(t, err)
@@ -269,6 +267,80 @@ func TestMailboxOrderingAcknowledgementAndScopedSender(t *testing.T) {
 	require.ErrorIs(t, err, ErrUnauthorized)
 }
 
+func TestMessageReplayConflictAndConcurrentSequence(t *testing.T) {
+	t.Parallel()
+
+	runtime := newMemoryTestRuntime(t)
+	group := registerWorker(t, runtime, createTestTeam(t, runtime))
+	request := SendMessageRequest{
+		Command: runtime.member("lead", group.Revision), MessageID: "message-replay",
+		RecipientID: "worker", Body: ai.JSON(`{"text":"stable"}`),
+	}
+	sent, err := runtime.engine.SendMessage(t.Context(), group.ID, request)
+	require.NoError(t, err)
+	replayed, err := runtime.engine.SendMessage(t.Context(), group.ID, request)
+	require.NoError(t, err)
+	assert.Equal(t, sent, replayed)
+
+	request.Body = ai.JSON(`{"text":"changed"}`)
+	_, err = runtime.engine.SendMessage(t.Context(), group.ID, request)
+	require.ErrorIs(t, err, ErrCommandConflict)
+
+	requests := []SendMessageRequest{
+		{
+			Command: CommandMetadata{
+				ID: "concurrent-message-a", ExpectedRevision: sent.Team.Revision,
+				Actor: Actor{Kind: ActorKindMember, ID: "lead"},
+			},
+			MessageID: "message-a", RecipientID: "worker", Body: ai.JSON(`{"text":"a"}`),
+		},
+		{
+			Command: CommandMetadata{
+				ID: "concurrent-message-b", ExpectedRevision: sent.Team.Revision,
+				Actor: Actor{Kind: ActorKindMember, ID: "lead"},
+			},
+			MessageID: "message-b", RecipientID: "worker", Body: ai.JSON(`{"text":"b"}`),
+		},
+	}
+	errorsByRequest := make([]error, len(requests))
+
+	var wait sync.WaitGroup
+	wait.Add(len(requests))
+
+	for index := range requests {
+		go func() {
+			defer wait.Done()
+
+			_, errorsByRequest[index] = runtime.engine.SendMessage(t.Context(), group.ID, requests[index])
+		}()
+	}
+
+	wait.Wait()
+
+	successes := 0
+	conflicts := 0
+
+	for _, sendErr := range errorsByRequest {
+		switch {
+		case sendErr == nil:
+			successes++
+		case errors.Is(sendErr, ErrConflict):
+			conflicts++
+		default:
+			require.NoError(t, sendErr)
+		}
+	}
+
+	assert.Equal(t, 1, successes)
+	assert.Equal(t, 1, conflicts)
+
+	mailbox, err := runtime.engine.Mailbox(t.Context(), group.ID, "worker", MailboxOptions{})
+	require.NoError(t, err)
+	require.Len(t, mailbox.Messages, 2)
+	assert.Equal(t, uint64(1), mailbox.Messages[0].Sequence)
+	assert.Equal(t, uint64(2), mailbox.Messages[1].Sequence)
+}
+
 type executionReaderFunc func(context.Context, continuation.ID) (continuation.Execution, error)
 
 func (function executionReaderFunc) Get(
@@ -338,7 +410,6 @@ func TestConcurrentTaskClaimHasOneWinner(t *testing.T) {
 		Command: runtime.coordinator(team.Revision),
 		Member: MemberSpec{
 			ID: "worker-2", Name: "Worker Two", Role: "implement",
-			SessionRef: "session-worker-2",
 		},
 	})
 	require.NoError(t, err)

@@ -6,7 +6,7 @@ import (
 	"fmt"
 
 	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/internal/coding/jsonx"
+	"github.com/rsbin/pips/internal/jsonx"
 )
 
 const maxEncodedEventBytes = 4 << 20
