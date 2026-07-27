@@ -192,6 +192,89 @@ func TestRepositoryRejectsInvalidSubagentLineage(t *testing.T) {
 	require.ErrorIs(t, err, session.ErrInvalid)
 }
 
+func TestRepositorySeparatesTeamWorkerLineageAndWorkspace(t *testing.T) {
+	t.Parallel()
+
+	repo, err := session.NewRepository(filepath.Join(t.TempDir(), "sessions"))
+	require.NoError(t, err)
+	lineage := session.TeamWorkerLineage{
+		ParentSessionID: "s-parent",
+		TeamID:          "team-one",
+		MemberID:        "member-one",
+		TaskID:          "task-one",
+		AttemptID:       "attempt-one",
+		ContinuationID:  "continuation-one",
+	}
+	worker, err := repo.Create(t.Context(), session.CreateOptions{
+		WorkspaceID: "worker-workspace",
+		Kind:        session.KindTeamWorker,
+		TeamWorker:  &lineage,
+	})
+	require.NoError(t, err)
+	_, err = worker.Session().AppendMessage(ai.UserText("worker task"), nil)
+	require.NoError(t, err)
+	id := worker.Metadata().ID
+	assert.Equal(t, "worker-workspace", worker.Metadata().WorkspaceID)
+	assert.Equal(t, lineage, worker.Metadata().TeamWorker)
+	require.NoError(t, worker.Close())
+
+	conversations, err := repo.List(t.Context())
+	require.NoError(t, err)
+	assert.Empty(t, conversations)
+	subagents, err := repo.ListSubagents(t.Context(), "worker-workspace", "s-parent")
+	require.NoError(t, err)
+	assert.Empty(t, subagents)
+	workers, err := repo.ListTeamWorkers(t.Context(), "s-parent", "team-one", 10)
+	require.NoError(t, err)
+	require.Len(t, workers, 1)
+	assert.Equal(t, id, workers[0].ID)
+	assert.Equal(t, "worker-workspace", workers[0].WorkspaceID)
+	assert.Equal(t, lineage, workers[0].TeamWorker)
+	assert.Equal(t, "worker task", workers[0].Preview)
+
+	_, err = repo.Open(t.Context(), session.OpenOptions{ID: id, WorkspaceID: "worker-workspace"})
+	require.ErrorIs(t, err, session.ErrInvalid)
+
+	wrong := lineage
+	wrong.AttemptID = "attempt-other"
+	_, err = repo.OpenTeamWorker(t.Context(), session.OpenTeamWorkerOptions{
+		ID: id, WorkspaceID: "worker-workspace", Lineage: wrong,
+	})
+	require.ErrorIs(t, err, session.ErrLineageMismatch)
+	_, err = repo.OpenTeamWorker(t.Context(), session.OpenTeamWorkerOptions{
+		ID: id, WorkspaceID: "parent-workspace", Lineage: lineage,
+	})
+	require.ErrorIs(t, err, session.ErrWorkspaceMismatch)
+
+	reopened, err := repo.OpenTeamWorker(t.Context(), session.OpenTeamWorkerOptions{
+		ID: id, WorkspaceID: "worker-workspace", Lineage: lineage,
+	})
+	require.NoError(t, err)
+	require.NoError(t, reopened.Close())
+}
+
+func TestRepositoryRejectsIncompleteTeamWorkerLineage(t *testing.T) {
+	t.Parallel()
+
+	repo, err := session.NewRepository(filepath.Join(t.TempDir(), "sessions"))
+	require.NoError(t, err)
+
+	_, err = repo.Create(t.Context(), session.CreateOptions{
+		WorkspaceID: "worker-workspace",
+		Kind:        session.KindTeamWorker,
+	})
+	require.ErrorIs(t, err, session.ErrInvalid)
+	_, err = repo.Create(t.Context(), session.CreateOptions{
+		WorkspaceID: "worker-workspace",
+		Kind:        session.KindTeamWorker,
+		TeamWorker: &session.TeamWorkerLineage{
+			ParentSessionID: "s-parent",
+			TeamID:          "bad/team",
+		},
+	})
+	require.ErrorIs(t, err, session.ErrInvalid)
+}
+
 func TestRepositoryCloseProvisionalDoesNotPersist(t *testing.T) {
 	t.Parallel()
 

@@ -15,7 +15,9 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/rsbin/pips/agent/continuation"
 	"github.com/rsbin/pips/agent/harness"
+	"github.com/rsbin/pips/agent/team"
 	"github.com/rsbin/pips/ai"
 )
 
@@ -26,7 +28,13 @@ const (
 	extraParentEntryID     = "pips.coding.parent_entry_id"
 	extraParentRunID       = "pips.coding.parent_run_id"
 	extraAgent             = "pips.coding.agent"
+	extraTeamID            = "pips.coding.team_id"
+	extraTeamMemberID      = "pips.coding.team_member_id"
+	extraTeamTaskID        = "pips.coding.team_task_id"
+	extraTeamAttemptID     = "pips.coding.team_attempt_id"
+	extraContinuationID    = "pips.coding.continuation_id"
 	maxSessionPreviewRunes = 160
+	maxTeamWorkerList      = 1_000
 )
 
 var (
@@ -37,6 +45,9 @@ var (
 	// ErrWorkspaceMismatch means a stored session belongs to another workspace
 	// identity.
 	ErrWorkspaceMismatch = errors.New("coding session: workspace mismatch")
+	// ErrLineageMismatch means a Team Worker session is not owned by the exact
+	// Team resource lineage supplied by its caller.
+	ErrLineageMismatch = errors.New("coding session: Team Worker lineage mismatch")
 	// ErrUnsupportedPlatform means this platform cannot enforce the P0
 	// single-writer lock contract.
 	ErrUnsupportedPlatform = errors.New("coding session: unsupported platform")
@@ -57,6 +68,9 @@ const (
 	KindConversation Kind = "conversation"
 	// KindSubagent is an internal child transcript owned by one conversation.
 	KindSubagent Kind = "subagent"
+	// KindTeamWorker is one attempt-scoped Team Worker transcript. It belongs to
+	// its real Worktree Workspace and carries separate parent Team lineage.
+	KindTeamWorker Kind = "team_worker"
 )
 
 // NewRepository returns a session repository rooted at dir.
@@ -93,12 +107,32 @@ type CreateOptions struct {
 	ParentSessionID string
 	ParentRunID     string
 	Agent           string
+	TeamWorker      *TeamWorkerLineage
+}
+
+// TeamWorkerLineage binds an attempt-scoped Worker Session to its Lead and
+// exact durable Team resources.
+type TeamWorkerLineage struct {
+	ParentSessionID string
+	TeamID          team.ID
+	MemberID        team.MemberID
+	TaskID          team.TaskID
+	AttemptID       team.AttemptID
+	ContinuationID  continuation.ID
 }
 
 // OpenOptions identify a stored session and the workspace allowed to own it.
 type OpenOptions struct {
 	ID          string
 	WorkspaceID string
+}
+
+// OpenTeamWorkerOptions identifies a Team Worker and the exact resource
+// lineage allowed to own it.
+type OpenTeamWorkerOptions struct {
+	ID          string
+	WorkspaceID string
+	Lineage     TeamWorkerLineage
 }
 
 // Metadata is the typed coding projection of Harness session metadata.
@@ -112,6 +146,7 @@ type Metadata struct {
 	ParentEntryID   string
 	ParentRunID     string
 	Agent           string
+	TeamWorker      TeamWorkerLineage
 	Name            string
 	Preview         string
 	CurrentLeafID   string
@@ -214,10 +249,19 @@ func (r *Repository) Create(ctx context.Context, options CreateOptions) (*Handle
 		extraWorkspaceID: options.WorkspaceID,
 		extraKind:        string(kind),
 	}
-	if kind == KindSubagent {
+	switch kind {
+	case KindConversation:
+	case KindSubagent:
 		extra[extraParentSessionID] = options.ParentSessionID
 		extra[extraParentRunID] = options.ParentRunID
 		extra[extraAgent] = options.Agent
+	case KindTeamWorker:
+		extra[extraParentSessionID] = options.TeamWorker.ParentSessionID
+		extra[extraTeamID] = string(options.TeamWorker.TeamID)
+		extra[extraTeamMemberID] = string(options.TeamWorker.MemberID)
+		extra[extraTeamTaskID] = string(options.TeamWorker.TaskID)
+		extra[extraTeamAttemptID] = string(options.TeamWorker.AttemptID)
+		extra[extraContinuationID] = string(options.TeamWorker.ContinuationID)
 	}
 
 	store := newDeferredStore(r.repo, harness.SessionMetadata{
@@ -232,6 +276,21 @@ func (r *Repository) Create(ctx context.Context, options CreateOptions) (*Handle
 
 // Open locks and opens a stored session after verifying its workspace owner.
 func (r *Repository) Open(ctx context.Context, options OpenOptions) (*Handle, error) {
+	handle, err := r.open(ctx, options)
+	if err != nil {
+		return nil, err
+	}
+	if handle.meta.Kind == KindTeamWorker {
+		return nil, errors.Join(
+			fmt.Errorf("%w: Team Worker requires exact open boundary", ErrInvalid),
+			handle.Close(),
+		)
+	}
+
+	return handle, nil
+}
+
+func (r *Repository) open(ctx context.Context, options OpenOptions) (*Handle, error) {
 	if err := r.validate(); err != nil {
 		return nil, err
 	}
@@ -261,6 +320,29 @@ func (r *Repository) Open(ctx context.Context, options OpenOptions) (*Handle, er
 	}
 
 	return newHandle(store, lock, options.WorkspaceID)
+}
+
+// OpenTeamWorker locks and opens one Team Worker only after verifying its real
+// Workspace and every durable lineage component.
+func (r *Repository) OpenTeamWorker(
+	ctx context.Context,
+	options OpenTeamWorkerOptions,
+) (*Handle, error) {
+	if err := validateTeamWorkerLineage(options.Lineage); err != nil {
+		return nil, err
+	}
+	handle, err := r.open(ctx, OpenOptions{ID: options.ID, WorkspaceID: options.WorkspaceID})
+	if err != nil {
+		return nil, err
+	}
+	if handle.meta.Kind != KindTeamWorker || handle.meta.TeamWorker != options.Lineage {
+		return nil, errors.Join(
+			fmt.Errorf("%w: session %q", ErrLineageMismatch, options.ID),
+			handle.Close(),
+		)
+	}
+
+	return handle, nil
 }
 
 // Fork creates and locks a failure-atomic copy of source's selected path. The
@@ -424,6 +506,67 @@ func (r *Repository) ListSubagents(
 	return metas, nil
 }
 
+// ListTeamWorkers returns a bounded newest-first projection for exactly one
+// Lead Session and Team. Worker Workspace identities remain their real values.
+//
+//nolint:gocyclo // Projection keeps exact lineage, file safety, and bounded prefix checks together.
+func (r *Repository) ListTeamWorkers(
+	ctx context.Context,
+	parentSessionID string,
+	teamID team.ID,
+	limit int,
+) ([]Metadata, error) {
+	if err := r.validate(); err != nil {
+		return nil, err
+	}
+	if validateSessionID(parentSessionID) != nil || !validLineageID(string(teamID)) ||
+		limit < 1 || limit > maxTeamWorkerList {
+		return nil, fmt.Errorf("%w: invalid Team Worker owner", ErrInvalid)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	stored, err := r.repo.List()
+	if err != nil {
+		return nil, err
+	}
+
+	metas := make([]Metadata, 0, min(limit, len(stored)))
+	for _, value := range stored {
+		meta, projectErr := projectMetadata(value)
+		if projectErr != nil {
+			return nil, projectErr
+		}
+		if meta.Kind != KindTeamWorker || meta.TeamWorker.ParentSessionID != parentSessionID ||
+			meta.TeamWorker.TeamID != teamID {
+			continue
+		}
+		if err := secureSessionFile(value.Path); err != nil {
+			return nil, err
+		}
+		prefix, prefixErr := harness.ReadJSONLPrefix(value.Path, harness.JSONLPrefixLimits{})
+		if prefixErr != nil {
+			meta.Truncated = true
+		} else {
+			projectSessionPrefix(&meta, prefix)
+		}
+		metas = append(metas, meta)
+	}
+
+	slices.SortFunc(metas, func(left, right Metadata) int {
+		if order := right.CreatedAt.Compare(left.CreatedAt); order != 0 {
+			return order
+		}
+		return strings.Compare(left.ID, right.ID)
+	})
+	if len(metas) > limit {
+		metas = metas[:limit]
+	}
+
+	return metas, nil
+}
+
 func projectSubagentListMetadata(
 	value harness.SessionMetadata,
 	workspaceID string,
@@ -516,11 +659,22 @@ func projectMetadata(stored harness.SessionMetadata) (Metadata, error) {
 	if !validKind(kind) {
 		return Metadata{}, fmt.Errorf("%w: session %q has invalid kind", ErrInvalid, stored.ID)
 	}
-	if kind == KindSubagent {
+	switch kind {
+	case KindConversation:
+	case KindSubagent:
 		parentSessionID := stored.Extra[extraParentSessionID]
 		agent := stored.Extra[extraAgent]
 		if validateSessionID(parentSessionID) != nil || strings.TrimSpace(agent) == "" {
 			return Metadata{}, fmt.Errorf("%w: subagent session %q has incomplete lineage", ErrInvalid, stored.ID)
+		}
+	case KindTeamWorker:
+		lineage := teamWorkerLineage(stored.Extra)
+		if err := validateTeamWorkerLineage(lineage); err != nil {
+			return Metadata{}, fmt.Errorf(
+				"%w: Team Worker session %q has incomplete lineage",
+				ErrInvalid,
+				stored.ID,
+			)
 		}
 	}
 
@@ -534,6 +688,7 @@ func projectMetadata(stored harness.SessionMetadata) (Metadata, error) {
 		ParentEntryID:   stored.Extra[extraParentEntryID],
 		ParentRunID:     stored.Extra[extraParentRunID],
 		Agent:           stored.Extra[extraAgent],
+		TeamWorker:      teamWorkerLineage(stored.Extra),
 	}, nil
 }
 
@@ -604,6 +759,7 @@ func collapsePreview(value string, limit int) string {
 	return result.String()
 }
 
+//nolint:gocyclo // Kind-specific lineage fields are intentionally validated in one boundary.
 func validateCreateOptions(options CreateOptions) error {
 	if strings.TrimSpace(options.WorkspaceID) == "" {
 		return fmt.Errorf("%w: empty workspace identity", ErrInvalid)
@@ -613,18 +769,31 @@ func validateCreateOptions(options CreateOptions) error {
 	if !validKind(kind) {
 		return fmt.Errorf("%w: invalid session kind %q", ErrInvalid, options.Kind)
 	}
-	if kind == KindConversation {
-		if options.ParentSessionID != "" || options.ParentRunID != "" || options.Agent != "" {
+	switch kind {
+	case KindConversation:
+		if options.ParentSessionID != "" || options.ParentRunID != "" || options.Agent != "" ||
+			options.TeamWorker != nil {
 			return fmt.Errorf("%w: conversation cannot declare subagent lineage", ErrInvalid)
 		}
 
 		return nil
-	}
-	if validateSessionID(options.ParentSessionID) != nil || strings.TrimSpace(options.Agent) == "" {
-		return fmt.Errorf("%w: subagent requires parent session and agent", ErrInvalid)
-	}
+	case KindSubagent:
+		if options.TeamWorker != nil || validateSessionID(options.ParentSessionID) != nil ||
+			strings.TrimSpace(options.Agent) == "" {
+			return fmt.Errorf("%w: subagent requires parent session and agent", ErrInvalid)
+		}
 
-	return nil
+		return nil
+	case KindTeamWorker:
+		if options.ParentSessionID != "" || options.ParentRunID != "" || options.Agent != "" ||
+			options.TeamWorker == nil {
+			return fmt.Errorf("%w: Team Worker requires separate lineage", ErrInvalid)
+		}
+
+		return validateTeamWorkerLineage(*options.TeamWorker)
+	default:
+		return fmt.Errorf("%w: invalid session kind %q", ErrInvalid, options.Kind)
+	}
 }
 
 func normalizedKind(kind Kind) Kind {
@@ -636,7 +805,49 @@ func normalizedKind(kind Kind) Kind {
 }
 
 func validKind(kind Kind) bool {
-	return kind == KindConversation || kind == KindSubagent
+	return kind == KindConversation || kind == KindSubagent || kind == KindTeamWorker
+}
+
+func teamWorkerLineage(extra map[string]string) TeamWorkerLineage {
+	return TeamWorkerLineage{
+		ParentSessionID: extra[extraParentSessionID],
+		TeamID:          team.ID(extra[extraTeamID]),
+		MemberID:        team.MemberID(extra[extraTeamMemberID]),
+		TaskID:          team.TaskID(extra[extraTeamTaskID]),
+		AttemptID:       team.AttemptID(extra[extraTeamAttemptID]),
+		ContinuationID:  continuation.ID(extra[extraContinuationID]),
+	}
+}
+
+func validateTeamWorkerLineage(value TeamWorkerLineage) error {
+	if validateSessionID(value.ParentSessionID) != nil || !validLineageID(string(value.TeamID)) ||
+		!validLineageID(string(value.MemberID)) || !validLineageID(string(value.TaskID)) ||
+		!validLineageID(string(value.AttemptID)) ||
+		!validLineageID(string(value.ContinuationID)) {
+		return fmt.Errorf("%w: invalid Team Worker lineage", ErrInvalid)
+	}
+
+	return nil
+}
+
+func validLineageID(value string) bool {
+	if len(value) == 0 || len(value) > 128 || !isASCIIAlphanumeric(value[0]) {
+		return false
+	}
+	for index := 1; index < len(value); index++ {
+		current := value[index]
+		if isASCIIAlphanumeric(current) || current == '.' || current == '_' || current == '-' {
+			continue
+		}
+		return false
+	}
+
+	return true
+}
+
+func isASCIIAlphanumeric(value byte) bool {
+	return value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z' ||
+		value >= '0' && value <= '9'
 }
 
 func (r *Repository) validate() error {

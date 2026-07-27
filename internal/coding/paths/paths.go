@@ -24,15 +24,21 @@ var ErrInvalid = errors.New("coding paths: invalid user configuration directory"
 // Layout contains all user-owned P0 persistence paths. Project-scoped product
 // resources remain workspace-relative and are not part of this layout.
 type Layout struct {
-	root           string
-	configFile     string
-	workspacesFile string
-	sessionsDir    string
-	plansDir       string
-	skillsDir      string
-	agentSkillsDir string
-	bundlesDir     string
-	mcpFile        string
+	root                 string
+	configFile           string
+	workspacesFile       string
+	sessionsDir          string
+	plansDir             string
+	teamsDir             string
+	teamAggregatesDir    string
+	teamContinuationsDir string
+	teamResourcesDir     string
+	teamLeasesDir        string
+	worktreesRoot        string
+	skillsDir            string
+	agentSkillsDir       string
+	bundlesDir           string
+	mcpFile              string
 }
 
 // New returns an application layout rooted exactly at root.
@@ -50,15 +56,28 @@ func New(root string) (Layout, error) {
 		return Layout{}, fmt.Errorf("%w: %w", ErrInvalid, err)
 	}
 
+	if filepath.Dir(abs) == abs {
+		return Layout{}, fmt.Errorf("%w: filesystem root is not a product directory", ErrInvalid)
+	}
+
+	teamsDir := filepath.Join(abs, "teams")
+	worktreesRoot := filepath.Join(filepath.Dir(abs), filepath.Base(abs)+"-worktrees")
+
 	return Layout{
-		root:           abs,
-		configFile:     filepath.Join(abs, configFileName),
-		workspacesFile: filepath.Join(abs, "workspaces.json"),
-		sessionsDir:    filepath.Join(abs, "sessions"),
-		plansDir:       filepath.Join(abs, "plans"),
-		skillsDir:      filepath.Join(abs, "skills"),
-		bundlesDir:     filepath.Join(abs, "bundles"),
-		mcpFile:        filepath.Join(abs, "mcp.json"),
+		root:                 abs,
+		configFile:           filepath.Join(abs, configFileName),
+		workspacesFile:       filepath.Join(abs, "workspaces.json"),
+		sessionsDir:          filepath.Join(abs, "sessions"),
+		plansDir:             filepath.Join(abs, "plans"),
+		teamsDir:             teamsDir,
+		teamAggregatesDir:    filepath.Join(teamsDir, "aggregates"),
+		teamContinuationsDir: filepath.Join(teamsDir, "continuations"),
+		teamResourcesDir:     filepath.Join(teamsDir, "resources"),
+		teamLeasesDir:        filepath.Join(teamsDir, "leases"),
+		worktreesRoot:        worktreesRoot,
+		skillsDir:            filepath.Join(abs, "skills"),
+		bundlesDir:           filepath.Join(abs, "bundles"),
+		mcpFile:              filepath.Join(abs, "mcp.json"),
 	}, nil
 }
 
@@ -159,6 +178,24 @@ func (l Layout) SessionsDir() string { return l.sessionsDir }
 
 // PlansDir returns the private user-level Plan document directory.
 func (l Layout) PlansDir() string { return l.plansDir }
+
+// TeamsDir returns the private Team application data directory.
+func (l Layout) TeamsDir() string { return l.teamsDir }
+
+// TeamAggregatesDir returns the Team aggregate journal directory.
+func (l Layout) TeamAggregatesDir() string { return l.teamAggregatesDir }
+
+// TeamContinuationsDir returns the Team continuation journal directory.
+func (l Layout) TeamContinuationsDir() string { return l.teamContinuationsDir }
+
+// TeamResourcesDir returns the Team application resource journal directory.
+func (l Layout) TeamResourcesDir() string { return l.teamResourcesDir }
+
+// TeamLeasesDir returns the retained Team lease directory.
+func (l Layout) TeamLeasesDir() string { return l.teamLeasesDir }
+
+// WorktreesRoot returns the sibling root reserved for Team Worktrees.
+func (l Layout) WorktreesRoot() string { return l.worktreesRoot }
 
 // SkillsDir returns the user skill directory.
 func (l Layout) SkillsDir() string { return l.skillsDir }
