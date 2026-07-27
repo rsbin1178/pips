@@ -27,7 +27,7 @@ var (
 	ErrInvalidResult = errors.New("coding subagent: invalid result")
 )
 
-// Role selects one bounded specialist behavior and output schema.
+// Role selects one isolated read-only specialist behavior and output schema.
 type Role string
 
 const (
@@ -91,7 +91,7 @@ type Ownership struct {
 	RootInteractionID   string
 }
 
-// Request describes one bounded specialist delegation.
+// Request describes one isolated read-only specialist delegation.
 type Request struct {
 	Role      Role
 	Task      string

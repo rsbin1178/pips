@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/rsbin/pips/agent"
+	"github.com/rsbin/pips/agent/harness"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding/session"
 	"github.com/rsbin/pips/internal/coding/workspace"
@@ -157,7 +158,7 @@ func TestRunTrackerProjectsDefensiveLiveActivity(t *testing.T) {
 	t.Parallel()
 
 	startedAt := time.Date(2026, time.July, 23, 10, 0, 0, 0, time.UTC)
-	tracker := newRunTracker(startedAt, DefaultLimits().MaxToolCalls)
+	tracker := newRunTracker(startedAt, DefaultLimits().MaxActivityTools)
 	call := ai.ToolCallPart{
 		ID: "call-1", Name: readToolName, Args: ai.JSON(`{"path":"internal/coding/runtime.go"}`),
 	}
@@ -194,6 +195,28 @@ func TestRunTrackerProjectsDefensiveLiveActivity(t *testing.T) {
 	second := tracker.activitySnapshot()
 	assert.JSONEq(t, `{"path":"internal/coding/runtime.go"}`, string(second.Tools[0].Call.Args))
 	assert.Equal(t, "reading", messageText(second.Tools[0].Update))
+}
+
+func TestRunTrackerBoundsActivityWithoutFreezingCurrentAction(t *testing.T) {
+	t.Parallel()
+
+	tracker := newRunTracker(time.Now().UTC(), 1)
+	for index, target := range []string{"first.txt", "second.txt"} {
+		call := ai.ToolCallPart{
+			ID: fmt.Sprintf("call-%d", index+1), Name: readToolName,
+			Args: ai.JSON(fmt.Sprintf(`{"path":%q}`, target)),
+		}
+		trackChildEvent(tracker, agent.Event{
+			Type: agent.EventToolStart, RunID: "run-1", Turn: index + 1,
+			Time: time.Now().UTC(), Call: &call,
+		})
+	}
+
+	snapshot, activity := tracker.snapshot()
+	require.Len(t, activity.Tools, 1)
+	assert.Equal(t, "first.txt", summarizeToolActivity(activity.Tools[0].Call).Target)
+	assert.Equal(t, "second.txt", snapshot.activity.Target)
+	assert.Equal(t, ActivityPhaseWorking, activity.Phase)
 }
 
 func TestManagerInspectOverlaysInFlightToolActivity(t *testing.T) {
@@ -300,21 +323,22 @@ func TestManagerReservesFinalTurnWithoutTools(t *testing.T) {
 }
 
 //nolint:wsl_v5 // Scripted turns and filesystem fixtures intentionally stay adjacent.
-func TestManagerAllowsProductiveWorkBeyondFormerTwelveTurnLimit(t *testing.T) {
+func TestManagerDefaultAllowsWorkBeyondFormerExecutionBudgets(t *testing.T) {
 	t.Parallel()
 
-	const workingTurns = 13
+	const workingTurns = 65
 	responses := make([]*ai.Response, 0, workingTurns+1)
 	for index := range workingTurns {
-		responses = append(responses, responseToolCall(ai.ToolCallPart{
+		response := responseToolCall(ai.ToolCallPart{
 			ID: fmt.Sprintf("call-%d", index+1), Name: readToolName,
 			Args: ai.JSON(fmt.Sprintf(`{"path":"file-%d.txt"}`, index+1)),
-		}))
+		})
+		response.Usage = ai.Usage{InputTokens: 2_000, OutputTokens: 20}
+		responses = append(responses, response)
 	}
-	responses = append(
-		responses,
-		responseText(`{"summary":"done","evidence":[],"unknowns":[]}`),
-	)
+	finalResponse := responseText(`{"summary":"done","evidence":[],"unknowns":[]}`)
+	finalResponse.Usage = ai.Usage{InputTokens: 2_000, OutputTokens: 20}
+	responses = append(responses, finalResponse)
 
 	model := &testModel{responses: responses}
 	fixture := newManagerFixture(t, model)
@@ -334,10 +358,174 @@ func TestManagerAllowsProductiveWorkBeyondFormerTwelveTurnLimit(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, OutcomeSucceeded, result.Outcome)
 	assert.Equal(t, workingTurns+1, result.Turns)
+	assert.Greater(t, result.ToolCalls, 64)
+	assert.Greater(t, result.Usage.InputTokens+result.Usage.OutputTokens, 120_000)
 
 	requests := model.Requests()
 	require.Len(t, requests, workingTurns+1)
 	assert.NotEmpty(t, requests[workingTurns].Tools)
+}
+
+func TestManagerStopsAfterOneFailedNoProgressConvergenceTurn(t *testing.T) {
+	t.Parallel()
+
+	limit := DefaultLimits().RepeatedToolCallLimit
+	responses := make([]*ai.Response, 0, limit+2)
+	for index := range limit + 2 {
+		responses = append(responses, responseToolCall(ai.ToolCallPart{
+			ID: fmt.Sprintf("call-%d", index+1), Name: readToolName,
+			Args: ai.JSON(`{"path":"sentinel.txt"}`),
+		}))
+	}
+	model := &testModel{responses: responses}
+	fixture := newManagerFixture(t, model)
+	require.NoError(t, os.WriteFile(
+		filepath.Join(fixture.root, "sentinel.txt"), []byte("content"), 0o600,
+	))
+
+	execution, err := fixture.manager.Start(
+		t.Context(), Request{Role: RoleExplore, Task: "Avoid looping."}, nil,
+	)
+	require.NoError(t, err)
+	result, err := execution.Wait(t.Context())
+	require.Error(t, err)
+	assert.Equal(t, OutcomeFailed, result.Outcome)
+	assert.Equal(t, "no_progress", result.Code)
+	assert.Equal(t, agent.StopWhen, result.Stop)
+
+	requests := model.Requests()
+	require.Len(t, requests, limit+2)
+	assert.Empty(t, requests[len(requests)-1].Tools)
+}
+
+func TestManagerClassifiesMalformedConvergenceAsNoProgress(t *testing.T) {
+	t.Parallel()
+
+	limit := DefaultLimits().RepeatedToolCallLimit
+	responses := make([]*ai.Response, 0, limit+2)
+	for index := range limit + 1 {
+		responses = append(responses, responseToolCall(ai.ToolCallPart{
+			ID: fmt.Sprintf("call-%d", index+1), Name: readToolName,
+			Args: ai.JSON(`{"path":"sentinel.txt"}`),
+		}))
+	}
+	responses = append(responses, responseText(`{"summary":`))
+	fixture := newManagerFixture(t, &testModel{responses: responses})
+	require.NoError(t, os.WriteFile(
+		filepath.Join(fixture.root, "sentinel.txt"), []byte("content"), 0o600,
+	))
+
+	execution, err := fixture.manager.Start(
+		t.Context(), Request{Role: RoleExplore, Task: "Avoid looping."}, nil,
+	)
+	require.NoError(t, err)
+	result, err := execution.Wait(t.Context())
+	require.Error(t, err)
+	assert.Equal(t, OutcomeFailed, result.Outcome)
+	assert.Equal(t, "no_progress", result.Code)
+}
+
+func TestManagerCompactsChildContextBetweenToolTurns(t *testing.T) {
+	t.Parallel()
+
+	settings := harness.CompactionSettings{
+		ContextTokens: 800, ReserveTokens: 100, KeepRecentTokens: 250, SummaryTokens: 64,
+	}
+	responses := []*ai.Response{
+		responseToolCall(ai.ToolCallPart{
+			ID: "call-1", Name: readToolName, Args: ai.JSON(`{"path":"large.txt"}`),
+		}),
+		responseToolCall(ai.ToolCallPart{
+			ID: "call-2", Name: readToolName, Args: ai.JSON(`{"path":"large.txt"}`),
+		}),
+		responseText(`{"summary":"done","evidence":[],"unknowns":[]}`),
+	}
+	responses[0].Usage = ai.Usage{InputTokens: 100, OutputTokens: 20}
+	responses[1].Usage = ai.Usage{InputTokens: 500, OutputTokens: 20}
+
+	t.Run("success", func(t *testing.T) {
+		t.Parallel()
+
+		model := &testModel{responses: slices.Clone(responses)}
+		summarizer := &testModel{responses: []*ai.Response{responseText("compact summary")}}
+		fixture := newManagerFixtureWithConfig(
+			t, model, ExecutionOptions{}, func(config *Config) {
+				config.Compaction = &settings
+				config.SummaryModel = summarizer
+			},
+		)
+		require.NoError(t, os.WriteFile(
+			filepath.Join(fixture.root, "large.txt"), []byte(strings.Repeat("word", 200)), 0o600,
+		))
+
+		execution, err := fixture.manager.Start(
+			t.Context(), Request{Role: RoleExplore, Task: "Read the large file twice."}, nil,
+		)
+		require.NoError(t, err)
+		result, err := execution.Wait(t.Context())
+		require.NoError(t, err)
+		assert.Equal(t, OutcomeSucceeded, result.Outcome)
+		require.Len(t, summarizer.Requests(), 1)
+		require.Len(t, model.Requests(), 3)
+		assert.Contains(t, requestText(model.Requests()[2]), harness.CompactionPrefix)
+		assert.Equal(t, 1, countChildCompactions(execution.child.Session().Path()))
+	})
+
+	t.Run("summary failure stops before another child request", func(t *testing.T) {
+		t.Parallel()
+
+		model := &testModel{responses: slices.Clone(responses)}
+		summarizer := &testModel{}
+		fixture := newManagerFixtureWithConfig(
+			t, model, ExecutionOptions{}, func(config *Config) {
+				config.Compaction = &settings
+				config.SummaryModel = summarizer
+			},
+		)
+		require.NoError(t, os.WriteFile(
+			filepath.Join(fixture.root, "large.txt"), []byte(strings.Repeat("word", 200)), 0o600,
+		))
+
+		execution, err := fixture.manager.Start(
+			t.Context(), Request{Role: RoleExplore, Task: "Read the large file twice."}, nil,
+		)
+		require.NoError(t, err)
+		result, err := execution.Wait(t.Context())
+		require.Error(t, err)
+		assert.Equal(t, OutcomeFailed, result.Outcome)
+		assert.Equal(t, "execution_failed", result.Code)
+		assert.Len(t, model.Requests(), 2)
+		assert.Zero(t, countChildCompactions(execution.child.Session().Path()))
+	})
+
+	t.Run("cancellation interrupts summary", func(t *testing.T) {
+		t.Parallel()
+
+		model := &testModel{responses: slices.Clone(responses)}
+		summarizer := &blockingTestModel{entered: make(chan struct{})}
+		fixture := newManagerFixtureWithConfig(
+			t, model, ExecutionOptions{}, func(config *Config) {
+				config.Compaction = &settings
+				config.SummaryModel = summarizer
+			},
+		)
+		require.NoError(t, os.WriteFile(
+			filepath.Join(fixture.root, "large.txt"), []byte(strings.Repeat("word", 200)), 0o600,
+		))
+
+		execution, err := fixture.manager.Start(
+			t.Context(), Request{Role: RoleExplore, Task: "Read the large file twice."}, nil,
+		)
+		require.NoError(t, err)
+		<-summarizer.entered
+		execution.Cancel()
+		result, err := execution.Wait(t.Context())
+		require.ErrorIs(t, err, context.Canceled)
+		assert.Equal(t, OutcomeCanceled, result.Outcome)
+		assert.Equal(t, "canceled", result.Code)
+		assert.Len(t, model.Requests(), 2)
+		assert.Zero(t, countChildCompactions(execution.child.Session().Path()))
+	})
 }
 
 //nolint:wsl_v5 // Scripted repeated calls and finalization assertions form one scenario.
@@ -714,7 +902,14 @@ func TestManagerInspectUsesPersistedLimitsAndRejectsOtherParent(t *testing.T) {
 	model := &testModel{responses: []*ai.Response{
 		responseText(`{"summary":"persisted result","evidence":[],"unknowns":[]}`),
 	}}
-	fixture := newManagerFixture(t, model)
+	persistedLimits := DefaultLimits()
+	persistedLimits.MaxTurns = 4
+	persistedLimits.MaxTokens = 20_000
+	persistedLimits.MaxToolCalls = 4
+	persistedLimits.MaxDuration = time.Minute
+	fixture := newManagerFixtureWithOptions(
+		t, model, ExecutionOptions{Limits: persistedLimits},
+	)
 	execution, err := fixture.manager.Start(
 		t.Context(), Request{Role: RoleExplore, Task: "Inspect."}, nil,
 	)
@@ -849,6 +1044,54 @@ func TestManagerReportsWallTimeAndCumulativeTokenBudgets(t *testing.T) {
 	})
 }
 
+func TestManagerDefaultRunHasNoDeadlineAndExplicitToolBudgetStillStops(t *testing.T) {
+	t.Parallel()
+
+	t.Run("default lifetime", func(t *testing.T) {
+		t.Parallel()
+
+		model := &contextInspectingModel{inner: &testModel{responses: []*ai.Response{
+			responseText(`{"summary":"done","evidence":[],"unknowns":[]}`),
+		}}}
+		fixture := newManagerFixture(t, model)
+		execution, err := fixture.manager.Start(
+			t.Context(), Request{Role: RoleExplore, Task: "Inspect."}, nil,
+		)
+		require.NoError(t, err)
+		_, err = execution.Wait(t.Context())
+		require.NoError(t, err)
+		assert.False(t, model.SawDeadline())
+	})
+
+	t.Run("explicit tool budget", func(t *testing.T) {
+		t.Parallel()
+
+		limits := DefaultLimits()
+		limits.MaxToolCalls = 1
+		model := &testModel{responses: []*ai.Response{
+			responseToolCall(ai.ToolCallPart{
+				ID: "call-1", Name: readToolName, Args: ai.JSON(`{"path":"sentinel.txt"}`),
+			}),
+			responseToolCall(ai.ToolCallPart{
+				ID: "call-2", Name: readToolName, Args: ai.JSON(`{"path":"sentinel.txt"}`),
+			}),
+		}}
+		fixture := newManagerFixtureWithOptions(t, model, ExecutionOptions{Limits: limits})
+		require.NoError(t, os.WriteFile(
+			filepath.Join(fixture.root, "sentinel.txt"), []byte("content"), 0o600,
+		))
+		execution, err := fixture.manager.Start(
+			t.Context(), Request{Role: RoleExplore, Task: "Inspect."}, nil,
+		)
+		require.NoError(t, err)
+		result, err := execution.Wait(t.Context())
+		require.Error(t, err)
+		assert.Equal(t, OutcomeFailed, result.Outcome)
+		assert.Equal(t, "max_tool_calls", result.Code)
+		assert.Equal(t, agent.StopWhen, result.Stop)
+	})
+}
+
 type managerFixture struct {
 	root       string
 	manager    *Manager
@@ -869,6 +1112,17 @@ func newManagerFixtureWithOptions(
 	options ExecutionOptions,
 ) managerFixture {
 	t.Helper()
+
+	return newManagerFixtureWithConfig(t, model, options, nil)
+}
+
+func newManagerFixtureWithConfig(
+	t *testing.T,
+	model ai.LanguageModel,
+	options ExecutionOptions,
+	configure func(*Config),
+) managerFixture {
+	t.Helper()
 	root := filepath.Join(t.TempDir(), "workspace")
 	require.NoError(t, os.Mkdir(root, 0o700))
 	value, err := workspace.Open(root)
@@ -881,10 +1135,14 @@ func newManagerFixtureWithOptions(
 		WorkspaceID: value.Identity().Key(),
 	})
 	require.NoError(t, err)
-	manager, err := New(Config{
+	managerConfig := Config{
 		Repository: repository, Parent: parent, Tree: tree, Model: model,
 		Options: options,
-	})
+	}
+	if configure != nil {
+		configure(&managerConfig)
+	}
+	manager, err := New(managerConfig)
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -986,6 +1244,45 @@ type blockingTestModel struct {
 	entered chan struct{}
 }
 
+type contextInspectingModel struct {
+	inner       *testModel
+	mu          sync.Mutex
+	sawDeadline bool
+}
+
+func (m *contextInspectingModel) Generate(
+	ctx context.Context,
+	request ai.Request,
+) (*ai.Response, error) {
+	m.recordDeadline(ctx)
+
+	return m.inner.Generate(ctx, request)
+}
+
+func (m *contextInspectingModel) Stream(ctx context.Context, request ai.Request) ai.Stream {
+	m.recordDeadline(ctx)
+
+	return m.inner.Stream(ctx, request)
+}
+
+func (m *contextInspectingModel) Provider() ai.Provider         { return m.inner.Provider() }
+func (m *contextInspectingModel) ModelID() string               { return m.inner.ModelID() }
+func (m *contextInspectingModel) Capabilities() ai.Capabilities { return m.inner.Capabilities() }
+
+func (m *contextInspectingModel) recordDeadline(ctx context.Context) {
+	_, deadline := ctx.Deadline()
+	m.mu.Lock()
+	m.sawDeadline = m.sawDeadline || deadline
+	m.mu.Unlock()
+}
+
+func (m *contextInspectingModel) SawDeadline() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.sawDeadline
+}
+
 func (m *blockingTestModel) Generate(ctx context.Context, _ ai.Request) (*ai.Response, error) {
 	m.once.Do(func() { close(m.entered) })
 	<-ctx.Done()
@@ -1028,6 +1325,26 @@ func toolNames(tools []ai.Tool) []string {
 	}
 
 	return values
+}
+
+func requestText(request ai.Request) string {
+	var result strings.Builder
+	for _, message := range request.Messages {
+		result.WriteString(messageText(message))
+	}
+
+	return result.String()
+}
+
+func countChildCompactions(entries []harness.Entry) int {
+	count := 0
+	for _, entry := range entries {
+		if entry.Kind == harness.KindCompaction {
+			count++
+		}
+	}
+
+	return count
 }
 
 func expectedResult(role Role) any {

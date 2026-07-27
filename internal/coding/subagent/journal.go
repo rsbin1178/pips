@@ -58,6 +58,7 @@ type recordLimits struct {
 	MaxTokens             int   `json:"max_tokens"`
 	MaxToolCalls          int   `json:"max_tool_calls"`
 	MaxDurationNanos      int64 `json:"max_duration_nanos"`
+	MaxActivityTools      int   `json:"max_activity_tools,omitempty"`
 	MaxOutputTokens       int   `json:"max_output_tokens"`
 	MaxTaskBytes          int   `json:"max_task_bytes"`
 	MaxResultBytes        int   `json:"max_result_bytes"`
@@ -73,6 +74,7 @@ func journalLimits(value Limits) recordLimits {
 		MaxTokens:             value.MaxTokens,
 		MaxToolCalls:          value.MaxToolCalls,
 		MaxDurationNanos:      int64(value.MaxDuration),
+		MaxActivityTools:      value.MaxActivityTools,
 		MaxOutputTokens:       value.MaxOutputTokens,
 		MaxTaskBytes:          value.MaxTaskBytes,
 		MaxResultBytes:        value.MaxResultBytes,
@@ -93,6 +95,7 @@ func (l recordLimits) limits() Limits {
 		MaxTokens:             l.MaxTokens,
 		MaxToolCalls:          l.MaxToolCalls,
 		MaxDuration:           time.Duration(l.MaxDurationNanos),
+		MaxActivityTools:      l.MaxActivityTools,
 		MaxOutputTokens:       l.MaxOutputTokens,
 		MaxTaskBytes:          l.MaxTaskBytes,
 		MaxResultBytes:        l.MaxResultBytes,

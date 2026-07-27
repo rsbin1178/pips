@@ -1,6 +1,7 @@
 package question
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -316,9 +317,9 @@ func requestFromCall(call ai.ToolCallPart) (Request, error) {
 		return Request{}, fmt.Errorf("%w: invalid ask_user identity", ErrInvalid)
 	}
 
-	var spec Spec
-	if err := jsonx.Decode(call.Args, &spec); err != nil {
-		return Request{}, fmt.Errorf("%w: decode ask_user arguments", ErrInvalid)
+	spec, err := decodeSpecArguments(call.Args)
+	if err != nil {
+		return Request{}, fmt.Errorf("%w: decode ask_user arguments: %w", ErrInvalid, err)
 	}
 
 	digest, err := Digest(spec)
@@ -330,6 +331,42 @@ func requestFromCall(call ai.ToolCallPart) (Request, error) {
 	requestID := "q-" + hex.EncodeToString(sum[:16])
 
 	return NewRequest(requestID, call.ID, spec)
+}
+
+func decodeSpecArguments(data ai.JSON) (Spec, error) {
+	var arguments struct {
+		Questions json.RawMessage `json:"questions"`
+	}
+	if err := jsonx.Decode(data, &arguments); err != nil {
+		return Spec{}, err
+	}
+
+	rawQuestions := bytes.TrimSpace(arguments.Questions)
+	if len(rawQuestions) == 0 {
+		return Spec{}, errors.New("questions are required")
+	}
+
+	jsonEncoded := rawQuestions[0] == '"'
+	if jsonEncoded {
+		var encoded string
+		if err := jsonx.Decode(rawQuestions, &encoded); err != nil {
+			return Spec{}, fmt.Errorf("decode JSON-encoded questions: %w", err)
+		}
+
+		rawQuestions = []byte(encoded)
+	}
+
+	var questions []Question
+	if err := jsonx.Decode(rawQuestions, &questions); err != nil {
+		label := "decode questions array"
+		if jsonEncoded {
+			label = "decode JSON-encoded questions"
+		}
+
+		return Spec{}, fmt.Errorf("%s: %w", label, err)
+	}
+
+	return Spec{Questions: questions}, nil
 }
 
 func encodeResolution(resolution Resolution) (string, error) {

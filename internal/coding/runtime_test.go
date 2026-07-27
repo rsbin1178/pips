@@ -25,6 +25,7 @@ import (
 	"github.com/rsbin/pips/internal/coding/changes"
 	"github.com/rsbin/pips/internal/coding/config"
 	"github.com/rsbin/pips/internal/coding/execution"
+	"github.com/rsbin/pips/internal/coding/modelcatalog"
 	"github.com/rsbin/pips/internal/coding/paths"
 	"github.com/rsbin/pips/internal/coding/subagent"
 	"github.com/rsbin/pips/internal/coding/workspace"
@@ -58,6 +59,34 @@ func TestRuntimePromptStreamsAndPersistsOneInteraction(t *testing.T) {
 	require.NoError(t, runtime.Close(t.Context()))
 	assert.Equal(t, PhaseClosed, runtime.Snapshot().Phase)
 	require.NoError(t, runtime.Close(t.Context()))
+}
+
+func TestEffectiveCompactionSettingsUseOneResolvedPolicy(t *testing.T) {
+	t.Parallel()
+
+	configured := config.CompactionConfig{
+		Enabled: true, ReserveTokens: 100, KeepRecentTokens: 900, SummaryMaxTokens: 64,
+	}
+	resolved := modelcatalog.ResolvedModel{
+		Limits:  modelcatalog.Limits{ContextWindow: 1000},
+		Options: config.ModelOptions{MaxOutputTokens: ai.Ptr(400)},
+	}
+
+	settings, disabled := effectiveCompactionSettings(configured, resolved)
+	assert.Empty(t, disabled)
+	assert.Equal(t, 1000, settings.ContextTokens)
+	assert.Equal(t, 400, settings.ReserveTokens)
+	assert.Equal(t, 450, settings.KeepRecentTokens)
+	assert.Equal(t, 64, settings.SummaryTokens)
+
+	configured.Enabled = false
+	_, disabled = effectiveCompactionSettings(configured, resolved)
+	assert.Equal(t, "automatic and manual compaction are disabled", disabled)
+
+	configured.Enabled = true
+	resolved.Limits.ContextWindow = 0
+	_, disabled = effectiveCompactionSettings(configured, resolved)
+	assert.Equal(t, "the selected model has no context_window metadata", disabled)
 }
 
 func TestRuntimeMainAgentRunsPastGenericTurnDefault(t *testing.T) {
