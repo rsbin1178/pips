@@ -292,28 +292,46 @@ func TestLimitsRejectUnsafeOverrides(t *testing.T) {
 	t.Parallel()
 
 	limits := DefaultLimits()
-	limits.MaxTurns = 0
+	require.NoError(t, validateLimits(limits))
+	limits.MaxTurns = -1
 	require.ErrorIs(t, validateLimits(limits), ErrInvalid)
 	limits = DefaultLimits()
-	limits.MaxDuration = 31 * time.Minute
+	limits.MaxDuration = -time.Nanosecond
 	require.ErrorIs(t, validateLimits(limits), ErrInvalid)
 	limits = DefaultLimits()
+	limits.MaxTurns = 3
 	limits.FinalizationTurns = limits.MaxTurns
+	require.ErrorIs(t, validateLimits(limits), ErrInvalid)
+	limits = DefaultLimits()
+	limits.FinalizationTurns = 1
 	require.ErrorIs(t, validateLimits(limits), ErrInvalid)
 	limits = DefaultLimits()
 	limits.RepeatedToolCallLimit = 17
 	require.ErrorIs(t, validateLimits(limits), ErrInvalid)
+	limits = DefaultLimits()
+	limits.MaxActivityTools = 1025
+	require.ErrorIs(t, validateLimits(limits), ErrInvalid)
+	limits = DefaultLimits()
+	limits.MaxDuration = 24 * time.Hour
+	require.NoError(t, validateLimits(limits))
 }
 
 func TestNormalizeLimitsPreservesOlderPolicyRecords(t *testing.T) {
 	t.Parallel()
 
 	limits := DefaultLimits()
+	limits.MaxTurns = 26
 	limits.FinalizationTurns = 0
 	limits.RepeatedToolCallLimit = 0
+	limits.MaxActivityTools = 0
 
 	normalized := normalizeLimits(limits)
-	assert.Equal(t, DefaultLimits().FinalizationTurns, normalized.FinalizationTurns)
+	assert.Equal(t, 1, normalized.FinalizationTurns)
 	assert.Equal(t, DefaultLimits().RepeatedToolCallLimit, normalized.RepeatedToolCallLimit)
+	assert.Equal(t, DefaultLimits().MaxActivityTools, normalized.MaxActivityTools)
 	require.NoError(t, validateLimits(normalized))
+
+	unlimited := DefaultLimits()
+	unlimited.FinalizationTurns = 0
+	assert.Zero(t, normalizeLimits(unlimited).FinalizationTurns)
 }

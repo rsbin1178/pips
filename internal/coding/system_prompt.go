@@ -203,7 +203,7 @@ func writeModeGuidance(prompt *strings.Builder, mode OperatingMode, toolNames []
 	}
 
 	if _, ok := available["run_subagent"]; ok {
-		prompt.WriteString("- Use run_subagent for one bounded specialist result that blocks the current task. The parent remains responsible for validating and integrating the result.\n")
+		prompt.WriteString("- Use run_subagent for one isolated read-only specialist result that blocks the current task. The parent remains responsible for validating and integrating the result.\n")
 	}
 
 	if _, ok := available["spawn_agent"]; ok {

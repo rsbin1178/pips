@@ -68,6 +68,95 @@ func TestControllerPausesResolvesAndReconciles(t *testing.T) {
 	assert.Nil(t, request)
 }
 
+func TestControllerAcceptsJSONEncodedQuestionsCompatibility(t *testing.T) {
+	t.Parallel()
+
+	controller, err := question.NewController(&recordingResolver{})
+	require.NoError(t, err)
+
+	questions, err := json.Marshal(testSpec().Questions)
+	require.NoError(t, err)
+	args, err := json.Marshal(struct {
+		Questions string `json:"questions"`
+	}{Questions: string(questions)})
+	require.NoError(t, err)
+
+	call := ai.ToolCallPart{
+		ID: "stringified-questions", Name: question.ToolName, Args: args,
+	}
+	decision := controller.BeforeTool(t.Context(), agent.ToolCallInfo{ToolCall: agent.ToolCall{
+		ID: call.ID, Name: call.Name, Args: call.Args,
+	}})
+	assert.Equal(t, agent.ToolDecisionPause, decision.Action)
+
+	request, err := controller.Reconcile([]ai.ToolCallPart{call})
+	require.NoError(t, err)
+	require.NotNil(t, request)
+	assert.Equal(t, testSpec().Questions, request.Questions)
+}
+
+func TestControllerExplainsMalformedJSONEncodedQuestions(t *testing.T) {
+	t.Parallel()
+
+	controller, err := question.NewController(&recordingResolver{})
+	require.NoError(t, err)
+	args, err := json.Marshal(struct {
+		Questions string `json:"questions"`
+	}{Questions: `[{"header":`})
+	require.NoError(t, err)
+
+	decision := controller.BeforeTool(t.Context(), agent.ToolCallInfo{ToolCall: agent.ToolCall{
+		ID: "malformed-stringified-questions", Name: question.ToolName, Args: args,
+	}})
+
+	assert.Equal(t, agent.ToolDecisionDeny, decision.Action)
+	assert.Contains(t, decision.Reason, "decode JSON-encoded questions")
+}
+
+func TestControllerKeepsJSONEncodedQuestionsStrict(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		questions string
+		want      string
+	}{
+		{
+			name: "unknown nested field",
+			questions: `[{"header":"H","question":"Q","options":[` +
+				`{"label":"A","description":"A","unknown":true},` +
+				`{"label":"B","description":"B"}]}]`,
+			want: "unknown field",
+		},
+		{
+			name: "duplicate nested field",
+			questions: `[{"header":"H","header":"H2","question":"Q","options":[` +
+				`{"label":"A","description":"A"},` +
+				`{"label":"B","description":"B"}]}]`,
+			want: "duplicate object key",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			controller, err := question.NewController(&recordingResolver{})
+			require.NoError(t, err)
+			args, err := json.Marshal(struct {
+				Questions string `json:"questions"`
+			}{Questions: test.questions})
+			require.NoError(t, err)
+
+			decision := controller.BeforeTool(t.Context(), agent.ToolCallInfo{ToolCall: agent.ToolCall{
+				ID: "strict-stringified-questions", Name: question.ToolName, Args: args,
+			}})
+			assert.Equal(t, agent.ToolDecisionDeny, decision.Action)
+			assert.Contains(t, decision.Reason, test.want)
+		})
+	}
+}
+
 func TestControllerRejectsMalformedStaleAndCanceledInput(t *testing.T) {
 	t.Parallel()
 

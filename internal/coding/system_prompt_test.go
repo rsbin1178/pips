@@ -42,7 +42,7 @@ func TestBuildCodingSystemPromptComposesDeterministicLayers(t *testing.T) {
 	assert.Equal(t, 1, strings.Count(prompt, `"read"`))
 	assert.Contains(t, prompt, "Use tool_search only when an Extension or MCP tool is needed")
 	assert.Contains(t, prompt, "Use spawn_agent for independent background work")
-	assert.NotContains(t, prompt, "Use run_subagent for one bounded specialist result")
+	assert.NotContains(t, prompt, "Use run_subagent for one isolated read-only specialist result")
 	assert.Less(t, strings.Index(prompt, "# Runtime environment"), strings.Index(prompt, "# Tool guidance"))
 	assert.Less(t, strings.Index(prompt, "# Tool guidance"), strings.Index(prompt, "# Project instructions"))
 }
