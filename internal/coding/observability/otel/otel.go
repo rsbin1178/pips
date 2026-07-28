@@ -43,6 +43,7 @@ type Observer struct {
 	subagentDuration    metric.Int64Histogram
 	teams               metric.Int64Counter
 	teamDuration        metric.Int64Histogram
+	teamIntegrations    metric.Int64Counter
 }
 
 // New constructs an observer using application-owned or global providers.
@@ -151,6 +152,14 @@ func New(config Config) (*Observer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("coding otel Team duration: %w", err)
 	}
+	teamIntegrations, err := meter.Int64Counter(
+		"pips.coding.team.integrations",
+		metric.WithDescription("Coding Team result integration lifecycle events."),
+		metric.WithUnit("{event}"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("coding otel Team integrations counter: %w", err)
+	}
 
 	return &Observer{
 		tracer:              tp.Tracer(instrumentationName),
@@ -165,6 +174,7 @@ func New(config Config) (*Observer, error) {
 		subagentDuration:    subagentDuration,
 		teams:               teams,
 		teamDuration:        teamDuration,
+		teamIntegrations:    teamIntegrations,
 	}, nil
 }
 
@@ -225,6 +235,8 @@ func (o *Observer) Observe(ctx context.Context, event coding.TelemetryEvent) err
 		o.observeSubagent(ctx, event)
 	case coding.EventTeamLifecycle:
 		o.observeTeam(ctx, event)
+	case coding.EventTeamIntegrationLifecycle:
+		o.observeTeamIntegration(ctx, event)
 	case coding.EventInteractionStarted, coding.EventRunStarted, coding.EventRunCompleted,
 		coding.EventTurnStarted, coding.EventTurnCompleted, coding.EventMessageCommitted,
 		coding.EventMessageDelta, coding.EventToolStarted, coding.EventToolUpdated,
@@ -234,6 +246,22 @@ func (o *Observer) Observe(ctx context.Context, event coding.TelemetryEvent) err
 	}
 
 	return nil
+}
+
+func (o *Observer) observeTeamIntegration(ctx context.Context, event coding.TelemetryEvent) {
+	attrs := []attribute.KeyValue{
+		attribute.String("coding.team.integration.state", event.IntegrationState),
+		attribute.String("coding.team.integration.verification", event.IntegrationVerification),
+		attribute.String("coding.team.integration.code", event.Code),
+		attribute.Int("coding.team.integration.attempts", event.Attempts),
+		attribute.Int("coding.team.integration.files", event.Files),
+	}
+	metricAttrs := []attribute.KeyValue{
+		attribute.String("coding.team.integration.state", event.IntegrationState),
+		attribute.String("coding.team.integration.verification", event.IntegrationVerification),
+	}
+	o.teamIntegrations.Add(ctx, 1, metric.WithAttributes(metricAttrs...))
+	o.instant(ctx, "coding.team.integration", event, attrs, event.Failed)
 }
 
 func (o *Observer) observeTeam(ctx context.Context, event coding.TelemetryEvent) {

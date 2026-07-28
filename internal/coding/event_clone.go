@@ -71,6 +71,8 @@ func cloneEventPayload(payload EventPayload) EventPayload {
 		return value
 	case TeamLifecycle:
 		return value
+	case TeamIntegrationLifecycle:
+		return value
 	case ApprovalRequired:
 		return cloneApprovalRequired(value)
 	case ApprovalUnknown:

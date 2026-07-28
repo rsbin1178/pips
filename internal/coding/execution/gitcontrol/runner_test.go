@@ -56,6 +56,52 @@ func TestRunnerBuildsFixedWorktreeArgv(t *testing.T) {
 	), calls[1])
 }
 
+func TestRunnerBuildsReadOnlyStatusArgvAndDigest(t *testing.T) {
+	t.Parallel()
+
+	runner := testRunner(t)
+
+	var call []string
+
+	runner.process = func(
+		_ context.Context,
+		_ string,
+		arguments, _ []string,
+		_ []byte,
+		_ int64,
+		_ time.Duration,
+	) (commandResult, error) {
+		call = append([]string(nil), arguments...)
+
+		return commandResult{stdout: []byte("?? untracked\x00")}, nil
+	}
+
+	repository := filepath.Clean(t.TempDir())
+	status, err := runner.SnapshotStatus(t.Context(), repository)
+	require.NoError(t, err)
+	assert.False(t, status.Clean)
+	assert.Len(t, status.Digest, 64)
+	assert.Equal(t, []string{"untracked"}, status.Paths)
+
+	prefix := append([]string{"-C", repository}, fixedConfig...)
+	assert.Equal(t, append(append([]string(nil), prefix...),
+		"status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none",
+	), call)
+}
+
+func TestParseStatusPathsIncludesBothRenameSides(t *testing.T) {
+	t.Parallel()
+
+	paths, err := parseStatusPaths(
+		[]byte(" M changed.txt\x00R  destination.txt\x00source.txt\x00?? untracked.txt\x00"),
+		10,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		"changed.txt", "destination.txt", "source.txt", "untracked.txt",
+	}, paths)
+}
+
 func TestRunnerBuildsAtomicRefTransaction(t *testing.T) {
 	t.Parallel()
 
@@ -157,6 +203,7 @@ func TestGitControlSourceContainsNoDestructiveFallbackLiteral(t *testing.T) {
 	directory := filepath.Dir(source)
 	forbidden := map[string]struct{}{
 		"--force": {}, "-f": {}, "-B": {}, "-D": {}, "prune": {},
+		"merge": {}, "cherry-pick": {}, "reset": {}, "clean": {}, "stash": {}, "apply": {},
 		"sh": {}, "bash": {}, "zsh": {},
 	}
 
@@ -174,6 +221,12 @@ func TestGitControlSourceContainsNoDestructiveFallbackLiteral(t *testing.T) {
 		)
 		require.NoError(t, err)
 		ast.Inspect(file, func(node ast.Node) bool {
+			selector, ok := node.(*ast.SelectorExpr)
+			if ok {
+				assert.NotEqual(t, "RemoveAll", selector.Sel.Name,
+					"%s contains broad recursive cleanup", entry.Name())
+			}
+
 			literal, ok := node.(*ast.BasicLit)
 			if !ok || literal.Kind != token.STRING {
 				return true

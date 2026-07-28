@@ -64,13 +64,17 @@ type IntegrationState string
 
 // Integration resource states.
 const (
-	IntegrationPlanned  IntegrationState = "planned"
-	IntegrationReady    IntegrationState = "ready"
-	IntegrationVerified IntegrationState = "verified"
-	IntegrationApproved IntegrationState = "approved"
-	IntegrationApplied  IntegrationState = "applied"
-	IntegrationFailed   IntegrationState = "failed"
-	IntegrationRetained IntegrationState = "retained"
+	IntegrationPlanned     IntegrationState = "planned"
+	IntegrationReady       IntegrationState = "ready"
+	IntegrationVerified    IntegrationState = "verified"
+	IntegrationApproved    IntegrationState = "approved"
+	IntegrationApplied     IntegrationState = "applied"
+	IntegrationConflict    IntegrationState = "conflict"
+	IntegrationApplying    IntegrationState = "applying"
+	IntegrationInterrupted IntegrationState = "interrupted"
+	IntegrationRolledBack  IntegrationState = "rolled_back"
+	IntegrationFailed      IntegrationState = "failed"
+	IntegrationRetained    IntegrationState = "retained"
 )
 
 // CleanupClass states what may happen to retained resources. It is a
@@ -152,13 +156,19 @@ type AttemptResource struct {
 
 // IntegrationResource binds one integration attempt to selected Team results.
 type IntegrationResource struct {
-	ID                string           `json:"id"`
-	AttemptIDs        []team.AttemptID `json:"attempt_ids"`
-	Worktree          WorktreeResource `json:"worktree,omitzero"`
-	State             IntegrationState `json:"state"`
-	DiffDigest        string           `json:"diff_digest,omitempty"`
-	ApprovalTokenHash string           `json:"approval_token_hash,omitempty"`
-	Cleanup           CleanupClass     `json:"cleanup"`
+	ID                 string           `json:"id"`
+	AttemptIDs         []team.AttemptID `json:"attempt_ids"`
+	ResourceRevision   team.Revision    `json:"resource_revision,omitempty"`
+	Worktree           WorktreeResource `json:"worktree,omitzero"`
+	State              IntegrationState `json:"state"`
+	DiffDigest         string           `json:"diff_digest,omitempty"`
+	TreeOID            string           `json:"tree_oid,omitempty"`
+	CommitOID          string           `json:"commit_oid,omitempty"`
+	ManifestDigest     string           `json:"manifest_digest,omitempty"`
+	VerificationDigest string           `json:"verification_digest,omitempty"`
+	JournalDigest      string           `json:"journal_digest,omitempty"`
+	ApprovalTokenHash  string           `json:"approval_token_hash,omitempty"`
+	Cleanup            CleanupClass     `json:"cleanup"`
 }
 
 // Snapshot is the latest full application resource truth for one Team.

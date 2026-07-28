@@ -601,6 +601,14 @@ func eventCases() []eventCase {
 				Usage: usage, DurationMillis: 25,
 			},
 		)},
+		{name: "Team integration lifecycle", event: newSessionEvent(
+			EventTeamIntegrationLifecycle,
+			TeamIntegrationLifecycle{
+				TeamID: "team-1", IntegrationID: "int-1", State: TeamIntegrationVerified,
+				VerificationState: "passed", Attempts: 2,
+				Files: 3, Added: 1, Changed: 1, Deleted: 1, Binary: 1,
+			},
+		)},
 		{name: "approval required", event: newInteractionEvent(
 			EventApprovalRequired,
 			ApprovalRequired{
@@ -702,6 +710,52 @@ func TestValidateTeamLifecycleRejectsContentAndAccountingShapeViolations(t *test
 	}
 	for _, payload := range tests {
 		event := newSessionEvent(EventTeamLifecycle, payload)
+		require.ErrorIs(t, ValidateEvent(event), ErrInvalidEvent)
+	}
+}
+
+func TestTeamIntegrationTelemetryOmitsRoutingIdentity(t *testing.T) {
+	t.Parallel()
+
+	event := newSessionEvent(EventTeamIntegrationLifecycle, TeamIntegrationLifecycle{
+		TeamID: "team-secret", IntegrationID: "integration-secret",
+		State: TeamIntegrationVerificationFailed, VerificationState: "timeout",
+		Attempts: 2, Files: 2, Changed: 2, Code: "verification_timeout",
+	})
+	require.NoError(t, ValidateEvent(event))
+
+	telemetry, err := Telemetry(event)
+	require.NoError(t, err)
+	encoded, err := json.Marshal(telemetry)
+	require.NoError(t, err)
+	assert.NotContains(t, string(encoded), "team-secret")
+	assert.NotContains(t, string(encoded), "integration-secret")
+	assert.Equal(t, "team_integration", telemetry.Agent)
+	assert.Equal(t, string(TeamIntegrationVerificationFailed), telemetry.IntegrationState)
+	assert.Equal(t, "timeout", telemetry.IntegrationVerification)
+	assert.True(t, telemetry.Failed)
+}
+
+func TestValidateTeamIntegrationLifecycleRejectsInvalidEvidence(t *testing.T) {
+	t.Parallel()
+
+	tests := []TeamIntegrationLifecycle{
+		{TeamID: "team-1", IntegrationID: "", State: TeamIntegrationReady},
+		{
+			TeamID: "team-1", IntegrationID: "int-1", State: TeamIntegrationReady,
+			Files: 2, Changed: 1,
+		},
+		{
+			TeamID: "team-1", IntegrationID: "int-1",
+			State: TeamIntegrationVerificationFailed, VerificationState: "failed",
+		},
+		{
+			TeamID: "team-1", IntegrationID: "int-1", State: TeamIntegrationVerified,
+			VerificationState: "unknown",
+		},
+	}
+	for _, payload := range tests {
+		event := newSessionEvent(EventTeamIntegrationLifecycle, payload)
 		require.ErrorIs(t, ValidateEvent(event), ErrInvalidEvent)
 	}
 }
