@@ -516,8 +516,16 @@ func validateSuccessor(previous, next Snapshot) error {
 			continue
 		}
 		if !slices.Equal(prior.AttemptIDs, integration.AttemptIDs) ||
+			prior.ResourceRevision != 0 && prior.ResourceRevision != integration.ResourceRevision ||
 			!worktreeSuccessor(prior.Worktree, integration.Worktree) ||
+			!integrationStateSuccessor(prior.State, integration.State) ||
 			prior.DiffDigest != "" && prior.DiffDigest != integration.DiffDigest ||
+			prior.TreeOID != "" && prior.TreeOID != integration.TreeOID ||
+			prior.CommitOID != "" && prior.CommitOID != integration.CommitOID ||
+			prior.ManifestDigest != "" && prior.ManifestDigest != integration.ManifestDigest ||
+			prior.VerificationDigest != "" &&
+				prior.VerificationDigest != integration.VerificationDigest ||
+			prior.JournalDigest != "" && prior.JournalDigest != integration.JournalDigest ||
 			prior.ApprovalTokenHash != "" &&
 				prior.ApprovalTokenHash != integration.ApprovalTokenHash {
 			return fmt.Errorf("%w: Integration binding changed", ErrInvalid)
@@ -529,6 +537,38 @@ func validateSuccessor(previous, next Snapshot) error {
 	}
 
 	return nil
+}
+
+func integrationStateSuccessor(previous, next IntegrationState) bool {
+	if previous == next {
+		return true
+	}
+
+	var allowed []IntegrationState
+	switch previous {
+	case IntegrationPlanned:
+		allowed = []IntegrationState{
+			IntegrationReady, IntegrationVerified, IntegrationConflict,
+			IntegrationFailed, IntegrationInterrupted, IntegrationRetained,
+		}
+	case IntegrationReady, IntegrationVerified, IntegrationApproved:
+		allowed = []IntegrationState{
+			IntegrationApplying, IntegrationInterrupted, IntegrationRetained,
+		}
+	case IntegrationApplying:
+		allowed = []IntegrationState{
+			IntegrationApplied, IntegrationInterrupted,
+			IntegrationRolledBack, IntegrationRetained,
+		}
+	case IntegrationInterrupted:
+		allowed = []IntegrationState{
+			IntegrationApplied, IntegrationRolledBack, IntegrationRetained,
+		}
+	case IntegrationApplied, IntegrationConflict, IntegrationRolledBack,
+		IntegrationFailed, IntegrationRetained:
+	}
+
+	return slices.Contains(allowed, next)
 }
 
 //nolint:gocyclo // Every previously observed Worktree identity component is immutable.

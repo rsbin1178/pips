@@ -1095,6 +1095,7 @@ const (
 	operationTeamPropose       runtimeOperationKind = "propose Team"
 	operationTeamConfirm       runtimeOperationKind = "confirm Team"
 	operationTeamResume        runtimeOperationKind = "resume Team"
+	operationTeamIntegration   runtimeOperationKind = "integrate Team results"
 )
 
 func (r *Runtime) runSequence(

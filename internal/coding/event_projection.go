@@ -187,37 +187,41 @@ func safeMessage(message ai.Message) ai.Message {
 // one Coding event. It never contains session, interaction, run, request, or
 // provider-response identifiers.
 type TelemetryEvent struct {
-	Type           EventType          `json:"type"`
-	Time           time.Time          `json:"time"`
-	Provider       ai.Provider        `json:"provider,omitempty"`
-	ModelID        string             `json:"model_id,omitempty"`
-	Agent          string             `json:"agent,omitempty"`
-	SubagentRole   string             `json:"subagent_role,omitempty"`
-	SubagentState  string             `json:"subagent_state,omitempty"`
-	TeamScope      string             `json:"team_scope,omitempty"`
-	TeamState      string             `json:"team_state,omitempty"`
-	TeamActivity   string             `json:"team_activity,omitempty"`
-	Tool           string             `json:"tool,omitempty"`
-	ToolCalls      int                `json:"tool_calls,omitempty"`
-	Stop           agent.StopReason   `json:"stop,omitempty"`
-	Phase          Phase              `json:"phase,omitempty"`
-	Mode           OperatingMode      `json:"mode,omitempty"`
-	Outcome        InteractionOutcome `json:"outcome,omitempty"`
-	Component      string             `json:"component,omitempty"`
-	Code           string             `json:"code,omitempty"`
-	Turns          int                `json:"turns,omitempty"`
-	Changes        int                `json:"changes,omitempty"`
-	Nodes          int                `json:"nodes,omitempty"`
-	Questions      int                `json:"questions,omitempty"`
-	Answers        int                `json:"answers,omitempty"`
-	Chat           bool               `json:"chat,omitempty"`
-	CompactionMode CompactionMode     `json:"compaction_mode,omitempty"`
-	TokensBefore   int                `json:"tokens_before,omitempty"`
-	TokensAfter    int                `json:"tokens_after,omitempty"`
-	DurationMillis int64              `json:"duration_ms,omitempty"`
-	Usage          TokenUsage         `json:"usage"`
-	Resumed        bool               `json:"resumed,omitempty"`
-	Failed         bool               `json:"failed,omitempty"`
+	Type                    EventType          `json:"type"`
+	Time                    time.Time          `json:"time"`
+	Provider                ai.Provider        `json:"provider,omitempty"`
+	ModelID                 string             `json:"model_id,omitempty"`
+	Agent                   string             `json:"agent,omitempty"`
+	SubagentRole            string             `json:"subagent_role,omitempty"`
+	SubagentState           string             `json:"subagent_state,omitempty"`
+	TeamScope               string             `json:"team_scope,omitempty"`
+	TeamState               string             `json:"team_state,omitempty"`
+	TeamActivity            string             `json:"team_activity,omitempty"`
+	IntegrationState        string             `json:"integration_state,omitempty"`
+	IntegrationVerification string             `json:"integration_verification,omitempty"`
+	Tool                    string             `json:"tool,omitempty"`
+	ToolCalls               int                `json:"tool_calls,omitempty"`
+	Stop                    agent.StopReason   `json:"stop,omitempty"`
+	Phase                   Phase              `json:"phase,omitempty"`
+	Mode                    OperatingMode      `json:"mode,omitempty"`
+	Outcome                 InteractionOutcome `json:"outcome,omitempty"`
+	Component               string             `json:"component,omitempty"`
+	Code                    string             `json:"code,omitempty"`
+	Turns                   int                `json:"turns,omitempty"`
+	Changes                 int                `json:"changes,omitempty"`
+	Attempts                int                `json:"attempts,omitempty"`
+	Files                   int                `json:"files,omitempty"`
+	Nodes                   int                `json:"nodes,omitempty"`
+	Questions               int                `json:"questions,omitempty"`
+	Answers                 int                `json:"answers,omitempty"`
+	Chat                    bool               `json:"chat,omitempty"`
+	CompactionMode          CompactionMode     `json:"compaction_mode,omitempty"`
+	TokensBefore            int                `json:"tokens_before,omitempty"`
+	TokensAfter             int                `json:"tokens_after,omitempty"`
+	DurationMillis          int64              `json:"duration_ms,omitempty"`
+	Usage                   TokenUsage         `json:"usage"`
+	Resumed                 bool               `json:"resumed,omitempty"`
+	Failed                  bool               `json:"failed,omitempty"`
 }
 
 // Telemetry projects one validated event into content-free observability data.
@@ -290,6 +294,17 @@ func Telemetry(event Event) (TelemetryEvent, error) {
 		projectSubagentTelemetry(&projected, event.Type, value)
 	case TeamLifecycle:
 		projectTeamTelemetry(&projected, value)
+	case TeamIntegrationLifecycle:
+		projected.Agent = "team_integration"
+		projected.IntegrationState = string(value.State)
+		projected.IntegrationVerification = value.VerificationState
+		projected.Attempts = value.Attempts
+		projected.Files = value.Files
+		projected.Changes = value.Files
+		projected.Code = value.Code
+		projected.Failed = value.State == TeamIntegrationConflict ||
+			value.State == TeamIntegrationVerificationFailed ||
+			value.State == TeamIntegrationInterrupted
 	case ApprovalRequired:
 		projected.Tool = value.Tool
 	case ApprovalUnknown:

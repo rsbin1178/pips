@@ -14,8 +14,9 @@ import (
 )
 
 const (
-	maxRecentSubagents     = 128
-	maxRecentTeamLifecycle = 256
+	maxRecentSubagents        = 128
+	maxRecentTeamLifecycle    = 256
+	maxRecentTeamIntegrations = 64
 )
 
 // InteractionState is the current or most recently completed user interaction.
@@ -91,6 +92,12 @@ type TeamLifecycleState struct {
 	TeamLifecycle
 }
 
+// TeamIntegrationLifecycleState is the latest compact projection for one
+// isolated Team result integration.
+type TeamIntegrationLifecycleState struct {
+	TeamIntegrationLifecycle
+}
+
 // ApprovalKind identifies the approval overlay content.
 type ApprovalKind string
 
@@ -153,19 +160,20 @@ type State struct {
 	Transcript  []ai.Message     `json:"transcript"`
 	// SyntheticMessages contains transcript indexes owned by Runtime-generated
 	// protocol input. Frontends render them as neutral activity, not user chat.
-	SyntheticMessages []int                   `json:"synthetic_messages,omitempty"`
-	Draft             []MessageDelta          `json:"draft"`
-	Runs              []RunState              `json:"runs"`
-	Tools             []ToolState             `json:"tools"`
-	Subagents         []SubagentState         `json:"subagents"`
-	Teams             []TeamLifecycleState    `json:"teams,omitempty"`
-	Approval          ApprovalState           `json:"approval"`
-	Question          QuestionState           `json:"question"`
-	Changes           *WorkspaceChanged       `json:"changes,omitempty"`
-	Diagnostics       []IntegrationDiagnostic `json:"diagnostics"`
-	LastError         *RuntimeError           `json:"last_error,omitempty"`
-	Tree              SessionTree             `json:"tree"`
-	Compaction        CompactionState         `json:"compaction"`
+	SyntheticMessages []int                           `json:"synthetic_messages,omitempty"`
+	Draft             []MessageDelta                  `json:"draft"`
+	Runs              []RunState                      `json:"runs"`
+	Tools             []ToolState                     `json:"tools"`
+	Subagents         []SubagentState                 `json:"subagents"`
+	Teams             []TeamLifecycleState            `json:"teams,omitempty"`
+	TeamIntegrations  []TeamIntegrationLifecycleState `json:"team_integrations,omitempty"`
+	Approval          ApprovalState                   `json:"approval"`
+	Question          QuestionState                   `json:"question"`
+	Changes           *WorkspaceChanged               `json:"changes,omitempty"`
+	Diagnostics       []IntegrationDiagnostic         `json:"diagnostics"`
+	LastError         *RuntimeError                   `json:"last_error,omitempty"`
+	Tree              SessionTree                     `json:"tree"`
+	Compaction        CompactionState                 `json:"compaction"`
 
 	activeRuns  map[string]int
 	openTurns   map[string]int
@@ -201,6 +209,7 @@ func (state State) Clone() State {
 	}
 	cloned.Subagents = slices.Clone(state.Subagents)
 	cloned.Teams = slices.Clone(state.Teams)
+	cloned.TeamIntegrations = slices.Clone(state.TeamIntegrations)
 
 	cloned.Approval = cloneApprovalState(state.Approval)
 	if state.Question.Required != nil {
@@ -504,6 +513,10 @@ func (state *State) apply(event Event) error {
 		if err := state.applyTeamLifecycle(payload); err != nil {
 			return err
 		}
+	case TeamIntegrationLifecycle:
+		if err := state.applyTeamIntegrationLifecycle(payload); err != nil {
+			return err
+		}
 	case ApprovalRequired:
 		if err := state.requireInteraction(event.InteractionID); err != nil || state.Approval.Kind != ApprovalNone {
 			return protocolError("approval request cannot be displayed")
@@ -612,6 +625,106 @@ func (state *State) applyTeamLifecycle(payload TeamLifecycle) error {
 	state.Teams[index] = TeamLifecycleState{TeamLifecycle: payload}
 
 	return nil
+}
+
+//nolint:gocyclo // The reducer keeps transition validation and bounded projection atomic.
+func (state *State) applyTeamIntegrationLifecycle(payload TeamIntegrationLifecycle) error {
+	if !state.SessionOpen || state.SessionID == "" {
+		return protocolError("Team integration lifecycle requires an open Session")
+	}
+	index := -1
+	for candidate := range state.TeamIntegrations {
+		if state.TeamIntegrations[candidate].IntegrationID == payload.IntegrationID {
+			if state.TeamIntegrations[candidate].TeamID != payload.TeamID {
+				return protocolError("Team integration identity changed")
+			}
+			index = candidate
+			break
+		}
+	}
+	if index < 0 {
+		if !validInitialTeamIntegrationStatus(payload.State) {
+			return protocolError("Team integration cannot begin in state %q", payload.State)
+		}
+		state.TeamIntegrations = append(
+			state.TeamIntegrations,
+			TeamIntegrationLifecycleState{TeamIntegrationLifecycle: payload},
+		)
+		if len(state.TeamIntegrations) > maxRecentTeamIntegrations {
+			state.TeamIntegrations = slices.Clone(
+				state.TeamIntegrations[len(state.TeamIntegrations)-maxRecentTeamIntegrations:],
+			)
+		}
+
+		return nil
+	}
+	previous := state.TeamIntegrations[index].State
+	if terminalTeamIntegrationStatus(previous) ||
+		!validTeamIntegrationTransition(previous, payload.State) {
+		return protocolError("Team integration cannot change from %q to %q", previous, payload.State)
+	}
+	previousValue := state.TeamIntegrations[index].TeamIntegrationLifecycle
+	if payload.Attempts == 0 && payload.Files == 0 && payload.Added == 0 &&
+		payload.Changed == 0 && payload.Deleted == 0 && payload.Binary == 0 {
+		payload.Attempts = previousValue.Attempts
+		payload.Files = previousValue.Files
+		payload.Added = previousValue.Added
+		payload.Changed = previousValue.Changed
+		payload.Deleted = previousValue.Deleted
+		payload.Binary = previousValue.Binary
+	}
+	if payload.VerificationState == "" {
+		payload.VerificationState = previousValue.VerificationState
+	}
+	state.TeamIntegrations[index] = TeamIntegrationLifecycleState{TeamIntegrationLifecycle: payload}
+
+	return nil
+}
+
+func validInitialTeamIntegrationStatus(value TeamIntegrationStatus) bool {
+	switch value {
+	case TeamIntegrationConflict, TeamIntegrationReady, TeamIntegrationVerified,
+		TeamIntegrationVerificationFailed, TeamIntegrationApprovalRequired,
+		TeamIntegrationInterrupted, TeamIntegrationRecoverable:
+		return true
+	default:
+		return false
+	}
+}
+
+func terminalTeamIntegrationStatus(value TeamIntegrationStatus) bool {
+	switch value {
+	case TeamIntegrationConflict, TeamIntegrationVerificationFailed,
+		TeamIntegrationApprovalRequired, TeamIntegrationApplied,
+		TeamIntegrationRejected, TeamIntegrationRolledBack:
+		return true
+	default:
+		return false
+	}
+}
+
+//nolint:gocyclo // The explicit transition matrix rejects accidental lifecycle fallthrough.
+func validTeamIntegrationTransition(previous, next TeamIntegrationStatus) bool {
+	if previous == next {
+		return previous == TeamIntegrationInterrupted || previous == TeamIntegrationRecoverable
+	}
+	switch previous {
+	case TeamIntegrationReady, TeamIntegrationVerified:
+		return next == TeamIntegrationApplying || next == TeamIntegrationRejected ||
+			next == TeamIntegrationRecoverable
+	case TeamIntegrationApplying:
+		return next == TeamIntegrationApplied || next == TeamIntegrationInterrupted ||
+			next == TeamIntegrationRecoverable || next == TeamIntegrationRolledBack ||
+			next == TeamIntegrationRejected
+	case TeamIntegrationInterrupted:
+		return next == TeamIntegrationRecoverable || next == TeamIntegrationApplied ||
+			next == TeamIntegrationRolledBack
+	case TeamIntegrationRecoverable:
+		return next == TeamIntegrationApplied || next == TeamIntegrationRolledBack ||
+			next == TeamIntegrationInterrupted
+	default:
+		return false
+	}
 }
 
 func (state *State) teamLifecycleIndex(payload TeamLifecycle) int {

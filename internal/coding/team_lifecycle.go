@@ -26,6 +26,24 @@ func (r *Runtime) publishTeamLifecycle(ctx context.Context, value TeamLifecycle)
 	_ = emitter.emit("", "", EventTeamLifecycle, value)
 }
 
+// publishTeamIntegrationLifecycle commits a bounded, content-free integration
+// projection. Durable Team state and private journals remain authoritative.
+func (r *Runtime) publishTeamIntegrationLifecycle(
+	ctx context.Context,
+	value TeamIntegrationLifecycle,
+) {
+	if r == nil || r.publisher == nil {
+		return
+	}
+
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	emitter := newEventEmitter(context.WithoutCancel(ctx), r, nil, false)
+	_ = emitter.emit("", "", EventTeamIntegrationLifecycle, value)
+}
+
 func teamAttemptLifecycle(candidate workerCandidate, state TeamLifecycleStatus) TeamLifecycle {
 	return TeamLifecycle{
 		TeamID: candidate.key.teamID, MemberID: candidate.memberID,

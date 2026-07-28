@@ -11,6 +11,7 @@ import (
 	"github.com/rsbin/pips/agent/catalog"
 	"github.com/rsbin/pips/agent/team"
 	"github.com/rsbin/pips/internal/coding/teamcontrol"
+	"github.com/rsbin/pips/internal/coding/teamintegration"
 	"github.com/rsbin/pips/internal/coding/teamstate"
 	"github.com/rsbin/pips/internal/coding/teamworktree"
 )
@@ -19,17 +20,19 @@ import (
 // scheduler and Attempt owner tables are added to this same owner rather than
 // introducing a second Coding application container.
 type teamCoordinator struct {
-	mu        sync.Mutex
-	controlMu sync.Mutex
+	mu            sync.Mutex
+	controlMu     sync.Mutex
+	integrationMu sync.Mutex
 
-	id        team.ID
-	leadID    team.MemberID
-	engine    *team.Engine
-	state     *teamstate.Store
-	control   *teamcontrol.Store
-	worktree  *teamworktree.Manager
-	lease     *teamworktree.Lease
-	lifecycle teamLifecycleSink
+	id          team.ID
+	leadID      team.MemberID
+	engine      *team.Engine
+	state       *teamstate.Store
+	control     *teamcontrol.Store
+	worktree    *teamworktree.Manager
+	integration *teamintegration.Manager
+	lease       *teamworktree.Lease
+	lifecycle   teamLifecycleSink
 
 	factory   coordinatorOwnerFactory
 	admission *workerAdmission

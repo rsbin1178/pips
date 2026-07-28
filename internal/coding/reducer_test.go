@@ -362,6 +362,73 @@ func TestReduceTeamLifecycleIsCompactBoundedAndStrict(t *testing.T) {
 	assert.Len(t, state.Teams, maxRecentTeamLifecycle)
 }
 
+func TestReduceTeamIntegrationLifecyclePreservesEvidenceAndIsStrict(t *testing.T) {
+	t.Parallel()
+
+	events := []Event{
+		newSessionEvent(EventSessionOpened, SessionOpened{
+			Provider: ai.ProviderOpenAI, ModelID: "gpt-test",
+		}),
+		newSessionEvent(EventTeamIntegrationLifecycle, TeamIntegrationLifecycle{
+			TeamID: "team-1", IntegrationID: "int-1", State: TeamIntegrationVerified,
+			VerificationState: "passed", Attempts: 2,
+			Files: 3, Added: 1, Changed: 1, Deleted: 1,
+		}),
+		newSessionEvent(EventTeamIntegrationLifecycle, TeamIntegrationLifecycle{
+			TeamID: "team-1", IntegrationID: "int-1", State: TeamIntegrationApplying,
+		}),
+		newSessionEvent(EventTeamIntegrationLifecycle, TeamIntegrationLifecycle{
+			TeamID: "team-1", IntegrationID: "int-1", State: TeamIntegrationApplied,
+		}),
+	}
+	var state State
+	for index := range events {
+		events[index].Sequence = uint64(index + 1)
+		var err error
+		state, err = Reduce(state, events[index])
+		require.NoError(t, err)
+	}
+	require.Len(t, state.TeamIntegrations, 1)
+	integration := state.TeamIntegrations[0]
+	assert.Equal(t, TeamIntegrationApplied, integration.State)
+	assert.Equal(t, 2, integration.Attempts)
+	assert.Equal(t, 3, integration.Files)
+	assert.Equal(t, "passed", integration.VerificationState)
+
+	late := newSessionEvent(EventTeamIntegrationLifecycle, TeamIntegrationLifecycle{
+		TeamID: "team-1", IntegrationID: "int-1", State: TeamIntegrationApplying,
+	})
+	late.Sequence = state.Sequence + 1
+	_, err := Reduce(state, late)
+	require.ErrorIs(t, err, ErrEventProtocol)
+
+	invalidInitial := newSessionEvent(EventTeamIntegrationLifecycle, TeamIntegrationLifecycle{
+		TeamID: "team-1", IntegrationID: "int-invalid", State: TeamIntegrationApplying,
+	})
+	invalidInitial.Sequence = state.Sequence + 1
+	_, err = Reduce(state, invalidInitial)
+	require.ErrorIs(t, err, ErrEventProtocol)
+
+	changedTeam := newSessionEvent(EventTeamIntegrationLifecycle, TeamIntegrationLifecycle{
+		TeamID: "team-2", IntegrationID: "int-1", State: TeamIntegrationRecoverable,
+		Code: "recovery_available",
+	})
+	changedTeam.Sequence = state.Sequence + 1
+	_, err = Reduce(state, changedTeam)
+	require.ErrorIs(t, err, ErrEventProtocol)
+
+	for index := range maxRecentTeamIntegrations + 1 {
+		event := newSessionEvent(EventTeamIntegrationLifecycle, TeamIntegrationLifecycle{
+			TeamID: "team-1", IntegrationID: fmt.Sprintf("bulk-int-%d", index),
+			State: TeamIntegrationReady,
+		})
+		event.Sequence = state.Sequence + 1
+		state, err = Reduce(state, event)
+		require.NoError(t, err)
+	}
+	assert.Len(t, state.TeamIntegrations, maxRecentTeamIntegrations)
+}
+
 func withTeamLifecycle(
 	value TeamLifecycle,
 	state TeamLifecycleStatus,
