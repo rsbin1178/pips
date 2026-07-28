@@ -50,43 +50,44 @@ type EventType string
 
 // Coding Agent event types.
 const (
-	EventSessionOpened         EventType = "session.opened"
-	EventSessionClosed         EventType = "session.closed"
-	EventSessionTreeChanged    EventType = "session.tree_changed"
-	EventSessionNavigated      EventType = "session.navigated"
-	EventSessionForked         EventType = "session.forked"
-	EventCompactionStarted     EventType = "compaction.started"
-	EventCompactionCompleted   EventType = "compaction.completed"
-	EventModeChanged           EventType = "mode.changed"
-	EventInteractionStarted    EventType = "interaction.started"
-	EventInteractionCompleted  EventType = "interaction.completed"
-	EventRunStarted            EventType = "run.started"
-	EventRunCompleted          EventType = "run.completed"
-	EventTurnStarted           EventType = "turn.started"
-	EventTurnCompleted         EventType = "turn.completed"
-	EventMessageCommitted      EventType = "message.committed"
-	EventMessageDelta          EventType = "message.delta"
-	EventToolStarted           EventType = "tool.started"
-	EventToolUpdated           EventType = "tool.updated"
-	EventToolCompleted         EventType = "tool.completed"
-	EventSubagentCreated       EventType = "subagent.created"
-	EventSubagentStarted       EventType = "subagent.started"
-	EventSubagentProgress      EventType = "subagent.progress"
-	EventSubagentCompleted     EventType = "subagent.completed"
-	EventSubagentFailed        EventType = "subagent.failed"
-	EventSubagentCanceled      EventType = "subagent.canceled"
-	EventSubagentInterrupted   EventType = "subagent.interrupted"
-	EventTeamLifecycle         EventType = "team.lifecycle"
-	EventApprovalRequired      EventType = "approval.required"
-	EventApprovalUnknown       EventType = "approval.unknown"
-	EventApprovalResolved      EventType = "approval.resolved"
-	EventQuestionRequired      EventType = "question.required"
-	EventQuestionResolved      EventType = "question.resolved"
-	EventQuestionRejected      EventType = "question.rejected"
-	EventWorkspaceChanged      EventType = "workspace.changed"
-	EventStatusChanged         EventType = "status.changed"
-	EventIntegrationDiagnostic EventType = "integration.diagnostic"
-	EventError                 EventType = "error"
+	EventSessionOpened            EventType = "session.opened"
+	EventSessionClosed            EventType = "session.closed"
+	EventSessionTreeChanged       EventType = "session.tree_changed"
+	EventSessionNavigated         EventType = "session.navigated"
+	EventSessionForked            EventType = "session.forked"
+	EventCompactionStarted        EventType = "compaction.started"
+	EventCompactionCompleted      EventType = "compaction.completed"
+	EventModeChanged              EventType = "mode.changed"
+	EventInteractionStarted       EventType = "interaction.started"
+	EventInteractionCompleted     EventType = "interaction.completed"
+	EventRunStarted               EventType = "run.started"
+	EventRunCompleted             EventType = "run.completed"
+	EventTurnStarted              EventType = "turn.started"
+	EventTurnCompleted            EventType = "turn.completed"
+	EventMessageCommitted         EventType = "message.committed"
+	EventMessageDelta             EventType = "message.delta"
+	EventToolStarted              EventType = "tool.started"
+	EventToolUpdated              EventType = "tool.updated"
+	EventToolCompleted            EventType = "tool.completed"
+	EventSubagentCreated          EventType = "subagent.created"
+	EventSubagentStarted          EventType = "subagent.started"
+	EventSubagentProgress         EventType = "subagent.progress"
+	EventSubagentCompleted        EventType = "subagent.completed"
+	EventSubagentFailed           EventType = "subagent.failed"
+	EventSubagentCanceled         EventType = "subagent.canceled"
+	EventSubagentInterrupted      EventType = "subagent.interrupted"
+	EventTeamLifecycle            EventType = "team.lifecycle"
+	EventTeamIntegrationLifecycle EventType = "team.integration"
+	EventApprovalRequired         EventType = "approval.required"
+	EventApprovalUnknown          EventType = "approval.unknown"
+	EventApprovalResolved         EventType = "approval.resolved"
+	EventQuestionRequired         EventType = "question.required"
+	EventQuestionResolved         EventType = "question.resolved"
+	EventQuestionRejected         EventType = "question.rejected"
+	EventWorkspaceChanged         EventType = "workspace.changed"
+	EventStatusChanged            EventType = "status.changed"
+	EventIntegrationDiagnostic    EventType = "integration.diagnostic"
+	EventError                    EventType = "error"
 )
 
 // Event is one immutable-by-contract increment in a Runtime event stream.
@@ -383,6 +384,43 @@ type TeamLifecycle struct {
 	Code           string              `json:"code,omitempty"`
 }
 
+// TeamIntegrationStatus is the bounded frontend-visible state of one isolated
+// Team result integration. Private paths, refs, tokens, and journal contents
+// never enter this event protocol.
+type TeamIntegrationStatus string
+
+// Team result integration lifecycle states.
+const (
+	TeamIntegrationConflict           TeamIntegrationStatus = "conflict"
+	TeamIntegrationReady              TeamIntegrationStatus = "ready"
+	TeamIntegrationVerified           TeamIntegrationStatus = "verified"
+	TeamIntegrationVerificationFailed TeamIntegrationStatus = "verification_failed"
+	TeamIntegrationApprovalRequired   TeamIntegrationStatus = "approval_required"
+	TeamIntegrationApplying           TeamIntegrationStatus = "applying"
+	TeamIntegrationApplied            TeamIntegrationStatus = "applied"
+	TeamIntegrationRejected           TeamIntegrationStatus = "rejected"
+	TeamIntegrationInterrupted        TeamIntegrationStatus = "interrupted"
+	TeamIntegrationRecoverable        TeamIntegrationStatus = "recoverable"
+	TeamIntegrationRolledBack         TeamIntegrationStatus = "rolled_back"
+)
+
+// TeamIntegrationLifecycle is the content-free projection consumed by
+// frontends and telemetry. Exact evidence remains available through the
+// explicit preview and recovery APIs.
+type TeamIntegrationLifecycle struct {
+	TeamID            team.ID               `json:"team_id"`
+	IntegrationID     string                `json:"integration_id"`
+	State             TeamIntegrationStatus `json:"state"`
+	VerificationState string                `json:"verification_state,omitempty"`
+	Attempts          int                   `json:"attempts,omitempty"`
+	Files             int                   `json:"files,omitempty"`
+	Added             int                   `json:"added,omitempty"`
+	Changed           int                   `json:"changed,omitempty"`
+	Deleted           int                   `json:"deleted,omitempty"`
+	Binary            int                   `json:"binary,omitempty"`
+	Code              string                `json:"code,omitempty"`
+}
+
 // ApprovalRequired describes an exact pending operation for the approval overlay.
 type ApprovalRequired struct {
 	RequestID     string            `json:"request_id"`
@@ -480,37 +518,38 @@ type RuntimeError struct {
 	Fatal   bool   `json:"fatal"`
 }
 
-func (SessionOpened) eventPayload()         {}
-func (SessionClosed) eventPayload()         {}
-func (SessionTreeChanged) eventPayload()    {}
-func (SessionNavigated) eventPayload()      {}
-func (SessionForked) eventPayload()         {}
-func (CompactionStarted) eventPayload()     {}
-func (CompactionCompleted) eventPayload()   {}
-func (ModeChanged) eventPayload()           {}
-func (InteractionStarted) eventPayload()    {}
-func (InteractionCompleted) eventPayload()  {}
-func (RunStarted) eventPayload()            {}
-func (RunCompleted) eventPayload()          {}
-func (TurnStarted) eventPayload()           {}
-func (TurnCompleted) eventPayload()         {}
-func (MessageCommitted) eventPayload()      {}
-func (MessageDelta) eventPayload()          {}
-func (ToolStarted) eventPayload()           {}
-func (ToolUpdated) eventPayload()           {}
-func (ToolCompleted) eventPayload()         {}
-func (SubagentLifecycle) eventPayload()     {}
-func (TeamLifecycle) eventPayload()         {}
-func (ApprovalRequired) eventPayload()      {}
-func (ApprovalUnknown) eventPayload()       {}
-func (ApprovalResolved) eventPayload()      {}
-func (QuestionRequired) eventPayload()      {}
-func (QuestionResolved) eventPayload()      {}
-func (QuestionRejected) eventPayload()      {}
-func (WorkspaceChanged) eventPayload()      {}
-func (StatusChanged) eventPayload()         {}
-func (IntegrationDiagnostic) eventPayload() {}
-func (RuntimeError) eventPayload()          {}
+func (SessionOpened) eventPayload()            {}
+func (SessionClosed) eventPayload()            {}
+func (SessionTreeChanged) eventPayload()       {}
+func (SessionNavigated) eventPayload()         {}
+func (SessionForked) eventPayload()            {}
+func (CompactionStarted) eventPayload()        {}
+func (CompactionCompleted) eventPayload()      {}
+func (ModeChanged) eventPayload()              {}
+func (InteractionStarted) eventPayload()       {}
+func (InteractionCompleted) eventPayload()     {}
+func (RunStarted) eventPayload()               {}
+func (RunCompleted) eventPayload()             {}
+func (TurnStarted) eventPayload()              {}
+func (TurnCompleted) eventPayload()            {}
+func (MessageCommitted) eventPayload()         {}
+func (MessageDelta) eventPayload()             {}
+func (ToolStarted) eventPayload()              {}
+func (ToolUpdated) eventPayload()              {}
+func (ToolCompleted) eventPayload()            {}
+func (SubagentLifecycle) eventPayload()        {}
+func (TeamLifecycle) eventPayload()            {}
+func (TeamIntegrationLifecycle) eventPayload() {}
+func (ApprovalRequired) eventPayload()         {}
+func (ApprovalUnknown) eventPayload()          {}
+func (ApprovalResolved) eventPayload()         {}
+func (QuestionRequired) eventPayload()         {}
+func (QuestionResolved) eventPayload()         {}
+func (QuestionRejected) eventPayload()         {}
+func (WorkspaceChanged) eventPayload()         {}
+func (StatusChanged) eventPayload()            {}
+func (IntegrationDiagnostic) eventPayload()    {}
+func (RuntimeError) eventPayload()             {}
 
 // ValidateEvent verifies the envelope, payload discriminator, and bounded content.
 func ValidateEvent(event Event) error {
@@ -553,7 +592,8 @@ func validateEnvelopeIDs(event Event) error {
 	switch event.Type {
 	case EventSessionOpened, EventSessionClosed, EventSessionTreeChanged,
 		EventSessionNavigated, EventSessionForked, EventCompactionStarted,
-		EventCompactionCompleted, EventModeChanged, EventTeamLifecycle:
+		EventCompactionCompleted, EventModeChanged, EventTeamLifecycle,
+		EventTeamIntegrationLifecycle:
 		if event.InteractionID != "" || event.RunID != "" {
 			return invalidEvent("session event has interaction or run id")
 		}
@@ -711,6 +751,10 @@ func validatePayload(eventType EventType, payload EventPayload) error {
 		if eventType != EventTeamLifecycle || validateTeamLifecycle(value) != nil {
 			return invalidPayload(eventType, payload)
 		}
+	case TeamIntegrationLifecycle:
+		if eventType != EventTeamIntegrationLifecycle || validateTeamIntegrationLifecycle(value) != nil {
+			return invalidPayload(eventType, payload)
+		}
 	case ApprovalRequired:
 		if eventType != EventApprovalRequired || validateApprovalRequired(value) != nil {
 			return invalidPayload(eventType, payload)
@@ -805,6 +849,50 @@ func validateTeamLifecycle(value TeamLifecycle) error {
 	}
 
 	return nil
+}
+
+//nolint:gocyclo // The closed lifecycle payload validates every independent bound in one boundary.
+func validateTeamIntegrationLifecycle(value TeamIntegrationLifecycle) error {
+	if !validTeamRoutingID(string(value.TeamID), true) ||
+		!validTeamRoutingID(value.IntegrationID, true) ||
+		!validTeamIntegrationStatus(value.State) ||
+		!validTeamIntegrationVerification(value.VerificationState) ||
+		value.Attempts < 0 || value.Attempts > maxEventItems ||
+		value.Files < 0 || value.Files > 100_000 ||
+		value.Added < 0 || value.Changed < 0 || value.Deleted < 0 || value.Binary < 0 ||
+		value.Added+value.Changed+value.Deleted != value.Files || value.Binary > value.Files ||
+		(value.Code != "" && !validCode(value.Code)) {
+		return errors.New("invalid Team integration lifecycle fields")
+	}
+	if (value.State == TeamIntegrationConflict ||
+		value.State == TeamIntegrationVerificationFailed ||
+		value.State == TeamIntegrationInterrupted || value.State == TeamIntegrationRecoverable) &&
+		value.Code == "" {
+		return errors.New("team integration lifecycle failure requires a stable code")
+	}
+
+	return nil
+}
+
+func validTeamIntegrationStatus(value TeamIntegrationStatus) bool {
+	switch value {
+	case TeamIntegrationConflict, TeamIntegrationReady, TeamIntegrationVerified,
+		TeamIntegrationVerificationFailed, TeamIntegrationApprovalRequired,
+		TeamIntegrationApplying, TeamIntegrationApplied, TeamIntegrationRejected,
+		TeamIntegrationInterrupted, TeamIntegrationRecoverable, TeamIntegrationRolledBack:
+		return true
+	default:
+		return false
+	}
+}
+
+func validTeamIntegrationVerification(value string) bool {
+	switch value {
+	case "", "not_run", "passed", "failed", "timeout", "approval_required":
+		return true
+	default:
+		return false
+	}
 }
 
 func validTeamRoutingID(value string, required bool) bool {

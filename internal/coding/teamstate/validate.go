@@ -163,8 +163,16 @@ func validateIntegration(
 	if err := validateWorktree(value.Worktree); err != nil {
 		return err
 	}
-	if value.DiffDigest != "" && !validDigest(value.DiffDigest) ||
-		value.ApprovalTokenHash != "" && !validDigest(value.ApprovalTokenHash) {
+	for _, digest := range []string{
+		value.DiffDigest, value.ManifestDigest, value.VerificationDigest,
+		value.JournalDigest, value.ApprovalTokenHash,
+	} {
+		if digest != "" && !validDigest(digest) {
+			return fmt.Errorf("%w: invalid integration digest", ErrInvalid)
+		}
+	}
+	if value.TreeOID != "" && !validOID(value.TreeOID) ||
+		value.CommitOID != "" && !validOID(value.CommitOID) {
 		return fmt.Errorf("%w: invalid integration digest", ErrInvalid)
 	}
 
@@ -267,7 +275,8 @@ func validAttemptState(value AttemptState) bool {
 func validIntegrationState(value IntegrationState) bool {
 	return slices.Contains([]IntegrationState{
 		IntegrationPlanned, IntegrationReady, IntegrationVerified, IntegrationApproved,
-		IntegrationApplied, IntegrationFailed, IntegrationRetained,
+		IntegrationApplied, IntegrationConflict, IntegrationApplying, IntegrationInterrupted,
+		IntegrationRolledBack, IntegrationFailed, IntegrationRetained,
 	}, value)
 }
 

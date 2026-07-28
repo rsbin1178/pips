@@ -111,6 +111,28 @@ func (r *Runner) InspectRepository(ctx context.Context, directory string) (Repos
 	}, nil
 }
 
+// SnapshotStatus returns a stable digest of tracked and untracked Worktree
+// state without refreshing or mutating the index.
+func (r *Runner) SnapshotStatus(ctx context.Context, directory string) (Status, error) {
+	if err := validateAbsolutePath(directory); err != nil {
+		return Status{}, err
+	}
+
+	result, err := r.run(ctx, directory, nil, nil,
+		"status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none",
+	)
+	if err != nil {
+		return Status{}, err
+	}
+
+	paths, err := parseStatusPaths(result.stdout, r.limits.TreeEntries)
+	if err != nil {
+		return Status{}, err
+	}
+
+	return newStatus(result.stdout, paths), nil
+}
+
 // ResolveCommit resolves value and requires a commit object.
 func (r *Runner) ResolveCommit(ctx context.Context, directory, value string) (string, error) {
 	if err := validateAbsolutePath(directory); err != nil {
@@ -879,6 +901,57 @@ func parseTree(value []byte, limit int) ([]TreeEntry, error) {
 	}
 
 	return entries, nil
+}
+
+//nolint:gocyclo // Porcelain rename/copy records require explicit bounded parsing branches.
+func parseStatusPaths(value []byte, limit int) ([]string, error) {
+	if len(value) == 0 {
+		return nil, nil
+	}
+
+	if value[len(value)-1] != 0 {
+		return nil, fmt.Errorf("%w: unterminated status", ErrGit)
+	}
+
+	records := bytes.Split(value[:len(value)-1], []byte{0})
+	paths := make([]string, 0, len(records))
+
+	for index := 0; index < len(records); index++ {
+		record := records[index]
+		if len(record) < 4 || record[2] != ' ' {
+			return nil, fmt.Errorf("%w: malformed status entry", ErrGit)
+		}
+
+		path := string(record[3:])
+		if err := validateRelativePath(path); err != nil {
+			return nil, fmt.Errorf("%w: unsafe status path", ErrGit)
+		}
+
+		paths = append(paths, path)
+
+		if record[0] == 'R' || record[0] == 'C' || record[1] == 'R' || record[1] == 'C' {
+			index++
+			if index >= len(records) {
+				return nil, fmt.Errorf("%w: incomplete renamed status entry", ErrGit)
+			}
+
+			source := string(records[index])
+			if err := validateRelativePath(source); err != nil {
+				return nil, fmt.Errorf("%w: unsafe renamed status path", ErrGit)
+			}
+
+			paths = append(paths, source)
+		}
+
+		if len(paths) > limit {
+			return nil, ErrLimit
+		}
+	}
+
+	slices.Sort(paths)
+	paths = slices.Compact(paths)
+
+	return paths, nil
 }
 
 //nolint:gocyclo // Stable porcelain fields form one closed parser state machine.

@@ -1,6 +1,10 @@
 package gitcontrol
 
-import "time"
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"time"
+)
 
 const (
 	maximumOutputBytes = 64 << 20
@@ -35,6 +39,22 @@ type Repository struct {
 	ObjectFormat string
 	HeadOID      string
 	BranchRef    string
+}
+
+// Status is the exact machine-status snapshot of one Worktree.
+type Status struct {
+	Clean  bool
+	Digest string
+	Paths  []string
+}
+
+func newStatus(value []byte, paths []string) Status {
+	sum := sha256.Sum256(value)
+
+	return Status{
+		Clean: len(value) == 0, Digest: hex.EncodeToString(sum[:]),
+		Paths: paths,
+	}
 }
 
 // Worktree is one record from worktree list --porcelain -z.
