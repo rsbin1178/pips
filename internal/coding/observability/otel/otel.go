@@ -41,6 +41,8 @@ type Observer struct {
 	diagnostics         metric.Int64Counter
 	subagents           metric.Int64Counter
 	subagentDuration    metric.Int64Histogram
+	teams               metric.Int64Counter
+	teamDuration        metric.Int64Histogram
 }
 
 // New constructs an observer using application-owned or global providers.
@@ -133,6 +135,22 @@ func New(config Config) (*Observer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("coding otel subagent duration: %w", err)
 	}
+	teams, err := meter.Int64Counter(
+		"pips.coding.teams",
+		metric.WithDescription("Coding Team lifecycle events."),
+		metric.WithUnit("{event}"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("coding otel Teams counter: %w", err)
+	}
+	teamDuration, err := meter.Int64Histogram(
+		"pips.coding.team.duration",
+		metric.WithDescription("Terminal Coding Team Attempt duration."),
+		metric.WithUnit("ms"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("coding otel Team duration: %w", err)
+	}
 
 	return &Observer{
 		tracer:              tp.Tracer(instrumentationName),
@@ -145,6 +163,8 @@ func New(config Config) (*Observer, error) {
 		diagnostics:         diagnostics,
 		subagents:           subagents,
 		subagentDuration:    subagentDuration,
+		teams:               teams,
+		teamDuration:        teamDuration,
 	}, nil
 }
 
@@ -203,6 +223,8 @@ func (o *Observer) Observe(ctx context.Context, event coding.TelemetryEvent) err
 		coding.EventSubagentFailed, coding.EventSubagentCanceled,
 		coding.EventSubagentInterrupted:
 		o.observeSubagent(ctx, event)
+	case coding.EventTeamLifecycle:
+		o.observeTeam(ctx, event)
 	case coding.EventInteractionStarted, coding.EventRunStarted, coding.EventRunCompleted,
 		coding.EventTurnStarted, coding.EventTurnCompleted, coding.EventMessageCommitted,
 		coding.EventMessageDelta, coding.EventToolStarted, coding.EventToolUpdated,
@@ -212,6 +234,42 @@ func (o *Observer) Observe(ctx context.Context, event coding.TelemetryEvent) err
 	}
 
 	return nil
+}
+
+func (o *Observer) observeTeam(ctx context.Context, event coding.TelemetryEvent) {
+	attrs := []attribute.KeyValue{
+		attribute.String("coding.team.scope", event.TeamScope),
+		attribute.String("coding.team.state", event.TeamState),
+		attribute.String("coding.team.activity", event.TeamActivity),
+		attribute.String("coding.team.code", event.Code),
+		attribute.Int("coding.team.turns", event.Turns),
+		attribute.Int("coding.team.tool_calls", event.ToolCalls),
+		attribute.Int64("coding.team.duration_ms", event.DurationMillis),
+		attribute.Int("coding.usage.input_tokens", event.Usage.InputTokens),
+		attribute.Int("coding.usage.output_tokens", event.Usage.OutputTokens),
+		attribute.Int("coding.usage.reasoning_tokens", event.Usage.ReasoningTokens),
+	}
+	metricAttrs := []attribute.KeyValue{
+		attribute.String("coding.team.scope", event.TeamScope),
+		attribute.String("coding.team.state", event.TeamState),
+		attribute.String("coding.team.activity", event.TeamActivity),
+	}
+	o.teams.Add(ctx, 1, metric.WithAttributes(metricAttrs...))
+	if event.TeamScope == "attempt" && terminalTeamState(event.TeamState) {
+		o.teamDuration.Record(
+			ctx,
+			event.DurationMillis,
+			metric.WithAttributes(metricAttrs...),
+		)
+	}
+	o.instant(ctx, "coding.team.lifecycle", event, attrs, event.Failed)
+}
+
+func terminalTeamState(state string) bool {
+	return state == string(coding.TeamLifecycleCompleted) ||
+		state == string(coding.TeamLifecycleFailed) ||
+		state == string(coding.TeamLifecycleCancelled) ||
+		state == string(coding.TeamLifecycleInterrupted)
 }
 
 func (o *Observer) observeSubagent(ctx context.Context, event coding.TelemetryEvent) {

@@ -51,6 +51,21 @@ type systemPromptOptions struct {
 	ToolNames           []string
 	ProjectInstructions string
 	ExplicitSkills      string
+	TeamWorker          *systemPromptTeamWorker
+}
+
+type systemPromptTeamWorker struct {
+	ParentSessionID       string `json:"parent_session_id"`
+	TeamID                string `json:"team_id"`
+	MemberID              string `json:"member_id"`
+	TaskID                string `json:"task_id"`
+	AttemptID             string `json:"attempt_id"`
+	ContinuationID        string `json:"continuation_id"`
+	OwnerGeneration       uint64 `json:"owner_generation"`
+	Objective             string `json:"objective"`
+	Task                  string `json:"task"`
+	DependencyEvidence    string `json:"dependency_evidence,omitempty"`
+	CapabilityFingerprint string `json:"capability_fingerprint"`
 }
 
 type systemPromptEnvironment struct {
@@ -142,6 +157,23 @@ func buildCodingSystemPromptParts(options systemPromptOptions) (systemPromptPart
 	suffix.Write(modeContext)
 	suffix.WriteString("\n</operating_mode_context>")
 	writeModeGuidance(&suffix, options.Mode, toolNames)
+	if options.TeamWorker != nil {
+		workerContext, err := json.MarshalIndent(options.TeamWorker, "", "  ")
+		if err != nil {
+			return systemPromptParts{}, fmt.Errorf(
+				"coding system prompt: encode Team Worker context: %w",
+				err,
+			)
+		}
+		suffix.WriteString("\n\n# Team Worker assignment\n\n")
+		suffix.WriteString("The following JSON is coordinator-owned assignment context. Execute only this assignment inside the current Worktree.\n\n")
+		suffix.WriteString("<team_worker_context>\n")
+		suffix.Write(workerContext)
+		suffix.WriteString("\n</team_worker_context>\n\n")
+		suffix.WriteString("- You are an attempt-scoped Team Worker, not the Lead. Do not create or finish Team attempts, claim or release tasks, create subagents, enter Plan Mode, switch models, or expand tools and permissions.\n")
+		suffix.WriteString("- Modify only the current Worktree. Never write the parent Workspace, another Worktree, Git administrative data, or Pips private data.\n")
+		suffix.WriteString("- Use Team collaboration tools for status and direct messages. The trusted coordinator owns scheduling, result capture, and terminal attempt state.\n")
+	}
 
 	explicitSkills := strings.TrimSpace(options.ExplicitSkills)
 	if explicitSkills != "" {

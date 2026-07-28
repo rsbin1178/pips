@@ -88,7 +88,9 @@ func ResolveTarget(group team.Team, resources teamstate.Snapshot, target Target)
 		if resource.State != teamstate.AttemptRunning ||
 			target.MemberID != "" && resource.MemberID != target.MemberID ||
 			target.TaskID != "" && resource.TaskID != target.TaskID ||
-			target.ExpectedAttemptID != "" && resource.AttemptID != target.ExpectedAttemptID {
+			target.ExpectedAttemptID != "" && resource.AttemptID != target.ExpectedAttemptID ||
+			target.OwnerGeneration != 0 &&
+				resource.Worktree.LeaseGeneration != target.OwnerGeneration {
 			continue
 		}
 
@@ -106,7 +108,8 @@ func ResolveTarget(group team.Team, resources teamstate.Snapshot, target Target)
 	}
 
 	match := matches[0]
-	if match.ContinuationID == "" || match.Session.SessionID == "" || match.Session.WorkspaceID == "" {
+	if match.ContinuationID == "" || match.Session.SessionID == "" ||
+		match.Session.WorkspaceID == "" || match.Worktree.LeaseGeneration == 0 {
 		return ResolvedTarget{}, fmt.Errorf("%w: incomplete execution identity", ErrInvalid)
 	}
 
@@ -116,6 +119,7 @@ func ResolveTarget(group team.Team, resources teamstate.Snapshot, target Target)
 	resolved.ContinuationID = match.ContinuationID
 	resolved.SessionID = match.Session.SessionID
 	resolved.WorkspaceID = match.Session.WorkspaceID
+	resolved.OwnerGeneration = match.Worktree.LeaseGeneration
 
 	return resolved, nil
 }

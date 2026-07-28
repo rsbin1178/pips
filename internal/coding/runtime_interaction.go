@@ -441,6 +441,14 @@ func (r *Runtime) beginOperation(
 		if r.state.Phase != PhaseIdle || r.interaction != nil || r.recovery.PendingID != "" {
 			return nil, nil, stateError(string(kind), r.state.Phase, ErrRuntimePending)
 		}
+	case operationTeamPropose, operationTeamConfirm:
+		if r.state.Phase != PhaseIdle && r.state.Phase != PhasePaused {
+			return nil, nil, stateError(string(kind), r.state.Phase, ErrRuntimePending)
+		}
+	case operationTeamResume:
+		if r.state.Phase != PhaseIdle || r.interaction != nil || r.recovery.PendingID != "" {
+			return nil, nil, stateError(string(kind), r.state.Phase, ErrRuntimePending)
+		}
 	default:
 		return nil, nil, fmt.Errorf("%w: unknown operation", ErrRuntimeInvalid)
 	}
@@ -546,9 +554,16 @@ func (r *Runtime) openInteraction(
 	if err != nil {
 		return nil, err
 	}
-	planCatalog, err := tools.NewPlanCatalog(r.plans, r.planRef)
-	if err != nil {
-		return nil, err
+
+	r.mu.Lock()
+	leadCoordinator := r.team
+	leadTeamActive := !r.isTeamWorker() && leadCoordinator != nil && r.teamGuard.active()
+	r.mu.Unlock()
+	if leadTeamActive {
+		localCatalog, err = filterCatalog(ctx, localCatalog, leadTeamDescriptorAllowed)
+		if err != nil {
+			return nil, err
+		}
 	}
 	questionCatalog, err := r.questions.Catalog()
 	if err != nil {
@@ -570,36 +585,53 @@ func (r *Runtime) openInteraction(
 		}
 	}
 
-	childOwner := subagent.Ownership{
-		ParentSessionID:     r.handle.Metadata().ID,
-		ParentInteractionID: current.id,
-		RootInteractionID:   current.rootInteractionID,
-	}
-	childObserver := r.subagentObserver(current, emitter)
-	subagentTools, err := catalog.New(catalog.Local(
-		"coding.subagent",
-		catalog.RiskRead,
-		r.subagents.ToolFor(childOwner, childObserver),
-		r.subagents.SpawnToolFor(childOwner, childObserver),
-	)...)
-	if err != nil {
-		return nil, err
+	composedCatalogs := []*catalog.Catalog{localCatalog, questionCatalog, skillTools}
+	if r.isTeamWorker() {
+		memberCatalog, memberErr := r.teamWorkerCatalog()
+		if memberErr != nil {
+			return nil, memberErr
+		}
+		composedCatalogs = append(composedCatalogs, memberCatalog)
+	} else if leadTeamActive {
+		leadCatalog, leadErr := leadCoordinator.leadCatalog(ctx)
+		if leadErr != nil {
+			return nil, leadErr
+		}
+		composedCatalogs = append(composedCatalogs, leadCatalog)
+	} else {
+		planCatalog, planErr := tools.NewPlanCatalog(r.plans, r.planRef)
+		if planErr != nil {
+			return nil, planErr
+		}
+		childOwner := subagent.Ownership{
+			ParentSessionID:     r.handle.Metadata().ID,
+			ParentInteractionID: current.id,
+			RootInteractionID:   current.rootInteractionID,
+		}
+		childObserver := r.subagentObserver(current, emitter)
+		subagentTools, subagentErr := catalog.New(catalog.Local(
+			"coding.subagent",
+			catalog.RiskRead,
+			r.subagents.ToolFor(childOwner, childObserver),
+			r.subagents.SpawnToolFor(childOwner, childObserver),
+		)...)
+		if subagentErr != nil {
+			return nil, subagentErr
+		}
+		mcpCatalog, mcpErr := catalog.New(r.connections.Snapshot().Entries...)
+		if mcpErr != nil {
+			return nil, mcpErr
+		}
+		composedCatalogs = append(
+			composedCatalogs,
+			planCatalog,
+			subagentTools,
+			snapshot.Catalog(),
+			mcpCatalog,
+		)
 	}
 
-	mcpCatalog, err := catalog.New(r.connections.Snapshot().Entries...)
-	if err != nil {
-		return nil, err
-	}
-
-	merged, err := catalog.Merge(
-		localCatalog,
-		planCatalog,
-		questionCatalog,
-		subagentTools,
-		skillTools,
-		snapshot.Catalog(),
-		mcpCatalog,
-	)
+	merged, err := catalog.Merge(composedCatalogs...)
 	if err != nil {
 		return nil, err
 	}
@@ -613,7 +645,8 @@ func (r *Runtime) openInteraction(
 		return nil, err
 	}
 	changeDescriptors := slices.DeleteFunc(slices.Clone(descriptors), func(value catalog.Descriptor) bool {
-		return value.Source.Kind == catalog.SourceLocal && value.Source.ID == tools.PlanCatalogID
+		return value.Source.Kind == catalog.SourceTeam ||
+			(value.Source.Kind == catalog.SourceLocal && value.Source.ID == tools.PlanCatalogID)
 	})
 	current.changeTracker = newInteractionChangeTracker(r.inspector, changeDescriptors)
 
@@ -641,6 +674,7 @@ func (r *Runtime) openInteraction(
 		ToolNames:           agentToolNames(visibleTools),
 		ProjectInstructions: r.projectInstructions,
 		ExplicitSkills:      explicitSkills,
+		TeamWorker:          r.workerSystemPromptContext(),
 	})
 	if err != nil {
 		return nil, err
@@ -657,6 +691,8 @@ func (r *Runtime) openInteraction(
 	controlHooks := extensionHooks
 	controlHooks.Observe = nil
 	composed := extension.ComposeHooks(
+		extension.Hooks{BeforeTool: r.teamGuard.beforeTool(descriptors)},
+		extension.Hooks{AfterTool: leadCoordinatorAfterTool(leadCoordinator)},
 		extension.Hooks{BeforeTool: leasedToolGuard(started.Mode, descriptors, r.config.ToolSearch)},
 		extension.Hooks{BeforeTool: r.questions.BeforeTool},
 		extension.Hooks{BeforeTool: current.changeTracker.beforeTool},

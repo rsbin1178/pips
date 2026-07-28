@@ -145,6 +145,45 @@ func (s *Store) Begin(
 	})
 }
 
+// CompletePending records a command that could not resolve to an exact live
+// execution. No external side effect has started, so only rejected and stale
+// are valid terminal states and Resolved remains empty.
+func (s *Store) CompletePending(
+	ctx context.Context,
+	teamID team.ID,
+	commandID team.CommandID,
+	mutation Mutation,
+	state State,
+	errorCode string,
+) (Record, error) {
+	if state != StateRejected && state != StateStale {
+		return Record{}, ErrInvalid
+	}
+	if previous, exists, err := s.loadMutation(ctx, teamID, mutation.ID); err != nil {
+		return Record{}, err
+	} else if exists {
+		if previous.Entry.Command.ID != commandID || previous.Entry.State != state ||
+			previous.Entry.ErrorCode != errorCode || previous.Entry.Resolved != nil ||
+			!sameMutation(previous, mutation) {
+			return Record{}, ErrIdempotency
+		}
+
+		return recordFromJournal(previous), nil
+	}
+
+	return s.transition(ctx, teamID, commandID, mutation, func(previous Entry) (Entry, error) {
+		if previous.State != StatePending || previous.Resolved != nil {
+			return Entry{}, ErrConflict
+		}
+
+		previous.State = state
+		previous.ErrorCode = errorCode
+		previous.UpdatedAt = s.now().UTC()
+
+		return previous, nil
+	})
+}
+
 // Complete durably records one terminal result after applying or reconciling a command.
 func (s *Store) Complete(
 	ctx context.Context,
@@ -274,6 +313,30 @@ func (s *Store) Get(ctx context.Context, teamID team.ID, commandID team.CommandI
 	}
 
 	return Record{Revision: latestRevisionFor(state.records, commandID), Entry: cloneEntry(entry)}, nil
+}
+
+// Revision returns the current journal revision. A Team without a control
+// journal has revision zero; callers may use that value for the first Submit.
+func (s *Store) Revision(ctx context.Context, teamID team.ID) (Revision, error) {
+	if s == nil || !safeIDPattern.MatchString(string(teamID)) {
+		return 0, ErrInvalid
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	state, err := s.read(ctx, teamID)
+	if errors.Is(err, ErrNotFound) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+
+	return Revision(len(state.records)), nil
 }
 
 // List returns a bounded page of journal transitions in revision order.
@@ -636,11 +699,13 @@ func validateSuccessor(previous, next Entry) error {
 		return nil
 	}
 
-	if previous.Command != next.Command || previous.UpdatedAt.After(next.UpdatedAt) || terminalState(previous.State) {
+	if !sameCommand(previous.Command, next.Command) || previous.UpdatedAt.After(next.UpdatedAt) ||
+		terminalState(previous.State) {
 		return ErrInvalid
 	}
 
-	if previous.State == StatePending && next.State != StateApplying ||
+	if previous.State == StatePending && next.State != StateApplying &&
+		next.State != StateRejected && next.State != StateStale ||
 		previous.State == StateApplying && !terminalState(next.State) {
 		return ErrInvalid
 	}
@@ -804,10 +869,17 @@ func latestRevisionFor(records []journalRecord, id team.CommandID) Revision {
 
 func cloneEntry(value Entry) Entry {
 	out := value
+	out.Command.Payload = slices.Clone(value.Command.Payload)
 	if value.Resolved != nil {
 		resolved := *value.Resolved
 		out.Resolved = &resolved
 	}
 
 	return out
+}
+
+func sameCommand(left, right Command) bool {
+	return left.ID == right.ID && left.Action == right.Action && left.Target == right.Target &&
+		left.Text == right.Text && left.CreatedAt.Equal(right.CreatedAt) &&
+		bytes.Equal(left.Payload, right.Payload)
 }

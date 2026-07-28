@@ -537,13 +537,16 @@ func worktreeSuccessor(previous, next WorktreeResource) bool {
 		return true
 	}
 	return previous.ID == next.ID &&
+		(previous.Workspace == (FileIdentity{}) || previous.Workspace == next.Workspace) &&
 		(previous.Directory == (FileIdentity{}) || previous.Directory == next.Directory) &&
 		(previous.GitDir == (FileIdentity{}) || previous.GitDir == next.GitDir) &&
 		(previous.CommonDir == (FileIdentity{}) || previous.CommonDir == next.CommonDir) &&
+		(previous.ObjectFormat == "" || previous.ObjectFormat == next.ObjectFormat) &&
 		(previous.BranchRef == "" || previous.BranchRef == next.BranchRef) &&
 		(previous.BaseOID == "" || previous.BaseOID == next.BaseOID) &&
 		(previous.ResultRef == "" || previous.ResultRef == next.ResultRef) &&
 		(previous.ResultCommitOID == "" || previous.ResultCommitOID == next.ResultCommitOID) &&
+		(previous.LockReason == "" || previous.LockReason == next.LockReason) &&
 		next.LeaseGeneration >= previous.LeaseGeneration
 }
 

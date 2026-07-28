@@ -194,6 +194,9 @@ type TelemetryEvent struct {
 	Agent          string             `json:"agent,omitempty"`
 	SubagentRole   string             `json:"subagent_role,omitempty"`
 	SubagentState  string             `json:"subagent_state,omitempty"`
+	TeamScope      string             `json:"team_scope,omitempty"`
+	TeamState      string             `json:"team_state,omitempty"`
+	TeamActivity   string             `json:"team_activity,omitempty"`
 	Tool           string             `json:"tool,omitempty"`
 	ToolCalls      int                `json:"tool_calls,omitempty"`
 	Stop           agent.StopReason   `json:"stop,omitempty"`
@@ -285,6 +288,8 @@ func Telemetry(event Event) (TelemetryEvent, error) {
 		projected.Failed = toolMessageFailed(value.Result)
 	case SubagentLifecycle:
 		projectSubagentTelemetry(&projected, event.Type, value)
+	case TeamLifecycle:
+		projectTeamTelemetry(&projected, value)
 	case ApprovalRequired:
 		projected.Tool = value.Tool
 	case ApprovalUnknown:
@@ -314,6 +319,24 @@ func Telemetry(event Event) (TelemetryEvent, error) {
 	}
 
 	return projected, nil
+}
+
+func projectTeamTelemetry(projected *TelemetryEvent, value TeamLifecycle) {
+	projected.Agent = "team_worker"
+	projected.TeamScope = "team"
+	if value.AttemptID != "" {
+		projected.TeamScope = "attempt"
+	}
+	projected.TeamState = string(value.State)
+	projected.TeamActivity = string(value.Activity)
+	projected.Code = value.Code
+	projected.Turns = value.Turns
+	projected.ToolCalls = value.ToolCalls
+	projected.DurationMillis = value.DurationMillis
+	projected.Usage = value.Usage
+	projected.Failed = value.State == TeamLifecycleFailed ||
+		value.State == TeamLifecycleCancelled ||
+		value.State == TeamLifecycleInterrupted
 }
 
 func projectSubagentTelemetry(

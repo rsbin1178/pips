@@ -16,6 +16,7 @@ import (
 
 	"github.com/rsbin/pips/agent"
 	"github.com/rsbin/pips/agent/harness"
+	"github.com/rsbin/pips/agent/team"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding/approval"
 	"github.com/rsbin/pips/internal/coding/changes"
@@ -75,6 +76,7 @@ const (
 	EventSubagentFailed        EventType = "subagent.failed"
 	EventSubagentCanceled      EventType = "subagent.canceled"
 	EventSubagentInterrupted   EventType = "subagent.interrupted"
+	EventTeamLifecycle         EventType = "team.lifecycle"
 	EventApprovalRequired      EventType = "approval.required"
 	EventApprovalUnknown       EventType = "approval.unknown"
 	EventApprovalResolved      EventType = "approval.resolved"
@@ -332,6 +334,55 @@ type SubagentLifecycle struct {
 	DurationMillis      int64                    `json:"duration_ms"`
 }
 
+// TeamLifecycleStatus is the compact parent-visible state of one Team or one
+// exact Task Attempt. Full Worker output remains owned by the child Session.
+type TeamLifecycleStatus string
+
+// Team lifecycle states exposed to frontends and product telemetry.
+const (
+	TeamLifecycleProposed    TeamLifecycleStatus = "proposed"
+	TeamLifecycleAdmitted    TeamLifecycleStatus = "admitted"
+	TeamLifecycleWaiting     TeamLifecycleStatus = "waiting"
+	TeamLifecycleRunning     TeamLifecycleStatus = "running"
+	TeamLifecyclePaused      TeamLifecycleStatus = "paused"
+	TeamLifecycleCapturing   TeamLifecycleStatus = "capturing"
+	TeamLifecycleCompleted   TeamLifecycleStatus = "completed"
+	TeamLifecycleFailed      TeamLifecycleStatus = "failed"
+	TeamLifecycleCancelled   TeamLifecycleStatus = "cancelled"
+	TeamLifecycleInterrupted TeamLifecycleStatus = "interrupted"
+	TeamLifecycleRecoverable TeamLifecycleStatus = "recoverable"
+)
+
+// TeamActivity is a content-free summary of what an Attempt owner is doing.
+type TeamActivity string
+
+// Team activity values. They deliberately carry no Tool arguments, paths, or
+// assistant text.
+const (
+	TeamActivityPreparing        TeamActivity = "preparing"
+	TeamActivityWorking          TeamActivity = "working"
+	TeamActivityAwaitingApproval TeamActivity = "awaiting_approval"
+	TeamActivityAwaitingQuestion TeamActivity = "awaiting_question"
+	TeamActivityCapturing        TeamActivity = "capturing"
+)
+
+// TeamLifecycle is the bounded parent projection for Team execution. Logical
+// IDs are present for frontend routing but are excluded from Telemetry.
+type TeamLifecycle struct {
+	TeamID         team.ID             `json:"team_id"`
+	MemberID       team.MemberID       `json:"member_id,omitempty"`
+	TaskID         team.TaskID         `json:"task_id,omitempty"`
+	AttemptID      team.AttemptID      `json:"attempt_id,omitempty"`
+	ChildSessionID string              `json:"child_session_id,omitempty"`
+	State          TeamLifecycleStatus `json:"state"`
+	Activity       TeamActivity        `json:"activity,omitempty"`
+	Turns          int                 `json:"turns,omitempty"`
+	ToolCalls      int                 `json:"tool_calls,omitempty"`
+	Usage          TokenUsage          `json:"usage"`
+	DurationMillis int64               `json:"duration_ms,omitempty"`
+	Code           string              `json:"code,omitempty"`
+}
+
 // ApprovalRequired describes an exact pending operation for the approval overlay.
 type ApprovalRequired struct {
 	RequestID     string            `json:"request_id"`
@@ -449,6 +500,7 @@ func (ToolStarted) eventPayload()           {}
 func (ToolUpdated) eventPayload()           {}
 func (ToolCompleted) eventPayload()         {}
 func (SubagentLifecycle) eventPayload()     {}
+func (TeamLifecycle) eventPayload()         {}
 func (ApprovalRequired) eventPayload()      {}
 func (ApprovalUnknown) eventPayload()       {}
 func (ApprovalResolved) eventPayload()      {}
@@ -501,7 +553,7 @@ func validateEnvelopeIDs(event Event) error {
 	switch event.Type {
 	case EventSessionOpened, EventSessionClosed, EventSessionTreeChanged,
 		EventSessionNavigated, EventSessionForked, EventCompactionStarted,
-		EventCompactionCompleted, EventModeChanged:
+		EventCompactionCompleted, EventModeChanged, EventTeamLifecycle:
 		if event.InteractionID != "" || event.RunID != "" {
 			return invalidEvent("session event has interaction or run id")
 		}
@@ -655,6 +707,10 @@ func validatePayload(eventType EventType, payload EventPayload) error {
 		if validateSubagentLifecycle(eventType, value) != nil {
 			return invalidPayload(eventType, payload)
 		}
+	case TeamLifecycle:
+		if eventType != EventTeamLifecycle || validateTeamLifecycle(value) != nil {
+			return invalidPayload(eventType, payload)
+		}
 	case ApprovalRequired:
 		if eventType != EventApprovalRequired || validateApprovalRequired(value) != nil {
 			return invalidPayload(eventType, payload)
@@ -704,6 +760,103 @@ func validatePayload(eventType EventType, payload EventPayload) error {
 	}
 
 	return nil
+}
+
+func validateTeamLifecycle(value TeamLifecycle) error {
+	if !validTeamRoutingID(string(value.TeamID), true) ||
+		!validTeamRoutingID(string(value.MemberID), false) ||
+		!validTeamRoutingID(string(value.TaskID), false) ||
+		!validTeamRoutingID(string(value.AttemptID), false) ||
+		!validTeamRoutingID(value.ChildSessionID, false) ||
+		!validTeamLifecycleStatus(value.State) || !validTeamActivity(value.Activity) ||
+		value.Turns < 0 || value.ToolCalls < 0 || !validTokenUsage(value.Usage) ||
+		value.DurationMillis < 0 || value.DurationMillis > maxEventDurationMS ||
+		(value.Code != "" && !validCode(value.Code)) {
+		return errors.New("invalid Team lifecycle fields")
+	}
+
+	attemptScoped := value.MemberID != "" || value.TaskID != "" || value.AttemptID != ""
+	if attemptScoped && (value.MemberID == "" || value.TaskID == "" || value.AttemptID == "") {
+		return errors.New("incomplete Team Attempt identity")
+	}
+	if value.ChildSessionID != "" && !attemptScoped {
+		return errors.New("Team child Session requires an Attempt")
+	}
+	switch value.State {
+	case TeamLifecycleProposed, TeamLifecycleAdmitted:
+		if attemptScoped || value.ChildSessionID != "" || value.Activity != "" {
+			return errors.New("Team-level lifecycle contains Attempt state")
+		}
+	case TeamLifecycleWaiting, TeamLifecycleRunning, TeamLifecyclePaused, TeamLifecycleCapturing:
+		if !attemptScoped {
+			return errors.New("Attempt lifecycle is missing identity")
+		}
+	case TeamLifecycleCompleted, TeamLifecycleFailed, TeamLifecycleCancelled,
+		TeamLifecycleInterrupted, TeamLifecycleRecoverable:
+	}
+
+	if !terminalTeamLifecycleStatus(value.State) &&
+		(value.Usage != (TokenUsage{}) || value.DurationMillis != 0) {
+		return errors.New("non-terminal Team lifecycle contains terminal accounting")
+	}
+	if (value.State == TeamLifecycleFailed || value.State == TeamLifecycleInterrupted ||
+		value.State == TeamLifecycleRecoverable) && value.Code == "" {
+		return errors.New("Team lifecycle failure requires a stable code")
+	}
+
+	return nil
+}
+
+func validTeamRoutingID(value string, required bool) bool {
+	if value == "" {
+		return !required
+	}
+	if len(value) > 128 {
+		return false
+	}
+	for index, character := range value {
+		if index == 0 && !asciiAlphaNumeric(character) {
+			return false
+		}
+		if !asciiAlphaNumeric(character) && character != '.' && character != '_' && character != '-' {
+			return false
+		}
+	}
+
+	return true
+}
+
+func asciiAlphaNumeric(value rune) bool {
+	return value >= 'A' && value <= 'Z' || value >= 'a' && value <= 'z' ||
+		value >= '0' && value <= '9'
+}
+
+func validTeamLifecycleStatus(value TeamLifecycleStatus) bool {
+	switch value {
+	case TeamLifecycleProposed, TeamLifecycleAdmitted, TeamLifecycleWaiting,
+		TeamLifecycleRunning, TeamLifecyclePaused, TeamLifecycleCapturing,
+		TeamLifecycleCompleted, TeamLifecycleFailed, TeamLifecycleCancelled,
+		TeamLifecycleInterrupted, TeamLifecycleRecoverable:
+		return true
+	default:
+		return false
+	}
+}
+
+func validTeamActivity(value TeamActivity) bool {
+	switch value {
+	case "", TeamActivityPreparing, TeamActivityWorking,
+		TeamActivityAwaitingApproval, TeamActivityAwaitingQuestion,
+		TeamActivityCapturing:
+		return true
+	default:
+		return false
+	}
+}
+
+func terminalTeamLifecycleStatus(value TeamLifecycleStatus) bool {
+	return value == TeamLifecycleCompleted || value == TeamLifecycleFailed ||
+		value == TeamLifecycleCancelled || value == TeamLifecycleInterrupted
 }
 
 func validateQuestionRequired(value QuestionRequired) error {

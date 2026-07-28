@@ -42,6 +42,7 @@ func TestStoreLifecycleAndLostResponseReplay(t *testing.T) {
 	resolved := teamcontrol.ResolvedTarget{
 		TeamID: "team-1", MemberID: "worker-1", TaskID: "task-1", AttemptID: "attempt-1",
 		ContinuationID: "continuation-1", SessionID: "session-1", WorkspaceID: "workspace-1",
+		OwnerGeneration: 1,
 	}
 	applying, err := store.Begin(t.Context(), "team-1", command.ID, teamcontrol.Mutation{
 		ID: "begin-1", ExpectedRevision: 1,
@@ -86,15 +87,45 @@ func TestStoreLifecycleAndLostResponseReplay(t *testing.T) {
 	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
 }
 
+func TestStoreCompletePendingReplaysLostResponse(t *testing.T) {
+	t.Parallel()
+
+	store, err := teamcontrol.New(filepath.Join(t.TempDir(), "control"), teamcontrol.Limits{})
+	require.NoError(t, err)
+	command := newCommand("operator-stale", "team-stale", "worker-1")
+	_, err = store.Submit(t.Context(), command, 0)
+	require.NoError(t, err)
+	mutation := teamcontrol.Mutation{ID: "complete-stale", ExpectedRevision: 1}
+
+	completed, err := store.CompletePending(
+		t.Context(), "team-stale", command.ID, mutation,
+		teamcontrol.StateStale, "stale_target",
+	)
+	require.NoError(t, err)
+	replayed, err := store.CompletePending(
+		t.Context(), "team-stale", command.ID, mutation,
+		teamcontrol.StateStale, "stale_target",
+	)
+	require.NoError(t, err)
+	assert.Equal(t, completed, replayed)
+}
+
 func TestStoreBoundedQueriesAndDefensiveCopies(t *testing.T) {
 	t.Parallel()
 
 	store, err := teamcontrol.New(filepath.Join(t.TempDir(), "control"), teamcontrol.Limits{})
 	require.NoError(t, err)
 
+	revision, err := store.Revision(t.Context(), "team-query")
+	require.NoError(t, err)
+	assert.Zero(t, revision)
+
 	command := newCommand("operator-query-1", "team-query", "worker-1")
 	_, err = store.Submit(t.Context(), command, 0)
 	require.NoError(t, err)
+	revision, err = store.Revision(t.Context(), "team-query")
+	require.NoError(t, err)
+	assert.Equal(t, teamcontrol.Revision(1), revision)
 
 	pending, err := store.Pending(t.Context(), "team-query", 10)
 	require.NoError(t, err)

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/rsbin/pips/agent"
+	"github.com/rsbin/pips/agent/team"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding/approval"
 	"github.com/rsbin/pips/internal/coding/changes"
@@ -591,6 +592,15 @@ func eventCases() []eventCase {
 				Model: "openai/test", Code: "process_interrupted", DurationMillis: 5,
 			},
 		)},
+		{name: "Team lifecycle", event: newSessionEvent(
+			EventTeamLifecycle,
+			TeamLifecycle{
+				TeamID: "team-1", MemberID: "worker-1", TaskID: "task-1",
+				AttemptID: "attempt-1", ChildSessionID: "child-1",
+				State: TeamLifecycleCompleted, Turns: 2, ToolCalls: 3,
+				Usage: usage, DurationMillis: 25,
+			},
+		)},
 		{name: "approval required", event: newInteractionEvent(
 			EventApprovalRequired,
 			ApprovalRequired{
@@ -642,6 +652,57 @@ func eventCases() []eventCase {
 		{name: "error", event: newStatusEvent(
 			EventError, RuntimeError{Code: "model_failed", Message: "request failed", Fatal: true},
 		)},
+	}
+}
+
+func TestTeamLifecycleTelemetryOmitsRoutingIdentity(t *testing.T) {
+	t.Parallel()
+
+	event := newSessionEvent(EventTeamLifecycle, TeamLifecycle{
+		TeamID: team.ID("team-secret"), MemberID: team.MemberID("member-secret"),
+		TaskID: team.TaskID("task-secret"), AttemptID: team.AttemptID("attempt-secret"),
+		ChildSessionID: "session-secret", State: TeamLifecycleCompleted,
+		Turns: 2, ToolCalls: 4, Usage: TokenUsage{InputTokens: 10, OutputTokens: 5},
+		DurationMillis: 100,
+	})
+	require.NoError(t, ValidateEvent(event))
+
+	telemetry, err := Telemetry(event)
+	require.NoError(t, err)
+	encoded, err := json.Marshal(telemetry)
+	require.NoError(t, err)
+	for _, secret := range []string{
+		"team-secret", "member-secret", "task-secret", "attempt-secret", "session-secret",
+	} {
+		assert.NotContains(t, string(encoded), secret)
+	}
+	assert.Equal(t, "team_worker", telemetry.Agent)
+	assert.Equal(t, "attempt", telemetry.TeamScope)
+	assert.Equal(t, string(TeamLifecycleCompleted), telemetry.TeamState)
+}
+
+func TestValidateTeamLifecycleRejectsContentAndAccountingShapeViolations(t *testing.T) {
+	t.Parallel()
+
+	tests := []TeamLifecycle{
+		{TeamID: "/private/team", State: TeamLifecycleProposed},
+		{TeamID: "team-1", State: TeamLifecycleRunning},
+		{TeamID: "team-1", MemberID: "worker-1", State: TeamLifecycleRunning},
+		{
+			TeamID: "team-1", MemberID: "worker-1", TaskID: "task-1",
+			AttemptID: "attempt-1", State: TeamLifecycleRunning,
+			Usage: TokenUsage{InputTokens: 1},
+		},
+		{TeamID: "team-1", State: TeamLifecycleFailed},
+		{
+			TeamID: "team-1", MemberID: "worker-1", TaskID: "task-1",
+			AttemptID: "attempt-1", ChildSessionID: "/private/session",
+			State: TeamLifecycleRunning,
+		},
+	}
+	for _, payload := range tests {
+		event := newSessionEvent(EventTeamLifecycle, payload)
+		require.ErrorIs(t, ValidateEvent(event), ErrInvalidEvent)
 	}
 }
 
