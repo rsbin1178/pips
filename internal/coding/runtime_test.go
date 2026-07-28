@@ -253,6 +253,42 @@ func TestRuntimeClosePublishesTerminalEventsBeforeClosingSubscription(t *testing
 	assert.Equal(t, []EventType{EventStatusChanged, EventSessionClosed}, types[len(types)-2:])
 }
 
+func TestRuntimeCloseTimeoutKeepsOneCleanupOwnerRunning(t *testing.T) {
+	t.Parallel()
+
+	model := newDelayedCancelRuntimeModel()
+	runtime := openTestRuntime(t, model)
+	promptDone := make(chan struct{})
+	go func() {
+		defer close(promptDone)
+		for range runtime.Prompt(context.Background(), ai.UserText("wait for shutdown")) {
+		}
+	}()
+	select {
+	case <-model.started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("model did not start")
+	}
+
+	closeCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	assert.ErrorIs(t, runtime.Close(closeCtx), context.DeadlineExceeded)
+
+	results := make(chan error, 2)
+	go func() { results <- runtime.Close(context.Background()) }()
+	go func() { results <- runtime.Close(context.Background()) }()
+	close(model.release)
+	for range 2 {
+		require.NoError(t, <-results)
+	}
+	select {
+	case <-promptDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("prompt did not stop")
+	}
+	assert.Equal(t, PhaseClosed, runtime.Snapshot().Phase)
+}
+
 func TestRuntimeDeliversIdleAgentNotificationAsSyntheticInteraction(t *testing.T) {
 	t.Parallel()
 
@@ -1648,7 +1684,9 @@ func abruptRuntimeStop(t *testing.T, runtime *Runtime) {
 
 	runtime.pending.clear()
 	runtime.resolver.set(nil)
-	require.NoError(t, current.activation.Release(t.Context()))
+	if current != nil && current.activation != nil {
+		require.NoError(t, current.activation.Release(t.Context()))
+	}
 	require.NoError(t, runtime.extensions.Shutdown(t.Context()))
 	require.NoError(t, runtime.connections.Close())
 	require.NoError(t, runtime.inspector.Close())
@@ -2157,3 +2195,46 @@ func (*blockingRuntimeModel) Capabilities() ai.Capabilities {
 }
 
 var _ ai.LanguageModel = (*blockingRuntimeModel)(nil)
+
+type delayedCancelRuntimeModel struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func newDelayedCancelRuntimeModel() *delayedCancelRuntimeModel {
+	return &delayedCancelRuntimeModel{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (m *delayedCancelRuntimeModel) Generate(ctx context.Context, _ ai.Request) (*ai.Response, error) {
+	m.once.Do(func() { close(m.started) })
+	<-ctx.Done()
+	<-m.release
+
+	return nil, ctx.Err()
+}
+
+func (m *delayedCancelRuntimeModel) Stream(ctx context.Context, _ ai.Request) ai.Stream {
+	return func(yield func(ai.StreamEvent, error) bool) {
+		if !yield(ai.StreamEvent{
+			Type: ai.StreamMessageStart, Provider: ai.ProviderOpenAI, Model: "runtime-test",
+		}, nil) {
+			return
+		}
+		m.once.Do(func() { close(m.started) })
+		<-ctx.Done()
+		<-m.release
+		yield(ai.StreamEvent{}, ctx.Err())
+	}
+}
+
+func (*delayedCancelRuntimeModel) Provider() ai.Provider { return ai.ProviderOpenAI }
+func (*delayedCancelRuntimeModel) ModelID() string       { return "runtime-test" }
+func (*delayedCancelRuntimeModel) Capabilities() ai.Capabilities {
+	return ai.Capabilities{Text: true, Tools: true}
+}
+
+var _ ai.LanguageModel = (*delayedCancelRuntimeModel)(nil)

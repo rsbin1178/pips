@@ -129,6 +129,12 @@ func (r *Runtime) SetSkillEnabled(
 	if r == nil {
 		return ErrRuntimeClosed
 	}
+	if r.isTeamWorker() {
+		return fmt.Errorf("%w: Team Worker Skill policy is fixed", ErrRuntimeInvalid)
+	}
+	if r.teamGuard.active() {
+		return fmt.Errorf("%w: Lead Skill policy is fixed while a Team is active", ErrTeamActive)
+	}
 	if id == "" {
 		return fmt.Errorf("%w: empty Skill ID", ErrRuntimeInvalid)
 	}

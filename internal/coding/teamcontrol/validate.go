@@ -37,28 +37,39 @@ func validateCommand(command Command, limits Limits) error {
 		return ErrInvalid
 	}
 
-	if len(command.Text) > limits.MaxTextBytes {
+	if len(command.Text) > limits.MaxTextBytes || len(command.Payload) > limits.MaxTextBytes {
 		return ErrLimit
+	}
+	if command.Payload != nil && !json.Valid(command.Payload) {
+		return ErrInvalid
 	}
 
 	switch command.Action {
 	case ActionMessage, ActionFollowUp:
-		if command.Target.MemberID == "" || strings.TrimSpace(command.Text) == "" {
+		if command.Target.MemberID == "" || strings.TrimSpace(command.Text) == "" || command.Payload != nil {
 			return ErrInvalid
 		}
 	case ActionInterruptAttempt:
 		if command.Target.MemberID == "" || command.Target.TaskID == "" ||
-			command.Target.ExpectedAttemptID == "" || command.Text != "" {
+			command.Target.ExpectedAttemptID == "" || command.Text != "" || command.Payload != nil {
 			return ErrInvalid
 		}
 	case ActionCancelTask, ActionRetryTask:
 		if command.Target.TaskID == "" || command.Target.MemberID != "" ||
-			command.Target.ExpectedAttemptID != "" {
+			command.Target.ExpectedAttemptID != "" || command.Target.OwnerGeneration != 0 ||
+			command.Payload != nil {
 			return ErrInvalid
 		}
 	case ActionCancelTeam:
 		if command.Target.MemberID != "" || command.Target.TaskID != "" ||
-			command.Target.ExpectedAttemptID != "" {
+			command.Target.ExpectedAttemptID != "" || command.Target.OwnerGeneration != 0 ||
+			command.Payload != nil {
+			return ErrInvalid
+		}
+	case ActionResolveApproval, ActionResolveQuestion, ActionRejectQuestion:
+		if command.Target.MemberID == "" || command.Target.TaskID == "" ||
+			command.Target.ExpectedAttemptID == "" || command.Target.OwnerGeneration == 0 ||
+			command.Text != "" || command.Payload == nil {
 			return ErrInvalid
 		}
 	default:
@@ -100,7 +111,8 @@ func validateEntry(entry Entry, limits Limits) error {
 		return ErrInvalid
 	}
 
-	if entry.State != StatePending && entry.Resolved == nil {
+	if (entry.State == StateApplying || entry.State == StateApplied ||
+		entry.State == StateDeliveryUnknown) && entry.Resolved == nil {
 		return ErrInvalid
 	}
 
@@ -122,7 +134,8 @@ func validateResolved(resolved ResolvedTarget, command Command) error {
 	if resolved.TeamID != command.Target.TeamID ||
 		command.Target.MemberID != "" && resolved.MemberID != command.Target.MemberID ||
 		command.Target.TaskID != "" && resolved.TaskID != command.Target.TaskID ||
-		command.Target.ExpectedAttemptID != "" && resolved.AttemptID != command.Target.ExpectedAttemptID {
+		command.Target.ExpectedAttemptID != "" && resolved.AttemptID != command.Target.ExpectedAttemptID ||
+		command.Target.OwnerGeneration != 0 && resolved.OwnerGeneration != command.Target.OwnerGeneration {
 		return ErrInvalid
 	}
 
@@ -137,19 +150,23 @@ func validateResolved(resolved ResolvedTarget, command Command) error {
 	}
 
 	switch command.Action {
-	case ActionMessage, ActionFollowUp, ActionInterruptAttempt:
+	case ActionMessage, ActionFollowUp, ActionInterruptAttempt,
+		ActionResolveApproval, ActionResolveQuestion, ActionRejectQuestion:
 		if resolved.MemberID == "" || resolved.TaskID == "" || resolved.AttemptID == "" ||
-			resolved.ContinuationID == "" || resolved.SessionID == "" || resolved.WorkspaceID == "" {
+			resolved.ContinuationID == "" || resolved.SessionID == "" || resolved.WorkspaceID == "" ||
+			resolved.OwnerGeneration == 0 {
 			return ErrInvalid
 		}
 	case ActionCancelTask, ActionRetryTask:
 		if resolved.TaskID == "" || resolved.MemberID != "" || resolved.AttemptID != "" ||
-			resolved.ContinuationID != "" || resolved.SessionID != "" || resolved.WorkspaceID != "" {
+			resolved.ContinuationID != "" || resolved.SessionID != "" || resolved.WorkspaceID != "" ||
+			resolved.OwnerGeneration != 0 {
 			return ErrInvalid
 		}
 	case ActionCancelTeam:
 		if resolved.MemberID != "" || resolved.TaskID != "" || resolved.AttemptID != "" ||
-			resolved.ContinuationID != "" || resolved.SessionID != "" || resolved.WorkspaceID != "" {
+			resolved.ContinuationID != "" || resolved.SessionID != "" || resolved.WorkspaceID != "" ||
+			resolved.OwnerGeneration != 0 {
 			return ErrInvalid
 		}
 	default:
@@ -179,7 +196,9 @@ func terminalState(state State) bool {
 }
 
 func liveDeliveryAction(action Action) bool {
-	return action == ActionMessage || action == ActionFollowUp
+	return action == ActionMessage || action == ActionFollowUp ||
+		action == ActionResolveApproval || action == ActionResolveQuestion ||
+		action == ActionRejectQuestion
 }
 
 func mutationHash(expected Revision, mutationID team.CommandID, entry Entry) (string, error) {

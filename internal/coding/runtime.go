@@ -104,6 +104,8 @@ type Runtime struct {
 	mu    sync.Mutex
 	state State
 
+	profile             runtimeProfile
+	worker              *workerRuntimeBinding
 	workspace           workspace.Workspace
 	tree                *workspace.Tree
 	config              config.Config
@@ -116,32 +118,37 @@ type Runtime struct {
 	promptDate          string
 	projectInstructions string
 
-	handle        *session.Handle
-	repository    *session.Repository
-	session       *harness.Session
-	journal       *interactionJournal
-	plans         plandoc.Repository
-	planRef       plandoc.Ref
-	policy        execution.Policy
-	executor      *execution.Executor
-	inspector     *git.Inspector
-	permissions   *codingmcp.Permissions
-	connections   *codingmcp.Connections
-	extensions    *extension.Runtime
-	compiled      []extension.Extension
-	resources     resource.Result
-	skillSettings *skillsettings.Manager
-	skillPolicy   skillsettings.Snapshot
-	trusted       bool
-	controller    *approval.Controller
-	questions     *question.Controller
-	resolver      activeResolver
-	pending       pendingRunner
-	observers     *agentObservers
-	telemetry     *telemetryObservers
-	subagents     *subagent.Manager
-	notifications *subagent.NotificationInbox
-	children      map[string]*childProjection
+	handle          *session.Handle
+	repository      *session.Repository
+	session         *harness.Session
+	journal         *interactionJournal
+	plans           plandoc.Repository
+	planRef         plandoc.Ref
+	policy          execution.Policy
+	executor        *execution.Executor
+	inspector       *git.Inspector
+	permissions     *codingmcp.Permissions
+	connections     *codingmcp.Connections
+	extensions      *extension.Runtime
+	compiled        []extension.Extension
+	resources       resource.Result
+	skillSettings   *skillsettings.Manager
+	skillPolicy     skillsettings.Snapshot
+	trusted         bool
+	controller      *approval.Controller
+	questions       *question.Controller
+	resolver        activeResolver
+	pending         pendingRunner
+	observers       *agentObservers
+	telemetry       *telemetryObservers
+	subagents       *subagent.Manager
+	notifications   *subagent.NotificationInbox
+	children        map[string]*childProjection
+	teamGuard       teamCapabilityGuard
+	admission       *teamAdmission
+	team            *teamCoordinator
+	teamRecovery    []TeamRecoveryCandidate
+	teamRecoveryErr error
 
 	writer      *eventWriter
 	publisher   *eventPublisher
@@ -193,7 +200,25 @@ func (stack *cleanupStack) close(ctx context.Context) error {
 // already-acquired resources in exact reverse order.
 //
 //nolint:gocyclo,funlen // Composition order and rollback ownership stay explicit here.
-func Open(ctx context.Context, options OpenOptions) (_ *Runtime, returnErr error) {
+func Open(ctx context.Context, options OpenOptions) (*Runtime, error) {
+	return openRuntime(ctx, options, runtimeOpenPolicy{profile: profileLead})
+}
+
+// openRuntime is the only Runtime construction path. The Team Worker profile
+// remains package-private so configuration, CLI, MCP, and Extensions cannot
+// select a more privileged composition shape.
+//
+//nolint:gocyclo,funlen // Composition order and rollback ownership stay explicit here.
+func openRuntime(
+	ctx context.Context,
+	options OpenOptions,
+	openPolicy runtimeOpenPolicy,
+) (_ *Runtime, returnErr error) {
+	var err error
+	options, openPolicy, err = normalizeRuntimeOpen(options, openPolicy)
+	if err != nil {
+		return nil, err
+	}
 	if err := validateOpenOptions(options); err != nil {
 		return nil, err
 	}
@@ -269,7 +294,7 @@ func Open(ctx context.Context, options OpenOptions) (_ *Runtime, returnErr error
 		return nil, err
 	}
 
-	handle, resumed, err := openSession(ctx, repository, options)
+	handle, resumed, err := openSession(ctx, repository, options, openPolicy)
 	if err != nil {
 		return nil, err
 	}
@@ -346,23 +371,26 @@ func Open(ctx context.Context, options OpenOptions) (_ *Runtime, returnErr error
 		return nil, err
 	}
 
-	connections, err := openMCP(ctx, options, configured, tree, permissions)
+	connections, err := openRuntimeMCP(
+		ctx, options, configured, tree, permissions, openPolicy,
+	)
 	if err != nil {
 		return nil, err
 	}
 	stack.add(func(context.Context) error { return connections.Close() })
 
-	extensionRuntime, err := extension.New(extension.WithExtensions(options.Extensions...))
+	extensionOptions := make([]extension.Option, 0, 1)
+	if !openPolicy.teamWorker() {
+		extensionOptions = append(extensionOptions, extension.WithExtensions(options.Extensions...))
+	}
+	extensionRuntime, err := extension.New(extensionOptions...)
 	if err != nil {
 		return nil, err
 	}
 	stack.add(extensionRuntime.Shutdown)
 
-	setup, err := activateResources(
-		ctx,
-		extensionRuntime,
-		loadedResources,
-		options.Extensions,
+	setup, err := activateRuntimeResources(
+		ctx, extensionRuntime, loadedResources, options.Extensions, openPolicy,
 	)
 	if err != nil {
 		return nil, err
@@ -372,6 +400,8 @@ func Open(ctx context.Context, options OpenOptions) (_ *Runtime, returnErr error
 	}
 
 	runtime := &Runtime{
+		profile:             openPolicy.profile,
+		worker:              openPolicy.worker,
 		workspace:           options.Workspace,
 		tree:                tree,
 		config:              options.Config.Clone(),
@@ -401,6 +431,7 @@ func Open(ctx context.Context, options OpenOptions) (_ *Runtime, returnErr error
 		trusted:             options.Trusted,
 		observers:           newAgentObservers(options.AgentObservers),
 		telemetry:           newTelemetryObservers(options.TelemetryObservers),
+		admission:           newTeamAdmission(),
 		closeDone:           make(chan struct{}),
 	}
 
@@ -426,20 +457,22 @@ func Open(ctx context.Context, options OpenOptions) (_ *Runtime, returnErr error
 			)
 		}
 	}
-	if err := subagent.Reconcile(ctx, repository, handle); err != nil {
-		return nil, fmt.Errorf("coding runtime: reconcile subagents: %w", err)
-	}
-	notificationLimits := configured.Subagent.Limits
-	if notificationLimits == (subagent.Limits{}) {
-		notificationLimits = subagent.DefaultLimits()
-	}
-	runtime.notifications, err = subagent.NewNotificationInbox(
-		runtime.session,
-		handle.Metadata().ID,
-		notificationLimits.MaxResultBytes,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("coding runtime: open Agent notification inbox: %w", err)
+	if !openPolicy.teamWorker() {
+		if err := subagent.Reconcile(ctx, repository, handle); err != nil {
+			return nil, fmt.Errorf("coding runtime: reconcile subagents: %w", err)
+		}
+		notificationLimits := configured.Subagent.Limits
+		if notificationLimits == (subagent.Limits{}) {
+			notificationLimits = subagent.DefaultLimits()
+		}
+		runtime.notifications, err = subagent.NewNotificationInbox(
+			runtime.session,
+			handle.Metadata().ID,
+			notificationLimits.MaxResultBytes,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("coding runtime: open Agent notification inbox: %w", err)
+		}
 	}
 	treeSnapshot, err := runtime.session.Tree(harness.TreeLimits{})
 	if err != nil {
@@ -461,6 +494,9 @@ func Open(ctx context.Context, options OpenOptions) (_ *Runtime, returnErr error
 	runtime.recovery = bootstrap.Recovery
 	runtime.publisher = newEventPublisher(runtime)
 	runtime.children = make(map[string]*childProjection)
+	if !openPolicy.teamWorker() {
+		runtime.teamRecovery, runtime.teamRecoveryErr = runtime.discoverTeamRecovery(ctx)
+	}
 
 	runtime.controller, err = approval.New(
 		options.Workspace,
@@ -478,45 +514,52 @@ func Open(ctx context.Context, options OpenOptions) (_ *Runtime, returnErr error
 	if err != nil {
 		return nil, err
 	}
-	childCompactionSettings, compactionDisabled := effectiveCompactionSettings(
-		runtime.config.Compaction,
-		resolved,
-	)
-	var (
-		childCompaction   *harness.CompactionSettings
-		childSummaryModel ai.LanguageModel
-	)
-	if compactionDisabled == "" {
-		childCompaction = &childCompactionSettings
-		childSummaryModel = requestPolicyModel{
-			LanguageModel: baseModel,
-			apply:         requestPolicy,
+	if !openPolicy.teamWorker() {
+		childCompactionSettings, compactionDisabled := effectiveCompactionSettings(
+			runtime.config.Compaction,
+			resolved,
+		)
+		var (
+			childCompaction   *harness.CompactionSettings
+			childSummaryModel ai.LanguageModel
+		)
+		if compactionDisabled == "" {
+			childCompaction = &childCompactionSettings
+			childSummaryModel = requestPolicyModel{
+				LanguageModel: baseModel,
+				apply:         requestPolicy,
+			}
 		}
-	}
-	runtime.subagents, err = subagent.New(subagent.Config{
-		Context:        ctx,
-		Repository:     repository,
-		Parent:         handle,
-		Tree:           tree,
-		Model:          baseModel,
-		SummaryModel:   childSummaryModel,
-		Compaction:     childCompaction,
-		RequestPolicy:  requestPolicy,
-		Options:        configured.Subagent,
-		AgentObservers: []func(context.Context, agent.Event){runtime.observers.observe},
-		EventObservers: []subagent.AgentEventObserver{runtime.observeChildAgentEvent},
-	})
-	if err != nil {
-		return nil, err
-	}
-	stack.add(runtime.subagents.Close)
-	if err := runtime.recoverAgentNotifications(ctx); err != nil {
-		return nil, err
+		runtime.subagents, err = subagent.New(subagent.Config{
+			Context:        ctx,
+			Repository:     repository,
+			Parent:         handle,
+			Tree:           tree,
+			Model:          baseModel,
+			SummaryModel:   childSummaryModel,
+			Compaction:     childCompaction,
+			RequestPolicy:  requestPolicy,
+			Options:        configured.Subagent,
+			AgentObservers: []func(context.Context, agent.Event){runtime.observers.observe},
+			EventObservers: []subagent.AgentEventObserver{runtime.observeChildAgentEvent},
+		})
+		if err != nil {
+			return nil, err
+		}
+		stack.add(runtime.subagents.Close)
+		if err := runtime.recoverAgentNotifications(ctx); err != nil {
+			return nil, err
+		}
 	}
 
 	runtime.observeSessionOpened(ctx, resumed)
+	if !openPolicy.teamWorker() {
+		runtime.publishTeamRecoveryCandidates(ctx, runtime.teamRecovery)
+	}
 	runtime.recordOpenDiagnostics(ctx, connections)
-	runtime.startNotificationCoordinator(ctx)
+	if !openPolicy.teamWorker() {
+		runtime.startNotificationCoordinator(ctx)
+	}
 	stack.values = nil
 
 	return runtime, nil
@@ -662,7 +705,28 @@ func openSession(
 	ctx context.Context,
 	repository *session.Repository,
 	options OpenOptions,
+	policy runtimeOpenPolicy,
 ) (*session.Handle, bool, error) {
+	if policy.teamWorker() {
+		lineage := policy.worker.lineage
+		if options.Session.ID == "" {
+			handle, err := repository.Create(ctx, session.CreateOptions{
+				WorkspaceID: options.Workspace.Identity().Key(),
+				Kind:        session.KindTeamWorker,
+				TeamWorker:  &lineage,
+			})
+
+			return handle, false, err
+		}
+
+		handle, err := repository.OpenTeamWorker(ctx, session.OpenTeamWorkerOptions{
+			ID: options.Session.ID, WorkspaceID: options.Workspace.Identity().Key(),
+			Lineage: lineage,
+		})
+
+		return handle, true, err
+	}
+
 	if options.Session.ID == "" {
 		handle, err := repository.Create(ctx, session.CreateOptions{
 			WorkspaceID: options.Workspace.Identity().Key(),
@@ -721,6 +785,29 @@ func openMCP(
 	})
 }
 
+func openRuntimeMCP(
+	ctx context.Context,
+	options OpenOptions,
+	configured ExecutionOptions,
+	tree *workspace.Tree,
+	permissions *codingmcp.Permissions,
+	policy runtimeOpenPolicy,
+) (*codingmcp.Connections, error) {
+	if !policy.teamWorker() {
+		return openMCP(ctx, options, configured, tree, permissions)
+	}
+
+	return codingmcp.OpenConnections(ctx, nil, codingmcp.ConnectionOptions{
+		Workspace:      options.Workspace,
+		Implementation: configured.MCPClient,
+		HTTPClient:     configured.HTTPClient,
+		TempRoot:       configured.TempRoot,
+		Environment:    configured.Environment,
+		TerminateAfter: configured.MCPTerminate,
+		MaxTools:       configured.MCPMaxTools,
+	})
+}
+
 func activateResources(
 	ctx context.Context,
 	runtime *extension.Runtime,
@@ -733,6 +820,20 @@ func activateResources(
 	}
 
 	return bundle.Activate(ctx, runtime, bundles...)
+}
+
+func activateRuntimeResources(
+	ctx context.Context,
+	runtime *extension.Runtime,
+	loaded resource.Result,
+	compiled []extension.Extension,
+	policy runtimeOpenPolicy,
+) (*extension.Activation, error) {
+	if policy.teamWorker() {
+		return runtime.Activate(ctx)
+	}
+
+	return activateResources(ctx, runtime, loaded, compiled)
 }
 
 func (r *Runtime) recordOpenDiagnostics(
@@ -863,6 +964,12 @@ func (r *Runtime) SetMode(ctx context.Context, mode OperatingMode) error {
 	if r == nil {
 		return ErrRuntimeClosed
 	}
+	if r.isTeamWorker() {
+		return fmt.Errorf("%w: Team Worker mode is fixed", ErrRuntimeInvalid)
+	}
+	if r.teamGuard.active() {
+		return fmt.Errorf("%w: Lead mode is fixed while a Team is active", ErrTeamActive)
+	}
 	if !validOperatingMode(mode) {
 		return fmt.Errorf("%w: unsupported operating mode %q", ErrRuntimeInvalid, mode)
 	}
@@ -985,6 +1092,9 @@ const (
 	operationNavigate          runtimeOperationKind = "navigate"
 	operationFork              runtimeOperationKind = "fork"
 	operationAgentNotification runtimeOperationKind = "agent notification"
+	operationTeamPropose       runtimeOperationKind = "propose Team"
+	operationTeamConfirm       runtimeOperationKind = "confirm Team"
+	operationTeamResume        runtimeOperationKind = "resume Team"
 )
 
 func (r *Runtime) runSequence(
@@ -1022,6 +1132,12 @@ func cloneMessages(messages []ai.Message) []ai.Message {
 func (r *Runtime) Reload(ctx context.Context) error {
 	if r == nil {
 		return ErrRuntimeClosed
+	}
+	if r.isTeamWorker() {
+		return fmt.Errorf("%w: Team Worker resources are fixed", ErrRuntimeInvalid)
+	}
+	if r.teamGuard.active() {
+		return fmt.Errorf("%w: Lead resources are fixed while a Team is active", ErrTeamActive)
 	}
 
 	r.mu.Lock()

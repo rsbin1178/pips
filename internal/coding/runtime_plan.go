@@ -12,6 +12,9 @@ func (r *Runtime) PlanDocumentPath() (string, error) {
 	if r == nil {
 		return "", ErrRuntimeClosed
 	}
+	if r.isTeamWorker() {
+		return "", fmt.Errorf("%w: Team Worker has no Plan document", ErrRuntimeInvalid)
+	}
 
 	r.mu.Lock()
 	if r.closed || r.closing {
