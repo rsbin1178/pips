@@ -125,13 +125,16 @@ type WorkerSessionResource struct {
 // fields are valid before the Worktree is provisioned.
 type WorktreeResource struct {
 	ID              string       `json:"id,omitempty"`
+	Workspace       FileIdentity `json:"workspace,omitzero"`
 	Directory       FileIdentity `json:"directory,omitzero"`
 	GitDir          FileIdentity `json:"git_dir,omitzero"`
 	CommonDir       FileIdentity `json:"common_dir,omitzero"`
+	ObjectFormat    string       `json:"object_format,omitempty"`
 	BranchRef       string       `json:"branch_ref,omitempty"`
 	BaseOID         string       `json:"base_oid,omitempty"`
 	ResultRef       string       `json:"result_ref,omitempty"`
 	ResultCommitOID string       `json:"result_commit_oid,omitempty"`
+	LockReason      string       `json:"lock_reason,omitempty"`
 	LeaseGeneration uint64       `json:"lease_generation,omitempty"`
 }
 

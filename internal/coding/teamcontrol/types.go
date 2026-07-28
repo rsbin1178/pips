@@ -6,6 +6,7 @@ import (
 
 	"github.com/rsbin/pips/agent/continuation"
 	"github.com/rsbin/pips/agent/team"
+	"github.com/rsbin/pips/ai"
 )
 
 // Action identifies one operator control operation.
@@ -19,6 +20,9 @@ const (
 	ActionCancelTask       Action = "cancel_task"
 	ActionRetryTask        Action = "retry_task"
 	ActionCancelTeam       Action = "cancel_team"
+	ActionResolveApproval  Action = "resolve_approval"
+	ActionResolveQuestion  Action = "resolve_question"
+	ActionRejectQuestion   Action = "reject_question"
 )
 
 // State is the durable lifecycle of one operator command.
@@ -40,17 +44,19 @@ type Target struct {
 	MemberID          team.MemberID  `json:"member_id,omitempty"`
 	TaskID            team.TaskID    `json:"task_id,omitempty"`
 	ExpectedAttemptID team.AttemptID `json:"expected_attempt_id,omitempty"`
+	OwnerGeneration   uint64         `json:"owner_generation,omitempty"`
 }
 
 // ResolvedTarget is the exact execution identity selected before a side effect.
 type ResolvedTarget struct {
-	TeamID         team.ID         `json:"team_id"`
-	MemberID       team.MemberID   `json:"member_id,omitempty"`
-	TaskID         team.TaskID     `json:"task_id,omitempty"`
-	AttemptID      team.AttemptID  `json:"attempt_id,omitempty"`
-	ContinuationID continuation.ID `json:"continuation_id,omitempty"`
-	SessionID      string          `json:"session_id,omitempty"`
-	WorkspaceID    string          `json:"workspace_id,omitempty"`
+	TeamID          team.ID         `json:"team_id"`
+	MemberID        team.MemberID   `json:"member_id,omitempty"`
+	TaskID          team.TaskID     `json:"task_id,omitempty"`
+	AttemptID       team.AttemptID  `json:"attempt_id,omitempty"`
+	ContinuationID  continuation.ID `json:"continuation_id,omitempty"`
+	SessionID       string          `json:"session_id,omitempty"`
+	WorkspaceID     string          `json:"workspace_id,omitempty"`
+	OwnerGeneration uint64          `json:"owner_generation,omitempty"`
 }
 
 // Command is immutable operator intent.
@@ -59,6 +65,7 @@ type Command struct {
 	Action    Action         `json:"action"`
 	Target    Target         `json:"target"`
 	Text      string         `json:"text,omitempty"`
+	Payload   ai.JSON        `json:"payload,omitempty"`
 	CreatedAt time.Time      `json:"created_at"`
 }
 

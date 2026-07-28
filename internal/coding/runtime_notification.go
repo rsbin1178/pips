@@ -316,6 +316,10 @@ func (r *Runtime) releaseUndeliveredNotificationClaims() {
 }
 
 func (r *Runtime) acknowledgeNotificationMessage(message ai.Message) error {
+	if r == nil || r.notifications == nil {
+		return nil
+	}
+
 	text, ok := singleUserText(message)
 	if !ok {
 		return nil
@@ -356,6 +360,9 @@ func (r *Runtime) verifiedNotificationMessage(
 ) ([]string, bool, error) {
 	text, ok := singleUserText(message)
 	if !ok || !strings.HasPrefix(text, agentNotificationPrefix) {
+		return nil, false, nil
+	}
+	if r == nil || r.notifications == nil {
 		return nil, false, nil
 	}
 	envelope, err := parseAgentNotificationText(text)

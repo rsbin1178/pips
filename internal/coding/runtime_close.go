@@ -6,72 +6,67 @@ import (
 	"errors"
 )
 
-// Close cancels and waits for an active operation, terminally closes a paused
-// interaction, then releases resources in reverse acquisition order. It is
-// safe for concurrent and repeated calls.
+// Close starts the Runtime's unique cleanup owner and waits for it. If the
+// caller deadline expires, cleanup continues in the background and a later
+// Close waits for the same result. It is safe for concurrent and repeated
+// calls.
 func (r *Runtime) Close(ctx context.Context) error {
 	if r == nil {
 		return nil
 	}
 
-	for {
-		r.mu.Lock()
-		if r.closed {
-			err := r.closeErr
-			r.mu.Unlock()
-
-			return err
-		}
-
-		if !r.closing {
-			r.closing = true
-		}
-
-		if r.cleanupRunning {
-			done := r.closeDone
-			r.mu.Unlock()
-
-			select {
-			case <-done:
-				r.mu.Lock()
-				err := r.closeErr
-				r.mu.Unlock()
-
-				return err
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		}
-
-		active := r.active
-		if active != nil {
-			active.cancel()
-			done := active.done
-			r.mu.Unlock()
-
-			select {
-			case <-done:
-				continue
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		}
-
-		r.cleanupRunning = true
-		current := r.interaction
-		r.mu.Unlock()
-
-		err := r.closeResources(ctx, current)
-		r.publisher.close()
-
-		r.mu.Lock()
-		r.closeErr = err
-		r.closed = true
-		r.cleanupRunning = false
-		close(r.closeDone)
+	r.mu.Lock()
+	if r.closed {
+		err := r.closeErr
 		r.mu.Unlock()
 
 		return err
+	}
+	if !r.cleanupRunning {
+		r.closing = true
+		r.cleanupRunning = true
+		cleanupCtx := context.WithoutCancel(ctx)
+		go r.runCloseCleanup(cleanupCtx)
+	}
+	done := r.closeDone
+	r.mu.Unlock()
+
+	select {
+	case <-done:
+		r.mu.Lock()
+		err := r.closeErr
+		r.mu.Unlock()
+
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (r *Runtime) runCloseCleanup(ctx context.Context) {
+	for {
+		r.mu.Lock()
+		active := r.active
+		if active == nil {
+			current := r.interaction
+			r.mu.Unlock()
+
+			err := r.closeResources(ctx, current)
+			r.publisher.close()
+
+			r.mu.Lock()
+			r.closeErr = err
+			r.closed = true
+			r.cleanupRunning = false
+			close(r.closeDone)
+			r.mu.Unlock()
+
+			return
+		}
+		active.cancel()
+		done := active.done
+		r.mu.Unlock()
+		<-done
 	}
 }
 
@@ -95,6 +90,15 @@ func (r *Runtime) closeResources(ctx context.Context, current *interaction) erro
 	}
 	if err := r.stopNotificationCoordinator(ctx); err != nil {
 		errs = append(errs, err)
+	}
+	r.mu.Lock()
+	coordinator := r.team
+	r.mu.Unlock()
+	if coordinator != nil {
+		r.teamGuard.beginClose(coordinator.id)
+		if err := coordinator.close(ctx); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	// Children stop while the parent Session is still open so their terminal
 	// lifecycle and durable completion notification can be committed safely.

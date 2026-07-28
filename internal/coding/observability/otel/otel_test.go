@@ -89,6 +89,13 @@ func TestObserverEmitsContentFreeProductSignals(t *testing.T) {
 			DurationMillis: 125, Usage: coding.TokenUsage{InputTokens: 100, OutputTokens: 20},
 		},
 		{
+			Type: coding.EventTeamLifecycle, Time: at.Add(4750 * time.Millisecond),
+			TeamScope: "attempt",
+			TeamState: string(coding.TeamLifecycleCompleted), TeamActivity: "capturing",
+			Code: "completed", Turns: 3, ToolCalls: 9, DurationMillis: 250,
+			Usage: coding.TokenUsage{InputTokens: 120, OutputTokens: 30},
+		},
+		{
 			Type: coding.EventSessionClosed, Time: at.Add(5 * time.Second), Code: "closed",
 		},
 	}
@@ -119,6 +126,7 @@ func TestObserverEmitsContentFreeProductSignals(t *testing.T) {
 		"coding.integration.diagnostic",
 		"coding.interaction",
 		"coding.subagent.completed",
+		"coding.team.lifecycle",
 		"coding.session.closed",
 	}, names)
 
@@ -139,6 +147,8 @@ func TestObserverEmitsContentFreeProductSignals(t *testing.T) {
 		"pips.coding.integration.diagnostics",
 		"pips.coding.subagents",
 		"pips.coding.subagent.duration",
+		"pips.coding.teams",
+		"pips.coding.team.duration",
 	}, meterProvider.instrumentNames())
 }
 

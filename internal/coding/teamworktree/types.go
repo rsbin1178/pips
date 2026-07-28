@@ -85,6 +85,9 @@ type Resource struct {
 func (r Resource) TeamState() teamstate.WorktreeResource {
 	return teamstate.WorktreeResource{
 		ID: r.ID,
+		Workspace: teamstate.FileIdentity{
+			Path: r.Workspace.Path, Device: r.Workspace.Device, Inode: r.Workspace.Inode,
+		},
 		Directory: teamstate.FileIdentity{
 			Path: r.Directory.Path, Device: r.Directory.Device, Inode: r.Directory.Inode,
 		},
@@ -94,8 +97,10 @@ func (r Resource) TeamState() teamstate.WorktreeResource {
 		CommonDir: teamstate.FileIdentity{
 			Path: r.CommonDir.Path, Device: r.CommonDir.Device, Inode: r.CommonDir.Inode,
 		},
-		BranchRef: r.BranchRef, BaseOID: r.BaseOID, ResultRef: r.ResultRef,
+		ObjectFormat: r.ObjectFormat,
+		BranchRef:    r.BranchRef, BaseOID: r.BaseOID, ResultRef: r.ResultRef,
 		ResultCommitOID: r.ResultCommitOID, LeaseGeneration: r.Owner.LeaseGeneration,
+		LockReason: r.LockReason,
 	}
 }
 

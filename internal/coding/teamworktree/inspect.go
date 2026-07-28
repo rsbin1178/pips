@@ -25,6 +25,31 @@ func (m *Manager) Inspect(
 		return Status{}, err
 	}
 
+	return m.inspectVerified(ctx, resource, verified)
+}
+
+// InspectRetained verifies bounded exact Worktree state without acquiring or
+// requiring the Team mutation lease. It is intended only for startup recovery
+// discovery; callers must acquire a newer lease and call Takeover before any
+// mutation or Worker Runtime is opened.
+func (m *Manager) InspectRetained(
+	ctx context.Context,
+	resource Resource,
+) (Status, error) {
+	verified, err := m.verifyResourceIdentity(ctx, resource)
+	if err != nil {
+		return Status{}, err
+	}
+
+	return m.inspectVerified(ctx, resource, verified)
+}
+
+func (m *Manager) inspectVerified(
+	ctx context.Context,
+	resource Resource,
+	verified verifiedResource,
+) (Status, error) {
+
 	expected, err := m.treeManifest(ctx, resource.Workspace.Path, verified.expectedOID)
 	if err != nil {
 		return Status{}, err
@@ -94,15 +119,27 @@ func (m *Manager) verifyResource(
 	lease *Lease,
 	resource Resource,
 ) (verifiedResource, error) {
-	if err := ctx.Err(); err != nil {
-		return verifiedResource{}, err
-	}
-
 	if err := validateResource(resource); err != nil {
 		return verifiedResource{}, err
 	}
 
 	if err := m.validateLease(lease, resource.Owner); err != nil {
+		return verifiedResource{}, err
+	}
+
+	return m.verifyResourceIdentity(ctx, resource)
+}
+
+//nolint:gocyclo,funlen // Every identity edge is checked independently and fail-closed.
+func (m *Manager) verifyResourceIdentity(
+	ctx context.Context,
+	resource Resource,
+) (verifiedResource, error) {
+	if err := ctx.Err(); err != nil {
+		return verifiedResource{}, err
+	}
+
+	if err := validateResource(resource); err != nil {
 		return verifiedResource{}, err
 	}
 

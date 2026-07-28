@@ -2,9 +2,11 @@
 package coding
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/rsbin/pips/agent"
+	"github.com/rsbin/pips/agent/team"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding/approval"
 	"github.com/rsbin/pips/internal/coding/changes"
@@ -278,6 +280,97 @@ func TestReduceSubagentLifecycleIsBoundedAndStrict(t *testing.T) {
 	}
 	_, err = Reduce(before, progress)
 	require.ErrorIs(t, err, ErrEventProtocol)
+}
+
+func TestReduceTeamLifecycleIsCompactBoundedAndStrict(t *testing.T) {
+	t.Parallel()
+
+	teamID := team.ID("team-1")
+	beforeOpen := newSessionEvent(EventTeamLifecycle, TeamLifecycle{
+		TeamID: teamID, State: TeamLifecycleProposed,
+	})
+	_, err := Reduce(State{}, beforeOpen)
+	require.ErrorIs(t, err, ErrEventProtocol)
+
+	attempt := TeamLifecycle{
+		TeamID: teamID, MemberID: "worker-1", TaskID: "task-1", AttemptID: "attempt-1",
+	}
+	events := []Event{
+		newSessionEvent(EventSessionOpened, SessionOpened{
+			Provider: ai.ProviderOpenAI, ModelID: "gpt-test",
+		}),
+		newSessionEvent(EventTeamLifecycle, TeamLifecycle{
+			TeamID: teamID, State: TeamLifecycleProposed,
+		}),
+		newSessionEvent(EventTeamLifecycle, TeamLifecycle{
+			TeamID: teamID, State: TeamLifecycleAdmitted,
+		}),
+		newSessionEvent(EventTeamLifecycle, withTeamLifecycle(
+			attempt, TeamLifecycleWaiting, TeamActivityPreparing,
+		)),
+		newSessionEvent(EventTeamLifecycle, withTeamLifecycle(
+			attempt, TeamLifecycleRunning, TeamActivityWorking,
+		)),
+		newSessionEvent(EventTeamLifecycle, withTeamLifecycle(
+			attempt, TeamLifecyclePaused, TeamActivityAwaitingQuestion,
+		)),
+		newSessionEvent(EventTeamLifecycle, withTeamLifecycle(
+			attempt, TeamLifecycleRunning, TeamActivityWorking,
+		)),
+		newSessionEvent(EventTeamLifecycle, withTeamLifecycle(
+			attempt, TeamLifecycleCapturing, TeamActivityCapturing,
+		)),
+		newSessionEvent(EventTeamLifecycle, TeamLifecycle{
+			TeamID: teamID, MemberID: attempt.MemberID, TaskID: attempt.TaskID,
+			AttemptID: attempt.AttemptID, State: TeamLifecycleCompleted,
+			Turns: 2, Usage: TokenUsage{InputTokens: 10, OutputTokens: 4},
+			DurationMillis: 20,
+		}),
+		newSessionEvent(EventTeamLifecycle, TeamLifecycle{
+			TeamID: teamID, State: TeamLifecycleCompleted,
+		}),
+	}
+
+	var state State
+	for index := range events {
+		events[index].Sequence = uint64(index + 1)
+		var err error
+		state, err = Reduce(state, events[index])
+		require.NoError(t, err)
+	}
+	require.Len(t, state.Teams, 2)
+	assert.Equal(t, TeamLifecycleCompleted, state.Teams[0].State)
+	assert.Equal(t, TeamLifecycleCompleted, state.Teams[1].State)
+	assert.Equal(t, 10, state.Teams[1].Usage.InputTokens)
+
+	late := newSessionEvent(EventTeamLifecycle, withTeamLifecycle(
+		attempt, TeamLifecycleRunning, TeamActivityWorking,
+	))
+	late.Sequence = state.Sequence + 1
+	_, err = Reduce(state, late)
+	require.ErrorIs(t, err, ErrEventProtocol)
+
+	for index := 0; index < maxRecentTeamLifecycle+1; index++ {
+		event := newSessionEvent(EventTeamLifecycle, TeamLifecycle{
+			TeamID: team.ID(fmt.Sprintf("bulk-team-%d", index)),
+			State:  TeamLifecycleInterrupted, Code: "startup_interrupted",
+		})
+		event.Sequence = state.Sequence + 1
+		state, err = Reduce(state, event)
+		require.NoError(t, err)
+	}
+	assert.Len(t, state.Teams, maxRecentTeamLifecycle)
+}
+
+func withTeamLifecycle(
+	value TeamLifecycle,
+	state TeamLifecycleStatus,
+	activity TeamActivity,
+) TeamLifecycle {
+	value.State = state
+	value.Activity = activity
+
+	return value
 }
 
 func reducerEvents() []Event {

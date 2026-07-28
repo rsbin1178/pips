@@ -13,7 +13,10 @@ import (
 	"github.com/rsbin/pips/internal/coding/subagent"
 )
 
-const maxRecentSubagents = 128
+const (
+	maxRecentSubagents     = 128
+	maxRecentTeamLifecycle = 256
+)
 
 // InteractionState is the current or most recently completed user interaction.
 type InteractionState struct {
@@ -79,6 +82,13 @@ type SubagentState struct {
 	ToolCalls           int                      `json:"tool_calls"`
 	Usage               TokenUsage               `json:"usage"`
 	DurationMillis      int64                    `json:"duration_ms"`
+}
+
+// TeamLifecycleState is the latest compact lifecycle projection for one Team
+// or exact Task Attempt. Child Session transcript and Tool detail never enter
+// this parent projection.
+type TeamLifecycleState struct {
+	TeamLifecycle
 }
 
 // ApprovalKind identifies the approval overlay content.
@@ -148,6 +158,7 @@ type State struct {
 	Runs              []RunState              `json:"runs"`
 	Tools             []ToolState             `json:"tools"`
 	Subagents         []SubagentState         `json:"subagents"`
+	Teams             []TeamLifecycleState    `json:"teams,omitempty"`
 	Approval          ApprovalState           `json:"approval"`
 	Question          QuestionState           `json:"question"`
 	Changes           *WorkspaceChanged       `json:"changes,omitempty"`
@@ -189,6 +200,7 @@ func (state State) Clone() State {
 		cloned.Tools[index] = tool
 	}
 	cloned.Subagents = slices.Clone(state.Subagents)
+	cloned.Teams = slices.Clone(state.Teams)
 
 	cloned.Approval = cloneApprovalState(state.Approval)
 	if state.Question.Required != nil {
@@ -488,6 +500,10 @@ func (state *State) apply(event Event) error {
 		if err := state.applySubagent(event, payload); err != nil {
 			return err
 		}
+	case TeamLifecycle:
+		if err := state.applyTeamLifecycle(payload); err != nil {
+			return err
+		}
 	case ApprovalRequired:
 		if err := state.requireInteraction(event.InteractionID); err != nil || state.Approval.Kind != ApprovalNone {
 			return protocolError("approval request cannot be displayed")
@@ -564,6 +580,101 @@ func (state *State) apply(event Event) error {
 	}
 
 	return nil
+}
+
+func (state *State) applyTeamLifecycle(payload TeamLifecycle) error {
+	if !state.SessionOpen || state.SessionID == "" {
+		return protocolError("Team lifecycle requires an open Session")
+	}
+
+	index := state.teamLifecycleIndex(payload)
+	if index < 0 {
+		if !validInitialTeamLifecycleState(payload.State) {
+			return protocolError("Team lifecycle cannot start in state %q", payload.State)
+		}
+
+		state.Teams = append(state.Teams, TeamLifecycleState{TeamLifecycle: payload})
+		if len(state.Teams) > maxRecentTeamLifecycle {
+			state.Teams = slices.Clone(state.Teams[len(state.Teams)-maxRecentTeamLifecycle:])
+		}
+
+		return nil
+	}
+
+	previous := state.Teams[index].TeamLifecycle
+	if terminalTeamLifecycleStatus(previous.State) {
+		return protocolError("Team lifecycle changed after terminal state %q", previous.State)
+	}
+	if !validTeamLifecycleTransition(previous.State, payload.State) {
+		return protocolError("Team lifecycle cannot change from %q to %q", previous.State, payload.State)
+	}
+
+	state.Teams[index] = TeamLifecycleState{TeamLifecycle: payload}
+
+	return nil
+}
+
+func (state *State) teamLifecycleIndex(payload TeamLifecycle) int {
+	for index := range state.Teams {
+		previous := state.Teams[index].TeamLifecycle
+		if previous.TeamID == payload.TeamID && previous.MemberID == payload.MemberID &&
+			previous.TaskID == payload.TaskID && previous.AttemptID == payload.AttemptID {
+			return index
+		}
+	}
+
+	return -1
+}
+
+func validInitialTeamLifecycleState(value TeamLifecycleStatus) bool {
+	switch value {
+	case TeamLifecycleProposed, TeamLifecycleAdmitted, TeamLifecycleWaiting,
+		TeamLifecycleRunning, TeamLifecycleInterrupted, TeamLifecycleRecoverable:
+		return true
+	default:
+		return false
+	}
+}
+
+func validTeamLifecycleTransition(previous, next TeamLifecycleStatus) bool {
+	if previous == next {
+		return next == TeamLifecycleRunning
+	}
+
+	switch previous {
+	case TeamLifecycleProposed:
+		return next == TeamLifecycleAdmitted || next == TeamLifecycleCancelled ||
+			next == TeamLifecycleInterrupted
+	case TeamLifecycleAdmitted:
+		return next == TeamLifecycleCompleted || next == TeamLifecycleFailed ||
+			next == TeamLifecycleCancelled || next == TeamLifecycleInterrupted ||
+			next == TeamLifecycleRecoverable
+	case TeamLifecycleWaiting:
+		return next == TeamLifecycleRunning || next == TeamLifecycleFailed ||
+			next == TeamLifecycleCancelled || next == TeamLifecycleInterrupted ||
+			next == TeamLifecycleRecoverable
+	case TeamLifecycleRunning:
+		return next == TeamLifecyclePaused || next == TeamLifecycleCapturing ||
+			next == TeamLifecycleCompleted || next == TeamLifecycleFailed ||
+			next == TeamLifecycleCancelled || next == TeamLifecycleInterrupted ||
+			next == TeamLifecycleRecoverable
+	case TeamLifecyclePaused:
+		return next == TeamLifecycleRunning || next == TeamLifecycleFailed ||
+			next == TeamLifecycleCancelled || next == TeamLifecycleInterrupted ||
+			next == TeamLifecycleRecoverable
+	case TeamLifecycleCapturing:
+		return next == TeamLifecycleCompleted || next == TeamLifecycleFailed ||
+			next == TeamLifecycleCancelled || next == TeamLifecycleInterrupted ||
+			next == TeamLifecycleRecoverable
+	case TeamLifecycleRecoverable:
+		return next == TeamLifecycleAdmitted || next == TeamLifecycleWaiting ||
+			next == TeamLifecycleRunning ||
+			next == TeamLifecycleCapturing || next == TeamLifecycleCompleted ||
+			next == TeamLifecycleFailed || next == TeamLifecycleCancelled ||
+			next == TeamLifecycleInterrupted
+	default:
+		return false
+	}
 }
 
 func (state *State) canStartCompaction(mode CompactionMode) bool {

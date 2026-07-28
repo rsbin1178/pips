@@ -177,10 +177,15 @@ func validateWorktree(value WorktreeResource) error {
 	}
 	if !safeIDPattern.MatchString(value.ID) || !validRef(value.BranchRef, true) ||
 		!validRef(value.ResultRef, true) || value.BaseOID != "" && !validOID(value.BaseOID) ||
-		value.ResultCommitOID != "" && !validOID(value.ResultCommitOID) {
+		value.ResultCommitOID != "" && !validOID(value.ResultCommitOID) ||
+		value.ObjectFormat != "sha1" && value.ObjectFormat != "sha256" ||
+		strings.TrimSpace(value.LockReason) == "" || len(value.LockReason) > 4096 ||
+		value.LeaseGeneration == 0 {
 		return fmt.Errorf("%w: invalid Worktree binding", ErrInvalid)
 	}
-	for _, identity := range []FileIdentity{value.Directory, value.GitDir, value.CommonDir} {
+	for _, identity := range []FileIdentity{
+		value.Workspace, value.Directory, value.GitDir, value.CommonDir,
+	} {
 		if err := validateFileIdentity(identity, false); err != nil {
 			return fmt.Errorf("%w: invalid Worktree filesystem identity", ErrInvalid)
 		}

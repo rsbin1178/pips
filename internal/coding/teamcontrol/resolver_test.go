@@ -24,6 +24,7 @@ func TestResolveCommandBindsExactlyOneRunningAttempt(t *testing.T) {
 	assert.Equal(t, continuation.ID("continuation-1"), resolved.ContinuationID)
 	assert.Equal(t, "session-1", resolved.SessionID)
 	assert.Equal(t, "workspace-1", resolved.WorkspaceID)
+	assert.Equal(t, uint64(1), resolved.OwnerGeneration)
 
 	resources.Attempts = append(resources.Attempts, teamstate.AttemptResource{
 		TaskID: "task-2", AttemptID: "attempt-2", MemberID: "worker-1",
@@ -108,6 +109,7 @@ func runningTeamFixture() (team.Team, teamstate.Snapshot) {
 			TaskID: "task-1", AttemptID: "attempt-1", MemberID: "worker-1",
 			ContinuationID: "continuation-1",
 			Session:        teamstate.WorkerSessionResource{SessionID: "session-1", WorkspaceID: "workspace-1"},
+			Worktree:       teamstate.WorktreeResource{LeaseGeneration: 1},
 			State:          teamstate.AttemptRunning,
 		}},
 	}
