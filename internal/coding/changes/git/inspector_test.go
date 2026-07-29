@@ -218,7 +218,7 @@ func newGitFixture(t *testing.T) *gitFixture {
 	t.Helper()
 
 	fixture := newGitFixtureWithoutRepository(t, DefaultLimits())
-	fixture.git("init", "--quiet")
+	fixture.git("init", "--quiet", "--initial-branch=main")
 
 	return fixture
 }
