@@ -165,6 +165,8 @@ func decodeEventPayload(eventType EventType, data []byte) (EventPayload, error) 
 		return decodePayload[SubagentLifecycle](data)
 	case EventTeamLifecycle:
 		return decodePayload[TeamLifecycle](data)
+	case EventTeamControlLifecycle:
+		return decodePayload[TeamControlLifecycle](data)
 	case EventTeamIntegrationLifecycle:
 		return decodePayload[TeamIntegrationLifecycle](data)
 	case EventApprovalRequired:

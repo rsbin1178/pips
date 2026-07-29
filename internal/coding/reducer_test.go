@@ -4,12 +4,14 @@ package coding
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/rsbin/pips/agent"
 	"github.com/rsbin/pips/agent/team"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding/approval"
 	"github.com/rsbin/pips/internal/coding/changes"
+	"github.com/rsbin/pips/internal/coding/question"
 	"github.com/rsbin/pips/internal/coding/subagent"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -80,6 +82,66 @@ func TestReduceReturnsDefensiveState(t *testing.T) {
 	snapshotText, ok := snapshot.Transcript[0].Parts[0].(ai.TextPart)
 	require.True(t, ok)
 	assert.Equal(t, "working", snapshotText.Text)
+}
+
+func TestReduceRecordsDurablePromptRequestTime(t *testing.T) {
+	t.Parallel()
+
+	request, err := question.NewRequest("question-1", "call-1", question.Spec{
+		Questions: []question.Question{{
+			Header: "Scope", Question: "Which scope?",
+			Options: []question.Option{
+				{Label: "Runtime", Description: "Runtime only"},
+				{Label: "TUI", Description: "TUI only"},
+			},
+		}},
+	})
+	require.NoError(t, err)
+
+	reducePrompt := func(t *testing.T, payload EventPayload, at time.Time) State {
+		t.Helper()
+
+		events := []Event{
+			newSessionEvent(EventSessionOpened, SessionOpened{
+				Provider: ai.ProviderOpenAI, ModelID: "gpt-test",
+			}),
+			newInteractionEvent(EventInteractionStarted, InteractionStarted{}),
+			newInteractionEvent(eventTypeForPrompt(payload), payload),
+		}
+		events[2].Time = at
+		var state State
+		for index, event := range events {
+			event.Sequence = uint64(index + 1)
+			state, err = Reduce(state, event)
+			require.NoError(t, err)
+		}
+
+		return state.Clone()
+	}
+
+	approvalAt := eventTestTime.Add(time.Second)
+	approvalState := reducePrompt(t, ApprovalRequired{
+		RequestID: "approval-1", CallID: "call-1", Tool: "shell",
+		Choices: []approval.Choice{approval.ChoiceAllowOnce, approval.ChoiceDeny},
+	}, approvalAt)
+	assert.Equal(t, approvalAt, approvalState.Approval.RequestedAt)
+
+	questionAt := approvalAt.Add(time.Second)
+	questionState := reducePrompt(t, QuestionRequired{
+		Request: request, Count: len(request.Questions),
+	}, questionAt)
+	assert.Equal(t, questionAt, questionState.Question.RequestedAt)
+}
+
+func eventTypeForPrompt(payload EventPayload) EventType {
+	switch payload.(type) {
+	case ApprovalRequired:
+		return EventApprovalRequired
+	case QuestionRequired:
+		return EventQuestionRequired
+	default:
+		return ""
+	}
 }
 
 func TestStateIsSessionProvisional(t *testing.T) {

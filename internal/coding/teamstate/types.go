@@ -28,6 +28,17 @@ const (
 	StateFailed                   State = "failed"
 )
 
+// IsTerminal reports whether retained resources no longer represent an
+// active or reviewable Team lifecycle.
+func IsTerminal(state State) bool {
+	switch state {
+	case StateIntegrated, StateClosedWithoutIntegration, StateCancelled, StateFailed:
+		return true
+	default:
+		return false
+	}
+}
+
 // Admission identifies the workspace baseline admitted by the user.
 type Admission string
 
@@ -184,6 +195,18 @@ type Snapshot struct {
 	Cleanup      CleanupClass          `json:"cleanup"`
 	CreatedAt    time.Time             `json:"created_at"`
 	UpdatedAt    time.Time             `json:"updated_at"`
+}
+
+// IndexEntry is the bounded path-free identity and lifecycle projection used
+// for read-only workspace and parent discovery.
+type IndexEntry struct {
+	TeamID          team.ID       `json:"team_id"`
+	ParentSessionID string        `json:"parent_session_id"`
+	WorkspaceID     string        `json:"workspace_id"`
+	Revision        team.Revision `json:"revision"`
+	State           State         `json:"state"`
+	Cleanup         CleanupClass  `json:"cleanup"`
+	UpdatedAt       time.Time     `json:"updated_at"`
 }
 
 // Mutation is one idempotent optimistic update. Snapshot.Revision must equal

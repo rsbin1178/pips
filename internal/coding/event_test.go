@@ -601,6 +601,14 @@ func eventCases() []eventCase {
 				Usage: usage, DurationMillis: 25,
 			},
 		)},
+		{name: "Team control lifecycle", event: newSessionEvent(
+			EventTeamControlLifecycle,
+			TeamControlLifecycle{
+				TeamID: "team-1", Revision: 3, CommandID: "control-1",
+				Action: TeamControlMessage, MemberID: "worker-1", TaskID: "task-1",
+				AttemptID: "attempt-1", OwnerGeneration: 2, State: TeamControlApplied,
+			},
+		)},
 		{name: "Team integration lifecycle", event: newSessionEvent(
 			EventTeamIntegrationLifecycle,
 			TeamIntegrationLifecycle{

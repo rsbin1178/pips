@@ -24,15 +24,16 @@ type teamCoordinator struct {
 	controlMu     sync.Mutex
 	integrationMu sync.Mutex
 
-	id          team.ID
-	leadID      team.MemberID
-	engine      *team.Engine
-	state       *teamstate.Store
-	control     *teamcontrol.Store
-	worktree    *teamworktree.Manager
-	integration *teamintegration.Manager
-	lease       *teamworktree.Lease
-	lifecycle   teamLifecycleSink
+	id               team.ID
+	leadID           team.MemberID
+	engine           *team.Engine
+	state            *teamstate.Store
+	control          *teamcontrol.Store
+	worktree         *teamworktree.Manager
+	integration      *teamintegration.Manager
+	lease            *teamworktree.Lease
+	lifecycle        teamLifecycleSink
+	controlLifecycle teamControlLifecycleSink
 
 	factory   coordinatorOwnerFactory
 	admission *workerAdmission

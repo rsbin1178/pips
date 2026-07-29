@@ -6,9 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"os"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/rsbin/pips/agent/team"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding"
 	"github.com/rsbin/pips/internal/coding/approval"
@@ -20,6 +24,7 @@ import (
 	"github.com/rsbin/pips/internal/coding/question"
 	"github.com/rsbin/pips/internal/coding/session"
 	"github.com/rsbin/pips/internal/coding/subagent"
+	"github.com/rsbin/pips/internal/coding/teamstate"
 	"github.com/rsbin/pips/internal/coding/workspace"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -334,6 +339,109 @@ func TestControllerListsOnlyCurrentWorkspaceSessions(t *testing.T) {
 	require.NoError(t, controller.Close(t.Context()))
 }
 
+func TestControllerListsSessionSummariesFromReadOnlyTeamIndex(t *testing.T) {
+	t.Parallel()
+
+	fixture := newControllerFixture(t)
+	workspaceID := fixture.options.Workspace.Identity().Key()
+	fixture.sessions = []session.Metadata{
+		{ID: "current", WorkspaceID: workspaceID},
+		{ID: "second", WorkspaceID: workspaceID},
+		{ID: "other", WorkspaceID: "another-workspace"},
+	}
+	store, err := teamstate.New(
+		fixture.options.Paths.TeamResourcesDir(),
+		teamstate.Limits{},
+	)
+	require.NoError(t, err)
+	at := time.Date(2026, time.July, 29, 1, 2, 3, 0, time.UTC)
+	resources := []teamstate.Snapshot{
+		teamSummarySnapshot("team-retained", "current", workspaceID, teamstate.StateInterrupted, at),
+		teamSummarySnapshot(
+			"team-blocked", "current", workspaceID,
+			teamstate.StateBlockedIdentity, at.Add(time.Minute),
+		),
+		teamSummarySnapshot(
+			"team-terminal", "current", workspaceID,
+			teamstate.StateIntegrated, at.Add(2*time.Minute),
+		),
+		teamSummarySnapshot(
+			"team-second", "second", workspaceID,
+			teamstate.StateActive, at.Add(3*time.Minute),
+		),
+		teamSummarySnapshot(
+			"team-other-workspace", "current", "another-workspace",
+			teamstate.StateActive, at.Add(4*time.Minute),
+		),
+	}
+	for _, resource := range resources {
+		_, err = store.Commit(t.Context(), teamstate.Mutation{
+			CommandID:        team.CommandID("create-" + string(resource.TeamID)),
+			ExpectedRevision: 0, Snapshot: resource,
+		})
+		require.NoError(t, err)
+	}
+
+	controller, err := newController(t.Context(), fixture.options, fixture.dependencies())
+	require.NoError(t, err)
+	summaries, err := controller.ListSessionSummaries(t.Context())
+	require.NoError(t, err)
+	require.Len(t, summaries, 2)
+	assert.Equal(t, "current", summaries[0].Session.ID)
+	assert.Equal(t, 2, summaries[0].TeamRecovery.Count)
+	assert.Equal(t, TeamRecoveryBlocked, summaries[0].TeamRecovery.Class)
+	assert.Equal(t, at.Add(time.Minute), summaries[0].TeamRecovery.UpdatedAt)
+	assert.Equal(t, "second", summaries[1].Session.ID)
+	assert.Equal(t, 1, summaries[1].TeamRecovery.Count)
+	assert.Equal(t, TeamRecoveryRetained, summaries[1].TeamRecovery.Class)
+	assert.Equal(t, at.Add(3*time.Minute), summaries[1].TeamRecovery.UpdatedAt)
+	require.NoError(t, controller.Close(t.Context()))
+}
+
+func TestControllerListSessionSummariesDoesNotCreateMissingTeamStore(t *testing.T) {
+	t.Parallel()
+
+	fixture := newControllerFixture(t)
+	fixture.sessions = []session.Metadata{{
+		ID: "current", WorkspaceID: fixture.options.Workspace.Identity().Key(),
+	}}
+	controller, err := newController(t.Context(), fixture.options, fixture.dependencies())
+	require.NoError(t, err)
+
+	summaries, err := controller.ListSessionSummaries(t.Context())
+	require.NoError(t, err)
+	require.Len(t, summaries, 1)
+	assert.Zero(t, summaries[0].TeamRecovery.Count)
+	_, statErr := os.Stat(fixture.options.Paths.TeamResourcesDir())
+	require.ErrorIs(t, statErr, os.ErrNotExist)
+	require.NoError(t, controller.Close(t.Context()))
+}
+
+func teamSummarySnapshot(
+	id team.ID,
+	parentSessionID string,
+	workspaceID string,
+	state teamstate.State,
+	at time.Time,
+) teamstate.Snapshot {
+	return teamstate.Snapshot{
+		TeamID: id, Revision: 1, State: state,
+		Parent: teamstate.ParentResource{
+			SessionID: parentSessionID, WorkspaceID: workspaceID,
+			Workspace: teamstate.FileIdentity{Path: "/workspace", Device: 1, Inode: 2},
+		},
+		Repository: teamstate.RepositoryResource{
+			CommonDir: teamstate.FileIdentity{Path: "/repository/.git", Device: 1, Inode: 3},
+			BaseOID:   strings.Repeat("a", 40), BranchRef: "refs/heads/main",
+			Admission: teamstate.AdmissionClean,
+		},
+		Members: []teamstate.MemberResource{{
+			MemberID: "lead", CapabilityProfileFingerprint: strings.Repeat("b", 64),
+		}},
+		Cleanup: teamstate.CleanupRetain, CreatedAt: at, UpdatedAt: at,
+	}
+}
+
 func TestControllerCloseIsIdempotent(t *testing.T) {
 	t.Parallel()
 
@@ -551,6 +659,138 @@ func (*fakeRuntime) ListSubagents(context.Context) ([]subagent.Summary, error) {
 
 func (*fakeRuntime) InspectSubagent(context.Context, string) (subagent.Detail, error) {
 	return subagent.Detail{}, nil
+}
+
+func (*fakeRuntime) GenerateTeamProposal(
+	context.Context,
+	coding.TeamProposalPrompt,
+) (coding.TeamProposal, error) {
+	return coding.TeamProposal{}, nil
+}
+
+func (*fakeRuntime) ReviseTeamProposal(
+	context.Context,
+	string,
+	string,
+) (coding.TeamProposal, error) {
+	return coding.TeamProposal{}, nil
+}
+
+func (*fakeRuntime) DeclineTeam(context.Context, string) error { return nil }
+
+func (*fakeRuntime) ConfirmTeam(
+	context.Context,
+	coding.TeamConfirmation,
+) (coding.TeamReference, error) {
+	return coding.TeamReference{}, nil
+}
+
+func (*fakeRuntime) ReadTeam(
+	context.Context,
+	coding.TeamReadRequest,
+) (coding.TeamView, error) {
+	return coding.TeamView{}, nil
+}
+
+func (*fakeRuntime) SubmitTeamControl(
+	context.Context,
+	coding.TeamControlRequest,
+) (coding.TeamControlReference, error) {
+	return coding.TeamControlReference{}, nil
+}
+
+func (*fakeRuntime) ResolveTeamWorkerApproval(
+	context.Context,
+	coding.TeamWorkerTarget,
+	approval.Resolution,
+) (coding.TeamControlReference, error) {
+	return coding.TeamControlReference{}, nil
+}
+
+func (*fakeRuntime) ResolveTeamWorkerQuestion(
+	context.Context,
+	coding.TeamWorkerTarget,
+	question.Resolution,
+) (coding.TeamControlReference, error) {
+	return coding.TeamControlReference{}, nil
+}
+
+func (*fakeRuntime) RejectTeamWorkerQuestion(
+	context.Context,
+	coding.TeamWorkerTarget,
+	string,
+	string,
+) (coding.TeamControlReference, error) {
+	return coding.TeamControlReference{}, nil
+}
+
+func (*fakeRuntime) ObserveTeamWorker(
+	context.Context,
+	coding.TeamWorkerTarget,
+) (coding.EventObservation, error) {
+	return coding.EventObservation{}, nil
+}
+
+func (*fakeRuntime) InspectTeamWorkerState(
+	context.Context,
+	coding.TeamWorkerTarget,
+) (coding.State, error) {
+	return coding.State{}, nil
+}
+
+func (*fakeRuntime) DiscoverTeamRecovery(
+	context.Context,
+) ([]coding.TeamRecoveryCandidate, error) {
+	return nil, nil
+}
+
+func (*fakeRuntime) ResumeTeam(
+	context.Context,
+	team.ID,
+	coding.TeamResumeDecision,
+) (coding.TeamReference, error) {
+	return coding.TeamReference{}, nil
+}
+
+func (*fakeRuntime) PrepareTeamIntegration(
+	context.Context,
+	coding.TeamIntegrationRequest,
+) (coding.TeamIntegrationPreview, error) {
+	return coding.TeamIntegrationPreview{}, nil
+}
+
+func (*fakeRuntime) ApplyTeamIntegration(
+	context.Context,
+	coding.TeamIntegrationApproval,
+) (coding.TeamIntegrationResult, error) {
+	return coding.TeamIntegrationResult{}, nil
+}
+
+func (*fakeRuntime) RejectTeamIntegration(
+	context.Context,
+	coding.TeamIntegrationApproval,
+) error {
+	return nil
+}
+
+func (*fakeRuntime) TeamIntegrationRecoveries(
+	context.Context,
+) ([]coding.TeamIntegrationRecovery, error) {
+	return nil, nil
+}
+
+func (*fakeRuntime) RecoverTeamIntegration(
+	context.Context,
+	coding.TeamIntegrationRecoveryRequest,
+) (coding.TeamIntegrationResult, error) {
+	return coding.TeamIntegrationResult{}, nil
+}
+
+func (*fakeRuntime) CleanupTeam(
+	context.Context,
+	coding.TeamCleanupRequest,
+) (coding.TeamCleanupResult, error) {
+	return coding.TeamCleanupResult{}, nil
 }
 
 func (*fakeRuntime) Skills(context.Context) (coding.SkillSnapshot, error) {

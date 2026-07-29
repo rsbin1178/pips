@@ -61,6 +61,10 @@ The formal P0 support matrix is macOS Seatbelt and native Linux Bubblewrap, and
 both fail closed when the real capability probe does not pass. WSL2 uses the
 Linux backend but remains conditional until the same native smoke matrix passes
 in the target environment. Native Windows and WSL1 are not supported.
+Linux requires a trusted executable Bubblewrap 0.8.0 or newer at
+`/usr/bin/bwrap` or `/bin/bwrap`; PATH-only installations are intentionally
+ignored. CentOS 7 and other older distributions are conditional on that binary
+and the complete runtime namespace/seccomp probe, not on distribution name.
 `full-access` is an explicit, unsandboxed user override.
 
 Configure a model in `~/.pips/config.toml`, for example:
@@ -156,7 +160,7 @@ selected child's full-width ordinary Session timeline, including visible
 assistant output and Tool activity, and toggles back to the parent. Other Tools
 retain ordinary detail behavior.
 
-The command palette provides `/new`, `/resume`, `/plan`, `/mode`, `/agents`,
+The command palette provides `/new`, `/resume`, `/plan`, `/mode`, `/agents`, `/team`,
 `/skills`, `/model`, `/tree`, `/fork`, `/compact`, `/review`, `/diff`,
 `/reload`, `/status`, `/help`, and `/quit`. `/skills` browses user-invocable Skills from native
 `~/.pips/skills`/`.pips/skills` and shared
@@ -170,6 +174,14 @@ selected running child with `c`. Approval is fail-closed: review defaults to
 deny, Enter applies only the highlighted Runtime-provided choice, and an
 unknown outcome exposes only retry, mark-failed, or acknowledge when the
 Runtime declares them.
+
+`/team [objective]` proposes a Coding Team through an explicit review before
+admission; `/team` inspects current or recoverable Team work. Worker input,
+interrupted-Work retry, Integration Apply/Reject/recovery, and cleanup each use
+their own exact confirmation. `/resume` may show a bounded Team recovery badge,
+but Enter resumes only the conversation; no Worker starts until the later Team
+recovery confirmation. Private routing IDs, Worktree paths, Git refs/OIDs,
+journal hashes, and approval tokens are never shown in these views.
 
 `/model` changes the effective model only for the current pips process. Later
 new or resumed sessions in that process inherit the selection, but Session

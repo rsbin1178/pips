@@ -25,6 +25,8 @@ var (
 	ErrConsumed = errors.New("coding team integration: approval consumed")
 	// ErrRecovery reports an apply state that cannot be recovered automatically.
 	ErrRecovery = errors.New("coding team integration: recovery required")
+	// ErrRetained reports cleanup evidence intentionally preserved for review.
+	ErrRetained = errors.New("coding team integration: resource retained")
 )
 
 // Limits bounds tree composition, manifest construction, and preview evidence.

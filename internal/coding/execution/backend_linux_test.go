@@ -129,12 +129,9 @@ func TestLinuxBubblewrapVersionRejectsMalformedOutput(t *testing.T) {
 	}
 }
 
+//nolint:paralleltest // CentOS executable scanners can write-lock parallel fresh launchers.
 func TestQueryLinuxBubblewrapVersion(t *testing.T) {
-	t.Parallel()
-
 	t.Run("success", func(t *testing.T) {
-		t.Parallel()
-
 		launcher := writeLinuxVersionLauncher(t, "printf 'bubblewrap 0.8.4\\n'", 0)
 		version, err := queryLinuxBubblewrapVersion(t.Context(), launcher)
 		require.NoError(t, err)
@@ -142,8 +139,6 @@ func TestQueryLinuxBubblewrapVersion(t *testing.T) {
 	})
 
 	t.Run("bounded output", func(t *testing.T) {
-		t.Parallel()
-
 		launcher := writeLinuxVersionLauncher(
 			t,
 			"printf '"+strings.Repeat("x", linuxVersionOutputBytes+1)+"'",
@@ -154,8 +149,6 @@ func TestQueryLinuxBubblewrapVersion(t *testing.T) {
 	})
 
 	t.Run("nonzero", func(t *testing.T) {
-		t.Parallel()
-
 		launcher := writeLinuxVersionLauncher(t, "printf 'private stderr' >&2", 9)
 		_, err := queryLinuxBubblewrapVersion(t.Context(), launcher)
 		require.Error(t, err)
@@ -163,8 +156,6 @@ func TestQueryLinuxBubblewrapVersion(t *testing.T) {
 	})
 
 	t.Run("timeout", func(t *testing.T) {
-		t.Parallel()
-
 		launcher := writeLinuxVersionLauncher(t, "sleep 30", 0)
 		ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
 
@@ -379,8 +370,12 @@ func writeLinuxVersionLauncher(t *testing.T, command string, exitCode int) fileO
 
 	path := filepath.Join(t.TempDir(), "bwrap")
 	content := "#!/bin/sh\n" + command + "\nexit " + strconv.Itoa(exitCode) + "\n"
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+	// Make the fixture executable only after all content is written and closed.
+	// CentOS host scanners can otherwise race execution with the initial write
+	// and make execve fail transiently with ETXTBSY.
 	//nolint:gosec // The inspected test launcher must be executable.
-	require.NoError(t, os.WriteFile(path, []byte(content), 0o700))
+	require.NoError(t, os.Chmod(path, 0o700))
 	launcher, err := inspectExecutable(path)
 	require.NoError(t, err)
 

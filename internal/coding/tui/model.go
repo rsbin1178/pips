@@ -18,6 +18,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding"
+	"github.com/rsbin/pips/internal/coding/runtimecontrol"
 )
 
 const (
@@ -102,6 +103,8 @@ type Model struct {
 	pickerSeq          uint64
 	route              routeState
 	routeSeq           uint64
+	teamProjection     teamProjectionState
+	teamInteractions   teamInteractionQueueState
 	presentation       presentationState
 	prompt             promptState
 	promptSeq          uint64
@@ -195,6 +198,9 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if m.route.kind == routeSessions || m.route.kind == routeSkills {
 			m.route.search.SetStyles(sessionSearchStyles(m.theme, m.options.NoColor))
 		}
+		if m.route.kind == routeTeam && m.route.team != nil {
+			m.route.team.input.SetStyles(sessionSearchStyles(m.theme, m.options.NoColor))
+		}
 		m.rerenderTranscript(false)
 
 		return m, nil
@@ -219,6 +225,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 
 		m.controller = message.controller
 		m.state = message.controller.Snapshot()
+		m.resetTeamProjection(m.state.SessionID)
 		m.resetScrollback()
 		m.lifecycle = lifecycleReady
 		m.syncApprovalPrompt()
@@ -235,19 +242,28 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.commitStableTimeline()
 		}
 		if !message.supported {
-			return m, m.continueIfPaused()
+			return m, tea.Batch(m.continueIfPaused(), m.refreshTeamProjectionSnapshot())
 		}
 		if m.subscription != nil {
 			m.subscription.stop()
 		}
 
 		m.subscription = message.bridge
+		previousSessionID := m.state.SessionID
 		m.state = message.observation.State
+		if previousSessionID != m.state.SessionID {
+			m.stopTeamWorkerRouteSubscription()
+			m.resetTeamProjection(m.state.SessionID)
+		}
 		m.childStates = cloneChildStates(message.observation.Children)
 		m.syncApprovalPrompt()
 		m.setLayout()
 		commit := m.commitStableTimeline()
-		wait := tea.Batch(message.bridge.wait(), m.continueIfPaused())
+		wait := tea.Batch(
+			message.bridge.wait(),
+			m.continueIfPaused(),
+			m.refreshTeamProjectionSnapshot(),
+		)
 		if commit != nil {
 			return m, tea.Sequence(commit, wait)
 		}
@@ -312,7 +328,8 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.setLayout()
 		return m, m.commitStableTimeline()
 	case subagentRouteDataMsg:
-		if m.route.kind != routeSubagent || message.generation != m.route.generation ||
+		if m.route.kind != routeChild || m.route.childKind != childSubagent ||
+			message.generation != m.route.generation ||
 			message.childSessionID != m.route.childSessionID {
 			return m, nil
 		}
@@ -341,7 +358,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 
 		return m, nil
 	case subagentCancelResultMsg:
-		if (m.route.kind != routeAgents && m.route.kind != routeSubagent) ||
+		if (m.route.kind != routeAgents && m.route.kind != routeChild) ||
 			message.generation != m.route.generation {
 			return m, nil
 		}
@@ -349,6 +366,18 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.route.err = message.err
 
 		return m, nil
+	case teamWorkerRouteDataMsg:
+		return m.applyTeamWorkerRouteData(message)
+	case teamWorkerRouteEventMsg:
+		return m.applyTeamWorkerRouteEvent(message)
+	case teamWorkerControlResultMsg:
+		m.applyTeamWorkerControl(message)
+
+		return m, nil
+	case teamRouteResultMsg:
+		return m.applyTeamRouteResult(message)
+	case teamProjectionRefreshMsg:
+		return m, m.applyTeamProjectionRefresh(message)
 	case sessionPickerDataMsg:
 		if m.route.kind != routeSessions || message.generation != m.route.generation {
 			return m, nil
@@ -356,6 +385,10 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.route.loading = false
 		m.route.err = message.err
 		m.route.sessions = message.sessions
+		m.route.sessionRecovery = message.teamRecovery
+		if m.route.sessionRecovery == nil {
+			m.route.sessionRecovery = make(map[string]runtimecontrol.TeamRecoveryHint)
+		}
 		m.route.cursor = 0
 
 		return m, nil
@@ -393,8 +426,24 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.route.loading = false
 		m.route.err = message.err
-		m.route.agents = message.agents
+		views := make([]coding.TeamView, 0, len(message.teamViews))
+		for _, view := range message.teamViews {
+			merged := m.mergeTeamProjectionView(view)
+			m.storeTeamProjectionView(merged)
+			views = append(views, merged)
+		}
+		m.route.children = childSummaries(message.agents, views)
 		m.route.cursor = 0
+		commands := make([]tea.Cmd, 0, len(views))
+		for _, view := range views {
+			commands = append(commands, m.reconcileTeamInteractionView(view))
+		}
+
+		return m, tea.Batch(commands...)
+	case teamInteractionDataMsg:
+		return m, m.applyTeamInteractionData(message)
+	case teamInteractionControlMsg:
+		m.applyTeamInteractionControlResult(message)
 
 		return m, nil
 	case treeRouteDataMsg:
@@ -442,6 +491,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.route.controlling = false
 		}
 		if replacementControl {
+			m.stopTeamWorkerRouteSubscription()
 			m.stopSubscription()
 			m.state = m.controller.Snapshot()
 		} else if !m.subscriptionMode {
@@ -465,6 +515,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		switch message.operation {
 		case operationNew, operationResume, operationFork:
 			m.completionMarkers = nil
+			m.resetTeamProjection(m.state.SessionID)
 			m.resetScrollback()
 		case operationModel, operationReload, operationMode:
 		}
@@ -495,10 +546,24 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if replacementControl {
-			return m, tea.Sequence(commit, m.startSubscription())
+			commands := []tea.Cmd{commit, m.startSubscription()}
+			if message.operation == operationResume {
+				commands = append(commands, m.probeTeamRecoveryAfterResume())
+			}
+
+			return m, tea.Sequence(commands...)
 		}
 
 		return m, tea.Sequence(commit, m.continueIfPaused())
+	case teamRecoveryProbeMsg:
+		if message.err != nil || message.sessionID == "" ||
+			message.sessionID != m.state.SessionID || len(message.values) == 0 ||
+			m.route.kind != routeNone || m.picker.kind != pickerNone ||
+			m.prompt.kind != promptNone {
+			return m, nil
+		}
+
+		return m, m.activateTeamRecoveryReview(message.values)
 	case workspaceStatusResultMsg:
 		if message.generation != m.worktreeGeneration {
 			return m, nil
@@ -571,6 +636,13 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			if m.route.kind == routeSessions {
 				var command tea.Cmd
 				m.route.search, command = m.route.search.Update(message)
+
+				return m, command
+			}
+			if m.route.kind == routeTeam && m.route.team != nil &&
+				teamRouteInputStage(m.route.team.stage) {
+				var command tea.Cmd
+				m.route.team.input, command = m.route.team.input.Update(message)
 
 				return m, command
 			}
@@ -912,6 +984,7 @@ func (m *Model) questionEditorOffset(prompt string) (int, int, bool) {
 	return ansi.StringWidth(prefix[lineStart:]), strings.Count(prefix, "\n"), true
 }
 
+//nolint:gocyclo // Status composition keeps its deterministic width and color policy in one pass.
 func (m *Model) statusLine() string {
 	workspaceName := filepath.Base(m.options.Workspace)
 	if workspaceName == "." || workspaceName == string(filepath.Separator) {
@@ -934,15 +1007,18 @@ func (m *Model) statusLine() string {
 		phaseLabel,
 	}
 	width := m.statusLineWidth()
-	mode := statusModeLabel(m.state.Mode, width)
+	teamStatus := m.teamStatusLabel(width)
+	mode := combinedStatusRight(m.state.Mode, teamStatus, width)
 	if !m.options.NoColor {
 		palette := paletteFor(m.theme)
 		values[0] = lipgloss.NewStyle().Bold(true).Foreground(palette.workspace).Render(values[0])
 		values[1] = lipgloss.NewStyle().Bold(true).Foreground(palette.session).Render(values[1])
 		values[2] = lipgloss.NewStyle().Foreground(palette.model).Render(values[2])
 		modeColor := palette.model
-		if m.state.Mode == coding.ModePlan {
+		if m.state.Mode == coding.ModePlan && teamStatus == "" {
 			modeColor = palette.session
+		} else if teamStatus != "" {
+			modeColor = palette.workspace
 		}
 		mode = lipgloss.NewStyle().Bold(true).Foreground(modeColor).Render(mode)
 		values[3] = lipgloss.NewStyle().Bold(true).Foreground(
@@ -1063,6 +1139,9 @@ func (m *Model) setLayout() {
 	}
 	if m.route.kind == routeSessions || m.route.kind == routeSkills {
 		m.route.search.SetWidth(routeSearchInputWidth(width))
+	}
+	if m.route.kind == routeTeam && m.route.team != nil {
+		m.route.team.input.SetWidth(max(1, width-4))
 	}
 }
 
@@ -1205,8 +1284,11 @@ func (m *Model) toggleLatestTool() tea.Cmd {
 
 			return m.openToolDetailRoute(detail)
 		case blockUser, blockAssistant, blockDraft, blockQuestion, blockDiagnostic,
-			blockChange, blockError, blockCompletion:
+			blockChange, blockError, blockCompletion, blockTeam:
 		}
+	}
+	if child, ok := m.latestTeamWorkerChild(); ok {
+		return m.openChildRoute(child)
 	}
 
 	return nil
@@ -1358,7 +1440,10 @@ func (m *Model) updateStream(message streamItemMsg) (tea.Model, tea.Cmd) {
 
 	m.reduceStreamItem(message.item)
 	m.setLayout()
-	refresh := m.invalidateAgentDetail(message.item)
+	refresh := tea.Batch(
+		m.invalidateAgentDetail(message.item),
+		m.invalidateTeamProjection(message.item.event),
+	)
 
 	m.waiting = true
 	wait := m.bridge.wait()
@@ -1387,7 +1472,14 @@ func (m *Model) reduceStreamItem(item streamItem) {
 		return
 	}
 
+	previousSessionID := m.state.SessionID
 	m.state = next
+	if previousSessionID != m.state.SessionID {
+		m.stopTeamWorkerRouteSubscription()
+		m.resetTeamProjection(m.state.SessionID)
+	}
+	m.trackTeamLifecycleEvent(item.event)
+	m.applyTeamInteractionEvent(item.event)
 	if item.event.Type == coding.EventSessionNavigated ||
 		item.event.Type == coding.EventCompactionCompleted {
 		m.resetScrollback()
@@ -1547,7 +1639,10 @@ func (m *Model) updateSubscription(message subscriptionEventMsg) (tea.Model, tea
 
 	m.reduceObservedEvent(message.record.Event)
 	m.setLayout()
-	refresh := m.invalidateAgentDetail(streamItem{event: message.record.Event})
+	refresh := tea.Batch(
+		m.invalidateAgentDetail(streamItem{event: message.record.Event}),
+		m.invalidateTeamProjection(message.record.Event),
+	)
 	wait := message.bridge.wait()
 	commit := m.commitStableTimeline()
 	if commit != nil {
@@ -1566,7 +1661,7 @@ func (m *Model) reduceObservedEvent(event coding.Event) {
 	}
 
 	state := m.childStates[event.SessionID]
-	wasAtBottom := m.route.kind == routeSubagent &&
+	wasAtBottom := m.route.kind == routeChild && m.route.childKind == childSubagent &&
 		m.route.childSessionID == event.SessionID &&
 		m.route.offset >= m.subagentRouteMaximumOffset()
 	next, err := coding.Reduce(state, event)
@@ -1576,7 +1671,8 @@ func (m *Model) reduceObservedEvent(event coding.Event) {
 		return
 	}
 	m.childStates[event.SessionID] = next
-	if m.route.kind == routeSubagent && m.route.childSessionID == event.SessionID {
+	if m.route.kind == routeChild && m.route.childKind == childSubagent &&
+		m.route.childSessionID == event.SessionID {
 		child := next.Clone()
 		m.route.childState = &child
 		if wasAtBottom {

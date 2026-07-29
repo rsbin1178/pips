@@ -28,6 +28,7 @@ const (
 	blockChange
 	blockError
 	blockCompletion
+	blockTeam
 )
 
 const (
@@ -736,8 +737,32 @@ func renderTimelineBlockWithOptions(
 
 		return renderToolActivityBlock(block, width, theme, noColor)
 	}
+	if block.kind == blockTeam {
+		return renderTeamActivityBlock(block, width, theme, noColor)
+	}
 
 	return renderRegularTimelineBlock(block, markdown, width, theme, noColor)
+}
+
+func renderTeamActivityBlock(
+	block timelineBlock,
+	width int,
+	theme colorTheme,
+	noColor bool,
+) string {
+	content := strings.TrimSpace(block.title)
+	if body := strings.TrimSpace(block.body); body != "" {
+		if content != "" {
+			content += " · "
+		}
+		content += body
+	}
+	content = ansi.Truncate(content, max(1, width), "…")
+	if noColor {
+		return content
+	}
+
+	return timelineTitleStyle(blockTeam, theme).Render(content)
 }
 
 func renderRegularTimelineBlock(
@@ -899,7 +924,7 @@ func timelineTitleStyle(kind blockKind, theme colorTheme) lipgloss.Style {
 		color = "#5FAFFF"
 	case blockAssistant, blockDraft:
 		color = "#AF87FF"
-	case blockTool:
+	case blockTool, blockTeam:
 		color = "#5FD7AF"
 	case blockQuestion:
 		color = "#5FAFFF"

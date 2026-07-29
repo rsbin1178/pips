@@ -60,6 +60,7 @@ func ExitCode(err error) int {
 func isApprovalError(err error) bool {
 	return matchesAny(err,
 		coding.ErrInputRequired,
+		coding.ErrTeamInteractionRequired,
 		approval.ErrApprovalRequired,
 		approval.ErrOutcomeUnknown,
 		approval.ErrInvalidResolution,

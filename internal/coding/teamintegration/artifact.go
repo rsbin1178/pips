@@ -88,6 +88,22 @@ type Resource struct {
 	LockReason     string
 }
 
+// CleanupRequest binds non-force artifact cleanup to one exact Team and
+// prepared Integration resource.
+type CleanupRequest struct {
+	TeamID   string
+	Resource Resource
+}
+
+// Cleanup reports exact artifact deletion. Captured Attempt result refs are
+// outside this boundary and are never removed here.
+type Cleanup struct {
+	WorktreeRemoved       bool
+	BranchDeleted         bool
+	IntegrationRefDeleted bool
+	JournalRemoved        bool
+}
+
 // RetainedError reports an artifact that was intentionally left inspectable.
 type RetainedError struct {
 	IntegrationID string
@@ -98,7 +114,13 @@ func (e *RetainedError) Error() string {
 	return "coding team integration: retained artifact " + e.IntegrationID + ": " + e.Cause.Error()
 }
 
-func (e *RetainedError) Unwrap() error { return e.Cause }
+func (e *RetainedError) Unwrap() []error {
+	if e == nil || e.Cause == nil {
+		return []error{ErrRetained}
+	}
+
+	return []error{ErrRetained, e.Cause}
+}
 
 // RolledBackError reports an apply attempt that wrote parent paths but safely
 // restored every one to its exact base state. The Integration artifact remains

@@ -254,10 +254,13 @@ func TestHelpInspectionExplainsMouseSelectionAndWheelScrolling(t *testing.T) {
 	t.Parallel()
 
 	model := readyModel(t, true)
+	model.Update(tea.WindowSizeMsg{Width: 180, Height: 30})
 	content := commandOutput(model.printHelp())
 
 	assert.Contains(t, content, "terminal owns conversation history")
 	assert.Contains(t, content, "drag normally to select and copy text")
+	assert.Contains(t, content, "/team [objective]")
+	assert.Contains(t, content, "Enter resumes only the conversation")
 	assert.NotContains(t, content, "PgUp/PgDown/End")
 	assert.NotContains(t, content, "/mouse")
 }
@@ -349,15 +352,17 @@ func approvalReviewState() coding.State {
 
 type overlayController struct {
 	interactionController
-	resolutions []approval.Resolution
-	sessions    []session.Metadata
-	resumed     []string
-	models      []modelcatalog.Selection
-	entries     []modelcatalog.Entry
-	newCalls    int
-	tree        coding.SessionTree
-	preview     coding.CompactionPreview
-	navigations []struct {
+	resolutions  []approval.Resolution
+	sessions     []session.Metadata
+	teamRecovery map[string]runtimecontrol.TeamRecoveryHint
+	recoveries   []coding.TeamRecoveryCandidate
+	resumed      []string
+	models       []modelcatalog.Selection
+	entries      []modelcatalog.Entry
+	newCalls     int
+	tree         coding.SessionTree
+	preview      coding.CompactionPreview
+	navigations  []struct {
 		entryID   string
 		summarize bool
 	}
@@ -431,6 +436,32 @@ func (*overlayController) Continue(context.Context) iter.Seq2[coding.Event, erro
 
 func (c *overlayController) ListSessions(context.Context) ([]session.Metadata, error) {
 	return append([]session.Metadata(nil), c.sessions...), nil
+}
+
+func (c *overlayController) ListSessionSummaries(
+	context.Context,
+) ([]runtimecontrol.SessionSummary, error) {
+	values := make([]runtimecontrol.SessionSummary, len(c.sessions))
+	for index, metadata := range c.sessions {
+		values[index] = runtimecontrol.SessionSummary{
+			Session: metadata, TeamRecovery: c.teamRecovery[metadata.ID],
+		}
+	}
+
+	return values, nil
+}
+
+func (c *overlayController) DiscoverTeamRecovery(
+	context.Context,
+) ([]coding.TeamRecoveryCandidate, error) {
+	return cloneTeamRouteRecovery(c.recoveries), nil
+}
+
+func (*overlayController) CleanupTeam(
+	context.Context,
+	coding.TeamCleanupRequest,
+) (coding.TeamCleanupResult, error) {
+	return coding.TeamCleanupResult{}, nil
 }
 
 func (c *overlayController) Skills(context.Context) (coding.SkillSnapshot, error) {

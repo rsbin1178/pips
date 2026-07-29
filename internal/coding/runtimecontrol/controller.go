@@ -8,10 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"os"
 	"slices"
 	"sync"
 	"time"
 
+	"github.com/rsbin/pips/agent/team"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding"
 	"github.com/rsbin/pips/internal/coding/approval"
@@ -23,9 +25,13 @@ import (
 	"github.com/rsbin/pips/internal/coding/question"
 	"github.com/rsbin/pips/internal/coding/session"
 	"github.com/rsbin/pips/internal/coding/subagent"
+	"github.com/rsbin/pips/internal/coding/teamstate"
 )
 
-const runtimeCloseTimeout = 10 * time.Second
+const (
+	runtimeCloseTimeout        = 10 * time.Second
+	maxSessionSummaryTeamCount = 1_000
+)
 
 var (
 	// ErrBusy means an operation or Runtime replacement is already active.
@@ -52,6 +58,30 @@ type ModeState struct {
 	Overridden bool
 }
 
+// TeamRecoveryClass is the closed conversation-list classification for
+// retained Team resources. Detailed recovery remains a Runtime operation.
+type TeamRecoveryClass string
+
+// Team recovery hint classifications.
+const (
+	TeamRecoveryRetained TeamRecoveryClass = "retained"
+	TeamRecoveryBlocked  TeamRecoveryClass = "blocked"
+)
+
+// TeamRecoveryHint is a bounded content-free summary for one Lead Session.
+type TeamRecoveryHint struct {
+	Count     int               `json:"count"`
+	UpdatedAt time.Time         `json:"updated_at,omitzero"`
+	Class     TeamRecoveryClass `json:"class,omitempty"`
+}
+
+// SessionSummary adds read-only Team recovery hints to ordinary conversation
+// metadata without changing the generic Session repository contract.
+type SessionSummary struct {
+	Session      session.Metadata `json:"session"`
+	TeamRecovery TeamRecoveryHint `json:"team_recovery,omitzero"`
+}
+
 type runtimeInstance interface {
 	Prompt(context.Context, ...ai.Message) iter.Seq2[coding.Event, error]
 	Continue(context.Context) iter.Seq2[coding.Event, error]
@@ -68,6 +98,51 @@ type runtimeInstance interface {
 	Fork(context.Context, string) (string, error)
 	ListSubagents(context.Context) ([]subagent.Summary, error)
 	InspectSubagent(context.Context, string) (subagent.Detail, error)
+	GenerateTeamProposal(context.Context, coding.TeamProposalPrompt) (coding.TeamProposal, error)
+	ReviseTeamProposal(context.Context, string, string) (coding.TeamProposal, error)
+	DeclineTeam(context.Context, string) error
+	ConfirmTeam(context.Context, coding.TeamConfirmation) (coding.TeamReference, error)
+	ReadTeam(context.Context, coding.TeamReadRequest) (coding.TeamView, error)
+	SubmitTeamControl(context.Context, coding.TeamControlRequest) (coding.TeamControlReference, error)
+	ResolveTeamWorkerApproval(
+		context.Context,
+		coding.TeamWorkerTarget,
+		approval.Resolution,
+	) (coding.TeamControlReference, error)
+	ResolveTeamWorkerQuestion(
+		context.Context,
+		coding.TeamWorkerTarget,
+		question.Resolution,
+	) (coding.TeamControlReference, error)
+	RejectTeamWorkerQuestion(
+		context.Context,
+		coding.TeamWorkerTarget,
+		string,
+		string,
+	) (coding.TeamControlReference, error)
+	ObserveTeamWorker(context.Context, coding.TeamWorkerTarget) (coding.EventObservation, error)
+	InspectTeamWorkerState(context.Context, coding.TeamWorkerTarget) (coding.State, error)
+	DiscoverTeamRecovery(context.Context) ([]coding.TeamRecoveryCandidate, error)
+	ResumeTeam(
+		context.Context,
+		team.ID,
+		coding.TeamResumeDecision,
+	) (coding.TeamReference, error)
+	PrepareTeamIntegration(
+		context.Context,
+		coding.TeamIntegrationRequest,
+	) (coding.TeamIntegrationPreview, error)
+	ApplyTeamIntegration(
+		context.Context,
+		coding.TeamIntegrationApproval,
+	) (coding.TeamIntegrationResult, error)
+	RejectTeamIntegration(context.Context, coding.TeamIntegrationApproval) error
+	TeamIntegrationRecoveries(context.Context) ([]coding.TeamIntegrationRecovery, error)
+	RecoverTeamIntegration(
+		context.Context,
+		coding.TeamIntegrationRecoveryRequest,
+	) (coding.TeamIntegrationResult, error)
+	CleanupTeam(context.Context, coding.TeamCleanupRequest) (coding.TeamCleanupResult, error)
 	Skills(context.Context) (coding.SkillSnapshot, error)
 	SetSkillEnabled(context.Context, coding.SkillID, bool) error
 	Steer(...ai.Message) error
@@ -558,6 +633,91 @@ func (c *Controller) ListSessions(ctx context.Context) ([]session.Metadata, erro
 	}
 
 	return filtered, nil
+}
+
+// ListSessionSummaries returns current-Workspace conversations with bounded
+// Team recovery hints. It never opens a Runtime, child Session, Team lease,
+// scheduler, model, or Tool.
+func (c *Controller) ListSessionSummaries(ctx context.Context) ([]SessionSummary, error) {
+	metas, err := c.ListSessions(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	summaries := make([]SessionSummary, len(metas))
+	bySession := make(map[string]int, len(metas))
+	for index, meta := range metas {
+		summaries[index].Session = meta
+		bySession[meta.ID] = index
+	}
+	if len(summaries) == 0 {
+		return summaries, nil
+	}
+
+	c.mu.Lock()
+	resourcesDirectory := c.base.Paths.TeamResourcesDir()
+	workspaceID := c.base.Workspace.Identity().Key()
+	c.mu.Unlock()
+	entries, err := loadTeamSummaryEntries(ctx, resourcesDirectory, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	for _, entry := range entries {
+		if teamstate.IsTerminal(entry.State) {
+			continue
+		}
+		index, exists := bySession[entry.ParentSessionID]
+		if !exists {
+			continue
+		}
+
+		hint := &summaries[index].TeamRecovery
+		hint.Count++
+		if entry.UpdatedAt.After(hint.UpdatedAt) {
+			hint.UpdatedAt = entry.UpdatedAt
+		}
+		class := classifyTeamSummary(entry.State, entry.Cleanup)
+		if hint.Class == "" || class == TeamRecoveryBlocked {
+			hint.Class = class
+		}
+	}
+
+	return summaries, nil
+}
+
+func loadTeamSummaryEntries(
+	ctx context.Context,
+	resourcesDirectory string,
+	workspaceID string,
+) ([]teamstate.IndexEntry, error) {
+	if _, err := os.Stat(resourcesDirectory); errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	} else if err != nil {
+		return nil, fmt.Errorf("coding runtime control: inspect Team resources: %w", err)
+	}
+
+	store, err := teamstate.New(resourcesDirectory, teamstate.Limits{})
+	if err != nil {
+		return nil, err
+	}
+
+	return store.ListByWorkspace(ctx, workspaceID, maxSessionSummaryTeamCount)
+}
+
+func classifyTeamSummary(
+	state teamstate.State,
+	cleanup teamstate.CleanupClass,
+) TeamRecoveryClass {
+	if cleanup == teamstate.CleanupOrphaned {
+		return TeamRecoveryBlocked
+	}
+	switch state {
+	case teamstate.StateAdmitted, teamstate.StateProvisioning,
+		teamstate.StateActive, teamstate.StateInterrupted:
+		return TeamRecoveryRetained
+	default:
+		return TeamRecoveryBlocked
+	}
 }
 
 // ListSubagents returns children owned by the currently selected Session.

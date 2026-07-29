@@ -25,6 +25,12 @@ type controlResultMsg struct {
 	err       error
 }
 
+type teamRecoveryProbeMsg struct {
+	sessionID string
+	values    []coding.TeamRecoveryCandidate
+	err       error
+}
+
 func (m *Model) runModeControl(mode coding.OperatingMode) tea.Cmd {
 	if m.picker.kind != pickerNone {
 		m.picker.loading = true
@@ -71,5 +77,19 @@ func (m *Model) runControl(
 		}
 
 		return controlResultMsg{operation: operation, err: err}
+	}
+}
+
+func (m *Model) probeTeamRecoveryAfterResume() tea.Cmd {
+	controller := m.controller
+	sessionID := m.state.SessionID
+	ctx := m.ctx
+
+	return func() tea.Msg {
+		values, err := controller.DiscoverTeamRecovery(ctx)
+
+		return teamRecoveryProbeMsg{
+			sessionID: sessionID, values: cloneTeamRouteRecovery(values), err: err,
+		}
 	}
 }
