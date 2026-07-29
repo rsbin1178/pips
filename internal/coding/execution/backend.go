@@ -9,6 +9,8 @@ import (
 // Capabilities describes platform sandbox guarantees verified by Probe.
 type Capabilities struct {
 	Platform         string
+	Runtime          string
+	RuntimeVersion   string
 	WorkspaceWrite   bool
 	NetworkIsolation bool
 	ProcessIsolation bool

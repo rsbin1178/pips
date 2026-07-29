@@ -19,27 +19,36 @@ import (
 )
 
 const (
-	linuxProbeTimeout          = 5 * time.Second
-	linuxSeccompFD             = 3
-	linuxBubblewrapUsrBin      = "/usr/bin/bwrap"
-	linuxBubblewrapBin         = "/bin/bwrap"
-	linuxKernelReleaseFilename = "/proc/sys/kernel/osrelease"
-	linuxPlatform              = "linux"
-	linuxWSL2Platform          = "wsl2"
-	linuxProbeLang             = "LANG=C"
-	linuxProbePath             = "PATH=/usr/bin:/bin"
+	linuxProbeTimeout           = 5 * time.Second
+	linuxVersionOutputBytes     = 128
+	linuxSeccompFD              = 3
+	linuxBubblewrapUsrBin       = "/usr/bin/bwrap"
+	linuxBubblewrapBin          = "/bin/bwrap"
+	linuxBubblewrapRuntime      = "bubblewrap"
+	linuxBubblewrapUnshareAll   = "--unshare-all"
+	linuxBubblewrapUnshareUser  = "--unshare-user"
+	linuxBubblewrapReadOnlyBind = "--ro-bind"
+	minimumLinuxBubblewrapText  = "0.8.0"
+	linuxKernelReleaseFilename  = "/proc/sys/kernel/osrelease"
+	linuxPlatform               = "linux"
+	linuxWSL2Platform           = "wsl2"
+	linuxProbeLang              = "LANG=C"
+	linuxProbePath              = "PATH=/usr/bin:/bin"
 )
 
 type linuxBackend struct {
-	mutex    sync.Mutex
-	ready    bool
-	contract string
-	host     linuxHost
-	launcher fileObject
-	result   Capabilities
-	readFile func(string) ([]byte, error)
-	stat     func(string) (os.FileInfo, error)
-	readlink func(string) (string, error)
+	mutex           sync.Mutex
+	ready           bool
+	contract        string
+	host            linuxHost
+	launcher        fileObject
+	result          Capabilities
+	inspectLauncher func() (fileObject, error)
+	queryVersion    linuxVersionQuery
+	runProbeCommand linuxProbeCommandRunner
+	readFile        func(string) ([]byte, error)
+	stat            func(string) (os.FileInfo, error)
+	readlink        func(string) (string, error)
 }
 
 type linuxHost struct {
@@ -50,6 +59,36 @@ type linuxHost struct {
 type linuxMount struct {
 	source string
 	target string
+}
+
+type linuxBubblewrapVersion struct {
+	major uint32
+	minor uint32
+	patch uint32
+}
+
+var minimumLinuxBubblewrapVersion = linuxBubblewrapVersion{major: 0, minor: 8, patch: 0}
+
+type linuxVersionQuery func(context.Context, fileObject) (linuxBubblewrapVersion, error)
+
+type linuxProbeCommandRunner func(context.Context, linuxProbeCommand) error
+
+type linuxProbeCommand struct {
+	launcher   string
+	cwd        string
+	args       []string
+	extraFiles []*os.File
+	stdout     io.Writer
+}
+
+type linuxCapabilityProbeRequest struct {
+	launcher   fileObject
+	host       linuxHost
+	version    linuxBubblewrapVersion
+	tempRoot   string
+	stat       func(string) (os.FileInfo, error)
+	readlink   func(string) (string, error)
+	runCommand linuxProbeCommandRunner
 }
 
 type linuxSandboxRequest struct {
@@ -71,9 +110,12 @@ type linuxSandboxRequest struct {
 
 func platformBackend() backend {
 	return &linuxBackend{
-		readFile: os.ReadFile,
-		stat:     os.Stat,
-		readlink: os.Readlink,
+		inspectLauncher: inspectLinuxBubblewrap,
+		queryVersion:    queryLinuxBubblewrapVersion,
+		runProbeCommand: runLinuxProbeCommand,
+		readFile:        os.ReadFile,
+		stat:            os.Stat,
+		readlink:        os.Readlink,
 	}
 }
 
@@ -149,9 +191,25 @@ func (b *linuxBackend) prepare(
 	ctx context.Context,
 	tempRoot string,
 ) (fileObject, Capabilities, error) {
-	launcher, err := inspectLinuxBubblewrap()
+	if err := b.validateDependencies(); err != nil {
+		return fileObject{}, Capabilities{}, newProbeError(
+			ProbeFailureUnknown,
+			linuxBubblewrapRuntime,
+			"",
+			minimumLinuxBubblewrapText,
+			err,
+		)
+	}
+
+	launcher, err := b.inspectLauncher()
 	if err != nil {
-		return fileObject{}, Capabilities{}, err
+		return fileObject{}, Capabilities{}, newProbeError(
+			ProbeFailureLauncher,
+			linuxBubblewrapRuntime,
+			"",
+			minimumLinuxBubblewrapText,
+			err,
+		)
 	}
 
 	host, err := detectLinuxHost(b.readFile)
@@ -167,19 +225,41 @@ func (b *linuxBackend) prepare(
 		return launcher, b.result, nil
 	}
 
-	capabilities, err := runLinuxCapabilityProbe(
-		ctx,
-		launcher,
-		host,
-		tempRoot,
-		b.stat,
-		b.readlink,
-	)
+	probeCtx, cancel := context.WithTimeout(ctx, linuxProbeTimeout)
+	defer cancel()
+
+	version, err := b.queryVersion(probeCtx, launcher)
 	if err != nil {
-		return fileObject{}, Capabilities{}, fmt.Errorf(
-			"linux sandbox capability probe failed; verify unprivileged user namespaces and host AppArmor policy: %w",
+		return fileObject{}, Capabilities{}, newProbeError(
+			ProbeFailureRuntimeVersion,
+			linuxBubblewrapRuntime,
+			"",
+			minimumLinuxBubblewrapText,
 			err,
 		)
+	}
+
+	if !version.atLeast(minimumLinuxBubblewrapVersion) {
+		return fileObject{}, Capabilities{}, newProbeError(
+			ProbeFailureRuntimeTooOld,
+			linuxBubblewrapRuntime,
+			version.String(),
+			minimumLinuxBubblewrapText,
+			errors.New("bubblewrap runtime is below the supported baseline"),
+		)
+	}
+
+	capabilities, err := runLinuxCapabilityProbe(probeCtx, linuxCapabilityProbeRequest{
+		launcher:   launcher,
+		host:       host,
+		version:    version,
+		tempRoot:   tempRoot,
+		stat:       b.stat,
+		readlink:   b.readlink,
+		runCommand: b.runProbeCommand,
+	})
+	if err != nil {
+		return fileObject{}, Capabilities{}, err
 	}
 
 	b.ready = true
@@ -189,6 +269,25 @@ func (b *linuxBackend) prepare(
 	b.result = capabilities
 
 	return launcher, capabilities, nil
+}
+
+func (b *linuxBackend) validateDependencies() error {
+	switch {
+	case b.inspectLauncher == nil:
+		return errors.New("linux sandbox launcher inspection is unavailable")
+	case b.queryVersion == nil:
+		return errors.New("linux sandbox version query is unavailable")
+	case b.runProbeCommand == nil:
+		return errors.New("linux sandbox probe runner is unavailable")
+	case b.readFile == nil:
+		return errors.New("linux sandbox file reader is unavailable")
+	case b.stat == nil:
+		return errors.New("linux sandbox path inspector is unavailable")
+	case b.readlink == nil:
+		return errors.New("linux sandbox namespace inspector is unavailable")
+	default:
+		return nil
+	}
 }
 
 func inspectLinuxBubblewrap() (fileObject, error) {
@@ -213,6 +312,117 @@ func inspectLinuxBubblewrap() (fileObject, error) {
 	return fileObject{}, errors.New(
 		"bubblewrap is unavailable; install the distribution package at /usr/bin/bwrap or /bin/bwrap",
 	)
+}
+
+func queryLinuxBubblewrapVersion(
+	ctx context.Context,
+	launcher fileObject,
+) (linuxBubblewrapVersion, error) {
+	if err := revalidateFileObject(launcher, true, false); err != nil {
+		return linuxBubblewrapVersion{}, err
+	}
+
+	output := boundedLinuxProbeOutput{limit: linuxVersionOutputBytes}
+
+	err := runLinuxProbeCommand(ctx, linuxProbeCommand{
+		launcher: launcher.path,
+		cwd:      string(filepath.Separator),
+		args:     []string{"--version"},
+		stdout:   &output,
+	})
+	if err != nil {
+		return linuxBubblewrapVersion{}, err
+	}
+
+	if output.overflow {
+		return linuxBubblewrapVersion{}, errors.New("bubblewrap version output exceeds limit")
+	}
+
+	return parseLinuxBubblewrapVersion(output.content)
+}
+
+func parseLinuxBubblewrapVersion(content []byte) (linuxBubblewrapVersion, error) {
+	if len(content) == 0 || len(content) > linuxVersionOutputBytes {
+		return linuxBubblewrapVersion{}, errors.New("invalid Bubblewrap version output length")
+	}
+
+	text, _ := strings.CutSuffix(string(content), "\n")
+
+	versionText, ok := strings.CutPrefix(text, linuxBubblewrapRuntime+" ")
+	if !ok || versionText == "" || strings.ContainsAny(versionText, "\r\n\t ") {
+		return linuxBubblewrapVersion{}, errors.New("invalid Bubblewrap version output format")
+	}
+
+	parts := strings.Split(versionText, ".")
+	if len(parts) != 3 {
+		return linuxBubblewrapVersion{}, errors.New("invalid Bubblewrap version component count")
+	}
+
+	values := make([]uint32, len(parts))
+	for index, part := range parts {
+		value, err := parseLinuxBubblewrapVersionComponent(part)
+		if err != nil {
+			return linuxBubblewrapVersion{}, err
+		}
+
+		values[index] = value
+	}
+
+	return linuxBubblewrapVersion{major: values[0], minor: values[1], patch: values[2]}, nil
+}
+
+func parseLinuxBubblewrapVersionComponent(part string) (uint32, error) {
+	if part == "" || len(part) > 9 || len(part) > 1 && part[0] == '0' {
+		return 0, errors.New("invalid Bubblewrap version component")
+	}
+
+	for _, digit := range part {
+		if digit < '0' || digit > '9' {
+			return 0, errors.New("invalid Bubblewrap version component")
+		}
+	}
+
+	value, err := strconv.ParseUint(part, 10, 32)
+	if err != nil {
+		return 0, errors.New("invalid Bubblewrap version component")
+	}
+
+	return uint32(value), nil
+}
+
+func (v linuxBubblewrapVersion) String() string {
+	return fmt.Sprintf("%d.%d.%d", v.major, v.minor, v.patch)
+}
+
+func (v linuxBubblewrapVersion) atLeast(minimum linuxBubblewrapVersion) bool {
+	if v.major != minimum.major {
+		return v.major > minimum.major
+	}
+
+	if v.minor != minimum.minor {
+		return v.minor > minimum.minor
+	}
+
+	return v.patch >= minimum.patch
+}
+
+type boundedLinuxProbeOutput struct {
+	content  []byte
+	limit    int
+	overflow bool
+}
+
+func (w *boundedLinuxProbeOutput) Write(content []byte) (int, error) {
+	available := w.limit - len(w.content)
+	if available < len(content) {
+		w.overflow = true
+	}
+
+	if available > 0 {
+		w.content = append(w.content, content[:min(available, len(content))]...)
+	}
+
+	return len(content), nil
 }
 
 func detectLinuxHost(readFile func(string) ([]byte, error)) (linuxHost, error) {
@@ -334,7 +544,8 @@ func prepareLinuxMaskMounts(privateDir string, protected []string, gitPath strin
 
 func buildLinuxSandboxArguments(request linuxSandboxRequest) []string {
 	args := []string{
-		"--unshare-all",
+		linuxBubblewrapUnshareAll,
+		linuxBubblewrapUnshareUser,
 	}
 	if request.networkAny {
 		args = append(args, "--share-net")
@@ -346,7 +557,7 @@ func buildLinuxSandboxArguments(request linuxSandboxRequest) []string {
 		"--clearenv",
 		"--cap-drop", "ALL",
 		"--disable-userns",
-		"--ro-bind", string(filepath.Separator), string(filepath.Separator),
+		linuxBubblewrapReadOnlyBind, string(filepath.Separator), string(filepath.Separator),
 		"--proc", "/proc",
 		"--dev", "/dev",
 	)
@@ -366,16 +577,16 @@ func buildLinuxSandboxArguments(request linuxSandboxRequest) []string {
 
 	gitPath := filepath.Join(request.workspace, ".git")
 	if request.gitExists {
-		args = append(args, "--ro-bind", gitPath, gitPath)
+		args = append(args, linuxBubblewrapReadOnlyBind, gitPath, gitPath)
 	}
 
-	args = append(args, "--ro-bind", request.executable, request.executable)
+	args = append(args, linuxBubblewrapReadOnlyBind, request.executable, request.executable)
 	for _, path := range request.readOnlyFiles {
-		args = append(args, "--ro-bind", path, path)
+		args = append(args, linuxBubblewrapReadOnlyBind, path, path)
 	}
 
 	for _, mount := range request.maskMounts {
-		args = append(args, "--ro-bind", mount.source, mount.target)
+		args = append(args, linuxBubblewrapReadOnlyBind, mount.source, mount.target)
 	}
 
 	args = append(args,
@@ -395,43 +606,68 @@ func buildLinuxSandboxArguments(request linuxSandboxRequest) []string {
 
 func runLinuxCapabilityProbe(
 	ctx context.Context,
-	launcher fileObject,
-	host linuxHost,
-	tempRoot string,
-	stat func(string) (os.FileInfo, error),
-	readlink func(string) (string, error),
-) (capabilities Capabilities, resultErr error) {
-	probeCtx, cancel := context.WithTimeout(ctx, linuxProbeTimeout)
-	defer cancel()
-
-	tempObject, err := validateTempRoot(tempRoot)
+	request linuxCapabilityProbeRequest,
+) (Capabilities, error) {
+	tempObject, err := validateTempRoot(request.tempRoot)
 	if err != nil {
-		return Capabilities{}, err
+		return Capabilities{}, newLinuxProbeStageError(ProbeFailureIsolation, request.version, err)
 	}
 
 	probeRoot, err := os.MkdirTemp(tempObject.path, "probe-")
 	if err != nil {
-		return Capabilities{}, fmt.Errorf("create capability probe: %w", err)
+		return Capabilities{}, newLinuxProbeStageError(ProbeFailureIsolation, request.version, err)
 	}
 
 	probeObject, _, err := inspectFileObject(probeRoot)
 	if err != nil {
-		_ = os.Remove(probeRoot)
+		removeErr := os.Remove(probeRoot)
 
-		return Capabilities{}, err
+		return Capabilities{}, newLinuxProbeStageError(
+			ProbeFailureIsolation,
+			request.version,
+			errors.Join(err, removeErr),
+		)
 	}
-	defer func() {
-		resultErr = errors.Join(resultErr, removeOwnedLinuxProbe(tempObject, probeObject))
-	}()
 
+	capabilities, probeErr := runLinuxCapabilityProbeInRoot(ctx, request, probeRoot)
+
+	cleanupErr := removeOwnedLinuxProbe(tempObject, probeObject)
+	if probeErr != nil {
+		return Capabilities{}, joinProbeErrorCause(probeErr, cleanupErr)
+	}
+
+	if cleanupErr != nil {
+		return Capabilities{}, newLinuxProbeStageError(
+			ProbeFailureIsolation,
+			request.version,
+			cleanupErr,
+		)
+	}
+
+	return capabilities, nil
+}
+
+func runLinuxCapabilityProbeInRoot(
+	ctx context.Context,
+	request linuxCapabilityProbeRequest,
+	probeRoot string,
+) (Capabilities, error) {
 	paths, err := prepareLinuxProbePaths(probeRoot)
 	if err != nil {
-		return Capabilities{}, err
+		return Capabilities{}, newLinuxProbeStageError(ProbeFailureIsolation, request.version, err)
 	}
 
-	namespaces, err := readLinuxNamespaceIdentities(readlink)
+	if err := request.runCommand(ctx, linuxProbeCommand{
+		launcher: request.launcher.path,
+		cwd:      paths.workspace,
+		args:     buildLinuxIsolationProbeArguments(paths.workspace),
+	}); err != nil {
+		return Capabilities{}, newLinuxProbeStageError(ProbeFailureIsolation, request.version, err)
+	}
+
+	namespaces, err := readLinuxNamespaceIdentities(request.readlink)
 	if err != nil {
-		return Capabilities{}, err
+		return Capabilities{}, newLinuxProbeStageError(ProbeFailureIsolation, request.version, err)
 	}
 
 	maskMounts, err := prepareLinuxMaskMounts(
@@ -440,16 +676,21 @@ func runLinuxCapabilityProbe(
 		paths.gitDir,
 	)
 	if err != nil {
-		return Capabilities{}, err
+		return Capabilities{}, newLinuxProbeStageError(ProbeFailureIsolation, request.version, err)
 	}
 
 	for _, networkAny := range []bool{false, true} {
 		filter, err := createLinuxSeccompFile(paths.privateDir, networkAny)
 		if err != nil {
-			return Capabilities{}, err
+			failure := ProbeFailureDeny
+			if networkAny {
+				failure = ProbeFailureAllow
+			}
+
+			return Capabilities{}, newLinuxProbeStageError(failure, request.version, err)
 		}
 
-		script := linuxProbeScript(paths, namespaces, launcher.path, networkAny)
+		script := linuxProbeScript(paths, namespaces, request.launcher.path, networkAny)
 		sandboxRequest := linuxSandboxRequest{
 			workspace:      paths.workspace,
 			cwd:            paths.workspace,
@@ -463,28 +704,70 @@ func runLinuxCapabilityProbe(
 			gitExists:      true,
 			maskMounts:     maskMounts,
 		}
-		sandboxRequest.privateMounts = linuxPrivateMounts(stat, sandboxRequest)
+		sandboxRequest.privateMounts = linuxPrivateMounts(request.stat, sandboxRequest)
 		args := buildLinuxSandboxArguments(sandboxRequest)
 
-		runErr := runLinuxProbeCommand(probeCtx, launcher.path, paths.workspace, args, filter)
+		runErr := request.runCommand(ctx, linuxProbeCommand{
+			launcher:   request.launcher.path,
+			cwd:        paths.workspace,
+			args:       args,
+			extraFiles: []*os.File{filter},
+		})
 
 		closeErr := filter.Close()
 		if runErr != nil || closeErr != nil {
-			capability := "deny"
+			failure := ProbeFailureDeny
 			if networkAny {
-				capability = "allow"
+				failure = ProbeFailureAllow
 			}
 
-			return Capabilities{}, fmt.Errorf("%s capability: %w", capability, errors.Join(runErr, closeErr))
+			return Capabilities{}, newLinuxProbeStageError(
+				failure,
+				request.version,
+				errors.Join(runErr, closeErr),
+			)
 		}
 	}
 
 	return Capabilities{
-		Platform:         host.platform,
+		Platform:         request.host.platform,
+		Runtime:          linuxBubblewrapRuntime,
+		RuntimeVersion:   request.version.String(),
 		WorkspaceWrite:   true,
 		NetworkIsolation: true,
 		ProcessIsolation: true,
 	}, nil
+}
+
+func newLinuxProbeStageError(
+	failure ProbeFailure,
+	version linuxBubblewrapVersion,
+	cause error,
+) *ProbeError {
+	return newProbeError(
+		failure,
+		linuxBubblewrapRuntime,
+		version.String(),
+		minimumLinuxBubblewrapText,
+		cause,
+	)
+}
+
+func buildLinuxIsolationProbeArguments(cwd string) []string {
+	return []string{
+		linuxBubblewrapUnshareAll,
+		linuxBubblewrapUnshareUser,
+		"--new-session",
+		"--die-with-parent",
+		"--clearenv",
+		"--cap-drop", "ALL",
+		"--disable-userns",
+		linuxBubblewrapReadOnlyBind, string(filepath.Separator), string(filepath.Separator),
+		"--proc", "/proc",
+		"--dev", "/dev",
+		"--chdir", cwd,
+		"--", "/bin/true",
+	}
 }
 
 type linuxProbePaths struct {
@@ -594,22 +877,24 @@ func linuxProbeScript(
 	)
 }
 
-func runLinuxProbeCommand(
-	ctx context.Context,
-	launcher, cwd string,
-	args []string,
-	seccomp *os.File,
-) error {
+func runLinuxProbeCommand(ctx context.Context, request linuxProbeCommand) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	stdout := request.stdout
+	if stdout == nil {
+		stdout = io.Discard
+	}
+
 	command := &exec.Cmd{
-		Path: launcher,
-		Args: append([]string{launcher}, args...),
-		Dir:  cwd,
-		Env:  []string{linuxProbeLang, linuxProbePath},
-		ExtraFiles: []*os.File{
-			seccomp,
-		},
-		Stdout: io.Discard,
-		Stderr: io.Discard,
+		Path:       request.launcher,
+		Args:       append([]string{request.launcher}, request.args...),
+		Dir:        request.cwd,
+		Env:        []string{linuxProbeLang, linuxProbePath},
+		ExtraFiles: slices.Clone(request.extraFiles),
+		Stdout:     stdout,
+		Stderr:     io.Discard,
 		SysProcAttr: &syscall.SysProcAttr{
 			Setpgid: true,
 		},

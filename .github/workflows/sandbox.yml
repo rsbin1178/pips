@@ -55,6 +55,12 @@ jobs:
           cache: true
       - name: Install external sandbox runtime
         run: sudo apt-get update && sudo apt-get install --yes bubblewrap
+      - name: Record Linux sandbox host
+        run: |
+          cat /etc/os-release
+          uname -a
+          go version
+          bwrap --version
       - name: Test execution package
         run: go test -race ./internal/coding/execution/... ./internal/coding/approval/... ./internal/coding/changes/... ./internal/coding/tools/...
       - name: Test real Linux sandbox

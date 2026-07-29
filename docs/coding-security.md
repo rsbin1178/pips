@@ -22,7 +22,7 @@ approval Controller can expose its guarded wrapper.
 | Host | Runtime | Support contract |
 | --- | --- | --- |
 | macOS | System `/usr/bin/sandbox-exec` (Seatbelt) | A real read/write/network capability probe must pass. Seatbelt is deprecated by Apple, so it remains a replaceable backend rather than an application contract. Process-tree cleanup is weaker than a PID namespace. |
-| Linux | Rootless Bubblewrap at `/usr/bin/bwrap` or `/bin/bwrap`, plus supported seccomp architecture | A real namespace, mount, PID, network, and seccomp probe must pass. Pips does not install Bubblewrap or change AppArmor/user-namespace settings. |
+| Linux | Non-setuid Bubblewrap 0.8.0 or newer at `/usr/bin/bwrap` or `/bin/bwrap`, plus supported seccomp architecture | The version gate provides an early diagnostic, then a real namespace, mount, PID, network, filesystem, and seccomp probe must pass. Pips does not install Bubblewrap or change container, SELinux/AppArmor, or user-namespace settings. |
 | WSL2 | Same Bubblewrap contract as Linux | Conditional, not part of the formal P0 matrix. A release may claim WSL2 support only after the complete native smoke passes in WSL2; cross-compilation is not evidence. |
 | WSL1 / native Windows | No P0 backend | Commands fail as unsupported. Use a verified WSL2 environment conditionally, or run the whole application in a container/VM. |
 
@@ -30,11 +30,23 @@ The release-blocking P0 matrix is macOS and native Linux on amd64/arm64. A
 successful `pips doctor` proves the current machine's capability but does not by
 itself replace the release's native platform-runner evidence.
 
+Linux support is capability-based, not distribution-name-based. CentOS 7 and
+other older hosts are supported only when an administrator supplies a trusted
+Bubblewrap 0.8.0-or-newer system binary and the complete probe succeeds. A
+stock package version, a successful `bwrap --version`, or an
+`ID_LIKE=centos` value is not sufficient. In particular, an outer container
+must allow the user, mount, PID, and network namespaces and the private `/proc`
+mount required by the probe. Pips fails closed if any layer blocks them; it
+does not fall back to a weaker Sandbox or automatically modify the host.
+Pips explicitly requests the initial user namespace before disabling nested
+user namespaces, so the same contract applies when Pips itself runs as root or
+as an unprivileged user.
+
 `pips doctor` validates configuration and the provider-neutral `API_KEY`. In
 `workspace-write` mode it then runs the real native Sandbox probe and reports
-filesystem, network, and process isolation. In `full-access` mode it reports an
-explicit warning instead of presenting an unsandboxed runner as a successful
-Sandbox probe.
+the platform, Sandbox runtime/version, and filesystem, network, and process
+isolation. In `full-access` mode it reports an explicit warning instead of
+presenting an unsandboxed runner as a successful Sandbox probe.
 
 ## Files, credentials, and HOME
 

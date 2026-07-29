@@ -78,13 +78,35 @@ func doctorSandboxStatus(
 	}
 
 	return fmt.Sprintf(
-		"sandbox ok platform=%s workspace_write=%t network_isolation=%t process_isolation=%t\n"+
+		"sandbox ok platform=%s runtime=%s runtime_version=%s "+
+			"workspace_write=%t network_isolation=%t process_isolation=%t\n"+
 			"sandbox notice home_readable=true known_credentials_denied=true\n",
-		capabilities.Platform,
+		doctorCapabilityValue(capabilities.Platform),
+		doctorCapabilityValue(capabilities.Runtime),
+		doctorCapabilityValue(capabilities.RuntimeVersion),
 		capabilities.WorkspaceWrite,
 		capabilities.NetworkIsolation,
 		capabilities.ProcessIsolation,
 	), nil
+}
+
+func doctorCapabilityValue(value string) string {
+	if value == "" || len(value) > 64 {
+		return unknownDisplayValue
+	}
+
+	for _, character := range value {
+		if character >= 'a' && character <= 'z' ||
+			character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' ||
+			character == '.' || character == '_' || character == '-' {
+			continue
+		}
+
+		return unknownDisplayValue
+	}
+
+	return value
 }
 
 func nativeSandboxProbe(dependencies Dependencies) SandboxProbe {
