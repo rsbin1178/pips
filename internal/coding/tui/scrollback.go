@@ -18,14 +18,15 @@ import (
 // tail Bubble Tea still owns. Stable blocks are printed above the inline
 // Program once, so the terminal can retain, select, and scroll them natively.
 type scrollbackCursor struct {
-	messages    int
-	tools       int
-	diagnostics int
-	toolIDs     map[string]struct{}
-	completions map[string]struct{}
-	changes     projectionFingerprint
-	lastError   projectionFingerprint
-	streamError string
+	messages     int
+	tools        int
+	diagnostics  int
+	toolIDs      map[string]struct{}
+	completions  map[string]struct{}
+	teamAttempts map[teamAttemptKey]projectionFingerprint
+	changes      projectionFingerprint
+	lastError    projectionFingerprint
+	streamError  string
 }
 
 type projectionFingerprint [sha256.Size]byte
@@ -36,7 +37,9 @@ type scrollbackWrite struct {
 }
 
 func (m *Model) resetScrollback() {
+	teamAttempts := m.scrollback.teamAttempts
 	m.scrollback = scrollbackCursor{}
+	m.scrollback.teamAttempts = teamAttempts
 	m.streaming.reset()
 	m.timeline = ""
 }
@@ -257,6 +260,7 @@ func (m *Model) takeStableTimelineBlocks() []timelineBlock {
 	for _, block := range blocks {
 		m.markToolActivitiesCommitted(block)
 	}
+	blocks = append(blocks, m.takeStableTeamAttemptBlocks()...)
 	for index := m.scrollback.tools; index < stableTools; index++ {
 		m.markToolIDCommitted(m.state.Tools[index].Call.ID)
 	}
@@ -340,6 +344,8 @@ func (m *Model) activeTimelineBlocks() []timelineBlock {
 			}
 		}
 	}
+
+	blocks = append(blocks, m.activeTeamAttemptBlocks()...)
 
 	return blocks
 }

@@ -737,6 +737,12 @@ func (stubController) WorkspaceStatus(context.Context) (changes.WorktreeStatus, 
 	)
 }
 
+func (stubController) DiscoverTeamRecovery(
+	context.Context,
+) ([]coding.TeamRecoveryCandidate, error) {
+	return nil, nil
+}
+
 func (c stubController) Config() config.Config {
 	value := config.Defaults()
 	value.Model.Provider = c.state.Provider

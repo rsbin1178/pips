@@ -20,6 +20,7 @@ import (
 
 	"github.com/charmbracelet/x/term"
 	"github.com/creack/pty"
+	"github.com/rsbin/pips/agent/team"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding"
 	"github.com/stretchr/testify/assert"
@@ -100,7 +101,7 @@ func TestPTYLifecycleRestoresTerminalBeforeControllerClose(t *testing.T) {
 			"\x1b[<32;11;5M",
 	))
 	require.NoError(t, err)
-	waitForPTYOutput(t, &output, "▣ openai/tui-scripted ·", 5*time.Second)
+	waitForPTYOutput(t, &output, "▣ Team Worker · Team task · Completed", 5*time.Second)
 	_, err = master.Write([]byte{0x03})
 	require.NoError(t, err)
 	time.Sleep(500 * time.Millisecond)
@@ -153,6 +154,12 @@ func TestPTYLifecycleRestoresTerminalBeforeControllerClose(t *testing.T) {
 	assert.Contains(t, value, "PROMPT_LINES=4")
 	assert.Contains(t, value, "scripted final answer")
 	assert.Contains(t, value, "▣ openai/tui-scripted ·")
+	assert.Contains(t, value, "▣ Team Worker · Team task · Completed")
+	for _, private := range []string{
+		"team-pty", "member-pty", "task-pty", "attempt-pty", "child-pty", "private_ref",
+	} {
+		assert.NotContains(t, value, private)
+	}
 }
 
 type synchronizedBuffer struct {
@@ -213,7 +220,50 @@ func (c *ptyController) Prompt(
 	c.promptLines = lines
 	c.mu.Unlock()
 
-	return c.Controller.Prompt(ctx, messages...)
+	upstream := c.Controller.Prompt(ctx, messages...)
+
+	return func(yield func(coding.Event, error) bool) {
+		var latest coding.Event
+		for event, eventErr := range upstream {
+			if eventErr == nil {
+				latest = event
+			}
+			if !yield(event, eventErr) || eventErr != nil {
+				return
+			}
+		}
+		if latest.SessionID == "" {
+			return
+		}
+
+		attempt := coding.TeamLifecycle{
+			TeamID: team.ID("team-pty"), MemberID: team.MemberID("member-pty"),
+			TaskID: team.TaskID("task-pty"), AttemptID: team.AttemptID("attempt-pty"),
+			ChildSessionID: "child-pty", State: coding.TeamLifecycleRunning,
+			Activity: coding.TeamActivityWorking,
+		}
+		running := coding.Event{
+			Schema: coding.EventSchema, Sequence: latest.Sequence + 1,
+			Time: latest.Time.Add(time.Millisecond), SessionID: latest.SessionID,
+			Type: coding.EventTeamLifecycle, Payload: attempt,
+		}
+		if !yield(running, nil) {
+			return
+		}
+
+		attempt.State = coding.TeamLifecycleCompleted
+		attempt.Activity = ""
+		attempt.Code = "private_ref"
+		attempt.Turns = 2
+		attempt.ToolCalls = 3
+		attempt.Usage = coding.TokenUsage{InputTokens: 120, OutputTokens: 80}
+		attempt.DurationMillis = 2_000
+		_ = yield(coding.Event{
+			Schema: coding.EventSchema, Sequence: latest.Sequence + 2,
+			Time: latest.Time.Add(2 * time.Millisecond), SessionID: latest.SessionID,
+			Type: coding.EventTeamLifecycle, Payload: attempt,
+		}, nil)
+	}
 }
 
 func (c *ptyController) Close(ctx context.Context) error {

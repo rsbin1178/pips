@@ -141,8 +141,6 @@ func (s *Store) Load(ctx context.Context, id team.ID) (Snapshot, error) {
 
 // ListByParent returns bounded newest-first resource projections for one Lead
 // Session. It never repairs journals or acquires writer ownership.
-//
-//nolint:gocyclo // Bounded projection keeps filesystem checks and filtering in one read-only pass.
 func (s *Store) ListByParent(
 	ctx context.Context,
 	parentSessionID string,
@@ -152,6 +150,50 @@ func (s *Store) ListByParent(
 		limit < 1 || limit > s.limits.MaxListResults {
 		return nil, fmt.Errorf("%w: invalid parent query", ErrInvalid)
 	}
+
+	return s.listSnapshots(ctx, limit, func(value Snapshot) bool {
+		return value.Parent.SessionID == parentSessionID
+	})
+}
+
+// ListByWorkspace returns bounded newest-first path-free resource index
+// entries. It scans journals once without repairing them or acquiring writer
+// ownership.
+func (s *Store) ListByWorkspace(
+	ctx context.Context,
+	workspaceID string,
+	limit int,
+) ([]IndexEntry, error) {
+	if s == nil || !validWorkspaceID(workspaceID) ||
+		limit < 1 || limit > s.limits.MaxListResults {
+		return nil, fmt.Errorf("%w: invalid workspace query", ErrInvalid)
+	}
+
+	snapshots, err := s.listSnapshots(ctx, limit, func(value Snapshot) bool {
+		return value.Parent.WorkspaceID == workspaceID
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	values := make([]IndexEntry, 0, len(snapshots))
+	for _, value := range snapshots {
+		values = append(values, IndexEntry{
+			TeamID: value.TeamID, ParentSessionID: value.Parent.SessionID,
+			WorkspaceID: value.Parent.WorkspaceID, Revision: value.Revision,
+			State: value.State, Cleanup: value.Cleanup, UpdatedAt: value.UpdatedAt,
+		})
+	}
+
+	return values, nil
+}
+
+//nolint:gocyclo // Bounded projection keeps filesystem checks and filtering in one read-only pass.
+func (s *Store) listSnapshots(
+	ctx context.Context,
+	limit int,
+	match func(Snapshot) bool,
+) ([]Snapshot, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -199,7 +241,7 @@ func (s *Store) ListByParent(
 		if readErr != nil {
 			return nil, readErr
 		}
-		if state.latest.Parent.SessionID == parentSessionID {
+		if match(state.latest) {
 			values = append(values, cloneSnapshot(state.latest))
 		}
 	}

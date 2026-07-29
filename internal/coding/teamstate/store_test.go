@@ -2,6 +2,7 @@
 package teamstate_test
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -73,6 +74,27 @@ func TestStoreCommitCASReplayAndClone(t *testing.T) {
 	dirInfo, err := os.Stat(store.Dir())
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0o700), dirInfo.Mode().Perm())
+}
+
+func TestIsTerminal(t *testing.T) {
+	t.Parallel()
+
+	for _, state := range []teamstate.State{
+		teamstate.StateIntegrated,
+		teamstate.StateClosedWithoutIntegration,
+		teamstate.StateCancelled,
+		teamstate.StateFailed,
+	} {
+		assert.True(t, teamstate.IsTerminal(state))
+	}
+	for _, state := range []teamstate.State{
+		teamstate.StateAdmitted,
+		teamstate.StateActive,
+		teamstate.StateInterrupted,
+		teamstate.StateIntegrationPending,
+	} {
+		assert.False(t, teamstate.IsTerminal(state))
+	}
 }
 
 func TestStoreConcurrentExpectedRevisionHasOneWinner(t *testing.T) {
@@ -359,6 +381,9 @@ func TestStoreListByParentIsBoundedAndStable(t *testing.T) {
 			parent = "s-other"
 		}
 		value := snapshot(id, parent, 1)
+		if id == "team-c" {
+			value.Parent.WorkspaceID = "workspace-other"
+		}
 		value.UpdatedAt = value.UpdatedAt.Add(time.Duration(index) * time.Minute)
 		_, err := store.Commit(t.Context(), teamstate.Mutation{
 			CommandID:        team.CommandID("create-" + string(id)),
@@ -373,6 +398,20 @@ func TestStoreListByParentIsBoundedAndStable(t *testing.T) {
 	require.Len(t, values, 1)
 	assert.Equal(t, team.ID("team-b"), values[0].TeamID)
 	_, err = store.ListByParent(t.Context(), "s-parent", 0)
+	require.ErrorIs(t, err, teamstate.ErrInvalid)
+
+	index, err := store.ListByWorkspace(t.Context(), "workspace-parent", 2)
+	require.NoError(t, err)
+	require.Len(t, index, 2)
+	assert.Equal(t, team.ID("team-b"), index[0].TeamID)
+	assert.Equal(t, "s-parent", index[0].ParentSessionID)
+	assert.Equal(t, team.ID("team-a"), index[1].TeamID)
+	encoded, err := json.Marshal(index)
+	require.NoError(t, err)
+	assert.NotContains(t, string(encoded), "/workspace")
+	assert.NotContains(t, string(encoded), "/repository")
+
+	_, err = store.ListByWorkspace(t.Context(), "workspace-parent", 0)
 	require.ErrorIs(t, err, teamstate.ErrInvalid)
 }
 

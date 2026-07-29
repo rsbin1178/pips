@@ -79,6 +79,29 @@ func TestTeamProposalDeclineCreatesNoDurableResources(t *testing.T) {
 	assert.Empty(t, id)
 }
 
+func TestTeamNonInteractiveConfirmationRequiresInputWithoutConsumingProposal(t *testing.T) {
+	t.Parallel()
+
+	runtime := openGitTestRuntime(t, newRuntimeModel(), nil)
+	proposal, err := runtime.ProposeTeam(t.Context(), validTeamProposalRequest())
+	require.NoError(t, err)
+
+	_, err = runtime.ConfirmTeamNonInteractive(t.Context(), TeamConfirmation{
+		ProposalID: proposal.ID, Admission: TeamAdmissionClean,
+	})
+	require.ErrorIs(t, err, ErrTeamInteractionRequired)
+	assertNoTeamResources(t, runtime.paths)
+	state, id := runtime.teamGuard.snapshot()
+	assert.Equal(t, teamGuardProposed, state)
+	assert.Empty(t, id)
+
+	reference, err := runtime.ConfirmTeam(t.Context(), TeamConfirmation{
+		ProposalID: proposal.ID, Admission: TeamAdmissionClean,
+	})
+	require.NoError(t, err)
+	assert.NotEmpty(t, reference.TeamID)
+}
+
 func TestTeamConfirmationRequiresExactWorkspaceStateAndAdmission(t *testing.T) {
 	t.Parallel()
 

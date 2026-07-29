@@ -73,6 +73,8 @@ func TestManagerPrepareAndApplyLeavesParentHeadAndIndexUntouched(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
+	resource, err := manager.Resource(preview.ID)
+	require.NoError(t, err)
 	require.NotEmpty(t, preview.ApprovalToken)
 	assert.Equal(t, teamintegration.VerificationNotRun, preview.Verification.Status)
 	assert.Len(t, preview.Manifest.Entries, 4)
@@ -104,6 +106,42 @@ func TestManagerPrepareAndApplyLeavesParentHeadAndIndexUntouched(t *testing.T) {
 
 	_, err = manager.Apply(t.Context(), preview.ID, preview.ApprovalToken)
 	require.ErrorIs(t, err, teamintegration.ErrConsumed)
+
+	changed := resource
+	changed.BranchRef += "-changed"
+	_, err = manager.Cleanup(t.Context(), teamintegration.CleanupRequest{
+		TeamID: "team-1", Resource: changed,
+	})
+	require.ErrorIs(t, err, teamintegration.ErrRetained)
+	require.ErrorIs(t, err, teamintegration.ErrStale)
+	_, err = os.Stat(resource.Directory.Path())
+	require.NoError(t, err)
+
+	dirtyPath := filepath.Join(resource.Directory.Path(), "dirty.tmp")
+	require.NoError(t, os.WriteFile(dirtyPath, []byte("retain\n"), 0o600))
+	_, err = manager.Cleanup(t.Context(), teamintegration.CleanupRequest{
+		TeamID: "team-1", Resource: resource,
+	})
+	require.ErrorIs(t, err, teamintegration.ErrRetained)
+	_, err = os.Stat(resource.Directory.Path())
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(dirtyPath))
+
+	cleanup, err := manager.Cleanup(t.Context(), teamintegration.CleanupRequest{
+		TeamID: "team-1", Resource: resource,
+	})
+	require.NoError(t, err)
+	assert.True(t, cleanup.WorktreeRemoved)
+	assert.True(t, cleanup.BranchDeleted)
+	assert.True(t, cleanup.IntegrationRefDeleted)
+	assert.True(t, cleanup.JournalRemoved)
+	_, err = os.Lstat(resource.Directory.Path())
+	require.ErrorIs(t, err, os.ErrNotExist)
+	assert.Equal(t, resultOID, strings.TrimSpace(runIntegrationGit(
+		t, gitPath, repository, "rev-parse", resultRef,
+	)))
+	assertIntegrationRefMissing(t, gitPath, repository, resource.BranchRef)
+	assertIntegrationRefMissing(t, gitPath, repository, resource.IntegrationRef)
 }
 
 func TestManagerConsumesApprovalWhenParentIndexChanges(t *testing.T) {
@@ -173,4 +211,17 @@ func mustReadFile(t *testing.T, path string) []byte {
 	require.NoError(t, err)
 
 	return value
+}
+
+func assertIntegrationRefMissing(t *testing.T, gitPath, directory, ref string) {
+	t.Helper()
+	command := exec.CommandContext(
+		t.Context(), gitPath, "-C", directory, "show-ref", "--verify", "--quiet", ref,
+	)
+	command.Env = append(os.Environ(), "LC_ALL=C", "GIT_TERMINAL_PROMPT=0")
+	err := command.Run()
+	require.Error(t, err)
+	var exitErr *exec.ExitError
+	require.ErrorAs(t, err, &exitErr)
+	assert.Equal(t, 1, exitErr.ExitCode())
 }

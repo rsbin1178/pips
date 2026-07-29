@@ -175,7 +175,10 @@ reopened pending operation is reconciled first. If a human decision is still
 needed, `exec` exits with code 3 without approving, retrying, or resolving it.
 The same applies when `ask_user` requests structured input: non-interactive
 execution returns classified `input_required` rather than selecting an answer
-or waiting indefinitely.
+or waiting indefinitely. Team admission is also interactive-only:
+`interaction_required` maps to exit 3, does not consume the proposal, and never
+chooses clean versus HEAD-only admission, interrupted-Work retry, Integration,
+or cleanup on the caller's behalf.
 
 ## Output
 
@@ -212,4 +215,7 @@ redundant `context canceled` line.
 
 The default `workspace-write` sandbox fails closed. Review
 [Coding execution security](coding-security.md) before using `full-access` or
-running against an untrusted repository.
+running against an untrusted repository. Linux requires Bubblewrap 0.8.0 or
+newer at `/usr/bin/bwrap` or `/bin/bwrap` and must pass the real capability
+probe; a successful upstream build test alone is insufficient. CentOS 7 and
+other older distributions are supported only when this same probe passes.

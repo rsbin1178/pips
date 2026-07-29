@@ -279,7 +279,8 @@ func (r *Runtime) run(
 			err = r.reconcileAndContinue(ctx, current, emitter)
 		}
 	case operationPreview, operationCompact, operationNavigate, operationFork,
-		operationTeamPropose, operationTeamConfirm, operationTeamResume, operationTeamIntegration:
+		operationTeamPropose, operationTeamProposalAgent, operationTeamConfirm,
+		operationTeamResume, operationTeamIntegration, operationTeamCleanup:
 		err = fmt.Errorf("%w: structural operation entered interaction driver", ErrRuntimeInvalid)
 	}
 
@@ -438,7 +439,8 @@ func (r *Runtime) beginOperation(
 				return nil, nil, fmt.Errorf("%w: invalid question rejection", ErrRuntimeInvalid)
 			}
 		}
-	case operationPreview, operationCompact, operationNavigate, operationFork:
+	case operationPreview, operationCompact, operationNavigate, operationFork,
+		operationTeamProposalAgent:
 		if r.state.Phase != PhaseIdle || r.interaction != nil || r.recovery.PendingID != "" {
 			return nil, nil, stateError(string(kind), r.state.Phase, ErrRuntimePending)
 		}
@@ -446,7 +448,7 @@ func (r *Runtime) beginOperation(
 		if r.state.Phase != PhaseIdle && r.state.Phase != PhasePaused {
 			return nil, nil, stateError(string(kind), r.state.Phase, ErrRuntimePending)
 		}
-	case operationTeamResume, operationTeamIntegration:
+	case operationTeamResume, operationTeamIntegration, operationTeamCleanup:
 		if r.state.Phase != PhaseIdle || r.interaction != nil || r.recovery.PendingID != "" {
 			return nil, nil, stateError(string(kind), r.state.Phase, ErrRuntimePending)
 		}

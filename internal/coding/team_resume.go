@@ -176,6 +176,7 @@ func (r *Runtime) ResumeTeam(
 	coordinator.worktree = manager
 	coordinator.lease = lease
 	coordinator.lifecycle = r.publishTeamLifecycle
+	coordinator.controlLifecycle = r.publishTeamControlLifecycle
 
 	continuationStore, err := continuation.NewJSONLStore(r.paths.TeamContinuationsDir())
 	if err != nil {

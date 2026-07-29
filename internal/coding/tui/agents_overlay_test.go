@@ -385,7 +385,8 @@ func TestAgentsRouteCancelsSelectedChild(t *testing.T) {
 	}}
 	model := readyModelWithController(t, controller, true)
 	model.route = routeState{
-		kind: routeAgents, generation: 4, agents: controller.agents,
+		kind: routeAgents, generation: 4,
+		children: childSummaries(controller.agents, nil),
 	}
 
 	_, command := model.Update(key("c"))

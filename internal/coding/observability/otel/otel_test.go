@@ -96,6 +96,11 @@ func TestObserverEmitsContentFreeProductSignals(t *testing.T) {
 			Usage: coding.TokenUsage{InputTokens: 120, OutputTokens: 30},
 		},
 		{
+			Type: coding.EventTeamControlLifecycle, Time: at.Add(4775 * time.Millisecond),
+			TeamControlAction: string(coding.TeamControlCancelTask),
+			TeamControlState:  string(coding.TeamControlApplied),
+		},
+		{
 			Type: coding.EventTeamIntegrationLifecycle, Time: at.Add(4800 * time.Millisecond),
 			IntegrationState:        string(coding.TeamIntegrationVerified),
 			IntegrationVerification: "passed", Attempts: 2, Files: 4,
@@ -132,6 +137,7 @@ func TestObserverEmitsContentFreeProductSignals(t *testing.T) {
 		"coding.interaction",
 		"coding.subagent.completed",
 		"coding.team.lifecycle",
+		"coding.team.control",
 		"coding.team.integration",
 		"coding.session.closed",
 	}, names)
@@ -155,6 +161,7 @@ func TestObserverEmitsContentFreeProductSignals(t *testing.T) {
 		"pips.coding.subagent.duration",
 		"pips.coding.teams",
 		"pips.coding.team.duration",
+		"pips.coding.team.controls",
 		"pips.coding.team.integrations",
 	}, meterProvider.instrumentNames())
 }
