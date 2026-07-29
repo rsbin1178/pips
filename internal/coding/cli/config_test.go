@@ -3,6 +3,8 @@ package cli_test
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -215,6 +217,8 @@ sandbox = "workspace-write"
 
 		return execution.Capabilities{
 			Platform:         "test",
+			Runtime:          "test-runtime",
+			RuntimeVersion:   "1.2.3",
 			WorkspaceWrite:   true,
 			NetworkIsolation: true,
 			ProcessIsolation: true,
@@ -225,6 +229,7 @@ sandbox = "workspace-write"
 	require.NoError(t, err)
 	assert.Equal(t, 1, probeCalls)
 	assert.Contains(t, output, "sandbox ok platform=test")
+	assert.Contains(t, output, "runtime=test-runtime runtime_version=1.2.3")
 	assert.Contains(t, output, "sandbox notice home_readable=true")
 
 	writeCLIFile(t, fixture.layout.ConfigFile(), `
@@ -250,11 +255,17 @@ func TestDoctorFailsWhenNativeSandboxIsUnavailable(t *testing.T) {
 		context.Context,
 		workspace.Workspace,
 	) (execution.Capabilities, error) {
-		return execution.Capabilities{}, execution.ErrSandboxUnavailable
+		return execution.Capabilities{}, fmt.Errorf(
+			"%w: %w",
+			execution.ErrSandboxUnavailable,
+			&execution.ProbeError{},
+		)
 	}
 
 	_, err := executeWithDependencies(t, dependencies, "doctor")
 	require.ErrorIs(t, err, execution.ErrSandboxUnavailable)
+	_, ok := errors.AsType[*execution.ProbeError](err)
+	require.True(t, ok)
 }
 
 func TestSessionListFiltersCurrentWorkspace(t *testing.T) {
@@ -348,6 +359,8 @@ func (f cliFixture) dependencies(environment map[string]string) cli.Dependencies
 		) (execution.Capabilities, error) {
 			return execution.Capabilities{
 				Platform:         "test",
+				Runtime:          "test-runtime",
+				RuntimeVersion:   "1.2.3",
 				WorkspaceWrite:   true,
 				NetworkIsolation: true,
 				ProcessIsolation: true,

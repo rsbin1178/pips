@@ -212,6 +212,23 @@ func TestExecutorValidatesConfigurationAndProbe(t *testing.T) {
 	got, err := executor.Probe(t.Context())
 	require.NoError(t, err)
 	assert.Equal(t, want, got)
+
+	cause := errors.New("probe cause")
+	executor = fixture.executor(t, fakeBackend{probeFn: func(context.Context, probeRequest) (Capabilities, error) {
+		return Capabilities{}, newProbeError(
+			ProbeFailureIsolation,
+			"bubblewrap",
+			"0.8.0",
+			"0.8.0",
+			cause,
+		)
+	}}, systemRunnerDependencies())
+	_, err = executor.Probe(t.Context())
+	require.ErrorIs(t, err, ErrSandboxUnavailable)
+	require.ErrorIs(t, err, cause)
+	probeErr, ok := errors.AsType[*ProbeError](err)
+	require.True(t, ok)
+	assert.Equal(t, ProbeFailureIsolation, probeErr.Failure())
 }
 
 func TestExecutorRejectsReplacedTempRoot(t *testing.T) {

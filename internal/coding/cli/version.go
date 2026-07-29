@@ -6,6 +6,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const unknownDisplayValue = "unknown"
+
 func newVersionCommand(build BuildInfo) *cobra.Command {
 	build = normalizeBuildInfo(build)
 
@@ -37,11 +39,11 @@ func normalizeBuildInfo(build BuildInfo) BuildInfo {
 	}
 
 	if build.Commit == "" {
-		build.Commit = "unknown"
+		build.Commit = unknownDisplayValue
 	}
 
 	if build.Date == "" {
-		build.Date = "unknown"
+		build.Date = unknownDisplayValue
 	}
 
 	return build

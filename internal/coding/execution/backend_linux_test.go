@@ -5,6 +5,7 @@ package execution
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -71,6 +72,321 @@ func TestDetectLinuxHost(t *testing.T) {
 	}
 }
 
+func TestLinuxBubblewrapVersion(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		content string
+		want    string
+		atLeast bool
+	}{
+		{name: "old distro", content: "bubblewrap 0.4.0\n", want: "0.4.0"},
+		{name: "previous minor", content: "bubblewrap 0.7.99", want: "0.7.99"},
+		{name: "minimum", content: "bubblewrap 0.8.0\n", want: "0.8.0", atLeast: true},
+		{name: "new patch", content: "bubblewrap 0.8.1\n", want: "0.8.1", atLeast: true},
+		{name: "new major", content: "bubblewrap 1.2.3\n", want: "1.2.3", atLeast: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			version, err := parseLinuxBubblewrapVersion([]byte(test.content))
+			require.NoError(t, err)
+			assert.Equal(t, test.want, version.String())
+			assert.Equal(t, test.atLeast, version.atLeast(minimumLinuxBubblewrapVersion))
+		})
+	}
+}
+
+func TestLinuxBubblewrapVersionRejectsMalformedOutput(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		content string
+	}{
+		{name: "empty"},
+		{name: "wrong prefix", content: "bwrap 0.8.0\n"},
+		{name: "missing patch", content: "bubblewrap 0.8\n"},
+		{name: "suffix", content: "bubblewrap 0.8.0 vendor\n"},
+		{name: "negative", content: "bubblewrap -1.8.0\n"},
+		{name: "leading zero", content: "bubblewrap 00.8.0\n"},
+		{name: "overflow", content: "bubblewrap 4294967296.8.0\n"},
+		{name: "two newlines", content: "bubblewrap 0.8.0\n\n"},
+		{name: "carriage return", content: "bubblewrap 0.8.0\r\n"},
+		{name: "oversize", content: strings.Repeat("x", linuxVersionOutputBytes+1)},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := parseLinuxBubblewrapVersion([]byte(test.content))
+			require.Error(t, err)
+		})
+	}
+}
+
+func TestQueryLinuxBubblewrapVersion(t *testing.T) {
+	t.Parallel()
+
+	t.Run("success", func(t *testing.T) {
+		t.Parallel()
+
+		launcher := writeLinuxVersionLauncher(t, "printf 'bubblewrap 0.8.4\\n'", 0)
+		version, err := queryLinuxBubblewrapVersion(t.Context(), launcher)
+		require.NoError(t, err)
+		assert.Equal(t, "0.8.4", version.String())
+	})
+
+	t.Run("bounded output", func(t *testing.T) {
+		t.Parallel()
+
+		launcher := writeLinuxVersionLauncher(
+			t,
+			"printf '"+strings.Repeat("x", linuxVersionOutputBytes+1)+"'",
+			0,
+		)
+		_, err := queryLinuxBubblewrapVersion(t.Context(), launcher)
+		require.ErrorContains(t, err, "exceeds limit")
+	})
+
+	t.Run("nonzero", func(t *testing.T) {
+		t.Parallel()
+
+		launcher := writeLinuxVersionLauncher(t, "printf 'private stderr' >&2", 9)
+		_, err := queryLinuxBubblewrapVersion(t.Context(), launcher)
+		require.Error(t, err)
+		assert.NotContains(t, err.Error(), "private stderr")
+	})
+
+	t.Run("timeout", func(t *testing.T) {
+		t.Parallel()
+
+		launcher := writeLinuxVersionLauncher(t, "sleep 30", 0)
+		ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+
+		defer cancel()
+
+		_, err := queryLinuxBubblewrapVersion(ctx, launcher)
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+	})
+}
+
+func TestBuildLinuxIsolationProbeArguments(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, []string{
+		"--unshare-all",
+		"--unshare-user",
+		"--new-session",
+		"--die-with-parent",
+		"--clearenv",
+		"--cap-drop", "ALL",
+		"--disable-userns",
+		"--ro-bind", "/", "/",
+		"--proc", "/proc",
+		"--dev", "/dev",
+		"--chdir", "/owned/workspace",
+		"--", "/bin/true",
+	}, buildLinuxIsolationProbeArguments("/owned/workspace"))
+}
+
+func TestLinuxBackendPrepareStagesAndCachesSuccess(t *testing.T) {
+	t.Parallel()
+
+	backend, tempRoot := newLinuxBackendTestFixture(t)
+	release := "6.8.0-test\n"
+	backend.readFile = func(string) ([]byte, error) { return []byte(release), nil }
+	queryCalls := 0
+	backend.queryVersion = func(context.Context, fileObject) (linuxBubblewrapVersion, error) {
+		queryCalls++
+
+		return minimumLinuxBubblewrapVersion, nil
+	}
+
+	requests := make([]linuxProbeCommand, 0, 3)
+	backend.runProbeCommand = func(_ context.Context, request linuxProbeCommand) error {
+		requests = append(requests, request)
+
+		return nil
+	}
+
+	_, capabilities, err := backend.prepare(t.Context(), tempRoot)
+	require.NoError(t, err)
+	assert.Equal(t, Capabilities{
+		Platform:         linuxPlatform,
+		Runtime:          linuxBubblewrapRuntime,
+		RuntimeVersion:   minimumLinuxBubblewrapText,
+		WorkspaceWrite:   true,
+		NetworkIsolation: true,
+		ProcessIsolation: true,
+	}, capabilities)
+	require.Len(t, requests, 3)
+	assert.Empty(t, requests[0].extraFiles)
+	assert.NotContains(t, requests[0].args, "--seccomp")
+	assert.NotContains(t, requests[0].args, "--share-net")
+	require.Len(t, requests[1].extraFiles, 1)
+	assert.NotContains(t, requests[1].args, "--share-net")
+	require.Len(t, requests[2].extraFiles, 1)
+	assert.Contains(t, requests[2].args, "--share-net")
+
+	_, cached, err := backend.prepare(t.Context(), tempRoot)
+	require.NoError(t, err)
+	assert.Equal(t, capabilities, cached)
+	assert.Equal(t, 1, queryCalls)
+	assert.Len(t, requests, 3)
+
+	release = "6.9.0-test\n"
+	_, refreshed, err := backend.prepare(t.Context(), tempRoot)
+	require.NoError(t, err)
+	assert.Equal(t, capabilities, refreshed)
+	assert.Equal(t, 2, queryCalls)
+	assert.Len(t, requests, 6)
+}
+
+func TestLinuxBackendPrepareRejectsRuntimeBeforeProbe(t *testing.T) {
+	t.Parallel()
+
+	backend, tempRoot := newLinuxBackendTestFixture(t)
+	probeCalls := 0
+	backend.runProbeCommand = func(context.Context, linuxProbeCommand) error {
+		probeCalls++
+
+		return nil
+	}
+	backend.queryVersion = func(context.Context, fileObject) (linuxBubblewrapVersion, error) {
+		return linuxBubblewrapVersion{major: 0, minor: 7, patch: 2}, nil
+	}
+
+	_, _, err := backend.prepare(t.Context(), tempRoot)
+	probeErr, ok := errors.AsType[*ProbeError](err)
+	require.True(t, ok)
+	assert.Equal(t, ProbeFailureRuntimeTooOld, probeErr.Failure())
+	assert.Equal(t, "0.7.2", probeErr.Version())
+	assert.Zero(t, probeCalls)
+}
+
+func TestLinuxBackendPrepareClassifiesLauncherAndVersionFailures(t *testing.T) {
+	t.Parallel()
+
+	t.Run("launcher", func(t *testing.T) {
+		t.Parallel()
+
+		backend, tempRoot := newLinuxBackendTestFixture(t)
+		backend.inspectLauncher = func() (fileObject, error) {
+			return fileObject{}, assert.AnError
+		}
+
+		_, _, err := backend.prepare(t.Context(), tempRoot)
+		probeErr, ok := errors.AsType[*ProbeError](err)
+		require.True(t, ok)
+		assert.Equal(t, ProbeFailureLauncher, probeErr.Failure())
+	})
+
+	t.Run("version", func(t *testing.T) {
+		t.Parallel()
+
+		backend, tempRoot := newLinuxBackendTestFixture(t)
+		probeCalls := 0
+		backend.queryVersion = func(context.Context, fileObject) (linuxBubblewrapVersion, error) {
+			return linuxBubblewrapVersion{}, assert.AnError
+		}
+		backend.runProbeCommand = func(context.Context, linuxProbeCommand) error {
+			probeCalls++
+
+			return nil
+		}
+
+		_, _, err := backend.prepare(t.Context(), tempRoot)
+		probeErr, ok := errors.AsType[*ProbeError](err)
+		require.True(t, ok)
+		assert.Equal(t, ProbeFailureRuntimeVersion, probeErr.Failure())
+		assert.Zero(t, probeCalls)
+	})
+}
+
+func TestLinuxBackendPrepareClassifiesProbeStages(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		failCall  int
+		failure   ProbeFailure
+		wantCalls int
+	}{
+		{name: "isolation", failCall: 1, failure: ProbeFailureIsolation, wantCalls: 1},
+		{name: "deny", failCall: 2, failure: ProbeFailureDeny, wantCalls: 2},
+		{name: "allow", failCall: 3, failure: ProbeFailureAllow, wantCalls: 3},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			backend, tempRoot := newLinuxBackendTestFixture(t)
+			backend.queryVersion = func(context.Context, fileObject) (linuxBubblewrapVersion, error) {
+				return minimumLinuxBubblewrapVersion, nil
+			}
+			calls := 0
+			backend.runProbeCommand = func(context.Context, linuxProbeCommand) error {
+				calls++
+				if calls == test.failCall {
+					return assert.AnError
+				}
+
+				return nil
+			}
+
+			_, _, err := backend.prepare(t.Context(), tempRoot)
+			probeErr, ok := errors.AsType[*ProbeError](err)
+			require.True(t, ok)
+			assert.Equal(t, test.failure, probeErr.Failure())
+			assert.Equal(t, test.wantCalls, calls)
+			assert.False(t, backend.ready)
+		})
+	}
+}
+
+func newLinuxBackendTestFixture(t *testing.T) (*linuxBackend, string) {
+	t.Helper()
+
+	launcherPath := filepath.Join(t.TempDir(), "bwrap")
+	//nolint:gosec // The inspected test launcher must be executable.
+	require.NoError(t, os.WriteFile(launcherPath, []byte("test launcher"), 0o700))
+	launcher, err := inspectExecutable(launcherPath)
+	require.NoError(t, err)
+	tempRoot := t.TempDir()
+	//nolint:gosec // Sandbox temp roots must be owner-only directories.
+	require.NoError(t, os.Chmod(tempRoot, 0o700))
+
+	return &linuxBackend{
+		inspectLauncher: func() (fileObject, error) { return launcher, nil },
+		queryVersion: func(context.Context, fileObject) (linuxBubblewrapVersion, error) {
+			return minimumLinuxBubblewrapVersion, nil
+		},
+		runProbeCommand: func(context.Context, linuxProbeCommand) error { return nil },
+		readFile:        func(string) ([]byte, error) { return []byte("6.8.0-test\n"), nil },
+		stat:            os.Stat,
+		readlink:        func(path string) (string, error) { return filepath.Base(path) + ":[1]", nil },
+	}, tempRoot
+}
+
+func writeLinuxVersionLauncher(t *testing.T, command string, exitCode int) fileObject {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "bwrap")
+	content := "#!/bin/sh\n" + command + "\nexit " + strconv.Itoa(exitCode) + "\n"
+	//nolint:gosec // The inspected test launcher must be executable.
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o700))
+	launcher, err := inspectExecutable(path)
+	require.NoError(t, err)
+
+	return launcher
+}
+
 func TestBuildLinuxSandboxArguments(t *testing.T) {
 	t.Parallel()
 
@@ -97,6 +413,7 @@ func TestBuildLinuxSandboxArguments(t *testing.T) {
 
 	assert.Equal(t, []string{
 		"--unshare-all",
+		"--unshare-user",
 		"--share-net",
 		"--new-session",
 		"--die-with-parent",
@@ -235,6 +552,8 @@ func TestLinuxCapabilityProbeIntegration(t *testing.T) {
 	capabilities, err := executor.Probe(t.Context())
 	require.NoError(t, err)
 	assert.Contains(t, []string{"linux", "wsl2"}, capabilities.Platform)
+	assert.Equal(t, linuxBubblewrapRuntime, capabilities.Runtime)
+	assert.NotEmpty(t, capabilities.RuntimeVersion)
 	assert.True(t, capabilities.WorkspaceWrite)
 	assert.True(t, capabilities.NetworkIsolation)
 	assert.True(t, capabilities.ProcessIsolation)
@@ -469,23 +788,121 @@ func testLinuxPIDNamespaceCleanup(
 ) {
 	t.Helper()
 
+	innerPIDPath := filepath.Join(fixture.workspace.Root(), "background-inner-pid")
+	pidNamespacePath := filepath.Join(fixture.workspace.Root(), "background-pid-namespace")
+	releasePath := filepath.Join(fixture.workspace.Root(), "background-release")
 	script := "sleep 30 & child=$!; " +
-		"while read key first rest; do " +
-		"if [ \"$key\" = NSpid: ]; then printf '%s' \"$first\"; break; fi; " +
-		"done < /proc/$child/status"
-	operation, err := NewOperation(t.Context(), fixture.workspace, fixture.operationSpec(script))
+		"printf '%s' \"$child\" > " + shellSingleQuote(innerPIDPath) + "; " +
+		"readlink /proc/$child/ns/pid > " + shellSingleQuote(pidNamespacePath) + "; " +
+		"while test ! -e " + shellSingleQuote(releasePath) + "; do sleep 0.01; done"
+	spec := fixture.operationSpec(script)
+	spec.Timeout = 5 * time.Second
+	operation, err := NewOperation(t.Context(), fixture.workspace, spec)
 	require.NoError(t, err)
 
 	authorization, ok := policy.Evaluate(operation).Authorization()
 	require.True(t, ok)
 
-	result, err := executor.Execute(t.Context(), operation, authorization, nil)
-	require.NoError(t, err)
-	hostPID, err := strconv.Atoi(strings.TrimSpace(string(result.Stdout.Head())))
-	require.NoError(t, err)
+	type executionOutcome struct {
+		result Result
+		err    error
+	}
+
+	executionDone := make(chan executionOutcome, 1)
+
+	go func() {
+		result, executeErr := executor.Execute(t.Context(), operation, authorization, nil)
+		executionDone <- executionOutcome{result: result, err: executeErr}
+	}()
+
+	t.Cleanup(func() { _ = os.WriteFile(releasePath, nil, 0o600) })
+
+	hostPID := requireLinuxHostPID(t, innerPIDPath, pidNamespacePath)
+	require.NoError(t, os.WriteFile(releasePath, nil, 0o600))
+
+	select {
+	case outcome := <-executionDone:
+		require.NoError(t, outcome.err)
+		assert.Equal(t, StatusExited, outcome.result.Status)
+	case <-time.After(3 * time.Second):
+		t.Fatal("sandbox execution did not return after release")
+	}
+
 	require.Eventually(t, func() bool {
 		return errors.Is(syscall.Kill(hostPID, 0), syscall.ESRCH)
 	}, time.Second, 10*time.Millisecond)
+}
+
+func requireLinuxHostPID(t *testing.T, innerPIDPath, pidNamespacePath string) int {
+	t.Helper()
+
+	var hostPID int
+
+	require.Eventually(t, func() bool {
+		innerContent, innerErr := os.ReadFile(innerPIDPath) //nolint:gosec // Test owns the exact marker path.
+
+		namespaceContent, namespaceErr := os.ReadFile(pidNamespacePath) //nolint:gosec // Test owns the exact marker path.
+
+		if innerErr != nil || namespaceErr != nil {
+			return false
+		}
+
+		innerPID, parseErr := strconv.Atoi(strings.TrimSpace(string(innerContent)))
+		if parseErr != nil {
+			return false
+		}
+
+		pid, findErr := findLinuxHostPID(
+			innerPID,
+			strings.TrimSpace(string(namespaceContent)),
+		)
+		if findErr != nil {
+			return false
+		}
+
+		hostPID = pid
+
+		return true
+	}, 2*time.Second, 10*time.Millisecond)
+
+	return hostPID
+}
+
+func findLinuxHostPID(innerPID int, pidNamespace string) (int, error) {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return 0, fmt.Errorf("read host proc: %w", err)
+	}
+
+	innerText := strconv.Itoa(innerPID)
+
+	for _, entry := range entries {
+		hostPID, parseErr := strconv.Atoi(entry.Name())
+		if parseErr != nil {
+			continue
+		}
+
+		processRoot := filepath.Join("/proc", entry.Name())
+
+		actualNamespace, readlinkErr := os.Readlink(filepath.Join(processRoot, "ns", "pid"))
+		if readlinkErr != nil || actualNamespace != pidNamespace {
+			continue
+		}
+
+		status, readErr := os.ReadFile(filepath.Join(processRoot, "status")) //nolint:gosec // Fixed proc root and numeric PID.
+		if readErr != nil {
+			continue
+		}
+
+		for line := range strings.Lines(string(status)) {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 && fields[0] == "NSpid:" && fields[len(fields)-1] == innerText {
+				return hostPID, nil
+			}
+		}
+	}
+
+	return 0, fmt.Errorf("find host PID for namespace %q PID %d", pidNamespace, innerPID)
 }
 
 func testLinuxParentDeath(t *testing.T, fixture executorFixture) {
@@ -592,11 +1009,12 @@ func runLinuxParentDeathHelper(t *testing.T) {
 
 	defer func() { _ = filter.Close() }()
 
-	marker := filepath.Join(workspace, "host-pid")
+	innerPIDPath := filepath.Join(workspace, "background-inner-pid")
+	pidNamespacePath := filepath.Join(workspace, "background-pid-namespace")
+	hostPIDPath := filepath.Join(root, "host-pid")
 	script := "sleep 30 & child=$!; " +
-		"while read key first rest; do " +
-		"if [ \"$key\" = NSpid: ]; then printf '%s' \"$first\" > " + shellSingleQuote(marker) +
-		"; break; fi; done < /proc/$child/status; wait"
+		"printf '%s' \"$child\" > " + shellSingleQuote(innerPIDPath) + "; " +
+		"readlink /proc/$child/ns/pid > " + shellSingleQuote(pidNamespacePath) + "; wait"
 	args := buildLinuxSandboxArguments(linuxSandboxRequest{
 		workspace:      workspace,
 		cwd:            workspace,
@@ -618,11 +1036,12 @@ func runLinuxParentDeathHelper(t *testing.T) {
 	command.Stdout = io.Discard
 	command.Stderr = io.Discard
 	require.NoError(t, command.Start())
-	require.Eventually(t, func() bool {
-		_, err := os.Stat(marker) //nolint:gosec // The test fixture owns this exact path.
-
-		return err == nil
-	}, 2*time.Second, 10*time.Millisecond)
+	hostPID := requireLinuxHostPID(t, innerPIDPath, pidNamespacePath)
+	require.NoError(t, os.WriteFile( //nolint:gosec // Test helper owns the exact parent fixture path.
+		hostPIDPath,
+		[]byte(strconv.Itoa(hostPID)),
+		0o600,
+	))
 	// Intentionally do not Wait: the test process exits and --die-with-parent must
 	// tear down the namespace and its detached descendant.
 }
