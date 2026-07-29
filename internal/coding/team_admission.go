@@ -77,6 +77,12 @@ type TeamProposalRequest struct {
 	Tasks     []TeamTaskSpec   `json:"tasks"`
 }
 
+// TeamProposalPrompt is the user-owned objective for one constrained,
+// model-assisted Team proposal run.
+type TeamProposalPrompt struct {
+	Objective string `json:"objective"`
+}
+
 // TeamProposal is a safe preview. The opaque ID binds repository and Runtime
 // truth internally without disclosing local absolute paths.
 type TeamProposal struct {
@@ -84,6 +90,11 @@ type TeamProposal struct {
 	Request   TeamProposalRequest `json:"request"`
 	Dirty     bool                `json:"dirty"`
 	ExpiresAt time.Time           `json:"expires_at"`
+}
+
+// Clone returns a fully detached Team proposal preview.
+func (value TeamProposal) Clone() TeamProposal {
+	return cloneTeamProposal(value)
 }
 
 // TeamAdmissionMode records which parent state the user explicitly admitted.
@@ -175,32 +186,45 @@ func (r *Runtime) ProposeTeam(
 	}
 	defer r.endOperation(operation)
 
-	normalized, workers, err := validateTeamProposalRequest(request)
+	record, err := r.prepareTeamProposal(operationCtx, request, true)
 	if err != nil {
 		return TeamProposal{}, err
 	}
 
-	preflight, err := r.preflightTeam(operationCtx, true)
+	return r.installTeamProposal(operationCtx, record)
+}
+
+func (r *Runtime) prepareTeamProposal(
+	ctx context.Context,
+	request TeamProposalRequest,
+	probeSandbox bool,
+) (teamProposalRecord, error) {
+	normalized, workers, err := validateTeamProposalRequest(request)
 	if err != nil {
-		return TeamProposal{}, err
+		return teamProposalRecord{}, err
+	}
+
+	preflight, err := r.preflightTeam(ctx, probeSandbox)
+	if err != nil {
+		return teamProposalRecord{}, err
 	}
 
 	requestDigest, err := digestJSON(normalized)
 	if err != nil {
-		return TeamProposal{}, fmt.Errorf("%w: digest proposal: %w", ErrTeamAdmission, err)
+		return teamProposalRecord{}, fmt.Errorf("%w: digest proposal: %w", ErrTeamAdmission, err)
 	}
 	capabilityFingerprint, err := r.teamCapabilityFingerprint()
 	if err != nil {
-		return TeamProposal{}, err
+		return teamProposalRecord{}, err
 	}
 
 	proposalID, err := r.admission.newID("proposal")
 	if err != nil {
-		return TeamProposal{}, fmt.Errorf("%w: create proposal identity: %w", ErrTeamAdmission, err)
+		return teamProposalRecord{}, fmt.Errorf("%w: create proposal identity: %w", ErrTeamAdmission, err)
 	}
 	teamIDValue, err := r.admission.newID("team")
 	if err != nil {
-		return TeamProposal{}, fmt.Errorf("%w: create Team identity: %w", ErrTeamAdmission, err)
+		return teamProposalRecord{}, fmt.Errorf("%w: create Team identity: %w", ErrTeamAdmission, err)
 	}
 
 	now := r.admission.now().UTC()
@@ -208,14 +232,23 @@ func (r *Runtime) ProposeTeam(
 		ID: proposalID, Request: cloneTeamProposalRequest(normalized),
 		Dirty: preflight.dirty, ExpiresAt: now.Add(teamProposalLifetime),
 	}
-	record := teamProposalRecord{
+
+	return teamProposalRecord{
 		view: view, requestDigest: requestDigest, statusDigest: preflight.statusDigest,
 		repository: preflight.repository, workspace: preflight.workspace,
 		commonDir: preflight.commonDir, teamID: team.ID(teamIDValue), leadID: "lead",
 		capabilityFingerprint: capabilityFingerprint,
 		workers:               workers, tasks: cloneTeamTasks(normalized.Tasks),
-	}
+	}, nil
+}
 
+func (r *Runtime) installTeamProposal(
+	ctx context.Context,
+	record teamProposalRecord,
+) (TeamProposal, error) {
+	if err := ctx.Err(); err != nil {
+		return TeamProposal{}, err
+	}
 	if err := r.teamGuard.propose(); err != nil {
 		return TeamProposal{}, err
 	}
@@ -227,13 +260,14 @@ func (r *Runtime) ProposeTeam(
 
 		return TeamProposal{}, ErrTeamActive
 	}
-	r.admission.proposals[proposalID] = record
+
+	r.admission.proposals[record.view.ID] = cloneTeamProposalRecord(record)
 	r.admission.mu.Unlock()
-	r.publishTeamLifecycle(operationCtx, TeamLifecycle{
+	r.publishTeamLifecycle(ctx, TeamLifecycle{
 		TeamID: record.teamID, State: TeamLifecycleProposed,
 	})
 
-	return cloneTeamProposal(view), nil
+	return cloneTeamProposal(record.view), nil
 }
 
 // DeclineTeam consumes a proposal without creating resources.
@@ -547,6 +581,7 @@ func (r *Runtime) createAdmittedTeam(
 		return TeamReference{}, false, err
 	}
 	coordinator.lifecycle = r.publishTeamLifecycle
+	coordinator.controlLifecycle = r.publishTeamControlLifecycle
 	coordinator.control = controlStore
 	actor := team.Actor{Kind: team.ActorKindCoordinator, ID: "coding-team-coordinator"}
 	aggregate, err := engine.Create(ctx, team.CreateRequest{
@@ -939,6 +974,14 @@ func admissionCommandID(teamID team.ID, action, target string) team.CommandID {
 
 func cloneTeamProposal(value TeamProposal) TeamProposal {
 	value.Request = cloneTeamProposalRequest(value.Request)
+
+	return value
+}
+
+func cloneTeamProposalRecord(value teamProposalRecord) teamProposalRecord {
+	value.view = cloneTeamProposal(value.view)
+	value.workers = slices.Clone(value.workers)
+	value.tasks = cloneTeamTasks(value.tasks)
 
 	return value
 }

@@ -24,6 +24,9 @@ const (
 	TeamControlCancelTask       TeamControlAction = "cancel_task"
 	TeamControlRetryTask        TeamControlAction = "retry_task"
 	TeamControlCancelTeam       TeamControlAction = "cancel_team"
+	TeamControlResolveApproval  TeamControlAction = "resolve_approval"
+	TeamControlResolveQuestion  TeamControlAction = "resolve_question"
+	TeamControlRejectQuestion   TeamControlAction = "reject_question"
 )
 
 // TeamControlRequest supplies stable logical identity. Runtime resolves it to
@@ -210,17 +213,30 @@ func (c *teamCoordinator) submitControlCommand(
 
 	c.controlMu.Lock()
 	revision, err := c.control.Revision(ctx, c.id)
+
+	var record teamcontrol.Record
 	if err == nil {
-		_, err = c.control.Submit(ctx, command, revision)
+		record, err = c.control.Submit(ctx, command, revision)
 	}
 	c.controlMu.Unlock()
 	if err != nil {
 		return TeamControlReference{}, err
 	}
+
+	c.publishControlLifecycle(ctx, record)
 	c.signal()
 
 	return TeamControlReference{
 		CommandID: command.ID, TeamID: target.TeamID,
 		Action: TeamControlAction(action), CreatedAt: createdAt,
 	}, nil
+}
+
+func (c *teamCoordinator) publishControlLifecycle(
+	ctx context.Context,
+	record teamcontrol.Record,
+) {
+	if c != nil && c.controlLifecycle != nil {
+		c.controlLifecycle(ctx, teamControlLifecycle(record))
+	}
 }

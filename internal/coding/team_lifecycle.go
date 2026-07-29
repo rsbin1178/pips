@@ -7,9 +7,13 @@ import (
 
 	"github.com/rsbin/pips/agent/continuation"
 	"github.com/rsbin/pips/agent/team"
+	"github.com/rsbin/pips/internal/coding/teamcontrol"
 )
 
-type teamLifecycleSink func(context.Context, TeamLifecycle)
+type (
+	teamLifecycleSink        func(context.Context, TeamLifecycle)
+	teamControlLifecycleSink func(context.Context, TeamControlLifecycle)
+)
 
 // publishTeamLifecycle commits the compact parent-visible projection. Team
 // execution remains authoritative even if a frontend or telemetry observer is
@@ -24,6 +28,42 @@ func (r *Runtime) publishTeamLifecycle(ctx context.Context, value TeamLifecycle)
 
 	emitter := newEventEmitter(context.WithoutCancel(ctx), r, nil, false)
 	_ = emitter.emit("", "", EventTeamLifecycle, value)
+}
+
+// publishTeamControlLifecycle commits a content-free operator-command
+// projection after its private journal transition is durable.
+func (r *Runtime) publishTeamControlLifecycle(ctx context.Context, value TeamControlLifecycle) {
+	if r == nil || r.publisher == nil {
+		return
+	}
+
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	emitter := newEventEmitter(context.WithoutCancel(ctx), r, nil, false)
+	_ = emitter.emit("", "", EventTeamControlLifecycle, value)
+}
+
+func teamControlLifecycle(record teamcontrol.Record) TeamControlLifecycle {
+	entry := record.Entry
+
+	value := TeamControlLifecycle{
+		TeamID: entry.Command.Target.TeamID, Revision: uint64(record.Revision),
+		CommandID: entry.Command.ID, Action: TeamControlAction(entry.Command.Action),
+		MemberID: entry.Command.Target.MemberID, TaskID: entry.Command.Target.TaskID,
+		AttemptID:       entry.Command.Target.ExpectedAttemptID,
+		OwnerGeneration: entry.Command.Target.OwnerGeneration,
+		State:           TeamControlStatus(entry.State), Code: entry.ErrorCode,
+	}
+	if entry.Resolved != nil {
+		value.MemberID = entry.Resolved.MemberID
+		value.TaskID = entry.Resolved.TaskID
+		value.AttemptID = entry.Resolved.AttemptID
+		value.OwnerGeneration = entry.Resolved.OwnerGeneration
+	}
+
+	return value
 }
 
 // publishTeamIntegrationLifecycle commits a bounded, content-free integration

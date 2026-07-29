@@ -11,21 +11,24 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/rsbin/pips/internal/coding"
 	"github.com/rsbin/pips/internal/coding/modelcatalog"
+	"github.com/rsbin/pips/internal/coding/runtimecontrol"
 	"github.com/rsbin/pips/internal/coding/session"
 )
 
 type sessionPickerDataMsg struct {
-	generation uint64
-	sessions   []session.Metadata
-	err        error
+	generation   uint64
+	sessions     []session.Metadata
+	teamRecovery map[string]runtimecontrol.TeamRecoveryHint
+	err          error
 }
 
 func newSessionPickerState(previousInput string, theme colorTheme, noColor bool) routeState {
 	return routeState{
-		kind:          routeSessions,
-		search:        newRouteSearch(theme, noColor),
-		previousInput: previousInput,
-		openedAt:      time.Now(),
+		kind:            routeSessions,
+		search:          newRouteSearch(theme, noColor),
+		sessionRecovery: make(map[string]runtimecontrol.TeamRecoveryHint),
+		previousInput:   previousInput,
+		openedAt:        time.Now(),
 	}
 }
 
@@ -45,16 +48,31 @@ func (m *Model) activateSessionPicker(previousInput string) tea.Cmd {
 	generation := m.route.generation
 
 	load := func() tea.Msg {
-		values, err := m.controller.ListSessions(m.ctx)
+		values, err := m.controller.ListSessionSummaries(m.ctx)
+		sessions, recovery := splitSessionSummaries(values)
 
 		return sessionPickerDataMsg{
 			generation: generation,
-			sessions:   values,
-			err:        err,
+			sessions:   sessions, teamRecovery: recovery, err: err,
 		}
 	}
 
 	return tea.Batch(m.route.search.Focus(), load)
+}
+
+func splitSessionSummaries(
+	values []runtimecontrol.SessionSummary,
+) ([]session.Metadata, map[string]runtimecontrol.TeamRecoveryHint) {
+	sessions := make([]session.Metadata, len(values))
+	recovery := make(map[string]runtimecontrol.TeamRecoveryHint)
+	for index, value := range values {
+		sessions[index] = value.Session
+		if value.TeamRecovery.Count > 0 {
+			recovery[value.Session.ID] = value.TeamRecovery
+		}
+	}
+
+	return sessions, recovery
 }
 
 func (m *Model) closeSessionPicker(restoreInput bool) tea.Cmd {
@@ -120,13 +138,19 @@ func (m *Model) filteredSessionPickerValues() []session.Metadata {
 	filtered := make([]session.Metadata, 0, len(m.route.sessions))
 	for _, value := range m.route.sessions {
 		created := strings.ToLower(value.CreatedAt.Local().Format(time.DateTime))
+		recovery := m.route.sessionRecovery[value.ID]
+		recoveryText := strings.ToLower(string(recovery.Class))
+		if recovery.Count > 0 {
+			recoveryText = "team recovery " + recoveryText
+		}
 		matches := query == "" ||
 			strings.Contains(strings.ToLower(value.ID), query) ||
 			strings.Contains(created, query) ||
 			strings.Contains(strings.ToLower(value.ParentSessionID), query) ||
 			strings.Contains(strings.ToLower(value.Name), query) ||
 			strings.Contains(strings.ToLower(value.Preview), query) ||
-			strings.Contains(strings.ToLower(value.CurrentLeafID), query)
+			strings.Contains(strings.ToLower(value.CurrentLeafID), query) ||
+			strings.Contains(recoveryText, query)
 		if matches {
 			filtered = append(filtered, value)
 		}
@@ -308,6 +332,13 @@ func (m *Model) sessionPickerMetadata(value session.Metadata) string {
 			lineage += " @ " + shortDisplayID(value.ParentEntryID)
 		}
 		parts = append(parts, lineage)
+	}
+	if hint := m.route.sessionRecovery[value.ID]; hint.Count > 0 {
+		label := fmt.Sprintf("Team recovery: %d %s", hint.Count, hint.Class)
+		if !hint.UpdatedAt.IsZero() {
+			label += " · updated " + relativeSessionTime(hint.UpdatedAt, m.route.openedAt)
+		}
+		parts = append(parts, label)
 	}
 
 	return strings.Join(parts, " · ")

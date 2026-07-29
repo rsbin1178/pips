@@ -201,6 +201,91 @@ func TestRuntimePreparesAndAppliesCapturedTeamResultWithoutChangingGitMetadata(t
 		ID: preview.ID, Token: preview.ApprovalToken,
 	})
 	require.Error(t, err)
+
+	coordinator := runtime.team
+	resources, err := coordinator.state.Load(t.Context(), coordinator.id)
+	require.NoError(t, err)
+	require.Len(t, resources.Attempts, 1)
+	require.Len(t, resources.Integrations, 1)
+	attemptResultRef := resources.Attempts[0].Worktree.ResultRef
+	attemptResultOID := resources.Attempts[0].Worktree.ResultCommitOID
+	integrationBranch := resources.Integrations[0].Worktree.BranchRef
+	integrationRef := resources.Integrations[0].Worktree.ResultRef
+	attemptDirectory := resources.Attempts[0].Worktree.Directory.Path
+	integrationDirectory := resources.Integrations[0].Worktree.Directory.Path
+	stateStore := coordinator.state
+
+	cleanup, err := runtime.CleanupTeam(t.Context(), TeamCleanupRequest{
+		TeamID: coordinator.id, ExpectedResourceRevision: resources.Revision,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, teamstate.StateIntegrated, cleanup.State)
+	assert.Equal(t, 2, cleanup.Cleaned)
+	assert.Zero(t, cleanup.Retained)
+	assert.Nil(t, runtime.team)
+
+	terminal, err := stateStore.Load(t.Context(), coordinator.id)
+	require.NoError(t, err)
+	assert.Equal(t, teamstate.CleanupComplete, terminal.Cleanup)
+
+	_, err = os.Lstat(attemptDirectory)
+	require.ErrorIs(t, err, os.ErrNotExist)
+	_, err = os.Lstat(integrationDirectory)
+	require.ErrorIs(t, err, os.ErrNotExist)
+	oid, err := runner.ResolveRef(t.Context(), runtime.workspace.Root(), attemptResultRef)
+	require.NoError(t, err)
+	assert.Equal(t, attemptResultOID, oid)
+	_, err = runner.ResolveRef(t.Context(), runtime.workspace.Root(), integrationBranch)
+	require.ErrorIs(t, err, gitcontrol.ErrNotFound)
+	_, err = runner.ResolveRef(t.Context(), runtime.workspace.Root(), integrationRef)
+	require.ErrorIs(t, err, gitcontrol.ErrNotFound)
+}
+
+func TestRuntimeCleanupRequiresExplicitCloseWithoutIntegrationAndRetainsDirtyWorktree(t *testing.T) {
+	t.Parallel()
+
+	runtime := openCapturedTeamRuntime(t)
+	coordinator := runtime.team
+	resources, err := coordinator.state.Load(t.Context(), coordinator.id)
+	require.NoError(t, err)
+
+	_, err = runtime.CleanupTeam(t.Context(), TeamCleanupRequest{
+		TeamID: coordinator.id, ExpectedResourceRevision: resources.Revision - 1,
+		CloseWithoutIntegration: true,
+	})
+	require.ErrorIs(t, err, ErrTeamCleanupStale)
+
+	_, err = runtime.CleanupTeam(t.Context(), TeamCleanupRequest{
+		TeamID: coordinator.id, ExpectedResourceRevision: resources.Revision,
+	})
+	require.ErrorIs(t, err, ErrTeamCleanupIntegrationRequired)
+
+	dirtyPath := filepath.Join(resources.Attempts[0].Worktree.Directory.Path, "dirty.tmp")
+	require.NoError(t, os.WriteFile(dirtyPath, []byte("retain\n"), 0o600))
+	retained, err := runtime.CleanupTeam(t.Context(), TeamCleanupRequest{
+		TeamID: coordinator.id, ExpectedResourceRevision: resources.Revision,
+		CloseWithoutIntegration: true,
+	})
+	require.ErrorIs(t, err, ErrTeamCleanupRetained)
+	assert.Zero(t, retained.Cleaned)
+	assert.Equal(t, 1, retained.Retained)
+	assert.NotNil(t, runtime.team)
+
+	_, err = os.Stat(resources.Attempts[0].Worktree.Directory.Path)
+	require.NoError(t, err)
+
+	require.NoError(t, os.Remove(dirtyPath))
+	retry, err := coordinator.state.Load(t.Context(), coordinator.id)
+	require.NoError(t, err)
+	closed, err := runtime.CleanupTeam(t.Context(), TeamCleanupRequest{
+		TeamID: coordinator.id, ExpectedResourceRevision: retry.Revision,
+		CloseWithoutIntegration: true,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, teamstate.StateClosedWithoutIntegration, closed.State)
+	assert.Equal(t, 1, closed.Cleaned)
+	assert.Zero(t, closed.Retained)
+	assert.Nil(t, runtime.team)
 }
 
 func TestRuntimeRejectsTeamIntegrationWithoutParentMutation(t *testing.T) {
@@ -279,8 +364,10 @@ func openCapturedTeamRuntime(t *testing.T) *Runtime {
 			return false
 		}
 
-		return resources.Attempts[0].State == teamstate.AttemptCaptured ||
+		terminal := resources.Attempts[0].State == teamstate.AttemptCaptured ||
 			resources.Attempts[0].State == teamstate.AttemptTerminal
+
+		return terminal && runtime.team.ownerCount() == 0
 	}, 10*time.Second, 20*time.Millisecond)
 
 	return runtime

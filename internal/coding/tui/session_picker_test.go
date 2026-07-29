@@ -10,6 +10,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/rsbin/pips/internal/coding"
+	"github.com/rsbin/pips/internal/coding/runtimecontrol"
 	"github.com/rsbin/pips/internal/coding/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -51,6 +52,33 @@ func TestSessionPickerFiltersAndResumesExactlyOnce(t *testing.T) {
 	composerLine := lineContaining(lines, inputArrow)
 	require.NotEqual(t, -1, composerLine)
 	assert.Equal(t, composerLine+model.composer.Cursor().Y, view.Cursor.Y)
+}
+
+func TestSessionPickerShowsReadOnlyTeamRecoveryHint(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	controller := newOverlayController(readyState())
+	controller.sessions = []session.Metadata{
+		{ID: "alpha", Preview: "Recover work", CreatedAt: now.Add(-time.Hour)},
+		{ID: "beta", Preview: "Ordinary session", CreatedAt: now.Add(-2 * time.Hour)},
+	}
+	controller.teamRecovery = map[string]runtimecontrol.TeamRecoveryHint{
+		"alpha": {
+			Count: 2, Class: runtimecontrol.TeamRecoveryBlocked,
+			UpdatedAt: now.Add(-time.Minute),
+		},
+	}
+	model := readyModelWithController(t, controller, true)
+	driveModelCommands(t, model, model.openSessionPicker(""))
+
+	content := model.View().Content
+	assert.Contains(t, content, "Team recovery: 2 blocked")
+	assert.NotContains(t, content, "team-1")
+	model.Update(tea.KeyPressMsg{Text: "blocked"})
+	require.Len(t, model.filteredSessionPickerValues(), 1)
+	assert.Equal(t, "alpha", model.filteredSessionPickerValues()[0].ID)
+	assert.Empty(t, controller.recoveries)
 }
 
 func TestSessionPickerRendersFullWidthSearchAndSessionMetadata(t *testing.T) {

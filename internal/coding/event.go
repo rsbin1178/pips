@@ -77,6 +77,7 @@ const (
 	EventSubagentCanceled         EventType = "subagent.canceled"
 	EventSubagentInterrupted      EventType = "subagent.interrupted"
 	EventTeamLifecycle            EventType = "team.lifecycle"
+	EventTeamControlLifecycle     EventType = "team.control"
 	EventTeamIntegrationLifecycle EventType = "team.integration"
 	EventApprovalRequired         EventType = "approval.required"
 	EventApprovalUnknown          EventType = "approval.unknown"
@@ -384,6 +385,22 @@ type TeamLifecycle struct {
 	Code           string              `json:"code,omitempty"`
 }
 
+// TeamControlLifecycle is the content-free parent projection for one durable
+// operator command. Command text, payloads, and resolved execution identities
+// remain private to the Team control journal.
+type TeamControlLifecycle struct {
+	TeamID          team.ID           `json:"team_id"`
+	Revision        uint64            `json:"revision"`
+	CommandID       team.CommandID    `json:"command_id"`
+	Action          TeamControlAction `json:"action"`
+	MemberID        team.MemberID     `json:"member_id,omitempty"`
+	TaskID          team.TaskID       `json:"task_id,omitempty"`
+	AttemptID       team.AttemptID    `json:"attempt_id,omitempty"`
+	OwnerGeneration uint64            `json:"owner_generation,omitempty"`
+	State           TeamControlStatus `json:"state"`
+	Code            string            `json:"code,omitempty"`
+}
+
 // TeamIntegrationStatus is the bounded frontend-visible state of one isolated
 // Team result integration. Private paths, refs, tokens, and journal contents
 // never enter this event protocol.
@@ -539,6 +556,7 @@ func (ToolUpdated) eventPayload()              {}
 func (ToolCompleted) eventPayload()            {}
 func (SubagentLifecycle) eventPayload()        {}
 func (TeamLifecycle) eventPayload()            {}
+func (TeamControlLifecycle) eventPayload()     {}
 func (TeamIntegrationLifecycle) eventPayload() {}
 func (ApprovalRequired) eventPayload()         {}
 func (ApprovalUnknown) eventPayload()          {}
@@ -593,7 +611,7 @@ func validateEnvelopeIDs(event Event) error {
 	case EventSessionOpened, EventSessionClosed, EventSessionTreeChanged,
 		EventSessionNavigated, EventSessionForked, EventCompactionStarted,
 		EventCompactionCompleted, EventModeChanged, EventTeamLifecycle,
-		EventTeamIntegrationLifecycle:
+		EventTeamControlLifecycle, EventTeamIntegrationLifecycle:
 		if event.InteractionID != "" || event.RunID != "" {
 			return invalidEvent("session event has interaction or run id")
 		}
@@ -751,6 +769,10 @@ func validatePayload(eventType EventType, payload EventPayload) error {
 		if eventType != EventTeamLifecycle || validateTeamLifecycle(value) != nil {
 			return invalidPayload(eventType, payload)
 		}
+	case TeamControlLifecycle:
+		if eventType != EventTeamControlLifecycle || validateTeamControlLifecycle(value) != nil {
+			return invalidPayload(eventType, payload)
+		}
 	case TeamIntegrationLifecycle:
 		if eventType != EventTeamIntegrationLifecycle || validateTeamIntegrationLifecycle(value) != nil {
 			return invalidPayload(eventType, payload)
@@ -804,6 +826,88 @@ func validatePayload(eventType EventType, payload EventPayload) error {
 	}
 
 	return nil
+}
+
+func validateTeamControlLifecycle(value TeamControlLifecycle) error {
+	if err := validateTeamControlLifecycleFields(value); err != nil {
+		return err
+	}
+
+	if err := validateTeamControlLifecycleTarget(value); err != nil {
+		return err
+	}
+
+	return validateTeamControlLifecycleResult(value)
+}
+
+func validateTeamControlLifecycleFields(value TeamControlLifecycle) error {
+	if value.Revision == 0 || !validTeamControlAction(value.Action) ||
+		!validTeamControlStatus(value.State) {
+		return errors.New("invalid Team control lifecycle fields")
+	}
+
+	for _, routing := range []struct {
+		value    string
+		required bool
+	}{
+		{string(value.TeamID), true},
+		{string(value.CommandID), true},
+		{string(value.MemberID), false},
+		{string(value.TaskID), false},
+		{string(value.AttemptID), false},
+	} {
+		if !validTeamRoutingID(routing.value, routing.required) {
+			return errors.New("invalid Team control lifecycle fields")
+		}
+	}
+	if value.Code != "" && !validCode(value.Code) {
+		return errors.New("invalid Team control lifecycle fields")
+	}
+
+	return nil
+}
+
+func validateTeamControlLifecycleTarget(value TeamControlLifecycle) error {
+	if value.AttemptID != "" && (value.MemberID == "" || value.TaskID == "") {
+		return errors.New("incomplete Team control Attempt identity")
+	}
+	if value.OwnerGeneration != 0 && value.AttemptID == "" {
+		return errors.New("team control generation requires an Attempt")
+	}
+
+	return nil
+}
+
+func validateTeamControlLifecycleResult(value TeamControlLifecycle) error {
+	terminalFailure := value.State == TeamControlRejected ||
+		value.State == TeamControlStale || value.State == TeamControlDeliveryUnknown
+	if terminalFailure != (value.Code != "") {
+		return errors.New("invalid Team control result code")
+	}
+
+	return nil
+}
+
+func validTeamControlAction(value TeamControlAction) bool {
+	switch value {
+	case TeamControlMessage, TeamControlFollowUp, TeamControlInterruptAttempt,
+		TeamControlCancelTask, TeamControlRetryTask, TeamControlCancelTeam,
+		TeamControlResolveApproval, TeamControlResolveQuestion,
+		TeamControlRejectQuestion:
+		return true
+	default:
+		return false
+	}
+}
+
+func validTeamControlStatus(value TeamControlStatus) bool {
+	switch value {
+	case TeamControlPending, TeamControlApplying, TeamControlApplied,
+		TeamControlRejected, TeamControlStale, TeamControlDeliveryUnknown:
+		return true
+	default:
+		return false
+	}
 }
 
 func validateTeamLifecycle(value TeamLifecycle) error {

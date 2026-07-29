@@ -55,6 +55,7 @@ type promptState struct {
 	err        error
 	preview    coding.CompactionPreview
 	question   questionPromptState
+	team       *teamPromptSource
 	generation uint64
 }
 
@@ -79,6 +80,7 @@ func (m *Model) openCompactPrompt() tea.Cmd {
 func (m *Model) syncApprovalPrompt() {
 	if m.state.Question.Required != nil {
 		if m.prompt.kind == promptQuestion &&
+			m.prompt.team == nil &&
 			m.prompt.question.request.ID == m.state.Question.Required.ID &&
 			m.prompt.question.request.SchemaDigest == m.state.Question.Required.SchemaDigest {
 			return
@@ -94,6 +96,11 @@ func (m *Model) syncApprovalPrompt() {
 		return
 	}
 	if m.state.Approval.Kind == coding.ApprovalNone {
+		if entry, ok := m.nextTeamInteraction(); ok {
+			m.syncTeamInteractionPrompt(*entry)
+
+			return
+		}
 		if m.prompt.kind == promptApproval || m.prompt.kind == promptQuestion {
 			m.prompt = promptState{}
 			m.composer.Focus()
@@ -114,6 +121,7 @@ func (m *Model) syncApprovalPrompt() {
 }
 
 func (m *Model) claimPromptOwner() {
+	m.stopTeamWorkerRouteSubscription()
 	if m.picker.kind == pickerCommand {
 		m.closeCommandPicker(true)
 	}
@@ -218,6 +226,15 @@ func (m *Model) resolvePromptChoice(choice approval.Choice) (tea.Model, tea.Cmd)
 	if !slices.Contains(m.prompt.choices, choice) {
 		return m, nil
 	}
+	if m.prompt.team != nil {
+		command := m.submitTeamApprovalChoice(m.prompt.team.key, choice)
+		if command != nil {
+			m.prompt.loading = true
+			m.prompt.err = nil
+		}
+
+		return m, command
+	}
 
 	requestID := ""
 	if m.state.Approval.Required != nil {
@@ -287,13 +304,7 @@ func (m *Model) updateQuestionPromptKey(message tea.KeyPressMsg) (tea.Model, tea
 	case keyEscape, keyCtrlC:
 		state.loading = true
 
-		return m, m.startStream(func(ctx context.Context) iter.Seq2[coding.Event, error] {
-			return m.controller.RejectQuestion(
-				ctx,
-				state.request.ID,
-				state.request.SchemaDigest,
-			)
-		})
+		return m, m.rejectQuestionPromptCommand(state.request)
 	case keyLeft:
 		state.tab = wrapIndex(state.tab-1, questionCount+1)
 		state.err = nil
@@ -395,13 +406,7 @@ func (m *Model) updateQuestionEditorKey(message tea.KeyPressMsg) (tea.Model, tea
 		state.editor.Blur()
 		state.loading = true
 
-		return m, m.startStream(func(ctx context.Context) iter.Seq2[coding.Event, error] {
-			return m.controller.RejectQuestion(
-				ctx,
-				state.request.ID,
-				state.request.SchemaDigest,
-			)
-		})
+		return m, m.rejectQuestionPromptCommand(state.request)
 	case "ctrl+j", "shift+enter":
 		if state.editing == questionEditChat {
 			state.editor.InsertString("\n")
@@ -427,9 +432,7 @@ func (m *Model) updateQuestionEditorKey(message tea.KeyPressMsg) (tea.Model, tea
 			}
 			state.loading = true
 
-			return m, m.startStream(func(ctx context.Context) iter.Seq2[coding.Event, error] {
-				return m.controller.ResolveQuestion(ctx, resolution)
-			})
+			return m, m.resolveQuestionPromptCommand(resolution)
 		}
 
 		clear(state.selected[state.tab])
@@ -478,8 +481,42 @@ func (m *Model) resolveStructuredQuestion() (tea.Model, tea.Cmd) {
 	state.loading = true
 	state.err = nil
 
-	return m, m.startStream(func(ctx context.Context) iter.Seq2[coding.Event, error] {
+	return m, m.resolveQuestionPromptCommand(resolution)
+}
+
+func (m *Model) resolveQuestionPromptCommand(resolution question.Resolution) tea.Cmd {
+	if m.prompt.team != nil {
+		command := m.submitTeamQuestionResolution(m.prompt.team.key, resolution, false)
+		if command == nil {
+			m.syncApprovalPrompt()
+		}
+
+		return command
+	}
+
+	return m.startStream(func(ctx context.Context) iter.Seq2[coding.Event, error] {
 		return m.controller.ResolveQuestion(ctx, resolution)
+	})
+}
+
+func (m *Model) rejectQuestionPromptCommand(request question.Request) tea.Cmd {
+	if m.prompt.team != nil {
+		command := m.submitTeamQuestionResolution(
+			m.prompt.team.key,
+			question.Resolution{
+				RequestID: request.ID, SchemaDigest: request.SchemaDigest,
+			},
+			true,
+		)
+		if command == nil {
+			m.syncApprovalPrompt()
+		}
+
+		return command
+	}
+
+	return m.startStream(func(ctx context.Context) iter.Seq2[coding.Event, error] {
+		return m.controller.RejectQuestion(ctx, request.ID, request.SchemaDigest)
 	})
 }
 
@@ -523,7 +560,11 @@ func (m *Model) questionPromptView() string {
 	}
 	tabs = append(tabs, submit, "→")
 
-	lines := []string{strings.Join(tabs, "  "), ""}
+	lines := make([]string, 0, 16)
+	if source := m.teamPromptSourceLine(); source != "" {
+		lines = append(lines, source, "")
+	}
+	lines = append(lines, strings.Join(tabs, "  "), "")
 	if state.tab == len(request.Questions) {
 		lines = append(lines, "Review your answers", "")
 		for index, item := range request.Questions {
@@ -661,12 +702,16 @@ func questionAnswerLabel(state questionPromptState, index int) string {
 
 func (m *Model) approvalPromptView() string {
 	lines := []string{"△ Approval required"}
-	if value := m.state.Approval.Required; value != nil {
+	if source := m.teamPromptSourceLine(); source != "" {
+		lines = append(lines, source)
+	}
+	state := m.promptApprovalState()
+	if value := state.Required; value != nil {
 		lines = append(lines,
 			value.Tool+": "+strings.Join(value.Command, " "),
 			"cwd "+value.CWD+" · reason: "+value.Justification,
 		)
-	} else if value := m.state.Approval.Unknown; value != nil {
+	} else if value := state.Unknown; value != nil {
 		lines = append(lines,
 			"outcome unknown · "+value.Tool+" · "+value.Reason,
 		)
@@ -696,6 +741,34 @@ func (m *Model) approvalPromptView() string {
 	}
 
 	return strings.Join(lines, "\n")
+}
+
+func (m *Model) promptApprovalState() coding.ApprovalState {
+	if m.prompt.team == nil {
+		return m.state.Approval
+	}
+	entry, ok := m.teamInteraction(m.prompt.team.key)
+	if !ok {
+		return coding.ApprovalState{}
+	}
+
+	return entry.approval
+}
+
+func (m *Model) teamPromptSourceLine() string {
+	if m.prompt.team == nil {
+		return ""
+	}
+	worker := boundedTeamLabel(m.prompt.team.workerName)
+	if worker == "" {
+		worker = genericTeamWorkerLabel
+	}
+	task := boundedTeamLabel(m.prompt.team.taskTitle)
+	if task == "" {
+		task = genericTeamTaskLabel
+	}
+
+	return "Team Worker · " + worker + " · Task: " + task
 }
 
 func (m *Model) compactPromptView() string {

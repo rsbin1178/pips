@@ -14,6 +14,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/rsbin/pips/agent/team"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding"
 	"github.com/rsbin/pips/internal/coding/approval"
@@ -90,9 +91,55 @@ type Controller interface {
 	Config() config.Config
 	Detached() bool
 	ListSessions(context.Context) ([]session.Metadata, error)
+	ListSessionSummaries(context.Context) ([]runtimecontrol.SessionSummary, error)
 	ListSubagents(context.Context) ([]subagent.Summary, error)
 	InspectSubagent(context.Context, string) (subagent.Detail, error)
 	InspectSubagentState(context.Context, string) (coding.State, error)
+	GenerateTeamProposal(context.Context, coding.TeamProposalPrompt) (coding.TeamProposal, error)
+	ReviseTeamProposal(context.Context, string, string) (coding.TeamProposal, error)
+	DeclineTeam(context.Context, string) error
+	ConfirmTeam(context.Context, coding.TeamConfirmation) (coding.TeamReference, error)
+	ReadTeam(context.Context, coding.TeamReadRequest) (coding.TeamView, error)
+	SubmitTeamControl(context.Context, coding.TeamControlRequest) (coding.TeamControlReference, error)
+	ResolveTeamWorkerApproval(
+		context.Context,
+		coding.TeamWorkerTarget,
+		approval.Resolution,
+	) (coding.TeamControlReference, error)
+	ResolveTeamWorkerQuestion(
+		context.Context,
+		coding.TeamWorkerTarget,
+		question.Resolution,
+	) (coding.TeamControlReference, error)
+	RejectTeamWorkerQuestion(
+		context.Context,
+		coding.TeamWorkerTarget,
+		string,
+		string,
+	) (coding.TeamControlReference, error)
+	ObserveTeamWorker(context.Context, coding.TeamWorkerTarget) (coding.EventObservation, error)
+	InspectTeamWorkerState(context.Context, coding.TeamWorkerTarget) (coding.State, error)
+	DiscoverTeamRecovery(context.Context) ([]coding.TeamRecoveryCandidate, error)
+	ResumeTeam(
+		context.Context,
+		team.ID,
+		coding.TeamResumeDecision,
+	) (coding.TeamReference, error)
+	PrepareTeamIntegration(
+		context.Context,
+		coding.TeamIntegrationRequest,
+	) (coding.TeamIntegrationPreview, error)
+	ApplyTeamIntegration(
+		context.Context,
+		coding.TeamIntegrationApproval,
+	) (coding.TeamIntegrationResult, error)
+	RejectTeamIntegration(context.Context, coding.TeamIntegrationApproval) error
+	TeamIntegrationRecoveries(context.Context) ([]coding.TeamIntegrationRecovery, error)
+	RecoverTeamIntegration(
+		context.Context,
+		coding.TeamIntegrationRecoveryRequest,
+	) (coding.TeamIntegrationResult, error)
+	CleanupTeam(context.Context, coding.TeamCleanupRequest) (coding.TeamCleanupResult, error)
 	Skills(context.Context) (coding.SkillSnapshot, error)
 	SetSkillEnabled(context.Context, coding.SkillID, bool) error
 	WaitSubagent(context.Context, string) (subagent.Result, error)
@@ -180,6 +227,7 @@ func Run(ctx context.Context, options Options) (returnErr error) {
 		controllerCloseTimeout,
 	)
 	returnErr = errors.Join(returnErr, model.stopStream(cleanupCtx))
+	model.stopTeamWorkerRouteSubscription()
 	model.stopSubscription()
 	cleanupCancel()
 	owned.Lock()

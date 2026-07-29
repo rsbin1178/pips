@@ -146,7 +146,7 @@ func (r *Runtime) discoverTeamRecovery(ctx context.Context) ([]TeamRecoveryCandi
 
 	candidates := make([]TeamRecoveryCandidate, 0, len(snapshots))
 	for _, snapshot := range snapshots {
-		if terminalTeamResourceState(snapshot.State) {
+		if teamstate.IsTerminal(snapshot.State) {
 			continue
 		}
 
@@ -474,16 +474,6 @@ func openExistingControlStore(directory string) (*teamcontrol.Store, error) {
 	}
 
 	return teamcontrol.New(directory, teamcontrol.Limits{})
-}
-
-func terminalTeamResourceState(state teamstate.State) bool {
-	switch state {
-	case teamstate.StateIntegrated, teamstate.StateClosedWithoutIntegration,
-		teamstate.StateCancelled, teamstate.StateFailed:
-		return true
-	default:
-		return false
-	}
 }
 
 func recoverableTeamResourceState(state teamstate.State) bool {

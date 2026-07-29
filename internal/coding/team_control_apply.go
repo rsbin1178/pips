@@ -83,15 +83,8 @@ func (c *teamCoordinator) consumeControl(
 		return c.completePendingControl(ctx, entry.Command.ID, state, code)
 	}
 
-	revision, err := c.control.Revision(ctx, c.id)
-	if err != nil {
+	if err := c.beginControl(ctx, entry.Command.ID, resolved); err != nil {
 		return err
-	}
-	_, err = c.control.Begin(ctx, c.id, entry.Command.ID, teamcontrol.Mutation{
-		ID: teamControlMutationID(c.id, entry.Command.ID, "begin"), ExpectedRevision: revision,
-	}, resolved)
-	if err != nil {
-		return fmt.Errorf("coding Team control: begin: %w", err)
 	}
 
 	// Domain state may change between resolution and Begin. Re-resolve after
@@ -405,11 +398,37 @@ func (c *teamCoordinator) completePendingControl(
 	if err != nil {
 		return err
 	}
-	_, err = c.control.CompletePending(ctx, c.id, commandID, teamcontrol.Mutation{
+
+	record, err := c.control.CompletePending(ctx, c.id, commandID, teamcontrol.Mutation{
 		ID: teamControlMutationID(c.id, commandID, "pending-"+code), ExpectedRevision: revision,
 	}, state, code)
+	if err == nil {
+		c.publishControlLifecycle(ctx, record)
+	}
 
 	return err
+}
+
+func (c *teamCoordinator) beginControl(
+	ctx context.Context,
+	commandID team.CommandID,
+	resolved teamcontrol.ResolvedTarget,
+) error {
+	revision, err := c.control.Revision(ctx, c.id)
+	if err != nil {
+		return err
+	}
+
+	begun, err := c.control.Begin(ctx, c.id, commandID, teamcontrol.Mutation{
+		ID: teamControlMutationID(c.id, commandID, "begin"), ExpectedRevision: revision,
+	}, resolved)
+	if err != nil {
+		return fmt.Errorf("coding Team control: begin: %w", err)
+	}
+
+	c.publishControlLifecycle(ctx, begun)
+
+	return nil
 }
 
 func (c *teamCoordinator) completeControl(
@@ -423,9 +442,13 @@ func (c *teamCoordinator) completeControl(
 	if err != nil {
 		return err
 	}
-	_, err = c.control.Complete(ctx, c.id, commandID, teamcontrol.Mutation{
+
+	record, err := c.control.Complete(ctx, c.id, commandID, teamcontrol.Mutation{
 		ID: teamControlMutationID(c.id, commandID, phase), ExpectedRevision: revision,
 	}, state, code)
+	if err == nil {
+		c.publishControlLifecycle(ctx, record)
+	}
 
 	return err
 }

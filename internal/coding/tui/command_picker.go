@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"iter"
 	"strings"
+	"unicode"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -20,11 +21,14 @@ type commandDescriptor struct {
 	name        string
 	description string
 	idleOnly    bool
+	arguments   bool
 }
 
 const (
-	commandDiff   = "diff"
-	commandStatus = "status"
+	commandDiff                     = "diff"
+	commandStatus                   = "status"
+	commandTeam                     = "team"
+	maximumCommandArgumentTailBytes = 16 << 10
 )
 
 var commands = []commandDescriptor{
@@ -33,6 +37,7 @@ var commands = []commandDescriptor{
 	{name: "plan", description: "enter read-only Plan Mode", idleOnly: true},
 	{name: "mode", description: "switch Agent or Plan operating mode", idleOnly: true},
 	{name: "agents", description: "inspect read-only specialist runs", idleOnly: true},
+	{name: commandTeam, description: "propose or inspect a coding Team", idleOnly: true, arguments: true},
 	{name: "skills", description: "enable or disable project Skills", idleOnly: true},
 	{name: "model", description: "switch the process-local model", idleOnly: true},
 	{name: "tree", description: "navigate the current session tree", idleOnly: true},
@@ -121,7 +126,14 @@ func (m *Model) updateCommandPickerKey(message tea.KeyPressMsg) (tea.Model, tea.
 	default:
 		text := message.Key().Text
 		if text != "" && text != "/" {
-			m.picker.query += text
+			candidate := m.picker.query + text
+			_, arguments := splitCommandQuery(candidate)
+			if len(arguments) > maximumCommandArgumentTailBytes {
+				m.picker.err = errors.New("command argument is too long")
+
+				return m, nil
+			}
+			m.picker.query = candidate
 			m.picker.cursor = 0
 			m.picker.err = nil
 			m.syncCommandInput()
@@ -137,6 +149,18 @@ func (m *Model) updateCommandPickerKey(message tea.KeyPressMsg) (tea.Model, tea.
 func (m *Model) executeCommand(command commandDescriptor) (tea.Model, tea.Cmd) {
 	if command.idleOnly && m.actionContext() != contextIdle {
 		m.picker.err = fmt.Errorf("/%s is available only while idle", command.name)
+
+		return m, nil
+	}
+
+	_, arguments := splitCommandQuery(m.picker.query)
+	if arguments != "" && !command.arguments {
+		m.picker.err = fmt.Errorf("/%s does not accept an argument", command.name)
+
+		return m, nil
+	}
+	if len(arguments) > maximumCommandArgumentTailBytes {
+		m.picker.err = errors.New("command argument is too long")
 
 		return m, nil
 	}
@@ -169,6 +193,10 @@ func (m *Model) executeCommand(command commandDescriptor) (tea.Model, tea.Cmd) {
 		m.closeCommandPicker(false)
 
 		return m, m.openAgentsRoute()
+	case commandTeam:
+		m.closeCommandPicker(false)
+
+		return m, m.openTeamRoute(arguments)
 	case "skills":
 		previousInput := m.picker.previousInput
 		m.closeCommandPicker(false)
@@ -223,7 +251,8 @@ func (m *Model) executeCommand(command commandDescriptor) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) filteredCommands() []commandDescriptor {
-	query := strings.ToLower(strings.TrimSpace(m.picker.query))
+	query, _ := splitCommandQuery(m.picker.query)
+	query = strings.ToLower(query)
 
 	filtered := make([]commandDescriptor, 0, len(commands))
 	for _, command := range commands {
@@ -234,6 +263,16 @@ func (m *Model) filteredCommands() []commandDescriptor {
 	}
 
 	return filtered
+}
+
+func splitCommandQuery(value string) (string, string) {
+	value = strings.TrimLeftFunc(value, unicode.IsSpace)
+	separator := strings.IndexFunc(value, unicode.IsSpace)
+	if separator < 0 {
+		return value, ""
+	}
+
+	return value[:separator], strings.TrimSpace(value[separator:])
 }
 
 func (m *Model) commandPickerView(maxHeight int) string {
@@ -308,8 +347,9 @@ func (m *Model) renderCommandPickerRow(command commandDescriptor, selected bool)
 	if !m.options.NoColor {
 		palette := paletteFor(m.theme)
 		matchStyle := lipgloss.NewStyle().Bold(true).Foreground(palette.model)
+		query, _ := splitCommandQuery(m.picker.query)
 		for index := range lines {
-			lines[index] = highlightCommandMatch(lines[index], m.picker.query, matchStyle)
+			lines[index] = highlightCommandMatch(lines[index], query, matchStyle)
 			if selected {
 				lines[index] = lipgloss.NewStyle().Foreground(palette.session).Render(lines[index])
 			}

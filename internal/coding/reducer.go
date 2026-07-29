@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"fmt"
 	"slices"
+	"time"
 
 	"github.com/rsbin/pips/agent"
 	"github.com/rsbin/pips/ai"
@@ -16,6 +17,7 @@ import (
 const (
 	maxRecentSubagents        = 128
 	maxRecentTeamLifecycle    = 256
+	maxRecentTeamControls     = 256
 	maxRecentTeamIntegrations = 64
 )
 
@@ -92,6 +94,12 @@ type TeamLifecycleState struct {
 	TeamLifecycle
 }
 
+// TeamControlLifecycleState is the latest content-free projection for one
+// durable operator command.
+type TeamControlLifecycleState struct {
+	TeamControlLifecycle
+}
+
 // TeamIntegrationLifecycleState is the latest compact projection for one
 // isolated Team result integration.
 type TeamIntegrationLifecycleState struct {
@@ -110,14 +118,16 @@ const (
 
 // ApprovalState is the current approval overlay projection.
 type ApprovalState struct {
-	Kind     ApprovalKind      `json:"kind,omitempty"`
-	Required *ApprovalRequired `json:"required,omitempty"`
-	Unknown  *ApprovalUnknown  `json:"unknown,omitempty"`
+	Kind        ApprovalKind      `json:"kind,omitempty"`
+	RequestedAt time.Time         `json:"requested_at,omitzero"`
+	Required    *ApprovalRequired `json:"required,omitempty"`
+	Unknown     *ApprovalUnknown  `json:"unknown,omitempty"`
 }
 
 // QuestionState is the current Runtime-owned structured input request.
 type QuestionState struct {
-	Required *question.Request `json:"required,omitempty"`
+	RequestedAt time.Time         `json:"requested_at,omitzero"`
+	Required    *question.Request `json:"required,omitempty"`
 }
 
 // NonInteractiveError fails closed when structured input is pending.
@@ -166,6 +176,7 @@ type State struct {
 	Tools             []ToolState                     `json:"tools"`
 	Subagents         []SubagentState                 `json:"subagents"`
 	Teams             []TeamLifecycleState            `json:"teams,omitempty"`
+	TeamControls      []TeamControlLifecycleState     `json:"team_controls,omitempty"`
 	TeamIntegrations  []TeamIntegrationLifecycleState `json:"team_integrations,omitempty"`
 	Approval          ApprovalState                   `json:"approval"`
 	Question          QuestionState                   `json:"question"`
@@ -209,6 +220,7 @@ func (state State) Clone() State {
 	}
 	cloned.Subagents = slices.Clone(state.Subagents)
 	cloned.Teams = slices.Clone(state.Teams)
+	cloned.TeamControls = slices.Clone(state.TeamControls)
 	cloned.TeamIntegrations = slices.Clone(state.TeamIntegrations)
 
 	cloned.Approval = cloneApprovalState(state.Approval)
@@ -513,6 +525,10 @@ func (state *State) apply(event Event) error {
 		if err := state.applyTeamLifecycle(payload); err != nil {
 			return err
 		}
+	case TeamControlLifecycle:
+		if err := state.applyTeamControlLifecycle(payload); err != nil {
+			return err
+		}
 	case TeamIntegrationLifecycle:
 		if err := state.applyTeamIntegrationLifecycle(payload); err != nil {
 			return err
@@ -523,14 +539,18 @@ func (state *State) apply(event Event) error {
 		}
 
 		request := cloneApprovalRequired(payload)
-		state.Approval = ApprovalState{Kind: ApprovalReview, Required: &request}
+		state.Approval = ApprovalState{
+			Kind: ApprovalReview, RequestedAt: event.Time, Required: &request,
+		}
 	case ApprovalUnknown:
 		if err := state.requireInteraction(event.InteractionID); err != nil || state.Approval.Kind != ApprovalNone {
 			return protocolError("unknown approval cannot be displayed")
 		}
 
 		unknown := cloneApprovalUnknown(payload)
-		state.Approval = ApprovalState{Kind: ApprovalUncertain, Unknown: &unknown}
+		state.Approval = ApprovalState{
+			Kind: ApprovalUncertain, RequestedAt: event.Time, Unknown: &unknown,
+		}
 	case ApprovalResolved:
 		if err := state.requireInteraction(event.InteractionID); err != nil {
 			return err
@@ -549,7 +569,7 @@ func (state *State) apply(event Event) error {
 		}
 
 		request := question.CloneRequest(payload.Request)
-		state.Question.Required = &request
+		state.Question = QuestionState{RequestedAt: event.Time, Required: &request}
 	case QuestionResolved:
 		if err := state.requireInteraction(event.InteractionID); err != nil ||
 			state.Question.Required == nil || payload.Redacted ||
@@ -625,6 +645,68 @@ func (state *State) applyTeamLifecycle(payload TeamLifecycle) error {
 	state.Teams[index] = TeamLifecycleState{TeamLifecycle: payload}
 
 	return nil
+}
+
+func (state *State) applyTeamControlLifecycle(payload TeamControlLifecycle) error {
+	if !state.SessionOpen || state.SessionID == "" {
+		return protocolError("Team control lifecycle requires an open Session")
+	}
+
+	index := -1
+	for candidate := range state.TeamControls {
+		if state.TeamControls[candidate].CommandID == payload.CommandID {
+			index = candidate
+			break
+		}
+	}
+	if index < 0 {
+		state.TeamControls = append(
+			state.TeamControls,
+			TeamControlLifecycleState{TeamControlLifecycle: payload},
+		)
+		if len(state.TeamControls) > maxRecentTeamControls {
+			state.TeamControls = slices.Clone(
+				state.TeamControls[len(state.TeamControls)-maxRecentTeamControls:],
+			)
+		}
+
+		return nil
+	}
+
+	previous := state.TeamControls[index].TeamControlLifecycle
+	if previous == payload {
+		return nil
+	}
+	if previous.TeamID != payload.TeamID || previous.Action != payload.Action {
+		return protocolError("Team control identity changed")
+	}
+	if payload.Revision <= previous.Revision {
+		return protocolError("Team control revision did not advance")
+	}
+	if !validTeamControlTransition(previous.State, payload.State) {
+		return protocolError(
+			"Team control cannot change from %q to %q",
+			previous.State,
+			payload.State,
+		)
+	}
+
+	state.TeamControls[index] = TeamControlLifecycleState{TeamControlLifecycle: payload}
+
+	return nil
+}
+
+func validTeamControlTransition(previous, next TeamControlStatus) bool {
+	switch previous {
+	case TeamControlPending:
+		return next == TeamControlApplying || next == TeamControlRejected ||
+			next == TeamControlStale
+	case TeamControlApplying:
+		return next == TeamControlApplied || next == TeamControlRejected ||
+			next == TeamControlStale || next == TeamControlDeliveryUnknown
+	default:
+		return false
+	}
 }
 
 //nolint:gocyclo // The reducer keeps transition validation and bounded projection atomic.
@@ -1008,7 +1090,7 @@ func (state *State) rebuildIndexes() {
 }
 
 func cloneApprovalState(state ApprovalState) ApprovalState {
-	cloned := ApprovalState{Kind: state.Kind}
+	cloned := ApprovalState{Kind: state.Kind, RequestedAt: state.RequestedAt}
 	if state.Required != nil {
 		required := cloneApprovalRequired(*state.Required)
 		cloned.Required = &required

@@ -25,6 +25,8 @@ func (m *Model) printHelp() tea.Cmd {
 		"Help",
 		renderActionHelp(defaultActions, m.actionContext())+"\n\n"+
 			"Ctrl+J / Shift+Enter newline\n"+
+			"/team [objective] proposes or inspects a Team; recovery, Integration, and cleanup always require review.\n"+
+			"/resume may show a read-only Team recovery badge; Enter resumes only the conversation.\n"+
 			"The terminal owns conversation history: use its wheel or scrollback keys to navigate, "+
 			"and drag normally to select and copy text.",
 	)

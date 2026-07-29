@@ -1093,9 +1093,11 @@ const (
 	operationFork              runtimeOperationKind = "fork"
 	operationAgentNotification runtimeOperationKind = "agent notification"
 	operationTeamPropose       runtimeOperationKind = "propose Team"
+	operationTeamProposalAgent runtimeOperationKind = "generate Team proposal"
 	operationTeamConfirm       runtimeOperationKind = "confirm Team"
 	operationTeamResume        runtimeOperationKind = "resume Team"
 	operationTeamIntegration   runtimeOperationKind = "integrate Team results"
+	operationTeamCleanup       runtimeOperationKind = "clean up Team resources"
 )
 
 func (r *Runtime) runSequence(

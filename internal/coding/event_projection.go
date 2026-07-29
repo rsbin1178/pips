@@ -197,6 +197,8 @@ type TelemetryEvent struct {
 	TeamScope               string             `json:"team_scope,omitempty"`
 	TeamState               string             `json:"team_state,omitempty"`
 	TeamActivity            string             `json:"team_activity,omitempty"`
+	TeamControlAction       string             `json:"team_control_action,omitempty"`
+	TeamControlState        string             `json:"team_control_state,omitempty"`
 	IntegrationState        string             `json:"integration_state,omitempty"`
 	IntegrationVerification string             `json:"integration_verification,omitempty"`
 	Tool                    string             `json:"tool,omitempty"`
@@ -294,6 +296,13 @@ func Telemetry(event Event) (TelemetryEvent, error) {
 		projectSubagentTelemetry(&projected, event.Type, value)
 	case TeamLifecycle:
 		projectTeamTelemetry(&projected, value)
+	case TeamControlLifecycle:
+		projected.Agent = "team_control"
+		projected.TeamControlAction = string(value.Action)
+		projected.TeamControlState = string(value.State)
+		projected.Code = value.Code
+		projected.Failed = value.State == TeamControlRejected ||
+			value.State == TeamControlStale || value.State == TeamControlDeliveryUnknown
 	case TeamIntegrationLifecycle:
 		projected.Agent = "team_integration"
 		projected.IntegrationState = string(value.State)

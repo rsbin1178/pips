@@ -13,10 +13,74 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/rsbin/pips/agent/team"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding"
 	"github.com/rsbin/pips/internal/coding/subagent"
+	"github.com/rsbin/pips/internal/coding/teamstate"
 )
+
+type childKind uint8
+
+const (
+	childSubagent childKind = iota
+	childTeamWorker
+)
+
+type childSummary struct {
+	kind           childKind
+	subagent       subagent.Summary
+	worker         coding.TeamAttemptView
+	workerName     string
+	taskTitle      string
+	childSessionID string
+	createdAt      time.Time
+}
+
+func subagentChildSummary(value subagent.Summary) childSummary {
+	return childSummary{
+		kind: childSubagent, subagent: value,
+		childSessionID: value.ChildSessionID, createdAt: value.CreatedAt,
+	}
+}
+
+func (value childSummary) live() bool {
+	switch value.kind {
+	case childSubagent:
+		return value.subagent.State == subagent.StateCreated ||
+			value.subagent.State == subagent.StateRunning
+	case childTeamWorker:
+		return value.worker.DomainState == team.AttemptStatusRunning &&
+			value.worker.ResourceState == teamstate.AttemptRunning
+	default:
+		return false
+	}
+}
+
+func (value childSummary) searchableText() string {
+	if value.kind == childSubagent {
+		return strings.Join([]string{
+			value.subagent.TaskPreview, string(value.subagent.Role),
+			string(value.subagent.State),
+		}, " ")
+	}
+
+	return strings.Join([]string{
+		value.workerName, value.taskTitle, string(value.worker.LifecycleState),
+		string(value.worker.Activity), string(value.worker.ResourceState),
+	}, " ")
+}
+
+func (value childSummary) sameIdentity(other childSummary) bool {
+	if value.kind != other.kind {
+		return false
+	}
+	if value.kind == childSubagent {
+		return value.childSessionID != "" && value.childSessionID == other.childSessionID
+	}
+
+	return value.worker.Target == other.worker.Target
+}
 
 type subagentToolEnvelope struct {
 	Schema         string `json:"schema"`
@@ -27,6 +91,7 @@ type subagentToolEnvelope struct {
 type agentsRouteDataMsg struct {
 	generation uint64
 	agents     []subagent.Summary
+	teamViews  []coding.TeamView
 	err        error
 }
 
@@ -101,12 +166,56 @@ func (m *Model) activateAgentsRoute() tea.Cmd {
 	m.route = routeState{kind: routeAgents, loading: true, generation: m.routeSeq}
 	m.composer.Blur()
 	generation := m.route.generation
+	controller := m.controller
+	ctx := m.ctx
+	views, requests := m.teamViewsForChildSelector()
 
 	return func() tea.Msg {
-		values, err := m.controller.ListSubagents(m.ctx)
+		values, err := controller.ListSubagents(ctx)
+		for _, request := range requests {
+			view, readErr := controller.ReadTeam(ctx, request)
+			if readErr != nil {
+				continue
+			}
+			views = append(views, view)
+		}
 
-		return agentsRouteDataMsg{generation: generation, agents: values, err: err}
+		return agentsRouteDataMsg{
+			generation: generation, agents: values, teamViews: views, err: err,
+		}
 	}
+}
+
+func (m *Model) teamViewsForChildSelector() ([]coding.TeamView, []coding.TeamReadRequest) {
+	m.ensureTeamProjection()
+	views := make([]coding.TeamView, 0, len(m.teamProjection.views))
+	requests := make([]coding.TeamReadRequest, 0, len(m.teamProjection.views))
+	seen := make(map[team.ID]struct{}, len(m.teamProjection.views))
+	for _, teamID := range m.teamProjection.viewOrder {
+		view, ok := m.teamProjection.views[teamID]
+		if !ok {
+			continue
+		}
+		views = append(views, view.Clone())
+		seen[teamID] = struct{}{}
+		requests = append(requests, coding.TeamReadRequest{
+			TeamID: teamID, AfterRevision: view.ChangeCursor,
+			AfterControlRevision: view.ControlCursor,
+		})
+	}
+
+	for _, value := range m.state.Teams {
+		if value.TeamID == "" {
+			continue
+		}
+		if _, exists := seen[value.TeamID]; exists {
+			continue
+		}
+		seen[value.TeamID] = struct{}{}
+		requests = append(requests, coding.TeamReadRequest{TeamID: value.TeamID})
+	}
+
+	return views, requests
 }
 
 //nolint:gocyclo // The keyboard map is kept explicit for the full-width route.
@@ -118,7 +227,7 @@ func (m *Model) updateAgentsRouteKey(message tea.KeyPressMsg) (tea.Model, tea.Cm
 		return m, nil
 	}
 
-	values := m.filteredAgents()
+	values := m.filteredChildren()
 
 	switch message.String() {
 	case "up", "k":
@@ -136,17 +245,13 @@ func (m *Model) updateAgentsRouteKey(message tea.KeyPressMsg) (tea.Model, tea.Cm
 			return m, nil
 		}
 
-		childSessionID := values[m.route.cursor].ChildSessionID
-
-		return m, m.openSubagentRoute(childSessionID)
+		return m, m.openChildRoute(values[m.route.cursor])
 	case "c":
 		if len(values) == 0 || m.route.controlling {
 			return m, nil
 		}
 
-		childSessionID := values[m.route.cursor].ChildSessionID
-
-		return m, m.cancelSubagent(childSessionID)
+		return m, m.cancelChild(values[m.route.cursor])
 	default:
 		if text := message.Key().Text; text != "" {
 			m.route.query += text
@@ -157,41 +262,37 @@ func (m *Model) updateAgentsRouteKey(message tea.KeyPressMsg) (tea.Model, tea.Cm
 	return m, nil
 }
 
-func (m *Model) filteredAgents() []subagent.Summary {
+func (m *Model) filteredChildren() []childSummary {
 	query := strings.ToLower(strings.TrimSpace(m.route.query))
 
-	values := make([]subagent.Summary, 0, len(m.route.agents))
-	for _, value := range m.route.agents {
-		if query == "" || strings.Contains(strings.ToLower(value.TaskPreview), query) ||
-			strings.Contains(string(value.Role), query) ||
-			strings.Contains(string(value.State), query) {
+	values := make([]childSummary, 0, len(m.route.children))
+	for _, value := range m.route.children {
+		if query == "" || strings.Contains(strings.ToLower(value.searchableText()), query) {
 			values = append(values, value)
 		}
 	}
 	sort.SliceStable(values, func(left, right int) bool {
-		leftRunning := values[left].State == subagent.StateCreated ||
-			values[left].State == subagent.StateRunning
-		rightRunning := values[right].State == subagent.StateCreated ||
-			values[right].State == subagent.StateRunning
+		leftRunning := values[left].live()
+		rightRunning := values[right].live()
 		if leftRunning != rightRunning {
 			return leftRunning
 		}
 
-		return values[left].CreatedAt.After(values[right].CreatedAt)
+		return values[left].createdAt.After(values[right].createdAt)
 	})
 
 	return values
 }
 
 func (m *Model) agentsRouteContent() string {
-	lines := []string{"Subagents", "", "Search: " + m.route.query, ""}
+	lines := []string{"Agents", "", "Search: " + m.route.query, ""}
 	if m.route.loading {
 		return strings.Join(append(lines, "Loading…"), "\n")
 	}
 
-	values := m.filteredAgents()
+	values := m.filteredChildren()
 	if len(values) == 0 {
-		lines = append(lines, "No specialist runs in this session.")
+		lines = append(lines, "No child Agents in this session.")
 	}
 
 	for index, value := range values {
@@ -200,26 +301,52 @@ func (m *Model) agentsRouteContent() string {
 			marker = "› "
 		}
 
-		preview := value.TaskPreview
-		if strings.TrimSpace(preview) == "" {
-			preview = "(no task preview)"
-		}
-
-		lines = append(lines,
-			fmt.Sprintf("%s%s", marker, preview),
-			fmt.Sprintf("  %s · %s · %s · %s",
-				value.Role, value.State, relativeTime(value.CreatedAt),
-				formatInteractionDuration(value.Duration.Milliseconds())),
-		)
+		lines = append(lines, renderChildSummary(value, marker)...)
 	}
 
-	lines = append(lines, "", "↑/↓ choose · type to search · Enter inspect · c cancel · Ctrl+T/Esc close")
+	lines = append(lines, "", "↑/↓ choose · type to search · Enter inspect · c interrupt · Ctrl+T/Esc close")
 
 	return strings.Join(lines, "\n")
 }
 
+func renderChildSummary(value childSummary, marker string) []string {
+	if value.kind == childTeamWorker {
+		title := value.taskTitle
+		if title == "" {
+			title = genericTeamTaskLabel
+		}
+		worker := value.workerName
+		if worker == "" {
+			worker = genericTeamWorkerLabel
+		}
+		state := value.worker.LifecycleState
+		if state == "" {
+			state = coding.TeamLifecycleStatus(value.worker.ResourceState)
+		}
+
+		return []string{
+			fmt.Sprintf("%s%s", marker, title),
+			fmt.Sprintf("  Team Worker · %s · %s · %s", worker, state,
+				formatInteractionDuration(value.worker.DurationMillis)),
+		}
+	}
+
+	preview := value.subagent.TaskPreview
+	if strings.TrimSpace(preview) == "" {
+		preview = "(no task preview)"
+	}
+
+	return []string{
+		fmt.Sprintf("%s%s", marker, preview),
+		fmt.Sprintf("  %s subagent · %s · %s · %s",
+			value.subagent.Role, value.subagent.State,
+			relativeTime(value.subagent.CreatedAt),
+			formatInteractionDuration(value.subagent.Duration.Milliseconds())),
+	}
+}
+
 func (m *Model) updateSubagentRouteSummary(event coding.Event) {
-	if m.route.kind != routeAgents && m.route.kind != routeSubagent {
+	if m.route.kind != routeAgents && m.route.kind != routeChild {
 		return
 	}
 	lifecycle, ok := event.Payload.(coding.SubagentLifecycle)
@@ -228,22 +355,23 @@ func (m *Model) updateSubagentRouteSummary(event coding.Event) {
 	}
 
 	index := -1
-	for candidate := range m.route.agents {
-		if m.route.agents[candidate].ChildSessionID == lifecycle.ChildSessionID {
+	for candidate := range m.route.children {
+		if m.route.children[candidate].kind == childSubagent &&
+			m.route.children[candidate].childSessionID == lifecycle.ChildSessionID {
 			index = candidate
 
 			break
 		}
 	}
 	if index < 0 {
-		m.route.agents = append(m.route.agents, subagent.Summary{
+		m.route.children = append(m.route.children, subagentChildSummary(subagent.Summary{
 			ChildSessionID: lifecycle.ChildSessionID,
 			CreatedAt:      event.Time,
-		})
-		index = len(m.route.agents) - 1
+		}))
+		index = len(m.route.children) - 1
 	}
 
-	value := &m.route.agents[index]
+	value := &m.route.children[index].subagent
 	value.Ownership = subagent.Ownership{
 		ParentSessionID:     m.state.SessionID,
 		ParentInteractionID: lifecycle.ParentInteractionID,
@@ -266,10 +394,108 @@ func (m *Model) updateSubagentRouteSummary(event coding.Event) {
 	}
 	value.Code = lifecycle.Code
 
-	if m.route.kind == routeSubagent && m.route.childSessionID == lifecycle.ChildSessionID &&
+	if m.route.kind == routeChild && m.route.childKind == childSubagent &&
+		m.route.childSessionID == lifecycle.ChildSessionID &&
 		m.route.detail != nil {
 		m.route.detail.Summary = *value
 	}
+}
+
+func childSummaries(agents []subagent.Summary, views []coding.TeamView) []childSummary {
+	values := make([]childSummary, 0, len(agents))
+	for _, value := range agents {
+		values = append(values, subagentChildSummary(value))
+	}
+	for _, view := range views {
+		values = mergeTeamWorkerChildren(values, view)
+	}
+
+	return values
+}
+
+func (m *Model) latestTeamWorkerChild() (childSummary, bool) {
+	m.ensureTeamProjection()
+	var latest childSummary
+	found := false
+	for _, teamID := range m.teamProjection.viewOrder {
+		view, ok := m.teamProjection.views[teamID]
+		if !ok {
+			continue
+		}
+		for _, child := range mergeTeamWorkerChildren(nil, view) {
+			if !found || !child.createdAt.Before(latest.createdAt) {
+				latest = child
+				found = true
+			}
+		}
+	}
+
+	return latest, found
+}
+
+func mergeTeamWorkerChildren(values []childSummary, view coding.TeamView) []childSummary {
+	for _, attempt := range view.Attempts {
+		if attempt.Target.TeamID == "" || attempt.Target.MemberID == "" ||
+			attempt.Target.TaskID == "" || attempt.Target.AttemptID == "" ||
+			attempt.Target.OwnerGeneration == 0 || attempt.ChildSessionID == "" {
+			continue
+		}
+		value := childSummary{
+			kind: childTeamWorker, worker: attempt,
+			workerName:     teamWorkerMemberLabel(view, attempt.Target.MemberID),
+			taskTitle:      teamWorkerTaskLabel(view, attempt.Target.TaskID),
+			childSessionID: attempt.ChildSessionID,
+			createdAt:      attempt.StartedAt,
+		}
+		found := false
+		for index := range values {
+			if sameChildSelectorIdentity(values[index], value) {
+				values[index] = value
+				found = true
+
+				break
+			}
+		}
+		if !found {
+			values = append(values, value)
+		}
+	}
+
+	return values
+}
+
+func sameChildSelectorIdentity(left, right childSummary) bool {
+	if left.kind != right.kind {
+		return false
+	}
+	if left.kind == childSubagent {
+		return left.childSessionID != "" && left.childSessionID == right.childSessionID
+	}
+
+	return left.worker.Target.TeamID == right.worker.Target.TeamID &&
+		left.worker.Target.MemberID == right.worker.Target.MemberID &&
+		left.worker.Target.TaskID == right.worker.Target.TaskID &&
+		left.worker.Target.AttemptID == right.worker.Target.AttemptID
+}
+
+func teamWorkerMemberLabel(view coding.TeamView, memberID team.MemberID) string {
+	for _, member := range view.Members {
+		if member.ID == memberID {
+			return boundedTeamLabel(member.Name)
+		}
+	}
+
+	return genericTeamWorkerLabel
+}
+
+func teamWorkerTaskLabel(view coding.TeamView, taskID team.TaskID) string {
+	for _, task := range view.Tasks {
+		if task.ID == taskID {
+			return boundedTeamLabel(task.Title)
+		}
+	}
+
+	return genericTeamTaskLabel
 }
 
 //nolint:gocyclo,nestif // Terminal result/error enrichment remains adjacent to ordinary timeline projection.
@@ -544,12 +770,14 @@ func (m *Model) updateSubagentRouteKey(message tea.KeyPressMsg) (tea.Model, tea.
 	case keyCtrlT, keyCtrlC:
 		return m, m.closeRouteToParent()
 	case keyEscape:
-		if len(m.route.agents) > 0 {
+		m.stopTeamWorkerRouteSubscription()
+		if len(m.route.children) > 0 {
 			m.route.kind = routeAgents
 			m.route.loading = false
 			m.route.err = nil
 			m.route.offset = 0
 			m.route.childSessionID = ""
+			m.route.childSummary = childSummary{}
 			m.route.detail = nil
 			m.route.childState = nil
 			m.route.refreshing = false
@@ -562,7 +790,7 @@ func (m *Model) updateSubagentRouteKey(message tea.KeyPressMsg) (tea.Model, tea.
 		return m, m.openAgentsRoute()
 	}
 	if key == "c" && !m.route.controlling {
-		return m, m.cancelSubagent(m.route.childSessionID)
+		return m, m.cancelChild(m.route.childSummary)
 	}
 
 	visible := max(1, m.height-3)
@@ -584,6 +812,14 @@ func (m *Model) updateSubagentRouteKey(message tea.KeyPressMsg) (tea.Model, tea.
 	}
 
 	return m, nil
+}
+
+func (m *Model) cancelChild(value childSummary) tea.Cmd {
+	if value.kind == childTeamWorker {
+		return m.interruptTeamWorker(value.worker.Target)
+	}
+
+	return m.cancelSubagent(value.childSessionID)
 }
 
 func (m *Model) cancelSubagent(childSessionID string) tea.Cmd {
@@ -610,18 +846,22 @@ func (m *Model) subagentRouteView() tea.View {
 		).Render(strings.Repeat("─", width))
 	}
 
-	body := "Loading subagent activity…"
+	body := "Loading child activity…"
 
 	if m.route.childState != nil {
-		body = m.subagentRouteContent(*m.route.childState, m.route.detail)
+		if m.route.childKind == childTeamWorker {
+			body = m.teamWorkerRouteContent(*m.route.childState, m.route.childSummary)
+		} else {
+			body = m.subagentRouteContent(*m.route.childState, m.route.detail)
+		}
 	}
 
 	if m.route.err != nil {
-		body += "\n\nError: " + safeError(m.route.err)
+		body += "\n\nError: " + m.safeChildRouteError(m.route.err)
 	}
 
 	if m.route.refreshErr != nil {
-		body += "\n\nRefresh: " + safeError(m.route.refreshErr)
+		body += "\n\nRefresh: " + m.safeChildRouteError(m.route.refreshErr)
 	}
 
 	footer := m.subagentRouteStatusLine()
@@ -641,9 +881,11 @@ func (m *Model) subagentRouteView() tea.View {
 }
 
 func (m *Model) subagentRouteStatusLine() string {
-	values := []string{"pips", "subagent", "loading"}
+	values := []string{"pips", "child Agent", "loading"}
 
-	if m.route.detail != nil {
+	if m.route.childKind == childTeamWorker {
+		values = m.teamWorkerRouteStatusValues()
+	} else if m.route.detail != nil {
 		summary := m.route.detail.Summary
 
 		values = []string{"pips", string(summary.Role) + " subagent"}
@@ -655,7 +897,7 @@ func (m *Model) subagentRouteStatusLine() string {
 		values = append(values, string(summary.State))
 	}
 
-	values = append(values, "Ctrl+T parent", "Esc subagents")
+	values = append(values, "Ctrl+T parent", "Esc agents")
 
 	if !m.options.NoColor {
 		palette := paletteFor(m.theme)
@@ -668,17 +910,59 @@ func (m *Model) subagentRouteStatusLine() string {
 	return ansi.Truncate(strings.Join(values, "  ·  "), max(1, m.width), "…")
 }
 
+func (m *Model) teamWorkerRouteStatusValues() []string {
+	worker := m.route.childSummary.workerName
+	if worker == "" {
+		worker = genericTeamWorkerLabel
+	}
+	values := []string{"pips", worker + " · Team Worker"}
+	if m.route.childState != nil {
+		state := m.route.childState
+		if state.Provider != "" || state.ModelID != "" {
+			values = append(values, fmt.Sprintf("%s/%s", state.Provider, state.ModelID))
+		}
+	}
+	status := m.route.childSummary.worker.LifecycleState
+	if status == "" {
+		status = coding.TeamLifecycleStatus(m.route.childSummary.worker.ResourceState)
+	}
+
+	return append(values, string(status))
+}
+
 func (m *Model) openSubagentRoute(childSessionID string) tea.Cmd {
+	child := subagentChildSummary(subagent.Summary{ChildSessionID: childSessionID})
+	for _, candidate := range m.route.children {
+		if candidate.kind == childSubagent && candidate.childSessionID == childSessionID {
+			child = candidate
+
+			break
+		}
+	}
+
+	return m.openChildRoute(child)
+}
+
+func (m *Model) openChildRoute(child childSummary) tea.Cmd {
 	previous := m.route
 
-	return m.requestRouteOpen(newSubagentRouteRequest(previous, childSessionID))
+	return m.requestRouteOpen(newChildRouteRequest(previous, child))
+}
+
+func (m *Model) activateChildRoute(request routeOpenRequest) tea.Cmd {
+	if request.child.kind == childTeamWorker {
+		return m.activateTeamWorkerRoute(request)
+	}
+
+	return m.activateSubagentRoute(request)
 }
 
 func (m *Model) activateSubagentRoute(request routeOpenRequest) tea.Cmd {
 	m.routeSeq++
 	m.route = routeState{
-		kind: routeSubagent, loading: true, generation: m.routeSeq,
-		childSessionID: request.childSessionID, agents: request.agents,
+		kind: routeChild, loading: true, generation: m.routeSeq,
+		childKind: childSubagent, childSummary: request.child,
+		childSessionID: request.childSessionID, children: request.children,
 		query: request.query, cursor: request.cursor,
 	}
 	if child, ok := m.childStates[request.childSessionID]; ok {
@@ -785,9 +1069,11 @@ func (m *Model) subagentRouteMaximumOffset() int {
 	}
 
 	visible := max(1, m.height-3)
-	lineCount := strings.Count(
-		m.subagentRouteContent(*m.route.childState, m.route.detail), "\n",
-	) + 1
+	content := m.subagentRouteContent(*m.route.childState, m.route.detail)
+	if m.route.childKind == childTeamWorker {
+		content = m.teamWorkerRouteContent(*m.route.childState, m.route.childSummary)
+	}
+	lineCount := strings.Count(content, "\n") + 1
 
 	return max(0, lineCount-visible)
 }

@@ -1,11 +1,11 @@
 package tui
 
 import (
-	"slices"
 	"time"
 
 	"charm.land/bubbles/v2/textinput"
 	"github.com/rsbin/pips/internal/coding"
+	"github.com/rsbin/pips/internal/coding/runtimecontrol"
 	"github.com/rsbin/pips/internal/coding/session"
 	"github.com/rsbin/pips/internal/coding/subagent"
 
@@ -19,10 +19,13 @@ const (
 	routeSessions
 	routeSkills
 	routeAgents
-	routeSubagent
+	routeChild
+	routeTeam
 	routeTree
 	routeToolDetail
 )
+
+const routeSubagent = routeChild
 
 // routeState holds the full-area surface currently owning view and keyboard
 // input. Each route uses only its relevant payload fields.
@@ -36,22 +39,27 @@ type routeState struct {
 	controlling bool
 	err         error
 
-	search        textinput.Model
-	sessions      []session.Metadata
-	skills        []coding.SkillSummary
-	diagnostics   []coding.SkillDiagnostic
-	showDetails   bool
-	previousInput string
-	openedAt      time.Time
+	search          textinput.Model
+	sessions        []session.Metadata
+	sessionRecovery map[string]runtimecontrol.TeamRecoveryHint
+	skills          []coding.SkillSummary
+	diagnostics     []coding.SkillDiagnostic
+	showDetails     bool
+	previousInput   string
+	openedAt        time.Time
 
-	agents []subagent.Summary
+	children []childSummary
 
+	childKind      childKind
+	childSummary   childSummary
 	childSessionID string
 	detail         *subagent.Detail
 	childState     *coding.State
+	workerBridge   *workerSubscriptionBridge
 	refreshing     bool
 	refreshPending bool
 	refreshErr     error
+	team           *teamRouteState
 
 	tree       coding.SessionTree
 	forkMode   bool
@@ -67,7 +75,9 @@ type routeOpenRequest struct {
 	previousInput  string
 	forkMode       bool
 	childSessionID string
-	agents         []subagent.Summary
+	teamObjective  string
+	children       []childSummary
+	child          childSummary
 	query          string
 	cursor         int
 	toolDetail     *toolDetailView
@@ -133,6 +143,8 @@ func (m *Model) requestRouteOpen(request routeOpenRequest) tea.Cmd {
 }
 
 func (m *Model) activateRoute(request routeOpenRequest) tea.Cmd {
+	m.stopTeamWorkerRouteSubscription()
+
 	switch request.kind {
 	case routeSessions:
 		return m.activateSessionPicker(request.previousInput)
@@ -140,8 +152,10 @@ func (m *Model) activateRoute(request routeOpenRequest) tea.Cmd {
 		return m.activateSkillsRoute(request.previousInput)
 	case routeAgents:
 		return m.activateAgentsRoute()
-	case routeSubagent:
-		return m.activateSubagentRoute(request)
+	case routeChild:
+		return m.activateChildRoute(request)
+	case routeTeam:
+		return m.activateTeamRoute(request.teamObjective)
 	case routeTree:
 		return m.activateTreeRoute(request.forkMode)
 	case routeToolDetail:
@@ -178,16 +192,18 @@ func (m *Model) finishScrollbackWrite(sequence uint64) tea.Cmd {
 // visible. The returned sequence keeps the Composer focus restoration behind
 // the native scrollback insertion.
 func (m *Model) closeRouteToParent() tea.Cmd {
+	m.stopTeamWorkerRouteSubscription()
 	m.route = routeState{}
 	m.setLayout()
 
 	return tea.Sequence(m.commitStableTimeline(), m.composer.Focus())
 }
 
-func newSubagentRouteRequest(previous routeState, childSessionID string) routeOpenRequest {
+func newChildRouteRequest(previous routeState, child childSummary) routeOpenRequest {
 	return routeOpenRequest{
-		kind: routeSubagent, childSessionID: childSessionID,
-		agents: slices.Clone(previous.agents), query: previous.query, cursor: previous.cursor,
+		kind: routeChild, childSessionID: child.childSessionID, child: child,
+		children: append([]childSummary(nil), previous.children...),
+		query:    previous.query, cursor: previous.cursor,
 	}
 }
 
@@ -199,8 +215,10 @@ func (m *Model) updateRouteKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.updateSkillsRouteKey(message)
 	case routeAgents:
 		return m.updateAgentsRouteKey(message)
-	case routeSubagent:
+	case routeChild:
 		return m.updateSubagentRouteKey(message)
+	case routeTeam:
+		return m.updateTeamRouteKey(message)
 	case routeTree:
 		return m.updateTreeRouteKey(message)
 	case routeToolDetail:
@@ -220,8 +238,10 @@ func (m *Model) routeView() tea.View {
 		return m.skillsRouteView()
 	case routeAgents:
 		return m.agentsRouteView()
-	case routeSubagent:
+	case routeChild:
 		return m.subagentRouteView()
+	case routeTeam:
+		return m.teamRouteView()
 	case routeTree:
 		return m.treeRouteView()
 	case routeToolDetail:
