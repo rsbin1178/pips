@@ -5,13 +5,14 @@ Usage:
   pips [command]
 
 Available Commands:
-  completion  Generate shell completion
-  config      Inspect effective configuration
-  doctor      Check coding agent prerequisites
-  exec        Run one non-interactive coding request
-  help        Help about any command
-  session     Inspect durable coding sessions
-  version     Print build version information
+  completion       Generate shell completion
+  config           Inspect effective configuration
+  doctor           Check coding agent prerequisites
+  exec             Run one non-interactive coding request
+  help             Help about any command
+  session          Inspect durable coding sessions
+  ssh              Run Pips in a remote workspace
+  version          Print build version information
 
 Flags:
       --approval string    approval mode

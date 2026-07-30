@@ -4,6 +4,60 @@
 an adapter over the same durable session, approval, event, and sandbox layers
 used by future interactive frontends; it does not contain a second Agent loop.
 
+## Remote interactive SSH
+
+`pips ssh` opens the ordinary interactive Pips TUI on a remote host while
+system OpenSSH continues to own host configuration, authentication, host-key
+verification, transport encryption, and connection multiplexing:
+
+```sh
+pips ssh dev-host --workspace /srv/project
+pips ssh deploy@example.internal --workspace .
+```
+
+The destination is one bounded host, `user@host`, or SSH configuration alias.
+Pips accepts no SSH option passthrough; put ports, jump hosts, identities, and
+other transport choices in `~/.ssh/config`. Only `--workspace` applies to this
+subcommand. `--model`, `--config`, sandbox, approval, and related flags are
+rejected because the remote Pips process owns those choices.
+
+Both hosts must run the exact same `pips version`, and `pips` must be on the
+remote non-interactive SSH command PATH. The remote host also owns
+`~/.pips/config.toml`, Workspace trust, sessions, Sandbox prerequisites, and
+the provider-neutral `API_KEY`. The local API key, Pips paths, proxy variables,
+and other secret-shaped environment entries are removed from the environment
+given to OpenSSH and are never added to remote argv. The local SSH agent remains
+usable for authentication, but agent and X11 forwarding are forcibly disabled.
+An explicit `SetEnv` in the user's own OpenSSH configuration remains
+user-controlled SSH policy and should not contain provider credentials.
+
+Outside bracketed paste, Ctrl+V requests one local clipboard image. Pips
+normalizes a PNG or JPEG entirely in memory, enforces the existing 1 MiB image
+limit, and sends it over a second non-PTY session multiplexed onto the private
+live connection. The remote Composer shows the same immutable image reference
+used for local attachments. Ctrl+V bytes inside bracketed paste remain literal
+paste content. One worker and one pending request are allowed; additional
+requests receive a local busy notice. Failures show a fixed notice without
+printing image content, nonce, socket paths, or remote diagnostics.
+
+The bridge is push-only and lives only for the interactive session. It cannot
+read the remote clipboard, upload arbitrary files or paths, start a daemon, or
+create an image temporary file. Closing the main session cancels upload work,
+reaps OpenSSH, restores the local terminal, and removes only bridge objects
+owned by that invocation. The `__bridge-session` and `__bridge-upload` commands
+are hidden fixed protocol endpoints, not public scripting interfaces.
+
+If clipboard image bridging is unnecessary, ordinary SSH remains the simplest
+fallback:
+
+```sh
+ssh -tt dev-host 'cd /srv/project && exec pips'
+```
+
+This fallback has ordinary SSH behavior and does not intercept local Ctrl+V.
+For native CentOS 7 validation, follow the
+[real-host checklist](coding-ssh-centos7.md).
+
 ## Input
 
 ```sh
@@ -204,6 +258,7 @@ prefix and the process exits nonzero.
 | 2 | Invalid input, flags, configuration, credential, workspace, or session |
 | 3 | Approval/recovery decision or structured user input required/denied |
 | 4 | Sandbox, policy, authorization, or workspace-integrity failure |
+| 5–129, 131–142, 144–255 | Exit status preserved from the remote OpenSSH/Pips session |
 | 130 | Interrupted (`SIGINT`) |
 | 143 | Terminated (`SIGTERM`) |
 
