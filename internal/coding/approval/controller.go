@@ -187,7 +187,7 @@ func (c *Controller) BeforeTool(ctx context.Context, info agent.ToolCallInfo) ag
 
 	operation, err := c.prepare(ctx, handler, call)
 	if err != nil {
-		return agent.DenyTool(err.Error())
+		return agent.DenyTool(renderPreparationDenial(handler, err))
 	}
 
 	decision := c.policy.Evaluate(operation, replay.grants...)
@@ -212,6 +212,19 @@ func (c *Controller) BeforeTool(ctx context.Context, info agent.ToolCallInfo) ag
 	default:
 		return agent.DenyTool("approval policy returned an invalid verdict")
 	}
+}
+
+func renderPreparationDenial(handler Handler, err error) string {
+	if handler == nil {
+		return "controlled operation arguments are invalid"
+	}
+
+	_, renderErr := handler.Render(execution.Result{}, err)
+	if renderErr == nil {
+		return "controlled operation arguments are invalid"
+	}
+
+	return renderErr.Error()
 }
 
 // Reconcile repairs durable completions and processes pending calls until the

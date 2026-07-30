@@ -109,10 +109,14 @@ mode = "agent"
 workspace/external capabilities plus the session-bound Plan document at
 `~/.pips/plans/<session-id>.md`. The model never supplies its path. New Plan
 documents are created only by the first successful `write_plan`; Resume reuses
-the binding and Fork copies an existing snapshot. Completing the document does
-not switch to Agent Mode or authorize implementation. Plan Mode is a capability
-boundary, not secret isolation: files readable by the Pips process remain
-readable.
+the binding and Fork copies an existing snapshot. A completed Plan is submitted
+with the exact current revision through `submit_plan`. The interactive TUI can
+return it for more planning or approve an idle, process-local switch to Agent
+Mode. Approval does not authorize any Shell, patch, MCP, external write, or
+Sandbox exception. Non-interactive `pips exec --mode plan` never chooses on the
+user's behalf: a pending review returns exit code `3` (input required). Plan
+Mode is a capability boundary, not secret isolation: files readable by the Pips
+process remain readable.
 
 A higher-priority `--model` or `PIPS_MODEL` selection starts from that target
 model's default variant and reasoning; it never inherits those choices from the

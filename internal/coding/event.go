@@ -21,6 +21,7 @@ import (
 	"github.com/rsbin/pips/internal/coding/approval"
 	"github.com/rsbin/pips/internal/coding/changes"
 	"github.com/rsbin/pips/internal/coding/config"
+	"github.com/rsbin/pips/internal/coding/planreview"
 	"github.com/rsbin/pips/internal/coding/question"
 	"github.com/rsbin/pips/internal/coding/subagent"
 )
@@ -66,6 +67,7 @@ const (
 	EventTurnCompleted            EventType = "turn.completed"
 	EventMessageCommitted         EventType = "message.committed"
 	EventMessageDelta             EventType = "message.delta"
+	EventMessageDiscarded         EventType = "message.discarded"
 	EventToolStarted              EventType = "tool.started"
 	EventToolUpdated              EventType = "tool.updated"
 	EventToolCompleted            EventType = "tool.completed"
@@ -85,6 +87,8 @@ const (
 	EventQuestionRequired         EventType = "question.required"
 	EventQuestionResolved         EventType = "question.resolved"
 	EventQuestionRejected         EventType = "question.rejected"
+	EventPlanReviewRequired       EventType = "plan_review.required"
+	EventPlanReviewResolved       EventType = "plan_review.resolved"
 	EventWorkspaceChanged         EventType = "workspace.changed"
 	EventStatusChanged            EventType = "status.changed"
 	EventIntegrationDiagnostic    EventType = "integration.diagnostic"
@@ -283,6 +287,12 @@ type MessageDelta struct {
 	Arguments     string             `json:"arguments,omitempty"`
 	FinishReason  ai.FinishReason    `json:"finish_reason,omitempty"`
 	Usage         *TokenUsage        `json:"usage,omitempty"`
+}
+
+// MessageDiscarded clears one provisional streaming candidate that was
+// rejected before it could become a committed assistant message.
+type MessageDiscarded struct {
+	Turn int `json:"turn"`
 }
 
 // ToolCall is the bounded model request projected into tool lifecycle events.
@@ -489,6 +499,18 @@ type QuestionRejected struct {
 	SchemaDigest string `json:"schema_digest"`
 }
 
+// PlanReviewRequired pauses one Plan interaction for explicit review.
+type PlanReviewRequired struct {
+	Request planreview.Request `json:"request"`
+}
+
+// PlanReviewResolved records the exact content-free review decision.
+type PlanReviewResolved struct {
+	RequestID string              `json:"request_id"`
+	Revision  string              `json:"revision"`
+	Decision  planreview.Decision `json:"decision"`
+}
+
 // WorkspaceChange is one normalized workspace-relative path change.
 type WorkspaceChange struct {
 	Path         string       `json:"path"`
@@ -551,6 +573,7 @@ func (TurnStarted) eventPayload()              {}
 func (TurnCompleted) eventPayload()            {}
 func (MessageCommitted) eventPayload()         {}
 func (MessageDelta) eventPayload()             {}
+func (MessageDiscarded) eventPayload()         {}
 func (ToolStarted) eventPayload()              {}
 func (ToolUpdated) eventPayload()              {}
 func (ToolCompleted) eventPayload()            {}
@@ -564,6 +587,8 @@ func (ApprovalResolved) eventPayload()         {}
 func (QuestionRequired) eventPayload()         {}
 func (QuestionResolved) eventPayload()         {}
 func (QuestionRejected) eventPayload()         {}
+func (PlanReviewRequired) eventPayload()       {}
+func (PlanReviewResolved) eventPayload()       {}
 func (WorkspaceChanged) eventPayload()         {}
 func (StatusChanged) eventPayload()            {}
 func (IntegrationDiagnostic) eventPayload()    {}
@@ -618,12 +643,14 @@ func validateEnvelopeIDs(event Event) error {
 	case EventInteractionStarted, EventInteractionCompleted,
 		EventApprovalRequired, EventApprovalUnknown, EventApprovalResolved,
 		EventQuestionRequired, EventQuestionResolved, EventQuestionRejected,
+		EventPlanReviewRequired, EventPlanReviewResolved,
 		EventWorkspaceChanged:
 		if event.InteractionID == "" || event.RunID != "" {
 			return invalidEvent("%s requires only an interaction id", event.Type)
 		}
 	case EventRunStarted, EventRunCompleted, EventTurnStarted, EventTurnCompleted,
-		EventMessageCommitted, EventMessageDelta, EventToolStarted, EventToolUpdated,
+		EventMessageCommitted, EventMessageDelta, EventMessageDiscarded,
+		EventToolStarted, EventToolUpdated,
 		EventToolCompleted, EventSubagentCreated, EventSubagentStarted,
 		EventSubagentProgress, EventSubagentCompleted, EventSubagentFailed,
 		EventSubagentCanceled, EventSubagentInterrupted:
@@ -747,6 +774,10 @@ func validatePayload(eventType EventType, payload EventPayload) error {
 		if eventType != EventMessageDelta || validateMessageDelta(value) != nil {
 			return invalidPayload(eventType, payload)
 		}
+	case MessageDiscarded:
+		if eventType != EventMessageDiscarded || value.Turn < 1 {
+			return invalidPayload(eventType, payload)
+		}
 	case ToolStarted:
 		if eventType != EventToolStarted || value.Turn < 1 || validateToolCall(value.Call) != nil {
 			return invalidPayload(eventType, payload)
@@ -802,6 +833,21 @@ func validatePayload(eventType EventType, payload EventPayload) error {
 		if eventType != EventQuestionRejected ||
 			validateEventID("question request id", value.RequestID, true) != nil ||
 			!validDigest(value.SchemaDigest) {
+			return invalidPayload(eventType, payload)
+		}
+	case PlanReviewRequired:
+		if eventType != EventPlanReviewRequired ||
+			planreview.ValidateRequest(value.Request) != nil {
+			return invalidPayload(eventType, payload)
+		}
+	case PlanReviewResolved:
+		if eventType != EventPlanReviewResolved || planreview.ValidateResolutionShape(
+			planreview.Resolution{
+				RequestID: value.RequestID,
+				Revision:  value.Revision,
+				Decision:  value.Decision,
+			},
+		) != nil {
 			return invalidPayload(eventType, payload)
 		}
 	case WorkspaceChanged:

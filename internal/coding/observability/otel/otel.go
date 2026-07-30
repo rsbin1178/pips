@@ -206,6 +206,14 @@ func (o *Observer) Observe(ctx context.Context, event coding.TelemetryEvent) err
 		o.observeApproval(ctx, event)
 	case coding.EventQuestionRequired, coding.EventQuestionResolved, coding.EventQuestionRejected:
 		o.observeQuestion(ctx, event)
+	case coding.EventPlanReviewRequired:
+		o.instant(ctx, "coding.plan_review.required", event, []attribute.KeyValue{
+			attribute.Int64("coding.plan.bytes", event.PlanBytes),
+		}, false)
+	case coding.EventPlanReviewResolved:
+		o.instant(ctx, "coding.plan_review.resolved", event, []attribute.KeyValue{
+			attribute.String("coding.plan.decision", event.PlanDecision),
+		}, false)
 	case coding.EventModeChanged:
 		o.instant(ctx, "coding.mode.changed", event, []attribute.KeyValue{
 			attribute.String("coding.mode", string(event.Mode)),
@@ -251,7 +259,8 @@ func (o *Observer) Observe(ctx context.Context, event coding.TelemetryEvent) err
 		o.observeTeamIntegration(ctx, event)
 	case coding.EventInteractionStarted, coding.EventRunStarted, coding.EventRunCompleted,
 		coding.EventTurnStarted, coding.EventTurnCompleted, coding.EventMessageCommitted,
-		coding.EventMessageDelta, coding.EventToolStarted, coding.EventToolUpdated,
+		coding.EventMessageDelta, coding.EventMessageDiscarded,
+		coding.EventToolStarted, coding.EventToolUpdated,
 		coding.EventToolCompleted, coding.EventStatusChanged:
 		// Raw Agent observers cover run/turn/tool signals. Status and content
 		// events intentionally create no duplicate product metrics.

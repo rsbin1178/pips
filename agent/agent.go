@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/rsbin/pips/ai"
@@ -58,6 +59,7 @@ type config struct {
 	beforeTool    gate
 	afterTool     func(context.Context, ToolResultInfo) *ToolResultOverride
 	prepareTurn   func(context.Context, RunInfo) TurnUpdate
+	candidate     func(context.Context, CandidateAnswerInfo) CandidateAnswerDecision
 	transform     func(context.Context, []ai.Message) ([]ai.Message, error)
 	onEvent       func(context.Context, Event)
 	requestFn     func(*ai.Request)
@@ -140,6 +142,16 @@ func WithAfterTool(fn func(ctx context.Context, info ToolResultInfo) *ToolResult
 // (the commit point for context compaction).
 func WithPrepareTurn(fn func(ctx context.Context, info RunInfo) TurnUpdate) Option {
 	return func(c *config) { c.prepareTurn = fn }
+}
+
+// WithCandidateAnswer installs a hook for no-Tool assistant answers before
+// they are committed. The hook may accept, abort, or discard and retry with a
+// one-request constraint. Streaming deltas are provisional; a retry emits
+// [EventCandidateDiscard] so consumers can clear the rejected draft.
+func WithCandidateAnswer(
+	fn func(context.Context, CandidateAnswerInfo) CandidateAnswerDecision,
+) Option {
+	return func(c *config) { c.candidate = fn }
 }
 
 // WithTransformContext installs a transform applied to the session snapshot
@@ -252,7 +264,11 @@ func (a *Agent) Name() string {
 	return a.cfg.name
 }
 
-func (a *Agent) requestWithTools(msgs []ai.Message, tools *toolbox) ai.Request {
+func (a *Agent) requestWithTools(
+	msgs []ai.Message,
+	tools *toolbox,
+	update *runModelRequest,
+) ai.Request {
 	req := ai.Request{
 		Messages: msgs,
 		System:   a.cfg.system,
@@ -260,6 +276,20 @@ func (a *Agent) requestWithTools(msgs []ai.Message, tools *toolbox) ai.Request {
 	}
 	if a.cfg.requestFn != nil {
 		a.cfg.requestFn(&req)
+	}
+
+	if update != nil {
+		if update.systemSuffix != "" {
+			if strings.TrimSpace(req.System) != "" {
+				req.System += "\n\n"
+			}
+
+			req.System += update.systemSuffix
+		}
+
+		if update.toolChoice.Mode != "" {
+			req.ToolChoice = update.toolChoice
+		}
 	}
 
 	return req

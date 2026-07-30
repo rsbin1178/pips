@@ -2,8 +2,10 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -24,6 +26,31 @@ func TestShellHandlerIsNotDirectlyRegisterable(t *testing.T) {
 
 	assert.False(t, registerable)
 	assert.Equal(t, shellName, handler.Decl().Name)
+}
+
+func TestShellSchemaMakesOnlyCommandRequired(t *testing.T) {
+	t.Parallel()
+
+	schema := NewShellHandler().Decl().InputSchema
+	require.NotNil(t, schema)
+	assert.Equal(t, []string{"command"}, schema.Required)
+	assert.Equal(t, false, schema.AdditionalProperties)
+	assert.ElementsMatch(
+		t,
+		[]string{"command", "cwd", "timeout_ms", "permissions", "justification"},
+		mapKeys(schema.Properties),
+	)
+
+	permissions := schema.Properties["permissions"]
+	require.NotNil(t, permissions)
+	assert.True(t, permissions.Nullable)
+	assert.Equal(t, false, permissions.AdditionalProperties)
+	assert.Equal(t, []string{"write_paths", "network"}, permissions.Required)
+
+	encoded, err := json.Marshal(schema)
+	require.NoError(t, err)
+	assert.Contains(t, string(encoded), `"required":["command"]`)
+	assert.Contains(t, string(encoded), `"type":["object","null"]`)
 }
 
 func TestShellOperationUsesFixedBoundedContract(t *testing.T) {
@@ -66,10 +93,17 @@ func TestShellOperationStrictlyRejectsUnsafeArguments(t *testing.T) {
 		{name: "missing command", args: `{}`},
 		{name: "unknown field", args: `{"command":"true","interactive":true}`},
 		{name: "trailing value", args: `{"command":"true"}{}`},
+		{name: "duplicate field", args: `{"command":"true","command":"false"}`},
+		{name: "null command", args: `{"command":null}`},
+		{name: "null cwd", args: `{"command":"true","cwd":null}`},
+		{name: "empty cwd", args: `{"command":"true","cwd":""}`},
+		{name: "absolute cwd", args: `{"command":"true","cwd":"/root/project"}`},
+		{name: "parent cwd", args: `{"command":"true","cwd":"../project"}`},
 		{name: "short timeout", args: `{"command":"true","timeout_ms":99}`},
 		{name: "long timeout", args: `{"command":"true","timeout_ms":1800001}`},
-		{name: "network without reason", args: `{"command":"true","permissions":{"network":true}}`},
-		{name: "external write without reason", args: `{"command":"true","permissions":{"write_paths":["/tmp"]}}`},
+		{name: "null timeout", args: `{"command":"true","timeout_ms":null}`},
+		{name: "network without reason", args: `{"command":"true","permissions":{"write_paths":[],"network":true}}`},
+		{name: "external write without reason", args: `{"command":"true","permissions":{"write_paths":["/tmp"],"network":false}}`},
 	}
 
 	for _, test := range tests {
@@ -84,6 +118,97 @@ func TestShellOperationStrictlyRejectsUnsafeArguments(t *testing.T) {
 			assert.Equal(t, "invalid_argument", header.Code)
 		})
 	}
+}
+
+//nolint:wsl_v5 // The compatibility matrix keeps each decoded case beside its assertions.
+func TestShellPermissionsCompatibilityMatrix(t *testing.T) {
+	t.Parallel()
+
+	handler := NewShellHandler()
+	twiceEncodedObject := mustJSONEncode(t, mustJSONEncode(t, `{"write_paths":[],"network":false}`))
+
+	tests := []struct {
+		name        string
+		permissions string
+		want        *shellPermissions
+		wantReason  string
+	}{
+		{name: "missing"},
+		{name: "null", permissions: `null`},
+		{
+			name: "native", permissions: `{"write_paths":[],"network":false}`,
+			want: &shellPermissions{WritePaths: []string{}, Network: false},
+		},
+		{
+			name: "once encoded", permissions: mustJSONEncode(t, `{"write_paths":[],"network":false}`),
+			want: &shellPermissions{WritePaths: []string{}, Network: false},
+		},
+		{name: "missing write paths", permissions: `{"network":false}`, wantReason: "permissions_shape"},
+		{name: "missing network", permissions: `{"write_paths":[]}`, wantReason: "permissions_shape"},
+		{name: "null write paths", permissions: `{"write_paths":null,"network":false}`, wantReason: "permissions_shape"},
+		{name: "wrong field type", permissions: `{"write_paths":[],"network":"false"}`, wantReason: "permissions_shape"},
+		{name: "unknown field", permissions: `{"write_paths":[],"network":false,"extra":true}`, wantReason: "permissions_shape"},
+		{name: "duplicate field", permissions: `{"write_paths":[],"network":false,"network":true}`, wantReason: "arguments_json"},
+		{name: "scalar", permissions: `true`, wantReason: "permissions_shape"},
+		{name: "twice encoded", permissions: twiceEncodedObject, wantReason: "permissions_shape"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			arguments := `{"command":"true"}`
+			if test.permissions != "" {
+				arguments = `{"command":"true","permissions":` + test.permissions + `}`
+			}
+
+			spec, err := handler.Operation(t.Context(), agent.ToolCall{
+				Name: shellName, Args: ai.JSON(arguments),
+			})
+			if test.wantReason == "" {
+				require.NoError(t, err)
+				if test.want == nil {
+					assert.Empty(t, spec.WriteDirs)
+					assert.Equal(t, execution.NetworkNone, spec.Network)
+					return
+				}
+
+				assert.True(t, slices.Equal(test.want.WritePaths, spec.WriteDirs))
+				assert.Equal(t, execution.NetworkNone, spec.Network)
+				return
+			}
+
+			require.Error(t, err)
+			header, body, parseErr := ParseResult(err.Error())
+			require.NoError(t, parseErr)
+			assert.Equal(t, "invalid_argument", header.Code)
+			assert.Equal(t, test.wantReason, header.Reason)
+			if test.wantReason == "permissions_shape" {
+				assert.Equal(t, permissionsCorrection(), body)
+			} else {
+				assert.Contains(t, body, "one JSON object")
+			}
+			assert.NotContains(t, err.Error(), "shellPermissions")
+			assert.NotContains(t, err.Error(), "cannot unmarshal")
+		})
+	}
+}
+
+func TestShellAbsoluteCWDReturnsActionableBoundedError(t *testing.T) {
+	t.Parallel()
+
+	_, err := NewShellHandler().Operation(t.Context(), agent.ToolCall{
+		Name: shellName,
+		Args: ai.JSON(`{"command":"true","cwd":"/root/server/temp"}`),
+	})
+	require.Error(t, err)
+
+	header, body, parseErr := ParseResult(err.Error())
+	require.NoError(t, parseErr)
+	assert.Equal(t, "invalid_argument", header.Code)
+	assert.Equal(t, "cwd_relative", header.Reason)
+	assert.Contains(t, body, "omit cwd")
+	assert.NotContains(t, body, "/root/server/temp")
 }
 
 func TestShellOperationCanonicalizesThroughExecution(t *testing.T) {
@@ -208,4 +333,22 @@ func (catalogShell) Decl() ai.Tool { return ai.Tool{Name: shellName} }
 
 func (catalogShell) Exec(context.Context, agent.ToolCall) ([]ai.Part, error) {
 	return agent.TextResult("ok"), nil
+}
+
+func mustJSONEncode(t *testing.T, value string) string {
+	t.Helper()
+
+	encoded, err := json.Marshal(value)
+	require.NoError(t, err)
+
+	return string(encoded)
+}
+
+func mapKeys[V any](values map[string]V) []string {
+	result := make([]string, 0, len(values))
+	for key := range values {
+		result = append(result, key)
+	}
+
+	return result
 }

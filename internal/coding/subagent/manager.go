@@ -1108,7 +1108,7 @@ func (t *runTracker) trackActivityLocked(event agent.Event) bool {
 	case agent.EventRunEnd:
 		t.activity.Phase = ActivityPhaseFinalizing
 		changed = true
-	case agent.EventDelta:
+	case agent.EventDelta, agent.EventCandidateDiscard:
 	}
 
 	if event.Turn > t.activity.Turn {

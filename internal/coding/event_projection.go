@@ -217,6 +217,8 @@ type TelemetryEvent struct {
 	Questions               int                `json:"questions,omitempty"`
 	Answers                 int                `json:"answers,omitempty"`
 	Chat                    bool               `json:"chat,omitempty"`
+	PlanBytes               int64              `json:"plan_bytes,omitempty"`
+	PlanDecision            string             `json:"plan_decision,omitempty"`
 	CompactionMode          CompactionMode     `json:"compaction_mode,omitempty"`
 	TokensBefore            int                `json:"tokens_before,omitempty"`
 	TokensAfter             int                `json:"tokens_after,omitempty"`
@@ -328,6 +330,12 @@ func Telemetry(event Event) (TelemetryEvent, error) {
 		projected.Chat = value.Chat
 	case QuestionRejected:
 		projected.Code = "rejected"
+	case PlanReviewRequired:
+		projected.Tool = "submit_plan"
+		projected.PlanBytes = value.Request.Size
+	case PlanReviewResolved:
+		projected.Tool = "submit_plan"
+		projected.PlanDecision = string(value.Decision)
 	case WorkspaceChanged:
 		projected.Changes = len(value.Entries)
 	case StatusChanged:

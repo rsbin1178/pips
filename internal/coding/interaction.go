@@ -14,6 +14,7 @@ import (
 	"github.com/rsbin/pips/agent/harness"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding/execution"
+	"github.com/rsbin/pips/internal/coding/planflow"
 )
 
 const maxPendingErrorBytes = 16 << 10
@@ -30,6 +31,7 @@ type interaction struct {
 	harness           *harness.Harness
 	search            *catalog.ToolSearch
 	changeTracker     *interactionChangeTracker
+	planFlow          *planflow.Controller
 	usage             TokenUsage
 	stop              agent.StopReason
 	subagentUsage     map[string]struct{}

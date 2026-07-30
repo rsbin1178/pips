@@ -109,6 +109,32 @@ func TestControllerModeOverrideAppliesToReplacementAndRollback(t *testing.T) {
 	require.NoError(t, controller.Close(t.Context()))
 }
 
+func TestControllerSequenceSynchronizesRuntimeModeTransition(t *testing.T) {
+	t.Parallel()
+
+	fixture := newControllerFixture(t)
+	fixture.options.Config.Mode = coding.ModePlan
+	controller, err := newController(t.Context(), fixture.options, fixture.dependencies())
+	require.NoError(t, err)
+
+	runtime := fixture.opener.runtimes[0]
+	runtime.prompt = func(func(coding.Event, error) bool) {
+		runtime.setState(func(state *coding.State) { state.Mode = coding.ModeAgent })
+	}
+	for _, eventErr := range controller.Prompt(t.Context(), ai.UserText("approve Plan")) {
+		require.NoError(t, eventErr)
+	}
+
+	assert.Equal(t, ModeState{
+		Current: coding.ModeAgent, Configured: coding.ModePlan, Overridden: true,
+	}, controller.Mode())
+	assert.Equal(t, coding.ModeAgent, controller.Config().Mode)
+
+	require.NoError(t, controller.NewSession(t.Context()))
+	assert.Equal(t, coding.ModeAgent, fixture.opener.calls[1].Config.Mode)
+	require.NoError(t, controller.Close(t.Context()))
+}
+
 func TestControllerForkReplacesSessionWithoutChangingEffectiveModel(t *testing.T) {
 	t.Parallel()
 

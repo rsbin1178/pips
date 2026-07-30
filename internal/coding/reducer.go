@@ -10,6 +10,7 @@ import (
 	"github.com/rsbin/pips/agent"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding/approval"
+	"github.com/rsbin/pips/internal/coding/planreview"
 	"github.com/rsbin/pips/internal/coding/question"
 	"github.com/rsbin/pips/internal/coding/subagent"
 )
@@ -130,6 +131,21 @@ type QuestionState struct {
 	Required    *question.Request `json:"required,omitempty"`
 }
 
+// PlanReviewState is the current explicit Plan review request.
+type PlanReviewState struct {
+	RequestedAt time.Time           `json:"requested_at,omitzero"`
+	Required    *planreview.Request `json:"required,omitempty"`
+}
+
+// NonInteractiveError fails closed when explicit Plan review is pending.
+func (state PlanReviewState) NonInteractiveError() error {
+	if state.Required != nil {
+		return ErrPlanReviewRequired
+	}
+
+	return nil
+}
+
 // NonInteractiveError fails closed when structured input is pending.
 func (state QuestionState) NonInteractiveError() error {
 	if state.Required != nil {
@@ -180,6 +196,7 @@ type State struct {
 	TeamIntegrations  []TeamIntegrationLifecycleState `json:"team_integrations,omitempty"`
 	Approval          ApprovalState                   `json:"approval"`
 	Question          QuestionState                   `json:"question"`
+	PlanReview        PlanReviewState                 `json:"plan_review"`
 	Changes           *WorkspaceChanged               `json:"changes,omitempty"`
 	Diagnostics       []IntegrationDiagnostic         `json:"diagnostics"`
 	LastError         *RuntimeError                   `json:"last_error,omitempty"`
@@ -227,6 +244,10 @@ func (state State) Clone() State {
 	if state.Question.Required != nil {
 		request := question.CloneRequest(*state.Question.Required)
 		cloned.Question.Required = &request
+	}
+	if state.PlanReview.Required != nil {
+		request := planreview.CloneRequest(*state.PlanReview.Required)
+		cloned.PlanReview.Required = &request
 	}
 	if state.Changes != nil {
 		changes := cloneWorkspaceChanged(*state.Changes)
@@ -329,7 +350,8 @@ func (state *State) apply(event Event) error {
 		state.Mode = payload.Mode
 		state.Phase = PhaseIdle
 	case SessionClosed:
-		if !state.SessionOpen || state.Interaction.Active || state.Question.Required != nil {
+		if !state.SessionOpen || state.Interaction.Active || state.Question.Required != nil ||
+			state.PlanReview.Required != nil {
 			return protocolError("session cannot close in its current state")
 		}
 
@@ -369,7 +391,7 @@ func (state *State) apply(event Event) error {
 	case ModeChanged:
 		if !state.SessionOpen || state.Phase != PhaseIdle || state.Interaction.Active ||
 			state.Compaction.Active || state.Approval.Kind != ApprovalNone ||
-			state.Question.Required != nil {
+			state.Question.Required != nil || state.PlanReview.Required != nil {
 			return protocolError("mode cannot change in its current state")
 		}
 		state.Mode = payload.Mode
@@ -385,11 +407,13 @@ func (state *State) apply(event Event) error {
 		state.Draft = nil
 		state.Approval = ApprovalState{}
 		state.Question = QuestionState{}
+		state.PlanReview = PlanReviewState{}
 		state.Changes = nil
 		state.LastError = nil
 	case InteractionCompleted:
 		if !state.Interaction.Active || state.Interaction.ID != event.InteractionID ||
-			len(state.activeRuns) > 0 || len(state.activeTools) > 0 || state.Question.Required != nil {
+			len(state.activeRuns) > 0 || len(state.activeTools) > 0 ||
+			state.Question.Required != nil || state.PlanReview.Required != nil {
 			return protocolError("interaction cannot complete in its current state")
 		}
 
@@ -400,6 +424,7 @@ func (state *State) apply(event Event) error {
 		state.Draft = nil
 		state.Approval = ApprovalState{}
 		state.Question = QuestionState{}
+		state.PlanReview = PlanReviewState{}
 	case RunStarted:
 		if err := state.requireInteraction(event.InteractionID); err != nil {
 			return err
@@ -482,6 +507,14 @@ func (state *State) apply(event Event) error {
 		}
 
 		state.Draft = append(state.Draft, cloneMessageDelta(payload))
+	case MessageDiscarded:
+		if _, err := state.activeRun(event.RunID); err != nil {
+			return err
+		}
+		if state.openTurns[event.RunID] != payload.Turn {
+			return protocolError("message candidate discarded outside its turn")
+		}
+		state.Draft = nil
 	case ToolStarted:
 		if _, err := state.activeRun(event.RunID); err != nil {
 			return err
@@ -534,7 +567,8 @@ func (state *State) apply(event Event) error {
 			return err
 		}
 	case ApprovalRequired:
-		if err := state.requireInteraction(event.InteractionID); err != nil || state.Approval.Kind != ApprovalNone {
+		if err := state.requireInteraction(event.InteractionID); err != nil ||
+			state.Approval.Kind != ApprovalNone || state.PlanReview.Required != nil {
 			return protocolError("approval request cannot be displayed")
 		}
 
@@ -543,7 +577,8 @@ func (state *State) apply(event Event) error {
 			Kind: ApprovalReview, RequestedAt: event.Time, Required: &request,
 		}
 	case ApprovalUnknown:
-		if err := state.requireInteraction(event.InteractionID); err != nil || state.Approval.Kind != ApprovalNone {
+		if err := state.requireInteraction(event.InteractionID); err != nil ||
+			state.Approval.Kind != ApprovalNone || state.PlanReview.Required != nil {
 			return protocolError("unknown approval cannot be displayed")
 		}
 
@@ -564,7 +599,8 @@ func (state *State) apply(event Event) error {
 		state.Approval = ApprovalState{}
 	case QuestionRequired:
 		if err := state.requireInteraction(event.InteractionID); err != nil ||
-			state.Question.Required != nil || state.Approval.Kind != ApprovalNone || payload.Redacted {
+			state.Question.Required != nil || state.Approval.Kind != ApprovalNone ||
+			state.PlanReview.Required != nil || payload.Redacted {
 			return protocolError("question request cannot be displayed")
 		}
 
@@ -578,6 +614,27 @@ func (state *State) apply(event Event) error {
 		}
 
 		state.Question = QuestionState{}
+	case PlanReviewRequired:
+		if err := state.requireInteraction(event.InteractionID); err != nil ||
+			state.PlanReview.Required != nil || state.Question.Required != nil ||
+			state.Approval.Kind != ApprovalNone {
+			return protocolError("Plan review cannot be displayed")
+		}
+
+		request := planreview.CloneRequest(payload.Request)
+		state.PlanReview = PlanReviewState{RequestedAt: event.Time, Required: &request}
+	case PlanReviewResolved:
+		if err := state.requireInteraction(event.InteractionID); err != nil ||
+			state.PlanReview.Required == nil ||
+			planreview.ValidateResolution(*state.PlanReview.Required, planreview.Resolution{
+				RequestID: payload.RequestID,
+				Revision:  payload.Revision,
+				Decision:  payload.Decision,
+			}) != nil {
+			return protocolError("Plan review resolution does not match displayed request")
+		}
+
+		state.PlanReview = PlanReviewState{}
 	case QuestionRejected:
 		if err := state.requireInteraction(event.InteractionID); err != nil ||
 			state.Question.Required == nil ||
@@ -890,7 +947,8 @@ func (state *State) canStartAutomaticCompaction(mode CompactionMode) bool {
 	if len(state.activeRuns) != 1 || len(state.openTurns) != 0 || len(state.activeTools) != 0 {
 		return false
 	}
-	if state.Approval.Kind != ApprovalNone || state.Question.Required != nil {
+	if state.Approval.Kind != ApprovalNone || state.Question.Required != nil ||
+		state.PlanReview.Required != nil {
 		return false
 	}
 	if len(state.Draft) != 0 {

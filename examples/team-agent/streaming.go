@@ -127,7 +127,8 @@ func (state *harnessStreamState) handle(
 		state.result.Turns = event.Turn
 		state.result.Usage = event.Usage
 		state.ended = true
-	case agent.EventRunStart, agent.EventToolUpdate, agent.EventToolEnd:
+	case agent.EventRunStart, agent.EventCandidateDiscard,
+		agent.EventToolUpdate, agent.EventToolEnd:
 	}
 
 	return nil

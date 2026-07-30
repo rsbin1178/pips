@@ -12,6 +12,7 @@ import (
 	"github.com/rsbin/pips/agent"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding"
+	"github.com/rsbin/pips/internal/coding/planreview"
 	"github.com/rsbin/pips/internal/coding/question"
 	"github.com/rsbin/pips/internal/coding/subagent"
 )
@@ -102,7 +103,7 @@ func projectTimelineExcluding(
 		for activityIndex < len(activities) && activities[activityIndex].position <= position {
 			activity := activities[activityIndex]
 			activityIndex++
-			if block, visible := projectQuestionToolActivity(activity); activity.name == question.ToolName {
+			if block, handled, visible := projectProtocolToolActivity(activity); handled {
 				if visible {
 					blocks = append(blocks, block)
 				}
@@ -121,7 +122,7 @@ func projectTimelineExcluding(
 	for activityIndex < len(activities) {
 		activity := activities[activityIndex]
 		activityIndex++
-		if block, visible := projectQuestionToolActivity(activity); activity.name == question.ToolName {
+		if block, handled, visible := projectProtocolToolActivity(activity); handled {
 			if visible {
 				blocks = append(blocks, block)
 			}
@@ -156,6 +157,15 @@ func projectTimelineExcluding(
 	}
 
 	for _, diagnostic := range state.Diagnostics {
+		if diagnostic.Component == "changes" && diagnostic.Code == "not_repository" {
+			blocks = append(blocks, timelineBlock{
+				kind:     blockDiagnostic,
+				title:    "Workspace changes unavailable",
+				body:     "This workspace is not a Git repository; command execution is unaffected.",
+				position: len(state.Transcript),
+			})
+			continue
+		}
 		message := strings.TrimSpace(diagnostic.Message)
 		if message == "" {
 			message = diagnostic.Code
@@ -177,6 +187,50 @@ func projectTimelineExcluding(
 	}
 
 	return groupExploreBlocks(blocks)
+}
+
+func projectProtocolToolActivity(activity toolActivity) (timelineBlock, bool, bool) {
+	switch activity.name {
+	case planreview.ToolName:
+		block, visible := projectPlanReviewToolActivity(activity)
+		return block, true, visible
+	case question.ToolName:
+		block, visible := projectQuestionToolActivity(activity)
+		return block, true, visible
+	default:
+		return timelineBlock{}, false, false
+	}
+}
+
+func projectPlanReviewToolActivity(activity toolActivity) (timelineBlock, bool) {
+	if activity.name != planreview.ToolName {
+		return timelineBlock{}, false
+	}
+	if activity.state == toolStateRunning {
+		return timelineBlock{}, false
+	}
+
+	block := timelineBlock{kind: blockQuestion, position: activity.position}
+	if activity.state == toolStateFailed || activity.state == toolStateInterrupted {
+		block.title = "Plan submission failed"
+		block.body = oneLineToolText(activity.result)
+		if block.body == "" {
+			block.body = "The submitted Plan could not be reviewed."
+		}
+
+		return block, true
+	}
+	if strings.HasPrefix(activity.result, planreview.ApprovalToolResult) {
+		block.title = "Plan approved"
+		block.body = "The exact submitted revision was approved for an idle switch to Agent Mode."
+
+		return block, true
+	}
+
+	block.title = "Planning continued"
+	block.body = "The Plan was returned for another revision."
+
+	return block, true
 }
 
 func projectSubagentToolActivity(

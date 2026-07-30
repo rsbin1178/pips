@@ -6,6 +6,7 @@ import (
 
 	"github.com/rsbin/pips/agent"
 	"github.com/rsbin/pips/ai"
+	"github.com/rsbin/pips/internal/coding/planreview"
 	"github.com/rsbin/pips/internal/coding/question"
 )
 
@@ -15,7 +16,7 @@ func cloneEvent(event Event) Event {
 	return event
 }
 
-//nolint:gocyclo,cyclop // The sealed payload taxonomy has one explicit copy branch per variant.
+//nolint:gocyclo,cyclop,funlen // The sealed payload taxonomy has one explicit copy branch per variant.
 func cloneEventPayload(payload EventPayload) EventPayload {
 	switch value := payload.(type) {
 	case SessionOpened:
@@ -54,6 +55,8 @@ func cloneEventPayload(payload EventPayload) EventPayload {
 		return value
 	case MessageDelta:
 		return cloneMessageDelta(value)
+	case MessageDiscarded:
+		return value
 	case ToolStarted:
 		value.Call = cloneToolCall(value.Call)
 		return value
@@ -88,6 +91,11 @@ func cloneEventPayload(payload EventPayload) EventPayload {
 		value.Resolution = question.CloneResolution(value.Resolution)
 		return value
 	case QuestionRejected:
+		return value
+	case PlanReviewRequired:
+		value.Request = planreview.CloneRequest(value.Request)
+		return value
+	case PlanReviewResolved:
 		return value
 	case WorkspaceChanged:
 		return cloneWorkspaceChanged(value)
@@ -213,6 +221,7 @@ func toolUpdateMessage(parts []ai.Part) ai.Message {
 func validAgentEventType(eventType agent.EventType) bool {
 	switch eventType {
 	case agent.EventRunStart, agent.EventTurnStart, agent.EventDelta, agent.EventMessage,
+		agent.EventCandidateDiscard,
 		agent.EventToolStart, agent.EventToolUpdate, agent.EventToolEnd,
 		agent.EventTurnEnd, agent.EventRunEnd:
 		return true
