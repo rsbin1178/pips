@@ -15,6 +15,15 @@ func runInteractive(
 	dependencies Dependencies,
 	flags *rootFlags,
 ) error {
+	return runInteractiveWithIngress(cmd, dependencies, flags, nil)
+}
+
+func runInteractiveWithIngress(
+	cmd *cobra.Command,
+	dependencies Dependencies,
+	flags *rootFlags,
+	ingress tui.ImageIngress,
+) error {
 	if err := validateInteractiveTerminal(cmd, dependencies); err != nil {
 		return err
 	}
@@ -51,13 +60,14 @@ func runInteractive(
 	_, noColor := dependencies.LookupEnv("NO_COLOR")
 
 	return dependencies.RunTUI(cmd.Context(), tui.Options{
-		Input:       cmd.InOrStdin(),
-		Output:      cmd.OutOrStdout(),
-		Environment: dependencies.Environment,
-		Workspace:   resolved.workspace.Root(),
-		Trusted:     resolved.isTrusted,
-		NoColor:     noColor,
-		Bootstrap:   bootstrap,
+		Input:        cmd.InOrStdin(),
+		Output:       cmd.OutOrStdout(),
+		Environment:  dependencies.Environment,
+		Workspace:    resolved.workspace.Root(),
+		Trusted:      resolved.isTrusted,
+		NoColor:      noColor,
+		Bootstrap:    bootstrap,
+		ImageIngress: ingress,
 	})
 }
 

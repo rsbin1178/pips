@@ -9,6 +9,7 @@ import (
 	"github.com/rsbin/pips/internal/coding/config"
 	"github.com/rsbin/pips/internal/coding/credential"
 	"github.com/rsbin/pips/internal/coding/execution"
+	"github.com/rsbin/pips/internal/coding/execution/sshclient"
 	"github.com/rsbin/pips/internal/coding/generation"
 	"github.com/rsbin/pips/internal/coding/model"
 	"github.com/rsbin/pips/internal/coding/modelcatalog"
@@ -40,6 +41,11 @@ func ExitCode(err error) int {
 
 	if errors.Is(err, context.Canceled) {
 		return ExitInterrupted
+	}
+
+	var remoteExit *sshclient.ExitError
+	if errors.As(err, &remoteExit) && remoteExit.ExitCode() > 0 && remoteExit.ExitCode() <= 255 {
+		return remoteExit.ExitCode()
 	}
 
 	if isApprovalError(err) {
@@ -92,6 +98,7 @@ func isSecurityError(err error) bool {
 func isUsageError(err error) bool {
 	return matchesAny(err,
 		ErrUsage,
+		sshclient.ErrInvalid,
 		coding.ErrInvalidPrompt,
 		coding.ErrRuntimeInvalid,
 		config.ErrInvalid,

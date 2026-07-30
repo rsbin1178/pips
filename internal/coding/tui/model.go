@@ -188,12 +188,15 @@ func newModel(ctx context.Context, options Options) *Model {
 
 // Init starts bootstrap immediately for an already trusted Workspace.
 func (m *Model) Init() tea.Cmd {
-	commands := make([]tea.Cmd, 0, 2)
+	commands := make([]tea.Cmd, 0, 3)
 	if !m.options.NoColor {
 		commands = append(commands, tea.RequestBackgroundColor)
 	}
 	if m.lifecycle == lifecycleLoading {
 		commands = append(commands, m.bootstrap(true))
+	}
+	if command := m.waitBridgeImage(); command != nil {
+		commands = append(commands, command)
 	}
 
 	return tea.Batch(commands...)
@@ -369,6 +372,8 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.setLayout()
 
 		return m, nil
+	case bridgeImageMsg:
+		return m.updateBridgeImage(message)
 	case cancelResultMsg:
 		if message.beforeStart {
 			m.streamErr = errors.Join(m.streamErr, message.err)

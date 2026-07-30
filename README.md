@@ -143,6 +143,21 @@ The TUI is intentionally single-column: transcript, a 1–8 line composer, and a
 compact status line. All operations have keyboard paths; the mouse is used only
 for transcript scrolling.
 
+Run the same TUI in an existing remote Workspace through system OpenSSH:
+
+```sh
+pips ssh dev-host --workspace /srv/project
+```
+
+`dev-host` may be a bounded host or `~/.ssh/config` alias; SSH options remain in
+OpenSSH configuration and are not accepted on the Pips command line. Local
+Ctrl+V pushes one clipboard image into the live remote draft. The remote host
+must have the exact same Pips version, its own model configuration and
+`API_KEY`, and `pips` available to non-interactive SSH commands. Local provider
+credentials are intentionally not forwarded. See the
+[SSH CLI contract](docs/coding-cli.md#remote-interactive-ssh) and
+[CentOS 7 host checklist](docs/coding-ssh-centos7.md).
+
 | Action | Key |
 |---|---|
 | Send / steer while running | `Enter` |

@@ -85,3 +85,34 @@ valuable host credentials, remote unattended execution, or stronger resource
 governance, run the entire pips process inside a minimally privileged container,
 VM, or disposable development environment. Keep `workspace-write` enabled
 inside that outer boundary as defense in depth.
+
+## Remote SSH image bridge
+
+`pips ssh` delegates authentication, host keys, transport, and user SSH
+configuration to the fixed root-owned `/usr/bin/ssh` or `/bin/ssh`. Pips passes
+separate validated argv, forces a private non-persistent ControlMaster,
+disables agent/X11/port forwarding and local commands, and does not accept SSH
+options from its CLI. Its child environment is a small authentication and
+terminal allowlist; provider keys, Pips configuration paths, proxy variables,
+and secret-shaped ambient variables are absent. `SSH_AUTH_SOCK` may reach the
+local OpenSSH client, but `ForwardAgent=no` prevents forwarding it. Explicit
+environment literals configured by the user with OpenSSH `SetEnv` remain the
+user's SSH policy and must not contain Pips provider credentials.
+
+Each invocation creates a fresh 256-bit nonce. Dynamic remote values use
+canonical base64url or a bounded destination alphabet before OpenSSH joins the
+fixed remote command. The remote side requires the exact same Pips version and
+creates one mode-0600 Unix socket in a same-UID mode-0700 directory under
+`/tmp`. Both connector and listener verify type, ownership, mode, inode, and
+peer credentials. The sequential receiver accepts only one strict frame with
+fixed magic/version/type, bounded length, absolute deadline, SHA-256 digest,
+and EOF; malformed or trailing data is rejected. Its image inbox has capacity
+four and never persists payload bytes.
+
+This channel only moves a local clipboard image into a live remote draft. The
+image reaches the configured model provider only if the user later submits a
+message containing it. The remote cannot request a local clipboard read, and
+there is no reverse forward, generic file transfer, durable service, or remote
+path supplied by the image frame. A same-user adversary remains within the
+same OS authority; use separate accounts or an outer container/VM when that is
+not an acceptable trust boundary.

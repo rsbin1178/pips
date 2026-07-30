@@ -12,6 +12,7 @@ import (
 	"github.com/rsbin/pips/internal/coding/config"
 	"github.com/rsbin/pips/internal/coding/credential"
 	"github.com/rsbin/pips/internal/coding/execution"
+	"github.com/rsbin/pips/internal/coding/execution/sshclient"
 	"github.com/rsbin/pips/internal/coding/paths"
 	"github.com/rsbin/pips/internal/coding/runtimecontrol"
 	"github.com/rsbin/pips/internal/coding/tui"
@@ -36,6 +37,9 @@ type TerminalDetector func(io.Reader, io.Writer) (bool, bool)
 // TUIRunner starts one interactive Program.
 type TUIRunner func(context.Context, tui.Options) error
 
+// SSHRunner starts one fixed OpenSSH terminal bridge.
+type SSHRunner func(context.Context, sshclient.Options) error
+
 // ControllerOpener opens the lifecycle controller consumed by the TUI.
 type ControllerOpener func(context.Context, coding.OpenOptions) (tui.Controller, error)
 
@@ -48,6 +52,7 @@ type Dependencies struct {
 	SandboxProbe SandboxProbe
 	Terminal     TerminalDetector
 	RunTUI       TUIRunner
+	RunSSH       SSHRunner
 	OpenControl  ControllerOpener
 	Environment  []string
 }
@@ -89,6 +94,10 @@ func New(dependencies Dependencies) (*cobra.Command, error) {
 
 	if dependencies.RunTUI == nil {
 		dependencies.RunTUI = tui.Run
+	}
+
+	if dependencies.RunSSH == nil {
+		dependencies.RunSSH = sshclient.Run
 	}
 
 	if dependencies.OpenControl == nil {
@@ -153,6 +162,9 @@ func New(dependencies Dependencies) (*cobra.Command, error) {
 		) (execRuntime, error) {
 			return coding.Open(ctx, options)
 		}),
+		newSSHCommand(dependencies, flags),
+		newBridgeSessionCommand(dependencies, flags),
+		newBridgeUploadCommand(dependencies),
 		newConfigCommand(dependencies, flags),
 		newSessionCommand(dependencies, flags),
 		newDoctorCommand(dependencies, flags),
