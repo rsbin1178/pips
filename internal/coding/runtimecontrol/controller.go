@@ -17,6 +17,7 @@ import (
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding"
 	"github.com/rsbin/pips/internal/coding/approval"
+	"github.com/rsbin/pips/internal/coding/attachment"
 	"github.com/rsbin/pips/internal/coding/changes"
 	"github.com/rsbin/pips/internal/coding/config"
 	"github.com/rsbin/pips/internal/coding/credential"
@@ -145,6 +146,8 @@ type runtimeInstance interface {
 	CleanupTeam(context.Context, coding.TeamCleanupRequest) (coding.TeamCleanupResult, error)
 	Skills(context.Context) (coding.SkillSnapshot, error)
 	SetSkillEnabled(context.Context, coding.SkillID, bool) error
+	ListWorkspaceFiles(context.Context) (attachment.Snapshot, error)
+	ResolveWorkspaceFile(context.Context, attachment.Reference) (attachment.Text, error)
 	Steer(...ai.Message) error
 	FollowUp(...ai.Message) error
 	Cancel() error
@@ -380,6 +383,39 @@ func (c *Controller) Skills(ctx context.Context) (coding.SkillSnapshot, error) {
 	})
 
 	return snapshot.Clone(), err
+}
+
+// ListWorkspaceFiles returns the current Runtime's bounded content-free file
+// snapshot while holding its lease against replacement.
+func (c *Controller) ListWorkspaceFiles(
+	ctx context.Context,
+) (attachment.Snapshot, error) {
+	var snapshot attachment.Snapshot
+	err := c.withRuntime(func(runtime runtimeInstance) error {
+		var err error
+		snapshot, err = runtime.ListWorkspaceFiles(ctx)
+
+		return err
+	})
+
+	return snapshot.Clone(), err
+}
+
+// ResolveWorkspaceFile resolves one selected file while holding the active
+// Runtime lease against replacement.
+func (c *Controller) ResolveWorkspaceFile(
+	ctx context.Context,
+	reference attachment.Reference,
+) (attachment.Text, error) {
+	var resolved attachment.Text
+	err := c.withRuntime(func(runtime runtimeInstance) error {
+		var err error
+		resolved, err = runtime.ResolveWorkspaceFile(ctx, reference)
+
+		return err
+	})
+
+	return resolved, err
 }
 
 // SetSkillEnabled persists one project-scoped Skill enablement decision.
