@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -24,6 +25,20 @@ func addTool() agent.Tool {
 		) (string, error) {
 			return strconv.Itoa(args.A + args.B), nil
 		})
+}
+
+func sessionText(messages []ai.Message) string {
+	var value strings.Builder
+
+	for _, message := range messages {
+		for _, part := range message.Parts {
+			if text, ok := part.(ai.TextPart); ok {
+				value.WriteString(text.Text)
+			}
+		}
+	}
+
+	return value.String()
 }
 
 func TestRunToolLoop(t *testing.T) {
@@ -128,6 +143,63 @@ func TestStreamToolLoop(t *testing.T) {
 	final, ok := msgs[3].Parts[0].(ai.TextPart)
 	require.True(t, ok)
 	assert.Equal(t, "5", final.Text)
+}
+
+func TestCandidateAnswerRetryDiscardsDraftAndConstrainsOneRequest(t *testing.T) {
+	t.Parallel()
+
+	tool := addTool()
+	model := newScriptedModel(
+		respond(textResponse("uncommitted draft")),
+		respond(callResponse(call("c1", "add", `{"a":2,"b":3}`))),
+		respond(textResponse("5")),
+	)
+
+	candidates := 0
+	a, err := agent.New(
+		model,
+		agent.WithSystem("base system"),
+		agent.WithTools(tool),
+		agent.WithCandidateAnswer(func(
+			_ context.Context,
+			_ agent.CandidateAnswerInfo,
+		) agent.CandidateAnswerDecision {
+			candidates++
+			if candidates != 1 {
+				return agent.CandidateAnswerDecision{}
+			}
+
+			return agent.CandidateAnswerDecision{Retry: &agent.ModelRequestUpdate{
+				Tools:        []agent.Tool{tool},
+				ToolChoice:   ai.ToolChoice{Mode: ai.ToolChoiceTool, Name: "add"},
+				SystemSuffix: "retry with the exact tool",
+			}}
+		}),
+	)
+	require.NoError(t, err)
+
+	sess := agent.NewSession()
+
+	var events []agent.EventType
+
+	for event, streamErr := range a.Stream(t.Context(), sess, ai.UserText("calculate")) {
+		require.NoError(t, streamErr)
+
+		events = append(events, event.Type)
+	}
+
+	assert.Contains(t, events, agent.EventCandidateDiscard)
+	assert.Equal(t, 2, candidates)
+	assert.NotContains(t, sessionText(sess.Messages()), "uncommitted draft")
+	assert.Contains(t, sessionText(sess.Messages()), "5")
+
+	requests := model.Requests()
+	require.Len(t, requests, 3)
+	assert.Equal(t, ai.ToolChoice{Mode: ai.ToolChoiceTool, Name: "add"}, requests[1].ToolChoice)
+	require.Len(t, requests[1].Tools, 1)
+	assert.Equal(t, "add", requests[1].Tools[0].Name)
+	assert.Contains(t, requests[1].System, "base system\n\nretry with the exact tool")
+	assert.Equal(t, ai.ToolChoice{}, requests[2].ToolChoice, "constraint must be one-shot")
 }
 
 func TestRunOnEvent(t *testing.T) {

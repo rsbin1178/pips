@@ -84,6 +84,29 @@ func TestReduceReturnsDefensiveState(t *testing.T) {
 	assert.Equal(t, "working", snapshotText.Text)
 }
 
+func TestReduceMessageDiscardedClearsOnlyProvisionalDraft(t *testing.T) {
+	t.Parallel()
+
+	events := reducerEvents()
+	var state State
+	for _, event := range events[:6] {
+		var err error
+		state, err = Reduce(state, event)
+		require.NoError(t, err)
+	}
+	require.NotEmpty(t, state.Draft)
+
+	discarded := newTestEvent(
+		EventMessageDiscarded,
+		MessageDiscarded{Turn: 1},
+	)
+	discarded.Sequence = state.Sequence + 1
+	state, err := Reduce(state, discarded)
+	require.NoError(t, err)
+	assert.Empty(t, state.Draft)
+	assert.Empty(t, state.Transcript)
+}
+
 func TestReduceRecordsDurablePromptRequestTime(t *testing.T) {
 	t.Parallel()
 

@@ -112,7 +112,8 @@ func (o *Observer) Observe(ctx context.Context, event agent.Event) {
 		}
 	case agent.EventRunEnd:
 		o.end(&o.runs, event.RunID, event, false)
-	case agent.EventDelta, agent.EventMessage, agent.EventToolUpdate:
+	case agent.EventDelta, agent.EventMessage, agent.EventCandidateDiscard,
+		agent.EventToolUpdate:
 		// These events do not change span lifecycle or aggregate metrics.
 	}
 }

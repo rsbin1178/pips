@@ -24,6 +24,10 @@ const (
 	// EventMessage reports a completed message appended to the session
 	// (the assistant turn, then the tool-result message) in Message.
 	EventMessage EventType = "message"
+	// EventCandidateDiscard reports that provisional deltas formed a no-Tool
+	// candidate answer which was rejected before Session commit and will be
+	// retried. It carries only Turn; candidate content is deliberately absent.
+	EventCandidateDiscard EventType = "candidate_discard"
 	// EventToolStart announces a tool call about to be gated and executed; it
 	// carries Call.
 	EventToolStart EventType = "tool_start"

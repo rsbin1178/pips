@@ -20,6 +20,8 @@ import (
 	"github.com/rsbin/pips/internal/coding/changes"
 	"github.com/rsbin/pips/internal/coding/changes/git"
 	codingmcp "github.com/rsbin/pips/internal/coding/mcp"
+	"github.com/rsbin/pips/internal/coding/planflow"
+	"github.com/rsbin/pips/internal/coding/planreview"
 	"github.com/rsbin/pips/internal/coding/question"
 	"github.com/rsbin/pips/internal/coding/subagent"
 	"github.com/rsbin/pips/internal/coding/tools"
@@ -236,6 +238,9 @@ func (r *Runtime) run(
 		r.mu.Unlock()
 
 		err = r.questions.Resolve(resolution.question)
+		if err == nil && current.planFlow != nil {
+			current.planFlow.InvalidateUserInput()
+		}
 		if err == nil {
 			err = emitter.emit(
 				current.id,
@@ -264,6 +269,9 @@ func (r *Runtime) run(
 			resolution.rejection.requestID,
 			resolution.rejection.schemaDigest,
 		)
+		if err == nil && current.planFlow != nil {
+			current.planFlow.InvalidateUserInput()
+		}
 		if err == nil {
 			err = emitter.emit(
 				current.id,
@@ -272,6 +280,30 @@ func (r *Runtime) run(
 				QuestionRejected{
 					RequestID:    resolution.rejection.requestID,
 					SchemaDigest: resolution.rejection.schemaDigest,
+				},
+			)
+		}
+		if err == nil {
+			err = r.reconcileAndContinue(ctx, current, emitter)
+		}
+	case operationResolvePlanReview:
+		r.mu.Lock()
+		current = r.interaction
+		r.mu.Unlock()
+
+		err = r.planReviews.Resolve(resolution.planReview)
+		if err == nil && current.planFlow != nil {
+			current.planFlow.ResolvePlanReview(resolution.planReview.Decision)
+		}
+		if err == nil {
+			err = emitter.emit(
+				current.id,
+				"",
+				EventPlanReviewResolved,
+				PlanReviewResolved{
+					RequestID: resolution.planReview.RequestID,
+					Revision:  resolution.planReview.Revision,
+					Decision:  resolution.planReview.Decision,
 				},
 			)
 		}
@@ -419,7 +451,8 @@ func (r *Runtime) beginOperation(
 		if r.state.Phase != PhasePaused || r.interaction != nil || r.recovery.PendingID == "" {
 			return nil, nil, stateError(string(kind), r.state.Phase, ErrRuntimeNotPaused)
 		}
-	case operationResolve, operationResolveQuestion, operationRejectQuestion:
+	case operationResolve, operationResolveQuestion, operationRejectQuestion,
+		operationResolvePlanReview:
 		if r.state.Phase != PhasePaused || r.interaction == nil {
 			return nil, nil, stateError(string(kind), r.state.Phase, ErrRuntimeNotPaused)
 		}
@@ -437,6 +470,15 @@ func (r *Runtime) beginOperation(
 				r.state.Question.Required.ID != resolution.rejection.requestID ||
 				r.state.Question.Required.SchemaDigest != resolution.rejection.schemaDigest {
 				return nil, nil, fmt.Errorf("%w: invalid question rejection", ErrRuntimeInvalid)
+			}
+		}
+		if kind == operationResolvePlanReview {
+			if r.state.PlanReview.Required == nil ||
+				planreview.ValidateResolution(
+					*r.state.PlanReview.Required,
+					resolution.planReview,
+				) != nil {
+				return nil, nil, fmt.Errorf("%w: invalid Plan review resolution", ErrRuntimeInvalid)
 			}
 		}
 	case operationPreview, operationCompact, operationNavigate, operationFork,
@@ -589,6 +631,7 @@ func (r *Runtime) openInteraction(
 	}
 
 	composedCatalogs := []*catalog.Catalog{localCatalog, questionCatalog, skillTools}
+	var planCoordinator *planflow.Controller
 	if r.isTeamWorker() {
 		memberCatalog, memberErr := r.teamWorkerCatalog()
 		if memberErr != nil {
@@ -632,6 +675,23 @@ func (r *Runtime) openInteraction(
 			snapshot.Catalog(),
 			mcpCatalog,
 		)
+		if started.Mode == ModePlan {
+			planCoordinator, err = planflow.NewController()
+			if err != nil {
+				return nil, err
+			}
+			planFlowCatalog, flowErr := planCoordinator.Catalog()
+			if flowErr != nil {
+				return nil, flowErr
+			}
+			composedCatalogs = append(composedCatalogs, planFlowCatalog)
+
+			planReviewCatalog, reviewErr := r.planReviews.Catalog()
+			if reviewErr != nil {
+				return nil, reviewErr
+			}
+			composedCatalogs = append(composedCatalogs, planReviewCatalog)
+		}
 	}
 
 	merged, err := catalog.Merge(composedCatalogs...)
@@ -664,6 +724,11 @@ func (r *Runtime) openInteraction(
 	if err != nil {
 		return nil, err
 	}
+	if planCoordinator != nil {
+		if err := planCoordinator.BindTools(visibleTools); err != nil {
+			return nil, err
+		}
+	}
 	systemPrompt, err := buildCodingSystemPromptParts(systemPromptOptions{
 		Model:               r.resolved.Ref.String(),
 		WorkingDirectory:    r.workspace.Root(),
@@ -693,17 +758,43 @@ func (r *Runtime) openInteraction(
 	extensionObserver := newGuardedAgentObserver(extensionHooks.Observe)
 	controlHooks := extensionHooks
 	controlHooks.Observe = nil
+	planEnforcementHooks := extension.Hooks{}
+	planPrepareHooks := extension.Hooks{}
+	if planCoordinator != nil {
+		planEnforcementHooks = extension.Hooks{
+			BeforeTool: planCoordinator.BeforeTool,
+			AfterTool:  planCoordinator.AfterTool,
+		}
+		planPrepareHooks = extension.Hooks{PrepareTurn: planCoordinator.PrepareTurn}
+	}
 	composed := extension.ComposeHooks(
 		extension.Hooks{BeforeTool: r.teamGuard.beforeTool(descriptors)},
 		extension.Hooks{AfterTool: leadCoordinatorAfterTool(leadCoordinator)},
 		extension.Hooks{BeforeTool: leasedToolGuard(started.Mode, descriptors, r.config.ToolSearch)},
+		planEnforcementHooks,
+		extension.Hooks{BeforeTool: r.planReviews.BeforeTool},
 		extension.Hooks{BeforeTool: r.questions.BeforeTool},
 		extension.Hooks{BeforeTool: current.changeTracker.beforeTool},
 		controlHooks,
 		extension.Hooks{BeforeTool: r.controller.BeforeTool},
 		extension.Hooks{PrepareTurn: search.PrepareTurn},
 		extension.Hooks{PrepareTurn: r.compactMainContext(emitter)},
+		planPrepareHooks,
 	)
+	failureGuard := newToolFailureGuard()
+	composed.BeforeTool = failureGuard.wrapBeforeTool(composed.BeforeTool)
+	composed.AfterTool = failureGuard.wrapAfterTool(composed.AfterTool)
+
+	agentOptions := append(
+		composed.AgentOptions(),
+		agent.WithMaxTurns(0),
+		agent.WithStopWhen(failureGuard.stopWhen),
+		agent.WithToolTimeout(r.opts.ToolTimeout),
+		agent.WithRequest(r.requestPolicy),
+	)
+	if planCoordinator != nil {
+		agentOptions = append(agentOptions, agent.WithCandidateAnswer(planCoordinator.CandidateAnswer))
+	}
 
 	harnessOptions := []harness.Option{
 		harness.WithTools(visibleTools...),
@@ -711,12 +802,7 @@ func (r *Runtime) openInteraction(
 		harness.WithSystemSuffix(systemPrompt.Suffix),
 		harness.WithSkillCatalog(modelSkillCatalog),
 		harness.WithTemplates(snapshot.Prompts()...),
-		harness.WithAgentOptions(append(
-			composed.AgentOptions(),
-			agent.WithMaxTurns(0),
-			agent.WithToolTimeout(r.opts.ToolTimeout),
-			agent.WithRequest(r.requestPolicy),
-		)...),
+		harness.WithAgentOptions(agentOptions...),
 		harness.WithOnEvent(func(eventCtx context.Context, event agent.Event) {
 			extensionObserver.observe(eventCtx, event)
 			r.observers.observe(eventCtx, event)
@@ -728,7 +814,14 @@ func (r *Runtime) openInteraction(
 		return nil, err
 	}
 
-	if err := r.pending.set(allTools, extensionHooks, r.opts.ToolTimeout); err != nil {
+	pendingHooks := extensionHooks
+	if started.Mode == ModePlan {
+		pendingHooks = extension.ComposeHooks(
+			extension.Hooks{BeforeTool: r.planReviews.BeforeTool},
+			extensionHooks,
+		)
+	}
+	if err := r.pending.set(allTools, pendingHooks, r.opts.ToolTimeout); err != nil {
 		return nil, err
 	}
 	r.resolver.set(value)
@@ -736,6 +829,7 @@ func (r *Runtime) openInteraction(
 	current.activation = activation
 	current.harness = value
 	current.search = search
+	current.planFlow = planCoordinator
 	current.observer = extensionObserver
 
 	if resumed {
@@ -959,7 +1053,7 @@ func (r *Runtime) emitRunError(
 	})
 }
 
-//nolint:nestif // Question recovery must precede and exclude approval recovery.
+//nolint:gocyclo,nestif // Input-owner recovery is intentionally ordered and exclusive.
 func (r *Runtime) reconcileAndContinue(
 	ctx context.Context,
 	current *interaction,
@@ -969,6 +1063,42 @@ func (r *Runtime) reconcileAndContinue(
 	if err != nil {
 		return err
 	}
+	planRequest, err := r.planReviews.Reconcile(ctx, pending)
+	if err != nil {
+		return err
+	}
+	if planRequest != nil {
+		state := r.Snapshot()
+		if state.Approval.Kind != ApprovalNone || state.Question.Required != nil {
+			return fmt.Errorf("%w: Plan review cannot overlap another input owner", ErrRuntimeInvalid)
+		}
+		if state.Phase == PhaseRunning {
+			if err := emitter.emit(
+				current.id,
+				"",
+				EventStatusChanged,
+				StatusChanged{Phase: PhasePaused},
+			); err != nil {
+				return err
+			}
+		}
+		state = r.Snapshot()
+		if state.PlanReview.Required != nil {
+			if *state.PlanReview.Required == *planRequest {
+				return nil
+			}
+
+			return fmt.Errorf("%w: another Plan review is already displayed", ErrRuntimeInvalid)
+		}
+
+		return emitter.emit(
+			current.id,
+			"",
+			EventPlanReviewRequired,
+			PlanReviewRequired{Request: *planRequest},
+		)
+	}
+
 	request, err := r.questions.Reconcile(pending)
 	if err != nil {
 		return err
@@ -1141,6 +1271,7 @@ func (r *Runtime) interactionPaused(current *interaction) bool {
 	return r.interaction == current && r.state.Phase == PhasePaused
 }
 
+//nolint:gocyclo // Completion must collect every cleanup and terminal-event error before returning.
 func (r *Runtime) finishInteraction(
 	ctx context.Context,
 	current *interaction,
@@ -1190,6 +1321,9 @@ func (r *Runtime) finishInteraction(
 	if err := emitter.emit(current.id, "", EventStatusChanged, StatusChanged{Phase: PhaseIdle}); err != nil {
 		errs = append(errs, err)
 	}
+	if err := r.settleAcceptedPlanReview(ctx, current, emitter); err != nil {
+		errs = append(errs, err)
+	}
 	if err := r.emitTreeChanged(ctx, emitter); err != nil {
 		errs = append(errs, err)
 	}
@@ -1212,6 +1346,37 @@ func (r *Runtime) finishInteraction(
 	}
 
 	return errors.Join(errs...)
+}
+
+func (r *Runtime) settleAcceptedPlanReview(
+	ctx context.Context,
+	current *interaction,
+	emitter *eventEmitter,
+) error {
+	revision, accepted := r.planReviews.AcceptedRevision()
+	if !accepted {
+		return nil
+	}
+	defer r.planReviews.ClearAccepted()
+
+	document, err := r.plans.Read(ctx, r.planRef)
+	if err != nil || document.Revision != revision {
+		return emitter.emit(current.id, "", EventIntegrationDiagnostic, IntegrationDiagnostic{
+			Component: "plan_review",
+			Code:      "accepted_revision_invalidated",
+			Message:   "The accepted Plan revision is no longer current; Pips remains in Plan Mode",
+		})
+	}
+
+	if err := emitter.emit("", "", EventModeChanged, ModeChanged{Mode: ModeAgent}); err != nil {
+		return err
+	}
+
+	r.mu.Lock()
+	r.config.Mode = ModeAgent
+	r.mu.Unlock()
+
+	return nil
 }
 
 func workspaceChanged(report changes.Report) WorkspaceChanged {
@@ -1270,7 +1435,14 @@ func (r *Runtime) Steer(messages ...ai.Message) error {
 		return err
 	}
 
-	return current.Steer(cloneMessages(messages)...)
+	if err := current.harness.Steer(cloneMessages(messages)...); err != nil {
+		return err
+	}
+	if current.planFlow != nil {
+		current.planFlow.InvalidateUserInput()
+	}
+
+	return nil
 }
 
 // FollowUp queues messages after the current Agent invocation settles.
@@ -1280,10 +1452,17 @@ func (r *Runtime) FollowUp(messages ...ai.Message) error {
 		return err
 	}
 
-	return current.FollowUp(cloneMessages(messages)...)
+	if err := current.harness.FollowUp(cloneMessages(messages)...); err != nil {
+		return err
+	}
+	if current.planFlow != nil {
+		current.planFlow.InvalidateUserInput()
+	}
+
+	return nil
 }
 
-func (r *Runtime) activeHarness(operation string) (*harness.Harness, error) {
+func (r *Runtime) activeHarness(operation string) (*interaction, error) {
 	if r == nil {
 		return nil, ErrRuntimeClosed
 	}
@@ -1299,7 +1478,7 @@ func (r *Runtime) activeHarness(operation string) (*harness.Harness, error) {
 		return nil, stateError(operation, r.state.Phase, ErrRuntimeBusy)
 	}
 
-	return r.interaction.harness, nil
+	return r.interaction, nil
 }
 
 // Cancel requests cancellation of the current operation.

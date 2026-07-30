@@ -224,6 +224,9 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if m.prompt.kind == promptQuestion {
 			m.prompt.question.editor.SetStyles(composerStyles(m.theme, m.options.NoColor))
 		}
+		if m.prompt.kind == promptPlanReview {
+			m.prompt.planReview.editor.SetStyles(composerStyles(m.theme, m.options.NoColor))
+		}
 		if m.route.kind == routeSessions || m.route.kind == routeSkills {
 			m.route.search.SetStyles(sessionSearchStyles(m.theme, m.options.NoColor))
 		}
@@ -261,7 +264,9 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.setLayout()
 		commit := m.commitStartupOutput()
 
-		return m, tea.Sequence(commit, tea.Batch(m.composer.Focus(), m.startSubscription()))
+		return m, tea.Sequence(commit, tea.Batch(
+			m.composer.Focus(), m.startSubscription(), m.loadPlanReviewIfNeeded(),
+		))
 	case subscriptionStartedMsg:
 		m.subscriptionMode = message.supported
 		if message.err != nil {
@@ -292,6 +297,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			message.bridge.wait(),
 			m.continueIfPaused(),
 			m.refreshTeamProjectionSnapshot(),
+			m.loadPlanReviewIfNeeded(),
 		)
 		if commit != nil {
 			return m, tea.Sequence(commit, wait)
@@ -369,6 +375,25 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.streamErr = m.composer.InsertImage(message.image)
+		m.setLayout()
+
+		return m, nil
+	case planDocumentMsg:
+		if m.prompt.kind != promptPlanReview ||
+			message.generation != m.prompt.generation ||
+			message.requestID != m.prompt.planReview.request.ID {
+			return m, nil
+		}
+		m.prompt.planReview.loading = false
+		m.prompt.planReview.err = message.err
+		if message.err == nil {
+			if message.document.Revision != m.prompt.planReview.request.Revision ||
+				message.document.Size != m.prompt.planReview.request.Size {
+				m.prompt.planReview.err = errors.New("plan revision changed; resubmit the current Plan")
+			} else {
+				m.prompt.planReview.document = message.document
+			}
+		}
 		m.setLayout()
 
 		return m, nil
@@ -1111,6 +1136,19 @@ func (m *Model) readyView() tea.View {
 			}
 		}
 	}
+	if m.prompt.kind == promptPlanReview && m.prompt.planReview.editing && promptIndex >= 0 {
+		if cursorX, cursorY, ok := editorOffset(promptContent, m.prompt.planReview.editor.View()); ok {
+			view.Cursor = m.prompt.planReview.editor.Cursor()
+			if view.Cursor != nil {
+				promptOffset := lipgloss.Height(lipgloss.JoinVertical(
+					lipgloss.Left,
+					parts[:promptIndex]...,
+				))
+				view.Cursor.X += cursorX
+				view.Cursor.Y += promptOffset + cursorY
+			}
+		}
+	}
 	if view.Cursor != nil {
 		cursorX, cursorY := m.composerBoxCursorOffset()
 		view.Cursor.X += cursorX
@@ -1124,7 +1162,10 @@ func (m *Model) readyView() tea.View {
 }
 
 func (m *Model) questionEditorOffset(prompt string) (int, int, bool) {
-	editor := m.prompt.question.editor.View()
+	return editorOffset(prompt, m.prompt.question.editor.View())
+}
+
+func editorOffset(prompt, editor string) (int, int, bool) {
 	before, _, ok := strings.Cut(prompt, editor)
 	if !ok {
 		return 0, 0, false
@@ -1292,6 +1333,9 @@ func (m *Model) setLayout() {
 	m.composer.SetHeight(composerHeight)
 	if m.prompt.kind == promptQuestion {
 		m.prompt.question.editor.SetWidth(max(1, width-4))
+	}
+	if m.prompt.kind == promptPlanReview {
+		m.prompt.planReview.editor.SetWidth(max(1, width-4))
 	}
 	if m.route.kind == routeSessions || m.route.kind == routeSkills {
 		m.route.search.SetWidth(routeSearchInputWidth(width))
@@ -1668,6 +1712,7 @@ func (m *Model) updateStream(message streamItemMsg) (tea.Model, tea.Cmd) {
 	refresh := tea.Batch(
 		m.invalidateAgentDetail(message.item),
 		m.invalidateTeamProjection(message.item.event),
+		m.loadPlanReviewIfNeeded(),
 	)
 
 	m.waiting = true
@@ -1867,6 +1912,7 @@ func (m *Model) updateSubscription(message subscriptionEventMsg) (tea.Model, tea
 	refresh := tea.Batch(
 		m.invalidateAgentDetail(streamItem{event: message.record.Event}),
 		m.invalidateTeamProjection(message.record.Event),
+		m.loadPlanReviewIfNeeded(),
 	)
 	wait := message.bridge.wait()
 	commit := m.commitStableTimeline()

@@ -153,6 +153,8 @@ func decodeEventPayload(eventType EventType, data []byte) (EventPayload, error) 
 		return decodePayload[MessageCommitted](data)
 	case EventMessageDelta:
 		return decodePayload[MessageDelta](data)
+	case EventMessageDiscarded:
+		return decodePayload[MessageDiscarded](data)
 	case EventToolStarted:
 		return decodePayload[ToolStarted](data)
 	case EventToolUpdated:
@@ -181,6 +183,10 @@ func decodeEventPayload(eventType EventType, data []byte) (EventPayload, error) 
 		return decodePayload[QuestionResolved](data)
 	case EventQuestionRejected:
 		return decodePayload[QuestionRejected](data)
+	case EventPlanReviewRequired:
+		return decodePayload[PlanReviewRequired](data)
+	case EventPlanReviewResolved:
+		return decodePayload[PlanReviewResolved](data)
 	case EventWorkspaceChanged:
 		return decodePayload[WorkspaceChanged](data)
 	case EventStatusChanged:

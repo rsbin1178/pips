@@ -807,7 +807,7 @@ func TestRuntimeApprovalPauseAndDenyContinuation(t *testing.T) {
 		runtimeToolResponse(
 			"call-shell",
 			"shell",
-			`{"command":"printf ok","permissions":{"network":true},"justification":"test"}`,
+			`{"command":"printf ok","permissions":{"write_paths":[],"network":true},"justification":"test"}`,
 		),
 		runtimeTextResponse("continued"),
 	)
@@ -869,7 +869,7 @@ func TestRuntimeContinueRestoresPendingInteraction(t *testing.T) {
 	firstModel := newRuntimeModel(runtimeToolResponse(
 		"call-shell",
 		"shell",
-		`{"command":"printf ok","permissions":{"network":true},"justification":"test"}`,
+		`{"command":"printf ok","permissions":{"write_paths":[],"network":true},"justification":"test"}`,
 	))
 	first := openTestRuntimeAt(t, base, SessionTarget{}, firstModel)
 	collectRuntimeEvents(t, first.Prompt(t.Context(), ai.UserText("run")))
@@ -1157,7 +1157,7 @@ func TestRuntimeReadPatchControlledShellAndAnswer(t *testing.T) {
 		runtimeToolResponse(
 			"call-shell",
 			"shell",
-			`{"command":"printf checked","permissions":{"network":true},"justification":"test"}`,
+			`{"command":"printf checked","permissions":{"write_paths":[],"network":true},"justification":"test"}`,
 		),
 		runtimeTextResponse("done"),
 	)

@@ -27,6 +27,32 @@ type ToolResultOverride struct {
 	Terminate *bool
 }
 
+// ModelRequestUpdate constrains exactly one subsequent model request. It is
+// run-local: applying it never mutates the Agent or the persistent Session.
+// A non-nil Tools slice replaces the declaration and execution snapshot for
+// that request only.
+type ModelRequestUpdate struct {
+	Tools        []Tool
+	ToolChoice   ai.ToolChoice
+	SystemSuffix string
+}
+
+// CandidateAnswerInfo is the read-only view passed to a
+// [WithCandidateAnswer] hook before a no-Tool assistant answer is committed.
+type CandidateAnswerInfo struct {
+	RunInfo
+	Session []ai.Message
+	Message ai.Message
+}
+
+// CandidateAnswerDecision accepts the candidate when both fields are zero.
+// Err rejects it and aborts the run. Retry rejects it without committing the
+// assistant message and constrains exactly the next model request.
+type CandidateAnswerDecision struct {
+	Retry *ModelRequestUpdate
+	Err   error
+}
+
 // TurnUpdate adjusts the run between turns, returned by a [WithPrepareTurn]
 // hook. The zero value changes nothing.
 type TurnUpdate struct {
@@ -45,4 +71,7 @@ type TurnUpdate struct {
 	// the model without the matching executable implementation. This enables
 	// deferred tool discovery without mutating the Agent shared by other runs.
 	Tools []Tool
+	// NextRequest, when non-nil, constrains exactly the next model request.
+	// Unlike Tools, it does not replace the run's persistent tool snapshot.
+	NextRequest *ModelRequestUpdate
 }

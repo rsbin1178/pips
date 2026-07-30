@@ -120,6 +120,9 @@ func (p *agentProjector) project(event agent.Event) (Event, error) {
 				Message: cloneMessage(*event.Message), Synthetic: p.synthetic(*event.Message),
 			}
 		}
+	case agent.EventCandidateDiscard:
+		eventType = EventMessageDiscarded
+		payload = MessageDiscarded{Turn: event.Turn}
 	case agent.EventToolStart:
 		if event.Call == nil {
 			return Event{}, invalidEvent("agent tool-start event has no call")

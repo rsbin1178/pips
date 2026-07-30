@@ -8,6 +8,7 @@ import (
 	"github.com/rsbin/pips/agent"
 	"github.com/rsbin/pips/agent/catalog"
 	"github.com/rsbin/pips/ai"
+	"github.com/rsbin/pips/internal/coding/planreview"
 	"github.com/rsbin/pips/internal/coding/tools"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -102,14 +103,7 @@ func TestRuntimeSetModePublishesAndLeasesPlanCapabilities(t *testing.T) {
 	t.Parallel()
 
 	base := t.TempDir()
-	model := newRuntimeModel(
-		runtimeToolResponse(
-			"call-plan",
-			tools.WritePlanName,
-			`{"content":"# Implementation Plan\n\n1. Inspect\n2. Verify"}`,
-		),
-		runtimeTextResponse("Plan ready"),
-	)
+	model := newRuntimeModel()
 	runtime := openTestRuntimeAt(t, base, SessionTarget{}, model)
 	observation, err := runtime.ObserveEvents()
 	require.NoError(t, err)
@@ -118,6 +112,17 @@ func TestRuntimeSetModePublishesAndLeasesPlanCapabilities(t *testing.T) {
 
 	require.NoError(t, runtime.SetMode(t.Context(), ModePlan))
 	assert.Equal(t, ModePlan, runtime.Snapshot().Mode)
+
+	const content = "# Implementation Plan\n\n1. Inspect\n2. Verify"
+
+	document, err := runtime.plans.Replace(t.Context(), runtime.planRef, "", content)
+	require.NoError(t, err)
+	setPlanReviewResponsesForContent(
+		model,
+		document.Revision,
+		content,
+		runtimeToolResponse("submit-plan", planreview.ToolName, submitPlanArgs(document.Revision)),
+	)
 
 	select {
 	case record := <-observation.Subscription.Events():
@@ -128,25 +133,42 @@ func TestRuntimeSetModePublishesAndLeasesPlanCapabilities(t *testing.T) {
 	}
 
 	events := collectRuntimeEvents(t, runtime.Prompt(t.Context(), testUserMessage("plan it")))
-	assert.Contains(t, eventTypes(events), EventInteractionCompleted)
+	assert.Contains(t, eventTypes(events), EventPlanReviewRequired)
 
 	requests := model.Requests()
-	require.Len(t, requests, 2)
+	require.Len(t, requests, 3)
 	toolNames := toolNamesFromRequest(requests[0])
 	assert.Contains(t, toolNames, tools.ReadPlanName)
 	assert.Contains(t, toolNames, tools.WritePlanName)
+	assert.Contains(t, toolNames, planreview.ToolName)
 	assert.Contains(t, toolNames, "run_subagent")
 	assert.NotContains(t, toolNames, "apply_patch")
 	assert.NotContains(t, toolNames, "shell")
 	assert.Contains(t, requests[0].System, `"operating_mode": "plan"`)
+	assert.Equal(t, ai.ToolChoice{Mode: ai.ToolChoiceTool, Name: tools.WritePlanName}, requests[1].ToolChoice)
+	assert.Equal(t, []string{tools.WritePlanName}, toolNamesFromRequest(requests[1]))
+	assert.Equal(t, ai.ToolChoice{Mode: ai.ToolChoiceTool, Name: planreview.ToolName}, requests[2].ToolChoice)
+	assert.Equal(t, []string{planreview.ToolName}, toolNamesFromRequest(requests[2]))
 
 	planPath := base + "/home/plans/" + runtime.handle.Metadata().ID + ".md"
 	info, err := os.Stat(planPath)
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
-	document, err := runtime.plans.Read(t.Context(), runtime.planRef)
+	document, err = runtime.plans.Read(t.Context(), runtime.planRef)
 	require.NoError(t, err)
 	assert.Contains(t, document.Content, "Implementation Plan")
+}
+
+func TestRuntimeAgentModeDoesNotAdvertisePlanSubmission(t *testing.T) {
+	t.Parallel()
+
+	model := newRuntimeModel(runtimeTextResponse("done"))
+	runtime := openTestRuntime(t, model)
+	collectRuntimeEvents(t, runtime.Prompt(t.Context(), testUserMessage("inspect")))
+
+	requests := model.Requests()
+	require.Len(t, requests, 1)
+	assert.NotContains(t, toolNamesFromRequest(requests[0]), planreview.ToolName)
 }
 
 func TestRuntimeSetModeIsIdleOnlyAndIdempotent(t *testing.T) {

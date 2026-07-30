@@ -15,6 +15,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/rsbin/pips/internal/coding"
 	"github.com/rsbin/pips/internal/coding/approval"
+	"github.com/rsbin/pips/internal/coding/planreview"
 	"github.com/rsbin/pips/internal/coding/question"
 )
 
@@ -25,6 +26,7 @@ const (
 	promptApproval
 	promptCompact
 	promptQuestion
+	promptPlanReview
 )
 
 type questionEditKind uint8
@@ -47,6 +49,19 @@ type questionPromptState struct {
 	err      error
 }
 
+type planReviewPromptState struct {
+	request     planreview.Request
+	document    coding.PlanDocument
+	cursor      int
+	offset      int
+	loading     bool
+	loadStarted bool
+	editing     bool
+	confirming  bool
+	editor      textarea.Model
+	err         error
+}
+
 type promptState struct {
 	kind       promptKind
 	cursor     int
@@ -55,6 +70,7 @@ type promptState struct {
 	err        error
 	preview    coding.CompactionPreview
 	question   questionPromptState
+	planReview planReviewPromptState
 	team       *teamPromptSource
 	generation uint64
 }
@@ -62,6 +78,13 @@ type promptState struct {
 type compactPreviewMsg struct {
 	generation uint64
 	preview    coding.CompactionPreview
+	err        error
+}
+
+type planDocumentMsg struct {
+	generation uint64
+	requestID  string
+	document   coding.PlanDocument
 	err        error
 }
 
@@ -78,6 +101,9 @@ func (m *Model) openCompactPrompt() tea.Cmd {
 }
 
 func (m *Model) syncApprovalPrompt() {
+	if m.syncPlanReviewPrompt() {
+		return
+	}
 	if m.state.Question.Required != nil {
 		if m.prompt.kind == promptQuestion &&
 			m.prompt.team == nil &&
@@ -101,7 +127,8 @@ func (m *Model) syncApprovalPrompt() {
 
 			return
 		}
-		if m.prompt.kind == promptApproval || m.prompt.kind == promptQuestion {
+		if m.prompt.kind == promptApproval || m.prompt.kind == promptQuestion ||
+			m.prompt.kind == promptPlanReview {
 			m.prompt = promptState{}
 			m.composer.Focus()
 		}
@@ -118,6 +145,29 @@ func (m *Model) syncApprovalPrompt() {
 		}
 	}
 	m.prompt = promptState{kind: promptApproval, cursor: cursor, choices: choices}
+}
+
+func (m *Model) syncPlanReviewPrompt() bool {
+	if m.state.PlanReview.Required != nil {
+		if m.prompt.kind == promptPlanReview &&
+			m.prompt.planReview.request.ID == m.state.PlanReview.Required.ID &&
+			m.prompt.planReview.request.Revision == m.state.PlanReview.Required.Revision {
+			return true
+		}
+
+		m.claimPromptOwner()
+		m.promptSeq++
+		m.prompt = promptState{
+			kind:       promptPlanReview,
+			generation: m.promptSeq,
+			planReview: m.newPlanReviewPrompt(*m.state.PlanReview.Required),
+		}
+		m.composer.Blur()
+
+		return true
+	}
+
+	return false
 }
 
 func (m *Model) claimPromptOwner() {
@@ -175,9 +225,172 @@ func (m *Model) updatePromptKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.updateCompactPromptKey(message)
 	case promptQuestion:
 		return m.updateQuestionPromptKey(message)
+	case promptPlanReview:
+		return m.updatePlanReviewPromptKey(message)
 	default:
 		return m, nil
 	}
+}
+
+func (m *Model) newPlanReviewPrompt(request planreview.Request) planReviewPromptState {
+	editor := textarea.New()
+	editor.Prompt = ""
+	editor.Placeholder = "Optional feedback for the next Plan revision"
+	editor.ShowLineNumbers = false
+	editor.DynamicHeight = true
+	editor.MinHeight = 1
+	editor.MaxHeight = 4
+	editor.MaxContentHeight = 8
+	editor.SetVirtualCursor(false)
+	editor.SetWidth(max(1, m.width-4))
+	editor.SetStyles(composerStyles(m.theme, m.options.NoColor))
+
+	return planReviewPromptState{
+		request: planreview.CloneRequest(request), loading: true, editor: editor,
+	}
+}
+
+func (m *Model) loadPlanReviewIfNeeded() tea.Cmd {
+	if m.prompt.kind != promptPlanReview || !m.prompt.planReview.loading ||
+		m.prompt.planReview.loadStarted || m.controller == nil {
+		return nil
+	}
+	reviewer, ok := m.controller.(planReviewController)
+	if !ok {
+		m.prompt.planReview.loading = false
+		m.prompt.planReview.err = errors.New("plan review is unavailable")
+
+		return nil
+	}
+
+	m.prompt.planReview.loadStarted = true
+	generation := m.prompt.generation
+	request := m.prompt.planReview.request
+
+	return func() tea.Msg {
+		document, err := reviewer.ReadPlanDocument(m.ctx, request.Revision)
+
+		return planDocumentMsg{
+			generation: generation, requestID: request.ID, document: document, err: err,
+		}
+	}
+}
+
+func (m *Model) updatePlanReviewPromptKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	state := &m.prompt.planReview
+	switch {
+	case state.loading:
+		return m, nil
+	case state.err != nil:
+		return m.updatePlanReviewErrorKey(message)
+	case state.editing:
+		return m.updatePlanReviewEditorKey(message)
+	default:
+		return m.updatePlanReviewSelectionKey(message)
+	}
+}
+
+func (m *Model) updatePlanReviewErrorKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	state := &m.prompt.planReview
+	switch message.String() {
+	case keyEscape, keyCtrlC:
+		return m.resolvePlanReview(planreview.DecisionContinue, "")
+	case "r":
+		state.loading = true
+		state.loadStarted = false
+		state.err = nil
+
+		return m, m.loadPlanReviewIfNeeded()
+	default:
+		return m, nil
+	}
+}
+
+func (m *Model) updatePlanReviewEditorKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	state := &m.prompt.planReview
+	switch message.String() {
+	case keyEscape:
+		state.editing = false
+		state.editor.Blur()
+		state.err = nil
+		return m, nil
+	case "ctrl+j", "shift+enter":
+		state.editor.InsertString("\n")
+		return m, nil
+	case keyEnter:
+		return m.resolvePlanReview(planreview.DecisionContinue, strings.TrimSpace(state.editor.Value()))
+	}
+
+	var command tea.Cmd
+	state.editor, command = state.editor.Update(message)
+
+	return m, command
+}
+
+func (m *Model) updatePlanReviewSelectionKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	state := &m.prompt.planReview
+
+	switch message.String() {
+	case keyEscape, keyCtrlC:
+		return m.resolvePlanReview(planreview.DecisionContinue, "")
+	case keyTab, keyLeft, keyRight:
+		state.cursor = wrapIndex(state.cursor+1, 2)
+		state.confirming = false
+		state.err = nil
+	case "up", "k":
+		state.offset = max(0, state.offset-1)
+	case keyDown, "j":
+		state.offset++
+	case "pgup":
+		state.offset = max(0, state.offset-8)
+	case "pgdown":
+		state.offset += 8
+	case keyEnter:
+		if state.cursor == 1 {
+			state.editing = true
+			state.confirming = false
+			state.err = nil
+			return m, state.editor.Focus()
+		}
+		if !state.confirming {
+			state.confirming = true
+			state.err = nil
+			return m, nil
+		}
+
+		return m.resolvePlanReview(planreview.DecisionApprove, "")
+	}
+
+	return m, nil
+}
+
+func (m *Model) resolvePlanReview(
+	decision planreview.Decision,
+	feedback string,
+) (tea.Model, tea.Cmd) {
+	state := &m.prompt.planReview
+	resolution := planreview.Resolution{
+		RequestID: state.request.ID,
+		Revision:  state.request.Revision,
+		Decision:  decision,
+		Feedback:  feedback,
+	}
+	if err := planreview.ValidateResolution(state.request, resolution); err != nil {
+		state.err = err
+		return m, nil
+	}
+	reviewer, ok := m.controller.(planReviewController)
+	if !ok {
+		state.err = errors.New("plan review is unavailable")
+		return m, nil
+	}
+
+	state.loading = true
+	state.err = nil
+
+	return m, m.startStream(func(ctx context.Context) iter.Seq2[coding.Event, error] {
+		return reviewer.ResolvePlanReview(ctx, resolution)
+	})
 }
 
 //nolint:gocyclo // Approval choices are deliberately visible as direct terminal bindings.
@@ -539,9 +752,72 @@ func (m *Model) promptView() string {
 		return m.compactPromptView()
 	case promptQuestion:
 		return m.questionPromptView()
+	case promptPlanReview:
+		return m.planReviewPromptView()
 	default:
 		return ""
 	}
+}
+
+func (m *Model) planReviewPromptView() string {
+	state := &m.prompt.planReview
+	lines := []string{"Plan ready for review", ""}
+	switch {
+	case state.loading:
+		lines = append(lines, "Loading plan.md…")
+	case state.err != nil:
+		lines = append(
+			lines,
+			"Unable to review plan.md: "+safeError(state.err),
+			"R retry · Esc keeps planning",
+		)
+	default:
+		rendered, err := m.markdown.render(
+			state.document.Content,
+			max(1, m.width-4),
+			m.theme,
+			m.options.NoColor,
+		)
+		if err != nil {
+			rendered = state.document.Content
+		}
+		contentLines := strings.Split(rendered, "\n")
+		viewportHeight := max(4, min(12, m.height/2))
+		maximumOffset := max(0, len(contentLines)-viewportHeight)
+		state.offset = min(max(0, state.offset), maximumOffset)
+		end := min(len(contentLines), state.offset+viewportHeight)
+		lines = append(lines, contentLines[state.offset:end]...)
+		if maximumOffset > 0 {
+			lines = append(lines, "", "↑/↓ scroll  "+strconv.Itoa(state.offset+1)+"/"+strconv.Itoa(maximumOffset+1))
+		}
+		lines = append(lines, "")
+		approve := "Approve & switch to Agent Mode"
+		keep := "Keep planning"
+		if state.cursor == 0 {
+			approve = "[" + approve + "]"
+		} else {
+			keep = "[" + keep + "]"
+		}
+		lines = append(lines, approve+"  ·  "+keep)
+		switch {
+		case state.editing:
+			lines = append(lines, "", state.editor.View(), "Enter continue · Ctrl+J newline · Esc back")
+		case state.confirming:
+			lines = append(lines, "Enter again to approve this exact revision · Esc keeps planning")
+		default:
+			lines = append(lines, "Tab choose · Enter select · Esc keeps planning")
+		}
+	}
+
+	bar := "▌"
+	if !m.options.NoColor {
+		bar = lipgloss.NewStyle().Foreground(paletteFor(m.theme).session).Render(bar)
+	}
+	for index := range lines {
+		lines[index] = bar + " " + ansi.Truncate(lines[index], max(1, m.width-2), "…")
+	}
+
+	return strings.Join(lines, "\n")
 }
 
 //nolint:gocyclo,nestif // The inline question renderer mirrors the explicit navigation state machine.

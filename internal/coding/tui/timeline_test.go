@@ -10,6 +10,7 @@ import (
 	"github.com/rsbin/pips/agent"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding"
+	"github.com/rsbin/pips/internal/coding/planreview"
 	"github.com/rsbin/pips/internal/coding/question"
 	"github.com/rsbin/pips/internal/coding/subagent"
 	"github.com/stretchr/testify/assert"
@@ -79,6 +80,44 @@ func TestTimelineDistinguishesRejectedAndInvalidQuestions(t *testing.T) {
 	assert.Contains(t, blocks[0].body, "two to four options")
 	assert.Equal(t, "Question canceled", blocks[1].title)
 	assert.Equal(t, "No answer was submitted.", blocks[1].body)
+}
+
+func TestTimelineProjectsPlanReviewSemantically(t *testing.T) {
+	t.Parallel()
+
+	state := coding.State{Transcript: []ai.Message{
+		ai.Assistant(ai.ToolCallPart{
+			ID: "submit-plan", Name: planreview.ToolName,
+			Args: ai.JSON(`{"expected_revision":"secret-revision"}`),
+		}),
+		ai.ToolResultText("submit-plan", planreview.ToolName, planreview.ApprovalToolResult),
+	}}
+
+	blocks := projectTimeline(state)
+	require.Len(t, blocks, 1)
+	assert.Equal(t, "Plan approved", blocks[0].title)
+	rendered := renderTimeline(blocks, newMarkdownRenderer(4), 80, themeDark, true)
+	assert.Contains(t, rendered, "idle switch to Agent Mode")
+	assert.NotContains(t, rendered, planreview.ToolName)
+	assert.NotContains(t, rendered, "secret-revision")
+}
+
+func TestTimelineRendersNonGitAttributionAsNeutralInformation(t *testing.T) {
+	t.Parallel()
+
+	state := coding.State{Diagnostics: []coding.IntegrationDiagnostic{{
+		Component: "changes", Code: "not_repository",
+		Message: "workspace change attribution is unavailable for this interaction",
+	}}}
+	blocks := projectTimeline(state)
+	require.Len(t, blocks, 1)
+	assert.Equal(t, "Workspace changes unavailable", blocks[0].title)
+	assert.Empty(t, blocks[0].status)
+	assert.Contains(t, blocks[0].body, "command execution is unaffected")
+
+	rendered := renderTimeline(blocks, newMarkdownRenderer(4), 80, themeDark, true)
+	assert.NotContains(t, rendered, "changes · not_repository")
+	assert.NotContains(t, rendered, "Run failed")
 }
 
 func TestTimelineUsesUniformInterBlockSpacing(t *testing.T) {

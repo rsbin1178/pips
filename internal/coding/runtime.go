@@ -32,6 +32,7 @@ import (
 	"github.com/rsbin/pips/internal/coding/modelcatalog"
 	"github.com/rsbin/pips/internal/coding/paths"
 	"github.com/rsbin/pips/internal/coding/plandoc"
+	"github.com/rsbin/pips/internal/coding/planreview"
 	"github.com/rsbin/pips/internal/coding/question"
 	"github.com/rsbin/pips/internal/coding/resource"
 	"github.com/rsbin/pips/internal/coding/session"
@@ -137,6 +138,7 @@ type Runtime struct {
 	trusted         bool
 	controller      *approval.Controller
 	questions       *question.Controller
+	planReviews     *planreview.Controller
 	resolver        activeResolver
 	pending         pendingRunner
 	observers       *agentObservers
@@ -511,6 +513,14 @@ func openRuntime(
 		return nil, err
 	}
 	runtime.questions, err = question.NewController(&runtime.resolver)
+	if err != nil {
+		return nil, err
+	}
+	runtime.planReviews, err = planreview.NewController(
+		runtime.plans,
+		runtime.planRef,
+		&runtime.resolver,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -986,7 +996,7 @@ func (r *Runtime) SetMode(ctx context.Context, mode OperatingMode) error {
 	}
 	if r.active != nil || r.interaction != nil || r.state.Phase != PhaseIdle ||
 		r.state.Compaction.Active || r.state.Approval.Kind != ApprovalNone ||
-		r.state.Question.Required != nil {
+		r.state.Question.Required != nil || r.state.PlanReview.Required != nil {
 		phase := r.state.Phase
 		r.mu.Unlock()
 
@@ -1068,10 +1078,26 @@ func (r *Runtime) RejectQuestion(
 	)
 }
 
+// ResolvePlanReview durably records one explicit Plan review decision and
+// resumes the paused Plan interaction.
+func (r *Runtime) ResolvePlanReview(
+	ctx context.Context,
+	resolution planreview.Resolution,
+) iter.Seq2[Event, error] {
+	return r.runSequence(
+		ctx,
+		operationResolvePlanReview,
+		runtimeResolution{planReview: planreview.CloneResolution(resolution)},
+		nil,
+		nil,
+	)
+}
+
 type runtimeResolution struct {
-	approval  approval.Resolution
-	question  question.Resolution
-	rejection *questionRejection
+	approval   approval.Resolution
+	question   question.Resolution
+	planReview planreview.Resolution
+	rejection  *questionRejection
 }
 
 type questionRejection struct {
@@ -1087,6 +1113,7 @@ const (
 	operationResolve           runtimeOperationKind = "resolve"
 	operationResolveQuestion   runtimeOperationKind = "resolve question"
 	operationRejectQuestion    runtimeOperationKind = "reject question"
+	operationResolvePlanReview runtimeOperationKind = "resolve Plan review"
 	operationPreview           runtimeOperationKind = "preview compaction"
 	operationCompact           runtimeOperationKind = "compact"
 	operationNavigate          runtimeOperationKind = "navigate"

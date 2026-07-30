@@ -23,6 +23,7 @@ import (
 	"github.com/rsbin/pips/internal/coding/credential"
 	"github.com/rsbin/pips/internal/coding/model"
 	"github.com/rsbin/pips/internal/coding/modelcatalog"
+	"github.com/rsbin/pips/internal/coding/planreview"
 	"github.com/rsbin/pips/internal/coding/question"
 	"github.com/rsbin/pips/internal/coding/session"
 	"github.com/rsbin/pips/internal/coding/subagent"
@@ -319,6 +320,25 @@ func (c *Controller) ResolveQuestion(
 	})
 }
 
+// ResolvePlanReview delegates one exact explicit Plan review decision.
+func (c *Controller) ResolvePlanReview(
+	ctx context.Context,
+	resolution planreview.Resolution,
+) iter.Seq2[coding.Event, error] {
+	cloned := planreview.CloneResolution(resolution)
+
+	return c.sequence(func(runtime runtimeInstance) iter.Seq2[coding.Event, error] {
+		reviewer, ok := runtime.(interface {
+			ResolvePlanReview(context.Context, planreview.Resolution) iter.Seq2[coding.Event, error]
+		})
+		if !ok {
+			return errorSequence(fmt.Errorf("%w: runtime does not expose Plan review", ErrInvalid))
+		}
+
+		return reviewer.ResolvePlanReview(ctx, cloned)
+	})
+}
+
 // RejectQuestion delegates one explicit structured-input cancellation.
 func (c *Controller) RejectQuestion(
 	ctx context.Context,
@@ -357,6 +377,31 @@ func (c *Controller) WorkspaceStatus(
 	})
 
 	return status, err
+}
+
+// ReadPlanDocument loads one exact path-free Plan revision for review.
+//
+//nolint:dupl // Optional Runtime read capabilities deliberately share the Controller lease boundary.
+func (c *Controller) ReadPlanDocument(
+	ctx context.Context,
+	expectedRevision string,
+) (coding.PlanDocument, error) {
+	var document coding.PlanDocument
+	err := c.withRuntime(func(runtime runtimeInstance) error {
+		reader, ok := runtime.(interface {
+			ReadPlanDocument(context.Context, string) (coding.PlanDocument, error)
+		})
+		if !ok {
+			return fmt.Errorf("%w: runtime does not expose Plan documents", ErrInvalid)
+		}
+
+		var err error
+		document, err = reader.ReadPlanDocument(ctx, expectedRevision)
+
+		return err
+	})
+
+	return document, err
 }
 
 // PlanDocumentPath returns the current Session's private Plan display path.
@@ -992,6 +1037,7 @@ func (c *Controller) sequence(
 			return
 		}
 		defer release()
+		defer c.syncRuntimeState(runtime)
 
 		for event, eventErr := range operation(runtime) {
 			if !yield(event, eventErr) {
@@ -1001,6 +1047,29 @@ func (c *Controller) sequence(
 				return
 			}
 		}
+	}
+}
+
+func (c *Controller) syncRuntimeState(runtime runtimeInstance) {
+	if c == nil || runtime == nil {
+		return
+	}
+	snapshot := runtime.Snapshot()
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.runtime != runtime {
+		return
+	}
+	c.lastState = snapshot
+	c.mode = snapshot.Mode
+	c.modeOverride = c.mode != c.baseMode
+	c.effective.Mode = c.mode
+}
+
+func errorSequence(err error) iter.Seq2[coding.Event, error] {
+	return func(yield func(coding.Event, error) bool) {
+		yield(coding.Event{}, err)
 	}
 }
 
