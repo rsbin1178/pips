@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/rsbin/pips/ai"
+	"github.com/rsbin/pips/internal/coding/attachment"
 )
 
 const (
@@ -33,6 +34,8 @@ func validatePromptMessages(messages []ai.Message) error {
 	}
 
 	textBytes := 0
+	imageCount := 0
+	imageBytes := int64(0)
 	hasUserContent := false
 
 	for index, message := range messages {
@@ -51,13 +54,23 @@ func validatePromptMessages(messages []ai.Message) error {
 				if strings.TrimSpace(value.Text) != "" {
 					hasUserContent = true
 				}
+			case ai.ImagePart:
+				if len(value.Source.Data) > attachment.MaxImageBytes {
+					return ErrInvalidPrompt
+				}
+
+				imageCount++
+				imageBytes += int64(len(value.Source.Data))
+				hasUserContent = true
 			default:
 				hasUserContent = true
 			}
 		}
 	}
 
-	if !hasUserContent || textBytes > MaxPromptTextBytes {
+	if !hasUserContent || textBytes > MaxPromptTextBytes ||
+		imageCount > attachment.MaxImagesPerMessage ||
+		imageBytes > int64(attachment.MaxImageBytesPerMessage) {
 		return ErrInvalidPrompt
 	}
 

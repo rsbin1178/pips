@@ -6,6 +6,7 @@ import (
 
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding/approval"
+	"github.com/rsbin/pips/internal/coding/attachment"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -58,6 +59,69 @@ func FuzzValidatePromptText(f *testing.F) {
 			require.ErrorIs(t, err, ErrInvalidPrompt)
 		}
 	})
+}
+
+func TestValidatePromptMessagesBoundsImages(t *testing.T) {
+	t.Parallel()
+
+	half := make([]byte, attachment.MaxImageBytesPerMessage/4)
+	tests := []struct {
+		name      string
+		message   ai.Message
+		wantError bool
+	}{
+		{
+			name: "exact count and aggregate",
+			message: ai.User(
+				ai.ImageData("image/png", half),
+				ai.ImageData("image/png", half),
+				ai.ImageData("image/png", half),
+				ai.ImageData("image/png", half),
+			),
+		},
+		{
+			name: "too many images",
+			message: ai.User(
+				ai.ImageURL("https://example.invalid/1.png"),
+				ai.ImageURL("https://example.invalid/2.png"),
+				ai.ImageURL("https://example.invalid/3.png"),
+				ai.ImageURL("https://example.invalid/4.png"),
+				ai.ImageURL("https://example.invalid/5.png"),
+			),
+			wantError: true,
+		},
+		{
+			name: "aggregate inline media",
+			message: ai.User(
+				ai.ImageData("image/png", make([]byte, attachment.MaxImageBytes)),
+				ai.ImageData("image/png", make([]byte, attachment.MaxImageBytes)),
+				ai.ImageData("image/png", []byte{1}),
+			),
+			wantError: true,
+		},
+		{
+			name: "single inline media",
+			message: ai.User(
+				ai.ImageData("image/png", make([]byte, attachment.MaxImageBytes+1)),
+			),
+			wantError: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := validatePromptMessages([]ai.Message{test.message})
+			if test.wantError {
+				require.ErrorIs(t, err, ErrInvalidPrompt)
+
+				return
+			}
+
+			require.NoError(t, err)
+		})
+	}
 }
 
 func TestRuntimeRejectsInvalidPromptBeforeMutation(t *testing.T) {

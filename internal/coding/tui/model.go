@@ -18,6 +18,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding"
+	codingclipboard "github.com/rsbin/pips/internal/coding/clipboard"
 	"github.com/rsbin/pips/internal/coding/runtimecontrol"
 )
 
@@ -92,51 +93,57 @@ type Model struct {
 	allow     bool
 	err       error
 
-	controller         Controller
-	state              coding.State
-	childStates        map[string]coding.State
-	composer           composerState
-	markdown           *markdownRenderer
-	theme              colorTheme
-	timeline           string
-	scrollback         scrollbackCursor
-	scrollbackOutput   bool
-	streaming          streamProjection
-	renderWait         bool
-	bridge             *eventBridge
-	subscription       *subscriptionBridge
-	subscriptionMode   bool
-	starting           bool
-	cancelStart        bool
-	waiting            bool
-	streamErr          error
-	composerResolving  bool
-	composerResolveSeq uint64
-	composerCancel     context.CancelFunc
-	queued             int
-	canceling          bool
-	exitArmed          bool
-	bannerPrinted      bool
-	picker             pickerState
-	pickerSeq          uint64
-	route              routeState
-	routeSeq           uint64
-	teamProjection     teamProjectionState
-	teamInteractions   teamInteractionQueueState
-	presentation       presentationState
-	prompt             promptState
-	promptSeq          uint64
-	completionMarkers  []completionMarker
-	worktreeLoading    bool
-	worktreeGeneration uint64
-	worktreeCancel     context.CancelFunc
-	worktreeSummary    string
-	activity           activityIndicator
-	refreshCursor      bool
-	cursorRefreshSeq   uint64
+	controller          Controller
+	state               coding.State
+	childStates         map[string]coding.State
+	composer            composerState
+	markdown            *markdownRenderer
+	theme               colorTheme
+	timeline            string
+	scrollback          scrollbackCursor
+	scrollbackOutput    bool
+	streaming           streamProjection
+	renderWait          bool
+	bridge              *eventBridge
+	subscription        *subscriptionBridge
+	subscriptionMode    bool
+	starting            bool
+	cancelStart         bool
+	waiting             bool
+	streamErr           error
+	composerResolving   bool
+	composerResolveSeq  uint64
+	composerCancel      context.CancelFunc
+	clipboardLoading    bool
+	clipboardGeneration uint64
+	clipboardCancel     context.CancelFunc
+	queued              int
+	canceling           bool
+	exitArmed           bool
+	bannerPrinted       bool
+	picker              pickerState
+	pickerSeq           uint64
+	route               routeState
+	routeSeq            uint64
+	teamProjection      teamProjectionState
+	teamInteractions    teamInteractionQueueState
+	presentation        presentationState
+	prompt              promptState
+	promptSeq           uint64
+	completionMarkers   []completionMarker
+	worktreeLoading     bool
+	worktreeGeneration  uint64
+	worktreeCancel      context.CancelFunc
+	worktreeSummary     string
+	activity            activityIndicator
+	refreshCursor       bool
+	cursorRefreshSeq    uint64
 }
 
 func newModel(ctx context.Context, options Options) *Model {
+	if options.Clipboard == nil {
+		options.Clipboard = codingclipboard.New()
+	}
 	lifecycle := lifecycleTrust
 	if options.Trusted {
 		lifecycle = lifecycleLoading
@@ -343,6 +350,25 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		return m, m.dispatchSubmission(message.kind, message.snapshot, message.message)
+	case clipboardImageMsg:
+		if !m.clipboardLoading || message.generation != m.clipboardGeneration {
+			return m, nil
+		}
+		if m.clipboardCancel != nil {
+			m.clipboardCancel()
+			m.clipboardCancel = nil
+		}
+		m.clipboardLoading = false
+		if message.err != nil {
+			m.streamErr = message.err
+			m.setLayout()
+
+			return m, nil
+		}
+		m.streamErr = m.composer.InsertImage(message.image)
+		m.setLayout()
+
+		return m, nil
 	case cancelResultMsg:
 		if message.beforeStart {
 			m.streamErr = errors.Join(m.streamErr, message.err)
@@ -671,6 +697,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, command
 		}
 		if m.route.kind != routeNone || m.prompt.kind != promptNone || m.composerResolving ||
+			m.clipboardLoading ||
 			m.picker.kind != pickerNone {
 			return m, nil
 		}
@@ -893,6 +920,13 @@ func (m *Model) updateReadyKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 		return m, nil
 	}
+	if m.clipboardLoading {
+		if key := message.String(); key == keyEscape || key == keyCtrlC {
+			m.cancelClipboardImageRead()
+		}
+
+		return m, nil
+	}
 	if m.route.kind != routeNone {
 		return m.updateRouteKey(message)
 	}
@@ -958,6 +992,8 @@ func (m *Model) updateReadyKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 
 			return m, m.runModeControl(mode)
+		case actionPasteImage:
+			return m, m.readClipboardImage()
 		case actionCommand, actionHelp:
 			if action == actionCommand {
 				m.openCommandPicker()
@@ -1109,6 +1145,8 @@ func (m *Model) statusLine() string {
 	phaseLabel := string(phase)
 	if m.composerResolving {
 		phaseLabel = "resolving files"
+	} else if m.clipboardLoading {
+		phaseLabel = "reading clipboard"
 	}
 	if m.state.LastError != nil && m.state.Interaction.Outcome != coding.InteractionCanceled {
 		phaseLabel = "error"
@@ -1493,6 +1531,16 @@ func (m *Model) prepareSubmission(
 	kind submissionKind,
 	snapshot composerSnapshot,
 ) tea.Cmd {
+	vision := true
+	if composerSnapshotHasImages(snapshot) {
+		vision = m.controller.Capabilities().Vision
+		if !vision {
+			m.streamErr = errComposerVisionUnsupported
+			m.setLayout()
+
+			return nil
+		}
+	}
 	if composerSnapshotHasFiles(snapshot) {
 		m.composerResolveSeq++
 		generation := m.composerResolveSeq
@@ -1506,6 +1554,7 @@ func (m *Model) prepareSubmission(
 			message, err := resolveComposerSnapshot(
 				resolveCtx,
 				snapshot,
+				vision,
 				m.controller.ResolveWorkspaceFile,
 			)
 
@@ -1519,7 +1568,7 @@ func (m *Model) prepareSubmission(
 		}
 	}
 
-	message, err := resolveComposerSnapshot(m.ctx, snapshot, nil)
+	message, err := resolveComposerSnapshot(m.ctx, snapshot, vision, nil)
 	if err != nil {
 		if strings.TrimSpace(m.composer.Value()) != "" {
 			m.streamErr = err

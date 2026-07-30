@@ -163,8 +163,11 @@ func TestComposerResolvesWorkspaceFilesInVisibleOrder(t *testing.T) {
 	controller.resolve = func(
 		_ context.Context,
 		reference attachment.Reference,
-	) (attachment.Text, error) {
-		return attachment.Text{Reference: reference, Content: "file contents"}, nil
+	) (attachment.Resolved, error) {
+		return attachment.NewResolvedText(attachment.Text{
+			Reference: reference,
+			Content:   "file contents",
+		})
 	}
 	model := readyModelWithController(t, controller, true)
 	model.composer.SetValue("before @file")
@@ -205,8 +208,8 @@ func TestComposerResolutionFailurePreservesExactDraft(t *testing.T) {
 	controller.resolve = func(
 		context.Context,
 		attachment.Reference,
-	) (attachment.Text, error) {
-		return attachment.Text{}, workspace.ErrChanged
+	) (attachment.Resolved, error) {
+		return attachment.Resolved{}, workspace.ErrChanged
 	}
 	model := readyModelWithController(t, controller, true)
 	model.composer.SetValue("@file")
@@ -248,14 +251,15 @@ func TestComposerResolutionRejectsTotalTextOverage(t *testing.T) {
 	_, err := resolveComposerSnapshot(
 		t.Context(),
 		composer.Snapshot(),
+		true,
 		func(
 			_ context.Context,
 			reference attachment.Reference,
-		) (attachment.Text, error) {
-			return attachment.Text{
+		) (attachment.Resolved, error) {
+			return attachment.NewResolvedText(attachment.Text{
 				Reference: reference,
 				Content:   strings.Repeat("x", attachment.MaxTextBytes),
-			}, nil
+			})
 		},
 	)
 	require.ErrorIs(t, err, coding.ErrInvalidPrompt)
@@ -281,16 +285,11 @@ func TestProtectedFileReferenceIsAtomic(t *testing.T) {
 	assert.Empty(t, composer.elements)
 }
 
-func TestImageReferenceRemainsPendingWithoutDraftLoss(t *testing.T) {
+func TestImageReferenceVisionRefusalPreservesDraft(t *testing.T) {
 	t.Parallel()
 
 	controller := newWorkspaceAttachmentController(readyState())
-	controller.resolve = func(
-		context.Context,
-		attachment.Reference,
-	) (attachment.Text, error) {
-		return attachment.Text{}, attachment.ErrImagePending
-	}
+	controller.capabilities.Vision = false
 	model := readyModelWithController(t, controller, true)
 	model.composer.SetValue("@logo")
 	require.NoError(t, model.composer.InsertFile(
@@ -301,10 +300,10 @@ func TestImageReferenceRemainsPendingWithoutDraftLoss(t *testing.T) {
 	before := model.composer.Snapshot()
 
 	_, command := model.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
-	require.NotNil(t, command)
-	model.Update(command())
+	require.Nil(t, command)
 	assert.Equal(t, before, model.composer.Snapshot())
-	assert.ErrorIs(t, model.streamErr, attachment.ErrImagePending)
+	require.ErrorIs(t, model.streamErr, errComposerVisionUnsupported)
+	assert.Empty(t, controller.prompts)
 }
 
 func TestComposerResolutionCanBeCanceledWithoutDraftLoss(t *testing.T) {
@@ -313,7 +312,7 @@ func TestComposerResolutionCanBeCanceledWithoutDraftLoss(t *testing.T) {
 	model := readyModel(t, true)
 	model.composer.SetValue("keep [File #1 · file.txt]")
 	model.composer.elements = []composerElement{{
-		id: 1, kind: composerElementFile, label: "[File #1 · file.txt]",
+		id: 1, kind: composerElementAttachment, label: "[File #1 · file.txt]",
 		file: attachment.Reference{Path: "file.txt", Kind: attachment.KindText},
 	}}
 	before := model.composer.Snapshot()
@@ -352,9 +351,9 @@ func (c *workspaceAttachmentController) ListWorkspaceFiles(
 func (c *workspaceAttachmentController) ResolveWorkspaceFile(
 	ctx context.Context,
 	reference attachment.Reference,
-) (attachment.Text, error) {
+) (attachment.Resolved, error) {
 	if c.resolve == nil {
-		return attachment.Text{}, errors.New("unexpected Workspace file resolution")
+		return attachment.Resolved{}, errors.New("unexpected Workspace file resolution")
 	}
 
 	return c.resolve(ctx, reference)

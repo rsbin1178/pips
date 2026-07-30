@@ -352,6 +352,7 @@ func approvalReviewState() coding.State {
 
 type overlayController struct {
 	interactionController
+	capabilities ai.Capabilities
 	resolutions  []approval.Resolution
 	sessions     []session.Metadata
 	teamRecovery map[string]runtimecontrol.TeamRecoveryHint
@@ -407,6 +408,7 @@ func newOverlayController(state coding.State) *overlayController {
 		interactionController: interactionController{
 			stubController: stubController{state: state},
 		},
+		capabilities: ai.Capabilities{Text: true, Vision: true},
 		entries: []modelcatalog.Entry{
 			{Ref: config.ModelRef{Provider: state.Provider, Model: state.ModelID}},
 			{
@@ -417,6 +419,8 @@ func newOverlayController(state coding.State) *overlayController {
 		},
 	}
 }
+
+func (c *overlayController) Capabilities() ai.Capabilities { return c.capabilities }
 
 func (c *overlayController) Resolve(
 	_ context.Context,
