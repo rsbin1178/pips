@@ -1,7 +1,11 @@
 package attachment
 
 import (
+	"bytes"
 	"context"
+	"image"
+	"image/color"
+	"image/png"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -158,6 +162,33 @@ func TestResolveTextUsesStableOpenedHandle(t *testing.T) {
 	assert.Equal(t, "\n\n[Workspace file: notes.txt]\nexact\r\ncontent  ", resolved.PromptText())
 }
 
+func TestResolveWorkspaceImageUsesStableOpenedHandle(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	encoded := workspacePNGFixture(t, color.RGBA{R: 32, G: 64, B: 128, A: 255})
+	writeBytesFixture(t, root, "assets/screen.png", encoded)
+	tree := openAttachmentTree(t, root)
+
+	resolved, err := Resolve(
+		t.Context(),
+		tree,
+		Reference{Path: "assets/screen.png", Kind: KindImage},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, KindImage, resolved.Kind())
+	assert.Equal(t, Reference{Path: "assets/screen.png", Kind: KindImage}, resolved.Reference())
+
+	normalized, ok := resolved.Image()
+	require.True(t, ok)
+	assert.True(t, normalized.Valid())
+	assert.Equal(t, "assets/screen.png", normalized.Name())
+	assert.Equal(t, encoded, normalized.Bytes())
+
+	_, hasText := resolved.Text()
+	assert.False(t, hasText)
+}
+
 func TestResolveTextAcceptsExactMaximum(t *testing.T) {
 	t.Parallel()
 
@@ -191,7 +222,7 @@ func TestResolveTextRejectsInvalidContentAndUnsafePaths(t *testing.T) {
 		{name: "nul", path: "nul.txt", err: ErrBinaryText},
 		{name: "size", path: "large.txt", err: ErrLimit},
 		{name: "symlink parent", path: "linked/file.txt", err: workspace.ErrSymlink},
-		{name: "image deferred", path: "image.png", err: ErrImagePending},
+		{name: "image is not text", path: "image.png", err: workspace.ErrChanged},
 		{name: "denied", path: ".env", err: ErrDenied},
 	}
 
@@ -255,6 +286,32 @@ func TestResolveTextRejectsReplacementAndDeletion(t *testing.T) {
 	}
 }
 
+func TestResolveImageRejectsReplacementAndUnsafePaths(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeBytesFixture(t, root, "image.png", workspacePNGFixture(t, color.RGBA{R: 255, A: 255}))
+	writeBytesFixture(t, root, ".git/image.png", workspacePNGFixture(t, color.RGBA{B: 255, A: 255}))
+	tree := openAttachmentTree(t, root)
+
+	_, err := resolveImage(
+		t.Context(),
+		tree,
+		Reference{Path: "image.png", Kind: KindImage},
+		func() {
+			require.NoError(t, os.Rename(
+				filepath.Join(root, "image.png"),
+				filepath.Join(root, "old.png"),
+			))
+			writeBytesFixture(t, root, "image.png", workspacePNGFixture(t, color.RGBA{G: 255, A: 255}))
+		},
+	)
+	require.ErrorIs(t, err, workspace.ErrChanged)
+
+	_, err = ResolveImage(t.Context(), tree, Reference{Path: ".git/image.png", Kind: KindImage})
+	require.ErrorIs(t, err, ErrDenied)
+}
+
 func TestResolveTextHonorsCancellation(t *testing.T) {
 	t.Parallel()
 
@@ -313,4 +370,21 @@ func writeBytesFixture(t *testing.T, root, name string, content []byte) {
 	full := filepath.Join(root, filepath.FromSlash(name))
 	require.NoError(t, os.MkdirAll(filepath.Dir(full), 0o700))
 	require.NoError(t, os.WriteFile(full, content, 0o600))
+}
+
+func workspacePNGFixture(t *testing.T, fill color.RGBA) []byte {
+	t.Helper()
+
+	source := image.NewRGBA(image.Rect(0, 0, 2, 2))
+
+	for y := range 2 {
+		for x := range 2 {
+			source.SetRGBA(x, y, fill)
+		}
+	}
+
+	var output bytes.Buffer
+	require.NoError(t, png.Encode(&output, source))
+
+	return output.Bytes()
 }

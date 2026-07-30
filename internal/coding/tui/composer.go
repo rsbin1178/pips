@@ -25,9 +25,13 @@ const (
 )
 
 var (
-	errComposerElementLimit = errors.New("coding tui: composer attachment limit reached")
-	errComposerInvalidPaste = errors.New("coding tui: pasted text is invalid or too large")
-	errComposerCorruptDraft = errors.New("coding tui: composer protected element is invalid")
+	errComposerElementLimit      = errors.New("coding tui: composer attachment limit reached")
+	errComposerImageLimit        = errors.New("coding tui: composer image limit reached")
+	errComposerInvalidPaste      = errors.New("coding tui: pasted text is invalid or too large")
+	errComposerCorruptDraft      = errors.New("coding tui: composer protected element is invalid")
+	errComposerVisionUnsupported = errors.New(
+		"coding tui: active model does not declare image input support",
+	)
 )
 
 type composerElementKind uint8
@@ -35,7 +39,7 @@ type composerElementKind uint8
 const (
 	composerElementUnknown composerElementKind = iota
 	composerElementPaste
-	composerElementFile
+	composerElementAttachment
 )
 
 type composerElement struct {
@@ -44,6 +48,7 @@ type composerElement struct {
 	label   string
 	payload string
 	file    attachment.Reference
+	image   attachment.Image
 }
 
 type composerPosition struct {
@@ -248,24 +253,69 @@ func (c *composerState) InsertFile(
 		return fmt.Errorf("coding tui: insert Workspace file: %w", err)
 	}
 
+	if normalized.Kind == attachment.KindImage &&
+		composerSnapshotImageCount(c.Snapshot()) >= attachment.MaxImagesPerMessage {
+		return errComposerImageLimit
+	}
+
 	before := c.Snapshot()
 	if !composerRangeAvailable(before, start, end) {
 		return errComposerCorruptDraft
 	}
 
-	label := c.nextFileLabel(before.display, normalized.Path)
+	prefix := "File"
+	if normalized.Kind == attachment.KindImage {
+		prefix = "Image"
+	}
+
+	label := c.nextAttachmentLabel(before.display, prefix, normalized.Path)
 
 	updated := before.display[:start] + label + before.display[end:]
 	c.Model.SetValue(updated)
 	c.elements = append(c.elements, composerElement{
 		id:    c.nextID,
-		kind:  composerElementFile,
+		kind:  composerElementAttachment,
 		label: label,
 		file:  normalized,
 	})
 	line, column := composerPositionAtByte(updated, start+len(label))
 	setComposerPosition(c, line, column)
 
+	if !c.hasValidElements() {
+		c.applySnapshot(before)
+
+		return errComposerCorruptDraft
+	}
+
+	c.exitHistoryOnChange(before.display)
+
+	return nil
+}
+
+func (c *composerState) InsertImage(image attachment.Image) error {
+	if !image.Valid() {
+		return errComposerCorruptDraft
+	}
+
+	if len(c.elements) >= maximumComposerElements {
+		return errComposerElementLimit
+	}
+
+	if composerSnapshotImageCount(c.Snapshot()) >= attachment.MaxImagesPerMessage {
+		return errComposerImageLimit
+	}
+
+	c.snapCursorToElementEdge()
+	before := c.Snapshot()
+	label := c.nextAttachmentLabel(before.display, "Image", image.Name())
+	c.Model.InsertString(label)
+
+	c.elements = append(c.elements, composerElement{
+		id:    c.nextID,
+		kind:  composerElementAttachment,
+		label: label,
+		image: image,
+	})
 	if !c.hasValidElements() {
 		c.applySnapshot(before)
 
@@ -292,11 +342,11 @@ func composerRangeAvailable(snapshot composerSnapshot, start, end int) bool {
 	return true
 }
 
-func (c *composerState) nextFileLabel(display, name string) string {
+func (c *composerState) nextAttachmentLabel(display, prefix, name string) string {
 	for {
 		c.nextID++
 
-		label := fmt.Sprintf("[File #%d · %s]", c.nextID, name)
+		label := fmt.Sprintf("[%s #%d · %s]", prefix, c.nextID, name)
 		if !strings.Contains(display, label) {
 			return label
 		}
@@ -312,7 +362,7 @@ func (c *composerState) RecordHistory(snapshot composerSnapshot) error {
 		return errComposerCorruptDraft
 	}
 
-	if !composerSnapshotHasFiles(snapshot) {
+	if !composerSnapshotHasAttachments(snapshot) {
 		if _, err := assembleComposerSnapshot(snapshot); err != nil {
 			return err
 		}
@@ -508,13 +558,23 @@ func validComposerSnapshot(snapshot composerSnapshot) bool {
 
 		switch element.kind {
 		case composerElementPaste:
-			if element.file != (attachment.Reference{}) {
+			if element.file != (attachment.Reference{}) || element.image.Valid() {
 				return false
 			}
-		case composerElementFile:
-			normalized, err := attachment.NormalizeReference(element.file)
-			if err != nil || normalized != element.file || element.payload != "" {
+		case composerElementAttachment:
+			hasFile := element.file != (attachment.Reference{})
+
+			hasImage := element.image.Valid()
+
+			if hasFile == hasImage || element.payload != "" {
 				return false
+			}
+
+			if hasFile {
+				normalized, err := attachment.NormalizeReference(element.file)
+				if err != nil || normalized != element.file {
+					return false
+				}
 			}
 		default:
 			return false
@@ -553,7 +613,7 @@ func assembleComposerSnapshot(snapshot composerSnapshot) (string, error) {
 		switch element.kind {
 		case composerElementPaste:
 			builder.WriteString(element.payload)
-		case composerElementFile:
+		case composerElementAttachment:
 			return "", errComposerCorruptDraft
 		case composerElementUnknown:
 			return "", errComposerCorruptDraft
@@ -578,7 +638,8 @@ func equalComposerStructure(left, right composerSnapshot) bool {
 	for index := range left.elements {
 		if left.elements[index].kind != right.elements[index].kind ||
 			left.elements[index].payload != right.elements[index].payload ||
-			left.elements[index].file != right.elements[index].file {
+			left.elements[index].file != right.elements[index].file ||
+			!left.elements[index].image.Equal(right.elements[index].image) {
 			return false
 		}
 	}
@@ -607,7 +668,8 @@ func composerStructure(snapshot composerSnapshot) string {
 func composerSnapshotBytes(snapshot composerSnapshot) int {
 	size := len(snapshot.display)
 	for _, element := range snapshot.elements {
-		size += len(element.label) + len(element.payload) + len(element.file.Path)
+		size += len(element.label) + len(element.payload) + len(element.file.Path) +
+			element.image.Size()
 	}
 
 	return size
@@ -615,12 +677,43 @@ func composerSnapshotBytes(snapshot composerSnapshot) int {
 
 func composerSnapshotHasFiles(snapshot composerSnapshot) bool {
 	for _, element := range snapshot.elements {
-		if element.kind == composerElementFile {
+		if element.kind == composerElementAttachment &&
+			element.file != (attachment.Reference{}) {
 			return true
 		}
 	}
 
 	return false
+}
+
+func composerSnapshotHasAttachments(snapshot composerSnapshot) bool {
+	for _, element := range snapshot.elements {
+		if element.kind == composerElementAttachment {
+			return true
+		}
+	}
+
+	return false
+}
+
+func composerSnapshotImageCount(snapshot composerSnapshot) int {
+	count := 0
+
+	for _, element := range snapshot.elements {
+		if element.kind != composerElementAttachment {
+			continue
+		}
+
+		if element.image.Valid() || element.file.Kind == attachment.KindImage {
+			count++
+		}
+	}
+
+	return count
+}
+
+func composerSnapshotHasImages(snapshot composerSnapshot) bool {
+	return composerSnapshotImageCount(snapshot) > 0
 }
 
 func validatePastedText(content string) error {

@@ -147,7 +147,7 @@ type runtimeInstance interface {
 	Skills(context.Context) (coding.SkillSnapshot, error)
 	SetSkillEnabled(context.Context, coding.SkillID, bool) error
 	ListWorkspaceFiles(context.Context) (attachment.Snapshot, error)
-	ResolveWorkspaceFile(context.Context, attachment.Reference) (attachment.Text, error)
+	ResolveWorkspaceFile(context.Context, attachment.Reference) (attachment.Resolved, error)
 	Steer(...ai.Message) error
 	FollowUp(...ai.Message) error
 	Cancel() error
@@ -406,8 +406,8 @@ func (c *Controller) ListWorkspaceFiles(
 func (c *Controller) ResolveWorkspaceFile(
 	ctx context.Context,
 	reference attachment.Reference,
-) (attachment.Text, error) {
-	var resolved attachment.Text
+) (attachment.Resolved, error) {
+	var resolved attachment.Resolved
 	err := c.withRuntime(func(runtime runtimeInstance) error {
 		var err error
 		resolved, err = runtime.ResolveWorkspaceFile(ctx, reference)
@@ -561,6 +561,22 @@ func (c *Controller) Model() ModelState {
 		},
 		Resolved: c.resolved.Clone(), Overridden: c.overridden,
 	}
+}
+
+// Capabilities returns the current bound model's declared capabilities.
+func (c *Controller) Capabilities() ai.Capabilities {
+	if c == nil {
+		return ai.Capabilities{}
+	}
+
+	c.mu.Lock()
+	model := c.model
+	c.mu.Unlock()
+	if model == nil {
+		return ai.Capabilities{}
+	}
+
+	return model.Capabilities()
 }
 
 // Mode returns the configured and effective process-local operating mode.

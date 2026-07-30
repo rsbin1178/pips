@@ -83,10 +83,11 @@ type Controller interface {
 	Cancel() error
 	Reload(context.Context) error
 	ListWorkspaceFiles(context.Context) (attachment.Snapshot, error)
-	ResolveWorkspaceFile(context.Context, attachment.Reference) (attachment.Text, error)
+	ResolveWorkspaceFile(context.Context, attachment.Reference) (attachment.Resolved, error)
 	Snapshot() coding.State
 	SessionID() string
 	Model() runtimecontrol.ModelState
+	Capabilities() ai.Capabilities
 	Mode() runtimecontrol.ModeState
 	SetMode(context.Context, coding.OperatingMode) error
 	WorkspaceStatus(context.Context) (changes.WorktreeStatus, error)
@@ -154,6 +155,11 @@ type Controller interface {
 	Close(context.Context) error
 }
 
+// ImageClipboard is the one-method clipboard boundary consumed by the TUI.
+type ImageClipboard interface {
+	ReadImage(context.Context) ([]byte, error)
+}
+
 // Bootstrap loads configuration and opens the first Runtime. trustProject is
 // the user's explicit Workspace trust decision.
 type Bootstrap func(context.Context, bool) (Controller, error)
@@ -167,6 +173,7 @@ type Options struct {
 	Trusted     bool
 	NoColor     bool
 	Bootstrap   Bootstrap
+	Clipboard   ImageClipboard
 }
 
 // Run owns the terminal Program and closes any acquired Controller after the

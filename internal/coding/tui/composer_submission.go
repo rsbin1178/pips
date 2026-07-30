@@ -15,11 +15,12 @@ import (
 type workspaceFileResolver func(
 	context.Context,
 	attachment.Reference,
-) (attachment.Text, error)
+) (attachment.Resolved, error)
 
 func resolveComposerSnapshot(
 	ctx context.Context,
 	snapshot composerSnapshot,
+	vision bool,
 	resolve workspaceFileResolver,
 ) (ai.Message, error) {
 	if !validComposerSnapshot(snapshot) {
@@ -28,6 +29,10 @@ func resolveComposerSnapshot(
 
 	if resolve == nil && composerSnapshotHasFiles(snapshot) {
 		return ai.Message{}, errors.New("coding tui: resolve Composer: missing file resolver")
+	}
+
+	if composerSnapshotHasImages(snapshot) && !vision {
+		return ai.Message{}, errComposerVisionUnsupported
 	}
 
 	builder := newComposerMessageBuilder(len(snapshot.elements)*2 + 1)
@@ -67,8 +72,20 @@ func appendComposerElement(
 	switch element.kind {
 	case composerElementPaste:
 		return builder.appendRun(element.payload)
-	case composerElementFile:
+	case composerElementAttachment:
 		builder.flushRun()
+
+		if element.image.Valid() {
+			return builder.appendImage(
+				fmt.Sprintf(
+					"\n\n[Clipboard image: %s · %d×%d]\n",
+					element.image.Name(),
+					element.image.Width(),
+					element.image.Height(),
+				),
+				element.image,
+			)
+		}
 
 		resolved, err := resolve(ctx, element.file)
 		if err != nil {
@@ -79,14 +96,39 @@ func appendComposerElement(
 			)
 		}
 
-		if resolved.Reference != element.file {
+		if resolved.Reference() != element.file {
 			return fmt.Errorf(
 				"%w: Workspace file resolver returned a different reference",
 				workspace.ErrChanged,
 			)
 		}
 
-		return builder.appendPart(resolved.PromptText())
+		switch resolved.Kind() {
+		case attachment.KindText:
+			text, ok := resolved.Text()
+			if !ok {
+				return errComposerCorruptDraft
+			}
+
+			return builder.appendPart(text.PromptText())
+		case attachment.KindImage:
+			image, ok := resolved.Image()
+			if !ok {
+				return errComposerCorruptDraft
+			}
+
+			return builder.appendImage(
+				fmt.Sprintf(
+					"\n\n[Workspace image: %s · %d×%d]\n",
+					element.file.Path,
+					image.Width(),
+					image.Height(),
+				),
+				image,
+			)
+		default:
+			return fmt.Errorf("%w: Workspace resolver returned invalid content", workspace.ErrChanged)
+		}
 	default:
 		return errComposerCorruptDraft
 	}
@@ -97,6 +139,32 @@ type composerMessageBuilder struct {
 	textParts []string
 	run       strings.Builder
 	total     int
+	images    int
+	media     int
+}
+
+func (b *composerMessageBuilder) appendImage(
+	provenance string,
+	image attachment.Image,
+) error {
+	if !image.Valid() {
+		return errComposerCorruptDraft
+	}
+
+	if b.images >= attachment.MaxImagesPerMessage ||
+		image.Size() > attachment.MaxImageBytesPerMessage-b.media {
+		return fmt.Errorf("coding tui: resolve Composer images: %w", attachment.ErrLimit)
+	}
+
+	if err := b.appendPart(provenance); err != nil {
+		return err
+	}
+
+	b.parts = append(b.parts, image.Part())
+	b.images++
+	b.media += image.Size()
+
+	return nil
 }
 
 func newComposerMessageBuilder(capacity int) *composerMessageBuilder {

@@ -16,6 +16,7 @@ const (
 	keyCtrlC     = "ctrl+c"
 	keyCtrlT     = "ctrl+t"
 	keyCtrlU     = "ctrl+u"
+	keyCtrlV     = "ctrl+v"
 	keyEscape    = "esc"
 	keyLeft      = "left"
 	keyRight     = "right"
@@ -41,6 +42,7 @@ const (
 	actionToggleTool actionID = "toggle_tool"
 	actionCancel     actionID = "cancel"
 	actionToggleMode actionID = "toggle_mode"
+	actionPasteImage actionID = "paste_image"
 )
 
 type actionBinding struct {
@@ -74,6 +76,12 @@ var defaultActions = []actionBinding{
 		Contexts: []actionContext{contextIdle},
 		Keys:     []string{"shift+tab"},
 		Label:    "toggle mode",
+	},
+	{
+		ID:       actionPasteImage,
+		Contexts: []actionContext{contextIdle, contextRunning},
+		Keys:     []string{keyCtrlV},
+		Label:    "paste image",
 	},
 	{
 		ID:       actionCommand,

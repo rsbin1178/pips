@@ -14,13 +14,102 @@ import (
 )
 
 // ResolveText opens and reads one stable text reference through the Workspace
-// tree. Image references remain deferred to the image normalization boundary.
+// tree.
 func ResolveText(
 	ctx context.Context,
 	tree *workspace.Tree,
 	reference Reference,
 ) (Text, error) {
 	return resolveText(ctx, tree, reference, nil)
+}
+
+// Resolve opens and resolves one stable Workspace text or image reference.
+func Resolve(
+	ctx context.Context,
+	tree *workspace.Tree,
+	reference Reference,
+) (Resolved, error) {
+	normalized, err := NormalizeReference(reference)
+	if err != nil {
+		return Resolved{}, err
+	}
+
+	switch normalized.Kind {
+	case KindText:
+		text, err := ResolveText(ctx, tree, normalized)
+		if err != nil {
+			return Resolved{}, err
+		}
+
+		return NewResolvedText(text)
+	case KindImage:
+		image, err := ResolveImage(ctx, tree, normalized)
+		if err != nil {
+			return Resolved{}, err
+		}
+
+		return NewResolvedImage(normalized, image)
+	default:
+		return Resolved{}, fmt.Errorf("%w: unknown attachment kind", workspace.ErrChanged)
+	}
+}
+
+// ResolveImage opens and normalizes one stable Workspace image reference.
+func ResolveImage(
+	ctx context.Context,
+	tree *workspace.Tree,
+	reference Reference,
+) (Image, error) {
+	return resolveImage(ctx, tree, reference, nil)
+}
+
+func resolveImage(
+	ctx context.Context,
+	tree *workspace.Tree,
+	reference Reference,
+	afterInspect func(),
+) (Image, error) {
+	normalized, expected, err := inspectImageReference(ctx, tree, reference)
+	if err != nil {
+		return Image{}, err
+	}
+
+	if afterInspect != nil {
+		afterInspect()
+	}
+
+	file, err := tree.Open(normalized.Path)
+	if err != nil {
+		return Image{}, mapChangedPathError(normalized.Path, err)
+	}
+
+	content, opened, readErr := readOpenedFile(
+		ctx,
+		file,
+		normalized.Path,
+		expected,
+		MaxEncodedImageBytes,
+	)
+
+	closeErr := file.Close()
+	if readErr != nil || closeErr != nil {
+		return Image{}, errors.Join(readErr, closeErr)
+	}
+
+	normalizedImage, err := NormalizeImageContext(ctx, normalized.Path, content)
+	if err != nil {
+		return Image{}, err
+	}
+
+	_, current, inspectErr := tree.InspectRegularPath(normalized.Path)
+	if inspectErr != nil || !sameFileState(opened, current) {
+		return Image{}, errors.Join(
+			fmt.Errorf("%w: %q changed after read", workspace.ErrChanged, normalized.Path),
+			inspectErr,
+		)
+	}
+
+	return normalizedImage, nil
 }
 
 func resolveText(
@@ -43,7 +132,13 @@ func resolveText(
 		return Text{}, mapChangedPathError(normalized.Path, err)
 	}
 
-	content, opened, readErr := readOpenedText(ctx, file, normalized.Path, expected)
+	content, opened, readErr := readOpenedFile(
+		ctx,
+		file,
+		normalized.Path,
+		expected,
+		MaxTextBytes,
+	)
 
 	closeErr := file.Close()
 	if readErr != nil || closeErr != nil {
@@ -58,6 +153,24 @@ func inspectTextReference(
 	tree *workspace.Tree,
 	reference Reference,
 ) (Reference, fs.FileInfo, error) {
+	return inspectReference(ctx, tree, reference, KindText, MaxTextBytes)
+}
+
+func inspectImageReference(
+	ctx context.Context,
+	tree *workspace.Tree,
+	reference Reference,
+) (Reference, fs.FileInfo, error) {
+	return inspectReference(ctx, tree, reference, KindImage, MaxEncodedImageBytes)
+}
+
+func inspectReference(
+	ctx context.Context,
+	tree *workspace.Tree,
+	reference Reference,
+	expectedKind Kind,
+	limit int,
+) (Reference, fs.FileInfo, error) {
 	if err := ctx.Err(); err != nil {
 		return Reference{}, nil, err
 	}
@@ -71,8 +184,12 @@ func inspectTextReference(
 		return Reference{}, nil, err
 	}
 
-	if normalized.Kind == KindImage {
-		return Reference{}, nil, fmt.Errorf("%w: %q", ErrImagePending, normalized.Path)
+	if normalized.Kind != expectedKind {
+		return Reference{}, nil, fmt.Errorf(
+			"%w: %q has an unexpected attachment kind",
+			workspace.ErrChanged,
+			normalized.Path,
+		)
 	}
 
 	_, expected, err := tree.InspectRegularPath(normalized.Path)
@@ -80,12 +197,12 @@ func inspectTextReference(
 		return Reference{}, nil, err
 	}
 
-	if expected.Size() > MaxTextBytes {
+	if expected.Size() > int64(limit) {
 		return Reference{}, nil, fmt.Errorf(
 			"%w: %q exceeds %d bytes",
 			ErrLimit,
 			normalized.Path,
-			MaxTextBytes,
+			limit,
 		)
 	}
 
@@ -113,11 +230,12 @@ func validateResolvedText(
 	return Text{Reference: normalized, Content: string(content)}, nil
 }
 
-func readOpenedText(
+func readOpenedFile(
 	ctx context.Context,
 	file *os.File,
 	name string,
 	expected fs.FileInfo,
+	limit int,
 ) ([]byte, fs.FileInfo, error) {
 	opened, err := file.Stat()
 	if err != nil {
@@ -128,15 +246,15 @@ func readOpenedText(
 		return nil, nil, fmt.Errorf("%w: %q changed while opening", workspace.ErrChanged, name)
 	}
 
-	reader := io.LimitReader(file, MaxTextBytes+1)
+	reader := io.LimitReader(file, int64(limit)+1)
 
-	content, err := readAllContext(ctx, reader)
+	content, err := readAllContext(ctx, reader, limit)
 	if err != nil {
 		return nil, nil, fmt.Errorf("coding attachment: read %q: %w", name, err)
 	}
 
-	if len(content) > MaxTextBytes {
-		return nil, nil, fmt.Errorf("%w: %q exceeds %d bytes", ErrLimit, name, MaxTextBytes)
+	if len(content) > limit {
+		return nil, nil, fmt.Errorf("%w: %q exceeds %d bytes", ErrLimit, name, limit)
 	}
 
 	final, err := file.Stat()
@@ -151,8 +269,8 @@ func readOpenedText(
 	return content, final, nil
 }
 
-func readAllContext(ctx context.Context, reader io.Reader) ([]byte, error) {
-	content := make([]byte, 0, MaxTextBytes+1)
+func readAllContext(ctx context.Context, reader io.Reader, limit int) ([]byte, error) {
+	content := make([]byte, 0, min(limit+1, 32<<10))
 	buffer := make([]byte, 32<<10)
 
 	for {
