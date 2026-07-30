@@ -10,6 +10,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding"
+	"github.com/rsbin/pips/internal/coding/attachment"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -310,9 +311,20 @@ func TestReadyQueueFailureRestoresProtectedSnapshot(t *testing.T) {
 func TestReadyTemporaryInputSurfacesRestoreProtectedSnapshot(t *testing.T) {
 	t.Parallel()
 
-	model := readyModel(t, true)
+	model := readyModelWithController(t, newOverlayController(readyState()), true)
 	_, err := model.composer.InsertPaste(strings.Repeat("payload\n", 9))
 	require.NoError(t, err)
+	model.composer.InsertString(" @notes")
+	fileStart := strings.LastIndex(model.composer.Value(), "@notes")
+	require.NoError(t, model.composer.InsertFile(
+		fileStart,
+		fileStart+len("@notes"),
+		attachment.Reference{Path: "notes.txt", Kind: attachment.KindText},
+	))
+	model.composer.InsertString(" ")
+	require.NoError(t, model.composer.InsertImage(
+		normalizedComposerImage(t, clipboardImageName, 0),
+	))
 	original := model.composer.Snapshot()
 
 	model.openCommandPicker()
@@ -324,6 +336,18 @@ func TestReadyTemporaryInputSurfacesRestoreProtectedSnapshot(t *testing.T) {
 	assert.Equal(t, original, model.composer.Snapshot())
 
 	model.activateSkillsRouteSnapshot(original)
+	model.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	assert.Equal(t, original, model.composer.Snapshot())
+
+	model.openAgentsRoute()
+	model.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	assert.Equal(t, original, model.composer.Snapshot())
+
+	model.openTeamRoute("")
+	model.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	assert.Equal(t, original, model.composer.Snapshot())
+
+	model.openTreeRoute(true)
 	model.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	assert.Equal(t, original, model.composer.Snapshot())
 
@@ -339,6 +363,24 @@ func TestReadyTemporaryInputSurfacesRestoreProtectedSnapshot(t *testing.T) {
 	model.Update(tea.KeyPressMsg{Text: "$"})
 	require.Equal(t, pickerSkill, model.picker.kind)
 	model.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	assert.Equal(t, original, model.composer.Snapshot())
+
+	model.openModelPicker()
+	model.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	assert.Equal(t, original, model.composer.Snapshot())
+
+	model.openCommandPicker()
+	model.state.Approval = approvalReviewState().Approval
+	model.syncApprovalPrompt()
+	assert.Equal(t, original, model.composer.Snapshot())
+	model.state.Approval = coding.ApprovalState{}
+	model.syncApprovalPrompt()
+
+	model.openCommandPicker()
+
+	questionState := questionPromptStateSnapshot(testQuestionRequest(t))
+	model.state.Question = questionState.Question
+	model.syncApprovalPrompt()
 	assert.Equal(t, original, model.composer.Snapshot())
 }
 
