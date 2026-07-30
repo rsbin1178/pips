@@ -58,6 +58,22 @@ type controllerCommandMsg struct {
 	err      error
 }
 
+type submissionKind uint8
+
+const (
+	submissionPrompt submissionKind = iota
+	submissionSteer
+	submissionFollowUp
+)
+
+type composerResolvedMsg struct {
+	generation uint64
+	snapshot   composerSnapshot
+	kind       submissionKind
+	message    ai.Message
+	err        error
+}
+
 type cancelResultMsg struct {
 	bridge      *eventBridge
 	beforeStart bool
@@ -94,6 +110,9 @@ type Model struct {
 	cancelStart        bool
 	waiting            bool
 	streamErr          error
+	composerResolving  bool
+	composerResolveSeq uint64
+	composerCancel     context.CancelFunc
 	queued             int
 	canceling          bool
 	exitArmed          bool
@@ -307,6 +326,23 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.setLayout()
 		return m, m.commitStableTimeline()
+	case composerResolvedMsg:
+		if !m.composerResolving || message.generation != m.composerResolveSeq {
+			return m, nil
+		}
+		m.composerResolving = false
+		if m.composerCancel != nil {
+			m.composerCancel()
+			m.composerCancel = nil
+		}
+		if message.err != nil {
+			m.streamErr = message.err
+			m.setLayout()
+
+			return m, m.commitStableTimeline()
+		}
+
+		return m, m.dispatchSubmission(message.kind, message.snapshot, message.message)
 	case cancelResultMsg:
 		if message.beforeStart {
 			m.streamErr = errors.Join(m.streamErr, message.err)
@@ -480,6 +516,18 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.setLayout()
 
 		return m, nil
+	case filePickerDataMsg:
+		if m.picker.kind != pickerFile || message.generation != m.picker.generation {
+			return m, nil
+		}
+		m.picker.loading = false
+		m.picker.err = message.err
+		m.picker.files = slices.Clone(message.snapshot.Files)
+		m.picker.truncated = message.snapshot.Truncated
+		m.picker.cursor = 0
+		m.setLayout()
+
+		return m, nil
 	case controlResultMsg:
 		pickerControl := m.picker.kind != pickerNone && m.picker.controlling
 		routeControl := m.route.kind != routeNone && m.route.controlling
@@ -622,7 +670,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 
 			return m, command
 		}
-		if m.route.kind != routeNone || m.prompt.kind != promptNone ||
+		if m.route.kind != routeNone || m.prompt.kind != promptNone || m.composerResolving ||
 			m.picker.kind != pickerNone {
 			return m, nil
 		}
@@ -832,6 +880,19 @@ func (m *Model) trustChoice(label, description string, selected bool) string {
 
 //nolint:gocyclo,nestif,gocritic // Contextual input precedence is an explicit product state machine.
 func (m *Model) updateReadyKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if m.composerResolving {
+		if key := message.String(); key == keyEscape || key == keyCtrlC {
+			if m.composerCancel != nil {
+				m.composerCancel()
+			}
+			m.composerCancel = nil
+			m.composerResolving = false
+			m.composerResolveSeq++
+			m.setLayout()
+		}
+
+		return m, nil
+	}
 	if m.route.kind != routeNone {
 		return m.updateRouteKey(message)
 	}
@@ -915,6 +976,9 @@ func (m *Model) updateReadyKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if context == contextIdle && message.Key().Text == "$" && m.canOpenSkillPickerAtCursor() {
 		return m, tea.Batch(command, m.openSkillPickerAfterDollar())
 	}
+	if message.Key().Text == "@" && m.canOpenFilePickerAtCursor() {
+		return m, tea.Batch(command, m.openFilePickerAfterAt())
+	}
 	m.setLayout()
 
 	return m, command
@@ -955,6 +1019,8 @@ func (m *Model) readyView() tea.View {
 			footer = append(footer, m.modePickerView(availableRows))
 		case pickerSkill:
 			footer = append(footer, m.skillPickerView(availableRows))
+		case pickerFile:
+			footer = append(footer, m.filePickerView(availableRows))
 		default:
 			footer = append(footer, m.commandPickerView(availableRows))
 		}
@@ -1041,6 +1107,9 @@ func (m *Model) statusLine() string {
 	}
 	phase := m.effectivePhase()
 	phaseLabel := string(phase)
+	if m.composerResolving {
+		phaseLabel = "resolving files"
+	}
 	if m.state.LastError != nil && m.state.Interaction.Outcome != coding.InteractionCanceled {
 		phaseLabel = "error"
 	}
@@ -1400,7 +1469,57 @@ type scrollbackCursorRefreshDoneMsg struct {
 
 func (m *Model) submit(actionCtx actionContext) tea.Cmd {
 	snapshot := m.composer.Snapshot()
-	text, err := m.composer.Assemble()
+	switch actionCtx {
+	case contextIdle:
+		return m.prepareSubmission(submissionPrompt, snapshot)
+	case contextRunning:
+		return m.prepareSubmission(submissionSteer, snapshot)
+	default:
+		return nil
+	}
+}
+
+func (m *Model) queueMessage(kind controllerCommand) tea.Cmd {
+	snapshot := m.composer.Snapshot()
+	submission := submissionSteer
+	if kind == commandFollowUp {
+		submission = submissionFollowUp
+	}
+
+	return m.prepareSubmission(submission, snapshot)
+}
+
+func (m *Model) prepareSubmission(
+	kind submissionKind,
+	snapshot composerSnapshot,
+) tea.Cmd {
+	if composerSnapshotHasFiles(snapshot) {
+		m.composerResolveSeq++
+		generation := m.composerResolveSeq
+		resolveCtx, cancel := context.WithCancel(m.ctx)
+		m.composerCancel = cancel
+		m.composerResolving = true
+		m.streamErr = nil
+		m.setLayout()
+
+		return func() tea.Msg {
+			message, err := resolveComposerSnapshot(
+				resolveCtx,
+				snapshot,
+				m.controller.ResolveWorkspaceFile,
+			)
+
+			return composerResolvedMsg{
+				generation: generation,
+				snapshot:   snapshot,
+				kind:       kind,
+				message:    message,
+				err:        err,
+			}
+		}
+	}
+
+	message, err := resolveComposerSnapshot(m.ctx, snapshot, nil)
 	if err != nil {
 		if strings.TrimSpace(m.composer.Value()) != "" {
 			m.streamErr = err
@@ -1410,8 +1529,15 @@ func (m *Model) submit(actionCtx actionContext) tea.Cmd {
 		return nil
 	}
 
-	switch actionCtx {
-	case contextIdle:
+	return m.dispatchSubmission(kind, snapshot, message)
+}
+
+func (m *Model) dispatchSubmission(
+	kind submissionKind,
+	snapshot composerSnapshot,
+	message ai.Message,
+) tea.Cmd {
+	if kind == submissionPrompt {
 		if err := m.composer.RecordHistory(snapshot); err != nil {
 			m.streamErr = err
 
@@ -1422,34 +1548,16 @@ func (m *Model) submit(actionCtx actionContext) tea.Cmd {
 		m.streamErr = nil
 
 		return m.startStream(func(ctx context.Context) iter.Seq2[coding.Event, error] {
-			return m.controller.Prompt(ctx, ai.UserText(text))
+			return m.controller.Prompt(ctx, message)
 		})
-	case contextRunning:
-		return m.queueMessage(commandSteer)
-	default:
-		return nil
-	}
-}
-
-func (m *Model) queueMessage(kind controllerCommand) tea.Cmd {
-	snapshot := m.composer.Snapshot()
-	text, err := m.composer.Assemble()
-	if err != nil {
-		if strings.TrimSpace(m.composer.Value()) != "" {
-			m.streamErr = err
-			m.setLayout()
-		}
-
-		return nil
 	}
 
 	m.composer.Reset()
 	m.setLayout()
 
 	return func() tea.Msg {
-		message := ai.UserText(text)
 		var commandErr error
-		if kind == commandFollowUp {
+		if kind == submissionFollowUp {
 			commandErr = m.controller.FollowUp(message)
 		} else {
 			commandErr = m.controller.Steer(message)

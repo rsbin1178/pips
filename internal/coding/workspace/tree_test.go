@@ -110,6 +110,17 @@ func TestTreeInspectMutationPathRejectsSymlinksAndUnsupportedTypes(t *testing.T)
 
 	_, _, err = tree.InspectMutationPath("real")
 	require.ErrorIs(t, err, workspace.ErrUnsupportedType)
+
+	path, info, err = tree.InspectRegularPath("real/file.txt")
+	require.NoError(t, err)
+	assert.Equal(t, "real/file.txt", path)
+	assert.True(t, info.Mode().IsRegular())
+
+	_, _, err = tree.InspectRegularPath("real/new.txt")
+	require.ErrorIs(t, err, fs.ErrNotExist)
+
+	_, _, err = tree.InspectRegularPath("linked/file.txt")
+	require.ErrorIs(t, err, workspace.ErrSymlink)
 }
 
 func TestTreeMutationUsesStableDirectoryAndExpiresHandles(t *testing.T) {

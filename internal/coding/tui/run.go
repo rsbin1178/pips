@@ -18,6 +18,7 @@ import (
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding"
 	"github.com/rsbin/pips/internal/coding/approval"
+	"github.com/rsbin/pips/internal/coding/attachment"
 	"github.com/rsbin/pips/internal/coding/changes"
 	"github.com/rsbin/pips/internal/coding/config"
 	"github.com/rsbin/pips/internal/coding/modelcatalog"
@@ -81,6 +82,8 @@ type Controller interface {
 	FollowUp(...ai.Message) error
 	Cancel() error
 	Reload(context.Context) error
+	ListWorkspaceFiles(context.Context) (attachment.Snapshot, error)
+	ResolveWorkspaceFile(context.Context, attachment.Reference) (attachment.Text, error)
 	Snapshot() coding.State
 	SessionID() string
 	Model() runtimecontrol.ModelState

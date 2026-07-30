@@ -13,6 +13,7 @@ import (
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 	"github.com/rsbin/pips/internal/coding"
+	"github.com/rsbin/pips/internal/coding/attachment"
 )
 
 const (
@@ -34,6 +35,7 @@ type composerElementKind uint8
 const (
 	composerElementUnknown composerElementKind = iota
 	composerElementPaste
+	composerElementFile
 )
 
 type composerElement struct {
@@ -41,6 +43,7 @@ type composerElement struct {
 	kind    composerElementKind
 	label   string
 	payload string
+	file    attachment.Reference
 }
 
 type composerPosition struct {
@@ -231,13 +234,88 @@ func (c *composerState) InsertPaste(content string) (bool, error) {
 	return true, nil
 }
 
+func (c *composerState) InsertFile(
+	start int,
+	end int,
+	reference attachment.Reference,
+) error {
+	if len(c.elements) >= maximumComposerElements {
+		return errComposerElementLimit
+	}
+
+	normalized, err := attachment.NormalizeReference(reference)
+	if err != nil {
+		return fmt.Errorf("coding tui: insert Workspace file: %w", err)
+	}
+
+	before := c.Snapshot()
+	if !composerRangeAvailable(before, start, end) {
+		return errComposerCorruptDraft
+	}
+
+	label := c.nextFileLabel(before.display, normalized.Path)
+
+	updated := before.display[:start] + label + before.display[end:]
+	c.Model.SetValue(updated)
+	c.elements = append(c.elements, composerElement{
+		id:    c.nextID,
+		kind:  composerElementFile,
+		label: label,
+		file:  normalized,
+	})
+	line, column := composerPositionAtByte(updated, start+len(label))
+	setComposerPosition(c, line, column)
+
+	if !c.hasValidElements() {
+		c.applySnapshot(before)
+
+		return errComposerCorruptDraft
+	}
+
+	c.exitHistoryOnChange(before.display)
+
+	return nil
+}
+
+func composerRangeAvailable(snapshot composerSnapshot, start, end int) bool {
+	if start < 0 || end < start || end > len(snapshot.display) ||
+		!utf8.ValidString(snapshot.display[:start]) || !utf8.ValidString(snapshot.display[end:]) {
+		return false
+	}
+
+	for _, span := range composerElementSpans(snapshot) {
+		if start < span.end && end > span.start {
+			return false
+		}
+	}
+
+	return true
+}
+
+func (c *composerState) nextFileLabel(display, name string) string {
+	for {
+		c.nextID++
+
+		label := fmt.Sprintf("[File #%d · %s]", c.nextID, name)
+		if !strings.Contains(display, label) {
+			return label
+		}
+	}
+}
+
 func (c *composerState) Assemble() (string, error) {
 	return assembleComposerSnapshot(c.Snapshot())
 }
 
 func (c *composerState) RecordHistory(snapshot composerSnapshot) error {
-	if _, err := assembleComposerSnapshot(snapshot); err != nil {
-		return err
+	if !validComposerSnapshot(snapshot) {
+		return errComposerCorruptDraft
+	}
+
+	if !composerSnapshotHasFiles(snapshot) {
+		if _, err := assembleComposerSnapshot(snapshot); err != nil {
+			return err
+		}
 	}
 	if len(c.history) > 0 && equalComposerStructure(c.history[len(c.history)-1], snapshot) {
 		return nil
@@ -419,12 +497,26 @@ func validComposerSnapshot(snapshot composerSnapshot) bool {
 		return false
 	}
 
-	// Payloads enter through InsertPaste and are validated again after assembly.
-	// Do not rescan a retained 1 MiB payload on every textarea update.
+	// Payloads and file contents are validated at their insertion/resolution
+	// boundaries. Do not rescan retained large content on every textarea update.
 	labels := make(map[string]struct{}, len(snapshot.elements))
 	for _, element := range snapshot.elements {
-		if element.id == 0 || element.kind != composerElementPaste || element.label == "" ||
+		if element.id == 0 || element.label == "" ||
 			strings.Count(snapshot.display, element.label) != 1 {
+			return false
+		}
+
+		switch element.kind {
+		case composerElementPaste:
+			if element.file != (attachment.Reference{}) {
+				return false
+			}
+		case composerElementFile:
+			normalized, err := attachment.NormalizeReference(element.file)
+			if err != nil || normalized != element.file || element.payload != "" {
+				return false
+			}
+		default:
 			return false
 		}
 		if _, exists := labels[element.label]; exists {
@@ -461,6 +553,8 @@ func assembleComposerSnapshot(snapshot composerSnapshot) (string, error) {
 		switch element.kind {
 		case composerElementPaste:
 			builder.WriteString(element.payload)
+		case composerElementFile:
+			return "", errComposerCorruptDraft
 		case composerElementUnknown:
 			return "", errComposerCorruptDraft
 		default:
@@ -483,7 +577,8 @@ func equalComposerStructure(left, right composerSnapshot) bool {
 	}
 	for index := range left.elements {
 		if left.elements[index].kind != right.elements[index].kind ||
-			left.elements[index].payload != right.elements[index].payload {
+			left.elements[index].payload != right.elements[index].payload ||
+			left.elements[index].file != right.elements[index].file {
 			return false
 		}
 	}
@@ -512,10 +607,20 @@ func composerStructure(snapshot composerSnapshot) string {
 func composerSnapshotBytes(snapshot composerSnapshot) int {
 	size := len(snapshot.display)
 	for _, element := range snapshot.elements {
-		size += len(element.label) + len(element.payload)
+		size += len(element.label) + len(element.payload) + len(element.file.Path)
 	}
 
 	return size
+}
+
+func composerSnapshotHasFiles(snapshot composerSnapshot) bool {
+	for _, element := range snapshot.elements {
+		if element.kind == composerElementFile {
+			return true
+		}
+	}
+
+	return false
 }
 
 func validatePastedText(content string) error {
