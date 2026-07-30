@@ -18,18 +18,18 @@ func (r *Runtime) ListWorkspaceFiles(ctx context.Context) (attachment.Snapshot, 
 	return attachment.Discover(ctx, tree)
 }
 
-// ResolveWorkspaceFile reads one stable text reference through the active
-// Workspace tree. Image references remain deferred to image normalization.
+// ResolveWorkspaceFile reads one stable text or normalized image reference
+// through the active Workspace tree.
 func (r *Runtime) ResolveWorkspaceFile(
 	ctx context.Context,
 	reference attachment.Reference,
-) (attachment.Text, error) {
+) (attachment.Resolved, error) {
 	tree, err := r.attachmentTree(ctx, "resolve Workspace file")
 	if err != nil {
-		return attachment.Text{}, err
+		return attachment.Resolved{}, err
 	}
 
-	return attachment.ResolveText(ctx, tree, reference)
+	return attachment.Resolve(ctx, tree, reference)
 }
 
 func (r *Runtime) attachmentTree(

@@ -18,6 +18,16 @@ const (
 	MaxTextBytes = 512 << 10
 	// MaxPathBytes bounds Workspace-relative attachment paths and provenance.
 	MaxPathBytes = 4 << 10
+	// MaxEncodedImageBytes is the largest encoded image accepted at ingress.
+	MaxEncodedImageBytes = 20 << 20
+	// MaxImageBytes is the largest normalized inline image accepted by Coding.
+	MaxImageBytes = 1 << 20
+	// MaxImagePixels bounds decoded image work before a full decode is attempted.
+	MaxImagePixels = 40_000_000
+	// MaxImagesPerMessage bounds images in one assembled user message.
+	MaxImagesPerMessage = 4
+	// MaxImageBytesPerMessage bounds aggregate inline image data in one message.
+	MaxImageBytesPerMessage = 2 << 20
 )
 
 var (
@@ -27,8 +37,10 @@ var (
 	ErrLimit = errors.New("coding attachment: limit exceeded")
 	// ErrBinaryText means a selected text file is not valid NUL-free UTF-8.
 	ErrBinaryText = errors.New("coding attachment: binary text file")
-	// ErrImagePending means an image reference requires the bounded image normalizer.
-	ErrImagePending = errors.New("coding attachment: image normalization is unavailable")
+	// ErrInvalidImage means encoded image data or metadata is malformed.
+	ErrInvalidImage = errors.New("coding attachment: invalid image")
+	// ErrUnsupportedImage means the encoded image format is not accepted.
+	ErrUnsupportedImage = errors.New("coding attachment: unsupported image format")
 )
 
 // Kind classifies a Workspace attachment without reading its content eagerly.

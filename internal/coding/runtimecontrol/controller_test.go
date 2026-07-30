@@ -173,6 +173,40 @@ func TestControllerModelSwitchReopensDurableSession(t *testing.T) {
 	require.NoError(t, controller.Close(t.Context()))
 }
 
+func TestControllerCapabilitiesFollowCurrentModel(t *testing.T) {
+	t.Parallel()
+
+	fixture := newControllerFixture(t)
+	initial := fixture.options.Resolved
+	if initial.Ref.Model == "" {
+		initial = modelcatalog.ResolvedModel{Ref: fixture.options.Config.Model}
+	}
+	fixture.options.Model = &controlModel{
+		resolved:     initial,
+		capabilities: ai.Capabilities{Text: true, Vision: true},
+	}
+	fixture.newModel = func(
+		_ context.Context,
+		selected modelcatalog.ResolvedModel,
+		_ credential.Store,
+	) (ai.LanguageModel, error) {
+		return &controlModel{
+			resolved:     selected,
+			capabilities: ai.Capabilities{Text: true},
+		}, nil
+	}
+
+	controller, err := newController(t.Context(), fixture.options, fixture.dependencies())
+	require.NoError(t, err)
+	assert.True(t, controller.Capabilities().Vision)
+
+	require.NoError(t, controller.SwitchModel(t.Context(), modelcatalog.Selection{
+		Ref: config.ModelRef{Provider: ai.ProviderAnthropic, Model: "configured-next"},
+	}))
+	assert.False(t, controller.Capabilities().Vision)
+	require.NoError(t, controller.Close(t.Context()))
+}
+
 func TestControllerModelPreparationFailureKeepsCurrentRuntime(t *testing.T) {
 	t.Parallel()
 
@@ -348,15 +382,17 @@ func TestControllerWorkspaceFileOperationsHoldReplacementLease(t *testing.T) {
 	runtime.resolveAttachment = func(
 		_ context.Context,
 		got attachment.Reference,
-	) (attachment.Text, error) {
+	) (attachment.Resolved, error) {
 		require.ErrorIs(t, controller.NewSession(t.Context()), ErrBusy)
 		assert.Equal(t, reference, got)
 
-		return attachment.Text{Reference: got, Content: "private"}, nil
+		return attachment.NewResolvedText(attachment.Text{Reference: got, Content: "private"})
 	}
 	resolved, err := controller.ResolveWorkspaceFile(t.Context(), reference)
 	require.NoError(t, err)
-	assert.Equal(t, "private", resolved.Content)
+	text, ok := resolved.Text()
+	require.True(t, ok)
+	assert.Equal(t, "private", text.Content)
 	require.NoError(t, controller.NewSession(t.Context()))
 	require.NoError(t, controller.Close(t.Context()))
 }
@@ -604,7 +640,7 @@ type fakeRuntime struct {
 	state             coding.State
 	prompt            func(func(coding.Event, error) bool)
 	listAttachments   func(context.Context) (attachment.Snapshot, error)
-	resolveAttachment func(context.Context, attachment.Reference) (attachment.Text, error)
+	resolveAttachment func(context.Context, attachment.Reference) (attachment.Resolved, error)
 	closed            int
 	closeError        error
 }
@@ -852,12 +888,12 @@ func (r *fakeRuntime) ListWorkspaceFiles(ctx context.Context) (attachment.Snapsh
 func (r *fakeRuntime) ResolveWorkspaceFile(
 	ctx context.Context,
 	reference attachment.Reference,
-) (attachment.Text, error) {
+) (attachment.Resolved, error) {
 	if r.resolveAttachment != nil {
 		return r.resolveAttachment(ctx, reference)
 	}
 
-	return attachment.Text{}, nil
+	return attachment.Resolved{}, nil
 }
 
 func (r *fakeRuntime) Snapshot() coding.State {
@@ -891,7 +927,8 @@ func (r *fakeRuntime) closeCalls() int {
 }
 
 type controlModel struct {
-	resolved modelcatalog.ResolvedModel
+	resolved     modelcatalog.ResolvedModel
+	capabilities ai.Capabilities
 }
 
 func (*controlModel) Generate(context.Context, ai.Request) (*ai.Response, error) {
@@ -902,6 +939,6 @@ func (*controlModel) Stream(context.Context, ai.Request) ai.Stream {
 	return func(func(ai.StreamEvent, error) bool) {}
 }
 
-func (m *controlModel) Provider() ai.Provider       { return m.resolved.Ref.Provider }
-func (m *controlModel) ModelID() string             { return m.resolved.Ref.Model }
-func (*controlModel) Capabilities() ai.Capabilities { return ai.Capabilities{} }
+func (m *controlModel) Provider() ai.Provider         { return m.resolved.Ref.Provider }
+func (m *controlModel) ModelID() string               { return m.resolved.Ref.Model }
+func (m *controlModel) Capabilities() ai.Capabilities { return m.capabilities }
