@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -241,6 +242,48 @@ func TestRuntimePreparesAndAppliesCapturedTeamResultWithoutChangingGitMetadata(t
 	require.ErrorIs(t, err, gitcontrol.ErrNotFound)
 }
 
+func TestRuntimeIntegratesParallelTeamResultsWithoutChangingGitMetadata(t *testing.T) {
+	t.Parallel()
+
+	runtime := openCapturedTeamRuntimeWithPaths(t, "worker-a.txt", "worker-b.txt")
+	runner, err := gitcontrol.New(runtime.opts.GitPath, gitcontrol.DefaultLimits())
+	require.NoError(t, err)
+	repositoryBefore, err := runner.InspectRepository(t.Context(), runtime.workspace.Root())
+	require.NoError(t, err)
+	indexBefore, err := os.ReadFile(filepath.Join(repositoryBefore.GitDir, "index"))
+	require.NoError(t, err)
+
+	preview, err := runtime.PrepareTeamIntegration(t.Context(), TeamIntegrationRequest{})
+	require.NoError(t, err)
+	assert.Equal(t, 2, preview.Manifest.Added)
+	assert.True(t, preview.ProducesUnstagedChanges)
+
+	result, err := runtime.ApplyTeamIntegration(t.Context(), TeamIntegrationApproval{
+		ID: preview.ID, Token: preview.ApprovalToken,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "applied", result.State)
+
+	for _, name := range []string{"worker-a.txt", "worker-b.txt"} {
+		content, readErr := os.ReadFile( //nolint:gosec // The test owns these fixed fixture names and Workspace.
+			filepath.Join(runtime.workspace.Root(), name),
+		)
+		require.NoError(t, readErr)
+		assert.Equal(t, "captured by "+name+"\n", string(content))
+	}
+
+	repositoryAfter, err := runner.InspectRepository(t.Context(), runtime.workspace.Root())
+	require.NoError(t, err)
+	indexAfter, err := os.ReadFile(filepath.Join(repositoryAfter.GitDir, "index"))
+	require.NoError(t, err)
+	assert.Equal(t, repositoryBefore.BranchRef, repositoryAfter.BranchRef)
+	assert.Equal(t, repositoryBefore.HeadOID, repositoryAfter.HeadOID)
+	assert.True(t, bytes.Equal(indexBefore, indexAfter), "parent index bytes changed")
+	status, err := runner.SnapshotStatus(t.Context(), runtime.workspace.Root())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"worker-a.txt", "worker-b.txt"}, status.Paths)
+}
+
 func TestRuntimeCleanupRequiresExplicitCloseWithoutIntegrationAndRetainsDirtyWorktree(t *testing.T) {
 	t.Parallel()
 
@@ -334,18 +377,36 @@ func TestRuntimeRefusesIntegrationAfterTeamResourceRevisionDrift(t *testing.T) {
 func openCapturedTeamRuntime(t *testing.T) *Runtime {
 	t.Helper()
 
-	model := newParallelTeamWriteModel("result.txt")
+	return openCapturedTeamRuntimeWithPaths(t, "result.txt")
+}
+
+func openCapturedTeamRuntimeWithPaths(t *testing.T, paths ...string) *Runtime {
+	t.Helper()
+
+	require.NotEmpty(t, paths)
+
+	workers := make([]TeamWorkerSpec, len(paths))
+
+	tasks := make([]TeamTaskSpec, len(paths))
+
+	for index, filePath := range paths {
+		workerName := fmt.Sprintf("Worker %d", index+1)
+		workers[index] = TeamWorkerSpec{
+			Name: workerName, Role: "Implement the assigned file change.",
+		}
+		tasks[index] = TeamTaskSpec{
+			ID: fmt.Sprintf("task-%d", index+1), Title: "Create " + filePath,
+			Description:    "Create " + filePath + " with the requested bounded content.",
+			AssignedWorker: workerName,
+		}
+	}
+
+	model := newParallelTeamWriteModel(paths...)
 	runtime := openGitTestRuntime(t, model, nil)
 	proposal, err := runtime.ProposeTeam(t.Context(), TeamProposalRequest{
-		Objective: "Create the captured result without modifying the parent Workspace.",
-		Workers: []TeamWorkerSpec{{
-			Name: "Implementer", Role: "Implement the assigned file change.",
-		}},
-		Tasks: []TeamTaskSpec{{
-			ID: "task-1", Title: "Create result",
-			Description:    "Create result.txt with the requested bounded content.",
-			AssignedWorker: "Implementer",
-		}},
+		Objective: "Create captured results without modifying the parent Workspace.",
+		Workers:   workers,
+		Tasks:     tasks,
 	})
 	require.NoError(t, err)
 	reference, err := runtime.ConfirmTeam(t.Context(), TeamConfirmation{
@@ -354,20 +415,30 @@ func openCapturedTeamRuntime(t *testing.T) *Runtime {
 	require.NoError(t, err)
 	require.Eventually(t, func() bool {
 		aggregate, getErr := runtime.team.engine.Get(t.Context(), reference.TeamID)
-		if getErr != nil || len(aggregate.Tasks) != 1 ||
-			aggregate.Tasks[0].Status != team.TaskStatusCompleted {
+		if getErr != nil || len(aggregate.Tasks) != len(tasks) {
 			return false
+		}
+
+		for _, task := range aggregate.Tasks {
+			if task.Status != team.TaskStatusCompleted {
+				return false
+			}
 		}
 
 		resources, loadErr := runtime.team.state.Load(t.Context(), reference.TeamID)
-		if loadErr != nil || len(resources.Attempts) != 1 {
+		if loadErr != nil || len(resources.Attempts) != len(tasks) {
 			return false
 		}
 
-		terminal := resources.Attempts[0].State == teamstate.AttemptCaptured ||
-			resources.Attempts[0].State == teamstate.AttemptTerminal
+		for _, attempt := range resources.Attempts {
+			terminal := attempt.State == teamstate.AttemptCaptured ||
+				attempt.State == teamstate.AttemptTerminal
+			if !terminal {
+				return false
+			}
+		}
 
-		return terminal && runtime.team.ownerCount() == 0
+		return runtime.team.ownerCount() == 0
 	}, 10*time.Second, 20*time.Millisecond)
 
 	return runtime
