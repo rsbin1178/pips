@@ -56,9 +56,11 @@ func (m *Model) openCommandPicker() {
 		return
 	}
 
+	previous := m.composer.Snapshot()
 	m.picker = pickerState{
-		kind:          pickerCommand,
-		previousInput: m.composer.Value(),
+		kind:             pickerCommand,
+		previousInput:    previous.display,
+		previousComposer: previous,
 	}
 	m.syncCommandInput()
 	m.setLayout()
@@ -66,10 +68,14 @@ func (m *Model) openCommandPicker() {
 
 func (m *Model) closeCommandPicker(restoreInput bool) {
 	previousInput := m.picker.previousInput
+	previousComposer := m.picker.previousComposer
 
 	m.picker = pickerState{}
 	if restoreInput {
-		m.composer.SetValue(previousInput)
+		if err := m.composer.Restore(previousComposer); err != nil {
+			m.composer.SetValue(previousInput)
+			m.streamErr = err
+		}
 	} else {
 		m.composer.Reset()
 	}
@@ -173,45 +179,59 @@ func (m *Model) executeCommand(command commandDescriptor) (tea.Model, tea.Cmd) {
 	case "plan":
 		return m, m.runModeControl(coding.ModePlan)
 	case "mode":
+		previous := m.picker.previousComposer
 		m.closeCommandPicker(false)
+		m.restoreCommandComposer(previous)
 		m.openModePicker()
 
 		return m, nil
 	case "new":
 		return m, m.runControl(operationNew, "", modelcatalog.Selection{})
 	case "resume":
-		previousInput := m.picker.previousInput
+		previous := m.picker.previousComposer
 		m.closeCommandPicker(false)
 
-		return m, m.openSessionPicker(previousInput)
+		return m, m.openSessionPickerSnapshot(previous)
 	case "model":
+		previous := m.picker.previousComposer
 		m.closeCommandPicker(false)
+		m.restoreCommandComposer(previous)
 		m.openModelPicker()
 
 		return m, nil
 	case "agents":
+		previous := m.picker.previousComposer
 		m.closeCommandPicker(false)
+		m.restoreCommandComposer(previous)
 
 		return m, m.openAgentsRoute()
 	case commandTeam:
+		previous := m.picker.previousComposer
 		m.closeCommandPicker(false)
+		m.restoreCommandComposer(previous)
 
 		return m, m.openTeamRoute(arguments)
 	case "skills":
-		previousInput := m.picker.previousInput
+		previous := m.picker.previousComposer
 		m.closeCommandPicker(false)
 
-		return m, m.openSkillsRoute(previousInput)
+		return m, m.openSkillsRouteSnapshot(previous)
 	case "tree":
+		previous := m.picker.previousComposer
 		m.closeCommandPicker(false)
+		m.restoreCommandComposer(previous)
 
 		return m, m.openTreeRoute(false)
 	case "fork":
+		previous := m.picker.previousComposer
 		m.closeCommandPicker(false)
+		m.restoreCommandComposer(previous)
 
 		return m, m.openTreeRoute(true)
 	case "compact":
+		previous := m.picker.previousComposer
 		m.closeCommandPicker(false)
+		m.restoreCommandComposer(previous)
 
 		return m, m.openCompactPrompt()
 	case "review":
@@ -220,7 +240,9 @@ func (m *Model) executeCommand(command commandDescriptor) (tea.Model, tea.Cmd) {
 
 			return m, nil
 		}
+		previous := m.picker.previousComposer
 		m.closeCommandPicker(false)
+		m.restoreCommandComposer(previous)
 
 		return m, m.startStream(func(ctx context.Context) iter.Seq2[coding.Event, error] {
 			return m.controller.Prompt(ctx, ai.UserText(
@@ -228,17 +250,23 @@ func (m *Model) executeCommand(command commandDescriptor) (tea.Model, tea.Cmd) {
 			))
 		})
 	case commandDiff:
+		previous := m.picker.previousComposer
 		m.closeCommandPicker(false)
+		m.restoreCommandComposer(previous)
 
 		return m, m.loadWorkspaceStatus()
 	case "reload":
 		return m, m.runControl(operationReload, "", modelcatalog.Selection{})
 	case commandStatus:
+		previous := m.picker.previousComposer
 		m.closeCommandPicker(false)
+		m.restoreCommandComposer(previous)
 
 		return m, m.printStatus()
 	case string(actionHelp):
+		previous := m.picker.previousComposer
 		m.closeCommandPicker(false)
+		m.restoreCommandComposer(previous)
 
 		return m, m.printHelp()
 	case "quit":
@@ -247,6 +275,12 @@ func (m *Model) executeCommand(command commandDescriptor) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	default:
 		return m, nil
+	}
+}
+
+func (m *Model) restoreCommandComposer(snapshot composerSnapshot) {
+	if err := m.composer.Restore(snapshot); err != nil {
+		m.streamErr = err
 	}
 }
 

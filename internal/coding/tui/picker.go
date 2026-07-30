@@ -26,22 +26,23 @@ const (
 )
 
 type pickerState struct {
-	kind          pickerKind
-	cursor        int
-	query         string
-	err           error
-	loading       bool
-	controlling   bool
-	models        []modelcatalog.Entry
-	skills        []coding.SkillSummary
-	diagnostics   int
-	selection     modelcatalog.Selection
-	previousInput string
-	previousLine  int
-	previousCol   int
-	tokenStart    int
-	tokenEnd      int
-	generation    uint64
+	kind             pickerKind
+	cursor           int
+	query            string
+	err              error
+	loading          bool
+	controlling      bool
+	models           []modelcatalog.Entry
+	skills           []coding.SkillSummary
+	diagnostics      int
+	selection        modelcatalog.Selection
+	previousInput    string
+	previousComposer composerSnapshot
+	previousLine     int
+	previousCol      int
+	tokenStart       int
+	tokenEnd         int
+	generation       uint64
 }
 
 func (m *Model) openModelPicker() {

@@ -23,24 +23,44 @@ type sessionPickerDataMsg struct {
 }
 
 func newSessionPickerState(previousInput string, theme colorTheme, noColor bool) routeState {
+	return newSessionPickerStateSnapshot(plainComposerSnapshot(previousInput), theme, noColor)
+}
+
+func newSessionPickerStateSnapshot(
+	previous composerSnapshot,
+	theme colorTheme,
+	noColor bool,
+) routeState {
 	return routeState{
-		kind:            routeSessions,
-		search:          newRouteSearch(theme, noColor),
-		sessionRecovery: make(map[string]runtimecontrol.TeamRecoveryHint),
-		previousInput:   previousInput,
-		openedAt:        time.Now(),
+		kind:                routeSessions,
+		search:              newRouteSearch(theme, noColor),
+		sessionRecovery:     make(map[string]runtimecontrol.TeamRecoveryHint),
+		previousInput:       previous.display,
+		previousComposer:    previous.clone(),
+		hasPreviousComposer: true,
+		openedAt:            time.Now(),
 	}
 }
 
 func (m *Model) openSessionPicker(previousInput string) tea.Cmd {
+	return m.openSessionPickerSnapshot(plainComposerSnapshot(previousInput))
+}
+
+func (m *Model) openSessionPickerSnapshot(previous composerSnapshot) tea.Cmd {
 	return m.requestRouteOpen(routeOpenRequest{
-		kind: routeSessions, previousInput: previousInput,
+		kind: routeSessions, previousInput: previous.display,
+		previousComposer:    previous.clone(),
+		hasPreviousComposer: true,
 	})
 }
 
 func (m *Model) activateSessionPicker(previousInput string) tea.Cmd {
+	return m.activateSessionPickerSnapshot(plainComposerSnapshot(previousInput))
+}
+
+func (m *Model) activateSessionPickerSnapshot(previous composerSnapshot) tea.Cmd {
 	m.routeSeq++
-	m.route = newSessionPickerState(previousInput, m.theme, m.options.NoColor)
+	m.route = newSessionPickerStateSnapshot(previous, m.theme, m.options.NoColor)
 	m.route.generation = m.routeSeq
 	m.route.loading = true
 	m.composer.Reset()
@@ -83,9 +103,13 @@ func (m *Model) closeSessionPicker(restoreInput bool) tea.Cmd {
 
 func (m *Model) dismissSessionPicker(restoreInput bool) {
 	previousInput := m.route.previousInput
+	previousComposer := m.route.previousComposer
 	m.route = routeState{}
 	if restoreInput {
-		m.composer.SetValue(previousInput)
+		if err := m.composer.Restore(previousComposer); err != nil {
+			m.composer.SetValue(previousInput)
+			m.streamErr = err
+		}
 	} else {
 		m.composer.Reset()
 	}

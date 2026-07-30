@@ -25,19 +25,31 @@ type skillToggleResultMsg struct {
 }
 
 func (m *Model) openSkillsRoute(previousInput string) tea.Cmd {
+	return m.openSkillsRouteSnapshot(plainComposerSnapshot(previousInput))
+}
+
+func (m *Model) openSkillsRouteSnapshot(previous composerSnapshot) tea.Cmd {
 	return m.requestRouteOpen(routeOpenRequest{
-		kind: routeSkills, previousInput: previousInput,
+		kind: routeSkills, previousInput: previous.display,
+		previousComposer:    previous.clone(),
+		hasPreviousComposer: true,
 	})
 }
 
 func (m *Model) activateSkillsRoute(previousInput string) tea.Cmd {
+	return m.activateSkillsRouteSnapshot(plainComposerSnapshot(previousInput))
+}
+
+func (m *Model) activateSkillsRouteSnapshot(previous composerSnapshot) tea.Cmd {
 	m.routeSeq++
 	m.route = routeState{
-		kind:          routeSkills,
-		generation:    m.routeSeq,
-		loading:       true,
-		search:        newRouteSearch(m.theme, m.options.NoColor),
-		previousInput: previousInput,
+		kind:                routeSkills,
+		generation:          m.routeSeq,
+		loading:             true,
+		search:              newRouteSearch(m.theme, m.options.NoColor),
+		previousInput:       previous.display,
+		previousComposer:    previous.clone(),
+		hasPreviousComposer: true,
 	}
 	m.composer.Reset()
 	m.setLayout()
@@ -62,8 +74,12 @@ func (m *Model) updateSkillsRouteKey(message tea.KeyPressMsg) (tea.Model, tea.Cm
 	key := message.String()
 	if key == keyEscape || key == keyCtrlC {
 		previousInput := m.route.previousInput
+		previousComposer := m.route.previousComposer
 		m.route = routeState{}
-		m.composer.SetValue(previousInput)
+		if err := m.composer.Restore(previousComposer); err != nil {
+			m.composer.SetValue(previousInput)
+			m.streamErr = err
+		}
 		m.setLayout()
 
 		return m, tea.Sequence(m.commitStableTimeline(), m.composer.Focus())
