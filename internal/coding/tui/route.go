@@ -39,14 +39,16 @@ type routeState struct {
 	controlling bool
 	err         error
 
-	search          textinput.Model
-	sessions        []session.Metadata
-	sessionRecovery map[string]runtimecontrol.TeamRecoveryHint
-	skills          []coding.SkillSummary
-	diagnostics     []coding.SkillDiagnostic
-	showDetails     bool
-	previousInput   string
-	openedAt        time.Time
+	search              textinput.Model
+	sessions            []session.Metadata
+	sessionRecovery     map[string]runtimecontrol.TeamRecoveryHint
+	skills              []coding.SkillSummary
+	diagnostics         []coding.SkillDiagnostic
+	showDetails         bool
+	previousInput       string
+	previousComposer    composerSnapshot
+	hasPreviousComposer bool
+	openedAt            time.Time
 
 	children []childSummary
 
@@ -72,15 +74,17 @@ type routeState struct {
 type routeOpenRequest struct {
 	kind routeKind
 
-	previousInput  string
-	forkMode       bool
-	childSessionID string
-	teamObjective  string
-	children       []childSummary
-	child          childSummary
-	query          string
-	cursor         int
-	toolDetail     *toolDetailView
+	previousInput       string
+	previousComposer    composerSnapshot
+	hasPreviousComposer bool
+	forkMode            bool
+	childSessionID      string
+	teamObjective       string
+	children            []childSummary
+	child               childSummary
+	query               string
+	cursor              int
+	toolDetail          *toolDetailView
 }
 
 func (r routeOpenRequest) pending() bool {
@@ -122,6 +126,15 @@ func (m *Model) requestRouteOpen(request routeOpenRequest) tea.Cmd {
 	if !request.pending() {
 		return nil
 	}
+	if !request.hasPreviousComposer {
+		if m.route.hasPreviousComposer {
+			request.previousComposer = m.route.previousComposer.clone()
+		} else {
+			request.previousComposer = m.composer.Snapshot()
+		}
+		request.previousInput = request.previousComposer.display
+		request.hasPreviousComposer = true
+	}
 
 	if m.route.kind != routeNone {
 		return m.activateRoute(request)
@@ -147,24 +160,41 @@ func (m *Model) activateRoute(request routeOpenRequest) tea.Cmd {
 
 	switch request.kind {
 	case routeSessions:
-		return m.activateSessionPicker(request.previousInput)
+		return m.activateSessionPickerSnapshot(request.previousComposer)
 	case routeSkills:
-		return m.activateSkillsRoute(request.previousInput)
+		return m.activateSkillsRouteSnapshot(request.previousComposer)
 	case routeAgents:
-		return m.activateAgentsRoute()
+		command := m.activateAgentsRoute()
+		m.setRouteComposerSnapshot(request)
+
+		return command
 	case routeChild:
-		return m.activateChildRoute(request)
+		command := m.activateChildRoute(request)
+		m.setRouteComposerSnapshot(request)
+
+		return command
 	case routeTeam:
-		return m.activateTeamRoute(request.teamObjective)
+		command := m.activateTeamRoute(request.teamObjective)
+		m.setRouteComposerSnapshot(request)
+
+		return command
 	case routeTree:
-		return m.activateTreeRoute(request.forkMode)
+		command := m.activateTreeRoute(request.forkMode)
+		m.setRouteComposerSnapshot(request)
+
+		return command
 	case routeToolDetail:
 		if request.toolDetail == nil {
 			return nil
 		}
 
 		detail := *request.toolDetail
-		m.route = routeState{kind: routeToolDetail, toolDetail: &detail}
+		m.route = routeState{
+			kind: routeToolDetail, toolDetail: &detail,
+			previousInput:       request.previousInput,
+			previousComposer:    request.previousComposer.clone(),
+			hasPreviousComposer: request.hasPreviousComposer,
+		}
 		m.composer.Blur()
 
 		return nil
@@ -173,6 +203,16 @@ func (m *Model) activateRoute(request routeOpenRequest) tea.Cmd {
 	default:
 		return nil
 	}
+}
+
+func (m *Model) setRouteComposerSnapshot(request routeOpenRequest) {
+	if m.route.kind == routeNone || !request.hasPreviousComposer {
+		return
+	}
+
+	m.route.previousInput = request.previousInput
+	m.route.previousComposer = request.previousComposer.clone()
+	m.route.hasPreviousComposer = true
 }
 
 func (m *Model) finishScrollbackWrite(sequence uint64) tea.Cmd {
@@ -193,7 +233,14 @@ func (m *Model) finishScrollbackWrite(sequence uint64) tea.Cmd {
 // the native scrollback insertion.
 func (m *Model) closeRouteToParent() tea.Cmd {
 	m.stopTeamWorkerRouteSubscription()
+	previous := m.route.previousComposer
+	hasPrevious := m.route.hasPreviousComposer
 	m.route = routeState{}
+	if hasPrevious {
+		if err := m.composer.Restore(previous); err != nil {
+			m.streamErr = err
+		}
+	}
 	m.setLayout()
 
 	return tea.Sequence(m.commitStableTimeline(), m.composer.Focus())
@@ -204,6 +251,9 @@ func newChildRouteRequest(previous routeState, child childSummary) routeOpenRequ
 		kind: routeChild, childSessionID: child.childSessionID, child: child,
 		children: append([]childSummary(nil), previous.children...),
 		query:    previous.query, cursor: previous.cursor,
+		previousInput:       previous.previousInput,
+		previousComposer:    previous.previousComposer.clone(),
+		hasPreviousComposer: previous.hasPreviousComposer,
 	}
 }
 

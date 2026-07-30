@@ -90,7 +90,9 @@ func TestPTYLifecycleRestoresTerminalBeforeControllerClose(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 	require.NoError(t, pty.Setsize(master, &pty.Winsize{Rows: 36, Cols: 100}))
 	_, err = master.Write([]byte(
-		"\x1b[200~paste one\npaste two\x1b[201~" +
+		"\x1b[200~small @ literal\x1b[201~\x0a" +
+			"\x1b[200~paste one\npaste two\npaste three\npaste four\n" +
+			"paste five\npaste six\npaste seven\npaste eight\npaste nine\x1b[201~" +
 			"\x0actrl-j\x1b[13;2ushift-enter\r",
 	))
 	require.NoError(t, err)
@@ -151,7 +153,9 @@ func TestPTYLifecycleRestoresTerminalBeforeControllerClose(t *testing.T) {
 	assert.Contains(t, value, "SHELL_HISTORY_MARKER")
 	assert.Contains(t, value, "Pips")
 	assert.Contains(t, value, "✻ Pips")
-	assert.Contains(t, value, "PROMPT_LINES=4")
+	assert.Contains(t, value, "small @ literal")
+	assert.Contains(t, value, "[Pasted text #1")
+	assert.Contains(t, value, "PROMPT_LINES=12")
 	assert.Contains(t, value, "scripted final answer")
 	assert.Contains(t, value, "▣ openai/tui-scripted ·")
 	assert.Contains(t, value, "▣ Team Worker · Team task · Completed")
