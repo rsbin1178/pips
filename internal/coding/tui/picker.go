@@ -9,6 +9,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/rsbin/pips/internal/coding"
+	"github.com/rsbin/pips/internal/coding/attachment"
 	"github.com/rsbin/pips/internal/coding/config"
 	"github.com/rsbin/pips/internal/coding/modelcatalog"
 )
@@ -22,6 +23,7 @@ const (
 	pickerCommand
 	pickerModel
 	pickerSkill
+	pickerFile
 	pickerMode
 )
 
@@ -34,6 +36,8 @@ type pickerState struct {
 	controlling      bool
 	models           []modelcatalog.Entry
 	skills           []coding.SkillSummary
+	files            []attachment.Summary
+	truncated        bool
 	diagnostics      int
 	selection        modelcatalog.Selection
 	previousInput    string
@@ -75,6 +79,55 @@ func (m *Model) closePicker() tea.Cmd {
 	return m.composer.Focus()
 }
 
+func (m *Model) openInlinePicker(trigger byte, kind pickerKind) (uint64, bool) {
+	value := m.composer.Value()
+	cursor := composerCursorByte(value, m.composer.Line(), m.composer.Column())
+	if cursor <= 0 || cursor > len(value) || value[cursor-1] != trigger {
+		return 0, false
+	}
+
+	start := cursor - 1
+	previous := value[:start] + value[cursor:]
+	previousLine, previousColumn := composerPositionAtByte(previous, start)
+	previousComposer := m.composer.Snapshot()
+	previousComposer.display = previous
+	previousComposer.position = composerPosition{
+		line: previousLine, column: previousColumn,
+	}
+
+	m.pickerSeq++
+	m.picker = pickerState{
+		kind:             kind,
+		loading:          true,
+		previousInput:    previous,
+		previousComposer: previousComposer,
+		previousLine:     previousLine,
+		previousCol:      previousColumn,
+		tokenStart:       start,
+		tokenEnd:         cursor,
+		generation:       m.pickerSeq,
+	}
+	m.setLayout()
+
+	return m.picker.generation, true
+}
+
+func (m *Model) syncInlinePickerToken(replacement string) {
+	value := m.composer.Value()
+	start := min(max(0, m.picker.tokenStart), len(value))
+	end := min(max(start, m.picker.tokenEnd), len(value))
+	updated := value[:start] + replacement + value[end:]
+	m.picker.tokenEnd = start + len(replacement)
+	if err := m.composer.setDisplayPreservingElements(updated); err != nil {
+		m.picker.err = err
+
+		return
+	}
+
+	line, column := composerPositionAtByte(updated, m.picker.tokenEnd)
+	setComposerPosition(&m.composer, line, column)
+}
+
 //nolint:gocyclo // The picker owns the complete set of model-selection terminal bindings.
 func (m *Model) updatePickerKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch m.picker.kind {
@@ -83,6 +136,8 @@ func (m *Model) updatePickerKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case pickerModel:
 	case pickerSkill:
 		return m.updateSkillPickerKey(message)
+	case pickerFile:
+		return m.updateFilePickerKey(message)
 	case pickerMode:
 		return m.updateModePickerKey(message)
 	default:

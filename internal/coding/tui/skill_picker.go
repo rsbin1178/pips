@@ -26,35 +26,10 @@ func (m *Model) openSkillPickerForInput(input string) tea.Cmd {
 }
 
 func (m *Model) openSkillPickerAfterDollar() tea.Cmd {
-	value := m.composer.Value()
-	cursor := composerCursorByte(value, m.composer.Line(), m.composer.Column())
-	if cursor <= 0 || cursor > len(value) || value[cursor-1] != '$' {
+	generation, ok := m.openInlinePicker('$', pickerSkill)
+	if !ok {
 		return nil
 	}
-
-	start := cursor - 1
-	previous := value[:start] + value[cursor:]
-	previousLine, previousColumn := composerPositionAtByte(previous, start)
-	previousComposer := m.composer.Snapshot()
-	previousComposer.display = previous
-	previousComposer.position = composerPosition{
-		line: previousLine, column: previousColumn,
-	}
-
-	m.pickerSeq++
-	m.picker = pickerState{
-		kind:             pickerSkill,
-		loading:          true,
-		previousInput:    previous,
-		previousComposer: previousComposer,
-		previousLine:     previousLine,
-		previousCol:      previousColumn,
-		tokenStart:       start,
-		tokenEnd:         cursor,
-		generation:       m.pickerSeq,
-	}
-	m.setLayout()
-	generation := m.picker.generation
 
 	return func() tea.Msg {
 		snapshot, err := m.controller.Skills(m.ctx)
@@ -90,7 +65,7 @@ func (m *Model) updateSkillPickerKey(message tea.KeyPressMsg) (tea.Model, tea.Cm
 		m.picker.query = ""
 		m.picker.cursor = 0
 		m.picker.err = nil
-		m.syncSkillToken("$")
+		m.syncInlinePickerToken("$")
 	case keyBackspace:
 		if m.picker.query == "" {
 			return m, m.restoreSkillPicker()
@@ -99,13 +74,13 @@ func (m *Model) updateSkillPickerKey(message tea.KeyPressMsg) (tea.Model, tea.Cm
 		m.picker.query = trimLastRune(m.picker.query)
 		m.picker.cursor = 0
 		m.picker.err = nil
-		m.syncSkillToken("$" + m.picker.query)
+		m.syncInlinePickerToken("$" + m.picker.query)
 	case keyEnter:
 		if len(filtered) == 0 {
 			return m, nil
 		}
 
-		m.syncSkillToken("$" + filtered[m.picker.cursor].Name + " ")
+		m.syncInlinePickerToken("$" + filtered[m.picker.cursor].Name + " ")
 		m.picker = pickerState{}
 		m.setLayout()
 
@@ -127,7 +102,7 @@ func (m *Model) updateSkillPickerKey(message tea.KeyPressMsg) (tea.Model, tea.Cm
 		m.picker.query += text
 		m.picker.cursor = 0
 		m.picker.err = nil
-		m.syncSkillToken("$" + m.picker.query)
+		m.syncInlinePickerToken("$" + m.picker.query)
 	}
 
 	m.setLayout()
@@ -149,21 +124,6 @@ func (m *Model) restoreSkillPicker() tea.Cmd {
 	m.setLayout()
 
 	return m.composer.Focus()
-}
-
-func (m *Model) syncSkillToken(replacement string) {
-	value := m.composer.Value()
-	start := min(max(0, m.picker.tokenStart), len(value))
-	end := min(max(start, m.picker.tokenEnd), len(value))
-	updated := value[:start] + replacement + value[end:]
-	m.picker.tokenEnd = start + len(replacement)
-	if err := m.composer.setDisplayPreservingElements(updated); err != nil {
-		m.picker.err = err
-
-		return
-	}
-	line, column := composerPositionAtByte(updated, m.picker.tokenEnd)
-	setComposerPosition(&m.composer, line, column)
 }
 
 func (m *Model) filteredSkills() []coding.SkillSummary {

@@ -16,6 +16,7 @@ import (
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding"
 	"github.com/rsbin/pips/internal/coding/approval"
+	"github.com/rsbin/pips/internal/coding/attachment"
 	"github.com/rsbin/pips/internal/coding/changes"
 	"github.com/rsbin/pips/internal/coding/config"
 	"github.com/rsbin/pips/internal/coding/credential"
@@ -321,6 +322,45 @@ func TestControllerRejectsReplacementWhilePausedOrIterating(t *testing.T) {
 	})
 }
 
+func TestControllerWorkspaceFileOperationsHoldReplacementLease(t *testing.T) {
+	t.Parallel()
+
+	fixture := newControllerFixture(t)
+	controller, err := newController(t.Context(), fixture.options, fixture.dependencies())
+	require.NoError(t, err)
+	runtime := fixture.opener.runtimes[0]
+	source := attachment.Snapshot{Files: []attachment.Summary{{
+		Path: "notes.txt", Kind: attachment.KindText, Size: 7,
+	}}}
+	runtime.listAttachments = func(context.Context) (attachment.Snapshot, error) {
+		require.ErrorIs(t, controller.NewSession(t.Context()), ErrBusy)
+
+		return source, nil
+	}
+
+	snapshot, err := controller.ListWorkspaceFiles(t.Context())
+	require.NoError(t, err)
+	require.Len(t, snapshot.Files, 1)
+	snapshot.Files[0].Path = "changed"
+	assert.Equal(t, "notes.txt", source.Files[0].Path)
+
+	reference := source.Files[0].Reference()
+	runtime.resolveAttachment = func(
+		_ context.Context,
+		got attachment.Reference,
+	) (attachment.Text, error) {
+		require.ErrorIs(t, controller.NewSession(t.Context()), ErrBusy)
+		assert.Equal(t, reference, got)
+
+		return attachment.Text{Reference: got, Content: "private"}, nil
+	}
+	resolved, err := controller.ResolveWorkspaceFile(t.Context(), reference)
+	require.NoError(t, err)
+	assert.Equal(t, "private", resolved.Content)
+	require.NoError(t, controller.NewSession(t.Context()))
+	require.NoError(t, controller.Close(t.Context()))
+}
+
 func TestControllerListsOnlyCurrentWorkspaceSessions(t *testing.T) {
 	t.Parallel()
 
@@ -560,11 +600,13 @@ func (o *scriptedRuntimeOpener) open(
 }
 
 type fakeRuntime struct {
-	mu         sync.Mutex
-	state      coding.State
-	prompt     func(func(coding.Event, error) bool)
-	closed     int
-	closeError error
+	mu                sync.Mutex
+	state             coding.State
+	prompt            func(func(coding.Event, error) bool)
+	listAttachments   func(context.Context) (attachment.Snapshot, error)
+	resolveAttachment func(context.Context, attachment.Reference) (attachment.Text, error)
+	closed            int
+	closeError        error
 }
 
 func (r *fakeRuntime) Prompt(
@@ -798,6 +840,25 @@ func (*fakeRuntime) Skills(context.Context) (coding.SkillSnapshot, error) {
 }
 
 func (*fakeRuntime) SetSkillEnabled(context.Context, coding.SkillID, bool) error { return nil }
+
+func (r *fakeRuntime) ListWorkspaceFiles(ctx context.Context) (attachment.Snapshot, error) {
+	if r.listAttachments != nil {
+		return r.listAttachments(ctx)
+	}
+
+	return attachment.Snapshot{}, nil
+}
+
+func (r *fakeRuntime) ResolveWorkspaceFile(
+	ctx context.Context,
+	reference attachment.Reference,
+) (attachment.Text, error) {
+	if r.resolveAttachment != nil {
+		return r.resolveAttachment(ctx, reference)
+	}
+
+	return attachment.Text{}, nil
+}
 
 func (r *fakeRuntime) Snapshot() coding.State {
 	r.mu.Lock()

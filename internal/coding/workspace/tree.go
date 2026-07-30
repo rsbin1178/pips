@@ -206,6 +206,19 @@ func (t *Tree) FileSystem() fs.FS {
 // components may not be symbolic links; parents must be directories. A nil
 // FileInfo means the final path does not exist.
 func (t *Tree) InspectMutationPath(name string) (string, fs.FileInfo, error) {
+	return t.inspectRegularPath(name, true)
+}
+
+// InspectRegularPath validates an existing regular file path without following
+// symbolic links in any component.
+func (t *Tree) InspectRegularPath(name string) (string, fs.FileInfo, error) {
+	return t.inspectRegularPath(name, false)
+}
+
+func (t *Tree) inspectRegularPath(
+	name string,
+	allowMissing bool,
+) (string, fs.FileInfo, error) {
 	normalized, err := NormalizePath(name, false)
 	if err != nil {
 		return "", nil, err
@@ -216,7 +229,7 @@ func (t *Tree) InspectMutationPath(name string) (string, fs.FileInfo, error) {
 		current := strings.Join(components[:index+1], "/")
 
 		info, statErr := t.Lstat(current)
-		if errors.Is(statErr, fs.ErrNotExist) && index == len(components)-1 {
+		if allowMissing && errors.Is(statErr, fs.ErrNotExist) && index == len(components)-1 {
 			return normalized, nil, nil
 		}
 
@@ -241,7 +254,7 @@ func (t *Tree) InspectMutationPath(name string) (string, fs.FileInfo, error) {
 		}
 	}
 
-	return "", nil, fmt.Errorf("%w: empty mutation path", ErrInvalidPath)
+	return "", nil, fmt.Errorf("%w: empty regular path", ErrInvalidPath)
 }
 
 // Mutate serializes a guarded filesystem mutation. The callback may open
