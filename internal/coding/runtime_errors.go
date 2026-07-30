@@ -19,6 +19,9 @@ var (
 	// ErrInputRequired means a non-interactive client encountered a structured
 	// user question that it must not answer implicitly.
 	ErrInputRequired = errors.New("coding runtime: structured user input required")
+	// ErrPlanReviewRequired means a non-interactive client encountered a Plan
+	// review decision that it must not answer implicitly.
+	ErrPlanReviewRequired = errors.New("coding runtime: Plan review required")
 	// ErrLegacyToolCallUnresolved means a resumed Session contains a pending
 	// call for a removed pre-P1 Coding Tool protocol. It is never replayed or
 	// guessed under the replacement name.

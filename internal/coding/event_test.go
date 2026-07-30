@@ -14,6 +14,7 @@ import (
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding/approval"
 	"github.com/rsbin/pips/internal/coding/changes"
+	"github.com/rsbin/pips/internal/coding/planreview"
 	"github.com/rsbin/pips/internal/coding/question"
 	"github.com/rsbin/pips/internal/coding/subagent"
 	"github.com/stretchr/testify/assert"
@@ -443,6 +444,14 @@ func eventCases() []eventCase {
 		RequestID: request.ID, SchemaDigest: request.SchemaDigest,
 		Answers: []question.Answer{{Selections: []string{"Core"}}},
 	}
+	planRequest, err := planreview.NewRequest(
+		"submit-plan",
+		"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		512,
+	)
+	if err != nil {
+		panic(err)
+	}
 
 	return []eventCase{
 		{name: "session opened", event: newSessionEvent(EventSessionOpened, SessionOpened{
@@ -517,6 +526,9 @@ func eventCases() []eventCase {
 		{name: "message delta", event: newTestEvent(EventMessageDelta, MessageDelta{
 			Kind: ai.StreamReasoningDelta, Text: "thinking", Signature: "signature",
 		})},
+		{name: "message discarded", event: newTestEvent(
+			EventMessageDiscarded, MessageDiscarded{Turn: 1},
+		)},
 		{name: "tool started", event: newTestEvent(
 			EventToolStarted, ToolStarted{Turn: 1, Call: toolCall},
 		)},
@@ -650,6 +662,18 @@ func eventCases() []eventCase {
 		{name: "question rejected", event: newInteractionEvent(
 			EventQuestionRejected,
 			QuestionRejected{RequestID: request.ID, SchemaDigest: request.SchemaDigest},
+		)},
+		{name: "Plan review required", event: newInteractionEvent(
+			EventPlanReviewRequired,
+			PlanReviewRequired{Request: planRequest},
+		)},
+		{name: "Plan review resolved", event: newInteractionEvent(
+			EventPlanReviewResolved,
+			PlanReviewResolved{
+				RequestID: planRequest.ID,
+				Revision:  planRequest.Revision,
+				Decision:  planreview.DecisionApprove,
+			},
 		)},
 		{name: "workspace changed", event: newInteractionEvent(
 			EventWorkspaceChanged,

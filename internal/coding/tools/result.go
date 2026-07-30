@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"strings"
 
+	"github.com/rsbin/pips/internal/coding/execution"
 	patchdoc "github.com/rsbin/pips/internal/coding/tools/patch"
 	"github.com/rsbin/pips/internal/coding/workspace"
 )
@@ -155,6 +156,8 @@ func errorCode(err error) string {
 		return "canceled"
 	case errors.Is(err, context.DeadlineExceeded):
 		return "deadline_exceeded"
+	case errors.Is(err, execution.ErrInvalidOperation):
+		return "invalid_argument"
 	case errors.Is(err, errInvalidArgument), errors.Is(err, workspace.ErrInvalidPath), errors.Is(err, patchdoc.ErrInvalid):
 		return "invalid_argument"
 	case errors.Is(err, workspace.ErrOutsideRoot):

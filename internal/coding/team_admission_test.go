@@ -647,7 +647,7 @@ func TestTeamWorkerApprovalResolutionCannotDriftToAnotherOwner(t *testing.T) {
 		runtimeToolResponse(
 			"call-worker-shell",
 			"shell",
-			`{"command":"printf should-not-run","permissions":{"network":true},"justification":"test"}`,
+			`{"command":"printf should-not-run","permissions":{"write_paths":[],"network":true},"justification":"test"}`,
 		),
 		runtimeTextResponse("continued after denial"),
 	)

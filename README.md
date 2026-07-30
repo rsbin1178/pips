@@ -212,9 +212,23 @@ tools, and other external side effects at the Runtime capability boundary. Its
 only write exception is the current private document at
 `~/.pips/plans/<session-id>.md`; the model cannot select that path. New creates
 the document lazily, Resume reuses it, and Fork copies an existing snapshot.
-Finishing a plan never grants implementation permission or switches modes.
+Planning follows an evidence → material decisions → implementation design flow.
+When the model calls `submit_plan` with the exact current revision, the TUI
+opens a path-free `plan.md` review. You can keep planning (with optional
+feedback) or explicitly approve the revision. Approval grants no Tool or
+Sandbox permission; only after that Plan interaction reaches idle does the
+current process switch to Agent Mode. A restart never replays historical Plan
+approval as authority. `pips exec --mode plan` cannot answer the review and
+exits with input-required status 3.
 Plan Mode can still read files visible to the process, so it is not a secret
 isolation boundary.
+
+The Shell Tool requires only `command`. `cwd`, `timeout_ms`, `permissions`, and
+`justification` are optional; omit `cwd` for the Workspace root. `permissions`
+may be `null` or a complete object such as
+`{"write_paths":[],"network":false}`. Pips also normalizes the known
+once-JSON-encoded form, but rejects incomplete, unknown, duplicate, or
+recursively encoded permission values with a bounded actionable error.
 
 `/diff` asynchronously reads fresh Git branch, staged, unstaged, conflict, and
 untracked state without modifying the repository. Product metadata under

@@ -133,6 +133,7 @@ func TestCodingFlowIntegration(t *testing.T) {
 		"command": "printf 'after\\n' > file.txt",
 		"permissions": map[string]any{
 			"write_paths": []string{approvedDirectory},
+			"network":     false,
 		},
 		"justification": "exercise one exact expanded sandbox plan",
 	})

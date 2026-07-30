@@ -61,7 +61,7 @@ func TestBuildCodingSystemPromptKeepsSharedPrefixStableAcrossModes(t *testing.T)
 	planOptions := base
 	planOptions.Mode = ModePlan
 	planOptions.PlanDocument = "session-bound:s-1"
-	planOptions.ToolNames = []string{"read", "read_plan", "write_plan"}
+	planOptions.ToolNames = []string{"read", "read_plan", "write_plan", "submit_plan"}
 
 	agentParts, err := buildCodingSystemPromptParts(agentOptions)
 	require.NoError(t, err)
@@ -74,6 +74,9 @@ func TestBuildCodingSystemPromptKeepsSharedPrefixStableAcrossModes(t *testing.T)
 	assert.NotContains(t, agentParts.SharedPrefix, "visible_tools")
 	assert.Contains(t, planParts.Suffix, `"operating_mode": "plan"`)
 	assert.Contains(t, planParts.Suffix, "write_plan")
+	assert.Contains(t, planParts.Suffix, "Phase 1 — Ground")
+	assert.Contains(t, planParts.Suffix, "submit_plan alone")
+	assert.Contains(t, planParts.Suffix, "Plan approval is not Tool approval")
 }
 
 func TestBuildCodingSystemPromptPrefersStructuredQuestionsWhenAvailable(t *testing.T) {

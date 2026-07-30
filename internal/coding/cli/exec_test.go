@@ -15,6 +15,7 @@ import (
 	"github.com/rsbin/pips/internal/coding/config"
 	"github.com/rsbin/pips/internal/coding/execution"
 	"github.com/rsbin/pips/internal/coding/paths"
+	"github.com/rsbin/pips/internal/coding/planreview"
 	"github.com/rsbin/pips/internal/coding/question"
 	"github.com/rsbin/pips/internal/coding/workspace"
 	"github.com/stretchr/testify/assert"
@@ -123,6 +124,25 @@ func TestRunExecRuntimeFailsClosedForStructuredQuestion(t *testing.T) {
 
 	err := runExecRuntime(t.Context(), runtime, &recordingPresenter{}, "prompt")
 	require.ErrorIs(t, err, coding.ErrInputRequired)
+	assert.Equal(t, 1, runtime.continueCalls)
+	assert.Zero(t, runtime.promptCalls)
+	assert.Equal(t, 1, runtime.closeCalls)
+}
+
+func TestRunExecRuntimeFailsClosedForPlanReview(t *testing.T) {
+	t.Parallel()
+
+	runtime := &fakeExecRuntime{
+		state: coding.State{SessionID: "session-1", SessionOpen: true, Phase: coding.PhasePaused},
+		continuation: func(runtime *fakeExecRuntime) iter.Seq2[coding.Event, error] {
+			return func(func(coding.Event, error) bool) {
+				runtime.state.PlanReview.Required = &planreview.Request{ID: "pending"}
+			}
+		},
+	}
+
+	err := runExecRuntime(t.Context(), runtime, &recordingPresenter{}, "prompt")
+	require.ErrorIs(t, err, coding.ErrPlanReviewRequired)
 	assert.Equal(t, 1, runtime.continueCalls)
 	assert.Zero(t, runtime.promptCalls)
 	assert.Equal(t, 1, runtime.closeCalls)

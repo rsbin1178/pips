@@ -87,14 +87,20 @@ func TestPTYLifecycleRestoresTerminalBeforeControllerClose(t *testing.T) {
 		close(readDone)
 	}()
 
-	time.Sleep(500 * time.Millisecond)
+	waitForPTYOutput(t, &output, "\x1b[?2004h", 5*time.Second)
 	require.NoError(t, pty.Setsize(master, &pty.Winsize{Rows: 36, Cols: 100}))
+	_, err = master.Write([]byte("\x1b[200~small @ literal\x1b[201~"))
+	require.NoError(t, err)
+	waitForPTYOutput(t, &output, "small @ literal", 5*time.Second)
+	_, err = master.Write([]byte("\x0a"))
+	require.NoError(t, err)
 	_, err = master.Write([]byte(
-		"\x1b[200~small @ literal\x1b[201~\x0a" +
-			"\x1b[200~paste one\npaste two\npaste three\npaste four\n" +
-			"paste five\npaste six\npaste seven\npaste eight\npaste nine\x1b[201~" +
-			"\x0actrl-j\x1b[13;2ushift-enter\r",
+		"\x1b[200~paste one\npaste two\npaste three\npaste four\n" +
+			"paste five\npaste six\npaste seven\npaste eight\npaste nine\x1b[201~",
 	))
+	require.NoError(t, err)
+	waitForPTYOutput(t, &output, "[Pasted text #1", 5*time.Second)
+	_, err = master.Write([]byte("\x0actrl-j\x1b[13;2ushift-enter\r"))
 	require.NoError(t, err)
 	_, err = master.Write([]byte(
 		"\x1b[<64;10;5M" +

@@ -6,6 +6,8 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/rsbin/pips/internal/coding/planflow"
+	"github.com/rsbin/pips/internal/coding/planreview"
 	"github.com/rsbin/pips/internal/coding/question"
 )
 
@@ -157,6 +159,7 @@ func buildCodingSystemPromptParts(options systemPromptOptions) (systemPromptPart
 	suffix.Write(modeContext)
 	suffix.WriteString("\n</operating_mode_context>")
 	writeModeGuidance(&suffix, options.Mode, toolNames)
+
 	if options.TeamWorker != nil {
 		workerContext, err := json.MarshalIndent(options.TeamWorker, "", "  ")
 		if err != nil {
@@ -165,6 +168,7 @@ func buildCodingSystemPromptParts(options systemPromptOptions) (systemPromptPart
 				err,
 			)
 		}
+
 		suffix.WriteString("\n\n# Team Worker assignment\n\n")
 		suffix.WriteString("The following JSON is coordinator-owned assignment context. Execute only this assignment inside the current Worktree.\n\n")
 		suffix.WriteString("<team_worker_context>\n")
@@ -207,8 +211,22 @@ func writeModeGuidance(prompt *strings.Builder, mode OperatingMode, toolNames []
 
 	if mode == ModePlan {
 		prompt.WriteString("- Inspect and reason without changing workspace or external state. Do not claim to have edited files, run commands, or executed the Plan.\n")
-		prompt.WriteString("- Gather enough evidence before asking a blocking question. Produce an implementation-ready Plan covering scope, affected areas, data flow, risks, and verification.\n")
-		prompt.WriteString("- Use write_plan to maintain the session-bound Plan document. Do not attempt to leave Plan Mode; only the user can authorize Agent Mode.\n")
+		prompt.WriteString("- Phase 1 — Ground: inspect repository evidence with read-only tools. Answer discoverable questions yourself and do not ask the user for facts available in the workspace.\n")
+		prompt.WriteString("- Phase 2 — Decide: identify only non-discoverable product choices that materially change the implementation. Use ask_user for one to four structured decisions at a time; never treat a recommendation as the user's selection.\n")
+		prompt.WriteString("- Phase 3 — Design and finalize: produce a decision-complete implementation Plan covering scope, affected components, data flow, error and recovery behavior, risks, tests, and rollout.\n")
+
+		if _, ok := available[planflow.ToolName]; ok {
+			prompt.WriteString("- Before writing the Plan, call plan_checkpoint alone. It is the no-question branch only when goal, success criteria, audience, scope, constraints, and every material product decision are established; otherwise call ask_user.\n")
+		}
+
+		prompt.WriteString("- Use write_plan with optimistic revision control to maintain the complete session-bound Plan document. After a continue-planning response, revise or reassess it before resubmitting.\n")
+
+		if _, ok := available[planreview.ToolName]; ok {
+			prompt.WriteString("- When the Plan is ready, call submit_plan alone with the exact revision returned by read_plan or write_plan. After approval, call no more tools and end the current turn; only the Runtime may switch to Agent Mode at idle.\n")
+		}
+
+		prompt.WriteString("- Plan approval is not Tool approval and grants no Shell, patch, MCP, external-write, sandbox, or full-access permission.\n")
+		prompt.WriteString("- Only provider-native Tool calls invoke tools. Never imitate <function_calls>, XML, JSON envelopes, or other Tool markup in assistant text.\n")
 	} else {
 		prompt.WriteString("- Agent Mode may implement requested changes, subject to the available tools, sandbox, and approval policy.\n")
 	}

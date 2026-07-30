@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -90,6 +91,79 @@ func TestProviderSmoke(t *testing.T) {
 	require.NoError(t, scanner.Err())
 	require.True(t, assistantMessage, "provider smoke returned no assistant message")
 	require.True(t, interactionCompleted, "provider smoke did not complete the interaction")
+}
+
+//nolint:paralleltest // An opt-in real-provider conformance run must not compete for rate limits.
+func TestProviderPlanConformance(t *testing.T) {
+	if os.Getenv("PIPS_PLAN_CONFORMANCE") != "1" {
+		t.Skip("set PIPS_PLAN_CONFORMANCE=1 with API_KEY and canonical PIPS_MODEL")
+	}
+
+	modelID := requiredSmokeEnvironment(t, "PIPS_MODEL")
+	apiKey := requiredSmokeEnvironment(t, "API_KEY")
+	workspace := t.TempDir()
+	layout, err := paths.New(t.TempDir())
+	require.NoError(t, err)
+
+	command, err := cli.New(cli.Dependencies{
+		Paths:      layout,
+		LookupEnv:  os.LookupEnv,
+		WorkingDir: func() (string, error) { return workspace, nil },
+	})
+	require.NoError(t, err)
+
+	stdout := new(bytes.Buffer)
+	stderr := new(bytes.Buffer)
+	command.SetOut(stdout)
+	command.SetErr(stderr)
+	command.SetArgs([]string{
+		"exec", "--output", "jsonl",
+		"--model", modelID,
+		"--mode", "plan",
+		"--sandbox", "workspace-write",
+		"--approval", "never",
+		"Help me plan and design a student management system using full-stack TypeScript.",
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	runErr := command.ExecuteContext(ctx)
+	if !errors.Is(runErr, coding.ErrInputRequired) {
+		t.Fatalf("Plan conformance must pause for a material decision: %v", runErr)
+	}
+	if strings.Contains(stdout.String(), apiKey) || strings.Contains(stderr.String(), apiKey) {
+		t.Fatal("Plan conformance output disclosed API_KEY")
+	}
+
+	questionRequired := false
+	planWriteStarted := false
+	scanner := bufio.NewScanner(bytes.NewReader(stdout.Bytes()))
+	scanner.Buffer(make([]byte, 64<<10), 1<<20)
+	for scanner.Scan() {
+		var envelope struct {
+			Type    coding.EventType `json:"type"`
+			Payload json.RawMessage  `json:"payload"`
+		}
+		require.NoError(t, json.Unmarshal(scanner.Bytes(), &envelope))
+
+		switch envelope.Type {
+		case coding.EventQuestionRequired:
+			questionRequired = true
+		case coding.EventToolStarted:
+			var payload struct {
+				Call struct {
+					Name string `json:"name"`
+				} `json:"call"`
+			}
+			require.NoError(t, json.Unmarshal(envelope.Payload, &payload))
+			planWriteStarted = planWriteStarted || payload.Call.Name == "write_plan"
+		default:
+		}
+	}
+	require.NoError(t, scanner.Err())
+	require.True(t, questionRequired, "broad product request reached no structured question")
+	require.False(t, planWriteStarted, "Plan write started before material product decisions")
 }
 
 func requiredSmokeEnvironment(t *testing.T, name string) string {

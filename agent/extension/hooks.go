@@ -193,6 +193,12 @@ func composePrepareTurns(values []func(context.Context, agent.RunInfo) agent.Tur
 			if update.Tools != nil {
 				combined.Tools = slices.Clone(update.Tools)
 			}
+
+			if update.NextRequest != nil {
+				next := *update.NextRequest
+				next.Tools = slices.Clone(update.NextRequest.Tools)
+				combined.NextRequest = &next
+			}
 		}
 
 		return combined

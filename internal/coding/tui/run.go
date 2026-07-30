@@ -22,6 +22,7 @@ import (
 	"github.com/rsbin/pips/internal/coding/changes"
 	"github.com/rsbin/pips/internal/coding/config"
 	"github.com/rsbin/pips/internal/coding/modelcatalog"
+	"github.com/rsbin/pips/internal/coding/planreview"
 	"github.com/rsbin/pips/internal/coding/question"
 	"github.com/rsbin/pips/internal/coding/runtimecontrol"
 	"github.com/rsbin/pips/internal/coding/session"
@@ -153,6 +154,11 @@ type Controller interface {
 	ForkSession(context.Context, string) error
 	SwitchModel(context.Context, modelcatalog.Selection) error
 	Close(context.Context) error
+}
+
+type planReviewController interface {
+	ResolvePlanReview(context.Context, planreview.Resolution) iter.Seq2[coding.Event, error]
+	ReadPlanDocument(context.Context, string) (coding.PlanDocument, error)
 }
 
 // ImageClipboard is the one-method clipboard boundary consumed by the TUI.

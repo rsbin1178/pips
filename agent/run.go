@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"iter"
 	"time"
 
@@ -124,9 +126,17 @@ type run struct {
 	// pending holds drained queue messages awaiting injection at the next
 	// turn start.
 	pending []ai.Message
+	// nextRequest is a one-shot request constraint consumed at the next turn.
+	nextRequest *runModelRequest
 
 	usage    ai.Usage
 	lastResp *ai.Response
+}
+
+type runModelRequest struct {
+	tools        *toolbox
+	toolChoice   ai.ToolChoice
+	systemSuffix string
 }
 
 // partial assembles the result accompanying a run error.
@@ -155,15 +165,24 @@ func (r *run) turn(ctx context.Context, turn int) (result *RunResult, next bool,
 		return r.partial(turn - 1), false, err
 	}
 
-	msgs := r.sess.Messages()
-	if r.agent.cfg.transform != nil {
-		msgs, err = r.agent.cfg.transform(ctx, msgs)
-		if err != nil {
-			return r.partial(turn - 1), false, err
-		}
+	msgs, err := r.modelMessages(ctx)
+	if err != nil {
+		return r.partial(turn - 1), false, err
 	}
 
-	resp, stopped, err := r.agent.callModel(ctx, r.model, r.tools, turn, msgs, r.emit, r.streaming)
+	requestUpdate := r.nextRequest
+	r.nextRequest = nil
+
+	turnTools := r.tools
+	if requestUpdate != nil && requestUpdate.tools != nil {
+		turnTools = requestUpdate.tools
+	}
+
+	previousResponse := r.lastResp
+
+	resp, stopped, err := r.agent.callModel(
+		ctx, r.model, turnTools, requestUpdate, turn, msgs, r.emit, r.streaming,
+	)
 	if stopped {
 		return nil, false, nil
 	}
@@ -177,17 +196,15 @@ func (r *run) turn(ctx context.Context, turn int) (result *RunResult, next bool,
 	r.sess.addUsage(resp.Usage)
 
 	if len(resp.ToolCalls()) == 0 {
-		info := OutputGuardrailInfo{
-			RunInfo: RunInfo{
-				RunMetadata: r.meta,
-				Turns:       turn,
-				Usage:       r.usage,
-				Response:    resp,
-			},
-			Message: resp.Message,
+		update, candidateErr := r.evaluateCandidate(ctx, turn, resp)
+		if candidateErr != nil {
+			return r.partial(turn), false, candidateErr
 		}
-		if err := checkOutputGuardrails(ctx, r.agent.cfg.outputGuards, info); err != nil {
-			return r.partial(turn), false, err
+
+		if update != nil {
+			r.lastResp = previousResponse
+
+			return r.retryCandidate(ctx, turn, resp, update)
 		}
 	}
 
@@ -197,7 +214,90 @@ func (r *run) turn(ctx context.Context, turn int) (result *RunResult, next bool,
 		return nil, false, nil
 	}
 
-	return r.toolPhase(ctx, turn, resp)
+	return r.toolPhase(ctx, turn, resp, turnTools)
+}
+
+func (r *run) modelMessages(ctx context.Context) ([]ai.Message, error) {
+	messages := r.sess.Messages()
+	if r.agent.cfg.transform == nil {
+		return messages, nil
+	}
+
+	return r.agent.cfg.transform(ctx, messages)
+}
+
+func (r *run) evaluateCandidate(
+	ctx context.Context,
+	turn int,
+	resp *ai.Response,
+) (*ModelRequestUpdate, error) {
+	info := OutputGuardrailInfo{
+		RunInfo: RunInfo{
+			RunMetadata: r.meta,
+			Turns:       turn,
+			Usage:       r.usage,
+			Response:    resp,
+		},
+		Message: resp.Message,
+	}
+	if err := checkOutputGuardrails(ctx, r.agent.cfg.outputGuards, info); err != nil {
+		return nil, err
+	}
+
+	candidate := r.agent.cfg.candidate
+	if candidate == nil {
+		return nil, nil
+	}
+
+	decision := candidate(ctx, CandidateAnswerInfo{
+		RunInfo: info.RunInfo,
+		Session: r.sess.Messages(),
+		Message: resp.Message,
+	})
+	if decision.Err != nil {
+		return nil, decision.Err
+	}
+
+	return decision.Retry, nil
+}
+
+func (r *run) retryCandidate(
+	ctx context.Context,
+	turn int,
+	resp *ai.Response,
+	update *ModelRequestUpdate,
+) (result *RunResult, next bool, err error) {
+	if !r.emit(Event{Type: EventCandidateDiscard, Turn: turn}) ||
+		!r.emit(Event{Type: EventTurnEnd, Turn: turn, Usage: r.usage}) {
+		return nil, false, nil
+	}
+
+	if err := r.prepare(ctx, turn, resp); err != nil {
+		return r.partial(turn), false, err
+	}
+
+	if err := r.setNextRequest(update); err != nil {
+		return r.partial(turn), false, err
+	}
+
+	if err := ctx.Err(); err != nil {
+		return r.partial(turn), false, err
+	}
+
+	if reason, stop := r.agent.shouldStop(RunInfo{
+		RunMetadata: r.meta,
+		Turns:       turn,
+		Usage:       r.usage,
+		Response:    resp,
+	}); stop {
+		result, err := r.finish(reason, turn, nil)
+
+		return result, false, err
+	}
+
+	r.pending = r.sess.drainSteering(r.agent.cfg.steeringMode)
+
+	return nil, true, nil
 }
 
 // inject appends and announces messages drained from the queues; false means
@@ -218,7 +318,12 @@ func (r *run) inject(turn int) bool {
 
 // toolPhase executes a turn's tool calls (if any) and decides how the loop
 // proceeds.
-func (r *run) toolPhase(ctx context.Context, turn int, resp *ai.Response) (result *RunResult, next bool, err error) {
+func (r *run) toolPhase(
+	ctx context.Context,
+	turn int,
+	resp *ai.Response,
+	tools *toolbox,
+) (result *RunResult, next bool, err error) {
 	calls := resp.ToolCalls()
 
 	var outcome batchOutcome
@@ -231,7 +336,7 @@ func (r *run) toolPhase(ctx context.Context, turn int, resp *ai.Response) (resul
 		// let the model re-issue the calls (none are safe to execute).
 		outcome = r.truncatedBatch(turn, calls)
 	default:
-		outcome = r.agent.execBatch(ctx, r.tools, r.cancel, turn, calls, r.emit)
+		outcome = r.agent.execBatch(ctx, tools, r.cancel, turn, calls, r.emit)
 	}
 
 	if len(outcome.results) > 0 {
@@ -288,15 +393,8 @@ func (r *run) truncatedBatch(turn int, calls []ai.ToolCallPart) batchOutcome {
 // when nothing is queued; otherwise the stop conditions guard continuation,
 // and steering — then, on a natural stop, follow-ups — feed the next turn.
 func (r *run) decide(ctx context.Context, turn int, natural bool, naturalStop StopReason) (result *RunResult, next bool, err error) {
-	if fn := r.agent.cfg.prepareTurn; fn != nil {
-		if err := r.applyTurnUpdate(fn(ctx, RunInfo{
-			RunMetadata: r.meta,
-			Turns:       turn,
-			Usage:       r.usage,
-			Response:    r.lastResp,
-		})); err != nil {
-			return r.partial(turn), false, err
-		}
+	if err := r.prepare(ctx, turn, r.lastResp); err != nil {
+		return r.partial(turn), false, err
 	}
 
 	if err := ctx.Err(); err != nil {
@@ -332,6 +430,19 @@ func (r *run) decide(ctx context.Context, turn int, natural bool, naturalStop St
 	return nil, true, nil
 }
 
+func (r *run) prepare(ctx context.Context, turn int, response *ai.Response) error {
+	if fn := r.agent.cfg.prepareTurn; fn != nil {
+		return r.applyTurnUpdate(fn(ctx, RunInfo{
+			RunMetadata: r.meta,
+			Turns:       turn,
+			Usage:       r.usage,
+			Response:    response,
+		}))
+	}
+
+	return nil
+}
+
 func (r *run) applyTurnUpdate(update TurnUpdate) error {
 	if update.Err != nil {
 		return update.Err
@@ -345,16 +456,79 @@ func (r *run) applyTurnUpdate(update TurnUpdate) error {
 		r.sess.Replace(update.ReplaceMessages...)
 	}
 
-	if update.Tools == nil {
+	if update.Tools != nil {
+		tools, err := newToolbox(update.Tools)
+		if err != nil {
+			return err
+		}
+
+		r.tools = tools
+	}
+
+	if update.NextRequest != nil {
+		return r.setNextRequest(update.NextRequest)
+	}
+
+	return nil
+}
+
+func (r *run) setNextRequest(update *ModelRequestUpdate) error {
+	if update == nil {
+		r.nextRequest = nil
+
 		return nil
 	}
 
-	tools, err := newToolbox(update.Tools)
-	if err != nil {
-		return err
+	selected := r.tools
+
+	request := &runModelRequest{
+		toolChoice:   update.ToolChoice,
+		systemSuffix: update.SystemSuffix,
+	}
+	if update.Tools != nil {
+		tools, err := newToolbox(update.Tools)
+		if err != nil {
+			return fmt.Errorf("agent: next model request: %w", err)
+		}
+
+		selected = tools
+		request.tools = tools
 	}
 
-	r.tools = tools
+	if err := validateToolChoice(update.ToolChoice, selected); err != nil {
+		return fmt.Errorf("agent: next model request: %w", err)
+	}
+
+	r.nextRequest = request
+
+	return nil
+}
+
+func validateToolChoice(choice ai.ToolChoice, tools *toolbox) error {
+	switch choice.Mode {
+	case "", ai.ToolChoiceAuto, ai.ToolChoiceNone:
+		if choice.Name != "" {
+			return errors.New("tool choice name requires exact-tool mode")
+		}
+	case ai.ToolChoiceRequired:
+		if choice.Name != "" {
+			return errors.New("required tool choice must not name a tool")
+		}
+
+		if tools == nil || len(tools.decls) == 0 {
+			return errors.New("required tool choice has no available tools")
+		}
+	case ai.ToolChoiceTool:
+		if choice.Name == "" {
+			return errors.New("exact tool choice has no name")
+		}
+
+		if tools == nil || tools.byName[choice.Name] == nil {
+			return fmt.Errorf("exact tool choice %q is unavailable", choice.Name)
+		}
+	default:
+		return fmt.Errorf("unknown tool choice mode %q", choice.Mode)
+	}
 
 	return nil
 }
@@ -376,8 +550,17 @@ func (r *run) finish(stop StopReason, turns int, pending []ai.ToolCallPart) (*Ru
 // callModel performs one model call. When streaming, deltas tee through emit
 // while [ai.Collect] folds them into the completed response; stopped reports
 // that the consumer quit mid-stream.
-func (a *Agent) callModel(ctx context.Context, model ai.LanguageModel, tools *toolbox, turn int, msgs []ai.Message, emit emitFunc, streaming bool) (resp *ai.Response, stopped bool, err error) {
-	req := a.requestWithTools(msgs, tools)
+func (a *Agent) callModel(
+	ctx context.Context,
+	model ai.LanguageModel,
+	tools *toolbox,
+	update *runModelRequest,
+	turn int,
+	msgs []ai.Message,
+	emit emitFunc,
+	streaming bool,
+) (resp *ai.Response, stopped bool, err error) {
+	req := a.requestWithTools(msgs, tools, update)
 
 	if !streaming {
 		resp, err = model.Generate(ctx, req)
