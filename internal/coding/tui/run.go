@@ -160,20 +160,27 @@ type ImageClipboard interface {
 	ReadImage(context.Context) ([]byte, error)
 }
 
+// ImageIngress receives validated immutable images from an application-owned
+// bridge such as one remote SSH session.
+type ImageIngress interface {
+	Receive(context.Context) (attachment.Image, error)
+}
+
 // Bootstrap loads configuration and opens the first Runtime. trustProject is
 // the user's explicit Workspace trust decision.
 type Bootstrap func(context.Context, bool) (Controller, error)
 
 // Options contain the CLI-owned resources used by one TUI Program.
 type Options struct {
-	Input       io.Reader
-	Output      io.Writer
-	Environment []string
-	Workspace   string
-	Trusted     bool
-	NoColor     bool
-	Bootstrap   Bootstrap
-	Clipboard   ImageClipboard
+	Input        io.Reader
+	Output       io.Writer
+	Environment  []string
+	Workspace    string
+	Trusted      bool
+	NoColor      bool
+	Bootstrap    Bootstrap
+	Clipboard    ImageClipboard
+	ImageIngress ImageIngress
 }
 
 // Run owns the terminal Program and closes any acquired Controller after the
