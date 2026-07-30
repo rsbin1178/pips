@@ -35,17 +35,23 @@ func (m *Model) openSkillPickerAfterDollar() tea.Cmd {
 	start := cursor - 1
 	previous := value[:start] + value[cursor:]
 	previousLine, previousColumn := composerPositionAtByte(previous, start)
+	previousComposer := m.composer.Snapshot()
+	previousComposer.display = previous
+	previousComposer.position = composerPosition{
+		line: previousLine, column: previousColumn,
+	}
 
 	m.pickerSeq++
 	m.picker = pickerState{
-		kind:          pickerSkill,
-		loading:       true,
-		previousInput: previous,
-		previousLine:  previousLine,
-		previousCol:   previousColumn,
-		tokenStart:    start,
-		tokenEnd:      cursor,
-		generation:    m.pickerSeq,
+		kind:             pickerSkill,
+		loading:          true,
+		previousInput:    previous,
+		previousComposer: previousComposer,
+		previousLine:     previousLine,
+		previousCol:      previousColumn,
+		tokenStart:       start,
+		tokenEnd:         cursor,
+		generation:       m.pickerSeq,
 	}
 	m.setLayout()
 	generation := m.picker.generation
@@ -131,11 +137,15 @@ func (m *Model) updateSkillPickerKey(message tea.KeyPressMsg) (tea.Model, tea.Cm
 
 func (m *Model) restoreSkillPicker() tea.Cmd {
 	previous := m.picker.previousInput
+	previousComposer := m.picker.previousComposer
 	line := m.picker.previousLine
 	column := m.picker.previousCol
 	m.picker = pickerState{}
-	m.composer.SetValue(previous)
-	setComposerPosition(&m.composer, line, column)
+	if err := m.composer.Restore(previousComposer); err != nil {
+		m.composer.SetValue(previous)
+		setComposerPosition(&m.composer, line, column)
+		m.streamErr = err
+	}
 	m.setLayout()
 
 	return m.composer.Focus()
@@ -147,7 +157,11 @@ func (m *Model) syncSkillToken(replacement string) {
 	end := min(max(start, m.picker.tokenEnd), len(value))
 	updated := value[:start] + replacement + value[end:]
 	m.picker.tokenEnd = start + len(replacement)
-	m.composer.SetValue(updated)
+	if err := m.composer.setDisplayPreservingElements(updated); err != nil {
+		m.picker.err = err
+
+		return
+	}
 	line, column := composerPositionAtByte(updated, m.picker.tokenEnd)
 	setComposerPosition(&m.composer, line, column)
 }

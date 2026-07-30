@@ -54,9 +54,8 @@ const (
 )
 
 type controllerCommandMsg struct {
-	kind controllerCommand
-	text string
-	err  error
+	snapshot composerSnapshot
+	err      error
 }
 
 type cancelResultMsg struct {
@@ -80,7 +79,7 @@ type Model struct {
 	controller         Controller
 	state              coding.State
 	childStates        map[string]coding.State
-	composer           textarea.Model
+	composer           composerState
 	markdown           *markdownRenderer
 	theme              colorTheme
 	timeline           string
@@ -124,24 +123,25 @@ func newModel(ctx context.Context, options Options) *Model {
 		lifecycle = lifecycleLoading
 	}
 
-	composer := textarea.New()
-	composer.Prompt = ""
-	composer.SetPromptFunc(inputPromptWidth, func(info textarea.PromptInfo) string {
+	editor := textarea.New()
+	editor.Prompt = ""
+	editor.SetPromptFunc(inputPromptWidth, func(info textarea.PromptInfo) string {
 		if info.LineNumber == 0 {
 			return inputArrow + " "
 		}
 
 		return ""
 	})
-	composer.Placeholder = ""
-	composer.ShowLineNumbers = false
-	composer.DynamicHeight = true
-	composer.MinHeight = 1
-	composer.MaxHeight = composerMaxLines
-	composer.MaxContentHeight = 200
-	composer.SetVirtualCursor(false)
-	composer.SetWidth(composerEditorWidth(defaultWidth))
-	composer.SetStyles(composerStyles(themeDark, options.NoColor))
+	editor.Placeholder = ""
+	editor.ShowLineNumbers = false
+	editor.DynamicHeight = true
+	editor.MinHeight = 1
+	editor.MaxHeight = composerMaxLines
+	editor.MaxContentHeight = 200
+	editor.SetVirtualCursor(false)
+	editor.SetWidth(composerEditorWidth(defaultWidth))
+	editor.SetStyles(composerStyles(themeDark, options.NoColor))
+	composer := newComposerState(editor)
 
 	model := &Model{
 		ctx:         ctx,
@@ -297,10 +297,13 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if message.err != nil {
 			m.streamErr = message.err
 			if m.composer.Value() == "" {
-				m.composer.SetValue(message.text)
+				m.streamErr = errors.Join(m.streamErr, m.composer.Restore(message.snapshot))
 			}
 		} else {
 			m.queued++
+			if err := m.composer.RecordHistory(message.snapshot); err != nil {
+				m.streamErr = errors.Join(m.streamErr, err)
+			}
 		}
 		m.setLayout()
 		return m, m.commitStableTimeline()
@@ -522,7 +525,11 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		switch {
 		case pickerControl:
 			if m.picker.kind == pickerCommand {
+				previous := m.picker.previousComposer
 				m.closeCommandPicker(false)
+				if message.operation == operationReload || message.operation == operationMode {
+					m.restoreCommandComposer(previous)
+				}
 			} else {
 				m.picker = pickerState{}
 			}
@@ -597,6 +604,33 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		// scrollback consume drag and wheel gestures before they reach the model.
 		return m, nil
 	case tea.MouseMsg:
+		return m, nil
+	case tea.PasteMsg:
+		if m.lifecycle != lifecycleReady {
+			return m, nil
+		}
+		if m.route.kind == routeSessions || m.route.kind == routeSkills {
+			var command tea.Cmd
+			m.route.search, command = m.route.search.Update(message)
+
+			return m, command
+		}
+		if m.route.kind == routeTeam && m.route.team != nil &&
+			teamRouteInputStage(m.route.team.stage) {
+			var command tea.Cmd
+			m.route.team.input, command = m.route.team.input.Update(message)
+
+			return m, command
+		}
+		if m.route.kind != routeNone || m.prompt.kind != promptNone ||
+			m.picker.kind != pickerNone {
+			return m, nil
+		}
+
+		_, err := m.composer.InsertPaste(message.Content)
+		m.streamErr = err
+		m.setLayout()
+
 		return m, nil
 	case tea.KeyPressMsg:
 		return m.updateKey(message)
@@ -808,6 +842,16 @@ func (m *Model) updateReadyKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.updatePickerKey(message)
 	}
 	key := message.String()
+	if key == "up" && m.composer.AtFirstVisualRow() && m.composer.HistoryUp() {
+		m.setLayout()
+
+		return m, nil
+	}
+	if key == keyDown && m.composer.AtLastVisualRow() && m.composer.HistoryDown() {
+		m.setLayout()
+
+		return m, nil
+	}
 	if m.worktreeLoading && (key == keyCtrlC || key == keyEscape) {
 		m.cancelWorkspaceStatus()
 
@@ -1355,13 +1399,24 @@ type scrollbackCursorRefreshDoneMsg struct {
 }
 
 func (m *Model) submit(actionCtx actionContext) tea.Cmd {
-	text := strings.TrimSpace(m.composer.Value())
-	if text == "" {
+	snapshot := m.composer.Snapshot()
+	text, err := m.composer.Assemble()
+	if err != nil {
+		if strings.TrimSpace(m.composer.Value()) != "" {
+			m.streamErr = err
+			m.setLayout()
+		}
+
 		return nil
 	}
 
 	switch actionCtx {
 	case contextIdle:
+		if err := m.composer.RecordHistory(snapshot); err != nil {
+			m.streamErr = err
+
+			return nil
+		}
 		m.composer.Reset()
 		m.setLayout()
 		m.streamErr = nil
@@ -1377,8 +1432,14 @@ func (m *Model) submit(actionCtx actionContext) tea.Cmd {
 }
 
 func (m *Model) queueMessage(kind controllerCommand) tea.Cmd {
-	text := strings.TrimSpace(m.composer.Value())
-	if text == "" {
+	snapshot := m.composer.Snapshot()
+	text, err := m.composer.Assemble()
+	if err != nil {
+		if strings.TrimSpace(m.composer.Value()) != "" {
+			m.streamErr = err
+			m.setLayout()
+		}
+
 		return nil
 	}
 
@@ -1387,14 +1448,16 @@ func (m *Model) queueMessage(kind controllerCommand) tea.Cmd {
 
 	return func() tea.Msg {
 		message := ai.UserText(text)
-		var err error
+		var commandErr error
 		if kind == commandFollowUp {
-			err = m.controller.FollowUp(message)
+			commandErr = m.controller.FollowUp(message)
 		} else {
-			err = m.controller.Steer(message)
+			commandErr = m.controller.Steer(message)
 		}
 
-		return controllerCommandMsg{kind: kind, text: text, err: err}
+		return controllerCommandMsg{
+			snapshot: snapshot, err: commandErr,
+		}
 	}
 }
 

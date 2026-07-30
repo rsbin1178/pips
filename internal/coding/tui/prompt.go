@@ -132,10 +132,21 @@ func (m *Model) claimPromptOwner() {
 		m.dismissSessionPicker(true)
 	case routeSkills:
 		previousInput := m.route.previousInput
+		previousComposer := m.route.previousComposer
 		m.route = routeState{}
-		m.composer.SetValue(previousInput)
+		if err := m.composer.Restore(previousComposer); err != nil {
+			m.composer.SetValue(previousInput)
+			m.streamErr = err
+		}
 	default:
+		previousComposer := m.route.previousComposer
+		hasPreviousComposer := m.route.hasPreviousComposer
 		m.route = routeState{}
+		if hasPreviousComposer {
+			if err := m.composer.Restore(previousComposer); err != nil {
+				m.streamErr = err
+			}
+		}
 	}
 	if hadRoute {
 		m.composer.Focus()
