@@ -245,9 +245,16 @@ func (m *Model) newPlanReviewPrompt(request planreview.Request) planReviewPrompt
 	editor.SetWidth(max(1, m.width-4))
 	editor.SetStyles(composerStyles(m.theme, m.options.NoColor))
 
-	return planReviewPromptState{
-		request: planreview.CloneRequest(request), loading: true, editor: editor,
+	state := planReviewPromptState{
+		request: planreview.CloneRequest(request), loading: request.Content == "", editor: editor,
 	}
+	if request.Content != "" {
+		state.document = coding.PlanDocument{
+			Revision: request.Revision, Content: request.Content, Size: request.Size,
+		}
+	}
+
+	return state
 }
 
 func (m *Model) loadPlanReviewIfNeeded() tea.Cmd {
@@ -499,13 +506,20 @@ func (m *Model) newQuestionPrompt(request question.Request) questionPromptState 
 		selected[index] = make([]bool, len(item.Options))
 	}
 
-	return questionPromptState{
+	state := questionPromptState{
 		request:  question.CloneRequest(request),
 		cursors:  make([]int, len(request.Questions)),
 		selected: selected,
 		custom:   make([]string, len(request.Questions)),
 		editor:   editor,
 	}
+	if request.Kind == question.RequestFreeform {
+		state.editing = questionEditChat
+		state.editor.Placeholder = "Type the missing preference or constraint"
+		state.editor.Focus()
+	}
+
+	return state
 }
 
 func (m *Model) updateQuestionPromptKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -824,6 +838,17 @@ func (m *Model) planReviewPromptView() string {
 func (m *Model) questionPromptView() string {
 	state := &m.prompt.question
 	request := state.request
+	if request.Kind == question.RequestFreeform {
+		lines := []string{"Input required", "", request.Prompt, "", state.editor.View(), "Enter submit · Ctrl+J newline · Ctrl+C cancel"}
+		if state.loading {
+			lines = append(lines, "Working…")
+		}
+		if state.err != nil {
+			lines = append(lines, "Error: "+safeError(state.err))
+		}
+
+		return strings.Join(lines, "\n")
+	}
 	if len(request.Questions) == 0 {
 		return "△ Structured question unavailable"
 	}

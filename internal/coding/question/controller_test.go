@@ -237,13 +237,15 @@ func TestQuestionCatalogHasExactProvenanceAndSchema(t *testing.T) {
 	require.NoError(t, err)
 	descriptors, err := catalogValue.Search(t.Context(), catalogPolicy(), "")
 	require.NoError(t, err)
-	require.Len(t, descriptors, 1)
+	require.Len(t, descriptors, 2)
 	assert.Equal(t, question.ToolName, descriptors[0].Name)
 	assert.Equal(t, question.CatalogID, descriptors[0].Source.ID)
+	assert.Equal(t, question.TextToolName, descriptors[1].Name)
+	assert.Equal(t, question.CatalogID, descriptors[1].Source.ID)
 
 	tools, err := catalogValue.Snapshot(t.Context(), catalogPolicy())
 	require.NoError(t, err)
-	require.Len(t, tools, 1)
+	require.Len(t, tools, 2)
 	declaration := tools[0].Decl()
 	assert.Contains(t, declaration.Description, "Prefer structured choices")
 	assert.Contains(t, declaration.Description, "assistant text")
@@ -270,6 +272,81 @@ func TestQuestionCatalogHasExactProvenanceAndSchema(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(wireSchema), `"minItems":1`)
 	assert.Contains(t, string(wireSchema), `"maxItems":4`)
+
+	textSchema := tools[1].Decl().InputSchema
+	require.NotNil(t, textSchema)
+	assert.Equal(t, []string{"question"}, textSchema.Required)
+	assert.Equal(t, []string{"question"}, mapKeys(textSchema.Properties))
+}
+
+func TestControllerPausesFlatAndGenericFreeformFallback(t *testing.T) {
+	t.Parallel()
+
+	controller, err := question.NewController(&recordingResolver{})
+	require.NoError(t, err)
+
+	valid := ai.ToolCallPart{
+		ID: "flat-valid", Name: question.TextToolName,
+		Args: ai.JSON(`{"question":"Which authentication policy should the system use?"}`),
+	}
+	decision := controller.BeforeTool(t.Context(), agent.ToolCallInfo{
+		ToolCall: agent.ToolCall{ID: valid.ID, Name: valid.Name, Args: valid.Args}, BatchSize: 1,
+	})
+	require.Equal(t, agent.ToolDecisionPause, decision.Action)
+
+	request, err := controller.Reconcile([]ai.ToolCallPart{valid})
+	require.NoError(t, err)
+	require.NotNil(t, request)
+	assert.Equal(t, question.RequestFreeform, request.Kind)
+	assert.Contains(t, request.Prompt, "authentication policy")
+
+	controller, err = question.NewController(&recordingResolver{})
+	require.NoError(t, err)
+
+	malformed := ai.ToolCallPart{
+		ID: "flat-malformed", Name: question.TextToolName,
+		Args: ai.JSON(`{"question":}`),
+	}
+	decision = controller.BeforeTool(t.Context(), agent.ToolCallInfo{
+		ToolCall: agent.ToolCall{ID: malformed.ID, Name: malformed.Name, Args: malformed.Args}, BatchSize: 1,
+	})
+	require.Equal(t, agent.ToolDecisionPause, decision.Action)
+
+	request, err = controller.Reconcile([]ai.ToolCallPart{malformed})
+	require.NoError(t, err)
+	require.NotNil(t, request)
+	assert.Equal(t, question.RequestFreeform, request.Kind)
+	assert.Contains(t, request.Prompt, "could not form a valid structured question")
+	assert.NotContains(t, request.Prompt, `{"question":}`)
+}
+
+func TestControllerRejectsBatchedQuestionBeforePause(t *testing.T) {
+	t.Parallel()
+
+	controller, err := question.NewController(&recordingResolver{})
+	require.NoError(t, err)
+	args, err := json.Marshal(testSpec())
+	require.NoError(t, err)
+
+	decision := controller.BeforeTool(t.Context(), agent.ToolCallInfo{
+		ToolCall:   agent.ToolCall{ID: "batched", Name: question.ToolName, Args: args},
+		BatchIndex: 0, BatchSize: 2,
+	})
+	assert.Equal(t, agent.ToolDecisionDeny, decision.Action)
+	assert.Contains(t, decision.Reason, "alone")
+
+	request, err := controller.Reconcile(nil)
+	require.NoError(t, err)
+	assert.Nil(t, request)
+}
+
+func mapKeys(values map[string]*ai.Schema) []string {
+	result := make([]string, 0, len(values))
+	for key := range values {
+		result = append(result, key)
+	}
+
+	return result
 }
 
 func catalogPolicy() catalog.Policy {

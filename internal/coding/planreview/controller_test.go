@@ -3,6 +3,8 @@ package planreview_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"testing"
 
@@ -103,7 +105,7 @@ func TestControllerRejectsStaleAndMalformedSubmissions(t *testing.T) {
 	}
 }
 
-func TestCatalogAdvertisesOneExactRevisionField(t *testing.T) {
+func TestCatalogAdvertisesAtomicPresentationFields(t *testing.T) {
 	t.Parallel()
 
 	controller := newController(t, &recordingResolver{})
@@ -117,8 +119,72 @@ func TestCatalogAdvertisesOneExactRevisionField(t *testing.T) {
 	require.Len(t, tools, 1)
 	schema := tools[0].Decl().InputSchema
 	require.NotNil(t, schema)
-	assert.Equal(t, []string{"expected_revision"}, schema.Required)
-	assert.Equal(t, []string{"expected_revision"}, mapKeys(schema.Properties))
+	assert.ElementsMatch(t, []string{"expected_revision", "content"}, schema.Required)
+	assert.ElementsMatch(t, []string{"expected_revision", "content"}, mapKeys(schema.Properties))
+}
+
+func TestControllerPresentsPlanAtomicallyAndReconcilesIdempotently(t *testing.T) {
+	t.Parallel()
+
+	resolver := &recordingResolver{}
+	repo := &memoryRepository{}
+	controller, err := planreview.NewController(
+		repo,
+		plandoc.Ref{SessionID: "session", WorkspaceID: "workspace"},
+		resolver,
+	)
+	require.NoError(t, err)
+	call := ai.ToolCallPart{
+		ID: "present-1", Name: planreview.PresentToolName,
+		Args: ai.JSON(`{"expected_revision":"","content":"# Plan\n\nBuild it safely."}`),
+	}
+
+	decision := controller.BeforeTool(t.Context(), agent.ToolCallInfo{
+		ToolCall:  agent.ToolCall{ID: call.ID, Name: call.Name, Args: call.Args},
+		BatchSize: 1,
+	})
+	require.Equal(t, agent.ToolDecisionPause, decision.Action)
+	assert.Zero(t, repo.replaces, "BeforeTool must not mutate the Plan repository")
+
+	request, err := controller.Reconcile(t.Context(), []ai.ToolCallPart{call})
+	require.NoError(t, err)
+	require.NotNil(t, request)
+	assert.Equal(t, "# Plan\n\nBuild it safely.", request.Content)
+	assert.Equal(t, int64(len(request.Content)), request.Size)
+	assert.Equal(t, 1, repo.replaces)
+
+	restarted, err := planreview.NewController(
+		repo,
+		plandoc.Ref{SessionID: "session", WorkspaceID: "workspace"},
+		resolver,
+	)
+	require.NoError(t, err)
+	recovered, err := restarted.Reconcile(t.Context(), []ai.ToolCallPart{call})
+	require.NoError(t, err)
+	require.NotNil(t, recovered)
+	assert.Equal(t, *request, *recovered)
+	assert.Equal(t, 1, repo.replaces, "recovery must not replace already-applied content")
+}
+
+func TestControllerRejectsBatchedPresentationBeforeWrite(t *testing.T) {
+	t.Parallel()
+
+	repo := &memoryRepository{}
+	controller, err := planreview.NewController(
+		repo,
+		plandoc.Ref{SessionID: "session", WorkspaceID: "workspace"},
+		&recordingResolver{},
+	)
+	require.NoError(t, err)
+	decision := controller.BeforeTool(t.Context(), agent.ToolCallInfo{
+		ToolCall: agent.ToolCall{
+			ID: "present-batched", Name: planreview.PresentToolName,
+			Args: ai.JSON(`{"expected_revision":"","content":"# Plan"}`),
+		},
+		BatchIndex: 0, BatchSize: 2,
+	})
+	assert.Equal(t, agent.ToolDecisionDeny, decision.Action)
+	assert.Zero(t, repo.replaces)
 }
 
 type staticRepository struct{ document plandoc.Document }
@@ -126,6 +192,40 @@ type staticRepository struct{ document plandoc.Document }
 func (r staticRepository) Read(context.Context, plandoc.Ref) (plandoc.Document, error) {
 	return r.document, nil
 }
+
+type memoryRepository struct {
+	document plandoc.Document
+	replaces int
+}
+
+func (r *memoryRepository) Read(context.Context, plandoc.Ref) (plandoc.Document, error) {
+	if r.document.Revision == "" {
+		return plandoc.Document{}, plandoc.ErrNotFound
+	}
+
+	return r.document, nil
+}
+
+func (r *memoryRepository) Replace(
+	_ context.Context,
+	ref plandoc.Ref,
+	expected string,
+	content string,
+) (plandoc.Document, error) {
+	if expected != r.document.Revision {
+		return plandoc.Document{}, plandoc.ErrConflict
+	}
+
+	sum := sha256.Sum256([]byte(content))
+	r.document = plandoc.Document{
+		Ref: ref, Revision: hex.EncodeToString(sum[:]), Content: content, Size: int64(len(content)),
+	}
+	r.replaces++
+
+	return r.document, nil
+}
+
+func (*memoryRepository) Fork(context.Context, plandoc.Ref, plandoc.Ref) error { return nil }
 
 func (staticRepository) Replace(context.Context, plandoc.Ref, string, string) (plandoc.Document, error) {
 	return plandoc.Document{}, errors.New("unexpected Replace")

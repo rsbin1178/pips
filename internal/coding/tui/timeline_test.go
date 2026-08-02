@@ -102,6 +102,35 @@ func TestTimelineProjectsPlanReviewSemantically(t *testing.T) {
 	assert.NotContains(t, rendered, "secret-revision")
 }
 
+func TestTimelineRendersResolvedPresentPlanAsOneFullSemanticBlock(t *testing.T) {
+	t.Parallel()
+
+	const content = "# Student System Plan\n\n- API\n- Web UI\n- Tests"
+	state := coding.State{
+		Transcript: []ai.Message{
+			ai.Assistant(ai.ToolCallPart{
+				ID: "present-plan", Name: planreview.PresentToolName,
+				Args: ai.JSON(`{"expected_revision":"","content":"redacted from TUI parsing"}`),
+			}),
+			ai.ToolResultText("present-plan", planreview.PresentToolName, planreview.ApprovalToolResult),
+		},
+		PlanProposals: []coding.PlanProposal{{
+			ID: "proposal-1", ToolCallID: "present-plan", Revision: strings.Repeat("a", 64),
+			Size: int64(len(content)), Content: content, Status: coding.PlanProposalApproved,
+		}},
+	}
+
+	blocks := projectTimeline(state)
+	require.Len(t, blocks, 1)
+	assert.Equal(t, blockPlan, blocks[0].kind)
+	assert.Equal(t, "Plan · Approved", blocks[0].title)
+	rendered := renderTimeline(blocks, newMarkdownRenderer(4), 80, themeDark, true)
+	assert.Equal(t, 1, strings.Count(rendered, "Student System Plan"))
+	assert.Contains(t, rendered, "API")
+	assert.NotContains(t, rendered, "redacted from TUI parsing")
+	assert.NotContains(t, rendered, planreview.ApprovalToolResult)
+}
+
 func TestTimelineRendersNonGitAttributionAsNeutralInformation(t *testing.T) {
 	t.Parallel()
 

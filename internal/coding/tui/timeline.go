@@ -23,6 +23,7 @@ const (
 	blockUser blockKind = iota
 	blockAssistant
 	blockDraft
+	blockPlan
 	blockTool
 	blockQuestion
 	blockDiagnostic
@@ -33,9 +34,10 @@ const (
 )
 
 const (
-	completionGlyph     = "▣"
-	errorAccentBar      = "▌"
-	questionFailedTitle = "Question failed"
+	completionGlyph       = "▣"
+	errorAccentBar        = "▌"
+	questionAnsweredTitle = "Question answered"
+	questionFailedTitle   = "Question failed"
 )
 
 type timelineBlock struct {
@@ -81,6 +83,10 @@ func projectTimelineExcluding(
 	for messageIndex, message := range state.Transcript {
 		position := messageIndex + 1
 		body := visibleMessageText(message)
+		candidateID := ""
+		if messageIndex < len(state.MessageCandidates) {
+			candidateID = state.MessageCandidates[messageIndex].Key()
+		}
 		_, synthetic := syntheticMessages[messageIndex]
 		if body != "" && !synthetic {
 			switch message.Role {
@@ -90,7 +96,7 @@ func projectTimelineExcluding(
 				})
 			case ai.RoleAssistant:
 				blocks = append(blocks, timelineBlock{
-					kind: blockAssistant, body: body, position: position,
+					kind: blockAssistant, id: candidateID, body: body, position: position,
 				})
 			case ai.RoleSystem:
 				blocks = append(blocks, timelineBlock{
@@ -103,7 +109,7 @@ func projectTimelineExcluding(
 		for activityIndex < len(activities) && activities[activityIndex].position <= position {
 			activity := activities[activityIndex]
 			activityIndex++
-			if block, handled, visible := projectProtocolToolActivity(activity); handled {
+			if block, handled, visible := projectProtocolToolActivity(activity, state.PlanProposals); handled {
 				if visible {
 					blocks = append(blocks, block)
 				}
@@ -122,7 +128,7 @@ func projectTimelineExcluding(
 	for activityIndex < len(activities) {
 		activity := activities[activityIndex]
 		activityIndex++
-		if block, handled, visible := projectProtocolToolActivity(activity); handled {
+		if block, handled, visible := projectProtocolToolActivity(activity, state.PlanProposals); handled {
 			if visible {
 				blocks = append(blocks, block)
 			}
@@ -140,7 +146,7 @@ func projectTimelineExcluding(
 	draft := visibleDraftText(state.Draft)
 	if draft != "" {
 		blocks = append(blocks, timelineBlock{
-			kind: blockDraft, body: draft,
+			kind: blockDraft, id: state.DraftCandidate.Key(), body: draft,
 			position: len(state.Transcript),
 		})
 	}
@@ -189,12 +195,15 @@ func projectTimelineExcluding(
 	return groupExploreBlocks(blocks)
 }
 
-func projectProtocolToolActivity(activity toolActivity) (timelineBlock, bool, bool) {
+func projectProtocolToolActivity(
+	activity toolActivity,
+	proposals []coding.PlanProposal,
+) (timelineBlock, bool, bool) {
 	switch activity.name {
-	case planreview.ToolName:
-		block, visible := projectPlanReviewToolActivity(activity)
+	case planreview.ToolName, planreview.PresentToolName:
+		block, visible := projectPlanReviewToolActivity(activity, proposals)
 		return block, true, visible
-	case question.ToolName:
+	case question.ToolName, question.TextToolName:
 		block, visible := projectQuestionToolActivity(activity)
 		return block, true, visible
 	default:
@@ -202,11 +211,33 @@ func projectProtocolToolActivity(activity toolActivity) (timelineBlock, bool, bo
 	}
 }
 
-func projectPlanReviewToolActivity(activity toolActivity) (timelineBlock, bool) {
-	if activity.name != planreview.ToolName {
+func projectPlanReviewToolActivity(
+	activity toolActivity,
+	proposals []coding.PlanProposal,
+) (timelineBlock, bool) {
+	if activity.name != planreview.ToolName && activity.name != planreview.PresentToolName {
 		return timelineBlock{}, false
 	}
 	if activity.state == toolStateRunning {
+		return timelineBlock{}, false
+	}
+	if activity.name == planreview.PresentToolName {
+		for _, proposal := range proposals {
+			if proposal.ToolCallID != activity.id || proposal.Status == coding.PlanProposalPending {
+				continue
+			}
+
+			title := "Plan · Continue planning"
+			if proposal.Status == coding.PlanProposalApproved {
+				title = "Plan · Approved"
+			}
+
+			return timelineBlock{
+				kind: blockPlan, id: proposal.ID, title: title, body: proposal.Content,
+				position: activity.position,
+			}, true
+		}
+
 		return timelineBlock{}, false
 	}
 
@@ -307,7 +338,7 @@ func projectToolActivity(activity toolActivity) timelineBlock {
 }
 
 func projectQuestionToolActivity(activity toolActivity) (timelineBlock, bool) {
-	if activity.name != question.ToolName {
+	if activity.name != question.ToolName && activity.name != question.TextToolName {
 		return timelineBlock{}, false
 	}
 	if activity.state == toolStateRunning {
@@ -341,10 +372,26 @@ func projectAnsweredQuestionActivity(
 	block timelineBlock,
 	activity toolActivity,
 ) timelineBlock {
+	if activity.name == question.TextToolName {
+		var result struct {
+			Chat string `json:"chat"`
+		}
+		if json.Unmarshal([]byte(activity.result), &result) == nil && result.Chat != "" {
+			block.title = "Answered question"
+			block.body = result.Chat
+
+			return block
+		}
+
+		block.title = questionAnsweredTitle
+		block.body = "Free-form response submitted."
+
+		return block
+	}
 	var spec question.Spec
 	if err := json.Unmarshal(activity.arguments, &spec); err != nil ||
 		question.ValidateSpec(spec) != nil {
-		block.title = "Question answered"
+		block.title = questionAnsweredTitle
 		block.body = "Structured response submitted."
 
 		return block
@@ -355,7 +402,7 @@ func projectAnsweredQuestionActivity(
 		Chat    string            `json:"chat"`
 	}
 	if err := json.Unmarshal([]byte(activity.result), &result); err != nil {
-		block.title = "Question answered"
+		block.title = questionAnsweredTitle
 		block.body = "Structured response submitted."
 
 		return block
@@ -367,7 +414,7 @@ func projectAnsweredQuestionActivity(
 		return block
 	}
 	if len(result.Answers) != len(spec.Questions) {
-		block.title = "Question answered"
+		block.title = questionAnsweredTitle
 		block.body = "Structured response submitted."
 
 		return block
@@ -831,7 +878,7 @@ func renderRegularTimelineBlock(
 	}
 
 	body := block.body
-	if !block.rendered && (block.kind == blockAssistant || block.kind == blockDraft) {
+	if !block.rendered && (block.kind == blockAssistant || block.kind == blockDraft || block.kind == blockPlan) {
 		if value, err := markdown.render(body, max(1, width), theme, noColor); err == nil {
 			body = value
 		}
@@ -976,7 +1023,7 @@ func timelineTitleStyle(kind blockKind, theme colorTheme) lipgloss.Style {
 	switch kind {
 	case blockUser:
 		color = "#5FAFFF"
-	case blockAssistant, blockDraft:
+	case blockAssistant, blockDraft, blockPlan:
 		color = "#AF87FF"
 	case blockTool, blockTeam:
 		color = "#5FD7AF"

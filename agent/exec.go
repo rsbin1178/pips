@@ -82,8 +82,10 @@ func (a *Agent) gateCalls(ctx context.Context, turn int, calls []ai.ToolCallPart
 
 	for idx, call := range calls {
 		info := ToolCallInfo{
-			ToolCall: ToolCall{ID: call.ID, Name: call.Name, Args: call.Args},
-			Turn:     turn,
+			ToolCall:   ToolCall{ID: call.ID, Name: call.Name, Args: call.Args},
+			Turn:       turn,
+			BatchIndex: idx,
+			BatchSize:  len(calls),
 		}
 
 		decision := a.cfg.beforeTool(ctx, info)

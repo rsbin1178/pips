@@ -9,6 +9,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/rsbin/pips/ai"
+	"github.com/rsbin/pips/internal/coding"
 )
 
 const (
@@ -21,11 +22,13 @@ const (
 // the live region at a fixed height prevents inline frame growth from
 // repainting previously committed terminal history while the user scrolls.
 type streamProjection struct {
-	active  bool
-	source  string
-	emitted int
-	tail    string
-	width   int
+	active      bool
+	identity    string
+	retractable bool
+	source      string
+	emitted     int
+	tail        string
+	width       int
 }
 
 func (s *streamProjection) reset() {
@@ -34,11 +37,12 @@ func (s *streamProjection) reset() {
 
 // syncStreamingDraft returns newly immutable rendered rows and whether they
 // continue an assistant block that already has rows in native scrollback.
-func (m *Model) syncStreamingDraft(source string) (string, bool) {
+func (m *Model) syncStreamingDraft(identity, source string) (string, bool) {
 	stream := &m.streaming
-	if !stream.active || !strings.HasPrefix(source, stream.source) {
+	if !stream.active || stream.identity != identity {
 		stream.reset()
 		stream.active = true
+		stream.identity = identity
 		stream.width = m.width
 	}
 
@@ -88,6 +92,28 @@ func (m *Model) syncStreamingDraft(source string) (string, bool) {
 	}
 
 	return promoted, continuation
+}
+
+func (m *Model) syncRetractableDraft(identity, source string) {
+	stream := &m.streaming
+	if !stream.active || stream.identity != identity {
+		stream.reset()
+		stream.active = true
+		stream.identity = identity
+		stream.width = m.width
+	}
+
+	stream.retractable = true
+	stream.source = source
+	stream.emitted = 0
+
+	lines := m.renderStreamingLines(source, stream.width)
+	if len(lines) == 0 {
+		stream.tail = streamTailPlaceholder
+		return
+	}
+
+	stream.tail = ansi.Truncate(lines[len(lines)-1], max(1, m.width-2), "…")
 }
 
 func (m *Model) renderStreamingTablePreview(source string) string {
@@ -189,7 +215,14 @@ func (m *Model) streamingScrollbackWrites(blocks []timelineBlock) []scrollbackWr
 	if source != "" {
 		writes := m.timelineScrollbackWrite(blocks)
 
-		promoted, continuation := m.syncStreamingDraft(source)
+		identity := m.state.DraftCandidate.Key()
+		if m.state.Interaction.Mode == coding.ModePlan {
+			m.syncRetractableDraft(identity, source)
+
+			return writes
+		}
+
+		promoted, continuation := m.syncStreamingDraft(identity, source)
 		if promoted != "" {
 			writes = append(writes, scrollbackWrite{
 				content: promoted, continuation: continuation,
@@ -201,6 +234,13 @@ func (m *Model) streamingScrollbackWrites(blocks []timelineBlock) []scrollbackWr
 
 	if !m.streaming.active {
 		return m.timelineScrollbackWrite(blocks)
+	}
+
+	if m.streaming.retractable && m.matchingStreamingAssistantIndex(blocks) < 0 {
+		writes := m.timelineScrollbackWrite(blocks)
+		m.streaming.reset()
+
+		return writes
 	}
 
 	writes := make([]scrollbackWrite, 0, 3)
@@ -273,14 +313,12 @@ func (m *Model) streamingAssistantIndex(blocks []timelineBlock) int {
 }
 
 func (m *Model) matchingStreamingAssistantIndex(blocks []timelineBlock) int {
-	streamSource := strings.TrimSpace(m.streaming.source)
-
 	for index := range blocks {
 		if blocks[index].kind != blockAssistant {
 			continue
 		}
 
-		if strings.TrimSpace(blocks[index].body) == streamSource {
+		if m.streaming.identity != "" && blocks[index].id == m.streaming.identity {
 			return index
 		}
 	}
@@ -289,10 +327,10 @@ func (m *Model) matchingStreamingAssistantIndex(blocks []timelineBlock) int {
 }
 
 func (m *Model) hasPendingStreamingAssistant() bool {
-	streamSource := strings.TrimSpace(m.streaming.source)
-	for _, message := range m.state.Transcript[m.scrollback.messages:] {
-		if message.Role == ai.RoleAssistant &&
-			strings.TrimSpace(visibleMessageText(message)) == streamSource {
+	for index, message := range m.state.Transcript[m.scrollback.messages:] {
+		candidateIndex := m.scrollback.messages + index
+		if message.Role == ai.RoleAssistant && candidateIndex < len(m.state.MessageCandidates) &&
+			m.state.MessageCandidates[candidateIndex].Key() == m.streaming.identity {
 			return true
 		}
 	}

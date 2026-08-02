@@ -213,13 +213,18 @@ only write exception is the current private document at
 `~/.pips/plans/<session-id>.md`; the model cannot select that path. New creates
 the document lazily, Resume reuses it, and Fork copies an existing snapshot.
 Planning follows an evidence → material decisions → implementation design flow.
-When the model calls `submit_plan` with the exact current revision, the TUI
-opens a path-free `plan.md` review. You can keep planning (with optional
-feedback) or explicitly approve the revision. Approval grants no Tool or
-Sandbox permission; only after that Plan interaction reaches idle does the
-current process switch to Agent Mode. A restart never replays historical Plan
-approval as authority. `pips exec --mode plan` cannot answer the review and
-exits with input-required status 3.
+Material choices pause through `ask_user`; if a provider returns malformed
+structured arguments, Pips narrows one retry to `ask_user_text` and ultimately
+falls back to a Runtime-owned free-form prompt instead of silently planning
+past the missing answer. Once requirements are decision-complete, the model
+calls `plan_checkpoint` and then `present_plan`. `present_plan` atomically
+persists the complete Markdown document and opens a path-free review that shows
+the full Plan. You can keep planning (with optional feedback) or explicitly
+approve that exact revision. Approval performs no extra model turn and grants
+no Tool or Sandbox permission; only after the Plan interaction reaches idle
+does the current process switch to Agent Mode. A restart never replays
+historical Plan approval as authority. `pips exec --mode plan` cannot answer a
+question or review and exits with input-required status 3.
 Plan Mode can still read files visible to the process, so it is not a secret
 isolation boundary.
 

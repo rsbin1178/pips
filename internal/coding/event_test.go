@@ -251,6 +251,40 @@ func TestProjectRemovesSensitiveContent(t *testing.T) {
 	assert.NotContains(t, string(encodedTelemetry), event.RunID)
 }
 
+func TestProjectRedactsPresentedPlanContentButKeepsLocalContent(t *testing.T) {
+	t.Parallel()
+
+	const secretPlan = "# Private architecture\n\nDo not export this Plan."
+	request, err := planreview.ProposalFromCall(ai.ToolCallPart{
+		ID: "present-1", Name: planreview.PresentToolName,
+		Args: ai.JSON(`{"expected_revision":"","content":"# Private architecture\n\nDo not export this Plan."}`),
+	})
+	require.NoError(t, err)
+	event := newInteractionEvent(
+		EventPlanReviewRequired,
+		PlanReviewRequired{Request: request},
+	)
+
+	safe, err := Project(event, DisclosureSafe)
+	require.NoError(t, err)
+	encodedSafe, err := json.Marshal(safe)
+	require.NoError(t, err)
+	assert.NotContains(t, string(encodedSafe), secretPlan)
+	assert.Contains(t, string(encodedSafe), request.Revision)
+
+	content, err := Project(event, DisclosureContent)
+	require.NoError(t, err)
+	encodedContent, err := json.Marshal(content)
+	require.NoError(t, err)
+	assert.Contains(t, string(encodedContent), "Private architecture")
+
+	telemetry, err := Telemetry(event)
+	require.NoError(t, err)
+	encodedTelemetry, err := json.Marshal(telemetry)
+	require.NoError(t, err)
+	assert.NotContains(t, string(encodedTelemetry), "Private architecture")
+}
+
 func TestSafeDisclosureMatrix(t *testing.T) {
 	t.Parallel()
 

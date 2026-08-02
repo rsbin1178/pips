@@ -6,6 +6,7 @@ import (
 
 	"github.com/rsbin/pips/agent"
 	"github.com/rsbin/pips/agent/catalog"
+	"github.com/rsbin/pips/internal/coding/planreview"
 	"github.com/rsbin/pips/internal/coding/tools"
 )
 
@@ -22,7 +23,7 @@ func catalogPolicyForMode(mode OperatingMode, tenantID string) (catalog.Policy, 
 				}
 
 				return descriptor.Risk == catalog.RiskWrite &&
-					descriptor.Name == tools.WritePlanName &&
+					(descriptor.Name == tools.WritePlanName || descriptor.Name == planreview.PresentToolName) &&
 					descriptor.Source.Kind == catalog.SourceLocal &&
 					descriptor.Source.ID == tools.PlanCatalogID, nil
 			},
