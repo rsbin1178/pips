@@ -235,7 +235,7 @@ func openRuntime(
 		return nil, fmt.Errorf("%w: invalid execution duration or count", ErrRuntimeInvalid)
 	}
 	if configured.TempRoot == "" {
-		configured.TempRoot = filepath.Join(options.Paths.Root(), "tmp")
+		configured.TempRoot = options.Paths.TempDir()
 	}
 	if configured.GitPath == "" {
 		gitPath, err := findExecutable("git", configured.Environment)
@@ -507,7 +507,7 @@ func openRuntime(
 		&runtime.pending,
 		policy,
 		executor,
-		tools.NewShellHandler(),
+		tools.NewShellHandlerForNetwork(options.Config.SandboxWorkspaceWrite.Network),
 	)
 	if err != nil {
 		return nil, err
@@ -759,7 +759,8 @@ func newRuntimePolicy(options OpenOptions) (execution.Policy, error) {
 	source, _ := options.Config.Source(config.FieldSandbox)
 
 	return execution.NewPolicy(options.Workspace, execution.PolicyConfig{
-		Sandbox: options.Config.Sandbox, Approval: options.Config.Approval,
+		Sandbox: options.Config.Sandbox, Network: options.Config.SandboxWorkspaceWrite.Network,
+		Approval:      options.Config.Approval,
 		SandboxSource: source, Protected: []string{options.Paths.Root()},
 	})
 }

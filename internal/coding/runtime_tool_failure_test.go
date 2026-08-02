@@ -23,15 +23,21 @@ func TestToolFailureGuardStopsCanonicalIdenticalDenials(t *testing.T) {
 		{Name: "shell", Args: ai.JSON(`{"command":"true","permissions":[]}`)},
 		{Name: "shell", Args: ai.JSON(`{ "permissions": [], "command": "true" }`)},
 		{Name: "shell", Args: ai.JSON(`{"command":"true","permissions":[]}`)},
+		{Name: "shell", Args: ai.JSON(`{"command":"true","permissions":[]}`)},
 	}
 
 	for index, call := range calls {
 		decision := before(t.Context(), agent.ToolCallInfo{ToolCall: call})
 		require.Equal(t, agent.ToolDecisionDeny, decision.Action)
-		if index < toolFailureLimit-1 {
-			assert.NotContains(t, decision.Reason, toolFailureMessage)
-		} else {
+		switch index {
+		case toolFailureLimit - 1:
+			assert.Contains(t, decision.Reason, toolFailureCorrectionMessage)
+			assert.False(t, guard.stopWhen(agent.RunInfo{}))
+		case toolFailureLimit:
 			assert.Contains(t, decision.Reason, toolFailureMessage)
+		default:
+			assert.NotContains(t, decision.Reason, toolFailureCorrectionMessage)
+			assert.NotContains(t, decision.Reason, toolFailureMessage)
 		}
 	}
 	assert.True(t, guard.stopWhen(agent.RunInfo{}))
@@ -75,6 +81,7 @@ func TestToolFailureGuardStopsRepeatedExecutedErrors(t *testing.T) {
 		{ID: "run-1", Name: "shell", Args: ai.JSON(`{"command":"false"}`)},
 		{ID: "run-2", Name: "shell", Args: ai.JSON(`{ "command": "false" }`)},
 		{ID: "run-3", Name: "shell", Args: ai.JSON(`{"command":"false"}`)},
+		{ID: "run-4", Name: "shell", Args: ai.JSON(`{"command":"false"}`)},
 	}
 
 	for index, call := range calls {
@@ -92,7 +99,7 @@ func TestToolFailureGuardStopsRepeatedExecutedErrors(t *testing.T) {
 		}
 
 		require.NotNil(t, override)
-		assert.Contains(t, transcriptText([]ai.Message{{
+		message := transcriptText([]ai.Message{{
 			Role: ai.RoleTool,
 			Parts: []ai.Part{ai.ToolResultPart{
 				ToolCallID: call.ID,
@@ -100,10 +107,63 @@ func TestToolFailureGuardStopsRepeatedExecutedErrors(t *testing.T) {
 				Content:    override.Content,
 				IsError:    true,
 			}},
-		}}), toolFailureMessage)
+		}})
+		if index == toolFailureLimit-1 {
+			assert.Contains(t, message, toolFailureCorrectionMessage)
+			assert.False(t, guard.stopWhen(agent.RunInfo{}))
+		} else {
+			assert.Contains(t, message, toolFailureMessage)
+		}
 	}
 
 	assert.True(t, guard.stopWhen(agent.RunInfo{}))
+}
+
+func TestToolFailureGuardGroupsEquivalentStructuredShellFailures(t *testing.T) {
+	t.Parallel()
+
+	const failureResult = `{"schema":"pips.coding.tool_result/v1alpha1","ok":false,"tool":"shell","code":"invalid_argument","reason":"cwd_not_found","problem":{"field":"cwd","retryable":true,"hint":"choose an existing Workspace directory"}}`
+	guard := newToolFailureGuard()
+	before := guard.wrapBeforeTool(func(context.Context, agent.ToolCallInfo) agent.ToolDecision {
+		return agent.DenyTool(failureResult)
+	})
+	calls := []agent.ToolCall{
+		{Name: "shell", Args: ai.JSON(`{"command":"pwd","cwd":"missing"}`)},
+		{Name: "shell", Args: ai.JSON(`{"cwd":"another-missing","command":"pwd"}`)},
+		{Name: "shell", Args: ai.JSON(`{"command":"pwd","cwd":"/workspace/missing"}`)},
+		{Name: "shell", Args: ai.JSON(`{"command":"pwd","cwd":"still-missing","permissions":{}}`)},
+	}
+
+	for index, call := range calls {
+		decision := before(t.Context(), agent.ToolCallInfo{ToolCall: call})
+		if index == toolFailureLimit-1 {
+			assert.Contains(t, decision.Reason, toolFailureCorrectionMessage)
+			assert.Contains(t, decision.Reason, "choose an existing Workspace directory")
+		}
+		if index == toolFailureLimit {
+			assert.Contains(t, decision.Reason, toolFailureMessage)
+		}
+	}
+	assert.True(t, guard.stopWhen(agent.RunInfo{}))
+}
+
+func TestToolFailureGuardSeparatesStructuredFailureCategories(t *testing.T) {
+	t.Parallel()
+
+	const cwdFailure = `{"schema":"pips.coding.tool_result/v1alpha1","ok":false,"tool":"shell","code":"invalid_argument","reason":"cwd_not_found","problem":{"field":"cwd","retryable":true,"hint":"choose an existing Workspace directory"}}`
+	const permissionFailure = `{"schema":"pips.coding.tool_result/v1alpha1","ok":false,"tool":"shell","code":"invalid_argument","reason":"permissions_shape","problem":{"field":"permissions","retryable":true,"hint":"use a permissions object"}}`
+	guard := newToolFailureGuard()
+	call := agent.ToolCall{Name: "shell", Args: ai.JSON(`{"command":"pwd","cwd":"missing"}`)}
+
+	for range toolFailureLimit {
+		disposition, _ := guard.observeFailure(call, cwdFailure)
+		if disposition == toolFailureCorrect {
+			break
+		}
+	}
+	disposition, _ := guard.observeFailure(call, permissionFailure)
+	assert.Equal(t, toolFailureObserved, disposition)
+	assert.False(t, guard.stopWhen(agent.RunInfo{}))
 }
 
 func TestToolFailureGuardChangedFailingCallResetsSequence(t *testing.T) {
@@ -137,7 +197,7 @@ func TestToolFailureFingerprintPreservesLargeJSONNumbers(t *testing.T) {
 	assert.NotEqual(t, left, right)
 }
 
-func TestRuntimeStopsAfterThreeIdenticalInvalidToolCalls(t *testing.T) {
+func TestRuntimeStopsAfterFailedToolCorrectionTurn(t *testing.T) {
 	t.Parallel()
 
 	invalid := `{"command":"true","permissions":[]}`
@@ -145,6 +205,7 @@ func TestRuntimeStopsAfterThreeIdenticalInvalidToolCalls(t *testing.T) {
 		runtimeToolResponse("call-1", "shell", invalid),
 		runtimeToolResponse("call-2", "shell", invalid),
 		runtimeToolResponse("call-3", "shell", invalid),
+		runtimeToolResponse("call-4", "shell", invalid),
 		runtimeTextResponse("must not be requested"),
 	)
 	runtime := openTestRuntime(t, model)
@@ -154,8 +215,9 @@ func TestRuntimeStopsAfterThreeIdenticalInvalidToolCalls(t *testing.T) {
 
 	assert.Equal(t, InteractionIncomplete, state.Interaction.Outcome)
 	assert.Equal(t, agent.StopWhen, state.Interaction.Stop)
-	assert.Len(t, model.Requests(), toolFailureLimit)
+	assert.Len(t, model.Requests(), toolFailureLimit+1)
 	transcript := transcriptText(state.Transcript)
+	assert.Contains(t, transcript, toolFailureCorrectionMessage)
 	assert.Contains(t, transcript, toolFailureMessage)
 	assert.NotContains(t, transcript, "tools.shellPermissions")
 	assert.NotContains(t, transcript, "cannot unmarshal")

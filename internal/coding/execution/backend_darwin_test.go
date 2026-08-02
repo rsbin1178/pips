@@ -203,6 +203,7 @@ func TestDarwinSandboxAttackMatrixIntegration(t *testing.T) {
 	require.NoError(t, os.Mkdir(externalDir, 0o700))
 	externalSpec := fixture.operationSpec("printf approved > " + shellSingleQuote(filepath.Join(externalDir, "allowed")))
 	externalSpec.WriteDirs = []string{externalDir}
+	externalSpec.Justification = "verify approved external sandbox write"
 	externalOperation, err := NewOperation(t.Context(), fixture.workspace, externalSpec)
 	require.NoError(t, err)
 	externalAuthorization, err := policy.Approve(externalOperation)

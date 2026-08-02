@@ -130,6 +130,26 @@ func TestResolveActivity(t *testing.T) {
 			kind: activityApproval, label: activityLabelApproval, visible: true,
 		},
 		{
+			name: "allowed approval yields to running tool",
+			context: activityContext{
+				state: withApproval(
+					withTools(
+						running,
+						coding.ToolState{
+							Call: coding.ToolCall{
+								ID: "call-1", Name: "shell",
+								Arguments: ai.JSON(`{"command":"make test"}`),
+							},
+							Status: coding.ToolStatusRunning,
+						},
+					),
+					coding.ApprovalReview,
+				),
+				isResolvingAllowedApproval: true,
+			},
+			kind: activityTool, label: "Running…", detail: "make test", visible: true,
+		},
+		{
 			name: "unknown outcome recovery", context: activityContext{state: withApproval(
 				running,
 				coding.ApprovalUncertain,

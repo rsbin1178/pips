@@ -171,6 +171,9 @@ func ProjectBundlesDir() string { return path.Join(projectDir, "bundles") }
 // Root returns the application's user configuration directory.
 func (l Layout) Root() string { return l.root }
 
+// TempDir returns the private runtime scratch directory under the product root.
+func (l Layout) TempDir() string { return filepath.Join(l.root, "tmp") }
+
 // ConfigFile returns the user TOML configuration path.
 func (l Layout) ConfigFile() string { return l.configFile }
 

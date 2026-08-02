@@ -18,6 +18,7 @@ func TestPolicyDecisionMatrix(t *testing.T) {
 	baseline := mustOperation(t, fixture, fixture.spec())
 	expandedSpec := fixture.spec()
 	expandedSpec.Network = execution.NetworkAny
+	expandedSpec.Justification = "test network approval"
 	expanded := mustOperation(t, fixture, expandedSpec)
 
 	onRequest := mustPolicy(t, fixture, execution.PolicyConfig{
@@ -70,6 +71,71 @@ func TestPolicyDecisionMatrix(t *testing.T) {
 	require.NotEqual(t, execution.Authorization{}, authorization)
 }
 
+func TestPolicyWorkspaceWriteNetworkModes(t *testing.T) {
+	t.Parallel()
+
+	fixture := newOperationFixture(t)
+	spec := fixture.spec()
+	spec.Network = execution.NetworkAny
+	spec.Justification = "download dependencies"
+	operation := mustOperation(t, fixture, spec)
+
+	tests := []struct {
+		name        string
+		network     config.SandboxNetworkMode
+		approval    config.ApprovalMode
+		wantVerdict execution.Verdict
+		wantReason  string
+	}{
+		{
+			name: "deny", network: config.SandboxNetworkDeny,
+			approval:    config.ApprovalOnRequest,
+			wantVerdict: execution.VerdictDeny, wantReason: "network_disabled",
+		},
+		{
+			name: "on request", network: config.SandboxNetworkOnRequest,
+			approval:    config.ApprovalOnRequest,
+			wantVerdict: execution.VerdictReview, wantReason: "approval_required",
+		},
+		{
+			name: "allow", network: config.SandboxNetworkAllow,
+			approval:    config.ApprovalNever,
+			wantVerdict: execution.VerdictAllow, wantReason: "baseline",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			policy := mustPolicy(t, fixture, execution.PolicyConfig{
+				Sandbox:       config.SandboxWorkspaceWrite,
+				Network:       test.network,
+				Approval:      test.approval,
+				SandboxSource: config.Source{Kind: config.SourceDefault},
+			})
+			decision := policy.Evaluate(operation)
+			assert.Equal(t, test.wantVerdict, decision.Verdict())
+			assert.Equal(t, test.wantReason, decision.Reason())
+		})
+	}
+
+	external := mkdir(t, filepath.Join(fixture.base, "external-network-allow"))
+	externalSpec := fixture.spec()
+	externalSpec.Network = execution.NetworkAny
+	externalSpec.NetworkByConfiguration = true
+	externalSpec.WriteDirs = []string{external}
+	externalSpec.Justification = "write generated output"
+	externalOperation := mustOperation(t, fixture, externalSpec)
+	allow := mustPolicy(t, fixture, execution.PolicyConfig{
+		Sandbox:       config.SandboxWorkspaceWrite,
+		Network:       config.SandboxNetworkAllow,
+		Approval:      config.ApprovalOnRequest,
+		SandboxSource: config.Source{Kind: config.SourceDefault},
+	})
+	assert.Equal(t, execution.VerdictReview, allow.Evaluate(externalOperation).Verdict())
+}
+
 func TestPolicyRejectsUnsafeConfigurationAndProtectedWrites(t *testing.T) {
 	t.Parallel()
 
@@ -104,6 +170,7 @@ func TestPolicyRejectsUnsafeConfigurationAndProtectedWrites(t *testing.T) {
 	for _, writeDir := range []string{protected, child, fixture.base} {
 		spec := fixture.spec()
 		spec.WriteDirs = []string{writeDir}
+		spec.Justification = "test protected write approval"
 		op := mustOperation(t, fixture, spec)
 		decision := policy.Evaluate(op, op.Fingerprint())
 		assert.Equal(t, execution.VerdictDeny, decision.Verdict())
@@ -121,6 +188,7 @@ func TestPolicyRejectsUnsafeConfigurationAndProtectedWrites(t *testing.T) {
 	})
 	spec := fixture.spec()
 	spec.WriteDirs = []string{protected}
+	spec.Justification = "test protected write approval"
 	op := mustOperation(t, fixture, spec)
 	decision := fullAccess.Evaluate(op, op.Fingerprint())
 	assert.Equal(t, execution.VerdictDeny, decision.Verdict())

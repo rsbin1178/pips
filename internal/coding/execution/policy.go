@@ -47,6 +47,7 @@ func (d Decision) Authorization() (Authorization, bool) {
 // PolicyConfig defines the immutable sandbox and approval ceiling.
 type PolicyConfig struct {
 	Sandbox       config.SandboxMode
+	Network       config.SandboxNetworkMode
 	Approval      config.ApprovalMode
 	SandboxSource config.Source
 	Protected     []string
@@ -57,6 +58,7 @@ type Policy struct {
 	workspaceRoot string
 	workspaceKey  string
 	sandbox       config.SandboxMode
+	network       config.SandboxNetworkMode
 	approval      config.ApprovalMode
 	protected     []string
 	ceiling       Fingerprint
@@ -90,6 +92,7 @@ func NewPolicy(ws workspace.Workspace, cfg PolicyConfig) (Policy, error) {
 		workspaceRoot: ws.Root(),
 		workspaceKey:  ws.Identity().Key(),
 		sandbox:       cfg.Sandbox,
+		network:       effectiveNetworkMode(cfg.Network),
 		approval:      cfg.Approval,
 		protected:     protected,
 		ceiling:       protectedCeiling(protected),
@@ -105,8 +108,11 @@ func (p Policy) Evaluate(op Operation, grants ...Fingerprint) Decision {
 	if p.sandbox == config.SandboxFullAccess {
 		return p.allowed(op, "full_access")
 	}
+	if op.network == NetworkAny && p.network == config.SandboxNetworkDeny {
+		return denied("network_disabled")
+	}
 
-	if baselineOperation(op) {
+	if p.baselineOperation(op) {
 		return p.allowed(op, "baseline")
 	}
 
@@ -127,7 +133,7 @@ func (p Policy) Approve(op Operation) (Authorization, error) {
 		return Authorization{}, fmt.Errorf("%w: %s", ErrUnauthorized, reason)
 	}
 
-	if p.sandbox != config.SandboxFullAccess && !baselineOperation(op) && p.approval != config.ApprovalOnRequest {
+	if p.sandbox != config.SandboxFullAccess && !p.baselineOperation(op) && p.approval != config.ApprovalOnRequest {
 		return Authorization{}, fmt.Errorf("%w: approval disabled", ErrUnauthorized)
 	}
 
@@ -147,12 +153,26 @@ func validatePolicyConfig(cfg PolicyConfig) error {
 		return fmt.Errorf("%w: unsupported sandbox mode %q", ErrInvalidPolicy, cfg.Sandbox)
 	}
 
+	switch effectiveNetworkMode(cfg.Network) {
+	case config.SandboxNetworkDeny, config.SandboxNetworkOnRequest, config.SandboxNetworkAllow:
+	default:
+		return fmt.Errorf("%w: unsupported network mode %q", ErrInvalidPolicy, cfg.Network)
+	}
+
 	switch cfg.Approval {
 	case config.ApprovalOnRequest, config.ApprovalNever:
 		return nil
 	default:
 		return fmt.Errorf("%w: unsupported approval mode %q", ErrInvalidPolicy, cfg.Approval)
 	}
+}
+
+func effectiveNetworkMode(mode config.SandboxNetworkMode) config.SandboxNetworkMode {
+	if mode == "" {
+		return config.SandboxNetworkOnRequest
+	}
+
+	return mode
 }
 
 func canonicalProtectedPaths(ws workspace.Workspace, configured []string) ([]string, error) {
@@ -212,8 +232,13 @@ func protectedOverlap(protected, requested string) bool {
 	return pathContains(protected, requested) || pathContains(requested, protected)
 }
 
-func baselineOperation(op Operation) bool {
-	return op.network == NetworkNone && len(op.writeDirs) == 0
+func (p Policy) baselineOperation(op Operation) bool {
+	if len(op.writeDirs) > 0 {
+		return false
+	}
+
+	return op.network == NetworkNone ||
+		op.network == NetworkAny && p.network == config.SandboxNetworkAllow
 }
 
 func containsFingerprint(grants []Fingerprint, target Fingerprint) bool {

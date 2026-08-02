@@ -11,6 +11,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"slices"
 
 	patchdoc "github.com/rsbin/pips/internal/coding/tools/patch"
@@ -20,10 +21,20 @@ import (
 const temporaryNameAttempts = 16
 
 type patchTransaction struct {
-	service *service
-	changes []*plannedChange
-	dirs    map[string]*workspace.MutationDir
-	applied bool
+	service     *service
+	changes     []*plannedChange
+	dirs        map[string]*workspace.MutationDir
+	mutation    *workspace.Mutation
+	createdDirs []*createdPatchDirectory
+	applied     bool
+}
+
+type createdPatchDirectory struct {
+	path     string
+	parent   string
+	base     string
+	expected fs.FileInfo
+	removed  bool
 }
 
 func (s *service) commitPatch(ctx context.Context, changes []*plannedChange) error {
@@ -38,16 +49,9 @@ func (s *service) commitPatch(ctx context.Context, changes []*plannedChange) err
 
 //nolint:gocyclo // Transaction phases and recovery routing are intentionally visible in the orchestrator.
 func (t *patchTransaction) run(ctx context.Context, mutation *workspace.Mutation) (returnErr error) {
+	t.mutation = mutation
 	defer func() {
-		var closeErrors []error
-
-		for _, directory := range t.dirs {
-			if err := directory.Close(); err != nil {
-				closeErrors = append(closeErrors, err)
-			}
-		}
-
-		closeErr := errors.Join(closeErrors...)
+		closeErr := t.closeDirectories()
 		if closeErr == nil {
 			return
 		}
@@ -60,17 +64,21 @@ func (t *patchTransaction) run(ctx context.Context, mutation *workspace.Mutation
 		returnErr = joinedError(returnErr, closeErr)
 	}()
 
+	if err := t.createMissingDirectories(mutation); err != nil {
+		return t.abortCreatedDirectories("prepare_cleanup", err)
+	}
+
 	if err := t.openDirectories(mutation); err != nil {
-		return err
+		return t.abortCreatedDirectories("prepare_cleanup", err)
 	}
 
 	if err := t.prepare(ctx); err != nil {
 		cleanupErr := t.cleanupPrepared("prepare_cleanup")
-		if cleanupErr != nil {
-			return t.recoveryError(false, joinedError(err, cleanupErr))
-		}
 
-		return err
+		return t.abortCreatedDirectories(
+			"prepare_cleanup",
+			joinedError(err, cleanupErr),
+		)
 	}
 
 	for _, change := range t.changes {
@@ -102,21 +110,93 @@ func (t *patchTransaction) run(ctx context.Context, mutation *workspace.Mutation
 
 func (t *patchTransaction) openDirectories(mutation *workspace.Mutation) error {
 	for _, change := range t.changes {
-		if directory := t.dirs[change.parent]; directory != nil {
-			change.directory = directory
-			continue
-		}
-
-		directory, err := mutation.OpenDir(change.parent)
+		directory, err := t.openDirectory(mutation, change.parent)
 		if err != nil {
 			return err
 		}
 
-		t.dirs[change.parent] = directory
 		change.directory = directory
 	}
 
 	return nil
+}
+
+func (t *patchTransaction) createMissingDirectories(mutation *workspace.Mutation) error {
+	missing := make([]string, 0)
+	for _, change := range t.changes {
+		missing = append(missing, change.missingParents...)
+	}
+	slices.Sort(missing)
+	missing = slices.Compact(missing)
+
+	for _, directoryPath := range missing {
+		parent := path.Dir(directoryPath)
+		base := path.Base(directoryPath)
+		parentDirectory, err := t.openDirectory(mutation, parent)
+		if err != nil {
+			return err
+		}
+
+		_, err = parentDirectory.Lstat(base)
+		if err == nil {
+			return fmt.Errorf(
+				"%w: patch parent %q appeared during patch",
+				workspace.ErrChanged,
+				directoryPath,
+			)
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+		if err := t.service.patchStep("prepare", "mkdir", directoryPath); err != nil {
+			return err
+		}
+		if err := parentDirectory.Mkdir(base, 0o755); err != nil {
+			return err
+		}
+
+		created := &createdPatchDirectory{
+			path: directoryPath, parent: parent, base: base,
+		}
+		t.createdDirs = append(t.createdDirs, created)
+
+		info, err := parentDirectory.Lstat(base)
+		if err != nil {
+			return err
+		}
+		if info.Mode()&fs.ModeSymlink != 0 || !info.IsDir() {
+			return fmt.Errorf(
+				"%w: created patch parent %q changed type",
+				workspace.ErrChanged,
+				directoryPath,
+			)
+		}
+		created.expected = info
+
+		if _, err := t.openDirectory(mutation, directoryPath); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (t *patchTransaction) openDirectory(
+	mutation *workspace.Mutation,
+	name string,
+) (*workspace.MutationDir, error) {
+	if directory := t.dirs[name]; directory != nil {
+		return directory, nil
+	}
+
+	directory, err := mutation.OpenDir(name)
+	if err != nil {
+		return nil, err
+	}
+
+	t.dirs[name] = directory
+
+	return directory, nil
 }
 
 func (t *patchTransaction) prepare(ctx context.Context) error {
@@ -363,12 +443,112 @@ func (t *patchTransaction) rollback(ctx context.Context, cause error) error {
 	if err := t.syncDirectories("rollback"); err != nil {
 		rollbackErrors = append(rollbackErrors, err)
 	}
+	if err := t.removeCreatedDirectories("rollback_cleanup"); err != nil {
+		rollbackErrors = append(rollbackErrors, err)
+	}
 
 	if len(rollbackErrors) > 0 {
 		return t.recoveryError(false, joinedError(cause, errors.Join(rollbackErrors...)))
 	}
 
 	return cause
+}
+
+func (t *patchTransaction) abortCreatedDirectories(phase string, cause error) error {
+	cleanupErr := t.removeCreatedDirectories(phase)
+	if cleanupErr != nil {
+		return t.recoveryError(false, joinedError(cause, cleanupErr))
+	}
+
+	return cause
+}
+
+func (t *patchTransaction) removeCreatedDirectories(phase string) error {
+	if len(t.createdDirs) == 0 {
+		return nil
+	}
+
+	var errorsToJoin []error
+	if err := t.closeDirectories(); err != nil {
+		errorsToJoin = append(errorsToJoin, err)
+	}
+	for _, directory := range slices.Backward(t.createdDirs) {
+		if directory.removed {
+			continue
+		}
+
+		parent, err := t.mutation.OpenDir(directory.parent)
+		if err != nil {
+			errorsToJoin = append(errorsToJoin, err)
+			continue
+		}
+
+		removeErr := t.removeCreatedDirectory(phase, parent, directory)
+		closeErr := parent.Close()
+		if removeErr != nil || closeErr != nil {
+			errorsToJoin = append(errorsToJoin, errors.Join(removeErr, closeErr))
+		}
+	}
+
+	return errors.Join(errorsToJoin...)
+}
+
+func (t *patchTransaction) removeCreatedDirectory(
+	phase string,
+	parent *workspace.MutationDir,
+	directory *createdPatchDirectory,
+) error {
+	if err := t.service.patchStep(phase, "rmdir", directory.path); err != nil {
+		return err
+	}
+
+	current, err := parent.Lstat(directory.base)
+	if errors.Is(err, fs.ErrNotExist) {
+		directory.removed = true
+
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if directory.expected == nil || !current.IsDir() ||
+		current.Mode()&fs.ModeSymlink != 0 || !os.SameFile(directory.expected, current) {
+		return fmt.Errorf(
+			"coding tools: refuse to remove changed patch directory %q",
+			directory.path,
+		)
+	}
+	if err := parent.Remove(directory.base); err != nil {
+		return err
+	}
+	directory.removed = true
+	if err := parent.Sync(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (t *patchTransaction) closeDirectories() error {
+	if len(t.dirs) == 0 {
+		return nil
+	}
+
+	paths := make([]string, 0, len(t.dirs))
+	for directoryPath := range t.dirs {
+		paths = append(paths, directoryPath)
+	}
+	slices.Sort(paths)
+
+	errorsToJoin := make([]error, 0)
+	for _, directoryPath := range slices.Backward(paths) {
+		if err := t.dirs[directoryPath].Close(); err != nil {
+			errorsToJoin = append(errorsToJoin, err)
+		}
+		delete(t.dirs, directoryPath)
+	}
+
+	return errors.Join(errorsToJoin...)
 }
 
 //nolint:gocyclo // Recovery spells out non-overwriting behavior for every change kind.
@@ -518,6 +698,13 @@ func (t *patchTransaction) recoveryError(applied bool, cause error) error {
 
 		if change.committed && !change.restored {
 			paths = append(paths, change.path)
+		}
+	}
+	if !applied {
+		for _, directory := range t.createdDirs {
+			if !directory.removed {
+				paths = append(paths, directory.path)
+			}
 		}
 	}
 

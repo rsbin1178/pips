@@ -47,10 +47,18 @@ type result struct {
 	Code      string
 	Truncated bool
 	Reason    string
+	Problem   *ResultProblem
 	Counts    ResultCounts
 	Next      ResultNext
 	Execution *ResultExecution
 	Body      string
+}
+
+// ResultProblem describes a safe correction for a failed tool call.
+type ResultProblem struct {
+	Field     string `json:"field,omitempty"`
+	Retryable bool   `json:"retryable"`
+	Hint      string `json:"hint,omitempty"`
 }
 
 // ResultExecution summarizes one bounded local process outcome.
@@ -78,6 +86,7 @@ type ResultHeader struct {
 	Code      string           `json:"code,omitempty"`
 	Truncated bool             `json:"truncated,omitempty"`
 	Reason    string           `json:"reason,omitempty"`
+	Problem   *ResultProblem   `json:"problem,omitempty"`
 	Counts    ResultCounts     `json:"counts,omitzero"`
 	Next      ResultNext       `json:"next,omitzero"`
 	Execution *ResultExecution `json:"execution,omitempty"`
@@ -91,6 +100,7 @@ func (r result) render() string {
 		Code:      r.Code,
 		Truncated: r.Truncated,
 		Reason:    r.Reason,
+		Problem:   r.Problem,
 		Counts:    r.Counts,
 		Next:      r.Next,
 		Execution: r.Execution,

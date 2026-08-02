@@ -24,6 +24,14 @@ const twoFilePatch = `*** Begin Patch
 *** End Patch
 `
 
+const nestedAddPatch = `*** Begin Patch
+*** Add File: created/deep/a.txt
++nested
+*** Add File: z.txt
++last
+*** End Patch
+`
+
 func TestPatchCommitFailureRollsBackAllTargets(t *testing.T) {
 	t.Parallel()
 
@@ -121,6 +129,82 @@ func TestPatchRollbackFailureRetainsRecoveryMaterial(t *testing.T) {
 	header, _, parseErr := ParseResult(err.Error())
 	require.NoError(t, parseErr)
 	assert.Equal(t, "recovery_required", header.Code)
+}
+
+func TestPatchCommitFailureRemovesCreatedParents(t *testing.T) {
+	t.Parallel()
+
+	service, root := newPatchService(t)
+	service.patchFault = func(phase, operation, name string) error {
+		if phase == "commit" && operation == "link" && name == "z.txt" {
+			return errors.New("injected commit failure")
+		}
+
+		return nil
+	}
+
+	_, err := service.applyPatch(t.Context(), applyPatchArgs{Patch: nestedAddPatch})
+	require.Error(t, err)
+	_, statErr := os.Stat(filepath.Join(root, "created"))
+	require.ErrorIs(t, statErr, os.ErrNotExist)
+	_, statErr = os.Stat(filepath.Join(root, "z.txt"))
+	require.ErrorIs(t, statErr, os.ErrNotExist)
+}
+
+func TestPatchRollbackRefusesReplacedCreatedDirectory(t *testing.T) {
+	t.Parallel()
+
+	service, root := newPatchService(t)
+	replaced := false
+	service.patchFault = func(phase, operation, name string) error {
+		switch {
+		case phase == "commit" && operation == "link" && name == "z.txt":
+			return errors.New("injected commit failure")
+		case !replaced && phase == "rollback_cleanup" && operation == "rmdir" && name == "created/deep":
+			replaced = true
+			original := filepath.Join(root, "created", "deep")
+			held := filepath.Join(root, "held-deep")
+			if err := os.Rename(original, held); err != nil {
+				return err
+			}
+			if err := os.Mkdir(original, 0o700); err != nil {
+				return err
+			}
+
+			return os.WriteFile(filepath.Join(original, "marker"), []byte("replacement"), 0o600)
+		default:
+			return nil
+		}
+	}
+
+	_, err := service.applyPatch(t.Context(), applyPatchArgs{Patch: nestedAddPatch})
+	require.Error(t, err)
+	var recovery *RecoveryError
+	require.ErrorAs(t, err, &recovery)
+	assert.Contains(t, recovery.RecoveryPaths, "created/deep")
+	assert.Contains(t, recovery.RecoveryPaths, "created")
+	assert.Equal(t,
+		"replacement",
+		string(readPatchFile(t, root, filepath.Join("created", "deep", "marker"))),
+	)
+}
+
+func TestPatchRejectsAncestorAndDescendantTargets(t *testing.T) {
+	t.Parallel()
+
+	service, root := newPatchService(t)
+	patch := `*** Begin Patch
+*** Add File: created
++parent
+*** Add File: created/child.txt
++child
+*** End Patch
+`
+
+	_, err := service.applyPatch(t.Context(), applyPatchArgs{Patch: patch})
+	require.ErrorContains(t, err, "conflicts with descendant")
+	_, statErr := os.Lstat(filepath.Join(root, "created"))
+	require.ErrorIs(t, statErr, os.ErrNotExist)
 }
 
 func newPatchService(t *testing.T) (*service, string) {

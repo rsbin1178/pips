@@ -119,6 +119,30 @@ func TestToolActivitiesClassifyCanceledResultAsInterrupted(t *testing.T) {
 	assert.Contains(t, rendered, "! Run interrupted go test ./...")
 }
 
+func TestShellToolPreflightRejectionIsNotRenderedAsRunFailure(t *testing.T) {
+	t.Parallel()
+
+	result := ai.Message{Role: ai.RoleTool, Parts: []ai.Part{ai.ToolResultPart{
+		ToolCallID: "call-1", Name: "shell", IsError: true,
+		Content: []ai.Part{ai.Text(
+			`{"schema":"pips.coding.tool_result/v1alpha1","ok":false,"tool":"shell","code":"invalid_argument","reason":"cwd_not_found","problem":{"field":"cwd","retryable":true,"hint":"choose an existing Workspace directory"}}` +
+				"\n\nchoose an existing Workspace directory",
+		)},
+	}}}
+	state := coding.State{Tools: []coding.ToolState{{
+		Call: coding.ToolCall{
+			ID: "call-1", Name: "shell", Arguments: ai.JSON(`{"command":"pwd","cwd":"missing"}`),
+		},
+		Status: coding.ToolStatusCompleted, Result: result,
+	}}}
+
+	rendered := renderTimeline(
+		projectTimeline(state), newMarkdownRenderer(8), 80, themeDark, true,
+	)
+	assert.Contains(t, rendered, "✗ Tool input rejected pwd")
+	assert.NotContains(t, rendered, "Run failed")
+}
+
 func TestGenericToolCompactInvocationIsAllowlistedAndRedacted(t *testing.T) {
 	t.Parallel()
 

@@ -8,14 +8,29 @@ import (
 	"encoding/json"
 	"io"
 	"slices"
+	"strings"
 	"sync"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/rsbin/pips/agent"
+	"github.com/rsbin/pips/ai"
+	codingtools "github.com/rsbin/pips/internal/coding/tools"
 )
 
 const (
-	toolFailureLimit   = 3
-	toolFailureMessage = "identical failing tool call reached the no-progress limit; this run will stop"
+	toolFailureLimit             = 3
+	toolFailureCorrectionMessage = "repeated tool failure detected; correct the rejected input before retrying"
+	toolFailureMessage           = "tool failure repeated after the correction turn; this run will stop"
+	maximumToolFailureHintBytes  = 512
+)
+
+type toolFailureDisposition uint8
+
+const (
+	toolFailureObserved toolFailureDisposition = iota
+	toolFailureCorrect
+	toolFailureStop
 )
 
 type toolFailureGuard struct {
@@ -23,6 +38,7 @@ type toolFailureGuard struct {
 	last        [sha256.Size]byte
 	hasLast     bool
 	consecutive int
+	corrected   bool
 	exhausted   bool
 }
 
@@ -39,11 +55,16 @@ func (g *toolFailureGuard) wrapBeforeTool(
 
 		switch decision.Action {
 		case agent.ToolDecisionDeny:
-			if g.observeFailure(info.ToolCall) {
-				if decision.Reason == "" {
-					decision.Reason = "tool call denied"
-				}
-				decision.Reason += "; " + toolFailureMessage
+			disposition, hint := g.observeFailure(info.ToolCall, decision.Reason)
+			switch disposition {
+			case toolFailureCorrect:
+				decision.Reason = appendToolFailureGuidance(
+					decision.Reason,
+					toolFailureCorrection(hint),
+				)
+			case toolFailureStop:
+				decision.Reason = appendToolFailureGuidance(decision.Reason, toolFailureMessage)
+			case toolFailureObserved:
 			}
 		case agent.ToolDecisionPause:
 			g.reset()
@@ -77,13 +98,18 @@ func (g *toolFailureGuard) wrapAfterTool(
 			g.reset()
 			return cloneToolResultOverride(override)
 		}
-		if !g.observeFailure(info.ToolCall) {
+		disposition, hint := g.observeFailure(info.ToolCall, toolFailureResultText(effective.Content))
+		if disposition == toolFailureObserved {
 			return cloneToolResultOverride(override)
 		}
 
+		message := toolFailureMessage
+		if disposition == toolFailureCorrect {
+			message = toolFailureCorrection(hint)
+		}
 		effective.Content = append(
 			slices.Clone(effective.Content),
-			agent.TextResult(toolFailureMessage)...,
+			agent.TextResult(message)...,
 		)
 		result := cloneToolResultOverride(override)
 		if result == nil {
@@ -106,12 +132,15 @@ func (g *toolFailureGuard) stopWhen(agent.RunInfo) bool {
 	return g.exhausted
 }
 
-func (g *toolFailureGuard) observeFailure(call agent.ToolCall) bool {
+func (g *toolFailureGuard) observeFailure(
+	call agent.ToolCall,
+	failureText string,
+) (toolFailureDisposition, string) {
 	if g == nil {
-		return false
+		return toolFailureObserved, ""
 	}
 
-	fingerprint := toolCallFingerprint(call)
+	fingerprint, hint := toolFailureFingerprint(call, failureText)
 
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -122,13 +151,22 @@ func (g *toolFailureGuard) observeFailure(call agent.ToolCall) bool {
 		g.last = fingerprint
 		g.hasLast = true
 		g.consecutive = 1
+		g.corrected = false
 		g.exhausted = false
 	}
-	if g.consecutive >= toolFailureLimit {
+
+	if g.corrected && g.consecutive > toolFailureLimit {
 		g.exhausted = true
+
+		return toolFailureStop, hint
+	}
+	if !g.corrected && g.consecutive >= toolFailureLimit {
+		g.corrected = true
+
+		return toolFailureCorrect, hint
 	}
 
-	return g.exhausted
+	return toolFailureObserved, hint
 }
 
 func (g *toolFailureGuard) reset() {
@@ -140,26 +178,13 @@ func (g *toolFailureGuard) reset() {
 	g.last = [sha256.Size]byte{}
 	g.hasLast = false
 	g.consecutive = 0
+	g.corrected = false
 	g.exhausted = false
 	g.mu.Unlock()
 }
 
 func toolCallFingerprint(call agent.ToolCall) [sha256.Size]byte {
-	arguments := call.Args
-
-	var decoded any
-	validJSON := false
-	decoder := json.NewDecoder(bytes.NewReader(call.Args))
-	decoder.UseNumber()
-	if err := decoder.Decode(&decoded); err == nil {
-		var trailing any
-		validJSON = decoder.Decode(&trailing) == io.EOF
-	}
-	if validJSON {
-		if canonical, marshalErr := json.Marshal(decoded); marshalErr == nil {
-			arguments = canonical
-		}
-	}
+	arguments := canonicalToolArguments(call.Args)
 
 	input := make([]byte, 0, len(call.Name)+1+len(arguments))
 	input = append(input, call.Name...)
@@ -167,6 +192,131 @@ func toolCallFingerprint(call agent.ToolCall) [sha256.Size]byte {
 	input = append(input, arguments...)
 
 	return sha256.Sum256(input)
+}
+
+func toolFailureFingerprint(
+	call agent.ToolCall,
+	failureText string,
+) ([sha256.Size]byte, string) {
+	header, _, err := codingtools.ParseResult(failureText)
+	if err != nil || header.OK || header.Code == "" {
+		return toolCallFingerprint(call), ""
+	}
+
+	arguments := canonicalToolArguments(call.Args)
+	if call.Name == "shell" {
+		if command, ok := shellFailureCommand(call.Args); ok {
+			arguments = []byte(command)
+		}
+	}
+
+	phase := "preflight"
+	if header.Execution != nil {
+		phase = "execution"
+	}
+
+	field := ""
+	hint := ""
+	if header.Problem != nil {
+		field = header.Problem.Field
+		hint = safeToolFailureHint(*header.Problem)
+	}
+
+	identity, marshalErr := json.Marshal(struct {
+		Tool      string `json:"tool"`
+		Arguments []byte `json:"arguments"`
+		Phase     string `json:"phase"`
+		Code      string `json:"code"`
+		Reason    string `json:"reason"`
+		Field     string `json:"field"`
+	}{
+		Tool: call.Name, Arguments: arguments, Phase: phase,
+		Code: header.Code, Reason: header.Reason, Field: field,
+	})
+	if marshalErr != nil {
+		return toolCallFingerprint(call), hint
+	}
+
+	return sha256.Sum256(identity), hint
+}
+
+func canonicalToolArguments(arguments ai.JSON) []byte {
+	var decoded any
+	decoder := json.NewDecoder(bytes.NewReader(arguments))
+	decoder.UseNumber()
+	if err := decoder.Decode(&decoded); err != nil {
+		return slices.Clone(arguments)
+	}
+
+	var trailing any
+	if decoder.Decode(&trailing) != io.EOF {
+		return slices.Clone(arguments)
+	}
+
+	canonical, err := json.Marshal(decoded)
+	if err != nil {
+		return slices.Clone(arguments)
+	}
+
+	return canonical
+}
+
+func shellFailureCommand(arguments ai.JSON) (string, bool) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(arguments, &fields); err != nil {
+		return "", false
+	}
+
+	var command string
+	if err := json.Unmarshal(fields["command"], &command); err != nil || command == "" {
+		return "", false
+	}
+
+	return command, true
+}
+
+func safeToolFailureHint(problem codingtools.ResultProblem) string {
+	if !problem.Retryable {
+		return ""
+	}
+
+	hint := strings.TrimSpace(problem.Hint)
+	if hint == "" || len(hint) > maximumToolFailureHintBytes || !utf8.ValidString(hint) {
+		return ""
+	}
+	for _, character := range hint {
+		if unicode.IsControl(character) {
+			return ""
+		}
+	}
+
+	return hint
+}
+
+func toolFailureCorrection(hint string) string {
+	if hint == "" {
+		return toolFailureCorrectionMessage
+	}
+
+	return toolFailureCorrectionMessage + ": " + hint
+}
+
+func appendToolFailureGuidance(reason, guidance string) string {
+	if strings.TrimSpace(reason) == "" {
+		reason = "tool call denied"
+	}
+
+	return reason + "\n\n" + guidance
+}
+
+func toolFailureResultText(parts []ai.Part) string {
+	for _, part := range parts {
+		if text, ok := part.(ai.TextPart); ok {
+			return text.Text
+		}
+	}
+
+	return ""
 }
 
 func cloneToolResultOverride(value *agent.ToolResultOverride) *agent.ToolResultOverride {

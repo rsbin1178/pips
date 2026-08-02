@@ -1385,10 +1385,11 @@ func (m *Model) composerBoxCursorOffset() (int, int) {
 
 func (m *Model) activityStatus() (activityStatus, bool) {
 	return resolveActivity(activityContext{
-		state:       m.state,
-		isStarting:  m.starting,
-		hasBridge:   m.bridge != nil,
-		isCanceling: m.canceling,
+		state:                      m.state,
+		isStarting:                 m.starting,
+		hasBridge:                  m.bridge != nil,
+		isCanceling:                m.canceling,
+		isResolvingAllowedApproval: m.mainApprovalExecutionStarting(),
 	})
 }
 
@@ -1406,7 +1407,9 @@ func (m *Model) activityLine() string {
 }
 
 func (m *Model) effectivePhase() coding.Phase {
-	if m.state.Phase != coding.PhasePaused && (m.starting || m.bridge != nil || m.canceling) {
+	bridgeActive := m.starting || m.bridge != nil || m.canceling
+	if bridgeActive &&
+		(m.state.Phase != coding.PhasePaused || m.mainApprovalExecutionStarting()) {
 		return coding.PhaseRunning
 	}
 

@@ -261,6 +261,22 @@ func TestApplyPatchAddsUpdatesDeletesAndPreservesMode(t *testing.T) {
 	assert.Empty(t, temporaryFiles(t, fixture.root))
 }
 
+func TestApplyPatchAddCreatesNestedParents(t *testing.T) {
+	t.Parallel()
+
+	fixture := newToolFixture(t, tools.DefaultLimits())
+	text, err := fixture.exec(t.Context(), "apply_patch", `{"patch":"*** Begin Patch\n*** Add File: prisma/schema/schema.prisma\n+datasource db {}\n*** End Patch\n"}`)
+	require.NoError(t, err)
+	header, body, err := tools.ParseResult(text)
+	require.NoError(t, err)
+	assert.True(t, header.OK)
+	assert.Equal(t, "A prisma/schema/schema.prisma\n", body)
+	assert.Equal(t,
+		"datasource db {}\n",
+		string(mustRead(t, filepath.Join(fixture.root, "prisma", "schema", "schema.prisma"))),
+	)
+}
+
 func TestApplyPatchConflictLeavesWorkspaceUnchanged(t *testing.T) {
 	t.Parallel()
 
@@ -305,6 +321,27 @@ func TestResultParserRejectsUnknownEnvelope(t *testing.T) {
 	require.Error(t, err)
 	_, _, err = tools.ParseResult(`not json`)
 	require.Error(t, err)
+}
+
+func TestResultParserKeepsProblemMetadataBackwardCompatible(t *testing.T) {
+	t.Parallel()
+
+	legacy, _, err := tools.ParseResult(
+		`{"schema":"pips.coding.tool_result/v1alpha1","ok":false,"tool":"shell","code":"invalid_argument","reason":"operation_invalid"}`,
+	)
+	require.NoError(t, err)
+	assert.Nil(t, legacy.Problem)
+
+	current, body, err := tools.ParseResult(
+		`{"schema":"pips.coding.tool_result/v1alpha1","ok":false,"tool":"shell","code":"invalid_argument","reason":"cwd_not_found","problem":{"field":"cwd","retryable":true,"hint":"choose an existing Workspace directory"}}` +
+			"\n\nchoose an existing Workspace directory",
+	)
+	require.NoError(t, err)
+	require.NotNil(t, current.Problem)
+	assert.Equal(t, "cwd", current.Problem.Field)
+	assert.True(t, current.Problem.Retryable)
+	assert.Equal(t, "choose an existing Workspace directory", current.Problem.Hint)
+	assert.Equal(t, "choose an existing Workspace directory", body)
 }
 
 type toolFixture struct {

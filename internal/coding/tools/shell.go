@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/rsbin/pips/agent"
 	"github.com/rsbin/pips/ai"
+	"github.com/rsbin/pips/internal/coding/config"
 	"github.com/rsbin/pips/internal/coding/execution"
 	"github.com/rsbin/pips/internal/coding/workspace"
 	"github.com/rsbin/pips/internal/jsonx"
@@ -79,15 +81,29 @@ func (e *shellArgumentError) Unwrap() error {
 // registerable wrapper.
 type ShellHandler struct {
 	declaration ai.Tool
+	network     config.SandboxNetworkMode
 }
 
 // NewShellHandler constructs the non-registerable shell operation handler.
 func NewShellHandler() *ShellHandler {
-	return &ShellHandler{declaration: ai.Tool{
-		Name: shellName,
-		Description: "Run a bounded non-interactive POSIX shell command in the local OS sandbox. " +
-			"Omit cwd to run at the Workspace root; otherwise use a Workspace-relative directory. " +
-			"External writes and network access require a complete permissions object and explicit approval.",
+	return NewShellHandlerForNetwork(config.SandboxNetworkOnRequest)
+}
+
+// NewShellHandlerForNetwork constructs a Shell handler with the user-owned
+// workspace-write network policy. The Config boundary validates mode.
+func NewShellHandlerForNetwork(mode config.SandboxNetworkMode) *ShellHandler {
+	description := "Run a bounded non-interactive POSIX shell command in the local OS sandbox. " +
+		"Omit cwd to run at the Workspace root; an absolute cwd is accepted only inside the Workspace. " +
+		"Permissions describe only optional external writes or network access and require explicit approval."
+	if mode == config.SandboxNetworkAllow {
+		description = "Run a bounded non-interactive POSIX shell command in the local OS sandbox. " +
+			"Omit cwd to run at the Workspace root; an absolute cwd is accepted only inside the Workspace. " +
+			"Host network access is enabled by user configuration; external writes still require explicit approval."
+	}
+
+	return &ShellHandler{network: mode, declaration: ai.Tool{
+		Name:        shellName,
+		Description: description,
 		InputSchema: shellInputSchema(),
 	}}
 }
@@ -145,6 +161,7 @@ func (h *ShellHandler) Operation(
 
 	writePaths := []string(nil)
 	network := execution.NetworkNone
+	networkByConfiguration := h.network == config.SandboxNetworkAllow
 
 	if arguments.Permissions != nil {
 		writePaths = arguments.Permissions.WritePaths
@@ -152,14 +169,8 @@ func (h *ShellHandler) Operation(
 			network = execution.NetworkAny
 		}
 	}
-
-	elevated := len(writePaths) > 0 || network == execution.NetworkAny
-	if elevated && strings.TrimSpace(arguments.Justification) == "" {
-		return execution.OperationSpec{}, shellFailure(newShellArgumentError(
-			"justification_required",
-			"justification is required when permissions request network or external writes",
-			nil,
-		))
+	if networkByConfiguration {
+		network = execution.NetworkAny
 	}
 
 	return execution.OperationSpec{
@@ -175,10 +186,11 @@ func (h *ShellHandler) Operation(
 			ChunkBytes:   shellChunkBytes,
 			QueueDepth:   shellOutputQueueDepth,
 		},
-		Workspace:     execution.WorkspaceWrite,
-		WriteDirs:     writePaths,
-		Network:       network,
-		Justification: arguments.Justification,
+		Workspace:              execution.WorkspaceWrite,
+		WriteDirs:              writePaths,
+		Network:                network,
+		NetworkByConfiguration: networkByConfiguration,
+		Justification:          arguments.Justification,
 	}, nil
 }
 
@@ -190,6 +202,9 @@ func (h *ShellHandler) Render(result execution.Result, runErr error) ([]ai.Part,
 	}
 
 	executionResult, body := renderShellExecution(result)
+	if result.Status == execution.StatusUnknown {
+		executionResult = nil
+	}
 	value := resultEnvelopeForShell(result, runErr, executionResult, body)
 	text := value.render()
 
@@ -265,23 +280,32 @@ func decodeShellCommand(raw json.RawMessage) (string, error) {
 
 //nolint:wsl_v5 // Shape, omission, and normalization checks form one decode boundary.
 func decodeShellCWD(raw json.RawMessage) (string, error) {
-	cwd, err := decodeShellString(raw, false)
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return "", nil
+	}
+
+	var cwd string
+	err := jsonx.Decode(trimmed, &cwd)
 	if err != nil {
 		return "", newShellArgumentError(
 			"cwd_relative",
-			"cwd must be a Workspace-relative directory; omit cwd to use the Workspace root",
+			"cwd must be a string, null, or omitted",
 			err,
 		)
 	}
-	if len(raw) == 0 {
+	if cwd == "" {
 		return "", nil
 	}
-	if cwd == "" {
+	if !utf8.ValidString(cwd) || strings.IndexByte(cwd, 0) >= 0 {
 		return "", newShellArgumentError(
 			"cwd_relative",
-			"cwd cannot be empty when supplied; omit cwd to use the Workspace root",
+			"cwd must be a bounded UTF-8 path",
 			nil,
 		)
+	}
+	if filepath.IsAbs(cwd) {
+		return filepath.Clean(cwd), nil
 	}
 
 	normalized, err := workspace.NormalizePath(cwd, true)
@@ -358,33 +382,39 @@ func decodeShellPermissions(raw json.RawMessage) (*shellPermissions, error) {
 			"permissions_shape", permissionsCorrection(), err,
 		)
 	}
-	if len(wire.WritePaths) == 0 || len(wire.Network) == 0 ||
-		bytes.Equal(bytes.TrimSpace(wire.WritePaths), []byte("null")) ||
-		bytes.Equal(bytes.TrimSpace(wire.Network), []byte("null")) {
-		return nil, newShellArgumentError(
-			"permissions_shape", permissionsCorrection(), nil,
-		)
-	}
-
 	var writePaths []string
-	if err := jsonx.Decode(wire.WritePaths, &writePaths); err != nil {
-		return nil, newShellArgumentError(
-			"permissions_shape", permissionsCorrection(), err,
-		)
+	if len(wire.WritePaths) > 0 {
+		if bytes.Equal(bytes.TrimSpace(wire.WritePaths), []byte("null")) {
+			return nil, newShellArgumentError(
+				"permissions_shape", permissionsCorrection(), nil,
+			)
+		}
+		if err := jsonx.Decode(wire.WritePaths, &writePaths); err != nil {
+			return nil, newShellArgumentError(
+				"permissions_shape", permissionsCorrection(), err,
+			)
+		}
 	}
 
 	var network bool
-	if err := jsonx.Decode(wire.Network, &network); err != nil {
-		return nil, newShellArgumentError(
-			"permissions_shape", permissionsCorrection(), err,
-		)
+	if len(wire.Network) > 0 {
+		if bytes.Equal(bytes.TrimSpace(wire.Network), []byte("null")) {
+			return nil, newShellArgumentError(
+				"permissions_shape", permissionsCorrection(), nil,
+			)
+		}
+		if err := jsonx.Decode(wire.Network, &network); err != nil {
+			return nil, newShellArgumentError(
+				"permissions_shape", permissionsCorrection(), err,
+			)
+		}
 	}
 
 	return &shellPermissions{WritePaths: writePaths, Network: network}, nil
 }
 
 func permissionsCorrection() string {
-	return "permissions must be null or one complete object with write_paths (array) and network (boolean)"
+	return "permissions must be null or one object containing optional write_paths (array) and network (boolean)"
 }
 
 func newShellArgumentError(reason, message string, cause error) *shellArgumentError {
@@ -394,16 +424,35 @@ func newShellArgumentError(reason, message string, cause error) *shellArgumentEr
 func shellFailure(err error) error {
 	var argument *shellArgumentError
 	if errors.As(err, &argument) {
+		problem := shellArgumentProblem(argument)
 		return &toolError{
 			result: result{
 				OK: false, Tool: shellName, Code: "invalid_argument",
-				Reason: argument.reason, Body: argument.message,
+				Reason: argument.reason, Problem: &problem, Body: argument.message,
 			},
 			cause: argument,
 		}
 	}
 
 	return failure(shellName, err)
+}
+
+func shellArgumentProblem(argument *shellArgumentError) ResultProblem {
+	field := "arguments"
+	switch argument.reason {
+	case "command_shape":
+		field = "command"
+	case "cwd_relative":
+		field = "cwd"
+	case "timeout_range":
+		field = "timeout_ms"
+	case "permissions_shape":
+		field = "permissions"
+	case "justification_shape", "justification_required":
+		field = "justification"
+	}
+
+	return ResultProblem{Field: field, Retryable: true, Hint: argument.message}
 }
 
 func shellInputSchema() *ai.Schema {
@@ -422,7 +471,6 @@ func shellInputSchema() *ai.Schema {
 				Type: "boolean", Description: "Allow host network access for this exact command.",
 			},
 		},
-		Required: []string{"write_paths", "network"},
 		Nullable: true,
 	}
 
@@ -439,8 +487,8 @@ func shellInputSchema() *ai.Schema {
 			},
 			"cwd": {
 				Type:        schemaStringType,
-				Description: "Optional Workspace-relative working directory. Omit it to use the Workspace root.",
-				Extra:       map[string]json.RawMessage{"minLength": json.RawMessage("1")},
+				Description: "Optional absolute or relative directory inside the Workspace. Omit, null, or empty uses the Workspace root.",
+				Nullable:    true,
 			},
 			"timeout_ms": {
 				Type: "integer", Description: "Optional command timeout in milliseconds (100 to 1800000).",
@@ -480,6 +528,12 @@ func resultEnvelopeForShell(
 		value.Code = errorCode(runErr)
 		if errors.Is(runErr, execution.ErrInvalidOperation) {
 			value.Reason = "operation_invalid"
+			if problem, ok := execution.DescribeInvalidOperation(runErr); ok {
+				value.Reason = problem.Reason
+				value.Problem = &ResultProblem{
+					Field: problem.Field, Retryable: problem.Retryable, Hint: problem.Hint,
+				}
+			}
 		}
 
 		safeError := safeShellError(runErr)
@@ -611,6 +665,10 @@ func shellStatusName(status execution.Status) string {
 }
 
 func safeShellError(err error) string {
+	if problem, ok := execution.DescribeInvalidOperation(err); ok {
+		return problem.Hint
+	}
+
 	switch {
 	case errors.Is(err, context.Canceled):
 		return "command execution was canceled"
@@ -625,7 +683,7 @@ func safeShellError(err error) string {
 	case errors.Is(err, execution.ErrStart):
 		return "the sandboxed command could not be started"
 	case errors.Is(err, execution.ErrInvalidOperation):
-		return "command configuration is invalid; cwd must name an existing Workspace-relative directory"
+		return "command configuration is invalid"
 	default:
 		return "command execution failed"
 	}
