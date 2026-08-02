@@ -8,7 +8,6 @@ import (
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding/planreview"
 	"github.com/rsbin/pips/internal/coding/question"
-	"github.com/rsbin/pips/internal/coding/tools"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -24,7 +23,7 @@ const validCheckpoint = `{
   "unresolved_material_decisions":[]
 }`
 
-func TestControllerEnforcesCheckpointWriteSubmitOrder(t *testing.T) {
+func TestControllerEnforcesCheckpointPresentOrder(t *testing.T) {
 	t.Parallel()
 
 	controller := newBoundController(t)
@@ -36,22 +35,13 @@ func TestControllerEnforcesCheckpointWriteSubmitOrder(t *testing.T) {
 
 	update := controller.PrepareTurn(t.Context(), agent.RunInfo{})
 	require.NotNil(t, update.NextRequest)
-	assert.Equal(t, ai.ToolChoice{Mode: ai.ToolChoiceTool, Name: tools.WritePlanName}, update.NextRequest.ToolChoice)
-	assert.Equal(t, []string{tools.WritePlanName}, toolNames(update.NextRequest.Tools))
+	assert.Equal(t, ai.ToolChoice{Mode: ai.ToolChoiceTool, Name: planreview.PresentToolName}, update.NextRequest.ToolChoice)
+	assert.Equal(t, []string{planreview.PresentToolName}, toolNames(update.NextRequest.Tools))
 
 	assert.Equal(t, agent.ToolDecisionAllow, controller.BeforeTool(
-		t.Context(), toolCall(tools.WritePlanName, 2, `{}`),
+		t.Context(), toolCall(planreview.PresentToolName, 2, `{"expected_revision":"","content":"# Plan"}`),
 	).Action)
-	controller.AfterTool(t.Context(), successfulToolResult(tools.WritePlanName, 2))
-
-	update = controller.PrepareTurn(t.Context(), agent.RunInfo{})
-	require.NotNil(t, update.NextRequest)
-	assert.Equal(t, ai.ToolChoice{Mode: ai.ToolChoiceTool, Name: planreview.ToolName}, update.NextRequest.ToolChoice)
-	assert.Equal(t, []string{planreview.ToolName}, toolNames(update.NextRequest.Tools))
-
-	assert.Equal(t, agent.ToolDecisionAllow, controller.BeforeTool(
-		t.Context(), toolCall(planreview.ToolName, 3, `{}`),
-	).Action)
+	assert.Nil(t, controller.PrepareTurn(t.Context(), agent.RunInfo{}).NextRequest)
 }
 
 func TestControllerRejectsIncompleteCheckpointAndInvalidatesSameTurnQuestion(t *testing.T) {
@@ -72,15 +62,20 @@ func TestControllerRejectsIncompleteCheckpointAndInvalidatesSameTurnQuestion(t *
 	assert.Equal(t, agent.ToolDecisionDeny, decision.Action)
 	assert.Contains(t, decision.Reason, "call ask_user")
 
-	require.Equal(t, agent.ToolDecisionAllow, controller.BeforeTool(
-		t.Context(), toolCall(ToolName, 2, validCheckpoint),
-	).Action)
-	controller.BeforeTool(t.Context(), toolCall(question.ToolName, 2, `{}`))
-	controller.AfterTool(t.Context(), successfulToolResult(ToolName, 2))
+	malformed := controller.BeforeTool(t.Context(), toolCall(question.ToolName, 2, `{}`))
+	assert.Equal(t, agent.ToolDecisionDeny, malformed.Action)
+	assert.Contains(t, malformed.Reason, question.TextToolName)
 
-	assert.Nil(t, controller.PrepareTurn(t.Context(), agent.RunInfo{}).NextRequest)
-	assert.Equal(t, agent.ToolDecisionDeny, controller.BeforeTool(
-		t.Context(), toolCall(tools.WritePlanName, 3, `{}`),
+	blocked := controller.BeforeTool(t.Context(), toolCall(ToolName, 3, validCheckpoint))
+	assert.Equal(t, agent.ToolDecisionDeny, blocked.Action)
+	assert.Contains(t, blocked.Reason, "until the pending user question is answered")
+	recovery := controller.PrepareTurn(t.Context(), agent.RunInfo{})
+	require.NotNil(t, recovery.NextRequest)
+	assert.Equal(t, ai.ToolChoice{Mode: ai.ToolChoiceTool, Name: question.TextToolName}, recovery.NextRequest.ToolChoice)
+
+	controller.ResolveQuestion()
+	require.Equal(t, agent.ToolDecisionAllow, controller.BeforeTool(
+		t.Context(), toolCall(ToolName, 4, validCheckpoint),
 	).Action)
 }
 
@@ -88,13 +83,11 @@ func TestControllerRejectsBatchedTransitionAndNewUserIntent(t *testing.T) {
 	t.Parallel()
 
 	controller := newBoundController(t)
-	require.Equal(t, agent.ToolDecisionAllow, controller.BeforeTool(
-		t.Context(), toolCall(ToolName, 1, validCheckpoint),
-	).Action)
-	decision := controller.BeforeTool(t.Context(), toolCall("read", 1, `{}`))
+	call := toolCall(ToolName, 1, validCheckpoint)
+	call.BatchSize = 2
+	decision := controller.BeforeTool(t.Context(), call)
 	assert.Equal(t, agent.ToolDecisionDeny, decision.Action)
 	assert.Contains(t, decision.Reason, "must be called alone")
-	controller.AfterTool(t.Context(), successfulToolResult(ToolName, 1))
 	assert.Nil(t, controller.PrepareTurn(t.Context(), agent.RunInfo{}).NextRequest)
 
 	require.Equal(t, agent.ToolDecisionAllow, controller.BeforeTool(
@@ -102,11 +95,10 @@ func TestControllerRejectsBatchedTransitionAndNewUserIntent(t *testing.T) {
 	).Action)
 	controller.AfterTool(t.Context(), successfulToolResult(ToolName, 2))
 	require.Equal(t, agent.ToolDecisionAllow, controller.BeforeTool(
-		t.Context(), toolCall(tools.WritePlanName, 3, `{}`),
+		t.Context(), toolCall(planreview.PresentToolName, 3, `{"expected_revision":"","content":"# Plan"}`),
 	).Action)
 
 	controller.InvalidateUserInput()
-	controller.AfterTool(t.Context(), successfulToolResult(tools.WritePlanName, 3))
 	assert.Nil(t, controller.PrepareTurn(t.Context(), agent.RunInfo{}).NextRequest)
 	retry := controller.CandidateAnswer(t.Context(), agent.CandidateAnswerInfo{})
 	require.NotNil(t, retry.Retry)
@@ -143,9 +135,9 @@ func newBoundController(t *testing.T) *Controller {
 
 	values := []agent.Tool{
 		namedTool(question.ToolName),
+		namedTool(question.TextToolName),
 		controller.checkpoint,
-		namedTool(tools.WritePlanName),
-		namedTool(planreview.ToolName),
+		namedTool(planreview.PresentToolName),
 	}
 	require.NoError(t, controller.BindTools(values))
 

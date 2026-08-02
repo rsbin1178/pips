@@ -1098,7 +1098,7 @@ func terminalTeamLifecycleStatus(value TeamLifecycleStatus) bool {
 }
 
 func validateQuestionRequired(value QuestionRequired) error {
-	if value.Count < 1 || value.Count > 4 || value.Count != len(value.Request.Questions) && !value.Redacted {
+	if value.Count < 1 || value.Count > 4 || value.Count != question.RequestCount(value.Request) && !value.Redacted {
 		return errors.New("invalid question count")
 	}
 	if value.Redacted {

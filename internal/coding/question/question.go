@@ -24,6 +24,7 @@ const (
 	maxPreviewBytes     = 16 << 10
 	maxCustomBytes      = 4096
 	maxChatBytes        = 16 << 10
+	maxFreeformBytes    = 4096
 )
 
 // ErrInvalid means a question schema or response violates the protocol.
@@ -49,12 +50,25 @@ type Spec struct {
 	Questions []Question `json:"questions"`
 }
 
+// RequestKind distinguishes structured choices from a direct free-form
+// response owned by the Runtime.
+type RequestKind string
+
+const (
+	// RequestStructured is the backward-compatible zero-value request kind.
+	RequestStructured RequestKind = ""
+	// RequestFreeform asks for one direct text response.
+	RequestFreeform RequestKind = "freeform"
+)
+
 // Request is one Runtime-owned pending structured question.
 type Request struct {
-	ID           string     `json:"id"`
-	ToolCallID   string     `json:"tool_call_id"`
-	SchemaDigest string     `json:"schema_digest"`
-	Questions    []Question `json:"questions"`
+	ID           string      `json:"id"`
+	ToolCallID   string      `json:"tool_call_id"`
+	SchemaDigest string      `json:"schema_digest"`
+	Kind         RequestKind `json:"kind,omitempty"`
+	Prompt       string      `json:"prompt,omitempty"`
+	Questions    []Question  `json:"questions"`
 }
 
 // Answer resolves one question in its original request order.
@@ -172,11 +186,44 @@ func NewRequest(id, toolCallID string, spec Spec) (Request, error) {
 	}, nil
 }
 
+// NewFreeformRequest binds one bounded direct prompt to Runtime and Tool-call
+// identities. The prompt is application-owned when malformed fallback
+// arguments cannot be trusted.
+func NewFreeformRequest(id, toolCallID, prompt string) (Request, error) {
+	if !validIdentity(id) || !validIdentity(toolCallID) || !validText(prompt, maxFreeformBytes) {
+		return Request{}, fmt.Errorf("%w: invalid free-form request", ErrInvalid)
+	}
+
+	sum := sha256.Sum256([]byte(string(RequestFreeform) + "\x00" + prompt))
+
+	return Request{
+		ID: id, ToolCallID: toolCallID, SchemaDigest: hex.EncodeToString(sum[:]),
+		Kind: RequestFreeform, Prompt: prompt,
+	}, nil
+}
+
 // ValidateRequest verifies identity and schema integrity.
 func ValidateRequest(request Request) error {
 	if !validIdentity(request.ID) || !validIdentity(request.ToolCallID) ||
 		len(request.SchemaDigest) != sha256.Size*2 {
 		return fmt.Errorf("%w: invalid request identity", ErrInvalid)
+	}
+
+	if request.Kind == RequestFreeform {
+		want, err := NewFreeformRequest(request.ID, request.ToolCallID, request.Prompt)
+		if err != nil {
+			return err
+		}
+
+		if len(request.Questions) != 0 || want.SchemaDigest != request.SchemaDigest {
+			return fmt.Errorf("%w: schema digest mismatch", ErrInvalid)
+		}
+
+		return nil
+	}
+
+	if request.Kind != RequestStructured || request.Prompt != "" {
+		return fmt.Errorf("%w: unsupported request kind", ErrInvalid)
 	}
 
 	digest, err := Digest(Spec{Questions: request.Questions})
@@ -207,6 +254,10 @@ func ValidateResolution(request Request, resolution Resolution) error {
 		}
 
 		return nil
+	}
+
+	if request.Kind == RequestFreeform {
+		return fmt.Errorf("%w: free-form response is required", ErrInvalid)
 	}
 
 	if len(resolution.Answers) != len(request.Questions) {
@@ -285,6 +336,16 @@ func CloneResolution(resolution Resolution) Resolution {
 	}
 
 	return resolution
+}
+
+// RequestCount returns the number of user-visible decisions. A free-form
+// fallback is one decision even though it has no structured options.
+func RequestCount(request Request) int {
+	if request.Kind == RequestFreeform {
+		return 1
+	}
+
+	return len(request.Questions)
 }
 
 func validateAnswer(item Question, answer Answer) error {

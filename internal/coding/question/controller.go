@@ -23,10 +23,15 @@ const (
 	CatalogID = "coding.question"
 	// ToolName is the provider-neutral structured user-question capability.
 	ToolName = "ask_user"
+	// TextToolName is the exact one-field recovery capability used after a
+	// malformed structured question.
+	TextToolName = "ask_user_text"
 	// RejectionToolResult is the durable result of an explicit user cancellation.
-	RejectionToolResult = "The user canceled this question without selecting an answer."
-	maxToolErrorBytes   = 1024
-	schemaTypeString    = "string"
+	RejectionToolResult   = "The user canceled this question without selecting an answer."
+	maxToolErrorBytes     = 1024
+	questionField         = "question"
+	schemaTypeString      = "string"
+	genericFreeformPrompt = "Pips could not form a valid structured question. Provide the missing preference or constraint in your own words, or cancel planning."
 )
 
 var (
@@ -48,6 +53,7 @@ type Controller struct {
 	resolver Resolver
 	pending  *Request
 	tool     agent.Tool
+	textTool agent.Tool
 }
 
 // NewController constructs one question coordinator.
@@ -75,30 +81,40 @@ func NewController(resolver Resolver) (*Controller, error) {
 			declaration: declaration,
 		},
 	}
+	textBase := agent.NewTool(
+		TextToolName,
+		"Ask one direct free-form question. Use only as the exact recovery requested by Pips after ask_user arguments were rejected.",
+		func(context.Context, struct {
+			Question string `json:"question"`
+		},
+		) (string, error) {
+			return "", errors.New("ask_user_text requires Runtime-mediated user input")
+		},
+	)
+	textDeclaration := textBase.Decl()
+	textDeclaration.InputSchema = textInputSchema()
+	controller.textTool = declaredTool{Tool: textBase, declaration: textDeclaration}
 
 	return controller, nil
 }
 
 // Catalog returns the exact local read-risk ask_user registration.
 func (c *Controller) Catalog() (*catalog.Catalog, error) {
-	if c == nil || c.tool == nil {
+	if c == nil || c.tool == nil || c.textTool == nil {
 		return nil, errors.New("coding question: unavailable controller")
 	}
 
-	return catalog.New(catalog.Entry{
-		Tool: c.tool,
-		Source: catalog.Source{
-			Kind: catalog.SourceLocal,
-			ID:   CatalogID,
-		},
-		Risk: catalog.RiskRead,
-		Tags: []string{"builtin", "coding", "question"},
-	})
+	source := catalog.Source{Kind: catalog.SourceLocal, ID: CatalogID}
+
+	return catalog.New(
+		catalog.Entry{Tool: c.tool, Source: source, Risk: catalog.RiskRead, Tags: []string{"builtin", "coding", questionField}},
+		catalog.Entry{Tool: c.textTool, Source: source, Risk: catalog.RiskRead, Tags: []string{"builtin", "coding", questionField, "fallback"}},
+	)
 }
 
 // BeforeTool validates ask_user arguments before pausing the Agent loop.
 func (c *Controller) BeforeTool(_ context.Context, info agent.ToolCallInfo) agent.ToolDecision {
-	if info.Name != ToolName {
+	if info.Name != ToolName && info.Name != TextToolName {
 		return agent.ToolDecision{}
 	}
 
@@ -106,9 +122,20 @@ func (c *Controller) BeforeTool(_ context.Context, info agent.ToolCallInfo) agen
 		return agent.DenyTool("structured user input is unavailable")
 	}
 
+	if batchSize(info) != 1 {
+		return agent.DenyTool(info.Name + " must be called alone")
+	}
+
 	request, err := requestFromCall(ai.ToolCallPart{
 		ID: info.ID, Name: info.Name, Args: info.Args,
 	})
+	if err != nil {
+		if info.Name == TextToolName {
+			request, err = genericRequest(info.ID)
+		} else {
+			return agent.DenyTool(invalidArgumentsReason(err))
+		}
+	}
 	if err != nil {
 		return agent.DenyTool(invalidArgumentsReason(err))
 	}
@@ -135,10 +162,10 @@ func (c *Controller) Reconcile(pending []ai.ToolCallPart) (*Request, error) {
 
 	var request *Request
 
-	if len(pending) > 0 && pending[0].Name == ToolName {
-		value, err := requestFromCall(pending[0])
+	if len(pending) > 0 && isQuestionCall(pending[0]) {
+		value, err := requestFromPendingCall(pending[0])
 		if err != nil {
-			return nil, fmt.Errorf("coding question: reconcile pending call: %w", err)
+			return nil, err
 		}
 
 		request = &value
@@ -158,6 +185,28 @@ func (c *Controller) Reconcile(pending []ai.ToolCallPart) (*Request, error) {
 	result := CloneRequest(cloned)
 
 	return &result, nil
+}
+
+func isQuestionCall(call ai.ToolCallPart) bool {
+	return call.Name == ToolName || call.Name == TextToolName
+}
+
+func requestFromPendingCall(call ai.ToolCallPart) (Request, error) {
+	request, err := requestFromCall(call)
+	if err == nil {
+		return request, nil
+	}
+
+	if call.Name != TextToolName {
+		return Request{}, fmt.Errorf("coding question: reconcile pending call: %w", err)
+	}
+
+	request, err = genericRequest(call.ID)
+	if err != nil {
+		return Request{}, fmt.Errorf("coding question: reconcile generic fallback: %w", err)
+	}
+
+	return request, nil
 }
 
 // Resolve validates and durably records one exact answer before clearing it.
@@ -312,9 +361,41 @@ func inputSchema() *ai.Schema {
 	}
 }
 
+func textInputSchema() *ai.Schema {
+	return &ai.Schema{
+		Type:                 "object",
+		AdditionalProperties: false,
+		Properties: map[string]*ai.Schema{
+			questionField: {Type: schemaTypeString, Description: "The one missing preference or constraint to ask directly."},
+		},
+		Required: []string{questionField},
+		Extra: map[string]json.RawMessage{
+			"minProperties": json.RawMessage("1"),
+			"maxProperties": json.RawMessage("1"),
+		},
+	}
+}
+
 func requestFromCall(call ai.ToolCallPart) (Request, error) {
-	if call.ID == "" || call.Name != ToolName {
-		return Request{}, fmt.Errorf("%w: invalid ask_user identity", ErrInvalid)
+	if call.ID == "" || (call.Name != ToolName && call.Name != TextToolName) {
+		return Request{}, fmt.Errorf("%w: invalid question identity", ErrInvalid)
+	}
+
+	if call.Name == TextToolName {
+		var arguments struct {
+			Question string `json:"question"`
+		}
+		if err := jsonx.Decode(call.Args, &arguments); err != nil {
+			return Request{}, fmt.Errorf("%w: decode ask_user_text arguments: %w", ErrInvalid, err)
+		}
+
+		if !validText(arguments.Question, maxFreeformBytes) {
+			return Request{}, fmt.Errorf("%w: question contains invalid text", ErrInvalid)
+		}
+
+		sum := sha256.Sum256([]byte(TextToolName + "\x00" + call.ID + "\x00" + arguments.Question))
+
+		return NewFreeformRequest("q-"+hex.EncodeToString(sum[:16]), call.ID, arguments.Question)
 	}
 
 	spec, err := decodeSpecArguments(call.Args)
@@ -331,6 +412,27 @@ func requestFromCall(call ai.ToolCallPart) (Request, error) {
 	requestID := "q-" + hex.EncodeToString(sum[:16])
 
 	return NewRequest(requestID, call.ID, spec)
+}
+
+// ValidateCall checks one question Tool call through the same strict decoder
+// used by the pause owner. Plan flow uses it only to choose the bounded
+// recovery phase; it never repairs arguments.
+func ValidateCall(info agent.ToolCallInfo) error {
+	_, err := requestFromCall(ai.ToolCallPart{ID: info.ID, Name: info.Name, Args: info.Args})
+	return err
+}
+
+func genericRequest(toolCallID string) (Request, error) {
+	sum := sha256.Sum256([]byte(TextToolName + "\x00" + toolCallID + "\x00generic"))
+	return NewFreeformRequest("q-"+hex.EncodeToString(sum[:16]), toolCallID, genericFreeformPrompt)
+}
+
+func batchSize(info agent.ToolCallInfo) int {
+	if info.BatchSize == 0 {
+		return 1
+	}
+
+	return info.BatchSize
 }
 
 func decodeSpecArguments(data ai.JSON) (Spec, error) {

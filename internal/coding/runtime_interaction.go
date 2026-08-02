@@ -29,6 +29,8 @@ import (
 
 var errConsumerStopped = errors.New("coding runtime: event consumer stopped")
 
+const planInteractionMaxTurns = 32
+
 type eventEmitter struct {
 	mu        sync.Mutex
 	ctx       context.Context
@@ -133,6 +135,7 @@ func (r *Runtime) run(
 	}
 
 	var current *interaction
+	var mechanicalOutcome *InteractionOutcome
 	switch kind {
 	case operationPrompt, operationAgentNotification:
 		interactionID, startErr := r.journal.start()
@@ -239,7 +242,7 @@ func (r *Runtime) run(
 
 		err = r.questions.Resolve(resolution.question)
 		if err == nil && current.planFlow != nil {
-			current.planFlow.InvalidateUserInput()
+			current.planFlow.ResolveQuestion()
 		}
 		if err == nil {
 			err = emitter.emit(
@@ -269,9 +272,6 @@ func (r *Runtime) run(
 			resolution.rejection.requestID,
 			resolution.rejection.schemaDigest,
 		)
-		if err == nil && current.planFlow != nil {
-			current.planFlow.InvalidateUserInput()
-		}
 		if err == nil {
 			err = emitter.emit(
 				current.id,
@@ -283,7 +283,11 @@ func (r *Runtime) run(
 				},
 			)
 		}
-		if err == nil {
+		if err == nil && current.planFlow != nil {
+			current.stop = agent.StopWhen
+			outcome := InteractionIncomplete
+			mechanicalOutcome = &outcome
+		} else if err == nil {
 			err = r.reconcileAndContinue(ctx, current, emitter)
 		}
 	case operationResolvePlanReview:
@@ -307,7 +311,11 @@ func (r *Runtime) run(
 				},
 			)
 		}
-		if err == nil {
+		if err == nil && resolution.planReview.Decision == planreview.DecisionApprove {
+			current.stop = agent.StopTerminated
+			outcome := InteractionSucceeded
+			mechanicalOutcome = &outcome
+		} else if err == nil {
 			err = r.reconcileAndContinue(ctx, current, emitter)
 		}
 	case operationPreview, operationCompact, operationNavigate, operationFork,
@@ -327,6 +335,13 @@ func (r *Runtime) run(
 		if !errors.Is(err, errConsumerStopped) {
 			emitter.fail(errors.Join(err, finishErr))
 		}
+
+		return
+	}
+	if mechanicalOutcome != nil {
+		emitter.fail(r.finishInteraction(
+			context.WithoutCancel(ctx), current, *mechanicalOutcome, emitter,
+		))
 
 		return
 	}
@@ -753,6 +768,9 @@ func (r *Runtime) openInteraction(
 		return nil, err
 	}
 	allTools = appendUniqueTools(allTools, visibleTools...)
+	if legacy := r.planReviews.LegacyTool(); legacy != nil {
+		allTools = appendUniqueTools(allTools, legacy)
+	}
 
 	extensionHooks := snapshot.Hooks()
 	extensionObserver := newGuardedAgentObserver(extensionHooks.Observe)
@@ -785,9 +803,13 @@ func (r *Runtime) openInteraction(
 	composed.BeforeTool = failureGuard.wrapBeforeTool(composed.BeforeTool)
 	composed.AfterTool = failureGuard.wrapAfterTool(composed.AfterTool)
 
+	maxTurns := 0
+	if planCoordinator != nil {
+		maxTurns = planInteractionMaxTurns
+	}
 	agentOptions := append(
 		composed.AgentOptions(),
-		agent.WithMaxTurns(0),
+		agent.WithMaxTurns(maxTurns),
 		agent.WithStopWhen(failureGuard.stopWhen),
 		agent.WithToolTimeout(r.opts.ToolTimeout),
 		agent.WithRequest(r.requestPolicy),
@@ -1135,7 +1157,7 @@ func (r *Runtime) reconcileAndContinue(
 			EventQuestionRequired,
 			QuestionRequired{
 				Request: question.CloneRequest(*request),
-				Count:   len(request.Questions),
+				Count:   question.RequestCount(*request),
 			},
 		)
 	}

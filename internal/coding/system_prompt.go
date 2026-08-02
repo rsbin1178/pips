@@ -219,10 +219,9 @@ func writeModeGuidance(prompt *strings.Builder, mode OperatingMode, toolNames []
 			prompt.WriteString("- Before writing the Plan, call plan_checkpoint alone. It is the no-question branch only when goal, success criteria, audience, scope, constraints, and every material product decision are established; otherwise call ask_user.\n")
 		}
 
-		prompt.WriteString("- Use write_plan with optimistic revision control to maintain the complete session-bound Plan document. After a continue-planning response, revise or reassess it before resubmitting.\n")
-
-		if _, ok := available[planreview.ToolName]; ok {
-			prompt.WriteString("- When the Plan is ready, call submit_plan alone with the exact revision returned by read_plan or write_plan. After approval, call no more tools and end the current turn; only the Runtime may switch to Agent Mode at idle.\n")
+		if _, ok := available[planreview.PresentToolName]; ok {
+			prompt.WriteString("- After plan_checkpoint succeeds, call present_plan alone with the complete Markdown Plan and the current expected revision (empty only for first creation). Pips persists it atomically and immediately opens full review.\n")
+			prompt.WriteString("- Continue-planning feedback starts discovery again. Approval mechanically completes this interaction; do not generate a separate approval summary or attempt implementation.\n")
 		}
 
 		prompt.WriteString("- Plan approval is not Tool approval and grants no Shell, patch, MCP, external-write, sandbox, or full-access permission.\n")

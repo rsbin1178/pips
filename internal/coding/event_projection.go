@@ -7,6 +7,7 @@ import (
 
 	"github.com/rsbin/pips/agent"
 	"github.com/rsbin/pips/ai"
+	"github.com/rsbin/pips/internal/coding/planreview"
 )
 
 // Disclosure selects the content retained at a serialization boundary.
@@ -117,12 +118,16 @@ func projectSafePayload(payload EventPayload) EventPayload {
 		return value
 	case QuestionRequired:
 		value.Request.Questions = nil
+		value.Request.Prompt = ""
 		value.Redacted = true
 		return value
 	case QuestionResolved:
 		value.Resolution.Answers = nil
 		value.Resolution.Chat = ""
 		value.Redacted = true
+		return value
+	case PlanReviewRequired:
+		value.Request.Content = ""
 		return value
 	case WorkspaceChanged:
 		value.Diff = ""
@@ -331,10 +336,10 @@ func Telemetry(event Event) (TelemetryEvent, error) {
 	case QuestionRejected:
 		projected.Code = "rejected"
 	case PlanReviewRequired:
-		projected.Tool = "submit_plan"
+		projected.Tool = planreview.PresentToolName
 		projected.PlanBytes = value.Request.Size
 	case PlanReviewResolved:
-		projected.Tool = "submit_plan"
+		projected.Tool = planreview.PresentToolName
 		projected.PlanDecision = string(value.Decision)
 	case WorkspaceChanged:
 		projected.Changes = len(value.Entries)

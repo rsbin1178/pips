@@ -91,6 +91,8 @@ func BootstrapState(options BootstrapOptions) (BootstrapResult, error) {
 	if len(state.Transcript) > maxEventItems {
 		state.Transcript = state.Transcript[len(state.Transcript)-maxEventItems:]
 	}
+	state.MessageCandidates = make([]CandidateIdentity, len(state.Transcript))
+	state.PlanProposals = projectPlanProposals(state.Transcript)
 	state.SyntheticMessages = syntheticMessageIndexes(state.Transcript)
 
 	if recovery.LastID != "" {

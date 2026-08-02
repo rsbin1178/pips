@@ -47,6 +47,22 @@ type RunState struct {
 	Usage       TokenUsage       `json:"usage"`
 }
 
+// CandidateIdentity binds provisional deltas and their eventual commit or
+// discard to one Agent run and turn. Text equality is never ownership.
+type CandidateIdentity struct {
+	RunID string `json:"run_id"`
+	Turn  int    `json:"turn"`
+}
+
+// Key returns a stable frontend-local identity string.
+func (identity CandidateIdentity) Key() string {
+	if identity.RunID == "" || identity.Turn < 1 {
+		return ""
+	}
+
+	return fmt.Sprintf("%s:%d", identity.RunID, identity.Turn)
+}
+
 // ToolStatus is one tool call's lifecycle status.
 type ToolStatus string
 
@@ -137,6 +153,28 @@ type PlanReviewState struct {
 	Required    *planreview.Request `json:"required,omitempty"`
 }
 
+// PlanProposalStatus is the user disposition of one exact presented Plan.
+type PlanProposalStatus string
+
+const (
+	// PlanProposalPending is awaiting an explicit user decision.
+	PlanProposalPending PlanProposalStatus = "pending"
+	// PlanProposalContinued was returned for additional planning.
+	PlanProposalContinued PlanProposalStatus = "continued"
+	// PlanProposalApproved was accepted by the user.
+	PlanProposalApproved PlanProposalStatus = "approved"
+)
+
+// PlanProposal is the semantic full-content projection used by frontends.
+type PlanProposal struct {
+	ID         string             `json:"id"`
+	ToolCallID string             `json:"tool_call_id"`
+	Revision   string             `json:"revision"`
+	Size       int64              `json:"size"`
+	Content    string             `json:"content"`
+	Status     PlanProposalStatus `json:"status"`
+}
+
 // NonInteractiveError fails closed when explicit Plan review is pending.
 func (state PlanReviewState) NonInteractiveError() error {
 	if state.Required != nil {
@@ -188,6 +226,8 @@ type State struct {
 	// protocol input. Frontends render them as neutral activity, not user chat.
 	SyntheticMessages []int                           `json:"synthetic_messages,omitempty"`
 	Draft             []MessageDelta                  `json:"draft"`
+	DraftCandidate    CandidateIdentity               `json:"draft_candidate,omitzero"`
+	MessageCandidates []CandidateIdentity             `json:"message_candidates,omitempty"`
 	Runs              []RunState                      `json:"runs"`
 	Tools             []ToolState                     `json:"tools"`
 	Subagents         []SubagentState                 `json:"subagents"`
@@ -197,6 +237,7 @@ type State struct {
 	Approval          ApprovalState                   `json:"approval"`
 	Question          QuestionState                   `json:"question"`
 	PlanReview        PlanReviewState                 `json:"plan_review"`
+	PlanProposals     []PlanProposal                  `json:"plan_proposals,omitempty"`
 	Changes           *WorkspaceChanged               `json:"changes,omitempty"`
 	Diagnostics       []IntegrationDiagnostic         `json:"diagnostics"`
 	LastError         *RuntimeError                   `json:"last_error,omitempty"`
@@ -225,6 +266,7 @@ func (state State) Clone() State {
 			cloned.Draft[index].Usage = &usage
 		}
 	}
+	cloned.MessageCandidates = slices.Clone(state.MessageCandidates)
 
 	cloned.Runs = slices.Clone(state.Runs)
 
@@ -249,6 +291,7 @@ func (state State) Clone() State {
 		request := planreview.CloneRequest(*state.PlanReview.Required)
 		cloned.PlanReview.Required = &request
 	}
+	cloned.PlanProposals = slices.Clone(state.PlanProposals)
 	if state.Changes != nil {
 		changes := cloneWorkspaceChanged(*state.Changes)
 		cloned.Changes = &changes
@@ -492,11 +535,17 @@ func (state *State) apply(event Event) error {
 			return protocolError("message committed outside an active turn")
 		}
 
+		candidate := CandidateIdentity{}
+		if payload.Message.Role == ai.RoleAssistant {
+			candidate = CandidateIdentity{RunID: event.RunID, Turn: state.openTurns[event.RunID]}
+		}
 		state.Transcript = append(state.Transcript, cloneMessage(payload.Message))
+		state.MessageCandidates = append(state.MessageCandidates, candidate)
 		if payload.Synthetic {
 			state.SyntheticMessages = append(state.SyntheticMessages, len(state.Transcript)-1)
 		}
 		state.Draft = nil
+		state.DraftCandidate = CandidateIdentity{}
 	case MessageDelta:
 		if _, err := state.activeRun(event.RunID); err != nil {
 			return err
@@ -506,6 +555,11 @@ func (state *State) apply(event Event) error {
 			return protocolError("message delta emitted outside an active turn")
 		}
 
+		candidate := CandidateIdentity{RunID: event.RunID, Turn: state.openTurns[event.RunID]}
+		if state.DraftCandidate.Key() != "" && state.DraftCandidate != candidate {
+			return protocolError("message delta changed candidate identity")
+		}
+		state.DraftCandidate = candidate
 		state.Draft = append(state.Draft, cloneMessageDelta(payload))
 	case MessageDiscarded:
 		if _, err := state.activeRun(event.RunID); err != nil {
@@ -514,7 +568,11 @@ func (state *State) apply(event Event) error {
 		if state.openTurns[event.RunID] != payload.Turn {
 			return protocolError("message candidate discarded outside its turn")
 		}
+		if state.DraftCandidate.Key() != "" && state.DraftCandidate != (CandidateIdentity{RunID: event.RunID, Turn: payload.Turn}) {
+			return protocolError("message discard does not match draft candidate")
+		}
 		state.Draft = nil
+		state.DraftCandidate = CandidateIdentity{}
 	case ToolStarted:
 		if _, err := state.activeRun(event.RunID); err != nil {
 			return err
@@ -623,6 +681,9 @@ func (state *State) apply(event Event) error {
 
 		request := planreview.CloneRequest(payload.Request)
 		state.PlanReview = PlanReviewState{RequestedAt: event.Time, Required: &request}
+		if proposal, ok := planProposalFromRequest(request); ok {
+			state.PlanProposals = upsertPlanProposal(state.PlanProposals, proposal)
+		}
 	case PlanReviewResolved:
 		if err := state.requireInteraction(event.InteractionID); err != nil ||
 			state.PlanReview.Required == nil ||
@@ -635,6 +696,9 @@ func (state *State) apply(event Event) error {
 		}
 
 		state.PlanReview = PlanReviewState{}
+		state.PlanProposals = resolvePlanProposal(
+			state.PlanProposals, payload.RequestID, payload.Revision, payload.Decision,
+		)
 	case QuestionRejected:
 		if err := state.requireInteraction(event.InteractionID); err != nil ||
 			state.Question.Required == nil ||

@@ -121,7 +121,6 @@ func TestRuntimeSetModePublishesAndLeasesPlanCapabilities(t *testing.T) {
 		model,
 		document.Revision,
 		content,
-		runtimeToolResponse("submit-plan", planreview.ToolName, submitPlanArgs(document.Revision)),
 	)
 
 	select {
@@ -136,19 +135,18 @@ func TestRuntimeSetModePublishesAndLeasesPlanCapabilities(t *testing.T) {
 	assert.Contains(t, eventTypes(events), EventPlanReviewRequired)
 
 	requests := model.Requests()
-	require.Len(t, requests, 3)
+	require.Len(t, requests, 2)
 	toolNames := toolNamesFromRequest(requests[0])
 	assert.Contains(t, toolNames, tools.ReadPlanName)
 	assert.Contains(t, toolNames, tools.WritePlanName)
-	assert.Contains(t, toolNames, planreview.ToolName)
+	assert.Contains(t, toolNames, planreview.PresentToolName)
+	assert.NotContains(t, toolNames, planreview.ToolName)
 	assert.Contains(t, toolNames, "run_subagent")
 	assert.NotContains(t, toolNames, "apply_patch")
 	assert.NotContains(t, toolNames, "shell")
 	assert.Contains(t, requests[0].System, `"operating_mode": "plan"`)
-	assert.Equal(t, ai.ToolChoice{Mode: ai.ToolChoiceTool, Name: tools.WritePlanName}, requests[1].ToolChoice)
-	assert.Equal(t, []string{tools.WritePlanName}, toolNamesFromRequest(requests[1]))
-	assert.Equal(t, ai.ToolChoice{Mode: ai.ToolChoiceTool, Name: planreview.ToolName}, requests[2].ToolChoice)
-	assert.Equal(t, []string{planreview.ToolName}, toolNamesFromRequest(requests[2]))
+	assert.Equal(t, ai.ToolChoice{Mode: ai.ToolChoiceTool, Name: planreview.PresentToolName}, requests[1].ToolChoice)
+	assert.Equal(t, []string{planreview.PresentToolName}, toolNamesFromRequest(requests[1]))
 
 	planPath := base + "/home/plans/" + runtime.handle.Metadata().ID + ".md"
 	info, err := os.Stat(planPath)

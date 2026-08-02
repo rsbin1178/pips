@@ -219,10 +219,12 @@ func TestStreamingWaitsForMatchingDurableAssistantPromotion(t *testing.T) {
 	model.state.Interaction.Active = true
 
 	source := "```text\nfirst row\nmiddle row\nsecond row"
-	promoted, _ := model.syncStreamingDraft(source)
+	promoted, _ := model.syncStreamingDraft("run-1:1", source)
 	require.NotEmpty(t, promoted)
 
 	model.state.Transcript = []ai.Message{ai.AssistantText(source)}
+	model.state.MessageCandidates = []coding.CandidateIdentity{{RunID: "run-1", Turn: 1}}
+	model.scrollback.messages = 0
 
 	writes := model.streamingScrollbackWrites(nil)
 	assert.Empty(t, writes)
@@ -233,7 +235,7 @@ func TestStreamingWaitsForMatchingDurableAssistantPromotion(t *testing.T) {
 	assert.NotContains(t, active, "first row")
 	assert.Contains(t, active, "second row")
 
-	stable := []timelineBlock{{kind: blockAssistant, body: source}}
+	stable := []timelineBlock{{kind: blockAssistant, id: "run-1:1", body: source}}
 	finalWrites := model.streamingScrollbackWrites(stable)
 
 	finalParts := make([]string, len(finalWrites))
@@ -246,6 +248,52 @@ func TestStreamingWaitsForMatchingDurableAssistantPromotion(t *testing.T) {
 	assert.Equal(t, 1, strings.Count(combined, "first row"))
 	assert.Equal(t, 1, strings.Count(combined, "middle row"))
 	assert.Equal(t, 1, strings.Count(combined, "second row"))
+	assert.False(t, model.streaming.active)
+}
+
+func TestPlanStreamingCandidateIsRetractableAndCommitsExactlyOnce(t *testing.T) {
+	t.Parallel()
+
+	model := readyModel(t, true)
+	model.Update(tea.WindowSizeMsg{Width: 48, Height: 14})
+	model.scrollbackOutput = false
+	model.state.Phase = coding.PhaseRunning
+	model.state.Interaction = coding.InteractionState{Active: true, Mode: coding.ModePlan}
+	model.state.DraftCandidate = coding.CandidateIdentity{RunID: "plan-run", Turn: 1}
+	model.state.Draft = []coding.MessageDelta{{
+		Kind: ai.StreamTextDelta, Text: "provisional Plan that must remain retractable",
+	}}
+
+	writes := model.streamingScrollbackWrites(nil)
+	assert.Empty(t, writes)
+	assert.True(t, model.streaming.active)
+	assert.True(t, model.streaming.retractable)
+	assert.Zero(t, model.streaming.emitted)
+
+	model.state.Draft = nil
+	model.state.DraftCandidate = coding.CandidateIdentity{}
+	writes = model.streamingScrollbackWrites(nil)
+	assert.Empty(t, writes)
+	assert.False(t, model.streaming.active)
+
+	const accepted = "# Accepted Plan\n\nOne authoritative block."
+
+	model.state.DraftCandidate = coding.CandidateIdentity{RunID: "plan-run", Turn: 2}
+	model.state.Draft = []coding.MessageDelta{{Kind: ai.StreamTextDelta, Text: accepted}}
+	assert.Empty(t, model.streamingScrollbackWrites(nil))
+	model.state.Draft = nil
+	model.state.DraftCandidate = coding.CandidateIdentity{}
+	stable := []timelineBlock{{kind: blockAssistant, id: "plan-run:2", body: accepted}}
+	writes = model.streamingScrollbackWrites(stable)
+
+	var rendered strings.Builder
+	for _, write := range writes {
+		rendered.WriteString(write.content)
+	}
+
+	output := ansi.Strip(rendered.String())
+	assert.Equal(t, 1, strings.Count(output, "Accepted Plan"))
+	assert.Equal(t, 1, strings.Count(output, "One authoritative block"))
 	assert.False(t, model.streaming.active)
 }
 

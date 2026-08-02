@@ -312,3 +312,37 @@ func TestGatePauseFirstCallLeavesNoToolMessage(t *testing.T) {
 	require.Len(t, msgs, 2)
 	assert.Equal(t, result.Pending, sess.Pending())
 }
+
+func TestGateReceivesCompleteBatchPositionBeforePause(t *testing.T) {
+	t.Parallel()
+
+	model := newScriptedModel(respond(callResponse(
+		call("c1", "add", `{"a":1,"b":1}`),
+		call("c2", "add", `{"a":2,"b":2}`),
+		call("c3", "add", `{"a":3,"b":3}`),
+	)))
+
+	var observed []agent.ToolCallInfo
+
+	a, err := agent.New(model,
+		agent.WithTools(addTool()),
+		agent.WithBeforeTool(func(_ context.Context, info agent.ToolCallInfo) agent.ToolDecision {
+			observed = append(observed, info)
+			if info.BatchIndex == 1 {
+				return agent.ToolDecision{Action: agent.ToolDecisionPause}
+			}
+
+			return agent.ToolDecision{}
+		}),
+	)
+	require.NoError(t, err)
+
+	result, err := a.Run(t.Context(), agent.NewSession(), ai.UserText("go"))
+	require.NoError(t, err)
+	require.Equal(t, agent.StopPaused, result.Stop)
+	require.Len(t, observed, 2)
+	assert.Equal(t, 0, observed[0].BatchIndex)
+	assert.Equal(t, 3, observed[0].BatchSize)
+	assert.Equal(t, 1, observed[1].BatchIndex)
+	assert.Equal(t, 3, observed[1].BatchSize)
+}

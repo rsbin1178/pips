@@ -38,6 +38,12 @@ type ToolCallInfo struct {
 	ToolCall
 	// Turn is the turn (1-based) that produced the call.
 	Turn int
+	// BatchIndex is this call's zero-based position in the model response.
+	BatchIndex int
+	// BatchSize is the total number of calls in the model response. Gates may
+	// use it to reject interaction-owning calls before a leading Pause hides
+	// the remaining suffix.
+	BatchSize int
 }
 
 // gate is the [WithBeforeTool] callback type.

@@ -38,7 +38,7 @@ type phase uint8
 const (
 	phaseGrounding phase = iota
 	phaseReady
-	phaseDrafted
+	phaseReviewing
 	phaseApproved
 )
 
@@ -75,18 +75,15 @@ type checkpointResult struct {
 type Controller struct {
 	mu sync.Mutex
 
-	phase          phase
-	readyTurn      int
-	draftedTurn    int
-	generation     uint64
-	checkpointGen  uint64
-	writeGen       uint64
-	gateTurn       int
-	gateCalls      int
-	transitionName string
-	retries        int
-	tools          map[string]agent.Tool
-	checkpoint     agent.Tool
+	phase               phase
+	readyTurn           int
+	generation          uint64
+	checkpointGen       uint64
+	questionRequired    bool
+	requireTextQuestion bool
+	retries             int
+	tools               map[string]agent.Tool
+	checkpoint          agent.Tool
 }
 
 // NewController creates an unbound coordinator. BindTools must be called with
@@ -139,7 +136,7 @@ func (c *Controller) BindTools(values []agent.Tool) error {
 	}
 
 	for _, name := range []string{
-		question.ToolName, ToolName, tools.WritePlanName, planreview.ToolName,
+		question.ToolName, question.TextToolName, ToolName, planreview.PresentToolName,
 	} {
 		if indexed[name] == nil {
 			return fmt.Errorf("coding Plan flow: required tool %q is unavailable", name)
@@ -165,8 +162,14 @@ func (c *Controller) BeforeTool(
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if decision := c.batchDecisionLocked(info); decision != nil {
-		return *decision
+	if isInteractionTool(info.Name) && normalizedBatchSize(info) != 1 {
+		if info.Name == question.ToolName || info.Name == question.TextToolName {
+			c.questionRequired = true
+		} else {
+			c.invalidateLocked()
+		}
+
+		return agent.DenyTool(info.Name + " must be called alone in its turn")
 	}
 
 	return c.transitionDecisionLocked(info)
@@ -175,25 +178,49 @@ func (c *Controller) BeforeTool(
 func (c *Controller) transitionDecisionLocked(info agent.ToolCallInfo) agent.ToolDecision {
 	switch info.Name {
 	case question.ToolName:
-		c.invalidateLocked()
+		c.questionRequired = true
+
+		if err := question.ValidateCall(info); err != nil {
+			c.requireTextQuestion = true
+
+			return agent.DenyTool(
+				"invalid ask_user arguments; call ask_user_text next with exactly {\"question\":\"...\"}: " + err.Error(),
+			)
+		}
+
+		c.requireTextQuestion = false
+	case question.TextToolName:
+		c.questionRequired = true
+		c.requireTextQuestion = true
 	case ToolName:
-		c.invalidateLocked()
+		if c.questionRequired {
+			return agent.DenyTool("plan_checkpoint is unavailable until the pending user question is answered")
+		}
+
+		c.invalidateReadinessLocked()
 
 		if _, err := decodeArguments(info.Args); err != nil {
 			return agent.DenyTool("invalid plan_checkpoint arguments: " + err.Error())
 		}
 
 		c.checkpointGen = c.generation
-	case tools.WritePlanName:
+	case planreview.PresentToolName:
+		if c.questionRequired {
+			return agent.DenyTool("present_plan is unavailable until the pending user question is answered")
+		}
 		if c.phase != phaseReady || c.readyTurn == 0 || c.readyTurn >= info.Turn {
-			return agent.DenyTool("write_plan requires a successful plan_checkpoint in an earlier turn")
+			return agent.DenyTool("present_plan requires a successful plan_checkpoint in an earlier turn")
 		}
 
-		c.writeGen = c.generation
-	case planreview.ToolName:
-		if c.phase != phaseDrafted || c.draftedTurn == 0 || c.draftedTurn >= info.Turn {
-			return agent.DenyTool("submit_plan requires a successful write_plan after the current plan_checkpoint")
+		if _, err := planreview.ProposalFromCall(ai.ToolCallPart{
+			ID: info.ID, Name: info.Name, Args: info.Args,
+		}); err != nil {
+			return agent.DenyTool("invalid present_plan arguments: " + err.Error())
 		}
+
+		c.phase = phaseReviewing
+	case tools.WritePlanName, planreview.ToolName:
+		return agent.DenyTool("use present_plan after plan_checkpoint; the legacy write/submit sequence is not part of this interaction")
 	}
 
 	return agent.ToolDecision{}
@@ -220,14 +247,7 @@ func (c *Controller) AfterTool(
 
 		c.phase = phaseReady
 		c.readyTurn = info.Turn
-		c.draftedTurn = 0
 		c.retries = 0
-	case tools.WritePlanName:
-		if c.writeGen == c.generation && c.phase == phaseReady && c.readyTurn < info.Turn {
-			c.phase = phaseDrafted
-			c.draftedTurn = info.Turn
-			c.retries = 0
-		}
 	}
 
 	return nil
@@ -251,7 +271,8 @@ func (c *Controller) PrepareTurn(
 		return agent.TurnUpdate{Err: err}
 	}
 
-	if request == nil || c.phase == phaseGrounding || c.phase == phaseApproved {
+	if request == nil || (c.phase == phaseGrounding && !c.requireTextQuestion) ||
+		c.phase == phaseReviewing || c.phase == phaseApproved {
 		return agent.TurnUpdate{}
 	}
 
@@ -290,8 +311,8 @@ func (c *Controller) CandidateAnswer(
 	return agent.CandidateAnswerDecision{Retry: request}
 }
 
-// ResolvePlanReview invalidates discovery after continued planning or permits
-// the final natural answer after explicit approval.
+// ResolvePlanReview invalidates discovery after continued planning or records
+// mechanical approval without permitting another candidate answer.
 func (c *Controller) ResolvePlanReview(decision planreview.Decision) {
 	if c == nil {
 		return
@@ -310,6 +331,20 @@ func (c *Controller) ResolvePlanReview(decision planreview.Decision) {
 	c.invalidateLocked()
 }
 
+// ResolveQuestion starts a new discovery generation and clears the material
+// input latch only after one exact Runtime-owned answer was persisted.
+func (c *Controller) ResolveQuestion() {
+	if c == nil {
+		return
+	}
+
+	c.mu.Lock()
+	c.invalidateLocked()
+	c.questionRequired = false
+	c.requireTextQuestion = false
+	c.mu.Unlock()
+}
+
 // InvalidateUserInput makes queued steering, follow-up, or an answered
 // question start requirements readiness from the new intent.
 func (c *Controller) InvalidateUserInput() {
@@ -324,56 +359,19 @@ func (c *Controller) InvalidateUserInput() {
 
 func (c *Controller) invalidateLocked() {
 	c.generation++
-	c.phase = phaseGrounding
-	c.readyTurn = 0
-	c.draftedTurn = 0
-	c.checkpointGen = 0
-	c.writeGen = 0
+	c.invalidateReadinessLocked()
 	c.retries = 0
 }
 
-func (c *Controller) batchDecisionLocked(info agent.ToolCallInfo) *agent.ToolDecision {
-	if c.gateTurn != info.Turn {
-		c.gateTurn = info.Turn
-		c.gateCalls = 0
-		c.transitionName = ""
-	}
-
-	c.gateCalls++
-
-	if c.transitionName != "" {
-		c.invalidateLocked()
-
-		if info.Name == question.ToolName {
-			return nil
-		}
-
-		decision := agent.DenyTool(
-			c.transitionName + " must be called alone; retry the Plan transition in a new turn",
-		)
-
-		return &decision
-	}
-
-	if !isTransitionTool(info.Name) {
-		return nil
-	}
-
-	if c.gateCalls != 1 {
-		c.invalidateLocked()
-
-		decision := agent.DenyTool(info.Name + " must be called alone in its turn")
-
-		return &decision
-	}
-
-	c.transitionName = info.Name
-
-	return nil
+func (c *Controller) invalidateReadinessLocked() {
+	c.phase = phaseGrounding
+	c.readyTurn = 0
+	c.checkpointGen = 0
 }
 
-func isTransitionTool(name string) bool {
-	return name == ToolName || name == tools.WritePlanName || name == planreview.ToolName
+func isInteractionTool(name string) bool {
+	return name == question.ToolName || name == question.TextToolName || name == ToolName ||
+		name == planreview.PresentToolName || name == tools.WritePlanName || name == planreview.ToolName
 }
 
 func (c *Controller) requestForPhaseLocked(recoverGrounding bool) (*agent.ModelRequestUpdate, error) {
@@ -383,6 +381,12 @@ func (c *Controller) requestForPhaseLocked(recoverGrounding bool) (*agent.ModelR
 
 	switch c.phase {
 	case phaseGrounding:
+		if c.requireTextQuestion {
+			return exactRequest(
+				c.tools[question.TextToolName],
+				"A structured question call failed. Call ask_user_text now with exactly one question string. Do not call plan_checkpoint or answer in ordinary text.",
+			), nil
+		}
 		if !recoverGrounding {
 			return nil, nil
 		}
@@ -396,19 +400,24 @@ func (c *Controller) requestForPhaseLocked(recoverGrounding bool) (*agent.ModelR
 		}, nil
 	case phaseReady:
 		return exactRequest(
-			c.tools[tools.WritePlanName],
-			"The Plan checkpoint is accepted. Call write_plan now with the complete decision-ready Markdown Plan; do not answer in ordinary text.",
+			c.tools[planreview.PresentToolName],
+			"The Plan checkpoint is accepted. Call present_plan now with the complete decision-ready Markdown Plan and current expected revision; Pips will persist it and pause for review.",
 		), nil
-	case phaseDrafted:
-		return exactRequest(
-			c.tools[planreview.ToolName],
-			"The current Plan document was written successfully. Call submit_plan now with that exact revision; do not answer in ordinary text.",
-		), nil
+	case phaseReviewing:
+		return nil, nil
 	case phaseApproved:
 		return nil, nil
 	default:
 		return nil, errors.New("coding Plan flow: unknown state")
 	}
+}
+
+func normalizedBatchSize(info agent.ToolCallInfo) int {
+	if info.BatchSize == 0 {
+		return 1
+	}
+
+	return info.BatchSize
 }
 
 func exactRequest(tool agent.Tool, suffix string) *agent.ModelRequestUpdate {

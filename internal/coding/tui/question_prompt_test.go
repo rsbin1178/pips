@@ -46,6 +46,31 @@ func TestStructuredQuestionPromptResolvesExactSelection(t *testing.T) {
 	assert.True(t, model.composer.Focused())
 }
 
+func TestFreeformQuestionPromptSubmitsDirectChatResponse(t *testing.T) {
+	t.Parallel()
+
+	request, err := question.NewFreeformRequest(
+		"q-freeform", "call-freeform", "Which authentication constraint is missing?",
+	)
+	require.NoError(t, err)
+
+	controller := &questionPromptController{stubController: stubController{
+		state: questionPromptStateSnapshot(request),
+	}}
+	model := readyModelWithController(t, controller, true)
+
+	require.Equal(t, questionEditChat, model.prompt.question.editing)
+	assert.Contains(t, model.View().Content, "Which authentication constraint is missing?")
+	model.prompt.question.editor.SetValue("Use the school's SSO provider.")
+	_, command := model.Update(key("enter"))
+	require.NotNil(t, command)
+	driveModelCommands(t, model, command)
+
+	require.Len(t, controller.resolutions, 1)
+	assert.Equal(t, "Use the school's SSO provider.", controller.resolutions[0].Chat)
+	assert.Empty(t, controller.resolutions[0].Answers)
+}
+
 func TestStructuredQuestionPromptRejectsWithoutSynthesizingAnswer(t *testing.T) {
 	t.Parallel()
 

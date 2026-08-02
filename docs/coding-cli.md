@@ -108,15 +108,28 @@ mode = "agent"
 `pips exec --mode plan` uses the same Runtime but exposes only read-only
 workspace/external capabilities plus the session-bound Plan document at
 `~/.pips/plans/<session-id>.md`. The model never supplies its path. New Plan
-documents are created only by the first successful `write_plan`; Resume reuses
-the binding and Fork copies an existing snapshot. A completed Plan is submitted
-with the exact current revision through `submit_plan`. The interactive TUI can
-return it for more planning or approve an idle, process-local switch to Agent
-Mode. Approval does not authorize any Shell, patch, MCP, external write, or
-Sandbox exception. Non-interactive `pips exec --mode plan` never chooses on the
-user's behalf: a pending review returns exit code `3` (input required). Plan
-Mode is a capability boundary, not secret isolation: files readable by the Pips
-process remain readable.
+documents are created only when Plan content is first persisted; Resume reuses
+the binding and Fork copies an existing snapshot. Plan Mode pauses for material
+choices through `ask_user`. A malformed structured question is retried through
+the one-field `ask_user_text` capability and, if that is malformed too, becomes
+a Runtime-owned free-form prompt; the checkpoint remains locked until an exact
+answer is persisted. After `plan_checkpoint`, `present_plan` atomically replaces
+the bound document and opens review for the complete Markdown content and exact
+revision. The interactive TUI shows that full Plan and can return it for more
+planning or approve an idle, process-local switch to Agent Mode. Approval does
+not run the model again and does not authorize any Shell, patch, MCP, external
+write, or Sandbox exception. Non-interactive `pips exec --mode plan` never
+chooses on the user's behalf: a pending question or review returns exit code `3`
+(input required). Plan Mode is a capability boundary, not secret isolation:
+files readable by the Pips process remain readable.
+
+A Session paused on `present_plan` cannot be resumed by an older binary that
+only understands the legacy `write_plan`/`submit_plan` handshake. Do not edit
+the Session JSONL or `~/.pips/plans/<session-id>.md` to force recovery. Reinstall
+or invoke a Pips binary that supports `present_plan`, launch `pips`, and select
+the Session through `/resume`; Runtime will reconcile the durable pending call
+idempotently. Downgrading is safe only after the review has been resolved and
+the interaction has settled.
 
 A higher-priority `--model` or `PIPS_MODEL` selection starts from that target
 model's default variant and reasoning; it never inherits those choices from the

@@ -95,6 +95,8 @@ func TestReduceMessageDiscardedClearsOnlyProvisionalDraft(t *testing.T) {
 		require.NoError(t, err)
 	}
 	require.NotEmpty(t, state.Draft)
+	assert.NotEmpty(t, state.DraftCandidate.Key())
+	assert.Equal(t, 1, state.DraftCandidate.Turn)
 
 	discarded := newTestEvent(
 		EventMessageDiscarded,
@@ -104,6 +106,7 @@ func TestReduceMessageDiscardedClearsOnlyProvisionalDraft(t *testing.T) {
 	state, err := Reduce(state, discarded)
 	require.NoError(t, err)
 	assert.Empty(t, state.Draft)
+	assert.Empty(t, state.DraftCandidate.Key())
 	assert.Empty(t, state.Transcript)
 }
 
