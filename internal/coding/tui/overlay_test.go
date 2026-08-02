@@ -3,6 +3,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding"
 	"github.com/rsbin/pips/internal/coding/approval"
@@ -43,6 +45,124 @@ func TestApprovalOverlayDefaultsToDenyAndUsesExactResolution(t *testing.T) {
 	require.Len(t, controller.resolutions, 1)
 	assert.Equal(t, approval.ChoiceDeny, controller.resolutions[0].Choice)
 	assert.Equal(t, promptNone, model.prompt.kind)
+}
+
+func TestApprovalOverlayYieldsToRunningShellAfterAllowSubmission(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name       string
+		key        string
+		resolution approval.Choice
+	}{
+		{name: "allow once", key: "o", resolution: approval.ChoiceAllowOnce},
+		{name: "allow session", key: "s", resolution: approval.ChoiceAllowSession},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			state := approvalReviewState()
+			state.Tools = []coding.ToolState{{
+				Call: coding.ToolCall{
+					ID: "call-1", Name: "shell",
+					Arguments: ai.JSON(`{"command":"make test"}`),
+				},
+				Status: coding.ToolStatusRunning,
+			}}
+			model := readyModelWithController(t, newOverlayController(state), true)
+
+			_, command := model.Update(key(test.key))
+			require.NotNil(t, command)
+			require.True(t, model.prompt.loading)
+			assert.Equal(t, test.resolution, model.prompt.resolution)
+			assert.True(t, model.starting)
+
+			content := ansi.Strip(model.View().Content)
+			assert.NotContains(t, content, "Approval required")
+			assert.NotContains(t, content, "allow_once")
+			assert.Contains(t, content, "Running… · make test")
+			assert.Equal(t, coding.PhaseRunning, model.effectivePhase())
+
+			_, duplicate := model.Update(key("d"))
+			assert.Nil(t, duplicate)
+			assert.Equal(t, test.resolution, model.prompt.resolution)
+		})
+	}
+}
+
+func TestMainApprovalExecutionStartingIsLimitedToPositiveMainDecisions(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		prompt promptState
+		want   bool
+	}{
+		{
+			name: "allow once",
+			prompt: promptState{
+				kind: promptApproval, loading: true, resolution: approval.ChoiceAllowOnce,
+			},
+			want: true,
+		},
+		{
+			name: "allow session",
+			prompt: promptState{
+				kind: promptApproval, loading: true, resolution: approval.ChoiceAllowSession,
+			},
+			want: true,
+		},
+		{
+			name: "deny",
+			prompt: promptState{
+				kind: promptApproval, loading: true, resolution: approval.ChoiceDeny,
+			},
+		},
+		{
+			name: "team approval",
+			prompt: promptState{
+				kind:       promptApproval,
+				loading:    true,
+				resolution: approval.ChoiceAllowOnce,
+				team:       &teamPromptSource{},
+			},
+		},
+		{
+			name: "not submitted",
+			prompt: promptState{
+				kind: promptApproval, resolution: approval.ChoiceAllowOnce,
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			model := &Model{prompt: test.prompt}
+			assert.Equal(t, test.want, model.mainApprovalExecutionStarting())
+		})
+	}
+}
+
+func TestApprovalOverlayRestoresPromptWhenAllowResolutionFails(t *testing.T) {
+	t.Parallel()
+
+	state := approvalReviewState()
+	base := newOverlayController(state)
+	controller := &approvalResolutionErrorController{overlayController: base}
+	model := readyModelWithController(t, controller, true)
+
+	_, command := model.Update(key("o"))
+	require.NotNil(t, command)
+	driveModelCommands(t, model, command)
+
+	assert.Equal(t, promptApproval, model.prompt.kind)
+	assert.False(t, model.prompt.loading)
+	content := ansi.Strip(model.View().Content)
+	assert.Contains(t, content, "Approval required")
+	assert.Contains(t, content, "allow_once")
+	assert.ErrorContains(t, model.streamErr, "resolution failed")
 }
 
 func TestApprovalOverlayClosesSubagentRoute(t *testing.T) {
@@ -375,6 +495,21 @@ type overlayController struct {
 	agentCanceled    []string
 	skillSnapshot    coding.SkillSnapshot
 	skillErr         error
+}
+
+type approvalResolutionErrorController struct {
+	*overlayController
+}
+
+func (c *approvalResolutionErrorController) Resolve(
+	_ context.Context,
+	resolution approval.Resolution,
+) iter.Seq2[coding.Event, error] {
+	c.resolutions = append(c.resolutions, resolution)
+
+	return func(yield func(coding.Event, error) bool) {
+		yield(coding.Event{}, errors.New("approval resolution failed"))
+	}
 }
 
 type worktreeController struct {

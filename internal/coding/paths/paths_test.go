@@ -19,6 +19,7 @@ func TestNew(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, base, layout.Root())
+	assert.Equal(t, filepath.Join(base, "tmp"), layout.TempDir())
 	assert.Equal(t, filepath.Join(base, "config.toml"), layout.ConfigFile())
 	assert.Equal(t, filepath.Join(base, "workspaces.json"), layout.WorkspacesFile())
 	assert.Equal(t, filepath.Join(base, "sessions"), layout.SessionsDir())

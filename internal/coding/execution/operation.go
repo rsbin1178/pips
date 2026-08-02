@@ -2,6 +2,7 @@ package execution
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -81,19 +82,24 @@ type OutputLimits struct {
 
 // OperationSpec describes a requested command before canonicalization.
 type OperationSpec struct {
-	Kind          Kind
-	Tool          string
-	Executable    string
-	Args          []string
-	CWD           string
-	Env           []EnvVar
-	Stdin         []byte
-	Timeout       time.Duration
-	Output        OutputLimits
-	Workspace     WorkspaceAccess
-	WriteDirs     []string
-	Network       NetworkAccess
-	Justification string
+	Kind       Kind
+	Tool       string
+	Executable string
+	Args       []string
+	CWD        string
+	Env        []EnvVar
+	Stdin      []byte
+	Timeout    time.Duration
+	Output     OutputLimits
+	Workspace  WorkspaceAccess
+	WriteDirs  []string
+	Network    NetworkAccess
+	// NetworkByConfiguration means NetworkAny came from an explicit user
+	// sandbox policy rather than a per-call permission request. Policy still
+	// decides authority; this flag only avoids demanding model-authored network
+	// justification for authority the user already supplied.
+	NetworkByConfiguration bool
+	Justification          string
 }
 
 // Operation is an immutable-by-API, canonical command and permission request.
@@ -151,6 +157,17 @@ func NewOperation(ctx context.Context, ws workspace.Workspace, spec OperationSpe
 	writeDirs, err := canonicalWriteDirs(ws, spec.WriteDirs)
 	if err != nil {
 		return Operation{}, err
+	}
+
+	elevated := spec.Network == NetworkAny && !spec.NetworkByConfiguration || len(writeDirs) > 0
+	if elevated && strings.TrimSpace(spec.Justification) == "" {
+		return Operation{}, invalidOperation(
+			"justification",
+			"justification_required",
+			true,
+			"add justification for network or external write access",
+			nil,
+		)
 	}
 
 	return Operation{
@@ -312,9 +329,50 @@ func canonicalArguments(input []string) ([]string, error) {
 }
 
 func canonicalCWD(ws workspace.Workspace, input string) (string, error) {
-	normalized, err := workspace.NormalizePath(input, true)
+	if input == "" {
+		input = "."
+	}
+
+	normalized, err := normalizeCWDSpelling(ws, input)
 	if err != nil {
-		return "", fmt.Errorf("%w: cwd: %w", ErrInvalidOperation, err)
+		return "", err
+	}
+
+	absolute := filepath.Join(ws.Root(), filepath.FromSlash(normalized))
+	resolved, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		reason := "cwd_invalid"
+		hint := "choose an existing Workspace directory"
+		if errors.Is(err, fs.ErrNotExist) {
+			reason = "cwd_not_found"
+			hint = "create the directory first or choose an existing Workspace directory"
+		}
+
+		return "", invalidOperation("cwd", reason, true, hint, err)
+	}
+
+	if !pathContains(ws.Root(), resolved) {
+		return "", invalidOperation(
+			"cwd",
+			"cwd_symlink_escape",
+			true,
+			"choose a directory whose resolved target remains inside the Workspace",
+			nil,
+		)
+	}
+
+	relative, err := filepath.Rel(ws.Root(), resolved)
+	if err != nil {
+		return "", invalidOperation(
+			"cwd", "cwd_invalid", true, "choose an existing Workspace directory", err,
+		)
+	}
+
+	normalized, err = workspace.NormalizePath(filepath.ToSlash(relative), true)
+	if err != nil {
+		return "", invalidOperation(
+			"cwd", "cwd_invalid", true, "choose an existing Workspace directory", err,
+		)
 	}
 
 	tree, err := workspace.OpenTree(ws)
@@ -325,11 +383,69 @@ func canonicalCWD(ws workspace.Workspace, input string) (string, error) {
 
 	info, err := tree.Stat(normalized)
 	if err != nil {
-		return "", fmt.Errorf("%w: inspect cwd: %w", ErrInvalidOperation, err)
+		reason := "cwd_invalid"
+		hint := "choose an existing Workspace directory"
+		if errors.Is(err, fs.ErrNotExist) {
+			reason = "cwd_not_found"
+			hint = "create the directory first or choose an existing Workspace directory"
+		}
+
+		return "", invalidOperation("cwd", reason, true, hint, err)
 	}
 
 	if !info.IsDir() {
-		return "", fmt.Errorf("%w: cwd is not a directory", ErrInvalidOperation)
+		return "", invalidOperation(
+			"cwd",
+			"cwd_not_directory",
+			true,
+			"choose an existing Workspace directory",
+			nil,
+		)
+	}
+
+	return normalized, nil
+}
+
+func normalizeCWDSpelling(ws workspace.Workspace, input string) (string, error) {
+	if !filepath.IsAbs(input) {
+		normalized, err := workspace.NormalizePath(input, true)
+		if err == nil {
+			return normalized, nil
+		}
+
+		reason := "cwd_invalid"
+		hint := "choose an existing Workspace directory"
+		if errors.Is(err, workspace.ErrOutsideRoot) {
+			reason = "cwd_outside_workspace"
+			hint = "omit cwd for the Workspace root or choose a directory inside the Workspace"
+		}
+
+		return "", invalidOperation("cwd", reason, true, hint, err)
+	}
+
+	cleaned := filepath.Clean(input)
+	if !pathContains(ws.Root(), cleaned) {
+		return "", invalidOperation(
+			"cwd",
+			"cwd_outside_workspace",
+			true,
+			"omit cwd for the Workspace root or choose a directory inside the Workspace",
+			nil,
+		)
+	}
+
+	relative, err := filepath.Rel(ws.Root(), cleaned)
+	if err != nil {
+		return "", invalidOperation(
+			"cwd", "cwd_invalid", true, "choose an existing Workspace directory", err,
+		)
+	}
+
+	normalized, err := workspace.NormalizePath(filepath.ToSlash(relative), true)
+	if err != nil {
+		return "", invalidOperation(
+			"cwd", "cwd_invalid", true, "choose an existing Workspace directory", err,
+		)
 	}
 
 	return normalized, nil
@@ -369,14 +485,23 @@ func canonicalEnvironment(input []EnvVar) ([]EnvVar, error) {
 
 func canonicalWriteDirs(ws workspace.Workspace, input []string) ([]fileObject, error) {
 	if len(input) > maxWriteDirectories {
-		return nil, fmt.Errorf("%w: too many external write directories", ErrInvalidOperation)
+		return nil, invalidOperation(
+			"permissions.write_paths",
+			"write_paths_limit",
+			true,
+			"request no more than eight exact external write directories",
+			nil,
+		)
 	}
 
 	output := make([]fileObject, 0, len(input))
 	for _, directory := range input {
-		object, err := inspectWriteDirectory(ws, directory)
+		object, err := inspectWriteDirectory(directory)
 		if err != nil {
 			return nil, err
+		}
+		if pathContains(ws.Root(), object.path) {
+			continue
 		}
 
 		output = append(output, object)
@@ -405,26 +530,59 @@ func inspectExecutable(input string) (fileObject, error) {
 	return object, nil
 }
 
-func inspectWriteDirectory(ws workspace.Workspace, input string) (fileObject, error) {
+func inspectWriteDirectory(input string) (fileObject, error) {
 	if !filepath.IsAbs(input) {
-		return fileObject{}, fmt.Errorf("%w: external write directory must be absolute", ErrInvalidOperation)
+		return fileObject{}, invalidOperation(
+			"permissions.write_paths",
+			"write_path_absolute",
+			true,
+			"use an exact absolute directory or omit Workspace-contained write paths",
+			nil,
+		)
 	}
 
 	object, info, err := inspectFileObject(input)
 	if err != nil {
-		return fileObject{}, err
+		reason := "write_path_invalid"
+		hint := "choose an existing absolute external directory"
+		if errors.Is(err, fs.ErrNotExist) {
+			reason = "write_path_not_found"
+			hint = "create the external directory first or remove it from write_paths"
+		}
+
+		return fileObject{}, invalidOperation(
+			"permissions.write_paths", reason, true, hint, err,
+		)
 	}
 
 	if !info.IsDir() {
-		return fileObject{}, fmt.Errorf("%w: external write path is not a directory", ErrInvalidOperation)
+		return fileObject{}, invalidOperation(
+			"permissions.write_paths",
+			"write_path_not_directory",
+			true,
+			"choose an existing absolute external directory",
+			nil,
+		)
 	}
 
-	if object.path == string(filepath.Separator) || pathContains(ws.Root(), object.path) {
-		return fileObject{}, fmt.Errorf("%w: external write directory is not external", ErrInvalidOperation)
+	if object.path == string(filepath.Separator) {
+		return fileObject{}, invalidOperation(
+			"permissions.write_paths",
+			"write_path_unsafe",
+			true,
+			"request only the narrow external directory required by this command",
+			nil,
+		)
 	}
 
 	if home, homeErr := os.UserHomeDir(); homeErr == nil && pathContains(object.path, filepath.Clean(home)) {
-		return fileObject{}, fmt.Errorf("%w: external write directory contains the user home", ErrInvalidOperation)
+		return fileObject{}, invalidOperation(
+			"permissions.write_paths",
+			"write_path_unsafe",
+			true,
+			"request only the narrow external directory required by this command",
+			nil,
+		)
 	}
 
 	return object, nil

@@ -110,19 +110,10 @@ func doctorCapabilityValue(value string) string {
 }
 
 func nativeSandboxProbe(dependencies Dependencies) SandboxProbe {
-	return func(ctx context.Context, ws workspace.Workspace) (_ execution.Capabilities, returnErr error) {
-		tempRoot, err := os.MkdirTemp("", "pips-sandbox-probe-")
-		if err != nil {
-			return execution.Capabilities{}, fmt.Errorf("create private probe directory: %w", err)
-		}
-
-		defer func() {
-			returnErr = errors.Join(returnErr, removeProbeDirectory(tempRoot))
-		}()
-
-		//nolint:gosec // The sandbox contract requires an owner-only traversable directory.
-		if err := os.Chmod(tempRoot, 0o700); err != nil {
-			return execution.Capabilities{}, fmt.Errorf("protect probe directory: %w", err)
+	return func(ctx context.Context, ws workspace.Workspace) (execution.Capabilities, error) {
+		tempRoot := dependencies.Paths.TempDir()
+		if err := ensureDoctorTempRoot(tempRoot); err != nil {
+			return execution.Capabilities{}, err
 		}
 
 		executor, err := execution.NewExecutor(ws, execution.ExecutorConfig{
@@ -138,9 +129,17 @@ func nativeSandboxProbe(dependencies Dependencies) SandboxProbe {
 	}
 }
 
-func removeProbeDirectory(path string) error {
-	if err := os.RemoveAll(path); err != nil {
-		return fmt.Errorf("remove private probe directory: %w", err)
+func ensureDoctorTempRoot(path string) error {
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		return fmt.Errorf("create private probe directory: %w", err)
+	}
+
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("inspect private probe directory: %w", err)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
+		return errors.New("private probe directory must be an owner-only directory")
 	}
 
 	return nil

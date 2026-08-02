@@ -1,9 +1,12 @@
 package cli
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestDoctorCapabilityValue(t *testing.T) {
@@ -28,4 +31,37 @@ func TestDoctorCapabilityValue(t *testing.T) {
 			assert.Equal(t, test.want, doctorCapabilityValue(test.value))
 		})
 	}
+}
+
+func TestEnsureDoctorTempRoot(t *testing.T) {
+	t.Parallel()
+
+	t.Run("creates owner-only directory", func(t *testing.T) {
+		t.Parallel()
+
+		path := filepath.Join(t.TempDir(), "nested", "tmp")
+		require.NoError(t, ensureDoctorTempRoot(path))
+		info, err := os.Stat(path)
+		require.NoError(t, err)
+		assert.Equal(t, os.FileMode(0o700), info.Mode().Perm())
+	})
+
+	t.Run("rejects public directory", func(t *testing.T) {
+		t.Parallel()
+
+		path := filepath.Join(t.TempDir(), "tmp")
+		require.NoError(t, os.Mkdir(path, 0o755))
+		require.ErrorContains(t, ensureDoctorTempRoot(path), "owner-only")
+	})
+
+	t.Run("rejects symbolic link", func(t *testing.T) {
+		t.Parallel()
+
+		root := t.TempDir()
+		target := filepath.Join(root, "target")
+		require.NoError(t, os.Mkdir(target, 0o700))
+		link := filepath.Join(root, "tmp")
+		require.NoError(t, os.Symlink(target, link))
+		require.ErrorContains(t, ensureDoctorTempRoot(link), "owner-only")
+	})
 }

@@ -231,6 +231,33 @@ func TestExecutorValidatesConfigurationAndProbe(t *testing.T) {
 	assert.Equal(t, ProbeFailureIsolation, probeErr.Failure())
 }
 
+func TestExecutorProbeIncludesProtectedPolicyCeiling(t *testing.T) {
+	t.Parallel()
+
+	fixture := newExecutorFixture(t)
+	protected := filepath.Join(fixture.base, "protected")
+	require.NoError(t, os.Mkdir(protected, 0o700))
+
+	var got probeRequest
+	executor, err := newExecutor(fixture.workspace, ExecutorConfig{
+		TempRoot:    fixture.tempRoot,
+		Environment: mapLookup(nil),
+		Protected:   []string{protected},
+	}, fakeBackend{probeFn: func(_ context.Context, request probeRequest) (Capabilities, error) {
+		got = request
+
+		return Capabilities{Platform: "fake"}, nil
+	}}, systemRunnerDependencies())
+	require.NoError(t, err)
+
+	_, err = executor.Probe(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, fixture.workspace.Root(), got.workspaceRoot)
+	assert.Equal(t, fixture.tempRoot, got.tempRoot)
+	assert.Contains(t, got.protected, protected)
+	assert.Contains(t, got.protected, filepath.Join(fixture.workspace.Root(), ".git"))
+}
+
 func TestExecutorRejectsReplacedTempRoot(t *testing.T) {
 	t.Parallel()
 

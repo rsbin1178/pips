@@ -52,10 +52,11 @@ type activityStatus struct {
 }
 
 type activityContext struct {
-	state       coding.State
-	isStarting  bool
-	hasBridge   bool
-	isCanceling bool
+	state                      coding.State
+	isStarting                 bool
+	hasBridge                  bool
+	isCanceling                bool
+	isResolvingAllowedApproval bool
 }
 
 var activitySpinner = spinner.Spinner{
@@ -138,6 +139,10 @@ func resolveBlockingActivity(context activityContext) (activityStatus, bool) {
 
 	switch context.state.Approval.Kind {
 	case coding.ApprovalReview:
+		if context.isResolvingAllowedApproval {
+			break
+		}
+
 		return activityStatus{
 			kind: activityApproval, label: activityLabelApproval,
 		}, true

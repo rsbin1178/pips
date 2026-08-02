@@ -72,10 +72,11 @@ type Result struct {
 }
 
 type fileLayer struct {
-	patch      Patch
-	providers  map[ai.Provider]ProviderConfig
-	models     []ModelConfig
-	compaction *CompactionConfig
+	patch                 Patch
+	providers             map[ai.Provider]ProviderConfig
+	models                []ModelConfig
+	compaction            *CompactionConfig
+	sandboxWorkspaceWrite *SandboxWorkspaceWriteConfig
 }
 
 // Load resolves one configuration snapshot in increasing precedence order.
@@ -103,6 +104,12 @@ func Load(options LoadOptions) (Result, error) {
 		if layer.compaction != nil {
 			result.Config.Compaction = *layer.compaction
 		}
+		if layer.sandboxWorkspaceWrite != nil {
+			result.Config.SandboxWorkspaceWrite = *layer.sandboxWorkspaceWrite
+			result.Config.sources[FieldSandboxNetwork] = Source{
+				Kind: SourceConfigFile, Detail: options.ConfigFile,
+			}
+		}
 	}
 
 	if err := applyEnvironment(&result.Config, options.LookupEnv); err != nil {
@@ -119,14 +126,19 @@ func Load(options LoadOptions) (Result, error) {
 }
 
 type fileConfig struct {
-	Variant    *string                 `toml:"variant"`
-	Reasoning  *string                 `toml:"reasoning"`
-	Providers  map[string]fileProvider `toml:"providers"`
-	ToolSearch *bool                   `toml:"tool_search"`
-	Mode       *string                 `toml:"mode"`
-	Sandbox    *string                 `toml:"sandbox"`
-	Approval   *string                 `toml:"approval"`
-	Compaction *fileCompaction         `toml:"compaction"`
+	Variant               *string                    `toml:"variant"`
+	Reasoning             *string                    `toml:"reasoning"`
+	Providers             map[string]fileProvider    `toml:"providers"`
+	ToolSearch            *bool                      `toml:"tool_search"`
+	Mode                  *string                    `toml:"mode"`
+	Sandbox               *string                    `toml:"sandbox"`
+	SandboxWorkspaceWrite *fileSandboxWorkspaceWrite `toml:"sandbox_workspace_write"`
+	Approval              *string                    `toml:"approval"`
+	Compaction            *fileCompaction            `toml:"compaction"`
+}
+
+type fileSandboxWorkspaceWrite struct {
+	Network *string `toml:"network"`
 }
 
 type fileCompaction struct {
@@ -459,6 +471,17 @@ func decodeLayer(value fileConfig) (fileLayer, error) {
 			return fileLayer{}, err
 		}
 		layer.compaction = &compaction
+	}
+	if value.SandboxWorkspaceWrite != nil {
+		settings := SandboxWorkspaceWriteConfig{Network: SandboxNetworkOnRequest}
+		if value.SandboxWorkspaceWrite.Network != nil {
+			network, err := ParseSandboxNetworkMode(*value.SandboxWorkspaceWrite.Network)
+			if err != nil {
+				return fileLayer{}, err
+			}
+			settings.Network = network
+		}
+		layer.sandboxWorkspaceWrite = &settings
 	}
 	if value.Variant != nil {
 		variant, err := ParseVariant(*value.Variant)

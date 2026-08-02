@@ -66,6 +66,7 @@ type promptState struct {
 	kind       promptKind
 	cursor     int
 	choices    []approval.Choice
+	resolution approval.Choice
 	loading    bool
 	err        error
 	preview    coding.CompactionPreview
@@ -482,10 +483,20 @@ func (m *Model) resolvePromptChoice(choice approval.Choice) (tea.Model, tea.Cmd)
 		return m, nil
 	}
 
+	m.prompt.resolution = choice
 	m.prompt.loading = true
 	return m, m.startStream(func(ctx context.Context) iter.Seq2[coding.Event, error] {
 		return m.controller.Resolve(ctx, approval.Resolution{RequestID: requestID, Choice: choice})
 	})
+}
+
+func (m *Model) mainApprovalExecutionStarting() bool {
+	if m.prompt.kind != promptApproval || m.prompt.team != nil || !m.prompt.loading {
+		return false
+	}
+
+	return m.prompt.resolution == approval.ChoiceAllowOnce ||
+		m.prompt.resolution == approval.ChoiceAllowSession
 }
 
 func (m *Model) newQuestionPrompt(request question.Request) questionPromptState {
@@ -761,6 +772,10 @@ func (m *Model) rejectQuestionPromptCommand(request question.Request) tea.Cmd {
 func (m *Model) promptView() string {
 	switch m.prompt.kind {
 	case promptApproval:
+		if m.mainApprovalExecutionStarting() {
+			return ""
+		}
+
 		return m.approvalPromptView()
 	case promptCompact:
 		return m.compactPromptView()

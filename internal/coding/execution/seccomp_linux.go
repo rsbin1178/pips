@@ -15,6 +15,7 @@ import (
 const (
 	seccompDataSyscallOffset = 0
 	seccompDataArchOffset    = 4
+	seccompDataArg0Offset    = 16
 	x32SyscallBit            = uint32(0x40000000)
 )
 
@@ -71,6 +72,9 @@ func buildLinuxSeccompProgram(networkAny bool) []unix.SockFilter {
 	}
 
 	program = append(program, linuxABICompatibilityGuard()...)
+	if !networkAny {
+		program = append(program, linuxNetworkNoneSocketGuard()...)
+	}
 	for _, syscallNumber := range blockedLinuxSyscalls(networkAny) {
 		program = append(program,
 			bpfJump(unix.BPF_JMP|unix.BPF_JEQ|unix.BPF_K, syscallNumber, 0, 1),
@@ -124,13 +128,25 @@ func blockedLinuxSyscalls(networkAny bool) []uint32 {
 		unix.SYS_UNSHARE,
 		unix.SYS_USERFAULTFD,
 	}
-	if !networkAny {
-		blocked = append(blocked, unix.SYS_SOCKET, unix.SYS_SOCKETPAIR)
-	}
-
 	slices.Sort(blocked)
 
 	return slices.Compact(blocked)
+}
+
+func linuxNetworkNoneSocketGuard() []unix.SockFilter {
+	return []unix.SockFilter{
+		// The private network namespace contains TCP/IP sockets. Deny AF_UNIX
+		// socket creation so filesystem and abstract host sockets remain
+		// unreachable, while anonymous socketpair IPC stays available.
+		bpfJump(unix.BPF_JMP|unix.BPF_JEQ|unix.BPF_K, unix.SYS_SOCKET, 0, 3),
+		bpfStatement(unix.BPF_LD|unix.BPF_W|unix.BPF_ABS, seccompDataArg0Offset),
+		bpfJump(unix.BPF_JMP|unix.BPF_JEQ|unix.BPF_K, unix.AF_UNIX, 0, 1),
+		bpfStatement(
+			unix.BPF_RET|unix.BPF_K,
+			unix.SECCOMP_RET_ERRNO|uint32(unix.EPERM),
+		),
+		bpfStatement(unix.BPF_LD|unix.BPF_W|unix.BPF_ABS, seccompDataSyscallOffset),
+	}
 }
 
 func marshalLinuxSockFilters(filters []unix.SockFilter) []byte {

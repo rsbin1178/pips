@@ -904,7 +904,8 @@ func (v runtimeIntegrationVerifier) Verify(
 ) (teamintegration.Verification, error) {
 	source, _ := v.runtime.config.Source(config.FieldSandbox)
 	policy, err := execution.NewPolicy(request.Workspace, execution.PolicyConfig{
-		Sandbox: v.runtime.config.Sandbox, Approval: v.runtime.config.Approval,
+		Sandbox: v.runtime.config.Sandbox, Network: v.runtime.config.SandboxWorkspaceWrite.Network,
+		Approval:      v.runtime.config.Approval,
 		SandboxSource: source, Protected: []string{v.runtime.paths.Root()},
 	})
 	if err != nil {

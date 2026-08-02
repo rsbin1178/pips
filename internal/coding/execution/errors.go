@@ -22,3 +22,55 @@ var (
 	// ErrOutputLimit means observed process output exceeded the operation hard limit.
 	ErrOutputLimit = errors.New("coding execution: output limit exceeded")
 )
+
+// InvalidOperationProblem is safe, bounded correction metadata for an invalid
+// operation. It never includes the rejected value or an operating-system error.
+type InvalidOperationProblem struct {
+	Field     string
+	Reason    string
+	Retryable bool
+	Hint      string
+}
+
+type invalidOperationError struct {
+	problem InvalidOperationProblem
+	cause   error
+}
+
+func (e *invalidOperationError) Error() string {
+	return "coding execution: invalid operation: " + e.problem.Reason
+}
+
+func (e *invalidOperationError) Unwrap() error {
+	if e.cause == nil {
+		return ErrInvalidOperation
+	}
+
+	return errors.Join(ErrInvalidOperation, e.cause)
+}
+
+// DescribeInvalidOperation returns safe correction metadata when err carries
+// a classified invalid-operation failure.
+func DescribeInvalidOperation(err error) (InvalidOperationProblem, bool) {
+	var classified *invalidOperationError
+	if !errors.As(err, &classified) {
+		return InvalidOperationProblem{}, false
+	}
+
+	return classified.problem, true
+}
+
+func invalidOperation(
+	field string,
+	reason string,
+	retryable bool,
+	hint string,
+	cause error,
+) error {
+	return &invalidOperationError{
+		problem: InvalidOperationProblem{
+			Field: field, Reason: reason, Retryable: retryable, Hint: hint,
+		},
+		cause: cause,
+	}
+}

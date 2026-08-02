@@ -209,6 +209,61 @@ func (t *Tree) InspectMutationPath(name string) (string, fs.FileInfo, error) {
 	return t.inspectRegularPath(name, true)
 }
 
+// InspectAddPath validates an Add target without requiring its parent tree to
+// exist. It returns the exact missing parent directories in shallow-to-deep
+// order. Existing components may not be symbolic links and existing parents
+// must be directories.
+func (t *Tree) InspectAddPath(name string) (string, fs.FileInfo, []string, error) {
+	normalized, err := NormalizePath(name, false)
+	if err != nil {
+		return "", nil, nil, err
+	}
+
+	components := strings.Split(normalized, "/")
+	missing := make([]string, 0, len(components)-1)
+	parentMissing := false
+
+	for index := range components {
+		current := strings.Join(components[:index+1], "/")
+		final := index == len(components)-1
+		if parentMissing {
+			if !final {
+				missing = append(missing, current)
+			}
+
+			continue
+		}
+
+		info, statErr := t.Lstat(current)
+		if errors.Is(statErr, fs.ErrNotExist) {
+			if !final {
+				missing = append(missing, current)
+				parentMissing = true
+			}
+
+			continue
+		}
+		if statErr != nil {
+			return "", nil, nil, statErr
+		}
+		if info.Mode()&fs.ModeSymlink != 0 {
+			return "", nil, nil, fmt.Errorf("%w: %q", ErrSymlink, current)
+		}
+		if final {
+			return normalized, info, missing, nil
+		}
+		if !info.IsDir() {
+			return "", nil, nil, fmt.Errorf(
+				"%w: parent %q is not a directory",
+				ErrUnsupportedType,
+				current,
+			)
+		}
+	}
+
+	return normalized, nil, missing, nil
+}
+
 // InspectRegularPath validates an existing regular file path without following
 // symbolic links in any component.
 func (t *Tree) InspectRegularPath(name string) (string, fs.FileInfo, error) {

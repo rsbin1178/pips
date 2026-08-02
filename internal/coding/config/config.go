@@ -24,13 +24,14 @@ type Field string
 
 // Configuration fields.
 const (
-	FieldModel      Field = "model"
-	FieldVariant    Field = "variant"
-	FieldReasoning  Field = "reasoning"
-	FieldToolSearch Field = "tool_search"
-	FieldMode       Field = "mode"
-	FieldSandbox    Field = "sandbox"
-	FieldApproval   Field = "approval"
+	FieldModel          Field = "model"
+	FieldVariant        Field = "variant"
+	FieldReasoning      Field = "reasoning"
+	FieldToolSearch     Field = "tool_search"
+	FieldMode           Field = "mode"
+	FieldSandbox        Field = "sandbox"
+	FieldSandboxNetwork Field = "sandbox_workspace_write.network"
+	FieldApproval       Field = "approval"
 )
 
 var fields = []Field{
@@ -40,6 +41,7 @@ var fields = []Field{
 	FieldToolSearch,
 	FieldMode,
 	FieldSandbox,
+	FieldSandboxNetwork,
 	FieldApproval,
 }
 
@@ -71,6 +73,23 @@ const (
 	SandboxWorkspaceWrite SandboxMode = "workspace-write"
 	SandboxFullAccess     SandboxMode = "full-access"
 )
+
+// SandboxNetworkMode controls child-process network authority in the
+// workspace-write sandbox.
+type SandboxNetworkMode string
+
+// Supported workspace-write network modes.
+const (
+	SandboxNetworkDeny      SandboxNetworkMode = "deny"
+	SandboxNetworkOnRequest SandboxNetworkMode = "on-request"
+	SandboxNetworkAllow     SandboxNetworkMode = "allow"
+)
+
+// SandboxWorkspaceWriteConfig contains settings specific to the
+// workspace-write sandbox.
+type SandboxWorkspaceWriteConfig struct {
+	Network SandboxNetworkMode
+}
 
 // ApprovalMode selects when operations require explicit approval.
 type ApprovalMode string
@@ -356,16 +375,17 @@ func (m ModelConfig) Equal(other ModelConfig) bool {
 
 // Config is the final immutable-by-convention application configuration.
 type Config struct {
-	Model      ModelRef
-	Variant    string
-	Reasoning  *ReasoningLevel
-	Providers  map[ai.Provider]ProviderConfig
-	Models     []ModelConfig
-	ToolSearch bool
-	Mode       OperatingMode
-	Sandbox    SandboxMode
-	Approval   ApprovalMode
-	Compaction CompactionConfig
+	Model                 ModelRef
+	Variant               string
+	Reasoning             *ReasoningLevel
+	Providers             map[ai.Provider]ProviderConfig
+	Models                []ModelConfig
+	ToolSearch            bool
+	Mode                  OperatingMode
+	Sandbox               SandboxMode
+	SandboxWorkspaceWrite SandboxWorkspaceWriteConfig
+	Approval              ApprovalMode
+	Compaction            CompactionConfig
 
 	sources map[Field]Source
 }
@@ -393,9 +413,12 @@ func Defaults() Config {
 	}
 
 	return Config{
-		Providers:  map[ai.Provider]ProviderConfig{},
-		Mode:       ModeAgent,
-		Sandbox:    SandboxWorkspaceWrite,
+		Providers: map[ai.Provider]ProviderConfig{},
+		Mode:      ModeAgent,
+		Sandbox:   SandboxWorkspaceWrite,
+		SandboxWorkspaceWrite: SandboxWorkspaceWriteConfig{
+			Network: SandboxNetworkOnRequest,
+		},
 		Approval:   ApprovalOnRequest,
 		Compaction: DefaultCompactionConfig(),
 		sources:    sources,
@@ -449,6 +472,11 @@ func (c Config) ValidateRuntime() error {
 	}
 	if err := validateSandbox(c.Sandbox); err != nil {
 		return err
+	}
+	if c.SandboxWorkspaceWrite.Network != "" {
+		if err := validateSandboxNetwork(c.SandboxWorkspaceWrite.Network); err != nil {
+			return err
+		}
 	}
 	if c.Mode != "" {
 		if err := validateOperatingMode(c.Mode); err != nil {
@@ -551,6 +579,16 @@ func ParseSandboxMode(value string) (SandboxMode, error) {
 	return mode, nil
 }
 
+// ParseSandboxNetworkMode parses a supported workspace-write network mode.
+func ParseSandboxNetworkMode(value string) (SandboxNetworkMode, error) {
+	mode := SandboxNetworkMode(strings.TrimSpace(value))
+	if err := validateSandboxNetwork(mode); err != nil {
+		return "", err
+	}
+
+	return mode, nil
+}
+
 // ParseApprovalMode parses a supported approval mode.
 func ParseApprovalMode(value string) (ApprovalMode, error) {
 	mode := ApprovalMode(strings.TrimSpace(value))
@@ -577,6 +615,15 @@ func validateSandbox(mode SandboxMode) error {
 		return nil
 	default:
 		return fmt.Errorf("%w: unsupported sandbox mode %q", ErrInvalid, mode)
+	}
+}
+
+func validateSandboxNetwork(mode SandboxNetworkMode) error {
+	switch mode {
+	case SandboxNetworkDeny, SandboxNetworkOnRequest, SandboxNetworkAllow:
+		return nil
+	default:
+		return fmt.Errorf("%w: unsupported workspace-write network mode %q", ErrInvalid, mode)
 	}
 }
 
