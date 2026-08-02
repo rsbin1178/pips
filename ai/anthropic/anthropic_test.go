@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"github.com/rsbin/pips/ai"
@@ -118,6 +119,77 @@ func as[T any](t *testing.T, v any) T {
 	require.True(t, ok, "expected %T, got %T (%v)", out, v, v)
 
 	return out
+}
+
+func TestRedactedThinkingToolContinuationIsReplayedExactly(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int32
+
+	model := newTestModel(t, func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if !assert.NoError(t, json.NewDecoder(r.Body).Decode(&body)) {
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+
+		if calls.Add(1) == 1 {
+			_, _ = w.Write([]byte(`{
+				"id":"msg_redacted_1","type":"message","role":"assistant","model":"claude-sonnet-4-5",
+				"content":[
+					{"type":"redacted_thinking","data":"opaque-redacted-state"},
+					{"type":"tool_use","id":"toolu_1","name":"lookup","input":{"q":"x"}}
+				],
+				"stop_reason":"tool_use","usage":{"input_tokens":20,"output_tokens":10}
+			}`))
+
+			return
+		}
+
+		messages := as[[]any](t, body["messages"])
+		if !assert.Len(t, messages, 3) {
+			return
+		}
+
+		assistant := as[map[string]any](t, messages[1])
+		assert.Equal(t, []any{
+			map[string]any{"type": "redacted_thinking", "data": "opaque-redacted-state"},
+			map[string]any{
+				"type": "tool_use", "id": "toolu_1", "name": "lookup",
+				"input": map[string]any{"q": "x"},
+			},
+		}, assistant["content"])
+
+		toolTurn := as[map[string]any](t, messages[2])
+
+		toolBlocks := as[[]any](t, toolTurn["content"])
+		if !assert.Len(t, toolBlocks, 1) {
+			return
+		}
+
+		assert.Equal(t, "tool_result", as[map[string]any](t, toolBlocks[0])["type"])
+		assert.Equal(t, "toolu_1", as[map[string]any](t, toolBlocks[0])["tool_use_id"])
+
+		_, _ = w.Write([]byte(`{
+			"id":"msg_redacted_2","type":"message","role":"assistant","model":"claude-sonnet-4-5",
+			"content":[{"type":"text","text":"done"}],"stop_reason":"end_turn",
+			"usage":{"input_tokens":30,"output_tokens":4}
+		}`))
+	})
+
+	first, err := model.Generate(t.Context(), ai.Request{Messages: []ai.Message{ai.UserText("look it up")}})
+	require.NoError(t, err)
+	require.Len(t, first.Message.Parts, 2)
+	assert.Equal(t, ai.ReasoningPart{Redacted: true, Signature: "opaque-redacted-state"}, first.Message.Parts[0])
+
+	second, err := model.Generate(t.Context(), ai.Request{Messages: []ai.Message{
+		ai.UserText("look it up"),
+		first.Message,
+		ai.ToolResultText("toolu_1", "lookup", "value"),
+	}})
+	require.NoError(t, err)
+	assert.Equal(t, "done", second.Text())
 }
 
 func TestGenerateText(t *testing.T) {

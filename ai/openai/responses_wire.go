@@ -38,14 +38,17 @@ type responseItem struct {
 	// function_call_output
 	Output string `json:"output,omitempty"`
 
-	// reasoning (output only)
-	Summary          []responseSummary `json:"summary,omitempty"`
-	EncryptedContent string            `json:"encrypted_content,omitempty"`
-	Status           string            `json:"status,omitempty"`
+	// reasoning
+	// Summary is a pointer because the field is required for reasoning input
+	// items, including when the summary array is empty, but must stay absent
+	// from every other item variant.
+	Summary          *[]responseSummary `json:"summary,omitempty"`
+	EncryptedContent string             `json:"encrypted_content,omitempty"`
+	Status           string             `json:"status,omitempty"`
 }
 
 type responseContent struct {
-	Type     string `json:"type"` // "input_text"|"output_text"|"input_image"|"input_file"
+	Type     string `json:"type"` // "input_text"|"output_text"|"reasoning_text"|"input_image"|"input_file"
 	Text     string `json:"text,omitempty"`
 	ImageURL string `json:"image_url,omitempty"`
 	FileData string `json:"file_data,omitempty"`

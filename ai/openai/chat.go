@@ -59,13 +59,15 @@ func (m *Model) streamChat(ctx context.Context, req ai.Request) ai.Stream {
 // chatStreamState tracks what has been emitted so the SSE chunk sequence
 // becomes a well-formed ai.Stream (start → deltas → tool ends → end).
 type chatStreamState struct {
-	provider  ai.Provider
-	startSent bool
-	endSent   bool
-	finish    ai.FinishReason
-	usage     *ai.Usage
-	openTools []int
-	toolOpen  map[int]bool
+	provider          ai.Provider
+	startSent         bool
+	endSent           bool
+	finish            ai.FinishReason
+	usage             *ai.Usage
+	openTools         []int
+	toolOpen          map[int]bool
+	openRouterDetails *openRouterReasoningAccumulator
+	mistralThinking   *mistralThinkingAccumulator
 }
 
 // emitChatStream drives the Chat Completions SSE dialect: JSON chunks under
@@ -139,20 +141,23 @@ func (s *chatStreamState) emitChunk(chunk chatResponse, yield func(ai.StreamEven
 }
 
 func (s *chatStreamState) emitDelta(delta chatChoiceMessage, yield func(ai.StreamEvent, error) bool) bool {
-	if delta.ReasoningContent != "" {
+	switch {
+	case len(delta.ReasoningDetails) > 0:
+		if !s.emitOpenRouterReasoning(delta.ReasoningDetails, yield) {
+			return false
+		}
+	case delta.ReasoningContent != "":
 		if !yield(ai.StreamEvent{Type: ai.StreamReasoningDelta, Text: delta.ReasoningContent}, nil) {
 			return false
 		}
-	} else if delta.Reasoning != "" {
+	case delta.Reasoning != "":
 		if !yield(ai.StreamEvent{Type: ai.StreamReasoningDelta, Text: delta.Reasoning}, nil) {
 			return false
 		}
 	}
 
-	if delta.Content != nil && *delta.Content != "" {
-		if !yield(ai.StreamEvent{Type: ai.StreamTextDelta, Text: *delta.Content}, nil) {
-			return false
-		}
+	if !s.emitChatContent(delta.Content, yield) {
+		return false
 	}
 
 	for _, call := range delta.ToolCalls {

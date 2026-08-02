@@ -275,6 +275,41 @@ func TestResponsesToolResultHistoryWireFormat(t *testing.T) {
 	assert.Equal(t, `{"temp":21}`, output["output"])
 }
 
+func TestResponsesReasoningReplayEmptySummary(t *testing.T) {
+	t.Parallel()
+
+	const firstResponse = `{
+		"id":"resp_1","model":"gpt-5","status":"completed","output":[
+			{"type":"reasoning","id":"rs_empty","summary":[],"encrypted_content":"encrypted-state"},
+			{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{}"}
+		]
+	}`
+
+	firstModel := newResponsesModel(t, serveResponsesJSON(t, firstResponse, nil))
+	first, err := firstModel.Generate(t.Context(), ai.Request{
+		Messages: []ai.Message{ai.UserText("lookup")},
+	})
+	require.NoError(t, err)
+
+	var captured map[string]any
+
+	replayModel := newResponsesModel(t, serveResponsesJSON(t, responsesTextResponse, &captured))
+	_, err = replayModel.Generate(t.Context(), ai.Request{Messages: []ai.Message{
+		ai.UserText("lookup"),
+		first.Message,
+		ai.ToolResultText("call_1", "lookup", "value"),
+	}})
+	require.NoError(t, err)
+
+	input := as[[]any](t, captured["input"])
+	require.Len(t, input, 4)
+	replayed := as[map[string]any](t, input[1])
+	assert.Equal(t, "reasoning", replayed["type"])
+	assert.Equal(t, "rs_empty", replayed["id"])
+	assert.Equal(t, []any{}, replayed["summary"])
+	assert.Equal(t, "encrypted-state", replayed["encrypted_content"])
+}
+
 func TestResponsesStructuredOutputWireFormat(t *testing.T) {
 	t.Parallel()
 
@@ -350,11 +385,17 @@ data: {"type":"response.reasoning_summary_text.delta","output_index":0,"delta":"
 event: response.output_item.done
 data: {"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_1","encrypted_content":"encrypted-state"}}
 
-event: response.output_text.delta
-data: {"type":"response.output_text.delta","output_index":1,"delta":"done"}
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","call_id":"call_1","name":"lookup"}}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","output_index":1,"delta":"{}"}
+
+event: response.function_call_arguments.done
+data: {"type":"response.function_call_arguments.done","output_index":1}
 
 event: response.completed
-data: {"type":"response.completed","response":{"id":"resp_r1","model":"gpt-5","status":"completed","output":[],"usage":{"input_tokens":4,"output_tokens":5}}}
+data: {"type":"response.completed","response":{"id":"resp_r1","model":"gpt-5","status":"completed","output":[{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{}"}],"usage":{"input_tokens":4,"output_tokens":5}}}
 
 `
 
@@ -366,7 +407,32 @@ data: {"type":"response.completed","response":{"id":"resp_r1","model":"gpt-5","s
 	reasoning := as[ai.ReasoningPart](t, resp.Message.Parts[0])
 	assert.Equal(t, "checking", reasoning.Text)
 	assert.NotEmpty(t, reasoning.Signature)
-	assert.Equal(t, ai.TextPart{Text: "done"}, resp.Message.Parts[1])
+
+	calls := resp.ToolCalls()
+	require.Len(t, calls, 1)
+	assert.Equal(t, "call_1", calls[0].ID)
+	assert.Equal(t, "lookup", calls[0].Name)
+	assert.JSONEq(t, `{}`, string(calls[0].Args))
+
+	var captured map[string]any
+
+	replayModel := newResponsesModel(t, serveResponsesJSON(t, responsesTextResponse, &captured))
+	_, err = replayModel.Generate(t.Context(), ai.Request{Messages: []ai.Message{
+		ai.UserText("check"),
+		resp.Message,
+		ai.ToolResultText("call_1", "lookup", "value"),
+	}})
+	require.NoError(t, err)
+
+	input := as[[]any](t, captured["input"])
+	require.Len(t, input, 4)
+	replayed := as[map[string]any](t, input[1])
+	assert.Equal(t, "reasoning", replayed["type"])
+	assert.Equal(t, "rs_1", replayed["id"])
+	assert.Equal(t, []any{
+		map[string]any{"type": "summary_text", "text": "checking"},
+	}, replayed["summary"])
+	assert.Equal(t, "encrypted-state", replayed["encrypted_content"])
 }
 
 // TestAPIAutoRouting verifies AC3's routing half: reasoning-family models go
