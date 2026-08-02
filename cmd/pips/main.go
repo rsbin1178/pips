@@ -27,11 +27,26 @@ func main() {
 }
 
 func run(args []string, stdin, stdout, stderr *os.File) int {
+	return runAfterSignalSetup(args, stdin, stdout, stderr, nil)
+}
+
+func runAfterSignalSetup(
+	args []string,
+	stdin, stdout, stderr *os.File,
+	ready func(),
+) int {
 	interruptCtx, stopInterrupt := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stopInterrupt()
 
-	commandCtx, stopTermination := signal.NotifyContext(interruptCtx, syscall.SIGTERM)
+	commandCtx, stopTermination := signal.NotifyContext(
+		interruptCtx,
+		syscall.SIGTERM,
+		syscall.SIGHUP,
+	)
 	defer stopTermination()
+	if ready != nil {
+		ready()
+	}
 
 	sigpipe := make(chan os.Signal, 1)
 

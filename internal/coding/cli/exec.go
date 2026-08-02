@@ -264,16 +264,20 @@ func validateSuccessfulInteraction(state coding.State) error {
 }
 
 func validateSessionFlag(value string) error {
-	if strings.TrimSpace(value) != value {
-		return fmt.Errorf("%w: --session has surrounding whitespace", ErrUsage)
-	}
-
 	if value == "" {
 		return nil
 	}
 
+	return validateSessionArgument(value)
+}
+
+func validateSessionArgument(value string) error {
+	if strings.TrimSpace(value) != value {
+		return fmt.Errorf("%w: session ID has surrounding whitespace", ErrUsage)
+	}
+
 	if err := session.ValidateID(value); err != nil {
-		return fmt.Errorf("%w: --session: %w", ErrUsage, err)
+		return fmt.Errorf("%w: session ID: %w", ErrUsage, err)
 	}
 
 	return nil

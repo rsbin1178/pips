@@ -19,6 +19,7 @@ import (
 	"github.com/rsbin/pips/internal/coding/modelcatalog"
 	"github.com/rsbin/pips/internal/coding/plandoc"
 	"github.com/rsbin/pips/internal/coding/session"
+	"github.com/rsbin/pips/internal/coding/tasklist"
 )
 
 const maxCompactionInstructions = 64 << 10
@@ -350,8 +351,23 @@ func (r *Runtime) emitTreeChanged(ctx context.Context, emitter *eventEmitter) er
 	transcript := transcriptFromPath(r.session.Path())
 
 	return emitter.emit("", "", EventSessionTreeChanged, SessionTreeChanged{
-		Tree: tree, Transcript: transcript,
+		Tree: tree, Transcript: transcript, ContextTokens: harness.EstimateContext(r.session.Path()),
+		Tasks: tasksFromPath(r.session.Path()),
 	})
+}
+
+func tasksFromPath(path []harness.Entry) tasklist.Snapshot {
+	var snapshot tasklist.Snapshot
+	for _, entry := range path {
+		if entry.Kind != harness.KindMessage || entry.Message == nil {
+			continue
+		}
+		if update, ok := tasklist.FromMessage(*entry.Message); ok {
+			snapshot = tasklist.FromUpdate(update)
+		}
+	}
+
+	return snapshot
 }
 
 func transcriptFromPath(path []harness.Entry) []ai.Message {

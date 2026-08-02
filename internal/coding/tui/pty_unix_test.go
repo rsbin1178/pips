@@ -41,6 +41,11 @@ func TestPTYLifecycleRestoresTerminalBeforeControllerClose(t *testing.T) {
 			Bootstrap: func(context.Context, bool) (Controller, error) {
 				return controller, nil
 			},
+			OnExit: func(info ExitInfo) error {
+				_, err := fmt.Fprintf(os.Stdout, ";EXIT_HINT=%s", info.SessionID)
+
+				return err
+			},
 		})
 		if err != nil {
 			_, _ = os.Stderr.WriteString(err.Error())
@@ -150,12 +155,14 @@ func TestPTYLifecycleRestoresTerminalBeforeControllerClose(t *testing.T) {
 	value := output.String()
 	reset := strings.LastIndex(value, resetTerminalInteraction)
 	closed := strings.LastIndex(value, "CONTROLLER_CLOSED")
+	exitHint := strings.LastIndex(value, "EXIT_HINT=")
 	assert.NotContains(t, value, "\x1b[?1049h", "alternate screen must remain disabled")
 	assert.NotContains(t, value, "\x1b[?1007h", "alternate scroll must remain disabled")
 	assert.NotContains(t, value, "\x1b[?1002h", "cell mouse reporting must remain disabled")
 	assert.NotContains(t, value, "\x1b[?1003h", "all-motion mouse reporting must remain disabled")
 	assert.GreaterOrEqual(t, reset, 0, "terminal interaction modes were not reset")
 	assert.Greater(t, closed, reset, "controller closed before terminal restoration")
+	assert.Greater(t, exitHint, closed, "exit hint printed before controller release")
 	assert.Contains(t, value, "SHELL_HISTORY_MARKER")
 	assert.Contains(t, value, "Pips")
 	assert.Contains(t, value, "✻ Pips")
@@ -215,6 +222,13 @@ type ptyController struct {
 
 	mu          sync.Mutex
 	promptLines int
+}
+
+func (c *ptyController) Snapshot() coding.State {
+	state := c.Controller.Snapshot()
+	state.Tree.TotalNodes = max(state.Tree.TotalNodes, 1)
+
+	return state
 }
 
 func (c *ptyController) Prompt(

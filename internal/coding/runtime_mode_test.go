@@ -9,6 +9,7 @@ import (
 	"github.com/rsbin/pips/agent/catalog"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding/planreview"
+	"github.com/rsbin/pips/internal/coding/tasklist"
 	"github.com/rsbin/pips/internal/coding/tools"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -144,6 +145,7 @@ func TestRuntimeSetModePublishesAndLeasesPlanCapabilities(t *testing.T) {
 	assert.Contains(t, toolNames, "run_subagent")
 	assert.NotContains(t, toolNames, "apply_patch")
 	assert.NotContains(t, toolNames, "shell")
+	assert.NotContains(t, toolNames, tasklist.ToolName)
 	assert.Contains(t, requests[0].System, `"operating_mode": "plan"`)
 	assert.Equal(t, ai.ToolChoice{Mode: ai.ToolChoiceTool, Name: planreview.PresentToolName}, requests[1].ToolChoice)
 	assert.Equal(t, []string{planreview.PresentToolName}, toolNamesFromRequest(requests[1]))
@@ -166,7 +168,9 @@ func TestRuntimeAgentModeDoesNotAdvertisePlanSubmission(t *testing.T) {
 
 	requests := model.Requests()
 	require.Len(t, requests, 1)
-	assert.NotContains(t, toolNamesFromRequest(requests[0]), planreview.ToolName)
+	toolNames := toolNamesFromRequest(requests[0])
+	assert.NotContains(t, toolNames, planreview.ToolName)
+	assert.Contains(t, toolNames, tasklist.ToolName)
 }
 
 func TestRuntimeSetModeIsIdleOnlyAndIdempotent(t *testing.T) {

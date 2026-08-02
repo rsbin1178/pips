@@ -156,6 +156,7 @@ func New(dependencies Dependencies) (*cobra.Command, error) {
 	}
 
 	root.AddCommand(
+		newResumeCommand(dependencies, flags),
 		newExecCommand(dependencies, flags, func(
 			ctx context.Context,
 			options coding.OpenOptions,

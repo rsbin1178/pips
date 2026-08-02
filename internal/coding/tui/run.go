@@ -26,6 +26,7 @@ import (
 	"github.com/rsbin/pips/internal/coding/question"
 	"github.com/rsbin/pips/internal/coding/runtimecontrol"
 	"github.com/rsbin/pips/internal/coding/session"
+	"github.com/rsbin/pips/internal/coding/statusline"
 	"github.com/rsbin/pips/internal/coding/subagent"
 )
 
@@ -176,17 +177,32 @@ type ImageIngress interface {
 // the user's explicit Workspace trust decision.
 type Bootstrap func(context.Context, bool) (Controller, error)
 
+// ExitInfo is the resumable conversation left by one normal TUI exit.
+type ExitInfo struct {
+	SessionID string
+	Resumable bool
+}
+
+// ExitHandler runs after terminal restoration and Controller release.
+type ExitHandler func(ExitInfo) error
+
+// StatusLineSaver atomically persists one complete ordered field selection.
+type StatusLineSaver func(context.Context, []statusline.Item) error
+
 // Options contain the CLI-owned resources used by one TUI Program.
 type Options struct {
-	Input        io.Reader
-	Output       io.Writer
-	Environment  []string
-	Workspace    string
-	Trusted      bool
-	NoColor      bool
-	Bootstrap    Bootstrap
-	Clipboard    ImageClipboard
-	ImageIngress ImageIngress
+	Input          io.Reader
+	Output         io.Writer
+	Environment    []string
+	Workspace      string
+	Trusted        bool
+	NoColor        bool
+	Bootstrap      Bootstrap
+	Clipboard      ImageClipboard
+	ImageIngress   ImageIngress
+	OnExit         ExitHandler
+	StatusLine     []statusline.Item
+	SaveStatusLine StatusLineSaver
 }
 
 // Run owns the terminal Program and closes any acquired Controller after the
@@ -236,29 +252,57 @@ func Run(ctx context.Context, options Options) (returnErr error) {
 		tea.WithoutSignalHandler(),
 	)
 
-	_, runErr := program.Run()
-	returnErr = runErr
-	if resetErr := resetTerminalModes(options.Output); resetErr != nil {
-		retryErr := resetTerminalModes(options.Output)
-		returnErr = errors.Join(returnErr, resetErr, retryErr)
-		terminalRestored = retryErr == nil
-	} else {
-		terminalRestored = true
+	cleaned := false
+	cleanup := func() {
+		if cleaned {
+			return
+		}
+		cleaned = true
+		if resetErr := resetTerminalModes(options.Output); resetErr != nil {
+			retryErr := resetTerminalModes(options.Output)
+			returnErr = errors.Join(returnErr, resetErr, retryErr)
+			terminalRestored = retryErr == nil
+		} else {
+			terminalRestored = true
+		}
+		cleanupCtx, cleanupCancel := context.WithTimeout(
+			context.WithoutCancel(ctx),
+			controllerCloseTimeout,
+		)
+		returnErr = errors.Join(returnErr, model.stopStream(cleanupCtx))
+		model.stopTeamWorkerRouteSubscription()
+		model.stopSubscription()
+		cleanupCancel()
+		owned.Lock()
+		controller := owned.controller
+		owned.Unlock()
+		returnErr = errors.Join(returnErr, closeController(ctx, controller))
 	}
-	cleanupCtx, cleanupCancel := context.WithTimeout(
-		context.WithoutCancel(ctx),
-		controllerCloseTimeout,
-	)
-	returnErr = errors.Join(returnErr, model.stopStream(cleanupCtx))
-	model.stopTeamWorkerRouteSubscription()
-	model.stopSubscription()
-	cleanupCancel()
-	owned.Lock()
-	controller := owned.controller
-	owned.Unlock()
-	returnErr = errors.Join(returnErr, closeController(ctx, controller))
+	defer cleanup()
+
+	final, runErr := program.Run()
+	returnErr = runErr
+	finalModel, ok := final.(*Model)
+	if !ok {
+		finalModel = model
+	}
+	normal := runErr == nil && ctx.Err() == nil
+	exitInfo := ExitInfo{
+		SessionID: finalModel.state.SessionID,
+		Resumable: finalModel.state.SessionID != "" && !finalModel.state.IsSessionProvisional(),
+	}
+	cleanup()
+	returnErr = finishRunExit(returnErr, normal, options.OnExit, exitInfo)
 
 	return returnErr
+}
+
+func finishRunExit(current error, normal bool, handler ExitHandler, info ExitInfo) error {
+	if current != nil || !normal || handler == nil {
+		return current
+	}
+
+	return handler(info)
 }
 
 func resetTerminalModes(output io.Writer) error {
@@ -283,6 +327,11 @@ func validateOptions(options Options) error {
 	}
 	if options.Workspace == "" {
 		return fmt.Errorf("%w: workspace is required", errInvalidOptions)
+	}
+	if options.StatusLine != nil {
+		if err := statusline.Validate(options.StatusLine); err != nil {
+			return fmt.Errorf("%w: %w", errInvalidOptions, err)
+		}
 	}
 
 	return nil

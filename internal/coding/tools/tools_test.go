@@ -9,6 +9,7 @@ import (
 	"github.com/rsbin/pips/agent"
 	"github.com/rsbin/pips/agent/catalog"
 	"github.com/rsbin/pips/ai"
+	"github.com/rsbin/pips/internal/coding/tasklist"
 	"github.com/rsbin/pips/internal/coding/tools"
 	"github.com/rsbin/pips/internal/coding/workspace"
 	"github.com/stretchr/testify/assert"
@@ -67,6 +68,35 @@ func TestCatalogMetadataAndConcurrency(t *testing.T) {
 	assert.True(t, grepDeclaration.InputSchema.Properties["fixed_strings"].Nullable)
 	assert.NotContains(t, grepDeclaration.InputSchema.Properties, "query")
 	assert.NotContains(t, grepDeclaration.InputSchema.Properties, "regex")
+}
+
+func TestTaskCatalogIsBoundedApplicationState(t *testing.T) {
+	t.Parallel()
+
+	value, err := tools.NewTaskCatalog()
+	require.NoError(t, err)
+	descriptors, err := value.Search(t.Context(), catalog.AllowAll("test", catalog.RiskRead), "")
+	require.NoError(t, err)
+	require.Len(t, descriptors, 1)
+	assert.Equal(t, tasklist.ToolName, descriptors[0].Name)
+	assert.Equal(t, catalog.RiskRead, descriptors[0].Risk)
+
+	snapshot, err := value.Snapshot(t.Context(), catalog.AllowAll("test", catalog.RiskRead))
+	require.NoError(t, err)
+	require.Len(t, snapshot, 1)
+	parts, err := snapshot[0].Exec(t.Context(), agent.ToolCall{
+		ID: "task-1", Name: tasklist.ToolName,
+		Args: ai.JSON(`{"plan":[{"step":"Test","status":"completed"}]}`),
+	})
+	require.NoError(t, err)
+	require.Len(t, parts, 1)
+	assert.Contains(t, parts[0].(ai.TextPart).Text, `"completed":1`)
+
+	_, err = snapshot[0].Exec(t.Context(), agent.ToolCall{
+		ID: "task-2", Name: tasklist.ToolName,
+		Args: ai.JSON(`{"plan":[{"step":"Test","status":"completed"}],"unknown":true}`),
+	})
+	require.Error(t, err)
 }
 
 func TestReadPaginatesAndRejectsUnsafeContent(t *testing.T) {
