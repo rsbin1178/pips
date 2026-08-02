@@ -159,7 +159,7 @@ func TestXAIResponsesReasoningReplay(t *testing.T) {
 
 			_, _ = w.Write([]byte(`{
 				"id":"resp_x1","model":"grok-4","status":"completed","output":[
-					{"type":"reasoning","id":"rs_x1","encrypted_content":"encrypted-state","summary":[{"type":"summary_text","text":"checking"}]},
+					{"type":"reasoning","id":"rs_x1","encrypted_content":"encrypted-state","summary":[{"type":"summary_text","text":"checking"}],"content":[{"type":"reasoning_text","text":"provider reasoning content"}],"status":"completed"},
 					{"type":"function_call","call_id":"call_x1","name":"lookup","arguments":"{}"}
 				]
 			}`))
@@ -168,6 +168,25 @@ func TestXAIResponsesReasoningReplay(t *testing.T) {
 		}
 
 		second = body
+
+		input, inputOK := body["input"].([]any)
+		if !inputOK || len(input) < 2 {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":{"message":"Missing required input history","type":"invalid_request_error"}}`))
+
+			return
+		}
+
+		replayed, replayOK := input[1].(map[string]any)
+
+		_, summaryOK := replayed["summary"]
+		if !replayOK || !summaryOK {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":{"message":"Missing required parameter: 'input[1].summary'.","type":"invalid_request_error","param":"input[1].summary"}}`))
+
+			return
+		}
+
 		_, _ = w.Write([]byte(`{"id":"resp_x2","model":"grok-4","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}]}`))
 	}))
 	t.Cleanup(server.Close)
@@ -201,7 +220,14 @@ func TestXAIResponsesReasoningReplay(t *testing.T) {
 	replayed := as[map[string]any](t, input[1])
 	assert.Equal(t, "reasoning", replayed["type"])
 	assert.Equal(t, "rs_x1", replayed["id"])
+	assert.Equal(t, []any{
+		map[string]any{"type": "summary_text", "text": "checking"},
+	}, replayed["summary"])
+	assert.Equal(t, []any{
+		map[string]any{"type": "reasoning_text", "text": "provider reasoning content"},
+	}, replayed["content"])
 	assert.Equal(t, "encrypted-state", replayed["encrypted_content"])
+	assert.Equal(t, "completed", replayed["status"])
 }
 
 func TestProfileErrorsAndStreamUseRealProvider(t *testing.T) {

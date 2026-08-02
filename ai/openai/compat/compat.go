@@ -147,10 +147,13 @@ var deepSeekProfile = Profile{
 }
 
 var groqProfile = Profile{
-	Provider:        ai.ProviderGroq,
-	BaseURL:         "https://api.groq.com/openai/v1",
-	APIKeyEnv:       []string{"GROQ_API_KEY"},
-	API:             openai.APIChatCompletions,
+	Provider:  ai.ProviderGroq,
+	BaseURL:   "https://api.groq.com/openai/v1",
+	APIKeyEnv: []string{"GROQ_API_KEY"},
+	API:       openai.APIChatCompletions,
+	Compatibility: openai.Compatibility{
+		ReasoningHistory: openai.ReasoningHistoryReasoning,
+	},
 	capabilitiesFor: groqCapabilities,
 }
 
@@ -180,16 +183,19 @@ var openRouterProfile = Profile{
 	Compatibility: openai.Compatibility{
 		MaxTokensField:   openai.MaxTokensFieldLegacy,
 		ChatReasoning:    openai.ChatReasoningObject,
-		ReasoningHistory: openai.ReasoningHistoryReasoning,
+		ReasoningHistory: openai.ReasoningHistoryDetails,
 	},
 	Capabilities: ai.Capabilities{Text: true, Tools: true},
 }
 
 var cerebrasProfile = Profile{
-	Provider:        ai.ProviderCerebras,
-	BaseURL:         "https://api.cerebras.ai/v1",
-	APIKeyEnv:       []string{"CEREBRAS_API_KEY"},
-	API:             openai.APIChatCompletions,
+	Provider:  ai.ProviderCerebras,
+	BaseURL:   "https://api.cerebras.ai/v1",
+	APIKeyEnv: []string{"CEREBRAS_API_KEY"},
+	API:       openai.APIChatCompletions,
+	Compatibility: openai.Compatibility{
+		ReasoningHistory: openai.ReasoningHistoryReasoning,
+	},
 	capabilitiesFor: cerebrasCapabilities,
 }
 
@@ -213,7 +219,7 @@ var mistralProfile = Profile{
 	API:       openai.APIChatCompletions,
 	Compatibility: openai.Compatibility{
 		MaxTokensField:   openai.MaxTokensFieldLegacy,
-		ReasoningHistory: openai.ReasoningHistoryReasoning,
+		ReasoningHistory: openai.ReasoningHistoryContentChunks,
 	},
 	capabilitiesFor: mistralCapabilities,
 }

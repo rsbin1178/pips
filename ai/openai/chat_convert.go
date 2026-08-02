@@ -3,6 +3,7 @@ package openai
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -174,7 +175,12 @@ func chatMessageFrom(msg ai.Message, compat Compatibility, label string) ([]chat
 
 		return []chatMessage{{Role: "user", Content: content}}, nil
 	case ai.RoleAssistant:
-		return []chatMessage{chatAssistantFrom(msg, compat.ReasoningHistory)}, nil
+		converted, err := chatAssistantFrom(msg, compat.ReasoningHistory)
+		if err != nil {
+			return nil, fmt.Errorf("%s: encoding assistant history: %w", label, err)
+		}
+
+		return []chatMessage{converted}, nil
 	case ai.RoleTool:
 		return chatToolResultsFrom(msg)
 	default:
@@ -196,7 +202,7 @@ func chatContentFrom(parts []ai.Part) (any, error) {
 	for _, part := range parts {
 		switch p := part.(type) {
 		case ai.TextPart:
-			out = append(out, chatContentPart{Type: "text", Text: p.Text})
+			out = append(out, chatContentPart{Type: typeText, Text: p.Text})
 		case ai.ImagePart:
 			url, err := imageURLFrom(p.Source)
 			if err != nil {
@@ -245,36 +251,166 @@ func dataURL(src ai.MediaSource) string {
 }
 
 // chatAssistantFrom renders a prior assistant turn. OpenAI drops reasoning;
-// compatible providers may require it on a provider-specific history field.
-func chatAssistantFrom(msg ai.Message, reasoningField ReasoningHistoryField) chatMessage {
+// compatible providers may require plaintext or structured continuation state.
+func chatAssistantFrom(msg ai.Message, reasoningField ReasoningHistoryField) (chatMessage, error) {
 	out := chatMessage{Role: "assistant"}
+	var contentChunks []json.RawMessage
 
-	if text := textOf(msg.Parts); text != "" {
-		out.Content = text
-	}
-
-	for _, part := range msg.Parts {
-		switch p := part.(type) {
-		case ai.ReasoningPart:
-			switch reasoningField {
-			case ReasoningHistoryContent:
-				out.ReasoningContent += p.Text
-			case ReasoningHistoryReasoning:
-				out.Reasoning += p.Text
-			}
-		case ai.ToolCallPart:
-			out.ToolCalls = append(out.ToolCalls, chatToolCall{
-				ID:   p.ID,
-				Type: typeFunction,
-				Function: chatFunctionCall{
-					Name:      p.Name,
-					Arguments: string(p.Args),
-				},
-			})
+	if reasoningField != ReasoningHistoryContentChunks {
+		if text := textOf(msg.Parts); text != "" {
+			out.Content = text
 		}
 	}
 
-	return out
+	for _, part := range msg.Parts {
+		if err := appendChatAssistantPart(&out, &contentChunks, part, reasoningField); err != nil {
+			return chatMessage{}, err
+		}
+	}
+
+	if len(contentChunks) > 0 {
+		out.Content = contentChunks
+	}
+
+	return out, nil
+}
+
+func appendChatAssistantPart(
+	out *chatMessage,
+	contentChunks *[]json.RawMessage,
+	part ai.Part,
+	reasoningField ReasoningHistoryField,
+) error {
+	switch p := part.(type) {
+	case ai.TextPart:
+		if reasoningField != ReasoningHistoryContentChunks {
+			return nil
+		}
+
+		raw, err := json.Marshal(mistralContentChunk{Type: typeText, Text: p.Text})
+		if err != nil {
+			return fmt.Errorf("encoding Mistral text chunk: %w", err)
+		}
+
+		*contentChunks = append(*contentChunks, raw)
+	case ai.ReasoningPart:
+		return appendChatReasoningHistory(out, contentChunks, p, reasoningField)
+	case ai.ToolCallPart:
+		out.ToolCalls = append(out.ToolCalls, chatToolCall{
+			ID:   p.ID,
+			Type: typeFunction,
+			Function: chatFunctionCall{
+				Name:      p.Name,
+				Arguments: string(p.Args),
+			},
+		})
+	}
+
+	return nil
+}
+
+func appendChatReasoningHistory(
+	out *chatMessage,
+	contentChunks *[]json.RawMessage,
+	part ai.ReasoningPart,
+	reasoningField ReasoningHistoryField,
+) error {
+	state, hasState := decodeChatReasoningState(part.Signature)
+	if hasState && reasoningField == ReasoningHistoryDetails && state.Kind == chatReasoningOpenRouter {
+		out.ReasoningDetails = append(out.ReasoningDetails, cloneRawMessages(state.OpenRouterDetails)...)
+
+		return nil
+	}
+	if hasState && reasoningField == ReasoningHistoryContentChunks && state.Kind == chatReasoningMistral {
+		*contentChunks = append(*contentChunks, cloneRawMessage(state.MistralThinking))
+
+		return nil
+	}
+
+	switch reasoningField {
+	case ReasoningHistoryContent:
+		out.ReasoningContent += part.Text
+	case ReasoningHistoryReasoning, ReasoningHistoryDetails:
+		out.Reasoning += part.Text
+	case ReasoningHistoryContentChunks:
+		raw, err := mistralThinkingChunkFromText(part.Text)
+		if err != nil {
+			return err
+		}
+
+		*contentChunks = append(*contentChunks, raw)
+	}
+
+	return nil
+}
+
+func mistralThinkingChunkFromText(text string) (json.RawMessage, error) {
+	nested, err := json.Marshal(mistralContentChunk{Type: typeText, Text: text})
+	if err != nil {
+		return nil, fmt.Errorf("encoding Mistral thinking text: %w", err)
+	}
+
+	raw, err := json.Marshal(mistralContentChunk{
+		Type:     typeThinking,
+		Thinking: []json.RawMessage{nested},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("encoding Mistral thinking chunk: %w", err)
+	}
+
+	return raw, nil
+}
+
+func contentPartsFromChat(content *json.RawMessage) ([]ai.Part, error) {
+	if content == nil || len(*content) == 0 || string(*content) == "null" {
+		return nil, nil
+	}
+
+	var text string
+	if err := json.Unmarshal(*content, &text); err == nil {
+		if text == "" {
+			return nil, nil
+		}
+
+		return []ai.Part{ai.TextPart{Text: text}}, nil
+	}
+
+	var chunks []json.RawMessage
+	if err := json.Unmarshal(*content, &chunks); err != nil {
+		return nil, fmt.Errorf("content must be a string or content-chunk array: %w", err)
+	}
+
+	parts := make([]ai.Part, 0, len(chunks))
+	for index, raw := range chunks {
+		var chunk mistralContentChunk
+		if err := json.Unmarshal(raw, &chunk); err != nil {
+			return nil, fmt.Errorf("decoding content[%d]: %w", index, err)
+		}
+
+		switch chunk.Type {
+		case typeText:
+			parts = append(parts, ai.TextPart{Text: chunk.Text})
+		case typeThinking:
+			text, err := mistralThinkingText(raw)
+			if err != nil {
+				return nil, fmt.Errorf("decoding content[%d]: %w", index, err)
+			}
+
+			signature, err := encodeChatReasoningState(chatReasoningState{
+				Kind:            chatReasoningMistral,
+				MistralThinking: cloneRawMessage(raw),
+			})
+			if err != nil {
+				return nil, fmt.Errorf("preserving content[%d]: %w", index, err)
+			}
+
+			parts = append(parts, ai.ReasoningPart{Text: text, Signature: signature})
+		default:
+			return nil, fmt.Errorf("content[%d] has unsupported type %q", index, chunk.Type)
+		}
+	}
+
+	return parts, nil
 }
 
 // chatToolResultsFrom renders each tool result part as its own role:"tool"
@@ -383,15 +519,33 @@ func responseFromChat(body chatResponse, raw []byte, provider ai.Provider) (*ai.
 	choice := body.Choices[0]
 	msg := ai.Message{Role: ai.RoleAssistant}
 
-	if choice.Message.ReasoningContent != "" {
+	switch {
+	case len(choice.Message.ReasoningDetails) > 0:
+		text, err := openRouterReasoningText(choice.Message.ReasoningDetails)
+		if err != nil {
+			return nil, fmt.Errorf("decoding reasoning_details: %w", err)
+		}
+
+		signature, err := encodeChatReasoningState(chatReasoningState{
+			Kind:              chatReasoningOpenRouter,
+			OpenRouterDetails: cloneRawMessages(choice.Message.ReasoningDetails),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("preserving reasoning_details: %w", err)
+		}
+
+		msg.Parts = append(msg.Parts, ai.ReasoningPart{Text: text, Signature: signature})
+	case choice.Message.ReasoningContent != "":
 		msg.Parts = append(msg.Parts, ai.ReasoningPart{Text: choice.Message.ReasoningContent})
-	} else if choice.Message.Reasoning != "" {
+	case choice.Message.Reasoning != "":
 		msg.Parts = append(msg.Parts, ai.ReasoningPart{Text: choice.Message.Reasoning})
 	}
 
-	if choice.Message.Content != nil && *choice.Message.Content != "" {
-		msg.Parts = append(msg.Parts, ai.TextPart{Text: *choice.Message.Content})
+	contentParts, err := contentPartsFromChat(choice.Message.Content)
+	if err != nil {
+		return nil, fmt.Errorf("decoding assistant content: %w", err)
 	}
+	msg.Parts = append(msg.Parts, contentParts...)
 
 	for _, call := range choice.Message.ToolCalls {
 		msg.Parts = append(msg.Parts, ai.ToolCallPart{
