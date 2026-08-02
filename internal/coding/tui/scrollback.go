@@ -22,6 +22,7 @@ type scrollbackCursor struct {
 	tools        int
 	diagnostics  int
 	toolIDs      map[string]struct{}
+	planIDs      map[string]struct{}
 	completions  map[string]struct{}
 	teamAttempts map[teamAttemptKey]projectionFingerprint
 	changes      projectionFingerprint
@@ -220,6 +221,9 @@ func (m *Model) takeStableTimelineBlocks() []timelineBlock {
 	delta := m.state.Clone()
 
 	delta.Transcript = delta.Transcript[m.scrollback.messages:stableMessages]
+	delta.MessageCandidates = sliceMessageCandidates(
+		m.state.MessageCandidates, m.scrollback.messages, stableMessages,
+	)
 	delta.SyntheticMessages = sliceSyntheticMessageIndexes(
 		m.state.SyntheticMessages,
 		m.scrollback.messages,
@@ -241,6 +245,7 @@ func (m *Model) takeStableTimelineBlocks() []timelineBlock {
 	}
 
 	blocks := projectTimelineExcluding(delta, m.scrollback.toolIDs)
+	blocks = m.appendStablePlanProposalBlocks(blocks)
 
 	for _, marker := range m.pendingCompletionMarkers() {
 		if block, ok := projectCompletionMarker(marker); ok {
@@ -297,6 +302,9 @@ func (m *Model) activeTimelineBlocks() []timelineBlock {
 	active := m.state.Clone()
 
 	active.Transcript = active.Transcript[m.scrollback.messages:]
+	active.MessageCandidates = sliceMessageCandidates(
+		m.state.MessageCandidates, m.scrollback.messages, len(m.state.Transcript),
+	)
 	active.SyntheticMessages = sliceSyntheticMessageIndexes(
 		m.state.SyntheticMessages,
 		m.scrollback.messages,
@@ -315,6 +323,7 @@ func (m *Model) activeTimelineBlocks() []timelineBlock {
 	}
 
 	blocks := projectTimelineExcluding(active, m.scrollback.toolIDs)
+	blocks = append(blocks, m.activePlanProposalBlocks(blocks)...)
 	for _, marker := range m.pendingCompletionMarkers() {
 		if block, ok := projectCompletionMarker(marker); ok {
 			blocks = append(blocks, block)
@@ -348,6 +357,83 @@ func (m *Model) activeTimelineBlocks() []timelineBlock {
 	blocks = append(blocks, m.activeTeamAttemptBlocks()...)
 
 	return blocks
+}
+
+func (m *Model) appendStablePlanProposalBlocks(blocks []timelineBlock) []timelineBlock {
+	if m.scrollback.planIDs == nil {
+		m.scrollback.planIDs = make(map[string]struct{})
+	}
+	for _, block := range blocks {
+		if block.kind == blockPlan && block.id != "" {
+			m.scrollback.planIDs[block.id] = struct{}{}
+		}
+	}
+
+	for _, proposal := range m.state.PlanProposals {
+		if proposal.Status == coding.PlanProposalPending {
+			continue
+		}
+		if _, exists := m.scrollback.planIDs[proposal.ID]; exists {
+			continue
+		}
+
+		blocks = append(blocks, planProposalBlock(proposal, len(m.state.Transcript)))
+		m.scrollback.planIDs[proposal.ID] = struct{}{}
+	}
+
+	return blocks
+}
+
+func (m *Model) activePlanProposalBlocks(existing []timelineBlock) []timelineBlock {
+	seen := make(map[string]struct{}, len(existing))
+	for _, block := range existing {
+		if block.kind == blockPlan {
+			seen[block.id] = struct{}{}
+		}
+	}
+
+	blocks := make([]timelineBlock, 0, len(m.state.PlanProposals))
+	for _, proposal := range m.state.PlanProposals {
+		if proposal.Status == coding.PlanProposalPending {
+			continue
+		}
+		if _, committed := m.scrollback.planIDs[proposal.ID]; committed {
+			continue
+		}
+		if _, projected := seen[proposal.ID]; projected {
+			continue
+		}
+
+		blocks = append(blocks, planProposalBlock(proposal, len(m.state.Transcript)))
+	}
+
+	return blocks
+}
+
+func planProposalBlock(proposal coding.PlanProposal, position int) timelineBlock {
+	title := "Plan · Continue planning"
+	if proposal.Status == coding.PlanProposalApproved {
+		title = "Plan · Approved"
+	}
+
+	return timelineBlock{
+		kind: blockPlan, id: proposal.ID, title: title, body: proposal.Content, position: position,
+	}
+}
+
+func sliceMessageCandidates(
+	values []coding.CandidateIdentity,
+	start int,
+	end int,
+) []coding.CandidateIdentity {
+	result := make([]coding.CandidateIdentity, max(0, end-start))
+	if start >= len(values) || len(result) == 0 {
+		return result
+	}
+
+	copy(result, values[start:min(end, len(values))])
+
+	return result
 }
 
 func (m *Model) holdCompletedSubagentTool(tool coding.ToolState) bool {

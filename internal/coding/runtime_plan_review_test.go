@@ -5,13 +5,14 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 
+	"github.com/rsbin/pips/agent"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding/planflow"
 	"github.com/rsbin/pips/internal/coding/planreview"
 	"github.com/rsbin/pips/internal/coding/question"
-	"github.com/rsbin/pips/internal/coding/tools"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -25,11 +26,10 @@ func TestRuntimeRecoversTextOnlyCandidateIntoPlanDocumentAndReview(t *testing.T)
 		runtimeTextResponse("Here is a generic plan that skipped the Plan tools."),
 		runtimeToolResponse("checkpoint-after-retry", planflow.ToolName, checkpointFixture),
 		runtimeToolResponse(
-			"write-after-checkpoint",
-			tools.WritePlanName,
+			"present-after-checkpoint",
+			planreview.PresentToolName,
 			fmt.Sprintf(`{"expected_revision":"","content":%q}`, content),
 		),
-		runtimeToolResponse("submit-after-write", planreview.ToolName, submitPlanArgs(revision)),
 	)
 	runtime := openTestRuntimeAt(t, t.TempDir(), SessionTarget{}, model)
 	require.NoError(t, runtime.SetMode(t.Context(), ModePlan))
@@ -49,13 +49,11 @@ func TestRuntimeRecoversTextOnlyCandidateIntoPlanDocumentAndReview(t *testing.T)
 	assert.Equal(t, content, document.Content)
 
 	requests := model.Requests()
-	require.Len(t, requests, 4)
+	require.Len(t, requests, 3)
 	assert.Equal(t, ai.ToolChoice{Mode: ai.ToolChoiceRequired}, requests[1].ToolChoice)
 	assert.Equal(t, []string{question.ToolName, planflow.ToolName}, toolNamesFromRequest(requests[1]))
-	assert.Equal(t, ai.ToolChoice{Mode: ai.ToolChoiceTool, Name: tools.WritePlanName}, requests[2].ToolChoice)
-	assert.Equal(t, []string{tools.WritePlanName}, toolNamesFromRequest(requests[2]))
-	assert.Equal(t, ai.ToolChoice{Mode: ai.ToolChoiceTool, Name: planreview.ToolName}, requests[3].ToolChoice)
-	assert.Equal(t, []string{planreview.ToolName}, toolNamesFromRequest(requests[3]))
+	assert.Equal(t, ai.ToolChoice{Mode: ai.ToolChoiceTool, Name: planreview.PresentToolName}, requests[2].ToolChoice)
+	assert.Equal(t, []string{planreview.PresentToolName}, toolNamesFromRequest(requests[2]))
 }
 
 func TestRuntimePlanReviewContinueKeepsPlanMode(t *testing.T) {
@@ -63,7 +61,6 @@ func TestRuntimePlanReviewContinueKeepsPlanMode(t *testing.T) {
 
 	runtime, model, revision := openPlanReviewRuntime(t)
 	setPlanReviewResponses(model, revision,
-		runtimeToolResponse("submit-continue", planreview.ToolName, submitPlanArgs(revision)),
 		runtimeQuestionResponse(t, "question-after-continue"),
 	)
 
@@ -94,27 +91,10 @@ func TestRuntimePlanReviewApprovalSwitchesOnlyAtIdleAndFreezesSuffix(t *testing.
 	t.Parallel()
 
 	runtime, model, revision := openPlanReviewRuntime(t)
-	setPlanReviewResponses(model, revision,
-		&ai.Response{
-			Provider: ai.ProviderOpenAI,
-			Model:    "runtime-test",
-			Message: ai.Assistant(
-				ai.ToolCallPart{
-					ID: "submit-approve", Name: planreview.ToolName,
-					Args: ai.JSON(submitPlanArgs(revision)),
-				},
-				ai.ToolCallPart{
-					ID: "late-write", Name: tools.WritePlanName,
-					Args: ai.JSON(`{"expected_revision":"` + revision + `","content":"# Changed after approval"}`),
-				},
-			),
-			FinishReason: ai.FinishToolCalls,
-			Usage:        ai.Usage{InputTokens: 10, OutputTokens: 2},
-		},
-		runtimeTextResponse("Plan review complete."),
-	)
+	setPlanReviewResponses(model, revision)
 
 	collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("submit the Plan")))
+	requestsBeforeApproval := len(model.Requests())
 	request := *runtime.Snapshot().PlanReview.Required
 	events := collectRuntimeEvents(t, runtime.ResolvePlanReview(t.Context(), planreview.Resolution{
 		RequestID: request.ID,
@@ -144,16 +124,14 @@ func TestRuntimePlanReviewApprovalSwitchesOnlyAtIdleAndFreezesSuffix(t *testing.
 	assert.Equal(t, revision, document.Revision)
 	assert.NotContains(t, document.Content, "Changed after approval")
 	assert.Contains(t, transcriptText(state.Transcript), "approved")
+	assert.Len(t, model.Requests(), requestsBeforeApproval, "approval must not call the model again")
 }
 
 func TestRuntimePlanReviewApprovalFailsClosedWhenRevisionChanges(t *testing.T) {
 	t.Parallel()
 
 	runtime, model, revision := openPlanReviewRuntime(t)
-	setPlanReviewResponses(model, revision,
-		runtimeToolResponse("submit-stale", planreview.ToolName, submitPlanArgs(revision)),
-		runtimeTextResponse("Plan review complete."),
-	)
+	setPlanReviewResponses(model, revision)
 
 	collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("submit the Plan")))
 	request := *runtime.Snapshot().PlanReview.Required
@@ -197,6 +175,130 @@ func TestRuntimeDiscardsPseudoToolMarkupAndRequiresNativePlanTransition(t *testi
 	assert.Equal(t, []string{question.ToolName, planflow.ToolName}, toolNamesFromRequest(requests[1]))
 }
 
+func TestRuntimeMalformedQuestionFallsBackToGenericFreeformAndEventuallyPresents(t *testing.T) {
+	t.Parallel()
+
+	const content = "# SSO Plan\n\nUse the school identity provider and verify role mapping."
+	model := newRuntimeModel(
+		runtimeToolResponse("bad-structured", question.ToolName, `{"questions":[]}`),
+		runtimeToolResponse("bad-flat", question.TextToolName, `{"question":123}`),
+		runtimeToolResponse("checkpoint-after-answer", planflow.ToolName, checkpointFixture),
+		runtimeToolResponse(
+			"present-after-answer",
+			planreview.PresentToolName,
+			fmt.Sprintf(`{"expected_revision":"","content":%q}`, content),
+		),
+	)
+	runtime := openTestRuntimeAt(t, t.TempDir(), SessionTarget{}, model)
+	require.NoError(t, runtime.SetMode(t.Context(), ModePlan))
+
+	events := collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("Plan the system")))
+	assert.Equal(t, 1, countEventType(events, EventQuestionRequired))
+	paused := runtime.Snapshot()
+	require.NotNil(t, paused.Question.Required)
+	request := question.CloneRequest(*paused.Question.Required)
+	assert.Equal(t, question.RequestFreeform, request.Kind)
+	assert.Contains(t, request.Prompt, "could not form a valid structured question")
+	assert.NotContains(t, request.Prompt, `{"question":123}`)
+
+	requests := model.Requests()
+	require.Len(t, requests, 2)
+	assert.Equal(t, ai.ToolChoice{Mode: ai.ToolChoiceTool, Name: question.TextToolName}, requests[1].ToolChoice)
+	assert.Equal(t, []string{question.TextToolName}, toolNamesFromRequest(requests[1]))
+
+	events = collectRuntimeEvents(t, runtime.ResolveQuestion(t.Context(), question.Resolution{
+		RequestID: request.ID, SchemaDigest: request.SchemaDigest,
+		Chat: "Use the school SSO identity provider.",
+	}))
+	assert.Contains(t, eventTypes(events), EventPlanReviewRequired)
+	state := runtime.Snapshot()
+	require.NotNil(t, state.PlanReview.Required)
+	assert.Equal(t, content, state.PlanReview.Required.Content)
+}
+
+func TestRuntimeGenericFreeformFallbackSurvivesRestart(t *testing.T) {
+	t.Parallel()
+
+	base := t.TempDir()
+	firstModel := newRuntimeModel(
+		runtimeToolResponse("bad-structured", question.ToolName, `{"questions":[]}`),
+		runtimeToolResponse("bad-flat", question.TextToolName, `{"question":123}`),
+	)
+	first := openTestRuntimeAt(t, base, SessionTarget{}, firstModel)
+	require.NoError(t, first.SetMode(t.Context(), ModePlan))
+	collectRuntimeEvents(t, first.Prompt(t.Context(), ai.UserText("Plan the system")))
+	require.NotNil(t, first.Snapshot().Question.Required)
+	before := question.CloneRequest(*first.Snapshot().Question.Required)
+	sessionID := first.handle.Metadata().ID
+	abruptRuntimeStop(t, first)
+
+	secondModel := newRuntimeModel()
+	second := openTestRuntimeAt(t, base, SessionTarget{ID: sessionID}, secondModel)
+	second.mu.Lock()
+	second.config.Mode = ModePlan
+	second.state.Mode = ModePlan
+	second.mu.Unlock()
+	events := collectRuntimeEvents(t, second.Continue(t.Context()))
+	assert.Contains(t, eventTypes(events), EventQuestionRequired)
+	require.NotNil(t, second.Snapshot().Question.Required)
+	assert.Equal(t, before, *second.Snapshot().Question.Required)
+	assert.Empty(t, secondModel.Requests())
+}
+
+func TestRuntimePlanQuestionCancellationStopsIncompleteWithoutModelResume(t *testing.T) {
+	t.Parallel()
+
+	model := newRuntimeModel(runtimeQuestionResponse(t, "plan-question"))
+	runtime := openTestRuntimeAt(t, t.TempDir(), SessionTarget{}, model)
+	require.NoError(t, runtime.SetMode(t.Context(), ModePlan))
+	collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("Plan the system")))
+	request := question.CloneRequest(*runtime.Snapshot().Question.Required)
+	requestsBeforeCancel := len(model.Requests())
+
+	events := collectRuntimeEvents(t, runtime.RejectQuestion(
+		t.Context(), request.ID, request.SchemaDigest,
+	))
+	assert.Contains(t, eventTypes(events), EventQuestionRejected)
+	state := runtime.Snapshot()
+	assert.Equal(t, PhaseIdle, state.Phase)
+	assert.Equal(t, ModePlan, state.Mode)
+	assert.Equal(t, InteractionIncomplete, state.Interaction.Outcome)
+	assert.Equal(t, agent.StopWhen, state.Interaction.Stop)
+	assert.Len(t, model.Requests(), requestsBeforeCancel)
+}
+
+func TestRuntimePlanQuestionBypassHasFiniteTurnFuse(t *testing.T) {
+	t.Parallel()
+
+	responses := make([]*ai.Response, 0, planInteractionMaxTurns)
+	responses = append(responses, runtimeToolResponse("bad-structured", question.ToolName, `{"questions":[]}`))
+	for index := 1; index < planInteractionMaxTurns; index++ {
+		arguments := strings.Replace(
+			checkpointFixture,
+			"Deliver the requested implementation",
+			fmt.Sprintf("Deliver the requested implementation attempt %d", index),
+			1,
+		)
+		responses = append(responses, runtimeToolResponse(
+			fmt.Sprintf("bypass-%d", index),
+			planflow.ToolName,
+			arguments,
+		))
+	}
+
+	model := newRuntimeModel(responses...)
+	runtime := openTestRuntimeAt(t, t.TempDir(), SessionTarget{}, model)
+	require.NoError(t, runtime.SetMode(t.Context(), ModePlan))
+
+	events := collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("Plan without answering")))
+	state := runtime.Snapshot()
+	assert.Equal(t, PhaseIdle, state.Phase)
+	assert.Equal(t, InteractionIncomplete, state.Interaction.Outcome)
+	assert.Equal(t, agent.StopMaxTurns, state.Interaction.Stop)
+	assert.Len(t, model.Requests(), planInteractionMaxTurns)
+	assert.Zero(t, countEventType(events, EventPlanReviewRequired))
+}
+
 func TestRuntimePlanReviewSurvivesRestartWithoutModelReplay(t *testing.T) {
 	t.Parallel()
 
@@ -206,9 +308,7 @@ func TestRuntimePlanReviewSurvivesRestartWithoutModelReplay(t *testing.T) {
 	require.NoError(t, first.SetMode(t.Context(), ModePlan))
 	document, err := first.plans.Replace(t.Context(), first.planRef, "", "# Restart-safe Plan")
 	require.NoError(t, err)
-	setPlanReviewResponsesForContent(firstModel, document.Revision, document.Content, runtimeToolResponse(
-		"submit-restart", planreview.ToolName, submitPlanArgs(document.Revision),
-	))
+	setPlanReviewResponsesForContent(firstModel, document.Revision, document.Content)
 	collectRuntimeEvents(t, first.Prompt(t.Context(), ai.UserText("submit")))
 	before := *first.Snapshot().PlanReview.Required
 	sessionID := first.handle.Metadata().ID
@@ -280,8 +380,8 @@ func setPlanReviewResponsesForContent(
 	prefix := []*ai.Response{
 		runtimeToolResponse("checkpoint", planflow.ToolName, checkpointFixture),
 		runtimeToolResponse(
-			"write-plan",
-			tools.WritePlanName,
+			"present-plan",
+			planreview.PresentToolName,
 			fmt.Sprintf(`{"expected_revision":%q,"content":%q}`, revision, content),
 		),
 	}

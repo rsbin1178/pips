@@ -38,12 +38,20 @@ type Arguments struct {
 	ExpectedRevision string `json:"expected_revision"`
 }
 
+// PresentArguments atomically supplies the complete Plan and the optimistic
+// revision it replaces. An empty revision is create-only.
+type PresentArguments struct {
+	ExpectedRevision string `json:"expected_revision"`
+	Content          string `json:"content"`
+}
+
 // Request is the content-free identity of one submitted Plan revision.
 type Request struct {
 	ID         string `json:"id"`
 	ToolCallID string `json:"tool_call_id"`
 	Revision   string `json:"revision"`
 	Size       int64  `json:"size"`
+	Content    string `json:"content,omitempty"`
 }
 
 // Resolution is one exact user decision for a submitted Plan.
@@ -70,6 +78,23 @@ func NewRequest(toolCallID, revision string, size int64) (Request, error) {
 	}, nil
 }
 
+// NewProposal binds the exact full Plan content to the persisted revision.
+func NewProposal(toolCallID, revision, content string) (Request, error) {
+	request, err := NewRequest(toolCallID, revision, int64(len(content)))
+	if err != nil {
+		return Request{}, err
+	}
+
+	sum := sha256.Sum256([]byte(content))
+	if hex.EncodeToString(sum[:]) != revision {
+		return Request{}, fmt.Errorf("%w: content revision mismatch", ErrInvalid)
+	}
+
+	request.Content = content
+
+	return request, nil
+}
+
 // ValidateRequest verifies a request's deterministic identity and bounds.
 func ValidateRequest(request Request) error {
 	want, err := NewRequest(request.ToolCallID, request.Revision, request.Size)
@@ -78,6 +103,12 @@ func ValidateRequest(request Request) error {
 	}
 	if request.ID != want.ID {
 		return fmt.Errorf("%w: request digest mismatch", ErrInvalid)
+	}
+	if request.Content != "" {
+		proposal, err := NewProposal(request.ToolCallID, request.Revision, request.Content)
+		if err != nil || proposal.Size != request.Size {
+			return fmt.Errorf("%w: proposal content mismatch", ErrInvalid)
+		}
 	}
 
 	return nil

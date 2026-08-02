@@ -67,6 +67,22 @@ func TestScrollbackCommitsStableBlocksOnlyOnce(t *testing.T) {
 	assert.NotContains(t, active, "Read")
 }
 
+func TestScrollbackCommitsResolvedPlanProposalExactlyOnce(t *testing.T) {
+	t.Parallel()
+
+	model := readyModel(t, true)
+	model.state.PlanProposals = []coding.PlanProposal{{
+		ID: "plan-1", ToolCallID: "present-1", Revision: strings.Repeat("a", 64),
+		Size: 36, Content: "# Full Plan\n\nOne semantic Plan block.",
+		Status: coding.PlanProposalApproved,
+	}}
+
+	first := model.takeStableTimeline()
+	assert.Equal(t, 1, strings.Count(first, "Full Plan"))
+	assert.Equal(t, 1, strings.Count(first, "One semantic Plan block"))
+	assert.Empty(t, model.takeStableTimeline())
+}
+
 func TestScrollbackKeepsConversationGapAcrossIncrementalCommits(t *testing.T) {
 	t.Parallel()
 

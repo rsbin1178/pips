@@ -2,6 +2,8 @@ package tui
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"iter"
 	"strings"
 	"testing"
@@ -51,6 +53,26 @@ func TestPlanReviewPromptLoadsExactDocumentAndConfirmsApproval(t *testing.T) {
 	require.Len(t, controller.resolutions, 1)
 	assert.Equal(t, planreview.DecisionApprove, controller.resolutions[0].Decision)
 	assert.Equal(t, promptNone, model.prompt.kind)
+}
+
+func TestPlanReviewPromptUsesPresentedContentWithoutSecondRead(t *testing.T) {
+	t.Parallel()
+
+	const content = "# Atomic Plan\n\nThe full proposal is already bound to this review."
+
+	revision := fmt.Sprintf("%x", sha256.Sum256([]byte(content)))
+	request, err := planreview.NewProposal("present-tui", revision, content)
+	require.NoError(t, err)
+
+	controller := &planPromptController{
+		stubController: stubController{state: planPromptStateSnapshot(request)},
+	}
+	model := readyModelWithController(t, controller, true)
+
+	assert.False(t, model.prompt.planReview.loading)
+	assert.Nil(t, model.loadPlanReviewIfNeeded())
+	assert.Contains(t, model.View().Content, "Atomic Plan")
+	assert.Contains(t, model.View().Content, "full proposal")
 }
 
 func TestPlanReviewPromptKeepsPlanningOnEscapeOrWithFeedback(t *testing.T) {
