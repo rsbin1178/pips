@@ -24,6 +24,7 @@ import (
 	"github.com/rsbin/pips/internal/coding/planreview"
 	"github.com/rsbin/pips/internal/coding/question"
 	"github.com/rsbin/pips/internal/coding/subagent"
+	"github.com/rsbin/pips/internal/coding/tasklist"
 )
 
 const (
@@ -142,10 +143,11 @@ type TokenUsage struct {
 
 // SessionOpened carries the initial durable session metadata.
 type SessionOpened struct {
-	Resumed  bool          `json:"resumed"`
-	Provider ai.Provider   `json:"provider,omitempty"`
-	ModelID  string        `json:"model_id,omitempty"`
-	Mode     OperatingMode `json:"mode"`
+	Resumed       bool          `json:"resumed"`
+	Provider      ai.Provider   `json:"provider,omitempty"`
+	ModelID       string        `json:"model_id,omitempty"`
+	ContextWindow int           `json:"context_window"`
+	Mode          OperatingMode `json:"mode"`
 }
 
 // SessionCloseReason classifies why a Runtime stopped owning a session.
@@ -165,8 +167,10 @@ type SessionClosed struct {
 
 // SessionTreeChanged replaces the reducer's durable bounded tree projection.
 type SessionTreeChanged struct {
-	Tree       SessionTree  `json:"tree"`
-	Transcript []ai.Message `json:"transcript"`
+	Tree          SessionTree       `json:"tree"`
+	Transcript    []ai.Message      `json:"transcript"`
+	ContextTokens int               `json:"context_tokens"`
+	Tasks         tasklist.Snapshot `json:"tasks"`
 }
 
 // SessionNavigated records one successful same-file leaf change.
@@ -674,7 +678,8 @@ func validatePayload(eventType EventType, payload EventPayload) error {
 	case SessionOpened:
 		if eventType != EventSessionOpened || !validProvider(value.Provider) ||
 			!validIdentifierText(value.ModelID, maxEventIDBytes, true) ||
-			(value.Provider == "") != (value.ModelID == "") || !validOperatingMode(value.Mode) {
+			(value.Provider == "") != (value.ModelID == "") || value.ContextWindow < 0 ||
+			!validOperatingMode(value.Mode) {
 			return invalidPayload(eventType, payload)
 		}
 	case SessionClosed:
@@ -683,7 +688,8 @@ func validatePayload(eventType EventType, payload EventPayload) error {
 		}
 	case SessionTreeChanged:
 		if eventType != EventSessionTreeChanged || validateSessionTree(value.Tree) != nil ||
-			len(value.Transcript) > maxEventItems {
+			len(value.Transcript) > maxEventItems || value.ContextTokens < 0 ||
+			tasklist.ValidateSnapshot(value.Tasks) != nil {
 			return invalidPayload(eventType, payload)
 		}
 		for _, message := range value.Transcript {

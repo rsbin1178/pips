@@ -646,6 +646,13 @@ func (r *Runtime) openInteraction(
 	}
 
 	composedCatalogs := []*catalog.Catalog{localCatalog, questionCatalog, skillTools}
+	if started.Mode == ModeAgent {
+		taskCatalog, taskErr := tools.NewTaskCatalog()
+		if taskErr != nil {
+			return nil, taskErr
+		}
+		composedCatalogs = append(composedCatalogs, taskCatalog)
+	}
 	var planCoordinator *planflow.Controller
 	if r.isTeamWorker() {
 		memberCatalog, memberErr := r.teamWorkerCatalog()

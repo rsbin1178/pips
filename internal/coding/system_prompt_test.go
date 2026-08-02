@@ -14,6 +14,7 @@ import (
 	"github.com/rsbin/pips/internal/coding/paths"
 	"github.com/rsbin/pips/internal/coding/question"
 	"github.com/rsbin/pips/internal/coding/skillsettings"
+	"github.com/rsbin/pips/internal/coding/tasklist"
 	"github.com/rsbin/pips/internal/coding/workspace"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -106,6 +107,25 @@ func TestBuildCodingSystemPromptPrefersStructuredQuestionsWhenAvailable(t *testi
 	assert.NotContains(t, prompt, "Prefer ask_user")
 }
 
+func TestBuildCodingSystemPromptGuidesTaskProgressOnlyWhenAvailable(t *testing.T) {
+	t.Parallel()
+
+	options := systemPromptOptions{
+		Model: "example/model", WorkingDirectory: "/workspace", Platform: "linux",
+		Date: "2026-08-02", Sandbox: "workspace-write", Approval: "on-request",
+		Mode: ModeAgent, ToolNames: []string{"read", tasklist.ToolName},
+	}
+	prompt, err := buildCodingSystemPrompt(options)
+	require.NoError(t, err)
+	assert.Contains(t, prompt, "Use update_plan for non-trivial multi-step work")
+	assert.Contains(t, prompt, "exactly one step in_progress")
+
+	options.ToolNames = []string{"read"}
+	prompt, err = buildCodingSystemPrompt(options)
+	require.NoError(t, err)
+	assert.NotContains(t, prompt, "Use update_plan")
+}
+
 func TestRuntimeInjectsMainSystemPromptAndProjectInstructions(t *testing.T) {
 	t.Parallel()
 
@@ -137,6 +157,7 @@ func TestRuntimeInjectsMainSystemPromptAndProjectInstructions(t *testing.T) {
 	assert.Contains(t, request.System, `"apply_patch"`)
 	assert.Contains(t, request.System, `"run_subagent"`)
 	assert.Contains(t, request.System, `"spawn_agent"`)
+	assert.Contains(t, request.System, `"update_plan"`)
 }
 
 func TestRuntimeExplicitUserSkillIsInteractionScoped(t *testing.T) {

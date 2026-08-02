@@ -111,7 +111,8 @@ func (r *Runtime) openChildProjection(ctx context.Context, event subagent.Event)
 		EventSessionOpened,
 		SessionOpened{
 			Provider: r.model.Provider(), ModelID: r.model.ModelID(),
-			Mode: r.currentOperatingMode(),
+			ContextWindow: r.resolved.Limits.ContextWindow,
+			Mode:          r.currentOperatingMode(),
 		},
 	); err != nil {
 		return err

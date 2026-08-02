@@ -6,6 +6,7 @@ import (
 
 	"github.com/rsbin/pips/agent/harness"
 	"github.com/rsbin/pips/ai"
+	"github.com/rsbin/pips/internal/coding/tasklist"
 )
 
 // BootstrapOptions describe one already-open durable Harness session.
@@ -13,6 +14,7 @@ type BootstrapOptions struct {
 	SessionID           string
 	Provider            ai.Provider
 	ModelID             string
+	ContextWindow       int
 	Mode                OperatingMode
 	Path                []harness.Entry
 	HasPendingToolCalls bool
@@ -38,6 +40,9 @@ func BootstrapState(options BootstrapOptions) (BootstrapResult, error) {
 		(options.Provider == "") != (options.ModelID == "") {
 		return BootstrapResult{}, invalidEvent("invalid bootstrap model metadata")
 	}
+	if options.ContextWindow < 0 {
+		return BootstrapResult{}, invalidEvent("invalid bootstrap context window")
+	}
 	if !validOperatingMode(options.Mode) {
 		return BootstrapResult{}, invalidEvent("invalid bootstrap operating mode")
 	}
@@ -56,7 +61,8 @@ func BootstrapState(options BootstrapOptions) (BootstrapResult, error) {
 
 	state := State{
 		SessionID: options.SessionID, SessionOpen: true,
-		Provider: options.Provider, ModelID: options.ModelID, Mode: options.Mode, Phase: PhaseIdle,
+		Provider: options.Provider, ModelID: options.ModelID, ContextWindow: options.ContextWindow,
+		Mode: options.Mode, Phase: PhaseIdle,
 	}
 	if options.Tree.SessionID != "" {
 		state.Tree, err = sessionTreeFromHarness(options.Tree)
@@ -72,6 +78,9 @@ func BootstrapState(options BootstrapOptions) (BootstrapResult, error) {
 			}
 
 			state.Transcript = append(state.Transcript, cloneMessage(*entry.Message))
+			if update, ok := tasklist.FromMessage(*entry.Message); ok {
+				state.Tasks = tasklist.FromUpdate(update)
+			}
 		case harness.KindModelChange:
 			if !validProvider(entry.Provider) ||
 				!validIdentifierText(entry.ModelID, maxEventIDBytes, false) {
@@ -94,6 +103,7 @@ func BootstrapState(options BootstrapOptions) (BootstrapResult, error) {
 	state.MessageCandidates = make([]CandidateIdentity, len(state.Transcript))
 	state.PlanProposals = projectPlanProposals(state.Transcript)
 	state.SyntheticMessages = syntheticMessageIndexes(state.Transcript)
+	state.ContextTokens = harness.EstimateContext(options.Path)
 
 	if recovery.LastID != "" {
 		state.Interaction = InteractionState{

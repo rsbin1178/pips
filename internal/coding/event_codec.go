@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/rsbin/pips/ai"
+	"github.com/rsbin/pips/internal/coding/tasklist"
 	"github.com/rsbin/pips/internal/jsonx"
 )
 
@@ -217,8 +218,10 @@ func validateNestedPayloadJSON(eventType EventType, data []byte) error {
 	switch eventType {
 	case EventSessionTreeChanged:
 		var payload struct {
-			Tree       SessionTree       `json:"tree"`
-			Transcript []json.RawMessage `json:"transcript"`
+			Tree          SessionTree       `json:"tree"`
+			Transcript    []json.RawMessage `json:"transcript"`
+			ContextTokens int               `json:"context_tokens"`
+			Tasks         tasklist.Snapshot `json:"tasks"`
 		}
 		if err := strictDecode(data, &payload); err != nil {
 			return err

@@ -13,6 +13,7 @@ import (
 	"github.com/rsbin/pips/internal/coding/planreview"
 	"github.com/rsbin/pips/internal/coding/question"
 	"github.com/rsbin/pips/internal/coding/subagent"
+	"github.com/rsbin/pips/internal/coding/tasklist"
 )
 
 const (
@@ -213,15 +214,16 @@ func (state ApprovalState) NonInteractiveError() error {
 // State is the complete reducer projection used by interactive and
 // non-interactive frontends. Use [State.Clone] when retaining a snapshot.
 type State struct {
-	Sequence    uint64           `json:"sequence"`
-	SessionID   string           `json:"session_id,omitempty"`
-	SessionOpen bool             `json:"session_open"`
-	Provider    ai.Provider      `json:"provider,omitempty"`
-	ModelID     string           `json:"model_id,omitempty"`
-	Mode        OperatingMode    `json:"mode"`
-	Phase       Phase            `json:"phase,omitempty"`
-	Interaction InteractionState `json:"interaction"`
-	Transcript  []ai.Message     `json:"transcript"`
+	Sequence      uint64           `json:"sequence"`
+	SessionID     string           `json:"session_id,omitempty"`
+	SessionOpen   bool             `json:"session_open"`
+	Provider      ai.Provider      `json:"provider,omitempty"`
+	ModelID       string           `json:"model_id,omitempty"`
+	ContextWindow int              `json:"context_window"`
+	Mode          OperatingMode    `json:"mode"`
+	Phase         Phase            `json:"phase,omitempty"`
+	Interaction   InteractionState `json:"interaction"`
+	Transcript    []ai.Message     `json:"transcript"`
 	// SyntheticMessages contains transcript indexes owned by Runtime-generated
 	// protocol input. Frontends render them as neutral activity, not user chat.
 	SyntheticMessages []int                           `json:"synthetic_messages,omitempty"`
@@ -243,6 +245,8 @@ type State struct {
 	LastError         *RuntimeError                   `json:"last_error,omitempty"`
 	Tree              SessionTree                     `json:"tree"`
 	Compaction        CompactionState                 `json:"compaction"`
+	ContextTokens     int                             `json:"context_tokens"`
+	Tasks             tasklist.Snapshot               `json:"tasks"`
 
 	activeRuns  map[string]int
 	openTurns   map[string]int
@@ -281,6 +285,7 @@ func (state State) Clone() State {
 	cloned.Teams = slices.Clone(state.Teams)
 	cloned.TeamControls = slices.Clone(state.TeamControls)
 	cloned.TeamIntegrations = slices.Clone(state.TeamIntegrations)
+	cloned.Tasks = state.Tasks.Clone()
 
 	cloned.Approval = cloneApprovalState(state.Approval)
 	if state.Question.Required != nil {
@@ -390,6 +395,7 @@ func (state *State) apply(event Event) error {
 		state.SessionOpen = true
 		state.Provider = payload.Provider
 		state.ModelID = payload.ModelID
+		state.ContextWindow = payload.ContextWindow
 		state.Mode = payload.Mode
 		state.Phase = PhaseIdle
 	case SessionClosed:
@@ -407,6 +413,8 @@ func (state *State) apply(event Event) error {
 		state.Tree = payload.Tree.Clone()
 		state.Transcript = cloneMessages(payload.Transcript)
 		state.SyntheticMessages = syntheticMessageIndexes(state.Transcript)
+		state.ContextTokens = payload.ContextTokens
+		state.Tasks = payload.Tasks.Clone()
 	case SessionNavigated:
 		if !state.SessionOpen || state.Phase != PhaseIdle || state.Interaction.Active {
 			return protocolError("session cannot navigate in its current state")
@@ -431,6 +439,7 @@ func (state *State) apply(event Event) error {
 			TokensBefore: payload.TokensBefore, TokensAfter: payload.TokensAfter,
 			FirstKeptID: payload.FirstKeptID, DurationMillis: payload.DurationMillis,
 		}
+		state.ContextTokens = payload.TokensAfter
 	case ModeChanged:
 		if !state.SessionOpen || state.Phase != PhaseIdle || state.Interaction.Active ||
 			state.Compaction.Active || state.Approval.Kind != ApprovalNone ||
@@ -524,6 +533,7 @@ func (state *State) apply(event Event) error {
 		}
 
 		state.Runs[index].Usage = payload.Usage
+		state.ContextTokens = contextTokensFromUsage(payload.Usage)
 		state.Runs[index].TurnOpen = false
 		delete(state.openTurns, event.RunID)
 	case MessageCommitted:
@@ -540,6 +550,9 @@ func (state *State) apply(event Event) error {
 			candidate = CandidateIdentity{RunID: event.RunID, Turn: state.openTurns[event.RunID]}
 		}
 		state.Transcript = append(state.Transcript, cloneMessage(payload.Message))
+		if update, ok := tasklist.FromMessage(payload.Message); ok {
+			state.Tasks = tasklist.FromUpdate(update)
+		}
 		state.MessageCandidates = append(state.MessageCandidates, candidate)
 		if payload.Synthetic {
 			state.SyntheticMessages = append(state.SyntheticMessages, len(state.Transcript)-1)
@@ -734,6 +747,15 @@ func (state *State) apply(event Event) error {
 	}
 
 	return nil
+}
+
+func contextTokensFromUsage(usage TokenUsage) int {
+	maximum := int(^uint(0) >> 1)
+	if usage.InputTokens > maximum-usage.OutputTokens {
+		return maximum
+	}
+
+	return usage.InputTokens + usage.OutputTokens
 }
 
 func (state *State) applyTeamLifecycle(payload TeamLifecycle) error {

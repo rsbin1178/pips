@@ -145,6 +145,7 @@ func projectSafePayload(payload EventPayload) EventPayload {
 		for index := range value.Transcript {
 			value.Transcript[index] = safeMessage(value.Transcript[index])
 		}
+		value.Tasks.Items = nil
 
 		return value
 	case IntegrationDiagnostic:

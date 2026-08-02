@@ -154,3 +154,76 @@ func TestInteractiveTrustDecisionDoesNotLoadProjectConfig(t *testing.T) {
 		})
 	}
 }
+
+func TestResumeCommandOpensTargetAndPrintsNormalExitHint(t *testing.T) {
+	t.Parallel()
+
+	layout, err := paths.New(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(layout.ConfigFile(), []byte(`
+[providers.openai.models."test-model"]
+default = true
+context_window = 128000
+`), 0o600))
+	workspaceRoot := t.TempDir()
+	const sessionID = "s-39056983df4f82d84497df4c323de25a"
+	var openedSession string
+	controller := &stubInteractiveController{}
+	command, err := New(Dependencies{
+		Paths:      layout,
+		WorkingDir: func() (string, error) { return workspaceRoot, nil },
+		LookupEnv: func(name string) (string, bool) {
+			if name == "API_KEY" {
+				return "test-key", true
+			}
+
+			return "", false
+		},
+		Terminal: func(_ io.Reader, _ io.Writer) (bool, bool) { return true, true },
+		OpenControl: func(_ context.Context, options coding.OpenOptions) (tui.Controller, error) {
+			openedSession = options.Session.ID
+
+			return controller, nil
+		},
+		RunTUI: func(ctx context.Context, options tui.Options) error {
+			_, bootstrapErr := options.Bootstrap(ctx, false)
+			require.NoError(t, bootstrapErr)
+			require.NotNil(t, options.OnExit)
+
+			return options.OnExit(tui.ExitInfo{SessionID: sessionID, Resumable: true})
+		},
+	})
+	require.NoError(t, err)
+	var output bytes.Buffer
+	command.SetIn(bytes.NewBuffer(nil))
+	command.SetOut(&output)
+	command.SetArgs([]string{"resume", sessionID})
+
+	require.NoError(t, command.ExecuteContext(t.Context()))
+	assert.Equal(t, sessionID, openedSession)
+	assert.Contains(t, output.String(), "pips resume "+sessionID)
+}
+
+func TestResumeCommandRejectsInvalidSessionBeforeWorkspaceAcquisition(t *testing.T) {
+	t.Parallel()
+
+	layout, err := paths.New(t.TempDir())
+	require.NoError(t, err)
+	workspaceAcquired := false
+	command, err := New(Dependencies{
+		Paths: layout,
+		WorkingDir: func() (string, error) {
+			workspaceAcquired = true
+
+			return "", errors.New("must not be called")
+		},
+	})
+	require.NoError(t, err)
+	command.SetArgs([]string{"resume", "../bad"})
+
+	err = command.ExecuteContext(t.Context())
+	require.ErrorIs(t, err, ErrUsage)
+	assert.False(t, workspaceAcquired)
+}
+
+type stubInteractiveController struct{ tui.Controller }

@@ -41,6 +41,7 @@ type Layout struct {
 	agentSkillsDir       string
 	bundlesDir           string
 	mcpFile              string
+	tuiFile              string
 }
 
 // New returns an application layout rooted exactly at root.
@@ -82,6 +83,7 @@ func New(root string) (Layout, error) {
 		skillsDir:            filepath.Join(abs, "skills"),
 		bundlesDir:           filepath.Join(abs, "bundles"),
 		mcpFile:              filepath.Join(abs, "mcp.json"),
+		tuiFile:              filepath.Join(abs, "tui.json"),
 	}, nil
 }
 
@@ -222,3 +224,6 @@ func (l Layout) BundlesDir() string { return l.bundlesDir }
 
 // MCPFile returns the user MCP configuration path.
 func (l Layout) MCPFile() string { return l.mcpFile }
+
+// TUIFile returns the presentation-only user preference path.
+func (l Layout) TUIFile() string { return l.tuiFile }

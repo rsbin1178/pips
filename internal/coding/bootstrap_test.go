@@ -7,6 +7,7 @@ import (
 
 	"github.com/rsbin/pips/agent/harness"
 	"github.com/rsbin/pips/ai"
+	"github.com/rsbin/pips/internal/coding/tasklist"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -28,6 +29,54 @@ func TestBootstrapStateAcceptsCustomProviderMetadata(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, provider, result.State.Provider)
 	assert.Equal(t, "deepseek-v4-flash", result.State.ModelID)
+}
+
+func TestBootstrapStateProjectsContextAndTaskProgress(t *testing.T) {
+	t.Parallel()
+
+	message := ai.Assistant(ai.ToolCallPart{
+		ID: "task-1", Name: tasklist.ToolName,
+		Args: ai.JSON(`{"plan":[{"step":"Inspect","status":"completed"},{"step":"Test","status":"in_progress"}]}`),
+	})
+	result, err := BootstrapState(BootstrapOptions{
+		SessionID: "session-1", Provider: ai.ProviderOpenAI, ModelID: "gpt-test",
+		ContextWindow: 1_000, Mode: ModeAgent,
+		Path: []harness.Entry{{
+			Kind: harness.KindMessage, ID: "entry-1", Message: &message,
+			Usage: &ai.Usage{InputTokens: 200, OutputTokens: 50},
+		}},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1_000, result.State.ContextWindow)
+	assert.Equal(t, 250, result.State.ContextTokens)
+	assert.Equal(t, 1, result.State.Tasks.Completed)
+	assert.Equal(t, 1, result.State.Tasks.InProgress)
+	assert.Equal(t, 2, result.State.Tasks.Total)
+}
+
+func TestBootstrapTaskProgressSurvivesBoundedTranscriptTail(t *testing.T) {
+	t.Parallel()
+
+	plan := ai.Assistant(ai.ToolCallPart{
+		ID: "task-1", Name: tasklist.ToolName,
+		Args: ai.JSON(`{"plan":[{"step":"Long task","status":"in_progress"}]}`),
+	})
+	path := []harness.Entry{{Kind: harness.KindMessage, ID: "plan", Message: &plan}}
+	for index := range maxEventItems + 1 {
+		message := ai.UserText(fmt.Sprintf("tail-%d", index))
+		path = append(path, harness.Entry{
+			Kind: harness.KindMessage, ID: fmt.Sprintf("tail-entry-%d", index), Message: &message,
+		})
+	}
+
+	result, err := BootstrapState(BootstrapOptions{
+		SessionID: "session-1", Provider: ai.ProviderOpenAI, ModelID: "gpt-test",
+		Mode: ModeAgent, Path: path,
+	})
+	require.NoError(t, err)
+	require.Len(t, result.State.Transcript, maxEventItems)
+	assert.Equal(t, 1, result.State.Tasks.InProgress)
+	assert.Equal(t, 1, result.State.Tasks.Total)
 }
 
 func TestBootstrapStateRejectsInvalidCustomProviderMetadata(t *testing.T) {
