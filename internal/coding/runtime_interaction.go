@@ -785,10 +785,12 @@ func (r *Runtime) openInteraction(
 		}
 		planPrepareHooks = extension.Hooks{PrepareTurn: planCoordinator.PrepareTurn}
 	}
+	statefulBatchGuard := newStatefulToolBatchGuard(descriptors)
 	composed := extension.ComposeHooks(
 		extension.Hooks{BeforeTool: r.teamGuard.beforeTool(descriptors)},
 		extension.Hooks{AfterTool: leadCoordinatorAfterTool(leadCoordinator)},
 		extension.Hooks{BeforeTool: leasedToolGuard(started.Mode, descriptors, r.config.ToolSearch)},
+		extension.Hooks{BeforeTool: statefulBatchGuard.beforeTool},
 		planEnforcementHooks,
 		extension.Hooks{BeforeTool: r.planReviews.BeforeTool},
 		extension.Hooks{BeforeTool: r.questions.BeforeTool},

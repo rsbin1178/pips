@@ -22,15 +22,16 @@ type applyPatchArgs struct {
 }
 
 type plannedChange struct {
-	kind     patchdoc.Kind
-	path     string
-	parent   string
-	base     string
-	before   []byte
-	after    []byte
-	expected fs.FileInfo
-	mode     fs.FileMode
-	hash     [sha256.Size]byte
+	kind           patchdoc.Kind
+	path           string
+	parent         string
+	base           string
+	before         []byte
+	after          []byte
+	expected       fs.FileInfo
+	mode           fs.FileMode
+	hash           [sha256.Size]byte
+	missingParents []string
 
 	directory *workspace.MutationDir
 	stage     string
@@ -103,13 +104,28 @@ func (s *service) planPatch(ctx context.Context, document patchdoc.Document) ([]
 			return nil, err
 		}
 
-		name, info, err := s.tree.InspectMutationPath(operation.Path)
+		var (
+			name           string
+			info           fs.FileInfo
+			missingParents []string
+			err            error
+		)
+		if operation.Kind == patchdoc.Add {
+			name, info, missingParents, err = s.tree.InspectAddPath(operation.Path)
+		} else {
+			name, info, err = s.tree.InspectMutationPath(operation.Path)
+		}
 		if err != nil {
 			return nil, err
 		}
 
 		change := &plannedChange{
-			kind: operation.Kind, path: name, parent: path.Dir(name), base: path.Base(name), expected: info,
+			kind:           operation.Kind,
+			path:           name,
+			parent:         path.Dir(name),
+			base:           path.Base(name),
+			expected:       info,
+			missingParents: slices.Clone(missingParents),
 		}
 		switch operation.Kind {
 		case patchdoc.Add:
@@ -167,6 +183,17 @@ func (s *service) planPatch(ctx context.Context, document patchdoc.Document) ([]
 	slices.SortFunc(changes, func(left, right *plannedChange) int {
 		return strings.Compare(left.path, right.path)
 	})
+	for index := 1; index < len(changes); index++ {
+		parent := changes[index-1].path
+		if strings.HasPrefix(changes[index].path, parent+"/") {
+			return nil, fmt.Errorf(
+				"%w: patch target %q conflicts with descendant %q",
+				workspace.ErrChanged,
+				parent,
+				changes[index].path,
+			)
+		}
+	}
 
 	return changes, nil
 }

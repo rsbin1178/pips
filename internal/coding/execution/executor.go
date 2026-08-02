@@ -123,6 +123,7 @@ func (e *Executor) Probe(ctx context.Context) (Capabilities, error) {
 	capabilities, err := e.backend.probe(ctx, probeRequest{
 		workspaceRoot: e.workspace.Root(),
 		tempRoot:      e.tempRoot,
+		protected:     slices.Clone(e.protected),
 	})
 	if err != nil {
 		return Capabilities{}, fmt.Errorf("%w: %w", ErrSandboxUnavailable, err)

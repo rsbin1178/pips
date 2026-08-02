@@ -61,6 +61,126 @@ func TestOperationCanonicalizesOwnedInput(t *testing.T) {
 	assert.Equal(t, "format generated files", op.Justification())
 }
 
+func TestOperationCanonicalizesWorkspaceCWDSpellings(t *testing.T) {
+	t.Parallel()
+
+	fixture := newOperationFixture(t)
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "empty root alias", input: "", want: "."},
+		{name: "dot root alias", input: ".", want: "."},
+		{name: "absolute root", input: fixture.workspace.Root(), want: "."},
+		{name: "relative child", input: "sub", want: "sub"},
+		{
+			name: "absolute child", input: filepath.Join(fixture.workspace.Root(), "sub"), want: "sub",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			spec := fixture.spec()
+			spec.CWD = test.input
+			op, err := execution.NewOperation(t.Context(), fixture.workspace, spec)
+			require.NoError(t, err)
+			assert.Equal(t, test.want, op.CWD())
+		})
+	}
+}
+
+func TestOperationClassifiesInvalidWorkspaceCWD(t *testing.T) {
+	t.Parallel()
+
+	fixture := newOperationFixture(t)
+	workspaceFile := filepath.Join(fixture.workspace.Root(), "file")
+	require.NoError(t, os.WriteFile(workspaceFile, []byte("file"), 0o600))
+	external := mkdir(t, filepath.Join(fixture.base, "external-cwd"))
+	escapingLink := filepath.Join(fixture.workspace.Root(), "escaping-link")
+	require.NoError(t, os.Symlink(external, escapingLink))
+
+	tests := []struct {
+		name   string
+		input  string
+		reason string
+	}{
+		{name: "relative parent", input: "../outside", reason: "cwd_outside_workspace"},
+		{name: "absolute outside", input: external, reason: "cwd_outside_workspace"},
+		{name: "missing", input: "missing", reason: "cwd_not_found"},
+		{name: "file", input: "file", reason: "cwd_not_directory"},
+		{name: "symlink escape", input: "escaping-link", reason: "cwd_symlink_escape"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			spec := fixture.spec()
+			spec.CWD = test.input
+			_, err := execution.NewOperation(t.Context(), fixture.workspace, spec)
+			require.ErrorIs(t, err, execution.ErrInvalidOperation)
+
+			problem, ok := execution.DescribeInvalidOperation(err)
+			require.True(t, ok)
+			assert.Equal(t, "cwd", problem.Field)
+			assert.Equal(t, test.reason, problem.Reason)
+			assert.True(t, problem.Retryable)
+			assert.NotEmpty(t, problem.Hint)
+		})
+	}
+}
+
+func TestOperationReducesPermissionDeltaBeforeRequiringJustification(t *testing.T) {
+	t.Parallel()
+
+	fixture := newOperationFixture(t)
+	external := mkdir(t, filepath.Join(fixture.base, "external-write"))
+	externalLink := filepath.Join(fixture.workspace.Root(), "external-link")
+	require.NoError(t, os.Symlink(external, externalLink))
+
+	spec := fixture.spec()
+	spec.CWD = fixture.workspace.Root()
+	spec.WriteDirs = []string{fixture.workspace.Root(), filepath.Join(fixture.workspace.Root(), "sub")}
+	op, err := execution.NewOperation(t.Context(), fixture.workspace, spec)
+	require.NoError(t, err)
+	assert.Empty(t, op.WriteDirs())
+
+	for _, test := range []struct {
+		name      string
+		writeDirs []string
+		network   execution.NetworkAccess
+	}{
+		{name: "external write", writeDirs: []string{external}, network: execution.NetworkNone},
+		{name: "workspace link to external", writeDirs: []string{externalLink}, network: execution.NetworkNone},
+		{name: "network", network: execution.NetworkAny},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			elevated := fixture.spec()
+			elevated.WriteDirs = test.writeDirs
+			elevated.Network = test.network
+			_, err := execution.NewOperation(t.Context(), fixture.workspace, elevated)
+			require.ErrorIs(t, err, execution.ErrInvalidOperation)
+
+			problem, ok := execution.DescribeInvalidOperation(err)
+			require.True(t, ok)
+			assert.Equal(t, "justification", problem.Field)
+			assert.Equal(t, "justification_required", problem.Reason)
+		})
+	}
+
+	elevated := fixture.spec()
+	elevated.WriteDirs = []string{externalLink}
+	elevated.Justification = "write generated artifacts outside the Workspace"
+	op, err = execution.NewOperation(t.Context(), fixture.workspace, elevated)
+	require.NoError(t, err)
+	assert.Equal(t, []string{canonicalPath(t, external)}, op.WriteDirs())
+}
+
 func TestOperationFingerprintIsCanonicalAndExact(t *testing.T) {
 	t.Parallel()
 
@@ -70,6 +190,7 @@ func TestOperationFingerprintIsCanonicalAndExact(t *testing.T) {
 	base := fixture.spec()
 	base.Env = []execution.EnvVar{{Name: "LANG", Value: "C"}, {Name: "HOME", Value: "/tmp/home"}}
 	base.WriteDirs = []string{externalB, externalA}
+	base.Justification = "test external write access"
 
 	first := mustOperation(t, fixture, base)
 	reordered := base
@@ -153,7 +274,6 @@ func TestNewOperationRejectsUnsafeInput(t *testing.T) {
 		"unknown workspace access": func(spec *execution.OperationSpec) { spec.Workspace = execution.WorkspaceAccessUnknown },
 		"unknown network access":   func(spec *execution.OperationSpec) { spec.Network = execution.NetworkUnknown },
 		"relative write dir":       func(spec *execution.OperationSpec) { spec.WriteDirs = []string{"external"} },
-		"workspace write dir":      func(spec *execution.OperationSpec) { spec.WriteDirs = []string{fixture.workspace.Root()} },
 		"root write dir":           func(spec *execution.OperationSpec) { spec.WriteDirs = []string{string(filepath.Separator)} },
 		"file write dir":           func(spec *execution.OperationSpec) { spec.WriteDirs = []string{nonExecutable} },
 		"control justification":    func(spec *execution.OperationSpec) { spec.Justification = "line\ncontrol" },

@@ -24,6 +24,9 @@ reasoning = "medium"
 tool_search = true
 mode = "plan"
 
+[sandbox_workspace_write]
+network = "allow"
+
 [compaction]
 enabled = true
 reserve_tokens = 32768
@@ -86,6 +89,7 @@ max_output_tokens = 8192
 	assert.Equal(t, flagVariant, result.Config.Variant)
 	assert.Equal(t, flagReasoning, *result.Config.Reasoning)
 	assert.Equal(t, config.ModePlan, result.Config.Mode)
+	assert.Equal(t, config.SandboxNetworkAllow, result.Config.SandboxWorkspaceWrite.Network)
 	assert.Equal(t, config.FileStateLoaded, result.ConfigFile.State)
 	require.Len(t, result.Config.Models, 1)
 	assert.Equal(t, 200000, result.Config.Models[0].ContextWindow)
@@ -288,6 +292,16 @@ func TestLoadRejectsLegacyAndInvalidConfiguration(t *testing.T) {
 		},
 		{name: "unknown top level", content: "api_key = \"secret\"\n", want: config.ErrDecode},
 		{name: "unknown compaction", content: "[compaction]\ntypo = true\n", want: config.ErrDecode},
+		{
+			name:    "unknown workspace sandbox setting",
+			content: "[sandbox_workspace_write]\ntypo = true\n",
+			want:    config.ErrDecode,
+		},
+		{
+			name:    "invalid workspace sandbox network",
+			content: "[sandbox_workspace_write]\nnetwork = \"always\"\n",
+			want:    config.ErrInvalid,
+		},
 		{name: "invalid compaction", content: "[compaction]\nsummary_max_tokens = 30000\n", want: config.ErrInvalid},
 		{
 			name:    "invalid reasoning history",

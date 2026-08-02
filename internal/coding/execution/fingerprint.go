@@ -14,7 +14,7 @@ import (
 const (
 	operationSchema = "pips.coding.operation/v1alpha1"
 	policySchema    = "pips.coding.policy/v1alpha1"
-	sandboxContract = "pips.coding.sandbox/v1alpha1"
+	sandboxContract = "pips.coding.sandbox/v1alpha2"
 )
 
 // Fingerprint is the complete stable identity of one operation permission request.

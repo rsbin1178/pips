@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/rsbin/pips/internal/coding/config"
+	"github.com/rsbin/pips/internal/coding/workspace"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
@@ -205,7 +206,7 @@ func TestLinuxBackendPrepareStagesAndCachesSuccess(t *testing.T) {
 		return nil
 	}
 
-	_, capabilities, err := backend.prepare(t.Context(), tempRoot)
+	_, capabilities, err := backend.prepare(t.Context(), filepath.Dir(tempRoot), tempRoot, nil)
 	require.NoError(t, err)
 	assert.Equal(t, Capabilities{
 		Platform:         linuxPlatform,
@@ -219,19 +220,19 @@ func TestLinuxBackendPrepareStagesAndCachesSuccess(t *testing.T) {
 	assert.Empty(t, requests[0].extraFiles)
 	assert.NotContains(t, requests[0].args, "--seccomp")
 	assert.NotContains(t, requests[0].args, "--share-net")
-	require.Len(t, requests[1].extraFiles, 1)
+	require.Len(t, requests[1].extraFiles, 3)
 	assert.NotContains(t, requests[1].args, "--share-net")
-	require.Len(t, requests[2].extraFiles, 1)
+	require.Len(t, requests[2].extraFiles, 3)
 	assert.Contains(t, requests[2].args, "--share-net")
 
-	_, cached, err := backend.prepare(t.Context(), tempRoot)
+	_, cached, err := backend.prepare(t.Context(), filepath.Dir(tempRoot), tempRoot, nil)
 	require.NoError(t, err)
 	assert.Equal(t, capabilities, cached)
 	assert.Equal(t, 1, queryCalls)
 	assert.Len(t, requests, 3)
 
 	release = "6.9.0-test\n"
-	_, refreshed, err := backend.prepare(t.Context(), tempRoot)
+	_, refreshed, err := backend.prepare(t.Context(), filepath.Dir(tempRoot), tempRoot, nil)
 	require.NoError(t, err)
 	assert.Equal(t, capabilities, refreshed)
 	assert.Equal(t, 2, queryCalls)
@@ -252,7 +253,7 @@ func TestLinuxBackendPrepareRejectsRuntimeBeforeProbe(t *testing.T) {
 		return linuxBubblewrapVersion{major: 0, minor: 7, patch: 2}, nil
 	}
 
-	_, _, err := backend.prepare(t.Context(), tempRoot)
+	_, _, err := backend.prepare(t.Context(), filepath.Dir(tempRoot), tempRoot, nil)
 	probeErr, ok := errors.AsType[*ProbeError](err)
 	require.True(t, ok)
 	assert.Equal(t, ProbeFailureRuntimeTooOld, probeErr.Failure())
@@ -271,7 +272,7 @@ func TestLinuxBackendPrepareClassifiesLauncherAndVersionFailures(t *testing.T) {
 			return fileObject{}, assert.AnError
 		}
 
-		_, _, err := backend.prepare(t.Context(), tempRoot)
+		_, _, err := backend.prepare(t.Context(), filepath.Dir(tempRoot), tempRoot, nil)
 		probeErr, ok := errors.AsType[*ProbeError](err)
 		require.True(t, ok)
 		assert.Equal(t, ProbeFailureLauncher, probeErr.Failure())
@@ -291,7 +292,7 @@ func TestLinuxBackendPrepareClassifiesLauncherAndVersionFailures(t *testing.T) {
 			return nil
 		}
 
-		_, _, err := backend.prepare(t.Context(), tempRoot)
+		_, _, err := backend.prepare(t.Context(), filepath.Dir(tempRoot), tempRoot, nil)
 		probeErr, ok := errors.AsType[*ProbeError](err)
 		require.True(t, ok)
 		assert.Equal(t, ProbeFailureRuntimeVersion, probeErr.Failure())
@@ -331,7 +332,7 @@ func TestLinuxBackendPrepareClassifiesProbeStages(t *testing.T) {
 				return nil
 			}
 
-			_, _, err := backend.prepare(t.Context(), tempRoot)
+			_, _, err := backend.prepare(t.Context(), filepath.Dir(tempRoot), tempRoot, nil)
 			probeErr, ok := errors.AsType[*ProbeError](err)
 			require.True(t, ok)
 			assert.Equal(t, test.failure, probeErr.Failure())
@@ -365,6 +366,61 @@ func newLinuxBackendTestFixture(t *testing.T) (*linuxBackend, string) {
 	}, tempRoot
 }
 
+//nolint:paralleltest // The descriptor count must not race parallel test setup.
+func TestLinuxBackendCompileClosesResourcesWhenGitInspectionFails(t *testing.T) {
+	backend, tempRoot := newLinuxBackendTestFixture(t)
+	workspaceRoot := t.TempDir()
+	privateDir := filepath.Join(tempRoot, "operation")
+	require.NoError(t, os.Mkdir(privateDir, 0o700))
+	protectedFile := filepath.Join(t.TempDir(), "protected")
+	require.NoError(t, os.WriteFile(protectedFile, []byte("secret"), 0o600))
+
+	_, _, err := backend.prepare(t.Context(), workspaceRoot, tempRoot, nil)
+	require.NoError(t, err)
+	backend.stat = func(name string) (os.FileInfo, error) {
+		if name == filepath.Join(workspaceRoot, ".git") {
+			return nil, assert.AnError
+		}
+
+		return os.Stat(name)
+	}
+
+	before := countLinuxOpenDescriptors(t)
+	_, _, err = backend.compile(t.Context(), compileRequest{
+		operation: Operation{
+			executable: fileObject{path: "/bin/true"},
+			cwd:        ".",
+			workspace:  WorkspaceReadOnly,
+			network:    NetworkNone,
+		},
+		workspaceRoot: workspaceRoot,
+		privateDir:    privateDir,
+		protected:     []string{protectedFile},
+	})
+	require.ErrorContains(t, err, "inspect sandbox mount path")
+	assert.Equal(t, before, countLinuxOpenDescriptors(t))
+}
+
+func TestOpenLinuxPrivateDirectoryRejectsFile(t *testing.T) {
+	t.Parallel()
+
+	name := filepath.Join(t.TempDir(), "private")
+	require.NoError(t, os.WriteFile(name, nil, 0o600))
+
+	file, err := openLinuxPrivateDirectory(name)
+	require.ErrorContains(t, err, "not a directory")
+	assert.Nil(t, file)
+}
+
+func countLinuxOpenDescriptors(t *testing.T) int {
+	t.Helper()
+
+	entries, err := os.ReadDir("/proc/self/fd")
+	require.NoError(t, err)
+
+	return len(entries)
+}
+
 func writeLinuxVersionLauncher(t *testing.T, command string, exitCode int) fileObject {
 	t.Helper()
 
@@ -387,10 +443,13 @@ func TestBuildLinuxSandboxArguments(t *testing.T) {
 
 	workspace := "/work"
 	privateDir := "/private"
+	privateTarget := "/tmp/" + linuxSandboxPrivateName
 	args := buildLinuxSandboxArguments(linuxSandboxRequest{
 		workspace:      workspace,
 		cwd:            "/work/subdir",
 		privateDir:     privateDir,
+		privateTarget:  privateTarget,
+		privateFD:      linuxSandboxPrivateFD,
 		executable:     "/usr/bin/tool",
 		args:           []string{"one", "two"},
 		environment:    []string{"HOME=/home/user", "PATH=/usr/bin:/bin"},
@@ -402,7 +461,7 @@ func TestBuildLinuxSandboxArguments(t *testing.T) {
 		privateMounts:  []string{"/tmp", "/var/tmp", "/run/user/1000"},
 		gitExists:      true,
 		maskMounts: []linuxMount{
-			{source: "/private/deny", target: "/home/user/.ssh"},
+			{source: "/private/deny", target: "/home/user/.ssh", sourceFD: linuxSandboxMaskFD},
 		},
 	})
 
@@ -422,12 +481,13 @@ func TestBuildLinuxSandboxArguments(t *testing.T) {
 		"--tmpfs", "/var/tmp",
 		"--tmpfs", "/run/user/1000",
 		"--bind", workspace, workspace,
-		"--bind", privateDir, privateDir,
+		"--dir", privateTarget,
+		"--bind-fd", "4", privateTarget,
 		"--bind", "/external", "/external",
 		"--ro-bind", "/work/.git", "/work/.git",
 		"--ro-bind", "/usr/bin/tool", "/usr/bin/tool",
 		"--ro-bind", "/work/linked", "/work/linked",
-		"--ro-bind", "/private/deny", "/home/user/.ssh",
+		"--ro-bind-fd", "5", "/home/user/.ssh",
 		"--chdir", "/work/subdir",
 		"--seccomp", "3",
 		"--setenv", "HOME", "/home/user",
@@ -436,15 +496,34 @@ func TestBuildLinuxSandboxArguments(t *testing.T) {
 	}, args)
 }
 
+func TestLinuxSandboxEnvironmentUsesPrivateAlias(t *testing.T) {
+	t.Parallel()
+
+	privateDir := "/root/.pips/tmp/plan-123"
+	privateTarget := "/tmp/" + linuxSandboxPrivateName
+	assert.Equal(t, []string{
+		"HOME=/root",
+		"TMPDIR=" + filepath.Join(privateTarget, "tmp"),
+		"XDG_CACHE_HOME=" + filepath.Join(privateTarget, "cache"),
+	}, linuxSandboxEnvironment([]string{
+		"HOME=/root",
+		"TMPDIR=" + filepath.Join(privateDir, "tmp"),
+		"XDG_CACHE_HOME=" + filepath.Join(privateDir, "cache"),
+	}, privateDir, privateTarget))
+}
+
 func TestBuildLinuxSandboxArgumentsReadOnlyAndNetworkNone(t *testing.T) {
 	t.Parallel()
 
 	args := buildLinuxSandboxArguments(linuxSandboxRequest{
-		workspace:  "/work",
-		cwd:        "/work",
-		privateDir: "/private",
-		executable: "/bin/true",
-		seccompFD:  linuxSeccompFD,
+		workspace:     "/work",
+		cwd:           "/work",
+		privateDir:    "/private",
+		privateTarget: "/tmp/" + linuxSandboxPrivateName,
+		privateFD:     linuxSandboxPrivateFD,
+		executable:    "/bin/true",
+		seccompFD:     linuxSeccompFD,
+		privateMounts: []string{"/tmp"},
 	})
 
 	assert.NotContains(t, args, "--share-net")
@@ -482,15 +561,19 @@ func TestLinuxSeccompProgram(t *testing.T) {
 
 	assert.Equal(t,
 		uint32(unix.SECCOMP_RET_ERRNO)|uint32(unix.EPERM),
-		evaluateLinuxSeccomp(t, none, nativeLinuxAuditArch, unix.SYS_SOCKET),
+		evaluateLinuxSeccomp(t, none, nativeLinuxAuditArch, unix.SYS_SOCKET, unix.AF_UNIX),
 	)
 	assert.Equal(t,
-		uint32(unix.SECCOMP_RET_ERRNO)|uint32(unix.EPERM),
+		uint32(unix.SECCOMP_RET_ALLOW),
 		evaluateLinuxSeccomp(t, none, nativeLinuxAuditArch, unix.SYS_SOCKETPAIR),
 	)
 	assert.Equal(t,
 		uint32(unix.SECCOMP_RET_ALLOW),
-		evaluateLinuxSeccomp(t, networkAnyProgram, nativeLinuxAuditArch, unix.SYS_SOCKET),
+		evaluateLinuxSeccomp(t, none, nativeLinuxAuditArch, unix.SYS_SOCKET, unix.AF_INET),
+	)
+	assert.Equal(t,
+		uint32(unix.SECCOMP_RET_ALLOW),
+		evaluateLinuxSeccomp(t, networkAnyProgram, nativeLinuxAuditArch, unix.SYS_SOCKET, unix.AF_UNIX),
 	)
 	assert.Equal(t,
 		uint32(unix.SECCOMP_RET_ERRNO)|uint32(unix.EPERM),
@@ -553,6 +636,68 @@ func TestLinuxCapabilityProbeIntegration(t *testing.T) {
 	assert.True(t, capabilities.NetworkIsolation)
 	assert.True(t, capabilities.ProcessIsolation)
 	assert.Empty(t, directoryEntries(t, fixture.tempRoot))
+}
+
+func TestLinuxProtectedProductTempTopologyIntegration(t *testing.T) {
+	if os.Getenv("PIPS_SANDBOX_INTEGRATION") != "1" {
+		t.Skip("set PIPS_SANDBOX_INTEGRATION=1 to run the system sandbox probe")
+	}
+
+	base := t.TempDir()
+	productRoot := filepath.Join(base, "product")
+	tempRoot := filepath.Join(productRoot, "tmp")
+	workspaceRoot := filepath.Join(base, "workspace")
+	for _, directory := range []string{productRoot, tempRoot, workspaceRoot} {
+		require.NoError(t, os.Mkdir(directory, 0o700))
+	}
+
+	opened, err := workspace.Open(workspaceRoot)
+	require.NoError(t, err)
+	executor, err := NewExecutor(opened, ExecutorConfig{
+		TempRoot:    tempRoot,
+		Environment: mapLookup(map[string]string{"PATH": "/usr/bin:/bin", "LANG": "C"}),
+		TermGrace:   50 * time.Millisecond,
+		DrainGrace:  100 * time.Millisecond,
+		Protected:   []string{productRoot},
+	})
+	require.NoError(t, err)
+
+	_, err = executor.Probe(t.Context())
+	require.NoError(t, err)
+
+	policy, err := NewPolicy(opened, PolicyConfig{
+		Sandbox:       config.SandboxWorkspaceWrite,
+		Approval:      config.ApprovalOnRequest,
+		SandboxSource: config.Source{Kind: config.SourceDefault},
+		Protected:     []string{productRoot},
+	})
+	require.NoError(t, err)
+	spec := OperationSpec{
+		Kind:       KindShell,
+		Tool:       "shell",
+		Executable: "/bin/sh",
+		Args: []string{"-c", strings.Join([]string{
+			"set -eu",
+			"printf runtime > \"$TMPDIR/runtime-write\"",
+			"test -s \"$TMPDIR/runtime-write\"",
+			"printf ok",
+		}, "; ")},
+		CWD:       ".",
+		Timeout:   time.Second,
+		Output:    OutputLimits{CaptureBytes: 4096, MaxBytes: 1 << 20, ChunkBytes: 512, QueueDepth: 8},
+		Workspace: WorkspaceWrite,
+		Network:   NetworkNone,
+	}
+	operation, err := NewOperation(t.Context(), opened, spec)
+	require.NoError(t, err)
+	authorization, ok := policy.Evaluate(operation).Authorization()
+	require.True(t, ok)
+
+	result, err := executor.Execute(t.Context(), operation, authorization, nil)
+	require.NoError(t, err)
+	assert.Equal(t, 0, result.ExitCode, string(result.Stderr.Head()))
+	assert.Equal(t, []byte("ok"), result.Stdout.Head())
+	assert.Empty(t, directoryEntries(t, tempRoot))
 }
 
 func TestLinuxSandboxAttackMatrixIntegration(t *testing.T) {
@@ -651,6 +796,7 @@ func TestLinuxSandboxAttackMatrixIntegration(t *testing.T) {
 		"printf approved > " + shellSingleQuote(filepath.Join(externalWriteDir, "allowed")),
 	)
 	externalWriteSpec.WriteDirs = []string{externalWriteDir}
+	externalWriteSpec.Justification = "verify approved external sandbox write"
 	externalWriteOperation, err := NewOperation(t.Context(), fixture.workspace, externalWriteSpec)
 	require.NoError(t, err)
 	externalWriteAuthorization, err := policy.Approve(externalWriteOperation)
@@ -740,6 +886,7 @@ func testLinuxNetworkBoundaries(
 			}
 			spec.WriteDirs = []string{externalDir}
 			spec.Network = test.network
+			spec.Justification = "verify sandbox network and external-write boundaries"
 			spec.Timeout = 5 * time.Second
 
 			operation, err := NewOperation(t.Context(), fixture.workspace, spec)
@@ -945,8 +1092,10 @@ func runLinuxSandboxHelper(t *testing.T, mode string) {
 		}
 
 		require.ErrorIs(t, err, unix.EPERM)
-		_, err = unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM, 0)
-		require.ErrorIs(t, err, unix.EPERM)
+		pair, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM, 0)
+		require.NoError(t, err)
+		require.NoError(t, unix.Close(pair[0]))
+		require.NoError(t, unix.Close(pair[1]))
 
 		dialer := net.Dialer{Timeout: time.Second}
 		_, err = dialer.DialContext(t.Context(), "tcp", os.Getenv(linuxHelperTCPEnvironment))
@@ -1001,8 +1150,13 @@ func runLinuxParentDeathHelper(t *testing.T) {
 	require.NoError(t, err)
 	filter, err := createLinuxSeccompFile(privateDir, false)
 	require.NoError(t, err)
+	privateHandle, err := openLinuxPrivateDirectory(privateDir)
+	require.NoError(t, err)
 
-	defer func() { _ = filter.Close() }()
+	defer func() {
+		_ = filter.Close()
+		_ = privateHandle.Close()
+	}()
 
 	innerPIDPath := filepath.Join(workspace, "background-inner-pid")
 	pidNamespacePath := filepath.Join(workspace, "background-pid-namespace")
@@ -1014,11 +1168,14 @@ func runLinuxParentDeathHelper(t *testing.T) {
 		workspace:      workspace,
 		cwd:            workspace,
 		privateDir:     privateDir,
+		privateTarget:  "/var/tmp/" + linuxSandboxPrivateName,
+		privateFD:      linuxSandboxPrivateFD,
 		executable:     "/bin/sh",
 		args:           []string{"-c", script},
 		environment:    []string{"HOME=/", "LANG=C", "PATH=/usr/bin:/bin"},
 		workspaceWrite: true,
 		seccompFD:      linuxSeccompFD,
+		privateMounts:  []string{"/var/tmp"},
 	})
 
 	command := exec.CommandContext( //nolint:gosec // The launcher has a fixed, inspected system path.
@@ -1027,7 +1184,7 @@ func runLinuxParentDeathHelper(t *testing.T) {
 		args...,
 	)
 	command.Env = []string{"LANG=C", "PATH=/usr/bin:/bin"}
-	command.ExtraFiles = []*os.File{filter}
+	command.ExtraFiles = []*os.File{filter, privateHandle}
 	command.Stdout = io.Discard
 	command.Stderr = io.Discard
 	require.NoError(t, command.Start())
@@ -1055,6 +1212,7 @@ func evaluateLinuxSeccomp(
 	program []unix.SockFilter,
 	arch uint32,
 	syscallNumber int,
+	arguments ...uint64,
 ) uint32 {
 	t.Helper()
 
@@ -1069,6 +1227,12 @@ func evaluateLinuxSeccomp(
 				accumulator = uint32(syscallNumber) //nolint:gosec // Linux syscall numbers are non-negative uint32 values.
 			case seccompDataArchOffset:
 				accumulator = arch
+			case seccompDataArg0Offset:
+				if len(arguments) > 0 {
+					accumulator = uint32(arguments[0])
+				} else {
+					accumulator = 0
+				}
 			default:
 				t.Fatalf("unexpected seccomp load offset %d", instruction.K)
 			}

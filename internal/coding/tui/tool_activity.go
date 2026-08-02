@@ -892,7 +892,12 @@ func toolActivityHeading(
 		case toolStateRunning:
 			verb = "Running"
 		case toolStateFailed:
-			verb = "Run failed"
+			if activity.hasHeader && activity.header.Code == "invalid_argument" &&
+				activity.header.Execution == nil {
+				verb = "Tool input rejected"
+			} else {
+				verb = "Run failed"
+			}
 		case toolStateInterrupted:
 			verb = "Run interrupted"
 		case toolStateSucceeded:

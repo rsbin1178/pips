@@ -21,12 +21,32 @@ func TestDefaults(t *testing.T) {
 	assert.False(t, cfg.ToolSearch)
 	assert.Equal(t, config.ModeAgent, cfg.Mode)
 	assert.Equal(t, config.SandboxWorkspaceWrite, cfg.Sandbox)
+	assert.Equal(t, config.SandboxNetworkOnRequest, cfg.SandboxWorkspaceWrite.Network)
 	assert.Equal(t, config.ApprovalOnRequest, cfg.Approval)
 	assert.Equal(t, config.DefaultCompactionConfig(), cfg.Compaction)
 	for _, field := range config.Fields() {
 		source, ok := cfg.Source(field)
 		require.True(t, ok)
 		assert.Equal(t, config.SourceDefault, source.Kind)
+	}
+}
+
+func TestParseSandboxNetworkMode(t *testing.T) {
+	t.Parallel()
+
+	for _, value := range []config.SandboxNetworkMode{
+		config.SandboxNetworkDeny,
+		config.SandboxNetworkOnRequest,
+		config.SandboxNetworkAllow,
+	} {
+		parsed, err := config.ParseSandboxNetworkMode(" " + string(value) + " ")
+		require.NoError(t, err)
+		assert.Equal(t, value, parsed)
+	}
+
+	for _, value := range []string{"", "always", "ALLOW"} {
+		_, err := config.ParseSandboxNetworkMode(value)
+		require.ErrorIs(t, err, config.ErrInvalid)
 	}
 }
 

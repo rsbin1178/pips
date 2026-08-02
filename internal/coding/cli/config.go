@@ -69,7 +69,10 @@ func newConfigShowCommand(dependencies Dependencies, flags *rootFlags) *cobra.Co
 				config.FieldToolSearch: strconv.FormatBool(state.config.Config.ToolSearch),
 				config.FieldMode:       strconv.Quote(string(state.config.Config.Mode)),
 				config.FieldSandbox:    strconv.Quote(string(state.config.Config.Sandbox)),
-				config.FieldApproval:   strconv.Quote(string(state.config.Config.Approval)),
+				config.FieldSandboxNetwork: strconv.Quote(
+					string(state.config.Config.SandboxWorkspaceWrite.Network),
+				),
+				config.FieldApproval: strconv.Quote(string(state.config.Config.Approval)),
 			}
 			extraBytes, err := json.Marshal(resolved.Options.ExtraBody)
 			if err != nil {

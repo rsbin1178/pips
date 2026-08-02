@@ -24,6 +24,7 @@ type backend interface {
 type probeRequest struct {
 	workspaceRoot string
 	tempRoot      string
+	protected     []string
 }
 
 type compileRequest struct {

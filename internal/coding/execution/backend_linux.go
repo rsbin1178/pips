@@ -16,6 +16,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -34,6 +36,9 @@ const (
 	linuxWSL2Platform           = "wsl2"
 	linuxProbeLang              = "LANG=C"
 	linuxProbePath              = "PATH=/usr/bin:/bin"
+	linuxSandboxPrivateName     = ".pips-private"
+	linuxSandboxPrivateFD       = 4
+	linuxSandboxMaskFD          = 5
 )
 
 type linuxBackend struct {
@@ -57,8 +62,9 @@ type linuxHost struct {
 }
 
 type linuxMount struct {
-	source string
-	target string
+	source   string
+	target   string
+	sourceFD int
 }
 
 type linuxBubblewrapVersion struct {
@@ -82,19 +88,23 @@ type linuxProbeCommand struct {
 }
 
 type linuxCapabilityProbeRequest struct {
-	launcher   fileObject
-	host       linuxHost
-	version    linuxBubblewrapVersion
-	tempRoot   string
-	stat       func(string) (os.FileInfo, error)
-	readlink   func(string) (string, error)
-	runCommand linuxProbeCommandRunner
+	launcher      fileObject
+	host          linuxHost
+	version       linuxBubblewrapVersion
+	workspaceRoot string
+	tempRoot      string
+	protected     []string
+	stat          func(string) (os.FileInfo, error)
+	readlink      func(string) (string, error)
+	runCommand    linuxProbeCommandRunner
 }
 
 type linuxSandboxRequest struct {
 	workspace      string
 	cwd            string
 	privateDir     string
+	privateTarget  string
+	privateFD      int
 	executable     string
 	args           []string
 	environment    []string
@@ -120,7 +130,12 @@ func platformBackend() backend {
 }
 
 func (b *linuxBackend) probe(ctx context.Context, request probeRequest) (Capabilities, error) {
-	_, capabilities, err := b.prepare(ctx, request.tempRoot)
+	_, capabilities, err := b.prepare(
+		ctx,
+		request.workspaceRoot,
+		request.tempRoot,
+		request.protected,
+	)
 
 	return capabilities, err
 }
@@ -129,7 +144,12 @@ func (b *linuxBackend) compile(
 	ctx context.Context,
 	request compileRequest,
 ) (launchSpec, []io.Closer, error) {
-	launcher, _, err := b.prepare(ctx, filepath.Dir(request.privateDir))
+	launcher, _, err := b.prepare(
+		ctx,
+		request.workspaceRoot,
+		filepath.Dir(request.privateDir),
+		request.protected,
+	)
 	if err != nil {
 		return launchSpec{}, nil, err
 	}
@@ -150,21 +170,33 @@ func (b *linuxBackend) compile(
 	if err != nil {
 		return launchSpec{}, nil, err
 	}
+	privateHandle, err := openLinuxPrivateDirectory(request.privateDir)
+	if err != nil {
+		return launchSpec{}, nil, errors.Join(err, filter.Close())
+	}
+	maskMounts, maskHandles, err := openLinuxMaskMounts(maskMounts, linuxSandboxMaskFD)
+	if err != nil {
+		return launchSpec{}, nil, errors.Join(
+			err,
+			closeLinuxSandboxFiles(filter, privateHandle, nil),
+		)
+	}
 
 	gitExists, err := linuxPathExists(b.stat, gitPath)
 	if err != nil {
-		_ = filter.Close()
-
-		return launchSpec{}, nil, err
+		return launchSpec{}, nil, errors.Join(
+			err,
+			closeLinuxSandboxFiles(filter, privateHandle, maskHandles),
+		)
 	}
 
 	sandboxRequest := linuxSandboxRequest{
 		workspace:      request.workspaceRoot,
 		cwd:            filepath.Join(request.workspaceRoot, filepath.FromSlash(request.operation.cwd)),
 		privateDir:     request.privateDir,
+		privateFD:      linuxSandboxPrivateFD,
 		executable:     request.operation.executable.path,
 		args:           request.operation.args,
-		environment:    request.environment,
 		workspaceWrite: request.operation.workspace == WorkspaceWrite,
 		networkAny:     request.operation.network == NetworkAny,
 		writeDirs:      request.operation.WriteDirs(),
@@ -174,6 +206,18 @@ func (b *linuxBackend) compile(
 		maskMounts:     maskMounts,
 	}
 	sandboxRequest.privateMounts = linuxPrivateMounts(b.stat, sandboxRequest)
+	sandboxRequest.privateTarget, err = linuxPrivateTarget(sandboxRequest.privateMounts)
+	if err != nil {
+		return launchSpec{}, nil, errors.Join(
+			err,
+			closeLinuxSandboxFiles(filter, privateHandle, maskHandles),
+		)
+	}
+	sandboxRequest.environment = linuxSandboxEnvironment(
+		request.environment,
+		request.privateDir,
+		sandboxRequest.privateTarget,
+	)
 	args := buildLinuxSandboxArguments(sandboxRequest)
 	cwd := filepath.Join(request.workspaceRoot, filepath.FromSlash(request.operation.cwd))
 
@@ -183,13 +227,15 @@ func (b *linuxBackend) compile(
 		cwd:         cwd,
 		environment: slices.Clone(request.environment),
 		stdin:       slices.Clone(request.operation.stdin),
-		extraFiles:  []*os.File{filter},
-	}, []io.Closer{filter}, nil
+		extraFiles:  append([]*os.File{filter, privateHandle}, maskHandles...),
+	}, append([]io.Closer{filter, privateHandle}, filesAsClosers(maskHandles)...), nil
 }
 
 func (b *linuxBackend) prepare(
 	ctx context.Context,
+	workspaceRoot string,
 	tempRoot string,
+	protected []string,
 ) (fileObject, Capabilities, error) {
 	if err := b.validateDependencies(); err != nil {
 		return fileObject{}, Capabilities{}, newProbeError(
@@ -250,13 +296,15 @@ func (b *linuxBackend) prepare(
 	}
 
 	capabilities, err := runLinuxCapabilityProbe(probeCtx, linuxCapabilityProbeRequest{
-		launcher:   launcher,
-		host:       host,
-		version:    version,
-		tempRoot:   tempRoot,
-		stat:       b.stat,
-		readlink:   b.readlink,
-		runCommand: b.runProbeCommand,
+		launcher:      launcher,
+		host:          host,
+		version:       version,
+		workspaceRoot: workspaceRoot,
+		tempRoot:      tempRoot,
+		protected:     slices.Clone(protected),
+		stat:          b.stat,
+		readlink:      b.readlink,
+		runCommand:    b.runProbeCommand,
 	})
 	if err != nil {
 		return fileObject{}, Capabilities{}, err
@@ -462,13 +510,9 @@ func linuxPathExists(stat func(string) (os.FileInfo, error), path string) (bool,
 }
 
 func linuxPrivateMounts(stat func(string) (os.FileInfo, error), request linuxSandboxRequest) []string {
-	sources := []string{request.workspace, request.privateDir, request.executable}
+	sources := []string{request.workspace, request.executable}
 	sources = append(sources, request.writeDirs...)
 	sources = append(sources, request.readOnlyFiles...)
-
-	for _, mount := range request.maskMounts {
-		sources = append(sources, mount.source)
-	}
 
 	candidates := []string{"/tmp", "/var/tmp"}
 
@@ -487,6 +531,111 @@ func linuxPrivateMounts(stat func(string) (os.FileInfo, error), request linuxSan
 	}
 
 	return privateMounts
+}
+
+func linuxPrivateTarget(privateMounts []string) (string, error) {
+	if len(privateMounts) == 0 {
+		return "", errors.New("no isolated mount is available for sandbox private files")
+	}
+
+	return filepath.Join(privateMounts[0], linuxSandboxPrivateName), nil
+}
+
+func openLinuxPrivateDirectory(path string) (*os.File, error) {
+	directory, err := os.Open(path) //nolint:gosec // The path is an owned, validated private directory.
+	if err != nil {
+		return nil, fmt.Errorf("open sandbox private directory: %w", err)
+	}
+
+	info, err := directory.Stat()
+	if err != nil {
+		_ = directory.Close()
+
+		return nil, fmt.Errorf("inspect sandbox private directory: %w", err)
+	}
+	if !info.IsDir() {
+		_ = directory.Close()
+
+		return nil, errors.New("sandbox private path is not a directory")
+	}
+
+	current, err := os.Stat(path)
+	if err != nil || !os.SameFile(info, current) {
+		_ = directory.Close()
+
+		return nil, errors.New("sandbox private directory changed while opening")
+	}
+
+	return directory, nil
+}
+
+func openLinuxMaskMounts(
+	mounts []linuxMount,
+	firstFD int,
+) ([]linuxMount, []*os.File, error) {
+	files := make([]*os.File, 0, len(mounts))
+	result := slices.Clone(mounts)
+
+	for index := range result {
+		file, err := openLinuxPathDescriptor(result[index].source)
+		if err != nil {
+			return nil, nil, errors.Join(err, closeLinuxFiles(files))
+		}
+
+		fd := firstFD + len(files)
+		result[index].sourceFD = fd
+		files = append(files, file)
+	}
+
+	return result, files, nil
+}
+
+func openLinuxPathDescriptor(path string) (*os.File, error) {
+	fd, err := unix.Open(path, unix.O_PATH|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, fmt.Errorf("open sandbox mask source: %w", err)
+	}
+
+	file := os.NewFile(uintptr(fd), filepath.Base(path))
+	if file == nil {
+		_ = unix.Close(fd)
+
+		return nil, errors.New("open sandbox mask source: invalid file descriptor")
+	}
+
+	return file, nil
+}
+
+func closeLinuxFiles(files []*os.File) error {
+	errs := make([]error, 0, len(files))
+	for _, file := range slices.Backward(files) {
+		if err := file.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
+func closeLinuxSandboxFiles(filter, privateHandle *os.File, maskHandles []*os.File) error {
+	err := closeLinuxFiles(maskHandles)
+	if privateHandle != nil {
+		err = errors.Join(err, privateHandle.Close())
+	}
+	if filter != nil {
+		err = errors.Join(err, filter.Close())
+	}
+
+	return err
+}
+
+func filesAsClosers(files []*os.File) []io.Closer {
+	closers := make([]io.Closer, len(files))
+	for index, file := range files {
+		closers[index] = file
+	}
+
+	return closers
 }
 
 func prepareLinuxMaskMounts(privateDir string, protected []string, gitPath string) ([]linuxMount, error) {
@@ -570,7 +719,14 @@ func buildLinuxSandboxArguments(request linuxSandboxRequest) []string {
 		args = append(args, "--bind", request.workspace, request.workspace)
 	}
 
-	args = append(args, "--bind", request.privateDir, request.privateDir)
+	if request.privateTarget == "" || request.privateFD < 3 {
+		return nil
+	}
+	args = append(
+		args,
+		"--dir", request.privateTarget,
+		"--bind-fd", strconv.Itoa(request.privateFD), request.privateTarget,
+	)
 	for _, directory := range request.writeDirs {
 		args = append(args, "--bind", directory, directory)
 	}
@@ -586,6 +742,11 @@ func buildLinuxSandboxArguments(request linuxSandboxRequest) []string {
 	}
 
 	for _, mount := range request.maskMounts {
+		if mount.sourceFD >= 3 {
+			args = append(args, "--ro-bind-fd", strconv.Itoa(mount.sourceFD), mount.target)
+			continue
+		}
+
 		args = append(args, linuxBubblewrapReadOnlyBind, mount.source, mount.target)
 	}
 
@@ -602,6 +763,25 @@ func buildLinuxSandboxArguments(request linuxSandboxRequest) []string {
 	args = append(args, request.args...)
 
 	return args
+}
+
+func linuxSandboxEnvironment(environment []string, privateDir, privateTarget string) []string {
+	rewritten := slices.Clone(environment)
+	for index, entry := range rewritten {
+		name, value, found := strings.Cut(entry, "=")
+		if !found || !pathContains(privateDir, value) {
+			continue
+		}
+
+		relative, err := filepath.Rel(privateDir, value)
+		if err != nil {
+			continue
+		}
+
+		rewritten[index] = name + "=" + filepath.Join(privateTarget, relative)
+	}
+
+	return rewritten
 }
 
 func runLinuxCapabilityProbe(
@@ -628,10 +808,50 @@ func runLinuxCapabilityProbe(
 			errors.Join(err, removeErr),
 		)
 	}
+	workspaceObject, _, err := inspectFileObject(request.workspaceRoot)
+	if err != nil {
+		cleanupErr := removeOwnedLinuxProbe(tempObject, probeObject)
 
-	capabilities, probeErr := runLinuxCapabilityProbeInRoot(ctx, request, probeRoot)
+		return Capabilities{}, newLinuxProbeStageError(
+			ProbeFailureIsolation,
+			request.version,
+			errors.Join(err, cleanupErr),
+		)
+	}
 
-	cleanupErr := removeOwnedLinuxProbe(tempObject, probeObject)
+	probeWorkspace, err := os.MkdirTemp(workspaceObject.path, "probe-")
+	if err != nil {
+		cleanupErr := removeOwnedLinuxProbe(tempObject, probeObject)
+
+		return Capabilities{}, newLinuxProbeStageError(
+			ProbeFailureIsolation,
+			request.version,
+			errors.Join(err, cleanupErr),
+		)
+	}
+	probeWorkspaceObject, _, err := inspectFileObject(probeWorkspace)
+	if err != nil {
+		workspaceCleanupErr := os.Remove(probeWorkspace)
+		tempCleanupErr := removeOwnedLinuxProbe(tempObject, probeObject)
+
+		return Capabilities{}, newLinuxProbeStageError(
+			ProbeFailureIsolation,
+			request.version,
+			errors.Join(err, workspaceCleanupErr, tempCleanupErr),
+		)
+	}
+
+	capabilities, probeErr := runLinuxCapabilityProbeInRoot(
+		ctx,
+		request,
+		probeRoot,
+		probeWorkspace,
+	)
+
+	cleanupErr := errors.Join(
+		removeOwnedLinuxProbe(tempObject, probeObject),
+		removeOwnedLinuxProbe(workspaceObject, probeWorkspaceObject),
+	)
 	if probeErr != nil {
 		return Capabilities{}, joinProbeErrorCause(probeErr, cleanupErr)
 	}
@@ -651,8 +871,9 @@ func runLinuxCapabilityProbeInRoot(
 	ctx context.Context,
 	request linuxCapabilityProbeRequest,
 	probeRoot string,
+	probeWorkspace string,
 ) (Capabilities, error) {
-	paths, err := prepareLinuxProbePaths(probeRoot)
+	paths, err := prepareLinuxProbePaths(probeRoot, probeWorkspace)
 	if err != nil {
 		return Capabilities{}, newLinuxProbeStageError(ProbeFailureIsolation, request.version, err)
 	}
@@ -672,7 +893,7 @@ func runLinuxCapabilityProbeInRoot(
 
 	maskMounts, err := prepareLinuxMaskMounts(
 		paths.privateDir,
-		[]string{paths.gitDir, paths.protected},
+		append([]string{paths.gitDir, paths.protected}, request.protected...),
 		paths.gitDir,
 	)
 	if err != nil {
@@ -690,14 +911,26 @@ func runLinuxCapabilityProbeInRoot(
 			return Capabilities{}, newLinuxProbeStageError(failure, request.version, err)
 		}
 
-		script := linuxProbeScript(paths, namespaces, request.launcher.path, networkAny)
+		privateHandle, err := openLinuxPrivateDirectory(paths.privateDir)
+		if err != nil {
+			_ = filter.Close()
+
+			return Capabilities{}, newLinuxProbeStageError(ProbeFailureIsolation, request.version, err)
+		}
+		maskMounts, maskHandles, err := openLinuxMaskMounts(maskMounts, linuxSandboxMaskFD)
+		if err != nil {
+			_ = privateHandle.Close()
+			_ = filter.Close()
+
+			return Capabilities{}, newLinuxProbeStageError(ProbeFailureIsolation, request.version, err)
+		}
+
 		sandboxRequest := linuxSandboxRequest{
 			workspace:      paths.workspace,
 			cwd:            paths.workspace,
 			privateDir:     paths.privateDir,
+			privateFD:      linuxSandboxPrivateFD,
 			executable:     "/bin/sh",
-			args:           []string{"-c", script},
-			environment:    []string{"HOME=/", linuxProbeLang, linuxProbePath},
 			workspaceWrite: true,
 			networkAny:     networkAny,
 			seccompFD:      linuxSeccompFD,
@@ -705,16 +938,44 @@ func runLinuxCapabilityProbeInRoot(
 			maskMounts:     maskMounts,
 		}
 		sandboxRequest.privateMounts = linuxPrivateMounts(request.stat, sandboxRequest)
+		sandboxRequest.privateTarget, err = linuxPrivateTarget(sandboxRequest.privateMounts)
+		if err != nil {
+			_ = closeLinuxFiles(maskHandles)
+			_ = privateHandle.Close()
+			_ = filter.Close()
+
+			return Capabilities{}, newLinuxProbeStageError(ProbeFailureIsolation, request.version, err)
+		}
+		sandboxRequest.args = []string{"-c", linuxProbeScript(
+			paths,
+			namespaces,
+			request.launcher.path,
+			networkAny,
+			sandboxRequest.privateTarget,
+		)}
+		sandboxRequest.environment = linuxSandboxEnvironment([]string{
+			"GOCACHE=" + filepath.Join(paths.privateDir, "go-cache"),
+			"GOTMPDIR=" + filepath.Join(paths.privateDir, "go-tmp"),
+			"HOME=/",
+			linuxProbeLang,
+			linuxProbePath,
+			"TMPDIR=" + filepath.Join(paths.privateDir, "tmp"),
+			"XDG_CACHE_HOME=" + filepath.Join(paths.privateDir, "cache"),
+		}, paths.privateDir, sandboxRequest.privateTarget)
 		args := buildLinuxSandboxArguments(sandboxRequest)
 
 		runErr := request.runCommand(ctx, linuxProbeCommand{
 			launcher:   request.launcher.path,
 			cwd:        paths.workspace,
 			args:       args,
-			extraFiles: []*os.File{filter},
+			extraFiles: append([]*os.File{filter, privateHandle}, maskHandles...),
 		})
 
-		closeErr := filter.Close()
+		closeErr := errors.Join(
+			filter.Close(),
+			privateHandle.Close(),
+			closeLinuxFiles(maskHandles),
+		)
 		if runErr != nil || closeErr != nil {
 			failure := ProbeFailureDeny
 			if networkAny {
@@ -779,9 +1040,9 @@ type linuxProbePaths struct {
 	secret     string
 }
 
-func prepareLinuxProbePaths(root string) (linuxProbePaths, error) {
+func prepareLinuxProbePaths(root, workspaceRoot string) (linuxProbePaths, error) {
 	paths := linuxProbePaths{
-		workspace:  filepath.Join(root, "workspace"),
+		workspace:  workspaceRoot,
 		privateDir: filepath.Join(root, "private"),
 		outside:    filepath.Join(root, "outside"),
 		protected:  filepath.Join(root, "protected"),
@@ -790,7 +1051,6 @@ func prepareLinuxProbePaths(root string) (linuxProbePaths, error) {
 	paths.secret = filepath.Join(paths.protected, "secret")
 
 	for _, directory := range []string{
-		paths.workspace,
 		paths.gitDir,
 		paths.privateDir,
 		paths.outside,
@@ -798,6 +1058,11 @@ func prepareLinuxProbePaths(root string) (linuxProbePaths, error) {
 	} {
 		if err := os.Mkdir(directory, 0o700); err != nil {
 			return linuxProbePaths{}, fmt.Errorf("create probe directory: %w", err)
+		}
+	}
+	for _, directory := range []string{"tmp", "cache", "go-cache", "go-tmp"} {
+		if err := os.Mkdir(filepath.Join(paths.privateDir, directory), 0o700); err != nil {
+			return linuxProbePaths{}, fmt.Errorf("create probe private directory: %w", err)
 		}
 	}
 
@@ -846,6 +1111,7 @@ func linuxProbeScript(
 	namespaces linuxNamespaceIdentities,
 	launcher string,
 	networkAny bool,
+	privateTarget string,
 ) string {
 	networkComparison := "!="
 	if networkAny {
@@ -854,11 +1120,12 @@ func linuxProbeScript(
 
 	return fmt.Sprintf(
 		"set -eu; "+
-			"test \"$(/usr/bin/readlink /proc/self/ns/user)\" != %s; "+
-			"test \"$(/usr/bin/readlink /proc/self/ns/mnt)\" != %s; "+
-			"test \"$(/usr/bin/readlink /proc/self/ns/pid)\" != %s; "+
-			"test \"$(/usr/bin/readlink /proc/self/ns/net)\" %s %s; "+
-			"printf ok > %s; printf ok > %s; "+
+			"test \"$(/usr/bin/readlink /proc/self/ns/user)\" != %s || exit 61; "+
+			"test \"$(/usr/bin/readlink /proc/self/ns/mnt)\" != %s || exit 62; "+
+			"test \"$(/usr/bin/readlink /proc/self/ns/pid)\" != %s || exit 63; "+
+			"test \"$(/usr/bin/readlink /proc/self/ns/net)\" %s %s || exit 64; "+
+			"printf ok > %s || exit 65; printf ok > %s || exit 66; "+
+			"printf ok > \"$TMPDIR/probe\" || exit 67; "+
 			"if printf no > %s; then exit 71; fi; "+
 			"if printf no > %s; then exit 72; fi; "+
 			"if /bin/cat %s >/dev/null 2>&1; then exit 73; fi; "+
@@ -869,7 +1136,7 @@ func linuxProbeScript(
 		networkComparison,
 		shellSingleQuote(namespaces.net),
 		shellSingleQuote(filepath.Join(paths.workspace, "write-ok")),
-		shellSingleQuote(filepath.Join(paths.privateDir, "write-ok")),
+		shellSingleQuote(filepath.Join(privateTarget, "write-ok")),
 		shellSingleQuote(filepath.Join(paths.outside, "write-denied")),
 		shellSingleQuote(filepath.Join(paths.gitDir, "write-denied")),
 		shellSingleQuote(paths.secret),

@@ -123,6 +123,28 @@ func TestTreeInspectMutationPathRejectsSymlinksAndUnsupportedTypes(t *testing.T)
 	require.ErrorIs(t, err, workspace.ErrSymlink)
 }
 
+func TestTreeInspectAddPathReportsMissingParentsAndRejectsUnsafeComponents(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(root, "existing"), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "file"), []byte("x"), 0o600))
+	require.NoError(t, os.Symlink("existing", filepath.Join(root, "linked")))
+	tree := openTree(t, root)
+
+	name, info, missing, err := tree.InspectAddPath("existing/new/deep/file.txt")
+	require.NoError(t, err)
+	assert.Equal(t, "existing/new/deep/file.txt", name)
+	assert.Nil(t, info)
+	assert.Equal(t, []string{"existing/new", "existing/new/deep"}, missing)
+
+	_, _, _, err = tree.InspectAddPath("linked/file.txt")
+	require.ErrorIs(t, err, workspace.ErrSymlink)
+
+	_, _, _, err = tree.InspectAddPath("file/child.txt")
+	require.ErrorIs(t, err, workspace.ErrUnsupportedType)
+}
+
 func TestTreeMutationUsesStableDirectoryAndExpiresHandles(t *testing.T) {
 	t.Parallel()
 
