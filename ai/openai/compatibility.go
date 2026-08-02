@@ -43,14 +43,16 @@ const (
 	ChatReasoningOmit     ChatReasoningFormat = "omit"
 )
 
-// ReasoningHistoryField selects which assistant-message field receives prior
-// reasoning during Chat Completions continuation. The empty value omits it.
+// ReasoningHistoryField selects how prior assistant reasoning is represented
+// during Chat Completions continuation. The empty value omits it.
 type ReasoningHistoryField string
 
 // Assistant reasoning-history fields.
 const (
-	ReasoningHistoryContent   ReasoningHistoryField = "reasoning_content"
-	ReasoningHistoryReasoning ReasoningHistoryField = "reasoning"
+	ReasoningHistoryContent       ReasoningHistoryField = "reasoning_content"
+	ReasoningHistoryReasoning     ReasoningHistoryField = "reasoning"
+	ReasoningHistoryDetails       ReasoningHistoryField = "reasoning_details"
+	ReasoningHistoryContentChunks ReasoningHistoryField = "content_chunks"
 )
 
 // Compatibility describes documented wire differences on OpenAI-shaped

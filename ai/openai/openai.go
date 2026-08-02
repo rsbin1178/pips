@@ -48,6 +48,9 @@ const (
 	typeFunctionCall = "function_call"
 	typeMessage      = "message"
 	typeReasoning    = "reasoning"
+	typeSummaryText  = "summary_text"
+	typeText         = "text"
+	typeThinking     = "thinking"
 )
 
 // Model is an ai.LanguageModel backed by the OpenAI API. Create one with

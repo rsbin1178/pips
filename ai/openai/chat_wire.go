@@ -1,6 +1,10 @@
 package openai
 
-import "github.com/rsbin/pips/ai"
+import (
+	"encoding/json"
+
+	"github.com/rsbin/pips/ai"
+)
 
 // Chat Completions wire types — the subset of the schema this adapter
 // produces and consumes. Field names follow the API exactly.
@@ -36,12 +40,13 @@ type chatStreamOptions struct {
 }
 
 type chatMessage struct {
-	Role             string         `json:"role"`
-	Content          any            `json:"content,omitempty"` // string or []chatContentPart
-	ToolCalls        []chatToolCall `json:"tool_calls,omitempty"`
-	ToolCallID       string         `json:"tool_call_id,omitempty"`
-	ReasoningContent string         `json:"reasoning_content,omitempty"`
-	Reasoning        string         `json:"reasoning,omitempty"`
+	Role             string            `json:"role"`
+	Content          any               `json:"content,omitempty"` // string or provider content chunks
+	ToolCalls        []chatToolCall    `json:"tool_calls,omitempty"`
+	ToolCallID       string            `json:"tool_call_id,omitempty"`
+	ReasoningContent string            `json:"reasoning_content,omitempty"`
+	Reasoning        string            `json:"reasoning,omitempty"`
+	ReasoningDetails []json.RawMessage `json:"reasoning_details,omitempty"`
 }
 
 type chatContentPart struct {
@@ -129,11 +134,12 @@ type chatChoice struct {
 }
 
 type chatChoiceMessage struct {
-	Role             string         `json:"role,omitempty"`
-	Content          *string        `json:"content"`
-	ToolCalls        []chatToolCall `json:"tool_calls,omitempty"`
-	ReasoningContent string         `json:"reasoning_content,omitempty"` // compat endpoints (DeepSeek, Ollama)
-	Reasoning        string         `json:"reasoning,omitempty"`         // compat endpoints (OpenRouter, Together)
+	Role             string            `json:"role,omitempty"`
+	Content          *json.RawMessage  `json:"content"`
+	ToolCalls        []chatToolCall    `json:"tool_calls,omitempty"`
+	ReasoningContent string            `json:"reasoning_content,omitempty"` // compat endpoints (DeepSeek, Ollama)
+	Reasoning        string            `json:"reasoning,omitempty"`         // compat endpoints (OpenRouter, Together)
+	ReasoningDetails []json.RawMessage `json:"reasoning_details,omitempty"` // OpenRouter structured continuation state
 }
 
 type chatUsage struct {

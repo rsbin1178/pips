@@ -196,12 +196,7 @@ func responseAssistantItems(parts []ai.Part) []responseItem {
 			}
 
 			flushText()
-
-			items = append(items, responseItem{
-				ID:               state.ID,
-				Type:             typeReasoning,
-				EncryptedContent: state.EncryptedContent,
-			})
+			items = append(items, responseReasoningInputItem(state, p.Text))
 		case ai.ToolCallPart:
 			flushText()
 
@@ -301,8 +296,10 @@ func appendOutputItem(msg *ai.Message, item responseItem) {
 		}
 	case typeReasoning:
 		var text strings.Builder
-		for _, s := range item.Summary {
-			text.WriteString(s.Text)
+		if item.Summary != nil {
+			for _, summary := range *item.Summary {
+				text.WriteString(summary.Text)
+			}
 		}
 
 		signature := encodeResponsesReasoningState(item)

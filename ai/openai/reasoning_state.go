@@ -13,18 +13,29 @@ const responsesReasoningSignaturePrefix = "responses:"
 // ai.ReasoningPart.Signature. The prefix keeps unrelated provider signatures
 // from being interpreted as Responses input items.
 type responsesReasoningState struct {
-	ID               string `json:"id,omitempty"`
-	EncryptedContent string `json:"encrypted_content,omitempty"`
+	ID               string            `json:"id,omitempty"`
+	Summary          []responseSummary `json:"summary,omitempty"`
+	Content          []responseContent `json:"content,omitempty"`
+	EncryptedContent string            `json:"encrypted_content,omitempty"`
+	Status           string            `json:"status,omitempty"`
 }
 
 func encodeResponsesReasoningState(item responseItem) string {
-	if item.ID == "" && item.EncryptedContent == "" {
+	if item.ID == "" {
 		return ""
+	}
+
+	var summary []responseSummary
+	if item.Summary != nil {
+		summary = *item.Summary
 	}
 
 	raw, err := jsonx.Marshal(responsesReasoningState{
 		ID:               item.ID,
+		Summary:          summary,
+		Content:          item.Content,
 		EncryptedContent: item.EncryptedContent,
+		Status:           item.Status,
 	})
 	if err != nil {
 		return ""
@@ -45,9 +56,33 @@ func decodeResponsesReasoningState(signature string) (responsesReasoningState, b
 	}
 
 	var state responsesReasoningState
-	if err := jsonx.Unmarshal(raw, &state); err != nil || state.ID == "" && state.EncryptedContent == "" {
+	if err := jsonx.Unmarshal(raw, &state); err != nil || state.ID == "" {
 		return responsesReasoningState{}, false
 	}
 
 	return state, true
+}
+
+// responseReasoningInputItem restores a Provider reasoning item for a later
+// Responses request. Summary must be present even when it is empty. Visible
+// text is only a fallback for signatures persisted before structured summaries
+// were retained.
+func responseReasoningInputItem(state responsesReasoningState, fallbackText string) responseItem {
+	summary := state.Summary
+	if len(summary) == 0 && fallbackText != "" {
+		summary = []responseSummary{{Type: typeSummaryText, Text: fallbackText}}
+	}
+
+	if summary == nil {
+		summary = []responseSummary{}
+	}
+
+	return responseItem{
+		ID:               state.ID,
+		Type:             typeReasoning,
+		Content:          state.Content,
+		Summary:          &summary,
+		EncryptedContent: state.EncryptedContent,
+		Status:           state.Status,
+	}
 }

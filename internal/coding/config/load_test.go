@@ -213,6 +213,42 @@ func TestLoadMultipleModelsRequireDefaultOrProcessSelection(t *testing.T) {
 	assert.Equal(t, "openai/two", result.Config.Model.String())
 }
 
+func TestLoadStructuredReasoningHistoryModes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		mode openai.ReasoningHistoryField
+	}{
+		{name: "openrouter details", mode: openai.ReasoningHistoryDetails},
+		{name: "mistral content chunks", mode: openai.ReasoningHistoryContentChunks},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			path := filepath.Join(t.TempDir(), "config.toml")
+			writeFile(t, path, `
+[providers.local]
+protocol = "openai/chat_completions"
+base_url = "https://example.com/v1"
+
+[providers.local.compatibility]
+reasoning_history = "`+string(tc.mode)+`"
+
+[providers.local.models.reasoner]
+default = true
+`)
+
+			result, err := config.Load(config.LoadOptions{ConfigFile: path})
+			require.NoError(t, err)
+			require.NotNil(t, result.Config.Providers["local"].Compatibility.ReasoningHistory)
+			assert.Equal(t, tc.mode, *result.Config.Providers["local"].Compatibility.ReasoningHistory)
+		})
+	}
+}
+
 func TestLoadRejectsLegacyAndInvalidConfiguration(t *testing.T) {
 	t.Parallel()
 
@@ -253,6 +289,11 @@ func TestLoadRejectsLegacyAndInvalidConfiguration(t *testing.T) {
 		{name: "unknown top level", content: "api_key = \"secret\"\n", want: config.ErrDecode},
 		{name: "unknown compaction", content: "[compaction]\ntypo = true\n", want: config.ErrDecode},
 		{name: "invalid compaction", content: "[compaction]\nsummary_max_tokens = 30000\n", want: config.ErrInvalid},
+		{
+			name:    "invalid reasoning history",
+			content: "[providers.local.compatibility]\nreasoning_history = \"future\"\n",
+			want:    config.ErrInvalid,
+		},
 		{name: "unknown request", content: "[providers.openai.models.gpt.request]\ntypo = true\n", want: config.ErrDecode},
 		{name: "duplicate nested model", content: "[providers.openai.models.gpt]\n[providers.openai.models.gpt]\n", want: config.ErrDecode},
 		{name: "multiple defaults", content: "[providers.openai.models.one]\ndefault = true\n[providers.openai.models.two]\ndefault = true\n", want: config.ErrInvalid},

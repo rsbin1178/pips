@@ -671,7 +671,6 @@ func decodeOptions(value fileOptions) (ModelOptions, error) {
 	return result, validateOptions(result, "request")
 }
 
-//nolint:gocyclo // Every enum is validated before entering the runtime snapshot.
 func decodeCompatibility(value fileCompatibility) (CompatibilityConfig, error) {
 	result := CompatibilityConfig{IncludeEncryptedReasoning: value.IncludeEncryptedReasoning}
 	if value.MaxTokensField != nil {
@@ -708,9 +707,15 @@ func decodeCompatibility(value fileCompatibility) (CompatibilityConfig, error) {
 	}
 	if value.ReasoningHistory != nil {
 		parsed := openai.ReasoningHistoryField(strings.TrimSpace(*value.ReasoningHistory))
-		if parsed != openai.ReasoningHistoryContent && parsed != openai.ReasoningHistoryReasoning {
+		switch parsed {
+		case openai.ReasoningHistoryContent,
+			openai.ReasoningHistoryReasoning,
+			openai.ReasoningHistoryDetails,
+			openai.ReasoningHistoryContentChunks:
+		default:
 			return CompatibilityConfig{}, fmt.Errorf("%w: invalid reasoning_history", ErrInvalid)
 		}
+
 		result.ReasoningHistory = &parsed
 	}
 
