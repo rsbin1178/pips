@@ -20,7 +20,10 @@ import (
 	"github.com/rsbin/pips/internal/coding"
 	codingclipboard "github.com/rsbin/pips/internal/coding/clipboard"
 	"github.com/rsbin/pips/internal/coding/runtimecontrol"
+	"github.com/rsbin/pips/internal/coding/statusline"
 )
+
+var errStatusLinePersistenceUnavailable = errors.New("status-line persistence is unavailable")
 
 const (
 	defaultWidth          = 80
@@ -136,6 +139,7 @@ type Model struct {
 	worktreeCancel      context.CancelFunc
 	worktreeSummary     string
 	activity            activityIndicator
+	statusLineItems     []statusline.Item
 	refreshCursor       bool
 	cursorRefreshSeq    uint64
 }
@@ -168,18 +172,23 @@ func newModel(ctx context.Context, options Options) *Model {
 	editor.SetWidth(composerEditorWidth(defaultWidth))
 	editor.SetStyles(composerStyles(themeDark, options.NoColor))
 	composer := newComposerState(editor)
+	statusLineItems := options.StatusLine
+	if statusLineItems == nil {
+		statusLineItems = statusline.Default()
+	}
 
 	model := &Model{
-		ctx:         ctx,
-		options:     options,
-		lifecycle:   lifecycle,
-		width:       defaultWidth,
-		height:      defaultHeight,
-		composer:    composer,
-		markdown:    newMarkdownRenderer(markdownCacheCapacity),
-		theme:       themeDark,
-		activity:    newActivityIndicator(),
-		childStates: make(map[string]coding.State),
+		ctx:             ctx,
+		options:         options,
+		lifecycle:       lifecycle,
+		width:           defaultWidth,
+		height:          defaultHeight,
+		composer:        composer,
+		markdown:        newMarkdownRenderer(markdownCacheCapacity),
+		theme:           themeDark,
+		activity:        newActivityIndicator(),
+		childStates:     make(map[string]coding.State),
+		statusLineItems: slices.Clone(statusLineItems),
 	}
 	model.setLayout()
 
@@ -584,6 +593,20 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.setLayout()
 
 		return m, nil
+	case statusLineSavedMsg:
+		if m.picker.kind != pickerStatusLine || message.generation != m.picker.generation {
+			return m, nil
+		}
+		m.picker.loading = false
+		m.picker.controlling = false
+		m.picker.err = message.err
+		if message.err != nil {
+			return m, nil
+		}
+		m.statusLineItems = slices.Clone(message.items)
+		m.picker = pickerState{}
+
+		return m, m.composer.Focus()
 	case controlResultMsg:
 		pickerControl := m.picker.kind != pickerNone && m.picker.controlling
 		routeControl := m.route.kind != routeNone && m.route.controlling
@@ -1083,6 +1106,8 @@ func (m *Model) readyView() tea.View {
 			footer = append(footer, m.pickerView(availableRows))
 		case pickerMode:
 			footer = append(footer, m.modePickerView(availableRows))
+		case pickerStatusLine:
+			footer = append(footer, m.statusLinePickerView(availableRows))
 		case pickerSkill:
 			footer = append(footer, m.skillPickerView(availableRows))
 		case pickerFile:
@@ -1119,7 +1144,8 @@ func (m *Model) readyView() tea.View {
 	view.MouseMode = tea.MouseModeNone
 	view.WindowTitle = appTitle
 	view.Cursor = m.composer.Cursor()
-	if m.prompt.kind != promptNone || m.picker.kind == pickerModel || m.picker.kind == pickerMode {
+	if m.prompt.kind != promptNone || m.picker.kind == pickerModel || m.picker.kind == pickerMode ||
+		m.picker.kind == pickerStatusLine {
 		view.Cursor = nil
 	}
 	if m.prompt.kind == promptQuestion &&
@@ -1176,8 +1202,75 @@ func editorOffset(prompt, editor string) (int, int, bool) {
 	return ansi.StringWidth(prefix[lineStart:]), strings.Count(prefix, "\n"), true
 }
 
-//nolint:gocyclo // Status composition keeps its deterministic width and color policy in one pass.
 func (m *Model) statusLine() string {
+	return m.statusLineWithItems(m.statusLineItems)
+}
+
+func (m *Model) statusLineWithItems(items []statusline.Item) string {
+	width := m.statusLineWidth()
+	type segment struct {
+		item  statusline.Item
+		value string
+	}
+	segments := make([]segment, 0, len(items))
+	for _, item := range items {
+		if value := m.statusLineItem(item, width); value != "" {
+			segments = append(segments, segment{item: item, value: value})
+		}
+	}
+	separator := "  ·  "
+	if !m.options.NoColor {
+		separator = lipgloss.NewStyle().Foreground(paletteFor(m.theme).muted).Render(separator)
+	}
+
+	rightStart := len(segments)
+	for rightStart > 0 {
+		item := segments[rightStart-1].item
+		if item != statusline.Mode && item != statusline.Team {
+			break
+		}
+		rightStart--
+	}
+	leftSegments := segments[:rightStart]
+	left := make([]string, 0, len(leftSegments)+3)
+	phaseIndex := -1
+	for index, segment := range leftSegments {
+		left = append(left, segment.value)
+		if segment.item == statusline.Phase {
+			phaseIndex = index
+		}
+	}
+	extras := m.statusExtras()
+	right := make([]string, 0, len(segments)-rightStart)
+	for _, segment := range segments[rightStart:] {
+		right = append(right, segment.value)
+	}
+	if len(segments)-rightStart == 2 && segments[rightStart].item == statusline.Mode &&
+		segments[rightStart+1].item == statusline.Team {
+		right = []string{combinedStatusRight(
+			m.state.Mode,
+			m.teamStatusLabel(width),
+			width,
+		)}
+	}
+	leftValue := strings.Join(append(left, extras...), separator)
+	if phaseIndex > 0 {
+		leftValue = fitStatusLeft(
+			strings.Join(left[:phaseIndex], separator),
+			strings.Join(append(slices.Clone(left[phaseIndex:]), extras...), separator),
+			separator,
+			width,
+		)
+	}
+	if len(right) == 0 {
+		return ansi.Truncate(leftValue, width, "…")
+	}
+
+	return alignStatusLine(leftValue, strings.Join(right, separator), width)
+}
+
+//nolint:gocyclo // Each closed status field has one visible formatting branch.
+func (m *Model) statusLineItem(item statusline.Item, width int) string {
 	workspaceName := filepath.Base(m.options.Workspace)
 	if workspaceName == "." || workspaceName == string(filepath.Separator) {
 		workspaceName = m.options.Workspace
@@ -1197,52 +1290,49 @@ func (m *Model) statusLine() string {
 	if m.state.LastError != nil && m.state.Interaction.Outcome != coding.InteractionCanceled {
 		phaseLabel = "error"
 	}
-	values := []string{
-		workspaceName,
-		sessionLabel,
-		fmt.Sprintf("%s/%s", m.state.Provider, m.state.ModelID),
-		phaseLabel,
-	}
-	width := m.statusLineWidth()
-	teamStatus := m.teamStatusLabel(width)
-	mode := combinedStatusRight(m.state.Mode, teamStatus, width)
-	if !m.options.NoColor {
-		palette := paletteFor(m.theme)
-		values[0] = lipgloss.NewStyle().Bold(true).Foreground(palette.workspace).Render(values[0])
-		values[1] = lipgloss.NewStyle().Bold(true).Foreground(palette.session).Render(values[1])
-		values[2] = lipgloss.NewStyle().Foreground(palette.model).Render(values[2])
-		modeColor := palette.model
-		if m.state.Mode == coding.ModePlan && teamStatus == "" {
-			modeColor = palette.session
-		} else if teamStatus != "" {
-			modeColor = palette.workspace
+
+	value := ""
+	style := lipgloss.NewStyle()
+	palette := paletteFor(m.theme)
+	switch item {
+	case statusline.Workspace:
+		value = workspaceName
+		style = style.Bold(true).Foreground(palette.workspace)
+	case statusline.Session:
+		value = sessionLabel
+		style = style.Bold(true).Foreground(palette.session)
+	case statusline.Model:
+		value = fmt.Sprintf("%s/%s", m.state.Provider, m.state.ModelID)
+		style = style.Foreground(palette.model)
+	case statusline.ContextUsed:
+		window := m.state.ContextWindow
+		if window > 0 {
+			percent := min(100, max(0, int(
+				(float64(m.state.ContextTokens)/float64(window))*100,
+			)))
+			value = fmt.Sprintf("Context %d%% used", percent)
+			style = style.Foreground(palette.model)
 		}
-		mode = lipgloss.NewStyle().Bold(true).Foreground(modeColor).Render(mode)
-		values[3] = lipgloss.NewStyle().Bold(true).Foreground(
-			phaseColor(m.state, phase, palette),
-		).Render(values[3])
+	case statusline.TaskProgress:
+		if m.state.Tasks.Total > 0 {
+			value = fmt.Sprintf("Tasks %d/%d", m.state.Tasks.Completed, m.state.Tasks.Total)
+			style = style.Foreground(palette.workspace)
+		}
+	case statusline.Phase:
+		value = phaseLabel
+		style = style.Bold(true).Foreground(phaseColor(m.state, phase, palette))
+	case statusline.Mode:
+		value = statusModeLabel(m.state.Mode, width)
+		style = style.Bold(true).Foreground(palette.session)
+	case statusline.Team:
+		value = m.teamStatusLabel(width)
+		style = style.Bold(true).Foreground(palette.workspace)
 	}
-	separator := "  ·  "
-	if !m.options.NoColor {
-		separator = lipgloss.NewStyle().Foreground(paletteFor(m.theme).muted).Render(separator)
-	}
-	head := strings.Join(values[:3], separator)
-	tail := []string{values[3]}
-	extras := m.statusExtras()
-	if len(extras) > 0 {
-		tail = append(tail, extras...)
-	}
-
-	leftWidth := width
-	if mode != "" {
-		leftWidth = max(0, width-ansi.StringWidth(mode)-1)
-	}
-	left := fitStatusLeft(head, strings.Join(tail, separator), separator, leftWidth)
-	if mode == "" {
-		return ansi.Truncate(left, width, "…")
+	if value == "" || m.options.NoColor {
+		return value
 	}
 
-	return alignStatusLine(left, mode, width)
+	return style.Render(value)
 }
 
 func statusModeLabel(mode coding.OperatingMode, width int) string {

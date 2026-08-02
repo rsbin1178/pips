@@ -9,6 +9,7 @@ import (
 	"github.com/rsbin/pips/internal/coding/planflow"
 	"github.com/rsbin/pips/internal/coding/planreview"
 	"github.com/rsbin/pips/internal/coding/question"
+	"github.com/rsbin/pips/internal/coding/tasklist"
 )
 
 const codingSystemPrompt = `You are Pips, a terminal-first coding agent operating in the user's local workspace. Be precise, safe, and useful.
@@ -240,6 +241,10 @@ func writeModeGuidance(prompt *strings.Builder, mode OperatingMode, toolNames []
 
 	if _, ok := available["apply_patch"]; ok {
 		prompt.WriteString("- Use apply_patch for deliberate source edits. Let project formatters or generators own mechanical and generated output.\n")
+	}
+
+	if _, ok := available[tasklist.ToolName]; ok {
+		prompt.WriteString("- Use update_plan for non-trivial multi-step work. Replace the complete list, keep exactly one step in_progress while work remains, update it as work proceeds, and mark work completed only after verification. Skip it for trivial requests.\n")
 	}
 
 	if _, ok := available["tool_search"]; ok {

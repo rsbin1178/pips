@@ -26,6 +26,7 @@ func cloneEventPayload(payload EventPayload) EventPayload {
 	case SessionTreeChanged:
 		value.Tree = value.Tree.Clone()
 		value.Transcript = cloneMessages(value.Transcript)
+		value.Tasks = value.Tasks.Clone()
 		return value
 	case SessionNavigated:
 		return value

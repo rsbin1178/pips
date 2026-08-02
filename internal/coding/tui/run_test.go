@@ -40,6 +40,25 @@ func TestCloseControllerOutlivesCanceledProgramContext(t *testing.T) {
 	assert.NoError(t, controller.contextErr)
 }
 
+func TestFinishRunExitSuppressesCallbackAfterFailureOrSignal(t *testing.T) {
+	t.Parallel()
+
+	want := errors.New("cleanup failed")
+	called := 0
+	handler := func(ExitInfo) error {
+		called++
+
+		return nil
+	}
+
+	require.ErrorIs(t, finishRunExit(want, true, handler, ExitInfo{}), want)
+	require.NoError(t, finishRunExit(nil, false, handler, ExitInfo{}))
+	assert.Zero(t, called)
+
+	require.NoError(t, finishRunExit(nil, true, handler, ExitInfo{Resumable: true}))
+	assert.Equal(t, 1, called)
+}
+
 type closeContextController struct {
 	stubController
 	err        error

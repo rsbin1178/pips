@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/rsbin/pips/internal/coding/statusline"
 	"github.com/rsbin/pips/internal/coding/tui"
+	"github.com/rsbin/pips/internal/coding/tuiconfig"
 	"github.com/rsbin/pips/internal/coding/workspace"
 	"github.com/spf13/cobra"
 )
@@ -23,6 +25,16 @@ func runInteractiveWithIngress(
 	dependencies Dependencies,
 	flags *rootFlags,
 	ingress tui.ImageIngress,
+) error {
+	return runInteractiveTarget(cmd, dependencies, flags, ingress, "")
+}
+
+func runInteractiveTarget(
+	cmd *cobra.Command,
+	dependencies Dependencies,
+	flags *rootFlags,
+	ingress tui.ImageIngress,
+	sessionID string,
 ) error {
 	if err := validateInteractiveTerminal(cmd, dependencies); err != nil {
 		return err
@@ -49,7 +61,7 @@ func runInteractiveWithIngress(
 			return nil, err
 		}
 
-		options, err := newRuntimeOpenOptions(dependencies, state, "")
+		options, err := newRuntimeOpenOptions(dependencies, state, sessionID)
 		if err != nil {
 			return nil, err
 		}
@@ -58,6 +70,11 @@ func runInteractiveWithIngress(
 	}
 
 	_, noColor := dependencies.LookupEnv("NO_COLOR")
+	preferenceStore := tuiconfig.NewStore(dependencies.Paths.TUIFile())
+	preferences, err := preferenceStore.Load()
+	if err != nil {
+		return err
+	}
 
 	return dependencies.RunTUI(cmd.Context(), tui.Options{
 		Input:        cmd.InOrStdin(),
@@ -68,7 +85,43 @@ func runInteractiveWithIngress(
 		NoColor:      noColor,
 		Bootstrap:    bootstrap,
 		ImageIngress: ingress,
+		StatusLine:   preferences.StatusLine,
+		SaveStatusLine: func(_ context.Context, items []statusline.Item) error {
+			return preferenceStore.Save(tuiconfig.Settings{StatusLine: items})
+		},
+		OnExit: func(info tui.ExitInfo) error {
+			if !info.Resumable {
+				return nil
+			}
+			_, err := fmt.Fprintf(
+				cmd.OutOrStdout(),
+				"\nResume this session with:\n  pips resume %s\n",
+				info.SessionID,
+			)
+
+			return err
+		},
 	})
+}
+
+func newResumeCommand(dependencies Dependencies, flags *rootFlags) *cobra.Command {
+	return &cobra.Command{
+		Use:   "resume SESSION_ID",
+		Short: "Resume a durable coding session",
+		Args: func(_ *cobra.Command, args []string) error {
+			if len(args) != 1 {
+				return fmt.Errorf("%w: pips resume requires one session ID", ErrUsage)
+			}
+			if err := validateSessionArgument(args[0]); err != nil {
+				return err
+			}
+
+			return nil
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runInteractiveTarget(cmd, dependencies, flags, nil, args[0])
+		},
+	}
 }
 
 func validateInteractiveTerminal(cmd *cobra.Command, dependencies Dependencies) error {

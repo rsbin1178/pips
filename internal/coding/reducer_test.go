@@ -13,6 +13,7 @@ import (
 	"github.com/rsbin/pips/internal/coding/changes"
 	"github.com/rsbin/pips/internal/coding/question"
 	"github.com/rsbin/pips/internal/coding/subagent"
+	"github.com/rsbin/pips/internal/coding/tasklist"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -56,6 +57,9 @@ func TestReduceLiveAndJSONReplayMatch(t *testing.T) {
 	assert.Equal(t, "connect_failed", live.Diagnostics[0].Code)
 	require.NotNil(t, live.LastError)
 	assert.Equal(t, "model_failed", live.LastError.Code)
+	assert.Equal(t, 15, live.ContextTokens)
+	assert.Equal(t, 1, live.Tasks.Completed)
+	assert.Equal(t, 2, live.Tasks.Total)
 }
 
 func TestReduceReturnsDefensiveState(t *testing.T) {
@@ -218,6 +222,11 @@ func TestReduceSessionTreeAndCompactionLifecycle(t *testing.T) {
 		}),
 		newSessionEvent(EventSessionTreeChanged, SessionTreeChanged{
 			Tree: tree, Transcript: []ai.Message{ai.UserText("goal")},
+			ContextTokens: 3000,
+			Tasks: tasklist.Snapshot{
+				Items:      []tasklist.Item{{Step: "Compact", Status: tasklist.StatusInProgress}},
+				InProgress: 1, Total: 1,
+			},
 		}),
 		newSessionEvent(EventCompactionStarted, CompactionStarted{
 			Mode: CompactionManual, Preview: preview,
@@ -248,6 +257,8 @@ func TestReduceSessionTreeAndCompactionLifecycle(t *testing.T) {
 	assert.Equal(t, CompactionManual, state.Compaction.Mode)
 	assert.Equal(t, 3000, state.Compaction.TokensBefore)
 	assert.Equal(t, 900, state.Compaction.TokensAfter)
+	assert.Equal(t, 900, state.ContextTokens)
+	assert.Equal(t, 1, state.Tasks.InProgress)
 }
 
 func TestReduceRejectsProtocolViolations(t *testing.T) {
@@ -541,7 +552,13 @@ func reducerEvents() []Event {
 		newTestEvent(EventRunStarted, RunStarted{Agent: "coding"}),
 		newTestEvent(EventTurnStarted, TurnStarted{Turn: 1}),
 		newTestEvent(EventMessageDelta, MessageDelta{Kind: ai.StreamTextDelta, Text: "working"}),
-		newTestEvent(EventMessageCommitted, MessageCommitted{Message: ai.AssistantText("working")}),
+		newTestEvent(EventMessageCommitted, MessageCommitted{Message: ai.Assistant(
+			ai.Text("working"),
+			ai.ToolCallPart{
+				ID: "task-1", Name: tasklist.ToolName,
+				Args: ai.JSON(`{"plan":[{"step":"Inspect","status":"completed"},{"step":"Implement","status":"pending"}]}`),
+			},
+		)}),
 		newTestEvent(EventToolStarted, ToolStarted{Turn: 1, Call: call}),
 		newTestEvent(EventToolUpdated, ToolUpdated{
 			Turn: 1, Call: call,

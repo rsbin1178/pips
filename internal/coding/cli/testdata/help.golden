@@ -10,6 +10,7 @@ Available Commands:
   doctor           Check coding agent prerequisites
   exec             Run one non-interactive coding request
   help             Help about any command
+  resume           Resume a durable coding session
   session          Inspect durable coding sessions
   ssh              Run Pips in a remote workspace
   version          Print build version information

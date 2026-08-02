@@ -339,7 +339,8 @@ func (r *Runtime) bootstrapTeamWorkerState(
 	result, err := BootstrapState(BootstrapOptions{
 		SessionID: handle.Metadata().ID,
 		Provider:  r.model.Provider(), ModelID: r.model.ModelID(),
-		Mode: r.currentOperatingMode(), Path: handle.Session().Path(),
+		ContextWindow: r.resolved.Limits.ContextWindow,
+		Mode:          r.currentOperatingMode(), Path: handle.Session().Path(),
 		HasPendingToolCalls: len(pending) != 0, Tree: tree,
 	})
 	if err != nil {

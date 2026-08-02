@@ -12,6 +12,7 @@ import (
 	"github.com/rsbin/pips/internal/coding/attachment"
 	"github.com/rsbin/pips/internal/coding/config"
 	"github.com/rsbin/pips/internal/coding/modelcatalog"
+	"github.com/rsbin/pips/internal/coding/statusline"
 )
 
 type pickerKind uint8
@@ -25,6 +26,7 @@ const (
 	pickerSkill
 	pickerFile
 	pickerMode
+	pickerStatusLine
 )
 
 type pickerState struct {
@@ -47,6 +49,8 @@ type pickerState struct {
 	tokenStart       int
 	tokenEnd         int
 	generation       uint64
+	statusItems      []statusline.Item
+	statusEnabled    map[statusline.Item]bool
 }
 
 func (m *Model) openModelPicker() {
@@ -140,6 +144,8 @@ func (m *Model) updatePickerKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.updateFilePickerKey(message)
 	case pickerMode:
 		return m.updateModePickerKey(message)
+	case pickerStatusLine:
+		return m.updateStatusLinePickerKey(message)
 	default:
 		return m, nil
 	}

@@ -40,6 +40,7 @@ var commands = []commandDescriptor{
 	{name: commandTeam, description: "propose or inspect a coding Team", idleOnly: true, arguments: true},
 	{name: "skills", description: "enable or disable project Skills", idleOnly: true},
 	{name: "model", description: "switch the process-local model", idleOnly: true},
+	{name: "statusline", description: "configure status-line fields", idleOnly: true},
 	{name: "tree", description: "navigate the current session tree", idleOnly: true},
 	{name: "fork", description: "fork a node into a new session", idleOnly: true},
 	{name: "compact", description: "preview and compact older context", idleOnly: true},
@@ -197,6 +198,13 @@ func (m *Model) executeCommand(command commandDescriptor) (tea.Model, tea.Cmd) {
 		m.closeCommandPicker(false)
 		m.restoreCommandComposer(previous)
 		m.openModelPicker()
+
+		return m, nil
+	case "statusline":
+		previous := m.picker.previousComposer
+		m.closeCommandPicker(false)
+		m.restoreCommandComposer(previous)
+		m.openStatusLinePicker()
 
 		return m, nil
 	case "agents":

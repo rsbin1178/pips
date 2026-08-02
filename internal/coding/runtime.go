@@ -484,6 +484,7 @@ func openRuntime(
 		SessionID:           handle.Metadata().ID,
 		Provider:            resolved.Ref.Provider,
 		ModelID:             resolved.Ref.Model,
+		ContextWindow:       resolved.Limits.ContextWindow,
 		Mode:                options.Config.Mode,
 		Path:                runtime.session.Path(),
 		HasPendingToolCalls: len(pending) > 0,

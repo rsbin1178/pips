@@ -43,13 +43,20 @@ func acquirePlatformLock(ctx context.Context, path string) (sessionLock, error) 
 	}
 
 	if err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
+			owner := readLockRecord(file)
+			_ = file.Close()
+
+			return nil, &LockedError{
+				Path: path, OwnerPID: owner.PID, AcquiredAt: owner.AcquiredAt,
+			}
+		}
 		_ = file.Close()
 
-		if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
-			return nil, fmt.Errorf("%w: %q", ErrLocked, path)
-		}
-
 		return nil, fmt.Errorf("coding session: acquire lock: %w", err)
+	}
+	if err := writeLockRecord(file); err != nil {
+		return nil, errors.Join(err, unix.Flock(fd, unix.LOCK_UN), file.Close())
 	}
 
 	if err := ctx.Err(); err != nil {
