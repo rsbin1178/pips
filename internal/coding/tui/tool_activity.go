@@ -420,7 +420,7 @@ func safeCompactURL(value string) string {
 }
 
 func compactToolPreview(activity toolActivity) []string {
-	if containsSensitiveToolText(activity.body) {
+	if activity.class != toolClassPatch && containsSensitiveToolText(activity.body) {
 		return nil
 	}
 
@@ -436,6 +436,9 @@ func compactToolPreview(activity toolActivity) []string {
 	case toolClassPatch:
 		if !activity.hasHeader {
 			return nil
+		}
+		if preview, ok := compactPatchDiffPreview(activity); ok {
+			return preview
 		}
 
 		return patchResultLines(activity.body, compactToolPreviewLines)
@@ -827,6 +830,19 @@ func toolActivityRowColor(
 	exploreLimit int,
 	palette colorPalette,
 ) color.Color {
+	if class == toolClassPatch && len(activities) > 0 && index < len(activities[0].preview) {
+		row := strings.TrimLeft(activities[0].preview[index], " ")
+		switch {
+		case strings.HasPrefix(row, "A "), strings.HasPrefix(row, "+"):
+			return palette.idle
+		case strings.HasPrefix(row, "D "), strings.HasPrefix(row, "-"):
+			return palette.error
+		case strings.HasPrefix(row, "M "):
+			return palette.active
+		default:
+			return palette.muted
+		}
+	}
 	if class != toolClassExplore || index >= len(activities) ||
 		(exploreLimit > 0 && len(activities) > exploreLimit && index == exploreLimit) {
 		return palette.muted
@@ -913,9 +929,18 @@ func toolActivityHeading(
 		if state == toolStateRunning {
 			return glyph, "Updating workspace", ""
 		}
+		if state == toolStateSucceeded {
+			if verb, subject, ok := singlePatchChange(activity); ok {
+				return glyph, verb, subject
+			}
+		}
 		verb := "Updated workspace"
 		if activity.hasHeader && activity.header.Counts.Files > 0 {
-			verb = fmt.Sprintf("Updated %d files", activity.header.Counts.Files)
+			label := "files"
+			if activity.header.Counts.Files == 1 {
+				label = fileCountSingular
+			}
+			verb = fmt.Sprintf("Updated %d %s", activity.header.Counts.Files, label)
 		}
 		switch state {
 		case toolStateFailed:
@@ -1021,7 +1046,18 @@ func toolActivityRows(
 		}
 
 		return rows
-	case toolClassShell, toolClassPatch:
+	case toolClassShell:
+		return activities[0].preview
+	case toolClassPatch:
+		if _, parsed := parsePatchDisplayChanges(activities[0]); !parsed {
+			if _, _, single := singlePatchChange(activities[0]); single {
+				return nil
+			}
+		}
+		if len(activities[0].preview) == 0 {
+			return nil
+		}
+
 		return activities[0].preview
 	case toolClassGeneric:
 		return append([]string{activities[0].invocation}, activities[0].preview...)
@@ -1043,6 +1079,32 @@ func toolActivityReason(activity toolActivity) string {
 	}
 
 	return toolStateTextFailed
+}
+
+func singlePatchChange(activity toolActivity) (verb, subject string, ok bool) {
+	if activity.state != toolStateSucceeded || !activity.hasHeader ||
+		activity.header.Counts.Files != 1 {
+		return "", "", false
+	}
+	lines := patchResultLines(activity.body, 2)
+	if len(lines) != 1 || len(lines[0]) < 3 || lines[0][1] != ' ' {
+		return "", "", false
+	}
+
+	subject = safeWorkspaceToolPath(strings.TrimSpace(lines[0][2:]))
+	if subject == "" || subject == "[invalid path]" {
+		return "", "", false
+	}
+	switch lines[0][0] {
+	case 'A':
+		return "Added", subject, true
+	case 'M':
+		return "Edited", subject, true
+	case 'D':
+		return "Deleted", subject, true
+	default:
+		return "", "", false
+	}
 }
 
 func toolActivityIDs(block timelineBlock) []string {

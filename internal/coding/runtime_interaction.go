@@ -1412,6 +1412,7 @@ func (r *Runtime) settleAcceptedPlanReview(
 
 func workspaceChanged(report changes.Report) WorkspaceChanged {
 	entries := report.Entries()
+	summary := report.Summary()
 	projected := make([]WorkspaceChange, 0, min(len(entries), maxEventItems))
 	truncated := report.Truncated()
 	for _, entry := range entries {
@@ -1436,7 +1437,12 @@ func workspaceChanged(report changes.Report) WorkspaceChanged {
 	diff, diffTruncated := boundedEventText(report.Diff(), maxEventTextBytes)
 
 	return WorkspaceChanged{
-		Entries: projected, Diff: diff, Truncated: truncated || diffTruncated,
+		Entries:   projected,
+		Diff:      diff,
+		Files:     summary.Files,
+		Additions: summary.Additions,
+		Deletions: summary.Deletions,
+		Truncated: truncated || diffTruncated,
 	}
 }
 

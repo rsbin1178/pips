@@ -388,7 +388,7 @@ func (i *Inspector) diffSection(
 		return changes.DiffSection{}, err
 	}
 
-	additions, deletions := diffLineCounts(diff)
+	additions, deletions := changes.CountUnifiedDiffLines(diff)
 
 	return changes.DiffSection{
 		Summary: changes.DiffSummary{
@@ -396,27 +396,6 @@ func (i *Inspector) diffSection(
 		},
 		Diff: diff, Truncated: truncated,
 	}, nil
-}
-
-func diffLineCounts(diff string) (int, int) {
-	additions := 0
-	deletions := 0
-	inHunk := false
-
-	for line := range strings.SplitSeq(diff, "\n") {
-		switch {
-		case strings.HasPrefix(line, "@@"):
-			inHunk = true
-		case strings.HasPrefix(line, "diff --git "):
-			inHunk = false
-		case inHunk && strings.HasPrefix(line, "+"):
-			additions++
-		case inHunk && strings.HasPrefix(line, "-"):
-			deletions++
-		}
-	}
-
-	return additions, deletions
 }
 
 func (i *Inspector) untrackedSection(
@@ -462,7 +441,7 @@ func (i *Inspector) untrackedSection(
 	}
 
 	section.Diff = content.String()
-	section.Summary.Additions, section.Summary.Deletions = diffLineCounts(section.Diff)
+	section.Summary.Additions, section.Summary.Deletions = changes.CountUnifiedDiffLines(section.Diff)
 
 	return section, nil
 }

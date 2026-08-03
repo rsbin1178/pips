@@ -12,6 +12,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding"
+	"github.com/rsbin/pips/internal/coding/changes"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -78,7 +79,10 @@ func visualIdleState() coding.State {
 		),
 	}}
 	state.Changes = &coding.WorkspaceChanged{
-		Entries: []coding.WorkspaceChange{{Path: "internal/coding/tui/bridge.go"}},
+		Entries: []coding.WorkspaceChange{{
+			Path: "internal/coding/tui/bridge.go", Kind: changes.KindModified,
+		}},
+		Files: 1, Additions: 4, Deletions: 1,
 	}
 
 	return state
