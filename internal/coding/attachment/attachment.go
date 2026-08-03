@@ -31,7 +31,7 @@ const (
 )
 
 var (
-	// ErrDenied means a path is a known credential candidate or private VCS path.
+	// ErrDenied means a path enters private VCS metadata.
 	ErrDenied = errors.New("coding attachment: path denied")
 	// ErrLimit means a discovery or text-content boundary was exceeded.
 	ErrLimit = errors.New("coding attachment: limit exceeded")
@@ -95,8 +95,8 @@ func (t Text) PromptText() string {
 	return fmt.Sprintf("\n\n[Workspace file: %s]\n%s", t.Reference.Path, t.Content)
 }
 
-// NormalizeReference validates a Workspace-relative reference, applies the
-// denylist, and derives its kind from the normalized path.
+// NormalizeReference validates a Workspace-relative reference, denies private
+// VCS metadata, and derives its kind from the normalized path.
 func NormalizeReference(reference Reference) (Reference, error) {
 	normalized, err := workspace.NormalizePath(reference.Path, false)
 	if err != nil {
@@ -128,31 +128,12 @@ func NormalizeReference(reference Reference) (Reference, error) {
 func deniedPath(name string) bool {
 	for segment := range strings.SplitSeq(name, "/") {
 		lower := strings.ToLower(segment)
-		if lower == ".git" || deniedBaseName(lower) {
+		if lower == ".git" {
 			return true
 		}
 	}
 
 	return false
-}
-
-func deniedBaseName(base string) bool {
-	if strings.HasPrefix(base, ".env") {
-		return true
-	}
-
-	if base == ".netrc" || base == ".npmrc" || base == ".pypirc" {
-		return true
-	}
-
-	if base == "id_rsa" || base == "id_dsa" || base == "id_ecdsa" ||
-		base == "id_ed25519" {
-		return true
-	}
-
-	extension := strings.ToLower(path.Ext(base))
-
-	return extension == ".pem" || extension == ".key"
 }
 
 func kindForPath(name string) Kind {

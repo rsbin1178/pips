@@ -38,13 +38,13 @@ func TestNormalizeReference(t *testing.T) {
 		{name: "backslash", path: `dir\file`, err: workspace.ErrInvalidPath},
 		{name: "control", path: "dir/line\nbreak", err: workspace.ErrInvalidPath},
 		{name: "git metadata", path: ".git/config", err: ErrDenied},
-		{name: "nested environment", path: "config/.env.production", err: ErrDenied},
-		{name: "netrc", path: ".netrc", err: ErrDenied},
-		{name: "npm credentials", path: "project/.npmrc", err: ErrDenied},
-		{name: "python credentials", path: ".pypirc", err: ErrDenied},
-		{name: "ssh key", path: "fixtures/id_ed25519", err: ErrDenied},
-		{name: "pem", path: "certs/client.pem", err: ErrDenied},
-		{name: "key extension", path: "certs/client.KEY", err: ErrDenied},
+		{name: "nested environment", path: "config/.env.production", kind: KindText},
+		{name: "netrc", path: ".netrc", kind: KindText},
+		{name: "npm configuration", path: "project/.npmrc", kind: KindText},
+		{name: "python configuration", path: ".pypirc", kind: KindText},
+		{name: "ssh-shaped filename", path: "fixtures/id_ed25519", kind: KindText},
+		{name: "pem extension", path: "certs/client.pem", kind: KindText},
+		{name: "key extension", path: "certs/client.KEY", kind: KindText},
 	}
 
 	for _, test := range tests {
@@ -87,6 +87,8 @@ func TestDiscoverFiltersAndSortsWorkspaceFiles(t *testing.T) {
 
 	assert.False(t, snapshot.Truncated)
 	assert.Equal(t, []Summary{
+		{Path: ".env.local", Kind: KindText, Size: 7},
+		{Path: "keys/id_rsa", Kind: KindText, Size: 7},
 		{Path: "src/main.go", Kind: KindText, Size: 12},
 		{Path: "src/main.png", Kind: KindImage, Size: 15},
 		{Path: "src/重复.go", Kind: KindText, Size: 16},
@@ -96,7 +98,72 @@ func TestDiscoverFiltersAndSortsWorkspaceFiles(t *testing.T) {
 
 	cloned := snapshot.Clone()
 	cloned.Files[0].Path = "changed"
-	assert.Equal(t, "src/main.go", snapshot.Files[0].Path)
+	assert.Equal(t, ".env.local", snapshot.Files[0].Path)
+}
+
+func TestDiscoverCandidatesFiltersAndSortsWorkspaceFiles(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeFixture(t, root, ".gitignore", ".npm-cache/\n")
+	writeFixture(t, root, "src/main.go", "package main")
+	writeFixture(t, root, ".npm-cache/CACHEDIR.TAG", "cache")
+	writeFixture(t, root, ".env.example", "private")
+	require.NoError(t, os.Symlink("src/main.go", filepath.Join(root, "linked.go")))
+	tree := openAttachmentTree(t, root)
+
+	snapshot, err := DiscoverCandidates(t.Context(), tree, []string{
+		"src/main.go",
+		"missing.txt",
+		"linked.go",
+		".gitignore",
+		".env.example",
+	})
+	require.NoError(t, err)
+	assert.False(t, snapshot.Truncated)
+	assert.Equal(t, []Summary{
+		{Path: ".env.example", Kind: KindText, Size: 7},
+		{Path: ".gitignore", Kind: KindText, Size: 12},
+		{Path: "src/main.go", Kind: KindText, Size: 12},
+	}, snapshot.Files)
+}
+
+func TestDiscoverCandidatesHonorsEntryAndResultLimits(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	for _, name := range []string{"a.txt", "b.txt", "c.txt"} {
+		writeFixture(t, root, name, name)
+	}
+
+	tree := openAttachmentTree(t, root)
+	candidates := []string{"a.txt", "b.txt", "c.txt"}
+
+	byEntries, err := discoverCandidates(
+		t.Context(),
+		tree,
+		candidates,
+		discoveryLimits{entries: 2, results: 10},
+	)
+	require.NoError(t, err)
+	assert.True(t, byEntries.Truncated)
+	assert.Equal(t, []string{"a.txt", "b.txt"}, []string{
+		byEntries.Files[0].Path,
+		byEntries.Files[1].Path,
+	})
+
+	byResults, err := discoverCandidates(
+		t.Context(),
+		tree,
+		candidates,
+		discoveryLimits{entries: 10, results: 2},
+	)
+	require.NoError(t, err)
+	assert.True(t, byResults.Truncated)
+	assert.Equal(t, []string{"a.txt", "b.txt"}, []string{
+		byResults.Files[0].Path,
+		byResults.Files[1].Path,
+	})
 }
 
 func TestDiscoverHonorsEntryAndResultLimits(t *testing.T) {
@@ -147,6 +214,37 @@ func TestDiscoverHandlesDeepTreesAndCancellation(t *testing.T) {
 
 	_, err = Discover(canceled, tree)
 	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestResolveTextAllowsCredentialShapedPaths(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+
+	paths := []string{
+		".env.example",
+		".netrc",
+		"project/.npmrc",
+		".pypirc",
+		"fixtures/id_ed25519",
+		"certs/client.pem",
+		"certs/client.key",
+	}
+	for _, name := range paths {
+		writeFixture(t, root, name, "placeholder")
+	}
+
+	for _, name := range paths {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			tree := openAttachmentTree(t, root)
+			resolved, err := ResolveText(t.Context(), tree, Reference{Path: name})
+			require.NoError(t, err)
+			assert.Equal(t, name, resolved.Reference.Path)
+			assert.Equal(t, "placeholder", resolved.Content)
+		})
+	}
 }
 
 func TestResolveTextUsesStableOpenedHandle(t *testing.T) {
@@ -223,7 +321,7 @@ func TestResolveTextRejectsInvalidContentAndUnsafePaths(t *testing.T) {
 		{name: "size", path: "large.txt", err: ErrLimit},
 		{name: "symlink parent", path: "linked/file.txt", err: workspace.ErrSymlink},
 		{name: "image is not text", path: "image.png", err: workspace.ErrChanged},
-		{name: "denied", path: ".env", err: ErrDenied},
+		{name: "git metadata", path: ".git/config", err: ErrDenied},
 	}
 
 	for _, test := range tests {

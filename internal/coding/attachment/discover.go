@@ -64,6 +64,86 @@ func Discover(ctx context.Context, tree *workspace.Tree) (Snapshot, error) {
 	return Snapshot{}, err
 }
 
+// DiscoverCandidates returns bounded metadata for an already filtered set of
+// Workspace-relative file candidates without reading their contents.
+func DiscoverCandidates(
+	ctx context.Context,
+	tree *workspace.Tree,
+	candidates []string,
+) (Snapshot, error) {
+	if err := ctx.Err(); err != nil {
+		return Snapshot{}, err
+	}
+
+	scanCtx, cancel := context.WithTimeout(ctx, discoveryTimeout)
+	defer cancel()
+
+	snapshot, err := discoverCandidates(
+		scanCtx,
+		tree,
+		candidates,
+		discoveryLimits{entries: maximumDiscoveryEntries, results: maximumDiscoveryResults},
+	)
+	if err == nil {
+		return snapshot, nil
+	}
+
+	if ctx.Err() != nil {
+		return Snapshot{}, ctx.Err()
+	}
+
+	if scanCtx.Err() != nil {
+		snapshot.Truncated = true
+
+		return snapshot, nil
+	}
+
+	return Snapshot{}, err
+}
+
+func discoverCandidates(
+	ctx context.Context,
+	tree *workspace.Tree,
+	candidates []string,
+	limits discoveryLimits,
+) (Snapshot, error) {
+	if tree == nil || limits.entries <= 0 || limits.results <= 0 {
+		return Snapshot{}, fmt.Errorf("%w: invalid discovery configuration", ErrLimit)
+	}
+
+	paths := slices.Clone(candidates)
+	sort.Strings(paths)
+	paths = slices.Compact(paths)
+
+	snapshot := Snapshot{Files: make([]Summary, 0, min(limits.results, len(paths)))}
+	if len(paths) > limits.entries {
+		paths = paths[:limits.entries:limits.entries]
+		snapshot.Truncated = true
+	}
+
+	for _, name := range paths {
+		if err := ctx.Err(); err != nil {
+			return snapshot, err
+		}
+
+		file, err := inspectDiscoveryCandidate(tree, name)
+		if err != nil {
+			return Snapshot{}, err
+		}
+
+		if file.Path != "" {
+			snapshot.Files = append(snapshot.Files, file)
+		}
+	}
+
+	if len(snapshot.Files) > limits.results {
+		snapshot.Files = snapshot.Files[:limits.results:limits.results]
+		snapshot.Truncated = true
+	}
+
+	return snapshot, nil
+}
+
 func discover(
 	ctx context.Context,
 	tree *workspace.Tree,
@@ -169,20 +249,13 @@ func inspectDiscoveryEntry(
 	entryName string,
 ) (Summary, string, error) {
 	name := joinPath(directory, entryName)
-	if !eligiblePath(name) {
-		return Summary{}, "", nil
-	}
 
-	info, err := tree.Lstat(name)
-	if errors.Is(err, fs.ErrNotExist) {
-		return Summary{}, "", nil
-	}
-
+	info, eligible, err := inspectDiscoveryPath(tree, name)
 	if err != nil {
-		return Summary{}, "", fmt.Errorf("coding attachment: inspect %q: %w", name, err)
+		return Summary{}, "", err
 	}
 
-	if info.Mode()&fs.ModeSymlink != 0 {
+	if !eligible {
 		return Summary{}, "", nil
 	}
 
@@ -195,6 +268,43 @@ func inspectDiscoveryEntry(
 	}
 
 	return Summary{Path: name, Kind: kindForPath(name), Size: info.Size()}, "", nil
+}
+
+func inspectDiscoveryCandidate(tree *workspace.Tree, name string) (Summary, error) {
+	info, eligible, err := inspectDiscoveryPath(tree, name)
+	if err != nil {
+		return Summary{}, err
+	}
+
+	if !eligible || !info.Mode().IsRegular() {
+		return Summary{}, nil
+	}
+
+	return Summary{Path: name, Kind: kindForPath(name), Size: info.Size()}, nil
+}
+
+func inspectDiscoveryPath(
+	tree *workspace.Tree,
+	name string,
+) (fs.FileInfo, bool, error) {
+	if !eligiblePath(name) {
+		return nil, false, nil
+	}
+
+	info, err := tree.Lstat(name)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, false, nil
+	}
+
+	if err != nil {
+		return nil, false, fmt.Errorf("coding attachment: inspect %q: %w", name, err)
+	}
+
+	if info.Mode()&fs.ModeSymlink != 0 {
+		return nil, false, nil
+	}
+
+	return info, true, nil
 }
 
 func readDirectory(
