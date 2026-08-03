@@ -120,6 +120,9 @@ func renderToolDetailSection(index int, activity toolActivity) string {
 	if facts := toolResultFacts(activity); facts != "" {
 		lines = append(lines, "Facts: "+facts)
 	}
+	if changes := patchDetailChanges(activity); changes != "" {
+		lines = append(lines, "Changes:", changes)
+	}
 	if update := truncateText(sanitizeToolText(activity.update), maximumToolDetailBytes); update != "" {
 		lines = append(lines, "Progress:", update)
 	}

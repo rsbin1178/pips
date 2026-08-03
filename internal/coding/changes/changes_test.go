@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/rsbin/pips/agent"
@@ -67,7 +68,40 @@ func TestInspectorBoundaryAndDefensiveValues(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, report.Entries(), got.Entries())
 	assert.Equal(t, "diff", got.Diff())
+	assert.Equal(t, changes.DiffSummary{Files: 1}, got.Summary())
 	assert.False(t, got.Truncated())
+}
+
+func TestReportSummarizesUnifiedDiffHunks(t *testing.T) {
+	t.Parallel()
+
+	diff := strings.Join([]string{
+		"diff --git a/first.go b/first.go",
+		"--- a/first.go",
+		"+++ b/first.go",
+		"@@ -1,2 +1,3 @@",
+		"-old",
+		"+new",
+		"+added",
+		" context",
+		"diff --git a/second.go b/second.go",
+		"--- a/second.go",
+		"+++ b/second.go",
+		"@@ -1 +0,0 @@",
+		"-removed",
+		`\ No newline at end of file`,
+	}, "\n")
+
+	report, err := changes.NewReport([]changes.Entry{
+		{Path: "first.go", Kind: changes.KindModified},
+		{Path: "second.go", Kind: changes.KindDeleted},
+	}, diff, false)
+	require.NoError(t, err)
+
+	assert.Equal(t, changes.DiffSummary{
+		Files: 2, Additions: 2, Deletions: 2,
+	}, report.Summary())
+	assert.Equal(t, 2, report.Summary().Files)
 }
 
 func TestChangeValuesRejectInvalidInput(t *testing.T) {

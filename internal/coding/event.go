@@ -526,6 +526,9 @@ type WorkspaceChange struct {
 type WorkspaceChanged struct {
 	Entries   []WorkspaceChange `json:"entries"`
 	Diff      string            `json:"diff,omitempty"`
+	Files     int               `json:"files,omitempty"`
+	Additions int               `json:"additions,omitempty"`
+	Deletions int               `json:"deletions,omitempty"`
 	Truncated bool              `json:"truncated"`
 }
 
@@ -1654,7 +1657,11 @@ func validApprovalChoice(choice approval.Choice) bool {
 }
 
 func validateWorkspaceChanged(value WorkspaceChanged) error {
-	if len(value.Entries) > maxEventItems || !validBoundedText(value.Diff, maxEventTextBytes, true) {
+	if len(value.Entries) > maxEventItems ||
+		!validBoundedText(value.Diff, maxEventTextBytes, true) ||
+		value.Files < 0 || value.Additions < 0 || value.Deletions < 0 ||
+		(value.Files > 0 && value.Files < len(value.Entries)) ||
+		(value.Files == 0 && (value.Additions > 0 || value.Deletions > 0)) {
 		return errors.New("invalid workspace report")
 	}
 

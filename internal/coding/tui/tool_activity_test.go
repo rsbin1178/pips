@@ -2,6 +2,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -388,20 +389,19 @@ func TestTimelineReconstructsDurableSubagentToolActivity(t *testing.T) {
 	assert.NotContains(t, rendered, "child-1")
 }
 
-func TestTimelineRendersPatchSummaryWithoutPatchBody(t *testing.T) {
+func TestTimelineRendersBoundedPatchCodeForEveryPath(t *testing.T) {
 	t.Parallel()
 
-	const patchSecret = "private patch body"
 	result := ai.ToolResultText(
 		"call-1",
 		"apply_patch",
 		`{"schema":"pips.coding.tool_result/v1alpha1","ok":true,"tool":"apply_patch","counts":{"files":3}}`+
-			"\n\nA added.go\nM changed.go\nD removed.go\n",
+			"\n\nM .env\nA .env.example\nD removed.go\n",
 	)
 	state := coding.State{Tools: []coding.ToolState{{
 		Call: coding.ToolCall{
 			ID: "call-1", Name: "apply_patch",
-			Arguments: ai.JSON(`{"patch":"*** Begin Patch\\n+` + patchSecret + `\\n*** End Patch"}`),
+			Arguments: ai.JSON(`{"patch":"*** Begin Patch\n*** Update File: .env\n@@\n-API_KEY=old\n+API_KEY=new\n*** Add File: .env.example\n+API_KEY=example\n*** Delete File: removed.go\n*** End Patch\n"}`),
 		},
 		Status: coding.ToolStatusCompleted, Result: result,
 	}}}
@@ -414,10 +414,171 @@ func TestTimelineRendersPatchSummaryWithoutPatchBody(t *testing.T) {
 		true,
 	)
 	assert.Contains(t, rendered, "• Updated 3 files")
-	assert.Contains(t, rendered, "A added.go")
-	assert.Contains(t, rendered, "M changed.go")
+	assert.Contains(t, rendered, "M .env")
+	assert.Contains(t, rendered, "-API_KEY=old")
+	assert.Contains(t, rendered, "+API_KEY=new")
+	assert.Contains(t, rendered, "A .env.example")
+	assert.Contains(t, rendered, "+API_KEY=example")
 	assert.Contains(t, rendered, "D removed.go")
-	assert.NotContains(t, rendered, patchSecret)
+}
+
+func TestTimelineBoundsPatchCodeAndToolDetailKeepsBoundedRemainder(t *testing.T) {
+	t.Parallel()
+
+	var patch strings.Builder
+	patch.WriteString("*** Begin Patch\n*** Add File: many.txt\n")
+	for index := range 25 {
+		fmt.Fprintf(&patch, "+line-%02d\n", index)
+	}
+	patch.WriteString("*** End Patch\n")
+	arguments, err := json.Marshal(map[string]string{"patch": patch.String()})
+	require.NoError(t, err)
+	result := ai.ToolResultText(
+		"call-1",
+		"apply_patch",
+		`{"schema":"pips.coding.tool_result/v1alpha1","ok":true,"tool":"apply_patch","counts":{"files":1}}`+
+			"\n\nA many.txt\n",
+	)
+	state := coding.State{Tools: []coding.ToolState{{
+		Call: coding.ToolCall{
+			ID: "call-1", Name: "apply_patch", Arguments: ai.JSON(arguments),
+		},
+		Status: coding.ToolStatusCompleted, Result: result,
+	}}}
+	blocks := projectTimeline(state)
+
+	rendered := renderTimeline(
+		blocks,
+		newMarkdownRenderer(8),
+		80,
+		themeDark,
+		true,
+	)
+	assert.Contains(t, rendered, "• Added many.txt")
+	assert.Contains(t, rendered, "+line-00")
+	assert.Contains(t, rendered, "… +6 diff rows (ctrl+t for details)")
+	assert.NotContains(t, rendered, "+line-24")
+
+	detail := newToolDetailView(blocks[0])
+	assert.Contains(t, detail.content, "Changes:\nA many.txt")
+	assert.Contains(t, detail.content, "+line-24")
+}
+
+func TestPatchCodePreviewBoundsLongLinesAndDetailBytes(t *testing.T) {
+	t.Parallel()
+
+	longLine := strings.Repeat("x", maximumToolDetailBytes+2_000)
+	patch := "*** Begin Patch\n*** Add File: long.txt\n+" + longLine + "\n*** End Patch\n"
+	arguments, err := json.Marshal(map[string]string{"patch": patch})
+	require.NoError(t, err)
+	result := ai.ToolResultText(
+		"call-1",
+		"apply_patch",
+		`{"schema":"pips.coding.tool_result/v1alpha1","ok":true,"tool":"apply_patch","counts":{"files":1}}`+
+			"\n\nA long.txt\n",
+	)
+	state := coding.State{Tools: []coding.ToolState{{
+		Call: coding.ToolCall{
+			ID: "call-1", Name: "apply_patch", Arguments: ai.JSON(arguments),
+		},
+		Status: coding.ToolStatusCompleted, Result: result,
+	}}}
+	blocks := projectTimeline(state)
+	require.Len(t, blocks, 1)
+	require.Len(t, blocks[0].tools, 1)
+
+	preview := blocks[0].tools[0].preview
+	require.Len(t, preview, 1)
+	assert.LessOrEqual(t, len(preview[0]), compactPatchPreviewLineBytes+len("…"))
+	assert.True(t, strings.HasSuffix(preview[0], "…"))
+
+	detail := patchDetailChanges(blocks[0].tools[0])
+	assert.LessOrEqual(t, len(detail), maximumToolDetailBytes+len("…"))
+	assert.True(t, strings.HasSuffix(detail, "…"))
+}
+
+func TestTimelineDoesNotRenderPatchCodeForFailedOrMalformedCalls(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		result ai.Message
+	}{
+		{
+			name: "failed",
+			result: ai.ToolResultError(
+				"call-1",
+				"apply_patch",
+				`{"schema":"pips.coding.tool_result/v1alpha1","ok":false,"tool":"apply_patch","code":"conflict"}`,
+			),
+		},
+		{
+			name: "malformed",
+			result: ai.ToolResultText(
+				"call-1",
+				"apply_patch",
+				`{"schema":"pips.coding.tool_result/v1alpha1","ok":true,"tool":"apply_patch","counts":{"files":1}}`+
+					"\n\nM file.txt\n",
+			),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			state := coding.State{Tools: []coding.ToolState{{
+				Call: coding.ToolCall{
+					ID: "call-1", Name: "apply_patch",
+					Arguments: ai.JSON(`{"patch":"not a valid patch +do-not-render"}`),
+				},
+				Status: coding.ToolStatusCompleted, Result: test.result,
+			}}}
+			rendered := renderTimeline(
+				projectTimeline(state), newMarkdownRenderer(8), 80, themeDark, true,
+			)
+
+			assert.NotContains(t, rendered, "+do-not-render")
+		})
+	}
+}
+
+func TestTimelineNamesSingleFilePatchOperation(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		row  string
+		want string
+	}{
+		{row: "A added.go\n", want: "• Added added.go"},
+		{row: "M changed.go\n", want: "• Edited changed.go"},
+		{row: "D removed.go\n", want: "• Deleted removed.go"},
+	}
+	for _, test := range tests {
+		t.Run(test.row[:1], func(t *testing.T) {
+			t.Parallel()
+
+			result := ai.ToolResultText(
+				"call-1",
+				"apply_patch",
+				`{"schema":"pips.coding.tool_result/v1alpha1","ok":true,"tool":"apply_patch","counts":{"files":1}}`+
+					"\n\n"+test.row,
+			)
+			state := coding.State{Tools: []coding.ToolState{{
+				Call:   coding.ToolCall{ID: "call-1", Name: "apply_patch"},
+				Status: coding.ToolStatusCompleted, Result: result,
+			}}}
+
+			rendered := renderTimeline(
+				projectTimeline(state),
+				newMarkdownRenderer(8),
+				80,
+				themeDark,
+				true,
+			)
+			assert.Equal(t, test.want, rendered)
+			assert.NotContains(t, rendered, strings.TrimSpace(test.row))
+		})
+	}
 }
 
 func TestTimelineBoundsExplorationRowsAtNarrowWidths(t *testing.T) {

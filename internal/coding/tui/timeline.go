@@ -41,14 +41,15 @@ const (
 )
 
 type timelineBlock struct {
-	kind     blockKind
-	id       string
-	title    string
-	body     string
-	status   string
-	position int
-	rendered bool
-	tools    []toolActivity
+	kind             blockKind
+	id               string
+	title            string
+	body             string
+	status           string
+	position         int
+	rendered         bool
+	tools            []toolActivity
+	workspaceChanges *coding.WorkspaceChanged
 }
 
 type timelineRenderOptions struct {
@@ -152,22 +153,19 @@ func projectTimelineExcluding(
 	}
 
 	if state.Changes != nil {
-		summary := fmt.Sprintf("%d workspace change(s)", len(state.Changes.Entries))
-		if state.Changes.Truncated {
-			summary += " · diff truncated"
-		}
-		blocks = append(blocks, timelineBlock{
-			kind: blockChange, title: "Pips-attributed changes", body: summary,
-			position: len(state.Transcript),
-		})
+		blocks = append(blocks, projectWorkspaceChangeBlock(
+			*state.Changes,
+			len(state.Transcript),
+		))
 	}
 
 	for _, diagnostic := range state.Diagnostics {
 		if diagnostic.Component == "changes" && diagnostic.Code == "not_repository" {
 			blocks = append(blocks, timelineBlock{
-				kind:     blockDiagnostic,
-				title:    "Workspace changes unavailable",
-				body:     "This workspace is not a Git repository; command execution is unaffected.",
+				kind:  blockDiagnostic,
+				title: "Git change summary unavailable",
+				body: "This workspace is not a Git repository. Direct apply_patch edits remain visible " +
+					"in their tool activity; repository-wide shell and generator changes cannot be attributed.",
 				position: len(state.Transcript),
 			})
 			continue
@@ -840,6 +838,9 @@ func renderTimelineBlockWithOptions(
 	}
 	if block.kind == blockTeam {
 		return renderTeamActivityBlock(block, width, theme, noColor)
+	}
+	if block.kind == blockChange {
+		return renderWorkspaceChangeBlock(block, width, theme, noColor)
 	}
 
 	return renderRegularTimelineBlock(block, markdown, width, theme, noColor)

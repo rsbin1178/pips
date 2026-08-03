@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding"
+	"github.com/rsbin/pips/internal/coding/changes"
 	"github.com/rsbin/pips/internal/coding/subagent"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -963,14 +964,17 @@ func TestScrollbackCommitsDistinctChangeAndErrorUpdates(t *testing.T) {
 
 	model := readyModel(t, true)
 	model.state.Changes = &coding.WorkspaceChanged{
-		Entries: []coding.WorkspaceChange{{Path: "first.go"}},
+		Entries: []coding.WorkspaceChange{{Path: "first.go", Kind: changes.KindModified}},
 	}
-	assert.Contains(t, model.takeStableTimeline(), "1 workspace change(s)")
+	assert.Contains(t, model.takeStableTimeline(), "Workspace changes · 1 file")
 
 	model.state.Changes = &coding.WorkspaceChanged{
-		Entries: []coding.WorkspaceChange{{Path: "first.go"}, {Path: "second.go"}},
+		Entries: []coding.WorkspaceChange{
+			{Path: "first.go", Kind: changes.KindModified},
+			{Path: "second.go", Kind: changes.KindAdded},
+		},
 	}
-	assert.Contains(t, model.takeStableTimeline(), "2 workspace change(s)")
+	assert.Contains(t, model.takeStableTimeline(), "Workspace changes · 2 files")
 
 	model.state.LastError = &coding.RuntimeError{Code: "first", Message: "first failure"}
 	assert.Contains(t, model.takeStableTimeline(), "first failure")

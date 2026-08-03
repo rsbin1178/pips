@@ -343,7 +343,10 @@ func Telemetry(event Event) (TelemetryEvent, error) {
 		projected.Tool = planreview.PresentToolName
 		projected.PlanDecision = string(value.Decision)
 	case WorkspaceChanged:
-		projected.Changes = len(value.Entries)
+		projected.Changes = value.Files
+		if projected.Changes == 0 {
+			projected.Changes = len(value.Entries)
+		}
 	case StatusChanged:
 		projected.Phase = value.Phase
 	case IntegrationDiagnostic:

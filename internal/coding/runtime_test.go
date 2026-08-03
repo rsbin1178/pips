@@ -1030,6 +1030,7 @@ func TestWorkspaceChangedBoundsEventPayload(t *testing.T) {
 	projected := workspaceChanged(report)
 	assert.Len(t, projected.Entries, maxEventItems)
 	assert.Len(t, projected.Diff, maxEventTextBytes)
+	assert.Equal(t, maxEventItems+5, projected.Files)
 	assert.True(t, projected.Truncated)
 	require.NoError(t, validateWorkspaceChanged(projected))
 }

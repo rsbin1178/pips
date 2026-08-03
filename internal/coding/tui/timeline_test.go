@@ -10,6 +10,7 @@ import (
 	"github.com/rsbin/pips/agent"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding"
+	"github.com/rsbin/pips/internal/coding/changes"
 	"github.com/rsbin/pips/internal/coding/planreview"
 	"github.com/rsbin/pips/internal/coding/question"
 	"github.com/rsbin/pips/internal/coding/subagent"
@@ -140,9 +141,10 @@ func TestTimelineRendersNonGitAttributionAsNeutralInformation(t *testing.T) {
 	}}}
 	blocks := projectTimeline(state)
 	require.Len(t, blocks, 1)
-	assert.Equal(t, "Workspace changes unavailable", blocks[0].title)
+	assert.Equal(t, "Git change summary unavailable", blocks[0].title)
 	assert.Empty(t, blocks[0].status)
-	assert.Contains(t, blocks[0].body, "command execution is unaffected")
+	assert.Contains(t, blocks[0].body, "Direct apply_patch edits remain visible")
+	assert.Contains(t, blocks[0].body, "cannot be attributed")
 
 	rendered := renderTimeline(blocks, newMarkdownRenderer(4), 80, themeDark, true)
 	assert.NotContains(t, rendered, "changes · not_repository")
@@ -235,7 +237,10 @@ func TestTimelineSummarizesChangesAndDiagnostics(t *testing.T) {
 
 	state := coding.State{
 		Changes: &coding.WorkspaceChanged{
-			Entries:   []coding.WorkspaceChange{{Path: "main.go"}},
+			Entries: []coding.WorkspaceChange{{
+				Path: "main.go", Kind: changes.KindModified,
+			}},
+			Files: 1, Additions: 3, Deletions: 1,
 			Truncated: true,
 		},
 		Diagnostics: []coding.IntegrationDiagnostic{{
@@ -252,7 +257,9 @@ func TestTimelineSummarizesChangesAndDiagnostics(t *testing.T) {
 		themeDark,
 		true,
 	)
-	assert.Contains(t, rendered, "1 workspace change(s) · diff truncated")
+	assert.Contains(t, rendered, "Workspace changes · 1 file (+3 -1) · partial report")
+	assert.Contains(t, rendered, "M  main.go")
+	assert.Contains(t, rendered, "/diff for full review")
 	assert.Contains(t, rendered, "mcp · disabled")
 	assert.NotContains(t, rendered, "diff --git")
 }

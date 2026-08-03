@@ -231,6 +231,7 @@ type Entry struct {
 type Report struct {
 	entries   []Entry
 	diff      string
+	summary   DiffSummary
 	truncated bool
 }
 
@@ -269,7 +270,16 @@ func NewReport(entries []Entry, diff string, truncated bool) (Report, error) {
 		seen[entry.Path] = struct{}{}
 	}
 
-	return Report{entries: copyEntries, diff: diff, truncated: truncated}, nil
+	additions, deletions := CountUnifiedDiffLines(diff)
+
+	return Report{
+		entries: copyEntries,
+		diff:    diff,
+		summary: DiffSummary{
+			Files: len(copyEntries), Additions: additions, Deletions: deletions,
+		},
+		truncated: truncated,
+	}, nil
 }
 
 // Entries returns a defensive copy of changed paths.
@@ -278,8 +288,32 @@ func (r Report) Entries() []Entry { return slices.Clone(r.entries) }
 // Diff returns the implementation-bounded human-readable diff.
 func (r Report) Diff() string { return r.diff }
 
+// Summary returns aggregate file and visible unified-diff line counts.
+func (r Report) Summary() DiffSummary { return r.summary }
+
 // Truncated reports whether the Inspector bounded the diff or change list.
 func (r Report) Truncated() bool { return r.truncated }
+
+// CountUnifiedDiffLines counts added and deleted content lines inside unified
+// diff hunks. File headers and no-newline markers are not content changes.
+func CountUnifiedDiffLines(diff string) (additions, deletions int) {
+	inHunk := false
+
+	for line := range strings.SplitSeq(diff, "\n") {
+		switch {
+		case strings.HasPrefix(line, "@@"):
+			inHunk = true
+		case strings.HasPrefix(line, "diff --git "):
+			inHunk = false
+		case inHunk && strings.HasPrefix(line, "+"):
+			additions++
+		case inHunk && strings.HasPrefix(line, "-"):
+			deletions++
+		}
+	}
+
+	return additions, deletions
+}
 
 func validKind(kind Kind) bool {
 	switch kind {
