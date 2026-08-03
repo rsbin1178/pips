@@ -11,18 +11,21 @@ import (
 type actionContext string
 
 const (
-	keyEnter     = "enter"
-	keyTab       = "tab"
-	keyCtrlC     = "ctrl+c"
-	keyCtrlT     = "ctrl+t"
-	keyCtrlU     = "ctrl+u"
-	keyCtrlV     = "ctrl+v"
-	keyEscape    = "esc"
-	keyLeft      = "left"
-	keyRight     = "right"
-	keyDown      = "down"
-	keyBackspace = "backspace"
-	appTitle     = "Pips"
+	keyEnter      = "enter"
+	keyTab        = "tab"
+	keyCtrlC      = "ctrl+c"
+	keyCtrlT      = "ctrl+t"
+	keyCtrlU      = "ctrl+u"
+	keyCtrlV      = "ctrl+v"
+	keyCtrlJ      = "ctrl+j"
+	keyShiftEnter = "shift+enter"
+	keySpace      = "space"
+	keyEscape     = "esc"
+	keyLeft       = "left"
+	keyRight      = "right"
+	keyDown       = "down"
+	keyBackspace  = "backspace"
+	appTitle      = "Pips"
 )
 
 const (
@@ -62,7 +65,7 @@ var defaultActions = []actionBinding{
 	{
 		ID:       actionNewline,
 		Contexts: []actionContext{contextIdle, contextRunning},
-		Keys:     []string{"ctrl+j", "shift+enter"},
+		Keys:     []string{keyCtrlJ, keyShiftEnter},
 		Label:    "newline",
 	},
 	{

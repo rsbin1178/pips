@@ -130,6 +130,7 @@ type Model struct {
 	routeSeq            uint64
 	teamProjection      teamProjectionState
 	teamInteractions    teamInteractionQueueState
+	teamPanel           teamPanelState
 	presentation        presentationState
 	prompt              promptState
 	promptSeq           uint64
@@ -238,9 +239,6 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.route.kind == routeSessions || m.route.kind == routeSkills {
 			m.route.search.SetStyles(sessionSearchStyles(m.theme, m.options.NoColor))
-		}
-		if m.route.kind == routeTeam && m.route.team != nil {
-			m.route.team.input.SetStyles(sessionSearchStyles(m.theme, m.options.NoColor))
 		}
 		m.rerenderTranscript(false)
 
@@ -475,9 +473,9 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case teamWorkerRouteEventMsg:
 		return m.applyTeamWorkerRouteEvent(message)
 	case teamWorkerControlResultMsg:
-		m.applyTeamWorkerControl(message)
-
-		return m, nil
+		return m, m.applyTeamWorkerControl(message)
+	case teamPanelControlResultMsg:
+		return m, m.applyTeamPanelControl(message)
 	case teamRouteResultMsg:
 		return m.applyTeamRouteResult(message)
 	case teamProjectionRefreshMsg:
@@ -744,10 +742,18 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.route.kind == routeTeam && m.route.team != nil &&
 			teamRouteInputStage(m.route.team.stage) {
-			var command tea.Cmd
-			m.route.team.input, command = m.route.team.input.Update(message)
+			_, err := m.composer.InsertPaste(message.Content)
+			m.streamErr = err
+			m.setLayout()
 
-			return m, command
+			return m, nil
+		}
+		if m.route.kind == routeChild && m.route.childKind == childTeamWorker {
+			_, err := m.composer.InsertPaste(message.Content)
+			m.streamErr = err
+			m.setLayout()
+
+			return m, nil
 		}
 		if m.route.kind != routeNone || m.prompt.kind != promptNone || m.composerResolving ||
 			m.clipboardLoading ||
@@ -788,7 +794,8 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 
 		return m, nil
 	case activityTickMsg:
-		if _, visible := m.activityStatus(); !visible {
+		teamActivityVisible := m.route.kind == routeTeam && m.route.team != nil && m.route.loading
+		if _, visible := m.activityStatus(); !visible && !teamActivityVisible {
 			return m, nil
 		}
 
@@ -798,13 +805,6 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			if m.route.kind == routeSessions {
 				var command tea.Cmd
 				m.route.search, command = m.route.search.Update(message)
-
-				return m, command
-			}
-			if m.route.kind == routeTeam && m.route.team != nil &&
-				teamRouteInputStage(m.route.team.stage) {
-				var command tea.Cmd
-				m.route.team.input, command = m.route.team.input.Update(message)
 
 				return m, command
 			}
@@ -980,7 +980,8 @@ func (m *Model) updateReadyKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 		return m, nil
 	}
-	if m.route.kind != routeNone {
+	inlineTeamRoute := m.teamRouteIsInline()
+	if m.route.kind != routeNone && !inlineTeamRoute {
 		return m.updateRouteKey(message)
 	}
 	if m.prompt.kind != promptNone {
@@ -988,6 +989,12 @@ func (m *Model) updateReadyKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.picker.kind != pickerNone {
 		return m.updatePickerKey(message)
+	}
+	if inlineTeamRoute {
+		return m.updateTeamRouteKey(message)
+	}
+	if command, handled := m.updateTeamPanelKey(message); handled {
+		return m, command
 	}
 	key := message.String()
 	if key == "up" && m.composer.AtFirstVisualRow() && m.composer.HistoryUp() {
@@ -1075,7 +1082,7 @@ func (m *Model) updateReadyKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 //nolint:gocyclo // Footer composition follows the explicit route/prompt/picker state machine.
 func (m *Model) readyView() tea.View {
-	if m.route.kind != routeNone {
+	if m.route.kind != routeNone && !m.teamRouteIsInline() {
 		return m.routeView()
 	}
 
@@ -1092,6 +1099,9 @@ func (m *Model) readyView() tea.View {
 		promptFooterIndex = len(footer)
 		promptContent = prompt
 		footer = append(footer, prompt)
+	}
+	if inline := m.inlineTeamRouteView(); inline != "" {
+		footer = append(footer, inline)
 	}
 	for range conversationGapHeight {
 		footer = append(footer, "")
@@ -1116,6 +1126,9 @@ func (m *Model) readyView() tea.View {
 			footer = append(footer, m.commandPickerView(availableRows))
 		}
 	} else {
+		if panel := m.teamPanelView(); panel != "" {
+			footer = append(footer, panel)
+		}
 		footer = append(footer, m.statusLineView())
 	}
 
@@ -1145,7 +1158,8 @@ func (m *Model) readyView() tea.View {
 	view.WindowTitle = appTitle
 	view.Cursor = m.composer.Cursor()
 	if m.prompt.kind != promptNone || m.picker.kind == pickerModel || m.picker.kind == pickerMode ||
-		m.picker.kind == pickerStatusLine {
+		m.picker.kind == pickerStatusLine || m.teamPanel.isFocused ||
+		(m.teamRouteIsInline() && (m.route.loading || !teamRouteInputStage(m.route.team.stage))) {
 		view.Cursor = nil
 	}
 	if m.prompt.kind == promptQuestion &&
@@ -1430,14 +1444,15 @@ func (m *Model) setLayout() {
 	if m.route.kind == routeSessions || m.route.kind == routeSkills {
 		m.route.search.SetWidth(routeSearchInputWidth(width))
 	}
-	if m.route.kind == routeTeam && m.route.team != nil {
-		m.route.team.input.SetWidth(max(1, width-4))
-	}
 }
 
 func (m *Model) composerBox() string {
+	return m.composerBoxContent(m.composer.View())
+}
+
+func (m *Model) composerBoxContent(content string) string {
 	if !m.hasComposerBox() {
-		return m.composer.View()
+		return content
 	}
 
 	style := lipgloss.NewStyle().
@@ -1450,7 +1465,7 @@ func (m *Model) composerBox() string {
 		style = style.BorderForeground(paletteFor(m.theme).separator)
 	}
 
-	return style.Render(m.composer.View())
+	return style.Render(content)
 }
 
 func (m *Model) hasComposerBox() bool {

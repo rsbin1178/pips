@@ -52,7 +52,7 @@ func (m *Model) updateStatusLinePickerKey(message tea.KeyPressMsg) (tea.Model, t
 		m.moveStatusLinePicker(-1)
 	case keyRight:
 		m.moveStatusLinePicker(1)
-	case " ", "space":
+	case " ", keySpace:
 		if item, ok := m.statusLinePickerItem(); ok {
 			m.picker.statusEnabled[item] = !m.picker.statusEnabled[item]
 			m.picker.err = nil

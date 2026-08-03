@@ -4,6 +4,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -248,6 +249,86 @@ func TestTeamWorkerInterruptUsesExactControlTarget(t *testing.T) {
 	assert.Equal(t, child.worker.Target.TaskID, controls[0].TaskID)
 	assert.Equal(t, child.worker.Target.AttemptID, controls[0].ExpectedAttemptID)
 	assert.Equal(t, child.worker.Target.OwnerGeneration, controls[0].OwnerGeneration)
+}
+
+func TestTeamWorkerRouteUsesComposerForExactDirectMessageAndRestoresParentDraft(t *testing.T) {
+	t.Parallel()
+
+	controller := newTeamWorkerRouteController()
+	model := readyModelWithController(t, controller, true)
+	child := onlyTeamWorkerChild(t, controller.viewSnapshot())
+	model.composer.SetValue("parent draft")
+
+	driveModelCommands(t, model, model.openChildRoute(child))
+	assert.Equal(t, routeChild, model.route.kind)
+	assert.Empty(t, model.composer.Value())
+	require.NotNil(t, model.View().Cursor)
+	assert.Contains(t, model.View().Content, "Enter me")
+
+	model.Update(tea.KeyPressMsg{Text: "check the exact ownership edge"})
+	_, command := model.Update(key(keyEnter))
+	require.NotNil(t, command)
+	driveModelCommands(t, model, command)
+	assert.Empty(t, model.composer.Value())
+
+	controls := controller.controlsSnapshot()
+	require.Len(t, controls, 1)
+	request := controls[0]
+	assert.Equal(t, coding.TeamControlMessage, request.Action)
+	assert.Equal(t, child.worker.Target.TeamID, request.TeamID)
+	assert.Equal(t, child.worker.Target.MemberID, request.MemberID)
+	assert.Equal(t, child.worker.Target.TaskID, request.TaskID)
+	assert.Equal(t, child.worker.Target.AttemptID, request.ExpectedAttemptID)
+	assert.Equal(t, child.worker.Target.OwnerGeneration, request.OwnerGeneration)
+	assert.Equal(t, "check the exact ownership edge", request.Text)
+
+	_, command = model.Update(key(keyEscape))
+	driveModelCommands(t, model, command)
+	assert.Equal(t, routeNone, model.route.kind)
+	assert.Equal(t, "parent draft", model.composer.Value())
+}
+
+func TestTeamWorkerMessageResolvesPasteAndRetainsDraftOnFailure(t *testing.T) {
+	t.Parallel()
+
+	controller := newTeamWorkerRouteController()
+	controller.controlErr = errors.New("control unavailable")
+	model := readyModelWithController(t, controller, true)
+	child := onlyTeamWorkerChild(t, controller.viewSnapshot())
+	driveModelCommands(t, model, model.openChildRoute(child))
+
+	pasted := strings.Repeat("review this boundary\n", 9)
+	placeholder, err := model.composer.InsertPaste(pasted)
+	require.NoError(t, err)
+	assert.True(t, placeholder)
+	draft := model.composer.Snapshot()
+
+	_, command := model.Update(key(keyEnter))
+	require.NotNil(t, command)
+	driveModelCommands(t, model, command)
+	assert.Equal(t, draft, model.composer.Snapshot())
+	require.Error(t, model.route.err)
+	require.NotNil(t, model.View().Cursor)
+	assert.Equal(t, strings.TrimSpace(pasted), controller.controlsSnapshot()[0].Text)
+}
+
+func TestTeamWorkerMessageIsReadOnlyInPlanMode(t *testing.T) {
+	t.Parallel()
+
+	state := readyState()
+	state.Mode = coding.ModePlan
+	controller := newTeamWorkerRouteController()
+	controller.state = state
+	model := readyModelWithController(t, controller, true)
+	child := onlyTeamWorkerChild(t, controller.viewSnapshot())
+	driveModelCommands(t, model, model.openChildRoute(child))
+	model.composer.SetValue("do not send")
+
+	_, command := model.Update(key(keyEnter))
+	assert.Nil(t, command)
+	assert.Equal(t, "do not send", model.composer.Value())
+	assert.Contains(t, safeTeamRouteError(model.route.err), "read-only in Plan Mode")
+	assert.Empty(t, controller.controlsSnapshot())
 }
 
 func TestTeamWorkerRouteClosesBridgeOnBackAndParentCatchUp(t *testing.T) {

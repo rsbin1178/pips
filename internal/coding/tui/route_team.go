@@ -4,12 +4,10 @@ package tui
 import (
 	"context"
 	"errors"
-	"fmt"
 	"slices"
 	"strings"
 	"time"
 
-	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/rsbin/pips/agent/team"
@@ -75,12 +73,12 @@ const (
 
 type teamRouteState struct {
 	stage             teamRouteStage
-	input             textinput.Model
 	objective         string
 	proposal          *coding.TeamProposal
 	view              *coding.TeamView
 	teamID            team.ID
 	operation         uint64
+	pending           teamRouteOperation
 	cancel            context.CancelFunc
 	cancelRequested   bool
 	refreshPending    bool
@@ -137,42 +135,26 @@ func (m *Model) activateTeamRoute(objective string) tea.Cmd {
 	m.routeSeq++
 	state := &teamRouteState{
 		stage:     teamRouteObjective,
-		input:     newTeamRouteInput(m.theme, m.options.NoColor),
 		objective: strings.TrimSpace(objective),
 	}
-	state.input.SetValue(state.objective)
 	m.route = routeState{kind: routeTeam, generation: m.routeSeq, team: state}
-	m.composer.Blur()
+	m.composer.SetValue(state.objective)
 	m.setLayout()
 
 	if teamID := currentTeamRouteID(m.state); teamID != "" {
-		state.stage = teamRouteActive
-		state.teamID = teamID
-		state.input.Blur()
 		m.ensureTeamProjection()
-		if cached, ok := m.teamProjection.views[teamID]; ok {
-			view := cached.Clone()
-			state.view = &view
-		}
+		m.route = routeState{}
+		m.composer.Reset()
+		m.teamPanel.isFocused = true
+		m.composer.Blur()
 
-		return m.readTeamRoute()
+		return m.readTeamProjection(teamID)
 	}
 	if state.objective != "" {
 		return m.generateTeamRouteProposal()
 	}
 
 	return m.discoverTeamRouteRecovery()
-}
-
-func newTeamRouteInput(theme colorTheme, noColor bool) textinput.Model {
-	input := textinput.New()
-	input.Prompt = "› "
-	input.Placeholder = "Describe the outcome this Team should deliver…"
-	input.CharLimit = maximumTeamRouteInputBytes
-	input.SetVirtualCursor(false)
-	input.SetStyles(sessionSearchStyles(theme, noColor))
-
-	return input
 }
 
 func currentTeamRouteID(state coding.State) team.ID {
@@ -187,13 +169,17 @@ func currentTeamRouteID(state coding.State) team.ID {
 	return ""
 }
 
-func (m *Model) beginTeamRouteOperation() (context.Context, uint64, uint64, bool) {
-	if m.route.kind != routeTeam || m.route.team == nil || m.route.loading {
+func (m *Model) beginTeamRouteOperation(
+	kind teamRouteOperation,
+) (context.Context, uint64, uint64, bool) {
+	if kind == teamRouteOperationNone || m.route.kind != routeTeam ||
+		m.route.team == nil || m.route.loading {
 		return nil, 0, 0, false
 	}
 
 	state := m.route.team
 	state.operation++
+	state.pending = kind
 	state.cancelRequested = false
 	m.route.loading = true
 	m.route.err = nil
@@ -203,28 +189,48 @@ func (m *Model) beginTeamRouteOperation() (context.Context, uint64, uint64, bool
 	return ctx, m.route.generation, state.operation, true
 }
 
+func (m *Model) withTeamRouteActivity(command tea.Cmd) tea.Cmd {
+	if command == nil {
+		return nil
+	}
+
+	return tea.Batch(command, m.activity.Tick())
+}
+
 func (m *Model) generateTeamRouteProposal() tea.Cmd {
 	state := m.route.team
-	objective := strings.TrimSpace(state.input.Value())
-	if len(objective) == 0 || len(objective) > maximumTeamRouteInputBytes {
+	snapshot := m.composer.Snapshot()
+	objectivePreview := strings.TrimSpace(snapshot.display)
+	if len(objectivePreview) == 0 || len(objectivePreview) > maximumTeamRouteInputBytes {
 		m.route.err = newTeamRoutePresentationError("enter a Team objective within the supported limit")
 
-		return state.input.Focus()
+		return m.composer.Focus()
 	}
 	if m.controller.Mode().Current != coding.ModeAgent {
 		m.route.err = newTeamRoutePresentationError("team proposals require Agent Mode; switch mode before continuing")
 
-		return state.input.Focus()
+		return m.composer.Focus()
 	}
 
-	ctx, generation, operation, ok := m.beginTeamRouteOperation()
+	ctx, generation, operation, ok := m.beginTeamRouteOperation(teamRouteOperationGenerate)
 	if !ok {
 		return nil
 	}
-	state.objective = objective
-	state.input.Blur()
+	state.objective = objectivePreview
+	m.composer.Blur()
 
-	return func() tea.Msg {
+	return m.withTeamRouteActivity(func() tea.Msg {
+		objective, resolveErr := resolveTeamComposerText(
+			ctx,
+			snapshot,
+			m.controller.ResolveWorkspaceFile,
+		)
+		if resolveErr != nil {
+			return teamRouteResultMsg{
+				generation: generation, operation: operation,
+				kind: teamRouteOperationGenerate, err: resolveErr,
+			}
+		}
 		proposal, err := m.controller.GenerateTeamProposal(ctx, coding.TeamProposalPrompt{
 			Objective: objective,
 		})
@@ -233,7 +239,7 @@ func (m *Model) generateTeamRouteProposal() tea.Cmd {
 			generation: generation, operation: operation,
 			kind: teamRouteOperationGenerate, proposal: proposal, err: err,
 		}
-	}
+	})
 }
 
 func (m *Model) reviseTeamRouteProposal() tea.Cmd {
@@ -242,28 +248,40 @@ func (m *Model) reviseTeamRouteProposal() tea.Cmd {
 		return nil
 	}
 
-	feedback := strings.TrimSpace(state.input.Value())
-	if len(feedback) == 0 || len(feedback) > maximumTeamRouteInputBytes {
+	snapshot := m.composer.Snapshot()
+	feedbackPreview := strings.TrimSpace(snapshot.display)
+	if len(feedbackPreview) == 0 || len(feedbackPreview) > maximumTeamRouteInputBytes {
 		m.route.err = newTeamRoutePresentationError("enter revision feedback within the supported limit")
 
-		return state.input.Focus()
+		return m.composer.Focus()
 	}
 
-	ctx, generation, operation, ok := m.beginTeamRouteOperation()
+	ctx, generation, operation, ok := m.beginTeamRouteOperation(teamRouteOperationRevise)
 	if !ok {
 		return nil
 	}
 	proposalID := state.proposal.ID
-	state.input.Blur()
+	m.composer.Blur()
 
-	return func() tea.Msg {
+	return m.withTeamRouteActivity(func() tea.Msg {
+		feedback, resolveErr := resolveTeamComposerText(
+			ctx,
+			snapshot,
+			m.controller.ResolveWorkspaceFile,
+		)
+		if resolveErr != nil {
+			return teamRouteResultMsg{
+				generation: generation, operation: operation,
+				kind: teamRouteOperationRevise, err: resolveErr,
+			}
+		}
 		proposal, err := m.controller.ReviseTeamProposal(ctx, proposalID, feedback)
 
 		return teamRouteResultMsg{
 			generation: generation, operation: operation,
 			kind: teamRouteOperationRevise, proposal: proposal, err: err,
 		}
-	}
+	})
 }
 
 func (m *Model) confirmTeamRouteProposal(admission coding.TeamAdmissionMode) tea.Cmd {
@@ -272,13 +290,13 @@ func (m *Model) confirmTeamRouteProposal(admission coding.TeamAdmissionMode) tea
 		return nil
 	}
 
-	ctx, generation, operation, ok := m.beginTeamRouteOperation()
+	ctx, generation, operation, ok := m.beginTeamRouteOperation(teamRouteOperationConfirm)
 	if !ok {
 		return nil
 	}
 	proposalID := state.proposal.ID
 
-	return func() tea.Msg {
+	return m.withTeamRouteActivity(func() tea.Msg {
 		reference, err := m.controller.ConfirmTeam(ctx, coding.TeamConfirmation{
 			ProposalID: proposalID,
 			Admission:  admission,
@@ -297,7 +315,7 @@ func (m *Model) confirmTeamRouteProposal(admission coding.TeamAdmissionMode) tea
 			kind: teamRouteOperationConfirm, reference: reference,
 			view: view, err: readErr,
 		}
-	}
+	})
 }
 
 func (m *Model) declineTeamRouteProposal(closeAfter bool) tea.Cmd {
@@ -309,24 +327,26 @@ func (m *Model) declineTeamRouteProposal(closeAfter bool) tea.Cmd {
 
 		state.stage = teamRouteObjective
 
-		return state.input.Focus()
+		m.composer.SetValue(state.objective)
+
+		return m.composer.Focus()
 	}
 
-	ctx, generation, operation, ok := m.beginTeamRouteOperation()
+	ctx, generation, operation, ok := m.beginTeamRouteOperation(teamRouteOperationDecline)
 	if !ok {
 		return nil
 	}
 	state.declineToClose = closeAfter
 	proposalID := state.proposal.ID
 
-	return func() tea.Msg {
+	return m.withTeamRouteActivity(func() tea.Msg {
 		err := m.controller.DeclineTeam(ctx, proposalID)
 
 		return teamRouteResultMsg{
 			generation: generation, operation: operation,
 			kind: teamRouteOperationDecline, err: err,
 		}
-	}
+	})
 }
 
 func (m *Model) readTeamRoute() tea.Cmd {
@@ -340,7 +360,7 @@ func (m *Model) readTeamRoute() tea.Cmd {
 		return nil
 	}
 
-	ctx, generation, operation, ok := m.beginTeamRouteOperation()
+	ctx, generation, operation, ok := m.beginTeamRouteOperation(teamRouteOperationRead)
 	if !ok {
 		return nil
 	}
@@ -350,14 +370,14 @@ func (m *Model) readTeamRoute() tea.Cmd {
 		request.AfterControlRevision = state.view.ControlCursor
 	}
 
-	return func() tea.Msg {
+	return m.withTeamRouteActivity(func() tea.Msg {
 		view, err := m.controller.ReadTeam(ctx, request)
 
 		return teamRouteResultMsg{
 			generation: generation, operation: operation,
 			kind: teamRouteOperationRead, view: view, err: err,
 		}
-	}
+	})
 }
 
 func (m *Model) submitTeamRouteControl() tea.Cmd {
@@ -367,13 +387,13 @@ func (m *Model) submitTeamRouteControl() tea.Cmd {
 		return nil
 	}
 
-	ctx, generation, operation, ok := m.beginTeamRouteOperation()
+	ctx, generation, operation, ok := m.beginTeamRouteOperation(teamRouteOperationControl)
 	if !ok {
 		return nil
 	}
-	state.input.Blur()
+	m.composer.Blur()
 
-	return func() tea.Msg {
+	return m.withTeamRouteActivity(func() tea.Msg {
 		reference, err := m.controller.SubmitTeamControl(ctx, request)
 		if err != nil {
 			return teamRouteResultMsg{
@@ -389,7 +409,7 @@ func (m *Model) submitTeamRouteControl() tea.Cmd {
 			kind: teamRouteOperationControl, control: reference,
 			view: view, err: readErr,
 		}
-	}
+	})
 }
 
 func (m *Model) applyTeamRouteResult(message teamRouteResultMsg) (tea.Model, tea.Cmd) {
@@ -403,6 +423,7 @@ func (m *Model) applyTeamRouteResult(message teamRouteResultMsg) (tea.Model, tea
 		state.cancel = nil
 	}
 	m.route.loading = false
+	state.pending = teamRouteOperationNone
 	cancelled := state.cancelRequested
 	state.cancelRequested = false
 
@@ -410,10 +431,9 @@ func (m *Model) applyTeamRouteResult(message teamRouteResultMsg) (tea.Model, tea
 		cleanup := m.cleanupStaleTeamRouteProposal(message)
 		state.proposal = nil
 		state.stage = teamRouteObjective
-		state.input.SetValue(state.objective)
 		m.route.err = nil
 
-		return m, tea.Batch(state.input.Focus(), cleanup)
+		return m, tea.Batch(m.composer.Focus(), cleanup)
 	}
 
 	command := m.applyTeamRouteOperation(message, cancelled)
@@ -424,7 +444,8 @@ func (m *Model) applyTeamRouteResult(message teamRouteResultMsg) (tea.Model, tea
 func (m *Model) acceptTeamRouteResult(message teamRouteResultMsg) bool {
 	return m.route.kind == routeTeam && m.route.team != nil &&
 		message.generation == m.route.generation &&
-		message.operation == m.route.team.operation
+		message.operation == m.route.team.operation &&
+		message.kind == m.route.team.pending
 }
 
 func (m *Model) applyTeamRouteOperation(
@@ -490,20 +511,21 @@ func (m *Model) applyGeneratedTeamProposal(
 		m.route.err = nil
 		state.stage = teamRouteObjective
 
-		return state.input.Focus()
+		return m.composer.Focus()
 	}
 	if message.err != nil {
 		m.route.err = message.err
 		state.stage = teamRouteObjective
 
-		return state.input.Focus()
+		return m.composer.Focus()
 	}
 
 	proposal := message.proposal.Clone()
 	state.proposal = &proposal
 	state.objective = proposal.Request.Objective
 	state.stage = teamRouteProposal
-	state.input.Reset()
+	m.composer.Reset()
+	m.composer.Blur()
 	m.route.err = nil
 
 	return nil
@@ -517,7 +539,8 @@ func (m *Model) applyRevisedTeamProposal(
 	if cancelled {
 		m.route.err = nil
 		state.stage = teamRouteProposal
-		state.input.Reset()
+		m.composer.Reset()
+		m.composer.Blur()
 
 		return nil
 	}
@@ -525,14 +548,15 @@ func (m *Model) applyRevisedTeamProposal(
 		m.route.err = message.err
 		state.stage = teamRouteRevision
 
-		return state.input.Focus()
+		return m.composer.Focus()
 	}
 
 	proposal := message.proposal.Clone()
 	state.proposal = &proposal
 	state.objective = proposal.Request.Objective
 	state.stage = teamRouteProposal
-	state.input.Reset()
+	m.composer.Reset()
+	m.composer.Blur()
 	m.route.err = nil
 
 	return nil
@@ -550,15 +574,17 @@ func (m *Model) applyConfirmedTeamProposal(message teamRouteResultMsg) tea.Cmd {
 	state.proposal = nil
 	state.teamID = message.reference.TeamID
 	state.stage = teamRouteActive
-	state.input.Reset()
+	m.composer.Reset()
 	if message.view.TeamID != "" {
 		view := m.mergeTeamRouteView(message.view)
 		state.view = &view
 	}
 	m.route.err = message.err
 	m.route.cursor = 0
+	m.route.hasPreviousComposer = false
+	m.teamPanel = teamPanelState{}
 
-	return nil
+	return m.closeRouteToParent()
 }
 
 func (m *Model) applyReadTeamRoute(message teamRouteResultMsg) tea.Cmd {
@@ -620,9 +646,9 @@ func (m *Model) applyDeclinedTeamProposal(message teamRouteResultMsg) tea.Cmd {
 	}
 
 	state.stage = teamRouteObjective
-	state.input.SetValue(state.objective)
+	m.composer.SetValue(state.objective)
 
-	return state.input.Focus()
+	return m.composer.Focus()
 }
 
 func (m *Model) cleanupStaleTeamRouteProposal(message teamRouteResultMsg) tea.Cmd {
@@ -726,6 +752,10 @@ func (m *Model) updateBusyTeamRouteKey(key string) tea.Cmd {
 	if state.cancel != nil {
 		state.cancel()
 	}
+	if state.stage == teamRouteObjective &&
+		state.pending == teamRouteOperationDiscoverRecovery {
+		return m.closeRouteToParent()
+	}
 
 	return nil
 }
@@ -750,10 +780,9 @@ func (m *Model) updateTeamProposalKey(key string) (tea.Model, tea.Cmd) {
 		return m, m.declineTeamRouteProposal(true)
 	case "r":
 		state.stage = teamRouteRevision
-		state.input.Reset()
-		state.input.Placeholder = "Describe what the proposal should change…"
+		m.composer.Reset()
 
-		return m, state.input.Focus()
+		return m, m.composer.Focus()
 	case keyEnter:
 		state.stage = teamRouteConfirmation
 		m.route.cursor = 0
@@ -767,7 +796,8 @@ func (m *Model) updateTeamRevisionKey(message tea.KeyPressMsg) (tea.Model, tea.C
 	switch message.String() {
 	case keyEscape, keyCtrlC:
 		m.route.team.stage = teamRouteProposal
-		m.route.team.input.Reset()
+		m.composer.Reset()
+		m.composer.Blur()
 		m.route.err = nil
 
 		return m, nil
@@ -874,11 +904,10 @@ func (m *Model) openTeamControlInput(action coding.TeamControlAction) tea.Cmd {
 	state := m.route.team
 	state.control = request
 	state.stage = teamRouteControlInput
-	state.input.Reset()
-	state.input.Placeholder = "Message for the selected Worker…"
+	m.composer.Reset()
 	m.route.err = nil
 
-	return state.input.Focus()
+	return m.composer.Focus()
 }
 
 func (m *Model) openTeamControlConfirmation(action coding.TeamControlAction) tea.Cmd {
@@ -902,12 +931,13 @@ func (m *Model) updateTeamControlInputKey(message tea.KeyPressMsg) (tea.Model, t
 	case keyEscape, keyCtrlC:
 		state.stage = teamRouteActive
 		state.control = coding.TeamControlRequest{}
-		state.input.Reset()
+		m.composer.Reset()
+		m.composer.Blur()
 		m.route.err = nil
 
 		return m, nil
 	case keyEnter:
-		text := strings.TrimSpace(state.input.Value())
+		text := strings.TrimSpace(m.composer.Value())
 		if text == "" || len(text) > maximumTeamRouteInputBytes {
 			m.route.err = newTeamRoutePresentationError("enter a message within the supported limit")
 
@@ -937,15 +967,27 @@ func (m *Model) updateTeamControlConfirmationKey(key string) (tea.Model, tea.Cmd
 }
 
 func (m *Model) updateTeamRouteInput(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	state := m.route.team
-	before := state.input.Value()
+	if message.String() == keyCtrlV {
+		return m, m.readClipboardImage()
+	}
+
+	before := m.composer.Snapshot()
 	var command tea.Cmd
-	state.input, command = state.input.Update(message)
-	if len(state.input.Value()) > maximumTeamRouteInputBytes {
-		state.input.SetValue(before)
+	m.composer, command = m.composer.Update(message)
+	if len(m.composer.Value()) > maximumTeamRouteInputBytes {
+		if err := m.composer.Restore(before); err != nil {
+			m.streamErr = err
+		}
 		m.route.err = newTeamRoutePresentationError("input is too long")
 	} else {
 		m.route.err = nil
+	}
+	m.setLayout()
+	if message.Key().Text == "$" && m.canOpenSkillPickerAtCursor() {
+		return m, tea.Batch(command, m.openSkillPickerAfterDollar())
+	}
+	if message.Key().Text == "@" && m.canOpenFilePickerAtCursor() {
+		return m, tea.Batch(command, m.openFilePickerAfterAt())
 	}
 
 	return m, command
@@ -1152,24 +1194,51 @@ func teamRouteControlView(value coding.TeamControlLifecycle, at time.Time) codin
 }
 
 func (m *Model) teamRouteView() tea.View {
-	content, inputY := m.teamRouteContent()
-	content = fitScrollableContent(content, max(1, m.width), max(1, m.height), m.route.offset)
+	content, _ := m.teamRouteContent()
+	content, _ = fitScrollableContentWindow(
+		content,
+		max(1, m.width),
+		max(1, m.height),
+		m.route.offset,
+	)
 	view := tea.NewView(content)
 	view.AltScreen = false
 	view.MouseMode = tea.MouseModeNone
 	view.WindowTitle = appTitle
 
-	if m.route.team != nil && teamRouteInputStage(m.route.team.stage) && !m.route.loading {
-		view.Cursor = m.route.team.input.Cursor()
-		if view.Cursor != nil {
-			view.Cursor.Y += inputY
-			if view.Cursor.X >= max(1, m.width) || view.Cursor.Y >= max(1, m.height) {
-				view.Cursor = nil
-			}
-		}
+	return view
+}
+
+func (m *Model) teamRouteIsInline() bool {
+	if m.route.kind != routeTeam || m.route.team == nil {
+		return false
 	}
 
-	return view
+	switch m.route.team.stage {
+	case teamRouteObjective, teamRouteProposal, teamRouteRevision,
+		teamRouteConfirmation, teamRouteActive, teamRouteControlInput,
+		teamRouteControlConfirmation:
+		return true
+	case teamRouteRecovery, teamRouteRecoveryConfirmation,
+		teamRouteIntegration, teamRouteIntegrationPreview,
+		teamRouteIntegrationConfirmation:
+		return false
+	default:
+		return false
+	}
+}
+
+func (m *Model) inlineTeamRouteView() string {
+	if !m.teamRouteIsInline() {
+		return ""
+	}
+
+	content, _ := m.teamRouteContent()
+	reserved := lipgloss.Height(m.composerBox()) +
+		lipgloss.Height(m.statusLineView()) + conversationGapHeight
+	available := max(1, m.height-reserved)
+
+	return fitScrollableContent(content, max(1, m.width), available, m.route.offset)
 }
 
 func teamRouteInputStage(stage teamRouteStage) bool {
@@ -1184,19 +1253,20 @@ func (m *Model) teamRouteContent() (string, int) {
 	}
 
 	content, inputY := m.teamRouteStageContent(state)
-
 	if m.route.loading {
-		status := "Working…"
-		if state.cancelRequested {
-			status = "Cancelling…"
-		}
-		content += "\n\n" + status
+		content = m.teamRouteLoadingContent(content, state)
 	}
 	if m.route.err != nil {
-		content += "\n\nError: " + safeTeamRouteError(m.route.err)
+		errorLines := m.appendTeamRouteWrapped(
+			nil,
+			"Error: "+safeTeamRouteError(m.route.err),
+			"",
+			teamRouteToneError,
+		)
+		content += "\n\n" + strings.Join(errorLines, "\n")
 	}
 
-	return m.styleTeamRouteContent(content), inputY
+	return content, inputY
 }
 
 func (m *Model) teamRouteStageContent(state *teamRouteState) (string, int) {
@@ -1245,27 +1315,30 @@ func (m *Model) teamRouteIntegrationStageContent(state *teamRouteState) string {
 }
 
 func (m *Model) teamObjectiveContent() (string, int) {
-	lines := []string{
-		"Coding Team", "",
-		"Describe one outcome. A constrained Lead will propose up to three Workers and a task DAG.", "",
-	}
-	inputY := len(lines)
-	lines = append(lines, m.route.team.input.View(), "")
+	lines := []string{"Coding Team", ""}
 	if m.controller.Mode().Current == coding.ModePlan {
 		lines = append(lines, "Plan Mode is read-only. Switch to Agent Mode before generating a proposal.", "")
 	}
-	lines = append(lines, "Enter generate proposal · Esc close")
+	lines = append(
+		lines,
+		"Describe one outcome. A constrained Lead will propose up to three Workers and a task DAG.",
+		"",
+		"Enter generate proposal · Esc close",
+	)
 
-	return strings.Join(lines, "\n"), inputY
+	return strings.Join(lines, "\n"), -1
 }
 
 func (m *Model) teamRevisionContent() (string, int) {
 	lines := []string{"Revise Team proposal", "", "Describe the change in natural language.", ""}
-	inputY := len(lines)
-	lines = append(lines, m.route.team.input.View(), "", "Enter regenerate · Esc keep current proposal", "")
+	lines = append(
+		lines,
+		"Enter regenerate · Esc keep current proposal",
+		"",
+	)
 	lines = append(lines, m.teamProposalLines()...)
 
-	return strings.Join(lines, "\n"), inputY
+	return strings.Join(lines, "\n"), -1
 }
 
 func (m *Model) teamProposalContent(confirmation bool) string {
@@ -1274,47 +1347,13 @@ func (m *Model) teamProposalContent(confirmation bool) string {
 		return strings.Join(lines, "\n")
 	}
 
-	lines = append(lines, "", "Enter confirm · r revise · c cancel · Esc back")
+	lines = append(lines,
+		"",
+		m.teamRouteFooter("Enter confirm · r revise · c cancel · Esc back"),
+		"",
+	)
 
 	return strings.Join(lines, "\n")
-}
-
-func (m *Model) teamProposalLines() []string {
-	proposal := m.route.team.proposal
-	if proposal == nil {
-		return []string{"Team proposal unavailable."}
-	}
-
-	workspace := "clean Workspace"
-	if proposal.Dirty {
-		workspace = "dirty Workspace · confirmation will not include uncommitted changes"
-	}
-	lines := []string{
-		"Team proposal", "",
-		"Objective: " + safeDetailText(proposal.Request.Objective),
-		"Admission evidence: " + workspace,
-		"Expires: " + proposal.ExpiresAt.Local().Format(time.DateTime),
-		"", "Workers",
-	}
-	for _, worker := range proposal.Request.Workers {
-		lines = append(lines, fmt.Sprintf(
-			"  • %s — %s", safeDetailText(worker.Name), safeDetailText(worker.Role),
-		))
-	}
-	lines = append(lines, "", "Tasks")
-	for _, task := range proposal.Request.Tasks {
-		dependencies := "none"
-		if len(task.Dependencies) > 0 {
-			dependencies = strings.Join(task.Dependencies, ", ")
-		}
-		lines = append(lines, fmt.Sprintf(
-			"  • %s — %s [%s] · depends: %s",
-			safeDetailText(task.Title), safeDetailText(task.AssignedWorker),
-			safeDetailText(task.ID), safeDetailText(dependencies),
-		))
-	}
-
-	return lines
 }
 
 func (m *Model) teamConfirmationContent() string {
@@ -1345,75 +1384,6 @@ func (m *Model) teamConfirmationContent() string {
 		lines = append(lines, marker+choice)
 	}
 	lines = append(lines, "", "↑/↓ choose · Enter apply exact choice · Esc back")
-
-	return strings.Join(lines, "\n")
-}
-
-func (m *Model) activeTeamContent() string {
-	state := m.route.team
-	if state.view == nil {
-		return "Coding Team\n\nLoading Team state…\n\nr retry · Esc close"
-	}
-
-	view := state.view
-	lines := []string{
-		"Coding Team", "",
-		"Objective: " + safeDetailText(view.Objective),
-		fmt.Sprintf("Status: %s · resources: %s", view.Status, view.ResourceState),
-		"", "Members",
-	}
-	for _, member := range view.Members {
-		lines = append(lines, fmt.Sprintf(
-			"  • %s — %s · %s",
-			safeDetailText(member.Name), safeDetailText(member.Role), member.Status,
-		))
-	}
-	lines = append(lines, "", "Tasks")
-	for index, task := range view.Tasks {
-		marker := "  "
-		if index == m.route.cursor {
-			marker = "> "
-		}
-		worker := teamRouteMemberName(view, task.AssignedMemberID)
-		lines = append(lines, fmt.Sprintf(
-			"%s%s — %s · %s", marker, safeDetailText(task.Title), worker, task.Status,
-		))
-		if attempt, found := latestTeamRouteAttempt(view, task.ID); found {
-			activity := string(attempt.Activity)
-			if activity == "" {
-				activity = string(attempt.LifecycleState)
-			}
-			if activity == "" {
-				activity = string(attempt.DomainState)
-			}
-			lines = append(lines, fmt.Sprintf(
-				"    Attempt %d · %s · %s",
-				attempt.Number, activity,
-				formatInteractionDuration(attempt.DurationMillis),
-			))
-		}
-	}
-
-	if len(view.Controls) > 0 {
-		lines = append(lines, "", "Recent controls")
-		start := max(0, len(view.Controls)-8)
-		for _, control := range view.Controls[start:] {
-			value := fmt.Sprintf("  • %s · %s", control.Action, control.State)
-			if control.Code != "" {
-				value += " · " + safeDetailText(control.Code)
-			}
-			lines = append(lines, value)
-		}
-	}
-
-	lines = append(lines, "")
-	if m.controller.Mode().Current == coding.ModePlan {
-		lines = append(lines, "Plan Mode · Team controls are read-only · ↑/↓ choose · Esc close")
-	} else {
-		lines = append(lines,
-			"↑/↓ choose · g integrate/recover · m message · f follow-up · i interrupt · x cancel task · r retry · C cancel Team · Esc close",
-		)
-	}
 
 	return strings.Join(lines, "\n")
 }
@@ -1457,10 +1427,12 @@ func (m *Model) teamControlInputContent() (string, int) {
 		label + " selected Worker", "",
 		"The command is bound to the exact live Attempt reviewed in the Team view.", "",
 	}
-	inputY := len(lines)
-	lines = append(lines, m.route.team.input.View(), "", "Enter submit · Esc cancel")
+	lines = append(
+		lines,
+		"Enter submit · Esc cancel",
+	)
 
-	return strings.Join(lines, "\n"), inputY
+	return strings.Join(lines, "\n"), -1
 }
 
 func (m *Model) teamControlConfirmationContent() string {
@@ -1488,14 +1460,6 @@ func (m *Model) teamControlConfirmationContent() string {
 		"Confirm Team control", "", "> " + label, "",
 		"Enter submit durable intent · Esc back",
 	}, "\n")
-}
-
-func (m *Model) styleTeamRouteContent(content string) string {
-	if m.options.NoColor {
-		return content
-	}
-
-	return lipgloss.NewStyle().Foreground(paletteFor(m.theme).workspace).Render(content)
 }
 
 func safeTeamRouteError(err error) string {
@@ -1527,6 +1491,9 @@ func safeTeamRouteError(err error) string {
 
 func safeTeamAdmissionError(err error) string {
 	switch {
+	case errors.Is(err, coding.ErrTeamRepositoryRequired):
+		return "Coding Team requires the Workspace to be a Git repository root with at least one commit. " +
+			"Create the initial commit, then retry."
 	case errors.Is(err, coding.ErrTeamActive):
 		return "A Team proposal or admitted Team is already active."
 	case errors.Is(err, coding.ErrTeamProposalNotFound):
