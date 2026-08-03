@@ -39,6 +39,9 @@ const (
 var (
 	// ErrTeamAdmission reports a malformed or unavailable Team admission.
 	ErrTeamAdmission = errors.New("coding Team admission failed")
+	// ErrTeamRepositoryRequired reports a Workspace that cannot provide the
+	// committed repository root required for isolated Worker Worktrees.
+	ErrTeamRepositoryRequired = errors.New("coding Team requires a repository root with HEAD")
 	// ErrTeamActive reports an existing proposal or admitted Team owner.
 	ErrTeamActive = errors.New("coding Team is already active")
 	// ErrTeamProposalNotFound reports an unknown or already consumed proposal.
@@ -451,6 +454,19 @@ func (r *Runtime) preflightTeam(ctx context.Context, probeSandbox bool) (teamPre
 		return teamPreflight{}, ErrTeamActive
 	}
 
+	status, err := inspector.Status(ctx)
+	if err != nil {
+		return teamPreflight{}, fmt.Errorf("%w: inspect Workspace status: %w", ErrTeamAdmission, err)
+	}
+
+	if !status.Repository() || status.Branch().Unborn {
+		return teamPreflight{}, fmt.Errorf(
+			"%w: %w",
+			ErrTeamAdmission,
+			ErrTeamRepositoryRequired,
+		)
+	}
+
 	runner, err := gitcontrol.New(options.GitPath, gitcontrol.Limits{
 		OutputBytes: options.GitLimits.GitBytes,
 		InputBytes:  options.GitLimits.CopyBytes,
@@ -465,7 +481,11 @@ func (r *Runtime) preflightTeam(ctx context.Context, probeSandbox bool) (teamPre
 		return teamPreflight{}, fmt.Errorf("%w: inspect repository: %w", ErrTeamAdmission, err)
 	}
 	if repository.TopLevel != workspaceValue.Root() || repository.HeadOID == "" {
-		return teamPreflight{}, fmt.Errorf("%w: Workspace must be a repository root with HEAD", ErrTeamAdmission)
+		return teamPreflight{}, fmt.Errorf(
+			"%w: %w",
+			ErrTeamAdmission,
+			ErrTeamRepositoryRequired,
+		)
 	}
 	if err := validateTeamRoots(workspaceValue.Root(), repository.CommonDir, layout); err != nil {
 		return teamPreflight{}, err
@@ -476,11 +496,7 @@ func (r *Runtime) preflightTeam(ctx context.Context, probeSandbox bool) (teamPre
 		return teamPreflight{}, fmt.Errorf("%w: inspect repository common directory: %w", ErrTeamAdmission, err)
 	}
 
-	status, err := inspector.Status(ctx)
-	if err != nil {
-		return teamPreflight{}, fmt.Errorf("%w: inspect Workspace status: %w", ErrTeamAdmission, err)
-	}
-	if !status.Repository() || status.Branch().Unborn || status.Branch().OID != repository.HeadOID {
+	if status.Branch().OID != repository.HeadOID {
 		return teamPreflight{}, fmt.Errorf("%w: repository status does not match HEAD", ErrTeamAdmission)
 	}
 	statusDigest, err := digestWorktreeStatus(status)

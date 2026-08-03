@@ -173,6 +173,8 @@ func (m *Model) syncPlanReviewPrompt() bool {
 
 func (m *Model) claimPromptOwner() {
 	m.stopTeamWorkerRouteSubscription()
+	m.teamPanel.isFocused = false
+	m.teamPanel.isPeeking = false
 	if m.picker.kind == pickerCommand {
 		m.closeCommandPicker(true)
 	}
@@ -322,7 +324,7 @@ func (m *Model) updatePlanReviewEditorKey(message tea.KeyPressMsg) (tea.Model, t
 		state.editor.Blur()
 		state.err = nil
 		return m, nil
-	case "ctrl+j", "shift+enter":
+	case keyCtrlJ, keyShiftEnter:
 		state.editor.InsertString("\n")
 		return m, nil
 	case keyEnter:
@@ -570,7 +572,7 @@ func (m *Model) updateQuestionPromptKey(message tea.KeyPressMsg) (tea.Model, tea
 			rows := len(state.request.Questions[state.tab].Options) + 2
 			state.cursors[state.tab] = wrapIndex(state.cursors[state.tab]+1, rows)
 		}
-	case " ", "space":
+	case " ", keySpace:
 		m.toggleQuestionSelection()
 	case keyEnter:
 		return m.activateQuestionSelection()
@@ -656,7 +658,7 @@ func (m *Model) updateQuestionEditorKey(message tea.KeyPressMsg) (tea.Model, tea
 		state.loading = true
 
 		return m, m.rejectQuestionPromptCommand(state.request)
-	case "ctrl+j", "shift+enter":
+	case keyCtrlJ, keyShiftEnter:
 		if state.editing == questionEditChat {
 			state.editor.InsertString("\n")
 		}

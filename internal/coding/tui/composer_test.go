@@ -344,6 +344,9 @@ func TestReadyTemporaryInputSurfacesRestoreProtectedSnapshot(t *testing.T) {
 	assert.Equal(t, original, model.composer.Snapshot())
 
 	model.openTeamRoute("")
+	require.Equal(t, routeTeam, model.route.kind)
+	require.True(t, model.route.hasPreviousComposer)
+	require.Equal(t, original, model.route.previousComposer)
 	model.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	assert.Equal(t, original, model.composer.Snapshot())
 

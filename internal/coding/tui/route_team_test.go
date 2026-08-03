@@ -101,6 +101,27 @@ func TestTeamRouteHidesPrivateRuntimeErrorDetail(t *testing.T) {
 	assert.NotContains(t, content, "internal-ref")
 }
 
+func TestTeamRouteExplainsRepositoryPrerequisite(t *testing.T) {
+	t.Parallel()
+
+	controller := newTeamRouteTestController(readyState())
+	controller.generate = func(context.Context, coding.TeamProposalPrompt) (coding.TeamProposal, error) {
+		return coding.TeamProposal{}, fmt.Errorf(
+			"%w: %w",
+			coding.ErrTeamAdmission,
+			coding.ErrTeamRepositoryRequired,
+		)
+	}
+	model := readyModelWithController(t, controller, true)
+	driveModelCommands(t, model, model.openTeamRoute("inspect frontend and backend bugs"))
+
+	content := model.View().Content
+	assert.Contains(t, content, "Git repository root with at")
+	assert.Contains(t, content, "least one commit")
+	assert.Contains(t, content, "Create the initial commit, then retry")
+	assert.NotContains(t, content, "review Runtime diagnostics")
+}
+
 func TestTeamRouteRevisionCancelAndDirtyAdmissionDefaultStop(t *testing.T) {
 	t.Parallel()
 
@@ -136,7 +157,8 @@ func TestTeamRouteRevisionCancelAndDirtyAdmissionDefaultStop(t *testing.T) {
 	driveModelCommands(t, model, command)
 	require.Len(t, controller.confirmationsSnapshot(), 1)
 	assert.Equal(t, coding.TeamAdmissionHEADOnly, controller.confirmationsSnapshot()[0].Admission)
-	assert.Equal(t, teamRouteActive, model.route.team.stage)
+	assert.Equal(t, routeNone, model.route.kind)
+	assert.Contains(t, ansi.Strip(model.View().Content), "Team · 1 Workers")
 
 	cancelController := newTeamRouteTestController(readyState())
 	cancelModel := readyModelWithController(t, cancelController, true)
@@ -162,8 +184,11 @@ func TestTeamRouteProposalCancellationIsSingleFlightAndCleansLateSuccess(t *test
 	model := readyModelWithController(t, controller, true)
 	command := model.openTeamRoute("inspect cancellation")
 	require.NotNil(t, command)
+	batch, ok := command().(tea.BatchMsg)
+	require.True(t, ok)
+	require.NotEmpty(t, batch)
 	result := make(chan tea.Msg, 1)
-	go func() { result <- command() }()
+	go func() { result <- batch[0]() }()
 	<-started
 
 	_, duplicate := model.Update(key(keyEnter))
@@ -176,111 +201,6 @@ func TestTeamRouteProposalCancellationIsSingleFlightAndCleansLateSuccess(t *test
 	assert.Equal(t, teamRouteObjective, model.route.team.stage)
 	assert.Nil(t, model.route.team.proposal)
 	assert.Equal(t, []string{"proposal-1"}, controller.declinesSnapshot())
-}
-
-func TestActiveTeamRouteSubmitsEveryExactControlAndRefreshesByEvent(t *testing.T) {
-	t.Parallel()
-
-	state := readyState()
-	state.Teams = []coding.TeamLifecycleState{{TeamLifecycle: coding.TeamLifecycle{
-		TeamID: "team-1", State: coding.TeamLifecycleAdmitted,
-	}}}
-	controller := newTeamRouteTestController(state)
-	model := readyModelWithController(t, controller, true)
-	driveModelCommands(t, model, model.openTeamRoute(""))
-	require.Equal(t, teamRouteActive, model.route.team.stage)
-
-	submitTeamRouteTextControl(t, model, "m", "check the ownership edge")
-	submitTeamRouteTextControl(t, model, "f", "then run the focused test")
-	submitTeamRouteConfirmedControl(t, model, "i")
-	submitTeamRouteConfirmedControl(t, model, "x")
-
-	failed := controller.viewSnapshot()
-	failed.Tasks[0].Status = team.TaskStatusFailed
-	failed.Attempts[0].DomainState = team.AttemptStatusFailed
-	controller.setView(failed)
-	view := failed.Clone()
-	model.route.team.view = &view
-	submitTeamRouteConfirmedControl(t, model, "r")
-	submitTeamRouteConfirmedControl(t, model, "C")
-
-	controls := controller.controlsSnapshot()
-	require.Len(t, controls, 6)
-	for _, index := range []int{0, 1, 2} {
-		assert.Equal(t, team.MemberID("worker-1"), controls[index].MemberID)
-		assert.Equal(t, team.TaskID("task-1"), controls[index].TaskID)
-		assert.Equal(t, team.AttemptID("attempt-1"), controls[index].ExpectedAttemptID)
-		assert.Equal(t, uint64(7), controls[index].OwnerGeneration)
-	}
-	assert.Equal(t, "check the ownership edge", controls[0].Text)
-	assert.Equal(t, "then run the focused test", controls[1].Text)
-	assert.Empty(t, controls[3].MemberID)
-	assert.Empty(t, controls[4].MemberID)
-	assert.Empty(t, controls[5].TaskID)
-
-	updated := controller.viewSnapshot()
-	updated.Objective = "refreshed objective"
-	controller.setView(updated)
-	refresh := model.invalidateTeamRoute(coding.Event{Payload: coding.TeamControlLifecycle{
-		TeamID: "team-1", Revision: 12, CommandID: "control-event",
-		Action: coding.TeamControlMessage, State: coding.TeamControlApplied,
-	}})
-	require.NotNil(t, refresh)
-	driveModelCommands(t, model, refresh)
-	assert.Equal(t, "refreshed objective", model.route.team.view.Objective)
-	require.Len(t, model.route.team.view.Controls, 1)
-	assert.Equal(t, coding.TeamControlApplied, model.route.team.view.Controls[0].State)
-
-	late := model.invalidateTeamRoute(coding.Event{Payload: coding.TeamLifecycle{
-		TeamID: "team-1", State: coding.TeamLifecycleRunning,
-	}})
-	require.NotNil(t, late)
-	message := late()
-	model.closeRouteToParent()
-	model.Update(message)
-	assert.Equal(t, routeNone, model.route.kind)
-}
-
-func TestActiveTeamRouteIsReadOnlyInPlanMode(t *testing.T) {
-	t.Parallel()
-
-	state := readyState()
-	state.Mode = coding.ModePlan
-	state.Teams = []coding.TeamLifecycleState{{TeamLifecycle: coding.TeamLifecycle{
-		TeamID: "team-1", State: coding.TeamLifecycleRunning,
-	}}}
-	controller := newTeamRouteTestController(state)
-	model := readyModelWithController(t, controller, true)
-	driveModelCommands(t, model, model.openTeamRoute(""))
-
-	_, command := model.Update(key("m"))
-	assert.Nil(t, command)
-	require.Error(t, model.route.err)
-	assert.Contains(t, model.View().Content, "Plan Mode")
-	assert.Empty(t, controller.controlsSnapshot())
-}
-
-func submitTeamRouteTextControl(t *testing.T, model *Model, keyValue, text string) {
-	t.Helper()
-
-	model.Update(key(keyValue))
-	require.Equal(t, teamRouteControlInput, model.route.team.stage)
-	model.Update(tea.KeyPressMsg{Text: text})
-	_, command := model.Update(key(keyEnter))
-	require.NotNil(t, command)
-	driveModelCommands(t, model, command)
-	require.Equal(t, teamRouteActive, model.route.team.stage)
-}
-
-func submitTeamRouteConfirmedControl(t *testing.T, model *Model, keyValue string) {
-	t.Helper()
-
-	model.Update(key(keyValue))
-	require.Equal(t, teamRouteControlConfirmation, model.route.team.stage)
-	_, command := model.Update(key(keyEnter))
-	require.NotNil(t, command)
-	driveModelCommands(t, model, command)
-	require.Equal(t, teamRouteActive, model.route.team.stage)
 }
 
 func commandNamed(t *testing.T, name string) commandDescriptor {
@@ -320,6 +240,7 @@ type teamRouteTestController struct {
 	confirmations         []coding.TeamConfirmation
 	declines              []string
 	controls              []coding.TeamControlRequest
+	controlErr            error
 	reads                 []coding.TeamReadRequest
 	resumes               []teamRouteResumeCall
 	integrationPreview    coding.TeamIntegrationPreview
@@ -412,11 +333,41 @@ func (c *teamRouteTestController) SubmitTeamControl(
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.controls = append(c.controls, request)
+	if c.controlErr != nil {
+		return coding.TeamControlReference{}, c.controlErr
+	}
 
 	return coding.TeamControlReference{
 		CommandID: team.CommandID("control-1"), TeamID: request.TeamID,
 		Action: request.Action, CreatedAt: time.Now().UTC(),
 	}, nil
+}
+
+func TestTeamRouteComposerExpandsPasteAndKeepsInlineFilePickerOwnership(t *testing.T) {
+	t.Parallel()
+
+	controller := newTeamRouteTestController(readyState())
+	model := readyModelWithController(t, controller, true)
+	driveModelCommands(t, model, model.openTeamRoute(""))
+
+	pasted := strings.Repeat("full requirement line\n", 9)
+	placeholder, err := model.composer.InsertPaste(pasted)
+	require.NoError(t, err)
+	assert.True(t, placeholder)
+	assert.Contains(t, model.composer.Value(), "Pasted text")
+
+	_, command := model.Update(key(keyEnter))
+	require.NotNil(t, command)
+	driveModelCommands(t, model, command)
+	assert.Equal(t, strings.TrimSpace(pasted), controller.generatedObjective())
+
+	other := readyModelWithController(t, newTeamRouteTestController(readyState()), true)
+	driveModelCommands(t, other, other.openTeamRoute(""))
+	_, command = other.Update(tea.KeyPressMsg{Text: "@"})
+	require.NotNil(t, command)
+	assert.Equal(t, pickerFile, other.picker.kind)
+	assert.Equal(t, routeTeam, other.route.kind)
+	assert.Contains(t, other.View().Content, "Loading Workspace files")
 }
 
 func (c *teamRouteTestController) generatedObjective() string {

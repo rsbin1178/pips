@@ -63,6 +63,36 @@ func resolveComposerSnapshot(
 	return builder.message()
 }
 
+func resolveTeamComposerText(
+	ctx context.Context,
+	snapshot composerSnapshot,
+	resolve workspaceFileResolver,
+) (string, error) {
+	message, err := resolveComposerSnapshot(ctx, snapshot, true, resolve)
+	if err != nil {
+		return "", newTeamRoutePresentationError(
+			"Composer input could not be resolved; review its files and attachments",
+		)
+	}
+
+	var text strings.Builder
+
+	for _, part := range message.Parts {
+		if value, ok := part.(ai.TextPart); ok {
+			text.WriteString(value.Text)
+		}
+	}
+
+	value := strings.TrimSpace(text.String())
+	if value == "" || len(value) > maximumTeamRouteInputBytes {
+		return "", newTeamRoutePresentationError(
+			"resolved Composer input must fit within the Team input limit",
+		)
+	}
+
+	return value, nil
+}
+
 func appendComposerElement(
 	ctx context.Context,
 	builder *composerMessageBuilder,

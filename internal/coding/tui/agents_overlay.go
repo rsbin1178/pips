@@ -770,6 +770,17 @@ func (m *Model) updateSubagentRouteKey(message tea.KeyPressMsg) (tea.Model, tea.
 	case keyCtrlT, keyCtrlC:
 		return m, m.closeRouteToParent()
 	case keyEscape:
+		if m.route.childKind == childTeamWorker {
+			if m.composer.Value() != "" {
+				m.composer.Reset()
+				m.setLayout()
+
+				return m, nil
+			}
+			if len(m.route.children) == 0 {
+				return m, m.closeRouteToParent()
+			}
+		}
 		m.stopTeamWorkerRouteSubscription()
 		if len(m.route.children) > 0 {
 			m.route.kind = routeAgents
@@ -788,6 +799,9 @@ func (m *Model) updateSubagentRouteKey(message tea.KeyPressMsg) (tea.Model, tea.
 		}
 
 		return m, m.openAgentsRoute()
+	}
+	if m.route.childKind == childTeamWorker {
+		return m.updateTeamWorkerComposerKey(message)
 	}
 	if key == "c" && !m.route.controlling {
 		return m, m.cancelChild(m.route.childSummary)
@@ -812,6 +826,87 @@ func (m *Model) updateSubagentRouteKey(message tea.KeyPressMsg) (tea.Model, tea.
 	}
 
 	return m, nil
+}
+
+func (m *Model) updateTeamWorkerComposerKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if m.route.controlling {
+		return m, nil
+	}
+
+	key := message.String()
+	if command, handled := m.updateTeamWorkerScrollKey(key); handled {
+		return m, command
+	}
+	if command, handled := m.updateTeamWorkerActionKey(key); handled {
+		return m, command
+	}
+
+	switch key {
+	case "up":
+		if m.composer.AtFirstVisualRow() && m.composer.HistoryUp() {
+			m.setLayout()
+
+			return m, nil
+		}
+	case keyDown:
+		if m.composer.AtLastVisualRow() && m.composer.HistoryDown() {
+			m.setLayout()
+
+			return m, nil
+		}
+	}
+
+	var command tea.Cmd
+	m.composer, command = m.composer.Update(message)
+	m.setLayout()
+
+	return m, command
+}
+
+func (m *Model) updateTeamWorkerActionKey(key string) (tea.Cmd, bool) {
+	switch key {
+	case keyCtrlV:
+		return m.readClipboardImage(), true
+	case "ctrl+x":
+		if m.composer.Value() == "" {
+			return m.interruptTeamWorker(m.route.childSummary.worker.Target), true
+		}
+	case keyEnter:
+		if strings.TrimSpace(m.composer.Value()) == "" {
+			return nil, true
+		}
+
+		return m.messageTeamWorker(
+			m.route.childSummary.worker.Target,
+			m.composer.Snapshot(),
+		), true
+	case keyCtrlJ, keyShiftEnter:
+		m.composer.InsertString("\n")
+		m.setLayout()
+
+		return nil, true
+	}
+
+	return nil, false
+}
+
+func (m *Model) updateTeamWorkerScrollKey(key string) (tea.Cmd, bool) {
+	visible := max(1, m.height-5)
+	maximum := m.subagentRouteMaximumOffset()
+	switch key {
+	case "pgup":
+		m.route.offset = max(0, m.route.offset-visible)
+	case "pgdown":
+		m.route.offset = min(maximum, m.route.offset+visible)
+	case "home":
+		m.route.offset = 0
+	case "end":
+		m.route.offset = maximum
+	default:
+		return nil, false
+	}
+
+	return nil, true
 }
 
 func (m *Model) cancelChild(value childSummary) tea.Cmd {
@@ -864,18 +959,31 @@ func (m *Model) subagentRouteView() tea.View {
 		body += "\n\nRefresh: " + m.safeChildRouteError(m.route.refreshErr)
 	}
 
-	footer := m.subagentRouteStatusLine()
-	bodyHeight := max(0, height-2)
+	footerParts := []string{separator}
+	if m.route.childKind == childTeamWorker {
+		footerParts = append(footerParts, m.composerBox())
+	}
+	footerParts = append(footerParts, m.subagentRouteStatusLine())
+	footer := lipgloss.JoinVertical(lipgloss.Left, footerParts...)
+	bodyHeight := max(0, height-lipgloss.Height(footer))
 
 	body = fitScrollableContent(body, width, bodyHeight, m.route.offset)
 	if padding := bodyHeight - lipgloss.Height(body); padding > 0 {
 		body += strings.Repeat("\n", padding)
 	}
 
-	view := tea.NewView(lipgloss.JoinVertical(lipgloss.Left, body, separator, footer))
+	view := tea.NewView(lipgloss.JoinVertical(lipgloss.Left, body, footer))
 	view.AltScreen = false
 	view.MouseMode = tea.MouseModeNone
 	view.WindowTitle = appTitle
+	if m.route.childKind == childTeamWorker && !m.route.controlling {
+		view.Cursor = m.composer.Cursor()
+		if view.Cursor != nil {
+			cursorX, cursorY := m.composerBoxCursorOffset()
+			view.Cursor.X += cursorX
+			view.Cursor.Y += bodyHeight + 1 + cursorY
+		}
+	}
 
 	return view
 }
@@ -897,7 +1005,11 @@ func (m *Model) subagentRouteStatusLine() string {
 		values = append(values, string(summary.State))
 	}
 
-	values = append(values, "Ctrl+T parent", "Esc agents")
+	if m.route.childKind == childTeamWorker {
+		values = append(values, "Enter message", "Ctrl+J newline", "PgUp/PgDn scroll", "Ctrl+X interrupt", "Esc Lead")
+	} else {
+		values = append(values, "Ctrl+T parent", "Esc agents")
+	}
 
 	if !m.options.NoColor {
 		palette := paletteFor(m.theme)
@@ -1069,6 +1181,9 @@ func (m *Model) subagentRouteMaximumOffset() int {
 	}
 
 	visible := max(1, m.height-3)
+	if m.route.childKind == childTeamWorker {
+		visible = max(1, m.height-lipgloss.Height(m.composerBox())-2)
+	}
 	content := m.subagentRouteContent(*m.route.childState, m.route.detail)
 	if m.route.childKind == childTeamWorker {
 		content = m.teamWorkerRouteContent(*m.route.childState, m.route.childSummary)

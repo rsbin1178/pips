@@ -189,6 +189,10 @@ func (r *Runtime) GenerateTeamProposal(
 		return TeamProposal{}, err
 	}
 
+	if _, err := r.preflightTeam(operationCtx, false); err != nil {
+		return TeamProposal{}, err
+	}
+
 	request, err := r.runTeamProposalAgent(operationCtx, teamProposalAgentInput{
 		Objective: prompt.Objective, ProjectInstructions: r.projectInstructions,
 	})

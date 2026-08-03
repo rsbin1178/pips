@@ -52,7 +52,8 @@ func TestTeamRouteRecoveryRequiresExplicitRetryDecision(t *testing.T) {
 	assert.Equal(t, team.ID("private-team-id"), controller.resumes[0].teamID)
 	assert.Equal(t, team.Revision(9), controller.resumes[0].decision.ExpectedResourceRevision)
 	assert.True(t, controller.resumes[0].decision.RetryInterruptedWork)
-	assert.Equal(t, teamRouteActive, model.route.team.stage)
+	assert.Equal(t, routeNone, model.route.kind)
+	assert.Contains(t, model.View().Content, "Team · 1 Workers")
 }
 
 func TestSessionResumeAutomaticallyOpensReadOnlyTeamRecoveryReview(t *testing.T) {
