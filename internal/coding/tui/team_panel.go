@@ -623,6 +623,9 @@ func (m *Model) teamPanelWorkerLines(worker teamPanelWorker, selected bool) []st
 		marker = "› "
 	}
 	glyph, label, tone := teamPanelWorkerState(worker)
+	if teamPanelWorkerActivityVisible(worker) {
+		glyph = m.activity.Frame()
+	}
 	name := boundedTeamRouteText(worker.member.Name, teamRoutePrimaryTextBytes)
 	primary := fmt.Sprintf("%s%s %s  %s", marker, glyph, name, label)
 	lines := []string{m.teamRouteStyle(primary, tone, selected && m.teamPanel.isFocused)}
@@ -633,6 +636,37 @@ func (m *Model) teamPanelWorkerLines(worker teamPanelWorker, selected bool) []st
 	}
 
 	return lines
+}
+
+func teamPanelWorkerActivityVisible(worker teamPanelWorker) bool {
+	if !worker.hasAttempt || teamAttemptNeedsInteraction(worker.attempt) {
+		return false
+	}
+
+	attempt := worker.attempt
+	if attempt.LifecycleState == coding.TeamLifecycleFailed ||
+		attempt.DomainState == team.AttemptStatusFailed {
+		return false
+	}
+
+	resourceLive := attempt.ResourceState == teamstate.AttemptRunning ||
+		attempt.ResourceState == teamstate.AttemptCapturing
+	if !resourceLive {
+		return false
+	}
+
+	return attempt.LifecycleState == coding.TeamLifecycleRunning ||
+		attempt.LifecycleState == coding.TeamLifecycleCapturing ||
+		attempt.DomainState == team.AttemptStatusRunning
+}
+
+func (m *Model) teamPanelActivityVisible() bool {
+	view, ok := m.currentTeamPanelView()
+	if !ok {
+		return false
+	}
+
+	return slices.ContainsFunc(teamPanelWorkers(view), teamPanelWorkerActivityVisible)
 }
 
 func teamPanelWorkerState(worker teamPanelWorker) (string, string, teamRouteTone) {
@@ -656,6 +690,9 @@ func teamPanelAttemptState(attempt coding.TeamAttemptView) (string, string, team
 	case attempt.LifecycleState == coding.TeamLifecycleFailed ||
 		attempt.DomainState == team.AttemptStatusFailed:
 		return "✗", "Failed", teamRouteToneError
+	case attempt.LifecycleState == coding.TeamLifecycleRecoverable ||
+		attempt.ResourceState == teamstate.AttemptRecoverable:
+		return "✻", "Recoverable", teamRouteToneWarning
 	case attempt.LifecycleState == coding.TeamLifecycleCapturing:
 		return "✻", "Capturing result", teamRouteToneActive
 	case attempt.LifecycleState == coding.TeamLifecycleRunning ||

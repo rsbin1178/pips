@@ -60,6 +60,55 @@ func TestTeamAttemptsRemainMutableThenCommitOnceInTerminalOrder(t *testing.T) {
 	assert.Len(t, model.scrollback.teamAttempts, 2)
 }
 
+func TestTeamAttemptWorkingUsesSharedAnimatedClock(t *testing.T) {
+	t.Parallel()
+
+	model := readyModel(t, true)
+	model.width = 200
+	model.storeTeamProjectionView(teamProjectionTestView())
+	working := teamProjectionAttempt("worker-1", "task-1", "attempt-1")
+	model.state.Teams = []coding.TeamLifecycleState{{TeamLifecycle: working}}
+
+	before := renderTimelineBlock(
+		model.activeTeamAttemptBlocks()[0], model.markdown, 160, themeDark, true,
+	)
+	assert.Contains(t, before, "✻ Builder · Implement timeline · Working")
+
+	_, next := model.Update(activityTickMsg{})
+	require.NotNil(t, next)
+	after := renderTimelineBlock(
+		model.activeTeamAttemptBlocks()[0], model.markdown, 160, themeDark, true,
+	)
+	assert.NotEqual(t, before, after)
+	assert.Contains(t, after, "Builder · Implement timeline · Working")
+
+	recoverable := working
+	recoverable.State = coding.TeamLifecycleRecoverable
+	recoverable.Activity = ""
+	model.state.Teams = []coding.TeamLifecycleState{{TeamLifecycle: recoverable}}
+	static := renderTimelineBlock(
+		model.activeTeamAttemptBlocks()[0], model.markdown, 160, themeDark, true,
+	)
+	assert.Contains(t, static, "✻ Builder · Implement timeline · Recoverable")
+	_, stopped := model.Update(activityTickMsg{})
+	assert.Nil(t, stopped)
+}
+
+func TestAcceptedLiveTeamProjectionStartsIdleSharedClock(t *testing.T) {
+	t.Parallel()
+
+	model := readyModel(t, true)
+	assert.False(t, model.activityClockVisible())
+
+	command := model.applyAcceptedTeamProjectionView(teamProjectionRefreshMsg{
+		teamID: "team-1", view: testTeamRouteView(),
+	})
+	require.NotNil(t, command)
+	_, ok := command().(activityTickMsg)
+	assert.True(t, ok)
+	assert.True(t, model.activityClockVisible())
+}
+
 func TestTeamAttemptCursorFreezesForVisibleAndPendingRoutes(t *testing.T) {
 	t.Parallel()
 

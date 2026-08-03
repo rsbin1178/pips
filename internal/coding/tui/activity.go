@@ -86,6 +86,10 @@ func (i activityIndicator) Tick() tea.Cmd {
 	return i.spinner.Tick
 }
 
+func (i activityIndicator) Frame() string {
+	return i.spinner.View()
+}
+
 func (i *activityIndicator) Update(message activityTickMsg) tea.Cmd {
 	var command tea.Cmd
 
@@ -95,7 +99,7 @@ func (i *activityIndicator) Update(message activityTickMsg) tea.Cmd {
 }
 
 func (i activityIndicator) View(status activityStatus, theme colorTheme, noColor bool) string {
-	frame := i.spinner.View()
+	frame := i.Frame()
 
 	parts := []string{frame, status.label}
 	if status.detail != "" {
@@ -116,6 +120,24 @@ func (i activityIndicator) View(status activityStatus, theme colorTheme, noColor
 	}
 
 	return strings.Join(parts, " ")
+}
+
+func (m *Model) activityClockVisible() bool {
+	if _, visible := m.activityStatus(); visible {
+		return true
+	}
+
+	return m.route.kind == routeTeam && m.route.team != nil && m.route.loading ||
+		m.teamPanelRetryInFlight() || m.teamTimelineActivityVisible() ||
+		m.teamPanelActivityVisible()
+}
+
+func (m *Model) startActivityClock(previouslyVisible bool) tea.Cmd {
+	if previouslyVisible || !m.activityClockVisible() {
+		return nil
+	}
+
+	return m.activity.Tick()
 }
 
 func resolveActivity(context activityContext) (activityStatus, bool) {
