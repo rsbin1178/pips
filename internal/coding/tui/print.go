@@ -160,11 +160,9 @@ func (m *Model) diffContent() string {
 	}
 
 	lines := []string{"Pips-attributed changes", ""}
+	lines = append(lines, workspaceChangeSummary(*m.state.Changes), "")
 	for _, entry := range m.state.Changes.Entries {
-		line := fmt.Sprintf("%s  %s", entry.Kind, entry.Path)
-		if entry.PreviousPath != "" {
-			line += " <- " + entry.PreviousPath
-		}
+		line := workspaceChangeGlyph(entry.Kind) + "  " + workspaceChangePath(entry)
 		lines = append(lines, line)
 	}
 	if m.state.Changes.Truncated {

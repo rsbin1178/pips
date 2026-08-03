@@ -340,7 +340,7 @@ func TestSafeDisclosureMatrix(t *testing.T) {
 			name: "workspace diff",
 			event: newInteractionEvent(EventWorkspaceChanged, WorkspaceChanged{
 				Entries: []WorkspaceChange{{Path: "main.go", Kind: changes.KindModified}},
-				Diff:    secret,
+				Diff:    secret, Files: 1, Additions: 2, Deletions: 1,
 			}),
 			retained: "main.go",
 		},
@@ -389,6 +389,54 @@ func TestSafeDisclosureMatrix(t *testing.T) {
 			require.NoError(t, err)
 			assert.NotContains(t, string(encodedTelemetry), secret)
 		})
+	}
+}
+
+func TestValidateWorkspaceChangedSummaryAndLegacyFallback(t *testing.T) {
+	t.Parallel()
+
+	legacy := newInteractionEvent(EventWorkspaceChanged, WorkspaceChanged{
+		Entries: []WorkspaceChange{{Path: "main.go", Kind: changes.KindModified}},
+	})
+	require.NoError(t, ValidateEvent(legacy))
+
+	telemetry, err := Telemetry(legacy)
+	require.NoError(t, err)
+	assert.Equal(t, 1, telemetry.Changes)
+
+	valid := newInteractionEvent(EventWorkspaceChanged, WorkspaceChanged{
+		Entries: []WorkspaceChange{{Path: "main.go", Kind: changes.KindModified}},
+		Files:   3, Additions: 4, Deletions: 2,
+	})
+	require.NoError(t, ValidateEvent(valid))
+	telemetry, err = Telemetry(valid)
+	require.NoError(t, err)
+	assert.Equal(t, 3, telemetry.Changes)
+	safe, err := Project(valid, DisclosureSafe)
+	require.NoError(t, err)
+	safePayload, ok := safe.Event().Payload.(WorkspaceChanged)
+	require.True(t, ok)
+	assert.Equal(t, 3, safePayload.Files)
+	assert.Equal(t, 4, safePayload.Additions)
+	assert.Equal(t, 2, safePayload.Deletions)
+	assert.Empty(t, safePayload.Diff)
+
+	invalid := []WorkspaceChanged{
+		{Files: -1},
+		{Files: 1, Additions: -1},
+		{Files: 1, Deletions: -1},
+		{
+			Entries: []WorkspaceChange{
+				{Path: "one.go", Kind: changes.KindModified},
+				{Path: "two.go", Kind: changes.KindModified},
+			},
+			Files: 1,
+		},
+		{Additions: 1},
+	}
+	for _, payload := range invalid {
+		event := newInteractionEvent(EventWorkspaceChanged, payload)
+		require.ErrorIs(t, ValidateEvent(event), ErrInvalidEvent)
 	}
 }
 
