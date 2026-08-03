@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -152,6 +153,81 @@ func TestTeamPanelPreservesExactTaskAndTeamControls(t *testing.T) {
 	assert.Equal(t, team.TaskID("task-1"), controls[1].TaskID)
 	assert.Equal(t, coding.TeamControlCancelTeam, controls[2].Action)
 	assert.Empty(t, controls[2].TaskID)
+}
+
+func TestTeamPanelRetryUsesSharedActivitySpinner(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		width       int
+		noColor     bool
+		controlErr  error
+		expectError bool
+	}{
+		{name: "ANSI success", width: 72},
+		{
+			name: "narrow no-color submission failure", width: 30, noColor: true,
+			controlErr: errors.New("control unavailable"), expectError: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			controller := newTeamWorkerRouteController()
+			controller.controlErr = test.controlErr
+			model := readyModelWithController(t, controller, true)
+			model.options.NoColor = test.noColor
+			model.Update(tea.WindowSizeMsg{Width: test.width, Height: 20})
+
+			view := controller.viewSnapshot()
+			view.Tasks[0].Status = team.TaskStatusFailed
+			view.Attempts[0].DomainState = team.AttemptStatusFailed
+			view.Attempts[0].LifecycleState = coding.TeamLifecycleRecoverable
+			model.storeTeamProjectionView(view)
+			model.state.Teams = []coding.TeamLifecycleState{{TeamLifecycle: coding.TeamLifecycle{
+				TeamID: view.TeamID, State: coding.TeamLifecycleRunning,
+			}}}
+
+			model.Update(key(keyCtrlT))
+			static := ansi.Strip(model.teamPanelView())
+			assert.Contains(t, static, "Failed")
+			assert.NotContains(t, static, "Retrying Task…")
+			model.Update(key("r"))
+			_, command := model.Update(key(keyEnter))
+			require.NotNil(t, command)
+
+			before := model.teamPanelView()
+			assert.Contains(t, ansi.Strip(before), "Retrying Task…")
+
+			if test.noColor {
+				assert.NotContains(t, before, "\x1b[")
+			} else {
+				assert.Contains(t, before, "\x1b[")
+			}
+
+			for line := range strings.SplitSeq(before, "\n") {
+				assert.LessOrEqual(t, ansi.StringWidth(line), test.width)
+			}
+
+			_, tick := model.Update(activityTickMsg{})
+			require.NotNil(t, tick)
+			assert.NotEqual(t, before, model.teamPanelView())
+
+			driveModelCommands(t, model, command)
+			content := ansi.Strip(model.teamPanelView())
+			assert.NotContains(t, content, "Retrying Task…")
+
+			if test.expectError {
+				assert.Contains(t, content, "Error: unable")
+			}
+
+			_, stopped := model.Update(activityTickMsg{})
+			assert.Nil(t, stopped)
+		})
+	}
 }
 
 func TestTeamPanelControlsStayReadOnlyInPlanMode(t *testing.T) {
