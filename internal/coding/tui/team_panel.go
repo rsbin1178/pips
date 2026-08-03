@@ -446,7 +446,7 @@ func (m *Model) submitTeamPanelControl(view coding.TeamView) tea.Cmd {
 	controller := m.controller
 	ctx := m.ctx
 
-	return func() tea.Msg {
+	command := func() tea.Msg {
 		_, controlErr := controller.SubmitTeamControl(ctx, request)
 
 		return teamPanelControlResultMsg{
@@ -454,6 +454,11 @@ func (m *Model) submitTeamPanelControl(view coding.TeamView) tea.Cmd {
 			teamID: request.TeamID, action: request.Action, err: controlErr,
 		}
 	}
+	if request.Action == coding.TeamControlRetryTask {
+		return tea.Batch(command, m.activity.Tick())
+	}
+
+	return command
 }
 
 func (m *Model) interruptTeamPanelWorker(target coding.TeamWorkerTarget) tea.Cmd {
@@ -506,6 +511,21 @@ func (m *Model) applyTeamPanelControl(message teamPanelControlResultMsg) tea.Cmd
 	return m.readTeamProjection(message.teamID)
 }
 
+func (m *Model) teamPanelRetryInFlight() bool {
+	return m.teamPanel.isControlling &&
+		m.teamPanel.controlAction == coding.TeamControlRetryTask
+}
+
+func (m *Model) teamPanelRetryActivityLine() string {
+	if !m.teamPanelRetryInFlight() {
+		return ""
+	}
+
+	return m.activity.View(activityStatus{
+		kind: activityWorking, label: "Retrying Task…",
+	}, m.theme, m.options.NoColor)
+}
+
 func (m *Model) teamPanelView() string {
 	view, ok := m.currentTeamPanelView()
 	if !ok {
@@ -542,6 +562,9 @@ func (m *Model) teamPanelView() string {
 			),
 			m.teamRouteFooter("Enter confirm durable intent · Esc back"),
 		)
+	}
+	if activity := m.teamPanelRetryActivityLine(); activity != "" {
+		lines = append(lines, "", "  "+activity)
 	}
 	if m.teamPanel.controlErr != nil {
 		message := "Error: unable to apply the selected Team control"

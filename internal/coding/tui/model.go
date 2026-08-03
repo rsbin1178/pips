@@ -795,7 +795,9 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case activityTickMsg:
 		teamActivityVisible := m.route.kind == routeTeam && m.route.team != nil && m.route.loading
-		if _, visible := m.activityStatus(); !visible && !teamActivityVisible {
+		teamPanelActivityVisible := m.teamPanelRetryInFlight()
+		if _, visible := m.activityStatus(); !visible && !teamActivityVisible &&
+			!teamPanelActivityVisible {
 			return m, nil
 		}
 
