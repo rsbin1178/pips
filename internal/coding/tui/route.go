@@ -80,6 +80,8 @@ type routeOpenRequest struct {
 	forkMode            bool
 	childSessionID      string
 	teamObjective       string
+	teamView            *coding.TeamView
+	teamIntegration     bool
 	children            []childSummary
 	child               childSummary
 	query               string
@@ -174,6 +176,13 @@ func (m *Model) activateRoute(request routeOpenRequest) tea.Cmd {
 
 		return command
 	case routeTeam:
+		if request.teamIntegration && request.teamView != nil {
+			command := m.activateTeamIntegrationRoute(*request.teamView)
+			m.setRouteComposerSnapshot(request)
+
+			return command
+		}
+
 		command := m.activateTeamRoute(request.teamObjective)
 		m.setRouteComposerSnapshot(request)
 

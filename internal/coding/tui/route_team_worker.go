@@ -40,6 +40,8 @@ type teamWorkerRouteEventMsg struct {
 type teamWorkerControlResultMsg struct {
 	generation uint64
 	target     coding.TeamWorkerTarget
+	action     coding.TeamControlAction
+	snapshot   composerSnapshot
 	err        error
 }
 
@@ -106,7 +108,8 @@ func (m *Model) activateTeamWorkerRoute(request routeOpenRequest) tea.Cmd {
 		childSessionID: request.child.childSessionID, children: request.children,
 		query: request.query, cursor: request.cursor,
 	}
-	m.composer.Blur()
+	m.composer.Reset()
+	m.composer.Focus()
 
 	return m.teamWorkerRouteLoadCommand(false)
 }
@@ -265,6 +268,11 @@ func (m *Model) interruptTeamWorker(target coding.TeamWorkerTarget) tea.Cmd {
 	if target == (coding.TeamWorkerTarget{}) || m.route.controlling {
 		return nil
 	}
+	if m.controller.Mode().Current != coding.ModeAgent {
+		m.route.err = newTeamRoutePresentationError("team controls are read-only in Plan Mode")
+
+		return nil
+	}
 
 	m.route.controlling = true
 	generation := m.route.generation
@@ -280,28 +288,92 @@ func (m *Model) interruptTeamWorker(target coding.TeamWorkerTarget) tea.Cmd {
 		})
 
 		return teamWorkerControlResultMsg{
-			generation: generation, target: target, err: err,
+			generation: generation, target: target,
+			action: coding.TeamControlInterruptAttempt, err: err,
 		}
 	}
 }
 
-func (m *Model) applyTeamWorkerControl(message teamWorkerControlResultMsg) {
+func (m *Model) messageTeamWorker(
+	target coding.TeamWorkerTarget,
+	snapshot composerSnapshot,
+) tea.Cmd {
+	textPreview := strings.TrimSpace(snapshot.display)
+	if target == (coding.TeamWorkerTarget{}) || textPreview == "" ||
+		len(textPreview) > maximumTeamRouteInputBytes || m.route.controlling {
+		return nil
+	}
+	if m.controller.Mode().Current != coding.ModeAgent {
+		m.route.err = newTeamRoutePresentationError("team controls are read-only in Plan Mode")
+
+		return nil
+	}
+
+	m.route.controlling = true
+	m.route.err = nil
+	m.composer.Blur()
+	generation := m.route.generation
+	controller := m.controller
+	ctx := m.ctx
+
+	return func() tea.Msg {
+		text, resolveErr := resolveTeamComposerText(
+			ctx,
+			snapshot,
+			controller.ResolveWorkspaceFile,
+		)
+		if resolveErr != nil {
+			return teamWorkerControlResultMsg{
+				generation: generation, target: target,
+				action: coding.TeamControlMessage, snapshot: snapshot, err: resolveErr,
+			}
+		}
+		_, err := controller.SubmitTeamControl(ctx, coding.TeamControlRequest{
+			TeamID: target.TeamID, Action: coding.TeamControlMessage,
+			MemberID: target.MemberID, TaskID: target.TaskID,
+			ExpectedAttemptID: target.AttemptID,
+			OwnerGeneration:   target.OwnerGeneration,
+			Text:              text,
+		})
+
+		return teamWorkerControlResultMsg{
+			generation: generation, target: target,
+			action: coding.TeamControlMessage, snapshot: snapshot, err: err,
+		}
+	}
+}
+
+func (m *Model) applyTeamWorkerControl(message teamWorkerControlResultMsg) tea.Cmd {
 	if (m.route.kind != routeAgents && m.route.kind != routeChild) ||
 		message.generation != m.route.generation {
-		return
+		return nil
 	}
 	if m.route.kind == routeChild &&
 		message.target != m.route.childSummary.worker.Target {
-		return
+		return nil
 	}
 
 	m.route.controlling = false
 	if m.route.kind == routeAgents && message.err != nil {
 		m.route.err = newTeamRoutePresentationError("unable to interrupt the selected Team Worker")
 
-		return
+		return nil
 	}
 	m.route.err = message.err
+	if m.route.kind != routeChild || m.route.childKind != childTeamWorker ||
+		message.action != coding.TeamControlMessage {
+		return nil
+	}
+	if message.err == nil {
+		if err := m.composer.RecordHistory(message.snapshot); err != nil {
+			m.route.err = err
+		} else {
+			m.composer.Reset()
+		}
+	}
+	m.setLayout()
+
+	return m.composer.Focus()
 }
 
 func (m *Model) teamWorkerRouteContent(state coding.State, child childSummary) string {

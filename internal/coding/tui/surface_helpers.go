@@ -11,10 +11,17 @@ import (
 )
 
 func fitScrollableContent(content string, width, height, offset int) string {
+	value, _ := fitScrollableContentWindow(content, width, height, offset)
+
+	return value
+}
+
+func fitScrollableContentWindow(content string, width, height, offset int) (string, int) {
 	lines := strings.Split(content, "\n")
+	start := 0
 	if len(lines) > height {
 		visible := max(1, height-1)
-		start := min(max(0, offset), len(lines)-visible)
+		start = min(max(0, offset), len(lines)-visible)
 		end := min(len(lines), start+visible)
 		window := slices.Clone(lines[start:end])
 		window = append(window, fmt.Sprintf("… lines %d-%d/%d …", start+1, end, len(lines)))
@@ -24,7 +31,7 @@ func fitScrollableContent(content string, width, height, offset int) string {
 		lines[index] = ansi.Truncate(lines[index], max(1, width), "…")
 	}
 
-	return strings.Join(lines, "\n")
+	return strings.Join(lines, "\n"), start
 }
 
 func wrapIndex(value, length int) int {

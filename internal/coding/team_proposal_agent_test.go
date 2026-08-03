@@ -170,6 +170,45 @@ func TestGenerateTeamProposalPreflightFailureOccursAfterEphemeralRun(t *testing.
 	assertNoTeamResources(t, runtime.paths)
 }
 
+func TestGenerateTeamProposalRejectsUnbornRepositoryBeforeEphemeralRun(t *testing.T) {
+	t.Parallel()
+
+	model := newRuntimeModel(runtimeToolResponse(
+		"proposal-1",
+		teamProposalToolName,
+		mustTeamProposalArguments(t, validTeamProposalRequest()),
+	))
+	runtime := openGitTestRuntime(t, model, nil)
+	runGitTestCommand(t, runtime, "checkout", "--orphan", "unborn-team-test")
+
+	_, err := runtime.GenerateTeamProposal(t.Context(), TeamProposalPrompt{
+		Objective: validTeamProposalRequest().Objective,
+	})
+	require.ErrorIs(t, err, ErrTeamRepositoryRequired)
+	assert.Empty(t, model.Requests(), "repository prerequisites must fail before the Lead runs")
+	assertTeamProposalInactive(t, runtime)
+	assertNoTeamResources(t, runtime.paths)
+}
+
+func TestGenerateTeamProposalRejectsNonRepositoryBeforeEphemeralRun(t *testing.T) {
+	t.Parallel()
+
+	model := newRuntimeModel(runtimeToolResponse(
+		"proposal-1",
+		teamProposalToolName,
+		mustTeamProposalArguments(t, validTeamProposalRequest()),
+	))
+	runtime := openTestRuntime(t, model)
+
+	_, err := runtime.GenerateTeamProposal(t.Context(), TeamProposalPrompt{
+		Objective: validTeamProposalRequest().Objective,
+	})
+	require.ErrorIs(t, err, ErrTeamRepositoryRequired)
+	assert.Empty(t, model.Requests(), "repository prerequisites must fail before the Lead runs")
+	assertTeamProposalInactive(t, runtime)
+	assertNoTeamResources(t, runtime.paths)
+}
+
 func TestGenerateTeamProposalRequiresAgentModeAndIdleRuntime(t *testing.T) {
 	t.Parallel()
 

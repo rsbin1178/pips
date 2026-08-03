@@ -21,10 +21,8 @@ func (m *Model) activateTeamRecoveryReview(
 	m.routeSeq++
 	state := &teamRouteState{
 		stage:    teamRouteRecovery,
-		input:    newTeamRouteInput(m.theme, m.options.NoColor),
 		recovery: cloneTeamRouteRecovery(values),
 	}
-	state.input.Blur()
 	m.route = routeState{kind: routeTeam, generation: m.routeSeq, team: state}
 	m.composer.Blur()
 	m.setLayout()
@@ -32,21 +30,38 @@ func (m *Model) activateTeamRecoveryReview(
 	return nil
 }
 
+func (m *Model) activateTeamIntegrationRoute(view coding.TeamView) tea.Cmd {
+	m.routeSeq++
+	cloned := view.Clone()
+	m.route = routeState{
+		kind: routeTeam, generation: m.routeSeq,
+		team: &teamRouteState{
+			stage: teamRouteActive, teamID: cloned.TeamID, view: &cloned,
+		},
+	}
+	m.composer.Blur()
+	m.setLayout()
+
+	return m.openTeamIntegrationRoute()
+}
+
 func (m *Model) discoverTeamRouteRecovery() tea.Cmd {
-	ctx, generation, operation, ok := m.beginTeamRouteOperation()
+	ctx, generation, operation, ok := m.beginTeamRouteOperation(
+		teamRouteOperationDiscoverRecovery,
+	)
 	if !ok {
 		return nil
 	}
 	controller := m.controller
 
-	return func() tea.Msg {
+	return m.withTeamRouteActivity(func() tea.Msg {
 		values, err := controller.DiscoverTeamRecovery(ctx)
 
 		return teamRouteResultMsg{
 			generation: generation, operation: operation,
 			kind: teamRouteOperationDiscoverRecovery, recovery: values, err: err,
 		}
-	}
+	})
 }
 
 func (m *Model) applyDiscoveredTeamRecovery(message teamRouteResultMsg) tea.Cmd {
@@ -55,7 +70,7 @@ func (m *Model) applyDiscoveredTeamRecovery(message teamRouteResultMsg) tea.Cmd 
 		state.stage = teamRouteObjective
 		m.route.err = message.err
 
-		return state.input.Focus()
+		return m.composer.Focus()
 	}
 
 	state.recovery = cloneTeamRouteRecovery(message.recovery)
@@ -63,7 +78,6 @@ func (m *Model) applyDiscoveredTeamRecovery(message teamRouteResultMsg) tea.Cmd 
 	m.route.err = nil
 	if len(state.recovery) > 0 {
 		state.stage = teamRouteRecovery
-		state.input.Blur()
 
 		return nil
 	}
@@ -73,7 +87,7 @@ func (m *Model) applyDiscoveredTeamRecovery(message teamRouteResultMsg) tea.Cmd 
 
 	state.stage = teamRouteObjective
 
-	return state.input.Focus()
+	return m.composer.Focus()
 }
 
 func cloneTeamRouteRecovery(
@@ -181,13 +195,15 @@ func (m *Model) resumeTeamRouteRecovery(
 	candidate coding.TeamRecoveryCandidate,
 	retryWork bool,
 ) tea.Cmd {
-	ctx, generation, operation, ok := m.beginTeamRouteOperation()
+	ctx, generation, operation, ok := m.beginTeamRouteOperation(
+		teamRouteOperationResumeRecovery,
+	)
 	if !ok {
 		return nil
 	}
 	controller := m.controller
 
-	return func() tea.Msg {
+	return m.withTeamRouteActivity(func() tea.Msg {
 		reference, err := controller.ResumeTeam(ctx, candidate.TeamID, coding.TeamResumeDecision{
 			ExpectedResourceRevision: candidate.ResourceRevision,
 			RetryInterruptedWork:     retryWork,
@@ -205,7 +221,7 @@ func (m *Model) resumeTeamRouteRecovery(
 			kind: teamRouteOperationResumeRecovery, reference: reference,
 			view: view, err: readErr,
 		}
-	}
+	})
 }
 
 func (m *Model) applyResumedTeamRecovery(message teamRouteResultMsg) tea.Cmd {
@@ -228,7 +244,7 @@ func (m *Model) applyResumedTeamRecovery(message teamRouteResultMsg) tea.Cmd {
 	m.route.cursor = 0
 	m.route.err = message.err
 
-	return nil
+	return m.closeRouteToParent()
 }
 
 func (m *Model) refreshTeamRouteForStage() tea.Cmd {
@@ -279,14 +295,16 @@ func (m *Model) loadTeamRouteIntegration() tea.Cmd {
 	if state == nil || state.teamID == "" {
 		return nil
 	}
-	ctx, generation, operation, ok := m.beginTeamRouteOperation()
+	ctx, generation, operation, ok := m.beginTeamRouteOperation(
+		teamRouteOperationLoadIntegration,
+	)
 	if !ok {
 		return nil
 	}
 	controller := m.controller
 	teamID := state.teamID
 
-	return func() tea.Msg {
+	return m.withTeamRouteActivity(func() tea.Msg {
 		recoveries, err := controller.TeamIntegrationRecoveries(ctx)
 		if err != nil {
 			return teamRouteResultMsg{
@@ -301,7 +319,7 @@ func (m *Model) loadTeamRouteIntegration() tea.Cmd {
 			kind: teamRouteOperationLoadIntegration,
 			view: view, recoveries: recoveries, err: readErr,
 		}
-	}
+	})
 }
 
 func (m *Model) applyLoadedTeamIntegration(message teamRouteResultMsg) tea.Cmd {
@@ -357,9 +375,7 @@ func (m *Model) updateTeamIntegrationRecoveryKey(key string) (tea.Model, tea.Cmd
 	rows := m.teamIntegrationRowCount()
 	switch key {
 	case keyEscape, keyCtrlC:
-		state.stage = teamRouteActive
-		m.route.cursor = 0
-		m.route.err = nil
+		return m, m.closeRouteToParent()
 	case "up", "k":
 		m.route.cursor = wrapIndex(m.route.cursor-1, rows)
 	case keyDown, "j", keyTab:
@@ -386,9 +402,7 @@ func (m *Model) updateTeamIntegrationSelectionKey(key string) (tea.Model, tea.Cm
 	tasks := completedTeamRouteTasks(state.view)
 	switch key {
 	case keyEscape, keyCtrlC:
-		state.stage = teamRouteActive
-		m.route.cursor = 0
-		m.route.err = nil
+		return m, m.closeRouteToParent()
 	case "up", "k":
 		m.route.cursor = wrapIndex(m.route.cursor-1, len(tasks))
 	case keyDown, "j", keyTab:
@@ -401,7 +415,7 @@ func (m *Model) updateTeamIntegrationSelectionKey(key string) (tea.Model, tea.Cm
 		}
 	case "d":
 		return m.openTeamRouteCleanupConfirmation()
-	case " ", "space":
+	case " ", keySpace:
 		if m.route.cursor >= 0 && m.route.cursor < len(tasks) {
 			id := tasks[m.route.cursor].ID
 			state.integrationTasks[id] = !state.integrationTasks[id]
@@ -460,13 +474,15 @@ func (m *Model) prepareTeamRouteIntegration() tea.Cmd {
 		selected = nil
 	}
 
-	ctx, generation, operation, ok := m.beginTeamRouteOperation()
+	ctx, generation, operation, ok := m.beginTeamRouteOperation(
+		teamRouteOperationPrepareIntegration,
+	)
 	if !ok {
 		return nil
 	}
 	controller := m.controller
 
-	return func() tea.Msg {
+	return m.withTeamRouteActivity(func() tea.Msg {
 		preview, err := controller.PrepareTeamIntegration(ctx, coding.TeamIntegrationRequest{
 			TaskIDs: selected,
 		})
@@ -475,7 +491,7 @@ func (m *Model) prepareTeamRouteIntegration() tea.Cmd {
 			generation: generation, operation: operation,
 			kind: teamRouteOperationPrepareIntegration, preview: preview, err: err,
 		}
-	}
+	})
 }
 
 func (m *Model) applyPreparedTeamIntegration(message teamRouteResultMsg) tea.Cmd {
@@ -559,15 +575,15 @@ func (m *Model) submitTeamIntegrationAction() tea.Cmd {
 		return nil
 	}
 
-	ctx, generation, operation, ok := m.beginTeamRouteOperation()
+	ctx, generation, operation, ok := m.beginTeamRouteOperation(dispatch.kind)
 	if !ok {
 		return nil
 	}
 	controller := m.controller
 
-	return func() tea.Msg {
+	return m.withTeamRouteActivity(func() tea.Msg {
 		return dispatchTeamIntegration(ctx, controller, generation, operation, dispatch)
-	}
+	})
 }
 
 type teamIntegrationDispatch struct {

@@ -48,6 +48,7 @@ type teamProjectionRefreshMsg struct {
 
 func (m *Model) resetTeamProjection(sessionID string) {
 	m.teamProjection = teamProjectionState{sessionID: sessionID}
+	m.teamPanel = teamPanelState{}
 	m.resetTeamInteractions(sessionID)
 	m.scrollback.teamAttempts = nil
 }
