@@ -28,10 +28,12 @@ func TestTeamPanelKeepsLeadComposerAndUsesExplicitFocus(t *testing.T) {
 
 	content := ansi.Strip(model.View().Content)
 	composer := strings.Index(content, inputArrow)
+	statusLine := strings.Index(content, ansi.Strip(model.statusLineView()))
 	panel := strings.Index(content, "Team · 1 Workers · Tasks 0/1")
 
 	require.GreaterOrEqual(t, composer, 0)
-	require.Greater(t, panel, composer)
+	require.Greater(t, statusLine, composer)
+	require.Greater(t, panel, statusLine)
 	require.NotNil(t, model.View().Cursor)
 	assert.Contains(t, content, "Builder")
 	assert.NotContains(t, content, "Tasks · 1")

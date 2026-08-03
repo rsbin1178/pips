@@ -1126,10 +1126,10 @@ func (m *Model) readyView() tea.View {
 			footer = append(footer, m.commandPickerView(availableRows))
 		}
 	} else {
+		footer = append(footer, m.statusLineView())
 		if panel := m.teamPanelView(); panel != "" {
 			footer = append(footer, panel)
 		}
-		footer = append(footer, m.statusLineView())
 	}
 
 	parts := make([]string, 0, len(footer)+1)
