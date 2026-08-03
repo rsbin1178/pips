@@ -227,7 +227,9 @@ func (m *Model) projectTeamAttemptBlock(value coding.TeamLifecycle) timelineBloc
 	}
 
 	glyph := "✻"
-	if terminalTeamAttempt(value) {
+	if teamLifecycleActivityVisible(value) {
+		glyph = m.activity.Frame()
+	} else if terminalTeamAttempt(value) {
 		glyph = completionGlyph
 	}
 
@@ -237,6 +239,25 @@ func (m *Model) projectTeamAttemptBlock(value coding.TeamLifecycle) timelineBloc
 		body:   status,
 		status: string(value.State),
 	}
+}
+
+func teamLifecycleActivityVisible(value coding.TeamLifecycle) bool {
+	if _, ok := exactTeamAttemptKey(value); !ok {
+		return false
+	}
+
+	return value.State == coding.TeamLifecycleRunning ||
+		value.State == coding.TeamLifecycleCapturing
+}
+
+func (m *Model) teamTimelineActivityVisible() bool {
+	for _, state := range m.state.Teams {
+		if teamLifecycleActivityVisible(state.TeamLifecycle) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (m *Model) teamAttemptLabels(value coding.TeamLifecycle) (string, string) {
@@ -399,6 +420,7 @@ func (m *Model) applyTeamProjectionRefresh(message teamProjectionRefreshMsg) tea
 }
 
 func (m *Model) applyAcceptedTeamProjectionView(message teamProjectionRefreshMsg) tea.Cmd {
+	activityWasVisible := m.activityClockVisible()
 	view := m.mergeTeamProjectionView(message.view)
 	m.storeTeamProjectionView(view)
 	if m.route.kind == routeAgents {
@@ -414,7 +436,10 @@ func (m *Model) applyAcceptedTeamProjectionView(message teamProjectionRefreshMsg
 		m.route.team.view = &cloned
 	}
 
-	return m.reconcileTeamInteractionView(view)
+	return tea.Batch(
+		m.reconcileTeamInteractionView(view),
+		m.startActivityClock(activityWasVisible),
+	)
 }
 
 func (m *Model) refreshSelectedTeamWorkerSummary(view coding.TeamView) {

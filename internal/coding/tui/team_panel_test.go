@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/rsbin/pips/agent/team"
 	"github.com/rsbin/pips/internal/coding"
+	"github.com/rsbin/pips/internal/coding/teamstate"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -225,7 +226,11 @@ func TestTeamPanelRetryUsesSharedActivitySpinner(t *testing.T) {
 			}
 
 			_, stopped := model.Update(activityTickMsg{})
-			assert.Nil(t, stopped)
+			if test.expectError {
+				assert.Nil(t, stopped)
+			} else {
+				assert.NotNil(t, stopped, "a successfully retried live Worker keeps the shared clock")
+			}
 		})
 	}
 }
@@ -284,6 +289,48 @@ func TestTeamPanelCapturingStateWinsOverRunningDomainState(t *testing.T) {
 
 	_, label, _ := teamPanelWorkerState(worker)
 	assert.Equal(t, "Capturing result", label)
+}
+
+func TestTeamPanelLiveWorkerUsesSharedAnimatedClock(t *testing.T) {
+	t.Parallel()
+
+	model := readyModel(t, true)
+	view := testTeamRouteView()
+	model.storeTeamProjectionView(view)
+
+	before := ansi.Strip(model.teamPanelView())
+	assert.Contains(t, before, "✻ Builder  Working")
+
+	_, next := model.Update(activityTickMsg{})
+	require.NotNil(t, next)
+
+	after := ansi.Strip(model.teamPanelView())
+	assert.NotEqual(t, before, after)
+	assert.Contains(t, after, "Builder  Working")
+
+	view.Attempts[0].ResourceState = teamstate.AttemptRecoverable
+	view.Attempts[0].LifecycleState = coding.TeamLifecycleRecoverable
+	model.storeTeamProjectionView(view)
+	static := ansi.Strip(model.teamPanelView())
+	assert.Contains(t, static, "✻ Builder  Recoverable")
+
+	_, stopped := model.Update(activityTickMsg{})
+	assert.Nil(t, stopped)
+}
+
+func TestTeamPanelCapturingWorkerUsesSharedActivityFrame(t *testing.T) {
+	t.Parallel()
+
+	attempt := testTeamRouteView().Attempts[0]
+	attempt.LifecycleState = coding.TeamLifecycleCapturing
+	attempt.ResourceState = teamstate.AttemptCapturing
+	worker := teamPanelWorker{attempt: attempt, hasAttempt: true}
+
+	assert.True(t, teamPanelWorkerActivityVisible(worker))
+
+	attempt.ResourceState = teamstate.AttemptRecoverable
+	worker.attempt = attempt
+	assert.False(t, teamPanelWorkerActivityVisible(worker))
 }
 
 func TestTeamPanelTaskWindowKeepsSelectedOverflowTaskVisible(t *testing.T) {
