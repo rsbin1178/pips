@@ -270,11 +270,13 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.syncApprovalPrompt()
 		m.setLayout()
 		commit := m.commitStartupOutput()
+		activity := m.startActivityClock(false)
 
 		return m, tea.Sequence(commit, tea.Batch(
-			m.composer.Focus(), m.startSubscription(), m.loadPlanReviewIfNeeded(),
+			m.composer.Focus(), m.startSubscription(), m.loadPlanReviewIfNeeded(), activity,
 		))
 	case subscriptionStartedMsg:
+		activityWasVisible := m.activityClockVisible()
 		m.subscriptionMode = message.supported
 		if message.err != nil {
 			m.streamErr = message.err
@@ -305,6 +307,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.continueIfPaused(),
 			m.refreshTeamProjectionSnapshot(),
 			m.loadPlanReviewIfNeeded(),
+			m.startActivityClock(activityWasVisible),
 		)
 		if commit != nil {
 			return m, tea.Sequence(commit, wait)
@@ -794,10 +797,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 
 		return m, nil
 	case activityTickMsg:
-		teamActivityVisible := m.route.kind == routeTeam && m.route.team != nil && m.route.loading
-		teamPanelActivityVisible := m.teamPanelRetryInFlight()
-		if _, visible := m.activityStatus(); !visible && !teamActivityVisible &&
-			!teamPanelActivityVisible {
+		if !m.activityClockVisible() {
 			return m, nil
 		}
 
@@ -2017,12 +2017,14 @@ func (m *Model) updateSubscription(message subscriptionEventMsg) (tea.Model, tea
 		return m, m.startSubscription()
 	}
 
+	activityWasVisible := m.activityClockVisible()
 	m.reduceObservedEvent(message.record.Event)
 	m.setLayout()
 	refresh := tea.Batch(
 		m.invalidateAgentDetail(streamItem{event: message.record.Event}),
 		m.invalidateTeamProjection(message.record.Event),
 		m.loadPlanReviewIfNeeded(),
+		m.startActivityClock(activityWasVisible),
 	)
 	wait := message.bridge.wait()
 	commit := m.commitStableTimeline()
