@@ -97,6 +97,48 @@ func TestShellOperationUsesConfiguredNetwork(t *testing.T) {
 	assert.Empty(t, spec.Justification)
 }
 
+func TestShellOperationUsesReadOnlyWorkspaceBoundary(t *testing.T) {
+	t.Parallel()
+
+	handler := NewShellHandlerForSandbox(config.SandboxReadOnly, config.SandboxNetworkAllow)
+	spec, err := handler.Operation(t.Context(), agent.ToolCall{
+		Name: shellName,
+		Args: ai.JSON(`{"command":"cat README.md"}`),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, execution.WorkspaceReadOnly, spec.Workspace)
+	assert.Equal(t, execution.NetworkAny, spec.Network)
+	assert.True(t, spec.NetworkByConfiguration)
+}
+
+func TestReadOnlyShellExternalWriteIsDeniedByPolicy(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	ws, err := workspace.Open(root)
+	require.NoError(t, err)
+	external := t.TempDir()
+	handler := NewShellHandlerForSandbox(config.SandboxReadOnly, config.SandboxNetworkAllow)
+	spec, err := handler.Operation(t.Context(), agent.ToolCall{
+		Name: shellName,
+		Args: ai.JSON(`{"command":"printf blocked","permissions":{"write_paths":["` + external + `"],"network":true},"justification":"test write denial"}`),
+	})
+	require.NoError(t, err)
+	operation, err := execution.NewOperation(t.Context(), ws, spec)
+	require.NoError(t, err)
+	policy, err := execution.NewPolicy(ws, execution.PolicyConfig{
+		Sandbox:       config.SandboxReadOnly,
+		Network:       config.SandboxNetworkAllow,
+		Approval:      config.ApprovalOnRequest,
+		SandboxSource: config.Source{Kind: config.SourceDefault},
+	})
+	require.NoError(t, err)
+
+	decision := policy.Evaluate(operation, operation.Fingerprint())
+	assert.Equal(t, execution.VerdictDeny, decision.Verdict())
+	assert.Equal(t, "sandbox_read_only", decision.Reason())
+}
+
 func TestShellOperationStrictlyRejectsUnsafeArguments(t *testing.T) {
 	t.Parallel()
 

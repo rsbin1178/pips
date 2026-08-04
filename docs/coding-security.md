@@ -80,11 +80,15 @@ after its single-use snapshot, preserving pre-existing dirty work.
 
 ## Full Access and stronger isolation
 
-`full-access` runs the command directly with host permissions. It must come
-from a user config file, environment value, or CLI flag; project configuration,
-Bundles, Extensions, and model Tool arguments cannot enable it. Full Access
-removes filesystem and network isolation, and process-group cleanup remains
-best effort. Use it only for a Workspace and command you trust.
+`full-access` runs the command directly with host permissions. At startup it
+must come from a user config file, environment value, or CLI flag; during an
+interactive session it may also be selected only after explicit TUI confirmation
+through the Controller's one-shot `session_override` capability. Project
+configuration, Bundles, Extensions, and model Tool arguments cannot enable it.
+Full Access removes filesystem and network isolation, and process-group cleanup
+remains best effort. `/permissions` can switch to or from Full Access at an
+idle boundary without restarting Pips; the choice remains process-local. Use it
+only for a Workspace and command you trust.
 
 The command Sandbox does not isolate the pips process itself, trusted compiled
 Extensions, the model Provider client, or other same-user processes. It also

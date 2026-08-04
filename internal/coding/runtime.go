@@ -534,7 +534,10 @@ func openRuntime(
 		&runtime.pending,
 		policy,
 		executor,
-		tools.NewShellHandlerForNetwork(options.Config.SandboxWorkspaceWrite.Network),
+		tools.NewShellHandlerForSandbox(
+			options.Config.Sandbox,
+			options.Config.SandboxWorkspaceWrite.Network,
+		),
 	)
 	if err != nil {
 		return nil, err

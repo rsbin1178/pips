@@ -71,6 +71,91 @@ func TestPolicyDecisionMatrix(t *testing.T) {
 	require.NotEqual(t, execution.Authorization{}, authorization)
 }
 
+func TestReadOnlyPolicyDeniesWritesBeforeApproval(t *testing.T) {
+	t.Parallel()
+
+	fixture := newOperationFixture(t)
+	readOnlySpec := fixture.spec()
+	readOnlySpec.Workspace = execution.WorkspaceReadOnly
+	readOnlyOperation := mustOperation(t, fixture, readOnlySpec)
+
+	readOnly := mustPolicy(t, fixture, execution.PolicyConfig{
+		Sandbox:       config.SandboxReadOnly,
+		Network:       config.SandboxNetworkAllow,
+		Approval:      config.ApprovalOnRequest,
+		SandboxSource: config.Source{Kind: config.SourceDefault},
+	})
+	decision := readOnly.Evaluate(readOnlyOperation)
+	assert.Equal(t, execution.VerdictAllow, decision.Verdict())
+	assert.Equal(t, "baseline", decision.Reason())
+
+	workspaceWrite := mustOperation(t, fixture, fixture.spec())
+	decision = readOnly.Evaluate(workspaceWrite, workspaceWrite.Fingerprint())
+	assert.Equal(t, execution.VerdictDeny, decision.Verdict())
+	assert.Equal(t, "sandbox_read_only", decision.Reason())
+
+	_, err := readOnly.Approve(workspaceWrite)
+	require.ErrorIs(t, err, execution.ErrUnauthorized)
+	require.ErrorContains(t, err, "sandbox_read_only")
+
+	external := mkdir(t, filepath.Join(fixture.base, "external-read-only"))
+	externalSpec := readOnlySpec
+	externalSpec.WriteDirs = []string{external}
+	externalSpec.Justification = "write generated output"
+	externalOperation := mustOperation(t, fixture, externalSpec)
+	decision = readOnly.Evaluate(externalOperation, externalOperation.Fingerprint())
+	assert.Equal(t, execution.VerdictDeny, decision.Verdict())
+	assert.Equal(t, "sandbox_read_only", decision.Reason())
+
+	_, err = readOnly.Approve(externalOperation)
+	require.ErrorIs(t, err, execution.ErrUnauthorized)
+	require.ErrorContains(t, err, "sandbox_read_only")
+}
+
+func TestReadOnlyPolicyRetainsNetworkModes(t *testing.T) {
+	t.Parallel()
+
+	fixture := newOperationFixture(t)
+	spec := fixture.spec()
+	spec.Workspace = execution.WorkspaceReadOnly
+	spec.Network = execution.NetworkAny
+	spec.Justification = "download dependencies"
+	operation := mustOperation(t, fixture, spec)
+
+	tests := []struct {
+		name        string
+		network     config.SandboxNetworkMode
+		wantVerdict execution.Verdict
+		wantReason  string
+	}{
+		{name: "deny", network: config.SandboxNetworkDeny, wantVerdict: execution.VerdictDeny, wantReason: "network_disabled"},
+		{name: "on request", network: config.SandboxNetworkOnRequest, wantVerdict: execution.VerdictReview, wantReason: "approval_required"},
+		{name: "allow", network: config.SandboxNetworkAllow, wantVerdict: execution.VerdictAllow, wantReason: "baseline"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			policy := mustPolicy(t, fixture, execution.PolicyConfig{
+				Sandbox:       config.SandboxReadOnly,
+				Network:       test.network,
+				Approval:      config.ApprovalOnRequest,
+				SandboxSource: config.Source{Kind: config.SourceDefault},
+			})
+			decision := policy.Evaluate(operation)
+			assert.Equal(t, test.wantVerdict, decision.Verdict())
+			assert.Equal(t, test.wantReason, decision.Reason())
+
+			if test.network == config.SandboxNetworkDeny {
+				_, err := policy.Approve(operation)
+				require.ErrorIs(t, err, execution.ErrUnauthorized)
+				require.ErrorContains(t, err, "network_disabled")
+			}
+		})
+	}
+}
+
 func TestPolicyWorkspaceWriteNetworkModes(t *testing.T) {
 	t.Parallel()
 
@@ -149,7 +234,10 @@ func TestPolicyRejectsUnsafeConfigurationAndProtectedWrites(t *testing.T) {
 		require.ErrorIs(t, err, execution.ErrInvalidPolicy)
 	}
 
-	for _, source := range []config.SourceKind{config.SourceConfigFile, config.SourceEnvironment, config.SourceFlag} {
+	for _, source := range []config.SourceKind{
+		config.SourceConfigFile, config.SourceEnvironment, config.SourceFlag,
+		config.SourceSessionOverride,
+	} {
 		_, err := execution.NewPolicy(fixture.workspace, execution.PolicyConfig{
 			Sandbox:       config.SandboxFullAccess,
 			Approval:      config.ApprovalOnRequest,

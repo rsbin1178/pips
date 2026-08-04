@@ -107,6 +107,10 @@ func (p Policy) Evaluate(op Operation, grants ...Fingerprint) Decision {
 	if p.sandbox == config.SandboxFullAccess {
 		return p.allowed(op, "full_access")
 	}
+
+	if reason := p.readOnlyWriteReason(op); reason != "" {
+		return denied(reason)
+	}
 	if op.network == NetworkAny && p.network == config.SandboxNetworkDeny {
 		return denied("network_disabled")
 	}
@@ -132,6 +136,13 @@ func (p Policy) Approve(op Operation) (Authorization, error) {
 		return Authorization{}, fmt.Errorf("%w: %s", ErrUnauthorized, reason)
 	}
 
+	if reason := p.readOnlyWriteReason(op); reason != "" {
+		return Authorization{}, fmt.Errorf("%w: %s", ErrUnauthorized, reason)
+	}
+
+	if p.sandbox != config.SandboxFullAccess && op.network == NetworkAny && p.network == config.SandboxNetworkDeny {
+		return Authorization{}, fmt.Errorf("%w: network_disabled", ErrUnauthorized)
+	}
 	if p.sandbox != config.SandboxFullAccess && !p.baselineOperation(op) && p.approval != config.ApprovalOnRequest {
 		return Authorization{}, fmt.Errorf("%w: approval disabled", ErrUnauthorized)
 	}
@@ -139,12 +150,22 @@ func (p Policy) Approve(op Operation) (Authorization, error) {
 	return p.authorization(op), nil
 }
 
+func (p Policy) readOnlyWriteReason(op Operation) string {
+	if p.sandbox == config.SandboxReadOnly &&
+		(op.workspace == WorkspaceWrite || len(op.writeDirs) > 0) {
+		return "sandbox_read_only"
+	}
+
+	return ""
+}
+
 func validatePolicyConfig(cfg PolicyConfig) error {
 	switch cfg.Sandbox {
-	case config.SandboxWorkspaceWrite:
+	case config.SandboxReadOnly, config.SandboxWorkspaceWrite:
 	case config.SandboxFullAccess:
 		switch cfg.SandboxSource.Kind {
-		case config.SourceConfigFile, config.SourceEnvironment, config.SourceFlag:
+		case config.SourceConfigFile, config.SourceEnvironment, config.SourceFlag,
+			config.SourceSessionOverride:
 		default:
 			return fmt.Errorf("%w: full access requires an explicit user-controlled source", ErrInvalidPolicy)
 		}
