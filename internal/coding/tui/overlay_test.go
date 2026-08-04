@@ -255,23 +255,7 @@ func TestModelPickerRendersInlineBelowComposerAndOwnsTyping(t *testing.T) {
 	assert.Empty(t, model.composer.Value())
 }
 
-func TestDiffInspectionPrintsPlainNarrowOutput(t *testing.T) {
-	t.Parallel()
-
-	model := readyModel(t, true)
-	model.Update(tea.WindowSizeMsg{Width: 28, Height: 10})
-	model.state.Changes = &coding.WorkspaceChanged{
-		Entries: []coding.WorkspaceChange{{Path: "main.go", Kind: "modified"}},
-		Diff:    "diff --git a/main.go b/main.go\n-old\n+new",
-	}
-	printed := commandOutput(model.printDiff())
-	assert.Contains(t, printed, "Pips-attributed changes")
-	assert.Contains(t, printed, "+new")
-	assert.NotContains(t, printed, "\x1b[")
-	assert.Equal(t, routeNone, model.route.kind)
-}
-
-func TestDiffCommandLoadsFreshWorktreeStatusAsynchronously(t *testing.T) {
+func TestStatusCommandRefreshesCompactWorktreeSummaryAsynchronously(t *testing.T) {
 	t.Parallel()
 
 	status, err := changes.NewWorktreeStatus(
@@ -312,16 +296,32 @@ func TestDiffCommandLoadsFreshWorktreeStatusAsynchronously(t *testing.T) {
 	printed := commandOutput(printedCommand)
 
 	assert.False(t, model.worktreeLoading)
-	assert.Contains(t, printed, "Workspace changes · main ↑1 ↓0")
-	assert.Contains(t, printed, "Staged (1 files, +2 -1)")
-	assert.Contains(t, printed, "M  runtime.go")
-	assert.Contains(t, printed, "Untracked (1 files, +3 -0)")
-	assert.Contains(t, printed, "Protected product metadata omitted: 1 path(s)")
+	assert.Contains(t, printed, "Status")
+	assert.Contains(t, printed, "Repository: main ↑1 ↓0 · 2 changed")
+	assert.NotContains(t, printed, "diff --git")
+	assert.NotContains(t, printed, "runtime.go")
 	assert.Contains(t, model.statusContent(), "Repository: main ↑1 ↓0 · 2 changed")
 	assert.Equal(t, 1, controller.calls)
 }
 
-func TestDiffInspectionCanBeCanceledWithoutPrintingAnError(t *testing.T) {
+func TestStatusKeepsRuntimeDetailsWhenGitStatusFails(t *testing.T) {
+	t.Parallel()
+
+	controller := &worktreeController{
+		overlayController: newOverlayController(readyState()),
+		err:               errors.New("git inspector unavailable"),
+	}
+	model := readyModelWithController(t, controller, true)
+	_, printedCommand := model.Update(model.loadWorkspaceStatus()())
+	printed := commandOutput(printedCommand)
+
+	assert.Contains(t, printed, "Status")
+	assert.Contains(t, printed, "Model:")
+	assert.Contains(t, printed, "Repository: unavailable")
+	assert.Contains(t, printed, "git inspector unavailable")
+}
+
+func TestStatusInspectionCanBeCanceledWithoutPrintingAnError(t *testing.T) {
 	t.Parallel()
 
 	controller := &cancelWorktreeController{
@@ -342,21 +342,6 @@ func TestDiffInspectionCanBeCanceledWithoutPrintingAnError(t *testing.T) {
 	_, staleCommand := model.Update(<-result)
 	assert.Nil(t, staleCommand)
 	assert.Empty(t, model.worktreeSummary)
-}
-
-func TestLongDiffInspectionPrintIncludesFullReport(t *testing.T) {
-	t.Parallel()
-
-	model := readyModel(t, true)
-	model.Update(tea.WindowSizeMsg{Width: 40, Height: 10})
-	lines := make([]string, 30)
-	for index := range lines {
-		lines[index] = fmt.Sprintf("diff line %02d", index+1)
-	}
-	model.state.Changes = &coding.WorkspaceChanged{Diff: strings.Join(lines, "\n")}
-	printed := commandOutput(model.printDiff())
-	assert.Contains(t, printed, "diff line 01")
-	assert.Contains(t, printed, "diff line 30")
 }
 
 func TestStatusInspectionShowsOnlyRequestOutputLimit(t *testing.T) {
@@ -487,14 +472,17 @@ type overlayController struct {
 		entryID   string
 		summarize bool
 	}
-	compactions      []coding.CompactionRequest
-	forks            []string
-	agents           []subagent.Summary
-	agentDetail      subagent.Detail
-	agentInspections []string
-	agentCanceled    []string
-	skillSnapshot    coding.SkillSnapshot
-	skillErr         error
+	compactions       []coding.CompactionRequest
+	forks             []string
+	agents            []subagent.Summary
+	agentDetail       subagent.Detail
+	agentInspections  []string
+	agentCanceled     []string
+	skillSnapshot     coding.SkillSnapshot
+	skillErr          error
+	permissions       runtimecontrol.PermissionState
+	permissionErr     error
+	permissionUpdates []runtimecontrol.PermissionUpdate
 }
 
 type approvalResolutionErrorController struct {
@@ -515,6 +503,7 @@ func (c *approvalResolutionErrorController) Resolve(
 type worktreeController struct {
 	*overlayController
 	status changes.WorktreeStatus
+	err    error
 	calls  int
 }
 
@@ -535,7 +524,7 @@ func (c *cancelWorktreeController) WorkspaceStatus(
 func (c *worktreeController) WorkspaceStatus(context.Context) (changes.WorktreeStatus, error) {
 	c.calls++
 
-	return c.status, nil
+	return c.status, c.err
 }
 
 func newOverlayController(state coding.State) *overlayController {
@@ -556,6 +545,53 @@ func newOverlayController(state coding.State) *overlayController {
 }
 
 func (c *overlayController) Capabilities() ai.Capabilities { return c.capabilities }
+
+func (c *overlayController) Permissions() runtimecontrol.PermissionState {
+	if c.permissions.Sandbox != "" {
+		return c.permissions
+	}
+
+	value := c.Config()
+	state := runtimecontrol.PermissionState{
+		Sandbox:            value.Sandbox,
+		ConfiguredSandbox:  value.Sandbox,
+		Approval:           value.Approval,
+		ConfiguredApproval: value.Approval,
+		Network:            value.SandboxWorkspaceWrite.Network,
+		ConfiguredNetwork:  value.SandboxWorkspaceWrite.Network,
+		SandboxSource:      config.SourceDefault,
+		ApprovalSource:     config.SourceDefault,
+		NetworkSource:      config.SourceDefault,
+	}
+
+	return state
+}
+
+func (c *overlayController) SetPermissions(
+	_ context.Context,
+	update runtimecontrol.PermissionUpdate,
+) error {
+	if c.permissionErr != nil {
+		return c.permissionErr
+	}
+	c.permissionUpdates = append(c.permissionUpdates, update)
+	state := c.Permissions()
+	if update.Sandbox != nil {
+		state.Sandbox = *update.Sandbox
+		state.SandboxOverridden = state.Sandbox != state.ConfiguredSandbox
+	}
+	if update.Approval != nil {
+		state.Approval = *update.Approval
+		state.ApprovalOverridden = state.Approval != state.ConfiguredApproval
+	}
+	if update.Network != nil {
+		state.Network = *update.Network
+		state.NetworkOverridden = state.Network != state.ConfiguredNetwork
+	}
+	c.permissions = state
+
+	return nil
+}
 
 func (c *overlayController) Resolve(
 	_ context.Context,

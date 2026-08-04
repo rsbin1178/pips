@@ -26,6 +26,7 @@ const (
 	pickerSkill
 	pickerFile
 	pickerMode
+	pickerPermissions
 	pickerStatusLine
 )
 
@@ -51,6 +52,7 @@ type pickerState struct {
 	generation       uint64
 	statusItems      []statusline.Item
 	statusEnabled    map[statusline.Item]bool
+	permissions      permissionPickerState
 }
 
 func (m *Model) openModelPicker() {
@@ -144,6 +146,8 @@ func (m *Model) updatePickerKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.updateFilePickerKey(message)
 	case pickerMode:
 		return m.updateModePickerKey(message)
+	case pickerPermissions:
+		return m.updatePermissionsPickerKey(message)
 	case pickerStatusLine:
 		return m.updateStatusLinePickerKey(message)
 	default:

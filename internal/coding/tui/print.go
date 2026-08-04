@@ -12,6 +12,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/rsbin/pips/internal/coding/changes"
+	"github.com/rsbin/pips/internal/coding/config"
 )
 
 type workspaceStatusResultMsg struct {
@@ -33,14 +34,7 @@ func (m *Model) printHelp() tea.Cmd {
 }
 
 func (m *Model) printStatus() tea.Cmd {
-	return m.printInspection("Status", strings.TrimPrefix(m.statusContent(), "Status\n\n"))
-}
-
-func (m *Model) printDiff() tea.Cmd {
-	return m.printInspection(
-		"Pips-attributed changes",
-		strings.TrimPrefix(m.diffContent(), "Pips-attributed changes\n\n"),
-	)
+	return m.loadWorkspaceStatus()
 }
 
 func (m *Model) loadWorkspaceStatus() tea.Cmd {
@@ -101,13 +95,14 @@ func (m *Model) statusContent() string {
 	modelState := m.controller.Model()
 	modeState := m.controller.Mode()
 	configState := m.controller.Config()
+	permissions := m.permissionState()
 	content := fmt.Sprintf(
 		"Status\n\nWorkspace: %s\nSession: %s\nModel: %s\n"+
 			"Variant: %s\nReasoning: %s\nProtocol: %s\nEndpoint: %s (%s)\n"+
 			"Context: %s\nRequest output: %s\n"+
 			"Compaction: %t (reserve %d · keep %d · summary max %d)\n"+
 			"Model override: %t\nMode: %s\nConfigured mode: %s\nMode override: %t\n"+
-			"Phase: %s\nSandbox: %s\nApproval: %s\n"+
+			"Phase: %s\nSandbox: %s\nApproval: %s\nNetwork: %s\n"+
 			"Tool search: %t\nPending approval: %s\nDetached: %t",
 		m.options.Workspace,
 		m.state.SessionID,
@@ -128,8 +123,20 @@ func (m *Model) statusContent() string {
 		modeState.Configured,
 		modeState.Overridden,
 		m.state.Phase,
-		configState.Sandbox,
-		configState.Approval,
+		permissionStatusText(
+			string(permissions.Sandbox), string(permissions.ConfiguredSandbox),
+			permissions.SandboxSource, permissions.SandboxOverridden, false,
+		),
+		permissionStatusText(
+			string(permissions.Approval), string(permissions.ConfiguredApproval),
+			permissions.ApprovalSource, permissions.ApprovalOverridden,
+			permissions.Sandbox == config.SandboxFullAccess,
+		),
+		permissionStatusText(
+			string(permissions.Network), string(permissions.ConfiguredNetwork),
+			permissions.NetworkSource, permissions.NetworkOverridden,
+			permissions.Sandbox == config.SandboxFullAccess,
+		),
 		configState.ToolSearch,
 		m.state.Approval.Kind,
 		m.controller.Detached(),
@@ -152,112 +159,6 @@ func (m *Model) statusContent() string {
 	}
 
 	return content + "\n\nIntegrations:\n" + strings.Join(lines, "\n")
-}
-
-func (m *Model) diffContent() string {
-	if m.state.Changes == nil {
-		return "Pips-attributed changes\n\nNo attributed change report is available for the current interaction."
-	}
-
-	lines := []string{"Pips-attributed changes", ""}
-	lines = append(lines, workspaceChangeSummary(*m.state.Changes), "")
-	for _, entry := range m.state.Changes.Entries {
-		line := workspaceChangeGlyph(entry.Kind) + "  " + workspaceChangePath(entry)
-		lines = append(lines, line)
-	}
-	if m.state.Changes.Truncated {
-		lines = append(lines, "", "The report was truncated.")
-	}
-	if m.state.Changes.Diff != "" {
-		lines = append(lines, "", m.state.Changes.Diff)
-	}
-
-	return strings.Join(lines, "\n")
-}
-
-func worktreeStatusContent(status changes.WorktreeStatus) string {
-	if !status.Repository() {
-		return "Workspace changes\n\nThis workspace is not a Git repository."
-	}
-
-	lines := []string{"Workspace changes · " + branchStatusLabel(status.Branch()), ""}
-	entries := status.Entries()
-	lines = appendStatusSection(
-		lines, "Staged", status.Staged(), entries,
-		func(entry changes.StatusEntry) bool { return entry.Index != changes.PathUnchanged },
-		func(entry changes.StatusEntry) changes.PathState { return entry.Index },
-	)
-	lines = appendStatusSection(
-		lines, "Unstaged", status.Unstaged(), entries,
-		func(entry changes.StatusEntry) bool {
-			return entry.Worktree != changes.PathUnchanged &&
-				entry.Worktree != changes.PathUntracked
-		},
-		func(entry changes.StatusEntry) changes.PathState { return entry.Worktree },
-	)
-	lines = appendStatusSection(
-		lines, "Untracked", status.Untracked(), entries,
-		func(entry changes.StatusEntry) bool { return entry.Worktree == changes.PathUntracked },
-		func(changes.StatusEntry) changes.PathState { return changes.PathUntracked },
-	)
-	if status.ProtectedOmitted() > 0 {
-		lines = append(lines, fmt.Sprintf(
-			"Protected product metadata omitted: %d path(s)",
-			status.ProtectedOmitted(),
-		))
-	}
-	if len(entries) == 0 && status.ProtectedOmitted() == 0 {
-		lines = append(lines, "Working tree clean.")
-	}
-
-	return strings.TrimSpace(strings.Join(lines, "\n"))
-}
-
-func appendStatusSection(
-	lines []string,
-	title string,
-	section changes.DiffSection,
-	entries []changes.StatusEntry,
-	include func(changes.StatusEntry) bool,
-	state func(changes.StatusEntry) changes.PathState,
-) []string {
-	if section.Summary.Files == 0 {
-		return lines
-	}
-
-	summary := fmt.Sprintf(
-		"%s (%d files, +%d -%d)",
-		title,
-		section.Summary.Files,
-		section.Summary.Additions,
-		section.Summary.Deletions,
-	)
-	if section.Summary.Binary > 0 {
-		summary += fmt.Sprintf(" · %d binary", section.Summary.Binary)
-	}
-	if section.Summary.Omitted > 0 {
-		summary += fmt.Sprintf(" · %d preview omitted", section.Summary.Omitted)
-	}
-	if section.Truncated {
-		summary += " · truncated"
-	}
-	lines = append(lines, summary)
-	for _, entry := range entries {
-		if !include(entry) {
-			continue
-		}
-		path := safeStatusPath(entry.Path)
-		if entry.PreviousPath != "" {
-			path = safeStatusPath(entry.PreviousPath) + " -> " + path
-		}
-		lines = append(lines, "  "+pathStateGlyph(state(entry))+"  "+path)
-	}
-	if section.Diff != "" {
-		lines = append(lines, "", section.Diff)
-	}
-	lines = append(lines, "")
-
-	return lines
 }
 
 func compactWorktreeSummary(status changes.WorktreeStatus) string {
@@ -341,4 +242,19 @@ func optionalInt(value *int) string {
 	}
 
 	return strconv.Itoa(*value)
+}
+
+func permissionStatusText(
+	current string,
+	configured string,
+	source config.SourceKind,
+	overridden bool,
+	inactive bool,
+) string {
+	value := current + " (configured " + configured + "; " + permissionSourceText(source, overridden)
+	if inactive {
+		value += "; inactive under full-access"
+	}
+
+	return value + ")"
 }

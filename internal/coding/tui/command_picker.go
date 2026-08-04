@@ -25,7 +25,7 @@ type commandDescriptor struct {
 }
 
 const (
-	commandDiff                     = "diff"
+	commandPermissions              = "permissions"
 	commandStatus                   = "status"
 	commandTeam                     = "team"
 	maximumCommandArgumentTailBytes = 16 << 10
@@ -40,12 +40,12 @@ var commands = []commandDescriptor{
 	{name: commandTeam, description: "propose or inspect a coding Team", idleOnly: true, arguments: true},
 	{name: "skills", description: "enable or disable project Skills", idleOnly: true},
 	{name: "model", description: "switch the process-local model", idleOnly: true},
+	{name: commandPermissions, description: "change process-local execution permissions", idleOnly: true},
 	{name: "statusline", description: "configure status-line fields", idleOnly: true},
 	{name: "tree", description: "navigate the current session tree", idleOnly: true},
 	{name: "fork", description: "fork a node into a new session", idleOnly: true},
 	{name: "compact", description: "preview and compact older context", idleOnly: true},
 	{name: "review", description: "review workspace changes in Plan Mode", idleOnly: true},
-	{name: commandDiff, description: "inspect workspace changes"},
 	{name: "reload", description: "reload resources and integrations", idleOnly: true},
 	{name: commandStatus, description: "show runtime status"},
 	{name: string(actionHelp), description: "show keyboard help"},
@@ -200,6 +200,13 @@ func (m *Model) executeCommand(command commandDescriptor) (tea.Model, tea.Cmd) {
 		m.openModelPicker()
 
 		return m, nil
+	case commandPermissions:
+		previous := m.picker.previousComposer
+		m.closeCommandPicker(false)
+		m.restoreCommandComposer(previous)
+		m.openPermissionsPicker()
+
+		return m, nil
 	case "statusline":
 		previous := m.picker.previousComposer
 		m.closeCommandPicker(false)
@@ -257,12 +264,6 @@ func (m *Model) executeCommand(command commandDescriptor) (tea.Model, tea.Cmd) {
 				"Review the current workspace changes. Identify correctness, security, and test risks. Do not modify files.",
 			))
 		})
-	case commandDiff:
-		previous := m.picker.previousComposer
-		m.closeCommandPicker(false)
-		m.restoreCommandComposer(previous)
-
-		return m, m.loadWorkspaceStatus()
 	case "reload":
 		return m, m.runControl(operationReload, "", modelcatalog.Selection{})
 	case commandStatus:
