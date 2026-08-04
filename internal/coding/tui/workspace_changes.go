@@ -69,9 +69,9 @@ func renderWorkspaceChangeBlock(
 	files := workspaceChangeFileCount(value)
 	omitted := max(0, files-visible)
 
-	hint := "  /diff for full review"
+	hint := "  /status for repository summary"
 	if omitted > 0 {
-		hint = fmt.Sprintf("  … %d more files · /diff for full review", omitted)
+		hint = fmt.Sprintf("  … %d more files · /status for repository summary", omitted)
 	}
 
 	if files > 0 {

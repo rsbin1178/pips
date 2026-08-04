@@ -57,6 +57,7 @@ func TestTeamWorkerRuntimeUsesExactProfileAndCatalog(t *testing.T) {
 	assert.Contains(t, requests[0].System, "Modify only the current Worktree")
 
 	assert.ErrorIs(t, runtime.SetMode(t.Context(), ModePlan), ErrRuntimeInvalid)
+	require.ErrorIs(t, runtime.ReplacementPreflight(t.Context()), ErrRuntimeInvalid)
 	assert.ErrorIs(t, runtime.Reload(t.Context()), ErrRuntimeInvalid)
 	assert.ErrorIs(t, runtime.SetSkillEnabled(t.Context(), "missing", false), ErrRuntimeInvalid)
 	_, err := runtime.PlanDocumentPath()

@@ -187,7 +187,7 @@ func TestControllerTeamOperationLeaseBlocksReplacement(t *testing.T) {
 
 	<-started
 
-	_, err := controller.beginReplacement()
+	_, err := controller.beginReplacement(t.Context())
 	require.ErrorIs(t, err, ErrBusy)
 
 	close(release)

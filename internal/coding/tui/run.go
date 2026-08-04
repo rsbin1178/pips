@@ -92,6 +92,8 @@ type Controller interface {
 	Capabilities() ai.Capabilities
 	Mode() runtimecontrol.ModeState
 	SetMode(context.Context, coding.OperatingMode) error
+	Permissions() runtimecontrol.PermissionState
+	SetPermissions(context.Context, runtimecontrol.PermissionUpdate) error
 	WorkspaceStatus(context.Context) (changes.WorktreeStatus, error)
 	Models() []modelcatalog.Entry
 	Config() config.Config

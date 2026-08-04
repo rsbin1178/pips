@@ -18,7 +18,6 @@ func TestInspectionCommandsPrintIntoScrollback(t *testing.T) {
 	}{
 		{name: "help", command: commandDescriptor{name: "help"}, want: "Help"},
 		{name: "status", command: commandDescriptor{name: "status"}, want: "Status"},
-		{name: "diff", command: commandDescriptor{name: "diff"}, want: "Workspace changes"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

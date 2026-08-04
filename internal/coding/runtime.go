@@ -1024,6 +1024,40 @@ func (r *Runtime) currentOperatingMode() OperatingMode {
 	return r.state.Mode
 }
 
+// ReplacementPreflight verifies that the Runtime can be replaced without
+// interrupting an active interaction, approval, question, Plan review, or Team
+// owner. It does not mutate Runtime state.
+//
+//nolint:gocyclo // Replacement safety keeps every lifecycle gate explicit.
+func (r *Runtime) ReplacementPreflight(ctx context.Context) error {
+	if r == nil {
+		return ErrRuntimeClosed
+	}
+	if r.isTeamWorker() {
+		return fmt.Errorf("%w: Team Worker resources are fixed", ErrRuntimeInvalid)
+	}
+	if r.teamGuard.active() {
+		return fmt.Errorf("%w: Lead resources are fixed while a Team is active", ErrTeamActive)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed || r.closing {
+		return stateError("replace Runtime", r.state.Phase, ErrRuntimeClosed)
+	}
+	if r.active != nil || r.interaction != nil || r.recovery.PendingID != "" ||
+		r.state.Phase != PhaseIdle || r.state.Compaction.Active ||
+		r.state.Approval.Kind != ApprovalNone || r.state.Question.Required != nil ||
+		r.state.PlanReview.Required != nil {
+		return stateError("replace Runtime", r.state.Phase, ErrRuntimeBusy)
+	}
+
+	return nil
+}
+
 // SetMode changes the process-local capability policy at an idle boundary.
 // Existing interactions retain the mode leased when they started.
 //
