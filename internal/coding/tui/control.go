@@ -34,24 +34,43 @@ type teamRecoveryProbeMsg struct {
 }
 
 func (m *Model) runModeControl(mode coding.OperatingMode) tea.Cmd {
+	activityWasVisible := m.activityClockVisible()
 	if m.picker.kind != pickerNone {
 		m.picker.loading = true
 		m.picker.controlling = true
 		m.picker.err = nil
 	}
 
-	return func() tea.Msg {
+	apply := func() tea.Msg {
 		return controlResultMsg{operation: operationMode, err: m.controller.SetMode(m.ctx, mode)}
 	}
+
+	return tea.Batch(apply, m.startActivityClock(activityWasVisible))
 }
 
-func (m *Model) runPermissionControl(update runtimecontrol.PermissionUpdate) tea.Cmd {
+func (m *Model) runPermissionControl(
+	update runtimecontrol.PermissionUpdate,
+	confirmed ...bool,
+) tea.Cmd {
 	activityWasVisible := m.activityClockVisible()
 	m.picker.loading = true
 	m.picker.controlling = true
 	m.picker.err = nil
+	needsConfirmation := len(confirmed) > 0 && confirmed[0]
 
 	apply := func() tea.Msg {
+		if needsConfirmation {
+			confirmation, err := m.controller.NewFullAccessConfirmation(m.ctx, update)
+			if err != nil {
+				return controlResultMsg{operation: operationPermissions, err: err}
+			}
+
+			return controlResultMsg{
+				operation: operationPermissions,
+				err:       m.controller.SetPermissions(m.ctx, update, confirmation),
+			}
+		}
+
 		return controlResultMsg{
 			operation: operationPermissions,
 			err:       m.controller.SetPermissions(m.ctx, update),
@@ -66,6 +85,7 @@ func (m *Model) runControl(
 	sessionID string,
 	selected modelcatalog.Selection,
 ) tea.Cmd {
+	activityWasVisible := m.activityClockVisible()
 	switch {
 	case m.picker.kind != pickerNone:
 		m.picker.loading = true
@@ -77,7 +97,7 @@ func (m *Model) runControl(
 		m.route.err = nil
 	}
 
-	return func() tea.Msg {
+	apply := func() tea.Msg {
 		var err error
 		switch operation {
 		case operationNew:
@@ -96,6 +116,8 @@ func (m *Model) runControl(
 
 		return controlResultMsg{operation: operation, err: err}
 	}
+
+	return tea.Batch(apply, m.startActivityClock(activityWasVisible))
 }
 
 func (m *Model) probeTeamRecoveryAfterResume() tea.Cmd {

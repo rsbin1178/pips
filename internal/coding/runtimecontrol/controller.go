@@ -179,21 +179,22 @@ type dependencies struct {
 type Controller struct {
 	mu sync.Mutex
 
-	base         coding.OpenOptions
-	effective    config.Config
-	catalog      modelcatalog.Catalog
-	selection    modelcatalog.Selection
-	resolved     modelcatalog.ResolvedModel
-	baseResolved modelcatalog.ResolvedModel
-	model        ai.LanguageModel
-	runtime      runtimeInstance
-	sessionID    string
-	lastState    coding.State
-	overridden   bool
-	mode         coding.OperatingMode
-	baseMode     coding.OperatingMode
-	modeOverride bool
-	active       int
+	base              coding.OpenOptions
+	effective         config.Config
+	catalog           modelcatalog.Catalog
+	selection         modelcatalog.Selection
+	resolved          modelcatalog.ResolvedModel
+	baseResolved      modelcatalog.ResolvedModel
+	model             ai.LanguageModel
+	runtime           runtimeInstance
+	sessionID         string
+	runtimeGeneration uint64
+	lastState         coding.State
+	overridden        bool
+	mode              coding.OperatingMode
+	baseMode          coding.OperatingMode
+	modeOverride      bool
+	active            int
 
 	replacing   bool
 	replaceDone chan struct{}
@@ -214,6 +215,7 @@ type replacement struct {
 	sessionID  string
 	state      coding.State
 	overridden bool
+	generation uint64
 }
 
 // New opens the initial Runtime and returns its lifecycle Controller.
@@ -264,20 +266,21 @@ func newController(
 	}
 
 	return &Controller{
-		base:         base,
-		effective:    options.Config.Clone(),
-		catalog:      catalog,
-		selection:    selection,
-		resolved:     resolved.Clone(),
-		baseResolved: resolved.Clone(),
-		model:        boundModel,
-		runtime:      opened,
-		sessionID:    state.SessionID,
-		lastState:    state,
-		mode:         options.Config.Mode,
-		baseMode:     options.Config.Mode,
-		closeDone:    make(chan struct{}),
-		deps:         deps,
+		base:              base,
+		effective:         options.Config.Clone(),
+		catalog:           catalog,
+		selection:         selection,
+		resolved:          resolved.Clone(),
+		baseResolved:      resolved.Clone(),
+		model:             boundModel,
+		runtime:           opened,
+		sessionID:         state.SessionID,
+		runtimeGeneration: 1,
+		lastState:         state,
+		mode:              options.Config.Mode,
+		baseMode:          options.Config.Mode,
+		closeDone:         make(chan struct{}),
+		deps:              deps,
 	}, nil
 }
 
@@ -1204,6 +1207,7 @@ func (c *Controller) reopenReplacement(
 		sessionID:  state.SessionID,
 		state:      state,
 		overridden: targetOverride,
+		generation: current.generation + 1,
 	})
 
 	return nil
@@ -1240,6 +1244,7 @@ func (c *Controller) beginReplacement(ctx context.Context) (replacement, error) 
 		model:      c.model,
 		sessionID:  c.sessionID,
 		overridden: c.overridden,
+		generation: c.runtimeGeneration,
 	}
 	c.mu.Unlock()
 
@@ -1280,6 +1285,7 @@ func (c *Controller) rollback(
 	previous.runtime = restored
 	previous.state = state
 	previous.sessionID = state.SessionID
+	previous.generation++
 	c.finishReplacement(previous)
 
 	return primary
@@ -1295,6 +1301,9 @@ func (c *Controller) finishReplacement(next replacement) {
 	c.sessionID = next.sessionID
 	c.lastState = next.state.Clone()
 	c.overridden = next.overridden
+	if next.generation != 0 {
+		c.runtimeGeneration = next.generation
+	}
 	c.mode = next.config.Mode
 	c.modeOverride = c.mode != c.baseMode
 	done := c.replaceDone

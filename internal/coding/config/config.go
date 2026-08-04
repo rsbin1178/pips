@@ -48,15 +48,16 @@ var fields = []Field{
 // Fields returns all selectable fields in display order.
 func Fields() []Field { return slices.Clone(fields) }
 
-// SourceKind identifies a configuration layer.
+// SourceKind identifies a configuration layer or process-local override.
 type SourceKind string
 
-// Configuration source kinds, from lowest to highest precedence.
+// Configuration source kinds plus the process-local session override marker.
 const (
-	SourceDefault     SourceKind = "default"
-	SourceConfigFile  SourceKind = "config_file"
-	SourceEnvironment SourceKind = "environment"
-	SourceFlag        SourceKind = "flag"
+	SourceDefault         SourceKind = "default"
+	SourceConfigFile      SourceKind = "config_file"
+	SourceEnvironment     SourceKind = "environment"
+	SourceFlag            SourceKind = "flag"
+	SourceSessionOverride SourceKind = "session_override"
 )
 
 // Source records the winning layer and its non-secret origin.
@@ -70,23 +71,24 @@ type SandboxMode string
 
 // Supported sandbox modes.
 const (
+	SandboxReadOnly       SandboxMode = "read-only"
 	SandboxWorkspaceWrite SandboxMode = "workspace-write"
 	SandboxFullAccess     SandboxMode = "full-access"
 )
 
-// SandboxNetworkMode controls child-process network authority in the
-// workspace-write sandbox.
+// SandboxNetworkMode controls child-process network authority in sandboxed
+// profiles.
 type SandboxNetworkMode string
 
-// Supported workspace-write network modes.
+// Supported sandboxed network modes.
 const (
 	SandboxNetworkDeny      SandboxNetworkMode = "deny"
 	SandboxNetworkOnRequest SandboxNetworkMode = "on-request"
 	SandboxNetworkAllow     SandboxNetworkMode = "allow"
 )
 
-// SandboxWorkspaceWriteConfig contains settings specific to the
-// workspace-write sandbox.
+// SandboxWorkspaceWriteConfig retains the compatibility settings used by
+// sandboxed profiles.
 type SandboxWorkspaceWriteConfig struct {
 	Network SandboxNetworkMode
 }
@@ -454,6 +456,51 @@ func (c Config) Source(field Field) (Source, bool) {
 	return source, ok
 }
 
+// WithSessionOverride returns a detached configuration whose field is marked
+// as a process-local permission override. The source detail is intentionally
+// fixed and cannot be supplied by callers.
+func (c Config) WithSessionOverride(field Field) Config {
+	cloned := c.Clone()
+	if !isPermissionField(field) {
+		return cloned
+	}
+	if cloned.sources == nil {
+		cloned.sources = make(map[Field]Source)
+	}
+	cloned.sources[field] = Source{Kind: SourceSessionOverride}
+
+	return cloned
+}
+
+// RestoreSourceFrom returns a detached configuration with field provenance
+// restored from the configured base. It changes source metadata only; the
+// caller is responsible for setting the corresponding value first.
+func (c Config) RestoreSourceFrom(base Config, field Field) Config {
+	cloned := c.Clone()
+	if !isPermissionField(field) {
+		return cloned
+	}
+	if cloned.sources == nil {
+		cloned.sources = make(map[Field]Source)
+	}
+	if source, ok := base.Source(field); ok {
+		cloned.sources[field] = source
+	} else {
+		delete(cloned.sources, field)
+	}
+
+	return cloned
+}
+
+func isPermissionField(field Field) bool {
+	switch field {
+	case FieldSandbox, FieldSandboxNetwork, FieldApproval:
+		return true
+	default:
+		return false
+	}
+}
+
 // ValidateRuntime verifies registry-independent fields required to resolve an
 // executable runtime. modelcatalog performs endpoint/protocol resolution.
 func (c Config) ValidateRuntime() error {
@@ -579,7 +626,7 @@ func ParseSandboxMode(value string) (SandboxMode, error) {
 	return mode, nil
 }
 
-// ParseSandboxNetworkMode parses a supported workspace-write network mode.
+// ParseSandboxNetworkMode parses a supported sandboxed network mode.
 func ParseSandboxNetworkMode(value string) (SandboxNetworkMode, error) {
 	mode := SandboxNetworkMode(strings.TrimSpace(value))
 	if err := validateSandboxNetwork(mode); err != nil {
@@ -611,7 +658,7 @@ func ParseOperatingMode(value string) (OperatingMode, error) {
 
 func validateSandbox(mode SandboxMode) error {
 	switch mode {
-	case SandboxWorkspaceWrite, SandboxFullAccess:
+	case SandboxReadOnly, SandboxWorkspaceWrite, SandboxFullAccess:
 		return nil
 	default:
 		return fmt.Errorf("%w: unsupported sandbox mode %q", ErrInvalid, mode)
@@ -623,7 +670,7 @@ func validateSandboxNetwork(mode SandboxNetworkMode) error {
 	case SandboxNetworkDeny, SandboxNetworkOnRequest, SandboxNetworkAllow:
 		return nil
 	default:
-		return fmt.Errorf("%w: unsupported workspace-write network mode %q", ErrInvalid, mode)
+		return fmt.Errorf("%w: unsupported sandbox network mode %q", ErrInvalid, mode)
 	}
 }
 

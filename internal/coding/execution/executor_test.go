@@ -50,6 +50,32 @@ func TestPlanOwnsBackendResourcesAndIsSingleUse(t *testing.T) {
 	assert.EqualValues(t, 1, resource.closed.Load())
 }
 
+func TestPlanAcceptsReadOnlyAuthorization(t *testing.T) {
+	t.Parallel()
+
+	fixture := newExecutorFixture(t)
+	spec := fixture.operationSpec("printf read-only")
+	spec.Workspace = WorkspaceReadOnly
+	operation, err := NewOperation(t.Context(), fixture.workspace, spec)
+	require.NoError(t, err)
+
+	policy, err := NewPolicy(fixture.workspace, PolicyConfig{
+		Sandbox:       config.SandboxReadOnly,
+		Approval:      config.ApprovalNever,
+		SandboxSource: config.Source{Kind: config.SourceDefault},
+	})
+	require.NoError(t, err)
+
+	decision := policy.Evaluate(operation)
+	authorization, ok := decision.Authorization()
+	require.True(t, ok)
+
+	executor := fixture.executor(t, fakeBackend{compileFn: directCompile()}, systemRunnerDependencies())
+	plan, err := executor.Plan(t.Context(), operation, authorization)
+	require.NoError(t, err)
+	require.NoError(t, plan.Close())
+}
+
 func TestPlanFailsClosedAndCleansCompileResources(t *testing.T) {
 	t.Parallel()
 
@@ -283,7 +309,8 @@ type executorFixture struct {
 func newExecutorFixture(t *testing.T) executorFixture {
 	t.Helper()
 
-	base := t.TempDir()
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
 	workspaceRoot := filepath.Join(base, "workspace")
 	require.NoError(t, os.Mkdir(workspaceRoot, 0o700))
 	opened, err := workspace.Open(workspaceRoot)

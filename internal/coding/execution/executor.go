@@ -307,7 +307,7 @@ func (e *Executor) validateAuthorization(op Operation, auth Authorization) error
 	}
 
 	switch auth.sandbox {
-	case config.SandboxWorkspaceWrite, config.SandboxFullAccess:
+	case config.SandboxReadOnly, config.SandboxWorkspaceWrite, config.SandboxFullAccess:
 		return nil
 	default:
 		return ErrUnauthorized

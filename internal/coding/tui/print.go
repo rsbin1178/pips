@@ -124,18 +124,28 @@ func (m *Model) statusContent() string {
 		modeState.Overridden,
 		m.state.Phase,
 		permissionStatusText(
-			string(permissions.Sandbox), string(permissions.ConfiguredSandbox),
-			permissions.SandboxSource, permissions.SandboxOverridden, false,
+			string(permissions.SandboxProfile.Filesystem.Effective),
+			string(permissions.SandboxProfile.Filesystem.Configured),
+			permissions.SandboxProfile.Filesystem.EffectiveSource,
+			permissions.SandboxProfile.Filesystem.ConfiguredSource,
+			permissions.SandboxProfile.Filesystem.Overridden,
+			false,
 		),
 		permissionStatusText(
-			string(permissions.Approval), string(permissions.ConfiguredApproval),
-			permissions.ApprovalSource, permissions.ApprovalOverridden,
-			permissions.Sandbox == config.SandboxFullAccess,
+			string(permissions.ApprovalPolicy.Effective),
+			string(permissions.ApprovalPolicy.Configured),
+			permissions.ApprovalPolicy.EffectiveSource,
+			permissions.ApprovalPolicy.ConfiguredSource,
+			permissions.ApprovalPolicy.Overridden,
+			false,
 		),
 		permissionStatusText(
-			string(permissions.Network), string(permissions.ConfiguredNetwork),
-			permissions.NetworkSource, permissions.NetworkOverridden,
-			permissions.Sandbox == config.SandboxFullAccess,
+			string(permissions.SandboxProfile.Network.Effective),
+			string(permissions.SandboxProfile.Network.Configured),
+			permissions.SandboxProfile.Network.EffectiveSource,
+			permissions.SandboxProfile.Network.ConfiguredSource,
+			permissions.SandboxProfile.Network.Overridden,
+			!permissions.SandboxProfile.NetworkEnforced,
 		),
 		configState.ToolSearch,
 		m.state.Approval.Kind,
@@ -248,10 +258,11 @@ func permissionStatusText(
 	current string,
 	configured string,
 	source config.SourceKind,
+	configuredSource config.SourceKind,
 	overridden bool,
 	inactive bool,
 ) string {
-	value := current + " (configured " + configured + "; " + permissionSourceText(source, overridden)
+	value := current + " (configured " + configured + "; " + permissionSourceText(source, configuredSource, overridden)
 	if inactive {
 		value += "; inactive under full-access"
 	}

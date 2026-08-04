@@ -13,11 +13,19 @@ import (
 )
 
 type permissionPickerState struct {
-	profile  runtimecontrol.PermissionState
-	sandbox  config.SandboxMode
-	approval config.ApprovalMode
-	network  config.SandboxNetworkMode
+	profile    runtimecontrol.PermissionState
+	sandbox    config.SandboxMode
+	approval   config.ApprovalMode
+	network    config.SandboxNetworkMode
+	confirming bool
 }
+
+const (
+	permissionFilesystemRow = iota
+	permissionNetworkRow
+	permissionApprovalRow
+	permissionRowCount
+)
 
 func (m *Model) openPermissionsPicker() {
 	profile := m.permissionState()
@@ -25,9 +33,9 @@ func (m *Model) openPermissionsPicker() {
 		kind: pickerPermissions,
 		permissions: permissionPickerState{
 			profile:  profile,
-			sandbox:  profile.Sandbox,
-			approval: profile.Approval,
-			network:  profile.Network,
+			sandbox:  profile.SandboxProfile.Filesystem.Effective,
+			approval: profile.ApprovalPolicy.Effective,
+			network:  profile.SandboxProfile.Network.Effective,
 		},
 	}
 	m.setLayout()
@@ -42,18 +50,41 @@ func (m *Model) updatePermissionsPickerKey(message tea.KeyPressMsg) (tea.Model, 
 		return m, nil
 	}
 
+	if m.picker.permissions.confirming {
+		switch message.String() {
+		case keyEscape, keyCtrlC, "n", "N":
+			m.picker.permissions.confirming = false
+			m.picker.err = nil
+		case keyEnter, "y", "Y":
+			m.picker.permissions.confirming = false
+			return m, m.runPermissionControl(m.permissionUpdate(), true)
+		}
+
+		return m, nil
+	}
+
 	switch message.String() {
 	case keyEscape, keyCtrlC:
 		return m, m.closePicker()
 	case "up", "k":
-		m.picker.cursor = wrapIndex(m.picker.cursor-1, 3)
+		m.picker.cursor = wrapIndex(m.picker.cursor-1, permissionRowCount)
 	case keyDown, "j", keyTab:
-		m.picker.cursor = wrapIndex(m.picker.cursor+1, 3)
+		m.picker.cursor = wrapIndex(m.picker.cursor+1, permissionRowCount)
 	case keyLeft, "h":
 		m.cyclePermissionValue(-1)
 	case keyRight, "l":
 		m.cyclePermissionValue(1)
 	case keyEnter:
+		if m.permissionDraftUnchanged() {
+			return m, m.closePicker()
+		}
+		if m.permissionNeedsFullAccessConfirmation() {
+			m.picker.permissions.confirming = true
+			m.picker.err = nil
+
+			return m, nil
+		}
+
 		return m, m.runPermissionControl(m.permissionUpdate())
 	}
 
@@ -66,25 +97,58 @@ func (m *Model) cyclePermissionValue(direction int) {
 	}
 
 	switch m.picker.cursor {
-	case 0:
-		values := []config.ApprovalMode{config.ApprovalOnRequest, config.ApprovalNever}
-		index := slices.Index(values, m.picker.permissions.approval)
-		m.picker.permissions.approval = values[wrapIndex(index+direction, len(values))]
-	case 1:
+	case permissionFilesystemRow:
+		values := []config.SandboxMode{
+			config.SandboxReadOnly,
+			config.SandboxWorkspaceWrite,
+			config.SandboxFullAccess,
+		}
+		index := slices.Index(values, m.picker.permissions.sandbox)
+		if index < 0 {
+			if direction < 0 {
+				index = len(values) - 1
+			} else {
+				index = 0
+			}
+		} else {
+			index = wrapIndex(index+direction, len(values))
+		}
+		m.picker.permissions.sandbox = values[index]
+	case permissionNetworkRow:
+		// Full Access retains the selected Network value for the next sandboxed
+		// profile, but does not enforce or edit it while Full Access is drafted.
+		if m.picker.permissions.sandbox == config.SandboxFullAccess {
+			return
+		}
 		values := []config.SandboxNetworkMode{
 			config.SandboxNetworkDeny,
 			config.SandboxNetworkOnRequest,
 			config.SandboxNetworkAllow,
 		}
 		index := slices.Index(values, m.picker.permissions.network)
-		m.picker.permissions.network = values[wrapIndex(index+direction, len(values))]
-	case 2:
-		values := []config.SandboxMode{config.SandboxWorkspaceWrite}
-		if m.picker.permissions.profile.Sandbox == config.SandboxFullAccess {
-			values = append(values, config.SandboxFullAccess)
+		if index < 0 {
+			if direction < 0 {
+				index = len(values) - 1
+			} else {
+				index = 0
+			}
+		} else {
+			index = wrapIndex(index+direction, len(values))
 		}
-		index := slices.Index(values, m.picker.permissions.sandbox)
-		m.picker.permissions.sandbox = values[wrapIndex(index+direction, len(values))]
+		m.picker.permissions.network = values[index]
+	case permissionApprovalRow:
+		values := []config.ApprovalMode{config.ApprovalOnRequest, config.ApprovalNever}
+		index := slices.Index(values, m.picker.permissions.approval)
+		if index < 0 {
+			if direction < 0 {
+				index = len(values) - 1
+			} else {
+				index = 0
+			}
+		} else {
+			index = wrapIndex(index+direction, len(values))
+		}
+		m.picker.permissions.approval = values[index]
 	}
 	m.picker.err = nil
 }
@@ -93,10 +157,28 @@ func (m *Model) permissionUpdate() runtimecontrol.PermissionUpdate {
 	permissions := m.picker.permissions
 
 	return runtimecontrol.PermissionUpdate{
-		Sandbox:  &permissions.sandbox,
+		SandboxProfile: &runtimecontrol.SandboxPermissionUpdate{
+			Filesystem: &permissions.sandbox,
+			Network:    &permissions.network,
+		},
 		Approval: &permissions.approval,
-		Network:  &permissions.network,
 	}
+}
+
+func (m *Model) permissionDraftUnchanged() bool {
+	permissions := m.picker.permissions
+	profile := permissions.profile
+
+	return permissions.sandbox == profile.SandboxProfile.Filesystem.Effective &&
+		permissions.network == profile.SandboxProfile.Network.Effective &&
+		permissions.approval == profile.ApprovalPolicy.Effective
+}
+
+func (m *Model) permissionNeedsFullAccessConfirmation() bool {
+	permissions := m.picker.permissions
+
+	return permissions.sandbox == config.SandboxFullAccess &&
+		permissions.profile.SandboxProfile.Filesystem.Effective != config.SandboxFullAccess
 }
 
 func (m *Model) permissionsPickerView(maxHeight int) string {
@@ -105,43 +187,68 @@ func (m *Model) permissionsPickerView(maxHeight int) string {
 	}
 
 	permissions := m.picker.permissions
-	lines := []string{"Permissions · current process only"}
+	if permissions.confirming {
+		return m.fullAccessConfirmationView(maxHeight)
+	}
+
+	profile := permissions.profile
+	lines := []string{"Permissions · current process only", "Sandbox"}
 	lines = append(lines, m.permissionPickerRow(
-		0, "Approval", permissionValueText(
-			string(permissions.approval), string(permissions.profile.ConfiguredApproval),
-			permissions.profile.ApprovalOverridden,
+		permissionFilesystemRow,
+		"Filesystem",
+		permissionValueText(
+			string(permissions.sandbox), string(profile.SandboxProfile.Filesystem.Configured),
+			permissions.sandbox != profile.SandboxProfile.Filesystem.Effective ||
+				profile.SandboxProfile.Filesystem.Overridden,
 		),
-		permissionSourceText(permissions.profile.ApprovalSource, permissions.profile.ApprovalOverridden),
-		"on-request asks before gated operations · never fails closed",
+		permissionDraftSourceText(
+			string(permissions.sandbox),
+			string(profile.SandboxProfile.Filesystem.Effective),
+			string(profile.SandboxProfile.Filesystem.Configured),
+			profile.SandboxProfile.Filesystem.EffectiveSource,
+			profile.SandboxProfile.Filesystem.ConfiguredSource,
+		),
+		"read-only · workspace-write · full-access",
 	))
-	networkNote := "workspace-write network authority"
-	if permissions.profile.Sandbox == config.SandboxFullAccess {
-		networkNote = "configured value; inactive under full-access"
+
+	networkNote := "active · enforced for this Sandbox profile"
+	if permissions.sandbox == config.SandboxFullAccess {
+		networkNote = "inactive · not enforced under full-access"
 	}
 	lines = append(lines, m.permissionPickerRow(
-		1, "Network", permissionValueText(
-			string(permissions.network), string(permissions.profile.ConfiguredNetwork),
-			permissions.profile.NetworkOverridden,
+		permissionNetworkRow,
+		"Network",
+		permissionValueText(
+			string(permissions.network), string(profile.SandboxProfile.Network.Configured),
+			permissions.network != profile.SandboxProfile.Network.Effective ||
+				profile.SandboxProfile.Network.Overridden,
 		),
-		permissionSourceText(permissions.profile.NetworkSource, permissions.profile.NetworkOverridden),
+		permissionDraftSourceText(
+			string(permissions.network),
+			string(profile.SandboxProfile.Network.Effective),
+			string(profile.SandboxProfile.Network.Configured),
+			profile.SandboxProfile.Network.EffectiveSource,
+			profile.SandboxProfile.Network.ConfiguredSource,
+		),
 		networkNote,
 	))
-	var sandboxNote string
-	switch {
-	case permissions.profile.Sandbox == config.SandboxFullAccess:
-		sandboxNote = "user-configured full-access; picker can only narrow"
-	case permissions.profile.ConfiguredSandbox == config.SandboxFullAccess:
-		sandboxNote = "process narrowed from full-access; restore unavailable until restart"
-	default:
-		sandboxNote = "full-access elevation requires explicit user configuration"
-	}
+	lines = append(lines, "Approval")
 	lines = append(lines, m.permissionPickerRow(
-		2, "Sandbox", permissionValueText(
-			string(permissions.sandbox), string(permissions.profile.ConfiguredSandbox),
-			permissions.profile.SandboxOverridden,
+		permissionApprovalRow,
+		"Approval",
+		permissionValueText(
+			string(permissions.approval), string(profile.ApprovalPolicy.Configured),
+			permissions.approval != profile.ApprovalPolicy.Effective ||
+				profile.ApprovalPolicy.Overridden,
 		),
-		permissionSourceText(permissions.profile.SandboxSource, permissions.profile.SandboxOverridden),
-		sandboxNote,
+		permissionDraftSourceText(
+			string(permissions.approval),
+			string(profile.ApprovalPolicy.Effective),
+			string(profile.ApprovalPolicy.Configured),
+			profile.ApprovalPolicy.EffectiveSource,
+			profile.ApprovalPolicy.ConfiguredSource,
+		),
+		"independent confirmation policy",
 	))
 	if m.picker.loading {
 		lines = append(lines, m.activityNotice("Working…"))
@@ -157,6 +264,28 @@ func (m *Model) permissionsPickerView(maxHeight int) string {
 	return truncateHeight(strings.Join(lines, "\n"), max(1, maxHeight))
 }
 
+func (m *Model) fullAccessConfirmationView(maxHeight int) string {
+	lines := []string{
+		"Full Access confirmation",
+		"",
+		"Full Access disables the Sandbox boundary for subsequent commands.",
+		"This changes only the current Pips process; it does not edit config or Session history.",
+		"",
+		"Press Enter or y to confirm · Esc or n to decline",
+	}
+	if !m.options.NoColor {
+		lines[0] = lipgloss.NewStyle().Bold(true).Foreground(paletteFor(m.theme).warning).Render(lines[0])
+	}
+	if m.picker.err != nil {
+		lines = append(lines, "Error: "+safeError(m.picker.err))
+	}
+	for index := range lines {
+		lines[index] = ansi.Truncate(lines[index], max(1, m.width), "…")
+	}
+
+	return truncateHeight(strings.Join(lines, "\n"), max(1, maxHeight))
+}
+
 func (m *Model) permissionPickerRow(
 	index int,
 	name string,
@@ -164,9 +293,9 @@ func (m *Model) permissionPickerRow(
 	source string,
 	note string,
 ) string {
-	prefix := "  "
+	prefix := "    "
 	if index == m.picker.cursor {
-		prefix = "› "
+		prefix = "  › "
 	}
 	line := prefix + name + ": " + value + " · " + source + " · " + note
 	if !m.options.NoColor && index == m.picker.cursor {
@@ -184,13 +313,57 @@ func permissionValueText(effective, configured string, overridden bool) string {
 	return effective + " (configured: " + configured + ")"
 }
 
-func permissionSourceText(source config.SourceKind, overridden bool) string {
+func permissionSourceText(source, configuredSource config.SourceKind, overridden bool) string {
+	return permissionSourceTextWithDraft(source, configuredSource, overridden, false)
+}
+
+func permissionDraftSourceText(
+	draftValue, effectiveValue, configuredValue string,
+	effectiveSource, configuredSource config.SourceKind,
+) string {
+	source := effectiveSource
+	draft := draftValue != effectiveValue
+	if draft {
+		// Full Access is always a user-confirmed process-local elevation when
+		// the effective profile is not already Full Access. This remains true
+		// even when the configured value is also Full Access: the draft is
+		// proposing the Controller's session override, not restoring a field.
+		switch {
+		case draftValue == string(config.SandboxFullAccess) &&
+			effectiveValue != string(config.SandboxFullAccess):
+			source = config.SourceSessionOverride
+		case configuredValue != "" && draftValue == configuredValue:
+			source = configuredSource
+		default:
+			source = config.SourceSessionOverride
+		}
+	}
+
+	return permissionSourceTextWithDraft(
+		source,
+		configuredSource,
+		source == config.SourceSessionOverride,
+		draft,
+	)
+}
+
+func permissionSourceTextWithDraft(
+	source, configuredSource config.SourceKind,
+	overridden bool,
+	draft bool,
+) string {
 	label := "source=" + string(source)
 	if source == "" {
 		label = "source=unknown"
 	}
+	if configuredSource != "" && source != configuredSource {
+		label += " · configured source=" + string(configuredSource)
+	}
 	if overridden {
 		label += " · process override"
+	}
+	if draft {
+		label += " · draft (not applied)"
 	}
 
 	return label
