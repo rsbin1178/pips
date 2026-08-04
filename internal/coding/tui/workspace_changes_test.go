@@ -39,7 +39,7 @@ func TestWorkspaceChangeBlockShowsBoundedSemanticSummary(t *testing.T) {
 	assert.Contains(t, rendered, "R  old-name.go -> new-name.go")
 	assert.Contains(t, rendered, "D  deleted.go")
 	assert.Contains(t, rendered, "U  conflicted.go")
-	assert.Contains(t, rendered, "… 4 more files · /diff for full review")
+	assert.Contains(t, rendered, "… 4 more files · /status for repository summary")
 	assert.NotContains(t, rendered, "path-12.go")
 
 	narrow := renderWorkspaceChangeBlock(block, 28, themeDark, false)

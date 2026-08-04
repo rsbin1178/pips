@@ -91,6 +91,7 @@ type runtimeInstance interface {
 	ResolveQuestion(context.Context, question.Resolution) iter.Seq2[coding.Event, error]
 	RejectQuestion(context.Context, string, string) iter.Seq2[coding.Event, error]
 	SetMode(context.Context, coding.OperatingMode) error
+	ReplacementPreflight(context.Context) error
 	WorkspaceStatus(context.Context) (changes.WorktreeStatus, error)
 	PlanDocumentPath() (string, error)
 	Tree(context.Context) (coding.SessionTree, error)
@@ -173,8 +174,8 @@ type dependencies struct {
 	listSession sessionLister
 }
 
-// Controller owns one active Runtime and the process-local model override used
-// for later Runtime replacements.
+// Controller owns one active Runtime and the process-local model/permission
+// overrides used for later Runtime replacements.
 type Controller struct {
 	mu sync.Mutex
 
@@ -927,7 +928,7 @@ func (c *Controller) ResumeSession(ctx context.Context, id string) error {
 // ForkSession creates a new Session from one node and replaces the current
 // Runtime with it while preserving the effective process-local model.
 func (c *Controller) ForkSession(ctx context.Context, entryID string) error {
-	current, err := c.beginReplacement()
+	current, err := c.beginReplacement(ctx)
 	if err != nil {
 		return err
 	}
@@ -938,24 +939,10 @@ func (c *Controller) ForkSession(ctx context.Context, entryID string) error {
 
 		return err
 	}
-	if err := closeRuntimeBounded(ctx, current.runtime); err != nil {
-		return c.rollback(ctx, current, fmt.Errorf("runtime control: close source runtime: %w", err))
-	}
-	target, state, err := openRuntime(
-		ctx,
-		c.deps.openRuntime,
-		openOptions(c.base, current.config, current.resolved, current.model, targetID),
+	return c.reopenReplacement(
+		ctx, current, targetID, current.config, current.selection,
+		current.resolved, current.model, current.overridden,
 	)
-	if err != nil {
-		return c.rollback(ctx, current, err)
-	}
-
-	current.runtime = target
-	current.sessionID = state.SessionID
-	current.state = state
-	c.finishReplacement(current)
-
-	return nil
 }
 
 // SwitchModel replaces the current Runtime using a process-local model
@@ -1122,7 +1109,7 @@ func (c *Controller) replace(
 	selected modelcatalog.Selection,
 	isModelSwitch bool,
 ) error {
-	current, err := c.beginReplacement()
+	current, err := c.beginReplacement(ctx)
 	if err != nil {
 		return err
 	}
@@ -1172,7 +1159,24 @@ func (c *Controller) replace(
 		targetOverride = !targetResolved.Equal(c.baseResolved)
 	}
 
-	if targetID == current.sessionID && targetResolved.Equal(current.resolved) {
+	return c.reopenReplacement(
+		ctx, current, targetID, targetConfig, targetSelection,
+		targetResolved, targetModel, targetOverride,
+	)
+}
+
+func (c *Controller) reopenReplacement(
+	ctx context.Context,
+	current replacement,
+	targetID string,
+	targetConfig config.Config,
+	targetSelection modelcatalog.Selection,
+	targetResolved modelcatalog.ResolvedModel,
+	targetModel ai.LanguageModel,
+	targetOverride bool,
+) error {
+	if targetID == current.sessionID && targetResolved.Equal(current.resolved) &&
+		targetConfig.Equal(current.config) {
 		c.finishReplacement(current)
 
 		return nil
@@ -1205,7 +1209,7 @@ func (c *Controller) replace(
 	return nil
 }
 
-func (c *Controller) beginReplacement() (replacement, error) {
+func (c *Controller) beginReplacement(ctx context.Context) (replacement, error) {
 	if c == nil {
 		return replacement{}, ErrClosed
 	}
@@ -1239,12 +1243,12 @@ func (c *Controller) beginReplacement() (replacement, error) {
 	}
 	c.mu.Unlock()
 
-	current.state = current.runtime.Snapshot()
-	if current.state.Phase != coding.PhaseIdle || current.state.Interaction.Active {
+	if err := current.runtime.ReplacementPreflight(ctx); err != nil {
 		c.finishReplacement(current)
 
-		return replacement{}, ErrBusy
+		return replacement{}, err
 	}
+	current.state = current.runtime.Snapshot()
 
 	return current, nil
 }

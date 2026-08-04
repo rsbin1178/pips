@@ -648,7 +648,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.completionMarkers = nil
 			m.resetTeamProjection(m.state.SessionID)
 			m.resetScrollback()
-		case operationModel, operationReload, operationMode:
+		case operationModel, operationReload, operationMode, operationPermissions:
 		}
 		switch {
 		case pickerControl:
@@ -709,19 +709,16 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.worktreeLoading = false
 		if message.err != nil {
-			return m, m.printInspection(
-				"Workspace changes",
-				"Unable to inspect Git status: "+safeError(message.err),
-			)
+			body := strings.TrimPrefix(m.statusContent(), "Status\n\n") +
+				"\nRepository: unavailable (Git status: " + safeError(message.err) + ")"
+
+			return m, m.printInspection("Status", body)
 		}
 		m.worktreeSummary = compactWorktreeSummary(message.status)
 
 		return m, m.printInspection(
-			"Workspace changes",
-			strings.TrimPrefix(
-				worktreeStatusContent(message.status),
-				"Workspace changes\n\n",
-			),
+			"Status",
+			strings.TrimPrefix(m.statusContent(), "Status\n\n"),
 		)
 	case exitResetMsg:
 		m.exitArmed = false
@@ -1118,6 +1115,8 @@ func (m *Model) readyView() tea.View {
 			footer = append(footer, m.pickerView(availableRows))
 		case pickerMode:
 			footer = append(footer, m.modePickerView(availableRows))
+		case pickerPermissions:
+			footer = append(footer, m.permissionsPickerView(availableRows))
 		case pickerStatusLine:
 			footer = append(footer, m.statusLinePickerView(availableRows))
 		case pickerSkill:
@@ -1160,7 +1159,7 @@ func (m *Model) readyView() tea.View {
 	view.WindowTitle = appTitle
 	view.Cursor = m.composer.Cursor()
 	if m.prompt.kind != promptNone || m.picker.kind == pickerModel || m.picker.kind == pickerMode ||
-		m.picker.kind == pickerStatusLine || m.teamPanel.isFocused ||
+		m.picker.kind == pickerPermissions || m.picker.kind == pickerStatusLine || m.teamPanel.isFocused ||
 		(m.teamRouteIsInline() && (m.route.loading || !teamRouteInputStage(m.route.team.stage))) {
 		view.Cursor = nil
 	}

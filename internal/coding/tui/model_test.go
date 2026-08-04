@@ -724,7 +724,34 @@ func (c stubController) Mode() runtimecontrol.ModeState {
 
 	return runtimecontrol.ModeState{Current: mode, Configured: mode}
 }
-func (stubController) SetMode(context.Context, coding.OperatingMode) error { return nil }
+func (c stubController) SetMode(context.Context, coding.OperatingMode) error { return nil }
+func (c stubController) Permissions() runtimecontrol.PermissionState {
+	value := c.Config()
+	state := runtimecontrol.PermissionState{
+		Sandbox:            value.Sandbox,
+		ConfiguredSandbox:  value.Sandbox,
+		Approval:           value.Approval,
+		ConfiguredApproval: value.Approval,
+		Network:            value.SandboxWorkspaceWrite.Network,
+		ConfiguredNetwork:  value.SandboxWorkspaceWrite.Network,
+	}
+	if source, ok := value.Source(config.FieldSandbox); ok {
+		state.SandboxSource = source.Kind
+	}
+	if source, ok := value.Source(config.FieldApproval); ok {
+		state.ApprovalSource = source.Kind
+	}
+	if source, ok := value.Source(config.FieldSandboxNetwork); ok {
+		state.NetworkSource = source.Kind
+	}
+
+	return state
+}
+
+func (stubController) SetPermissions(context.Context, runtimecontrol.PermissionUpdate) error {
+	return nil
+}
+
 func (stubController) WorkspaceStatus(context.Context) (changes.WorktreeStatus, error) {
 	return changes.NewWorktreeStatus(
 		false,

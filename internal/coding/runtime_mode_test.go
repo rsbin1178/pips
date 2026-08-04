@@ -188,6 +188,32 @@ func TestRuntimeSetModeIsIdleOnlyAndIdempotent(t *testing.T) {
 	assert.Equal(t, ModeAgent, runtime.Snapshot().Mode)
 }
 
+func TestRuntimeReplacementPreflightUsesCompleteIdleGate(t *testing.T) {
+	t.Parallel()
+
+	runtime := openTestRuntimeAt(
+		t, t.TempDir(), SessionTarget{}, newRuntimeModel(runtimeTextResponse("done")),
+	)
+	require.NoError(t, runtime.ReplacementPreflight(t.Context()))
+
+	runtime.mu.Lock()
+	runtime.state.Phase = PhaseRunning
+	runtime.mu.Unlock()
+	require.ErrorIs(t, runtime.ReplacementPreflight(t.Context()), ErrRuntimeBusy)
+
+	runtime.mu.Lock()
+	runtime.state.Phase = PhaseIdle
+	runtime.state.Approval = ApprovalState{Kind: ApprovalReview}
+	runtime.mu.Unlock()
+	require.ErrorIs(t, runtime.ReplacementPreflight(t.Context()), ErrRuntimeBusy)
+
+	runtime.mu.Lock()
+	runtime.state.Approval = ApprovalState{}
+	runtime.recovery.PendingID = "pending-1"
+	runtime.mu.Unlock()
+	require.ErrorIs(t, runtime.ReplacementPreflight(t.Context()), ErrRuntimeBusy)
+}
+
 func testUserMessage(value string) ai.Message { return ai.UserText(value) }
 
 func testCatalogTool(name string) agent.Tool {

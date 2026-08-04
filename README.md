@@ -176,7 +176,7 @@ assistant output and Tool activity, and toggles back to the parent. Other Tools
 retain ordinary detail behavior.
 
 The command palette provides `/new`, `/resume`, `/plan`, `/mode`, `/agents`, `/team`,
-`/skills`, `/model`, `/tree`, `/fork`, `/compact`, `/review`, `/diff`,
+`/skills`, `/model`, `/permissions`, `/tree`, `/fork`, `/compact`, `/review`,
 `/reload`, `/status`, `/help`, and `/quit`. `/skills` browses user-invocable Skills from native
 `~/.pips/skills`/`.pips/skills` and shared
 `~/.agents/skills`/`.agents/skills` roots. Type `$` at a token boundary to
@@ -203,6 +203,14 @@ new or resumed sessions in that process inherit the selection, but Session
 history and `config.toml` are not modified. Restarting pips returns to the
 normal default/user-file/env/flag selection. Existing Session model metadata
 is tolerated for compatibility and ignored.
+
+`/permissions` changes only the current process's Approval and workspace-write
+Network settings. It displays the effective Sandbox, Approval, and Network
+values with safe source labels. A normal session cannot use this command to
+elevate to `full-access`; an explicitly user-configured Full Access session may
+narrow to `workspace-write`, but cannot silently restore Full Access after that
+narrowing. Changes are idle-only, rebuild the Runtime execution policy, and do
+not write configuration files or Session history.
 
 Operating mode is process-local. Configure `mode = "agent"` or `mode = "plan"`,
 or override it with `PIPS_MODE`/`--mode`. `/plan` enters Plan Mode and `/mode`
@@ -235,11 +243,11 @@ may be `null` or a complete object such as
 once-JSON-encoded form, but rejects incomplete, unknown, duplicate, or
 recursively encoded permission values with a bounded actionable error.
 
-`/diff` asynchronously reads fresh Git branch, staged, unstaged, conflict, and
-untracked state without modifying the repository. Product metadata under
-`.pips` is omitted. Pips never automatically stages, commits, resets, cleans,
-stashes, switches branches, or rewrites history. Interaction-only changes stay
-separately labeled as `Pips-attributed changes`.
+`/status` may asynchronously refresh a compact Git branch/dirty summary
+without modifying the repository. Product metadata under `.pips` is omitted.
+Pips never automatically stages, commits, resets, cleans, stashes, switches
+branches, or rewrites history. Interaction-only changes stay separately
+labeled as `Pips-attributed changes` in the conversation timeline.
 
 Set `NO_COLOR=1` for an ASCII, color-free view. The TUI stays in the terminal's
 main buffer so stable conversation output remains selectable and scrollable,

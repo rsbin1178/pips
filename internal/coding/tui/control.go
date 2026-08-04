@@ -7,6 +7,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/rsbin/pips/internal/coding"
 	"github.com/rsbin/pips/internal/coding/modelcatalog"
+	"github.com/rsbin/pips/internal/coding/runtimecontrol"
 )
 
 type controlOperation uint8
@@ -18,6 +19,7 @@ const (
 	operationReload
 	operationFork
 	operationMode
+	operationPermissions
 )
 
 type controlResultMsg struct {
@@ -41,6 +43,22 @@ func (m *Model) runModeControl(mode coding.OperatingMode) tea.Cmd {
 	return func() tea.Msg {
 		return controlResultMsg{operation: operationMode, err: m.controller.SetMode(m.ctx, mode)}
 	}
+}
+
+func (m *Model) runPermissionControl(update runtimecontrol.PermissionUpdate) tea.Cmd {
+	activityWasVisible := m.activityClockVisible()
+	m.picker.loading = true
+	m.picker.controlling = true
+	m.picker.err = nil
+
+	apply := func() tea.Msg {
+		return controlResultMsg{
+			operation: operationPermissions,
+			err:       m.controller.SetPermissions(m.ctx, update),
+		}
+	}
+
+	return tea.Batch(apply, m.startActivityClock(activityWasVisible))
 }
 
 func (m *Model) runControl(

@@ -714,6 +714,18 @@ func (r *fakeRuntime) SetMode(_ context.Context, mode coding.OperatingMode) erro
 	return nil
 }
 
+func (r *fakeRuntime) ReplacementPreflight(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	state := r.Snapshot()
+	if state.Phase != coding.PhaseIdle || state.Interaction.Active {
+		return ErrBusy
+	}
+
+	return nil
+}
+
 func (*fakeRuntime) WorkspaceStatus(context.Context) (changes.WorktreeStatus, error) {
 	return changes.NewWorktreeStatus(
 		false,
