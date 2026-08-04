@@ -401,6 +401,31 @@ func TestLinuxBackendCompileClosesResourcesWhenGitInspectionFails(t *testing.T) 
 	assert.Equal(t, before, countLinuxOpenDescriptors(t))
 }
 
+//nolint:paralleltest // CentOS executable scanners can write-lock parallel fresh launchers.
+func TestLinuxBackendCompileReadOnlySkipsWorkspacePreflight(t *testing.T) {
+	backend, tempRoot := newLinuxBackendTestFixture(t)
+	workspaceRoot := t.TempDir()
+	require.NoError(t, syscall.Mkfifo(filepath.Join(workspaceRoot, "fifo"), 0o600))
+	privateDir := filepath.Join(tempRoot, "operation")
+	require.NoError(t, os.Mkdir(privateDir, 0o700))
+
+	_, closers, err := backend.compile(t.Context(), compileRequest{
+		operation: Operation{
+			executable: fileObject{path: "/bin/true"},
+			cwd:        ".",
+			workspace:  WorkspaceReadOnly,
+			network:    NetworkNone,
+		},
+		workspaceRoot: workspaceRoot,
+		privateDir:    privateDir,
+	})
+	require.NoError(t, err)
+
+	for _, closer := range slices.Backward(closers) {
+		require.NoError(t, closer.Close())
+	}
+}
+
 func TestOpenLinuxPrivateDirectoryRejectsFile(t *testing.T) {
 	t.Parallel()
 
@@ -448,6 +473,7 @@ func TestBuildLinuxSandboxArguments(t *testing.T) {
 		workspace:      workspace,
 		cwd:            "/work/subdir",
 		privateDir:     privateDir,
+		writableRoots:  []string{"/approved"},
 		privateTarget:  privateTarget,
 		privateFD:      linuxSandboxPrivateFD,
 		executable:     "/usr/bin/tool",
@@ -484,6 +510,7 @@ func TestBuildLinuxSandboxArguments(t *testing.T) {
 		"--dir", privateTarget,
 		"--bind-fd", "4", privateTarget,
 		"--bind", "/external", "/external",
+		"--bind", "/approved", "/approved",
 		"--ro-bind", "/work/.git", "/work/.git",
 		"--ro-bind", "/usr/bin/tool", "/usr/bin/tool",
 		"--ro-bind", "/work/linked", "/work/linked",
@@ -502,11 +529,19 @@ func TestLinuxSandboxEnvironmentUsesPrivateAlias(t *testing.T) {
 	privateDir := "/root/.pips/tmp/plan-123"
 	privateTarget := "/tmp/" + linuxSandboxPrivateName
 	assert.Equal(t, []string{
+		"GOCACHE=" + filepath.Join(privateTarget, "go-cache"),
+		"GOTMPDIR=" + filepath.Join(privateTarget, "go-tmp"),
 		"HOME=/root",
+		"TEMP=" + filepath.Join(privateTarget, "tmp"),
+		"TMP=" + filepath.Join(privateTarget, "tmp"),
 		"TMPDIR=" + filepath.Join(privateTarget, "tmp"),
 		"XDG_CACHE_HOME=" + filepath.Join(privateTarget, "cache"),
 	}, linuxSandboxEnvironment([]string{
+		"GOCACHE=" + filepath.Join(privateDir, "go-cache"),
+		"GOTMPDIR=" + filepath.Join(privateDir, "go-tmp"),
 		"HOME=/root",
+		"TEMP=" + filepath.Join(privateDir, "tmp"),
+		"TMP=" + filepath.Join(privateDir, "tmp"),
 		"TMPDIR=" + filepath.Join(privateDir, "tmp"),
 		"XDG_CACHE_HOME=" + filepath.Join(privateDir, "cache"),
 	}, privateDir, privateTarget))

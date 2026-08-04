@@ -506,17 +506,30 @@ func shellInputSchema() *ai.Schema {
 	}
 }
 
+//nolint:wsl_v5 // Stable result classification is intentionally ordered.
 func resultEnvelopeForShell(
 	process execution.Result,
 	runErr error,
 	executionResult *ResultExecution,
 	body string,
 ) result {
+	var diagnostic *execution.SandboxDiagnostic
+	if runErr != nil {
+		if classified, ok := execution.SandboxDiagnosticFromError(runErr, "executor", "pre-launch"); ok {
+			diagnostic = &classified
+		}
+	} else if process.Status != execution.StatusExited || process.ExitCode != 0 {
+		if classified, ok := execution.SandboxDiagnosticFromOutput(body, "child-process", "stderr"); ok {
+			diagnostic = &classified
+		}
+	}
+
 	value := result{
-		OK:        runErr == nil && process.Status == execution.StatusExited && process.ExitCode == 0,
-		Tool:      shellName,
-		Execution: executionResult,
-		Body:      body,
+		OK:         runErr == nil && process.Status == execution.StatusExited && process.ExitCode == 0,
+		Tool:       shellName,
+		Execution:  executionResult,
+		Diagnostic: diagnostic,
+		Body:       body,
 	}
 
 	if value.OK {

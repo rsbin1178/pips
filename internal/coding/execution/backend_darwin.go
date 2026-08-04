@@ -1,5 +1,6 @@
 //go:build darwin
 
+//nolint:wsl_v5 // Native profile construction keeps policy normalization adjacent.
 package execution
 
 import (
@@ -35,6 +36,7 @@ type darwinBackend struct {
 type darwinProfileRequest struct {
 	workspace      string
 	privateDir     string
+	writableRoots  []string
 	workspaceWrite bool
 	networkAny     bool
 	writeDirs      []string
@@ -75,6 +77,7 @@ func (b *darwinBackend) probe(ctx context.Context, request probeRequest) (Capabi
 	return capabilities, nil
 }
 
+//nolint:wsl_v5 // Profile compilation keeps canonicalization and cleanup adjacent.
 func (b *darwinBackend) compile(
 	ctx context.Context,
 	request compileRequest,
@@ -91,16 +94,24 @@ func (b *darwinBackend) compile(
 		return launchSpec{}, nil, err
 	}
 
-	profile := buildDarwinProfile(darwinProfileRequest{
+	profileRequest, err := canonicalDarwinProfileRequest(darwinProfileRequest{
 		workspace:      request.workspaceRoot,
 		privateDir:     request.privateDir,
+		writableRoots:  request.writableRoots,
 		workspaceWrite: request.operation.workspace == WorkspaceWrite,
 		networkAny:     request.operation.network == NetworkAny,
 		writeDirs:      request.operation.WriteDirs(),
 		protected:      request.protected,
 		readOnlyFiles:  preflight.readOnlyFiles,
 	})
-	cwd := filepath.Join(request.workspaceRoot, filepath.FromSlash(request.operation.cwd))
+	if err != nil {
+		return launchSpec{}, nil, err
+	}
+	profile := buildDarwinProfile(profileRequest)
+	cwd, err := canonicalDarwinPath(filepath.Join(request.workspaceRoot, filepath.FromSlash(request.operation.cwd)), false)
+	if err != nil || !pathContains(request.workspaceRoot, cwd) {
+		return launchSpec{}, nil, fmt.Errorf("%w: canonicalize sandbox cwd", ErrInvalidOperation)
+	}
 	args := darwinLaunchArguments(profile, request.operation.executable.path, request.operation.args)
 
 	return launchSpec{
@@ -110,6 +121,87 @@ func (b *darwinBackend) compile(
 		environment: slices.Clone(request.environment),
 		stdin:       slices.Clone(request.operation.stdin),
 	}, nil, nil
+}
+
+//nolint:wsl_v5 // Every native profile path is normalized at one boundary.
+func canonicalDarwinProfileRequest(request darwinProfileRequest) (darwinProfileRequest, error) {
+	var err error
+	request.workspace, err = canonicalDarwinPath(request.workspace, false)
+	if err != nil {
+		return darwinProfileRequest{}, err
+	}
+	request.privateDir, err = canonicalDarwinPath(request.privateDir, false)
+	if err != nil {
+		return darwinProfileRequest{}, err
+	}
+	request.writableRoots, err = canonicalDarwinPaths(request.writableRoots, false)
+	if err != nil {
+		return darwinProfileRequest{}, err
+	}
+	request.writeDirs, err = canonicalDarwinPaths(request.writeDirs, false)
+	if err != nil {
+		return darwinProfileRequest{}, err
+	}
+	request.protected, err = canonicalDarwinPaths(request.protected, true)
+	if err != nil {
+		return darwinProfileRequest{}, err
+	}
+	request.readOnlyFiles, err = canonicalDarwinPaths(request.readOnlyFiles, false)
+	if err != nil {
+		return darwinProfileRequest{}, err
+	}
+
+	return request, nil
+}
+
+func canonicalDarwinPaths(paths []string, allowMissing bool) ([]string, error) {
+	canonical := make([]string, len(paths))
+	for index, path := range paths {
+		value, err := canonicalDarwinPath(path, allowMissing)
+		if err != nil {
+			return nil, err
+		}
+		canonical[index] = value
+	}
+
+	return canonical, nil
+}
+
+//nolint:wsl_v5 // Ancestor resolution intentionally keeps the path walk together.
+func canonicalDarwinPath(value string, allowMissing bool) (string, error) {
+	if !filepath.IsAbs(value) {
+		return "", fmt.Errorf("%w: native sandbox path must be absolute", ErrInvalidOperation)
+	}
+
+	cleaned := filepath.Clean(value)
+	candidate := cleaned
+	missingSuffix := make([]string, 0, 2)
+	for {
+		resolved, err := filepath.EvalSymlinks(candidate)
+		if err == nil {
+			for _, suffix := range slices.Backward(missingSuffix) {
+				resolved = filepath.Join(resolved, suffix)
+			}
+
+			return filepath.Clean(resolved), nil
+		}
+		if !allowMissing || !errors.Is(err, os.ErrNotExist) {
+			return "", fmt.Errorf("%w: canonicalize native sandbox path %q: %w", ErrInvalidOperation, value, err)
+		}
+
+		// Resolve the longest existing ancestor instead of returning a symlink
+		// spelling when only the final path component is absent.
+		if info, statErr := os.Lstat(candidate); statErr == nil && info.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("%w: canonicalize native sandbox path %q: dangling symlink", ErrInvalidOperation, value)
+		}
+		parent := filepath.Dir(candidate)
+		if parent == candidate {
+			return "", fmt.Errorf("%w: canonicalize native sandbox path %q: no existing ancestor", ErrInvalidOperation, value)
+		}
+
+		missingSuffix = append(missingSuffix, filepath.Base(candidate))
+		candidate = parent
+	}
 }
 
 func buildDarwinProfile(request darwinProfileRequest) darwinProfile {
@@ -130,6 +222,19 @@ func buildDarwinProfile(request darwinProfileRequest) darwinProfile {
 		profile.WriteString("(allow file-write* (subpath (param \"WORKSPACE\")))\n")
 	}
 
+	knownWritable := append([]string{request.privateDir, request.workspace}, request.writeDirs...)
+	writableIndex := 0
+	for _, path := range request.writableRoots {
+		if slices.Contains(knownWritable, path) {
+			continue
+		}
+
+		name := "WRITABLE_" + strconv.Itoa(writableIndex)
+		writableIndex++
+		parameters = append(parameters, name+"="+path)
+		writeParameterizedRule(&profile, "allow", "file-write*", "subpath", name)
+	}
+
 	for index, path := range request.writeDirs {
 		name := "WRITE_" + strconv.Itoa(index)
 		parameters = append(parameters, name+"="+path)
@@ -148,10 +253,10 @@ func buildDarwinProfile(request darwinProfileRequest) darwinProfile {
 		protectedIndex++
 
 		parameters = append(parameters, name+"="+path)
-		writeParameterizedRule(&profile, "deny", "file-write*", "subpath", name)
+		writeProtectedRule(&profile, "file-write*", name, path, request.privateDir)
 
 		if path != gitDir {
-			writeParameterizedRule(&profile, "deny", "file-read*", "subpath", name)
+			writeProtectedRule(&profile, "file-read*", name, path, request.privateDir)
 		}
 	}
 
@@ -165,6 +270,12 @@ func buildDarwinProfile(request darwinProfileRequest) darwinProfile {
 		profile.WriteString("(allow network*)\n")
 	} else {
 		profile.WriteString("(deny network*)\n")
+		// Tool runtimes such as tsx use Unix-domain IPC sockets under the
+		// private Plan root. Permit only that local IPC while retaining the
+		// NetworkNone denial for TCP, UDP, and sockets outside the root.
+		profile.WriteString("(allow system-socket (socket-domain AF_UNIX))\n")
+		profile.WriteString("(allow network-bind (local unix-socket (subpath (param \"PRIVATE_DIR\"))))\n")
+		profile.WriteString("(allow network-outbound (remote unix-socket (subpath (param \"PRIVATE_DIR\"))))\n")
 	}
 
 	return darwinProfile{text: profile.String(), parameters: parameters}
@@ -182,6 +293,25 @@ func writeParameterizedRule(
 		filter,
 		parameter,
 	)
+}
+
+func writeProtectedRule(
+	profile *strings.Builder,
+	operation, parameter, protected, privateDir string,
+) {
+	if protected != string(filepath.Separator) && pathContains(protected, privateDir) {
+		_, _ = fmt.Fprintf(
+			profile,
+			"(deny %s (require-all (subpath (param %q)) (require-not (subpath (param %q)))))\n",
+			operation,
+			parameter,
+			"PRIVATE_DIR",
+		)
+
+		return
+	}
+
+	writeParameterizedRule(profile, "deny", operation, "subpath", parameter)
 }
 
 func darwinLaunchArguments(profile darwinProfile, executable string, args []string) []string {

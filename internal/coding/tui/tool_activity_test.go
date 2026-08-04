@@ -336,6 +336,27 @@ func TestTimelineRendersCodexStyleToolActivities(t *testing.T) {
 	assert.Contains(t, rendered, "ctrl+t for details")
 }
 
+func TestFailedShellPreviewKeepsSandboxDiagnosticLine(t *testing.T) {
+	t.Parallel()
+
+	preview := compactToolPreview(toolActivity{
+		class:     toolClassShell,
+		state:     toolStateFailed,
+		hasHeader: true,
+		body: strings.Join([]string{
+			"Error: command failed",
+			"at createIpcServer",
+			"EPERM: operation not permitted, mkdir '/private/var/folders/pips/tmp/tsx-501'",
+			"at async main",
+			"seed process exited",
+		}, "\n"),
+	})
+
+	assert.Contains(t, strings.Join(preview, "\n"), "EPERM")
+	assert.Contains(t, strings.Join(preview, "\n"), "mkdir")
+	assert.Contains(t, strings.Join(preview, "\n"), "ctrl+t for details")
+}
+
 func TestTimelineRendersGenericCallAndBoundedResult(t *testing.T) {
 	t.Parallel()
 

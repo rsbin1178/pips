@@ -111,6 +111,11 @@ func (r *Runtime) closeResources(ctx context.Context, current *interaction) erro
 	}
 
 	resources := &cleanupStack{}
+	// Scratch is the outermost runtime resource and must be removed only after
+	// all child transports, inspectors, and sessions have stopped using it.
+	if r.tempRoot != nil {
+		resources.add(func(context.Context) error { return r.tempRoot.Close() })
+	}
 	resources.add(func(context.Context) error { return r.tree.Close() })
 	resources.add(func(context.Context) error { return r.handle.Close() })
 	resources.add(func(context.Context) error { return r.inspector.Close() })

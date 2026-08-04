@@ -51,15 +51,23 @@ presenting an unsandboxed runner as a successful Sandbox probe.
 ## Files, credentials, and HOME
 
 The Sandbox keeps the host filesystem read-only except for the Workspace,
-private execution temp, and exact directories approved for one Operation. The
-Workspace `.git` metadata and known pips configuration/session/credential paths
-receive stronger deny/read-only treatment. Child environments are rebuilt from
-a small allowlist; `API_KEY`, token/password/secret variables, proxy settings,
-agent sockets, dynamic-loader controls, and Shell startup injection variables
-are removed.
+a canonical owner-only per-runtime private execution root, and exact
+directories approved for one Operation. Production scratch roots live outside
+`PIPS_HOME`; legacy explicitly supplied nested roots are materialized through a
+narrow backend-specific private alias and never make the protected product
+root writable. The Workspace `.git` metadata and known pips
+configuration/session/credential paths receive stronger deny/read-only
+treatment. Child environments are rebuilt from a small allowlist; `TMP`,
+`TEMP`, `TMPDIR`, `XDG_CACHE_HOME`, `GOCACHE`, `GOTMPDIR`, npm cache, and npm
+log paths are forced below the Plan root. `API_KEY`, token/password/secret
+variables, proxy settings, agent sockets, dynamic-loader controls, and Shell
+startup injection variables are removed.
 
-`HOME` is deliberately preserved and host files remain readable to support Go
-and other local toolchains. Known credential paths are denied, but this is not
+NetworkNone still denies host TCP/UDP and Unix sockets outside the private
+Plan root; local Unix-domain IPC below that root is allowed for runtimes such
+as tsx. `HOME` is deliberately preserved and host files remain readable to
+support Go and other local toolchains. Known credential paths are denied, but
+this is not
 a complete secrecy boundary for arbitrary files a user stored under HOME. Do
 not keep a highly sensitive working environment exposed to an untrusted build
 and assume the command Sandbox hides every secret.
