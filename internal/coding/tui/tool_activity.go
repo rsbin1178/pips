@@ -431,6 +431,9 @@ func compactToolPreview(activity toolActivity) []string {
 		if !activity.hasHeader {
 			return nil
 		}
+		if activity.state == toolStateFailed {
+			return boundedFailureToolLines(activity.body, compactToolPreviewLines)
+		}
 
 		return boundedToolLines(activity.body, compactToolPreviewLines)
 	case toolClassPatch:
@@ -494,6 +497,66 @@ func boundedToolLines(value string, maximum int) []string {
 	omitted := len(lines) - head - 1
 	result := append([]string{}, lines[:head]...)
 	result = append(result, fmt.Sprintf("… +%d lines (ctrl+t for details)", omitted))
+	result = append(result, lines[len(lines)-1])
+
+	return result
+}
+
+//nolint:gocyclo,wsl_v5 // Failure previews preserve one actionable diagnostic within a fixed bound.
+func boundedFailureToolLines(value string, maximum int) []string {
+	value = sanitizeToolText(value)
+	if value == "" || maximum <= 0 {
+		return nil
+	}
+
+	lines := strings.Split(value, "\n")
+	for len(lines) > 0 && strings.TrimSpace(lines[0]) == "" {
+		lines = lines[1:]
+	}
+	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
+		lines = lines[:len(lines)-1]
+	}
+	if len(lines) == 0 || len(lines) <= maximum {
+		return lines
+	}
+
+	diagnostic := -1
+	for index, line := range lines {
+		lower := strings.ToLower(line)
+		for _, marker := range []string{
+			"eperm", "eacces", "enoent", "erofs", "mkdir", "prisma", "p1001", "sandbox",
+		} {
+			if strings.Contains(lower, marker) {
+				diagnostic = index
+				break
+			}
+		}
+		if diagnostic >= 0 {
+			break
+		}
+	}
+	if diagnostic < 0 {
+		return boundedToolLines(value, maximum)
+	}
+	if maximum == 1 {
+		return []string{lines[diagnostic]}
+	}
+	if diagnostic == 0 || diagnostic == len(lines)-1 {
+		return boundedToolLines(value, maximum)
+	}
+	if maximum == 2 {
+		return []string{
+			lines[diagnostic],
+			fmt.Sprintf("… +%d lines (ctrl+t for details)", len(lines)-1),
+		}
+	}
+
+	result := []string{lines[0], lines[diagnostic]}
+	if maximum > 3 {
+		result = append(result,
+			fmt.Sprintf("… +%d lines (ctrl+t for details)", len(lines)-3),
+		)
+	}
 	result = append(result, lines[len(lines)-1])
 
 	return result

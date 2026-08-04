@@ -362,6 +362,29 @@ func TestShellOperationTreatsWorkspaceWritePermissionAsRedundant(t *testing.T) {
 	assert.Empty(t, operation.WriteDirs())
 }
 
+func TestShellResultCarriesSandboxDiagnostic(t *testing.T) {
+	t.Parallel()
+
+	value := resultEnvelopeForShell(
+		execution.Result{Status: execution.StatusExited, ExitCode: 1},
+		nil,
+		nil,
+		"stderr:\nError: EPERM: operation not permitted, mkdir '/private/var/tmp/tsx-501'\n",
+	)
+	require.NotNil(t, value.Diagnostic)
+	assert.Equal(t, "EPERM", value.Diagnostic.Errno)
+	assert.Equal(t, "mkdir", value.Diagnostic.Operation)
+	assert.Equal(t, "/private/var/tmp/tsx-501", value.Diagnostic.Path)
+	assert.Equal(t, "child-process", value.Diagnostic.Backend)
+	assert.Equal(t, "stderr", value.Diagnostic.Phase)
+
+	rendered := value.render()
+	header, _, err := ParseResult(rendered)
+	require.NoError(t, err)
+	require.NotNil(t, header.Diagnostic)
+	assert.Equal(t, value.Diagnostic, header.Diagnostic)
+}
+
 func TestShellRenderClassifiesProcessResult(t *testing.T) {
 	t.Parallel()
 

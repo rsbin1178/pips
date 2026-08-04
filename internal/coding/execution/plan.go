@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -75,28 +74,11 @@ func removePrivatePlanDir(tempRoot, privateDir fileObject) error {
 		return errors.New("coding execution: refuse unsafe private directory cleanup")
 	}
 
-	if err := revalidateFileObject(tempRoot, false, true); err != nil {
+	if err := revalidatePrivateDirectory(tempRoot); err != nil {
 		return fmt.Errorf("coding execution: refuse cleanup after temp root change: %w", err)
 	}
 
-	info, err := os.Lstat(privateDir.path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-
-	if err != nil {
-		return fmt.Errorf("coding execution: inspect private directory: %w", err)
-	}
-
-	device, inode, err := fileIdentity(info)
-	if err != nil || !info.IsDir() || device != privateDir.device || inode != privateDir.inode {
-		return fmt.Errorf(
-			"coding execution: refuse cleanup after private directory change: %w",
-			errors.Join(ErrInvalidOperation, err),
-		)
-	}
-
-	if err := os.RemoveAll(privateDir.path); err != nil {
+	if err := removeOwnedChild(tempRoot, privateDir); err != nil {
 		return fmt.Errorf("coding execution: remove private directory: %w", err)
 	}
 

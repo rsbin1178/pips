@@ -1,3 +1,4 @@
+//nolint:wsl_v5 // Executor policy and identity checks stay explicit at the boundary.
 package execution
 
 import (
@@ -41,6 +42,7 @@ type Executor struct {
 	drainGrace  time.Duration
 	backend     backend
 	deps        runnerDependencies
+	paths       pathPolicy
 	protected   []string
 	ceiling     Fingerprint
 }
@@ -97,6 +99,7 @@ func newExecutor(
 		drainGrace:  drainGrace,
 		backend:     platform,
 		deps:        deps,
+		paths:       newPathPolicy([]string{tempObject.path}, protected),
 		protected:   protected,
 		ceiling:     protectedCeiling(protected),
 	}, nil
@@ -116,14 +119,15 @@ func (e *Executor) Probe(ctx context.Context) (Capabilities, error) {
 		return Capabilities{}, fmt.Errorf("%w: %w", ErrSandboxUnavailable, err)
 	}
 
-	if err := revalidateFileObject(e.tempObject, false, true); err != nil {
+	if err := revalidatePrivateDirectory(e.tempObject); err != nil {
 		return Capabilities{}, fmt.Errorf("%w: %w", ErrSandboxUnavailable, err)
 	}
 
 	capabilities, err := e.backend.probe(ctx, probeRequest{
 		workspaceRoot: e.workspace.Root(),
 		tempRoot:      e.tempRoot,
-		protected:     slices.Clone(e.protected),
+		writableRoots: slices.Clone(e.paths.writableRoots),
+		protected:     slices.Clone(e.paths.protectedSubpaths),
 	})
 	if err != nil {
 		return Capabilities{}, fmt.Errorf("%w: %w", ErrSandboxUnavailable, err)
@@ -150,7 +154,7 @@ func (e *Executor) Plan(ctx context.Context, op Operation, auth Authorization) (
 		return nil, err
 	}
 
-	if err := revalidateFileObject(e.tempObject, false, true); err != nil {
+	if err := revalidatePrivateDirectory(e.tempObject); err != nil {
 		return nil, err
 	}
 
@@ -227,12 +231,21 @@ func (e *Executor) compilePlan(
 		return nil, err
 	}
 
+	writableRoots := []string{privateObject.path}
+	if op.workspace == WorkspaceWrite {
+		writableRoots = append(writableRoots, e.workspace.Root())
+	}
+	writableRoots = append(writableRoots, op.WriteDirs()...)
 	request := compileRequest{
 		operation:     op,
 		workspaceRoot: e.workspace.Root(),
 		privateDir:    privateObject.path,
 		environment:   environment,
-		protected:     slices.Clone(e.protected),
+		writableRoots: sortPolicyPaths(writableRoots),
+		protected:     slices.Clone(e.paths.protectedSubpaths),
+	}
+	if err := validateWritableRootPolicy(request.writableRoots, request.protected, request.privateDir); err != nil {
+		return nil, err
 	}
 
 	launch, resources, err := e.compileLaunch(ctx, auth.sandbox, request)
@@ -410,6 +423,21 @@ func cloneLaunchSpec(launch launchSpec) launchSpec {
 	launch.extraFiles = slices.Clone(launch.extraFiles)
 
 	return launch
+}
+
+func revalidatePrivateDirectory(expected fileObject) error {
+	info, err := os.Lstat(expected.path)
+	if err != nil {
+		return fmt.Errorf("%w: revalidate private directory %q: %w", ErrInvalidOperation, expected.path, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || info.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf("%w: private directory changed for %q", ErrInvalidOperation, expected.path)
+	}
+	if !fileInfoMatches(info, expected) {
+		return fmt.Errorf("%w: filesystem identity changed for %q", ErrInvalidOperation, expected.path)
+	}
+
+	return nil
 }
 
 func revalidateFileObject(expected fileObject, executable, directory bool) error {

@@ -1,3 +1,4 @@
+//nolint:wsl_v5 // Environment assembly keeps private-path creation adjacent.
 package execution
 
 import (
@@ -117,11 +118,16 @@ func cleanExecutablePath(value string) string {
 }
 
 func preparePrivateEnvironment(privateDir string) (map[string]string, error) {
+	tmp := filepath.Join(privateDir, "tmp")
 	paths := map[string]string{
-		"GOCACHE":        filepath.Join(privateDir, "go-cache"),
-		"GOTMPDIR":       filepath.Join(privateDir, "go-tmp"),
-		"TMPDIR":         filepath.Join(privateDir, "tmp"),
-		"XDG_CACHE_HOME": filepath.Join(privateDir, "cache"),
+		"GOCACHE":             filepath.Join(privateDir, "go-cache"),
+		"GOTMPDIR":            filepath.Join(privateDir, "go-tmp"),
+		"TEMP":                tmp,
+		"TMP":                 tmp,
+		"TMPDIR":              tmp,
+		"XDG_CACHE_HOME":      filepath.Join(privateDir, "cache"),
+		"npm_config_cache":    filepath.Join(privateDir, "npm-cache"),
+		"npm_config_logs_dir": filepath.Join(privateDir, "npm-logs"),
 	}
 
 	names := make([]string, 0, len(paths))
@@ -131,10 +137,16 @@ func preparePrivateEnvironment(privateDir string) (map[string]string, error) {
 
 	slices.Sort(names)
 
+	created := make(map[string]struct{}, len(paths))
 	for _, name := range names {
-		if err := os.Mkdir(paths[name], 0o700); err != nil {
+		path := paths[name]
+		if _, ok := created[path]; ok {
+			continue
+		}
+		if err := os.Mkdir(path, 0o700); err != nil {
 			return nil, fmt.Errorf("coding execution: create private %s: %w", strings.ToLower(name), err)
 		}
+		created[path] = struct{}{}
 	}
 
 	return paths, nil

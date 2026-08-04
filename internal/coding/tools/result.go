@@ -42,16 +42,17 @@ type ResultNext struct {
 }
 
 type result struct {
-	OK        bool
-	Tool      string
-	Code      string
-	Truncated bool
-	Reason    string
-	Problem   *ResultProblem
-	Counts    ResultCounts
-	Next      ResultNext
-	Execution *ResultExecution
-	Body      string
+	OK         bool
+	Tool       string
+	Code       string
+	Truncated  bool
+	Reason     string
+	Problem    *ResultProblem
+	Counts     ResultCounts
+	Next       ResultNext
+	Execution  *ResultExecution
+	Diagnostic *execution.SandboxDiagnostic
+	Body       string
 }
 
 // ResultProblem describes a safe correction for a failed tool call.
@@ -80,30 +81,32 @@ type ResultExecutionStream struct {
 
 // ResultHeader is the machine-readable first line of every coding-tool result.
 type ResultHeader struct {
-	Schema    string           `json:"schema"`
-	OK        bool             `json:"ok"`
-	Tool      string           `json:"tool"`
-	Code      string           `json:"code,omitempty"`
-	Truncated bool             `json:"truncated,omitempty"`
-	Reason    string           `json:"reason,omitempty"`
-	Problem   *ResultProblem   `json:"problem,omitempty"`
-	Counts    ResultCounts     `json:"counts,omitzero"`
-	Next      ResultNext       `json:"next,omitzero"`
-	Execution *ResultExecution `json:"execution,omitempty"`
+	Schema     string                       `json:"schema"`
+	OK         bool                         `json:"ok"`
+	Tool       string                       `json:"tool"`
+	Code       string                       `json:"code,omitempty"`
+	Truncated  bool                         `json:"truncated,omitempty"`
+	Reason     string                       `json:"reason,omitempty"`
+	Problem    *ResultProblem               `json:"problem,omitempty"`
+	Counts     ResultCounts                 `json:"counts,omitzero"`
+	Next       ResultNext                   `json:"next,omitzero"`
+	Execution  *ResultExecution             `json:"execution,omitempty"`
+	Diagnostic *execution.SandboxDiagnostic `json:"diagnostic,omitempty"`
 }
 
 func (r result) render() string {
 	header, err := json.Marshal(ResultHeader{
-		Schema:    resultSchema,
-		OK:        r.OK,
-		Tool:      r.Tool,
-		Code:      r.Code,
-		Truncated: r.Truncated,
-		Reason:    r.Reason,
-		Problem:   r.Problem,
-		Counts:    r.Counts,
-		Next:      r.Next,
-		Execution: r.Execution,
+		Schema:     resultSchema,
+		OK:         r.OK,
+		Tool:       r.Tool,
+		Code:       r.Code,
+		Truncated:  r.Truncated,
+		Reason:     r.Reason,
+		Problem:    r.Problem,
+		Counts:     r.Counts,
+		Next:       r.Next,
+		Execution:  r.Execution,
+		Diagnostic: r.Diagnostic,
 	})
 	if err != nil {
 		panic(fmt.Sprintf("coding tools: render result header: %v", err))
@@ -166,6 +169,8 @@ func errorCode(err error) string {
 		return "canceled"
 	case errors.Is(err, context.DeadlineExceeded):
 		return "deadline_exceeded"
+	case errors.Is(err, execution.ErrSandboxUnavailable):
+		return "sandbox_unavailable"
 	case errors.Is(err, execution.ErrInvalidOperation):
 		return "invalid_argument"
 	case errors.Is(err, errInvalidArgument), errors.Is(err, workspace.ErrInvalidPath), errors.Is(err, patchdoc.ErrInvalid):

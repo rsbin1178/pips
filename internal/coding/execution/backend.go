@@ -24,6 +24,7 @@ type backend interface {
 type probeRequest struct {
 	workspaceRoot string
 	tempRoot      string
+	writableRoots []string
 	protected     []string
 }
 
@@ -32,6 +33,7 @@ type compileRequest struct {
 	workspaceRoot string
 	privateDir    string
 	environment   []string
+	writableRoots []string
 	protected     []string
 }
 
