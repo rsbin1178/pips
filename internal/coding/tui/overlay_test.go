@@ -224,7 +224,7 @@ func TestModelPickerAppliesTypedProcessSelection(t *testing.T) {
 
 	_, command := model.Update(key("enter"))
 	require.NotNil(t, command)
-	model.Update(command())
+	model.Update(commandMessage(t, command))
 	require.Len(t, controller.models, 1)
 	assert.Equal(t, "next-model", controller.models[0].Ref.Model)
 	assert.Equal(t, "fast", controller.models[0].Variant)
@@ -389,7 +389,7 @@ func TestTreeOverlayFiltersNavigatesWithSummaryAndForks(t *testing.T) {
 	}
 	model := readyModelWithController(t, controller, true)
 	load := model.openTreeRoute(false)
-	model.Update(load())
+	model.Update(commandMessage(t, load))
 	model.Update(tea.KeyPressMsg{Text: "first"})
 	require.Len(t, model.filteredTreeNodes(), 1)
 	_, navigate := model.Update(key("s"))
@@ -399,11 +399,11 @@ func TestTreeOverlayFiltersNavigatesWithSummaryAndForks(t *testing.T) {
 	assert.True(t, controller.navigations[0].summarize)
 
 	load = model.openTreeRoute(true)
-	model.Update(load())
+	model.Update(commandMessage(t, load))
 	model.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	_, fork := model.Update(key("enter"))
 	require.NotNil(t, fork)
-	model.Update(fork())
+	model.Update(commandMessage(t, fork))
 	assert.Equal(t, []string{"node-second"}, controller.forks)
 	assert.Equal(t, routeNone, model.route.kind)
 }
@@ -419,13 +419,13 @@ func TestCompactPromptCancelDoesNothingAndConfirmUsesPreviewToken(t *testing.T) 
 	}
 	model := readyModelWithController(t, controller, true)
 	load := model.openCompactPrompt()
-	model.Update(load())
+	model.Update(commandMessage(t, load))
 	model.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	assert.Empty(t, controller.compactions)
 	assert.Equal(t, promptNone, model.prompt.kind)
 
 	load = model.openCompactPrompt()
-	model.Update(load())
+	model.Update(commandMessage(t, load))
 	_, compact := model.Update(key("enter"))
 	driveModelCommands(t, model, compact)
 	require.Len(t, controller.compactions, 1)
@@ -472,17 +472,18 @@ type overlayController struct {
 		entryID   string
 		summarize bool
 	}
-	compactions       []coding.CompactionRequest
-	forks             []string
-	agents            []subagent.Summary
-	agentDetail       subagent.Detail
-	agentInspections  []string
-	agentCanceled     []string
-	skillSnapshot     coding.SkillSnapshot
-	skillErr          error
-	permissions       runtimecontrol.PermissionState
-	permissionErr     error
-	permissionUpdates []runtimecontrol.PermissionUpdate
+	compactions          []coding.CompactionRequest
+	forks                []string
+	agents               []subagent.Summary
+	agentDetail          subagent.Detail
+	agentInspections     []string
+	agentCanceled        []string
+	skillSnapshot        coding.SkillSnapshot
+	skillErr             error
+	permissions          runtimecontrol.PermissionState
+	permissionErr        error
+	permissionUpdates    []runtimecontrol.PermissionUpdate
+	confirmationRequests int
 }
 
 type approvalResolutionErrorController struct {
@@ -548,6 +549,29 @@ func (c *overlayController) Capabilities() ai.Capabilities { return c.capabiliti
 
 func (c *overlayController) Permissions() runtimecontrol.PermissionState {
 	if c.permissions.Sandbox != "" {
+		if c.permissions.SandboxProfile.Filesystem.Effective == "" {
+			c.permissions.SandboxProfile = runtimecontrol.SandboxPermissionState{
+				Filesystem: runtimecontrol.PermissionFilesystemState{
+					Effective: c.permissions.Sandbox, Configured: c.permissions.ConfiguredSandbox,
+					EffectiveSource: c.permissions.SandboxSource, ConfiguredSource: c.permissions.SandboxSource,
+					Overridden: c.permissions.SandboxOverridden,
+				},
+				Network: runtimecontrol.PermissionNetworkState{
+					Effective: c.permissions.Network, Configured: c.permissions.ConfiguredNetwork,
+					EffectiveSource: c.permissions.NetworkSource, ConfiguredSource: c.permissions.NetworkSource,
+					Overridden: c.permissions.NetworkOverridden,
+				},
+				NetworkEnforced: c.permissions.Sandbox != config.SandboxFullAccess,
+			}
+		}
+		if c.permissions.ApprovalPolicy.Effective == "" {
+			c.permissions.ApprovalPolicy = runtimecontrol.PermissionApprovalState{
+				Effective: c.permissions.Approval, Configured: c.permissions.ConfiguredApproval,
+				EffectiveSource: c.permissions.ApprovalSource, ConfiguredSource: c.permissions.ApprovalSource,
+				Overridden: c.permissions.ApprovalOverridden,
+			}
+		}
+
 		return c.permissions
 	}
 
@@ -563,13 +587,39 @@ func (c *overlayController) Permissions() runtimecontrol.PermissionState {
 		ApprovalSource:     config.SourceDefault,
 		NetworkSource:      config.SourceDefault,
 	}
+	state.SandboxProfile = runtimecontrol.SandboxPermissionState{
+		Filesystem: runtimecontrol.PermissionFilesystemState{
+			Effective: value.Sandbox, Configured: value.Sandbox,
+			EffectiveSource: config.SourceDefault, ConfiguredSource: config.SourceDefault,
+		},
+		Network: runtimecontrol.PermissionNetworkState{
+			Effective:       value.SandboxWorkspaceWrite.Network,
+			Configured:      value.SandboxWorkspaceWrite.Network,
+			EffectiveSource: config.SourceDefault, ConfiguredSource: config.SourceDefault,
+		},
+		NetworkEnforced: value.Sandbox != config.SandboxFullAccess,
+	}
+	state.ApprovalPolicy = runtimecontrol.PermissionApprovalState{
+		Effective: value.Approval, Configured: value.Approval,
+		EffectiveSource: config.SourceDefault, ConfiguredSource: config.SourceDefault,
+	}
 
 	return state
+}
+
+func (c *overlayController) NewFullAccessConfirmation(
+	context.Context,
+	runtimecontrol.PermissionUpdate,
+) (*runtimecontrol.FullAccessConfirmation, error) {
+	c.confirmationRequests++
+
+	return nil, nil
 }
 
 func (c *overlayController) SetPermissions(
 	_ context.Context,
 	update runtimecontrol.PermissionUpdate,
+	_ ...*runtimecontrol.FullAccessConfirmation,
 ) error {
 	if c.permissionErr != nil {
 		return c.permissionErr
@@ -588,6 +638,24 @@ func (c *overlayController) SetPermissions(
 		state.Network = *update.Network
 		state.NetworkOverridden = state.Network != state.ConfiguredNetwork
 	}
+	c.permissions = state
+	if update.SandboxProfile != nil {
+		if update.SandboxProfile.Filesystem != nil {
+			state.SandboxProfile.Filesystem.Effective = *update.SandboxProfile.Filesystem
+			state.SandboxProfile.Filesystem.Overridden = state.SandboxProfile.Filesystem.Effective != state.SandboxProfile.Filesystem.Configured
+			state.Sandbox = *update.SandboxProfile.Filesystem
+			state.SandboxOverridden = state.Sandbox != state.ConfiguredSandbox
+		}
+		if update.SandboxProfile.Network != nil {
+			state.SandboxProfile.Network.Effective = *update.SandboxProfile.Network
+			state.SandboxProfile.Network.Overridden = state.SandboxProfile.Network.Effective != state.SandboxProfile.Network.Configured
+			state.Network = *update.SandboxProfile.Network
+			state.NetworkOverridden = state.Network != state.ConfiguredNetwork
+		}
+		state.SandboxProfile.NetworkEnforced = state.SandboxProfile.Filesystem.Effective != config.SandboxFullAccess
+	}
+	state.ApprovalPolicy.Effective = state.Approval
+	state.ApprovalPolicy.Overridden = state.Approval != state.ConfiguredApproval
 	c.permissions = state
 
 	return nil

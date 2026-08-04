@@ -204,13 +204,16 @@ history and `config.toml` are not modified. Restarting pips returns to the
 normal default/user-file/env/flag selection. Existing Session model metadata
 is tolerated for compatibility and ignored.
 
-`/permissions` changes only the current process's Approval and workspace-write
-Network settings. It displays the effective Sandbox, Approval, and Network
-values with safe source labels. A normal session cannot use this command to
-elevate to `full-access`; an explicitly user-configured Full Access session may
-narrow to `workspace-write`, but cannot silently restore Full Access after that
-narrowing. Changes are idle-only, rebuild the Runtime execution policy, and do
-not write configuration files or Session history.
+`/permissions` changes only the current process's Sandbox profile and Approval
+policy. Sandbox profiles are `read-only`, `workspace-write`, and `full-access`;
+Network (`deny`, `on-request`, or `allow`) is nested under the first two and is
+shown as inactive while Full Access is active. Approval `on-request` remains a
+separate policy. The effective/configured values and safe source labels are
+visible without source details. A transition to Full Access requires an
+explicit confirmation, but does not require restarting Pips: the idle Runtime
+is replaced in place with the same Session/model. Changes rebuild the execution
+policy, do not write configuration files or Session history, and read-only
+policy rejects workspace/external writes before Approval or session grants.
 
 Operating mode is process-local. Configure `mode = "agent"` or `mode = "plan"`,
 or override it with `PIPS_MODE`/`--mode`. `/plan` enters Plan Mode and `/mode`

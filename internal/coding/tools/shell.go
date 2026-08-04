@@ -82,6 +82,7 @@ func (e *shellArgumentError) Unwrap() error {
 type ShellHandler struct {
 	declaration ai.Tool
 	network     config.SandboxNetworkMode
+	workspace   execution.WorkspaceAccess
 }
 
 // NewShellHandler constructs the non-registerable shell operation handler.
@@ -92,6 +93,23 @@ func NewShellHandler() *ShellHandler {
 // NewShellHandlerForNetwork constructs a Shell handler with the user-owned
 // workspace-write network policy. The Config boundary validates mode.
 func NewShellHandlerForNetwork(mode config.SandboxNetworkMode) *ShellHandler {
+	return NewShellHandlerForSandbox(config.SandboxWorkspaceWrite, mode)
+}
+
+// NewShellHandlerForSandbox constructs a Shell handler for one effective
+// filesystem profile and Network policy. Read-only profiles request the
+// read-only operation boundary so safe shell reads remain available while
+// Policy rejects workspace and external writes before approval.
+func NewShellHandlerForSandbox(
+	sandbox config.SandboxMode,
+	networkMode config.SandboxNetworkMode,
+) *ShellHandler {
+	workspace := execution.WorkspaceWrite
+	if sandbox == config.SandboxReadOnly {
+		workspace = execution.WorkspaceReadOnly
+	}
+
+	mode := networkMode
 	description := "Run a bounded non-interactive POSIX shell command in the local OS sandbox. " +
 		"Omit cwd to run at the Workspace root; an absolute cwd is accepted only inside the Workspace. " +
 		"Permissions describe only optional external writes or network access and require explicit approval."
@@ -101,7 +119,7 @@ func NewShellHandlerForNetwork(mode config.SandboxNetworkMode) *ShellHandler {
 			"Host network access is enabled by user configuration; external writes still require explicit approval."
 	}
 
-	return &ShellHandler{network: mode, declaration: ai.Tool{
+	return &ShellHandler{network: mode, workspace: workspace, declaration: ai.Tool{
 		Name:        shellName,
 		Description: description,
 		InputSchema: shellInputSchema(),
@@ -186,7 +204,7 @@ func (h *ShellHandler) Operation(
 			ChunkBytes:   shellChunkBytes,
 			QueueDepth:   shellOutputQueueDepth,
 		},
-		Workspace:              execution.WorkspaceWrite,
+		Workspace:              h.workspace,
 		WriteDirs:              writePaths,
 		Network:                network,
 		NetworkByConfiguration: networkByConfiguration,
