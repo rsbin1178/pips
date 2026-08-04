@@ -103,6 +103,7 @@ type linuxSandboxRequest struct {
 	workspace      string
 	cwd            string
 	privateDir     string
+	writableRoots  []string
 	privateTarget  string
 	privateFD      int
 	executable     string
@@ -194,6 +195,7 @@ func (b *linuxBackend) compile(
 		workspace:      request.workspaceRoot,
 		cwd:            filepath.Join(request.workspaceRoot, filepath.FromSlash(request.operation.cwd)),
 		privateDir:     request.privateDir,
+		writableRoots:  request.writableRoots,
 		privateFD:      linuxSandboxPrivateFD,
 		executable:     request.operation.executable.path,
 		args:           request.operation.args,
@@ -218,8 +220,12 @@ func (b *linuxBackend) compile(
 		request.privateDir,
 		sandboxRequest.privateTarget,
 	)
+	cwd, err := filepath.EvalSymlinks(filepath.Join(request.workspaceRoot, filepath.FromSlash(request.operation.cwd)))
+	if err != nil || !pathContains(request.workspaceRoot, cwd) {
+		return launchSpec{}, append([]io.Closer{filter, privateHandle}, filesAsClosers(maskHandles)...), fmt.Errorf("%w: canonicalize sandbox cwd", ErrInvalidOperation)
+	}
+	sandboxRequest.cwd = cwd
 	args := buildLinuxSandboxArguments(sandboxRequest)
-	cwd := filepath.Join(request.workspaceRoot, filepath.FromSlash(request.operation.cwd))
 
 	return launchSpec{
 		executable:  launcher.path,
@@ -511,6 +517,7 @@ func linuxPathExists(stat func(string) (os.FileInfo, error), path string) (bool,
 
 func linuxPrivateMounts(stat func(string) (os.FileInfo, error), request linuxSandboxRequest) []string {
 	sources := []string{request.workspace, request.executable}
+	sources = append(sources, request.writableRoots...)
 	sources = append(sources, request.writeDirs...)
 	sources = append(sources, request.readOnlyFiles...)
 
@@ -729,6 +736,12 @@ func buildLinuxSandboxArguments(request linuxSandboxRequest) []string {
 	)
 	for _, directory := range request.writeDirs {
 		args = append(args, "--bind", directory, directory)
+	}
+	for _, root := range request.writableRoots {
+		if root == request.privateDir || root == request.workspace || slices.Contains(request.writeDirs, root) {
+			continue
+		}
+		args = append(args, "--bind", root, root)
 	}
 
 	gitPath := filepath.Join(request.workspace, ".git")

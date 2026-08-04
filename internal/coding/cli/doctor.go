@@ -109,23 +109,28 @@ func doctorCapabilityValue(value string) string {
 	return value
 }
 
+//nolint:wsl_v5 // Probe ownership and cleanup are kept in one closure.
 func nativeSandboxProbe(dependencies Dependencies) SandboxProbe {
 	return func(ctx context.Context, ws workspace.Workspace) (execution.Capabilities, error) {
-		tempRoot := dependencies.Paths.TempDir()
-		if err := ensureDoctorTempRoot(tempRoot); err != nil {
-			return execution.Capabilities{}, err
-		}
-
-		executor, err := execution.NewExecutor(ws, execution.ExecutorConfig{
-			TempRoot:    tempRoot,
-			Environment: dependencies.LookupEnv,
-			Protected:   []string{dependencies.Paths.Root()},
-		})
+		tempRoot, err := execution.NewPrivateTempRootOutside(
+			os.TempDir(),
+			[]string{dependencies.Paths.Root()},
+		)
 		if err != nil {
 			return execution.Capabilities{}, err
 		}
 
-		return executor.Probe(ctx)
+		executor, err := execution.NewExecutor(ws, execution.ExecutorConfig{
+			TempRoot:    tempRoot.Path(),
+			Environment: dependencies.LookupEnv,
+			Protected:   []string{dependencies.Paths.Root()},
+		})
+		if err != nil {
+			return execution.Capabilities{}, errors.Join(err, tempRoot.Close())
+		}
+
+		capabilities, probeErr := executor.Probe(ctx)
+		return capabilities, errors.Join(probeErr, tempRoot.Close())
 	}
 }
 

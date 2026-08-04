@@ -38,7 +38,11 @@ func TestEnvironmentSnapshotUsesAllowlistAndPrivatePaths(t *testing.T) {
 	assert.Equal(t, strings.Join([]string{"/usr/bin", "/bin"}, string(os.PathListSeparator)), values["PATH"])
 	assert.Equal(t, "cat", values["GIT_PAGER"])
 	assert.Equal(t, filepath.Join(privateDir, "tmp"), values["TMPDIR"])
+	assert.Equal(t, filepath.Join(privateDir, "tmp"), values["TMP"])
+	assert.Equal(t, filepath.Join(privateDir, "tmp"), values["TEMP"])
 	assert.Equal(t, filepath.Join(privateDir, "cache"), values["XDG_CACHE_HOME"])
+	assert.Equal(t, filepath.Join(privateDir, "npm-cache"), values["npm_config_cache"])
+	assert.Equal(t, filepath.Join(privateDir, "npm-logs"), values["npm_config_logs_dir"])
 	assert.NotContains(t, values, "API_KEY")
 	assert.NotContains(t, values, "HTTPS_PROXY")
 	assert.NotContains(t, values, "LD_PRELOAD")
@@ -46,7 +50,7 @@ func TestEnvironmentSnapshotUsesAllowlistAndPrivatePaths(t *testing.T) {
 	assert.NotContains(t, values, "PIPS_HOME")
 	assert.True(t, slices.IsSorted(environment))
 
-	for _, name := range []string{"tmp", "cache", "go-cache", "go-tmp"} {
+	for _, name := range []string{"tmp", "cache", "go-cache", "go-tmp", "npm-cache", "npm-logs"} {
 		info, statErr := os.Stat(filepath.Join(privateDir, name))
 		require.NoError(t, statErr)
 		assert.Equal(t, os.FileMode(0o700), info.Mode().Perm())

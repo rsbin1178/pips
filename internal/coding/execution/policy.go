@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"path/filepath"
 	"slices"
-	"sort"
 	"strings"
 
 	"github.com/rsbin/pips/internal/coding/config"
@@ -198,9 +197,7 @@ func canonicalProtectedPaths(ws workspace.Workspace, configured []string) ([]str
 		canonical = append(canonical, cleaned)
 	}
 
-	sort.Strings(canonical)
-
-	return slices.Compact(canonical), nil
+	return sortPolicyPaths(canonical), nil
 }
 
 func (p Policy) invalidReason(op Operation) string {

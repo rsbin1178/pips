@@ -127,6 +127,7 @@ type Runtime struct {
 	planRef         plandoc.Ref
 	policy          execution.Policy
 	executor        *execution.Executor
+	tempRoot        *execution.PrivateTempRoot
 	inspector       *git.Inspector
 	permissions     *codingmcp.Permissions
 	connections     *codingmcp.Connections
@@ -234,21 +235,45 @@ func openRuntime(
 		configured.MCPTerminate < 0 || configured.MCPMaxTools < 0 {
 		return nil, fmt.Errorf("%w: invalid execution duration or count", ErrRuntimeInvalid)
 	}
+
+	var scratchRoot *execution.PrivateTempRoot
 	if configured.TempRoot == "" {
-		configured.TempRoot = options.Paths.TempDir()
+		scratchRoot, err = newRuntimeScratchRoot(options.Paths.Root())
+		if err != nil {
+			return nil, err
+		}
+		configured.TempRoot = scratchRoot.Path()
 	}
 	if configured.GitPath == "" {
 		gitPath, err := findExecutable("git", configured.Environment)
 		if err != nil {
+			if scratchRoot != nil {
+				_ = scratchRoot.Close()
+			}
+
 			return nil, err
 		}
 		configured.GitPath = gitPath
 	}
 	if err := ensurePrivateTempRoot(configured.TempRoot); err != nil {
+		if scratchRoot != nil {
+			_ = scratchRoot.Close()
+		}
+
+		return nil, err
+	}
+	if err := ensurePrivateApplicationRoot(options.Paths.Root()); err != nil {
+		if scratchRoot != nil {
+			_ = scratchRoot.Close()
+		}
+
 		return nil, err
 	}
 
 	stack := &cleanupStack{}
+	if scratchRoot != nil {
+		stack.add(func(context.Context) error { return scratchRoot.Close() })
+	}
 	defer func() {
 		if returnErr != nil {
 			returnErr = errors.Join(returnErr, stack.close(context.WithoutCancel(ctx)))
@@ -422,6 +447,7 @@ func openRuntime(
 		planRef:             planRef,
 		policy:              policy,
 		executor:            executor,
+		tempRoot:            scratchRoot,
 		inspector:           inspector,
 		permissions:         permissions,
 		connections:         connections,
@@ -669,18 +695,48 @@ func withExecutionDefaults(options ExecutionOptions) ExecutionOptions {
 	return options
 }
 
+func newRuntimeScratchRoot(productRoot string) (*execution.PrivateTempRoot, error) {
+	root, err := execution.NewPrivateTempRootOutside(os.TempDir(), []string{productRoot})
+	if err != nil {
+		return nil, fmt.Errorf("coding runtime: allocate private scratch root: %w", err)
+	}
+
+	return root, nil
+}
+
+func ensurePrivateApplicationRoot(root string) error {
+	if err := ensureOwnerOnlyDirectory(root); err != nil {
+		return fmt.Errorf("%w: product root must be a private directory: %w", ErrRuntimeInvalid, err)
+	}
+
+	return nil
+}
+
 func ensurePrivateTempRoot(root string) error {
 	if !filepath.IsAbs(root) {
 		return fmt.Errorf("%w: temp root must be absolute", ErrRuntimeInvalid)
 	}
+	if err := ensureOwnerOnlyDirectory(root); err != nil {
+		return fmt.Errorf("%w: temp root must be a private directory: %w", ErrRuntimeInvalid, err)
+	}
 
+	return nil
+}
+
+func ensureOwnerOnlyDirectory(root string) error {
+	if !filepath.IsAbs(root) {
+		return errors.New("directory must be absolute")
+	}
 	if err := os.MkdirAll(root, 0o700); err != nil {
-		return fmt.Errorf("coding runtime: create temp root: %w", err)
+		return err
 	}
 
 	info, err := os.Lstat(root)
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
-		return fmt.Errorf("%w: temp root must be a private directory", ErrRuntimeInvalid)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
+		return errors.New("directory must be an owner-only non-symlink directory")
 	}
 
 	return nil
