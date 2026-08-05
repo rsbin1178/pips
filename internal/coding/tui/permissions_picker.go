@@ -2,6 +2,7 @@
 package tui
 
 import (
+	"errors"
 	"slices"
 	"strings"
 
@@ -243,7 +244,7 @@ func (m *Model) permissionsPickerView(maxHeight int) string {
 		lines = append(lines, m.activityNotice("Working…"))
 	}
 	if m.picker.err != nil {
-		lines = append(lines, "Error: "+safeError(m.picker.err))
+		lines = append(lines, "Error: "+permissionPickerErrorText(m.picker.err))
 	}
 	lines = append(lines, "", "Changes apply to this Pips process only and reset on restart.")
 	lines = append(lines, "↑/↓ choose · ←/→ change · Enter apply · Esc cancel")
@@ -268,7 +269,7 @@ func (m *Model) fullAccessConfirmationView(maxHeight int) string {
 		lines[0] = lipgloss.NewStyle().Bold(true).Foreground(paletteFor(m.theme).warning).Render(lines[0])
 	}
 	if m.picker.err != nil {
-		lines = append(lines, "Error: "+safeError(m.picker.err))
+		lines = append(lines, "Error: "+permissionPickerErrorText(m.picker.err))
 	}
 	for index := range lines {
 		lines[index] = ansi.Truncate(lines[index], max(1, m.width), "…")
@@ -365,5 +366,20 @@ func permissionApprovalText(mode config.ApprovalMode) string {
 		return "Block actions that need approval"
 	default:
 		return "Unknown"
+	}
+}
+
+func permissionPickerErrorText(err error) string {
+	switch {
+	case errors.Is(err, runtimecontrol.ErrBusy):
+		return "Pips must be idle to change permissions."
+	case errors.Is(err, runtimecontrol.ErrClosed):
+		return "Permissions are unavailable because the Runtime is closed."
+	case errors.Is(err, runtimecontrol.ErrDetached):
+		return "Pips could not safely replace the Runtime."
+	case errors.Is(err, runtimecontrol.ErrInvalid):
+		return "Permission changes were rejected."
+	default:
+		return "Permission changes could not be applied."
 	}
 }
