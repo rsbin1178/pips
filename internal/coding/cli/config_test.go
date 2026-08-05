@@ -109,19 +109,21 @@ func TestConfigPathDoesNotDecodeFiles(t *testing.T) {
 	assert.Contains(t, output, "project_trusted = false")
 }
 
-func TestConfigShowIncludesFileOnlyThemeSelection(t *testing.T) {
+func TestConfigShowIncludesFileOnlyTUISelections(t *testing.T) {
 	t.Parallel()
 
 	fixture := newCLIFixture(t)
 	writeCLIFile(t, fixture.layout.ConfigFile(), `
 [tui]
 theme = "missing-custom-theme"
+status_line = ["model", "phase"]
 [providers.openai.models."test-model"]
 `)
 
 	output, err := executeWithDependencies(t, fixture.dependencies(nil), "config", "show")
 	require.NoError(t, err)
 	assert.Contains(t, output, `tui.theme = "missing-custom-theme" # source=config_file detail="`)
+	assert.Contains(t, output, `tui.status_line = ["model","phase"] # source=config_file detail="`)
 	assert.NotContains(t, output, "theme registry")
 }
 

@@ -270,7 +270,12 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 
 		m.controller = message.controller
 		m.state = message.controller.Snapshot()
-		m.loadInitialTheme(message.controller.Config().TUI.Theme)
+		configuredTUI := message.controller.Config().TUI
+		if configuredTUI.StatusLine == nil {
+			configuredTUI.StatusLine = statusline.Default()
+		}
+		m.statusLineItems = slices.Clone(configuredTUI.StatusLine)
+		m.loadInitialTheme(configuredTUI.Theme)
 		m.resetTeamProjection(m.state.SessionID)
 		m.resetScrollback()
 		m.lifecycle = lifecycleReady
@@ -608,10 +613,17 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.picker.loading = false
 		m.picker.controlling = false
 		m.picker.err = message.err
-		if message.err != nil {
+		if message.err != nil && !errors.Is(message.err, config.ErrStatusLineDurability) {
+			m.setLayout()
+
 			return m, nil
 		}
 		m.statusLineItems = slices.Clone(message.items)
+		if errors.Is(message.err, config.ErrStatusLineDurability) {
+			m.setLayout()
+
+			return m, nil
+		}
 		m.picker = pickerState{}
 
 		return m, m.composer.Focus()

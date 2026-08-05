@@ -1,0 +1,8 @@
+# TUI preferences live in the active config.toml.
+# With --config PATH, both /theme and /statusline use that same file.
+[tui]
+theme = "nord"
+status_line = ["workspace", "session", "model", "phase"]
+
+# Omit status_line to use the built-in default order. An explicit empty array
+# is valid when only transient safety or operation indicators should remain.

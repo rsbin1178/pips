@@ -12,6 +12,7 @@ import (
 
 	"github.com/rsbin/pips/internal/coding"
 	"github.com/rsbin/pips/internal/coding/paths"
+	"github.com/rsbin/pips/internal/coding/statusline"
 	"github.com/rsbin/pips/internal/coding/tui"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -189,8 +190,14 @@ theme = "auto"
 		RunTUI: func(ctx context.Context, options tui.Options) error {
 			_, bootstrapErr := options.Bootstrap(ctx, false)
 			require.NoError(t, bootstrapErr)
+			require.NotNil(t, options.SaveStatusLine)
 			require.NotNil(t, options.SaveTheme)
 			called = true
+
+			require.NoError(t, options.SaveStatusLine(ctx, []statusline.Item{
+				statusline.Model,
+				statusline.Phase,
+			}))
 
 			return options.SaveTheme(ctx, "dracula")
 		},
@@ -203,8 +210,61 @@ theme = "auto"
 	data, err := os.ReadFile(explicit) //nolint:gosec // The test controls the temporary explicit config path.
 	require.NoError(t, err)
 	assert.Contains(t, string(data), `theme = "dracula"`)
+	assert.Contains(t, string(data), `status_line = ["model", "phase"]`)
 	_, err = os.Stat(layout.ConfigFile())
 	assert.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestInteractiveIgnoresLegacyTUIJSONForStatusLine(t *testing.T) {
+	t.Parallel()
+
+	userRoot := t.TempDir()
+	layout, err := paths.New(userRoot)
+	require.NoError(t, err)
+	workspaceRoot := t.TempDir()
+	require.NoError(t, os.WriteFile(layout.ConfigFile(), []byte(`
+[providers.openai.models."test-model"]
+default = true
+`), 0o600))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(userRoot, "tui.json"),
+		[]byte(`{"schema":"pips.tui/v1alpha1","status_line":{"items":["model"]}}`),
+		0o600,
+	))
+
+	var loaded []statusline.Item
+	controller := &stubInteractiveController{}
+	command, err := New(Dependencies{
+		Paths:      layout,
+		WorkingDir: func() (string, error) { return workspaceRoot, nil },
+		LookupEnv: func(name string) (string, bool) {
+			if name == "API_KEY" {
+				return "test-key", true
+			}
+
+			return "", false
+		},
+		Terminal: func(_ io.Reader, _ io.Writer) (bool, bool) { return true, true },
+		OpenControl: func(_ context.Context, options coding.OpenOptions) (tui.Controller, error) {
+			loaded = append([]statusline.Item(nil), options.Config.TUI.StatusLine...)
+
+			return controller, nil
+		},
+		RunTUI: func(ctx context.Context, options tui.Options) error {
+			_, err := options.Bootstrap(ctx, false)
+
+			return err
+		},
+	})
+	require.NoError(t, err)
+	command.SetIn(bytes.NewBuffer(nil))
+	command.SetOut(new(bytes.Buffer))
+
+	require.NoError(t, command.ExecuteContext(t.Context()))
+	assert.Equal(t, statusline.Default(), loaded)
+	legacy, err := os.ReadFile(filepath.Join(userRoot, "tui.json")) //nolint:gosec // The test controls the temporary legacy path.
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"schema":"pips.tui/v1alpha1","status_line":{"items":["model"]}}`, string(legacy))
 }
 
 func TestResumeCommandOpensTargetAndPrintsNormalExitHint(t *testing.T) {

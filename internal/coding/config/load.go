@@ -15,6 +15,7 @@ import (
 	"github.com/pelletier/go-toml/v2"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/ai/openai"
+	"github.com/rsbin/pips/internal/coding/statusline"
 )
 
 const maxConfigFileSize = 1 << 20
@@ -77,6 +78,7 @@ type fileLayer struct {
 	models                []ModelConfig
 	compaction            *CompactionConfig
 	sandboxWorkspaceWrite *SandboxWorkspaceWriteConfig
+	statusLine            *[]statusline.Item
 }
 
 // Load resolves one configuration snapshot in increasing precedence order.
@@ -110,6 +112,12 @@ func Load(options LoadOptions) (Result, error) {
 				Kind: SourceConfigFile, Detail: options.ConfigFile,
 			}
 		}
+		if layer.statusLine != nil {
+			result.Config.TUI.StatusLine = slices.Clone(*layer.statusLine)
+			result.Config.sources[FieldStatusLine] = Source{
+				Kind: SourceConfigFile, Detail: options.ConfigFile,
+			}
+		}
 	}
 
 	if err := applyEnvironment(&result.Config, options.LookupEnv); err != nil {
@@ -139,7 +147,8 @@ type fileConfig struct {
 }
 
 type fileTUI struct {
-	Theme *string `toml:"theme"`
+	Theme      *string   `toml:"theme"`
+	StatusLine *[]string `toml:"status_line"`
 }
 
 type fileSandboxWorkspaceWrite struct {
@@ -311,6 +320,10 @@ func decodeFile(path string, data []byte) (fileLayer, error) {
 
 	probe := Defaults()
 	probe = apply(probe, layer.patch, Source{Kind: SourceConfigFile, Detail: path})
+	if layer.statusLine != nil {
+		probe.TUI.StatusLine = slices.Clone(*layer.statusLine)
+		probe.sources[FieldStatusLine] = Source{Kind: SourceConfigFile, Detail: path}
+	}
 	probe.Providers = layer.providers
 	probe.Models = layer.models
 	if err := validateRegistry(probe); err != nil {
@@ -510,12 +523,24 @@ func decodeLayer(value fileConfig) (fileLayer, error) {
 		}
 		layer.patch.Mode = &mode
 	}
-	if value.TUI != nil && value.TUI.Theme != nil {
-		theme, err := ParseThemeSelection(*value.TUI.Theme)
-		if err != nil {
-			return fileLayer{}, err
+	if value.TUI != nil {
+		if value.TUI.Theme != nil {
+			theme, err := ParseThemeSelection(*value.TUI.Theme)
+			if err != nil {
+				return fileLayer{}, err
+			}
+			layer.patch.Theme = &theme
 		}
-		layer.patch.Theme = &theme
+		if value.TUI.StatusLine != nil {
+			items := make([]statusline.Item, len(*value.TUI.StatusLine))
+			for index, item := range *value.TUI.StatusLine {
+				items[index] = statusline.Item(item)
+			}
+			if err := statusline.Validate(items); err != nil {
+				return fileLayer{}, fmt.Errorf("%w: %w", ErrInvalid, err)
+			}
+			layer.statusLine = &items
+		}
 	}
 	if value.Sandbox != nil {
 		mode, err := ParseSandboxMode(*value.Sandbox)

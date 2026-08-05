@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rsbin/pips/internal/coding/statusline"
 	"github.com/stretchr/testify/require"
 )
 
@@ -97,6 +98,7 @@ func TestSaveThemeReportsCommittedDurabilityFailure(t *testing.T) {
 	err := SaveThemeWithOptions(path, "nord", ThemeSaveOptions{})
 	require.ErrorIs(t, err, ErrThemeDurability)
 	if err != nil {
+		require.Equal(t, "coding config: theme commit durability uncertain", ErrThemeDurability.Error())
 		// The rename has already happened; this is a durability warning rather
 		// than a report that the selection was not applied.
 		if !strings.Contains(err.Error(), "replacement committed") {
@@ -108,4 +110,20 @@ func TestSaveThemeReportsCommittedDurabilityFailure(t *testing.T) {
 	if string(data) != "[tui]\ntheme = \"nord\"\n" {
 		t.Fatalf("unexpected committed data: %q", data)
 	}
+}
+
+//nolint:paralleltest // This test temporarily replaces a package-level sync hook.
+func TestSaveStatusLineReportsCommittedDurabilityFailure(t *testing.T) {
+	originalSync := syncThemeDirectory
+	syncThemeDirectory = func(string) error { return errors.New("injected directory sync failure") }
+	defer func() { syncThemeDirectory = originalSync }()
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	require.NoError(t, os.WriteFile(path, []byte("[tui]\ntheme = \"auto\"\nstatus_line = [\"workspace\"]\n"), 0o600))
+
+	err := SaveStatusLineWithOptions(path, []statusline.Item{}, TUIConfigSaveOptions{})
+	require.ErrorIs(t, err, ErrStatusLineDurability)
+	data, readErr := os.ReadFile(path)
+	require.NoError(t, readErr)
+	require.Equal(t, "[tui]\ntheme = \"auto\"\nstatus_line = []\n", string(data))
 }
