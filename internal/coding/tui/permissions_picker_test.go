@@ -167,7 +167,10 @@ func TestPermissionsPickerKeepsDraftOnFailure(t *testing.T) {
 
 	assert.Equal(t, pickerPermissions, model.picker.kind)
 	assert.Equal(t, config.ApprovalNever, model.picker.permissions.approval)
-	require.ErrorContains(t, model.picker.err, "permission replacement failed")
+	require.Error(t, model.picker.err)
+	content := ansi.Strip(model.permissionsPickerView(20))
+	assert.Contains(t, content, "Permission changes could not be applied.")
+	assert.NotContains(t, content, "permission replacement failed")
 }
 
 func TestPermissionsPickerConfirmsFullAccessBeforeControllerCall(t *testing.T) {
