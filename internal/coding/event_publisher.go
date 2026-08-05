@@ -56,12 +56,12 @@ func (p *eventPublisher) emitLocked(
 	eventType EventType,
 	payload EventPayload,
 ) error {
-	event, err := p.runtime.writer.write(interactionID, runID, eventType, payload)
+	event, err := p.runtime.writer.prepare(interactionID, runID, eventType, payload)
 	if err != nil {
 		return err
 	}
 
-	return p.publishLocked(ctx, emitter, event)
+	return p.publishLocked(ctx, emitter, p.runtime.writer, event)
 }
 
 func (p *eventPublisher) publishAgent(
@@ -78,18 +78,25 @@ func (p *eventPublisher) publishAgent(
 		return Event{}, err
 	}
 
-	return projected, p.publishLocked(ctx, emitter, projected)
+	return projected, p.publishLocked(ctx, emitter, projector.writer, projected)
 }
 
 func (p *eventPublisher) publishLocked(
 	ctx context.Context,
 	emitter *eventEmitter,
+	writer *eventWriter,
 	event Event,
 ) error {
+	if writer == nil {
+		return invalidEvent("event writer is required")
+	}
 	p.runtime.mu.Lock()
 	next, err := Reduce(p.runtime.state, event)
 	if err == nil {
-		p.runtime.state = next
+		err = writer.commit(event)
+		if err == nil {
+			p.runtime.state = next
+		}
 	}
 	p.runtime.mu.Unlock()
 	if err != nil {
@@ -165,7 +172,7 @@ func (p *eventPublisher) publishChildGeneratedLocked(
 	if eventType == EventSessionOpened {
 		interactionID = ""
 	}
-	event, err := child.writer.writeAt(
+	event, err := child.writer.prepareAt(
 		eventTime,
 		interactionID,
 		runID,
@@ -186,6 +193,9 @@ func (p *eventPublisher) publishChildLocked(
 ) error {
 	next, err := Reduce(child.state, event)
 	if err != nil {
+		return err
+	}
+	if err := child.writer.commit(event); err != nil {
 		return err
 	}
 	child.state = next

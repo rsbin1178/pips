@@ -243,7 +243,7 @@ func (m *Model) modePickerView(maxHeight int) string {
 	}
 	lines = append(lines, "↑/↓ choose · Enter apply · Esc cancel")
 	if m.picker.loading {
-		lines = append(lines, "Working…")
+		lines = append(lines, m.activityNotice("Working…"))
 	}
 	if m.picker.err != nil {
 		lines = append(lines, "Error: "+safeError(m.picker.err))
@@ -340,7 +340,7 @@ func (m *Model) pickerView(maxHeight int) string {
 		lines = append(lines, "Variant: "+variant+" · Reasoning: "+reasoning)
 	}
 	if m.picker.loading {
-		lines = append(lines, "Working…")
+		lines = append(lines, m.activityNotice("Working…"))
 	}
 	if m.picker.err != nil {
 		lines = append(lines, "Error: "+safeError(m.picker.err))

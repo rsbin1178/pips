@@ -1,8 +1,6 @@
 package coding
 
 import (
-	"slices"
-	"sync"
 	"testing"
 	"time"
 
@@ -12,63 +10,27 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestEventWriterAssignsSequenceAfterValidation(t *testing.T) {
+func TestEventWriterCommitsSequenceOnlyAfterAcceptedPreparation(t *testing.T) {
 	t.Parallel()
 
 	writer, err := newEventWriter("session-1", func() time.Time { return eventTestTime })
 	require.NoError(t, err)
 
-	first, err := writer.write("", "", EventSessionOpened, SessionOpened{Mode: ModeAgent})
+	first, err := writer.prepare("", "", EventSessionOpened, SessionOpened{Mode: ModeAgent})
 	require.NoError(t, err)
 	assert.Equal(t, uint64(1), first.Sequence)
 
-	_, err = writer.write("", "", EventToolStarted, ToolStarted{})
+	_, err = writer.prepare("", "", EventToolStarted, ToolStarted{})
 	require.ErrorIs(t, err, ErrInvalidEvent)
 
-	second, err := writer.write("", "", EventStatusChanged, StatusChanged{Phase: PhaseIdle})
+	uncommitted, err := writer.prepare("", "", EventStatusChanged, StatusChanged{Phase: PhaseIdle})
+	require.NoError(t, err)
+	assert.Equal(t, uint64(1), uncommitted.Sequence)
+	require.NoError(t, writer.commit(first))
+
+	second, err := writer.prepare("", "", EventStatusChanged, StatusChanged{Phase: PhaseIdle})
 	require.NoError(t, err)
 	assert.Equal(t, uint64(2), second.Sequence)
-}
-
-func TestEventWriterSerializesConcurrentWriters(t *testing.T) {
-	t.Parallel()
-
-	writer, err := newEventWriter("session-1", func() time.Time { return eventTestTime })
-	require.NoError(t, err)
-
-	const count = 64
-
-	sequences := make([]uint64, count)
-
-	var wait sync.WaitGroup
-	wait.Add(count)
-
-	for index := range count {
-		go func() {
-			defer wait.Done()
-
-			event, writeErr := writer.write(
-				"",
-				"",
-				EventIntegrationDiagnostic,
-				IntegrationDiagnostic{Component: "runtime", Code: "test"},
-			)
-			if writeErr != nil {
-				t.Errorf("write event: %v", writeErr)
-				return
-			}
-
-			sequences[index] = event.Sequence
-		}()
-	}
-
-	wait.Wait()
-
-	slices.Sort(sequences)
-
-	for index, sequence := range sequences {
-		assert.Equal(t, uint64(index+1), sequence)
-	}
 }
 
 func TestAgentProjectorMapsLifecycle(t *testing.T) {
@@ -122,6 +84,7 @@ func TestAgentProjectorMapsLifecycle(t *testing.T) {
 		assert.Equal(t, uint64(index+1), projected.Sequence)
 		assert.Equal(t, "interaction-1", projected.InteractionID)
 		assert.Equal(t, "run-1", projected.RunID)
+		require.NoError(t, writer.commit(projected))
 	}
 }
 

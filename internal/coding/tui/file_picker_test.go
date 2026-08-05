@@ -31,7 +31,7 @@ func TestAtPickerSelectsProtectedWorkspaceFile(t *testing.T) {
 
 	_, load := model.Update(tea.KeyPressMsg{Text: "@"})
 	require.NotNil(t, load)
-	model.Update(load())
+	model.Update(commandMessage(t, load))
 	assert.Equal(t, pickerFile, model.picker.kind)
 	assert.Equal(t, "review @", model.composer.Value())
 
@@ -66,7 +66,7 @@ func TestAtPickerCancelRestoresExactRichDraft(t *testing.T) {
 
 	_, load := model.Update(tea.KeyPressMsg{Text: "@"})
 	require.NotNil(t, load)
-	model.Update(load())
+	model.Update(commandMessage(t, load))
 	model.Update(tea.KeyPressMsg{Text: "file"})
 	model.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 

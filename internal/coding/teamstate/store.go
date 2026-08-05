@@ -538,6 +538,7 @@ func validateSuccessor(previous, next Snapshot) error {
 		}
 		if prior.TaskID != attempt.TaskID || prior.MemberID != attempt.MemberID ||
 			prior.ContinuationID != attempt.ContinuationID ||
+			prior.Base != (AttemptBaseResource{}) && prior.Base != attempt.Base ||
 			prior.Session != (WorkerSessionResource{}) && prior.Session != attempt.Session ||
 			!worktreeSuccessor(prior.Worktree, attempt.Worktree) {
 			return fmt.Errorf("%w: Attempt binding changed", ErrInvalid)

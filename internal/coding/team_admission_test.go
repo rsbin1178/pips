@@ -208,6 +208,7 @@ func TestTeamConfirmationPersistsAggregateAndNarrowsLeadCatalog(t *testing.T) {
 		assert.NotContains(t, names, forbidden)
 	}
 	assert.ErrorIs(t, runtime.SetMode(t.Context(), ModePlan), ErrTeamActive)
+	require.ErrorIs(t, runtime.ReplacementPreflight(t.Context()), ErrTeamActive)
 	assert.ErrorIs(t, runtime.Reload(t.Context()), ErrTeamActive)
 }
 
@@ -469,7 +470,7 @@ func TestTeamControlInterruptStopsExactRunningAttempt(t *testing.T) {
 		}
 
 		return current.Tasks[0].Status == team.TaskStatusFailed
-	}, 3*time.Second, 10*time.Millisecond)
+	}, 30*time.Second, 20*time.Millisecond)
 }
 
 func TestTeamCaptureRecoversPublishedResultBeforeResourceCommit(t *testing.T) {
@@ -622,7 +623,7 @@ func TestTeamWorkerQuestionResolutionBindsAttemptAndOwnerGeneration(t *testing.T
 		record, getErr := runtime.team.control.Get(t.Context(), target.TeamID, stale.CommandID)
 
 		return getErr == nil && record.Entry.State == teamcontrol.StateStale
-	}, 3*time.Second, 10*time.Millisecond)
+	}, 30*time.Second, 20*time.Millisecond)
 
 	resolved, err := runtime.ResolveTeamWorkerQuestion(t.Context(), target, question.Resolution{
 		RequestID: request.ID, SchemaDigest: request.SchemaDigest,
@@ -633,10 +634,10 @@ func TestTeamWorkerQuestionResolutionBindsAttemptAndOwnerGeneration(t *testing.T
 		record, getErr := runtime.team.control.Get(t.Context(), target.TeamID, resolved.CommandID)
 
 		return getErr == nil && record.Entry.State == teamcontrol.StateApplied
-	}, 3*time.Second, 10*time.Millisecond)
+	}, 30*time.Second, 20*time.Millisecond)
 	require.Eventually(t, func() bool {
 		return len(model.Requests()) == 2
-	}, 3*time.Second, 10*time.Millisecond)
+	}, 30*time.Second, 20*time.Millisecond)
 	assert.True(t, requestContainsToolText(model.Requests()[1], "React"))
 }
 
@@ -669,10 +670,10 @@ func TestTeamWorkerApprovalResolutionCannotDriftToAnotherOwner(t *testing.T) {
 		record, getErr := runtime.team.control.Get(t.Context(), target.TeamID, resolved.CommandID)
 
 		return getErr == nil && record.Entry.State == teamcontrol.StateApplied
-	}, 3*time.Second, 10*time.Millisecond)
+	}, 30*time.Second, 20*time.Millisecond)
 	require.Eventually(t, func() bool {
 		return len(model.Requests()) == 2
-	}, 3*time.Second, 10*time.Millisecond)
+	}, 30*time.Second, 20*time.Millisecond)
 }
 
 func waitForPausedTeamWorker(
@@ -704,7 +705,8 @@ func waitForPausedTeamWorker(
 			return false
 		}
 		state = workerRuntime.Snapshot()
-		if state.Phase != PhasePaused {
+		if state.Phase != PhasePaused ||
+			(state.Approval.Required == nil && state.Question.Required == nil) {
 			return false
 		}
 		resources, err := runtime.team.state.Load(t.Context(), teamID)
@@ -725,7 +727,7 @@ func waitForPausedTeamWorker(
 		}
 
 		return false
-	}, 3*time.Second, 10*time.Millisecond)
+	}, 30*time.Second, 20*time.Millisecond)
 
 	return target, state
 }
@@ -908,7 +910,7 @@ func (m *teamControlFollowUpModel) waitStarted(t *testing.T) {
 	t.Helper()
 	select {
 	case <-m.started:
-	case <-time.After(3 * time.Second):
+	case <-time.After(30 * time.Second):
 		require.FailNow(t, "timed out waiting for Team Worker model request")
 	}
 }

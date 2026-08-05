@@ -72,25 +72,26 @@ const (
 )
 
 type teamRouteState struct {
-	stage             teamRouteStage
-	objective         string
-	proposal          *coding.TeamProposal
-	view              *coding.TeamView
-	teamID            team.ID
-	operation         uint64
-	pending           teamRouteOperation
-	cancel            context.CancelFunc
-	cancelRequested   bool
-	refreshPending    bool
-	closeAfter        bool
-	declineToClose    bool
-	control           coding.TeamControlRequest
-	recovery          []coding.TeamRecoveryCandidate
-	retryWork         bool
-	integrationTasks  map[team.TaskID]bool
-	integration       *coding.TeamIntegrationPreview
-	recoveries        []coding.TeamIntegrationRecovery
-	integrationAction teamRouteIntegrationAction
+	stage              teamRouteStage
+	objective          string
+	proposal           *coding.TeamProposal
+	view               *coding.TeamView
+	teamID             team.ID
+	operation          uint64
+	pending            teamRouteOperation
+	cancel             context.CancelFunc
+	cancelRequested    bool
+	activityWasVisible bool
+	refreshPending     bool
+	closeAfter         bool
+	declineToClose     bool
+	control            coding.TeamControlRequest
+	recovery           []coding.TeamRecoveryCandidate
+	retryWork          bool
+	integrationTasks   map[team.TaskID]bool
+	integration        *coding.TeamIntegrationPreview
+	recoveries         []coding.TeamIntegrationRecovery
+	integrationAction  teamRouteIntegrationAction
 }
 
 type teamRouteResultMsg struct {
@@ -178,6 +179,7 @@ func (m *Model) beginTeamRouteOperation(
 	}
 
 	state := m.route.team
+	state.activityWasVisible = m.activityClockVisible()
 	state.operation++
 	state.pending = kind
 	state.cancelRequested = false
@@ -193,8 +195,18 @@ func (m *Model) withTeamRouteActivity(command tea.Cmd) tea.Cmd {
 	if command == nil {
 		return nil
 	}
+	if m.route.team == nil {
+		return command
+	}
 
-	return tea.Batch(command, m.activity.Tick())
+	state := m.route.team
+	activity := m.startActivityClock(state.activityWasVisible)
+	state.activityWasVisible = true
+	if activity == nil {
+		return command
+	}
+
+	return tea.Batch(command, activity)
 }
 
 func (m *Model) generateTeamRouteProposal() tea.Cmd {

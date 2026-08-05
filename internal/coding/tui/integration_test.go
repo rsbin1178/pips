@@ -162,6 +162,70 @@ func driveModelCommands(t *testing.T, model *Model, initial tea.Cmd) {
 	driveModelCommandsCapture(t, model, initial)
 }
 
+func commandMessage(t *testing.T, initial tea.Cmd) tea.Msg {
+	t.Helper()
+
+	commands := []tea.Cmd{initial}
+	for steps := 0; len(commands) > 0 && steps < 100; steps++ {
+		command := commands[0]
+		commands = commands[1:]
+		if command == nil {
+			continue
+		}
+
+		message := command()
+		if batch, ok := message.(tea.BatchMsg); ok {
+			commands = append(commands, batch...)
+
+			continue
+		}
+		if _, ok := message.(activityTickMsg); ok {
+			continue
+		}
+
+		return message
+	}
+
+	require.FailNow(t, "command did not produce a non-activity message")
+
+	return nil
+}
+
+func commandContainsActivityTick(t *testing.T, initial tea.Cmd) bool {
+	t.Helper()
+
+	commands := []tea.Cmd{initial}
+	for steps := 0; len(commands) > 0 && steps < 100; steps++ {
+		command := commands[0]
+		commands = commands[1:]
+		if command == nil {
+			continue
+		}
+
+		message := command()
+		if _, ok := message.(activityTickMsg); ok {
+			return true
+		}
+		if batch, ok := message.(tea.BatchMsg); ok {
+			commands = append(commands, batch...)
+
+			continue
+		}
+		value := reflect.ValueOf(message)
+		if value.IsValid() && value.Type().PkgPath() == "charm.land/bubbletea/v2" &&
+			value.Type().Name() == "sequenceMsg" {
+			for index := range value.Len() {
+				sequence, ok := value.Index(index).Interface().(tea.Cmd)
+				if ok {
+					commands = append(commands, sequence)
+				}
+			}
+		}
+	}
+
+	return false
+}
+
 func driveModelCommandsCapture(t *testing.T, model *Model, initial tea.Cmd) string {
 	t.Helper()
 

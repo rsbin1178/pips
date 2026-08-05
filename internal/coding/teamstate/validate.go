@@ -16,6 +16,8 @@ import (
 
 var safeIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
+const maximumAttemptDependencies = 10_000
+
 func validateMutation(value Mutation, limits Limits) (Mutation, error) {
 	if !safeIDPattern.MatchString(string(value.CommandID)) {
 		return Mutation{}, fmt.Errorf("%w: invalid command ID", ErrInvalid)
@@ -135,8 +137,35 @@ func validateAttempt(value AttemptResource, members map[team.MemberID]struct{}) 
 			return fmt.Errorf("%w: invalid Worker Session binding", ErrInvalid)
 		}
 	}
+	if err := validateAttemptBase(value.Base); err != nil {
+		return err
+	}
 	if err := validateWorktree(value.Worktree); err != nil {
 		return err
+	}
+
+	return nil
+}
+
+//nolint:gocyclo // Closed optional/generated binding invariants are kept in one validator.
+func validateAttemptBase(value AttemptBaseResource) error {
+	if value == (AttemptBaseResource{}) {
+		return nil
+	}
+	if !validOID(value.OID) || value.TreeOID != "" && !validOID(value.TreeOID) ||
+		!validRef(value.OwnedRef, true) || value.DependencyCount < 0 ||
+		value.DependencyCount > maximumAttemptDependencies {
+		return fmt.Errorf("%w: invalid Attempt base binding", ErrInvalid)
+	}
+	if value.DependencyDigest != "" && !validDigest(value.DependencyDigest) ||
+		value.CompositionDigest != "" && !validDigest(value.CompositionDigest) {
+		return fmt.Errorf("%w: invalid Attempt base digest", ErrInvalid)
+	}
+	generated := value.OwnedRef != "" || value.CompositionDigest != ""
+	if value.DependencyCount > 0 && value.DependencyDigest == "" ||
+		generated && (value.DependencyCount < 2 || value.OwnedRef == "" ||
+			value.CompositionDigest == "" || value.TreeOID == "") {
+		return fmt.Errorf("%w: incomplete Attempt base binding", ErrInvalid)
 	}
 
 	return nil

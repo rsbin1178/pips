@@ -360,12 +360,35 @@ func TestStoreRejectsOversizeAndImmutableAttemptLineageChanges(t *testing.T) {
 		})
 		require.ErrorIs(t, err, teamstate.ErrInvalid)
 
-		removed := first
-		removed.Revision = 2
+		withBase := first
+		withBase.Revision = 2
+		withBase.UpdatedAt = withBase.UpdatedAt.Add(time.Minute)
+		withBase.Attempts = append([]teamstate.AttemptResource(nil), first.Attempts...)
+		withBase.Attempts[0].Base = teamstate.AttemptBaseResource{
+			OID: strings.Repeat("c", 40), DependencyCount: 1,
+			DependencyDigest: strings.Repeat("d", 64),
+		}
+		_, err = store.Commit(t.Context(), teamstate.Mutation{
+			CommandID: "bind-base", ExpectedRevision: 1, Snapshot: withBase,
+		})
+		require.NoError(t, err)
+
+		changedBase := withBase
+		changedBase.Revision = 3
+		changedBase.UpdatedAt = changedBase.UpdatedAt.Add(time.Minute)
+		changedBase.Attempts = append([]teamstate.AttemptResource(nil), withBase.Attempts...)
+		changedBase.Attempts[0].Base.OID = strings.Repeat("e", 40)
+		_, err = store.Commit(t.Context(), teamstate.Mutation{
+			CommandID: "change-base", ExpectedRevision: 2, Snapshot: changedBase,
+		})
+		require.ErrorIs(t, err, teamstate.ErrInvalid)
+
+		removed := withBase
+		removed.Revision = 3
 		removed.UpdatedAt = removed.UpdatedAt.Add(time.Minute)
 		removed.Attempts = nil
 		_, err = store.Commit(t.Context(), teamstate.Mutation{
-			CommandID: "remove-attempt", ExpectedRevision: 1, Snapshot: removed,
+			CommandID: "remove-attempt", ExpectedRevision: 2, Snapshot: removed,
 		})
 		require.ErrorIs(t, err, teamstate.ErrInvalid)
 	})

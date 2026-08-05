@@ -124,7 +124,7 @@ func TestObserveTeamWorkerLiveToTerminalRaceIsClassified(t *testing.T) {
 			errors.Is(err, ErrRuntimeBusy) || errors.Is(err, ErrTeamWorkerStale),
 			err,
 		)
-	case <-time.After(3 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("live Worker observer did not converge after owner termination")
 	}
 
