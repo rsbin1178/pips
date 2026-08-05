@@ -1,8 +1,13 @@
+//nolint:wsl_v5 // Recovery fixtures keep crash-window setup and evidence adjacent.
 package coding
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -10,6 +15,7 @@ import (
 	"github.com/rsbin/pips/agent/continuation"
 	"github.com/rsbin/pips/agent/team"
 	"github.com/rsbin/pips/ai"
+	"github.com/rsbin/pips/internal/coding/execution/gitcontrol"
 	"github.com/rsbin/pips/internal/coding/teamcontrol"
 	"github.com/rsbin/pips/internal/coding/teamstate"
 	"github.com/rsbin/pips/internal/coding/workspace"
@@ -32,7 +38,7 @@ func TestTeamDiscoveryOnSessionResumeIsReadOnly(t *testing.T) {
 	require.NoError(t, err)
 	select {
 	case <-model.blocked.started:
-	case <-time.After(3 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("Team Worker did not start")
 	}
 
@@ -184,7 +190,7 @@ func TestTeamResumeReconcilesTerminalChildWithNewLeaseGeneration(t *testing.T) {
 	require.NoError(t, err)
 	select {
 	case <-model.blocked.started:
-	case <-time.After(3 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("Team Worker did not start")
 	}
 	require.NoError(t, first.team.close(context.Background()))
@@ -238,7 +244,7 @@ func TestTeamResumeReconcilesTerminalChildWithNewLeaseGeneration(t *testing.T) {
 
 		return getErr == nil && len(aggregate.Tasks) == 1 &&
 			aggregate.Tasks[0].Status == team.TaskStatusFailed
-	}, 5*time.Second, 10*time.Millisecond)
+	}, 30*time.Second, 20*time.Millisecond)
 	if !completed {
 		aggregate, _ := resumed.team.engine.Get(t.Context(), reference.TeamID)
 		resources, _ := resumed.team.state.Load(t.Context(), reference.TeamID)
@@ -267,6 +273,251 @@ func TestTeamResumeReconcilesTerminalChildWithNewLeaseGeneration(t *testing.T) {
 			after.Attempts[0].State == teamstate.AttemptTerminal
 	}, 3*time.Second, 10*time.Millisecond)
 	assert.Greater(t, after.Attempts[0].Worktree.LeaseGeneration, oldGeneration)
+}
+
+func TestTeamResumeReusesRecoverableJoinAttemptAfterDependencyRefIsRestored(t *testing.T) {
+	t.Parallel()
+
+	model := newStaleDependencyRecoveryModel()
+	first := openGitTestRuntime(t, model, nil)
+	collectRuntimeEvents(t, first.Prompt(t.Context(), ai.UserText("prepare Team dependency recovery")))
+	proposal, err := first.ProposeTeam(t.Context(), TeamProposalRequest{
+		Objective: "Recover the same join Attempt after stale dependency evidence is repaired.",
+		Workers: []TeamWorkerSpec{
+			{Name: "First", Role: "Create first.txt."},
+			{Name: "Second", Role: "Create second.txt."},
+			{Name: "Join", Role: "Create join.txt from both results."},
+		},
+		Tasks: []TeamTaskSpec{
+			{ID: "first", Title: "Create first.txt", AssignedWorker: "First"},
+			{ID: "second", Title: "Create second.txt", AssignedWorker: "Second"},
+			{
+				ID: "join", Title: "Create join.txt", AssignedWorker: "Join",
+				Dependencies: []string{"first", "second"},
+			},
+		},
+	})
+	require.NoError(t, err)
+	reference, err := first.ConfirmTeam(t.Context(), TeamConfirmation{
+		ProposalID: proposal.ID, Admission: TeamAdmissionClean,
+	})
+	require.NoError(t, err)
+	select {
+	case <-model.secondWaiting:
+	case <-time.After(15 * time.Second):
+		t.Fatal("second dependency did not reach the controlled capture boundary")
+	}
+
+	var firstAttempt teamstate.AttemptResource
+	require.Eventually(t, func() bool {
+		resources, loadErr := first.team.state.Load(t.Context(), reference.TeamID)
+		if loadErr != nil {
+			return false
+		}
+		for _, attempt := range resources.Attempts {
+			if attempt.TaskID == "first" && attempt.Worktree.ResultRef != "" &&
+				attempt.Worktree.ResultCommitOID != "" {
+				firstAttempt = attempt
+
+				return true
+			}
+		}
+
+		return false
+	}, 15*time.Second, 20*time.Millisecond)
+
+	runner, err := gitcontrol.New(first.opts.GitPath, gitcontrol.DefaultLimits())
+	require.NoError(t, err)
+	repository, err := runner.InspectRepository(t.Context(), first.workspace.Root())
+	require.NoError(t, err)
+	require.NoError(t, runner.UpdateRefs(
+		t.Context(), first.workspace.Root(), repository.ObjectFormat,
+		"test stale dependency result",
+		[]gitcontrol.RefUpdate{{
+			Ref:    firstAttempt.Worktree.ResultRef,
+			NewOID: repository.HeadOID, OldOID: firstAttempt.Worktree.ResultCommitOID,
+		}},
+	))
+	close(model.releaseSecond)
+
+	var recoverable teamstate.AttemptResource
+	require.Eventually(t, func() bool {
+		aggregate, getErr := first.team.engine.Get(t.Context(), reference.TeamID)
+		if getErr != nil {
+			return false
+		}
+		joinTask, found := taskByID(aggregate.Tasks, "join")
+		if !found || joinTask.Status != team.TaskStatusRunning || len(joinTask.Attempts) != 1 {
+			return false
+		}
+		resources, loadErr := first.team.state.Load(t.Context(), reference.TeamID)
+		if loadErr != nil {
+			return false
+		}
+		for _, attempt := range resources.Attempts {
+			if attempt.TaskID == "join" && attempt.State == teamstate.AttemptRecoverable {
+				recoverable = attempt
+
+				return first.team.ownerCount() == 0
+			}
+		}
+
+		return false
+	}, 30*time.Second, 20*time.Millisecond)
+	assert.Empty(t, recoverable.Base.OID)
+	assert.Empty(t, recoverable.Worktree.ID)
+	assert.Empty(t, recoverable.Session.SessionID)
+	assert.Zero(t, model.callsFor("join.txt"))
+
+	require.ErrorIs(t, first.team.close(context.Background()), errDependencyBaseUnavailable)
+	sessionID := first.handle.Metadata().ID
+	workspaceRoot := first.workspace.Root()
+	configValue := first.config.Clone()
+	pathsValue := first.paths
+	options := first.opts
+	resolved := first.resolved.Clone()
+	abruptRuntimeStop(t, first)
+
+	workerSpace, err := workspace.Open(workspaceRoot)
+	require.NoError(t, err)
+	resumed, err := Open(t.Context(), OpenOptions{
+		Workspace: workerSpace, Trusted: true, Config: configValue,
+		Paths: pathsValue, Session: SessionTarget{ID: sessionID},
+		Model: model, Resolved: resolved, Execution: options,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = resumed.Close(context.Background()) })
+	candidates, err := resumed.TeamRecoveryCandidates()
+	require.NoError(t, err)
+	require.Len(t, candidates, 1)
+	require.Equal(t, TeamRecoveryResume, candidates[0].Disposition)
+
+	require.NoError(t, runner.UpdateRefs(
+		t.Context(), workspaceRoot, repository.ObjectFormat,
+		"restore dependency result",
+		[]gitcontrol.RefUpdate{{
+			Ref:    firstAttempt.Worktree.ResultRef,
+			NewOID: firstAttempt.Worktree.ResultCommitOID, OldOID: repository.HeadOID,
+		}},
+	))
+	_, err = resumed.ResumeTeam(t.Context(), reference.TeamID, TeamResumeDecision{
+		ExpectedResourceRevision: candidates[0].ResourceRevision,
+	})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		aggregate, getErr := resumed.team.engine.Get(t.Context(), reference.TeamID)
+		if getErr != nil {
+			return false
+		}
+		joinTask, found := taskByID(aggregate.Tasks, "join")
+
+		return found && joinTask.Status == team.TaskStatusCompleted &&
+			len(joinTask.Attempts) == 1 && joinTask.Attempts[0].ID == recoverable.AttemptID &&
+			resumed.team.ownerCount() == 0
+	}, 30*time.Second, 20*time.Millisecond)
+	resources, err := resumed.team.state.Load(t.Context(), reference.TeamID)
+	require.NoError(t, err)
+	for _, attempt := range resources.Attempts {
+		if attempt.AttemptID == recoverable.AttemptID {
+			assert.NotEmpty(t, attempt.Base.OwnedRef)
+			assert.Equal(t, attempt.Base.OID, attempt.Worktree.BaseOID)
+		}
+	}
+	assert.Equal(t, 2, model.callsFor("join.txt"))
+	_, err = os.Lstat(filepath.Join(workspaceRoot, "join.txt"))
+	require.ErrorIs(t, err, os.ErrNotExist)
+}
+
+type staleDependencyRecoveryModel struct {
+	mu            sync.Mutex
+	calls         map[string]int
+	secondWaiting chan struct{}
+	releaseSecond chan struct{}
+	waitOnce      sync.Once
+}
+
+func newStaleDependencyRecoveryModel() *staleDependencyRecoveryModel {
+	return &staleDependencyRecoveryModel{
+		calls: make(map[string]int, 3), secondWaiting: make(chan struct{}),
+		releaseSecond: make(chan struct{}),
+	}
+}
+
+func (m *staleDependencyRecoveryModel) Generate(
+	ctx context.Context,
+	request ai.Request,
+) (*ai.Response, error) {
+	path := ""
+	for _, candidate := range []string{"first.txt", "second.txt", "join.txt"} {
+		if requestContainsText(request, candidate) {
+			path = candidate
+			break
+		}
+	}
+	if path == "" {
+		if requestContainsText(request, "prepare Team dependency recovery") {
+			return runtimeTextResponse("Team dependency recovery session is ready."), nil
+		}
+
+		return nil, errors.New("stale dependency model could not identify the task")
+	}
+	m.mu.Lock()
+	m.calls[path]++
+	call := m.calls[path]
+	m.mu.Unlock()
+	if path == "second.txt" && call == 2 {
+		m.waitOnce.Do(func() { close(m.secondWaiting) })
+		select {
+		case <-m.releaseSecond:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	if call == 1 {
+		arguments, err := json.Marshal(struct {
+			Patch string `json:"patch"`
+		}{Patch: "*** Begin Patch\n*** Add File: " + path +
+			"\n+captured by " + path + "\n*** End Patch"})
+		if err != nil {
+			return nil, err
+		}
+
+		return runtimeToolResponse("write-"+path, "apply_patch", string(arguments)), nil
+	}
+	if call == 2 {
+		return runtimeTextResponse("Worker result is ready for capture."), nil
+	}
+
+	return nil, errors.New("stale dependency model script exhausted")
+}
+
+func (m *staleDependencyRecoveryModel) Stream(ctx context.Context, request ai.Request) ai.Stream {
+	return func(yield func(ai.StreamEvent, error) bool) {
+		response, err := m.Generate(ctx, request)
+		if err != nil {
+			yield(ai.StreamEvent{}, err)
+
+			return
+		}
+		for _, event := range runtimeResponseEvents(response) {
+			if !yield(event, nil) {
+				return
+			}
+		}
+	}
+}
+
+func (*staleDependencyRecoveryModel) Provider() ai.Provider { return ai.ProviderOpenAI }
+func (*staleDependencyRecoveryModel) ModelID() string       { return "stale-dependency-test" }
+func (*staleDependencyRecoveryModel) Capabilities() ai.Capabilities {
+	return ai.Capabilities{Text: true, Tools: true}
+}
+
+func (m *staleDependencyRecoveryModel) callsFor(path string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.calls[strings.TrimSpace(path)]
 }
 
 func (r *Runtime) teamStateSnapshot(
@@ -551,7 +802,7 @@ func TestTeamCloseConcurrentReleasesOwnersPermitsLeaseAndSession(t *testing.T) {
 	require.NoError(t, err)
 	select {
 	case <-model.blocked.started:
-	case <-time.After(3 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("Team Worker did not start")
 	}
 

@@ -71,7 +71,7 @@ func TestAgentsTeamWorkersSortLiveThenNewest(t *testing.T) {
 	live.StartedAt = now.Add(-2 * time.Minute)
 	live.DomainState = team.AttemptStatusRunning
 	live.ResourceState = teamstate.AttemptRunning
-	live.LifecycleState = coding.TeamLifecyclePaused
+	live.LifecycleState = coding.TeamLifecycleRunning
 	view.Attempts = []coding.TeamAttemptView{oldTerminal, newTerminal, live}
 
 	model := readyModel(t, true)
@@ -81,6 +81,31 @@ func TestAgentsTeamWorkersSortLiveThenNewest(t *testing.T) {
 	assert.Equal(t, team.AttemptID("attempt-3"), children[0].worker.Target.AttemptID)
 	assert.Equal(t, team.AttemptID("attempt-2"), children[1].worker.Target.AttemptID)
 	assert.Equal(t, team.AttemptID("attempt-1"), children[2].worker.Target.AttemptID)
+}
+
+func TestTeamWorkerActivityPredicateKeepsPausedStaticAndCapturingLive(t *testing.T) {
+	t.Parallel()
+
+	controller := newTeamWorkerRouteController()
+	child := onlyTeamWorkerChild(t, controller.viewSnapshot())
+
+	capturing := child
+	capturing.worker.DomainState = team.AttemptStatusRunning
+	capturing.worker.ResourceState = teamstate.AttemptCapturing
+	capturing.worker.LifecycleState = coding.TeamLifecycleCapturing
+	assert.True(t, capturing.live())
+
+	paused := child
+	paused.worker.DomainState = team.AttemptStatusRunning
+	paused.worker.ResourceState = teamstate.AttemptRunning
+	paused.worker.LifecycleState = coding.TeamLifecyclePaused
+	paused.worker.Activity = coding.TeamActivityAwaitingQuestion
+	assert.False(t, paused.live())
+
+	recoverable := child
+	recoverable.worker.ResourceState = teamstate.AttemptRecoverable
+	recoverable.worker.LifecycleState = coding.TeamLifecycleRecoverable
+	assert.False(t, recoverable.live())
 }
 
 func TestTeamWorkerRouteBootstrapsTerminalOrdinaryTimeline(t *testing.T) {
@@ -115,6 +140,56 @@ func TestTeamWorkerRouteBootstrapsTerminalOrdinaryTimeline(t *testing.T) {
 	assert.Equal(t, []coding.TeamWorkerTarget{child.worker.Target}, controller.inspected)
 	assert.Empty(t, controller.observed)
 	assert.Nil(t, model.route.workerBridge)
+}
+
+func TestTeamWorkerRouteFallbackUsesSharedActivityFrame(t *testing.T) {
+	t.Parallel()
+
+	controller := newTeamWorkerRouteController()
+	model := readyModelWithController(t, controller, true)
+	child := onlyTeamWorkerChild(t, controller.viewSnapshot())
+	state := coding.State{}
+	model.route = routeState{
+		kind: routeChild, childKind: childTeamWorker,
+		children: []childSummary{child}, childSummary: child,
+		childState: &state,
+	}
+	model.activity.Reset()
+
+	before := model.teamWorkerRouteContent(state, child)
+	assert.True(t, model.activityClockVisible())
+	assert.Contains(t, before, "✻ Working…")
+
+	_, command := model.Update(model.activity.Tick()())
+	require.NotNil(t, command)
+
+	after := model.teamWorkerRouteContent(state, child)
+	assert.NotEqual(t, before, after)
+	assert.Contains(t, after, "✢ Working…")
+
+	child.worker.DomainState = team.AttemptStatusCompleted
+	child.worker.ResourceState = teamstate.AttemptTerminal
+	child.worker.LifecycleState = coding.TeamLifecycleCompleted
+	model.route.children[0] = child
+	model.route.childSummary = child
+	assert.False(t, model.activityClockVisible())
+	static := model.teamWorkerRouteContent(state, child)
+	_, command = model.Update(activityTickMsg{})
+	assert.Nil(t, command)
+	assert.Equal(t, static, model.teamWorkerRouteContent(state, child))
+
+	paused := child
+	paused.worker.DomainState = team.AttemptStatusRunning
+	paused.worker.ResourceState = teamstate.AttemptRunning
+	paused.worker.LifecycleState = coding.TeamLifecyclePaused
+	paused.worker.Activity = coding.TeamActivityAwaitingQuestion
+	assert.Equal(t, "Needs input · question", model.teamWorkerRouteContent(state, paused))
+
+	recoverable := child
+	recoverable.worker.ResourceState = teamstate.AttemptRecoverable
+	recoverable.worker.LifecycleState = coding.TeamLifecycleRecoverable
+	recoverable.worker.Activity = ""
+	assert.Equal(t, "Recoverable", model.teamWorkerRouteContent(state, recoverable))
 }
 
 func TestTeamWorkerRouteAppliesLiveDeltasAndRecoversGapWithLastGoodState(t *testing.T) {

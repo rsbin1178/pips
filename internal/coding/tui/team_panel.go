@@ -437,6 +437,7 @@ func (m *Model) submitTeamPanelControl(view coding.TeamView) tea.Cmd {
 		return nil
 	}
 
+	activityWasVisible := m.activityClockVisible()
 	m.teamPanel.isControlling = true
 	m.teamPanel.isConfirming = false
 	m.teamPanel.controlErr = nil
@@ -455,7 +456,7 @@ func (m *Model) submitTeamPanelControl(view coding.TeamView) tea.Cmd {
 		}
 	}
 	if request.Action == coding.TeamControlRetryTask {
-		return tea.Batch(command, m.activity.Tick())
+		return tea.Batch(command, m.startActivityClock(activityWasVisible))
 	}
 
 	return command
@@ -639,28 +640,14 @@ func (m *Model) teamPanelWorkerLines(worker teamPanelWorker, selected bool) []st
 }
 
 func teamPanelWorkerActivityVisible(worker teamPanelWorker) bool {
-	if !worker.hasAttempt || teamAttemptNeedsInteraction(worker.attempt) {
-		return false
-	}
-
-	attempt := worker.attempt
-	if attempt.LifecycleState == coding.TeamLifecycleFailed ||
-		attempt.DomainState == team.AttemptStatusFailed {
-		return false
-	}
-
-	resourceLive := attempt.ResourceState == teamstate.AttemptRunning ||
-		attempt.ResourceState == teamstate.AttemptCapturing
-	if !resourceLive {
-		return false
-	}
-
-	return attempt.LifecycleState == coding.TeamLifecycleRunning ||
-		attempt.LifecycleState == coding.TeamLifecycleCapturing ||
-		attempt.DomainState == team.AttemptStatusRunning
+	return worker.hasAttempt && teamAttemptActivityVisible(worker.attempt)
 }
 
 func (m *Model) teamPanelActivityVisible() bool {
+	if !m.teamPanelSurfaceVisible() {
+		return false
+	}
+
 	view, ok := m.currentTeamPanelView()
 	if !ok {
 		return false
@@ -716,6 +703,10 @@ func teamPanelAttemptLive(attempt coding.TeamAttemptView) bool {
 }
 
 func teamPanelActivityLabel(attempt coding.TeamAttemptView) string {
+	if attempt.LifecycleState == coding.TeamLifecycleCapturing ||
+		attempt.ResourceState == teamstate.AttemptCapturing {
+		return "Capturing result"
+	}
 	if attempt.Activity == "" {
 		return "Working"
 	}

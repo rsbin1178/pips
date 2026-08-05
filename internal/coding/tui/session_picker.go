@@ -59,6 +59,7 @@ func (m *Model) activateSessionPicker(previousInput string) tea.Cmd {
 }
 
 func (m *Model) activateSessionPickerSnapshot(previous composerSnapshot) tea.Cmd {
+	activityWasVisible := m.activityClockVisible()
 	m.routeSeq++
 	m.route = newSessionPickerStateSnapshot(previous, m.theme, m.options.NoColor)
 	m.route.generation = m.routeSeq
@@ -77,7 +78,10 @@ func (m *Model) activateSessionPickerSnapshot(previous composerSnapshot) tea.Cmd
 		}
 	}
 
-	return tea.Batch(m.route.search.Focus(), load)
+	return tea.Batch(
+		m.route.search.Focus(), load,
+		m.startActivityClock(activityWasVisible),
+	)
 }
 
 func splitSessionSummaries(
@@ -256,10 +260,10 @@ func (m *Model) sessionPickerSeparator(width int) string {
 
 func (m *Model) sessionPickerList(maximum int) string {
 	if m.route.controlling {
-		return m.styleSessionPickerNotice("Resuming session…", false)
+		return m.styleSessionPickerNotice(m.activityNotice("Resuming session…"), false)
 	}
 	if m.route.loading {
-		return m.styleSessionPickerNotice("Loading sessions…", false)
+		return m.styleSessionPickerNotice(m.activityNotice("Loading sessions…"), false)
 	}
 	if m.route.err != nil {
 		return m.styleSessionPickerNotice("Error: "+safeError(m.route.err), true)

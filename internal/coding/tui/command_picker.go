@@ -325,7 +325,7 @@ func (m *Model) commandPickerView(maxHeight int) string {
 
 	footer := ""
 	if m.picker.loading {
-		footer = "Working…"
+		footer = m.activityNotice("Working…")
 	} else if m.picker.err != nil {
 		footer = "Error: " + safeError(m.picker.err)
 	}

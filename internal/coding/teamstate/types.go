@@ -136,6 +136,18 @@ type WorkerSessionResource struct {
 	WorkspaceID string `json:"workspace_id"`
 }
 
+// AttemptBaseResource binds a Worker to the exact dependency generation used
+// to create its Worktree. OwnedRef is set only for a generated multi-result
+// base; prerequisite result refs remain owned by their source Attempts.
+type AttemptBaseResource struct {
+	OID               string `json:"oid"`
+	TreeOID           string `json:"tree_oid,omitempty"`
+	OwnedRef          string `json:"owned_ref,omitempty"`
+	CompositionDigest string `json:"composition_digest,omitempty"`
+	DependencyDigest  string `json:"dependency_digest,omitempty"`
+	DependencyCount   int    `json:"dependency_count,omitempty"`
+}
+
 // WorktreeResource records application-observed Worktree identity. Empty
 // fields are valid before the Worktree is provisioned.
 type WorktreeResource struct {
@@ -159,6 +171,7 @@ type AttemptResource struct {
 	AttemptID      team.AttemptID        `json:"attempt_id"`
 	MemberID       team.MemberID         `json:"member_id"`
 	ContinuationID continuation.ID       `json:"continuation_id"`
+	Base           AttemptBaseResource   `json:"base,omitzero"`
 	Session        WorkerSessionResource `json:"session,omitzero"`
 	Worktree       WorktreeResource      `json:"worktree,omitzero"`
 	State          AttemptState          `json:"state"`

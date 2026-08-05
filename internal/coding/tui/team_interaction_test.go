@@ -336,7 +336,7 @@ func TestTeamInteractionControlResultCatchesUpEarlierAppliedEvent(t *testing.T) 
 
 	_, command := model.Update(key("enter"))
 	require.NotNil(t, command)
-	message, ok := command().(teamInteractionControlMsg)
+	message, ok := commandMessage(t, command).(teamInteractionControlMsg)
 	require.True(t, ok)
 	entry := model.teamInteractions.entries[0]
 	entry.commandID = message.reference.CommandID

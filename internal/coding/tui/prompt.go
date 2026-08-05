@@ -90,15 +90,18 @@ type planDocumentMsg struct {
 }
 
 func (m *Model) openCompactPrompt() tea.Cmd {
+	activityWasVisible := m.activityClockVisible()
 	m.promptSeq++
 	m.prompt = promptState{kind: promptCompact, loading: true, generation: m.promptSeq}
 	generation := m.prompt.generation
 
-	return func() tea.Msg {
+	load := func() tea.Msg {
 		preview, err := m.controller.PreviewCompaction(m.ctx)
 
 		return compactPreviewMsg{generation: generation, preview: preview, err: err}
 	}
+
+	return tea.Batch(load, m.startActivityClock(activityWasVisible))
 }
 
 func (m *Model) syncApprovalPrompt() {
@@ -273,17 +276,20 @@ func (m *Model) loadPlanReviewIfNeeded() tea.Cmd {
 		return nil
 	}
 
+	activityWasVisible := m.activityClockVisible()
 	m.prompt.planReview.loadStarted = true
 	generation := m.prompt.generation
 	request := m.prompt.planReview.request
 
-	return func() tea.Msg {
+	load := func() tea.Msg {
 		document, err := reviewer.ReadPlanDocument(m.ctx, request.Revision)
 
 		return planDocumentMsg{
 			generation: generation, requestID: request.ID, document: document, err: err,
 		}
 	}
+
+	return tea.Batch(load, m.startActivityClock(activityWasVisible))
 }
 
 func (m *Model) updatePlanReviewPromptKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -306,11 +312,15 @@ func (m *Model) updatePlanReviewErrorKey(message tea.KeyPressMsg) (tea.Model, te
 	case keyEscape, keyCtrlC:
 		return m.resolvePlanReview(planreview.DecisionContinue, "")
 	case "r":
+		activityWasVisible := m.activityClockVisible()
 		state.loading = true
 		state.loadStarted = false
 		state.err = nil
 
-		return m, m.loadPlanReviewIfNeeded()
+		return m, tea.Batch(
+			m.loadPlanReviewIfNeeded(),
+			m.startActivityClock(activityWasVisible),
+		)
 	default:
 		return m, nil
 	}
@@ -461,13 +471,15 @@ func (m *Model) resolvePromptChoice(choice approval.Choice) (tea.Model, tea.Cmd)
 		return m, nil
 	}
 	if m.prompt.team != nil {
+		activityWasVisible := m.activityClockVisible()
 		command := m.submitTeamApprovalChoice(m.prompt.team.key, choice)
 		if command != nil {
 			m.prompt.loading = true
 			m.prompt.err = nil
+			return m, tea.Batch(command, m.startActivityClock(activityWasVisible))
 		}
 
-		return m, command
+		return m, nil
 	}
 
 	requestID := ""
@@ -553,9 +565,10 @@ func (m *Model) updateQuestionPromptKey(message tea.KeyPressMsg) (tea.Model, tea
 
 	switch message.String() {
 	case keyEscape, keyCtrlC:
+		activityWasVisible := m.activityClockVisible()
 		state.loading = true
 
-		return m, m.rejectQuestionPromptCommand(state.request)
+		return m, m.rejectQuestionPromptCommand(state.request, activityWasVisible)
 	case keyLeft:
 		state.tab = wrapIndex(state.tab-1, questionCount+1)
 		state.err = nil
@@ -653,11 +666,12 @@ func (m *Model) updateQuestionEditorKey(message tea.KeyPressMsg) (tea.Model, tea
 
 		return m, nil
 	case keyCtrlC:
+		activityWasVisible := m.activityClockVisible()
 		state.editing = questionEditNone
 		state.editor.Blur()
 		state.loading = true
 
-		return m, m.rejectQuestionPromptCommand(state.request)
+		return m, m.rejectQuestionPromptCommand(state.request, activityWasVisible)
 	case keyCtrlJ, keyShiftEnter:
 		if state.editing == questionEditChat {
 			state.editor.InsertString("\n")
@@ -681,9 +695,10 @@ func (m *Model) updateQuestionEditorKey(message tea.KeyPressMsg) (tea.Model, tea
 
 				return m, nil
 			}
+			activityWasVisible := m.activityClockVisible()
 			state.loading = true
 
-			return m, m.resolveQuestionPromptCommand(resolution)
+			return m, m.resolveQuestionPromptCommand(resolution, activityWasVisible)
 		}
 
 		clear(state.selected[state.tab])
@@ -729,20 +744,26 @@ func (m *Model) resolveStructuredQuestion() (tea.Model, tea.Cmd) {
 
 		return m, nil
 	}
+	activityWasVisible := m.activityClockVisible()
 	state.loading = true
 	state.err = nil
 
-	return m, m.resolveQuestionPromptCommand(resolution)
+	return m, m.resolveQuestionPromptCommand(resolution, activityWasVisible)
 }
 
-func (m *Model) resolveQuestionPromptCommand(resolution question.Resolution) tea.Cmd {
+func (m *Model) resolveQuestionPromptCommand(
+	resolution question.Resolution,
+	activityWasVisible bool,
+) tea.Cmd {
 	if m.prompt.team != nil {
 		command := m.submitTeamQuestionResolution(m.prompt.team.key, resolution, false)
 		if command == nil {
 			m.syncApprovalPrompt()
+
+			return nil
 		}
 
-		return command
+		return tea.Batch(command, m.startActivityClock(activityWasVisible))
 	}
 
 	return m.startStream(func(ctx context.Context) iter.Seq2[coding.Event, error] {
@@ -750,7 +771,10 @@ func (m *Model) resolveQuestionPromptCommand(resolution question.Resolution) tea
 	})
 }
 
-func (m *Model) rejectQuestionPromptCommand(request question.Request) tea.Cmd {
+func (m *Model) rejectQuestionPromptCommand(
+	request question.Request,
+	activityWasVisible bool,
+) tea.Cmd {
 	if m.prompt.team != nil {
 		command := m.submitTeamQuestionResolution(
 			m.prompt.team.key,
@@ -761,9 +785,11 @@ func (m *Model) rejectQuestionPromptCommand(request question.Request) tea.Cmd {
 		)
 		if command == nil {
 			m.syncApprovalPrompt()
+
+			return nil
 		}
 
-		return command
+		return tea.Batch(command, m.startActivityClock(activityWasVisible))
 	}
 
 	return m.startStream(func(ctx context.Context) iter.Seq2[coding.Event, error] {
@@ -795,7 +821,7 @@ func (m *Model) planReviewPromptView() string {
 	lines := []string{"Plan ready for review", ""}
 	switch {
 	case state.loading:
-		lines = append(lines, "Loading plan.md…")
+		lines = append(lines, m.activityNotice("Loading plan.md…"))
 	case state.err != nil:
 		lines = append(
 			lines,
@@ -858,7 +884,7 @@ func (m *Model) questionPromptView() string {
 	if request.Kind == question.RequestFreeform {
 		lines := []string{"Input required", "", request.Prompt, "", state.editor.View(), "Enter submit · Ctrl+J newline · Ctrl+C cancel"}
 		if state.loading {
-			lines = append(lines, "Working…")
+			lines = append(lines, m.activityNotice("Working…"))
 		}
 		if state.err != nil {
 			lines = append(lines, "Error: "+safeError(state.err))
@@ -959,7 +985,7 @@ func (m *Model) questionPromptView() string {
 	}
 
 	if state.loading {
-		lines = append(lines, "Working…")
+		lines = append(lines, m.activityNotice("Working…"))
 	}
 	if state.err != nil {
 		lines = append(lines, "Error: "+safeError(state.err))
@@ -1055,7 +1081,7 @@ func (m *Model) approvalPromptView() string {
 	}
 	lines = append(lines, "↑/↓ choose · Enter confirm")
 	if m.prompt.loading {
-		lines = append(lines, "Working…")
+		lines = append(lines, m.activityNotice("Working…"))
 	}
 	if m.prompt.err != nil {
 		lines = append(lines, safeError(m.prompt.err))
@@ -1104,7 +1130,7 @@ func (m *Model) compactPromptView() string {
 	lines := []string{"△ Compact context"}
 	switch {
 	case m.prompt.loading:
-		lines = append(lines, "Loading compaction preview…")
+		lines = append(lines, m.activityNotice("Loading compaction preview…"))
 	case m.prompt.err != nil:
 		lines = append(lines, "Error: "+safeError(m.prompt.err))
 	case !m.prompt.preview.Available:

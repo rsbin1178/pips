@@ -74,8 +74,8 @@ func (m *Model) moveStatusLinePicker(delta int) {
 	if current == next {
 		return
 	}
-	m.picker.statusItems[current], m.picker.statusItems[next] =
-		m.picker.statusItems[next], m.picker.statusItems[current]
+
+	m.picker.statusItems[current], m.picker.statusItems[next] = m.picker.statusItems[next], m.picker.statusItems[current]
 	m.picker.cursor = next
 }
 
@@ -106,16 +106,19 @@ func (m *Model) saveStatusLinePicker() tea.Cmd {
 	}
 
 	items := m.selectedStatusLineItems()
+	activityWasVisible := m.activityClockVisible()
 	generation := m.picker.generation
 	m.picker.loading = true
 	m.picker.controlling = true
 	m.picker.err = nil
 
-	return func() tea.Msg {
+	save := func() tea.Msg {
 		err := m.options.SaveStatusLine(m.ctx, slices.Clone(items))
 
 		return statusLineSavedMsg{generation: generation, items: items, err: err}
 	}
+
+	return tea.Batch(save, m.startActivityClock(activityWasVisible))
 }
 
 func (m *Model) statusLinePickerView(maxHeight int) string {
@@ -145,7 +148,7 @@ func (m *Model) statusLinePickerView(maxHeight int) string {
 		lines = append(lines, line)
 	}
 	if m.picker.loading {
-		lines = append(lines, "Saving…")
+		lines = append(lines, m.activityNotice("Saving…"))
 	}
 	if m.picker.err != nil {
 		lines = append(lines, "Error: "+safeError(m.picker.err))

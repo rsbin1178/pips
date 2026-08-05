@@ -59,7 +59,7 @@ func TestStatusLinePickerSavesAndCancelHasNoSideEffects(t *testing.T) {
 	_, _ = model.updateStatusLinePickerKey(tea.KeyPressMsg{Code: tea.KeyRight})
 	_, command := model.updateStatusLinePickerKey(tea.KeyPressMsg{Code: tea.KeyEnter})
 	require.NotNil(t, command)
-	message := command()
+	message := commandMessage(t, command)
 	_, _ = model.Update(message)
 	assert.Equal(t, saved, model.statusLineItems)
 	assert.Equal(t, pickerNone, model.picker.kind)
@@ -83,7 +83,7 @@ func TestStatusLinePickerSaveFailureKeepsPreviousSelection(t *testing.T) {
 	_, _ = model.updateStatusLinePickerKey(tea.KeyPressMsg{Code: tea.KeySpace, Text: " "})
 	_, command := model.updateStatusLinePickerKey(tea.KeyPressMsg{Code: tea.KeyEnter})
 	require.NotNil(t, command)
-	_, _ = model.Update(command())
+	_, _ = model.Update(commandMessage(t, command))
 
 	assert.Equal(t, pickerStatusLine, model.picker.kind)
 	require.ErrorContains(t, model.picker.err, "disk full")

@@ -31,16 +31,16 @@ func newEventWriter(sessionID string, clock eventClock) (*eventWriter, error) {
 	return &eventWriter{sessionID: sessionID, clock: clock}, nil
 }
 
-func (w *eventWriter) write(
+func (w *eventWriter) prepare(
 	interactionID string,
 	runID string,
 	eventType EventType,
 	payload EventPayload,
 ) (Event, error) {
-	return w.writeAt(w.clock().UTC(), interactionID, runID, eventType, payload)
+	return w.prepareAt(w.clock().UTC(), interactionID, runID, eventType, payload)
 }
 
-func (w *eventWriter) writeAt(
+func (w *eventWriter) prepareAt(
 	eventTime time.Time,
 	interactionID string,
 	runID string,
@@ -50,6 +50,16 @@ func (w *eventWriter) writeAt(
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
+	return w.prepareAtLocked(eventTime, interactionID, runID, eventType, payload)
+}
+
+func (w *eventWriter) prepareAtLocked(
+	eventTime time.Time,
+	interactionID string,
+	runID string,
+	eventType EventType,
+	payload EventPayload,
+) (Event, error) {
 	event := Event{
 		Schema:        EventSchema,
 		Sequence:      w.sequence + 1,
@@ -64,9 +74,31 @@ func (w *eventWriter) writeAt(
 		return Event{}, err
 	}
 
+	return cloneEvent(event), nil
+}
+
+func (w *eventWriter) commit(event Event) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if event.SessionID != w.sessionID {
+		return fmt.Errorf("%w: event writer Session changed", ErrEventProtocol)
+	}
+	if event.Sequence != w.sequence+1 {
+		return fmt.Errorf(
+			"%w: event writer sequence %d follows %d",
+			ErrEventProtocol,
+			event.Sequence,
+			w.sequence,
+		)
+	}
+	if err := ValidateEvent(event); err != nil {
+		return err
+	}
+
 	w.sequence = event.Sequence
 
-	return cloneEvent(event), nil
+	return nil
 }
 
 type agentProjector struct {
@@ -164,7 +196,7 @@ func (p *agentProjector) project(event agent.Event) (Event, error) {
 		}
 	}
 
-	return p.writer.writeAt(
+	return p.writer.prepareAt(
 		event.Time,
 		p.interactionID,
 		event.RunID,

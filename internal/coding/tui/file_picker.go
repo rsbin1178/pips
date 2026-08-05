@@ -22,12 +22,13 @@ type filePickerDataMsg struct {
 }
 
 func (m *Model) openFilePickerAfterAt() tea.Cmd {
+	activityWasVisible := m.activityClockVisible()
 	generation, ok := m.openInlinePicker('@', pickerFile)
 	if !ok {
 		return nil
 	}
 
-	return func() tea.Msg {
+	load := func() tea.Msg {
 		snapshot, err := m.controller.ListWorkspaceFiles(m.ctx)
 
 		return filePickerDataMsg{
@@ -36,6 +37,8 @@ func (m *Model) openFilePickerAfterAt() tea.Cmd {
 			err:        err,
 		}
 	}
+
+	return tea.Batch(load, m.startActivityClock(activityWasVisible))
 }
 
 func (m *Model) canOpenFilePickerAtCursor() bool {
@@ -232,7 +235,7 @@ func (m *Model) filePickerView(maxHeight int) string {
 	if len(filtered) == 0 {
 		empty := "No matching Workspace files."
 		if m.picker.loading {
-			empty = "Loading Workspace files…"
+			empty = m.activityNotice("Loading Workspace files…")
 		}
 
 		return truncateHeight(empty+"\n"+m.styleCommandPickerFooter(footer), maxHeight+1)
@@ -274,7 +277,7 @@ func (m *Model) filePickerFooter() string {
 	case m.picker.err != nil:
 		return "Error: " + safeError(m.picker.err)
 	case m.picker.loading:
-		return "Loading Workspace files…"
+		return m.activityNotice("Loading Workspace files…")
 	case m.picker.truncated:
 		return "Limited results · ↑/↓ select · Enter attach · Esc cancel"
 	default:

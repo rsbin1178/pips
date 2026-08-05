@@ -9,6 +9,7 @@ import (
 	"github.com/rsbin/pips/agent/team"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding"
+	"github.com/rsbin/pips/internal/coding/teamstate"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -86,12 +87,74 @@ func TestTeamAttemptWorkingUsesSharedAnimatedClock(t *testing.T) {
 	recoverable.State = coding.TeamLifecycleRecoverable
 	recoverable.Activity = ""
 	model.state.Teams = []coding.TeamLifecycleState{{TeamLifecycle: recoverable}}
+	view := teamProjectionTestView()
+	view.Attempts[0].ResourceState = teamstate.AttemptRecoverable
+	view.Attempts[0].LifecycleState = coding.TeamLifecycleRecoverable
+	view.Attempts[0].Activity = ""
+	view.Attempts[1].ResourceState = teamstate.AttemptTerminal
+	view.Attempts[1].LifecycleState = coding.TeamLifecycleCompleted
+	model.storeTeamProjectionView(view)
 	static := renderTimelineBlock(
 		model.activeTeamAttemptBlocks()[0], model.markdown, 160, themeDark, true,
 	)
 	assert.Contains(t, static, "✻ Builder · Implement timeline · Recoverable")
 	_, stopped := model.Update(activityTickMsg{})
 	assert.Nil(t, stopped)
+}
+
+func TestParentTimelineRequiresLiveResourceEvidence(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		resource      teamstate.AttemptState
+		viewState     coding.TeamLifecycleStatus
+		viewActivity  coding.TeamActivity
+		eventState    coding.TeamLifecycleStatus
+		eventActivity coding.TeamActivity
+	}{
+		{
+			name:          "running lifecycle with recoverable resource",
+			resource:      teamstate.AttemptRecoverable,
+			viewState:     coding.TeamLifecycleRunning,
+			viewActivity:  coding.TeamActivityWorking,
+			eventState:    coding.TeamLifecycleRunning,
+			eventActivity: coding.TeamActivityWorking,
+		},
+		{
+			name:          "running lifecycle awaiting question",
+			resource:      teamstate.AttemptRunning,
+			viewState:     coding.TeamLifecycleRunning,
+			viewActivity:  coding.TeamActivityAwaitingQuestion,
+			eventState:    coding.TeamLifecycleRunning,
+			eventActivity: coding.TeamActivityAwaitingQuestion,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			model := readyModel(t, true)
+			view := teamProjectionTestView()
+			view.Attempts = view.Attempts[:1]
+			view.Attempts[0].ResourceState = test.resource
+			view.Attempts[0].LifecycleState = test.viewState
+			view.Attempts[0].Activity = test.viewActivity
+			model.storeTeamProjectionView(view)
+
+			value := teamProjectionAttempt("worker-1", "task-1", "attempt-1")
+			value.State = test.eventState
+			value.Activity = test.eventActivity
+			model.state.Teams = []coding.TeamLifecycleState{{TeamLifecycle: value}}
+
+			block := renderTimelineBlock(
+				model.activeTeamAttemptBlocks()[0], model.markdown, 160, themeDark, true,
+			)
+			assert.Contains(t, block, "✻ Builder")
+			assert.False(t, model.teamTimelineActivityVisible())
+			_, next := model.Update(activityTickMsg{})
+			assert.Nil(t, next)
+		})
+	}
 }
 
 func TestAcceptedLiveTeamProjectionStartsIdleSharedClock(t *testing.T) {
@@ -303,6 +366,28 @@ func teamProjectionTestView() coding.TeamView {
 		Tasks: []coding.TeamTaskView{
 			{ID: "task-1", Title: "Implement timeline"},
 			{ID: "task-2", Title: "Review timeline"},
+		},
+		Attempts: []coding.TeamAttemptView{
+			{
+				Target: coding.TeamWorkerTarget{
+					TeamID: "team-1", MemberID: "worker-1",
+					TaskID: "task-1", AttemptID: "attempt-1",
+				},
+				DomainState:    team.AttemptStatusRunning,
+				ResourceState:  teamstate.AttemptRunning,
+				LifecycleState: coding.TeamLifecycleRunning,
+				Activity:       coding.TeamActivityWorking,
+			},
+			{
+				Target: coding.TeamWorkerTarget{
+					TeamID: "team-1", MemberID: "worker-2",
+					TaskID: "task-2", AttemptID: "attempt-2",
+				},
+				DomainState:    team.AttemptStatusRunning,
+				ResourceState:  teamstate.AttemptRunning,
+				LifecycleState: coding.TeamLifecycleRunning,
+				Activity:       coding.TeamActivityWorking,
+			},
 		},
 	}
 }
