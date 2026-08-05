@@ -41,7 +41,7 @@ func TestSkillsCommandOpensProjectManagerAndTogglesSelection(t *testing.T) {
 
 	_, save := model.Update(key("enter"))
 	require.NotNil(t, save)
-	model.Update(save())
+	model.Update(commandMessage(t, save))
 	assert.Equal(t, routeSkills, model.route.kind)
 	assert.Contains(t, ansi.Strip(model.View().Content), "[ ] go-review")
 	assert.False(t, controller.skillSnapshot.Skills[0].Enabled)
@@ -58,7 +58,7 @@ func TestDollarPickerFiltersRealComposerTokenAndRestoresDraft(t *testing.T) {
 
 	_, load := model.Update(tea.KeyPressMsg{Text: "$"})
 	require.NotNil(t, load)
-	model.Update(load())
+	model.Update(commandMessage(t, load))
 	assert.Equal(t, pickerSkill, model.picker.kind)
 	assert.Equal(t, "please $", model.composer.Value())
 
@@ -131,7 +131,7 @@ func TestDisabledSkillIsAbsentFromDollarPicker(t *testing.T) {
 
 	_, load := model.Update(tea.KeyPressMsg{Text: "$"})
 	require.NotNil(t, load)
-	model.Update(load())
+	model.Update(commandMessage(t, load))
 	model.Update(tea.KeyPressMsg{Text: "dep"})
 
 	assert.Empty(t, model.filteredSkills())
@@ -150,7 +150,7 @@ func TestSkillsManagerFailedToggleKeepsCheckboxAndCanRetry(t *testing.T) {
 
 	_, save := model.Update(key("enter"))
 	require.NotNil(t, save)
-	model.Update(save())
+	model.Update(commandMessage(t, save))
 	require.ErrorIs(t, model.route.err, assert.AnError)
 	assert.True(t, model.route.skills[0].Enabled)
 	content := ansi.Strip(model.View().Content)
@@ -160,7 +160,7 @@ func TestSkillsManagerFailedToggleKeepsCheckboxAndCanRetry(t *testing.T) {
 	controller.skillErr = nil
 	_, retry := model.Update(key("enter"))
 	require.NotNil(t, retry)
-	model.Update(retry())
+	model.Update(commandMessage(t, retry))
 	require.NoError(t, model.route.err)
 	assert.False(t, model.route.skills[0].Enabled)
 }
@@ -200,7 +200,7 @@ func TestDollarPickerLeavesUnknownShellVariableAsPlainText(t *testing.T) {
 
 	_, load := model.Update(tea.KeyPressMsg{Text: "$"})
 	require.NotNil(t, load)
-	model.Update(load())
+	model.Update(commandMessage(t, load))
 	for _, character := range "HOME" {
 		model.Update(tea.KeyPressMsg{Text: string(character)})
 	}
@@ -219,7 +219,7 @@ func TestSkillPickerIgnoresStaleAsyncResult(t *testing.T) {
 	model := readyModelWithController(t, controller, true)
 
 	first := model.openSkillPickerForInput("")
-	firstMessage := first()
+	firstMessage := commandMessage(t, first)
 	model.restoreSkillPicker()
 	second := model.openSkillPickerForInput("next ")
 	require.NotNil(t, second)
@@ -227,7 +227,7 @@ func TestSkillPickerIgnoresStaleAsyncResult(t *testing.T) {
 	model.Update(firstMessage)
 	assert.True(t, model.picker.loading)
 	assert.Empty(t, model.picker.skills)
-	model.Update(second())
+	model.Update(commandMessage(t, second))
 	assert.False(t, model.picker.loading)
 	require.NotEmpty(t, model.picker.skills)
 }

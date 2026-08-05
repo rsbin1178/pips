@@ -17,10 +17,12 @@ import (
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding/approval"
 	"github.com/rsbin/pips/internal/coding/config"
+	"github.com/rsbin/pips/internal/coding/execution/gitcontrol"
 	"github.com/rsbin/pips/internal/coding/modelcatalog"
 	"github.com/rsbin/pips/internal/coding/paths"
 	"github.com/rsbin/pips/internal/coding/question"
 	"github.com/rsbin/pips/internal/coding/session"
+	"github.com/rsbin/pips/internal/coding/teamintegration"
 	"github.com/rsbin/pips/internal/coding/teamstate"
 	"github.com/rsbin/pips/internal/coding/teamworktree"
 	"github.com/rsbin/pips/internal/coding/workspace"
@@ -51,6 +53,7 @@ const attemptTargetKind = "team_task_attempt"
 type AttemptBaseRequest struct {
 	Team      team.Team
 	Task      team.Task
+	AttemptID team.AttemptID
 	Resources teamstate.Snapshot
 }
 
@@ -59,6 +62,7 @@ type AttemptBaseRequest struct {
 type AttemptBase struct {
 	OID      string
 	Evidence string
+	Resource teamstate.AttemptBaseResource
 }
 
 // AttemptBasePreparer composes the immutable Git base for one Attempt.
@@ -66,34 +70,110 @@ type AttemptBasePreparer interface {
 	PrepareAttemptBase(context.Context, AttemptBaseRequest) (AttemptBase, error)
 }
 
-type admittedBasePreparer struct{}
+type dependencyBasePreparer struct {
+	manager *teamintegration.Manager
+}
 
-func (admittedBasePreparer) PrepareAttemptBase(
-	_ context.Context,
+//nolint:wsl_v5 // Selection, fast-path, and failure classification form one control boundary.
+func (p dependencyBasePreparer) PrepareAttemptBase(
+	ctx context.Context,
 	request AttemptBaseRequest,
 ) (AttemptBase, error) {
 	if len(request.Task.DependencyIDs) == 0 {
-		return AttemptBase{OID: request.Resources.Repository.BaseOID, Evidence: "No dependencies."}, nil
-	}
-	if len(request.Task.DependencyIDs) != 1 {
-		return AttemptBase{}, errDependencyBaseUnavailable
-	}
+		binding := teamstate.AttemptBaseResource{OID: request.Resources.Repository.BaseOID}
 
-	dependencyID := request.Task.DependencyIDs[0]
-	dependency, found := capturedDependency(request.Team, request.Resources, dependencyID)
+		return AttemptBase{OID: binding.OID, Evidence: "No dependencies.", Resource: binding}, nil
+	}
+	if p.manager == nil || request.AttemptID == "" {
+		return AttemptBase{}, fmt.Errorf("%w: incomplete dependency base preparer", ErrTeamAdmission)
+	}
+	selection, err := buildIntegrationSelection(
+		request.Team,
+		request.Resources,
+		request.Task.DependencyIDs,
+	)
+	if err != nil {
+		return AttemptBase{}, fmt.Errorf("%w: %w", errDependencyBaseUnavailable, err)
+	}
+	startedAt, found := attemptStartedAt(request.Team, request.Task.ID, request.AttemptID)
 	if !found {
-		return AttemptBase{}, errDependencyBaseUnavailable
+		return AttemptBase{}, fmt.Errorf("%w: current Attempt start is unavailable", ErrTeamAdmission)
+	}
+	directResultOID := ""
+	if len(request.Task.DependencyIDs) == 1 {
+		dependency, captured := capturedDependency(
+			request.Team,
+			request.Resources,
+			request.Task.DependencyIDs[0],
+		)
+		if !captured {
+			return AttemptBase{}, errDependencyBaseUnavailable
+		}
+		directResultOID = dependency.Worktree.ResultCommitOID
+	}
+	prepared, err := p.manager.PrepareAttemptBase(ctx, teamintegration.AttemptBaseRequest{
+		Workspace: request.Resources.Parent.Workspace.Path, AttemptID: string(request.AttemptID),
+		Timestamp: startedAt.UTC(), Selection: selection, DirectResultOID: directResultOID,
+	})
+	base := attemptBaseFromIntegration(prepared)
+	if err != nil {
+		switch {
+		case errors.Is(err, teamintegration.ErrConflict):
+			return AttemptBase{}, errors.Join(ErrAttemptBaseConflict, err)
+		case errors.Is(err, teamintegration.ErrStale),
+			errors.Is(err, gitcontrol.ErrNotFound),
+			errors.Is(err, teamintegration.ErrRetained):
+			return base, fmt.Errorf("%w: %w", errDependencyBaseUnavailable, err)
+		default:
+			return base, err
+		}
 	}
 
-	return AttemptBase{
-		OID: dependency.Worktree.ResultCommitOID,
-		Evidence: fmt.Sprintf(
-			"Captured dependency %s at Attempt %s (%s).",
-			dependencyID,
-			dependency.AttemptID,
-			dependency.Worktree.ResultCommitOID,
-		),
-	}, nil
+	return base, nil
+}
+
+//nolint:wsl_v5 // Durable binding and Worker evidence derive from one prepared result.
+func attemptBaseFromIntegration(value teamintegration.AttemptBase) AttemptBase {
+	resource := teamstate.AttemptBaseResource{
+		OID: value.CommitOID, TreeOID: value.TreeOID, OwnedRef: value.Ref,
+		CompositionDigest: value.CompositionDigest,
+		DependencyDigest:  value.DependencyDigest,
+		DependencyCount:   value.DependencyCount,
+	}
+	evidence := fmt.Sprintf(
+		"Verified %d captured dependency Attempt(s) at %s.",
+		value.DependencyCount,
+		value.CommitOID,
+	)
+	if value.Ref != "" {
+		evidence = fmt.Sprintf(
+			"Composed %d captured dependency Attempt(s) with digest %s.",
+			value.DependencyCount,
+			value.CompositionDigest,
+		)
+	}
+
+	return AttemptBase{OID: value.CommitOID, Evidence: evidence, Resource: resource}
+}
+
+//nolint:wsl_v5 // Exact Attempt lookup is intentionally explicit.
+func attemptStartedAt(
+	aggregate team.Team,
+	taskID team.TaskID,
+	attemptID team.AttemptID,
+) (time.Time, bool) {
+	for _, taskValue := range aggregate.Tasks {
+		if taskValue.ID != taskID {
+			continue
+		}
+		for _, attempt := range taskValue.Attempts {
+			if attempt.ID == attemptID && !attempt.StartedAt.IsZero() {
+				return attempt.StartedAt, true
+			}
+		}
+	}
+
+	return time.Time{}, false
 }
 
 func validateCapturedDependencyInputs(request AttemptBaseRequest) error {
@@ -179,7 +259,12 @@ func newAttemptOwnerFactory(
 		return nil, fmt.Errorf("%w: incomplete Attempt owner factory", ErrTeamAdmission)
 	}
 	if base == nil {
-		base = admittedBasePreparer{}
+		manager, err := parent.integrationManager(coordinator)
+		if err != nil {
+			return nil, err
+		}
+
+		base = dependencyBasePreparer{manager: manager}
 	}
 	store, err := continuation.NewJSONLStore(parent.paths.TeamContinuationsDir())
 	if err != nil {
@@ -487,6 +572,7 @@ func (o *attemptOwner) PrepareAttempt(
 	}, nil
 }
 
+//nolint:wsl_v5 // Durable base, Worktree, Session, and lifecycle steps stay in order.
 func (o *attemptOwner) ensureRuntime(ctx context.Context) (*Runtime, error) {
 	o.mu.Lock()
 	if o.runtime != nil {
@@ -508,22 +594,52 @@ func (o *attemptOwner) ensureRuntime(ctx context.Context) (*Runtime, error) {
 	if err != nil {
 		return nil, err
 	}
+	taskValue, found := taskByID(aggregate.Tasks, o.candidate.key.taskID)
+	if !found {
+		return nil, fmt.Errorf("%w: current Attempt Task is missing", ErrTeamAdmission)
+	}
 	baseRequest := AttemptBaseRequest{
-		Team: aggregate, Task: o.candidate.task, Resources: resources,
+		Team: aggregate, Task: taskValue, AttemptID: o.candidate.key.attemptID,
+		Resources: resources,
 	}
 	if err := validateCapturedDependencyInputs(baseRequest); err != nil {
 		return nil, err
 	}
 	base, err := o.factory.base.PrepareAttemptBase(ctx, baseRequest)
 	if err != nil {
+		if base.Resource != (teamstate.AttemptBaseResource{}) {
+			_, persistErr := transitionAttemptResource(
+				context.WithoutCancel(ctx), o.factory.state, o.candidate,
+				"base-retained", teamstate.AttemptRecoverable,
+				func(value *teamstate.AttemptResource) error {
+					if value.Base != (teamstate.AttemptBaseResource{}) && value.Base != base.Resource {
+						return fmt.Errorf("%w: Attempt base identity changed", ErrTeamAdmission)
+					}
+					value.Base = base.Resource
+
+					return nil
+				},
+			)
+
+			return nil, errors.Join(err, persistErr)
+		}
+
 		return nil, err
 	}
-	if strings.TrimSpace(base.OID) == "" {
+	if strings.TrimSpace(base.OID) == "" || base.Resource.OID != base.OID {
 		return nil, fmt.Errorf("%w: empty Attempt base", ErrTeamAdmission)
 	}
 	if _, err := transitionAttemptResource(
 		ctx, o.factory.state, o.candidate,
-		"base-prepared", teamstate.AttemptBasePrepared, nil,
+		"base-prepared", teamstate.AttemptBasePrepared,
+		func(value *teamstate.AttemptResource) error {
+			if value.Base != (teamstate.AttemptBaseResource{}) && value.Base != base.Resource {
+				return fmt.Errorf("%w: Attempt base identity changed", ErrTeamAdmission)
+			}
+			value.Base = base.Resource
+
+			return nil
+		},
 	); err != nil {
 		return nil, err
 	}

@@ -101,6 +101,7 @@ func (m *Model) stopTeamWorkerRouteSubscription() {
 }
 
 func (m *Model) activateTeamWorkerRoute(request routeOpenRequest) tea.Cmd {
+	activityWasVisible := m.activityClockVisible()
 	m.routeSeq++
 	m.route = routeState{
 		kind: routeChild, loading: true, generation: m.routeSeq,
@@ -111,7 +112,10 @@ func (m *Model) activateTeamWorkerRoute(request routeOpenRequest) tea.Cmd {
 	m.composer.Reset()
 	m.composer.Focus()
 
-	return m.teamWorkerRouteLoadCommand(false)
+	return tea.Batch(
+		m.teamWorkerRouteLoadCommand(false),
+		m.startActivityClock(activityWasVisible),
+	)
 }
 
 func (m *Model) teamWorkerRouteLoadCommand(background bool) tea.Cmd {
@@ -258,10 +262,14 @@ func (m *Model) refreshTeamWorkerRoute() tea.Cmd {
 		return nil
 	}
 
+	activityWasVisible := m.activityClockVisible()
 	m.stopTeamWorkerRouteSubscription()
 	m.route.refreshing = true
 
-	return m.teamWorkerRouteLoadCommand(true)
+	return tea.Batch(
+		m.teamWorkerRouteLoadCommand(true),
+		m.startActivityClock(activityWasVisible),
+	)
 }
 
 func (m *Model) interruptTeamWorker(target coding.TeamWorkerTarget) tea.Cmd {
@@ -274,12 +282,13 @@ func (m *Model) interruptTeamWorker(target coding.TeamWorkerTarget) tea.Cmd {
 		return nil
 	}
 
+	activityWasVisible := m.activityClockVisible()
 	m.route.controlling = true
 	generation := m.route.generation
 	controller := m.controller
 	ctx := m.ctx
 
-	return func() tea.Msg {
+	interrupt := func() tea.Msg {
 		_, err := controller.SubmitTeamControl(ctx, coding.TeamControlRequest{
 			TeamID: target.TeamID, Action: coding.TeamControlInterruptAttempt,
 			MemberID: target.MemberID, TaskID: target.TaskID,
@@ -292,6 +301,8 @@ func (m *Model) interruptTeamWorker(target coding.TeamWorkerTarget) tea.Cmd {
 			action: coding.TeamControlInterruptAttempt, err: err,
 		}
 	}
+
+	return tea.Batch(interrupt, m.startActivityClock(activityWasVisible))
 }
 
 func (m *Model) messageTeamWorker(
@@ -309,6 +320,7 @@ func (m *Model) messageTeamWorker(
 		return nil
 	}
 
+	activityWasVisible := m.activityClockVisible()
 	m.route.controlling = true
 	m.route.err = nil
 	m.composer.Blur()
@@ -316,7 +328,7 @@ func (m *Model) messageTeamWorker(
 	controller := m.controller
 	ctx := m.ctx
 
-	return func() tea.Msg {
+	messageCommand := func() tea.Msg {
 		text, resolveErr := resolveTeamComposerText(
 			ctx,
 			snapshot,
@@ -341,6 +353,8 @@ func (m *Model) messageTeamWorker(
 			action: coding.TeamControlMessage, snapshot: snapshot, err: err,
 		}
 	}
+
+	return tea.Batch(messageCommand, m.startActivityClock(activityWasVisible))
 }
 
 func (m *Model) applyTeamWorkerControl(message teamWorkerControlResultMsg) tea.Cmd {
@@ -390,10 +404,14 @@ func (m *Model) teamWorkerRouteContent(state coding.State, child childSummary) s
 		return flow
 	}
 	if child.live() {
-		return "✻ Working…"
+		return m.activityNotice(teamPanelActivityLabel(child.worker) + "…")
 	}
 
-	return humanizeTeamProjectionState(string(child.worker.LifecycleState))
+	_, label, _ := teamPanelWorkerState(teamPanelWorker{
+		attempt: child.worker, hasAttempt: true,
+	})
+
+	return label
 }
 
 func teamWorkerCompletionMarker(

@@ -39,7 +39,7 @@ func TestSessionPickerFiltersAndResumesExactlyOnce(t *testing.T) {
 	assert.Nil(t, duplicate)
 	assert.True(t, model.route.controlling)
 
-	_, committed := model.Update(resume())
+	_, committed := model.Update(commandMessage(t, resume))
 	driveModelCommands(t, model, committed)
 	assert.Equal(t, []string{"beta"}, controller.resumed)
 	assert.Equal(t, "beta", model.state.SessionID)

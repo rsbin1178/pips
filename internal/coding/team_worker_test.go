@@ -88,7 +88,7 @@ func TestAttemptOwnerReportsUncertainDeliveryWhenOwnerExitsAfterReceive(t *testi
 	assert.True(t, errors.Is(err, ErrTeamAdmission))
 }
 
-func TestAdmittedBasePreparerUsesOnlyVerifiedCapturedDependency(t *testing.T) {
+func TestCapturedDependencySelectionRequiresVerifiedResourceIdentity(t *testing.T) {
 	t.Parallel()
 
 	baseOID := strings.Repeat("1", 40)
@@ -116,11 +116,6 @@ func TestAdmittedBasePreparerUsesOnlyVerifiedCapturedDependency(t *testing.T) {
 	}
 
 	require.NoError(t, validateCapturedDependencyInputs(request))
-	base, err := (admittedBasePreparer{}).PrepareAttemptBase(t.Context(), request)
-	require.NoError(t, err)
-	assert.Equal(t, resultOID, base.OID)
-	assert.Contains(t, base.Evidence, "dependency")
-
 	request.Resources.Attempts[0].Worktree.ResultCommitOID = ""
 	assert.ErrorIs(t, validateCapturedDependencyInputs(request), errDependencyBaseUnavailable)
 }

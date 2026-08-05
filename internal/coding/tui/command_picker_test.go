@@ -138,7 +138,7 @@ func TestCommandPickerReplacementIsSingleFlightAndClearsCommandInput(t *testing.
 	_, duplicate := model.Update(key("enter"))
 	assert.Nil(t, duplicate)
 
-	_, commit := model.Update(command())
+	_, commit := model.Update(commandMessage(t, command))
 	printed := driveModelCommandsCapture(t, model, commit)
 	assert.Equal(t, 1, controller.newCalls)
 	assert.Equal(t, pickerNone, model.picker.kind)

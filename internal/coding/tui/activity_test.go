@@ -357,6 +357,190 @@ func TestActivityTickAdvancesOnlyWhileVisible(t *testing.T) {
 	assert.Nil(t, command)
 }
 
+func TestAsyncActivityUsesSharedFrameAndStopsForStaticState(t *testing.T) {
+	t.Parallel()
+
+	model := readyModel(t, true)
+	model.route = routeState{kind: routeAgents, loading: true}
+	model.activity.Reset()
+
+	before := model.agentsRouteContent()
+	assert.True(t, model.activityClockVisible())
+	assert.Contains(t, before, "✻ Loading…")
+
+	_, command := model.Update(model.activity.Tick()())
+	require.NotNil(t, command)
+
+	after := model.agentsRouteContent()
+	assert.NotEqual(t, before, after)
+	assert.Contains(t, after, "✢ Loading…")
+
+	model.route.loading = false
+	_, command = model.Update(activityTickMsg{})
+	assert.Nil(t, command)
+	assert.False(t, model.activityClockVisible())
+}
+
+func TestLiveChildSelectorUsesSharedFrameButTerminalChildIsStatic(t *testing.T) {
+	t.Parallel()
+
+	model := readyModel(t, true)
+	model.route = routeState{
+		kind: routeAgents,
+		children: []childSummary{{
+			kind: childSubagent,
+			subagent: subagent.Summary{
+				State: subagent.StateRunning, Role: subagent.RoleExplore,
+				TaskPreview: "Inspect the TUI",
+			},
+		}},
+	}
+	model.activity.Reset()
+
+	before := model.agentsRouteContent()
+	assert.True(t, model.activityClockVisible())
+	assert.Contains(t, before, "✻ explore subagent")
+
+	_, command := model.Update(model.activity.Tick()())
+	require.NotNil(t, command)
+
+	after := model.agentsRouteContent()
+	assert.Contains(t, after, "✢ explore subagent")
+	assert.NotEqual(t, before, after)
+
+	model.route.children[0].subagent.State = subagent.StateSucceeded
+	assert.False(t, model.activityClockVisible())
+	static := model.agentsRouteContent()
+	_, command = model.Update(activityTickMsg{})
+	assert.Nil(t, command)
+	assert.Equal(t, static, model.agentsRouteContent())
+}
+
+func TestLiveChildTranscriptDoesNotOwnAnInvisibleActivityClock(t *testing.T) {
+	t.Parallel()
+
+	model := readyModel(t, true)
+	child := childSummary{
+		kind: childSubagent,
+		subagent: subagent.Summary{
+			ChildSessionID: "child-1", Role: subagent.RoleExplore,
+			State: subagent.StateRunning, TaskPreview: "Inspect the TUI",
+		},
+	}
+	state := coding.State{Transcript: []ai.Message{ai.AssistantText("live transcript")}}
+	detail := &subagent.Detail{Summary: child.subagent}
+	model.route = routeState{
+		kind: routeChild, childKind: childSubagent,
+		children: []childSummary{child}, childSummary: child,
+		childState: &state, detail: detail,
+	}
+
+	content := model.subagentRouteContent(state, detail)
+	assert.Contains(t, content, "live transcript")
+	assert.False(t, model.activityClockVisible())
+	_, command := model.Update(activityTickMsg{})
+	assert.Nil(t, command)
+	assert.Equal(t, content, model.subagentRouteContent(state, detail))
+}
+
+func TestFullAreaChildRouteDoesNotTickHiddenParentTeamActivity(t *testing.T) {
+	t.Parallel()
+
+	model := readyModel(t, true)
+	model.storeTeamProjectionView(teamProjectionTestView())
+
+	value := teamProjectionAttempt("worker-1", "task-1", "attempt-1")
+	model.state.Teams = []coding.TeamLifecycleState{{TeamLifecycle: value}}
+
+	child := childSummary{
+		kind: childSubagent,
+		subagent: subagent.Summary{
+			ChildSessionID: "child-1", Role: subagent.RoleExplore,
+			State: subagent.StateRunning, TaskPreview: "Inspect the TUI",
+		},
+	}
+	state := coding.State{Transcript: []ai.Message{ai.AssistantText("live transcript")}}
+	model.route = routeState{
+		kind: routeChild, childKind: childSubagent,
+		children: []childSummary{child}, childSummary: child,
+		childState: &state, detail: &subagent.Detail{Summary: child.subagent},
+	}
+
+	assert.False(t, model.teamTimelineActivityVisible())
+	assert.False(t, model.teamPanelActivityVisible())
+	assert.False(t, model.activityClockVisible())
+}
+
+func TestReturningFromChildRouteRestartsParentActivityClock(t *testing.T) {
+	t.Parallel()
+
+	model := readyModel(t, true)
+	model.storeTeamProjectionView(teamProjectionTestView())
+
+	value := teamProjectionAttempt("worker-1", "task-1", "attempt-1")
+	model.state.Teams = []coding.TeamLifecycleState{{TeamLifecycle: value}}
+
+	child := childSummary{
+		kind: childSubagent,
+		subagent: subagent.Summary{
+			ChildSessionID: "child-1", Role: subagent.RoleExplore,
+			State: subagent.StateRunning, TaskPreview: "Inspect the TUI",
+		},
+	}
+	state := coding.State{Transcript: []ai.Message{ai.AssistantText("live transcript")}}
+	model.route = routeState{
+		kind: routeChild, childKind: childSubagent,
+		children: []childSummary{child}, childSummary: child,
+		childState: &state, detail: &subagent.Detail{Summary: child.subagent},
+	}
+	assert.False(t, model.activityClockVisible())
+
+	command := model.closeRouteToParent()
+	require.NotNil(t, command)
+	assert.True(t, commandContainsActivityTick(t, command))
+	assert.Equal(t, routeNone, model.route.kind)
+}
+
+func TestAgentsCancellationActivityUsesExactChildKind(t *testing.T) {
+	t.Parallel()
+
+	model := readyModel(t, true)
+	model.route = routeState{
+		kind: routeAgents, controlling: true,
+		controllingChildKind: childTeamWorker, controllingChildSet: true,
+	}
+	assert.Contains(t, model.agentsRouteContent(), "Interrupting Team Worker…")
+	assert.NotContains(t, model.agentsRouteContent(), "Cancelling subagent…")
+
+	model.route.controllingChildKind = childSubagent
+	assert.Contains(t, model.agentsRouteContent(), "Cancelling subagent…")
+	assert.NotContains(t, model.agentsRouteContent(), "Interrupting Team Worker…")
+}
+
+func TestPromptLoadingUsesSharedFrameAndStopsWhenResolved(t *testing.T) {
+	t.Parallel()
+
+	model := readyModel(t, true)
+	model.prompt = promptState{kind: promptCompact, loading: true}
+	model.activity.Reset()
+
+	before := model.compactPromptView()
+	assert.True(t, model.activityClockVisible())
+	assert.Contains(t, before, "✻ Loading compaction preview…")
+
+	_, command := model.Update(model.activity.Tick()())
+	require.NotNil(t, command)
+
+	after := model.compactPromptView()
+	assert.NotEqual(t, before, after)
+	assert.Contains(t, after, "✢ Loading compaction preview…")
+
+	model.prompt.loading = false
+	_, command = model.Update(activityTickMsg{})
+	assert.Nil(t, command)
+	assert.False(t, model.activityClockVisible())
+}
+
 func TestBridgeStartBatchesStreamWaitAndActivityTick(t *testing.T) {
 	t.Parallel()
 

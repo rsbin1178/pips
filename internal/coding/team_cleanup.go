@@ -95,14 +95,31 @@ func (r *Runtime) CleanupTeam(
 		if attempt.Cleanup != teamstate.CleanupPending {
 			continue
 		}
-		owner := teamworktree.Owner{
-			TeamID: coordinator.id, MemberID: attempt.MemberID, AttemptID: attempt.AttemptID,
-			LeaseGeneration: attempt.Worktree.LeaseGeneration,
+		var cleanupErr error
+		if attempt.Base.OwnedRef != "" {
+			manager, managerErr := r.integrationManager(coordinator)
+			cleanupErr = managerErr
+			if cleanupErr == nil {
+				cleanupErr = manager.CleanupAttemptBase(
+					operationCtx,
+					teamintegration.AttemptBaseCleanupRequest{
+						Workspace: resources.Parent.Workspace.Path,
+						TeamID:    string(coordinator.id), AttemptID: string(attempt.AttemptID),
+						Ref: attempt.Base.OwnedRef, CommitOID: attempt.Base.OID,
+					},
+				)
+			}
 		}
-		resource := worktreeResourceFromState(owner, attempt.Worktree)
-		_, cleanupErr := coordinator.worktree.Cleanup(
-			operationCtx, coordinator.lease, resource,
-		)
+		if cleanupErr == nil && attempt.Worktree != (teamstate.WorktreeResource{}) {
+			owner := teamworktree.Owner{
+				TeamID: coordinator.id, MemberID: attempt.MemberID, AttemptID: attempt.AttemptID,
+				LeaseGeneration: attempt.Worktree.LeaseGeneration,
+			}
+			resource := worktreeResourceFromState(owner, attempt.Worktree)
+			_, cleanupErr = coordinator.worktree.Cleanup(
+				operationCtx, coordinator.lease, resource,
+			)
+		}
 		class := classifyAttemptCleanup(cleanupErr)
 		if cleanupErr != nil {
 			failures = append(failures, cleanupErr)
@@ -218,7 +235,7 @@ func beginTeamCleanup(
 	next := cloneTeamResourceSnapshot(current)
 	for index := range next.Attempts {
 		attempt := &next.Attempts[index]
-		if attempt.Worktree == (teamstate.WorktreeResource{}) {
+		if attempt.Worktree == (teamstate.WorktreeResource{}) && attempt.Base.OwnedRef == "" {
 			attempt.Cleanup = teamstate.CleanupComplete
 		} else if cleanupAttemptState(attempt.State) && attempt.Cleanup != teamstate.CleanupComplete {
 			attempt.Cleanup = teamstate.CleanupPending
@@ -241,7 +258,7 @@ func beginTeamCleanup(
 func cleanupAttemptState(state teamstate.AttemptState) bool {
 	switch state {
 	case teamstate.AttemptCaptured, teamstate.AttemptTerminal, teamstate.AttemptFailed,
-		teamstate.AttemptCancelled, teamstate.AttemptCaptureFailed:
+		teamstate.AttemptCancelled, teamstate.AttemptConflicted, teamstate.AttemptCaptureFailed:
 		return true
 	default:
 		return false
@@ -277,7 +294,8 @@ func classifyAttemptCleanup(err error) teamstate.CleanupClass {
 		return teamstate.CleanupComplete
 	}
 	if errors.Is(err, teamworktree.ErrIdentity) || errors.Is(err, teamworktree.ErrLeaseLost) ||
-		errors.Is(err, teamworktree.ErrInvalid) {
+		errors.Is(err, teamworktree.ErrInvalid) || errors.Is(err, teamintegration.ErrStale) ||
+		errors.Is(err, teamintegration.ErrInvalid) {
 		return teamstate.CleanupOrphaned
 	}
 

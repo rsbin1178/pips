@@ -17,7 +17,6 @@ import (
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding"
 	"github.com/rsbin/pips/internal/coding/subagent"
-	"github.com/rsbin/pips/internal/coding/teamstate"
 )
 
 type childKind uint8
@@ -50,8 +49,7 @@ func (value childSummary) live() bool {
 		return value.subagent.State == subagent.StateCreated ||
 			value.subagent.State == subagent.StateRunning
 	case childTeamWorker:
-		return value.worker.DomainState == team.AttemptStatusRunning &&
-			value.worker.ResourceState == teamstate.AttemptRunning
+		return teamAttemptActivityVisible(value.worker)
 	default:
 		return false
 	}
@@ -162,6 +160,7 @@ func (m *Model) openAgentsRoute() tea.Cmd {
 }
 
 func (m *Model) activateAgentsRoute() tea.Cmd {
+	activityWasVisible := m.activityClockVisible()
 	m.routeSeq++
 	m.route = routeState{kind: routeAgents, loading: true, generation: m.routeSeq}
 	m.composer.Blur()
@@ -170,7 +169,7 @@ func (m *Model) activateAgentsRoute() tea.Cmd {
 	ctx := m.ctx
 	views, requests := m.teamViewsForChildSelector()
 
-	return func() tea.Msg {
+	load := func() tea.Msg {
 		values, err := controller.ListSubagents(ctx)
 		for _, request := range requests {
 			view, readErr := controller.ReadTeam(ctx, request)
@@ -184,6 +183,8 @@ func (m *Model) activateAgentsRoute() tea.Cmd {
 			generation: generation, agents: values, teamViews: views, err: err,
 		}
 	}
+
+	return tea.Batch(load, m.startActivityClock(activityWasVisible))
 }
 
 func (m *Model) teamViewsForChildSelector() ([]coding.TeamView, []coding.TeamReadRequest) {
@@ -287,7 +288,7 @@ func (m *Model) filteredChildren() []childSummary {
 func (m *Model) agentsRouteContent() string {
 	lines := []string{"Agents", "", "Search: " + m.route.query, ""}
 	if m.route.loading {
-		return strings.Join(append(lines, "Loading…"), "\n")
+		return strings.Join(append(lines, m.activityNotice("Loading…")), "\n")
 	}
 
 	values := m.filteredChildren()
@@ -301,15 +302,27 @@ func (m *Model) agentsRouteContent() string {
 			marker = "› "
 		}
 
-		lines = append(lines, renderChildSummary(value, marker)...)
+		lines = append(lines, m.renderChildSummary(value, marker)...)
 	}
 
+	if m.route.controlling {
+		label := "Cancelling subagent…"
+		if m.route.controllingChildSet &&
+			m.route.controllingChildKind == childTeamWorker {
+			label = "Interrupting Team Worker…"
+		}
+		lines = append(lines, "", m.activityNotice(label))
+	}
 	lines = append(lines, "", "↑/↓ choose · type to search · Enter inspect · c interrupt · Ctrl+T/Esc close")
 
 	return strings.Join(lines, "\n")
 }
 
-func renderChildSummary(value childSummary, marker string) []string {
+func (m *Model) renderChildSummary(value childSummary, marker string) []string {
+	activity := ""
+	if value.live() {
+		activity = m.activity.Frame() + " "
+	}
 	if value.kind == childTeamWorker {
 		title := value.taskTitle
 		if title == "" {
@@ -326,7 +339,7 @@ func renderChildSummary(value childSummary, marker string) []string {
 
 		return []string{
 			fmt.Sprintf("%s%s", marker, title),
-			fmt.Sprintf("  Team Worker · %s · %s · %s", worker, state,
+			fmt.Sprintf("  %sTeam Worker · %s · %s · %s", activity, worker, state,
 				formatInteractionDuration(value.worker.DurationMillis)),
 		}
 	}
@@ -338,7 +351,7 @@ func renderChildSummary(value childSummary, marker string) []string {
 
 	return []string{
 		fmt.Sprintf("%s%s", marker, preview),
-		fmt.Sprintf("  %s subagent · %s · %s · %s",
+		fmt.Sprintf("  %s%s subagent · %s · %s · %s", activity,
 			value.subagent.Role, value.subagent.State,
 			relativeTime(value.subagent.CreatedAt),
 			formatInteractionDuration(value.subagent.Duration.Milliseconds())),
@@ -541,12 +554,12 @@ func (m *Model) subagentRouteContent(state coding.State, detail *subagent.Detail
 		return flow
 	}
 	if detail == nil {
-		return "Loading subagent activity…"
+		return m.activityNotice("Loading subagent activity…")
 	}
 
 	value := detail.Summary
 	if value.State == subagent.StateCreated || value.State == subagent.StateRunning {
-		return "✻ " + subagentPhaseLabel(detail.Activity.Phase)
+		return m.activityNotice(subagentPhaseLabel(detail.Activity.Phase))
 	}
 
 	return subagentOutcomeText(value)
@@ -910,6 +923,8 @@ func (m *Model) updateTeamWorkerScrollKey(key string) (tea.Cmd, bool) {
 }
 
 func (m *Model) cancelChild(value childSummary) tea.Cmd {
+	m.route.controllingChildKind = value.kind
+	m.route.controllingChildSet = true
 	if value.kind == childTeamWorker {
 		return m.interruptTeamWorker(value.worker.Target)
 	}
@@ -918,15 +933,18 @@ func (m *Model) cancelChild(value childSummary) tea.Cmd {
 }
 
 func (m *Model) cancelSubagent(childSessionID string) tea.Cmd {
+	activityWasVisible := m.activityClockVisible()
 	m.route.controlling = true
 	generation := m.route.generation
 
-	return func() tea.Msg {
+	cancel := func() tea.Msg {
 		return subagentCancelResultMsg{
 			generation: generation, childSessionID: childSessionID,
 			err: m.controller.CancelSubagent(m.ctx, childSessionID),
 		}
 	}
+
+	return tea.Batch(cancel, m.startActivityClock(activityWasVisible))
 }
 
 func (m *Model) subagentRouteView() tea.View {
@@ -941,9 +959,17 @@ func (m *Model) subagentRouteView() tea.View {
 		).Render(strings.Repeat("─", width))
 	}
 
-	body := "Loading child activity…"
-
-	if m.route.childState != nil {
+	body := "Child activity unavailable."
+	switch {
+	case m.route.controlling:
+		label := "Cancelling subagent…"
+		if m.route.childKind == childTeamWorker {
+			label = "Applying Worker control…"
+		}
+		body = m.activityNotice(label)
+	case m.route.childState == nil && (m.route.loading || m.route.refreshing):
+		body = m.activityNotice("Loading child activity…")
+	case m.route.childState != nil:
 		if m.route.childKind == childTeamWorker {
 			body = m.teamWorkerRouteContent(*m.route.childState, m.route.childSummary)
 		} else {
@@ -1070,6 +1096,7 @@ func (m *Model) activateChildRoute(request routeOpenRequest) tea.Cmd {
 }
 
 func (m *Model) activateSubagentRoute(request routeOpenRequest) tea.Cmd {
+	activityWasVisible := m.activityClockVisible()
 	m.routeSeq++
 	m.route = routeState{
 		kind: routeChild, loading: true, generation: m.routeSeq,
@@ -1084,7 +1111,7 @@ func (m *Model) activateSubagentRoute(request routeOpenRequest) tea.Cmd {
 	m.composer.Blur()
 	generation := m.route.generation
 
-	return func() tea.Msg {
+	load := func() tea.Msg {
 		state, stateErr := m.controller.InspectSubagentState(m.ctx, request.childSessionID)
 		detail, detailErr := m.controller.InspectSubagent(m.ctx, request.childSessionID)
 
@@ -1095,6 +1122,8 @@ func (m *Model) activateSubagentRoute(request routeOpenRequest) tea.Cmd {
 			generation: generation, childSessionID: request.childSessionID,
 		}
 	}
+
+	return tea.Batch(load, m.startActivityClock(activityWasVisible))
 }
 
 func (m *Model) invalidateAgentDetail(item streamItem) tea.Cmd {
@@ -1123,11 +1152,12 @@ func (m *Model) refreshSubagentRoute() tea.Cmd {
 		return nil
 	}
 
+	activityWasVisible := m.activityClockVisible()
 	m.route.refreshing = true
 	generation := m.route.generation
 	childSessionID := m.route.childSessionID
 
-	return func() tea.Msg {
+	load := func() tea.Msg {
 		state, stateErr := m.controller.InspectSubagentState(m.ctx, childSessionID)
 		detail, detailErr := m.controller.InspectSubagent(m.ctx, childSessionID)
 
@@ -1138,6 +1168,8 @@ func (m *Model) refreshSubagentRoute() tea.Cmd {
 			background: true, generation: generation, childSessionID: childSessionID,
 		}
 	}
+
+	return tea.Batch(load, m.startActivityClock(activityWasVisible))
 }
 
 //nolint:nestif // Refresh preserves scroll anchoring while applying two independently available views.

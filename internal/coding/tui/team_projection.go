@@ -227,7 +227,7 @@ func (m *Model) projectTeamAttemptBlock(value coding.TeamLifecycle) timelineBloc
 	}
 
 	glyph := "✻"
-	if teamLifecycleActivityVisible(value) {
+	if m.teamLifecycleActivityVisible(value) {
 		glyph = m.activity.Frame()
 	} else if terminalTeamAttempt(value) {
 		glyph = completionGlyph
@@ -241,18 +241,35 @@ func (m *Model) projectTeamAttemptBlock(value coding.TeamLifecycle) timelineBloc
 	}
 }
 
-func teamLifecycleActivityVisible(value coding.TeamLifecycle) bool {
+func (m *Model) teamLifecycleActivityVisible(value coding.TeamLifecycle) bool {
 	if _, ok := exactTeamAttemptKey(value); !ok {
 		return false
 	}
 
-	return value.State == coding.TeamLifecycleRunning ||
-		value.State == coding.TeamLifecycleCapturing
+	view, ok := m.teamProjection.views[value.TeamID]
+	if !ok {
+		return false
+	}
+	for _, attempt := range view.Attempts {
+		if attempt.Target.MemberID != value.MemberID ||
+			attempt.Target.TaskID != value.TaskID ||
+			attempt.Target.AttemptID != value.AttemptID {
+			continue
+		}
+
+		return teamAttemptActivityVisible(attempt)
+	}
+
+	return false
 }
 
 func (m *Model) teamTimelineActivityVisible() bool {
+	if !m.parentActivitySurfaceVisible() {
+		return false
+	}
+
 	for _, state := range m.state.Teams {
-		if teamLifecycleActivityVisible(state.TeamLifecycle) {
+		if m.teamLifecycleActivityVisible(state.TeamLifecycle) {
 			return true
 		}
 	}

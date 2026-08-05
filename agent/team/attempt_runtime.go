@@ -14,7 +14,10 @@ import (
 	"github.com/rsbin/pips/ai"
 )
 
-const defaultAttemptTargetKind = "team_task_attempt"
+const (
+	defaultAttemptTargetKind       = "team_task_attempt"
+	attemptCompletionConflictLimit = 32
+)
 
 var defaultAttemptControllerRef = continuation.HandlerRef{
 	Kind: "team_complete_after_work", Version: "v1",
@@ -282,7 +285,8 @@ type AttemptRunResult struct {
 }
 
 // Run claims/starts the attempt if necessary, creates or resumes its child,
-// and commits a projected terminal result. It performs no polling or retries.
+// and commits a projected terminal result. It performs no polling or work
+// retries; terminal projection commands rebase bounded optimistic conflicts.
 //
 //nolint:gocyclo // The branches are the explicit cross-store recovery states.
 func (runtime *AttemptRuntime) Run(ctx context.Context, request AttemptRunRequest) (AttemptRunResult, error) {
@@ -434,49 +438,97 @@ func (runtime *AttemptRuntime) commitCompletion(
 	mailbox MessagePage,
 	completion AttemptCompletion,
 ) (Team, error) {
-	team, err := runtime.teams.Get(ctx, dispatch.TeamID)
-	if err != nil {
-		return Team{}, err
-	}
 	memberActor := Actor{Kind: ActorKindMember, ID: string(dispatch.MemberID)}
-	request := AttemptRunRequest{TeamID: dispatch.TeamID, TaskID: dispatch.TaskID, AttemptID: dispatch.AttemptID, ContinuationID: dispatch.ContinuationID}
+	request := AttemptRunRequest{
+		TeamID: dispatch.TeamID, TaskID: dispatch.TaskID,
+		AttemptID: dispatch.AttemptID, ContinuationID: dispatch.ContinuationID,
+	}
 	if completion.AcknowledgeMailbox && mailbox.NextAfter > 0 {
-		command, commandErr := runtime.command("ack", request, "", team.Revision, memberActor)
-		if commandErr != nil {
-			return Team{}, commandErr
-		}
-		team, err = runtime.teams.AcknowledgeMessages(ctx, dispatch.TeamID, AcknowledgeMessagesRequest{
-			Command: command, ThroughSequence: mailbox.NextAfter,
+		_, err := runtime.commitCompletionCommand(ctx, dispatch.TeamID, func(current Team) (Team, error) {
+			member, _, found := findMember(current, dispatch.MemberID)
+			if !found {
+				return Team{}, fmt.Errorf("%w: dispatch member missing", ErrCorruptStore)
+			}
+			if member.MailboxAcknowledged >= mailbox.NextAfter {
+				return current, nil
+			}
+			command, commandErr := runtime.command("ack", request, "", current.Revision, memberActor)
+			if commandErr != nil {
+				return Team{}, commandErr
+			}
+
+			return runtime.teams.AcknowledgeMessages(ctx, dispatch.TeamID, AcknowledgeMessagesRequest{
+				Command: command, ThroughSequence: mailbox.NextAfter,
+			})
 		})
 		if err != nil {
 			return Team{}, err
 		}
 	}
 	for _, message := range completion.Messages {
-		command, commandErr := runtime.command("message", request, message.ID, team.Revision, memberActor)
-		if commandErr != nil {
-			return Team{}, commandErr
-		}
-		sent, sendErr := runtime.teams.SendMessage(ctx, dispatch.TeamID, SendMessageRequest{
-			Command:   command,
-			MessageID: message.ID, RecipientID: message.RecipientID, TaskID: dispatch.TaskID,
-			ReplyToID: message.ReplyToID, Body: slices.Clone(message.Body),
+		_, err := runtime.commitCompletionCommand(ctx, dispatch.TeamID, func(current Team) (Team, error) {
+			command, commandErr := runtime.command(
+				"message", request, message.ID, current.Revision, memberActor,
+			)
+			if commandErr != nil {
+				return Team{}, commandErr
+			}
+			sent, sendErr := runtime.teams.SendMessage(ctx, dispatch.TeamID, SendMessageRequest{
+				Command:   command,
+				MessageID: message.ID, RecipientID: message.RecipientID, TaskID: dispatch.TaskID,
+				ReplyToID: message.ReplyToID, Body: slices.Clone(message.Body),
+			})
+			if sendErr != nil {
+				return Team{}, sendErr
+			}
+
+			return sent.Team, nil
 		})
-		if sendErr != nil {
-			return Team{}, sendErr
+		if err != nil {
+			return Team{}, err
 		}
-		team = sent.Team
 	}
-	command, err := runtime.command("finish", request, "", team.Revision, runtime.config.coordinator)
-	if err != nil {
-		return Team{}, err
-	}
-	return runtime.teams.FinishTaskAttempt(ctx, dispatch.TeamID, FinishTaskAttemptRequest{
-		Command: command,
-		TaskID:  dispatch.TaskID, AttemptID: dispatch.AttemptID, ContinuationID: dispatch.ContinuationID,
-		Outcome: completion.Outcome, Result: slices.Clone(completion.Result),
-		Artifacts: cloneArtifacts(completion.Artifacts), Reason: completion.Reason,
+
+	return runtime.commitCompletionCommand(ctx, dispatch.TeamID, func(current Team) (Team, error) {
+		command, err := runtime.command(
+			"finish", request, "", current.Revision, runtime.config.coordinator,
+		)
+		if err != nil {
+			return Team{}, err
+		}
+
+		return runtime.teams.FinishTaskAttempt(ctx, dispatch.TeamID, FinishTaskAttemptRequest{
+			Command: command,
+			TaskID:  dispatch.TaskID, AttemptID: dispatch.AttemptID,
+			ContinuationID: dispatch.ContinuationID,
+			Outcome:        completion.Outcome, Result: slices.Clone(completion.Result),
+			Artifacts: cloneArtifacts(completion.Artifacts), Reason: completion.Reason,
+		})
 	})
+}
+
+func (runtime *AttemptRuntime) commitCompletionCommand(
+	ctx context.Context,
+	teamID ID,
+	commit func(Team) (Team, error),
+) (Team, error) {
+	var conflict error
+	for range attemptCompletionConflictLimit {
+		current, err := runtime.teams.Get(ctx, teamID)
+		if err != nil {
+			return Team{}, err
+		}
+		next, err := commit(current)
+		if errors.Is(err, ErrConflict) {
+			conflict = err
+
+			continue
+		}
+
+		return next, err
+	}
+
+	return Team{}, fmt.Errorf("team: Attempt completion conflict limit: %w", conflict)
 }
 
 func (runtime *AttemptRuntime) command(action string, request AttemptRunRequest, messageID MessageID, revision Revision, actor Actor) (CommandMetadata, error) {

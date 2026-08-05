@@ -30,14 +30,16 @@ const routeSubagent = routeChild
 // routeState holds the full-area surface currently owning view and keyboard
 // input. Each route uses only its relevant payload fields.
 type routeState struct {
-	kind        routeKind
-	generation  uint64
-	cursor      int
-	query       string
-	offset      int
-	loading     bool
-	controlling bool
-	err         error
+	kind                 routeKind
+	generation           uint64
+	cursor               int
+	query                string
+	offset               int
+	loading              bool
+	controlling          bool
+	controllingChildKind childKind
+	controllingChildSet  bool
+	err                  error
 
 	search              textinput.Model
 	sessions            []session.Metadata
@@ -241,6 +243,7 @@ func (m *Model) finishScrollbackWrite(sequence uint64) tea.Cmd {
 // visible. The returned sequence keeps the Composer focus restoration behind
 // the native scrollback insertion.
 func (m *Model) closeRouteToParent() tea.Cmd {
+	activityWasVisible := m.activityClockVisible()
 	m.stopTeamWorkerRouteSubscription()
 	previous := m.route.previousComposer
 	hasPrevious := m.route.hasPreviousComposer
@@ -252,7 +255,10 @@ func (m *Model) closeRouteToParent() tea.Cmd {
 	}
 	m.setLayout()
 
-	return tea.Sequence(m.commitStableTimeline(), m.composer.Focus())
+	return tea.Sequence(
+		m.commitStableTimeline(),
+		tea.Batch(m.composer.Focus(), m.startActivityClock(activityWasVisible)),
+	)
 }
 
 func newChildRouteRequest(previous routeState, child childSummary) routeOpenRequest {

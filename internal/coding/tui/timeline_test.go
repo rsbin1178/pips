@@ -259,7 +259,7 @@ func TestTimelineSummarizesChangesAndDiagnostics(t *testing.T) {
 	)
 	assert.Contains(t, rendered, "Workspace changes · 1 file (+3 -1) · partial report")
 	assert.Contains(t, rendered, "M  main.go")
-	assert.Contains(t, rendered, "/diff for full review")
+	assert.Contains(t, rendered, "/status for repository summary")
 	assert.Contains(t, rendered, "mcp · disabled")
 	assert.NotContains(t, rendered, "diff --git")
 }

@@ -26,16 +26,19 @@ func (m *Model) openSkillPickerForInput(input string) tea.Cmd {
 }
 
 func (m *Model) openSkillPickerAfterDollar() tea.Cmd {
+	activityWasVisible := m.activityClockVisible()
 	generation, ok := m.openInlinePicker('$', pickerSkill)
 	if !ok {
 		return nil
 	}
 
-	return func() tea.Msg {
+	load := func() tea.Msg {
 		snapshot, err := m.controller.Skills(m.ctx)
 
 		return skillPickerDataMsg{generation: generation, snapshot: snapshot.Clone(), err: err}
 	}
+
+	return tea.Batch(load, m.startActivityClock(activityWasVisible))
 }
 
 func (m *Model) canOpenSkillPickerAtCursor() bool {
@@ -160,7 +163,7 @@ func (m *Model) skillPickerView(maxHeight int) string {
 	if len(filtered) == 0 {
 		empty := "No matching user-invocable Skills."
 		if m.picker.loading {
-			empty = "Loading Skills…"
+			empty = m.activityNotice("Loading Skills…")
 		}
 		if footer != "" && !m.picker.loading {
 			empty += "\n" + m.styleCommandPickerFooter(footer)
@@ -241,7 +244,7 @@ func (m *Model) skillPickerFooter() string {
 	case m.picker.err != nil:
 		return "Error: " + safeError(m.picker.err)
 	case m.picker.loading:
-		return "Loading Skills…"
+		return m.activityNotice("Loading Skills…")
 	case m.picker.diagnostics > 0:
 		return fmt.Sprintf(
 			"↑/↓ select · type to filter · Enter insert · Esc cancel · %d diagnostics",

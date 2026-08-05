@@ -74,6 +74,61 @@ type Selection struct {
 	Artifacts        []Artifact `json:"artifacts"`
 }
 
+// AttemptBaseRequest identifies one deterministic dependency base for a
+// consuming Team Attempt. DirectResultOID preserves the single-dependency
+// fast path while still verifying the complete captured closure.
+type AttemptBaseRequest struct {
+	Workspace       string
+	AttemptID       string
+	Timestamp       time.Time
+	Selection       Selection
+	DirectResultOID string
+}
+
+// AttemptBase is the immutable Git evidence used before a Worker Worktree is
+// created. Ref is non-empty only when this manager published an Attempt-owned
+// multi-dependency base.
+type AttemptBase struct {
+	CommitOID         string
+	TreeOID           string
+	Ref               string
+	CompositionDigest string
+	DependencyDigest  string
+	DependencyCount   int
+}
+
+// AttemptBaseCleanupRequest binds deletion to the exact derived owned ref.
+type AttemptBaseCleanupRequest struct {
+	Workspace string
+	TeamID    string
+	AttemptID string
+	Ref       string
+	CommitOID string
+}
+
+// AttemptBaseRetainedError reports uncertain publication after an owned ref
+// mutation. Base is durable evidence that callers must persist before retry.
+type AttemptBaseRetainedError struct {
+	Base  AttemptBase
+	Cause error
+}
+
+func (e *AttemptBaseRetainedError) Error() string {
+	if e == nil || e.Cause == nil {
+		return ErrRetained.Error()
+	}
+
+	return "coding team integration: retained Attempt base: " + e.Cause.Error()
+}
+
+func (e *AttemptBaseRetainedError) Unwrap() []error {
+	if e == nil || e.Cause == nil {
+		return []error{ErrRetained}
+	}
+
+	return []error{ErrRetained, e.Cause}
+}
+
 // ConflictKind classifies an exact entry-level composition conflict.
 type ConflictKind string
 

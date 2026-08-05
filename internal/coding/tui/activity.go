@@ -10,9 +10,11 @@ import (
 	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/rsbin/pips/agent/team"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding"
 	"github.com/rsbin/pips/internal/coding/subagent"
+	"github.com/rsbin/pips/internal/coding/teamstate"
 )
 
 type activityKind uint8
@@ -123,13 +125,123 @@ func (i activityIndicator) View(status activityStatus, theme colorTheme, noColor
 }
 
 func (m *Model) activityClockVisible() bool {
-	if _, visible := m.activityStatus(); visible {
-		return true
+	if m.parentActivitySurfaceVisible() {
+		if _, visible := m.activityStatus(); visible {
+			return true
+		}
 	}
 
-	return m.route.kind == routeTeam && m.route.team != nil && m.route.loading ||
-		m.teamPanelRetryInFlight() || m.teamTimelineActivityVisible() ||
-		m.teamPanelActivityVisible()
+	return m.routeActivityVisible() || m.promptActivityVisible() ||
+		m.picker.loading || m.picker.controlling ||
+		m.agentsRouteActivityVisible() || m.childRouteActivityVisible() ||
+		(m.teamPanelSurfaceVisible() && m.teamPanelRetryInFlight()) ||
+		m.teamTimelineActivityVisible() ||
+		(m.teamPanelSurfaceVisible() && m.teamPanelActivityVisible())
+}
+
+func (m *Model) parentActivitySurfaceVisible() bool {
+	return m.route.kind == routeNone || m.teamRouteIsInline()
+}
+
+func (m *Model) teamPanelSurfaceVisible() bool {
+	return m.parentActivitySurfaceVisible() && m.picker.kind == pickerNone
+}
+
+func (m *Model) routeActivityVisible() bool {
+	switch m.route.kind {
+	case routeSessions, routeSkills, routeAgents, routeTree:
+		return m.route.loading || m.route.controlling
+	case routeChild:
+		return m.route.controlling ||
+			((m.route.loading || m.route.refreshing) && m.route.childState == nil)
+	case routeTeam:
+		return m.route.team != nil && m.route.loading
+	case routeNone, routeToolDetail:
+		return false
+	default:
+		return false
+	}
+}
+
+func (m *Model) promptActivityVisible() bool {
+	return m.prompt.loading ||
+		(m.prompt.kind == promptPlanReview && m.prompt.planReview.loading)
+}
+
+func (m *Model) agentsRouteActivityVisible() bool {
+	if m.route.kind != routeAgents {
+		return false
+	}
+
+	for _, child := range m.route.children {
+		if child.live() {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (m *Model) currentChildRouteSummary() childSummary {
+	child := m.route.childSummary
+	for _, candidate := range m.route.children {
+		if candidate.sameIdentity(child) {
+			return candidate
+		}
+	}
+
+	return child
+}
+
+func (m *Model) childRouteActivityVisible() bool {
+	if m.route.kind != routeChild || !m.currentChildRouteSummary().live() {
+		return false
+	}
+
+	if m.route.childState == nil {
+		return m.route.loading || m.route.refreshing
+	}
+
+	return len(projectTimeline(*m.route.childState)) == 0
+}
+
+func teamAttemptActivityVisible(attempt coding.TeamAttemptView) bool {
+	if teamAttemptNeedsInteraction(attempt) ||
+		attempt.Activity == coding.TeamActivityAwaitingApproval ||
+		attempt.Activity == coding.TeamActivityAwaitingQuestion {
+		return false
+	}
+
+	switch attempt.LifecycleState {
+	case coding.TeamLifecyclePaused, coding.TeamLifecycleRecoverable,
+		coding.TeamLifecycleCompleted, coding.TeamLifecycleFailed,
+		coding.TeamLifecycleCancelled, coding.TeamLifecycleInterrupted:
+		return false
+	case coding.TeamLifecycleProposed, coding.TeamLifecycleAdmitted,
+		coding.TeamLifecycleWaiting, coding.TeamLifecycleRunning,
+		coding.TeamLifecycleCapturing:
+	}
+
+	if attempt.DomainState == team.AttemptStatusFailed ||
+		attempt.DomainState == team.AttemptStatusCompleted ||
+		attempt.DomainState == team.AttemptStatusCancelled {
+		return false
+	}
+
+	if attempt.ResourceState != teamstate.AttemptRunning &&
+		attempt.ResourceState != teamstate.AttemptCapturing {
+		return false
+	}
+
+	return attempt.LifecycleState == coding.TeamLifecycleRunning ||
+		attempt.LifecycleState == coding.TeamLifecycleCapturing ||
+		attempt.DomainState == team.AttemptStatusRunning
+}
+
+func (m *Model) activityNotice(label string) string {
+	return m.activity.View(activityStatus{
+		kind: activityWorking, label: label,
+	}, m.theme, m.options.NoColor)
 }
 
 func (m *Model) startActivityClock(previouslyVisible bool) tea.Cmd {

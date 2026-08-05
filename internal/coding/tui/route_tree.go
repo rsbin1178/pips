@@ -23,16 +23,19 @@ func (m *Model) openTreeRoute(forkMode bool) tea.Cmd {
 }
 
 func (m *Model) activateTreeRoute(forkMode bool) tea.Cmd {
+	activityWasVisible := m.activityClockVisible()
 	m.routeSeq++
 	m.route = routeState{kind: routeTree, loading: true, generation: m.routeSeq, forkMode: forkMode}
 	m.composer.Blur()
 	generation := m.route.generation
 
-	return func() tea.Msg {
+	load := func() tea.Msg {
 		value, err := m.controller.Tree(m.ctx)
 
 		return treeRouteDataMsg{generation: generation, tree: value, err: err}
 	}
+
+	return tea.Batch(load, m.startActivityClock(activityWasVisible))
 }
 
 func (m *Model) updateTreeRouteKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -97,7 +100,7 @@ func (m *Model) treeRouteContent() string {
 	}
 	lines := []string{title, "", "Filter: " + m.route.query, ""}
 	if m.route.loading {
-		return strings.Join(lines, "\n")
+		return strings.Join(append(lines, m.activityNotice("Loading session tree…")), "\n")
 	}
 	values := m.filteredTreeNodes()
 	if len(values) == 0 {

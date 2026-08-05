@@ -748,7 +748,18 @@ func (c stubController) Permissions() runtimecontrol.PermissionState {
 	return state
 }
 
-func (stubController) SetPermissions(context.Context, runtimecontrol.PermissionUpdate) error {
+func (stubController) NewFullAccessConfirmation(
+	context.Context,
+	runtimecontrol.PermissionUpdate,
+) (*runtimecontrol.FullAccessConfirmation, error) {
+	return nil, nil
+}
+
+func (stubController) SetPermissions(
+	context.Context,
+	runtimecontrol.PermissionUpdate,
+	...*runtimecontrol.FullAccessConfirmation,
+) error {
 	return nil
 }
 

@@ -41,6 +41,7 @@ func (m *Model) activateSkillsRoute(previousInput string) tea.Cmd {
 }
 
 func (m *Model) activateSkillsRouteSnapshot(previous composerSnapshot) tea.Cmd {
+	activityWasVisible := m.activityClockVisible()
 	m.routeSeq++
 	m.route = routeState{
 		kind:                routeSkills,
@@ -63,7 +64,10 @@ func (m *Model) activateSkillsRouteSnapshot(previous composerSnapshot) tea.Cmd {
 		}
 	}
 
-	return tea.Batch(m.route.search.Focus(), load)
+	return tea.Batch(
+		m.route.search.Focus(), load,
+		m.startActivityClock(activityWasVisible),
+	)
 }
 
 func (m *Model) updateSkillsRouteKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -103,17 +107,20 @@ func (m *Model) updateSkillsRouteKey(message tea.KeyPressMsg) (tea.Model, tea.Cm
 
 		selected := values[m.route.cursor]
 		enabled := !selected.Enabled
+		activityWasVisible := m.activityClockVisible()
 		m.route.controlling = true
 		m.route.err = nil
 		generation := m.route.generation
 
-		return m, func() tea.Msg {
+		toggle := func() tea.Msg {
 			err := m.controller.SetSkillEnabled(m.ctx, selected.ID, enabled)
 
 			return skillToggleResultMsg{
 				generation: generation, id: selected.ID, enabled: enabled, err: err,
 			}
 		}
+
+		return m, tea.Batch(toggle, m.startActivityClock(activityWasVisible))
 	default:
 		before := m.route.search.Value()
 		var command tea.Cmd
@@ -207,7 +214,7 @@ func (m *Model) skillsRouteContent() (string, int, int) {
 
 func (m *Model) skillsRouteList(maximum int) string {
 	if m.route.loading {
-		return m.styleSessionPickerNotice("Loading Skills…", false)
+		return m.styleSessionPickerNotice(m.activityNotice("Loading Skills…"), false)
 	}
 	if m.route.err != nil && len(m.route.skills) == 0 {
 		return m.styleSessionPickerNotice("Error: "+safeError(m.route.err), true)
@@ -324,7 +331,7 @@ func (m *Model) skillsDiagnosticDetail(maximum int) string {
 
 func (m *Model) skillsRouteFooter(width int) string {
 	if m.route.controlling {
-		return "Saving project Skill settings…"
+		return m.activityNotice("Saving project Skill settings…")
 	}
 	if width < 50 {
 		return "↑/↓ · Space toggle · Ctrl+D details · Esc"

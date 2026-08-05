@@ -93,7 +93,8 @@ type Controller interface {
 	Mode() runtimecontrol.ModeState
 	SetMode(context.Context, coding.OperatingMode) error
 	Permissions() runtimecontrol.PermissionState
-	SetPermissions(context.Context, runtimecontrol.PermissionUpdate) error
+	NewFullAccessConfirmation(context.Context, runtimecontrol.PermissionUpdate) (*runtimecontrol.FullAccessConfirmation, error)
+	SetPermissions(context.Context, runtimecontrol.PermissionUpdate, ...*runtimecontrol.FullAccessConfirmation) error
 	WorkspaceStatus(context.Context) (changes.WorktreeStatus, error)
 	Models() []modelcatalog.Entry
 	Config() config.Config

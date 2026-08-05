@@ -1,18 +1,24 @@
+//nolint:wsl_v5 // Git-backed DAG fixtures keep orchestration evidence adjacent.
 package coding
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/rsbin/pips/agent/team"
+	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding/execution"
 	"github.com/rsbin/pips/internal/coding/execution/gitcontrol"
 	"github.com/rsbin/pips/internal/coding/teamintegration"
@@ -284,6 +290,420 @@ func TestRuntimeIntegratesParallelTeamResultsWithoutChangingGitMetadata(t *testi
 	assert.Equal(t, []string{"worker-a.txt", "worker-b.txt"}, status.Paths)
 }
 
+func TestRuntimeStartsJoinTaskFromComposedDependencyBase(t *testing.T) {
+	t.Parallel()
+
+	model := newParallelTeamWriteModel("first.txt", "second.txt", "join.txt")
+	runtime := openGitTestRuntime(t, model, nil)
+	proposal, err := runtime.ProposeTeam(t.Context(), TeamProposalRequest{
+		Objective: "Create two independent results, then consume both in one join task.",
+		Workers: []TeamWorkerSpec{
+			{Name: "First", Role: "Create the first result."},
+			{Name: "Second", Role: "Create the second result."},
+			{Name: "Join", Role: "Consume both prerequisite results."},
+		},
+		Tasks: []TeamTaskSpec{
+			{ID: "first", Title: "Create first.txt", AssignedWorker: "First"},
+			{ID: "second", Title: "Create second.txt", AssignedWorker: "Second"},
+			{
+				ID: "join", Title: "Create join.txt", AssignedWorker: "Join",
+				Dependencies: []string{"first", "second"},
+			},
+		},
+	})
+	require.NoError(t, err)
+	reference, err := runtime.ConfirmTeam(t.Context(), TeamConfirmation{
+		ProposalID: proposal.ID, Admission: TeamAdmissionClean,
+	})
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		aggregate, getErr := runtime.team.engine.Get(t.Context(), reference.TeamID)
+		if getErr != nil || len(aggregate.Tasks) != 3 {
+			return false
+		}
+		for _, taskValue := range aggregate.Tasks {
+			if taskValue.Status != team.TaskStatusCompleted {
+				return false
+			}
+		}
+		resources, loadErr := runtime.team.state.Load(t.Context(), reference.TeamID)
+
+		return loadErr == nil && len(resources.Attempts) == 3 && runtime.team.ownerCount() == 0
+	}, 60*time.Second, 20*time.Millisecond)
+
+	resources, err := runtime.team.state.Load(t.Context(), reference.TeamID)
+	require.NoError(t, err)
+	byTask := make(map[team.TaskID]teamstate.AttemptResource, len(resources.Attempts))
+	for _, attempt := range resources.Attempts {
+		byTask[attempt.TaskID] = attempt
+	}
+	join := byTask["join"]
+	require.NotEmpty(t, join.Base.OwnedRef)
+	assert.Equal(t, 2, join.Base.DependencyCount)
+	assert.NotEmpty(t, join.Base.DependencyDigest)
+	assert.NotEmpty(t, join.Base.CompositionDigest)
+	assert.Equal(t, join.Base.OID, join.Worktree.BaseOID)
+	for _, taskID := range []team.TaskID{"first", "second"} {
+		assert.Equal(t, resources.Repository.BaseOID, byTask[taskID].Base.OID)
+		assert.Empty(t, byTask[taskID].Base.OwnedRef)
+	}
+
+	runner, err := gitcontrol.New(runtime.opts.GitPath, gitcontrol.DefaultLimits())
+	require.NoError(t, err)
+	baseOID, err := runner.ResolveRef(t.Context(), runtime.workspace.Root(), join.Base.OwnedRef)
+	require.NoError(t, err)
+	assert.Equal(t, join.Base.OID, baseOID)
+	aggregate, err := runtime.team.engine.Get(t.Context(), reference.TeamID)
+	require.NoError(t, err)
+	joinTask, found := taskByID(aggregate.Tasks, "join")
+	require.True(t, found)
+	require.NotEmpty(t, joinTask.Attempts)
+	reprepared, err := (dependencyBasePreparer{manager: runtime.team.integration}).PrepareAttemptBase(
+		t.Context(),
+		AttemptBaseRequest{
+			Team: aggregate, Task: joinTask,
+			AttemptID: joinTask.Attempts[len(joinTask.Attempts)-1].ID,
+			Resources: resources,
+		},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, join.Base, reprepared.Resource)
+	resultTree, err := runner.ResolveTree(
+		t.Context(), runtime.workspace.Root(), join.Worktree.ResultCommitOID,
+	)
+	require.NoError(t, err)
+	entries, err := runner.ListTree(t.Context(), runtime.workspace.Root(), resultTree)
+	require.NoError(t, err)
+	paths := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		paths = append(paths, entry.Path)
+	}
+	assert.Subset(t, paths, []string{"README.md", "first.txt", "second.txt", "join.txt"})
+	status, err := runner.SnapshotStatus(t.Context(), runtime.workspace.Root())
+	require.NoError(t, err)
+	assert.True(t, status.Clean)
+	for _, name := range []string{"first.txt", "second.txt", "join.txt"} {
+		_, statErr := os.Lstat(filepath.Join(runtime.workspace.Root(), name))
+		require.ErrorIs(t, statErr, os.ErrNotExist)
+	}
+
+	resultRefs := []string{
+		byTask["first"].Worktree.ResultRef,
+		byTask["second"].Worktree.ResultRef,
+		join.Worktree.ResultRef,
+	}
+	_, err = runtime.CleanupTeam(t.Context(), TeamCleanupRequest{
+		TeamID: reference.TeamID, ExpectedResourceRevision: resources.Revision,
+		CloseWithoutIntegration: true,
+	})
+	require.NoError(t, err)
+	_, err = runner.ResolveRef(t.Context(), runtime.workspace.Root(), join.Base.OwnedRef)
+	require.ErrorIs(t, err, gitcontrol.ErrNotFound)
+	for _, resultRef := range resultRefs {
+		_, err = runner.ResolveRef(t.Context(), runtime.workspace.Root(), resultRef)
+		require.NoError(t, err)
+	}
+}
+
+func TestRuntimeUsesExactSingleDependencyResultAsAttemptBase(t *testing.T) {
+	t.Parallel()
+
+	runtime := openGitTestRuntime(
+		t,
+		newParallelTeamWriteModel("dependency.txt", "consumer.txt"),
+		nil,
+	)
+	proposal, err := runtime.ProposeTeam(t.Context(), TeamProposalRequest{
+		Objective: "Create one result and consume it without synthesizing another base.",
+		Workers: []TeamWorkerSpec{
+			{Name: "Dependency", Role: "Create dependency.txt."},
+			{Name: "Consumer", Role: "Create consumer.txt from the dependency result."},
+		},
+		Tasks: []TeamTaskSpec{
+			{ID: "dependency", Title: "Create dependency.txt", AssignedWorker: "Dependency"},
+			{
+				ID: "consumer", Title: "Create consumer.txt", AssignedWorker: "Consumer",
+				Dependencies: []string{"dependency"},
+			},
+		},
+	})
+	require.NoError(t, err)
+	reference, err := runtime.ConfirmTeam(t.Context(), TeamConfirmation{
+		ProposalID: proposal.ID, Admission: TeamAdmissionClean,
+	})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		aggregate, getErr := runtime.team.engine.Get(t.Context(), reference.TeamID)
+		if getErr != nil || len(aggregate.Tasks) != 2 {
+			return false
+		}
+		for _, taskValue := range aggregate.Tasks {
+			if taskValue.Status != team.TaskStatusCompleted {
+				return false
+			}
+		}
+		resources, loadErr := runtime.team.state.Load(t.Context(), reference.TeamID)
+
+		return loadErr == nil && len(resources.Attempts) == 2 && runtime.team.ownerCount() == 0
+	}, 60*time.Second, 20*time.Millisecond)
+
+	resources, err := runtime.team.state.Load(t.Context(), reference.TeamID)
+	require.NoError(t, err)
+	byTask := make(map[team.TaskID]teamstate.AttemptResource, len(resources.Attempts))
+	for _, attempt := range resources.Attempts {
+		byTask[attempt.TaskID] = attempt
+	}
+	dependency := byTask["dependency"]
+	consumer := byTask["consumer"]
+	assert.Equal(t, dependency.Worktree.ResultCommitOID, consumer.Base.OID)
+	assert.Equal(t, consumer.Base.OID, consumer.Worktree.BaseOID)
+	assert.Equal(t, 1, consumer.Base.DependencyCount)
+	assert.NotEmpty(t, consumer.Base.DependencyDigest)
+	assert.Empty(t, consumer.Base.OwnedRef)
+	assert.Empty(t, consumer.Base.CompositionDigest)
+}
+
+func TestRuntimeBlocksConflictingDependencyBaseBeforeOpeningJoinWorker(t *testing.T) {
+	t.Parallel()
+
+	model := newConflictingDependencyModel()
+	runtime := openGitTestRuntime(t, model, nil)
+	proposal, err := runtime.ProposeTeam(t.Context(), TeamProposalRequest{
+		Objective: "Detect the conflicting prerequisite results before starting the join Worker.",
+		Workers: []TeamWorkerSpec{
+			{Name: "Left", Role: "Create the left shared-file result."},
+			{Name: "Right", Role: "Create the right shared-file result."},
+			{Name: "Join", Role: "Consume both results only when exact composition succeeds."},
+		},
+		Tasks: []TeamTaskSpec{
+			{ID: "left", Title: "Apply left-change", AssignedWorker: "Left"},
+			{ID: "right", Title: "Apply right-change", AssignedWorker: "Right"},
+			{
+				ID: "join", Title: "Run join-change", AssignedWorker: "Join",
+				Dependencies: []string{"left", "right"},
+			},
+		},
+	})
+	require.NoError(t, err)
+	reference, err := runtime.ConfirmTeam(t.Context(), TeamConfirmation{
+		ProposalID: proposal.ID, Admission: TeamAdmissionClean,
+	})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		aggregate, getErr := runtime.team.engine.Get(t.Context(), reference.TeamID)
+		if getErr != nil {
+			return false
+		}
+		joinTask, found := taskByID(aggregate.Tasks, "join")
+		if !found || joinTask.Status != team.TaskStatusFailed {
+			return false
+		}
+		resources, loadErr := runtime.team.state.Load(t.Context(), reference.TeamID)
+		if loadErr != nil || resources.State != teamstate.StateBlockedConflict {
+			return false
+		}
+		for _, attempt := range resources.Attempts {
+			if attempt.TaskID == "join" {
+				return attempt.State == teamstate.AttemptConflicted && runtime.team.ownerCount() == 0
+			}
+		}
+
+		return false
+	}, 60*time.Second, 20*time.Millisecond)
+
+	resources, err := runtime.team.state.Load(t.Context(), reference.TeamID)
+	require.NoError(t, err)
+	for _, attempt := range resources.Attempts {
+		if attempt.TaskID != "join" {
+			continue
+		}
+		assert.Empty(t, attempt.Base.OID)
+		assert.Empty(t, attempt.Worktree.ID)
+		assert.Empty(t, attempt.Session.SessionID)
+	}
+	assert.Zero(t, model.joinCalls())
+	status, err := gitcontrol.New(runtime.opts.GitPath, gitcontrol.DefaultLimits())
+	require.NoError(t, err)
+	parentStatus, err := status.SnapshotStatus(t.Context(), runtime.workspace.Root())
+	require.NoError(t, err)
+	assert.True(t, parentStatus.Clean)
+}
+
+func TestRuntimeComposesDiamondDependencyClosureExactlyOnce(t *testing.T) {
+	t.Parallel()
+
+	runtime := openGitTestRuntime(
+		t,
+		newParallelTeamWriteModel("root.txt", "left.txt", "right.txt", "diamond.txt"),
+		nil,
+	)
+	proposal, err := runtime.ProposeTeam(t.Context(), TeamProposalRequest{
+		Objective: "Compose a diamond dependency closure in stable Task order.",
+		Workers: []TeamWorkerSpec{
+			{Name: "RootDiamond", Role: "Create root.txt, then the final diamond result."},
+			{Name: "Left", Role: "Create left.txt from root."},
+			{Name: "Right", Role: "Create right.txt from root."},
+		},
+		Tasks: []TeamTaskSpec{
+			{ID: "root", Title: "Create root.txt", AssignedWorker: "RootDiamond"},
+			{
+				ID: "left", Title: "Create left.txt", AssignedWorker: "Left",
+				Dependencies: []string{"root"},
+			},
+			{
+				ID: "right", Title: "Create right.txt", AssignedWorker: "Right",
+				Dependencies: []string{"root"},
+			},
+			{
+				ID: "diamond", Title: "Create diamond.txt", AssignedWorker: "RootDiamond",
+				Dependencies: []string{"left", "right"},
+			},
+		},
+	})
+	require.NoError(t, err)
+	reference, err := runtime.ConfirmTeam(t.Context(), TeamConfirmation{
+		ProposalID: proposal.ID, Admission: TeamAdmissionClean,
+	})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		aggregate, getErr := runtime.team.engine.Get(t.Context(), reference.TeamID)
+		if getErr != nil || len(aggregate.Tasks) != 4 {
+			return false
+		}
+		for _, taskValue := range aggregate.Tasks {
+			if taskValue.Status != team.TaskStatusCompleted {
+				return false
+			}
+		}
+
+		return runtime.team.ownerCount() == 0
+	}, 60*time.Second, 20*time.Millisecond)
+
+	resources, err := runtime.team.state.Load(t.Context(), reference.TeamID)
+	require.NoError(t, err)
+	byTask := make(map[team.TaskID]teamstate.AttemptResource, len(resources.Attempts))
+	for _, attempt := range resources.Attempts {
+		byTask[attempt.TaskID] = attempt
+	}
+	rootResult := byTask["root"].Worktree.ResultCommitOID
+	assert.Equal(t, rootResult, byTask["left"].Base.OID)
+	assert.Equal(t, rootResult, byTask["right"].Base.OID)
+	diamond := byTask["diamond"]
+	assert.Equal(t, 3, diamond.Base.DependencyCount)
+	assert.NotEmpty(t, diamond.Base.OwnedRef)
+	assert.Equal(t, diamond.Base.OID, diamond.Worktree.BaseOID)
+
+	runner, err := gitcontrol.New(runtime.opts.GitPath, gitcontrol.DefaultLimits())
+	require.NoError(t, err)
+	treeOID, err := runner.ResolveTree(
+		t.Context(), runtime.workspace.Root(), diamond.Worktree.ResultCommitOID,
+	)
+	require.NoError(t, err)
+	entries, err := runner.ListTree(t.Context(), runtime.workspace.Root(), treeOID)
+	require.NoError(t, err)
+	paths := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		paths = append(paths, entry.Path)
+	}
+	assert.Subset(
+		t,
+		paths,
+		[]string{"README.md", "root.txt", "left.txt", "right.txt", "diamond.txt"},
+	)
+}
+
+type conflictingDependencyModel struct {
+	mu    sync.Mutex
+	calls map[string]int
+	join  int
+}
+
+func newConflictingDependencyModel() *conflictingDependencyModel {
+	return &conflictingDependencyModel{calls: make(map[string]int, 2)}
+}
+
+func (m *conflictingDependencyModel) Generate(
+	_ context.Context,
+	request ai.Request,
+) (*ai.Response, error) {
+	key := ""
+	for _, message := range request.Messages {
+		if message.Role != ai.RoleUser {
+			continue
+		}
+		text := runtimeMessageText(message)
+		for _, candidate := range []string{"left-change", "right-change", "join-change"} {
+			if strings.Contains(text, candidate) {
+				key = candidate
+				break
+			}
+		}
+	}
+	if key == "" {
+		return nil, errors.New("conflicting dependency model could not identify the task")
+	}
+	m.mu.Lock()
+	if key == "join-change" {
+		m.join++
+		m.mu.Unlock()
+
+		return nil, errors.New("conflicting join Worker must not start")
+	}
+	m.calls[key]++
+	call := m.calls[key]
+	m.mu.Unlock()
+	if call == 1 {
+		content := "left\n"
+		if key == "right-change" {
+			content = "right\n"
+		}
+		arguments, err := json.Marshal(struct {
+			Patch string `json:"patch"`
+		}{Patch: "*** Begin Patch\n*** Add File: shared.txt\n+" +
+			strings.TrimSuffix(content, "\n") + "\n*** End Patch"})
+		if err != nil {
+			return nil, err
+		}
+
+		return runtimeToolResponse("write-"+key, "apply_patch", string(arguments)), nil
+	}
+	if call == 2 {
+		return runtimeTextResponse("Conflicting prerequisite result is ready for capture."), nil
+	}
+
+	return nil, errors.New("conflicting dependency model script exhausted")
+}
+
+func (m *conflictingDependencyModel) Stream(ctx context.Context, request ai.Request) ai.Stream {
+	return func(yield func(ai.StreamEvent, error) bool) {
+		response, err := m.Generate(ctx, request)
+		if err != nil {
+			yield(ai.StreamEvent{}, err)
+
+			return
+		}
+		for _, event := range runtimeResponseEvents(response) {
+			if !yield(event, nil) {
+				return
+			}
+		}
+	}
+}
+
+func (*conflictingDependencyModel) Provider() ai.Provider { return ai.ProviderOpenAI }
+func (*conflictingDependencyModel) ModelID() string       { return "conflicting-team-test" }
+func (*conflictingDependencyModel) Capabilities() ai.Capabilities {
+	return ai.Capabilities{Text: true, Tools: true}
+}
+
+func (m *conflictingDependencyModel) joinCalls() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.join
+}
+
 func TestRuntimeCleanupRequiresExplicitCloseWithoutIntegrationAndRetainsDirtyWorktree(t *testing.T) {
 	t.Parallel()
 
@@ -439,7 +859,7 @@ func openCapturedTeamRuntimeWithPaths(t *testing.T, paths ...string) *Runtime {
 		}
 
 		return runtime.team.ownerCount() == 0
-	}, 10*time.Second, 20*time.Millisecond)
+	}, 60*time.Second, 20*time.Millisecond)
 
 	return runtime
 }

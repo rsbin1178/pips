@@ -4,6 +4,7 @@ package team
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 
 	"github.com/rsbin/pips/agent/continuation"
@@ -20,7 +21,20 @@ func (worker attemptTestWorker) Run(ctx context.Context, request continuation.Wo
 
 func newAttemptTestRuntime(t *testing.T, worker continuation.Worker, projector AttemptResultProjector) (*AttemptRuntime, *testRuntime) {
 	t.Helper()
-	teamRuntime := newMemoryTestRuntime(t)
+	store, err := NewMemoryStore()
+	require.NoError(t, err)
+
+	return newAttemptTestRuntimeWithStore(t, store, worker, projector)
+}
+
+func newAttemptTestRuntimeWithStore(
+	t *testing.T,
+	store Store,
+	worker continuation.Worker,
+	projector AttemptResultProjector,
+) (*AttemptRuntime, *testRuntime) {
+	t.Helper()
+	teamRuntime := newTestRuntime(t, store)
 	continuationStore, err := continuation.NewMemoryStore()
 	require.NoError(t, err)
 	continuations, err := continuation.New(continuationStore)
@@ -39,6 +53,47 @@ func newAttemptTestRuntime(t *testing.T, worker continuation.Worker, projector A
 	)
 	require.NoError(t, err)
 	return runtime, teamRuntime
+}
+
+type attemptCompletionConflictStore struct {
+	Store
+
+	mu        sync.Mutex
+	enabled   bool
+	remaining map[Cause]int
+	injected  int
+}
+
+func (s *attemptCompletionConflictStore) CompareAndSwap(
+	ctx context.Context,
+	id ID,
+	revision Revision,
+	record Record,
+) error {
+	s.mu.Lock()
+	if s.enabled && s.remaining[record.Transition.Cause] > 0 {
+		s.remaining[record.Transition.Cause]--
+		s.injected++
+		s.mu.Unlock()
+
+		return ErrConflict
+	}
+	s.mu.Unlock()
+
+	return s.Store.CompareAndSwap(ctx, id, revision, record)
+}
+
+func (s *attemptCompletionConflictStore) enable() {
+	s.mu.Lock()
+	s.enabled = true
+	s.mu.Unlock()
+}
+
+func (s *attemptCompletionConflictStore) injectedCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.injected
 }
 
 func createAssignedAttemptTask(t *testing.T, teamRuntime *testRuntime) Team {
@@ -104,6 +159,72 @@ func TestAttemptRuntimeRunsDurableLifecycleInOrder(t *testing.T) {
 		CauseMessageSent, CauseTaskClaimed, CauseTaskAttemptStarted,
 		CauseMessagesAcknowledged, CauseMessageSent, CauseTaskAttemptCompleted,
 	}, causes)
+}
+
+func TestAttemptRuntimeRebasesTerminalProjectionCommandsAfterConflicts(t *testing.T) {
+	t.Parallel()
+
+	store, err := NewMemoryStore()
+	require.NoError(t, err)
+	conflicts := &attemptCompletionConflictStore{
+		Store: store,
+		remaining: map[Cause]int{
+			CauseMessagesAcknowledged: 1,
+			CauseMessageSent:          1,
+			CauseTaskAttemptCompleted: 1,
+		},
+	}
+	worker := attemptTestWorker(func(context.Context, continuation.WorkRequest) (continuation.WorkResult, error) {
+		return continuation.WorkResult{
+			Value: ai.JSON(`{"answer":"done"}`), Progress: continuation.ProgressChanged,
+		}, nil
+	})
+	runtime, teamRuntime := newAttemptTestRuntimeWithStore(
+		t,
+		conflicts,
+		worker,
+		AttemptResultProjectorFunc(func(
+			context.Context,
+			AttemptInput,
+			continuation.Execution,
+		) (AttemptCompletion, error) {
+			return AttemptCompletion{
+				Outcome: AttemptOutcomeCompleted, Result: ai.JSON(`{"answer":"done"}`),
+				AcknowledgeMailbox: true,
+				Messages: []AttemptMessage{{
+					ID: "result-message", RecipientID: "lead", Body: ai.JSON(`{"status":"done"}`),
+				}},
+			}, nil
+		}),
+	)
+	teamValue := createAssignedAttemptTask(t, teamRuntime)
+	sent, err := teamRuntime.engine.SendMessage(t.Context(), teamValue.ID, SendMessageRequest{
+		Command:   teamRuntime.member("lead", teamValue.Revision),
+		MessageID: "inbox-message", RecipientID: "worker", TaskID: "task",
+		Body: ai.JSON(`{"request":"go"}`),
+	})
+	require.NoError(t, err)
+	teamValue = sent.Team
+	conflicts.enable()
+
+	result, err := runtime.Run(t.Context(), AttemptRunRequest{
+		TeamID: teamValue.ID, TaskID: "task",
+		AttemptID: "attempt-1", ContinuationID: "execution-1",
+	})
+	require.NoError(t, err)
+	assert.True(t, result.Finished)
+	assert.Equal(t, TaskStatusCompleted, result.Team.Tasks[0].Status)
+	assert.Equal(t, 3, conflicts.injectedCount())
+
+	history, err := teamRuntime.engine.History(t.Context(), teamValue.ID)
+	require.NoError(t, err)
+	counts := make(map[Cause]int)
+	for _, record := range history {
+		counts[record.Transition.Cause]++
+	}
+	assert.Equal(t, 1, counts[CauseMessagesAcknowledged])
+	assert.Equal(t, 2, counts[CauseMessageSent])
+	assert.Equal(t, 1, counts[CauseTaskAttemptCompleted])
 }
 
 func TestAttemptRuntimeCreatesMissingChildAfterCommittedStart(t *testing.T) {
