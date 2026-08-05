@@ -164,8 +164,10 @@ func newSSHPTYHarness(t *testing.T) sshPTYHarness {
 	executable, err := os.Executable()
 	require.NoError(t, err)
 
-	identity, err := inspectSSHExecutable(executable)
-	require.NoError(t, err)
+	identity, err := resolveSSHExecutable()
+	if err != nil {
+		t.Skipf("system OpenSSH unavailable: %v", err)
+	}
 
 	master, slave, err := pty.Open()
 	require.NoError(t, err)
