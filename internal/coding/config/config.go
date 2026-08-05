@@ -14,6 +14,7 @@ import (
 	"github.com/rsbin/pips/agent/harness"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/ai/openai"
+	"github.com/rsbin/pips/internal/coding/statusline"
 )
 
 // ErrInvalid means a configuration value or combination is invalid.
@@ -30,6 +31,7 @@ const (
 	FieldToolSearch     Field = "tool_search"
 	FieldMode           Field = "mode"
 	FieldTheme          Field = "tui.theme"
+	FieldStatusLine     Field = "tui.status_line"
 	FieldSandbox        Field = "sandbox"
 	FieldSandboxNetwork Field = "sandbox_workspace_write.network"
 	FieldApproval       Field = "approval"
@@ -42,6 +44,7 @@ var fields = []Field{
 	FieldToolSearch,
 	FieldMode,
 	FieldTheme,
+	FieldStatusLine,
 	FieldSandbox,
 	FieldSandboxNetwork,
 	FieldApproval,
@@ -77,7 +80,8 @@ const DefaultThemeSelection = ThemeAuto
 // TUIConfig contains presentation-only configuration. It is intentionally not
 // projected into Runtime, Session, or Coding event state.
 type TUIConfig struct {
-	Theme string
+	Theme      string
+	StatusLine []statusline.Item
 }
 
 // SandboxMode selects the application sandbox boundary.
@@ -433,8 +437,11 @@ func Defaults() Config {
 	return Config{
 		Providers: map[ai.Provider]ProviderConfig{},
 		Mode:      ModeAgent,
-		TUI:       TUIConfig{Theme: DefaultThemeSelection},
-		Sandbox:   SandboxWorkspaceWrite,
+		TUI: TUIConfig{
+			Theme:      DefaultThemeSelection,
+			StatusLine: statusline.Default(),
+		},
+		Sandbox: SandboxWorkspaceWrite,
 		SandboxWorkspaceWrite: SandboxWorkspaceWriteConfig{
 			Network: SandboxNetworkOnRequest,
 		},
@@ -452,6 +459,7 @@ func (c Config) Clone() Config {
 	for provider, definition := range cloned.Providers {
 		cloned.Providers[provider] = definition.Clone()
 	}
+	cloned.TUI.StatusLine = slices.Clone(c.TUI.StatusLine)
 	cloned.Models = make([]ModelConfig, len(c.Models))
 	for index := range c.Models {
 		cloned.Models[index] = c.Models[index].Clone()
@@ -550,6 +558,11 @@ func (c Config) ValidateRuntime() error {
 	if c.TUI.Theme != "" {
 		if _, err := ParseThemeSelection(c.TUI.Theme); err != nil {
 			return err
+		}
+	}
+	if c.TUI.StatusLine != nil {
+		if err := statusline.Validate(c.TUI.StatusLine); err != nil {
+			return fmt.Errorf("%w: %w", ErrInvalid, err)
 		}
 	}
 	if err := validateApproval(c.Approval); err != nil {

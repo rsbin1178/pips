@@ -8,6 +8,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/rsbin/pips/internal/coding/config"
 	"github.com/rsbin/pips/internal/coding/statusline"
 	"github.com/rsbin/pips/internal/coding/tasklist"
 	"github.com/stretchr/testify/assert"
@@ -31,10 +32,32 @@ func TestStatusLineRendersContextAndTaskProgress(t *testing.T) {
 	assert.LessOrEqual(t, ansi.StringWidth(model.statusLine()), model.statusLineWidth())
 }
 
+func TestBootstrapAppliesExplicitEmptyStatusLine(t *testing.T) {
+	t.Parallel()
+
+	controller := stubController{
+		state:            readyState(),
+		configStatusLine: []statusline.Item{},
+	}
+	model := newModel(t.Context(), Options{
+		Workspace: "/workspace",
+		StatusLine: []statusline.Item{
+			statusline.Workspace,
+		},
+	})
+	_, _ = model.Update(bootstrapResult{controller: controller})
+
+	assert.NotNil(t, model.statusLineItems)
+	assert.Empty(t, model.statusLineItems)
+}
+
 func TestStatusLinePickerSavesAndCancelHasNoSideEffects(t *testing.T) {
 	t.Parallel()
 
-	controller := stubController{state: readyState()}
+	controller := stubController{
+		state:            readyState(),
+		configStatusLine: []statusline.Item{statusline.Workspace, statusline.Phase},
+	}
 	var saved []statusline.Item
 	model := newModel(t.Context(), Options{
 		Workspace: "/workspace", NoColor: true,
@@ -69,7 +92,10 @@ func TestStatusLinePickerSavesAndCancelHasNoSideEffects(t *testing.T) {
 func TestStatusLinePickerSaveFailureKeepsPreviousSelection(t *testing.T) {
 	t.Parallel()
 
-	controller := stubController{state: readyState()}
+	controller := stubController{
+		state:            readyState(),
+		configStatusLine: []statusline.Item{statusline.Workspace},
+	}
 	model := newModel(t.Context(), Options{
 		Workspace: "/workspace", NoColor: true,
 		StatusLine: []statusline.Item{statusline.Workspace},
@@ -88,4 +114,44 @@ func TestStatusLinePickerSaveFailureKeepsPreviousSelection(t *testing.T) {
 	assert.Equal(t, pickerStatusLine, model.picker.kind)
 	require.ErrorContains(t, model.picker.err, "disk full")
 	assert.Equal(t, []statusline.Item{statusline.Workspace}, model.statusLineItems)
+}
+
+func TestStatusLinePickerDurabilityWarningAppliesCommittedSelection(t *testing.T) {
+	t.Parallel()
+
+	controller := stubController{
+		state:            readyState(),
+		configStatusLine: []statusline.Item{statusline.Workspace},
+	}
+	model := newModel(t.Context(), Options{
+		Workspace: "/workspace",
+		NoColor:   true,
+		SaveStatusLine: func(context.Context, []statusline.Item) error {
+			return config.ErrStatusLineDurability
+		},
+		Bootstrap: func(context.Context, bool) (Controller, error) { return controller, nil },
+	})
+	_, _ = model.Update(bootstrapResult{controller: controller})
+	model.openStatusLinePicker()
+	_, _ = model.updateStatusLinePickerKey(tea.KeyPressMsg{Code: tea.KeySpace, Text: " "})
+	_, command := model.updateStatusLinePickerKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	require.NotNil(t, command)
+	_, _ = model.Update(commandMessage(t, command))
+
+	assert.Equal(t, pickerStatusLine, model.picker.kind)
+	assert.Empty(t, model.statusLineItems)
+	assert.Contains(t, ansi.Strip(model.statusLinePickerView(20)), "status line saved; disk durability is uncertain")
+}
+
+func TestStatusLinePickerUsesSafePersistenceErrorMapping(t *testing.T) {
+	t.Parallel()
+
+	model := readyModel(t, true)
+	model.openStatusLinePicker()
+	model.picker.err = errors.Join(config.ErrDecode, errors.New("/Users/example/config.toml: parser detail"))
+
+	content := ansi.Strip(model.statusLinePickerView(20))
+	assert.Contains(t, content, "Error: status-line configuration is invalid")
+	assert.NotContains(t, content, "/Users/example/config.toml")
+	assert.NotContains(t, content, "parser detail")
 }

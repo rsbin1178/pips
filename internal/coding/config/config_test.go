@@ -8,6 +8,7 @@ import (
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/ai/openai"
 	"github.com/rsbin/pips/internal/coding/config"
+	"github.com/rsbin/pips/internal/coding/statusline"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -22,6 +23,8 @@ func TestDefaults(t *testing.T) {
 	assert.False(t, cfg.ToolSearch)
 	assert.Equal(t, config.ModeAgent, cfg.Mode)
 	assert.Equal(t, config.ThemeAuto, cfg.TUI.Theme)
+	assert.Equal(t, statusline.Default(), cfg.TUI.StatusLine)
+	assert.Contains(t, config.Fields(), config.FieldStatusLine)
 	assert.Equal(t, config.SandboxWorkspaceWrite, cfg.Sandbox)
 	assert.Equal(t, config.SandboxNetworkOnRequest, cfg.SandboxWorkspaceWrite.Network)
 	assert.Equal(t, config.ApprovalOnRequest, cfg.Approval)
@@ -110,6 +113,18 @@ func TestPermissionSourceHelpersAreDetachedAndSafe(t *testing.T) {
 	assert.True(t, base.Equal(restored))
 	assert.False(t, base.Equal(changed))
 	assert.True(t, base.Equal(base.WithSessionOverride(config.FieldModel)))
+}
+
+func TestValidateRuntimeValidatesStatusLine(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Defaults()
+	cfg.Model = config.ModelRef{Provider: ai.ProviderOpenAI, Model: "test"}
+	cfg.TUI.StatusLine = []statusline.Item{}
+	require.NoError(t, cfg.ValidateRuntime())
+
+	cfg.TUI.StatusLine = []statusline.Item{statusline.Item("unknown")}
+	require.ErrorIs(t, cfg.ValidateRuntime(), config.ErrInvalid)
 }
 
 func TestValidateRuntimeAllowsSandboxProfiles(t *testing.T) {
@@ -228,6 +243,10 @@ func TestCloneDetachesNestedValues(t *testing.T) {
 	providerMaxTokens := openai.MaxTokensFieldLegacy
 	modelStreamUsage := openai.StreamUsageOmit
 	cfg := config.Config{
+		TUI: config.TUIConfig{
+			Theme:      config.ThemeAuto,
+			StatusLine: statusline.Default(),
+		},
 		Providers: map[ai.Provider]config.ProviderConfig{
 			ai.ProviderOpenAI: {
 				Compatibility: config.CompatibilityConfig{MaxTokensField: &providerMaxTokens},
@@ -259,6 +278,8 @@ func TestCloneDetachesNestedValues(t *testing.T) {
 	assert.Equal(t, openai.MaxTokensFieldLegacy, *cfg.Providers[ai.ProviderOpenAI].Compatibility.MaxTokensField)
 	assert.Equal(t, openai.StreamUsageOmit, *cfg.Models[0].Compatibility.StreamUsage)
 	assert.False(t, cfg.Equal(cloned))
+	cloned.TUI.StatusLine[0] = statusline.Team
+	assert.Equal(t, statusline.Default(), cfg.TUI.StatusLine)
 	originalNested, ok := cfg.Models[0].Options.ExtraBody["nested"].(map[string]any)
 	require.True(t, ok)
 	assert.Equal(t, true, originalNested["value"])

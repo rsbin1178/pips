@@ -1,12 +1,14 @@
 package tui
 
 import (
+	"errors"
 	"slices"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/rsbin/pips/internal/coding/config"
 	"github.com/rsbin/pips/internal/coding/statusline"
 )
 
@@ -130,7 +132,8 @@ func (m *Model) statusLinePickerView(maxHeight int) string {
 	if preview == "" {
 		preview = "(empty)"
 	}
-	lines := []string{"Status line · saved for future sessions", "Preview: " + preview}
+
+	lines := []string{"Status line · saved in active config.toml", "Preview: " + preview}
 	for index, item := range m.picker.statusItems {
 		cursor := "  "
 		if index == m.picker.cursor {
@@ -151,7 +154,7 @@ func (m *Model) statusLinePickerView(maxHeight int) string {
 		lines = append(lines, m.activityNotice("Saving…"))
 	}
 	if m.picker.err != nil {
-		lines = append(lines, "Error: "+safeError(m.picker.err))
+		lines = append(lines, "Error: "+safeStatusLineError(m.picker.err))
 	}
 	lines = append(lines, "↑/↓ choose · Space toggle · ←/→ reorder · Enter save · Esc cancel")
 	for index := range lines {
@@ -159,4 +162,29 @@ func (m *Model) statusLinePickerView(maxHeight int) string {
 	}
 
 	return truncateHeight(strings.Join(lines, "\n"), max(1, maxHeight))
+}
+
+func safeStatusLineError(err error) string {
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, errStatusLinePersistenceUnavailable):
+		return "status-line persistence is unavailable"
+	case errors.Is(err, config.ErrConflict):
+		return "status-line configuration changed; try again"
+	case errors.Is(err, config.ErrUnsafe):
+		return "status-line configuration is not safe to update"
+	case errors.Is(err, config.ErrStatusLineEditUnsupported):
+		return "status-line configuration shape is unsupported"
+	case errors.Is(err, config.ErrStatusLineDurability):
+		return "status line saved; disk durability is uncertain"
+	case errors.Is(err, config.ErrDecode):
+		return "status-line configuration is invalid"
+	case errors.Is(err, config.ErrFile):
+		return "status-line configuration cannot be read or written"
+	case errors.Is(err, config.ErrInvalid):
+		return "status-line selection is invalid"
+	default:
+		return "status line could not be saved"
+	}
 }

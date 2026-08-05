@@ -10,6 +10,7 @@ import (
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/ai/openai"
 	"github.com/rsbin/pips/internal/coding/config"
+	"github.com/rsbin/pips/internal/coding/statusline"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -20,6 +21,10 @@ func TestLoadThemeSelectionDefaultsAndFileSource(t *testing.T) {
 	result, err := config.Load(config.LoadOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, config.ThemeAuto, result.Config.TUI.Theme)
+	assert.Equal(t, statusline.Default(), result.Config.TUI.StatusLine)
+	statusSource, ok := result.Config.Source(config.FieldStatusLine)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceDefault, statusSource.Kind)
 	source, ok := result.Config.Source(config.FieldTheme)
 	require.True(t, ok)
 	assert.Equal(t, config.SourceDefault, source.Kind)
@@ -33,6 +38,53 @@ func TestLoadThemeSelectionDefaultsAndFileSource(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, config.SourceConfigFile, source.Kind)
 	assert.Equal(t, path, source.Detail)
+}
+
+func TestLoadStatusLineSelectionFileOverrideAndProvenance(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, "[tui]\ntheme = \"nord\"\nstatus_line = [\"workspace\", \"phase\", \"model\"]\n")
+
+	result, err := config.Load(config.LoadOptions{ConfigFile: path})
+	require.NoError(t, err)
+	assert.Equal(t, []statusline.Item{statusline.Workspace, statusline.Phase, statusline.Model}, result.Config.TUI.StatusLine)
+	source, ok := result.Config.Source(config.FieldStatusLine)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceConfigFile, source.Kind)
+	assert.Equal(t, path, source.Detail)
+}
+
+func TestLoadStatusLineSelectionPreservesExplicitEmpty(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, "[tui]\nstatus_line = []\n")
+
+	result, err := config.Load(config.LoadOptions{ConfigFile: path})
+	require.NoError(t, err)
+	assert.NotNil(t, result.Config.TUI.StatusLine)
+	assert.Empty(t, result.Config.TUI.StatusLine)
+	source, ok := result.Config.Source(config.FieldStatusLine)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceConfigFile, source.Kind)
+}
+
+func TestLoadStatusLineSelectionRejectsUnknownAndDuplicateItems(t *testing.T) {
+	t.Parallel()
+
+	for _, content := range []string{
+		"[tui]\nstatus_line = [\"workspace\", \"unknown\"]\n",
+		"[tui]\nstatus_line = [\"workspace\", \"workspace\"]\n",
+	} {
+		t.Run(content, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "config.toml")
+			writeFile(t, path, content)
+			_, err := config.Load(config.LoadOptions{ConfigFile: path})
+			require.ErrorIs(t, err, config.ErrInvalid)
+		})
+	}
 }
 
 func TestLoadThemeSelectionEmptyNormalizesToAuto(t *testing.T) {
