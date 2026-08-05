@@ -8,7 +8,6 @@ import (
 	"github.com/rsbin/pips/internal/coding/config"
 	"github.com/rsbin/pips/internal/coding/statusline"
 	"github.com/rsbin/pips/internal/coding/tui"
-	"github.com/rsbin/pips/internal/coding/tuiconfig"
 	"github.com/rsbin/pips/internal/coding/workspace"
 	"github.com/spf13/cobra"
 )
@@ -71,11 +70,7 @@ func runInteractiveTarget(
 	}
 
 	_, noColor := dependencies.LookupEnv("NO_COLOR")
-	preferenceStore := tuiconfig.NewStore(dependencies.Paths.TUIFile())
-	preferences, err := preferenceStore.Load()
-	if err != nil {
-		return err
-	}
+	allowConfigCreate := strings.TrimSpace(flags.configFile) == ""
 
 	return dependencies.RunTUI(cmd.Context(), tui.Options{
 		Input:          cmd.InOrStdin(),
@@ -87,15 +82,18 @@ func runInteractiveTarget(
 		NoColor:        noColor,
 		Bootstrap:      bootstrap,
 		ImageIngress:   ingress,
-		StatusLine:     preferences.StatusLine,
 		SaveStatusLine: func(_ context.Context, items []statusline.Item) error {
-			return preferenceStore.Save(tuiconfig.Settings{StatusLine: items})
+			return config.SaveStatusLineWithOptions(
+				resolved.configFile,
+				items,
+				config.TUIConfigSaveOptions{AllowCreate: allowConfigCreate},
+			)
 		},
 		SaveTheme: func(_ context.Context, theme string) error {
 			return config.SaveThemeWithOptions(
 				resolved.configFile,
 				theme,
-				config.ThemeSaveOptions{AllowCreate: strings.TrimSpace(flags.configFile) == ""},
+				config.TUIConfigSaveOptions{AllowCreate: allowConfigCreate},
 			)
 		},
 		OnExit: func(info tui.ExitInfo) error {

@@ -17,6 +17,7 @@ import (
 	"github.com/rsbin/pips/internal/coding/changes"
 	"github.com/rsbin/pips/internal/coding/config"
 	"github.com/rsbin/pips/internal/coding/runtimecontrol"
+	"github.com/rsbin/pips/internal/coding/statusline"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -712,7 +713,8 @@ func readyState() coding.State {
 
 type stubController struct {
 	Controller
-	state coding.State
+	state            coding.State
+	configStatusLine []statusline.Item
 }
 
 func (c stubController) Snapshot() coding.State { return c.state.Clone() }
@@ -785,6 +787,10 @@ func (c stubController) Config() config.Config {
 	value := config.Defaults()
 	value.Model.Provider = c.state.Provider
 	value.Model.Model = c.state.ModelID
+	if c.configStatusLine != nil {
+		value.TUI.StatusLine = make([]statusline.Item, len(c.configStatusLine))
+		copy(value.TUI.StatusLine, c.configStatusLine)
+	}
 
 	return value
 }

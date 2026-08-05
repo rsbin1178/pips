@@ -235,7 +235,7 @@ this invocation. It does not enable project configuration, grant a tool or
 Skill-script approval, approve an MCP server, or enable Full Access. The trust
 decision is audited on stderr.
 
-### Interactive TUI themes
+### Interactive TUI themes and status line
 
 The interactive TUI supports the automatic selection `auto` and these built-in
 IDs:
@@ -257,33 +257,42 @@ not changed by later background messages. Theme changes update the managed
 TUI view, input styles, Markdown rendering, and theme-separated Markdown
 cache entries without restarting the session.
 
-The selected ID is stored in the active configuration file under `[tui]`:
+All TUI selections are stored together in the active configuration file under
+`[tui]`:
 
 ```toml
 [tui]
 theme = "nord"
+status_line = ["workspace", "session", "model", "phase"]
 ```
 
-Theme selection is file-only: there is no `PIPS_THEME` environment variable or
-`--theme` flag. An absent `[tui]` table, absent `theme`, or empty value means
-`auto`. A well-formed but unavailable ID is accepted by configuration loading,
+Theme and status-line selection are file-only: there is no `PIPS_THEME`,
+`--theme`, status-line environment variable, or status-line flag. An absent
+`[tui]` table or absent `theme` means `auto`; an absent `status_line` uses the
+built-in default order. An explicit `status_line = []` is a valid empty
+configurable line; transient safety and operation indicators may still appear.
+A well-formed but unavailable theme ID is accepted by configuration loading,
 but the TUI falls back to `auto` when the registry cannot resolve it and shows
-a bounded notice. A failed theme save leaves both the file and the currently
-applied theme unchanged. If the atomic replacement has already committed but
-its parent-directory sync is uncertain, the TUI applies the selected theme,
-keeps the picker open, and shows a bounded durability warning so the user can
-cancel or retry.
+a bounded notice.
 
-`--config <path>` selects the active file for both configuration loading and
-`/theme` persistence. It is a replacement path, not an overlay. An existing
-explicit target must be a safe regular non-symlink file; a missing explicit
-target is not created. The default configuration may be created when saving a
-theme, and the writer changes only the `[tui].theme` scalar while preserving
-unrelated bytes, comments, and settings. Malformed, unknown-field, ambiguous,
-unsafe, or concurrently changed files are rejected rather than overwritten. To
-keep the source-preserving editor fail-closed, files containing TOML multiline
-strings are rejected for theme edits rather than risking a match inside
-unrelated content.
+`/statusline` keeps the existing picker interactions: toggle and reorder items,
+preview the result, press Enter to save, or press Esc to cancel. `/theme` and
+`/statusline` each update only their own `[tui]` field, so saving one never
+removes the other. A failed save leaves the file and active presentation state
+unchanged. If an atomic replacement has already committed but its
+parent-directory sync is uncertain, the selected value is applied, the
+relevant picker stays open, and a bounded durability warning is shown.
+
+`--config <path>` selects the active file for loading and for both `/theme` and
+`/statusline` persistence. It is a replacement path, not an overlay. An
+existing explicit target must be a safe regular non-symlink file; a missing
+explicit target is not created. The default configuration may be created when
+saving a TUI preference. The source-preserving writer changes only the selected
+`[tui]` scalar or array while preserving unrelated bytes, comments, and
+settings. Malformed, unknown-field, ambiguous, unsafe, or concurrently changed
+files are rejected rather than overwritten. To keep the editor fail-closed,
+files containing TOML multiline strings or multiline `status_line` arrays are
+rejected rather than risking a match inside unrelated content.
 
 User themes are independent files below `$PIPS_HOME/themes` (normally
 `~/.pips/themes`). Discovery does not create the directory. A theme file's
@@ -327,10 +336,13 @@ directory is replaced during a scan, custom entries are discarded for that
 scan. The active resolved theme remains usable for the current run even if its
 file is later changed or removed; the next picker scan discovers the new state.
 
-The theme definition is display-only. It is never written to `config.toml`,
-Runtime events, Session history, or `tui.json`. `tui.json` remains the strict,
-status-line-only preference file. `NO_COLOR` still suppresses ANSI output while
-preserving the same layout and width behavior. See the small
+Theme definitions remain display-only. They are never written to Runtime
+events or Session history; only the selected theme ID is stored in
+`config.toml`. Existing `$PIPS_HOME/tui.json` files are ignored completely:
+they are not read, migrated, written, or deleted. If `[tui].status_line` is
+absent, Pips uses the built-in default instead. `NO_COLOR` still suppresses
+ANSI output while preserving the same layout and width behavior. See the
+[TUI config example](examples/tui-config.toml) and the small
 [custom theme example](examples/tui-theme.toml).
 
 User Skills are discovered from `~/.pips/skills` and the ecosystem-standard

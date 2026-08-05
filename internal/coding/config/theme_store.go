@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/rsbin/pips/internal/coding/statusline"
 )
 
 var (
@@ -20,14 +22,32 @@ var (
 	ErrConflict = errors.New("coding config: revision conflict")
 	// ErrUnsafe means a config target or parent does not satisfy the safe writer contract.
 	ErrUnsafe = errors.New("coding config: unsafe filesystem object")
-	// ErrThemeEditUnsupported means the source is valid TOML but not safely editable
-	// by the narrow [tui].theme editor.
+	// ErrTUIConfigEditUnsupported means the source is valid TOML but not safely
+	// editable by the narrow single-field [tui] preference editor.
+	ErrTUIConfigEditUnsupported = errors.New("coding config: unsupported TUI preference edit shape")
+	// ErrThemeEditUnsupported retains the theme-specific source-shape sentinel
+	// used by existing callers while remaining classifiable as a TUI edit error.
 	ErrThemeEditUnsupported = errors.New("coding config: unsupported theme edit shape")
-	// ErrThemeDurability means the target was atomically replaced, but the
-	// containing directory could not be synchronized. Callers must treat the
-	// selected theme as committed while recognizing that its durability is
-	// uncertain.
+	// ErrStatusLineEditUnsupported identifies an unsafe status-line source shape.
+	ErrStatusLineEditUnsupported = errors.New("coding config: unsupported status-line edit shape")
+	// ErrThemeDurability retains the established theme error contract. The
+	// target was replaced, but the parent directory could not be synchronized.
 	ErrThemeDurability = errors.New("coding config: theme commit durability uncertain")
+	// ErrStatusLineDurability identifies a committed status-line replacement
+	// whose parent directory could not be synchronized.
+	ErrStatusLineDurability = errors.New("coding config: status line commit durability uncertain")
+	// ErrTUIConfigDurability is the generalized classification shared by both
+	// field-specific durability errors.
+	ErrTUIConfigDurability = errors.New("coding config: TUI preference commit durability uncertain")
+
+	// ErrTUIConfigConflict aliases ErrConflict for TUI preference callers.
+	ErrTUIConfigConflict = ErrConflict
+	// ErrTUIConfigUnsafe aliases ErrUnsafe for TUI preference callers.
+	ErrTUIConfigUnsafe = ErrUnsafe
+	// ErrStatusLineConflict aliases ErrConflict for status-line callers.
+	ErrStatusLineConflict = ErrConflict
+	// ErrStatusLineUnsafe aliases ErrUnsafe for status-line callers.
+	ErrStatusLineUnsafe = ErrUnsafe
 
 	// ErrThemeConflict aliases ErrConflict for presentation-specific callers.
 	ErrThemeConflict = ErrConflict
@@ -35,18 +55,22 @@ var (
 	ErrThemeUnsafe = ErrUnsafe
 )
 
-// ThemeSaveOptions controls whether a missing target may be created. The
-// default SaveTheme helper permits creation for the default config path; an
-// explicit --config target should use AllowCreate=false.
-type ThemeSaveOptions struct {
+// TUIConfigSaveOptions controls whether a missing target may be created. The
+// default SaveTheme and SaveStatusLine helpers (where applicable) permit
+// creation for the default config path; an explicit --config target should use
+// AllowCreate=false.
+type TUIConfigSaveOptions struct {
 	AllowCreate bool
 }
+
+// ThemeSaveOptions is retained as a source-compatible name for theme callers.
+type ThemeSaveOptions = TUIConfigSaveOptions
 
 // ThemeStore persists only the [tui].theme scalar in one active config file.
 // It never marshals or reconstructs the complete Config value.
 type ThemeStore struct {
 	path    string
-	options ThemeSaveOptions
+	options TUIConfigSaveOptions
 }
 
 // NewThemeStore returns a theme editor that may create a missing target.
@@ -73,14 +97,34 @@ func (store *ThemeStore) Save(theme string) error {
 // config, while callers editing an explicit --config target should use
 // SaveThemeWithOptions with AllowCreate=false.
 func SaveTheme(path, theme string) error {
-	return saveTheme(path, theme, ThemeSaveOptions{AllowCreate: true})
+	return saveTheme(path, theme, TUIConfigSaveOptions{AllowCreate: true})
 }
 
 // SaveThemeWithOptions persists theme with explicit missing-target behavior.
-// If the returned error matches ErrThemeDurability, the target replacement
-// already committed and only directory-entry durability is uncertain.
-func SaveThemeWithOptions(path, theme string, options ThemeSaveOptions) error {
+// If the returned error matches ErrThemeDurability or
+// ErrTUIConfigDurability, the target replacement already committed and only
+// directory-entry durability is uncertain.
+func SaveThemeWithOptions(path, theme string, options TUIConfigSaveOptions) error {
 	return saveTheme(path, theme, options)
+}
+
+// SaveStatusLine persists status-line preferences to a default config target,
+// allowing the target and its missing parent directories to be created.
+func SaveStatusLine(path string, items []statusline.Item) error {
+	return SaveStatusLineWithOptions(path, items, TUIConfigSaveOptions{AllowCreate: true})
+}
+
+// SaveStatusLineWithOptions persists only [tui].status_line with the same
+// source-preserving and atomic replacement contract as SaveThemeWithOptions.
+func SaveStatusLineWithOptions(path string, items []statusline.Item, options TUIConfigSaveOptions) error {
+	if err := statusline.Validate(items); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalid, err)
+	}
+
+	return saveTUIConfig(path, tuiPreferenceEdit{
+		field: tuiFieldStatusLine,
+		value: formatStatusLine(items),
+	}, options)
 }
 
 type themePathLocks struct {
@@ -104,11 +148,19 @@ func (locks *themePathLocks) lock(path string) func() {
 	return mutex.Unlock
 }
 
-func saveTheme(path, theme string, options ThemeSaveOptions) error {
+func saveTheme(path, theme string, options TUIConfigSaveOptions) error {
 	selection, err := ParseThemeSelection(theme)
 	if err != nil {
 		return err
 	}
+
+	return saveTUIConfig(path, tuiPreferenceEdit{
+		field: tuiFieldTheme,
+		value: strconv.Quote(selection),
+	}, options)
+}
+
+func saveTUIConfig(path string, edit tuiPreferenceEdit, options TUIConfigSaveOptions) error {
 	absolute, err := normalizeThemePath(path)
 	if err != nil {
 		return err
@@ -116,7 +168,7 @@ func saveTheme(path, theme string, options ThemeSaveOptions) error {
 	unlock := globalThemePathLocks.lock(absolute)
 	defer unlock()
 
-	return saveThemeLocked(absolute, selection, options)
+	return saveTUIConfigLocked(absolute, edit, options)
 }
 
 type themeRevision struct {
@@ -127,7 +179,41 @@ type themeRevision struct {
 	data           []byte
 }
 
-func saveThemeLocked(path, selection string, options ThemeSaveOptions) error {
+type tuiPreferenceField string
+
+const (
+	tuiFieldTheme      tuiPreferenceField = "theme"
+	tuiFieldStatusLine tuiPreferenceField = "status_line"
+)
+
+type tuiPreferenceEdit struct {
+	field tuiPreferenceField
+	value string
+}
+
+func tuiEditUnsupportedError(field tuiPreferenceField) error {
+	if field == tuiFieldStatusLine {
+		return ErrStatusLineEditUnsupported
+	}
+
+	return ErrThemeEditUnsupported
+}
+
+func formatStatusLine(items []statusline.Item) string {
+	var builder strings.Builder
+	builder.WriteByte('[')
+	for index, item := range items {
+		if index > 0 {
+			builder.WriteString(", ")
+		}
+		builder.WriteString(strconv.Quote(string(item)))
+	}
+	builder.WriteByte(']')
+
+	return builder.String()
+}
+
+func saveTUIConfigLocked(path string, edit tuiPreferenceEdit, options TUIConfigSaveOptions) error {
 	parent := filepath.Dir(path)
 	parentIdentity, err := ensureThemeParent(parent, options.AllowCreate)
 	if err != nil {
@@ -141,9 +227,9 @@ func saveThemeLocked(path, selection string, options ThemeSaveOptions) error {
 
 	var edited []byte
 	if revision.exists {
-		edited, err = editThemeSource(path, revision.data, selection)
+		edited, err = editTUISource(path, revision.data, edit)
 	} else {
-		edited = []byte("[tui]\ntheme = " + strconv.Quote(selection) + "\n")
+		edited = []byte("[tui]\n" + string(edit.field) + " = " + edit.value + "\n")
 	}
 	if err != nil {
 		return err
@@ -152,7 +238,7 @@ func saveThemeLocked(path, selection string, options ThemeSaveOptions) error {
 		return err
 	}
 
-	return atomicallyReplaceTheme(path, parent, revision, edited)
+	return atomicallyReplaceTUI(path, parent, revision, edited, edit.field)
 }
 
 func normalizeThemePath(path string) (string, error) {
@@ -304,17 +390,22 @@ func validateThemeConfig(path string, data []byte) error {
 	return nil
 }
 
-func editThemeSource(path string, data []byte, selection string) ([]byte, error) {
-	location, err := locateThemeSource(data)
+func editTUISource(path string, data []byte, edit tuiPreferenceEdit) ([]byte, error) {
+	location, err := locateTUISource(data)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %q: %w", ErrThemeEditUnsupported, path, err)
+		return nil, fmt.Errorf(
+			"%w: %w: %q: %w",
+			tuiEditUnsupportedError(edit.field), ErrTUIConfigEditUnsupported, path, err,
+		)
 	}
-	value := []byte("theme = " + strconv.Quote(selection) + "\n")
-	if location.hasTheme {
-		result := make([]byte, 0, len(data)+len(value))
-		result = append(result, data[:location.valueStart]...)
-		result = append(result, strconv.Quote(selection)...)
-		result = append(result, data[location.valueEnd:]...)
+
+	value := []byte(string(edit.field) + " = " + edit.value + "\n")
+	valueStart, valueEnd, present := location.assignment(edit.field)
+	if present {
+		result := make([]byte, 0, len(data)+len(edit.value))
+		result = append(result, data[:valueStart]...)
+		result = append(result, edit.value...)
+		result = append(result, data[valueEnd:]...)
 
 		return result, nil
 	}
@@ -347,25 +438,39 @@ func editThemeSource(path string, data []byte, selection string) ([]byte, error)
 	return result, nil
 }
 
-type themeSourceLocation struct {
-	hasTable   bool
-	hasTheme   bool
-	valueStart int
-	valueEnd   int
-	tableEnd   int
+type tuiSourceLocation struct {
+	hasTable             bool
+	themeValueStart      int
+	themeValueEnd        int
+	statusLineValueStart int
+	statusLineValueEnd   int
+	hasTheme             bool
+	hasStatusLine        bool
+	tableEnd             int
+}
+
+func (location tuiSourceLocation) assignment(field tuiPreferenceField) (int, int, bool) {
+	switch field {
+	case tuiFieldTheme:
+		return location.themeValueStart, location.themeValueEnd, location.hasTheme
+	case tuiFieldStatusLine:
+		return location.statusLineValueStart, location.statusLineValueEnd, location.hasStatusLine
+	default:
+		return 0, 0, false
+	}
 }
 
 //nolint:gocyclo,nestif // Source-shape validation is intentionally fail-closed and explicit.
-func locateThemeSource(data []byte) (themeSourceLocation, error) {
+func locateTUISource(data []byte) (tuiSourceLocation, error) {
 	// The editor is deliberately conservative: without a TOML lexer it cannot
 	// distinguish table-looking text inside a multiline string from syntax.
 	// Rejecting any multiline string preserves unrelated source bytes rather
 	// than risking an edit in the wrong logical table.
 	if bytes.Contains(data, []byte(`"""`)) || bytes.Contains(data, []byte(`'''`)) {
-		return themeSourceLocation{}, errors.New("multiline TOML strings are not safely editable")
+		return tuiSourceLocation{}, errors.New("multiline TOML strings are not safely editable")
 	}
 
-	location := themeSourceLocation{tableEnd: len(data)}
+	location := tuiSourceLocation{tableEnd: len(data)}
 	activeTUI := false
 	for _, line := range sourceLines(data) {
 		trimmed := strings.TrimSpace(line.text)
@@ -375,11 +480,11 @@ func locateThemeSource(data []byte) (themeSourceLocation, error) {
 
 		if name, array, ok := parseThemeTableHeader(trimmed); ok {
 			if strings.HasPrefix(name, "tui.") || (array && (name == "tui" || strings.HasPrefix(name, "tui."))) {
-				return themeSourceLocation{}, errors.New("nested or array [tui] tables are not supported")
+				return tuiSourceLocation{}, errors.New("nested or array [tui] tables are not supported")
 			}
 			if name == "tui" {
 				if array || location.hasTable {
-					return themeSourceLocation{}, errors.New("[tui] is ambiguous or repeated")
+					return tuiSourceLocation{}, errors.New("[tui] is ambiguous or repeated")
 				}
 				location.hasTable = true
 				activeTUI = true
@@ -393,22 +498,36 @@ func locateThemeSource(data []byte) (themeSourceLocation, error) {
 		}
 
 		if assignment, ok := themeAssignmentKey(trimmed); ok {
-			if assignment == "tui" || assignment == "tui.theme" || strings.HasPrefix(assignment, "tui.") {
-				return themeSourceLocation{}, errors.New("dotted or inline tui assignments are not supported")
+			if assignment == "tui" || assignment == "tui.theme" || assignment == "tui.status_line" || strings.HasPrefix(assignment, "tui.") {
+				return tuiSourceLocation{}, errors.New("dotted or inline tui assignments are not supported")
 			}
-			if !activeTUI || assignment != "theme" {
+			if !activeTUI {
 				continue
 			}
-			if location.hasTheme {
-				return themeSourceLocation{}, errors.New("theme is repeated")
+			switch assignment {
+			case "theme":
+				if location.hasTheme {
+					return tuiSourceLocation{}, errors.New("theme is repeated")
+				}
+				start, end, err := themeValueRange(line.text, line.start)
+				if err != nil {
+					return tuiSourceLocation{}, err
+				}
+				location.hasTheme = true
+				location.themeValueStart = start
+				location.themeValueEnd = end
+			case "status_line":
+				if location.hasStatusLine {
+					return tuiSourceLocation{}, errors.New("status_line is repeated")
+				}
+				start, end, err := statusLineValueRange(line.text, line.start)
+				if err != nil {
+					return tuiSourceLocation{}, err
+				}
+				location.hasStatusLine = true
+				location.statusLineValueStart = start
+				location.statusLineValueEnd = end
 			}
-			start, end, err := themeValueRange(line.text, line.start)
-			if err != nil {
-				return themeSourceLocation{}, err
-			}
-			location.hasTheme = true
-			location.valueStart = start
-			location.valueEnd = end
 		}
 	}
 	if activeTUI {
@@ -534,7 +653,63 @@ func themeValueRange(line string, lineStart int) (int, int, error) {
 	return 0, 0, errors.New("unterminated theme value")
 }
 
+// statusLineValueRange accepts only a complete, single-line TOML array. The
+// strict decoder validates the element types and values; this scanner only
+// identifies the exact source bytes that are safe to replace.
+//
+//nolint:gocyclo // Quoted array scanning handles each TOML string edge explicitly.
+func statusLineValueRange(line string, lineStart int) (int, int, error) {
+	equal := strings.IndexByte(line, '=')
+	valueStart := equal + 1
+	for valueStart < len(line) && (line[valueStart] == ' ' || line[valueStart] == '\t') {
+		valueStart++
+	}
+	if valueStart >= len(line) || line[valueStart] != '[' {
+		return 0, 0, errors.New("status_line value must be a single-line array")
+	}
+
+	depth := 0
+	for index := valueStart; index < len(line); index++ {
+		switch line[index] {
+		case '"', '\'':
+			quote := line[index]
+			for index++; index < len(line); index++ {
+				if quote == '"' && line[index] == '\\' {
+					index++
+					continue
+				}
+				if line[index] == quote {
+					break
+				}
+			}
+		case '[':
+			depth++
+		case ']':
+			depth--
+			if depth == 0 {
+				rest := strings.TrimSpace(line[index+1:])
+				if rest != "" && !strings.HasPrefix(rest, "#") {
+					return 0, 0, errors.New("status_line value has an unsupported trailing expression")
+				}
+
+				return lineStart + valueStart, lineStart + index + 1, nil
+			}
+		}
+	}
+
+	return 0, 0, errors.New("multiline or unterminated status_line value is not supported")
+}
+
 func atomicallyReplaceTheme(path, parent string, revision themeRevision, data []byte) error {
+	return atomicallyReplaceTUI(path, parent, revision, data, tuiFieldTheme)
+}
+
+func atomicallyReplaceTUI(
+	path, parent string,
+	revision themeRevision,
+	data []byte,
+	field tuiPreferenceField,
+) error {
 	if err := verifyThemeRevision(path, parent, revision); err != nil {
 		return err
 	}
@@ -578,7 +753,15 @@ func atomicallyReplaceTheme(path, parent string, revision themeRevision, data []
 	}
 	committed = true
 	if err := syncThemeDirectory(parent); err != nil {
-		return fmt.Errorf("%w: config replacement committed but parent directory sync failed: %w", ErrThemeDurability, err)
+		durabilityErr := ErrThemeDurability
+		if field == tuiFieldStatusLine {
+			durabilityErr = ErrStatusLineDurability
+		}
+
+		return fmt.Errorf(
+			"%w: %w: config replacement committed but parent directory sync failed: %w",
+			durabilityErr, ErrTUIConfigDurability, err,
+		)
 	}
 
 	return nil

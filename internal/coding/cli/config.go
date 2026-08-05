@@ -62,6 +62,10 @@ func newConfigShowCommand(dependencies Dependencies, flags *rootFlags) *cobra.Co
 			if err != nil {
 				return err
 			}
+			statusLine, err := json.Marshal(state.config.Config.TUI.StatusLine)
+			if err != nil {
+				return fmt.Errorf("coding cli: encode status-line summary: %w", err)
+			}
 			values := map[config.Field]string{
 				config.FieldModel:      quotedOrUnset(state.config.Config.Model.String()),
 				config.FieldVariant:    quotedOrUnset(state.config.Config.Variant),
@@ -69,6 +73,7 @@ func newConfigShowCommand(dependencies Dependencies, flags *rootFlags) *cobra.Co
 				config.FieldToolSearch: strconv.FormatBool(state.config.Config.ToolSearch),
 				config.FieldMode:       strconv.Quote(string(state.config.Config.Mode)),
 				config.FieldTheme:      strconv.Quote(state.config.Config.TUI.Theme),
+				config.FieldStatusLine: string(statusLine),
 				config.FieldSandbox:    strconv.Quote(string(state.config.Config.Sandbox)),
 				config.FieldSandboxNetwork: strconv.Quote(
 					string(state.config.Config.SandboxWorkspaceWrite.Network),

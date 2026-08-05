@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/rsbin/pips/internal/coding/config"
+	"github.com/rsbin/pips/internal/coding/statusline"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -221,3 +222,120 @@ func TestSaveThemeRejectsEditedConfigOverSizeLimit(t *testing.T) {
 }
 
 func configFileSizeForTest() int { return 1 << 20 }
+
+func TestSaveStatusLineReplacesOnlyTheArrayAndPreservesTOML(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	original := "# keep this comment\nmode = \"agent\"\n\n[tui]\n  theme = \"nord\" # keep theme\n  status_line = [\"workspace\", \"phase\"] # keep status\n\n[providers.openai.models.gpt]\n"
+	writeFile(t, path, original)
+
+	items := []statusline.Item{statusline.Model, statusline.ContextUsed}
+	require.NoError(t, config.SaveStatusLineWithOptions(path, items, config.TUIConfigSaveOptions{}))
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	want := strings.Replace(original, `["workspace", "phase"]`, `["model", "context_used"]`, 1)
+	assert.Equal(t, want, string(data))
+
+	loaded, err := config.Load(config.LoadOptions{ConfigFile: path})
+	require.NoError(t, err)
+	assert.Equal(t, items, loaded.Config.TUI.StatusLine)
+	assert.Equal(t, "nord", loaded.Config.TUI.Theme)
+}
+
+func TestSaveStatusLineInsertsAndPreservesExplicitEmpty(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		content string
+		want    string
+		items   []statusline.Item
+	}{
+		{
+			name:    "existing table",
+			content: "tool_search = true\n\n[tui]\n# local preferences\n\ntheme = \"nord\"\n[providers.openai.models.gpt]\n",
+			want:    "tool_search = true\n\n[tui]\n# local preferences\n\ntheme = \"nord\"\nstatus_line = [\"workspace\", \"session\"]\n[providers.openai.models.gpt]\n",
+			items:   []statusline.Item{statusline.Workspace, statusline.Session},
+		},
+		{
+			name:    "missing table",
+			content: "tool_search = true\n",
+			want:    "tool_search = true\n[tui]\nstatus_line = []\n",
+			items:   []statusline.Item{},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "config.toml")
+			writeFile(t, path, tt.content)
+			require.NoError(t, config.SaveStatusLineWithOptions(path, tt.items, config.TUIConfigSaveOptions{}))
+			data, err := os.ReadFile(path)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, string(data))
+		})
+	}
+}
+
+func TestSaveStatusLineRejectsUnsupportedOrInvalidSources(t *testing.T) {
+	t.Parallel()
+
+	tests := []string{
+		"[tui]\nstatus_line = [\"workspace\",\n  \"phase\"]\n",
+		"[tui]\nstatus_line = [\"workspace\"] trailing\n",
+		"[tui]\nstatus_line = [\"workspace\", \"unknown\"]\n",
+		"[tui]\nstatus_line = [\"workspace\"]\nstatus_line = []\n",
+		"[tui]\nstatus_line = [\"workspace\"]\n[tui.palette]\nvalue = true\n",
+		"tui.status_line = [\"workspace\"]\n",
+	}
+	for _, content := range tests {
+		t.Run(content, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "config.toml")
+			writeFile(t, path, content)
+			before, err := os.ReadFile(path)
+			require.NoError(t, err)
+
+			err = config.SaveStatusLineWithOptions(
+				path,
+				[]statusline.Item{statusline.Phase},
+				config.TUIConfigSaveOptions{},
+			)
+			require.Error(t, err)
+			after, err := os.ReadFile(path)
+			require.NoError(t, err)
+			assert.Equal(t, before, after)
+		})
+	}
+}
+
+func TestSaveThemeAndStatusLineSharePerPathLock(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, "[tui]\ntheme = \"auto\"\nstatus_line = [\"workspace\"]\n")
+
+	var group sync.WaitGroup
+	errorsCh := make(chan error, 2)
+	group.Go(func() {
+		errorsCh <- config.SaveThemeWithOptions(path, "nord", config.TUIConfigSaveOptions{})
+	})
+	group.Go(func() {
+		errorsCh <- config.SaveStatusLineWithOptions(
+			path,
+			[]statusline.Item{statusline.Model, statusline.Phase},
+			config.TUIConfigSaveOptions{},
+		)
+	})
+	group.Wait()
+	close(errorsCh)
+	for err := range errorsCh {
+		require.NoError(t, err)
+	}
+
+	loaded, err := config.Load(config.LoadOptions{ConfigFile: path})
+	require.NoError(t, err)
+	assert.Equal(t, "nord", loaded.Config.TUI.Theme)
+	assert.Equal(t, []statusline.Item{statusline.Model, statusline.Phase}, loaded.Config.TUI.StatusLine)
+}
