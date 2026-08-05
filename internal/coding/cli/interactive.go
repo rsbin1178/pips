@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/rsbin/pips/internal/coding/config"
 	"github.com/rsbin/pips/internal/coding/statusline"
 	"github.com/rsbin/pips/internal/coding/tui"
 	"github.com/rsbin/pips/internal/coding/tuiconfig"
@@ -77,17 +78,25 @@ func runInteractiveTarget(
 	}
 
 	return dependencies.RunTUI(cmd.Context(), tui.Options{
-		Input:        cmd.InOrStdin(),
-		Output:       cmd.OutOrStdout(),
-		Environment:  dependencies.Environment,
-		Workspace:    resolved.workspace.Root(),
-		Trusted:      resolved.isTrusted,
-		NoColor:      noColor,
-		Bootstrap:    bootstrap,
-		ImageIngress: ingress,
-		StatusLine:   preferences.StatusLine,
+		Input:          cmd.InOrStdin(),
+		Output:         cmd.OutOrStdout(),
+		Environment:    dependencies.Environment,
+		Workspace:      resolved.workspace.Root(),
+		ThemeDirectory: dependencies.Paths.TUIThemesDir(),
+		Trusted:        resolved.isTrusted,
+		NoColor:        noColor,
+		Bootstrap:      bootstrap,
+		ImageIngress:   ingress,
+		StatusLine:     preferences.StatusLine,
 		SaveStatusLine: func(_ context.Context, items []statusline.Item) error {
 			return preferenceStore.Save(tuiconfig.Settings{StatusLine: items})
+		},
+		SaveTheme: func(_ context.Context, theme string) error {
+			return config.SaveThemeWithOptions(
+				resolved.configFile,
+				theme,
+				config.ThemeSaveOptions{AllowCreate: strings.TrimSpace(flags.configFile) == ""},
+			)
 		},
 		OnExit: func(info tui.ExitInfo) error {
 			if !info.Resumable {

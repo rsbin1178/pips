@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"image/color"
 	"strings"
 
 	"charm.land/glamour/v2"
@@ -16,17 +17,12 @@ import (
 
 const markdownCacheCapacity = 128
 
-type colorTheme uint8
-
-const (
-	themeDark colorTheme = iota
-	themeLight
-)
+type themeFingerprint string
 
 type markdownKey struct {
 	hash    string
 	width   int
-	theme   colorTheme
+	theme   themeFingerprint
 	noColor bool
 }
 
@@ -94,11 +90,27 @@ func (r *markdownRenderer) render(
 
 func markdownStyle(theme colorTheme, noColor bool) glamouransi.StyleConfig {
 	style := styles.DarkStyleConfig
-	if theme == themeLight {
+	if theme.isLight() {
 		style = styles.LightStyleConfig
 	}
 	if noColor {
 		style = styles.ASCIIStyleConfig
+	} else if theme.id != themeDark.id && theme.id != themeLight.id {
+		palette := paletteFor(theme)
+		style.Text.Color = themeColorPointer(palette.workspace)
+		style.BlockQuote.Color = themeColorPointer(palette.muted)
+		style.H1.Color = themeColorPointer(palette.model)
+		style.H2.Color = themeColorPointer(palette.model)
+		style.H3.Color = themeColorPointer(palette.model)
+		style.H4.Color = themeColorPointer(palette.model)
+		style.H5.Color = themeColorPointer(palette.model)
+		style.H6.Color = themeColorPointer(palette.model)
+		style.Link.Color = themeColorPointer(palette.session)
+		style.LinkText.Color = themeColorPointer(palette.session)
+		style.Code.Color = themeColorPointer(palette.code)
+		style.Code.BackgroundColor = themeColorPointer(palette.codeBackground)
+		style.CodeBlock.Color = themeColorPointer(palette.code)
+		style.CodeBlock.BackgroundColor = themeColorPointer(palette.codeBackground)
 	}
 
 	outerMargin := uint(0)
@@ -112,6 +124,12 @@ func markdownStyle(theme colorTheme, noColor bool) glamouransi.StyleConfig {
 	style.H6.Prefix = ""
 
 	return style
+}
+
+func themeColorPointer(value color.Color) *string {
+	canonical := colorString(value)
+
+	return &canonical
 }
 
 func (r *markdownRenderer) insert(entry markdownEntry) {
@@ -148,7 +166,7 @@ func newMarkdownKey(
 	return markdownKey{
 		hash:    hex.EncodeToString(digest[:]),
 		width:   width,
-		theme:   theme,
+		theme:   themeFingerprint(theme.fingerprint),
 		noColor: noColor,
 	}
 }

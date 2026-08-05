@@ -42,6 +42,7 @@ type Layout struct {
 	bundlesDir           string
 	mcpFile              string
 	tuiFile              string
+	tuiThemesDir         string
 }
 
 // New returns an application layout rooted exactly at root.
@@ -84,6 +85,7 @@ func New(root string) (Layout, error) {
 		bundlesDir:           filepath.Join(abs, "bundles"),
 		mcpFile:              filepath.Join(abs, "mcp.json"),
 		tuiFile:              filepath.Join(abs, "tui.json"),
+		tuiThemesDir:         filepath.Join(abs, "themes"),
 	}, nil
 }
 
@@ -229,3 +231,8 @@ func (l Layout) MCPFile() string { return l.mcpFile }
 
 // TUIFile returns the presentation-only user preference path.
 func (l Layout) TUIFile() string { return l.tuiFile }
+
+// TUIThemesDir returns the optional user theme directory. Theme discovery
+// never creates this directory; users may add independent *.toml definitions
+// beneath the private product root.
+func (l Layout) TUIThemesDir() string { return l.tuiThemesDir }

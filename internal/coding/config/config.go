@@ -29,6 +29,7 @@ const (
 	FieldReasoning      Field = "reasoning"
 	FieldToolSearch     Field = "tool_search"
 	FieldMode           Field = "mode"
+	FieldTheme          Field = "tui.theme"
 	FieldSandbox        Field = "sandbox"
 	FieldSandboxNetwork Field = "sandbox_workspace_write.network"
 	FieldApproval       Field = "approval"
@@ -40,6 +41,7 @@ var fields = []Field{
 	FieldReasoning,
 	FieldToolSearch,
 	FieldMode,
+	FieldTheme,
 	FieldSandbox,
 	FieldSandboxNetwork,
 	FieldApproval,
@@ -64,6 +66,18 @@ const (
 type Source struct {
 	Kind   SourceKind
 	Detail string
+}
+
+// ThemeAuto selects the terminal-adaptive TUI theme.
+const ThemeAuto = "auto"
+
+// DefaultThemeSelection is the persisted/default TUI theme selection.
+const DefaultThemeSelection = ThemeAuto
+
+// TUIConfig contains presentation-only configuration. It is intentionally not
+// projected into Runtime, Session, or Coding event state.
+type TUIConfig struct {
+	Theme string
 }
 
 // SandboxMode selects the application sandbox boundary.
@@ -384,6 +398,7 @@ type Config struct {
 	Models                []ModelConfig
 	ToolSearch            bool
 	Mode                  OperatingMode
+	TUI                   TUIConfig
 	Sandbox               SandboxMode
 	SandboxWorkspaceWrite SandboxWorkspaceWriteConfig
 	Approval              ApprovalMode
@@ -401,6 +416,7 @@ type Patch struct {
 	Reasoning  *ReasoningLevel
 	ToolSearch *bool
 	Mode       *OperatingMode
+	Theme      *string
 	Sandbox    *SandboxMode
 	Approval   *ApprovalMode
 }
@@ -417,6 +433,7 @@ func Defaults() Config {
 	return Config{
 		Providers: map[ai.Provider]ProviderConfig{},
 		Mode:      ModeAgent,
+		TUI:       TUIConfig{Theme: DefaultThemeSelection},
 		Sandbox:   SandboxWorkspaceWrite,
 		SandboxWorkspaceWrite: SandboxWorkspaceWriteConfig{
 			Network: SandboxNetworkOnRequest,
@@ -527,6 +544,11 @@ func (c Config) ValidateRuntime() error {
 	}
 	if c.Mode != "" {
 		if err := validateOperatingMode(c.Mode); err != nil {
+			return err
+		}
+	}
+	if c.TUI.Theme != "" {
+		if _, err := ParseThemeSelection(c.TUI.Theme); err != nil {
 			return err
 		}
 	}
@@ -656,6 +678,36 @@ func ParseOperatingMode(value string) (OperatingMode, error) {
 	return mode, nil
 }
 
+// ParseThemeSelection validates and normalizes one persisted TUI theme ID.
+// Empty values are the compatibility spelling for the automatic selection.
+func ParseThemeSelection(value string) (string, error) {
+	selection := strings.TrimSpace(value)
+	if selection == "" {
+		return ThemeAuto, nil
+	}
+	if len(selection) > 32 || !utf8.ValidString(selection) {
+		return "", fmt.Errorf("%w: theme selection must be valid UTF-8 within 32 bytes", ErrInvalid)
+	}
+	for index, r := range selection {
+		valid := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-'
+		if !valid || (index == 0 && r == '-') {
+			return "", fmt.Errorf("%w: theme selection %q must match [a-z0-9][a-z0-9-]{0,31}", ErrInvalid, value)
+		}
+	}
+
+	return selection, nil
+}
+
+// NormalizeThemeSelection returns the canonical persisted selection.
+func NormalizeThemeSelection(value string) string {
+	selection, err := ParseThemeSelection(value)
+	if err != nil {
+		return ThemeAuto
+	}
+
+	return selection
+}
+
 func validateSandbox(mode SandboxMode) error {
 	switch mode {
 	case SandboxReadOnly, SandboxWorkspaceWrite, SandboxFullAccess:
@@ -717,6 +769,10 @@ func apply(value Config, patch Patch, source Source) Config {
 	if patch.Mode != nil {
 		value.Mode = *patch.Mode
 		value.sources[FieldMode] = source
+	}
+	if patch.Theme != nil {
+		value.TUI.Theme = *patch.Theme
+		value.sources[FieldTheme] = source
 	}
 	if patch.Sandbox != nil {
 		value.Sandbox = *patch.Sandbox

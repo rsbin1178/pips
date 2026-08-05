@@ -19,6 +19,7 @@ import (
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding"
 	codingclipboard "github.com/rsbin/pips/internal/coding/clipboard"
+	"github.com/rsbin/pips/internal/coding/config"
 	"github.com/rsbin/pips/internal/coding/runtimecontrol"
 	"github.com/rsbin/pips/internal/coding/statusline"
 )
@@ -96,53 +97,58 @@ type Model struct {
 	allow     bool
 	err       error
 
-	controller          Controller
-	state               coding.State
-	childStates         map[string]coding.State
-	composer            composerState
-	markdown            *markdownRenderer
-	theme               colorTheme
-	timeline            string
-	scrollback          scrollbackCursor
-	scrollbackOutput    bool
-	streaming           streamProjection
-	renderWait          bool
-	bridge              *eventBridge
-	subscription        *subscriptionBridge
-	subscriptionMode    bool
-	starting            bool
-	cancelStart         bool
-	waiting             bool
-	streamErr           error
-	composerResolving   bool
-	composerResolveSeq  uint64
-	composerCancel      context.CancelFunc
-	clipboardLoading    bool
-	clipboardGeneration uint64
-	clipboardCancel     context.CancelFunc
-	queued              int
-	canceling           bool
-	exitArmed           bool
-	bannerPrinted       bool
-	picker              pickerState
-	pickerSeq           uint64
-	route               routeState
-	routeSeq            uint64
-	teamProjection      teamProjectionState
-	teamInteractions    teamInteractionQueueState
-	teamPanel           teamPanelState
-	presentation        presentationState
-	prompt              promptState
-	promptSeq           uint64
-	completionMarkers   []completionMarker
-	worktreeLoading     bool
-	worktreeGeneration  uint64
-	worktreeCancel      context.CancelFunc
-	worktreeSummary     string
-	activity            activityIndicator
-	statusLineItems     []statusline.Item
-	refreshCursor       bool
-	cursorRefreshSeq    uint64
+	controller           Controller
+	state                coding.State
+	childStates          map[string]coding.State
+	composer             composerState
+	markdown             *markdownRenderer
+	theme                colorTheme
+	themeSelection       string
+	themeRegistry        themeRegistry
+	themeBackgroundKnown bool
+	themeIsDark          bool
+	themeDiagnostics     []themeDiagnostic
+	timeline             string
+	scrollback           scrollbackCursor
+	scrollbackOutput     bool
+	streaming            streamProjection
+	renderWait           bool
+	bridge               *eventBridge
+	subscription         *subscriptionBridge
+	subscriptionMode     bool
+	starting             bool
+	cancelStart          bool
+	waiting              bool
+	streamErr            error
+	composerResolving    bool
+	composerResolveSeq   uint64
+	composerCancel       context.CancelFunc
+	clipboardLoading     bool
+	clipboardGeneration  uint64
+	clipboardCancel      context.CancelFunc
+	queued               int
+	canceling            bool
+	exitArmed            bool
+	bannerPrinted        bool
+	picker               pickerState
+	pickerSeq            uint64
+	route                routeState
+	routeSeq             uint64
+	teamProjection       teamProjectionState
+	teamInteractions     teamInteractionQueueState
+	teamPanel            teamPanelState
+	presentation         presentationState
+	prompt               promptState
+	promptSeq            uint64
+	completionMarkers    []completionMarker
+	worktreeLoading      bool
+	worktreeGeneration   uint64
+	worktreeCancel       context.CancelFunc
+	worktreeSummary      string
+	activity             activityIndicator
+	statusLineItems      []statusline.Item
+	refreshCursor        bool
+	cursorRefreshSeq     uint64
 }
 
 func newModel(ctx context.Context, options Options) *Model {
@@ -187,6 +193,9 @@ func newModel(ctx context.Context, options Options) *Model {
 		composer:        composer,
 		markdown:        newMarkdownRenderer(markdownCacheCapacity),
 		theme:           themeDark,
+		themeSelection:  config.ThemeAuto,
+		themeRegistry:   loadThemeRegistry(""),
+		themeIsDark:     true,
 		activity:        newActivityIndicator(),
 		childStates:     make(map[string]coding.State),
 		statusLineItems: slices.Clone(statusLineItems),
@@ -225,22 +234,19 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 
 		return m, nil
 	case tea.BackgroundColorMsg:
-		if message.IsDark() {
-			m.theme = themeDark
-		} else {
-			m.theme = themeLight
+		// NO_COLOR is a strict no-style mode. Do not let injected or late
+		// background messages mutate adaptive-theme state, either: doing so can
+		// make a later theme selection depend on terminal probing that was never
+		// requested and can invalidate geometry-sensitive rendering tests.
+		if m.options.NoColor {
+			return m, nil
 		}
-		m.composer.SetStyles(composerStyles(m.theme, m.options.NoColor))
-		if m.prompt.kind == promptQuestion {
-			m.prompt.question.editor.SetStyles(composerStyles(m.theme, m.options.NoColor))
+
+		m.themeBackgroundKnown = true
+		m.themeIsDark = message.IsDark()
+		if m.themeSelection == config.ThemeAuto {
+			m.applyTheme(m.themeForSelection(config.ThemeAuto))
 		}
-		if m.prompt.kind == promptPlanReview {
-			m.prompt.planReview.editor.SetStyles(composerStyles(m.theme, m.options.NoColor))
-		}
-		if m.route.kind == routeSessions || m.route.kind == routeSkills {
-			m.route.search.SetStyles(sessionSearchStyles(m.theme, m.options.NoColor))
-		}
-		m.rerenderTranscript(false)
 
 		return m, nil
 	case bootstrapResult:
@@ -264,6 +270,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 
 		m.controller = message.controller
 		m.state = message.controller.Snapshot()
+		m.loadInitialTheme(message.controller.Config().TUI.Theme)
 		m.resetTeamProjection(m.state.SessionID)
 		m.resetScrollback()
 		m.lifecycle = lifecycleReady
@@ -608,6 +615,39 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.picker = pickerState{}
 
 		return m, m.composer.Focus()
+	case themeSavedMsg:
+		if m.picker.kind != pickerTheme || message.generation != m.picker.generation {
+			return m, nil
+		}
+		m.picker.loading = false
+		m.picker.controlling = false
+		m.picker.err = message.err
+		if message.err != nil && !errors.Is(message.err, config.ErrThemeDurability) {
+			m.setLayout()
+
+			return m, nil
+		}
+		m.themeRegistry = m.picker.themeRegistry
+		m.themeDiagnostics = slices.DeleteFunc(
+			slices.Clone(m.picker.themeDiagnostics),
+			func(diagnostic themeDiagnostic) bool {
+				return diagnostic.category == themeDiagnosticSelection
+			},
+		)
+		m.picker.themeDiagnostics = slices.Clone(m.themeDiagnostics)
+		m.themeSelection = message.selection
+		m.applyTheme(m.themeForSelection(message.selection))
+		if errors.Is(message.err, config.ErrThemeDurability) {
+			m.picker.loading = false
+			m.picker.controlling = false
+			m.picker.themeSelection = message.selection
+			m.setLayout()
+
+			return m, nil
+		}
+		m.picker = pickerState{}
+
+		return m, m.composer.Focus()
 	case controlResultMsg:
 		pickerControl := m.picker.kind != pickerNone && m.picker.controlling
 		routeControl := m.route.kind != routeNone && m.route.controlling
@@ -896,12 +936,9 @@ func (m *Model) trustView() string {
 	projectRoot := ".pips"
 	help := "Up/Down choose • Enter confirm • a allow • d deny"
 	if !m.options.NoColor {
-		accent := lipgloss.Color("#5FAFFF")
-		muted := lipgloss.Color("#8B949E")
-		if m.theme == themeLight {
-			accent = lipgloss.Color("#0969DA")
-			muted = lipgloss.Color("#57606A")
-		}
+		palette := paletteFor(m.theme)
+		accent := palette.session
+		muted := palette.muted
 		title = lipgloss.NewStyle().Bold(true).Foreground(accent).Render(title)
 		workspaceLabel = lipgloss.NewStyle().Bold(true).Render(workspaceLabel)
 		trustWord = lipgloss.NewStyle().Bold(true).Foreground(accent).Render(trustWord)
@@ -943,15 +980,9 @@ func (m *Model) trustChoice(label, description string, selected bool) string {
 		return line
 	}
 
-	color := lipgloss.Color("#5FAFFF")
+	color := paletteFor(m.theme).session
 	if !selected {
-		color = lipgloss.Color("#8B949E")
-	}
-	if m.theme == themeLight {
-		color = lipgloss.Color("#0969DA")
-		if !selected {
-			color = lipgloss.Color("#57606A")
-		}
+		color = paletteFor(m.theme).muted
 	}
 
 	return lipgloss.NewStyle().Bold(true).Foreground(color).Render(line)
@@ -1119,6 +1150,8 @@ func (m *Model) readyView() tea.View {
 			footer = append(footer, m.permissionsPickerView(availableRows))
 		case pickerStatusLine:
 			footer = append(footer, m.statusLinePickerView(availableRows))
+		case pickerTheme:
+			footer = append(footer, m.themePickerView(availableRows))
 		case pickerSkill:
 			footer = append(footer, m.skillPickerView(availableRows))
 		case pickerFile:
@@ -1158,8 +1191,7 @@ func (m *Model) readyView() tea.View {
 	view.MouseMode = tea.MouseModeNone
 	view.WindowTitle = appTitle
 	view.Cursor = m.composer.Cursor()
-	if m.prompt.kind != promptNone || m.picker.kind == pickerModel || m.picker.kind == pickerMode ||
-		m.picker.kind == pickerPermissions || m.picker.kind == pickerStatusLine || m.teamPanel.isFocused ||
+	if m.prompt.kind != promptNone || m.pickerHidesComposerCursor() || m.teamPanel.isFocused ||
 		(m.teamRouteIsInline() && (m.route.loading || !teamRouteInputStage(m.route.team.stage))) {
 		view.Cursor = nil
 	}
@@ -1200,6 +1232,15 @@ func (m *Model) readyView() tea.View {
 	}
 
 	return view
+}
+
+func (m *Model) pickerHidesComposerCursor() bool {
+	switch m.picker.kind {
+	case pickerModel, pickerMode, pickerPermissions, pickerStatusLine, pickerTheme:
+		return true
+	default:
+		return false
+	}
 }
 
 func (m *Model) questionEditorOffset(prompt string) (int, int, bool) {

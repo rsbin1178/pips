@@ -71,6 +71,7 @@ model = "anthropic/project-model"
 	assert.Contains(t, output, `resolved.request.logprobs = true`)
 	assert.Contains(t, output, `tool_search = false # source=flag detail="--tool-search"`)
 	assert.Contains(t, output, `mode = "plan" # source=config_file detail="`)
+	assert.Contains(t, output, `tui.theme = "auto" # source=default detail="built-in"`)
 	assert.Contains(t, output, `sandbox_workspace_write.network = "allow" # source=config_file detail="`)
 	assert.NotContains(t, output, "model_max_output_tokens")
 	assert.NotContains(t, output, "project-model")
@@ -106,6 +107,58 @@ func TestConfigPathDoesNotDecodeFiles(t *testing.T) {
 	assert.Contains(t, output, `workspace = "`+opened.Root()+`"`)
 	assert.Contains(t, output, `config_file = "`+fixture.layout.ConfigFile()+`"`)
 	assert.Contains(t, output, "project_trusted = false")
+}
+
+func TestConfigShowIncludesFileOnlyThemeSelection(t *testing.T) {
+	t.Parallel()
+
+	fixture := newCLIFixture(t)
+	writeCLIFile(t, fixture.layout.ConfigFile(), `
+[tui]
+theme = "missing-custom-theme"
+[providers.openai.models."test-model"]
+`)
+
+	output, err := executeWithDependencies(t, fixture.dependencies(nil), "config", "show")
+	require.NoError(t, err)
+	assert.Contains(t, output, `tui.theme = "missing-custom-theme" # source=config_file detail="`)
+	assert.NotContains(t, output, "theme registry")
+}
+
+func TestConfigValidateChecksThemeShapeWithoutDiscoveringThemes(t *testing.T) {
+	t.Parallel()
+
+	fixture := newCLIFixture(t)
+	writeCLIFile(t, fixture.layout.ConfigFile(), `
+[tui]
+theme = "missing-custom-theme"
+`)
+
+	output, err := executeWithDependencies(
+		t,
+		fixture.dependencies(nil),
+		"config",
+		"validate",
+		"--model",
+		"gemini/gemini-test",
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "configuration valid\n", output)
+
+	writeCLIFile(t, fixture.layout.ConfigFile(), `
+[tui]
+theme = "Not A Theme"
+`)
+	_, err = executeWithDependencies(
+		t,
+		fixture.dependencies(nil),
+		"config",
+		"validate",
+		"--model",
+		"gemini/gemini-test",
+	)
+	require.Error(t, err)
+	require.ErrorIs(t, err, config.ErrInvalid)
 }
 
 func TestConfigValidateRequiresRuntimeModel(t *testing.T) {

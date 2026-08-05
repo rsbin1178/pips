@@ -155,6 +155,58 @@ func TestInteractiveTrustDecisionDoesNotLoadProjectConfig(t *testing.T) {
 	}
 }
 
+func TestInteractiveThemeSaverUsesExplicitConfigTargetWithoutCreatingDefault(t *testing.T) {
+	t.Parallel()
+
+	userRoot := t.TempDir()
+	layout, err := paths.New(userRoot)
+	require.NoError(t, err)
+	workspaceRoot := t.TempDir()
+	explicit := filepath.Join(workspaceRoot, "selected.toml")
+	require.NoError(t, os.WriteFile(explicit, []byte(`
+[providers.openai.models."test-model"]
+default = true
+
+[tui]
+theme = "auto"
+`), 0o600))
+	controller := &stubInteractiveController{}
+	called := false
+	command, err := New(Dependencies{
+		Paths:      layout,
+		WorkingDir: func() (string, error) { return workspaceRoot, nil },
+		LookupEnv: func(name string) (string, bool) {
+			if name == "API_KEY" {
+				return "test-key", true
+			}
+
+			return "", false
+		},
+		Terminal: func(_ io.Reader, _ io.Writer) (bool, bool) { return true, true },
+		OpenControl: func(_ context.Context, _ coding.OpenOptions) (tui.Controller, error) {
+			return controller, nil
+		},
+		RunTUI: func(ctx context.Context, options tui.Options) error {
+			_, bootstrapErr := options.Bootstrap(ctx, false)
+			require.NoError(t, bootstrapErr)
+			require.NotNil(t, options.SaveTheme)
+			called = true
+
+			return options.SaveTheme(ctx, "dracula")
+		},
+	})
+	require.NoError(t, err)
+	command.SetArgs([]string{"--config", "selected.toml"})
+
+	require.NoError(t, command.ExecuteContext(t.Context()))
+	assert.True(t, called)
+	data, err := os.ReadFile(explicit) //nolint:gosec // The test controls the temporary explicit config path.
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `theme = "dracula"`)
+	_, err = os.Stat(layout.ConfigFile())
+	assert.ErrorIs(t, err, os.ErrNotExist)
+}
+
 func TestResumeCommandOpensTargetAndPrintsNormalExitHint(t *testing.T) {
 	t.Parallel()
 

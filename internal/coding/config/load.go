@@ -131,10 +131,15 @@ type fileConfig struct {
 	Providers             map[string]fileProvider    `toml:"providers"`
 	ToolSearch            *bool                      `toml:"tool_search"`
 	Mode                  *string                    `toml:"mode"`
+	TUI                   *fileTUI                   `toml:"tui"`
 	Sandbox               *string                    `toml:"sandbox"`
 	SandboxWorkspaceWrite *fileSandboxWorkspaceWrite `toml:"sandbox_workspace_write"`
 	Approval              *string                    `toml:"approval"`
 	Compaction            *fileCompaction            `toml:"compaction"`
+}
+
+type fileTUI struct {
+	Theme *string `toml:"theme"`
 }
 
 type fileSandboxWorkspaceWrite struct {
@@ -505,6 +510,13 @@ func decodeLayer(value fileConfig) (fileLayer, error) {
 		}
 		layer.patch.Mode = &mode
 	}
+	if value.TUI != nil && value.TUI.Theme != nil {
+		theme, err := ParseThemeSelection(*value.TUI.Theme)
+		if err != nil {
+			return fileLayer{}, err
+		}
+		layer.patch.Theme = &theme
+	}
 	if value.Sandbox != nil {
 		mode, err := ParseSandboxMode(*value.Sandbox)
 		if err != nil {
@@ -839,6 +851,13 @@ func validatePatch(patch Patch) (Patch, error) {
 			return Patch{}, err
 		}
 		result.Mode = &mode
+	}
+	if patch.Theme != nil {
+		theme, err := ParseThemeSelection(*patch.Theme)
+		if err != nil {
+			return Patch{}, err
+		}
+		result.Theme = &theme
 	}
 	if patch.Sandbox != nil {
 		mode, err := ParseSandboxMode(string(*patch.Sandbox))
