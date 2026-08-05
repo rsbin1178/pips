@@ -41,7 +41,7 @@ func TestPermissionsPickerIsDraftOnlyAndRestoresComposer(t *testing.T) {
 	assert.Equal(t, before, model.composer.Snapshot())
 	assert.Contains(t, model.View().Content, "Permissions")
 	assert.Contains(t, model.View().Content, "Sandbox")
-	assert.Contains(t, model.View().Content, "workspace-write")
+	assert.Contains(t, ansi.Strip(model.View().Content), "Workspace write")
 	assert.Empty(t, controller.permissionUpdates)
 
 	model.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
@@ -50,7 +50,7 @@ func TestPermissionsPickerIsDraftOnlyAndRestoresComposer(t *testing.T) {
 	assert.Empty(t, controller.permissionUpdates)
 }
 
-func TestPermissionsPickerShowsConfiguredValuesForOverrides(t *testing.T) {
+func TestPermissionsPickerHidesConfiguredValuesAndProvenance(t *testing.T) {
 	t.Parallel()
 
 	controller := newOverlayController(readyState())
@@ -69,9 +69,61 @@ func TestPermissionsPickerShowsConfiguredValuesForOverrides(t *testing.T) {
 	model.openPermissionsPicker()
 	content := ansi.Strip(model.View().Content)
 
-	assert.Contains(t, content, "configured: on-request")
-	assert.Contains(t, content, "configured: allow")
-	assert.Contains(t, content, "configured: full-access")
+	assert.Contains(t, content, "Mode: Workspace write")
+	assert.Contains(t, content, "Policy: Block actions that need approval")
+	assert.Contains(t, content, "Network: Off")
+	assert.NotContains(t, content, "configured")
+	assert.NotContains(t, content, "source=")
+	assert.NotContains(t, content, "process override")
+	assert.NotContains(t, content, "workspace-write")
+	assert.NotContains(t, content, "on-request")
+	assert.NotContains(t, content, "full-access")
+}
+
+func TestPermissionsPickerChangesNetworkWithDownThenRight(t *testing.T) {
+	t.Parallel()
+
+	controller := newOverlayController(readyState())
+	model := readyModelWithController(t, controller, true)
+	model.openPermissionsPicker()
+
+	assert.Equal(t, permissionModeRow, model.picker.cursor)
+	_, command := model.updatePermissionsPickerKey(tea.KeyPressMsg{Code: tea.KeyDown})
+	assert.Nil(t, command)
+	assert.Equal(t, permissionNetworkRow, model.picker.cursor)
+
+	_, command = model.updatePermissionsPickerKey(tea.KeyPressMsg{Code: tea.KeyRight})
+	assert.Nil(t, command)
+	assert.Equal(t, config.SandboxNetworkAllow, model.picker.permissions.network)
+
+	_, command = model.updatePermissionsPickerKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	require.NotNil(t, command)
+	message := commandMessage(t, command)
+	_, next := model.Update(message)
+	if next != nil {
+		driveModelCommands(t, model, next)
+	}
+
+	require.Len(t, controller.permissionUpdates, 1)
+	require.NotNil(t, controller.permissionUpdates[0].SandboxProfile)
+	assert.Equal(t, config.SandboxNetworkAllow, *controller.permissionUpdates[0].SandboxProfile.Network)
+}
+
+func TestPermissionsPickerSkipsNetworkUnderFullAccess(t *testing.T) {
+	t.Parallel()
+
+	controller := newOverlayController(readyState())
+	model := readyModelWithController(t, controller, true)
+	model.openPermissionsPicker()
+	model.picker.permissions.sandbox = config.SandboxFullAccess
+
+	_, command := model.updatePermissionsPickerKey(tea.KeyPressMsg{Code: tea.KeyDown})
+	assert.Nil(t, command)
+	assert.Equal(t, permissionApprovalRow, model.picker.cursor)
+
+	_, command = model.updatePermissionsPickerKey(tea.KeyPressMsg{Code: tea.KeyUp})
+	assert.Nil(t, command)
+	assert.Equal(t, permissionModeRow, model.picker.cursor)
 }
 
 func TestPermissionsPickerAppliesProcessLocalUpdate(t *testing.T) {
@@ -131,7 +183,7 @@ func TestPermissionsPickerConfirmsFullAccessBeforeControllerCall(t *testing.T) {
 	assert.True(t, model.picker.permissions.confirming)
 	assert.Empty(t, controller.permissionUpdates)
 	assert.Zero(t, controller.confirmationRequests)
-	assert.Contains(t, ansi.Strip(model.View().Content), "Full Access confirmation")
+	assert.Contains(t, ansi.Strip(model.View().Content), "Full access confirmation")
 
 	_, command = model.updatePermissionsPickerKey(key(keyEscape))
 	assert.Nil(t, command)
@@ -162,13 +214,13 @@ func TestPermissionsPickerKeepsApprovalAndNetworkOnRequestDistinct(t *testing.T)
 	model.width = 240
 	model.openPermissionsPicker()
 	pickerContent := ansi.Strip(model.permissionsPickerView(20))
-	assert.Contains(t, pickerContent, "Network: on-request")
-	assert.Contains(t, pickerContent, "Approval: on-request")
-	assert.Contains(t, pickerContent, "independent confirmation policy")
+	assert.Contains(t, pickerContent, "Network: Ask when needed")
+	assert.Contains(t, pickerContent, "Policy: Ask before risky actions")
+	assert.Contains(t, pickerContent, "active inside Sandbox")
 
 	statusContent := model.statusContent()
-	assert.Contains(t, statusContent, "Approval: on-request")
-	assert.Contains(t, statusContent, "Network: on-request")
+	assert.Contains(t, statusContent, "Approval: Ask before risky actions")
+	assert.Contains(t, statusContent, "Network: Ask when needed (active)")
 }
 
 func TestPermissionsPickerKeepsNetworkActiveForReadOnlyAndInactiveForFullAccess(t *testing.T) {
@@ -179,16 +231,17 @@ func TestPermissionsPickerKeepsNetworkActiveForReadOnlyAndInactiveForFullAccess(
 	model.openPermissionsPicker()
 	model.picker.permissions.sandbox = config.SandboxReadOnly
 	content := ansi.Strip(model.permissionsPickerView(20))
-	assert.Contains(t, content, "active")
-	assert.Contains(t, content, "enforced")
+	assert.Contains(t, content, "Network: Ask when needed")
+	assert.Contains(t, content, "active inside Sandbox")
 
 	model.picker.permissions.sandbox = config.SandboxFullAccess
 	content = ansi.Strip(model.permissionsPickerView(20))
-	assert.Contains(t, content, "inactive")
-	assert.Contains(t, content, "not enforced")
+	assert.Contains(t, content, "Network: Unrestricted under Full access")
+	assert.Contains(t, content, "Select Read only or Workspace write")
+	assert.NotContains(t, content, "› Network")
 }
 
-func TestStatusShowsPermissionSourcesWithoutSourceDetails(t *testing.T) {
+func TestStatusHidesPermissionProvenance(t *testing.T) {
 	t.Parallel()
 
 	controller := newOverlayController(readyState())
@@ -232,11 +285,15 @@ func TestStatusShowsPermissionSourcesWithoutSourceDetails(t *testing.T) {
 	model := readyModelWithController(t, controller, true)
 	content := model.statusContent()
 
-	assert.Contains(t, content, "source=config_file")
-	assert.Contains(t, content, "source=environment")
-	assert.Contains(t, content, "source=flag")
-	assert.Contains(t, content, "configured source=config_file")
-	assert.Contains(t, content, "process override")
+	assert.Contains(t, content, "Sandbox: Workspace write")
+	assert.Contains(t, content, "Approval: Block actions that need approval")
+	assert.Contains(t, content, "Network: Off (active)")
+	assert.NotContains(t, content, "source=")
+	assert.NotContains(t, content, "configured")
+	assert.NotContains(t, content, "process override")
+	assert.NotContains(t, content, "workspace-write")
+	assert.NotContains(t, content, "on-request")
+	assert.NotContains(t, content, "full-access")
 	assert.NotContains(t, content, "/Users/")
 	assert.NotContains(t, content, "PIPS_")
 
@@ -244,10 +301,11 @@ func TestStatusShowsPermissionSourcesWithoutSourceDetails(t *testing.T) {
 	controller.permissions.SandboxProfile.Filesystem.Effective = config.SandboxFullAccess
 	controller.permissions.SandboxProfile.NetworkEnforced = false
 	content = model.statusContent()
-	assert.Contains(t, content, "inactive under full-access")
+	assert.Contains(t, content, "Sandbox: Full access")
+	assert.Contains(t, content, "Network: Unrestricted under Full access")
 }
 
-func TestPermissionsPickerDraftFullAccessElevationUsesSessionOverrideSource(t *testing.T) {
+func TestPermissionsPickerDraftFullAccessUsesHumanLabels(t *testing.T) {
 	t.Parallel()
 
 	controller := newOverlayController(readyState())
@@ -279,13 +337,14 @@ func TestPermissionsPickerDraftFullAccessElevationUsesSessionOverrideSource(t *t
 
 	content := ansi.Strip(model.permissionsPickerView(20))
 
-	assert.Contains(t, content, "Filesystem: full-access")
-	assert.Contains(t, content, "source=session_override")
-	assert.Contains(t, content, "configured source=config_file")
-	assert.Contains(t, content, "draft (not applied)")
+	assert.Contains(t, content, "Mode: Full access")
+	assert.Contains(t, content, "Network: Unrestricted under Full access")
+	assert.NotContains(t, content, "source=")
+	assert.NotContains(t, content, "configured")
+	assert.NotContains(t, content, "draft (not applied)")
 }
 
-func TestPermissionsPickerDraftUsesProposedSourceAndHandlesUnknownValues(t *testing.T) {
+func TestPermissionsPickerHandlesUnknownValuesWithoutProvenance(t *testing.T) {
 	t.Parallel()
 
 	controller := newOverlayController(readyState())
@@ -320,11 +379,11 @@ func TestPermissionsPickerDraftUsesProposedSourceAndHandlesUnknownValues(t *test
 	model.picker.permissions.sandbox = config.SandboxFullAccess
 	content := ansi.Strip(model.permissionsPickerView(20))
 
-	assert.Contains(t, content, "source=session_override")
-	assert.Contains(t, content, "configured source=config_file")
-	assert.NotContains(t, content, "source=environment")
+	assert.Contains(t, content, "Mode: Full access")
+	assert.NotContains(t, content, "source=")
+	assert.NotContains(t, content, "configured")
 
-	model.picker.cursor = permissionFilesystemRow
+	model.picker.cursor = permissionModeRow
 	model.picker.permissions.sandbox = config.SandboxMode("")
 	model.cyclePermissionValue(1)
 	assert.Equal(t, config.SandboxReadOnly, model.picker.permissions.sandbox)
