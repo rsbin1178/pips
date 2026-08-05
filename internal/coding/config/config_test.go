@@ -31,6 +31,25 @@ func TestDefaults(t *testing.T) {
 	}
 }
 
+func TestParseSandboxMode(t *testing.T) {
+	t.Parallel()
+
+	for _, value := range []config.SandboxMode{
+		config.SandboxReadOnly,
+		config.SandboxWorkspaceWrite,
+		config.SandboxFullAccess,
+	} {
+		parsed, err := config.ParseSandboxMode(" " + string(value) + " ")
+		require.NoError(t, err)
+		assert.Equal(t, value, parsed)
+	}
+
+	for _, value := range []string{"", "sandboxed", "FULL-ACCESS"} {
+		_, err := config.ParseSandboxMode(value)
+		require.ErrorIs(t, err, config.ErrInvalid)
+	}
+}
+
 func TestParseSandboxNetworkMode(t *testing.T) {
 	t.Parallel()
 
@@ -50,13 +69,46 @@ func TestParseSandboxNetworkMode(t *testing.T) {
 	}
 }
 
-func TestValidateRuntimeAllowsLegacyZeroValueMode(t *testing.T) {
+func TestPermissionSourceHelpersAreDetachedAndSafe(t *testing.T) {
 	t.Parallel()
 
-	cfg := config.Defaults()
-	cfg.Mode = ""
-	cfg.Model = config.ModelRef{Provider: ai.ProviderOpenAI, Model: "test"}
-	require.NoError(t, cfg.ValidateRuntime())
+	base := config.Defaults()
+	base = base.RestoreSourceFrom(base, config.FieldSandbox)
+	changed := base.WithSessionOverride(config.FieldSandbox)
+
+	source, ok := changed.Source(config.FieldSandbox)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceSessionOverride, source.Kind)
+	assert.Empty(t, source.Detail)
+
+	restored := changed.RestoreSourceFrom(base, config.FieldSandbox)
+	source, ok = restored.Source(config.FieldSandbox)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceDefault, source.Kind)
+	assert.Equal(t, "built-in", source.Detail)
+	assert.True(t, base.Equal(restored))
+	assert.False(t, base.Equal(changed))
+	assert.True(t, base.Equal(base.WithSessionOverride(config.FieldModel)))
+}
+
+func TestValidateRuntimeAllowsSandboxProfiles(t *testing.T) {
+	t.Parallel()
+
+	for _, sandbox := range []config.SandboxMode{
+		config.SandboxReadOnly,
+		config.SandboxWorkspaceWrite,
+		config.SandboxFullAccess,
+	} {
+		t.Run(string(sandbox), func(t *testing.T) {
+			t.Parallel()
+
+			cfg := config.Defaults()
+			cfg.Mode = ""
+			cfg.Model = config.ModelRef{Provider: ai.ProviderOpenAI, Model: "test"}
+			cfg.Sandbox = sandbox
+			require.NoError(t, cfg.ValidateRuntime())
+		})
+	}
 }
 
 func TestParseOperatingMode(t *testing.T) {

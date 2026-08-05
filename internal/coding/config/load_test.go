@@ -14,6 +14,26 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestLoadReadOnlySandbox(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, `
+sandbox = "read-only"
+
+[providers.openai.models.gpt]
+`)
+
+	result, err := config.Load(config.LoadOptions{ConfigFile: path})
+	require.NoError(t, err)
+	assert.Equal(t, config.SandboxReadOnly, result.Config.Sandbox)
+	assert.Equal(t, config.SandboxNetworkOnRequest, result.Config.SandboxWorkspaceWrite.Network)
+	source, ok := result.Config.Source(config.FieldSandbox)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceConfigFile, source.Kind)
+	require.NoError(t, result.Config.ValidateRuntime())
+}
+
 func TestLoadRegistryAndSelectionPrecedence(t *testing.T) {
 	t.Parallel()
 
