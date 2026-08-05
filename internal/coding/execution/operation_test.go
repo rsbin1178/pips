@@ -65,6 +65,8 @@ func TestOperationCanonicalizesWorkspaceCWDSpellings(t *testing.T) {
 	t.Parallel()
 
 	fixture := newOperationFixture(t)
+	rootAlias := filepath.Join(t.TempDir(), "workspace-alias")
+	require.NoError(t, os.Symlink(fixture.workspace.Root(), rootAlias))
 	tests := []struct {
 		name  string
 		input string
@@ -73,6 +75,7 @@ func TestOperationCanonicalizesWorkspaceCWDSpellings(t *testing.T) {
 		{name: "empty root alias", input: "", want: "."},
 		{name: "dot root alias", input: ".", want: "."},
 		{name: "absolute root", input: fixture.workspace.Root(), want: "."},
+		{name: "absolute symlink alias", input: rootAlias, want: "."},
 		{name: "relative child", input: "sub", want: "sub"},
 		{
 			name: "absolute child", input: filepath.Join(fixture.workspace.Root(), "sub"), want: "sub",
