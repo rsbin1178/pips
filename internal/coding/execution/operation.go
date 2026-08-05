@@ -424,6 +424,10 @@ func normalizeCWDSpelling(ws workspace.Workspace, input string) (string, error) 
 	}
 
 	cleaned := filepath.Clean(input)
+	if resolved, err := filepath.EvalSymlinks(cleaned); err == nil &&
+		pathContains(ws.Root(), resolved) {
+		cleaned = resolved
+	}
 	if !pathContains(ws.Root(), cleaned) {
 		return "", invalidOperation(
 			"cwd",
