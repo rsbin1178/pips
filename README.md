@@ -205,15 +205,17 @@ normal default/user-file/env/flag selection. Existing Session model metadata
 is tolerated for compatibility and ignored.
 
 `/permissions` changes only the current process's Sandbox profile and Approval
-policy. Sandbox profiles are `read-only`, `workspace-write`, and `full-access`;
-Network (`deny`, `on-request`, or `allow`) is nested under the first two and is
-shown as inactive while Full Access is active. Approval `on-request` remains a
-separate policy. The effective/configured values and safe source labels are
-visible without source details. A transition to Full Access requires an
-explicit confirmation, but does not require restarting Pips: the idle Runtime
-is replaced in place with the same Session/model. Changes rebuild the execution
-policy, do not write configuration files or Session history, and read-only
-policy rejects workspace/external writes before Approval or session grants.
+policy. The window presents human-facing choices: Read only, Workspace write,
+or Full access; Network is Off, Ask when needed, or On for the two Sandbox
+profiles, and is shown as unrestricted rather than editable under Full access.
+Approval is separate: Ask before risky actions or Block actions that need
+approval. A transition to Full access requires explicit confirmation, but does
+not require restarting Pips: the idle Runtime is replaced in place with the
+same Session/model. Changes rebuild the execution policy, do not write
+configuration files or Session history, and read-only policy rejects
+workspace/external writes before Approval or session grants. The window may
+note that changes apply to the current process and reset on restart; internal
+configured values and provenance are not part of the normal UI.
 
 Operating mode is process-local. Configure `mode = "agent"` or `mode = "plan"`,
 or override it with `PIPS_MODE`/`--mode`. `/plan` enters Plan Mode and `/mode`

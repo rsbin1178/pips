@@ -87,8 +87,11 @@ through the Controller's one-shot `session_override` capability. Project
 configuration, Bundles, Extensions, and model Tool arguments cannot enable it.
 Full Access removes filesystem and network isolation, and process-group cleanup
 remains best effort. `/permissions` can switch to or from Full Access at an
-idle boundary without restarting Pips; the choice remains process-local. Use it
-only for a Workspace and command you trust.
+idle boundary without restarting Pips; the choice remains process-local. Its
+normal view uses human-facing capability labels and shows Network as
+unrestricted under Full Access; configuration-layer provenance remains an
+internal Controller concern. Use Full Access only for a Workspace and command
+you trust.
 
 The command Sandbox does not isolate the pips process itself, trusted compiled
 Extensions, the model Provider client, or other same-user processes. It also
