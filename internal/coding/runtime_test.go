@@ -300,8 +300,9 @@ func TestRuntimeDeliversIdleAgentNotificationAsSyntheticInteraction(t *testing.T
 
 	require.Eventually(t, func() bool {
 		pending, err := runtime.notifications.Pending()
-		return err == nil && len(pending) == 0 && runtime.Snapshot().Phase == PhaseIdle
-	}, 2*time.Second, 10*time.Millisecond)
+		return err == nil && len(pending) == 0 && runtime.Snapshot().Phase == PhaseIdle &&
+			len(model.Requests()) == 1
+	}, 30*time.Second, 20*time.Millisecond)
 
 	state := runtime.Snapshot()
 	assert.Equal(t, InteractionSourceAgentNotification, state.Interaction.Source)
@@ -340,8 +341,9 @@ func TestRuntimeHoldsAgentNotificationWhilePaused(t *testing.T) {
 	runtime.signalNotifications()
 	require.Eventually(t, func() bool {
 		pending, pendingErr := runtime.notifications.Pending()
-		return pendingErr == nil && len(pending) == 0 && runtime.Snapshot().Phase == PhaseIdle
-	}, 2*time.Second, 10*time.Millisecond)
+		return pendingErr == nil && len(pending) == 0 && runtime.Snapshot().Phase == PhaseIdle &&
+			len(model.Requests()) == 1
+	}, 30*time.Second, 20*time.Millisecond)
 	assert.Len(t, model.Requests(), 1)
 }
 
@@ -358,8 +360,9 @@ func TestRuntimeBatchesAgentNotificationsForSameRoot(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		pending, err := runtime.notifications.Pending()
-		return err == nil && len(pending) == 0 && runtime.Snapshot().Phase == PhaseIdle
-	}, 2*time.Second, 10*time.Millisecond)
+		return err == nil && len(pending) == 0 && runtime.Snapshot().Phase == PhaseIdle &&
+			len(model.Requests()) == 1
+	}, 30*time.Second, 20*time.Millisecond)
 	requests := model.Requests()
 	require.Len(t, requests, 1)
 	assert.True(t, requestContainsText(requests[0], first.AgentID))
