@@ -28,6 +28,7 @@ const (
 	pickerMode
 	pickerPermissions
 	pickerStatusLine
+	pickerTheme
 )
 
 type pickerState struct {
@@ -52,6 +53,10 @@ type pickerState struct {
 	generation       uint64
 	statusItems      []statusline.Item
 	statusEnabled    map[statusline.Item]bool
+	themes           []themeOption
+	themeRegistry    themeRegistry
+	themeDiagnostics []themeDiagnostic
+	themeSelection   string
 	permissions      permissionPickerState
 }
 
@@ -150,6 +155,8 @@ func (m *Model) updatePickerKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.updatePermissionsPickerKey(message)
 	case pickerStatusLine:
 		return m.updateStatusLinePickerKey(message)
+	case pickerTheme:
+		return m.updateThemePickerKey(message)
 	default:
 		return m, nil
 	}

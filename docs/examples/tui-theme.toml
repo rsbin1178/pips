@@ -1,0 +1,13 @@
+# Copy this file to $PIPS_HOME/themes/ocean.toml.
+# The filename becomes the selectable theme ID: "ocean".
+schema = "pips.tui.theme/v1alpha1"
+name = "Ocean Night"
+inherits = "nord"
+background = "dark"
+
+[palette]
+# Partial palettes inherit all omitted roles from Nord.
+session = "#67D5E8"
+model = "#B4A7FF"
+active = "#FFD580"
+code_background = "#17212B"

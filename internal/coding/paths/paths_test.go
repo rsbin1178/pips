@@ -36,6 +36,7 @@ func TestNew(t *testing.T) {
 	assert.Empty(t, layout.AgentSkillsDir())
 	assert.Equal(t, filepath.Join(base, "bundles"), layout.BundlesDir())
 	assert.Equal(t, filepath.Join(base, "mcp.json"), layout.MCPFile())
+	assert.Equal(t, filepath.Join(base, "themes"), layout.TUIThemesDir())
 }
 
 func TestNewRejectsEmptyPath(t *testing.T) {
@@ -70,6 +71,7 @@ func TestDefault(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, filepath.Join(home, ".pips"), layout.Root())
 	assert.Equal(t, filepath.Join(home, ".agents", "skills"), layout.AgentSkillsDir())
+	assert.Equal(t, filepath.Join(home, ".pips", "themes"), layout.TUIThemesDir())
 }
 
 func TestDefaultUsesPIPSHome(t *testing.T) {
@@ -82,6 +84,7 @@ func TestDefaultUsesPIPSHome(t *testing.T) {
 	home, err := os.UserHomeDir()
 	require.NoError(t, err)
 	assert.Equal(t, filepath.Join(home, ".agents", "skills"), layout.AgentSkillsDir())
+	assert.Equal(t, filepath.Join(root, "themes"), layout.TUIThemesDir())
 }
 
 func TestWithAgentSkillsDir(t *testing.T) {

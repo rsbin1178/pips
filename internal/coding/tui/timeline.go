@@ -1020,26 +1020,24 @@ func completionGlyphStyle(status string, theme colorTheme) lipgloss.Style {
 }
 
 func timelineTitleStyle(kind blockKind, theme colorTheme) lipgloss.Style {
-	color := "#7D8B99"
+	palette := paletteFor(theme)
+	color := palette.diagnostic
 	switch kind {
-	case blockUser:
-		color = "#5FAFFF"
+	case blockUser, blockQuestion:
+		color = palette.session
 	case blockAssistant, blockDraft, blockPlan:
-		color = "#AF87FF"
+		color = palette.model
 	case blockTool, blockTeam:
-		color = "#5FD7AF"
-	case blockQuestion:
-		color = "#5FAFFF"
+		color = palette.idle
 	case blockChange:
-		color = "#87D75F"
+		color = palette.change
 	case blockError:
-		color = "#FF5F5F"
+		color = palette.error
 	case blockCompletion:
+		color = palette.muted
 	case blockDiagnostic:
-		if theme == themeLight {
-			color = "#586069"
-		}
+		color = palette.diagnostic
 	}
 
-	return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(color))
+	return lipgloss.NewStyle().Bold(true).Foreground(color)
 }

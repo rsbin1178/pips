@@ -14,6 +14,74 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestLoadThemeSelectionDefaultsAndFileSource(t *testing.T) {
+	t.Parallel()
+
+	result, err := config.Load(config.LoadOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, config.ThemeAuto, result.Config.TUI.Theme)
+	source, ok := result.Config.Source(config.FieldTheme)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceDefault, source.Kind)
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, "[tui]\ntheme = \"dracula\"\n")
+	result, err = config.Load(config.LoadOptions{ConfigFile: path})
+	require.NoError(t, err)
+	assert.Equal(t, "dracula", result.Config.TUI.Theme)
+	source, ok = result.Config.Source(config.FieldTheme)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceConfigFile, source.Kind)
+	assert.Equal(t, path, source.Detail)
+}
+
+func TestLoadThemeSelectionEmptyNormalizesToAuto(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, "[tui]\ntheme = \"\"\n")
+	result, err := config.Load(config.LoadOptions{ConfigFile: path})
+	require.NoError(t, err)
+	assert.Equal(t, config.ThemeAuto, result.Config.TUI.Theme)
+	source, ok := result.Config.Source(config.FieldTheme)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceConfigFile, source.Kind)
+}
+
+func TestLoadThemeSelectionIsFileOnly(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, "[tui]\ntheme = \"nord\"\n")
+	result, err := config.Load(config.LoadOptions{
+		ConfigFile: path,
+		LookupEnv:  mapLookup(map[string]string{"PIPS_THEME": "dracula"}),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "nord", result.Config.TUI.Theme)
+}
+
+func TestLoadRejectsInvalidThemeSchema(t *testing.T) {
+	t.Parallel()
+
+	tests := []string{
+		"[tui]\ntheme = \"Dracula\"\n",
+		"[tui]\ntheme = \"theme_name\"\n",
+		"[tui]\nunknown = true\n",
+		"theme = \"dracula\"\n",
+		"[tui]\ntheme = \"dracula\"\n[tui]\ntheme = \"nord\"\n",
+	}
+	for _, content := range tests {
+		t.Run(content, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "config.toml")
+			writeFile(t, path, content)
+			_, err := config.Load(config.LoadOptions{ConfigFile: path})
+			require.Error(t, err)
+		})
+	}
+}
+
 func TestLoadReadOnlySandbox(t *testing.T) {
 	t.Parallel()
 
