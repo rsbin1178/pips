@@ -2,6 +2,7 @@
 package config_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/rsbin/pips/ai"
@@ -20,6 +21,7 @@ func TestDefaults(t *testing.T) {
 	assert.Empty(t, cfg.Models)
 	assert.False(t, cfg.ToolSearch)
 	assert.Equal(t, config.ModeAgent, cfg.Mode)
+	assert.Equal(t, config.ThemeAuto, cfg.TUI.Theme)
 	assert.Equal(t, config.SandboxWorkspaceWrite, cfg.Sandbox)
 	assert.Equal(t, config.SandboxNetworkOnRequest, cfg.SandboxWorkspaceWrite.Network)
 	assert.Equal(t, config.ApprovalOnRequest, cfg.Approval)
@@ -29,6 +31,25 @@ func TestDefaults(t *testing.T) {
 		require.True(t, ok)
 		assert.Equal(t, config.SourceDefault, source.Kind)
 	}
+}
+
+func TestParseThemeSelection(t *testing.T) {
+	t.Parallel()
+
+	for _, value := range []string{"", " auto ", "dracula", "custom-theme-1", "a123"} {
+		parsed, err := config.ParseThemeSelection(value)
+		require.NoError(t, err)
+		if value == "" || value == " auto " {
+			assert.Equal(t, config.ThemeAuto, parsed)
+		} else {
+			assert.Equal(t, value, parsed)
+		}
+	}
+	for _, value := range []string{"-theme", "Theme", "theme_name", "theme/name", "theme!", strings.Repeat("a", 33)} {
+		_, err := config.ParseThemeSelection(value)
+		require.ErrorIs(t, err, config.ErrInvalid)
+	}
+	assert.Equal(t, config.ThemeAuto, config.NormalizeThemeSelection("invalid!"))
 }
 
 func TestParseSandboxMode(t *testing.T) {

@@ -36,6 +36,30 @@ func TestMarkdownRendererUsesBoundedThemeAwareCache(t *testing.T) {
 	assert.Len(t, renderer.entries, 2)
 }
 
+func TestMarkdownCustomThemeUsesResolvedPaletteAndFingerprint(t *testing.T) {
+	t.Parallel()
+
+	registry := loadThemeRegistryFromText(t, map[string]string{
+		"ocean": `schema = "pips.tui.theme/v1alpha1"
+name = "Ocean"
+inherits = "nord"
+
+[palette]
+model = "#FF00AA"
+`,
+	})
+	theme, ok := registry.Resolve("ocean")
+	require.True(t, ok)
+	assert.Equal(t, "#FF00AA", colorString(theme.palette.model))
+	assert.Equal(t, "#FF00AA", *markdownStyle(theme, false).H1.Color)
+
+	rendered, err := newMarkdownRenderer(4).render("# Ocean", 40, theme, false)
+	require.NoError(t, err)
+	assert.Contains(t, rendered, "Ocean")
+	assert.Contains(t, rendered, "\x1b[")
+	assert.NotEqual(t, themeDark.fingerprint, theme.fingerprint)
+}
+
 func TestMarkdownNoColorHasNoANSI(t *testing.T) {
 	t.Parallel()
 

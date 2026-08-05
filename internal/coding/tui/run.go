@@ -192,12 +192,16 @@ type ExitHandler func(ExitInfo) error
 // StatusLineSaver atomically persists one complete ordered field selection.
 type StatusLineSaver func(context.Context, []statusline.Item) error
 
+// ThemeSaver persists only the requested theme ID in the active config file.
+type ThemeSaver func(context.Context, string) error
+
 // Options contain the CLI-owned resources used by one TUI Program.
 type Options struct {
 	Input          io.Reader
 	Output         io.Writer
 	Environment    []string
 	Workspace      string
+	ThemeDirectory string
 	Trusted        bool
 	NoColor        bool
 	Bootstrap      Bootstrap
@@ -206,6 +210,7 @@ type Options struct {
 	OnExit         ExitHandler
 	StatusLine     []statusline.Item
 	SaveStatusLine StatusLineSaver
+	SaveTheme      ThemeSaver
 }
 
 // Run owns the terminal Program and closes any acquired Controller after the

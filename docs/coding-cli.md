@@ -235,6 +235,104 @@ this invocation. It does not enable project configuration, grant a tool or
 Skill-script approval, approve an MCP server, or enable Full Access. The trust
 decision is audited on stderr.
 
+### Interactive TUI themes
+
+The interactive TUI supports the automatic selection `auto` and these built-in
+IDs:
+
+- `default-dark` — the Pips default dark palette;
+- `default-light` — the Pips default light palette;
+- `dracula`;
+- `nord`;
+- `gruvbox-dark`;
+- `catppuccin-mocha`;
+- `one-dark`;
+- `solarized-light`.
+
+Open the command picker with `/` and choose `/theme`. The picker lists `auto`,
+built-ins, and discovered user themes in stable order. Press Enter to apply a
+selection immediately; Esc cancels. `auto` starts with the dark default and
+then follows Bubble Tea's terminal background detection. An explicit ID is
+not changed by later background messages. Theme changes update the managed
+TUI view, input styles, Markdown rendering, and theme-separated Markdown
+cache entries without restarting the session.
+
+The selected ID is stored in the active configuration file under `[tui]`:
+
+```toml
+[tui]
+theme = "nord"
+```
+
+Theme selection is file-only: there is no `PIPS_THEME` environment variable or
+`--theme` flag. An absent `[tui]` table, absent `theme`, or empty value means
+`auto`. A well-formed but unavailable ID is accepted by configuration loading,
+but the TUI falls back to `auto` when the registry cannot resolve it and shows
+a bounded notice. A failed theme save leaves both the file and the currently
+applied theme unchanged. If the atomic replacement has already committed but
+its parent-directory sync is uncertain, the TUI applies the selected theme,
+keeps the picker open, and shows a bounded durability warning so the user can
+cancel or retry.
+
+`--config <path>` selects the active file for both configuration loading and
+`/theme` persistence. It is a replacement path, not an overlay. An existing
+explicit target must be a safe regular non-symlink file; a missing explicit
+target is not created. The default configuration may be created when saving a
+theme, and the writer changes only the `[tui].theme` scalar while preserving
+unrelated bytes, comments, and settings. Malformed, unknown-field, ambiguous,
+unsafe, or concurrently changed files are rejected rather than overwritten. To
+keep the source-preserving editor fail-closed, files containing TOML multiline
+strings are rejected for theme edits rather than risking a match inside
+unrelated content.
+
+User themes are independent files below `$PIPS_HOME/themes` (normally
+`~/.pips/themes`). Discovery does not create the directory. A theme file's
+basename is its ID, so `themes/ocean.toml` defines `ocean`; the file cannot
+replace a built-in ID. Files must be regular non-symlinks without group/world
+write bits and use this schema:
+
+```toml
+schema = "pips.tui.theme/v1alpha1"
+name = "Ocean Night"       # optional
+inherits = "nord"          # optional built-in or user theme
+background = "dark"        # optional: dark or light
+
+[palette]
+separator = "#3B4252"
+composer_prompt = "#81A1C1"
+muted = "#81A1C1"
+workspace = "#D8DEE9"
+session = "#88C0D0"
+model = "#B48EAD"
+idle = "#A3BE8C"
+active = "#EBCB8B"
+warning = "#D08770"
+error = "#BF616A"
+change = "#8FBCBB"
+code = "#D8DEE9"
+code_background = "#2E3440"
+diagnostic = "#81A1C1"
+```
+
+`schema` is required. `name`, `inherits`, `background`, and palette fields are
+optional; omitted values inherit from the parent, or from the default dark or
+light built-in selected by `background`. Colors accept only `#RGB` and
+`#RRGGBB`. IDs use lowercase letters, digits, and hyphens, are at most 32
+bytes, and cannot be `auto`. Invalid files are skipped individually and do not
+prevent startup. Inheritance supports built-ins and other user themes, with a
+maximum depth of eight; missing parents and cycles are skipped. The picker
+reports only a bounded count/category of ignored files, not paths or parser
+details. Directory identity is rechecked throughout discovery; if the theme
+directory is replaced during a scan, custom entries are discarded for that
+scan. The active resolved theme remains usable for the current run even if its
+file is later changed or removed; the next picker scan discovers the new state.
+
+The theme definition is display-only. It is never written to `config.toml`,
+Runtime events, Session history, or `tui.json`. `tui.json` remains the strict,
+status-line-only preference file. `NO_COLOR` still suppresses ANSI output while
+preserving the same layout and width behavior. See the small
+[custom theme example](examples/tui-theme.toml).
+
 User Skills are discovered from `~/.pips/skills` and the ecosystem-standard
 `~/.agents/skills`; `PIPS_HOME` moves only the native Pips root. In interactive
 mode, `/skills` browses the effective user-invocable set and `$skill-name`

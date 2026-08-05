@@ -28,6 +28,7 @@ const (
 	commandPermissions              = "permissions"
 	commandStatus                   = "status"
 	commandTeam                     = "team"
+	commandTheme                    = "theme"
 	maximumCommandArgumentTailBytes = 16 << 10
 )
 
@@ -42,6 +43,7 @@ var commands = []commandDescriptor{
 	{name: "model", description: "switch the process-local model", idleOnly: true},
 	{name: commandPermissions, description: "change process-local execution permissions", idleOnly: true},
 	{name: "statusline", description: "configure status-line fields", idleOnly: true},
+	{name: commandTheme, description: "choose the TUI color theme", idleOnly: true},
 	{name: "tree", description: "navigate the current session tree", idleOnly: true},
 	{name: "fork", description: "fork a node into a new session", idleOnly: true},
 	{name: "compact", description: "preview and compact older context", idleOnly: true},
@@ -214,6 +216,8 @@ func (m *Model) executeCommand(command commandDescriptor) (tea.Model, tea.Cmd) {
 		m.openStatusLinePicker()
 
 		return m, nil
+	case commandTheme:
+		return m.openThemeCommand()
 	case "agents":
 		previous := m.picker.previousComposer
 		m.closeCommandPicker(false)
@@ -285,6 +289,15 @@ func (m *Model) executeCommand(command commandDescriptor) (tea.Model, tea.Cmd) {
 	default:
 		return m, nil
 	}
+}
+
+func (m *Model) openThemeCommand() (tea.Model, tea.Cmd) {
+	previous := m.picker.previousComposer
+	m.closeCommandPicker(false)
+	m.restoreCommandComposer(previous)
+	m.openThemePicker()
+
+	return m, nil
 }
 
 func (m *Model) restoreCommandComposer(snapshot composerSnapshot) {
