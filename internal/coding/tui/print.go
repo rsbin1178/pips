@@ -123,29 +123,11 @@ func (m *Model) statusContent() string {
 		modeState.Configured,
 		modeState.Overridden,
 		m.state.Phase,
-		permissionStatusText(
-			string(permissions.SandboxProfile.Filesystem.Effective),
-			string(permissions.SandboxProfile.Filesystem.Configured),
-			permissions.SandboxProfile.Filesystem.EffectiveSource,
-			permissions.SandboxProfile.Filesystem.ConfiguredSource,
-			permissions.SandboxProfile.Filesystem.Overridden,
-			false,
-		),
-		permissionStatusText(
-			string(permissions.ApprovalPolicy.Effective),
-			string(permissions.ApprovalPolicy.Configured),
-			permissions.ApprovalPolicy.EffectiveSource,
-			permissions.ApprovalPolicy.ConfiguredSource,
-			permissions.ApprovalPolicy.Overridden,
-			false,
-		),
-		permissionStatusText(
-			string(permissions.SandboxProfile.Network.Effective),
-			string(permissions.SandboxProfile.Network.Configured),
-			permissions.SandboxProfile.Network.EffectiveSource,
-			permissions.SandboxProfile.Network.ConfiguredSource,
-			permissions.SandboxProfile.Network.Overridden,
-			!permissions.SandboxProfile.NetworkEnforced,
+		permissionModeText(permissions.SandboxProfile.Filesystem.Effective),
+		permissionApprovalText(permissions.ApprovalPolicy.Effective),
+		permissionStatusNetworkText(
+			permissions.SandboxProfile.Network.Effective,
+			permissions.SandboxProfile.NetworkEnforced,
 		),
 		configState.ToolSearch,
 		m.state.Approval.Kind,
@@ -254,18 +236,13 @@ func optionalInt(value *int) string {
 	return strconv.Itoa(*value)
 }
 
-func permissionStatusText(
-	current string,
-	configured string,
-	source config.SourceKind,
-	configuredSource config.SourceKind,
-	overridden bool,
-	inactive bool,
+func permissionStatusNetworkText(
+	mode config.SandboxNetworkMode,
+	active bool,
 ) string {
-	value := current + " (configured " + configured + "; " + permissionSourceText(source, configuredSource, overridden)
-	if inactive {
-		value += "; inactive under full-access"
+	if !active {
+		return "Unrestricted under Full access"
 	}
 
-	return value + ")"
+	return permissionNetworkText(mode, true) + " (active)"
 }
