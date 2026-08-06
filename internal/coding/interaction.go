@@ -27,7 +27,7 @@ type interaction struct {
 	notificationIDs   []string
 	startedAt         time.Time
 	resumed           bool
-	activation        *extension.Activation
+	integration       *IntegrationGeneration
 	harness           *harness.Harness
 	search            *catalog.ToolSearch
 	changeTracker     *interactionChangeTracker

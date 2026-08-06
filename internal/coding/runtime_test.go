@@ -1688,11 +1688,14 @@ func abruptRuntimeStop(t *testing.T, runtime *Runtime) {
 
 	runtime.pending.clear()
 	runtime.resolver.set(nil)
-	if current != nil && current.activation != nil {
-		require.NoError(t, current.activation.Release(t.Context()))
+	if current != nil && current.integration != nil {
+		runtime.mu.Lock()
+		integration := current.integration
+		runtime.integration = nil
+		runtime.mu.Unlock()
+		require.NoError(t, integration.retire(t.Context()))
 	}
 	require.NoError(t, runtime.extensions.Shutdown(t.Context()))
-	require.NoError(t, runtime.connections.Close())
 	require.NoError(t, runtime.inspector.Close())
 	require.NoError(t, runtime.handle.Close())
 	require.NoError(t, runtime.tree.Close())
