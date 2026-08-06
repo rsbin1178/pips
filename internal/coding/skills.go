@@ -90,25 +90,31 @@ func (r *Runtime) Skills(ctx context.Context) (_ SkillSnapshot, returnErr error)
 
 		return SkillSnapshot{}, stateError("skills", phase, ErrRuntimeBusy)
 	}
-
-	activation, err := r.extensions.Acquire()
-	resources := r.resources
-	policy := r.skillPolicy.Clone()
-	r.mu.Unlock()
-	if err != nil {
+	integration := r.integration
+	if integration == nil {
+		r.mu.Unlock()
+		return SkillSnapshot{}, ErrRuntimeClosed
+	}
+	if err := integration.acquire(); err != nil {
+		r.mu.Unlock()
 		return SkillSnapshot{}, err
 	}
+	r.mu.Unlock()
 	defer func() {
 		returnErr = errors.Join(
 			returnErr,
-			activation.Release(context.WithoutCancel(ctx)),
+			integration.release(context.WithoutCancel(ctx)),
 		)
 	}()
 
+	activation := integration.snapshot()
+	if activation == nil {
+		return SkillSnapshot{}, ErrRuntimeClosed
+	}
 	resolved, err := resolveSkillSet(
-		resources,
+		integration.resourcesSnapshot(),
 		activation.Snapshot().SkillEntries(),
-		policy,
+		integration.skillPolicySnapshot(),
 	)
 	if err != nil {
 		return SkillSnapshot{}, err
@@ -159,8 +165,12 @@ func (r *Runtime) SetSkillEnabled(
 	operationCtx, cancel := context.WithCancel(ctx)
 	operation := &runtimeOperation{cancel: cancel, done: make(chan struct{})}
 	r.active = operation
-	resources := r.resources
-	previous := r.skillPolicy.Clone()
+	integration := r.integration
+	if integration == nil {
+		r.mu.Unlock()
+		return ErrRuntimeClosed
+	}
+	previous := integration.skillPolicySnapshot()
 	manager := r.skillSettings
 	r.mu.Unlock()
 	defer r.endOperation(operation)
@@ -168,28 +178,21 @@ func (r *Runtime) SetSkillEnabled(
 		return fmt.Errorf("%w: Skill settings are unavailable", ErrRuntimeInvalid)
 	}
 
-	activation, err := r.extensions.Acquire()
-	if err != nil {
-		return err
+	activation := integration.snapshot()
+	if activation == nil {
+		return ErrRuntimeClosed
 	}
-
 	resolved, err := resolveSkillSet(
-		resources,
+		integration.resourcesSnapshot(),
 		activation.Snapshot().SkillEntries(),
 		previous,
 	)
 	if err != nil {
-		return errors.Join(err, activation.Release(context.WithoutCancel(operationCtx)))
+		return err
 	}
 	ref, found := resolved.ref(id)
 	if !found {
-		return errors.Join(
-			fmt.Errorf("%w: unknown Skill ID", ErrRuntimeInvalid),
-			activation.Release(context.WithoutCancel(operationCtx)),
-		)
-	}
-	if err := activation.Release(context.WithoutCancel(operationCtx)); err != nil {
-		return err
+		return fmt.Errorf("%w: unknown Skill ID", ErrRuntimeInvalid)
 	}
 
 	next := previous.WithDisabled(ref, !enabled)
@@ -211,7 +214,20 @@ func (r *Runtime) SetSkillEnabled(
 			rollbackErr,
 		)
 	}
-	r.skillPolicy = next
+
+	candidate, err := integration.handoff(r.generationID+1, next)
+	if err != nil {
+		r.mu.Unlock()
+		rollbackErr := manager.Save(context.WithoutCancel(operationCtx), previous)
+
+		return errors.Join(err, rollbackErr)
+	}
+	r.integration = candidate
+	r.generationID = candidate.ID()
+	r.connections = candidate.connectionsSnapshot()
+	r.resources = candidate.resourcesSnapshot()
+	r.skillPolicy = candidate.skillPolicySnapshot()
+	r.projectInstructions = candidate.projectInstructionsSnapshot()
 	r.mu.Unlock()
 
 	return nil

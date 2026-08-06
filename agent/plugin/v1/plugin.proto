@@ -1,0 +1,250 @@
+syntax = "proto3";
+
+package agent.plugin.v1;
+
+option go_package = "github.com/rsbin/pips/agent/plugin/v1;pluginv1";
+
+// ProtocolVersion identifies one semantic pips domain protocol. It is
+// negotiated independently from the bootstrap framing, manifest schema,
+// plugin semantic version, artifact target, and persisted state schema.
+message ProtocolVersion {
+  uint32 major = 1;
+  uint32 minor = 2;
+}
+
+// ProtocolRange describes the minor versions supported for one major.
+message ProtocolRange {
+  uint32 major = 1;
+  uint32 min_minor = 2;
+  uint32 max_minor = 3;
+}
+
+// CapabilityVersion identifies a versioned capability family. Capability
+// names and versions are declarations; the application still decides which
+// capabilities are granted.
+message CapabilityVersion {
+  string name = 1;
+  uint32 major = 2;
+  uint32 min_minor = 3;
+  uint32 max_minor = 4;
+}
+
+// CapabilityGrant records the application decision for one declared
+// capability. A plugin declaration or annotation never grants itself access.
+message CapabilityGrant {
+  CapabilityVersion capability = 1;
+  bool enabled = 2;
+}
+
+message PluginIdentity {
+  string id = 1;
+  string semantic_version = 2;
+  string display_name = 3;
+  string description = 4;
+}
+
+// StateSchema is an identity for host-owned durable state. State migration is
+// intentionally not part of this MVP; the schema is reported so later phases
+// can reject incompatible state rather than guessing.
+message StateSchema {
+  string kind = 1;
+  uint32 version = 2;
+}
+
+// Provenance is an informational echo from the installed artifact. It is not
+// a substitute for manifest verification, signatures, or host policy.
+message Provenance {
+  string publisher = 1;
+  string source = 2;
+  string artifact_digest = 3;
+}
+
+// ResourceLimits communicates negotiated budgets. The application remains the
+// authority and may choose stricter values than the plugin advertises.
+message ResourceLimits {
+  uint64 max_input_bytes = 1;
+  uint64 max_output_bytes = 2;
+  uint64 max_event_bytes = 3;
+  uint32 max_progress_events = 4;
+  uint32 max_concurrent_calls = 5;
+}
+
+message DescribeRequest {
+  ProtocolVersion application_protocol = 1;
+}
+
+message DescribeResponse {
+  PluginIdentity identity = 1;
+  ProtocolRange application_protocol = 2;
+  repeated CapabilityVersion capabilities = 3;
+  repeated StateSchema state_schemas = 4;
+  Provenance provenance = 5;
+  ResourceLimits limits = 6;
+}
+
+message ConfigureRequest {
+  ProtocolVersion application_protocol = 1;
+  repeated CapabilityGrant grants = 2;
+  ResourceLimits limits = 3;
+  // Canonical JSON object owned by the application/plugin contract. It is
+  // opaque to this transport package and must not contain ambient secrets.
+  bytes configuration_json = 4;
+}
+
+message ConfigureResponse {
+  repeated CapabilityVersion enabled_capabilities = 1;
+  ResourceLimits effective_limits = 2;
+}
+
+message ReadyRequest {}
+
+enum ReadinessStatus {
+  READINESS_STATUS_UNSPECIFIED = 0;
+  READINESS_STATUS_READY = 1;
+  READINESS_STATUS_NOT_READY = 2;
+  READINESS_STATUS_DEGRADED = 3;
+}
+
+message ReadyResponse {
+  ReadinessStatus status = 1;
+  string message = 2;
+}
+
+message HealthRequest {}
+
+enum HealthStatus {
+  HEALTH_STATUS_UNSPECIFIED = 0;
+  HEALTH_STATUS_SERVING = 1;
+  HEALTH_STATUS_NOT_SERVING = 2;
+  HEALTH_STATUS_DEGRADED = 3;
+}
+
+message HealthResponse {
+  HealthStatus status = 1;
+  string message = 2;
+  uint32 active_calls = 3;
+}
+
+enum ShutdownMode {
+  SHUTDOWN_MODE_UNSPECIFIED = 0;
+  SHUTDOWN_MODE_GRACEFUL = 1;
+  SHUTDOWN_MODE_IMMEDIATE = 2;
+}
+
+message ShutdownRequest {
+  ShutdownMode mode = 1;
+}
+
+message ShutdownResponse {
+  bool accepted = 1;
+}
+
+// CoreService is the semantic lifecycle surface for the MVP. Bootstrap
+// framing and local-channel authentication are deliberately separate.
+service CoreService {
+  rpc Describe(DescribeRequest) returns (DescribeResponse);
+  rpc Configure(ConfigureRequest) returns (ConfigureResponse);
+  rpc Ready(ReadyRequest) returns (ReadyResponse);
+  rpc Health(HealthRequest) returns (HealthResponse);
+  rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
+}
+
+message ListToolsRequest {}
+
+// ToolHints are untrusted annotations. Risk, concurrency, and authorization
+// remain application-owned catalog/policy decisions.
+enum RiskHint {
+  RISK_HINT_UNSPECIFIED = 0;
+  RISK_HINT_READ_ONLY = 1;
+  RISK_HINT_STATE_CHANGE = 2;
+  RISK_HINT_PRIVILEGED = 3;
+}
+
+message ToolHints {
+  RiskHint risk = 1;
+  bool concurrency_safe = 2;
+}
+
+message ToolDescriptor {
+  string id = 1;
+  string name = 2;
+  string description = 3;
+  // A UTF-8 JSON object containing the input schema. The schema is semantic
+  // data, not a Go type or an authorization document.
+  bytes input_schema_json = 4;
+  ToolHints hints = 5;
+}
+
+message ListToolsResponse {
+  repeated ToolDescriptor tools = 1;
+}
+
+message InvokeToolRequest {
+  string tool_id = 1;
+  string invocation_id = 2;
+  bytes arguments_json = 3;
+  // The transport context/deadline is authoritative. This field is an
+  // optional serialized echo for implementations that need one wire value.
+  int64 deadline_unix_nanos = 4;
+}
+
+message ToolProgress {
+  string message = 1;
+  uint32 percent_millis = 2;
+  bytes metadata_json = 3;
+}
+
+message ToolContent {
+  string media_type = 1;
+  bytes data = 2;
+}
+
+message ToolResult {
+  repeated ToolContent content = 1;
+  bytes structured_json = 2;
+  bool truncated = 3;
+}
+
+enum FailureCode {
+  FAILURE_CODE_UNSPECIFIED = 0;
+  FAILURE_CODE_INVALID_ARGUMENT = 1;
+  FAILURE_CODE_NOT_FOUND = 2;
+  FAILURE_CODE_PERMISSION_DENIED = 3;
+  FAILURE_CODE_CANCELED = 4;
+  FAILURE_CODE_DEADLINE_EXCEEDED = 5;
+  FAILURE_CODE_OUTPUT_LIMIT = 6;
+  FAILURE_CODE_UNAVAILABLE = 7;
+  FAILURE_CODE_INTERNAL = 8;
+}
+
+message FailureProblem {
+  string field = 1;
+  string reason = 2;
+  bool retryable = 3;
+  string hint = 4;
+}
+
+message ToolFailure {
+  FailureCode code = 1;
+  string message = 2;
+  repeated FailureProblem problems = 3;
+  bool retryable = 4;
+  bytes details_json = 5;
+}
+
+// InvokeToolResponse is one ordered server-stream item. Progress is
+// non-terminal; Result and Failure are terminal. A stream must contain exactly
+// one terminal event and monotonically increasing, non-zero sequence values.
+message InvokeToolResponse {
+  uint64 sequence = 1;
+  oneof payload {
+    ToolProgress progress = 2;
+    ToolResult result = 3;
+    ToolFailure failure = 4;
+  }
+}
+
+service ToolsService {
+  rpc ListTools(ListToolsRequest) returns (ListToolsResponse);
+  rpc InvokeTool(InvokeToolRequest) returns (stream InvokeToolResponse);
+}
