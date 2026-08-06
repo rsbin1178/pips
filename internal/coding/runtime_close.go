@@ -119,8 +119,8 @@ func (r *Runtime) closeResources(ctx context.Context, current *interaction) erro
 	resources.add(func(context.Context) error { return r.tree.Close() })
 	resources.add(func(context.Context) error { return r.handle.Close() })
 	resources.add(func(context.Context) error { return r.inspector.Close() })
-	resources.add(func(context.Context) error { return r.connections.Close() })
 	resources.add(r.extensions.Shutdown)
+	resources.add(r.integration.retire)
 	if err := resources.close(ctx); err != nil {
 		errs = append(errs, err)
 	}

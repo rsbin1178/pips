@@ -49,6 +49,7 @@ const (
 	defaultToolTimeout      = 5 * time.Minute
 	maximumToolTimeout      = 30 * time.Minute
 	componentMCP            = "mcp"
+	componentIntegration    = "integration"
 )
 
 // SessionTarget selects a new session when ID is empty or a durable session
@@ -130,12 +131,14 @@ type Runtime struct {
 	tempRoot        *execution.PrivateTempRoot
 	inspector       *git.Inspector
 	permissions     *codingmcp.Permissions
-	connections     *codingmcp.Connections
+	connections     *codingmcp.Connections // Compatibility alias for the current generation.
 	extensions      *extension.Runtime
 	compiled        []extension.Extension
-	resources       resource.Result
+	resources       resource.Result // Compatibility alias for the current generation.
 	skillSettings   *skillsettings.Manager
-	skillPolicy     skillsettings.Snapshot
+	skillPolicy     skillsettings.Snapshot // Compatibility alias for the current generation.
+	integration     *IntegrationGeneration
+	generationID    uint64
 	trusted         bool
 	controller      *approval.Controller
 	questions       *question.Controller
@@ -404,8 +407,17 @@ func openRuntime(
 	if err != nil {
 		return nil, err
 	}
-	stack.add(func(context.Context) error { return connections.Close() })
+	// The IntegrationGeneration is not constructed until Extension activation
+	// succeeds, so register MCP ownership immediately. Otherwise a later
+	// extension.New or activation failure can leak the already-open connections.
+	connectionsOwnedByStack := true
+	stack.add(func(context.Context) error {
+		if !connectionsOwnedByStack {
+			return nil
+		}
 
+		return connections.Close()
+	})
 	extensionOptions := make([]extension.Option, 0, 1)
 	if !openPolicy.teamWorker() {
 		extensionOptions = append(extensionOptions, extension.WithExtensions(options.Extensions...))
@@ -416,15 +428,31 @@ func openRuntime(
 	}
 	stack.add(extensionRuntime.Shutdown)
 
-	setup, err := activateRuntimeResources(
+	setup, activationErr := activateRuntimeResources(
 		ctx, extensionRuntime, loadedResources, options.Extensions, openPolicy,
 	)
-	if err != nil {
-		return nil, err
+	if setup == nil {
+		if activationErr == nil {
+			activationErr = fmt.Errorf("%w: extension activation returned no lease", ErrRuntimeInvalid)
+		}
+
+		return nil, activationErr
 	}
-	if err := setup.Release(ctx); err != nil {
-		return nil, err
+	if activationErr != nil {
+		// Open has no previously published application generation to retain.
+		// Do not leak the installed Activation; reject this incomplete open.
+		// The cleanup stack owns the MCP connections from this point onward.
+		return nil, errors.Join(
+			activationErr,
+			setup.Release(context.WithoutCancel(ctx)),
+		)
 	}
+	integration := newIntegrationGeneration(
+		1, setup, connections, loadedResources, skillPolicy,
+		projectInstructions.SystemPrompt(),
+	)
+	connectionsOwnedByStack = false
+	stack.add(integration.retire)
 
 	runtime := &Runtime{
 		profile:             openPolicy.profile,
@@ -456,6 +484,8 @@ func openRuntime(
 		resources:           loadedResources,
 		skillSettings:       skillSettings,
 		skillPolicy:         skillPolicy,
+		integration:         integration,
+		generationID:        integration.ID(),
 		trusted:             options.Trusted,
 		observers:           newAgentObservers(options.AgentObservers),
 		telemetry:           newTelemetryObservers(options.TelemetryObservers),
@@ -596,7 +626,7 @@ func openRuntime(
 	if !openPolicy.teamWorker() {
 		runtime.publishTeamRecoveryCandidates(ctx, runtime.teamRecovery)
 	}
-	runtime.recordOpenDiagnostics(ctx, connections)
+	runtime.recordOpenDiagnostics(ctx, integration.connectionsSnapshot())
 	if !openPolicy.teamWorker() {
 		runtime.startNotificationCoordinator(ctx)
 	}
@@ -1254,7 +1284,7 @@ func cloneMessages(messages []ai.Message) []ai.Message {
 // idle safe boundary. Existing interactions retain their leased snapshot.
 //
 //nolint:gocyclo // Reload has one rollback branch for each acquired generation.
-func (r *Runtime) Reload(ctx context.Context) error {
+func (r *Runtime) Reload(ctx context.Context) (returnErr error) {
 	if r == nil {
 		return ErrRuntimeClosed
 	}
@@ -1307,29 +1337,70 @@ func (r *Runtime) Reload(ctx context.Context) error {
 		return err
 	}
 
-	activation, err := activateResources(reloadCtx, r.extensions, loaded, r.compiled)
-	if err != nil {
-		return errors.Join(err, connections.Close())
+	activation, activationErr := activateResources(reloadCtx, r.extensions, loaded, r.compiled)
+	if activation == nil {
+		if activationErr == nil {
+			activationErr = fmt.Errorf("%w: extension activation returned no lease", ErrRuntimeInvalid)
+		}
+
+		return errors.Join(activationErr, connections.Close())
 	}
-	if err := activation.Release(reloadCtx); err != nil {
-		return errors.Join(err, connections.Close())
-	}
+	candidate := newIntegrationGeneration(
+		r.nextGenerationID(), activation, connections, loaded, nextSkillPolicy,
+		nextProjectInstructions.SystemPrompt(),
+	)
+	candidateAdopted := false
+	defer func() {
+		if !candidateAdopted {
+			returnErr = errors.Join(
+				returnErr,
+				candidate.retire(context.WithoutCancel(reloadCtx)),
+			)
+		}
+	}()
 
 	r.mu.Lock()
 	if r.closed || r.closing || r.active != operation || r.interaction != nil {
 		phase := r.state.Phase
 		r.mu.Unlock()
 
-		return errors.Join(stateError("reload", phase, ErrRuntimeBusy), connections.Close())
+		return stateError("reload", phase, ErrRuntimeBusy)
 	}
 
-	previous := r.connections
-	r.connections = connections
-	r.resources = loaded
-	r.skillPolicy = nextSkillPolicy
-	r.projectInstructions = nextProjectInstructions.SystemPrompt()
+	previous := r.integration
+	r.integration = candidate
+	r.generationID = candidate.ID()
+	r.connections = candidate.connectionsSnapshot()
+	r.resources = candidate.resourcesSnapshot()
+	r.skillPolicy = candidate.skillPolicySnapshot()
+	r.projectInstructions = candidate.projectInstructionsSnapshot()
+	candidateAdopted = true
 	r.mu.Unlock()
-	r.recordOpenDiagnostics(ctx, connections)
 
-	return previous.Close()
+	r.recordOpenDiagnostics(ctx, candidate.connectionsSnapshot())
+	retireErr := previous.retire(context.WithoutCancel(ctx))
+	if activationErr != nil {
+		r.recordDiagnostic(ctx, IntegrationDiagnostic{
+			Component: componentIntegration,
+			Code:      "extension_retire_failed",
+			Message:   "The new integration generation was published; retired Extension cleanup failed",
+		})
+	}
+	if retireErr != nil {
+		r.recordDiagnostic(ctx, IntegrationDiagnostic{
+			Component: componentIntegration,
+			Code:      "generation_retire_failed",
+			Message:   "The new integration generation was published; retired generation cleanup failed",
+		})
+	}
+
+	postPublicationErr := errors.Join(activationErr, retireErr)
+	if postPublicationErr != nil {
+		return &ReloadPublicationError{
+			GenerationID: candidate.ID(),
+			Err:          postPublicationErr,
+		}
+	}
+
+	return nil
 }

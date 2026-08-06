@@ -15,6 +15,23 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  windows-plugin-supervisor:
+    name: Windows plugin supervisor
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Test native process supervision and named pipes
+        run: go test -count=1 ./internal/coding/execution/pluginsupervisor
+      - name: Race-test native process supervision
+        run: go test -race -count=1 ./internal/coding/execution/pluginsupervisor
+      - name: Vet native process supervision
+        run: go vet ./internal/coding/execution/pluginsupervisor
+
   verify:
     name: Go quality and security
     runs-on: ubuntu-24.04

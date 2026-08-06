@@ -550,7 +550,25 @@ func (r *Runtime) openInteraction(
 	if started.RootInteractionID != "" {
 		current.rootInteractionID = started.RootInteractionID
 	}
-	if snapshot, attempted, err := r.connections.RefreshChanged(ctx); err != nil {
+	r.mu.Lock()
+	integration := r.integration
+	if integration == nil || r.closed || r.closing {
+		r.mu.Unlock()
+		return nil, ErrRuntimeClosed
+	}
+	if err := integration.acquire(); err != nil {
+		r.mu.Unlock()
+		return nil, err
+	}
+	r.mu.Unlock()
+	defer func() {
+		if returnErr != nil {
+			returnErr = errors.Join(returnErr, integration.release(context.WithoutCancel(ctx)))
+		}
+	}()
+
+	connections := integration.connectionsSnapshot()
+	if snapshot, attempted, err := connections.RefreshChanged(ctx); err != nil {
 		_ = emitter.emit("", "", EventIntegrationDiagnostic, IntegrationDiagnostic{
 			Component: componentMCP, Code: "refresh_failed",
 			Message: "MCP refresh failed; the previous tool snapshot remains active",
@@ -559,21 +577,16 @@ func (r *Runtime) openInteraction(
 		_ = snapshot
 	}
 
-	activation, err := r.extensions.Acquire()
-	if err != nil {
-		return nil, err
+	activation := integration.snapshot()
+	if activation == nil {
+		return nil, errIntegrationGenerationRetired
 	}
-	defer func() {
-		if returnErr != nil {
-			returnErr = errors.Join(returnErr, activation.Release(context.WithoutCancel(ctx)))
-		}
-	}()
 
 	snapshot := activation.Snapshot()
 	resolvedSkills, err := resolveSkillSet(
-		r.resources,
+		integration.resourcesSnapshot(),
 		snapshot.SkillEntries(),
-		r.skillPolicy,
+		integration.skillPolicySnapshot(),
 	)
 	if err != nil {
 		return nil, err
@@ -686,7 +699,7 @@ func (r *Runtime) openInteraction(
 		if subagentErr != nil {
 			return nil, subagentErr
 		}
-		mcpCatalog, mcpErr := catalog.New(r.connections.Snapshot().Entries...)
+		mcpCatalog, mcpErr := catalog.New(connections.Snapshot().Entries...)
 		if mcpErr != nil {
 			return nil, mcpErr
 		}
@@ -762,7 +775,7 @@ func (r *Runtime) openInteraction(
 		Mode:                started.Mode,
 		PlanDocument:        planDocumentReference(started.Mode, r.handle.Metadata().ID),
 		ToolNames:           agentToolNames(visibleTools),
-		ProjectInstructions: r.projectInstructions,
+		ProjectInstructions: integration.projectInstructionsSnapshot(),
 		ExplicitSkills:      explicitSkills,
 		TeamWorker:          r.workerSystemPromptContext(),
 	})
@@ -857,7 +870,7 @@ func (r *Runtime) openInteraction(
 	}
 	r.resolver.set(value)
 
-	current.activation = activation
+	current.integration = integration
 	current.harness = value
 	current.search = search
 	current.planFlow = planCoordinator
@@ -1372,7 +1385,7 @@ func (r *Runtime) finishInteraction(
 	r.recovery.PendingID = ""
 	r.mu.Unlock()
 
-	if err := current.activation.Release(ctx); err != nil {
+	if err := current.integration.release(ctx); err != nil {
 		errs = append(errs, err)
 	}
 

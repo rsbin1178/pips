@@ -1,7 +1,7 @@
 GO=go
 
 .PHONY: all build test test-short cover fuzz lint lint-fix fmt vet tidy audit deps-check \
-	mod-verify p0-verify provider-smoke sandbox-smoke help
+	mod-verify proto-generate proto-lint p0-verify provider-smoke sandbox-smoke help
 
 all: fmt vet lint test build
 
@@ -45,6 +45,14 @@ vet:
 tidy:
 	$(GO) mod tidy
 
+## proto-generate: Generate the versioned executable-plugin protobuf and gRPC bindings
+proto-generate:
+	buf generate
+
+## proto-lint: Lint the executable-plugin protobuf schema
+proto-lint:
+	buf lint
+
 ## audit: Check dependencies for known vulnerabilities
 audit:
 	$(GO) tool govulncheck ./...
@@ -84,7 +92,7 @@ p0-verify:
 
 ## deps-check: Verify core ai/agent packages use only reviewed dependencies; compile optional integrations
 deps-check:
-	@core_pkgs=$$($(GO) list ./ai/... ./agent/... | grep -Ev '/agent/(mcp|observability/otel)$$'); \
+	@core_pkgs=$$($(GO) list ./ai/... ./agent/... | grep -Ev '/agent/(mcp|observability/otel|plugin/v1)$$'); \
 	mods=$$($(GO) list -deps -f '{{if .Module}}{{.Module.Path}}{{end}}' $$core_pkgs | sort -u | grep -v '^github.com/rsbin/pips$$' | grep -v '^golang.org/x/' | grep -v '^gopkg.in/yaml.v3$$' || true); \
 	if [ -n "$$mods" ]; then \
 		echo "unexpected third-party module dependencies in core ai/agent:"; echo "$$mods"; exit 1; \
@@ -95,6 +103,8 @@ deps-check:
 	@echo "optional agent/mcp integration dependency graph OK"
 	@$(GO) list -deps ./agent/observability/otel >/dev/null
 	@echo "optional agent/observability/otel integration dependency graph OK"
+	@$(GO) list -deps ./agent/plugin/v1 >/dev/null
+	@echo "optional agent/plugin/v1 protocol dependency graph OK"
 
 ## help: Show this help message
 help:
