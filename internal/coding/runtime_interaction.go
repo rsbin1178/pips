@@ -127,8 +127,20 @@ func (r *Runtime) run(
 
 	emitter := newEventEmitter(ctx, r, yield, true)
 	defer emitter.detachConsumer()
+	var promptHookContext []string
+	if kind == operationPrompt {
+		promptHookContext, err = r.runUserPromptSubmit(ctx, messages, emitter)
+		if err != nil {
+			emitter.fail(err)
+
+			return
+		}
+	}
 	if kind == operationPrompt || kind == operationAgentNotification {
 		if err := r.maybeCompact(ctx, emitter); err != nil {
+			if errors.Is(err, ErrHookStopped) {
+				return
+			}
 			r.emitStructuralError("automatic_compaction_failed", "Automatic compaction failed", err, emitter)
 			return
 		}
@@ -172,7 +184,7 @@ func (r *Runtime) run(
 			promptMessages = messages
 		}
 		current, err = r.openInteraction(
-			ctx, interactionID, false, emitter, started, promptMessages,
+			ctx, interactionID, false, emitter, started, promptMessages, promptHookContext,
 		)
 		if err != nil {
 			outcome := InteractionFailed
@@ -208,6 +220,7 @@ func (r *Runtime) run(
 			true,
 			emitter,
 			InteractionStarted{Resumed: true, Mode: r.currentOperatingMode()},
+			nil,
 			nil,
 		)
 		if err == nil {
@@ -350,6 +363,7 @@ func (r *Runtime) run(
 		return
 	}
 
+	stopHookActive := false
 	for {
 		stop, driveErr := r.driveHarness(ctx, current, messages, emitter)
 		messages = nil
@@ -370,6 +384,22 @@ func (r *Runtime) run(
 		}
 
 		if outcome, terminal := terminalInteractionOutcome(stop); terminal {
+			hookOutcome, hookErr := r.runStopHook(ctx, stopHookActive, emitter)
+			if hookErr != nil {
+				errorEventErr := r.emitRunError(current, hookErr, InteractionFailed, emitter)
+				finishErr := r.finishInteraction(
+					context.WithoutCancel(ctx), current, InteractionFailed, emitter,
+				)
+				emitter.fail(errors.Join(hookErr, errorEventErr, finishErr))
+
+				return
+			}
+			if hookOutcome.Blocked && !hookOutcome.Stopped {
+				messages = []ai.Message{ai.UserText(hookContinuationReason(hookOutcome.Reason))}
+				stopHookActive = true
+
+				continue
+			}
 			current.stop = stop
 			finishErr := r.finishInteraction(
 				context.WithoutCancel(ctx),
@@ -541,6 +571,7 @@ func (r *Runtime) openInteraction(
 	emitter *eventEmitter,
 	started InteractionStarted,
 	promptMessages []ai.Message,
+	promptHookContext []string,
 ) (_ *interaction, returnErr error) {
 	current := &interaction{
 		id: interactionID, rootInteractionID: interactionID,
@@ -778,6 +809,7 @@ func (r *Runtime) openInteraction(
 		ProjectInstructions: integration.projectInstructionsSnapshot(),
 		ExplicitSkills:      explicitSkills,
 		TeamWorker:          r.workerSystemPromptContext(),
+		HookContext:         append(r.hookContextSnapshot(), promptHookContext...),
 	})
 	if err != nil {
 		return nil, err
@@ -807,6 +839,7 @@ func (r *Runtime) openInteraction(
 	}
 	statefulBatchGuard := newStatefulToolBatchGuard(descriptors)
 	composed := extension.ComposeHooks(
+		extension.Hooks{BeforeTool: r.hookBeforeTool(emitter)},
 		extension.Hooks{BeforeTool: r.teamGuard.beforeTool(descriptors)},
 		extension.Hooks{AfterTool: leadCoordinatorAfterTool(leadCoordinator)},
 		extension.Hooks{BeforeTool: leasedToolGuard(started.Mode, descriptors, r.config.ToolSearch)},
@@ -818,12 +851,13 @@ func (r *Runtime) openInteraction(
 		controlHooks,
 		extension.Hooks{BeforeTool: r.controller.BeforeTool},
 		extension.Hooks{PrepareTurn: search.PrepareTurn},
-		extension.Hooks{PrepareTurn: r.compactMainContext(emitter)},
+		extension.Hooks{PrepareTurn: r.compactMainContext(current, emitter)},
 		planPrepareHooks,
 	)
 	failureGuard := newToolFailureGuard()
 	composed.BeforeTool = failureGuard.wrapBeforeTool(composed.BeforeTool)
 	composed.AfterTool = failureGuard.wrapAfterTool(composed.AfterTool)
+	composed = extension.ComposeHooks(composed, extension.Hooks{AfterTool: r.hookAfterTool(emitter)})
 
 	maxTurns := 0
 	if planCoordinator != nil {
@@ -832,7 +866,9 @@ func (r *Runtime) openInteraction(
 	agentOptions := append(
 		composed.AgentOptions(),
 		agent.WithMaxTurns(maxTurns),
-		agent.WithStopWhen(failureGuard.stopWhen),
+		agent.WithStopWhen(func(info agent.RunInfo) bool {
+			return current.hookStopRequestedNow() || failureGuard.stopWhen(info)
+		}),
 		agent.WithToolTimeout(r.opts.ToolTimeout),
 		agent.WithRequest(r.requestPolicy),
 	)
@@ -858,7 +894,13 @@ func (r *Runtime) openInteraction(
 		return nil, err
 	}
 
-	pendingHooks := extensionHooks
+	// A paused call has already crossed the Pips lifecycle pre-tool gate. Keep
+	// that one-shot decision intact, but run the lifecycle post-tool hook when
+	// an uncontrolled pending call finally executes through pendingRunner.
+	pendingHooks := extension.ComposeHooks(
+		extensionHooks,
+		extension.Hooks{AfterTool: r.hookAfterTool(nil)},
+	)
 	if started.Mode == ModePlan {
 		pendingHooks = extension.ComposeHooks(
 			extension.Hooks{BeforeTool: r.planReviews.BeforeTool},
@@ -908,6 +950,7 @@ func (r *Runtime) openInteraction(
 }
 
 func (r *Runtime) compactMainContext(
+	current *interaction,
 	emitter *eventEmitter,
 ) func(context.Context, agent.RunInfo) agent.TurnUpdate {
 	return func(ctx context.Context, info agent.RunInfo) agent.TurnUpdate {
@@ -916,7 +959,14 @@ func (r *Runtime) compactMainContext(
 		}
 
 		before := r.session.LeafID()
+		hookContextBefore := len(r.hookContextSnapshot())
 		if err := r.maybeCompact(ctx, emitter); err != nil {
+			if errors.Is(err, ErrHookStopped) {
+				current.requestHookStop()
+
+				return agent.TurnUpdate{}
+			}
+
 			return agent.TurnUpdate{Err: fmt.Errorf("coding runtime: compact context: %w", err)}
 		}
 		if r.session.LeafID() == before {
@@ -928,7 +978,16 @@ func (r *Runtime) compactMainContext(
 			return agent.TurnUpdate{Err: fmt.Errorf("coding runtime: load compacted context: %w", err)}
 		}
 
-		return agent.TurnUpdate{ReplaceMessages: contextValue.Messages}
+		update := agent.TurnUpdate{ReplaceMessages: contextValue.Messages}
+		if hookContext := r.hookContextAfter(hookContextBefore); len(hookContext) > 0 {
+			suffix, err := trustedHookContextSuffix(hookContext)
+			if err != nil {
+				return agent.TurnUpdate{Err: fmt.Errorf("coding runtime: encode compact hook context: %w", err)}
+			}
+			update.NextRequest = &agent.ModelRequestUpdate{SystemSuffix: suffix}
+		}
+
+		return update
 	}
 }
 
@@ -1193,7 +1252,7 @@ func (r *Runtime) reconcileAndContinue(
 }
 
 func (r *Runtime) handleApprovalState(
-	_ context.Context,
+	ctx context.Context,
 	current *interaction,
 	state approval.State,
 	emitter *eventEmitter,
@@ -1208,6 +1267,25 @@ func (r *Runtime) handleApprovalState(
 	case approval.StateReview:
 		if state.Review == nil {
 			return approval.ErrJournalCorrupt
+		}
+		outcome, err := r.runPermissionRequest(ctx, *state.Review, emitter)
+		if err != nil {
+			return err
+		}
+		if outcome.Blocked || outcome.Allowed {
+			resolution := approval.Resolution{
+				RequestID: state.Review.RequestID,
+				Choice:    approval.ChoiceAllowOnce,
+			}
+			if outcome.Blocked {
+				resolution.Choice = approval.ChoiceDeny
+				resolution.Reason = outcome.Reason
+			}
+			next, resolveErr := r.controller.Resolve(ctx, resolution, nil)
+			if resolveErr != nil {
+				return resolveErr
+			}
+			return r.handleApprovalState(ctx, current, next, emitter)
 		}
 
 		if r.Snapshot().Phase == PhaseRunning {
@@ -1375,6 +1453,7 @@ func (r *Runtime) finishInteraction(
 	for _, runID := range current.runIDs {
 		current.search.Forget(runID)
 	}
+	r.clearHookToolContext()
 	r.pending.clear()
 	r.resolver.set(nil)
 

@@ -38,6 +38,8 @@ func TestNew(t *testing.T) {
 	assert.Equal(t, filepath.Join(base, "plugins"), layout.PluginsDir())
 	assert.Equal(t, filepath.Join(base, "plugin-data"), layout.PluginDataDir())
 	assert.Equal(t, filepath.Join(base, "mcp.json"), layout.MCPFile())
+	assert.Equal(t, filepath.Join(base, "hooks.json"), layout.HooksFile())
+	assert.Equal(t, filepath.Join(base, "hook-trust.json"), layout.HookTrustFile())
 	assert.Equal(t, filepath.Join(base, "themes"), layout.TUIThemesDir())
 }
 
@@ -91,6 +93,8 @@ func TestDefaultUsesPIPSHome(t *testing.T) {
 	assert.Equal(t, filepath.Join(root, "plugins"), layout.PluginsDir())
 	assert.Equal(t, filepath.Join(root, "plugin-data"), layout.PluginDataDir())
 	assert.Equal(t, filepath.Join(root, "themes"), layout.TUIThemesDir())
+	assert.Equal(t, filepath.Join(root, "hooks.json"), layout.HooksFile())
+	assert.Equal(t, filepath.Join(root, "hook-trust.json"), layout.HookTrustFile())
 }
 
 func TestWithAgentSkillsDir(t *testing.T) {
@@ -133,6 +137,7 @@ func TestProjectPaths(t *testing.T) {
 	assert.Equal(t, ".pips", paths.ProjectRoot())
 	assert.Equal(t, ".pips/permissions.toml", paths.ProjectPermissionsFile())
 	assert.Equal(t, ".pips/mcp.json", paths.ProjectMCPFile())
+	assert.Equal(t, ".pips/hooks.json", paths.ProjectHooksFile())
 	assert.Equal(t, ".pips/skills", paths.ProjectSkillsDir())
 	assert.Equal(t, ".pips/skills.toml", paths.ProjectSkillsFile())
 	assert.Equal(t, ".agents/skills", paths.ProjectAgentSkillsDir())

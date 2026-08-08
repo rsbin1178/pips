@@ -93,6 +93,55 @@ func TestManagerRunsEachRoleWithExactReadOnlyCatalog(t *testing.T) {
 	}
 }
 
+func TestManagerLifecycleAddsContextAndContinuesChild(t *testing.T) {
+	t.Parallel()
+
+	model := &testModel{responses: []*ai.Response{
+		responseText(`{"summary":"first","evidence":[],"unknowns":[]}`),
+		responseText(`{"summary":"second","evidence":[],"unknowns":[]}`),
+	}}
+	var (
+		starts []LifecycleStart
+		stops  []LifecycleStop
+	)
+	fixture := newManagerFixtureWithConfig(t, model, ExecutionOptions{}, func(config *Config) {
+		config.Lifecycle = Lifecycle{
+			BeforeStart: func(_ context.Context, value LifecycleStart) string {
+				starts = append(starts, value)
+
+				return "trusted child context"
+			},
+			BeforeStop: func(_ context.Context, value LifecycleStop) LifecycleStopDecision {
+				stops = append(stops, value)
+				if len(stops) == 1 {
+					return LifecycleStopDecision{Continue: true, Reason: "Take one more focused pass."}
+				}
+
+				return LifecycleStopDecision{}
+			},
+		}
+	})
+
+	execution, err := fixture.manager.Start(t.Context(), Request{
+		Role: RoleExplore, Task: "Inspect lifecycle behavior.",
+	}, nil)
+	require.NoError(t, err)
+	result, err := execution.Wait(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, OutcomeSucceeded, result.Outcome)
+	require.Len(t, starts, 1)
+	assert.Equal(t, result.ChildSessionID, starts[0].ChildSessionID)
+	require.Len(t, stops, 2)
+	assert.False(t, stops[0].StopHookActive)
+	assert.True(t, stops[1].StopHookActive)
+	assert.Contains(t, stops[0].LastAssistantMessage, `"summary":"first"`)
+
+	requests := model.Requests()
+	require.Len(t, requests, 2)
+	assert.Contains(t, requests[0].System, "trusted child context")
+	assert.Contains(t, messageText(requests[1].Messages[len(requests[1].Messages)-1]), "Take one more focused pass.")
+}
+
 func TestSummarizeToolActivityExposesOnlyBoundedSemanticFields(t *testing.T) {
 	t.Parallel()
 

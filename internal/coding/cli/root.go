@@ -145,6 +145,7 @@ func New(dependencies Dependencies) (*cobra.Command, error) {
 		newConfigCommand(dependencies, flags),
 		newSessionCommand(dependencies, flags),
 		newPluginCommand(dependencies),
+		newHooksCommand(dependencies, flags),
 		newDoctorCommand(dependencies, flags),
 		newVersionCommand(dependencies.Build),
 		newCompletionCommand(),

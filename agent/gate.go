@@ -1,6 +1,10 @@
 package agent
 
-import "context"
+import (
+	"context"
+
+	"github.com/rsbin/pips/ai"
+)
 
 // ToolDecisionAction is what a [WithBeforeTool] gate tells the runtime to do with
 // a tool call.
@@ -26,6 +30,10 @@ type ToolDecision struct {
 	// Reason is sent to the model when Action is [ToolDecisionDeny]. Empty
 	// falls back to a generic denial message.
 	Reason string
+	// UpdatedInput replaces the JSON arguments for an allowed call before the
+	// next gate and before execution. Callers must validate it for their tool
+	// protocol; nil leaves the original arguments unchanged.
+	UpdatedInput ai.JSON
 }
 
 // DenyTool returns a [ToolDecisionDeny] decision carrying the given reason.

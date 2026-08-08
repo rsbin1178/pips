@@ -105,6 +105,7 @@ func (r *Runtime) closeResources(ctx context.Context, current *interaction) erro
 	if err := r.subagents.Close(ctx); err != nil {
 		errs = append(errs, err)
 	}
+	r.runSessionEnd(ctx, SessionClosedNormally, emitter)
 
 	if err := emitter.emit("", "", EventSessionClosed, SessionClosed{Reason: SessionClosedNormally}); err != nil {
 		errs = append(errs, err)

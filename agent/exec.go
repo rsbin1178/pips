@@ -79,8 +79,9 @@ func (a *Agent) gateCalls(ctx context.Context, turn int, calls []ai.ToolCallPart
 	if a.cfg.beforeTool == nil {
 		return calls, denials, nil
 	}
+	runnable := slices.Clone(calls)
 
-	for idx, call := range calls {
+	for idx, call := range runnable {
 		info := ToolCallInfo{
 			ToolCall:   ToolCall{ID: call.ID, Name: call.Name, Args: call.Args},
 			Turn:       turn,
@@ -89,9 +90,13 @@ func (a *Agent) gateCalls(ctx context.Context, turn int, calls []ai.ToolCallPart
 		}
 
 		decision := a.cfg.beforeTool(ctx, info)
+		if decision.UpdatedInput != nil {
+			runnable[idx].Args = slices.Clone(decision.UpdatedInput)
+			call = runnable[idx]
+		}
 		switch decision.Action {
 		case ToolDecisionPause:
-			return calls[:idx], denials[:idx], slices.Clone(calls[idx:])
+			return runnable[:idx], denials[:idx], slices.Clone(runnable[idx:])
 		case ToolDecisionDeny:
 			reason := decision.Reason
 			if reason == "" {
@@ -104,7 +109,7 @@ func (a *Agent) gateCalls(ctx context.Context, turn int, calls []ai.ToolCallPart
 		}
 	}
 
-	return calls, denials, nil
+	return runnable, denials, nil
 }
 
 // batchExec walks one turn's gated calls in order: denied calls settle

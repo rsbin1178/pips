@@ -17,12 +17,13 @@ import (
 )
 
 const (
-	journalCustomType    = "pips.coding.approval/v1alpha1"
-	requestIDBytes       = 16
-	maxCallIDBytes       = 512
-	maxToolNameBytes     = 128
-	journalResultSuccess = "success"
-	journalResultError   = "error"
+	journalCustomType      = "pips.coding.approval/v1alpha1"
+	requestIDBytes         = 16
+	maxCallIDBytes         = 512
+	maxToolNameBytes       = 128
+	maxDecisionReasonBytes = 4 << 10
+	journalResultSuccess   = "success"
+	journalResultError     = "error"
 )
 
 type receiptEvent string
@@ -44,6 +45,7 @@ type receipt struct {
 	Choice      Choice       `json:"choice,omitempty"`
 	Attempt     int          `json:"attempt,omitempty"`
 	Result      string       `json:"result,omitempty"`
+	Reason      string       `json:"reason,omitempty"`
 }
 
 type lifecycle struct {
@@ -52,6 +54,7 @@ type lifecycle struct {
 	choice       Choice
 	approved     bool
 	denied       bool
+	denialReason string
 	retryAttempt int
 	started      int
 	requestIndex int
@@ -210,6 +213,7 @@ func (r *replayState) applyDecision(lifecycle *lifecycle, record receipt) error 
 
 		lifecycle.choice = record.Choice
 		lifecycle.denied = true
+		lifecycle.denialReason = record.Reason
 	case ChoiceRetry:
 		if lifecycle.started < 1 || lifecycle.retryAttempt != 0 || record.Attempt != lifecycle.started+1 {
 			return errors.New("invalid retry decision")
@@ -265,27 +269,29 @@ func decodeReceipt(data ai.JSON) (receipt, execution.Fingerprint, error) {
 func validReceiptFields(record receipt) bool {
 	switch record.Event {
 	case eventRequested:
-		return record.Choice == "" && record.Attempt == 0 && record.Result == ""
+		return record.Choice == "" && record.Attempt == 0 && record.Result == "" && record.Reason == ""
 	case eventDecided:
 		if record.Result != "" {
 			return false
 		}
 
 		switch record.Choice {
-		case ChoiceAllowOnce, ChoiceAllowSession, ChoiceDeny:
-			return record.Attempt == 0
+		case ChoiceAllowOnce, ChoiceAllowSession:
+			return record.Attempt == 0 && record.Reason == ""
+		case ChoiceDeny:
+			return record.Attempt == 0 && validOptionalJournalText(record.Reason, maxDecisionReasonBytes)
 		case ChoiceRetry:
-			return record.Attempt >= 2
+			return record.Attempt >= 2 && record.Reason == ""
 		default:
 			return false
 		}
 	case eventStarted:
-		return record.Choice == "" && record.Attempt >= 1 && record.Result == ""
+		return record.Choice == "" && record.Attempt >= 1 && record.Result == "" && record.Reason == ""
 	case eventCompleted:
 		return record.Choice == "" && record.Attempt >= 0 &&
-			(record.Result == journalResultSuccess || record.Result == journalResultError)
+			(record.Result == journalResultSuccess || record.Result == journalResultError) && record.Reason == ""
 	case eventAcknowledged:
-		return record.Choice == ChoiceMarkFailed && record.Attempt >= 1 && record.Result == ""
+		return record.Choice == ChoiceMarkFailed && record.Attempt >= 1 && record.Result == "" && record.Reason == ""
 	default:
 		return false
 	}
@@ -334,6 +340,10 @@ func validJournalText(value string, limit int) bool {
 	}
 
 	return !strings.ContainsFunc(value, unicode.IsControl)
+}
+
+func validOptionalJournalText(value string, limit int) bool {
+	return value == "" || validJournalText(value, limit)
 }
 
 func validToolName(value string) bool {

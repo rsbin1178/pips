@@ -1,6 +1,7 @@
 package approval
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/rsbin/pips/agent"
@@ -128,6 +129,79 @@ func TestControllerRepairsDeniedCompletionAfterDurableResult(t *testing.T) {
 		eventDecided,
 		eventCompleted,
 	}, receiptEvents(fixture.session.Path()))
+}
+
+func TestControllerDenyReasonIsDurableAndModelVisible(t *testing.T) {
+	t.Parallel()
+
+	fixture := newControllerFixture(t, true, config.ApprovalOnRequest)
+	fixture.session.addPending(controlledCall("call-1", `true`))
+
+	state, err := fixture.controller.Reconcile(t.Context(), nil)
+	require.NoError(t, err)
+	require.NotNil(t, state.Review)
+
+	const reason = "repository policy denied this approval"
+	state, err = fixture.controller.Resolve(t.Context(), Resolution{
+		RequestID: state.Review.RequestID,
+		Choice:    ChoiceDeny,
+		Reason:    reason,
+	}, nil)
+	require.NoError(t, err)
+	assert.Equal(t, StateReady, state.Kind)
+
+	replay := replayJournal(fixture.session.Path())
+	assert.False(t, replay.tainted)
+	require.Len(t, replay.lifecycles, 1)
+	assert.Equal(t, reason, replay.lifecycles[0].denialReason)
+
+	require.Len(t, fixture.session.resolved, 1)
+	resolution := fixture.session.resolved[0]
+	assert.True(t, resolution.IsError)
+	var foundReason bool
+	for _, part := range resolution.Content {
+		text, ok := part.(ai.TextPart)
+		if ok && strings.Contains(text.Text, reason) {
+			foundReason = true
+			break
+		}
+	}
+	assert.True(t, foundReason)
+}
+
+func TestControllerRejectsInvalidDenialReason(t *testing.T) {
+	t.Parallel()
+
+	fixture := newControllerFixture(t, true, config.ApprovalOnRequest)
+	fixture.session.addPending(controlledCall("call-1", `true`))
+
+	state, err := fixture.controller.Reconcile(t.Context(), nil)
+	require.NoError(t, err)
+	require.NotNil(t, state.Review)
+
+	tests := []struct {
+		name       string
+		choice     Choice
+		denialNote string
+	}{
+		{name: "reason on allowance", choice: ChoiceAllowOnce, denialNote: "not permitted"},
+		{name: "control character", choice: ChoiceDeny, denialNote: "not permitted\n"},
+		{name: "oversized reason", choice: ChoiceDeny, denialNote: strings.Repeat("x", maxDecisionReasonBytes+1)},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := fixture.controller.Resolve(t.Context(), Resolution{
+				RequestID: state.Review.RequestID,
+				Choice:    test.choice,
+				Reason:    test.denialNote,
+			}, nil)
+			require.ErrorIs(t, err, ErrInvalidResolution)
+		})
+	}
+
+	assert.Equal(t, []receiptEvent{eventRequested}, receiptEvents(fixture.session.Path()))
+	assert.Zero(t, fixture.executor.runCount)
 }
 
 func TestControllerUnknownRequiresExplicitRetry(t *testing.T) {
