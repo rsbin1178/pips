@@ -34,10 +34,32 @@ type interaction struct {
 	planFlow          *planflow.Controller
 	usage             TokenUsage
 	stop              agent.StopReason
+	hookStopRequested bool
 	subagentUsage     map[string]struct{}
 	runIDs            []string
 	activeRunID       string
 	observer          *guardedAgentObserver
+}
+
+func (i *interaction) requestHookStop() {
+	if i == nil {
+		return
+	}
+
+	i.mu.Lock()
+	i.hookStopRequested = true
+	i.mu.Unlock()
+}
+
+func (i *interaction) hookStopRequestedNow() bool {
+	if i == nil {
+		return false
+	}
+
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	return i.hookStopRequested
 }
 
 func (i *interaction) addSubagentUsage(childSessionID string, usage TokenUsage) {
@@ -224,6 +246,9 @@ func (r *pendingRunner) RunPending(
 
 		switch decision.Action {
 		case agent.ToolDecisionAllow:
+			if decision.UpdatedInput != nil {
+				call.Args = slices.Clone(decision.UpdatedInput)
+			}
 		case agent.ToolDecisionDeny:
 			if decision.Reason == "" {
 				decision.Reason = "pending tool call denied"

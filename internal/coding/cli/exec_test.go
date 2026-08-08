@@ -264,9 +264,10 @@ func TestExecCommandAssemblesOptionsAndTrustsWorkspace(t *testing.T) {
 		return value, ok
 	}
 	dependencies := Dependencies{
-		Paths:      layout,
-		LookupEnv:  lookup,
-		WorkingDir: func() (string, error) { return workspacePath, nil },
+		Paths:       layout,
+		LookupEnv:   lookup,
+		WorkingDir:  func() (string, error) { return workspacePath, nil },
+		Environment: []string{"HOOK_TEST=present"},
 	}
 	root := &rootFlags{workspace: "."}
 
@@ -296,6 +297,7 @@ func TestExecCommandAssemblesOptionsAndTrustsWorkspace(t *testing.T) {
 	assert.Equal(t, config.ApprovalOnRequest, opened.Config.Approval)
 	assert.NotNil(t, opened.Credentials)
 	assert.NotNil(t, opened.Execution.Environment)
+	assert.Equal(t, []string{"HOOK_TEST=present"}, opened.Execution.HooksEnvironment)
 	assert.Contains(t, stderr.String(), "workspace trusted")
 
 	store := workspace.NewStore(layout.WorkspacesFile())

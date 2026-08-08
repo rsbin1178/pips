@@ -3,6 +3,8 @@ package coding
 import (
 	"errors"
 	"fmt"
+
+	"github.com/rsbin/pips/internal/coding/hooks"
 )
 
 var (
@@ -35,7 +37,48 @@ var (
 	// ErrCompactionRetrySuppressed prevents automatic compaction thrashing on
 	// an unchanged leaf after a prior model or persistence failure.
 	ErrCompactionRetrySuppressed = errors.New("coding runtime: automatic compaction retry suppressed")
+	// ErrHookDenied means a trusted UserPromptSubmit lifecycle hook explicitly
+	// rejected a prompt before an interaction was created.
+	ErrHookDenied = errors.New("coding runtime: prompt denied by hook")
+	// ErrHookStopped means a lifecycle hook stopped the event-specific
+	// continuation without turning it into a Runtime failure.
+	ErrHookStopped = errors.New("coding runtime: lifecycle event stopped by hook")
 )
+
+// HookDeniedError includes the reviewed hook's bounded reason while preserving
+// a stable sentinel for non-interactive callers.
+type HookDeniedError struct {
+	Reason string
+}
+
+func (e *HookDeniedError) Error() string {
+	if e == nil || e.Reason == "" {
+		return ErrHookDenied.Error()
+	}
+
+	return fmt.Sprintf("%s: %s", ErrHookDenied, e.Reason)
+}
+
+// Unwrap exposes the stable hook-denial sentinel.
+func (e *HookDeniedError) Unwrap() error { return ErrHookDenied }
+
+// HookStoppedError identifies the hook event and bounded reason that stopped a
+// continuation such as compaction or a clean agent turn.
+type HookStoppedError struct {
+	Event  hooks.Event
+	Reason string
+}
+
+func (e *HookStoppedError) Error() string {
+	if e == nil || e.Reason == "" {
+		return ErrHookStopped.Error()
+	}
+
+	return fmt.Sprintf("%s: %s", ErrHookStopped, e.Reason)
+}
+
+// Unwrap exposes the stable stop sentinel.
+func (e *HookStoppedError) Unwrap() error { return ErrHookStopped }
 
 // RuntimeStateError reports a stable rejected operation and the phase that
 // rejected it. Cause supports errors.Is without exposing mutable internals.

@@ -50,6 +50,7 @@ type Config struct {
 	SummaryModel   ai.LanguageModel
 	Compaction     *harness.CompactionSettings
 	RequestPolicy  func(*ai.Request)
+	Lifecycle      Lifecycle
 	Options        ExecutionOptions
 	AgentObservers []func(context.Context, agent.Event)
 	EventObservers []AgentEventObserver
@@ -84,12 +85,13 @@ type Manager struct {
 // Execution is one cancelable, waitable child lifetime. It intentionally does
 // not retain a context.Context.
 type Execution struct {
-	manager *Manager
-	request Request
-	cancel  context.CancelFunc
-	done    chan struct{}
-	child   *session.Handle
-	tracker *runTracker
+	manager     *Manager
+	request     Request
+	cancel      context.CancelFunc
+	done        chan struct{}
+	child       *session.Handle
+	tracker     *runTracker
+	hookContext string
 
 	cancelOnce sync.Once
 	mu         sync.Mutex
@@ -356,6 +358,14 @@ func (m *Manager) Start(
 		child:      child,
 		tracker:    tracker,
 		stopParent: stopParent,
+	}
+	if m.config.Lifecycle.BeforeStart != nil {
+		execution.hookContext = m.config.Lifecycle.BeforeStart(runCtx, LifecycleStart{
+			ChildSessionID: child.Metadata().ID,
+			Role:           request.Role,
+			Task:           request.Task,
+			Ownership:      request.Ownership,
+		})
 	}
 	m.mu.Lock()
 	if m.closed {
@@ -723,6 +733,7 @@ func (m *Manager) run(
 		m.config.Model,
 		child.Session(),
 		harness.WithSystem(instructions),
+		harness.WithSystemSuffix(execution.hookContext),
 		harness.WithTools(m.tools...),
 		harness.WithOnEvent(onEvent),
 		harness.WithAgentOptions(options...),
@@ -731,6 +742,23 @@ func (m *Manager) run(
 		var result *agent.RunResult
 
 		result, err = childHarness.Prompt(ctx, execution.request.Task)
+		stopHookActive := false
+		for err == nil && result != nil && m.config.Lifecycle.BeforeStop != nil {
+			decision := m.config.Lifecycle.BeforeStop(ctx, LifecycleStop{
+				ChildSessionID:       child.Metadata().ID,
+				Role:                 execution.request.Role,
+				Ownership:            execution.request.Ownership,
+				StopHookActive:       stopHookActive,
+				LastAssistantMessage: result.Text(),
+			})
+			reason := strings.TrimSpace(decision.Reason)
+			if !decision.Continue || reason == "" {
+				break
+			}
+
+			stopHookActive = true
+			result, err = childHarness.Prompt(ctx, reason)
+		}
 		m.finishExecution(ctx, execution, child, observer, created, tracker, startedAt, result, err)
 
 		return

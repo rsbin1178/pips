@@ -1468,6 +1468,7 @@ func cloneOpenOptions(options coding.OpenOptions) coding.OpenOptions {
 	options.Extensions = slices.Clone(options.Extensions)
 	options.AgentObservers = slices.Clone(options.AgentObservers)
 	options.TelemetryObservers = slices.Clone(options.TelemetryObservers)
+	options.Execution.HooksEnvironment = slices.Clone(options.Execution.HooksEnvironment)
 
 	return options
 }

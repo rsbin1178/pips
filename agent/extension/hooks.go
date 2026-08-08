@@ -106,14 +106,24 @@ func composeGates(values []func(context.Context, agent.ToolCallInfo) agent.ToolD
 	}
 
 	return func(ctx context.Context, info agent.ToolCallInfo) agent.ToolDecision {
+		current := info
+		var updatedInput ai.JSON
 		for _, gate := range values {
-			decision := gate(ctx, info)
+			decision := gate(ctx, current)
 			if decision.Action != agent.ToolDecisionAllow {
+				if decision.UpdatedInput == nil && updatedInput != nil {
+					decision.UpdatedInput = slices.Clone(updatedInput)
+				}
+
 				return decision
+			}
+			if decision.UpdatedInput != nil {
+				updatedInput = slices.Clone(decision.UpdatedInput)
+				current.Args = slices.Clone(decision.UpdatedInput)
 			}
 		}
 
-		return agent.ToolDecision{}
+		return agent.ToolDecision{UpdatedInput: updatedInput}
 	}
 }
 

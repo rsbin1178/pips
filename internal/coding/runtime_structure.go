@@ -16,6 +16,7 @@ import (
 	"github.com/rsbin/pips/agent/harness"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding/config"
+	"github.com/rsbin/pips/internal/coding/hooks"
 	"github.com/rsbin/pips/internal/coding/modelcatalog"
 	"github.com/rsbin/pips/internal/coding/plandoc"
 	"github.com/rsbin/pips/internal/coding/session"
@@ -157,7 +158,7 @@ func (r *Runtime) Compact(
 		}
 		if err := r.executeCompaction(
 			operationCtx, CompactionManual, preview, plan, settings, request.Instructions, emitter,
-		); err != nil {
+		); err != nil && !errors.Is(err, ErrHookStopped) {
 			r.emitStructuralError("compaction_failed", "Compaction failed", err, emitter)
 		}
 	}
@@ -309,6 +310,9 @@ func (r *Runtime) executeCompaction(
 	instructions string,
 	emitter *eventEmitter,
 ) error {
+	if err := r.runPreCompact(ctx, mode, preview, emitter); err != nil {
+		return err
+	}
 	if err := emitter.emit("", "", EventCompactionStarted, CompactionStarted{
 		Mode: mode, Preview: preview,
 	}); err != nil {
@@ -332,15 +336,35 @@ func (r *Runtime) executeCompaction(
 	}
 	after := min(harness.EstimateContext(r.session.Path()), preview.EstimatedTokens)
 	duration := max(time.Since(started), time.Duration(0))
+	durationMS := min(duration.Milliseconds(), maxEventDurationMS)
+	postHookErr := r.runPostCompact(ctx, mode, preview.EstimatedTokens, after, durationMS, emitter)
+	if postHookErr != nil && !errors.Is(postHookErr, ErrHookStopped) {
+		return postHookErr
+	}
+	sessionStartOutcome, err := r.runSessionStartSource(ctx, "compact", emitter)
+	if err != nil {
+		return err
+	}
 	if err := emitter.emit("", "", EventCompactionCompleted, CompactionCompleted{
 		Mode: mode, TokensBefore: preview.EstimatedTokens, TokensAfter: after,
 		FirstKeptID:    preview.FirstKeptID,
-		DurationMillis: min(duration.Milliseconds(), maxEventDurationMS),
+		DurationMillis: durationMS,
 	}); err != nil {
 		return err
 	}
 
-	return r.emitTreeChanged(ctx, emitter)
+	if err := r.emitTreeChanged(ctx, emitter); err != nil {
+		return err
+	}
+
+	if sessionStartOutcome.Stopped {
+		return &HookStoppedError{
+			Event:  hooks.EventSessionStart,
+			Reason: sessionStartOutcome.Reason,
+		}
+	}
+
+	return postHookErr
 }
 
 func (r *Runtime) emitTreeChanged(ctx context.Context, emitter *eventEmitter) error {

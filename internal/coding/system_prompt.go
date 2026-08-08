@@ -54,6 +54,7 @@ type systemPromptOptions struct {
 	ToolNames           []string
 	ProjectInstructions string
 	ExplicitSkills      string
+	HookContext         []string
 	TeamWorker          *systemPromptTeamWorker
 }
 
@@ -180,6 +181,16 @@ func buildCodingSystemPromptParts(options systemPromptOptions) (systemPromptPart
 		suffix.WriteString("- Use Team collaboration tools for status and direct messages. The trusted coordinator owns scheduling, result capture, and terminal attempt state.\n")
 	}
 
+	if len(options.HookContext) > 0 {
+		hookSuffix, err := trustedHookContextSuffix(options.HookContext)
+		if err != nil {
+			return systemPromptParts{}, fmt.Errorf("coding system prompt: encode hook context: %w", err)
+		}
+
+		suffix.WriteString("\n\n")
+		suffix.WriteString(hookSuffix)
+	}
+
 	explicitSkills := strings.TrimSpace(options.ExplicitSkills)
 	if explicitSkills != "" {
 		suffix.WriteString("\n\n# Explicitly selected Skills\n\n")
@@ -187,6 +198,18 @@ func buildCodingSystemPromptParts(options systemPromptOptions) (systemPromptPart
 	}
 
 	return systemPromptParts{SharedPrefix: sharedPrefix, Suffix: suffix.String()}, nil
+}
+
+func trustedHookContextSuffix(values []string) (string, error) {
+	hookContext, err := json.MarshalIndent(values, "", "  ")
+	if err != nil {
+		return "", err
+	}
+
+	return "# Trusted lifecycle hook context\n\n" +
+		"The following JSON was supplied by explicitly trusted local lifecycle hooks. " +
+		"It is Runtime-owned context for this interaction.\n\n<trusted_hook_context>\n" +
+		string(hookContext) + "\n</trusted_hook_context>", nil
 }
 
 func normalizedToolNames(values []string) []string {
