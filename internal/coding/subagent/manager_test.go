@@ -930,8 +930,9 @@ func TestRunSubagentToolHasStableSchemaAndEnvelope(t *testing.T) {
 	tool := fixture.manager.Tool(nil)
 	declaration := tool.Decl()
 	assert.Equal(t, ToolName, declaration.Name)
-	assert.Equal(t, []string{"role", "task"}, declaration.InputSchema.Required)
+	assert.Equal(t, []string{"task"}, declaration.InputSchema.Required)
 	assert.Equal(t, []any{"explore", "plan", "review"}, declaration.InputSchema.Properties["role"].Enum)
+	assert.Equal(t, []any{"explore", "plan", "review"}, declaration.InputSchema.Properties["agent_id"].Enum)
 
 	parts, err := tool.Exec(t.Context(), agent.ToolCall{
 		ID: "call-1", Name: ToolName,

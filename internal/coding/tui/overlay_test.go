@@ -475,6 +475,7 @@ type overlayController struct {
 	compactions          []coding.CompactionRequest
 	forks                []string
 	agents               []subagent.Summary
+	agentLibrary         coding.AgentLibrary
 	agentDetail          subagent.Detail
 	agentInspections     []string
 	agentCanceled        []string
@@ -731,6 +732,10 @@ func (c *overlayController) SetSkillEnabled(
 
 func (c *overlayController) ListSubagents(context.Context) ([]subagent.Summary, error) {
 	return append([]subagent.Summary(nil), c.agents...), nil
+}
+
+func (c *overlayController) ListAgentProfiles(context.Context) (coding.AgentLibrary, error) {
+	return c.agentLibrary.Clone(), nil
 }
 
 func (c *overlayController) InspectSubagent(_ context.Context, childSessionID string) (subagent.Detail, error) {

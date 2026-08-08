@@ -91,8 +91,12 @@ type Ownership struct {
 	RootInteractionID   string
 }
 
-// Request describes one isolated read-only specialist delegation.
+// Request is the compatibility admission shape for one builtin specialist
+// delegation. AgentID is the primary selector; Role remains a temporary wire
+// alias for explore, plan, and review. Custom definitions are admitted only
+// through a Runtime-compiled ExecutionPlan.
 type Request struct {
+	AgentID   string
 	Role      Role
 	Task      string
 	Ownership Ownership
@@ -111,6 +115,7 @@ type Lifecycle struct {
 // its harness begins its first run.
 type LifecycleStart struct {
 	ChildSessionID string
+	Identity       AgentIdentity
 	Role           Role
 	Task           string
 	Ownership      Ownership
@@ -120,6 +125,7 @@ type LifecycleStart struct {
 // its terminal child record.
 type LifecycleStop struct {
 	ChildSessionID       string
+	Identity             AgentIdentity
 	Role                 Role
 	Ownership            Ownership
 	StopHookActive       bool
@@ -135,6 +141,7 @@ type LifecycleStopDecision struct {
 
 // Result is the terminal execution result returned to the parent Tool.
 type Result struct {
+	Identity       AgentIdentity
 	Role           Role
 	ChildSessionID string
 	ChildRunID     string
@@ -152,6 +159,7 @@ type Result struct {
 type Event struct {
 	Progress            bool
 	State               State
+	Identity            AgentIdentity
 	Role                Role
 	ChildSessionID      string
 	ParentSessionID     string
@@ -199,6 +207,7 @@ type Summary struct {
 	ChildSessionID string
 	Ownership      Ownership
 	Delivery       Delivery
+	Identity       AgentIdentity
 	Role           Role
 	State          State
 	TaskPreview    string
@@ -286,6 +295,7 @@ type Activity struct {
 // Detail extends Summary with durable replay data and optional live activity.
 type Detail struct {
 	Summary    Summary
+	Plan       ExecutionPlan
 	Transcript []ai.Message
 	Activity   Activity
 	Result     any

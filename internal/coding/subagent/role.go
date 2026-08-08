@@ -1,3 +1,4 @@
+//nolint:wsl_v5,gocyclo // Role admission keeps legacy compatibility and strict request validation adjacent.
 package subagent
 
 import (
@@ -183,12 +184,62 @@ func unwrapJSONFence(value string) (string, bool) {
 	return inner, true
 }
 
-//nolint:gocyclo // Request ownership and role constraints are one strict admission boundary.
-func validateRequest(request Request, limits Limits) error {
-	if _, err := specFor(request.Role); err != nil {
-		return err
+// normalizeBuiltinRequest turns the temporary role wire alias into the
+// canonical builtin agent ID. It deliberately accepts only reserved builtin
+// IDs: custom IDs must first be compiled by Runtime into an ExecutionPlan, so
+// callers cannot construct authority by filling a Request themselves.
+func normalizeBuiltinRequest(request Request) (Request, error) {
+	if request.AgentID == "" {
+		identity, err := BuiltinIdentity(request.Role)
+		if err != nil {
+			return Request{}, err
+		}
+		request.AgentID = identity.ID
+
+		return request, nil
 	}
 
+	identity, err := BuiltinIdentity(Role(request.AgentID))
+	if err != nil {
+		return Request{}, fmt.Errorf("%w: unknown agent_id %q", ErrInvalid, request.AgentID)
+	}
+	if request.Role != "" && request.Role != identity.LegacyRole() {
+		return Request{}, fmt.Errorf("%w: role and agent_id differ", ErrInvalid)
+	}
+
+	request.Role = identity.LegacyRole()
+
+	return request, nil
+}
+
+// normalizeDispatchRequest recognizes the legacy builtin wire shape without
+// treating every unknown agent_id as a builtin. Custom IDs are deliberately
+// left unresolved here: only a Runtime-owned Dispatcher may compile them.
+func normalizeDispatchRequest(request Request) (Request, bool, error) {
+	if request.Role != "" {
+		normalized, err := normalizeBuiltinRequest(request)
+		if err != nil {
+			return Request{}, false, err
+		}
+
+		return normalized, true, nil
+	}
+	if request.AgentID == "" || !validAgentID(request.AgentID) {
+		return Request{}, false, fmt.Errorf("%w: invalid agent_id", ErrInvalid)
+	}
+
+	if identity, err := BuiltinIdentity(Role(request.AgentID)); err == nil {
+		request.Role = identity.LegacyRole()
+
+		return request, true, nil
+	}
+
+	return request, false, nil
+}
+
+// validateDispatchRequest validates the caller-controlled portion of any
+// admission request. It intentionally has no profile or capability authority.
+func validateDispatchRequest(request Request, limits Limits) error {
 	if strings.TrimSpace(request.Task) == "" || !utf8.ValidString(request.Task) ||
 		strings.ContainsRune(request.Task, 0) {
 		return fmt.Errorf("%w: task must be non-blank UTF-8 without NUL", ErrInvalid)
@@ -217,6 +268,17 @@ func validateRequest(request Request, limits Limits) error {
 	}
 
 	return nil
+}
+
+func validateRequest(request Request, limits Limits) error {
+	if request.AgentID != "" && request.AgentID != string(request.Role) {
+		return fmt.Errorf("%w: request must use one canonical builtin agent id", ErrInvalid)
+	}
+	if _, err := specFor(request.Role); err != nil {
+		return err
+	}
+
+	return validateDispatchRequest(request, limits)
 }
 
 func decodeExplore(text string, limits Limits) (any, error) {

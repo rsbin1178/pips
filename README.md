@@ -47,8 +47,16 @@ The synchronous `run_subagent` Tool waits for one specialist; the asynchronous
 `spawn_agent` Tool returns an `agent_id` immediately and delivers its terminal
 result back to the parent Agent automatically. Both paths share the same
 bounded manager, journal, permissions, result validation, and ordinary child
-Session timeline. Each specialist receives only `read`, `ls`, `glob`, and
+Session timeline. Built-in specialists receive only `read`, `ls`, `glob`, and
 `grep`.
+
+The disabled-by-default Dynamic custom Agents Alpha adds user and trusted-project
+Markdown profiles without changing that authority model. A profile can select
+currently delegable read, write, Shell, existing MCP, Skill, Tool Search, and
+question capabilities, but only the active Runtime can authorize them and each
+high-risk action retains the child-owned approval/audit path. See
+[Dynamic custom Agents](docs/coding-cli.md#dynamic-custom-agents-alpha) for
+the feature gate, definition format, trust roots, and direct invocation.
 The single-session Runtime now composes durable Harness state, immutable
 Extension/Skill/MCP generations, approval continuation, change attribution,
 typed product events, and optional telemetry. The default command now opens a
@@ -139,10 +147,11 @@ API_KEY=... go run ./cmd/pips
 ```
 
 The first visit to a Workspace asks whether project resources may be loaded.
-Trust enables Pips-native `.pips` resources and shared `.agents/skills`, but
-does not approve tools, Skill scripts, MCP servers, Shell commands, or full
-access. Main configuration always comes from `~/.pips/config.toml` or the one
-file selected by `--config`; project trust does not change it.
+Trust enables Pips-native `.pips` resources, shared `.agents/skills`, and the
+project Agent roots `.pips/agents` and `.agents/agents`, but does not approve
+tools, Skill scripts, MCP servers, Shell commands, or full access. Main
+configuration always comes from `~/.pips/config.toml` or the one file selected
+by `--config`; project trust does not change it.
 Non-TTY input and `TERM=dumb` fail before Workspace configuration or
 credentials are acquired and direct the caller to `pips exec`.
 
@@ -190,12 +199,16 @@ The command palette provides `/new`, `/resume`, `/plan`, `/mode`, `/agents`, `/t
 filter the same list and insert an exact `$skill-name` reference. Explicit
 references apply only to that request; unknown tokens such as `$HOME` remain
 ordinary text.
-`/agents` lists only the specialists owned by the current conversation, orders
-running work first, opens the full child timeline with Enter, and cancels the
-selected running child with `c`. Approval is fail-closed: review defaults to
-deny, Enter applies only the highlighted Runtime-provided choice, and an
-unknown outcome exposes only retry, mark-failed, or acknowledge when the
-Runtime declares them.
+`/agents` opens durable Runs by default: it orders running work first, opens
+the full child timeline with Enter, and cancels the selected running child with
+`c`. Press `Ctrl+L` for the definition Library and `Ctrl+R` to return to Runs.
+The Library shows safe provenance, declared capability requests, and
+availability; Enter selects an available user-visible Agent, then the Composer
+submits its direct task without asking the parent model to delegate it. Approval
+is fail-closed: review defaults to deny, Enter applies only the highlighted
+Runtime-provided choice, and an unknown outcome exposes only retry, mark-failed,
+or acknowledge when the Runtime declares them. A custom child's approval or
+question is resolved against that exact child Session, never the parent.
 
 `/team [objective]` proposes a Coding Team through an explicit review before
 admission; `/team` inspects current or recoverable Team work. Worker input,

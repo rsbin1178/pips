@@ -73,6 +73,7 @@ type promptState struct {
 	question   questionPromptState
 	planReview planReviewPromptState
 	team       *teamPromptSource
+	subagent   *subagentPromptSource
 	generation uint64
 }
 
@@ -111,6 +112,7 @@ func (m *Model) syncApprovalPrompt() {
 	if m.state.Question.Required != nil {
 		if m.prompt.kind == promptQuestion &&
 			m.prompt.team == nil &&
+			m.prompt.subagent == nil &&
 			m.prompt.question.request.ID == m.state.Question.Required.ID &&
 			m.prompt.question.request.SchemaDigest == m.state.Question.Required.SchemaDigest {
 			return
@@ -126,6 +128,9 @@ func (m *Model) syncApprovalPrompt() {
 		return
 	}
 	if m.state.Approval.Kind == coding.ApprovalNone {
+		if m.syncSubagentInteractionPrompt() {
+			return
+		}
 		if entry, ok := m.nextTeamInteraction(); ok {
 			m.syncTeamInteractionPrompt(*entry)
 
@@ -481,6 +486,19 @@ func (m *Model) resolvePromptChoice(choice approval.Choice) (tea.Model, tea.Cmd)
 
 		return m, nil
 	}
+	if m.prompt.subagent != nil {
+		activityWasVisible := m.activityClockVisible()
+		command := m.submitSubagentApprovalChoice(m.prompt.subagent, choice)
+		if command == nil {
+			m.syncApprovalPrompt()
+
+			return m, nil
+		}
+		m.prompt.loading = true
+		m.prompt.err = nil
+
+		return m, tea.Batch(command, m.startActivityClock(activityWasVisible))
+	}
 
 	requestID := ""
 	if m.state.Approval.Required != nil {
@@ -505,7 +523,7 @@ func (m *Model) resolvePromptChoice(choice approval.Choice) (tea.Model, tea.Cmd)
 }
 
 func (m *Model) mainApprovalExecutionStarting() bool {
-	if m.prompt.kind != promptApproval || m.prompt.team != nil || !m.prompt.loading {
+	if m.prompt.kind != promptApproval || m.prompt.team != nil || m.prompt.subagent != nil || !m.prompt.loading {
 		return false
 	}
 
@@ -765,6 +783,16 @@ func (m *Model) resolveQuestionPromptCommand(
 
 		return tea.Batch(command, m.startActivityClock(activityWasVisible))
 	}
+	if m.prompt.subagent != nil {
+		command := m.submitSubagentQuestionResolution(m.prompt.subagent, resolution, false)
+		if command == nil {
+			m.syncApprovalPrompt()
+
+			return nil
+		}
+
+		return tea.Batch(command, m.startActivityClock(activityWasVisible))
+	}
 
 	return m.startStream(func(ctx context.Context) iter.Seq2[coding.Event, error] {
 		return m.controller.ResolveQuestion(ctx, resolution)
@@ -781,6 +809,20 @@ func (m *Model) rejectQuestionPromptCommand(
 			question.Resolution{
 				RequestID: request.ID, SchemaDigest: request.SchemaDigest,
 			},
+			true,
+		)
+		if command == nil {
+			m.syncApprovalPrompt()
+
+			return nil
+		}
+
+		return tea.Batch(command, m.startActivityClock(activityWasVisible))
+	}
+	if m.prompt.subagent != nil {
+		command := m.submitSubagentQuestionResolution(
+			m.prompt.subagent,
+			question.Resolution{RequestID: request.ID, SchemaDigest: request.SchemaDigest},
 			true,
 		)
 		if command == nil {
@@ -882,7 +924,11 @@ func (m *Model) questionPromptView() string {
 	state := &m.prompt.question
 	request := state.request
 	if request.Kind == question.RequestFreeform {
-		lines := []string{"Input required", "", request.Prompt, "", state.editor.View(), "Enter submit · Ctrl+J newline · Ctrl+C cancel"}
+		lines := []string{"Input required"}
+		if source := m.promptSourceLine(); source != "" {
+			lines = append(lines, source)
+		}
+		lines = append(lines, "", request.Prompt, "", state.editor.View(), "Enter submit · Ctrl+J newline · Ctrl+C cancel")
 		if state.loading {
 			lines = append(lines, m.activityNotice("Working…"))
 		}
@@ -916,7 +962,7 @@ func (m *Model) questionPromptView() string {
 	tabs = append(tabs, submit, "→")
 
 	lines := make([]string, 0, 16)
-	if source := m.teamPromptSourceLine(); source != "" {
+	if source := m.promptSourceLine(); source != "" {
 		lines = append(lines, source, "")
 	}
 	lines = append(lines, strings.Join(tabs, "  "), "")
@@ -1057,19 +1103,37 @@ func questionAnswerLabel(state questionPromptState, index int) string {
 
 func (m *Model) approvalPromptView() string {
 	lines := []string{"△ Approval required"}
-	if source := m.teamPromptSourceLine(); source != "" {
+	if source := m.promptSourceLine(); source != "" {
 		lines = append(lines, source)
 	}
-	state := m.promptApprovalState()
-	if value := state.Required; value != nil {
-		lines = append(lines,
-			value.Tool+": "+strings.Join(value.Command, " "),
-			"cwd "+value.CWD+" · reason: "+value.Justification,
-		)
-	} else if value := state.Unknown; value != nil {
-		lines = append(lines,
-			"outcome unknown · "+value.Tool+" · "+value.Reason,
-		)
+	//nolint:nestif // Child approval rendering keeps exact target ownership adjacent to its safe fields.
+	if m.prompt.subagent != nil {
+		state, ok := m.subagentInteractions.values[m.prompt.subagent.childSessionID]
+		if ok && state.Approval.Review != nil {
+			value := state.Approval.Review
+			command := append([]string{value.Operation.Executable()}, value.Operation.Args()...)
+			lines = append(lines,
+				value.Call.Name+": "+strings.Join(command, " "),
+				"cwd "+value.Operation.CWD()+" · reason: "+value.Operation.Justification(),
+			)
+		} else if ok && state.Approval.Unknown != nil {
+			value := state.Approval.Unknown
+			lines = append(lines,
+				"outcome unknown · "+value.Tool+" · "+value.Reason,
+			)
+		}
+	} else {
+		state := m.promptApprovalState()
+		if value := state.Required; value != nil {
+			lines = append(lines,
+				value.Tool+": "+strings.Join(value.Command, " "),
+				"cwd "+value.CWD+" · reason: "+value.Justification,
+			)
+		} else if value := state.Unknown; value != nil {
+			lines = append(lines,
+				"outcome unknown · "+value.Tool+" · "+value.Reason,
+			)
+		}
 	}
 	lines = append(lines, "")
 	for index, choice := range m.prompt.choices {
@@ -1124,6 +1188,19 @@ func (m *Model) teamPromptSourceLine() string {
 	}
 
 	return "Team Worker · " + worker + " · Task: " + task
+}
+
+func (m *Model) promptSourceLine() string {
+	if m.prompt.subagent != nil {
+		name := safeDetailText(m.prompt.subagent.agentName)
+		if name == "" {
+			name = genericSubagentLabel
+		}
+
+		return "Subagent · " + truncateText(name, 96)
+	}
+
+	return m.teamPromptSourceLine()
 }
 
 func (m *Model) compactPromptView() string {

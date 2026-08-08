@@ -15,6 +15,7 @@ import (
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding/execution"
 	"github.com/rsbin/pips/internal/coding/planflow"
+	"github.com/rsbin/pips/internal/coding/subagent"
 )
 
 const maxPendingErrorBytes = 16 << 10
@@ -39,6 +40,7 @@ type interaction struct {
 	runIDs            []string
 	activeRunID       string
 	observer          *guardedAgentObserver
+	userDispatcher    subagent.Dispatcher
 }
 
 func (i *interaction) requestHookStop() {

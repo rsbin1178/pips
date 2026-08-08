@@ -8,6 +8,10 @@ import (
 
 	"github.com/rsbin/pips/agent"
 	"github.com/rsbin/pips/ai"
+	"github.com/rsbin/pips/internal/coding/approval"
+	"github.com/rsbin/pips/internal/coding/config"
+	"github.com/rsbin/pips/internal/coding/modelcatalog"
+	"github.com/rsbin/pips/internal/coding/question"
 	"github.com/rsbin/pips/internal/coding/subagent"
 )
 
@@ -28,7 +32,7 @@ func (r *Runtime) subagentObserver(
 		eventType := subagentEventType(event)
 
 		payload := SubagentLifecycle{
-			Role: event.Role, State: event.State,
+			Identity: event.Identity, Role: event.Role, State: event.State,
 			ChildSessionID:      event.ChildSessionID,
 			ParentInteractionID: event.ParentInteractionID,
 			ParentRunID:         event.ParentRunID,
@@ -103,6 +107,7 @@ func (r *Runtime) openChildProjection(ctx context.Context, event subagent.Event)
 	}
 	r.children[event.ChildSessionID] = child
 	eventTime := childEventTime(event.Time)
+	provider, modelID, contextWindow := r.childSessionModel(event.Model)
 	if err := publisher.publishChildGeneratedLocked(
 		ctx,
 		child,
@@ -110,9 +115,8 @@ func (r *Runtime) openChildProjection(ctx context.Context, event subagent.Event)
 		"",
 		EventSessionOpened,
 		SessionOpened{
-			Provider: r.model.Provider(), ModelID: r.model.ModelID(),
-			ContextWindow: r.resolved.Limits.ContextWindow,
-			Mode:          r.currentOperatingMode(),
+			Provider: provider, ModelID: modelID, ContextWindow: contextWindow,
+			Mode: r.currentOperatingMode(),
 		},
 	); err != nil {
 		return err
@@ -127,6 +131,27 @@ func (r *Runtime) openChildProjection(ctx context.Context, event subagent.Event)
 	return publisher.publishChildGeneratedLocked(
 		ctx, child, eventTime, "", EventStatusChanged, StatusChanged{Phase: PhaseRunning},
 	)
+}
+
+func (r *Runtime) childSessionModel(modelRef string) (ai.Provider, string, int) {
+	if r == nil || r.model == nil {
+		return "", "", 0
+	}
+	provider, modelID, contextWindow := r.model.Provider(), r.model.ModelID(), r.resolved.Limits.ContextWindow
+	ref, err := config.ParseModelRef(modelRef)
+	if err != nil {
+		return provider, modelID, contextWindow
+	}
+	provider, modelID = ref.Provider, ref.Model
+	if r.modelCatalog == nil {
+		return provider, modelID, contextWindow
+	}
+	resolved, resolveErr := r.modelCatalog.Resolve(modelcatalog.Selection{Ref: ref})
+	if resolveErr == nil {
+		contextWindow = resolved.Limits.ContextWindow
+	}
+
+	return provider, modelID, contextWindow
 }
 
 func (r *Runtime) observeChildAgentEvent(ctx context.Context, childEvent subagent.AgentEvent) error {
@@ -169,6 +194,76 @@ func (r *Runtime) observeChildAgentEvent(ctx context.Context, childEvent subagen
 	}
 
 	return nil
+}
+
+// projectChildPause records an independently owned child phase transition.
+// The parent interaction remains running while the child waits for its own
+// approval or structured question; callers must resolve that child through
+// the targetable child-control APIs.
+func (r *Runtime) projectChildPause(
+	ctx context.Context,
+	childSessionID string,
+	paused bool,
+) error {
+	if r == nil || childSessionID == "" {
+		return ErrRuntimeClosed
+	}
+	publisher := r.publisher
+	if publisher == nil {
+		return ErrRuntimeClosed
+	}
+	publisher.mu.Lock()
+	defer publisher.mu.Unlock()
+
+	child, exists := r.children[childSessionID]
+	if !exists || child.finished {
+		return fmt.Errorf("%w: child projection is unavailable", ErrEventProtocol)
+	}
+	phase := PhaseRunning
+	if paused {
+		phase = PhasePaused
+	}
+
+	return publisher.publishChildGeneratedLocked(
+		ctx,
+		child,
+		time.Now().UTC(),
+		"",
+		EventStatusChanged,
+		StatusChanged{Phase: phase},
+	)
+}
+
+// projectChildWorkspaceChanged records a change report exclusively in the
+// child Session projection. The parent State and parent lifecycle event remain
+// content-free with respect to child file diffs.
+func (r *Runtime) projectChildWorkspaceChanged(
+	ctx context.Context,
+	childSessionID string,
+	report WorkspaceChanged,
+) error {
+	if r == nil || childSessionID == "" {
+		return ErrRuntimeClosed
+	}
+	publisher := r.publisher
+	if publisher == nil {
+		return ErrRuntimeClosed
+	}
+	publisher.mu.Lock()
+	defer publisher.mu.Unlock()
+	child, exists := r.children[childSessionID]
+	if !exists || child.finished {
+		return fmt.Errorf("%w: child projection is unavailable", ErrEventProtocol)
+	}
+
+	return publisher.publishChildGeneratedLocked(
+		ctx,
+		child,
+		time.Now().UTC(),
+		"",
+		EventWorkspaceChanged,
+		report,
+	)
 }
 
 func (r *Runtime) finishChildProjection(ctx context.Context, event subagent.Event) error {
@@ -346,4 +441,82 @@ func (r *Runtime) CancelSubagent(ctx context.Context, childSessionID string) err
 	}
 
 	return r.subagents.Cancel(ctx, childSessionID)
+}
+
+// SubagentControlState returns the independently owned approval/question
+// state for a currently live custom child. Terminal and legacy children have
+// no in-memory control target and therefore cannot be resumed through this
+// path.
+func (r *Runtime) SubagentControlState(childSessionID string) (ChildControlState, error) {
+	scope, err := r.childControlScope(childSessionID)
+	if err != nil {
+		return ChildControlState{}, err
+	}
+
+	return scope.State(), nil
+}
+
+// ResolveSubagentApproval routes a decision to exactly one child-owned
+// approval journal/resolver. It never resolves the parent interaction.
+func (r *Runtime) ResolveSubagentApproval(
+	ctx context.Context,
+	childSessionID string,
+	resolution approval.Resolution,
+) (ChildControlState, error) {
+	scope, err := r.childControlScope(childSessionID)
+	if err != nil {
+		return ChildControlState{}, err
+	}
+
+	return scope.ResolveApproval(ctx, resolution)
+}
+
+// ResolveSubagentQuestion routes a structured answer to exactly one
+// child-owned question controller and resumes only that child when ready.
+func (r *Runtime) ResolveSubagentQuestion(
+	ctx context.Context,
+	childSessionID string,
+	resolution question.Resolution,
+) (ChildControlState, error) {
+	scope, err := r.childControlScope(childSessionID)
+	if err != nil {
+		return ChildControlState{}, err
+	}
+
+	return scope.ResolveQuestion(ctx, resolution)
+}
+
+// RejectSubagentQuestion records an explicit cancellation on exactly one
+// child-owned question controller.
+func (r *Runtime) RejectSubagentQuestion(
+	ctx context.Context,
+	childSessionID string,
+	requestID string,
+	schemaDigest string,
+) (ChildControlState, error) {
+	scope, err := r.childControlScope(childSessionID)
+	if err != nil {
+		return ChildControlState{}, err
+	}
+
+	return scope.RejectQuestion(ctx, requestID, schemaDigest)
+}
+
+func (r *Runtime) childControlScope(childSessionID string) (*childControlScope, error) {
+	if r == nil || childSessionID == "" {
+		return nil, ErrRuntimeClosed
+	}
+	r.mu.Lock()
+	closed := r.closed || r.closing
+	controls := r.childControls
+	r.mu.Unlock()
+	if closed || controls == nil {
+		return nil, ErrRuntimeClosed
+	}
+	scope := controls.get(childSessionID)
+	if scope == nil {
+		return nil, fmt.Errorf("%w: child control target is unavailable", ErrRuntimeNotPaused)
+	}
+
+	return scope, nil
 }

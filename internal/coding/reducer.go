@@ -93,6 +93,7 @@ type SubagentState struct {
 	RootInteractionID   string                   `json:"root_interaction_id,omitempty"`
 	Delivery            subagent.Delivery        `json:"delivery,omitempty"`
 	ChildRunID          string                   `json:"child_run_id,omitempty"`
+	Identity            subagent.AgentIdentity   `json:"identity,omitzero"`
 	Role                subagent.Role            `json:"role"`
 	State               subagent.State           `json:"state"`
 	TaskPreview         string                   `json:"task_preview,omitempty"`
@@ -1086,7 +1087,8 @@ func (state *State) applySubagent(event Event, payload SubagentLifecycle) error 
 		ParentToolCallID:    payload.ParentToolCallID,
 		RootInteractionID:   payload.RootInteractionID,
 		Delivery:            payload.Delivery,
-		ChildRunID:          payload.ChildRunID, Role: payload.Role, State: payload.State,
+		ChildRunID:          payload.ChildRunID, Identity: payload.Identity,
+		Role: payload.Role, State: payload.State,
 		TaskPreview: payload.TaskPreview, Activity: activity,
 		Model: payload.Model, Code: payload.Code,
 		Turns: payload.Turns, ToolCalls: payload.ToolCalls, Usage: payload.Usage,
@@ -1143,7 +1145,8 @@ func sameSubagentIdentity(previous SubagentState, payload SubagentLifecycle) boo
 		previous.ParentRunID == payload.ParentRunID &&
 		previous.ParentToolCallID == payload.ParentToolCallID &&
 		previous.RootInteractionID == payload.RootInteractionID &&
-		previous.Delivery == payload.Delivery && previous.Role == payload.Role &&
+		previous.Delivery == payload.Delivery && previous.Identity == payload.Identity &&
+		previous.Role == payload.Role &&
 		previous.Model == payload.Model && previous.TaskPreview == payload.TaskPreview &&
 		(previous.ChildRunID == "" || previous.ChildRunID == payload.ChildRunID)
 }

@@ -16,6 +16,7 @@ import (
 	"github.com/rsbin/pips/agent/extension"
 	"github.com/rsbin/pips/agent/harness"
 	"github.com/rsbin/pips/ai"
+	"github.com/rsbin/pips/internal/coding/agentprofile"
 	"github.com/rsbin/pips/internal/coding/approval"
 	"github.com/rsbin/pips/internal/coding/changes"
 	"github.com/rsbin/pips/internal/coding/changes/git"
@@ -149,6 +150,10 @@ func (r *Runtime) run(
 	var current *interaction
 	var mechanicalOutcome *InteractionOutcome
 	switch kind {
+	case operationDirectAgent:
+		emitter.fail(fmt.Errorf("%w: direct Agent invocation must use RunAgent", ErrRuntimeInvalid))
+
+		return
 	case operationPrompt, operationAgentNotification:
 		interactionID, startErr := r.journal.start()
 		if startErr != nil {
@@ -485,7 +490,7 @@ func (r *Runtime) beginOperation(
 	}
 
 	switch kind {
-	case operationPrompt, operationAgentNotification:
+	case operationPrompt, operationDirectAgent, operationAgentNotification:
 		if kind == operationAgentNotification && len(messages) != 1 {
 			return nil, nil, fmt.Errorf("%w: invalid Agent notification operation", ErrRuntimeInvalid)
 		}
@@ -698,6 +703,12 @@ func (r *Runtime) openInteraction(
 		composedCatalogs = append(composedCatalogs, taskCatalog)
 	}
 	var planCoordinator *planflow.Controller
+	var (
+		childOwner          subagent.Ownership
+		childObserver       subagent.Observer
+		childMCPEntries     []catalog.Entry
+		attachSubagentTools bool
+	)
 	if r.isTeamWorker() {
 		memberCatalog, memberErr := r.teamWorkerCatalog()
 		if memberErr != nil {
@@ -715,32 +726,24 @@ func (r *Runtime) openInteraction(
 		if planErr != nil {
 			return nil, planErr
 		}
-		childOwner := subagent.Ownership{
+		childOwner = subagent.Ownership{
 			ParentSessionID:     r.handle.Metadata().ID,
 			ParentInteractionID: current.id,
 			RootInteractionID:   current.rootInteractionID,
 		}
-		childObserver := r.subagentObserver(current, emitter)
-		subagentTools, subagentErr := catalog.New(catalog.Local(
-			"coding.subagent",
-			catalog.RiskRead,
-			r.subagents.ToolFor(childOwner, childObserver),
-			r.subagents.SpawnToolFor(childOwner, childObserver),
-		)...)
-		if subagentErr != nil {
-			return nil, subagentErr
-		}
-		mcpCatalog, mcpErr := catalog.New(connections.Snapshot().Entries...)
+		childObserver = r.subagentObserver(current, emitter)
+		childMCPEntries = connections.Snapshot().Entries
+		mcpCatalog, mcpErr := catalog.New(childMCPEntries...)
 		if mcpErr != nil {
 			return nil, mcpErr
 		}
 		composedCatalogs = append(
 			composedCatalogs,
 			planCatalog,
-			subagentTools,
 			snapshot.Catalog(),
 			mcpCatalog,
 		)
+		attachSubagentTools = true
 		if started.Mode == ModePlan {
 			planCoordinator, err = planflow.NewController()
 			if err != nil {
@@ -760,7 +763,7 @@ func (r *Runtime) openInteraction(
 		}
 	}
 
-	merged, err := catalog.Merge(composedCatalogs...)
+	ambientCatalog, err := catalog.Merge(composedCatalogs...)
 	if err != nil {
 		return nil, err
 	}
@@ -768,6 +771,75 @@ func (r *Runtime) openInteraction(
 	policy, err := catalogPolicyForMode(started.Mode, r.workspace.Identity().Key())
 	if err != nil {
 		return nil, err
+	}
+	ambientDescriptors, err := ambientCatalog.Search(ctx, policy, "")
+	if err != nil {
+		return nil, err
+	}
+	merged := ambientCatalog
+	var userDispatcher subagent.Dispatcher
+	//nolint:nestif // Dynamic dispatch must stay beside the frozen interaction snapshot it captures.
+	if attachSubagentTools {
+		var dispatcher subagent.Dispatcher
+		if r.config.DynamicSubagents {
+			childModel := snapshot.Model(r.model)
+			childModels, modelErr := newChildModelResolver(
+				r.modelCatalog,
+				r.resolved,
+				childModel,
+				r.requestPolicy,
+				r.credentials,
+				snapshot.Model,
+			)
+			if modelErr != nil {
+				return nil, modelErr
+			}
+			childFactory := childScopeFactory{
+				workspace: r.workspace, tree: r.tree, toolLimits: r.opts.ToolLimits,
+				policy: r.policy, executor: r.executor, sandbox: r.config.Sandbox,
+				network:       r.config.SandboxWorkspaceWrite.Network,
+				requestPolicy: r.requestPolicy, toolTimeout: r.opts.ToolTimeout,
+				inspector: r.inspector, hooks: r.hookDefinitions, hookRunner: r.hookRunner,
+				model: childModel, mode: started.Mode, mcpEntries: childMCPEntries, controls: r.childControls,
+				onPauseChanged:     r.projectChildPause,
+				onWorkspaceChanged: r.projectChildWorkspaceChanged,
+			}
+			newDispatcher := func(audience agentprofile.Audience) (*customSubagentDispatcher, error) {
+				return newCustomSubagentDispatcher(
+					integration,
+					integration.agentProfilesSnapshot(),
+					audience,
+					ambientDescriptors,
+					resolvedSkills.enabledSkills(),
+					runtimeSubagentLimits(r.opts.Subagent),
+					childModels,
+					childFactory,
+					r.config.ToolSearch,
+				)
+			}
+			customDispatcher, dispatchErr := newDispatcher(agentprofile.AudienceModel)
+			if dispatchErr != nil {
+				return nil, dispatchErr
+			}
+			dispatcher = customDispatcher
+			userDispatcher, dispatchErr = newDispatcher(agentprofile.AudienceUser)
+			if dispatchErr != nil {
+				return nil, dispatchErr
+			}
+		}
+		subagentTools, subagentErr := catalog.New(catalog.Local(
+			"coding.subagent",
+			catalog.RiskRead,
+			r.subagents.ToolForDispatcher(childOwner, childObserver, dispatcher),
+			r.subagents.SpawnToolForDispatcher(childOwner, childObserver, dispatcher),
+		)...)
+		if subagentErr != nil {
+			return nil, subagentErr
+		}
+		merged, err = catalog.Merge(ambientCatalog, subagentTools)
+		if err != nil {
+			return nil, err
+		}
 	}
 	descriptors, err := merged.Search(ctx, policy, "")
 	if err != nil {
@@ -917,6 +989,7 @@ func (r *Runtime) openInteraction(
 	current.search = search
 	current.planFlow = planCoordinator
 	current.observer = extensionObserver
+	current.userDispatcher = userDispatcher
 
 	if resumed {
 		pending, err := r.session.Pending()

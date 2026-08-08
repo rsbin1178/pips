@@ -2,6 +2,7 @@
 package tui
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,6 +25,19 @@ type childKind uint8
 const (
 	childSubagent childKind = iota
 	childTeamWorker
+
+	agentLibraryStatusAvailable = "available"
+	genericSubagentLabel        = "child Agent"
+)
+
+// agentsRouteTab keeps the definition Library separate from durable child
+// Runs. A definition is declarative metadata; a run is a persisted execution
+// snapshot, so conflating them would make historical authority ambiguous.
+type agentsRouteTab uint8
+
+const (
+	agentsTabRuns agentsRouteTab = iota
+	agentsTabLibrary
 )
 
 type childSummary struct {
@@ -58,7 +72,9 @@ func (value childSummary) live() bool {
 func (value childSummary) searchableText() string {
 	if value.kind == childSubagent {
 		return strings.Join([]string{
-			value.subagent.TaskPreview, string(value.subagent.Role),
+			value.subagent.TaskPreview,
+			subagentDisplayName(value.subagent.Identity, value.subagent.Role),
+			value.subagent.Identity.ID,
 			string(value.subagent.State),
 		}, " ")
 	}
@@ -90,6 +106,7 @@ type agentsRouteDataMsg struct {
 	generation uint64
 	agents     []subagent.Summary
 	teamViews  []coding.TeamView
+	library    coding.AgentLibrary
 	err        error
 }
 
@@ -171,6 +188,14 @@ func (m *Model) activateAgentsRoute() tea.Cmd {
 
 	load := func() tea.Msg {
 		values, err := controller.ListSubagents(ctx)
+		var library coding.AgentLibrary
+		if loader, ok := controller.(interface {
+			ListAgentProfiles(context.Context) (coding.AgentLibrary, error)
+		}); ok {
+			loaded, loadErr := loader.ListAgentProfiles(ctx)
+			library = loaded
+			err = errors.Join(err, loadErr)
+		}
 		for _, request := range requests {
 			view, readErr := controller.ReadTeam(ctx, request)
 			if readErr != nil {
@@ -180,7 +205,7 @@ func (m *Model) activateAgentsRoute() tea.Cmd {
 		}
 
 		return agentsRouteDataMsg{
-			generation: generation, agents: values, teamViews: views, err: err,
+			generation: generation, agents: values, teamViews: views, library: library, err: err,
 		}
 	}
 
@@ -227,6 +252,20 @@ func (m *Model) updateAgentsRouteKey(message tea.KeyPressMsg) (tea.Model, tea.Cm
 	if m.route.loading {
 		return m, nil
 	}
+	if key := message.String(); key == "ctrl+l" {
+		m.route.agentsTab = agentsTabLibrary
+		m.route.cursor = 0
+
+		return m, nil
+	} else if key == "ctrl+r" {
+		m.route.agentsTab = agentsTabRuns
+		m.route.cursor = 0
+
+		return m, nil
+	}
+	if m.route.agentsTab == agentsTabLibrary {
+		return m.updateAgentLibraryRouteKey(message)
+	}
 
 	values := m.filteredChildren()
 
@@ -263,6 +302,35 @@ func (m *Model) updateAgentsRouteKey(message tea.KeyPressMsg) (tea.Model, tea.Cm
 	return m, nil
 }
 
+func (m *Model) updateAgentLibraryRouteKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	values := m.filteredAgentLibrary()
+	switch message.String() {
+	case "up", "k":
+		m.route.cursor = wrapIndex(m.route.cursor-1, len(values))
+	case keyDown, "j", keyTab:
+		m.route.cursor = wrapIndex(m.route.cursor+1, len(values))
+	case keyCtrlU:
+		m.route.query = ""
+		m.route.cursor = 0
+	case keyBackspace:
+		m.route.query = trimLastRune(m.route.query)
+		m.route.cursor = 0
+	case keyEnter:
+		if len(values) == 0 {
+			return m, nil
+		}
+
+		return m, m.selectDirectAgent(values[m.route.cursor])
+	default:
+		if text := message.Key().Text; text != "" {
+			m.route.query += text
+			m.route.cursor = 0
+		}
+	}
+
+	return m, nil
+}
+
 func (m *Model) filteredChildren() []childSummary {
 	query := strings.ToLower(strings.TrimSpace(m.route.query))
 
@@ -285,10 +353,41 @@ func (m *Model) filteredChildren() []childSummary {
 	return values
 }
 
+func (m *Model) filteredAgentLibrary() []coding.AgentLibraryEntry {
+	query := strings.ToLower(strings.TrimSpace(m.route.query))
+	values := make([]coding.AgentLibraryEntry, 0, len(m.route.agentLibrary))
+	for _, value := range m.route.agentLibrary {
+		searchable := strings.Join([]string{
+			value.ID, value.Name, value.Description, value.Kind, value.Scope,
+			value.Source, value.Status, value.Unavailable,
+			strings.Join(value.DeclaredTools, " "), strings.Join(value.RequiredTools, " "),
+		}, " ")
+		if query == "" || strings.Contains(strings.ToLower(searchable), query) {
+			values = append(values, value)
+		}
+	}
+	sort.SliceStable(values, func(left, right int) bool {
+		if values[left].Available != values[right].Available {
+			return values[left].Available
+		}
+
+		return values[left].ID < values[right].ID
+	})
+
+	return values
+}
+
 func (m *Model) agentsRouteContent() string {
-	lines := []string{"Agents", "", "Search: " + m.route.query, ""}
+	title := "Agents · Runs"
+	if m.route.agentsTab == agentsTabLibrary {
+		title = "Agents · Library"
+	}
+	lines := []string{title, "", "Search: " + m.route.query, ""}
 	if m.route.loading {
 		return strings.Join(append(lines, m.activityNotice("Loading…")), "\n")
+	}
+	if m.route.agentsTab == agentsTabLibrary {
+		return m.agentLibraryRouteContent(lines)
 	}
 
 	values := m.filteredChildren()
@@ -313,9 +412,65 @@ func (m *Model) agentsRouteContent() string {
 		}
 		lines = append(lines, "", m.activityNotice(label))
 	}
-	lines = append(lines, "", "↑/↓ choose · type to search · Enter inspect · c interrupt · Ctrl+T/Esc close")
+	lines = append(lines, "", "↑/↓ choose · type to search · Enter inspect · c interrupt · Ctrl+L Library · Ctrl+R Runs · Ctrl+T/Esc close")
 
 	return strings.Join(lines, "\n")
+}
+
+func (m *Model) agentLibraryRouteContent(lines []string) string {
+	values := m.filteredAgentLibrary()
+	if len(values) == 0 {
+		lines = append(lines, "No Agent definitions are available in this workspace.")
+	}
+	for index, value := range values {
+		marker := "  "
+		if index == m.route.cursor {
+			marker = "› "
+		}
+		lines = append(lines, renderAgentLibrarySummary(value, marker)...)
+	}
+	lines = append(lines,
+		"",
+		"Declared capabilities are intersected with active session authority at launch.",
+		"↑/↓ choose · Enter run · type to search · Ctrl+L Library · Ctrl+R Runs · Ctrl+T/Esc close",
+	)
+
+	return strings.Join(lines, "\n")
+}
+
+func renderAgentLibrarySummary(value coding.AgentLibraryEntry, marker string) []string {
+	name := safeDetailText(value.Name)
+	if name == "" {
+		name = value.ID
+	}
+	status := agentLibraryStatusAvailable
+	if !value.Available {
+		status = value.Unavailable
+		if status == "" {
+			status = value.Status
+		}
+	}
+	provenance := strings.Join([]string{value.Kind, value.Scope, value.Source}, " · ")
+	tools := "none"
+	if len(value.DeclaredTools) > 0 {
+		tools = strings.Join(value.DeclaredTools, ", ")
+	}
+	lines := []string{
+		fmt.Sprintf("%s%s", marker, truncateText(name, 96)),
+		fmt.Sprintf("  %s · %s", safeDetailText(status), safeDetailText(provenance)),
+		"  declared tools: " + safeDetailText(truncateText(tools, 180)),
+	}
+	if description := safeDetailText(value.Description); description != "" {
+		lines = append(lines, "  "+truncateText(description, 180))
+	}
+	if len(value.RequiredTools) > 0 {
+		lines = append(lines, "  required: "+safeDetailText(truncateText(strings.Join(value.RequiredTools, ", "), 180)))
+	}
+	if len(value.Diagnostics) > 0 {
+		lines = append(lines, "  diagnostic: "+safeDetailText(value.Diagnostics[0].Code))
+	}
+
+	return lines
 }
 
 func (m *Model) renderChildSummary(value childSummary, marker string) []string {
@@ -352,10 +507,24 @@ func (m *Model) renderChildSummary(value childSummary, marker string) []string {
 	return []string{
 		fmt.Sprintf("%s%s", marker, preview),
 		fmt.Sprintf("  %s%s subagent · %s · %s · %s", activity,
-			value.subagent.Role, value.subagent.State,
+			subagentDisplayName(value.subagent.Identity, value.subagent.Role), value.subagent.State,
 			relativeTime(value.subagent.CreatedAt),
 			formatInteractionDuration(value.subagent.Duration.Milliseconds())),
 	}
+}
+
+func subagentDisplayName(identity subagent.AgentIdentity, role subagent.Role) string {
+	if role != "" {
+		return string(role)
+	}
+	if name := safeDetailText(identity.Name); name != "" {
+		return truncateText(name, 96)
+	}
+	if identity.ID != "" {
+		return identity.ID
+	}
+
+	return genericSubagentLabel
 }
 
 func (m *Model) updateSubagentRouteSummary(event coding.Event) {
@@ -392,6 +561,7 @@ func (m *Model) updateSubagentRouteSummary(event coding.Event) {
 		RootInteractionID: lifecycle.RootInteractionID,
 	}
 	value.Delivery = lifecycle.Delivery
+	value.Identity = lifecycle.Identity
 	value.Role = lifecycle.Role
 	value.State = lifecycle.State
 	value.TaskPreview = lifecycle.TaskPreview
@@ -1015,14 +1185,14 @@ func (m *Model) subagentRouteView() tea.View {
 }
 
 func (m *Model) subagentRouteStatusLine() string {
-	values := []string{"pips", "child Agent", "loading"}
+	values := []string{"pips", genericSubagentLabel, "loading"}
 
 	if m.route.childKind == childTeamWorker {
 		values = m.teamWorkerRouteStatusValues()
 	} else if m.route.detail != nil {
 		summary := m.route.detail.Summary
 
-		values = []string{"pips", string(summary.Role) + " subagent"}
+		values = []string{"pips", subagentDisplayName(summary.Identity, summary.Role) + " subagent"}
 
 		if model := safeDetailText(summary.Model); model != "" {
 			values = append(values, model)

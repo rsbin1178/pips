@@ -341,10 +341,11 @@ func (r *Runtime) subagentHookLifecycle() subagent.Lifecycle {
 
 	return subagent.Lifecycle{
 		BeforeStart: func(ctx context.Context, info subagent.LifecycleStart) string {
-			outcome, err := r.invokeHooks(ctx, hooks.EventSubagentStart, string(info.Role), subagentStartHookInput{
+			agentType := subagentHookAgentType(info.Identity, info.Role)
+			outcome, err := r.invokeHooks(ctx, hooks.EventSubagentStart, agentType, subagentStartHookInput{
 				lifecycleHookInput: r.hookInput(hooks.EventSubagentStart),
-				AgentID:            info.ChildSessionID,
-				AgentType:          string(info.Role),
+				AgentID:            agentType,
+				AgentType:          agentType,
 				Task:               hookTextProjection(info.Task),
 			})
 			r.recordHookDiagnostics(ctx, nil, outcome.Diagnostics)
@@ -366,10 +367,11 @@ func (r *Runtime) subagentHookLifecycle() subagent.Lifecycle {
 			return suffix
 		},
 		BeforeStop: func(ctx context.Context, info subagent.LifecycleStop) subagent.LifecycleStopDecision {
-			outcome, err := r.invokeHooks(ctx, hooks.EventSubagentStop, string(info.Role), subagentStopHookInput{
+			agentType := subagentHookAgentType(info.Identity, info.Role)
+			outcome, err := r.invokeHooks(ctx, hooks.EventSubagentStop, agentType, subagentStopHookInput{
 				lifecycleHookInput:   r.hookInput(hooks.EventSubagentStop),
-				AgentID:              info.ChildSessionID,
-				AgentType:            string(info.Role),
+				AgentID:              agentType,
+				AgentType:            agentType,
 				StopHookActive:       info.StopHookActive,
 				LastAssistantMessage: hookTextProjection(info.LastAssistantMessage),
 			})
@@ -389,6 +391,14 @@ func (r *Runtime) subagentHookLifecycle() subagent.Lifecycle {
 			}
 		},
 	}
+}
+
+func subagentHookAgentType(identity subagent.AgentIdentity, role subagent.Role) string {
+	if identity.ID != "" {
+		return identity.ID
+	}
+
+	return string(role)
 }
 
 func (r *Runtime) runPreCompact(
