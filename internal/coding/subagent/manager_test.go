@@ -932,7 +932,8 @@ func TestManagerInspectUsesPersistedLimitsAndRejectsOtherParent(t *testing.T) {
 	assert.IsType(t, ExploreResult{}, detail.Result)
 
 	otherParent, err := fixture.repository.Create(t.Context(), session.CreateOptions{
-		WorkspaceID: fixture.parent.Metadata().WorkspaceID,
+		WorkspaceID:   fixture.parent.Metadata().WorkspaceID,
+		WorkspacePath: fixture.parent.Metadata().WorkspacePath,
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, otherParent.Close()) })
@@ -1132,7 +1133,7 @@ func newManagerFixtureWithConfig(
 	repository, err := session.NewRepository(filepath.Join(t.TempDir(), "sessions"))
 	require.NoError(t, err)
 	parent, err := repository.Create(t.Context(), session.CreateOptions{
-		WorkspaceID: value.Identity().Key(),
+		WorkspaceID: value.Identity().Key(), WorkspacePath: value.Root(),
 	})
 	require.NoError(t, err)
 	managerConfig := Config{

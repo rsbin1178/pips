@@ -39,6 +39,51 @@ type Definitions struct {
 	values []Definition
 }
 
+// NewDefinitions returns an immutable validated definition set.
+func NewDefinitions(values []Definition, maximum int) (Definitions, error) {
+	if maximum <= 0 {
+		return Definitions{}, fmt.Errorf("%w: invalid definition limit", ErrInvalid)
+	}
+	if len(values) > maximum {
+		return Definitions{}, fmt.Errorf("%w: more than %d servers", ErrLimitExceeded, maximum)
+	}
+
+	cloned := make([]Definition, 0, len(values))
+	seen := make(map[string]Scope, len(values))
+	for index, definition := range values {
+		if err := validateDefinition(definition); err != nil {
+			return Definitions{}, fmt.Errorf(
+				"%w: server %d (%q): %w",
+				ErrInvalid,
+				index,
+				definition.ID,
+				err,
+			)
+		}
+		if previous, duplicate := seen[definition.ID]; duplicate {
+			return Definitions{}, fmt.Errorf(
+				"%w: server %q in %s and %s scopes",
+				ErrDuplicate,
+				definition.ID,
+				previous,
+				definition.Scope,
+			)
+		}
+
+		seen[definition.ID] = definition.Scope
+		cloned = append(cloned, cloneDefinition(definition))
+	}
+
+	return Definitions{values: cloned}, nil
+}
+
+// Merge returns one immutable definition set and rejects cross-set collisions.
+func (d Definitions) Merge(other Definitions, maximum int) (Definitions, error) {
+	values := append(d.List(), other.List()...)
+
+	return NewDefinitions(values, maximum)
+}
+
 // List returns definitions in user-file then project-file order.
 func (d Definitions) List() []Definition {
 	values := make([]Definition, len(d.values))
@@ -102,26 +147,7 @@ func LoadDefinitions(ctx context.Context, options LoadOptions) (Definitions, err
 		}
 	}
 
-	if len(values) > options.Limits.MaxServers {
-		return Definitions{}, fmt.Errorf("%w: more than %d servers", ErrLimitExceeded, options.Limits.MaxServers)
-	}
-
-	seen := make(map[string]Scope, len(values))
-	for _, definition := range values {
-		if previous, duplicate := seen[definition.ID]; duplicate {
-			return Definitions{}, fmt.Errorf(
-				"%w: server %q in %s and %s scopes",
-				ErrDuplicate,
-				definition.ID,
-				previous,
-				definition.Scope,
-			)
-		}
-
-		seen[definition.ID] = definition.Scope
-	}
-
-	return Definitions{values: values}, nil
+	return NewDefinitions(values, options.Limits.MaxServers)
 }
 
 type definitionFile struct {

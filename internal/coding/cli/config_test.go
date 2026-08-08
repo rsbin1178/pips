@@ -337,7 +337,7 @@ func TestSessionListFiltersCurrentWorkspace(t *testing.T) {
 	current, err := workspace.Open(fixture.workspaceDir)
 	require.NoError(t, err)
 	currentHandle, err := repository.Create(t.Context(), session.CreateOptions{
-		WorkspaceID: current.Identity().Key(),
+		WorkspaceID: current.Identity().Key(), WorkspacePath: current.Root(),
 	})
 	require.NoError(t, err)
 
@@ -350,7 +350,7 @@ func TestSessionListFiltersCurrentWorkspace(t *testing.T) {
 	other, err := workspace.Open(otherDir)
 	require.NoError(t, err)
 	otherHandle, err := repository.Create(t.Context(), session.CreateOptions{
-		WorkspaceID: other.Identity().Key(),
+		WorkspaceID: other.Identity().Key(), WorkspacePath: other.Root(),
 	})
 	require.NoError(t, err)
 

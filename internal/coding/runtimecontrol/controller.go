@@ -916,7 +916,7 @@ func (c *Controller) CancelSubagent(ctx context.Context, childSessionID string) 
 
 // NewSession replaces the current Runtime with a new writable Session.
 func (c *Controller) NewSession(ctx context.Context) error {
-	return c.replace(ctx, "", modelcatalog.Selection{}, false)
+	return c.replaceSession(ctx, "")
 }
 
 // ResumeSession replaces the current Runtime with an existing Session.
@@ -925,7 +925,7 @@ func (c *Controller) ResumeSession(ctx context.Context, id string) error {
 		return fmt.Errorf("%w: %w", ErrInvalid, err)
 	}
 
-	return c.replace(ctx, id, modelcatalog.Selection{}, false)
+	return c.replaceSession(ctx, id)
 }
 
 // ForkSession creates a new Session from one node and replaces the current
@@ -945,13 +945,23 @@ func (c *Controller) ForkSession(ctx context.Context, entryID string) error {
 	return c.reopenReplacement(
 		ctx, current, targetID, current.config, current.selection,
 		current.resolved, current.model, current.overridden,
+		false,
 	)
 }
 
 // SwitchModel replaces the current Runtime using a process-local model
 // override. It does not modify Session history or configuration files.
 func (c *Controller) SwitchModel(ctx context.Context, selected modelcatalog.Selection) error {
-	return c.replace(ctx, "", selected, true)
+	return c.replaceModel(ctx, selected, false)
+}
+
+// SwitchSessionModel replaces the current Runtime while preserving its exact
+// Session identity, including when the durable conversation is still empty.
+func (c *Controller) SwitchSessionModel(
+	ctx context.Context,
+	selected modelcatalog.Selection,
+) error {
+	return c.replaceModel(ctx, selected, true)
 }
 
 // Close closes the owned Runtime once. It waits for an in-flight replacement
@@ -1106,65 +1116,83 @@ func (c *Controller) release() {
 	c.mu.Unlock()
 }
 
-func (c *Controller) replace(
+func (c *Controller) replaceSession(ctx context.Context, sessionID string) error {
+	current, err := c.beginReplacement(ctx)
+	if err != nil {
+		return err
+	}
+
+	return c.reopenReplacement(
+		ctx,
+		current,
+		sessionID,
+		current.config,
+		current.selection,
+		current.resolved,
+		current.model,
+		current.overridden,
+		false,
+	)
+}
+
+func (c *Controller) replaceModel(
 	ctx context.Context,
-	sessionID string,
 	selected modelcatalog.Selection,
-	isModelSwitch bool,
+	retainSessionID bool,
 ) error {
 	current, err := c.beginReplacement(ctx)
 	if err != nil {
 		return err
 	}
 
-	targetID := sessionID
-	if isModelSwitch && !current.state.IsSessionProvisional() {
+	targetID := ""
+	if retainSessionID || !current.state.IsSessionProvisional() {
 		targetID = current.sessionID
 	}
 
-	targetConfig := current.config
-	targetSelection := current.selection
-	targetResolved := current.resolved
-	targetModel := current.model
-	targetOverride := current.overridden
-	if isModelSwitch {
-		targetResolved, err = c.catalog.Resolve(selected)
-		if err != nil {
-			c.finishReplacement(current)
+	targetResolved, err := c.catalog.Resolve(selected)
+	if err != nil {
+		c.finishReplacement(current)
 
-			return fmt.Errorf("%w: %w", ErrInvalid, err)
-		}
-		targetSelection = modelcatalog.Selection{
-			Ref: selected.Ref, Variant: selected.Variant,
-			ReasoningOverride: cloneReasoning(selected.ReasoningOverride),
-		}
-		if targetResolved.Equal(current.resolved) {
-			c.finishReplacement(current)
+		return fmt.Errorf("%w: %w", ErrInvalid, err)
+	}
+	targetSelection := modelcatalog.Selection{
+		Ref: selected.Ref, Variant: selected.Variant,
+		ReasoningOverride: cloneReasoning(selected.ReasoningOverride),
+	}
+	if targetResolved.Equal(current.resolved) {
+		c.finishReplacement(current)
 
-			return nil
-		}
-
-		targetConfig = targetConfig.Clone()
-		targetConfig.Model = targetResolved.Ref
-		targetConfig.Variant = targetResolved.Variant
-		targetConfig.Reasoning = cloneReasoning(targetResolved.ReasoningLevel)
-		targetModel, err = c.deps.newModel(ctx, targetResolved, c.base.Credentials)
-		if err != nil {
-			c.finishReplacement(current)
-
-			return err
-		}
-		if err := validateModel(targetModel, targetResolved); err != nil {
-			c.finishReplacement(current)
-
-			return err
-		}
-		targetOverride = !targetResolved.Equal(c.baseResolved)
+		return nil
 	}
 
+	targetConfig := current.config.Clone()
+	targetConfig.Model = targetResolved.Ref
+	targetConfig.Variant = targetResolved.Variant
+	targetConfig.Reasoning = cloneReasoning(targetResolved.ReasoningLevel)
+	targetModel, err := c.deps.newModel(ctx, targetResolved, c.base.Credentials)
+	if err != nil {
+		c.finishReplacement(current)
+
+		return err
+	}
+	if err := validateModel(targetModel, targetResolved); err != nil {
+		c.finishReplacement(current)
+
+		return err
+	}
+	targetOverride := !targetResolved.Equal(c.baseResolved)
+
 	return c.reopenReplacement(
-		ctx, current, targetID, targetConfig, targetSelection,
-		targetResolved, targetModel, targetOverride,
+		ctx,
+		current,
+		targetID,
+		targetConfig,
+		targetSelection,
+		targetResolved,
+		targetModel,
+		targetOverride,
+		retainSessionID,
 	)
 }
 
@@ -1177,6 +1205,7 @@ func (c *Controller) reopenReplacement(
 	targetResolved modelcatalog.ResolvedModel,
 	targetModel ai.LanguageModel,
 	targetOverride bool,
+	retainSessionID bool,
 ) error {
 	if targetID == current.sessionID && targetResolved.Equal(current.resolved) &&
 		targetConfig.Equal(current.config) {
@@ -1186,7 +1215,12 @@ func (c *Controller) reopenReplacement(
 	}
 
 	if err := closeRuntimeBounded(ctx, current.runtime); err != nil {
-		return c.rollback(ctx, current, fmt.Errorf("runtime control: close current runtime: %w", err))
+		return c.rollback(
+			ctx,
+			current,
+			fmt.Errorf("runtime control: close current runtime: %w", err),
+			retainSessionID,
+		)
 	}
 
 	target, state, err := openRuntime(
@@ -1195,7 +1229,16 @@ func (c *Controller) reopenReplacement(
 		openOptions(c.base, targetConfig, targetResolved, targetModel, targetID),
 	)
 	if err != nil {
-		return c.rollback(ctx, current, err)
+		return c.rollback(ctx, current, err, retainSessionID)
+	}
+	if retainSessionID && state.SessionID != current.sessionID {
+		identityErr := fmt.Errorf(
+			"%w: replacement changed retained session identity",
+			ErrInvalid,
+		)
+		identityErr = errors.Join(identityErr, closeRuntimeBounded(ctx, target))
+
+		return c.rollback(ctx, current, identityErr, true)
 	}
 
 	c.finishReplacement(replacement{
@@ -1262,11 +1305,12 @@ func (c *Controller) rollback(
 	ctx context.Context,
 	previous replacement,
 	primary error,
+	retainSessionID bool,
 ) error {
 	restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), runtimeCloseTimeout)
 	defer cancel()
 	restoreID := previous.sessionID
-	if previous.state.IsSessionProvisional() {
+	if previous.state.IsSessionProvisional() && !retainSessionID {
 		restoreID = ""
 	}
 
@@ -1280,6 +1324,17 @@ func (c *Controller) rollback(
 		c.finishReplacement(previous)
 
 		return errors.Join(primary, fmt.Errorf("%w: restore previous runtime: %w", ErrDetached, err))
+	}
+	if retainSessionID && state.SessionID != previous.sessionID {
+		closeErr := closeRuntimeBounded(restoreCtx, restored)
+		previous.runtime = nil
+		c.finishReplacement(previous)
+
+		return errors.Join(
+			primary,
+			fmt.Errorf("%w: restore changed retained session identity", ErrDetached),
+			closeErr,
+		)
 	}
 
 	previous.runtime = restored
@@ -1402,7 +1457,7 @@ func openOptions(
 	options.Config = effective
 	options.Resolved = resolved.Clone()
 	options.Model = boundModel
-	options.Session = coding.SessionTarget{ID: sessionID}
+	options.Session.ID = sessionID
 
 	return options
 }

@@ -98,6 +98,12 @@ persist the explicit decision that enables project `.pips` resources. See the
 [Coding CLI contract](docs/coding-cli.md) for output, exit-code, signal, and
 security details.
 
+ACP-capable editors can launch Pips as a stdio agent with `pips acp`. It speaks
+stable ACP v1, uses the same configuration, credentials, Workspace trust,
+durable sessions, Runtime, and Sandbox as the TUI, and keeps stdout
+protocol-only. See the [ACP v1 agent guide](docs/coding-acp.md) for editor
+process configuration, supported capabilities, and explicit exclusions.
+
 Coding observability has two deliberate inputs. Raw `agent.Event` observers
 receive run/turn/tool signals through the Harness boundary; content-free
 `coding.TelemetryEvent` observers receive session, interaction, subagent,

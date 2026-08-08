@@ -9,6 +9,7 @@ import (
 
 	term "github.com/charmbracelet/x/term"
 	"github.com/rsbin/pips/internal/coding"
+	codingacp "github.com/rsbin/pips/internal/coding/acp"
 	"github.com/rsbin/pips/internal/coding/config"
 	"github.com/rsbin/pips/internal/coding/credential"
 	"github.com/rsbin/pips/internal/coding/execution"
@@ -43,6 +44,12 @@ type SSHRunner func(context.Context, sshclient.Options) error
 // ControllerOpener opens the lifecycle controller consumed by the TUI.
 type ControllerOpener func(context.Context, coding.OpenOptions) (tui.Controller, error)
 
+// ACPControllerOpener opens one lifecycle controller owned by an ACP session.
+type ACPControllerOpener func(context.Context, coding.OpenOptions) (codingacp.Controller, error)
+
+// ACPRunner serves one ACP connection over the supplied protocol streams.
+type ACPRunner func(context.Context, codingacp.Config, io.Reader, io.Writer) error
+
 // Dependencies are process-level inputs shared by command handlers.
 type Dependencies struct {
 	Build        BuildInfo
@@ -54,6 +61,8 @@ type Dependencies struct {
 	RunTUI       TUIRunner
 	RunSSH       SSHRunner
 	OpenControl  ControllerOpener
+	OpenACP      ACPControllerOpener
+	RunACP       ACPRunner
 	Environment  []string
 }
 
@@ -107,6 +116,14 @@ func New(dependencies Dependencies) (*cobra.Command, error) {
 		) (tui.Controller, error) {
 			return runtimecontrol.New(ctx, options)
 		}
+	}
+
+	if dependencies.OpenACP == nil {
+		dependencies.OpenACP = openACPController
+	}
+
+	if dependencies.RunACP == nil {
+		dependencies.RunACP = runACPServer
 	}
 
 	if dependencies.Environment == nil {
@@ -163,6 +180,7 @@ func New(dependencies Dependencies) (*cobra.Command, error) {
 		) (execRuntime, error) {
 			return coding.Open(ctx, options)
 		}),
+		newACPCommand(dependencies, flags),
 		newSSHCommand(dependencies, flags),
 		newBridgeSessionCommand(dependencies, flags),
 		newBridgeUploadCommand(dependencies),
@@ -174,6 +192,27 @@ func New(dependencies Dependencies) (*cobra.Command, error) {
 	)
 
 	return root, nil
+}
+
+func openACPController(
+	ctx context.Context,
+	options coding.OpenOptions,
+) (codingacp.Controller, error) {
+	return runtimecontrol.New(ctx, options)
+}
+
+func runACPServer(
+	ctx context.Context,
+	config codingacp.Config,
+	input io.Reader,
+	output io.Writer,
+) error {
+	server, err := codingacp.New(config)
+	if err != nil {
+		return err
+	}
+
+	return server.Serve(ctx, input, output)
 }
 
 func rejectLegacyFlags(cmd *cobra.Command, _ []string) error {
