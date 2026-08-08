@@ -113,7 +113,7 @@ func (r *Runtime) Skills(ctx context.Context) (_ SkillSnapshot, returnErr error)
 	}
 	resolved, err := resolveSkillSet(
 		integration.resourcesSnapshot(),
-		activation.Snapshot().SkillEntries(),
+		integration.skillEntries(activation.Snapshot().SkillEntries()),
 		integration.skillPolicySnapshot(),
 	)
 	if err != nil {
@@ -184,7 +184,7 @@ func (r *Runtime) SetSkillEnabled(
 	}
 	resolved, err := resolveSkillSet(
 		integration.resourcesSnapshot(),
-		activation.Snapshot().SkillEntries(),
+		integration.skillEntries(activation.Snapshot().SkillEntries()),
 		previous,
 	)
 	if err != nil {
@@ -224,9 +224,6 @@ func (r *Runtime) SetSkillEnabled(
 	}
 	r.integration = candidate
 	r.generationID = candidate.ID()
-	r.connections = candidate.connectionsSnapshot()
-	r.resources = candidate.resourcesSnapshot()
-	r.skillPolicy = candidate.skillPolicySnapshot()
 	r.projectInstructions = candidate.projectInstructionsSnapshot()
 	r.mu.Unlock()
 

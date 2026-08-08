@@ -6,6 +6,7 @@ import (
 	"errors"
 	"maps"
 	"slices"
+	"strings"
 
 	"github.com/rsbin/pips/agent/bundle"
 	"github.com/rsbin/pips/agent/extension"
@@ -107,6 +108,9 @@ func (r Result) ResolveSkills(entries ...extension.SkillEntry) ([]harness.Skill,
 
 	for _, entry := range entries {
 		provenance := "extension:" + entry.Origin.ExtensionID
+		if strings.HasPrefix(entry.Origin.ExtensionID, "agent-plugin:") {
+			provenance = entry.Skill.Source
+		}
 		skill := cloneSkill(entry.Skill)
 		skill.Source = provenance
 		skill.AllowedTools = nil

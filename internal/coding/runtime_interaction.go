@@ -585,7 +585,7 @@ func (r *Runtime) openInteraction(
 	snapshot := activation.Snapshot()
 	resolvedSkills, err := resolveSkillSet(
 		integration.resourcesSnapshot(),
-		snapshot.SkillEntries(),
+		integration.skillEntries(snapshot.SkillEntries()),
 		integration.skillPolicySnapshot(),
 	)
 	if err != nil {
