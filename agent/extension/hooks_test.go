@@ -82,6 +82,56 @@ func TestComposeHooksUsesDocumentedOrdering(t *testing.T) {
 	}
 }
 
+func TestComposeHooksPassesUpdatedInputToFollowingGates(t *testing.T) {
+	t.Parallel()
+
+	seen := ai.JSON(nil)
+	hooks := extension.ComposeHooks(
+		extension.Hooks{BeforeTool: func(context.Context, agent.ToolCallInfo) agent.ToolDecision {
+			return agent.ToolDecision{UpdatedInput: ai.JSON(`{"path":"rewritten"}`)}
+		}},
+		extension.Hooks{BeforeTool: func(_ context.Context, info agent.ToolCallInfo) agent.ToolDecision {
+			seen = append(seen[:0], info.Args...)
+
+			return agent.ToolDecision{}
+		}},
+	)
+
+	decision := hooks.BeforeTool(context.Background(), agent.ToolCallInfo{
+		ToolCall: agent.ToolCall{Args: ai.JSON(`{"path":"original"}`)},
+	})
+	if decision.Action != agent.ToolDecisionAllow {
+		t.Fatalf("decision = %#v", decision)
+	}
+	if string(seen) != `{"path":"rewritten"}` || string(decision.UpdatedInput) != string(seen) {
+		t.Fatalf("updated input = %s, seen = %s", decision.UpdatedInput, seen)
+	}
+}
+
+func TestComposeHooksPreservesUpdatedInputWhenFollowingGatePauses(t *testing.T) {
+	t.Parallel()
+
+	hooks := extension.ComposeHooks(
+		extension.Hooks{BeforeTool: func(context.Context, agent.ToolCallInfo) agent.ToolDecision {
+			return agent.ToolDecision{UpdatedInput: ai.JSON(`{"path":"rewritten"}`)}
+		}},
+		extension.Hooks{BeforeTool: func(_ context.Context, info agent.ToolCallInfo) agent.ToolDecision {
+			if string(info.Args) != `{"path":"rewritten"}` {
+				t.Fatalf("following gate args = %s", info.Args)
+			}
+
+			return agent.ToolDecision{Action: agent.ToolDecisionPause}
+		}},
+	)
+
+	decision := hooks.BeforeTool(context.Background(), agent.ToolCallInfo{
+		ToolCall: agent.ToolCall{Args: ai.JSON(`{"path":"original"}`)},
+	})
+	if decision.Action != agent.ToolDecisionPause || string(decision.UpdatedInput) != `{"path":"rewritten"}` {
+		t.Fatalf("decision = %#v", decision)
+	}
+}
+
 func TestComposeHooksPipelinesContextWithDefensiveCopies(t *testing.T) {
 	t.Parallel()
 

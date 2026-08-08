@@ -43,6 +43,8 @@ type Layout struct {
 	pluginsDir           string
 	pluginDataDir        string
 	mcpFile              string
+	hooksFile            string
+	hookTrustFile        string
 	tuiThemesDir         string
 }
 
@@ -87,6 +89,8 @@ func New(root string) (Layout, error) {
 		pluginsDir:           filepath.Join(abs, "plugins"),
 		pluginDataDir:        filepath.Join(abs, "plugin-data"),
 		mcpFile:              filepath.Join(abs, "mcp.json"),
+		hooksFile:            filepath.Join(abs, "hooks.json"),
+		hookTrustFile:        filepath.Join(abs, "hook-trust.json"),
 		tuiThemesDir:         filepath.Join(abs, "themes"),
 	}, nil
 }
@@ -160,6 +164,9 @@ func ProjectPermissionsFile() string { return path.Join(projectDir, "permissions
 
 // ProjectMCPFile returns the workspace-relative MCP configuration path.
 func ProjectMCPFile() string { return path.Join(projectDir, "mcp.json") }
+
+// ProjectHooksFile returns the workspace-relative lifecycle hook configuration path.
+func ProjectHooksFile() string { return path.Join(projectDir, "hooks.json") }
 
 // ProjectSkillsDir returns the workspace-relative project skills directory.
 func ProjectSkillsDir() string { return path.Join(projectDir, "skills") }
@@ -240,6 +247,12 @@ func (l Layout) PluginDataDir() string { return l.pluginDataDir }
 
 // MCPFile returns the user MCP configuration path.
 func (l Layout) MCPFile() string { return l.mcpFile }
+
+// HooksFile returns the user lifecycle hook configuration path.
+func (l Layout) HooksFile() string { return l.hooksFile }
+
+// HookTrustFile returns the Pips-owned lifecycle hook trust store path.
+func (l Layout) HookTrustFile() string { return l.hookTrustFile }
 
 // TUIThemesDir returns the optional user theme directory. Theme discovery
 // never creates this directory; users may add independent *.toml definitions

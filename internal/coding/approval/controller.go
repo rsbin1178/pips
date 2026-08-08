@@ -15,19 +15,26 @@ import (
 
 const maxVolatileOutcomes = 1024
 
+// PendingResultHook observes and may replace the result of a controlled tool
+// call after it resumes from the approval boundary. It runs only for calls
+// executed by executePending; direct calls are handled by the agent's normal
+// after-tool hook chain.
+type PendingResultHook func(context.Context, agent.ToolCall, []ai.Part, bool) ([]ai.Part, bool)
+
 // Controller owns every registerable wrapper for approval-controlled tools.
 type Controller struct {
-	mutex     sync.Mutex
-	workspace workspace.Workspace
-	journal   Journal
-	resolver  Resolver
-	pending   PendingRunner
-	policy    execution.Policy
-	executor  controllerExecutor
-	handlers  map[string]Handler
-	tools     map[string]agent.Tool
-	permits   map[string]execution.Fingerprint
-	volatile  map[string]struct{}
+	mutex             sync.Mutex
+	workspace         workspace.Workspace
+	journal           Journal
+	resolver          Resolver
+	pending           PendingRunner
+	policy            execution.Policy
+	executor          controllerExecutor
+	handlers          map[string]Handler
+	tools             map[string]agent.Tool
+	permits           map[string]execution.Fingerprint
+	volatile          map[string]struct{}
+	pendingResultHook PendingResultHook
 }
 
 // New constructs a controller for one durable session and workspace.
@@ -164,6 +171,19 @@ func (c *Controller) Tool(name string) (agent.Tool, bool) {
 	return tool, ok
 }
 
+// SetPendingResultHook installs the hook applied after an approval-paused
+// controlled call executes. Call it during runtime setup, before the
+// controller is used. Passing nil clears the hook.
+func (c *Controller) SetPendingResultHook(hook PendingResultHook) {
+	if c == nil {
+		return
+	}
+
+	c.mutex.Lock()
+	c.pendingResultHook = hook
+	c.mutex.Unlock()
+}
+
 // BeforeTool is the agent.WithBeforeTool gate for controlled calls.
 func (c *Controller) BeforeTool(ctx context.Context, info agent.ToolCallInfo) agent.ToolDecision {
 	if c == nil {
@@ -253,7 +273,9 @@ func (c *Controller) Resolve(
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
-	if resolution.RequestID == "" {
+	invalidReasonChoice := resolution.Reason != "" && resolution.Choice != ChoiceDeny
+	invalidReason := !validOptionalJournalText(resolution.Reason, maxDecisionReasonBytes)
+	if resolution.RequestID == "" || invalidReasonChoice || invalidReason {
 		return State{}, ErrInvalidResolution
 	}
 
@@ -268,7 +290,7 @@ func (c *Controller) Resolve(
 			return State{}, ErrInvalidResolution
 		}
 
-		return c.resolveReviewLocked(ctx, *state.Review, resolution.Choice, sink)
+		return c.resolveReviewLocked(ctx, *state.Review, resolution.Choice, resolution.Reason, sink)
 	case StateUnknown:
 		if state.Unknown == nil || state.Unknown.RequestID != resolution.RequestID {
 			return State{}, ErrInvalidResolution
@@ -434,7 +456,7 @@ func (c *Controller) reconcilePending(
 
 		lifecycle := findLifecycle(replay, call, operation.Fingerprint())
 		if lifecycle != nil && lifecycle.denied {
-			if err := c.finishDenial(call, handler, lifecycle); err != nil {
+			if err := c.finishDenial(call, handler, lifecycle, lifecycle.denialReason); err != nil {
 				return nil, err
 			}
 
@@ -502,6 +524,9 @@ func (c *Controller) executePending(
 	result, runErr := prepared.Run(ctx, sink)
 
 	parts, isError := renderResult(handler, result, runErr)
+	if c.pendingResultHook != nil {
+		parts, isError = c.pendingResultHook(ctx, call, slices.Clone(parts), isError)
+	}
 	if err := c.resolver.ResolveToolCalls(agent.ToolResolution{
 		ToolCallID: call.ID,
 		Content:    parts,
@@ -529,6 +554,7 @@ func (c *Controller) resolveReviewLocked(
 	ctx context.Context,
 	review Review,
 	choice Choice,
+	denialReason string,
 	sink execution.Sink,
 ) (State, error) {
 	replay := replayJournal(c.journal.Path())
@@ -557,11 +583,13 @@ func (c *Controller) resolveReviewLocked(
 
 	switch choice {
 	case ChoiceDeny:
-		if err := appendReceipt(c.journal, receiptFor(lifecycle, eventDecided, ChoiceDeny, 0, "")); err != nil {
+		decision := receiptFor(lifecycle, eventDecided, ChoiceDeny, 0, "")
+		decision.Reason = denialReason
+		if err := appendReceipt(c.journal, decision); err != nil {
 			return State{}, err
 		}
 
-		if err := c.finishDenial(call, handler, lifecycle); err != nil {
+		if err := c.finishDenial(call, handler, lifecycle, denialReason); err != nil {
 			return State{}, err
 		}
 	case ChoiceAllowOnce, ChoiceAllowSession:
@@ -890,8 +918,22 @@ func (c *Controller) firstUnknown(
 	return nil
 }
 
-func (c *Controller) finishDenial(call agent.ToolCall, handler Handler, lifecycle *lifecycle) error {
-	if err := c.resolveRendered(call, handler, execution.Result{}, ErrDenied); err != nil {
+func (c *Controller) finishDenial(
+	call agent.ToolCall,
+	handler Handler,
+	lifecycle *lifecycle,
+	denialReason string,
+) error {
+	var denialErr error = ErrDenied
+	if denialReason != "" {
+		denialErr = wrapError(ErrDenied, denialReason)
+	}
+
+	parts, isError := renderResult(handler, execution.Result{}, denialErr)
+	if denialReason != "" {
+		parts = append(parts, ai.TextPart{Text: "[Approval denial]\n" + denialReason})
+	}
+	if err := c.resolveCall(call, parts, isError, nil); err != nil {
 		return err
 	}
 

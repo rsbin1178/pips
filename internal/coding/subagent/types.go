@@ -99,6 +99,40 @@ type Request struct {
 	Delivery  Delivery
 }
 
+// Lifecycle provides Runtime-owned child lifecycle callbacks. Manager only
+// transports bounded context and continuation requests; it neither discovers
+// nor executes user hook configuration.
+type Lifecycle struct {
+	BeforeStart func(context.Context, LifecycleStart) string
+	BeforeStop  func(context.Context, LifecycleStop) LifecycleStopDecision
+}
+
+// LifecycleStart describes a child after its durable session exists and before
+// its harness begins its first run.
+type LifecycleStart struct {
+	ChildSessionID string
+	Role           Role
+	Task           string
+	Ownership      Ownership
+}
+
+// LifecycleStop describes one clean child-agent stop before Manager commits
+// its terminal child record.
+type LifecycleStop struct {
+	ChildSessionID       string
+	Role                 Role
+	Ownership            Ownership
+	StopHookActive       bool
+	LastAssistantMessage string
+}
+
+// LifecycleStopDecision asks Manager to issue one follow-up prompt to the
+// already-open child harness. A false Continue leaves the child terminal.
+type LifecycleStopDecision struct {
+	Continue bool
+	Reason   string
+}
+
 // Result is the terminal execution result returned to the parent Tool.
 type Result struct {
 	Role           Role

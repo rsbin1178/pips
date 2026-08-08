@@ -216,6 +216,39 @@ func TestGateDenyFeedsReasonToModel(t *testing.T) {
 	require.Len(t, reqs, 2)
 }
 
+func TestGateUpdatedInputReachesToolExecution(t *testing.T) {
+	t.Parallel()
+
+	model := newScriptedModel(
+		respond(callResponse(call("c1", "echo", `{"value":"original"}`))),
+		respond(textResponse("done")),
+	)
+	echo := agent.NewTool("echo", "Echoes its value.", func(
+		_ context.Context,
+		args struct {
+			Value string `json:"value"`
+		},
+	) (string, error) {
+		return args.Value, nil
+	})
+	a, err := agent.New(model,
+		agent.WithTools(echo),
+		agent.WithBeforeTool(func(_ context.Context, info agent.ToolCallInfo) agent.ToolDecision {
+			assert.JSONEq(t, `{"value":"original"}`, string(info.Args))
+
+			return agent.ToolDecision{UpdatedInput: ai.JSON(`{"value":"rewritten"}`)}
+		}),
+	)
+	require.NoError(t, err)
+
+	sess := agent.NewSession()
+	_, err = a.Run(t.Context(), sess, ai.UserText("go"))
+	require.NoError(t, err)
+	results := toolResults(t, sess, 2)
+	require.Len(t, results, 1)
+	assert.Equal(t, "rewritten", resultText(t, results[0]))
+}
+
 func TestGatePauseAndResume(t *testing.T) {
 	t.Parallel()
 

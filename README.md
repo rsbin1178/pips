@@ -96,7 +96,8 @@ Prompts can also come from stdin (`printf 'review this change' | pips exec` or
 `--session <id>` to continue an exact session, and `--trust-workspace` to
 persist the explicit decision that enables project `.pips` resources. See the
 [Coding CLI contract](docs/coding-cli.md) for output, exit-code, signal, and
-security details.
+security details. Reviewed local command automation is documented separately
+in [Coding lifecycle hooks](docs/coding-hooks.md).
 
 ACP-capable editors can launch Pips as a stdio agent with `pips acp`. It speaks
 stable ACP v1, uses the same configuration, credentials, Workspace trust,

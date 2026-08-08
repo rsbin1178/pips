@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"slices"
+
 	"github.com/rsbin/pips/internal/coding"
 	"github.com/rsbin/pips/internal/coding/credential"
 )
@@ -27,7 +29,8 @@ func newRuntimeOpenOptions(
 		Session:     coding.SessionTarget{ID: sessionID},
 		Credentials: credentials,
 		Execution: coding.ExecutionOptions{
-			Environment: dependencies.LookupEnv,
+			Environment:      dependencies.LookupEnv,
+			HooksEnvironment: slices.Clone(dependencies.Environment),
 		},
 	}, nil
 }

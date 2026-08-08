@@ -27,6 +27,7 @@ import (
 	"github.com/rsbin/pips/internal/coding/credential"
 	"github.com/rsbin/pips/internal/coding/execution"
 	"github.com/rsbin/pips/internal/coding/generation"
+	"github.com/rsbin/pips/internal/coding/hooks"
 	"github.com/rsbin/pips/internal/coding/instructions"
 	codingmcp "github.com/rsbin/pips/internal/coding/mcp"
 	"github.com/rsbin/pips/internal/coding/model"
@@ -51,6 +52,7 @@ const (
 	maximumToolTimeout      = 30 * time.Minute
 	componentMCP            = "mcp"
 	componentAgentPlugin    = "agent-plugin"
+	componentHook           = "hook"
 	componentIntegration    = "integration"
 )
 
@@ -64,11 +66,15 @@ type SessionTarget struct {
 // ExecutionOptions contain process- and resource-bound Runtime dependencies.
 // Zero limits select the package production defaults.
 type ExecutionOptions struct {
-	TempRoot     string
-	GitPath      string
-	Environment  func(string) (string, bool)
-	SandboxProbe func(context.Context, *execution.Executor) error
-	ToolTimeout  time.Duration
+	TempRoot    string
+	GitPath     string
+	Environment func(string) (string, bool)
+	// HooksEnvironment is the invoking process environment snapshot supplied
+	// to reviewed lifecycle hook commands. It is intentionally distinct from
+	// Environment, which is a lookup used by Coding tool execution.
+	HooksEnvironment []string
+	SandboxProbe     func(context.Context, *execution.Executor) error
+	ToolTimeout      time.Duration
 
 	HTTPClient        *http.Client
 	MCPClient         *sdk.Implementation
@@ -124,6 +130,10 @@ type Runtime struct {
 	instructionResolver *instructions.Resolver
 	promptDate          string
 	projectInstructions string
+	hookContext         []string
+	hookToolContext     map[string][]string
+	hookDefinitions     []hooks.Definition
+	hookRunner          hooks.Runner
 
 	handle          *session.Handle
 	repository      *session.Repository
@@ -402,6 +412,38 @@ func openRuntime(
 			return nil, err
 		}
 	}
+	trustedHooks := make([]hooks.Definition, 0)
+	pendingHookDiagnostics := make([]hooks.Diagnostic, 0)
+	if !openPolicy.teamWorker() {
+		loadedHooks, loadHooksErr := hooks.Load(ctx, hooks.LoadOptions{
+			Paths:          options.Paths,
+			Tree:           tree,
+			ProjectTrusted: options.Trusted,
+			Limits:         hooks.DefaultLimits(),
+		})
+		if loadHooksErr != nil {
+			return nil, fmt.Errorf("coding runtime: load lifecycle hooks: %w", loadHooksErr)
+		}
+		hookStatuses, resolveHooksErr := hooks.NewTrustStore(options.Paths.HookTrustFile()).Resolve(
+			ctx,
+			loadedHooks,
+			options.Workspace.Identity().Key(),
+		)
+		if resolveHooksErr != nil {
+			return nil, fmt.Errorf("coding runtime: resolve lifecycle hook trust: %w", resolveHooksErr)
+		}
+		for _, status := range hookStatuses {
+			if status.Status == hooks.StatusTrusted {
+				trustedHooks = append(trustedHooks, status.Definition)
+				continue
+			}
+			pendingHookDiagnostics = append(pendingHookDiagnostics, hooks.Diagnostic{
+				Reference: status.Definition.Reference,
+				Code:      "pending_trust",
+				Message:   "hook is pending explicit trust; review it with pips hooks list",
+			})
+		}
+	}
 
 	store := workspace.NewStore(options.Paths.WorkspacesFile())
 	permissions, err := codingmcp.NewPermissions(codingmcp.PermissionOptions{
@@ -489,26 +531,33 @@ func openRuntime(
 		instructionResolver: instructionResolver,
 		promptDate:          time.Now().Format(time.DateOnly),
 		projectInstructions: projectInstructions.SystemPrompt(),
-		handle:              handle,
-		repository:          repository,
-		session:             handle.Session(),
-		plans:               planRepository,
-		planRef:             planRef,
-		policy:              policy,
-		executor:            executor,
-		tempRoot:            scratchRoot,
-		inspector:           inspector,
-		permissions:         permissions,
-		extensions:          extensionRuntime,
-		compiled:            slices.Clone(options.Extensions),
-		skillSettings:       skillSettings,
-		integration:         integration,
-		generationID:        integration.ID(),
-		trusted:             options.Trusted,
-		observers:           newAgentObservers(options.AgentObservers),
-		telemetry:           newTelemetryObservers(options.TelemetryObservers),
-		admission:           newTeamAdmission(),
-		closeDone:           make(chan struct{}),
+		hookDefinitions:     trustedHooks,
+		hookToolContext:     make(map[string][]string),
+		hookRunner: hooks.Runner{
+			Workspace:   options.Workspace.Root(),
+			Environment: slices.Clone(configured.HooksEnvironment),
+			Limits:      hooks.DefaultLimits(),
+		},
+		handle:        handle,
+		repository:    repository,
+		session:       handle.Session(),
+		plans:         planRepository,
+		planRef:       planRef,
+		policy:        policy,
+		executor:      executor,
+		tempRoot:      scratchRoot,
+		inspector:     inspector,
+		permissions:   permissions,
+		extensions:    extensionRuntime,
+		compiled:      slices.Clone(options.Extensions),
+		skillSettings: skillSettings,
+		integration:   integration,
+		generationID:  integration.ID(),
+		trusted:       options.Trusted,
+		observers:     newAgentObservers(options.AgentObservers),
+		telemetry:     newTelemetryObservers(options.TelemetryObservers),
+		admission:     newTeamAdmission(),
+		closeDone:     make(chan struct{}),
 	}
 
 	runtime.journal, err = newInteractionJournal(runtime.session, nil)
@@ -590,6 +639,7 @@ func openRuntime(
 	if err != nil {
 		return nil, err
 	}
+	runtime.controller.SetPendingResultHook(runtime.hookAfterPendingTool)
 	runtime.questions, err = question.NewController(&runtime.resolver)
 	if err != nil {
 		return nil, err
@@ -627,6 +677,7 @@ func openRuntime(
 			SummaryModel:   childSummaryModel,
 			Compaction:     childCompaction,
 			RequestPolicy:  requestPolicy,
+			Lifecycle:      runtime.subagentHookLifecycle(),
 			Options:        configured.Subagent,
 			AgentObservers: []func(context.Context, agent.Event){runtime.observers.observe},
 			EventObservers: []subagent.AgentEventObserver{runtime.observeChildAgentEvent},
@@ -641,6 +692,10 @@ func openRuntime(
 	}
 
 	runtime.observeSessionOpened(ctx, resumed)
+	if err := runtime.runSessionStart(ctx, resumed); err != nil {
+		return nil, err
+	}
+	runtime.recordHookDiagnostics(ctx, nil, pendingHookDiagnostics)
 	if !openPolicy.teamWorker() {
 		runtime.publishTeamRecoveryCandidates(ctx, runtime.teamRecovery)
 	}
@@ -706,6 +761,11 @@ func validateOpenOptions(options OpenOptions) error {
 func withExecutionDefaults(options ExecutionOptions) ExecutionOptions {
 	if options.Environment == nil {
 		options.Environment = os.LookupEnv
+	}
+	if options.HooksEnvironment == nil {
+		options.HooksEnvironment = os.Environ()
+	} else {
+		options.HooksEnvironment = slices.Clone(options.HooksEnvironment)
 	}
 
 	if options.HTTPClient == nil {

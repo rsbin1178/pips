@@ -155,9 +155,12 @@ func (b *linuxBackend) compile(
 		return launchSpec{}, nil, err
 	}
 
-	preflight, err := preflightWorkspace(ctx, request.workspaceRoot)
-	if err != nil {
-		return launchSpec{}, nil, err
+	preflight := preflightResult{}
+	if request.operation.workspace == WorkspaceWrite {
+		preflight, err = preflightWorkspace(ctx, request.workspaceRoot)
+		if err != nil {
+			return launchSpec{}, nil, err
+		}
 	}
 
 	gitPath := filepath.Join(request.workspaceRoot, ".git")

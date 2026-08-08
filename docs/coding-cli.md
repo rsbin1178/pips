@@ -239,6 +239,11 @@ this invocation. It does not enable project configuration, grant a tool or
 Skill-script approval, approve an MCP server, or enable Full Access. The trust
 decision is audited on stderr.
 
+Reviewed local lifecycle commands are configured and approved separately from
+Workspace trust. See the [Coding lifecycle hooks guide](coding-hooks.md) for
+the native JSON schema, command protocol, handler trust review, and host
+authority boundary.
+
 ### Interactive TUI themes and status line
 
 The interactive TUI supports the automatic selection `auto` and these built-in

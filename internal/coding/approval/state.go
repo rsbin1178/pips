@@ -106,4 +106,7 @@ const (
 type Resolution struct {
 	RequestID string
 	Choice    Choice
+	// Reason is persisted only with a denial so a durable policy decision can
+	// render the same model-visible result after recovery.
+	Reason string
 }
