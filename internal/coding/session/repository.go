@@ -7,9 +7,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -23,21 +25,30 @@ import (
 )
 
 const (
-	extraWorkspaceID       = "pips.coding.workspace_id"
-	extraWorkspacePath     = "pips.coding.workspace_path"
-	extraRetainEmpty       = "pips.coding.retain_empty"
-	extraKind              = "pips.coding.session_kind"
-	extraParentSessionID   = "pips.coding.parent_session_id"
-	extraParentEntryID     = "pips.coding.parent_entry_id"
-	extraParentRunID       = "pips.coding.parent_run_id"
-	extraAgent             = "pips.coding.agent"
-	extraTeamID            = "pips.coding.team_id"
-	extraTeamMemberID      = "pips.coding.team_member_id"
-	extraTeamTaskID        = "pips.coding.team_task_id"
-	extraTeamAttemptID     = "pips.coding.team_attempt_id"
-	extraContinuationID    = "pips.coding.continuation_id"
-	maxSessionPreviewRunes = 160
-	maxTeamWorkerList      = 1_000
+	extraWorkspaceID            = "pips.coding.workspace_id"
+	extraWorkspacePath          = "pips.coding.workspace_path"
+	extraRetainEmpty            = "pips.coding.retain_empty"
+	extraKind                   = "pips.coding.session_kind"
+	extraParentSessionID        = "pips.coding.parent_session_id"
+	extraParentEntryID          = "pips.coding.parent_entry_id"
+	extraParentRunID            = "pips.coding.parent_run_id"
+	extraAgent                  = "pips.coding.agent"
+	extraSubagentIdentitySchema = "pips.coding.subagent.identity_schema"
+	extraSubagentAgentID        = "pips.coding.subagent.agent_id"
+	extraSubagentKind           = "pips.coding.subagent.agent_kind"
+	extraSubagentName           = "pips.coding.subagent.agent_name"
+	extraDefinitionSchema       = "pips.coding.subagent.definition_schema"
+	extraDefinitionDigest       = "pips.coding.subagent.definition_digest"
+	extraDefinitionSource       = "pips.coding.subagent.definition_source"
+	extraGenerationID           = "pips.coding.subagent.generation_id"
+	extraPlanDigest             = "pips.coding.subagent.plan_digest"
+	extraTeamID                 = "pips.coding.team_id"
+	extraTeamMemberID           = "pips.coding.team_member_id"
+	extraTeamTaskID             = "pips.coding.team_task_id"
+	extraTeamAttemptID          = "pips.coding.team_attempt_id"
+	extraContinuationID         = "pips.coding.continuation_id"
+	maxSessionPreviewRunes      = 160
+	maxTeamWorkerList           = 1_000
 )
 
 var (
@@ -112,7 +123,26 @@ type CreateOptions struct {
 	ParentSessionID string
 	ParentRunID     string
 	Agent           string
-	TeamWorker      *TeamWorkerLineage
+	// SubagentIdentity is an optional versioned, non-secret identity snapshot
+	// for a child. Legacy callers may omit it; new child executions supply it.
+	SubagentIdentity *SubagentIdentity
+	TeamWorker       *TeamWorkerLineage
+}
+
+// SubagentIdentity is the non-secret session-header subset of a compiled
+// child execution plan. The full plan remains in the child journal; this
+// header lets session listing and lineage validation retain stable identity
+// even after the definition file changes or disappears.
+type SubagentIdentity struct {
+	Schema           string
+	AgentID          string
+	Kind             string
+	Name             string
+	DefinitionSchema string
+	DefinitionDigest string
+	DefinitionSource string
+	GenerationID     uint64
+	PlanDigest       string
 }
 
 // TeamWorkerLineage binds an attempt-scoped Worker Session to its Lead and
@@ -142,24 +172,25 @@ type OpenTeamWorkerOptions struct {
 
 // Metadata is the typed coding projection of Harness session metadata.
 type Metadata struct {
-	ID              string
-	CreatedAt       time.Time
-	Path            string
-	WorkspaceID     string
-	WorkspacePath   string
-	RetainEmpty     bool
-	Kind            Kind
-	ParentSessionID string
-	ParentEntryID   string
-	ParentRunID     string
-	Agent           string
-	TeamWorker      TeamWorkerLineage
-	Name            string
-	Preview         string
-	CurrentLeafID   string
-	NodeCount       int
-	BranchCount     int
-	Truncated       bool
+	ID               string
+	CreatedAt        time.Time
+	Path             string
+	WorkspaceID      string
+	WorkspacePath    string
+	RetainEmpty      bool
+	Kind             Kind
+	ParentSessionID  string
+	ParentEntryID    string
+	ParentRunID      string
+	Agent            string
+	SubagentIdentity SubagentIdentity
+	TeamWorker       TeamWorkerLineage
+	Name             string
+	Preview          string
+	CurrentLeafID    string
+	NodeCount        int
+	BranchCount      int
+	Truncated        bool
 }
 
 // ForkOptions select the source node copied into a new Session. An empty node
@@ -267,6 +298,10 @@ func (r *Repository) Create(ctx context.Context, options CreateOptions) (*Handle
 		extra[extraParentSessionID] = options.ParentSessionID
 		extra[extraParentRunID] = options.ParentRunID
 		extra[extraAgent] = options.Agent
+		if options.SubagentIdentity != nil {
+			identity := *options.SubagentIdentity
+			maps.Copy(extra, subagentIdentityExtras(identity))
+		}
 	case KindTeamWorker:
 		extra[extraParentSessionID] = options.TeamWorker.ParentSessionID
 		extra[extraTeamID] = string(options.TeamWorker.TeamID)
@@ -773,15 +808,28 @@ func projectMetadata(stored harness.SessionMetadata) (Metadata, error) {
 			stored.ID,
 		)
 	}
+	identity, err := projectSubagentIdentity(stored.Extra)
+	if err != nil {
+		return Metadata{}, fmt.Errorf("%w: session %q has invalid subagent identity", ErrInvalid, stored.ID)
+	}
 	switch kind {
 	case KindConversation:
+		if !identity.IsZero() {
+			return Metadata{}, fmt.Errorf("%w: conversation cannot carry subagent identity", ErrInvalid)
+		}
 	case KindSubagent:
 		parentSessionID := stored.Extra[extraParentSessionID]
 		agent := stored.Extra[extraAgent]
 		if validateSessionID(parentSessionID) != nil || strings.TrimSpace(agent) == "" {
 			return Metadata{}, fmt.Errorf("%w: subagent session %q has incomplete lineage", ErrInvalid, stored.ID)
 		}
+		if !identity.IsZero() && identity.AgentID != agent {
+			return Metadata{}, fmt.Errorf("%w: subagent session %q has invalid identity", ErrInvalid, stored.ID)
+		}
 	case KindTeamWorker:
+		if !identity.IsZero() {
+			return Metadata{}, fmt.Errorf("%w: Team Worker cannot carry subagent identity", ErrInvalid)
+		}
 		lineage := teamWorkerLineage(stored.Extra)
 		if err := validateTeamWorkerLineage(lineage); err != nil {
 			return Metadata{}, fmt.Errorf(
@@ -793,19 +841,145 @@ func projectMetadata(stored harness.SessionMetadata) (Metadata, error) {
 	}
 
 	return Metadata{
-		ID:              stored.ID,
-		CreatedAt:       stored.CreatedAt,
-		Path:            stored.Path,
-		WorkspaceID:     workspaceID,
-		WorkspacePath:   workspacePath,
-		RetainEmpty:     retainEmpty,
-		Kind:            kind,
-		ParentSessionID: stored.Extra[extraParentSessionID],
-		ParentEntryID:   stored.Extra[extraParentEntryID],
-		ParentRunID:     stored.Extra[extraParentRunID],
-		Agent:           stored.Extra[extraAgent],
-		TeamWorker:      teamWorkerLineage(stored.Extra),
+		ID:               stored.ID,
+		CreatedAt:        stored.CreatedAt,
+		Path:             stored.Path,
+		WorkspaceID:      workspaceID,
+		WorkspacePath:    workspacePath,
+		RetainEmpty:      retainEmpty,
+		Kind:             kind,
+		ParentSessionID:  stored.Extra[extraParentSessionID],
+		ParentEntryID:    stored.Extra[extraParentEntryID],
+		ParentRunID:      stored.Extra[extraParentRunID],
+		Agent:            stored.Extra[extraAgent],
+		SubagentIdentity: identity,
+		TeamWorker:       teamWorkerLineage(stored.Extra),
 	}, nil
+}
+
+// IsZero reports whether the legacy session header carries no identity
+// snapshot. It is valid only for historical child sessions.
+func (i SubagentIdentity) IsZero() bool {
+	return i == (SubagentIdentity{})
+}
+
+func subagentIdentityExtras(identity SubagentIdentity) map[string]string {
+	return map[string]string{
+		extraSubagentIdentitySchema: identity.Schema,
+		extraSubagentAgentID:        identity.AgentID,
+		extraSubagentKind:           identity.Kind,
+		extraSubagentName:           identity.Name,
+		extraDefinitionSchema:       identity.DefinitionSchema,
+		extraDefinitionDigest:       identity.DefinitionDigest,
+		extraDefinitionSource:       identity.DefinitionSource,
+		extraGenerationID:           strconv.FormatUint(identity.GenerationID, 10),
+		extraPlanDigest:             identity.PlanDigest,
+	}
+}
+
+func projectSubagentIdentity(extra map[string]string) (SubagentIdentity, error) {
+	if !hasSubagentIdentityExtras(extra) {
+		return SubagentIdentity{}, nil
+	}
+
+	identity := SubagentIdentity{
+		Schema:           extra[extraSubagentIdentitySchema],
+		AgentID:          extra[extraSubagentAgentID],
+		Kind:             extra[extraSubagentKind],
+		Name:             extra[extraSubagentName],
+		DefinitionSchema: extra[extraDefinitionSchema],
+		DefinitionDigest: extra[extraDefinitionDigest],
+		DefinitionSource: extra[extraDefinitionSource],
+		PlanDigest:       extra[extraPlanDigest],
+	}
+	parsedGeneration, err := strconv.ParseUint(extra[extraGenerationID], 10, 64)
+	if err != nil {
+		return SubagentIdentity{}, err
+	}
+	identity.GenerationID = parsedGeneration
+	if err := validateSubagentIdentity(identity); err != nil {
+		return SubagentIdentity{}, err
+	}
+
+	return identity, nil
+}
+
+func hasSubagentIdentityExtras(extra map[string]string) bool {
+	for _, key := range []string{
+		extraSubagentIdentitySchema,
+		extraSubagentAgentID,
+		extraSubagentKind,
+		extraSubagentName,
+		extraDefinitionSchema,
+		extraDefinitionDigest,
+		extraDefinitionSource,
+		extraGenerationID,
+		extraPlanDigest,
+	} {
+		if _, exists := extra[key]; exists {
+			return true
+		}
+	}
+
+	return false
+}
+
+func validateSubagentIdentity(identity SubagentIdentity) error {
+	if identity.Schema != "pips.coding.subagent.identity/v1alpha1" ||
+		!validSubagentAgentID(identity.AgentID) ||
+		!validSubagentKind(identity.Kind) ||
+		!validSubagentHeaderText(identity.Name, 256, true) ||
+		!validSubagentHeaderText(identity.DefinitionSchema, 256, true) ||
+		!validSessionDigest(identity.DefinitionDigest) ||
+		!validSubagentHeaderText(identity.DefinitionSource, 4<<10, true) ||
+		!validSessionDigest(identity.PlanDigest) {
+		return fmt.Errorf("%w: invalid subagent identity", ErrInvalid)
+	}
+
+	return nil
+}
+
+func validSubagentAgentID(value string) bool {
+	if value == "" || len(value) > 64 || strings.HasPrefix(value, "-") ||
+		strings.HasSuffix(value, "-") || strings.Contains(value, "--") {
+		return false
+	}
+	for _, current := range value {
+		if current == '-' || current >= 'a' && current <= 'z' || current >= '0' && current <= '9' {
+			continue
+		}
+
+		return false
+	}
+
+	return true
+}
+
+func validSubagentKind(value string) bool {
+	return value == "builtin" || value == "custom" || value == "ephemeral"
+}
+
+func validSubagentHeaderText(value string, maximum int, required bool) bool {
+	if required && value == "" || len(value) > maximum || !utf8.ValidString(value) ||
+		strings.TrimSpace(value) != value {
+		return false
+	}
+	for _, current := range value {
+		if current == 0 || unicode.IsControl(current) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func validSessionDigest(value string) bool {
+	if len(value) != 64 || strings.ToLower(value) != value {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+
+	return err == nil
 }
 
 func projectSessionPrefix(meta *Metadata, prefix harness.JSONLPrefix) {
@@ -891,7 +1065,7 @@ func validateCreateOptions(options CreateOptions) error {
 	switch kind {
 	case KindConversation:
 		if options.ParentSessionID != "" || options.ParentRunID != "" || options.Agent != "" ||
-			options.TeamWorker != nil {
+			options.SubagentIdentity != nil || options.TeamWorker != nil {
 			return fmt.Errorf("%w: conversation cannot declare subagent lineage", ErrInvalid)
 		}
 
@@ -904,6 +1078,12 @@ func validateCreateOptions(options CreateOptions) error {
 			strings.TrimSpace(options.Agent) == "" {
 			return fmt.Errorf("%w: subagent requires parent session and agent", ErrInvalid)
 		}
+		if options.SubagentIdentity != nil {
+			if err := validateSubagentIdentity(*options.SubagentIdentity); err != nil ||
+				options.SubagentIdentity.AgentID != options.Agent {
+				return fmt.Errorf("%w: subagent identity must match agent lineage", ErrInvalid)
+			}
+		}
 
 		return nil
 	case KindTeamWorker:
@@ -911,7 +1091,7 @@ func validateCreateOptions(options CreateOptions) error {
 			return fmt.Errorf("%w: Team Worker cannot retain an empty session", ErrInvalid)
 		}
 		if options.ParentSessionID != "" || options.ParentRunID != "" || options.Agent != "" ||
-			options.TeamWorker == nil {
+			options.SubagentIdentity != nil || options.TeamWorker == nil {
 			return fmt.Errorf("%w: Team Worker requires separate lineage", ErrInvalid)
 		}
 

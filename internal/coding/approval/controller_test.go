@@ -9,6 +9,7 @@ import (
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding/config"
 	"github.com/rsbin/pips/internal/coding/execution"
+	"github.com/rsbin/pips/internal/coding/workspace"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -48,6 +49,65 @@ func TestControllerReviewAllowOncePersistsExecutionOrder(t *testing.T) {
 	assert.Equal(t, harness.KindMessage, path[3].Kind)
 	assert.Equal(t, eventCompleted, receiptEvents(path[4:])[0])
 	assert.NotContains(t, string(path[0].Data), "printf success")
+}
+
+func TestControllersKeepApprovalStateInSeparateSessionsOnOneWorkspace(t *testing.T) {
+	t.Parallel()
+
+	ws, err := workspace.Open(t.TempDir())
+	require.NoError(t, err)
+	policy, err := execution.NewPolicy(ws, execution.PolicyConfig{
+		Sandbox: config.SandboxWorkspaceWrite, Approval: config.ApprovalOnRequest,
+	})
+	require.NoError(t, err)
+
+	parentSession := newMemorySession()
+	childSession := newMemorySession()
+	handler := testHandler{writeDir: t.TempDir()}
+	parent, err := newController(
+		ws,
+		parentSession,
+		parentSession,
+		&fakePendingRunner{},
+		policy,
+		newFakeControllerExecutor(parentSession),
+		handler,
+	)
+	require.NoError(t, err)
+	child, err := newController(
+		ws,
+		childSession,
+		childSession,
+		&fakePendingRunner{},
+		policy,
+		newFakeControllerExecutor(childSession),
+		handler,
+	)
+	require.NoError(t, err)
+
+	parentSession.addPending(controlledCall("parent-call", `true`))
+	childSession.addPending(controlledCall("child-call", `true`))
+
+	parentState, err := parent.Reconcile(t.Context(), nil)
+	require.NoError(t, err)
+	childState, err := child.Reconcile(t.Context(), nil)
+	require.NoError(t, err)
+	require.NotNil(t, parentState.Review)
+	require.NotNil(t, childState.Review)
+
+	_, err = parent.Resolve(t.Context(), Resolution{
+		RequestID: parentState.Review.RequestID, Choice: ChoiceDeny,
+	}, nil)
+	require.NoError(t, err)
+
+	assert.Empty(t, parentSession.pending)
+	require.Len(t, childSession.pending, 1)
+	childAfter, err := child.Reconcile(t.Context(), nil)
+	require.NoError(t, err)
+	require.NotNil(t, childAfter.Review)
+	assert.Equal(t, childState.Review.RequestID, childAfter.Review.RequestID)
+	assert.Len(t, receiptEvents(parentSession.Path()), 3)
+	assert.Len(t, receiptEvents(childSession.Path()), 1)
 }
 
 func TestControllerDoesNotRunWhenStartedReceiptFails(t *testing.T) {

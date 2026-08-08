@@ -22,13 +22,14 @@ const maxConfigFileSize = 1 << 20
 
 // Environment variable names understood by the configuration loader.
 const (
-	ModelEnv      = "PIPS_MODEL"
-	VariantEnv    = "PIPS_VARIANT"
-	ReasoningEnv  = "PIPS_REASONING"
-	ToolSearchEnv = "PIPS_TOOL_SEARCH"
-	ModeEnv       = "PIPS_MODE"
-	SandboxEnv    = "PIPS_SANDBOX"
-	ApprovalEnv   = "PIPS_APPROVAL"
+	ModelEnv            = "PIPS_MODEL"
+	VariantEnv          = "PIPS_VARIANT"
+	ReasoningEnv        = "PIPS_REASONING"
+	ToolSearchEnv       = "PIPS_TOOL_SEARCH"
+	DynamicSubagentsEnv = "PIPS_DYNAMIC_SUBAGENTS"
+	ModeEnv             = "PIPS_MODE"
+	SandboxEnv          = "PIPS_SANDBOX"
+	ApprovalEnv         = "PIPS_APPROVAL"
 )
 
 var (
@@ -138,6 +139,7 @@ type fileConfig struct {
 	Reasoning             *string                    `toml:"reasoning"`
 	Providers             map[string]fileProvider    `toml:"providers"`
 	ToolSearch            *bool                      `toml:"tool_search"`
+	DynamicSubagents      *bool                      `toml:"dynamic_subagents"`
 	Mode                  *string                    `toml:"mode"`
 	TUI                   *fileTUI                   `toml:"tui"`
 	Sandbox               *string                    `toml:"sandbox"`
@@ -516,6 +518,7 @@ func decodeLayer(value fileConfig) (fileLayer, error) {
 		layer.patch.Reasoning = &level
 	}
 	layer.patch.ToolSearch = value.ToolSearch
+	layer.patch.DynamicSubagents = value.DynamicSubagents
 	if value.Mode != nil {
 		mode, err := ParseOperatingMode(*value.Mode)
 		if err != nil {
@@ -800,6 +803,7 @@ func applyEnvironment(value *Config, lookup LookupEnv) error {
 		{name: VariantEnv, parse: variantPatch},
 		{name: ReasoningEnv, parse: reasoningPatch},
 		{name: ToolSearchEnv, parse: toolSearchPatch},
+		{name: DynamicSubagentsEnv, parse: dynamicSubagentsPatch},
 		{name: ModeEnv, parse: operatingModePatch},
 		{name: SandboxEnv, parse: sandboxPatch},
 		{name: ApprovalEnv, parse: approvalPatch},
@@ -833,6 +837,7 @@ func applyFlagOverrides(value *Config, patch Patch) error {
 		{detail: "--variant", patch: Patch{Variant: validated.Variant}, set: validated.Variant != nil},
 		{detail: "--reasoning", patch: Patch{Reasoning: validated.Reasoning}, set: validated.Reasoning != nil},
 		{detail: "--tool-search", patch: Patch{ToolSearch: validated.ToolSearch}, set: validated.ToolSearch != nil},
+		{detail: "--dynamic-subagents", patch: Patch{DynamicSubagents: validated.DynamicSubagents}, set: validated.DynamicSubagents != nil},
 		{detail: "--mode", patch: Patch{Mode: validated.Mode}, set: validated.Mode != nil},
 		{detail: "--sandbox", patch: Patch{Sandbox: validated.Sandbox}, set: validated.Sandbox != nil},
 		{detail: "--approval", patch: Patch{Approval: validated.Approval}, set: validated.Approval != nil},
@@ -870,6 +875,7 @@ func validatePatch(patch Patch) (Patch, error) {
 		result.Reasoning = &level
 	}
 	result.ToolSearch = patch.ToolSearch
+	result.DynamicSubagents = patch.DynamicSubagents
 	if patch.Mode != nil {
 		mode, err := ParseOperatingMode(string(*patch.Mode))
 		if err != nil {
@@ -918,11 +924,29 @@ func reasoningPatch(value string) (Patch, error) {
 }
 
 func toolSearchPatch(value string) (Patch, error) {
-	enabled, err := strconv.ParseBool(strings.TrimSpace(value))
+	enabled, err := parseBoolPatch(value)
 	if err != nil {
-		return Patch{}, fmt.Errorf("%w: invalid boolean %q", ErrInvalid, value)
+		return Patch{}, err
 	}
 	return Patch{ToolSearch: &enabled}, nil
+}
+
+func dynamicSubagentsPatch(value string) (Patch, error) {
+	enabled, err := parseBoolPatch(value)
+	if err != nil {
+		return Patch{}, err
+	}
+
+	return Patch{DynamicSubagents: &enabled}, nil
+}
+
+func parseBoolPatch(value string) (bool, error) {
+	enabled, err := strconv.ParseBool(strings.TrimSpace(value))
+	if err != nil {
+		return false, fmt.Errorf("%w: invalid boolean %q", ErrInvalid, value)
+	}
+
+	return enabled, nil
 }
 
 func operatingModePatch(value string) (Patch, error) {

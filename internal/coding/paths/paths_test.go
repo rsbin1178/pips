@@ -33,7 +33,9 @@ func TestNew(t *testing.T) {
 	assert.Equal(t, filepath.Join(base, "teams", "integrations"), layout.TeamIntegrationsDir())
 	assert.Equal(t, base+"-worktrees", layout.WorktreesRoot())
 	assert.Equal(t, filepath.Join(base, "skills"), layout.SkillsDir())
+	assert.Equal(t, filepath.Join(base, "agents"), layout.AgentsDir())
 	assert.Empty(t, layout.AgentSkillsDir())
+	assert.Empty(t, layout.SharedAgentsDir())
 	assert.Equal(t, filepath.Join(base, "bundles"), layout.BundlesDir())
 	assert.Equal(t, filepath.Join(base, "plugins"), layout.PluginsDir())
 	assert.Equal(t, filepath.Join(base, "plugin-data"), layout.PluginDataDir())
@@ -75,6 +77,8 @@ func TestDefault(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, filepath.Join(home, ".pips"), layout.Root())
 	assert.Equal(t, filepath.Join(home, ".agents", "skills"), layout.AgentSkillsDir())
+	assert.Equal(t, filepath.Join(home, ".agents", "agents"), layout.SharedAgentsDir())
+	assert.Equal(t, filepath.Join(home, ".pips", "agents"), layout.AgentsDir())
 	assert.Equal(t, filepath.Join(home, ".pips", "plugins"), layout.PluginsDir())
 	assert.Equal(t, filepath.Join(home, ".pips", "plugin-data"), layout.PluginDataDir())
 	assert.Equal(t, filepath.Join(home, ".pips", "themes"), layout.TUIThemesDir())
@@ -90,6 +94,8 @@ func TestDefaultUsesPIPSHome(t *testing.T) {
 	home, err := os.UserHomeDir()
 	require.NoError(t, err)
 	assert.Equal(t, filepath.Join(home, ".agents", "skills"), layout.AgentSkillsDir())
+	assert.Equal(t, filepath.Join(home, ".agents", "agents"), layout.SharedAgentsDir())
+	assert.Equal(t, filepath.Join(root, "agents"), layout.AgentsDir())
 	assert.Equal(t, filepath.Join(root, "plugins"), layout.PluginsDir())
 	assert.Equal(t, filepath.Join(root, "plugin-data"), layout.PluginDataDir())
 	assert.Equal(t, filepath.Join(root, "themes"), layout.TUIThemesDir())
@@ -107,6 +113,18 @@ func TestWithAgentSkillsDir(t *testing.T) {
 	layout, err = layout.WithAgentSkillsDir(shared)
 	require.NoError(t, err)
 	assert.Equal(t, shared, layout.AgentSkillsDir())
+}
+
+func TestWithSharedAgentsDir(t *testing.T) {
+	t.Parallel()
+
+	layout, err := paths.New(t.TempDir())
+	require.NoError(t, err)
+
+	shared := t.TempDir()
+	layout, err = layout.WithSharedAgentsDir(shared)
+	require.NoError(t, err)
+	assert.Equal(t, shared, layout.SharedAgentsDir())
 }
 
 func TestDefaultRejectsRelativePIPSHome(t *testing.T) {
@@ -141,6 +159,8 @@ func TestProjectPaths(t *testing.T) {
 	assert.Equal(t, ".pips/skills", paths.ProjectSkillsDir())
 	assert.Equal(t, ".pips/skills.toml", paths.ProjectSkillsFile())
 	assert.Equal(t, ".agents/skills", paths.ProjectAgentSkillsDir())
+	assert.Equal(t, ".pips/agents", paths.ProjectAgentsDir())
+	assert.Equal(t, ".agents/agents", paths.ProjectSharedAgentsDir())
 	assert.Equal(t, ".pips/bundles", paths.ProjectBundlesDir())
 	assert.Equal(t, ".pips/plugins", paths.ProjectPluginsDir())
 }

@@ -19,36 +19,39 @@ import (
 )
 
 const (
-	recordSchema    = "pips.coding.subagent.record/v1alpha1"
-	customCreated   = "pips.coding.subagent.created"
-	customStarted   = "pips.coding.subagent.started"
-	customTerminal  = "pips.coding.subagent.terminal"
-	maxPreviewRunes = 160
+	legacyRecordSchema = "pips.coding.subagent.record/v1alpha1"
+	recordSchema       = "pips.coding.subagent.record/v1alpha2"
+	customCreated      = "pips.coding.subagent.created"
+	customStarted      = "pips.coding.subagent.started"
+	customTerminal     = "pips.coding.subagent.terminal"
+	maxPreviewRunes    = 160
 )
 
 type record struct {
-	Schema              string       `json:"schema"`
-	State               State        `json:"state"`
-	Role                Role         `json:"role"`
-	ChildSessionID      string       `json:"child_session_id"`
-	ParentSessionID     string       `json:"parent_session_id"`
-	ParentInteractionID string       `json:"parent_interaction_id,omitempty"`
-	ParentRunID         string       `json:"parent_run_id,omitempty"`
-	ParentToolCallID    string       `json:"parent_tool_call_id,omitempty"`
-	RootInteractionID   string       `json:"root_interaction_id,omitempty"`
-	Delivery            Delivery     `json:"delivery,omitempty"`
-	ChildRunID          string       `json:"child_run_id,omitempty"`
-	Model               string       `json:"model"`
-	Limits              recordLimits `json:"limits"`
-	TaskPreview         string       `json:"task_preview,omitempty"`
-	Code                string       `json:"code,omitempty"`
-	Stop                string       `json:"stop,omitempty"`
-	Turns               int          `json:"turns,omitempty"`
-	ToolCalls           int          `json:"tool_calls,omitempty"`
-	Usage               ai.Usage     `json:"usage"`
-	DurationMillis      int64        `json:"duration_millis,omitempty"`
-	ResultBytes         int          `json:"result_bytes,omitempty"`
-	Time                time.Time    `json:"time"`
+	Schema              string        `json:"schema"`
+	State               State         `json:"state"`
+	Identity            AgentIdentity `json:"identity,omitzero"`
+	Role                Role          `json:"role"`
+	Plan                ExecutionPlan `json:"plan,omitzero"`
+	ChildSessionID      string        `json:"child_session_id"`
+	ParentSessionID     string        `json:"parent_session_id"`
+	ParentInteractionID string        `json:"parent_interaction_id,omitempty"`
+	ParentRunID         string        `json:"parent_run_id,omitempty"`
+	ParentToolCallID    string        `json:"parent_tool_call_id,omitempty"`
+	RootInteractionID   string        `json:"root_interaction_id,omitempty"`
+	Delivery            Delivery      `json:"delivery,omitempty"`
+	ChildRunID          string        `json:"child_run_id,omitempty"`
+	Model               string        `json:"model"`
+	Limits              recordLimits  `json:"limits"`
+	TaskPreview         string        `json:"task_preview,omitempty"`
+	Code                string        `json:"code,omitempty"`
+	Stop                string        `json:"stop,omitempty"`
+	Turns               int           `json:"turns,omitempty"`
+	ToolCalls           int           `json:"tool_calls,omitempty"`
+	Usage               ai.Usage      `json:"usage"`
+	DurationMillis      int64         `json:"duration_millis,omitempty"`
+	ResultBytes         int           `json:"result_bytes,omitempty"`
+	Time                time.Time     `json:"time"`
 }
 
 type recordLimits struct {
@@ -122,6 +125,11 @@ func appendRecord(target *harness.Session, value record) error {
 		return fmt.Errorf("%w: nil journal session", ErrInvalid)
 	}
 
+	var err error
+	value, err = normalizeRecord(value, true)
+	if err != nil {
+		return err
+	}
 	if err := validateRecord(value); err != nil {
 		return err
 	}
@@ -204,11 +212,71 @@ func decodeRecord(data ai.JSON) (record, error) {
 		return record{}, fmt.Errorf("%w: trailing journal JSON", ErrInvalid)
 	}
 
+	var err error
+	value, err = normalizeRecord(value, false)
+	if err != nil {
+		return record{}, err
+	}
 	if err := validateRecord(value); err != nil {
 		return record{}, err
 	}
 
 	return value, nil
+}
+
+func normalizeRecord(value record, allowCurrentCompatibility bool) (record, error) {
+	if value.Schema != legacyRecordSchema && value.Schema != recordSchema {
+		return record{}, fmt.Errorf("%w: unknown journal schema %q", ErrInvalid, value.Schema)
+	}
+
+	if value.Identity.IsZero() {
+		if value.Schema != legacyRecordSchema && !allowCurrentCompatibility {
+			return record{}, fmt.Errorf("%w: current journal record lacks agent identity", ErrInvalid)
+		}
+		identity, err := BuiltinIdentity(value.Role)
+		if err != nil {
+			return record{}, err
+		}
+		value.Identity = identity
+	}
+	if value.Role == "" {
+		value.Role = value.Identity.LegacyRole()
+	}
+	if value.Plan.Schema == "" {
+		if value.Schema != legacyRecordSchema && !allowCurrentCompatibility {
+			return record{}, fmt.Errorf("%w: current journal record lacks execution plan", ErrInvalid)
+		}
+		value.Plan = legacyExecutionPlan(value)
+	}
+
+	return value, nil
+}
+
+func legacyExecutionPlan(value record) ExecutionPlan {
+	output := OutputContract{
+		Format: OutputFormatBuiltin,
+		Name:   "legacy-" + string(value.Role),
+	}
+	output.Digest = digestOutputContract(output)
+
+	return ExecutionPlan{
+		Schema:       ExecutionPlanSchema,
+		Identity:     value.Identity,
+		GenerationID: 0,
+		Delivery:     normalizedDelivery(value.Delivery),
+		Model:        value.Model,
+		Limits:       normalizeLimits(value.Limits.limits()),
+		Output:       output,
+		Legacy:       true,
+	}
+}
+
+func normalizedDelivery(value Delivery) Delivery {
+	if value == "" {
+		return DeliveryForeground
+	}
+
+	return value
 }
 
 func validateRecord(value record) error {
@@ -224,8 +292,23 @@ func validateRecordBase(value record) error {
 		return fmt.Errorf("%w: incomplete journal record", ErrInvalid)
 	}
 
-	if _, err := specFor(value.Role); err != nil {
+	if err := ValidateIdentity(value.Identity); err != nil {
 		return err
+	}
+	if role := value.Identity.LegacyRole(); role != "" {
+		if value.Role != role {
+			return fmt.Errorf("%w: builtin role projection differs from identity", ErrInvalid)
+		}
+	} else if value.Role != "" {
+		return fmt.Errorf("%w: custom identity must not invent a legacy role", ErrInvalid)
+	}
+	if err := validateExecutionPlan(value.Plan, true); err != nil {
+		return err
+	}
+	if value.Plan.Identity != value.Identity || value.Plan.Model != value.Model ||
+		value.Plan.Delivery != normalizedDelivery(value.Delivery) ||
+		!samePlanLimits(value.Plan.Limits, normalizeLimits(value.Limits.limits())) {
+		return fmt.Errorf("%w: execution plan differs from journal record", ErrInvalid)
 	}
 
 	if err := value.Limits.validate(); err != nil {
@@ -240,9 +323,14 @@ func validateRecordBase(value record) error {
 }
 
 func validRecordIdentity(value record) bool {
-	return value.Schema == recordSchema && value.ChildSessionID != "" &&
+	return (value.Schema == legacyRecordSchema || value.Schema == recordSchema) &&
+		value.ChildSessionID != "" &&
 		value.ParentSessionID != "" && value.Model != "" && !value.Time.IsZero() &&
 		validRecordOwnership(value)
+}
+
+func samePlanLimits(left, right Limits) bool {
+	return left == right
 }
 
 func validRecordOwnership(value record) bool {
@@ -371,7 +459,7 @@ func validateJournalUpdate(previous, value record) error {
 }
 
 func sameExecution(left, right record) bool {
-	return left.Schema == right.Schema && left.Role == right.Role &&
+	return left.Schema == right.Schema && left.Identity == right.Identity && left.Role == right.Role &&
 		left.ChildSessionID == right.ChildSessionID &&
 		left.ParentSessionID == right.ParentSessionID &&
 		left.ParentInteractionID == right.ParentInteractionID &&
@@ -379,7 +467,8 @@ func sameExecution(left, right record) bool {
 		left.ParentToolCallID == right.ParentToolCallID &&
 		left.RootInteractionID == right.RootInteractionID &&
 		left.Delivery == right.Delivery && left.Model == right.Model &&
-		left.Limits == right.Limits && left.TaskPreview == right.TaskPreview
+		left.Limits == right.Limits && left.TaskPreview == right.TaskPreview &&
+		sameExecutionPlan(left.Plan, right.Plan)
 }
 
 func validTransition(from, to State) bool {
@@ -535,11 +624,31 @@ func authoritativeChildRecords(child *session.Handle) ([]record, error) {
 		return nil, fmt.Errorf("%w: child has no lifecycle record", ErrInvalid)
 	}
 
-	if value.ParentSessionID != child.Metadata().ParentSessionID || value.Role != Role(child.Metadata().Agent) {
+	meta := child.Metadata()
+	if value.ParentSessionID != meta.ParentSessionID || value.Identity.ID != meta.Agent ||
+		!matchesSessionIdentity(meta.SubagentIdentity, value.Plan) {
 		return nil, fmt.Errorf("%w: child lineage mismatch", ErrInvalid)
 	}
 
 	return childRecords, nil
+}
+
+func matchesSessionIdentity(header session.SubagentIdentity, plan ExecutionPlan) bool {
+	if header.IsZero() {
+		return true
+	}
+	digest, err := plan.Digest()
+	if err != nil {
+		return false
+	}
+
+	identity := plan.Identity
+	return header.Schema == identity.Schema && header.AgentID == identity.ID &&
+		header.Kind == string(identity.Kind) && header.Name == identity.Name &&
+		header.DefinitionSchema == identity.DefinitionSchema &&
+		header.DefinitionDigest == identity.DefinitionDigest &&
+		header.DefinitionSource == identity.DefinitionSource &&
+		header.GenerationID == plan.GenerationID && header.PlanDigest == digest
 }
 
 func interruptChild(child *harness.Session, values []record) ([]record, error) {
@@ -565,7 +674,7 @@ func repairParentRecords(parent *harness.Session, parentRecords, childRecords []
 	}
 
 	for index := range parentRecords {
-		if parentRecords[index] != childRecords[index] {
+		if !sameRecord(parentRecords[index], childRecords[index]) {
 			return fmt.Errorf("%w: parent lifecycle is not a child prefix", ErrInvalid)
 		}
 	}
@@ -577,4 +686,11 @@ func repairParentRecords(parent *harness.Session, parentRecords, childRecords []
 	}
 
 	return nil
+}
+
+func sameRecord(left, right record) bool {
+	leftData, leftErr := json.Marshal(left)
+	rightData, rightErr := json.Marshal(right)
+
+	return leftErr == nil && rightErr == nil && bytes.Equal(leftData, rightData)
 }

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/rsbin/pips/internal/coding/agentplugin"
+	"github.com/rsbin/pips/internal/coding/agentprofile"
 	codingmcp "github.com/rsbin/pips/internal/coding/mcp"
 	"github.com/rsbin/pips/internal/coding/resource"
 	"github.com/rsbin/pips/internal/coding/skillsettings"
@@ -48,6 +49,7 @@ func TestIntegrationCandidatePublishTransfersCleanupOwnership(t *testing.T) {
 		nil,
 		nil,
 		resource.Result{},
+		agentprofile.Registry{},
 		skillsettings.Empty(),
 		"",
 		agentplugin.Result{},

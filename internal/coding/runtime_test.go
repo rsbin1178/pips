@@ -1148,6 +1148,44 @@ func TestRuntimeReloadInstallsAtIdleBoundary(t *testing.T) {
 	require.NoError(t, runtime.Close(t.Context()))
 }
 
+func TestRuntimeReloadPublishesImmutableAgentProfileRegistry(t *testing.T) {
+	t.Parallel()
+
+	base := t.TempDir()
+	profileDir := filepath.Join(base, "home", "agents")
+	profilePath := filepath.Join(profileDir, "go-helper.md")
+	require.NoError(t, os.MkdirAll(profileDir, 0o700))
+	require.NoError(t, os.WriteFile(profilePath, []byte(`---
+schema: pips.agent/v1alpha1
+name: Go helper
+description: Inspect Go code.
+---
+initial instructions
+`), 0o600))
+
+	runtime := openTestRuntimeAt(t, base, SessionTarget{}, newRuntimeModel(runtimeTextResponse("unused")))
+	before := runtime.integration.agentProfilesSnapshot()
+	definition, found := before.Lookup("go-helper")
+	require.True(t, found)
+	assert.Equal(t, "initial instructions", definition.Instructions)
+
+	require.NoError(t, os.WriteFile(profilePath, []byte(`---
+schema: pips.agent/v1alpha1
+name: Go helper
+description: Inspect Go code.
+---
+updated instructions
+`), 0o600))
+	require.NoError(t, runtime.Reload(t.Context()))
+
+	after := runtime.integration.agentProfilesSnapshot()
+	updated, found := after.Lookup("go-helper")
+	require.True(t, found)
+	assert.Equal(t, "updated instructions", updated.Instructions)
+	assert.Equal(t, "initial instructions", definition.Instructions)
+	assert.NotEqual(t, definition.Digest, updated.Digest)
+}
+
 func TestRuntimeReadPatchControlledShellAndAnswer(t *testing.T) {
 	t.Parallel()
 

@@ -1,12 +1,14 @@
-//nolint:containedctx,wsl_v5 // Manager owns a Runtime lifecycle context and structured children.
+//nolint:containedctx,wsl_v5,gocyclo,funlen // Manager owns a Runtime lifecycle context and structured children.
 package subagent
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"path"
 	"slices"
 	"strings"
@@ -42,11 +44,15 @@ type ExecutionOptions struct {
 
 // Config contains the application-owned dependencies for one parent Session.
 type Config struct {
-	Context        context.Context
-	Repository     *session.Repository
-	Parent         *session.Handle
-	Tree           *workspace.Tree
-	Model          ai.LanguageModel
+	Context    context.Context
+	Repository *session.Repository
+	Parent     *session.Handle
+	Tree       *workspace.Tree
+	Model      ai.LanguageModel
+	// GenerationID identifies the immutable Coding integration snapshot that
+	// compiled this manager's builtin execution plan. Custom dispatch will
+	// acquire a per-child generation lease in the next slice.
+	GenerationID   uint64
 	SummaryModel   ai.LanguageModel
 	Compaction     *harness.CompactionSettings
 	RequestPolicy  func(*ai.Request)
@@ -87,6 +93,8 @@ type Manager struct {
 type Execution struct {
 	manager     *Manager
 	request     Request
+	plan        ExecutionPlan
+	runner      Runner
 	cancel      context.CancelFunc
 	done        chan struct{}
 	child       *session.Handle
@@ -270,11 +278,89 @@ func buildReadTools(config Config) ([]agent.Tool, error) {
 	return readTools, nil
 }
 
+func (m *Manager) builtinExecutionPlan(request Request) (ExecutionPlan, error) {
+	identity, err := BuiltinIdentity(request.Role)
+	if err != nil {
+		return ExecutionPlan{}, err
+	}
+	spec, err := specFor(request.Role)
+	if err != nil {
+		return ExecutionPlan{}, err
+	}
+	nativeStructuredOutput := m.config.Model.Capabilities().StructuredOutput
+	instructions, err := spec.instructionsFor(nativeStructuredOutput)
+	if err != nil {
+		return ExecutionPlan{}, err
+	}
+	schema, err := json.Marshal(spec.schema)
+	if err != nil {
+		return ExecutionPlan{}, fmt.Errorf("coding subagent: encode builtin output schema: %w", err)
+	}
+	output := OutputContract{
+		Format: OutputFormatBuiltin,
+		Name:   spec.name,
+		Schema: schema,
+	}
+	output.Digest = digestOutputContract(output)
+
+	capabilities := make([]EffectiveCapability, 0, len(m.tools))
+	for _, tool := range m.tools {
+		if tool == nil {
+			return ExecutionPlan{}, fmt.Errorf("%w: nil builtin tool", ErrInvalid)
+		}
+		capabilities = append(capabilities, EffectiveCapability{
+			WireName: tool.Decl().Name,
+			Source:   "builtin:workspace",
+			Risk:     readToolName,
+		})
+	}
+	plan := ExecutionPlan{
+		Schema:             ExecutionPlanSchema,
+		Identity:           identity,
+		GenerationID:       m.config.GenerationID,
+		Delivery:           request.Delivery,
+		Model:              modelName(m.config.Model),
+		Instructions:       instructions,
+		InstructionsDigest: digestText(instructions),
+		Capabilities:       capabilities,
+		Skills:             []string{},
+		Limits:             m.limits,
+		Output:             output,
+	}
+	if err := validateExecutionPlan(plan, false); err != nil {
+		return ExecutionPlan{}, err
+	}
+
+	return plan, nil
+}
+
 // Start reserves one execution slot and starts one owned goroutine.
 func (m *Manager) Start(
 	ctx context.Context,
 	request Request,
 	observer Observer,
+) (*Execution, error) {
+	return m.start(ctx, request, observer, nil)
+}
+
+// StartWithDispatcher admits either a builtin compatibility request or a
+// Runtime-compiled custom execution. Dispatcher is interaction-scoped: it
+// owns registry visibility and the child-specific control binding, while this
+// Manager retains quotas, durable lineage, lifecycle, and terminal cleanup.
+func (m *Manager) StartWithDispatcher(
+	ctx context.Context,
+	request Request,
+	observer Observer,
+	dispatcher Dispatcher,
+) (*Execution, error) {
+	return m.start(ctx, request, observer, dispatcher)
+}
+
+func (m *Manager) start(
+	ctx context.Context,
+	request Request,
+	observer Observer,
+	dispatcher Dispatcher,
 ) (*Execution, error) {
 	if m == nil {
 		return nil, fmt.Errorf("%w: nil manager", ErrInvalid)
@@ -284,10 +370,33 @@ func (m *Manager) Start(
 		return nil, err
 	}
 
-	if err := validateRequest(request, m.limits); err != nil {
+	var err error
+	request, builtin, err := normalizeDispatchRequest(request)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateDispatchRequest(request, m.limits); err != nil {
 		return nil, err
 	}
 	request = m.normalizeRequest(ctx, request)
+	var plan ExecutionPlan
+	if builtin {
+		if err := validateRequest(request, m.limits); err != nil {
+			return nil, err
+		}
+		plan, err = m.builtinExecutionPlan(request)
+	} else {
+		if dispatcher == nil {
+			return nil, fmt.Errorf("%w: custom agent dispatcher is unavailable", ErrInvalid)
+		}
+		plan, err = dispatcher.Compile(ctx, request)
+		if err == nil {
+			err = validateDispatchedPlan(request, plan, m.limits)
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
 	if err := m.reserveStart(request); err != nil {
 		return nil, err
 	}
@@ -302,14 +411,30 @@ func (m *Manager) Start(
 	}()
 
 	parentMeta := m.config.Parent.Metadata()
+	planDigest, err := plan.Digest()
+	if err != nil {
+		return nil, err
+	}
+	childIdentity := session.SubagentIdentity{
+		Schema:           plan.Identity.Schema,
+		AgentID:          plan.Identity.ID,
+		Kind:             string(plan.Identity.Kind),
+		Name:             plan.Identity.Name,
+		DefinitionSchema: plan.Identity.DefinitionSchema,
+		DefinitionDigest: plan.Identity.DefinitionDigest,
+		DefinitionSource: plan.Identity.DefinitionSource,
+		GenerationID:     plan.GenerationID,
+		PlanDigest:       planDigest,
+	}
 
 	child, err := m.config.Repository.Create(startCtx, session.CreateOptions{
-		WorkspaceID:     parentMeta.WorkspaceID,
-		WorkspacePath:   parentMeta.WorkspacePath,
-		Kind:            session.KindSubagent,
-		ParentSessionID: parentMeta.ID,
-		ParentRunID:     request.Ownership.ParentRunID,
-		Agent:           string(request.Role),
+		WorkspaceID:      parentMeta.WorkspaceID,
+		WorkspacePath:    parentMeta.WorkspacePath,
+		Kind:             session.KindSubagent,
+		ParentSessionID:  parentMeta.ID,
+		ParentRunID:      request.Ownership.ParentRunID,
+		Agent:            request.AgentID,
+		SubagentIdentity: &childIdentity,
 	})
 	if err != nil {
 		return nil, err
@@ -318,7 +443,9 @@ func (m *Manager) Start(
 	created := record{
 		Schema:              recordSchema,
 		State:               StateCreated,
+		Identity:            plan.Identity,
 		Role:                request.Role,
+		Plan:                plan,
 		ChildSessionID:      child.Metadata().ID,
 		ParentSessionID:     parentMeta.ID,
 		ParentInteractionID: request.Ownership.ParentInteractionID,
@@ -326,22 +453,17 @@ func (m *Manager) Start(
 		ParentToolCallID:    request.Ownership.ParentToolCallID,
 		RootInteractionID:   request.Ownership.RootInteractionID,
 		Delivery:            request.Delivery,
-		Model:               modelName(m.config.Model),
-		Limits:              journalLimits(m.limits),
+		Model:               plan.Model,
+		Limits:              journalLimits(plan.Limits),
 		TaskPreview:         preview(request.Task),
 		Time:                time.Now().UTC(),
 	}
-	if err := m.appendMirrored(child.Session(), created); err != nil {
-		return nil, errors.Join(err, child.Close())
-	}
-	startSucceeded = true
-
 	var (
 		runCtx context.Context
 		cancel context.CancelFunc
 	)
-	if m.limits.MaxDuration > 0 {
-		runCtx, cancel = context.WithTimeout(m.lifecycle, m.limits.MaxDuration)
+	if plan.Limits.MaxDuration > 0 {
+		runCtx, cancel = context.WithTimeout(m.lifecycle, plan.Limits.MaxDuration)
 	} else {
 		runCtx, cancel = context.WithCancel(m.lifecycle)
 	}
@@ -349,19 +471,66 @@ func (m *Manager) Start(
 	if request.Delivery == DeliveryForeground {
 		stopParent = context.AfterFunc(ctx, cancel)
 	}
-	tracker := newRunTracker(created.Time, m.limits.MaxActivityTools)
+	tracker := newRunTracker(created.Time, plan.Limits.MaxActivityTools)
 	execution := &Execution{
 		manager:    m,
 		request:    request,
+		plan:       plan,
 		cancel:     cancel,
 		done:       make(chan struct{}),
 		child:      child,
 		tracker:    tracker,
 		stopParent: stopParent,
 	}
+	if err := m.appendMirrored(child.Session(), created); err != nil {
+		cancel()
+		if stopParent != nil {
+			stopParent()
+		}
+
+		return nil, errors.Join(err, child.Close())
+	}
+	if !builtin {
+		runner, openErr := dispatcher.Open(runCtx, DispatchInput{
+			Plan: plan, Request: request, Child: child,
+			OnEvent: func(eventCtx context.Context, event agent.Event) {
+				m.observeChild(eventCtx, child, observer, request, created, tracker, event)
+			},
+		})
+		if openErr != nil {
+			cancel()
+			if stopParent != nil {
+				stopParent()
+			}
+			terminal := created
+			terminal.State = StateFailed
+			terminal.Code = "binding_failed"
+			terminal.Time = time.Now().UTC()
+			persistErr := m.appendMirrored(child.Session(), terminal)
+			// A custom binding can fail after the durable child record exists
+			// (for example a required capability disappears). Project both
+			// lifecycle edges so parent Runs views do not retain a phantom
+			// created child. The durable journal remains authoritative if an
+			// observer is already detached.
+			createdObserverErr := emitObserver(runCtx, observer, eventFromRecord(created))
+			terminalObserverErr := emitObserver(runCtx, observer, eventFromRecord(terminal))
+
+			return nil, errors.Join(
+				openErr,
+				persistErr,
+				createdObserverErr,
+				terminalObserverErr,
+				child.Close(),
+			)
+		}
+		execution.runner = runner
+	}
+	startSucceeded = true
+
 	if m.config.Lifecycle.BeforeStart != nil {
 		execution.hookContext = m.config.Lifecycle.BeforeStart(runCtx, LifecycleStart{
 			ChildSessionID: child.Metadata().ID,
+			Identity:       plan.Identity,
 			Role:           request.Role,
 			Task:           request.Task,
 			Ownership:      request.Ownership,
@@ -380,9 +549,13 @@ func (m *Manager) Start(
 		terminal.Code = "manager_closed"
 		terminal.Time = time.Now().UTC()
 		persistErr := m.appendMirrored(child.Session(), terminal)
+		runnerCloseErr := error(nil)
+		if execution.runner != nil {
+			runnerCloseErr = execution.runner.Close(context.WithoutCancel(startCtx))
+		}
 		closeErr := child.Close()
 
-		return nil, errors.Join(ErrClosed, persistErr, closeErr)
+		return nil, errors.Join(ErrClosed, persistErr, runnerCloseErr, closeErr)
 	}
 
 	m.active[created.ChildSessionID] = execution
@@ -565,7 +738,7 @@ func (m *Manager) CancelRoot(rootInteractionID string) int {
 func resultFromDetail(detail Detail) Result {
 	value := detail.Summary
 	result := Result{
-		Role: value.Role, ChildSessionID: value.ChildSessionID,
+		Identity: value.Identity, Role: value.Role, ChildSessionID: value.ChildSessionID,
 		Code: value.Code, Turns: value.Turns, ToolCalls: value.ToolCalls,
 		Usage: value.Usage, Duration: value.Duration, Value: detail.Result,
 	}
@@ -698,6 +871,27 @@ func (m *Manager) run(
 	tracker.err = observerErr
 	startedAt := tracker.activity.StartedAt
 	tracker.mu.Unlock()
+	if execution.runner != nil {
+		output, runErr := execution.runner.Run(ctx, execution.request.Task)
+		tracker.mu.Lock()
+		tracker.value = output.Value
+		tracker.text = output.Text
+		tracker.toolCalls = output.ToolCalls
+		tracker.mu.Unlock()
+		m.finishExecution(
+			ctx,
+			execution,
+			child,
+			observer,
+			created,
+			tracker,
+			startedAt,
+			output.Run,
+			runErr,
+		)
+
+		return
+	}
 
 	spec, specErr := specFor(execution.request.Role)
 	if specErr != nil {
@@ -706,15 +900,7 @@ func (m *Manager) run(
 	}
 
 	useNativeResponseFormat := m.config.Model.Capabilities().StructuredOutput
-
-	instructions, instructionsErr := spec.instructionsFor(useNativeResponseFormat)
-	if instructionsErr != nil {
-		m.finishExecution(
-			ctx, execution, child, observer, created, tracker, startedAt, nil, instructionsErr,
-		)
-
-		return
-	}
+	instructions := execution.plan.Instructions
 
 	onEvent := func(eventCtx context.Context, event agent.Event) {
 		m.observeChild(
@@ -727,7 +913,7 @@ func (m *Manager) run(
 			event,
 		)
 	}
-	options := m.agentOptions(execution.request.Role, child, tracker, spec, useNativeResponseFormat)
+	options := m.agentOptions(execution.plan.Identity, child, tracker, spec, useNativeResponseFormat)
 
 	childHarness, err := harness.New(
 		m.config.Model,
@@ -746,6 +932,7 @@ func (m *Manager) run(
 		for err == nil && result != nil && m.config.Lifecycle.BeforeStop != nil {
 			decision := m.config.Lifecycle.BeforeStop(ctx, LifecycleStop{
 				ChildSessionID:       child.Metadata().ID,
+				Identity:             execution.plan.Identity,
 				Role:                 execution.request.Role,
 				Ownership:            execution.request.Ownership,
 				StopHookActive:       stopHookActive,
@@ -769,14 +956,14 @@ func (m *Manager) run(
 
 //nolint:gocyclo,wsl_v5 // Each option keeps its execution boundary beside the policy it enforces.
 func (m *Manager) agentOptions(
-	role Role,
+	identity AgentIdentity,
 	child *session.Handle,
 	tracker *runTracker,
 	spec roleSpec,
 	useNativeResponseFormat bool,
 ) []agent.Option {
 	return []agent.Option{
-		agent.WithName("subagent/" + string(role)),
+		agent.WithName("subagent/" + identity.ID),
 		agent.WithMaxTurns(m.limits.MaxTurns),
 		agent.WithMaxTokens(m.limits.MaxTokens),
 		agent.WithParallelTools(1),
@@ -1463,6 +1650,7 @@ func (m *Manager) finishExecution(
 	}
 
 	result := Result{
+		Identity:       execution.plan.Identity,
 		Role:           execution.request.Role,
 		ChildSessionID: child.Metadata().ID,
 		ChildRunID:     runID,
@@ -1478,8 +1666,8 @@ func (m *Manager) finishExecution(
 		result.Usage = runResult.Usage
 	}
 
-	tokenExceeded := m.limits.MaxTokens > 0 &&
-		result.Usage.InputTokens+result.Usage.OutputTokens > m.limits.MaxTokens
+	tokenExceeded := execution.plan.Limits.MaxTokens > 0 &&
+		result.Usage.InputTokens+result.Usage.OutputTokens > execution.plan.Limits.MaxTokens
 
 	result.Outcome, result.Code = classifyOutcome(
 		runErr,
@@ -1505,10 +1693,14 @@ func (m *Manager) finishExecution(
 	terminal.ResultBytes = len(text)
 	terminal.Time = time.Now().UTC()
 	persistErr := m.appendMirrored(child.Session(), terminal)
+	runnerCloseErr := error(nil)
+	if execution.runner != nil {
+		runnerCloseErr = execution.runner.Close(context.WithoutCancel(ctx))
+	}
 	closeErr := child.Close()
-	cleanupErr := errors.Join(trackedErr, persistErr, closeErr)
+	cleanupErr := errors.Join(trackedErr, persistErr, runnerCloseErr, closeErr)
 
-	finalErr := errors.Join(runErr, persistErr, closeErr)
+	finalErr := errors.Join(runErr, persistErr, runnerCloseErr, closeErr)
 	if result.Outcome == OutcomeSucceeded && finalErr == nil {
 		finalErr = nil
 	} else if finalErr == nil {
@@ -1640,6 +1832,7 @@ func stateForOutcome(outcome Outcome) State {
 func eventFromRecord(value record) Event {
 	return Event{
 		State:               value.State,
+		Identity:            value.Identity,
 		Role:                value.Role,
 		ChildSessionID:      value.ChildSessionID,
 		ParentSessionID:     value.ParentSessionID,
@@ -1732,7 +1925,7 @@ func cloneResult(result Result) Result {
 		return result
 	}
 
-	value, err := decodeClonedValue(result.Role, data)
+	value, err := decodeClonedValue(result.Identity, result.Role, data)
 	if err != nil {
 		result.Value = nil
 		return result
@@ -1743,7 +1936,21 @@ func cloneResult(result Result) Result {
 	return result
 }
 
-func decodeClonedValue(role Role, data []byte) (any, error) {
+func decodeClonedValue(identity AgentIdentity, role Role, data []byte) (any, error) {
+	if identity.Kind == AgentKindCustom || identity.Kind == AgentKindEphemeral {
+		decoder := json.NewDecoder(bytes.NewReader(data))
+		decoder.UseNumber()
+		var value any
+		if err := decoder.Decode(&value); err != nil {
+			return nil, err
+		}
+		if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+			return nil, errors.New("trailing custom result JSON")
+		}
+
+		return value, nil
+	}
+
 	switch role {
 	case RoleExplore:
 		var value ExploreResult

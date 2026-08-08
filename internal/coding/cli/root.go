@@ -16,6 +16,7 @@ import (
 	"github.com/rsbin/pips/internal/coding/execution/sshclient"
 	"github.com/rsbin/pips/internal/coding/paths"
 	"github.com/rsbin/pips/internal/coding/runtimecontrol"
+	"github.com/rsbin/pips/internal/coding/subagent"
 	"github.com/rsbin/pips/internal/coding/tui"
 	"github.com/rsbin/pips/internal/coding/workspace"
 	"github.com/spf13/cobra"
@@ -44,6 +45,18 @@ type SSHRunner func(context.Context, sshclient.Options) error
 // ControllerOpener opens the lifecycle controller consumed by the TUI.
 type ControllerOpener func(context.Context, coding.OpenOptions) (tui.Controller, error)
 
+// AgentRunRuntime is the narrow lifecycle surface used by `pips agents run`.
+// It intentionally avoids coupling the non-interactive command to the full
+// TUI controller interface.
+type AgentRunRuntime interface {
+	RunAgent(context.Context, coding.AgentRunRequest) (subagent.Result, error)
+	Close(context.Context) error
+}
+
+// AgentRunOpener opens one Runtime suitable for an explicit user-selected
+// Agent invocation.
+type AgentRunOpener func(context.Context, coding.OpenOptions) (AgentRunRuntime, error)
+
 // ACPControllerOpener opens one lifecycle controller owned by an ACP session.
 type ACPControllerOpener func(context.Context, coding.OpenOptions) (codingacp.Controller, error)
 
@@ -61,21 +74,23 @@ type Dependencies struct {
 	RunTUI       TUIRunner
 	RunSSH       SSHRunner
 	OpenControl  ControllerOpener
+	OpenAgentRun AgentRunOpener
 	OpenACP      ACPControllerOpener
 	RunACP       ACPRunner
 	Environment  []string
 }
 
 type rootFlags struct {
-	workspace  string
-	configFile string
-	model      string
-	variant    string
-	reasoning  string
-	toolSearch bool
-	mode       string
-	sandbox    string
-	approval   string
+	workspace        string
+	configFile       string
+	model            string
+	variant          string
+	reasoning        string
+	toolSearch       bool
+	dynamicSubagents bool
+	mode             string
+	sandbox          string
+	approval         string
 }
 
 // New constructs a fresh command tree. Callers must not reuse a command after
@@ -116,6 +131,7 @@ func New(dependencies Dependencies) (*cobra.Command, error) {
 	persistent.StringVar(&flags.variant, "variant", "", "named model request preset")
 	persistent.StringVar(&flags.reasoning, "reasoning", "", "model reasoning level")
 	persistent.BoolVar(&flags.toolSearch, "tool-search", false, "enable deferred tool search")
+	persistent.BoolVar(&flags.dynamicSubagents, "dynamic-subagents", false, "enable Alpha custom subagents")
 	persistent.StringVar(&flags.mode, "mode", "", "operating mode (agent or plan)")
 	persistent.StringVar(&flags.sandbox, "sandbox", "", "sandbox mode")
 	persistent.StringVar(&flags.approval, "approval", "", "approval mode")
@@ -131,6 +147,7 @@ func New(dependencies Dependencies) (*cobra.Command, error) {
 	}
 
 	root.AddCommand(
+		newAgentsCommand(dependencies, flags),
 		newResumeCommand(dependencies, flags),
 		newExecCommand(dependencies, flags, func(
 			ctx context.Context,
@@ -193,6 +210,15 @@ func defaultRuntimeDependencies(dependencies Dependencies) Dependencies {
 			options coding.OpenOptions,
 		) (tui.Controller, error) {
 			return runtimecontrol.New(ctx, options)
+		}
+	}
+
+	if dependencies.OpenAgentRun == nil {
+		dependencies.OpenAgentRun = func(
+			ctx context.Context,
+			options coding.OpenOptions,
+		) (AgentRunRuntime, error) {
+			return coding.Open(ctx, options)
 		}
 	}
 

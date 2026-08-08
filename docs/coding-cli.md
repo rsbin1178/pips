@@ -244,6 +244,136 @@ Workspace trust. See the [Coding lifecycle hooks guide](coding-hooks.md) for
 the native JSON schema, command protocol, handler trust review, and host
 authority boundary.
 
+### Dynamic custom Agents (Alpha)
+
+Custom Coding Agents are reusable Markdown definitions. They are an Alpha
+feature and are disabled by default: discovery and validation still work while
+the gate is off, but Pips will not expose custom definitions to the parent
+model or dispatch them. Enable the gate at the highest-precedence layer that
+fits the use case:
+
+```toml
+# ~/.pips/config.toml (or the file selected by --config)
+dynamic_subagents = true
+```
+
+```sh
+PIPS_DYNAMIC_SUBAGENTS=true pips agents list
+pips --dynamic-subagents agents run go-checker "inspect internal/coding"
+```
+
+`pips config show` reports the resolved `dynamic_subagents` value and its
+source. Disabling the gate stops new custom dispatch without deleting
+definitions or making historical child Sessions unreadable. Built-in
+`explore`, `plan`, and `review` remain available through their compatible
+protocol.
+
+Pips discovers `*.md` definitions from these roots in increasing precedence:
+
+| Scope | Root | Trust requirement |
+| --- | --- | --- |
+| Shared user | `~/.agents/agents/` | none |
+| Pips user | `$PIPS_HOME/agents/` (normally `~/.pips/agents/`) | none |
+| Shared project | `.agents/agents/` | trusted Workspace only |
+| Pips project | `.pips/agents/` | trusted Workspace only |
+
+The filename stem is the canonical ID, so `go-checker.md` defines
+`go-checker`. IDs use bounded lowercase ASCII letters, digits, and hyphens.
+Higher-precedence definitions with the same ID suppress lower ones; conflicting,
+invalid, or reserved builtin IDs are retained only as diagnostics. Pips does
+not inspect either project root before the Workspace is trusted, and opens user
+roots and files with safe regular-file and permission checks.
+
+Each definition uses strict YAML front matter followed by a non-empty Markdown
+instruction body. Unknown and duplicate fields are rejected rather than
+ignored:
+
+```markdown
+---
+schema: pips.agent/v1alpha1
+name: Go checker
+description: Inspect one bounded Go target and report evidence.
+model: inherit
+visibility:
+  user: true
+  model: false
+delivery: [foreground]
+limits:
+  max_turns: 8
+  max_tool_calls: 16
+  max_duration: 2m
+tools:
+  allow: ["tool:read", "tool:grep"]
+  require: ["tool:read"]
+skills:
+  allow: [golang-code-style]
+  preload: [golang-code-style]
+output:
+  format: text
+---
+Inspect only the task supplied by the caller. Report evidence and uncertainty.
+```
+
+`visibility.user` controls the Library and direct user invocation;
+`visibility.model` controls whether the parent model can discover the profile.
+`delivery` can contain `foreground`, `background`, or both. A profile's
+`model` is either `inherit` or a configured Pips `provider/model` reference;
+it cannot specify an endpoint, header, credential, or provider policy.
+`output.format` is `text` or `json_schema`; JSON Schema output is validated
+locally in addition to any provider structured-output support.
+
+`tools.allow` and `tools.require` accept exact `tool:<wire-name>`,
+`source:<kind>/<id>`, and `tag:<tag>` selectors. `require` must also be in
+`allow`; a missing required capability makes admission fail instead of silently
+weakening the profile. Skills select only already loaded, trusted Skills, and
+`preload` must be a subset of `allow`.
+
+Definitions describe a specialization; they never grant authority. At launch,
+Pips freezes the intersection of the profile's selections with the active
+Runtime's delegable catalog, operating mode, Workspace trust, Sandbox,
+approval policy, model catalog, Skill/MCP generation, and per-call checks.
+Consequently a profile may request `apply_patch`, `shell`, an existing MCP Tool,
+Tool Search, or `ask_user`, but it receives the capability only when the parent
+Runtime already permits it. It cannot add credentials, endpoints, environment
+variables, Sandbox or permission overrides, private MCP servers, executable
+hooks, or recursive Agent delegation.
+
+Every admitted child receives its own approval, question, change-audit, and
+generation-lease scope. A profile's declared selectors are shown separately
+from the dispatch-time effective plan; the child Session keeps the immutable
+identity, digest, source, model, limits, and capability snapshot. Reloads
+affect later interactions, not an already running child.
+
+Use the explicit commands to manage and invoke definitions:
+
+```sh
+# Creates $PIPS_HOME/agents/go-checker.md only if it does not already exist.
+pips agents init go-checker
+
+pips agents validate
+pips agents list --all
+pips agents show go-checker
+
+# Runs one named user-visible profile and prints a bounded JSON result envelope.
+pips --dynamic-subagents agents run go-checker "inspect internal/coding"
+
+# Parses an explicitly supplied Markdown definition for this run only.
+pips --dynamic-subagents agents run ad-hoc-check \
+  "review this diff" --definition ./reviewer.md
+```
+
+`--definition` never writes the supplied file into an Agent root and never
+publishes it to the parent model. `agents run` is non-interactive: if its child
+needs a Shell/patch approval, an unknown-outcome decision, or a structured
+answer, it returns the matching classified error rather than auto-approving or
+waiting indefinitely.
+
+In the interactive TUI, open `/agents`, press `Ctrl+L` for the Library, choose
+an available user-visible profile with Enter, then enter its task in the
+Composer. `Ctrl+R` returns to durable Runs. Child approval and question prompts
+identify the exact child and resolve only that child Session; they do not grant
+or answer anything for the parent interaction.
+
 ### Interactive TUI themes and status line
 
 The interactive TUI supports the automatic selection `auto` and these built-in

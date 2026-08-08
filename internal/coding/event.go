@@ -330,6 +330,7 @@ type ToolCompleted struct {
 // Child transcript, Tool arguments, paths, and structured results are loaded
 // from the child Session only and never copied into this payload.
 type SubagentLifecycle struct {
+	Identity            subagent.AgentIdentity   `json:"identity,omitzero"`
 	Role                subagent.Role            `json:"role"`
 	State               subagent.State           `json:"state"`
 	ChildSessionID      string                   `json:"child_session_id"`
@@ -1196,10 +1197,19 @@ func validateSubagentLifecycleFields(value SubagentLifecycle) error {
 	} else if value.ParentToolCallID == "" || value.RootInteractionID == "" {
 		return errors.New("incomplete subagent ownership")
 	}
-	switch value.Role {
-	case subagent.RoleExplore, subagent.RolePlan, subagent.RoleReview:
-	default:
-		return errors.New("invalid subagent role")
+	if !value.Identity.IsZero() {
+		if err := subagent.ValidateIdentity(value.Identity); err != nil {
+			return errors.New("invalid subagent identity")
+		}
+		if value.Role != value.Identity.LegacyRole() {
+			return errors.New("subagent role differs from identity")
+		}
+	} else {
+		switch value.Role {
+		case subagent.RoleExplore, subagent.RolePlan, subagent.RoleReview:
+		default:
+			return errors.New("invalid subagent role")
+		}
 	}
 	if !validSubagentActivity(value.Activity) {
 		return errors.New("invalid subagent activity")

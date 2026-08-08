@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"github.com/rsbin/pips/internal/coding/agentplugin"
+	"github.com/rsbin/pips/internal/coding/agentprofile"
 	"github.com/rsbin/pips/internal/coding/resource"
 )
 
@@ -47,6 +48,12 @@ func (r *Runtime) buildIntegrationCandidate(
 	if err != nil {
 		return nil, err
 	}
+	profiles, err := agentprofile.Load(ctx, agentprofile.Options{
+		Paths: r.paths, Tree: r.tree, ProjectTrusted: r.trusted, Limits: r.opts.AgentProfileLimits,
+	})
+	if err != nil {
+		return nil, err
+	}
 	nextSkillPolicy, err := r.skillSettings.Load(ctx)
 	if err != nil {
 		return nil, err
@@ -81,6 +88,7 @@ func (r *Runtime) buildIntegrationCandidate(
 		activation,
 		connections,
 		loaded,
+		profiles,
 		nextSkillPolicy,
 		nextProjectInstructions.SystemPrompt(),
 		plugins,

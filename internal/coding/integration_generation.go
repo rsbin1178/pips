@@ -9,6 +9,7 @@ import (
 
 	"github.com/rsbin/pips/agent/extension"
 	"github.com/rsbin/pips/internal/coding/agentplugin"
+	"github.com/rsbin/pips/internal/coding/agentprofile"
 	codingmcp "github.com/rsbin/pips/internal/coding/mcp"
 	"github.com/rsbin/pips/internal/coding/resource"
 	"github.com/rsbin/pips/internal/coding/skillsettings"
@@ -28,6 +29,7 @@ type IntegrationGeneration struct {
 	activation          *extension.Activation
 	connections         *codingmcp.Connections
 	resources           resource.Result
+	agentProfiles       agentprofile.Registry
 	skillPolicy         skillsettings.Snapshot
 	projectInstructions string
 	agentPlugins        agentplugin.Result
@@ -45,6 +47,7 @@ func newIntegrationGeneration(
 	activation *extension.Activation,
 	connections *codingmcp.Connections,
 	resources resource.Result,
+	agentProfiles agentprofile.Registry,
 	skillPolicy skillsettings.Snapshot,
 	projectInstructions string,
 	agentPlugins agentplugin.Result,
@@ -54,6 +57,7 @@ func newIntegrationGeneration(
 		activation:          activation,
 		connections:         connections,
 		resources:           resources,
+		agentProfiles:       agentProfiles.Clone(),
 		skillPolicy:         skillPolicy.Clone(),
 		projectInstructions: projectInstructions,
 		agentPlugins:        agentPlugins,
@@ -154,6 +158,7 @@ func (g *IntegrationGeneration) handoff(
 		activation:          g.activation,
 		connections:         g.connections,
 		resources:           g.resources,
+		agentProfiles:       g.agentProfiles.Clone(),
 		skillPolicy:         skillPolicy.Clone(),
 		projectInstructions: g.projectInstructions,
 		agentPlugins:        g.agentPlugins,
@@ -162,6 +167,7 @@ func (g *IntegrationGeneration) handoff(
 	g.activation = nil
 	g.connections = nil
 	g.resources = resource.Result{}
+	g.agentProfiles = agentprofile.Registry{}
 	g.agentPlugins = agentplugin.Result{}
 	g.refs = 0
 	g.retired = true
@@ -220,6 +226,14 @@ func (g *IntegrationGeneration) resourcesSnapshot() resource.Result {
 	}
 
 	return g.resources
+}
+
+func (g *IntegrationGeneration) agentProfilesSnapshot() agentprofile.Registry {
+	if g == nil {
+		return agentprofile.Registry{}
+	}
+
+	return g.agentProfiles.Clone()
 }
 
 func (g *IntegrationGeneration) skillPolicySnapshot() skillsettings.Snapshot {

@@ -38,7 +38,9 @@ type Layout struct {
 	teamIntegrationsDir  string
 	worktreesRoot        string
 	skillsDir            string
+	agentsDir            string
 	agentSkillsDir       string
+	sharedAgentsDir      string
 	bundlesDir           string
 	pluginsDir           string
 	pluginDataDir        string
@@ -85,6 +87,7 @@ func New(root string) (Layout, error) {
 		teamIntegrationsDir:  filepath.Join(teamsDir, "integrations"),
 		worktreesRoot:        worktreesRoot,
 		skillsDir:            filepath.Join(abs, "skills"),
+		agentsDir:            filepath.Join(abs, "agents"),
 		bundlesDir:           filepath.Join(abs, "bundles"),
 		pluginsDir:           filepath.Join(abs, "plugins"),
 		pluginDataDir:        filepath.Join(abs, "plugin-data"),
@@ -118,6 +121,7 @@ func Default() (Layout, error) {
 		}
 
 		layout.agentSkillsDir = filepath.Join(home, agentDir, "skills")
+		layout.sharedAgentsDir = filepath.Join(home, agentDir, "agents")
 
 		return layout, nil
 	}
@@ -128,6 +132,7 @@ func Default() (Layout, error) {
 	}
 
 	layout.agentSkillsDir = filepath.Join(home, agentDir, "skills")
+	layout.sharedAgentsDir = filepath.Join(home, agentDir, "agents")
 
 	return layout, nil
 }
@@ -156,6 +161,31 @@ func (l Layout) WithAgentSkillsDir(directory string) (Layout, error) {
 	return l, nil
 }
 
+// WithSharedAgentsDir returns a copy that discovers shared Agent definitions
+// from directory. An empty directory disables the shared user root. This is
+// mainly useful for embedders and hermetic tests; Default configures
+// ~/.agents/agents.
+func (l Layout) WithSharedAgentsDir(directory string) (Layout, error) {
+	if directory == "" {
+		l.sharedAgentsDir = ""
+
+		return l, nil
+	}
+
+	if strings.ContainsRune(directory, '\x00') {
+		return Layout{}, fmt.Errorf("%w: shared Agent path contains NUL", ErrInvalid)
+	}
+
+	abs, err := filepath.Abs(directory)
+	if err != nil {
+		return Layout{}, fmt.Errorf("%w: shared Agent path: %w", ErrInvalid, err)
+	}
+
+	l.sharedAgentsDir = abs
+
+	return l, nil
+}
+
 // ProjectRoot returns the workspace-relative product directory.
 func ProjectRoot() string { return projectDir }
 
@@ -177,6 +207,12 @@ func ProjectSkillsFile() string { return path.Join(projectDir, "skills.toml") }
 // ProjectAgentSkillsDir returns the workspace-relative shared Agent Skills
 // directory.
 func ProjectAgentSkillsDir() string { return path.Join(agentDir, "skills") }
+
+// ProjectAgentsDir returns the workspace-relative private Pips Agent root.
+func ProjectAgentsDir() string { return path.Join(projectDir, "agents") }
+
+// ProjectSharedAgentsDir returns the workspace-relative shared Agent root.
+func ProjectSharedAgentsDir() string { return path.Join(agentDir, "agents") }
 
 // ProjectBundlesDir returns the workspace-relative project bundle directory.
 func ProjectBundlesDir() string { return path.Join(projectDir, "bundles") }
@@ -231,9 +267,16 @@ func (l Layout) WorktreesRoot() string { return l.worktreesRoot }
 // SkillsDir returns the user skill directory.
 func (l Layout) SkillsDir() string { return l.skillsDir }
 
+// AgentsDir returns the user Pips Agent definition directory.
+func (l Layout) AgentsDir() string { return l.agentsDir }
+
 // AgentSkillsDir returns the shared user Agent Skills directory. It is empty
 // for layouts built with New unless explicitly configured.
 func (l Layout) AgentSkillsDir() string { return l.agentSkillsDir }
+
+// SharedAgentsDir returns the shared user Agent definition directory. It is
+// empty for layouts built with New unless explicitly configured.
+func (l Layout) SharedAgentsDir() string { return l.sharedAgentsDir }
 
 // BundlesDir returns the user bundle directory.
 func (l Layout) BundlesDir() string { return l.bundlesDir }

@@ -18,8 +18,9 @@ import (
 )
 
 const (
-	notificationSchema     = "pips.coding.subagent.notification/v1alpha1"
-	notificationCustomType = "pips.coding.subagent.notification"
+	legacyNotificationSchema = "pips.coding.subagent.notification/v1alpha1"
+	notificationSchema       = "pips.coding.subagent.notification/v1alpha2"
+	notificationCustomType   = "pips.coding.subagent.notification"
 )
 
 type notificationEvent string
@@ -32,16 +33,17 @@ const (
 // Notification is one bounded background-child completion waiting to be
 // injected into its owning parent conversation.
 type Notification struct {
-	ID          string    `json:"id"`
-	AgentID     string    `json:"agent_id"`
-	Ownership   Ownership `json:"ownership"`
-	Role        Role      `json:"role"`
-	Outcome     Outcome   `json:"outcome"`
-	Code        string    `json:"code"`
-	TaskPreview string    `json:"task_preview,omitempty"`
-	Result      ai.JSON   `json:"result,omitempty"`
-	Usage       ai.Usage  `json:"usage"`
-	TerminalAt  time.Time `json:"terminal_at"`
+	ID          string        `json:"id"`
+	AgentID     string        `json:"agent_id"`
+	Ownership   Ownership     `json:"ownership"`
+	Identity    AgentIdentity `json:"identity,omitzero"`
+	Role        Role          `json:"role"`
+	Outcome     Outcome       `json:"outcome"`
+	Code        string        `json:"code"`
+	TaskPreview string        `json:"task_preview,omitempty"`
+	Result      ai.JSON       `json:"result,omitempty"`
+	Usage       ai.Usage      `json:"usage"`
+	TerminalAt  time.Time     `json:"terminal_at"`
 }
 
 type notificationRecord struct {
@@ -107,7 +109,8 @@ func (i *NotificationInbox) EnqueueCompletion(event Event) error {
 			ParentToolCallID:    event.ParentToolCallID,
 			RootInteractionID:   event.RootInteractionID,
 		},
-		Role: event.Role, Outcome: event.Result.Outcome, Code: event.Result.Code,
+		Identity: event.Identity, Role: event.Role,
+		Outcome: event.Result.Outcome, Code: event.Result.Code,
 		TaskPreview: event.TaskPreview, Result: resultJSON, Usage: event.Result.Usage,
 		TerminalAt: event.Time,
 	})
@@ -130,7 +133,7 @@ func (i *NotificationInbox) EnqueueRecovered(summary Summary, result any) error 
 
 	return i.Enqueue(Notification{
 		ID: summary.ChildSessionID, AgentID: summary.ChildSessionID,
-		Ownership: summary.Ownership, Role: summary.Role,
+		Ownership: summary.Ownership, Identity: summary.Identity, Role: summary.Role,
 		Outcome: outcomeFromState(summary.State), Code: summary.Code,
 		TaskPreview: summary.TaskPreview, Result: resultJSON, Usage: summary.Usage,
 		TerminalAt: summary.CreatedAt.Add(summary.Duration),
@@ -146,6 +149,11 @@ func (i *NotificationInbox) Enqueue(value Notification) error {
 
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	var err error
+	value, err = normalizeNotification(value)
+	if err != nil {
+		return err
+	}
 	value = cloneNotification(value)
 	if err := i.validateNotification(value); err != nil {
 		return err
@@ -321,7 +329,8 @@ func decodeNotificationRecord(data ai.JSON) (notificationRecord, error) {
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return notificationRecord{}, fmt.Errorf("%w: trailing notification journal JSON", ErrInvalid)
 	}
-	if record.Schema != notificationSchema || record.ID == "" || record.Time.IsZero() {
+	if (record.Schema != legacyNotificationSchema && record.Schema != notificationSchema) ||
+		record.ID == "" || record.Time.IsZero() {
 		return notificationRecord{}, fmt.Errorf("%w: invalid notification record", ErrInvalid)
 	}
 	switch record.Event {
@@ -329,6 +338,11 @@ func decodeNotificationRecord(data ai.JSON) (notificationRecord, error) {
 		if record.Notification == nil || record.Notification.ID != record.ID {
 			return notificationRecord{}, fmt.Errorf("%w: invalid pending notification", ErrInvalid)
 		}
+		value, err := normalizeNotification(*record.Notification)
+		if err != nil {
+			return notificationRecord{}, err
+		}
+		record.Notification = &value
 	case notificationDelivered:
 		if record.Notification != nil {
 			return notificationRecord{}, fmt.Errorf("%w: delivered notification has payload", ErrInvalid)
@@ -338,6 +352,21 @@ func decodeNotificationRecord(data ai.JSON) (notificationRecord, error) {
 	}
 
 	return record, nil
+}
+
+func normalizeNotification(value Notification) (Notification, error) {
+	if value.Identity.IsZero() {
+		identity, err := BuiltinIdentity(value.Role)
+		if err != nil {
+			return Notification{}, err
+		}
+		value.Identity = identity
+	}
+	if value.Role == "" {
+		value.Role = value.Identity.LegacyRole()
+	}
+
+	return value, nil
 }
 
 //nolint:gocyclo // The persisted notification union is validated exhaustively before append.
@@ -351,8 +380,11 @@ func (i *NotificationInbox) validateNotification(value Notification) error {
 		!validUsage(value.Usage) {
 		return fmt.Errorf("%w: invalid notification payload", ErrInvalid)
 	}
-	if _, err := specFor(value.Role); err != nil {
+	if err := ValidateIdentity(value.Identity); err != nil {
 		return err
+	}
+	if value.Role != value.Identity.LegacyRole() {
+		return fmt.Errorf("%w: notification role differs from identity", ErrInvalid)
 	}
 	switch value.Outcome {
 	case OutcomeSucceeded:
@@ -372,7 +404,7 @@ func (i *NotificationInbox) validateNotification(value Notification) error {
 
 func sameNotification(left, right Notification) bool {
 	return left.ID == right.ID && left.AgentID == right.AgentID &&
-		left.Ownership == right.Ownership && left.Role == right.Role &&
+		left.Ownership == right.Ownership && left.Identity == right.Identity && left.Role == right.Role &&
 		left.Outcome == right.Outcome && left.Code == right.Code &&
 		left.TaskPreview == right.TaskPreview && bytes.Equal(left.Result, right.Result) &&
 		left.Usage == right.Usage && left.TerminalAt.Equal(right.TerminalAt)

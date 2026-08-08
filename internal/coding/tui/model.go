@@ -136,6 +136,8 @@ type Model struct {
 	routeSeq             uint64
 	teamProjection       teamProjectionState
 	teamInteractions     teamInteractionQueueState
+	subagentInteractions subagentInteractionState
+	directAgent          *directAgentSelection
 	teamPanel            teamPanelState
 	presentation         presentationState
 	prompt               promptState
@@ -311,6 +313,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.resetTeamProjection(m.state.SessionID)
 		}
 		m.childStates = cloneChildStates(message.observation.Children)
+		m.resetSubagentInteractions()
 		m.syncApprovalPrompt()
 		m.setLayout()
 		commit := m.commitStableTimeline()
@@ -318,6 +321,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			message.bridge.wait(),
 			m.continueIfPaused(),
 			m.refreshTeamProjectionSnapshot(),
+			m.loadPausedSubagentControls(),
 			m.loadPlanReviewIfNeeded(),
 			m.startActivityClock(activityWasVisible),
 		)
@@ -428,6 +432,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.state = m.controller.Snapshot()
 			}
 			m.syncApprovalPrompt()
+			m.clearCompletedDirectAgent()
 			m.setLayout()
 			return m, m.commitStableTimeline()
 		}
@@ -442,6 +447,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.state = m.controller.Snapshot()
 		}
 		m.syncApprovalPrompt()
+		m.clearCompletedDirectAgent()
 		m.setLayout()
 		return m, m.commitStableTimeline()
 	case subagentRouteDataMsg:
@@ -472,6 +478,14 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 
 			return m, m.refreshSubagentRoute()
 		}
+
+		return m, nil
+	case subagentControlDataMsg:
+		m.applySubagentControlData(message)
+
+		return m, nil
+	case subagentControlResultMsg:
+		m.applySubagentControlResult(message)
 
 		return m, nil
 	case subagentCancelResultMsg:
@@ -543,6 +557,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.route.loading = false
 		m.route.err = message.err
+		m.route.agentLibrary = message.library.Clone().Entries
 		views := make([]coding.TeamView, 0, len(message.teamViews))
 		for _, view := range message.teamViews {
 			merged := m.mergeTeamProjectionView(view)
@@ -1039,6 +1054,13 @@ func (m *Model) updateReadyKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, command
 	}
 	key := message.String()
+	if key == keyEscape && m.directAgent != nil && !m.directAgent.running &&
+		m.composer.Value() == "" {
+		m.directAgent = nil
+		m.setLayout()
+
+		return m, nil
+	}
 	if key == "up" && m.composer.AtFirstVisualRow() && m.composer.HistoryUp() {
 		m.setLayout()
 
@@ -1144,6 +1166,9 @@ func (m *Model) readyView() tea.View {
 	}
 	if inline := m.inlineTeamRouteView(); inline != "" {
 		footer = append(footer, inline)
+	}
+	if notice := m.directAgentNotice(); notice != "" {
+		footer = append(footer, notice)
 	}
 	for range conversationGapHeight {
 		footer = append(footer, "")
@@ -1720,8 +1745,16 @@ func (m *Model) submit(actionCtx actionContext) tea.Cmd {
 	snapshot := m.composer.Snapshot()
 	switch actionCtx {
 	case contextIdle:
+		if m.directAgent != nil {
+			return m.submitDirectAgent(snapshot)
+		}
+
 		return m.prepareSubmission(submissionPrompt, snapshot)
 	case contextRunning:
+		if m.directAgent != nil && m.directAgent.running {
+			return nil
+		}
+
 		return m.prepareSubmission(submissionSteer, snapshot)
 	default:
 		return nil
@@ -1729,6 +1762,10 @@ func (m *Model) submit(actionCtx actionContext) tea.Cmd {
 }
 
 func (m *Model) queueMessage(kind controllerCommand) tea.Cmd {
+	if m.directAgent != nil && m.directAgent.running {
+		return nil
+	}
+
 	snapshot := m.composer.Snapshot()
 	submission := submissionSteer
 	if kind == commandFollowUp {
@@ -1874,6 +1911,7 @@ func (m *Model) updateStream(message streamItemMsg) (tea.Model, tea.Cmd) {
 	refresh := tea.Batch(
 		m.invalidateAgentDetail(message.item),
 		m.invalidateTeamProjection(message.item.event),
+		m.observeSubagentControl(message.item.event),
 		m.loadPlanReviewIfNeeded(),
 	)
 
@@ -1909,6 +1947,7 @@ func (m *Model) reduceStreamItem(item streamItem) {
 	if previousSessionID != m.state.SessionID {
 		m.stopTeamWorkerRouteSubscription()
 		m.resetTeamProjection(m.state.SessionID)
+		m.resetSubagentInteractions()
 	}
 	m.trackTeamLifecycleEvent(item.event)
 	m.applyTeamInteractionEvent(item.event)
@@ -1982,6 +2021,7 @@ func (m *Model) finishStream() tea.Cmd {
 		m.state = snapshot
 	}
 	m.syncApprovalPrompt()
+	m.clearCompletedDirectAgent()
 	m.bridge = nil
 	m.starting = false
 	m.waiting = false
@@ -2075,6 +2115,7 @@ func (m *Model) updateSubscription(message subscriptionEventMsg) (tea.Model, tea
 	refresh := tea.Batch(
 		m.invalidateAgentDetail(streamItem{event: message.record.Event}),
 		m.invalidateTeamProjection(message.record.Event),
+		m.observeSubagentControl(message.record.Event),
 		m.loadPlanReviewIfNeeded(),
 		m.startActivityClock(activityWasVisible),
 	)

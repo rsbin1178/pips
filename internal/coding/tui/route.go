@@ -46,6 +46,8 @@ type routeState struct {
 	sessionRecovery     map[string]runtimecontrol.TeamRecoveryHint
 	skills              []coding.SkillSummary
 	diagnostics         []coding.SkillDiagnostic
+	agentLibrary        []coding.AgentLibraryEntry
+	agentsTab           agentsRouteTab
 	showDetails         bool
 	previousInput       string
 	previousComposer    composerSnapshot
