@@ -304,12 +304,13 @@ func connectionTransportFactory(
 		switch definition.Transport {
 		case TransportStdio:
 			resource, err := mcpstdio.NewTransport(mcpstdio.Config{
-				Workspace:         options.Workspace,
-				Command:           definition.Command,
-				Args:              definition.Args,
-				TempRoot:          options.TempRoot,
-				Environment:       options.Environment,
-				TerminateDuration: options.TerminateAfter,
+				Workspace:            options.Workspace,
+				Command:              definition.Command,
+				Args:                 definition.Args,
+				TempRoot:             options.TempRoot,
+				Environment:          options.Environment,
+				EnvironmentOverrides: definition.Environment,
+				TerminateDuration:    options.TerminateAfter,
 			})
 			if err != nil {
 				return nil, nil, err

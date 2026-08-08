@@ -28,12 +28,13 @@ const (
 
 // Config defines one absolute, shell-free stdio server process.
 type Config struct {
-	Workspace         workspace.Workspace
-	Command           string
-	Args              []string
-	TempRoot          string
-	Environment       func(string) (string, bool)
-	TerminateDuration time.Duration
+	Workspace            workspace.Workspace
+	Command              string
+	Args                 []string
+	TempRoot             string
+	Environment          func(string) (string, bool)
+	EnvironmentOverrides []execution.EnvVar
+	TerminateDuration    time.Duration
 }
 
 // Resource owns a prepared SDK transport and its private environment root.
@@ -99,7 +100,11 @@ func NewTransport(config Config) (*Resource, error) {
 		return nil, fmt.Errorf("coding mcp stdio: inspect private directory: %w", err)
 	}
 
-	environment, err := execution.NewChildEnvironment(config.Environment, privateDir, nil)
+	environment, err := execution.NewChildEnvironment(
+		config.Environment,
+		privateDir,
+		config.EnvironmentOverrides,
+	)
 	if err != nil {
 		return nil, err
 	}

@@ -199,6 +199,49 @@ func TestControllerModelSwitchReopensDurableSession(t *testing.T) {
 	require.NoError(t, controller.Close(t.Context()))
 }
 
+func TestControllerSessionModelSwitchRetainsProvisionalIdentity(t *testing.T) {
+	t.Parallel()
+
+	fixture := newControllerFixture(t)
+	fixture.options.Session.RetainEmpty = true
+	controller, err := newController(t.Context(), fixture.options, fixture.dependencies())
+	require.NoError(t, err)
+	initialID := controller.SessionID()
+
+	require.NoError(t, controller.SwitchSessionModel(t.Context(), modelcatalog.Selection{
+		Ref: config.ModelRef{Provider: ai.ProviderAnthropic, Model: "configured-next"},
+	}))
+	assert.Equal(t, initialID, controller.SessionID())
+	require.Len(t, fixture.opener.calls, 2)
+	assert.Equal(t, initialID, fixture.opener.calls[1].Session.ID)
+	assert.True(t, fixture.opener.calls[1].Session.RetainEmpty)
+	require.NoError(t, controller.Close(t.Context()))
+}
+
+func TestControllerFailedSessionModelSwitchRestoresProvisionalIdentity(t *testing.T) {
+	t.Parallel()
+
+	fixture := newControllerFixture(t)
+	fixture.options.Session.RetainEmpty = true
+	targetErr := errors.New("target open failed")
+	fixture.opener.failures[1] = targetErr
+	controller, err := newController(t.Context(), fixture.options, fixture.dependencies())
+	require.NoError(t, err)
+	initialID := controller.SessionID()
+
+	err = controller.SwitchSessionModel(t.Context(), modelcatalog.Selection{
+		Ref: config.ModelRef{Provider: ai.ProviderAnthropic, Model: "configured-next"},
+	})
+	require.ErrorIs(t, err, targetErr)
+	assert.False(t, controller.Detached())
+	assert.Equal(t, initialID, controller.SessionID())
+	require.Len(t, fixture.opener.calls, 3)
+	assert.Equal(t, initialID, fixture.opener.calls[1].Session.ID)
+	assert.Equal(t, initialID, fixture.opener.calls[2].Session.ID)
+	assert.True(t, fixture.opener.calls[2].Session.RetainEmpty)
+	require.NoError(t, controller.Close(t.Context()))
+}
+
 func TestControllerCapabilitiesFollowCurrentModel(t *testing.T) {
 	t.Parallel()
 

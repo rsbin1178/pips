@@ -1212,6 +1212,31 @@ func TestRuntimeLiveDurableStateMatchesReopenBootstrap(t *testing.T) {
 	require.NoError(t, second.Close(t.Context()))
 }
 
+func TestRuntimeRetainedEmptySessionCanReopenBeforeFirstPrompt(t *testing.T) {
+	t.Parallel()
+
+	base := t.TempDir()
+	first := openTestRuntimeAt(
+		t,
+		base,
+		SessionTarget{RetainEmpty: true},
+		newRuntimeModel(runtimeTextResponse("unused")),
+	)
+	sessionID := first.Snapshot().SessionID
+	assert.True(t, first.Snapshot().IsSessionProvisional())
+	require.NoError(t, first.Close(t.Context()))
+
+	reopened := openTestRuntimeAt(
+		t,
+		base,
+		SessionTarget{ID: sessionID, RetainEmpty: true},
+		newRuntimeModel(runtimeTextResponse("unused")),
+	)
+	assert.Equal(t, sessionID, reopened.Snapshot().SessionID)
+	assert.True(t, reopened.Snapshot().IsSessionProvisional())
+	require.NoError(t, reopened.Close(t.Context()))
+}
+
 func TestRuntimeResumeUsesConfigurationInsteadOfLegacyModelChange(t *testing.T) {
 	t.Parallel()
 

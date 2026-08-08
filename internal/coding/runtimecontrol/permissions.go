@@ -158,6 +158,7 @@ func (c *Controller) SetPermissions(
 	return c.reopenReplacement(
 		ctx, current, targetID, target, current.selection,
 		current.resolved, current.model, current.overridden,
+		false,
 	)
 }
 

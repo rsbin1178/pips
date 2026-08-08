@@ -5,6 +5,7 @@ Usage:
   pips [command]
 
 Available Commands:
+  acp              Serve Agent Client Protocol v1 over stdio
   completion       Generate shell completion
   config           Inspect effective configuration
   doctor           Check coding agent prerequisites

@@ -42,7 +42,8 @@ func TestReconcileMarksOrphanRunningInterruptedAndRepairsParent(t *testing.T) {
 
 	repository, parent, workspaceID := newJournalFixture(t)
 	child, err := repository.Create(t.Context(), session.CreateOptions{
-		WorkspaceID: workspaceID, Kind: session.KindSubagent,
+		WorkspaceID: workspaceID, WorkspacePath: parent.Metadata().WorkspacePath,
+		Kind:            session.KindSubagent,
 		ParentSessionID: parent.Metadata().ID, ParentRunID: "parent-run",
 		Agent: string(RoleExplore),
 	})
@@ -101,7 +102,8 @@ func TestReconcileRepairsMissingParentTerminalFromChild(t *testing.T) {
 
 	repository, parent, workspaceID := newJournalFixture(t)
 	child, err := repository.Create(t.Context(), session.CreateOptions{
-		WorkspaceID: workspaceID, Kind: session.KindSubagent,
+		WorkspaceID: workspaceID, WorkspacePath: parent.Metadata().WorkspacePath,
+		Kind:            session.KindSubagent,
 		ParentSessionID: parent.Metadata().ID, ParentRunID: "parent-run",
 		Agent: string(RoleReview),
 	})
@@ -146,7 +148,8 @@ func TestReconcileRepairsParentMissingEntireChildLifecycle(t *testing.T) {
 
 	repository, parent, workspaceID := newJournalFixture(t)
 	child, err := repository.Create(t.Context(), session.CreateOptions{
-		WorkspaceID: workspaceID, Kind: session.KindSubagent,
+		WorkspaceID: workspaceID, WorkspacePath: parent.Metadata().WorkspacePath,
+		Kind:            session.KindSubagent,
 		ParentSessionID: parent.Metadata().ID, Agent: string(RolePlan),
 	})
 	require.NoError(t, err)
@@ -207,7 +210,9 @@ func newJournalFixture(t *testing.T) (*session.Repository, *session.Handle, stri
 	require.NoError(t, err)
 
 	workspaceID := "workspace-test"
-	parent, err := repository.Create(t.Context(), session.CreateOptions{WorkspaceID: workspaceID})
+	parent, err := repository.Create(t.Context(), session.CreateOptions{
+		WorkspaceID: workspaceID, WorkspacePath: filepath.Dir(root),
+	})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, parent.Close()) })
 

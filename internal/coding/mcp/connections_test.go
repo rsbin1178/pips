@@ -19,6 +19,7 @@ import (
 	"github.com/rsbin/pips/agent"
 	agentmcp "github.com/rsbin/pips/agent/mcp"
 	"github.com/rsbin/pips/ai"
+	"github.com/rsbin/pips/internal/coding/execution"
 	codingmcp "github.com/rsbin/pips/internal/coding/mcp"
 	"github.com/rsbin/pips/internal/coding/workspace"
 	"github.com/stretchr/testify/assert"
@@ -45,6 +46,9 @@ func TestCodingMCPStdioHelper(t *testing.T) {
 			if os.Getenv(name) != "" {
 				return nil, fmt.Errorf("unsafe environment inherited: %s", name)
 			}
+		}
+		if os.Getenv("PIPS_TEST_MCP_SCOPE") != "session-only" {
+			return nil, errors.New("session environment overlay is missing")
 		}
 
 		return &sdk.CallToolResult{Content: []sdk.Content{
@@ -268,6 +272,9 @@ func TestOpenConnectionsUsesDefaultStdioTransportWithoutAmbientSecrets(t *testin
 				"-test.run=^TestCodingMCPStdioHelper$",
 				"-pips-coding-mcp-stdio-helper=true",
 			},
+			Environment: []execution.EnvVar{{
+				Name: "PIPS_TEST_MCP_SCOPE", Value: "session-only",
+			}},
 			ConnectTimeout: 10 * time.Second,
 		},
 		Status: codingmcp.StatusEnabled,
