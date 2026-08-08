@@ -5,13 +5,74 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/rsbin/pips/internal/coding/execution"
 	codingmcp "github.com/rsbin/pips/internal/coding/mcp"
 	"github.com/rsbin/pips/internal/coding/paths"
 	"github.com/rsbin/pips/internal/coding/workspace"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestNewDefinitionsOwnsSessionEnvironmentAndMergeRejectsCollisions(t *testing.T) {
+	t.Parallel()
+
+	input := []codingmcp.Definition{{
+		ID: "editor_tools", Scope: codingmcp.ScopeSession, Transport: codingmcp.TransportStdio,
+		Command: "/bin/echo", Args: []string{"serve"},
+		Environment:    []execution.EnvVar{{Name: "PIPS_TEST_MCP", Value: "one"}},
+		ConnectTimeout: 5 * time.Second,
+	}}
+	definitions, err := codingmcp.NewDefinitions(input, 2)
+	require.NoError(t, err)
+	fingerprint := definitions.List()[0].Fingerprint()
+
+	input[0].Args[0] = "changed"
+	input[0].Environment[0].Value = "changed"
+	listed := definitions.List()
+	listed[0].Environment[0].Value = "listed-change"
+	assert.Equal(t, "serve", definitions.List()[0].Args[0])
+	assert.Equal(t, "one", definitions.List()[0].Environment[0].Value)
+	assert.Equal(t, fingerprint, definitions.List()[0].Fingerprint())
+
+	changed, err := codingmcp.NewDefinitions([]codingmcp.Definition{{
+		ID: "editor_tools", Scope: codingmcp.ScopeSession, Transport: codingmcp.TransportStdio,
+		Command: "/bin/echo", Environment: []execution.EnvVar{{Name: "PIPS_TEST_MCP", Value: "two"}},
+		ConnectTimeout: 5 * time.Second,
+	}}, 2)
+	require.NoError(t, err)
+	assert.NotEqual(t, fingerprint, changed.List()[0].Fingerprint())
+
+	user, err := codingmcp.NewDefinitions([]codingmcp.Definition{{
+		ID: "editor_tools", Scope: codingmcp.ScopeUser, Transport: codingmcp.TransportStdio,
+		Command: "/bin/echo", ConnectTimeout: 5 * time.Second,
+	}}, 2)
+	require.NoError(t, err)
+	_, err = user.Merge(definitions, 2)
+	require.ErrorIs(t, err, codingmcp.ErrDuplicate)
+}
+
+func TestNewDefinitionsRejectsUnsafeSessionEnvironmentAndLimits(t *testing.T) {
+	t.Parallel()
+
+	definition := codingmcp.Definition{
+		ID: "editor_tools", Scope: codingmcp.ScopeSession, Transport: codingmcp.TransportStdio,
+		Command: "/bin/echo", Environment: []execution.EnvVar{{Name: "API_KEY", Value: "secret"}},
+		ConnectTimeout: 5 * time.Second,
+	}
+	_, err := codingmcp.NewDefinitions([]codingmcp.Definition{definition}, 1)
+	require.ErrorIs(t, err, codingmcp.ErrInvalid)
+	assert.NotContains(t, err.Error(), "secret")
+
+	definition.Environment = nil
+	_, err = codingmcp.NewDefinitions([]codingmcp.Definition{definition}, 0)
+	require.ErrorIs(t, err, codingmcp.ErrInvalid)
+	second := definition
+	second.ID = "editor_tools_two"
+	_, err = codingmcp.NewDefinitions([]codingmcp.Definition{definition, second}, 1)
+	require.ErrorIs(t, err, codingmcp.ErrLimitExceeded)
+}
 
 func TestLoadDefinitionsStrictScopedAndFingerprintStable(t *testing.T) {
 	t.Parallel()

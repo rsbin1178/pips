@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/rsbin/pips/internal/coding/execution"
 	"github.com/rsbin/pips/internal/coding/execution/mcpstdio"
 	"github.com/rsbin/pips/internal/coding/workspace"
 	"github.com/stretchr/testify/assert"
@@ -41,6 +42,9 @@ func TestNewTransportBuildsMinimalShellFreeCommandAndCleansPrivateDir(t *testing
 
 			return value, ok
 		},
+		EnvironmentOverrides: []execution.EnvVar{{
+			Name: "PIPS_TEST_MCP_SCOPE", Value: "session-only",
+		}},
 	})
 	require.NoError(t, err)
 
@@ -56,6 +60,7 @@ func TestNewTransportBuildsMinimalShellFreeCommandAndCleansPrivateDir(t *testing
 	assert.NotContains(t, environment, "HTTPS_PROXY")
 	assert.NotContains(t, environment, "OTEL_HEADERS")
 	assert.NotContains(t, environment, "SSH_AUTH_SOCK")
+	assert.Contains(t, environment, "PIPS_TEST_MCP_SCOPE=session-only")
 	assert.Contains(t, environment, "TMPDIR="+filepath.Join(resource.PrivateDir(), "tmp"))
 
 	privateDir := resource.PrivateDir()
@@ -67,6 +72,21 @@ func TestNewTransportBuildsMinimalShellFreeCommandAndCleansPrivateDir(t *testing
 
 	_, err = os.Stat(privateDir)
 	require.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestNewTransportRejectsUnsafeEnvironmentOverride(t *testing.T) {
+	t.Parallel()
+
+	ws, err := workspace.Open(t.TempDir())
+	require.NoError(t, err)
+	executable, err := os.Executable()
+	require.NoError(t, err)
+	_, err = mcpstdio.NewTransport(mcpstdio.Config{
+		Workspace: ws, Command: executable, TempRoot: privateTempRoot(t), Environment: os.LookupEnv,
+		EnvironmentOverrides: []execution.EnvVar{{Name: "API_KEY", Value: "secret"}},
+	})
+	require.ErrorIs(t, err, execution.ErrInvalidOperation)
+	assert.NotContains(t, err.Error(), "secret")
 }
 
 func TestNewTransportRejectsSymlinkExecutableAndPublicTempRoot(t *testing.T) {

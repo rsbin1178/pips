@@ -487,6 +487,13 @@ func canonicalEnvironment(input []EnvVar) ([]EnvVar, error) {
 	return output, nil
 }
 
+// ValidateEnvironment verifies bounded trusted child-process environment overrides.
+func ValidateEnvironment(input []EnvVar) error {
+	_, err := canonicalEnvironment(input)
+
+	return err
+}
+
 func canonicalWriteDirs(ws workspace.Workspace, input []string) ([]fileObject, error) {
 	if len(input) > maxWriteDirectories {
 		return nil, invalidOperation(

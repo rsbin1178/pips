@@ -14,6 +14,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/rsbin/pips/internal/coding/execution"
 )
 
 const (
@@ -42,6 +44,7 @@ type Scope string
 const (
 	ScopeUser    Scope = "user"
 	ScopeProject Scope = "project"
+	ScopeSession Scope = "session"
 )
 
 // TransportType identifies the configured MCP transport.
@@ -60,22 +63,30 @@ type Definition struct {
 	Transport      TransportType
 	Command        string
 	Args           []string
+	Environment    []execution.EnvVar
 	URL            string
 	ConnectTimeout time.Duration
 }
 
 // Fingerprint returns the normalized semantic SHA-256 identity of a Definition.
 func (d Definition) Fingerprint() string {
+	environment := slices.Clone(d.Environment)
+	slices.SortFunc(environment, func(left, right execution.EnvVar) int {
+		return strings.Compare(left.Name, right.Name)
+	})
+
 	canonical := struct {
-		ID        string        `json:"id"`
-		Transport TransportType `json:"transport"`
-		Command   string        `json:"command,omitempty"`
-		Args      []string      `json:"args,omitempty"`
-		URL       string        `json:"url,omitempty"`
-		TimeoutNS int64         `json:"connect_timeout_ns"`
+		ID          string             `json:"id"`
+		Transport   TransportType      `json:"transport"`
+		Command     string             `json:"command,omitempty"`
+		Args        []string           `json:"args,omitempty"`
+		Environment []execution.EnvVar `json:"environment,omitempty"`
+		URL         string             `json:"url,omitempty"`
+		TimeoutNS   int64              `json:"connect_timeout_ns"`
 	}{
 		ID: d.ID, Transport: d.Transport, Command: d.Command,
-		Args: slices.Clone(d.Args), URL: d.URL, TimeoutNS: int64(d.ConnectTimeout),
+		Args: slices.Clone(d.Args), Environment: environment,
+		URL: d.URL, TimeoutNS: int64(d.ConnectTimeout),
 	}
 
 	encoded, _ := json.Marshal(canonical)
@@ -86,6 +97,7 @@ func (d Definition) Fingerprint() string {
 
 func cloneDefinition(definition Definition) Definition {
 	definition.Args = slices.Clone(definition.Args)
+	definition.Environment = slices.Clone(definition.Environment)
 
 	return definition
 }
@@ -102,7 +114,7 @@ func validateDefinition(definition Definition) error {
 	}
 
 	switch definition.Scope {
-	case ScopeUser, ScopeProject:
+	case ScopeUser, ScopeProject, ScopeSession:
 	default:
 		return errors.New("unsupported definition scope")
 	}
@@ -130,6 +142,9 @@ func validateStdioDefinition(definition Definition) error {
 	if len(definition.Args) > 256 {
 		return errors.New("stdio definition has too many arguments")
 	}
+	if err := execution.ValidateEnvironment(definition.Environment); err != nil {
+		return err
+	}
 
 	total := 0
 
@@ -148,8 +163,8 @@ func validateStdioDefinition(definition Definition) error {
 }
 
 func validateHTTPDefinition(definition Definition) error {
-	if definition.Command != "" || len(definition.Args) != 0 {
-		return errors.New("streamable HTTP definition cannot set command or args")
+	if definition.Command != "" || len(definition.Args) != 0 || len(definition.Environment) != 0 {
+		return errors.New("streamable HTTP definition cannot set command, args, or environment")
 	}
 
 	if !validText(definition.URL, 4<<10, false) {

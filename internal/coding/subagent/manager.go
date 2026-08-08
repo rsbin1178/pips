@@ -303,6 +303,7 @@ func (m *Manager) Start(
 
 	child, err := m.config.Repository.Create(startCtx, session.CreateOptions{
 		WorkspaceID:     parentMeta.WorkspaceID,
+		WorkspacePath:   parentMeta.WorkspacePath,
 		Kind:            session.KindSubagent,
 		ParentSessionID: parentMeta.ID,
 		ParentRunID:     request.Ownership.ParentRunID,

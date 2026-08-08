@@ -4,6 +4,10 @@
 an adapter over the same durable session, approval, event, and sandbox layers
 used by future interactive frontends; it does not contain a second Agent loop.
 
+`pips acp` is the stdio editor protocol surface over the same Runtime. Its
+launch, capability, authentication, and lifecycle contract is documented in
+the [ACP v1 agent guide](coding-acp.md).
+
 ## Remote interactive SSH
 
 `pips ssh` opens the ordinary interactive Pips TUI on a remote host while

@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/rsbin/pips/agent/continuation"
 	"github.com/rsbin/pips/agent/harness"
@@ -23,6 +24,8 @@ import (
 
 const (
 	extraWorkspaceID       = "pips.coding.workspace_id"
+	extraWorkspacePath     = "pips.coding.workspace_path"
+	extraRetainEmpty       = "pips.coding.retain_empty"
 	extraKind              = "pips.coding.session_kind"
 	extraParentSessionID   = "pips.coding.parent_session_id"
 	extraParentEntryID     = "pips.coding.parent_entry_id"
@@ -103,6 +106,8 @@ func (r *Repository) Dir() string {
 // CreateOptions are the non-secret attributes persisted in a session header.
 type CreateOptions struct {
 	WorkspaceID     string
+	WorkspacePath   string
+	RetainEmpty     bool
 	Kind            Kind
 	ParentSessionID string
 	ParentRunID     string
@@ -141,6 +146,8 @@ type Metadata struct {
 	CreatedAt       time.Time
 	Path            string
 	WorkspaceID     string
+	WorkspacePath   string
+	RetainEmpty     bool
 	Kind            Kind
 	ParentSessionID string
 	ParentEntryID   string
@@ -219,8 +226,9 @@ func (h *Handle) Close() error {
 	return h.closeErr
 }
 
-// Create reserves and locks a new session. Its JSONL file is created when the
-// owning Harness Session persists its first entry.
+// Create reserves and locks a new session. By default its JSONL file is
+// created when the owning Harness Session persists its first entry. Callers
+// that publish the ID before the first entry can retain an empty durable file.
 func (r *Repository) Create(ctx context.Context, options CreateOptions) (*Handle, error) {
 	if err := r.validate(); err != nil {
 		return nil, err
@@ -246,8 +254,12 @@ func (r *Repository) Create(ctx context.Context, options CreateOptions) (*Handle
 
 	kind := normalizedKind(options.Kind)
 	extra := map[string]string{
-		extraWorkspaceID: options.WorkspaceID,
-		extraKind:        string(kind),
+		extraWorkspaceID:   options.WorkspaceID,
+		extraWorkspacePath: options.WorkspacePath,
+		extraKind:          string(kind),
+	}
+	if options.RetainEmpty {
+		extra[extraRetainEmpty] = "true"
 	}
 	switch kind {
 	case KindConversation:
@@ -264,12 +276,22 @@ func (r *Repository) Create(ctx context.Context, options CreateOptions) (*Handle
 		extra[extraContinuationID] = string(options.TeamWorker.ContinuationID)
 	}
 
-	store := newDeferredStore(r.repo, harness.SessionMetadata{
+	metadata := harness.SessionMetadata{
 		ID:        id,
 		CreatedAt: time.Now().UTC(),
 		Path:      r.sessionPath(id),
 		Extra:     extra,
-	})
+	}
+	if options.RetainEmpty {
+		store, createErr := r.repo.Create(id, extra)
+		if createErr != nil {
+			return nil, errors.Join(createErr, lock.Close())
+		}
+
+		return newHandle(store, lock, options.WorkspaceID)
+	}
+
+	store := newDeferredStore(r.repo, metadata)
 
 	return newProvisionalHandle(store, lock, options.WorkspaceID)
 }
@@ -376,6 +398,7 @@ func (r *Repository) Fork(
 	}
 	store, err := r.repo.ForkSession(source.session, options.AtEntryID, id, map[string]string{
 		extraWorkspaceID:     source.meta.WorkspaceID,
+		extraWorkspacePath:   source.meta.WorkspacePath,
 		extraKind:            string(KindConversation),
 		extraParentSessionID: source.meta.ID,
 		extraParentEntryID:   parentEntryID,
@@ -436,7 +459,7 @@ func (r *Repository) List(ctx context.Context) ([]Metadata, error) {
 		if prefixErr != nil {
 			meta.Truncated = true
 		} else {
-			if len(prefix.Entries) == 0 {
+			if len(prefix.Entries) == 0 && !meta.RetainEmpty {
 				continue
 			}
 			projectSessionPrefix(&meta, prefix)
@@ -454,6 +477,84 @@ func (r *Repository) List(ctx context.Context) ([]Metadata, error) {
 	})
 
 	return metas, nil
+}
+
+// Delete permanently removes one durable conversation. Missing conversations
+// are already in the desired state and therefore succeed. Child and Team
+// Worker transcripts are never deleted through this user-facing boundary.
+func (r *Repository) Delete(ctx context.Context, id string) (resultErr error) {
+	if err := r.validate(); err != nil {
+		return err
+	}
+	if err := validateSessionID(id); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	path := r.sessionPath(id)
+	exists, err := secureStoredSession(path)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+
+	lock, err := acquireSessionLock(ctx, r.lockPath(id))
+	if err != nil {
+		return err
+	}
+	defer func() { resultErr = errors.Join(resultErr, lock.Close()) }()
+
+	exists, err = secureStoredSession(path)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	if err := validateDeletableConversation(path, id); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	if err := r.repo.Delete(id); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+
+	return nil
+}
+
+func secureStoredSession(path string) (bool, error) {
+	err := secureSessionFile(path)
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, os.ErrNotExist):
+		return false, nil
+	default:
+		return false, err
+	}
+}
+
+func validateDeletableConversation(path, id string) error {
+	stored, err := harness.ReadJSONLMetadata(path)
+	if err != nil {
+		return err
+	}
+	meta, err := projectMetadata(stored)
+	if err != nil {
+		return err
+	}
+	if meta.Kind != KindConversation {
+		return fmt.Errorf("%w: session %q is not a conversation", ErrInvalid, id)
+	}
+
+	return nil
 }
 
 // ListSubagents returns newest-first child metadata for exactly one Workspace
@@ -651,13 +752,26 @@ func newProvisionalHandle(
 
 func projectMetadata(stored harness.SessionMetadata) (Metadata, error) {
 	workspaceID := stored.Extra[extraWorkspaceID]
-	if stored.ID == "" || workspaceID == "" {
+	workspacePath := stored.Extra[extraWorkspacePath]
+	if stored.ID == "" || workspaceID == "" || !validWorkspacePath(workspacePath) {
 		return Metadata{}, fmt.Errorf("%w: session %q has incomplete coding metadata", ErrInvalid, stored.ID)
 	}
 
 	kind := normalizedKind(Kind(stored.Extra[extraKind]))
 	if !validKind(kind) {
 		return Metadata{}, fmt.Errorf("%w: session %q has invalid kind", ErrInvalid, stored.ID)
+	}
+	retainEmpty := false
+	switch stored.Extra[extraRetainEmpty] {
+	case "":
+	case "true":
+		retainEmpty = true
+	default:
+		return Metadata{}, fmt.Errorf(
+			"%w: session %q has invalid empty-retention marker",
+			ErrInvalid,
+			stored.ID,
+		)
 	}
 	switch kind {
 	case KindConversation:
@@ -683,6 +797,8 @@ func projectMetadata(stored harness.SessionMetadata) (Metadata, error) {
 		CreatedAt:       stored.CreatedAt,
 		Path:            stored.Path,
 		WorkspaceID:     workspaceID,
+		WorkspacePath:   workspacePath,
+		RetainEmpty:     retainEmpty,
 		Kind:            kind,
 		ParentSessionID: stored.Extra[extraParentSessionID],
 		ParentEntryID:   stored.Extra[extraParentEntryID],
@@ -764,6 +880,9 @@ func validateCreateOptions(options CreateOptions) error {
 	if strings.TrimSpace(options.WorkspaceID) == "" {
 		return fmt.Errorf("%w: empty workspace identity", ErrInvalid)
 	}
+	if !validWorkspacePath(options.WorkspacePath) {
+		return fmt.Errorf("%w: workspace path must be clean and absolute", ErrInvalid)
+	}
 
 	kind := normalizedKind(options.Kind)
 	if !validKind(kind) {
@@ -778,6 +897,9 @@ func validateCreateOptions(options CreateOptions) error {
 
 		return nil
 	case KindSubagent:
+		if options.RetainEmpty {
+			return fmt.Errorf("%w: subagent cannot retain an empty session", ErrInvalid)
+		}
 		if options.TeamWorker != nil || validateSessionID(options.ParentSessionID) != nil ||
 			strings.TrimSpace(options.Agent) == "" {
 			return fmt.Errorf("%w: subagent requires parent session and agent", ErrInvalid)
@@ -785,6 +907,9 @@ func validateCreateOptions(options CreateOptions) error {
 
 		return nil
 	case KindTeamWorker:
+		if options.RetainEmpty {
+			return fmt.Errorf("%w: Team Worker cannot retain an empty session", ErrInvalid)
+		}
 		if options.ParentSessionID != "" || options.ParentRunID != "" || options.Agent != "" ||
 			options.TeamWorker == nil {
 			return fmt.Errorf("%w: Team Worker requires separate lineage", ErrInvalid)
@@ -794,6 +919,11 @@ func validateCreateOptions(options CreateOptions) error {
 	default:
 		return fmt.Errorf("%w: invalid session kind %q", ErrInvalid, options.Kind)
 	}
+}
+
+func validWorkspacePath(path string) bool {
+	return filepath.IsAbs(path) && filepath.Clean(path) == path &&
+		utf8.ValidString(path) && !strings.ContainsRune(path, '\x00')
 }
 
 func normalizedKind(kind Kind) Kind {

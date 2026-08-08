@@ -55,7 +55,8 @@ const (
 // SessionTarget selects a new session when ID is empty or a durable session
 // to reopen when ID is set.
 type SessionTarget struct {
-	ID string
+	ID          string
+	RetainEmpty bool
 }
 
 // ExecutionOptions contain process- and resource-bound Runtime dependencies.
@@ -73,6 +74,7 @@ type ExecutionOptions struct {
 	MCPMaxTools    int
 	ResourceLimits resource.Limits
 	MCPLimits      codingmcp.Limits
+	MCPDefinitions codingmcp.Definitions
 	ToolLimits     tools.Limits
 	GitLimits      git.Limits
 	Subagent       subagent.ExecutionOptions
@@ -811,9 +813,10 @@ func openSession(
 		lineage := policy.worker.lineage
 		if options.Session.ID == "" {
 			handle, err := repository.Create(ctx, session.CreateOptions{
-				WorkspaceID: options.Workspace.Identity().Key(),
-				Kind:        session.KindTeamWorker,
-				TeamWorker:  &lineage,
+				WorkspaceID:   options.Workspace.Identity().Key(),
+				WorkspacePath: options.Workspace.Root(),
+				Kind:          session.KindTeamWorker,
+				TeamWorker:    &lineage,
 			})
 
 			return handle, false, err
@@ -829,7 +832,9 @@ func openSession(
 
 	if options.Session.ID == "" {
 		handle, err := repository.Create(ctx, session.CreateOptions{
-			WorkspaceID: options.Workspace.Identity().Key(),
+			WorkspaceID:   options.Workspace.Identity().Key(),
+			WorkspacePath: options.Workspace.Root(),
+			RetainEmpty:   options.Session.RetainEmpty,
 		})
 
 		return handle, false, err
@@ -866,6 +871,10 @@ func openMCP(
 		Paths: options.Paths, Tree: tree, ProjectTrusted: options.Trusted,
 		Limits: configured.MCPLimits,
 	})
+	if err != nil {
+		return nil, err
+	}
+	definitions, err = definitions.Merge(configured.MCPDefinitions, configured.MCPLimits.MaxServers)
 	if err != nil {
 		return nil, err
 	}
