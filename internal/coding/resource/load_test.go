@@ -48,9 +48,10 @@ func TestLoadResolvesScopedSkillPrecedenceAndSafeProvenance(t *testing.T) {
 	assert.Equal(t, "project:pips/review/SKILL.md", skills[0].Source)
 	assert.Empty(t, skills[0].AllowedTools)
 	assert.NotContains(t, skills[0].Source, fixture.workspace.Root())
-	require.Len(t, diagnostics, 2)
-	assert.Equal(t, "project:pips/review/SKILL.md", diagnostics[0].Winner)
+	require.Len(t, diagnostics, 3)
+	assert.Equal(t, "skill_allowed_tools_compatibility", diagnostics[0].Code)
 	assert.Equal(t, "project:pips/review/SKILL.md", diagnostics[1].Winner)
+	assert.Equal(t, "project:pips/review/SKILL.md", diagnostics[2].Winner)
 
 	// Returned Skills are owned snapshots.
 	skills[0].Metadata["changed"] = "true"

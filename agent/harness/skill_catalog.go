@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // SkillCatalog is an immutable, indexed collection of validated skills. It
@@ -43,6 +44,7 @@ func NewSkillCatalog(skills ...Skill) (*SkillCatalog, error) {
 	}
 
 	for _, skill := range skills {
+		skill.Name = normalizeSkillName(skill.Name)
 		if err := validateSkill(skill); err != nil {
 			return nil, err
 		}
@@ -200,12 +202,12 @@ func (c *SkillCatalog) Activations() []SkillActivation {
 }
 
 func validateSkill(skill Skill) error {
-	if !skillNamePattern.MatchString(skill.Name) || len(skill.Name) > 64 {
-		return fmt.Errorf("harness: skill name %q must be 1-64 lowercase letters, numbers, or single hyphens", skill.Name)
+	if !validSkillName(skill.Name) {
+		return fmt.Errorf("harness: skill name %q must be 1-64 Unicode lowercase alphanumeric characters or single hyphens", skill.Name)
 	}
 
-	if strings.TrimSpace(skill.Description) == "" || len(skill.Description) > 1024 {
-		return fmt.Errorf("harness: skill %q description must be non-empty and at most 1024 bytes", skill.Name)
+	if strings.TrimSpace(skill.Description) == "" || utf8.RuneCountInString(skill.Description) > 1024 {
+		return fmt.Errorf("harness: skill %q description must be non-empty and at most 1024 characters", skill.Name)
 	}
 
 	if skill.Invocation > SkillInvocationDisabled {

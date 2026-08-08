@@ -3,10 +3,10 @@ package mcpstdio_test
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
-	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/rsbin/pips/internal/coding/execution"
 	"github.com/rsbin/pips/internal/coding/execution/mcpstdio"
 	"github.com/rsbin/pips/internal/coding/workspace"
@@ -48,13 +48,13 @@ func TestNewTransportBuildsMinimalShellFreeCommandAndCleansPrivateDir(t *testing
 	})
 	require.NoError(t, err)
 
-	transport, ok := resource.Transport().(*sdk.CommandTransport)
-	require.True(t, ok)
-	assert.Equal(t, executable, transport.Command.Path)
-	assert.Equal(t, []string{executable, "-test.run=TestHelper"}, transport.Command.Args)
-	assert.Equal(t, ws.Root(), transport.Command.Dir)
+	command := resource.Command()
+	require.NotNil(t, command)
+	assert.Equal(t, executable, command.Path)
+	assert.Equal(t, []string{executable, "-test.run=TestHelper"}, command.Args)
+	assert.Equal(t, ws.Root(), command.Dir)
 
-	environment := strings.Join(transport.Command.Env, "\n")
+	environment := strings.Join(command.Env, "\n")
 	assert.Contains(t, environment, "HOME=/home/test")
 	assert.NotContains(t, environment, "API_KEY")
 	assert.NotContains(t, environment, "HTTPS_PROXY")
@@ -89,7 +89,70 @@ func TestNewTransportRejectsUnsafeEnvironmentOverride(t *testing.T) {
 	assert.NotContains(t, err.Error(), "secret")
 }
 
+func TestNewTransportAppliesAgentPluginEnvironmentAndWorkingDirectory(t *testing.T) {
+	t.Parallel()
+
+	ws, err := workspace.Open(t.TempDir())
+	require.NoError(t, err)
+	pluginRoot := t.TempDir()
+	pluginData := t.TempDir()
+	resource, err := mcpstdio.NewTransport(mcpstdio.Config{
+		Workspace: ws, Command: "go", TempRoot: privateTempRoot(t), Environment: os.LookupEnv,
+		PluginRoot: pluginRoot, PluginData: pluginData, WorkingDirectory: pluginData,
+		EnvironmentOverrides: []execution.EnvVar{
+			{Name: "API_KEY", Value: "configured"},
+			{Name: "PATH", Value: "/plugin/path"},
+			{Name: "plugin_root", Value: "lowercase-configured"},
+			{Name: "plugin_data", Value: "lowercase-configured"},
+		},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, resource.Close()) })
+
+	command := resource.Command()
+	require.NotNil(t, command)
+	assert.Equal(t, pluginData, command.Dir)
+	environment := strings.Join(command.Env, "\n")
+	assert.Contains(t, environment, "API_KEY=configured")
+	assert.Contains(t, environment, "PATH=/plugin/path")
+	assert.Contains(t, environment, "PLUGIN_ROOT="+pluginRoot)
+	assert.Contains(t, environment, "PLUGIN_DATA="+pluginData)
+
+	if runtime.GOOS == "windows" {
+		assert.NotContains(t, environment, "plugin_root=lowercase-configured")
+		assert.NotContains(t, environment, "plugin_data=lowercase-configured")
+	} else {
+		assert.Contains(t, environment, "plugin_root=lowercase-configured")
+		assert.Contains(t, environment, "plugin_data=lowercase-configured")
+	}
+}
+
+func TestNewTransportResolvesBareAgentPluginCommandWithPlatformSearch(t *testing.T) {
+	t.Parallel()
+
+	ws, err := workspace.Open(t.TempDir())
+	require.NoError(t, err)
+	pluginRoot := t.TempDir()
+	pluginData := t.TempDir()
+	resource, err := mcpstdio.NewTransport(mcpstdio.Config{
+		Workspace: ws, Command: "go", TempRoot: privateTempRoot(t), Environment: os.LookupEnv,
+		PluginRoot: pluginRoot, PluginData: pluginData, WorkingDirectory: pluginRoot,
+		EnvironmentOverrides: []execution.EnvVar{{Name: "PATH", Value: filepath.Join(t.TempDir(), "not-used")}},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, resource.Close()) })
+
+	command := resource.Command()
+	require.NotNil(t, command)
+	assert.True(t, filepath.IsAbs(command.Path))
+	assert.NotContains(t, command.Path, "not-used")
+}
+
 func TestNewTransportRejectsSymlinkExecutableAndPublicTempRoot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX symlink privilege and mode-bit policy do not apply on Windows")
+	}
+
 	t.Parallel()
 
 	ws, err := workspace.Open(t.TempDir())
@@ -110,6 +173,45 @@ func TestNewTransportRejectsSymlinkExecutableAndPublicTempRoot(t *testing.T) {
 		Workspace: ws, Command: executable, TempRoot: publicRoot, Environment: os.LookupEnv,
 	})
 	require.Error(t, err)
+}
+
+func TestAgentPluginCommandIsRevalidatedImmediatelyBeforeStart(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation is not generally available to unprivileged Windows tests")
+	}
+
+	t.Parallel()
+
+	ws, err := workspace.Open(t.TempDir())
+	require.NoError(t, err)
+	pluginRoot := t.TempDir()
+	pluginData := t.TempDir()
+	binDirectory := filepath.Join(pluginRoot, "bin")
+	require.NoError(t, os.Mkdir(binDirectory, 0o700))
+	command := filepath.Join(binDirectory, "server")
+	require.NoError(t, os.WriteFile(command, []byte("#!/bin/sh\nexit 0\n"), 0o600))
+	require.NoError(t, os.Chmod(command, 0o700)) //nolint:gosec // Executable fixture requires owner execute.
+
+	resource, err := mcpstdio.NewTransport(mcpstdio.Config{
+		Workspace: ws, Command: command, TempRoot: privateTempRoot(t), Environment: os.LookupEnv,
+		PluginRoot: pluginRoot, PluginData: pluginData, WorkingDirectory: pluginRoot,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, resource.Close()) })
+
+	require.NoError(t, os.Rename(binDirectory, binDirectory+"-original"))
+	outside := t.TempDir()
+	outsideCommand := filepath.Join(outside, "server")
+	require.NoError(t, os.WriteFile(outsideCommand, []byte("#!/bin/sh\nexit 0\n"), 0o600))
+	require.NoError(t, os.Chmod(outsideCommand, 0o700)) //nolint:gosec // Executable fixture requires owner execute.
+	require.NoError(t, os.Symlink(outside, binDirectory))
+
+	connection, err := resource.Transport().Connect(t.Context())
+	if connection != nil {
+		_ = connection.Close()
+	}
+
+	require.ErrorContains(t, err, "escapes plugin root")
 }
 
 func TestResourceRefusesToRemoveReplacementDirectory(t *testing.T) {

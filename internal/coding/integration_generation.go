@@ -4,9 +4,11 @@ package coding
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 
 	"github.com/rsbin/pips/agent/extension"
+	"github.com/rsbin/pips/internal/coding/agentplugin"
 	codingmcp "github.com/rsbin/pips/internal/coding/mcp"
 	"github.com/rsbin/pips/internal/coding/resource"
 	"github.com/rsbin/pips/internal/coding/skillsettings"
@@ -28,6 +30,7 @@ type IntegrationGeneration struct {
 	resources           resource.Result
 	skillPolicy         skillsettings.Snapshot
 	projectInstructions string
+	agentPlugins        agentplugin.Result
 
 	mu        sync.Mutex
 	refs      int // Runtime ownership plus interaction leases.
@@ -44,6 +47,7 @@ func newIntegrationGeneration(
 	resources resource.Result,
 	skillPolicy skillsettings.Snapshot,
 	projectInstructions string,
+	agentPlugins agentplugin.Result,
 ) *IntegrationGeneration {
 	return &IntegrationGeneration{
 		id:                  id,
@@ -52,6 +56,7 @@ func newIntegrationGeneration(
 		resources:           resources,
 		skillPolicy:         skillPolicy.Clone(),
 		projectInstructions: projectInstructions,
+		agentPlugins:        agentPlugins,
 		refs:                1,
 	}
 }
@@ -151,11 +156,13 @@ func (g *IntegrationGeneration) handoff(
 		resources:           g.resources,
 		skillPolicy:         skillPolicy.Clone(),
 		projectInstructions: g.projectInstructions,
+		agentPlugins:        g.agentPlugins,
 		refs:                1,
 	}
 	g.activation = nil
 	g.connections = nil
 	g.resources = resource.Result{}
+	g.agentPlugins = agentplugin.Result{}
 	g.refs = 0
 	g.retired = true
 
@@ -169,8 +176,6 @@ func (g *IntegrationGeneration) close(ctx context.Context) error {
 
 	g.closeOnce.Do(func() {
 		errs := make([]error, 0, 2)
-		// Activation is acquired after MCP during candidate construction, so
-		// retirement follows the reverse construction order.
 		if g.activation != nil {
 			if err := g.activation.Release(ctx); err != nil {
 				errs = append(errs, err)
@@ -231,6 +236,22 @@ func (g *IntegrationGeneration) projectInstructionsSnapshot() string {
 	}
 
 	return g.projectInstructions
+}
+
+func (g *IntegrationGeneration) agentPluginSnapshot() agentplugin.Result {
+	if g == nil {
+		return agentplugin.Result{}
+	}
+
+	return g.agentPlugins
+}
+
+func (g *IntegrationGeneration) skillEntries(base []extension.SkillEntry) []extension.SkillEntry {
+	if g == nil {
+		return slices.Clone(base)
+	}
+
+	return slices.Concat(base, g.agentPlugins.SkillEntries())
 }
 
 func (r *Runtime) nextGenerationID() uint64 {

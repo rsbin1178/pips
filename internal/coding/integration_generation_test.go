@@ -3,10 +3,13 @@ package coding
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 
 	"github.com/rsbin/pips/agent/extension"
+	"github.com/rsbin/pips/internal/coding/agentplugin"
 	"github.com/rsbin/pips/internal/coding/resource"
 	"github.com/rsbin/pips/internal/coding/skillsettings"
 	"github.com/stretchr/testify/assert"
@@ -55,7 +58,7 @@ func TestIntegrationGenerationDrainsLeasesBeforeClosing(t *testing.T) {
 	require.NoError(t, err)
 
 	generation := newIntegrationGeneration(
-		1, activation, nil, resourceResultForGenerationTest(), skillsettings.Empty(), "",
+		1, activation, nil, resourceResultForGenerationTest(), skillsettings.Empty(), "", agentplugin.Result{},
 	)
 	require.NoError(t, generation.acquire())
 
@@ -82,7 +85,7 @@ func TestIntegrationGenerationHandoffPublishesNewPolicy(t *testing.T) {
 	require.NoError(t, err)
 
 	previous := newIntegrationGeneration(
-		1, activation, nil, resourceResultForGenerationTest(), skillsettings.Empty(), "old",
+		1, activation, nil, resourceResultForGenerationTest(), skillsettings.Empty(), "old", agentplugin.Result{},
 	)
 	nextPolicy := skillsettings.Empty().WithDisabled(
 		skillsettings.Ref{Source: "user:pips/SKILL.md", Name: "review"}, true,
@@ -121,7 +124,7 @@ func TestIntegrationGenerationAdoptsInstalledActivationWithCleanupError(t *testi
 	require.ErrorIs(t, activationErr, stopErr)
 
 	generation := newIntegrationGeneration(
-		1, activation, nil, resourceResultForGenerationTest(), skillsettings.Empty(), "",
+		1, activation, nil, resourceResultForGenerationTest(), skillsettings.Empty(), "", agentplugin.Result{},
 	)
 	// The non-nil activation is the adopted complete generation. The prior
 	// cleanup error is reported separately by Activate and does not cause the
@@ -129,6 +132,35 @@ func TestIntegrationGenerationAdoptsInstalledActivationWithCleanupError(t *testi
 	require.NoError(t, generation.retire(t.Context()))
 	require.NoError(t, extensions.Shutdown(t.Context()))
 	assert.Equal(t, int32(1), nextLifecycle.stops.Load())
+}
+
+func TestIntegrationGenerationIncludesAgentPluginSkills(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "skills", "portable"), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "plugin.json"), []byte(`{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "portable-plugin"
+}`), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "skills", "portable", "SKILL.md"), []byte(`---
+name: portable
+description: A portable plugin Skill.
+---
+Instructions.
+`), 0o600))
+	plugins, err := agentplugin.LoadDirectory(
+		t.Context(), root, filepath.Join(t.TempDir(), "data"), agentplugin.DefaultLimits(),
+	)
+	require.NoError(t, err)
+
+	generation := newIntegrationGeneration(
+		1, nil, nil, resource.Result{}, skillsettings.Empty(), "", plugins,
+	)
+	entries := generation.skillEntries(nil)
+	require.Len(t, entries, 1)
+	assert.Equal(t, "portable", entries[0].Skill.Name)
+	assert.Contains(t, entries[0].Skill.Source, "agent-plugin:")
 }
 
 func TestRuntimeReloadRejectsCandidateWithoutPublishing(t *testing.T) {

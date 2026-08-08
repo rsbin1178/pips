@@ -85,50 +85,8 @@ func New(dependencies Dependencies) (*cobra.Command, error) {
 		return nil, errors.New("coding cli: empty user paths")
 	}
 
-	if dependencies.LookupEnv == nil {
-		dependencies.LookupEnv = os.LookupEnv
-	}
-
-	if dependencies.WorkingDir == nil {
-		dependencies.WorkingDir = os.Getwd
-	}
-
-	if dependencies.SandboxProbe == nil {
-		dependencies.SandboxProbe = nativeSandboxProbe(dependencies)
-	}
-
-	if dependencies.Terminal == nil {
-		dependencies.Terminal = detectTerminal
-	}
-
-	if dependencies.RunTUI == nil {
-		dependencies.RunTUI = tui.Run
-	}
-
-	if dependencies.RunSSH == nil {
-		dependencies.RunSSH = sshclient.Run
-	}
-
-	if dependencies.OpenControl == nil {
-		dependencies.OpenControl = func(
-			ctx context.Context,
-			options coding.OpenOptions,
-		) (tui.Controller, error) {
-			return runtimecontrol.New(ctx, options)
-		}
-	}
-
-	if dependencies.OpenACP == nil {
-		dependencies.OpenACP = openACPController
-	}
-
-	if dependencies.RunACP == nil {
-		dependencies.RunACP = runACPServer
-	}
-
-	if dependencies.Environment == nil {
-		dependencies.Environment = os.Environ()
-	}
+	dependencies = defaultProcessDependencies(dependencies)
+	dependencies = defaultRuntimeDependencies(dependencies)
 
 	flags := &rootFlags{}
 	root := &cobra.Command{
@@ -186,12 +144,66 @@ func New(dependencies Dependencies) (*cobra.Command, error) {
 		newBridgeUploadCommand(dependencies),
 		newConfigCommand(dependencies, flags),
 		newSessionCommand(dependencies, flags),
+		newPluginCommand(dependencies),
 		newDoctorCommand(dependencies, flags),
 		newVersionCommand(dependencies.Build),
 		newCompletionCommand(),
 	)
 
 	return root, nil
+}
+
+func defaultProcessDependencies(dependencies Dependencies) Dependencies {
+	if dependencies.LookupEnv == nil {
+		dependencies.LookupEnv = os.LookupEnv
+	}
+
+	if dependencies.WorkingDir == nil {
+		dependencies.WorkingDir = os.Getwd
+	}
+
+	if dependencies.SandboxProbe == nil {
+		dependencies.SandboxProbe = nativeSandboxProbe(dependencies)
+	}
+
+	if dependencies.Terminal == nil {
+		dependencies.Terminal = detectTerminal
+	}
+
+	if dependencies.RunTUI == nil {
+		dependencies.RunTUI = tui.Run
+	}
+
+	if dependencies.RunSSH == nil {
+		dependencies.RunSSH = sshclient.Run
+	}
+
+	if dependencies.Environment == nil {
+		dependencies.Environment = os.Environ()
+	}
+
+	return dependencies
+}
+
+func defaultRuntimeDependencies(dependencies Dependencies) Dependencies {
+	if dependencies.OpenControl == nil {
+		dependencies.OpenControl = func(
+			ctx context.Context,
+			options coding.OpenOptions,
+		) (tui.Controller, error) {
+			return runtimecontrol.New(ctx, options)
+		}
+	}
+
+	if dependencies.OpenACP == nil {
+		dependencies.OpenACP = openACPController
+	}
+
+	if dependencies.RunACP == nil {
+		dependencies.RunACP = runACPServer
+	}
+
+	return dependencies
 }
 
 func openACPController(

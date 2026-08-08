@@ -40,6 +40,8 @@ type Layout struct {
 	skillsDir            string
 	agentSkillsDir       string
 	bundlesDir           string
+	pluginsDir           string
+	pluginDataDir        string
 	mcpFile              string
 	tuiThemesDir         string
 }
@@ -82,6 +84,8 @@ func New(root string) (Layout, error) {
 		worktreesRoot:        worktreesRoot,
 		skillsDir:            filepath.Join(abs, "skills"),
 		bundlesDir:           filepath.Join(abs, "bundles"),
+		pluginsDir:           filepath.Join(abs, "plugins"),
+		pluginDataDir:        filepath.Join(abs, "plugin-data"),
 		mcpFile:              filepath.Join(abs, "mcp.json"),
 		tuiThemesDir:         filepath.Join(abs, "themes"),
 	}, nil
@@ -170,6 +174,9 @@ func ProjectAgentSkillsDir() string { return path.Join(agentDir, "skills") }
 // ProjectBundlesDir returns the workspace-relative project bundle directory.
 func ProjectBundlesDir() string { return path.Join(projectDir, "bundles") }
 
+// ProjectPluginsDir returns the trusted workspace-relative Agent Plugins root.
+func ProjectPluginsDir() string { return path.Join(projectDir, "plugins") }
+
 // Root returns the application's user configuration directory.
 func (l Layout) Root() string { return l.root }
 
@@ -223,6 +230,13 @@ func (l Layout) AgentSkillsDir() string { return l.agentSkillsDir }
 
 // BundlesDir returns the user bundle directory.
 func (l Layout) BundlesDir() string { return l.bundlesDir }
+
+// PluginsDir returns the user Agent Plugins discovery root. Each immediate
+// child is one portable package rooted by plugin.json.
+func (l Layout) PluginsDir() string { return l.pluginsDir }
+
+// PluginDataDir returns the client-owned persistent PLUGIN_DATA base.
+func (l Layout) PluginDataDir() string { return l.pluginDataDir }
 
 // MCPFile returns the user MCP configuration path.
 func (l Layout) MCPFile() string { return l.mcpFile }
