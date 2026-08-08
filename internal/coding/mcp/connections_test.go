@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -145,6 +146,54 @@ func TestOpenConnectionsDegradesPerServerAndClosesInReverse(t *testing.T) {
 	mu.Lock()
 	assert.Equal(t, []string{"bad-list", "two", "one"}, closeOrder)
 	mu.Unlock()
+}
+
+func TestConfiguredHeadersNeverCrossOriginRedirect(t *testing.T) {
+	t.Parallel()
+
+	var targetRequests atomic.Int32
+
+	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		targetRequests.Add(1)
+	}))
+	t.Cleanup(target.Close)
+
+	sourceHeaders := make(chan http.Header, 1)
+	source := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		sourceHeaders <- request.Header.Clone()
+
+		http.Redirect(writer, request, target.URL, http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(source.Close)
+
+	connections, err := codingmcp.OpenConnections(
+		t.Context(),
+		[]codingmcp.ResolvedDefinition{{
+			Definition: codingmcp.Definition{
+				ID: "ap-redirect", Scope: codingmcp.ScopeAgentPlugin,
+				Transport: codingmcp.TransportStreamableHTTP, URL: source.URL,
+				Headers: []codingmcp.HTTPHeader{
+					{Name: "X-Public", Value: "visible"},
+					{Name: "Content-Type", Value: "text/plain"},
+				},
+				ConnectTimeout: time.Second,
+			},
+			Status: codingmcp.StatusEnabled,
+		}},
+		codingmcp.ConnectionOptions{
+			Implementation: &sdk.Implementation{Name: "pips-test", Version: "v1"},
+			HTTPClient:     &http.Client{Timeout: 2 * time.Second}, MaxTools: 16,
+		},
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, connections.Close()) })
+
+	headers := <-sourceHeaders
+	assert.Equal(t, "visible", headers.Get("X-Public"))
+	assert.NotEqual(t, "text/plain", headers.Get("Content-Type"))
+	assert.Zero(t, targetRequests.Load())
+	require.Len(t, connections.Diagnostics(), 1)
+	assert.Equal(t, "connect_failed", connections.Diagnostics()[0].Code)
 }
 
 func TestConnectionsRefreshChangedPreservesPriorSnapshotAndCoalescesFailure(t *testing.T) {

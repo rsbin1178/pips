@@ -1,3 +1,4 @@
+//nolint:wsl_v5 // Connection lifecycle and redirect checks keep ownership steps adjacent.
 package mcp
 
 import (
@@ -6,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -32,6 +35,7 @@ type ConnectionOptions struct {
 	TerminateAfter time.Duration
 	MaxTools       int
 	Transport      TransportFactory
+	Diagnostics    []ConnectionDiagnostic
 }
 
 // ConnectionDiagnostic is a safe, non-fatal server lifecycle condition.
@@ -83,7 +87,7 @@ func OpenConnections(
 		return nil, err
 	}
 
-	connections := &Connections{}
+	connections := &Connections{diagnostics: slices.Clone(options.Diagnostics)}
 	servers := make([]agentmcp.RegistryServer, 0, len(resolved))
 
 	for _, selected := range resolved {
@@ -310,6 +314,9 @@ func connectionTransportFactory(
 				TempRoot:             options.TempRoot,
 				Environment:          options.Environment,
 				EnvironmentOverrides: definition.Environment,
+				WorkingDirectory:     definition.WorkingDir,
+				PluginRoot:           definition.PluginRoot,
+				PluginData:           definition.PluginData,
 				TerminateDuration:    options.TerminateAfter,
 			})
 			if err != nil {
@@ -318,14 +325,105 @@ func connectionTransportFactory(
 
 			return resource.Transport(), resource, nil
 		case TransportStreamableHTTP:
+			httpClient, err := definitionHTTPClient(options.HTTPClient, definition)
+			if err != nil {
+				return nil, nil, err
+			}
+
 			return &sdk.StreamableClientTransport{
 				Endpoint:   definition.URL,
-				HTTPClient: options.HTTPClient,
+				HTTPClient: httpClient,
 			}, nil, nil
 		default:
 			return nil, nil, fmt.Errorf("%w: unsupported transport", ErrInvalid)
 		}
 	}, nil
+}
+
+type headerRoundTripper struct {
+	base    http.RoundTripper
+	headers []HTTPHeader
+	origin  *url.URL
+}
+
+func (t headerRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
+	cloned := request.Clone(request.Context())
+	cloned.Header = request.Header.Clone()
+	if sameOrigin(t.origin, cloned.URL) {
+		for _, header := range t.headers {
+			if !hasHeader(cloned.Header, header.Name) {
+				cloned.Header.Set(header.Name, header.Value)
+			}
+		}
+	}
+
+	return t.base.RoundTrip(cloned)
+}
+
+func hasHeader(headers http.Header, name string) bool {
+	for existing := range headers {
+		if strings.EqualFold(existing, name) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func definitionHTTPClient(base *http.Client, definition Definition) (*http.Client, error) {
+	if base == nil {
+		return nil, fmt.Errorf("%w: nil HTTP client", ErrInvalid)
+	}
+
+	endpoint, err := url.Parse(definition.URL)
+	if err != nil {
+		return nil, fmt.Errorf("%w: parse HTTP endpoint", ErrInvalid)
+	}
+	client := *base
+	transport := base.Transport
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	client.Transport = headerRoundTripper{
+		base: transport, headers: slices.Clone(definition.Headers), origin: endpoint,
+	}
+	if len(definition.Headers) == 0 {
+		return &client, nil
+	}
+
+	previousCheck := base.CheckRedirect
+	client.CheckRedirect = func(request *http.Request, via []*http.Request) error {
+		if !sameOrigin(endpoint, request.URL) {
+			return errors.New("coding mcp: configured headers cannot cross origins")
+		}
+		if previousCheck != nil {
+			return previousCheck(request, via)
+		}
+		if len(via) >= 10 {
+			return errors.New("coding mcp: stopped after 10 redirects")
+		}
+
+		return nil
+	}
+
+	return &client, nil
+}
+
+func sameOrigin(left, right *url.URL) bool {
+	return left != nil && right != nil && strings.EqualFold(left.Scheme, right.Scheme) &&
+		strings.EqualFold(left.Hostname(), right.Hostname()) &&
+		effectivePort(left) == effectivePort(right)
+}
+
+func effectivePort(value *url.URL) string {
+	if port := value.Port(); port != "" {
+		return port
+	}
+	if strings.EqualFold(value.Scheme, "https") {
+		return "443"
+	}
+
+	return "80"
 }
 
 func (c *Connections) addDiagnostic(diagnostic ConnectionDiagnostic) {

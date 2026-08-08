@@ -6,6 +6,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -32,6 +33,16 @@ var inheritedEnvironmentKeys = []string{
 	pathEnvironment,
 	"TERM",
 	"USER",
+}
+
+// EnvironmentNamesEqual reports whether two environment names are equivalent
+// under the current platform's process-environment semantics.
+func EnvironmentNamesEqual(left, right string) bool {
+	if runtime.GOOS == windowsPlatform {
+		return strings.EqualFold(left, right)
+	}
+
+	return left == right
 }
 
 // NewChildEnvironment builds a sorted, minimal child-process environment.

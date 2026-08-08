@@ -380,6 +380,35 @@ The first sequence number can therefore be greater than one after open or
 resume. If a later operation or close fails, stdout remains a valid JSONL
 prefix and the process exits nonzero.
 
+### Agent Plugins
+
+pips implements the portable
+[Agent Plugins 1.0.0](https://agent-plugins.org/specification) directory format.
+Each immediate child below `$PIPS_HOME/plugins/` is one package with a required
+root `plugin.json` and optional fixed `skills/` and `mcp.json` components.
+Trusted workspaces may provide the same format below `.pips/plugins/`.
+
+Use `list` to inspect user packages and `validate` to check one explicit package:
+
+```sh
+pips plugin list
+pips plugin list --json
+pips plugin validate /path/to/my-plugin
+pips plugin validate /path/to/my-plugin --json
+```
+
+The JSON form contains `plugins` package projections and a `diagnostics` array.
+Package projections include portable identity, the resolved root, and accepted
+Skill and MCP server counts. A manifest error makes `validate` fail. Invalid
+individual Skills or MCP server entries are reported but do not make otherwise
+valid sibling components disappear.
+
+Agent Plugins does not define an archive, registry, enablement database, or
+upgrade/rollback transaction. Install by placing the portable directory below
+a discovery root, then open or reload the Coding Runtime. pips does not accept
+its former executable-target/capability manifest and provides no legacy
+install, trust, grant, enable, upgrade, rollback, logs, or remove commands.
+
 ## Exit codes and signals
 
 | Code | Meaning |

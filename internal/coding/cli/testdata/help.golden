@@ -11,6 +11,7 @@ Available Commands:
   doctor           Check coding agent prerequisites
   exec             Run one non-interactive coding request
   help             Help about any command
+  plugin           Inspect portable Agent Plugins
   resume           Resume a durable coding session
   session          Inspect durable coding sessions
   ssh              Run Pips in a remote workspace

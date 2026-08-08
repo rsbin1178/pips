@@ -1,6 +1,7 @@
 package harness_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/rsbin/pips/agent/harness"
@@ -63,6 +64,16 @@ func TestSkillCatalogRejectsInvalidSkill(t *testing.T) {
 		},
 	})
 	require.ErrorContains(t, err, "invalid resource path")
+}
+
+func TestSkillCatalogCountsUnicodeCharacters(t *testing.T) {
+	t.Parallel()
+
+	catalog, err := harness.NewSkillCatalog(harness.Skill{
+		Name: "审查", Description: strings.Repeat("界", 1024), Content: "instructions",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "审查", catalog.List()[0].Name)
 }
 
 func TestSkillCatalogFiltersInvocationAndReadsResources(t *testing.T) {

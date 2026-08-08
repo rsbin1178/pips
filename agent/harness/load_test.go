@@ -2,6 +2,7 @@ package harness_test
 
 import (
 	"os"
+	"strings"
 	"testing"
 	"testing/fstest"
 
@@ -96,6 +97,43 @@ func TestLoadSkillsFSRejectsInvalidManifest(t *testing.T) {
 		"bad/SKILL.md": &fstest.MapFile{Data: []byte("instructions only")},
 	})
 	require.ErrorContains(t, err, "requires YAML frontmatter")
+
+	_, err = harness.LoadSkillsFS(fstest.MapFS{
+		"bad/SKILL.md": &fstest.MapFile{Data: []byte("---\nname: bad\ndescription: d\ncompatibility: \"\"\n---\nbody")},
+	})
+	require.ErrorContains(t, err, "compatibility must be between 1 and 500 characters")
+}
+
+func TestLoadSkillFSUsesUnicodeCharacterRulesAndNormalization(t *testing.T) {
+	t.Parallel()
+
+	name := strings.Repeat("界", 64)
+	skill, err := harness.LoadSkillFS(fstest.MapFS{
+		name + "/SKILL.md": &fstest.MapFile{Data: []byte(
+			"---\nname: " + name + "\ndescription: Unicode name.\ncompatibility: 跨平台\n---\nBody.",
+		)},
+	}, name+"/SKILL.md")
+	require.NoError(t, err)
+	assert.Equal(t, name, skill.Name)
+	assert.Equal(t, "跨平台", skill.Compatibility)
+
+	fullwidthDirectory := "ｒｅｖｉｅｗ"
+	skill, diagnostics, err := harness.LoadSkillFSWithDiagnostics(fstest.MapFS{
+		fullwidthDirectory + "/SKILL.md": &fstest.MapFile{Data: []byte(
+			"---\nname: review\ndescription: Normalized name.\n---\nBody.",
+		)},
+	}, fullwidthDirectory+"/SKILL.md")
+	require.NoError(t, err)
+	assert.Equal(t, "review", skill.Name)
+	assert.Empty(t, diagnostics)
+
+	tooLong := strings.Repeat("界", 65)
+	_, err = harness.LoadSkillFS(fstest.MapFS{
+		tooLong + "/SKILL.md": &fstest.MapFile{Data: []byte(
+			"---\nname: " + tooLong + "\ndescription: Too long.\n---\nBody.",
+		)},
+	}, tooLong+"/SKILL.md")
+	require.ErrorContains(t, err, "name must be")
 }
 
 func TestLoadSkillFSWithDiagnosticsSupportsEcosystemFrontmatter(t *testing.T) {
@@ -143,6 +181,8 @@ Review the selected code.`)},
 	}
 
 	assert.ElementsMatch(t, []string{
+		"client_field",
+		"client_field",
 		"directory_name_mismatch",
 		"metadata_value_ignored",
 		"unsupported_field",

@@ -3,6 +3,7 @@ package execution
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -62,6 +63,13 @@ func TestEnvironmentSnapshotRejectsMissingLookup(t *testing.T) {
 
 	_, err := NewChildEnvironment(nil, t.TempDir(), nil)
 	require.ErrorIs(t, err, ErrInvalidOperation)
+}
+
+func TestEnvironmentNamesEqualUsesPlatformSemantics(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, runtime.GOOS == windowsPlatform, EnvironmentNamesEqual("Path", "PATH"))
+	assert.True(t, EnvironmentNamesEqual("PLUGIN_ROOT", "PLUGIN_ROOT"))
 }
 
 func mapLookup(values map[string]string) func(string) (string, bool) {

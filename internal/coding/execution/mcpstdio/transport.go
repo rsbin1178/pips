@@ -1,5 +1,7 @@
 // Package mcpstdio constructs trusted, unsandboxed MCP stdio transports with
 // the Coding Agent's minimal child environment and owned private directories.
+//
+//nolint:wsl_v5 // Process and filesystem security checks stay adjacent to their owned values.
 package mcpstdio
 
 import (
@@ -26,7 +28,8 @@ const (
 	maximumTerminateDuration = 30 * time.Second
 )
 
-// Config defines one absolute, shell-free stdio server process.
+// Config defines one shell-free stdio server process. Native definitions use
+// absolute commands; Agent Plugins may also use a bare platform command.
 type Config struct {
 	Workspace            workspace.Workspace
 	Command              string
@@ -34,13 +37,16 @@ type Config struct {
 	TempRoot             string
 	Environment          func(string) (string, bool)
 	EnvironmentOverrides []execution.EnvVar
+	WorkingDirectory     string
+	PluginRoot           string
+	PluginData           string
 	TerminateDuration    time.Duration
 }
 
 // Resource owns a prepared SDK transport and its private environment root.
 // Close it only after the MCP Client has closed its process connection.
 type Resource struct {
-	transport  *SDK.CommandTransport
+	transport  *validatedCommandTransport
 	privateDir string
 	private    fs.FileInfo
 
@@ -48,14 +54,48 @@ type Resource struct {
 	closeErr  error
 }
 
+type validatedCommandTransport struct {
+	commandTransport  *SDK.CommandTransport
+	configuredCommand string
+	pluginRoot        string
+	pluginData        string
+	workingDirectory  string
+	environment       []execution.EnvVar
+}
+
+func (t *validatedCommandTransport) Connect(ctx context.Context) (SDK.Connection, error) {
+	command, err := validateCommand(t.configuredCommand, t.pluginRoot)
+	if err != nil {
+		return nil, err
+	}
+	directory := t.commandTransport.Command.Dir
+	if t.pluginRoot != "" {
+		directory, err = workingDirectory(Config{
+			PluginRoot: t.pluginRoot, PluginData: t.pluginData,
+			WorkingDirectory: t.workingDirectory, EnvironmentOverrides: t.environment,
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	t.commandTransport.Command.Path = command
+	t.commandTransport.Command.Args[0] = command
+	t.commandTransport.Command.Dir = directory
+
+	return t.commandTransport.Connect(ctx)
+}
+
 // NewTransport validates and prepares one MCP stdio transport. It does not
 // start the command.
+//
+//nolint:gocyclo // Process, private-directory, environment, and plugin-path checks are one boundary.
 func NewTransport(config Config) (*Resource, error) {
 	if err := validateWorkspace(config.Workspace); err != nil {
 		return nil, err
 	}
 
-	command, err := validateCommand(config.Command)
+	command, err := validateCommand(config.Command, config.PluginRoot)
 	if err != nil {
 		return nil, err
 	}
@@ -100,13 +140,29 @@ func NewTransport(config Config) (*Resource, error) {
 		return nil, fmt.Errorf("coding mcp stdio: inspect private directory: %w", err)
 	}
 
+	overrides := config.EnvironmentOverrides
+	if config.PluginRoot != "" {
+		overrides = nil
+	}
 	environment, err := execution.NewChildEnvironment(
 		config.Environment,
 		privateDir,
-		config.EnvironmentOverrides,
+		overrides,
 	)
 	if err != nil {
 		return nil, err
+	}
+
+	workingDirectory, err := workingDirectory(config)
+	if err != nil {
+		return nil, err
+	}
+	if config.PluginRoot != "" {
+		for _, variable := range config.EnvironmentOverrides {
+			environment = setEnvironment(environment, variable.Name, variable.Value)
+		}
+		environment = setEnvironment(environment, "PLUGIN_ROOT", config.PluginRoot)
+		environment = setEnvironment(environment, "PLUGIN_DATA", config.PluginData)
 	}
 
 	commandValue := exec.CommandContext( //nolint:gosec // Absolute regular executable and args validated above; no shell.
@@ -114,19 +170,103 @@ func NewTransport(config Config) (*Resource, error) {
 		command,
 		arguments...,
 	)
-	commandValue.Dir = config.Workspace.Root()
+	commandValue.Dir = workingDirectory
 	commandValue.Env = environment
 
 	removePrivate = false
 
 	return &Resource{
-		transport: &SDK.CommandTransport{
-			Command:           commandValue,
-			TerminateDuration: terminateDuration,
+		transport: &validatedCommandTransport{
+			commandTransport: &SDK.CommandTransport{
+				Command: commandValue, TerminateDuration: terminateDuration,
+			},
+			configuredCommand: config.Command,
+			pluginRoot:        config.PluginRoot, pluginData: config.PluginData,
+			workingDirectory: config.WorkingDirectory,
+			environment:      slices.Clone(config.EnvironmentOverrides),
 		},
 		privateDir: privateDir,
 		private:    privateInfo,
 	}, nil
+}
+
+//nolint:gocyclo // Native and Agent Plugin directory contracts intentionally fail closed here.
+func workingDirectory(config Config) (string, error) {
+	if config.PluginRoot == "" && config.PluginData == "" && config.WorkingDirectory == "" {
+		return config.Workspace.Root(), nil
+	}
+	if config.PluginRoot == "" || config.PluginData == "" || config.WorkingDirectory == "" {
+		return "", errors.New("coding mcp stdio: incomplete Agent Plugin paths")
+	}
+
+	for _, variable := range config.EnvironmentOverrides {
+		if variable.Name == "" || strings.ContainsAny(variable.Name, "=\x00") ||
+			strings.ContainsRune(variable.Value, '\x00') ||
+			variable.Name == "PLUGIN_ROOT" || variable.Name == "PLUGIN_DATA" {
+			return "", errors.New("coding mcp stdio: reserved Agent Plugin environment override")
+		}
+	}
+
+	root, err := validateDirectory(config.PluginRoot)
+	if err != nil {
+		return "", fmt.Errorf("coding mcp stdio: plugin root: %w", err)
+	}
+	data, err := validateDirectory(config.PluginData)
+	if err != nil {
+		return "", fmt.Errorf("coding mcp stdio: plugin data: %w", err)
+	}
+	dataInfo, err := os.Stat(data)
+	if err != nil || !execution.IsOwnerWritableDirectory(dataInfo) {
+		return "", errors.New("coding mcp stdio: plugin data is not writable")
+	}
+	if err := execution.ValidateDirectoryWritable(data); err != nil {
+		return "", errors.New("coding mcp stdio: plugin data is not writable")
+	}
+	directory, err := validateDirectory(config.WorkingDirectory)
+	if err != nil {
+		return "", fmt.Errorf("coding mcp stdio: working directory: %w", err)
+	}
+	if !pathContains(root, directory) && !pathContains(data, directory) {
+		return "", errors.New("coding mcp stdio: working directory escapes plugin roots")
+	}
+
+	return directory, nil
+}
+
+func validateDirectory(directory string) (string, error) {
+	if !filepath.IsAbs(directory) || filepath.Clean(directory) != directory {
+		return "", errors.New("path must be clean and absolute")
+	}
+	resolved, err := filepath.EvalSymlinks(directory)
+	if err != nil {
+		return "", err
+	}
+	if resolved != directory {
+		return "", errors.New("path must be filesystem-resolved")
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", errors.New("path is not a directory")
+	}
+
+	return resolved, nil
+}
+
+func setEnvironment(environment []string, name, value string) []string {
+	filtered := environment[:0]
+	for _, entry := range environment {
+		entryName, _, exists := strings.Cut(entry, "=")
+		if !exists || !execution.EnvironmentNamesEqual(entryName, name) {
+			filtered = append(filtered, entry)
+		}
+	}
+	filtered = append(filtered, name+"="+value)
+	slices.Sort(filtered)
+
+	return filtered
 }
 
 // Transport returns the official SDK transport prepared by NewTransport.
@@ -136,6 +276,20 @@ func (r *Resource) Transport() SDK.Transport {
 	}
 
 	return r.transport
+}
+
+// Command returns a snapshot of the prepared shell-free command for internal
+// inspection. Agent Plugin paths are validated again immediately before start.
+func (r *Resource) Command() *exec.Cmd {
+	if r == nil || r.transport == nil || r.transport.commandTransport == nil {
+		return nil
+	}
+
+	command := *r.transport.commandTransport.Command
+	command.Args = slices.Clone(command.Args)
+	command.Env = slices.Clone(command.Env)
+
+	return &command
 }
 
 // PrivateDir returns the owned private directory for lifecycle diagnostics.
@@ -173,17 +327,60 @@ func validateWorkspace(ws workspace.Workspace) error {
 	return nil
 }
 
-func validateCommand(command string) (string, error) {
+func validateCommand(command, pluginRoot string) (string, error) {
+	switch {
+	case pluginRoot == "":
+		return validateAbsoluteCommand(command)
+	case filepath.IsAbs(command):
+		return resolveBundledCommand(command, pluginRoot)
+	default:
+		return resolveBareCommand(command)
+	}
+}
+
+func resolveBareCommand(command string) (string, error) {
+	if command == "" || strings.ContainsAny(command, "/\\\x00") {
+		return "", errors.New("coding mcp stdio: invalid bare Agent Plugin command")
+	}
+	resolved, err := exec.LookPath(command)
+	if err != nil {
+		return "", fmt.Errorf("coding mcp stdio: resolve bare command: %w", err)
+	}
+	resolved, err = filepath.Abs(resolved)
+	if err != nil {
+		return "", fmt.Errorf("coding mcp stdio: resolve bare command: %w", err)
+	}
+	resolved, err = filepath.EvalSymlinks(resolved)
+	if err != nil {
+		return "", fmt.Errorf("coding mcp stdio: resolve bare command: %w", err)
+	}
+
+	return validateAbsoluteCommand(resolved)
+}
+
+func resolveBundledCommand(command, pluginRoot string) (string, error) {
+	root, err := validateDirectory(pluginRoot)
+	if err != nil {
+		return "", fmt.Errorf("coding mcp stdio: plugin root: %w", err)
+	}
+	resolved, err := filepath.EvalSymlinks(command)
+	if err != nil || !pathContains(root, resolved) {
+		return "", errors.New("coding mcp stdio: bundled command escapes plugin root")
+	}
+
+	return validateAbsoluteCommand(resolved)
+}
+
+func validateAbsoluteCommand(command string) (string, error) {
 	if !filepath.IsAbs(command) || filepath.Clean(command) != command {
 		return "", errors.New("coding mcp stdio: command must be a clean absolute path")
 	}
-
 	info, err := os.Lstat(command)
 	if err != nil {
 		return "", fmt.Errorf("coding mcp stdio: inspect command: %w", err)
 	}
 
-	if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+	if !execution.IsExecutableFile(info) {
 		return "", errors.New("coding mcp stdio: command is not a regular executable")
 	}
 
@@ -222,7 +419,7 @@ func validateTempRoot(ws workspace.Workspace, root string) (string, error) {
 		return "", fmt.Errorf("coding mcp stdio: inspect temp root: %w", err)
 	}
 
-	if !info.IsDir() || info.Mode().Perm()&0o077 != 0 {
+	if !execution.IsOwnerPrivateDirectory(info) {
 		return "", errors.New("coding mcp stdio: temp root must be an owner-private directory")
 	}
 

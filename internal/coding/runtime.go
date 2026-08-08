@@ -20,6 +20,7 @@ import (
 	"github.com/rsbin/pips/agent/extension"
 	"github.com/rsbin/pips/agent/harness"
 	"github.com/rsbin/pips/ai"
+	"github.com/rsbin/pips/internal/coding/agentplugin"
 	"github.com/rsbin/pips/internal/coding/approval"
 	"github.com/rsbin/pips/internal/coding/changes/git"
 	"github.com/rsbin/pips/internal/coding/config"
@@ -49,6 +50,7 @@ const (
 	defaultToolTimeout      = 5 * time.Minute
 	maximumToolTimeout      = 30 * time.Minute
 	componentMCP            = "mcp"
+	componentAgentPlugin    = "agent-plugin"
 	componentIntegration    = "integration"
 )
 
@@ -68,16 +70,17 @@ type ExecutionOptions struct {
 	SandboxProbe func(context.Context, *execution.Executor) error
 	ToolTimeout  time.Duration
 
-	HTTPClient     *http.Client
-	MCPClient      *sdk.Implementation
-	MCPTerminate   time.Duration
-	MCPMaxTools    int
-	ResourceLimits resource.Limits
-	MCPLimits      codingmcp.Limits
-	MCPDefinitions codingmcp.Definitions
-	ToolLimits     tools.Limits
-	GitLimits      git.Limits
-	Subagent       subagent.ExecutionOptions
+	HTTPClient        *http.Client
+	MCPClient         *sdk.Implementation
+	MCPTerminate      time.Duration
+	MCPMaxTools       int
+	ResourceLimits    resource.Limits
+	AgentPluginLimits agentplugin.Limits
+	MCPLimits         codingmcp.Limits
+	MCPDefinitions    codingmcp.Definitions
+	ToolLimits        tools.Limits
+	GitLimits         git.Limits
+	Subagent          subagent.ExecutionOptions
 }
 
 // OpenOptions explicitly bind one Runtime to one Workspace, configuration,
@@ -133,12 +136,9 @@ type Runtime struct {
 	tempRoot        *execution.PrivateTempRoot
 	inspector       *git.Inspector
 	permissions     *codingmcp.Permissions
-	connections     *codingmcp.Connections // Compatibility alias for the current generation.
 	extensions      *extension.Runtime
 	compiled        []extension.Extension
-	resources       resource.Result // Compatibility alias for the current generation.
 	skillSettings   *skillsettings.Manager
-	skillPolicy     skillsettings.Snapshot // Compatibility alias for the current generation.
 	integration     *IntegrationGeneration
 	generationID    uint64
 	trusted         bool
@@ -284,7 +284,6 @@ func openRuntime(
 			returnErr = errors.Join(returnErr, stack.close(context.WithoutCancel(ctx)))
 		}
 	}()
-
 	tree, err := workspace.OpenTree(options.Workspace)
 	if err != nil {
 		return nil, fmt.Errorf("coding runtime: open workspace tree: %w", err)
@@ -393,6 +392,16 @@ func openRuntime(
 	if err != nil {
 		return nil, err
 	}
+	loadedPlugins := agentplugin.Result{}
+	if !openPolicy.teamWorker() {
+		loadedPlugins, err = agentplugin.Load(ctx, agentplugin.Options{
+			Paths: options.Paths, Tree: tree, ProjectTrusted: options.Trusted,
+			Limits: configured.AgentPluginLimits,
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	store := workspace.NewStore(options.Paths.WorkspacesFile())
 	permissions, err := codingmcp.NewPermissions(codingmcp.PermissionOptions{
@@ -405,6 +414,7 @@ func openRuntime(
 
 	connections, err := openRuntimeMCP(
 		ctx, options, configured, tree, permissions, openPolicy,
+		loadedPlugins.MCPDefinitions(),
 	)
 	if err != nil {
 		return nil, err
@@ -449,11 +459,20 @@ func openRuntime(
 			setup.Release(context.WithoutCancel(ctx)),
 		)
 	}
+	setupOwnedByStack := true
+	stack.add(func(ctx context.Context) error {
+		if !setupOwnedByStack {
+			return nil
+		}
+
+		return setup.Release(ctx)
+	})
 	integration := newIntegrationGeneration(
 		1, setup, connections, loadedResources, skillPolicy,
-		projectInstructions.SystemPrompt(),
+		projectInstructions.SystemPrompt(), loadedPlugins,
 	)
 	connectionsOwnedByStack = false
+	setupOwnedByStack = false
 	stack.add(integration.retire)
 
 	runtime := &Runtime{
@@ -480,12 +499,9 @@ func openRuntime(
 		tempRoot:            scratchRoot,
 		inspector:           inspector,
 		permissions:         permissions,
-		connections:         connections,
 		extensions:          extensionRuntime,
 		compiled:            slices.Clone(options.Extensions),
-		resources:           loadedResources,
 		skillSettings:       skillSettings,
-		skillPolicy:         skillPolicy,
 		integration:         integration,
 		generationID:        integration.ID(),
 		trusted:             options.Trusted,
@@ -629,6 +645,7 @@ func openRuntime(
 		runtime.publishTeamRecoveryCandidates(ctx, runtime.teamRecovery)
 	}
 	runtime.recordOpenDiagnostics(ctx, integration.connectionsSnapshot())
+	runtime.recordAgentPluginDiagnostics(ctx, integration.agentPluginSnapshot())
 	if !openPolicy.teamWorker() {
 		runtime.startNotificationCoordinator(ctx)
 	}
@@ -713,6 +730,9 @@ func withExecutionDefaults(options ExecutionOptions) ExecutionOptions {
 
 	if options.ResourceLimits.MaxEntries == 0 {
 		options.ResourceLimits = resource.DefaultLimits()
+	}
+	if options.AgentPluginLimits.MaxPlugins == 0 {
+		options.AgentPluginLimits = agentplugin.DefaultLimits()
 	}
 
 	if options.MCPLimits.MaxFileBytes == 0 {
@@ -866,6 +886,7 @@ func openMCP(
 	configured ExecutionOptions,
 	tree *workspace.Tree,
 	permissions *codingmcp.Permissions,
+	pluginDefinitions codingmcp.Definitions,
 ) (*codingmcp.Connections, error) {
 	definitions, err := codingmcp.LoadDefinitions(ctx, codingmcp.LoadOptions{
 		Paths: options.Paths, Tree: tree, ProjectTrusted: options.Trusted,
@@ -875,6 +896,12 @@ func openMCP(
 		return nil, err
 	}
 	definitions, err = definitions.Merge(configured.MCPDefinitions, configured.MCPLimits.MaxServers)
+	if err != nil {
+		return nil, err
+	}
+	definitions, pluginDiagnostics, err := mergeAgentPluginDefinitions(
+		definitions, pluginDefinitions, configured.MCPLimits.MaxServers,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -892,7 +919,48 @@ func openMCP(
 		Environment:    configured.Environment,
 		TerminateAfter: configured.MCPTerminate,
 		MaxTools:       configured.MCPMaxTools,
+		Diagnostics:    pluginDiagnostics,
 	})
+}
+
+func mergeAgentPluginDefinitions(
+	base codingmcp.Definitions,
+	plugins codingmcp.Definitions,
+	maximum int,
+) (codingmcp.Definitions, []codingmcp.ConnectionDiagnostic, error) {
+	values := base.List()
+	seen := make(map[string]struct{}, len(values))
+	for _, definition := range values {
+		seen[definition.ID] = struct{}{}
+	}
+	diagnostics := make([]codingmcp.ConnectionDiagnostic, 0)
+	for _, definition := range plugins.List() {
+		if _, duplicate := seen[definition.ID]; duplicate {
+			diagnostics = append(diagnostics, codingmcp.ConnectionDiagnostic{
+				ServerID: definition.ID, Stage: "configuration", Code: "definition_duplicate",
+				Message: "Agent Plugin server conflicts with another configured server and was ignored",
+			})
+
+			continue
+		}
+		if len(values) >= maximum {
+			diagnostics = append(diagnostics, codingmcp.ConnectionDiagnostic{
+				ServerID: definition.ID, Stage: "configuration", Code: "definition_limit",
+				Message: "Agent Plugin server exceeds the client-wide server limit and was ignored",
+			})
+
+			continue
+		}
+		seen[definition.ID] = struct{}{}
+		values = append(values, definition)
+	}
+
+	merged, err := codingmcp.NewDefinitions(values, maximum)
+	if err != nil {
+		return codingmcp.Definitions{}, nil, err
+	}
+
+	return merged, diagnostics, nil
 }
 
 func openRuntimeMCP(
@@ -902,9 +970,10 @@ func openRuntimeMCP(
 	tree *workspace.Tree,
 	permissions *codingmcp.Permissions,
 	policy runtimeOpenPolicy,
+	pluginDefinitions codingmcp.Definitions,
 ) (*codingmcp.Connections, error) {
 	if !policy.teamWorker() {
-		return openMCP(ctx, options, configured, tree, permissions)
+		return openMCP(ctx, options, configured, tree, permissions, pluginDefinitions)
 	}
 
 	return codingmcp.OpenConnections(ctx, nil, codingmcp.ConnectionOptions{
@@ -953,6 +1022,16 @@ func (r *Runtime) recordOpenDiagnostics(
 	for _, diagnostic := range connections.Diagnostics() {
 		r.recordDiagnostic(ctx, IntegrationDiagnostic{
 			Component: componentMCP, Code: diagnostic.Code, Message: diagnostic.Message, Disabled: true,
+		})
+	}
+}
+
+func (r *Runtime) recordAgentPluginDiagnostics(ctx context.Context, plugins agentplugin.Result) {
+	for _, diagnostic := range plugins.Diagnostics() {
+		r.recordDiagnostic(ctx, IntegrationDiagnostic{
+			Component: componentAgentPlugin,
+			Code:      diagnostic.Code,
+			Message:   diagnostic.Plugin + ": " + diagnostic.Message,
 		})
 	}
 }
@@ -1323,51 +1402,13 @@ func (r *Runtime) Reload(ctx context.Context) (returnErr error) {
 	r.mu.Unlock()
 	defer r.endOperation(operation)
 
-	loaded, err := resource.Load(reloadCtx, resource.Options{
-		Paths: r.paths, Tree: r.tree, ProjectTrusted: r.trusted, Limits: r.opts.ResourceLimits,
-	})
+	candidate, err := r.buildIntegrationCandidate(reloadCtx)
 	if err != nil {
 		return err
 	}
-	nextSkillPolicy, err := r.skillSettings.Load(reloadCtx)
-	if err != nil {
-		return err
-	}
-	nextProjectInstructions, err := r.instructionResolver.Resolve(reloadCtx, ".")
-	if err != nil {
-		return fmt.Errorf("coding runtime: resolve project instructions: %w", err)
-	}
-
-	options := OpenOptions{
-		Workspace: r.workspace, Trusted: r.trusted, Paths: r.paths,
-	}
-	connections, err := openMCP(reloadCtx, options, r.opts, r.tree, r.permissions)
-	if err != nil {
-		return err
-	}
-
-	activation, activationErr := activateResources(reloadCtx, r.extensions, loaded, r.compiled)
-	if activation == nil {
-		if activationErr == nil {
-			activationErr = fmt.Errorf("%w: extension activation returned no lease", ErrRuntimeInvalid)
-		}
-
-		return errors.Join(activationErr, connections.Close())
-	}
-	candidate := newIntegrationGeneration(
-		r.nextGenerationID(), activation, connections, loaded, nextSkillPolicy,
-		nextProjectInstructions.SystemPrompt(),
-	)
-	candidateAdopted := false
 	defer func() {
-		if !candidateAdopted {
-			returnErr = errors.Join(
-				returnErr,
-				candidate.retire(context.WithoutCancel(reloadCtx)),
-			)
-		}
+		returnErr = errors.Join(returnErr, candidate.abort(context.WithoutCancel(reloadCtx)))
 	}()
-
 	r.mu.Lock()
 	if r.closed || r.closing || r.active != operation || r.interaction != nil {
 		phase := r.state.Phase
@@ -1376,19 +1417,22 @@ func (r *Runtime) Reload(ctx context.Context) (returnErr error) {
 		return stateError("reload", phase, ErrRuntimeBusy)
 	}
 
+	next, err := candidate.publish()
+	if err != nil {
+		r.mu.Unlock()
+
+		return err
+	}
 	previous := r.integration
-	r.integration = candidate
-	r.generationID = candidate.ID()
-	r.connections = candidate.connectionsSnapshot()
-	r.resources = candidate.resourcesSnapshot()
-	r.skillPolicy = candidate.skillPolicySnapshot()
-	r.projectInstructions = candidate.projectInstructionsSnapshot()
-	candidateAdopted = true
+	r.integration = next
+	r.generationID = next.ID()
+	r.projectInstructions = next.projectInstructionsSnapshot()
 	r.mu.Unlock()
 
-	r.recordOpenDiagnostics(ctx, candidate.connectionsSnapshot())
+	r.recordOpenDiagnostics(ctx, next.connectionsSnapshot())
+	r.recordAgentPluginDiagnostics(ctx, next.agentPluginSnapshot())
 	retireErr := previous.retire(context.WithoutCancel(ctx))
-	if activationErr != nil {
+	if candidate.activationErr != nil {
 		r.recordDiagnostic(ctx, IntegrationDiagnostic{
 			Component: componentIntegration,
 			Code:      "extension_retire_failed",
@@ -1403,10 +1447,10 @@ func (r *Runtime) Reload(ctx context.Context) (returnErr error) {
 		})
 	}
 
-	postPublicationErr := errors.Join(activationErr, retireErr)
+	postPublicationErr := errors.Join(candidate.activationErr, retireErr)
 	if postPublicationErr != nil {
 		return &ReloadPublicationError{
-			GenerationID: candidate.ID(),
+			GenerationID: next.ID(),
 			Err:          postPublicationErr,
 		}
 	}

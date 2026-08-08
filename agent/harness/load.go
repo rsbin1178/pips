@@ -9,9 +9,11 @@ import (
 	"io/fs"
 	"os"
 	"path"
-	"regexp"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
+	"golang.org/x/text/unicode/norm"
 	"gopkg.in/yaml.v3"
 )
 
@@ -109,7 +111,7 @@ func loadSkill(fsys fs.FS, p string) (Skill, []SkillDiagnostic, error) {
 		return Skill{}, nil, fmt.Errorf("%s: %w", p, err)
 	}
 
-	parent := path.Base(path.Dir(p))
+	parent := normalizeSkillName(path.Base(path.Dir(p)))
 	if manifest.name == "" {
 		manifest.name = parent
 		diagnostics = append(diagnostics, SkillDiagnostic{
@@ -117,7 +119,10 @@ func loadSkill(fsys fs.FS, p string) (Skill, []SkillDiagnostic, error) {
 			Field:   string(KindName),
 			Message: "skill name defaulted from its directory",
 		})
-	} else if manifest.name != parent {
+	} else {
+		manifest.name = normalizeSkillName(manifest.name)
+	}
+	if manifest.name != parent {
 		diagnostics = append(diagnostics, SkillDiagnostic{
 			Code:    "directory_name_mismatch",
 			Field:   string(KindName),
@@ -125,8 +130,8 @@ func loadSkill(fsys fs.FS, p string) (Skill, []SkillDiagnostic, error) {
 		})
 	}
 
-	if !skillNamePattern.MatchString(manifest.name) || len(manifest.name) > 64 {
-		return Skill{}, nil, fmt.Errorf("%s: name must be 1-64 lowercase letters, numbers, or single hyphens", p)
+	if !validSkillName(manifest.name) {
+		return Skill{}, nil, fmt.Errorf("%s: name must be 1-64 Unicode lowercase alphanumeric characters or single hyphens", p)
 	}
 
 	return Skill{
@@ -137,7 +142,23 @@ func loadSkill(fsys fs.FS, p string) (Skill, []SkillDiagnostic, error) {
 	}, diagnostics, nil
 }
 
-var skillNamePattern = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
+func normalizeSkillName(name string) string {
+	return norm.NFKC.String(strings.TrimSpace(name))
+}
+
+func validSkillName(name string) bool {
+	if name == "" || utf8.RuneCountInString(name) > 64 || name != strings.ToLower(name) ||
+		strings.HasPrefix(name, "-") || strings.HasSuffix(name, "-") || strings.Contains(name, "--") {
+		return false
+	}
+	for _, character := range name {
+		if character != '-' && !unicode.IsLetter(character) && !unicode.IsNumber(character) {
+			return false
+		}
+	}
+
+	return true
+}
 
 type skillManifest struct {
 	name          string
@@ -179,18 +200,11 @@ func parseSkillManifest(content string) (skillManifest, string, []SkillDiagnosti
 		return skillManifest{}, "", nil, err
 	}
 
-	if strings.TrimSpace(manifest.description) == "" || len(manifest.description) > 1024 {
-		return skillManifest{}, "", nil, errors.New("description must be non-empty and at most 1024 bytes")
-	}
-
-	if manifest.compatibility != "" && len(manifest.compatibility) > 500 {
-		return skillManifest{}, "", nil, errors.New("compatibility exceeds 500 bytes")
+	if strings.TrimSpace(manifest.description) == "" || utf8.RuneCountInString(manifest.description) > 1024 {
+		return skillManifest{}, "", nil, errors.New("description must be non-empty and at most 1024 characters")
 	}
 
 	body = strings.TrimSpace(body)
-	if body == "" {
-		return skillManifest{}, "", nil, errors.New("skill instructions must not be empty")
-	}
 
 	return manifest, body, diagnostics, nil
 }
@@ -253,6 +267,10 @@ func decodeSkillManifest(front string) (skillManifest, []SkillDiagnostic, error)
 			if err != nil {
 				return skillManifest{}, nil, err
 			}
+			characterCount := utf8.RuneCountInString(decoded)
+			if characterCount < 1 || characterCount > 500 {
+				return skillManifest{}, nil, errors.New("compatibility must be between 1 and 500 characters")
+			}
 			manifest.compatibility = decoded
 		case "metadata":
 			metadata, ignored, err := decodeSkillMetadata(value)
@@ -267,16 +285,31 @@ func decodeSkillManifest(front string) (skillManifest, []SkillDiagnostic, error)
 				return skillManifest{}, nil, err
 			}
 			manifest.allowedTools = tools
+			if value.Kind != yaml.ScalarNode {
+				diagnostics = append(diagnostics, SkillDiagnostic{
+					Code:    "allowed_tools_compatibility",
+					Field:   key,
+					Message: "non-string allowed-tools was accepted for client compatibility",
+				})
+			}
 		case "user-invocable":
 			if err := value.Decode(&userInvocable); err != nil || value.Tag != "!!bool" {
 				return skillManifest{}, nil, errors.New("user-invocable must be a boolean")
 			}
+			diagnostics = append(diagnostics, SkillDiagnostic{
+				Code: "client_field", Field: key,
+				Message: "client-specific invocation field was accepted for compatibility",
+			})
 		case "disable-model-invocation":
 			var disabled bool
 			if err := value.Decode(&disabled); err != nil || value.Tag != "!!bool" {
 				return skillManifest{}, nil, errors.New("disable-model-invocation must be a boolean")
 			}
 			modelInvocable = !disabled
+			diagnostics = append(diagnostics, SkillDiagnostic{
+				Code: "client_field", Field: key,
+				Message: "client-specific invocation field was accepted for compatibility",
+			})
 		case "argument-hint", "context", "agent":
 			diagnostics = append(diagnostics, SkillDiagnostic{
 				Code:    "unsupported_field",

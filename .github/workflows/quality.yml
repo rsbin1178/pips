@@ -15,22 +15,26 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  windows-plugin-supervisor:
-    name: Windows plugin supervisor
-    runs-on: windows-latest
-    timeout-minutes: 20
+  agent-plugins:
+    name: Agent Plugins (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
-      - name: Test native process supervision and named pipes
-        run: go test -count=1 ./internal/coding/execution/pluginsupervisor
-      - name: Race-test native process supervision
-        run: go test -race -count=1 ./internal/coding/execution/pluginsupervisor
-      - name: Vet native process supervision
-        run: go vet ./internal/coding/execution/pluginsupervisor
+      - name: Test portable package and MCP runtime
+        run: go test -count=1 ./agent/harness ./internal/coding/agentplugin ./internal/coding/execution/mcpstdio
+      - name: Test platform and HTTP integration semantics
+        run: |
+          go test -count=1 ./internal/coding/execution -run '^TestEnvironmentNamesEqualUsesPlatformSemantics$'
+          go test -count=1 ./internal/coding/mcp -run '^TestConfiguredHeadersNeverCrossOriginRedirect$'
 
   verify:
     name: Go quality and security
