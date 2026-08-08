@@ -834,6 +834,73 @@ func (c *Controller) ListSubagents(ctx context.Context) ([]subagent.Summary, err
 	return values, err
 }
 
+// ListAgentProfiles returns the content-safe Agent Library for the selected
+// Runtime. It is optional on runtimeInstance so older embedders retain their
+// existing Runtime contract while current Coding runtimes can expose dynamic
+// definition metadata to the TUI.
+func (c *Controller) ListAgentProfiles(ctx context.Context) (coding.AgentLibrary, error) {
+	var value coding.AgentLibrary
+	err := c.withRuntime(func(runtime runtimeInstance) error {
+		library, ok := runtime.(interface {
+			ListAgentProfiles(context.Context) (coding.AgentLibrary, error)
+		})
+		if !ok {
+			return fmt.Errorf("%w: runtime does not expose Agent Library", ErrInvalid)
+		}
+
+		var err error
+		value, err = library.ListAgentProfiles(ctx)
+
+		return err
+	})
+
+	return value.Clone(), err
+}
+
+// RunAgent directly starts one user-selected foreground Agent. It is an
+// optional Runtime capability because historical embedders may expose only
+// model-authored subagent dispatch.
+func (c *Controller) RunAgent(
+	ctx context.Context,
+	request coding.AgentRunRequest,
+) (subagent.Result, error) {
+	var value subagent.Result
+	err := c.withRuntime(func(runtime runtimeInstance) error {
+		runner, ok := runtime.(interface {
+			RunAgent(context.Context, coding.AgentRunRequest) (subagent.Result, error)
+		})
+		if !ok {
+			return fmt.Errorf("%w: runtime does not expose direct Agent invocation", ErrInvalid)
+		}
+
+		var err error
+		value, err = runner.RunAgent(ctx, request)
+
+		return err
+	})
+
+	return value, err
+}
+
+// RunAgentEvents streams an explicit user-selected Agent invocation while
+// holding the Controller lease. This keeps session replacement from racing a
+// live child and lets the interactive TUI render child controls immediately.
+func (c *Controller) RunAgentEvents(
+	ctx context.Context,
+	request coding.AgentRunRequest,
+) iter.Seq2[coding.Event, error] {
+	return c.sequence(func(runtime runtimeInstance) iter.Seq2[coding.Event, error] {
+		runner, ok := runtime.(interface {
+			RunAgentEvents(context.Context, coding.AgentRunRequest) iter.Seq2[coding.Event, error]
+		})
+		if !ok {
+			return errorSequence(fmt.Errorf("%w: runtime does not expose direct Agent invocation", ErrInvalid))
+		}
+
+		return runner.RunAgentEvents(ctx, request)
+	})
+}
+
 // InspectSubagent loads one child owned by the currently selected Session.
 func (c *Controller) InspectSubagent(
 	ctx context.Context,
@@ -873,6 +940,103 @@ func (c *Controller) InspectSubagentState(
 	})
 
 	return value, err
+}
+
+// SubagentControlState returns the independently owned pending-input state
+// for one live custom child. It is intentionally an optional Runtime surface
+// so historical/embedder runtimes retain their existing control contract.
+func (c *Controller) SubagentControlState(
+	_ context.Context,
+	childSessionID string,
+) (coding.ChildControlState, error) {
+	return c.withChildControl(func(runtime runtimeInstance) (coding.ChildControlState, error) {
+		controller, ok := runtime.(interface {
+			SubagentControlState(string) (coding.ChildControlState, error)
+		})
+		if !ok {
+			return coding.ChildControlState{}, fmt.Errorf("%w: runtime does not expose custom child control", ErrInvalid)
+		}
+
+		return controller.SubagentControlState(childSessionID)
+	})
+}
+
+// ResolveSubagentApproval sends one exact decision only to the target custom
+// child approval controller. It never falls back to the parent controller.
+//
+//nolint:dupl // Typed approval/question optional Runtime adapters differ only in their exact target method.
+func (c *Controller) ResolveSubagentApproval(
+	ctx context.Context,
+	childSessionID string,
+	resolution approval.Resolution,
+) (coding.ChildControlState, error) {
+	return c.withChildControl(func(runtime runtimeInstance) (coding.ChildControlState, error) {
+		controller, ok := runtime.(interface {
+			ResolveSubagentApproval(context.Context, string, approval.Resolution) (coding.ChildControlState, error)
+		})
+		if !ok {
+			return coding.ChildControlState{}, fmt.Errorf("%w: runtime does not expose custom child control", ErrInvalid)
+		}
+
+		return controller.ResolveSubagentApproval(ctx, childSessionID, resolution)
+	})
+}
+
+// ResolveSubagentQuestion sends one structured response only to the target
+// custom child question controller.
+//
+//nolint:dupl // Typed approval/question optional Runtime adapters differ only in their exact target method.
+func (c *Controller) ResolveSubagentQuestion(
+	ctx context.Context,
+	childSessionID string,
+	resolution question.Resolution,
+) (coding.ChildControlState, error) {
+	return c.withChildControl(func(runtime runtimeInstance) (coding.ChildControlState, error) {
+		controller, ok := runtime.(interface {
+			ResolveSubagentQuestion(context.Context, string, question.Resolution) (coding.ChildControlState, error)
+		})
+		if !ok {
+			return coding.ChildControlState{}, fmt.Errorf("%w: runtime does not expose custom child control", ErrInvalid)
+		}
+
+		return controller.ResolveSubagentQuestion(ctx, childSessionID, resolution)
+	})
+}
+
+// RejectSubagentQuestion records an explicit cancellation only on the target
+// custom child question controller.
+func (c *Controller) RejectSubagentQuestion(
+	ctx context.Context,
+	childSessionID string,
+	requestID string,
+	schemaDigest string,
+) (coding.ChildControlState, error) {
+	return c.withChildControl(func(runtime runtimeInstance) (coding.ChildControlState, error) {
+		controller, ok := runtime.(interface {
+			RejectSubagentQuestion(context.Context, string, string, string) (coding.ChildControlState, error)
+		})
+		if !ok {
+			return coding.ChildControlState{}, fmt.Errorf("%w: runtime does not expose custom child control", ErrInvalid)
+		}
+
+		return controller.RejectSubagentQuestion(ctx, childSessionID, requestID, schemaDigest)
+	})
+}
+
+// withChildControl serializes a targetable child-control call through the
+// same Runtime ownership boundary as all Controller operations.
+func (c *Controller) withChildControl(
+	invoke func(runtimeInstance) (coding.ChildControlState, error),
+) (coding.ChildControlState, error) {
+	var value coding.ChildControlState
+	err := c.withRuntime(func(runtime runtimeInstance) error {
+		var invokeErr error
+		value, invokeErr = invoke(runtime)
+
+		return invokeErr
+	})
+
+	return value.Clone(), err
 }
 
 // WaitSubagent waits for one child owned by the selected Session.

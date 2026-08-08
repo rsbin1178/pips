@@ -54,6 +54,10 @@ func normalizeLimits(limits Limits) Limits {
 	return limits
 }
 
+// NormalizeLimits applies the stable inherited defaults used by a compiled
+// execution plan. It returns a value copy and grants no additional authority.
+func NormalizeLimits(limits Limits) Limits { return normalizeLimits(limits) }
+
 func validateLimits(limits Limits) error {
 	if err := validateExecutionLimits(limits); err != nil {
 		return err

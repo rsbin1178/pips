@@ -784,12 +784,12 @@ func verifyThemeRevision(path, parent string, revision themeRevision) error {
 		}
 		return nil
 	}
-	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o022 != 0 || !os.SameFile(revision.identity, info) {
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o022 != 0 || !sameThemeFileIdentity(revision.identity, info) {
 		return fmt.Errorf("%w: config file changed concurrently", ErrConflict)
 	}
 
 	data, openedInfo, readErr := readThemeFile(path, info)
-	if readErr != nil || !os.SameFile(revision.identity, openedInfo) {
+	if readErr != nil || !sameThemeFileIdentity(revision.identity, openedInfo) {
 		return fmt.Errorf("%w: config file changed concurrently", ErrConflict)
 	}
 	if sha256.Sum256(data) != revision.digest {
@@ -797,6 +797,14 @@ func verifyThemeRevision(path, parent string, revision themeRevision) error {
 	}
 
 	return nil
+}
+
+// sameThemeFileIdentity rejects a remove-and-replace race even on filesystems
+// that reuse an inode immediately. os.SameFile alone cannot distinguish that
+// case when the replacement has identical content and permissions.
+func sameThemeFileIdentity(left, right os.FileInfo) bool {
+	return left != nil && right != nil && os.SameFile(left, right) &&
+		left.ModTime().Equal(right.ModTime())
 }
 
 var (

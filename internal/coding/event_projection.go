@@ -387,7 +387,14 @@ func projectSubagentTelemetry(
 ) {
 	projected.SubagentRole = string(value.Role)
 	projected.SubagentState = string(value.State)
-	projected.Agent = "subagent/" + string(value.Role)
+	// Profile IDs are unbounded user input and would create high-cardinality
+	// telemetry dimensions. Keep the legacy builtin role when available and
+	// otherwise use only the fixed durable identity kind.
+	if value.Role != "" {
+		projected.Agent = "subagent/" + string(value.Role)
+	} else {
+		projected.Agent = "subagent/" + string(value.Identity.Kind)
+	}
 	projected.ModelID = value.Model
 	projected.Code = value.Code
 	projected.Stop = value.Stop

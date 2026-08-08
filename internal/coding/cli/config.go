@@ -67,14 +67,15 @@ func newConfigShowCommand(dependencies Dependencies, flags *rootFlags) *cobra.Co
 				return fmt.Errorf("coding cli: encode status-line summary: %w", err)
 			}
 			values := map[config.Field]string{
-				config.FieldModel:      quotedOrUnset(state.config.Config.Model.String()),
-				config.FieldVariant:    quotedOrUnset(state.config.Config.Variant),
-				config.FieldReasoning:  optionalReasoning(state.config.Config.Reasoning),
-				config.FieldToolSearch: strconv.FormatBool(state.config.Config.ToolSearch),
-				config.FieldMode:       strconv.Quote(string(state.config.Config.Mode)),
-				config.FieldTheme:      strconv.Quote(state.config.Config.TUI.Theme),
-				config.FieldStatusLine: string(statusLine),
-				config.FieldSandbox:    strconv.Quote(string(state.config.Config.Sandbox)),
+				config.FieldModel:            quotedOrUnset(state.config.Config.Model.String()),
+				config.FieldVariant:          quotedOrUnset(state.config.Config.Variant),
+				config.FieldReasoning:        optionalReasoning(state.config.Config.Reasoning),
+				config.FieldToolSearch:       strconv.FormatBool(state.config.Config.ToolSearch),
+				config.FieldDynamicSubagents: strconv.FormatBool(state.config.Config.DynamicSubagents),
+				config.FieldMode:             strconv.Quote(string(state.config.Config.Mode)),
+				config.FieldTheme:            strconv.Quote(state.config.Config.TUI.Theme),
+				config.FieldStatusLine:       string(statusLine),
+				config.FieldSandbox:          strconv.Quote(string(state.config.Config.Sandbox)),
 				config.FieldSandboxNetwork: strconv.Quote(
 					string(state.config.Config.SandboxWorkspaceWrite.Network),
 				),

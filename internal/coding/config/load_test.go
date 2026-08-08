@@ -40,6 +40,38 @@ func TestLoadThemeSelectionDefaultsAndFileSource(t *testing.T) {
 	assert.Equal(t, path, source.Detail)
 }
 
+func TestLoadDynamicSubagentsGatePrecedenceAndProvenance(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, "dynamic_subagents = true\n")
+	result, err := config.Load(config.LoadOptions{
+		ConfigFile: path,
+		LookupEnv:  mapLookup(map[string]string{config.DynamicSubagentsEnv: "false"}),
+	})
+	require.NoError(t, err)
+	assert.False(t, result.Config.DynamicSubagents)
+	source, ok := result.Config.Source(config.FieldDynamicSubagents)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceEnvironment, source.Kind)
+	assert.Equal(t, config.DynamicSubagentsEnv, source.Detail)
+
+	enabled := true
+	result, err = config.Load(config.LoadOptions{
+		ConfigFile: path,
+		LookupEnv:  mapLookup(map[string]string{config.DynamicSubagentsEnv: "false"}),
+		FlagOverrides: config.Patch{
+			DynamicSubagents: &enabled,
+		},
+	})
+	require.NoError(t, err)
+	assert.True(t, result.Config.DynamicSubagents)
+	source, ok = result.Config.Source(config.FieldDynamicSubagents)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceFlag, source.Kind)
+	assert.Equal(t, "--dynamic-subagents", source.Detail)
+}
+
 func TestLoadStatusLineSelectionFileOverrideAndProvenance(t *testing.T) {
 	t.Parallel()
 

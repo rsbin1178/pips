@@ -21,6 +21,7 @@ import (
 	"github.com/rsbin/pips/agent/harness"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding/agentplugin"
+	"github.com/rsbin/pips/internal/coding/agentprofile"
 	"github.com/rsbin/pips/internal/coding/approval"
 	"github.com/rsbin/pips/internal/coding/changes/git"
 	"github.com/rsbin/pips/internal/coding/config"
@@ -76,17 +77,18 @@ type ExecutionOptions struct {
 	SandboxProbe     func(context.Context, *execution.Executor) error
 	ToolTimeout      time.Duration
 
-	HTTPClient        *http.Client
-	MCPClient         *sdk.Implementation
-	MCPTerminate      time.Duration
-	MCPMaxTools       int
-	ResourceLimits    resource.Limits
-	AgentPluginLimits agentplugin.Limits
-	MCPLimits         codingmcp.Limits
-	MCPDefinitions    codingmcp.Definitions
-	ToolLimits        tools.Limits
-	GitLimits         git.Limits
-	Subagent          subagent.ExecutionOptions
+	HTTPClient         *http.Client
+	MCPClient          *sdk.Implementation
+	MCPTerminate       time.Duration
+	MCPMaxTools        int
+	ResourceLimits     resource.Limits
+	AgentProfileLimits agentprofile.Limits
+	AgentPluginLimits  agentplugin.Limits
+	MCPLimits          codingmcp.Limits
+	MCPDefinitions     codingmcp.Definitions
+	ToolLimits         tools.Limits
+	GitLimits          git.Limits
+	Subagent           subagent.ExecutionOptions
 }
 
 // OpenOptions explicitly bind one Runtime to one Workspace, configuration,
@@ -125,6 +127,8 @@ type Runtime struct {
 	paths               paths.Layout
 	opts                ExecutionOptions
 	model               ai.LanguageModel
+	modelCatalog        modelcatalog.Catalog
+	credentials         credential.Store
 	resolved            modelcatalog.ResolvedModel
 	requestPolicy       generation.Policy
 	instructionResolver *instructions.Resolver
@@ -160,6 +164,7 @@ type Runtime struct {
 	observers       *agentObservers
 	telemetry       *telemetryObservers
 	subagents       *subagent.Manager
+	childControls   *childControlRegistry
 	notifications   *subagent.NotificationInbox
 	children        map[string]*childProjection
 	teamGuard       teamCapabilityGuard
@@ -309,7 +314,11 @@ func openRuntime(
 		return nil, fmt.Errorf("coding runtime: resolve project instructions: %w", err)
 	}
 
-	resolved, err := resolveOpenModel(options)
+	modelCatalog, err := modelcatalog.New(options.Config)
+	if err != nil {
+		return nil, err
+	}
+	resolved, err := resolveOpenModel(options, modelCatalog)
 	if err != nil {
 		return nil, err
 	}
@@ -398,6 +407,13 @@ func openRuntime(
 	loadedResources, err := resource.Load(ctx, resource.Options{
 		Paths: options.Paths, Tree: tree, ProjectTrusted: options.Trusted,
 		Limits: configured.ResourceLimits,
+	})
+	if err != nil {
+		return nil, err
+	}
+	loadedProfiles, err := agentprofile.Load(ctx, agentprofile.Options{
+		Paths: options.Paths, Tree: tree, ProjectTrusted: options.Trusted,
+		Limits: configured.AgentProfileLimits,
 	})
 	if err != nil {
 		return nil, err
@@ -510,7 +526,7 @@ func openRuntime(
 		return setup.Release(ctx)
 	})
 	integration := newIntegrationGeneration(
-		1, setup, connections, loadedResources, skillPolicy,
+		1, setup, connections, loadedResources, loadedProfiles, skillPolicy,
 		projectInstructions.SystemPrompt(), loadedPlugins,
 	)
 	connectionsOwnedByStack = false
@@ -526,6 +542,8 @@ func openRuntime(
 		paths:               options.Paths,
 		opts:                configured,
 		model:               baseModel,
+		modelCatalog:        modelCatalog,
+		credentials:         options.Credentials,
 		resolved:            resolved,
 		requestPolicy:       requestPolicy,
 		instructionResolver: instructionResolver,
@@ -620,6 +638,7 @@ func openRuntime(
 	runtime.recovery = bootstrap.Recovery
 	runtime.publisher = newEventPublisher(runtime)
 	runtime.children = make(map[string]*childProjection)
+	runtime.childControls = newChildControlRegistry()
 	if !openPolicy.teamWorker() {
 		runtime.teamRecovery, runtime.teamRecoveryErr = runtime.discoverTeamRecovery(ctx)
 	}
@@ -674,6 +693,7 @@ func openRuntime(
 			Parent:         handle,
 			Tree:           tree,
 			Model:          baseModel,
+			GenerationID:   integration.ID(),
 			SummaryModel:   childSummaryModel,
 			Compaction:     childCompaction,
 			RequestPolicy:  requestPolicy,
@@ -709,7 +729,10 @@ func openRuntime(
 	return runtime, nil
 }
 
-func resolveOpenModel(options OpenOptions) (modelcatalog.ResolvedModel, error) {
+func resolveOpenModel(
+	options OpenOptions,
+	catalog modelcatalog.Catalog,
+) (modelcatalog.ResolvedModel, error) {
 	if options.Resolved.Ref.String() != "" {
 		if options.Resolved.Ref != options.Config.Model {
 			return modelcatalog.ResolvedModel{}, fmt.Errorf(
@@ -721,9 +744,8 @@ func resolveOpenModel(options OpenOptions) (modelcatalog.ResolvedModel, error) {
 		return options.Resolved.Clone(), nil
 	}
 
-	catalog, err := modelcatalog.New(options.Config)
-	if err != nil {
-		return modelcatalog.ResolvedModel{}, err
+	if catalog == nil {
+		return modelcatalog.ResolvedModel{}, fmt.Errorf("%w: missing model catalog", ErrRuntimeInvalid)
 	}
 
 	return catalog.Resolve(modelcatalog.SelectionFromConfig(options.Config))
@@ -790,6 +812,9 @@ func withExecutionDefaults(options ExecutionOptions) ExecutionOptions {
 
 	if options.ResourceLimits.MaxEntries == 0 {
 		options.ResourceLimits = resource.DefaultLimits()
+	}
+	if options.AgentProfileLimits.MaxEntries == 0 {
+		options.AgentProfileLimits = agentprofile.DefaultLimits()
 	}
 	if options.AgentPluginLimits.MaxPlugins == 0 {
 		options.AgentPluginLimits = agentplugin.DefaultLimits()
@@ -1382,6 +1407,7 @@ type runtimeOperationKind string
 
 const (
 	operationPrompt            runtimeOperationKind = "prompt"
+	operationDirectAgent       runtimeOperationKind = "run Agent"
 	operationContinue          runtimeOperationKind = "continue"
 	operationResolve           runtimeOperationKind = "resolve"
 	operationResolveQuestion   runtimeOperationKind = "resolve question"

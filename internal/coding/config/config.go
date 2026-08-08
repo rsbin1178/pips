@@ -25,16 +25,17 @@ type Field string
 
 // Configuration fields.
 const (
-	FieldModel          Field = "model"
-	FieldVariant        Field = "variant"
-	FieldReasoning      Field = "reasoning"
-	FieldToolSearch     Field = "tool_search"
-	FieldMode           Field = "mode"
-	FieldTheme          Field = "tui.theme"
-	FieldStatusLine     Field = "tui.status_line"
-	FieldSandbox        Field = "sandbox"
-	FieldSandboxNetwork Field = "sandbox_workspace_write.network"
-	FieldApproval       Field = "approval"
+	FieldModel            Field = "model"
+	FieldVariant          Field = "variant"
+	FieldReasoning        Field = "reasoning"
+	FieldToolSearch       Field = "tool_search"
+	FieldDynamicSubagents Field = "dynamic_subagents"
+	FieldMode             Field = "mode"
+	FieldTheme            Field = "tui.theme"
+	FieldStatusLine       Field = "tui.status_line"
+	FieldSandbox          Field = "sandbox"
+	FieldSandboxNetwork   Field = "sandbox_workspace_write.network"
+	FieldApproval         Field = "approval"
 )
 
 var fields = []Field{
@@ -42,6 +43,7 @@ var fields = []Field{
 	FieldVariant,
 	FieldReasoning,
 	FieldToolSearch,
+	FieldDynamicSubagents,
 	FieldMode,
 	FieldTheme,
 	FieldStatusLine,
@@ -395,12 +397,16 @@ func (m ModelConfig) Equal(other ModelConfig) bool {
 
 // Config is the final immutable-by-convention application configuration.
 type Config struct {
-	Model                 ModelRef
-	Variant               string
-	Reasoning             *ReasoningLevel
-	Providers             map[ai.Provider]ProviderConfig
-	Models                []ModelConfig
-	ToolSearch            bool
+	Model      ModelRef
+	Variant    string
+	Reasoning  *ReasoningLevel
+	Providers  map[ai.Provider]ProviderConfig
+	Models     []ModelConfig
+	ToolSearch bool
+	// DynamicSubagents enables the Alpha custom Coding subagent dispatcher.
+	// It is intentionally disabled by default; profile discovery remains
+	// available for validation and inspection when this gate is off.
+	DynamicSubagents      bool
 	Mode                  OperatingMode
 	TUI                   TUIConfig
 	Sandbox               SandboxMode
@@ -415,14 +421,15 @@ type Config struct {
 // Registry definitions are loaded from exactly one selected file and are not
 // patched by environment variables or flags.
 type Patch struct {
-	Model      *ModelRef
-	Variant    *string
-	Reasoning  *ReasoningLevel
-	ToolSearch *bool
-	Mode       *OperatingMode
-	Theme      *string
-	Sandbox    *SandboxMode
-	Approval   *ApprovalMode
+	Model            *ModelRef
+	Variant          *string
+	Reasoning        *ReasoningLevel
+	ToolSearch       *bool
+	DynamicSubagents *bool
+	Mode             *OperatingMode
+	Theme            *string
+	Sandbox          *SandboxMode
+	Approval         *ApprovalMode
 }
 
 // Defaults returns the built-in application settings. Model is intentionally
@@ -778,6 +785,10 @@ func apply(value Config, patch Patch, source Source) Config {
 	if patch.ToolSearch != nil {
 		value.ToolSearch = *patch.ToolSearch
 		value.sources[FieldToolSearch] = source
+	}
+	if patch.DynamicSubagents != nil {
+		value.DynamicSubagents = *patch.DynamicSubagents
+		value.sources[FieldDynamicSubagents] = source
 	}
 	if patch.Mode != nil {
 		value.Mode = *patch.Mode

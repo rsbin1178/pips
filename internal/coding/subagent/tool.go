@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"time"
 
 	"github.com/rsbin/pips/agent"
@@ -23,12 +24,14 @@ const (
 )
 
 type toolArgs struct {
-	Role Role   `json:"role" description:"Specialist role: explore, plan, or review"`
-	Task string `json:"task" description:"Bounded task for the specialist"`
+	AgentID string `json:"agent_id,omitempty" description:"Canonical agent ID"`
+	Role    Role   `json:"role,omitempty" description:"Legacy builtin alias: explore, plan, or review"`
+	Task    string `json:"task" description:"Bounded task for the specialist"`
 }
 
 type toolResult struct {
 	Schema         string           `json:"schema"`
+	AgentID        string           `json:"agent_id"`
 	Role           Role             `json:"role"`
 	ChildSessionID string           `json:"child_session_id"`
 	Outcome        Outcome          `json:"outcome"`
@@ -42,10 +45,11 @@ type toolResult struct {
 }
 
 type managerTool struct {
-	manager  *Manager
-	observer Observer
-	owner    Ownership
-	decl     ai.Tool
+	manager    *Manager
+	observer   Observer
+	owner      Ownership
+	dispatcher Dispatcher
+	decl       ai.Tool
 }
 
 // Tool returns the serial main-agent adapter for this manager.
@@ -55,20 +59,32 @@ func (m *Manager) Tool(observer Observer) agent.Tool {
 
 // ToolFor returns the run_subagent adapter bound to one parent interaction.
 func (m *Manager) ToolFor(owner Ownership, observer Observer) agent.Tool {
+	return m.ToolForDispatcher(owner, observer, nil)
+}
+
+// ToolForDispatcher returns the parent adapter with one interaction-scoped
+// custom dispatcher. The dispatcher controls compilation; schema enum values
+// are advisory and deliberately bounded.
+func (m *Manager) ToolForDispatcher(
+	owner Ownership,
+	observer Observer,
+	dispatcher Dispatcher,
+) agent.Tool {
 	schema, err := ai.SchemaFor[toolArgs]()
 	if err != nil {
 		panic(fmt.Sprintf("coding subagent: derive tool schema: %v", err))
 	}
 
 	schema.Properties["role"].Enum = []any{string(RoleExplore), string(RolePlan), string(RoleReview)}
+	schema.Properties["agent_id"].Enum = agentIDSchemaEnum(dispatcher)
+	schema.Required = []string{"task"}
 
 	return &managerTool{
-		manager:  m,
-		observer: observer,
-		owner:    owner,
+		manager: m, observer: observer, owner: owner, dispatcher: dispatcher,
 		decl: ai.Tool{
-			Name:        ToolName,
-			Description: "Run one bounded read-only explore, plan, or review specialist and return its structured result.",
+			Name: ToolName,
+			Description: "Run one bounded specialist and return its structured result. " +
+				"Use agent_id; role is a compatibility alias for builtin agents.",
 			InputSchema: schema,
 		},
 	}
@@ -82,13 +98,13 @@ func (t *managerTool) Exec(ctx context.Context, call agent.ToolCall) ([]ai.Part,
 		return nil, err
 	}
 
-	request := Request{Role: args.Role, Task: args.Task}
+	request := Request{AgentID: args.AgentID, Role: args.Role, Task: args.Task}
 	request.Ownership = t.owner
 	if request.Ownership.ParentInteractionID != "" {
 		request.Ownership.ParentToolCallID = call.ID
 	}
 	request.Delivery = DeliveryForeground
-	execution, err := t.manager.Start(ctx, request, t.observer)
+	execution, err := t.manager.StartWithDispatcher(ctx, request, t.observer, t.dispatcher)
 	if err != nil {
 		return nil, err
 	}
@@ -124,6 +140,27 @@ func (t *managerTool) Exec(ctx context.Context, call agent.ToolCall) ([]ai.Part,
 	return nil, fmt.Errorf("coding subagent: %s: %w", data, err)
 }
 
+const maxAgentIDSchemaEnum = 128
+
+func agentIDSchemaEnum(dispatcher Dispatcher) []any {
+	values := []string{string(RoleExplore), string(RolePlan), string(RoleReview)}
+	if dispatcher != nil {
+		values = append(values, dispatcher.AgentIDs()...)
+	}
+	slices.Sort(values)
+	values = slices.Compact(values)
+	if len(values) > maxAgentIDSchemaEnum {
+		return nil
+	}
+
+	result := make([]any, len(values))
+	for index, value := range values {
+		result[index] = value
+	}
+
+	return result
+}
+
 func decodeToolArgs(data ai.JSON) (toolArgs, error) {
 	var args toolArgs
 
@@ -153,6 +190,7 @@ func encodeToolResult(result Result) ([]ai.Part, error) {
 func toolResultFrom(result Result) toolResult {
 	return toolResult{
 		Schema:         ResultSchema,
+		AgentID:        result.Identity.ID,
 		Role:           result.Role,
 		ChildSessionID: result.ChildSessionID,
 		Outcome:        result.Outcome,

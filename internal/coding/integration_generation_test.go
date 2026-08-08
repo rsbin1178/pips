@@ -10,6 +10,7 @@ import (
 
 	"github.com/rsbin/pips/agent/extension"
 	"github.com/rsbin/pips/internal/coding/agentplugin"
+	"github.com/rsbin/pips/internal/coding/agentprofile"
 	"github.com/rsbin/pips/internal/coding/resource"
 	"github.com/rsbin/pips/internal/coding/skillsettings"
 	"github.com/stretchr/testify/assert"
@@ -58,7 +59,7 @@ func TestIntegrationGenerationDrainsLeasesBeforeClosing(t *testing.T) {
 	require.NoError(t, err)
 
 	generation := newIntegrationGeneration(
-		1, activation, nil, resourceResultForGenerationTest(), skillsettings.Empty(), "", agentplugin.Result{},
+		1, activation, nil, resourceResultForGenerationTest(), agentprofile.Registry{}, skillsettings.Empty(), "", agentplugin.Result{},
 	)
 	require.NoError(t, generation.acquire())
 
@@ -85,7 +86,7 @@ func TestIntegrationGenerationHandoffPublishesNewPolicy(t *testing.T) {
 	require.NoError(t, err)
 
 	previous := newIntegrationGeneration(
-		1, activation, nil, resourceResultForGenerationTest(), skillsettings.Empty(), "old", agentplugin.Result{},
+		1, activation, nil, resourceResultForGenerationTest(), agentprofile.Registry{}, skillsettings.Empty(), "old", agentplugin.Result{},
 	)
 	nextPolicy := skillsettings.Empty().WithDisabled(
 		skillsettings.Ref{Source: "user:pips/SKILL.md", Name: "review"}, true,
@@ -124,7 +125,7 @@ func TestIntegrationGenerationAdoptsInstalledActivationWithCleanupError(t *testi
 	require.ErrorIs(t, activationErr, stopErr)
 
 	generation := newIntegrationGeneration(
-		1, activation, nil, resourceResultForGenerationTest(), skillsettings.Empty(), "", agentplugin.Result{},
+		1, activation, nil, resourceResultForGenerationTest(), agentprofile.Registry{}, skillsettings.Empty(), "", agentplugin.Result{},
 	)
 	// The non-nil activation is the adopted complete generation. The prior
 	// cleanup error is reported separately by Activate and does not cause the
@@ -155,7 +156,7 @@ Instructions.
 	require.NoError(t, err)
 
 	generation := newIntegrationGeneration(
-		1, nil, nil, resource.Result{}, skillsettings.Empty(), "", plugins,
+		1, nil, nil, resource.Result{}, agentprofile.Registry{}, skillsettings.Empty(), "", plugins,
 	)
 	entries := generation.skillEntries(nil)
 	require.Len(t, entries, 1)

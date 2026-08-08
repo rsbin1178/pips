@@ -21,6 +21,7 @@ func TestDefaults(t *testing.T) {
 	assert.Empty(t, cfg.Providers)
 	assert.Empty(t, cfg.Models)
 	assert.False(t, cfg.ToolSearch)
+	assert.False(t, cfg.DynamicSubagents)
 	assert.Equal(t, config.ModeAgent, cfg.Mode)
 	assert.Equal(t, config.ThemeAuto, cfg.TUI.Theme)
 	assert.Equal(t, statusline.Default(), cfg.TUI.StatusLine)

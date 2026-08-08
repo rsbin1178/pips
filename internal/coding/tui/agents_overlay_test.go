@@ -396,6 +396,50 @@ func TestAgentsRouteCancelsSelectedChild(t *testing.T) {
 	assert.False(t, model.route.controlling)
 }
 
+func TestAgentsRouteLibraryShowsSafeDefinitionMetadata(t *testing.T) {
+	t.Parallel()
+
+	controller := newOverlayController(readyState())
+	controller.agentLibrary = coding.AgentLibrary{Entries: []coding.AgentLibraryEntry{{
+		ID:            "go-checker",
+		Kind:          "custom",
+		Scope:         "user:pips",
+		Source:        "user:pips/go-checker.md",
+		Status:        "available",
+		Name:          "Go checker",
+		Description:   "Inspect one bounded target.",
+		DeclaredTools: []string{"tool:read", "tool:grep"},
+		RequiredTools: []string{"tool:read"},
+		Available:     true,
+	}, {
+		ID:          "private-model-only",
+		Kind:        "custom",
+		Scope:       "user:pips",
+		Source:      "user:pips/private-model-only.md",
+		Status:      "available",
+		Name:        "Model-only helper",
+		Unavailable: "not user-invocable",
+	}}}
+	model := readyModelWithController(t, controller, true)
+	driveModelCommands(t, model, model.openAgentsRoute())
+
+	_, command := model.Update(tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
+	require.Nil(t, command)
+	assert.Equal(t, agentsTabLibrary, model.route.agentsTab)
+	content := ansi.Strip(model.View().Content)
+	assert.Contains(t, content, "Agents · Library")
+	assert.Contains(t, content, "Go checker")
+	assert.Contains(t, content, "user:pips/go-checker.md")
+	assert.Contains(t, content, "declared tools: tool:read, tool:grep")
+	assert.Contains(t, content, "not user-invocable")
+	assert.Contains(t, content, "intersected with active session authority")
+	assert.NotContains(t, content, "PRIVATE INSTRUCTIONS")
+
+	_, command = model.Update(tea.KeyPressMsg{Code: 'r', Mod: tea.ModCtrl})
+	require.Nil(t, command)
+	assert.Equal(t, agentsTabRuns, model.route.agentsTab)
+}
+
 func testSubagentRouteContent(model *Model, detail subagent.Detail) string {
 	state := testSubagentState(detail)
 

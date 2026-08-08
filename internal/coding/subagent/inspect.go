@@ -1,3 +1,4 @@
+//nolint:wsl_v5,gocyclo // Durable/live child inspection keeps lineage and recovery checks adjacent.
 package subagent
 
 import (
@@ -142,7 +143,7 @@ func (m *Manager) inspectChild(
 		return Detail{}, fmt.Errorf("coding subagent: load transcript: %w", err)
 	}
 
-	detail := Detail{Summary: selected, Transcript: contextValue.Messages}
+	detail := Detail{Summary: selected, Plan: value.Plan.Clone(), Transcript: contextValue.Messages}
 	if selected.State == StateCreated || selected.State == StateRunning {
 		detail = m.overlayLiveDetail(detail)
 	}
@@ -153,12 +154,19 @@ func (m *Manager) inspectChild(
 			return Detail{}, fmt.Errorf("%w: successful child has no final assistant result", ErrInvalid)
 		}
 
-		spec, specErr := specFor(selected.Role)
-		if specErr != nil {
-			return Detail{}, specErr
+		if role := selected.Identity.LegacyRole(); role != "" {
+			spec, specErr := specFor(role)
+			if specErr != nil {
+				return Detail{}, specErr
+			}
+			detail.Result, err = spec.decode(text, value.Limits.limits())
+		} else {
+			validator, validatorErr := NewOutputValidator(value.Plan.Output, value.Plan.Limits)
+			if validatorErr != nil {
+				return Detail{}, validatorErr
+			}
+			detail.Result, err = validator.Validate(text)
 		}
-
-		detail.Result, err = spec.decode(text, value.Limits.limits())
 		if err != nil {
 			return Detail{}, fmt.Errorf("%w: persisted child result: %w", ErrInvalid, err)
 		}
@@ -197,8 +205,9 @@ func (m *Manager) childHandle(
 func validateLineage(parent, child session.Metadata, value record) error {
 	if child.Kind != session.KindSubagent || child.WorkspaceID != parent.WorkspaceID ||
 		child.ParentSessionID != parent.ID || value.ChildSessionID != child.ID ||
-		value.ParentSessionID != parent.ID || value.Role != Role(child.Agent) ||
-		value.ParentRunID != child.ParentRunID {
+		value.ParentSessionID != parent.ID || value.Identity.ID != child.Agent ||
+		value.ParentRunID != child.ParentRunID ||
+		!matchesSessionIdentity(child.SubagentIdentity, value.Plan) {
 		return fmt.Errorf("%w: child lineage mismatch", ErrInvalid)
 	}
 
@@ -210,6 +219,7 @@ func summaryFrom(meta session.Metadata, value record) Summary {
 		ChildSessionID: meta.ID,
 		Ownership:      executionOwnership(value),
 		Delivery:       value.Delivery,
+		Identity:       value.Identity,
 		Role:           value.Role,
 		State:          value.State,
 		TaskPreview:    value.TaskPreview,
@@ -238,7 +248,10 @@ func finalAssistantText(messages []ai.Message) (string, bool) {
 func cloneDetail(value Detail) Detail {
 	value.Transcript = cloneTranscript(value.Transcript)
 	value.Activity = cloneActivity(value.Activity)
-	value.Result = cloneResult(Result{Role: value.Summary.Role, Value: value.Result}).Value
+	value.Plan = value.Plan.Clone()
+	value.Result = cloneResult(Result{
+		Identity: value.Summary.Identity, Role: value.Summary.Role, Value: value.Result,
+	}).Value
 
 	return value
 }
