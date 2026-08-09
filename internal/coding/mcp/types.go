@@ -61,11 +61,26 @@ const (
 	TransportStreamableHTTP TransportType = "streamable_http"
 )
 
+// Visibility controls which Coding model catalog may describe one configured
+// server. It is application policy, not MCP protocol metadata.
+type Visibility string
+
+const (
+	// VisibilityAmbient exposes tools to the parent Coding interaction and to
+	// custom children selected through the ordinary capability intersection.
+	VisibilityAmbient Visibility = "ambient"
+	// VisibilityAgentPrivate keeps tools out of the parent catalog. A custom
+	// Agent must bind the exact server ID and fingerprint before its tools can
+	// enter that child's capability intersection.
+	VisibilityAgentPrivate Visibility = "agent_private"
+)
+
 // Definition is one validated MCP server declaration.
 type Definition struct {
 	ID             string
 	Scope          Scope
 	Transport      TransportType
+	Visibility     Visibility
 	Command        string
 	Args           []string
 	Environment    []execution.EnvVar
@@ -93,6 +108,7 @@ func (d Definition) Fingerprint() string {
 	canonical := struct {
 		ID          string             `json:"id"`
 		Transport   TransportType      `json:"transport"`
+		Visibility  Visibility         `json:"visibility,omitempty"`
 		Command     string             `json:"command,omitempty"`
 		Args        []string           `json:"args,omitempty"`
 		Environment []execution.EnvVar `json:"environment,omitempty"`
@@ -103,7 +119,7 @@ func (d Definition) Fingerprint() string {
 		Headers     []HTTPHeader       `json:"headers,omitempty"`
 		TimeoutNS   int64              `json:"connect_timeout_ns"`
 	}{
-		ID: d.ID, Transport: d.Transport, Command: d.Command,
+		ID: d.ID, Transport: d.Transport, Visibility: d.privateVisibility(), Command: d.Command,
 		Args: slices.Clone(d.Args), Environment: environment,
 		WorkingDir: d.WorkingDir, PluginRoot: d.PluginRoot, PluginData: d.PluginData,
 		URL: d.URL, Headers: slices.Clone(d.Headers), TimeoutNS: int64(d.ConnectTimeout),
@@ -113,6 +129,27 @@ func (d Definition) Fingerprint() string {
 	sum := sha256.Sum256(encoded)
 
 	return hex.EncodeToString(sum[:])
+}
+
+func (d Definition) privateVisibility() Visibility {
+	if d.effectiveVisibility() == VisibilityAgentPrivate {
+		return VisibilityAgentPrivate
+	}
+
+	return ""
+}
+
+// EffectiveVisibility returns the normalized visibility used by validation,
+// fingerprinting, and catalog filtering. The zero value preserves the
+// pre-private-MCP ambient behavior for programmatic callers.
+func (d Definition) EffectiveVisibility() Visibility { return d.effectiveVisibility() }
+
+func (d Definition) effectiveVisibility() Visibility {
+	if d.Visibility == "" {
+		return VisibilityAmbient
+	}
+
+	return d.Visibility
 }
 
 func cloneDefinition(definition Definition) Definition {
@@ -132,6 +169,9 @@ func validateDefinition(definition Definition) error {
 
 	if definition.ConnectTimeout <= 0 || definition.ConnectTimeout > time.Minute {
 		return errors.New("connect timeout must be positive and at most one minute")
+	}
+	if visibility := definition.effectiveVisibility(); visibility != VisibilityAmbient && visibility != VisibilityAgentPrivate {
+		return errors.New("unsupported MCP visibility")
 	}
 
 	switch definition.Scope {

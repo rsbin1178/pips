@@ -10,6 +10,7 @@ import (
 	"github.com/rsbin/pips/agent/extension"
 	"github.com/rsbin/pips/internal/coding/agentplugin"
 	"github.com/rsbin/pips/internal/coding/agentprofile"
+	"github.com/rsbin/pips/internal/coding/hooks"
 	codingmcp "github.com/rsbin/pips/internal/coding/mcp"
 	"github.com/rsbin/pips/internal/coding/resource"
 	"github.com/rsbin/pips/internal/coding/skillsettings"
@@ -33,6 +34,7 @@ type IntegrationGeneration struct {
 	skillPolicy         skillsettings.Snapshot
 	projectInstructions string
 	agentPlugins        agentplugin.Result
+	hookDefinitions     []hooks.Definition
 
 	mu        sync.Mutex
 	refs      int // Runtime ownership plus interaction leases.
@@ -51,6 +53,7 @@ func newIntegrationGeneration(
 	skillPolicy skillsettings.Snapshot,
 	projectInstructions string,
 	agentPlugins agentplugin.Result,
+	hookDefinitions []hooks.Definition,
 ) *IntegrationGeneration {
 	return &IntegrationGeneration{
 		id:                  id,
@@ -61,6 +64,7 @@ func newIntegrationGeneration(
 		skillPolicy:         skillPolicy.Clone(),
 		projectInstructions: projectInstructions,
 		agentPlugins:        agentPlugins,
+		hookDefinitions:     slices.Clone(hookDefinitions),
 		refs:                1,
 	}
 }
@@ -162,6 +166,7 @@ func (g *IntegrationGeneration) handoff(
 		skillPolicy:         skillPolicy.Clone(),
 		projectInstructions: g.projectInstructions,
 		agentPlugins:        g.agentPlugins,
+		hookDefinitions:     slices.Clone(g.hookDefinitions),
 		refs:                1,
 	}
 	g.activation = nil
@@ -169,6 +174,7 @@ func (g *IntegrationGeneration) handoff(
 	g.resources = resource.Result{}
 	g.agentProfiles = agentprofile.Registry{}
 	g.agentPlugins = agentplugin.Result{}
+	g.hookDefinitions = nil
 	g.refs = 0
 	g.retired = true
 
@@ -258,6 +264,14 @@ func (g *IntegrationGeneration) agentPluginSnapshot() agentplugin.Result {
 	}
 
 	return g.agentPlugins
+}
+
+func (g *IntegrationGeneration) hookDefinitionsSnapshot() []hooks.Definition {
+	if g == nil {
+		return nil
+	}
+
+	return slices.Clone(g.hookDefinitions)
 }
 
 func (g *IntegrationGeneration) skillEntries(base []extension.SkillEntry) []extension.SkillEntry {

@@ -245,6 +245,18 @@ func decodeDefinitionFrontmatter(front string, limits Limits) (Definition, error
 				return Definition{}, err
 			}
 			definition.Delegation = decoded
+		case "mcp":
+			decoded, err := decodePrivateResourceSelection(value, "mcp", limits.MaxSelectors)
+			if err != nil {
+				return Definition{}, err
+			}
+			definition.MCP = MCPSelection{Private: decoded}
+		case "hooks":
+			decoded, err := decodePrivateResourceSelection(value, "hooks", limits.MaxSelectors)
+			if err != nil {
+				return Definition{}, err
+			}
+			definition.Hooks = HookSelection{Private: decoded}
 		case "output":
 			decoded, err := decodeOutput(value, limits)
 			if err != nil {
@@ -369,11 +381,65 @@ func validModelSelection(value string, maximum int) bool {
 
 func unsupportedProfileField(value string) bool {
 	switch value {
-	case "permissions", "permissionMode", "sandbox", "mcpServers", "hooks", "env", "command":
+	case "permissions", "permissionMode", "sandbox", "mcpServers", "env", "command":
 		return true
 	default:
 		return false
 	}
+}
+
+func decodePrivateResourceSelection(node *yaml.Node, field string, maximum int) ([]string, error) {
+	entries, err := mappingEntries(node, field)
+	if err != nil {
+		return nil, err
+	}
+	var values []string
+	for index := 0; index < len(entries); index += 2 {
+		key := entries[index].Value
+		if key != "private" {
+			return nil, profileErrorf("unknown_field", "%s field %q is not recognized", field, key)
+		}
+		values, err = yamlStringList(entries[index+1], field+".private")
+		if err != nil {
+			return nil, err
+		}
+	}
+	if len(values) > maximum {
+		return nil, profileErrorf("selector_limit", "%s.private exceeds the selector limit", field)
+	}
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if !validPrivateResourceID(value) {
+			return nil, profileErrorf("invalid_integration", "%s.private contains an invalid ID", field)
+		}
+		if _, duplicate := seen[value]; duplicate {
+			return nil, profileErrorf("invalid_integration", "%s.private contains duplicate ID %q", field, value)
+		}
+		seen[value] = struct{}{}
+	}
+
+	return values, nil
+}
+
+func validPrivateResourceID(value string) bool {
+	if value == "" || len(value) > 64 {
+		return false
+	}
+	separator := true
+	for _, current := range value {
+		if current >= 'a' && current <= 'z' || current >= '0' && current <= '9' {
+			separator = false
+			continue
+		}
+		if (current == '-' || current == '_') && !separator {
+			separator = true
+			continue
+		}
+
+		return false
+	}
+
+	return !separator
 }
 
 func decodeDelegationSelection(node *yaml.Node, limits Limits) (DelegationSelection, error) {

@@ -27,6 +27,7 @@ func FuzzParseDefinition(f *testing.F) {
 	f.Add("---\nschema: pips.agent/v1alpha1\nname: Test\ndescription: Test\nmcpServers: {private: {command: sh}}\n---\nbody")
 	f.Add("---\nschema: pips.agent/v1alpha1\nname: Test\ndescription: Test\ndelegation:\n  allow: [reviewer, test-runner]\n---\nbody")
 	f.Add("---\nschema: pips.agent/v1alpha1\nname: Test\ndescription: Test\ndelegation:\n  allow: [reviewer, ../escape]\n---\nbody")
+	f.Add("---\nschema: pips.agent/v1alpha1\nname: Test\ndescription: Test\nmcp:\n  private: [source_control]\nhooks:\n  private: [child-policy]\n---\nbody")
 	f.Add(deepDefinitionSeed(limits.MaxSchemaDepth + 2))
 	f.Add(wideDefinitionSeed(limits.MaxSelectors + 2))
 	f.Add(strings.Repeat("x", int(limits.MaxDefinitionBytes)+1))
@@ -119,6 +120,8 @@ func assertFuzzDefinition(t *testing.T, definition Definition, limits Limits) {
 		len(definition.Instructions) == 0 || len(definition.Instructions) > limits.MaxBodyBytes ||
 		len(definition.Tools.Allow)+len(definition.Tools.Require) > limits.MaxSelectors ||
 		len(definition.Delegation.Allow) > limits.MaxSelectors ||
+		len(definition.MCP.Private) > limits.MaxSelectors ||
+		len(definition.Hooks.Private) > limits.MaxSelectors ||
 		len(definition.Skills.Allow)+len(definition.Skills.Preload) > limits.MaxSkills ||
 		len(definition.Output.Schema) > limits.MaxSchemaBytes ||
 		!utf8.ValidString(definition.Name) || !utf8.ValidString(definition.Description) ||
@@ -171,6 +174,14 @@ func mutateDefinitionClone(definition *Definition) {
 
 	if len(definition.Delegation.Allow) > 0 {
 		definition.Delegation.Allow[0] = "mutated"
+	}
+
+	if len(definition.MCP.Private) > 0 {
+		definition.MCP.Private[0] = "mutated"
+	}
+
+	if len(definition.Hooks.Private) > 0 {
+		definition.Hooks.Private[0] = "mutated"
 	}
 
 	if len(definition.Output.Schema) > 0 {

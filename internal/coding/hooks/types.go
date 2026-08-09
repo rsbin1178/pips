@@ -90,6 +90,17 @@ const (
 	ScopeProject Scope = "project"
 )
 
+// Visibility controls whether a trusted definition is mandatory ambient
+// policy or can only be added to one exact custom child plan.
+type Visibility string
+
+const (
+	// VisibilityAmbient makes a Hook mandatory ambient policy.
+	VisibilityAmbient Visibility = "ambient"
+	// VisibilityAgentPrivate makes a Hook selectable by exact custom child ID.
+	VisibilityAgentPrivate Visibility = "agent_private"
+)
+
 // Status is the local trust state of one loaded handler.
 type Status string
 
@@ -125,13 +136,15 @@ func DefaultLimits() Limits {
 
 // Definition is one immutable, validated command handler.
 type Definition struct {
-	Reference string
-	Scope     Scope
-	Source    string
-	Event     Event
-	Matcher   string
-	Command   string
-	Timeout   time.Duration
+	ID         string
+	Reference  string
+	Scope      Scope
+	Source     string
+	Visibility Visibility
+	Event      Event
+	Matcher    string
+	Command    string
+	Timeout    time.Duration
 
 	matcher *regexp.Regexp
 }
@@ -139,18 +152,40 @@ type Definition struct {
 // Fingerprint returns the normalized semantic SHA-256 identity of Definition.
 func (d Definition) Fingerprint() string {
 	encoded, _ := json.Marshal(struct {
-		Event     Event  `json:"event"`
-		Matcher   string `json:"matcher,omitempty"`
-		Type      string `json:"type"`
-		Command   string `json:"command"`
-		TimeoutNS int64  `json:"timeout_ns"`
+		ID         string     `json:"id,omitempty"`
+		Visibility Visibility `json:"visibility,omitempty"`
+		Event      Event      `json:"event"`
+		Matcher    string     `json:"matcher,omitempty"`
+		Type       string     `json:"type"`
+		Command    string     `json:"command"`
+		TimeoutNS  int64      `json:"timeout_ns"`
 	}{
-		Event: d.Event, Matcher: d.Matcher, Type: "command", Command: d.Command,
+		ID: d.ID, Visibility: d.privateVisibility(), Event: d.Event,
+		Matcher: d.Matcher, Type: "command", Command: d.Command,
 		TimeoutNS: d.Timeout.Nanoseconds(),
 	})
 	sum := sha256.Sum256(encoded)
 
 	return hex.EncodeToString(sum[:])
+}
+
+func (d Definition) privateVisibility() Visibility {
+	if d.effectiveVisibility() == VisibilityAgentPrivate {
+		return VisibilityAgentPrivate
+	}
+
+	return ""
+}
+
+// EffectiveVisibility normalizes the zero value to the legacy ambient policy.
+func (d Definition) EffectiveVisibility() Visibility { return d.effectiveVisibility() }
+
+func (d Definition) effectiveVisibility() Visibility {
+	if d.Visibility == "" {
+		return VisibilityAmbient
+	}
+
+	return d.Visibility
 }
 
 // Matches reports whether Definition applies to one lifecycle invocation.
@@ -335,7 +370,52 @@ func validateDefinition(definition Definition, limits Limits) error {
 		definition.Event == EventSessionEnd && definition.Timeout > maximumEndTimeout {
 		return errors.New("invalid timeout")
 	}
+
+	visibility := definition.effectiveVisibility()
+	if visibility != VisibilityAmbient && visibility != VisibilityAgentPrivate {
+		return errors.New("invalid visibility")
+	}
+
+	if visibility == VisibilityAmbient && definition.ID != "" {
+		return errors.New("ambient hook cannot set an ID")
+	}
+
+	if visibility == VisibilityAgentPrivate {
+		if !validPrivateID(definition.ID) {
+			return errors.New("agent-private hook requires a canonical ID")
+		}
+
+		switch definition.Event {
+		case EventPreToolUse, EventPermissionRequest, EventPostToolUse:
+		default:
+			return errors.New("agent-private hook event is not child-scoped")
+		}
+	}
 	return nil
+}
+
+func validPrivateID(value string) bool {
+	if value == "" || len(value) > 64 {
+		return false
+	}
+
+	separator := true
+
+	for _, current := range value {
+		if current >= 'a' && current <= 'z' || current >= '0' && current <= '9' {
+			separator = false
+			continue
+		}
+
+		if (current == '-' || current == '_') && !separator {
+			separator = true
+			continue
+		}
+
+		return false
+	}
+
+	return !separator
 }
 
 func compileDefinition(definition Definition, limits Limits) (Definition, error) {

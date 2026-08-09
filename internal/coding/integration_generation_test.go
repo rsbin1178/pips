@@ -9,10 +9,12 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/rsbin/pips/agent/extension"
 	"github.com/rsbin/pips/internal/coding/agentplugin"
 	"github.com/rsbin/pips/internal/coding/agentprofile"
+	"github.com/rsbin/pips/internal/coding/hooks"
 	"github.com/rsbin/pips/internal/coding/resource"
 	"github.com/rsbin/pips/internal/coding/skillsettings"
 	"github.com/stretchr/testify/assert"
@@ -61,7 +63,7 @@ func TestIntegrationGenerationDrainsLeasesBeforeClosing(t *testing.T) {
 	require.NoError(t, err)
 
 	generation := newIntegrationGeneration(
-		1, activation, nil, resourceResultForGenerationTest(), agentprofile.Registry{}, skillsettings.Empty(), "", agentplugin.Result{},
+		1, activation, nil, resourceResultForGenerationTest(), agentprofile.Registry{}, skillsettings.Empty(), "", agentplugin.Result{}, nil,
 	)
 	require.NoError(t, generation.acquire())
 
@@ -96,6 +98,7 @@ func TestIntegrationGenerationConcurrentRetireWaitsForFinalLease(t *testing.T) {
 		skillsettings.Empty(),
 		"",
 		agentplugin.Result{},
+		nil,
 	)
 	for range leases {
 		require.NoError(t, generation.acquire())
@@ -140,7 +143,7 @@ func TestIntegrationGenerationHandoffPublishesNewPolicy(t *testing.T) {
 	require.NoError(t, err)
 
 	previous := newIntegrationGeneration(
-		1, activation, nil, resourceResultForGenerationTest(), agentprofile.Registry{}, skillsettings.Empty(), "old", agentplugin.Result{},
+		1, activation, nil, resourceResultForGenerationTest(), agentprofile.Registry{}, skillsettings.Empty(), "old", agentplugin.Result{}, nil,
 	)
 	nextPolicy := skillsettings.Empty().WithDisabled(
 		skillsettings.Ref{Source: "user:pips/SKILL.md", Name: "review"}, true,
@@ -179,7 +182,7 @@ func TestIntegrationGenerationAdoptsInstalledActivationWithCleanupError(t *testi
 	require.ErrorIs(t, activationErr, stopErr)
 
 	generation := newIntegrationGeneration(
-		1, activation, nil, resourceResultForGenerationTest(), agentprofile.Registry{}, skillsettings.Empty(), "", agentplugin.Result{},
+		1, activation, nil, resourceResultForGenerationTest(), agentprofile.Registry{}, skillsettings.Empty(), "", agentplugin.Result{}, nil,
 	)
 	// The non-nil activation is the adopted complete generation. The prior
 	// cleanup error is reported separately by Activate and does not cause the
@@ -210,12 +213,37 @@ Instructions.
 	require.NoError(t, err)
 
 	generation := newIntegrationGeneration(
-		1, nil, nil, resource.Result{}, agentprofile.Registry{}, skillsettings.Empty(), "", plugins,
+		1, nil, nil, resource.Result{}, agentprofile.Registry{}, skillsettings.Empty(), "", plugins, nil,
 	)
 	entries := generation.skillEntries(nil)
 	require.Len(t, entries, 1)
 	assert.Equal(t, "portable", entries[0].Skill.Name)
 	assert.Contains(t, entries[0].Skill.Source, "agent-plugin:")
+}
+
+func TestIntegrationGenerationFreezesHooksAcrossHandoff(t *testing.T) {
+	t.Parallel()
+
+	definition := hooks.Definition{
+		ID: "child-policy", Reference: "user/private/child-policy", Scope: hooks.ScopeUser,
+		Source: "hooks.json", Visibility: hooks.VisibilityAgentPrivate,
+		Event: hooks.EventPreToolUse, Command: "true", Timeout: time.Second,
+	}
+	generation := newIntegrationGeneration(
+		1, nil, nil, resource.Result{}, agentprofile.Registry{}, skillsettings.Empty(), "", agentplugin.Result{},
+		[]hooks.Definition{definition},
+	)
+	snapshot := generation.hookDefinitionsSnapshot()
+	require.Len(t, snapshot, 1)
+	snapshot[0].ID = "mutated"
+	assert.Equal(t, "child-policy", generation.hookDefinitionsSnapshot()[0].ID)
+
+	next, err := generation.handoff(2, skillsettings.Empty())
+	require.NoError(t, err)
+	require.Len(t, next.hookDefinitionsSnapshot(), 1)
+	assert.Equal(t, definition.Fingerprint(), next.hookDefinitionsSnapshot()[0].Fingerprint())
+	require.NoError(t, generation.retire(t.Context()))
+	require.NoError(t, next.retire(t.Context()))
 }
 
 func TestRuntimeReloadRejectsCandidateWithoutPublishing(t *testing.T) {

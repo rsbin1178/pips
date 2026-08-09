@@ -266,6 +266,41 @@ Delegate carefully.
 	}
 }
 
+func TestParsePrivateIntegrationReferencesIsStrictAndDetached(t *testing.T) {
+	t.Parallel()
+
+	definition, err := ParseOneShot("private-agent", []byte(`---
+schema: pips.agent/v1alpha1
+name: Private Agent
+description: Uses configured private integrations
+mcp:
+  private: [source_control]
+hooks:
+  private: [child-policy]
+---
+Use only the configured integrations.
+`), DefaultLimits())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"source_control"}, definition.MCP.Private)
+	assert.Equal(t, []string{"child-policy"}, definition.Hooks.Private)
+	cloned := definition.Clone()
+	cloned.MCP.Private[0] = "changed"
+	cloned.Hooks.Private[0] = "changed"
+	assert.Equal(t, "source_control", definition.MCP.Private[0])
+	assert.Equal(t, "child-policy", definition.Hooks.Private[0])
+
+	for _, body := range []string{
+		"mcp:\n  private: [same, same]",
+		"hooks:\n  private: [Bad-ID]",
+		"mcp:\n  servers: [source-control]",
+		"hooks:\n  private: {id: child-policy}",
+	} {
+		data := []byte("---\nschema: pips.agent/v1alpha1\nname: Invalid\ndescription: Invalid\n" + body + "\n---\nbody\n")
+		_, err = ParseOneShot("private-agent", data, DefaultLimits())
+		require.ErrorIs(t, err, ErrInvalid, body)
+	}
+}
+
 func TestLoadRejectsUnsafeUserRootAndProjectSymlinkEscape(t *testing.T) {
 	t.Run("unsafe user root", func(t *testing.T) {
 		fixture := newProfileFixture(t)
