@@ -1,11 +1,51 @@
 package subagent
 
 import (
+	"context"
 	"fmt"
 	"maps"
 	"sync"
 	"sync/atomic"
 )
+
+// AdmissionOutcome is the bounded result of one shared-budget reservation.
+type AdmissionOutcome string
+
+const (
+	// AdmissionOutcomeAccepted means the request reserved an active slot.
+	AdmissionOutcomeAccepted AdmissionOutcome = "accepted"
+	// AdmissionOutcomeRejected means the shared budget refused the request.
+	AdmissionOutcomeRejected AdmissionOutcome = "rejected"
+)
+
+// AdmissionReason is a low-cardinality rejection classification.
+type AdmissionReason string
+
+const (
+	// AdmissionReasonBusy preserves the single-slot compatibility reason.
+	AdmissionReasonBusy AdmissionReason = "busy"
+	// AdmissionReasonCapacity means the active tree limit was exhausted.
+	AdmissionReasonCapacity AdmissionReason = "capacity"
+	// AdmissionReasonSpawnLimit means the root cumulative limit was exhausted.
+	AdmissionReasonSpawnLimit AdmissionReason = "spawn_limit"
+	// AdmissionReasonClosed means the Manager no longer accepts work.
+	AdmissionReasonClosed AdmissionReason = "closed"
+	// AdmissionReasonInvalid means the reservation input was malformed.
+	AdmissionReasonInvalid AdmissionReason = "invalid"
+)
+
+// AdmissionEvent is one content-free shared-budget decision. It deliberately
+// excludes Agent, Session, run, Tool-call, task, and root-interaction identity.
+type AdmissionEvent struct {
+	Outcome         AdmissionOutcome
+	Reason          AdmissionReason
+	Delivery        Delivery
+	DelegationDepth int
+}
+
+// AdmissionObserver receives a synchronous, non-authoritative budget signal.
+// Manager isolates observer panics and never lets observation change admission.
+type AdmissionObserver func(context.Context, AdmissionEvent)
 
 const (
 	defaultMaxConcurrent = 4

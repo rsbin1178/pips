@@ -3,6 +3,7 @@ package coding
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"iter"
@@ -734,6 +735,41 @@ func TestRuntimeTelemetryObserverFailuresAreIsolated(t *testing.T) {
 	assert.Equal(t, 1, panicCalls)
 	assert.Contains(t, telemetryTypes(observed), EventSessionOpened)
 	assert.Contains(t, telemetryTypes(observed), EventInteractionCompleted)
+}
+
+func TestRuntimeProjectsContentFreeSubagentAdmissionTelemetry(t *testing.T) {
+	t.Parallel()
+
+	observed := make([]TelemetryEvent, 0, 1)
+	runtime := openTestRuntimeWithTelemetry(
+		t,
+		newRuntimeModel(runtimeTextResponse("unused")),
+		TelemetryObserverFunc(func(_ context.Context, event TelemetryEvent) error {
+			if event.Signal == TelemetrySignalSubagentAdmission {
+				observed = append(observed, event)
+			}
+
+			return nil
+		}),
+	)
+	runtime.observeSubagentAdmission(t.Context(), subagent.AdmissionEvent{
+		Outcome:         subagent.AdmissionOutcomeRejected,
+		Reason:          subagent.AdmissionReasonCapacity,
+		Delivery:        subagent.DeliveryBackground,
+		DelegationDepth: 2,
+	})
+
+	require.Len(t, observed, 1)
+	assert.Equal(t, TelemetrySignalSubagentAdmission, observed[0].Signal)
+	assert.Equal(t, subagent.AdmissionOutcomeRejected, observed[0].AdmissionOutcome)
+	assert.Equal(t, subagent.AdmissionReasonCapacity, observed[0].AdmissionReason)
+	assert.Equal(t, subagent.DeliveryBackground, observed[0].SubagentDelivery)
+	assert.Equal(t, 2, observed[0].SubagentDepth)
+	encoded, err := json.Marshal(observed[0])
+	require.NoError(t, err)
+	for _, forbidden := range []string{"session_id", "run_id", "agent_id", "task", "path", "command"} {
+		assert.NotContains(t, string(encoded), forbidden)
+	}
 }
 
 func TestRuntimeTelemetrySessionOpenFailureBecomesSnapshotDiagnostic(t *testing.T) {

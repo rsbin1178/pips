@@ -818,6 +818,209 @@ func TestManagerEnforcesConcurrentCapacity(t *testing.T) {
 	}
 }
 
+func TestManagerObservesBoundedAdmissionDecisions(t *testing.T) {
+	t.Parallel()
+
+	var (
+		mu     sync.Mutex
+		events []AdmissionEvent
+	)
+	model := &blockingTestModel{entered: make(chan struct{})}
+	fixture := newManagerFixtureWithConfig(
+		t,
+		model,
+		ExecutionOptions{MaxConcurrent: 2},
+		func(config *Config) {
+			config.AdmissionObserver = func(_ context.Context, event AdmissionEvent) {
+				mu.Lock()
+				events = append(events, event)
+				mu.Unlock()
+			}
+		},
+	)
+	executions := make([]*Execution, 0, 2)
+	for range 2 {
+		execution, err := fixture.manager.Start(t.Context(), Request{
+			Role: RoleExplore, Task: "Wait without disclosing this task.",
+		}, nil)
+		require.NoError(t, err)
+		executions = append(executions, execution)
+	}
+	_, err := fixture.manager.Start(t.Context(), Request{
+		Role: RolePlan, Task: "Rejected task must not reach telemetry.",
+	}, nil)
+	require.ErrorIs(t, err, ErrCapacity)
+
+	mu.Lock()
+	observed := slices.Clone(events)
+	mu.Unlock()
+	require.Len(t, observed, 3)
+	for _, event := range observed {
+		assert.Equal(t, DeliveryForeground, event.Delivery)
+		assert.Zero(t, event.DelegationDepth)
+	}
+	assert.Equal(t, AdmissionOutcomeAccepted, observed[0].Outcome)
+	assert.Empty(t, observed[0].Reason)
+	assert.Equal(t, AdmissionOutcomeAccepted, observed[1].Outcome)
+	assert.Equal(t, AdmissionOutcomeRejected, observed[2].Outcome)
+	assert.Equal(t, AdmissionReasonCapacity, observed[2].Reason)
+
+	for _, execution := range executions {
+		execution.Cancel()
+	}
+	for _, execution := range executions {
+		_, waitErr := execution.Wait(t.Context())
+		require.ErrorIs(t, waitErr, context.Canceled)
+	}
+}
+
+func TestManagerAdmissionObservationIsPanicIsolated(t *testing.T) {
+	t.Parallel()
+
+	model := &testModel{responses: []*ai.Response{
+		responseText(`{"summary":"done","evidence":[],"unknowns":[]}`),
+	}}
+	fixture := newManagerFixtureWithConfig(
+		t,
+		model,
+		ExecutionOptions{},
+		func(config *Config) {
+			config.AdmissionObserver = func(context.Context, AdmissionEvent) {
+				panic("private observer failure")
+			}
+		},
+	)
+	execution, err := fixture.manager.Start(t.Context(), Request{
+		Role: RoleExplore, Task: "Complete despite observer failure.",
+	}, nil)
+	require.NoError(t, err)
+	result, err := execution.Wait(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, OutcomeSucceeded, result.Outcome)
+}
+
+func TestManagerObservesBusyAndInvalidAdmissionReasons(t *testing.T) {
+	t.Parallel()
+
+	events := make([]AdmissionEvent, 0, 3)
+	fixture := newManagerFixtureWithConfig(
+		t,
+		&testModel{},
+		ExecutionOptions{MaxConcurrent: 1},
+		func(config *Config) {
+			config.AdmissionObserver = func(_ context.Context, event AdmissionEvent) {
+				events = append(events, event)
+			}
+		},
+	)
+	permit, err := fixture.manager.reserveStart(t.Context(), Request{
+		Delivery: DeliveryForeground,
+	})
+	require.NoError(t, err)
+	_, err = fixture.manager.reserveStart(t.Context(), Request{
+		Delivery: DeliveryForeground,
+	})
+	require.ErrorIs(t, err, ErrBusy)
+	fixture.manager.finishStarting(permit, false)
+	_, err = fixture.manager.reserveStart(t.Context(), Request{
+		Delivery: Delivery("unexpected"),
+	})
+	require.ErrorIs(t, err, ErrInvalid)
+
+	require.Len(t, events, 3)
+	assert.Equal(t, AdmissionOutcomeAccepted, events[0].Outcome)
+	assert.Equal(t, AdmissionReasonBusy, events[1].Reason)
+	assert.Equal(t, AdmissionReasonInvalid, events[2].Reason)
+}
+
+func TestNestedManagerInheritsAdmissionObserverAndReportsDepth(t *testing.T) {
+	t.Parallel()
+
+	var observed []AdmissionEvent
+	model := &testModel{}
+	fixture := newManagerFixtureWithConfig(
+		t,
+		model,
+		ExecutionOptions{MaxDepth: 2},
+		func(config *Config) {
+			config.AdmissionObserver = func(_ context.Context, event AdmissionEvent) {
+				observed = append(observed, event)
+			}
+		},
+	)
+	child, err := fixture.repository.Create(t.Context(), session.CreateOptions{
+		WorkspaceID:   fixture.parent.Metadata().WorkspaceID,
+		WorkspacePath: fixture.parent.Metadata().WorkspacePath,
+		Kind:          session.KindSubagent, ParentSessionID: fixture.parent.Metadata().ID,
+		ParentRunID: "parent-run", Agent: "nested-parent",
+	})
+	require.NoError(t, err)
+	nested, err := New(Config{
+		Context: t.Context(), Parent: child, Model: model,
+		Share: fixture.manager, DelegationDepth: 2,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, nested.Close(context.Background()))
+		require.NoError(t, child.Close())
+	})
+
+	permit, err := nested.reserveStart(t.Context(), Request{
+		Delivery:  DeliveryForeground,
+		Ownership: Ownership{RootInteractionID: "root-1"},
+	})
+	require.NoError(t, err)
+	nested.finishStarting(permit, false)
+
+	require.Len(t, observed, 1)
+	assert.Equal(t, AdmissionOutcomeAccepted, observed[0].Outcome)
+	assert.Equal(t, DeliveryForeground, observed[0].Delivery)
+	assert.Equal(t, 2, observed[0].DelegationDepth)
+}
+
+func TestManagerObservesSpawnLimitAndClosedRejections(t *testing.T) {
+	t.Parallel()
+
+	events := make([]AdmissionEvent, 0, 3)
+	model := &testModel{responses: []*ai.Response{
+		responseText(`{"summary":"done","evidence":[],"unknowns":[]}`),
+	}}
+	fixture := newManagerFixtureWithConfig(
+		t,
+		model,
+		ExecutionOptions{MaxConcurrent: 1, MaxSpawnedPerRootInteraction: 1},
+		func(config *Config) {
+			config.AdmissionObserver = func(_ context.Context, event AdmissionEvent) {
+				events = append(events, event)
+			}
+		},
+	)
+	request := Request{
+		Role: RoleExplore, Task: "Run once.", Delivery: DeliveryBackground,
+		Ownership: Ownership{
+			ParentInteractionID: "root-1", ParentRunID: "parent-run",
+			ParentToolCallID: "parent-call", RootInteractionID: "root-1",
+		},
+	}
+	execution, err := fixture.manager.Start(t.Context(), request, nil)
+	require.NoError(t, err)
+	_, err = execution.Wait(t.Context())
+	require.NoError(t, err)
+	_, err = fixture.manager.Start(t.Context(), request, nil)
+	require.ErrorIs(t, err, ErrSpawnLimit)
+	require.NoError(t, fixture.manager.Close(t.Context()))
+	_, err = fixture.manager.Start(t.Context(), Request{
+		Role: RoleExplore, Task: "Closed.",
+	}, nil)
+	require.ErrorIs(t, err, ErrClosed)
+
+	require.Len(t, events, 3)
+	assert.Equal(t, AdmissionOutcomeAccepted, events[0].Outcome)
+	assert.Equal(t, DeliveryBackground, events[0].Delivery)
+	assert.Equal(t, AdmissionReasonSpawnLimit, events[1].Reason)
+	assert.Equal(t, AdmissionReasonClosed, events[2].Reason)
+}
+
 func TestManagerConcurrentCloseReleasesEveryAdmissionPermit(t *testing.T) {
 	t.Parallel()
 

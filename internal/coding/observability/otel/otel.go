@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/rsbin/pips/internal/coding"
+	"github.com/rsbin/pips/internal/coding/subagent"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -40,6 +41,7 @@ type Observer struct {
 	workspaceChanges    metric.Int64Counter
 	diagnostics         metric.Int64Counter
 	subagents           metric.Int64Counter
+	subagentAdmissions  metric.Int64Counter
 	subagentDuration    metric.Int64Histogram
 	teams               metric.Int64Counter
 	teamDuration        metric.Int64Histogram
@@ -128,6 +130,14 @@ func New(config Config) (*Observer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("coding otel subagents counter: %w", err)
 	}
+	subagentAdmissions, err := meter.Int64Counter(
+		"pips.coding.subagent.admissions",
+		metric.WithDescription("Coding subagent shared-budget decisions."),
+		metric.WithUnit("{decision}"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("coding otel subagent admissions counter: %w", err)
+	}
 
 	subagentDuration, err := meter.Int64Histogram(
 		"pips.coding.subagent.duration",
@@ -180,6 +190,7 @@ func New(config Config) (*Observer, error) {
 		workspaceChanges:    workspaceChanges,
 		diagnostics:         diagnostics,
 		subagents:           subagents,
+		subagentAdmissions:  subagentAdmissions,
 		subagentDuration:    subagentDuration,
 		teams:               teams,
 		teamDuration:        teamDuration,
@@ -194,6 +205,11 @@ func New(config Config) (*Observer, error) {
 //nolint:gocyclo // The event-family dispatch remains exhaustive and explicit.
 func (o *Observer) Observe(ctx context.Context, event coding.TelemetryEvent) error {
 	if o == nil {
+		return nil
+	}
+	if event.Signal == coding.TelemetrySignalSubagentAdmission {
+		o.observeSubagentAdmission(ctx, event)
+
 		return nil
 	}
 
@@ -336,6 +352,7 @@ func (o *Observer) observeSubagent(ctx context.Context, event coding.TelemetryEv
 	attrs := []attribute.KeyValue{
 		attribute.String("coding.subagent.role", event.SubagentRole),
 		attribute.String("coding.subagent.state", event.SubagentState),
+		attribute.String("coding.subagent.delivery", string(event.SubagentDelivery)),
 		attribute.String("coding.subagent.model", event.ModelID),
 		attribute.String("coding.subagent.code", event.Code),
 		attribute.String("coding.subagent.stop", string(event.Stop)),
@@ -349,6 +366,7 @@ func (o *Observer) observeSubagent(ctx context.Context, event coding.TelemetryEv
 	metricAttrs := []attribute.KeyValue{
 		attribute.String("coding.subagent.role", event.SubagentRole),
 		attribute.String("coding.subagent.state", event.SubagentState),
+		attribute.String("coding.subagent.delivery", string(event.SubagentDelivery)),
 	}
 	o.subagents.Add(ctx, 1, metric.WithAttributes(metricAttrs...))
 	if event.Type == coding.EventSubagentCompleted || event.Type == coding.EventSubagentFailed ||
@@ -360,6 +378,23 @@ func (o *Observer) observeSubagent(ctx context.Context, event coding.TelemetryEv
 		)
 	}
 	o.instant(ctx, "coding."+string(event.Type), event, attrs, event.Failed)
+}
+
+func (o *Observer) observeSubagentAdmission(ctx context.Context, event coding.TelemetryEvent) {
+	attrs := []attribute.KeyValue{
+		attribute.String("coding.subagent.admission.outcome", string(event.AdmissionOutcome)),
+		attribute.String("coding.subagent.admission.reason", string(event.AdmissionReason)),
+		attribute.String("coding.subagent.delivery", string(event.SubagentDelivery)),
+		attribute.Int("coding.subagent.depth", event.SubagentDepth),
+	}
+	o.subagentAdmissions.Add(ctx, 1, metric.WithAttributes(attrs...))
+	o.instant(
+		ctx,
+		"coding.subagent.admission",
+		event,
+		attrs,
+		event.AdmissionOutcome == subagent.AdmissionOutcomeRejected,
+	)
 }
 
 func compactionLifecycle(eventType coding.EventType) string {
