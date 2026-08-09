@@ -6,6 +6,8 @@ import (
 	"slices"
 	"sync"
 	"time"
+
+	"github.com/rsbin/pips/internal/coding/subagent"
 )
 
 const componentTelemetry = "telemetry"
@@ -104,6 +106,20 @@ func (r *Runtime) observeSessionOpened(ctx context.Context, resumed bool) {
 		Provider: r.config.Model.Provider,
 		ModelID:  r.config.Model.Model,
 		Resumed:  resumed,
+	})
+	for _, diagnostic := range diagnostics {
+		r.recordDiagnostic(ctx, diagnostic)
+	}
+}
+
+func (r *Runtime) observeSubagentAdmission(ctx context.Context, event subagent.AdmissionEvent) {
+	diagnostics := r.telemetry.observe(ctx, TelemetryEvent{
+		Signal:           TelemetrySignalSubagentAdmission,
+		Time:             time.Now().UTC(),
+		SubagentDelivery: event.Delivery,
+		SubagentDepth:    event.DelegationDepth,
+		AdmissionOutcome: event.Outcome,
+		AdmissionReason:  event.Reason,
 	})
 	for _, diagnostic := range diagnostics {
 		r.recordDiagnostic(ctx, diagnostic)

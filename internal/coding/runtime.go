@@ -672,19 +672,20 @@ func openRuntime(
 			}
 		}
 		runtime.subagents, err = subagent.New(subagent.Config{
-			Context:        ctx,
-			Repository:     repository,
-			Parent:         handle,
-			Tree:           tree,
-			Model:          baseModel,
-			GenerationID:   integration.ID(),
-			SummaryModel:   childSummaryModel,
-			Compaction:     childCompaction,
-			RequestPolicy:  requestPolicy,
-			Lifecycle:      runtime.subagentHookLifecycle(),
-			Options:        configured.Subagent,
-			AgentObservers: []func(context.Context, agent.Event){runtime.observers.observe},
-			EventObservers: []subagent.AgentEventObserver{runtime.observeChildAgentEvent},
+			Context:           ctx,
+			Repository:        repository,
+			Parent:            handle,
+			Tree:              tree,
+			Model:             baseModel,
+			GenerationID:      integration.ID(),
+			SummaryModel:      childSummaryModel,
+			Compaction:        childCompaction,
+			RequestPolicy:     requestPolicy,
+			Lifecycle:         runtime.subagentHookLifecycle(),
+			Options:           configured.Subagent,
+			AgentObservers:    []func(context.Context, agent.Event){runtime.observers.observe},
+			EventObservers:    []subagent.AgentEventObserver{runtime.observeChildAgentEvent},
+			AdmissionObserver: runtime.observeSubagentAdmission,
 		})
 		if err != nil {
 			return nil, err
