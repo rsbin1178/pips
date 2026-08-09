@@ -1,5 +1,7 @@
 # Agent composition
 
+中文教程、任务指南和全部公共包索引见 [Agent 包使用指南](agent/index.md)；模型接口与 Provider 配置见 [AI 包使用指南](ai/index.md)。本页继续说明设计边界与组合原则。
+
 `agent` is a general runtime, not a workflow engine or a coding-agent shell.
 Its stable responsibility is one controllable model/tool loop. The harness
 adds durable conversation state. Applications compose multiple loops with
@@ -135,7 +137,8 @@ does not sleep, poll, parse cron, or catch up missed intervals.
 
 **Team coordination.** Use `agent/team` when independent durable member
 Sessions need shared tasks and direct coordination. The Coordinator creates the Team,
-registers each resource using a stable `SessionRef`, and gives members scoped
+maps each `MemberID` or optional `CapabilityProfileRef` to an application-owned
+Agent/Harness resource, and gives members scoped
 `NewMemberToolset` or `NewLeadToolset` tools. For the standard one-task flow,
 `team.NewAttemptRuntime` owns claim → start → mailbox snapshot → continuation
 create/drive → result projection → acknowledgement/messages → finish. The
