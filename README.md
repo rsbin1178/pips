@@ -37,6 +37,14 @@ Go building blocks for AI applications. Current packages:
 > **Status: v0.** The API is under active development and may change without
 > notice. Pin a commit if you depend on it.
 
+## 文档
+
+- [AI 包使用指南](docs/ai/index.md)：Provider 中立接口、OpenAI/Anthropic/Gemini、Tools、结构化输出、中间件与测试。
+- [Agent 包使用指南](docs/agent/index.md)：Agent/Session、工具控制、Harness、Extension/Bundle/MCP、可观测性与持久编排。
+- [Coding Agent 人工验收手册](docs/manual-acceptance/index.md)：按能力划分的手工步骤、通过标准、证据要求和真实环境验收边界。
+
+现有 Coding CLI、安全、ACP、SSH、Hook 与 Dynamic Subagent 发布文档仍保留在 `docs/`；上述三个入口提供中文学习和验收路径。
+
 ## Coding agent status
 
 `cmd/pips` is being built as a local, terminal-first coding agent. Its P0
@@ -196,8 +204,8 @@ assistant output and Tool activity, and toggles back to the parent. Other Tools
 retain ordinary detail behavior.
 
 The command palette provides `/new`, `/resume`, `/plan`, `/mode`, `/agents`, `/team`,
-`/skills`, `/model`, `/permissions`, `/tree`, `/fork`, `/compact`, `/review`,
-`/reload`, `/status`, `/help`, and `/quit`. `/skills` browses user-invocable Skills from native
+`/skills`, `/model`, `/permissions`, `/statusline`, `/theme`, `/tree`, `/fork`,
+`/compact`, `/review`, `/reload`, `/status`, `/help`, and `/quit`. `/skills` browses user-invocable Skills from native
 `~/.pips/skills`/`.pips/skills` and shared
 `~/.agents/skills`/`.agents/skills` roots. Type `$` at a token boundary to
 filter the same list and insert an exact `$skill-name` reference. Explicit
@@ -450,8 +458,8 @@ result, err := attempts.Run(ctx, team.AttemptRunRequest{
     TeamID: teamID, TaskID: "review", AttemptID: "review-1",
     ContinuationID: "review-execution-1",
 })
-// workerFactory resolves result.Dispatch.SessionRef to its independent Harness
-// Session; resultProjector maps terminal evidence to Team result/messages.
+// workerFactory resolves result.Dispatch.MemberID/CapabilityProfileRef through
+// the application resource registry; resultProjector maps terminal evidence.
 ```
 
 Member and Lead toolsets bind Team/member identity and derive durable command
@@ -494,10 +502,12 @@ if err != nil {
     return err
 }
 activation, err := bundle.Activate(ctx, runtime)
+if activation != nil {
+    defer activation.Release(ctx)
+}
 if err != nil {
     return err
 }
-defer activation.Release(ctx)
 
 snapshot := activation.Snapshot()
 model = snapshot.Model(model)

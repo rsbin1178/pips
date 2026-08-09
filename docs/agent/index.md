@@ -2,7 +2,7 @@
 
 `github.com/rsbin/pips/agent` 提供一个可控、可组合的模型与工具循环。它负责把消息发送给模型、执行工具调用、维护一次运行的状态，并在确定的边界停止。持久会话、跨运行控制和多成员协作分别由其他公共包提供。
 
-这套文档面向熟悉 Go，但首次使用 Pips 的开发者。文档描述当前公开 API；每个符号的完整字段和签名以 [API 导航](api-navigation.md) 与 Godoc 为准。
+这套文档面向熟悉 Go，但首次使用 Pips 的开发者。模型接口与 Provider 配置先见 [AI 包使用指南](../ai/index.md)。本文档描述当前公开 API；每个符号的完整字段和签名以 [API 导航](api-navigation.md) 与 Godoc 为准。
 
 ## 从哪里开始
 
@@ -41,6 +41,8 @@ Team 与 Coding 产品中的 Subagent/Team 不是同一层 API：
 - `agent/team` 是通用、公开、模型无关的持久协作账本。
 - Coding Subagent 与 Coding Team 位于应用层，组合工作区、命令、权限、MCP、Hook 和具体 Coding Agent 行为。
 - 公共 Team 不创建 Coding Agent，不分配工作区，不运行成员，也没有后台调度队列。
+
+需要验收具体 Coding 产品能力时，使用 [Coding Agent 人工验收手册](../manual-acceptance/index.md)，不要用通用包的单元测试代替真实 Provider、平台或 Beta 观察证据。
 
 ## 推荐的学习顺序
 

@@ -8,6 +8,8 @@ used by future interactive frontends; it does not contain a second Agent loop.
 launch, capability, authentication, and lifecycle contract is documented in
 the [ACP v1 agent guide](coding-acp.md).
 
+需要按当前实现逐项手工验收 CLI、TUI、权限、Subagent、Team、SSH、ACP 与集成能力时，从 [Coding Agent 人工验收手册](manual-acceptance/index.md)开始，并单独记录真实 Provider、平台和运营观察证据。
+
 ## Remote interactive SSH
 
 `pips ssh` opens the ordinary interactive Pips TUI on a remote host while
@@ -126,6 +128,10 @@ write, or Sandbox exception. Non-interactive `pips exec --mode plan` never
 chooses on the user's behalf: a pending question or review returns exit code `3`
 (input required). Plan Mode is a capability boundary, not secret isolation:
 files readable by the Pips process remain readable.
+
+无路径参数的 `read_plan` Tool 读取当前绑定的 Plan 文档。旧版
+`write_plan`/`submit_plan` 仍可被兼容层识别，但当前 Plan 流程会拒绝它们；
+有效流程必须先调用 `plan_checkpoint`，再调用 `present_plan`。
 
 A Session paused on `present_plan` cannot be resumed by an older binary that
 only understands the legacy `write_plan`/`submit_plan` handshake. Do not edit

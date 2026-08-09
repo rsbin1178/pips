@@ -49,7 +49,7 @@ AI 包不负责：
 - 默认重试。裸 Provider 客户端每次调用只尝试一次。
 - 创建日志、指标、Trace Exporter，或替应用关闭这些资源。
 
-需要自主 Tool 循环、Guardrail、Approval、Session 或多 Agent 编排时，请使用后续的 `agent` 包使用指南；直接调用模型时保留在 `ai` 层。
+需要自主 Tool 循环、Guardrail、Approval、Session 或多 Agent 编排时，请使用 [Agent 包使用指南](../agent/index.md)；直接调用模型时保留在 `ai` 层。
 
 ## 稳定性与版本
 
