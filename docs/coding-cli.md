@@ -268,6 +268,26 @@ definitions or making historical child Sessions unreadable. Built-in
 `explore`, `plan`, and `review` remain available through their compatible
 protocol.
 
+Production child admission and execution budgets are configured independently
+in the same selected user file:
+
+```toml
+[subagent]
+max_concurrent = 4
+max_spawned_per_root_interaction = 8
+max_auto_follow_ups = 4
+max_turns = 64
+max_tokens = 256000
+max_tool_calls = 128
+max_duration_minutes = 30
+```
+
+Every value is positive and hard-bounded; invalid or unknown fields make
+configuration validation fail before Runtime open. A partial table changes only
+the named values, and `pips config show` reports each effective value and source.
+These are production defaults, not new authority: profile selectors, child-owned
+approval, Sandbox, and the frozen generation capability intersection still apply.
+
 Pips discovers `*.md` definitions from these roots in increasing precedence:
 
 | Scope | Root | Trust requirement |

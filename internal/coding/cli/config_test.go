@@ -28,6 +28,10 @@ func TestConfigShowResolvesSelectedFileAndChangedFlags(t *testing.T) {
 tool_search = true
 mode = "plan"
 
+[subagent]
+max_concurrent = 6
+max_turns = 80
+
 [sandbox_workspace_write]
 network = "allow"
 
@@ -70,6 +74,9 @@ model = "anthropic/project-model"
 	assert.Contains(t, output, `resolved.request.temperature = 0.25`)
 	assert.Contains(t, output, `resolved.request.logprobs = true`)
 	assert.Contains(t, output, `tool_search = false # source=flag detail="--tool-search"`)
+	assert.Contains(t, output, `subagent.max_concurrent = 6 # source=config_file detail="`)
+	assert.Contains(t, output, `subagent.max_turns = 80 # source=config_file detail="`)
+	assert.Contains(t, output, `subagent.max_tokens = 256000 # source=default detail="built-in"`)
 	assert.Contains(t, output, `mode = "plan" # source=config_file detail="`)
 	assert.Contains(t, output, `tui.theme = "auto" # source=default detail="built-in"`)
 	assert.Contains(t, output, `sandbox_workspace_write.network = "allow" # source=config_file detail="`)

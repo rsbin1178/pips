@@ -1,3 +1,4 @@
+//nolint:wsl_v5 // Lease stress fixtures keep barrier operations in lifecycle order.
 package coding
 
 import (
@@ -5,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -73,6 +75,58 @@ func TestIntegrationGenerationDrainsLeasesBeforeClosing(t *testing.T) {
 	assert.Equal(t, int32(1), lifecycle.stops.Load())
 	require.NoError(t, generation.retire(t.Context()))
 	assert.Equal(t, int32(1), lifecycle.stops.Load(), "close must be idempotent")
+}
+
+func TestIntegrationGenerationConcurrentRetireWaitsForFinalLease(t *testing.T) {
+	t.Parallel()
+
+	const leases = 64
+	lifecycle := &integrationTestLifecycle{}
+	extensionValue := integrationTestExtension(t, "lease-stress", lifecycle)
+	extensions, err := extension.New(extension.WithExtensions(extensionValue))
+	require.NoError(t, err)
+	activation, err := extensions.Activate(t.Context(), extensionValue)
+	require.NoError(t, err)
+	generation := newIntegrationGeneration(
+		1,
+		activation,
+		nil,
+		resourceResultForGenerationTest(),
+		agentprofile.Registry{},
+		skillsettings.Empty(),
+		"",
+		agentplugin.Result{},
+	)
+	for range leases {
+		require.NoError(t, generation.acquire())
+	}
+	require.NoError(t, generation.retire(t.Context()))
+	require.ErrorIs(t, generation.acquire(), errIntegrationGenerationRetired)
+
+	start := make(chan struct{})
+	errs := make(chan error, leases-1)
+	var group sync.WaitGroup
+	group.Add(leases - 1)
+	for range leases - 1 {
+		go func() {
+			defer group.Done()
+			<-start
+			errs <- generation.release(t.Context())
+		}()
+	}
+	close(start)
+	group.Wait()
+	close(errs)
+	for releaseErr := range errs {
+		require.NoError(t, releaseErr)
+	}
+	assert.Zero(t, lifecycle.stops.Load(), "retired generation must retain its final child lease")
+
+	require.NoError(t, generation.release(t.Context()))
+	require.NoError(t, generation.release(t.Context()))
+	require.NoError(t, generation.retire(t.Context()))
+	require.NoError(t, extensions.Shutdown(t.Context()))
+	assert.Equal(t, int32(1), lifecycle.stops.Load())
 }
 
 func TestIntegrationGenerationHandoffPublishesNewPolicy(t *testing.T) {

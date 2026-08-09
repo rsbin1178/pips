@@ -30,6 +30,7 @@ func TestDefaults(t *testing.T) {
 	assert.Equal(t, config.SandboxNetworkOnRequest, cfg.SandboxWorkspaceWrite.Network)
 	assert.Equal(t, config.ApprovalOnRequest, cfg.Approval)
 	assert.Equal(t, config.DefaultCompactionConfig(), cfg.Compaction)
+	assert.Equal(t, config.DefaultSubagentConfig(), cfg.Subagent)
 	for _, field := range config.Fields() {
 		source, ok := cfg.Source(field)
 		require.True(t, ok)
@@ -172,6 +173,33 @@ func TestValidateCompactionConfig(t *testing.T) {
 
 	cfg.Compaction.SummaryMaxTokens = cfg.Compaction.KeepRecentTokens + 1
 	require.ErrorIs(t, cfg.ValidateRuntime(), config.ErrInvalid)
+}
+
+func TestValidateSubagentConfig(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		mutate func(*config.SubagentConfig)
+	}{
+		{name: "concurrent", mutate: func(value *config.SubagentConfig) { value.MaxConcurrent = 33 }},
+		{name: "spawned", mutate: func(value *config.SubagentConfig) { value.MaxSpawnedPerRootInteraction = 0 }},
+		{name: "follow ups", mutate: func(value *config.SubagentConfig) { value.MaxAutoFollowUps = 33 }},
+		{name: "turns", mutate: func(value *config.SubagentConfig) { value.MaxTurns = 1 }},
+		{name: "tokens", mutate: func(value *config.SubagentConfig) { value.MaxTokens = 16_383 }},
+		{name: "tool calls", mutate: func(value *config.SubagentConfig) { value.MaxToolCalls = 4097 }},
+		{name: "duration", mutate: func(value *config.SubagentConfig) { value.MaxDurationMinutes = 1441 }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := config.Defaults()
+			cfg.Model = config.ModelRef{Provider: ai.ProviderOpenAI, Model: "gpt"}
+			test.mutate(&cfg.Subagent)
+			require.ErrorIs(t, cfg.ValidateRuntime(), config.ErrInvalid)
+		})
+	}
 }
 
 func TestParseModelRef(t *testing.T) {

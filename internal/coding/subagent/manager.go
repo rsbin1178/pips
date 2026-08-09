@@ -77,9 +77,7 @@ type Manager struct {
 	active           map[string]*Execution
 	starting         int
 	startingDone     chan struct{}
-	spawned          map[string]int
-	maxConcurrent    int
-	maxSpawned       int
+	admission        *admissionBudget
 	maxAutoFollowUps int
 	runs             sync.WaitGroup
 	waitOnce         sync.Once
@@ -100,6 +98,7 @@ type Execution struct {
 	child       *session.Handle
 	tracker     *runTracker
 	hookContext string
+	permit      *admissionPermit
 
 	cancelOnce sync.Once
 	mu         sync.Mutex
@@ -143,19 +142,22 @@ func New(config Config) (*Manager, error) {
 
 	maxConcurrent := config.Options.MaxConcurrent
 	if maxConcurrent == 0 {
-		maxConcurrent = 4
+		maxConcurrent = defaultMaxConcurrent
 	}
 	maxSpawned := config.Options.MaxSpawnedPerRootInteraction
 	if maxSpawned == 0 {
-		maxSpawned = 8
+		maxSpawned = defaultMaxSpawned
 	}
 	maxAutoFollowUps := config.Options.MaxAutoFollowUps
 	if maxAutoFollowUps == 0 {
 		maxAutoFollowUps = 4
 	}
-	if maxConcurrent < 1 || maxConcurrent > 32 || maxSpawned < 1 || maxSpawned > 128 ||
-		maxAutoFollowUps < 1 || maxAutoFollowUps > 32 {
+	if maxAutoFollowUps < 1 || maxAutoFollowUps > 32 {
 		return nil, fmt.Errorf("%w: invalid manager concurrency limits", ErrInvalid)
+	}
+	admission, err := newAdmissionBudget(maxConcurrent, maxSpawned)
+	if err != nil {
+		return nil, err
 	}
 	lifecycleBase := config.Context
 	if lifecycleBase == nil {
@@ -166,8 +168,7 @@ func New(config Config) (*Manager, error) {
 	return &Manager{
 		config: config, limits: limits, tools: readTools,
 		lifecycle: lifecycle, cancel: cancel,
-		active: make(map[string]*Execution), spawned: make(map[string]int),
-		maxConcurrent: maxConcurrent, maxSpawned: maxSpawned,
+		active: make(map[string]*Execution), admission: admission,
 		maxAutoFollowUps: maxAutoFollowUps,
 		waitDone:         make(chan struct{}),
 	}, nil
@@ -397,11 +398,12 @@ func (m *Manager) start(
 	if err != nil {
 		return nil, err
 	}
-	if err := m.reserveStart(request); err != nil {
+	permit, err := m.reserveStart(request)
+	if err != nil {
 		return nil, err
 	}
-	startSucceeded := false
-	defer func() { m.finishStarting(request, startSucceeded) }()
+	ownershipTransferred := false
+	defer func() { m.finishStarting(permit, ownershipTransferred) }()
 
 	startCtx, cancelStart := context.WithCancel(ctx)
 	stopLifecycle := context.AfterFunc(m.lifecycle, cancelStart)
@@ -481,6 +483,7 @@ func (m *Manager) start(
 		child:      child,
 		tracker:    tracker,
 		stopParent: stopParent,
+		permit:     permit,
 	}
 	if err := m.appendMirrored(child.Session(), created); err != nil {
 		cancel()
@@ -525,8 +528,6 @@ func (m *Manager) start(
 		}
 		execution.runner = runner
 	}
-	startSucceeded = true
-
 	if m.config.Lifecycle.BeforeStart != nil {
 		execution.hookContext = m.config.Lifecycle.BeforeStart(runCtx, LifecycleStart{
 			ChildSessionID: child.Metadata().ID,
@@ -560,6 +561,8 @@ func (m *Manager) start(
 
 	m.active[created.ChildSessionID] = execution
 	m.runs.Add(1)
+	permit.commit()
+	ownershipTransferred = true
 	m.mu.Unlock()
 
 	observerErr := emitObserver(runCtx, observer, eventFromRecord(created))
@@ -575,25 +578,18 @@ func (m *Manager) start(
 	return execution, nil
 }
 
-func (m *Manager) reserveStart(request Request) error {
+func (m *Manager) reserveStart(request Request) (*admissionPermit, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.closed {
-		return ErrClosed
+		return nil, ErrClosed
 	}
-	if len(m.active)+m.starting >= m.maxConcurrent {
-		if m.maxConcurrent == 1 {
-			return ErrBusy
-		}
-
-		return ErrCapacity
-	}
-	if request.Delivery == DeliveryBackground {
-		root := request.Ownership.RootInteractionID
-		if root == "" || m.spawned[root] >= m.maxSpawned {
-			return ErrSpawnLimit
-		}
-		m.spawned[root]++
+	permit, err := m.admission.reserve(
+		request.Delivery,
+		request.Ownership.RootInteractionID,
+	)
+	if err != nil {
+		return nil, err
 	}
 
 	if m.starting == 0 {
@@ -601,7 +597,7 @@ func (m *Manager) reserveStart(request Request) error {
 	}
 	m.starting++
 
-	return nil
+	return permit, nil
 }
 
 func (m *Manager) normalizeRequest(ctx context.Context, request Request) Request {
@@ -619,17 +615,13 @@ func (m *Manager) normalizeRequest(ctx context.Context, request Request) Request
 	return request
 }
 
-func (m *Manager) finishStarting(request Request, succeeded bool) {
+func (m *Manager) finishStarting(permit *admissionPermit, ownershipTransferred bool) {
+	if !ownershipTransferred {
+		permit.release()
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if !succeeded && request.Delivery == DeliveryBackground {
-		root := request.Ownership.RootInteractionID
-		if m.spawned[root] > 1 {
-			m.spawned[root]--
-		} else {
-			delete(m.spawned, root)
-		}
-	}
 	if m.starting > 0 {
 		m.starting--
 	}
@@ -1698,6 +1690,7 @@ func (m *Manager) finishExecution(
 		runnerCloseErr = execution.runner.Close(context.WithoutCancel(ctx))
 	}
 	closeErr := child.Close()
+	execution.permit.release()
 	cleanupErr := errors.Join(trackedErr, persistErr, runnerCloseErr, closeErr)
 
 	finalErr := errors.Join(runErr, persistErr, runnerCloseErr, closeErr)

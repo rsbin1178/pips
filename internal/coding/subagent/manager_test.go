@@ -818,6 +818,77 @@ func TestManagerEnforcesConcurrentCapacity(t *testing.T) {
 	}
 }
 
+func TestManagerConcurrentCloseReleasesEveryAdmissionPermit(t *testing.T) {
+	t.Parallel()
+
+	model := &blockingTestModel{entered: make(chan struct{})}
+	fixture := newManagerFixtureWithOptions(t, model, ExecutionOptions{MaxConcurrent: 2})
+	executions := make([]*Execution, 0, 2)
+	for index := range 2 {
+		execution, err := fixture.manager.Start(t.Context(), Request{
+			Role: RoleExplore, Task: fmt.Sprintf("Wait %d.", index),
+		}, nil)
+		require.NoError(t, err)
+		executions = append(executions, execution)
+	}
+	<-model.entered
+
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	for range 2 {
+		go func() {
+			<-start
+			errs <- fixture.manager.Close(context.Background())
+		}()
+	}
+	close(start)
+	for range 2 {
+		require.NoError(t, <-errs)
+	}
+	for _, execution := range executions {
+		result, err := execution.Wait(t.Context())
+		require.ErrorIs(t, err, context.Canceled)
+		assert.Equal(t, OutcomeCanceled, result.Outcome)
+	}
+	active, _ := fixture.manager.admission.snapshot()
+	assert.Zero(t, active)
+}
+
+func TestManagerBindingFailureReleasesPermitAndSpawnReservation(t *testing.T) {
+	t.Parallel()
+
+	fixture := newManagerFixtureWithOptions(
+		t,
+		&testModel{responses: []*ai.Response{responseText(`{"summary":"unused","evidence":[],"unknowns":[]}`)}},
+		ExecutionOptions{MaxConcurrent: 1, MaxSpawnedPerRootInteraction: 1},
+	)
+	plan, err := fixture.manager.builtinExecutionPlan(Request{
+		Role: RoleExplore, Delivery: DeliveryBackground,
+	})
+	require.NoError(t, err)
+	plan.Identity = AgentIdentity{
+		Schema: AgentIdentitySchema, ID: "binding-failure", Kind: AgentKindCustom,
+		Name: "Binding failure", DefinitionSchema: "pips.agent/v1alpha1",
+		DefinitionDigest: strings.Repeat("a", 64), DefinitionSource: "test",
+	}
+	dispatcher := failingOpenDispatcher{plan: plan}
+	request := Request{
+		AgentID: "binding-failure", Task: "Fail before execution ownership.",
+		Delivery: DeliveryBackground,
+		Ownership: Ownership{
+			ParentInteractionID: "root-1", ParentRunID: "parent-run",
+			ParentToolCallID: "parent-call", RootInteractionID: "root-1",
+		},
+	}
+	for range 2 {
+		_, err = fixture.manager.StartWithDispatcher(t.Context(), request, nil, dispatcher)
+		require.ErrorIs(t, err, errTestBindingFailed)
+		active, spawned := fixture.manager.admission.snapshot()
+		assert.Zero(t, active)
+		assert.Empty(t, spawned)
+	}
+}
+
 func TestManagerWaitReconstructsCompletedChild(t *testing.T) {
 	t.Parallel()
 
@@ -1215,6 +1286,22 @@ type testModel struct {
 	requests             []ai.Request
 	capabilities         *ai.Capabilities
 	rejectResponseFormat bool
+}
+
+var errTestBindingFailed = errors.New("test binding failed")
+
+type failingOpenDispatcher struct {
+	plan ExecutionPlan
+}
+
+func (d failingOpenDispatcher) AgentIDs() []string { return []string{d.plan.Identity.ID} }
+
+func (d failingOpenDispatcher) Compile(context.Context, Request) (ExecutionPlan, error) {
+	return d.plan.Clone(), nil
+}
+
+func (failingOpenDispatcher) Open(context.Context, DispatchInput) (Runner, error) {
+	return nil, errTestBindingFailed
 }
 
 func (m *testModel) Generate(_ context.Context, request ai.Request) (*ai.Response, error) {
