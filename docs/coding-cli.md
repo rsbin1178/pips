@@ -280,6 +280,7 @@ max_turns = 64
 max_tokens = 256000
 max_tool_calls = 128
 max_duration_minutes = 30
+max_depth = 0
 ```
 
 Every value is positive and hard-bounded; invalid or unknown fields make
@@ -328,6 +329,12 @@ tools:
 skills:
   allow: [golang-code-style]
   preload: [golang-code-style]
+delegation:
+  allow: [test-runner]
+mcp:
+  private: [source_control]
+hooks:
+  private: [review-child-shell]
 output:
   format: text
 ---
@@ -348,15 +355,48 @@ locally in addition to any provider structured-output support.
 weakening the profile. Skills select only already loaded, trusted Skills, and
 `preload` must be a subset of `allow`.
 
+`delegation.allow` names exact model-visible custom Agent IDs. Recursion is
+foreground-only, serial, cycle-checked, and disabled unless
+`[subagent].max_depth` is set to `1..3`; a recursive child receives only an
+exact `run_subagent` target list, never `spawn_agent`.
+
+`mcp.private` and `hooks.private` bind exact, already configured and trusted
+Agent-private integration IDs. They do not accept inline commands, URLs,
+headers, environment values, or credentials. A private MCP server is declared
+in `$PIPS_HOME/mcp.json` or trusted-project `.pips/mcp.json` with
+`"visibility":"agent_private"`:
+
+```json
+{
+  "schema": "pips.mcp/v1alpha1",
+  "servers": [
+    {
+      "id": "source_control",
+      "type": "streamable_http",
+      "visibility": "agent_private",
+      "url": "https://mcp.example.test/api"
+    }
+  ]
+}
+```
+
+The profile must also select individual tools through `tools.allow`, commonly
+with `source:mcp/source_control`; binding the server alone grants no Tool.
+Private server tools are absent from the parent model catalog and Tool Search.
+Project MCP permission and Hook trust continue to use their existing exact
+semantic fingerprints. See [Coding lifecycle hooks](coding-hooks.md) for the
+private Hook declaration and trust flow.
+
 Definitions describe a specialization; they never grant authority. At launch,
 Pips freezes the intersection of the profile's selections with the active
 Runtime's delegable catalog, operating mode, Workspace trust, Sandbox,
 approval policy, model catalog, Skill/MCP generation, and per-call checks.
-Consequently a profile may request `apply_patch`, `shell`, an existing MCP Tool,
-Tool Search, or `ask_user`, but it receives the capability only when the parent
-Runtime already permits it. It cannot add credentials, endpoints, environment
-variables, Sandbox or permission overrides, private MCP servers, executable
-hooks, or recursive Agent delegation.
+Consequently a profile may request `apply_patch`, `shell`, an eligible MCP Tool,
+Tool Search, `ask_user`, an exact recursive target, or an exact configured
+private integration, but it receives the capability only when every Runtime
+and generation check permits it. It cannot define credentials, endpoints,
+environment variables, commands, Sandbox or permission overrides, or a new
+MCP/Hook process inline.
 
 Every admitted child receives its own approval, question, change-audit, and
 generation-lease scope. A profile's declared selectors are shown separately

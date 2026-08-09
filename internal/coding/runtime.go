@@ -435,33 +435,11 @@ func openRuntime(
 	trustedHooks := make([]hooks.Definition, 0)
 	pendingHookDiagnostics := make([]hooks.Diagnostic, 0)
 	if !openPolicy.teamWorker() {
-		loadedHooks, loadHooksErr := hooks.Load(ctx, hooks.LoadOptions{
-			Paths:          options.Paths,
-			Tree:           tree,
-			ProjectTrusted: options.Trusted,
-			Limits:         hooks.DefaultLimits(),
-		})
-		if loadHooksErr != nil {
-			return nil, fmt.Errorf("coding runtime: load lifecycle hooks: %w", loadHooksErr)
-		}
-		hookStatuses, resolveHooksErr := hooks.NewTrustStore(options.Paths.HookTrustFile()).Resolve(
-			ctx,
-			loadedHooks,
-			options.Workspace.Identity().Key(),
+		trustedHooks, pendingHookDiagnostics, err = loadRuntimeHookDefinitions(
+			ctx, options.Paths, tree, options.Trusted, options.Workspace.Identity().Key(),
 		)
-		if resolveHooksErr != nil {
-			return nil, fmt.Errorf("coding runtime: resolve lifecycle hook trust: %w", resolveHooksErr)
-		}
-		for _, status := range hookStatuses {
-			if status.Status == hooks.StatusTrusted {
-				trustedHooks = append(trustedHooks, status.Definition)
-				continue
-			}
-			pendingHookDiagnostics = append(pendingHookDiagnostics, hooks.Diagnostic{
-				Reference: status.Definition.Reference,
-				Code:      "pending_trust",
-				Message:   "hook is pending explicit trust; review it with pips hooks list",
-			})
+		if err != nil {
+			return nil, err
 		}
 	}
 
@@ -531,7 +509,7 @@ func openRuntime(
 	})
 	integration := newIntegrationGeneration(
 		1, setup, connections, loadedResources, loadedProfiles, skillPolicy,
-		projectInstructions.SystemPrompt(), loadedPlugins,
+		projectInstructions.SystemPrompt(), loadedPlugins, trustedHooks,
 	)
 	connectionsOwnedByStack = false
 	setupOwnedByStack = false
@@ -553,7 +531,7 @@ func openRuntime(
 		instructionResolver: instructionResolver,
 		promptDate:          time.Now().Format(time.DateOnly),
 		projectInstructions: projectInstructions.SystemPrompt(),
-		hookDefinitions:     trustedHooks,
+		hookDefinitions:     ambientHookDefinitions(trustedHooks),
 		hookToolContext:     make(map[string][]string),
 		hookRunner: hooks.Runner{
 			Workspace:   options.Workspace.Root(),
@@ -1556,10 +1534,12 @@ func (r *Runtime) Reload(ctx context.Context) (returnErr error) {
 	r.integration = next
 	r.generationID = next.ID()
 	r.projectInstructions = next.projectInstructionsSnapshot()
+	r.hookDefinitions = ambientHookDefinitions(next.hookDefinitionsSnapshot())
 	r.mu.Unlock()
 
 	r.recordOpenDiagnostics(ctx, next.connectionsSnapshot())
 	r.recordAgentPluginDiagnostics(ctx, next.agentPluginSnapshot())
+	r.recordHookDiagnostics(ctx, nil, candidate.pendingHookDiagnostics)
 	retireErr := previous.retire(context.WithoutCancel(ctx))
 	if candidate.activationErr != nil {
 		r.recordDiagnostic(ctx, IntegrationDiagnostic{

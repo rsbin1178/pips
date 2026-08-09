@@ -10,6 +10,8 @@ import (
 	"github.com/rsbin/pips/agent/catalog"
 	"github.com/rsbin/pips/agent/harness"
 	"github.com/rsbin/pips/internal/coding/agentprofile"
+	"github.com/rsbin/pips/internal/coding/hooks"
+	codingmcp "github.com/rsbin/pips/internal/coding/mcp"
 	"github.com/rsbin/pips/internal/coding/subagent"
 )
 
@@ -33,6 +35,8 @@ type customSubagentDispatcher struct {
 	maxDelegationDepth int
 	ancestry           []string
 	ambient            []catalog.Descriptor
+	privateMCP         map[string]codingmcp.ConnectedServer
+	privateHooks       map[string]hooks.Definition
 	skills             map[string]harness.Skill
 	limits             subagent.Limits
 	models             childModelResolver
@@ -78,12 +82,19 @@ func newCustomSubagentDispatcher(
 	for _, skill := range skills {
 		byName[skill.Name] = skill
 	}
+	privateMCP := make(map[string]codingmcp.ConnectedServer)
+	connections := integration.connectionsSnapshot()
+	for _, server := range connections.ConnectedServers(codingmcp.VisibilityAgentPrivate) {
+		privateMCP[server.ID] = cloneConnectedServer(server)
+	}
 
 	return &customSubagentDispatcher{
 		definitions:        definitions,
 		modelDefinitions:   modelDefinitions,
 		maxDelegationDepth: maxDelegationDepth,
 		ambient:            cloneDescriptors(ambient),
+		privateMCP:         privateMCP,
+		privateHooks:       privateHookDefinitions(integration.hookDefinitionsSnapshot()),
 		skills:             byName,
 		limits:             limits,
 		models:             models,
@@ -156,12 +167,27 @@ func (d *customSubagentDispatcher) Compile(
 	if !definitionAllowsDelivery(definition, request.Delivery) {
 		return subagent.ExecutionPlan{}, fmt.Errorf("%w: agent %q does not allow %s delivery", subagent.ErrInvalid, request.AgentID, request.Delivery)
 	}
+	if definition.Kind != agentprofile.KindCustom &&
+		(len(definition.MCP.Private) > 0 || len(definition.Hooks.Private) > 0) {
+		return subagent.ExecutionPlan{}, fmt.Errorf(
+			"%w: private integrations require a persisted custom Agent", subagent.ErrInvalid,
+		)
+	}
 	delegationTargets, err := d.compileDelegationTargets(definition, request.Delivery)
 	if err != nil {
 		return subagent.ExecutionPlan{}, err
 	}
 
-	capabilities, err := compileDelegableCapabilities(definition.Tools, d.ambient)
+	privateMCP, privateMCPEntries, err := d.compilePrivateMCP(definition.MCP)
+	if err != nil {
+		return subagent.ExecutionPlan{}, err
+	}
+	privateHooks, _, err := d.compilePrivateHooks(definition.Hooks)
+	if err != nil {
+		return subagent.ExecutionPlan{}, err
+	}
+	capabilityAmbient := append(cloneDescriptors(d.ambient), descriptorsForEntries(privateMCPEntries)...)
+	capabilities, err := compileDelegableCapabilities(definition.Tools, capabilityAmbient)
 	if err != nil {
 		return subagent.ExecutionPlan{}, err
 	}
@@ -209,6 +235,8 @@ func (d *customSubagentDispatcher) Compile(
 		MaxDelegationDepth: d.maxDelegationDepth,
 		Ancestry:           append(slices.Clone(d.ancestry), definition.ID),
 		DelegationTargets:  delegationTargets,
+		PrivateMCP:         privateMCP,
+		PrivateHooks:       privateHooks,
 		Limits:             limits,
 		Output:             output,
 	}
@@ -283,6 +311,12 @@ func (d *customSubagentDispatcher) Open(
 	factory := d.factory.clone()
 	factory.model = binding.model
 	factory.requestPolicy = binding.requestPolicy
+	privateEntries, privateDefinitions, err := d.validatePrivateBindings(definition, input.Plan)
+	if err != nil {
+		return nil, err
+	}
+	factory.mcpEntries = append(factory.mcpEntries, privateEntries...)
+	factory.privateHooks = privateDefinitions
 	childDispatcher, err := d.childDispatcher(input.Plan)
 	if err != nil {
 		return nil, err
@@ -295,7 +329,87 @@ func (d *customSubagentDispatcher) Open(
 	factory.delegationOwner = input.Request.Ownership
 	factory.delegationObserver = input.Observer
 
-	return newChildControlScope(ctx, factory, d.generation, d.ambient, d.skills, input)
+	ambient := append(cloneDescriptors(d.ambient), descriptorsForEntries(privateEntries)...)
+
+	return newChildControlScope(ctx, factory, d.generation, ambient, d.skills, input)
+}
+
+func (d *customSubagentDispatcher) compilePrivateMCP(
+	selection agentprofile.MCPSelection,
+) ([]subagent.PrivateBinding, []catalog.Entry, error) {
+	bindings := make([]subagent.PrivateBinding, 0, len(selection.Private))
+	entries := make([]catalog.Entry, 0)
+	for _, id := range selection.Private {
+		server, exists := d.privateMCP[id]
+		if !exists || server.Visibility != codingmcp.VisibilityAgentPrivate || len(server.Entries) == 0 {
+			return nil, nil, fmt.Errorf("%w: private MCP server %q is unavailable", subagent.ErrInvalid, id)
+		}
+		bindings = append(bindings, subagent.PrivateBinding{ID: id, Fingerprint: server.Fingerprint})
+		entries = append(entries, cloneCatalogEntries(server.Entries)...)
+	}
+
+	return bindings, entries, nil
+}
+
+func (d *customSubagentDispatcher) compilePrivateHooks(
+	selection agentprofile.HookSelection,
+) ([]subagent.PrivateBinding, []hooks.Definition, error) {
+	bindings := make([]subagent.PrivateBinding, 0, len(selection.Private))
+	definitions := make([]hooks.Definition, 0, len(selection.Private))
+	for _, id := range selection.Private {
+		definition, exists := d.privateHooks[id]
+		if !exists || definition.EffectiveVisibility() != hooks.VisibilityAgentPrivate {
+			return nil, nil, fmt.Errorf("%w: private Hook %q is unavailable", subagent.ErrInvalid, id)
+		}
+		bindings = append(bindings, subagent.PrivateBinding{ID: id, Fingerprint: definition.Fingerprint()})
+		definitions = append(definitions, definition)
+	}
+
+	return bindings, definitions, nil
+}
+
+func (d *customSubagentDispatcher) validatePrivateBindings(
+	definition agentprofile.Definition,
+	plan subagent.ExecutionPlan,
+) ([]catalog.Entry, []hooks.Definition, error) {
+	mcpBindings, entries, err := d.compilePrivateMCP(definition.MCP)
+	if err != nil {
+		return nil, nil, err
+	}
+	hookBindings, hookDefinitions, err := d.compilePrivateHooks(definition.Hooks)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !equalPrivateBindings(mcpBindings, plan.PrivateMCP) ||
+		!equalPrivateBindings(hookBindings, plan.PrivateHooks) {
+		return nil, nil, fmt.Errorf("%w: private integration bindings differ from the frozen profile", subagent.ErrInvalid)
+	}
+
+	return entries, hookDefinitions, nil
+}
+
+func equalPrivateBindings(left, right []subagent.PrivateBinding) bool {
+	return slices.EqualFunc(left, right, func(a, b subagent.PrivateBinding) bool {
+		return a == b
+	})
+}
+
+func descriptorsForEntries(entries []catalog.Entry) []catalog.Descriptor {
+	values := make([]catalog.Descriptor, 0, len(entries))
+	for _, entry := range entries {
+		values = append(values, catalog.Descriptor{
+			Name: entry.Tool.Decl().Name, Source: entry.Source, Risk: entry.Risk,
+			Tags: slices.Clone(entry.Tags),
+		})
+	}
+
+	return values
+}
+
+func cloneConnectedServer(server codingmcp.ConnectedServer) codingmcp.ConnectedServer {
+	server.Entries = cloneCatalogEntries(server.Entries)
+
+	return server
 }
 
 func (d *customSubagentDispatcher) childDispatcher(

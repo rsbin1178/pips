@@ -28,6 +28,7 @@ const (
 	maxPlanCapabilities       = 512
 	maxPlanSkills             = 512
 	maxPlanDelegationTargets  = 128
+	maxPlanPrivateBindings    = 128
 	maxOutputSchemaBytes      = 64 << 10
 	// MaxDelegationDepth is the product hard bound for recursive custom Agent
 	// edges below a root child.
@@ -258,6 +259,13 @@ type OutputContract struct {
 	Digest string          `json:"digest"`
 }
 
+// PrivateBinding freezes one Agent-private executable resource selected from
+// the immutable Coding integration generation.
+type PrivateBinding struct {
+	ID          string `json:"id"`
+	Fingerprint string `json:"fingerprint"`
+}
+
 // Clone returns a detached output contract.
 func (c OutputContract) Clone() OutputContract {
 	c.Schema = slices.Clone(c.Schema)
@@ -284,6 +292,8 @@ type ExecutionPlan struct {
 	MaxDelegationDepth int                   `json:"max_delegation_depth,omitempty"`
 	Ancestry           []string              `json:"ancestry,omitempty"`
 	DelegationTargets  []string              `json:"delegation_targets,omitempty"`
+	PrivateMCP         []PrivateBinding      `json:"private_mcp,omitempty"`
+	PrivateHooks       []PrivateBinding      `json:"private_hooks,omitempty"`
 	Limits             Limits                `json:"limits"`
 	Output             OutputContract        `json:"output"`
 	// Legacy records did not carry an execution snapshot. It is set only while
@@ -299,6 +309,8 @@ func (p ExecutionPlan) Clone() ExecutionPlan {
 	p.PreloadedSkills = slices.Clone(p.PreloadedSkills)
 	p.Ancestry = slices.Clone(p.Ancestry)
 	p.DelegationTargets = slices.Clone(p.DelegationTargets)
+	p.PrivateMCP = slices.Clone(p.PrivateMCP)
+	p.PrivateHooks = slices.Clone(p.PrivateHooks)
 	p.Output = p.Output.Clone()
 
 	return p
@@ -326,6 +338,7 @@ func validateExecutionPlan(plan ExecutionPlan, allowLegacy bool) error {
 		!validPlanInstructions(plan.Instructions) || len(plan.Capabilities) > maxPlanCapabilities ||
 		len(plan.Skills) > maxPlanSkills || len(plan.PreloadedSkills) > maxPlanSkills ||
 		len(plan.DelegationTargets) > maxPlanDelegationTargets ||
+		len(plan.PrivateMCP) > maxPlanPrivateBindings || len(plan.PrivateHooks) > maxPlanPrivateBindings ||
 		!validPlanLimits(plan.Limits) ||
 		validateOutputContract(plan.Output) != nil {
 		return fmt.Errorf("%w: invalid execution plan", ErrInvalid)
@@ -336,7 +349,8 @@ func validateExecutionPlan(plan ExecutionPlan, allowLegacy bool) error {
 			len(plan.Capabilities) != 0 || len(plan.Skills) != 0 ||
 			len(plan.PreloadedSkills) != 0 || plan.ToolSearch ||
 			plan.DelegationDepth != 0 || plan.MaxDelegationDepth != 0 ||
-			len(plan.Ancestry) != 0 || len(plan.DelegationTargets) != 0 {
+			len(plan.Ancestry) != 0 || len(plan.DelegationTargets) != 0 ||
+			len(plan.PrivateMCP) != 0 || len(plan.PrivateHooks) != 0 {
 			return fmt.Errorf("%w: invalid legacy execution plan", ErrInvalid)
 		}
 
@@ -383,8 +397,50 @@ func validateExecutionPlan(plan ExecutionPlan, allowLegacy bool) error {
 	if err := validatePlanDelegation(plan); err != nil {
 		return err
 	}
+	if err := validatePrivateBindings(plan.PrivateMCP); err != nil {
+		return err
+	}
+	if err := validatePrivateBindings(plan.PrivateHooks); err != nil {
+		return err
+	}
 
 	return nil
+}
+
+func validatePrivateBindings(values []PrivateBinding) error {
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if !validPrivateBindingID(value.ID) || !validSHA256(value.Fingerprint) {
+			return fmt.Errorf("%w: invalid private resource binding", ErrInvalid)
+		}
+		if _, duplicate := seen[value.ID]; duplicate {
+			return fmt.Errorf("%w: duplicate private resource binding", ErrInvalid)
+		}
+		seen[value.ID] = struct{}{}
+	}
+
+	return nil
+}
+
+func validPrivateBindingID(value string) bool {
+	if value == "" || len(value) > 64 {
+		return false
+	}
+	separator := true
+	for _, current := range value {
+		if current >= 'a' && current <= 'z' || current >= '0' && current <= '9' {
+			separator = false
+			continue
+		}
+		if (current == '-' || current == '_') && !separator {
+			separator = true
+			continue
+		}
+
+		return false
+	}
+
+	return !separator
 }
 
 func validatePlanDelegation(plan ExecutionPlan) error {

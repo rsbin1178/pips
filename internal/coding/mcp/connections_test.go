@@ -270,6 +270,45 @@ func TestOpenConnectionsWithNoEnabledServersCreatesUsableEmptyRegistry(t *testin
 	assert.Empty(t, connections.Snapshot().Entries)
 }
 
+func TestConnectionsPartitionAmbientAndAgentPrivateEntries(t *testing.T) {
+	t.Parallel()
+
+	servers := map[string]*sdk.Server{
+		"ambient": testMCPServer("ambient", "lookup"),
+		"private": testMCPServer("private", "search"),
+	}
+	factory := func(ctx context.Context, definition codingmcp.Definition) (sdk.Transport, io.Closer, error) {
+		serverTransport, clientTransport := sdk.NewInMemoryTransports()
+		session, err := servers[definition.ID].Connect(ctx, serverTransport, nil)
+
+		return clientTransport, session, err
+	}
+	ambient := enabledHTTPDefinition("ambient")
+	private := enabledHTTPDefinition("private")
+	private.Definition.Visibility = codingmcp.VisibilityAgentPrivate
+	connections, err := codingmcp.OpenConnections(
+		t.Context(), []codingmcp.ResolvedDefinition{ambient, private},
+		codingmcp.ConnectionOptions{
+			Implementation: &sdk.Implementation{Name: "pips-test", Version: "v1"},
+			MaxTools:       16, Transport: factory,
+		},
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, connections.Close()) })
+	require.Len(t, connections.Snapshot().Entries, 2)
+	require.Len(t, connections.Entries(codingmcp.VisibilityAmbient), 1)
+	assert.Equal(t, "ambient_lookup", connections.Entries(codingmcp.VisibilityAmbient)[0].Tool.Decl().Name)
+	require.Len(t, connections.Entries(codingmcp.VisibilityAgentPrivate), 1)
+	assert.Equal(t, "private_search", connections.Entries(codingmcp.VisibilityAgentPrivate)[0].Tool.Decl().Name)
+
+	bindings := connections.ConnectedServers(codingmcp.VisibilityAgentPrivate)
+	require.Len(t, bindings, 1)
+	assert.Equal(t, "private", bindings[0].ID)
+	assert.Equal(t, private.Definition.Fingerprint(), bindings[0].Fingerprint)
+	bindings[0].Entries[0].Tags = append(bindings[0].Entries[0].Tags, "mutated")
+	assert.NotContains(t, connections.Entries(codingmcp.VisibilityAgentPrivate)[0].Tags, "mutated")
+}
+
 func TestOpenConnectionsUsesDefaultStreamableHTTPTransport(t *testing.T) {
 	t.Parallel()
 

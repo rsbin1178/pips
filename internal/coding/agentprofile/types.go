@@ -155,6 +155,17 @@ type DelegationSelection struct {
 	Allow []string
 }
 
+// MCPSelection names exact configured Agent-private MCP servers. It does not
+// select any tool by itself; Tools remains the capability authority surface.
+type MCPSelection struct {
+	Private []string
+}
+
+// HookSelection names exact trusted Agent-private lifecycle hooks.
+type HookSelection struct {
+	Private []string
+}
+
 // OutputFormat identifies the local final-result contract for a custom profile.
 type OutputFormat string
 
@@ -192,6 +203,8 @@ type Definition struct {
 	Tools        ToolSelection
 	Skills       SkillSelection
 	Delegation   DelegationSelection
+	MCP          MCPSelection
+	Hooks        HookSelection
 	Output       OutputContract
 }
 
@@ -204,6 +217,8 @@ func (d Definition) Clone() Definition {
 	cloned.Skills.Allow = slices.Clone(d.Skills.Allow)
 	cloned.Skills.Preload = slices.Clone(d.Skills.Preload)
 	cloned.Delegation.Allow = slices.Clone(d.Delegation.Allow)
+	cloned.MCP.Private = slices.Clone(d.MCP.Private)
+	cloned.Hooks.Private = slices.Clone(d.Hooks.Private)
 	cloned.Output.Schema = slices.Clone(d.Output.Schema)
 
 	return cloned
