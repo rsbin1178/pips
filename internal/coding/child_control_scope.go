@@ -33,22 +33,26 @@ import (
 // parent approval controller, parent pending runner, parent harness, or parent
 // interaction pointer.
 type childScopeFactory struct {
-	workspace     workspace.Workspace
-	tree          *workspace.Tree
-	toolLimits    tools.Limits
-	policy        execution.Policy
-	executor      *execution.Executor
-	sandbox       config.SandboxMode
-	network       config.SandboxNetworkMode
-	requestPolicy func(*ai.Request)
-	toolTimeout   time.Duration
-	inspector     *git.Inspector
-	hooks         []hooks.Definition
-	hookRunner    hooks.Runner
-	model         ai.LanguageModel
-	mode          OperatingMode
-	mcpEntries    []catalog.Entry
-	controls      *childControlRegistry
+	workspace            workspace.Workspace
+	tree                 *workspace.Tree
+	toolLimits           tools.Limits
+	policy               execution.Policy
+	executor             *execution.Executor
+	sandbox              config.SandboxMode
+	network              config.SandboxNetworkMode
+	requestPolicy        func(*ai.Request)
+	toolTimeout          time.Duration
+	inspector            *git.Inspector
+	hooks                []hooks.Definition
+	hookRunner           hooks.Runner
+	model                ai.LanguageModel
+	mode                 OperatingMode
+	mcpEntries           []catalog.Entry
+	controls             *childControlRegistry
+	subagents            *subagent.Manager
+	delegationDispatcher subagent.Dispatcher
+	delegationOwner      subagent.Ownership
+	delegationObserver   subagent.Observer
 	// onPauseChanged projects only the child Session phase transition. It is
 	// deliberately separate from parent interaction state so a child waiting
 	// for input can be surfaced and controlled without pausing its parent.
@@ -187,6 +191,7 @@ type childControlScope struct {
 	hooks       childHookScope
 	guard       childToolGuard
 	validator   subagent.OutputValidator
+	nested      *subagent.Manager
 
 	pause       ChildPauseKind
 	approval    approval.State
@@ -219,7 +224,11 @@ func newChildControlScope(
 		return nil, err
 	}
 	acquired := true
+	var nested *subagent.Manager
 	defer func() {
+		if returnErr != nil && nested != nil {
+			returnErr = errors.Join(returnErr, nested.Close(context.WithoutCancel(ctx)))
+		}
 		if returnErr != nil && acquired {
 			returnErr = errors.Join(returnErr, generation.release(context.WithoutCancel(ctx)))
 		}
@@ -243,6 +252,22 @@ func newChildControlScope(
 		return nil, err
 	}
 	scope.validator = validator
+	if factory.delegationDispatcher != nil {
+		if factory.subagents == nil || len(scope.plan.DelegationTargets) == 0 {
+			cancel()
+			return nil, fmt.Errorf("%w: incomplete recursive delegation dependencies", subagent.ErrInvalid)
+		}
+		nested, err = subagent.New(subagent.Config{
+			Context: lifecycle, Parent: input.Child, Model: factory.model,
+			RequestPolicy: factory.requestPolicy, Share: factory.subagents,
+			DelegationDepth: scope.plan.DelegationDepth + 1,
+		})
+		if err != nil {
+			cancel()
+			return nil, err
+		}
+		scope.nested = nested
+	}
 
 	controller, err := approval.New(
 		factory.workspace,
@@ -452,6 +477,15 @@ func (s *childControlScope) buildCatalog(
 				Tool: entry.Tool, Source: entry.Source, Risk: entry.Risk, Tags: slices.Clone(entry.Tags),
 			})
 		}
+	}
+	if s.nested != nil {
+		delegationTool := s.nested.ToolForTargets(
+			s.factory.delegationOwner,
+			s.factory.delegationObserver,
+			s.factory.delegationDispatcher,
+			s.plan.DelegationTargets,
+		)
+		entries = append(entries, catalog.Local("coding.subagent", catalog.RiskRead, delegationTool)...)
 	}
 	childCatalog, err := catalog.New(entries...)
 	if err != nil {
@@ -919,7 +953,10 @@ func (s *childControlScope) Close(ctx context.Context) error {
 		s.pending.clear()
 		s.resolver.set(nil)
 		s.factory.controls.remove(s.childSessionID, s)
-		s.closeErr = s.generation.release(ctx)
+		if s.nested != nil {
+			s.closeErr = errors.Join(s.closeErr, s.nested.Close(ctx))
+		}
+		s.closeErr = errors.Join(s.closeErr, s.generation.release(ctx))
 	})
 
 	s.mu.Lock()

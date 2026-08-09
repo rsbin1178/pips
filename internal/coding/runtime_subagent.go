@@ -30,6 +30,7 @@ func (r *Runtime) subagentObserver(
 ) subagent.Observer {
 	return func(ctx context.Context, event subagent.Event) error {
 		eventType := subagentEventType(event)
+		nested := event.ParentSessionID != "" && event.ParentSessionID != r.handle.Metadata().ID
 
 		payload := SubagentLifecycle{
 			Identity: event.Identity, Role: event.Role, State: event.State,
@@ -48,6 +49,20 @@ func (r *Runtime) subagentObserver(
 		}
 		if isTerminalSubagentState(event.State) && event.Delivery != subagent.DeliveryBackground {
 			current.addSubagentUsage(event.ChildSessionID, payload.Usage)
+		}
+		// Nested lifecycle belongs to its actual parent child run, which is not
+		// an active run in the root conversation reducer. Keep it out of the
+		// root timeline while retaining the ordinary descendant child projection.
+		if nested {
+			switch event.State {
+			case subagent.StateCreated:
+				return r.openChildProjection(ctx, event)
+			case subagent.StateSucceeded, subagent.StateFailed,
+				subagent.StateCanceled, subagent.StateInterrupted:
+				return r.finishChildProjection(ctx, event)
+			case subagent.StateRunning:
+				return nil
+			}
 		}
 
 		interactionID := event.ParentInteractionID

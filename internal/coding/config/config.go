@@ -30,6 +30,7 @@ const (
 	FieldReasoning             Field = "reasoning"
 	FieldToolSearch            Field = "tool_search"
 	FieldDynamicSubagents      Field = "dynamic_subagents"
+	FieldSubagentMaxDepth      Field = "subagent.max_depth"
 	FieldSubagentMaxConcurrent Field = "subagent.max_concurrent"
 	FieldSubagentMaxSpawned    Field = "subagent.max_spawned_per_root_interaction"
 	FieldSubagentMaxFollowUps  Field = "subagent.max_auto_follow_ups"
@@ -51,6 +52,7 @@ var fields = []Field{
 	FieldReasoning,
 	FieldToolSearch,
 	FieldDynamicSubagents,
+	FieldSubagentMaxDepth,
 	FieldSubagentMaxConcurrent,
 	FieldSubagentMaxSpawned,
 	FieldSubagentMaxFollowUps,
@@ -387,9 +389,11 @@ func DefaultCompactionConfig() CompactionConfig {
 }
 
 // SubagentConfig contains the user-configurable production admission and
-// execution budgets. Zero is invalid in TOML; the complete programmatic zero
+// execution budgets. MaxDepth defaults to zero (recursive delegation off);
+// zero is invalid for every other TOML field. The complete programmatic zero
 // value remains a legacy embedding boundary and is normalized by Runtime.
 type SubagentConfig struct {
+	MaxDepth                     int
 	MaxConcurrent                int
 	MaxSpawnedPerRootInteraction int
 	MaxAutoFollowUps             int
@@ -402,6 +406,7 @@ type SubagentConfig struct {
 // DefaultSubagentConfig returns the bounded production policy.
 func DefaultSubagentConfig() SubagentConfig {
 	return SubagentConfig{
+		MaxDepth:                     0,
 		MaxConcurrent:                4,
 		MaxSpawnedPerRootInteraction: 8,
 		MaxAutoFollowUps:             4,
@@ -641,6 +646,7 @@ func validateSubagent(value SubagentConfig) error {
 		minimum int
 		maximum int
 	}{
+		{"max_depth", value.MaxDepth, 0, 3},
 		{"max_concurrent", value.MaxConcurrent, 1, 32},
 		{"max_spawned_per_root_interaction", value.MaxSpawnedPerRootInteraction, 1, 128},
 		{"max_auto_follow_ups", value.MaxAutoFollowUps, 1, 32},

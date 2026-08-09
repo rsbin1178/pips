@@ -801,6 +801,7 @@ func (r *Runtime) openInteraction(
 				requestPolicy: r.requestPolicy, toolTimeout: r.opts.ToolTimeout,
 				inspector: r.inspector, hooks: r.hookDefinitions, hookRunner: r.hookRunner,
 				model: childModel, mode: started.Mode, mcpEntries: childMCPEntries, controls: r.childControls,
+				subagents:          r.subagents,
 				onPauseChanged:     r.projectChildPause,
 				onWorkspaceChanged: r.projectChildWorkspaceChanged,
 			}
@@ -815,6 +816,7 @@ func (r *Runtime) openInteraction(
 					childModels,
 					childFactory,
 					r.config.ToolSearch,
+					r.opts.Subagent.MaxDepth,
 				)
 			}
 			customDispatcher, dispatchErr := newDispatcher(agentprofile.AudienceModel)

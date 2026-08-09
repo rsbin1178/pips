@@ -38,12 +38,12 @@ func TestAdmissionPermitOwnsActiveAndCumulativeSpawnBudgets(t *testing.T) {
 
 	budget, err := newAdmissionBudget(2, 2)
 	require.NoError(t, err)
-	foreground, err := budget.reserve(DeliveryForeground, "")
+	foreground, err := budget.reserve(DeliveryForeground, "", false)
 	require.NoError(t, err)
-	background, err := budget.reserve(DeliveryBackground, "root-1")
+	background, err := budget.reserve(DeliveryBackground, "root-1", false)
 	require.NoError(t, err)
 
-	_, err = budget.reserve(DeliveryForeground, "")
+	_, err = budget.reserve(DeliveryForeground, "", false)
 	require.ErrorIs(t, err, ErrCapacity)
 
 	foreground.release()
@@ -54,11 +54,11 @@ func TestAdmissionPermitOwnsActiveAndCumulativeSpawnBudgets(t *testing.T) {
 	assert.Zero(t, active)
 	assert.Equal(t, map[string]int{"root-1": 1}, spawned)
 
-	second, err := budget.reserve(DeliveryBackground, "root-1")
+	second, err := budget.reserve(DeliveryBackground, "root-1", false)
 	require.NoError(t, err)
 	second.commit()
 	second.release()
-	_, err = budget.reserve(DeliveryBackground, "root-1")
+	_, err = budget.reserve(DeliveryBackground, "root-1", false)
 	require.ErrorIs(t, err, ErrSpawnLimit)
 }
 
@@ -67,18 +67,18 @@ func TestAdmissionPermitRollsBackUncommittedBackgroundSpawn(t *testing.T) {
 
 	budget, err := newAdmissionBudget(1, 1)
 	require.NoError(t, err)
-	permit, err := budget.reserve(DeliveryBackground, "root-1")
+	permit, err := budget.reserve(DeliveryBackground, "root-1", false)
 	require.NoError(t, err)
 	permit.release()
 
 	active, spawned := budget.snapshot()
 	assert.Zero(t, active)
 	assert.Empty(t, spawned)
-	permit, err = budget.reserve(DeliveryBackground, "root-1")
+	permit, err = budget.reserve(DeliveryBackground, "root-1", false)
 	require.NoError(t, err)
 	permit.commit()
 	permit.release()
-	_, err = budget.reserve(DeliveryBackground, "root-1")
+	_, err = budget.reserve(DeliveryBackground, "root-1", false)
 	require.ErrorIs(t, err, ErrSpawnLimit)
 }
 
@@ -87,13 +87,13 @@ func TestAdmissionBudgetPreservesSingleSlotBusyError(t *testing.T) {
 
 	budget, err := newAdmissionBudget(1, 1)
 	require.NoError(t, err)
-	permit, err := budget.reserve(DeliveryForeground, "")
+	permit, err := budget.reserve(DeliveryForeground, "", false)
 	require.NoError(t, err)
 	defer permit.release()
 
-	_, err = budget.reserve(DeliveryForeground, "")
+	_, err = budget.reserve(DeliveryForeground, "", false)
 	require.ErrorIs(t, err, ErrBusy)
-	_, err = budget.reserve(DeliveryBackground, "")
+	_, err = budget.reserve(DeliveryBackground, "", false)
 	require.ErrorIs(t, err, ErrBusy)
 }
 
@@ -102,13 +102,13 @@ func TestAdmissionBudgetRejectsInvalidRequests(t *testing.T) {
 
 	budget, err := newAdmissionBudget(2, 1)
 	require.NoError(t, err)
-	_, err = budget.reserve(DeliveryBackground, "")
+	_, err = budget.reserve(DeliveryBackground, "", false)
 	require.ErrorIs(t, err, ErrSpawnLimit)
-	_, err = budget.reserve(Delivery("later"), "root-1")
+	_, err = budget.reserve(Delivery("later"), "root-1", false)
 	require.ErrorIs(t, err, ErrInvalid)
 
 	var nilBudget *admissionBudget
-	_, err = nilBudget.reserve(DeliveryForeground, "")
+	_, err = nilBudget.reserve(DeliveryForeground, "", false)
 	require.ErrorIs(t, err, ErrInvalid)
 }
 
@@ -130,7 +130,7 @@ func TestAdmissionBudgetConcurrentReservationIsBoundedAndReusable(t *testing.T) 
 		go func() {
 			defer group.Done()
 			<-start
-			permit, reserveErr := budget.reserve(DeliveryForeground, "")
+			permit, reserveErr := budget.reserve(DeliveryForeground, "", false)
 			results <- reserveErr
 			if reserveErr != nil {
 				return
@@ -164,7 +164,21 @@ func TestAdmissionBudgetConcurrentReservationIsBoundedAndReusable(t *testing.T) 
 	group.Wait()
 	active, _ = budget.snapshot()
 	assert.Zero(t, active)
-	reused, err := budget.reserve(DeliveryForeground, "")
+	reused, err := budget.reserve(DeliveryForeground, "", false)
 	require.NoError(t, err)
 	reused.release()
+}
+
+func TestAdmissionBudgetCountsNestedForegroundDescendants(t *testing.T) {
+	t.Parallel()
+
+	budget, err := newAdmissionBudget(2, 1)
+	require.NoError(t, err)
+	permit, err := budget.reserve(DeliveryForeground, "root-1", true)
+	require.NoError(t, err)
+	permit.commit()
+	permit.release()
+
+	_, err = budget.reserve(DeliveryForeground, "root-1", true)
+	require.ErrorIs(t, err, ErrSpawnLimit)
 }

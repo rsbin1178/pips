@@ -854,12 +854,16 @@ func configuredSubagentOptions(
 	limits.MaxDuration = time.Duration(configured.MaxDurationMinutes) * time.Minute
 	result := subagent.ExecutionOptions{
 		Limits:                       limits,
+		MaxDepth:                     configured.MaxDepth,
 		MaxConcurrent:                configured.MaxConcurrent,
 		MaxSpawnedPerRootInteraction: configured.MaxSpawnedPerRootInteraction,
 		MaxAutoFollowUps:             configured.MaxAutoFollowUps,
 	}
 	if override.Limits != (subagent.Limits{}) {
 		result.Limits = override.Limits
+	}
+	if override.MaxDepth != 0 {
+		result.MaxDepth = override.MaxDepth
 	}
 	if override.MaxConcurrent != 0 {
 		result.MaxConcurrent = override.MaxConcurrent

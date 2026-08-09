@@ -33,10 +33,11 @@ type Dispatcher interface {
 // DispatchInput is the bounded, application-owned input for a child runtime
 // binding. The Session belongs solely to this child execution.
 type DispatchInput struct {
-	Plan    ExecutionPlan
-	Request Request
-	Child   *session.Handle
-	OnEvent func(context.Context, agent.Event)
+	Plan     ExecutionPlan
+	Request  Request
+	Child    *session.Handle
+	Observer Observer
+	OnEvent  func(context.Context, agent.Event)
 }
 
 // Runner owns the child-specific execution/control scope for one compiled
