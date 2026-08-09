@@ -176,6 +176,7 @@ type fileCompaction struct {
 }
 
 type fileSubagent struct {
+	MaxDepth                     *int `toml:"max_depth"`
 	MaxConcurrent                *int `toml:"max_concurrent"`
 	MaxSpawnedPerRootInteraction *int `toml:"max_spawned_per_root_interaction"`
 	MaxAutoFollowUps             *int `toml:"max_auto_follow_ups"`
@@ -523,6 +524,7 @@ func decodeLayer(value fileConfig) (fileLayer, error) {
 			*target = *source
 			layer.subagentFields = append(layer.subagentFields, field)
 		}
+		setSubagent(FieldSubagentMaxDepth, value.Subagent.MaxDepth, &subagent.MaxDepth)
 		setSubagent(FieldSubagentMaxConcurrent, value.Subagent.MaxConcurrent, &subagent.MaxConcurrent)
 		setSubagent(
 			FieldSubagentMaxSpawned,

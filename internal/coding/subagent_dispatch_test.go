@@ -279,3 +279,65 @@ func TestCompileProfileLimitsOnlyNarrowsCeiling(t *testing.T) {
 		})
 	}
 }
+
+func TestCompileDelegationTargetsRequiresExactModelVisibleNonAncestorCustomIDs(t *testing.T) {
+	t.Parallel()
+
+	custom := func(id string) agentprofile.Definition {
+		return agentprofile.Definition{ID: id, Kind: agentprofile.KindCustom}
+	}
+	dispatcher := &customSubagentDispatcher{
+		modelDefinitions: map[string]agentprofile.Definition{
+			"allowed-agent": custom("allowed-agent"),
+		},
+		maxDelegationDepth: 2,
+		delegationDepth:    1,
+		ancestry:           []string{"root-agent"},
+	}
+	targets, err := dispatcher.compileDelegationTargets(agentprofile.Definition{
+		ID: "middle-agent", Kind: agentprofile.KindCustom,
+		Delegation: agentprofile.DelegationSelection{Allow: []string{"allowed-agent"}},
+	}, subagent.DeliveryForeground)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"allowed-agent"}, targets)
+
+	for name, definition := range map[string]agentprofile.Definition{
+		"self": {
+			ID: "middle-agent", Kind: agentprofile.KindCustom,
+			Delegation: agentprofile.DelegationSelection{Allow: []string{"middle-agent"}},
+		},
+		"ancestor": {
+			ID: "middle-agent", Kind: agentprofile.KindCustom,
+			Delegation: agentprofile.DelegationSelection{Allow: []string{"root-agent"}},
+		},
+		"missing or user only": {
+			ID: "middle-agent", Kind: agentprofile.KindCustom,
+			Delegation: agentprofile.DelegationSelection{Allow: []string{"user-only-agent"}},
+		},
+		"builtin": {
+			ID: "middle-agent", Kind: agentprofile.KindCustom,
+			Delegation: agentprofile.DelegationSelection{Allow: []string{"explore"}},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := dispatcher.compileDelegationTargets(definition, subagent.DeliveryForeground)
+			require.ErrorIs(t, err, subagent.ErrInvalid)
+		})
+	}
+
+	_, err = dispatcher.compileDelegationTargets(agentprofile.Definition{
+		ID: "middle-agent", Kind: agentprofile.KindCustom,
+		Delegation: agentprofile.DelegationSelection{Allow: []string{"allowed-agent"}},
+	}, subagent.DeliveryBackground)
+	require.ErrorIs(t, err, subagent.ErrInvalid)
+
+	exhausted := *dispatcher
+	exhausted.delegationDepth = exhausted.maxDelegationDepth
+	_, err = exhausted.compileDelegationTargets(agentprofile.Definition{
+		ID: "middle-agent", Kind: agentprofile.KindCustom,
+		Delegation: agentprofile.DelegationSelection{Allow: []string{"allowed-agent"}},
+	}, subagent.DeliveryForeground)
+	require.ErrorIs(t, err, subagent.ErrInvalid)
+}

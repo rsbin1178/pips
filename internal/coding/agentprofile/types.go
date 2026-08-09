@@ -148,6 +148,13 @@ type SkillSelection struct {
 	Preload []string
 }
 
+// DelegationSelection names the exact custom Agents this profile may invoke.
+// Runtime still resolves every ID against the frozen model-visible registry;
+// parsing this request never grants delegation authority by itself.
+type DelegationSelection struct {
+	Allow []string
+}
+
 // OutputFormat identifies the local final-result contract for a custom profile.
 type OutputFormat string
 
@@ -184,6 +191,7 @@ type Definition struct {
 	Limits       ExecutionLimits
 	Tools        ToolSelection
 	Skills       SkillSelection
+	Delegation   DelegationSelection
 	Output       OutputContract
 }
 
@@ -195,6 +203,7 @@ func (d Definition) Clone() Definition {
 	cloned.Tools.Require = slices.Clone(d.Tools.Require)
 	cloned.Skills.Allow = slices.Clone(d.Skills.Allow)
 	cloned.Skills.Preload = slices.Clone(d.Skills.Preload)
+	cloned.Delegation.Allow = slices.Clone(d.Delegation.Allow)
 	cloned.Output.Schema = slices.Clone(d.Output.Schema)
 
 	return cloned

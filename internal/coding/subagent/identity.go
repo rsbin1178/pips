@@ -27,7 +27,11 @@ const (
 	maxPlanInstructionsBytes  = 128 << 10
 	maxPlanCapabilities       = 512
 	maxPlanSkills             = 512
+	maxPlanDelegationTargets  = 128
 	maxOutputSchemaBytes      = 64 << 10
+	// MaxDelegationDepth is the product hard bound for recursive custom Agent
+	// edges below a root child.
+	MaxDelegationDepth = 3
 )
 
 // AgentKind identifies the durable source class of one child agent.
@@ -276,6 +280,10 @@ type ExecutionPlan struct {
 	Skills             []string              `json:"skills"`
 	PreloadedSkills    []string              `json:"preloaded_skills"`
 	ToolSearch         bool                  `json:"tool_search,omitempty"`
+	DelegationDepth    int                   `json:"delegation_depth,omitempty"`
+	MaxDelegationDepth int                   `json:"max_delegation_depth,omitempty"`
+	Ancestry           []string              `json:"ancestry,omitempty"`
+	DelegationTargets  []string              `json:"delegation_targets,omitempty"`
 	Limits             Limits                `json:"limits"`
 	Output             OutputContract        `json:"output"`
 	// Legacy records did not carry an execution snapshot. It is set only while
@@ -289,6 +297,8 @@ func (p ExecutionPlan) Clone() ExecutionPlan {
 	p.Capabilities = slices.Clone(p.Capabilities)
 	p.Skills = slices.Clone(p.Skills)
 	p.PreloadedSkills = slices.Clone(p.PreloadedSkills)
+	p.Ancestry = slices.Clone(p.Ancestry)
+	p.DelegationTargets = slices.Clone(p.DelegationTargets)
 	p.Output = p.Output.Clone()
 
 	return p
@@ -315,6 +325,7 @@ func validateExecutionPlan(plan ExecutionPlan, allowLegacy bool) error {
 		!validModelIdentity(plan.Model) || len(plan.Instructions) > maxPlanInstructionsBytes ||
 		!validPlanInstructions(plan.Instructions) || len(plan.Capabilities) > maxPlanCapabilities ||
 		len(plan.Skills) > maxPlanSkills || len(plan.PreloadedSkills) > maxPlanSkills ||
+		len(plan.DelegationTargets) > maxPlanDelegationTargets ||
 		!validPlanLimits(plan.Limits) ||
 		validateOutputContract(plan.Output) != nil {
 		return fmt.Errorf("%w: invalid execution plan", ErrInvalid)
@@ -323,7 +334,9 @@ func validateExecutionPlan(plan ExecutionPlan, allowLegacy bool) error {
 	if plan.Legacy {
 		if !allowLegacy || plan.Instructions != "" || plan.InstructionsDigest != "" ||
 			len(plan.Capabilities) != 0 || len(plan.Skills) != 0 ||
-			len(plan.PreloadedSkills) != 0 || plan.ToolSearch {
+			len(plan.PreloadedSkills) != 0 || plan.ToolSearch ||
+			plan.DelegationDepth != 0 || plan.MaxDelegationDepth != 0 ||
+			len(plan.Ancestry) != 0 || len(plan.DelegationTargets) != 0 {
 			return fmt.Errorf("%w: invalid legacy execution plan", ErrInvalid)
 		}
 
@@ -366,6 +379,52 @@ func validateExecutionPlan(plan ExecutionPlan, allowLegacy bool) error {
 			return fmt.Errorf("%w: duplicate preloaded Skill", ErrInvalid)
 		}
 		seenPreloaded[skill] = struct{}{}
+	}
+	if err := validatePlanDelegation(plan); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func validatePlanDelegation(plan ExecutionPlan) error {
+	if plan.DelegationDepth == 0 && plan.MaxDelegationDepth == 0 &&
+		len(plan.Ancestry) == 0 && len(plan.DelegationTargets) == 0 {
+		return nil // Pre-recursion non-legacy plans remain readable and runnable.
+	}
+	if plan.Identity.Kind == AgentKindBuiltin || plan.DelegationDepth < 0 ||
+		plan.MaxDelegationDepth < 0 || plan.MaxDelegationDepth > MaxDelegationDepth ||
+		plan.DelegationDepth > plan.MaxDelegationDepth ||
+		len(plan.Ancestry) != plan.DelegationDepth+1 ||
+		plan.Ancestry[len(plan.Ancestry)-1] != plan.Identity.ID {
+		return fmt.Errorf("%w: invalid execution plan delegation lineage", ErrInvalid)
+	}
+	seen := make(map[string]struct{}, len(plan.Ancestry)+len(plan.DelegationTargets))
+	for _, id := range plan.Ancestry {
+		if !validAgentID(id) {
+			return fmt.Errorf("%w: invalid execution plan delegation ancestry", ErrInvalid)
+		}
+		if _, duplicate := seen[id]; duplicate {
+			return fmt.Errorf("%w: cyclic execution plan delegation ancestry", ErrInvalid)
+		}
+		seen[id] = struct{}{}
+	}
+	if len(plan.DelegationTargets) > 0 &&
+		(plan.Delivery != DeliveryForeground || plan.DelegationDepth >= plan.MaxDelegationDepth) {
+		return fmt.Errorf("%w: execution plan cannot delegate at this depth or delivery", ErrInvalid)
+	}
+	targets := make(map[string]struct{}, len(plan.DelegationTargets))
+	for _, id := range plan.DelegationTargets {
+		if !validAgentID(id) {
+			return fmt.Errorf("%w: invalid execution plan delegation target", ErrInvalid)
+		}
+		if _, ancestor := seen[id]; ancestor {
+			return fmt.Errorf("%w: execution plan delegation target is an ancestor", ErrInvalid)
+		}
+		if _, duplicate := targets[id]; duplicate {
+			return fmt.Errorf("%w: duplicate execution plan delegation target", ErrInvalid)
+		}
+		targets[id] = struct{}{}
 	}
 
 	return nil

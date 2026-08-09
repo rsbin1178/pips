@@ -15,7 +15,7 @@ const (
 )
 
 // admissionBudget owns the process-local child execution and cumulative
-// background-spawn budgets. Manager continues to own lifecycle coordination.
+// descendant budgets. Manager continues to own lifecycle coordination.
 type admissionBudget struct {
 	mu sync.Mutex
 
@@ -26,7 +26,7 @@ type admissionBudget struct {
 }
 
 // admissionPermit transfers one active slot from Start to the admitted
-// Execution. A background spawn is retained only after commit.
+// Execution. A counted descendant is retained only after commit.
 type admissionPermit struct {
 	once sync.Once
 
@@ -48,7 +48,7 @@ func newAdmissionBudget(maxConcurrent, maxSpawned int) (*admissionBudget, error)
 	}, nil
 }
 
-func (a *admissionBudget) reserve(delivery Delivery, root string) (*admissionPermit, error) {
+func (a *admissionBudget) reserve(delivery Delivery, root string, countDescendant bool) (*admissionPermit, error) {
 	if a == nil {
 		return nil, fmt.Errorf("%w: nil admission budget", ErrInvalid)
 	}
@@ -69,14 +69,17 @@ func (a *admissionBudget) reserve(delivery Delivery, root string) (*admissionPer
 	switch delivery {
 	case DeliveryForeground:
 	case DeliveryBackground:
+	default:
+		return nil, fmt.Errorf("%w: invalid delivery", ErrInvalid)
+	}
+
+	if delivery == DeliveryBackground || countDescendant {
 		if root == "" || a.spawned[root] >= a.maxSpawned {
 			return nil, ErrSpawnLimit
 		}
 
 		permit.root = root
 		a.spawned[root]++
-	default:
-		return nil, fmt.Errorf("%w: invalid delivery", ErrInvalid)
 	}
 
 	a.active++
@@ -85,7 +88,7 @@ func (a *admissionBudget) reserve(delivery Delivery, root string) (*admissionPer
 }
 
 // commit transfers ownership to a live Execution. After this point a
-// background spawn remains part of the root's cumulative budget.
+// counted descendant remains part of the root's cumulative budget.
 func (p *admissionPermit) commit() {
 	if p == nil || p.budget == nil {
 		return

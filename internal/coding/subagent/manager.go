@@ -37,9 +37,18 @@ const (
 // configuration protocol in P1. A zero Limits value selects DefaultLimits.
 type ExecutionOptions struct {
 	Limits                       Limits
+	MaxDepth                     int
 	MaxConcurrent                int
 	MaxSpawnedPerRootInteraction int
 	MaxAutoFollowUps             int
+}
+
+type sharedManagerState struct {
+	mu sync.Mutex
+
+	admission *admissionBudget
+	active    map[string]*Execution
+	maxDepth  int
 }
 
 // Config contains the application-owned dependencies for one parent Session.
@@ -60,6 +69,12 @@ type Config struct {
 	Options        ExecutionOptions
 	AgentObservers []func(context.Context, agent.Event)
 	EventObservers []AgentEventObserver
+	// Share joins this Manager to an existing root execution tree. It is
+	// required when Parent is a subagent Session.
+	Share *Manager
+	// DelegationDepth is the depth expected for children created by this
+	// manager. Root conversation Managers use zero.
+	DelegationDepth int
 }
 
 // Manager owns a bounded set of live child executions and all of their cleanup.
@@ -78,6 +93,8 @@ type Manager struct {
 	starting         int
 	startingDone     chan struct{}
 	admission        *admissionBudget
+	shared           *sharedManagerState
+	delegationDepth  int
 	maxAutoFollowUps int
 	runs             sync.WaitGroup
 	waitOnce         sync.Once
@@ -113,6 +130,7 @@ type Execution struct {
 //
 //nolint:gocyclo // Construction validates all concurrency and execution bounds in one place.
 func New(config Config) (*Manager, error) {
+	config = inheritManagerConfig(config)
 	if err := validateManagerConfig(config); err != nil {
 		return nil, err
 	}
@@ -155,9 +173,28 @@ func New(config Config) (*Manager, error) {
 	if maxAutoFollowUps < 1 || maxAutoFollowUps > 32 {
 		return nil, fmt.Errorf("%w: invalid manager concurrency limits", ErrInvalid)
 	}
-	admission, err := newAdmissionBudget(maxConcurrent, maxSpawned)
-	if err != nil {
-		return nil, err
+	if config.Options.MaxDepth < 0 || config.Options.MaxDepth > MaxDelegationDepth {
+		return nil, fmt.Errorf("%w: invalid manager delegation depth", ErrInvalid)
+	}
+	var shared *sharedManagerState
+	if config.Share != nil {
+		shared = config.Share.shared
+		if shared == nil {
+			return nil, fmt.Errorf("%w: unavailable shared manager state", ErrInvalid)
+		}
+		if shared.maxDepth != config.Options.MaxDepth {
+			return nil, fmt.Errorf("%w: shared manager delegation depth mismatch", ErrInvalid)
+		}
+	} else {
+		admission, err := newAdmissionBudget(maxConcurrent, maxSpawned)
+		if err != nil {
+			return nil, err
+		}
+		shared = &sharedManagerState{
+			admission: admission,
+			active:    make(map[string]*Execution),
+			maxDepth:  config.Options.MaxDepth,
+		}
 	}
 	lifecycleBase := config.Context
 	if lifecycleBase == nil {
@@ -168,10 +205,29 @@ func New(config Config) (*Manager, error) {
 	return &Manager{
 		config: config, limits: limits, tools: readTools,
 		lifecycle: lifecycle, cancel: cancel,
-		active: make(map[string]*Execution), admission: admission,
+		active: make(map[string]*Execution), admission: shared.admission, shared: shared,
+		delegationDepth:  config.DelegationDepth,
 		maxAutoFollowUps: maxAutoFollowUps,
 		waitDone:         make(chan struct{}),
 	}, nil
+}
+
+func inheritManagerConfig(config Config) Config {
+	if config.Share == nil {
+		return config
+	}
+	root := config.Share.config
+	config.Repository = root.Repository
+	config.Tree = root.Tree
+	config.GenerationID = root.GenerationID
+	config.SummaryModel = root.SummaryModel
+	config.Compaction = root.Compaction
+	config.Lifecycle = root.Lifecycle
+	config.Options = root.Options
+	config.AgentObservers = root.AgentObservers
+	config.EventObservers = root.EventObservers
+
+	return config
 }
 
 // MaxAutoFollowUps returns the validated Runtime coordination bound.
@@ -194,8 +250,24 @@ func validateManagerConfig(config Config) error {
 		return fmt.Errorf("%w: invalid model identity", ErrInvalid)
 	}
 
-	if config.Parent.Metadata().Kind != session.KindConversation {
-		return fmt.Errorf("%w: parent must be a conversation", ErrInvalid)
+	parentKind := config.Parent.Metadata().Kind
+	if parentKind != session.KindConversation && parentKind != session.KindSubagent {
+		return fmt.Errorf("%w: parent must be a conversation or subagent", ErrInvalid)
+	}
+	if parentKind == session.KindSubagent && config.Share == nil {
+		return fmt.Errorf("%w: subagent parent requires shared tree state", ErrInvalid)
+	}
+	if parentKind == session.KindConversation && config.Share != nil {
+		return fmt.Errorf("%w: conversation parent cannot join another tree", ErrInvalid)
+	}
+	if parentKind == session.KindConversation && config.DelegationDepth != 0 {
+		return fmt.Errorf("%w: manager delegation depth does not match parent kind", ErrInvalid)
+	}
+	if parentKind == session.KindSubagent && config.DelegationDepth == 0 {
+		return fmt.Errorf("%w: manager delegation depth does not match parent kind", ErrInvalid)
+	}
+	if config.DelegationDepth < 0 || config.DelegationDepth > MaxDelegationDepth {
+		return fmt.Errorf("%w: invalid manager delegation depth", ErrInvalid)
 	}
 
 	if err := validateManagerObservers(config); err != nil {
@@ -382,6 +454,9 @@ func (m *Manager) start(
 	request = m.normalizeRequest(ctx, request)
 	var plan ExecutionPlan
 	if builtin {
+		if m.config.Parent.Metadata().Kind == session.KindSubagent {
+			return nil, fmt.Errorf("%w: recursive builtin agents are unavailable", ErrInvalid)
+		}
 		if err := validateRequest(request, m.limits); err != nil {
 			return nil, err
 		}
@@ -393,6 +468,9 @@ func (m *Manager) start(
 		plan, err = dispatcher.Compile(ctx, request)
 		if err == nil {
 			err = validateDispatchedPlan(request, plan, m.limits)
+		}
+		if err == nil {
+			err = m.validateDelegationPlan(plan)
 		}
 	}
 	if err != nil {
@@ -496,6 +574,7 @@ func (m *Manager) start(
 	if !builtin {
 		runner, openErr := dispatcher.Open(runCtx, DispatchInput{
 			Plan: plan, Request: request, Child: child,
+			Observer: observer,
 			OnEvent: func(eventCtx context.Context, event agent.Event) {
 				m.observeChild(eventCtx, child, observer, request, created, tracker, event)
 			},
@@ -559,7 +638,15 @@ func (m *Manager) start(
 		return nil, errors.Join(ErrClosed, persistErr, runnerCloseErr, closeErr)
 	}
 
-	m.active[created.ChildSessionID] = execution
+	if err := m.registerExecution(created.ChildSessionID, execution); err != nil {
+		m.mu.Unlock()
+		cancel()
+		if stopParent != nil {
+			stopParent()
+		}
+
+		return nil, errors.Join(err, closeRunner(context.WithoutCancel(startCtx), execution.runner), child.Close())
+	}
 	m.runs.Add(1)
 	permit.commit()
 	ownershipTransferred = true
@@ -578,6 +665,14 @@ func (m *Manager) start(
 	return execution, nil
 }
 
+func closeRunner(ctx context.Context, runner Runner) error {
+	if runner == nil {
+		return nil
+	}
+
+	return runner.Close(ctx)
+}
+
 func (m *Manager) reserveStart(request Request) (*admissionPermit, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -587,6 +682,7 @@ func (m *Manager) reserveStart(request Request) (*admissionPermit, error) {
 	permit, err := m.admission.reserve(
 		request.Delivery,
 		request.Ownership.RootInteractionID,
+		m.config.Parent.Metadata().Kind == session.KindSubagent,
 	)
 	if err != nil {
 		return nil, err
@@ -598,6 +694,37 @@ func (m *Manager) reserveStart(request Request) (*admissionPermit, error) {
 	m.starting++
 
 	return permit, nil
+}
+
+func (m *Manager) validateDelegationPlan(plan ExecutionPlan) error {
+	if len(plan.Ancestry) == 0 {
+		if m.config.Parent.Metadata().Kind == session.KindSubagent {
+			return fmt.Errorf("%w: nested dispatch requires delegation lineage", ErrInvalid)
+		}
+
+		return nil
+	}
+	if m.shared == nil || plan.DelegationDepth != m.delegationDepth ||
+		plan.MaxDelegationDepth != m.shared.maxDepth {
+		return fmt.Errorf("%w: execution plan delegation budget mismatch", ErrInvalid)
+	}
+
+	return nil
+}
+
+func (m *Manager) registerExecution(childSessionID string, execution *Execution) error {
+	if m.shared == nil {
+		return fmt.Errorf("%w: unavailable shared manager state", ErrInvalid)
+	}
+	m.shared.mu.Lock()
+	defer m.shared.mu.Unlock()
+	if _, exists := m.shared.active[childSessionID]; exists {
+		return fmt.Errorf("%w: duplicate child execution", ErrInvalid)
+	}
+	m.active[childSessionID] = execution
+	m.shared.active[childSessionID] = execution
+
+	return nil
 }
 
 func (m *Manager) normalizeRequest(ctx context.Context, request Request) Request {
@@ -1722,14 +1849,19 @@ func (m *Manager) finishExecution(
 	}
 	m.cleanupErr = errors.Join(m.cleanupErr, cleanupErr)
 	m.mu.Unlock()
+	m.shared.mu.Lock()
+	if m.shared.active[terminal.ChildSessionID] == execution {
+		delete(m.shared.active, terminal.ChildSessionID)
+	}
+	m.shared.mu.Unlock()
 	close(execution.done)
 }
 
 func (m *Manager) activeExecution(childSessionID string) *Execution {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.shared.mu.Lock()
+	defer m.shared.mu.Unlock()
 
-	active := m.active[childSessionID]
+	active := m.shared.active[childSessionID]
 	if active == nil || active.child == nil ||
 		active.child.Metadata().ID != childSessionID {
 		return nil

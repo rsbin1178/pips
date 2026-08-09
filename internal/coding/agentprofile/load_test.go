@@ -235,6 +235,37 @@ func TestParseOneShotUsesTheDiscoveredDefinitionContractWithoutPersistence(t *te
 	require.ErrorIs(t, err, ErrInvalid)
 }
 
+func TestParseOneShotDelegationAllowIsStrictBoundedAndDetached(t *testing.T) {
+	t.Parallel()
+
+	definition, err := ParseOneShot("root-agent", []byte(`---
+schema: pips.agent/v1alpha1
+name: Root
+description: Delegates exact work
+delegation:
+  allow: [go-reviewer, test-runner]
+---
+Delegate carefully.
+`), DefaultLimits())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"go-reviewer", "test-runner"}, definition.Delegation.Allow)
+
+	cloned := definition.Clone()
+	cloned.Delegation.Allow[0] = "changed"
+	assert.Equal(t, "go-reviewer", definition.Delegation.Allow[0])
+
+	for _, body := range []string{
+		"delegation:\n  allow: [go-reviewer, go-reviewer]",
+		"delegation:\n  allow: [Explore]",
+		"delegation:\n  allow: [../escape]",
+		"delegation:\n  deny: [go-reviewer]",
+	} {
+		data := []byte("---\nschema: pips.agent/v1alpha1\nname: Root\ndescription: Delegates exact work\n" + body + "\n---\nbody\n")
+		_, err := ParseOneShot("root-agent", data, DefaultLimits())
+		require.ErrorIs(t, err, ErrInvalid, body)
+	}
+}
+
 func TestLoadRejectsUnsafeUserRootAndProjectSymlinkEscape(t *testing.T) {
 	t.Run("unsafe user root", func(t *testing.T) {
 		fixture := newProfileFixture(t)

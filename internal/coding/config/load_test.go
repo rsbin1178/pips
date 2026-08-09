@@ -77,6 +77,7 @@ func TestLoadSubagentBudgetsAndFieldProvenance(t *testing.T) {
 
 	path := filepath.Join(t.TempDir(), "config.toml")
 	writeFile(t, path, `[subagent]
+max_depth = 2
 max_concurrent = 6
 max_spawned_per_root_interaction = 12
 max_auto_follow_ups = 5
@@ -88,10 +89,12 @@ max_duration_minutes = 45
 	result, err := config.Load(config.LoadOptions{ConfigFile: path})
 	require.NoError(t, err)
 	assert.Equal(t, config.SubagentConfig{
+		MaxDepth:      2,
 		MaxConcurrent: 6, MaxSpawnedPerRootInteraction: 12, MaxAutoFollowUps: 5,
 		MaxTurns: 80, MaxTokens: 500_000, MaxToolCalls: 200, MaxDurationMinutes: 45,
 	}, result.Config.Subagent)
 	for _, field := range []config.Field{
+		config.FieldSubagentMaxDepth,
 		config.FieldSubagentMaxConcurrent,
 		config.FieldSubagentMaxSpawned,
 		config.FieldSubagentMaxFollowUps,
@@ -128,6 +131,7 @@ func TestLoadSubagentBudgetsRejectInvalidAndUnknownValues(t *testing.T) {
 	t.Parallel()
 
 	for _, content := range []string{
+		"[subagent]\nmax_depth = 4\n",
 		"[subagent]\nmax_turns = 1\n",
 		"[subagent]\nmax_tokens = 999999999\n",
 		"[subagent]\nmax_duration_minutes = 0\n",
