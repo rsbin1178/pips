@@ -803,6 +803,35 @@ func TestTeamLifecycleTelemetryOmitsRoutingIdentity(t *testing.T) {
 	assert.Equal(t, string(TeamLifecycleCompleted), telemetry.TeamState)
 }
 
+func TestSubagentTelemetryOmitsIdentityAndKeepsDelivery(t *testing.T) {
+	t.Parallel()
+
+	event := newTestEvent(EventSubagentCreated, SubagentLifecycle{
+		Identity: subagent.AgentIdentity{
+			Schema: subagent.AgentIdentitySchema, ID: "profile-secret",
+			Kind: subagent.AgentKindCustom, Name: "Profile secret",
+			DefinitionSchema: "pips.agent/v1alpha1",
+			DefinitionDigest: strings.Repeat("a", 64), DefinitionSource: "/private/agent.md",
+		},
+		State: subagent.StateCreated, ChildSessionID: "child-secret",
+		ParentRunID: "run-secret", Delivery: subagent.DeliveryBackground,
+		Model: "openai/test", TaskPreview: "task-secret",
+	})
+	require.NoError(t, ValidateEvent(event))
+
+	telemetry, err := Telemetry(event)
+	require.NoError(t, err)
+	encoded, err := json.Marshal(telemetry)
+	require.NoError(t, err)
+	for _, secret := range []string{
+		"profile-secret", "Profile secret", "/private/agent.md", "child-secret", "run-secret", "task-secret",
+	} {
+		assert.NotContains(t, string(encoded), secret)
+	}
+	assert.Equal(t, "subagent/custom", telemetry.Agent)
+	assert.Equal(t, subagent.DeliveryBackground, telemetry.SubagentDelivery)
+}
+
 func TestValidateTeamLifecycleRejectsContentAndAccountingShapeViolations(t *testing.T) {
 	t.Parallel()
 

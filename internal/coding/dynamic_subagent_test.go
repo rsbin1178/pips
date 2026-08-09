@@ -549,6 +549,76 @@ PRIVATE INSTRUCTIONS MUST NOT APPEAR IN THE LIBRARY.
 	assert.Empty(t, profile.Unavailable)
 }
 
+func TestRuntimeDynamicSubagentRollbackPreservesBuiltinHistoryAndDefinitions(t *testing.T) {
+	base := t.TempDir()
+	layout, err := paths.New(filepath.Join(base, "home"))
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(layout.AgentsDir(), 0o700))
+	definitionPath := filepath.Join(layout.AgentsDir(), "rollback-checker.md")
+	definition := []byte(`---
+schema: pips.agent/v1alpha1
+name: Rollback checker
+description: Return one bounded custom result.
+visibility:
+  user: true
+  model: false
+output:
+  format: text
+---
+Return the delegated result.
+`)
+	require.NoError(t, os.WriteFile(definitionPath, definition, 0o600))
+
+	enabled := openDynamicTestRuntimeAt(
+		t,
+		base,
+		SessionTarget{},
+		newRuntimeModel(runtimeTextResponse("custom before rollback")),
+	)
+	custom, err := enabled.RunAgent(t.Context(), AgentRunRequest{
+		AgentID: "rollback-checker", Task: "Run before rollback.",
+	})
+	require.NoError(t, err)
+	parentID := enabled.handle.Metadata().ID
+	require.NoError(t, enabled.Close(t.Context()))
+
+	disabledModel := newRuntimeModel(runtimeTextResponse(
+		`{"summary":"builtin after rollback","evidence":[],"unknowns":[]}`,
+	))
+	disabled := openTestRuntimeAt(t, base, SessionTarget{ID: parentID}, disabledModel)
+	assert.False(t, disabled.config.DynamicSubagents)
+	library, err := disabled.ListAgentProfiles(t.Context())
+	require.NoError(t, err)
+	profile, found := agentLibraryEntry(library, "rollback-checker")
+	require.True(t, found)
+	assert.False(t, profile.Available)
+	assert.Equal(t, "dynamic subagents is disabled", profile.Unavailable)
+
+	detail, err := disabled.InspectSubagent(t.Context(), custom.ChildSessionID)
+	require.NoError(t, err)
+	assert.Equal(t, subagent.StateSucceeded, detail.Summary.State)
+	assert.Equal(t, "rollback-checker", detail.Summary.Identity.ID)
+	_, err = disabled.RunAgent(t.Context(), AgentRunRequest{
+		AgentID: "rollback-checker", Task: "Must not run after rollback.",
+	})
+	require.Error(t, err)
+	_, err = disabled.GenerateAgentDraft(t.Context(), GenerateAgentDraftRequest{
+		AgentID: "rollback-draft", Intent: "Must not generate after rollback.",
+	})
+	require.ErrorIs(t, err, ErrAgentDraft)
+
+	builtin, err := disabled.RunAgent(t.Context(), AgentRunRequest{
+		AgentID: string(subagent.RoleExplore), Task: "Use the builtin after rollback.",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, subagent.OutcomeSucceeded, builtin.Outcome)
+	assert.Equal(t, subagent.RoleExplore, builtin.Role)
+	assert.Len(t, disabledModel.Requests(), 1)
+	persisted, err := os.ReadFile(definitionPath)
+	require.NoError(t, err)
+	assert.Equal(t, definition, persisted)
+}
+
 func TestRuntimeRunAgentUsesUserVisibilityWithoutParentModelDelegation(t *testing.T) {
 	t.Parallel()
 

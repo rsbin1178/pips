@@ -57,7 +57,10 @@ question capabilities, but only the active Runtime can authorize them and each
 high-risk action retains the child-owned approval/audit path. See
 [Dynamic custom Agents](docs/coding-cli.md#dynamic-custom-agents-alpha) for
 the feature gate, definition format, trust roots, direct invocation, and the
-explicit preview-before-promotion model-assisted draft workflow.
+explicit preview-before-promotion model-assisted draft workflow. Release
+operators should also use the
+[Dynamic Subagent Beta readiness runbook](docs/coding-dynamic-subagents-readiness.md)
+for content-free admission signals, rollback, and the still-pending GA gate.
 The single-session Runtime now composes durable Harness state, immutable
 Extension/Skill/MCP generations, approval continuation, change attribution,
 typed product events, and optional telemetry. The default command now opens a

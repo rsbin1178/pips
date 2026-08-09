@@ -69,6 +69,9 @@ type Config struct {
 	Options        ExecutionOptions
 	AgentObservers []func(context.Context, agent.Event)
 	EventObservers []AgentEventObserver
+	// AdmissionObserver receives content-free shared-budget decisions. It is
+	// observational only and cannot veto or alter a reservation.
+	AdmissionObserver AdmissionObserver
 	// Share joins this Manager to an existing root execution tree. It is
 	// required when Parent is a subagent Session.
 	Share *Manager
@@ -226,6 +229,7 @@ func inheritManagerConfig(config Config) Config {
 	config.Options = root.Options
 	config.AgentObservers = root.AgentObservers
 	config.EventObservers = root.EventObservers
+	config.AdmissionObserver = root.AdmissionObserver
 
 	return config
 }
@@ -476,7 +480,7 @@ func (m *Manager) start(
 	if err != nil {
 		return nil, err
 	}
-	permit, err := m.reserveStart(request)
+	permit, err := m.reserveStart(ctx, request)
 	if err != nil {
 		return nil, err
 	}
@@ -673,10 +677,15 @@ func closeRunner(ctx context.Context, runner Runner) error {
 	return runner.Close(ctx)
 }
 
-func (m *Manager) reserveStart(request Request) (*admissionPermit, error) {
+func (m *Manager) reserveStart(
+	ctx context.Context,
+	request Request,
+) (*admissionPermit, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.closed {
+		m.mu.Unlock()
+		m.observeAdmission(ctx, request, ErrClosed)
+
 		return nil, ErrClosed
 	}
 	permit, err := m.admission.reserve(
@@ -685,6 +694,9 @@ func (m *Manager) reserveStart(request Request) (*admissionPermit, error) {
 		m.config.Parent.Metadata().Kind == session.KindSubagent,
 	)
 	if err != nil {
+		m.mu.Unlock()
+		m.observeAdmission(ctx, request, err)
+
 		return nil, err
 	}
 
@@ -692,8 +704,45 @@ func (m *Manager) reserveStart(request Request) (*admissionPermit, error) {
 		m.startingDone = make(chan struct{})
 	}
 	m.starting++
+	m.mu.Unlock()
+	m.observeAdmission(ctx, request, nil)
 
 	return permit, nil
+}
+
+func (m *Manager) observeAdmission(ctx context.Context, request Request, admissionErr error) {
+	if m == nil || m.config.AdmissionObserver == nil {
+		return
+	}
+
+	event := AdmissionEvent{
+		Outcome: AdmissionOutcomeAccepted, Delivery: request.Delivery,
+		DelegationDepth: m.delegationDepth,
+	}
+	if admissionErr != nil {
+		event.Outcome = AdmissionOutcomeRejected
+		event.Reason = admissionReason(admissionErr)
+	}
+
+	func() {
+		defer func() { _ = recover() }()
+		m.config.AdmissionObserver(ctx, event)
+	}()
+}
+
+func admissionReason(err error) AdmissionReason {
+	switch {
+	case errors.Is(err, ErrBusy):
+		return AdmissionReasonBusy
+	case errors.Is(err, ErrCapacity):
+		return AdmissionReasonCapacity
+	case errors.Is(err, ErrSpawnLimit):
+		return AdmissionReasonSpawnLimit
+	case errors.Is(err, ErrClosed):
+		return AdmissionReasonClosed
+	default:
+		return AdmissionReasonInvalid
+	}
 }
 
 func (m *Manager) validateDelegationPlan(plan ExecutionPlan) error {

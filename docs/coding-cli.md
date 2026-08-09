@@ -266,7 +266,9 @@ pips --dynamic-subagents agents run go-checker "inspect internal/coding"
 source. Disabling the gate stops new custom dispatch without deleting
 definitions or making historical child Sessions unreadable. Built-in
 `explore`, `plan`, and `review` remain available through their compatible
-protocol.
+protocol. Selected-Beta telemetry, staged distribution, rollback drill, and GA
+evidence are defined in the
+[Dynamic Subagent readiness runbook](coding-dynamic-subagents-readiness.md).
 
 Production child admission and execution budgets are configured independently
 in the same selected user file:

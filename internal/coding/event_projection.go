@@ -8,6 +8,7 @@ import (
 	"github.com/rsbin/pips/agent"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding/planreview"
+	"github.com/rsbin/pips/internal/coding/subagent"
 )
 
 // Disclosure selects the content retained at a serialization boundary.
@@ -189,49 +190,63 @@ func safeMessage(message ai.Message) ai.Message {
 	return safe
 }
 
+// TelemetrySignal identifies a content-free observation that has no durable
+// Coding event, such as a rejection before child Session creation.
+type TelemetrySignal string
+
+const (
+	// TelemetrySignalSubagentAdmission observes a shared-budget decision.
+	TelemetrySignalSubagentAdmission TelemetrySignal = "subagent.admission"
+)
+
 // TelemetryEvent is a low-cardinality, content-free observation derived from
-// one Coding event. It never contains session, interaction, run, request, or
-// provider-response identifiers.
+// one Coding event or an explicitly non-durable Runtime signal. It never
+// contains session, interaction, run, request, or provider-response identifiers.
 type TelemetryEvent struct {
-	Type                    EventType          `json:"type"`
-	Time                    time.Time          `json:"time"`
-	Provider                ai.Provider        `json:"provider,omitempty"`
-	ModelID                 string             `json:"model_id,omitempty"`
-	Agent                   string             `json:"agent,omitempty"`
-	SubagentRole            string             `json:"subagent_role,omitempty"`
-	SubagentState           string             `json:"subagent_state,omitempty"`
-	TeamScope               string             `json:"team_scope,omitempty"`
-	TeamState               string             `json:"team_state,omitempty"`
-	TeamActivity            string             `json:"team_activity,omitempty"`
-	TeamControlAction       string             `json:"team_control_action,omitempty"`
-	TeamControlState        string             `json:"team_control_state,omitempty"`
-	IntegrationState        string             `json:"integration_state,omitempty"`
-	IntegrationVerification string             `json:"integration_verification,omitempty"`
-	Tool                    string             `json:"tool,omitempty"`
-	ToolCalls               int                `json:"tool_calls,omitempty"`
-	Stop                    agent.StopReason   `json:"stop,omitempty"`
-	Phase                   Phase              `json:"phase,omitempty"`
-	Mode                    OperatingMode      `json:"mode,omitempty"`
-	Outcome                 InteractionOutcome `json:"outcome,omitempty"`
-	Component               string             `json:"component,omitempty"`
-	Code                    string             `json:"code,omitempty"`
-	Turns                   int                `json:"turns,omitempty"`
-	Changes                 int                `json:"changes,omitempty"`
-	Attempts                int                `json:"attempts,omitempty"`
-	Files                   int                `json:"files,omitempty"`
-	Nodes                   int                `json:"nodes,omitempty"`
-	Questions               int                `json:"questions,omitempty"`
-	Answers                 int                `json:"answers,omitempty"`
-	Chat                    bool               `json:"chat,omitempty"`
-	PlanBytes               int64              `json:"plan_bytes,omitempty"`
-	PlanDecision            string             `json:"plan_decision,omitempty"`
-	CompactionMode          CompactionMode     `json:"compaction_mode,omitempty"`
-	TokensBefore            int                `json:"tokens_before,omitempty"`
-	TokensAfter             int                `json:"tokens_after,omitempty"`
-	DurationMillis          int64              `json:"duration_ms,omitempty"`
-	Usage                   TokenUsage         `json:"usage"`
-	Resumed                 bool               `json:"resumed,omitempty"`
-	Failed                  bool               `json:"failed,omitempty"`
+	Signal                  TelemetrySignal           `json:"signal,omitempty"`
+	Type                    EventType                 `json:"type,omitempty"`
+	Time                    time.Time                 `json:"time"`
+	Provider                ai.Provider               `json:"provider,omitempty"`
+	ModelID                 string                    `json:"model_id,omitempty"`
+	Agent                   string                    `json:"agent,omitempty"`
+	SubagentRole            string                    `json:"subagent_role,omitempty"`
+	SubagentState           string                    `json:"subagent_state,omitempty"`
+	SubagentDelivery        subagent.Delivery         `json:"subagent_delivery,omitempty"`
+	SubagentDepth           int                       `json:"subagent_depth,omitempty"`
+	AdmissionOutcome        subagent.AdmissionOutcome `json:"admission_outcome,omitempty"`
+	AdmissionReason         subagent.AdmissionReason  `json:"admission_reason,omitempty"`
+	TeamScope               string                    `json:"team_scope,omitempty"`
+	TeamState               string                    `json:"team_state,omitempty"`
+	TeamActivity            string                    `json:"team_activity,omitempty"`
+	TeamControlAction       string                    `json:"team_control_action,omitempty"`
+	TeamControlState        string                    `json:"team_control_state,omitempty"`
+	IntegrationState        string                    `json:"integration_state,omitempty"`
+	IntegrationVerification string                    `json:"integration_verification,omitempty"`
+	Tool                    string                    `json:"tool,omitempty"`
+	ToolCalls               int                       `json:"tool_calls,omitempty"`
+	Stop                    agent.StopReason          `json:"stop,omitempty"`
+	Phase                   Phase                     `json:"phase,omitempty"`
+	Mode                    OperatingMode             `json:"mode,omitempty"`
+	Outcome                 InteractionOutcome        `json:"outcome,omitempty"`
+	Component               string                    `json:"component,omitempty"`
+	Code                    string                    `json:"code,omitempty"`
+	Turns                   int                       `json:"turns,omitempty"`
+	Changes                 int                       `json:"changes,omitempty"`
+	Attempts                int                       `json:"attempts,omitempty"`
+	Files                   int                       `json:"files,omitempty"`
+	Nodes                   int                       `json:"nodes,omitempty"`
+	Questions               int                       `json:"questions,omitempty"`
+	Answers                 int                       `json:"answers,omitempty"`
+	Chat                    bool                      `json:"chat,omitempty"`
+	PlanBytes               int64                     `json:"plan_bytes,omitempty"`
+	PlanDecision            string                    `json:"plan_decision,omitempty"`
+	CompactionMode          CompactionMode            `json:"compaction_mode,omitempty"`
+	TokensBefore            int                       `json:"tokens_before,omitempty"`
+	TokensAfter             int                       `json:"tokens_after,omitempty"`
+	DurationMillis          int64                     `json:"duration_ms,omitempty"`
+	Usage                   TokenUsage                `json:"usage"`
+	Resumed                 bool                      `json:"resumed,omitempty"`
+	Failed                  bool                      `json:"failed,omitempty"`
 }
 
 // Telemetry projects one validated event into content-free observability data.
@@ -387,6 +402,7 @@ func projectSubagentTelemetry(
 ) {
 	projected.SubagentRole = string(value.Role)
 	projected.SubagentState = string(value.State)
+	projected.SubagentDelivery = value.Delivery
 	// Profile IDs are unbounded user input and would create high-cardinality
 	// telemetry dimensions. Keep the legacy builtin role when available and
 	// otherwise use only the fixed durable identity kind.

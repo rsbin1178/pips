@@ -11,6 +11,7 @@ import (
 
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding"
+	"github.com/rsbin/pips/internal/coding/subagent"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/attribute"
@@ -83,9 +84,16 @@ func TestObserverEmitsContentFreeProductSignals(t *testing.T) {
 			Usage: coding.TokenUsage{InputTokens: 11, OutputTokens: 3},
 		},
 		{
+			Signal: coding.TelemetrySignalSubagentAdmission, Time: at.Add(4250 * time.Millisecond),
+			SubagentDelivery: subagent.DeliveryBackground, SubagentDepth: 2,
+			AdmissionOutcome: subagent.AdmissionOutcomeRejected,
+			AdmissionReason:  subagent.AdmissionReasonCapacity,
+		},
+		{
 			Type: coding.EventSubagentCompleted, Time: at.Add(4500 * time.Millisecond),
 			SubagentRole: "explore", SubagentState: "succeeded",
-			ModelID: "openai/test", Code: "ok", Turns: 2, ToolCalls: 8,
+			SubagentDelivery: subagent.DeliveryBackground,
+			ModelID:          "openai/test", Code: "ok", Turns: 2, ToolCalls: 8,
 			DurationMillis: 125, Usage: coding.TokenUsage{InputTokens: 100, OutputTokens: 20},
 		},
 		{
@@ -135,6 +143,7 @@ func TestObserverEmitsContentFreeProductSignals(t *testing.T) {
 		"coding.compaction.completed",
 		"coding.integration.diagnostic",
 		"coding.interaction",
+		"coding.subagent.admission",
 		"coding.subagent.completed",
 		"coding.team.lifecycle",
 		"coding.team.control",
@@ -148,6 +157,23 @@ func TestObserverEmitsContentFreeProductSignals(t *testing.T) {
 	require.NotEqual(t, -1, interactionIndex)
 	assert.Equal(t, 250*time.Millisecond, spans[interactionIndex].ended.Sub(spans[interactionIndex].started))
 	assert.Equal(t, codes.Error, spans[interactionIndex].status)
+	admissionIndex := slices.IndexFunc(spans, func(span spanRecord) bool {
+		return span.name == "coding.subagent.admission"
+	})
+	require.NotEqual(t, -1, admissionIndex)
+	assert.Contains(t, spans[admissionIndex].attributes, attribute.String(
+		"coding.subagent.admission.reason",
+		string(subagent.AdmissionReasonCapacity),
+	))
+	assert.Contains(t, spans[admissionIndex].attributes, attribute.Int("coding.subagent.depth", 2))
+	subagentIndex := slices.IndexFunc(spans, func(span spanRecord) bool {
+		return span.name == "coding.subagent.completed"
+	})
+	require.NotEqual(t, -1, subagentIndex)
+	assert.Contains(t, spans[subagentIndex].attributes, attribute.String(
+		"coding.subagent.delivery",
+		string(subagent.DeliveryBackground),
+	))
 	assert.Equal(t, instrumentationName, meterProvider.scope)
 	assert.ElementsMatch(t, []string{
 		"pips.coding.sessions",
@@ -158,6 +184,7 @@ func TestObserverEmitsContentFreeProductSignals(t *testing.T) {
 		"pips.coding.workspace.changes",
 		"pips.coding.integration.diagnostics",
 		"pips.coding.subagents",
+		"pips.coding.subagent.admissions",
 		"pips.coding.subagent.duration",
 		"pips.coding.teams",
 		"pips.coding.team.duration",
