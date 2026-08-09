@@ -53,6 +53,7 @@ func TestIntegrationCandidatePublishTransfersCleanupOwnership(t *testing.T) {
 		skillsettings.Empty(),
 		"",
 		agentplugin.Result{},
+		nil,
 	)
 	cleaned := false
 	candidate := &integrationCandidate{generation: generation}

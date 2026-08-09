@@ -1,14 +1,19 @@
 package coding
 
 import (
+	"context"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/rsbin/pips/agent"
 	"github.com/rsbin/pips/agent/catalog"
 	"github.com/rsbin/pips/agent/harness"
 	"github.com/rsbin/pips/internal/coding/agentprofile"
+	"github.com/rsbin/pips/internal/coding/hooks"
+	codingmcp "github.com/rsbin/pips/internal/coding/mcp"
 	"github.com/rsbin/pips/internal/coding/subagent"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -339,5 +344,70 @@ func TestCompileDelegationTargetsRequiresExactModelVisibleNonAncestorCustomIDs(t
 		ID: "middle-agent", Kind: agentprofile.KindCustom,
 		Delegation: agentprofile.DelegationSelection{Allow: []string{"allowed-agent"}},
 	}, subagent.DeliveryForeground)
+	require.ErrorIs(t, err, subagent.ErrInvalid)
+}
+
+func TestCompilePrivateIntegrationsRequiresExactGenerationBindings(t *testing.T) {
+	t.Parallel()
+
+	tool := agent.NewTool("private_search", "private search", func(context.Context, struct{}) (string, error) {
+		return "ok", nil
+	})
+	entry := catalog.Entry{
+		Tool: tool, Source: catalog.Source{Kind: catalog.SourceMCP, ID: "private_docs"},
+		Risk: catalog.RiskPrivileged,
+	}
+	privateHook := hooks.Definition{
+		ID: "child-policy", Reference: "user/private/child-policy", Scope: hooks.ScopeUser,
+		Source: "hooks.json", Visibility: hooks.VisibilityAgentPrivate,
+		Event: hooks.EventPreToolUse, Command: "true", Timeout: time.Second,
+	}
+	dispatcher := &customSubagentDispatcher{
+		privateMCP: map[string]codingmcp.ConnectedServer{
+			"private_docs": {
+				ID: "private_docs", Fingerprint: strings.Repeat("a", 64),
+				Visibility: codingmcp.VisibilityAgentPrivate, Entries: []catalog.Entry{entry},
+			},
+		},
+		privateHooks: map[string]hooks.Definition{"child-policy": privateHook},
+	}
+	definition := agentprofile.Definition{
+		MCP:   agentprofile.MCPSelection{Private: []string{"private_docs"}},
+		Hooks: agentprofile.HookSelection{Private: []string{"child-policy"}},
+	}
+	mcpBindings, entries, err := dispatcher.compilePrivateMCP(definition.MCP)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, "private_search", entries[0].Tool.Decl().Name)
+	descriptors := descriptorsForEntries(entries)
+	capabilities, err := compileDelegableCapabilities(agentprofile.ToolSelection{}, descriptors)
+	require.NoError(t, err)
+	assert.Empty(t, capabilities, "binding a private server does not select any tool by itself")
+	capabilities, err = compileDelegableCapabilities(agentprofile.ToolSelection{Allow: []agentprofile.Selector{{
+		Kind: agentprofile.SelectorSource, Value: "mcp/private_docs",
+	}}}, descriptors)
+	require.NoError(t, err)
+	assert.Equal(t, []subagent.EffectiveCapability{{
+		WireName: "private_search", Source: "mcp/private_docs", Risk: "privileged",
+	}}, capabilities)
+
+	hookBindings, definitions, err := dispatcher.compilePrivateHooks(definition.Hooks)
+	require.NoError(t, err)
+	require.Len(t, definitions, 1)
+
+	selectedEntries, selectedHooks, err := dispatcher.validatePrivateBindings(definition, subagent.ExecutionPlan{
+		PrivateMCP: mcpBindings, PrivateHooks: hookBindings,
+	})
+	require.NoError(t, err)
+	require.Len(t, selectedEntries, 1)
+	require.Len(t, selectedHooks, 1)
+
+	stale := slices.Clone(mcpBindings)
+	stale[0].Fingerprint = strings.Repeat("b", 64)
+	_, _, err = dispatcher.validatePrivateBindings(definition, subagent.ExecutionPlan{
+		PrivateMCP: stale, PrivateHooks: hookBindings,
+	})
+	require.ErrorIs(t, err, subagent.ErrInvalid)
+	_, _, err = dispatcher.compilePrivateMCP(agentprofile.MCPSelection{Private: []string{"ambient_or_missing"}})
 	require.ErrorIs(t, err, subagent.ErrInvalid)
 }

@@ -25,7 +25,9 @@ execution authority: each exact command definition must be explicitly trusted
 in Pips-owned `$PIPS_HOME/hook-trust.json`. User definitions are trusted for
 the user configuration; project definitions are additionally bound to the
 current Workspace filesystem identity. Changing an event, matcher, command, or
-timeout changes the definition fingerprint and requires review again.
+timeout changes the definition fingerprint and requires review again. Changing
+a handler between ambient and Agent-private visibility also changes its
+fingerprint. Existing ambient handlers keep their previous fingerprints.
 
 ```sh
 pips hooks list
@@ -77,6 +79,50 @@ fields, and support command handlers only:
 }
 ```
 
+An Agent-private handler adds a stable `id` and
+`"visibility":"agent_private"`:
+
+```json
+{
+  "schema": "pips.coding.hooks/v1alpha1",
+  "hooks": {
+    "PermissionRequest": [
+      {
+        "matcher": "^shell$",
+        "hooks": [
+          {
+            "id": "review-child-shell",
+            "visibility": "agent_private",
+            "type": "command",
+            "command": "./scripts/review-child-shell",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Private IDs are globally unique across the loaded user and trusted-project
+files. Private handlers are accepted only for `PreToolUse`,
+`PermissionRequest`, and `PostToolUse`, which are owned by an individual child
+control scope. Trust them by the stable reference shown by `pips hooks list`,
+for example `pips hooks trust user/private/review-child-shell`.
+
+A persisted custom Agent opts in by exact ID:
+
+```yaml
+hooks:
+  private: [review-child-shell]
+```
+
+The selection is additive: ambient handlers still run first and cannot be
+disabled or reordered by the profile. An Agent-private `PermissionRequest`
+handler may deny or defer to normal child approval, but an `allow` response is
+audited and ignored. A `PreToolUse` input update still passes through every
+remaining child guard, Sandbox rule, and approval check.
+
 The supported events are:
 
 | Event | Matcher target | Pips effect |
@@ -105,6 +151,7 @@ tool name and these Codex-compatible aliases:
 MCP and other local function tools match their exact Pips tool name. Matching
 groups from user and project files all run. Commands for one event start
 concurrently, while their output is merged in deterministic source order.
+For a child, ambient handlers complete before its selected private handlers.
 
 `timeout` is a positive whole number of seconds. The normal default and upper
 bound are 600 seconds. `SessionEnd` defaults to one second and has a
@@ -217,7 +264,9 @@ uses parent-owned lifecycle adapters for `SubagentStart` and `SubagentStop`;
 Team Worker is a Pips coordination runtime and is intentionally outside this
 user-configurable hook surface.
 
-The release does not add HTTP/direct-argv handlers, hot reload, automatic trust
-prompts, a hook bypass flag, or a parser/executor for another product's hook
-configuration. Remove a handler from its active `hooks.json` to disable it;
-stale trust records are inert.
+The release does not add HTTP/direct-argv handlers, filesystem watchers,
+automatic trust prompts, a hook bypass flag, or a parser/executor for another
+product's hook configuration. An explicit idle Runtime reload publishes Hook,
+MCP, Skill, and Agent-profile snapshots atomically; active children retain the
+generation they already leased. Remove a handler from its active `hooks.json`
+to disable it for later generations; stale trust records are inert.

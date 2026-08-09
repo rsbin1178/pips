@@ -8,6 +8,7 @@ import (
 
 	"github.com/rsbin/pips/internal/coding/agentplugin"
 	"github.com/rsbin/pips/internal/coding/agentprofile"
+	"github.com/rsbin/pips/internal/coding/hooks"
 	"github.com/rsbin/pips/internal/coding/resource"
 )
 
@@ -16,9 +17,10 @@ import (
 // acquired resources in reverse order, while publish transfers them to the
 // immutable IntegrationGeneration.
 type integrationCandidate struct {
-	generation    *IntegrationGeneration
-	activationErr error
-	cleanup       cleanupStack
+	generation             *IntegrationGeneration
+	activationErr          error
+	pendingHookDiagnostics []hooks.Diagnostic
+	cleanup                cleanupStack
 }
 
 // buildIntegrationCandidate acquires every reload-visible integration input
@@ -54,6 +56,13 @@ func (r *Runtime) buildIntegrationCandidate(
 	if err != nil {
 		return nil, err
 	}
+	trustedHooks, pendingHookDiagnostics, err := loadRuntimeHookDefinitions(
+		ctx, r.paths, r.tree, r.trusted, r.workspace.Identity().Key(),
+	)
+	if err != nil {
+		return nil, err
+	}
+	candidate.pendingHookDiagnostics = pendingHookDiagnostics
 	nextSkillPolicy, err := r.skillSettings.Load(ctx)
 	if err != nil {
 		return nil, err
@@ -92,6 +101,7 @@ func (r *Runtime) buildIntegrationCandidate(
 		nextSkillPolicy,
 		nextProjectInstructions.SystemPrompt(),
 		plugins,
+		trustedHooks,
 	)
 	candidate.activationErr = activationErr
 

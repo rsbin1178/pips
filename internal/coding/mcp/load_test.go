@@ -1,6 +1,9 @@
 package mcp_test
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -121,6 +124,44 @@ func TestLoadDefinitionsStrictScopedAndFingerprintStable(t *testing.T) {
 	assert.NotEqual(t, projectFingerprint, definitions[1].Fingerprint())
 	assert.Equal(t, projectFingerprint, loaded.List()[1].Fingerprint())
 	assert.Equal(t, "go", loaded.List()[1].Args[0])
+}
+
+func TestMCPVisibilityDefaultsAmbientAndChangesFingerprint(t *testing.T) {
+	t.Parallel()
+
+	base := codingmcp.Definition{
+		ID: "private_docs", Scope: codingmcp.ScopeUser,
+		Transport: codingmcp.TransportStreamableHTTP, URL: "https://example.test/mcp",
+		ConnectTimeout: time.Second,
+	}
+	explicit := base
+	explicit.Visibility = codingmcp.VisibilityAmbient
+	private := base
+	private.Visibility = codingmcp.VisibilityAgentPrivate
+
+	assert.Equal(t, codingmcp.VisibilityAmbient, base.EffectiveVisibility())
+	assert.Equal(t, base.Fingerprint(), explicit.Fingerprint())
+	legacy, err := json.Marshal(struct {
+		ID        string                  `json:"id"`
+		Transport codingmcp.TransportType `json:"transport"`
+		URL       string                  `json:"url,omitempty"`
+		TimeoutNS int64                   `json:"connect_timeout_ns"`
+	}{
+		ID: base.ID, Transport: base.Transport, URL: base.URL,
+		TimeoutNS: int64(base.ConnectTimeout),
+	})
+	require.NoError(t, err)
+
+	legacySum := sha256.Sum256(legacy)
+	assert.Equal(t, hex.EncodeToString(legacySum[:]), base.Fingerprint(), "ambient definitions retain legacy permission fingerprints")
+	assert.NotEqual(t, base.Fingerprint(), private.Fingerprint())
+
+	_, err = codingmcp.NewDefinitions([]codingmcp.Definition{private}, 1)
+	require.NoError(t, err)
+
+	private.Visibility = "parent_and_private"
+	_, err = codingmcp.NewDefinitions([]codingmcp.Definition{private}, 1)
+	require.ErrorIs(t, err, codingmcp.ErrInvalid)
 }
 
 func TestLoadDefinitionsDoesNotInspectUntrustedProject(t *testing.T) {

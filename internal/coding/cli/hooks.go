@@ -138,14 +138,15 @@ func loadHooksCommandState(
 }
 
 type hookDefinitionProjection struct {
-	ID             string       `json:"id"`
-	Scope          hooks.Scope  `json:"scope"`
-	Source         string       `json:"source"`
-	Event          hooks.Event  `json:"event"`
-	Matcher        string       `json:"matcher,omitempty"`
-	TimeoutSeconds int64        `json:"timeout_seconds"`
-	Fingerprint    string       `json:"fingerprint"`
-	Status         hooks.Status `json:"status"`
+	ID             string           `json:"id"`
+	Scope          hooks.Scope      `json:"scope"`
+	Source         string           `json:"source"`
+	Visibility     hooks.Visibility `json:"visibility"`
+	Event          hooks.Event      `json:"event"`
+	Matcher        string           `json:"matcher,omitempty"`
+	TimeoutSeconds int64            `json:"timeout_seconds"`
+	Fingerprint    string           `json:"fingerprint"`
+	Status         hooks.Status     `json:"status"`
 }
 
 type hookDefinitionsOutput struct {
@@ -162,7 +163,8 @@ func writeHookDefinitions(
 		definition := resolved.Definition
 		values = append(values, hookDefinitionProjection{
 			ID: definition.Reference, Scope: definition.Scope, Source: definition.Source,
-			Event: definition.Event, Matcher: definition.Matcher,
+			Visibility: definition.EffectiveVisibility(),
+			Event:      definition.Event, Matcher: definition.Matcher,
 			TimeoutSeconds: int64(definition.Timeout.Seconds()),
 			Fingerprint:    definition.Fingerprint(),
 			Status:         resolved.Status,
@@ -178,7 +180,7 @@ func writeHookDefinitions(
 	table := tabwriter.NewWriter(writer, 0, 4, 2, ' ', 0)
 	if _, err := fmt.Fprintln(
 		table,
-		"ID\tSTATUS\tEVENT\tMATCHER\tTIMEOUT\tSOURCE\tFINGERPRINT",
+		"ID\tSTATUS\tVISIBILITY\tEVENT\tMATCHER\tTIMEOUT\tSOURCE\tFINGERPRINT",
 	); err != nil {
 		return err
 	}
@@ -189,9 +191,10 @@ func writeHookDefinitions(
 		}
 		if _, err := fmt.Fprintf(
 			table,
-			"%s\t%s\t%s\t%s\t%ds\t%s\t%s\n",
+			"%s\t%s\t%s\t%s\t%s\t%ds\t%s\t%s\n",
 			value.ID,
 			value.Status,
+			value.Visibility,
 			value.Event,
 			matcher,
 			value.TimeoutSeconds,

@@ -158,6 +158,7 @@ type definitionFile struct {
 type definitionServer struct {
 	ID             string   `json:"id"`
 	Type           string   `json:"type"`
+	Visibility     string   `json:"visibility,omitempty"`
 	Command        string   `json:"command,omitempty"`
 	Args           []string `json:"args,omitempty"`
 	URL            string   `json:"url,omitempty"`
@@ -199,7 +200,8 @@ func decodeDefinitions(data []byte, scope Scope, limits Limits) ([]Definition, e
 
 		definition := Definition{
 			ID: server.ID, Scope: scope, Transport: TransportType(server.Type),
-			Command: server.Command, Args: slices.Clone(server.Args),
+			Visibility: Visibility(server.Visibility),
+			Command:    server.Command, Args: slices.Clone(server.Args),
 			URL: server.URL, ConnectTimeout: timeout,
 		}
 		if err := validateDefinition(definition); err != nil {

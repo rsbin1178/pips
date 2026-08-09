@@ -20,6 +20,7 @@ import (
 	"github.com/rsbin/pips/internal/coding/approval"
 	"github.com/rsbin/pips/internal/coding/changes"
 	"github.com/rsbin/pips/internal/coding/changes/git"
+	"github.com/rsbin/pips/internal/coding/hooks"
 	codingmcp "github.com/rsbin/pips/internal/coding/mcp"
 	"github.com/rsbin/pips/internal/coding/planflow"
 	"github.com/rsbin/pips/internal/coding/planreview"
@@ -732,7 +733,7 @@ func (r *Runtime) openInteraction(
 			RootInteractionID:   current.rootInteractionID,
 		}
 		childObserver = r.subagentObserver(current, emitter)
-		childMCPEntries = connections.Snapshot().Entries
+		childMCPEntries = connections.Entries(codingmcp.VisibilityAmbient)
 		mcpCatalog, mcpErr := catalog.New(childMCPEntries...)
 		if mcpErr != nil {
 			return nil, mcpErr
@@ -800,6 +801,9 @@ func (r *Runtime) openInteraction(
 				network:       r.config.SandboxWorkspaceWrite.Network,
 				requestPolicy: r.requestPolicy, toolTimeout: r.opts.ToolTimeout,
 				inspector: r.inspector, hooks: r.hookDefinitions, hookRunner: r.hookRunner,
+				onHookDiagnostics: func(ctx context.Context, diagnostics []hooks.Diagnostic) {
+					r.recordHookDiagnostics(ctx, nil, diagnostics)
+				},
 				model: childModel, mode: started.Mode, mcpEntries: childMCPEntries, controls: r.childControls,
 				subagents:          r.subagents,
 				onPauseChanged:     r.projectChildPause,

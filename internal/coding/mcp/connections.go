@@ -51,11 +51,26 @@ type ownedConnection struct {
 	resource io.Closer
 }
 
+type connectedServer struct {
+	fingerprint string
+	visibility  Visibility
+}
+
+// ConnectedServer is a detached, credential-free view of one successfully
+// connected server in the current Registry snapshot.
+type ConnectedServer struct {
+	ID          string
+	Fingerprint string
+	Visibility  Visibility
+	Entries     []catalog.Entry
+}
+
 // Connections owns successful MCP clients and one atomic Registry. Individual
 // server failures are diagnostics and do not disable unrelated servers.
 type Connections struct {
 	registry *agentmcp.Registry
 	owned    []ownedConnection
+	servers  map[string]connectedServer
 
 	mu            sync.Mutex
 	diagnostics   []ConnectionDiagnostic
@@ -87,7 +102,10 @@ func OpenConnections(
 		return nil, err
 	}
 
-	connections := &Connections{diagnostics: slices.Clone(options.Diagnostics)}
+	connections := &Connections{
+		diagnostics: slices.Clone(options.Diagnostics),
+		servers:     make(map[string]connectedServer),
+	}
 	servers := make([]agentmcp.RegistryServer, 0, len(resolved))
 
 	for _, selected := range resolved {
@@ -167,6 +185,10 @@ func OpenConnections(
 			},
 			Risk: catalog.RiskPrivileged,
 		})
+		connections.servers[definition.ID] = connectedServer{
+			fingerprint: definition.Fingerprint(),
+			visibility:  definition.effectiveVisibility(),
+		}
 	}
 
 	registry, err := agentmcp.NewRegistry(servers...)
@@ -199,6 +221,70 @@ func (c *Connections) Snapshot() agentmcp.RegistrySnapshot {
 	}
 
 	return c.registry.Snapshot()
+}
+
+// Entries returns a detached current catalog filtered by configured
+// visibility. Unknown visibility values return no entries.
+func (c *Connections) Entries(visibility Visibility) []catalog.Entry {
+	if c == nil || (visibility != VisibilityAmbient && visibility != VisibilityAgentPrivate) {
+		return nil
+	}
+
+	entries := c.Snapshot().Entries
+	selected := make([]catalog.Entry, 0, len(entries))
+	for _, entry := range entries {
+		server, exists := c.servers[entry.Source.ID]
+		if !exists || server.visibility != visibility {
+			continue
+		}
+		selected = append(selected, cloneEntry(entry))
+	}
+
+	return selected
+}
+
+// ConnectedServers returns credential-free bindings for successfully
+// connected servers. Entry snapshots reflect the latest successfully
+// installed Registry generation.
+func (c *Connections) ConnectedServers(visibility Visibility) []ConnectedServer {
+	if c == nil || (visibility != VisibilityAmbient && visibility != VisibilityAgentPrivate) {
+		return nil
+	}
+
+	byID := make(map[string][]catalog.Entry)
+	for _, entry := range c.Entries(visibility) {
+		byID[entry.Source.ID] = append(byID[entry.Source.ID], cloneEntry(entry))
+	}
+	values := make([]ConnectedServer, 0, len(c.servers))
+	for id, server := range c.servers {
+		if server.visibility != visibility {
+			continue
+		}
+		values = append(values, ConnectedServer{
+			ID: id, Fingerprint: server.fingerprint, Visibility: server.visibility,
+			Entries: cloneEntries(byID[id]),
+		})
+	}
+	slices.SortFunc(values, func(left, right ConnectedServer) int {
+		return strings.Compare(left.ID, right.ID)
+	})
+
+	return values
+}
+
+func cloneEntries(values []catalog.Entry) []catalog.Entry {
+	cloned := make([]catalog.Entry, len(values))
+	for index, value := range values {
+		cloned[index] = cloneEntry(value)
+	}
+
+	return cloned
+}
+
+func cloneEntry(value catalog.Entry) catalog.Entry {
+	value.Tags = slices.Clone(value.Tags)
+
+	return value
 }
 
 // Diagnostics returns safe lifecycle diagnostics in occurrence order.

@@ -6,13 +6,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/rsbin/pips/agent/catalog"
 	"github.com/rsbin/pips/agent/extension"
 	"github.com/rsbin/pips/agent/harness"
@@ -20,10 +24,12 @@ import (
 	"github.com/rsbin/pips/internal/coding/agentprofile"
 	"github.com/rsbin/pips/internal/coding/approval"
 	"github.com/rsbin/pips/internal/coding/config"
+	"github.com/rsbin/pips/internal/coding/hooks"
 	"github.com/rsbin/pips/internal/coding/paths"
 	"github.com/rsbin/pips/internal/coding/question"
 	"github.com/rsbin/pips/internal/coding/session"
 	"github.com/rsbin/pips/internal/coding/subagent"
+	"github.com/rsbin/pips/internal/coding/workspace"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -103,6 +109,140 @@ Read only the delegated target and report the verification evidence.
 	assert.Equal(t, []string{"read"}, toolNamesFromRequest(requests[1]))
 	assert.NotContains(t, toolNamesFromRequest(requests[1]), subagent.ToolName)
 	assert.Nil(t, requests[1].ResponseFormat)
+}
+
+func TestRuntimeKeepsAgentPrivateMCPOutOfParentAndBindsItToSelectedChild(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int32
+	server := sdk.NewServer(&sdk.Implementation{Name: "private-docs", Version: "v1"}, nil)
+	server.AddTool(&sdk.Tool{
+		Name: "lookup", InputSchema: json.RawMessage(`{"type":"object","additionalProperties":false}`),
+	}, func(context.Context, *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
+		calls.Add(1)
+
+		return &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: "private evidence"}}}, nil
+	})
+	handler := sdk.NewStreamableHTTPHandler(
+		func(*http.Request) *sdk.Server { return server },
+		&sdk.StreamableHTTPOptions{JSONResponse: true},
+	)
+	httpServer := httptest.NewServer(handler)
+	t.Cleanup(httpServer.Close)
+
+	base := t.TempDir()
+	layout, err := paths.New(filepath.Join(base, "home"))
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(layout.AgentsDir(), 0o700))
+	require.NoError(t, os.WriteFile(layout.MCPFile(), fmt.Appendf(nil, `{
+  "schema":"pips.mcp/v1alpha1",
+  "servers":[{
+    "id":"private_docs",
+    "type":"streamable_http",
+    "visibility":"agent_private",
+    "url":%q
+  }]
+}`, httpServer.URL), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(layout.AgentsDir(), "private-reader.md"), []byte(`---
+schema: pips.agent/v1alpha1
+name: Private reader
+description: Use one configured private MCP tool.
+mcp:
+  private: [private_docs]
+tools:
+  allow: [source:mcp/private_docs]
+  require: [source:mcp/private_docs]
+---
+Use the private lookup tool and report its evidence.
+`), 0o600))
+
+	model := newRuntimeModel(
+		runtimeToolResponse("parent-delegate", subagent.ToolName, `{"agent_id":"private-reader","task":"Look up the evidence."}`),
+		runtimeToolResponse("child-lookup", "private_docs_lookup", `{}`),
+		runtimeTextResponse("private evidence verified"),
+		runtimeTextResponse("delegation complete"),
+	)
+	runtime := openDynamicTestRuntimeAt(t, base, SessionTarget{}, model)
+	collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("delegate the private lookup")))
+
+	requests := model.Requests()
+	require.Len(t, requests, 4)
+	assert.NotContains(t, toolNamesFromRequest(requests[0]), "private_docs_lookup")
+	assert.Contains(t, toolNamesFromRequest(requests[1]), "private_docs_lookup")
+	assert.Equal(t, int32(1), calls.Load())
+	summaries, err := runtime.ListSubagents(t.Context())
+	require.NoError(t, err)
+	require.Len(t, summaries, 1)
+	detail, err := runtime.InspectSubagent(t.Context(), summaries[0].ChildSessionID)
+	require.NoError(t, err)
+	require.Len(t, detail.Plan.PrivateMCP, 1)
+	assert.Equal(t, "private_docs", detail.Plan.PrivateMCP[0].ID)
+	assert.Len(t, detail.Plan.PrivateMCP[0].Fingerprint, 64)
+}
+
+func TestRuntimeAppliesSelectedPrivateHookOnlyInsideChild(t *testing.T) {
+	skipHookRuntimeOnWindows(t)
+	t.Parallel()
+
+	base := t.TempDir()
+	workspacePath := filepath.Join(base, "workspace")
+	require.NoError(t, mkdirPrivate(workspacePath))
+	ws, err := workspace.Open(workspacePath)
+	require.NoError(t, err)
+	layout, err := paths.New(filepath.Join(base, "home"))
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(layout.AgentsDir(), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(layout.AgentsDir(), "hooked-reader.md"), []byte(`---
+schema: pips.agent/v1alpha1
+name: Hooked reader
+description: Exercise one selected child policy Hook.
+hooks:
+  private: [deny-child-read]
+tools:
+  allow: [tool:read]
+---
+Attempt the requested read and report the policy result.
+`), 0o600))
+	require.NoError(t, os.WriteFile(layout.HooksFile(), []byte(`{
+  "schema":"pips.coding.hooks/v1alpha1",
+  "hooks":{"PreToolUse":[{"matcher":"^read$","hooks":[{
+    "id":"deny-child-read",
+    "visibility":"agent_private",
+    "type":"command",
+    "command":"printf private-child-deny >&2; exit 2"
+  }]}]}
+}`), 0o600))
+	definitions, err := hooks.Load(t.Context(), hooks.LoadOptions{Paths: layout, Limits: hooks.DefaultLimits()})
+	require.NoError(t, err)
+	require.Len(t, definitions.List(), 1)
+	require.NoError(t, hooks.NewTrustStore(layout.HookTrustFile()).Trust(
+		t.Context(), definitions.List()[0], ws.Identity().Key(),
+	))
+	require.NoError(t, os.WriteFile(filepath.Join(workspacePath, "target.txt"), []byte("must not be read\n"), 0o600))
+
+	model := newRuntimeModel(
+		runtimeToolResponse("parent-read", "read", `{"path":"target.txt"}`),
+		runtimeToolResponse("parent-delegate", subagent.ToolName, `{"agent_id":"hooked-reader","task":"Read target.txt."}`),
+		runtimeToolResponse("child-read", "read", `{"path":"target.txt"}`),
+		runtimeTextResponse("the child policy denied the read"),
+		runtimeTextResponse("delegation complete"),
+	)
+	runtime := openDynamicTestRuntimeAt(t, base, SessionTarget{}, model)
+	assert.Empty(t, runtime.hookDefinitions, "agent-private hooks must not enter the parent lifecycle set")
+	assert.Len(t, privateHookDefinitions(runtime.integration.hookDefinitionsSnapshot()), 1)
+	collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("delegate the hooked read")))
+
+	requests := model.Requests()
+	require.Len(t, requests, 5)
+	assert.True(t, hookRequestToolResultContains(requests[1], "must not be read"))
+	assert.True(t, hookRequestToolResultContains(requests[3], "private-child-deny"))
+	summaries, err := runtime.ListSubagents(t.Context())
+	require.NoError(t, err)
+	require.Len(t, summaries, 1)
+	detail, err := runtime.InspectSubagent(t.Context(), summaries[0].ChildSessionID)
+	require.NoError(t, err)
+	require.Len(t, detail.Plan.PrivateHooks, 1)
+	assert.Equal(t, "deny-child-read", detail.Plan.PrivateHooks[0].ID)
 }
 
 func TestRuntimeDispatchesBoundedExactTargetRecursiveChain(t *testing.T) {
@@ -754,7 +894,27 @@ func TestBackgroundCustomChildRetainsGenerationUntilTerminal(t *testing.T) {
 	base := t.TempDir()
 	layout, err := paths.New(filepath.Join(base, "home"))
 	require.NoError(t, err)
+	workspacePath := filepath.Join(base, "workspace")
+	require.NoError(t, mkdirPrivate(workspacePath))
+	ws, err := workspace.Open(workspacePath)
+	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(layout.AgentsDir(), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(workspacePath, "target.txt"), []byte("generation target\n"), 0o600))
+	require.NoError(t, os.WriteFile(layout.HooksFile(), []byte(`{
+  "schema":"pips.coding.hooks/v1alpha1",
+  "hooks":{"PreToolUse":[{"matcher":"^read$","hooks":[{
+    "id":"lease-policy",
+    "visibility":"agent_private",
+    "type":"command",
+    "command":"printf '{\"decision\":\"allow\",\"additional_context\":\"old-private\"}'"
+  }]}]}
+}`), 0o600))
+	hookDefinitions, err := hooks.Load(t.Context(), hooks.LoadOptions{Paths: layout, Limits: hooks.DefaultLimits()})
+	require.NoError(t, err)
+	require.Len(t, hookDefinitions.List(), 1)
+	require.NoError(t, hooks.NewTrustStore(layout.HookTrustFile()).Trust(
+		t.Context(), hookDefinitions.List()[0], ws.Identity().Key(),
+	))
 	require.NoError(t, os.WriteFile(
 		filepath.Join(layout.AgentsDir(), "slow-checker.md"),
 		[]byte(`---
@@ -762,6 +922,8 @@ schema: pips.agent/v1alpha1
 name: Slow checker
 description: Hold one bounded background verification until completion.
 delivery: [background]
+hooks:
+  private: [lease-policy]
 tools:
   allow: ["tool:read"]
 output:
@@ -791,12 +953,28 @@ Inspect only the assigned target and return when the work is complete.
 	}
 
 	before := runtime.integration
+	oldPrivateHooks := privateHookDefinitions(before.hookDefinitionsSnapshot())
+	require.Len(t, oldPrivateHooks, 1)
+	assert.True(t, model.sawPrivateContext.Load())
+	require.NoError(t, os.WriteFile(layout.HooksFile(), []byte(`{
+  "schema":"pips.coding.hooks/v1alpha1",
+  "hooks":{"PreToolUse":[{"matcher":"^read$","hooks":[{
+    "id":"lease-policy",
+    "visibility":"agent_private",
+    "type":"command",
+    "command":"printf '{\"decision\":\"allow\",\"additional_context\":\"new-private\"}'"
+  }]}]}
+}`), 0o600))
 	require.NoError(t, runtime.Reload(t.Context()))
 	runtime.mu.Lock()
 	after := runtime.integration
 	runtime.mu.Unlock()
 	assert.NotSame(t, before, after)
 	assert.Zero(t, lifecycle.stops.Load(), "old generation must remain leased by the child")
+	assert.Equal(t, oldPrivateHooks["lease-policy"].Fingerprint(),
+		privateHookDefinitions(before.hookDefinitionsSnapshot())["lease-policy"].Fingerprint())
+	assert.Empty(t, privateHookDefinitions(after.hookDefinitionsSnapshot()),
+		"the changed private Hook is pending fresh trust in the new generation")
 
 	summaries, err := runtime.ListSubagents(t.Context())
 	require.NoError(t, err)
@@ -1636,11 +1814,13 @@ func openDynamicTestRuntimeAt(
 }
 
 type backgroundCustomRuntimeModel struct {
-	mu           sync.Mutex
-	mainCalls    int
-	childOnce    sync.Once
-	childStarted chan struct{}
-	releaseChild chan struct{}
+	mu                sync.Mutex
+	mainCalls         int
+	childCalls        int
+	childOnce         sync.Once
+	childStarted      chan struct{}
+	releaseChild      chan struct{}
+	sawPrivateContext atomic.Bool
 }
 
 type nestedCancelRuntimeModel struct {
@@ -1729,6 +1909,14 @@ func (m *backgroundCustomRuntimeModel) Generate(
 	request ai.Request,
 ) (*ai.Response, error) {
 	if strings.Contains(request.System, "You are a specialized child agent") {
+		m.mu.Lock()
+		m.childCalls++
+		call := m.childCalls
+		m.mu.Unlock()
+		if call == 1 {
+			return runtimeToolResponse("background-read", "read", `{"path":"target.txt"}`), nil
+		}
+		m.sawPrivateContext.Store(hookRequestToolResultContains(request, "old-private"))
 		m.childOnce.Do(func() { close(m.childStarted) })
 		select {
 		case <-m.releaseChild:

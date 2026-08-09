@@ -65,6 +65,41 @@ func TestValidateExecutionPlanAcceptsPreRecursionPlan(t *testing.T) {
 	require.NoError(t, ValidateExecutionPlan(plan))
 }
 
+func TestExecutionPlanPrivateBindingsAreDetachedAndDigestCovered(t *testing.T) {
+	t.Parallel()
+
+	plan := testDelegationExecutionPlan(t)
+	plan.PrivateMCP = []PrivateBinding{{ID: "source_control", Fingerprint: strings.Repeat("b", 64)}}
+	plan.PrivateHooks = []PrivateBinding{{ID: "child-policy", Fingerprint: strings.Repeat("c", 64)}}
+	require.NoError(t, ValidateExecutionPlan(plan))
+	digest, err := plan.Digest()
+	require.NoError(t, err)
+
+	cloned := plan.Clone()
+	cloned.PrivateMCP[0].Fingerprint = strings.Repeat("d", 64)
+	cloned.PrivateHooks[0].ID = "other-policy"
+
+	assert.Equal(t, strings.Repeat("b", 64), plan.PrivateMCP[0].Fingerprint)
+
+	changed, err := cloned.Digest()
+	require.NoError(t, err)
+	assert.NotEqual(t, digest, changed)
+
+	for name, mutate := range map[string]func(*ExecutionPlan){
+		"invalid ID":          func(value *ExecutionPlan) { value.PrivateMCP[0].ID = "../escape" },
+		"invalid fingerprint": func(value *ExecutionPlan) { value.PrivateHooks[0].Fingerprint = "short" },
+		"duplicate":           func(value *ExecutionPlan) { value.PrivateMCP = append(value.PrivateMCP, value.PrivateMCP[0]) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			invalid := plan.Clone()
+			mutate(&invalid)
+			require.ErrorIs(t, ValidateExecutionPlan(invalid), ErrInvalid)
+		})
+	}
+}
+
 func testDelegationExecutionPlan(t *testing.T) ExecutionPlan {
 	t.Helper()
 

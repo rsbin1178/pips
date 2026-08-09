@@ -76,6 +76,20 @@ func Load(ctx context.Context, options LoadOptions) (Definitions, error) {
 		return Definitions{}, ErrLimitExceeded
 	}
 
+	privateIDs := make(map[string]struct{})
+
+	for _, definition := range values {
+		if definition.effectiveVisibility() != VisibilityAgentPrivate {
+			continue
+		}
+
+		if _, duplicate := privateIDs[definition.ID]; duplicate {
+			return Definitions{}, fmt.Errorf("%w: duplicate agent-private hook ID %q", ErrInvalid, definition.ID)
+		}
+
+		privateIDs[definition.ID] = struct{}{}
+	}
+
 	return Definitions{values: values}, nil
 }
 
@@ -90,9 +104,11 @@ type hookGroup struct {
 }
 
 type hookCommand struct {
-	Type    string          `json:"type"`
-	Command string          `json:"command"`
-	Timeout json.RawMessage `json:"timeout"`
+	ID         string          `json:"id,omitempty"`
+	Type       string          `json:"type"`
+	Visibility string          `json:"visibility,omitempty"`
+	Command    string          `json:"command"`
+	Timeout    json.RawMessage `json:"timeout"`
 }
 
 func decodeFile(data []byte, scope Scope, source string, limits Limits) ([]Definition, error) {
@@ -136,10 +152,15 @@ func decodeFile(data []byte, scope Scope, source string, limits Limits) ([]Defin
 				if err != nil {
 					return nil, fmt.Errorf("%w: %s handler %d timeout", ErrInvalid, event, handlerIndex)
 				}
+
+				reference := fmt.Sprintf("%s/%s/%d/%d", scope, event, groupIndex, handlerIndex)
+				if handler.Visibility == string(VisibilityAgentPrivate) && handler.ID != "" {
+					reference = fmt.Sprintf("%s/private/%s", scope, handler.ID)
+				}
 				definition, compileErr := compileDefinition(Definition{
-					Reference: fmt.Sprintf("%s/%s/%d/%d", scope, event, groupIndex, handlerIndex),
-					Scope:     scope, Source: source, Event: event, Matcher: group.Matcher,
-					Command: handler.Command, Timeout: timeout,
+					ID: handler.ID, Reference: reference,
+					Scope: scope, Source: source, Visibility: Visibility(handler.Visibility),
+					Event: event, Matcher: group.Matcher, Command: handler.Command, Timeout: timeout,
 				}, limits)
 				if compileErr != nil {
 					return nil, fmt.Errorf("%w: %s handler %d: %w", ErrInvalid, event, handlerIndex, compileErr)

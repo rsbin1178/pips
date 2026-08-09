@@ -2,6 +2,9 @@ package hooks
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -97,6 +100,61 @@ func TestLoadRejectsInvalidDefinitions(t *testing.T) {
 			require.ErrorIs(t, err, ErrInvalid)
 		})
 	}
+}
+
+func TestLoadAgentPrivateHooksRequiresStableUniqueChildScopedIDs(t *testing.T) {
+	t.Parallel()
+
+	layout, err := paths.New(t.TempDir())
+	require.NoError(t, err)
+	writeHookFile(t, layout.HooksFile(), `{
+  "schema":"pips.coding.hooks/v1alpha1",
+  "hooks":{"PreToolUse":[{"hooks":[
+    {"id":"child-policy","visibility":"agent_private","type":"command","command":"true"}
+  ]}]}
+}`)
+	definitions, err := Load(t.Context(), LoadOptions{Paths: layout, Limits: DefaultLimits()})
+	require.NoError(t, err)
+
+	definition := definitions.List()[0]
+	assert.Equal(t, "child-policy", definition.ID)
+	assert.Equal(t, VisibilityAgentPrivate, definition.EffectiveVisibility())
+	assert.Equal(t, "user/private/child-policy", definition.Reference)
+
+	for _, content := range []string{
+		`{"schema":"pips.coding.hooks/v1alpha1","hooks":{"SessionStart":[{"hooks":[{"id":"child-policy","visibility":"agent_private","type":"command","command":"true"}]}]}}`,
+		`{"schema":"pips.coding.hooks/v1alpha1","hooks":{"PreToolUse":[{"hooks":[{"visibility":"agent_private","type":"command","command":"true"}]}]}}`,
+		`{"schema":"pips.coding.hooks/v1alpha1","hooks":{"PreToolUse":[{"hooks":[{"id":"same","visibility":"agent_private","type":"command","command":"true"},{"id":"same","visibility":"agent_private","type":"command","command":"true"}]}]}}`,
+	} {
+		writeHookFile(t, layout.HooksFile(), content)
+		_, err = Load(t.Context(), LoadOptions{Paths: layout, Limits: DefaultLimits()})
+		require.ErrorIs(t, err, ErrInvalid)
+	}
+}
+
+func TestHookVisibilityChangesTrustFingerprint(t *testing.T) {
+	t.Parallel()
+
+	ambient := testDefinition(t, EventPreToolUse, time.Second, "true")
+	private := ambient
+	private.ID = "child-policy"
+	private.Reference = "user/private/child-policy"
+	private.Visibility = VisibilityAgentPrivate
+	legacy, err := json.Marshal(struct {
+		Event     Event  `json:"event"`
+		Matcher   string `json:"matcher,omitempty"`
+		Type      string `json:"type"`
+		Command   string `json:"command"`
+		TimeoutNS int64  `json:"timeout_ns"`
+	}{
+		Event: ambient.Event, Matcher: ambient.Matcher, Type: "command",
+		Command: ambient.Command, TimeoutNS: ambient.Timeout.Nanoseconds(),
+	})
+	require.NoError(t, err)
+
+	legacySum := sha256.Sum256(legacy)
+	assert.Equal(t, hex.EncodeToString(legacySum[:]), ambient.Fingerprint(), "ambient hooks retain legacy trust fingerprints")
+	assert.NotEqual(t, ambient.Fingerprint(), private.Fingerprint())
 }
 
 func TestTrustStoreBindsProjectDefinitionsToWorkspaceIdentity(t *testing.T) {

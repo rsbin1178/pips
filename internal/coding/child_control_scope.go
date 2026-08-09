@@ -44,7 +44,9 @@ type childScopeFactory struct {
 	toolTimeout          time.Duration
 	inspector            *git.Inspector
 	hooks                []hooks.Definition
+	privateHooks         []hooks.Definition
 	hookRunner           hooks.Runner
+	onHookDiagnostics    func(context.Context, []hooks.Diagnostic)
 	model                ai.LanguageModel
 	mode                 OperatingMode
 	mcpEntries           []catalog.Entry
@@ -70,6 +72,7 @@ type childScopeFactory struct {
 
 func (f childScopeFactory) clone() childScopeFactory {
 	f.hooks = slices.Clone(f.hooks)
+	f.privateHooks = slices.Clone(f.privateHooks)
 	f.mcpEntries = cloneCatalogEntries(f.mcpEntries)
 
 	return f
@@ -245,7 +248,10 @@ func newChildControlScope(
 		factory:        factory.clone(),
 		resume:         make(chan struct{}, 1),
 	}
-	scope.hooks = newChildHookScope(factory.hooks, factory.hookRunner, scope.childSessionID, factory.workspace.Root())
+	scope.hooks = newChildHookScope(
+		factory.hooks, factory.privateHooks, factory.hookRunner,
+		scope.childSessionID, factory.workspace.Root(), factory.onHookDiagnostics,
+	)
 	validator, err := subagent.NewOutputValidator(scope.plan.Output, scope.plan.Limits)
 	if err != nil {
 		cancel()
