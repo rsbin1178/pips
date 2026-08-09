@@ -420,6 +420,11 @@ pips --dynamic-subagents agents run go-checker "inspect internal/coding"
 # Parses an explicitly supplied Markdown definition for this run only.
 pips --dynamic-subagents agents run ad-hoc-check \
   "review this diff" --definition ./reviewer.md
+
+# Generates an isolated process-local draft, prints its full authority preview,
+# and waits for exact promote/edit/discard input before writing anything.
+pips --dynamic-subagents agents generate go-checker \
+  "Review bounded Go changes and report evidence"
 ```
 
 `--definition` never writes the supplied file into an Agent root and never
@@ -427,6 +432,21 @@ publishes it to the parent model. `agents run` is non-interactive: if its child
 needs a Shell/patch approval, an unknown-outcome decision, or a structured
 answer, it returns the matching classified error rather than auto-approving or
 waiting indefinitely.
+
+`agents generate` gives the proposal model no Workspace, Shell, MCP, Hook,
+Skill, Subagent, approval, question, registry, or promotion Tool. Its only Tool
+submits one strict Markdown proposal into an in-memory Session. Pips parses and
+compiles that proposal against the current frozen Runtime generation, prints
+the full Markdown plus declared/effective authority preview, and then accepts
+only `promote`, `edit <markdown-file>`, or `discard`; EOF also discards. The
+model cannot choose the action or path.
+
+Promotion is digest-bound and never overwrites a file. User scope writes only
+to `$PIPS_HOME/agents/<id>.md`; `--scope project` additionally requires a
+trusted Workspace and targets `.pips/agents/<id>.md`. Edited bytes are parsed
+and compiled again. A failed review or write retains only the process-local
+draft until the command exits; a successful write becomes discoverable on the
+next normal Runtime open or reload, not in the generation that reviewed it.
 
 In the interactive TUI, open `/agents`, press `Ctrl+L` for the Library, choose
 an available user-visible profile with Enter, then enter its task in the

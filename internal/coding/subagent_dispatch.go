@@ -138,6 +138,31 @@ func (d *customSubagentDispatcher) withOneShot(
 	return &cloned, nil
 }
 
+// withDraft returns an interaction-local dispatcher containing one parsed,
+// preview-only custom definition. It is used only to compile current authority;
+// the definition is not published to either registry audience and cannot be
+// opened by a Manager through the original dispatcher.
+func (d *customSubagentDispatcher) withDraft(
+	definition agentprofile.Definition,
+) (*customSubagentDispatcher, error) {
+	if d == nil || definition.Kind != agentprofile.KindCustom || definition.ID == "" ||
+		!validDraftDefinitionSource(definition) {
+		return nil, fmt.Errorf("%w: invalid Agent draft definition", subagent.ErrInvalid)
+	}
+	if _, exists := d.definitions[definition.ID]; exists {
+		return nil, fmt.Errorf("%w: Agent ID already exists", subagent.ErrInvalid)
+	}
+
+	cloned := *d
+	cloned.definitions = make(map[string]agentprofile.Definition, len(d.definitions)+1)
+	for id, value := range d.definitions {
+		cloned.definitions[id] = value.Clone()
+	}
+	cloned.definitions[definition.ID] = definition.Clone()
+
+	return &cloned, nil
+}
+
 // withNonInteractiveInput returns an invocation-local dispatcher whose child
 // bindings stop at an approval or structured-question boundary. It does not
 // resolve, approve, or otherwise alter the child-owned pending state.
