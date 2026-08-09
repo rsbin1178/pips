@@ -4,6 +4,7 @@ package coding
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -804,6 +805,262 @@ Ask for the missing decision, then summarize the selected answer.
 	assert.True(t, requestContainsToolText(requests[2], "React"))
 }
 
+func TestRuntimeRejectsCrossChildAndCrossKindControlSubstitution(t *testing.T) {
+	base := t.TempDir()
+	layout, err := paths.New(filepath.Join(base, "home"))
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(layout.AgentsDir(), 0o700))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(layout.AgentsDir(), "approval-checker.md"),
+		[]byte(`---
+schema: pips.agent/v1alpha1
+name: Approval checker
+description: Run one independently approved verification.
+delivery: [background]
+tools:
+  allow: ["tool:shell"]
+output:
+  format: text
+---
+Run the requested verification exactly once and report completion.
+`),
+		0o600,
+	))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(layout.AgentsDir(), "question-checker.md"),
+		[]byte(`---
+schema: pips.agent/v1alpha1
+name: Question checker
+description: Ask one independently routed question.
+delivery: [background]
+tools:
+  allow: ["tool:ask_user"]
+output:
+  format: text
+---
+Ask for the requested choice exactly once and report completion.
+`),
+		0o600,
+	))
+	external := filepath.Join(base, "external")
+	require.NoError(t, os.MkdirAll(external, 0o700))
+
+	model := newAuthorityRedTeamModel(t, external)
+	t.Cleanup(model.release)
+	runtime := openDynamicTestRuntimeAt(t, base, SessionTarget{}, model)
+	events := collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("start the four isolated background checks")))
+	assert.Equal(t, 4, countEventType(events, EventToolCompleted))
+
+	select {
+	case <-model.allChildrenStarted:
+	case <-time.After(10 * time.Second):
+		require.FailNow(t, "timed out waiting for all red-team children to start")
+	}
+	model.release()
+
+	expectedPause := map[string]ChildPauseKind{
+		"approval-alpha": ChildPauseApproval,
+		"approval-beta":  ChildPauseApproval,
+		"question-alpha": ChildPauseQuestion,
+		"question-beta":  ChildPauseQuestion,
+	}
+	childIDs, before := waitForRedTeamChildControls(t, runtime, expectedPause)
+
+	approvalAlpha := before["approval-alpha"].Approval.Review
+	approvalBeta := before["approval-beta"].Approval.Review
+	questionAlpha := before["question-alpha"].Question
+	questionBeta := before["question-beta"].Question
+	require.NotNil(t, approvalAlpha)
+	require.NotNil(t, approvalBeta)
+	require.NotNil(t, questionAlpha)
+	require.NotNil(t, questionBeta)
+
+	_, err = runtime.ResolveSubagentApproval(t.Context(), childIDs["approval-beta"], approval.Resolution{
+		RequestID: approvalAlpha.RequestID, Choice: approval.ChoiceAllowOnce,
+	})
+	require.Error(t, err)
+	_, err = runtime.ResolveSubagentQuestion(t.Context(), childIDs["question-beta"], question.Resolution{
+		RequestID: questionAlpha.ID, SchemaDigest: questionAlpha.SchemaDigest,
+		Answers: []question.Answer{{Selections: []string{"React"}}},
+	})
+	require.Error(t, err)
+	_, err = runtime.RejectSubagentQuestion(
+		t.Context(), childIDs["question-beta"], questionAlpha.ID, questionAlpha.SchemaDigest,
+	)
+	require.Error(t, err)
+	_, err = runtime.ResolveSubagentApproval(t.Context(), childIDs["question-alpha"], approval.Resolution{
+		RequestID: approvalAlpha.RequestID, Choice: approval.ChoiceAllowOnce,
+	})
+	require.Error(t, err)
+	_, err = runtime.ResolveSubagentQuestion(t.Context(), childIDs["approval-alpha"], question.Resolution{
+		RequestID: questionAlpha.ID, SchemaDigest: questionAlpha.SchemaDigest,
+		Answers: []question.Answer{{Selections: []string{"React"}}},
+	})
+	require.Error(t, err)
+	_, err = runtime.RejectSubagentQuestion(
+		t.Context(), childIDs["approval-beta"], questionAlpha.ID, questionAlpha.SchemaDigest,
+	)
+	require.Error(t, err)
+
+	for task, expected := range before {
+		actual, stateErr := runtime.SubagentControlState(childIDs[task])
+		require.NoError(t, stateErr)
+		assert.Equal(t, expected, actual, "malicious resolution changed %s", task)
+	}
+	assert.Equal(t, PhaseIdle, runtime.Snapshot().Phase)
+	assert.Equal(t, ApprovalNone, runtime.Snapshot().Approval.Kind)
+	assert.Nil(t, runtime.Snapshot().Question.Required)
+	for _, task := range []string{"approval-alpha", "approval-beta"} {
+		_, statErr := os.Stat(filepath.Join(external, task+".txt"))
+		require.ErrorIs(t, statErr, os.ErrNotExist)
+	}
+	for task := range expectedPause {
+		assert.Len(t, model.requestsFor(task), 1, "malicious resolution resumed %s", task)
+	}
+
+	for task, review := range map[string]*approval.Review{
+		"approval-alpha": approvalAlpha,
+		"approval-beta":  approvalBeta,
+	} {
+		_, err = runtime.ResolveSubagentApproval(t.Context(), childIDs[task], approval.Resolution{
+			RequestID: review.RequestID, Choice: approval.ChoiceAllowOnce,
+		})
+		require.NoError(t, err)
+		_, err = runtime.ResolveSubagentApproval(t.Context(), childIDs[task], approval.Resolution{
+			RequestID: review.RequestID, Choice: approval.ChoiceAllowOnce,
+		})
+		require.Error(t, err, "duplicate approval resolution must fail")
+	}
+	for task, request := range map[string]*question.Request{
+		"question-alpha": questionAlpha,
+		"question-beta":  questionBeta,
+	} {
+		resolution := question.Resolution{
+			RequestID: request.ID, SchemaDigest: request.SchemaDigest,
+			Answers: []question.Answer{{Selections: []string{"React"}}},
+		}
+		_, err = runtime.ResolveSubagentQuestion(t.Context(), childIDs[task], resolution)
+		require.NoError(t, err)
+		_, err = runtime.ResolveSubagentQuestion(t.Context(), childIDs[task], resolution)
+		require.Error(t, err, "duplicate question resolution must fail")
+	}
+
+	waitForRedTeamChildrenTerminal(t, runtime, childIDs)
+	for task, review := range map[string]*approval.Review{
+		"approval-alpha": approvalAlpha,
+		"approval-beta":  approvalBeta,
+	} {
+		_, err = runtime.ResolveSubagentApproval(t.Context(), childIDs[task], approval.Resolution{
+			RequestID: review.RequestID, Choice: approval.ChoiceAllowOnce,
+		})
+		require.ErrorIs(t, err, ErrRuntimeNotPaused)
+		contents, readErr := os.ReadFile(filepath.Join(external, task+".txt"))
+		require.NoError(t, readErr)
+		assert.Equal(t, task, string(contents), "approved command executed more than once")
+	}
+	for task, request := range map[string]*question.Request{
+		"question-alpha": questionAlpha,
+		"question-beta":  questionBeta,
+	} {
+		_, err = runtime.ResolveSubagentQuestion(t.Context(), childIDs[task], question.Resolution{
+			RequestID: request.ID, SchemaDigest: request.SchemaDigest,
+			Answers: []question.Answer{{Selections: []string{"React"}}},
+		})
+		require.ErrorIs(t, err, ErrRuntimeNotPaused)
+	}
+	for task := range expectedPause {
+		assert.Len(t, model.requestsFor(task), 2, "%s must receive one tool turn and one final turn", task)
+	}
+}
+
+func waitForRedTeamChildControls(
+	t *testing.T,
+	runtime *Runtime,
+	expected map[string]ChildPauseKind,
+) (map[string]string, map[string]ChildControlState) {
+	t.Helper()
+
+	deadline := time.NewTimer(10 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		childIDs := make(map[string]string, len(expected))
+		states := make(map[string]ChildControlState, len(expected))
+		summaries, err := runtime.ListSubagents(t.Context())
+		if err == nil {
+			for _, summary := range summaries {
+				pause, exists := expected[summary.TaskPreview]
+				if !exists {
+					continue
+				}
+				state, stateErr := runtime.SubagentControlState(summary.ChildSessionID)
+				if stateErr == nil && state.Pause == pause {
+					childIDs[summary.TaskPreview] = summary.ChildSessionID
+					states[summary.TaskPreview] = state
+				}
+			}
+		}
+		if len(states) == len(expected) {
+			return childIDs, states
+		}
+
+		select {
+		case <-deadline.C:
+			require.FailNow(t, "timed out waiting for live red-team child controls")
+		case <-ticker.C:
+		case <-t.Context().Done():
+			require.FailNow(t, "test context canceled while waiting for child controls")
+		}
+	}
+}
+
+func waitForRedTeamChildrenTerminal(t *testing.T, runtime *Runtime, childIDs map[string]string) {
+	t.Helper()
+
+	deadline := time.NewTimer(10 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		terminal := make(map[string]subagent.State, len(childIDs))
+		summaries, err := runtime.ListSubagents(t.Context())
+		if err == nil {
+			for _, summary := range summaries {
+				for task, childID := range childIDs {
+					if summary.ChildSessionID == childID && redTeamTerminalState(summary.State) {
+						terminal[task] = summary.State
+					}
+				}
+			}
+		}
+		if len(terminal) == len(childIDs) {
+			for task, state := range terminal {
+				assert.Equal(t, subagent.StateSucceeded, state, task)
+			}
+
+			return
+		}
+
+		select {
+		case <-deadline.C:
+			require.FailNow(t, "timed out waiting for red-team children to finish")
+		case <-ticker.C:
+		case <-t.Context().Done():
+			require.FailNow(t, "test context canceled while waiting for terminal children")
+		}
+	}
+}
+
+func redTeamTerminalState(state subagent.State) bool {
+	switch state {
+	case subagent.StateSucceeded, subagent.StateFailed, subagent.StateCanceled, subagent.StateInterrupted:
+		return true
+	default:
+		return false
+	}
+}
+
 func TestRuntimeRecoveryRejectsStaleCustomChildControls(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -1025,3 +1282,173 @@ func (*backgroundCustomRuntimeModel) Capabilities() ai.Capabilities {
 }
 
 var _ ai.LanguageModel = (*backgroundCustomRuntimeModel)(nil)
+
+type authorityRedTeamTask struct {
+	agentID   string
+	pause     ChildPauseKind
+	shellArgs string
+}
+
+type authorityRedTeamModel struct {
+	mu sync.Mutex
+
+	tasks              map[string]authorityRedTeamTask
+	spawnOrder         []string
+	parentCalls        int
+	childCalls         map[string]int
+	childRequests      map[string][]ai.Request
+	startedChildren    int
+	allChildrenStarted chan struct{}
+	releaseChildren    chan struct{}
+	releaseOnce        sync.Once
+}
+
+func newAuthorityRedTeamModel(t *testing.T, external string) *authorityRedTeamModel {
+	t.Helper()
+
+	tasks := map[string]authorityRedTeamTask{
+		"approval-alpha": {agentID: "approval-checker", pause: ChildPauseApproval},
+		"approval-beta":  {agentID: "approval-checker", pause: ChildPauseApproval},
+		"question-alpha": {agentID: "question-checker", pause: ChildPauseQuestion},
+		"question-beta":  {agentID: "question-checker", pause: ChildPauseQuestion},
+	}
+	for _, task := range []string{"approval-alpha", "approval-beta"} {
+		args, err := json.Marshal(map[string]any{
+			"command": "printf " + task + " >> " + filepath.Join(external, task+".txt"),
+			"permissions": map[string]any{
+				"write_paths": []string{external},
+			},
+			"justification": "write one red-team verification artifact",
+		})
+		require.NoError(t, err)
+		value := tasks[task]
+		value.shellArgs = string(args)
+		tasks[task] = value
+	}
+
+	return &authorityRedTeamModel{
+		tasks: tasks,
+		spawnOrder: []string{
+			"approval-alpha", "approval-beta", "question-alpha", "question-beta",
+		},
+		childCalls:         make(map[string]int, len(tasks)),
+		childRequests:      make(map[string][]ai.Request, len(tasks)),
+		allChildrenStarted: make(chan struct{}),
+		releaseChildren:    make(chan struct{}),
+	}
+}
+
+func (m *authorityRedTeamModel) Generate(ctx context.Context, request ai.Request) (*ai.Response, error) {
+	if strings.Contains(request.System, "You are a specialized child agent") {
+		return m.generateChild(ctx, request)
+	}
+
+	return m.generateParent()
+}
+
+func (m *authorityRedTeamModel) generateChild(ctx context.Context, request ai.Request) (*ai.Response, error) {
+	for task, definition := range m.tasks {
+		if !requestContainsText(request, task) {
+			continue
+		}
+
+		m.mu.Lock()
+		m.childCalls[task]++
+		call := m.childCalls[task]
+		m.childRequests[task] = append(m.childRequests[task], request)
+		if call == 1 {
+			m.startedChildren++
+		}
+		becameAllStarted := call == 1 && m.startedChildren == len(m.tasks)
+		m.mu.Unlock()
+		if becameAllStarted {
+			close(m.allChildrenStarted)
+		}
+
+		if call > 1 {
+			return runtimeTextResponse(task + " complete"), nil
+		}
+		select {
+		case <-m.releaseChildren:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+
+		switch definition.pause {
+		case ChildPauseApproval:
+			return runtimeToolResponse(task+"-approval", "shell", definition.shellArgs), nil
+		case ChildPauseQuestion:
+			args, err := json.Marshal(question.Spec{Questions: []question.Question{{
+				Header: "Framework", Question: "Which framework should be used for " + task + "?",
+				Options: []question.Option{
+					{Label: "React", Description: "Established ecosystem"},
+					{Label: "Vue", Description: "Progressive framework"},
+				},
+			}}})
+			if err != nil {
+				return nil, err
+			}
+
+			return runtimeToolResponse(task+"-question", question.ToolName, string(args)), nil
+		default:
+			return nil, fmt.Errorf("unexpected red-team pause kind %q", definition.pause)
+		}
+	}
+
+	return nil, errors.New("red-team child request has no task marker")
+}
+
+func (m *authorityRedTeamModel) generateParent() (*ai.Response, error) {
+	m.mu.Lock()
+	m.parentCalls++
+	call := m.parentCalls
+	if call <= len(m.spawnOrder) {
+		task := m.spawnOrder[call-1]
+		definition := m.tasks[task]
+		m.mu.Unlock()
+		args, err := json.Marshal(map[string]string{"agent_id": definition.agentID, "task": task})
+		if err != nil {
+			return nil, err
+		}
+
+		return runtimeToolResponse("spawn-"+task, subagent.SpawnToolName, string(args)), nil
+	}
+	m.mu.Unlock()
+
+	return runtimeTextResponse("red-team parent complete"), nil
+}
+
+func (m *authorityRedTeamModel) Stream(ctx context.Context, request ai.Request) ai.Stream {
+	return func(yield func(ai.StreamEvent, error) bool) {
+		response, err := m.Generate(ctx, request)
+		if err != nil {
+			yield(ai.StreamEvent{}, err)
+
+			return
+		}
+		for _, event := range runtimeResponseEvents(response) {
+			if !yield(event, nil) {
+				return
+			}
+		}
+	}
+}
+
+func (*authorityRedTeamModel) Provider() ai.Provider { return ai.ProviderOpenAI }
+func (*authorityRedTeamModel) ModelID() string       { return "runtime-test" }
+func (*authorityRedTeamModel) Capabilities() ai.Capabilities {
+	return ai.Capabilities{Text: true, Tools: true}
+}
+
+func (m *authorityRedTeamModel) requestsFor(task string) []ai.Request {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return append([]ai.Request(nil), m.childRequests[task]...)
+}
+
+func (m *authorityRedTeamModel) release() {
+	m.releaseOnce.Do(func() { close(m.releaseChildren) })
+}
+
+var _ ai.LanguageModel = (*authorityRedTeamModel)(nil)

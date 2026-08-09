@@ -285,6 +285,10 @@ func compileDelegableCapabilities(
 
 //nolint:goconst // The closed wire-name allowlist is intentionally visible at the authority boundary.
 func delegableDescriptor(descriptor catalog.Descriptor) bool {
+	if capabilityRisk(descriptor.Risk) == "" {
+		return false
+	}
+
 	switch descriptor.Source.Kind {
 	case catalog.SourceMCP:
 		return true
