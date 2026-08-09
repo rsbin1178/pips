@@ -56,7 +56,8 @@ currently delegable read, write, Shell, existing MCP, Skill, Tool Search, and
 question capabilities, but only the active Runtime can authorize them and each
 high-risk action retains the child-owned approval/audit path. See
 [Dynamic custom Agents](docs/coding-cli.md#dynamic-custom-agents-alpha) for
-the feature gate, definition format, trust roots, and direct invocation.
+the feature gate, definition format, trust roots, direct invocation, and the
+explicit preview-before-promotion model-assisted draft workflow.
 The single-session Runtime now composes durable Harness state, immutable
 Extension/Skill/MCP generations, approval continuation, change attribution,
 typed product events, and optional telemetry. The default command now opens a

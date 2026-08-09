@@ -167,6 +167,7 @@ type Runtime struct {
 	childControls   *childControlRegistry
 	notifications   *subagent.NotificationInbox
 	children        map[string]*childProjection
+	agentDrafts     map[string]agentDraftRecord
 	teamGuard       teamCapabilityGuard
 	admission       *teamAdmission
 	team            *teamCoordinator
@@ -557,6 +558,7 @@ func openRuntime(
 		observers:     newAgentObservers(options.AgentObservers),
 		telemetry:     newTelemetryObservers(options.TelemetryObservers),
 		admission:     newTeamAdmission(),
+		agentDrafts:   make(map[string]agentDraftRecord),
 		closeDone:     make(chan struct{}),
 	}
 
@@ -1439,6 +1441,8 @@ const (
 	operationNavigate          runtimeOperationKind = "navigate"
 	operationFork              runtimeOperationKind = "fork"
 	operationAgentNotification runtimeOperationKind = "agent notification"
+	operationAgentDraft        runtimeOperationKind = "generate Agent draft"
+	operationAgentPromote      runtimeOperationKind = "promote Agent draft"
 	operationTeamPropose       runtimeOperationKind = "propose Team"
 	operationTeamProposalAgent runtimeOperationKind = "generate Team proposal"
 	operationTeamConfirm       runtimeOperationKind = "confirm Team"
