@@ -491,7 +491,8 @@ func (r *Runtime) beginOperation(
 	}
 
 	switch kind {
-	case operationPrompt, operationDirectAgent, operationAgentNotification:
+	case operationPrompt, operationDirectAgent, operationAgentNotification,
+		operationAgentDraft, operationAgentPromote:
 		if kind == operationAgentNotification && len(messages) != 1 {
 			return nil, nil, fmt.Errorf("%w: invalid Agent notification operation", ErrRuntimeInvalid)
 		}

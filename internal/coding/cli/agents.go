@@ -2,6 +2,7 @@
 package cli
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -54,10 +55,278 @@ func newAgentsCommand(dependencies Dependencies, flags *rootFlags) *cobra.Comman
 		newAgentsShowCommand(dependencies, flags),
 		newAgentsValidateCommand(dependencies, flags),
 		newAgentsInitCommand(dependencies, flags),
+		newAgentsGenerateCommand(dependencies, flags),
 		newAgentsRunCommand(dependencies, flags),
 	)
 
 	return command
+}
+
+const maximumAgentDraftReviewActionBytes = 16 << 10
+
+type agentsGenerateFlags struct{ scope string }
+
+type agentDraftRuntime interface {
+	GenerateAgentDraft(context.Context, coding.GenerateAgentDraftRequest) (coding.AgentDraft, error)
+	PromoteAgentDraft(
+		context.Context,
+		coding.PromoteAgentDraftRequest,
+	) (coding.AgentDraftPromotion, error)
+	DiscardAgentDraft(context.Context, string, string) error
+}
+
+func newAgentsGenerateCommand(dependencies Dependencies, flags *rootFlags) *cobra.Command {
+	generateFlags := &agentsGenerateFlags{}
+	command := &cobra.Command{
+		Use:   "generate <agent-id> <intent>",
+		Short: "Generate, review, and explicitly promote one Agent draft",
+		Args:  cobra.MinimumNArgs(2),
+		RunE: func(cmd *cobra.Command, arguments []string) error {
+			return runAgentsGenerateCommand(
+				cmd, dependencies, flags, generateFlags.scope, arguments,
+			)
+		},
+	}
+	command.Flags().StringVar(
+		&generateFlags.scope,
+		"scope",
+		string(coding.AgentDraftScopeUser),
+		"promotion root (user or project)",
+	)
+
+	return command
+}
+
+func runAgentsGenerateCommand(
+	cmd *cobra.Command,
+	dependencies Dependencies,
+	flags *rootFlags,
+	scopeValue string,
+	arguments []string,
+) (returnErr error) {
+	scope, err := parseAgentDraftScope(scopeValue)
+	if err != nil {
+		return err
+	}
+	intent, err := validatePrompt(strings.Join(arguments[1:], " "))
+	if err != nil {
+		return err
+	}
+	state, err := loadCommandState(cmd, dependencies, flags)
+	if err != nil {
+		return err
+	}
+	options, err := newRuntimeOpenOptions(dependencies, state, "")
+	if err != nil {
+		return err
+	}
+	runtime, err := dependencies.OpenAgentRun(cmd.Context(), options)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		returnErr = errors.Join(returnErr, closeAgentRunRuntime(cmd.Context(), runtime))
+	}()
+	drafts, ok := runtime.(agentDraftRuntime)
+	if !ok {
+		return fmt.Errorf("%w: runtime does not expose Agent draft review", ErrUsage)
+	}
+
+	draft, err := drafts.GenerateAgentDraft(cmd.Context(), coding.GenerateAgentDraftRequest{
+		AgentID: arguments[0], Intent: intent, Scope: scope,
+	})
+	if err != nil {
+		return err
+	}
+	live := true
+	defer func() {
+		if live {
+			_ = drafts.DiscardAgentDraft(
+				context.WithoutCancel(cmd.Context()),
+				draft.Summary.DraftID,
+				draft.Summary.DefinitionDigest,
+			)
+		}
+	}()
+	if err := writeAgentDraftPreview(cmd.OutOrStdout(), draft); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(
+		cmd.ErrOrStderr(),
+		"Review the draft above, then enter: promote | edit <markdown-file> | discard",
+	); err != nil {
+		return err
+	}
+	action, err := readAgentDraftReviewAction(cmd.InOrStdin())
+	if err != nil {
+		return err
+	}
+
+	consumed, err := applyAgentDraftReviewAction(
+		cmd, dependencies, drafts, draft, action,
+	)
+	if consumed {
+		live = false
+	}
+
+	return err
+}
+
+func applyAgentDraftReviewAction(
+	cmd *cobra.Command,
+	dependencies Dependencies,
+	runtime agentDraftRuntime,
+	draft coding.AgentDraft,
+	action string,
+) (bool, error) {
+	switch {
+	case action == "", action == "discard":
+		if err := runtime.DiscardAgentDraft(
+			cmd.Context(), draft.Summary.DraftID, draft.Summary.DefinitionDigest,
+		); err != nil {
+			return false, err
+		}
+
+		return true, writeAgentDraftDisposition(cmd.OutOrStdout(), draft, "discarded")
+	case action == "promote":
+		return promoteReviewedAgentDraft(cmd, runtime, draft, nil)
+	case strings.HasPrefix(action, "edit "):
+		definition, err := readEditedAgentDraft(
+			cmd.Context(), dependencies, strings.TrimSpace(action[5:]),
+		)
+		if err != nil {
+			return false, err
+		}
+
+		return promoteReviewedAgentDraft(cmd, runtime, draft, definition)
+	default:
+		return false, fmt.Errorf("%w: invalid Agent draft review action", ErrUsage)
+	}
+}
+
+func promoteReviewedAgentDraft(
+	cmd *cobra.Command,
+	runtime agentDraftRuntime,
+	draft coding.AgentDraft,
+	definition []byte,
+) (bool, error) {
+	promotion, err := runtime.PromoteAgentDraft(
+		cmd.Context(),
+		coding.PromoteAgentDraftRequest{
+			DraftID: draft.Summary.DraftID, ExpectedDigest: draft.Summary.DefinitionDigest,
+			Definition: definition,
+		},
+	)
+	if err != nil {
+		return false, err
+	}
+
+	return true, writeAgentDraftPromotion(cmd.OutOrStdout(), promotion)
+}
+
+func parseAgentDraftScope(value string) (coding.AgentDraftScope, error) {
+	scope := coding.AgentDraftScope(value)
+	if scope != coding.AgentDraftScopeUser && scope != coding.AgentDraftScopeProject {
+		return "", fmt.Errorf("%w: Agent draft scope must be user or project", ErrUsage)
+	}
+
+	return scope, nil
+}
+
+func readAgentDraftReviewAction(input io.Reader) (string, error) {
+	scanner := bufio.NewScanner(input)
+	scanner.Buffer(make([]byte, 1024), maximumAgentDraftReviewActionBytes)
+	if !scanner.Scan() {
+		if err := scanner.Err(); err != nil {
+			return "", fmt.Errorf("%w: read Agent draft review action: %w", ErrUsage, err)
+		}
+
+		return "", nil
+	}
+
+	return strings.TrimSpace(scanner.Text()), nil
+}
+
+func readEditedAgentDraft(
+	ctx context.Context,
+	dependencies Dependencies,
+	value string,
+) ([]byte, error) {
+	workingDirectory, err := dependencies.WorkingDir()
+	if err != nil {
+		return nil, fmt.Errorf("coding cli: working directory: %w", err)
+	}
+	target, err := resolvePath(workingDirectory, value)
+	if err != nil {
+		return nil, fmt.Errorf("%w: edited Agent definition path: %w", ErrUsage, err)
+	}
+	// #nosec G304 -- this is an explicit user-selected review file.
+	file, err := os.Open(target)
+	if err != nil {
+		return nil, fmt.Errorf("coding cli: open edited Agent definition: %w", err)
+	}
+	defer func() { _ = file.Close() }()
+	maximum := agentprofile.DefaultLimits().MaxDefinitionBytes
+	definition, err := readBounded(ctx, file, maximum+1)
+	if err != nil {
+		return nil, fmt.Errorf("coding cli: read edited Agent definition: %w", err)
+	}
+	if int64(len(definition)) > maximum {
+		return nil, fmt.Errorf("%w: edited Agent definition is too large", ErrUsage)
+	}
+
+	return definition, nil
+}
+
+func writeAgentDraftPreview(output io.Writer, draft coding.AgentDraft) error {
+	value := struct {
+		Schema     string                   `json:"schema"`
+		Summary    coding.AgentDraftSummary `json:"summary"`
+		Origin     coding.AgentDraftOrigin  `json:"origin"`
+		Preview    coding.AgentDraftPreview `json:"preview"`
+		Definition string                   `json:"definition"`
+	}{
+		Schema: "pips.coding.agent.draft/v1alpha1", Summary: draft.Summary,
+		Origin: draft.Origin, Preview: draft.Preview, Definition: string(draft.Definition),
+	}
+
+	return writeAgentDraftJSON(output, value)
+}
+
+func writeAgentDraftDisposition(
+	output io.Writer,
+	draft coding.AgentDraft,
+	disposition string,
+) error {
+	value := struct {
+		Schema      string `json:"schema"`
+		DraftID     string `json:"draft_id"`
+		Disposition string `json:"disposition"`
+	}{
+		Schema:  "pips.coding.agent.draft.disposition/v1alpha1",
+		DraftID: draft.Summary.DraftID, Disposition: disposition,
+	}
+
+	return writeAgentDraftJSON(output, value)
+}
+
+func writeAgentDraftPromotion(output io.Writer, promotion coding.AgentDraftPromotion) error {
+	value := struct {
+		Schema    string                     `json:"schema"`
+		Promotion coding.AgentDraftPromotion `json:"promotion"`
+	}{Schema: "pips.coding.agent.draft.promotion/v1alpha1", Promotion: promotion}
+
+	return writeAgentDraftJSON(output, value)
+}
+
+func writeAgentDraftJSON(output io.Writer, value any) error {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return fmt.Errorf("coding cli: encode Agent draft result: %w", err)
+	}
+	_, err = fmt.Fprintln(output, string(data))
+
+	return err
 }
 
 type agentsRunFlags struct {

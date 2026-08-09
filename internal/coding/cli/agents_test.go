@@ -2,9 +2,11 @@
 package cli_test
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/rsbin/pips/internal/coding"
@@ -162,13 +164,145 @@ func TestAgentsRunPropagatesNonInteractiveChildInputError(t *testing.T) {
 	assert.True(t, runtime.closed)
 }
 
+func TestAgentsGenerateRequiresExplicitReviewBeforePromotion(t *testing.T) {
+	t.Parallel()
+
+	fixture := newCLIFixture(t)
+	runtime := &fakeAgentRunRuntime{
+		draft: coding.AgentDraft{
+			Summary: coding.AgentDraftSummary{
+				DraftID: "draft-review", AgentID: "release-review",
+				Scope: coding.AgentDraftScopeUser, DefinitionDigest: "digest-review",
+			},
+			Definition: []byte("PRIVATE_REVIEW_DEFINITION"),
+		},
+		promotion: coding.AgentDraftPromotion{
+			AgentID: "release-review", Scope: coding.AgentDraftScopeUser,
+			DefinitionDigest: "digest-review", Target: "/private/agents/release-review.md",
+			GenerationID: 7, ReloadRequired: true,
+		},
+	}
+	dependencies := fixture.dependencies(map[string]string{config.ModelEnv: "openai/test-model"})
+	dependencies.OpenAgentRun = func(
+		_ context.Context,
+		options coding.OpenOptions,
+	) (cli.AgentRunRuntime, error) {
+		runtime.options = options
+
+		return runtime, nil
+	}
+
+	output, err := executeAgentsWithInput(
+		t,
+		dependencies,
+		"promote\n",
+		"--dynamic-subagents",
+		"agents",
+		"generate",
+		"release-review",
+		"Review release changes",
+	)
+	require.NoError(t, err)
+	assert.Contains(t, output, `"schema":"pips.coding.agent.draft/v1alpha1"`)
+	assert.Contains(t, output, `"definition":"PRIVATE_REVIEW_DEFINITION"`)
+	assert.Contains(t, output, "Review the draft above")
+	assert.Contains(t, output, `"schema":"pips.coding.agent.draft.promotion/v1alpha1"`)
+	assert.Contains(t, output, `"reload_required":true`)
+	assert.Equal(t, "release-review", runtime.generate.AgentID)
+	assert.Equal(t, "Review release changes", runtime.generate.Intent)
+	assert.Equal(t, "draft-review", runtime.promote.DraftID)
+	assert.Equal(t, "digest-review", runtime.promote.ExpectedDigest)
+	assert.False(t, runtime.discarded)
+	assert.True(t, runtime.options.Config.DynamicSubagents)
+	assert.True(t, runtime.closed)
+}
+
+func TestAgentsGenerateDefaultsToDiscardOnEOF(t *testing.T) {
+	t.Parallel()
+
+	fixture := newCLIFixture(t)
+	runtime := &fakeAgentRunRuntime{draft: coding.AgentDraft{
+		Summary: coding.AgentDraftSummary{
+			DraftID: "draft-discard", AgentID: "discard-review",
+			Scope: coding.AgentDraftScopeUser, DefinitionDigest: "digest-discard",
+		},
+		Definition: []byte("discard definition"),
+	}}
+	dependencies := fixture.dependencies(map[string]string{config.ModelEnv: "openai/test-model"})
+	dependencies.OpenAgentRun = func(
+		context.Context,
+		coding.OpenOptions,
+	) (cli.AgentRunRuntime, error) {
+		return runtime, nil
+	}
+
+	output, err := executeAgentsWithInput(
+		t,
+		dependencies,
+		"",
+		"--dynamic-subagents",
+		"agents",
+		"generate",
+		"discard-review",
+		"Generate then discard",
+	)
+	require.NoError(t, err)
+	assert.Contains(t, output, `"disposition":"discarded"`)
+	assert.True(t, runtime.discarded)
+	assert.Empty(t, runtime.promote.DraftID)
+}
+
+func TestAgentsGenerateRevalidatesExplicitEditedDefinition(t *testing.T) {
+	t.Parallel()
+
+	fixture := newCLIFixture(t)
+	writeCLIFile(t, filepath.Join(fixture.workspaceDir, "edited.md"), "edited definition")
+
+	runtime := &fakeAgentRunRuntime{
+		draft: coding.AgentDraft{
+			Summary: coding.AgentDraftSummary{
+				DraftID: "draft-edit", AgentID: "edit-review",
+				Scope: coding.AgentDraftScopeUser, DefinitionDigest: "digest-edit",
+			},
+			Definition: []byte("original definition"),
+		},
+		promotion: coding.AgentDraftPromotion{AgentID: "edit-review"},
+	}
+	dependencies := fixture.dependencies(map[string]string{config.ModelEnv: "openai/test-model"})
+	dependencies.OpenAgentRun = func(
+		context.Context,
+		coding.OpenOptions,
+	) (cli.AgentRunRuntime, error) {
+		return runtime, nil
+	}
+
+	_, err := executeAgentsWithInput(
+		t,
+		dependencies,
+		"edit edited.md\n",
+		"--dynamic-subagents",
+		"agents",
+		"generate",
+		"edit-review",
+		"Generate then edit",
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "edited definition", string(runtime.promote.Definition))
+	assert.False(t, runtime.discarded)
+}
+
 type fakeAgentRunRuntime struct {
-	options coding.OpenOptions
-	request coding.AgentRunRequest
-	oneShot coding.OneShotAgentRunRequest
-	result  subagent.Result
-	runErr  error
-	closed  bool
+	options   coding.OpenOptions
+	request   coding.AgentRunRequest
+	oneShot   coding.OneShotAgentRunRequest
+	generate  coding.GenerateAgentDraftRequest
+	promote   coding.PromoteAgentDraftRequest
+	draft     coding.AgentDraft
+	promotion coding.AgentDraftPromotion
+	result    subagent.Result
+	runErr    error
+	discarded bool
+	closed    bool
 }
 
 func (r *fakeAgentRunRuntime) RunAgent(
@@ -193,4 +327,54 @@ func (r *fakeAgentRunRuntime) Close(context.Context) error {
 	r.closed = true
 
 	return nil
+}
+
+func (r *fakeAgentRunRuntime) GenerateAgentDraft(
+	_ context.Context,
+	request coding.GenerateAgentDraftRequest,
+) (coding.AgentDraft, error) {
+	r.generate = request
+
+	return r.draft, nil
+}
+
+func (r *fakeAgentRunRuntime) PromoteAgentDraft(
+	_ context.Context,
+	request coding.PromoteAgentDraftRequest,
+) (coding.AgentDraftPromotion, error) {
+	r.promote = request
+
+	return r.promotion, nil
+}
+
+func (r *fakeAgentRunRuntime) DiscardAgentDraft(
+	context.Context,
+	string,
+	string,
+) error {
+	r.discarded = true
+
+	return nil
+}
+
+func executeAgentsWithInput(
+	t *testing.T,
+	dependencies cli.Dependencies,
+	input string,
+	arguments ...string,
+) (string, error) {
+	t.Helper()
+
+	command, err := cli.New(dependencies)
+	require.NoError(t, err)
+
+	buffer := new(bytes.Buffer)
+
+	command.SetIn(strings.NewReader(input))
+	command.SetOut(buffer)
+	command.SetErr(buffer)
+	command.SetArgs(arguments)
+	err = command.ExecuteContext(t.Context())
+
+	return buffer.String(), err
 }

@@ -72,6 +72,9 @@ func (r *Runtime) runCloseCleanup(ctx context.Context) {
 
 func (r *Runtime) closeResources(ctx context.Context, current *interaction) error {
 	emitter := newEventEmitter(ctx, r, func(Event, error) bool { return true }, true)
+	r.mu.Lock()
+	r.agentDrafts = nil
+	r.mu.Unlock()
 
 	errs := make([]error, 0, 8)
 	if current != nil {

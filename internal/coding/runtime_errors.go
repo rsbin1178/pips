@@ -18,6 +18,9 @@ var (
 	ErrRuntimeNotPaused = errors.New("coding runtime: not paused")
 	// ErrRuntimeInvalid means Runtime construction input is incomplete or inconsistent.
 	ErrRuntimeInvalid = errors.New("coding runtime: invalid options")
+	// ErrAgentDraft means a model-generated Agent proposal or explicit local
+	// promotion violated the non-executable draft contract.
+	ErrAgentDraft = errors.New("coding runtime: invalid Agent draft")
 	// ErrInputRequired means a non-interactive client encountered a structured
 	// user question that it must not answer implicitly.
 	ErrInputRequired = errors.New("coding runtime: structured user input required")
