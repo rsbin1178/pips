@@ -33,6 +33,33 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestConfiguredSubagentOptionsUseConfigAndPreserveExplicitOverrides(t *testing.T) {
+	t.Parallel()
+
+	configured := config.DefaultSubagentConfig()
+	configured.MaxConcurrent = 6
+	configured.MaxTurns = 80
+	configured.MaxDurationMinutes = 45
+	options := configuredSubagentOptions(configured, subagent.ExecutionOptions{})
+	assert.Equal(t, 6, options.MaxConcurrent)
+	assert.Equal(t, 80, options.Limits.MaxTurns)
+	assert.Equal(t, 2, options.Limits.FinalizationTurns)
+	assert.Equal(t, 45*time.Minute, options.Limits.MaxDuration)
+
+	unbounded := subagent.DefaultLimits()
+	overridden := configuredSubagentOptions(configured, subagent.ExecutionOptions{
+		Limits: unbounded, MaxConcurrent: 1,
+	})
+	assert.Equal(t, 1, overridden.MaxConcurrent)
+	assert.Equal(t, unbounded, overridden.Limits)
+	assert.Equal(t, configured.MaxSpawnedPerRootInteraction, overridden.MaxSpawnedPerRootInteraction)
+	assert.Equal(
+		t,
+		subagent.ProductionLimits(),
+		configuredSubagentOptions(config.DefaultSubagentConfig(), subagent.ExecutionOptions{}).Limits,
+	)
+}
+
 func TestRuntimePromptStreamsAndPersistsOneInteraction(t *testing.T) {
 	t.Parallel()
 

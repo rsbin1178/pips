@@ -804,6 +804,143 @@ Ask for the missing decision, then summarize the selected answer.
 	assert.True(t, requestContainsToolText(requests[2], "React"))
 }
 
+func TestRuntimeRecoveryRejectsStaleCustomChildControls(t *testing.T) {
+	tests := []struct {
+		name     string
+		toolName string
+		args     ai.JSON
+		resolve  func(context.Context, *Runtime, string) error
+	}{
+		{
+			name:     "approval",
+			toolName: "shell",
+			args:     ai.JSON(`{"command":"printf must-not-run","permissions":{"network":true}}`),
+			resolve: func(ctx context.Context, runtime *Runtime, childID string) error {
+				_, err := runtime.ResolveSubagentApproval(ctx, childID, approval.Resolution{
+					RequestID: "stale-child-call", Choice: approval.ChoiceAllowOnce,
+				})
+
+				return err
+			},
+		},
+		{
+			name:     "question",
+			toolName: "ask_user",
+			args: ai.JSON(
+				`{"questions":[{"header":"UI","prompt":"Choose","options":[{"label":"A","description":"first"},{"label":"B","description":"second"}]}]}`,
+			),
+			resolve: func(ctx context.Context, runtime *Runtime, childID string) error {
+				_, err := runtime.ResolveSubagentQuestion(ctx, childID, question.Resolution{
+					RequestID: "stale-child-call", SchemaDigest: strings.Repeat("a", 64),
+					Answers: []question.Answer{{Selections: []string{"A"}}},
+				})
+
+				return err
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			base := t.TempDir()
+			first := openDynamicTestRuntimeAt(
+				t, base, SessionTarget{RetainEmpty: true}, newRuntimeModel(),
+			)
+			parentMeta := first.handle.Metadata()
+			require.NoError(t, first.Close(t.Context()))
+
+			repository, err := session.NewRepository(first.paths.SessionsDir())
+			require.NoError(t, err)
+			parent, err := repository.Open(t.Context(), session.OpenOptions{
+				ID: parentMeta.ID, WorkspaceID: parentMeta.WorkspaceID,
+			})
+			require.NoError(t, err)
+			child, err := repository.Create(t.Context(), session.CreateOptions{
+				WorkspaceID: parentMeta.WorkspaceID, WorkspacePath: parentMeta.WorkspacePath,
+				Kind: session.KindSubagent, ParentSessionID: parentMeta.ID,
+				ParentRunID: "parent-run", Agent: string(subagent.RoleExplore),
+			})
+			require.NoError(t, err)
+			childID := child.Metadata().ID
+			appendInterruptedChildLifecycle(t, parent.Session(), child.Session(), childID, parentMeta.ID)
+			_, err = child.Session().AppendMessage(ai.Assistant(ai.ToolCallPart{
+				ID: "stale-child-call", Name: test.toolName, Args: test.args,
+			}), nil)
+			require.NoError(t, err)
+			require.NoError(t, child.Close())
+			require.NoError(t, parent.Close())
+
+			reopenedModel := newRuntimeModel()
+			reopened := openDynamicTestRuntimeAt(
+				t, base, SessionTarget{ID: parentMeta.ID}, reopenedModel,
+			)
+			detail, err := reopened.InspectSubagent(t.Context(), childID)
+			require.NoError(t, err)
+			assert.Equal(t, subagent.StateInterrupted, detail.Summary.State)
+			_, err = reopened.SubagentControlState(childID)
+			require.ErrorIs(t, err, ErrRuntimeNotPaused)
+			require.ErrorIs(t, test.resolve(t.Context(), reopened, childID), ErrRuntimeNotPaused)
+
+			persisted, err := repository.Open(t.Context(), session.OpenOptions{
+				ID: childID, WorkspaceID: parentMeta.WorkspaceID,
+			})
+			require.NoError(t, err)
+			pending, err := persisted.Session().Pending()
+			require.NoError(t, err)
+			require.Len(t, pending, 1)
+			assert.Equal(t, "stale-child-call", pending[0].ID)
+			assert.Equal(t, test.toolName, pending[0].Name)
+			require.NoError(t, persisted.Close())
+			assert.Empty(t, reopenedModel.Requests())
+		})
+	}
+}
+
+func appendInterruptedChildLifecycle(
+	t *testing.T,
+	parent *harness.Session,
+	child *harness.Session,
+	childID string,
+	parentID string,
+) {
+	t.Helper()
+
+	limits := subagent.ProductionLimits()
+	record := map[string]any{
+		"schema":            "pips.coding.subagent.record/v1alpha1",
+		"state":             string(subagent.StateCreated),
+		"role":              string(subagent.RoleExplore),
+		"child_session_id":  childID,
+		"parent_session_id": parentID,
+		"parent_run_id":     "parent-run",
+		"model":             "openai/runtime-test",
+		"limits": map[string]any{
+			"max_turns": limits.MaxTurns, "finalization_turns": limits.FinalizationTurns,
+			"repeated_tool_call_limit": limits.RepeatedToolCallLimit,
+			"max_tokens":               limits.MaxTokens, "max_tool_calls": limits.MaxToolCalls,
+			"max_duration_nanos": int64(limits.MaxDuration),
+			"max_activity_tools": limits.MaxActivityTools,
+			"max_output_tokens":  limits.MaxOutputTokens, "max_task_bytes": limits.MaxTaskBytes,
+			"max_result_bytes": limits.MaxResultBytes, "max_result_items": limits.MaxResultItems,
+			"max_field_bytes": limits.MaxFieldBytes,
+		},
+		"usage": map[string]any{},
+		"time":  time.Now().UTC(),
+	}
+	appendRecord := func(target *harness.Session, customType string) {
+		data, err := json.Marshal(record)
+		require.NoError(t, err)
+		_, err = target.AppendCustom(customType, ai.JSON(data))
+		require.NoError(t, err)
+	}
+	appendRecord(child, "pips.coding.subagent.created")
+	appendRecord(parent, "pips.coding.subagent.created")
+	record["state"] = string(subagent.StateRunning)
+	record["child_run_id"] = "child-run"
+	record["time"] = time.Now().UTC().Add(time.Millisecond)
+	appendRecord(child, "pips.coding.subagent.started")
+	appendRecord(parent, "pips.coding.subagent.started")
+}
+
 func openDynamicTestRuntimeAt(
 	t *testing.T,
 	base string,

@@ -314,6 +314,38 @@ func TestLimitsRejectUnsafeOverrides(t *testing.T) {
 	limits = DefaultLimits()
 	limits.MaxDuration = 24 * time.Hour
 	require.NoError(t, validateLimits(limits))
+	limits.MaxDuration++
+	require.ErrorIs(t, validateLimits(limits), ErrInvalid)
+	limits = DefaultLimits()
+	limits.MaxTurns = maximumTurns + 1
+	require.ErrorIs(t, validateLimits(limits), ErrInvalid)
+	limits = DefaultLimits()
+	limits.MaxTokens = maximumTokens + 1
+	require.ErrorIs(t, validateLimits(limits), ErrInvalid)
+	limits = DefaultLimits()
+	limits.MaxToolCalls = maximumToolCalls + 1
+	require.ErrorIs(t, validateLimits(limits), ErrInvalid)
+}
+
+func TestProductionLimitsBoundExecutionWithoutChangingEmbedderDefaults(t *testing.T) {
+	t.Parallel()
+
+	embedder := DefaultLimits()
+	assert.Zero(t, embedder.MaxTurns)
+	assert.Zero(t, embedder.MaxTokens)
+	assert.Zero(t, embedder.MaxToolCalls)
+	assert.Zero(t, embedder.MaxDuration)
+	require.NoError(t, validateLimits(embedder))
+
+	production := ProductionLimits()
+	assert.Positive(t, production.MaxTurns)
+	assert.Positive(t, production.FinalizationTurns)
+	assert.Positive(t, production.MaxTokens)
+	assert.Positive(t, production.MaxToolCalls)
+	assert.Positive(t, production.MaxDuration)
+	assert.Equal(t, embedder.MaxOutputTokens, production.MaxOutputTokens)
+	assert.Equal(t, embedder.MaxResultBytes, production.MaxResultBytes)
+	require.NoError(t, validateLimits(production))
 }
 
 func TestNormalizeLimitsPreservesOlderPolicyRecords(t *testing.T) {

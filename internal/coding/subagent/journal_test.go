@@ -1,13 +1,16 @@
+//nolint:wsl_v5 // Recovery fixtures keep durable lifecycle steps beside their assertions.
 package subagent
 
 import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/rsbin/pips/agent/harness"
+	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -82,6 +85,117 @@ func TestReconcileMarksOrphanRunningInterruptedAndRepairsParent(t *testing.T) {
 	}
 
 	assert.Equal(t, 1, terminalCount)
+}
+
+func TestReconcileInterruptsPendingChildInputWithoutReplayingOrResolvingIt(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		toolName string
+		args     ai.JSON
+	}{
+		{
+			name:     "approval",
+			toolName: "shell",
+			args:     ai.JSON(`{"command":"printf must-not-run","permissions":{"network":true}}`),
+		},
+		{
+			name:     "question",
+			toolName: "ask_user",
+			args:     ai.JSON(`{"questions":[{"header":"UI","prompt":"Choose","options":[{"label":"A","description":"first"},{"label":"B","description":"second"}]}]}`),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			repository, parent, workspaceID := newJournalFixture(t)
+			child, err := repository.Create(t.Context(), session.CreateOptions{
+				WorkspaceID: workspaceID, WorkspacePath: parent.Metadata().WorkspacePath,
+				Kind: session.KindSubagent, ParentSessionID: parent.Metadata().ID,
+				ParentRunID: "parent-run", Agent: string(RoleExplore),
+			})
+			require.NoError(t, err)
+			created := record{
+				Schema: recordSchema, State: StateCreated, Role: RoleExplore,
+				ChildSessionID: child.Metadata().ID, ParentSessionID: parent.Metadata().ID,
+				ParentRunID: "parent-run", Model: "openai/test", TaskPreview: "pending input",
+				Limits: journalLimits(ProductionLimits()), Time: time.Now().UTC(),
+			}
+			require.NoError(t, appendMirrored(child.Session(), parent.Session(), created))
+			started := created
+			started.State = StateRunning
+			started.ChildRunID = "child-run"
+			started.Time = started.Time.Add(time.Millisecond)
+			require.NoError(t, appendMirrored(child.Session(), parent.Session(), started))
+			const staleCallID = "stale-child-call"
+			_, err = child.Session().AppendMessage(ai.Assistant(ai.ToolCallPart{
+				ID: staleCallID, Name: test.toolName, Args: test.args,
+			}), nil)
+			require.NoError(t, err)
+			require.NoError(t, child.Close())
+
+			require.NoError(t, Reconcile(t.Context(), repository, parent))
+			require.NoError(t, Reconcile(t.Context(), repository, parent))
+			reopened, err := repository.Open(t.Context(), session.OpenOptions{
+				ID: created.ChildSessionID, WorkspaceID: workspaceID,
+			})
+			require.NoError(t, err)
+			pending, err := reopened.Session().Pending()
+			require.NoError(t, err)
+			require.Len(t, pending, 1)
+			assert.Equal(t, staleCallID, pending[0].ID)
+			assert.Equal(t, test.toolName, pending[0].Name)
+			childRecords, err := records(reopened.Session().Entries())
+			require.NoError(t, err)
+			require.NoError(t, reopened.Close())
+			terminalCount := 0
+			for _, value := range childRecords {
+				if value.State == StateInterrupted {
+					terminalCount++
+					assert.Equal(t, "process_interrupted", value.Code)
+				}
+			}
+			assert.Equal(t, 1, terminalCount)
+
+			parentRecords, err := recordsByChild(parent.Session().Entries())
+			require.NoError(t, err)
+			assert.Equal(t, childRecords, parentRecords[created.ChildSessionID])
+		})
+	}
+}
+
+func TestReconcileRejectsHeaderPlanLineageMismatchWithoutTerminalizing(t *testing.T) {
+	t.Parallel()
+
+	repository, parent, workspaceID := newJournalFixture(t)
+	child, err := repository.Create(t.Context(), session.CreateOptions{
+		WorkspaceID: workspaceID, WorkspacePath: parent.Metadata().WorkspacePath,
+		Kind: session.KindSubagent, ParentSessionID: parent.Metadata().ID,
+		Agent: string(RoleExplore),
+		SubagentIdentity: &session.SubagentIdentity{
+			Schema: "pips.coding.subagent.identity/v1alpha1", AgentID: string(RoleExplore),
+			Kind: "builtin", Name: "Explore", DefinitionSchema: "pips.agent/v1alpha1",
+			DefinitionDigest: strings.Repeat("a", 64), DefinitionSource: "builtin",
+			GenerationID: 1, PlanDigest: strings.Repeat("b", 64),
+		},
+	})
+	require.NoError(t, err)
+	created := record{
+		Schema: recordSchema, State: StateCreated, Role: RoleExplore,
+		ChildSessionID: child.Metadata().ID, ParentSessionID: parent.Metadata().ID,
+		Model: "openai/test", Limits: journalLimits(ProductionLimits()), Time: time.Now().UTC(),
+	}
+	require.NoError(t, appendMirrored(child.Session(), parent.Session(), created))
+	require.NoError(t, child.Close())
+
+	err = Reconcile(t.Context(), repository, parent)
+	require.ErrorIs(t, err, ErrInvalid)
+	parentRecords, recordErr := recordsByChild(parent.Session().Entries())
+	require.NoError(t, recordErr)
+	require.Len(t, parentRecords[created.ChildSessionID], 1)
+	assert.Equal(t, StateCreated, parentRecords[created.ChildSessionID][0].State)
 }
 
 func legacyBoundedRecordLimits() recordLimits {

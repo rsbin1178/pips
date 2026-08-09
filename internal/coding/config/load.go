@@ -78,6 +78,8 @@ type fileLayer struct {
 	providers             map[ai.Provider]ProviderConfig
 	models                []ModelConfig
 	compaction            *CompactionConfig
+	subagent              *SubagentConfig
+	subagentFields        []Field
 	sandboxWorkspaceWrite *SandboxWorkspaceWriteConfig
 	statusLine            *[]statusline.Item
 }
@@ -106,6 +108,14 @@ func Load(options LoadOptions) (Result, error) {
 		result.Config.Models = layer.models
 		if layer.compaction != nil {
 			result.Config.Compaction = *layer.compaction
+		}
+		if layer.subagent != nil {
+			result.Config.Subagent = *layer.subagent
+			for _, field := range layer.subagentFields {
+				result.Config.sources[field] = Source{
+					Kind: SourceConfigFile, Detail: options.ConfigFile,
+				}
+			}
 		}
 		if layer.sandboxWorkspaceWrite != nil {
 			result.Config.SandboxWorkspaceWrite = *layer.sandboxWorkspaceWrite
@@ -146,6 +156,7 @@ type fileConfig struct {
 	SandboxWorkspaceWrite *fileSandboxWorkspaceWrite `toml:"sandbox_workspace_write"`
 	Approval              *string                    `toml:"approval"`
 	Compaction            *fileCompaction            `toml:"compaction"`
+	Subagent              *fileSubagent              `toml:"subagent"`
 }
 
 type fileTUI struct {
@@ -162,6 +173,16 @@ type fileCompaction struct {
 	ReserveTokens    *int  `toml:"reserve_tokens"`
 	KeepRecentTokens *int  `toml:"keep_recent_tokens"`
 	SummaryMaxTokens *int  `toml:"summary_max_tokens"`
+}
+
+type fileSubagent struct {
+	MaxConcurrent                *int `toml:"max_concurrent"`
+	MaxSpawnedPerRootInteraction *int `toml:"max_spawned_per_root_interaction"`
+	MaxAutoFollowUps             *int `toml:"max_auto_follow_ups"`
+	MaxTurns                     *int `toml:"max_turns"`
+	MaxTokens                    *int `toml:"max_tokens"`
+	MaxToolCalls                 *int `toml:"max_tool_calls"`
+	MaxDurationMinutes           *int `toml:"max_duration_minutes"`
 }
 
 type fileProvider struct {
@@ -491,6 +512,36 @@ func decodeLayer(value fileConfig) (fileLayer, error) {
 			return fileLayer{}, err
 		}
 		layer.compaction = &compaction
+	}
+	if value.Subagent != nil {
+		subagent := DefaultSubagentConfig()
+
+		setSubagent := func(field Field, source, target *int) {
+			if source == nil {
+				return
+			}
+			*target = *source
+			layer.subagentFields = append(layer.subagentFields, field)
+		}
+		setSubagent(FieldSubagentMaxConcurrent, value.Subagent.MaxConcurrent, &subagent.MaxConcurrent)
+		setSubagent(
+			FieldSubagentMaxSpawned,
+			value.Subagent.MaxSpawnedPerRootInteraction,
+			&subagent.MaxSpawnedPerRootInteraction,
+		)
+		setSubagent(FieldSubagentMaxFollowUps, value.Subagent.MaxAutoFollowUps, &subagent.MaxAutoFollowUps)
+		setSubagent(FieldSubagentMaxTurns, value.Subagent.MaxTurns, &subagent.MaxTurns)
+		setSubagent(FieldSubagentMaxTokens, value.Subagent.MaxTokens, &subagent.MaxTokens)
+		setSubagent(FieldSubagentMaxToolCalls, value.Subagent.MaxToolCalls, &subagent.MaxToolCalls)
+		setSubagent(
+			FieldSubagentMaxDuration,
+			value.Subagent.MaxDurationMinutes,
+			&subagent.MaxDurationMinutes,
+		)
+		if err := validateSubagent(subagent); err != nil {
+			return fileLayer{}, err
+		}
+		layer.subagent = &subagent
 	}
 	if value.SandboxWorkspaceWrite != nil {
 		settings := SandboxWorkspaceWriteConfig{Network: SandboxNetworkOnRequest}
