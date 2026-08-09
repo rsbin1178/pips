@@ -72,10 +72,31 @@ func newConfigShowCommand(dependencies Dependencies, flags *rootFlags) *cobra.Co
 				config.FieldReasoning:        optionalReasoning(state.config.Config.Reasoning),
 				config.FieldToolSearch:       strconv.FormatBool(state.config.Config.ToolSearch),
 				config.FieldDynamicSubagents: strconv.FormatBool(state.config.Config.DynamicSubagents),
-				config.FieldMode:             strconv.Quote(string(state.config.Config.Mode)),
-				config.FieldTheme:            strconv.Quote(state.config.Config.TUI.Theme),
-				config.FieldStatusLine:       string(statusLine),
-				config.FieldSandbox:          strconv.Quote(string(state.config.Config.Sandbox)),
+				config.FieldSubagentMaxConcurrent: strconv.Itoa(
+					state.config.Config.Subagent.MaxConcurrent,
+				),
+				config.FieldSubagentMaxSpawned: strconv.Itoa(
+					state.config.Config.Subagent.MaxSpawnedPerRootInteraction,
+				),
+				config.FieldSubagentMaxFollowUps: strconv.Itoa(
+					state.config.Config.Subagent.MaxAutoFollowUps,
+				),
+				config.FieldSubagentMaxTurns: strconv.Itoa(
+					state.config.Config.Subagent.MaxTurns,
+				),
+				config.FieldSubagentMaxTokens: strconv.Itoa(
+					state.config.Config.Subagent.MaxTokens,
+				),
+				config.FieldSubagentMaxToolCalls: strconv.Itoa(
+					state.config.Config.Subagent.MaxToolCalls,
+				),
+				config.FieldSubagentMaxDuration: strconv.Itoa(
+					state.config.Config.Subagent.MaxDurationMinutes,
+				),
+				config.FieldMode:       strconv.Quote(string(state.config.Config.Mode)),
+				config.FieldTheme:      strconv.Quote(state.config.Config.TUI.Theme),
+				config.FieldStatusLine: string(statusLine),
+				config.FieldSandbox:    strconv.Quote(string(state.config.Config.Sandbox)),
 				config.FieldSandboxNetwork: strconv.Quote(
 					string(state.config.Config.SandboxWorkspaceWrite.Network),
 				),

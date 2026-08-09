@@ -25,17 +25,24 @@ type Field string
 
 // Configuration fields.
 const (
-	FieldModel            Field = "model"
-	FieldVariant          Field = "variant"
-	FieldReasoning        Field = "reasoning"
-	FieldToolSearch       Field = "tool_search"
-	FieldDynamicSubagents Field = "dynamic_subagents"
-	FieldMode             Field = "mode"
-	FieldTheme            Field = "tui.theme"
-	FieldStatusLine       Field = "tui.status_line"
-	FieldSandbox          Field = "sandbox"
-	FieldSandboxNetwork   Field = "sandbox_workspace_write.network"
-	FieldApproval         Field = "approval"
+	FieldModel                 Field = "model"
+	FieldVariant               Field = "variant"
+	FieldReasoning             Field = "reasoning"
+	FieldToolSearch            Field = "tool_search"
+	FieldDynamicSubagents      Field = "dynamic_subagents"
+	FieldSubagentMaxConcurrent Field = "subagent.max_concurrent"
+	FieldSubagentMaxSpawned    Field = "subagent.max_spawned_per_root_interaction"
+	FieldSubagentMaxFollowUps  Field = "subagent.max_auto_follow_ups"
+	FieldSubagentMaxTurns      Field = "subagent.max_turns"
+	FieldSubagentMaxTokens     Field = "subagent.max_tokens" //nolint:gosec // Tokens are an execution budget, not credentials.
+	FieldSubagentMaxToolCalls  Field = "subagent.max_tool_calls"
+	FieldSubagentMaxDuration   Field = "subagent.max_duration_minutes"
+	FieldMode                  Field = "mode"
+	FieldTheme                 Field = "tui.theme"
+	FieldStatusLine            Field = "tui.status_line"
+	FieldSandbox               Field = "sandbox"
+	FieldSandboxNetwork        Field = "sandbox_workspace_write.network"
+	FieldApproval              Field = "approval"
 )
 
 var fields = []Field{
@@ -44,6 +51,13 @@ var fields = []Field{
 	FieldReasoning,
 	FieldToolSearch,
 	FieldDynamicSubagents,
+	FieldSubagentMaxConcurrent,
+	FieldSubagentMaxSpawned,
+	FieldSubagentMaxFollowUps,
+	FieldSubagentMaxTurns,
+	FieldSubagentMaxTokens,
+	FieldSubagentMaxToolCalls,
+	FieldSubagentMaxDuration,
 	FieldMode,
 	FieldTheme,
 	FieldStatusLine,
@@ -372,6 +386,32 @@ func DefaultCompactionConfig() CompactionConfig {
 	}
 }
 
+// SubagentConfig contains the user-configurable production admission and
+// execution budgets. Zero is invalid in TOML; the complete programmatic zero
+// value remains a legacy embedding boundary and is normalized by Runtime.
+type SubagentConfig struct {
+	MaxConcurrent                int
+	MaxSpawnedPerRootInteraction int
+	MaxAutoFollowUps             int
+	MaxTurns                     int
+	MaxTokens                    int
+	MaxToolCalls                 int
+	MaxDurationMinutes           int
+}
+
+// DefaultSubagentConfig returns the bounded production policy.
+func DefaultSubagentConfig() SubagentConfig {
+	return SubagentConfig{
+		MaxConcurrent:                4,
+		MaxSpawnedPerRootInteraction: 8,
+		MaxAutoFollowUps:             4,
+		MaxTurns:                     64,
+		MaxTokens:                    256_000,
+		MaxToolCalls:                 128,
+		MaxDurationMinutes:           30,
+	}
+}
+
 // Clone returns a fully detached model definition.
 func (m ModelConfig) Clone() ModelConfig {
 	cloned := m
@@ -407,6 +447,7 @@ type Config struct {
 	// It is intentionally disabled by default; profile discovery remains
 	// available for validation and inspection when this gate is off.
 	DynamicSubagents      bool
+	Subagent              SubagentConfig
 	Mode                  OperatingMode
 	TUI                   TUIConfig
 	Sandbox               SandboxMode
@@ -454,6 +495,7 @@ func Defaults() Config {
 		},
 		Approval:   ApprovalOnRequest,
 		Compaction: DefaultCompactionConfig(),
+		Subagent:   DefaultSubagentConfig(),
 		sources:    sources,
 	}
 }
@@ -578,8 +620,48 @@ func (c Config) ValidateRuntime() error {
 	if err := validateCompaction(c.Compaction); err != nil {
 		return err
 	}
+	if err := validateSubagent(c.Subagent); err != nil {
+		return err
+	}
 
 	return validateRegistry(c)
+}
+
+func validateSubagent(value SubagentConfig) error {
+	// Preserve the legacy programmatic Config literal boundary. File loading
+	// always starts from DefaultSubagentConfig, so a user cannot select this
+	// compatibility form through TOML.
+	if value == (SubagentConfig{}) {
+		return nil
+	}
+
+	values := []struct {
+		name    string
+		value   int
+		minimum int
+		maximum int
+	}{
+		{"max_concurrent", value.MaxConcurrent, 1, 32},
+		{"max_spawned_per_root_interaction", value.MaxSpawnedPerRootInteraction, 1, 128},
+		{"max_auto_follow_ups", value.MaxAutoFollowUps, 1, 32},
+		{"max_turns", value.MaxTurns, 2, 1024},
+		{"max_tokens", value.MaxTokens, 16_384, 16_000_000},
+		{"max_tool_calls", value.MaxToolCalls, 1, 4096},
+		{"max_duration_minutes", value.MaxDurationMinutes, 1, 24 * 60},
+	}
+	for _, item := range values {
+		if item.value < item.minimum || item.value > item.maximum {
+			return fmt.Errorf(
+				"%w: subagent.%s must be within %d..%d",
+				ErrInvalid,
+				item.name,
+				item.minimum,
+				item.maximum,
+			)
+		}
+	}
+
+	return nil
 }
 
 func validateCompaction(value CompactionConfig) error {

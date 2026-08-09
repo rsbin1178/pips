@@ -5,6 +5,13 @@ import (
 	"time"
 )
 
+const (
+	maximumTurns     = 1024
+	maximumTokens    = 16_000_000
+	maximumToolCalls = 4096
+	maximumDuration  = 24 * time.Hour
+)
+
 // Limits bounds one child execution and its persisted projections.
 type Limits struct {
 	MaxTurns              int
@@ -21,9 +28,9 @@ type Limits struct {
 	MaxFieldBytes         int
 }
 
-// DefaultLimits returns the production child execution policy. Total turns,
-// cumulative tokens, tool calls, and wall time are unlimited by default;
-// payloads and live projections remain bounded independently.
+// DefaultLimits returns the legacy embedder policy. Total turns, cumulative
+// tokens, tool calls, and wall time are unlimited; payloads and live
+// projections remain bounded independently.
 func DefaultLimits() Limits {
 	return Limits{
 		RepeatedToolCallLimit: 3,
@@ -34,6 +41,20 @@ func DefaultLimits() Limits {
 		MaxResultItems:        128,
 		MaxFieldBytes:         8 << 10,
 	}
+}
+
+// ProductionLimits returns the bounded policy selected by a zero-value Coding
+// Runtime configuration. Embedders that explicitly need unlimited execution
+// can continue to pass DefaultLimits, whose payload fields make it non-zero.
+func ProductionLimits() Limits {
+	limits := DefaultLimits()
+	limits.MaxTurns = 64
+	limits.FinalizationTurns = 2
+	limits.MaxTokens = 256_000
+	limits.MaxToolCalls = 128
+	limits.MaxDuration = 30 * time.Minute
+
+	return limits
 }
 
 func normalizeLimits(limits Limits) Limits {
@@ -74,20 +95,30 @@ func validateExecutionLimits(limits Limits) error {
 	values := []struct {
 		name  string
 		value int
+		max   int
 	}{
-		{"turns", limits.MaxTurns},
-		{"finalization turns", limits.FinalizationTurns},
-		{"tokens", limits.MaxTokens},
-		{"tool calls", limits.MaxToolCalls},
+		{"turns", limits.MaxTurns, maximumTurns},
+		{"finalization turns", limits.FinalizationTurns, maximumTurns - 1},
+		{"tokens", limits.MaxTokens, maximumTokens},
+		{"tool calls", limits.MaxToolCalls, maximumToolCalls},
 	}
 	for _, value := range values {
-		if value.value < 0 {
-			return fmt.Errorf("%w: %s limit must be non-negative", ErrInvalid, value.name)
+		if value.value < 0 || value.value > value.max {
+			return fmt.Errorf(
+				"%w: %s limit must be within 0..%d",
+				ErrInvalid,
+				value.name,
+				value.max,
+			)
 		}
 	}
 
-	if limits.MaxDuration < 0 {
-		return fmt.Errorf("%w: duration limit must be non-negative", ErrInvalid)
+	if limits.MaxDuration < 0 || limits.MaxDuration > maximumDuration {
+		return fmt.Errorf(
+			"%w: duration limit must be within 0..%s",
+			ErrInvalid,
+			maximumDuration,
+		)
 	}
 
 	return nil

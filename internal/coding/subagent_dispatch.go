@@ -431,7 +431,7 @@ func compileProfileInstructions(
 func runtimeSubagentLimits(options subagent.ExecutionOptions) subagent.Limits {
 	limits := options.Limits
 	if limits == (subagent.Limits{}) {
-		limits = subagent.DefaultLimits()
+		limits = subagent.ProductionLimits()
 	}
 
 	return subagent.NormalizeLimits(limits)

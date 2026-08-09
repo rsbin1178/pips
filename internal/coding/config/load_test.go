@@ -72,6 +72,77 @@ func TestLoadDynamicSubagentsGatePrecedenceAndProvenance(t *testing.T) {
 	assert.Equal(t, "--dynamic-subagents", source.Detail)
 }
 
+func TestLoadSubagentBudgetsAndFieldProvenance(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, `[subagent]
+max_concurrent = 6
+max_spawned_per_root_interaction = 12
+max_auto_follow_ups = 5
+max_turns = 80
+max_tokens = 500000
+max_tool_calls = 200
+max_duration_minutes = 45
+`)
+	result, err := config.Load(config.LoadOptions{ConfigFile: path})
+	require.NoError(t, err)
+	assert.Equal(t, config.SubagentConfig{
+		MaxConcurrent: 6, MaxSpawnedPerRootInteraction: 12, MaxAutoFollowUps: 5,
+		MaxTurns: 80, MaxTokens: 500_000, MaxToolCalls: 200, MaxDurationMinutes: 45,
+	}, result.Config.Subagent)
+	for _, field := range []config.Field{
+		config.FieldSubagentMaxConcurrent,
+		config.FieldSubagentMaxSpawned,
+		config.FieldSubagentMaxFollowUps,
+		config.FieldSubagentMaxTurns,
+		config.FieldSubagentMaxTokens,
+		config.FieldSubagentMaxToolCalls,
+		config.FieldSubagentMaxDuration,
+	} {
+		source, ok := result.Config.Source(field)
+		require.True(t, ok)
+		assert.Equal(t, config.SourceConfigFile, source.Kind)
+		assert.Equal(t, path, source.Detail)
+	}
+}
+
+func TestLoadSubagentPartialTableRetainsDefaultFieldSources(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, "[subagent]\nmax_concurrent = 2\n")
+	result, err := config.Load(config.LoadOptions{ConfigFile: path})
+	require.NoError(t, err)
+	assert.Equal(t, 2, result.Config.Subagent.MaxConcurrent)
+	assert.Equal(t, config.DefaultSubagentConfig().MaxTurns, result.Config.Subagent.MaxTurns)
+	source, ok := result.Config.Source(config.FieldSubagentMaxConcurrent)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceConfigFile, source.Kind)
+	source, ok = result.Config.Source(config.FieldSubagentMaxTurns)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceDefault, source.Kind)
+}
+
+func TestLoadSubagentBudgetsRejectInvalidAndUnknownValues(t *testing.T) {
+	t.Parallel()
+
+	for _, content := range []string{
+		"[subagent]\nmax_turns = 1\n",
+		"[subagent]\nmax_tokens = 999999999\n",
+		"[subagent]\nmax_duration_minutes = 0\n",
+		"[subagent]\nunknown = 1\n",
+	} {
+		t.Run(content, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "config.toml")
+			writeFile(t, path, content)
+			_, err := config.Load(config.LoadOptions{ConfigFile: path})
+			require.Error(t, err)
+		})
+	}
+}
+
 func TestLoadStatusLineSelectionFileOverrideAndProvenance(t *testing.T) {
 	t.Parallel()
 

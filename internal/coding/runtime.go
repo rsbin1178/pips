@@ -251,6 +251,10 @@ func openRuntime(
 	}
 
 	configured := withExecutionDefaults(options.Execution)
+	configured.Subagent = configuredSubagentOptions(
+		options.Config.Subagent,
+		options.Execution.Subagent,
+	)
 	if configured.ToolTimeout < 0 || configured.ToolTimeout > maximumToolTimeout ||
 		configured.MCPTerminate < 0 || configured.MCPMaxTools < 0 {
 		return nil, fmt.Errorf("%w: invalid execution duration or count", ErrRuntimeInvalid)
@@ -833,6 +837,41 @@ func withExecutionDefaults(options ExecutionOptions) ExecutionOptions {
 	}
 
 	return options
+}
+
+func configuredSubagentOptions(
+	configured config.SubagentConfig,
+	override subagent.ExecutionOptions,
+) subagent.ExecutionOptions {
+	if configured == (config.SubagentConfig{}) {
+		configured = config.DefaultSubagentConfig()
+	}
+	limits := subagent.DefaultLimits()
+	limits.MaxTurns = configured.MaxTurns
+	limits.FinalizationTurns = min(2, configured.MaxTurns-1)
+	limits.MaxTokens = configured.MaxTokens
+	limits.MaxToolCalls = configured.MaxToolCalls
+	limits.MaxDuration = time.Duration(configured.MaxDurationMinutes) * time.Minute
+	result := subagent.ExecutionOptions{
+		Limits:                       limits,
+		MaxConcurrent:                configured.MaxConcurrent,
+		MaxSpawnedPerRootInteraction: configured.MaxSpawnedPerRootInteraction,
+		MaxAutoFollowUps:             configured.MaxAutoFollowUps,
+	}
+	if override.Limits != (subagent.Limits{}) {
+		result.Limits = override.Limits
+	}
+	if override.MaxConcurrent != 0 {
+		result.MaxConcurrent = override.MaxConcurrent
+	}
+	if override.MaxSpawnedPerRootInteraction != 0 {
+		result.MaxSpawnedPerRootInteraction = override.MaxSpawnedPerRootInteraction
+	}
+	if override.MaxAutoFollowUps != 0 {
+		result.MaxAutoFollowUps = override.MaxAutoFollowUps
+	}
+
+	return result
 }
 
 func newRuntimeScratchRoot(productRoot string) (*execution.PrivateTempRoot, error) {
