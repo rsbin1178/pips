@@ -10,7 +10,7 @@ Plan Mode 是能力边界，不是 secret 隔离。它允许读取可读文件�
 - 前置条件：有效 Provider；Workspace 有可读文件和已提交基线。
 - 隔离夹具：准备一个模型可能尝试修改的文件。
 - 步骤：以 `--mode plan` 启动；用 `/status` 确认；要求读取并制定修改方案，再明确要求直接 patch/shell；用 `/mode` 在 idle 时切回 Agent，先取消再确认。
-- 预期证据：Plan Mode 仅暴露只读 workspace/external 能力、受控 Plan/问题/审阅工具；`apply_patch`、Shell、privileged MCP/Extension 和 same-name forged tools 在 hooks/approval/执行前被拒绝；确认切 Agent 只是 process-local mode change，不自动再跑模型或授权写入。
+- 预期证据：Plan Mode 仅暴露只读 workspace/external 能力、path-free `read_plan` 及受控问题/审阅工具；当前流程拒绝 legacy `write_plan`/`submit_plan`，只接受 `plan_checkpoint` 后的 `present_plan`；`apply_patch`、Shell、privileged MCP/Extension 和 same-name forged tools 在 hooks/approval/执行前被拒绝；确认切 Agent 只是 process-local mode change，不自动再跑模型或授权写入。
 - 通过条件：模式边界严格、取消不切换、确认后下一轮才按 Agent 能力运行。
 - 失败条件：Plan 中发生 Workspace 写入/外部副作用、模型调用触发模式切换、或切换被持久化为更高权限默认。
 - 清理/回滚：确认 `git status --short` 与基线一致；退出进程。
