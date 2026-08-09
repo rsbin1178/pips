@@ -34,7 +34,6 @@ func TestVerifyThemeRevisionRejectsChangedContentAndReplacement(t *testing.T) {
 	require.NoError(t, os.WriteFile(path, []byte("[tui]\ntheme = \"nord\"\n"), 0o600))
 	require.ErrorIs(t, verifyThemeRevision(path, directory, revision), ErrConflict)
 
-	require.NoError(t, os.Remove(path))
 	replacement := filepath.Join(directory, "replacement.toml")
 	require.NoError(t, os.WriteFile(replacement, original, 0o600))
 	require.NoError(t, os.Rename(replacement, path))
