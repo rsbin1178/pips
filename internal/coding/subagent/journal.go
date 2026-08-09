@@ -519,40 +519,57 @@ func preview(value string) string {
 	return output.String()
 }
 
-// Reconcile repairs the current parent's bounded index from authoritative
-// child Sessions and converts incomplete executions to interrupted.
+// Reconcile repairs the current parent's bounded descendant tree from
+// authoritative child Sessions, deepest first, and converts incomplete
+// executions to interrupted.
 func Reconcile(ctx context.Context, repository *session.Repository, parent *session.Handle) error {
 	if repository == nil || parent == nil || parent.Session() == nil {
 		return fmt.Errorf("%w: incomplete reconciliation owner", ErrInvalid)
 	}
 
+	return reconcileDescendants(ctx, repository, parent, 0, nil, make(map[string]struct{}))
+}
+
+func reconcileDescendants(
+	ctx context.Context,
+	repository *session.Repository,
+	parent *session.Handle,
+	childDepth int,
+	parentRecord *record,
+	visited map[string]struct{},
+) error {
 	parentMeta := parent.Metadata()
+	if _, duplicate := visited[parentMeta.ID]; duplicate {
+		return fmt.Errorf("%w: reconciliation lineage contains a cycle", ErrInvalid)
+	}
+	visited[parentMeta.ID] = struct{}{}
+	defer delete(visited, parentMeta.ID)
 
 	children, err := repository.ListSubagents(ctx, parentMeta.WorkspaceID, parentMeta.ID)
 	if err != nil {
 		return err
 	}
-
 	parentRecords, err := recordsByChild(parent.Session().Entries())
 	if err != nil {
 		return err
+	}
+	if parentMeta.Kind == session.KindSubagent {
+		delete(parentRecords, parentMeta.ID)
 	}
 
 	seen := make(map[string]struct{}, len(children))
 	for _, childMeta := range children {
 		seen[childMeta.ID] = struct{}{}
-
-		child, openErr := repository.Open(ctx, session.OpenOptions{
-			ID: childMeta.ID, WorkspaceID: parentMeta.WorkspaceID,
-		})
-		if openErr != nil {
-			return fmt.Errorf("coding subagent: open child for reconciliation: %w", openErr)
-		}
-
-		childErr := reconcileChild(parent.Session(), child, parentRecords[childMeta.ID])
-
-		closeErr := child.Close()
-		if err := errors.Join(childErr, closeErr); err != nil {
+		if err := reconcileDescendant(
+			ctx,
+			repository,
+			parent,
+			childMeta,
+			childDepth,
+			parentRecord,
+			parentRecords[childMeta.ID],
+			visited,
+		); err != nil {
 			return err
 		}
 	}
@@ -564,6 +581,49 @@ func Reconcile(ctx context.Context, repository *session.Repository, parent *sess
 	}
 
 	return nil
+}
+
+func reconcileDescendant(
+	ctx context.Context,
+	repository *session.Repository,
+	parent *session.Handle,
+	childMeta session.Metadata,
+	childDepth int,
+	parentRecord *record,
+	parentRecords []record,
+	visited map[string]struct{},
+) (returnErr error) {
+	if _, cycle := visited[childMeta.ID]; cycle {
+		return fmt.Errorf("%w: reconciliation lineage contains a cycle", ErrInvalid)
+	}
+	parentMeta := parent.Metadata()
+	child, err := repository.Open(ctx, session.OpenOptions{
+		ID: childMeta.ID, WorkspaceID: parentMeta.WorkspaceID,
+	})
+	if err != nil {
+		return fmt.Errorf("coding subagent: open child for reconciliation: %w", err)
+	}
+	defer func() { returnErr = errors.Join(returnErr, child.Close()) }()
+
+	childSelf, err := authoritativeChildRecords(child)
+	if err != nil {
+		return err
+	}
+	latest := childSelf[len(childSelf)-1]
+	if err := validateLineage(parentMeta, childMeta, latest); err != nil {
+		return err
+	}
+	if err := validateRecursiveLineage(parentRecord, latest, childDepth); err != nil {
+		return err
+	}
+	latestCopy := latest
+	if err := reconcileDescendants(
+		ctx, repository, child, childDepth+1, &latestCopy, visited,
+	); err != nil {
+		return err
+	}
+
+	return reconcileChild(parent.Session(), child, parentRecords)
 }
 
 func recordsByChild(entries []harness.Entry) (map[string][]record, error) {
@@ -605,9 +665,15 @@ func reconcileChild(
 func authoritativeChildRecords(child *session.Handle) ([]record, error) {
 	entries := child.Session().Entries()
 
-	childRecords, err := records(entries)
+	allRecords, err := records(entries)
 	if err != nil {
 		return nil, err
+	}
+	childRecords := make([]record, 0, len(allRecords))
+	for _, value := range allRecords {
+		if value.ChildSessionID == child.Metadata().ID {
+			childRecords = append(childRecords, value)
+		}
 	}
 
 	if len(childRecords) == 0 || childRecords[0].State != StateCreated {

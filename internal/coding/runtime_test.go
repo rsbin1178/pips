@@ -37,20 +37,23 @@ func TestConfiguredSubagentOptionsUseConfigAndPreserveExplicitOverrides(t *testi
 	t.Parallel()
 
 	configured := config.DefaultSubagentConfig()
+	configured.MaxDepth = 2
 	configured.MaxConcurrent = 6
 	configured.MaxTurns = 80
 	configured.MaxDurationMinutes = 45
 	options := configuredSubagentOptions(configured, subagent.ExecutionOptions{})
 	assert.Equal(t, 6, options.MaxConcurrent)
+	assert.Equal(t, 2, options.MaxDepth)
 	assert.Equal(t, 80, options.Limits.MaxTurns)
 	assert.Equal(t, 2, options.Limits.FinalizationTurns)
 	assert.Equal(t, 45*time.Minute, options.Limits.MaxDuration)
 
 	unbounded := subagent.DefaultLimits()
 	overridden := configuredSubagentOptions(configured, subagent.ExecutionOptions{
-		Limits: unbounded, MaxConcurrent: 1,
+		Limits: unbounded, MaxDepth: 1, MaxConcurrent: 1,
 	})
 	assert.Equal(t, 1, overridden.MaxConcurrent)
+	assert.Equal(t, 1, overridden.MaxDepth)
 	assert.Equal(t, unbounded, overridden.Limits)
 	assert.Equal(t, configured.MaxSpawnedPerRootInteraction, overridden.MaxSpawnedPerRootInteraction)
 	assert.Equal(
@@ -1717,6 +1720,25 @@ func openTestRuntimeConfiguredWithSandbox(
 ) *Runtime {
 	t.Helper()
 
+	return openTestRuntimeConfiguredWithSandboxAndConfig(
+		t, base, target, model, extensions, agentObservers, telemetry, trusted, sandbox, nil,
+	)
+}
+
+func openTestRuntimeConfiguredWithSandboxAndConfig(
+	t *testing.T,
+	base string,
+	target SessionTarget,
+	model ai.LanguageModel,
+	extensions []extension.Extension,
+	agentObservers []func(context.Context, agent.Event),
+	telemetry []TelemetryObserver,
+	trusted bool,
+	sandbox config.SandboxMode,
+	mutateConfig func(*config.Config),
+) *Runtime {
+	t.Helper()
+
 	workspacePath := base + "/workspace"
 	require.NoError(t, mkdirPrivate(workspacePath))
 
@@ -1738,6 +1760,9 @@ func openTestRuntimeConfiguredWithSandbox(
 		cfg = loaded.Config
 	} else {
 		cfg.Sandbox = sandbox
+	}
+	if mutateConfig != nil {
+		mutateConfig(&cfg)
 	}
 	cfg.Model.Provider = model.Provider()
 	cfg.Model.Model = model.ModelID()

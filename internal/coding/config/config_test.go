@@ -182,6 +182,7 @@ func TestValidateSubagentConfig(t *testing.T) {
 		name   string
 		mutate func(*config.SubagentConfig)
 	}{
+		{name: "depth", mutate: func(value *config.SubagentConfig) { value.MaxDepth = 4 }},
 		{name: "concurrent", mutate: func(value *config.SubagentConfig) { value.MaxConcurrent = 33 }},
 		{name: "spawned", mutate: func(value *config.SubagentConfig) { value.MaxSpawnedPerRootInteraction = 0 }},
 		{name: "follow ups", mutate: func(value *config.SubagentConfig) { value.MaxAutoFollowUps = 33 }},

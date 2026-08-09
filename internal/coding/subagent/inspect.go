@@ -7,14 +7,20 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sort"
 	"time"
 
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding/session"
 )
 
-// List returns newest-first durable children owned by this manager's exact
-// parent conversation.
+type ownedSummary struct {
+	summary Summary
+	parent  session.Metadata
+}
+
+// List returns newest-first durable descendants owned by this manager's
+// execution tree.
 func (m *Manager) List(ctx context.Context) ([]Summary, error) {
 	if m == nil {
 		return nil, ErrClosed
@@ -24,43 +30,142 @@ func (m *Manager) List(ctx context.Context) ([]Summary, error) {
 		return nil, err
 	}
 
-	parent := m.config.Parent.Metadata()
-
-	metas, err := m.config.Repository.ListSubagents(ctx, parent.WorkspaceID, parent.ID)
+	owned, err := m.listOwnedDescendants(ctx)
 	if err != nil {
 		return nil, err
 	}
-
-	latest, err := latestByChild(m.config.Parent.Session().Entries())
-	if err != nil {
-		return nil, err
-	}
-
-	values := make([]Summary, 0, len(metas))
-
-	seen := make(map[string]struct{}, len(metas))
-	for _, meta := range metas {
-		seen[meta.ID] = struct{}{}
-
-		value, ok := latest[meta.ID]
-		if !ok {
-			return nil, fmt.Errorf("%w: parent index is missing child %q", ErrInvalid, meta.ID)
-		}
-
-		if err := validateLineage(parent, meta, value); err != nil {
-			return nil, err
-		}
-
-		values = append(values, summaryFrom(meta, value))
-	}
-
-	for childSessionID := range latest {
-		if _, ok := seen[childSessionID]; !ok {
-			return nil, fmt.Errorf("%w: parent index references a missing child", ErrInvalid)
-		}
+	values := make([]Summary, len(owned))
+	for index := range owned {
+		values[index] = owned[index].summary
 	}
 
 	return values, nil
+}
+
+func (m *Manager) listOwnedDescendants(ctx context.Context) ([]ownedSummary, error) {
+	values := make([]ownedSummary, 0)
+	visited := make(map[string]struct{})
+	startDepth := m.delegationDepth
+	if m.config.Parent.Metadata().Kind == session.KindConversation {
+		startDepth = 0
+	}
+	if err := m.walkOwnedDescendants(
+		ctx,
+		m.config.Parent,
+		false,
+		startDepth,
+		nil,
+		visited,
+		&values,
+	); err != nil {
+		return nil, err
+	}
+	sort.SliceStable(values, func(left, right int) bool {
+		return values[left].summary.CreatedAt.After(values[right].summary.CreatedAt)
+	})
+
+	return values, nil
+}
+
+func (m *Manager) walkOwnedDescendants(
+	ctx context.Context,
+	parent *session.Handle,
+	closeParent bool,
+	childDepth int,
+	parentRecord *record,
+	visited map[string]struct{},
+	values *[]ownedSummary,
+) (returnErr error) {
+	if closeParent {
+		defer func() { returnErr = errors.Join(returnErr, parent.Close()) }()
+	}
+	parentMeta := parent.Metadata()
+	if _, duplicate := visited[parentMeta.ID]; duplicate {
+		return fmt.Errorf("%w: recursive child lineage contains a cycle", ErrInvalid)
+	}
+	visited[parentMeta.ID] = struct{}{}
+	defer delete(visited, parentMeta.ID)
+
+	metas, err := m.config.Repository.ListSubagents(ctx, parentMeta.WorkspaceID, parentMeta.ID)
+	if err != nil {
+		return err
+	}
+	latest, err := latestByChild(parent.Session().Entries())
+	if err != nil {
+		return err
+	}
+	if parentMeta.Kind == session.KindSubagent {
+		delete(latest, parentMeta.ID)
+	}
+	if len(metas) > 0 && childDepth > MaxDelegationDepth {
+		return fmt.Errorf("%w: recursive child lineage exceeds hard depth", ErrInvalid)
+	}
+	seen := make(map[string]struct{}, len(metas))
+	for _, meta := range metas {
+		if _, cycle := visited[meta.ID]; cycle {
+			return fmt.Errorf("%w: recursive child lineage contains a cycle", ErrInvalid)
+		}
+		seen[meta.ID] = struct{}{}
+		value, ok := latest[meta.ID]
+		if !ok {
+			return fmt.Errorf("%w: parent index is missing child %q", ErrInvalid, meta.ID)
+		}
+		if err := validateLineage(parentMeta, meta, value); err != nil {
+			return err
+		}
+		if err := validateRecursiveLineage(parentRecord, value, childDepth); err != nil {
+			return err
+		}
+		*values = append(*values, ownedSummary{summary: summaryFrom(meta, value), parent: parentMeta})
+
+		child, owned, openErr := m.childHandle(ctx, meta.ID)
+		if openErr != nil {
+			return openErr
+		}
+		valueCopy := value
+		if err := m.walkOwnedDescendants(
+			ctx, child, owned, childDepth+1, &valueCopy, visited, values,
+		); err != nil {
+			return err
+		}
+	}
+	for childSessionID := range latest {
+		if _, ok := seen[childSessionID]; !ok {
+			return fmt.Errorf("%w: parent index references a missing child", ErrInvalid)
+		}
+	}
+
+	return nil
+}
+
+func validateRecursiveLineage(parent *record, child record, depth int) error {
+	plan := child.Plan
+	if len(plan.Ancestry) == 0 {
+		if parent != nil {
+			return fmt.Errorf("%w: recursive child is missing delegation lineage", ErrInvalid)
+		}
+
+		return nil
+	}
+	if plan.DelegationDepth != depth || depth > plan.MaxDelegationDepth ||
+		plan.MaxDelegationDepth > MaxDelegationDepth {
+		return fmt.Errorf("%w: recursive child depth mismatch", ErrInvalid)
+	}
+	if parent == nil {
+		if depth != 0 || len(plan.Ancestry) != 1 {
+			return fmt.Errorf("%w: root child delegation lineage mismatch", ErrInvalid)
+		}
+
+		return nil
+	}
+	parentPlan := parent.Plan
+	if len(parentPlan.Ancestry) == 0 || plan.MaxDelegationDepth != parentPlan.MaxDelegationDepth ||
+		!slices.Equal(plan.Ancestry[:len(plan.Ancestry)-1], parentPlan.Ancestry) ||
+		!slices.Contains(parentPlan.DelegationTargets, plan.Identity.ID) {
+		return fmt.Errorf("%w: recursive child authority lineage mismatch", ErrInvalid)
+	}
+
+	return nil
 }
 
 // Inspect loads one current-parent child transcript and validated structured
@@ -80,7 +185,7 @@ func (m *Manager) Inspect(
 	m.journalMu.Lock()
 	defer m.journalMu.Unlock()
 
-	selected, err := m.findSummary(ctx, childSessionID)
+	selected, err := m.findOwnedSummary(ctx, childSessionID)
 	if err != nil {
 		return Detail{}, err
 	}
@@ -94,30 +199,36 @@ func (m *Manager) Inspect(
 }
 
 func (m *Manager) findSummary(ctx context.Context, childSessionID string) (Summary, error) {
-	values, err := m.List(ctx)
+	selected, err := m.findOwnedSummary(ctx, childSessionID)
+	return selected.summary, err
+}
+
+func (m *Manager) findOwnedSummary(ctx context.Context, childSessionID string) (ownedSummary, error) {
+	values, err := m.listOwnedDescendants(ctx)
 	if err != nil {
-		return Summary{}, err
+		return ownedSummary{}, err
 	}
 
 	for _, value := range values {
-		if value.ChildSessionID == childSessionID {
+		if value.summary.ChildSessionID == childSessionID {
 			return value, nil
 		}
 	}
 
-	return Summary{}, fmt.Errorf("%w: child does not belong to current parent", ErrInvalid)
+	return ownedSummary{}, fmt.Errorf("%w: child does not belong to current parent", ErrInvalid)
 }
 
+//nolint:nestif // Durable custom and builtin result validation stays beside exact lineage validation.
 func (m *Manager) inspectChild(
 	child *session.Handle,
 	owned bool,
-	selected Summary,
+	selected ownedSummary,
 ) (_ Detail, returnErr error) {
 	if owned {
 		defer func() { returnErr = errors.Join(returnErr, child.Close()) }()
 	}
 
-	parent := m.config.Parent.Metadata()
+	parent := selected.parent
 	childMeta := child.Metadata()
 
 	childLatest, err := latestByChild(child.Session().Entries())
@@ -125,7 +236,7 @@ func (m *Manager) inspectChild(
 		return Detail{}, err
 	}
 
-	value, ok := childLatest[selected.ChildSessionID]
+	value, ok := childLatest[selected.summary.ChildSessionID]
 	if !ok {
 		return Detail{}, fmt.Errorf("%w: child lifecycle is missing", ErrInvalid)
 	}
@@ -134,7 +245,7 @@ func (m *Manager) inspectChild(
 		return Detail{}, err
 	}
 
-	if summaryFrom(childMeta, value) != selected {
+	if summaryFrom(childMeta, value) != selected.summary {
 		return Detail{}, fmt.Errorf("%w: parent and child lifecycle differ", ErrInvalid)
 	}
 
@@ -143,18 +254,18 @@ func (m *Manager) inspectChild(
 		return Detail{}, fmt.Errorf("coding subagent: load transcript: %w", err)
 	}
 
-	detail := Detail{Summary: selected, Plan: value.Plan.Clone(), Transcript: contextValue.Messages}
-	if selected.State == StateCreated || selected.State == StateRunning {
+	detail := Detail{Summary: selected.summary, Plan: value.Plan.Clone(), Transcript: contextValue.Messages}
+	if selected.summary.State == StateCreated || selected.summary.State == StateRunning {
 		detail = m.overlayLiveDetail(detail)
 	}
 
-	if selected.State == StateSucceeded {
+	if selected.summary.State == StateSucceeded {
 		text, ok := finalAssistantText(detail.Transcript)
 		if !ok {
 			return Detail{}, fmt.Errorf("%w: successful child has no final assistant result", ErrInvalid)
 		}
 
-		if role := selected.Identity.LegacyRole(); role != "" {
+		if role := selected.summary.Identity.LegacyRole(); role != "" {
 			spec, specErr := specFor(role)
 			if specErr != nil {
 				return Detail{}, specErr
@@ -179,18 +290,16 @@ func (m *Manager) childHandle(
 	ctx context.Context,
 	childSessionID string,
 ) (*session.Handle, bool, error) {
-	m.mu.Lock()
-
-	active := m.active[childSessionID]
+	m.shared.mu.Lock()
+	active := m.shared.active[childSessionID]
 	if active != nil && active.child != nil && active.child.Metadata().ID == childSessionID {
 		child := active.child
-		m.mu.Unlock()
+		m.shared.mu.Unlock()
 
 		return child, false, nil
 	}
-
+	m.shared.mu.Unlock()
 	parent := m.config.Parent.Metadata()
-	m.mu.Unlock()
 
 	child, err := m.config.Repository.Open(ctx, session.OpenOptions{
 		ID: childSessionID, WorkspaceID: parent.WorkspaceID,

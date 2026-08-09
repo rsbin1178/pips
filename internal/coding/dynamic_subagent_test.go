@@ -19,6 +19,7 @@ import (
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding/agentprofile"
 	"github.com/rsbin/pips/internal/coding/approval"
+	"github.com/rsbin/pips/internal/coding/config"
 	"github.com/rsbin/pips/internal/coding/paths"
 	"github.com/rsbin/pips/internal/coding/question"
 	"github.com/rsbin/pips/internal/coding/session"
@@ -102,6 +103,213 @@ Read only the delegated target and report the verification evidence.
 	assert.Equal(t, []string{"read"}, toolNamesFromRequest(requests[1]))
 	assert.NotContains(t, toolNamesFromRequest(requests[1]), subagent.ToolName)
 	assert.Nil(t, requests[1].ResponseFormat)
+}
+
+func TestRuntimeDispatchesBoundedExactTargetRecursiveChain(t *testing.T) {
+	t.Parallel()
+
+	base := t.TempDir()
+	layout, err := paths.New(filepath.Join(base, "home"))
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(layout.AgentsDir(), 0o700))
+	definitions := map[string]string{
+		"root-agent.md": `---
+schema: pips.agent/v1alpha1
+name: Root agent
+description: Delegate one exact middle task.
+delegation:
+  allow: [middle-agent]
+---
+Delegate the task to middle-agent and return its result.
+`,
+		"middle-agent.md": `---
+schema: pips.agent/v1alpha1
+name: Middle agent
+description: Delegate one exact leaf task.
+visibility:
+  user: false
+  model: true
+delegation:
+  allow: [leaf-agent]
+---
+Delegate the task to leaf-agent and return its result.
+`,
+		"leaf-agent.md": `---
+schema: pips.agent/v1alpha1
+name: Leaf agent
+description: Return one bounded leaf result.
+visibility:
+  user: false
+  model: true
+---
+Return the leaf result without tools.
+`,
+	}
+	for name, body := range definitions {
+		require.NoError(t, os.WriteFile(filepath.Join(layout.AgentsDir(), name), []byte(body), 0o600))
+	}
+
+	model := newRuntimeModel(
+		runtimeToolResponse("parent-root", subagent.ToolName, `{"agent_id":"root-agent","task":"Complete the chain."}`),
+		runtimeToolResponse("root-middle", subagent.ToolName, `{"agent_id":"middle-agent","task":"Delegate to the leaf."}`),
+		runtimeToolResponse("middle-leaf", subagent.ToolName, `{"agent_id":"leaf-agent","task":"Return the leaf evidence."}`),
+		runtimeTextResponse("leaf evidence"),
+		runtimeTextResponse("middle received leaf evidence"),
+		runtimeTextResponse("root received middle evidence"),
+		runtimeTextResponse("recursive delegation complete"),
+	)
+	runtime := openTestRuntimeConfiguredWithSandboxAndConfig(
+		t, base, SessionTarget{}, model, nil, nil, nil, false,
+		config.SandboxWorkspaceWrite,
+		func(cfg *config.Config) {
+			cfg.DynamicSubagents = true
+			cfg.Subagent.MaxDepth = 2
+		},
+	)
+
+	events := collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("run the recursive chain")))
+	assert.Contains(t, eventTypes(events), EventSubagentCompleted)
+	requests := model.Requests()
+	require.Len(t, requests, 7)
+	assert.Equal(t, []string{subagent.ToolName}, toolNamesFromRequest(requests[1]))
+	assert.Equal(t, []string{subagent.ToolName}, toolNamesFromRequest(requests[2]))
+	assert.Empty(t, toolNamesFromRequest(requests[3]))
+	assert.NotContains(t, toolNamesFromRequest(requests[1]), subagent.SpawnToolName)
+	assert.Equal(t, []any{"middle-agent"}, requests[1].Tools[0].InputSchema.Properties["agent_id"].Enum)
+	assert.Equal(t, []any{"leaf-agent"}, requests[2].Tools[0].InputSchema.Properties["agent_id"].Enum)
+
+	summaries, err := runtime.ListSubagents(t.Context())
+	require.NoError(t, err)
+	require.Len(t, summaries, 3)
+	byID := make(map[string]subagent.Summary, len(summaries))
+	for _, summary := range summaries {
+		byID[summary.Identity.ID] = summary
+	}
+	rootSummary := byID["root-agent"]
+	middleSummary := byID["middle-agent"]
+	leafSummary := byID["leaf-agent"]
+	assert.Equal(t, runtime.handle.Metadata().ID, rootSummary.Ownership.ParentSessionID)
+	assert.Equal(t, rootSummary.ChildSessionID, middleSummary.Ownership.ParentSessionID)
+	assert.Equal(t, middleSummary.ChildSessionID, leafSummary.Ownership.ParentSessionID)
+	assert.NotEmpty(t, middleSummary.Ownership.ParentRunID)
+	assert.NotEmpty(t, leafSummary.Ownership.ParentRunID)
+
+	var generationID uint64
+	for id, want := range map[string]struct {
+		depth    int
+		ancestry []string
+		targets  []string
+	}{
+		"root-agent":   {depth: 0, ancestry: []string{"root-agent"}, targets: []string{"middle-agent"}},
+		"middle-agent": {depth: 1, ancestry: []string{"root-agent", "middle-agent"}, targets: []string{"leaf-agent"}},
+		"leaf-agent":   {depth: 2, ancestry: []string{"root-agent", "middle-agent", "leaf-agent"}},
+	} {
+		detail, inspectErr := runtime.InspectSubagent(t.Context(), byID[id].ChildSessionID)
+		require.NoError(t, inspectErr, id)
+		if generationID == 0 {
+			generationID = detail.Plan.GenerationID
+		}
+		assert.Equal(t, generationID, detail.Plan.GenerationID, id)
+		assert.Equal(t, want.depth, detail.Plan.DelegationDepth, id)
+		assert.Equal(t, 2, detail.Plan.MaxDelegationDepth, id)
+		assert.Equal(t, want.ancestry, detail.Plan.Ancestry, id)
+		assert.Equal(t, want.targets, detail.Plan.DelegationTargets, id)
+		assert.Equal(t, rootSummary.Identity.DefinitionSchema, detail.Plan.Identity.DefinitionSchema)
+	}
+	leafResult, err := runtime.WaitSubagent(t.Context(), leafSummary.ChildSessionID)
+	require.NoError(t, err)
+	assert.Equal(t, "leaf evidence", leafResult.Value)
+	require.NoError(t, runtime.CancelSubagent(t.Context(), leafSummary.ChildSessionID))
+}
+
+func TestRuntimeRecursiveAdmissionRejectsBeforeCreatingAThirdChild(t *testing.T) {
+	tests := []struct {
+		name     string
+		mutate   func(*config.SubagentConfig)
+		wantText string
+	}{
+		{
+			name: "shared concurrent slots",
+			mutate: func(value *config.SubagentConfig) {
+				value.MaxDepth = 2
+				value.MaxConcurrent = 2
+			},
+			wantText: "capacity exhausted",
+		},
+		{
+			name: "shared cumulative descendants",
+			mutate: func(value *config.SubagentConfig) {
+				value.MaxDepth = 2
+				value.MaxSpawnedPerRootInteraction = 1
+			},
+			wantText: "spawn limit exhausted",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			base := t.TempDir()
+			layout, err := paths.New(filepath.Join(base, "home"))
+			require.NoError(t, err)
+			require.NoError(t, os.MkdirAll(layout.AgentsDir(), 0o700))
+			for name, body := range map[string]string{
+				"root-agent.md": `---
+schema: pips.agent/v1alpha1
+name: Root agent
+description: Delegate one middle task.
+delegation:
+  allow: [middle-agent]
+---
+Delegate to middle-agent.
+`,
+				"middle-agent.md": `---
+schema: pips.agent/v1alpha1
+name: Middle agent
+description: Delegate one leaf task.
+delegation:
+  allow: [leaf-agent]
+---
+Delegate to leaf-agent.
+`,
+				"leaf-agent.md": `---
+schema: pips.agent/v1alpha1
+name: Leaf agent
+description: Return the leaf result.
+---
+Return the leaf result.
+`,
+			} {
+				require.NoError(t, os.WriteFile(filepath.Join(layout.AgentsDir(), name), []byte(body), 0o600))
+			}
+			model := newRuntimeModel(
+				runtimeToolResponse("parent-root", subagent.ToolName, `{"agent_id":"root-agent","task":"Start."}`),
+				runtimeToolResponse("root-middle", subagent.ToolName, `{"agent_id":"middle-agent","task":"Continue."}`),
+				runtimeToolResponse("middle-leaf", subagent.ToolName, `{"agent_id":"leaf-agent","task":"Finish."}`),
+				runtimeTextResponse("middle handled admission rejection"),
+				runtimeTextResponse("root handled child result"),
+				runtimeTextResponse("parent complete"),
+			)
+			runtime := openTestRuntimeConfiguredWithSandboxAndConfig(
+				t, base, SessionTarget{}, model, nil, nil, nil, false,
+				config.SandboxWorkspaceWrite,
+				func(cfg *config.Config) {
+					cfg.DynamicSubagents = true
+					test.mutate(&cfg.Subagent)
+				},
+			)
+			collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("exercise recursive admission")))
+
+			requests := model.Requests()
+			require.Len(t, requests, 6)
+			assert.True(t, requestContainsToolText(requests[3], test.wantText))
+			summaries, err := runtime.ListSubagents(t.Context())
+			require.NoError(t, err)
+			require.Len(t, summaries, 2)
+			for _, summary := range summaries {
+				assert.NotEqual(t, "leaf-agent", summary.Identity.ID)
+			}
+		})
+	}
 }
 
 func TestRuntimeCustomProfileDispatchRequiresAlphaGate(t *testing.T) {
@@ -805,6 +1013,221 @@ Ask for the missing decision, then summarize the selected answer.
 	assert.True(t, requestContainsToolText(requests[2], "React"))
 }
 
+func TestRuntimeRoutesNestedQuestionByExactDescendantWithoutParentContamination(t *testing.T) {
+	base := t.TempDir()
+	layout, err := paths.New(filepath.Join(base, "home"))
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(layout.AgentsDir(), 0o700))
+	for name, body := range map[string]string{
+		"root-agent.md": `---
+schema: pips.agent/v1alpha1
+name: Root agent
+description: Delegate one decision.
+delegation:
+  allow: [decision-agent]
+---
+Delegate the decision and return its result.
+`,
+		"decision-agent.md": `---
+schema: pips.agent/v1alpha1
+name: Decision agent
+description: Ask one independently routed question.
+visibility:
+  user: false
+  model: true
+tools:
+  allow: ["tool:ask_user"]
+---
+Ask for the framework and return the answer.
+`,
+	} {
+		require.NoError(t, os.WriteFile(filepath.Join(layout.AgentsDir(), name), []byte(body), 0o600))
+	}
+	model := newRuntimeModel(
+		runtimeToolResponse("parent-root", subagent.ToolName, `{"agent_id":"root-agent","task":"Get the decision."}`),
+		runtimeToolResponse("root-decision", subagent.ToolName, `{"agent_id":"decision-agent","task":"Ask for the framework."}`),
+		runtimeQuestionResponse(t, "nested-question"),
+		runtimeTextResponse("React selected"),
+		runtimeTextResponse("nested decision complete"),
+		runtimeTextResponse("parent complete"),
+	)
+	runtime := openTestRuntimeConfiguredWithSandboxAndConfig(
+		t, base, SessionTarget{}, model, nil, nil, nil, false,
+		config.SandboxWorkspaceWrite,
+		func(cfg *config.Config) {
+			cfg.DynamicSubagents = true
+			cfg.Subagent.MaxDepth = 1
+		},
+	)
+	done := make(chan error, 1)
+	go func() {
+		var sequenceErr error
+		runtime.Prompt(context.Background(), ai.UserText("run nested decision"))(func(_ Event, eventErr error) bool {
+			if eventErr != nil {
+				sequenceErr = eventErr
+
+				return false
+			}
+
+			return true
+		})
+		done <- sequenceErr
+	}()
+
+	deadline := time.After(10 * time.Second)
+	var rootID, decisionID string
+	var state ChildControlState
+	for decisionID == "" {
+		summaries, listErr := runtime.ListSubagents(context.Background())
+		if listErr == nil {
+			for _, summary := range summaries {
+				switch summary.Identity.ID {
+				case "root-agent":
+					rootID = summary.ChildSessionID
+				case "decision-agent":
+					control, controlErr := runtime.SubagentControlState(summary.ChildSessionID)
+					if controlErr == nil && control.Pause == ChildPauseQuestion && control.Question != nil {
+						decisionID, state = summary.ChildSessionID, control
+					}
+				}
+			}
+		}
+		select {
+		case <-deadline:
+			require.FailNow(t, "timed out waiting for nested question")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	require.NotEmpty(t, rootID)
+	request := question.CloneRequest(*state.Question)
+	_, err = runtime.ResolveSubagentQuestion(context.Background(), rootID, question.Resolution{
+		RequestID: request.ID, SchemaDigest: request.SchemaDigest,
+		Answers: []question.Answer{{Selections: []string{"React"}}},
+	})
+	require.Error(t, err)
+	unchanged, err := runtime.SubagentControlState(decisionID)
+	require.NoError(t, err)
+	assert.Equal(t, request.ID, unchanged.Question.ID)
+	assert.Nil(t, runtime.Snapshot().Question.Required)
+	rootControl, err := runtime.SubagentControlState(rootID)
+	require.NoError(t, err)
+	assert.Equal(t, ChildPauseNone, rootControl.Pause)
+
+	resolved, err := runtime.ResolveSubagentQuestion(context.Background(), decisionID, question.Resolution{
+		RequestID: request.ID, SchemaDigest: request.SchemaDigest,
+		Answers: []question.Answer{{Selections: []string{"React"}}},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, ChildPauseNone, resolved.Pause)
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		require.FailNow(t, "timed out waiting for nested question completion")
+	}
+
+	summaries, err := runtime.ListSubagents(context.Background())
+	require.NoError(t, err)
+	require.Len(t, summaries, 2)
+	for _, summary := range summaries {
+		assert.Equal(t, subagent.StateSucceeded, summary.State)
+	}
+}
+
+func TestRuntimeCancelsLiveNestedDescendantWithoutCancelingItsParent(t *testing.T) {
+	base := t.TempDir()
+	layout, err := paths.New(filepath.Join(base, "home"))
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(layout.AgentsDir(), 0o700))
+	for name, body := range map[string]string{
+		"root-agent.md": `---
+schema: pips.agent/v1alpha1
+name: Root agent
+description: Delegate one cancelable leaf.
+delegation:
+  allow: [leaf-agent]
+---
+ROOT_CANCEL_MARKER: delegate to leaf-agent and handle cancellation.
+`,
+		"leaf-agent.md": `---
+schema: pips.agent/v1alpha1
+name: Leaf agent
+description: Wait until explicitly canceled.
+visibility:
+  user: false
+  model: true
+---
+LEAF_CANCEL_MARKER: wait for cancellation.
+`,
+	} {
+		require.NoError(t, os.WriteFile(filepath.Join(layout.AgentsDir(), name), []byte(body), 0o600))
+	}
+	model := newNestedCancelRuntimeModel()
+	runtime := openTestRuntimeConfiguredWithSandboxAndConfig(
+		t, base, SessionTarget{}, model, nil, nil, nil, false,
+		config.SandboxWorkspaceWrite,
+		func(cfg *config.Config) {
+			cfg.DynamicSubagents = true
+			cfg.Subagent.MaxDepth = 1
+		},
+	)
+	done := make(chan error, 1)
+	go func() {
+		var sequenceErr error
+		runtime.Prompt(context.Background(), ai.UserText("start nested cancellation"))(func(_ Event, eventErr error) bool {
+			if eventErr != nil {
+				sequenceErr = eventErr
+
+				return false
+			}
+
+			return true
+		})
+		done <- sequenceErr
+	}()
+	select {
+	case <-model.leafStarted:
+	case <-time.After(10 * time.Second):
+		require.FailNow(t, "nested leaf did not start")
+	}
+
+	var leafID string
+	assert.Eventually(t, func() bool {
+		summaries, listErr := runtime.ListSubagents(context.Background())
+		if listErr != nil {
+			return false
+		}
+		for _, summary := range summaries {
+			if summary.Identity.ID == "leaf-agent" {
+				leafID = summary.ChildSessionID
+
+				return true
+			}
+		}
+
+		return false
+	}, 10*time.Second, 10*time.Millisecond)
+	require.NoError(t, runtime.CancelSubagent(context.Background(), leafID))
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		require.FailNow(t, "nested cancellation did not complete")
+	}
+
+	summaries, err := runtime.ListSubagents(context.Background())
+	require.NoError(t, err)
+	require.Len(t, summaries, 2)
+	for _, summary := range summaries {
+		switch summary.Identity.ID {
+		case "leaf-agent":
+			assert.Equal(t, subagent.StateCanceled, summary.State)
+		case "root-agent":
+			assert.Equal(t, subagent.StateSucceeded, summary.State)
+		}
+	}
+}
+
 func TestRuntimeRejectsCrossChildAndCrossKindControlSubstitution(t *testing.T) {
 	base := t.TempDir()
 	layout, err := paths.New(filepath.Join(base, "home"))
@@ -1218,6 +1641,80 @@ type backgroundCustomRuntimeModel struct {
 	childOnce    sync.Once
 	childStarted chan struct{}
 	releaseChild chan struct{}
+}
+
+type nestedCancelRuntimeModel struct {
+	mu          sync.Mutex
+	mainCalls   int
+	rootCalls   int
+	leafOnce    sync.Once
+	leafStarted chan struct{}
+}
+
+func newNestedCancelRuntimeModel() *nestedCancelRuntimeModel {
+	return &nestedCancelRuntimeModel{leafStarted: make(chan struct{})}
+}
+
+func (m *nestedCancelRuntimeModel) Generate(ctx context.Context, request ai.Request) (*ai.Response, error) {
+	switch {
+	case strings.Contains(request.System, "LEAF_CANCEL_MARKER"):
+		m.leafOnce.Do(func() { close(m.leafStarted) })
+		<-ctx.Done()
+
+		return nil, ctx.Err()
+	case strings.Contains(request.System, "ROOT_CANCEL_MARKER"):
+		m.mu.Lock()
+		m.rootCalls++
+		call := m.rootCalls
+		m.mu.Unlock()
+		if call == 1 {
+			return runtimeToolResponse(
+				"root-leaf",
+				subagent.ToolName,
+				`{"agent_id":"leaf-agent","task":"Wait until canceled."}`,
+			), nil
+		}
+
+		return runtimeTextResponse("root handled leaf cancellation"), nil
+	default:
+		m.mu.Lock()
+		m.mainCalls++
+		call := m.mainCalls
+		m.mu.Unlock()
+		if call == 1 {
+			return runtimeToolResponse(
+				"parent-root",
+				subagent.ToolName,
+				`{"agent_id":"root-agent","task":"Run the cancelable leaf."}`,
+			), nil
+		}
+
+		return runtimeTextResponse("parent complete"), nil
+	}
+}
+
+func (m *nestedCancelRuntimeModel) Stream(ctx context.Context, request ai.Request) ai.Stream {
+	return func(yield func(ai.StreamEvent, error) bool) {
+		response, err := m.Generate(ctx, request)
+		if err != nil {
+			yield(ai.StreamEvent{}, err)
+
+			return
+		}
+		for _, event := range runtimeResponseEvents(response) {
+			if !yield(event, nil) {
+				return
+			}
+		}
+	}
+}
+
+func (m *nestedCancelRuntimeModel) Provider() ai.Provider { return ai.ProviderOpenAI }
+
+func (m *nestedCancelRuntimeModel) ModelID() string { return "runtime-test" }
+
+func (m *nestedCancelRuntimeModel) Capabilities() ai.Capabilities {
+	return ai.Capabilities{Text: true, Tools: true}
 }
 
 func newBackgroundCustomRuntimeModel() *backgroundCustomRuntimeModel {
