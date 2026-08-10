@@ -53,6 +53,7 @@ type Plan struct {
 	outgoing   [][]int
 	startIndex int
 	endIndex   int
+	loop       *loopCompileScope
 }
 
 type planNode struct {
@@ -108,6 +109,14 @@ func Compile(
 }
 
 func (s *compileSession) compile(ctx context.Context, definition Definition) (*Plan, error) {
+	return s.compileScoped(ctx, definition, nil)
+}
+
+func (s *compileSession) compileScoped(
+	ctx context.Context,
+	definition Definition,
+	loop *loopCompileScope,
+) (*Plan, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -164,6 +173,7 @@ func (s *compileSession) compile(ctx context.Context, definition Definition) (*P
 		outgoing:              make([][]int, len(snapshot.Nodes)),
 		startIndex:            -1,
 		endIndex:              -1,
+		loop:                  cloneLoopCompileScope(loop),
 	}
 
 	if err := plan.compileNodes(ctx, s); err != nil {
@@ -180,6 +190,10 @@ func (s *compileSession) compile(ctx context.Context, definition Definition) (*P
 	}
 
 	if err := plan.validateBindings(topological); err != nil {
+		return nil, err
+	}
+
+	if err := plan.validateLoopVariableAccess(topological); err != nil {
 		return nil, err
 	}
 
@@ -304,6 +318,7 @@ func (p *Plan) compileNodes(ctx context.Context, session *compileSession) error 
 		outputs:  outputSchemas,
 		registry: session.registry,
 		session:  session,
+		loop:     p.loop,
 	}
 
 	for index, definition := range p.definition.Nodes {
@@ -401,7 +416,8 @@ func (p *Plan) recordEndpoint(index int, definition NodeDefinition) error {
 
 		p.endIndex = index
 	case NodeTypeAction, NodeTypeCondition, NodeTypeMerge, NodeTypeSelector,
-		NodeTypeSubWorkflow, NodeTypeBatch:
+		NodeTypeSubWorkflow, NodeTypeBatch, NodeTypeLoop, NodeTypeBreak,
+		NodeTypeContinue, NodeTypeSetVariable:
 	}
 
 	return nil
@@ -538,6 +554,10 @@ func (p *Plan) validateGraph() ([]int, error) {
 		return nil, err
 	}
 
+	if err := p.validateLoopControlEdges(); err != nil {
+		return nil, err
+	}
+
 	return topological, nil
 }
 
@@ -563,6 +583,19 @@ func (p *Plan) validateNodeDegree(index int, node planNode) error {
 	incoming := len(p.incoming[index])
 	outgoing := len(p.outgoing[index])
 
+	if err := p.validateEndpointDegree(index, node, incoming, outgoing); err != nil {
+		return err
+	}
+
+	return p.validateFanIn(index, node, incoming)
+}
+
+func (p *Plan) validateEndpointDegree(
+	index int,
+	node planNode,
+	incoming int,
+	outgoing int,
+) error {
 	if index == p.startIndex && incoming != 0 {
 		return compileNodeError(node.definition.ID, "Start must not have incoming edges")
 	}
@@ -579,11 +612,16 @@ func (p *Plan) validateNodeDegree(index int, node planNode) error {
 		return compileNodeError(node.definition.ID, "non-End node requires an outgoing edge")
 	}
 
+	return nil
+}
+
+func (p *Plan) validateFanIn(index int, node planNode, incoming int) error {
 	if node.isMerge && incoming < 2 {
 		return compileNodeError(node.definition.ID, "Merge requires at least two incoming edges")
 	}
 
-	if !node.isMerge && incoming > 1 {
+	allowsLoopEndFanIn := p.loop != nil && index == p.endIndex
+	if !node.isMerge && !allowsLoopEndFanIn && incoming > 1 {
 		return compileNodeError(node.definition.ID, "multiple incoming edges require Merge")
 	}
 
@@ -770,6 +808,17 @@ func (p *Plan) bindingSchema(binding Binding) (PortSchema, int, error) {
 		if !ok {
 			return PortSchema{}, sourceIndex, fmt.Errorf("unknown node output %q.%s", binding.Node, binding.Port)
 		}
+	case BindingLoopVariable:
+		if p.loop == nil {
+			return PortSchema{}, sourceIndex, errors.New("loop variable is unavailable outside a direct Loop body")
+		}
+
+		var ok bool
+
+		schema, ok = p.loop.variables[binding.Port]
+		if !ok {
+			return PortSchema{}, sourceIndex, fmt.Errorf("unknown loop variable %q", binding.Port)
+		}
 	default:
 		return PortSchema{}, sourceIndex, fmt.Errorf("unknown binding source %q", binding.Source)
 	}
@@ -784,6 +833,208 @@ func (p *Plan) bindingSchema(binding Binding) (PortSchema, int, error) {
 	}
 
 	return subschema, sourceIndex, nil
+}
+
+func (p *Plan) validateLoopControlEdges() error {
+	for index, node := range p.nodes {
+		if node.definition.Type != NodeTypeBreak && node.definition.Type != NodeTypeContinue {
+			continue
+		}
+
+		successEdges := 0
+
+		for _, edgeIndex := range p.outgoing[index] {
+			edge := p.edges[edgeIndex]
+
+			if edge.route != RouteSuccess {
+				continue
+			}
+
+			successEdges++
+
+			if edge.to != p.endIndex {
+				return compileNodeError(
+					node.definition.ID,
+					"success edge must target the Loop body End",
+				)
+			}
+		}
+
+		if successEdges != 1 {
+			return compileNodeError(
+				node.definition.ID,
+				"requires exactly one success edge to the Loop body End",
+			)
+		}
+	}
+
+	return nil
+}
+
+type loopVariableAccess struct {
+	node  int
+	write bool
+}
+
+func (p *Plan) validateLoopVariableAccess(topological []int) error {
+	if p.loop == nil {
+		return nil
+	}
+
+	accesses := p.loopVariableAccesses()
+	dominators := p.dominators(topological)
+
+	for variable, variableAccesses := range accesses {
+		if err := p.validateVariableAccesses(variable, variableAccesses, dominators); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (p *Plan) loopVariableAccesses() map[string][]loopVariableAccess {
+	accesses := make(map[string][]loopVariableAccess, len(p.loop.variables))
+
+	for index, node := range p.nodes {
+		for _, binding := range node.bindings {
+			if binding.Source == BindingLoopVariable {
+				accesses[binding.Port] = append(
+					accesses[binding.Port],
+					loopVariableAccess{node: index},
+				)
+			}
+		}
+
+		setter, ok := node.executor.(*compiledSetVariable)
+		if !ok {
+			continue
+		}
+
+		for variable := range setter.targets {
+			accesses[variable] = append(
+				accesses[variable],
+				loopVariableAccess{node: index, write: true},
+			)
+		}
+	}
+
+	return accesses
+}
+
+func (p *Plan) validateVariableAccesses(
+	variable string,
+	accesses []loopVariableAccess,
+	dominators [][]bool,
+) error {
+	for left := range accesses {
+		for right := left + 1; right < len(accesses); right++ {
+			first := accesses[left]
+			second := accesses[right]
+
+			if p.loopAccessesOrderedOrIndependent(first, second, dominators) {
+				continue
+			}
+
+			return fmt.Errorf(
+				"%w: loop variable %q has unordered access between nodes %q and %q",
+				ErrCompile,
+				variable,
+				p.nodes[first.node].definition.ID,
+				p.nodes[second.node].definition.ID,
+			)
+		}
+	}
+
+	return nil
+}
+
+func (p *Plan) loopAccessesOrderedOrIndependent(
+	first loopVariableAccess,
+	second loopVariableAccess,
+	dominators [][]bool,
+) bool {
+	if first.node == second.node || (!first.write && !second.write) {
+		return true
+	}
+
+	if p.reachable(first.node, second.node) || p.reachable(second.node, first.node) {
+		return true
+	}
+
+	return p.mutuallyExclusive(first.node, second.node, dominators)
+}
+
+func (p *Plan) reachable(source, target int) bool {
+	if source == target {
+		return true
+	}
+
+	visited := make([]bool, len(p.nodes))
+	queue := []int{source}
+	visited[source] = true
+
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+
+		for _, edgeIndex := range p.outgoing[current] {
+			next := p.edges[edgeIndex].to
+			if next == target {
+				return true
+			}
+
+			if !visited[next] {
+				visited[next] = true
+				queue = append(queue, next)
+			}
+		}
+	}
+
+	return false
+}
+
+func (p *Plan) mutuallyExclusive(first, second int, dominators [][]bool) bool {
+	for branch := range p.nodes {
+		if !dominators[first][branch] || !dominators[second][branch] {
+			continue
+		}
+
+		firstRoutes := p.routesReaching(branch, first)
+		secondRoutes := p.routesReaching(branch, second)
+
+		if len(firstRoutes) == 0 || len(secondRoutes) == 0 {
+			continue
+		}
+
+		disjoint := true
+
+		for route := range firstRoutes {
+			if _, shared := secondRoutes[route]; shared {
+				disjoint = false
+				break
+			}
+		}
+
+		if disjoint {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (p *Plan) routesReaching(branch, target int) map[string]struct{} {
+	routes := make(map[string]struct{})
+
+	for _, edgeIndex := range p.outgoing[branch] {
+		edge := p.edges[edgeIndex]
+		if edge.to == target || p.reachable(edge.to, target) {
+			routes[edge.route] = struct{}{}
+		}
+	}
+
+	return routes
 }
 
 func (p *Plan) dominators(topological []int) [][]bool {

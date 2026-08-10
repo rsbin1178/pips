@@ -31,6 +31,14 @@ const (
 	NodeTypeSubWorkflow NodeTypeKey = "sub_workflow"
 	// NodeTypeBatch identifies [BatchNode].
 	NodeTypeBatch NodeTypeKey = "batch"
+	// NodeTypeLoop identifies [LoopNode].
+	NodeTypeLoop NodeTypeKey = "loop"
+	// NodeTypeBreak identifies [BreakNode].
+	NodeTypeBreak NodeTypeKey = "break"
+	// NodeTypeContinue identifies [ContinueNode].
+	NodeTypeContinue NodeTypeKey = "continue"
+	// NodeTypeSetVariable identifies [SetVariableNode].
+	NodeTypeSetVariable NodeTypeKey = "set_variable"
 
 	// RouteSuccess is the normal completion route.
 	RouteSuccess = "success"
@@ -50,6 +58,10 @@ func BuiltinNodeTypes() []NodeType {
 		SelectorNode{},
 		SubWorkflowNode{},
 		BatchNode{},
+		LoopNode{},
+		BreakNode{},
+		ContinueNode{},
+		SetVariableNode{},
 	}
 }
 
@@ -795,6 +807,10 @@ var (
 	_ NodeType = SelectorNode{}
 	_ NodeType = SubWorkflowNode{}
 	_ NodeType = BatchNode{}
+	_ NodeType = LoopNode{}
+	_ NodeType = BreakNode{}
+	_ NodeType = ContinueNode{}
+	_ NodeType = SetVariableNode{}
 
 	_ CompiledNode = (*passthroughNode)(nil)
 	_ CompiledNode = (*compiledAction)(nil)

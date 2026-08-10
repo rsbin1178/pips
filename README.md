@@ -13,8 +13,8 @@ Go building blocks for AI applications. Current packages:
 - **`workflow`** — provider- and Agent-independent declarative DAG runtime for
   fixed processes: strict versioned definitions, typed bindings and schemas,
   versioned host Actions, binary conditions, ordered selectors, exact-revision
-  sub-workflows, bounded array batches, explicit merge semantics,
-  concurrency/retry limits, and process-local lifecycle events.
+  sub-workflows, bounded array batches, bounded stateful loops, explicit merge
+  semantics, concurrency/retry limits, and process-local lifecycle events.
 - **`agent/harness`** — stateful orchestration over the runtime: persistent
   session trees (JSONL) with branching, automatic context compaction, branch
   summaries, streaming with active cancellation, and skill/prompt-template
@@ -65,9 +65,14 @@ Go building blocks for AI applications. Current packages:
 | Merge | `merge` | 独占或并行分支汇合 |
 | SubWorkflow | `sub_workflow` | 同步调用精确 ID/revision/fingerprint 的子流程 |
 | Batch | `batch` | 对数组执行串行或有界并行的内联子流程 |
+| Loop | `loop` | 以数组、次数或无限模式串行执行有界内联流程 |
+| Break | `break` | 提交当前迭代后退出所属 Loop |
+| Continue | `continue` | 结束当前迭代并进入下一轮 |
+| Set Variable | `set_variable` | 原子更新 Loop 局部变量 |
 
-Batch 是数组 map；它不承担 `while`/`until` 状态循环。父流程与子流程共享
-Run ID、取消信号、总步数、叶子并发额度和串行化事件输出。
+Batch 是可并行的数组 map，Loop 是带事务局部变量的串行状态循环；两者不
+允许互相嵌套。父流程与子流程共享 Run ID、取消信号、总步数、叶子并发额度
+和串行化事件输出。
 
 ## Coding agent status
 
