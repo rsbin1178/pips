@@ -945,7 +945,7 @@ func (m *parallelTeamWriteModel) Generate(
 	path := ""
 	for _, candidate := range m.paths {
 		for _, message := range request.Messages {
-			if message.Role == ai.RoleUser && strings.Contains(runtimeMessageText(message), candidate) {
+			if _, isUser := message.(ai.UserMessage); isUser && strings.Contains(runtimeMessageText(message), candidate) {
 				path = candidate
 				break
 			}

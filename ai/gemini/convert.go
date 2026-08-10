@@ -3,6 +3,7 @@ package gemini
 
 import (
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
@@ -51,14 +52,19 @@ func requestFrom(req ai.Request, provider ai.Provider) (any, error) {
 	}
 	opts := requestOptions(req, provider)
 
-	contents, err := contentsFrom(req.Messages)
+	system, conversation, err := req.Messages.SplitSystem()
+	if err != nil {
+		return nil, fmt.Errorf("gemini: invalid messages: %w", err)
+	}
+
+	contents, err := contentsFrom(conversation)
 	if err != nil {
 		return nil, err
 	}
 
 	out := generateRequest{
 		Contents:          contents,
-		SystemInstruction: systemInstructionFrom(req.System),
+		SystemInstruction: systemInstructionFrom(system),
 		CachedContent:     opts.CachedContent,
 		Tools:             toolsFrom(req.Tools),
 		ToolConfig:        toolConfigFrom(req.ToolChoice),
@@ -130,18 +136,27 @@ func outside(value *float64, minimum, maximum float64) bool {
 		*value < minimum || *value > maximum)
 }
 
-func systemInstructionFrom(system string) *wireContent {
-	if system == "" {
+func systemInstructionFrom(system []ai.SystemMessage) *wireContent {
+	if len(system) == 0 {
 		return nil
 	}
 
-	return &wireContent{Parts: []wirePart{{Text: system}}}
+	content := &wireContent{}
+	for _, message := range system {
+		for _, part := range message.Parts {
+			if text, ok := part.(ai.TextPart); ok {
+				content.Parts = append(content.Parts, wirePart{Text: text.Text})
+			}
+		}
+	}
+
+	return content
 }
 
 // contentsFrom converts the conversation. Gemini has only "user" and "model"
 // roles; system prompts move to systemInstruction and tool results become
 // user turns carrying functionResponse parts.
-func contentsFrom(msgs []ai.Message) ([]wireContent, error) {
+func contentsFrom(msgs ai.Messages) ([]wireContent, error) {
 	out := make([]wireContent, 0, len(msgs))
 
 	for _, msg := range msgs {
@@ -159,40 +174,40 @@ func contentsFrom(msgs []ai.Message) ([]wireContent, error) {
 }
 
 func contentFrom(msg ai.Message) (*wireContent, error) {
-	switch msg.Role {
-	case ai.RoleUser:
+	switch msg := msg.(type) {
+	case ai.UserMessage:
 		parts, err := userPartsFrom(msg.Parts)
 		if err != nil {
 			return nil, err
 		}
 
 		return &wireContent{Role: roleUser, Parts: parts}, nil
-	case ai.RoleAssistant:
+	case ai.AssistantMessage:
 		parts, err := modelPartsFrom(msg.Parts)
 		if err != nil {
 			return nil, err
 		}
 
 		return &wireContent{Role: roleModel, Parts: parts}, nil
-	case ai.RoleTool:
+	case ai.ToolMessage:
 		parts, err := functionResponseParts(msg.Parts)
 		if err != nil {
 			return nil, err
 		}
 
 		return &wireContent{Role: roleUser, Parts: parts}, nil
-	case ai.RoleSystem:
-		return &wireContent{Role: roleUser, Parts: []wirePart{{Text: textOf(msg.Parts)}}}, nil
+	case ai.SystemMessage:
+		return nil, errors.New("gemini: system message was not projected to systemInstruction")
 	default:
-		return nil, fmt.Errorf("gemini: unsupported message role %q", msg.Role)
+		return nil, fmt.Errorf("gemini: unsupported message type %T", msg)
 	}
 }
 
-func userPartsFrom(parts []ai.Part) ([]wirePart, error) {
+func userPartsFrom[T ai.Part](parts []T) ([]wirePart, error) {
 	out := make([]wirePart, 0, len(parts))
 
 	for _, part := range parts {
-		switch p := part.(type) {
+		switch p := any(part).(type) {
 		case ai.TextPart:
 			out = append(out, wirePart{Text: p.Text})
 		case ai.ImagePart:
@@ -215,7 +230,7 @@ func userPartsFrom(parts []ai.Part) ([]wirePart, error) {
 	return out, nil
 }
 
-func modelPartsFrom(parts []ai.Part) ([]wirePart, error) {
+func modelPartsFrom(parts []ai.AssistantPart) ([]wirePart, error) {
 	out := make([]wirePart, 0, len(parts))
 
 	for _, part := range parts {
@@ -241,15 +256,10 @@ func modelPartsFrom(parts []ai.Part) ([]wirePart, error) {
 // functionResponseParts converts tool results. Gemini keys a response by the
 // function name (and, for Gemini 3, the original call id), not a tool_call_id,
 // so the synthesized id is decoded back to name+id here.
-func functionResponseParts(parts []ai.Part) ([]wirePart, error) {
+func functionResponseParts(parts []ai.ToolResultPart) ([]wirePart, error) {
 	out := make([]wirePart, 0, len(parts))
 
-	for _, part := range parts {
-		result, ok := part.(ai.ToolResultPart)
-		if !ok {
-			return nil, fmt.Errorf("gemini: tool messages may only contain tool results, got %T", part)
-		}
-
+	for _, result := range parts {
 		out = append(out, wirePart{FunctionResponse: &wireFunctionResp{
 			ID:       originalCallID(result.ToolCallID),
 			Name:     result.Name,

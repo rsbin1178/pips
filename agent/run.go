@@ -611,11 +611,6 @@ func (a *Agent) shouldStop(info RunInfo) (StopReason, bool) {
 
 // toolMessage packs one turn's results into the tool message appended to the
 // session.
-func toolMessage(results []ai.ToolResultPart) ai.Message {
-	parts := make([]ai.Part, 0, len(results))
-	for _, r := range results {
-		parts = append(parts, r)
-	}
-
-	return ai.Message{Role: ai.RoleTool, Parts: parts}
+func toolMessage(results []ai.ToolResultPart) ai.ToolMessage {
+	return ai.ToolResults(results...)
 }

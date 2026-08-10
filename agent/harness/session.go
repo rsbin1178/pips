@@ -168,8 +168,16 @@ func (s *Session) appendUnderLocked(parentID string, e Entry) (string, error) {
 // accounting (recorded for assistant messages so compaction can estimate
 // context size from provider counts).
 func (s *Session) AppendMessage(msg ai.Message, usage *ai.Usage) (string, error) {
-	m := cloneMessage(msg)
-	return s.append(Entry{Kind: KindMessage, Message: &m, Usage: usage})
+	if err := ai.ValidateMessage(msg); err != nil {
+		return "", fmt.Errorf("%w: %w", ErrInvalidEntry, err)
+	}
+
+	m, err := ai.CloneMessage(msg)
+	if err != nil {
+		return "", fmt.Errorf("%w: %w", ErrInvalidEntry, err)
+	}
+
+	return s.append(Entry{Kind: KindMessage, Message: m, Usage: usage})
 }
 
 // AppendModelChange records a model switch effective for later prompts.
@@ -323,7 +331,7 @@ func (s *Session) CommonAncestor(a, b string) (string, error) {
 // Context is the model-visible reconstruction of the active branch.
 type Context struct {
 	// Messages is the conversation to send, oldest first.
-	Messages []ai.Message
+	Messages ai.Messages
 	// Provider and ModelID identify the model the branch last ran with (from
 	// model_change entries and assistant responses); empty when unknown.
 	Provider ai.Provider
@@ -355,7 +363,7 @@ func (s *Session) Context() (Context, error) {
 	for _, e := range contextEntries(path) {
 		switch e.Kind {
 		case KindMessage:
-			out.Messages = append(out.Messages, cloneMessage(*e.Message))
+			out.Messages = append(out.Messages, cloneMessage(e.Message))
 		case KindCompaction:
 			out.Messages = append(out.Messages, ai.UserText(CompactionPrefix+e.Summary))
 		case KindBranchSummary:

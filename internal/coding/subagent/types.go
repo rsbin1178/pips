@@ -276,8 +276,8 @@ type ToolActivity struct {
 	Turn   int
 	Call   ai.ToolCallPart
 	Status ToolStatus
-	Update ai.Message
-	Result ai.Message
+	Update []ai.Part
+	Result ai.ToolResultPart
 }
 
 // Activity is an immutable point-in-time view of an active child execution.

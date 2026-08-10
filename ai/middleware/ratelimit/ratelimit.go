@@ -122,10 +122,15 @@ func countTokens(ctx context.Context, m ai.LanguageModel, req ai.Request) int {
 		}
 	}
 
-	total := len(req.System)
+	total := 0
 
 	for _, msg := range req.Messages {
-		for _, part := range msg.Parts {
+		parts, err := ai.MessageParts(msg)
+		if err != nil {
+			continue
+		}
+
+		for _, part := range parts {
 			if text, ok := part.(ai.TextPart); ok {
 				total += len(text.Text)
 			}

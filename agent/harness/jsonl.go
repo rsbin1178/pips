@@ -165,7 +165,12 @@ func OpenJSONL(path string) (*JSONLStore, error) {
 			return nil, fmt.Errorf("harness: %s: line %d: %w", path, i+2, err)
 		}
 
-		entries = append(entries, fromEnvelope(env))
+		entry, err := fromEnvelope(env)
+		if err != nil {
+			return nil, fmt.Errorf("harness: %s: line %d: %w", path, i+2, err)
+		}
+
+		entries = append(entries, entry)
 	}
 
 	store := &JSONLStore{
@@ -189,7 +194,12 @@ func (s *JSONLStore) Append(e Entry) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if err := s.writeLine(toEnvelope(e)); err != nil {
+	envelope, err := toEnvelope(e)
+	if err != nil {
+		return err
+	}
+
+	if err := s.writeLine(envelope); err != nil {
 		return err
 	}
 
@@ -411,7 +421,12 @@ func ReadJSONLPrefix(path string, limits JSONLPrefixLimits) (JSONLPrefix, error)
 				"harness: %s: entry %d: %w", path, len(result.Entries)+1, err,
 			)
 		}
-		entry := fromEnvelope(env)
+		entry, err := fromEnvelope(env)
+		if err != nil {
+			return JSONLPrefix{}, fmt.Errorf(
+				"harness: %s: entry %d: %w", path, len(result.Entries)+1, err,
+			)
+		}
 		if err := validateStoredEntry(entry, seen, result.Entries); err != nil {
 			return JSONLPrefix{}, fmt.Errorf(
 				"%w: entry %d: %w", ErrSessionCorrupt, len(result.Entries)+1, err,

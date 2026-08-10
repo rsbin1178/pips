@@ -84,7 +84,7 @@ type weatherArgs struct {
 	City string `json:"city"`
 }
 
-func execute(call ai.ToolCallPart) (ai.Message, error) {
+func execute(call ai.ToolCallPart) (ai.ToolMessage, error) {
 	if call.Name != weatherTool.Name {
 		return ai.ToolResultError(call.ID, call.Name, "unknown tool"),
 			fmt.Errorf("unknown tool %q", call.Name)
@@ -101,7 +101,7 @@ func execute(call ai.ToolCallPart) (ai.Message, error) {
 }
 
 func run(ctx context.Context, model ai.LanguageModel, prompt string) (string, error) {
-	messages := []ai.Message{ai.UserText(prompt)}
+	messages := ai.Messages{ai.UserText(prompt)}
 
 	for range 5 {
 		resp, err := model.Generate(ctx, ai.Request{
@@ -203,7 +203,7 @@ type Recipe struct {
 }
 
 recipe, resp, err := ai.GenerateTyped[Recipe](ctx, model, ai.Request{
-	Messages: []ai.Message{
+	Messages: ai.Messages{
 		ai.UserText("提取：四人份番茄意面，需要意面、番茄和橄榄油。"),
 	},
 })

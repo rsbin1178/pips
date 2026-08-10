@@ -629,7 +629,7 @@ func (m *conflictingDependencyModel) Generate(
 ) (*ai.Response, error) {
 	key := ""
 	for _, message := range request.Messages {
-		if message.Role != ai.RoleUser {
+		if _, isUser := message.(ai.UserMessage); !isUser {
 			continue
 		}
 		text := runtimeMessageText(message)

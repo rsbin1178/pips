@@ -168,7 +168,7 @@ type SessionClosed struct {
 // SessionTreeChanged replaces the reducer's durable bounded tree projection.
 type SessionTreeChanged struct {
 	Tree          SessionTree       `json:"tree"`
-	Transcript    []ai.Message      `json:"transcript"`
+	Transcript    ai.Messages       `json:"transcript"`
 	ContextTokens int               `json:"context_tokens"`
 	Tasks         tasklist.Snapshot `json:"tasks"`
 }
@@ -314,16 +314,16 @@ type ToolStarted struct {
 
 // ToolUpdated carries best-effort progress for an active tool call.
 type ToolUpdated struct {
-	Turn   int        `json:"turn"`
-	Call   ToolCall   `json:"call"`
-	Update ai.Message `json:"update"`
+	Turn   int       `json:"turn"`
+	Call   ToolCall  `json:"call"`
+	Update []ai.Part `json:"-"`
 }
 
 // ToolCompleted carries the final tool-result message for one call.
 type ToolCompleted struct {
-	Turn   int        `json:"turn"`
-	Call   ToolCall   `json:"call"`
-	Result ai.Message `json:"result"`
+	Turn   int            `json:"turn"`
+	Call   ToolCall       `json:"call"`
+	Result ai.ToolMessage `json:"result"`
 }
 
 // SubagentLifecycle is one content-bounded specialist lifecycle projection.
@@ -794,12 +794,12 @@ func validatePayload(eventType EventType, payload EventPayload) error {
 		}
 	case ToolUpdated:
 		if eventType != EventToolUpdated || value.Turn < 1 || validateToolCall(value.Call) != nil ||
-			validateToolMessage(value.Update, value.Call.ID, false) != nil {
+			len(value.Update) > maxEventItems || validateParts(value.Update, 0) != nil {
 			return invalidPayload(eventType, payload)
 		}
 	case ToolCompleted:
 		if eventType != EventToolCompleted || value.Turn < 1 || validateToolCall(value.Call) != nil ||
-			validateToolMessage(value.Result, value.Call.ID, true) != nil {
+			validateToolMessage(value.Result, value.Call.ID) != nil {
 			return invalidPayload(eventType, payload)
 		}
 	case SubagentLifecycle:
@@ -1464,17 +1464,19 @@ func validTokenUsage(usage TokenUsage) bool {
 }
 
 func validateMessage(message ai.Message) error {
-	switch message.Role {
-	case ai.RoleSystem, ai.RoleUser, ai.RoleAssistant, ai.RoleTool:
-	default:
-		return errors.New("invalid role")
+	if err := ai.ValidateMessage(message); err != nil {
+		return err
 	}
 
-	if len(message.Parts) > maxEventItems {
+	parts, err := ai.MessageParts(message)
+	if err != nil {
+		return err
+	}
+	if len(parts) > maxEventItems {
 		return errors.New("too many message parts")
 	}
 
-	return validateParts(message.Parts, 0)
+	return validateParts(parts, 0)
 }
 
 //nolint:gocyclo // The sealed ai.Part taxonomy is exhaustively validated.
@@ -1586,21 +1588,16 @@ func validateToolCall(call ToolCall) error {
 	return nil
 }
 
-func validateToolMessage(message ai.Message, callID string, terminal bool) error {
-	if err := validateMessage(message); err != nil || message.Role != ai.RoleTool {
+func validateToolMessage(message ai.ToolMessage, callID string) error {
+	if err := validateMessage(message); err != nil {
 		return errors.New("invalid tool message")
-	}
-
-	if !terminal {
-		return nil
 	}
 
 	if len(message.Parts) != 1 {
 		return errors.New("terminal tool message must contain one result")
 	}
 
-	result, ok := message.Parts[0].(ai.ToolResultPart)
-	if !ok || result.ToolCallID != callID {
+	if message.Parts[0].ToolCallID != callID {
 		return errors.New("tool result does not match call")
 	}
 

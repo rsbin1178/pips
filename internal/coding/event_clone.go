@@ -62,12 +62,17 @@ func cloneEventPayload(payload EventPayload) EventPayload {
 		return value
 	case ToolUpdated:
 		value.Call = cloneToolCall(value.Call)
-		value.Update = cloneMessage(value.Update)
+		value.Update, _ = ai.CloneParts(value.Update)
 
 		return value
 	case ToolCompleted:
 		value.Call = cloneToolCall(value.Call)
-		value.Result = cloneMessage(value.Result)
+		cloned, err := ai.CloneMessage(value.Result)
+		if err == nil {
+			if result, ok := cloned.(ai.ToolMessage); ok {
+				value.Result = result
+			}
+		}
 
 		return value
 	case SubagentLifecycle:
@@ -145,9 +150,12 @@ func cloneWorkspaceChanged(value WorkspaceChanged) WorkspaceChanged {
 }
 
 func cloneMessage(message ai.Message) ai.Message {
-	message.Parts = cloneParts(message.Parts)
+	cloned, err := ai.CloneMessage(message)
+	if err != nil {
+		return message
+	}
 
-	return message
+	return cloned
 }
 
 func cloneParts(parts []ai.Part) []ai.Part {
@@ -210,10 +218,22 @@ func toolCallFromAI(call ai.ToolCallPart) ToolCall {
 	return ToolCall{ID: call.ID, Name: call.Name, Arguments: slices.Clone(call.Args)}
 }
 
-func toolResultMessage(result ai.ToolResultPart) ai.Message {
-	return ai.Message{Role: ai.RoleTool, Parts: []ai.Part{cloneParts([]ai.Part{result})[0]}}
+func toolResultMessage(result ai.ToolResultPart) ai.ToolMessage {
+	cloned, err := ai.CloneParts([]ai.Part{result})
+	if err != nil {
+		return ai.ToolResults(result)
+	}
+
+	part, ok := cloned[0].(ai.ToolResultPart)
+	if !ok {
+		return ai.ToolResults(result)
+	}
+
+	return ai.ToolResults(part)
 }
 
-func toolUpdateMessage(parts []ai.Part) ai.Message {
-	return ai.Message{Role: ai.RoleTool, Parts: cloneParts(parts)}
+func toolUpdateMessage(parts []ai.Part) []ai.Part {
+	cloned, _ := ai.CloneParts(parts)
+
+	return cloned
 }

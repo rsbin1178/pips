@@ -109,7 +109,7 @@ func TestHarnessSystemFuncSeesResources(t *testing.T) {
 	_, err = h.Prompt(t.Context(), "hi")
 	require.NoError(t, err)
 
-	system := model.Requests()[0].System
+	system := requestSystemText(t, model.Requests()[0])
 	assert.Contains(t, system, "assembled")
 	assert.Contains(t, system, "<name>s1</name>", "skills block appended")
 }
@@ -129,7 +129,7 @@ func TestHarnessSystemSuffixFollowsSkillsIndex(t *testing.T) {
 	_, err = h.Prompt(t.Context(), "hi")
 	require.NoError(t, err)
 
-	system := model.Requests()[0].System
+	system := requestSystemText(t, model.Requests()[0])
 	assert.Less(t, strings.Index(system, "stable-base"), strings.Index(system, "<available-skills>"))
 	assert.Less(t, strings.Index(system, "</available-skills>"), strings.Index(system, "interaction-suffix"))
 }

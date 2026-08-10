@@ -607,10 +607,12 @@ func hookPromptProjection(messages []ai.Message) (string, bool, bool) {
 	truncated := false
 	hasNonTextContent := false
 	for _, message := range messages {
-		if message.Role != ai.RoleUser {
+		user, ok := message.(ai.UserMessage)
+		if !ok {
 			continue
 		}
-		for _, part := range message.Parts {
+
+		for _, part := range user.Parts {
 			text, ok := part.(ai.TextPart)
 			if !ok {
 				hasNonTextContent = true
@@ -660,8 +662,8 @@ func (r *Runtime) lastHookAssistantMessage() string {
 		return ""
 	}
 	for index := len(contextValue.Messages) - 1; index >= 0; index-- {
-		message := contextValue.Messages[index]
-		if message.Role != ai.RoleAssistant {
+		message, ok := contextValue.Messages[index].(ai.AssistantMessage)
+		if !ok {
 			continue
 		}
 		var value strings.Builder

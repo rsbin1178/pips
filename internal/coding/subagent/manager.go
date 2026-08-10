@@ -1517,7 +1517,7 @@ func (t *runTracker) trackActivityLocked(event agent.Event) bool {
 }
 
 func (t *runTracker) trackMessageActivityLocked(event agent.MessageCommitted) bool {
-	if event.Message.Role != ai.RoleAssistant || messageHasToolCall(event.Message) {
+	if _, isAssistant := event.Message.(ai.AssistantMessage); !isAssistant || messageHasToolCall(event.Message) {
 		return false
 	}
 
@@ -1537,9 +1537,10 @@ func (t *runTracker) trackToolStartLocked(envelope agent.Event, event agent.Tool
 func (t *runTracker) trackToolUpdateLocked(envelope agent.Event, event agent.ToolUpdated) bool {
 	index := t.upsertToolLocked(envelope.RunID, event.Turn, event.Call, ToolStatusRunning)
 	if index >= 0 {
-		t.activity.Tools[index].Update = cloneTranscriptMessage(ai.Message{
-			Role: ai.RoleTool, Parts: event.Update,
-		})
+		update, err := ai.CloneParts(event.Update)
+		if err == nil {
+			t.activity.Tools[index].Update = update
+		}
 	}
 	t.activity.Phase = ActivityPhaseWorking
 
@@ -1549,9 +1550,12 @@ func (t *runTracker) trackToolUpdateLocked(envelope agent.Event, event agent.Too
 func (t *runTracker) trackToolCompletedLocked(envelope agent.Event, event agent.ToolCompleted) bool {
 	index := t.upsertToolLocked(envelope.RunID, event.Turn, event.Call, ToolStatusCompleted)
 	if index >= 0 {
-		t.activity.Tools[index].Result = cloneTranscriptMessage(ai.Message{
-			Role: ai.RoleTool, Parts: []ai.Part{event.Result},
-		})
+		result, err := ai.CloneParts([]ai.Part{event.Result})
+		if err == nil {
+			if part, ok := result[0].(ai.ToolResultPart); ok {
+				t.activity.Tools[index].Result = part
+			}
+		}
 	}
 	t.activity.Phase = ActivityPhaseThinking
 
@@ -1620,7 +1624,12 @@ func activityEventTime(value time.Time) time.Time {
 }
 
 func messageHasToolCall(message ai.Message) bool {
-	for _, part := range message.Parts {
+	assistant, ok := message.(ai.AssistantMessage)
+	if !ok {
+		return false
+	}
+
+	for _, part := range assistant.Parts {
 		if _, ok := part.(ai.ToolCallPart); ok {
 			return true
 		}
@@ -1742,8 +1751,13 @@ func cloneActivity(value Activity) Activity {
 	value.Tools = slices.Clone(value.Tools)
 	for index := range value.Tools {
 		value.Tools[index].Call.Args = slices.Clone(value.Tools[index].Call.Args)
-		value.Tools[index].Update = cloneTranscriptMessage(value.Tools[index].Update)
-		value.Tools[index].Result = cloneTranscriptMessage(value.Tools[index].Result)
+		value.Tools[index].Update, _ = ai.CloneParts(value.Tools[index].Update)
+		result, err := ai.CloneParts([]ai.Part{value.Tools[index].Result})
+		if err == nil {
+			if part, ok := result[0].(ai.ToolResultPart); ok {
+				value.Tools[index].Result = part
+			}
+		}
 	}
 
 	return value
@@ -2093,7 +2107,12 @@ func emitRawObserver(ctx context.Context, observer func(context.Context, agent.E
 func messageText(message ai.Message) string {
 	var result strings.Builder
 
-	for _, part := range message.Parts {
+	parts, err := ai.MessageParts(message)
+	if err != nil {
+		return ""
+	}
+
+	for _, part := range parts {
 		if text, ok := part.(ai.TextPart); ok {
 			result.WriteString(text.Text)
 		}

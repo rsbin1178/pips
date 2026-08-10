@@ -16,7 +16,7 @@ func TestNewSessionRejectsCorruptGraphs(t *testing.T) {
 
 	now := time.Now().UTC()
 	message := ai.UserText("hello")
-	valid := Entry{Kind: KindMessage, ID: "one", Time: now, Message: &message}
+	valid := Entry{Kind: KindMessage, ID: "one", Time: now, Message: message}
 
 	tests := []struct {
 		name    string
@@ -64,7 +64,9 @@ func TestSessionDefensiveCopiesInputsAndOutputs(t *testing.T) {
 	usage.InputTokens = 99
 
 	entries := session.Entries()
-	call, ok := entries[0].Message.Parts[0].(ai.ToolCallPart)
+	assistant, ok := entries[0].Message.(ai.AssistantMessage)
+	require.True(t, ok)
+	call, ok := assistant.Parts[0].(ai.ToolCallPart)
 	require.True(t, ok)
 	assert.JSONEq(t, `{"path":"main.go"}`, string(call.Args))
 	assert.Equal(t, 12, entries[0].Usage.InputTokens)
@@ -73,7 +75,9 @@ func TestSessionDefensiveCopiesInputsAndOutputs(t *testing.T) {
 	entries[0].Usage.InputTokens = 77
 	again, ok := session.Entry(entries[0].ID)
 	require.True(t, ok)
-	againCall, ok := again.Message.Parts[0].(ai.ToolCallPart)
+	againAssistant, ok := again.Message.(ai.AssistantMessage)
+	require.True(t, ok)
+	againCall, ok := againAssistant.Parts[0].(ai.ToolCallPart)
 	require.True(t, ok)
 	assert.JSONEq(t, `{"path":"main.go"}`, string(againCall.Args))
 	assert.Equal(t, 12, again.Usage.InputTokens)

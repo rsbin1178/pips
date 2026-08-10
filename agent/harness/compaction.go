@@ -69,7 +69,12 @@ const estimatedImageChars = 4800
 func EstimateTokens(msg ai.Message) int {
 	chars := 0
 
-	for _, part := range msg.Parts {
+	parts, err := ai.MessageParts(msg)
+	if err != nil {
+		return 0
+	}
+
+	for _, part := range parts {
 		switch p := part.(type) {
 		case ai.TextPart:
 			chars += len(p.Text)
@@ -154,14 +159,14 @@ func entryAfter(path []Entry, id string, index int) bool {
 }
 
 // entryContextMessages renders an entry's model-visible messages.
-func entryContextMessages(e Entry) []ai.Message {
+func entryContextMessages(e Entry) ai.Messages {
 	switch e.Kind {
 	case KindMessage:
-		return []ai.Message{*e.Message}
+		return ai.Messages{e.Message}
 	case KindCompaction:
-		return []ai.Message{ai.UserText(CompactionPrefix + e.Summary)}
+		return ai.Messages{ai.UserText(CompactionPrefix + e.Summary)}
 	case KindBranchSummary:
-		return []ai.Message{ai.UserText(BranchSummaryPrefix + e.Summary)}
+		return ai.Messages{ai.UserText(BranchSummaryPrefix + e.Summary)}
 	default:
 		return nil
 	}
@@ -173,10 +178,10 @@ type CompactionPlan struct {
 	// FirstKeptID is the entry where retained history starts.
 	FirstKeptID string
 	// ToSummarize is the history being folded into the summary.
-	ToSummarize []ai.Message
+	ToSummarize ai.Messages
 	// TurnPrefix holds the leading messages of a split turn, summarized
 	// separately (see SplitTurn).
-	TurnPrefix []ai.Message
+	TurnPrefix ai.Messages
 	// SplitTurn reports that the cut lands inside a turn: its prefix is
 	// summarized while its tail is retained.
 	SplitTurn bool
@@ -269,7 +274,12 @@ func isCutCandidate(e Entry) bool {
 	case KindBranchSummary:
 		return true
 	case KindMessage:
-		return e.Message.Role == ai.RoleUser || e.Message.Role == ai.RoleAssistant
+		switch e.Message.(type) {
+		case ai.UserMessage, ai.AssistantMessage:
+			return true
+		default:
+			return false
+		}
 	default:
 		return false
 	}
@@ -299,7 +309,7 @@ func findCutPoint(path []Entry, start, keepRecent int) cutPoint {
 			continue
 		}
 
-		accumulated += EstimateTokens(*path[i].Message)
+		accumulated += EstimateTokens(path[i].Message)
 		if accumulated < keepRecent {
 			continue
 		}
@@ -315,7 +325,8 @@ func findCutPoint(path []Entry, start, keepRecent int) cutPoint {
 	}
 
 	entry := path[cut]
-	isUser := entry.Kind == KindMessage && entry.Message.Role == ai.RoleUser
+	_, isUser := entry.Message.(ai.UserMessage)
+	isUser = entry.Kind == KindMessage && isUser
 
 	if isUser {
 		return cutPoint{firstKept: cut, turnStart: -1}
@@ -335,7 +346,7 @@ func findTurnStart(path []Entry, index, start int) int {
 			return i
 		}
 
-		if e.Kind == KindMessage && e.Message.Role == ai.RoleUser {
+		if _, isUser := e.Message.(ai.UserMessage); e.Kind == KindMessage && isUser {
 			return i
 		}
 	}
@@ -456,7 +467,7 @@ type summaryRequest struct {
 	turnPrefix   bool
 }
 
-func summarizeMessages(ctx context.Context, model ai.LanguageModel, msgs []ai.Message, req summaryRequest) (string, error) {
+func summarizeMessages(ctx context.Context, model ai.LanguageModel, msgs ai.Messages, req summaryRequest) (string, error) {
 	var b strings.Builder
 
 	b.WriteString("<conversation>\n")
@@ -484,8 +495,7 @@ func summarizeMessages(ctx context.Context, model ai.LanguageModel, msgs []ai.Me
 	}
 
 	resp, err := model.Generate(ctx, ai.Request{
-		System:    summarizationSystemPrompt,
-		Messages:  []ai.Message{ai.UserText(b.String())},
+		Messages:  ai.Messages{ai.SystemText(summarizationSystemPrompt), ai.UserText(b.String())},
 		MaxTokens: ai.Ptr(req.maxTokens),
 	})
 	if err != nil {
@@ -497,15 +507,20 @@ func summarizeMessages(ctx context.Context, model ai.LanguageModel, msgs []ai.Me
 
 // serializeConversation renders messages as plain text for summarization
 // prompts.
-func serializeConversation(msgs []ai.Message) string {
+func serializeConversation(msgs ai.Messages) string {
 	var b strings.Builder
 
 	for _, msg := range msgs {
 		b.WriteByte('[')
-		b.WriteString(string(msg.Role))
+		b.WriteString(messageLabel(msg))
 		b.WriteString("]\n")
 
-		for _, part := range msg.Parts {
+		parts, err := ai.MessageParts(msg)
+		if err != nil {
+			continue
+		}
+
+		for _, part := range parts {
 			switch p := part.(type) {
 			case ai.TextPart:
 				b.WriteString(p.Text)
@@ -538,4 +553,19 @@ func serializeConversation(msgs []ai.Message) string {
 	}
 
 	return strings.TrimRight(b.String(), "\n")
+}
+
+func messageLabel(message ai.Message) string {
+	switch message.(type) {
+	case ai.SystemMessage:
+		return "system"
+	case ai.UserMessage:
+		return "user"
+	case ai.AssistantMessage:
+		return "assistant"
+	case ai.ToolMessage:
+		return "tool"
+	default:
+		return "unknown"
+	}
 }

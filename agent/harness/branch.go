@@ -43,7 +43,7 @@ func SummarizeBranch(ctx context.Context, model ai.LanguageModel, sess *Session,
 		}
 	}
 
-	var msgs []ai.Message
+	var msgs ai.Messages
 	for _, e := range path {
 		msgs = append(msgs, entryContextMessages(e)...)
 	}
@@ -55,8 +55,7 @@ func SummarizeBranch(ctx context.Context, model ai.LanguageModel, sess *Session,
 	prompt := "<conversation>\n" + serializeConversation(msgs) + "\n</conversation>\n\n" + branchSummaryPrompt
 
 	resp, err := model.Generate(ctx, ai.Request{
-		System:   summarizationSystemPrompt,
-		Messages: []ai.Message{ai.UserText(prompt)},
+		Messages: ai.Messages{ai.SystemText(summarizationSystemPrompt), ai.UserText(prompt)},
 	})
 	if err != nil {
 		return "", fmt.Errorf("harness: branch summarization: %w", err)

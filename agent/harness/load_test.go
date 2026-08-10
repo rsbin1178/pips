@@ -319,7 +319,7 @@ func TestWithSkillsFSReachesSystemPrompt(t *testing.T) {
 	_, err = h.Prompt(t.Context(), "hi")
 	require.NoError(t, err)
 
-	system := model.Requests()[0].System
+	system := requestSystemText(t, model.Requests()[0])
 	assert.Contains(t, system, "<name>review</name>")
 	assert.Contains(t, system, `Use the "skill" tool`)
 	assert.NotContains(t, system, "<location>")

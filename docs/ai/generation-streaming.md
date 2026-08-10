@@ -12,8 +12,10 @@ func answer(ctx context.Context, model ai.LanguageModel, question string) (*ai.R
 	defer cancel()
 
 	resp, err := model.Generate(ctx, ai.Request{
-		System:      "回答必须简洁、准确。",
-		Messages:    []ai.Message{ai.UserText(question)},
+		Messages: ai.Messages{
+			ai.SystemText("回答必须简洁、准确。"),
+			ai.UserText(question),
+		},
 		Temperature: ai.Ptr(0.2),
 		MaxTokens:  ai.Ptr(500),
 	})

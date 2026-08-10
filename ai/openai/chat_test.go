@@ -134,8 +134,11 @@ func TestChatGenerateText(t *testing.T) {
 	model := newTestModel(t, serveJSON(t, chatTextResponse, "/v1/chat/completions", &captured))
 
 	resp, err := model.Generate(t.Context(), ai.Request{
-		System:      "You are terse.",
-		Messages:    []ai.Message{ai.UserText("Capital of France?")},
+		Messages: ai.Messages{
+			ai.SystemText("You are terse."),
+			ai.SystemText("Answer in one sentence."),
+			ai.UserText("Capital of France?"),
+		},
 		Temperature: ai.Ptr(0.2),
 		MaxTokens:   ai.Ptr(100),
 	})
@@ -147,9 +150,10 @@ func TestChatGenerateText(t *testing.T) {
 	assert.InDelta(t, 100, as[float64](t, captured["max_completion_tokens"]), 1e-9)
 	assert.NotContains(t, captured, "max_tokens")
 	messages := as[[]any](t, captured["messages"])
-	require.Len(t, messages, 2)
+	require.Len(t, messages, 3)
 	assert.Equal(t, map[string]any{"role": "system", "content": "You are terse."}, messages[0])
-	assert.Equal(t, map[string]any{"role": "user", "content": "Capital of France?"}, messages[1])
+	assert.Equal(t, map[string]any{"role": "system", "content": "Answer in one sentence."}, messages[1])
+	assert.Equal(t, map[string]any{"role": "user", "content": "Capital of France?"}, messages[2])
 
 	// Normalized response.
 	assert.Equal(t, "chatcmpl-abc123", resp.ID)

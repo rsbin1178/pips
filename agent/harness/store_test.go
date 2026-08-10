@@ -23,15 +23,45 @@ func buildSession(t *testing.T) *harness.Session {
 	return sess
 }
 
-func appendText(t *testing.T, sess *harness.Session, role ai.Role, text string, usage *ai.Usage) string {
+func appendText(t *testing.T, sess *harness.Session, messageType ai.Message, text string, usage *ai.Usage) string {
 	t.Helper()
 
-	msg := ai.Message{Role: role, Parts: []ai.Part{ai.Text(text)}}
+	var message ai.Message
+	switch messageType.(type) {
+	case ai.UserMessage:
+		message = ai.UserText(text)
+	case ai.AssistantMessage:
+		message = ai.AssistantText(text)
+	default:
+		t.Fatalf("unsupported message type %T", messageType)
+	}
 
-	id, err := sess.AppendMessage(msg, usage)
+	id, err := sess.AppendMessage(message, usage)
 	require.NoError(t, err)
 
 	return id
+}
+
+func firstTextPart(t *testing.T, message ai.Message) ai.TextPart {
+	t.Helper()
+
+	parts, err := ai.MessageParts(message)
+	require.NoError(t, err)
+	require.NotEmpty(t, parts)
+
+	text, ok := parts[0].(ai.TextPart)
+	require.True(t, ok)
+
+	return text
+}
+
+func requestSystemText(t *testing.T, request ai.Request) string {
+	t.Helper()
+
+	system, _, err := request.Messages.SplitSystem()
+	require.NoError(t, err)
+
+	return ai.JoinSystemText(system)
 }
 
 func TestJSONLRoundTripAllKinds(t *testing.T) {
@@ -46,8 +76,8 @@ func TestJSONLRoundTripAllKinds(t *testing.T) {
 	require.NoError(t, err)
 
 	u := ai.Usage{InputTokens: 10, OutputTokens: 5}
-	first := appendText(t, sess, ai.RoleUser, "hi", nil)
-	appendText(t, sess, ai.RoleAssistant, "hello", &u)
+	first := appendText(t, sess, ai.UserMessage{}, "hi", nil)
+	appendText(t, sess, ai.AssistantMessage{}, "hello", &u)
 
 	_, err = sess.AppendModelChange(ai.ProviderOpenAI, "gpt-4o")
 	require.NoError(t, err)
@@ -222,8 +252,8 @@ func TestReadJSONLPrefixIsValidatedBoundedAndDefensive(t *testing.T) {
 	require.NoError(t, err)
 	sess, err := harness.NewSession(store)
 	require.NoError(t, err)
-	appendText(t, sess, ai.RoleUser, "first", nil)
-	appendText(t, sess, ai.RoleAssistant, "second", nil)
+	appendText(t, sess, ai.UserMessage{}, "first", nil)
+	appendText(t, sess, ai.AssistantMessage{}, "second", nil)
 	require.NoError(t, sess.SetName("bounded"))
 	require.NoError(t, store.Close())
 
@@ -239,12 +269,14 @@ func TestReadJSONLPrefixIsValidatedBoundedAndDefensive(t *testing.T) {
 	assert.True(t, bounded.Truncated)
 	require.Len(t, bounded.Entries, 1)
 	bounded.Metadata.Extra["workspace"] = "changed"
-	bounded.Entries[0].Message.Parts[0] = ai.Text("changed")
+	message, ok := bounded.Entries[0].Message.(ai.UserMessage)
+	require.True(t, ok)
+	message.Parts[0] = ai.Text("changed")
 
 	again, err := harness.ReadJSONLPrefix(path, harness.JSONLPrefixLimits{MaxEntries: 1})
 	require.NoError(t, err)
 	assert.Equal(t, "w", again.Metadata.Extra["workspace"])
-	assert.Equal(t, ai.Text("first"), again.Entries[0].Message.Parts[0])
+	assert.Equal(t, ai.Text("first"), firstTextPart(t, again.Entries[0].Message))
 }
 
 func mustReadFile(t *testing.T, path string) []byte {
@@ -270,7 +302,7 @@ func TestRepoLifecycle(t *testing.T) {
 
 	sess, err := harness.NewSession(store)
 	require.NoError(t, err)
-	appendText(t, sess, ai.RoleUser, "hi", nil)
+	appendText(t, sess, ai.UserMessage{}, "hi", nil)
 	require.NoError(t, store.Close())
 
 	metas, err = repo.List()
@@ -299,8 +331,8 @@ func TestRepoFork(t *testing.T) {
 	sess, err := harness.NewSession(store)
 	require.NoError(t, err)
 
-	first := appendText(t, sess, ai.RoleUser, "one", nil)
-	appendText(t, sess, ai.RoleAssistant, "two", nil)
+	first := appendText(t, sess, ai.UserMessage{}, "one", nil)
+	appendText(t, sess, ai.AssistantMessage{}, "two", nil)
 	require.NoError(t, store.Close())
 
 	// Fork at the first entry: only that path is copied.
@@ -329,11 +361,11 @@ func TestRepoForkNormalizesReferencesOutsideSelectedBranch(t *testing.T) {
 	require.NoError(t, err)
 	sess, err := harness.NewSession(store)
 	require.NoError(t, err)
-	root := appendText(t, sess, ai.RoleUser, "root", nil)
-	abandoned := appendText(t, sess, ai.RoleAssistant, "old branch", nil)
+	root := appendText(t, sess, ai.UserMessage{}, "root", nil)
+	abandoned := appendText(t, sess, ai.AssistantMessage{}, "old branch", nil)
 	require.NoError(t, sess.MoveTo(root, "old branch summary"))
 	require.NoError(t, sess.SetLabel(abandoned, "outside selected path"))
-	current := appendText(t, sess, ai.RoleAssistant, "current branch", nil)
+	current := appendText(t, sess, ai.AssistantMessage{}, "current branch", nil)
 	before := sess.Entries()
 
 	forked, err := repo.ForkSession(sess, current, "fork", nil)

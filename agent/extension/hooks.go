@@ -238,32 +238,13 @@ func composeTransforms(values []func(context.Context, []ai.Message) ([]ai.Messag
 func cloneMessages(messages []ai.Message) []ai.Message {
 	cloned := make([]ai.Message, len(messages))
 	for i, message := range messages {
-		cloned[i] = message
-		cloned[i].Parts = cloneParts(message.Parts)
-	}
-
-	return cloned
-}
-
-func cloneParts(parts []ai.Part) []ai.Part {
-	cloned := make([]ai.Part, len(parts))
-	for i, part := range parts {
-		switch value := part.(type) {
-		case ai.ImagePart:
-			value.Source.Data = slices.Clone(value.Source.Data)
-			cloned[i] = value
-		case ai.FilePart:
-			value.Source.Data = slices.Clone(value.Source.Data)
-			cloned[i] = value
-		case ai.ToolCallPart:
-			value.Args = slices.Clone(value.Args)
-			cloned[i] = value
-		case ai.ToolResultPart:
-			value.Content = cloneParts(value.Content)
-			cloned[i] = value
-		default:
-			cloned[i] = value
+		messageCopy, err := ai.CloneMessage(message)
+		if err != nil {
+			cloned[i] = message
+			continue
 		}
+
+		cloned[i] = messageCopy
 	}
 
 	return cloned

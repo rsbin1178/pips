@@ -386,7 +386,7 @@ func tasksFromPath(path []harness.Entry) tasklist.Snapshot {
 		if entry.Kind != harness.KindMessage || entry.Message == nil {
 			continue
 		}
-		if update, ok := tasklist.FromMessage(*entry.Message); ok {
+		if update, ok := tasklist.FromMessage(entry.Message); ok {
 			snapshot = tasklist.FromUpdate(update)
 		}
 	}
@@ -394,11 +394,11 @@ func tasksFromPath(path []harness.Entry) tasklist.Snapshot {
 	return snapshot
 }
 
-func transcriptFromPath(path []harness.Entry) []ai.Message {
-	messages := make([]ai.Message, 0, len(path))
+func transcriptFromPath(path []harness.Entry) ai.Messages {
+	messages := make(ai.Messages, 0, len(path))
 	for _, entry := range path {
 		if entry.Kind == harness.KindMessage && entry.Message != nil {
-			messages = append(messages, cloneMessage(*entry.Message))
+			messages = append(messages, cloneMessage(entry.Message))
 		}
 	}
 	if len(messages) > maxEventItems {

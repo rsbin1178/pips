@@ -1039,7 +1039,12 @@ func childToolFingerprint(call agent.ToolCall) [sha256.Size]byte {
 
 func childMessageText(message ai.Message) string {
 	var value strings.Builder
-	for _, part := range message.Parts {
+	parts, err := ai.MessageParts(message)
+	if err != nil {
+		return ""
+	}
+
+	for _, part := range parts {
 		if text, ok := part.(ai.TextPart); ok {
 			value.WriteString(text.Text)
 		}

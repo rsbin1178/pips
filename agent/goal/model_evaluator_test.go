@@ -58,8 +58,10 @@ func TestModelEvaluatorUsesStructuredToolFreeRequestAndReportsUsage(t *testing.T
 	require.NotNil(t, model.request.ResponseFormat)
 	assert.True(t, model.request.ResponseFormat.Strict)
 	assert.Equal(t, "goal_evaluation", model.request.ResponseFormat.Name)
-	assert.Contains(t, model.request.System, "untrusted data")
-	require.Len(t, model.request.Messages, 1)
+	system, conversation, err := model.request.Messages.SplitSystem()
+	require.NoError(t, err)
+	assert.Contains(t, ai.JoinSystemText(system), "untrusted data")
+	require.Len(t, conversation, 1)
 }
 
 func TestModelEvaluatorRejectsUnsupportedOutcome(t *testing.T) {

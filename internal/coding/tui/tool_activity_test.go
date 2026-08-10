@@ -72,7 +72,7 @@ func TestToolActivitiesReconstructDurableResultWithoutLiveTools(t *testing.T) {
 func TestToolActivitiesClassifyFailureAndMissingResult(t *testing.T) {
 	t.Parallel()
 
-	failedResult := ai.Message{Role: ai.RoleTool, Parts: []ai.Part{ai.ToolResultPart{
+	failedResult := ai.ToolMessage{Parts: []ai.ToolResultPart{{
 		ToolCallID: "failed", Name: "shell", IsError: true,
 		Content: []ai.Part{ai.Text(`{"schema":"pips.coding.tool_result/v1alpha1","ok":false,"tool":"shell","code":"exit_nonzero","execution":{"status":"exited","exit_code":7,"duration_ms":1250,"stdout":{"bytes":0},"stderr":{"bytes":4}}}` + "\n\nstderr:\nboom")},
 	}}}
@@ -97,7 +97,7 @@ func TestToolActivitiesClassifyFailureAndMissingResult(t *testing.T) {
 func TestToolActivitiesClassifyCanceledResultAsInterrupted(t *testing.T) {
 	t.Parallel()
 
-	result := ai.Message{Role: ai.RoleTool, Parts: []ai.Part{ai.ToolResultPart{
+	result := ai.ToolMessage{Parts: []ai.ToolResultPart{{
 		ToolCallID: "call-1", Name: "shell", IsError: true,
 		Content: []ai.Part{ai.Text(
 			`{"schema":"pips.coding.tool_result/v1alpha1","ok":false,"tool":"shell","code":"deadline_exceeded"}` +
@@ -123,7 +123,7 @@ func TestToolActivitiesClassifyCanceledResultAsInterrupted(t *testing.T) {
 func TestShellToolPreflightRejectionIsNotRenderedAsRunFailure(t *testing.T) {
 	t.Parallel()
 
-	result := ai.Message{Role: ai.RoleTool, Parts: []ai.Part{ai.ToolResultPart{
+	result := ai.ToolMessage{Parts: []ai.ToolResultPart{{
 		ToolCallID: "call-1", Name: "shell", IsError: true,
 		Content: []ai.Part{ai.Text(
 			`{"schema":"pips.coding.tool_result/v1alpha1","ok":false,"tool":"shell","code":"invalid_argument","reason":"cwd_not_found","problem":{"field":"cwd","retryable":true,"hint":"choose an existing Workspace directory"}}` +
@@ -523,7 +523,7 @@ func TestTimelineDoesNotRenderPatchCodeForFailedOrMalformedCalls(t *testing.T) {
 
 	tests := []struct {
 		name   string
-		result ai.Message
+		result ai.ToolMessage
 	}{
 		{
 			name: "failed",
@@ -661,11 +661,11 @@ func TestToolActivityRenderingKeepsNoColorGeometry(t *testing.T) {
 	assert.Equal(t, ansi.StringWidth(plain), ansi.StringWidth(colored))
 }
 
-func codingToolResult(name, body string) ai.Message {
+func codingToolResult(name, body string) ai.ToolMessage {
 	return codingToolResultFor(name, name, body)
 }
 
-func codingToolResultFor(callID, name, body string) ai.Message {
+func codingToolResultFor(callID, name, body string) ai.ToolMessage {
 	return ai.ToolResultText(
 		callID,
 		name,

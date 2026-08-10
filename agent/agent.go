@@ -3,7 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
-	"strings"
+	"slices"
 	"time"
 
 	"github.com/rsbin/pips/ai"
@@ -210,7 +210,8 @@ func WithOutputGuardrail(
 }
 
 // WithRequest installs an escape hatch applied to each [ai.Request] just
-// before it is sent, after the agent has set Messages, System, and Tools. Use
+// before it is sent, after the agent has set Messages and Tools. The configured
+// system prompt is the leading [ai.SystemMessage] in Messages. Use
 // it for generation parameters, reasoning configuration, or provider options:
 //
 //	agent.WithRequest(func(req *ai.Request) {
@@ -269,9 +270,15 @@ func (a *Agent) requestWithTools(
 	tools *toolbox,
 	update *runModelRequest,
 ) ai.Request {
+	messages := make(ai.Messages, 0, len(msgs)+1)
+	if a.cfg.system != "" {
+		messages = append(messages, ai.SystemText(a.cfg.system))
+	}
+
+	messages = append(messages, msgs...)
+
 	req := ai.Request{
-		Messages: msgs,
-		System:   a.cfg.system,
+		Messages: messages,
 		Tools:    tools.decls,
 	}
 	if a.cfg.requestFn != nil {
@@ -280,11 +287,21 @@ func (a *Agent) requestWithTools(
 
 	if update != nil {
 		if update.systemSuffix != "" {
-			if strings.TrimSpace(req.System) != "" {
-				req.System += "\n\n"
+			prefix := 0
+			for prefix < len(req.Messages) {
+				if _, ok := req.Messages[prefix].(ai.SystemMessage); !ok {
+					break
+				}
+
+				prefix++
 			}
 
-			req.System += update.systemSuffix
+			suffix := update.systemSuffix
+			if prefix > 0 {
+				suffix = "\n" + suffix
+			}
+
+			req.Messages = slices.Insert(req.Messages, prefix, ai.Message(ai.SystemText(suffix)))
 		}
 
 		if update.toolChoice.Mode != "" {

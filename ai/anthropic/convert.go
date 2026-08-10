@@ -2,6 +2,7 @@
 package anthropic
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/rsbin/pips/ai"
@@ -65,7 +66,12 @@ func (m *Model) requestFrom(req ai.Request, stream bool) (any, error) {
 
 	opts := requestOptions(req, m.provider)
 
-	messages, err := wireMessagesFrom(req.Messages)
+	system, conversation, err := req.Messages.SplitSystem()
+	if err != nil {
+		return nil, fmt.Errorf("anthropic: invalid messages: %w", err)
+	}
+
+	messages, err := wireMessagesFrom(conversation)
 	if err != nil {
 		return nil, err
 	}
@@ -77,7 +83,7 @@ func (m *Model) requestFrom(req ai.Request, stream bool) (any, error) {
 	out := messagesRequest{
 		Model:       m.model,
 		Messages:    messages,
-		System:      systemBlocksFrom(req.System, opts.CacheSystem, opts.CacheTTL),
+		System:      systemBlocksFrom(system, opts.CacheSystem, opts.CacheTTL),
 		MaxTokens:   m.maxTokensFor(req),
 		Temperature: req.Temperature,
 		TopP:        req.TopP,
@@ -104,17 +110,22 @@ func (m *Model) maxTokensFor(req ai.Request) int {
 	return m.maxTokens
 }
 
-func systemBlocksFrom(system string, cache bool, ttl CacheTTL) []wireTextBlock {
-	if system == "" {
-		return nil
+func systemBlocksFrom(system []ai.SystemMessage, cache bool, ttl CacheTTL) []wireTextBlock {
+	var blocks []wireTextBlock
+
+	for _, message := range system {
+		for _, part := range message.Parts {
+			if text, ok := part.(ai.TextPart); ok {
+				blocks = append(blocks, wireTextBlock{Type: blockTypeText, Text: text.Text})
+			}
+		}
 	}
 
-	block := wireTextBlock{Type: blockTypeText, Text: system}
-	if cache {
-		block.CacheControl = cacheControlFrom(ttl)
+	if cache && len(blocks) > 0 {
+		blocks[len(blocks)-1].CacheControl = cacheControlFrom(ttl)
 	}
 
-	return []wireTextBlock{block}
+	return blocks
 }
 
 // markLastMessageCached puts a cache breakpoint on the final block of the
@@ -136,7 +147,7 @@ func cacheControlFrom(ttl CacheTTL) *cacheControl {
 	return &cacheControl{Type: "ephemeral", TTL: string(ttl)}
 }
 
-func wireMessagesFrom(msgs []ai.Message) ([]wireMessage, error) {
+func wireMessagesFrom(msgs ai.Messages) ([]wireMessage, error) {
 	out := make([]wireMessage, 0, len(msgs))
 
 	for _, msg := range msgs {
@@ -155,42 +166,40 @@ func wireMessagesFrom(msgs []ai.Message) ([]wireMessage, error) {
 // expected here (system is a top-level field); tool results become a user
 // message carrying tool_result blocks, as the API requires.
 func wireMessageFrom(msg ai.Message) ([]wireMessage, error) {
-	switch msg.Role {
-	case ai.RoleUser:
+	switch msg := msg.(type) {
+	case ai.UserMessage:
 		blocks, err := userBlocksFrom(msg.Parts)
 		if err != nil {
 			return nil, err
 		}
 
 		return []wireMessage{{Role: "user", Content: blocks}}, nil
-	case ai.RoleAssistant:
+	case ai.AssistantMessage:
 		blocks, err := assistantBlocksFrom(msg.Parts)
 		if err != nil {
 			return nil, err
 		}
 
 		return []wireMessage{{Role: "assistant", Content: blocks}}, nil
-	case ai.RoleTool:
+	case ai.ToolMessage:
 		blocks, err := toolResultBlocksFrom(msg.Parts)
 		if err != nil {
 			return nil, err
 		}
 
 		return []wireMessage{{Role: "user", Content: blocks}}, nil
-	case ai.RoleSystem:
-		// Tolerate a system message by flattening it to a user turn; callers
-		// should prefer Request.System.
-		return []wireMessage{{Role: "user", Content: []wireBlock{{Type: "text", Text: textOf(msg.Parts)}}}}, nil
+	case ai.SystemMessage:
+		return nil, errors.New("anthropic: system message was not projected to top-level system")
 	default:
-		return nil, fmt.Errorf("anthropic: unsupported message role %q", msg.Role)
+		return nil, fmt.Errorf("anthropic: unsupported message type %T", msg)
 	}
 }
 
-func userBlocksFrom(parts []ai.Part) ([]wireBlock, error) {
+func userBlocksFrom[T ai.Part](parts []T) ([]wireBlock, error) {
 	out := make([]wireBlock, 0, len(parts))
 
 	for _, part := range parts {
-		switch p := part.(type) {
+		switch p := any(part).(type) {
 		case ai.TextPart:
 			out = append(out, wireBlock{Type: blockTypeText, Text: p.Text})
 		case ai.ImagePart:
@@ -205,7 +214,7 @@ func userBlocksFrom(parts []ai.Part) ([]wireBlock, error) {
 	return out, nil
 }
 
-func assistantBlocksFrom(parts []ai.Part) ([]wireBlock, error) {
+func assistantBlocksFrom(parts []ai.AssistantPart) ([]wireBlock, error) {
 	out := make([]wireBlock, 0, len(parts))
 
 	for _, part := range parts {
@@ -234,15 +243,10 @@ func reasoningBlockFrom(p ai.ReasoningPart) wireBlock {
 	return wireBlock{Type: blockTypeThinking, Thinking: p.Text, Signature: p.Signature}
 }
 
-func toolResultBlocksFrom(parts []ai.Part) ([]wireBlock, error) {
+func toolResultBlocksFrom(parts []ai.ToolResultPart) ([]wireBlock, error) {
 	out := make([]wireBlock, 0, len(parts))
 
-	for _, part := range parts {
-		result, ok := part.(ai.ToolResultPart)
-		if !ok {
-			return nil, fmt.Errorf("anthropic: tool messages may only contain tool results, got %T", part)
-		}
-
+	for _, result := range parts {
 		content, err := userBlocksFrom(result.Content)
 		if err != nil {
 			return nil, err

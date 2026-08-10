@@ -34,18 +34,20 @@ func TestConvertPromptPreservesSupportedContent(t *testing.T) {
 		}),
 	}, DefaultLimits())
 	require.NoError(t, err)
-	require.Len(t, message.Parts, 5)
-	assert.Equal(t, ai.RoleUser, message.Role)
-	assert.Equal(t, ai.TextPart{Text: "hello"}, message.Parts[0])
-	resourceLink := requireType[ai.TextPart](t, message.Parts[1])
+
+	user, ok := message.(ai.UserMessage)
+	require.True(t, ok)
+	require.Len(t, user.Parts, 5)
+	assert.Equal(t, ai.TextPart{Text: "hello"}, user.Parts[0])
+	resourceLink := requireType[ai.TextPart](t, user.Parts[1])
 	assert.Contains(t, resourceLink.Text, "file:///workspace/guide.md")
-	imagePart := requireType[ai.ImagePart](t, message.Parts[2])
+	imagePart := requireType[ai.ImagePart](t, user.Parts[2])
 	assert.Equal(t, image, imagePart.Source.Data)
-	textFile := requireType[ai.FilePart](t, message.Parts[3])
+	textFile := requireType[ai.FilePart](t, user.Parts[3])
 	assert.Equal(t, "data.json", textFile.Name)
 	assert.Equal(t, []byte(`{"ok":true}`), textFile.Source.Data)
 
-	file := requireType[ai.FilePart](t, message.Parts[4])
+	file := requireType[ai.FilePart](t, user.Parts[4])
 	assert.Equal(t, "spec.pdf", file.Name)
 	assert.Equal(t, []byte("pdf"), file.Source.Data)
 }

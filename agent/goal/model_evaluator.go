@@ -113,8 +113,7 @@ func (evaluator *ModelEvaluator) Evaluate(
 	}
 
 	output, response, err := ai.GenerateTyped[modelEvaluationOutput](ctx, evaluator.model, ai.Request{
-		System:      modelEvaluatorSystem,
-		Messages:    []ai.Message{ai.UserText(string(payload))},
+		Messages:    ai.Messages{ai.SystemText(modelEvaluatorSystem), ai.UserText(string(payload))},
 		Temperature: ai.Ptr(0.0), MaxTokens: &maxTokens,
 		ResponseFormat: &ai.ResponseFormat{
 			Name: "goal_evaluation", Description: "Evidence-based Goal completion decision.",

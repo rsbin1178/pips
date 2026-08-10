@@ -32,7 +32,7 @@ func main() {
 	)
 
 	resp, err := model.Generate(context.Background(), ai.Request{
-		Messages: []ai.Message{ai.UserText("Say hello.")},
+		Messages: ai.Messages{ai.UserText("Say hello.")},
 	})
 	if err != nil {
 		log.Fatal(err)

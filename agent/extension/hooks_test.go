@@ -148,13 +148,19 @@ func TestComposeHooksPipelinesContextWithDefensiveCopies(t *testing.T) {
 	input := []ai.Message{ai.User(ai.ImageData("image/png", []byte("raw")))}
 	hooks := extension.ComposeHooks(
 		extension.Hooks{TransformContext: func(_ context.Context, messages []ai.Message) ([]ai.Message, error) {
-			image, ok := messages[0].Parts[0].(ai.ImagePart)
+			user, ok := messages[0].(ai.UserMessage)
 			if !ok {
-				t.Fatalf("first part type = %T, want ai.ImagePart", messages[0].Parts[0])
+				t.Fatalf("first message type = %T, want ai.UserMessage", messages[0])
+			}
+
+			image, ok := user.Parts[0].(ai.ImagePart)
+			if !ok {
+				t.Fatalf("first part type = %T, want ai.ImagePart", user.Parts[0])
 			}
 
 			image.Source.Data[0] = 'x'
-			messages[0].Parts[0] = image
+			user.Parts[0] = image
+			messages[0] = user
 
 			return append(messages, ai.AssistantText("first")), nil
 		}},
@@ -176,18 +182,28 @@ func TestComposeHooksPipelinesContextWithDefensiveCopies(t *testing.T) {
 		t.Fatalf("transformed message count = %d, want 3", len(got))
 	}
 
-	original, ok := input[0].Parts[0].(ai.ImagePart)
+	originalMessage, ok := input[0].(ai.UserMessage)
 	if !ok {
-		t.Fatalf("original part type = %T, want ai.ImagePart", input[0].Parts[0])
+		t.Fatalf("original message type = %T, want ai.UserMessage", input[0])
+	}
+
+	original, ok := originalMessage.Parts[0].(ai.ImagePart)
+	if !ok {
+		t.Fatalf("original part type = %T, want ai.ImagePart", originalMessage.Parts[0])
 	}
 
 	if got := string(original.Source.Data); got != "raw" {
 		t.Fatalf("input data was mutated: %q", got)
 	}
 
-	transformed, ok := got[0].Parts[0].(ai.ImagePart)
+	transformedMessage, ok := got[0].(ai.UserMessage)
 	if !ok {
-		t.Fatalf("transformed part type = %T, want ai.ImagePart", got[0].Parts[0])
+		t.Fatalf("transformed message type = %T, want ai.UserMessage", got[0])
+	}
+
+	transformed, ok := transformedMessage.Parts[0].(ai.ImagePart)
+	if !ok {
+		t.Fatalf("transformed part type = %T, want ai.ImagePart", transformedMessage.Parts[0])
 	}
 
 	if got := string(transformed.Source.Data); got != "xaw" {
@@ -258,7 +274,12 @@ func TestComposeHooksMergesPrepareTurnUpdates(t *testing.T) {
 		t.Fatalf("replace messages = %#v", update.ReplaceMessages)
 	}
 
-	text, ok := update.ReplaceMessages[0].Parts[0].(ai.TextPart)
+	replacement, ok := update.ReplaceMessages[0].(ai.UserMessage)
+	if !ok {
+		t.Fatalf("replace messages = %#v", update.ReplaceMessages)
+	}
+
+	text, ok := replacement.Parts[0].(ai.TextPart)
 	if !ok || text.Text != "compacted" {
 		t.Fatalf("replace messages = %#v", update.ReplaceMessages)
 	}

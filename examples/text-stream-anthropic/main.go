@@ -15,8 +15,10 @@ func main() {
 	model := anthropic.New("claude-sonnet-4-5", anthropic.WithAPIKey(os.Getenv("ANTHROPIC_API_KEY")))
 
 	req := ai.Request{
-		System:   "You are a concise assistant.",
-		Messages: []ai.Message{ai.UserText("Explain what a goroutine is in two sentences.")},
+		Messages: ai.Messages{
+			ai.SystemText("You are a concise assistant."),
+			ai.UserText("Explain what a goroutine is in two sentences."),
+		},
 	}
 
 	for ev, err := range model.Stream(context.Background(), req) {

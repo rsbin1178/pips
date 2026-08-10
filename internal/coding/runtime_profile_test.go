@@ -52,9 +52,11 @@ func TestTeamWorkerRuntimeUsesExactProfileAndCatalog(t *testing.T) {
 	} {
 		assert.NotContains(t, tools, forbidden)
 	}
-	assert.Contains(t, requests[0].System, "# Team Worker assignment")
-	assert.Contains(t, requests[0].System, `"attempt_id": "attempt-1"`)
-	assert.Contains(t, requests[0].System, "Modify only the current Worktree")
+
+	system := requestSystemText(requests[0])
+	assert.Contains(t, system, "# Team Worker assignment")
+	assert.Contains(t, system, `"attempt_id": "attempt-1"`)
+	assert.Contains(t, system, "Modify only the current Worktree")
 
 	assert.ErrorIs(t, runtime.SetMode(t.Context(), ModePlan), ErrRuntimeInvalid)
 	require.ErrorIs(t, runtime.ReplacementPreflight(t.Context()), ErrRuntimeInvalid)

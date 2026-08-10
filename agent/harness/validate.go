@@ -97,6 +97,9 @@ func validateEntryPayload(entry Entry) error {
 		if entry.Message == nil {
 			return fmt.Errorf("message entry %q has no message", entry.ID)
 		}
+		if err := ai.ValidateMessage(entry.Message); err != nil {
+			return fmt.Errorf("message entry %q: %w", entry.ID, err)
+		}
 		if entry.Usage != nil && !validUsage(*entry.Usage) {
 			return fmt.Errorf("message entry %q has negative usage", entry.ID)
 		}

@@ -30,7 +30,7 @@ func main() {
 	model := openai.New("gpt-4o", openai.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
 	ctx := context.Background()
 
-	messages := []ai.Message{ai.UserText("What's the weather in Paris right now?")}
+	messages := ai.Messages{ai.UserText("What's the weather in Paris right now?")}
 
 	for range 5 { // bounded agent loop
 		resp, err := model.Generate(ctx, ai.Request{

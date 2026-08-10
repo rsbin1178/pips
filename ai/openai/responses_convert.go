@@ -37,7 +37,12 @@ func (m *Model) responsesRequestFrom(req ai.Request, stream bool) (any, error) {
 		)
 	}
 
-	input, err := responseInputFrom(req.Messages, m.label())
+	system, conversation, err := req.Messages.SplitSystem()
+	if err != nil {
+		return nil, fmt.Errorf("%s: invalid messages: %w", m.label(), err)
+	}
+
+	input, err := responseInputFrom(conversation, m.label())
 	if err != nil {
 		return nil, err
 	}
@@ -45,7 +50,7 @@ func (m *Model) responsesRequestFrom(req ai.Request, stream bool) (any, error) {
 	out := responsesRequest{
 		Model:           m.model,
 		Input:           input,
-		Instructions:    req.System,
+		Instructions:    ai.JoinSystemText(system),
 		Tools:           responsesToolsFrom(req.Tools),
 		ToolChoice:      responsesToolChoiceFrom(req.ToolChoice),
 		Temperature:     req.Temperature,
@@ -99,7 +104,7 @@ func (m *Model) responsesRequestFrom(req ai.Request, stream bool) (any, error) {
 	return mergeExtraFields(out, requestOptions(req, m.provider).ExtraFields)
 }
 
-func responseInputFrom(msgs []ai.Message, label string) ([]responseItem, error) {
+func responseInputFrom(msgs ai.Messages, label string) ([]responseItem, error) {
 	var out []responseItem
 
 	for _, msg := range msgs {
@@ -115,30 +120,30 @@ func responseInputFrom(msgs []ai.Message, label string) ([]responseItem, error) 
 }
 
 func responseItemsFrom(msg ai.Message, label string) ([]responseItem, error) {
-	switch msg.Role {
-	case ai.RoleSystem:
-		return []responseItem{{Type: typeMessage, Role: "system", Content: []responseContent{{Type: "input_text", Text: textOf(msg.Parts)}}}}, nil
-	case ai.RoleUser:
+	switch msg := msg.(type) {
+	case ai.UserMessage:
 		content, err := responseUserContent(msg.Parts)
 		if err != nil {
 			return nil, err
 		}
 
 		return []responseItem{{Type: typeMessage, Role: "user", Content: content}}, nil
-	case ai.RoleAssistant:
+	case ai.AssistantMessage:
 		return responseAssistantItems(msg.Parts), nil
-	case ai.RoleTool:
+	case ai.ToolMessage:
 		return responseToolOutputs(msg.Parts)
+	case ai.SystemMessage:
+		return nil, fmt.Errorf("%s: system message was not projected to instructions", label)
 	default:
-		return nil, fmt.Errorf("%s: unsupported message role %q", label, msg.Role)
+		return nil, fmt.Errorf("%s: unsupported message type %T", label, msg)
 	}
 }
 
-func responseUserContent(parts []ai.Part) ([]responseContent, error) {
+func responseUserContent[T ai.Part](parts []T) ([]responseContent, error) {
 	out := make([]responseContent, 0, len(parts))
 
 	for _, part := range parts {
-		switch p := part.(type) {
+		switch p := any(part).(type) {
 		case ai.TextPart:
 			out = append(out, responseContent{Type: "input_text", Text: p.Text})
 		case ai.ImagePart:
@@ -171,7 +176,7 @@ func responseUserContent(parts []ai.Part) ([]responseContent, error) {
 // responseAssistantItems renders a prior assistant turn. Text becomes an
 // output_text message, replayable reasoning becomes a reasoning input item,
 // and each tool call becomes its own function_call item.
-func responseAssistantItems(parts []ai.Part) []responseItem {
+func responseAssistantItems(parts []ai.AssistantPart) []responseItem {
 	var items []responseItem
 
 	var text []responseContent
@@ -214,15 +219,10 @@ func responseAssistantItems(parts []ai.Part) []responseItem {
 	return items
 }
 
-func responseToolOutputs(parts []ai.Part) ([]responseItem, error) {
+func responseToolOutputs(parts []ai.ToolResultPart) ([]responseItem, error) {
 	var out []responseItem
 
-	for _, part := range parts {
-		result, ok := part.(ai.ToolResultPart)
-		if !ok {
-			return nil, fmt.Errorf("openai: tool messages may only contain tool results, got %T", part)
-		}
-
+	for _, result := range parts {
 		out = append(out, responseItem{
 			Type:   "function_call_output",
 			CallID: result.ToolCallID,
@@ -269,7 +269,7 @@ func responsesToolChoiceFrom(choice ai.ToolChoice) any {
 // responseFromResponses translates a Responses response body into the
 // portable shape.
 func responseFromResponses(body responsesResponse, raw []byte, provider ai.Provider) *ai.Response {
-	msg := ai.Message{Role: ai.RoleAssistant}
+	msg := ai.AssistantMessage{}
 
 	for _, item := range body.Output {
 		appendOutputItem(&msg, item)
@@ -286,7 +286,7 @@ func responseFromResponses(body responsesResponse, raw []byte, provider ai.Provi
 	}
 }
 
-func appendOutputItem(msg *ai.Message, item responseItem) {
+func appendOutputItem(msg *ai.AssistantMessage, item responseItem) {
 	switch item.Type {
 	case typeMessage:
 		for _, content := range item.Content {

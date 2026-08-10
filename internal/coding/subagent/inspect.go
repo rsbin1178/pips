@@ -3,7 +3,6 @@ package subagent
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -344,7 +343,7 @@ func summaryFrom(meta session.Metadata, value record) Summary {
 
 func finalAssistantText(messages []ai.Message) (string, bool) {
 	for _, v := range slices.Backward(messages) {
-		if v.Role != ai.RoleAssistant {
+		if _, ok := v.(ai.AssistantMessage); !ok {
 			continue
 		}
 
@@ -394,14 +393,9 @@ func cloneTranscript(messages []ai.Message) []ai.Message {
 }
 
 func cloneTranscriptMessage(message ai.Message) ai.Message {
-	data, err := json.Marshal(message)
+	cloned, err := ai.CloneMessage(message)
 	if err != nil {
-		return ai.Message{Role: message.Role}
-	}
-
-	var cloned ai.Message
-	if err := json.Unmarshal(data, &cloned); err != nil {
-		return ai.Message{Role: message.Role}
+		return message
 	}
 
 	return cloned

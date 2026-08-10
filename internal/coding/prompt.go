@@ -43,11 +43,12 @@ func validatePromptMessages(messages []ai.Message) error {
 			return fmt.Errorf("%w: message %d: %w", ErrInvalidPrompt, index, err)
 		}
 
-		if message.Role != ai.RoleUser {
+		user, ok := message.(ai.UserMessage)
+		if !ok {
 			continue
 		}
 
-		for _, part := range message.Parts {
+		for _, part := range user.Parts {
 			switch value := part.(type) {
 			case ai.TextPart:
 				textBytes += len(value.Text)

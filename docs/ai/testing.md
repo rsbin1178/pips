@@ -59,8 +59,10 @@ func (*fakeModel) Capabilities() ai.Capabilities {
 
 func summarize(ctx context.Context, model ai.LanguageModel, input string) (string, error) {
 	resp, err := model.Generate(ctx, ai.Request{
-		System:   "只返回摘要。",
-		Messages: []ai.Message{ai.UserText(input)},
+		Messages: ai.Messages{
+			ai.SystemText("只返回摘要。"),
+			ai.UserText(input),
+		},
 	})
 	if err != nil {
 		return "", err
@@ -70,8 +72,15 @@ func summarize(ctx context.Context, model ai.LanguageModel, input string) (strin
 
 func TestSummarize(t *testing.T) {
 	model := &fakeModel{generate: func(_ context.Context, req ai.Request) (*ai.Response, error) {
-		if req.System != "只返回摘要。" {
-			t.Fatalf("unexpected system prompt: %q", req.System)
+		system, conversation, err := req.Messages.SplitSystem()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := ai.JoinSystemText(system); got != "只返回摘要。" {
+			t.Fatalf("unexpected system prompt: %q", got)
+		}
+		if len(conversation) != 1 {
+			t.Fatalf("unexpected conversation length: %d", len(conversation))
 		}
 		return &ai.Response{
 			Provider: ai.Provider("test"),
@@ -200,7 +209,7 @@ func TestOpenAIGateway(t *testing.T) {
 	)
 
 	resp, err := model.Generate(context.Background(), ai.Request{
-		Messages: []ai.Message{ai.UserText("hello")},
+		Messages: ai.Messages{ai.UserText("hello")},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -264,7 +273,7 @@ func TestLiveOpenAI(t *testing.T) {
 	defer cancel()
 
 	resp, err := openai.New("gpt-4o").Generate(ctx, ai.Request{
-		Messages:  []ai.Message{ai.UserText("Reply with OK only.")},
+		Messages:  ai.Messages{ai.UserText("Reply with OK only.")},
 		MaxTokens: ai.Ptr(10),
 	})
 	if err != nil {

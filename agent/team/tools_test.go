@@ -124,13 +124,12 @@ func (model *teamToolModel) Generate(context.Context, ai.Request) (*ai.Response,
 	model.turn++
 	if model.turn == 1 {
 		return &ai.Response{
-			Message: ai.Message{
-				Role: ai.RoleAssistant,
-				Parts: []ai.Part{ai.ToolCallPart{
+			Message: ai.Assistant(
+				ai.ToolCallPart{
 					ID: "agent-call-1", Name: "team_create_task",
 					Args: ai.JSON(`{"title":"Agent-created task","attempt_limit":1}`),
-				}},
-			},
+				},
+			),
 			FinishReason: ai.FinishToolCalls,
 		}, nil
 	}

@@ -41,8 +41,8 @@ func main() {
 	defer cancel()
 
 	resp, err := model.Generate(ctx, ai.Request{
-		System: "你是一个简洁的 Go 助手。",
-		Messages: []ai.Message{
+		Messages: ai.Messages{
+			ai.SystemText("你是一个简洁的 Go 助手。"),
 			ai.UserText("用一句话解释 goroutine。"),
 		},
 		Temperature: ai.Ptr(0.2),
@@ -78,8 +78,10 @@ OPENAI_API_KEY='...' go run .
 ```go
 func summarize(ctx context.Context, model ai.LanguageModel, text string) (string, error) {
 	resp, err := model.Generate(ctx, ai.Request{
-		System:   "只返回三条要点。",
-		Messages: []ai.Message{ai.UserText(text)},
+		Messages: ai.Messages{
+			ai.SystemText("只返回三条要点。"),
+			ai.UserText(text),
+		},
 	})
 	if err != nil {
 		return "", err
@@ -105,7 +107,7 @@ geminiModel := gemini.New("gemini-2.5-flash")
 
 ```go
 for ev, err := range model.Stream(ctx, ai.Request{
-	Messages: []ai.Message{ai.UserText("写一首两行短诗。")},
+	Messages: ai.Messages{ai.UserText("写一首两行短诗。")},
 }) {
 	if err != nil {
 		return fmt.Errorf("stream: %w", err)

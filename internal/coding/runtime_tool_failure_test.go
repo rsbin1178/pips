@@ -99,15 +99,14 @@ func TestToolFailureGuardStopsRepeatedExecutedErrors(t *testing.T) {
 		}
 
 		require.NotNil(t, override)
-		message := transcriptText([]ai.Message{{
-			Role: ai.RoleTool,
-			Parts: []ai.Part{ai.ToolResultPart{
+		message := transcriptText([]ai.Message{ai.ToolResults(
+			ai.ToolResultPart{
 				ToolCallID: call.ID,
 				Name:       call.Name,
 				Content:    override.Content,
 				IsError:    true,
-			}},
-		}})
+			},
+		)})
 		if index == toolFailureLimit-1 {
 			assert.Contains(t, message, toolFailureCorrectionMessage)
 			assert.False(t, guard.stopWhen(agent.RunInfo{}))
@@ -227,7 +226,11 @@ func TestRuntimeStopsAfterFailedToolCorrectionTurn(t *testing.T) {
 func transcriptText(messages []ai.Message) string {
 	var text strings.Builder
 	for _, message := range messages {
-		for _, part := range message.Parts {
+		parts, err := ai.MessageParts(message)
+		if err != nil {
+			continue
+		}
+		for _, part := range parts {
 			switch value := part.(type) {
 			case ai.TextPart:
 				text.WriteString(value.Text)

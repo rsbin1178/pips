@@ -474,7 +474,7 @@ func sliceSyntheticMessageIndexes(values []int, start, end int) []int {
 
 func (m *Model) heldToolMessageFrontier(callID string) int {
 	for messageIndex, message := range m.state.Transcript {
-		for _, part := range message.Parts {
+		for _, part := range portableMessageParts(message) {
 			call, ok := part.(ai.ToolCallPart)
 			if ok && call.ID == callID {
 				return max(m.scrollback.messages, messageIndex)
@@ -555,7 +555,7 @@ func (m *Model) exploreGroupHasBoundary(start, end int) bool {
 
 func hasVisibleAssistantMessage(transcript []ai.Message) bool {
 	for _, message := range transcript {
-		if message.Role == ai.RoleAssistant && visibleMessageText(message) != "" {
+		if _, isAssistant := message.(ai.AssistantMessage); isAssistant && visibleMessageText(message) != "" {
 			return true
 		}
 	}
@@ -583,7 +583,7 @@ func latestToolMessagePosition(
 ) int {
 	latest := 0
 	for messageIndex, message := range transcript {
-		for _, part := range message.Parts {
+		for _, part := range portableMessageParts(message) {
 			switch value := part.(type) {
 			case ai.ToolCallPart:
 				if _, ok := ids[value.ID]; ok {
@@ -605,7 +605,7 @@ func earliestToolCallPosition(
 	ids map[string]struct{},
 ) int {
 	for messageIndex, message := range transcript {
-		for _, part := range message.Parts {
+		for _, part := range portableMessageParts(message) {
 			call, ok := part.(ai.ToolCallPart)
 			if !ok {
 				continue
