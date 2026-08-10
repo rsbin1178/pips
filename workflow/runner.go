@@ -194,7 +194,7 @@ func (r *Runner) Run(
 	}
 
 	state := newRunState(runID, plan.definition.Limits)
-	execution := newExecution(r, plan, state, startedAt, inputs, nil)
+	execution := newExecution(r, plan, state, startedAt, inputs, nil, nil)
 
 	return execution.run(ctx)
 }
@@ -214,6 +214,7 @@ type execution struct {
 	state  *runState
 	scope  []ScopeFrame
 	input  map[string]Value
+	loop   *loopIterationState
 	result RunResult
 
 	edges   []edgeState
@@ -267,6 +268,7 @@ func newExecution(
 	startedAt time.Time,
 	inputs map[string]Value,
 	scope []ScopeFrame,
+	loop *loopIterationState,
 ) *execution {
 	nodes := make([]NodeRun, len(plan.nodes))
 	for index, node := range plan.nodes {
@@ -280,6 +282,7 @@ func newExecution(
 		state:   state,
 		scope:   slices.Clone(scope),
 		input:   cloneValues(inputs),
+		loop:    loop,
 		edges:   make([]edgeState, len(plan.edges)),
 		nodes:   nodes,
 		outputs: make([]map[string]Value, len(plan.nodes)),
@@ -592,7 +595,7 @@ func invokeAttempt(
 
 func classifyFailure(ctx context.Context, err error) FailureKind {
 	switch {
-	case errors.Is(err, errStepLimit):
+	case errors.Is(err, errStepLimit), errors.Is(err, errLoopLimit):
 		return FailureLimit
 	case errors.Is(err, context.Canceled):
 		return FailureCanceled
@@ -662,6 +665,17 @@ func (e *execution) resolveBinding(binding Binding) (Value, bool) {
 		var ok bool
 
 		value, ok = e.outputs[sourceIndex][binding.Port]
+		if !ok {
+			return Value{}, false
+		}
+	case BindingLoopVariable:
+		if e.loop == nil {
+			return Value{}, false
+		}
+
+		var ok bool
+
+		value, ok = e.loop.value(binding.Port)
 		if !ok {
 			return Value{}, false
 		}
@@ -923,6 +937,7 @@ func (r *nodeRuntime) runChild(
 		startedAt,
 		inputs,
 		scope,
+		nil,
 	)
 
 	result, err := execution.run(ctx)
@@ -931,6 +946,71 @@ func (r *nodeRuntime) runChild(
 	}
 
 	return cloneValues(result.Outputs), nil
+}
+
+func (r *nodeRuntime) runLoopChild(
+	ctx context.Context,
+	plan *Plan,
+	inputs map[string]Value,
+	frame ScopeFrame,
+	state *loopIterationState,
+) (map[string]Value, error) {
+	if r == nil || r.execution == nil || plan == nil || state == nil {
+		return nil, errors.New("workflow loop child runtime is unavailable")
+	}
+
+	if err := validateScopeFrame(frame); err != nil {
+		return nil, err
+	}
+
+	if err := validatePortValues(inputs, plan.definition.Inputs); err != nil {
+		return nil, fmt.Errorf("loop body inputs: %w", err)
+	}
+
+	scope := append(slices.Clone(r.execution.scope), frame)
+	startedAt := r.execution.runner.clock().UTC()
+	execution := newExecution(
+		r.execution.runner,
+		plan,
+		r.execution.state,
+		startedAt,
+		inputs,
+		scope,
+		state,
+	)
+
+	result, err := execution.run(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return cloneValues(result.Outputs), nil
+}
+
+func (r *nodeRuntime) loopState() *loopIterationState {
+	if r == nil || r.execution == nil {
+		return nil
+	}
+
+	return r.execution.loop
+}
+
+func (r *nodeRuntime) breakLoop() error {
+	state := r.loopState()
+	if state == nil {
+		return errors.New("workflow loop state is unavailable")
+	}
+
+	return state.requestBreak()
+}
+
+func (r *nodeRuntime) setLoopVariables(updates map[string]Value) error {
+	state := r.loopState()
+	if state == nil {
+		return errors.New("workflow loop state is unavailable")
+	}
+
+	return state.assign(updates)
 }
 
 func validateScopeFrame(frame ScopeFrame) error {
@@ -943,9 +1023,9 @@ func validateScopeFrame(frame ScopeFrame) error {
 		if frame.Index != -1 {
 			return errors.New("workflow sub-workflow scope has invalid index")
 		}
-	case ScopeBatchItem:
+	case ScopeBatchItem, ScopeLoopIteration:
 		if frame.Index < 0 {
-			return errors.New("workflow batch scope has invalid index")
+			return errors.New("workflow indexed child scope has invalid index")
 		}
 	default:
 		return errors.New("workflow child scope has invalid kind")

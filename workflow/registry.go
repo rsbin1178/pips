@@ -349,6 +349,7 @@ type nodeCompileContext struct {
 	outputs  map[string]PortSchema
 	registry *Registry
 	session  *compileSession
+	loop     *loopCompileScope
 }
 
 type nodeTypeSnapshot struct {
@@ -400,9 +401,21 @@ func (c nodeCompileContext) compileDefinition(
 	return c.session.compile(ctx, definition)
 }
 
+func (c nodeCompileContext) compileLoopDefinition(
+	ctx context.Context,
+	definition Definition,
+	scope loopCompileScope,
+) (*Plan, error) {
+	return c.session.compileScoped(ctx, definition, &scope)
+}
+
 func (c nodeCompileContext) resolveDefinition(
 	ctx context.Context,
 	reference DefinitionRef,
 ) (*Plan, error) {
 	return c.session.resolve(ctx, reference)
+}
+
+func (c nodeCompileContext) loopCompileScope() *loopCompileScope {
+	return c.loop
 }

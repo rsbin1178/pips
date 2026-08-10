@@ -27,12 +27,13 @@ type ScopeKind string
 
 // Nested execution scope kinds.
 const (
-	ScopeSubWorkflow ScopeKind = "sub_workflow"
-	ScopeBatchItem   ScopeKind = "batch_item"
+	ScopeSubWorkflow   ScopeKind = "sub_workflow"
+	ScopeBatchItem     ScopeKind = "batch_item"
+	ScopeLoopIteration ScopeKind = "loop_iteration"
 )
 
 // ScopeFrame identifies the composite node that owns one child execution.
-// Index is -1 for SubWorkflow and the input index for a Batch item.
+// Index is -1 for SubWorkflow and the input index for Batch or Loop.
 type ScopeFrame struct {
 	Kind   ScopeKind
 	NodeID NodeID

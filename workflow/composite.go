@@ -32,6 +32,7 @@ func (f DefinitionResolverFunc) ResolveDefinition(
 
 type compositeCompileContext interface {
 	compileDefinition(context.Context, Definition) (*Plan, error)
+	compileLoopDefinition(context.Context, Definition, loopCompileScope) (*Plan, error)
 	resolveDefinition(context.Context, DefinitionRef) (*Plan, error)
 }
 
