@@ -1,0 +1,64 @@
+{
+  "schema": "pips.workflow/v1alpha1",
+  "id": "condition-fixture",
+  "revision": "v1",
+  "name": "Condition fixture",
+  "inputs": {
+    "approved": {"type": "boolean"}
+  },
+  "outputs": {
+    "result": {
+      "schema": {"type": "string"},
+      "binding": {"source": "node_output", "node": "merge", "port": "result"}
+    }
+  },
+  "nodes": [
+    {"id": "start", "type": "start", "version": "v1"},
+    {
+      "id": "validate",
+      "type": "action",
+      "version": "v1",
+      "config": {"action": "validate", "version": "v1"},
+      "inputs": {"value": {"source": "workflow_input", "port": "approved"}}
+    },
+    {
+      "id": "condition",
+      "type": "condition",
+      "version": "v1",
+      "config": {
+        "predicate": {"op": "eq", "input": "valid", "value": true},
+        "true_route": "yes",
+        "false_route": "no"
+      },
+      "inputs": {"valid": {"source": "node_output", "node": "validate", "port": "valid"}}
+    },
+    {"id": "accept", "type": "action", "version": "v1", "config": {"action": "accept", "version": "v1"}},
+    {"id": "reject", "type": "action", "version": "v1", "config": {"action": "reject", "version": "v1"}},
+    {
+      "id": "merge",
+      "type": "merge",
+      "version": "v1",
+      "config": {
+        "mode": "exclusive",
+        "outputs": {
+          "result": {"schema": {"type": "string"}, "sources": ["accepted", "rejected"]}
+        }
+      },
+      "inputs": {
+        "accepted": {"source": "node_output", "node": "accept", "port": "result"},
+        "rejected": {"source": "node_output", "node": "reject", "port": "result"}
+      }
+    },
+    {"id": "end", "type": "end", "version": "v1"}
+  ],
+  "edges": [
+    {"from": {"node": "start", "route": "success"}, "to": "validate"},
+    {"from": {"node": "validate", "route": "success"}, "to": "condition"},
+    {"from": {"node": "condition", "route": "yes"}, "to": "accept"},
+    {"from": {"node": "condition", "route": "no"}, "to": "reject"},
+    {"from": {"node": "accept", "route": "success"}, "to": "merge"},
+    {"from": {"node": "reject", "route": "success"}, "to": "merge"},
+    {"from": {"node": "merge", "route": "success"}, "to": "end"}
+  ],
+  "limits": {"max_concurrency": 2, "max_steps": 100}
+}

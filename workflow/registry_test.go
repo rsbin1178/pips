@@ -1,0 +1,139 @@
+package workflow_test
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"github.com/rsbin/pips/workflow"
+)
+
+type fakeAction struct {
+	spec workflow.ActionSpec
+	run  func(context.Context, workflow.ActionInput) (workflow.ActionOutput, error)
+}
+
+func (a *fakeAction) Spec() workflow.ActionSpec {
+	return a.spec
+}
+
+func (a *fakeAction) Run(ctx context.Context, input workflow.ActionInput) (workflow.ActionOutput, error) {
+	if a.run != nil {
+		return a.run(ctx, input)
+	}
+
+	return workflow.ActionOutput{Values: map[string]workflow.Value{}}, nil
+}
+
+func TestNewRegistry(t *testing.T) {
+	t.Parallel()
+
+	stringSchema, err := workflow.ParsePortSchema([]byte(`{"type":"string"}`))
+	if err != nil {
+		t.Fatalf("ParsePortSchema() error = %v", err)
+	}
+
+	action := &fakeAction{spec: workflow.ActionSpec{
+		Key:     "save",
+		Version: "v1",
+		Inputs:  map[string]workflow.PortSchema{"value": stringSchema},
+		Outputs: map[string]workflow.PortSchema{},
+	}}
+
+	registry, err := workflow.NewRegistry(nil, []workflow.Action{action})
+	if err != nil {
+		t.Fatalf("NewRegistry() error = %v", err)
+	}
+
+	if registry.Fingerprint() == "" {
+		t.Fatal("Registry.Fingerprint() is empty")
+	}
+
+	if resolved, ok := registry.Action("save", "v1"); !ok || resolved.Spec().Key != "save" {
+		t.Fatalf("Registry.Action() = %T, %v, want save action, true", resolved, ok)
+	}
+}
+
+func TestNewRegistryRejectsDuplicateAndTypedNilAction(t *testing.T) {
+	t.Parallel()
+
+	emptySchema := map[string]workflow.PortSchema{}
+	action := &fakeAction{spec: workflow.ActionSpec{
+		Key: "save", Version: "v1", Inputs: emptySchema, Outputs: emptySchema,
+	}}
+
+	tests := []struct {
+		name    string
+		actions []workflow.Action
+	}{
+		{name: "duplicate", actions: []workflow.Action{action, action}},
+		{name: "typed nil", actions: []workflow.Action{(*fakeAction)(nil)}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := workflow.NewRegistry(nil, test.actions)
+			if !errors.Is(err, workflow.ErrInvalidRegistry) {
+				t.Fatalf("NewRegistry() error = %v, want ErrInvalidRegistry", err)
+			}
+		})
+	}
+}
+
+func TestNewRegistryRejectsDuplicateNodeType(t *testing.T) {
+	t.Parallel()
+
+	_, err := workflow.NewRegistry(
+		[]workflow.NodeType{workflow.StartNode{}, workflow.StartNode{}},
+		nil,
+	)
+	if !errors.Is(err, workflow.ErrInvalidRegistry) {
+		t.Fatalf("NewRegistry() error = %v, want ErrInvalidRegistry", err)
+	}
+}
+
+func TestRegistrySnapshotsActionSpec(t *testing.T) {
+	t.Parallel()
+
+	stringSchema, err := workflow.ParsePortSchema([]byte(`{"type":"string"}`))
+	if err != nil {
+		t.Fatalf("ParsePortSchema() error = %v", err)
+	}
+
+	inputs := map[string]workflow.PortSchema{"value": stringSchema}
+	outputs := map[string]workflow.PortSchema{"result": stringSchema}
+	action := &fakeAction{spec: workflow.ActionSpec{
+		Key: "snapshot", Version: "v1", Inputs: inputs, Outputs: outputs,
+	}}
+
+	registry, err := workflow.NewRegistry(nil, []workflow.Action{action})
+	if err != nil {
+		t.Fatalf("NewRegistry() error = %v", err)
+	}
+
+	fingerprint := registry.Fingerprint()
+
+	delete(inputs, "value")
+	delete(outputs, "result")
+
+	action.spec.Key = "mutated"
+
+	resolved, ok := registry.Action("snapshot", "v1")
+	if !ok {
+		t.Fatal("Registry.Action() did not resolve snapshotted action")
+	}
+
+	spec := resolved.Spec()
+	delete(spec.Inputs, "value")
+
+	second := resolved.Spec()
+	if second.Key != "snapshot" || len(second.Inputs) != 1 || len(second.Outputs) != 1 {
+		t.Fatalf("snapshotted spec changed: %#v", second)
+	}
+
+	if registry.Fingerprint() != fingerprint {
+		t.Fatal("Registry fingerprint changed after source mutation")
+	}
+}

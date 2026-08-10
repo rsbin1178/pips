@@ -1,0 +1,39 @@
+{
+  "schema": "pips.workflow/v1alpha1",
+  "id": "linear-fixture",
+  "revision": "v1",
+  "name": "Linear fixture",
+  "inputs": {
+    "input": {"type": "string"}
+  },
+  "outputs": {
+    "result": {
+      "schema": {"type": "string"},
+      "binding": {"source": "node_output", "node": "save", "port": "result"}
+    }
+  },
+  "nodes": [
+    {"id": "start", "type": "start", "version": "v1"},
+    {
+      "id": "normalize",
+      "type": "action",
+      "version": "v1",
+      "config": {"action": "normalize", "version": "v1"},
+      "inputs": {"value": {"source": "workflow_input", "port": "input"}}
+    },
+    {
+      "id": "save",
+      "type": "action",
+      "version": "v1",
+      "config": {"action": "save", "version": "v2"},
+      "inputs": {"value": {"source": "node_output", "node": "normalize", "port": "value"}}
+    },
+    {"id": "end", "type": "end", "version": "v1"}
+  ],
+  "edges": [
+    {"from": {"node": "start", "route": "success"}, "to": "normalize"},
+    {"from": {"node": "normalize", "route": "success"}, "to": "save"},
+    {"from": {"node": "save", "route": "success"}, "to": "end"}
+  ],
+  "limits": {"max_concurrency": 2, "max_steps": 100}
+}
