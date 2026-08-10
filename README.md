@@ -10,6 +10,11 @@ Go building blocks for AI applications. Current packages:
   → tools → results → model), typed tools, event streaming, stop conditions,
   input/output guardrails, durable partial approvals, correlated nested runs,
   and serializable sessions.
+- **`workflow`** — provider- and Agent-independent declarative DAG runtime for
+  fixed processes: strict versioned definitions, typed bindings and schemas,
+  versioned host Actions, binary conditions, ordered selectors, exact-revision
+  sub-workflows, bounded array batches, explicit merge semantics,
+  concurrency/retry limits, and process-local lifecycle events.
 - **`agent/harness`** — stateful orchestration over the runtime: persistent
   session trees (JSONL) with branching, automatic context compaction, branch
   summaries, streaming with active cancellation, and skill/prompt-template
@@ -44,6 +49,25 @@ Go building blocks for AI applications. Current packages:
 - [Coding Agent 人工验收手册](docs/manual-acceptance/index.md)：按能力划分的手工步骤、通过标准、证据要求和真实环境验收边界。
 
 现有 Coding CLI、安全、ACP、SSH、Hook 与 Dynamic Subagent 发布文档仍保留在 `docs/`；上述三个入口提供中文学习和验收路径。
+
+## Workflow core
+
+`workflow` 用于构建确定的、非 ReAct 的通用流程。内置节点遵循 Coze
+命名风格，但运行时不包含 AI、图像、RAG 或产品画布依赖：
+
+| Node | Type key | Purpose |
+|---|---|---|
+| Start | `start` | 声明并传入 Workflow inputs |
+| End | `end` | 校验并返回 Workflow outputs |
+| Action | `action` | 调用宿主注册的版本固定 Action |
+| Condition | `condition` | 二分条件路由 |
+| Selector | `selector` | 有序多分支，first-match，带 default |
+| Merge | `merge` | 独占或并行分支汇合 |
+| SubWorkflow | `sub_workflow` | 同步调用精确 ID/revision/fingerprint 的子流程 |
+| Batch | `batch` | 对数组执行串行或有界并行的内联子流程 |
+
+Batch 是数组 map；它不承担 `while`/`until` 状态循环。父流程与子流程共享
+Run ID、取消信号、总步数、叶子并发额度和串行化事件输出。
 
 ## Coding agent status
 
