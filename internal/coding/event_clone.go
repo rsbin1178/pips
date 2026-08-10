@@ -4,7 +4,6 @@ package coding
 import (
 	"slices"
 
-	"github.com/rsbin/pips/agent"
 	"github.com/rsbin/pips/ai"
 	"github.com/rsbin/pips/internal/coding/planreview"
 	"github.com/rsbin/pips/internal/coding/question"
@@ -217,16 +216,4 @@ func toolResultMessage(result ai.ToolResultPart) ai.Message {
 
 func toolUpdateMessage(parts []ai.Part) ai.Message {
 	return ai.Message{Role: ai.RoleTool, Parts: cloneParts(parts)}
-}
-
-func validAgentEventType(eventType agent.EventType) bool {
-	switch eventType {
-	case agent.EventRunStart, agent.EventTurnStart, agent.EventDelta, agent.EventMessage,
-		agent.EventCandidateDiscard,
-		agent.EventToolStart, agent.EventToolUpdate, agent.EventToolEnd,
-		agent.EventTurnEnd, agent.EventRunEnd:
-		return true
-	default:
-		return false
-	}
 }

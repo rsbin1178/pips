@@ -6,51 +6,48 @@ import (
 	"github.com/rsbin/pips/ai"
 )
 
-// EventType discriminates [Event] variants.
+// EventType identifies the semantic payload carried by an [Event].
 type EventType string
 
-// Event types, in the order a run produces them: one run_start; per turn a
-// turn_start, deltas (streaming only), the assistant message, tool lifecycle
-// pairs, the tool-result message, and a turn_end; one run_end on clean
-// termination (failed runs surface an error instead).
+// Event types, in the order a run can produce them. Failed runs return an
+// iterator error instead of producing EventRunCompleted.
 const (
-	// EventRunStart opens the run.
-	EventRunStart EventType = "run_start"
-	// EventTurnStart opens a turn; Turn identifies it.
-	EventTurnStart EventType = "turn_start"
-	// EventDelta carries one model streaming increment in Delta. It is only
+	// EventRunStarted opens a run.
+	EventRunStarted EventType = "run_started"
+	// EventTurnStarted opens one model turn.
+	EventTurnStarted EventType = "turn_started"
+	// EventModelStream carries one normalized model stream event. It is only
 	// produced by [Agent.Stream], never [Agent.Run].
-	EventDelta EventType = "delta"
-	// EventMessage reports a completed message appended to the session
-	// (the assistant turn, then the tool-result message) in Message.
-	EventMessage EventType = "message"
-	// EventCandidateDiscard reports that provisional deltas formed a no-Tool
-	// candidate answer which was rejected before Session commit and will be
-	// retried. It carries only Turn; candidate content is deliberately absent.
-	EventCandidateDiscard EventType = "candidate_discard"
-	// EventToolStart announces a tool call about to be gated and executed; it
-	// carries Call.
-	EventToolStart EventType = "tool_start"
-	// EventToolUpdate carries a partial-result update published by a running
-	// tool via [ReportProgress]; it carries Call and Update. Delivery is
-	// best-effort.
-	EventToolUpdate EventType = "tool_update"
-	// EventToolEnd reports a finished tool call; it carries Call and Result
-	// (denials and synthesized failures included).
-	EventToolEnd EventType = "tool_end"
-	// EventTurnEnd closes a turn; it carries the run's cumulative Usage.
-	EventTurnEnd EventType = "turn_end"
-	// EventRunEnd closes the run; it carries Stop and the run's cumulative
-	// Usage.
-	EventRunEnd EventType = "run_end"
+	EventModelStream EventType = "model_stream"
+	// EventMessageCommitted reports a message after it has been appended to
+	// the session.
+	EventMessageCommitted EventType = "message_committed"
+	// EventCandidateDiscarded reports a provisional answer rejected before
+	// session commit. Candidate content is deliberately absent.
+	EventCandidateDiscarded EventType = "candidate_discarded"
+	// EventToolStarted opens one tool-call lifecycle.
+	EventToolStarted EventType = "tool_started"
+	// EventToolUpdated carries a best-effort progress update from a running
+	// tool.
+	EventToolUpdated EventType = "tool_updated"
+	// EventToolCompleted closes one tool-call lifecycle, including denials and
+	// synthesized failures.
+	EventToolCompleted EventType = "tool_completed"
+	// EventTurnCompleted closes one model turn.
+	EventTurnCompleted EventType = "turn_completed"
+	// EventRunCompleted closes a cleanly terminated run.
+	EventRunCompleted EventType = "run_completed"
 )
 
-// Event is one normalized increment of an agent run. Only the fields
-// documented for the event's Type are meaningful. Pointer fields reference
-// copies made at emission time, so events are safe to retain; treat their
-// contents as read-only.
+// Event is one immutable, process-local increment of an agent run. The
+// envelope carries correlation metadata shared by every variant; Payload
+// carries exactly one semantic variant. Events are safe to retain. Consumers
+// must treat the returned payload as read-only.
+//
+// Event intentionally has no JSON wire format. Durable or remote consumers
+// must define a versioned projection appropriate to their disclosure and
+// compatibility requirements.
 type Event struct {
-	Type EventType
 	// RunID correlates every event in one invocation. ParentRunID links a
 	// nested invocation to the run whose tool or callback started it. Agent is
 	// the configured [Agent.Name], and Time is the UTC emission time.
@@ -59,51 +56,130 @@ type Event struct {
 	Agent       string
 	Time        time.Time
 
-	// Turn is the 1-based turn number, 0 on run_start.
+	payload EventPayload
+	// noCompare prevents interface-backed payloads with slices from making an
+	// apparently valid Event comparison panic at runtime.
+	_ [0]func()
+}
+
+// EventPayload is the sealed union of semantic [Event] variants. Only the
+// concrete value types declared in this package are valid payloads.
+type EventPayload interface {
+	isEventPayload()
+}
+
+// emitFunc delivers one semantic payload and reports whether the run should
+// keep going. False means the stream consumer stopped iterating.
+type emitFunc func(EventPayload) bool
+
+// RunStarted opens a run and carries no variant-specific data.
+type RunStarted struct{}
+
+// TurnStarted opens one model turn. Turn is one-based.
+type TurnStarted struct {
 	Turn int
+}
 
-	// Delta is the model streaming event for delta events.
-	Delta ai.StreamEvent
+// ModelStreamEvent carries one normalized model stream increment. Turn is
+// one-based. The embedded stream event remains provisional until a
+// [MessageCommitted] payload is emitted.
+type ModelStreamEvent struct {
+	Turn  int
+	Event ai.StreamEvent
+}
 
-	// Message is the appended message for message events.
-	Message *ai.Message
+// MessageCommitted reports a message after it has been appended to the
+// session. Turn is one-based.
+type MessageCommitted struct {
+	Turn    int
+	Message ai.Message
+}
 
-	// Call is set on tool_start, tool_update, and tool_end; Result on
-	// tool_end; Update on tool_update.
-	Call   *ai.ToolCallPart
-	Result *ai.ToolResultPart
+// CandidateDiscarded reports a provisional no-tool answer rejected before
+// session commit. Turn is one-based; rejected content is never retained.
+type CandidateDiscarded struct {
+	Turn int
+}
+
+// ToolStarted opens the lifecycle of Call in the one-based Turn.
+type ToolStarted struct {
+	Turn int
+	Call ai.ToolCallPart
+}
+
+// ToolUpdated carries a best-effort progress Update for Call in the
+// one-based Turn.
+type ToolUpdated struct {
+	Turn   int
+	Call   ai.ToolCallPart
 	Update []ai.Part
+}
 
-	// Stop is set on run_end.
-	Stop StopReason
-	// Usage is the run's cumulative usage, set on turn_end and run_end.
+// ToolCompleted closes the lifecycle of Call in the one-based Turn. Result
+// includes denials and synthesized failures through Result.IsError.
+type ToolCompleted struct {
+	Turn   int
+	Call   ai.ToolCallPart
+	Result ai.ToolResultPart
+}
+
+// TurnCompleted closes the one-based Turn. Usage is cumulative for the run.
+type TurnCompleted struct {
+	Turn  int
 	Usage ai.Usage
 }
 
-// emitFunc delivers one event and reports whether the run should keep going;
-// false means the stream consumer stopped iterating.
-type emitFunc func(Event) bool
-
-// Event constructors copy their payloads so consumers can retain events
-// safely.
-
-func messageEvent(turn int, msg ai.Message) Event {
-	m := msg
-	return Event{Type: EventMessage, Turn: turn, Message: &m}
+// RunCompleted closes a cleanly terminated run. Turns is the number of model
+// calls made, Stop is the clean termination reason, and Usage is cumulative.
+type RunCompleted struct {
+	Turns int
+	Stop  StopReason
+	Usage ai.Usage
 }
 
-func toolStartEvent(turn int, call ai.ToolCallPart) Event {
-	c := call
-	return Event{Type: EventToolStart, Turn: turn, Call: &c}
+func (RunStarted) isEventPayload()         {}
+func (TurnStarted) isEventPayload()        {}
+func (ModelStreamEvent) isEventPayload()   {}
+func (MessageCommitted) isEventPayload()   {}
+func (CandidateDiscarded) isEventPayload() {}
+func (ToolStarted) isEventPayload()        {}
+func (ToolUpdated) isEventPayload()        {}
+func (ToolCompleted) isEventPayload()      {}
+func (TurnCompleted) isEventPayload()      {}
+func (RunCompleted) isEventPayload()       {}
+
+// NewEvent constructs a validated event and snapshots all mutable payload
+// data. occurredAt is normalized to UTC. It returns an error matching
+// [ErrInvalidEvent] when metadata or payload invariants are invalid.
+func NewEvent(meta RunMetadata, occurredAt time.Time, payload EventPayload) (Event, error) {
+	event := newEvent(meta, occurredAt, payload)
+	if err := event.Validate(); err != nil {
+		return Event{}, err
+	}
+
+	return event, nil
 }
 
-func toolEndEvent(turn int, call ai.ToolCallPart, result ai.ToolResultPart) Event {
-	c, r := call, result
+// Type returns the discriminator for the event's concrete payload. It
+// returns the zero EventType for an invalid zero Event.
+func (e Event) Type() EventType {
+	typeOf, _ := eventPayloadType(e.payload)
 
-	return Event{Type: EventToolEnd, Turn: turn, Call: &c, Result: &r}
+	return typeOf
 }
 
-func toolUpdateEvent(turn int, call ai.ToolCallPart, update []ai.Part) Event {
-	c := call
-	return Event{Type: EventToolUpdate, Turn: turn, Call: &c, Update: update}
+// Payload returns the event's sealed semantic payload. The returned value is
+// owned by this event snapshot and must be treated as read-only.
+func (e Event) Payload() EventPayload {
+	return e.payload
+}
+
+func newEvent(meta RunMetadata, occurredAt time.Time, payload EventPayload) Event {
+	return Event{
+		RunID:       meta.RunID,
+		ParentRunID: meta.ParentRunID,
+		Agent:       meta.Agent,
+		Time:        occurredAt.UTC(),
+		payload:     cloneEventPayload(payload),
+	}
 }

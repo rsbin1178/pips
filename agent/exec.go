@@ -54,7 +54,7 @@ func (a *Agent) execBatch(ctx context.Context, tools *toolbox, cancel context.Ca
 		outcomes: make([]execOutcome, len(runnable)),
 		sem:      make(chan struct{}, a.cfg.parallelTools),
 		done:     make(chan int, len(runnable)),
-		progress: make(chan Event, progressBuffer),
+		progress: make(chan EventPayload, progressBuffer),
 	}
 	b.run(ctx)
 
@@ -134,7 +134,7 @@ type batchExec struct {
 	// ReportProgress events from tool goroutines (non-blocking sends).
 	sem      chan struct{}
 	done     chan int
-	progress chan Event
+	progress chan EventPayload
 	inflight int
 	stopped  bool
 }
@@ -181,19 +181,19 @@ func (b *batchExec) step(ctx context.Context, idx int) {
 		return
 	}
 
-	b.emit(toolStartEvent(b.turn, call))
+	b.emit(ToolStarted{Turn: b.turn, Call: call})
 	b.outcomes[idx] = b.agent.runTool(b.reporterCtx(ctx, call), b.tools, call)
 	b.drainProgress()
 	b.finalize(ctx, idx)
-	b.emit(toolEndEvent(b.turn, call, b.outcomes[idx].part))
+	b.emit(ToolCompleted{Turn: b.turn, Call: call, Result: b.outcomes[idx].part})
 }
 
 // settle records a result that did not come from an execution (denial or
 // cancellation), emitting the tool's start/end pair.
 func (b *batchExec) settle(idx int, result ai.ToolResultPart) {
-	b.emit(toolStartEvent(b.turn, b.calls[idx]))
+	b.emit(ToolStarted{Turn: b.turn, Call: b.calls[idx]})
 	b.outcomes[idx] = execOutcome{part: result}
-	b.emit(toolEndEvent(b.turn, b.calls[idx], result))
+	b.emit(ToolCompleted{Turn: b.turn, Call: b.calls[idx], Result: result})
 }
 
 // dispatch hands a call to a worker, waiting for a semaphore slot while
@@ -209,7 +209,7 @@ func (b *batchExec) dispatch(ctx context.Context, idx int) {
 		case doneIdx := <-b.done:
 			b.finish(ctx, doneIdx)
 		case b.sem <- struct{}{}:
-			b.emit(toolStartEvent(b.turn, call))
+			b.emit(ToolStarted{Turn: b.turn, Call: call})
 			b.inflight++
 
 			go func() {
@@ -237,11 +237,15 @@ func (b *batchExec) await(ctx context.Context, target int) {
 }
 
 // finish books one completed worker: apply the after-tool hook, then emit its
-// tool_end.
+// ToolCompleted payload.
 func (b *batchExec) finish(ctx context.Context, idx int) {
 	b.inflight--
 	b.finalize(ctx, idx)
-	b.emit(toolEndEvent(b.turn, b.calls[idx], b.outcomes[idx].part))
+	b.emit(ToolCompleted{
+		Turn:   b.turn,
+		Call:   b.calls[idx],
+		Result: b.outcomes[idx].part,
+	})
 }
 
 // finalize applies the [WithAfterTool] hook to an executed outcome. It runs
@@ -304,7 +308,7 @@ func (b *batchExec) drainProgress() {
 func (b *batchExec) reporterCtx(ctx context.Context, call ai.ToolCallPart) context.Context {
 	return withProgress(ctx, func(parts []ai.Part) {
 		select {
-		case b.progress <- toolUpdateEvent(b.turn, call, parts):
+		case b.progress <- cloneEventPayload(ToolUpdated{Turn: b.turn, Call: call, Update: parts}):
 		default:
 		}
 	})
@@ -313,12 +317,12 @@ func (b *batchExec) reporterCtx(ctx context.Context, call ai.ToolCallPart) conte
 // emit forwards an event unless the consumer already stopped; when the
 // consumer stops here, the run context is cancelled so in-flight tools wind
 // down.
-func (b *batchExec) emit(ev Event) {
+func (b *batchExec) emit(payload EventPayload) {
 	if b.stopped {
 		return
 	}
 
-	if !b.emitFn(ev) {
+	if !b.emitFn(payload) {
 		b.stopped = true
 		b.cancel()
 	}

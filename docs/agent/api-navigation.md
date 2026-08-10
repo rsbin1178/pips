@@ -64,7 +64,10 @@
 - `WithMaxTurns`、`WithMaxTokens`、`WithToolTimeout`
 - `WithStopWhen`
 - `WithName`、`RunMetadataFromContext`
-- `WithOnEvent`、`Event`、`EventType`
+- `WithOnEvent`、`Event`、`EventType`、`EventPayload`、`NewEvent`
+- `RunStarted`、`TurnStarted`、`ModelStreamEvent`、`MessageCommitted`
+- `CandidateDiscarded`、`ToolStarted/ToolUpdated/ToolCompleted`
+- `TurnCompleted`、`RunCompleted`、`ErrInvalidEvent`、`ErrEventWireFormat`
 
 ## Harness 按任务查找
 

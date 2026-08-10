@@ -177,7 +177,7 @@ func (s *ToolSearch) PrepareTurn(ctx context.Context, info agent.RunInfo) agent.
 }
 
 // Forget removes one run's deferred selection early. It is useful when a
-// host chains its event handler and observes agent.EventRunEnd.
+// host chains its event handler and observes agent.EventRunCompleted.
 func (s *ToolSearch) Forget(runID string) {
 	if s == nil {
 		return

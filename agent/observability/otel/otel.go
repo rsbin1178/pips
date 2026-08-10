@@ -85,59 +85,64 @@ func (o *Observer) Observe(ctx context.Context, event agent.Event) {
 		return
 	}
 
-	attrs := runAttributes(event)
-	switch event.Type {
-	case agent.EventRunStart:
+	attrs := runAttributes(event, 0)
+	switch payload := event.Payload().(type) {
+	case agent.RunStarted:
 		_, span := o.tracer.Start(ctx, "agent.run", trace.WithAttributes(attrs...))
 		o.runs.Store(event.RunID, span)
 		o.runsTotal.Add(ctx, 1, metric.WithAttributes(attrs...))
-	case agent.EventTurnStart:
-		o.startChild(ctx, event, "agent.turn", &o.turns, turnKey(event))
-	case agent.EventTurnEnd:
-		o.end(&o.turns, turnKey(event), event, false)
-		o.tokens.Add(ctx, int64(event.Usage.InputTokens+event.Usage.OutputTokens), metric.WithAttributes(attrs...))
-	case agent.EventToolStart:
-		if event.Call != nil {
-			o.startChild(ctx, event, "agent.tool", &o.tools, toolKey(event), attribute.String("agent.tool.name", event.Call.Name))
-		}
-	case agent.EventToolEnd:
-		if event.Call != nil {
-			failed := event.Result != nil && event.Result.IsError
-			o.end(&o.tools, toolKey(event), event, failed)
-			o.toolsTotal.Add(ctx, 1, metric.WithAttributes(append(attrs, attribute.String("agent.tool.name", event.Call.Name))...))
+	case agent.TurnStarted:
+		o.startChild(ctx, event, payload.Turn, "agent.turn", &o.turns, turnKey(event.RunID, payload.Turn))
+	case agent.TurnCompleted:
+		attrs = runAttributes(event, payload.Turn)
+		o.end(&o.turns, turnKey(event.RunID, payload.Turn), event, false, "")
+		o.tokens.Add(ctx, int64(payload.Usage.InputTokens+payload.Usage.OutputTokens), metric.WithAttributes(attrs...))
+	case agent.ToolStarted:
+		o.startChild(
+			ctx,
+			event,
+			payload.Turn,
+			"agent.tool",
+			&o.tools,
+			toolKey(event.RunID, payload.Call.ID),
+			attribute.String("agent.tool.name", payload.Call.Name),
+		)
+	case agent.ToolCompleted:
+		attrs = runAttributes(event, payload.Turn)
+		o.end(&o.tools, toolKey(event.RunID, payload.Call.ID), event, payload.Result.IsError, "")
+		o.toolsTotal.Add(ctx, 1, metric.WithAttributes(append(attrs, attribute.String("agent.tool.name", payload.Call.Name))...))
 
-			if failed {
-				o.failures.Add(ctx, 1, metric.WithAttributes(attrs...))
-			}
+		if payload.Result.IsError {
+			o.failures.Add(ctx, 1, metric.WithAttributes(attrs...))
 		}
-	case agent.EventRunEnd:
-		o.end(&o.runs, event.RunID, event, false)
-	case agent.EventDelta, agent.EventMessage, agent.EventCandidateDiscard,
-		agent.EventToolUpdate:
+	case agent.RunCompleted:
+		o.end(&o.runs, event.RunID, event, false, payload.Stop)
+	case agent.ModelStreamEvent, agent.MessageCommitted, agent.CandidateDiscarded,
+		agent.ToolUpdated:
 		// These events do not change span lifecycle or aggregate metrics.
 	}
 }
 
-func (o *Observer) startChild(ctx context.Context, event agent.Event, name string, target *sync.Map, key string, extra ...attribute.KeyValue) {
+func (o *Observer) startChild(ctx context.Context, event agent.Event, turn int, name string, target *sync.Map, key string, extra ...attribute.KeyValue) {
 	if parent, ok := o.runs.Load(event.RunID); ok {
 		if span, isSpan := parent.(trace.Span); isSpan {
 			ctx = trace.ContextWithSpan(ctx, span)
 		}
 	}
 
-	attrs := append(runAttributes(event), extra...)
+	attrs := append(runAttributes(event, turn), extra...)
 	_, span := o.tracer.Start(ctx, name, trace.WithAttributes(attrs...))
 	target.Store(key, span)
 }
 
-func (o *Observer) end(source *sync.Map, key string, event agent.Event, failed bool) {
+func (o *Observer) end(source *sync.Map, key string, event agent.Event, failed bool, stop agent.StopReason) {
 	if value, ok := source.LoadAndDelete(key); ok {
 		span, isSpan := value.(trace.Span)
 		if !isSpan {
 			return
 		}
 
-		span.SetAttributes(attribute.String("agent.stop_reason", string(event.Stop)))
+		span.SetAttributes(attribute.String("agent.stop_reason", string(stop)))
 
 		if failed {
 			span.SetStatus(codes.Error, "tool failed")
@@ -147,8 +152,8 @@ func (o *Observer) end(source *sync.Map, key string, event agent.Event, failed b
 	}
 }
 
-func runAttributes(event agent.Event) []attribute.KeyValue {
-	return []attribute.KeyValue{attribute.String("agent.run_id", event.RunID), attribute.String("agent.parent_run_id", event.ParentRunID), attribute.String("agent.name", event.Agent), attribute.Int("agent.turn", event.Turn)}
+func runAttributes(event agent.Event, turn int) []attribute.KeyValue {
+	return []attribute.KeyValue{attribute.String("agent.run_id", event.RunID), attribute.String("agent.parent_run_id", event.ParentRunID), attribute.String("agent.name", event.Agent), attribute.Int("agent.turn", turn)}
 }
-func turnKey(event agent.Event) string { return event.RunID + ":" + strconv.Itoa(event.Turn) }
-func toolKey(event agent.Event) string { return event.RunID + ":" + event.Call.ID }
+func turnKey(runID string, turn int) string { return runID + ":" + strconv.Itoa(turn) }
+func toolKey(runID, callID string) string   { return runID + ":" + callID }

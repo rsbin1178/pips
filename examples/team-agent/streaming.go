@@ -92,7 +92,7 @@ func (coordinator *teamCoordinator) streamHarness(
 	}
 
 	if !state.ended {
-		return state.result, errors.New("stream ended without a run_end event")
+		return state.result, errors.New("stream ended without a run_completed event")
 	}
 
 	state.result.Text = messageText(state.finalAssistant)
@@ -104,31 +104,29 @@ func (state *harnessStreamState) handle(
 	coordinator *teamCoordinator, label string,
 	event agent.Event,
 ) error {
-	switch event.Type {
-	case agent.EventTurnStart:
+	switch payload := event.Payload().(type) {
+	case agent.TurnStarted:
 		return coordinator.writeStream("[%s] ", label)
-	case agent.EventDelta:
-		if event.Delta.Type == ai.StreamTextDelta {
-			return coordinator.writeStream("%s", event.Delta.Text)
+	case agent.ModelStreamEvent:
+		if payload.Event.Type == ai.StreamTextDelta {
+			return coordinator.writeStream("%s", payload.Event.Text)
 		}
-	case agent.EventMessage:
-		if event.Message != nil && event.Message.Role == ai.RoleAssistant {
-			message := *event.Message
+	case agent.MessageCommitted:
+		if payload.Message.Role == ai.RoleAssistant {
+			message := payload.Message
 			state.finalAssistant = &message
 		}
-	case agent.EventToolStart:
-		if event.Call != nil {
-			return coordinator.printf("[%s tool] %s\n", label, event.Call.Name)
-		}
-	case agent.EventTurnEnd:
+	case agent.ToolStarted:
+		return coordinator.printf("[%s tool] %s\n", label, payload.Call.Name)
+	case agent.TurnCompleted:
 		return coordinator.writeStream("\n")
-	case agent.EventRunEnd:
-		state.result.Stop = event.Stop
-		state.result.Turns = event.Turn
-		state.result.Usage = event.Usage
+	case agent.RunCompleted:
+		state.result.Stop = payload.Stop
+		state.result.Turns = payload.Turns
+		state.result.Usage = payload.Usage
 		state.ended = true
-	case agent.EventRunStart, agent.EventCandidateDiscard,
-		agent.EventToolUpdate, agent.EventToolEnd:
+	case agent.RunStarted, agent.CandidateDiscarded,
+		agent.ToolUpdated, agent.ToolCompleted:
 	}
 
 	return nil

@@ -189,7 +189,7 @@ func (r *Runtime) observeChildAgentEvent(ctx context.Context, childEvent subagen
 	if err := publisher.publishChildLocked(ctx, child, projected); err != nil {
 		return err
 	}
-	if childEvent.Event.Type != agent.EventTurnStart || len(child.pendingInput) == 0 {
+	if _, turnStarted := childEvent.Event.Payload().(agent.TurnStarted); !turnStarted || len(child.pendingInput) == 0 {
 		return nil
 	}
 

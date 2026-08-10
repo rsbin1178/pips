@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/rsbin/pips/agent"
 	"github.com/rsbin/pips/agent/extension"
@@ -54,7 +55,16 @@ func TestComposeHooksUsesDocumentedOrdering(t *testing.T) {
 		},
 	)
 
-	hooks.Observe(ctx, agent.Event{Type: agent.EventRunStart})
+	event, err := agent.NewEvent(
+		agent.RunMetadata{RunID: "run"},
+		time.Now().UTC(),
+		agent.RunStarted{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hooks.Observe(ctx, event)
 
 	decision := hooks.BeforeTool(ctx, agent.ToolCallInfo{})
 	if decision.Action != agent.ToolDecisionDeny || decision.Reason != "denied" {

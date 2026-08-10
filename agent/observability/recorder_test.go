@@ -17,10 +17,27 @@ func TestRecorderBuildsPrivacyPreservingTrace(t *testing.T) {
 
 	recorder := observability.NewRecorder()
 	now := time.Now().UTC()
-	recorder.Observe(context.Background(), agent.Event{Type: agent.EventRunStart, RunID: "run", Agent: "helper", Time: now})
-	recorder.Observe(context.Background(), agent.Event{Type: agent.EventToolStart, RunID: "run", Time: now, Call: &ai.ToolCallPart{ID: "call", Name: "lookup", Args: ai.JSON(`{"secret":"nope"}`)}})
-	recorder.Observe(context.Background(), agent.Event{Type: agent.EventToolEnd, RunID: "run", Time: now.Add(time.Second), Call: &ai.ToolCallPart{ID: "call", Name: "lookup"}, Result: &ai.ToolResultPart{IsError: true}})
-	recorder.Observe(context.Background(), agent.Event{Type: agent.EventRunEnd, RunID: "run", Time: now.Add(2 * time.Second), Turn: 2, Stop: agent.StopEndTurn, Usage: ai.Usage{InputTokens: 3, OutputTokens: 5}})
+	meta := agent.RunMetadata{RunID: "run", Agent: "helper"}
+	observe := func(at time.Time, payload agent.EventPayload) {
+		event, err := agent.NewEvent(meta, at, payload)
+		require.NoError(t, err)
+		recorder.Observe(context.Background(), event)
+	}
+	observe(now, agent.RunStarted{})
+	observe(now, agent.ToolStarted{
+		Turn: 1,
+		Call: ai.ToolCallPart{ID: "call", Name: "lookup", Args: ai.JSON(`{"secret":"nope"}`)},
+	})
+	observe(now.Add(time.Second), agent.ToolCompleted{
+		Turn:   1,
+		Call:   ai.ToolCallPart{ID: "call", Name: "lookup"},
+		Result: ai.ToolResultPart{IsError: true},
+	})
+	observe(now.Add(2*time.Second), agent.RunCompleted{
+		Turns: 2,
+		Stop:  agent.StopEndTurn,
+		Usage: ai.Usage{InputTokens: 3, OutputTokens: 5},
+	})
 
 	trace, ok := recorder.Trace("run")
 	require.True(t, ok)

@@ -49,6 +49,7 @@ func TestRunMetadataDecoratesEventsContextAndResult(t *testing.T) {
 	require.NotEmpty(t, events)
 
 	for idx, ev := range events {
+		require.NoError(t, ev.Validate())
 		assert.Equal(t, result.RunID, ev.RunID)
 		assert.Empty(t, ev.ParentRunID)
 		assert.Equal(t, "coordinator", ev.Agent)
@@ -97,7 +98,7 @@ func TestNestedAgentRunLinksParentMetadata(t *testing.T) {
 	child, err := agent.New(childModel,
 		agent.WithName("researcher"),
 		agent.WithOnEvent(func(_ context.Context, ev agent.Event) {
-			if ev.Type == agent.EventRunStart {
+			if _, ok := ev.Payload().(agent.RunStarted); ok {
 				childStart = ev
 			}
 		}),
@@ -179,7 +180,7 @@ func TestOutputGuardrailRejectsBeforeFinalMessageCommit(t *testing.T) {
 
 	a, err := agent.New(model,
 		agent.WithOnEvent(func(_ context.Context, ev agent.Event) {
-			events = append(events, ev.Type)
+			events = append(events, ev.Type())
 		}),
 		agent.WithOutputGuardrail("claims", func(_ context.Context, info agent.OutputGuardrailInfo) error {
 			assert.Equal(t, "provisional answer", info.Response.Text())
@@ -199,7 +200,7 @@ func TestOutputGuardrailRejectsBeforeFinalMessageCommit(t *testing.T) {
 	assert.Equal(t, ai.Usage{InputTokens: 10, OutputTokens: 5}, result.Usage)
 	assert.Equal(t, result.Usage, sess.Usage())
 	assert.Len(t, sess.Messages(), 1, "only the input is committed")
-	assert.Equal(t, []agent.EventType{agent.EventRunStart, agent.EventTurnStart}, events)
+	assert.Equal(t, []agent.EventType{agent.EventRunStarted, agent.EventTurnStarted}, events)
 }
 
 func TestOutputGuardrailValidatesEachAnswerCandidate(t *testing.T) {
@@ -253,7 +254,8 @@ func TestStreamOutputGuardrailLeavesDeltasProvisional(t *testing.T) {
 			continue
 		}
 
-		if ev.Type == agent.EventDelta && ev.Delta.Type == ai.StreamTextDelta {
+		if event, ok := ev.Payload().(agent.ModelStreamEvent); ok &&
+			event.Event.Type == ai.StreamTextDelta {
 			sawTextDelta = true
 		}
 	}

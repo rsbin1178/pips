@@ -107,32 +107,33 @@ func TestStreamToolLoop(t *testing.T) {
 
 	for ev, err := range a.Stream(t.Context(), sess, ai.UserText("2+3?")) {
 		require.NoError(t, err)
+		require.NoError(t, ev.Validate())
 
-		if ev.Type == agent.EventDelta {
+		if _, ok := ev.Payload().(agent.ModelStreamEvent); ok {
 			deltas++
 			continue
 		}
 
-		types = append(types, ev.Type)
+		types = append(types, ev.Type())
 
-		if ev.Type == agent.EventRunEnd {
-			assert.Equal(t, agent.StopEndTurn, ev.Stop)
-			assert.Equal(t, ai.Usage{InputTokens: 20, OutputTokens: 10}, ev.Usage)
+		if completed, ok := ev.Payload().(agent.RunCompleted); ok {
+			assert.Equal(t, agent.StopEndTurn, completed.Stop)
+			assert.Equal(t, ai.Usage{InputTokens: 20, OutputTokens: 10}, completed.Usage)
 		}
 	}
 
 	assert.Equal(t, []agent.EventType{
-		agent.EventRunStart,
-		agent.EventTurnStart,
-		agent.EventMessage, // assistant with tool call
-		agent.EventToolStart,
-		agent.EventToolEnd,
-		agent.EventMessage, // tool results
-		agent.EventTurnEnd,
-		agent.EventTurnStart,
-		agent.EventMessage, // final text
-		agent.EventTurnEnd,
-		agent.EventRunEnd,
+		agent.EventRunStarted,
+		agent.EventTurnStarted,
+		agent.EventMessageCommitted, // assistant with tool call
+		agent.EventToolStarted,
+		agent.EventToolCompleted,
+		agent.EventMessageCommitted, // tool results
+		agent.EventTurnCompleted,
+		agent.EventTurnStarted,
+		agent.EventMessageCommitted, // final text
+		agent.EventTurnCompleted,
+		agent.EventRunCompleted,
 	}, types)
 	assert.Positive(t, deltas)
 
@@ -184,11 +185,12 @@ func TestCandidateAnswerRetryDiscardsDraftAndConstrainsOneRequest(t *testing.T) 
 
 	for event, streamErr := range a.Stream(t.Context(), sess, ai.UserText("calculate")) {
 		require.NoError(t, streamErr)
+		require.NoError(t, event.Validate())
 
-		events = append(events, event.Type)
+		events = append(events, event.Type())
 	}
 
-	assert.Contains(t, events, agent.EventCandidateDiscard)
+	assert.Contains(t, events, agent.EventCandidateDiscarded)
 	assert.Equal(t, 2, candidates)
 	assert.NotContains(t, sessionText(sess.Messages()), "uncommitted draft")
 	assert.Contains(t, sessionText(sess.Messages()), "5")
@@ -210,7 +212,7 @@ func TestRunOnEvent(t *testing.T) {
 	var types []agent.EventType
 
 	a, err := agent.New(model, agent.WithOnEvent(func(_ context.Context, ev agent.Event) {
-		types = append(types, ev.Type)
+		types = append(types, ev.Type())
 	}))
 	require.NoError(t, err)
 
@@ -218,11 +220,11 @@ func TestRunOnEvent(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, []agent.EventType{
-		agent.EventRunStart,
-		agent.EventTurnStart,
-		agent.EventMessage,
-		agent.EventTurnEnd,
-		agent.EventRunEnd,
+		agent.EventRunStarted,
+		agent.EventTurnStarted,
+		agent.EventMessageCommitted,
+		agent.EventTurnCompleted,
+		agent.EventRunCompleted,
 	}, types)
 }
 
@@ -360,7 +362,7 @@ func TestStreamBreakCancelsRun(t *testing.T) {
 	for ev, err := range a.Stream(t.Context(), sess, ai.UserText("hi")) {
 		require.NoError(t, err)
 
-		if ev.Type == agent.EventDelta {
+		if _, ok := ev.Payload().(agent.ModelStreamEvent); ok {
 			break // abandon mid-model-stream
 		}
 	}

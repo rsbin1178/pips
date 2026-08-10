@@ -109,7 +109,9 @@ func TestAgentReturnsAnswer(t *testing.T) {
 5. 部分 `ResolveToolCalls` 后，遗漏调用仍 pending；
 6. 全部解析后第二次 Run 能继续。
 
-分别测试 input guardrail 失败时输入未提交、output guardrail 失败时候选未提交。流式测试还应确认 delta 只是暂定内容，`candidate_discard` 不泄露候选正文。
+分别测试 input guardrail 失败时输入未提交、output guardrail 失败时候选未提交。流式测试还应确认 `ModelStreamEvent` 只是暂定内容，`CandidateDiscarded` 不泄露候选正文。
+
+观察器、projector 或 renderer 的事件夹具应通过 `agent.NewEvent` 构造，不要依赖 Event 内部布局。至少覆盖一次 `Validate()`、`ErrInvalidEvent`、`ErrEventWireFormat`，以及修改原始 Tool Args/媒体 bytes 后 retained Event 不变的所有权测试。
 
 ## 测试 Session 并发与取消
 

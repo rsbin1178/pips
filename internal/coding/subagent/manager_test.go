@@ -213,17 +213,12 @@ func TestRunTrackerProjectsDefensiveLiveActivity(t *testing.T) {
 	}
 
 	events := []agent.Event{
-		{Type: agent.EventRunStart, RunID: "run-1", Time: startedAt},
-		{Type: agent.EventTurnStart, RunID: "run-1", Turn: 1, Time: startedAt.Add(time.Second)},
-		{
-			Type: agent.EventToolStart, RunID: "run-1", Turn: 1,
-			Time: startedAt.Add(2 * time.Second), Call: &call,
-		},
-		{
-			Type: agent.EventToolUpdate, RunID: "run-1", Turn: 1,
-			Time: startedAt.Add(3 * time.Second), Call: &call,
-			Update: []ai.Part{ai.TextPart{Text: "reading"}},
-		},
+		mustAgentEvent(t, startedAt, agent.RunStarted{}),
+		mustAgentEvent(t, startedAt.Add(time.Second), agent.TurnStarted{Turn: 1}),
+		mustAgentEvent(t, startedAt.Add(2*time.Second), agent.ToolStarted{Turn: 1, Call: call}),
+		mustAgentEvent(t, startedAt.Add(3*time.Second), agent.ToolUpdated{
+			Turn: 1, Call: call, Update: []ai.Part{ai.TextPart{Text: "reading"}},
+		}),
 	}
 	for _, event := range events {
 		trackChildEvent(tracker, event)
@@ -246,6 +241,19 @@ func TestRunTrackerProjectsDefensiveLiveActivity(t *testing.T) {
 	assert.Equal(t, "reading", messageText(second.Tools[0].Update))
 }
 
+func mustAgentEvent(t *testing.T, occurredAt time.Time, payload agent.EventPayload) agent.Event {
+	t.Helper()
+
+	event, err := agent.NewEvent(
+		agent.RunMetadata{RunID: "run-1", Agent: "subagent"},
+		occurredAt,
+		payload,
+	)
+	require.NoError(t, err)
+
+	return event
+}
+
 func TestRunTrackerBoundsActivityWithoutFreezingCurrentAction(t *testing.T) {
 	t.Parallel()
 
@@ -255,10 +263,11 @@ func TestRunTrackerBoundsActivityWithoutFreezingCurrentAction(t *testing.T) {
 			ID: fmt.Sprintf("call-%d", index+1), Name: readToolName,
 			Args: ai.JSON(fmt.Sprintf(`{"path":%q}`, target)),
 		}
-		trackChildEvent(tracker, agent.Event{
-			Type: agent.EventToolStart, RunID: "run-1", Turn: index + 1,
-			Time: time.Now().UTC(), Call: &call,
-		})
+		trackChildEvent(tracker, mustAgentEvent(
+			t,
+			time.Now().UTC(),
+			agent.ToolStarted{Turn: index + 1, Call: call},
+		))
 	}
 
 	snapshot, activity := tracker.snapshot()
@@ -295,7 +304,7 @@ func TestManagerInspectOverlaysInFlightToolActivity(t *testing.T) {
 
 	fixture.manager.config.AgentObservers = []func(context.Context, agent.Event){
 		func(_ context.Context, event agent.Event) {
-			if event.Type != agent.EventToolStart {
+			if _, ok := event.Payload().(agent.ToolStarted); !ok {
 				return
 			}
 

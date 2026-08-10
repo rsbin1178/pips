@@ -47,8 +47,8 @@ func main() {
 			return nil
 		}),
 		agent.WithOnEvent(func(_ context.Context, ev agent.Event) {
-			if ev.Type == agent.EventToolEnd {
-				fmt.Printf("→ [%s] %s(%s)\n", ev.RunID, ev.Call.Name, ev.Call.Args)
+			if completed, ok := ev.Payload().(agent.ToolCompleted); ok {
+				fmt.Printf("→ [%s] %s(%s)\n", ev.RunID, completed.Call.Name, completed.Call.Args)
 			}
 		}),
 	)

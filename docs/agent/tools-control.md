@@ -68,7 +68,7 @@ agent.WithTools(
 agent.ReportProgress(ctx, ai.TextPart{Text: "已处理 50%"})
 ```
 
-观察者收到 `tool_update` 事件。更新可能因消费者过慢而丢弃，在活动运行之外调用是 no-op，因此它不能承担持久 checkpoint 或正确性协议。
+观察者收到 `ToolUpdated` payload。更新可能因消费者过慢而丢弃，在活动运行之外调用是 no-op，因此它不能承担持久 checkpoint 或正确性协议。
 
 ## 调用前 gate
 
@@ -139,11 +139,11 @@ result, err = a.Run(ctx, sess)
 
 | 控制点 | 时机 | 适用场景 |
 | --- | --- | --- |
-| `WithInputGuardrail` | `run_start` 后、输入提交和模型 I/O 前 | 租户策略、输入大小、禁止内容 |
+| `WithInputGuardrail` | `RunStarted` 后、输入提交和模型 I/O 前 | 租户策略、输入大小、禁止内容 |
 | `WithOutputGuardrail` | 无工具候选完整形成后、提交前 | 声明、格式、合规验证 |
 | `WithCandidateAnswer` | 输出 guardrail 通过后、提交前 | 接受候选，或让模型基于反馈重试 |
 
-Guardrail 返回错误会中止 Run。输出 guardrail 先于候选 hook 执行；候选 hook 返回 Retry 会丢弃候选，可携带一次性的模型请求更新，已消费 token 不回退。流式 delta 在验证前已经产生，敏感场景应缓冲展示。
+Guardrail 返回错误会中止 Run。输出 guardrail 先于候选 hook 执行；候选 hook 返回 Retry 会丢弃候选，可携带一次性的模型请求更新，已消费 token 不回退。流式 `ModelStreamEvent` 在验证前已经产生，敏感场景应缓冲展示。
 
 副作用授权必须放在 before-tool gate 或工具自身的业务边界，而不是输出 guardrail；最终文本验证无法撤销已经发生的外部操作。
 
@@ -194,7 +194,7 @@ if err != nil {
 a, err := agent.New(model, opts...)
 ```
 
-默认延迟 MCP 与 Extension 来源，本地和 Team 工具保持直接可见；`DeferredSources` 可覆盖。关闭 `Enabled` 时所有已授权工具直接可见。宿主在 `run_end` 后可调用 `Forget(runID)` 提前清除运行选择；内部还有有界的运行记录清理。
+默认延迟 MCP 与 Extension 来源，本地和 Team 工具保持直接可见；`DeferredSources` 可覆盖。关闭 `Enabled` 时所有已授权工具直接可见。宿主在 `RunCompleted` 后可调用 `Forget(runID)` 提前清除运行选择；内部还有有界的运行记录清理。
 
 工具搜索只是模型上下文优化，不是授权绕过：搜索结果在展示和应用到下一轮时都会重新检查 Policy。
 
