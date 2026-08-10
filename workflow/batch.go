@@ -88,8 +88,8 @@ func (BatchNode) Compile(
 		return nil, wrapCompileNodeError(definition.ID, "batch body", err)
 	}
 
-	if child.containsNodeType(NodeTypeBatch) {
-		return nil, compileNodeError(definition.ID, "batch body must not contain Batch")
+	if child.containsNodeType(NodeTypeBatch) || child.containsNodeType(NodeTypeLoop) {
+		return nil, compileNodeError(definition.ID, "batch body must not contain Batch or Loop")
 	}
 
 	spec, err := batchNodeSpec(config, child)

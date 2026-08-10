@@ -135,6 +135,7 @@ func FuzzSelectorConfig(f *testing.F) {
 func FuzzCompositeNodeConfigs(f *testing.F) {
 	f.Add("batch", []byte(`{"mode":"parallel","max_concurrency":0}`))
 	f.Add("sub_workflow", []byte(`{"workflow":{"id":"child","revision":"v1","fingerprint":"invalid"}}`))
+	f.Add("loop", []byte(`{"mode":"count","max_iterations":100}`))
 
 	f.Fuzz(func(t *testing.T, nodeType string, config []byte) {
 		definition := workflow.NodeDefinition{
@@ -148,6 +149,9 @@ func FuzzCompositeNodeConfigs(f *testing.F) {
 		case workflow.NodeTypeSubWorkflow:
 			definition.Type = workflow.NodeTypeSubWorkflow
 			_, _ = (workflow.SubWorkflowNode{}).Compile(t.Context(), testCompileContext{}, definition)
+		case workflow.NodeTypeLoop:
+			definition.Type = workflow.NodeTypeLoop
+			_, _ = (workflow.LoopNode{}).Compile(t.Context(), testCompileContext{}, definition)
 		default:
 			return
 		}

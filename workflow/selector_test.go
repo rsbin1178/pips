@@ -166,18 +166,22 @@ func TestSelectorNodeRejectsInvalidConfig(t *testing.T) {
 	}
 }
 
-func TestBuiltinNodeTypesIncludeV2Nodes(t *testing.T) {
+func TestBuiltinNodeTypesIncludeCompositeAndLoopNodes(t *testing.T) {
 	t.Parallel()
 
 	nodeTypes := workflow.BuiltinNodeTypes()
-	if len(nodeTypes) != 8 {
-		t.Fatalf("len(BuiltinNodeTypes()) = %d, want 8", len(nodeTypes))
+	if len(nodeTypes) != 12 {
+		t.Fatalf("len(BuiltinNodeTypes()) = %d, want 12", len(nodeTypes))
 	}
 
 	want := map[workflow.NodeTypeKey]string{
 		workflow.NodeTypeSelector:    "Selector",
 		workflow.NodeTypeSubWorkflow: "SubWorkflow",
 		workflow.NodeTypeBatch:       "Batch",
+		workflow.NodeTypeLoop:        "Loop",
+		workflow.NodeTypeBreak:       "Break",
+		workflow.NodeTypeContinue:    "Continue",
+		workflow.NodeTypeSetVariable: "Set Variable",
 	}
 
 	for _, nodeType := range nodeTypes {

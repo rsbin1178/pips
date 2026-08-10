@@ -46,10 +46,12 @@ const (
 	BindingLiteral       BindingSource = "literal"
 	BindingWorkflowInput BindingSource = "workflow_input"
 	BindingNodeOutput    BindingSource = "node_output"
+	BindingLoopVariable  BindingSource = "loop_variable"
 )
 
-// Binding selects a literal, Workflow input, or prior node output. Path walks
-// object keys or decimal array indexes after resolving the source value.
+// Binding selects a literal, Workflow input, prior node output, or direct Loop
+// variable. Path walks object keys or decimal array indexes after resolving the
+// source value.
 type Binding struct {
 	Source BindingSource `json:"source"`
 	Node   NodeID        `json:"node,omitempty"`
@@ -342,9 +344,19 @@ func validateBindingSource(binding Binding) error {
 		return validateWorkflowInputBinding(binding)
 	case BindingNodeOutput:
 		return validateNodeOutputBinding(binding)
+	case BindingLoopVariable:
+		return validateLoopVariableBinding(binding)
 	default:
 		return fmt.Errorf("unknown binding source %q", binding.Source)
 	}
+}
+
+func validateLoopVariableBinding(binding Binding) error {
+	if binding.Value != nil || binding.Node != "" || !validIdentifier(binding.Port) {
+		return errors.New("loop variable binding requires only port")
+	}
+
+	return nil
 }
 
 func validateLiteralBinding(binding Binding) error {
