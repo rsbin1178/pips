@@ -82,7 +82,7 @@ Harness 同一时刻只执行一个操作。并发 Prompt、压缩、导航或�
 
 ## 精确保存点
 
-Harness 不会在调用开始时盲目持久化输入。用户消息在第一个 `turn_start` 保存；因此输入 guardrail 失败或在 `run_start` 后立即停止流，不会留下未进入模型的输入。
+Harness 不会在调用开始时盲目持久化输入。用户消息在第一个 `TurnStarted` 保存；因此输入 guardrail 失败或在 `RunStarted` 后立即停止流，不会留下未进入模型的输入。
 
 工具调用、结果和完成消息按运行提交点追加。若 Store 在模型调用前写失败，Harness 会取消并返回错误。恢复后，`Session.Pending` 可以找出缺少结果的工具调用；解析前 Harness 不会压缩或接受新 prompt。
 

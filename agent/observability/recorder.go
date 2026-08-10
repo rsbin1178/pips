@@ -72,41 +72,37 @@ func (r *Recorder) Observe(_ context.Context, event agent.Event) {
 	defer r.mu.Unlock()
 
 	trace := r.ensure(event)
-	switch event.Type {
-	case agent.EventRunStart:
+	switch payload := event.Payload().(type) {
+	case agent.RunStarted:
 		r.metrics.RunsStarted++
-	case agent.EventTurnStart, agent.EventDelta, agent.EventMessage,
-		agent.EventCandidateDiscard, agent.EventToolUpdate:
+	case agent.TurnStarted, agent.ModelStreamEvent, agent.MessageCommitted,
+		agent.CandidateDiscarded, agent.ToolUpdated:
 		// These events carry no durable aggregate currently.
-	case agent.EventTurnEnd:
-		trace.Turns = max(trace.Turns, event.Turn)
-		trace.Usage = event.Usage
+	case agent.TurnCompleted:
+		trace.Turns = max(trace.Turns, payload.Turn)
+		trace.Usage = payload.Usage
 		r.metrics.Turns++
-	case agent.EventToolStart:
-		if event.Call != nil {
-			r.metrics.ToolCalls++
+	case agent.ToolStarted:
+		r.metrics.ToolCalls++
 
-			trace.Tools = append(trace.Tools, ToolSpan{Name: event.Call.Name, StartedAt: event.Time})
-			r.active[event.RunID][event.Call.ID] = len(trace.Tools) - 1
-		}
-	case agent.EventToolEnd:
-		if event.Call != nil {
-			if index, ok := r.active[event.RunID][event.Call.ID]; ok {
-				trace.Tools[index].EndedAt = event.Time
+		trace.Tools = append(trace.Tools, ToolSpan{Name: payload.Call.Name, StartedAt: event.Time})
+		r.active[event.RunID][payload.Call.ID] = len(trace.Tools) - 1
+	case agent.ToolCompleted:
+		if index, ok := r.active[event.RunID][payload.Call.ID]; ok {
+			trace.Tools[index].EndedAt = event.Time
 
-				trace.Tools[index].Failed = event.Result != nil && event.Result.IsError
-				if trace.Tools[index].Failed {
-					r.metrics.ToolFailures++
-				}
-
-				delete(r.active[event.RunID], event.Call.ID)
+			trace.Tools[index].Failed = payload.Result.IsError
+			if trace.Tools[index].Failed {
+				r.metrics.ToolFailures++
 			}
+
+			delete(r.active[event.RunID], payload.Call.ID)
 		}
-	case agent.EventRunEnd:
-		trace.EndedAt, trace.Stop, trace.Usage = event.Time, event.Stop, event.Usage
-		trace.Turns = max(trace.Turns, event.Turn)
+	case agent.RunCompleted:
+		trace.EndedAt, trace.Stop, trace.Usage = event.Time, payload.Stop, payload.Usage
+		trace.Turns = max(trace.Turns, payload.Turns)
 		r.metrics.RunsCompleted++
-		r.metrics.Usage.Add(event.Usage)
+		r.metrics.Usage.Add(payload.Usage)
 	}
 }
 

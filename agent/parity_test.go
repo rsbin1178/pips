@@ -64,7 +64,7 @@ func TestSteeringExtendsFinishedRun(t *testing.T) {
 
 	// Steer exactly once, while the first turn's message lands.
 	a, err := agent.New(model, agent.WithOnEvent(func(_ context.Context, ev agent.Event) {
-		if ev.Type == agent.EventMessage && !steered.Swap(true) {
+		if _, ok := ev.Payload().(agent.MessageCommitted); ok && !steered.Swap(true) {
 			sess.Steer(ai.UserText("one more thing"))
 		}
 	}))
@@ -470,13 +470,13 @@ func TestReportProgressEvents(t *testing.T) {
 
 	for ev, err := range a.Stream(t.Context(), agent.NewSession(), ai.UserText("go")) {
 		require.NoError(t, err)
+		require.NoError(t, ev.Validate())
 
-		if ev.Type == agent.EventToolUpdate {
+		if update, ok := ev.Payload().(agent.ToolUpdated); ok {
 			updates++
 
-			require.NotNil(t, ev.Call)
-			assert.Equal(t, "slowly", ev.Call.Name)
-			require.Len(t, ev.Update, 1)
+			assert.Equal(t, "slowly", update.Call.Name)
+			require.Len(t, update.Update, 1)
 		}
 	}
 
@@ -508,7 +508,7 @@ func TestSteeringCannotOutrunMaxTurns(t *testing.T) {
 
 	// Try to keep the loop alive forever via steering.
 	a2, err := agent.New(model, agent.WithMaxTurns(1), agent.WithOnEvent(func(_ context.Context, ev agent.Event) {
-		if ev.Type == agent.EventMessage && !steered.Swap(true) {
+		if _, ok := ev.Payload().(agent.MessageCommitted); ok && !steered.Swap(true) {
 			sess.Steer(ai.UserText("keep going"))
 		}
 	}))

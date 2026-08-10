@@ -372,7 +372,7 @@ func TestHarnessPromptStreamMatchesObserverAndPersists(t *testing.T) {
 	h, err := harness.New(model, sess,
 		harness.WithTools(addTool()),
 		harness.WithOnEvent(func(_ context.Context, ev agent.Event) {
-			observed = append(observed, ev.Type)
+			observed = append(observed, ev.Type())
 		}),
 	)
 	require.NoError(t, err)
@@ -382,7 +382,7 @@ func TestHarnessPromptStreamMatchesObserverAndPersists(t *testing.T) {
 	for ev, err := range h.PromptStream(t.Context(), "2+3?") {
 		require.NoError(t, err)
 
-		streamed = append(streamed, ev.Type)
+		streamed = append(streamed, ev.Type())
 	}
 
 	assert.Equal(t, observed, streamed)
@@ -449,7 +449,8 @@ func TestHarnessPromptStreamEarlyBreakCleansUp(t *testing.T) {
 	for ev, streamErr := range h.PromptStream(t.Context(), "go") {
 		require.NoError(t, streamErr)
 
-		if ev.Type == agent.EventDelta && ev.Delta.Type == ai.StreamTextDelta {
+		if event, ok := ev.Payload().(agent.ModelStreamEvent); ok &&
+			event.Event.Type == ai.StreamTextDelta {
 			break
 		}
 	}
@@ -527,15 +528,15 @@ func TestHarnessOnEventForwarding(t *testing.T) {
 	var events []agent.EventType
 
 	h, err := harness.New(model, sess, harness.WithOnEvent(func(_ context.Context, ev agent.Event) {
-		events = append(events, ev.Type)
+		events = append(events, ev.Type())
 	}))
 	require.NoError(t, err)
 
 	_, err = h.Prompt(t.Context(), "hello")
 	require.NoError(t, err)
 
-	assert.Contains(t, events, agent.EventRunStart)
-	assert.Contains(t, events, agent.EventRunEnd)
+	assert.Contains(t, events, agent.EventRunStarted)
+	assert.Contains(t, events, agent.EventRunCompleted)
 }
 
 func TestHarnessPromptTemplate(t *testing.T) {

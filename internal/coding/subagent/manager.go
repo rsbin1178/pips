@@ -1414,12 +1414,13 @@ func (m *Manager) observeChild(
 	event agent.Event,
 ) {
 	snapshot, needsStart, visibleChange := trackChildEvent(tracker, event)
+	_, runStarted := event.Payload().(agent.RunStarted)
 
 	if needsStart {
 		m.recordChildStart(ctx, child, observer, created, tracker, event)
 	}
 
-	if visibleChange && event.Type != agent.EventRunStart {
+	if visibleChange && !runStarted {
 		m.emitChildProgress(ctx, child, observer, created, tracker, event, snapshot)
 	}
 
@@ -1445,15 +1446,20 @@ func trackChildEvent(
 	tracker.mu.Lock()
 	defer tracker.mu.Unlock()
 
-	if event.Turn > tracker.turns {
-		tracker.turns = event.Turn
+	turn := agentEventTurn(event.Payload())
+	if turn > tracker.turns {
+		tracker.turns = turn
 	}
 
-	if event.Type == agent.EventTurnEnd || event.Type == agent.EventRunEnd {
-		tracker.usage = event.Usage
+	switch payload := event.Payload().(type) {
+	case agent.TurnCompleted:
+		tracker.usage = payload.Usage
+	case agent.RunCompleted:
+		tracker.usage = payload.Usage
 	}
 
-	needsStart := event.Type == agent.EventRunStart && !tracker.started
+	_, runStarted := event.Payload().(agent.RunStarted)
+	needsStart := runStarted && !tracker.started
 	if needsStart {
 		tracker.started = true
 		tracker.runID = event.RunID
@@ -1471,32 +1477,33 @@ func trackChildEvent(
 func (t *runTracker) trackActivityLocked(event agent.Event) bool {
 	changed := false
 
-	switch event.Type {
-	case agent.EventRunStart:
+	switch payload := event.Payload().(type) {
+	case agent.RunStarted:
 		t.activity.RunID = event.RunID
 		changed = true
-	case agent.EventTurnStart:
+	case agent.TurnStarted:
 		t.activity.Phase = ActivityPhaseThinking
 		changed = true
-	case agent.EventMessage:
-		changed = t.trackMessageActivityLocked(event)
-	case agent.EventToolStart:
-		changed = t.trackToolStartLocked(event)
-	case agent.EventToolUpdate:
-		changed = t.trackToolUpdateLocked(event)
-	case agent.EventToolEnd:
-		changed = t.trackToolEndLocked(event)
-	case agent.EventTurnEnd:
+	case agent.MessageCommitted:
+		changed = t.trackMessageActivityLocked(payload)
+	case agent.ToolStarted:
+		changed = t.trackToolStartLocked(event, payload)
+	case agent.ToolUpdated:
+		changed = t.trackToolUpdateLocked(event, payload)
+	case agent.ToolCompleted:
+		changed = t.trackToolCompletedLocked(event, payload)
+	case agent.TurnCompleted:
 		t.activity.Phase = ActivityPhaseThinking
 		changed = true
-	case agent.EventRunEnd:
+	case agent.RunCompleted:
 		t.activity.Phase = ActivityPhaseFinalizing
 		changed = true
-	case agent.EventDelta, agent.EventCandidateDiscard:
+	case agent.ModelStreamEvent, agent.CandidateDiscarded:
 	}
 
-	if event.Turn > t.activity.Turn {
-		t.activity.Turn = event.Turn
+	turn := agentEventTurn(event.Payload())
+	if turn > t.activity.Turn {
+		t.activity.Turn = turn
 	}
 
 	if !changed {
@@ -1509,9 +1516,8 @@ func (t *runTracker) trackActivityLocked(event agent.Event) bool {
 	return true
 }
 
-func (t *runTracker) trackMessageActivityLocked(event agent.Event) bool {
-	if event.Message == nil || event.Message.Role != ai.RoleAssistant ||
-		messageHasToolCall(*event.Message) {
+func (t *runTracker) trackMessageActivityLocked(event agent.MessageCommitted) bool {
+	if event.Message.Role != ai.RoleAssistant || messageHasToolCall(event.Message) {
 		return false
 	}
 
@@ -1520,24 +1526,16 @@ func (t *runTracker) trackMessageActivityLocked(event agent.Event) bool {
 	return true
 }
 
-func (t *runTracker) trackToolStartLocked(event agent.Event) bool {
-	if event.Call == nil {
-		return false
-	}
-
-	t.upsertToolLocked(event, ToolStatusRunning)
-	t.activitySummary = summarizeToolActivity(*event.Call)
+func (t *runTracker) trackToolStartLocked(envelope agent.Event, event agent.ToolStarted) bool {
+	t.upsertToolLocked(envelope.RunID, event.Turn, event.Call, ToolStatusRunning)
+	t.activitySummary = summarizeToolActivity(event.Call)
 	t.activity.Phase = ActivityPhaseWorking
 
 	return true
 }
 
-func (t *runTracker) trackToolUpdateLocked(event agent.Event) bool {
-	if event.Call == nil {
-		return false
-	}
-
-	index := t.upsertToolLocked(event, ToolStatusRunning)
+func (t *runTracker) trackToolUpdateLocked(envelope agent.Event, event agent.ToolUpdated) bool {
+	index := t.upsertToolLocked(envelope.RunID, event.Turn, event.Call, ToolStatusRunning)
 	if index >= 0 {
 		t.activity.Tools[index].Update = cloneTranscriptMessage(ai.Message{
 			Role: ai.RoleTool, Parts: event.Update,
@@ -1548,15 +1546,11 @@ func (t *runTracker) trackToolUpdateLocked(event agent.Event) bool {
 	return true
 }
 
-func (t *runTracker) trackToolEndLocked(event agent.Event) bool {
-	if event.Call == nil || event.Result == nil {
-		return false
-	}
-
-	index := t.upsertToolLocked(event, ToolStatusCompleted)
+func (t *runTracker) trackToolCompletedLocked(envelope agent.Event, event agent.ToolCompleted) bool {
+	index := t.upsertToolLocked(envelope.RunID, event.Turn, event.Call, ToolStatusCompleted)
 	if index >= 0 {
 		t.activity.Tools[index].Result = cloneTranscriptMessage(ai.Message{
-			Role: ai.RoleTool, Parts: []ai.Part{*event.Result},
+			Role: ai.RoleTool, Parts: []ai.Part{event.Result},
 		})
 	}
 	t.activity.Phase = ActivityPhaseThinking
@@ -1564,16 +1558,15 @@ func (t *runTracker) trackToolEndLocked(event agent.Event) bool {
 	return true
 }
 
-func (t *runTracker) upsertToolLocked(event agent.Event, status ToolStatus) int {
-	call := *event.Call
+func (t *runTracker) upsertToolLocked(runID string, turn int, call ai.ToolCallPart, status ToolStatus) int {
 	if call.ID == "" || call.Name == "" {
 		return -1
 	}
 
 	call.Args = slices.Clone(call.Args)
 	if index, ok := t.toolIndex[call.ID]; ok {
-		t.activity.Tools[index].RunID = event.RunID
-		t.activity.Tools[index].Turn = event.Turn
+		t.activity.Tools[index].RunID = runID
+		t.activity.Tools[index].Turn = turn
 		t.activity.Tools[index].Call = call
 		t.activity.Tools[index].Status = status
 
@@ -1587,10 +1580,35 @@ func (t *runTracker) upsertToolLocked(event agent.Event, status ToolStatus) int 
 
 	t.toolIndex[call.ID] = index
 	t.activity.Tools = append(t.activity.Tools, ToolActivity{
-		RunID: event.RunID, Turn: event.Turn, Call: call, Status: status,
+		RunID: runID, Turn: turn, Call: call, Status: status,
 	})
 
 	return index
+}
+
+func agentEventTurn(payload agent.EventPayload) int {
+	switch event := payload.(type) {
+	case agent.TurnStarted:
+		return event.Turn
+	case agent.ModelStreamEvent:
+		return event.Turn
+	case agent.MessageCommitted:
+		return event.Turn
+	case agent.CandidateDiscarded:
+		return event.Turn
+	case agent.ToolStarted:
+		return event.Turn
+	case agent.ToolUpdated:
+		return event.Turn
+	case agent.ToolCompleted:
+		return event.Turn
+	case agent.TurnCompleted:
+		return event.Turn
+	case agent.RunCompleted:
+		return event.Turns
+	default:
+		return 0
+	}
 }
 
 func activityEventTime(value time.Time) time.Time {

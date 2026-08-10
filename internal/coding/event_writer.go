@@ -121,8 +121,8 @@ func newAgentProjector(writer *eventWriter, interactionID string) (*agentProject
 
 //nolint:gocyclo,cyclop // Projection intentionally mirrors every Agent lifecycle event.
 func (p *agentProjector) project(event agent.Event) (Event, error) {
-	if !validAgentEventType(event.Type) {
-		return Event{}, fmt.Errorf("%w: unknown agent event %q", ErrInvalidEvent, event.Type)
+	if err := event.Validate(); err != nil {
+		return Event{}, fmt.Errorf("%w: invalid agent event: %w", ErrInvalidEvent, err)
 	}
 
 	var (
@@ -130,69 +130,53 @@ func (p *agentProjector) project(event agent.Event) (Event, error) {
 		payload   EventPayload
 	)
 
-	switch event.Type {
-	case agent.EventRunStart:
+	switch source := event.Payload().(type) {
+	case agent.RunStarted:
 		eventType = EventRunStarted
 		payload = RunStarted{ParentRunID: event.ParentRunID, Agent: event.Agent}
-	case agent.EventTurnStart:
+	case agent.TurnStarted:
 		eventType = EventTurnStarted
-		payload = TurnStarted{Turn: event.Turn}
-	case agent.EventDelta:
+		payload = TurnStarted{Turn: source.Turn}
+	case agent.ModelStreamEvent:
 		eventType = EventMessageDelta
-		payload = messageDeltaFromAI(event.Delta)
-	case agent.EventMessage:
-		if event.Message == nil {
-			return Event{}, invalidEvent("agent message event has no message")
-		}
-
+		payload = messageDeltaFromAI(source.Event)
+	case agent.MessageCommitted:
 		eventType = EventMessageCommitted
-		payload = MessageCommitted{Message: cloneMessage(*event.Message)}
+		payload = MessageCommitted{Message: cloneMessage(source.Message)}
 		if p.synthetic != nil {
 			payload = MessageCommitted{
-				Message: cloneMessage(*event.Message), Synthetic: p.synthetic(*event.Message),
+				Message: cloneMessage(source.Message), Synthetic: p.synthetic(source.Message),
 			}
 		}
-	case agent.EventCandidateDiscard:
+	case agent.CandidateDiscarded:
 		eventType = EventMessageDiscarded
-		payload = MessageDiscarded{Turn: event.Turn}
-	case agent.EventToolStart:
-		if event.Call == nil {
-			return Event{}, invalidEvent("agent tool-start event has no call")
-		}
-
+		payload = MessageDiscarded{Turn: source.Turn}
+	case agent.ToolStarted:
 		eventType = EventToolStarted
-		payload = ToolStarted{Turn: event.Turn, Call: toolCallFromAI(*event.Call)}
-	case agent.EventToolUpdate:
-		if event.Call == nil {
-			return Event{}, invalidEvent("agent tool-update event has no call")
-		}
-
+		payload = ToolStarted{Turn: source.Turn, Call: toolCallFromAI(source.Call)}
+	case agent.ToolUpdated:
 		eventType = EventToolUpdated
 		payload = ToolUpdated{
-			Turn:   event.Turn,
-			Call:   toolCallFromAI(*event.Call),
-			Update: toolUpdateMessage(event.Update),
+			Turn:   source.Turn,
+			Call:   toolCallFromAI(source.Call),
+			Update: toolUpdateMessage(source.Update),
 		}
-	case agent.EventToolEnd:
-		if event.Call == nil || event.Result == nil {
-			return Event{}, invalidEvent("agent tool-end event is incomplete")
-		}
-
+	case agent.ToolCompleted:
 		eventType = EventToolCompleted
 		payload = ToolCompleted{
-			Turn:   event.Turn,
-			Call:   toolCallFromAI(*event.Call),
-			Result: toolResultMessage(*event.Result),
+			Turn:   source.Turn,
+			Call:   toolCallFromAI(source.Call),
+			Result: toolResultMessage(source.Result),
 		}
-	case agent.EventTurnEnd:
+	case agent.TurnCompleted:
 		eventType = EventTurnCompleted
-		payload = TurnCompleted{Turn: event.Turn, Usage: tokenUsageFromAI(event.Usage)}
-	case agent.EventRunEnd:
+		payload = TurnCompleted{Turn: source.Turn, Usage: tokenUsageFromAI(source.Usage)}
+	case agent.RunCompleted:
 		eventType = EventRunCompleted
 		payload = RunCompleted{
-			Stop:  event.Stop,
-			Turns: event.Turn,
-			Usage: tokenUsageFromAI(event.Usage),
+			Stop:  source.Stop,
+			Turns: source.Turns,
+			Usage: tokenUsageFromAI(source.Usage),
 		}
 	}
 

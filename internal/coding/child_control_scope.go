@@ -367,7 +367,7 @@ func newChildControlScope(
 		harness.WithTools(visibleTools...),
 		harness.WithSkillCatalog(skillCatalog),
 		harness.WithOnEvent(func(eventCtx context.Context, event agent.Event) {
-			if event.Type == agent.EventRunEnd {
+			if _, ok := event.Payload().(agent.RunCompleted); ok {
 				search.Forget(event.RunID)
 			}
 			input.OnEvent(eventCtx, event)

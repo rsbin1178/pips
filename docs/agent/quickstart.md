@@ -124,8 +124,9 @@ for event, err := range a.Stream(ctx, sess, ai.UserText("解释计算过程")) {
 	if err != nil {
 		return err
 	}
-	if event.Type == agent.EventDelta && event.Delta.Type == ai.StreamTextDelta {
-		fmt.Print(event.Delta.Text)
+	stream, ok := event.Payload().(agent.ModelStreamEvent)
+	if ok && stream.Event.Type == ai.StreamTextDelta {
+		fmt.Print(stream.Event.Text)
 	}
 }
 ```

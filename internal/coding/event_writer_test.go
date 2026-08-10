@@ -48,17 +48,17 @@ func TestAgentProjectorMapsLifecycle(t *testing.T) {
 	message := ai.Assistant(call)
 	usage := ai.Usage{InputTokens: 10, OutputTokens: 2}
 
-	events := []agent.Event{
-		{Type: agent.EventRunStart},
-		{Type: agent.EventTurnStart, Turn: 1},
-		{Type: agent.EventDelta, Turn: 1, Delta: ai.StreamEvent{Type: ai.StreamTextDelta, Text: "hi"}},
-		{Type: agent.EventCandidateDiscard, Turn: 1},
-		{Type: agent.EventMessage, Turn: 1, Message: &message},
-		{Type: agent.EventToolStart, Turn: 1, Call: &call},
-		{Type: agent.EventToolUpdate, Turn: 1, Call: &call, Update: []ai.Part{ai.Text("half")}},
-		{Type: agent.EventToolEnd, Turn: 1, Call: &call, Result: &result},
-		{Type: agent.EventTurnEnd, Turn: 1, Usage: usage},
-		{Type: agent.EventRunEnd, Turn: 1, Stop: agent.StopEndTurn, Usage: usage},
+	payloads := []agent.EventPayload{
+		agent.RunStarted{},
+		agent.TurnStarted{Turn: 1},
+		agent.ModelStreamEvent{Turn: 1, Event: ai.StreamEvent{Type: ai.StreamTextDelta, Text: "hi"}},
+		agent.CandidateDiscarded{Turn: 1},
+		agent.MessageCommitted{Turn: 1, Message: message},
+		agent.ToolStarted{Turn: 1, Call: call},
+		agent.ToolUpdated{Turn: 1, Call: call, Update: []ai.Part{ai.Text("half")}},
+		agent.ToolCompleted{Turn: 1, Call: call, Result: result},
+		agent.TurnCompleted{Turn: 1, Usage: usage},
+		agent.RunCompleted{Turns: 1, Stop: agent.StopEndTurn, Usage: usage},
 	}
 	wantTypes := []EventType{
 		EventRunStarted,
@@ -73,12 +73,15 @@ func TestAgentProjectorMapsLifecycle(t *testing.T) {
 		EventRunCompleted,
 	}
 
-	for index := range events {
-		events[index].RunID = "run-1"
-		events[index].Agent = "coding"
-		events[index].Time = eventTestTime
+	for index, payload := range payloads {
+		event, eventErr := agent.NewEvent(
+			agent.RunMetadata{RunID: "run-1", Agent: "coding"},
+			eventTestTime,
+			payload,
+		)
+		require.NoError(t, eventErr)
 
-		projected, projectErr := projector.project(events[index])
+		projected, projectErr := projector.project(event)
 		require.NoError(t, projectErr)
 		assert.Equal(t, wantTypes[index], projected.Type)
 		assert.Equal(t, uint64(index+1), projected.Sequence)
@@ -96,8 +99,7 @@ func TestAgentProjectorRejectsIncompleteEvent(t *testing.T) {
 	projector, err := newAgentProjector(writer, "interaction-1")
 	require.NoError(t, err)
 
-	_, err = projector.project(agent.Event{
-		Type: agent.EventMessage, RunID: "run-1", Time: eventTestTime,
-	})
+	_, err = projector.project(agent.Event{RunID: "run-1", Time: eventTestTime})
 	require.ErrorIs(t, err, ErrInvalidEvent)
+	require.ErrorIs(t, err, agent.ErrInvalidEvent)
 }

@@ -7,41 +7,46 @@ Agent 为阻塞和流式运行提供同一套归一化事件。事件适合 UI�
 一次正常运行产生：
 
 ```text
-run_start
-  turn_start
-    delta...                 # 仅 Stream
-    candidate_discard        # 被拒候选：不提交 assistant message
+run_started
+  turn_started
+    model_stream...              # 仅 Stream，承载 ai.StreamEvent
+    candidate_discarded          # 被拒候选：不提交 assistant message
     # 或者：
-    message                  # 已提交 assistant 消息
-    tool_start...            # 有工具调用时
-      tool_update...         # 尽力而为
-    tool_end...
-    message                  # 有工具时提交完整结果批次
-  turn_end
-run_end
+    message_committed            # 已提交 assistant 消息
+    tool_started...              # 有工具调用时
+      tool_updated...            # 尽力而为
+    tool_completed...
+    message_committed            # 有工具时提交完整结果批次
+  turn_completed
+run_completed
 ```
 
-以上 turn 区段可重复。`candidate_discard` 与该候选的 assistant `message` 是替代关系；丢弃候选不会进入 Session。一个模型响应包含多个工具时，每个调用都有各自的 start/end，最终提交一条包含完整批次结果的 message。
+以上 turn 区段可重复。`CandidateDiscarded` 与该候选的 `MessageCommitted` 是替代关系；丢弃候选不会进入 Session。一个模型响应包含多个工具时，每个调用都有各自的 started/completed，最终提交一条包含完整批次结果的 message。
 
-运行级错误不会产生正常 `run_end`，而是从 `Run`/`Stream` 返回 error。监控“开始但未正常结束”的 Run 时，需要结合调用错误和进程生命周期判断，不能只计算 `run_end`。
+运行级错误不会产生 `RunCompleted`，而是从 `Run`/`Stream` 返回 error。监控“开始但未正常结束”的 Run 时，需要结合调用错误和进程生命周期判断，不能只计算完成事件。
 
-## Event 字段
+## Envelope 与类型化载荷
 
-每个事件都带相同的 `RunID`、`ParentRunID`、Agent 名称和 UTC 时间。`Turn` 从 1 开始，`run_start` 为 0。
+每个 `Event` envelope 都带相同的 `RunID`、`ParentRunID`、Agent 名称和 UTC 时间。variant 数据只存在于 sealed `EventPayload`；使用 `event.Payload()` 做 concrete type switch，使用 `event.Type()` 读取 discriminator。包外代码不能实现新的 payload 或构造 Type/payload 错配。
 
-只有与事件类型匹配的载荷有意义：
+| `Event.Type()` | concrete payload | 主要载荷 |
+| --- | --- | --- |
+| `run_started` | `agent.RunStarted` | 无 |
+| `turn_started` | `agent.TurnStarted` | `Turn` |
+| `model_stream` | `agent.ModelStreamEvent` | `Turn`、`Event ai.StreamEvent` |
+| `message_committed` | `agent.MessageCommitted` | `Turn`、`Message` |
+| `candidate_discarded` | `agent.CandidateDiscarded` | `Turn`，无候选正文 |
+| `tool_started` | `agent.ToolStarted` | `Turn`、`Call` |
+| `tool_updated` | `agent.ToolUpdated` | `Turn`、`Call`、`Update` |
+| `tool_completed` | `agent.ToolCompleted` | `Turn`、`Call`、`Result` |
+| `turn_completed` | `agent.TurnCompleted` | `Turn`、累计 `Usage` |
+| `run_completed` | `agent.RunCompleted` | `Turns`、`Stop`、累计 `Usage` |
 
-| 类型 | 主要载荷 |
-| --- | --- |
-| `delta` | `Delta` |
-| `message` | `Message` |
-| `tool_start` | `Call` |
-| `tool_update` | `Call`、`Update` |
-| `tool_end` | `Call`、`Result` |
-| `turn_end` | 累计 `Usage` |
-| `run_end` | `Stop`、累计 `Usage` |
+构造测试夹具或 adapter 输入时使用 `agent.NewEvent(metadata, time, payload)`，并用 `errors.Is(err, agent.ErrInvalidEvent)` 处理校验失败。Runtime 发出的每个 Event 都满足 `Validate()`。
 
-指针载荷在发出时已复制，可以保留，但内容应视为只读。`candidate_discard` 故意不携带候选正文，避免观测面留存已拒绝内容。
+Message Parts、媒体 bytes、Tool Args/Result/Update 和 stream Usage 在事件边界做深拷贝；observer、stream consumer 和 Session 互不共享这些可变数据。Event 可以保留，但 `Payload()` 返回的 slice/bytes 仍应视为只读。
+
+Event 是进程内协议，不是 wire schema。直接 `json.Marshal`/`json.Unmarshal` 会返回 `agent.ErrEventWireFormat`；持久化或远程传输必须使用应用拥有的版本化 projection，并在该边界定义披露和脱敏。
 
 ## 阻塞运行观察器
 
@@ -50,12 +55,12 @@ run_end
 ```go
 a, err := agent.New(model,
 	agent.WithOnEvent(func(_ context.Context, event agent.Event) {
-		if event.Type == agent.EventRunEnd {
+		if completed, ok := event.Payload().(agent.RunCompleted); ok {
 			log.Printf(
 				"run=%s parent=%s stop=%s",
 				event.RunID,
 				event.ParentRunID,
-				event.Stop,
+				completed.Stop,
 			)
 		}
 	}),
@@ -68,7 +73,7 @@ Harness 应通过 `harness.WithOnEvent` 安装观察器。Extension Snapshot 的
 
 ## 流式消费
 
-`Agent.Stream` 与 `Harness.PromptStream` 直接把事件交给调用者。delta 是暂定展示内容：候选 hook 或输出 guardrail 尚未运行。严格内容策略应缓冲到最终 message/成功结果。
+`Agent.Stream` 与 `Harness.PromptStream` 直接把事件交给调用者。`ModelStreamEvent` 是暂定展示内容：候选 hook 或输出 guardrail 尚未运行。严格内容策略应缓冲到最终 `MessageCommitted`/成功结果。
 
 消费者提前 `break` 表示取消运行。Harness 会恢复 idle 并保存已经完成的提交点；直接 Agent Session 也会保留已提交内容，且可能有 pending 工具调用。
 
@@ -128,4 +133,4 @@ Provider 为 nil 时使用 OTel global provider。Observer 并发安全且不导
 - 若业务必须保留内容，先定义脱敏、访问控制、保留期和删除策略。
 - 工具授权决定、人工审批和外部副作用应写入业务审计系统；事件是运行事实，不是不可抵赖审计。
 - 将 RunID 传播到应用日志和下游请求，但不要把它当认证凭据。
-- `tool_update` 可能丢失，不可作为进度完成证明。
+- `ToolUpdated` 可能丢失，不可作为进度完成证明。

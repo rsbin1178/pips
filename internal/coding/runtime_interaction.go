@@ -1115,13 +1115,13 @@ func (r *Runtime) driveHarness(
 	var stop agent.StopReason
 	inputPending := cloneMessages(messages)
 	for event, streamErr := range current.harness.PromptMessagesStream(ctx, messages...) {
-		if event.Type != "" {
+		if event.Payload() != nil {
 			projected, projectErr := emitter.publishAgent(projector, event)
 			if projectErr != nil {
 				return "", projectErr
 			}
-			if event.Type == agent.EventMessage && event.Message != nil {
-				if err := r.acknowledgeNotificationMessage(*event.Message); err != nil {
+			if committed, ok := event.Payload().(agent.MessageCommitted); ok {
+				if err := r.acknowledgeNotificationMessage(committed.Message); err != nil {
 					return "", err
 				}
 			}
@@ -1137,7 +1137,7 @@ func (r *Runtime) driveHarness(
 				current.runIDs = append(current.runIDs, projected.RunID)
 			}
 
-			if event.Type == agent.EventTurnStart && len(inputPending) > 0 {
+			if _, turnStarted := event.Payload().(agent.TurnStarted); turnStarted && len(inputPending) > 0 {
 				for _, message := range inputPending {
 					if err := emitter.emit(
 						current.id,

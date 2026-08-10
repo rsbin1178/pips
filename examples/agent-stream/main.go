@@ -36,15 +36,15 @@ func main() {
 			log.Fatal(err)
 		}
 
-		switch ev.Type {
-		case agent.EventDelta:
-			if ev.Delta.Type == ai.StreamTextDelta {
-				fmt.Print(ev.Delta.Text)
+		switch event := ev.Payload().(type) {
+		case agent.ModelStreamEvent:
+			if event.Event.Type == ai.StreamTextDelta {
+				fmt.Print(event.Event.Text)
 			}
-		case agent.EventToolStart:
-			fmt.Printf("\n→ %s(%s)\n", ev.Call.Name, ev.Call.Args)
-		case agent.EventRunEnd:
-			fmt.Printf("\n[%s after %d turn(s)]\n", ev.Stop, ev.Turn)
+		case agent.ToolStarted:
+			fmt.Printf("\n→ %s(%s)\n", event.Call.Name, event.Call.Args)
+		case agent.RunCompleted:
+			fmt.Printf("\n[%s after %d turn(s)]\n", event.Stop, event.Turns)
 		default:
 		}
 	}
