@@ -1,0 +1,47 @@
+{
+  "schema": "pips.workflow/v1alpha1",
+  "id": "parallel-fixture",
+  "revision": "v1",
+  "name": "Parallel fixture",
+  "inputs": {},
+  "outputs": {
+    "profile": {
+      "schema": {"type": "string"},
+      "binding": {"source": "node_output", "node": "merge", "port": "profile"}
+    },
+    "policy": {
+      "schema": {"type": "string"},
+      "binding": {"source": "node_output", "node": "merge", "port": "policy"}
+    }
+  },
+  "nodes": [
+    {"id": "start", "type": "start", "version": "v1"},
+    {"id": "profile", "type": "action", "version": "v1", "config": {"action": "profile", "version": "v1"}},
+    {"id": "policy", "type": "action", "version": "v1", "config": {"action": "policy", "version": "v1"}},
+    {
+      "id": "merge",
+      "type": "merge",
+      "version": "v1",
+      "config": {
+        "mode": "parallel",
+        "outputs": {
+          "profile": {"schema": {"type": "string"}, "sources": ["profile"]},
+          "policy": {"schema": {"type": "string"}, "sources": ["policy"]}
+        }
+      },
+      "inputs": {
+        "profile": {"source": "node_output", "node": "profile", "port": "result"},
+        "policy": {"source": "node_output", "node": "policy", "port": "result"}
+      }
+    },
+    {"id": "end", "type": "end", "version": "v1"}
+  ],
+  "edges": [
+    {"from": {"node": "start", "route": "success"}, "to": "profile"},
+    {"from": {"node": "start", "route": "success"}, "to": "policy"},
+    {"from": {"node": "profile", "route": "success"}, "to": "merge"},
+    {"from": {"node": "policy", "route": "success"}, "to": "merge"},
+    {"from": {"node": "merge", "route": "success"}, "to": "end"}
+  ],
+  "limits": {"max_concurrency": 2, "max_steps": 100}
+}

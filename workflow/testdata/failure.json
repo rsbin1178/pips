@@ -1,0 +1,48 @@
+{
+  "schema": "pips.workflow/v1alpha1",
+  "id": "failure-fixture",
+  "revision": "v1",
+  "name": "Failure route fixture",
+  "inputs": {},
+  "outputs": {
+    "result": {
+      "schema": {"type": "string"},
+      "binding": {"source": "node_output", "node": "merge", "port": "result"}
+    }
+  },
+  "nodes": [
+    {"id": "start", "type": "start", "version": "v1"},
+    {
+      "id": "unreliable",
+      "type": "action",
+      "version": "v1",
+      "config": {"action": "unreliable", "version": "v1"},
+      "policy": {"retry": {"max_attempts": 2}, "error": "route_error"}
+    },
+    {"id": "fallback", "type": "action", "version": "v1", "config": {"action": "fallback", "version": "v1"}},
+    {
+      "id": "merge",
+      "type": "merge",
+      "version": "v1",
+      "config": {
+        "mode": "exclusive",
+        "outputs": {
+          "result": {"schema": {"type": "string"}, "sources": ["primary", "fallback"]}
+        }
+      },
+      "inputs": {
+        "primary": {"source": "node_output", "node": "unreliable", "port": "result"},
+        "fallback": {"source": "node_output", "node": "fallback", "port": "result"}
+      }
+    },
+    {"id": "end", "type": "end", "version": "v1"}
+  ],
+  "edges": [
+    {"from": {"node": "start", "route": "success"}, "to": "unreliable"},
+    {"from": {"node": "unreliable", "route": "success"}, "to": "merge"},
+    {"from": {"node": "unreliable", "route": "error"}, "to": "fallback"},
+    {"from": {"node": "fallback", "route": "success"}, "to": "merge"},
+    {"from": {"node": "merge", "route": "success"}, "to": "end"}
+  ],
+  "limits": {"max_concurrency": 2, "max_steps": 100}
+}
