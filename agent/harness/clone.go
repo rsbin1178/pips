@@ -25,8 +25,7 @@ func cloneEntries(values []Entry) []Entry {
 
 func cloneEntry(value Entry) Entry {
 	if value.Message != nil {
-		message := cloneMessage(*value.Message)
-		value.Message = &message
+		value.Message = cloneMessage(value.Message)
 	}
 	if value.Usage != nil {
 		usage := *value.Usage
@@ -38,30 +37,9 @@ func cloneEntry(value Entry) Entry {
 }
 
 func cloneMessage(value ai.Message) ai.Message {
-	value.Parts = cloneParts(value.Parts)
-
-	return value
-}
-
-func cloneParts(values []ai.Part) []ai.Part {
-	cloned := make([]ai.Part, len(values))
-	for index, part := range values {
-		switch value := part.(type) {
-		case ai.ImagePart:
-			value.Source.Data = slices.Clone(value.Source.Data)
-			cloned[index] = value
-		case ai.FilePart:
-			value.Source.Data = slices.Clone(value.Source.Data)
-			cloned[index] = value
-		case ai.ToolCallPart:
-			value.Args = slices.Clone(value.Args)
-			cloned[index] = value
-		case ai.ToolResultPart:
-			value.Content = cloneParts(value.Content)
-			cloned[index] = value
-		default:
-			cloned[index] = value
-		}
+	cloned, err := ai.CloneMessage(value)
+	if err != nil {
+		return value
 	}
 
 	return cloned

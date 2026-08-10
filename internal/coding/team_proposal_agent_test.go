@@ -58,8 +58,8 @@ func TestGenerateTeamProposalUsesExactEphemeralCatalog(t *testing.T) {
 			[]string{"read", "ls", "glob", "grep", teamProposalToolName},
 			toolNamesFromRequest(modelRequest),
 		)
-		assert.Contains(t, modelRequest.System, request.Objective)
-		assert.Contains(t, modelRequest.System, "PROJECT-PROPOSAL-BOUNDARY")
+		assert.Contains(t, requestSystemText(modelRequest), request.Objective)
+		assert.Contains(t, requestSystemText(modelRequest), "PROJECT-PROPOSAL-BOUNDARY")
 	}
 
 	proposalTool := requests[0].Tools[len(requests[0].Tools)-1]
@@ -400,7 +400,7 @@ func mustTeamProposalArguments(t *testing.T, request TeamProposalRequest) string
 }
 
 func runtimeToolCallsResponse(calls ...ai.ToolCallPart) *ai.Response {
-	parts := make([]ai.Part, len(calls))
+	parts := make([]ai.AssistantPart, len(calls))
 	for index, call := range calls {
 		parts[index] = call
 	}

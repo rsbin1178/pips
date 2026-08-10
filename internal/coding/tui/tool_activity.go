@@ -85,7 +85,7 @@ type toolActivityRecord struct {
 	order          int
 	live           bool
 	status         coding.ToolStatus
-	update         ai.Message
+	update         []ai.Part
 	result         ai.ToolResultPart
 	hasResult      bool
 }
@@ -140,7 +140,7 @@ func projectToolActivities(
 
 	for messageIndex, message := range state.Transcript {
 		position := messageIndex + 1
-		for _, part := range message.Parts {
+		for _, part := range portableMessageParts(message) {
 			switch value := part.(type) {
 			case ai.ToolCallPart:
 				record := recordFor(value.ID)
@@ -222,10 +222,9 @@ func projectToolActivities(
 	return activities
 }
 
-func toolResultPart(message ai.Message, callID string) (ai.ToolResultPart, bool) {
-	for _, part := range message.Parts {
-		result, ok := part.(ai.ToolResultPart)
-		if ok && (callID == "" || result.ToolCallID == callID) {
+func toolResultPart(message ai.ToolMessage, callID string) (ai.ToolResultPart, bool) {
+	for _, result := range message.Parts {
+		if callID == "" || result.ToolCallID == callID {
 			return result, true
 		}
 	}
@@ -239,16 +238,14 @@ func describeToolActivity(record toolActivityRecord) toolActivity {
 		runID: record.runID, turn: record.turn,
 		position: record.position, order: record.order,
 		arguments: record.call.Arguments,
-		update:    visibleToolMessage(record.update),
+		update:    visibleToolParts(record.update),
 	}
 	activity.class, activity.action, activity.subject = describeToolCall(record.call)
 	activity.invocation = compactToolInvocation(record.call)
 	activity.state = classifyToolActivity(record)
 
 	if record.hasResult {
-		activity.result = visibleToolMessage(ai.Message{
-			Role: ai.RoleTool, Parts: record.result.Content,
-		})
+		activity.result = visibleToolParts(record.result.Content)
 		activity.body = activity.result
 		if header, body, err := codingtools.ParseResult(activity.result); err == nil &&
 			header.Tool == record.call.Name {
@@ -271,7 +268,7 @@ func classifyToolActivity(record toolActivityRecord) toolActivityState {
 		return toolStateInterrupted
 	}
 
-	text := visibleToolMessage(ai.Message{Role: ai.RoleTool, Parts: record.result.Content})
+	text := visibleToolParts(record.result.Content)
 	header, _, err := codingtools.ParseResult(text)
 	if err == nil && !header.OK {
 		if header.Code == "canceled" || header.Code == "deadline_exceeded" {

@@ -15,7 +15,7 @@ func TestSessionPendingUsesActiveBranchAndCopiesArguments(t *testing.T) {
 	t.Parallel()
 
 	sess := buildSession(t)
-	root := appendText(t, sess, ai.RoleUser, "start", nil)
+	root := appendText(t, sess, ai.UserMessage{}, "start", nil)
 	_, err := sess.AppendMessage(ai.Assistant(
 		ai.ToolCallPart{ID: "c1", Name: "read_file", Args: ai.JSON(`{"path":"a.go"}`)},
 		ai.ToolCallPart{ID: "c2", Name: "search_text", Args: ai.JSON(`{"query":"TODO"}`)},
@@ -74,10 +74,10 @@ func TestContextReconstruction(t *testing.T) {
 
 	sess := buildSession(t)
 
-	m1 := appendText(t, sess, ai.RoleUser, "old question", nil)
-	appendText(t, sess, ai.RoleAssistant, "old answer", nil)
-	keep := appendText(t, sess, ai.RoleUser, "recent question", nil)
-	appendText(t, sess, ai.RoleAssistant, "recent answer", nil)
+	m1 := appendText(t, sess, ai.UserMessage{}, "old question", nil)
+	appendText(t, sess, ai.AssistantMessage{}, "old answer", nil)
+	keep := appendText(t, sess, ai.UserMessage{}, "recent question", nil)
+	appendText(t, sess, ai.AssistantMessage{}, "recent answer", nil)
 
 	// Bookkeeping entries never enter context.
 	_, err := sess.AppendCustom("note", ai.JSON(`{}`))
@@ -98,12 +98,11 @@ func TestContextReconstruction(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, cctx.Messages, 3) // summary, recent question, recent answer
 
-	text, ok := cctx.Messages[0].Parts[0].(ai.TextPart)
-	require.True(t, ok)
+	text := firstTextPart(t, cctx.Messages[0])
 	assert.Contains(t, text.Text, harness.CompactionPrefix+"first summary")
 
 	// A later compaction wins outright.
-	tail := appendText(t, sess, ai.RoleUser, "newest", nil)
+	tail := appendText(t, sess, ai.UserMessage{}, "newest", nil)
 	_, err = sess.AppendCompaction("second summary", tail, 200)
 	require.NoError(t, err)
 
@@ -111,8 +110,7 @@ func TestContextReconstruction(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, cctx.Messages, 2) // second summary + newest
 
-	second, ok := cctx.Messages[0].Parts[0].(ai.TextPart)
-	require.True(t, ok)
+	second := firstTextPart(t, cctx.Messages[0])
 	assert.Contains(t, second.Text, "second summary")
 }
 
@@ -120,7 +118,7 @@ func TestContextModelDerivation(t *testing.T) {
 	t.Parallel()
 
 	sess := buildSession(t)
-	appendText(t, sess, ai.RoleUser, "hi", nil)
+	appendText(t, sess, ai.UserMessage{}, "hi", nil)
 
 	_, err := sess.AppendModelChange(ai.ProviderAnthropic, "claude-sonnet-4-5")
 	require.NoError(t, err)
@@ -137,20 +135,19 @@ func TestMoveToBranches(t *testing.T) {
 
 	sess := buildSession(t)
 
-	root := appendText(t, sess, ai.RoleUser, "start", nil)
-	a := appendText(t, sess, ai.RoleAssistant, "branch a", nil)
+	root := appendText(t, sess, ai.UserMessage{}, "start", nil)
+	a := appendText(t, sess, ai.AssistantMessage{}, "branch a", nil)
 
 	// Branch from the root entry with a summary of the abandoned path.
 	require.NoError(t, sess.MoveTo(root, "tried branch a, dead end"))
-	b := appendText(t, sess, ai.RoleAssistant, "branch b", nil)
+	b := appendText(t, sess, ai.AssistantMessage{}, "branch b", nil)
 
 	// The active branch: start → (summary) → branch b; branch a is off-path.
 	cctx, err := sess.Context()
 	require.NoError(t, err)
 	require.Len(t, cctx.Messages, 3)
 
-	summary, ok := cctx.Messages[1].Parts[0].(ai.TextPart)
-	require.True(t, ok)
+	summary := firstTextPart(t, cctx.Messages[1])
 	assert.Contains(t, summary.Text, harness.BranchSummaryPrefix)
 
 	// Tree structure: both branches share the root.

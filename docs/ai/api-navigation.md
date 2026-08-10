@@ -25,8 +25,8 @@ go doc -all github.com/rsbin/pips/ai/observability
 | 图片生成 | `ImageModel`、`ImageRequest`、`ImageResponse`、`GeneratedImage` | [`image.go`](../../ai/image.go) |
 | Embedding | `EmbeddingModel`、`EmbeddingRequest`、`EmbeddingResponse` | [`embedding.go`](../../ai/embedding.go) |
 | 服务端 Token 计数 | `TokenCounter` | [`model.go`](../../ai/model.go) |
-| 消息与 Part | `Message`、`Role`、`Part`、`TextPart`、`ImagePart`、`FilePart`、`ReasoningPart`、`ToolCallPart`、`ToolResultPart` | [`message.go`](../../ai/message.go) |
-| 消息构造 | `Text`、`User`、`UserText`、`Assistant`、`AssistantText`、`ImageURL`、`ImageData`、`FileURL`、`FileData`、`FileID`、`ToolResultText`、`ToolResultError` | [`content.go`](../../ai/content.go) |
+| 消息与 Part | `Message`、`Messages`、`SystemMessage`、`UserMessage`、`AssistantMessage`、`ToolMessage`、`Part` 及六种具体 Part | [`message.go`](../../ai/message.go) |
+| 消息构造与边界 | `SystemText`、`UserText`、`AssistantText`、`ToolResultText`、`Messages.SplitSystem`、`UnmarshalMessage`、`CloneMessage`、`MessageParts` | [`content.go`](../../ai/content.go)、[`message_validate.go`](../../ai/message_validate.go)、[`message_json.go`](../../ai/message_json.go) |
 | 生成请求 | `Request`、`LogProbsConfig`、`Ptr` | [`request.go`](../../ai/request.go) |
 | 完整响应 | `Response`、`FinishReason`、`Usage`，以及 `Text`、`Reasoning`、`ToolCalls` 方法 | [`response.go`](../../ai/response.go) |
 | 流式响应 | `Stream`、`StreamEvent`、`StreamEventType`、`Collect` | [`stream.go`](../../ai/stream.go) |

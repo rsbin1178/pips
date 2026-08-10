@@ -26,12 +26,13 @@ type LanguageModel interface {
 - 调用者拥有 `context`、请求数据和自定义 `http.Client` 的生命周期。
 - Provider 对象不保存对话。继续对话时由应用把历史 `Message` 再次传入。
 
-## 消息与角色
+## 消息与角色类型
 
 `ai.Request.Messages` 按时间从旧到新排列。常用构造器如下：
 
 ```go
-messages := []ai.Message{
+messages := ai.Messages{
+	ai.SystemText("请用中文回答"),
 	ai.UserText("你好"),
 	ai.AssistantText("你好，需要什么帮助？"),
 	ai.User(
@@ -41,20 +42,20 @@ messages := []ai.Message{
 }
 ```
 
-四种角色的含义：
+`ai.Message` 是封闭联合类型，角色由具体 Go 类型唯一决定：
 
-| 角色 | 用途 |
-| --- | --- |
-| `ai.RoleSystem` | 历史中的系统消息；新的主系统提示优先放 `Request.System` |
-| `ai.RoleUser` | 用户输入，可含文本、图片或文件 |
-| `ai.RoleAssistant` | 之前的模型输出；继续对话时直接追加 `Response.Message` |
-| `ai.RoleTool` | 应用执行 Tool 后返回的一个或多个结果 |
+| 消息类型 | 允许的内容 | 用途 |
+| --- | --- | --- |
+| `ai.SystemMessage` | `TextPart` | 模型指令；只能出现在消息序列开头 |
+| `ai.UserMessage` | `TextPart`、`ImagePart`、`FilePart` | 用户输入 |
+| `ai.AssistantMessage` | `TextPart`、`ReasoningPart`、`ToolCallPart` | 模型输出；`Response.Message` 使用此具体类型 |
+| `ai.ToolMessage` | `ToolResultPart` | 应用执行 Tool 后返回的一个或多个结果 |
 
-不同 Provider 会把这些角色翻译到不同位置。例如 Anthropic 和 Gemini 的系统提示不是普通历史消息。便携代码应优先使用 `Request.System`，不要依赖某家的 wire 结构。
+不存在公开 `Role` 字段，也不能把任意 Part 塞进任意角色。`SystemMessage` 必须形成连续前缀；一旦出现 User、Assistant 或 Tool 消息，后面再出现 System 消息会返回 `ai.ErrInvalidMessage`。Provider 适配器会把这个前缀投影到各自的原生位置，例如 OpenAI Responses 的 `instructions`、Anthropic 的顶层 system blocks 或 Gemini 的 `systemInstruction`。
 
 ## Part 与多模态内容
 
-`Message.Parts` 是封闭接口，只能使用 `ai` 包提供的六种实现：
+每种具体 Message 的 `Parts` 都受角色专属接口约束；角色中立的 `Part` 也是封闭接口，只能使用 `ai` 包提供的六种实现：
 
 | Part | 常见方向 | 说明 |
 | --- | --- | --- |
@@ -82,7 +83,7 @@ msg := ai.User(
 
 ```go
 req := ai.Request{
-	Messages:         []ai.Message{ai.UserText("给出确定答案")},
+	Messages:         ai.Messages{ai.UserText("给出确定答案")},
 	Temperature:      ai.Ptr(0.0),
 	MaxTokens:        ai.Ptr(512),
 	FrequencyPenalty: ai.Ptr(0.0),

@@ -63,7 +63,7 @@ type Response struct {
 
 	// Message is the assistant turn: text, tool calls, and reasoning parts in
 	// model output order. Append it to the conversation to continue the turn.
-	Message Message
+	Message AssistantMessage
 
 	// FinishReason is why generation stopped.
 	FinishReason FinishReason

@@ -28,7 +28,7 @@ func main() {
 	//   model := gemini.New("gemini-2.5-flash", ...)
 
 	resp, err := model.Generate(context.Background(), ai.Request{
-		Messages: []ai.Message{ai.User(
+		Messages: ai.Messages{ai.User(
 			ai.Text("Describe this image in one sentence."),
 			ai.ImageData("image/png", data),
 		)},

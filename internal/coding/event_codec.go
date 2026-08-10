@@ -10,7 +10,13 @@ import (
 	"github.com/rsbin/pips/internal/jsonx"
 )
 
-const maxEncodedEventBytes = 4 << 20
+const (
+	maxEncodedEventBytes        = 4 << 20
+	durableMessageRoleSystem    = "system"
+	durableMessageRoleUser      = "user"
+	durableMessageRoleAssistant = "assistant"
+	durableMessageRoleTool      = "tool"
+)
 
 type eventEnvelope struct {
 	Schema        string          `json:"schema"`
@@ -214,6 +220,83 @@ func strictDecode(data []byte, target any) error {
 	return jsonx.Decode(data, target)
 }
 
+// UnmarshalJSON decodes the interface-bearing message through the canonical
+// ai message discriminator.
+func (payload *MessageCommitted) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Message   json.RawMessage `json:"message"`
+		Synthetic bool            `json:"synthetic,omitempty"`
+	}
+	if err := strictDecode(data, &raw); err != nil {
+		return err
+	}
+
+	message, err := ai.UnmarshalMessage(raw.Message)
+	if err != nil {
+		return err
+	}
+
+	*payload = MessageCommitted{Message: message, Synthetic: raw.Synthetic}
+
+	return nil
+}
+
+// MarshalJSON preserves the legacy durable update envelope whose role is
+// "tool" even though progress is not a model ToolMessage.
+func (payload ToolUpdated) MarshalJSON() ([]byte, error) {
+	parts, err := ai.MarshalParts(payload.Update)
+	if err != nil {
+		return nil, err
+	}
+
+	update, err := json.Marshal(struct {
+		Role  string          `json:"role"`
+		Parts json.RawMessage `json:"parts"`
+	}{Role: durableMessageRoleTool, Parts: parts})
+	if err != nil {
+		return nil, err
+	}
+
+	return json.Marshal(struct {
+		Turn   int             `json:"turn"`
+		Call   ToolCall        `json:"call"`
+		Update json.RawMessage `json:"update"`
+	}{Turn: payload.Turn, Call: payload.Call, Update: update})
+}
+
+// UnmarshalJSON restores progress parts from the legacy durable tool-role
+// envelope without admitting that envelope into the ai.Message union.
+func (payload *ToolUpdated) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Turn   int             `json:"turn"`
+		Call   ToolCall        `json:"call"`
+		Update json.RawMessage `json:"update"`
+	}
+	if err := strictDecode(data, &raw); err != nil {
+		return err
+	}
+
+	var update struct {
+		Role  string          `json:"role"`
+		Parts json.RawMessage `json:"parts"`
+	}
+	if err := strictDecode(raw.Update, &update); err != nil {
+		return err
+	}
+	if update.Role != durableMessageRoleTool {
+		return fmt.Errorf("tool update has role %q", update.Role)
+	}
+
+	parts, err := ai.UnmarshalParts(update.Parts)
+	if err != nil {
+		return err
+	}
+
+	*payload = ToolUpdated{Turn: raw.Turn, Call: raw.Call, Update: parts}
+
+	return nil
+}
+
 func validateNestedPayloadJSON(eventType EventType, data []byte) error {
 	switch eventType {
 	case EventSessionTreeChanged:
@@ -272,11 +355,18 @@ func validateNestedPayloadJSON(eventType EventType, data []byte) error {
 
 func validateStrictMessageJSON(data []byte) error {
 	var message struct {
-		Role  ai.Role           `json:"role"`
+		Role  string            `json:"role"`
 		Parts []json.RawMessage `json:"parts"`
 	}
 	if err := strictDecode(data, &message); err != nil {
 		return err
+	}
+
+	switch message.Role {
+	case durableMessageRoleSystem, durableMessageRoleUser,
+		durableMessageRoleAssistant, durableMessageRoleTool:
+	default:
+		return fmt.Errorf("unknown message role %q", message.Role)
 	}
 
 	for _, part := range message.Parts {

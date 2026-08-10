@@ -223,7 +223,6 @@ func TestProjectRemovesSensitiveContent(t *testing.T) {
 		ai.Text("answer"),
 		ai.ReasoningPart{Text: secret, Signature: secret},
 		ai.ToolCallPart{ID: "call-1", Name: "shell", Args: ai.JSON(`{"token":"` + secret + `"}`)},
-		ai.ImageData("image/png", []byte(secret)),
 	)})
 
 	safe, err := Project(event, DisclosureSafe)
@@ -318,7 +317,7 @@ func TestSafeDisclosureMatrix(t *testing.T) {
 			name: "tool progress",
 			event: newTestEvent(EventToolUpdated, ToolUpdated{
 				Turn: 1, Call: call,
-				Update: ai.Message{Role: ai.RoleTool, Parts: []ai.Part{ai.Text(secret)}},
+				Update: []ai.Part{ai.Text(secret)},
 			}),
 		},
 		{
@@ -616,7 +615,7 @@ func eventCases() []eventCase {
 		)},
 		{name: "tool updated", event: newTestEvent(EventToolUpdated, ToolUpdated{
 			Turn: 1, Call: toolCall,
-			Update: ai.Message{Role: ai.RoleTool, Parts: []ai.Part{ai.Text("half")}},
+			Update: []ai.Part{ai.Text("half")},
 		})},
 		{name: "tool completed", event: newTestEvent(EventToolCompleted, ToolCompleted{
 			Turn: 1, Call: toolCall,

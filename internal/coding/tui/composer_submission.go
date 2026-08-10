@@ -22,17 +22,17 @@ func resolveComposerSnapshot(
 	snapshot composerSnapshot,
 	vision bool,
 	resolve workspaceFileResolver,
-) (ai.Message, error) {
+) (ai.UserMessage, error) {
 	if !validComposerSnapshot(snapshot) {
-		return ai.Message{}, errComposerCorruptDraft
+		return ai.UserMessage{}, errComposerCorruptDraft
 	}
 
 	if resolve == nil && composerSnapshotHasFiles(snapshot) {
-		return ai.Message{}, errors.New("coding tui: resolve Composer: missing file resolver")
+		return ai.UserMessage{}, errors.New("coding tui: resolve Composer: missing file resolver")
 	}
 
 	if composerSnapshotHasImages(snapshot) && !vision {
-		return ai.Message{}, errComposerVisionUnsupported
+		return ai.UserMessage{}, errComposerVisionUnsupported
 	}
 
 	builder := newComposerMessageBuilder(len(snapshot.elements)*2 + 1)
@@ -41,23 +41,23 @@ func resolveComposerSnapshot(
 
 	for _, span := range spans {
 		if err := ctx.Err(); err != nil {
-			return ai.Message{}, err
+			return ai.UserMessage{}, err
 		}
 
 		if err := builder.appendRun(snapshot.display[last:span.start]); err != nil {
-			return ai.Message{}, err
+			return ai.UserMessage{}, err
 		}
 
 		element := snapshot.elements[span.elementIndex]
 		if err := appendComposerElement(ctx, builder, element, resolve); err != nil {
-			return ai.Message{}, err
+			return ai.UserMessage{}, err
 		}
 
 		last = span.end
 	}
 
 	if err := builder.appendRun(snapshot.display[last:]); err != nil {
-		return ai.Message{}, err
+		return ai.UserMessage{}, err
 	}
 
 	return builder.message()
@@ -165,7 +165,7 @@ func appendComposerElement(
 }
 
 type composerMessageBuilder struct {
-	parts     []ai.Part
+	parts     []ai.UserPart
 	textParts []string
 	run       strings.Builder
 	total     int
@@ -199,7 +199,7 @@ func (b *composerMessageBuilder) appendImage(
 
 func newComposerMessageBuilder(capacity int) *composerMessageBuilder {
 	return &composerMessageBuilder{
-		parts: make([]ai.Part, 0, capacity), textParts: make([]string, 0, capacity),
+		parts: make([]ai.UserPart, 0, capacity), textParts: make([]string, 0, capacity),
 	}
 }
 
@@ -245,12 +245,12 @@ func (b *composerMessageBuilder) flushRun() {
 	b.run.Reset()
 }
 
-func (b *composerMessageBuilder) message() (ai.Message, error) {
+func (b *composerMessageBuilder) message() (ai.UserMessage, error) {
 	b.flushRun()
 
 	assembled := strings.Join(b.textParts, "")
 	if err := coding.ValidatePromptText(assembled); err != nil {
-		return ai.Message{}, fmt.Errorf("coding tui: resolve Composer: %w", err)
+		return ai.UserMessage{}, fmt.Errorf("coding tui: resolve Composer: %w", err)
 	}
 
 	return ai.User(b.parts...), nil

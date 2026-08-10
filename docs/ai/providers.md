@@ -132,7 +132,7 @@ model := anthropic.New(
 )
 ```
 
-当前适配器会拒绝 `Seed`、`FrequencyPenalty`、`PresencePenalty` 和 `LogProbs`。系统提示从 `Request.System` 转换为顶层 system blocks；Tool Result 在 wire 上转换为 user 消息。文件 ID 会自动追加当前实现需要的 Files API Beta Header。
+当前适配器会拒绝 `Seed`、`FrequencyPenalty`、`PresencePenalty` 和 `LogProbs`。消息序列开头的 `SystemMessage` 会转换为顶层 system blocks；Tool Result 在 wire 上转换为 user 消息。文件 ID 会自动追加当前实现需要的 Files API Beta Header。
 
 ### Anthropic Prompt Cache
 

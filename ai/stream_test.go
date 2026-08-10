@@ -46,7 +46,7 @@ func TestCollectTextAndUsage(t *testing.T) {
 	assert.Equal(t, "Hello", resp.Text())
 	assert.Equal(t, ai.FinishStop, resp.FinishReason)
 	assert.Equal(t, 10, resp.Usage.InputTokens)
-	assert.Equal(t, ai.RoleAssistant, resp.Message.Role)
+	assert.IsType(t, ai.AssistantMessage{}, resp.Message)
 	require.Len(t, resp.Message.Parts, 1)
 }
 

@@ -69,8 +69,8 @@ func TestRuntimeGeneratesIsolatedAgentDraftAndPromotesOnlyAfterExplicitReview(t 
 	assert.Equal(t, []string{agentDraftToolName}, toolNamesFromRequest(requests[0]))
 	require.NotNil(t, requests[0].MaxTokens)
 	assert.Equal(t, agentDraftAgentMaxOutputTokens, *requests[0].MaxTokens)
-	assert.Contains(t, requests[0].System, intentMarker)
-	assert.NotContains(t, requests[0].System, contentMarker)
+	assert.Contains(t, requestSystemText(requests[0]), intentMarker)
+	assert.NotContains(t, requestSystemText(requests[0]), contentMarker)
 
 	entriesJSON, err := json.Marshal(runtime.handle.Session().Entries())
 	require.NoError(t, err)

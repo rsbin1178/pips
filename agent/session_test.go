@@ -101,15 +101,14 @@ func TestSessionResolvePending(t *testing.T) {
 
 	msgs := sess.Messages()
 	require.Len(t, msgs, 2)
-	require.Equal(t, ai.RoleTool, msgs[1].Role)
-	require.Len(t, msgs[1].Parts, 2)
-
-	first, ok := msgs[1].Parts[0].(ai.ToolResultPart)
+	tool, ok := msgs[1].(ai.ToolMessage)
 	require.True(t, ok)
+	require.Len(t, tool.Parts, 2)
+
+	first := tool.Parts[0]
 	assert.False(t, first.IsError)
 
-	second, ok := msgs[1].Parts[1].(ai.ToolResultPart)
-	require.True(t, ok)
+	second := tool.Parts[1]
 	assert.True(t, second.IsError)
 	assert.Equal(t, []ai.Part{ai.Text("rejected")}, second.Content)
 
@@ -139,13 +138,12 @@ func TestSessionResolveToolCallsSubsetInPendingOrder(t *testing.T) {
 
 	msgs := sess.Messages()
 	require.Len(t, msgs, 2)
-	require.Len(t, msgs[1].Parts, 2)
-
-	first, ok := msgs[1].Parts[0].(ai.ToolResultPart)
+	tool, ok := msgs[1].(ai.ToolMessage)
 	require.True(t, ok)
+	require.Len(t, tool.Parts, 2)
 
-	third, ok := msgs[1].Parts[1].(ai.ToolResultPart)
-	require.True(t, ok)
+	first := tool.Parts[0]
+	third := tool.Parts[1]
 
 	assert.Equal(t, "c1", first.ToolCallID)
 	assert.Equal(t, "first", first.Name)
@@ -244,7 +242,9 @@ func TestSessionMessagesIsACopy(t *testing.T) {
 	msgs := sess.Messages()
 	msgs[0] = ai.UserText("mutated")
 
-	kept, ok := sess.Messages()[0].Parts[0].(ai.TextPart)
+	keptMessage, ok := sess.Messages()[0].(ai.UserMessage)
+	require.True(t, ok)
+	kept, ok := keptMessage.Parts[0].(ai.TextPart)
 	require.True(t, ok)
 	assert.Equal(t, "hi", kept.Text)
 }

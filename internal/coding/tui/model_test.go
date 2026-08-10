@@ -572,17 +572,16 @@ func TestReadyToolDetailsToggleNeverShowsReasoning(t *testing.T) {
 			ID: "call-1", Name: "read", Arguments: ai.JSON(`{"path":"main.go"}`),
 		},
 		Status: coding.ToolStatusCompleted,
-		Result: ai.Message{
-			Role: ai.RoleTool,
-			Parts: []ai.Part{ai.ToolResultPart{
+		Result: ai.ToolResults(
+			ai.ToolResultPart{
 				ToolCallID: "call-1",
 				Name:       "read",
 				Content: []ai.Part{
 					ai.TextPart{Text: "visible result"},
 					ai.ReasoningPart{Text: secret, Signature: secret},
 				},
-			}},
-		},
+			},
+		),
 	}}
 	model := readyModelWithController(t, stubController{state: state}, true)
 	assert.NotContains(t, model.View().Content, "visible result")

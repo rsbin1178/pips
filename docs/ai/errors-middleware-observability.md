@@ -101,7 +101,7 @@ model := ai.Chain(base, limit)
 TPM 计数顺序：
 
 1. 若模型实现 `ai.TokenCounter`，调用其服务端计数方法。
-2. 若接口不存在、计数失败或结果非正数，统计 system 与消息中的 `TextPart` 字节数，按约 4 bytes/token 估算，至少为 1。
+2. 若接口不存在、计数失败或结果非正数，统计消息序列顶层 `TextPart` 的字节数，按约 4 bytes/token 估算，至少为 1；前置 `SystemMessage` 也在同一序列中。
 3. 单个请求估算大于 Bucket burst 时会被截到 burst，避免永远无法放行。
 
 该估算不包含图片、文件、Tool Schema 等复杂开销，不应当作账单或精确配额。Anthropic/Gemini 的服务端计数本身也是一次外部调用；为它设置的 context 与调用请求相同。

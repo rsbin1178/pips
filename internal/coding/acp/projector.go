@@ -163,7 +163,7 @@ func toolStartedUpdates(payload coding.ToolStarted) []acpsdk.SessionUpdate {
 }
 
 func toolUpdatedUpdates(payload coding.ToolUpdated) []acpsdk.SessionUpdate {
-	content := toolContentFromMessage(payload.Update)
+	content := toolContentFromParts(payload.Update)
 	if len(content) == 0 {
 		return nil
 	}
@@ -182,7 +182,9 @@ func toolCompletedUpdates(payload coding.ToolCompleted) []acpsdk.SessionUpdate {
 	}
 
 	options := []acpsdk.ToolCallUpdateOpt{acpsdk.WithUpdateStatus(status)}
-	if content := toolContentFromMessage(payload.Result); len(content) != 0 {
+
+	parts, _ := ai.MessageParts(payload.Result)
+	if content := toolContentFromParts(parts); len(content) != 0 {
 		options = append(options, acpsdk.WithUpdateContent(content))
 	}
 
@@ -281,8 +283,14 @@ func replayMessage(
 	message ai.Message,
 	messageID string,
 ) error {
-	for _, part := range message.Parts {
-		for _, update := range replayPartUpdates(message.Role, part, messageID) {
+	parts, err := ai.MessageParts(message)
+	if err != nil {
+		return err
+	}
+
+	role := replayRoleOf(message)
+	for _, part := range parts {
+		for _, update := range replayPartUpdates(role, part, messageID) {
 			if err := out.update(ctx, acpsdk.SessionId(sessionID), update); err != nil {
 				return err
 			}
@@ -292,7 +300,29 @@ func replayMessage(
 	return nil
 }
 
-func replayPartUpdates(role ai.Role, part ai.Part, messageID string) []acpsdk.SessionUpdate {
+type replayRole uint8
+
+const (
+	replayRoleUnknown replayRole = iota
+	replayRoleUser
+	replayRoleAssistant
+	replayRoleTool
+)
+
+func replayRoleOf(message ai.Message) replayRole {
+	switch message.(type) {
+	case ai.UserMessage:
+		return replayRoleUser
+	case ai.AssistantMessage:
+		return replayRoleAssistant
+	case ai.ToolMessage:
+		return replayRoleTool
+	default:
+		return replayRoleUnknown
+	}
+}
+
+func replayPartUpdates(role replayRole, part ai.Part, messageID string) []acpsdk.SessionUpdate {
 	switch value := part.(type) {
 	case ai.TextPart:
 		return replayTextUpdates(role, value.Text, messageID)
@@ -311,19 +341,19 @@ func replayPartUpdates(role ai.Role, part ai.Part, messageID string) []acpsdk.Se
 	}
 }
 
-func replayTextUpdates(role ai.Role, value, messageID string) []acpsdk.SessionUpdate {
+func replayTextUpdates(role replayRole, value, messageID string) []acpsdk.SessionUpdate {
 	switch role {
-	case ai.RoleUser:
+	case replayRoleUser:
 		return []acpsdk.SessionUpdate{withMessageID(acpsdk.UpdateUserMessageText(value), messageID)}
-	case ai.RoleAssistant:
+	case replayRoleAssistant:
 		return []acpsdk.SessionUpdate{withMessageID(acpsdk.UpdateAgentMessageText(value), messageID)}
 	default:
 		return nil
 	}
 }
 
-func replayReasoningUpdates(role ai.Role, value, messageID string) []acpsdk.SessionUpdate {
-	if role != ai.RoleAssistant || value == "" {
+func replayReasoningUpdates(role replayRole, value, messageID string) []acpsdk.SessionUpdate {
+	if role != replayRoleAssistant || value == "" {
 		return nil
 	}
 
@@ -331,7 +361,7 @@ func replayReasoningUpdates(role ai.Role, value, messageID string) []acpsdk.Sess
 }
 
 func replayMediaUpdates(
-	role ai.Role,
+	role replayRole,
 	source ai.MediaSource,
 	image bool,
 	name string,
@@ -380,8 +410,8 @@ func replayToolResultUpdates(value ai.ToolResultPart) []acpsdk.SessionUpdate {
 	}
 }
 
-func messageUpdate(role ai.Role, block acpsdk.ContentBlock) acpsdk.SessionUpdate {
-	if role == ai.RoleUser {
+func messageUpdate(role replayRole, block acpsdk.ContentBlock) acpsdk.SessionUpdate {
+	if role == replayRoleUser {
 		return acpsdk.UpdateUserMessage(block)
 	}
 
@@ -439,10 +469,10 @@ func contentBlockFromMedia(source ai.MediaSource, image bool, name string) (acps
 	}
 }
 
-func toolContentFromMessage(message ai.Message) []acpsdk.ToolCallContent {
+func toolContentFromParts(parts []ai.Part) []acpsdk.ToolCallContent {
 	var content []acpsdk.ToolCallContent
 
-	for _, part := range message.Parts {
+	for _, part := range parts {
 		if result, ok := part.(ai.ToolResultPart); ok {
 			for _, nested := range result.Content {
 				content = append(content, toolContentFromPart(nested)...)
@@ -478,9 +508,9 @@ func toolContentFromPart(part ai.Part) []acpsdk.ToolCallContent {
 	return nil
 }
 
-func messageHasToolError(message ai.Message) bool {
-	for _, part := range message.Parts {
-		if result, ok := part.(ai.ToolResultPart); ok && result.IsError {
+func messageHasToolError(message ai.ToolMessage) bool {
+	for _, result := range message.Parts {
+		if result.IsError {
 			return true
 		}
 	}
@@ -588,11 +618,12 @@ func workspaceUpdates(event coding.Event, changed coding.WorkspaceChanged) []acp
 
 func transcriptTitle(messages []ai.Message) string {
 	for _, message := range messages {
-		if message.Role != ai.RoleUser {
+		user, ok := message.(ai.UserMessage)
+		if !ok {
 			continue
 		}
 
-		for _, part := range message.Parts {
+		for _, part := range user.Parts {
 			text, ok := part.(ai.TextPart)
 			if !ok {
 				continue

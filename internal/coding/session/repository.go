@@ -1003,16 +1003,21 @@ func projectSessionPrefix(meta *Metadata, prefix harness.JSONLPrefix) {
 		if entry.Kind == harness.KindName {
 			meta.Name = entry.Name
 		}
-		if meta.Preview == "" && entry.Kind == harness.KindMessage && entry.Message != nil &&
-			entry.Message.Role == ai.RoleUser {
-			meta.Preview = firstMessageText(*entry.Message)
+		if _, isUser := entry.Message.(ai.UserMessage); meta.Preview == "" &&
+			entry.Kind == harness.KindMessage && isUser {
+			meta.Preview = firstMessageText(entry.Message)
 		}
 	}
 	meta.Truncated = prefix.Truncated
 }
 
 func firstMessageText(message ai.Message) string {
-	for _, part := range message.Parts {
+	parts, err := ai.MessageParts(message)
+	if err != nil {
+		return ""
+	}
+
+	for _, part := range parts {
 		if value, ok := part.(ai.TextPart); ok {
 			return collapsePreview(value.Text, maxSessionPreviewRunes)
 		}

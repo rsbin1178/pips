@@ -42,12 +42,12 @@ func TestSteeringInjectsBeforeNextTurn(t *testing.T) {
 	reqs := model.Requests()
 	require.Len(t, reqs, 2)
 	require.Len(t, reqs[1].Messages, 4)
-	assert.Equal(t, ai.RoleUser, reqs[1].Messages[3].Role)
+	assert.IsType(t, ai.UserMessage{}, reqs[1].Messages[3])
 
 	// And it landed in the session in the same position.
 	msgs := sess.Messages()
 	require.Len(t, msgs, 5)
-	assert.Equal(t, ai.RoleUser, msgs[3].Role)
+	assert.IsType(t, ai.UserMessage{}, msgs[3])
 }
 
 func TestSteeringExtendsFinishedRun(t *testing.T) {
@@ -549,7 +549,9 @@ func TestAsToolSubagent(t *testing.T) {
 	// The sub-agent ran with its own prompt and returned its text as the
 	// tool result.
 	require.Len(t, inner.Requests(), 1)
-	assert.Equal(t, "Answer in one word.", inner.Requests()[0].System)
+	system, _, err := inner.Requests()[0].Messages.SplitSystem()
+	require.NoError(t, err)
+	assert.Equal(t, "Answer in one word.", ai.JoinSystemText(system))
 
 	results := toolResults(t, sess, 2)
 	require.Len(t, results, 1)

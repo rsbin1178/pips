@@ -46,7 +46,7 @@ func validateEventPayload(payload EventPayload) error {
 	case ModelStreamEvent:
 		return validateModelStreamEvent(value)
 	case MessageCommitted:
-		turn = value.Turn
+		return validateMessageCommitted(value)
 	case CandidateDiscarded:
 		turn = value.Turn
 	case ToolStarted:
@@ -62,6 +62,18 @@ func validateEventPayload(payload EventPayload) error {
 	}
 
 	return validateEventTurn(turn)
+}
+
+func validateMessageCommitted(event MessageCommitted) error {
+	if err := validateEventTurn(event.Turn); err != nil {
+		return err
+	}
+
+	if err := ai.ValidateMessage(event.Message); err != nil {
+		return invalidEvent("committed message is invalid: %v", err)
+	}
+
+	return nil
 }
 
 func validateModelStreamEvent(event ModelStreamEvent) error {

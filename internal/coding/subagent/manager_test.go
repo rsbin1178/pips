@@ -87,8 +87,8 @@ func TestManagerRunsEachRoleWithExactReadOnlyCatalog(t *testing.T) {
 			assert.Equal(t, result.ChildSessionID, detail.Summary.ChildSessionID)
 			assert.IsType(t, expectedResult(test.role), detail.Result)
 			require.Len(t, detail.Transcript, 2)
-			assert.Equal(t, ai.RoleUser, detail.Transcript[0].Role)
-			assert.Equal(t, ai.RoleAssistant, detail.Transcript[1].Role)
+			assert.IsType(t, ai.UserMessage{}, detail.Transcript[0])
+			assert.IsType(t, ai.AssistantMessage{}, detail.Transcript[1])
 		})
 	}
 }
@@ -138,7 +138,7 @@ func TestManagerLifecycleAddsContextAndContinuesChild(t *testing.T) {
 
 	requests := model.Requests()
 	require.Len(t, requests, 2)
-	assert.Contains(t, requests[0].System, "trusted child context")
+	assert.Contains(t, requestSystemText(t, requests[0]), "trusted child context")
 	assert.Contains(t, messageText(requests[1].Messages[len(requests[1].Messages)-1]), "Take one more focused pass.")
 }
 
@@ -231,14 +231,14 @@ func TestRunTrackerProjectsDefensiveLiveActivity(t *testing.T) {
 	assert.Equal(t, uint64(5), activity.Revision)
 	require.Len(t, activity.Tools, 1)
 	assert.Equal(t, ToolStatusRunning, activity.Tools[0].Status)
-	assert.Equal(t, "reading", messageText(activity.Tools[0].Update))
+	assert.Equal(t, "reading", partsText(activity.Tools[0].Update))
 
 	activity.Tools[0].Call.Args[0] = '['
-	activity.Tools[0].Update.Parts[0] = ai.TextPart{Text: "mutated"}
+	activity.Tools[0].Update[0] = ai.TextPart{Text: "mutated"}
 
 	second := tracker.activitySnapshot()
 	assert.JSONEq(t, `{"path":"internal/coding/runtime.go"}`, string(second.Tools[0].Call.Args))
-	assert.Equal(t, "reading", messageText(second.Tools[0].Update))
+	assert.Equal(t, "reading", partsText(second.Tools[0].Update))
 }
 
 func mustAgentEvent(t *testing.T, occurredAt time.Time, payload agent.EventPayload) agent.Event {
@@ -760,8 +760,9 @@ func TestManagerOmitsNativeSchemaForModelWithoutStructuredOutput(t *testing.T) {
 				[]string{readToolName, "ls", "glob", "grep"},
 				toolNames(requests[0].Tools),
 			)
-			assert.Contains(t, requests[0].System, "Native structured output is unavailable")
-			assert.Contains(t, requests[0].System, test.schemaField)
+			system := requestSystemText(t, requests[0])
+			assert.Contains(t, system, "Native structured output is unavailable")
+			assert.Contains(t, system, test.schemaField)
 			require.NotNil(t, requests[0].MaxTokens)
 			assert.Equal(t, DefaultLimits().MaxOutputTokens, *requests[0].MaxTokens)
 		})
@@ -1180,9 +1181,7 @@ func TestSpawnToolSurvivesCallContextAndEnforcesRootLimit(t *testing.T) {
 	cancelCall()
 
 	var first spawnResult
-	require.NoError(t, json.Unmarshal([]byte(messageText(ai.Message{
-		Role: ai.RoleTool, Parts: parts,
-	})), &first))
+	require.NoError(t, json.Unmarshal([]byte(partsText(parts)), &first))
 	assert.Equal(t, SpawnResultSchema, first.Schema)
 	firstExecution := fixture.manager.activeExecution(first.AgentID)
 	require.NotNil(t, firstExecution)
@@ -1662,10 +1661,30 @@ func responseText(text string) *ai.Response {
 func responseToolCall(call ai.ToolCallPart) *ai.Response {
 	return &ai.Response{
 		Provider: ai.ProviderOpenAI, Model: "subagent-test",
-		Message:      ai.Message{Role: ai.RoleAssistant, Parts: []ai.Part{call}},
+		Message:      ai.Assistant(call),
 		FinishReason: ai.FinishToolCalls,
 		Usage:        ai.Usage{InputTokens: 100, OutputTokens: 20},
 	}
+}
+
+func requestSystemText(t *testing.T, request ai.Request) string {
+	t.Helper()
+
+	system, _, err := request.Messages.SplitSystem()
+	require.NoError(t, err)
+
+	return ai.JoinSystemText(system)
+}
+
+func partsText(parts []ai.Part) string {
+	var text strings.Builder
+	for _, part := range parts {
+		if value, ok := part.(ai.TextPart); ok {
+			text.WriteString(value.Text)
+		}
+	}
+
+	return text.String()
 }
 
 func toolNames(tools []ai.Tool) []string {

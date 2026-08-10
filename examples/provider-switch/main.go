@@ -28,7 +28,7 @@ func main() {
 	}
 
 	resp, err := model.Generate(context.Background(), ai.Request{
-		Messages: []ai.Message{ai.UserText(*prompt)},
+		Messages: ai.Messages{ai.UserText(*prompt)},
 	})
 	if err != nil {
 		log.Fatal(err)

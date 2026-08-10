@@ -350,11 +350,12 @@ func explicitSkillNames(messages []ai.Message, catalog *harness.SkillCatalog) []
 	seen := make(map[string]struct{})
 	var names []string
 	for _, message := range messages {
-		if message.Role != ai.RoleUser {
+		user, ok := message.(ai.UserMessage)
+		if !ok {
 			continue
 		}
 
-		for _, part := range message.Parts {
+		for _, part := range user.Parts {
 			text, ok := part.(ai.TextPart)
 			if !ok {
 				continue

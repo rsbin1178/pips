@@ -3,6 +3,7 @@ package harness
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"time"
@@ -53,7 +54,7 @@ type Entry struct {
 
 	// Message and Usage are set on message entries. Usage is recorded for
 	// assistant messages when the harness knows the turn's accounting.
-	Message *ai.Message
+	Message ai.Message
 	Usage   *ai.Usage
 
 	// Provider and ModelID are set on model_change entries.
@@ -89,8 +90,8 @@ type entryJSON struct {
 	ParentID string    `json:"parent_id,omitempty"`
 	Time     time.Time `json:"time"`
 
-	Message *ai.Message `json:"message,omitempty"`
-	Usage   *ai.Usage   `json:"usage,omitempty"`
+	Message json.RawMessage `json:"message,omitempty"`
+	Usage   *ai.Usage       `json:"usage,omitempty"`
 
 	Provider ai.Provider `json:"provider,omitempty"`
 	ModelID  string      `json:"model_id,omitempty"`
@@ -111,12 +112,44 @@ type entryJSON struct {
 	LeafID string `json:"leaf_id,omitempty"`
 }
 
-func toEnvelope(e Entry) entryJSON {
-	return entryJSON(e)
+func toEnvelope(e Entry) (entryJSON, error) {
+	envelope := entryJSON{
+		Kind: e.Kind, ID: e.ID, ParentID: e.ParentID, Time: e.Time, Usage: e.Usage,
+		Provider: e.Provider, ModelID: e.ModelID,
+		Summary: e.Summary, FirstKeptID: e.FirstKeptID, TokensBefore: e.TokensBefore, FromID: e.FromID,
+		Custom: e.Custom, Data: e.Data, TargetID: e.TargetID, Label: e.Label, Name: e.Name, LeafID: e.LeafID,
+	}
+
+	if e.Message != nil {
+		message, err := json.Marshal(e.Message)
+		if err != nil {
+			return entryJSON{}, fmt.Errorf("harness: encode message: %w", err)
+		}
+
+		envelope.Message = message
+	}
+
+	return envelope, nil
 }
 
-func fromEnvelope(env entryJSON) Entry {
-	return Entry(env)
+func fromEnvelope(env entryJSON) (Entry, error) {
+	entry := Entry{
+		Kind: env.Kind, ID: env.ID, ParentID: env.ParentID, Time: env.Time, Usage: env.Usage,
+		Provider: env.Provider, ModelID: env.ModelID,
+		Summary: env.Summary, FirstKeptID: env.FirstKeptID, TokensBefore: env.TokensBefore, FromID: env.FromID,
+		Custom: env.Custom, Data: env.Data, TargetID: env.TargetID, Label: env.Label, Name: env.Name, LeafID: env.LeafID,
+	}
+
+	if len(env.Message) > 0 {
+		message, err := ai.UnmarshalMessage(env.Message)
+		if err != nil {
+			return Entry{}, fmt.Errorf("harness: decode message: %w", err)
+		}
+
+		entry.Message = message
+	}
+
+	return entry, nil
 }
 
 // newID returns a short, time-sortable entry ID: a millisecond timestamp

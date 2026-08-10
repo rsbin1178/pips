@@ -200,16 +200,20 @@ func TestGenerateText(t *testing.T) {
 	model := newTestModel(t, serveJSON(t, textResponse, "/v1/messages", &captured))
 
 	resp, err := model.Generate(t.Context(), ai.Request{
-		System:    "You are terse.",
-		Messages:  []ai.Message{ai.UserText("Capital of France?")},
+		Messages: ai.Messages{
+			ai.SystemText("You are terse."),
+			ai.SystemText("Answer in one sentence."),
+			ai.UserText("Capital of France?"),
+		},
 		MaxTokens: ai.Ptr(100),
 	})
 	require.NoError(t, err)
 
 	// System is a top-level array of text blocks, not a message.
 	system := as[[]any](t, captured["system"])
-	require.Len(t, system, 1)
+	require.Len(t, system, 2)
 	assert.Equal(t, "You are terse.", as[map[string]any](t, system[0])["text"])
+	assert.Equal(t, "Answer in one sentence.", as[map[string]any](t, system[1])["text"])
 	assert.InDelta(t, 100, as[float64](t, captured["max_tokens"]), 1e-9)
 
 	assert.Equal(t, "msg_abc123", resp.ID)
@@ -471,8 +475,7 @@ func TestCacheControlViaProviderOptions(t *testing.T) {
 	model := newTestModel(t, serveJSON(t, textResponse, "/v1/messages", &captured))
 
 	_, err := model.Generate(t.Context(), ai.Request{
-		System:   "big reusable prompt",
-		Messages: []ai.Message{ai.UserText("hi")},
+		Messages: ai.Messages{ai.SystemText("big reusable prompt"), ai.UserText("hi")},
 		ProviderOptions: map[ai.Provider]any{
 			ai.ProviderAnthropic: anthropic.RequestOptions{CacheSystem: true},
 		},

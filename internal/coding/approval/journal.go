@@ -228,13 +228,13 @@ func (r *replayState) applyDecision(lifecycle *lifecycle, record receipt) error 
 }
 
 func collectDurableResults(replay *replayState, entry harness.Entry, index int) {
-	if entry.Kind != harness.KindMessage || entry.Message == nil || entry.Message.Role != ai.RoleTool {
+	message, ok := entry.Message.(ai.ToolMessage)
+	if entry.Kind != harness.KindMessage || !ok {
 		return
 	}
 
-	for _, part := range entry.Message.Parts {
-		result, ok := part.(ai.ToolResultPart)
-		if !ok || result.ToolCallID == "" {
+	for _, result := range message.Parts {
+		if result.ToolCallID == "" {
 			continue
 		}
 

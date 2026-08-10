@@ -42,7 +42,7 @@ func TestBootstrapStateProjectsContextAndTaskProgress(t *testing.T) {
 		SessionID: "session-1", Provider: ai.ProviderOpenAI, ModelID: "gpt-test",
 		ContextWindow: 1_000, Mode: ModeAgent,
 		Path: []harness.Entry{{
-			Kind: harness.KindMessage, ID: "entry-1", Message: &message,
+			Kind: harness.KindMessage, ID: "entry-1", Message: message,
 			Usage: &ai.Usage{InputTokens: 200, OutputTokens: 50},
 		}},
 	})
@@ -61,11 +61,11 @@ func TestBootstrapTaskProgressSurvivesBoundedTranscriptTail(t *testing.T) {
 		ID: "task-1", Name: tasklist.ToolName,
 		Args: ai.JSON(`{"plan":[{"step":"Long task","status":"in_progress"}]}`),
 	})
-	path := []harness.Entry{{Kind: harness.KindMessage, ID: "plan", Message: &plan}}
+	path := []harness.Entry{{Kind: harness.KindMessage, ID: "plan", Message: plan}}
 	for index := range maxEventItems + 1 {
 		message := ai.UserText(fmt.Sprintf("tail-%d", index))
 		path = append(path, harness.Entry{
-			Kind: harness.KindMessage, ID: fmt.Sprintf("tail-entry-%d", index), Message: &message,
+			Kind: harness.KindMessage, ID: fmt.Sprintf("tail-entry-%d", index), Message: message,
 		})
 	}
 
@@ -95,7 +95,7 @@ func TestBootstrapStateRebuildsBoundedTranscriptTreeAndCompaction(t *testing.T) 
 	for index := range maxEventItems + 5 {
 		message := ai.UserText(fmt.Sprintf("message-%d", index))
 		path = append(path, harness.Entry{
-			Kind: harness.KindMessage, ID: fmt.Sprintf("entry-%d", index), Message: &message,
+			Kind: harness.KindMessage, ID: fmt.Sprintf("entry-%d", index), Message: message,
 		})
 	}
 

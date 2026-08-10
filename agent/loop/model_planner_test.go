@@ -64,7 +64,10 @@ func TestModelPlannerUsesStructuredToolFreeRequestAndReportsUsage(t *testing.T) 
 	require.NotNil(t, model.request.ResponseFormat)
 	assert.True(t, model.request.ResponseFormat.Strict)
 	assert.Equal(t, "loop_plan", model.request.ResponseFormat.Name)
-	assert.Contains(t, model.request.System, "untrusted data")
+	system, conversation, err := model.request.Messages.SplitSystem()
+	require.NoError(t, err)
+	assert.Contains(t, ai.JoinSystemText(system), "untrusted data")
+	require.Len(t, conversation, 1)
 }
 
 func TestModelPlannerStopsWithZeroDelay(t *testing.T) {

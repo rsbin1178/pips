@@ -26,7 +26,7 @@ func main() {
 	// (each adapter uses its provider's native schema format).
 
 	recipe, resp, err := ai.GenerateTyped[Recipe](context.Background(), model, ai.Request{
-		Messages: []ai.Message{ai.UserText(
+		Messages: ai.Messages{ai.UserText(
 			"Pasta for four: boil 400g spaghetti; fry garlic in olive oil; toss with chili flakes and parsley.",
 		)},
 	})

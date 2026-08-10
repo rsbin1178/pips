@@ -75,12 +75,12 @@ const (
 
 // ToolState is one tool call and its latest bounded progress/result.
 type ToolState struct {
-	RunID  string     `json:"run_id"`
-	Turn   int        `json:"turn"`
-	Call   ToolCall   `json:"call"`
-	Status ToolStatus `json:"status"`
-	Update ai.Message `json:"update"`
-	Result ai.Message `json:"result"`
+	RunID  string         `json:"run_id"`
+	Turn   int            `json:"turn"`
+	Call   ToolCall       `json:"call"`
+	Status ToolStatus     `json:"status"`
+	Update []ai.Part      `json:"update"`
+	Result ai.ToolMessage `json:"result"`
 }
 
 // SubagentState is the bounded recent lifecycle projection used by live
@@ -224,7 +224,7 @@ type State struct {
 	Mode          OperatingMode    `json:"mode"`
 	Phase         Phase            `json:"phase,omitempty"`
 	Interaction   InteractionState `json:"interaction"`
-	Transcript    []ai.Message     `json:"transcript"`
+	Transcript    ai.Messages      `json:"transcript"`
 	// SyntheticMessages contains transcript indexes owned by Runtime-generated
 	// protocol input. Frontends render them as neutral activity, not user chat.
 	SyntheticMessages []int                           `json:"synthetic_messages,omitempty"`
@@ -258,7 +258,7 @@ type State struct {
 func (state State) Clone() State {
 	cloned := state
 
-	cloned.Transcript = make([]ai.Message, len(state.Transcript))
+	cloned.Transcript = make(ai.Messages, len(state.Transcript))
 	for index, message := range state.Transcript {
 		cloned.Transcript[index] = cloneMessage(message)
 	}
@@ -278,8 +278,13 @@ func (state State) Clone() State {
 	cloned.Tools = make([]ToolState, len(state.Tools))
 	for index, tool := range state.Tools {
 		tool.Call = cloneToolCall(tool.Call)
-		tool.Update = cloneMessage(tool.Update)
-		tool.Result = cloneMessage(tool.Result)
+		tool.Update, _ = ai.CloneParts(tool.Update)
+		result, err := ai.CloneMessage(tool.Result)
+		if err == nil {
+			if message, ok := result.(ai.ToolMessage); ok {
+				tool.Result = message
+			}
+		}
 		cloned.Tools[index] = tool
 	}
 	cloned.Subagents = slices.Clone(state.Subagents)
@@ -332,7 +337,7 @@ type DurableState struct {
 	Provider          ai.Provider      `json:"provider,omitempty"`
 	ModelID           string           `json:"model_id,omitempty"`
 	Interaction       InteractionState `json:"interaction"`
-	Transcript        []ai.Message     `json:"transcript"`
+	Transcript        ai.Messages      `json:"transcript"`
 	SyntheticMessages []int            `json:"synthetic_messages,omitempty"`
 	Approval          ApprovalState    `json:"approval"`
 	Tree              SessionTree      `json:"tree"`
@@ -547,7 +552,7 @@ func (state *State) apply(event Event) error {
 		}
 
 		candidate := CandidateIdentity{}
-		if payload.Message.Role == ai.RoleAssistant {
+		if _, isAssistant := payload.Message.(ai.AssistantMessage); isAssistant {
 			candidate = CandidateIdentity{RunID: event.RunID, Turn: state.openTurns[event.RunID]}
 		}
 		state.Transcript = append(state.Transcript, cloneMessage(payload.Message))
@@ -612,7 +617,7 @@ func (state *State) apply(event Event) error {
 			return err
 		}
 
-		state.Tools[index].Update = cloneMessage(payload.Update)
+		state.Tools[index].Update, _ = ai.CloneParts(payload.Update)
 	case ToolCompleted:
 		index, err := state.activeTool(event.RunID, payload.Call)
 		if err != nil {
@@ -620,7 +625,12 @@ func (state *State) apply(event Event) error {
 		}
 
 		state.Tools[index].Status = ToolStatusCompleted
-		state.Tools[index].Result = cloneMessage(payload.Result)
+		cloned, cloneErr := ai.CloneMessage(payload.Result)
+		if cloneErr == nil {
+			if result, ok := cloned.(ai.ToolMessage); ok {
+				state.Tools[index].Result = result
+			}
+		}
 		delete(state.activeTools, toolStateKey(event.RunID, payload.Call.ID))
 	case SubagentLifecycle:
 		if err := state.applySubagent(event, payload); err != nil {

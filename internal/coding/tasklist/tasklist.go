@@ -164,13 +164,15 @@ func Project(messages []ai.Message) Snapshot {
 
 // FromMessage returns the last valid update_plan call in one assistant message.
 func FromMessage(message ai.Message) (Update, bool) {
-	if message.Role != ai.RoleAssistant {
+	assistant, ok := message.(ai.AssistantMessage)
+	if !ok {
 		return Update{}, false
 	}
 
 	var result Update
 	found := false
-	for _, part := range message.Parts {
+
+	for _, part := range assistant.Parts {
 		call, ok := part.(ai.ToolCallPart)
 		if !ok || call.Name != ToolName {
 			continue

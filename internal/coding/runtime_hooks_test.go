@@ -38,9 +38,10 @@ func TestRuntimeHooksInjectSessionAndPromptContext(t *testing.T) {
 	collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("hello")))
 	requests := model.Requests()
 	require.Len(t, requests, 1)
-	assert.Contains(t, requests[0].System, "# Trusted lifecycle hook context")
-	assert.Contains(t, requests[0].System, "session hook context")
-	assert.Contains(t, requests[0].System, "prompt hook context")
+	system := requestSystemText(requests[0])
+	assert.Contains(t, system, "# Trusted lifecycle hook context")
+	assert.Contains(t, system, "session hook context")
+	assert.Contains(t, system, "prompt hook context")
 }
 
 func TestRuntimeHookPromptDenialPrecedesInteractionJournal(t *testing.T) {
@@ -317,7 +318,7 @@ func TestRuntimeSubagentHooksAddContextAndContinueChild(t *testing.T) {
 	collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("delegate")))
 	requests := model.Requests()
 	require.Len(t, requests, 4)
-	assert.Contains(t, requests[1].System, "child lifecycle context")
+	assert.Contains(t, requestSystemText(requests[1]), "child lifecycle context")
 	assert.True(t, requestContainsText(requests[2], "inspect one more detail"))
 }
 
@@ -401,7 +402,7 @@ esac`,
 				runtimeTextResponse("must not run after the stopped compaction"),
 			)
 			runtime := openTrustedHookRuntime(t, model, lifecycleHookConfig(t, map[hooks.Event][]string{
-				test.event: []string{stop},
+				test.event: {stop},
 			}), nil)
 			appendRuntimeHistory(t, runtime, 425, 425, 425, 425)
 			require.NoError(t, os.WriteFile(
@@ -520,7 +521,12 @@ func skipHookRuntimeOnWindows(t *testing.T) {
 
 func hookRequestToolResultContains(request ai.Request, expected string) bool {
 	for _, message := range request.Messages {
-		for _, part := range message.Parts {
+		parts, err := ai.MessageParts(message)
+		if err != nil {
+			continue
+		}
+
+		for _, part := range parts {
 			result, ok := part.(ai.ToolResultPart)
 			if !ok {
 				continue
