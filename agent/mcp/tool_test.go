@@ -272,17 +272,17 @@ func TestToolProgressBecomesAgentUpdateAndChainsHandler(t *testing.T) {
 		{Message: ai.AssistantText("done"), FinishReason: ai.FinishStop},
 	}}
 
-	var updates []agent.Event
+	var updates []agent.ToolUpdated
 
 	var updatesMu sync.Mutex
 
 	runtime, err := agent.New(model,
 		agent.WithTools(tools...),
 		agent.WithOnEvent(func(_ context.Context, event agent.Event) {
-			if event.Type == agent.EventToolUpdate {
+			if update, ok := event.Payload().(agent.ToolUpdated); ok {
 				updatesMu.Lock()
 
-				updates = append(updates, event)
+				updates = append(updates, update)
 				updatesMu.Unlock()
 			}
 		}),

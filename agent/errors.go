@@ -19,6 +19,13 @@ var (
 	// ErrInvalidToolResolution means a supplied resolution has an empty or
 	// duplicate tool-call ID.
 	ErrInvalidToolResolution = errors.New("agent: invalid tool resolution")
+	// ErrInvalidEvent classifies invalid process-local event metadata or
+	// payloads. Construct events with [NewEvent] to validate and snapshot them.
+	ErrInvalidEvent = errors.New("agent: invalid event")
+	// ErrEventWireFormat reports an attempt to marshal or unmarshal [Event].
+	// Agent events are process-local; use an application-owned, versioned
+	// projection for durable or remote transport.
+	ErrEventWireFormat = errors.New("agent: event has no wire format")
 	// ErrGuardrail classifies input and output validation failures. Extract a
 	// [GuardrailError] with [errors.As] for the phase, name, and cause.
 	ErrGuardrail = errors.New("agent: guardrail rejected the run")

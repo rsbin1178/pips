@@ -31,14 +31,14 @@ bob := agent.NewSession()
 一次阻塞运行大致经历：
 
 1. 获得 Session 的单运行所有权，并生成 `RunID`。
-2. 发出 `run_start` 事件，执行输入 guardrail。
+2. 发出 `RunStarted` 事件，执行输入 guardrail。
 3. 提交输入消息并开始一轮模型请求。
 4. 若模型返回工具调用，依次经过 before-tool gate、执行器和 after-tool hook，再提交完整工具结果消息。
 5. 若模型返回最终答案，执行候选答案与输出 guardrail。
 6. 处理已排队的 steering/follow-up，或按停止条件结束。
-7. 成功结束时发出 `run_end`，释放 Session。
+7. 成功结束时发出 `RunCompleted`，释放 Session。
 
-流式运行遵循相同的提交点，只多出 provisional delta。事件的精确顺序见[事件与可观测性](events-observability.md)。
+流式运行遵循相同的提交点，只多出 provisional `ModelStreamEvent`。事件的精确顺序见[事件与可观测性](events-observability.md)。
 
 ## 消息提交与失败
 
@@ -89,7 +89,7 @@ Session 只保留已提交消息。输入 guardrail 在新输入进入 transcrip
 - 返回错误会终止 Run。
 - 返回 Retry 会丢弃尚未提交的候选，并可用一次性的 `ModelRequestUpdate` 调整重试请求。
 
-被丢弃候选的 token 仍计入 Usage；事件只说明候选被丢弃，不携带候选正文。流式客户端可能已经看到该候选的 delta，因此严格审核场景应缓冲显示。
+被丢弃候选的 token 仍计入 Usage；事件只说明候选被丢弃，不携带候选正文。流式客户端可能已经看到该候选的 `ModelStreamEvent`，因此严格审核场景应缓冲显示。
 
 ## 嵌套运行与身份
 

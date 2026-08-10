@@ -29,7 +29,8 @@ func (a *Agent) Run(ctx context.Context, sess *Session, msgs ...ai.Message) (*Ru
 // cancels the run; the session keeps everything appended up to that point,
 // and any tool calls left unanswered surface through [Session.Pending].
 //
-// A clean termination ends with an [EventRunEnd] carrying the [StopReason]
+// A clean termination ends with an [EventRunCompleted] carrying the
+// [RunCompleted] payload and [StopReason]
 // (after [StopPaused], resolve [Session.Pending] and run again); failures
 // yield a non-nil error as the final element.
 func (a *Agent) Stream(ctx context.Context, sess *Session, msgs ...ai.Message) iter.Seq2[Event, error] {
@@ -53,7 +54,7 @@ func (a *Agent) Stream(ctx context.Context, sess *Session, msgs ...ai.Message) i
 // loop is the shared engine behind Run and Stream. It returns (nil, nil)
 // when the stream consumer stops iterating — the run is abandoned and
 // nothing further may be emitted.
-func (a *Agent) loop(ctx context.Context, sess *Session, msgs []ai.Message, emit emitFunc, streaming bool) (*RunResult, error) {
+func (a *Agent) loop(ctx context.Context, sess *Session, msgs []ai.Message, deliver func(Event) bool, streaming bool) (*RunResult, error) {
 	if err := sess.begin(); err != nil {
 		return nil, err
 	}
@@ -66,21 +67,16 @@ func (a *Agent) loop(ctx context.Context, sess *Session, msgs []ai.Message, emit
 	meta := newRunMetadata(ctx, a.cfg.name)
 	ctx = withRunMetadata(ctx, meta)
 
-	deliver := emit
-	emit = func(ev Event) bool {
-		ev.RunID = meta.RunID
-		ev.ParentRunID = meta.ParentRunID
-		ev.Agent = meta.Agent
-		ev.Time = time.Now().UTC()
-
+	emit := func(payload EventPayload) bool {
+		ev := newEvent(meta, time.Now(), payload)
 		if a.cfg.onEvent != nil {
-			a.cfg.onEvent(ctx, ev)
+			a.cfg.onEvent(ctx, cloneEvent(ev))
 		}
 
 		return deliver(ev)
 	}
 
-	if !emit(Event{Type: EventRunStart}) {
+	if !emit(RunStarted{}) {
 		return nil, nil
 	}
 
@@ -153,7 +149,7 @@ func (r *run) partial(turns int) *RunResult {
 // whether the loop should keep going; when false, result and err (both
 // possibly nil, for an abandoned stream) are the loop's outcome.
 func (r *run) turn(ctx context.Context, turn int) (result *RunResult, next bool, err error) {
-	if !r.emit(Event{Type: EventTurnStart, Turn: turn}) {
+	if !r.emit(TurnStarted{Turn: turn}) {
 		return nil, false, nil
 	}
 
@@ -210,7 +206,7 @@ func (r *run) turn(ctx context.Context, turn int) (result *RunResult, next bool,
 
 	r.sess.Append(resp.Message)
 
-	if !r.emit(messageEvent(turn, resp.Message)) {
+	if !r.emit(MessageCommitted{Turn: turn, Message: resp.Message}) {
 		return nil, false, nil
 	}
 
@@ -267,8 +263,8 @@ func (r *run) retryCandidate(
 	resp *ai.Response,
 	update *ModelRequestUpdate,
 ) (result *RunResult, next bool, err error) {
-	if !r.emit(Event{Type: EventCandidateDiscard, Turn: turn}) ||
-		!r.emit(Event{Type: EventTurnEnd, Turn: turn, Usage: r.usage}) {
+	if !r.emit(CandidateDiscarded{Turn: turn}) ||
+		!r.emit(TurnCompleted{Turn: turn, Usage: r.usage}) {
 		return nil, false, nil
 	}
 
@@ -306,7 +302,7 @@ func (r *run) inject(turn int) bool {
 	for _, msg := range r.pending {
 		r.sess.Append(msg)
 
-		if !r.emit(messageEvent(turn, msg)) {
+		if !r.emit(MessageCommitted{Turn: turn, Message: msg}) {
 			return false
 		}
 	}
@@ -343,7 +339,7 @@ func (r *run) toolPhase(
 		toolMsg := toolMessage(outcome.results)
 		r.sess.Append(toolMsg)
 
-		if !outcome.stopped && !r.emit(messageEvent(turn, toolMsg)) {
+		if !outcome.stopped && !r.emit(MessageCommitted{Turn: turn, Message: toolMsg}) {
 			return nil, false, nil
 		}
 	}
@@ -352,7 +348,7 @@ func (r *run) toolPhase(
 		return nil, false, nil
 	}
 
-	if !r.emit(Event{Type: EventTurnEnd, Turn: turn, Usage: r.usage}) {
+	if !r.emit(TurnCompleted{Turn: turn, Usage: r.usage}) {
 		return nil, false, nil
 	}
 
@@ -380,7 +376,8 @@ func (r *run) truncatedBatch(turn int, calls []ai.ToolCallPart) batchOutcome {
 	for idx, call := range calls {
 		results[idx] = errorResult(call, reason)
 
-		if !r.emit(toolStartEvent(turn, call)) || !r.emit(toolEndEvent(turn, call, results[idx])) {
+		if !r.emit(ToolStarted{Turn: turn, Call: call}) ||
+			!r.emit(ToolCompleted{Turn: turn, Call: call, Result: results[idx]}) {
 			return batchOutcome{results: results[:idx+1], stopped: true}
 		}
 	}
@@ -533,9 +530,9 @@ func validateToolChoice(choice ai.ToolChoice, tools *toolbox) error {
 	return nil
 }
 
-// finish emits run_end and assembles the result of a clean termination.
+// finish emits run_completed and assembles the result of a clean termination.
 func (r *run) finish(stop StopReason, turns int, pending []ai.ToolCallPart) (*RunResult, error) {
-	r.emit(Event{Type: EventRunEnd, Turn: turns, Stop: stop, Usage: r.usage})
+	r.emit(RunCompleted{Turns: turns, Stop: stop, Usage: r.usage})
 
 	return &RunResult{
 		RunMetadata: r.meta,
@@ -574,7 +571,12 @@ func (a *Agent) callModel(
 				return
 			}
 
-			if !emit(Event{Type: EventDelta, Turn: turn, Delta: ev}) {
+			if !validModelStreamEventType(ev.Type) {
+				yield(ai.StreamEvent{}, invalidEvent("model stream event type %q is invalid", ev.Type))
+				return
+			}
+
+			if !emit(ModelStreamEvent{Turn: turn, Event: ev}) {
 				stopped = true
 				return
 			}

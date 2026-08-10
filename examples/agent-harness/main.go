@@ -65,8 +65,9 @@ func run() error {
 			return err
 		}
 
-		if ev.Type == agent.EventDelta && ev.Delta.Type == ai.StreamTextDelta {
-			fmt.Print(ev.Delta.Text)
+		if event, ok := ev.Payload().(agent.ModelStreamEvent); ok &&
+			event.Event.Type == ai.StreamTextDelta {
+			fmt.Print(event.Event.Text)
 		}
 	}
 

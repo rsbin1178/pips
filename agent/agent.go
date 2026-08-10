@@ -146,8 +146,8 @@ func WithPrepareTurn(fn func(ctx context.Context, info RunInfo) TurnUpdate) Opti
 
 // WithCandidateAnswer installs a hook for no-Tool assistant answers before
 // they are committed. The hook may accept, abort, or discard and retry with a
-// one-request constraint. Streaming deltas are provisional; a retry emits
-// [EventCandidateDiscard] so consumers can clear the rejected draft.
+// one-request constraint. Streaming events are provisional; a retry emits an
+// [EventCandidateDiscarded] event so consumers can clear the rejected draft.
 func WithCandidateAnswer(
 	fn func(context.Context, CandidateAnswerInfo) CandidateAnswerDecision,
 ) Option {
@@ -176,8 +176,8 @@ func WithFollowUpMode(m QueueMode) Option {
 }
 
 // WithOnEvent installs a callback receiving every run event, for both
-// [Agent.Run] and [Agent.Stream] (Run produces no delta events). The callback
-// runs on the run's goroutine; keep it fast and non-blocking.
+// [Agent.Run] and [Agent.Stream] (Run produces no [EventModelStream] events).
+// The callback runs on the run's goroutine; keep it fast and non-blocking.
 func WithOnEvent(fn func(ctx context.Context, ev Event)) Option {
 	return func(c *config) { c.onEvent = fn }
 }

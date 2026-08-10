@@ -699,7 +699,7 @@ func (h *Harness) exit() {
 }
 
 // recorder captures run events, persisting each turn's messages at its
-// turn_end save point with per-turn usage derived from the cumulative
+// TurnCompleted save point with per-turn usage derived from the cumulative
 // counters. Events arrive on the run goroutine, so no locking is needed.
 type recorder struct {
 	session *Session
@@ -713,14 +713,14 @@ type recorder struct {
 }
 
 func (r *recorder) onEvent(ctx context.Context, ev agent.Event) {
-	switch ev.Type {
-	case agent.EventTurnStart:
+	switch payload := ev.Payload().(type) {
+	case agent.TurnStarted:
 		r.saveInput()
-	case agent.EventMessage:
-		r.buffer = append(r.buffer, *ev.Message)
-	case agent.EventTurnEnd:
-		delta := usageDelta(ev.Usage, r.lastCum)
-		r.lastCum = ev.Usage
+	case agent.MessageCommitted:
+		r.buffer = append(r.buffer, payload.Message)
+	case agent.TurnCompleted:
+		delta := usageDelta(payload.Usage, r.lastCum)
+		r.lastCum = payload.Usage
 		r.flush(&delta)
 	default:
 	}
