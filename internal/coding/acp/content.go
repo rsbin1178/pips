@@ -14,10 +14,10 @@ import (
 
 func convertPrompt(blocks []acpsdk.ContentBlock, limits Limits) (ai.Message, error) {
 	if len(blocks) == 0 || len(blocks) > limits.MaxPromptBlocks {
-		return ai.Message{}, fmt.Errorf("%w: prompt block count", ErrInvalid)
+		return nil, fmt.Errorf("%w: prompt block count", ErrInvalid)
 	}
 
-	parts := make([]ai.Part, 0, len(blocks))
+	parts := make([]ai.UserPart, 0, len(blocks))
 	textBytes := 0
 	binaryBytes := 0
 
@@ -28,17 +28,22 @@ func convertPrompt(blocks []acpsdk.ContentBlock, limits Limits) (ai.Message, err
 			limits.MaxBinaryBytes,
 		)
 		if err != nil {
-			return ai.Message{}, fmt.Errorf("%w: prompt block %d", err, index)
+			return nil, fmt.Errorf("%w: prompt block %d", err, index)
 		}
 
 		textBytes += textSize
 
 		binaryBytes += binarySize
 		if textBytes > limits.MaxPromptBytes || binaryBytes > limits.MaxBinaryBytes {
-			return ai.Message{}, fmt.Errorf("%w: prompt byte limit", ErrInvalid)
+			return nil, fmt.Errorf("%w: prompt byte limit", ErrInvalid)
 		}
 
-		parts = append(parts, part)
+		userPart, ok := part.(ai.UserPart)
+		if !ok {
+			return nil, fmt.Errorf("%w: prompt part %T", ErrInvalid, part)
+		}
+
+		parts = append(parts, userPart)
 	}
 
 	return ai.User(parts...), nil

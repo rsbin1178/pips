@@ -329,7 +329,9 @@ func (m *Model) matchingStreamingAssistantIndex(blocks []timelineBlock) int {
 func (m *Model) hasPendingStreamingAssistant() bool {
 	for index, message := range m.state.Transcript[m.scrollback.messages:] {
 		candidateIndex := m.scrollback.messages + index
-		if message.Role == ai.RoleAssistant && candidateIndex < len(m.state.MessageCandidates) &&
+
+		_, isAssistant := message.(ai.AssistantMessage)
+		if isAssistant && candidateIndex < len(m.state.MessageCandidates) &&
 			m.state.MessageCandidates[candidateIndex].Key() == m.streaming.identity {
 			return true
 		}

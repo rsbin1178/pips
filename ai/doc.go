@@ -13,7 +13,7 @@
 //
 //	model := openai.New("gpt-4o", openai.WithAPIKey(key))
 //	resp, err := model.Generate(ctx, ai.Request{
-//	    Messages: []ai.Message{ai.UserText("Hello!")},
+//	    Messages: ai.Messages{ai.UserText("Hello!")},
 //	})
 //
 // Streaming uses Go iterators; breaking out of the loop cancels the

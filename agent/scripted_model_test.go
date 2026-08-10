@@ -54,13 +54,13 @@ func textResponse(text string) *ai.Response {
 
 // callResponse builds an assistant response requesting the given tool calls.
 func callResponse(calls ...ai.ToolCallPart) *ai.Response {
-	parts := make([]ai.Part, 0, len(calls))
+	parts := make([]ai.AssistantPart, 0, len(calls))
 	for _, c := range calls {
 		parts = append(parts, c)
 	}
 
 	return &ai.Response{
-		Message:      ai.Message{Role: ai.RoleAssistant, Parts: parts},
+		Message:      ai.Assistant(parts...),
 		FinishReason: ai.FinishToolCalls,
 		Usage:        ai.Usage{InputTokens: 10, OutputTokens: 5},
 	}

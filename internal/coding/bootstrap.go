@@ -73,12 +73,12 @@ func BootstrapState(options BootstrapOptions) (BootstrapResult, error) {
 	for _, entry := range options.Path {
 		switch entry.Kind {
 		case harness.KindMessage:
-			if entry.Message == nil || validateMessage(*entry.Message) != nil {
+			if entry.Message == nil || validateMessage(entry.Message) != nil {
 				return BootstrapResult{}, protocolError("invalid durable message entry %q", entry.ID)
 			}
 
-			state.Transcript = append(state.Transcript, cloneMessage(*entry.Message))
-			if update, ok := tasklist.FromMessage(*entry.Message); ok {
+			state.Transcript = append(state.Transcript, cloneMessage(entry.Message))
+			if update, ok := tasklist.FromMessage(entry.Message); ok {
 				state.Tasks = tasklist.FromUpdate(update)
 			}
 		case harness.KindModelChange:

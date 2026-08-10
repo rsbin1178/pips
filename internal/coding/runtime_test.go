@@ -84,8 +84,8 @@ func TestRuntimePromptStreamsAndPersistsOneInteraction(t *testing.T) {
 	assert.False(t, snapshot.Interaction.Active)
 	assert.Equal(t, InteractionSucceeded, snapshot.Interaction.Outcome)
 	require.Len(t, snapshot.Transcript, 2)
-	assert.Equal(t, ai.RoleUser, snapshot.Transcript[0].Role)
-	assert.Equal(t, ai.RoleAssistant, snapshot.Transcript[1].Role)
+	assert.IsType(t, ai.UserMessage{}, snapshot.Transcript[0])
+	assert.IsType(t, ai.AssistantMessage{}, snapshot.Transcript[1])
 
 	require.NoError(t, runtime.Close(t.Context()))
 	assert.Equal(t, PhaseClosed, runtime.Snapshot().Phase)
@@ -340,8 +340,8 @@ func TestRuntimeDeliversIdleAgentNotificationAsSyntheticInteraction(t *testing.T
 	assert.Equal(t, "root-idle", state.Interaction.RootInteractionID)
 	require.Len(t, state.Transcript, 2)
 	assert.Equal(t, []int{0}, state.SyntheticMessages)
-	assert.Equal(t, ai.RoleUser, state.Transcript[0].Role)
-	assert.Equal(t, ai.RoleAssistant, state.Transcript[1].Role)
+	assert.IsType(t, ai.UserMessage{}, state.Transcript[0])
+	assert.IsType(t, ai.AssistantMessage{}, state.Transcript[1])
 
 	requests := model.Requests()
 	require.Len(t, requests, 1)
@@ -579,8 +579,8 @@ func TestRuntimeRunsReadOnlySubagentWithoutProjectingChildTranscript(t *testing.
 	require.NoError(t, err)
 	assert.IsType(t, subagent.ExploreResult{}, detail.Result)
 	require.Len(t, detail.Transcript, 2)
-	assert.Equal(t, ai.RoleUser, detail.Transcript[0].Role)
-	assert.Equal(t, ai.RoleAssistant, detail.Transcript[1].Role)
+	assert.IsType(t, ai.UserMessage{}, detail.Transcript[0])
+	assert.IsType(t, ai.AssistantMessage{}, detail.Transcript[1])
 	childState, err := runtime.InspectSubagentState(t.Context(), child.ChildSessionID)
 	require.NoError(t, err)
 	waited, err := runtime.WaitSubagent(t.Context(), child.ChildSessionID)
@@ -592,8 +592,8 @@ func TestRuntimeRunsReadOnlySubagentWithoutProjectingChildTranscript(t *testing.
 	assert.Equal(t, InteractionSucceeded, childState.Interaction.Outcome)
 	assert.False(t, childState.Interaction.Active)
 	require.Len(t, childState.Transcript, 2)
-	assert.Equal(t, ai.RoleUser, childState.Transcript[0].Role)
-	assert.Equal(t, ai.RoleAssistant, childState.Transcript[1].Role)
+	assert.IsType(t, ai.UserMessage{}, childState.Transcript[0])
+	assert.IsType(t, ai.AssistantMessage{}, childState.Transcript[1])
 	require.Len(t, childState.Runs, 1)
 	assert.False(t, childState.Runs[0].Active)
 
@@ -904,7 +904,7 @@ func TestRuntimeApprovalPauseAndDenyContinuation(t *testing.T) {
 	assert.Equal(t, InteractionSucceeded, settled.Interaction.Outcome)
 	requests := model.Requests()
 	assert.Len(t, requests, 2)
-	assert.Equal(t, 1, countRole(requests[1].Messages, ai.RoleUser))
+	assert.Equal(t, 1, countUserMessages(requests[1].Messages))
 
 	require.NoError(t, runtime.Close(t.Context()))
 }
@@ -1528,13 +1528,11 @@ func appendRuntimeHistory(t *testing.T, runtime *Runtime, tokenSizes ...int) {
 	t.Helper()
 
 	for index, tokens := range tokenSizes {
-		role := ai.RoleUser
+		var message ai.Message = ai.UserText(strings.Repeat("word", tokens))
 		if index%2 == 1 {
-			role = ai.RoleAssistant
+			message = ai.AssistantText(strings.Repeat("word", tokens))
 		}
-		_, err := runtime.session.AppendMessage(ai.Message{
-			Role: role, Parts: []ai.Part{ai.Text(strings.Repeat("word", tokens))},
-		}, nil)
+		_, err := runtime.session.AppendMessage(message, nil)
 		require.NoError(t, err)
 	}
 }
@@ -1558,7 +1556,11 @@ func collectRuntimeResult(sequence iter.Seq2[Event, error]) ([]Event, error) {
 
 func requestContainsText(request ai.Request, expected string) bool {
 	for _, message := range request.Messages {
-		for _, part := range message.Parts {
+		parts, err := ai.MessageParts(message)
+		if err != nil {
+			continue
+		}
+		for _, part := range parts {
 			if value, ok := part.(ai.TextPart); ok && strings.Contains(value.Text, expected) {
 				return true
 			}
@@ -1570,7 +1572,11 @@ func requestContainsText(request ai.Request, expected string) bool {
 
 func runtimeMessageText(message ai.Message) string {
 	var value strings.Builder
-	for _, part := range message.Parts {
+	parts, err := ai.MessageParts(message)
+	if err != nil {
+		return ""
+	}
+	for _, part := range parts {
 		if text, ok := part.(ai.TextPart); ok {
 			value.WriteString(text.Text)
 		}
@@ -1934,15 +1940,24 @@ func telemetryTypes(events []TelemetryEvent) []EventType {
 	return values
 }
 
-func countRole(messages []ai.Message, role ai.Role) int {
+func countUserMessages(messages []ai.Message) int {
 	count := 0
 	for _, message := range messages {
-		if message.Role == role {
+		if _, ok := message.(ai.UserMessage); ok {
 			count++
 		}
 	}
 
 	return count
+}
+
+func requestSystemText(request ai.Request) string {
+	system, _, err := request.Messages.SplitSystem()
+	if err != nil {
+		return ""
+	}
+
+	return ai.JoinSystemText(system)
 }
 
 func toolNamesFromRequest(request ai.Request) []string {
@@ -2157,7 +2172,7 @@ func (m *backgroundSpawnRuntimeModel) Generate(
 	ctx context.Context,
 	request ai.Request,
 ) (*ai.Response, error) {
-	if strings.Contains(request.System, "You are a read-only specialist") {
+	if strings.Contains(requestSystemText(request), "You are a read-only specialist") {
 		m.childOnce.Do(func() { close(m.childStarted) })
 		select {
 		case <-m.releaseChild:
@@ -2241,7 +2256,7 @@ func (m *canceledForegroundSubagentRuntimeModel) Generate(
 	ctx context.Context,
 	request ai.Request,
 ) (*ai.Response, error) {
-	if strings.Contains(request.System, "You are a read-only specialist") {
+	if strings.Contains(requestSystemText(request), "You are a read-only specialist") {
 		m.childOnce.Do(func() { close(m.childStarted) })
 		<-m.releaseChild
 

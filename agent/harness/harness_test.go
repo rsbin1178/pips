@@ -61,7 +61,7 @@ func TestHarnessPromptPersistsRun(t *testing.T) {
 	assert.Nil(t, entries[2].Usage)
 
 	// The system prompt reached the model.
-	assert.Equal(t, "Be terse.", model.Requests()[0].System)
+	assert.Equal(t, "Be terse.", requestSystemText(t, model.Requests()[0]))
 }
 
 func TestHarnessResumesAcrossInstances(t *testing.T) {
@@ -113,10 +113,10 @@ func TestHarnessAutoCompaction(t *testing.T) {
 	sess := buildSession(t)
 
 	// Seed history whose recorded usage exceeds the threshold.
-	appendText(t, sess, ai.RoleUser, bigText(100), nil)
-	appendText(t, sess, ai.RoleAssistant, "big turn", &ai.Usage{InputTokens: 90_000, OutputTokens: 500})
-	appendText(t, sess, ai.RoleUser, bigText(100), nil)
-	appendText(t, sess, ai.RoleAssistant, "done", nil)
+	appendText(t, sess, ai.UserMessage{}, bigText(100), nil)
+	appendText(t, sess, ai.AssistantMessage{}, "big turn", &ai.Usage{InputTokens: 90_000, OutputTokens: 500})
+	appendText(t, sess, ai.UserMessage{}, bigText(100), nil)
+	appendText(t, sess, ai.AssistantMessage{}, "done", nil)
 
 	summarizer := newScriptedModel("sum", textResponse("## Goal\nSummarized.", 10))
 	model := newScriptedModel("m", textResponse("fresh answer", 100))
@@ -137,8 +137,7 @@ func TestHarnessAutoCompaction(t *testing.T) {
 	reqs := model.Requests()
 	require.Len(t, reqs, 1)
 
-	lead, ok := reqs[0].Messages[0].Parts[0].(ai.TextPart)
-	require.True(t, ok)
+	lead := firstTextPart(t, reqs[0].Messages[0])
 	assert.Contains(t, lead.Text, harness.CompactionPrefix)
 
 	// The compaction entry was committed to the tree.
@@ -239,8 +238,7 @@ func TestHarnessNavigateWithSummary(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, cctx.Messages, 2)
 
-	summary, ok := cctx.Messages[1].Parts[0].(ai.TextPart)
-	require.True(t, ok)
+	summary := firstTextPart(t, cctx.Messages[1])
 	assert.Contains(t, summary.Text, "Branch a")
 }
 
@@ -337,7 +335,7 @@ func TestHarnessPendingApprovalPrecedesAutomaticCompaction(t *testing.T) {
 	t.Parallel()
 
 	sess := buildSession(t)
-	appendText(t, sess, ai.RoleUser, bigText(100), nil)
+	appendText(t, sess, ai.UserMessage{}, bigText(100), nil)
 
 	_, err := sess.AppendMessage(ai.Assistant(
 		ai.ToolCallPart{ID: "c1", Name: "approval"},
@@ -392,8 +390,7 @@ func TestHarnessPromptStreamMatchesObserverAndPersists(t *testing.T) {
 	entries := sess.Entries()
 	require.Len(t, entries, 4)
 
-	text, ok := entries[3].Message.Parts[0].(ai.TextPart)
-	require.True(t, ok)
+	text := firstTextPart(t, entries[3].Message)
 	assert.Equal(t, "It is 5.", text.Text)
 }
 
@@ -460,10 +457,9 @@ func TestHarnessPromptStreamEarlyBreakCleansUp(t *testing.T) {
 
 	entries := sess.Entries()
 	require.Len(t, entries, 1)
-	assert.Equal(t, ai.RoleUser, entries[0].Message.Role)
+	assert.IsType(t, ai.UserMessage{}, entries[0].Message)
 
-	text, ok := entries[0].Message.Parts[0].(ai.TextPart)
-	require.True(t, ok)
+	text := firstTextPart(t, entries[0].Message)
 	assert.Equal(t, "go", text.Text)
 }
 
@@ -553,8 +549,7 @@ func TestHarnessPromptTemplate(t *testing.T) {
 	_, err = h.PromptTemplate(t.Context(), "review", "main.go", "errors")
 	require.NoError(t, err)
 
-	prompt, ok := model.Requests()[0].Messages[0].Parts[0].(ai.TextPart)
-	require.True(t, ok)
+	prompt := firstTextPart(t, model.Requests()[0].Messages[0])
 	assert.Equal(t, "Review main.go focusing on errors.", prompt.Text)
 
 	_, err = h.PromptTemplate(t.Context(), "missing")
@@ -591,8 +586,8 @@ func TestHarnessSteeringMidRun(t *testing.T) {
 	found := false
 
 	for _, e := range sess.Entries() {
-		if e.Kind == harness.KindMessage && e.Message.Role == ai.RoleUser {
-			if text, ok := e.Message.Parts[0].(ai.TextPart); ok && text.Text == "change of plans" {
+		if _, isUser := e.Message.(ai.UserMessage); e.Kind == harness.KindMessage && isUser {
+			if text := firstTextPart(t, e.Message); text.Text == "change of plans" {
 				found = true
 			}
 		}

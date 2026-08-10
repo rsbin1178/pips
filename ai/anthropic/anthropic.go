@@ -201,17 +201,24 @@ func (m *Model) requestHeaders(req ai.Request) http.Header {
 
 func requestHasFileID(req ai.Request) bool {
 	for _, msg := range req.Messages {
-		if partsHaveFileID(msg.Parts) {
-			return true
+		switch msg := msg.(type) {
+		case ai.UserMessage:
+			if partsHaveFileID(msg.Parts) {
+				return true
+			}
+		case ai.ToolMessage:
+			if partsHaveFileID(msg.Parts) {
+				return true
+			}
 		}
 	}
 
 	return false
 }
 
-func partsHaveFileID(parts []ai.Part) bool {
+func partsHaveFileID[T ai.Part](parts []T) bool {
 	for _, part := range parts {
-		switch p := part.(type) {
+		switch p := any(part).(type) {
 		case ai.ImagePart:
 			if p.Source.IsID() {
 				return true

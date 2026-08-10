@@ -188,14 +188,17 @@ func TestComposerResolvesWorkspaceFilesInVisibleOrder(t *testing.T) {
 	driveModelCommands(t, model, command)
 
 	require.Len(t, controller.prompts, 1)
-	require.Len(t, controller.prompts[0].Parts, 3)
-	assert.Equal(t, "before ", textPart(t, controller.prompts[0].Parts[0]))
+	message, ok := controller.prompts[0].(ai.UserMessage)
+	require.True(t, ok)
+	parts := message.Parts
+	require.Len(t, parts, 3)
+	assert.Equal(t, "before ", textPart(t, parts[0]))
 	assert.Equal(
 		t,
 		"\n\n[Workspace file: docs/file.txt]\nfile contents",
-		textPart(t, controller.prompts[0].Parts[1]),
+		textPart(t, parts[1]),
 	)
-	assert.Equal(t, " after "+paste, textPart(t, controller.prompts[0].Parts[2]))
+	assert.Equal(t, " after "+paste, textPart(t, parts[2]))
 	assert.Empty(t, model.composer.Value())
 	require.Len(t, model.composer.history, 1)
 	assert.True(t, equalComposerStructure(before, model.composer.history[0]))

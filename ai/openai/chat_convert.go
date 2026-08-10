@@ -146,12 +146,17 @@ func deepSeekReasoningEffort(effort ai.ReasoningEffort) string {
 // prompt becomes a leading system message; each tool result becomes its own
 // role:"tool" message, as the API requires.
 func chatMessagesFrom(req ai.Request, compat Compatibility, label string) ([]chatMessage, error) {
-	out := make([]chatMessage, 0, len(req.Messages)+1)
-	if req.System != "" {
-		out = append(out, chatMessage{Role: "system", Content: req.System})
+	system, conversation, err := req.Messages.SplitSystem()
+	if err != nil {
+		return nil, fmt.Errorf("%s: invalid messages: %w", label, err)
 	}
 
-	for _, msg := range req.Messages {
+	out := make([]chatMessage, 0, len(req.Messages))
+	for _, message := range system {
+		out = append(out, chatMessage{Role: "system", Content: ai.JoinSystemText([]ai.SystemMessage{message})})
+	}
+
+	for _, msg := range conversation {
 		converted, err := chatMessageFrom(msg, compat, label)
 		if err != nil {
 			return nil, err
@@ -164,35 +169,35 @@ func chatMessagesFrom(req ai.Request, compat Compatibility, label string) ([]cha
 }
 
 func chatMessageFrom(msg ai.Message, compat Compatibility, label string) ([]chatMessage, error) {
-	switch msg.Role {
-	case ai.RoleSystem:
-		return []chatMessage{{Role: "system", Content: textOf(msg.Parts)}}, nil
-	case ai.RoleUser:
+	switch msg := msg.(type) {
+	case ai.SystemMessage:
+		return []chatMessage{{Role: "system", Content: ai.JoinSystemText([]ai.SystemMessage{msg})}}, nil
+	case ai.UserMessage:
 		content, err := chatContentFrom(msg.Parts)
 		if err != nil {
 			return nil, err
 		}
 
 		return []chatMessage{{Role: "user", Content: content}}, nil
-	case ai.RoleAssistant:
+	case ai.AssistantMessage:
 		converted, err := chatAssistantFrom(msg, compat.ReasoningHistory)
 		if err != nil {
 			return nil, fmt.Errorf("%s: encoding assistant history: %w", label, err)
 		}
 
 		return []chatMessage{converted}, nil
-	case ai.RoleTool:
+	case ai.ToolMessage:
 		return chatToolResultsFrom(msg)
 	default:
-		return nil, fmt.Errorf("%s: unsupported message role %q", label, msg.Role)
+		return nil, fmt.Errorf("%s: unsupported message type %T", label, msg)
 	}
 }
 
 // chatContentFrom renders user parts: a bare string when the message is a
 // single text part (the common case), a content-part array otherwise.
-func chatContentFrom(parts []ai.Part) (any, error) {
+func chatContentFrom[T ai.Part](parts []T) (any, error) {
 	if len(parts) == 1 {
-		if text, ok := parts[0].(ai.TextPart); ok {
+		if text, ok := any(parts[0]).(ai.TextPart); ok {
 			return text.Text, nil
 		}
 	}
@@ -200,7 +205,7 @@ func chatContentFrom(parts []ai.Part) (any, error) {
 	out := make([]chatContentPart, 0, len(parts))
 
 	for _, part := range parts {
-		switch p := part.(type) {
+		switch p := any(part).(type) {
 		case ai.TextPart:
 			out = append(out, chatContentPart{Type: typeText, Text: p.Text})
 		case ai.ImagePart:
@@ -252,7 +257,7 @@ func dataURL(src ai.MediaSource) string {
 
 // chatAssistantFrom renders a prior assistant turn. OpenAI drops reasoning;
 // compatible providers may require plaintext or structured continuation state.
-func chatAssistantFrom(msg ai.Message, reasoningField ReasoningHistoryField) (chatMessage, error) {
+func chatAssistantFrom(msg ai.AssistantMessage, reasoningField ReasoningHistoryField) (chatMessage, error) {
 	out := chatMessage{Role: "assistant"}
 	var contentChunks []json.RawMessage
 
@@ -361,7 +366,7 @@ func mistralThinkingChunkFromText(text string) (json.RawMessage, error) {
 	return raw, nil
 }
 
-func contentPartsFromChat(content *json.RawMessage) ([]ai.Part, error) {
+func contentPartsFromChat(content *json.RawMessage) ([]ai.AssistantPart, error) {
 	if content == nil || len(*content) == 0 || string(*content) == "null" {
 		return nil, nil
 	}
@@ -372,7 +377,7 @@ func contentPartsFromChat(content *json.RawMessage) ([]ai.Part, error) {
 			return nil, nil
 		}
 
-		return []ai.Part{ai.TextPart{Text: text}}, nil
+		return []ai.AssistantPart{ai.TextPart{Text: text}}, nil
 	}
 
 	var chunks []json.RawMessage
@@ -380,7 +385,7 @@ func contentPartsFromChat(content *json.RawMessage) ([]ai.Part, error) {
 		return nil, fmt.Errorf("content must be a string or content-chunk array: %w", err)
 	}
 
-	parts := make([]ai.Part, 0, len(chunks))
+	parts := make([]ai.AssistantPart, 0, len(chunks))
 	for index, raw := range chunks {
 		var chunk mistralContentChunk
 		if err := json.Unmarshal(raw, &chunk); err != nil {
@@ -415,15 +420,10 @@ func contentPartsFromChat(content *json.RawMessage) ([]ai.Part, error) {
 
 // chatToolResultsFrom renders each tool result part as its own role:"tool"
 // message keyed by tool_call_id.
-func chatToolResultsFrom(msg ai.Message) ([]chatMessage, error) {
+func chatToolResultsFrom(msg ai.ToolMessage) ([]chatMessage, error) {
 	var out []chatMessage
 
-	for _, part := range msg.Parts {
-		result, ok := part.(ai.ToolResultPart)
-		if !ok {
-			return nil, fmt.Errorf("openai: tool messages may only contain tool results, got %T", part)
-		}
-
+	for _, result := range msg.Parts {
 		content, err := chatToolResultContent(result)
 		if err != nil {
 			return nil, err
@@ -458,11 +458,11 @@ func chatToolResultContent(result ai.ToolResultPart) (any, error) {
 	return chatContentFrom(result.Content)
 }
 
-func textOf(parts []ai.Part) string {
+func textOf[T ai.Part](parts []T) string {
 	var out strings.Builder
 
 	for _, part := range parts {
-		if text, ok := part.(ai.TextPart); ok {
+		if text, ok := any(part).(ai.TextPart); ok {
 			out.WriteString(text.Text)
 		}
 	}
@@ -517,7 +517,7 @@ func responseFromChat(body chatResponse, raw []byte, provider ai.Provider) (*ai.
 	}
 
 	choice := body.Choices[0]
-	msg := ai.Message{Role: ai.RoleAssistant}
+	msg := ai.AssistantMessage{}
 
 	switch {
 	case len(choice.Message.ReasoningDetails) > 0:

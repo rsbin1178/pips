@@ -24,9 +24,9 @@ func TestExplicitSkillNamesMatchExactUserTextTokens(t *testing.T) {
 	require.NoError(t, err)
 
 	names := explicitSkillNames([]ai.Message{
-		{Role: ai.RoleAssistant, Parts: []ai.Part{ai.TextPart{Text: "$deploy"}}},
-		{Role: ai.RoleUser, Parts: []ai.Part{ai.TextPart{Text: "$go-review inspect; $HOME $go-review $Deploy $deploy_more"}}},
-		{Role: ai.RoleUser, Parts: []ai.Part{ai.TextPart{Text: "then $deploy"}}},
+		ai.AssistantText("$deploy"),
+		ai.UserText("$go-review inspect; $HOME $go-review $Deploy $deploy_more"),
+		ai.UserText("then $deploy"),
 	}, userCatalog)
 
 	assert.Equal(t, []string{"go-review", "deploy"}, names)
@@ -49,10 +49,7 @@ func TestExplicitSkillNamesHonorUserInvocationPolicy(t *testing.T) {
 	userCatalog, err := catalog.ForUser()
 	require.NoError(t, err)
 
-	names := explicitSkillNames([]ai.Message{{
-		Role:  ai.RoleUser,
-		Parts: []ai.Part{ai.TextPart{Text: "$user $model"}},
-	}}, userCatalog)
+	names := explicitSkillNames([]ai.Message{ai.UserText("$user $model")}, userCatalog)
 
 	assert.Equal(t, []string{"user"}, names)
 }

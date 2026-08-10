@@ -18,8 +18,8 @@ func ExampleUser() {
 		ai.ImageURL("https://example.com/cat.png"),
 	)
 
-	fmt.Println(msg.Role, len(msg.Parts))
-	// Output: user 2
+	fmt.Printf("%T %d\n", msg, len(msg.Parts))
+	// Output: ai.UserMessage 2
 }
 
 // Generate makes a blocking call and returns the normalized response.
@@ -27,8 +27,7 @@ func Example_generate() {
 	model := openai.New("gpt-4o", openai.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
 
 	resp, err := model.Generate(context.Background(), ai.Request{
-		System:      "You are terse.",
-		Messages:    []ai.Message{ai.UserText("Capital of France?")},
+		Messages:    ai.Messages{ai.SystemText("You are terse."), ai.UserText("Capital of France?")},
 		Temperature: ai.Ptr(0.2),
 	})
 	if err != nil {
@@ -43,7 +42,7 @@ func Example_stream() {
 	model := openai.New("gpt-4o", openai.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
 
 	for ev, err := range model.Stream(context.Background(), ai.Request{
-		Messages: []ai.Message{ai.UserText("Tell me a haiku.")},
+		Messages: ai.Messages{ai.UserText("Tell me a haiku.")},
 	}) {
 		if err != nil {
 			log.Fatal(err)
@@ -60,7 +59,7 @@ func ExampleCollect() {
 	model := openai.New("gpt-4o", openai.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
 
 	resp, err := ai.Collect(model.Stream(context.Background(), ai.Request{
-		Messages: []ai.Message{ai.UserText("Hello!")},
+		Messages: ai.Messages{ai.UserText("Hello!")},
 	}))
 	if err != nil {
 		log.Fatal(err)
@@ -80,7 +79,7 @@ func ExampleGenerateTyped() {
 	model := openai.New("gpt-4o", openai.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
 
 	weather, _, err := ai.GenerateTyped[Weather](context.Background(), model, ai.Request{
-		Messages: []ai.Message{ai.UserText("Current weather in Paris?")},
+		Messages: ai.Messages{ai.UserText("Current weather in Paris?")},
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -95,7 +94,7 @@ func ExampleChain() {
 	model := ai.Chain(base, retry.New(retry.WithMaxAttempts(3)))
 
 	_, _ = model.Generate(context.Background(), ai.Request{
-		Messages: []ai.Message{ai.UserText("Hi")},
+		Messages: ai.Messages{ai.UserText("Hi")},
 	})
 }
 

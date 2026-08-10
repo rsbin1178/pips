@@ -133,7 +133,12 @@ func runtimeQuestionResponse(t *testing.T, callID string) *ai.Response {
 
 func requestContainsToolText(request ai.Request, expected string) bool {
 	for _, message := range request.Messages {
-		for _, part := range message.Parts {
+		parts, err := ai.MessageParts(message)
+		if err != nil {
+			continue
+		}
+
+		for _, part := range parts {
 			result, ok := part.(ai.ToolResultPart)
 			if !ok {
 				continue

@@ -90,20 +90,20 @@ func projectTimelineExcluding(
 		}
 		_, synthetic := syntheticMessages[messageIndex]
 		if body != "" && !synthetic {
-			switch message.Role {
-			case ai.RoleUser:
+			switch message.(type) {
+			case ai.UserMessage:
 				blocks = append(blocks, timelineBlock{
 					kind: blockUser, body: body, position: position,
 				})
-			case ai.RoleAssistant:
+			case ai.AssistantMessage:
 				blocks = append(blocks, timelineBlock{
 					kind: blockAssistant, id: candidateID, body: body, position: position,
 				})
-			case ai.RoleSystem:
+			case ai.SystemMessage:
 				blocks = append(blocks, timelineBlock{
 					kind: blockDiagnostic, title: "System", body: body, position: position,
 				})
-			case ai.RoleTool:
+			case ai.ToolMessage:
 			}
 		}
 
@@ -682,8 +682,12 @@ func formatInteractionDuration(milliseconds int64) string {
 }
 
 func visibleToolMessage(message ai.Message) string {
-	parts := make([]string, 0, len(message.Parts))
-	for _, part := range message.Parts {
+	return visibleToolParts(portableMessageParts(message))
+}
+
+func visibleToolParts(values []ai.Part) string {
+	parts := make([]string, 0, len(values))
+	for _, part := range values {
 		switch part := part.(type) {
 		case ai.TextPart:
 			parts = append(parts, part.Text)
@@ -692,7 +696,7 @@ func visibleToolMessage(message ai.Message) string {
 		case ai.FilePart:
 			parts = append(parts, "[file]")
 		case ai.ToolResultPart:
-			parts = append(parts, visibleToolMessage(ai.Message{Parts: part.Content}))
+			parts = append(parts, visibleToolParts(part.Content))
 		}
 	}
 
@@ -700,8 +704,9 @@ func visibleToolMessage(message ai.Message) string {
 }
 
 func visibleMessageText(message ai.Message) string {
-	parts := make([]string, 0, len(message.Parts))
-	for _, part := range message.Parts {
+	values := portableMessageParts(message)
+	parts := make([]string, 0, len(values))
+	for _, part := range values {
 		switch part := part.(type) {
 		case ai.TextPart:
 			parts = append(parts, part.Text)
@@ -717,6 +722,15 @@ func visibleMessageText(message ai.Message) string {
 	}
 
 	return strings.TrimSpace(strings.Join(parts, ""))
+}
+
+func portableMessageParts(message ai.Message) []ai.Part {
+	parts, err := ai.MessageParts(message)
+	if err != nil {
+		return nil
+	}
+
+	return parts
 }
 
 func visibleDraftText(deltas []coding.MessageDelta) string {

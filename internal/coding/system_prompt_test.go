@@ -146,18 +146,19 @@ func TestRuntimeInjectsMainSystemPromptAndProjectInstructions(t *testing.T) {
 	requests := model.Requests()
 	require.Len(t, requests, 1)
 	request := requests[0]
-	assert.Contains(t, request.System, "You are Pips, a terminal-first coding agent")
-	assert.Contains(t, request.System, workspacePath)
-	assert.Contains(t, request.System, `source="AGENTS.md"`)
-	assert.Contains(t, request.System, "Always preserve the system-prompt sentinel.")
-	assert.Contains(t, request.System, `"model": "openai/runtime-test"`)
-	assert.Contains(t, request.System, `"sandbox": "workspace-write"`)
-	assert.Contains(t, request.System, `"approval": "on-request"`)
-	assert.Contains(t, request.System, `"workspace_trusted": false`)
-	assert.Contains(t, request.System, `"apply_patch"`)
-	assert.Contains(t, request.System, `"run_subagent"`)
-	assert.Contains(t, request.System, `"spawn_agent"`)
-	assert.Contains(t, request.System, `"update_plan"`)
+	system := requestSystemText(request)
+	assert.Contains(t, system, "You are Pips, a terminal-first coding agent")
+	assert.Contains(t, system, workspacePath)
+	assert.Contains(t, system, `source="AGENTS.md"`)
+	assert.Contains(t, system, "Always preserve the system-prompt sentinel.")
+	assert.Contains(t, system, `"model": "openai/runtime-test"`)
+	assert.Contains(t, system, `"sandbox": "workspace-write"`)
+	assert.Contains(t, system, `"approval": "on-request"`)
+	assert.Contains(t, system, `"workspace_trusted": false`)
+	assert.Contains(t, system, `"apply_patch"`)
+	assert.Contains(t, system, `"run_subagent"`)
+	assert.Contains(t, system, `"spawn_agent"`)
+	assert.Contains(t, system, `"update_plan"`)
 }
 
 func TestRuntimeExplicitUserSkillIsInteractionScoped(t *testing.T) {
@@ -185,9 +186,10 @@ func TestRuntimeExplicitUserSkillIsInteractionScoped(t *testing.T) {
 	collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("$review inspect this")))
 	requests := model.Requests()
 	require.Len(t, requests, 1)
-	assert.Contains(t, requests[0].System, "# Explicitly selected Skills")
-	assert.Contains(t, requests[0].System, "EXPLICIT_REVIEW_INSTRUCTIONS")
-	assert.NotContains(t, requests[0].System, "<available-skills>")
+	system := requestSystemText(requests[0])
+	assert.Contains(t, system, "# Explicitly selected Skills")
+	assert.Contains(t, system, "EXPLICIT_REVIEW_INSTRUCTIONS")
+	assert.NotContains(t, system, "<available-skills>")
 	assert.Contains(t, toolNamesFromRequest(requests[0]), "skill")
 	assert.True(t, requestContainsText(requests[0], "$review inspect this"))
 }
@@ -210,8 +212,8 @@ func TestRuntimeDoesNotExposeUnselectedUserOnlySkill(t *testing.T) {
 
 	requests := model.Requests()
 	require.Len(t, requests, 1)
-	assert.NotContains(t, requests[0].System, "PRIVATE_REVIEW_INSTRUCTIONS")
-	assert.NotContains(t, requests[0].System, "<available-skills>")
+	assert.NotContains(t, requestSystemText(requests[0]), "PRIVATE_REVIEW_INSTRUCTIONS")
+	assert.NotContains(t, requestSystemText(requests[0]), "<available-skills>")
 	assert.NotContains(t, toolNamesFromRequest(requests[0]), "skill")
 }
 
@@ -246,8 +248,8 @@ func TestRuntimeSkillPolicyDisablesInjectionAndPersists(t *testing.T) {
 	collectRuntimeEvents(t, first.Prompt(t.Context(), ai.UserText("$review inspect this")))
 	requests := firstModel.Requests()
 	require.Len(t, requests, 1)
-	assert.NotContains(t, requests[0].System, "DISABLED_REVIEW_INSTRUCTIONS")
-	assert.NotContains(t, requests[0].System, "<available-skills>")
+	assert.NotContains(t, requestSystemText(requests[0]), "DISABLED_REVIEW_INSTRUCTIONS")
+	assert.NotContains(t, requestSystemText(requests[0]), "<available-skills>")
 	assert.NotContains(t, toolNamesFromRequest(requests[0]), "skill")
 	require.NoError(t, first.Close(t.Context()))
 

@@ -98,12 +98,14 @@ func projectSafePayload(payload EventPayload) EventPayload {
 		return value
 	case ToolUpdated:
 		value.Call.Arguments = nil
-		value.Update = safeMessage(value.Update)
+		value.Update = nil
 
 		return value
 	case ToolCompleted:
 		value.Call.Arguments = nil
-		value.Result = safeMessage(value.Result)
+		if result, ok := safeMessage(value.Result).(ai.ToolMessage); ok {
+			value.Result = result
+		}
 
 		return value
 	case ApprovalRequired:
@@ -161,33 +163,37 @@ func projectSafePayload(payload EventPayload) EventPayload {
 }
 
 func safeMessage(message ai.Message) ai.Message {
-	safe := ai.Message{Role: message.Role}
-	if message.Role == ai.RoleUser || message.Role == ai.RoleSystem {
-		return safe
-	}
-
-	for _, part := range message.Parts {
-		switch value := part.(type) {
-		case ai.TextPart:
-			if message.Role == ai.RoleAssistant {
+	switch message := message.(type) {
+	case ai.SystemMessage:
+		return ai.SystemMessage{}
+	case ai.UserMessage:
+		return ai.UserMessage{}
+	case ai.AssistantMessage:
+		safe := ai.AssistantMessage{}
+		for _, part := range message.Parts {
+			switch value := part.(type) {
+			case ai.TextPart:
+				safe.Parts = append(safe.Parts, value)
+			case ai.ReasoningPart:
+				safe.Parts = append(safe.Parts, ai.ReasoningPart{Redacted: true})
+			case ai.ToolCallPart:
+				value.Args = nil
 				safe.Parts = append(safe.Parts, value)
 			}
-		case ai.ReasoningPart:
-			if message.Role == ai.RoleAssistant {
-				safe.Parts = append(safe.Parts, ai.ReasoningPart{Redacted: true})
-			}
-		case ai.ToolCallPart:
-			value.Args = nil
-			safe.Parts = append(safe.Parts, value)
-		case ai.ToolResultPart:
-			value.Content = nil
-			safe.Parts = append(safe.Parts, value)
-		case ai.ImagePart, ai.FilePart:
-			// Provider IDs, URLs, filenames, and inline data are content-bearing.
 		}
-	}
 
-	return safe
+		return safe
+	case ai.ToolMessage:
+		safe := ai.ToolMessage{Parts: make([]ai.ToolResultPart, len(message.Parts))}
+		for index, result := range message.Parts {
+			result.Content = nil
+			safe.Parts[index] = result
+		}
+
+		return safe
+	default:
+		return message
+	}
 }
 
 // TelemetrySignal identifies a content-free observation that has no durable
@@ -422,10 +428,10 @@ func projectSubagentTelemetry(
 		eventType == EventSubagentCanceled || eventType == EventSubagentInterrupted
 }
 
-func toolMessageFailed(message ai.Message) bool {
-	for _, part := range message.Parts {
-		if result, ok := part.(ai.ToolResultPart); ok {
-			return result.IsError
+func toolMessageFailed(message ai.ToolMessage) bool {
+	for _, result := range message.Parts {
+		if result.IsError {
+			return true
 		}
 	}
 

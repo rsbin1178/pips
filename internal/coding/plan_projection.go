@@ -67,7 +67,12 @@ func projectPlanProposals(transcript []ai.Message) []PlanProposal {
 	byCall := make(map[string]string)
 
 	for _, message := range transcript {
-		for _, part := range message.Parts {
+		parts, err := ai.MessageParts(message)
+		if err != nil {
+			continue
+		}
+
+		for _, part := range parts {
 			switch value := part.(type) {
 			case ai.ToolCallPart:
 				request, err := planreview.ProposalFromCall(value)

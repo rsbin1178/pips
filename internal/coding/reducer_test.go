@@ -2,6 +2,7 @@
 package coding
 
 import (
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -17,6 +18,27 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestDurableStateJSONRoundTripTranscript(t *testing.T) {
+	t.Parallel()
+
+	want := DurableState{
+		SessionID: "session-1",
+		Transcript: ai.Messages{
+			ai.SystemText("be concise"),
+			ai.UserText("hello"),
+			ai.AssistantText("hi"),
+			ai.ToolResultText("call-1", "lookup", "done"),
+		},
+	}
+
+	data, err := json.Marshal(want)
+	require.NoError(t, err)
+
+	var got DurableState
+	require.NoError(t, json.Unmarshal(data, &got))
+	assert.Equal(t, want, got)
+}
 
 func TestReduceLiveAndJSONReplayMatch(t *testing.T) {
 	t.Parallel()
@@ -77,13 +99,18 @@ func TestReduceReturnsDefensiveState(t *testing.T) {
 	}
 
 	snapshot := state.Clone()
-	messageText, ok := state.Transcript[0].Parts[0].(ai.TextPart)
+	message, ok := state.Transcript[0].(ai.AssistantMessage)
+	require.True(t, ok)
+	messageText, ok := message.Parts[0].(ai.TextPart)
 	require.True(t, ok)
 
 	messageText.Text = "mutated"
-	state.Transcript[0].Parts[0] = messageText
+	message.Parts[0] = messageText
+	state.Transcript[0] = message
 
-	snapshotText, ok := snapshot.Transcript[0].Parts[0].(ai.TextPart)
+	snapshotMessage, ok := snapshot.Transcript[0].(ai.AssistantMessage)
+	require.True(t, ok)
+	snapshotText, ok := snapshotMessage.Parts[0].(ai.TextPart)
 	require.True(t, ok)
 	assert.Equal(t, "working", snapshotText.Text)
 }
@@ -562,7 +589,7 @@ func reducerEvents() []Event {
 		newTestEvent(EventToolStarted, ToolStarted{Turn: 1, Call: call}),
 		newTestEvent(EventToolUpdated, ToolUpdated{
 			Turn: 1, Call: call,
-			Update: ai.Message{Role: ai.RoleTool, Parts: []ai.Part{ai.Text("half")}},
+			Update: []ai.Part{ai.Text("half")},
 		}),
 		newTestEvent(EventToolCompleted, ToolCompleted{
 			Turn: 1, Call: call, Result: ai.ToolResultText(call.ID, call.Name, "done"),

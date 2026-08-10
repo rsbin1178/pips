@@ -318,8 +318,10 @@ import (
 model := openai.New("gpt-4o", openai.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
 
 resp, err := model.Generate(ctx, ai.Request{
-    System:   "You are terse.",
-    Messages: []ai.Message{ai.UserText("What is the capital of France?")},
+    Messages: ai.Messages{
+        ai.SystemText("You are terse."),
+        ai.UserText("What is the capital of France?"),
+    },
 })
 fmt.Println(resp.Text())
 ```

@@ -120,15 +120,20 @@ func TestGenerateText(t *testing.T) {
 	model := newTestModel(t, serveJSON(t, textResponse, "/v1beta/models/gemini-2.5-flash:generateContent", &captured))
 
 	resp, err := model.Generate(t.Context(), ai.Request{
-		System:   "You are terse.",
-		Messages: []ai.Message{ai.UserText("Capital of France?")},
+		Messages: ai.Messages{
+			ai.SystemText("You are terse."),
+			ai.SystemText("Answer in one sentence."),
+			ai.UserText("Capital of France?"),
+		},
 	})
 	require.NoError(t, err)
 
 	// systemInstruction is a top-level field, not a message.
 	system := as[map[string]any](t, captured["systemInstruction"])
 	sysParts := as[[]any](t, system["parts"])
+	require.Len(t, sysParts, 2)
 	assert.Equal(t, "You are terse.", as[map[string]any](t, sysParts[0])["text"])
+	assert.Equal(t, "Answer in one sentence.", as[map[string]any](t, sysParts[1])["text"])
 
 	// Contents carry role "user".
 	contents := as[[]any](t, captured["contents"])

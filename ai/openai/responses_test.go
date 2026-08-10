@@ -94,14 +94,17 @@ func TestResponsesGenerateText(t *testing.T) {
 	model := newResponsesModel(t, serveResponsesJSON(t, responsesTextResponse, &captured))
 
 	resp, err := model.Generate(t.Context(), ai.Request{
-		System:    "You are terse.",
-		Messages:  []ai.Message{ai.UserText("Capital of France?")},
+		Messages: ai.Messages{
+			ai.SystemText("You are terse."),
+			ai.SystemText("Answer in one sentence."),
+			ai.UserText("Capital of France?"),
+		},
 		Reasoning: &ai.ReasoningConfig{Effort: ai.ReasoningHigh, IncludeSummary: true},
 	})
 	require.NoError(t, err)
 
 	// System becomes top-level instructions; messages become typed input items.
-	assert.Equal(t, "You are terse.", captured["instructions"])
+	assert.Equal(t, "You are terse.\nAnswer in one sentence.", captured["instructions"])
 	input := as[[]any](t, captured["input"])
 	require.Len(t, input, 1)
 	item := as[map[string]any](t, input[0])
@@ -494,9 +497,10 @@ func TestResponsesAndChatEquivalentShape(t *testing.T) {
 	respResp, err := responses.Generate(t.Context(), req)
 	require.NoError(t, err)
 
-	// Same provider, role, finish reason, and equivalent text output.
+	// Same provider, concrete message type, finish reason, and equivalent text output.
 	assert.Equal(t, chatResp.Provider, respResp.Provider)
-	assert.Equal(t, chatResp.Message.Role, respResp.Message.Role)
+	assert.IsType(t, ai.AssistantMessage{}, chatResp.Message)
+	assert.IsType(t, ai.AssistantMessage{}, respResp.Message)
 	assert.Equal(t, chatResp.FinishReason, respResp.FinishReason)
 	assert.Equal(t, "The capital of France is Paris.", chatResp.Text())
 	assert.Equal(t, "The capital of France is Paris.", respResp.Text())

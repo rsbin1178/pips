@@ -30,7 +30,12 @@ type countTokensResponse struct {
 // /v1/messages/count_tokens. It returns the request's input-token count
 // without running inference and without warming the prompt cache.
 func (m *Model) CountTokens(ctx context.Context, req ai.Request) (int, error) {
-	messages, err := wireMessagesFrom(req.Messages)
+	system, conversation, err := req.Messages.SplitSystem()
+	if err != nil {
+		return 0, fmt.Errorf("anthropic: invalid messages: %w", err)
+	}
+
+	messages, err := wireMessagesFrom(conversation)
 	if err != nil {
 		return 0, err
 	}
@@ -38,7 +43,7 @@ func (m *Model) CountTokens(ctx context.Context, req ai.Request) (int, error) {
 	body := countTokensRequest{
 		Model:    m.model,
 		Messages: messages,
-		System:   systemBlocksFrom(req.System, false, ""),
+		System:   systemBlocksFrom(system, false, ""),
 	}
 
 	full := messagesRequest{}

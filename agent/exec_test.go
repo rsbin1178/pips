@@ -20,18 +20,10 @@ func toolResults(t *testing.T, sess *agent.Session, i int) []ai.ToolResultPart {
 	t.Helper()
 
 	msg := sess.Messages()[i]
-	require.Equal(t, ai.RoleTool, msg.Role)
+	tool, ok := msg.(ai.ToolMessage)
+	require.True(t, ok)
 
-	results := make([]ai.ToolResultPart, 0, len(msg.Parts))
-
-	for _, part := range msg.Parts {
-		result, ok := part.(ai.ToolResultPart)
-		require.True(t, ok)
-
-		results = append(results, result)
-	}
-
-	return results
+	return tool.Parts
 }
 
 func resultText(t *testing.T, r ai.ToolResultPart) string {

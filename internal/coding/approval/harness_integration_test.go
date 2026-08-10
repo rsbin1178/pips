@@ -59,14 +59,13 @@ func TestControllerPersistsThroughHarnessSession(t *testing.T) {
 
 	session, err := harness.NewSession(harness.NewMemoryStore("approval-integration"))
 	require.NoError(t, err)
-	_, err = session.AppendMessage(ai.Message{
-		Role: ai.RoleAssistant,
-		Parts: []ai.Part{ai.ToolCallPart{
+	_, err = session.AppendMessage(ai.Assistant(
+		ai.ToolCallPart{
 			ID:   "call-1",
 			Name: controlledToolName,
 			Args: ai.JSON(`true`),
-		}},
-	}, nil)
+		},
+	), nil)
 	require.NoError(t, err)
 
 	runtime, err := harness.New(unusedApprovalModel{}, session)
@@ -115,8 +114,8 @@ func TestControllerPersistsThroughHarnessSession(t *testing.T) {
 	modelContext, err := session.Context()
 	require.NoError(t, err)
 	require.Len(t, modelContext.Messages, 2)
-	assert.Equal(t, ai.RoleAssistant, modelContext.Messages[0].Role)
-	assert.Equal(t, ai.RoleTool, modelContext.Messages[1].Role)
+	assert.IsType(t, ai.AssistantMessage{}, modelContext.Messages[0])
+	assert.IsType(t, ai.ToolMessage{}, modelContext.Messages[1])
 }
 
 func TestStateNonInteractiveError(t *testing.T) {

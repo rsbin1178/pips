@@ -755,7 +755,7 @@ func (r *recorder) saveInput() {
 func (r *recorder) flush(usage *ai.Usage) {
 	for _, msg := range r.buffer {
 		var u *ai.Usage
-		if usage != nil && msg.Role == ai.RoleAssistant {
+		if _, isAssistant := msg.(ai.AssistantMessage); usage != nil && isAssistant {
 			u = usage
 		}
 

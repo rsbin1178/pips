@@ -5,10 +5,7 @@ package ai
 // so that zero can be sent deliberately (see [Ptr]).
 type Request struct {
 	// Messages is the conversation so far, oldest first.
-	Messages []Message
-	// System is the system prompt. Adapters place it wherever the provider
-	// expects (top-level field, system message, or systemInstruction).
-	System string
+	Messages Messages
 
 	// Tools the model may call.
 	Tools []Tool

@@ -6,26 +6,47 @@ import "encoding/json"
 // freely between the two.
 type JSON = json.RawMessage
 
-// Role identifies the author of a [Message].
-type Role string
-
-// Message roles. Provider adapters map these onto each vendor's wire format;
-// for example a system prompt is a top-level field for Anthropic and Gemini
-// but a message with RoleSystem for OpenAI Chat Completions.
-const (
-	RoleSystem    Role = "system"
-	RoleUser      Role = "user"
-	RoleAssistant Role = "assistant"
-	RoleTool      Role = "tool"
-)
-
-// Message is a single turn in a conversation. A message carries one or more
-// content parts, allowing mixed text, images, tool calls, and tool results
-// within a turn.
-type Message struct {
-	Role  Role
-	Parts []Part
+// Message is one role-specific turn in a conversation. It is a sealed union:
+// the only implementations are [SystemMessage], [UserMessage],
+// [AssistantMessage], and [ToolMessage]. The concrete type identifies the
+// author and constrains the content kinds that may appear in the turn.
+type Message interface {
+	Validate() error
+	isMessage()
 }
+
+// Messages is a conversation ordered from oldest to newest. System messages,
+// when present, must form a prefix; call [Messages.SplitSystem] to validate and
+// project that prefix for a provider adapter.
+type Messages []Message
+
+// SystemMessage contains model instructions. Only text is valid system
+// content.
+type SystemMessage struct {
+	Parts []SystemPart
+}
+
+// UserMessage contains input supplied by a user. It may combine text, images,
+// and files.
+type UserMessage struct {
+	Parts []UserPart
+}
+
+// AssistantMessage contains model output. It may combine text, reasoning, and
+// tool calls.
+type AssistantMessage struct {
+	Parts []AssistantPart
+}
+
+// ToolMessage carries one or more results for prior assistant tool calls.
+type ToolMessage struct {
+	Parts []ToolResultPart
+}
+
+func (SystemMessage) isMessage()    {}
+func (UserMessage) isMessage()      {}
+func (AssistantMessage) isMessage() {}
+func (ToolMessage) isMessage()      {}
 
 // Part is one piece of content within a [Message]. It is a sealed interface:
 // the only implementations are the Part types in this package
@@ -34,6 +55,24 @@ type Message struct {
 // concrete types when translating to and from wire formats.
 type Part interface {
 	isPart()
+}
+
+// SystemPart is content accepted by [SystemMessage].
+type SystemPart interface {
+	Part
+	isSystemPart()
+}
+
+// UserPart is content accepted by [UserMessage].
+type UserPart interface {
+	Part
+	isUserPart()
+}
+
+// AssistantPart is content accepted by [AssistantMessage].
+type AssistantPart interface {
+	Part
+	isAssistantPart()
 }
 
 // TextPart is a run of plain text.
@@ -81,7 +120,7 @@ type ToolCallPart struct {
 }
 
 // ToolResultPart carries the outcome of a tool invocation back to the model.
-// It appears in messages with [RoleTool].
+// It appears in [ToolMessage].
 type ToolResultPart struct {
 	// ToolCallID matches the [ToolCallPart.ID] this result answers.
 	ToolCallID string
@@ -101,6 +140,16 @@ func (FilePart) isPart()       {}
 func (ReasoningPart) isPart()  {}
 func (ToolCallPart) isPart()   {}
 func (ToolResultPart) isPart() {}
+
+func (TextPart) isSystemPart() {}
+
+func (TextPart) isUserPart()  {}
+func (ImagePart) isUserPart() {}
+func (FilePart) isUserPart()  {}
+
+func (TextPart) isAssistantPart()      {}
+func (ReasoningPart) isAssistantPart() {}
+func (ToolCallPart) isAssistantPart()  {}
 
 // MediaSource locates binary media for an [ImagePart] or [FilePart]. Exactly
 // one of ID, URL, or Data should be set. When Data is set, MIMEType must

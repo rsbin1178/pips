@@ -31,7 +31,12 @@ func sessionText(messages []ai.Message) string {
 	var value strings.Builder
 
 	for _, message := range messages {
-		for _, part := range message.Parts {
+		parts, err := ai.MessageParts(message)
+		if err != nil {
+			continue
+		}
+
+		for _, part := range parts {
 			if text, ok := part.(ai.TextPart); ok {
 				value.WriteString(text.Text)
 			}
@@ -66,13 +71,15 @@ func TestRunToolLoop(t *testing.T) {
 	// Session: user, assistant(call), tool(result), assistant(text).
 	msgs := sess.Messages()
 	require.Len(t, msgs, 4)
-	assert.Equal(t, ai.RoleUser, msgs[0].Role)
-	assert.Equal(t, ai.RoleAssistant, msgs[1].Role)
-	assert.Equal(t, ai.RoleTool, msgs[2].Role)
-	assert.Equal(t, ai.RoleAssistant, msgs[3].Role)
+	assert.IsType(t, ai.UserMessage{}, msgs[0])
+	assert.IsType(t, ai.AssistantMessage{}, msgs[1])
+	assert.IsType(t, ai.ToolMessage{}, msgs[2])
+	assert.IsType(t, ai.AssistantMessage{}, msgs[3])
 
-	result5, ok := msgs[2].Parts[0].(ai.ToolResultPart)
+	toolMessage, ok := msgs[2].(ai.ToolMessage)
 	require.True(t, ok)
+
+	result5 := toolMessage.Parts[0]
 	assert.Equal(t, "c1", result5.ToolCallID)
 	assert.False(t, result5.IsError)
 	assert.Equal(t, []ai.Part{ai.Text("5")}, result5.Content)
@@ -81,11 +88,16 @@ func TestRunToolLoop(t *testing.T) {
 	// second request included the tool result.
 	reqs := model.Requests()
 	require.Len(t, reqs, 2)
-	assert.Equal(t, "Be terse.", reqs[0].System)
+	system, firstConversation, err := reqs[0].Messages.SplitSystem()
+	require.NoError(t, err)
+	assert.Equal(t, "Be terse.", ai.JoinSystemText(system))
+	require.Len(t, firstConversation, 1)
 	require.Len(t, reqs[0].Tools, 1)
 	assert.Equal(t, "add", reqs[0].Tools[0].Name)
-	require.Len(t, reqs[1].Messages, 3)
-	assert.Equal(t, ai.RoleTool, reqs[1].Messages[2].Role)
+	_, secondConversation, err := reqs[1].Messages.SplitSystem()
+	require.NoError(t, err)
+	require.Len(t, secondConversation, 3)
+	assert.IsType(t, ai.ToolMessage{}, secondConversation[2])
 }
 
 func TestStreamToolLoop(t *testing.T) {
@@ -141,7 +153,9 @@ func TestStreamToolLoop(t *testing.T) {
 	msgs := sess.Messages()
 	require.Len(t, msgs, 4)
 
-	final, ok := msgs[3].Parts[0].(ai.TextPart)
+	finalMessage, ok := msgs[3].(ai.AssistantMessage)
+	require.True(t, ok)
+	final, ok := finalMessage.Parts[0].(ai.TextPart)
 	require.True(t, ok)
 	assert.Equal(t, "5", final.Text)
 }
@@ -200,7 +214,9 @@ func TestCandidateAnswerRetryDiscardsDraftAndConstrainsOneRequest(t *testing.T) 
 	assert.Equal(t, ai.ToolChoice{Mode: ai.ToolChoiceTool, Name: "add"}, requests[1].ToolChoice)
 	require.Len(t, requests[1].Tools, 1)
 	assert.Equal(t, "add", requests[1].Tools[0].Name)
-	assert.Contains(t, requests[1].System, "base system\n\nretry with the exact tool")
+	system, _, err := requests[1].Messages.SplitSystem()
+	require.NoError(t, err)
+	assert.Contains(t, ai.JoinSystemText(system), "base system\n\nretry with the exact tool")
 	assert.Equal(t, ai.ToolChoice{}, requests[2].ToolChoice, "constraint must be one-shot")
 }
 
@@ -416,9 +432,10 @@ func TestRunCancelDuringTool(t *testing.T) {
 	msgs := sess.Messages()
 	require.Len(t, msgs, 3)
 
-	for _, part := range msgs[2].Parts {
-		toolResult, ok := part.(ai.ToolResultPart)
-		require.True(t, ok)
+	toolResults, ok := msgs[2].(ai.ToolMessage)
+	require.True(t, ok)
+
+	for _, toolResult := range toolResults.Parts {
 		assert.True(t, toolResult.IsError)
 	}
 }
@@ -568,8 +585,10 @@ func TestToolTimeout(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, agent.StopEndTurn, result.Stop)
 
-	toolResult, ok := sess.Messages()[2].Parts[0].(ai.ToolResultPart)
+	toolMessage, ok := sess.Messages()[2].(ai.ToolMessage)
 	require.True(t, ok)
+
+	toolResult := toolMessage.Parts[0]
 	assert.True(t, toolResult.IsError)
 	assert.Contains(t, resultText(t, toolResult), "deadline")
 }

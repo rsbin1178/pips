@@ -94,7 +94,7 @@ func (r *Runtime) reconcilePersistedNotificationMessages() error {
 			continue
 		}
 
-		ids, ok, err := r.verifiedNotificationMessage(*entry.Message)
+		ids, ok, err := r.verifiedNotificationMessage(entry.Message)
 		if err != nil {
 			return err
 		}
@@ -400,7 +400,7 @@ func agentNotificationMessage(
 	batch []subagent.Notification,
 ) (ai.Message, string, error) {
 	if len(batch) == 0 {
-		return ai.Message{}, "", fmt.Errorf("%w: empty Agent notification batch", ErrRuntimeInvalid)
+		return nil, "", fmt.Errorf("%w: empty Agent notification batch", ErrRuntimeInvalid)
 	}
 	rootID := batch[0].Ownership.RootInteractionID
 	envelope := agentNotificationEnvelope{
@@ -410,7 +410,7 @@ func agentNotificationMessage(
 	}
 	for _, notification := range batch {
 		if notification.Ownership.RootInteractionID != rootID {
-			return ai.Message{}, "", fmt.Errorf("%w: mixed notification roots", ErrRuntimeInvalid)
+			return nil, "", fmt.Errorf("%w: mixed notification roots", ErrRuntimeInvalid)
 		}
 		envelope.Agents = append(envelope.Agents, agentNotificationPayload{
 			AgentID: notification.AgentID, Role: notification.Role,
@@ -421,11 +421,11 @@ func agentNotificationMessage(
 	}
 	data, err := json.Marshal(envelope)
 	if err != nil {
-		return ai.Message{}, "", fmt.Errorf("coding runtime: encode Agent notification: %w", err)
+		return nil, "", fmt.Errorf("coding runtime: encode Agent notification: %w", err)
 	}
 	text := agentNotificationPrefix + string(data)
 	if err := ValidatePromptText(text); err != nil {
-		return ai.Message{}, "", err
+		return nil, "", err
 	}
 
 	return ai.UserText(text), text, nil
@@ -463,10 +463,11 @@ func notificationIDs(batch []subagent.Notification) []string {
 }
 
 func singleUserText(message ai.Message) (string, bool) {
-	if message.Role != ai.RoleUser || len(message.Parts) != 1 {
+	user, ok := message.(ai.UserMessage)
+	if !ok || len(user.Parts) != 1 {
 		return "", false
 	}
-	part, ok := message.Parts[0].(ai.TextPart)
+	part, ok := user.Parts[0].(ai.TextPart)
 
 	return part.Text, ok
 }

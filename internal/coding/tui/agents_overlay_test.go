@@ -33,14 +33,11 @@ func TestSubagentDetailUsesSemanticToolProjection(t *testing.T) {
 		},
 		Transcript: []ai.Message{
 			ai.UserText("Inspect the TUI."),
-			{
-				Role: ai.RoleAssistant,
-				Parts: []ai.Part{
-					ai.TextPart{Text: "I will inspect the TUI projection."},
-					ai.ReasoningPart{Text: reasoning},
-					call,
-				},
-			},
+			ai.Assistant(
+				ai.TextPart{Text: "I will inspect the TUI projection."},
+				ai.ReasoningPart{Text: reasoning},
+				call,
+			),
 			codingToolResultFor(call.ID, call.Name, "file contents"),
 			ai.AssistantText(`{"summary":"Located the TUI projection.","evidence":[],"unknowns":[]}`),
 		},
@@ -49,7 +46,7 @@ func TestSubagentDetailUsesSemanticToolProjection(t *testing.T) {
 			Tools: []subagent.ToolActivity{{
 				RunID: "run-1", Turn: 1, Call: call,
 				Status: subagent.ToolStatusCompleted,
-				Result: codingToolResultFor(call.ID, call.Name, "file contents"),
+				Result: codingToolResultFor(call.ID, call.Name, "file contents").Parts[0],
 			}},
 		},
 		Result: subagent.ExploreResult{
@@ -95,7 +92,7 @@ func TestSubagentDetailExpandsEveryToolResultInChronologicalFlow(t *testing.T) {
 		}
 		transcript = append(
 			transcript,
-			ai.Message{Role: ai.RoleAssistant, Parts: []ai.Part{call}},
+			ai.Assistant(call),
 			codingToolResultFor(
 				call.ID,
 				call.Name,
@@ -145,7 +142,7 @@ func TestSubagentDetailShowsToolFailureOutputInline(t *testing.T) {
 		},
 		Transcript: []ai.Message{
 			ai.UserText("Read missing.go."),
-			{Role: ai.RoleAssistant, Parts: []ai.Part{call}},
+			ai.Assistant(call),
 			result,
 		},
 	}
@@ -168,7 +165,7 @@ func TestSubagentDetailExpandedToolResultIsBoundedAndRedacted(t *testing.T) {
 			State: subagent.StateRunning,
 		},
 		Transcript: []ai.Message{
-			{Role: ai.RoleAssistant, Parts: []ai.Part{call}},
+			ai.Assistant(call),
 			codingToolResultFor(call.ID, call.Name, "API_KEY=must-not-render"),
 		},
 	}
@@ -205,9 +202,9 @@ func TestSubagentDetailUsesMainTimelineInformationFlow(t *testing.T) {
 		},
 		Transcript: []ai.Message{
 			ai.UserText("Inspect main.go completely."),
-			{Role: ai.RoleAssistant, Parts: []ai.Part{
+			ai.Assistant(
 				ai.TextPart{Text: "I will read the file first."}, call,
-			}},
+			),
 			codingToolResultFor(call.ID, call.Name, "package main"),
 		},
 	}
@@ -276,9 +273,9 @@ func TestSubagentDetailKeepsEveryChronologicalToolAction(t *testing.T) {
 		},
 		Transcript: []ai.Message{
 			ai.UserText("Inspect chronology."),
-			{Role: ai.RoleAssistant, Parts: []ai.Part{ai.TextPart{Text: "First I will read."}, first}},
+			ai.Assistant(ai.TextPart{Text: "First I will read."}, first),
 			codingToolResultFor(first.ID, first.Name, "first result"),
-			{Role: ai.RoleAssistant, Parts: []ai.Part{ai.TextPart{Text: "Next I will search."}, second}},
+			ai.Assistant(ai.TextPart{Text: "Next I will search."}, second),
 			codingToolResultFor(second.ID, second.Name, "second result"),
 		},
 	}
@@ -463,7 +460,7 @@ func testSubagentState(detail subagent.Detail) coding.State {
 			},
 			Status: status,
 			Update: value.Update,
-			Result: value.Result,
+			Result: ai.ToolResults(value.Result),
 		})
 	}
 

@@ -65,9 +65,12 @@ func cloneEventPayload(payload EventPayload) EventPayload {
 }
 
 func cloneEventMessage(message ai.Message) ai.Message {
-	message.Parts = cloneEventParts(message.Parts, make(map[partSliceKey][]ai.Part))
+	cloned, err := ai.CloneMessage(message)
+	if err != nil {
+		return message
+	}
 
-	return message
+	return cloned
 }
 
 func cloneEventToolCall(call ai.ToolCallPart) ai.ToolCallPart {

@@ -4,7 +4,7 @@ import "github.com/rsbin/pips/ai"
 
 // responseFrom translates a Messages response body into the portable shape.
 func responseFrom(body messagesResponse, raw []byte) *ai.Response {
-	msg := ai.Message{Role: ai.RoleAssistant}
+	msg := ai.AssistantMessage{}
 
 	for _, block := range body.Content {
 		if part := partFromBlock(block); part != nil {
@@ -23,7 +23,7 @@ func responseFrom(body messagesResponse, raw []byte) *ai.Response {
 	}
 }
 
-func partFromBlock(block wireBlock) ai.Part {
+func partFromBlock(block wireBlock) ai.AssistantPart {
 	switch block.Type {
 	case blockTypeText:
 		return ai.TextPart{Text: block.Text}

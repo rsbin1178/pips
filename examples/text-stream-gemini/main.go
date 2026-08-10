@@ -15,8 +15,10 @@ func main() {
 	model := gemini.New("gemini-2.5-flash", gemini.WithAPIKey(os.Getenv("GEMINI_API_KEY")))
 
 	req := ai.Request{
-		System:   "You are a concise assistant.",
-		Messages: []ai.Message{ai.UserText("Explain what a goroutine is in two sentences.")},
+		Messages: ai.Messages{
+			ai.SystemText("You are a concise assistant."),
+			ai.UserText("Explain what a goroutine is in two sentences."),
+		},
 	}
 
 	for ev, err := range model.Stream(context.Background(), req) {

@@ -28,15 +28,15 @@ type ToolResolution struct {
 // value is not usable; construct with [NewSession].
 type Session struct {
 	mu       sync.Mutex
-	messages []ai.Message
+	messages ai.Messages
 	usage    ai.Usage
 	running  bool
 
 	// steering and followUps queue messages for injection into a running
 	// loop (see Steer and FollowUp). They are runtime state and are not
 	// serialized.
-	steering  []ai.Message
-	followUps []ai.Message
+	steering  ai.Messages
+	followUps ai.Messages
 }
 
 // NewSession returns a session seeded with the given messages (for example a
@@ -47,7 +47,7 @@ func NewSession(msgs ...ai.Message) *Session {
 
 // Messages returns a copy of the conversation so far, oldest first. The
 // message structs are copies; treat their Parts as read-only.
-func (s *Session) Messages() []ai.Message {
+func (s *Session) Messages() ai.Messages {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -133,11 +133,11 @@ func (s *Session) HasQueued() bool {
 
 // drainSteering removes and returns queued steering messages according to
 // mode: the oldest one ([QueueDrainOne]) or all of them ([QueueDrainAll]).
-func (s *Session) drainSteering(mode QueueMode) []ai.Message {
+func (s *Session) drainSteering(mode QueueMode) ai.Messages {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	var drained []ai.Message
+	var drained ai.Messages
 
 	drained, s.steering = drainQueue(s.steering, mode)
 
@@ -146,11 +146,11 @@ func (s *Session) drainSteering(mode QueueMode) []ai.Message {
 
 // drainFollowUps removes and returns queued follow-up messages according to
 // mode.
-func (s *Session) drainFollowUps(mode QueueMode) []ai.Message {
+func (s *Session) drainFollowUps(mode QueueMode) ai.Messages {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	var drained []ai.Message
+	var drained ai.Messages
 
 	drained, s.followUps = drainQueue(s.followUps, mode)
 
@@ -159,7 +159,7 @@ func (s *Session) drainFollowUps(mode QueueMode) []ai.Message {
 
 // drainQueue splits a queue according to mode. The drained slice is
 // capacity-capped so later appends to either side cannot alias.
-func drainQueue(queue []ai.Message, mode QueueMode) (drained, rest []ai.Message) {
+func drainQueue(queue ai.Messages, mode QueueMode) (drained, rest ai.Messages) {
 	switch {
 	case len(queue) == 0:
 		return nil, queue
@@ -186,29 +186,26 @@ func (s *Session) pendingLocked() []ai.ToolCallPart {
 	// Walk trailing tool messages to collect answered call IDs, then check
 	// the assistant message they respond to.
 	for _, msg := range slices.Backward(s.messages) {
-		if msg.Role == ai.RoleTool {
-			for _, p := range msg.Parts {
-				if r, ok := p.(ai.ToolResultPart); ok {
-					answered[r.ToolCallID] = true
-				}
+		switch msg := msg.(type) {
+		case ai.ToolMessage:
+			for _, result := range msg.Parts {
+				answered[result.ToolCallID] = true
 			}
 
 			continue
-		}
+		case ai.AssistantMessage:
+			var pending []ai.ToolCallPart
 
-		if msg.Role != ai.RoleAssistant {
+			for _, part := range msg.Parts {
+				if call, ok := part.(ai.ToolCallPart); ok && !answered[call.ID] {
+					pending = append(pending, call)
+				}
+			}
+
+			return pending
+		default:
 			return nil
 		}
-
-		var pending []ai.ToolCallPart
-
-		for _, p := range msg.Parts {
-			if c, ok := p.(ai.ToolCallPart); ok && !answered[c.ID] {
-				pending = append(pending, c)
-			}
-		}
-
-		return pending
 	}
 
 	return nil
@@ -263,7 +260,7 @@ func (s *Session) ResolveToolCalls(resolutions ...ToolResolution) error {
 		}
 	}
 
-	parts := make([]ai.Part, 0, len(resolutions))
+	parts := make([]ai.ToolResultPart, 0, len(resolutions))
 
 	for _, call := range pending {
 		resolution, ok := byID[call.ID]
@@ -279,7 +276,7 @@ func (s *Session) ResolveToolCalls(resolutions ...ToolResolution) error {
 		})
 	}
 
-	s.messages = append(s.messages, ai.Message{Role: ai.RoleTool, Parts: parts})
+	s.messages = append(s.messages, ai.ToolMessage{Parts: parts})
 
 	return nil
 }
@@ -360,8 +357,8 @@ func (s *Session) addUsage(u ai.Usage) {
 }
 
 type sessionJSON struct {
-	Messages []ai.Message `json:"messages"`
-	Usage    ai.Usage     `json:"usage"`
+	Messages ai.Messages `json:"messages"`
+	Usage    ai.Usage    `json:"usage"`
 }
 
 // MarshalJSON implements [json.Marshaler]. The running flag is transient and

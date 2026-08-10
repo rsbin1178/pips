@@ -26,6 +26,9 @@ var (
 	// ErrInvalidRequest means the provider rejected the request as malformed
 	// (HTTP 400/404/422).
 	ErrInvalidRequest = errors.New("ai: invalid request")
+	// ErrInvalidMessage means a portable message has an unsupported concrete
+	// form, role-specific content, or sequence position.
+	ErrInvalidMessage = errors.New("ai: invalid message")
 )
 
 // Error is a structured provider error. Adapters return it (wrapped around a

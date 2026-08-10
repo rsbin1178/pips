@@ -82,7 +82,7 @@ func (s *memorySession) ResolveToolCalls(resolutions ...agent.ToolResolution) er
 	}
 
 	remaining := make([]ai.ToolCallPart, 0, len(s.pending))
-	parts := make([]ai.Part, 0, len(resolutions))
+	parts := make([]ai.ToolResultPart, 0, len(resolutions))
 
 	for _, call := range s.pending {
 		resolution, ok := byID[call.ID]
@@ -127,7 +127,7 @@ func (s *memorySession) removePending(id string) {
 }
 
 func (s *memorySession) appendToolResult(call agent.ToolCall, isError bool) {
-	s.appendToolParts([]ai.Part{ai.ToolResultPart{
+	s.appendToolParts([]ai.ToolResultPart{{
 		ToolCallID: call.ID,
 		Name:       call.Name,
 		Content:    agent.TextResult("durable result"),
@@ -135,9 +135,9 @@ func (s *memorySession) appendToolResult(call agent.ToolCall, isError bool) {
 	}})
 }
 
-func (s *memorySession) appendToolParts(parts []ai.Part) {
-	message := ai.Message{Role: ai.RoleTool, Parts: parts}
-	s.appendEntry(harness.Entry{Kind: harness.KindMessage, Message: &message})
+func (s *memorySession) appendToolParts(parts []ai.ToolResultPart) {
+	message := ai.ToolMessage{Parts: parts}
+	s.appendEntry(harness.Entry{Kind: harness.KindMessage, Message: message})
 }
 
 func (s *memorySession) appendEntry(entry harness.Entry) string {

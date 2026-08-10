@@ -29,7 +29,7 @@ func TestProjectEventPreservesOrderedACPUpdates(t *testing.T) {
 		}}},
 		{Payload: coding.ToolUpdated{
 			Call:   coding.ToolCall{ID: "call-1", Name: "read_file"},
-			Update: ai.AssistantText("progress"),
+			Update: []ai.Part{ai.Text("progress")},
 		}},
 		{Payload: coding.ToolCompleted{
 			Call:   coding.ToolCall{ID: "call-1", Name: "read_file"},
@@ -134,7 +134,7 @@ func TestReplayTranscriptSkipsSystemSyntheticAndSignatures(t *testing.T) {
 
 	out := &fakeOutbound{}
 	messages := []ai.Message{
-		{Role: ai.RoleSystem, Parts: []ai.Part{ai.Text("secret system")}},
+		ai.SystemText("secret system"),
 		ai.UserText("visible"),
 		ai.Assistant(ai.ReasoningPart{Text: "reason", Signature: "provider-secret"}),
 		ai.UserText("synthetic"),

@@ -22,7 +22,7 @@ type streamedHarnessResult struct {
 
 type harnessStreamState struct {
 	result         streamedHarnessResult
-	finalAssistant *ai.Message
+	finalAssistant *ai.AssistantMessage
 	ended          bool
 }
 
@@ -112,8 +112,7 @@ func (state *harnessStreamState) handle(
 			return coordinator.writeStream("%s", payload.Event.Text)
 		}
 	case agent.MessageCommitted:
-		if payload.Message.Role == ai.RoleAssistant {
-			message := payload.Message
+		if message, ok := payload.Message.(ai.AssistantMessage); ok {
 			state.finalAssistant = &message
 		}
 	case agent.ToolStarted:
@@ -149,7 +148,7 @@ func boundedStreamText(text string, stop agent.StopReason) (string, error) {
 	return text, nil
 }
 
-func messageText(message *ai.Message) string {
+func messageText(message *ai.AssistantMessage) string {
 	if message == nil {
 		return ""
 	}

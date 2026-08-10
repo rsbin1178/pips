@@ -84,8 +84,8 @@ func (p *plainPresenter) Final(state coding.State, baseline int) error {
 	}
 
 	for index := len(state.Transcript) - 1; index >= baseline; index-- {
-		message := state.Transcript[index]
-		if message.Role != ai.RoleAssistant {
+		message, ok := state.Transcript[index].(ai.AssistantMessage)
+		if !ok {
 			continue
 		}
 

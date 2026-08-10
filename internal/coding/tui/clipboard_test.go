@@ -45,7 +45,10 @@ func TestClipboardImageReadIsSingleFlightAndSubmitsMultimodalMessage(t *testing.
 	driveModelCommands(t, model, submit)
 
 	require.Len(t, controller.prompts, 1)
-	parts := controller.prompts[0].Parts
+	message, ok := controller.prompts[0].(ai.UserMessage)
+	require.True(t, ok)
+
+	parts := message.Parts
 	require.Len(t, parts, 4)
 	assert.Equal(t, "before ", textPart(t, parts[0]))
 	assert.Contains(t, textPart(t, parts[1]), "[Clipboard image: clipboard.png · 2×2]")
@@ -158,13 +161,16 @@ func TestComposerMixedAttachmentOrdering(t *testing.T) {
 	driveModelCommands(t, model, command)
 	require.Len(t, controller.prompts, 1)
 
-	parts := controller.prompts[0].Parts
+	message, ok := controller.prompts[0].(ai.UserMessage)
+	require.True(t, ok)
+
+	parts := message.Parts
 	require.Len(t, parts, 9)
 	assert.Equal(t, "start "+largePaste+" ", textPart(t, parts[0]))
 	assert.Contains(t, textPart(t, parts[1]), "[Workspace file: notes.txt]")
 	assert.Equal(t, " ", textPart(t, parts[2]))
 	assert.Contains(t, textPart(t, parts[3]), "[Clipboard image: clipboard.png")
-	_, ok := parts[4].(ai.ImagePart)
+	_, ok = parts[4].(ai.ImagePart)
 	require.True(t, ok)
 	assert.Equal(t, " ", textPart(t, parts[5]))
 	assert.Contains(t, textPart(t, parts[6]), "[Workspace image: assets/workspace.png")

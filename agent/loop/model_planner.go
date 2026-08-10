@@ -128,8 +128,7 @@ func (planner *ModelPlanner) Plan(ctx context.Context, request PlanRequest) (Pla
 	}
 
 	output, response, err := ai.GenerateTyped[modelPlanOutput](ctx, planner.model, ai.Request{
-		System:      modelPlannerSystem,
-		Messages:    []ai.Message{ai.UserText(string(payload))},
+		Messages:    ai.Messages{ai.SystemText(modelPlannerSystem), ai.UserText(string(payload))},
 		Temperature: ai.Ptr(0.0), MaxTokens: &maxTokens,
 		ResponseFormat: &ai.ResponseFormat{
 			Name: "loop_plan", Description: "Bounded next activation plan.",

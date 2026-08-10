@@ -146,7 +146,7 @@ func TestRuntimeSetModePublishesAndLeasesPlanCapabilities(t *testing.T) {
 	assert.NotContains(t, toolNames, "apply_patch")
 	assert.NotContains(t, toolNames, "shell")
 	assert.NotContains(t, toolNames, tasklist.ToolName)
-	assert.Contains(t, requests[0].System, `"operating_mode": "plan"`)
+	assert.Contains(t, requestSystemText(requests[0]), `"operating_mode": "plan"`)
 	assert.Equal(t, ai.ToolChoice{Mode: ai.ToolChoiceTool, Name: planreview.PresentToolName}, requests[1].ToolChoice)
 	assert.Equal(t, []string{planreview.PresentToolName}, toolNamesFromRequest(requests[1]))
 

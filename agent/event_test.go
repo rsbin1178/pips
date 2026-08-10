@@ -112,6 +112,14 @@ func TestEventValidationRejectsInvalidValues(t *testing.T) {
 			},
 		},
 		{name: "message turn zero", meta: meta, at: now, payload: agent.MessageCommitted{}},
+		{
+			name: "message is invalid",
+			meta: meta,
+			at:   now,
+			payload: agent.MessageCommitted{
+				Turn: 1,
+			},
+		},
 		{name: "candidate turn zero", meta: meta, at: now, payload: agent.CandidateDiscarded{}},
 		{name: "tool start turn zero", meta: meta, at: now, payload: agent.ToolStarted{}},
 		{name: "tool update turn zero", meta: meta, at: now, payload: agent.ToolUpdated{}},
@@ -203,16 +211,10 @@ func TestEventSnapshotsMutablePayload(t *testing.T) {
 
 	imageData := []byte("image")
 	fileData := []byte("file")
-	callArgs := ai.JSON(`{"path":"main.go"}`)
-	nestedData := []byte("nested")
-	message := ai.Message{Role: ai.RoleAssistant, Parts: []ai.Part{
+	message := ai.User(
 		ai.ImagePart{Source: ai.MediaSource{Data: imageData, MIMEType: "image/png"}},
 		ai.FilePart{Source: ai.MediaSource{Data: fileData, MIMEType: "application/pdf"}},
-		ai.ToolCallPart{ID: "call", Name: "read", Args: callArgs},
-		ai.ToolResultPart{Content: []ai.Part{
-			ai.ImagePart{Source: ai.MediaSource{Data: nestedData, MIMEType: "image/png"}},
-		}},
-	}}
+	)
 
 	event, err := agent.NewEvent(
 		agent.RunMetadata{RunID: "run"},
@@ -223,15 +225,42 @@ func TestEventSnapshotsMutablePayload(t *testing.T) {
 
 	imageData[0] = 'X'
 	fileData[0] = 'X'
-	callArgs[0] = '['
-	nestedData[0] = 'X'
 	message.Parts[0] = ai.Text("replaced")
 
 	committed := requireType[agent.MessageCommitted](t, event.Payload())
-	assert.Equal(t, []byte("image"), requireType[ai.ImagePart](t, committed.Message.Parts[0]).Source.Data)
-	assert.Equal(t, []byte("file"), requireType[ai.FilePart](t, committed.Message.Parts[1]).Source.Data)
-	assert.JSONEq(t, `{"path":"main.go"}`, string(requireType[ai.ToolCallPart](t, committed.Message.Parts[2]).Args))
-	nestedResult := requireType[ai.ToolResultPart](t, committed.Message.Parts[3])
+	committedUser := requireType[ai.UserMessage](t, committed.Message)
+	assert.Equal(t, []byte("image"), requireType[ai.ImagePart](t, committedUser.Parts[0]).Source.Data)
+	assert.Equal(t, []byte("file"), requireType[ai.FilePart](t, committedUser.Parts[1]).Source.Data)
+
+	callArgs := ai.JSON(`{"path":"main.go"}`)
+	callEvent, err := agent.NewEvent(
+		agent.RunMetadata{RunID: "run"},
+		time.Now().UTC(),
+		agent.MessageCommitted{Turn: 1, Message: ai.Assistant(
+			ai.ToolCallPart{ID: "call", Name: "read", Args: callArgs},
+		)},
+	)
+	require.NoError(t, err)
+
+	callArgs[0] = '['
+	committedCall := requireType[agent.MessageCommitted](t, callEvent.Payload())
+	assistant := requireType[ai.AssistantMessage](t, committedCall.Message)
+	assert.JSONEq(t, `{"path":"main.go"}`, string(requireType[ai.ToolCallPart](t, assistant.Parts[0]).Args))
+
+	nestedData := []byte("nested")
+	resultEvent, err := agent.NewEvent(
+		agent.RunMetadata{RunID: "run"},
+		time.Now().UTC(),
+		agent.MessageCommitted{Turn: 1, Message: ai.ToolResults(ai.ToolResultPart{Content: []ai.Part{
+			ai.ImagePart{Source: ai.MediaSource{Data: nestedData, MIMEType: "image/png"}},
+		}})},
+	)
+	require.NoError(t, err)
+
+	nestedData[0] = 'X'
+	committedResult := requireType[agent.MessageCommitted](t, resultEvent.Payload())
+	tool := requireType[ai.ToolMessage](t, committedResult.Message)
+	nestedResult := tool.Parts[0]
 	nested := requireType[ai.ImagePart](t, nestedResult.Content[0])
 	assert.Equal(t, []byte("nested"), nested.Source.Data)
 
@@ -292,11 +321,13 @@ func TestEventSnapshotsIsolateObserverStreamAndSession(t *testing.T) {
 			}
 
 			committed, ok := event.Payload().(agent.MessageCommitted)
-			if !ok || committed.Message.Role != ai.RoleAssistant {
+
+			assistant, isAssistant := committed.Message.(ai.AssistantMessage)
+			if !ok || !isAssistant {
 				return
 			}
 
-			for _, part := range committed.Message.Parts {
+			for _, part := range assistant.Parts {
 				if toolCall, isCall := part.(ai.ToolCallPart); isCall && len(toolCall.Args) > 0 {
 					toolCall.Args[0] = '['
 				}
@@ -319,11 +350,13 @@ func TestEventSnapshotsIsolateObserverStreamAndSession(t *testing.T) {
 		}
 
 		committed, ok := event.Payload().(agent.MessageCommitted)
-		if !ok || committed.Message.Role != ai.RoleAssistant {
+
+		assistant, isAssistant := committed.Message.(ai.AssistantMessage)
+		if !ok || !isAssistant {
 			continue
 		}
 
-		for _, part := range committed.Message.Parts {
+		for _, part := range assistant.Parts {
 			if toolCall, isCall := part.(ai.ToolCallPart); isCall {
 				sawCommittedCall = true
 
@@ -337,7 +370,8 @@ func TestEventSnapshotsIsolateObserverStreamAndSession(t *testing.T) {
 
 	messages := session.Messages()
 	require.Len(t, messages, 4)
-	storedCall := requireType[ai.ToolCallPart](t, messages[1].Parts[0])
+	storedAssistant := requireType[ai.AssistantMessage](t, messages[1])
+	storedCall := requireType[ai.ToolCallPart](t, storedAssistant.Parts[0])
 	assert.JSONEq(t, `{"a":2,"b":3}`, string(storedCall.Args))
 }
 
@@ -345,19 +379,21 @@ func TestEventSnapshotsCyclicToolResults(t *testing.T) {
 	t.Parallel()
 
 	parts := make([]ai.Part, 1)
-	parts[0] = ai.ToolResultPart{ToolCallID: "call", Content: parts}
+	result := ai.ToolResultPart{ToolCallID: "call", Content: parts}
+	parts[0] = result
 
 	event, err := agent.NewEvent(
 		agent.RunMetadata{RunID: "run"},
 		time.Now().UTC(),
-		agent.MessageCommitted{Turn: 1, Message: ai.Message{Role: ai.RoleTool, Parts: parts}},
+		agent.MessageCommitted{Turn: 1, Message: ai.ToolResults(result)},
 	)
 	require.NoError(t, err)
 
 	committed := requireType[agent.MessageCommitted](t, event.Payload())
-	result := requireType[ai.ToolResultPart](t, committed.Message.Parts[0])
-	result.Content[0] = ai.Text("changed through cycle")
-	assert.Equal(t, ai.Text("changed through cycle"), committed.Message.Parts[0])
+	committedTool := requireType[ai.ToolMessage](t, committed.Message)
+	committedResult := committedTool.Parts[0]
+	committedResult.Content[0] = ai.Text("changed through cycle")
+	assert.Equal(t, ai.Text("changed through cycle"), committedTool.Parts[0].Content[0])
 	assert.IsType(t, ai.ToolResultPart{}, parts[0], "the producer graph must remain isolated")
 }
 

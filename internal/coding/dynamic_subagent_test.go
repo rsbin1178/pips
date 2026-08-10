@@ -1907,12 +1907,12 @@ func newNestedCancelRuntimeModel() *nestedCancelRuntimeModel {
 
 func (m *nestedCancelRuntimeModel) Generate(ctx context.Context, request ai.Request) (*ai.Response, error) {
 	switch {
-	case strings.Contains(request.System, "LEAF_CANCEL_MARKER"):
+	case strings.Contains(requestSystemText(request), "LEAF_CANCEL_MARKER"):
 		m.leafOnce.Do(func() { close(m.leafStarted) })
 		<-ctx.Done()
 
 		return nil, ctx.Err()
-	case strings.Contains(request.System, "ROOT_CANCEL_MARKER"):
+	case strings.Contains(requestSystemText(request), "ROOT_CANCEL_MARKER"):
 		m.mu.Lock()
 		m.rootCalls++
 		call := m.rootCalls
@@ -1978,7 +1978,7 @@ func (m *backgroundCustomRuntimeModel) Generate(
 	ctx context.Context,
 	request ai.Request,
 ) (*ai.Response, error) {
-	if strings.Contains(request.System, "You are a specialized child agent") {
+	if strings.Contains(requestSystemText(request), "You are a specialized child agent") {
 		m.mu.Lock()
 		m.childCalls++
 		call := m.childCalls
@@ -2094,7 +2094,7 @@ func newAuthorityRedTeamModel(t *testing.T, external string) *authorityRedTeamMo
 }
 
 func (m *authorityRedTeamModel) Generate(ctx context.Context, request ai.Request) (*ai.Response, error) {
-	if strings.Contains(request.System, "You are a specialized child agent") {
+	if strings.Contains(requestSystemText(request), "You are a specialized child agent") {
 		return m.generateChild(ctx, request)
 	}
 

@@ -9,7 +9,7 @@ func responseFrom(body generateResponse, raw []byte) *ai.Response {
 		ID:       body.ResponseID,
 		Model:    body.ModelVersion,
 		Provider: ai.ProviderGemini,
-		Message:  ai.Message{Role: ai.RoleAssistant},
+		Message:  ai.AssistantMessage{},
 		Usage:    usageFrom(body.UsageMetadata),
 		Raw:      raw,
 	}
@@ -33,8 +33,8 @@ func responseFrom(body generateResponse, raw []byte) *ai.Response {
 
 // partsFrom converts wire parts, synthesizing tool-call ids so results can be
 // matched back regardless of whether the model supplied ids.
-func partsFrom(parts []wirePart) []ai.Part {
-	var out []ai.Part
+func partsFrom(parts []wirePart) []ai.AssistantPart {
+	var out []ai.AssistantPart
 
 	toolIndex := 0
 
@@ -88,7 +88,7 @@ func usageFrom(u *wireUsage) ai.Usage {
 // hasFunctionCall reports whether the candidate parts include a tool call,
 // used to normalize the finish reason (Gemini reports STOP even when it
 // emitted a functionCall).
-func hasFunctionCall(parts []ai.Part) bool {
+func hasFunctionCall(parts []ai.AssistantPart) bool {
 	for _, p := range parts {
 		if _, ok := p.(ai.ToolCallPart); ok {
 			return true

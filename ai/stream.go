@@ -116,7 +116,7 @@ type accumulator struct {
 
 func newAccumulator() *accumulator {
 	return &accumulator{
-		resp:     Response{Message: Message{Role: RoleAssistant}},
+		resp:     Response{Message: AssistantMessage{}},
 		toolSlot: make(map[int]int),
 		toolArgs: make(map[int]*strings.Builder),
 	}
