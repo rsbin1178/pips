@@ -206,6 +206,72 @@ Action error text，可能携带凭据或个人数据；宿主负责权限、脱
 不是 sandbox。该能力是隔离单节点试运行，不是 n8n 风格的上游 partial replay、
 历史数据复用或 data pinning。
 
+### Workflow Partial Run 与 Data Pinning
+
+`RunPartial` 用于编辑器预览、节点试跑和固定流程调试：调用方选择一个根节点
+作为 `destination`，运行时从该节点反向取得包含 Start 的依赖切片，并执行到目标
+节点（包含目标）为止。目标不是 End 时，`PartialRunResult.Outputs` 就是该目标
+节点的有效输出；SubWorkflow、Batch 和 Loop 始终作为一个原子节点边界。
+
+```go
+preview, err := runner.RunPartial(ctx, plan, "render", workflow.PartialRunInput{
+    Inputs: inputs,
+    Previous: previousPreviewData,
+    Pins: workflow.PinData{
+        "prepare": {
+            "prompt": workflow.MustValueOf("paper-cut city at dusk"),
+        },
+    },
+    Dirty: []workflow.NodeID{"render"},
+})
+if err != nil {
+    return err
+}
+
+// Data 是可由宿主持久化并传给下一次 RunPartial 的成功节点快照。
+previousPreviewData = &preview.Data
+```
+
+每个已到达节点按以下优先级取得数据：
+
+1. 当前 `Pins`；
+2. 仍有效且路由一致的 `Previous`；
+3. 通过普通 Runner 真实执行节点。
+
+`Dirty` 只需要列出宿主确认直接发生变化的当前节点，runtime 会使这些节点及其
+选中切片内的所有后代旧数据失效。Definition、连接、节点参数、Pin 或组合节点
+内部流程发生变化时，编辑器必须按自己的变更模型产生 Dirty 节点；如果 source
+Plan 指纹已经变化但没有任何可解析的 Dirty 节点，runtime 会拒绝复用旧数据。
+变更后的 Plan 应开始新的 `RunPartial`，传入旧 `Data` 与 `Dirty`，而不是恢复旧
+checkpoint。
+
+Pin 输出必须完整匹配节点输出 schema，并且第一版只允许固定恰好具有一个普通
+route 的节点。Pin 不会激活未被上游 route 选中的分支。已固定或复用的节点显示
+为 `succeeded`、零 attempts 和零 invocation 时间，并在结果中分别标记
+`pinned` / `reused`；真实调用标记为 `executed`。只有真正调用的节点产生 node
+invocation Events，现有 Event 仍不携带输入、输出或 Pin 数据。
+
+Partial Run 仍会真实调用未被替换的 Action，可能产生副作用，不是 sandbox。
+`PartialRunData`、Pin 和 checkpoint 可能包含敏感业务数据，宿主负责权限、加密、
+保留期与单写者协调。普通 `Run` / `Resume` 永远不会读取这些开发数据。
+
+当 Partial Run 在静态、动态或宿主边界中断时，使用相同 source Plan、destination、
+Run ID 和 Store 恢复：
+
+```go
+completed, err := runner.ResumePartial(
+    ctx,
+    plan,
+    "render",
+    preview.RunID,
+    resumeTargets,
+)
+```
+
+`ResumePartial` 在执行任何节点前严格校验 source/destination/私有切片指纹、数据
+来源、route、schema、节点状态和恢复目标；普通 checkpoint 与 Partial Run
+checkpoint 不能互换。
+
 ## Coding agent status
 
 `cmd/pips` is being built as a local, terminal-first coding agent. Its P0

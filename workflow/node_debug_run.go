@@ -67,7 +67,7 @@ func (r *Runner) ResumeNodeDebug(
 		return NodeDebugResult{}, fmt.Errorf("workflow: %w", err)
 	}
 
-	runResult, collector, runErr := r.resumeExecution(
+	runResult, collector, _, runErr := r.resumeExecution(
 		ctx,
 		debugPlan.plan,
 		runID,

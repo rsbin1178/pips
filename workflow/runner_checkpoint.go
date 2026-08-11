@@ -94,6 +94,10 @@ func (e *execution) finishInterrupted(ctx context.Context) (RunResult, error) {
 		stored.NodeDebug = e.state.nodeDebug.checkpoint(e.plan.nodeDebug)
 	}
 
+	if e.state.partialRun != nil {
+		stored.PartialRun = e.state.partialRun.checkpoint(e.plan, &checkpoint)
+	}
+
 	data, err := encodeWorkflowCheckpoint(stored)
 	if err != nil {
 		return e.finishFailed(fmt.Errorf("%w: save checkpoint: %w", ErrRun, err))
