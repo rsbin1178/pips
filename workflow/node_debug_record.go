@@ -193,8 +193,12 @@ func restoreNodeDebugCollector(checkpoint *nodeDebugCheckpoint) *nodeDebugCollec
 	return collector
 }
 
-func validateNodeDebugCheckpoint(checkpoint *nodeDebugCheckpoint, plan *Plan) error {
-	if err := validateNodeDebugCheckpointIdentity(checkpoint, plan); err != nil {
+func validateNodeDebugCheckpoint(
+	checkpoint *nodeDebugCheckpoint,
+	plan *Plan,
+	mode checkpointIdentityMode,
+) error {
+	if err := validateNodeDebugCheckpointIdentity(checkpoint, plan, mode); err != nil {
 		return err
 	}
 
@@ -230,7 +234,11 @@ func validateNodeDebugCheckpoint(checkpoint *nodeDebugCheckpoint, plan *Plan) er
 	return nil
 }
 
-func validateNodeDebugCheckpointIdentity(checkpoint *nodeDebugCheckpoint, plan *Plan) error {
+func validateNodeDebugCheckpointIdentity(
+	checkpoint *nodeDebugCheckpoint,
+	plan *Plan,
+	mode checkpointIdentityMode,
+) error {
 	if plan.nodeDebug == nil {
 		if checkpoint != nil {
 			return errors.New("ordinary checkpoint contains node debug state")
@@ -247,7 +255,7 @@ func validateNodeDebugCheckpointIdentity(checkpoint *nodeDebugCheckpoint, plan *
 		return fmt.Errorf("unsupported node debug checkpoint version %d", checkpoint.Version)
 	}
 
-	if checkpoint.Fingerprint != plan.nodeDebug.fingerprint ||
+	if checkpoint.Fingerprint != nodeDebugCheckpointFingerprint(plan.nodeDebug, mode) ||
 		!slices.Equal(checkpoint.Target, plan.nodeDebug.target.nodes) {
 		return errors.New("node debug checkpoint identity mismatch")
 	}
@@ -257,6 +265,24 @@ func validateNodeDebugCheckpointIdentity(checkpoint *nodeDebugCheckpoint, plan *
 	}
 
 	return nil
+}
+
+func nodeDebugCheckpointFingerprint(
+	metadata *nodeDebugPlanMetadata,
+	mode checkpointIdentityMode,
+) string {
+	if metadata == nil {
+		return ""
+	}
+
+	switch mode {
+	case checkpointIdentityLegacy:
+		return metadata.legacyFingerprint
+	case checkpointIdentityCurrent:
+		return metadata.fingerprint
+	default:
+		return ""
+	}
 }
 
 func validateNodeDebugCheckpointRecord(

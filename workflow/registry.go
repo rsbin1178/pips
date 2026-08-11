@@ -47,8 +47,9 @@ type CompiledNode interface {
 	Invoke(context.Context, NodeInput) (NodeOutput, error)
 }
 
-// CompileContext exposes Definition contracts and registered Actions without
-// exposing mutable Registry internals.
+// CompileContext exposes Definition contracts and registered Actions during
+// [NodeType.Compile] without exposing mutable Registry internals. NodeTypes
+// must not retain a CompileContext after Compile returns.
 type CompileContext interface {
 	WorkflowInputs() map[string]PortSchema
 	WorkflowOutputs() map[string]PortSchema
@@ -175,7 +176,7 @@ func (r *Registry) Action(key ActionKey, version string) (Action, bool) {
 	return action, ok
 }
 
-// Fingerprint identifies the Registry contracts pinned into a Plan.
+// Fingerprint identifies the complete NodeType and Action contract catalog.
 func (r *Registry) Fingerprint() string {
 	if r == nil {
 		return ""
@@ -348,6 +349,7 @@ type nodeCompileContext struct {
 	inputs     map[string]PortSchema
 	outputs    map[string]PortSchema
 	registry   *Registry
+	actions    *actionLookupRecorder
 	session    *compileSession
 	loop       *loopCompileScope
 	interrupts *interruptPolicy
@@ -392,7 +394,16 @@ func (c nodeCompileContext) WorkflowOutputs() map[string]PortSchema {
 }
 
 func (c nodeCompileContext) Action(key ActionKey, version string) (Action, bool) {
-	return c.registry.Action(key, version)
+	action, ok := c.registry.Action(key, version)
+	if c.actions == nil {
+		return action, ok
+	}
+
+	if !c.actions.record(key, version, action, ok) {
+		return nil, false
+	}
+
+	return action, ok
 }
 
 func (c nodeCompileContext) compileDefinition(

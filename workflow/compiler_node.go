@@ -10,6 +10,7 @@ func (p *Plan) compileNodes(
 	ctx context.Context,
 	session *compileSession,
 	interrupts *interruptPolicy,
+	actions *actionLookupRecorder,
 ) error {
 	outputSchemas := make(map[string]PortSchema, len(p.definition.Outputs))
 	for name, output := range p.definition.Outputs {
@@ -20,6 +21,7 @@ func (p *Plan) compileNodes(
 		inputs:   p.definition.Inputs,
 		outputs:  outputSchemas,
 		registry: session.registry,
+		actions:  actions,
 		session:  session,
 		loop:     p.loop,
 	}
