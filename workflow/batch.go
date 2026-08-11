@@ -153,175 +153,373 @@ func (n *compiledBatch) runItems(
 		return []Value{}, nil
 	}
 
-	if n.config.Mode == BatchSequential {
-		return n.runSequential(ctx, input, items)
-	}
-
-	return n.runParallel(ctx, input, items)
+	return n.runResumableItems(ctx, input, items)
 }
 
-func (n *compiledBatch) runSequential(
+type batchItemOutcome struct {
+	index int
+	value Value
+	err   error
+	pause *executionPauseError
+}
+
+func (n *compiledBatch) runResumableItems(
 	ctx context.Context,
 	input NodeInput,
 	items []Value,
 ) ([]Value, error) {
-	results := make([]Value, 0, len(items))
-	for index, item := range items {
-		value, err := n.runItem(ctx, input, item, index)
-		if err != nil {
-			if err := ctx.Err(); err != nil {
-				return nil, err
+	checkpoint := newBatchCheckpoint(len(items))
+	if input.runtime.resume != nil && input.runtime.resume.Batch != nil {
+		checkpoint = cloneBatchCheckpoint(input.runtime.resume.Batch)
+	}
+
+	if n.config.Mode == BatchSequential {
+		return n.runResumableSequential(ctx, input, items, checkpoint)
+	}
+
+	return n.runResumableParallel(ctx, input, items, checkpoint)
+}
+
+func newBatchCheckpoint(items int) *batchCheckpoint {
+	checkpoint := &batchCheckpoint{Items: make([]batchItemCheckpoint, items)}
+	for index := range items {
+		checkpoint.Items[index] = batchItemCheckpoint{Index: index, Status: batchItemPending}
+	}
+
+	return checkpoint
+}
+
+func (n *compiledBatch) runResumableSequential(
+	ctx context.Context,
+	input NodeInput,
+	items []Value,
+	checkpoint *batchCheckpoint,
+) ([]Value, error) {
+	for index := range checkpoint.Items {
+		item := &checkpoint.Items[index]
+		switch item.Status {
+		case batchItemSucceeded, batchItemFailed:
+			continue
+		case batchItemPending:
+		case batchItemInterrupted:
+			if !batchItemHasResumeTarget(input.runtime, *item) {
+				return nil, batchInterruption(checkpoint)
+			}
+		}
+
+		outcome := n.runResumableItem(ctx, input, items[index], *item)
+		if err := n.applyBatchOutcome(ctx, item, outcome); err != nil {
+			return nil, err
+		}
+
+		if item.Status == batchItemInterrupted {
+			return nil, batchInterruption(checkpoint)
+		}
+	}
+
+	return n.batchResults(checkpoint), nil
+}
+
+func (n *compiledBatch) runResumableParallel(
+	ctx context.Context,
+	input NodeInput,
+	items []Value,
+	checkpoint *batchCheckpoint,
+) ([]Value, error) {
+	for {
+		candidates, hasInterrupted := batchCandidates(input.runtime, checkpoint)
+		if len(candidates) == 0 {
+			if hasInterrupted {
+				return nil, batchInterruption(checkpoint)
 			}
 
-			switch n.config.ErrorMode {
-			case BatchTerminate:
-				return nil, batchItemError(index, err)
-			case BatchContinueWithNull:
-				results = append(results, MustValueOf(nil))
-			case BatchRemoveFailed:
+			return n.batchResults(checkpoint), nil
+		}
+
+		outcomes := n.runBatchCandidates(ctx, input, items, checkpoint, candidates)
+		if err := n.batchCandidateFailure(ctx, candidates, outcomes); err != nil {
+			return nil, err
+		}
+
+		for _, index := range candidates {
+			outcome, completed := outcomes[index]
+			if !completed {
+				continue
+			}
+
+			if err := n.applyBatchOutcome(ctx, &checkpoint.Items[index], outcome); err != nil {
+				return nil, err
+			}
+		}
+
+		if batchHasInterrupted(checkpoint) {
+			return nil, batchInterruption(checkpoint)
+		}
+	}
+}
+
+func batchCandidates(
+	runtime *nodeRuntime,
+	checkpoint *batchCheckpoint,
+) ([]int, bool) {
+	hasInterrupted := batchHasInterrupted(checkpoint)
+
+	candidates := make([]int, 0, len(checkpoint.Items))
+	for _, item := range checkpoint.Items {
+		if hasInterrupted {
+			if item.Status == batchItemInterrupted && batchItemHasResumeTarget(runtime, item) {
+				candidates = append(candidates, item.Index)
 			}
 
 			continue
 		}
 
-		results = append(results, value)
+		if item.Status == batchItemPending {
+			candidates = append(candidates, item.Index)
+		}
 	}
 
-	return results, nil
+	return candidates, hasInterrupted
 }
 
-func (n *compiledBatch) runParallel(
+func batchHasInterrupted(checkpoint *batchCheckpoint) bool {
+	for _, item := range checkpoint.Items {
+		if item.Status == batchItemInterrupted {
+			return true
+		}
+	}
+
+	return false
+}
+
+func batchItemHasResumeTarget(runtime *nodeRuntime, item batchItemCheckpoint) bool {
+	if len(item.Dynamic) == 0 {
+		return true
+	}
+
+	for _, interruption := range item.Dynamic {
+		if _, targeted := runtime.execution.state.resumeTargets[interruption.ID]; targeted {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (n *compiledBatch) runBatchCandidates(
 	ctx context.Context,
 	input NodeInput,
 	items []Value,
-) ([]Value, error) {
+	checkpoint *batchCheckpoint,
+	candidates []int,
+) map[int]batchItemOutcome {
 	batchCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	results := make([]Value, len(items))
-	succeeded := make([]bool, len(items))
 	jobs := make(chan int)
-	workerCount := min(n.config.MaxConcurrency, len(items))
+	outcomeChannel := make(chan batchItemOutcome, len(candidates))
+	workers := min(n.config.MaxConcurrency, len(candidates))
 
-	var (
-		firstError error
-		errorOnce  sync.Once
-		workers    sync.WaitGroup
-	)
+	var group sync.WaitGroup
+	group.Add(workers)
 
-	workers.Add(workerCount)
-
-	for range workerCount {
+	for range workers {
 		go func() {
-			defer workers.Done()
+			defer group.Done()
 
-			for {
-				select {
-				case <-batchCtx.Done():
-					return
-				case index, ok := <-jobs:
-					if !ok {
-						return
-					}
+			for index := range jobs {
+				outcome := n.runResumableItem(
+					batchCtx,
+					input,
+					items[index],
+					checkpoint.Items[index],
+				)
+				outcomeChannel <- outcome
 
-					value, err := n.runItem(batchCtx, input, items[index], index)
-					if err != nil {
-						if n.config.ErrorMode == BatchTerminate && ctx.Err() == nil {
-							errorOnce.Do(func() {
-								firstError = batchItemError(index, err)
-
-								cancel()
-							})
-						}
-
-						continue
-					}
-
-					results[index] = value
-					succeeded[index] = true
+				if n.config.ErrorMode == BatchTerminate && outcome.err != nil {
+					cancel()
 				}
 			}
 		}()
 	}
 
-	scheduleItems(batchCtx, jobs, len(items))
-	close(jobs)
-	workers.Wait()
+	go func() {
+		for _, index := range candidates {
+			select {
+			case <-batchCtx.Done():
+				close(jobs)
+				group.Wait()
+				close(outcomeChannel)
 
-	if err := ctx.Err(); err != nil {
-		return nil, err
+				return
+			case jobs <- index:
+			}
+		}
+
+		close(jobs)
+		group.Wait()
+		close(outcomeChannel)
+	}()
+
+	outcomes := make(map[int]batchItemOutcome, len(candidates))
+	for outcome := range outcomeChannel {
+		outcomes[outcome.index] = outcome
 	}
 
-	if firstError != nil {
-		return nil, firstError
-	}
-
-	return n.collectParallelResults(results, succeeded), nil
+	return outcomes
 }
 
-func (n *compiledBatch) runItem(
+func (n *compiledBatch) batchCandidateFailure(
+	ctx context.Context,
+	candidates []int,
+	outcomes map[int]batchItemOutcome,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	if n.config.ErrorMode != BatchTerminate {
+		return nil
+	}
+
+	var canceled *batchItemOutcome
+
+	for _, index := range candidates {
+		if outcome, ok := outcomes[index]; ok && outcome.err != nil {
+			if !errors.Is(outcome.err, context.Canceled) {
+				return batchItemError(index, outcome.err)
+			}
+
+			canceledOutcome := outcome
+			canceled = &canceledOutcome
+		}
+	}
+
+	if canceled != nil {
+		return batchItemError(canceled.index, canceled.err)
+	}
+
+	return nil
+}
+
+func (n *compiledBatch) runResumableItem(
 	ctx context.Context,
 	input NodeInput,
 	item Value,
-	index int,
-) (Value, error) {
+	checkpoint batchItemCheckpoint,
+) batchItemOutcome {
 	inputs := make(map[string]Value, len(n.child.definition.Inputs))
 	for name := range n.child.definition.Inputs {
 		switch name {
 		case batchItemInput:
 			inputs[name] = item
 		case batchIndexInput:
-			inputs[name] = MustValueOf(index)
+			inputs[name] = MustValueOf(checkpoint.Index)
 		default:
 			inputs[name] = input.Values[name]
 		}
 	}
 
-	outputs, err := input.runtime.runChild(
+	outputs, err := input.runtime.runChildWithCheckpoint(
 		ctx,
 		n.child,
 		inputs,
-		ScopeFrame{Kind: ScopeBatchItem, NodeID: input.runtime.nodeID, Index: index},
+		ScopeFrame{Kind: ScopeBatchItem, NodeID: input.runtime.nodeID, Index: checkpoint.Index},
+		checkpoint.Child,
 	)
 	if err != nil {
-		return Value{}, err
+		var pause *executionPauseError
+		if errors.As(err, &pause) {
+			return batchItemOutcome{index: checkpoint.Index, pause: pause}
+		}
+
+		return batchItemOutcome{index: checkpoint.Index, err: err}
 	}
 
-	return outputs[n.config.ResultOutput], nil
-}
-
-func (n *compiledBatch) collectParallelResults(results []Value, succeeded []bool) []Value {
-	switch n.config.ErrorMode {
-	case BatchContinueWithNull:
-		for index := range results {
-			if !succeeded[index] {
-				results[index] = MustValueOf(nil)
-			}
-		}
-
-		return results
-	case BatchRemoveFailed:
-		compacted := make([]Value, 0, len(results))
-		for index, result := range results {
-			if succeeded[index] {
-				compacted = append(compacted, result)
-			}
-		}
-
-		return compacted
-	default:
-		return results
+	return batchItemOutcome{
+		index: checkpoint.Index,
+		value: outputs[n.config.ResultOutput],
 	}
 }
 
-func scheduleItems(ctx context.Context, jobs chan<- int, itemCount int) {
-	for index := range itemCount {
-		select {
-		case <-ctx.Done():
-			return
-		case jobs <- index:
+func (n *compiledBatch) applyBatchOutcome(
+	ctx context.Context,
+	item *batchItemCheckpoint,
+	outcome batchItemOutcome,
+) error {
+	item.Result = nil
+	item.Child = nil
+	item.Dynamic = nil
+	item.Info = InterruptInfo{}
+
+	if outcome.pause != nil {
+		child := outcome.pause.checkpoint
+		item.Status = batchItemInterrupted
+		item.Child = &child
+		item.Dynamic = cloneDynamicInterrupts(outcome.pause.dynamic)
+		item.Info = cloneInterruptInfo(outcome.pause.info)
+
+		return nil //nolint:nilerr // Interruption is resumable control flow.
+	}
+
+	if outcome.err == nil {
+		value := outcome.value
+		item.Status = batchItemSucceeded
+		item.Result = &value
+
+		return nil
+	}
+
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	if n.config.ErrorMode == BatchTerminate {
+		return batchItemError(item.Index, outcome.err)
+	}
+
+	item.Status = batchItemFailed
+
+	return nil
+}
+
+func batchInterruption(checkpoint *batchCheckpoint) error {
+	info := InterruptInfo{}
+	dynamic := []dynamicInterruptCheckpoint{}
+
+	for _, item := range checkpoint.Items {
+		if item.Status != batchItemInterrupted {
+			continue
+		}
+
+		info.Contexts = append(info.Contexts, item.Info.Contexts...)
+		info.BeforeNodes = append(info.BeforeNodes, item.Info.BeforeNodes...)
+		info.AfterNodes = append(info.AfterNodes, item.Info.AfterNodes...)
+		info.RerunNodes = append(info.RerunNodes, item.Info.RerunNodes...)
+		dynamic = append(dynamic, cloneDynamicInterrupts(item.Dynamic)...)
+	}
+
+	return &executionPauseError{
+		batch: cloneBatchCheckpoint(checkpoint),
+		info:  cloneInterruptInfo(info), dynamic: dynamic,
+	}
+}
+
+func (n *compiledBatch) batchResults(checkpoint *batchCheckpoint) []Value {
+	results := make([]Value, 0, len(checkpoint.Items))
+	for _, item := range checkpoint.Items {
+		switch item.Status {
+		case batchItemSucceeded:
+			results = append(results, *item.Result)
+		case batchItemFailed:
+			if n.config.ErrorMode == BatchContinueWithNull {
+				results = append(results, MustValueOf(nil))
+			}
+		case batchItemPending, batchItemInterrupted:
 		}
 	}
+
+	return results
 }
 
 func validateBatchConfig(config BatchConfig) error {
