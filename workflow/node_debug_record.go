@@ -305,8 +305,10 @@ func validateNodeDebugRecordOutcome(
 		err = validateNodeDebugSkippedRecord(record)
 	case NodeStatusSucceeded:
 		err = validateNodeDebugSucceededRecord(record, node)
+	case NodeStatusException:
+		err = validateNodeDebugExceptionRecord(record, node)
 	case NodeStatusFailed:
-		err = validateNodeDebugFailedRecord(record, node)
+		err = validateNodeDebugFailedRecord(record)
 	default:
 		return errors.New("node debug checkpoint has invalid record status")
 	}
@@ -358,7 +360,7 @@ func validateNodeDebugSucceededRecord(
 	return nil
 }
 
-func validateNodeDebugFailedRecord(
+func validateNodeDebugExceptionRecord(
 	record nodeDebugExecutionCheckpoint,
 	node planNode,
 ) error {
@@ -376,13 +378,20 @@ func validateNodeDebugFailedRecord(
 			return errors.New("node debug checkpoint has invalid default-output route")
 		}
 
-		if err := validatePortValues(record.Outputs, node.spec.Outputs); err != nil {
-			return fmt.Errorf("node debug checkpoint default outputs: %w", err)
+		if !nodeValuesEqual(record.Outputs, node.definition.Policy.DefaultOutputs) {
+			return errors.New("node debug checkpoint default outputs do not match policy")
 		}
 	default:
-		if record.Route != "" || len(record.Outputs) != 0 {
-			return errors.New("node debug checkpoint has invalid stopped record")
-		}
+		return errors.New("node debug checkpoint has exception without handling")
+	}
+
+	return nil
+}
+
+func validateNodeDebugFailedRecord(record nodeDebugExecutionCheckpoint) error {
+	if record.ErrorMessage == "" || !validFailureKind(record.Node.Failure) ||
+		record.Route != "" || len(record.Outputs) != 0 {
+		return errors.New("node debug checkpoint has invalid failed record")
 	}
 
 	return nil

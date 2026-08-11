@@ -86,6 +86,7 @@ func validateBatchCheckpoint(
 			index,
 			resultSchema,
 			batch.child,
+			batch.config.ErrorMode,
 		); err != nil {
 			return err
 		}
@@ -99,23 +100,34 @@ func validateBatchCheckpointItem(
 	index int,
 	resultSchema PortSchema,
 	child *Plan,
+	errorMode BatchErrorMode,
 ) error {
 	if item.Index != index {
 		return errors.New("checkpoint Batch item index mismatch")
 	}
 
 	switch item.Status {
-	case batchItemPending, batchItemFailed:
-		if item.Result != nil || item.Child != nil || len(item.Dynamic) != 0 ||
-			!interruptInfoEmpty(item.Info) {
-			return errors.New("checkpoint Batch inactive item has resume state")
+	case batchItemPending:
+		return validateInactiveBatchItem(item)
+	case batchItemFailed:
+		if errorMode == BatchTerminate {
+			return errors.New("checkpoint terminating Batch has handled failed item")
 		}
+
+		return validateInactiveBatchItem(item)
 	case batchItemSucceeded:
 		return validateCompletedBatchItem(item, resultSchema)
 	case batchItemInterrupted:
 		return validateInterruptedBatchItem(item, child)
 	default:
 		return errors.New("checkpoint Batch item has invalid status")
+	}
+}
+
+func validateInactiveBatchItem(item batchItemCheckpoint) error {
+	if item.Result != nil || item.Child != nil || len(item.Dynamic) != 0 ||
+		!interruptInfoEmpty(item.Info) {
+		return errors.New("checkpoint Batch inactive item has resume state")
 	}
 
 	return nil

@@ -82,7 +82,7 @@ type EventPayload interface {
 // RunStarted opens one Run.
 type RunStarted struct{}
 
-// RunCompleted closes a successful Run.
+// RunCompleted closes a succeeded or partial-succeeded Run.
 type RunCompleted struct{}
 
 // RunFailed closes a failed Run.

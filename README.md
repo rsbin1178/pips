@@ -75,6 +75,51 @@ Batch 是可并行的数组 map，Loop 是带事务局部变量的串行状态�
 允许互相嵌套。父流程与子流程共享 Run ID、取消信号、总步数、叶子并发额度
 和串行化事件输出。
 
+### Workflow failure branches
+
+节点重试耗尽后按 `NodePolicy.Error` 执行三种互斥策略：`stop` 终止 Run，
+`route_error` 选择专用 error edge，`continue_with_default` 通过普通 success
+edge 返回编译期校验过的默认输出。`route_error` 分支使用独立的
+`node_error` binding 读取失败数据，而不能读取失败节点并不存在的普通输出：
+
+```json
+{
+  "message": {
+    "source": "node_error",
+    "node": "generate",
+    "port": "error_message"
+  },
+  "type": {
+    "source": "node_error",
+    "node": "generate",
+    "port": "error_type"
+  }
+}
+```
+
+| Port | Schema | Meaning |
+|---|---|---|
+| `error_message` | string | 最终一次 attempt 的原始 `error.Error()` 文本 |
+| `error_type` | string enum | `error`、`timeout`、`panic`、`canceled` 或 `limit` |
+
+编译器要求来源节点配置 `route_error`，并证明目标只可能从该节点的 error route
+到达；成功路径、重汇合后的不确定路径和伪造的 error binding 会在执行 Action
+之前失败。Exclusive Merge 可接收条件存在的 error candidate；Parallel Merge
+只有在 error 数据必然存在时才允许使用它。
+
+已由 error route 或默认值处理的节点状态为 `exception`。只要执行中出现过这种
+异常，最终完成的 Run 状态就是 `partial-succeeded`；后续未处理失败、取消或中断
+仍分别优先得到 `failed`、`canceled` 或 `interrupted`。Batch 的
+`continue_with_null` / `remove_failed` 条目失败也会标记部分成功，但 Batch 节点
+本身保持 `succeeded`；Batch `terminate`、Loop body 和 SubWorkflow 的未处理错误
+统一交给所属组合节点的外层 `NodePolicy`。
+
+`error_message` 属于敏感 Workflow 数据，可能进入显式输出、Node Debug 结果和
+不透明 checkpoint，但不会进入 lifecycle Events 或包日志。宿主负责授权、脱敏、
+加密、保留与删除。当前 checkpoint 格式为 v2，恢复会严格校验异常状态、failure
+data、已选 route、默认输出和根部分成功标记；旧 v1 checkpoint 会在调用 Action
+之前被拒绝。
+
 Workflow 支持三类可恢复中断，并保持 Definition JSON 不变：
 
 - 编译期边界：`WithInterruptBeforeNodes` / `WithInterruptAfterNodes` 接收

@@ -19,7 +19,16 @@
       "config": {"action": "unreliable", "version": "v1"},
       "policy": {"retry": {"max_attempts": 2}, "error": "route_error"}
     },
-    {"id": "fallback", "type": "action", "version": "v1", "config": {"action": "fallback", "version": "v1"}},
+    {
+      "id": "fallback",
+      "type": "action",
+      "version": "v1",
+      "config": {"action": "fallback", "version": "v1"},
+      "inputs": {
+        "message": {"source": "node_error", "node": "unreliable", "port": "error_message"},
+        "type": {"source": "node_error", "node": "unreliable", "port": "error_type"}
+      }
+    },
     {
       "id": "merge",
       "type": "merge",

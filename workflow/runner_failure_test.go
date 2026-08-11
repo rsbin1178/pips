@@ -133,12 +133,22 @@ func TestRunnerErrorRoute(t *testing.T) {
 
 	plan := compileRoundTrip(t, definition, unreliable, success, fallback)
 
-	result := runWorkflow(t, plan, map[string]workflow.Value{})
+	runner := mustRunner(t)
+
+	result, err := runner.Run(t.Context(), plan, map[string]workflow.Value{})
+	if err != nil {
+		t.Fatalf("Runner.Run() error = %v", err)
+	}
+
+	if result.Status != workflow.RunStatusPartialSucceeded {
+		t.Fatalf("RunResult.Status = %s, want partial-succeeded", result.Status)
+	}
+
 	if result.Outputs["result"].String() != `"fallback"` {
 		t.Fatalf("result = %s, want fallback", result.Outputs["result"].String())
 	}
 
-	if result.Nodes["unreliable"].Status != workflow.NodeStatusFailed ||
+	if result.Nodes["unreliable"].Status != workflow.NodeStatusException ||
 		result.Nodes["success"].Status != workflow.NodeStatusSkipped {
 		t.Fatalf("node states = %#v", result.Nodes)
 	}
@@ -157,9 +167,125 @@ func TestRunnerContinuesWithValidatedDefault(t *testing.T) {
 	}
 	plan := compileRoundTrip(t, singleActionDefinition(t, "default", stringSchema, policy), action)
 
-	result := runWorkflow(t, plan, map[string]workflow.Value{})
-	if result.Outputs["result"].String() != `"default"` || result.Nodes["action"].Status != workflow.NodeStatusFailed {
+	runner := mustRunner(t)
+
+	result, err := runner.Run(t.Context(), plan, map[string]workflow.Value{})
+	if err != nil {
+		t.Fatalf("Runner.Run() error = %v", err)
+	}
+
+	if result.Status != workflow.RunStatusPartialSucceeded ||
+		result.Outputs["result"].String() != `"default"` ||
+		result.Nodes["action"].Status != workflow.NodeStatusException {
 		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestRunnerRoutesStableFailureKinds(t *testing.T) {
+	t.Parallel()
+
+	stringSchema := mustSchema(t, `{"type":"string"}`)
+	errorTypeSchema := mustSchema(
+		t,
+		`{"type":"string","enum":["error","timeout","panic","canceled","limit"]}`,
+	)
+
+	tests := []struct {
+		name        string
+		invoke      func(context.Context) (workflow.ActionOutput, error)
+		timeout     int64
+		wantFailure workflow.FailureKind
+	}{
+		{
+			name: "ordinary error",
+			invoke: func(context.Context) (workflow.ActionOutput, error) {
+				return workflow.ActionOutput{}, errors.New("ordinary")
+			},
+			wantFailure: workflow.FailureError,
+		},
+		{
+			name: "timeout",
+			invoke: func(ctx context.Context) (workflow.ActionOutput, error) {
+				<-ctx.Done()
+
+				return workflow.ActionOutput{}, ctx.Err()
+			},
+			timeout:     5,
+			wantFailure: workflow.FailureTimeout,
+		},
+		{
+			name: "panic",
+			invoke: func(context.Context) (workflow.ActionOutput, error) {
+				panic("classified panic")
+			},
+			wantFailure: workflow.FailurePanic,
+		},
+		{
+			name: "node returned cancellation",
+			invoke: func(context.Context) (workflow.ActionOutput, error) {
+				return workflow.ActionOutput{}, context.Canceled
+			},
+			wantFailure: workflow.FailureCanceled,
+		},
+		{
+			name: "invalid output",
+			invoke: func(context.Context) (workflow.ActionOutput, error) {
+				return workflow.ActionOutput{Values: map[string]workflow.Value{
+					"result": workflow.MustValueOf(42),
+				}}, nil
+			},
+			wantFailure: workflow.FailureError,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			definition := failureBranchDefinition(t, stringSchema, 1)
+			definition.Nodes[1].Policy.TimeoutMilli = test.timeout
+			source := &fakeAction{
+				spec: actionSpec(
+					"typed_failure",
+					map[string]workflow.PortSchema{},
+					map[string]workflow.PortSchema{"result": stringSchema},
+				),
+				run: func(ctx context.Context, _ workflow.ActionInput) (workflow.ActionOutput, error) {
+					return test.invoke(ctx)
+				},
+			}
+			handler := &fakeAction{
+				spec: actionSpec(
+					"typed_handler",
+					map[string]workflow.PortSchema{"message": stringSchema, "type": errorTypeSchema},
+					map[string]workflow.PortSchema{"result": stringSchema},
+				),
+				run: func(_ context.Context, input workflow.ActionInput) (workflow.ActionOutput, error) {
+					return workflow.ActionOutput{Values: map[string]workflow.Value{
+						"result": input.Values["type"],
+					}}, nil
+				},
+			}
+			plan := compileRoundTrip(
+				t,
+				definition,
+				source,
+				constantAction("typed_success", "success", stringSchema),
+				handler,
+			)
+			runner := mustRunner(t)
+
+			result, err := runner.Run(t.Context(), plan, map[string]workflow.Value{})
+			if err != nil {
+				t.Fatalf("Runner.Run() error = %v", err)
+			}
+
+			if result.Status != workflow.RunStatusPartialSucceeded ||
+				result.Nodes["unreliable"].Failure != test.wantFailure ||
+				result.Outputs["result"].String() != fmt.Sprintf("%q", test.wantFailure) {
+				t.Fatalf("result = %#v", result)
+			}
+		})
 	}
 }
 
@@ -257,13 +383,21 @@ func TestRunnerEventsAreTypedAndPayloadFree(t *testing.T) {
 		t.Fatalf("NewRunner() error = %v", err)
 	}
 
-	if _, err := runner.Run(t.Context(), plan, map[string]workflow.Value{}); err != nil {
+	result, err := runner.Run(t.Context(), plan, map[string]workflow.Value{})
+	if err != nil {
 		t.Fatalf("Runner.Run() error = %v", err)
+	}
+
+	if result.Status != workflow.RunStatusPartialSucceeded ||
+		result.Nodes["action"].Status != workflow.NodeStatusException {
+		t.Fatalf("result = %#v", result)
 	}
 
 	if len(events) == 0 {
 		t.Fatal("no events observed")
 	}
+
+	var sawNodeFailure, sawRunCompleted bool
 
 	for _, event := range events {
 		if event.RunID != "events" || event.PlanFingerprint == "" || event.Time.IsZero() {
@@ -273,6 +407,17 @@ func TestRunnerEventsAreTypedAndPayloadFree(t *testing.T) {
 		if strings.Contains(fmt.Sprintf("%#v", event.Payload()), "do-not-export") {
 			t.Fatalf("event leaked Action error: %#v", event.Payload())
 		}
+
+		switch payload := event.Payload().(type) {
+		case workflow.NodeFailed:
+			sawNodeFailure = payload.Kind == workflow.FailureError
+		case workflow.RunCompleted:
+			sawRunCompleted = true
+		}
+	}
+
+	if !sawNodeFailure || !sawRunCompleted {
+		t.Fatalf("missing terminal metadata events: %#v", events)
 	}
 
 	if _, err := json.Marshal(events[0]); !errors.Is(err, workflow.ErrEventWireFormat) {

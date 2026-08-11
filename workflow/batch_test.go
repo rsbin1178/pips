@@ -297,22 +297,36 @@ func TestBatchNodeItemErrorModes(t *testing.T) {
 
 	tests := []struct {
 		name          string
+		mode          workflow.BatchMode
+		concurrency   int
 		errorMode     workflow.BatchErrorMode
 		resultsSchema workflow.PortSchema
 		want          string
 		wantError     bool
 	}{
 		{
-			name: "terminate", errorMode: workflow.BatchTerminate,
+			name: "terminate", mode: workflow.BatchSequential, errorMode: workflow.BatchTerminate,
 			resultsSchema: itemsSchema, wantError: true,
 		},
 		{
-			name: "continue with null", errorMode: workflow.BatchContinueWithNull,
-			resultsSchema: nullableResultsSchema, want: `["a",null,"c"]`,
+			name: "sequential continue with null", mode: workflow.BatchSequential,
+			errorMode:     workflow.BatchContinueWithNull,
+			resultsSchema: nullableResultsSchema, want: `["a",null,null,"c"]`,
 		},
 		{
-			name: "remove failed", errorMode: workflow.BatchRemoveFailed,
+			name: "sequential remove failed", mode: workflow.BatchSequential,
 			resultsSchema: itemsSchema, want: `["a","c"]`,
+			errorMode: workflow.BatchRemoveFailed,
+		},
+		{
+			name: "parallel continue with null", mode: workflow.BatchParallel, concurrency: 4,
+			errorMode:     workflow.BatchContinueWithNull,
+			resultsSchema: nullableResultsSchema, want: `["a",null,null,"c"]`,
+		},
+		{
+			name: "parallel remove failed", mode: workflow.BatchParallel, concurrency: 4,
+			resultsSchema: itemsSchema, want: `["a","c"]`,
+			errorMode: workflow.BatchRemoveFailed,
 		},
 	}
 
@@ -321,8 +335,8 @@ func TestBatchNodeItemErrorModes(t *testing.T) {
 			t.Parallel()
 
 			config := workflow.BatchConfig{
-				Body: body, ResultOutput: "result", Mode: workflow.BatchSequential,
-				ErrorMode: test.errorMode, MaxItems: 10,
+				Body: body, ResultOutput: "result", Mode: test.mode,
+				MaxConcurrency: test.concurrency, ErrorMode: test.errorMode, MaxItems: 10,
 			}
 			definition := batchParentDefinition(
 				t,
@@ -334,12 +348,17 @@ func TestBatchNodeItemErrorModes(t *testing.T) {
 			plan := compileRoundTrip(t, definition, action)
 			runner := mustRunner(t)
 			result, err := runner.Run(t.Context(), plan, map[string]workflow.Value{
-				"items": workflow.MustValueOf([]string{"a", "bad", "c"}),
+				"items": workflow.MustValueOf([]string{"a", "bad", "bad", "c"}),
 			})
 
 			if test.wantError {
 				if !errors.Is(err, workflow.ErrRun) {
 					t.Fatalf("Runner.Run() error = %v, want ErrRun", err)
+				}
+
+				if result.Status != workflow.RunStatusFailed ||
+					result.Nodes["batch"].Status != workflow.NodeStatusFailed {
+					t.Fatalf("terminate result = %#v", result)
 				}
 
 				return
@@ -352,7 +371,129 @@ func TestBatchNodeItemErrorModes(t *testing.T) {
 			if got := result.Outputs["results"].String(); got != test.want {
 				t.Fatalf("results = %s, want %s", got, test.want)
 			}
+
+			if result.Status != workflow.RunStatusPartialSucceeded ||
+				result.Nodes["batch"].Status != workflow.NodeStatusSucceeded {
+				t.Fatalf("handled item failure result = %#v", result)
+			}
 		})
+	}
+}
+
+func TestBatchTerminateFailureUsesOuterNodePolicy(t *testing.T) {
+	t.Parallel()
+
+	stringSchema := mustSchema(t, `{"type":"string"}`)
+	integerSchema := mustSchema(t, `{"type":"integer"}`)
+	itemsSchema := mustSchema(t, `{"type":"array","items":{"type":"string"}}`)
+	action := &fakeAction{
+		spec: actionSpec(
+			"outer_policy_item",
+			map[string]workflow.PortSchema{"item": stringSchema, "index": integerSchema},
+			map[string]workflow.PortSchema{"result": stringSchema},
+		),
+		run: func(context.Context, workflow.ActionInput) (workflow.ActionOutput, error) {
+			return workflow.ActionOutput{}, errors.New("batch item failed")
+		},
+	}
+	body := batchBodyDefinition(t, stringSchema, stringSchema, "outer_policy_item", false)
+	config := workflow.BatchConfig{
+		Body: body, ResultOutput: "result", Mode: workflow.BatchSequential,
+		ErrorMode: workflow.BatchTerminate, MaxItems: 10,
+	}
+	definition := batchParentDefinition(
+		t,
+		itemsSchema,
+		itemsSchema,
+		config,
+		workflow.PortSchema{},
+	)
+	definition.Nodes[1].Policy = workflow.NodePolicy{
+		Error: workflow.ErrorContinueWithDefault,
+		DefaultOutputs: map[string]workflow.Value{
+			"results": workflow.MustValueOf([]string{"default"}),
+		},
+	}
+	plan := compileRoundTrip(t, definition, action)
+	runner := mustRunner(t)
+
+	result, err := runner.Run(t.Context(), plan, map[string]workflow.Value{
+		"items": workflow.MustValueOf([]string{"bad"}),
+	})
+	if err != nil {
+		t.Fatalf("Runner.Run() error = %v", err)
+	}
+
+	if result.Status != workflow.RunStatusPartialSucceeded ||
+		result.Nodes["batch"].Status != workflow.NodeStatusException ||
+		result.Outputs["results"].String() != `["default"]` {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestBatchHandledBodyFailureMarksRootPartial(t *testing.T) {
+	t.Parallel()
+
+	stringSchema := mustSchema(t, `{"type":"string"}`)
+	integerSchema := mustSchema(t, `{"type":"integer"}`)
+	itemsSchema := mustSchema(t, `{"type":"array","items":{"type":"string"}}`)
+	errorTypeSchema := mustSchema(
+		t,
+		`{"type":"string","enum":["error","timeout","panic","canceled","limit"]}`,
+	)
+	body := failureBranchDefinition(t, stringSchema, 1)
+	body.Inputs["item"] = stringSchema
+	body.Inputs["index"] = integerSchema
+	config := workflow.BatchConfig{
+		Body: body, ResultOutput: "result", Mode: workflow.BatchSequential,
+		ErrorMode: workflow.BatchTerminate, MaxItems: 10,
+	}
+	definition := batchParentDefinition(
+		t,
+		itemsSchema,
+		itemsSchema,
+		config,
+		workflow.PortSchema{},
+	)
+	source := resultAction(
+		"typed_failure",
+		stringSchema,
+		func(context.Context) (workflow.Value, error) {
+			return workflow.Value{}, errors.New("batch body handled")
+		},
+	)
+	handler := &fakeAction{
+		spec: actionSpec(
+			"typed_handler",
+			map[string]workflow.PortSchema{"message": stringSchema, "type": errorTypeSchema},
+			map[string]workflow.PortSchema{"result": stringSchema},
+		),
+		run: func(_ context.Context, input workflow.ActionInput) (workflow.ActionOutput, error) {
+			return workflow.ActionOutput{Values: map[string]workflow.Value{
+				"result": input.Values["message"],
+			}}, nil
+		},
+	}
+	plan := compileRoundTrip(
+		t,
+		definition,
+		source,
+		constantAction("typed_success", "success", stringSchema),
+		handler,
+	)
+	runner := mustRunner(t)
+
+	result, err := runner.Run(t.Context(), plan, map[string]workflow.Value{
+		"items": workflow.MustValueOf([]string{"a", "b"}),
+	})
+	if err != nil {
+		t.Fatalf("Runner.Run() error = %v", err)
+	}
+
+	if result.Status != workflow.RunStatusPartialSucceeded ||
+		result.Nodes["batch"].Status != workflow.NodeStatusSucceeded ||
+		result.Outputs["results"].String() != `["batch body handled","batch body handled"]` {
+		t.Fatalf("result = %#v", result)
 	}
 }
 

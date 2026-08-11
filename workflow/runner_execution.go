@@ -31,6 +31,7 @@ type execution struct {
 	edges       []edgeState
 	nodes       []NodeRun
 	outputs     []map[string]Value
+	failures    []nodeFailureData
 	ready       []int
 	running     int
 	done        int
@@ -58,14 +59,15 @@ type eventEmitter struct {
 }
 
 type runState struct {
-	runID         string
-	maxSteps      int64
-	steps         atomic.Int64
-	leafTokens    chan struct{}
-	eventMu       sync.Mutex
-	resumeTargets map[string]ResumeTarget
-	nodeDebug     *nodeDebugCollector
-	partialRun    *partialRunState
+	runID             string
+	maxSteps          int64
+	steps             atomic.Int64
+	hasHandledFailure atomic.Bool
+	leafTokens        chan struct{}
+	eventMu           sync.Mutex
+	resumeTargets     map[string]ResumeTarget
+	nodeDebug         *nodeDebugCollector
+	partialRun        *partialRunState
 }
 
 type nodeRuntime struct {
@@ -148,6 +150,7 @@ func newExecution(
 		edges:        make([]edgeState, len(plan.edges)),
 		nodes:        nodes,
 		outputs:      make([]map[string]Value, len(plan.nodes)),
+		failures:     make([]nodeFailureData, len(plan.nodes)),
 		paused:       map[int]pausedNodeCheckpoint{},
 		inflight:     map[int]inflightNode{},
 		forcedRerun:  map[int]struct{}{},
@@ -407,9 +410,21 @@ func (e *execution) completeNode(completion nodeCompletion) error {
 		return nil
 	}
 
+	return e.completeFailedNode(completion)
+}
+
+func (e *execution) completeFailedNode(completion nodeCompletion) error {
 	nodeDefinition := e.plan.nodes[completion.index].definition
 	switch nodeDefinition.Policy.Error {
 	case ErrorRoute:
+		failureData, err := newNodeFailureData(completion.err.Error(), completion.failure)
+		if err != nil {
+			return e.failNodeErrorMaterialization(completion, err)
+		}
+
+		e.nodes[completion.index].Status = NodeStatusException
+		e.failures[completion.index] = failureData
+		e.state.hasHandledFailure.Store(true)
 		e.resolveOutgoing(completion.index, RouteError)
 		e.done++
 		e.recordPartialExecuted(
@@ -429,6 +444,14 @@ func (e *execution) completeNode(completion nodeCompletion) error {
 
 		return nil
 	case ErrorContinueWithDefault:
+		failureData, err := newNodeFailureData(completion.err.Error(), completion.failure)
+		if err != nil {
+			return e.failNodeErrorMaterialization(completion, err)
+		}
+
+		e.nodes[completion.index].Status = NodeStatusException
+		e.failures[completion.index] = failureData
+		e.state.hasHandledFailure.Store(true)
 		e.outputs[completion.index] = cloneValues(nodeDefinition.Policy.DefaultOutputs)
 		e.resolveOutgoing(completion.index, RouteSuccess)
 		e.done++
@@ -467,6 +490,32 @@ func (e *execution) completeNode(completion nodeCompletion) error {
 		return &RunError{
 			NodeID: nodeDefinition.ID, Attempt: completion.attempts, Err: completion.err,
 		}
+	}
+}
+
+func (e *execution) failNodeErrorMaterialization(
+	completion nodeCompletion,
+	materializeErr error,
+) error {
+	e.recordPartialExecuted(
+		completion.index,
+		completion.attempts,
+		nil,
+		"",
+		false,
+	)
+	e.recordNodeDebug(
+		completion.index,
+		completion.inputs,
+		nil,
+		"",
+		completion.err.Error(),
+	)
+
+	return &RunError{
+		NodeID:  e.plan.nodes[completion.index].definition.ID,
+		Attempt: completion.attempts,
+		Err:     errors.Join(completion.err, materializeErr),
 	}
 }
 
@@ -723,7 +772,12 @@ func (e *execution) drain(completions <-chan nodeCompletion) {
 
 func (e *execution) finishSucceeded() (RunResult, error) {
 	e.synchronizeNodeDebug()
+
 	e.result.Status = RunStatusSucceeded
+	if e.state.hasHandledFailure.Load() {
+		e.result.Status = RunStatusPartialSucceeded
+	}
+
 	e.result.Outputs = cloneValues(e.outputs[e.plan.endIndex])
 	e.result.EndedAt = e.runner.clock().UTC()
 	e.snapshotNodes()
