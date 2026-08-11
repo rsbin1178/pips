@@ -48,6 +48,15 @@ func (e *execution) resolveBinding(binding Binding) (Value, bool) {
 		if !ok {
 			return Value{}, false
 		}
+	case BindingNodeError:
+		sourceIndex := e.plan.nodeIndex[binding.Node]
+
+		var ok bool
+
+		value, ok = e.failures[sourceIndex][binding.Port]
+		if !ok {
+			return Value{}, false
+		}
 	case BindingLoopVariable:
 		if e.loop == nil {
 			return Value{}, false

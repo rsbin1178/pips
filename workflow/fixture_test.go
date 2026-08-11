@@ -19,12 +19,17 @@ func TestWorkflowFixturesRoundTripAndRun(t *testing.T) {
 
 	stringSchema := mustSchema(t, `{"type":"string"}`)
 	boolSchema := mustSchema(t, `{"type":"boolean"}`)
+	errorTypeSchema := mustSchema(
+		t,
+		`{"type":"string","enum":["error","timeout","panic","canceled","limit"]}`,
+	)
 
 	tests := []struct {
 		name     string
 		actions  []workflow.Action
 		inputs   map[string]workflow.Value
 		expected map[string]string
+		status   workflow.RunStatus
 	}{
 		{
 			name: "linear",
@@ -71,10 +76,34 @@ func TestWorkflowFixturesRoundTripAndRun(t *testing.T) {
 				fixtureAction("unreliable", "v1", map[string]workflow.PortSchema{}, map[string]workflow.PortSchema{"result": stringSchema}, func(workflow.ActionInput) (workflow.ActionOutput, error) {
 					return workflow.ActionOutput{}, errors.New("expected fixture failure")
 				}),
-				constantAction("fallback", "fallback", stringSchema),
+				fixtureAction(
+					"fallback",
+					"v1",
+					map[string]workflow.PortSchema{
+						"message": stringSchema,
+						"type":    errorTypeSchema,
+					},
+					map[string]workflow.PortSchema{"result": stringSchema},
+					func(input workflow.ActionInput) (workflow.ActionOutput, error) {
+						message, err := workflow.DecodeValue[string](input.Values["message"])
+						if err != nil {
+							return workflow.ActionOutput{}, err
+						}
+
+						failureType, err := workflow.DecodeValue[string](input.Values["type"])
+						if err != nil {
+							return workflow.ActionOutput{}, err
+						}
+
+						return workflow.ActionOutput{Values: map[string]workflow.Value{
+							"result": workflow.MustValueOf(message + "|" + failureType),
+						}}, nil
+					},
+				),
 			},
 			inputs:   map[string]workflow.Value{},
-			expected: map[string]string{"result": `"fallback"`},
+			expected: map[string]string{"result": `"expected fixture failure|error"`},
+			status:   workflow.RunStatusPartialSucceeded,
 		},
 	}
 
@@ -136,6 +165,15 @@ func TestWorkflowFixturesRoundTripAndRun(t *testing.T) {
 			result, err := runner.Run(t.Context(), plan, test.inputs)
 			if err != nil {
 				t.Fatalf("Runner.Run() error = %v", err)
+			}
+
+			wantStatus := test.status
+			if wantStatus == "" {
+				wantStatus = workflow.RunStatusSucceeded
+			}
+
+			if result.Status != wantStatus {
+				t.Fatalf("RunResult.Status = %s, want %s", result.Status, wantStatus)
 			}
 
 			for name, expected := range test.expected {

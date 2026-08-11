@@ -26,6 +26,7 @@ func TestDebugNodeFailurePolicies(t *testing.T) {
 		name       string
 		definition workflow.Definition
 		wantStatus workflow.RunStatus
+		wantNode   workflow.NodeStatus
 		wantRoute  string
 		wantOutput string
 		wantError  bool
@@ -36,6 +37,7 @@ func TestDebugNodeFailurePolicies(t *testing.T) {
 				t, "debug-failure", stringSchema, workflow.NodePolicy{},
 			),
 			wantStatus: workflow.RunStatusFailed,
+			wantNode:   workflow.NodeStatusFailed,
 			wantError:  true,
 		},
 		{
@@ -46,14 +48,16 @@ func TestDebugNodeFailurePolicies(t *testing.T) {
 					"result": workflow.MustValueOf("default"),
 				},
 			}),
-			wantStatus: workflow.RunStatusSucceeded,
+			wantStatus: workflow.RunStatusPartialSucceeded,
+			wantNode:   workflow.NodeStatusException,
 			wantRoute:  workflow.RouteSuccess,
 			wantOutput: `"default"`,
 		},
 		{
 			name:       "error route",
 			definition: debugErrorRouteDefinition(t, stringSchema),
-			wantStatus: workflow.RunStatusSucceeded,
+			wantStatus: workflow.RunStatusPartialSucceeded,
+			wantNode:   workflow.NodeStatusException,
 			wantRoute:  workflow.RouteError,
 		},
 	}
@@ -86,7 +90,7 @@ func TestDebugNodeFailurePolicies(t *testing.T) {
 			}
 
 			if result.Status != test.wantStatus ||
-				result.Execution.NodeRun.Status != workflow.NodeStatusFailed ||
+				result.Execution.NodeRun.Status != test.wantNode ||
 				result.Execution.Route != test.wantRoute ||
 				!strings.Contains(result.Execution.ErrorMessage, "debug failure text") {
 				t.Fatalf("DebugNode() result = %#v", result)

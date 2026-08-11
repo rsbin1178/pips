@@ -76,6 +76,69 @@ func TestResumePartialPreservesExecutedDataAndAttempts(t *testing.T) {
 	}
 }
 
+func TestResumePartialRestoresHandledFailureWithoutReusingIt(t *testing.T) {
+	t.Parallel()
+
+	var sourceCalls, handlerCalls atomic.Int32
+
+	plan := interruptedFailurePlan(t, &sourceCalls, &handlerCalls)
+	store := &memoryCheckpointStore{}
+
+	runner, err := workflow.NewRunner(
+		workflow.WithCheckpointStore(store),
+		workflow.WithRunIDSource(func(time.Time) (string, error) {
+			return "partial-failure-resume", nil
+		}),
+	)
+	if err != nil {
+		t.Fatalf("NewRunner() error = %v", err)
+	}
+
+	interrupted, err := runner.RunPartial(
+		t.Context(),
+		plan,
+		"handler",
+		workflow.PartialRunInput{Inputs: map[string]workflow.Value{}},
+	)
+	assertPartialInterrupted(t, interrupted, err, "partial-failure-resume")
+
+	if sourceCalls.Load() != 1 || handlerCalls.Load() != 0 ||
+		interrupted.Nodes["unreliable"].NodeRun.Status != workflow.NodeStatusException {
+		t.Fatalf(
+			"interrupted result = %#v, calls = %d/%d",
+			interrupted,
+			sourceCalls.Load(),
+			handlerCalls.Load(),
+		)
+	}
+
+	resumed, err := runner.ResumePartial(
+		t.Context(),
+		plan,
+		"handler",
+		interrupted.RunID,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("Runner.ResumePartial() error = %v", err)
+	}
+
+	if resumed.Status != workflow.RunStatusPartialSucceeded ||
+		resumed.Outputs["result"].String() != `"checkpoint failure|error"` ||
+		sourceCalls.Load() != 1 || handlerCalls.Load() != 1 {
+		t.Fatalf(
+			"resumed result = %#v, calls = %d/%d",
+			resumed,
+			sourceCalls.Load(),
+			handlerCalls.Load(),
+		)
+	}
+
+	if _, reusable := resumed.Data.Nodes["unreliable"]; reusable {
+		t.Fatalf("exception node became reusable: %#v", resumed.Data)
+	}
+}
+
 func TestResumePartialDynamicInterruptRestoresStateAndTargetData(t *testing.T) {
 	t.Parallel()
 

@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-const checkpointVersion = 1
+const checkpointVersion = 2
 
 var checkpointJSONLimits = jsonLimits{
 	maxBytes: 16 << 20,
@@ -27,6 +27,7 @@ type workflowCheckpoint struct {
 	PlanFingerprint       string                `json:"plan_fingerprint"`
 	StartedAt             time.Time             `json:"started_at"`
 	TotalSteps            int64                 `json:"total_steps"`
+	HandledFailure        bool                  `json:"handled_failure"`
 	Execution             executionCheckpoint   `json:"execution"`
 	Interruption          InterruptInfo         `json:"interruption"`
 	NodeDebug             *nodeDebugCheckpoint  `json:"node_debug,omitempty"`
@@ -41,6 +42,7 @@ type executionCheckpoint struct {
 	Edges           []edgeState            `json:"edges"`
 	Nodes           []checkpointNodeRun    `json:"nodes"`
 	Outputs         []map[string]Value     `json:"outputs"`
+	FailureData     []nodeFailureData      `json:"failure_data"`
 	Ready           []int                  `json:"ready"`
 	Done            int                    `json:"done"`
 	Steps           int64                  `json:"steps"`
@@ -145,6 +147,7 @@ func (r *Runner) resumeExecution(
 
 	state := newRunState(checkpoint.RunID, limits)
 	state.steps.Store(checkpoint.TotalSteps)
+	state.hasHandledFailure.Store(checkpoint.HandledFailure)
 	state.resumeTargets = resumeTargets
 
 	if checkpoint.NodeDebug != nil {
@@ -294,6 +297,11 @@ func decodeWorkflowCheckpoint(
 
 	if err := validateExecutionCheckpoint(&checkpoint.Execution, plan); err != nil {
 		return nil, err
+	}
+
+	if !checkpoint.HandledFailure &&
+		executionCheckpointHasHandledFailure(&checkpoint.Execution) {
+		return nil, errors.New("checkpoint handled failure accounting mismatch")
 	}
 
 	if err := validatePartialRunCheckpoint(
@@ -560,6 +568,7 @@ func executionCheckpointShapeMatches(checkpoint *executionCheckpoint, plan *Plan
 	return len(checkpoint.Edges) == len(plan.edges) &&
 		len(checkpoint.Nodes) == len(plan.nodes) &&
 		len(checkpoint.Outputs) == len(plan.nodes) &&
+		len(checkpoint.FailureData) == len(plan.nodes) &&
 		checkpoint.Done >= 0 && checkpoint.Done <= len(plan.nodes) && checkpoint.Steps >= 0
 }
 
@@ -611,8 +620,8 @@ func validateCheckpointNodeState(
 	}
 
 	switch node.Status {
-	case NodeStatusPending, NodeStatusSucceeded, NodeStatusFailed, NodeStatusSkipped,
-		NodeStatusInterrupted:
+	case NodeStatusPending, NodeStatusSucceeded, NodeStatusException, NodeStatusFailed,
+		NodeStatusSkipped, NodeStatusInterrupted:
 	case NodeStatusReady:
 		if _, ok := ready[index]; !ok {
 			return errors.New("checkpoint ready node is missing from frontier")
@@ -623,15 +632,149 @@ func validateCheckpointNodeState(
 		return errors.New("checkpoint has invalid node status")
 	}
 
+	if err := validateCheckpointNodeFailure(
+		checkpoint,
+		plan,
+		index,
+		node,
+	); err != nil {
+		return err
+	}
+
 	if checkpoint.Outputs[index] == nil {
 		return nil
 	}
 
-	if err := validatePortValues(checkpoint.Outputs[index], plan.nodes[index].spec.Outputs); err != nil {
+	if err := validatePortValues(
+		checkpoint.Outputs[index],
+		plan.nodes[index].spec.Outputs,
+	); err != nil {
 		return fmt.Errorf("checkpoint node %q outputs: %w", node.ID, err)
 	}
 
 	return nil
+}
+
+func validateCheckpointNodeFailure(
+	checkpoint *executionCheckpoint,
+	plan *Plan,
+	index int,
+	node checkpointNodeRun,
+) error {
+	data := checkpoint.FailureData[index]
+	if node.Status != NodeStatusException {
+		if data != nil {
+			return fmt.Errorf("checkpoint node %q has stale failure data", node.ID)
+		}
+
+		return nil
+	}
+
+	if !validFailureKind(node.Failure) {
+		return fmt.Errorf("checkpoint node %q has invalid exception kind", node.ID)
+	}
+
+	if err := validateNodeFailureData(data, node.Failure); err != nil {
+		return fmt.Errorf("checkpoint node %q failure data: %w", node.ID, err)
+	}
+
+	definition := plan.nodes[index].definition
+	switch definition.Policy.Error {
+	case ErrorRoute:
+		if checkpoint.Outputs[index] != nil ||
+			!checkpointNodeSelectedRoute(checkpoint, plan, index, RouteError) {
+			return fmt.Errorf("checkpoint node %q has invalid error-route exception", node.ID)
+		}
+	case ErrorContinueWithDefault:
+		if !nodeValuesEqual(checkpoint.Outputs[index], definition.Policy.DefaultOutputs) ||
+			!checkpointNodeSelectedRoute(checkpoint, plan, index, RouteSuccess) {
+			return fmt.Errorf("checkpoint node %q has invalid default exception", node.ID)
+		}
+	default:
+		return fmt.Errorf("checkpoint node %q has exception without handling", node.ID)
+	}
+
+	return nil
+}
+
+func checkpointNodeSelectedRoute(
+	checkpoint *executionCheckpoint,
+	plan *Plan,
+	index int,
+	route string,
+) bool {
+	for _, edgeIndex := range plan.outgoing[index] {
+		expected := edgeSkipped
+		if plan.edges[edgeIndex].route == route {
+			expected = edgeTaken
+		}
+
+		if checkpoint.Edges[edgeIndex] != expected {
+			return false
+		}
+	}
+
+	return true
+}
+
+func nodeValuesEqual(left, right map[string]Value) bool {
+	if len(left) != len(right) || (left == nil) != (right == nil) {
+		return false
+	}
+
+	for name, leftValue := range left {
+		rightValue, ok := right[name]
+		if !ok || !leftValue.Equal(rightValue) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func executionCheckpointHasHandledFailure(checkpoint *executionCheckpoint) bool {
+	if checkpoint == nil {
+		return false
+	}
+
+	for _, node := range checkpoint.Nodes {
+		if node.Status == NodeStatusException {
+			return true
+		}
+	}
+
+	for _, paused := range checkpoint.Paused {
+		if executionCheckpointHasHandledFailure(paused.Child) ||
+			batchCheckpointHasHandledFailure(paused.Batch) ||
+			executionCheckpointHasHandledFailure(loopCheckpointChild(paused.Loop)) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func batchCheckpointHasHandledFailure(checkpoint *batchCheckpoint) bool {
+	if checkpoint == nil {
+		return false
+	}
+
+	for _, item := range checkpoint.Items {
+		if item.Status == batchItemFailed ||
+			executionCheckpointHasHandledFailure(item.Child) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func loopCheckpointChild(checkpoint *loopCheckpoint) *executionCheckpoint {
+	if checkpoint == nil {
+		return nil
+	}
+
+	return checkpoint.Child
 }
 
 func validateCheckpointPausedNodes(
@@ -837,7 +980,7 @@ func validateCheckpointDone(checkpoint *executionCheckpoint) error {
 
 	for _, node := range checkpoint.Nodes {
 		switch node.Status {
-		case NodeStatusSucceeded, NodeStatusFailed, NodeStatusSkipped:
+		case NodeStatusSucceeded, NodeStatusException, NodeStatusFailed, NodeStatusSkipped:
 			completed++
 		case NodeStatusPending, NodeStatusReady, NodeStatusRunning, NodeStatusInterrupted:
 		}

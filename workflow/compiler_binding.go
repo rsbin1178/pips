@@ -60,13 +60,42 @@ func (p *Plan) validateBindingContract(
 		return compileNodeError(node.definition.ID, "input %q has incompatible schema", name)
 	}
 
-	if binding.Source != BindingNodeOutput {
+	switch binding.Source {
+	case BindingNodeOutput:
+		return p.validateNodeOutputAvailability(
+			targetIndex,
+			node,
+			name,
+			sourceIndex,
+			dominators,
+		)
+	case BindingNodeError:
+		return p.validateNodeErrorAvailability(
+			targetIndex,
+			node,
+			name,
+			sourceIndex,
+			dominators,
+		)
+	default:
 		return nil
 	}
+}
 
+func (p *Plan) validateNodeOutputAvailability(
+	targetIndex int,
+	node planNode,
+	name string,
+	sourceIndex int,
+	dominators [][]bool,
+) error {
 	if node.isMerge {
 		if !p.isDirectPredecessor(sourceIndex, targetIndex) {
-			return compileNodeError(node.definition.ID, "merge input %q is not from an incoming node", name)
+			return compileNodeError(
+				node.definition.ID,
+				"merge input %q is not from an incoming node",
+				name,
+			)
 		}
 
 		return nil
@@ -80,8 +109,51 @@ func (p *Plan) validateBindingContract(
 	return nil
 }
 
+func (p *Plan) validateNodeErrorAvailability(
+	targetIndex int,
+	node planNode,
+	name string,
+	sourceIndex int,
+	dominators [][]bool,
+) error {
+	if node.isMerge {
+		if !p.isDirectPredecessorRoute(sourceIndex, targetIndex, RouteError) {
+			return compileNodeError(
+				node.definition.ID,
+				"merge input %q is not from an incoming error route",
+				name,
+			)
+		}
+
+		merge, ok := node.executor.(*compiledMerge)
+		if !ok {
+			return compileNodeError(
+				node.definition.ID,
+				"built-in Merge executor has unexpected type",
+			)
+		}
+
+		if merge.config.Mode == MergeExclusive {
+			return nil
+		}
+	}
+
+	if !p.nodeErrorGuaranteed(sourceIndex, targetIndex, dominators) {
+		return compileNodeError(
+			node.definition.ID,
+			"input %q is not guaranteed to have node error data",
+			name,
+		)
+	}
+
+	return nil
+}
+
 func (p *Plan) bindingSchema(binding Binding) (PortSchema, int, error) {
-	var schema PortSchema
+	var (
+		schema PortSchema
+		err    error
+	)
 
 	sourceIndex := -1
 
@@ -96,17 +168,9 @@ func (p *Plan) bindingSchema(binding Binding) (PortSchema, int, error) {
 			return PortSchema{}, sourceIndex, fmt.Errorf("unknown Workflow input %q", binding.Port)
 		}
 	case BindingNodeOutput:
-		var ok bool
-
-		sourceIndex, ok = p.nodeIndex[binding.Node]
-		if !ok {
-			return PortSchema{}, sourceIndex, fmt.Errorf("unknown source node %q", binding.Node)
-		}
-
-		schema, ok = p.nodes[sourceIndex].spec.Outputs[binding.Port]
-		if !ok {
-			return PortSchema{}, sourceIndex, fmt.Errorf("unknown node output %q.%s", binding.Node, binding.Port)
-		}
+		schema, sourceIndex, err = p.nodeOutputBindingSchema(binding)
+	case BindingNodeError:
+		schema, sourceIndex, err = p.nodeErrorBindingSchema(binding)
 	case BindingLoopVariable:
 		if p.loop == nil {
 			return PortSchema{}, sourceIndex, errors.New("loop variable is unavailable outside a direct Loop body")
@@ -122,6 +186,10 @@ func (p *Plan) bindingSchema(binding Binding) (PortSchema, int, error) {
 		return PortSchema{}, sourceIndex, fmt.Errorf("unknown binding source %q", binding.Source)
 	}
 
+	if err != nil {
+		return PortSchema{}, sourceIndex, err
+	}
+
 	if len(binding.Path) == 0 {
 		return schema, sourceIndex, nil
 	}
@@ -132,6 +200,45 @@ func (p *Plan) bindingSchema(binding Binding) (PortSchema, int, error) {
 	}
 
 	return subschema, sourceIndex, nil
+}
+
+func (p *Plan) nodeOutputBindingSchema(binding Binding) (PortSchema, int, error) {
+	sourceIndex, ok := p.nodeIndex[binding.Node]
+	if !ok {
+		return PortSchema{}, -1, fmt.Errorf("unknown source node %q", binding.Node)
+	}
+
+	schema, ok := p.nodes[sourceIndex].spec.Outputs[binding.Port]
+	if !ok {
+		return PortSchema{}, sourceIndex, fmt.Errorf(
+			"unknown node output %q.%s",
+			binding.Node,
+			binding.Port,
+		)
+	}
+
+	return schema, sourceIndex, nil
+}
+
+func (p *Plan) nodeErrorBindingSchema(binding Binding) (PortSchema, int, error) {
+	sourceIndex, ok := p.nodeIndex[binding.Node]
+	if !ok {
+		return PortSchema{}, -1, fmt.Errorf("unknown source node %q", binding.Node)
+	}
+
+	if p.nodes[sourceIndex].definition.Policy.Error != ErrorRoute {
+		return PortSchema{}, sourceIndex, fmt.Errorf(
+			"source node %q does not use error routing",
+			binding.Node,
+		)
+	}
+
+	schema, err := nodeErrorPortSchema(binding.Port)
+	if err != nil {
+		return PortSchema{}, sourceIndex, err
+	}
+
+	return schema, sourceIndex, nil
 }
 
 func (p *Plan) validateLoopControlEdges() error {
@@ -378,6 +485,32 @@ func (p *Plan) isDirectPredecessor(source, target int) bool {
 	return false
 }
 
+func (p *Plan) isDirectPredecessorRoute(source, target int, route string) bool {
+	for _, edgeIndex := range p.incoming[target] {
+		edge := p.edges[edgeIndex]
+		if edge.from == source && edge.route == route {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (p *Plan) nodeErrorGuaranteed(source, target int, dominators [][]bool) bool {
+	if !dominators[target][source] ||
+		!p.reachableFromRoute(source, RouteError, target) {
+		return false
+	}
+
+	for _, route := range p.nodes[source].spec.Routes {
+		if p.reachableFromRoute(source, route, target) {
+			return false
+		}
+	}
+
+	return true
+}
+
 func (p *Plan) reachableFromRoute(source int, route string, target int) bool {
 	if !p.hasOutgoingRoute(source, route) {
 		return false
@@ -432,21 +565,24 @@ func (p *Plan) validateMergeNode(nodeIndex int) error {
 	for outputName, output := range merge.config.Outputs {
 		for _, inputName := range output.Sources {
 			binding := node.bindings[inputName]
-			if binding.Source != BindingNodeOutput {
-				return compileNodeError(node.definition.ID, "merge source %q must bind a node output", inputName)
+			if binding.Source != BindingNodeOutput && binding.Source != BindingNodeError {
+				return compileNodeError(
+					node.definition.ID,
+					"merge source %q must bind node output or error data",
+					inputName,
+				)
 			}
 
-			sourceIndex := p.nodeIndex[binding.Node]
+			sourceSchema, sourceIndex, err := p.bindingSchema(binding)
+			if err != nil {
+				return compileNodeError(node.definition.ID, "merge source %q: %v", inputName, err)
+			}
+
 			if _, ok := predecessors[sourceIndex]; !ok {
 				return compileNodeError(node.definition.ID, "merge source %q is not an incoming node", inputName)
 			}
 
 			usedPredecessors[sourceIndex] = struct{}{}
-
-			sourceSchema, _, err := p.bindingSchema(binding)
-			if err != nil {
-				return compileNodeError(node.definition.ID, "merge source %q: %v", inputName, err)
-			}
 
 			if !schemaCompatible(sourceSchema, output.Schema) {
 				return compileNodeError(
