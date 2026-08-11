@@ -10,16 +10,19 @@ type EventType string
 
 // Event types.
 const (
-	EventRunStarted    EventType = "run_started"
-	EventRunCompleted  EventType = "run_completed"
-	EventRunFailed     EventType = "run_failed"
-	EventRunCanceled   EventType = "run_canceled"
-	EventNodeReady     EventType = "node_ready"
-	EventNodeStarted   EventType = "node_started"
-	EventNodeCompleted EventType = "node_completed"
-	EventNodeFailed    EventType = "node_failed"
-	EventNodeSkipped   EventType = "node_skipped"
-	EventNodeRetrying  EventType = "node_retrying"
+	EventRunStarted      EventType = "run_started"
+	EventRunCompleted    EventType = "run_completed"
+	EventRunFailed       EventType = "run_failed"
+	EventRunCanceled     EventType = "run_canceled"
+	EventRunInterrupted  EventType = "run_interrupted"
+	EventRunResumed      EventType = "run_resumed"
+	EventNodeReady       EventType = "node_ready"
+	EventNodeStarted     EventType = "node_started"
+	EventNodeCompleted   EventType = "node_completed"
+	EventNodeFailed      EventType = "node_failed"
+	EventNodeSkipped     EventType = "node_skipped"
+	EventNodeRetrying    EventType = "node_retrying"
+	EventNodeInterrupted EventType = "node_interrupted"
 )
 
 // ScopeKind identifies one nested execution boundary.
@@ -73,6 +76,7 @@ type Event struct {
 // EventPayload is the sealed union of Workflow Event variants.
 type EventPayload interface {
 	isEventPayload()
+	eventType() EventType
 }
 
 // RunStarted opens one Run.
@@ -86,6 +90,12 @@ type RunFailed struct{}
 
 // RunCanceled closes a canceled Run.
 type RunCanceled struct{}
+
+// RunInterrupted reports that a resumable checkpoint was saved.
+type RunInterrupted struct{}
+
+// RunResumed reports that a checkpoint was validated and execution continued.
+type RunResumed struct{}
 
 // NodeReady reports that every incoming control edge has resolved and at
 // least one was taken.
@@ -110,43 +120,47 @@ type NodeRetrying struct {
 	NextAttempt int
 }
 
-func (RunStarted) isEventPayload()    {}
-func (RunCompleted) isEventPayload()  {}
-func (RunFailed) isEventPayload()     {}
-func (RunCanceled) isEventPayload()   {}
-func (NodeReady) isEventPayload()     {}
-func (NodeStarted) isEventPayload()   {}
-func (NodeCompleted) isEventPayload() {}
-func (NodeFailed) isEventPayload()    {}
-func (NodeSkipped) isEventPayload()   {}
-func (NodeRetrying) isEventPayload()  {}
+// NodeInterrupted reports an invocation suspended by a dynamic or descendant
+// interruption.
+type NodeInterrupted struct{}
+
+func (RunStarted) isEventPayload()      {}
+func (RunCompleted) isEventPayload()    {}
+func (RunFailed) isEventPayload()       {}
+func (RunCanceled) isEventPayload()     {}
+func (RunInterrupted) isEventPayload()  {}
+func (RunResumed) isEventPayload()      {}
+func (NodeReady) isEventPayload()       {}
+func (NodeStarted) isEventPayload()     {}
+func (NodeCompleted) isEventPayload()   {}
+func (NodeFailed) isEventPayload()      {}
+func (NodeSkipped) isEventPayload()     {}
+func (NodeRetrying) isEventPayload()    {}
+func (NodeInterrupted) isEventPayload() {}
+
+func (RunStarted) eventType() EventType     { return EventRunStarted }
+func (RunCompleted) eventType() EventType   { return EventRunCompleted }
+func (RunFailed) eventType() EventType      { return EventRunFailed }
+func (RunCanceled) eventType() EventType    { return EventRunCanceled }
+func (RunInterrupted) eventType() EventType { return EventRunInterrupted }
+func (RunResumed) eventType() EventType     { return EventRunResumed }
+func (NodeReady) eventType() EventType      { return EventNodeReady }
+func (NodeStarted) eventType() EventType    { return EventNodeStarted }
+func (NodeCompleted) eventType() EventType  { return EventNodeCompleted }
+func (NodeFailed) eventType() EventType     { return EventNodeFailed }
+func (NodeSkipped) eventType() EventType    { return EventNodeSkipped }
+func (NodeRetrying) eventType() EventType   { return EventNodeRetrying }
+func (NodeInterrupted) eventType() EventType {
+	return EventNodeInterrupted
+}
 
 // Type returns the discriminator for e's payload.
 func (e Event) Type() EventType {
-	switch e.payload.(type) {
-	case RunStarted:
-		return EventRunStarted
-	case RunCompleted:
-		return EventRunCompleted
-	case RunFailed:
-		return EventRunFailed
-	case RunCanceled:
-		return EventRunCanceled
-	case NodeReady:
-		return EventNodeReady
-	case NodeStarted:
-		return EventNodeStarted
-	case NodeCompleted:
-		return EventNodeCompleted
-	case NodeFailed:
-		return EventNodeFailed
-	case NodeSkipped:
-		return EventNodeSkipped
-	case NodeRetrying:
-		return EventNodeRetrying
-	default:
+	if e.payload == nil {
 		return ""
 	}
+
+	return e.payload.eventType()
 }
 
 // Payload returns e's sealed semantic payload.
