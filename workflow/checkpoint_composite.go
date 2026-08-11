@@ -67,6 +67,7 @@ func validateBatchCheckpoint(
 	checkpoint *batchCheckpoint,
 	node planNode,
 	inputs map[string]Value,
+	mode checkpointIdentityMode,
 ) error {
 	batch, ok := node.executor.(*compiledBatch)
 	if !ok {
@@ -87,6 +88,7 @@ func validateBatchCheckpoint(
 			resultSchema,
 			batch.child,
 			batch.config.ErrorMode,
+			mode,
 		); err != nil {
 			return err
 		}
@@ -101,6 +103,7 @@ func validateBatchCheckpointItem(
 	resultSchema PortSchema,
 	child *Plan,
 	errorMode BatchErrorMode,
+	mode checkpointIdentityMode,
 ) error {
 	if item.Index != index {
 		return errors.New("checkpoint Batch item index mismatch")
@@ -118,7 +121,7 @@ func validateBatchCheckpointItem(
 	case batchItemSucceeded:
 		return validateCompletedBatchItem(item, resultSchema)
 	case batchItemInterrupted:
-		return validateInterruptedBatchItem(item, child)
+		return validateInterruptedBatchItem(item, child, mode)
 	default:
 		return errors.New("checkpoint Batch item has invalid status")
 	}
@@ -146,12 +149,16 @@ func validateCompletedBatchItem(item batchItemCheckpoint, resultSchema PortSchem
 	return nil
 }
 
-func validateInterruptedBatchItem(item batchItemCheckpoint, child *Plan) error {
+func validateInterruptedBatchItem(
+	item batchItemCheckpoint,
+	child *Plan,
+	mode checkpointIdentityMode,
+) error {
 	if item.Result != nil || item.Child == nil || interruptInfoEmpty(item.Info) {
 		return errors.New("checkpoint Batch interrupted item state mismatch")
 	}
 
-	if err := validateExecutionCheckpoint(item.Child, child); err != nil {
+	if err := validateExecutionCheckpoint(item.Child, child, mode); err != nil {
 		return err
 	}
 
@@ -166,6 +173,7 @@ func validateLoopCheckpoint(
 	checkpoint *loopCheckpoint,
 	node planNode,
 	inputs map[string]Value,
+	mode checkpointIdentityMode,
 ) error {
 	loop, ok := node.executor.(*compiledLoop)
 	if !ok {
@@ -188,7 +196,7 @@ func validateLoopCheckpoint(
 		return err
 	}
 
-	if err := validateExecutionCheckpoint(checkpoint.Child, loop.child); err != nil {
+	if err := validateExecutionCheckpoint(checkpoint.Child, loop.child, mode); err != nil {
 		return err
 	}
 

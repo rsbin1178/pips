@@ -9,7 +9,54 @@ import (
 	"time"
 )
 
-const checkpointVersion = 2
+const (
+	checkpointVersion       = 3
+	legacyCheckpointVersion = 2
+)
+
+type checkpointIdentityMode uint8
+
+const (
+	checkpointIdentityLegacy checkpointIdentityMode = iota + 1
+	checkpointIdentityCurrent
+)
+
+type checkpointFingerprint struct {
+	value     string
+	isPresent bool
+}
+
+func newCheckpointFingerprint(value string) checkpointFingerprint {
+	return checkpointFingerprint{value: value, isPresent: true}
+}
+
+func (f checkpointFingerprint) IsZero() bool {
+	return !f.isPresent
+}
+
+func (f checkpointFingerprint) MarshalJSON() ([]byte, error) {
+	return json.Marshal(f.value)
+}
+
+func (f *checkpointFingerprint) UnmarshalJSON(data []byte) error {
+	if f == nil {
+		return errors.New("nil checkpoint fingerprint")
+	}
+
+	if string(data) == "null" {
+		return errors.New("checkpoint fingerprint must be a string")
+	}
+
+	var value string
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+
+	f.value = value
+	f.isPresent = true
+
+	return nil
+}
 
 var checkpointJSONLimits = jsonLimits{
 	maxBytes: 16 << 20,
@@ -23,7 +70,8 @@ type workflowCheckpoint struct {
 	DefinitionID          DefinitionID          `json:"definition_id"`
 	Revision              Revision              `json:"revision"`
 	DefinitionFingerprint string                `json:"definition_fingerprint"`
-	RegistryFingerprint   string                `json:"registry_fingerprint"`
+	RegistryFingerprint   checkpointFingerprint `json:"registry_fingerprint,omitzero"`
+	ContractFingerprint   checkpointFingerprint `json:"contract_fingerprint,omitzero"`
 	PlanFingerprint       string                `json:"plan_fingerprint"`
 	StartedAt             time.Time             `json:"started_at"`
 	TotalSteps            int64                 `json:"total_steps"`
@@ -283,7 +331,8 @@ func decodeWorkflowCheckpoint(
 		return nil, fmt.Errorf("decode checkpoint: %w", err)
 	}
 
-	if err := validateWorkflowCheckpointMetadata(&checkpoint, plan, runID); err != nil {
+	mode, err := validateWorkflowCheckpointMetadata(&checkpoint, plan, runID)
+	if err != nil {
 		return nil, err
 	}
 
@@ -295,7 +344,7 @@ func decodeWorkflowCheckpoint(
 		return nil, err
 	}
 
-	if err := validateExecutionCheckpoint(&checkpoint.Execution, plan); err != nil {
+	if err := validateExecutionCheckpoint(&checkpoint.Execution, plan, mode); err != nil {
 		return nil, err
 	}
 
@@ -308,6 +357,7 @@ func decodeWorkflowCheckpoint(
 		checkpoint.PartialRun,
 		plan,
 		&checkpoint.Execution,
+		mode,
 	); err != nil {
 		return nil, err
 	}
@@ -319,7 +369,7 @@ func decodeWorkflowCheckpoint(
 		return nil, err
 	}
 
-	if err := validateNodeDebugCheckpoint(checkpoint.NodeDebug, plan); err != nil {
+	if err := validateNodeDebugCheckpoint(checkpoint.NodeDebug, plan, mode); err != nil {
 		return nil, err
 	}
 
@@ -330,35 +380,88 @@ func validateWorkflowCheckpointMetadata(
 	checkpoint *workflowCheckpoint,
 	plan *Plan,
 	runID string,
-) error {
-	if checkpoint.Version != checkpointVersion {
-		return fmt.Errorf("unsupported checkpoint version %d", checkpoint.Version)
+) (checkpointIdentityMode, error) {
+	mode, err := checkpointMode(checkpoint.Version)
+	if err != nil {
+		return 0, err
 	}
 
 	if checkpoint.RunID != runID || checkpoint.RunID == "" {
-		return errors.New("checkpoint run identity mismatch")
+		return 0, errors.New("checkpoint run identity mismatch")
 	}
 
-	if !workflowCheckpointMatchesPlan(checkpoint, plan) {
-		return errors.New("checkpoint plan identity mismatch")
+	if !workflowCheckpointMatchesPlan(checkpoint, plan, mode) {
+		return 0, errors.New("checkpoint plan identity mismatch")
 	}
 
 	if checkpoint.StartedAt.IsZero() || checkpoint.TotalSteps < 0 {
-		return errors.New("checkpoint has invalid run accounting")
+		return 0, errors.New("checkpoint has invalid run accounting")
 	}
 
 	if interruptInfoEmpty(checkpoint.Interruption) {
-		return errors.New("checkpoint has no interruption")
+		return 0, errors.New("checkpoint has no interruption")
 	}
 
-	return nil
+	return mode, nil
 }
 
-func workflowCheckpointMatchesPlan(checkpoint *workflowCheckpoint, plan *Plan) bool {
-	return checkpoint.DefinitionID == plan.definition.ID &&
+func checkpointMode(version int) (checkpointIdentityMode, error) {
+	switch version {
+	case legacyCheckpointVersion:
+		return checkpointIdentityLegacy, nil
+	case checkpointVersion:
+		return checkpointIdentityCurrent, nil
+	default:
+		return 0, fmt.Errorf("unsupported checkpoint version %d", version)
+	}
+}
+
+func workflowCheckpointMatchesPlan(
+	checkpoint *workflowCheckpoint,
+	plan *Plan,
+	mode checkpointIdentityMode,
+) bool {
+	if !workflowCheckpointMatchesDefinition(checkpoint, plan) {
+		return false
+	}
+
+	switch mode {
+	case checkpointIdentityLegacy:
+		return workflowCheckpointMatchesLegacyPlan(checkpoint, plan)
+	case checkpointIdentityCurrent:
+		return workflowCheckpointMatchesCurrentPlan(checkpoint, plan)
+	default:
+		return false
+	}
+}
+
+func workflowCheckpointMatchesDefinition(
+	checkpoint *workflowCheckpoint,
+	plan *Plan,
+) bool {
+	return checkpoint != nil && plan != nil &&
+		checkpoint.DefinitionID == plan.definition.ID &&
 		checkpoint.Revision == plan.definition.Revision &&
-		checkpoint.DefinitionFingerprint == plan.definitionFingerprint &&
-		checkpoint.RegistryFingerprint == plan.registryFingerprint &&
+		checkpoint.DefinitionFingerprint == plan.definitionFingerprint
+}
+
+func workflowCheckpointMatchesLegacyPlan(
+	checkpoint *workflowCheckpoint,
+	plan *Plan,
+) bool {
+	return checkpoint.RegistryFingerprint.isPresent &&
+		!checkpoint.ContractFingerprint.isPresent &&
+		checkpoint.RegistryFingerprint.value == plan.registryFingerprint &&
+		checkpoint.PlanFingerprint == plan.legacyFingerprint
+}
+
+func workflowCheckpointMatchesCurrentPlan(
+	checkpoint *workflowCheckpoint,
+	plan *Plan,
+) bool {
+	return !checkpoint.RegistryFingerprint.isPresent &&
+		checkpoint.ContractFingerprint.isPresent &&
+		checkpoint.ContractFingerprint.value == plan.referencedContractFingerprint &&
 		checkpoint.PlanFingerprint == plan.fingerprint
 }
 
@@ -491,8 +594,12 @@ func validateNodeAddress(address NodeAddress) error {
 	return nil
 }
 
-func validateExecutionCheckpoint(checkpoint *executionCheckpoint, plan *Plan) error {
-	if err := validateExecutionCheckpointHeader(checkpoint, plan); err != nil {
+func validateExecutionCheckpoint(
+	checkpoint *executionCheckpoint,
+	plan *Plan,
+	mode checkpointIdentityMode,
+) error {
+	if err := validateExecutionCheckpointHeader(checkpoint, plan, mode); err != nil {
 		return err
 	}
 
@@ -505,7 +612,7 @@ func validateExecutionCheckpoint(checkpoint *executionCheckpoint, plan *Plan) er
 		return err
 	}
 
-	paused, err := validateCheckpointPausedNodes(checkpoint, plan)
+	paused, err := validateCheckpointPausedNodes(checkpoint, plan, mode)
 	if err != nil {
 		return err
 	}
@@ -524,8 +631,9 @@ func validateExecutionCheckpoint(checkpoint *executionCheckpoint, plan *Plan) er
 func validateExecutionCheckpointHeader(
 	checkpoint *executionCheckpoint,
 	plan *Plan,
+	mode checkpointIdentityMode,
 ) error {
-	if checkpoint == nil || checkpoint.PlanFingerprint != plan.fingerprint {
+	if checkpoint == nil || checkpoint.PlanFingerprint != planCheckpointFingerprint(plan, mode) {
 		return errors.New("checkpoint execution plan mismatch")
 	}
 
@@ -780,6 +888,7 @@ func loopCheckpointChild(checkpoint *loopCheckpoint) *executionCheckpoint {
 func validateCheckpointPausedNodes(
 	checkpoint *executionCheckpoint,
 	plan *Plan,
+	mode checkpointIdentityMode,
 ) (map[int]struct{}, error) {
 	paused := make(map[int]struct{}, len(checkpoint.Paused))
 	for _, node := range checkpoint.Paused {
@@ -791,7 +900,7 @@ func validateCheckpointPausedNodes(
 			return nil, errors.New("checkpoint has duplicate interrupted node")
 		}
 
-		if err := validateCheckpointPausedNode(checkpoint, plan, node); err != nil {
+		if err := validateCheckpointPausedNode(checkpoint, plan, node, mode); err != nil {
 			return nil, err
 		}
 
@@ -805,6 +914,7 @@ func validateCheckpointPausedNode(
 	checkpoint *executionCheckpoint,
 	plan *Plan,
 	node pausedNodeCheckpoint,
+	mode checkpointIdentityMode,
 ) error {
 	if !validPausedNodeAccounting(checkpoint.Nodes[node.Index], node) {
 		return errors.New("checkpoint interrupted node state mismatch")
@@ -814,7 +924,7 @@ func validateCheckpointPausedNode(
 		return fmt.Errorf("checkpoint interrupted node inputs: %w", err)
 	}
 
-	if err := validatePausedCompositeState(node, plan.nodes[node.Index]); err != nil {
+	if err := validatePausedCompositeState(node, plan.nodes[node.Index], mode); err != nil {
 		return err
 	}
 
@@ -892,7 +1002,11 @@ func validatePausedNodeResumeShape(node pausedNodeCheckpoint) error {
 	return nil
 }
 
-func validatePausedCompositeState(node pausedNodeCheckpoint, planNode planNode) error {
+func validatePausedCompositeState(
+	node pausedNodeCheckpoint,
+	planNode planNode,
+	mode checkpointIdentityMode,
+) error {
 	states := 0
 	if node.Child != nil {
 		states++
@@ -902,7 +1016,7 @@ func validatePausedCompositeState(node pausedNodeCheckpoint, planNode planNode) 
 			return errors.New("checkpoint child state belongs to a non-composite node")
 		}
 
-		if err := validateExecutionCheckpoint(node.Child, children[0]); err != nil {
+		if err := validateExecutionCheckpoint(node.Child, children[0], mode); err != nil {
 			return err
 		}
 	}
@@ -910,7 +1024,7 @@ func validatePausedCompositeState(node pausedNodeCheckpoint, planNode planNode) 
 	if node.Batch != nil {
 		states++
 
-		if err := validateBatchCheckpoint(node.Batch, planNode, node.Inputs); err != nil {
+		if err := validateBatchCheckpoint(node.Batch, planNode, node.Inputs, mode); err != nil {
 			return err
 		}
 	}
@@ -918,7 +1032,7 @@ func validatePausedCompositeState(node pausedNodeCheckpoint, planNode planNode) 
 	if node.Loop != nil {
 		states++
 
-		if err := validateLoopCheckpoint(node.Loop, planNode, node.Inputs); err != nil {
+		if err := validateLoopCheckpoint(node.Loop, planNode, node.Inputs, mode); err != nil {
 			return err
 		}
 	}
@@ -928,6 +1042,21 @@ func validatePausedCompositeState(node pausedNodeCheckpoint, planNode planNode) 
 	}
 
 	return nil
+}
+
+func planCheckpointFingerprint(plan *Plan, mode checkpointIdentityMode) string {
+	if plan == nil {
+		return ""
+	}
+
+	switch mode {
+	case checkpointIdentityLegacy:
+		return plan.legacyFingerprint
+	case checkpointIdentityCurrent:
+		return plan.fingerprint
+	default:
+		return ""
+	}
 }
 
 func validateCheckpointFrontiers(

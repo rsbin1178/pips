@@ -121,6 +121,85 @@ func TestNodeDebugPlanGettersAreDetachedAndDeterministic(t *testing.T) {
 	}
 }
 
+func TestNodeDebugFingerprintUsesScopedSourceIdentity(t *testing.T) {
+	t.Parallel()
+
+	stringSchema := mustSchema(t, `{"type":"string"}`)
+	definition := singleActionDefinition(
+		t,
+		"debug-scoped",
+		stringSchema,
+		workflow.NodePolicy{},
+	)
+	baseAction := constantAction("debug-scoped", "base", stringSchema)
+
+	baseRegistry, err := workflow.NewDefaultRegistry(baseAction)
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry() error = %v", err)
+	}
+
+	expandedRegistry := newCheckpointExpandedRegistry(t, baseAction)
+
+	basePlan := compileFingerprintPlan(t, definition, baseRegistry)
+	expandedPlan := compileFingerprintPlan(t, definition, expandedRegistry)
+
+	baseDebug, err := workflow.PrepareNodeDebug(basePlan, workflow.NewNodePath("action"))
+	if err != nil {
+		t.Fatalf("PrepareNodeDebug(base) error = %v", err)
+	}
+
+	expandedDebug, err := workflow.PrepareNodeDebug(
+		expandedPlan,
+		workflow.NewNodePath("action"),
+	)
+	if err != nil {
+		t.Fatalf("PrepareNodeDebug(expanded) error = %v", err)
+	}
+
+	if basePlan.RegistryFingerprint() == expandedPlan.RegistryFingerprint() {
+		t.Fatal("full Registry fingerprint did not change")
+	}
+
+	if baseDebug.SourcePlanFingerprint() != expandedDebug.SourcePlanFingerprint() ||
+		baseDebug.Fingerprint() != expandedDebug.Fingerprint() {
+		t.Fatalf(
+			"unused contracts changed Node Debug identity: source=%q/%q debug=%q/%q",
+			baseDebug.SourcePlanFingerprint(),
+			expandedDebug.SourcePlanFingerprint(),
+			baseDebug.Fingerprint(),
+			expandedDebug.Fingerprint(),
+		)
+	}
+
+	changedAction := &fakeAction{spec: actionSpec(
+		"debug-scoped",
+		map[string]workflow.PortSchema{},
+		map[string]workflow.PortSchema{
+			"result": stringSchema,
+			"extra":  stringSchema,
+		},
+	)}
+
+	changedRegistry, err := workflow.NewDefaultRegistry(changedAction)
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry(changed) error = %v", err)
+	}
+
+	changedPlan := compileFingerprintPlan(t, definition, changedRegistry)
+
+	changedDebug, err := workflow.PrepareNodeDebug(
+		changedPlan,
+		workflow.NewNodePath("action"),
+	)
+	if err != nil {
+		t.Fatalf("PrepareNodeDebug(changed) error = %v", err)
+	}
+
+	if baseDebug.Fingerprint() == changedDebug.Fingerprint() {
+		t.Fatal("used contract change did not change Node Debug identity")
+	}
+}
+
 func TestDebugNodeBindingPathAcceptsFinalPortValue(t *testing.T) {
 	t.Parallel()
 

@@ -85,7 +85,7 @@ func (e *execution) finishInterrupted(ctx context.Context) (RunResult, error) {
 		DefinitionID:          e.plan.definition.ID,
 		Revision:              e.plan.definition.Revision,
 		DefinitionFingerprint: e.plan.definitionFingerprint,
-		RegistryFingerprint:   e.plan.registryFingerprint,
+		ContractFingerprint:   newCheckpointFingerprint(e.plan.referencedContractFingerprint),
 		PlanFingerprint:       e.plan.fingerprint,
 		StartedAt:             e.result.StartedAt,
 		TotalSteps:            e.state.steps.Load(),

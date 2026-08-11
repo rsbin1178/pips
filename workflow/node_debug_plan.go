@@ -11,7 +11,8 @@ import (
 
 const (
 	nodeDebugDefinitionStrategy = "pips.workflow/node-debug-definition/v1"
-	nodeDebugPlanStrategy       = "pips.workflow/node-debug-plan/v1"
+	nodeDebugPlanStrategy       = "pips.workflow/node-debug-plan/v2"
+	legacyNodeDebugPlanStrategy = "pips.workflow/node-debug-plan/v1"
 )
 
 func resolveNodeDebugTarget(source *Plan, path []NodeID) (*Plan, int, error) {
@@ -75,6 +76,100 @@ func buildNodeDebugPlan(
 	targetIndex int,
 	target NodePath,
 ) (*NodeDebugPlan, error) {
+	parts, err := prepareNodeDebugPlanParts(source, containing, targetIndex)
+	if err != nil {
+		return nil, err
+	}
+
+	definitionFingerprint, err := nodeDebugDefinitionFingerprint(
+		source,
+		target,
+		parts.definition,
+		parts.spec,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("%w: fingerprint node debug definition: %w", ErrCompile, err)
+	}
+
+	_, before := containing.interruptBefore[targetIndex]
+	_, after := containing.interruptAfter[targetIndex]
+
+	planFingerprint, err := nodeDebugPlanFingerprint(
+		source,
+		definitionFingerprint,
+		parts.spec.OptionalInputs,
+		before,
+		after,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("%w: fingerprint node debug plan: %w", ErrCompile, err)
+	}
+
+	legacyPlanFingerprint, err := legacyNodeDebugPlanFingerprint(
+		source,
+		definitionFingerprint,
+		parts.spec.OptionalInputs,
+		before,
+		after,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("%w: fingerprint legacy node debug plan: %w", ErrCompile, err)
+	}
+
+	internalNode := planNode{
+		definition:  cloneNodeDefinition(parts.definition),
+		executor:    parts.selected.executor,
+		spec:        cloneNodeSpec(parts.selected.spec),
+		bindings:    cloneBindings(parts.bindings),
+		isMerge:     parts.selected.isMerge,
+		isComposite: parts.selected.isComposite,
+	}
+	internalPlan := &Plan{
+		definition:                    parts.snapshot,
+		definitionFingerprint:         definitionFingerprint,
+		registryFingerprint:           source.registryFingerprint,
+		referencedContractFingerprint: source.referencedContractFingerprint,
+		fingerprint:                   planFingerprint,
+		legacyFingerprint:             legacyPlanFingerprint,
+		nodes:                         []planNode{internalNode},
+		nodeIndex:                     map[NodeID]int{parts.definition.ID: 0},
+		edges:                         []planEdge{},
+		incoming:                      [][]int{{}},
+		outgoing:                      [][]int{{}},
+		startIndex:                    0,
+		endIndex:                      0,
+		interruptBefore:               interruptSet(before),
+		interruptAfter:                interruptSet(after),
+	}
+	internalPlan.nodeDebug = &nodeDebugPlanMetadata{
+		fingerprint:       planFingerprint,
+		legacyFingerprint: legacyPlanFingerprint,
+		target:            NewNodePath(target.nodes...),
+		spec:              cloneNodeDebugSpec(parts.spec),
+	}
+
+	return &NodeDebugPlan{
+		sourcePlanFingerprint: source.fingerprint,
+		target:                NewNodePath(target.nodes...),
+		spec:                  cloneNodeDebugSpec(parts.spec),
+		plan:                  internalPlan,
+		globalLimits:          source.definition.Limits,
+	}, nil
+}
+
+type nodeDebugPlanParts struct {
+	selected   planNode
+	definition NodeDefinition
+	bindings   map[string]Binding
+	spec       NodeDebugSpec
+	snapshot   Definition
+}
+
+func prepareNodeDebugPlanParts(
+	source *Plan,
+	containing *Plan,
+	targetIndex int,
+) (nodeDebugPlanParts, error) {
 	selected := containing.nodes[targetIndex]
 	definition := cloneNodeDefinition(selected.definition)
 	bindings := make(map[string]Binding, len(selected.bindings))
@@ -105,7 +200,6 @@ func buildNodeDebugPlan(
 		Outputs:        cloneSchemas(selected.spec.Outputs),
 		Routes:         slices.Clone(selected.spec.Routes),
 	}
-
 	internalDefinition := Definition{
 		Schema:   source.definition.Schema,
 		ID:       source.definition.ID,
@@ -120,68 +214,19 @@ func buildNodeDebugPlan(
 
 	snapshot, err := cloneDefinition(internalDefinition)
 	if err != nil {
-		return nil, fmt.Errorf("%w: node debug definition: %w", ErrCompile, err)
+		return nodeDebugPlanParts{}, fmt.Errorf(
+			"%w: node debug definition: %w",
+			ErrCompile,
+			err,
+		)
 	}
 
-	definitionFingerprint, err := nodeDebugDefinitionFingerprint(
-		source,
-		target,
-		definition,
-		spec,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("%w: fingerprint node debug definition: %w", ErrCompile, err)
-	}
-
-	_, before := containing.interruptBefore[targetIndex]
-	_, after := containing.interruptAfter[targetIndex]
-
-	planFingerprint, err := nodeDebugPlanFingerprint(
-		source,
-		definitionFingerprint,
-		optionalInputs,
-		before,
-		after,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("%w: fingerprint node debug plan: %w", ErrCompile, err)
-	}
-
-	internalNode := planNode{
-		definition:  cloneNodeDefinition(definition),
-		executor:    selected.executor,
-		spec:        cloneNodeSpec(selected.spec),
-		bindings:    cloneBindings(bindings),
-		isMerge:     selected.isMerge,
-		isComposite: selected.isComposite,
-	}
-	internalPlan := &Plan{
-		definition:            snapshot,
-		definitionFingerprint: definitionFingerprint,
-		registryFingerprint:   source.registryFingerprint,
-		fingerprint:           planFingerprint,
-		nodes:                 []planNode{internalNode},
-		nodeIndex:             map[NodeID]int{definition.ID: 0},
-		edges:                 []planEdge{},
-		incoming:              [][]int{{}},
-		outgoing:              [][]int{{}},
-		startIndex:            0,
-		endIndex:              0,
-		interruptBefore:       interruptSet(before),
-		interruptAfter:        interruptSet(after),
-	}
-	internalPlan.nodeDebug = &nodeDebugPlanMetadata{
-		fingerprint: planFingerprint,
-		target:      NewNodePath(target.nodes...),
-		spec:        cloneNodeDebugSpec(spec),
-	}
-
-	return &NodeDebugPlan{
-		sourcePlanFingerprint: source.fingerprint,
-		target:                NewNodePath(target.nodes...),
-		spec:                  cloneNodeDebugSpec(spec),
-		plan:                  internalPlan,
-		globalLimits:          source.definition.Limits,
+	return nodeDebugPlanParts{
+		selected:   selected,
+		definition: definition,
+		bindings:   bindings,
+		spec:       spec,
+		snapshot:   snapshot,
 	}, nil
 }
 
@@ -220,7 +265,7 @@ func nodeDebugPlanFingerprint(
 	return nodeDebugFingerprint(struct {
 		Strategy        string   `json:"strategy"`
 		Definition      string   `json:"definition"`
-		Registry        string   `json:"registry"`
+		Contract        string   `json:"contract"`
 		SourcePlan      string   `json:"source_plan"`
 		OptionalInputs  []string `json:"optional_inputs"`
 		InterruptBefore bool     `json:"interrupt_before"`
@@ -228,8 +273,34 @@ func nodeDebugPlanFingerprint(
 	}{
 		Strategy:        nodeDebugPlanStrategy,
 		Definition:      definitionFingerprint,
-		Registry:        source.registryFingerprint,
+		Contract:        source.referencedContractFingerprint,
 		SourcePlan:      source.fingerprint,
+		OptionalInputs:  slices.Clone(optionalInputs),
+		InterruptBefore: before,
+		InterruptAfter:  after,
+	})
+}
+
+func legacyNodeDebugPlanFingerprint(
+	source *Plan,
+	definitionFingerprint string,
+	optionalInputs []string,
+	before bool,
+	after bool,
+) (string, error) {
+	return nodeDebugFingerprint(struct {
+		Strategy        string   `json:"strategy"`
+		Definition      string   `json:"definition"`
+		Registry        string   `json:"registry"`
+		SourcePlan      string   `json:"source_plan"`
+		OptionalInputs  []string `json:"optional_inputs"`
+		InterruptBefore bool     `json:"interrupt_before"`
+		InterruptAfter  bool     `json:"interrupt_after"`
+	}{
+		Strategy:        legacyNodeDebugPlanStrategy,
+		Definition:      definitionFingerprint,
+		Registry:        source.registryFingerprint,
+		SourcePlan:      source.legacyFingerprint,
 		OptionalInputs:  slices.Clone(optionalInputs),
 		InterruptBefore: before,
 		InterruptAfter:  after,

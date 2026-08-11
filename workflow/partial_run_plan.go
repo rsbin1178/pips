@@ -14,8 +14,9 @@ const (
 )
 
 type partialRunPlanMetadata struct {
-	sourcePlanFingerprint string
-	destination           NodeID
+	sourcePlanFingerprint       string
+	legacySourcePlanFingerprint string
+	destination                 NodeID
 }
 
 func derivePartialRunPlan(source *Plan, destination NodeID) (*Plan, error) {
@@ -42,28 +43,39 @@ func derivePartialRunPlan(source *Plan, destination NodeID) (*Plan, error) {
 		return nil, fmt.Errorf("%w: fingerprint partial definition: %w", ErrCompile, err)
 	}
 
-	planFingerprint, err := partialRunPlanFingerprint(source, destination)
+	planFingerprint, err := partialRunPlanFingerprint(source.fingerprint, destination)
 	if err != nil {
 		return nil, fmt.Errorf("%w: fingerprint partial plan: %w", ErrCompile, err)
 	}
 
+	legacyPlanFingerprint, err := partialRunPlanFingerprint(
+		source.legacyFingerprint,
+		destination,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("%w: fingerprint legacy partial plan: %w", ErrCompile, err)
+	}
+
 	plan := &Plan{
-		definition:            definition,
-		definitionFingerprint: definitionFingerprint,
-		registryFingerprint:   source.registryFingerprint,
-		fingerprint:           planFingerprint,
-		nodes:                 nodes,
-		nodeIndex:             nodeIndex,
-		edges:                 edges,
-		incoming:              incoming,
-		outgoing:              outgoing,
-		startIndex:            oldToNew[source.startIndex],
-		endIndex:              oldToNew[destinationIndex],
-		interruptBefore:       remapInterruptSet(source.interruptBefore, oldToNew),
-		interruptAfter:        remapInterruptSet(source.interruptAfter, oldToNew),
+		definition:                    definition,
+		definitionFingerprint:         definitionFingerprint,
+		registryFingerprint:           source.registryFingerprint,
+		referencedContractFingerprint: source.referencedContractFingerprint,
+		fingerprint:                   planFingerprint,
+		legacyFingerprint:             legacyPlanFingerprint,
+		nodes:                         nodes,
+		nodeIndex:                     nodeIndex,
+		edges:                         edges,
+		incoming:                      incoming,
+		outgoing:                      outgoing,
+		startIndex:                    oldToNew[source.startIndex],
+		endIndex:                      oldToNew[destinationIndex],
+		interruptBefore:               remapInterruptSet(source.interruptBefore, oldToNew),
+		interruptAfter:                remapInterruptSet(source.interruptAfter, oldToNew),
 		partialRun: &partialRunPlanMetadata{
-			sourcePlanFingerprint: source.fingerprint,
-			destination:           destination,
+			sourcePlanFingerprint:       source.fingerprint,
+			legacySourcePlanFingerprint: source.legacyFingerprint,
+			destination:                 destination,
 		},
 	}
 
@@ -177,14 +189,14 @@ func partialRunDefinitionFingerprint(source *Plan, destination NodeID) (string, 
 	})
 }
 
-func partialRunPlanFingerprint(source *Plan, destination NodeID) (string, error) {
+func partialRunPlanFingerprint(sourceFingerprint string, destination NodeID) (string, error) {
 	return partialRunFingerprint(struct {
 		Strategy    string `json:"strategy"`
 		Source      string `json:"source"`
 		Destination NodeID `json:"destination"`
 	}{
 		Strategy:    partialRunPlanStrategy,
-		Source:      source.fingerprint,
+		Source:      sourceFingerprint,
 		Destination: destination,
 	})
 }

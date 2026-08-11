@@ -26,9 +26,10 @@ type NodeDebugPlan struct {
 }
 
 type nodeDebugPlanMetadata struct {
-	fingerprint string
-	target      NodePath
-	spec        NodeDebugSpec
+	fingerprint       string
+	legacyFingerprint string
+	target            NodePath
+	spec              NodeDebugSpec
 }
 
 // NodeDebugExecution is one detached node execution record. ErrorMessage may
