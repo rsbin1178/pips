@@ -65,6 +65,7 @@ type runState struct {
 	eventMu       sync.Mutex
 	resumeTargets map[string]ResumeTarget
 	nodeDebug     *nodeDebugCollector
+	partialRun    *partialRunState
 }
 
 type nodeRuntime struct {
@@ -216,6 +217,10 @@ func (e *execution) run(ctx context.Context) (RunResult, error) {
 
 		if e.pauseRequested && e.running == 0 {
 			return e.finishInterrupted(ctx)
+		}
+
+		if !e.pauseRequested && e.completePartialReady() {
+			continue
 		}
 
 		if !e.pauseRequested {
@@ -375,6 +380,13 @@ func (e *execution) completeNode(completion nodeCompletion) error {
 		e.resolveOutgoing(completion.index, completion.output.Route)
 		e.done++
 		delete(e.beforePassed, completion.index)
+		e.recordPartialExecuted(
+			completion.index,
+			completion.attempts,
+			completion.output.Values,
+			completion.output.Route,
+			true,
+		)
 		e.recordNodeDebug(
 			completion.index,
 			completion.inputs,
@@ -400,6 +412,13 @@ func (e *execution) completeNode(completion nodeCompletion) error {
 	case ErrorRoute:
 		e.resolveOutgoing(completion.index, RouteError)
 		e.done++
+		e.recordPartialExecuted(
+			completion.index,
+			completion.attempts,
+			nil,
+			RouteError,
+			false,
+		)
 		e.recordNodeDebug(
 			completion.index,
 			completion.inputs,
@@ -413,6 +432,13 @@ func (e *execution) completeNode(completion nodeCompletion) error {
 		e.outputs[completion.index] = cloneValues(nodeDefinition.Policy.DefaultOutputs)
 		e.resolveOutgoing(completion.index, RouteSuccess)
 		e.done++
+		e.recordPartialExecuted(
+			completion.index,
+			completion.attempts,
+			nodeDefinition.Policy.DefaultOutputs,
+			RouteSuccess,
+			false,
+		)
 		e.recordNodeDebug(
 			completion.index,
 			completion.inputs,
@@ -423,6 +449,13 @@ func (e *execution) completeNode(completion nodeCompletion) error {
 
 		return nil
 	default:
+		e.recordPartialExecuted(
+			completion.index,
+			completion.attempts,
+			nil,
+			"",
+			false,
+		)
 		e.recordNodeDebug(
 			completion.index,
 			completion.inputs,
@@ -450,6 +483,7 @@ func (e *execution) recordHostRerun(completion nodeCompletion) {
 	}
 	e.appendRerunAddress(completion.index)
 	e.pauseRequested = true
+	e.recordPartialExecuted(completion.index, completion.attempts, nil, "", false)
 	e.recordNodeDebug(completion.index, completion.inputs, nil, "", "")
 }
 
@@ -487,6 +521,7 @@ func (e *execution) recordDynamicInterruption(completion nodeCompletion) {
 	}
 
 	e.pauseRequested = true
+	e.recordPartialExecuted(completion.index, completion.attempts, nil, "", false)
 	e.recordNodeDebug(completion.index, completion.inputs, nil, "", "")
 }
 
@@ -518,6 +553,7 @@ func (e *execution) recordNodeInterruption(completion nodeCompletion) {
 	)
 	e.mergeInterruptInfo(completion.pause.info)
 	e.pauseRequested = true
+	e.recordPartialExecuted(completion.index, completion.attempts, nil, "", false)
 	e.recordNodeDebug(completion.index, completion.inputs, nil, "", "")
 }
 
@@ -632,7 +668,12 @@ func (e *execution) anyIncomingTaken(nodeIndex int) bool {
 
 func (e *execution) markReady(nodeIndex int) {
 	e.nodes[nodeIndex].Status = NodeStatusReady
+
 	e.ready = append(e.ready, nodeIndex)
+	if e.hasPartialData(nodeIndex) {
+		return
+	}
+
 	e.emit.node(nodeIndex, 0, NodeReady{})
 }
 
@@ -667,6 +708,13 @@ func (e *execution) drain(completions <-chan nodeCompletion) {
 			completion.output.Values,
 			completion.output.Route,
 			errorMessage,
+		)
+		e.recordPartialExecuted(
+			completion.index,
+			completion.attempts,
+			completion.output.Values,
+			completion.output.Route,
+			completion.err == nil,
 		)
 
 		e.running--
