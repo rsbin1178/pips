@@ -208,7 +208,7 @@ func (n *compiledBatch) runResumableSequential(
 		}
 
 		outcome := n.runResumableItem(ctx, input, items[index], *item)
-		if err := n.applyBatchOutcome(ctx, item, outcome); err != nil {
+		if err := n.applyBatchOutcome(ctx, input.runtime, item, outcome); err != nil {
 			return nil, err
 		}
 
@@ -247,7 +247,12 @@ func (n *compiledBatch) runResumableParallel(
 				continue
 			}
 
-			if err := n.applyBatchOutcome(ctx, &checkpoint.Items[index], outcome); err != nil {
+			if err := n.applyBatchOutcome(
+				ctx,
+				input.runtime,
+				&checkpoint.Items[index],
+				outcome,
+			); err != nil {
 				return nil, err
 			}
 		}
@@ -444,6 +449,7 @@ func (n *compiledBatch) runResumableItem(
 
 func (n *compiledBatch) applyBatchOutcome(
 	ctx context.Context,
+	runtime *nodeRuntime,
 	item *batchItemCheckpoint,
 	outcome batchItemOutcome,
 ) error {
@@ -479,6 +485,8 @@ func (n *compiledBatch) applyBatchOutcome(
 	}
 
 	item.Status = batchItemFailed
+
+	runtime.markHandledFailure()
 
 	return nil
 }

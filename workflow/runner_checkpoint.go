@@ -29,12 +29,14 @@ func restoreExecution(
 	execution.steps.Store(checkpoint.Steps)
 	execution.nodes = make([]NodeRun, len(checkpoint.Nodes))
 	execution.outputs = make([]map[string]Value, len(checkpoint.Outputs))
+	execution.failures = make([]nodeFailureData, len(checkpoint.FailureData))
 	execution.paused = make(map[int]pausedNodeCheckpoint, len(checkpoint.Paused))
 	execution.beforePassed = make(map[int]struct{}, len(checkpoint.BeforePassed))
 
 	for index, node := range checkpoint.Nodes {
 		execution.nodes[index] = NodeRun(node)
 		execution.outputs[index] = cloneValuesOrNil(checkpoint.Outputs[index])
+		execution.failures[index] = cloneNodeFailureData(checkpoint.FailureData[index])
 	}
 
 	for _, index := range checkpoint.BeforePassed {
@@ -87,6 +89,7 @@ func (e *execution) finishInterrupted(ctx context.Context) (RunResult, error) {
 		PlanFingerprint:       e.plan.fingerprint,
 		StartedAt:             e.result.StartedAt,
 		TotalSteps:            e.state.steps.Load(),
+		HandledFailure:        e.state.hasHandledFailure.Load(),
 		Execution:             checkpoint,
 		Interruption:          info,
 	}
@@ -124,6 +127,7 @@ func (e *execution) checkpoint() executionCheckpoint {
 		Edges:           slices.Clone(e.edges),
 		Nodes:           make([]checkpointNodeRun, len(e.nodes)),
 		Outputs:         make([]map[string]Value, len(e.outputs)),
+		FailureData:     make([]nodeFailureData, len(e.failures)),
 		Ready:           make([]int, 0, len(e.ready)),
 		Done:            e.done,
 		Steps:           e.steps.Load(),
@@ -134,6 +138,7 @@ func (e *execution) checkpoint() executionCheckpoint {
 	for index, node := range e.nodes {
 		checkpoint.Nodes[index] = checkpointNodeRun(node)
 		checkpoint.Outputs[index] = cloneValuesOrNil(e.outputs[index])
+		checkpoint.FailureData[index] = cloneNodeFailureData(e.failures[index])
 	}
 
 	for _, index := range e.ready {
@@ -192,6 +197,13 @@ func cloneExecutionCheckpoint(checkpoint executionCheckpoint) executionCheckpoin
 	}
 
 	checkpoint.Outputs = outputs
+
+	failures := make([]nodeFailureData, len(checkpoint.FailureData))
+	for index, data := range checkpoint.FailureData {
+		failures[index] = cloneNodeFailureData(data)
+	}
+
+	checkpoint.FailureData = failures
 
 	paused := make([]pausedNodeCheckpoint, len(checkpoint.Paused))
 	for index, node := range checkpoint.Paused {

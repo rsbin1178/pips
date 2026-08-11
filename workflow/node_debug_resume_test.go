@@ -91,6 +91,99 @@ func TestResumeNodeDebugStaticBeforePreservesRecord(t *testing.T) {
 	}
 }
 
+func TestResumeNodeDebugPreservesHandledFailure(t *testing.T) {
+	t.Parallel()
+
+	stringSchema := mustSchema(t, `{"type":"string"}`)
+	errorTypeSchema := mustSchema(
+		t,
+		`{"type":"string","enum":["error","timeout","panic","canceled","limit"]}`,
+	)
+	source := resultAction(
+		"typed_failure",
+		stringSchema,
+		func(context.Context) (workflow.Value, error) {
+			return workflow.Value{}, errors.New("debug handled failure")
+		},
+	)
+	handler := &fakeAction{
+		spec: actionSpec(
+			"typed_handler",
+			map[string]workflow.PortSchema{"message": stringSchema, "type": errorTypeSchema},
+			map[string]workflow.PortSchema{"result": stringSchema},
+		),
+		run: func(_ context.Context, input workflow.ActionInput) (workflow.ActionOutput, error) {
+			return workflow.ActionOutput{Values: map[string]workflow.Value{
+				"result": input.Values["message"],
+			}}, nil
+		},
+	}
+
+	registry, err := workflow.NewDefaultRegistry(
+		source,
+		constantAction("typed_success", "success", stringSchema),
+		handler,
+	)
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry() error = %v", err)
+	}
+
+	child := failureBranchDefinition(t, stringSchema, 1)
+	parent := emptySubWorkflowParent(t, stringSchema, child)
+
+	plan, err := workflow.Compile(
+		t.Context(),
+		parent,
+		registry,
+		workflow.WithDefinitionResolver(staticResolver(child)),
+		workflow.WithInterruptBeforeNodes(workflow.NewNodePath("sub", "handler")),
+	)
+	if err != nil {
+		t.Fatalf("Compile() error = %v", err)
+	}
+
+	debugPlan, err := workflow.PrepareNodeDebug(plan, workflow.NewNodePath("sub"))
+	if err != nil {
+		t.Fatalf("PrepareNodeDebug() error = %v", err)
+	}
+
+	store := &memoryCheckpointStore{}
+
+	runner, err := workflow.NewRunner(
+		workflow.WithCheckpointStore(store),
+		workflow.WithRunIDSource(func(time.Time) (string, error) {
+			return "debug-handled-resume", nil
+		}),
+	)
+	if err != nil {
+		t.Fatalf("NewRunner() error = %v", err)
+	}
+
+	interrupted, err := runner.DebugNode(t.Context(), debugPlan, map[string]workflow.Value{})
+	if !errors.Is(err, workflow.ErrInterrupted) ||
+		interrupted.Status != workflow.RunStatusInterrupted ||
+		interrupted.Execution.NodeRun.Status != workflow.NodeStatusInterrupted {
+		t.Fatalf("DebugNode() result = %#v, error = %v", interrupted, err)
+	}
+
+	resumed, err := runner.ResumeNodeDebug(
+		t.Context(),
+		debugPlan,
+		interrupted.RunID,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("ResumeNodeDebug() error = %v", err)
+	}
+
+	if resumed.Status != workflow.RunStatusPartialSucceeded ||
+		resumed.Execution.NodeRun.Status != workflow.NodeStatusSucceeded ||
+		resumed.Execution.Outputs["result"].String() != `"debug handled failure"` ||
+		resumed.Execution.ErrorMessage != "" {
+		t.Fatalf("ResumeNodeDebug() result = %#v", resumed)
+	}
+}
+
 func TestResumeNodeDebugRejectsDifferentPlanBeforeInvocation(t *testing.T) {
 	t.Parallel()
 

@@ -54,6 +54,168 @@ func TestSubWorkflowNodeExecutesExactReferencedDefinition(t *testing.T) {
 	}
 }
 
+func TestSubWorkflowPropagatesHandledFailureState(t *testing.T) {
+	t.Parallel()
+
+	stringSchema := mustSchema(t, `{"type":"string"}`)
+	errorTypeSchema := mustSchema(
+		t,
+		`{"type":"string","enum":["error","timeout","panic","canceled","limit"]}`,
+	)
+	child := failureBranchDefinition(t, stringSchema, 1)
+	failing := resultAction(
+		"typed_failure",
+		stringSchema,
+		func(context.Context) (workflow.Value, error) {
+			return workflow.Value{}, errors.New("child handled failure")
+		},
+	)
+	handler := &fakeAction{
+		spec: actionSpec(
+			"typed_handler",
+			map[string]workflow.PortSchema{"message": stringSchema, "type": errorTypeSchema},
+			map[string]workflow.PortSchema{"result": stringSchema},
+		),
+		run: func(_ context.Context, input workflow.ActionInput) (workflow.ActionOutput, error) {
+			return workflow.ActionOutput{Values: map[string]workflow.Value{
+				"result": input.Values["message"],
+			}}, nil
+		},
+	}
+	parent := emptySubWorkflowParent(t, stringSchema, child)
+	plan := compileWithResolver(
+		t,
+		parent,
+		staticResolver(child),
+		failing,
+		constantAction("typed_success", "success", stringSchema),
+		handler,
+	)
+	runner := mustRunner(t)
+
+	result, err := runner.Run(t.Context(), plan, map[string]workflow.Value{})
+	if err != nil {
+		t.Fatalf("Runner.Run() error = %v", err)
+	}
+
+	if result.Status != workflow.RunStatusPartialSucceeded ||
+		result.Nodes["sub"].Status != workflow.NodeStatusSucceeded ||
+		result.Outputs["result"].String() != `"child handled failure"` {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestSubWorkflowFailureUsesOuterPolicyAndTerminalFailureWins(t *testing.T) {
+	t.Parallel()
+
+	stringSchema := mustSchema(t, `{"type":"string"}`)
+	child := workflow.Definition{
+		Schema: workflow.SchemaV1Alpha1, ID: "failing-child", Revision: "v1", Name: "Failing Child",
+		Inputs: map[string]workflow.PortSchema{},
+		Outputs: map[string]workflow.OutputBinding{
+			"result": nodeOutput(stringSchema, "fail", "result"),
+		},
+		Nodes: []workflow.NodeDefinition{
+			{ID: "start", Type: workflow.NodeTypeStart, Version: workflow.BuiltinNodeVersion},
+			{ID: "fail", Type: workflow.NodeTypeAction, Version: workflow.BuiltinNodeVersion, Config: actionConfig(t, "child_fail")},
+			{ID: "end", Type: workflow.NodeTypeEnd, Version: workflow.BuiltinNodeVersion},
+		},
+		Edges: []workflow.ControlEdge{
+			edge("start", workflow.RouteSuccess, "fail"),
+			edge("fail", workflow.RouteSuccess, "end"),
+		},
+		Limits: workflow.DefaultLimits(),
+	}
+	childFailure := resultAction(
+		"child_fail",
+		stringSchema,
+		func(context.Context) (workflow.Value, error) {
+			return workflow.Value{}, errors.New("child stopped")
+		},
+	)
+	parent := emptySubWorkflowParent(t, stringSchema, child)
+	parent.Nodes[1].Policy = workflow.NodePolicy{
+		Error: workflow.ErrorContinueWithDefault,
+		DefaultOutputs: map[string]workflow.Value{
+			"result": workflow.MustValueOf("outer default"),
+		},
+	}
+	plan := compileWithResolver(t, parent, staticResolver(child), childFailure)
+	runner := mustRunner(t)
+
+	result, err := runner.Run(t.Context(), plan, map[string]workflow.Value{})
+	if err != nil {
+		t.Fatalf("Runner.Run() error = %v", err)
+	}
+
+	if result.Status != workflow.RunStatusPartialSucceeded ||
+		result.Nodes["sub"].Status != workflow.NodeStatusException ||
+		result.Outputs["result"].String() != `"outer default"` {
+		t.Fatalf("outer policy result = %#v", result)
+	}
+
+	handledChild := failureBranchDefinition(t, stringSchema, 1)
+	handledParent := emptySubWorkflowParent(t, stringSchema, handledChild)
+	handledParent.Nodes = append(
+		handledParent.Nodes[:2],
+		workflow.NodeDefinition{
+			ID: "terminal", Type: workflow.NodeTypeAction, Version: workflow.BuiltinNodeVersion,
+			Config: actionConfig(t, "terminal_fail"),
+		},
+		handledParent.Nodes[2],
+	)
+	handledParent.Edges = []workflow.ControlEdge{
+		edge("start", workflow.RouteSuccess, "sub"),
+		edge("sub", workflow.RouteSuccess, "terminal"),
+		edge("terminal", workflow.RouteSuccess, "end"),
+	}
+	errorTypeSchema := mustSchema(
+		t,
+		`{"type":"string","enum":["error","timeout","panic","canceled","limit"]}`,
+	)
+	handledSource := resultAction(
+		"typed_failure",
+		stringSchema,
+		func(context.Context) (workflow.Value, error) {
+			return workflow.Value{}, errors.New("handled first")
+		},
+	)
+	handledHandler := &fakeAction{
+		spec: actionSpec(
+			"typed_handler",
+			map[string]workflow.PortSchema{"message": stringSchema, "type": errorTypeSchema},
+			map[string]workflow.PortSchema{"result": stringSchema},
+		),
+		run: func(_ context.Context, input workflow.ActionInput) (workflow.ActionOutput, error) {
+			return workflow.ActionOutput{Values: map[string]workflow.Value{
+				"result": input.Values["message"],
+			}}, nil
+		},
+	}
+	terminal := resultAction(
+		"terminal_fail",
+		stringSchema,
+		func(context.Context) (workflow.Value, error) {
+			return workflow.Value{}, errors.New("terminal failure")
+		},
+	)
+	handledPlan := compileWithResolver(
+		t,
+		handledParent,
+		staticResolver(handledChild),
+		handledSource,
+		constantAction("typed_success", "success", stringSchema),
+		handledHandler,
+		terminal,
+	)
+
+	failed, err := runner.Run(t.Context(), handledPlan, map[string]workflow.Value{})
+	if !errors.Is(err, workflow.ErrRun) || failed.Status != workflow.RunStatusFailed ||
+		failed.Nodes["terminal"].Status != workflow.NodeStatusFailed {
+		t.Fatalf("terminal result = %#v, error = %v", failed, err)
+	}
+}
+
 func TestSubWorkflowNodeRejectsInvalidResolution(t *testing.T) {
 	t.Parallel()
 
@@ -408,6 +570,35 @@ func subWorkflowChildDefinition(
 		Edges: []workflow.ControlEdge{
 			edge("start", workflow.RouteSuccess, "child_action"),
 			edge("child_action", workflow.RouteSuccess, "end"),
+		},
+		Limits: workflow.DefaultLimits(),
+	}
+}
+
+func emptySubWorkflowParent(
+	t *testing.T,
+	stringSchema workflow.PortSchema,
+	child workflow.Definition,
+) workflow.Definition {
+	t.Helper()
+
+	return workflow.Definition{
+		Schema: workflow.SchemaV1Alpha1, ID: "empty-parent", Revision: "v1", Name: "Empty Parent",
+		Inputs: map[string]workflow.PortSchema{},
+		Outputs: map[string]workflow.OutputBinding{
+			"result": nodeOutput(stringSchema, "sub", "result"),
+		},
+		Nodes: []workflow.NodeDefinition{
+			{ID: "start", Type: workflow.NodeTypeStart, Version: workflow.BuiltinNodeVersion},
+			{
+				ID: "sub", Type: workflow.NodeTypeSubWorkflow, Version: workflow.BuiltinNodeVersion,
+				Config: mustJSON(t, workflow.SubWorkflowConfig{Workflow: workflowRef(t, child)}),
+			},
+			{ID: "end", Type: workflow.NodeTypeEnd, Version: workflow.BuiltinNodeVersion},
+		},
+		Edges: []workflow.ControlEdge{
+			edge("start", workflow.RouteSuccess, "sub"),
+			edge("sub", workflow.RouteSuccess, "end"),
 		},
 		Limits: workflow.DefaultLimits(),
 	}

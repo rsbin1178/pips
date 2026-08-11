@@ -14,12 +14,13 @@ type RunStatus string
 
 // Run states.
 const (
-	RunStatusPending     RunStatus = "pending"
-	RunStatusRunning     RunStatus = "running"
-	RunStatusSucceeded   RunStatus = "succeeded"
-	RunStatusFailed      RunStatus = "failed"
-	RunStatusCanceled    RunStatus = "canceled"
-	RunStatusInterrupted RunStatus = "interrupted"
+	RunStatusPending          RunStatus = "pending"
+	RunStatusRunning          RunStatus = "running"
+	RunStatusSucceeded        RunStatus = "succeeded"
+	RunStatusPartialSucceeded RunStatus = "partial-succeeded"
+	RunStatusFailed           RunStatus = "failed"
+	RunStatusCanceled         RunStatus = "canceled"
+	RunStatusInterrupted      RunStatus = "interrupted"
 )
 
 // NodeStatus identifies one node lifecycle state.
@@ -31,6 +32,7 @@ const (
 	NodeStatusReady       NodeStatus = "ready"
 	NodeStatusRunning     NodeStatus = "running"
 	NodeStatusSucceeded   NodeStatus = "succeeded"
+	NodeStatusException   NodeStatus = "exception"
 	NodeStatusFailed      NodeStatus = "failed"
 	NodeStatusSkipped     NodeStatus = "skipped"
 	NodeStatusInterrupted NodeStatus = "interrupted"

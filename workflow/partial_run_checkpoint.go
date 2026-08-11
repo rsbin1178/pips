@@ -247,6 +247,8 @@ func validatePartialNodeAccounting(
 	switch summary.Status {
 	case NodeStatusSucceeded:
 		return validatePartialSucceededNode(summary, outputs, origin, route)
+	case NodeStatusException:
+		return validatePartialExceptionNode(summary, origin, route)
 	case NodeStatusFailed:
 		return validatePartialFailedNode(summary, origin)
 	case NodeStatusInterrupted:
@@ -256,6 +258,18 @@ func validatePartialNodeAccounting(
 	default:
 		return errors.New("node has unsupported partial run status")
 	}
+}
+
+func validatePartialExceptionNode(
+	summary checkpointNodeRun,
+	origin PartialDataOrigin,
+	route string,
+) error {
+	if summary.Attempts < 1 || origin != PartialDataExecuted || route == "" {
+		return errors.New("exception node has invalid origin or route")
+	}
+
+	return nil
 }
 
 func validPartialDataOrigin(origin PartialDataOrigin) bool {

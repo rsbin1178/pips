@@ -208,6 +208,157 @@ func TestLoopLimitIsClassifiedAndStopsSuccessorIterations(t *testing.T) {
 	}
 }
 
+func TestLoopHandledBodyFailureMarksRootPartial(t *testing.T) {
+	t.Parallel()
+
+	stringSchema := mustSchema(t, `{"type":"string"}`)
+	integerSchema := mustSchema(t, `{"type":"integer"}`)
+	countSchema := mustSchema(t, `{"type":"integer","minimum":1}`)
+	resultsSchema := mustSchema(t, `{"type":"array","items":{"type":"string"}}`)
+	errorTypeSchema := mustSchema(
+		t,
+		`{"type":"string","enum":["error","timeout","panic","canceled","limit"]}`,
+	)
+	body := failureBranchDefinition(t, stringSchema, 1)
+	body.Inputs["index"] = integerSchema
+	config := workflow.LoopConfig{
+		Body: body, Mode: workflow.LoopCount, MaxIterations: 2,
+		Outputs: []workflow.LoopOutput{
+			{Name: "results", Source: workflow.LoopOutputBody, Port: "result"},
+		},
+	}
+	definition := loopParentDefinition(
+		t,
+		"handled-failure-loop",
+		map[string]workflow.PortSchema{"count": countSchema},
+		map[string]workflow.Binding{"count": workflowInput("count")},
+		map[string]workflow.OutputBinding{
+			"results": nodeOutput(resultsSchema, "loop", "results"),
+		},
+		config,
+	)
+
+	var attempts atomic.Int32
+
+	failing := resultAction(
+		"typed_failure",
+		stringSchema,
+		func(context.Context) (workflow.Value, error) {
+			attempts.Add(1)
+
+			return workflow.Value{}, errors.New("loop handled")
+		},
+	)
+	handler := &fakeAction{
+		spec: actionSpec(
+			"typed_handler",
+			map[string]workflow.PortSchema{"message": stringSchema, "type": errorTypeSchema},
+			map[string]workflow.PortSchema{"result": stringSchema},
+		),
+		run: func(_ context.Context, input workflow.ActionInput) (workflow.ActionOutput, error) {
+			return workflow.ActionOutput{Values: map[string]workflow.Value{
+				"result": input.Values["message"],
+			}}, nil
+		},
+	}
+	plan := compileRoundTrip(
+		t,
+		definition,
+		failing,
+		constantAction("typed_success", "success", stringSchema),
+		handler,
+	)
+	runner := mustRunner(t)
+
+	result, err := runner.Run(t.Context(), plan, map[string]workflow.Value{
+		"count": workflow.MustValueOf(2),
+	})
+	if err != nil {
+		t.Fatalf("Runner.Run() error = %v", err)
+	}
+
+	if result.Status != workflow.RunStatusPartialSucceeded || attempts.Load() != 2 ||
+		result.Nodes["loop"].Status != workflow.NodeStatusSucceeded ||
+		result.Outputs["results"].String() != `["loop handled","loop handled"]` {
+		t.Fatalf("result = %#v, attempts = %d", result, attempts.Load())
+	}
+}
+
+func TestLoopUnhandledBodyFailureUsesOuterPolicy(t *testing.T) {
+	t.Parallel()
+
+	stringSchema := mustSchema(t, `{"type":"string"}`)
+	integerSchema := mustSchema(t, `{"type":"integer"}`)
+	countSchema := mustSchema(t, `{"type":"integer","minimum":1}`)
+	resultsSchema := mustSchema(t, `{"type":"array","items":{"type":"string"}}`)
+	body := workflow.Definition{
+		Schema: workflow.SchemaV1Alpha1, ID: "unhandled-loop-body", Revision: "v1", Name: "Unhandled Loop Body",
+		Inputs: map[string]workflow.PortSchema{"index": integerSchema},
+		Outputs: map[string]workflow.OutputBinding{
+			"result": nodeOutput(stringSchema, "fail", "result"),
+		},
+		Nodes: []workflow.NodeDefinition{
+			{ID: "start", Type: workflow.NodeTypeStart, Version: workflow.BuiltinNodeVersion},
+			{ID: "fail", Type: workflow.NodeTypeAction, Version: workflow.BuiltinNodeVersion, Config: actionConfig(t, "loop_fail")},
+			{ID: "end", Type: workflow.NodeTypeEnd, Version: workflow.BuiltinNodeVersion},
+		},
+		Edges: []workflow.ControlEdge{
+			edge("start", workflow.RouteSuccess, "fail"),
+			edge("fail", workflow.RouteSuccess, "end"),
+		},
+		Limits: workflow.DefaultLimits(),
+	}
+	config := workflow.LoopConfig{
+		Body: body, Mode: workflow.LoopCount, MaxIterations: 3,
+		Outputs: []workflow.LoopOutput{
+			{Name: "results", Source: workflow.LoopOutputBody, Port: "result"},
+		},
+	}
+	definition := loopParentDefinition(
+		t,
+		"outer-policy-loop",
+		map[string]workflow.PortSchema{"count": countSchema},
+		map[string]workflow.Binding{"count": workflowInput("count")},
+		map[string]workflow.OutputBinding{
+			"results": nodeOutput(resultsSchema, "loop", "results"),
+		},
+		config,
+	)
+	definition.Nodes[1].Policy = workflow.NodePolicy{
+		Error: workflow.ErrorContinueWithDefault,
+		DefaultOutputs: map[string]workflow.Value{
+			"results": workflow.MustValueOf([]string{"default"}),
+		},
+	}
+
+	var calls atomic.Int32
+
+	failing := resultAction(
+		"loop_fail",
+		stringSchema,
+		func(context.Context) (workflow.Value, error) {
+			calls.Add(1)
+
+			return workflow.Value{}, errors.New("iteration stopped")
+		},
+	)
+	plan := compileRoundTrip(t, definition, failing)
+	runner := mustRunner(t)
+
+	result, err := runner.Run(t.Context(), plan, map[string]workflow.Value{
+		"count": workflow.MustValueOf(3),
+	})
+	if err != nil {
+		t.Fatalf("Runner.Run() error = %v", err)
+	}
+
+	if result.Status != workflow.RunStatusPartialSucceeded || calls.Load() != 1 ||
+		result.Nodes["loop"].Status != workflow.NodeStatusException ||
+		result.Outputs["results"].String() != `["default"]` {
+		t.Fatalf("result = %#v, calls = %d", result, calls.Load())
+	}
+}
+
 func TestLoopRejectsContextAndDeterminismViolations(t *testing.T) {
 	t.Parallel()
 

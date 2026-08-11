@@ -17,6 +17,14 @@
 // the exact root and composite frontier. Checkpoints are process-runtime state,
 // not part of the Definition wire contract.
 //
+// Exhausted node failures either stop execution, select a dedicated error
+// route, or continue with compile-validated default outputs. Error-route
+// consumers use BindingNodeError to read the bounded error_message and
+// error_type ports; normal outputs remain unavailable on that path. Handled
+// nodes have NodeStatusException, and a completed root execution that observed
+// one has RunStatusPartialSucceeded. Error messages are sensitive Workflow
+// data and never lifecycle Event payloads.
+//
 // RunPartial executes the root dependency slice ending at one destination.
 // Hosts may supply detached successful data from a prior Partial Run, current
 // pinned outputs, and directly changed node IDs; the runtime validates routes

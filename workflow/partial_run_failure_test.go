@@ -36,8 +36,8 @@ func TestRunPartialHandledDefaultFailureIsNotReusable(t *testing.T) {
 		t.Fatalf("Runner.RunPartial() error = %v", err)
 	}
 
-	if result.Status != workflow.RunStatusSucceeded ||
-		result.Nodes["action"].NodeRun.Status != workflow.NodeStatusFailed ||
+	if result.Status != workflow.RunStatusPartialSucceeded ||
+		result.Nodes["action"].NodeRun.Status != workflow.NodeStatusException ||
 		result.Nodes["action"].Origin != workflow.PartialDataExecuted ||
 		result.Outputs["result"].String() != `"default"` {
 		t.Fatalf("handled failure result = %#v", result)
@@ -45,6 +45,83 @@ func TestRunPartialHandledDefaultFailureIsNotReusable(t *testing.T) {
 
 	if _, reusable := result.Data.Nodes["action"]; reusable {
 		t.Fatalf("handled failure became reusable: %#v", result.Data)
+	}
+}
+
+func TestRunPartialReexecutesErrorHandlerWhenExceptionSourceIsMissing(t *testing.T) {
+	t.Parallel()
+
+	stringSchema := mustSchema(t, `{"type":"string"}`)
+	errorTypeSchema := mustSchema(
+		t,
+		`{"type":"string","enum":["error","timeout","panic","canceled","limit"]}`,
+	)
+
+	var sourceCalls, handlerCalls atomic.Int32
+
+	source := resultAction(
+		"typed_failure",
+		stringSchema,
+		func(context.Context) (workflow.Value, error) {
+			sourceCalls.Add(1)
+
+			return workflow.Value{}, errors.New("partial branch failure")
+		},
+	)
+	handler := &fakeAction{
+		spec: actionSpec(
+			"typed_handler",
+			map[string]workflow.PortSchema{"message": stringSchema, "type": errorTypeSchema},
+			map[string]workflow.PortSchema{"result": stringSchema},
+		),
+		run: func(_ context.Context, input workflow.ActionInput) (workflow.ActionOutput, error) {
+			handlerCalls.Add(1)
+
+			return workflow.ActionOutput{Values: map[string]workflow.Value{
+				"result": input.Values["message"],
+			}}, nil
+		},
+	}
+	plan := compileRoundTrip(
+		t,
+		failureBranchDefinition(t, stringSchema, 1),
+		source,
+		constantAction("typed_success", "success", stringSchema),
+		handler,
+	)
+	runner := mustRunner(t)
+
+	first, err := runner.RunPartial(t.Context(), plan, "handler", workflow.PartialRunInput{
+		Inputs: map[string]workflow.Value{},
+	})
+	if err != nil {
+		t.Fatalf("Runner.RunPartial(first) error = %v", err)
+	}
+
+	if _, reusable := first.Data.Nodes["unreliable"]; reusable {
+		t.Fatalf("exception source became reusable: %#v", first.Data)
+	}
+
+	if _, reusable := first.Data.Nodes["handler"]; !reusable {
+		t.Fatalf("successful handler is missing from first data: %#v", first.Data)
+	}
+
+	second, err := runner.RunPartial(t.Context(), plan, "handler", workflow.PartialRunInput{
+		Inputs:   map[string]workflow.Value{},
+		Previous: &first.Data,
+	})
+	if err != nil {
+		t.Fatalf("Runner.RunPartial(second) error = %v", err)
+	}
+
+	if sourceCalls.Load() != 2 || handlerCalls.Load() != 2 ||
+		second.Nodes["handler"].Origin != workflow.PartialDataExecuted {
+		t.Fatalf(
+			"second result = %#v, calls = %d/%d",
+			second,
+			sourceCalls.Load(),
+			handlerCalls.Load(),
+		)
 	}
 }
 
