@@ -18,18 +18,19 @@ var checkpointJSONLimits = jsonLimits{
 }
 
 type workflowCheckpoint struct {
-	Version               int                  `json:"version"`
-	RunID                 string               `json:"run_id"`
-	DefinitionID          DefinitionID         `json:"definition_id"`
-	Revision              Revision             `json:"revision"`
-	DefinitionFingerprint string               `json:"definition_fingerprint"`
-	RegistryFingerprint   string               `json:"registry_fingerprint"`
-	PlanFingerprint       string               `json:"plan_fingerprint"`
-	StartedAt             time.Time            `json:"started_at"`
-	TotalSteps            int64                `json:"total_steps"`
-	Execution             executionCheckpoint  `json:"execution"`
-	Interruption          InterruptInfo        `json:"interruption"`
-	NodeDebug             *nodeDebugCheckpoint `json:"node_debug,omitempty"`
+	Version               int                   `json:"version"`
+	RunID                 string                `json:"run_id"`
+	DefinitionID          DefinitionID          `json:"definition_id"`
+	Revision              Revision              `json:"revision"`
+	DefinitionFingerprint string                `json:"definition_fingerprint"`
+	RegistryFingerprint   string                `json:"registry_fingerprint"`
+	PlanFingerprint       string                `json:"plan_fingerprint"`
+	StartedAt             time.Time             `json:"started_at"`
+	TotalSteps            int64                 `json:"total_steps"`
+	Execution             executionCheckpoint   `json:"execution"`
+	Interruption          InterruptInfo         `json:"interruption"`
+	NodeDebug             *nodeDebugCheckpoint  `json:"node_debug,omitempty"`
+	PartialRun            *partialRunCheckpoint `json:"partial_run,omitempty"`
 }
 
 type executionCheckpoint struct {
@@ -112,7 +113,7 @@ func (r *Runner) Resume(
 	runID string,
 	targets []ResumeTarget,
 ) (RunResult, error) {
-	result, _, err := r.resumeExecution(ctx, plan, runID, targets, planLimits(plan))
+	result, _, _, err := r.resumeExecution(ctx, plan, runID, targets, planLimits(plan))
 
 	return result, err
 }
@@ -123,23 +124,23 @@ func (r *Runner) resumeExecution(
 	runID string,
 	targets []ResumeTarget,
 	limits Limits,
-) (RunResult, *nodeDebugCollector, error) {
+) (RunResult, *nodeDebugCollector, *partialRunState, error) {
 	if r == nil || r.clock == nil || r.idSource == nil {
-		return RunResult{}, nil, errors.New("workflow: nil or invalid runner")
+		return RunResult{}, nil, nil, errors.New("workflow: nil or invalid runner")
 	}
 
 	if plan == nil || plan.Fingerprint() == "" {
-		return RunResult{}, nil, errors.New("workflow: nil or invalid plan")
+		return RunResult{}, nil, nil, errors.New("workflow: nil or invalid plan")
 	}
 
 	checkpoint, err := r.loadResumeCheckpoint(ctx, plan, runID)
 	if err != nil {
-		return RunResult{}, nil, err
+		return RunResult{}, nil, nil, err
 	}
 
 	resumeTargets, err := validateResumeTargets(targets, checkpoint.Interruption)
 	if err != nil {
-		return RunResult{}, nil, fmt.Errorf("%w: resume targets: %w", ErrRun, err)
+		return RunResult{}, nil, nil, fmt.Errorf("%w: resume targets: %w", ErrRun, err)
 	}
 
 	state := newRunState(checkpoint.RunID, limits)
@@ -149,6 +150,12 @@ func (r *Runner) resumeExecution(
 	if checkpoint.NodeDebug != nil {
 		state.nodeDebug = restoreNodeDebugCollector(checkpoint.NodeDebug)
 	}
+
+	state.partialRun = restorePartialRunState(
+		checkpoint.PartialRun,
+		plan,
+		&checkpoint.Execution,
+	)
 
 	execution := restoreExecution(
 		r,
@@ -161,7 +168,7 @@ func (r *Runner) resumeExecution(
 
 	result, runErr := execution.run(ctx)
 
-	return result, state.nodeDebug, runErr
+	return result, state.nodeDebug, state.partialRun, runErr
 }
 
 func (r *Runner) loadResumeCheckpoint(
@@ -286,6 +293,14 @@ func decodeWorkflowCheckpoint(
 	}
 
 	if err := validateExecutionCheckpoint(&checkpoint.Execution, plan); err != nil {
+		return nil, err
+	}
+
+	if err := validatePartialRunCheckpoint(
+		checkpoint.PartialRun,
+		plan,
+		&checkpoint.Execution,
+	); err != nil {
 		return nil, err
 	}
 
@@ -674,6 +689,12 @@ func validateCheckpointPausedNode(
 func validatePlanInputValues(values map[string]Value, plan *Plan) error {
 	if plan.nodeDebug != nil {
 		return validateNodeDebugInputs(values, plan.nodeDebug.spec)
+	}
+
+	if plan.partialRun != nil {
+		_, err := validatePartialWorkflowInputs(values, plan.definition.Inputs, nil)
+
+		return err
 	}
 
 	return validatePortValues(values, plan.definition.Inputs)

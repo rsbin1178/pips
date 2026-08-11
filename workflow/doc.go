@@ -17,6 +17,14 @@
 // the exact root and composite frontier. Checkpoints are process-runtime state,
 // not part of the Definition wire contract.
 //
+// RunPartial executes the root dependency slice ending at one destination.
+// Hosts may supply detached successful data from a prior Partial Run, current
+// pinned outputs, and directly changed node IDs; the runtime validates routes
+// and schemas, invalidates dirty descendants, and executes every remaining
+// boundary through the ordinary scheduler. Composite nodes remain atomic.
+// ResumePartial uses the same opaque CheckpointStore protocol, while Run and
+// Resume never consult Partial Run data.
+//
 // PrepareNodeDebug derives a Coze-style isolated trial plan for one eligible
 // node. DebugNode executes that selected node without executing its upstream
 // graph; outside bindings become explicit final-schema inputs while literals
