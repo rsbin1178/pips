@@ -18,17 +18,18 @@ var checkpointJSONLimits = jsonLimits{
 }
 
 type workflowCheckpoint struct {
-	Version               int                 `json:"version"`
-	RunID                 string              `json:"run_id"`
-	DefinitionID          DefinitionID        `json:"definition_id"`
-	Revision              Revision            `json:"revision"`
-	DefinitionFingerprint string              `json:"definition_fingerprint"`
-	RegistryFingerprint   string              `json:"registry_fingerprint"`
-	PlanFingerprint       string              `json:"plan_fingerprint"`
-	StartedAt             time.Time           `json:"started_at"`
-	TotalSteps            int64               `json:"total_steps"`
-	Execution             executionCheckpoint `json:"execution"`
-	Interruption          InterruptInfo       `json:"interruption"`
+	Version               int                  `json:"version"`
+	RunID                 string               `json:"run_id"`
+	DefinitionID          DefinitionID         `json:"definition_id"`
+	Revision              Revision             `json:"revision"`
+	DefinitionFingerprint string               `json:"definition_fingerprint"`
+	RegistryFingerprint   string               `json:"registry_fingerprint"`
+	PlanFingerprint       string               `json:"plan_fingerprint"`
+	StartedAt             time.Time            `json:"started_at"`
+	TotalSteps            int64                `json:"total_steps"`
+	Execution             executionCheckpoint  `json:"execution"`
+	Interruption          InterruptInfo        `json:"interruption"`
+	NodeDebug             *nodeDebugCheckpoint `json:"node_debug,omitempty"`
 }
 
 type executionCheckpoint struct {
@@ -111,48 +112,43 @@ func (r *Runner) Resume(
 	runID string,
 	targets []ResumeTarget,
 ) (RunResult, error) {
+	result, _, err := r.resumeExecution(ctx, plan, runID, targets, planLimits(plan))
+
+	return result, err
+}
+
+func (r *Runner) resumeExecution(
+	ctx context.Context,
+	plan *Plan,
+	runID string,
+	targets []ResumeTarget,
+	limits Limits,
+) (RunResult, *nodeDebugCollector, error) {
 	if r == nil || r.clock == nil || r.idSource == nil {
-		return RunResult{}, errors.New("workflow: nil or invalid runner")
+		return RunResult{}, nil, errors.New("workflow: nil or invalid runner")
 	}
 
 	if plan == nil || plan.Fingerprint() == "" {
-		return RunResult{}, errors.New("workflow: nil or invalid plan")
+		return RunResult{}, nil, errors.New("workflow: nil or invalid plan")
 	}
 
-	if isNilInterface(r.checkpointStore) {
-		return RunResult{}, fmt.Errorf("%w: checkpoint store is required", ErrRun)
-	}
-
-	if runID == "" {
-		return RunResult{}, fmt.Errorf("%w: empty run id", ErrRun)
-	}
-
-	if err := ctx.Err(); err != nil {
-		return RunResult{}, err
-	}
-
-	data, found, err := r.checkpointStore.Get(ctx, runID)
+	checkpoint, err := r.loadResumeCheckpoint(ctx, plan, runID)
 	if err != nil {
-		return RunResult{}, fmt.Errorf("%w: load checkpoint: %w", ErrRun, err)
-	}
-
-	if !found {
-		return RunResult{}, fmt.Errorf("%w: checkpoint for run %q was not found", ErrRun, runID)
-	}
-
-	checkpoint, err := decodeWorkflowCheckpoint(slices.Clone(data), plan, runID)
-	if err != nil {
-		return RunResult{}, fmt.Errorf("%w: load checkpoint: %w", ErrRun, err)
+		return RunResult{}, nil, err
 	}
 
 	resumeTargets, err := validateResumeTargets(targets, checkpoint.Interruption)
 	if err != nil {
-		return RunResult{}, fmt.Errorf("%w: resume targets: %w", ErrRun, err)
+		return RunResult{}, nil, fmt.Errorf("%w: resume targets: %w", ErrRun, err)
 	}
 
-	state := newRunState(checkpoint.RunID, plan.definition.Limits)
+	state := newRunState(checkpoint.RunID, limits)
 	state.steps.Store(checkpoint.TotalSteps)
 	state.resumeTargets = resumeTargets
+
+	if checkpoint.NodeDebug != nil {
+		state.nodeDebug = restoreNodeDebugCollector(checkpoint.NodeDebug)
+	}
 
 	execution := restoreExecution(
 		r,
@@ -163,7 +159,51 @@ func (r *Runner) Resume(
 	)
 	execution.resumed = true
 
-	return execution.run(ctx)
+	result, runErr := execution.run(ctx)
+
+	return result, state.nodeDebug, runErr
+}
+
+func (r *Runner) loadResumeCheckpoint(
+	ctx context.Context,
+	plan *Plan,
+	runID string,
+) (*workflowCheckpoint, error) {
+	if isNilInterface(r.checkpointStore) {
+		return nil, fmt.Errorf("%w: checkpoint store is required", ErrRun)
+	}
+
+	if runID == "" {
+		return nil, fmt.Errorf("%w: empty run id", ErrRun)
+	}
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	data, found, err := r.checkpointStore.Get(ctx, runID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: load checkpoint: %w", ErrRun, err)
+	}
+
+	if !found {
+		return nil, fmt.Errorf("%w: checkpoint for run %q was not found", ErrRun, runID)
+	}
+
+	checkpoint, err := decodeWorkflowCheckpoint(slices.Clone(data), plan, runID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: load checkpoint: %w", ErrRun, err)
+	}
+
+	return checkpoint, nil
+}
+
+func planLimits(plan *Plan) Limits {
+	if plan == nil {
+		return Limits{}
+	}
+
+	return plan.definition.Limits
 }
 
 func validateResumeTargets(
@@ -253,6 +293,10 @@ func decodeWorkflowCheckpoint(
 		checkpoint.Interruption,
 		&checkpoint.Execution,
 	); err != nil {
+		return nil, err
+	}
+
+	if err := validateNodeDebugCheckpoint(checkpoint.NodeDebug, plan); err != nil {
 		return nil, err
 	}
 
@@ -470,7 +514,7 @@ func validateExecutionCheckpointHeader(
 		return err
 	}
 
-	if err := validatePortValues(checkpoint.Input, plan.definition.Inputs); err != nil {
+	if err := validatePlanInputValues(checkpoint.Input, plan); err != nil {
 		return fmt.Errorf("checkpoint inputs: %w", err)
 	}
 
@@ -608,7 +652,7 @@ func validateCheckpointPausedNode(
 		return errors.New("checkpoint interrupted node state mismatch")
 	}
 
-	if err := validatePortValues(node.Inputs, plan.nodes[node.Index].spec.Inputs); err != nil {
+	if err := validatePlanNodeInputValues(node.Inputs, plan.nodes[node.Index]); err != nil {
 		return fmt.Errorf("checkpoint interrupted node inputs: %w", err)
 	}
 
@@ -625,6 +669,37 @@ func validateCheckpointPausedNode(
 	}
 
 	return validatePausedNodeResumeShape(node)
+}
+
+func validatePlanInputValues(values map[string]Value, plan *Plan) error {
+	if plan.nodeDebug != nil {
+		return validateNodeDebugInputs(values, plan.nodeDebug.spec)
+	}
+
+	return validatePortValues(values, plan.definition.Inputs)
+}
+
+func validatePlanNodeInputValues(values map[string]Value, node planNode) error {
+	if !node.isMerge {
+		return validatePortValues(values, node.spec.Inputs)
+	}
+
+	if values == nil {
+		return errors.New("nil values")
+	}
+
+	for name, value := range values {
+		schema, ok := node.spec.Inputs[name]
+		if !ok {
+			return fmt.Errorf("unknown port %q", name)
+		}
+
+		if err := schema.Validate(value); err != nil {
+			return fmt.Errorf("port %q: %w", name, err)
+		}
+	}
+
+	return nil
 }
 
 func validPausedNodeAccounting(summary checkpointNodeRun, node pausedNodeCheckpoint) bool {

@@ -64,6 +64,7 @@ type runState struct {
 	leafTokens    chan struct{}
 	eventMu       sync.Mutex
 	resumeTargets map[string]ResumeTarget
+	nodeDebug     *nodeDebugCollector
 }
 
 type nodeRuntime struct {
@@ -374,6 +375,13 @@ func (e *execution) completeNode(completion nodeCompletion) error {
 		e.resolveOutgoing(completion.index, completion.output.Route)
 		e.done++
 		delete(e.beforePassed, completion.index)
+		e.recordNodeDebug(
+			completion.index,
+			completion.inputs,
+			completion.output.Values,
+			completion.output.Route,
+			"",
+		)
 
 		_, staticAfter := e.plan.interruptAfter[completion.index]
 		if staticAfter || e.hostInterruptRequested {
@@ -392,15 +400,37 @@ func (e *execution) completeNode(completion nodeCompletion) error {
 	case ErrorRoute:
 		e.resolveOutgoing(completion.index, RouteError)
 		e.done++
+		e.recordNodeDebug(
+			completion.index,
+			completion.inputs,
+			nil,
+			RouteError,
+			completion.err.Error(),
+		)
 
 		return nil
 	case ErrorContinueWithDefault:
 		e.outputs[completion.index] = cloneValues(nodeDefinition.Policy.DefaultOutputs)
 		e.resolveOutgoing(completion.index, RouteSuccess)
 		e.done++
+		e.recordNodeDebug(
+			completion.index,
+			completion.inputs,
+			nodeDefinition.Policy.DefaultOutputs,
+			RouteSuccess,
+			completion.err.Error(),
+		)
 
 		return nil
 	default:
+		e.recordNodeDebug(
+			completion.index,
+			completion.inputs,
+			nil,
+			"",
+			completion.err.Error(),
+		)
+
 		return &RunError{
 			NodeID: nodeDefinition.ID, Attempt: completion.attempts, Err: completion.err,
 		}
@@ -420,6 +450,7 @@ func (e *execution) recordHostRerun(completion nodeCompletion) {
 	}
 	e.appendRerunAddress(completion.index)
 	e.pauseRequested = true
+	e.recordNodeDebug(completion.index, completion.inputs, nil, "", "")
 }
 
 func (e *execution) appendRerunAddress(index int) {
@@ -456,6 +487,7 @@ func (e *execution) recordDynamicInterruption(completion nodeCompletion) {
 	}
 
 	e.pauseRequested = true
+	e.recordNodeDebug(completion.index, completion.inputs, nil, "", "")
 }
 
 func (e *execution) recordNodeInterruption(completion nodeCompletion) {
@@ -486,6 +518,7 @@ func (e *execution) recordNodeInterruption(completion nodeCompletion) {
 	)
 	e.mergeInterruptInfo(completion.pause.info)
 	e.pauseRequested = true
+	e.recordNodeDebug(completion.index, completion.inputs, nil, "", "")
 }
 
 func (e *execution) requestBeforeInterrupt() {
@@ -614,6 +647,7 @@ func (e *execution) skipNode(nodeIndex int) {
 
 	e.done++
 	e.emit.node(nodeIndex, 0, NodeSkipped{})
+	e.recordNodeDebug(nodeIndex, map[string]Value{}, map[string]Value{}, "", "")
 }
 
 func (e *execution) drain(completions <-chan nodeCompletion) {
@@ -622,11 +656,25 @@ func (e *execution) drain(completions <-chan nodeCompletion) {
 		e.finishInflight(completion.index)
 		e.recordNodeCompletion(completion)
 
+		errorMessage := ""
+		if completion.err != nil {
+			errorMessage = completion.err.Error()
+		}
+
+		e.recordNodeDebug(
+			completion.index,
+			completion.inputs,
+			completion.output.Values,
+			completion.output.Route,
+			errorMessage,
+		)
+
 		e.running--
 	}
 }
 
 func (e *execution) finishSucceeded() (RunResult, error) {
+	e.synchronizeNodeDebug()
 	e.result.Status = RunStatusSucceeded
 	e.result.Outputs = cloneValues(e.outputs[e.plan.endIndex])
 	e.result.EndedAt = e.runner.clock().UTC()
@@ -637,6 +685,7 @@ func (e *execution) finishSucceeded() (RunResult, error) {
 }
 
 func (e *execution) finishFailed(err error) (RunResult, error) {
+	e.synchronizeNodeDebug()
 	e.result.Status = RunStatusFailed
 	e.result.EndedAt = e.runner.clock().UTC()
 	e.snapshotNodes()
@@ -646,12 +695,31 @@ func (e *execution) finishFailed(err error) (RunResult, error) {
 }
 
 func (e *execution) finishCanceled(err error) (RunResult, error) {
+	e.synchronizeNodeDebug()
 	e.result.Status = RunStatusCanceled
 	e.result.EndedAt = e.runner.clock().UTC()
 	e.snapshotNodes()
 	e.emit.run(RunCanceled{})
 
 	return cloneRunResult(e.result), err
+}
+
+func (e *execution) recordNodeDebug(
+	index int,
+	inputs map[string]Value,
+	outputs map[string]Value,
+	route string,
+	errorMessage string,
+) {
+	if e.state.nodeDebug != nil {
+		e.state.nodeDebug.record(e, index, inputs, outputs, route, errorMessage)
+	}
+}
+
+func (e *execution) synchronizeNodeDebug() {
+	if e.state.nodeDebug != nil {
+		e.state.nodeDebug.synchronize(e)
+	}
 }
 
 func (e *execution) snapshotNodes() {
