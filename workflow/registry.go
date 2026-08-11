@@ -345,11 +345,12 @@ func isNilInterface(value any) bool {
 }
 
 type nodeCompileContext struct {
-	inputs   map[string]PortSchema
-	outputs  map[string]PortSchema
-	registry *Registry
-	session  *compileSession
-	loop     *loopCompileScope
+	inputs     map[string]PortSchema
+	outputs    map[string]PortSchema
+	registry   *Registry
+	session    *compileSession
+	loop       *loopCompileScope
+	interrupts *interruptPolicy
 }
 
 type nodeTypeSnapshot struct {
@@ -398,7 +399,7 @@ func (c nodeCompileContext) compileDefinition(
 	ctx context.Context,
 	definition Definition,
 ) (*Plan, error) {
-	return c.session.compile(ctx, definition)
+	return c.session.compile(ctx, definition, c.interrupts)
 }
 
 func (c nodeCompileContext) compileLoopDefinition(
@@ -406,14 +407,14 @@ func (c nodeCompileContext) compileLoopDefinition(
 	definition Definition,
 	scope loopCompileScope,
 ) (*Plan, error) {
-	return c.session.compileScoped(ctx, definition, &scope)
+	return c.session.compileScoped(ctx, definition, &scope, c.interrupts)
 }
 
 func (c nodeCompileContext) resolveDefinition(
 	ctx context.Context,
 	reference DefinitionRef,
 ) (*Plan, error) {
-	return c.session.resolve(ctx, reference)
+	return c.session.resolve(ctx, reference, c.interrupts)
 }
 
 func (c nodeCompileContext) loopCompileScope() *loopCompileScope {

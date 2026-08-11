@@ -141,6 +141,54 @@ func (n *compiledLoop) Invoke(ctx context.Context, input NodeInput) (NodeOutput,
 		return NodeOutput{}, err
 	}
 
+	committed, aggregated, startIndex, resumed := n.initialLoopState(input)
+
+	for index := startIndex; index < iterations; index++ {
+		state, childCheckpoint := resumeLoopIteration(committed, resumed, index)
+		resumed = nil
+
+		bodyInputs := n.bodyInputs(input.Values, arrays, index)
+
+		outputs, err := input.runtime.runLoopChild(
+			ctx,
+			n.child,
+			bodyInputs,
+			ScopeFrame{Kind: ScopeLoopIteration, NodeID: input.runtime.nodeID, Index: index},
+			state,
+			childCheckpoint,
+		)
+		if err != nil {
+			return NodeOutput{}, loopIterationError(
+				err,
+				state,
+				iterations,
+				index,
+				committed,
+				aggregated,
+			)
+		}
+
+		var shouldBreak bool
+
+		committed, shouldBreak = state.snapshot()
+
+		n.appendLoopOutputs(aggregated, outputs)
+
+		if shouldBreak {
+			return n.output(committed, aggregated)
+		}
+	}
+
+	if n.config.Mode == LoopInfinite {
+		return NodeOutput{}, errLoopLimit
+	}
+
+	return n.output(committed, aggregated)
+}
+
+func (n *compiledLoop) initialLoopState(
+	input NodeInput,
+) (map[string]Value, map[string][]Value, int, *loopCheckpoint) {
 	committed := make(map[string]Value, len(n.variables))
 	for name := range n.variables {
 		committed[name] = input.Values[name]
@@ -154,41 +202,69 @@ func (n *compiledLoop) Invoke(ctx context.Context, input NodeInput) (NodeOutput,
 		}
 	}
 
-	for index := range iterations {
-		state := newLoopIterationState(committed)
-		bodyInputs := n.bodyInputs(input.Values, arrays, index)
-
-		outputs, err := input.runtime.runLoopChild(
-			ctx,
-			n.child,
-			bodyInputs,
-			ScopeFrame{Kind: ScopeLoopIteration, NodeID: input.runtime.nodeID, Index: index},
-			state,
-		)
-		if err != nil {
-			return NodeOutput{}, err
-		}
-
-		var shouldBreak bool
-
-		committed, shouldBreak = state.snapshot()
-
-		for _, output := range n.config.Outputs {
-			if output.Source == LoopOutputBody {
-				aggregated[output.Name] = append(aggregated[output.Name], outputs[output.Port])
-			}
-		}
-
-		if shouldBreak {
-			return n.output(committed, aggregated)
-		}
+	if input.runtime.resume == nil || input.runtime.resume.Loop == nil {
+		return committed, aggregated, 0, nil
 	}
 
-	if n.config.Mode == LoopInfinite {
-		return NodeOutput{}, errLoopLimit
+	resumed := cloneLoopCheckpoint(input.runtime.resume.Loop)
+
+	return cloneValues(resumed.Committed), cloneValueSlices(resumed.Aggregated),
+		resumed.Index, resumed
+}
+
+func resumeLoopIteration(
+	committed map[string]Value,
+	resumed *loopCheckpoint,
+	index int,
+) (*loopIterationState, *executionCheckpoint) {
+	if resumed == nil || resumed.Index != index {
+		return newLoopIterationState(committed), nil
 	}
 
-	return n.output(committed, aggregated)
+	return newLoopIterationStateSnapshot(
+		resumed.IterationState,
+		resumed.ShouldBreak,
+	), resumed.Child
+}
+
+func loopIterationError(
+	err error,
+	state *loopIterationState,
+	iterations int,
+	index int,
+	committed map[string]Value,
+	aggregated map[string][]Value,
+) error {
+	var pause *executionPauseError
+	if !errors.As(err, &pause) {
+		return err
+	}
+
+	iterationState, shouldBreak := state.snapshot()
+	child := pause.checkpoint
+	checkpoint := &loopCheckpoint{
+		Iterations: iterations, Index: index,
+		Committed: cloneValues(committed), Aggregated: cloneValueSlices(aggregated),
+		IterationState: iterationState, ShouldBreak: shouldBreak,
+		Child: &child, Dynamic: cloneDynamicInterrupts(pause.dynamic),
+		Info: cloneInterruptInfo(pause.info),
+	}
+
+	return &executionPauseError{
+		loop: checkpoint, info: cloneInterruptInfo(pause.info),
+		dynamic: cloneDynamicInterrupts(pause.dynamic),
+	}
+}
+
+func (n *compiledLoop) appendLoopOutputs(
+	aggregated map[string][]Value,
+	outputs map[string]Value,
+) {
+	for _, output := range n.config.Outputs {
+		if output.Source == LoopOutputBody {
+			aggregated[output.Name] = append(aggregated[output.Name], outputs[output.Port])
+		}
+	}
 }
 
 func (n *compiledLoop) childPlans() []*Plan {

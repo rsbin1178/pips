@@ -18,6 +18,8 @@ var (
 	ErrCompile = errors.New("workflow: compile failed")
 	// ErrRun classifies a workflow execution failure.
 	ErrRun = errors.New("workflow: run failed")
+	// ErrInterrupted classifies a successfully checkpointed, resumable Run.
+	ErrInterrupted = errors.New("workflow: interrupted")
 	// ErrEventWireFormat reports an attempt to serialize a process-local Event.
 	ErrEventWireFormat = errors.New("workflow: event has no wire format")
 )

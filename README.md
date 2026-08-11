@@ -74,6 +74,99 @@ Batch 是可并行的数组 map，Loop 是带事务局部变量的串行状态�
 允许互相嵌套。父流程与子流程共享 Run ID、取消信号、总步数、叶子并发额度
 和串行化事件输出。
 
+Workflow 支持三类可恢复中断，并保持 Definition JSON 不变：
+
+- 编译期边界：`WithInterruptBeforeNodes` / `WithInterruptAfterNodes` 接收
+  `NodePath`，可精确穿过 SubWorkflow、Batch 和 Loop。
+- 运行期中断：Action 或自定义节点调用 `Interrupt`、`StatefulInterrupt`
+  或 `CompositeInterrupt`；`ResumeTarget` 按稳定中断 ID 定向传入数据。
+- 宿主中断：`WithRunInterrupt` 独立于普通 context cancellation；默认等待
+  运行中的节点结束，也可设置宽限时间后把未完成调用标为重跑。
+
+Runner 通过宿主实现的 `CheckpointStore` 以 Run ID 保存一个不透明快照。
+`Resume` 会先校验 checkpoint 版本以及 Definition、Registry、Plan 指纹，再
+恢复根流程和组合节点内部的准确前沿；校验失败时不会调用 Action。
+
+```go
+plan, err := workflow.Compile(
+    ctx,
+    definition,
+    registry,
+    workflow.WithInterruptBeforeNodes(workflow.NewNodePath("review")),
+	workflow.WithInterruptAfterNodes(workflow.NewNodePath("publish")),
+)
+if err != nil {
+    return err
+}
+
+runner, err := workflow.NewRunner(workflow.WithCheckpointStore(store))
+if err != nil {
+    return err
+}
+
+paused, err := runner.Run(ctx, plan, inputs)
+if !errors.Is(err, workflow.ErrInterrupted) {
+    return err
+}
+
+// Runner 不保存私有的进程内恢复状态；只要 Plan 和 Store 相同，就可以重建。
+resumedRunner, err := workflow.NewRunner(workflow.WithCheckpointStore(store))
+if err != nil {
+    return err
+}
+completed, err := resumedRunner.Resume(ctx, plan, paused.RunID, nil)
+```
+
+Action 可以保存自身的 JSON 状态，并在重新进入 invocation 时读取状态和宿主
+传入的数据：
+
+```go
+wasInterrupted, hasState, state := workflow.GetInterruptState(ctx)
+isTarget, hasData, data := workflow.GetResumeContext(ctx)
+if wasInterrupted && hasState && isTarget && hasData {
+    return continueFrom(state, data)
+}
+
+return workflow.ActionOutput{}, workflow.StatefulInterrupt(
+    ctx,
+    workflow.MustValueOf(map[string]any{"prompt": "confirm"}),
+    workflow.MustValueOf(map[string]any{"draft_id": draftID}),
+)
+```
+
+同一并行前沿可以一次恢复多个动态中断，也可以只选择其中一部分；未选择的
+中断不会执行，且保持原 ID：
+
+```go
+targets := make([]workflow.ResumeTarget, 0, len(paused.Interruption.Contexts))
+for _, request := range paused.Interruption.Contexts {
+    targets = append(targets, workflow.ResumeTarget{
+        InterruptID: request.ID,
+        Data:        workflow.MustValueOf(map[string]any{"approved": true}),
+    })
+}
+completed, err := resumedRunner.Resume(ctx, plan, paused.RunID, targets)
+```
+
+宿主需要可恢复地停止正在运行的 Workflow 时，应发送独立的中断信号；零宽限
+时间会协作取消未完成的叶子调用并保存其原始输入，而不是伪装成普通 context
+取消：
+
+```go
+runCtx, interrupt := workflow.WithRunInterrupt(ctx)
+go func() {
+    <-stopRequested
+    interrupt(workflow.WithRunInterruptTimeout(0))
+}()
+
+paused, err := runner.Run(runCtx, plan, inputs)
+```
+
+恢复会跳过已完成节点，但动态中断和宿主强制停止的未完成调用会从 invocation
+开头重放，因此相关 Action 必须幂等。Store 负责原子覆盖、加密、保留期和
+同一 Run ID 的单写者协调；该进程内运行时不提供远程 worker 或 exactly-once
+保证。普通 context cancellation 仍返回 canceled，且不会创建 checkpoint。
+
 ## Coding agent status
 
 `cmd/pips` is being built as a local, terminal-first coding agent. Its P0

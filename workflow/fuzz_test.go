@@ -1,9 +1,11 @@
 package workflow_test
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rsbin/pips/workflow"
 )
@@ -31,6 +33,238 @@ func FuzzParseValue(f *testing.F) {
 		if !value.Equal(roundTripped) {
 			t.Fatal("round-trip ParseValue changed value")
 		}
+	})
+}
+
+func FuzzResumeCheckpoint(f *testing.F) {
+	action := &fakeAction{
+		spec: actionSpec(
+			"fuzz_checkpoint_action",
+			map[string]workflow.PortSchema{},
+			map[string]workflow.PortSchema{},
+		),
+		run: func(context.Context, workflow.ActionInput) (workflow.ActionOutput, error) {
+			return workflow.ActionOutput{Values: map[string]workflow.Value{}}, nil
+		},
+	}
+
+	registry, err := workflow.NewDefaultRegistry(action)
+	if err != nil {
+		f.Fatalf("NewDefaultRegistry() error = %v", err)
+	}
+
+	definition := workflow.Definition{
+		Schema: workflow.SchemaV1Alpha1, ID: "fuzz-checkpoint", Revision: "v1",
+		Name:   "Fuzz Checkpoint",
+		Inputs: map[string]workflow.PortSchema{}, Outputs: map[string]workflow.OutputBinding{},
+		Nodes: []workflow.NodeDefinition{
+			{ID: "start", Type: workflow.NodeTypeStart, Version: workflow.BuiltinNodeVersion},
+			{
+				ID: "work", Type: workflow.NodeTypeAction, Version: workflow.BuiltinNodeVersion,
+				Config: json.RawMessage(`{"action":"fuzz_checkpoint_action","version":"v1"}`),
+			},
+			{ID: "end", Type: workflow.NodeTypeEnd, Version: workflow.BuiltinNodeVersion},
+		},
+		Edges: []workflow.ControlEdge{
+			{From: workflow.NodeRoute{Node: "start", Route: workflow.RouteSuccess}, To: "work"},
+			{From: workflow.NodeRoute{Node: "work", Route: workflow.RouteSuccess}, To: "end"},
+		},
+		Limits: workflow.DefaultLimits(),
+	}
+
+	plan, err := workflow.Compile(
+		context.Background(),
+		definition,
+		registry,
+		workflow.WithInterruptBeforeNodes(workflow.NewNodePath("work")),
+	)
+	if err != nil {
+		f.Fatalf("Compile() error = %v", err)
+	}
+
+	seedStore := &memoryCheckpointStore{}
+
+	seedRunner, err := workflow.NewRunner(
+		workflow.WithCheckpointStore(seedStore),
+		workflow.WithRunIDSource(func(time.Time) (string, error) { return "fuzz-run", nil }),
+	)
+	if err != nil {
+		f.Fatalf("NewRunner() error = %v", err)
+	}
+
+	if _, err := seedRunner.Run(context.Background(), plan, map[string]workflow.Value{}); err == nil {
+		f.Fatal("Runner.Run() unexpectedly completed")
+	}
+
+	valid := seedStore.value("fuzz-run")
+	f.Add(valid)
+	f.Add([]byte(`{"version":1}`))
+	f.Add([]byte(`not-json`))
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		store := &memoryCheckpointStore{values: map[string][]byte{"fuzz-run": data}}
+
+		runner, err := workflow.NewRunner(workflow.WithCheckpointStore(store))
+		if err != nil {
+			t.Fatalf("NewRunner() error = %v", err)
+		}
+
+		result, err := runner.Resume(context.Background(), plan, "fuzz-run", nil)
+		if err == nil && result.Status != workflow.RunStatusSucceeded {
+			t.Fatalf("successful Resume() status = %s", result.Status)
+		}
+	})
+}
+
+func FuzzCompileInterruptPath(f *testing.F) {
+	registry, err := workflow.NewDefaultRegistry()
+	if err != nil {
+		f.Fatalf("NewDefaultRegistry() error = %v", err)
+	}
+
+	definition := workflow.Definition{
+		Schema: workflow.SchemaV1Alpha1, ID: "fuzz-path", Revision: "v1", Name: "Fuzz Path",
+		Inputs: map[string]workflow.PortSchema{}, Outputs: map[string]workflow.OutputBinding{},
+		Nodes: []workflow.NodeDefinition{
+			{ID: "start", Type: workflow.NodeTypeStart, Version: workflow.BuiltinNodeVersion},
+			{ID: "end", Type: workflow.NodeTypeEnd, Version: workflow.BuiltinNodeVersion},
+		},
+		Edges: []workflow.ControlEdge{{
+			From: workflow.NodeRoute{Node: "start", Route: workflow.RouteSuccess}, To: "end",
+		}},
+		Limits: workflow.DefaultLimits(),
+	}
+
+	f.Add("start")
+	f.Add("missing")
+	f.Add("start/nested")
+
+	f.Fuzz(func(t *testing.T, encoded string) {
+		if len(encoded) > 1_000 {
+			return
+		}
+
+		segments := strings.Split(encoded, "/")
+
+		nodes := make([]workflow.NodeID, len(segments))
+		for index, segment := range segments {
+			nodes[index] = workflow.NodeID(segment)
+		}
+
+		_, _ = workflow.Compile(
+			t.Context(),
+			definition,
+			registry,
+			workflow.WithInterruptBeforeNodes(workflow.NewNodePath(nodes...)),
+		)
+	})
+}
+
+func FuzzResumeTargetID(f *testing.F) {
+	stringSchema, err := workflow.ParsePortSchema([]byte(`{"type":"string"}`))
+	if err != nil {
+		f.Fatalf("ParsePortSchema() error = %v", err)
+	}
+
+	action := &fakeAction{
+		spec: actionSpec(
+			"fuzz_target_action",
+			map[string]workflow.PortSchema{},
+			map[string]workflow.PortSchema{"result": stringSchema},
+		),
+		run: func(ctx context.Context, _ workflow.ActionInput) (workflow.ActionOutput, error) {
+			isTarget, _, _ := workflow.GetResumeContext(ctx)
+			if !isTarget {
+				return workflow.ActionOutput{}, workflow.Interrupt(
+					ctx,
+					workflow.MustValueOf("waiting"),
+				)
+			}
+
+			return workflow.ActionOutput{Values: map[string]workflow.Value{
+				"result": workflow.MustValueOf("done"),
+			}}, nil
+		},
+	}
+
+	registry, err := workflow.NewDefaultRegistry(action)
+	if err != nil {
+		f.Fatalf("NewDefaultRegistry() error = %v", err)
+	}
+
+	definition := workflow.Definition{
+		Schema: workflow.SchemaV1Alpha1, ID: "fuzz-target", Revision: "v1", Name: "Fuzz Target",
+		Inputs: map[string]workflow.PortSchema{},
+		Outputs: map[string]workflow.OutputBinding{
+			"result": {
+				Schema: stringSchema,
+				Binding: workflow.Binding{
+					Source: workflow.BindingNodeOutput, Node: "work", Port: "result",
+				},
+			},
+		},
+		Nodes: []workflow.NodeDefinition{
+			{ID: "start", Type: workflow.NodeTypeStart, Version: workflow.BuiltinNodeVersion},
+			{
+				ID: "work", Type: workflow.NodeTypeAction, Version: workflow.BuiltinNodeVersion,
+				Config: json.RawMessage(`{"action":"fuzz_target_action","version":"v1"}`),
+			},
+			{ID: "end", Type: workflow.NodeTypeEnd, Version: workflow.BuiltinNodeVersion},
+		},
+		Edges: []workflow.ControlEdge{
+			{From: workflow.NodeRoute{Node: "start", Route: workflow.RouteSuccess}, To: "work"},
+			{From: workflow.NodeRoute{Node: "work", Route: workflow.RouteSuccess}, To: "end"},
+		},
+		Limits: workflow.DefaultLimits(),
+	}
+
+	plan, err := workflow.Compile(context.Background(), definition, registry)
+	if err != nil {
+		f.Fatalf("Compile() error = %v", err)
+	}
+
+	seedStore := &memoryCheckpointStore{}
+
+	seedRunner, err := workflow.NewRunner(
+		workflow.WithCheckpointStore(seedStore),
+		workflow.WithRunIDSource(func(time.Time) (string, error) { return "fuzz-target-run", nil }),
+	)
+	if err != nil {
+		f.Fatalf("NewRunner() error = %v", err)
+	}
+
+	result, err := seedRunner.Run(context.Background(), plan, map[string]workflow.Value{})
+	if err == nil || result.Interruption == nil || len(result.Interruption.Contexts) != 1 {
+		f.Fatalf("Runner.Run() result = %#v, error = %v", result, err)
+	}
+
+	checkpoint := seedStore.value("fuzz-target-run")
+	validID := result.Interruption.Contexts[0].ID
+
+	f.Add(validID)
+	f.Add("")
+	f.Add("unknown")
+
+	f.Fuzz(func(t *testing.T, interruptID string) {
+		if len(interruptID) > 1_000 {
+			return
+		}
+
+		store := &memoryCheckpointStore{values: map[string][]byte{
+			"fuzz-target-run": checkpoint,
+		}}
+
+		runner, err := workflow.NewRunner(workflow.WithCheckpointStore(store))
+		if err != nil {
+			t.Fatalf("NewRunner() error = %v", err)
+		}
+
+		_, _ = runner.Resume(
+			context.Background(),
+			plan,
+			"fuzz-target-run",
+			[]workflow.ResumeTarget{{InterruptID: interruptID}},
+		)
 	})
 }
 

@@ -233,6 +233,15 @@ func newLoopIterationState(variables map[string]Value) *loopIterationState {
 	return &loopIterationState{variables: cloneValues(variables)}
 }
 
+func newLoopIterationStateSnapshot(
+	variables map[string]Value,
+	shouldBreak bool,
+) *loopIterationState {
+	return &loopIterationState{
+		variables: cloneValues(variables), shouldBreak: shouldBreak,
+	}
+}
+
 func (s *loopIterationState) value(name string) (Value, bool) {
 	if s == nil {
 		return Value{}, false
