@@ -17,6 +17,15 @@
 // the exact root and composite frontier. Checkpoints are process-runtime state,
 // not part of the Definition wire contract.
 //
+// PrepareNodeDebug derives a Coze-style isolated trial plan for one eligible
+// node. DebugNode executes that selected node without executing its upstream
+// graph; outside bindings become explicit final-schema inputs while literals
+// and selected composite child Plans remain internal. Results contain
+// sensitive resolved values and Action error text, so hosts own authorization,
+// redaction, encryption, and retention. ResumeNodeDebug uses the same opaque
+// CheckpointStore boundary as Resume. Node Debug invokes real Actions and is
+// distinct from partial graph replay or pinned-data execution.
+//
 // SchemaV1Alpha1 is an alpha wire contract: decoders reject unknown schema
 // versions and fields instead of attempting implicit migration. Events are
 // process-local observations and intentionally have no JSON wire format.

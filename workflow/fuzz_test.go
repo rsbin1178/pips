@@ -116,6 +116,138 @@ func FuzzResumeCheckpoint(f *testing.F) {
 	})
 }
 
+func FuzzResumeNodeDebugCheckpoint(f *testing.F) {
+	action := &fakeAction{
+		spec: actionSpec(
+			"fuzz_node_debug_checkpoint",
+			map[string]workflow.PortSchema{},
+			map[string]workflow.PortSchema{},
+		),
+		run: func(context.Context, workflow.ActionInput) (workflow.ActionOutput, error) {
+			return workflow.ActionOutput{Values: map[string]workflow.Value{}}, nil
+		},
+	}
+
+	registry, err := workflow.NewDefaultRegistry(action)
+	if err != nil {
+		f.Fatalf("NewDefaultRegistry() error = %v", err)
+	}
+
+	definition := workflow.Definition{
+		Schema: workflow.SchemaV1Alpha1, ID: "fuzz-node-debug", Revision: "v1", Name: "Fuzz Node Debug",
+		Inputs: map[string]workflow.PortSchema{}, Outputs: map[string]workflow.OutputBinding{},
+		Nodes: []workflow.NodeDefinition{
+			{ID: "start", Type: workflow.NodeTypeStart, Version: workflow.BuiltinNodeVersion},
+			{
+				ID: "work", Type: workflow.NodeTypeAction, Version: workflow.BuiltinNodeVersion,
+				Config: json.RawMessage(`{"action":"fuzz_node_debug_checkpoint","version":"v1"}`),
+			},
+			{ID: "end", Type: workflow.NodeTypeEnd, Version: workflow.BuiltinNodeVersion},
+		},
+		Edges: []workflow.ControlEdge{
+			{From: workflow.NodeRoute{Node: "start", Route: workflow.RouteSuccess}, To: "work"},
+			{From: workflow.NodeRoute{Node: "work", Route: workflow.RouteSuccess}, To: "end"},
+		},
+		Limits: workflow.DefaultLimits(),
+	}
+
+	plan, err := workflow.Compile(
+		context.Background(), definition, registry,
+		workflow.WithInterruptBeforeNodes(workflow.NewNodePath("work")),
+	)
+	if err != nil {
+		f.Fatalf("Compile() error = %v", err)
+	}
+
+	debugPlan, err := workflow.PrepareNodeDebug(plan, workflow.NewNodePath("work"))
+	if err != nil {
+		f.Fatalf("PrepareNodeDebug() error = %v", err)
+	}
+
+	seedStore := &memoryCheckpointStore{}
+
+	seedRunner, err := workflow.NewRunner(
+		workflow.WithCheckpointStore(seedStore),
+		workflow.WithRunIDSource(func(time.Time) (string, error) { return "fuzz-node-debug-run", nil }),
+	)
+	if err != nil {
+		f.Fatalf("NewRunner() error = %v", err)
+	}
+
+	if _, err := seedRunner.DebugNode(
+		context.Background(), debugPlan, map[string]workflow.Value{},
+	); err == nil {
+		f.Fatal("Runner.DebugNode() unexpectedly completed")
+	}
+
+	valid := seedStore.value("fuzz-node-debug-run")
+	f.Add(valid)
+	f.Add([]byte(`{"version":1}`))
+	f.Add([]byte(`not-json`))
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		store := &memoryCheckpointStore{values: map[string][]byte{
+			"fuzz-node-debug-run": data,
+		}}
+
+		runner, err := workflow.NewRunner(workflow.WithCheckpointStore(store))
+		if err != nil {
+			t.Fatalf("NewRunner() error = %v", err)
+		}
+
+		result, err := runner.ResumeNodeDebug(
+			context.Background(), debugPlan, "fuzz-node-debug-run", nil,
+		)
+		if err == nil && result.Status != workflow.RunStatusSucceeded {
+			t.Fatalf("successful ResumeNodeDebug() status = %s", result.Status)
+		}
+	})
+}
+
+func FuzzPrepareNodeDebugPath(f *testing.F) {
+	registry, err := workflow.NewDefaultRegistry()
+	if err != nil {
+		f.Fatalf("NewDefaultRegistry() error = %v", err)
+	}
+
+	definition := workflow.Definition{
+		Schema: workflow.SchemaV1Alpha1, ID: "fuzz-debug-path", Revision: "v1", Name: "Fuzz Debug Path",
+		Inputs: map[string]workflow.PortSchema{}, Outputs: map[string]workflow.OutputBinding{},
+		Nodes: []workflow.NodeDefinition{
+			{ID: "start", Type: workflow.NodeTypeStart, Version: workflow.BuiltinNodeVersion},
+			{ID: "end", Type: workflow.NodeTypeEnd, Version: workflow.BuiltinNodeVersion},
+		},
+		Edges: []workflow.ControlEdge{{
+			From: workflow.NodeRoute{Node: "start", Route: workflow.RouteSuccess}, To: "end",
+		}},
+		Limits: workflow.DefaultLimits(),
+	}
+
+	plan, err := workflow.Compile(context.Background(), definition, registry)
+	if err != nil {
+		f.Fatalf("Compile() error = %v", err)
+	}
+
+	f.Add("start")
+	f.Add("missing")
+	f.Add("start/child")
+
+	f.Fuzz(func(_ *testing.T, encoded string) {
+		if len(encoded) > 1_000 {
+			return
+		}
+
+		segments := strings.Split(encoded, "/")
+
+		nodes := make([]workflow.NodeID, len(segments))
+		for index, segment := range segments {
+			nodes[index] = workflow.NodeID(segment)
+		}
+
+		_, _ = workflow.PrepareNodeDebug(plan, workflow.NewNodePath(nodes...))
+	})
+}
+
 func FuzzCompileInterruptPath(f *testing.F) {
 	registry, err := workflow.NewDefaultRegistry()
 	if err != nil {

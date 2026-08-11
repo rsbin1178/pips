@@ -55,6 +55,7 @@ type Plan struct {
 
 	interruptBefore map[int]struct{}
 	interruptAfter  map[int]struct{}
+	nodeDebug       *nodeDebugPlanMetadata
 }
 
 type planNode struct {
