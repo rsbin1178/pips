@@ -55,6 +55,7 @@ func (e *execution) finishInterrupted(ctx context.Context) (RunResult, error) {
 		return e.finishFailed(&RunError{Err: errors.New("scheduler interruption has no context")})
 	}
 
+	e.synchronizeNodeDebug()
 	checkpoint := e.checkpoint()
 	info := cloneInterruptInfo(e.pauseInfo)
 
@@ -88,6 +89,9 @@ func (e *execution) finishInterrupted(ctx context.Context) (RunResult, error) {
 		TotalSteps:            e.state.steps.Load(),
 		Execution:             checkpoint,
 		Interruption:          info,
+	}
+	if e.state.nodeDebug != nil {
+		stored.NodeDebug = e.state.nodeDebug.checkpoint(e.plan.nodeDebug)
 	}
 
 	data, err := encodeWorkflowCheckpoint(stored)

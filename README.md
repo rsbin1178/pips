@@ -14,7 +14,8 @@ Go building blocks for AI applications. Current packages:
   fixed processes: strict versioned definitions, typed bindings and schemas,
   versioned host Actions, binary conditions, ordered selectors, exact-revision
   sub-workflows, bounded array batches, bounded stateful loops, explicit merge
-  semantics, concurrency/retry limits, and process-local lifecycle events.
+  semantics, isolated node debugging, concurrency/retry limits, and
+  process-local lifecycle events.
 - **`agent/harness`** — stateful orchestration over the runtime: persistent
   session trees (JSONL) with branching, automatic context compaction, branch
   summaries, streaming with active cancellation, and skill/prompt-template
@@ -166,6 +167,44 @@ paused, err := runner.Run(runCtx, plan, inputs)
 开头重放，因此相关 Action 必须幂等。Store 负责原子覆盖、加密、保留期和
 同一 Run ID 的单写者协调；该进程内运行时不提供远程 worker 或 exactly-once
 保证。普通 context cancellation 仍返回 canceled，且不会创建 checkpoint。
+
+### Workflow Node Debug
+
+`PrepareNodeDebug` 从已编译的不可变 `Plan` 派生一个 Coze 风格的单节点试运行
+计划。`DebugNode` 只执行所选节点，不执行它的上游图：字面量 binding 仍保留在
+计划内部，Workflow input、上游 node output 和外围 Loop variable 会变成按目标
+端口最终 schema 校验的显式输入。
+
+```go
+debugPlan, err := workflow.PrepareNodeDebug(
+    plan,
+    workflow.NewNodePath("render"),
+)
+if err != nil {
+    return err
+}
+
+result, err := runner.DebugNode(ctx, debugPlan, map[string]workflow.Value{
+    "prompt": workflow.MustValueOf("a paper-cut city"),
+})
+```
+
+选择 SubWorkflow、Batch 或 Loop 时会完整执行该组合节点，并在
+`InnerExecutions` 中按真实 SubWorkflow/Batch item/Loop iteration 地址返回内部
+非端点节点记录。选择组合节点内部的普通叶节点时，该叶节点只执行一次，外围
+item、index、Loop variable 等值由调用方作为显式 debug input 提供。Start、End、
+Break、Continue 和 Set Variable 不能脱离各自上下文单独调试。
+
+Node Debug 复用普通 Runner 的 retry、timeout、error policy、limits、取消、中断、
+事件和 `CheckpointStore`。中断后必须用同一个 `NodeDebugPlan` 和 Run ID 调用
+`ResumeNodeDebug`；checkpoint 会在执行任何 Action 前校验 source/target/debug
+指纹和已采集记录。它不会新增数据型 Event，也不会持久化最近输入或历史记录。
+
+`NodeDebugResult` 和 node-debug checkpoint 会包含 resolved inputs、outputs 及
+Action error text，可能携带凭据或个人数据；宿主负责权限、脱敏、加密、保留期
+和 checkpoint 单写者协调。Debug 会调用真实 Action，可能产生真实副作用，
+不是 sandbox。该能力是隔离单节点试运行，不是 n8n 风格的上游 partial replay、
+历史数据复用或 data pinning。
 
 ## Coding agent status
 
