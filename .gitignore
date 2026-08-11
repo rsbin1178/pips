@@ -35,4 +35,7 @@ go.work.sum
 
 # Local agent settings
 .claude/settings.local.json
+
+# Local Trellis state
+.trellis/
 **/research/vendor/
