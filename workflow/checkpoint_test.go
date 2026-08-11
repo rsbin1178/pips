@@ -198,7 +198,8 @@ func TestResumeRestoresNodeErrorDataAndPartialStatus(t *testing.T) {
 		t.Fatalf("json.Unmarshal(checkpoint) error = %v", err)
 	}
 
-	if checkpoint["version"] != float64(2) || checkpoint["handled_failure"] != true {
+	if checkpoint["version"] != float64(3) || checkpoint["handled_failure"] != true ||
+		checkpoint["contract_fingerprint"] == "" || checkpoint["registry_fingerprint"] != nil {
 		t.Fatalf("checkpoint header = %#v", checkpoint)
 	}
 

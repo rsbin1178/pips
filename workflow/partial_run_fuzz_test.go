@@ -83,6 +83,9 @@ func FuzzResumePartialCheckpoint(f *testing.F) {
 
 	f.Add(seedStore.value("fuzz-partial-run"))
 	f.Add([]byte(`{"version":1}`))
+	f.Add([]byte(`{"version":2,"registry_fingerprint":"legacy","contract_fingerprint":"current"}`))
+	f.Add([]byte(`{"version":3,"registry_fingerprint":"legacy","contract_fingerprint":"current"}`))
+	f.Add([]byte(`{"version":3,"plan_fingerprint":"first","plan_fingerprint":"second"}`))
 	f.Add([]byte(`not-json`))
 
 	f.Fuzz(func(t *testing.T, data []byte) {

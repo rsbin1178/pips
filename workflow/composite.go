@@ -48,5 +48,6 @@ type definitionKey struct {
 
 type childPlanIdentity struct {
 	Node        NodeID `json:"node"`
+	Index       int    `json:"index,omitempty"`
 	Fingerprint string `json:"fingerprint"`
 }

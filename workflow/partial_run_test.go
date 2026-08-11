@@ -83,6 +83,102 @@ func TestRunPartialReusesPreviousAndInvalidatesDirtyDescendants(t *testing.T) {
 	}
 }
 
+func TestPartialRunFingerprintUsesScopedSourceIdentity(t *testing.T) {
+	t.Parallel()
+
+	stringSchema := mustSchema(t, `{"type":"string"}`)
+	definition := singleActionDefinition(
+		t,
+		"partial-scoped",
+		stringSchema,
+		workflow.NodePolicy{},
+	)
+	baseAction := constantAction("partial-scoped", "base", stringSchema)
+
+	baseRegistry, err := workflow.NewDefaultRegistry(baseAction)
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry() error = %v", err)
+	}
+
+	expandedRegistry := newCheckpointExpandedRegistry(t, baseAction)
+	basePlan := compileFingerprintPlan(t, definition, baseRegistry)
+	expandedPlan := compileFingerprintPlan(t, definition, expandedRegistry)
+
+	runner, err := workflow.NewRunner()
+	if err != nil {
+		t.Fatalf("NewRunner() error = %v", err)
+	}
+
+	baseResult, err := runner.RunPartial(
+		t.Context(),
+		basePlan,
+		"action",
+		workflow.PartialRunInput{Inputs: map[string]workflow.Value{}},
+	)
+	if err != nil {
+		t.Fatalf("RunPartial(base) error = %v", err)
+	}
+
+	expandedResult, err := runner.RunPartial(
+		t.Context(),
+		expandedPlan,
+		"action",
+		workflow.PartialRunInput{Inputs: map[string]workflow.Value{}},
+	)
+	if err != nil {
+		t.Fatalf("RunPartial(expanded) error = %v", err)
+	}
+
+	if baseResult.SourcePlanFingerprint != expandedResult.SourcePlanFingerprint ||
+		baseResult.PlanFingerprint != expandedResult.PlanFingerprint {
+		t.Fatalf(
+			"unused contracts changed Partial Run identity: source=%q/%q partial=%q/%q",
+			baseResult.SourcePlanFingerprint,
+			expandedResult.SourcePlanFingerprint,
+			baseResult.PlanFingerprint,
+			expandedResult.PlanFingerprint,
+		)
+	}
+
+	changedAction := &fakeAction{
+		spec: actionSpec(
+			"partial-scoped",
+			map[string]workflow.PortSchema{},
+			map[string]workflow.PortSchema{
+				"result": stringSchema,
+				"extra":  stringSchema,
+			},
+		),
+		run: func(context.Context, workflow.ActionInput) (workflow.ActionOutput, error) {
+			return workflow.ActionOutput{Values: map[string]workflow.Value{
+				"result": workflow.MustValueOf("changed"),
+				"extra":  workflow.MustValueOf("changed"),
+			}}, nil
+		},
+	}
+
+	changedRegistry, err := workflow.NewDefaultRegistry(changedAction)
+	if err != nil {
+		t.Fatalf("NewDefaultRegistry(changed) error = %v", err)
+	}
+
+	changedPlan := compileFingerprintPlan(t, definition, changedRegistry)
+
+	changedResult, err := runner.RunPartial(
+		t.Context(),
+		changedPlan,
+		"action",
+		workflow.PartialRunInput{Inputs: map[string]workflow.Value{}},
+	)
+	if err != nil {
+		t.Fatalf("RunPartial(changed) error = %v", err)
+	}
+
+	if baseResult.PlanFingerprint == changedResult.PlanFingerprint {
+		t.Fatal("used contract change did not change Partial Run identity")
+	}
+}
+
 func TestRunPartialPinPrecedenceAndDetachedResult(t *testing.T) {
 	t.Parallel()
 

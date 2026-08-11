@@ -62,6 +62,7 @@ func validatePartialRunCheckpoint(
 	checkpoint *partialRunCheckpoint,
 	plan *Plan,
 	execution *executionCheckpoint,
+	mode checkpointIdentityMode,
 ) error {
 	if plan == nil {
 		return errors.New("checkpoint has nil plan")
@@ -83,7 +84,7 @@ func validatePartialRunCheckpoint(
 		return fmt.Errorf("unsupported partial run checkpoint version %d", checkpoint.Version)
 	}
 
-	if checkpoint.SourcePlanFingerprint != plan.partialRun.sourcePlanFingerprint ||
+	if checkpoint.SourcePlanFingerprint != partialRunCheckpointSource(plan.partialRun, mode) ||
 		checkpoint.Destination != plan.partialRun.destination {
 		return errors.New("checkpoint partial run identity mismatch")
 	}
@@ -102,6 +103,24 @@ func validatePartialRunCheckpoint(
 	}
 
 	return validatePartialCheckpointAvailable(checkpoint.Available, plan, execution)
+}
+
+func partialRunCheckpointSource(
+	metadata *partialRunPlanMetadata,
+	mode checkpointIdentityMode,
+) string {
+	if metadata == nil {
+		return ""
+	}
+
+	switch mode {
+	case checkpointIdentityLegacy:
+		return metadata.legacySourcePlanFingerprint
+	case checkpointIdentityCurrent:
+		return metadata.sourcePlanFingerprint
+	default:
+		return ""
+	}
 }
 
 func validatePartialCheckpointDataBounds(checkpoint *partialRunCheckpoint) error {
@@ -387,7 +406,7 @@ func restorePartialRunState(
 	}
 
 	state := &partialRunState{
-		sourcePlanFingerprint: checkpoint.SourcePlanFingerprint,
+		sourcePlanFingerprint: plan.partialRun.sourcePlanFingerprint,
 		destination:           checkpoint.Destination,
 		available:             make([]*partialMaterializedData, len(plan.nodes)),
 		origins:               slices.Clone(checkpoint.Origins),

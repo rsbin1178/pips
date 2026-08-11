@@ -39,10 +39,13 @@ type compileSession struct {
 
 // Plan is an immutable, concurrent-safe compiled Workflow execution plan.
 type Plan struct {
-	definition            Definition
-	definitionFingerprint string
-	registryFingerprint   string
-	fingerprint           string
+	definition                    Definition
+	definitionFingerprint         string
+	registryFingerprint           string
+	referencedContractFingerprint string
+	fingerprint                   string
+	legacyFingerprint             string
+	actionLookups                 []actionLookupContract
 
 	nodes      []planNode
 	nodeIndex  map[NodeID]int
@@ -188,10 +191,13 @@ func (s *compileSession) compileScoped(
 		endIndex:              -1,
 		loop:                  cloneLoopCompileScope(loop),
 	}
+	actions := newActionLookupRecorder()
 
-	if err := plan.compileNodes(ctx, s, interrupts); err != nil {
+	if err := plan.compileNodes(ctx, s, interrupts, actions); err != nil {
 		return nil, err
 	}
+
+	plan.actionLookups = actions.freeze()
 
 	if err := plan.compileEdges(); err != nil {
 		return nil, err
@@ -306,7 +312,7 @@ func (p *Plan) DefinitionFingerprint() string {
 	return p.definitionFingerprint
 }
 
-// RegistryFingerprint returns the Registry contract fingerprint.
+// RegistryFingerprint returns the complete source Registry contract fingerprint.
 func (p *Plan) RegistryFingerprint() string {
 	if p == nil {
 		return ""
@@ -315,7 +321,7 @@ func (p *Plan) RegistryFingerprint() string {
 	return p.registryFingerprint
 }
 
-// Fingerprint returns the identity of the combined Definition and Registry.
+// Fingerprint returns the Definition and referenced execution-contract identity.
 func (p *Plan) Fingerprint() string {
 	if p == nil {
 		return ""
