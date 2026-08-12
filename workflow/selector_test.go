@@ -170,8 +170,8 @@ func TestBuiltinNodeTypesIncludeCompositeAndLoopNodes(t *testing.T) {
 	t.Parallel()
 
 	nodeTypes := workflow.BuiltinNodeTypes()
-	if len(nodeTypes) != 12 {
-		t.Fatalf("len(BuiltinNodeTypes()) = %d, want 12", len(nodeTypes))
+	if len(nodeTypes) != 13 {
+		t.Fatalf("len(BuiltinNodeTypes()) = %d, want 13", len(nodeTypes))
 	}
 
 	want := map[workflow.NodeTypeKey]string{
