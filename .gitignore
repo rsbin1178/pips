@@ -33,8 +33,13 @@ go.work.sum
 .env.local
 .env.*.local
 
-# Local agent settings
-.claude/settings.local.json
+# Local AI and agent state
+/.agent/
+/.claude/
+/.codex/
+/.pi/
+/.pips/
+/AGENTS.md
 
 # Local Trellis state
 .trellis/
