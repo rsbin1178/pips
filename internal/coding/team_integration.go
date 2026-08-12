@@ -10,11 +10,11 @@ import (
 	"slices"
 	"time"
 
-	"github.com/rsbin/pips/agent/team"
-	"github.com/rsbin/pips/internal/coding/config"
-	"github.com/rsbin/pips/internal/coding/execution"
-	"github.com/rsbin/pips/internal/coding/teamintegration"
-	"github.com/rsbin/pips/internal/coding/teamstate"
+	"github.com/rsbin1178/pips/agent/team"
+	"github.com/rsbin1178/pips/internal/coding/config"
+	"github.com/rsbin1178/pips/internal/coding/execution"
+	"github.com/rsbin1178/pips/internal/coding/teamintegration"
+	"github.com/rsbin1178/pips/internal/coding/teamstate"
 )
 
 var (

@@ -9,10 +9,10 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/rsbin/pips/agent/team"
-	"github.com/rsbin/pips/internal/coding"
-	"github.com/rsbin/pips/internal/coding/teamintegration"
-	"github.com/rsbin/pips/internal/coding/teamstate"
+	"github.com/rsbin1178/pips/agent/team"
+	"github.com/rsbin1178/pips/internal/coding"
+	"github.com/rsbin1178/pips/internal/coding/teamintegration"
+	"github.com/rsbin1178/pips/internal/coding/teamstate"
 )
 
 func (m *Model) activateTeamRecoveryReview(

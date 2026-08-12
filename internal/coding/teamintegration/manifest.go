@@ -10,7 +10,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/rsbin/pips/internal/coding/workspace"
+	"github.com/rsbin1178/pips/internal/coding/workspace"
 )
 
 // BlobReader returns exact raw Git blob bytes without filters.

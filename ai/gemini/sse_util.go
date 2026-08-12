@@ -4,7 +4,7 @@ import (
 	"io"
 	"iter"
 
-	"github.com/rsbin/pips/ai/internal/sse"
+	"github.com/rsbin1178/pips/ai/internal/sse"
 )
 
 type eventSource = iter.Seq2[sse.Event, error]

@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"hash"
 
-	"github.com/rsbin/pips/internal/coding/config"
+	"github.com/rsbin1178/pips/internal/coding/config"
 )
 
 // PermissionFilesystemState describes one effective/configured filesystem

@@ -1,4 +1,4 @@
-module github.com/rsbin/pips
+module github.com/rsbin1178/pips
 
 go 1.26.5
 

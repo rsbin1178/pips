@@ -7,10 +7,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/rsbin/pips/agent/continuation"
-	"github.com/rsbin/pips/agent/team"
-	"github.com/rsbin/pips/internal/coding/teamcontrol"
-	"github.com/rsbin/pips/internal/coding/teamstate"
+	"github.com/rsbin1178/pips/agent/continuation"
+	"github.com/rsbin1178/pips/agent/team"
+	"github.com/rsbin1178/pips/internal/coding/teamcontrol"
+	"github.com/rsbin1178/pips/internal/coding/teamstate"
 )
 
 func TestResolveCommandBindsExactlyOneRunningAttempt(t *testing.T) {

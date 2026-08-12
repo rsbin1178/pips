@@ -18,8 +18,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/ai/internal/httpx"
+	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/ai/internal/httpx"
 )
 
 // API selects which OpenAI API surface a [Model] talks to.

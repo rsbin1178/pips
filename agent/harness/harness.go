@@ -10,8 +10,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/rsbin/pips/agent"
-	"github.com/rsbin/pips/ai"
+	"github.com/rsbin1178/pips/agent"
+	"github.com/rsbin1178/pips/ai"
 )
 
 // Phase is what a [Harness] is currently doing.

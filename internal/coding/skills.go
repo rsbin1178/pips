@@ -10,11 +10,11 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/rsbin/pips/agent/extension"
-	"github.com/rsbin/pips/agent/harness"
-	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/internal/coding/resource"
-	"github.com/rsbin/pips/internal/coding/skillsettings"
+	"github.com/rsbin1178/pips/agent/extension"
+	"github.com/rsbin1178/pips/agent/harness"
+	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/internal/coding/resource"
+	"github.com/rsbin1178/pips/internal/coding/skillsettings"
 )
 
 // SkillID is an opaque, generation-stable identifier for a resolved Skill.

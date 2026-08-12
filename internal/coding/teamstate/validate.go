@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rsbin/pips/agent/team"
-	"github.com/rsbin/pips/internal/coding/session"
+	"github.com/rsbin1178/pips/agent/team"
+	"github.com/rsbin1178/pips/internal/coding/session"
 )
 
 var safeIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)

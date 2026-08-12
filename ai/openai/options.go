@@ -3,8 +3,8 @@ package openai
 import (
 	"time"
 
-	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/ai/internal/jsonx"
+	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/ai/internal/jsonx"
 )
 
 // RequestOptions is the openai entry for [ai.Request.ProviderOptions]:

@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/rsbin/pips/ai"
+	"github.com/rsbin1178/pips/ai"
 )
 
 func convertResult(result *mcp.CallToolResult) ([]ai.Part, error) {

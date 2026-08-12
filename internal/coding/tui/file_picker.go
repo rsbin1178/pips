@@ -12,7 +12,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/rsbin/pips/internal/coding/attachment"
+	"github.com/rsbin1178/pips/internal/coding/attachment"
 )
 
 type filePickerDataMsg struct {

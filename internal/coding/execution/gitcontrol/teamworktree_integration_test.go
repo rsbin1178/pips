@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rsbin/pips/agent/team"
-	"github.com/rsbin/pips/internal/coding/teamworktree"
+	"github.com/rsbin1178/pips/agent/team"
+	"github.com/rsbin1178/pips/internal/coding/teamworktree"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

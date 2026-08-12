@@ -9,11 +9,11 @@ import (
 	"os"
 	"time"
 
-	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/ai/middleware/ratelimit"
-	"github.com/rsbin/pips/ai/middleware/retry"
-	"github.com/rsbin/pips/ai/observability"
-	"github.com/rsbin/pips/ai/openai"
+	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/ai/middleware/ratelimit"
+	"github.com/rsbin1178/pips/ai/middleware/retry"
+	"github.com/rsbin1178/pips/ai/observability"
+	"github.com/rsbin1178/pips/ai/openai"
 )
 
 func main() {

@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/rsbin/pips/agent"
-	"github.com/rsbin/pips/agent/catalog"
-	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/internal/coding/tasklist"
+	"github.com/rsbin1178/pips/agent"
+	"github.com/rsbin1178/pips/agent/catalog"
+	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/internal/coding/tasklist"
 )
 
 // NewTaskCatalog returns the Agent-mode application task progress tool.

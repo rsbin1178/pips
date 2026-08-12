@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/rsbin/pips/agent/continuation"
-	"github.com/rsbin/pips/agent/goal"
-	"github.com/rsbin/pips/ai"
+	"github.com/rsbin1178/pips/agent/continuation"
+	"github.com/rsbin1178/pips/agent/goal"
+	"github.com/rsbin1178/pips/ai"
 )
 
 type exampleWorker func(context.Context, continuation.WorkRequest) (continuation.WorkResult, error)

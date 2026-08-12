@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/rsbin/pips/workflow"
+	"github.com/rsbin1178/pips/workflow"
 )
 
 func TestRunPartialHandledDefaultFailureIsNotReusable(t *testing.T) {

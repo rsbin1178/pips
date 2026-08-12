@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/rsbin/pips/ai"
+	"github.com/rsbin1178/pips/ai"
 )
 
 // EmbeddingModel is an ai.EmbeddingModel backed by Gemini's embedContent

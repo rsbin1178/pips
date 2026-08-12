@@ -1,6 +1,6 @@
 package main
 
-import "github.com/rsbin/pips/ai"
+import "github.com/rsbin1178/pips/ai"
 
 // 提示词集中放在这里，便于应用按领域、语言和安全策略进行替换。
 // Team Runtime 不内置业务提示词，它只负责身份、任务和持久化状态约束。

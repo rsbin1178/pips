@@ -1,6 +1,6 @@
 package ai
 
-import "github.com/rsbin/pips/ai/internal/jsonx"
+import "github.com/rsbin1178/pips/ai/internal/jsonx"
 
 // ValidateRequestBodyExtension validates a bounded raw JSON object against
 // reserved dotted paths without sending a request. Provider adapters enforce

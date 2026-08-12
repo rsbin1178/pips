@@ -8,11 +8,11 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/rsbin/pips/agent/bundle"
-	"github.com/rsbin/pips/agent/extension"
-	"github.com/rsbin/pips/agent/harness"
-	"github.com/rsbin/pips/internal/coding/paths"
-	"github.com/rsbin/pips/internal/coding/workspace"
+	"github.com/rsbin1178/pips/agent/bundle"
+	"github.com/rsbin1178/pips/agent/extension"
+	"github.com/rsbin1178/pips/agent/harness"
+	"github.com/rsbin1178/pips/internal/coding/paths"
+	"github.com/rsbin1178/pips/internal/coding/workspace"
 )
 
 var (

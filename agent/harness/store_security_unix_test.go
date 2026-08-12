@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/rsbin/pips/agent/harness"
+	"github.com/rsbin1178/pips/agent/harness"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
 )

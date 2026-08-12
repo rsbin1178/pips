@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"sync"
 
-	"github.com/rsbin/pips/ai"
+	"github.com/rsbin1178/pips/ai"
 )
 
 // scriptedModel plays deterministic responses through Generate and Stream.

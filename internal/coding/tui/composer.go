@@ -12,8 +12,8 @@ import (
 
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
-	"github.com/rsbin/pips/internal/coding"
-	"github.com/rsbin/pips/internal/coding/attachment"
+	"github.com/rsbin1178/pips/internal/coding"
+	"github.com/rsbin1178/pips/internal/coding/attachment"
 )
 
 const (

@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/rsbin/pips/internal/jsonx"
+	"github.com/rsbin1178/pips/internal/jsonx"
 )
 
 const (

@@ -7,8 +7,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/ai/gemini"
+	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/ai/gemini"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

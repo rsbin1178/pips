@@ -12,7 +12,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/rsbin/pips/internal/coding/execution/gitcontrol"
+	"github.com/rsbin1178/pips/internal/coding/execution/gitcontrol"
 )
 
 type parentSnapshot struct {

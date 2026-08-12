@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	acpsdk "github.com/coder/acp-go-sdk"
-	"github.com/rsbin/pips/ai"
+	"github.com/rsbin1178/pips/ai"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

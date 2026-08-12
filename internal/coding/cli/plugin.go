@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"text/tabwriter"
 
-	"github.com/rsbin/pips/internal/coding/agentplugin"
+	"github.com/rsbin1178/pips/internal/coding/agentplugin"
 	"github.com/spf13/cobra"
 )
 

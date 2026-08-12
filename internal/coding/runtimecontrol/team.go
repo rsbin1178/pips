@@ -4,10 +4,10 @@ import (
 	"context"
 	"slices"
 
-	"github.com/rsbin/pips/agent/team"
-	"github.com/rsbin/pips/internal/coding"
-	"github.com/rsbin/pips/internal/coding/approval"
-	"github.com/rsbin/pips/internal/coding/question"
+	"github.com/rsbin1178/pips/agent/team"
+	"github.com/rsbin1178/pips/internal/coding"
+	"github.com/rsbin1178/pips/internal/coding/approval"
+	"github.com/rsbin1178/pips/internal/coding/question"
 )
 
 // GenerateTeamProposal runs one constrained proposal operation under the

@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/rsbin/pips/internal/coding/attachment"
+	"github.com/rsbin1178/pips/internal/coding/attachment"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

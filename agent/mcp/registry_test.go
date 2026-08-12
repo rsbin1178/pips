@@ -5,9 +5,9 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/rsbin/pips/agent"
-	"github.com/rsbin/pips/agent/catalog"
-	agentmcp "github.com/rsbin/pips/agent/mcp"
+	"github.com/rsbin1178/pips/agent"
+	"github.com/rsbin1178/pips/agent/catalog"
+	agentmcp "github.com/rsbin1178/pips/agent/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

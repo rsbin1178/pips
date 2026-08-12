@@ -634,8 +634,8 @@ Ctrl+C, SIGINT/SIGTERM, startup failure, and normal exit paths.
 
 ```go
 import (
-    "github.com/rsbin/pips/ai"
-    "github.com/rsbin/pips/ai/openai"
+    "github.com/rsbin1178/pips/ai"
+    "github.com/rsbin1178/pips/ai/openai"
 )
 
 model := openai.New("gpt-4o", openai.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
@@ -663,7 +663,7 @@ the actual provider in responses, streams, errors, request options, endpoint
 defaults, and capability reports:
 
 ```go
-import "github.com/rsbin/pips/ai/openai/compat"
+import "github.com/rsbin1178/pips/ai/openai/compat"
 
 model := compat.DeepSeek("deepseek-reasoner")
 model := compat.XAI("grok-4") // Responses API, including encrypted reasoning replay
@@ -706,7 +706,7 @@ image generation.
 The `agent` package turns any `ai.LanguageModel` into an autonomous loop:
 
 ```go
-import "github.com/rsbin/pips/agent"
+import "github.com/rsbin1178/pips/agent"
 
 add := agent.NewTool("add", "Add two integers.",
     func(ctx context.Context, args struct {
@@ -856,8 +856,8 @@ import (
     "os/exec"
 
     sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
-    "github.com/rsbin/pips/agent"
-    agentmcp "github.com/rsbin/pips/agent/mcp"
+    "github.com/rsbin1178/pips/agent"
+    agentmcp "github.com/rsbin1178/pips/agent/mcp"
 )
 
 transport := &sdkmcp.CommandTransport{

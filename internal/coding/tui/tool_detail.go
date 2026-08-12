@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/rsbin/pips/internal/coding/tools"
+	"github.com/rsbin1178/pips/internal/coding/tools"
 )
 
 type toolDetailView struct {

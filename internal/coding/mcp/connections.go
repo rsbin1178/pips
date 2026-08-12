@@ -14,11 +14,11 @@ import (
 	"time"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/rsbin/pips/agent"
-	"github.com/rsbin/pips/agent/catalog"
-	agentmcp "github.com/rsbin/pips/agent/mcp"
-	"github.com/rsbin/pips/internal/coding/execution/mcpstdio"
-	"github.com/rsbin/pips/internal/coding/workspace"
+	"github.com/rsbin1178/pips/agent"
+	"github.com/rsbin1178/pips/agent/catalog"
+	agentmcp "github.com/rsbin1178/pips/agent/mcp"
+	"github.com/rsbin1178/pips/internal/coding/execution/mcpstdio"
+	"github.com/rsbin1178/pips/internal/coding/workspace"
 )
 
 // TransportFactory prepares one definition transport and optional resource

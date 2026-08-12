@@ -11,9 +11,9 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/rsbin/pips/agent/harness"
-	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/internal/coding/subagent"
+	"github.com/rsbin1178/pips/agent/harness"
+	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/internal/coding/subagent"
 )
 
 const (

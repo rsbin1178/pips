@@ -15,7 +15,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/rsbin/pips/internal/jsonx"
+	"github.com/rsbin1178/pips/internal/jsonx"
 )
 
 const (

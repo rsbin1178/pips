@@ -1,6 +1,6 @@
 package openai
 
-import "github.com/rsbin/pips/ai"
+import "github.com/rsbin1178/pips/ai"
 
 // Responses API wire types — the subset this adapter produces and consumes.
 // The Responses API models a conversation as a flat list of typed input

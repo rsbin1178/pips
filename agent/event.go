@@ -3,7 +3,7 @@ package agent
 import (
 	"time"
 
-	"github.com/rsbin/pips/ai"
+	"github.com/rsbin1178/pips/ai"
 )
 
 // EventType identifies the semantic payload carried by an [Event].

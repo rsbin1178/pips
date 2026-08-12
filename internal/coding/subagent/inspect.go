@@ -9,8 +9,8 @@ import (
 	"sort"
 	"time"
 
-	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/internal/coding/session"
+	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/internal/coding/session"
 )
 
 type ownedSummary struct {

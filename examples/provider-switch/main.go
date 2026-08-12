@@ -8,11 +8,11 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/ai/anthropic"
-	"github.com/rsbin/pips/ai/gemini"
-	"github.com/rsbin/pips/ai/openai"
-	"github.com/rsbin/pips/ai/openai/compat"
+	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/ai/anthropic"
+	"github.com/rsbin1178/pips/ai/gemini"
+	"github.com/rsbin1178/pips/ai/openai"
+	"github.com/rsbin1178/pips/ai/openai/compat"
 )
 
 func main() {

@@ -10,7 +10,7 @@ import (
 	"os"
 	"unicode/utf8"
 
-	"github.com/rsbin/pips/internal/coding/workspace"
+	"github.com/rsbin1178/pips/internal/coding/workspace"
 )
 
 // ResolveText opens and reads one stable text reference through the Workspace

@@ -12,8 +12,8 @@ import (
 	"syscall"
 
 	term "github.com/charmbracelet/x/term"
-	"github.com/rsbin/pips/internal/coding/cli"
-	"github.com/rsbin/pips/internal/coding/paths"
+	"github.com/rsbin1178/pips/internal/coding/cli"
+	"github.com/rsbin1178/pips/internal/coding/paths"
 )
 
 var (

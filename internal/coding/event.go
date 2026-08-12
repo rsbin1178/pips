@@ -14,17 +14,17 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/rsbin/pips/agent"
-	"github.com/rsbin/pips/agent/harness"
-	"github.com/rsbin/pips/agent/team"
-	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/internal/coding/approval"
-	"github.com/rsbin/pips/internal/coding/changes"
-	"github.com/rsbin/pips/internal/coding/config"
-	"github.com/rsbin/pips/internal/coding/planreview"
-	"github.com/rsbin/pips/internal/coding/question"
-	"github.com/rsbin/pips/internal/coding/subagent"
-	"github.com/rsbin/pips/internal/coding/tasklist"
+	"github.com/rsbin1178/pips/agent"
+	"github.com/rsbin1178/pips/agent/harness"
+	"github.com/rsbin1178/pips/agent/team"
+	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/internal/coding/approval"
+	"github.com/rsbin1178/pips/internal/coding/changes"
+	"github.com/rsbin1178/pips/internal/coding/config"
+	"github.com/rsbin1178/pips/internal/coding/planreview"
+	"github.com/rsbin1178/pips/internal/coding/question"
+	"github.com/rsbin1178/pips/internal/coding/subagent"
+	"github.com/rsbin1178/pips/internal/coding/tasklist"
 )
 
 const (

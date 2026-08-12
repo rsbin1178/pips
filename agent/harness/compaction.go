@@ -7,7 +7,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/rsbin/pips/ai"
+	"github.com/rsbin1178/pips/ai"
 )
 
 // Default compaction settings (mirroring pi's harness defaults).

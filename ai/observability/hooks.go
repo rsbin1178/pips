@@ -8,7 +8,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/rsbin/pips/ai"
+	"github.com/rsbin1178/pips/ai"
 )
 
 // CallInfo describes an in-flight request passed to the hooks.

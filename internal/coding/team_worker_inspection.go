@@ -5,10 +5,10 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/rsbin/pips/agent/harness"
-	"github.com/rsbin/pips/internal/coding/session"
-	"github.com/rsbin/pips/internal/coding/teamcontrol"
-	"github.com/rsbin/pips/internal/coding/teamstate"
+	"github.com/rsbin1178/pips/agent/harness"
+	"github.com/rsbin1178/pips/internal/coding/session"
+	"github.com/rsbin1178/pips/internal/coding/teamcontrol"
+	"github.com/rsbin1178/pips/internal/coding/teamstate"
 )
 
 const maximumTeamWorkerInspectionSessions = 1_000

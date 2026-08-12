@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rsbin/pips/workflow"
+	"github.com/rsbin1178/pips/workflow"
 )
 
 func TestMergeExactVersionsKeepDistinctExclusiveSemantics(t *testing.T) {

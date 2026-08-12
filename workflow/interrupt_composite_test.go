@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rsbin/pips/workflow"
+	"github.com/rsbin1178/pips/workflow"
 )
 
 func TestResumePreservesExactBatchSubWorkflowAddress(t *testing.T) {

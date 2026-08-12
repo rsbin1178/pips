@@ -11,7 +11,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/rsbin/pips/internal/coding/workspace"
+	"github.com/rsbin1178/pips/internal/coding/workspace"
 )
 
 // Compose applies each dependency-ordered Attempt delta exactly once.

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"slices"
 
-	"github.com/rsbin/pips/ai"
+	"github.com/rsbin1178/pips/ai"
 )
 
 // batchOutcome is what one turn's tool execution produced.

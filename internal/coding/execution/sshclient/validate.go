@@ -8,7 +8,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/rsbin/pips/internal/coding/imagebridge"
+	"github.com/rsbin1178/pips/internal/coding/imagebridge"
 )
 
 const (

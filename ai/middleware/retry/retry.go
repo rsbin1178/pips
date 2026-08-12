@@ -14,7 +14,7 @@ import (
 	"math/rand/v2"
 	"time"
 
-	"github.com/rsbin/pips/ai"
+	"github.com/rsbin1178/pips/ai"
 )
 
 // Default backoff parameters.

@@ -3,8 +3,8 @@ package openai_test
 import (
 	"testing"
 
-	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/ai/openai"
+	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/ai/openai"
 	"github.com/stretchr/testify/assert"
 )
 

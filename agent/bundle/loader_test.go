@@ -10,7 +10,7 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"github.com/rsbin/pips/agent/bundle"
+	"github.com/rsbin1178/pips/agent/bundle"
 )
 
 func TestLoaderLoadsResourcesRelativeToManifest(t *testing.T) {

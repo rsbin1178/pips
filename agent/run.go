@@ -7,7 +7,7 @@ import (
 	"iter"
 	"time"
 
-	"github.com/rsbin/pips/ai"
+	"github.com/rsbin1178/pips/ai"
 )
 
 // Run appends msgs to the session and drives the agent loop to completion:

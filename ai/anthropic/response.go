@@ -1,6 +1,6 @@
 package anthropic
 
-import "github.com/rsbin/pips/ai"
+import "github.com/rsbin1178/pips/ai"
 
 // responseFrom translates a Messages response body into the portable shape.
 func responseFrom(body messagesResponse, raw []byte) *ai.Response {

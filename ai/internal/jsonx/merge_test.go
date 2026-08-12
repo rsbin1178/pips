@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rsbin/pips/ai/internal/jsonx"
+	"github.com/rsbin1178/pips/ai/internal/jsonx"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

@@ -3,9 +3,9 @@ package teamcontrol
 import (
 	"fmt"
 
-	"github.com/rsbin/pips/agent/continuation"
-	"github.com/rsbin/pips/agent/team"
-	"github.com/rsbin/pips/internal/coding/teamstate"
+	"github.com/rsbin1178/pips/agent/continuation"
+	"github.com/rsbin1178/pips/agent/team"
+	"github.com/rsbin1178/pips/internal/coding/teamstate"
 )
 
 // ResolveCommand validates its domain target and resolves live actions to one execution.

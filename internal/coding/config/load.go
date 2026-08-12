@@ -13,9 +13,9 @@ import (
 	"strings"
 
 	"github.com/pelletier/go-toml/v2"
-	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/ai/openai"
-	"github.com/rsbin/pips/internal/coding/statusline"
+	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/ai/openai"
+	"github.com/rsbin1178/pips/internal/coding/statusline"
 )
 
 const maxConfigFileSize = 1 << 20

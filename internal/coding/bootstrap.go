@@ -4,9 +4,9 @@ package coding
 import (
 	"fmt"
 
-	"github.com/rsbin/pips/agent/harness"
-	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/internal/coding/tasklist"
+	"github.com/rsbin1178/pips/agent/harness"
+	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/internal/coding/tasklist"
 )
 
 // BootstrapOptions describe one already-open durable Harness session.

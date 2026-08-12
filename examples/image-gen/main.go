@@ -8,8 +8,8 @@ import (
 	"log"
 	"os"
 
-	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/ai/openai"
+	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/ai/openai"
 )
 
 func main() {

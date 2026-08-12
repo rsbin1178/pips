@@ -8,7 +8,7 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/rsbin/pips/internal/coding/workspace"
+	"github.com/rsbin1178/pips/internal/coding/workspace"
 )
 
 func TestTreeInspectMutationPathRejectsFIFO(t *testing.T) {

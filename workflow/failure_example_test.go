@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/rsbin/pips/workflow"
+	"github.com/rsbin1178/pips/workflow"
 )
 
 type failureExampleAction struct {

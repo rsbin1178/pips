@@ -7,13 +7,13 @@ import (
 	"slices"
 	"sync"
 
-	"github.com/rsbin/pips/agent/extension"
-	"github.com/rsbin/pips/internal/coding/agentplugin"
-	"github.com/rsbin/pips/internal/coding/agentprofile"
-	"github.com/rsbin/pips/internal/coding/hooks"
-	codingmcp "github.com/rsbin/pips/internal/coding/mcp"
-	"github.com/rsbin/pips/internal/coding/resource"
-	"github.com/rsbin/pips/internal/coding/skillsettings"
+	"github.com/rsbin1178/pips/agent/extension"
+	"github.com/rsbin1178/pips/internal/coding/agentplugin"
+	"github.com/rsbin1178/pips/internal/coding/agentprofile"
+	"github.com/rsbin1178/pips/internal/coding/hooks"
+	codingmcp "github.com/rsbin1178/pips/internal/coding/mcp"
+	"github.com/rsbin1178/pips/internal/coding/resource"
+	"github.com/rsbin1178/pips/internal/coding/skillsettings"
 )
 
 var errIntegrationGenerationRetired = errors.New("coding integration generation: retired")

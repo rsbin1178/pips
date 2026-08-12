@@ -11,7 +11,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/rsbin/pips/agent"
+	"github.com/rsbin1178/pips/agent"
 )
 
 // Risk classifies the highest expected impact of a tool invocation.

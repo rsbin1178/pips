@@ -4,9 +4,9 @@ package teamcontrol
 import (
 	"time"
 
-	"github.com/rsbin/pips/agent/continuation"
-	"github.com/rsbin/pips/agent/team"
-	"github.com/rsbin/pips/ai"
+	"github.com/rsbin1178/pips/agent/continuation"
+	"github.com/rsbin1178/pips/agent/team"
+	"github.com/rsbin1178/pips/ai"
 )
 
 // Action identifies one operator control operation.

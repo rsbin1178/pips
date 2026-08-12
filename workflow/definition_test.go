@@ -6,7 +6,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/rsbin/pips/workflow"
+	"github.com/rsbin1178/pips/workflow"
 )
 
 func TestDecodeDefinition(t *testing.T) {

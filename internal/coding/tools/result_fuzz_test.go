@@ -3,7 +3,7 @@ package tools_test
 import (
 	"testing"
 
-	"github.com/rsbin/pips/internal/coding/tools"
+	"github.com/rsbin1178/pips/internal/coding/tools"
 )
 
 func FuzzParseResult(f *testing.F) {

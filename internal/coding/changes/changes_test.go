@@ -7,12 +7,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rsbin/pips/agent"
-	"github.com/rsbin/pips/agent/catalog"
-	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/internal/coding/changes"
-	"github.com/rsbin/pips/internal/coding/tools"
-	"github.com/rsbin/pips/internal/coding/workspace"
+	"github.com/rsbin1178/pips/agent"
+	"github.com/rsbin1178/pips/agent/catalog"
+	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/internal/coding/changes"
+	"github.com/rsbin1178/pips/internal/coding/tools"
+	"github.com/rsbin1178/pips/internal/coding/workspace"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

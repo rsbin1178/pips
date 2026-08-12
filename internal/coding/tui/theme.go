@@ -8,7 +8,7 @@ import (
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
 	"charm.land/lipgloss/v2"
-	"github.com/rsbin/pips/internal/coding"
+	"github.com/rsbin1178/pips/internal/coding"
 )
 
 const (

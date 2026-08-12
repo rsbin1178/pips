@@ -8,9 +8,9 @@ import (
 	"io/fs"
 	"strings"
 
-	"github.com/rsbin/pips/internal/coding/execution"
-	patchdoc "github.com/rsbin/pips/internal/coding/tools/patch"
-	"github.com/rsbin/pips/internal/coding/workspace"
+	"github.com/rsbin1178/pips/internal/coding/execution"
+	patchdoc "github.com/rsbin1178/pips/internal/coding/tools/patch"
+	"github.com/rsbin1178/pips/internal/coding/workspace"
 )
 
 const (

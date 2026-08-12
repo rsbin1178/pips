@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/rsbin/pips/agent"
+	"github.com/rsbin1178/pips/agent"
 )
 
 const toolSearchName = "tool_search"

@@ -6,7 +6,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/rsbin/pips/agent/harness"
+	"github.com/rsbin1178/pips/agent/harness"
 )
 
 func resolveSkills(

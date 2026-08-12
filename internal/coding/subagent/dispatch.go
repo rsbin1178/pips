@@ -5,8 +5,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/rsbin/pips/agent"
-	"github.com/rsbin/pips/internal/coding/session"
+	"github.com/rsbin1178/pips/agent"
+	"github.com/rsbin1178/pips/internal/coding/session"
 )
 
 // Dispatcher compiles and opens a non-builtin child execution. It is supplied

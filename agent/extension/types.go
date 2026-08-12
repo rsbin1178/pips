@@ -5,10 +5,10 @@ import (
 	"maps"
 	"slices"
 
-	"github.com/rsbin/pips/agent"
-	"github.com/rsbin/pips/agent/catalog"
-	"github.com/rsbin/pips/agent/harness"
-	"github.com/rsbin/pips/ai"
+	"github.com/rsbin1178/pips/agent"
+	"github.com/rsbin1178/pips/agent/catalog"
+	"github.com/rsbin1178/pips/agent/harness"
+	"github.com/rsbin1178/pips/ai"
 )
 
 // Capability is one stable feature name understood by a Runtime or Bundle.

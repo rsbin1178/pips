@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/rsbin/pips/internal/coding/config"
-	"github.com/rsbin/pips/internal/coding/statusline"
-	"github.com/rsbin/pips/internal/coding/tui"
-	"github.com/rsbin/pips/internal/coding/workspace"
+	"github.com/rsbin1178/pips/internal/coding/config"
+	"github.com/rsbin1178/pips/internal/coding/statusline"
+	"github.com/rsbin1178/pips/internal/coding/tui"
+	"github.com/rsbin1178/pips/internal/coding/workspace"
 	"github.com/spf13/cobra"
 )
 

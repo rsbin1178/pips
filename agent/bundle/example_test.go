@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"testing/fstest"
 
-	"github.com/rsbin/pips/agent/bundle"
-	"github.com/rsbin/pips/agent/catalog"
-	"github.com/rsbin/pips/agent/extension"
+	"github.com/rsbin1178/pips/agent/bundle"
+	"github.com/rsbin1178/pips/agent/catalog"
+	"github.com/rsbin1178/pips/agent/extension"
 )
 
 func ExampleBundle_Activate() {

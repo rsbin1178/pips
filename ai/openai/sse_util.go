@@ -6,8 +6,8 @@ import (
 	"io"
 	"iter"
 
-	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/ai/internal/sse"
+	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/ai/internal/sse"
 )
 
 // eventSource is the SSE event iterator both stream dialects consume.

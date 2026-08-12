@@ -14,8 +14,8 @@ import (
 	"path"
 	"slices"
 
-	patchdoc "github.com/rsbin/pips/internal/coding/tools/patch"
-	"github.com/rsbin/pips/internal/coding/workspace"
+	patchdoc "github.com/rsbin1178/pips/internal/coding/tools/patch"
+	"github.com/rsbin1178/pips/internal/coding/workspace"
 )
 
 const temporaryNameAttempts = 16

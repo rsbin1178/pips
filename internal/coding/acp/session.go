@@ -9,13 +9,13 @@ import (
 	"sync"
 
 	acpsdk "github.com/coder/acp-go-sdk"
-	"github.com/rsbin/pips/agent"
-	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/internal/coding"
-	"github.com/rsbin/pips/internal/coding/approval"
-	"github.com/rsbin/pips/internal/coding/modelcatalog"
-	"github.com/rsbin/pips/internal/coding/planreview"
-	"github.com/rsbin/pips/internal/coding/question"
+	"github.com/rsbin1178/pips/agent"
+	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/internal/coding"
+	"github.com/rsbin1178/pips/internal/coding/approval"
+	"github.com/rsbin1178/pips/internal/coding/modelcatalog"
+	"github.com/rsbin1178/pips/internal/coding/planreview"
+	"github.com/rsbin1178/pips/internal/coding/question"
 )
 
 const planContentField = "plan"

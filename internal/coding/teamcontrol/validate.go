@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rsbin/pips/agent/team"
+	"github.com/rsbin1178/pips/agent/team"
 )
 
 const recordSchema = "pips.coding.team-control/v1alpha1"

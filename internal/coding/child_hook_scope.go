@@ -6,9 +6,9 @@ import (
 	"slices"
 	"sync"
 
-	"github.com/rsbin/pips/agent"
-	"github.com/rsbin/pips/internal/coding/approval"
-	"github.com/rsbin/pips/internal/coding/hooks"
+	"github.com/rsbin1178/pips/agent"
+	"github.com/rsbin1178/pips/internal/coding/approval"
+	"github.com/rsbin1178/pips/internal/coding/hooks"
 )
 
 // childHookScope applies the same trusted hook definitions as a parent

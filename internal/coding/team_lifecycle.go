@@ -5,9 +5,9 @@ import (
 	"errors"
 	"time"
 
-	"github.com/rsbin/pips/agent/continuation"
-	"github.com/rsbin/pips/agent/team"
-	"github.com/rsbin/pips/internal/coding/teamcontrol"
+	"github.com/rsbin1178/pips/agent/continuation"
+	"github.com/rsbin1178/pips/agent/team"
+	"github.com/rsbin1178/pips/internal/coding/teamcontrol"
 )
 
 type (

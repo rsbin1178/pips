@@ -1,6 +1,6 @@
 package agent
 
-import "github.com/rsbin/pips/ai"
+import "github.com/rsbin1178/pips/ai"
 
 // StopReason is why a run terminated cleanly. Runs that fail (model error,
 // context cancellation) return a Go error instead; a [RunResult] carried

@@ -3,7 +3,7 @@ package openai
 import (
 	"encoding/json"
 
-	"github.com/rsbin/pips/ai"
+	"github.com/rsbin1178/pips/ai"
 )
 
 // Chat Completions wire types — the subset of the schema this adapter

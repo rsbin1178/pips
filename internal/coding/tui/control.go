@@ -5,9 +5,9 @@ import (
 	"errors"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/rsbin/pips/internal/coding"
-	"github.com/rsbin/pips/internal/coding/modelcatalog"
-	"github.com/rsbin/pips/internal/coding/runtimecontrol"
+	"github.com/rsbin1178/pips/internal/coding"
+	"github.com/rsbin1178/pips/internal/coding/modelcatalog"
+	"github.com/rsbin1178/pips/internal/coding/runtimecontrol"
 )
 
 type controlOperation uint8

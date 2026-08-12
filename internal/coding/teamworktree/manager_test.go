@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/rsbin/pips/agent/team"
+	"github.com/rsbin1178/pips/agent/team"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

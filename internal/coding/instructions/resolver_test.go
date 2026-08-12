@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rsbin/pips/internal/coding/instructions"
-	"github.com/rsbin/pips/internal/coding/workspace"
+	"github.com/rsbin1178/pips/internal/coding/instructions"
+	"github.com/rsbin1178/pips/internal/coding/workspace"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

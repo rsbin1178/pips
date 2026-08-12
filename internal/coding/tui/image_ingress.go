@@ -5,7 +5,7 @@ import (
 	"errors"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/rsbin/pips/internal/coding/attachment"
+	"github.com/rsbin1178/pips/internal/coding/attachment"
 )
 
 type bridgeImageMsg struct {

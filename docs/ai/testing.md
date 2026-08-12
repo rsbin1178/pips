@@ -25,7 +25,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/rsbin/pips/ai"
+	"github.com/rsbin1178/pips/ai"
 )
 
 type fakeModel struct {

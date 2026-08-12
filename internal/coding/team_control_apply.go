@@ -6,12 +6,12 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/rsbin/pips/agent/team"
-	"github.com/rsbin/pips/internal/coding/approval"
-	"github.com/rsbin/pips/internal/coding/question"
-	"github.com/rsbin/pips/internal/coding/teamcontrol"
-	"github.com/rsbin/pips/internal/coding/teamstate"
-	"github.com/rsbin/pips/internal/jsonx"
+	"github.com/rsbin1178/pips/agent/team"
+	"github.com/rsbin1178/pips/internal/coding/approval"
+	"github.com/rsbin1178/pips/internal/coding/question"
+	"github.com/rsbin1178/pips/internal/coding/teamcontrol"
+	"github.com/rsbin1178/pips/internal/coding/teamstate"
+	"github.com/rsbin1178/pips/internal/jsonx"
 )
 
 const teamControlPendingLimit = 64

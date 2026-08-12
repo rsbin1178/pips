@@ -6,7 +6,7 @@ import (
 	"slices"
 	"time"
 
-	"github.com/rsbin/pips/ai"
+	"github.com/rsbin1178/pips/ai"
 )
 
 // CreateTask creates one immutable task definition.
