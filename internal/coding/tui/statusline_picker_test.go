@@ -8,9 +8,9 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/rsbin/pips/internal/coding/config"
-	"github.com/rsbin/pips/internal/coding/statusline"
-	"github.com/rsbin/pips/internal/coding/tasklist"
+	"github.com/rsbin1178/pips/internal/coding/config"
+	"github.com/rsbin1178/pips/internal/coding/statusline"
+	"github.com/rsbin1178/pips/internal/coding/tasklist"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

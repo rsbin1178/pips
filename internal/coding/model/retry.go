@@ -1,8 +1,8 @@
 package model
 
 import (
-	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/ai/middleware/retry"
+	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/ai/middleware/retry"
 )
 
 const codingModelMaxRetries = 5

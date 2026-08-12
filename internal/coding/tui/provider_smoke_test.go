@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rsbin/pips/internal/coding"
-	"github.com/rsbin/pips/internal/coding/cli"
-	"github.com/rsbin/pips/internal/coding/paths"
+	"github.com/rsbin1178/pips/internal/coding"
+	"github.com/rsbin1178/pips/internal/coding/cli"
+	"github.com/rsbin1178/pips/internal/coding/paths"
 	"github.com/stretchr/testify/require"
 )
 

@@ -8,11 +8,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rsbin/pips/agent"
-	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/internal/coding/approval"
-	"github.com/rsbin/pips/internal/coding/hooks"
-	"github.com/rsbin/pips/internal/coding/subagent"
+	"github.com/rsbin1178/pips/agent"
+	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/internal/coding/approval"
+	"github.com/rsbin1178/pips/internal/coding/hooks"
+	"github.com/rsbin1178/pips/internal/coding/subagent"
 )
 
 const (

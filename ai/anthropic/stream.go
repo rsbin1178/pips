@@ -3,8 +3,8 @@ package anthropic
 import (
 	"fmt"
 
-	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/ai/internal/jsonx"
+	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/ai/internal/jsonx"
 )
 
 // streamDecoder maps Anthropic's typed SSE events onto ai.StreamEvents.

@@ -7,8 +7,8 @@ import (
 	"slices"
 	"time"
 
-	"github.com/rsbin/pips/agent/continuation"
-	"github.com/rsbin/pips/ai"
+	"github.com/rsbin1178/pips/agent/continuation"
+	"github.com/rsbin1178/pips/ai"
 )
 
 // StartTaskAttempt durably binds one claimed task to a continuation execution.

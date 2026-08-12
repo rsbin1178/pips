@@ -7,8 +7,8 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/rsbin/pips/internal/coding/config"
-	"github.com/rsbin/pips/internal/coding/workspace"
+	"github.com/rsbin1178/pips/internal/coding/config"
+	"github.com/rsbin1178/pips/internal/coding/workspace"
 )
 
 const maxConfiguredProtectedPaths = 32

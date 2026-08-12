@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"slices"
 
-	"github.com/rsbin/pips/ai"
+	"github.com/rsbin1178/pips/ai"
 )
 
 // partSliceKey identifies one concrete view of a Part slice. The memo keeps

@@ -13,9 +13,9 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/rsbin/pips/agent"
-	"github.com/rsbin/pips/ai"
-	codingtools "github.com/rsbin/pips/internal/coding/tools"
+	"github.com/rsbin1178/pips/agent"
+	"github.com/rsbin1178/pips/ai"
+	codingtools "github.com/rsbin1178/pips/internal/coding/tools"
 )
 
 const (

@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/rsbin/pips/agent/extension"
-	"github.com/rsbin/pips/agent/harness"
+	"github.com/rsbin1178/pips/agent/extension"
+	"github.com/rsbin1178/pips/agent/harness"
 )
 
 func ExampleRuntime() {

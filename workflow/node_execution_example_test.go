@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/rsbin/pips/workflow"
+	"github.com/rsbin1178/pips/workflow"
 )
 
 type nodeExecutionExampleAction struct {

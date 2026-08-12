@@ -3,7 +3,7 @@ package agent
 import (
 	"context"
 
-	"github.com/rsbin/pips/ai"
+	"github.com/rsbin1178/pips/ai"
 )
 
 // progressKey carries the per-call progress reporter through the tool's

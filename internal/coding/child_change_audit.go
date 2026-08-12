@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/rsbin/pips/agent/harness"
-	"github.com/rsbin/pips/ai"
+	"github.com/rsbin1178/pips/agent/harness"
+	"github.com/rsbin1178/pips/ai"
 )
 
 const childWorkspaceChangeAuditType = "pips.coding.subagent.workspace-changes/v1alpha1"

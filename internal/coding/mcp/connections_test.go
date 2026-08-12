@@ -17,12 +17,12 @@ import (
 	"time"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/rsbin/pips/agent"
-	agentmcp "github.com/rsbin/pips/agent/mcp"
-	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/internal/coding/execution"
-	codingmcp "github.com/rsbin/pips/internal/coding/mcp"
-	"github.com/rsbin/pips/internal/coding/workspace"
+	"github.com/rsbin1178/pips/agent"
+	agentmcp "github.com/rsbin1178/pips/agent/mcp"
+	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/internal/coding/execution"
+	codingmcp "github.com/rsbin1178/pips/internal/coding/mcp"
+	"github.com/rsbin1178/pips/internal/coding/workspace"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

@@ -12,9 +12,9 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/rsbin/pips/agent/extension"
-	codingmcp "github.com/rsbin/pips/internal/coding/mcp"
-	"github.com/rsbin/pips/internal/coding/paths"
+	"github.com/rsbin1178/pips/agent/extension"
+	codingmcp "github.com/rsbin1178/pips/internal/coding/mcp"
+	"github.com/rsbin1178/pips/internal/coding/paths"
 )
 
 type discoveryRoot struct {

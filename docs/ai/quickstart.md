@@ -7,7 +7,7 @@
 在已有 Go 模块中安装 Pips：
 
 ```sh
-go get github.com/rsbin/pips@<version-or-commit>
+go get github.com/rsbin1178/pips@<version-or-commit>
 ```
 
 仓库当前处于 `v0`。将 `<version-or-commit>` 替换为你审核并固定的版本或提交，不要在可重复构建中依赖浮动分支。
@@ -26,8 +26,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/ai/openai"
+	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/ai/openai"
 )
 
 func main() {

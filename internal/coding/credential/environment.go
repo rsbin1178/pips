@@ -5,7 +5,7 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/rsbin/pips/ai"
+	"github.com/rsbin1178/pips/ai"
 )
 
 // APIKeyEnv is the provider-neutral API key variable used by the application.

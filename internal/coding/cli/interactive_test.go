@@ -10,10 +10,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/rsbin/pips/internal/coding"
-	"github.com/rsbin/pips/internal/coding/paths"
-	"github.com/rsbin/pips/internal/coding/statusline"
-	"github.com/rsbin/pips/internal/coding/tui"
+	"github.com/rsbin1178/pips/internal/coding"
+	"github.com/rsbin1178/pips/internal/coding/paths"
+	"github.com/rsbin1178/pips/internal/coding/statusline"
+	"github.com/rsbin1178/pips/internal/coding/tui"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

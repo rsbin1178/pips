@@ -4,9 +4,9 @@ package coding
 import (
 	"slices"
 
-	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/internal/coding/planreview"
-	"github.com/rsbin/pips/internal/coding/question"
+	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/internal/coding/planreview"
+	"github.com/rsbin1178/pips/internal/coding/question"
 )
 
 func cloneEvent(event Event) Event {

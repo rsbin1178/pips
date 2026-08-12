@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rsbin/pips/ai/internal/sse"
+	"github.com/rsbin1178/pips/ai/internal/sse"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

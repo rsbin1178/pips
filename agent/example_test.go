@@ -7,9 +7,9 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/rsbin/pips/agent"
-	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/ai/openai"
+	"github.com/rsbin1178/pips/agent"
+	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/ai/openai"
 )
 
 // NewTool derives the argument schema from an ordinary Go struct.

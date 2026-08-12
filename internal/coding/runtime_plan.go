@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/rsbin/pips/internal/coding/plandoc"
+	"github.com/rsbin1178/pips/internal/coding/plandoc"
 )
 
 // PlanDocument is the bounded path-free Plan view exposed to frontends.

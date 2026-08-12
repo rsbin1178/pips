@@ -11,8 +11,8 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/rsbin/pips/internal/coding/changes"
-	"github.com/rsbin/pips/internal/coding/config"
+	"github.com/rsbin1178/pips/internal/coding/changes"
+	"github.com/rsbin1178/pips/internal/coding/config"
 )
 
 type workspaceStatusResultMsg struct {

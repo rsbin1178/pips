@@ -13,10 +13,10 @@ import (
 	"os/signal"
 	"strings"
 
-	"github.com/rsbin/pips/agent/continuation"
-	"github.com/rsbin/pips/agent/team"
-	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/ai/openai"
+	"github.com/rsbin1178/pips/agent/continuation"
+	"github.com/rsbin1178/pips/agent/team"
+	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/ai/openai"
 )
 
 const (

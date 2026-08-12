@@ -19,9 +19,9 @@ import (
 
 	term "github.com/charmbracelet/x/term"
 	"github.com/creack/pty"
-	"github.com/rsbin/pips/internal/coding/attachment"
-	"github.com/rsbin/pips/internal/coding/clipboard"
-	"github.com/rsbin/pips/internal/coding/imagebridge"
+	"github.com/rsbin1178/pips/internal/coding/attachment"
+	"github.com/rsbin1178/pips/internal/coding/clipboard"
+	"github.com/rsbin1178/pips/internal/coding/imagebridge"
 	"golang.org/x/sys/unix"
 )
 

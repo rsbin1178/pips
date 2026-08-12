@@ -5,12 +5,12 @@ import (
 	"os"
 	"testing"
 
-	"github.com/rsbin/pips/agent"
-	"github.com/rsbin/pips/agent/catalog"
-	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/internal/coding/planreview"
-	"github.com/rsbin/pips/internal/coding/tasklist"
-	"github.com/rsbin/pips/internal/coding/tools"
+	"github.com/rsbin1178/pips/agent"
+	"github.com/rsbin1178/pips/agent/catalog"
+	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/internal/coding/planreview"
+	"github.com/rsbin1178/pips/internal/coding/tasklist"
+	"github.com/rsbin1178/pips/internal/coding/tools"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

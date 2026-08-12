@@ -8,11 +8,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rsbin/pips/agent/extension"
-	"github.com/rsbin/pips/agent/harness"
-	"github.com/rsbin/pips/internal/coding/paths"
-	"github.com/rsbin/pips/internal/coding/resource"
-	"github.com/rsbin/pips/internal/coding/workspace"
+	"github.com/rsbin1178/pips/agent/extension"
+	"github.com/rsbin1178/pips/agent/harness"
+	"github.com/rsbin1178/pips/internal/coding/paths"
+	"github.com/rsbin1178/pips/internal/coding/resource"
+	"github.com/rsbin1178/pips/internal/coding/workspace"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

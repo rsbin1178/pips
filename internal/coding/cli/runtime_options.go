@@ -3,8 +3,8 @@ package cli
 import (
 	"slices"
 
-	"github.com/rsbin/pips/internal/coding"
-	"github.com/rsbin/pips/internal/coding/credential"
+	"github.com/rsbin1178/pips/internal/coding"
+	"github.com/rsbin1178/pips/internal/coding/credential"
 )
 
 func newRuntimeOpenOptions(

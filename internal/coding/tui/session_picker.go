@@ -9,10 +9,10 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/rsbin/pips/internal/coding"
-	"github.com/rsbin/pips/internal/coding/modelcatalog"
-	"github.com/rsbin/pips/internal/coding/runtimecontrol"
-	"github.com/rsbin/pips/internal/coding/session"
+	"github.com/rsbin1178/pips/internal/coding"
+	"github.com/rsbin1178/pips/internal/coding/modelcatalog"
+	"github.com/rsbin1178/pips/internal/coding/runtimecontrol"
+	"github.com/rsbin1178/pips/internal/coding/session"
 )
 
 type sessionPickerDataMsg struct {

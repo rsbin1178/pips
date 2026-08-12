@@ -85,17 +85,17 @@ p0-verify:
 ## deps-check: Verify core ai/agent/workflow dependencies; compile optional integrations
 deps-check:
 	@core_pkgs=$$($(GO) list ./ai/... ./agent/... | grep -Ev '/agent/(mcp|observability/otel)$$'); \
-	mods=$$($(GO) list -deps -f '{{if .Module}}{{.Module.Path}}{{end}}' $$core_pkgs | sort -u | grep -v '^github.com/rsbin/pips$$' | grep -v '^golang.org/x/' | grep -v '^gopkg.in/yaml.v3$$' || true); \
+	mods=$$($(GO) list -deps -f '{{if .Module}}{{.Module.Path}}{{end}}' $$core_pkgs | sort -u | grep -v '^github.com/rsbin1178/pips$$' | grep -v '^golang.org/x/' | grep -v '^gopkg.in/yaml.v3$$' || true); \
 	if [ -n "$$mods" ]; then \
 		echo "unexpected third-party module dependencies in core ai/agent:"; echo "$$mods"; exit 1; \
 	else \
 		echo "core dependency policy OK (stdlib + golang.org/x + reviewed YAML parser)"; \
 	fi
-	@forbidden=$$($(GO) list -deps -f '{{.ImportPath}}' ./workflow/... | grep -E '^github.com/rsbin/pips/(ai|agent)(/|$$)' || true); \
+	@forbidden=$$($(GO) list -deps -f '{{.ImportPath}}' ./workflow/... | grep -E '^github.com/rsbin1178/pips/(ai|agent)(/|$$)' || true); \
 	if [ -n "$$forbidden" ]; then \
 		echo "workflow must not depend on ai or agent packages:"; echo "$$forbidden"; exit 1; \
 	fi; \
-	mods=$$($(GO) list -deps -f '{{if .Module}}{{.Module.Path}}{{end}}' ./workflow/... | sort -u | grep -v '^github.com/rsbin/pips$$' | grep -v '^github.com/google/jsonschema-go$$' || true); \
+	mods=$$($(GO) list -deps -f '{{if .Module}}{{.Module.Path}}{{end}}' ./workflow/... | sort -u | grep -v '^github.com/rsbin1178/pips$$' | grep -v '^github.com/google/jsonschema-go$$' || true); \
 	if [ -n "$$mods" ]; then \
 		echo "unexpected third-party module dependencies in workflow:"; echo "$$mods"; exit 1; \
 	else \

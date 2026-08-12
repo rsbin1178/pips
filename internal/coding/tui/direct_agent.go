@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/rsbin/pips/internal/coding"
+	"github.com/rsbin1178/pips/internal/coding"
 )
 
 // agentRunController is deliberately optional so integrations that predate the

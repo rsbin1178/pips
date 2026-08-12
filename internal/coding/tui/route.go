@@ -4,10 +4,10 @@ import (
 	"time"
 
 	"charm.land/bubbles/v2/textinput"
-	"github.com/rsbin/pips/internal/coding"
-	"github.com/rsbin/pips/internal/coding/runtimecontrol"
-	"github.com/rsbin/pips/internal/coding/session"
-	"github.com/rsbin/pips/internal/coding/subagent"
+	"github.com/rsbin1178/pips/internal/coding"
+	"github.com/rsbin1178/pips/internal/coding/runtimecontrol"
+	"github.com/rsbin1178/pips/internal/coding/session"
+	"github.com/rsbin1178/pips/internal/coding/subagent"
 
 	tea "charm.land/bubbletea/v2"
 )

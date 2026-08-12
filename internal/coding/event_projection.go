@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/rsbin/pips/agent"
-	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/internal/coding/planreview"
-	"github.com/rsbin/pips/internal/coding/subagent"
+	"github.com/rsbin1178/pips/agent"
+	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/internal/coding/planreview"
+	"github.com/rsbin1178/pips/internal/coding/subagent"
 )
 
 // Disclosure selects the content retained at a serialization boundary.

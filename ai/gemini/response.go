@@ -1,6 +1,6 @@
 package gemini
 
-import "github.com/rsbin/pips/ai"
+import "github.com/rsbin1178/pips/ai"
 
 // responseFrom translates a generateContent response body into the portable
 // shape.

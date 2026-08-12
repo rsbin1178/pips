@@ -9,10 +9,10 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/rsbin/pips/agent"
-	"github.com/rsbin/pips/agent/catalog"
-	"github.com/rsbin/pips/agent/extension"
-	"github.com/rsbin/pips/agent/harness"
+	"github.com/rsbin1178/pips/agent"
+	"github.com/rsbin1178/pips/agent/catalog"
+	"github.com/rsbin1178/pips/agent/extension"
+	"github.com/rsbin1178/pips/agent/harness"
 )
 
 func TestRuntimeRetiresGenerationAfterFinalLease(t *testing.T) {

@@ -4,8 +4,8 @@ package teamstate
 import (
 	"time"
 
-	"github.com/rsbin/pips/agent/continuation"
-	"github.com/rsbin/pips/agent/team"
+	"github.com/rsbin1178/pips/agent/continuation"
+	"github.com/rsbin1178/pips/agent/team"
 )
 
 // State is the application lifecycle of one Team's resources.

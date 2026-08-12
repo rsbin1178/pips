@@ -3,9 +3,9 @@ package coding
 import (
 	"context"
 
-	"github.com/rsbin/pips/internal/coding/attachment"
-	"github.com/rsbin/pips/internal/coding/changes/git"
-	"github.com/rsbin/pips/internal/coding/workspace"
+	"github.com/rsbin1178/pips/internal/coding/attachment"
+	"github.com/rsbin1178/pips/internal/coding/changes/git"
+	"github.com/rsbin1178/pips/internal/coding/workspace"
 )
 
 // ListWorkspaceFiles returns a bounded content-free snapshot from the active

@@ -9,7 +9,7 @@ import (
 	"strings"
 
 	acpsdk "github.com/coder/acp-go-sdk"
-	"github.com/rsbin/pips/ai"
+	"github.com/rsbin1178/pips/ai"
 )
 
 func convertPrompt(blocks []acpsdk.ContentBlock, limits Limits) (ai.Message, error) {

@@ -3,8 +3,8 @@ package coding
 import (
 	"slices"
 
-	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/internal/coding/planreview"
+	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/internal/coding/planreview"
 )
 
 const maxPlanProposals = 128

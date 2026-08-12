@@ -5,7 +5,7 @@ import (
 	"slices"
 	"time"
 
-	"github.com/rsbin/pips/ai"
+	"github.com/rsbin1178/pips/ai"
 )
 
 // ID identifies one continuation execution independently of its target.

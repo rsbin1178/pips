@@ -5,7 +5,7 @@ import (
 	"maps"
 	"slices"
 
-	"github.com/rsbin/pips/ai"
+	"github.com/rsbin1178/pips/ai"
 )
 
 func cloneMetadata(value SessionMetadata) SessionMetadata {

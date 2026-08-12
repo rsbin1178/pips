@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/rsbin/pips/agent/team"
-	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/internal/coding/approval"
-	"github.com/rsbin/pips/internal/coding/question"
-	"github.com/rsbin/pips/internal/coding/teamcontrol"
+	"github.com/rsbin1178/pips/agent/team"
+	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/internal/coding/approval"
+	"github.com/rsbin1178/pips/internal/coding/question"
+	"github.com/rsbin1178/pips/internal/coding/teamcontrol"
 )
 
 // TeamControlAction identifies one user-authorized Team operation.

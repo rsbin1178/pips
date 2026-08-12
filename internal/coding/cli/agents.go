@@ -13,11 +13,11 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/rsbin/pips/internal/coding"
-	"github.com/rsbin/pips/internal/coding/agentprofile"
-	"github.com/rsbin/pips/internal/coding/paths"
-	"github.com/rsbin/pips/internal/coding/subagent"
-	"github.com/rsbin/pips/internal/coding/workspace"
+	"github.com/rsbin1178/pips/internal/coding"
+	"github.com/rsbin1178/pips/internal/coding/agentprofile"
+	"github.com/rsbin1178/pips/internal/coding/paths"
+	"github.com/rsbin1178/pips/internal/coding/subagent"
+	"github.com/rsbin1178/pips/internal/coding/workspace"
 	"github.com/spf13/cobra"
 )
 

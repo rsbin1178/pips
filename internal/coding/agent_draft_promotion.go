@@ -14,9 +14,9 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/rsbin/pips/internal/coding/agentprofile"
-	"github.com/rsbin/pips/internal/coding/paths"
-	"github.com/rsbin/pips/internal/coding/workspace"
+	"github.com/rsbin1178/pips/internal/coding/agentprofile"
+	"github.com/rsbin1178/pips/internal/coding/paths"
+	"github.com/rsbin1178/pips/internal/coding/workspace"
 )
 
 // PromoteAgentDraftRequest identifies the exact reviewed Draft. Definition is

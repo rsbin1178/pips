@@ -10,7 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/bmatcuk/doublestar/v4"
-	"github.com/rsbin/pips/agent"
+	"github.com/rsbin1178/pips/agent"
 )
 
 const globName = "glob"

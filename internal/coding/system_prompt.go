@@ -6,10 +6,10 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/rsbin/pips/internal/coding/planflow"
-	"github.com/rsbin/pips/internal/coding/planreview"
-	"github.com/rsbin/pips/internal/coding/question"
-	"github.com/rsbin/pips/internal/coding/tasklist"
+	"github.com/rsbin1178/pips/internal/coding/planflow"
+	"github.com/rsbin1178/pips/internal/coding/planreview"
+	"github.com/rsbin1178/pips/internal/coding/question"
+	"github.com/rsbin1178/pips/internal/coding/tasklist"
 )
 
 const codingSystemPrompt = `You are Pips, a terminal-first coding agent operating in the user's local workspace. Be precise, safe, and useful.

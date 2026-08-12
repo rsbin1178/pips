@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
 
-	"github.com/rsbin/pips/internal/coding/teamcontrol"
+	"github.com/rsbin1178/pips/internal/coding/teamcontrol"
 )
 
 func TestStoreRejectsConcurrentProcessWriter(t *testing.T) {

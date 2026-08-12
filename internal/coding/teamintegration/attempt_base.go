@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/rsbin/pips/internal/coding/execution/gitcontrol"
+	"github.com/rsbin1178/pips/internal/coding/execution/gitcontrol"
 )
 
 const attemptBaseRefReason = "pips coding Team Attempt dependency base"

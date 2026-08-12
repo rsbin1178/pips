@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/rsbin/pips/internal/coding/subagent"
+	"github.com/rsbin1178/pips/internal/coding/subagent"
 )
 
 const componentTelemetry = "telemetry"

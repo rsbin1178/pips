@@ -5,7 +5,7 @@ package imagebridge
 import (
 	"context"
 
-	"github.com/rsbin/pips/internal/coding/attachment"
+	"github.com/rsbin1178/pips/internal/coding/attachment"
 )
 
 // Server is unavailable on unsupported operating systems.

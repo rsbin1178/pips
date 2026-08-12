@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/rsbin/pips/ai"
+	"github.com/rsbin1178/pips/ai"
 )
 
 const branchSummaryPrompt = `The messages above are a conversation branch that is being abandoned. Summarize it so the work is not lost when continuing from an earlier point.

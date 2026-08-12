@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/rsbin/pips/ai"
+	"github.com/rsbin1178/pips/ai"
 )
 
 // ErrNotFound means no usable credential is available for a provider.

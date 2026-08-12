@@ -11,12 +11,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rsbin/pips/agent/extension"
-	"github.com/rsbin/pips/internal/coding/agentplugin"
-	"github.com/rsbin/pips/internal/coding/agentprofile"
-	"github.com/rsbin/pips/internal/coding/hooks"
-	"github.com/rsbin/pips/internal/coding/resource"
-	"github.com/rsbin/pips/internal/coding/skillsettings"
+	"github.com/rsbin1178/pips/agent/extension"
+	"github.com/rsbin1178/pips/internal/coding/agentplugin"
+	"github.com/rsbin1178/pips/internal/coding/agentprofile"
+	"github.com/rsbin1178/pips/internal/coding/hooks"
+	"github.com/rsbin1178/pips/internal/coding/resource"
+	"github.com/rsbin1178/pips/internal/coding/skillsettings"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

@@ -10,8 +10,8 @@ import (
 	"unicode/utf8"
 
 	acpsdk "github.com/coder/acp-go-sdk"
-	"github.com/rsbin/pips/internal/coding/execution"
-	codingmcp "github.com/rsbin/pips/internal/coding/mcp"
+	"github.com/rsbin1178/pips/internal/coding/execution"
+	codingmcp "github.com/rsbin1178/pips/internal/coding/mcp"
 )
 
 const sessionMCPConnectTimeout = 10 * time.Second

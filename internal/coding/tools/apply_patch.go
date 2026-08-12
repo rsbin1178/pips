@@ -11,8 +11,8 @@ import (
 	"slices"
 	"strings"
 
-	patchdoc "github.com/rsbin/pips/internal/coding/tools/patch"
-	"github.com/rsbin/pips/internal/coding/workspace"
+	patchdoc "github.com/rsbin1178/pips/internal/coding/tools/patch"
+	"github.com/rsbin1178/pips/internal/coding/workspace"
 )
 
 const applyPatchName = "apply_patch"

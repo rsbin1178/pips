@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/rsbin/pips/ai"
+	"github.com/rsbin1178/pips/ai"
 )
 
 // chatRequestFrom translates a portable request into the Chat Completions

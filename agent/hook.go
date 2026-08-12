@@ -1,7 +1,7 @@
 package agent
 
 import (
-	"github.com/rsbin/pips/ai"
+	"github.com/rsbin1178/pips/ai"
 )
 
 // ToolResultInfo is the read-only view passed to a [WithAfterTool] hook: the

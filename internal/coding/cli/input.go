@@ -6,7 +6,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/rsbin/pips/internal/coding"
+	"github.com/rsbin1178/pips/internal/coding"
 )
 
 type outputMode string

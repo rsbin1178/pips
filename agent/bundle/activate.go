@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/rsbin/pips/agent/extension"
+	"github.com/rsbin1178/pips/agent/extension"
 )
 
 // Activate resolves every bundle's registered Extensions, adds its

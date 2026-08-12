@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/ai/middleware/retry"
+	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/ai/middleware/retry"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

@@ -10,11 +10,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rsbin/pips/internal/coding/attachment"
-	"github.com/rsbin/pips/internal/coding/execution/sshclient"
-	"github.com/rsbin/pips/internal/coding/imagebridge"
-	"github.com/rsbin/pips/internal/coding/paths"
-	"github.com/rsbin/pips/internal/coding/tui"
+	"github.com/rsbin1178/pips/internal/coding/attachment"
+	"github.com/rsbin1178/pips/internal/coding/execution/sshclient"
+	"github.com/rsbin1178/pips/internal/coding/imagebridge"
+	"github.com/rsbin1178/pips/internal/coding/paths"
+	"github.com/rsbin1178/pips/internal/coding/tui"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

@@ -14,8 +14,8 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/ai/openai"
+	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/ai/openai"
 )
 
 // Lookup returns a defensive copy of a reviewed OpenAI-compatible provider

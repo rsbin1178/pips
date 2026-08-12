@@ -7,8 +7,8 @@ import (
 	"io"
 	"strings"
 
-	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/internal/coding"
+	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/internal/coding"
 )
 
 type execPresenter interface {

@@ -9,12 +9,12 @@ import (
 	"path/filepath"
 	"strings"
 
-	codingacp "github.com/rsbin/pips/internal/coding/acp"
-	"github.com/rsbin/pips/internal/coding/config"
-	"github.com/rsbin/pips/internal/coding/mcp"
-	"github.com/rsbin/pips/internal/coding/runtimecontrol"
-	"github.com/rsbin/pips/internal/coding/session"
-	"github.com/rsbin/pips/internal/coding/workspace"
+	codingacp "github.com/rsbin1178/pips/internal/coding/acp"
+	"github.com/rsbin1178/pips/internal/coding/config"
+	"github.com/rsbin1178/pips/internal/coding/mcp"
+	"github.com/rsbin1178/pips/internal/coding/runtimecontrol"
+	"github.com/rsbin1178/pips/internal/coding/session"
+	"github.com/rsbin1178/pips/internal/coding/workspace"
 	"github.com/spf13/cobra"
 )
 

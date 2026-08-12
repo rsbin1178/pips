@@ -10,8 +10,8 @@ import (
 	"io"
 	"maps"
 
-	"github.com/rsbin/pips/agent"
-	"github.com/rsbin/pips/ai"
+	"github.com/rsbin1178/pips/agent"
+	"github.com/rsbin1178/pips/ai"
 )
 
 // SkillToolName is the reserved Tool name for explicit Skill activation.

@@ -6,7 +6,7 @@ import (
 	"maps"
 	"sync"
 
-	"github.com/rsbin/pips/agent/harness"
+	"github.com/rsbin1178/pips/agent/harness"
 )
 
 var errDeferredStoreClosed = errors.New("coding session: deferred store is closed")

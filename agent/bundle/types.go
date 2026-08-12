@@ -4,8 +4,8 @@ import (
 	"maps"
 	"slices"
 
-	"github.com/rsbin/pips/agent/extension"
-	"github.com/rsbin/pips/agent/harness"
+	"github.com/rsbin1178/pips/agent/extension"
+	"github.com/rsbin1178/pips/agent/harness"
 )
 
 // SchemaV1Alpha1 is the P0 Bundle manifest schema.

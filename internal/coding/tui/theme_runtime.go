@@ -5,7 +5,7 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/rsbin/pips/internal/coding/config"
+	"github.com/rsbin1178/pips/internal/coding/config"
 )
 
 var errThemePersistenceUnavailable = errors.New("theme persistence is unavailable")

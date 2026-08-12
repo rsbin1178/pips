@@ -6,9 +6,9 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/rsbin/pips/agent/harness"
-	"github.com/rsbin/pips/internal/coding/instructions"
-	"github.com/rsbin/pips/internal/coding/workspace"
+	"github.com/rsbin1178/pips/agent/harness"
+	"github.com/rsbin1178/pips/internal/coding/instructions"
+	"github.com/rsbin1178/pips/internal/coding/workspace"
 )
 
 func ExampleResolver_Resolve() {

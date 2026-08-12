@@ -1,6 +1,6 @@
 package anthropic
 
-import "github.com/rsbin/pips/ai"
+import "github.com/rsbin1178/pips/ai"
 
 // Content block type discriminators used on the wire in both directions.
 const (

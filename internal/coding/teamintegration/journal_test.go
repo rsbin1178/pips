@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rsbin/pips/internal/coding/workspace"
-	"github.com/rsbin/pips/internal/jsonx"
+	"github.com/rsbin1178/pips/internal/coding/workspace"
+	"github.com/rsbin1178/pips/internal/jsonx"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

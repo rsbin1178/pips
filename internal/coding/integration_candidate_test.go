@@ -6,11 +6,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rsbin/pips/internal/coding/agentplugin"
-	"github.com/rsbin/pips/internal/coding/agentprofile"
-	codingmcp "github.com/rsbin/pips/internal/coding/mcp"
-	"github.com/rsbin/pips/internal/coding/resource"
-	"github.com/rsbin/pips/internal/coding/skillsettings"
+	"github.com/rsbin1178/pips/internal/coding/agentplugin"
+	"github.com/rsbin1178/pips/internal/coding/agentprofile"
+	codingmcp "github.com/rsbin1178/pips/internal/coding/mcp"
+	"github.com/rsbin1178/pips/internal/coding/resource"
+	"github.com/rsbin1178/pips/internal/coding/skillsettings"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

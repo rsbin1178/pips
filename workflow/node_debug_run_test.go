@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rsbin/pips/workflow"
+	"github.com/rsbin1178/pips/workflow"
 )
 
 func TestDebugNodeFailurePolicies(t *testing.T) {

@@ -6,7 +6,7 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/rsbin/pips/internal/coding/plandoc"
+	"github.com/rsbin1178/pips/internal/coding/plandoc"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

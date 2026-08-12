@@ -14,7 +14,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/rsbin/pips/internal/coding/statusline"
+	"github.com/rsbin1178/pips/internal/coding/statusline"
 )
 
 var (

@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/internal/coding"
-	"github.com/rsbin/pips/internal/coding/attachment"
-	"github.com/rsbin/pips/internal/coding/workspace"
+	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/internal/coding"
+	"github.com/rsbin1178/pips/internal/coding/attachment"
+	"github.com/rsbin1178/pips/internal/coding/workspace"
 )
 
 type workspaceFileResolver func(

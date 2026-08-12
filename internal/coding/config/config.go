@@ -11,10 +11,10 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/rsbin/pips/agent/harness"
-	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/ai/openai"
-	"github.com/rsbin/pips/internal/coding/statusline"
+	"github.com/rsbin1178/pips/agent/harness"
+	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/ai/openai"
+	"github.com/rsbin1178/pips/internal/coding/statusline"
 )
 
 // ErrInvalid means a configuration value or combination is invalid.

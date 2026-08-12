@@ -8,7 +8,7 @@ import (
 	"sync"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/rsbin/pips/internal/coding"
+	"github.com/rsbin1178/pips/internal/coding"
 )
 
 var errBridgeStopped = errors.New("coding tui: event bridge stopped")

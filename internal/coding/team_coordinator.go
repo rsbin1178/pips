@@ -7,13 +7,13 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/rsbin/pips/agent"
-	"github.com/rsbin/pips/agent/catalog"
-	"github.com/rsbin/pips/agent/team"
-	"github.com/rsbin/pips/internal/coding/teamcontrol"
-	"github.com/rsbin/pips/internal/coding/teamintegration"
-	"github.com/rsbin/pips/internal/coding/teamstate"
-	"github.com/rsbin/pips/internal/coding/teamworktree"
+	"github.com/rsbin1178/pips/agent"
+	"github.com/rsbin1178/pips/agent/catalog"
+	"github.com/rsbin1178/pips/agent/team"
+	"github.com/rsbin1178/pips/internal/coding/teamcontrol"
+	"github.com/rsbin1178/pips/internal/coding/teamintegration"
+	"github.com/rsbin1178/pips/internal/coding/teamstate"
+	"github.com/rsbin1178/pips/internal/coding/teamworktree"
 )
 
 // teamCoordinator is the single application owner for one admitted Team. The

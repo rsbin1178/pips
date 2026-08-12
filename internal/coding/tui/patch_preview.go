@@ -8,8 +8,8 @@ import (
 	"unicode"
 
 	"github.com/charmbracelet/x/ansi"
-	codingtools "github.com/rsbin/pips/internal/coding/tools"
-	patchdoc "github.com/rsbin/pips/internal/coding/tools/patch"
+	codingtools "github.com/rsbin1178/pips/internal/coding/tools"
+	patchdoc "github.com/rsbin1178/pips/internal/coding/tools/patch"
 )
 
 const (

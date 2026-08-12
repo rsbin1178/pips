@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rsbin/pips/internal/coding"
+	"github.com/rsbin1178/pips/internal/coding"
 	"github.com/stretchr/testify/assert"
 )
 

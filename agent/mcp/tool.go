@@ -8,8 +8,8 @@ import (
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/rsbin/pips/agent"
-	"github.com/rsbin/pips/ai"
+	"github.com/rsbin1178/pips/agent"
+	"github.com/rsbin1178/pips/ai"
 )
 
 // ToolError reports an MCP tool-level failure (`isError: true`). Protocol and

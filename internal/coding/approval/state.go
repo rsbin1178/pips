@@ -4,10 +4,10 @@ package approval
 import (
 	"context"
 
-	"github.com/rsbin/pips/agent"
-	"github.com/rsbin/pips/agent/harness"
-	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/internal/coding/execution"
+	"github.com/rsbin1178/pips/agent"
+	"github.com/rsbin1178/pips/agent/harness"
+	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/internal/coding/execution"
 )
 
 // Handler prepares one controlled tool and renders bounded execution results.
