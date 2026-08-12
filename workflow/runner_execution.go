@@ -65,6 +65,7 @@ type runState struct {
 	hasHandledFailure atomic.Bool
 	leafTokens        chan struct{}
 	eventMu           sync.Mutex
+	nodeExecutionMu   sync.Mutex
 	resumeTargets     map[string]ResumeTarget
 	nodeDebug         *nodeDebugCollector
 	partialRun        *partialRunState
@@ -201,7 +202,7 @@ func (e *execution) run(ctx context.Context) (RunResult, error) {
 
 		if err := ctx.Err(); err != nil {
 			cancel()
-			e.drain(completions)
+			e.drain(ctx, completions)
 
 			return e.finishCanceled(err)
 		}
@@ -237,7 +238,7 @@ func (e *execution) run(ctx context.Context) (RunResult, error) {
 		select {
 		case <-ctx.Done():
 			cancel()
-			e.drain(completions)
+			e.drain(ctx, completions)
 
 			return e.finishCanceled(ctx.Err())
 		case <-interrupt.signal:
@@ -250,9 +251,9 @@ func (e *execution) run(ctx context.Context) (RunResult, error) {
 
 			interrupt.poll(e)
 
-			if err := e.completeNode(completion); err != nil {
+			if err := e.completeNode(ctx, completion); err != nil {
 				cancel()
-				e.drain(completions)
+				e.drain(ctx, completions)
 
 				return e.finishFailed(err)
 			}
@@ -358,21 +359,21 @@ func (e *execution) finishInflight(index int) {
 	delete(e.forcedRerun, index)
 }
 
-func (e *execution) completeNode(completion nodeCompletion) error {
+func (e *execution) completeNode(ctx context.Context, completion nodeCompletion) error {
 	if completion.hostRerun {
-		e.recordHostRerun(completion)
+		e.recordHostRerun(ctx, completion)
 
 		return nil
 	}
 
 	if completion.dynamic != nil {
-		e.recordDynamicInterruption(completion)
+		e.recordDynamicInterruption(ctx, completion)
 
 		return nil //nolint:nilerr // Dynamic interruption is resumable control flow.
 	}
 
 	if completion.pause != nil {
-		e.recordNodeInterruption(completion)
+		e.recordNodeInterruption(ctx, completion)
 
 		return nil //nolint:nilerr // Descendant interruption is resumable control flow.
 	}
@@ -397,6 +398,15 @@ func (e *execution) completeNode(completion nodeCompletion) error {
 			completion.output.Route,
 			"",
 		)
+		e.recordNodeExecution(
+			ctx,
+			completion.index,
+			e.nodes[completion.index],
+			completion.inputs,
+			completion.output.Values,
+			completion.output.Route,
+			"",
+		)
 
 		_, staticAfter := e.plan.interruptAfter[completion.index]
 		if staticAfter || e.hostInterruptRequested {
@@ -410,16 +420,16 @@ func (e *execution) completeNode(completion nodeCompletion) error {
 		return nil
 	}
 
-	return e.completeFailedNode(completion)
+	return e.completeFailedNode(ctx, completion)
 }
 
-func (e *execution) completeFailedNode(completion nodeCompletion) error {
+func (e *execution) completeFailedNode(ctx context.Context, completion nodeCompletion) error {
 	nodeDefinition := e.plan.nodes[completion.index].definition
 	switch nodeDefinition.Policy.Error {
 	case ErrorRoute:
 		failureData, err := newNodeFailureData(completion.err.Error(), completion.failure)
 		if err != nil {
-			return e.failNodeErrorMaterialization(completion, err)
+			return e.failNodeErrorMaterialization(ctx, completion, err)
 		}
 
 		e.nodes[completion.index].Status = NodeStatusException
@@ -441,12 +451,21 @@ func (e *execution) completeFailedNode(completion nodeCompletion) error {
 			RouteError,
 			completion.err.Error(),
 		)
+		e.recordNodeExecution(
+			ctx,
+			completion.index,
+			e.nodes[completion.index],
+			completion.inputs,
+			nil,
+			RouteError,
+			completion.err.Error(),
+		)
 
 		return nil
 	case ErrorContinueWithDefault:
 		failureData, err := newNodeFailureData(completion.err.Error(), completion.failure)
 		if err != nil {
-			return e.failNodeErrorMaterialization(completion, err)
+			return e.failNodeErrorMaterialization(ctx, completion, err)
 		}
 
 		e.nodes[completion.index].Status = NodeStatusException
@@ -469,6 +488,15 @@ func (e *execution) completeFailedNode(completion nodeCompletion) error {
 			RouteSuccess,
 			completion.err.Error(),
 		)
+		e.recordNodeExecution(
+			ctx,
+			completion.index,
+			e.nodes[completion.index],
+			completion.inputs,
+			nodeDefinition.Policy.DefaultOutputs,
+			RouteSuccess,
+			completion.err.Error(),
+		)
 
 		return nil
 	default:
@@ -486,6 +514,15 @@ func (e *execution) completeFailedNode(completion nodeCompletion) error {
 			"",
 			completion.err.Error(),
 		)
+		e.recordNodeExecution(
+			ctx,
+			completion.index,
+			e.nodes[completion.index],
+			completion.inputs,
+			nil,
+			"",
+			completion.err.Error(),
+		)
 
 		return &RunError{
 			NodeID: nodeDefinition.ID, Attempt: completion.attempts, Err: completion.err,
@@ -494,9 +531,12 @@ func (e *execution) completeFailedNode(completion nodeCompletion) error {
 }
 
 func (e *execution) failNodeErrorMaterialization(
+	ctx context.Context,
 	completion nodeCompletion,
 	materializeErr error,
 ) error {
+	terminalErr := errors.Join(completion.err, materializeErr)
+
 	e.recordPartialExecuted(
 		completion.index,
 		completion.attempts,
@@ -511,15 +551,24 @@ func (e *execution) failNodeErrorMaterialization(
 		"",
 		completion.err.Error(),
 	)
+	e.recordNodeExecution(
+		ctx,
+		completion.index,
+		e.nodes[completion.index],
+		completion.inputs,
+		nil,
+		"",
+		terminalErr.Error(),
+	)
 
 	return &RunError{
 		NodeID:  e.plan.nodes[completion.index].definition.ID,
 		Attempt: completion.attempts,
-		Err:     errors.Join(completion.err, materializeErr),
+		Err:     terminalErr,
 	}
 }
 
-func (e *execution) recordHostRerun(completion nodeCompletion) {
+func (e *execution) recordHostRerun(ctx context.Context, completion nodeCompletion) {
 	node := &e.nodes[completion.index]
 	node.Status = NodeStatusInterrupted
 	node.Attempts = completion.attempts
@@ -534,6 +583,7 @@ func (e *execution) recordHostRerun(completion nodeCompletion) {
 	e.pauseRequested = true
 	e.recordPartialExecuted(completion.index, completion.attempts, nil, "", false)
 	e.recordNodeDebug(completion.index, completion.inputs, nil, "", "")
+	e.recordNodeExecution(ctx, completion.index, *node, completion.inputs, nil, "", "")
 }
 
 func (e *execution) appendRerunAddress(index int) {
@@ -547,7 +597,7 @@ func (e *execution) appendRerunAddress(index int) {
 	e.pauseInfo.RerunNodes = append(e.pauseInfo.RerunNodes, address)
 }
 
-func (e *execution) recordDynamicInterruption(completion nodeCompletion) {
+func (e *execution) recordDynamicInterruption(ctx context.Context, completion nodeCompletion) {
 	node := &e.nodes[completion.index]
 	node.Status = NodeStatusInterrupted
 	node.Attempts = completion.attempts
@@ -572,9 +622,10 @@ func (e *execution) recordDynamicInterruption(completion nodeCompletion) {
 	e.pauseRequested = true
 	e.recordPartialExecuted(completion.index, completion.attempts, nil, "", false)
 	e.recordNodeDebug(completion.index, completion.inputs, nil, "", "")
+	e.recordNodeExecution(ctx, completion.index, *node, completion.inputs, nil, "", "")
 }
 
-func (e *execution) recordNodeInterruption(completion nodeCompletion) {
+func (e *execution) recordNodeInterruption(ctx context.Context, completion nodeCompletion) {
 	node := &e.nodes[completion.index]
 	node.Status = NodeStatusInterrupted
 	node.Attempts = completion.attempts
@@ -604,6 +655,7 @@ func (e *execution) recordNodeInterruption(completion nodeCompletion) {
 	e.pauseRequested = true
 	e.recordPartialExecuted(completion.index, completion.attempts, nil, "", false)
 	e.recordNodeDebug(completion.index, completion.inputs, nil, "", "")
+	e.recordNodeExecution(ctx, completion.index, *node, completion.inputs, nil, "", "")
 }
 
 func (e *execution) requestBeforeInterrupt() {
@@ -740,7 +792,7 @@ func (e *execution) skipNode(nodeIndex int) {
 	e.recordNodeDebug(nodeIndex, map[string]Value{}, map[string]Value{}, "", "")
 }
 
-func (e *execution) drain(completions <-chan nodeCompletion) {
+func (e *execution) drain(ctx context.Context, completions <-chan nodeCompletion) {
 	for e.running > 0 {
 		completion := <-completions
 		e.finishInflight(completion.index)
@@ -753,6 +805,15 @@ func (e *execution) drain(completions <-chan nodeCompletion) {
 
 		e.recordNodeDebug(
 			completion.index,
+			completion.inputs,
+			completion.output.Values,
+			completion.output.Route,
+			errorMessage,
+		)
+		e.recordNodeExecution(
+			ctx,
+			completion.index,
+			e.nodes[completion.index],
 			completion.inputs,
 			completion.output.Values,
 			completion.output.Route,

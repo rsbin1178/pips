@@ -22,4 +22,7 @@ var (
 	ErrInterrupted = errors.New("workflow: interrupted")
 	// ErrEventWireFormat reports an attempt to serialize a process-local Event.
 	ErrEventWireFormat = errors.New("workflow: event has no wire format")
+	// ErrNodeExecutionWireFormat reports an attempt to serialize a sensitive,
+	// process-local NodeExecution snapshot.
+	ErrNodeExecutionWireFormat = errors.New("workflow: node execution has no wire format")
 )
