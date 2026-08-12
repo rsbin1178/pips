@@ -207,10 +207,12 @@ func (p *Plan) bindingSchema(binding Binding) (PortSchema, int, error) {
 	case BindingWorkflowInput:
 		var ok bool
 
-		schema, ok = p.definition.Inputs[binding.Port]
+		input, ok := p.definition.Inputs[binding.Port]
 		if !ok {
 			return PortSchema{}, sourceIndex, fmt.Errorf("unknown Workflow input %q", binding.Port)
 		}
+
+		schema = input.Schema
 	case BindingNodeOutput:
 		schema, sourceIndex, err = p.nodeOutputBindingSchema(binding)
 	case BindingNodeError:

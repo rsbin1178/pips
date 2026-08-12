@@ -22,7 +22,7 @@ func TestCompileRejectsInvalidDefinitions(t *testing.T) {
 
 	base := workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "compile", Revision: "v1", Name: "Compile",
-		Inputs:  map[string]workflow.PortSchema{"input": stringSchema},
+		Inputs:  map[string]workflow.WorkflowInput{"input": {Schema: stringSchema, Required: true}},
 		Outputs: map[string]workflow.OutputBinding{"result": nodeOutput(stringSchema, "action", "result")},
 		Nodes: []workflow.NodeDefinition{
 			{ID: "start", Type: workflow.NodeTypeStart, Version: workflow.BuiltinNodeVersion},
@@ -140,7 +140,7 @@ func TestCompileRejectsImplicitJoin(t *testing.T) {
 	action := constantAction("accept", "accepted", stringSchema)
 	definition := workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "implicit", Revision: "v1", Name: "Implicit Join",
-		Inputs:  map[string]workflow.PortSchema{"value": boolSchema},
+		Inputs:  map[string]workflow.WorkflowInput{"value": {Schema: boolSchema, Required: true}},
 		Outputs: map[string]workflow.OutputBinding{"result": nodeOutput(stringSchema, "accept", "result")},
 		Nodes: []workflow.NodeDefinition{
 			{ID: "start", Type: workflow.NodeTypeStart, Version: workflow.BuiltinNodeVersion},
@@ -189,7 +189,7 @@ func TestCompileRejectsOutputOnErrorRoute(t *testing.T) {
 	}
 	definition := workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "error-binding", Revision: "v1", Name: "Error Binding",
-		Inputs:  map[string]workflow.PortSchema{},
+		Inputs:  map[string]workflow.WorkflowInput{},
 		Outputs: map[string]workflow.OutputBinding{"result": nodeOutput(stringSchema, "merge", "result")},
 		Nodes: []workflow.NodeDefinition{
 			{ID: "start", Type: workflow.NodeTypeStart, Version: workflow.BuiltinNodeVersion},
@@ -250,7 +250,7 @@ func TestCompileRejectsCycle(t *testing.T) {
 	}
 	definition := workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "cycle", Revision: "v1", Name: "Cycle",
-		Inputs:  map[string]workflow.PortSchema{},
+		Inputs:  map[string]workflow.WorkflowInput{},
 		Outputs: map[string]workflow.OutputBinding{"result": nodeOutput(stringSchema, "merge-b", "first")},
 		Nodes: []workflow.NodeDefinition{
 			{ID: "start", Type: workflow.NodeTypeStart, Version: workflow.BuiltinNodeVersion},

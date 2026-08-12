@@ -100,7 +100,7 @@ func TestRunnerErrorRoute(t *testing.T) {
 	}
 	definition := workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "error-route", Revision: "v1", Name: "Error Route",
-		Inputs:  map[string]workflow.PortSchema{},
+		Inputs:  map[string]workflow.WorkflowInput{},
 		Outputs: map[string]workflow.OutputBinding{"result": nodeOutput(stringSchema, "merge", "result")},
 		Nodes: []workflow.NodeDefinition{
 			{ID: "start", Type: workflow.NodeTypeStart, Version: workflow.BuiltinNodeVersion},
@@ -313,7 +313,7 @@ func TestRunnerCancellationDoesNotStartSuccessor(t *testing.T) {
 	})
 	definition := workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "cancel", Revision: "v1", Name: "Cancel",
-		Inputs:  map[string]workflow.PortSchema{},
+		Inputs:  map[string]workflow.WorkflowInput{},
 		Outputs: map[string]workflow.OutputBinding{"result": nodeOutput(stringSchema, "successor", "result")},
 		Nodes: []workflow.NodeDefinition{
 			{ID: "start", Type: workflow.NodeTypeStart, Version: workflow.BuiltinNodeVersion},
@@ -435,7 +435,7 @@ func singleActionDefinition(
 
 	return workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "single", Revision: "v1", Name: "Single",
-		Inputs:  map[string]workflow.PortSchema{},
+		Inputs:  map[string]workflow.WorkflowInput{},
 		Outputs: map[string]workflow.OutputBinding{"result": nodeOutput(schema, "action", "result")},
 		Nodes: []workflow.NodeDefinition{
 			{ID: "start", Type: workflow.NodeTypeStart, Version: workflow.BuiltinNodeVersion},

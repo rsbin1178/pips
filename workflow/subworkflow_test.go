@@ -111,7 +111,7 @@ func TestSubWorkflowFailureUsesOuterPolicyAndTerminalFailureWins(t *testing.T) {
 	stringSchema := mustSchema(t, `{"type":"string"}`)
 	child := workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "failing-child", Revision: "v1", Name: "Failing Child",
-		Inputs: map[string]workflow.PortSchema{},
+		Inputs: map[string]workflow.WorkflowInput{},
 		Outputs: map[string]workflow.OutputBinding{
 			"result": nodeOutput(stringSchema, "fail", "result"),
 		},
@@ -314,7 +314,7 @@ func TestSubWorkflowNodeRejectsSchemaMismatch(t *testing.T) {
 	numberSchema := mustSchema(t, `{"type":"number"}`)
 	child := subWorkflowChildDefinition(stringSchema, "child_action")
 	parent := subWorkflowParentDefinition(t, stringSchema, workflowRef(t, child))
-	parent.Inputs["value"] = numberSchema
+	parent.Inputs["value"] = workflow.WorkflowInput{Schema: numberSchema, Required: true}
 
 	registry, err := workflow.NewDefaultRegistry(&fakeAction{spec: actionSpec(
 		"child_action",
@@ -553,7 +553,7 @@ func subWorkflowChildDefinition(
 ) workflow.Definition {
 	return workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "child", Revision: "v1", Name: "Child",
-		Inputs: map[string]workflow.PortSchema{"value": stringSchema},
+		Inputs: map[string]workflow.WorkflowInput{"value": {Schema: stringSchema, Required: true}},
 		Outputs: map[string]workflow.OutputBinding{
 			"result": nodeOutput(stringSchema, "child_action", "result"),
 		},
@@ -584,7 +584,7 @@ func emptySubWorkflowParent(
 
 	return workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "empty-parent", Revision: "v1", Name: "Empty Parent",
-		Inputs: map[string]workflow.PortSchema{},
+		Inputs: map[string]workflow.WorkflowInput{},
 		Outputs: map[string]workflow.OutputBinding{
 			"result": nodeOutput(stringSchema, "sub", "result"),
 		},
@@ -613,7 +613,7 @@ func subWorkflowParentDefinition(
 
 	return workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "parent", Revision: "v1", Name: "Parent",
-		Inputs: map[string]workflow.PortSchema{"value": stringSchema},
+		Inputs: map[string]workflow.WorkflowInput{"value": {Schema: stringSchema, Required: true}},
 		Outputs: map[string]workflow.OutputBinding{
 			"result": nodeOutput(stringSchema, "sub", "result"),
 		},
@@ -638,7 +638,7 @@ func subWorkflowParentDefinition(
 func emptyLeafDefinition(id workflow.DefinitionID) workflow.Definition {
 	return workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: id, Revision: "v1", Name: string(id),
-		Inputs:  map[string]workflow.PortSchema{},
+		Inputs:  map[string]workflow.WorkflowInput{},
 		Outputs: map[string]workflow.OutputBinding{},
 		Nodes: []workflow.NodeDefinition{
 			{ID: "start", Type: workflow.NodeTypeStart, Version: workflow.BuiltinNodeVersion},
@@ -658,7 +658,7 @@ func emptySubWorkflowDefinition(
 
 	return workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: id, Revision: "v1", Name: string(id),
-		Inputs:  map[string]workflow.PortSchema{},
+		Inputs:  map[string]workflow.WorkflowInput{},
 		Outputs: map[string]workflow.OutputBinding{},
 		Nodes: []workflow.NodeDefinition{
 			{ID: "start", Type: workflow.NodeTypeStart, Version: workflow.BuiltinNodeVersion},

@@ -474,8 +474,8 @@ func nestedInterruptLeafDefinition(
 
 	return workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "deep-leaf", Revision: "v1", Name: "Deep Leaf",
-		Inputs: map[string]workflow.PortSchema{
-			"item": stringSchema, "index": integerSchema,
+		Inputs: map[string]workflow.WorkflowInput{
+			"item": {Schema: stringSchema, Required: true}, "index": {Schema: integerSchema, Required: true},
 		},
 		Outputs: map[string]workflow.OutputBinding{
 			"result": nodeOutput(stringSchema, "work", "result"),
@@ -512,7 +512,7 @@ func checkpointStateLoopBody(
 	return workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "checkpoint-state-body", Revision: "v1",
 		Name:    "Checkpoint State Body",
-		Inputs:  map[string]workflow.PortSchema{"index": integerSchema},
+		Inputs:  map[string]workflow.WorkflowInput{"index": {Schema: integerSchema, Required: true}},
 		Outputs: map[string]workflow.OutputBinding{},
 		Nodes: []workflow.NodeDefinition{
 			{ID: "start", Type: workflow.NodeTypeStart, Version: workflow.BuiltinNodeVersion},
@@ -557,8 +557,8 @@ func nestedInterruptSubDefinition(
 
 	return workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: id, Revision: "v1", Name: string(id),
-		Inputs: map[string]workflow.PortSchema{
-			"item": stringSchema, "index": integerSchema,
+		Inputs: map[string]workflow.WorkflowInput{
+			"item": {Schema: stringSchema, Required: true}, "index": {Schema: integerSchema, Required: true},
 		},
 		Outputs: map[string]workflow.OutputBinding{
 			"result": nodeOutput(stringSchema, nodeID, "result"),

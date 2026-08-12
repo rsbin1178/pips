@@ -40,7 +40,7 @@ func ExampleRunner_RunPartial() {
 	registry, _ := workflow.NewDefaultRegistry(partialRunExampleAction{schema: stringSchema})
 	definition := workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "preview", Revision: "v1", Name: "Preview",
-		Inputs: map[string]workflow.PortSchema{"prompt": stringSchema},
+		Inputs: map[string]workflow.WorkflowInput{"prompt": {Schema: stringSchema, Required: true}},
 		Outputs: map[string]workflow.OutputBinding{
 			"image": {
 				Schema: stringSchema,

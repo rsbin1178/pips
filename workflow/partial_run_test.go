@@ -415,7 +415,7 @@ func partialRunLinearFixture(
 
 	return workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "partial-linear", Revision: "v1", Name: "Partial Linear",
-		Inputs: map[string]workflow.PortSchema{"value": stringSchema},
+		Inputs: map[string]workflow.WorkflowInput{"value": {Schema: stringSchema, Required: true}},
 		Outputs: map[string]workflow.OutputBinding{
 			"value": nodeOutput(stringSchema, "second", "value"),
 		},

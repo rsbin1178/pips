@@ -25,7 +25,7 @@ func ExampleLoopNode() {
 	})
 	body := workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "feedback-body", Revision: "v1", Name: "Feedback Body",
-		Inputs:  map[string]workflow.PortSchema{"index": integerSchema},
+		Inputs:  map[string]workflow.WorkflowInput{"index": {Schema: integerSchema, Required: true}},
 		Outputs: map[string]workflow.OutputBinding{},
 		Nodes: []workflow.NodeDefinition{
 			{ID: "start", Type: workflow.NodeTypeStart, Version: workflow.BuiltinNodeVersion},
@@ -67,8 +67,8 @@ func ExampleLoopNode() {
 	})
 	definition := workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "feedback", Revision: "v1", Name: "Feedback",
-		Inputs: map[string]workflow.PortSchema{
-			"count": countSchema, "state": stringSchema,
+		Inputs: map[string]workflow.WorkflowInput{
+			"count": {Schema: countSchema, Required: true}, "state": {Schema: stringSchema, Required: true},
 		},
 		Outputs: map[string]workflow.OutputBinding{
 			"final": nodeOutput(stringSchema, "loop", "final"),

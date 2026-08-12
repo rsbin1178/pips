@@ -413,7 +413,7 @@ func TestNodeDebugCheckpointRequiresPrivateDebugSection(t *testing.T) {
 	}
 	definition := workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "debug-checkpoint-section", Revision: "v1", Name: "Debug Checkpoint Section",
-		Inputs: map[string]workflow.PortSchema{}, Outputs: map[string]workflow.OutputBinding{},
+		Inputs: map[string]workflow.WorkflowInput{}, Outputs: map[string]workflow.OutputBinding{},
 		Nodes: []workflow.NodeDefinition{
 			{ID: "start", Type: workflow.NodeTypeStart, Version: workflow.BuiltinNodeVersion},
 			{

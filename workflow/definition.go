@@ -14,6 +14,8 @@ import (
 const (
 	// SchemaV1Alpha1 identifies the first Workflow Definition wire format.
 	SchemaV1Alpha1 = "pips.workflow/v1alpha1"
+	// SchemaV1Alpha2 adds required, optional, and default Workflow inputs.
+	SchemaV1Alpha2 = "pips.workflow/v1alpha2"
 
 	maxDefinitionBytes = 2 << 20
 	maxDefinitionNodes = 256
@@ -111,6 +113,17 @@ type Limits struct {
 	MaxSteps       int `json:"max_steps"`
 }
 
+// WorkflowInput declares one Workflow-boundary input contract. A non-null
+// Default applies to a missing optional input and to a supplied empty
+// string, array, or object of the same kind.
+//
+//nolint:revive // WorkflowInput is deliberately package-qualified and role-specific.
+type WorkflowInput struct {
+	Schema   PortSchema `json:"schema"`
+	Required bool       `json:"required,omitempty"`
+	Default  *Value     `json:"default,omitempty"`
+}
+
 // DefaultLimits returns conservative in-process Run limits.
 func DefaultLimits() Limits {
 	return Limits{MaxConcurrency: 4, MaxSteps: 1_000}
@@ -134,7 +147,7 @@ type Definition struct {
 	Revision Revision     `json:"revision"`
 	Name     string       `json:"name"`
 
-	Inputs  map[string]PortSchema    `json:"inputs"`
+	Inputs  map[string]WorkflowInput `json:"inputs"`
 	Outputs map[string]OutputBinding `json:"outputs"`
 	Nodes   []NodeDefinition         `json:"nodes"`
 	Edges   []ControlEdge            `json:"edges"`
@@ -210,7 +223,7 @@ func validateDefinitionShape(definition Definition) error {
 }
 
 func validateDefinitionIdentity(definition Definition) error {
-	if definition.Schema != SchemaV1Alpha1 {
+	if definition.Schema != SchemaV1Alpha1 && definition.Schema != SchemaV1Alpha2 {
 		return invalidDefinitionf("unsupported schema %q", definition.Schema)
 	}
 
@@ -246,9 +259,9 @@ func validateDefinitionSize(definition Definition) error {
 }
 
 func validateDefinitionPorts(definition Definition) error {
-	for name, schema := range definition.Inputs {
-		if !validIdentifier(name) || !schema.IsValid() {
-			return invalidDefinitionf("invalid input %q", name)
+	for name, input := range definition.Inputs {
+		if err := validateWorkflowInputContract(definition.Schema, name, input); err != nil {
+			return err
 		}
 	}
 
@@ -259,6 +272,31 @@ func validateDefinitionPorts(definition Definition) error {
 
 		if err := validateBinding(output.Binding); err != nil {
 			return invalidDefinitionf("output %q: %v", name, err)
+		}
+	}
+
+	return nil
+}
+
+func validateWorkflowInputContract(schema, name string, input WorkflowInput) error {
+	if !validIdentifier(name) || !input.Schema.IsValid() {
+		return invalidDefinitionf("invalid input %q", name)
+	}
+
+	defaultValue := effectiveWorkflowInputDefault(input)
+	if schema == SchemaV1Alpha1 && (!input.Required || defaultValue != nil) {
+		return invalidDefinitionf("v1alpha1 input %q must be required without a default", name)
+	}
+
+	if defaultValue != nil {
+		if err := input.Schema.Validate(*defaultValue); err != nil {
+			return invalidDefinitionf("input %q default: %v", name, err)
+		}
+	}
+
+	if !input.Required && defaultValue == nil {
+		if err := input.Schema.Validate(workflowNullValue); err != nil {
+			return invalidDefinitionf("optional input %q without a default must accept null", name)
 		}
 	}
 
@@ -484,6 +522,43 @@ func cloneNodeDefinition(definition NodeDefinition) NodeDefinition {
 	}
 
 	return definition
+}
+
+func effectiveWorkflowInputDefault(input WorkflowInput) *Value {
+	if input.Default == nil || input.Default.Kind() == ValueNull {
+		return nil
+	}
+
+	return input.Default
+}
+
+func cloneWorkflowInputs(inputs map[string]WorkflowInput) map[string]WorkflowInput {
+	if inputs == nil {
+		return nil
+	}
+
+	cloned := make(map[string]WorkflowInput, len(inputs))
+	for name, input := range inputs {
+		if defaultValue := effectiveWorkflowInputDefault(input); defaultValue != nil {
+			value := *defaultValue
+			input.Default = &value
+		} else {
+			input.Default = nil
+		}
+
+		cloned[name] = input
+	}
+
+	return cloned
+}
+
+func workflowInputSchemas(inputs map[string]WorkflowInput) map[string]PortSchema {
+	schemas := make(map[string]PortSchema, len(inputs))
+	for name, input := range inputs {
+		schemas[name] = input.Schema
+	}
+
+	return schemas
 }
 
 func validIdentifier(value string) bool {

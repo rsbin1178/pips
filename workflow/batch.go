@@ -92,7 +92,7 @@ func (BatchNode) Compile(
 		return nil, compileNodeError(definition.ID, "batch body must not contain Batch or Loop")
 	}
 
-	spec, err := batchNodeSpec(config, child)
+	spec, err := batchNodeSpec(config, child, definition.Inputs)
 	if err != nil {
 		return nil, compileNodeError(definition.ID, "batch contract: %v", err)
 	}
@@ -413,7 +413,8 @@ func (n *compiledBatch) runResumableItem(
 	item Value,
 	checkpoint batchItemCheckpoint,
 ) batchItemOutcome {
-	inputs := make(map[string]Value, len(n.child.definition.Inputs))
+	inputs := make(map[string]Value, len(input.Values)+2)
+
 	for name := range n.child.definition.Inputs {
 		switch name {
 		case batchItemInput:
@@ -421,7 +422,9 @@ func (n *compiledBatch) runResumableItem(
 		case batchIndexInput:
 			inputs[name] = MustValueOf(checkpoint.Index)
 		default:
-			inputs[name] = input.Values[name]
+			if value, present := input.Values[name]; present {
+				inputs[name] = value
+			}
 		}
 	}
 
@@ -560,11 +563,15 @@ func validateBatchConfig(config BatchConfig) error {
 	}
 }
 
-func batchNodeSpec(config BatchConfig, child *Plan) (NodeSpec, error) {
-	itemSchema, itemOK := child.definition.Inputs[batchItemInput]
+func batchNodeSpec(
+	config BatchConfig,
+	child *Plan,
+	bindings map[string]Binding,
+) (NodeSpec, error) {
+	itemInput, itemOK := child.definition.Inputs[batchItemInput]
 
-	indexSchema, indexOK := child.definition.Inputs[batchIndexInput]
-	if !itemOK || !indexOK {
+	indexInput, indexOK := child.definition.Inputs[batchIndexInput]
+	if !itemOK || !indexOK || !itemInput.Required || !indexInput.Required {
 		return NodeSpec{}, errors.New("body inputs item and index are required")
 	}
 
@@ -573,7 +580,7 @@ func batchNodeSpec(config BatchConfig, child *Plan) (NodeSpec, error) {
 		return NodeSpec{}, fmt.Errorf("prepare index schema: %w", err)
 	}
 
-	if !schemaCompatible(integerSchema, indexSchema) {
+	if !schemaCompatible(integerSchema, indexInput.Schema) {
 		return NodeSpec{}, errors.New("body input index must accept an integer")
 	}
 
@@ -582,7 +589,7 @@ func batchNodeSpec(config BatchConfig, child *Plan) (NodeSpec, error) {
 		return NodeSpec{}, fmt.Errorf("unknown body output %q", config.ResultOutput)
 	}
 
-	itemsSchema, err := arrayPortSchema(itemSchema)
+	itemsSchema, err := arrayPortSchema(itemInput.Schema)
 	if err != nil {
 		return NodeSpec{}, fmt.Errorf("prepare items schema: %w", err)
 	}
@@ -602,18 +609,33 @@ func batchNodeSpec(config BatchConfig, child *Plan) (NodeSpec, error) {
 
 	inputs := make(map[string]PortSchema, len(child.definition.Inputs)-1)
 	inputs[batchItemsInput] = itemsSchema
-
-	for name, schema := range child.definition.Inputs {
-		if name != batchItemInput && name != batchIndexInput {
-			inputs[name] = schema
-		}
-	}
+	projectBatchLiftedInputs(inputs, child.definition.Inputs, bindings)
 
 	return NodeSpec{
 		Inputs:  inputs,
 		Outputs: map[string]PortSchema{batchResultsOutput: resultsSchema},
 		Routes:  []string{RouteSuccess},
 	}, nil
+}
+
+func projectBatchLiftedInputs(
+	projected map[string]PortSchema,
+	inputs map[string]WorkflowInput,
+	bindings map[string]Binding,
+) {
+	for name, input := range inputs {
+		if name != batchItemInput && name != batchIndexInput {
+			if input.Required {
+				projected[name] = input.Schema
+
+				continue
+			}
+
+			if _, bound := bindings[name]; bound {
+				projected[name] = input.Schema
+			}
+		}
+	}
 }
 
 func arrayPortSchema(itemSchema PortSchema) (PortSchema, error) {

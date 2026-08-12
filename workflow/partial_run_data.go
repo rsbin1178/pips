@@ -17,6 +17,7 @@ type partialMaterializedData struct {
 type partialRunState struct {
 	sourcePlanFingerprint string
 	destination           NodeID
+	workflowInputs        map[string]struct{}
 	available             []*partialMaterializedData
 	origins               []PartialDataOrigin
 	routes                []string
@@ -55,8 +56,9 @@ func normalizePartialRunInput(
 	}
 
 	required := state.requiredWorkflowInputs(plan)
+	state.workflowInputs = required
 
-	inputs, err := validatePartialWorkflowInputs(input.Inputs, plan.definition.Inputs, required)
+	inputs, err := normalizeWorkflowInputs(plan.definition.Inputs, input.Inputs, required)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -398,9 +400,14 @@ func (s *partialRunState) requiredWorkflowInputs(plan *Plan) map[string]struct{}
 		visited[index] = true
 
 		materialized := s.available[index]
-		if materialized == nil {
+		if materialized == nil && index != plan.startIndex {
 			for _, binding := range plan.nodes[index].bindings {
-				if binding.Source == BindingWorkflowInput {
+				switch {
+				case binding.Source == BindingWorkflowInput:
+					required[binding.Port] = struct{}{}
+				case binding.Source == BindingNodeOutput &&
+					binding.Node == plan.nodes[plan.startIndex].definition.ID &&
+					s.available[plan.startIndex] == nil:
 					required[binding.Port] = struct{}{}
 				}
 			}
@@ -415,35 +422,6 @@ func (s *partialRunState) requiredWorkflowInputs(plan *Plan) map[string]struct{}
 	}
 
 	return required
-}
-
-func validatePartialWorkflowInputs(
-	values map[string]Value,
-	schemas map[string]PortSchema,
-	required map[string]struct{},
-) (map[string]Value, error) {
-	if values == nil {
-		return nil, errors.New("nil values")
-	}
-
-	for name, value := range values {
-		schema, ok := schemas[name]
-		if !ok {
-			return nil, fmt.Errorf("unknown port %q", name)
-		}
-
-		if err := schema.Validate(value); err != nil {
-			return nil, fmt.Errorf("port %q: %w", name, err)
-		}
-	}
-
-	for name := range required {
-		if _, ok := values[name]; !ok {
-			return nil, fmt.Errorf("missing port %q", name)
-		}
-	}
-
-	return cloneValues(values), nil
 }
 
 func (s *partialRunState) materialized(index int) (*partialMaterializedData, bool) {

@@ -177,7 +177,7 @@ func partialRunBranchPlan(
 	}
 	definition := workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "partial-branch", Revision: "v1", Name: "Partial Branch",
-		Inputs: map[string]workflow.PortSchema{"approved": boolSchema},
+		Inputs: map[string]workflow.WorkflowInput{"approved": {Schema: boolSchema, Required: true}},
 		Outputs: map[string]workflow.OutputBinding{
 			"result": nodeOutput(stringSchema, "merge", "result"),
 		},

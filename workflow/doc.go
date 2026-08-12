@@ -51,7 +51,9 @@
 // CheckpointStore boundary as Resume. Node Debug invokes real Actions and is
 // distinct from partial graph replay or pinned-data execution.
 //
-// SchemaV1Alpha1 is an alpha wire contract: decoders reject unknown schema
-// versions and fields instead of attempting implicit migration. Events are
+// SchemaV1Alpha1 preserves required schema-only Workflow inputs. V1Alpha2 adds
+// required, optional, and non-null default input contracts while retaining
+// strict version-directed decoding. Defaults normalize only at a Workflow
+// boundary, never as generic Action or NodeType port behavior. Events are
 // process-local observations and intentionally have no JSON wire format.
 package workflow

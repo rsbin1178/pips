@@ -353,7 +353,7 @@ func staticInterruptFixture(
 	definition := workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "static-interrupt", Revision: "v1",
 		Name:   "Static Interrupt",
-		Inputs: map[string]workflow.PortSchema{}, Outputs: map[string]workflow.OutputBinding{},
+		Inputs: map[string]workflow.WorkflowInput{}, Outputs: map[string]workflow.OutputBinding{},
 		Nodes: []workflow.NodeDefinition{
 			{ID: "start", Type: workflow.NodeTypeStart, Version: workflow.BuiltinNodeVersion},
 			{

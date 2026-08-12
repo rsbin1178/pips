@@ -410,7 +410,8 @@ func invokeAttempt(
 		return NodeOutput{}, classifyFailure(ctx, err), err
 	}
 
-	if err := validatePortValues(output.Values, node.spec.Outputs); err != nil {
+	outputSchemas := invocationOutputSchemas(node, runtime)
+	if err := validatePortValues(output.Values, outputSchemas); err != nil {
 		return NodeOutput{}, FailureError, fmt.Errorf("node output: %w", err)
 	}
 
@@ -419,6 +420,29 @@ func invokeAttempt(
 	}
 
 	return NodeOutput{Values: cloneValues(output.Values), Route: output.Route}, "", nil
+}
+
+func invocationOutputSchemas(node planNode, runtime *nodeRuntime) map[string]PortSchema {
+	if runtime == nil || runtime.execution == nil || runtime.execution.state == nil ||
+		runtime.execution.state.partialRun == nil ||
+		runtime.execution.plan.partialRun == nil ||
+		node.definition.Type != NodeTypeStart {
+		return node.spec.Outputs
+	}
+
+	inputs := runtime.execution.state.partialRun.workflowInputs
+	if inputs == nil {
+		return node.spec.Outputs
+	}
+
+	schemas := make(map[string]PortSchema, len(inputs))
+	for name := range inputs {
+		if schema, ok := node.spec.Outputs[name]; ok {
+			schemas[name] = schema
+		}
+	}
+
+	return schemas
 }
 
 func classifyFailure(ctx context.Context, err error) FailureKind {

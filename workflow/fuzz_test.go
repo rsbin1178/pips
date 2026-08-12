@@ -56,7 +56,7 @@ func FuzzResumeCheckpoint(f *testing.F) {
 	definition := workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "fuzz-checkpoint", Revision: "v1",
 		Name:   "Fuzz Checkpoint",
-		Inputs: map[string]workflow.PortSchema{}, Outputs: map[string]workflow.OutputBinding{},
+		Inputs: map[string]workflow.WorkflowInput{}, Outputs: map[string]workflow.OutputBinding{},
 		Nodes: []workflow.NodeDefinition{
 			{ID: "start", Type: workflow.NodeTypeStart, Version: workflow.BuiltinNodeVersion},
 			{
@@ -138,7 +138,7 @@ func FuzzResumeNodeDebugCheckpoint(f *testing.F) {
 
 	definition := workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "fuzz-node-debug", Revision: "v1", Name: "Fuzz Node Debug",
-		Inputs: map[string]workflow.PortSchema{}, Outputs: map[string]workflow.OutputBinding{},
+		Inputs: map[string]workflow.WorkflowInput{}, Outputs: map[string]workflow.OutputBinding{},
 		Nodes: []workflow.NodeDefinition{
 			{ID: "start", Type: workflow.NodeTypeStart, Version: workflow.BuiltinNodeVersion},
 			{
@@ -218,7 +218,7 @@ func FuzzPrepareNodeDebugPath(f *testing.F) {
 
 	definition := workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "fuzz-debug-path", Revision: "v1", Name: "Fuzz Debug Path",
-		Inputs: map[string]workflow.PortSchema{}, Outputs: map[string]workflow.OutputBinding{},
+		Inputs: map[string]workflow.WorkflowInput{}, Outputs: map[string]workflow.OutputBinding{},
 		Nodes: []workflow.NodeDefinition{
 			{ID: "start", Type: workflow.NodeTypeStart, Version: workflow.BuiltinNodeVersion},
 			{ID: "end", Type: workflow.NodeTypeEnd, Version: workflow.BuiltinNodeVersion},
@@ -262,7 +262,7 @@ func FuzzCompileInterruptPath(f *testing.F) {
 
 	definition := workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "fuzz-path", Revision: "v1", Name: "Fuzz Path",
-		Inputs: map[string]workflow.PortSchema{}, Outputs: map[string]workflow.OutputBinding{},
+		Inputs: map[string]workflow.WorkflowInput{}, Outputs: map[string]workflow.OutputBinding{},
 		Nodes: []workflow.NodeDefinition{
 			{ID: "start", Type: workflow.NodeTypeStart, Version: workflow.BuiltinNodeVersion},
 			{ID: "end", Type: workflow.NodeTypeEnd, Version: workflow.BuiltinNodeVersion},
@@ -332,7 +332,7 @@ func FuzzResumeTargetID(f *testing.F) {
 
 	definition := workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "fuzz-target", Revision: "v1", Name: "Fuzz Target",
-		Inputs: map[string]workflow.PortSchema{},
+		Inputs: map[string]workflow.WorkflowInput{},
 		Outputs: map[string]workflow.OutputBinding{
 			"result": {
 				Schema: stringSchema,
@@ -407,6 +407,7 @@ func FuzzResumeTargetID(f *testing.F) {
 }
 
 func FuzzDecodeDefinition(f *testing.F) {
+	f.Add([]byte(`{"schema":"pips.workflow/v1alpha2","id":"fuzz","revision":"v1","name":"Fuzz","inputs":{"value":{"schema":{"type":["string","null"]},"default":"fallback"}},"outputs":{"result":{"schema":{"type":["string","null"]},"binding":{"source":"workflow_input","port":"value"}}},"nodes":[{"id":"start","type":"start","version":"v1"},{"id":"end","type":"end","version":"v1"}],"edges":[{"from":{"node":"start","route":"success"},"to":"end"}],"limits":{"max_concurrency":1,"max_steps":10}}`))
 	f.Add([]byte(`{"schema":"unknown"}`))
 	f.Add([]byte(`null`))
 

@@ -608,7 +608,7 @@ func validateExecutionCheckpoint(
 		return err
 	}
 
-	if err := validateCheckpointNodeStates(checkpoint, plan, ready); err != nil {
+	if err := validateCheckpointNodeStates(checkpoint, plan, ready, mode); err != nil {
 		return err
 	}
 
@@ -704,9 +704,10 @@ func validateCheckpointNodeStates(
 	checkpoint *executionCheckpoint,
 	plan *Plan,
 	ready map[int]struct{},
+	mode checkpointIdentityMode,
 ) error {
 	for index, node := range checkpoint.Nodes {
-		if err := validateCheckpointNodeState(checkpoint, plan, ready, index, node); err != nil {
+		if err := validateCheckpointNodeState(checkpoint, plan, ready, mode, index, node); err != nil {
 			return err
 		}
 	}
@@ -718,6 +719,7 @@ func validateCheckpointNodeState(
 	checkpoint *executionCheckpoint,
 	plan *Plan,
 	ready map[int]struct{},
+	mode checkpointIdentityMode,
 	index int,
 	node checkpointNodeRun,
 ) error {
@@ -753,14 +755,39 @@ func validateCheckpointNodeState(
 		return nil
 	}
 
-	if err := validatePortValues(
-		checkpoint.Outputs[index],
-		plan.nodes[index].spec.Outputs,
-	); err != nil {
+	outputSchemas := plan.nodes[index].spec.Outputs
+	if mode == checkpointIdentityCurrent && checkpoint.Outputs[index] != nil {
+		outputSchemas = checkpointNodeOutputSchemas(checkpoint, plan, index)
+	}
+
+	if err := validatePortValues(checkpoint.Outputs[index], outputSchemas); err != nil {
 		return fmt.Errorf("checkpoint node %q outputs: %w", node.ID, err)
 	}
 
 	return nil
+}
+
+func checkpointNodeOutputSchemas(
+	checkpoint *executionCheckpoint,
+	plan *Plan,
+	index int,
+) map[string]PortSchema {
+	if plan.partialRun == nil || index != plan.startIndex {
+		return plan.nodes[index].spec.Outputs
+	}
+
+	if checkpoint.Outputs[index] == nil {
+		return nil
+	}
+
+	schemas := make(map[string]PortSchema, len(checkpoint.Outputs[index]))
+	for name := range checkpoint.Outputs[index] {
+		if schema, ok := plan.nodes[index].spec.Outputs[name]; ok {
+			schemas[name] = schema
+		}
+	}
+
+	return schemas
 }
 
 func validateCheckpointNodeFailure(
@@ -945,12 +972,10 @@ func validatePlanInputValues(values map[string]Value, plan *Plan) error {
 	}
 
 	if plan.partialRun != nil {
-		_, err := validatePartialWorkflowInputs(values, plan.definition.Inputs, nil)
-
-		return err
+		return validateWorkflowInputValues(values, plan.definition.Inputs, nil, false)
 	}
 
-	return validatePortValues(values, plan.definition.Inputs)
+	return validateNormalizedWorkflowInputs(values, plan.definition.Inputs, nil)
 }
 
 func validatePlanNodeInputValues(values map[string]Value, node planNode) error {

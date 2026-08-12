@@ -33,7 +33,7 @@ func derivePartialRunPlan(source *Plan, destination NodeID) (*Plan, error) {
 	)
 
 	definition := source.definition
-	definition.Inputs = cloneSchemas(source.definition.Inputs)
+	definition.Inputs = cloneWorkflowInputs(source.definition.Inputs)
 	definition.Outputs = cloneOutputBindings(source.definition.Outputs)
 	definition.Nodes = definitionNodes
 	definition.Edges = definitionEdges

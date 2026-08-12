@@ -108,7 +108,7 @@ func (LoopNode) Compile(
 		return nil, compileNodeError(definition.ID, "infinite loop body requires Break")
 	}
 
-	spec, lifted, err := loopNodeSpec(config, child, scope)
+	spec, lifted, err := loopNodeSpec(config, child, scope, definition.Inputs)
 	if err != nil {
 		return nil, compileNodeError(definition.ID, "loop contract: %v", err)
 	}
@@ -486,12 +486,13 @@ func loopNodeSpec(
 	config LoopConfig,
 	child *Plan,
 	scope loopCompileScope,
+	bindings map[string]Binding,
 ) (NodeSpec, []string, error) {
 	if err := validateLoopBodyInputs(child); err != nil {
 		return NodeSpec{}, nil, err
 	}
 
-	inputs, lifted, err := loopInputContract(config, child, scope)
+	inputs, lifted, err := loopInputContract(config, child, scope, bindings)
 	if err != nil {
 		return NodeSpec{}, nil, err
 	}
@@ -505,8 +506,8 @@ func loopNodeSpec(
 }
 
 func validateLoopBodyInputs(child *Plan) error {
-	indexSchema, ok := child.definition.Inputs[loopIndexInput]
-	if !ok {
+	indexInput, ok := child.definition.Inputs[loopIndexInput]
+	if !ok || !indexInput.Required {
 		return errors.New("body input index is required")
 	}
 
@@ -515,7 +516,7 @@ func validateLoopBodyInputs(child *Plan) error {
 		return fmt.Errorf("prepare index schema: %w", err)
 	}
 
-	if !schemaCompatible(integerSchema, indexSchema) {
+	if !schemaCompatible(integerSchema, indexInput.Schema) {
 		return errors.New("body input index must accept an integer")
 	}
 
@@ -530,6 +531,7 @@ func loopInputContract(
 	config LoopConfig,
 	child *Plan,
 	scope loopCompileScope,
+	bindings map[string]Binding,
 ) (map[string]PortSchema, []string, error) {
 	inputs := make(map[string]PortSchema)
 	maps.Copy(inputs, scope.variables)
@@ -537,12 +539,12 @@ func loopInputContract(
 	arrayNames := make(map[string]struct{}, len(config.Arrays))
 
 	for _, name := range config.Arrays {
-		itemSchema, present := child.definition.Inputs[name]
+		itemInput, present := child.definition.Inputs[name]
 		if !present {
 			return nil, nil, fmt.Errorf("body input %q is required for array mode", name)
 		}
 
-		arraySchema, err := arrayPortSchema(itemSchema)
+		arraySchema, err := arrayPortSchema(itemInput.Schema)
 		if err != nil {
 			return nil, nil, fmt.Errorf("prepare array input %q: %w", name, err)
 		}
@@ -553,7 +555,7 @@ func loopInputContract(
 
 	lifted := make([]string, 0, len(child.definition.Inputs))
 
-	for name, schema := range child.definition.Inputs {
+	for name, input := range child.definition.Inputs {
 		if name == loopIndexInput {
 			continue
 		}
@@ -566,8 +568,17 @@ func loopInputContract(
 			return nil, nil, fmt.Errorf("body input %q conflicts with a variable", name)
 		}
 
-		inputs[name] = schema
-		lifted = append(lifted, name)
+		if input.Required {
+			inputs[name] = input.Schema
+			lifted = append(lifted, name)
+
+			continue
+		}
+
+		if _, bound := bindings[name]; bound {
+			inputs[name] = input.Schema
+			lifted = append(lifted, name)
+		}
 	}
 
 	if config.Mode == LoopCount {

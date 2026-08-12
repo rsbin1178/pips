@@ -24,7 +24,7 @@ func ExampleRunner_DebugNode() {
 	registry, _ := workflow.NewDefaultRegistry(action)
 	definition := workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "preview-flow", Revision: "v1", Name: "Preview Flow",
-		Inputs: map[string]workflow.PortSchema{"prompt": stringSchema},
+		Inputs: map[string]workflow.WorkflowInput{"prompt": {Schema: stringSchema, Required: true}},
 		Outputs: map[string]workflow.OutputBinding{
 			"result": nodeOutput(stringSchema, "preview", "result"),
 		},
@@ -75,7 +75,7 @@ func ExampleNodeDebugResult_composite() {
 	}
 	body := workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "map-body", Revision: "v1", Name: "Map Body",
-		Inputs: map[string]workflow.PortSchema{"item": stringSchema, "index": integerSchema},
+		Inputs: map[string]workflow.WorkflowInput{"item": {Schema: stringSchema, Required: true}, "index": {Schema: integerSchema, Required: true}},
 		Outputs: map[string]workflow.OutputBinding{
 			"result": nodeOutput(stringSchema, "map", "result"),
 		},
@@ -102,7 +102,7 @@ func ExampleNodeDebugResult_composite() {
 	})
 	definition := workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "batch-preview", Revision: "v1", Name: "Batch Preview",
-		Inputs: map[string]workflow.PortSchema{"items": itemsSchema},
+		Inputs: map[string]workflow.WorkflowInput{"items": {Schema: itemsSchema, Required: true}},
 		Outputs: map[string]workflow.OutputBinding{
 			"results": nodeOutput(itemsSchema, "batch", "results"),
 		},
@@ -146,7 +146,7 @@ func ExampleRunner_ResumeNodeDebug() {
 	registry, _ := workflow.NewDefaultRegistry(action)
 	definition := workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "resume-preview", Revision: "v1", Name: "Resume Preview",
-		Inputs: map[string]workflow.PortSchema{}, Outputs: map[string]workflow.OutputBinding{},
+		Inputs: map[string]workflow.WorkflowInput{}, Outputs: map[string]workflow.OutputBinding{},
 		Nodes: []workflow.NodeDefinition{
 			{ID: "start", Type: workflow.NodeTypeStart, Version: workflow.BuiltinNodeVersion},
 			{
