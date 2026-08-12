@@ -6,22 +6,33 @@ import (
 )
 
 func (p *Plan) validateGraph() ([]int, error) {
+	var collector compileErrorCollector
+
 	for index, node := range p.nodes {
-		if err := p.validateGraphNode(index, node); err != nil {
-			return nil, err
-		}
+		collector.add(
+			p.validateGraphNode(index, node),
+			newNodeCompileIssue(
+				CompileIssueInvalidGraph,
+				NewNodePath(node.definition.ID),
+				fmt.Sprintf("node %q: invalid graph contract", node.definition.ID),
+			),
+		)
+	}
+
+	if err := collector.err(); err != nil {
+		return nil, err
 	}
 
 	topological, err := p.topologicalOrder()
 	if err != nil {
-		return nil, err
+		return nil, p.cycleCompileError(err)
 	}
 
-	if err := p.validateReachability(); err != nil {
-		return nil, err
-	}
+	var postOrderCollector compileErrorCollector
+	postOrderCollector.add(p.validateReachability(), CompileIssue{})
+	postOrderCollector.add(p.validateLoopControlEdges(), CompileIssue{})
 
-	if err := p.validateLoopControlEdges(); err != nil {
+	if err := postOrderCollector.err(); err != nil {
 		return nil, err
 	}
 
@@ -29,32 +40,71 @@ func (p *Plan) validateGraph() ([]int, error) {
 }
 
 func (p *Plan) validateGraphNode(index int, node planNode) error {
-	if err := p.validateNodeDegree(index, node); err != nil {
-		return err
-	}
+	var collector compileErrorCollector
+
+	collector.add(
+		p.validateNodeDegree(index, node),
+		newNodeCompileIssue(
+			CompileIssueInvalidGraph,
+			NewNodePath(node.definition.ID),
+			fmt.Sprintf("node %q: invalid degree", node.definition.ID),
+		),
+	)
 
 	if node.definition.Policy.Error == ErrorRoute && !p.hasOutgoingRoute(index, RouteError) {
-		return compileNodeError(node.definition.ID, "route_error requires an error edge")
+		collector.add(
+			compileNodeFailure(
+				CompileIssueInvalidGraph,
+				node.definition.ID,
+				nil,
+				"route_error requires an error edge",
+			),
+			CompileIssue{},
+		)
 	}
 
 	for _, route := range node.spec.Routes {
 		if index != p.endIndex && !p.hasOutgoingRoute(index, route) {
-			return compileNodeError(node.definition.ID, "route %q has no outgoing edge", route)
+			collector.add(
+				compileNodeFailure(
+					CompileIssueInvalidGraph,
+					node.definition.ID,
+					nil,
+					"route %q has no outgoing edge",
+					route,
+				),
+				CompileIssue{},
+			)
 		}
 	}
 
-	return nil
+	return collector.err()
 }
 
 func (p *Plan) validateNodeDegree(index int, node planNode) error {
 	incoming := len(p.incoming[index])
 	outgoing := len(p.outgoing[index])
 
-	if err := p.validateEndpointDegree(index, node, incoming, outgoing); err != nil {
-		return err
-	}
+	var collector compileErrorCollector
 
-	return p.validateFanIn(index, node, incoming)
+	collector.add(
+		p.validateEndpointDegree(index, node, incoming, outgoing),
+		newNodeCompileIssue(
+			CompileIssueInvalidGraph,
+			NewNodePath(node.definition.ID),
+			fmt.Sprintf("node %q: invalid endpoint degree", node.definition.ID),
+		),
+	)
+	collector.add(
+		p.validateFanIn(index, node, incoming),
+		newNodeCompileIssue(
+			CompileIssueInvalidGraph,
+			NewNodePath(node.definition.ID),
+			fmt.Sprintf("node %q: invalid fan-in", node.definition.ID),
+		),
+	)
+
+	return collector.err()
 }
 
 func (p *Plan) validateEndpointDegree(
@@ -64,19 +114,39 @@ func (p *Plan) validateEndpointDegree(
 	outgoing int,
 ) error {
 	if index == p.startIndex && incoming != 0 {
-		return compileNodeError(node.definition.ID, "Start must not have incoming edges")
+		return compileNodeFailure(
+			CompileIssueInvalidGraph,
+			node.definition.ID,
+			nil,
+			"Start must not have incoming edges",
+		)
 	}
 
 	if index != p.startIndex && incoming == 0 {
-		return compileNodeError(node.definition.ID, "non-Start node requires an incoming edge")
+		return compileNodeFailure(
+			CompileIssueInvalidGraph,
+			node.definition.ID,
+			nil,
+			"non-Start node requires an incoming edge",
+		)
 	}
 
 	if index == p.endIndex && outgoing != 0 {
-		return compileNodeError(node.definition.ID, "End must not have outgoing edges")
+		return compileNodeFailure(
+			CompileIssueInvalidGraph,
+			node.definition.ID,
+			nil,
+			"End must not have outgoing edges",
+		)
 	}
 
 	if index != p.endIndex && outgoing == 0 {
-		return compileNodeError(node.definition.ID, "non-End node requires an outgoing edge")
+		return compileNodeFailure(
+			CompileIssueInvalidGraph,
+			node.definition.ID,
+			nil,
+			"non-End node requires an outgoing edge",
+		)
 	}
 
 	return nil
@@ -84,12 +154,22 @@ func (p *Plan) validateEndpointDegree(
 
 func (p *Plan) validateFanIn(index int, node planNode, incoming int) error {
 	if node.isMerge && incoming < 2 {
-		return compileNodeError(node.definition.ID, "Merge requires at least two incoming edges")
+		return compileNodeFailure(
+			CompileIssueInvalidGraph,
+			node.definition.ID,
+			nil,
+			"Merge requires at least two incoming edges",
+		)
 	}
 
 	allowsLoopEndFanIn := p.loop != nil && index == p.endIndex
 	if !node.isMerge && !allowsLoopEndFanIn && incoming > 1 {
-		return compileNodeError(node.definition.ID, "multiple incoming edges require Merge")
+		return compileNodeFailure(
+			CompileIssueInvalidGraph,
+			node.definition.ID,
+			nil,
+			"multiple incoming edges require Merge",
+		)
 	}
 
 	return nil
@@ -135,23 +215,73 @@ func (p *Plan) topologicalOrder() ([]int, error) {
 	}
 
 	if len(order) != len(p.nodes) {
-		return nil, fmt.Errorf("%w: root graph must be a DAG", ErrCompile)
+		return nil, compileDefinitionFailure(
+			CompileIssueInvalidGraph,
+			nil,
+			"root graph must be a DAG",
+		)
 	}
 
 	return order, nil
 }
 
 func (p *Plan) validateReachability() error {
+	var collector compileErrorCollector
+
 	fromStart := p.walk(p.startIndex, p.outgoing, func(edge planEdge) int { return edge.to })
 	toEnd := p.walk(p.endIndex, p.incoming, func(edge planEdge) int { return edge.from })
 
 	for index, node := range p.nodes {
 		if !fromStart[index] || !toEnd[index] {
-			return compileNodeError(node.definition.ID, "node is not on a Start-to-End path")
+			collector.add(
+				compileNodeFailure(
+					CompileIssueInvalidGraph,
+					node.definition.ID,
+					nil,
+					"node is not on a Start-to-End path",
+				),
+				CompileIssue{},
+			)
 		}
 	}
 
-	return nil
+	return collector.err()
+}
+
+func (p *Plan) cycleCompileError(cause error) error {
+	var collector compileErrorCollector
+
+	for _, edge := range p.edges {
+		if !p.reachable(edge.to, edge.from) {
+			continue
+		}
+
+		definition := ControlEdge{
+			From: NodeRoute{
+				Node:  p.nodes[edge.from].definition.ID,
+				Route: edge.route,
+			},
+			To: p.nodes[edge.to].definition.ID,
+		}
+		collector.add(
+			compileControlPathFailure(
+				CompileIssueInvalidGraph,
+				definition,
+				nil,
+				"participates in a cycle; root graph must be a DAG",
+			),
+			CompileIssue{},
+		)
+	}
+
+	if err := collector.err(); err != nil {
+		return err
+	}
+
+	return compileErrorFromFailure(
+		cause,
+		newDefinitionCompileIssue(CompileIssueInvalidGraph, "root graph must be a DAG"),
+	)
 }
 
 func (p *Plan) walk(start int, adjacency [][]int, next func(planEdge) int) []bool {

@@ -4,34 +4,126 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 )
 
 func (p *Plan) validateBindings(topological []int) error {
 	dominators := p.dominators(topological)
-	for targetIndex, node := range p.nodes {
-		if err := p.validateNodeBindings(targetIndex, node, dominators); err != nil {
-			return err
-		}
 
-		if node.isMerge {
+	var shapeCollector compileErrorCollector
+
+	for _, targetIndex := range topological {
+		node := p.nodes[targetIndex]
+		shapeCollector.add(
+			p.validateNodeBindingShape(node),
+			newNodeCompileIssue(
+				CompileIssueInvalidBinding,
+				NewNodePath(node.definition.ID),
+				fmt.Sprintf("node %q: invalid input binding shape", node.definition.ID),
+			),
+		)
+		shapeCollector.add(
+			validateDefaultOutputs(node.definition, node.spec),
+			newNodeCompileIssue(
+				CompileIssueInvalidBinding,
+				NewNodePath(node.definition.ID),
+				fmt.Sprintf("node %q: invalid default outputs", node.definition.ID),
+			),
+		)
+	}
+
+	if err := shapeCollector.err(); err != nil {
+		return err
+	}
+
+	var contractCollector compileErrorCollector
+
+	for _, targetIndex := range topological {
+		node := p.nodes[targetIndex]
+		bindingErr := p.validateNodeBindings(targetIndex, node, dominators)
+		contractCollector.add(bindingErr, CompileIssue{})
+
+		if node.isMerge && bindingErr == nil {
 			if err := p.validateMergeNode(targetIndex); err != nil {
-				return err
+				contractCollector.add(err, CompileIssue{})
 			}
 		}
 	}
 
-	return nil
+	if err := contractCollector.err(); err != nil {
+		return err
+	}
+
+	return p.validateLoopVariableAccess(topological)
 }
 
-func (p *Plan) validateNodeBindings(targetIndex int, node planNode, dominators [][]bool) error {
-	for name, binding := range node.bindings {
-		if err := p.validateBindingContract(targetIndex, node, name, binding, dominators); err != nil {
-			return err
+func (p *Plan) validateNodeBindingShape(node planNode) error {
+	var collector compileErrorCollector
+
+	switch node.definition.Type {
+	case NodeTypeStart:
+		if len(node.definition.Inputs) != 0 {
+			collector.add(
+				compileBindingNodeFailure(
+					node.definition.ID,
+					"Start inputs are declared by the Workflow",
+				),
+				CompileIssue{},
+			)
+		}
+	case NodeTypeEnd:
+		if len(node.definition.Inputs) != 0 {
+			collector.add(
+				compileBindingNodeFailure(
+					node.definition.ID,
+					"End inputs are declared by Workflow outputs",
+				),
+				CompileIssue{},
+			)
+		}
+	default:
+		for _, name := range sortedSchemaNames(node.spec.Inputs) {
+			if _, ok := node.bindings[name]; !ok {
+				collector.add(
+					compileBindingNodeFailure(
+						node.definition.ID,
+						"missing input binding %q",
+						name,
+					),
+					CompileIssue{},
+				)
+			}
+		}
+
+		for _, name := range sortedBindingNames(node.bindings) {
+			if _, ok := node.spec.Inputs[name]; !ok {
+				collector.add(
+					compileBindingNodeFailure(
+						node.definition.ID,
+						"unknown input binding %q",
+						name,
+					),
+					CompileIssue{},
+				)
+			}
 		}
 	}
 
-	return nil
+	return collector.err()
+}
+
+func (p *Plan) validateNodeBindings(targetIndex int, node planNode, dominators [][]bool) error {
+	var collector compileErrorCollector
+
+	for _, name := range sortedBindingNames(node.bindings) {
+		binding := node.bindings[name]
+		if err := p.validateBindingContract(targetIndex, node, name, binding, dominators); err != nil {
+			collector.add(err, CompileIssue{})
+		}
+	}
+
+	return collector.err()
 }
 
 func (p *Plan) validateBindingContract(
@@ -45,19 +137,19 @@ func (p *Plan) validateBindingContract(
 
 	sourceSchema, sourceIndex, err := p.bindingSchema(binding)
 	if err != nil {
-		return compileNodeError(node.definition.ID, "input %q: %v", name, err)
+		return compileBindingNodeFailure(node.definition.ID, "input %q: %v", name, err)
 	}
 
 	if binding.Source == BindingLiteral {
 		if err := targetSchema.Validate(*binding.Value); err != nil {
-			return compileNodeError(node.definition.ID, "input %q: %v", name, err)
+			return compileBindingNodeFailure(node.definition.ID, "input %q: %v", name, err)
 		}
 
 		return nil
 	}
 
 	if !schemaCompatible(sourceSchema, targetSchema) {
-		return compileNodeError(node.definition.ID, "input %q has incompatible schema", name)
+		return compileBindingNodeFailure(node.definition.ID, "input %q has incompatible schema", name)
 	}
 
 	switch binding.Source {
@@ -92,7 +184,7 @@ func (p *Plan) validateNodeOutputAvailability(
 	if node.isMerge {
 		if p.isV2ExclusiveMerge(node) {
 			if !p.normalRouteReaches(sourceIndex, targetIndex) {
-				return compileNodeError(
+				return compileBindingNodeFailure(
 					node.definition.ID,
 					"merge input %q is not from a route-relevant upstream node",
 					name,
@@ -103,7 +195,7 @@ func (p *Plan) validateNodeOutputAvailability(
 		}
 
 		if !p.isDirectPredecessor(sourceIndex, targetIndex) {
-			return compileNodeError(
+			return compileBindingNodeFailure(
 				node.definition.ID,
 				"merge input %q is not from an incoming node",
 				name,
@@ -115,7 +207,11 @@ func (p *Plan) validateNodeOutputAvailability(
 
 	if !dominators[targetIndex][sourceIndex] ||
 		p.reachableFromRoute(sourceIndex, RouteError, targetIndex) {
-		return compileNodeError(node.definition.ID, "input %q is not guaranteed to be available", name)
+		return compileBindingNodeFailure(
+			node.definition.ID,
+			"input %q is not guaranteed to be available",
+			name,
+		)
 	}
 
 	return nil
@@ -133,7 +229,7 @@ func (p *Plan) validateNodeErrorAvailability(
 	}
 
 	if !p.nodeErrorGuaranteed(sourceIndex, targetIndex, dominators) {
-		return compileNodeError(
+		return compileBindingNodeFailure(
 			node.definition.ID,
 			"input %q is not guaranteed to have node error data",
 			name,
@@ -152,7 +248,7 @@ func (p *Plan) validateMergeErrorAvailability(
 ) error {
 	merge, ok := node.executor.(*compiledMerge)
 	if !ok {
-		return compileNodeError(
+		return compileBindingNodeFailure(
 			node.definition.ID,
 			"built-in Merge executor has unexpected type",
 		)
@@ -160,7 +256,7 @@ func (p *Plan) validateMergeErrorAvailability(
 
 	if merge.version == MergeNodeVersionV2 && merge.config.Mode == MergeExclusive {
 		if !p.reachableFromRoute(sourceIndex, RouteError, targetIndex) {
-			return compileNodeError(
+			return compileBindingNodeFailure(
 				node.definition.ID,
 				"merge input %q is not from a route-relevant upstream error route",
 				name,
@@ -171,7 +267,7 @@ func (p *Plan) validateMergeErrorAvailability(
 	}
 
 	if !p.isDirectPredecessorRoute(sourceIndex, targetIndex, RouteError) {
-		return compileNodeError(
+		return compileBindingNodeFailure(
 			node.definition.ID,
 			"merge input %q is not from an incoming error route",
 			name,
@@ -183,7 +279,7 @@ func (p *Plan) validateMergeErrorAvailability(
 	}
 
 	if !p.nodeErrorGuaranteed(sourceIndex, targetIndex, dominators) {
-		return compileNodeError(
+		return compileBindingNodeFailure(
 			node.definition.ID,
 			"input %q is not guaranteed to have node error data",
 			name,
@@ -288,6 +384,8 @@ func (p *Plan) nodeErrorBindingSchema(binding Binding) (PortSchema, int, error) 
 }
 
 func (p *Plan) validateLoopControlEdges() error {
+	var collector compileErrorCollector
+
 	for index, node := range p.nodes {
 		if node.definition.Type != NodeTypeBreak && node.definition.Type != NodeTypeContinue {
 			continue
@@ -305,22 +403,36 @@ func (p *Plan) validateLoopControlEdges() error {
 			successEdges++
 
 			if edge.to != p.endIndex {
-				return compileNodeError(
-					node.definition.ID,
-					"success edge must target the Loop body End",
+				definition := ControlEdge{
+					From: NodeRoute{Node: node.definition.ID, Route: edge.route},
+					To:   p.nodes[edge.to].definition.ID,
+				}
+				collector.add(
+					compileControlPathFailure(
+						CompileIssueInvalidGraph,
+						definition,
+						nil,
+						"Break or Continue success edge must target the Loop body End",
+					),
+					CompileIssue{},
 				)
 			}
 		}
 
 		if successEdges != 1 {
-			return compileNodeError(
-				node.definition.ID,
-				"requires exactly one success edge to the Loop body End",
+			collector.add(
+				compileNodeFailure(
+					CompileIssueInvalidGraph,
+					node.definition.ID,
+					nil,
+					"requires exactly one success edge to the Loop body End",
+				),
+				CompileIssue{},
 			)
 		}
 	}
 
-	return nil
+	return collector.err()
 }
 
 type loopVariableAccess struct {
@@ -333,23 +445,35 @@ func (p *Plan) validateLoopVariableAccess(topological []int) error {
 		return nil
 	}
 
-	accesses := p.loopVariableAccesses()
+	accesses := p.loopVariableAccesses(topological)
 	dominators := p.dominators(topological)
 
-	for variable, variableAccesses := range accesses {
+	variables := make([]string, 0, len(accesses))
+	for variable := range accesses {
+		variables = append(variables, variable)
+	}
+
+	slices.Sort(variables)
+
+	var collector compileErrorCollector
+
+	for _, variable := range variables {
+		variableAccesses := accesses[variable]
 		if err := p.validateVariableAccesses(variable, variableAccesses, dominators); err != nil {
-			return err
+			collector.add(err, CompileIssue{})
 		}
 	}
 
-	return nil
+	return collector.err()
 }
 
-func (p *Plan) loopVariableAccesses() map[string][]loopVariableAccess {
+func (p *Plan) loopVariableAccesses(topological []int) map[string][]loopVariableAccess {
 	accesses := make(map[string][]loopVariableAccess, len(p.loop.variables))
 
-	for index, node := range p.nodes {
-		for _, binding := range node.bindings {
+	for _, index := range topological {
+		node := p.nodes[index]
+		for _, name := range sortedBindingNames(node.bindings) {
+			binding := node.bindings[name]
 			if binding.Source == BindingLoopVariable {
 				accesses[binding.Port] = append(
 					accesses[binding.Port],
@@ -363,7 +487,14 @@ func (p *Plan) loopVariableAccesses() map[string][]loopVariableAccess {
 			continue
 		}
 
+		variables := make([]string, 0, len(setter.targets))
 		for variable := range setter.targets {
+			variables = append(variables, variable)
+		}
+
+		slices.Sort(variables)
+
+		for _, variable := range variables {
 			accesses[variable] = append(
 				accesses[variable],
 				loopVariableAccess{node: index, write: true},
@@ -379,6 +510,8 @@ func (p *Plan) validateVariableAccesses(
 	accesses []loopVariableAccess,
 	dominators [][]bool,
 ) error {
+	var collector compileErrorCollector
+
 	for left := range accesses {
 		for right := left + 1; right < len(accesses); right++ {
 			first := accesses[left]
@@ -388,17 +521,21 @@ func (p *Plan) validateVariableAccesses(
 				continue
 			}
 
-			return fmt.Errorf(
-				"%w: loop variable %q has unordered access between nodes %q and %q",
-				ErrCompile,
-				variable,
-				p.nodes[first.node].definition.ID,
-				p.nodes[second.node].definition.ID,
+			collector.add(
+				compileDefinitionFailure(
+					CompileIssueInvalidBinding,
+					nil,
+					"loop variable %q has unordered access between nodes %q and %q",
+					variable,
+					p.nodes[first.node].definition.ID,
+					p.nodes[second.node].definition.ID,
+				),
+				CompileIssue{},
 			)
 		}
 	}
 
-	return nil
+	return collector.err()
 }
 
 func (p *Plan) loopAccessesOrderedOrIndependent(
@@ -614,7 +751,10 @@ func (p *Plan) validateMergeNode(nodeIndex int) error {
 
 	merge, ok := node.executor.(*compiledMerge)
 	if !ok {
-		return compileNodeError(node.definition.ID, "built-in Merge executor has unexpected type")
+		return compileBindingNodeFailure(
+			node.definition.ID,
+			"built-in Merge executor has unexpected type",
+		)
 	}
 
 	predecessors := make(map[int]struct{}, len(p.incoming[nodeIndex]))
@@ -625,7 +765,17 @@ func (p *Plan) validateMergeNode(nodeIndex int) error {
 	usedPredecessors := make(map[int]struct{}, len(predecessors))
 	allowIndirect := p.isV2ExclusiveMerge(node)
 
-	for outputName, output := range merge.config.Outputs {
+	var collector compileErrorCollector
+
+	outputNames := make([]string, 0, len(merge.config.Outputs))
+	for outputName := range merge.config.Outputs {
+		outputNames = append(outputNames, outputName)
+	}
+
+	slices.Sort(outputNames)
+
+	for _, outputName := range outputNames {
+		output := merge.config.Outputs[outputName]
 		for _, inputName := range output.Sources {
 			if err := p.validateMergeSource(
 				node,
@@ -636,16 +786,22 @@ func (p *Plan) validateMergeNode(nodeIndex int) error {
 				usedPredecessors,
 				allowIndirect,
 			); err != nil {
-				return err
+				collector.add(err, CompileIssue{})
 			}
 		}
 	}
 
 	if !allowIndirect && len(usedPredecessors) != len(predecessors) {
-		return compileNodeError(node.definition.ID, "every incoming node must provide a mapped source")
+		collector.add(
+			compileBindingNodeFailure(
+				node.definition.ID,
+				"every incoming node must provide a mapped source",
+			),
+			CompileIssue{},
+		)
 	}
 
-	return nil
+	return collector.err()
 }
 
 func (p *Plan) validateMergeSource(
@@ -659,7 +815,7 @@ func (p *Plan) validateMergeSource(
 ) error {
 	binding := node.bindings[inputName]
 	if binding.Source != BindingNodeOutput && binding.Source != BindingNodeError {
-		return compileNodeError(
+		return compileBindingNodeFailure(
 			node.definition.ID,
 			"merge source %q must bind node output or error data",
 			inputName,
@@ -668,12 +824,16 @@ func (p *Plan) validateMergeSource(
 
 	sourceSchema, sourceIndex, err := p.bindingSchema(binding)
 	if err != nil {
-		return compileNodeError(node.definition.ID, "merge source %q: %v", inputName, err)
+		return compileBindingNodeFailure(node.definition.ID, "merge source %q: %v", inputName, err)
 	}
 
 	_, directPredecessor := predecessors[sourceIndex]
 	if !allowIndirect && !directPredecessor {
-		return compileNodeError(node.definition.ID, "merge source %q is not an incoming node", inputName)
+		return compileBindingNodeFailure(
+			node.definition.ID,
+			"merge source %q is not an incoming node",
+			inputName,
+		)
 	}
 
 	if directPredecessor {
@@ -681,7 +841,7 @@ func (p *Plan) validateMergeSource(
 	}
 
 	if !schemaCompatible(sourceSchema, outputSchema) {
-		return compileNodeError(
+		return compileBindingNodeFailure(
 			node.definition.ID,
 			"merge output %q source %q has incompatible schema",
 			outputName,
@@ -690,6 +850,90 @@ func (p *Plan) validateMergeSource(
 	}
 
 	return nil
+}
+
+func compileBindingNodeFailure(nodeID NodeID, format string, values ...any) error {
+	return compileNodeFailure(
+		CompileIssueInvalidBinding,
+		nodeID,
+		nil,
+		format,
+		values...,
+	)
+}
+
+func validateDefaultOutputs(definition NodeDefinition, spec NodeSpec) error {
+	if definition.Policy.Error != ErrorContinueWithDefault {
+		return nil
+	}
+
+	values := definition.Policy.DefaultOutputs
+	if values == nil {
+		return compileBindingNodeFailure(definition.ID, "default outputs: nil values")
+	}
+
+	if len(values) != len(spec.Outputs) {
+		return compileBindingNodeFailure(
+			definition.ID,
+			"default outputs: got %d ports, want %d",
+			len(values),
+			len(spec.Outputs),
+		)
+	}
+
+	var collector compileErrorCollector
+
+	for _, name := range sortedSchemaNames(spec.Outputs) {
+		value, ok := values[name]
+		if !ok {
+			collector.add(
+				compileBindingNodeFailure(
+					definition.ID,
+					"default outputs: missing port %q",
+					name,
+				),
+				CompileIssue{},
+			)
+
+			continue
+		}
+
+		if err := spec.Outputs[name].Validate(value); err != nil {
+			collector.add(
+				compileBindingNodeFailure(
+					definition.ID,
+					"default outputs: port %q: %v",
+					name,
+					err,
+				),
+				CompileIssue{},
+			)
+		}
+	}
+
+	return collector.err()
+}
+
+func sortedBindingNames(bindings map[string]Binding) []string {
+	names := make([]string, 0, len(bindings))
+	for name := range bindings {
+		names = append(names, name)
+	}
+
+	slices.Sort(names)
+
+	return names
+}
+
+func sortedSchemaNames(schemas map[string]PortSchema) []string {
+	names := make([]string, 0, len(schemas))
+	for name := range schemas {
+		names = append(names, name)
+	}
+
+	slices.Sort(names)
+
+	return names
 }
 
 func schemaCompatible(source, target PortSchema) bool {
