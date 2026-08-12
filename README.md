@@ -82,6 +82,29 @@ Merge 提供两个精确版本。`merge@v1` 保留原有 exclusive 语义：候�
 Schema 决定是否有效。两个版本的 parallel 语义相同，仍等待并读取直接入边；
 Definition 通过 `workflow.MergeNodeVersionV2` 精确选择 v2。
 
+`workflow.Compile` 对 Definition 问题返回可用 `errors.As` 提取的
+`*workflow.CompileError`。宿主应按稳定的 issue code 和 node/control path 定位，
+不应解析错误字符串：
+
+```go
+plan, err := workflow.Compile(ctx, definition, registry)
+if err != nil {
+    var compileErr *workflow.CompileError
+    if errors.As(err, &compileErr) {
+        for _, issue := range compileErr.Issues() {
+            handleCompileIssue(issue.Code(), issue.Location(), issue.Message())
+        }
+    }
+    return err
+}
+```
+
+诊断采用阶段门控：只聚合最早失败的依赖阶段中可安全独立判断的问题，不承诺继续
+运行自定义 NodeType 或产生后续派生错误。SubWorkflow、Batch 和 Loop 的子流程问题
+保留完整嵌套 `NodePath`/control path。`CompileIssue` 是进程内 core value，不规定
+JSON 或持久化格式；API/数据库版本、国际化和编辑器映射由宿主拥有。无效 Registry、
+CompileOption 以及 context 取消仍是调用或系统错误，不伪装成 Definition 诊断。
+
 Workflow input 在 Go API 中统一声明为 `workflow.WorkflowInput`。旧
 `pips.workflow/v1alpha1` wire 仍保持 `"inputs": {"name": <JSON Schema>}`，对应
 `Required: true` 且没有 default；新契约使用 `pips.workflow/v1alpha2`：

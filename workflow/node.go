@@ -847,11 +847,17 @@ func cloneValues(values map[string]Value) map[string]Value {
 }
 
 func compileNodeError(nodeID NodeID, format string, values ...any) error {
-	return fmt.Errorf("%w: node %q: %s", ErrCompile, nodeID, fmt.Sprintf(format, values...))
+	return compileNodeFailure(
+		CompileIssueInvalidNodeConfig,
+		nodeID,
+		nil,
+		format,
+		values...,
+	)
 }
 
 func wrapCompileNodeError(nodeID NodeID, operation string, err error) error {
-	return fmt.Errorf("%w: node %q: %s: %w", ErrCompile, nodeID, operation, err)
+	return prefixCompileError(nodeID, operation, err)
 }
 
 var (
