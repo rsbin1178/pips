@@ -179,6 +179,7 @@ func (e *execution) invokeNodeAttempt(
 		inputs,
 		node.definition.Policy.TimeoutMilli,
 		runtime,
+		attempt,
 	)
 
 	e.releaseLeaf(acquired)
@@ -377,6 +378,7 @@ func invokeAttempt(
 	inputs map[string]Value,
 	timeoutMilli int64,
 	runtime *nodeRuntime,
+	attempt int,
 ) (output NodeOutput, failure FailureKind, returnErr error) {
 	if timeoutMilli > 0 {
 		var cancel context.CancelFunc
@@ -393,6 +395,11 @@ func invokeAttempt(
 		}
 	}()
 
+	ctx = context.WithValue(
+		ctx,
+		executionContextKey{},
+		invocationExecutionContext(runtime, attempt),
+	)
 	ctx = context.WithValue(ctx, invocationInterruptKey{}, newInvocationInterruptContext(runtime))
 
 	output, err := node.executor.Invoke(ctx, NodeInput{
