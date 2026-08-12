@@ -64,4 +64,10 @@
 // SubWorkflow, Batch, and Loop issues retain full NodePath locations. Issues
 // are process-local values with no prescribed JSON or persistence format;
 // hosts own localization and versioned API, database, or editor projections.
+//
+// WithNodeExecutionRecorder exposes detached running and effective outcome
+// snapshots for ordinary Run and Resume operations. The callback is a
+// synchronous, process-local upsert boundary keyed by RunID and NodeAddress;
+// the host owns persistence failures, timeouts, redaction, retention, and any
+// stable transport schema. Node Debug and Partial Run do not call it.
 package workflow

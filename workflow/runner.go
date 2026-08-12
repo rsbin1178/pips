@@ -83,10 +83,11 @@ func (e *RunError) Unwrap() []error {
 type RunIDSource func(time.Time) (string, error)
 
 type runnerConfig struct {
-	eventSink       EventSink
-	clock           func() time.Time
-	idSource        RunIDSource
-	checkpointStore CheckpointStore
+	eventSink             EventSink
+	nodeExecutionRecorder NodeExecutionRecorder
+	clock                 func() time.Time
+	idSource              RunIDSource
+	checkpointStore       CheckpointStore
 }
 
 // RunnerOption configures a [Runner].
@@ -101,6 +102,20 @@ func WithEventSink(sink EventSink) RunnerOption {
 		}
 
 		config.eventSink = sink
+
+		return nil
+	}
+}
+
+// WithNodeExecutionRecorder observes sensitive, storage-neutral node
+// execution snapshots from ordinary Run and Resume operations.
+func WithNodeExecutionRecorder(recorder NodeExecutionRecorder) RunnerOption {
+	return func(config *runnerConfig) error {
+		if recorder == nil {
+			return errors.New("workflow: nil node execution recorder")
+		}
+
+		config.nodeExecutionRecorder = recorder
 
 		return nil
 	}
@@ -149,10 +164,11 @@ func WithCheckpointStore(store CheckpointStore) RunnerOption {
 
 // Runner synchronously executes immutable Plans in process.
 type Runner struct {
-	eventSink       EventSink
-	clock           func() time.Time
-	idSource        RunIDSource
-	checkpointStore CheckpointStore
+	eventSink             EventSink
+	nodeExecutionRecorder NodeExecutionRecorder
+	clock                 func() time.Time
+	idSource              RunIDSource
+	checkpointStore       CheckpointStore
 }
 
 // NewRunner creates a Runner with cryptographically random Run IDs.
@@ -170,10 +186,11 @@ func NewRunner(options ...RunnerOption) (*Runner, error) {
 	}
 
 	return &Runner{
-		eventSink:       config.eventSink,
-		clock:           config.clock,
-		idSource:        config.idSource,
-		checkpointStore: config.checkpointStore,
+		eventSink:             config.eventSink,
+		nodeExecutionRecorder: config.nodeExecutionRecorder,
+		clock:                 config.clock,
+		idSource:              config.idSource,
+		checkpointStore:       config.checkpointStore,
 	}, nil
 }
 
