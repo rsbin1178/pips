@@ -10,6 +10,9 @@
 // maps an inline child Definition over an array with bounded workers, and Loop
 // sequentially executes a bounded inline body with transactional local
 // variables. Batch and Loop are distinct and cannot contain each other.
+// Merge v1 preserves exactly-one-present branch aggregation; Merge v2 uses
+// ordered first-non-null selection for route-relevant upstream candidates.
+// Both versions keep parallel Merge as direct wait-all fan-in.
 //
 // Runs can stop at compile-time before/after boundaries, at dynamic
 // Interrupt calls, or on a host signal. A CheckpointStore persists one opaque

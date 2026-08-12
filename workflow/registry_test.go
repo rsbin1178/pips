@@ -137,3 +137,60 @@ func TestRegistrySnapshotsActionSpec(t *testing.T) {
 		t.Fatal("Registry fingerprint changed after source mutation")
 	}
 }
+
+func TestDefaultRegistryAddsMergeV2WithoutChangingV1PlanContract(t *testing.T) {
+	t.Parallel()
+
+	stringSchema := mustSchema(t, `{"type":"string"}`)
+	definition, actions := directMergeDefinition(t, workflow.BuiltinNodeVersion, stringSchema)
+	builtins := workflow.BuiltinNodeTypes()
+	v1Only := make([]workflow.NodeType, 0, len(builtins)-1)
+	families := make(map[workflow.NodeTypeKey]struct{})
+
+	for _, nodeType := range builtins {
+		spec := nodeType.Spec()
+
+		families[spec.Key] = struct{}{}
+		if spec.Key != workflow.NodeTypeMerge || spec.Version != workflow.MergeNodeVersionV2 {
+			v1Only = append(v1Only, nodeType)
+		}
+	}
+
+	if len(builtins) != 13 || len(families) != 12 {
+		t.Fatalf("built-in registrations/families = %d/%d, want 13/12", len(builtins), len(families))
+	}
+
+	fullRegistry, err := workflow.NewRegistry(builtins, actions)
+	if err != nil {
+		t.Fatalf("NewRegistry(full) error = %v", err)
+	}
+
+	oldRegistry, err := workflow.NewRegistry(v1Only, actions)
+	if err != nil {
+		t.Fatalf("NewRegistry(v1 only) error = %v", err)
+	}
+
+	for _, version := range []string{workflow.BuiltinNodeVersion, workflow.MergeNodeVersionV2} {
+		if _, ok := fullRegistry.NodeType(workflow.NodeTypeMerge, version); !ok {
+			t.Fatalf("full Registry does not resolve merge@%s", version)
+		}
+	}
+
+	if fullRegistry.Fingerprint() == oldRegistry.Fingerprint() {
+		t.Fatal("Registry fingerprint did not change after merge@v2 registration")
+	}
+
+	fullPlan, err := workflow.Compile(t.Context(), definition, fullRegistry)
+	if err != nil {
+		t.Fatalf("Compile(full) error = %v", err)
+	}
+
+	oldPlan, err := workflow.Compile(t.Context(), definition, oldRegistry)
+	if err != nil {
+		t.Fatalf("Compile(v1 only) error = %v", err)
+	}
+
+	if fullPlan.Fingerprint() != oldPlan.Fingerprint() {
+		t.Fatalf("unused merge@v2 changed v1 plan contract: %s != %s", fullPlan.Fingerprint(), oldPlan.Fingerprint())
+	}
+}

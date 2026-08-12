@@ -90,6 +90,18 @@ func (p *Plan) validateNodeOutputAvailability(
 	dominators [][]bool,
 ) error {
 	if node.isMerge {
+		if p.isV2ExclusiveMerge(node) {
+			if !p.normalRouteReaches(sourceIndex, targetIndex) {
+				return compileNodeError(
+					node.definition.ID,
+					"merge input %q is not from a route-relevant upstream node",
+					name,
+				)
+			}
+
+			return nil
+		}
+
 		if !p.isDirectPredecessor(sourceIndex, targetIndex) {
 			return compileNodeError(
 				node.definition.ID,
@@ -117,25 +129,57 @@ func (p *Plan) validateNodeErrorAvailability(
 	dominators [][]bool,
 ) error {
 	if node.isMerge {
-		if !p.isDirectPredecessorRoute(sourceIndex, targetIndex, RouteError) {
+		return p.validateMergeErrorAvailability(targetIndex, node, name, sourceIndex, dominators)
+	}
+
+	if !p.nodeErrorGuaranteed(sourceIndex, targetIndex, dominators) {
+		return compileNodeError(
+			node.definition.ID,
+			"input %q is not guaranteed to have node error data",
+			name,
+		)
+	}
+
+	return nil
+}
+
+func (p *Plan) validateMergeErrorAvailability(
+	targetIndex int,
+	node planNode,
+	name string,
+	sourceIndex int,
+	dominators [][]bool,
+) error {
+	merge, ok := node.executor.(*compiledMerge)
+	if !ok {
+		return compileNodeError(
+			node.definition.ID,
+			"built-in Merge executor has unexpected type",
+		)
+	}
+
+	if merge.version == MergeNodeVersionV2 && merge.config.Mode == MergeExclusive {
+		if !p.reachableFromRoute(sourceIndex, RouteError, targetIndex) {
 			return compileNodeError(
 				node.definition.ID,
-				"merge input %q is not from an incoming error route",
+				"merge input %q is not from a route-relevant upstream error route",
 				name,
 			)
 		}
 
-		merge, ok := node.executor.(*compiledMerge)
-		if !ok {
-			return compileNodeError(
-				node.definition.ID,
-				"built-in Merge executor has unexpected type",
-			)
-		}
+		return nil
+	}
 
-		if merge.config.Mode == MergeExclusive {
-			return nil
-		}
+	if !p.isDirectPredecessorRoute(sourceIndex, targetIndex, RouteError) {
+		return compileNodeError(
+			node.definition.ID,
+			"merge input %q is not from an incoming error route",
+			name,
+		)
+	}
+
+	if merge.config.Mode == MergeExclusive {
+		return nil
 	}
 
 	if !p.nodeErrorGuaranteed(sourceIndex, targetIndex, dominators) {
@@ -547,6 +591,22 @@ func (p *Plan) reachableFromRoute(source int, route string, target int) bool {
 	return false
 }
 
+func (p *Plan) normalRouteReaches(source, target int) bool {
+	for _, route := range p.nodes[source].spec.Routes {
+		if p.reachableFromRoute(source, route, target) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (p *Plan) isV2ExclusiveMerge(node planNode) bool {
+	merge, ok := node.executor.(*compiledMerge)
+
+	return ok && merge.version == MergeNodeVersionV2 && merge.config.Mode == MergeExclusive
+}
+
 func (p *Plan) validateMergeNode(nodeIndex int) error {
 	node := p.nodes[nodeIndex]
 
@@ -561,42 +621,70 @@ func (p *Plan) validateMergeNode(nodeIndex int) error {
 	}
 
 	usedPredecessors := make(map[int]struct{}, len(predecessors))
+	allowIndirect := p.isV2ExclusiveMerge(node)
 
 	for outputName, output := range merge.config.Outputs {
 		for _, inputName := range output.Sources {
-			binding := node.bindings[inputName]
-			if binding.Source != BindingNodeOutput && binding.Source != BindingNodeError {
-				return compileNodeError(
-					node.definition.ID,
-					"merge source %q must bind node output or error data",
-					inputName,
-				)
-			}
-
-			sourceSchema, sourceIndex, err := p.bindingSchema(binding)
-			if err != nil {
-				return compileNodeError(node.definition.ID, "merge source %q: %v", inputName, err)
-			}
-
-			if _, ok := predecessors[sourceIndex]; !ok {
-				return compileNodeError(node.definition.ID, "merge source %q is not an incoming node", inputName)
-			}
-
-			usedPredecessors[sourceIndex] = struct{}{}
-
-			if !schemaCompatible(sourceSchema, output.Schema) {
-				return compileNodeError(
-					node.definition.ID,
-					"merge output %q source %q has incompatible schema",
-					outputName,
-					inputName,
-				)
+			if err := p.validateMergeSource(
+				node,
+				outputName,
+				inputName,
+				output.Schema,
+				predecessors,
+				usedPredecessors,
+				allowIndirect,
+			); err != nil {
+				return err
 			}
 		}
 	}
 
-	if len(usedPredecessors) != len(predecessors) {
+	if !allowIndirect && len(usedPredecessors) != len(predecessors) {
 		return compileNodeError(node.definition.ID, "every incoming node must provide a mapped source")
+	}
+
+	return nil
+}
+
+func (p *Plan) validateMergeSource(
+	node planNode,
+	outputName string,
+	inputName string,
+	outputSchema PortSchema,
+	predecessors map[int]struct{},
+	usedPredecessors map[int]struct{},
+	allowIndirect bool,
+) error {
+	binding := node.bindings[inputName]
+	if binding.Source != BindingNodeOutput && binding.Source != BindingNodeError {
+		return compileNodeError(
+			node.definition.ID,
+			"merge source %q must bind node output or error data",
+			inputName,
+		)
+	}
+
+	sourceSchema, sourceIndex, err := p.bindingSchema(binding)
+	if err != nil {
+		return compileNodeError(node.definition.ID, "merge source %q: %v", inputName, err)
+	}
+
+	_, directPredecessor := predecessors[sourceIndex]
+	if !allowIndirect && !directPredecessor {
+		return compileNodeError(node.definition.ID, "merge source %q is not an incoming node", inputName)
+	}
+
+	if directPredecessor {
+		usedPredecessors[sourceIndex] = struct{}{}
+	}
+
+	if !schemaCompatible(sourceSchema, outputSchema) {
+		return compileNodeError(
+			node.definition.ID,
+			"merge output %q source %q has incompatible schema",
+			outputName,
+			inputName,
+		)
 	}
 
 	return nil

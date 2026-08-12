@@ -14,6 +14,8 @@ import (
 const (
 	// BuiltinNodeVersion is the exact version of all first-version built-ins.
 	BuiltinNodeVersion = "v1"
+	// MergeNodeVersionV2 selects the first non-null candidate in source order.
+	MergeNodeVersionV2 = "v2"
 
 	// NodeTypeStart identifies [StartNode].
 	NodeTypeStart NodeTypeKey = "start"
@@ -55,6 +57,7 @@ func BuiltinNodeTypes() []NodeType {
 		ActionNode{},
 		ConditionNode{},
 		MergeNode{},
+		mergeNodeV2{},
 		SelectorNode{},
 		SubWorkflowNode{},
 		BatchNode{},
@@ -359,6 +362,26 @@ func (MergeNode) Compile(
 	_ CompileContext,
 	definition NodeDefinition,
 ) (CompiledNode, error) {
+	return compileMergeNode(definition, BuiltinNodeVersion)
+}
+
+type mergeNodeV2 struct{}
+
+func (mergeNodeV2) Spec() NodeTypeSpec {
+	return NodeTypeSpec{
+		Key: NodeTypeMerge, Version: MergeNodeVersionV2, DisplayName: "Merge",
+	}
+}
+
+func (mergeNodeV2) Compile(
+	_ context.Context,
+	_ CompileContext,
+	definition NodeDefinition,
+) (CompiledNode, error) {
+	return compileMergeNode(definition, MergeNodeVersionV2)
+}
+
+func compileMergeNode(definition NodeDefinition, version string) (CompiledNode, error) {
 	var config MergeConfig
 	if err := decodeNodeConfig(definition, &config); err != nil {
 		return nil, err
@@ -384,14 +407,16 @@ func (MergeNode) Compile(
 	}
 
 	return &compiledMerge{
-		spec:   NodeSpec{Inputs: inputs, Outputs: outputs, Routes: []string{RouteSuccess}},
-		config: config,
+		spec:    NodeSpec{Inputs: inputs, Outputs: outputs, Routes: []string{RouteSuccess}},
+		config:  config,
+		version: version,
 	}, nil
 }
 
 type compiledMerge struct {
-	spec   NodeSpec
-	config MergeConfig
+	spec    NodeSpec
+	config  MergeConfig
+	version string
 }
 
 func (n *compiledMerge) Spec() NodeSpec {
@@ -401,7 +426,7 @@ func (n *compiledMerge) Spec() NodeSpec {
 func (n *compiledMerge) Invoke(_ context.Context, input NodeInput) (NodeOutput, error) {
 	values := make(map[string]Value, len(n.config.Outputs))
 	for name, output := range n.config.Outputs {
-		value, err := mergeOutputValue(n.config.Mode, output.Sources, input.Values)
+		value, err := mergeOutputValue(n.version, n.config.Mode, output.Sources, input.Values)
 		if err != nil {
 			return NodeOutput{}, fmt.Errorf("merge output %q: %w", name, err)
 		}
@@ -729,7 +754,12 @@ func validateMergeOutput(
 	return nil
 }
 
-func mergeOutputValue(mode MergeMode, sources []string, inputs map[string]Value) (Value, error) {
+func mergeOutputValue(
+	version string,
+	mode MergeMode,
+	sources []string,
+	inputs map[string]Value,
+) (Value, error) {
 	if mode == MergeParallel {
 		value, ok := inputs[sources[0]]
 		if !ok {
@@ -737,6 +767,17 @@ func mergeOutputValue(mode MergeMode, sources []string, inputs map[string]Value)
 		}
 
 		return value, nil
+	}
+
+	if version == MergeNodeVersionV2 {
+		for _, source := range sources {
+			value, ok := inputs[source]
+			if ok && value.Kind() != ValueNull {
+				return value, nil
+			}
+		}
+
+		return ValueOf(nil)
 	}
 
 	var selected Value
