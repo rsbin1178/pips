@@ -1305,10 +1305,7 @@ func legacyGoldenCheckpointPlan(
 		},
 	)
 
-	registry, err := workflow.NewDefaultRegistry(action)
-	if err != nil {
-		t.Fatalf("NewDefaultRegistry() error = %v", err)
-	}
+	registry := newLegacyGoldenRegistry(t, action)
 
 	if registry.Fingerprint() != legacyGoldenRegistryFingerprint {
 		t.Fatalf(
@@ -1321,6 +1318,27 @@ func legacyGoldenCheckpointPlan(
 	definition := legacyGoldenDefinition(t)
 
 	return compileCheckpointIdentityPlan(t, definition, registry), action, calls
+}
+
+func newLegacyGoldenRegistry(t *testing.T, actions ...workflow.Action) *workflow.Registry {
+	t.Helper()
+
+	nodeTypes := make([]workflow.NodeType, 0, len(workflow.BuiltinNodeTypes())-1)
+	for _, nodeType := range workflow.BuiltinNodeTypes() {
+		spec := nodeType.Spec()
+		if spec.Key == workflow.NodeTypeMerge && spec.Version == workflow.MergeNodeVersionV2 {
+			continue
+		}
+
+		nodeTypes = append(nodeTypes, nodeType)
+	}
+
+	registry, err := workflow.NewRegistry(nodeTypes, actions)
+	if err != nil {
+		t.Fatalf("NewRegistry(legacy golden) error = %v", err)
+	}
+
+	return registry
 }
 
 func legacyGoldenDefinition(t *testing.T) workflow.Definition {
@@ -1457,11 +1475,7 @@ func nestedCheckpointIdentityPlanWithAction(
 	child := subWorkflowChildDefinition(stringSchema, "legacy_child_action")
 	parent := subWorkflowParentDefinition(t, stringSchema, workflowRef(t, child))
 
-	registry, err := workflow.NewDefaultRegistry(action)
-	if err != nil {
-		t.Fatalf("NewDefaultRegistry() error = %v", err)
-	}
-
+	registry := newLegacyGoldenRegistry(t, action)
 	if expanded {
 		registry = newCheckpointExpandedRegistry(t, action)
 	}

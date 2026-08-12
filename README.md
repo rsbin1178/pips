@@ -75,6 +75,13 @@ Batch 是可并行的数组 map，Loop 是带事务局部变量的串行状态�
 允许互相嵌套。父流程与子流程共享 Run ID、取消信号、总步数、叶子并发额度
 和串行化事件输出。
 
+Merge 提供两个精确版本。`merge@v1` 保留原有 exclusive 语义：候选必须来自直接
+入边，且运行时恰好一个候选存在。`merge@v2` 的 exclusive 语义按 `Sources` 声明
+顺序选择首个存在且非 JSON null 的候选；候选可来自沿相应 normal/error route
+可达的任意上游节点。全部候选缺失/null 时输出 JSON null，并继续由声明的 output
+Schema 决定是否有效。两个版本的 parallel 语义相同，仍等待并读取直接入边；
+Definition 通过 `workflow.MergeNodeVersionV2` 精确选择 v2。
+
 ### Workflow failure branches
 
 节点重试耗尽后按 `NodePolicy.Error` 执行三种互斥策略：`stop` 终止 Run，
@@ -116,7 +123,7 @@ edge 返回编译期校验过的默认输出。`route_error` 分支使用独立�
 
 `error_message` 属于敏感 Workflow 数据，可能进入显式输出、Node Debug 结果和
 不透明 checkpoint，但不会进入 lifecycle Events 或包日志。宿主负责授权、脱敏、
-加密、保留与删除。当前 checkpoint 格式为 v2，恢复会严格校验异常状态、failure
+加密、保留与删除。当前 checkpoint 写入格式为 v3，恢复会严格校验异常状态、failure
 data、已选 route、默认输出和根部分成功标记；旧 v1 checkpoint 会在调用 Action
 之前被拒绝。
 
