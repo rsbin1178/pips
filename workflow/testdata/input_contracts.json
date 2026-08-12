@@ -1,0 +1,30 @@
+{
+  "schema": "pips.workflow/v1alpha2",
+  "id": "input-contracts-fixture",
+  "revision": "v1",
+  "name": "Input contracts fixture",
+  "inputs": {
+    "prompt": {
+      "schema": {"type": "string"},
+      "required": true
+    },
+    "style": {
+      "schema": {"type": "string"},
+      "default": "cinematic"
+    }
+  },
+  "outputs": {
+    "result": {
+      "schema": {"type": "string"},
+      "binding": {"source": "workflow_input", "port": "style"}
+    }
+  },
+  "nodes": [
+    {"id": "start", "type": "start", "version": "v1"},
+    {"id": "end", "type": "end", "version": "v1"}
+  ],
+  "edges": [
+    {"from": {"node": "start", "route": "success"}, "to": "end"}
+  ],
+  "limits": {"max_concurrency": 1, "max_steps": 10}
+}

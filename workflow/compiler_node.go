@@ -18,7 +18,7 @@ func (p *Plan) compileNodes(
 	}
 
 	baseContext := nodeCompileContext{
-		inputs:   p.definition.Inputs,
+		inputs:   workflowInputSchemas(p.definition.Inputs),
 		outputs:  outputSchemas,
 		registry: session.registry,
 		actions:  actions,

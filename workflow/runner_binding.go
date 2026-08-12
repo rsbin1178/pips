@@ -9,6 +9,10 @@ func (e *execution) resolveInputs(index int) (map[string]Value, error) {
 	for name, binding := range node.bindings {
 		value, present := e.resolveBinding(binding)
 		if !present {
+			if index == e.plan.startIndex && e.partialStartInputOmitted(name) {
+				continue
+			}
+
 			if node.isMerge {
 				continue
 			}
@@ -24,6 +28,18 @@ func (e *execution) resolveInputs(index int) (map[string]Value, error) {
 	}
 
 	return values, nil
+}
+
+func (e *execution) partialStartInputOmitted(name string) bool {
+	if e == nil || e.state == nil || e.state.partialRun == nil ||
+		e.plan.partialRun == nil ||
+		e.state.partialRun.workflowInputs == nil {
+		return false
+	}
+
+	_, required := e.state.partialRun.workflowInputs[name]
+
+	return !required
 }
 
 func (e *execution) resolveBinding(binding Binding) (Value, bool) {

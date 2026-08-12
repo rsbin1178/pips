@@ -442,8 +442,8 @@ func TestBatchHandledBodyFailureMarksRootPartial(t *testing.T) {
 		`{"type":"string","enum":["error","timeout","panic","canceled","limit"]}`,
 	)
 	body := failureBranchDefinition(t, stringSchema, 1)
-	body.Inputs["item"] = stringSchema
-	body.Inputs["index"] = integerSchema
+	body.Inputs["item"] = workflow.WorkflowInput{Schema: stringSchema, Required: true}
+	body.Inputs["index"] = workflow.WorkflowInput{Schema: integerSchema, Required: true}
 	config := workflow.BatchConfig{
 		Body: body, ResultOutput: "result", Mode: workflow.BatchSequential,
 		ErrorMode: workflow.BatchTerminate, MaxItems: 10,
@@ -762,15 +762,16 @@ func batchBodyDefinition(
 	t.Helper()
 
 	integerSchema := mustSchema(t, `{"type":"integer"}`)
-	inputs := map[string]workflow.PortSchema{
-		"item": itemSchema, "index": integerSchema,
+	inputs := map[string]workflow.WorkflowInput{
+		"item":  {Schema: itemSchema, Required: true},
+		"index": {Schema: integerSchema, Required: true},
 	}
 	actionInputs := map[string]workflow.Binding{
 		"item": workflowInput("item"), "index": workflowInput("index"),
 	}
 
 	if withPrefix {
-		inputs["prefix"] = resultSchema
+		inputs["prefix"] = workflow.WorkflowInput{Schema: resultSchema, Required: true}
 		actionInputs["prefix"] = workflowInput("prefix")
 	}
 
@@ -805,11 +806,13 @@ func batchParentDefinition(
 ) workflow.Definition {
 	t.Helper()
 
-	inputs := map[string]workflow.PortSchema{"items": itemsSchema}
+	inputs := map[string]workflow.WorkflowInput{
+		"items": {Schema: itemsSchema, Required: true},
+	}
 	bindings := map[string]workflow.Binding{"items": workflowInput("items")}
 
 	if liftedSchema.IsValid() {
-		inputs["prefix"] = liftedSchema
+		inputs["prefix"] = workflow.WorkflowInput{Schema: liftedSchema, Required: true}
 		bindings["prefix"] = workflowInput("prefix")
 	}
 
@@ -850,8 +853,8 @@ func nestedBatchBodyDefinition(
 
 	return workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "nested-body", Revision: "v1", Name: "Nested Body",
-		Inputs: map[string]workflow.PortSchema{
-			"item": itemsSchema, "index": integerSchema,
+		Inputs: map[string]workflow.WorkflowInput{
+			"item": {Schema: itemsSchema, Required: true}, "index": {Schema: integerSchema, Required: true},
 		},
 		Outputs: map[string]workflow.OutputBinding{
 			"results": nodeOutput(itemsSchema, "inner", "results"),

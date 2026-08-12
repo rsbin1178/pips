@@ -413,7 +413,7 @@ func dynamicSingleActionDefinition(
 
 	return workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: id, Revision: "v1", Name: string(id),
-		Inputs: map[string]workflow.PortSchema{},
+		Inputs: map[string]workflow.WorkflowInput{},
 		Outputs: map[string]workflow.OutputBinding{
 			"result": nodeOutput(outputSchema, "work", "result"),
 		},
@@ -450,7 +450,7 @@ func parallelInterruptDefinition(
 	return workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "parallel-interrupt", Revision: "v1",
 		Name:   "Parallel Interrupt",
-		Inputs: map[string]workflow.PortSchema{},
+		Inputs: map[string]workflow.WorkflowInput{},
 		Outputs: map[string]workflow.OutputBinding{
 			"left":  nodeOutput(stringSchema, "merge", "left"),
 			"right": nodeOutput(stringSchema, "merge", "right"),

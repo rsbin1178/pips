@@ -91,7 +91,7 @@ func TestExecutionContextMatchesActionAndCustomNodeEvents(t *testing.T) {
 
 		definition := workflow.Definition{
 			Schema: workflow.SchemaV1Alpha1, ID: "custom-context", Revision: "v2",
-			Name: "Custom Context", Inputs: map[string]workflow.PortSchema{},
+			Name: "Custom Context", Inputs: map[string]workflow.WorkflowInput{},
 			Outputs: map[string]workflow.OutputBinding{},
 			Nodes: []workflow.NodeDefinition{
 				{ID: "start", Type: workflow.NodeTypeStart, Version: workflow.BuiltinNodeVersion},
@@ -976,7 +976,7 @@ func executionContextLoopBody(
 
 	return workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "context-loop-body", Revision: "v1",
-		Name: "Context Loop Body", Inputs: map[string]workflow.PortSchema{"index": integerSchema},
+		Name: "Context Loop Body", Inputs: map[string]workflow.WorkflowInput{"index": {Schema: integerSchema, Required: true}},
 		Outputs: map[string]workflow.OutputBinding{
 			"result": nodeOutput(integerSchema, "work", "result"),
 		},
@@ -1006,7 +1006,7 @@ func executionContextEmptyActionDefinition(
 
 	return workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: id, Revision: "v1", Name: string(id),
-		Inputs: map[string]workflow.PortSchema{}, Outputs: map[string]workflow.OutputBinding{},
+		Inputs: map[string]workflow.WorkflowInput{}, Outputs: map[string]workflow.OutputBinding{},
 		Nodes: []workflow.NodeDefinition{
 			{ID: "start", Type: workflow.NodeTypeStart, Version: workflow.BuiltinNodeVersion},
 			{

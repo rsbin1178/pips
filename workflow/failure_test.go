@@ -326,7 +326,7 @@ func failureBranchDefinition(
 		ID:       "typed-failure",
 		Revision: "v1",
 		Name:     "Typed Failure",
-		Inputs:   map[string]workflow.PortSchema{},
+		Inputs:   map[string]workflow.WorkflowInput{},
 		Outputs: map[string]workflow.OutputBinding{
 			"result": nodeOutput(stringSchema, "merge", "result"),
 		},
@@ -408,7 +408,7 @@ func directErrorMergeDefinition(
 	return workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "direct-error-merge", Revision: "v1",
 		Name:   "Direct Error Merge",
-		Inputs: map[string]workflow.PortSchema{},
+		Inputs: map[string]workflow.WorkflowInput{},
 		Outputs: map[string]workflow.OutputBinding{
 			"result": nodeOutput(stringSchema, "merge", workflowOutput),
 		},
@@ -447,7 +447,7 @@ func guaranteedParallelErrorMergeDefinition(
 	return workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "parallel-error-merge", Revision: "v1",
 		Name:   "Parallel Error Merge",
-		Inputs: map[string]workflow.PortSchema{},
+		Inputs: map[string]workflow.WorkflowInput{},
 		Outputs: map[string]workflow.OutputBinding{
 			"result": nodeOutput(stringSchema, "final", "result"),
 		},

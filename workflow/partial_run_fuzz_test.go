@@ -29,7 +29,7 @@ func FuzzResumePartialCheckpoint(f *testing.F) {
 	definition := workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "fuzz-partial", Revision: "v1",
 		Name:   "Fuzz Partial",
-		Inputs: map[string]workflow.PortSchema{}, Outputs: map[string]workflow.OutputBinding{},
+		Inputs: map[string]workflow.WorkflowInput{}, Outputs: map[string]workflow.OutputBinding{},
 		Nodes: []workflow.NodeDefinition{
 			{ID: "start", Type: workflow.NodeTypeStart, Version: workflow.BuiltinNodeVersion},
 			{

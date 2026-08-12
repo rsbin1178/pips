@@ -354,7 +354,7 @@ func fingerprintNodeDefinition(nodeType workflow.NodeTypeKey) workflow.Definitio
 		ID:       "fingerprint",
 		Revision: "v1",
 		Name:     "Fingerprint",
-		Inputs:   map[string]workflow.PortSchema{},
+		Inputs:   map[string]workflow.WorkflowInput{},
 		Outputs:  map[string]workflow.OutputBinding{},
 		Nodes: []workflow.NodeDefinition{
 			{ID: "start", Type: workflow.NodeTypeStart, Version: workflow.BuiltinNodeVersion},

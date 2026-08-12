@@ -281,7 +281,7 @@ func interruptCompileFixture(t *testing.T) (workflow.Definition, *workflow.Regis
 	definition := workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "interrupt-compile", Revision: "v1",
 		Name:   "Interrupt Compile",
-		Inputs: map[string]workflow.PortSchema{}, Outputs: map[string]workflow.OutputBinding{},
+		Inputs: map[string]workflow.WorkflowInput{}, Outputs: map[string]workflow.OutputBinding{},
 		Nodes: []workflow.NodeDefinition{
 			{ID: "start", Type: workflow.NodeTypeStart, Version: workflow.BuiltinNodeVersion},
 			{

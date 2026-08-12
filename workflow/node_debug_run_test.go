@@ -123,7 +123,7 @@ func TestDebugNodeMergeUsesOptionalCandidateInputs(t *testing.T) {
 	}
 	definition := workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "debug-merge", Revision: "v1", Name: "Debug Merge",
-		Inputs: map[string]workflow.PortSchema{"approved": boolSchema},
+		Inputs: map[string]workflow.WorkflowInput{"approved": {Schema: boolSchema, Required: true}},
 		Outputs: map[string]workflow.OutputBinding{
 			"result": nodeOutput(stringSchema, "merge", "result"),
 		},
@@ -244,7 +244,7 @@ func TestDebugNodeConcurrentPlanReuseIsIsolated(t *testing.T) {
 	}
 	definition := workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "debug-concurrent", Revision: "v1", Name: "Debug Concurrent",
-		Inputs: map[string]workflow.PortSchema{"value": stringSchema},
+		Inputs: map[string]workflow.WorkflowInput{"value": {Schema: stringSchema, Required: true}},
 		Outputs: map[string]workflow.OutputBinding{
 			"result": nodeOutput(stringSchema, "action", "result"),
 		},
@@ -315,7 +315,7 @@ func TestDebugNodeCancellationReturnsFinalExecutionRecord(t *testing.T) {
 	}
 	definition := workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "debug-cancel", Revision: "v1", Name: "Debug Cancel",
-		Inputs: map[string]workflow.PortSchema{}, Outputs: map[string]workflow.OutputBinding{},
+		Inputs: map[string]workflow.WorkflowInput{}, Outputs: map[string]workflow.OutputBinding{},
 		Nodes: []workflow.NodeDefinition{
 			{ID: "start", Type: workflow.NodeTypeStart, Version: workflow.BuiltinNodeVersion},
 			{
@@ -373,7 +373,7 @@ func debugErrorRouteDefinition(
 
 	return workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "debug-error-route", Revision: "v1", Name: "Debug Error Route",
-		Inputs: map[string]workflow.PortSchema{},
+		Inputs: map[string]workflow.WorkflowInput{},
 		Outputs: map[string]workflow.OutputBinding{
 			"result": nodeOutput(stringSchema, "merge", "result"),
 		},

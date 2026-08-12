@@ -133,7 +133,22 @@ func (n *passthroughNode) Spec() NodeSpec {
 }
 
 func (n *passthroughNode) Invoke(_ context.Context, input NodeInput) (NodeOutput, error) {
-	return NodeOutput{Values: cloneValues(input.Values), Route: RouteSuccess}, nil
+	values := cloneValues(input.Values)
+	if input.runtime != nil && input.runtime.execution != nil &&
+		input.runtime.execution.state != nil &&
+		input.runtime.execution.state.partialRun != nil &&
+		input.runtime.execution.plan.partialRun != nil &&
+		input.runtime.execution.state.partialRun.workflowInputs != nil &&
+		input.runtime.nodeID == input.runtime.execution.plan.nodes[input.runtime.execution.plan.startIndex].definition.ID {
+		values = make(map[string]Value, len(input.runtime.execution.state.partialRun.workflowInputs))
+		for name := range input.runtime.execution.state.partialRun.workflowInputs {
+			if value, ok := input.Values[name]; ok {
+				values[name] = value
+			}
+		}
+	}
+
+	return NodeOutput{Values: values, Route: RouteSuccess}, nil
 }
 
 // ActionConfig selects one exact Action and carries optional immutable
