@@ -53,7 +53,7 @@ func TestDebugNodeIsolatesTargetAndPreservesLiteralInputs(t *testing.T) {
 	literal := workflow.MustValueOf("literal")
 	definition := workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "node-debug", Revision: "v1", Name: "Node Debug",
-		Inputs: map[string]workflow.PortSchema{},
+		Inputs: map[string]workflow.WorkflowInput{},
 		Outputs: map[string]workflow.OutputBinding{
 			"result": nodeOutput(stringSchema, "target", "result"),
 		},

@@ -232,7 +232,7 @@ func TestDebugNodeBindingPathAcceptsFinalPortValue(t *testing.T) {
 	}
 	definition := workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "debug-path", Revision: "v1", Name: "Debug Path",
-		Inputs: map[string]workflow.PortSchema{},
+		Inputs: map[string]workflow.WorkflowInput{},
 		Outputs: map[string]workflow.OutputBinding{
 			"result": nodeOutput(stringSchema, "target", "result"),
 		},
@@ -288,7 +288,7 @@ func TestPrepareNodeDebugSupportsRegisteredCustomNode(t *testing.T) {
 
 	definition := workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "debug-custom", Revision: "v1", Name: "Debug Custom",
-		Inputs: map[string]workflow.PortSchema{"value": stringSchema},
+		Inputs: map[string]workflow.WorkflowInput{"value": {Schema: stringSchema, Required: true}},
 		Outputs: map[string]workflow.OutputBinding{
 			"result": nodeOutput(stringSchema, "custom", "result"),
 		},

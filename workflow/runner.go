@@ -193,7 +193,8 @@ func (r *Runner) Run(
 		return RunResult{}, errors.New("workflow: nil or invalid plan")
 	}
 
-	if err := validatePortValues(inputs, plan.definition.Inputs); err != nil {
+	normalizedInputs, err := normalizeWorkflowInputs(plan.definition.Inputs, inputs, nil)
+	if err != nil {
 		return RunResult{}, fmt.Errorf("%w: inputs: %w", ErrRun, err)
 	}
 
@@ -213,7 +214,7 @@ func (r *Runner) Run(
 	}
 
 	state := newRunState(runID, plan.definition.Limits)
-	execution := newExecution(r, plan, state, startedAt, inputs, nil, nil)
+	execution := newExecution(r, plan, state, startedAt, normalizedInputs, nil, nil)
 
 	return execution.run(ctx)
 }

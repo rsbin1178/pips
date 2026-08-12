@@ -220,7 +220,7 @@ func TestLoopHandledBodyFailureMarksRootPartial(t *testing.T) {
 		`{"type":"string","enum":["error","timeout","panic","canceled","limit"]}`,
 	)
 	body := failureBranchDefinition(t, stringSchema, 1)
-	body.Inputs["index"] = integerSchema
+	body.Inputs["index"] = workflow.WorkflowInput{Schema: integerSchema, Required: true}
 	config := workflow.LoopConfig{
 		Body: body, Mode: workflow.LoopCount, MaxIterations: 2,
 		Outputs: []workflow.LoopOutput{
@@ -293,7 +293,7 @@ func TestLoopUnhandledBodyFailureUsesOuterPolicy(t *testing.T) {
 	resultsSchema := mustSchema(t, `{"type":"array","items":{"type":"string"}}`)
 	body := workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "unhandled-loop-body", Revision: "v1", Name: "Unhandled Loop Body",
-		Inputs: map[string]workflow.PortSchema{"index": integerSchema},
+		Inputs: map[string]workflow.WorkflowInput{"index": {Schema: integerSchema, Required: true}},
 		Outputs: map[string]workflow.OutputBinding{
 			"result": nodeOutput(stringSchema, "fail", "result"),
 		},
@@ -369,7 +369,7 @@ func TestLoopRejectsContextAndDeterminismViolations(t *testing.T) {
 
 		definition := workflow.Definition{
 			Schema: workflow.SchemaV1Alpha1, ID: "orphan-break", Revision: "v1", Name: "Orphan Break",
-			Inputs: map[string]workflow.PortSchema{}, Outputs: map[string]workflow.OutputBinding{},
+			Inputs: map[string]workflow.WorkflowInput{}, Outputs: map[string]workflow.OutputBinding{},
 			Nodes: []workflow.NodeDefinition{
 				{ID: "start", Type: workflow.NodeTypeStart, Version: workflow.BuiltinNodeVersion},
 				{ID: "break", Type: workflow.NodeTypeBreak, Version: workflow.BuiltinNodeVersion},
@@ -727,7 +727,7 @@ func statefulLoopBody(t *testing.T, integerSchema workflow.PortSchema) workflow.
 
 	return workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "stateful-loop-body", Revision: "v1", Name: "Stateful Loop Body",
-		Inputs: map[string]workflow.PortSchema{"index": integerSchema},
+		Inputs: map[string]workflow.WorkflowInput{"index": {Schema: integerSchema, Required: true}},
 		Outputs: map[string]workflow.OutputBinding{
 			"value": nodeOutput(integerSchema, "increment", "next"),
 		},
@@ -776,9 +776,9 @@ func arrayLoopBody(
 
 	return workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "array-loop-body", Revision: "v1", Name: "Array Loop Body",
-		Inputs: map[string]workflow.PortSchema{
-			"left": stringSchema, "right": stringSchema,
-			"prefix": stringSchema, "index": integerSchema,
+		Inputs: map[string]workflow.WorkflowInput{
+			"left": {Schema: stringSchema, Required: true}, "right": {Schema: stringSchema, Required: true},
+			"prefix": {Schema: stringSchema, Required: true}, "index": {Schema: integerSchema, Required: true},
 		},
 		Outputs: map[string]workflow.OutputBinding{
 			"result": nodeOutput(stringSchema, "join", "result"),
@@ -819,7 +819,7 @@ func indexedBreakBody(
 	return workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: workflow.DefinitionID(fmt.Sprintf("indexed-break-%d", breakIndex)),
 		Revision: "v1", Name: "Indexed Break Body",
-		Inputs: map[string]workflow.PortSchema{"index": integerSchema},
+		Inputs: map[string]workflow.WorkflowInput{"index": {Schema: integerSchema, Required: true}},
 		Outputs: map[string]workflow.OutputBinding{
 			"index": {Schema: integerSchema, Binding: workflowInput("index")},
 		},
@@ -853,7 +853,7 @@ func passthroughIndexBody(
 
 	return workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "passthrough-index", Revision: "v1", Name: "Passthrough Index",
-		Inputs: map[string]workflow.PortSchema{"index": integerSchema},
+		Inputs: map[string]workflow.WorkflowInput{"index": {Schema: integerSchema, Required: true}},
 		Outputs: map[string]workflow.OutputBinding{
 			"index": {Schema: integerSchema, Binding: workflowInput("index")},
 		},
@@ -878,7 +878,7 @@ func unorderedWritesBody(
 
 	return workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "unordered-writes", Revision: "v1", Name: "Unordered Writes",
-		Inputs:  map[string]workflow.PortSchema{"index": integerSchema},
+		Inputs:  map[string]workflow.WorkflowInput{"index": {Schema: integerSchema, Required: true}},
 		Outputs: map[string]workflow.OutputBinding{},
 		Nodes: []workflow.NodeDefinition{
 			{ID: "start", Type: workflow.NodeTypeStart, Version: workflow.BuiltinNodeVersion},
@@ -919,7 +919,7 @@ func setVariableLiteralBody(
 
 	return workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "literal-assignment", Revision: "v1", Name: "Literal Assignment",
-		Inputs:  map[string]workflow.PortSchema{"index": integerSchema},
+		Inputs:  map[string]workflow.WorkflowInput{"index": {Schema: integerSchema, Required: true}},
 		Outputs: map[string]workflow.OutputBinding{},
 		Nodes: []workflow.NodeDefinition{
 			{ID: "start", Type: workflow.NodeTypeStart, Version: workflow.BuiltinNodeVersion},
@@ -956,7 +956,7 @@ func exclusiveWritesBody(
 
 	return workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "exclusive-writes", Revision: "v1", Name: "Exclusive Writes",
-		Inputs:  map[string]workflow.PortSchema{"index": integerSchema},
+		Inputs:  map[string]workflow.WorkflowInput{"index": {Schema: integerSchema, Required: true}},
 		Outputs: map[string]workflow.OutputBinding{},
 		Nodes: []workflow.NodeDefinition{
 			{ID: "start", Type: workflow.NodeTypeStart, Version: workflow.BuiltinNodeVersion},
@@ -1000,8 +1000,8 @@ func nestedLoopBody(
 
 	return workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "nested-loop-body", Revision: "v1", Name: "Nested Loop Body",
-		Inputs: map[string]workflow.PortSchema{
-			"index": integerSchema, "inner_count": countSchema,
+		Inputs: map[string]workflow.WorkflowInput{
+			"index": {Schema: integerSchema, Required: true}, "inner_count": {Schema: countSchema, Required: true},
 		},
 		Outputs: map[string]workflow.OutputBinding{},
 		Nodes: []workflow.NodeDefinition{
@@ -1031,7 +1031,7 @@ func singleActionLoopBody(
 
 	return workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "single-action-loop-body", Revision: "v1", Name: "Single Action Loop Body",
-		Inputs:  map[string]workflow.PortSchema{"index": integerSchema},
+		Inputs:  map[string]workflow.WorkflowInput{"index": {Schema: integerSchema, Required: true}},
 		Outputs: map[string]workflow.OutputBinding{},
 		Nodes: []workflow.NodeDefinition{
 			{ID: "start", Type: workflow.NodeTypeStart, Version: workflow.BuiltinNodeVersion},
@@ -1058,7 +1058,7 @@ func breakWithFailingSiblingBody(
 
 	return workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "break-failure-body", Revision: "v1", Name: "Break Failure Body",
-		Inputs:  map[string]workflow.PortSchema{"index": integerSchema},
+		Inputs:  map[string]workflow.WorkflowInput{"index": {Schema: integerSchema, Required: true}},
 		Outputs: map[string]workflow.OutputBinding{},
 		Nodes: []workflow.NodeDefinition{
 			{ID: "start", Type: workflow.NodeTypeStart, Version: workflow.BuiltinNodeVersion},
@@ -1089,8 +1089,8 @@ func batchBodyContainingLoop(
 
 	return workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "batch-body-containing-loop", Revision: "v1", Name: "Batch Body Containing Loop",
-		Inputs: map[string]workflow.PortSchema{
-			"item": stringSchema, "index": integerSchema,
+		Inputs: map[string]workflow.WorkflowInput{
+			"item": {Schema: stringSchema, Required: true}, "index": {Schema: integerSchema, Required: true},
 		},
 		Outputs: map[string]workflow.OutputBinding{
 			"result": {Schema: stringSchema, Binding: workflowInput("item")},
@@ -1124,8 +1124,8 @@ func loopBodyContainingBatch(
 
 	batchBody := workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "nested-batch-body", Revision: "v1", Name: "Nested Batch Body",
-		Inputs: map[string]workflow.PortSchema{
-			"item": stringSchema, "index": integerSchema,
+		Inputs: map[string]workflow.WorkflowInput{
+			"item": {Schema: stringSchema, Required: true}, "index": {Schema: integerSchema, Required: true},
 		},
 		Outputs: map[string]workflow.OutputBinding{
 			"result": {Schema: stringSchema, Binding: workflowInput("item")},
@@ -1144,8 +1144,8 @@ func loopBodyContainingBatch(
 
 	return workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "loop-body-containing-batch", Revision: "v1", Name: "Loop Body Containing Batch",
-		Inputs: map[string]workflow.PortSchema{
-			"index": integerSchema, "items": itemsSchema,
+		Inputs: map[string]workflow.WorkflowInput{
+			"index": {Schema: integerSchema, Required: true}, "items": {Schema: itemsSchema, Required: true},
 		},
 		Outputs: map[string]workflow.OutputBinding{},
 		Nodes: []workflow.NodeDefinition{
@@ -1175,9 +1175,14 @@ func loopParentDefinition(
 ) workflow.Definition {
 	t.Helper()
 
+	workflowInputs := make(map[string]workflow.WorkflowInput, len(inputs))
+	for name, schema := range inputs {
+		workflowInputs[name] = workflow.WorkflowInput{Schema: schema, Required: true}
+	}
+
 	return workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: id, Revision: "v1", Name: "Loop Parent",
-		Inputs: inputs, Outputs: outputs,
+		Inputs: workflowInputs, Outputs: outputs,
 		Nodes: []workflow.NodeDefinition{
 			{ID: "start", Type: workflow.NodeTypeStart, Version: workflow.BuiltinNodeVersion},
 			{
@@ -1234,7 +1239,7 @@ func TestLoopFailureDoesNotStartSuccessorIteration(t *testing.T) {
 	}
 	body := workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "failed-iteration", Revision: "v1", Name: "Failed Iteration",
-		Inputs:  map[string]workflow.PortSchema{"index": integerSchema},
+		Inputs:  map[string]workflow.WorkflowInput{"index": {Schema: integerSchema, Required: true}},
 		Outputs: map[string]workflow.OutputBinding{},
 		Nodes: []workflow.NodeDefinition{
 			{ID: "start", Type: workflow.NodeTypeStart, Version: workflow.BuiltinNodeVersion},
@@ -1507,7 +1512,7 @@ func concurrentStateBody(
 
 	return workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "concurrent-loop-body", Revision: "v1", Name: "Concurrent Loop Body",
-		Inputs:  map[string]workflow.PortSchema{"index": integerSchema},
+		Inputs:  map[string]workflow.WorkflowInput{"index": {Schema: integerSchema, Required: true}},
 		Outputs: map[string]workflow.OutputBinding{},
 		Nodes: []workflow.NodeDefinition{
 			{ID: "start", Type: workflow.NodeTypeStart, Version: workflow.BuiltinNodeVersion},

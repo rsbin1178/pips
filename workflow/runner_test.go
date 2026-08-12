@@ -38,7 +38,7 @@ func TestRunnerLinearWorkflow(t *testing.T) {
 
 	definition := workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "linear", Revision: "v1", Name: "Linear",
-		Inputs: map[string]workflow.PortSchema{"input": stringSchema},
+		Inputs: map[string]workflow.WorkflowInput{"input": {Schema: stringSchema, Required: true}},
 		Outputs: map[string]workflow.OutputBinding{
 			"result": nodeOutput(stringSchema, "save", "result"),
 		},
@@ -99,7 +99,7 @@ func TestRunnerConditionalMergeWorkflow(t *testing.T) {
 	}
 	definition := workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "condition", Revision: "v1", Name: "Condition",
-		Inputs: map[string]workflow.PortSchema{"approved": boolSchema},
+		Inputs: map[string]workflow.WorkflowInput{"approved": {Schema: boolSchema, Required: true}},
 		Outputs: map[string]workflow.OutputBinding{
 			"result": nodeOutput(stringSchema, "merge", "result"),
 		},
@@ -181,7 +181,7 @@ func TestRunnerParallelMergeWaitsForAll(t *testing.T) {
 	}
 	definition := workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "parallel", Revision: "v1", Name: "Parallel",
-		Inputs: map[string]workflow.PortSchema{},
+		Inputs: map[string]workflow.WorkflowInput{},
 		Outputs: map[string]workflow.OutputBinding{
 			"profile": nodeOutput(stringSchema, "merge", "profile"),
 			"policy":  nodeOutput(stringSchema, "merge", "policy"),
@@ -264,7 +264,7 @@ func TestRunnerRetriesThenSucceeds(t *testing.T) {
 	}
 	definition := workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "retry", Revision: "v1", Name: "Retry",
-		Inputs:  map[string]workflow.PortSchema{},
+		Inputs:  map[string]workflow.WorkflowInput{},
 		Outputs: map[string]workflow.OutputBinding{"result": nodeOutput(stringSchema, "unreliable", "result")},
 		Nodes: []workflow.NodeDefinition{
 			{ID: "start", Type: workflow.NodeTypeStart, Version: workflow.BuiltinNodeVersion},
@@ -299,7 +299,7 @@ func TestPlanInputAndResultMutationIsolation(t *testing.T) {
 		ID:       "isolation",
 		Revision: "v1",
 		Name:     "Isolation",
-		Inputs:   map[string]workflow.PortSchema{"input": stringSchema},
+		Inputs:   map[string]workflow.WorkflowInput{"input": {Schema: stringSchema, Required: true}},
 		Outputs: map[string]workflow.OutputBinding{
 			"result": {
 				Schema:  stringSchema,
@@ -327,7 +327,7 @@ func TestPlanInputAndResultMutationIsolation(t *testing.T) {
 	}
 
 	planFingerprint := plan.Fingerprint()
-	definition.Inputs["input"] = numberSchema
+	definition.Inputs["input"] = workflow.WorkflowInput{Schema: numberSchema, Required: true}
 	definition.Nodes[0].ID = "mutated"
 
 	runner := mustRunner(t)
@@ -476,7 +476,7 @@ func ExampleRunner_Run() {
 		ID:       "example",
 		Revision: "v1",
 		Name:     "Example",
-		Inputs:   map[string]workflow.PortSchema{"input": stringSchema},
+		Inputs:   map[string]workflow.WorkflowInput{"input": {Schema: stringSchema, Required: true}},
 		Outputs: map[string]workflow.OutputBinding{
 			"result": {
 				Schema: stringSchema,

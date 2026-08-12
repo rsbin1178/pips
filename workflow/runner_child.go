@@ -36,10 +36,6 @@ func (r *nodeRuntime) runChildWithCheckpoint(
 		return nil, err
 	}
 
-	if err := validatePortValues(inputs, plan.definition.Inputs); err != nil {
-		return nil, fmt.Errorf("child workflow inputs: %w", err)
-	}
-
 	scope := append(slices.Clone(r.execution.scope), frame)
 
 	var execution *execution
@@ -53,13 +49,18 @@ func (r *nodeRuntime) runChildWithCheckpoint(
 		)
 		execution.resumed = true
 	} else {
+		normalizedInputs, err := normalizeWorkflowInputs(plan.definition.Inputs, inputs, nil)
+		if err != nil {
+			return nil, fmt.Errorf("child workflow inputs: %w", err)
+		}
+
 		startedAt := r.execution.runner.clock().UTC()
 		execution = newExecution(
 			r.execution.runner,
 			plan,
 			r.execution.state,
 			startedAt,
-			inputs,
+			normalizedInputs,
 			scope,
 			nil,
 		)
@@ -89,10 +90,6 @@ func (r *nodeRuntime) runLoopChild(
 		return nil, err
 	}
 
-	if err := validatePortValues(inputs, plan.definition.Inputs); err != nil {
-		return nil, fmt.Errorf("loop body inputs: %w", err)
-	}
-
 	scope := append(slices.Clone(r.execution.scope), frame)
 
 	var execution *execution
@@ -106,13 +103,18 @@ func (r *nodeRuntime) runLoopChild(
 		)
 		execution.resumed = true
 	} else {
+		normalizedInputs, err := normalizeWorkflowInputs(plan.definition.Inputs, inputs, nil)
+		if err != nil {
+			return nil, fmt.Errorf("loop body inputs: %w", err)
+		}
+
 		startedAt := r.execution.runner.clock().UTC()
 		execution = newExecution(
 			r.execution.runner,
 			plan,
 			r.execution.state,
 			startedAt,
-			inputs,
+			normalizedInputs,
 			scope,
 			state,
 		)

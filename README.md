@@ -82,6 +82,27 @@ Merge 提供两个精确版本。`merge@v1` 保留原有 exclusive 语义：候�
 Schema 决定是否有效。两个版本的 parallel 语义相同，仍等待并读取直接入边；
 Definition 通过 `workflow.MergeNodeVersionV2` 精确选择 v2。
 
+Workflow input 在 Go API 中统一声明为 `workflow.WorkflowInput`。旧
+`pips.workflow/v1alpha1` wire 仍保持 `"inputs": {"name": <JSON Schema>}`，对应
+`Required: true` 且没有 default；新契约使用 `pips.workflow/v1alpha2`：
+
+```go
+defaultStyle := workflow.MustValueOf("photo")
+definition := workflow.Definition{
+    Schema: workflow.SchemaV1Alpha2,
+    Inputs: map[string]workflow.WorkflowInput{
+        "prompt": {Schema: stringSchema, Required: true},
+        "style":  {Schema: nullableStringSchema, Default: &defaultStyle},
+    },
+}
+```
+
+缺失 required input 会在执行前失败；缺失 optional input 使用非 null default，否则
+补 JSON null（其 Schema 必须接受 null）。已提供的空 string/array/object 仅在 default
+为相同 JSON kind 时采用 default；显式 null、数字 0 和 `false` 保留并由 Schema 校验。
+`default:null` 会规范化为没有 default。SubWorkflow、Batch body、Loop body 和 Partial
+Run 都复用同一输入边界；这不会给 Action 或 custom NodeType 增加通用 optional port。
+
 ### Workflow failure branches
 
 节点重试耗尽后按 `NodePolicy.Error` 执行三种互斥策略：`stop` 终止 Run，

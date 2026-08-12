@@ -288,6 +288,12 @@ func TestResumePartialRejectsCorruptPartialCheckpointBeforeInvocation(t *testing
 			},
 		},
 		{
+			name: "invalid workflow input scope",
+			mutate: func(checkpoint map[string]any) {
+				partialCheckpointObject(t, checkpoint)["workflow_inputs"] = []any{"unknown"}
+			},
+		},
+		{
 			name: "invalid origin",
 			mutate: func(checkpoint map[string]any) {
 				partial := partialCheckpointObject(t, checkpoint)

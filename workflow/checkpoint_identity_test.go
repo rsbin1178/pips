@@ -947,7 +947,7 @@ func TestCheckpointV3ResumesLoopAfterUnusedContracts(t *testing.T) {
 		ID:       "checkpoint-loop-body",
 		Revision: "v1",
 		Name:     "Checkpoint Loop Body",
-		Inputs:   map[string]workflow.PortSchema{"index": integerSchema},
+		Inputs:   map[string]workflow.WorkflowInput{"index": {Schema: integerSchema, Required: true}},
 		Outputs:  map[string]workflow.OutputBinding{},
 		Nodes: []workflow.NodeDefinition{
 			{ID: "start", Type: workflow.NodeTypeStart, Version: workflow.BuiltinNodeVersion},

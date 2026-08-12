@@ -50,7 +50,7 @@ func (SubWorkflowNode) Compile(
 
 	return &compiledSubWorkflow{
 		spec: NodeSpec{
-			Inputs:  cloneSchemas(child.definition.Inputs),
+			Inputs:  projectCompositeInputSchemas(child.definition.Inputs, definition.Inputs),
 			Outputs: outputs,
 			Routes:  []string{RouteSuccess},
 		},

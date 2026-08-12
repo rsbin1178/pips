@@ -434,7 +434,7 @@ func indirectOutputMergeDefinition(
 	}
 	definition := workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "merge-v2-indirect", Revision: "v1", Name: "Merge V2 Indirect",
-		Inputs: map[string]workflow.PortSchema{},
+		Inputs: map[string]workflow.WorkflowInput{},
 		Outputs: map[string]workflow.OutputBinding{
 			"result": nodeOutput(stringSchema, "merge", "result"),
 		},
@@ -480,7 +480,7 @@ func directMergeDefinition(
 
 	definition := workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "merge-exact-identity", Revision: "v1", Name: "Merge Exact Identity",
-		Inputs:  map[string]workflow.PortSchema{},
+		Inputs:  map[string]workflow.WorkflowInput{},
 		Outputs: map[string]workflow.OutputBinding{"result": nodeOutput(stringSchema, "merge", "result")},
 		Nodes: []workflow.NodeDefinition{
 			{ID: "start", Type: workflow.NodeTypeStart, Version: workflow.BuiltinNodeVersion},
@@ -525,7 +525,7 @@ func indirectErrorMergeDefinition(
 
 	return workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "merge-v2-error", Revision: "v1", Name: "Merge V2 Error",
-		Inputs: map[string]workflow.PortSchema{},
+		Inputs: map[string]workflow.WorkflowInput{},
 		Outputs: map[string]workflow.OutputBinding{
 			"result": nodeOutput(stringSchema, "merge", "result"),
 		},
@@ -572,7 +572,7 @@ func futureMergeCandidateDefinition(t *testing.T) (workflow.Definition, []workfl
 	stringSchema := mustSchema(t, `{"type":"string"}`)
 	definition := workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "merge-v2-future", Revision: "v1", Name: "Merge V2 Future",
-		Inputs:  map[string]workflow.PortSchema{},
+		Inputs:  map[string]workflow.WorkflowInput{},
 		Outputs: map[string]workflow.OutputBinding{"result": nodeOutput(stringSchema, "future", "result")},
 		Nodes: []workflow.NodeDefinition{
 			{ID: "start", Type: workflow.NodeTypeStart, Version: workflow.BuiltinNodeVersion},
@@ -615,7 +615,7 @@ func unrelatedMergeCandidateDefinition(t *testing.T) (workflow.Definition, []wor
 	stringSchema := mustSchema(t, `{"type":"string"}`)
 	definition := workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "merge-v2-unrelated", Revision: "v1", Name: "Merge V2 Unrelated",
-		Inputs:  map[string]workflow.PortSchema{},
+		Inputs:  map[string]workflow.WorkflowInput{},
 		Outputs: map[string]workflow.OutputBinding{"result": nodeOutput(stringSchema, "final", "result")},
 		Nodes: []workflow.NodeDefinition{
 			{ID: "start", Type: workflow.NodeTypeStart, Version: workflow.BuiltinNodeVersion},
@@ -675,7 +675,7 @@ func wrongErrorRouteMergeDefinition(
 
 	definition := workflow.Definition{
 		Schema: workflow.SchemaV1Alpha1, ID: "merge-v2-wrong-error", Revision: "v1", Name: "Merge V2 Wrong Error",
-		Inputs:  map[string]workflow.PortSchema{},
+		Inputs:  map[string]workflow.WorkflowInput{},
 		Outputs: map[string]workflow.OutputBinding{"result": nodeOutput(stringSchema, "final", "result")},
 		Nodes: []workflow.NodeDefinition{
 			{ID: "start", Type: workflow.NodeTypeStart, Version: workflow.BuiltinNodeVersion},

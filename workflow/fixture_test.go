@@ -71,6 +71,11 @@ func TestWorkflowFixturesRoundTripAndRun(t *testing.T) {
 			expected: map[string]string{"profile": `"profile"`, "policy": `"policy"`},
 		},
 		{
+			name:     "input_contracts",
+			inputs:   map[string]workflow.Value{"prompt": workflow.MustValueOf("draw a lighthouse")},
+			expected: map[string]string{"result": `"cinematic"`},
+		},
+		{
 			name: "failure",
 			actions: []workflow.Action{
 				fixtureAction("unreliable", "v1", map[string]workflow.PortSchema{}, map[string]workflow.PortSchema{"result": stringSchema}, func(workflow.ActionInput) (workflow.ActionOutput, error) {

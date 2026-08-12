@@ -14,6 +14,7 @@ type partialRunCheckpoint struct {
 	Destination           NodeID                          `json:"destination"`
 	Origins               []PartialDataOrigin             `json:"origins"`
 	Routes                []string                        `json:"routes"`
+	WorkflowInputs        []string                        `json:"workflow_inputs"`
 	Available             []partialMaterializedCheckpoint `json:"available,omitempty"`
 }
 
@@ -38,6 +39,7 @@ func (s *partialRunState) checkpoint(
 		Destination:           s.destination,
 		Origins:               slices.Clone(s.origins),
 		Routes:                slices.Clone(s.routes),
+		WorkflowInputs:        sortedWorkflowInputScope(s.workflowInputs),
 		Available:             make([]partialMaterializedCheckpoint, 0),
 	}
 
@@ -87,6 +89,14 @@ func validatePartialRunCheckpoint(
 	if checkpoint.SourcePlanFingerprint != partialRunCheckpointSource(plan.partialRun, mode) ||
 		checkpoint.Destination != plan.partialRun.destination {
 		return errors.New("checkpoint partial run identity mismatch")
+	}
+
+	if err := validatePartialWorkflowInputScope(
+		checkpoint.WorkflowInputs,
+		plan,
+		execution,
+	); err != nil {
+		return err
 	}
 
 	if len(checkpoint.Origins) != len(plan.nodes) ||
@@ -153,6 +163,8 @@ func consumePartialCheckpointData(
 		checkpoint.SourcePlanFingerprint,
 		string(checkpoint.Destination),
 	}
+
+	metadata = append(metadata, checkpoint.WorkflowInputs...)
 	for index := range checkpoint.Origins {
 		metadata = append(metadata, string(checkpoint.Origins[index]), checkpoint.Routes[index])
 	}
@@ -408,6 +420,7 @@ func restorePartialRunState(
 	state := &partialRunState{
 		sourcePlanFingerprint: plan.partialRun.sourcePlanFingerprint,
 		destination:           checkpoint.Destination,
+		workflowInputs:        restorePartialWorkflowInputScope(checkpoint, plan, execution),
 		available:             make([]*partialMaterializedData, len(plan.nodes)),
 		origins:               slices.Clone(checkpoint.Origins),
 		routes:                slices.Clone(checkpoint.Routes),
@@ -429,4 +442,104 @@ func restorePartialRunState(
 	}
 
 	return state
+}
+
+func restorePartialWorkflowInputScope(
+	checkpoint *partialRunCheckpoint,
+	plan *Plan,
+	execution *executionCheckpoint,
+) map[string]struct{} {
+	if checkpoint != nil && checkpoint.WorkflowInputs != nil {
+		inputs := make(map[string]struct{}, len(checkpoint.WorkflowInputs))
+		for _, name := range checkpoint.WorkflowInputs {
+			inputs[name] = struct{}{}
+		}
+
+		return inputs
+	}
+
+	inputs := make(map[string]struct{})
+	if plan == nil || execution == nil || plan.startIndex < 0 ||
+		plan.startIndex >= len(execution.Outputs) {
+		return inputs
+	}
+
+	if execution.Nodes[plan.startIndex].Status == NodeStatusPending ||
+		execution.Nodes[plan.startIndex].Status == NodeStatusReady {
+		return nil
+	}
+
+	for name := range execution.Outputs[plan.startIndex] {
+		inputs[name] = struct{}{}
+	}
+
+	return inputs
+}
+
+func sortedWorkflowInputScope(inputs map[string]struct{}) []string {
+	if inputs == nil {
+		return nil
+	}
+
+	names := make([]string, 0, len(inputs))
+	for name := range inputs {
+		names = append(names, name)
+	}
+
+	slices.Sort(names)
+
+	return names
+}
+
+func validatePartialWorkflowInputScope(
+	inputs []string,
+	plan *Plan,
+	execution *executionCheckpoint,
+) error {
+	if inputs == nil {
+		return nil
+	}
+
+	if err := validatePartialWorkflowInputNames(inputs, plan); err != nil {
+		return err
+	}
+
+	return validatePartialWorkflowInputOutputs(inputs, plan, execution)
+}
+
+func validatePartialWorkflowInputNames(inputs []string, plan *Plan) error {
+	previous := ""
+	for _, name := range inputs {
+		if _, ok := plan.definition.Inputs[name]; !ok || name <= previous {
+			return errors.New("checkpoint partial run has invalid workflow input scope")
+		}
+
+		previous = name
+	}
+
+	return nil
+}
+
+func validatePartialWorkflowInputOutputs(
+	inputs []string,
+	plan *Plan,
+	execution *executionCheckpoint,
+) error {
+	if execution == nil || plan.startIndex < 0 || plan.startIndex >= len(execution.Outputs) ||
+		execution.Nodes[plan.startIndex].Status != NodeStatusSucceeded ||
+		execution.Nodes[plan.startIndex].Attempts == 0 || execution.Outputs[plan.startIndex] == nil {
+		return nil
+	}
+
+	if len(execution.Outputs[plan.startIndex]) != len(inputs) {
+		return errors.New("checkpoint partial run workflow input scope does not match Start outputs")
+	}
+
+	for _, name := range inputs {
+		if _, ok := execution.Outputs[plan.startIndex][name]; !ok {
+			return errors.New("checkpoint partial run workflow input scope does not match Start outputs")
+		}
+	}
+
+	return nil
 }

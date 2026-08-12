@@ -205,7 +205,7 @@ func prepareNodeDebugPlanParts(
 		ID:       source.definition.ID,
 		Revision: source.definition.Revision,
 		Name:     source.definition.Name,
-		Inputs:   cloneSchemas(exposedInputs),
+		Inputs:   requiredWorkflowInputs(exposedInputs),
 		Outputs:  map[string]OutputBinding{},
 		Nodes:    []NodeDefinition{cloneNodeDefinition(definition)},
 		Edges:    []ControlEdge{},
