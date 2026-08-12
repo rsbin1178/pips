@@ -17,6 +17,12 @@
 // the exact root and composite frontier. Checkpoints are process-runtime state,
 // not part of the Definition wire contract.
 //
+// During a real node invocation, Actions and custom NodeTypes can call
+// GetExecutionContext to read the current Run, Definition, scoped node address,
+// and cumulative one-based attempt. The returned address is detached runtime
+// correlation metadata; hosts remain responsible for defining idempotency at
+// their own side-effect boundaries.
+//
 // Exhausted node failures either stop execution, select a dedicated error
 // route, or continue with compile-validated default outputs. Error-route
 // consumers use BindingNodeError to read the bounded error_message and
