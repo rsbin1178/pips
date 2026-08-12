@@ -157,6 +157,17 @@ func cloneNodeDebugExecution(record NodeDebugExecution) NodeDebugExecution {
 	return record
 }
 
+func nodeDebugExecutionFromNodeExecution(record NodeExecution) NodeDebugExecution {
+	return NodeDebugExecution{
+		Address:      cloneNodeAddress(record.Address),
+		NodeRun:      record.NodeRun,
+		Inputs:       cloneValues(record.Inputs),
+		Outputs:      cloneValues(record.Outputs),
+		Route:        record.Route,
+		ErrorMessage: record.ErrorMessage,
+	}
+}
+
 func cloneNodeDebugResult(result NodeDebugResult) NodeDebugResult {
 	result.Target = NewNodePath(result.Target.nodes...)
 	result.Execution = cloneNodeDebugExecution(result.Execution)

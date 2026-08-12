@@ -109,6 +109,9 @@ func (e *execution) invokeNode(
 	}
 
 	completion := nodeCompletion{index: index, inputs: cloneValues(inputs)}
+	if resume != nil {
+		completion.started = resume.StartedAt
+	}
 
 	for retryAttempt := 1; retryAttempt <= maximumAttempts; retryAttempt++ {
 		if e.invokeNodeAttempt(
@@ -166,11 +169,31 @@ func (e *execution) invokeNodeAttempt(
 	}
 
 	started := e.runner.clock().UTC()
-	if completion.started.IsZero() {
+
+	firstLogicalAttempt := completion.started.IsZero()
+	if firstLogicalAttempt {
 		completion.started = started
 	}
 
 	e.emit.node(completion.index, attempt, NodeStarted{})
+
+	if firstLogicalAttempt {
+		e.recordNodeExecution(
+			ctx,
+			completion.index,
+			NodeRun{
+				ID:        node.definition.ID,
+				Type:      node.definition.Type,
+				Status:    NodeStatusRunning,
+				Attempts:  attempt,
+				StartedAt: completion.started,
+			},
+			inputs,
+			nil,
+			"",
+			"",
+		)
+	}
 
 	runtime := &nodeRuntime{execution: e, nodeID: node.definition.ID, resume: resume}
 	output, failure, err := invokeAttempt(

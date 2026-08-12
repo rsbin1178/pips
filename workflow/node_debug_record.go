@@ -68,14 +68,15 @@ func (c *nodeDebugCollector) record(
 		return
 	}
 
-	record := NodeDebugExecution{
-		Address:      execution.nodeAddress(index),
-		NodeRun:      execution.nodes[index],
-		Inputs:       cloneValues(inputs),
-		Outputs:      cloneValues(outputs),
-		Route:        route,
-		ErrorMessage: errorMessage,
-	}
+	record := nodeDebugExecutionFromNodeExecution(projectNodeExecution(
+		execution,
+		index,
+		execution.nodes[index],
+		inputs,
+		outputs,
+		route,
+		errorMessage,
+	))
 
 	c.mu.Lock()
 	c.records[nodeDebugAddressKey(record.Address)] = record
