@@ -12,6 +12,10 @@ func (p *Plan) compileNodes(
 	interrupts *interruptPolicy,
 	actions *actionLookupRecorder,
 ) error {
+	if err := p.preflightNodes(session.registry, interrupts); err != nil {
+		return err
+	}
+
 	outputSchemas := make(map[string]PortSchema, len(p.definition.Outputs))
 	for name, output := range p.definition.Outputs {
 		outputSchemas[name] = output.Schema
@@ -53,15 +57,111 @@ func (p *Plan) compileNodes(
 		}
 	}
 
-	if p.startIndex < 0 || p.endIndex < 0 {
-		return fmt.Errorf("%w: exactly one Start and one End node are required", ErrCompile)
-	}
-
-	if err := p.rejectUnknownInterruptNodes(interrupts); err != nil {
-		return err
-	}
-
 	return nil
+}
+
+func (p *Plan) preflightNodes(registry *Registry, interrupts *interruptPolicy) error {
+	var collector compileErrorCollector
+
+	startCount := 0
+	endCount := 0
+
+	for _, definition := range p.definition.Nodes {
+		_, ok := registry.NodeType(definition.Type, definition.Version)
+		if !ok {
+			collector.addIssue(newNodeCompileIssue(
+				CompileIssueUnknownNodeType,
+				NewNodePath(definition.ID),
+				fmt.Sprintf(
+					"node %q: unknown node type %q@%q",
+					definition.ID,
+					definition.Type,
+					definition.Version,
+				),
+			), nil)
+		}
+
+		switch definition.Type {
+		case NodeTypeStart:
+			startCount++
+		case NodeTypeEnd:
+			endCount++
+		default:
+		}
+	}
+
+	if startCount != 1 {
+		collector.addIssue(newDefinitionCompileIssue(
+			CompileIssueInvalidDefinition,
+			fmt.Sprintf("got %d Start nodes, want exactly one", startCount),
+		), nil)
+	}
+
+	if endCount != 1 {
+		collector.addIssue(newDefinitionCompileIssue(
+			CompileIssueInvalidDefinition,
+			fmt.Sprintf("got %d End nodes, want exactly one", endCount),
+		), nil)
+	}
+
+	p.preflightInterrupts(registry, interrupts, &collector)
+
+	return collector.err()
+}
+
+func (p *Plan) preflightInterrupts(
+	registry *Registry,
+	interrupts *interruptPolicy,
+	collector *compileErrorCollector,
+) {
+	if interrupts == nil {
+		return
+	}
+
+	definitions := make(map[NodeID]NodeDefinition, len(p.definition.Nodes))
+	for _, definition := range p.definition.Nodes {
+		definitions[definition.ID] = definition
+	}
+
+	for _, nodeID := range sortedNodeIDs(interrupts.children) {
+		definition, ok := definitions[nodeID]
+		if !ok {
+			path := NewNodePath(nodeID)
+			collector.addIssue(newNodeCompileIssue(
+				CompileIssueInvalidInterrupt,
+				path,
+				nodeCompileMessage(path, "interrupt path references unknown node"),
+			), nil)
+
+			continue
+		}
+
+		child := interrupts.children[nodeID]
+		if _, registered := registry.NodeType(definition.Type, definition.Version); registered &&
+			len(child.children) > 0 && !isBuiltinCompositeDefinition(definition) {
+			path := NewNodePath(nodeID)
+			collector.addIssue(newNodeCompileIssue(
+				CompileIssueInvalidInterrupt,
+				path,
+				nodeCompileMessage(path, "interrupt path continues through non-composite node"),
+			), nil)
+		}
+	}
+}
+
+func isBuiltinCompositeDefinition(definition NodeDefinition) bool {
+	return definition.Version == BuiltinNodeVersion && isCompositeNodeType(definition.Type)
+}
+
+func sortedNodeIDs(values map[NodeID]*interruptPolicy) []NodeID {
+	ids := make([]NodeID, 0, len(values))
+	for nodeID := range values {
+		ids = append(ids, nodeID)
+	}
+
+	slices.Sort(ids)
+
+	return ids
 }
 
 func (p *Plan) configureNodeInterrupt(
@@ -74,8 +174,10 @@ func (p *Plan) configureNodeInterrupt(
 	}
 
 	if len(interrupts.children) > 0 && !isCompositeNodeType(definition.Type) {
-		return compileNodeError(
+		return compileNodeFailure(
+			CompileIssueInvalidInterrupt,
 			definition.ID,
+			nil,
 			"interrupt path continues through non-composite node",
 		)
 	}
@@ -99,20 +201,6 @@ func (p *Plan) configureNodeInterrupt(
 	return nil
 }
 
-func (p *Plan) rejectUnknownInterruptNodes(interrupts *interruptPolicy) error {
-	if interrupts == nil {
-		return nil
-	}
-
-	for nodeID := range interrupts.children {
-		if _, ok := p.nodeIndex[nodeID]; !ok {
-			return compileNodeError(nodeID, "interrupt path references unknown node")
-		}
-	}
-
-	return nil
-}
-
 func (p *Plan) compileNode(
 	ctx context.Context,
 	registry *Registry,
@@ -121,8 +209,10 @@ func (p *Plan) compileNode(
 ) (planNode, error) {
 	nodeType, ok := registry.NodeType(definition.Type, definition.Version)
 	if !ok {
-		return planNode{}, compileNodeError(
+		return planNode{}, compileNodeFailure(
+			CompileIssueUnknownNodeType,
 			definition.ID,
+			nil,
 			"unknown node type %q@%q",
 			definition.Type,
 			definition.Version,
@@ -131,32 +221,45 @@ func (p *Plan) compileNode(
 
 	executor, err := nodeType.Compile(ctx, compileContext, cloneNodeDefinition(definition))
 	if err != nil {
-		return planNode{}, err
+		if ctxErr := compileContextError(ctx, err); ctxErr != nil {
+			return planNode{}, ctxErr
+		}
+
+		fallbackPath := NewNodePath(definition.ID)
+		fallback := newNodeCompileIssue(
+			CompileIssueInvalidNodeConfig,
+			fallbackPath,
+			nodeCompileMessage(fallbackPath, err.Error()),
+		)
+
+		return planNode{}, compileErrorFromFailure(err, fallback)
 	}
 
 	if isNilInterface(executor) {
-		return planNode{}, compileNodeError(definition.ID, "node type returned nil executor")
+		return planNode{}, compileNodeFailure(
+			CompileIssueInvalidNodeSpec,
+			definition.ID,
+			nil,
+			"node type returned nil executor",
+		)
 	}
 
 	spec := cloneNodeSpec(executor.Spec())
 	if err := validateNodeSpec(spec); err != nil {
-		return planNode{}, compileNodeError(definition.ID, "invalid compiled spec: %v", err)
-	}
-
-	bindings, err := p.nodeBindings(definition, spec)
-	if err != nil {
-		return planNode{}, err
-	}
-
-	if err := validateDefaultOutputs(definition, spec); err != nil {
-		return planNode{}, err
+		return planNode{}, compileNodeFailure(
+			CompileIssueInvalidNodeSpec,
+			definition.ID,
+			err,
+			"invalid compiled spec: %v",
+			err,
+		)
 	}
 
 	return planNode{
 		definition:  definition,
 		executor:    executor,
 		spec:        spec,
-		bindings:    bindings,
+		bindings:    p.nodeBindings(definition, spec),
 		isMerge:     definition.Type == NodeTypeMerge,
 		isComposite: isCompiledComposite(executor),
 	}, nil
@@ -172,13 +275,23 @@ func (p *Plan) recordEndpoint(index int, definition NodeDefinition) error {
 	switch definition.Type {
 	case NodeTypeStart:
 		if p.startIndex >= 0 {
-			return compileNodeError(definition.ID, "multiple Start nodes")
+			return compileNodeFailure(
+				CompileIssueInvalidNodeSpec,
+				definition.ID,
+				nil,
+				"multiple Start nodes",
+			)
 		}
 
 		p.startIndex = index
 	case NodeTypeEnd:
 		if p.endIndex >= 0 {
-			return compileNodeError(definition.ID, "multiple End nodes")
+			return compileNodeFailure(
+				CompileIssueInvalidNodeSpec,
+				definition.ID,
+				nil,
+				"multiple End nodes",
+			)
 		}
 
 		p.endIndex = index
@@ -190,23 +303,15 @@ func (p *Plan) recordEndpoint(index int, definition NodeDefinition) error {
 	return nil
 }
 
-func (p *Plan) nodeBindings(definition NodeDefinition, spec NodeSpec) (map[string]Binding, error) {
+func (p *Plan) nodeBindings(definition NodeDefinition, spec NodeSpec) map[string]Binding {
 	bindings := make(map[string]Binding, len(spec.Inputs))
 
 	switch definition.Type {
 	case NodeTypeStart:
-		if len(definition.Inputs) != 0 {
-			return nil, compileNodeError(definition.ID, "Start inputs are declared by the Workflow")
-		}
-
 		for name := range spec.Inputs {
 			bindings[name] = Binding{Source: BindingWorkflowInput, Port: name}
 		}
 	case NodeTypeEnd:
-		if len(definition.Inputs) != 0 {
-			return nil, compileNodeError(definition.ID, "End inputs are declared by Workflow outputs")
-		}
-
 		for name, output := range p.definition.Outputs {
 			bindings[name] = cloneBinding(output.Binding)
 		}
@@ -216,82 +321,110 @@ func (p *Plan) nodeBindings(definition NodeDefinition, spec NodeSpec) (map[strin
 		}
 	}
 
-	if len(bindings) != len(spec.Inputs) {
-		return nil, compileNodeError(
-			definition.ID,
-			"got %d input bindings, want %d",
-			len(bindings),
-			len(spec.Inputs),
-		)
-	}
-
-	for name := range spec.Inputs {
-		if _, ok := bindings[name]; !ok {
-			return nil, compileNodeError(definition.ID, "missing input binding %q", name)
-		}
-	}
-
-	for name := range bindings {
-		if _, ok := spec.Inputs[name]; !ok {
-			return nil, compileNodeError(definition.ID, "unknown input binding %q", name)
-		}
-	}
-
-	return bindings, nil
-}
-
-func validateDefaultOutputs(definition NodeDefinition, spec NodeSpec) error {
-	if definition.Policy.Error != ErrorContinueWithDefault {
-		return nil
-	}
-
-	if err := validatePortValues(definition.Policy.DefaultOutputs, spec.Outputs); err != nil {
-		return compileNodeError(definition.ID, "default outputs: %v", err)
-	}
-
-	return nil
+	return bindings
 }
 
 func (p *Plan) compileEdges() error {
 	seen := make(map[string]struct{}, len(p.definition.Edges))
+	edges := make([]planEdge, 0, len(p.definition.Edges))
+	incoming := make([][]int, len(p.nodes))
+	outgoing := make([][]int, len(p.nodes))
+
+	var collector compileErrorCollector
+
 	for _, definition := range p.definition.Edges {
 		from, fromOK := p.nodeIndex[definition.From.Node]
-
 		to, toOK := p.nodeIndex[definition.To]
-		if !fromOK || !toOK {
-			return fmt.Errorf(
-				"%w: edge %q/%q -> %q references unknown node",
-				ErrCompile,
-				definition.From.Node,
-				definition.From.Route,
-				definition.To,
+
+		if !fromOK {
+			collector.add(
+				compileControlPathFailure(
+					CompileIssueInvalidControlPath,
+					definition,
+					nil,
+					"references unknown source node %q",
+					definition.From.Node,
+				),
+				CompileIssue{},
 			)
+		}
+
+		if !toOK {
+			collector.add(
+				compileControlPathFailure(
+					CompileIssueInvalidControlPath,
+					definition,
+					nil,
+					"references unknown target node %q",
+					definition.To,
+				),
+				CompileIssue{},
+			)
+		}
+
+		if !fromOK || !toOK {
+			continue
 		}
 
 		if from == to {
-			return fmt.Errorf("%w: node %q has a self edge", ErrCompile, definition.To)
-		}
-
-		if !p.routeAllowed(from, definition.From.Route) {
-			return compileNodeError(
-				definition.From.Node,
-				"unknown route %q",
-				definition.From.Route,
+			collector.add(
+				compileControlPathFailure(
+					CompileIssueInvalidControlPath,
+					definition,
+					nil,
+					"node %q has a self edge",
+					definition.To,
+				),
+				CompileIssue{},
 			)
 		}
 
-		identity := fmt.Sprintf("%d/%s/%d", from, definition.From.Route, to)
+		if !p.routeAllowed(from, definition.From.Route) {
+			collector.add(
+				compileControlPathFailure(
+					CompileIssueInvalidControlPath,
+					definition,
+					nil,
+					"unknown route %q",
+					definition.From.Route,
+				),
+				CompileIssue{},
+			)
+		}
+
+		identity := fmt.Sprintf(
+			"%s/%s/%s",
+			definition.From.Node,
+			definition.From.Route,
+			definition.To,
+		)
 		if _, duplicate := seen[identity]; duplicate {
-			return fmt.Errorf("%w: duplicate control edge", ErrCompile)
+			collector.add(
+				compileControlPathFailure(
+					CompileIssueInvalidControlPath,
+					definition,
+					nil,
+					"duplicate control edge",
+				),
+				CompileIssue{},
+			)
 		}
 
 		seen[identity] = struct{}{}
 
-		edgeIndex := len(p.edges)
-		p.edges = append(p.edges, planEdge{from: from, to: to, route: definition.From.Route})
-		p.outgoing[from] = append(p.outgoing[from], edgeIndex)
-		p.incoming[to] = append(p.incoming[to], edgeIndex)
+		edgeIndex := len(edges)
+		edges = append(edges, planEdge{from: from, to: to, route: definition.From.Route})
+		outgoing[from] = append(outgoing[from], edgeIndex)
+		incoming[to] = append(incoming[to], edgeIndex)
 	}
+
+	if err := collector.err(); err != nil {
+		return err
+	}
+
+	p.edges = edges
+	p.incoming = incoming
+	p.outgoing = outgoing
 
 	return nil
 }

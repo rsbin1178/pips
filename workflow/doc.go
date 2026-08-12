@@ -56,4 +56,12 @@
 // strict version-directed decoding. Defaults normalize only at a Workflow
 // boundary, never as generic Action or NodeType port behavior. Events are
 // process-local observations and intentionally have no JSON wire format.
+//
+// Compile reports Definition diagnostics as a *CompileError containing stable
+// issue codes and Definition, node, or control-path locations. Diagnostics are
+// phase-gated: Compile returns all safely independent issues in the earliest
+// failed compiler phase, not every hypothetical downstream problem. Nested
+// SubWorkflow, Batch, and Loop issues retain full NodePath locations. Issues
+// are process-local values with no prescribed JSON or persistence format;
+// hosts own localization and versioned API, database, or editor projections.
 package workflow

@@ -106,7 +106,13 @@ func Compile(
 
 	interrupts, err := normalizeInterruptPolicy(config)
 	if err != nil {
-		return nil, fmt.Errorf("%w: interrupt policy: %w", ErrCompile, err)
+		return nil, newCompileError(
+			[]CompileIssue{newDefinitionCompileIssue(
+				CompileIssueInvalidInterrupt,
+				"interrupt policy: "+err.Error(),
+			)},
+			err,
+		)
 	}
 
 	session := &compileSession{
@@ -138,32 +144,45 @@ func (s *compileSession) compileScoped(
 	}
 
 	if len(s.stack) > maxChildPlanDepth {
-		return nil, fmt.Errorf("%w: child workflow nesting exceeds %d", ErrCompile, maxChildPlanDepth)
+		return nil, newCompileError([]CompileIssue{newDefinitionCompileIssue(
+			CompileIssueInvalidReference,
+			fmt.Sprintf("child workflow nesting exceeds %d", maxChildPlanDepth),
+		)})
 	}
 
 	key := definitionKey{id: definition.ID, revision: definition.Revision}
 	if _, recursive := s.active[key]; recursive {
-		return nil, fmt.Errorf(
-			"%w: recursive workflow reference %q@%q",
-			ErrCompile,
-			definition.ID,
-			definition.Revision,
-		)
+		return nil, newCompileError([]CompileIssue{newDefinitionCompileIssue(
+			CompileIssueInvalidReference,
+			fmt.Sprintf(
+				"recursive workflow reference %q@%q",
+				definition.ID,
+				definition.Revision,
+			),
+		)})
 	}
 
 	snapshot, err := cloneDefinition(definition)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrCompile, err)
+		return nil, newCompileError(
+			[]CompileIssue{newDefinitionCompileIssue(
+				CompileIssueInvalidDefinition,
+				err.Error(),
+			)},
+			err,
+		)
 	}
 
 	key = definitionKey{id: snapshot.ID, revision: snapshot.Revision}
 	if _, recursive := s.active[key]; recursive {
-		return nil, fmt.Errorf(
-			"%w: recursive workflow reference %q@%q",
-			ErrCompile,
-			snapshot.ID,
-			snapshot.Revision,
-		)
+		return nil, newCompileError([]CompileIssue{newDefinitionCompileIssue(
+			CompileIssueInvalidReference,
+			fmt.Sprintf(
+				"recursive workflow reference %q@%q",
+				snapshot.ID,
+				snapshot.Revision,
+			),
+		)})
 	}
 
 	s.stack = append(s.stack, key)
@@ -176,7 +195,13 @@ func (s *compileSession) compileScoped(
 
 	definitionFingerprint, err := snapshot.Fingerprint()
 	if err != nil {
-		return nil, fmt.Errorf("%w: fingerprint definition: %w", ErrCompile, err)
+		return nil, newCompileError(
+			[]CompileIssue{newDefinitionCompileIssue(
+				CompileIssueInvalidDefinition,
+				"fingerprint definition: "+err.Error(),
+			)},
+			err,
+		)
 	}
 
 	plan := &Plan{
@@ -191,36 +216,63 @@ func (s *compileSession) compileScoped(
 		endIndex:              -1,
 		loop:                  cloneLoopCompileScope(loop),
 	}
-	actions := newActionLookupRecorder()
-
-	if err := plan.compileNodes(ctx, s, interrupts, actions); err != nil {
-		return nil, err
-	}
-
-	plan.actionLookups = actions.freeze()
-
-	if err := plan.compileEdges(); err != nil {
-		return nil, err
-	}
-
-	topological, err := plan.validateGraph()
-	if err != nil {
-		return nil, err
-	}
-
-	if err := plan.validateBindings(topological); err != nil {
-		return nil, err
-	}
-
-	if err := plan.validateLoopVariableAccess(topological); err != nil {
-		return nil, err
-	}
-
-	if err := plan.computeFingerprint(); err != nil {
+	if err := plan.finishCompilation(ctx, s, interrupts); err != nil {
 		return nil, err
 	}
 
 	return plan, nil
+}
+
+func (p *Plan) finishCompilation(
+	ctx context.Context,
+	session *compileSession,
+	interrupts *interruptPolicy,
+) error {
+	actions := newActionLookupRecorder()
+
+	if err := p.compileNodes(ctx, session, interrupts, actions); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+
+		return compileErrorFromFailure(
+			err,
+			newDefinitionCompileIssue(CompileIssueInvalidNodeConfig, err.Error()),
+		)
+	}
+
+	p.actionLookups = actions.freeze()
+
+	if err := p.compileEdges(); err != nil {
+		return compileErrorFromFailure(
+			err,
+			newDefinitionCompileIssue(CompileIssueInvalidControlPath, err.Error()),
+		)
+	}
+
+	topological, err := p.validateGraph()
+	if err != nil {
+		return compileErrorFromFailure(
+			err,
+			newDefinitionCompileIssue(CompileIssueInvalidGraph, err.Error()),
+		)
+	}
+
+	if err := p.validateBindings(topological); err != nil {
+		return compileErrorFromFailure(
+			err,
+			newDefinitionCompileIssue(CompileIssueInvalidBinding, err.Error()),
+		)
+	}
+
+	if err := p.computeFingerprint(); err != nil {
+		return compileErrorFromFailure(
+			err,
+			newDefinitionCompileIssue(CompileIssueInvalidDefinition, err.Error()),
+		)
+	}
+
+	return nil
 }
 
 func (s *compileSession) resolve(
@@ -231,18 +283,27 @@ func (s *compileSession) resolve(
 	if !validIdentifier(string(reference.ID)) ||
 		!validIdentifier(string(reference.Revision)) ||
 		!validFingerprint(reference.Fingerprint) {
-		return nil, fmt.Errorf("%w: invalid workflow reference", ErrCompile)
+		return nil, compileDefinitionFailure(
+			CompileIssueInvalidReference,
+			nil,
+			"invalid workflow reference",
+		)
 	}
 
 	if isNilInterface(s.resolver) {
-		return nil, fmt.Errorf("%w: definition resolver is required", ErrCompile)
+		return nil, compileDefinitionFailure(
+			CompileIssueInvalidReference,
+			nil,
+			"definition resolver is required",
+		)
 	}
 
 	key := definitionKey{id: reference.ID, revision: reference.Revision}
 	if _, recursive := s.active[key]; recursive {
-		return nil, fmt.Errorf(
-			"%w: recursive workflow reference %q@%q",
-			ErrCompile,
+		return nil, compileDefinitionFailure(
+			CompileIssueInvalidReference,
+			nil,
+			"recursive workflow reference %q@%q",
 			reference.ID,
 			reference.Revision,
 		)
@@ -250,9 +311,14 @@ func (s *compileSession) resolve(
 
 	definition, err := s.resolver.ResolveDefinition(ctx, reference.ID, reference.Revision)
 	if err != nil {
-		return nil, fmt.Errorf(
-			"%w: resolve workflow %q@%q: %w",
-			ErrCompile,
+		if ctxErr := compileContextError(ctx, err); ctxErr != nil {
+			return nil, ctxErr
+		}
+
+		return nil, compileDefinitionFailure(
+			CompileIssueInvalidReference,
+			err,
+			"resolve workflow %q@%q: %v",
 			reference.ID,
 			reference.Revision,
 			err,
@@ -260,19 +326,44 @@ func (s *compileSession) resolve(
 	}
 
 	if definition.ID != reference.ID || definition.Revision != reference.Revision {
-		return nil, fmt.Errorf("%w: resolved workflow identity does not match reference", ErrCompile)
+		return nil, compileDefinitionFailure(
+			CompileIssueInvalidReference,
+			nil,
+			"resolved workflow identity does not match reference",
+		)
 	}
 
 	fingerprint, err := definition.Fingerprint()
 	if err != nil {
-		return nil, fmt.Errorf("%w: fingerprint resolved workflow: %w", ErrCompile, err)
+		return nil, compileDefinitionFailure(
+			CompileIssueInvalidReference,
+			err,
+			"fingerprint resolved workflow: %v",
+			err,
+		)
 	}
 
 	if fingerprint != reference.Fingerprint {
-		return nil, fmt.Errorf("%w: resolved workflow fingerprint does not match reference", ErrCompile)
+		return nil, compileDefinitionFailure(
+			CompileIssueInvalidReference,
+			nil,
+			"resolved workflow fingerprint does not match reference",
+		)
 	}
 
 	return s.compile(ctx, definition, interrupts)
+}
+
+func compileContextError(ctx context.Context, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+
+	return nil
 }
 
 func validFingerprint(fingerprint string) bool {
