@@ -8,14 +8,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/rsbin/pips/agent"
-	"github.com/rsbin/pips/agent/catalog"
-	"github.com/rsbin/pips/agent/extension"
-	"github.com/rsbin/pips/agent/harness"
-	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/internal/coding/execution"
-	"github.com/rsbin/pips/internal/coding/planflow"
-	"github.com/rsbin/pips/internal/coding/subagent"
+	"github.com/rsbin1178/pips/agent"
+	"github.com/rsbin1178/pips/agent/catalog"
+	"github.com/rsbin1178/pips/agent/extension"
+	"github.com/rsbin1178/pips/agent/harness"
+	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/internal/coding/execution"
+	"github.com/rsbin1178/pips/internal/coding/planflow"
+	"github.com/rsbin1178/pips/internal/coding/subagent"
 )
 
 const maxPendingErrorBytes = 16 << 10

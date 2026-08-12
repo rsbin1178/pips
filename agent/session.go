@@ -7,7 +7,7 @@ import (
 	"slices"
 	"sync"
 
-	"github.com/rsbin/pips/ai"
+	"github.com/rsbin1178/pips/ai"
 )
 
 // ToolResolution supplies an out-of-band result for one pending tool call.

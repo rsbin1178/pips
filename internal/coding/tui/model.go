@@ -16,12 +16,12 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/internal/coding"
-	codingclipboard "github.com/rsbin/pips/internal/coding/clipboard"
-	"github.com/rsbin/pips/internal/coding/config"
-	"github.com/rsbin/pips/internal/coding/runtimecontrol"
-	"github.com/rsbin/pips/internal/coding/statusline"
+	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/internal/coding"
+	codingclipboard "github.com/rsbin1178/pips/internal/coding/clipboard"
+	"github.com/rsbin1178/pips/internal/coding/config"
+	"github.com/rsbin1178/pips/internal/coding/runtimecontrol"
+	"github.com/rsbin1178/pips/internal/coding/statusline"
 )
 
 var errStatusLinePersistenceUnavailable = errors.New("status-line persistence is unavailable")

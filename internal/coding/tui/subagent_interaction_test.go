@@ -4,10 +4,10 @@ import (
 	"context"
 	"testing"
 
-	"github.com/rsbin/pips/agent"
-	"github.com/rsbin/pips/internal/coding"
-	"github.com/rsbin/pips/internal/coding/approval"
-	"github.com/rsbin/pips/internal/coding/question"
+	"github.com/rsbin1178/pips/agent"
+	"github.com/rsbin1178/pips/internal/coding"
+	"github.com/rsbin1178/pips/internal/coding/approval"
+	"github.com/rsbin1178/pips/internal/coding/question"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

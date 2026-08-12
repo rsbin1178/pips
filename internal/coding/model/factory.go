@@ -6,13 +6,13 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/ai/anthropic"
-	"github.com/rsbin/pips/ai/gemini"
-	"github.com/rsbin/pips/ai/openai"
-	"github.com/rsbin/pips/internal/coding/config"
-	"github.com/rsbin/pips/internal/coding/credential"
-	"github.com/rsbin/pips/internal/coding/modelcatalog"
+	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/ai/anthropic"
+	"github.com/rsbin1178/pips/ai/gemini"
+	"github.com/rsbin1178/pips/ai/openai"
+	"github.com/rsbin1178/pips/internal/coding/config"
+	"github.com/rsbin1178/pips/internal/coding/credential"
+	"github.com/rsbin1178/pips/internal/coding/modelcatalog"
 )
 
 // ErrInvalid means the resolved model or credential store is invalid.

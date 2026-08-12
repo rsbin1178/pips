@@ -9,9 +9,9 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/rsbin/pips/agent/catalog"
-	"github.com/rsbin/pips/agent/harness"
-	"github.com/rsbin/pips/ai"
+	"github.com/rsbin1178/pips/agent/catalog"
+	"github.com/rsbin1178/pips/agent/harness"
+	"github.com/rsbin1178/pips/ai"
 )
 
 type config struct {

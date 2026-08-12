@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rsbin/pips/agent/team"
+	"github.com/rsbin1178/pips/agent/team"
 )
 
 func TestValidateEntryRequiresResolvedIdentityAfterPending(t *testing.T) {

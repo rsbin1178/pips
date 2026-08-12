@@ -17,13 +17,13 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/rsbin/pips/agent"
-	"github.com/rsbin/pips/agent/catalog"
-	"github.com/rsbin/pips/agent/harness"
-	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/internal/coding/session"
-	"github.com/rsbin/pips/internal/coding/tools"
-	"github.com/rsbin/pips/internal/coding/workspace"
+	"github.com/rsbin1178/pips/agent"
+	"github.com/rsbin1178/pips/agent/catalog"
+	"github.com/rsbin1178/pips/agent/harness"
+	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/internal/coding/session"
+	"github.com/rsbin1178/pips/internal/coding/tools"
+	"github.com/rsbin1178/pips/internal/coding/workspace"
 )
 
 const (

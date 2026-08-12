@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/rsbin/pips/internal/coding/config"
-	"github.com/rsbin/pips/internal/coding/generation"
-	"github.com/rsbin/pips/internal/coding/modelcatalog"
+	"github.com/rsbin1178/pips/internal/coding/config"
+	"github.com/rsbin1178/pips/internal/coding/generation"
+	"github.com/rsbin1178/pips/internal/coding/modelcatalog"
 	"github.com/spf13/cobra"
 )
 

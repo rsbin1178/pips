@@ -20,9 +20,9 @@ import (
 
 	"github.com/charmbracelet/x/term"
 	"github.com/creack/pty"
-	"github.com/rsbin/pips/agent/team"
-	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/internal/coding"
+	"github.com/rsbin1178/pips/agent/team"
+	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/internal/coding"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

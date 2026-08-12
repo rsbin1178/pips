@@ -4,7 +4,7 @@ import (
 	"slices"
 	"time"
 
-	"github.com/rsbin/pips/agent/harness"
+	"github.com/rsbin1178/pips/agent/harness"
 )
 
 // SessionNodeKind is the product-level kind of one durable Session tree node.

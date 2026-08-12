@@ -7,9 +7,9 @@ import (
 	"sort"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/rsbin/pips/internal/coding"
-	"github.com/rsbin/pips/internal/coding/approval"
-	"github.com/rsbin/pips/internal/coding/question"
+	"github.com/rsbin1178/pips/internal/coding"
+	"github.com/rsbin1178/pips/internal/coding/approval"
+	"github.com/rsbin1178/pips/internal/coding/question"
 )
 
 // subagentControlController is intentionally optional. Older embedders can

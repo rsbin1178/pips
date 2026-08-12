@@ -11,7 +11,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/rsbin/pips/internal/coding/agentprofile"
+	"github.com/rsbin1178/pips/internal/coding/agentprofile"
 )
 
 const (

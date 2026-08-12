@@ -17,8 +17,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rsbin/pips/internal/coding/execution"
-	codingmcp "github.com/rsbin/pips/internal/coding/mcp"
+	"github.com/rsbin1178/pips/internal/coding/execution"
+	codingmcp "github.com/rsbin1178/pips/internal/coding/mcp"
 	"golang.org/x/net/http/httpguts"
 )
 

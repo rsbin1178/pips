@@ -10,8 +10,8 @@ import (
 	"sync"
 	"unicode/utf8"
 
-	"github.com/rsbin/pips/internal/coding/execution"
-	"github.com/rsbin/pips/internal/jsonx"
+	"github.com/rsbin1178/pips/internal/coding/execution"
+	"github.com/rsbin1178/pips/internal/jsonx"
 )
 
 // Runner executes already-trusted command definitions for one Coding Runtime.

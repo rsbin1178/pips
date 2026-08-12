@@ -1,6 +1,6 @@
 package coding
 
-import "github.com/rsbin/pips/internal/coding/config"
+import "github.com/rsbin1178/pips/internal/coding/config"
 
 // OperatingMode selects the process-local Coding Agent capability policy.
 // It is intentionally distinct from Phase, which describes lifecycle state.

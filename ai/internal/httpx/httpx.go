@@ -28,7 +28,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/rsbin/pips/ai/internal/jsonx"
+	"github.com/rsbin1178/pips/ai/internal/jsonx"
 )
 
 // Config carries the transport-level options every provider constructor

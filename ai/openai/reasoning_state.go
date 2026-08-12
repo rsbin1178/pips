@@ -4,7 +4,7 @@ import (
 	"encoding/base64"
 	"strings"
 
-	"github.com/rsbin/pips/ai/internal/jsonx"
+	"github.com/rsbin1178/pips/ai/internal/jsonx"
 )
 
 const responsesReasoningSignaturePrefix = "responses:"

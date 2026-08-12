@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/rsbin/pips/internal/coding/session"
+	"github.com/rsbin1178/pips/internal/coding/session"
 	"github.com/spf13/cobra"
 )
 

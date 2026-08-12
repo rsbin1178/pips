@@ -7,12 +7,12 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/rsbin/pips/agent/catalog"
-	"github.com/rsbin/pips/agent/harness"
-	"github.com/rsbin/pips/internal/coding/agentprofile"
-	"github.com/rsbin/pips/internal/coding/hooks"
-	codingmcp "github.com/rsbin/pips/internal/coding/mcp"
-	"github.com/rsbin/pips/internal/coding/subagent"
+	"github.com/rsbin1178/pips/agent/catalog"
+	"github.com/rsbin1178/pips/agent/harness"
+	"github.com/rsbin1178/pips/internal/coding/agentprofile"
+	"github.com/rsbin1178/pips/internal/coding/hooks"
+	codingmcp "github.com/rsbin1178/pips/internal/coding/mcp"
+	"github.com/rsbin1178/pips/internal/coding/subagent"
 )
 
 const customSubagentInstructionPrefix = `You are a specialized child agent in a Coding runtime.

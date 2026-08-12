@@ -5,8 +5,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/ai/internal/jsonx"
+	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/ai/internal/jsonx"
 )
 
 func encodeBase64(data []byte) string {

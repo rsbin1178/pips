@@ -5,11 +5,11 @@ import (
 	"context"
 	"testing"
 
-	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/internal/coding/config"
-	"github.com/rsbin/pips/internal/coding/credential"
-	"github.com/rsbin/pips/internal/coding/model"
-	"github.com/rsbin/pips/internal/coding/modelcatalog"
+	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/internal/coding/config"
+	"github.com/rsbin1178/pips/internal/coding/credential"
+	"github.com/rsbin1178/pips/internal/coding/model"
+	"github.com/rsbin1178/pips/internal/coding/modelcatalog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

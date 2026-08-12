@@ -4,7 +4,7 @@
 
 ## 在线与本地 Godoc
 
-- 在线入口：[`github.com/rsbin/pips/agent`](https://pkg.go.dev/github.com/rsbin/pips/agent)
+- 在线入口：[`github.com/rsbin1178/pips/agent`](https://pkg.go.dev/github.com/rsbin1178/pips/agent)
 - 本地查看根包：`go doc ./agent`
 - 查看完整导出符号：`go doc -all ./agent`
 - 查看单个类型：`go doc ./agent.Session`
@@ -14,18 +14,18 @@
 
 | 导入路径 | 主要入口 | 指南 |
 | --- | --- | --- |
-| `github.com/rsbin/pips/agent` | `New`、`NewSession`、`NewTool`、`AsTool`、Run/Stream、控制 Option、Event | [核心运行时](core-runtime.md)、[工具与控制](tools-control.md) |
-| `github.com/rsbin/pips/agent/catalog` | `New`、`Merge`、`Policy`、`NewToolSearch` | [工具与控制](tools-control.md) |
-| `github.com/rsbin/pips/agent/harness` | `New`、`NewSession`、`Repo`、JSONL、Skill、Template、Compaction | [Harness 与持久化](harness-persistence.md) |
-| `github.com/rsbin/pips/agent/continuation` | `New`、`Create`、`Advance`、`Drive`、控制命令、Memory/JSONL Store | [Continuation](orchestration-continuation.md) |
-| `github.com/rsbin/pips/agent/goal` | `Prepare`、`NewController`、`NewModelEvaluator` | [Goal 与 Loop](orchestration-goal-loop.md) |
-| `github.com/rsbin/pips/agent/loop` | `Prepare`、`Every`、`NewController`、`NewModelPlanner` | [Goal 与 Loop](orchestration-goal-loop.md) |
-| `github.com/rsbin/pips/agent/team` | `New`、Team 命令、Toolset、`NewAttemptRuntime`、Memory/JSONL Store | [Team](orchestration-team.md) |
-| `github.com/rsbin/pips/agent/extension` | `New`、`NewDefinition`、`Runtime.Activate/Acquire/Shutdown`、Snapshot | [扩展、Bundle 与 MCP](extensions-bundles-mcp.md) |
-| `github.com/rsbin/pips/agent/bundle` | `Open`/`New`、`Loader.Load`、`Activate` | [扩展、Bundle 与 MCP](extensions-bundles-mcp.md) |
-| `github.com/rsbin/pips/agent/mcp` | `Connect`、`Client.Tools/Session/Close`、`NewRegistry` | [扩展、Bundle 与 MCP](extensions-bundles-mcp.md) |
-| `github.com/rsbin/pips/agent/observability` | `NewRecorder`、`Recorder.Observe/Trace/Metrics` | [事件与可观测性](events-observability.md) |
-| `github.com/rsbin/pips/agent/observability/otel` | `New`、`Observer.Observe` | [事件与可观测性](events-observability.md) |
+| `github.com/rsbin1178/pips/agent` | `New`、`NewSession`、`NewTool`、`AsTool`、Run/Stream、控制 Option、Event | [核心运行时](core-runtime.md)、[工具与控制](tools-control.md) |
+| `github.com/rsbin1178/pips/agent/catalog` | `New`、`Merge`、`Policy`、`NewToolSearch` | [工具与控制](tools-control.md) |
+| `github.com/rsbin1178/pips/agent/harness` | `New`、`NewSession`、`Repo`、JSONL、Skill、Template、Compaction | [Harness 与持久化](harness-persistence.md) |
+| `github.com/rsbin1178/pips/agent/continuation` | `New`、`Create`、`Advance`、`Drive`、控制命令、Memory/JSONL Store | [Continuation](orchestration-continuation.md) |
+| `github.com/rsbin1178/pips/agent/goal` | `Prepare`、`NewController`、`NewModelEvaluator` | [Goal 与 Loop](orchestration-goal-loop.md) |
+| `github.com/rsbin1178/pips/agent/loop` | `Prepare`、`Every`、`NewController`、`NewModelPlanner` | [Goal 与 Loop](orchestration-goal-loop.md) |
+| `github.com/rsbin1178/pips/agent/team` | `New`、Team 命令、Toolset、`NewAttemptRuntime`、Memory/JSONL Store | [Team](orchestration-team.md) |
+| `github.com/rsbin1178/pips/agent/extension` | `New`、`NewDefinition`、`Runtime.Activate/Acquire/Shutdown`、Snapshot | [扩展、Bundle 与 MCP](extensions-bundles-mcp.md) |
+| `github.com/rsbin1178/pips/agent/bundle` | `Open`/`New`、`Loader.Load`、`Activate` | [扩展、Bundle 与 MCP](extensions-bundles-mcp.md) |
+| `github.com/rsbin1178/pips/agent/mcp` | `Connect`、`Client.Tools/Session/Close`、`NewRegistry` | [扩展、Bundle 与 MCP](extensions-bundles-mcp.md) |
+| `github.com/rsbin1178/pips/agent/observability` | `NewRecorder`、`Recorder.Observe/Trace/Metrics` | [事件与可观测性](events-observability.md) |
+| `github.com/rsbin1178/pips/agent/observability/otel` | `New`、`Observer.Observe` | [事件与可观测性](events-observability.md) |
 
 以上是 `go list ./agent/...` 的全部公共包。`internal/coding` 不属于公共 Agent API，外部 module 不应导入；Coding Subagent/Team 的产品行为也不在这些包的兼容承诺内。
 

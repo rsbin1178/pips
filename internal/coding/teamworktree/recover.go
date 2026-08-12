@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/rsbin/pips/internal/coding/execution/gitcontrol"
+	"github.com/rsbin1178/pips/internal/coding/execution/gitcontrol"
 )
 
 // Recover reconstructs and verifies the deterministic resource created for a

@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/internal/coding/tasklist"
-	"github.com/rsbin/pips/internal/jsonx"
+	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/internal/coding/tasklist"
+	"github.com/rsbin1178/pips/internal/jsonx"
 )
 
 const (

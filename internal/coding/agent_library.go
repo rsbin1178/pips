@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"slices"
 
-	"github.com/rsbin/pips/internal/coding/agentprofile"
+	"github.com/rsbin1178/pips/internal/coding/agentprofile"
 )
 
 // AgentLibrary is the content-safe, user-facing view of the immutable Agent

@@ -10,9 +10,9 @@ import (
 	"slices"
 	"time"
 
-	"github.com/rsbin/pips/internal/coding/paths"
-	"github.com/rsbin/pips/internal/coding/workspace"
-	"github.com/rsbin/pips/internal/jsonx"
+	"github.com/rsbin1178/pips/internal/coding/paths"
+	"github.com/rsbin1178/pips/internal/coding/workspace"
+	"github.com/rsbin1178/pips/internal/jsonx"
 )
 
 // Limits bound MCP definition discovery and decoding.

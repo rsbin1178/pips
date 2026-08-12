@@ -7,7 +7,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/rsbin/pips/internal/coding/execution"
+	"github.com/rsbin1178/pips/internal/coding/execution"
 )
 
 const gitToolName = "git_inspector"

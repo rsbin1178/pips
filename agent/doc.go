@@ -2,7 +2,7 @@
 // that calls a language model, executes the tools it requests, feeds results
 // back, and repeats until the model finishes or a stop condition fires.
 //
-// It builds on the sibling [github.com/rsbin/pips/ai] package — any
+// It builds on the sibling [github.com/rsbin1178/pips/ai] package — any
 // [ai.LanguageModel] (with whatever middleware stack) drives an agent, and
 // conversations are ordinary [ai.Message] histories.
 //

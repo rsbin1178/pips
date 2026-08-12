@@ -6,9 +6,9 @@ import (
 	"log"
 	"os"
 
-	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/ai/middleware/retry"
-	"github.com/rsbin/pips/ai/openai"
+	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/ai/middleware/retry"
+	"github.com/rsbin1178/pips/ai/openai"
 )
 
 // Building a multi-modal conversation with the message constructors.

@@ -7,7 +7,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/rsbin/pips/agent/team"
+	"github.com/rsbin1178/pips/agent/team"
 )
 
 const maxTerminalInputBytes = 32 << 10

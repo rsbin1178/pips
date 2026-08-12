@@ -3,7 +3,7 @@ package coding
 import (
 	"context"
 
-	"github.com/rsbin/pips/internal/coding/changes"
+	"github.com/rsbin1178/pips/internal/coding/changes"
 )
 
 // WorkspaceStatus returns bounded current Git worktree truth. It does not use

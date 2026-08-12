@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/rsbin/pips/agent/continuation"
-	"github.com/rsbin/pips/agent/team"
+	"github.com/rsbin1178/pips/agent/continuation"
+	"github.com/rsbin1178/pips/agent/team"
 )
 
 const (

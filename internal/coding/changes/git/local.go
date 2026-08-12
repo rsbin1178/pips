@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/rsbin/pips/internal/coding/execution"
-	"github.com/rsbin/pips/internal/coding/workspace"
+	"github.com/rsbin1178/pips/internal/coding/execution"
+	"github.com/rsbin1178/pips/internal/coding/workspace"
 )
 
 const maxLocalExcludeBytes = 1 << 20

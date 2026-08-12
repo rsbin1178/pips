@@ -10,7 +10,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/rsbin/pips/internal/coding/changes"
+	"github.com/rsbin1178/pips/internal/coding/changes"
 )
 
 type changeCandidate struct {

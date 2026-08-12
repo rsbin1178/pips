@@ -15,9 +15,9 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/rsbin/pips/agent/bundle"
-	"github.com/rsbin/pips/agent/harness"
-	"github.com/rsbin/pips/internal/coding/paths"
+	"github.com/rsbin1178/pips/agent/bundle"
+	"github.com/rsbin1178/pips/agent/harness"
+	"github.com/rsbin1178/pips/internal/coding/paths"
 )
 
 const (

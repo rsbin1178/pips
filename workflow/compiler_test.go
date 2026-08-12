@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rsbin/pips/workflow"
+	"github.com/rsbin1178/pips/workflow"
 )
 
 func TestCompileRejectsInvalidDefinitions(t *testing.T) {

@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/internal/coding"
-	"github.com/rsbin/pips/internal/coding/session"
-	"github.com/rsbin/pips/internal/coding/workspace"
+	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/internal/coding"
+	"github.com/rsbin1178/pips/internal/coding/session"
+	"github.com/rsbin1178/pips/internal/coding/workspace"
 	"github.com/spf13/cobra"
 )
 

@@ -3,7 +3,7 @@ package agent
 import (
 	"context"
 
-	"github.com/rsbin/pips/ai"
+	"github.com/rsbin1178/pips/ai"
 )
 
 // ToolDecisionAction is what a [WithBeforeTool] gate tells the runtime to do with

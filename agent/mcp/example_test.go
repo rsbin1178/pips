@@ -7,7 +7,7 @@ import (
 	"os/exec"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/rsbin/pips/agent/mcp"
+	"github.com/rsbin1178/pips/agent/mcp"
 )
 
 func ExampleConnect_stdio() {

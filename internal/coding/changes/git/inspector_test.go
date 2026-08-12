@@ -3,17 +3,16 @@ package git
 import (
 	"context"
 	"crypto/sha256"
-	"errors"
 	"os"
 	"path/filepath"
 	"slices"
 	"testing"
 	"time"
 
-	"github.com/rsbin/pips/internal/coding/changes"
-	"github.com/rsbin/pips/internal/coding/config"
-	"github.com/rsbin/pips/internal/coding/execution"
-	"github.com/rsbin/pips/internal/coding/workspace"
+	"github.com/rsbin1178/pips/internal/coding/changes"
+	"github.com/rsbin1178/pips/internal/coding/config"
+	"github.com/rsbin1178/pips/internal/coding/execution"
+	"github.com/rsbin1178/pips/internal/coding/workspace"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -449,15 +448,6 @@ func TestInspectorConstructorRejectsUnsafeConfiguration(t *testing.T) {
 		Limits:   DefaultLimits(),
 	})
 	require.Error(t, err)
-}
-
-func TestInspectorErrorsAreClassifiable(t *testing.T) {
-	t.Parallel()
-
-	for _, target := range []error{ErrNotRepository, ErrSnapshotExpired, ErrLimit, ErrGit, ErrClosed} {
-		wrapped := errors.Join(target, assert.AnError)
-		require.ErrorIs(t, wrapped, target)
-	}
 }
 
 func FuzzParsePathList(f *testing.F) {

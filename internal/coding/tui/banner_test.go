@@ -9,7 +9,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/rsbin/pips/ai"
+	"github.com/rsbin1178/pips/ai"
 	"github.com/stretchr/testify/assert"
 )
 

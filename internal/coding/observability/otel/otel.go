@@ -9,8 +9,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/rsbin/pips/internal/coding"
-	"github.com/rsbin/pips/internal/coding/subagent"
+	"github.com/rsbin1178/pips/internal/coding"
+	"github.com/rsbin1178/pips/internal/coding/subagent"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -18,7 +18,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-const instrumentationName = "github.com/rsbin/pips/internal/coding/observability/otel"
+const instrumentationName = "github.com/rsbin1178/pips/internal/coding/observability/otel"
 
 // Config supplies providers owned by the application. Nil providers use the
 // OpenTelemetry global providers.

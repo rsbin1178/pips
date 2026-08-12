@@ -5,17 +5,17 @@
 ## 本地查阅
 
 ```sh
-go doc -short github.com/rsbin/pips/ai
-go doc github.com/rsbin/pips/ai.Request
-go doc github.com/rsbin/pips/ai/openai.New
-go doc -all github.com/rsbin/pips/ai/observability
+go doc -short github.com/rsbin1178/pips/ai
+go doc github.com/rsbin1178/pips/ai.Request
+go doc github.com/rsbin1178/pips/ai/openai.New
+go doc -all github.com/rsbin1178/pips/ai/observability
 ```
 
 查看当前模块实际使用的源码版本比在线页面更可靠，尤其在固定提交或使用 replace directive 时。
 
 ## `ai`：便携模型协议
 
-- Godoc：[`github.com/rsbin/pips/ai`](https://pkg.go.dev/github.com/rsbin/pips/ai)
+- Godoc：[`github.com/rsbin1178/pips/ai`](https://pkg.go.dev/github.com/rsbin1178/pips/ai)
 - 源码：[`ai/`](../../ai)
 - 包示例：[`ai/example_test.go`](../../ai/example_test.go)
 
@@ -40,7 +40,7 @@ go doc -all github.com/rsbin/pips/ai/observability
 
 ## `ai/openai`：OpenAI 原生与兼容 Wire
 
-- Godoc：[`github.com/rsbin/pips/ai/openai`](https://pkg.go.dev/github.com/rsbin/pips/ai/openai)
+- Godoc：[`github.com/rsbin1178/pips/ai/openai`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/openai)
 - 源码：[`ai/openai/`](../../ai/openai)
 - 使用说明：[Provider 指南](providers.md#openai)
 
@@ -59,7 +59,7 @@ go doc -all github.com/rsbin/pips/ai/observability
 
 ## `ai/openai/compat`：审阅后的兼容 Profile
 
-- Godoc：[`github.com/rsbin/pips/ai/openai/compat`](https://pkg.go.dev/github.com/rsbin/pips/ai/openai/compat)
+- Godoc：[`github.com/rsbin1178/pips/ai/openai/compat`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/openai/compat)
 - 源码：[`compat.go`](../../ai/openai/compat/compat.go)
 - 使用说明：[OpenAI 兼容服务](providers.md#openai-兼容服务)
 
@@ -73,7 +73,7 @@ Profile 复用 `openai.Model`，但保持真实 `Provider`、凭据环境变量�
 
 ## `ai/anthropic`：Messages API
 
-- Godoc：[`github.com/rsbin/pips/ai/anthropic`](https://pkg.go.dev/github.com/rsbin/pips/ai/anthropic)
+- Godoc：[`github.com/rsbin1178/pips/ai/anthropic`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/anthropic)
 - 源码：[`ai/anthropic/`](../../ai/anthropic)
 - 使用说明：[Anthropic](providers.md#anthropic)
 
@@ -91,7 +91,7 @@ Profile 复用 `openai.Model`，但保持真实 `Provider`、凭据环境变量�
 
 ## `ai/gemini`：Gemini API
 
-- Godoc：[`github.com/rsbin/pips/ai/gemini`](https://pkg.go.dev/github.com/rsbin/pips/ai/gemini)
+- Godoc：[`github.com/rsbin1178/pips/ai/gemini`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/gemini)
 - 源码：[`ai/gemini/`](../../ai/gemini)
 - 使用说明：[Gemini](providers.md#gemini)
 
@@ -109,7 +109,7 @@ Profile 复用 `openai.Model`，但保持真实 `Provider`、凭据环境变量�
 
 ## `ai/middleware/retry`
 
-- Godoc：[`github.com/rsbin/pips/ai/middleware/retry`](https://pkg.go.dev/github.com/rsbin/pips/ai/middleware/retry)
+- Godoc：[`github.com/rsbin1178/pips/ai/middleware/retry`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/middleware/retry)
 - 源码：[`retry.go`](../../ai/middleware/retry/retry.go)
 - 使用说明：[Retry 中间件](errors-middleware-observability.md#retry-中间件)
 
@@ -117,7 +117,7 @@ Profile 复用 `openai.Model`，但保持真实 `Provider`、凭据环境变量�
 
 ## `ai/middleware/ratelimit`
 
-- Godoc：[`github.com/rsbin/pips/ai/middleware/ratelimit`](https://pkg.go.dev/github.com/rsbin/pips/ai/middleware/ratelimit)
+- Godoc：[`github.com/rsbin1178/pips/ai/middleware/ratelimit`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/middleware/ratelimit)
 - 源码：[`ratelimit.go`](../../ai/middleware/ratelimit/ratelimit.go)
 - 使用说明：[Rate Limit 中间件](errors-middleware-observability.md#rate-limit-中间件)
 
@@ -125,7 +125,7 @@ Profile 复用 `openai.Model`，但保持真实 `Provider`、凭据环境变量�
 
 ## `ai/observability`
 
-- Godoc：[`github.com/rsbin/pips/ai/observability`](https://pkg.go.dev/github.com/rsbin/pips/ai/observability)
+- Godoc：[`github.com/rsbin1178/pips/ai/observability`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/observability)
 - 源码：[`hooks.go`](../../ai/observability/hooks.go)
 - 使用说明：[Observability Hooks](errors-middleware-observability.md#observability-hooks)
 

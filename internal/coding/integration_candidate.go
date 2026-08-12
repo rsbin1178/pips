@@ -6,10 +6,10 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/rsbin/pips/internal/coding/agentplugin"
-	"github.com/rsbin/pips/internal/coding/agentprofile"
-	"github.com/rsbin/pips/internal/coding/hooks"
-	"github.com/rsbin/pips/internal/coding/resource"
+	"github.com/rsbin1178/pips/internal/coding/agentplugin"
+	"github.com/rsbin1178/pips/internal/coding/agentprofile"
+	"github.com/rsbin1178/pips/internal/coding/hooks"
+	"github.com/rsbin1178/pips/internal/coding/resource"
 )
 
 // integrationCandidate owns a complete, unpublished Coding integration

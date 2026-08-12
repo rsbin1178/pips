@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/rsbin/pips/internal/coding/hooks"
+	"github.com/rsbin1178/pips/internal/coding/hooks"
 )
 
 var (

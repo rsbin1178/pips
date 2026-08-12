@@ -26,8 +26,8 @@ import (
 
 	term "github.com/charmbracelet/x/term"
 	"github.com/creack/pty"
-	"github.com/rsbin/pips/internal/coding/attachment"
-	"github.com/rsbin/pips/internal/coding/imagebridge"
+	"github.com/rsbin1178/pips/internal/coding/attachment"
+	"github.com/rsbin1178/pips/internal/coding/imagebridge"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

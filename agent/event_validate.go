@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/rsbin/pips/ai"
+	"github.com/rsbin1178/pips/ai"
 )
 
 // Validate verifies the event envelope and payload invariants. All failures

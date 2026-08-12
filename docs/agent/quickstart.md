@@ -7,7 +7,7 @@
 在现有 Go module 中添加 Pips：
 
 ```bash
-go get github.com/rsbin/pips
+go get github.com/rsbin1178/pips
 ```
 
 示例使用 OpenAI provider。运行前设置凭据：
@@ -30,9 +30,9 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/rsbin/pips/agent"
-	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/ai/openai"
+	"github.com/rsbin1178/pips/agent"
+	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/ai/openai"
 )
 
 func main() {

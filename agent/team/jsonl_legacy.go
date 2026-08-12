@@ -10,7 +10,7 @@ import (
 	"reflect"
 	"time"
 
-	"github.com/rsbin/pips/ai"
+	"github.com/rsbin1178/pips/ai"
 )
 
 type migrationStage string

@@ -4,11 +4,11 @@ import (
 	"context"
 	"testing"
 
-	"github.com/rsbin/pips/agent/team"
-	"github.com/rsbin/pips/ai"
-	"github.com/rsbin/pips/internal/coding"
-	"github.com/rsbin/pips/internal/coding/question"
-	"github.com/rsbin/pips/internal/coding/teamintegration"
+	"github.com/rsbin1178/pips/agent/team"
+	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/internal/coding"
+	"github.com/rsbin1178/pips/internal/coding/question"
+	"github.com/rsbin1178/pips/internal/coding/teamintegration"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

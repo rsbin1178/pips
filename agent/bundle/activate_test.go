@@ -7,10 +7,10 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"github.com/rsbin/pips/agent"
-	"github.com/rsbin/pips/agent/bundle"
-	"github.com/rsbin/pips/agent/catalog"
-	"github.com/rsbin/pips/agent/extension"
+	"github.com/rsbin1178/pips/agent"
+	"github.com/rsbin1178/pips/agent/bundle"
+	"github.com/rsbin1178/pips/agent/catalog"
+	"github.com/rsbin1178/pips/agent/extension"
 )
 
 func TestBundleActivateComposesRegisteredAndDeclarativeExtensions(t *testing.T) {

@@ -10,8 +10,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/rsbin/pips/internal/coding/execution/gitcontrol"
-	"github.com/rsbin/pips/internal/coding/workspace"
+	"github.com/rsbin1178/pips/internal/coding/execution/gitcontrol"
+	"github.com/rsbin1178/pips/internal/coding/workspace"
 )
 
 // Cleanup removes one exact clean Integration Worktree and its owned refs.

@@ -16,8 +16,8 @@ import (
 	"time"
 
 	"github.com/pelletier/go-toml/v2"
-	"github.com/rsbin/pips/internal/coding/paths"
-	"github.com/rsbin/pips/internal/coding/workspace"
+	"github.com/rsbin1178/pips/internal/coding/paths"
+	"github.com/rsbin1178/pips/internal/coding/workspace"
 )
 
 // Status is the effective local state of one MCP definition.

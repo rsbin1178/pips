@@ -3,7 +3,7 @@ package openai
 import (
 	"strings"
 
-	"github.com/rsbin/pips/ai"
+	"github.com/rsbin1178/pips/ai"
 )
 
 // Capabilities implements ai.LanguageModel with a static prefix table.

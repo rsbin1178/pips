@@ -1,6 +1,6 @@
 package gemini
 
-import "github.com/rsbin/pips/ai"
+import "github.com/rsbin1178/pips/ai"
 
 // Gemini content roles (the wire has only these two).
 const (

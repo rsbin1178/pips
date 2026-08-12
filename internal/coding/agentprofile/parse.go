@@ -16,7 +16,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/rsbin/pips/internal/coding/config"
+	"github.com/rsbin1178/pips/internal/coding/config"
 	"gopkg.in/yaml.v3"
 )
 

@@ -14,7 +14,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/rsbin/pips/internal/coding/attachment"
+	"github.com/rsbin1178/pips/internal/coding/attachment"
 )
 
 const (
