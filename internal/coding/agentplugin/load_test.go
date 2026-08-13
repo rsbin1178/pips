@@ -20,6 +20,8 @@ func TestLoadDirectoryImplementsPortableComponentsAndIsolation(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	require.NoError(t, err)
 	dataBase := filepath.Join(t.TempDir(), "${PLUGIN_ROOT}", "plugin-data")
 	writeFile(t, filepath.Join(root, "plugin.json"), `{
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
@@ -63,6 +65,7 @@ func TestLoadDirectoryImplementsPortableComponentsAndIsolation(t *testing.T) {
 
 	packages := result.Packages()
 	require.Len(t, packages, 1)
+	assert.Equal(t, resolvedRoot, packages[0].Root)
 	assert.Equal(t, "example.tools", packages[0].Manifest.Name)
 	assert.Equal(t, "1.2.3", packages[0].Manifest.Version)
 	assert.Equal(t, 1, packages[0].SkillCount)
@@ -77,18 +80,20 @@ func TestLoadDirectoryImplementsPortableComponentsAndIsolation(t *testing.T) {
 	definitions := result.MCPDefinitions().List()
 	require.Len(t, definitions, 2)
 	stdio := definitionByTransport(t, definitions, codingmcp.TransportStdio)
-	assert.Equal(t, command, stdio.Command)
-	assert.Equal(t, root, stdio.Args[0])
+	assert.Equal(t, filepath.Join(resolvedRoot, "bin", "server"), stdio.Command)
+	assert.Equal(t, resolvedRoot, stdio.Args[0])
 	assert.Equal(t, stdio.PluginData, stdio.Args[1])
 	assert.Contains(t, stdio.PluginData, "${PLUGIN_ROOT}", "replacement output must not be expanded recursively")
 	assert.Equal(t, "${UNKNOWN}", stdio.Args[2])
 	assert.Equal(t, stdio.PluginData, stdio.WorkingDir)
 	assert.Equal(t, "API_TOKEN", stdio.Environment[0].Name)
-	assert.Equal(t, filepath.Join(root, "token"), stdio.Environment[0].Value)
+	assert.Equal(t, filepath.Join(resolvedRoot, "token"), stdio.Environment[0].Value)
 	assert.Equal(t, "${UNKNOWN}", stdio.Environment[1].Value)
 	dataInfo, err := os.Stat(stdio.PluginData)
 	require.NoError(t, err)
-	assert.Equal(t, os.FileMode(0o700), dataInfo.Mode().Perm())
+	if runtime.GOOS != "windows" {
+		assert.Equal(t, os.FileMode(0o700), dataInfo.Mode().Perm())
+	}
 
 	remote := definitionByTransport(t, definitions, codingmcp.TransportStreamableHTTP)
 	assert.Equal(t, "https://tools.example.com/mcp", remote.URL)

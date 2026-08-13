@@ -94,8 +94,8 @@ func TestNewTransportAppliesAgentPluginEnvironmentAndWorkingDirectory(t *testing
 
 	ws, err := workspace.Open(t.TempDir())
 	require.NoError(t, err)
-	pluginRoot := t.TempDir()
-	pluginData := t.TempDir()
+	pluginRoot := canonicalTempDir(t)
+	pluginData := canonicalTempDir(t)
 	resource, err := mcpstdio.NewTransport(mcpstdio.Config{
 		Workspace: ws, Command: "go", TempRoot: privateTempRoot(t), Environment: os.LookupEnv,
 		PluginRoot: pluginRoot, PluginData: pluginData, WorkingDirectory: pluginData,
@@ -132,8 +132,8 @@ func TestNewTransportResolvesBareAgentPluginCommandWithPlatformSearch(t *testing
 
 	ws, err := workspace.Open(t.TempDir())
 	require.NoError(t, err)
-	pluginRoot := t.TempDir()
-	pluginData := t.TempDir()
+	pluginRoot := canonicalTempDir(t)
+	pluginData := canonicalTempDir(t)
 	resource, err := mcpstdio.NewTransport(mcpstdio.Config{
 		Workspace: ws, Command: "go", TempRoot: privateTempRoot(t), Environment: os.LookupEnv,
 		PluginRoot: pluginRoot, PluginData: pluginData, WorkingDirectory: pluginRoot,
@@ -184,8 +184,8 @@ func TestAgentPluginCommandIsRevalidatedImmediatelyBeforeStart(t *testing.T) {
 
 	ws, err := workspace.Open(t.TempDir())
 	require.NoError(t, err)
-	pluginRoot := t.TempDir()
-	pluginData := t.TempDir()
+	pluginRoot := canonicalTempDir(t)
+	pluginData := canonicalTempDir(t)
 	binDirectory := filepath.Join(pluginRoot, "bin")
 	require.NoError(t, os.Mkdir(binDirectory, 0o700))
 	command := filepath.Join(binDirectory, "server")
@@ -244,6 +244,15 @@ func privateTempRoot(t *testing.T) string {
 
 	root := t.TempDir()
 	require.NoError(t, os.Chmod(root, 0o700)) //nolint:gosec // Directories require owner traversal.
+
+	return root
+}
+
+func canonicalTempDir(t *testing.T) string {
+	t.Helper()
+
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
 
 	return root
 }
