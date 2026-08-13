@@ -356,7 +356,14 @@ func resolveWorkingDirectory(raw json.RawMessage, root, data string) (string, er
 }
 
 func expandPluginVariables(value, root, data string) string {
-	return strings.NewReplacer("${PLUGIN_ROOT}", root, "${PLUGIN_DATA}", data).Replace(value)
+	separator := string(filepath.Separator)
+
+	return strings.NewReplacer(
+		"${PLUGIN_ROOT}/", root+separator,
+		"${PLUGIN_DATA}/", data+separator,
+		"${PLUGIN_ROOT}", root,
+		"${PLUGIN_DATA}", data,
+	).Replace(value)
 }
 
 func normalizeRemoteURL(value string) (string, error) {
