@@ -35,12 +35,19 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: Test portable Agent Plugin packages
-        run: go test -count=1 ./agent/harness ./internal/coding/agentplugin
+      - name: Test portable Agent Harness
+        shell: bash
+        run: bash .github/scripts/go-test.sh -count=1 ./agent/harness
+      - name: Test portable Agent Plugin loading
+        if: always()
+        shell: bash
+        run: bash .github/scripts/go-test.sh -count=1 ./internal/coding/agentplugin
       - name: Test MCP runtime
-        if: matrix.mcp_runtime
-        run: go test -count=1 ./internal/coding/execution/mcpstdio
+        if: always() && matrix.mcp_runtime
+        shell: bash
+        run: bash .github/scripts/go-test.sh -count=1 ./internal/coding/execution/mcpstdio
       - name: Test platform and HTTP integration semantics
+        if: always()
         run: |
           go test -count=1 ./internal/coding/execution -run '^TestEnvironmentNamesEqualUsesPlatformSemantics$'
           go test -count=1 ./internal/coding/mcp -run '^TestConfiguredHeadersNeverCrossOriginRedirect$'
@@ -60,9 +67,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes bubblewrap
       - name: Test
-        run: go test ./...
+        run: bash .github/scripts/go-test.sh ./...
       - name: Race-test Agent and Coding
-        run: go test -race ./agent/... ./internal/coding/...
+        run: bash .github/scripts/go-test.sh -race ./agent/... ./internal/coding/...
       - name: Provider adapter and scripted smoke
         run: make provider-smoke
       - name: Vet
