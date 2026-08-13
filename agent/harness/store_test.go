@@ -306,6 +306,7 @@ func TestRepoForkNormalizesReferencesOutsideSelectedBranch(t *testing.T) {
 	repo := harness.Repo{Dir: t.TempDir()}
 	store, err := repo.Create("src", nil)
 	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	sess, err := harness.NewSession(store)
 	require.NoError(t, err)
 	root := appendText(t, sess, ai.UserMessage{}, "root", nil)

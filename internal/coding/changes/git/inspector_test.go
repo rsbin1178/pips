@@ -218,6 +218,8 @@ func newGitFixture(t *testing.T) *gitFixture {
 
 	fixture := newGitFixtureWithoutRepository(t, DefaultLimits())
 	fixture.git("init", "--quiet", "--initial-branch=main")
+	fixture.git("config", "user.name", "Pips Test")
+	fixture.git("config", "user.email", "pips@example.invalid")
 
 	return fixture
 }
