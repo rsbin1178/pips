@@ -66,7 +66,11 @@ jobs:
       - name: Test execution package
         run: bash .github/scripts/go-test.sh -race ./internal/coding/execution/... ./internal/coding/approval/... ./internal/coding/changes/... ./internal/coding/tools/...
       - name: Test real Linux sandbox
-        run: make sandbox-smoke
+        run: |
+          PIPS_SANDBOX_INTEGRATION=1 bash .github/scripts/go-test.sh -race \
+            ./internal/coding/execution/... ./internal/coding/changes/git ./internal/coding/tools \
+            -run 'Darwin.*Integration|Linux.*Integration|GitIntegration|ShellIntegration|CodingFlowIntegration' \
+            -count=3
 
   macos:
     name: macOS sandbox (${{ matrix.arch }})
@@ -89,4 +93,8 @@ jobs:
       - name: Test execution package
         run: bash .github/scripts/go-test.sh -race ./internal/coding/execution/... ./internal/coding/approval/... ./internal/coding/changes/... ./internal/coding/tools/...
       - name: Test real macOS sandbox
-        run: make sandbox-smoke
+        run: |
+          PIPS_SANDBOX_INTEGRATION=1 bash .github/scripts/go-test.sh -race \
+            ./internal/coding/execution/... ./internal/coding/changes/git ./internal/coding/tools \
+            -run 'Darwin.*Integration|Linux.*Integration|GitIntegration|ShellIntegration|CodingFlowIntegration' \
+            -count=3
