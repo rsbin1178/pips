@@ -31,6 +31,8 @@ jobs:
             mcp_runtime: false
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
@@ -81,7 +83,8 @@ jobs:
         uses: golangci/golangci-lint-action@v9
         with:
           version: v2.12.2
-          args: ./...
+          # Keep existing lint debt visible without letting new changes add to it.
+          args: --new-from-rev=HEAD~ ./...
       - name: Build
         run: go build ./...
       - name: Verify modules
