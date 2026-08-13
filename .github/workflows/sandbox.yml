@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - ".github/workflows/sandbox.yml"
+      - ".github/scripts/go-test.sh"
       - "Makefile"
       - "go.mod"
       - "go.sum"
@@ -17,6 +18,7 @@ on:
       - main
     paths:
       - ".github/workflows/sandbox.yml"
+      - ".github/scripts/go-test.sh"
       - "Makefile"
       - "go.mod"
       - "go.sum"
@@ -62,7 +64,7 @@ jobs:
           go version
           bwrap --version
       - name: Test execution package
-        run: go test -race ./internal/coding/execution/... ./internal/coding/approval/... ./internal/coding/changes/... ./internal/coding/tools/...
+        run: bash .github/scripts/go-test.sh -race ./internal/coding/execution/... ./internal/coding/approval/... ./internal/coding/changes/... ./internal/coding/tools/...
       - name: Test real Linux sandbox
         run: make sandbox-smoke
 
@@ -85,6 +87,6 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Test execution package
-        run: go test -race ./internal/coding/execution/... ./internal/coding/approval/... ./internal/coding/changes/... ./internal/coding/tools/...
+        run: bash .github/scripts/go-test.sh -race ./internal/coding/execution/... ./internal/coding/approval/... ./internal/coding/changes/... ./internal/coding/tools/...
       - name: Test real macOS sandbox
         run: make sandbox-smoke
