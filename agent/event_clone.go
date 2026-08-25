@@ -113,6 +113,12 @@ func cloneEventParts(parts []ai.Part, memo map[partSliceKey][]ai.Part) []ai.Part
 		case ai.ToolResultPart:
 			value.Content = cloneEventParts(value.Content, memo)
 			cloned[index] = value
+		case ai.StructuredContentPart:
+			value.Data = slices.Clone(value.Data)
+			cloned[index] = value
+		case ai.EmbeddedResourcePart:
+			value.Blob = slices.Clone(value.Blob)
+			cloned[index] = value
 		default:
 			cloned[index] = value
 		}

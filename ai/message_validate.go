@@ -124,6 +124,34 @@ func (messages Messages) SplitSystem() ([]SystemMessage, Messages, error) {
 	return system, conversation, nil
 }
 
+// validateResultContentKind enforces the field rules of the tool-result-only
+// kinds: structured content must be a JSON object, links require a URI, and
+// embedded resources require a URI plus a MIME type for blob bodies.
+func validateResultContentKind(index int, part Part) error {
+	switch part := part.(type) {
+	case StructuredContentPart:
+		if err := validateStructuredObject(part.Data); err != nil {
+			return fmt.Errorf("part %d structured content: %w", index, err)
+		}
+	case ResourceLinkPart:
+		if part.URI == "" {
+			return fmt.Errorf("part %d resource link: uri is required", index)
+		}
+	case EmbeddedResourcePart:
+		if part.URI == "" {
+			return fmt.Errorf("part %d embedded resource: uri is required", index)
+		}
+
+		if part.Blob != nil && part.MIMEType == "" {
+			return fmt.Errorf("part %d embedded resource: mime type is required for blob resources", index)
+		}
+	default:
+		return fmt.Errorf("part %d has unsupported concrete type %T", index, part)
+	}
+
+	return nil
+}
+
 func invalidMessagePart(role string, index int, part any) error {
 	return fmt.Errorf("%w: %s part %d has unsupported concrete type %T", ErrInvalidMessage, role, index, part)
 }
@@ -145,6 +173,10 @@ func validatePartsSeen(parts []Part, seen map[partSliceKey]bool) error {
 	for i, part := range parts {
 		switch part := part.(type) {
 		case TextPart, ImagePart, FilePart, ReasoningPart, ToolCallPart:
+		case StructuredContentPart, ResourceLinkPart, EmbeddedResourcePart:
+			if err := validateResultContentKind(i, part); err != nil {
+				return err
+			}
 		case ToolResultPart:
 			if err := validatePartsSeen(part.Content, seen); err != nil {
 				return fmt.Errorf("part %d tool result: %w", i, err)

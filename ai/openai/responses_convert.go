@@ -226,7 +226,7 @@ func responseToolOutputs(parts []ai.ToolResultPart) ([]responseItem, error) {
 		out = append(out, responseItem{
 			Type:   "function_call_output",
 			CallID: result.ToolCallID,
-			Output: textOf(result.Content),
+			Output: textOf(ai.ProviderParts(result.Content)),
 		})
 	}
 

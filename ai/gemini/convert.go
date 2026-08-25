@@ -274,7 +274,7 @@ func functionResponseParts(parts []ai.ToolResultPart) ([]wirePart, error) {
 // Structured JSON output is passed through; plain text is wrapped under
 // "output"; errors under "error".
 func functionResponseValue(result ai.ToolResultPart) map[string]any {
-	text := textOf(result.Content)
+	text := textOf(ai.ProviderParts(result.Content))
 
 	key := "output"
 	if result.IsError {
