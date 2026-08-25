@@ -395,8 +395,9 @@ func replayToolResultUpdates(value ai.ToolResultPart) []acpsdk.SessionUpdate {
 		status = acpsdk.ToolCallStatusFailed
 	}
 
-	content := make([]acpsdk.ToolCallContent, 0, len(value.Content))
-	for _, resultPart := range value.Content {
+	projected := ai.ProviderParts(value.Content)
+	content := make([]acpsdk.ToolCallContent, 0, len(projected))
+	for _, resultPart := range projected {
 		content = append(content, toolContentFromPart(resultPart)...)
 	}
 

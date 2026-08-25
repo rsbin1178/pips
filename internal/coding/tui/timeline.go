@@ -696,7 +696,7 @@ func visibleToolParts(values []ai.Part) string {
 		case ai.FilePart:
 			parts = append(parts, "[file]")
 		case ai.ToolResultPart:
-			parts = append(parts, visibleToolParts(part.Content))
+			parts = append(parts, visibleToolParts(ai.ProviderParts(part.Content)))
 		}
 	}
 

@@ -1515,6 +1515,31 @@ func validateParts(parts []ai.Part, depth int) error {
 				len(value.Content) > maxEventItems || validateParts(value.Content, depth+1) != nil {
 				return errors.New("invalid tool result part")
 			}
+		case ai.StructuredContentPart:
+			if len(value.Data) > maxEventTextBytes {
+				return errors.New("structured content is too large")
+			}
+			if _, err := ai.StructuredContent(value.Data); err != nil {
+				return errors.New("invalid structured content part")
+			}
+		case ai.ResourceLinkPart:
+			if !validBoundedText(value.URI, maxEventTextBytes, false) ||
+				!validBoundedText(value.Name, maxEventTextBytes, true) ||
+				!validBoundedText(value.Title, maxEventTextBytes, true) ||
+				!validBoundedText(value.Description, maxEventTextBytes, true) ||
+				!validIdentifierText(value.MIMEType, maxEventIDBytes, true) {
+				return errors.New("invalid resource link part")
+			}
+		case ai.EmbeddedResourcePart:
+			if !validBoundedText(value.URI, maxEventTextBytes, false) ||
+				!validIdentifierText(value.MIMEType, maxEventIDBytes, true) ||
+				!validBoundedText(value.Text, maxEventTextBytes, true) ||
+				len(value.Blob) > maxEventTextBytes {
+				return errors.New("embedded resource is too large")
+			}
+			if len(value.Blob) > 0 && value.MIMEType == "" {
+				return errors.New("invalid embedded resource part")
+			}
 		default:
 			return fmt.Errorf("unknown part type %T", part)
 		}

@@ -440,11 +440,14 @@ func chatToolResultsFrom(msg ai.ToolMessage) ([]chatMessage, error) {
 }
 
 // chatToolResultContent renders tool output: plain string for text-only
-// results, a content-part array when the result carries images.
+// results, a content-part array when the result carries images. MCP-derived
+// kinds (structured content, resource links, embedded resources) project
+// through [ai.ProviderParts] first.
 func chatToolResultContent(result ai.ToolResultPart) (any, error) {
+	content := ai.ProviderParts(result.Content)
 	textOnly := true
 
-	for _, part := range result.Content {
+	for _, part := range content {
 		if _, ok := part.(ai.TextPart); !ok {
 			textOnly = false
 			break
@@ -452,10 +455,10 @@ func chatToolResultContent(result ai.ToolResultPart) (any, error) {
 	}
 
 	if textOnly {
-		return textOf(result.Content), nil
+		return textOf(content), nil
 	}
 
-	return chatContentFrom(result.Content)
+	return chatContentFrom(content)
 }
 
 func textOf[T ai.Part](parts []T) string {
