@@ -51,8 +51,11 @@ func (ToolMessage) isMessage()      {}
 // Part is one piece of content within a [Message]. It is a sealed interface:
 // the only implementations are the Part types in this package
 // ([TextPart], [ImagePart], [FilePart], [ReasoningPart], [ToolCallPart],
-// [ToolResultPart]). This lets provider adapters exhaustively switch over the
-// concrete types when translating to and from wire formats.
+// [ToolResultPart], [StructuredContentPart], [ResourceLinkPart],
+// [EmbeddedResourcePart]). This lets provider adapters exhaustively switch
+// over the concrete types when translating to and from wire formats.
+// Structured content, resource links, and embedded resources occur only as
+// tool-result content; the role-specific part sets do not accept them.
 type Part interface {
 	isPart()
 }
@@ -134,12 +137,55 @@ type ToolResultPart struct {
 	IsError bool
 }
 
+// StructuredContentPart is a tool-produced structured payload as a JSON
+// object. It appears in [ToolMessage] results, alongside or instead of
+// textual content. Use [StructuredContent] to build a validated value.
+type StructuredContentPart struct {
+	// Data is the structured payload. It must be a complete JSON object.
+	Data JSON
+}
+
+// ResourceLinkPart references a resource by URI without embedding its
+// content. It appears in [ToolMessage] results. Nothing fetches the resource
+// automatically; consumers decide whether and how to access it.
+type ResourceLinkPart struct {
+	// URI locates the resource. It is required.
+	URI string
+	// Name is the machine-readable resource name supplied by the source.
+	Name string
+	// Title is a human-readable display name supplied by the source.
+	Title string
+	// Description describes the resource.
+	Description string
+	// MIMEType is the expected media type of the resource, when known.
+	MIMEType string
+}
+
+// EmbeddedResourcePart carries a resource inline together with the identity
+// it had at its source. Text and Blob are mutually exclusive: Text holds the
+// body of a textual resource (possibly empty), Blob the raw body of a binary
+// one.
+type EmbeddedResourcePart struct {
+	// URI locates the originating resource. It is required.
+	URI string
+	// MIMEType describes Text or Blob. It is required for Blob.
+	MIMEType string
+	// Text is the body of a textual resource.
+	Text string
+	// Blob is the raw body of a binary resource.
+	Blob []byte
+}
+
 func (TextPart) isPart()       {}
 func (ImagePart) isPart()      {}
 func (FilePart) isPart()       {}
 func (ReasoningPart) isPart()  {}
 func (ToolCallPart) isPart()   {}
 func (ToolResultPart) isPart() {}
+
+func (StructuredContentPart) isPart() {}
+func (ResourceLinkPart) isPart()      {}
+func (EmbeddedResourcePart) isPart()  {}
 
 func (TextPart) isSystemPart() {}
 

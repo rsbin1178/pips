@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/rsbin1178/pips/ai"
@@ -29,11 +28,12 @@ func convertResult(result *mcp.CallToolResult) ([]ai.Part, error) {
 			return nil, fmt.Errorf("structured content: %w", err)
 		}
 
-		if trimmed := bytes.TrimSpace(data); len(trimmed) == 0 || trimmed[0] != '{' {
-			return nil, errors.New("structured content must be a JSON object")
+		part, err := ai.StructuredContent(data)
+		if err != nil {
+			return nil, fmt.Errorf("structured content: %w", err)
 		}
 
-		parts = append(parts, ai.Text(string(data)))
+		parts = append(parts, part)
 	}
 
 	return parts, nil
@@ -68,7 +68,17 @@ func convertContent(content mcp.Content) (ai.Part, error) {
 	case *mcp.EmbeddedResource:
 		return convertEmbeddedResource(content)
 	case *mcp.ResourceLink:
-		return contentJSON(content)
+		if content == nil {
+			return nil, errors.New("nil resource link")
+		}
+
+		return ai.ResourceLinkPart{
+			URI:         content.URI,
+			Name:        content.Name,
+			Title:       content.Title,
+			Description: content.Description,
+			MIMEType:    content.MIMEType,
+		}, nil
 	default:
 		return contentJSON(content)
 	}
@@ -81,18 +91,18 @@ func convertEmbeddedResource(content *mcp.EmbeddedResource) (ai.Part, error) {
 
 	resource := content.Resource
 	if resource.Blob == nil {
-		return ai.Text(resource.Text), nil
+		return ai.EmbeddedResourcePart{
+			URI:      resource.URI,
+			MIMEType: resource.MIMEType,
+			Text:     resource.Text,
+		}, nil
 	}
 
-	source := ai.MediaSource{
-		Data:     bytes.Clone(resource.Blob),
+	return ai.EmbeddedResourcePart{
+		URI:      resource.URI,
 		MIMEType: resource.MIMEType,
-	}
-	if strings.HasPrefix(strings.ToLower(resource.MIMEType), "image/") {
-		return ai.ImagePart{Source: source}, nil
-	}
-
-	return ai.FilePart{Source: source, Name: resource.URI}, nil
+		Blob:     bytes.Clone(resource.Blob),
+	}, nil
 }
 
 func contentJSON(content mcp.Content) (ai.Part, error) {

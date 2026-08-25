@@ -1,6 +1,11 @@
 package ai
 
-import "strings"
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"strings"
+)
 
 // Text returns a [TextPart]. It is the part-level building block; for whole
 // messages prefer [UserText] and friends.
@@ -111,4 +116,27 @@ func ToolResultError(toolCallID, name, errText string) ToolMessage {
 		Content:    []Part{Text(errText)},
 		IsError:    true,
 	})
+}
+
+// StructuredContent returns a [StructuredContentPart] carrying data, which
+// must be a complete JSON object.
+func StructuredContent(data JSON) (StructuredContentPart, error) {
+	if err := validateStructuredObject(data); err != nil {
+		return StructuredContentPart{}, err
+	}
+
+	return StructuredContentPart{Data: data}, nil
+}
+
+func validateStructuredObject(data JSON) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return errors.New("structured content must be a JSON object")
+	}
+
+	if !json.Valid(trimmed) {
+		return errors.New("structured content must be valid JSON")
+	}
+
+	return nil
 }

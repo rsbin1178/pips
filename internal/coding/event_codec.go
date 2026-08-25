@@ -378,7 +378,7 @@ func validateStrictMessageJSON(data []byte) error {
 	return nil
 }
 
-//nolint:cyclop // The ai.Part wire taxonomy is exhaustively checked before its custom decoder.
+//nolint:cyclop,gocyclo // The ai.Part wire taxonomy is exhaustively checked before its custom decoder.
 func validateStrictPartJSON(data []byte) error {
 	var header struct {
 		Type string `json:"type"`
@@ -453,6 +453,34 @@ func validateStrictPartJSON(data []byte) error {
 		}
 
 		return nil
+	case "structured_content":
+		var part struct {
+			Type string          `json:"type"`
+			Data json.RawMessage `json:"data,omitempty"`
+		}
+
+		return strictDecode(data, &part)
+	case "resource_link":
+		var part struct {
+			Type        string `json:"type"`
+			URI         string `json:"uri,omitempty"`
+			Name        string `json:"name,omitempty"`
+			Title       string `json:"title,omitempty"`
+			Description string `json:"description,omitempty"`
+			MIMEType    string `json:"mime_type,omitempty"`
+		}
+
+		return strictDecode(data, &part)
+	case "embedded_resource":
+		var part struct {
+			Type     string `json:"type"`
+			URI      string `json:"uri,omitempty"`
+			MIMEType string `json:"mime_type,omitempty"`
+			Text     string `json:"text,omitempty"`
+			Blob     []byte `json:"blob,omitempty"`
+		}
+
+		return strictDecode(data, &part)
 	default:
 		return fmt.Errorf("unknown message part type %q", header.Type)
 	}

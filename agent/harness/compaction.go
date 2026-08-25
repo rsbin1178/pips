@@ -101,6 +101,16 @@ func partsChars(parts []ai.Part) int {
 			chars += len(p.Text)
 		case ai.ImagePart:
 			chars += estimatedImageChars
+		case ai.StructuredContentPart:
+			chars += len(p.Data)
+		case ai.ResourceLinkPart:
+			chars += len(p.URI) + len(p.Name) + len(p.Title) + len(p.Description) + len(p.MIMEType)
+		case ai.EmbeddedResourcePart:
+			if p.Blob != nil {
+				chars += estimatedImageChars
+			} else {
+				chars += len(p.URI) + len(p.Text)
+			}
 		default:
 		}
 	}
@@ -536,7 +546,7 @@ func serializeConversation(msgs ai.Messages) string {
 				b.WriteString(p.Name)
 				b.WriteString(": ")
 
-				for _, c := range p.Content {
+				for _, c := range ai.ProviderParts(p.Content) {
 					if t, ok := c.(ai.TextPart); ok {
 						b.WriteString(t.Text)
 					}

@@ -166,6 +166,14 @@ func clonePart(part Part, memo map[partSliceKey][]Part) Part {
 		return part
 	case ToolResultPart:
 		return cloneToolResultPart(part, memo)
+	case StructuredContentPart:
+		part.Data = append(JSON(nil), part.Data...)
+		return part
+	case ResourceLinkPart:
+		return part
+	case EmbeddedResourcePart:
+		part.Blob = append([]byte(nil), part.Blob...)
+		return part
 	default:
 		return nil
 	}

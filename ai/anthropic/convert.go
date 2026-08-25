@@ -247,7 +247,7 @@ func toolResultBlocksFrom(parts []ai.ToolResultPart) ([]wireBlock, error) {
 	out := make([]wireBlock, 0, len(parts))
 
 	for _, result := range parts {
-		content, err := userBlocksFrom(result.Content)
+		content, err := userBlocksFrom(ai.ProviderParts(result.Content))
 		if err != nil {
 			return nil, err
 		}

@@ -55,7 +55,7 @@ messages := ai.Messages{
 
 ## Part 与多模态内容
 
-每种具体 Message 的 `Parts` 都受角色专属接口约束；角色中立的 `Part` 也是封闭接口，只能使用 `ai` 包提供的六种实现：
+每种具体 Message 的 `Parts` 都受角色专属接口约束；角色中立的 `Part` 也是封闭接口，只能使用 `ai` 包提供的九种实现：
 
 | Part | 常见方向 | 说明 |
 | --- | --- | --- |
@@ -65,6 +65,9 @@ messages := ai.Messages{
 | `ReasoningPart` | 输出/续接 | 推理文本及不透明续接签名 |
 | `ToolCallPart` | 输出/续接 | 模型请求的 Tool 名、调用 ID、JSON 参数 |
 | `ToolResultPart` | 输入 | Tool 成功或失败结果，可为多模态内容 |
+| `StructuredContentPart` | 仅 Tool 结果内 | Tool 返回的结构化 JSON object 载荷 |
+| `ResourceLinkPart` | 仅 Tool 结果内 | 按 URI 引用资源；不会被自动抓取 |
+| `EmbeddedResourcePart` | 仅 Tool 结果内 | 内联资源正文（text 或 blob）并保留来源 URI |
 
 媒体来源必须只选择 `ID`、`URL` 或 `Data` 中的一种。内联字节必须带 MIME 类型：
 

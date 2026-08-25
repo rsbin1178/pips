@@ -12,16 +12,20 @@ import (
 //	{"role":"user","parts":[{"type":"text","text":"hi"}]}
 //
 // Part kinds use a "type" discriminator: text, image, file, reasoning,
-// tool_call, tool_result. This format is this package's own; it is not any
+// tool_call, tool_result, structured_content, resource_link,
+// embedded_resource. This format is this package's own; it is not any
 // provider's wire format.
 
 const (
-	partTypeText       = "text"
-	partTypeImage      = "image"
-	partTypeFile       = "file"
-	partTypeReasoning  = "reasoning"
-	partTypeToolCall   = "tool_call"
-	partTypeToolResult = "tool_result"
+	partTypeText              = "text"
+	partTypeImage             = "image"
+	partTypeFile              = "file"
+	partTypeReasoning         = "reasoning"
+	partTypeToolCall          = "tool_call"
+	partTypeToolResult        = "tool_result"
+	partTypeStructuredContent = "structured_content"
+	partTypeResourceLink      = "resource_link"
+	partTypeEmbeddedResource  = "embedded_resource"
 )
 
 type partEnvelope struct {
@@ -37,6 +41,13 @@ type partEnvelope struct {
 
 	ID   string `json:"id,omitempty"`
 	Args JSON   `json:"args,omitempty"`
+
+	Data        JSON   `json:"data,omitempty"`
+	URI         string `json:"uri,omitempty"`
+	Title       string `json:"title,omitempty"`
+	Description string `json:"description,omitempty"`
+	MIMEType    string `json:"mime_type,omitempty"`
+	Blob        []byte `json:"blob,omitempty"`
 
 	ToolCallID string         `json:"tool_call_id,omitempty"`
 	Content    []partEnvelope `json:"content,omitempty"`
@@ -477,6 +488,25 @@ func encodePart(p Part, path map[partSliceKey]bool) (partEnvelope, error) {
 			Content:    content,
 			IsError:    p.IsError,
 		}, nil
+	case StructuredContentPart:
+		return partEnvelope{Type: partTypeStructuredContent, Data: p.Data}, nil
+	case ResourceLinkPart:
+		return partEnvelope{
+			Type:        partTypeResourceLink,
+			URI:         p.URI,
+			Name:        p.Name,
+			Title:       p.Title,
+			Description: p.Description,
+			MIMEType:    p.MIMEType,
+		}, nil
+	case EmbeddedResourcePart:
+		return partEnvelope{
+			Type:     partTypeEmbeddedResource,
+			URI:      p.URI,
+			MIMEType: p.MIMEType,
+			Text:     p.Text,
+			Blob:     p.Blob,
+		}, nil
 	default:
 		return partEnvelope{}, fmt.Errorf("ai: cannot marshal unknown part type %T", p)
 	}
@@ -527,6 +557,23 @@ func decodePart(env partEnvelope) (Part, error) {
 			Name:       env.Name,
 			Content:    content,
 			IsError:    env.IsError,
+		}, nil
+	case partTypeStructuredContent:
+		return StructuredContentPart{Data: env.Data}, nil
+	case partTypeResourceLink:
+		return ResourceLinkPart{
+			URI:         env.URI,
+			Name:        env.Name,
+			Title:       env.Title,
+			Description: env.Description,
+			MIMEType:    env.MIMEType,
+		}, nil
+	case partTypeEmbeddedResource:
+		return EmbeddedResourcePart{
+			URI:      env.URI,
+			MIMEType: env.MIMEType,
+			Text:     env.Text,
+			Blob:     env.Blob,
 		}, nil
 	default:
 		return nil, fmt.Errorf("ai: cannot unmarshal unknown part type %q", env.Type)

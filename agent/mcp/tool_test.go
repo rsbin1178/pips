@@ -78,15 +78,19 @@ func TestToolExecForwardsArgumentsAndConvertsResults(t *testing.T) {
 		Data:     []byte("audio"),
 		MIMEType: "audio/wav",
 	}}, parts[2])
-	assert.Equal(t, ai.Text("embedded text"), parts[3])
-	assert.Equal(t, ai.FilePart{
-		Source: ai.MediaSource{Data: []byte("pdf"), MIMEType: "application/pdf"},
-		Name:   "test://report.pdf",
+	assert.Equal(t, ai.EmbeddedResourcePart{
+		URI:  "test://text",
+		Text: "embedded text",
+	}, parts[3])
+	assert.Equal(t, ai.EmbeddedResourcePart{
+		URI:      "test://report.pdf",
+		MIMEType: "application/pdf",
+		Blob:     []byte("pdf"),
 	}, parts[4])
 
-	link, ok := parts[5].(ai.TextPart)
+	link, ok := parts[5].(ai.ResourceLinkPart)
 	require.True(t, ok)
-	assert.Contains(t, link.Text, `"uri":"https://example.invalid/report"`)
+	assert.Equal(t, "https://example.invalid/report", link.URI)
 	assert.JSONEq(t, `{"city":"Paris","days":2}`, string(<-arguments))
 
 	_, err = mixed.Exec(t.Context(), agent.ToolCall{Args: ai.JSON(`not-json`)})
@@ -99,7 +103,7 @@ func TestToolExecForwardsArgumentsAndConvertsResults(t *testing.T) {
 	parts, err = structured.Exec(t.Context(), agent.ToolCall{})
 	require.NoError(t, err)
 	require.Len(t, parts, 1)
-	assert.Equal(t, ai.Text(`{"answer":42}`), parts[0])
+	assert.Equal(t, ai.StructuredContentPart{Data: ai.JSON(`{"answer":42}`)}, parts[0])
 
 	failing := findRemoteTool(t, tools, "fails")
 	_, err = failing.Exec(t.Context(), agent.ToolCall{})
