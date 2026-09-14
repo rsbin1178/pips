@@ -7,9 +7,19 @@ import (
 
 	"github.com/rsbin1178/pips/agent"
 	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/internal/coding/planmode"
 	"github.com/rsbin1178/pips/internal/coding/planreview"
 	"github.com/rsbin1178/pips/internal/coding/subagent"
 )
+
+// planToolName maps one plan decision kind onto its tool name.
+func planToolName(kind planreview.Kind) string {
+	if kind == planreview.KindEnter {
+		return planmode.EnterToolName
+	}
+
+	return planmode.ExitToolName
+}
 
 // Disclosure selects the content retained at a serialization boundary.
 type Disclosure uint8
@@ -131,6 +141,8 @@ func projectSafePayload(payload EventPayload) EventPayload {
 		return value
 	case PlanReviewRequired:
 		value.Request.Content = ""
+		value.Request.HasContent = false
+		value.Request.Size = 0
 		return value
 	case WorkspaceChanged:
 		value.Diff = ""
@@ -358,10 +370,10 @@ func Telemetry(event Event) (TelemetryEvent, error) {
 	case QuestionRejected:
 		projected.Code = "rejected"
 	case PlanReviewRequired:
-		projected.Tool = planreview.PresentToolName
+		projected.Tool = planToolName(value.Request.Kind)
 		projected.PlanBytes = value.Request.Size
 	case PlanReviewResolved:
-		projected.Tool = planreview.PresentToolName
+		projected.Tool = planToolName(value.Kind)
 		projected.PlanDecision = string(value.Decision)
 	case WorkspaceChanged:
 		projected.Changes = value.Files

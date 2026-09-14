@@ -3,34 +3,17 @@ package planreview
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"sync"
-	"unicode/utf8"
 
 	"github.com/rsbin1178/pips/agent"
 	"github.com/rsbin1178/pips/agent/catalog"
 	"github.com/rsbin1178/pips/ai"
-	"github.com/rsbin1178/pips/internal/coding/plandoc"
+	"github.com/rsbin1178/pips/internal/coding/planmode"
 	"github.com/rsbin1178/pips/internal/coding/tools"
-	"github.com/rsbin1178/pips/internal/jsonx"
-)
-
-const (
-	// PresentToolName persists the complete Plan and opens exact review in one
-	// Runtime-mediated operation.
-	PresentToolName = "present_plan"
-	// ToolName is the Plan-only explicit submission capability.
-	ToolName = "submit_plan"
-	// ContinueToolResult is the durable result for a keep-planning decision.
-	ContinueToolResult = "The user requested continued planning. Reassess the Plan, apply any feedback, write the complete Plan, and submit its new revision."
-	// ApprovalToolResult is the durable result for an accepted Plan.
-	ApprovalToolResult = "The user approved this exact Plan revision. End the current turn without calling more tools; Agent Mode will become available only after this interaction settles."
-	maxPlanBytes       = 1 << 20
 )
 
 // Resolver durably records one result for a paused Tool call.
@@ -38,150 +21,150 @@ type Resolver interface {
 	ResolveToolCalls(...agent.ToolResolution) error
 }
 
-// Controller owns submit_plan validation, pause reconciliation, and the
-// process-local accepted revision awaiting an idle boundary.
-type Controller struct {
-	mu       sync.Mutex
-	repo     plandoc.Repository
-	ref      plandoc.Ref
-	resolver Resolver
-	pending  *Request
-	accepted string
-	tool     agent.Tool
-	legacy   agent.Tool
+// Service exposes the runtime-owned plan-mode state and direct tool execution
+// to the controller.
+type Service interface {
+	// PlanState reports the current plan-mode state.
+	PlanState() planmode.State
+	// EnterPlanMode executes an enter_plan_mode call that needs no approval.
+	EnterPlanMode(context.Context) (string, error)
+	// ExitPlanMode executes an exit_plan_mode call in a state without a gate.
+	ExitPlanMode(context.Context) (string, error)
 }
 
-// NewController constructs one Plan review coordinator.
+// Controller owns the enter/exit plan-mode pause protocol.
+type Controller struct {
+	mu       sync.Mutex
+	store    *planmode.Store
+	service  Service
+	resolver Resolver
+	pending  *Request
+	enter    agent.Tool
+	exit     agent.Tool
+}
+
+// NewController constructs one plan-mode decision coordinator.
 func NewController(
-	repo plandoc.Repository,
-	ref plandoc.Ref,
+	store *planmode.Store,
+	service Service,
 	resolver Resolver,
 ) (*Controller, error) {
-	if repo == nil || resolver == nil {
+	if store == nil || service == nil || resolver == nil {
 		return nil, errors.New("coding plan review: incomplete controller")
 	}
 
-	legacy := agent.NewTool(
-		ToolName,
-		"Submit the exact current session Plan revision for explicit user review. Call this alone only after the decision-complete Plan has been written.",
-		func(context.Context, Arguments) (string, error) {
-			return "", errors.New("submit_plan requires Runtime-mediated user review")
-		},
-	)
-	legacyDeclaration := legacy.Decl()
-	legacyDeclaration.InputSchema = inputSchema()
-	present := agent.NewTool(
-		PresentToolName,
-		"Present the complete decision-ready Markdown Plan for explicit user review. Call this alone after plan_checkpoint; Pips persists it atomically and immediately pauses for review.",
-		func(context.Context, PresentArguments) (string, error) {
-			return "", errors.New("present_plan requires Runtime-mediated user review")
-		},
-	)
-	presentDeclaration := present.Decl()
-	presentDeclaration.InputSchema = presentInputSchema()
+	controller := &Controller{store: store, service: service, resolver: resolver}
 
-	return &Controller{
-		repo: repo, ref: ref, resolver: resolver,
-		tool:   declaredTool{Tool: present, declaration: presentDeclaration},
-		legacy: declaredTool{Tool: legacy, declaration: legacyDeclaration},
-	}, nil
+	enter := agent.NewTool(
+		planmode.EnterToolName,
+		planmode.EnterDescription,
+		func(ctx context.Context, _ struct{}) (string, error) {
+			return controller.service.EnterPlanMode(ctx)
+		},
+	)
+	exit := agent.NewTool(
+		planmode.ExitToolName,
+		planmode.ExitDescription,
+		func(ctx context.Context, _ struct{}) (string, error) {
+			return controller.service.ExitPlanMode(ctx)
+		},
+	)
+	controller.enter = declaredTool{Tool: enter, declaration: emptyInputDeclaration(enter.Decl())}
+	controller.exit = declaredTool{Tool: exit, declaration: emptyInputDeclaration(exit.Decl())}
+
+	return controller, nil
 }
 
-// Catalog returns the exact local write-risk present_plan registration. The
-// legacy submit tool is retained only for durable pending-call recovery.
+// Catalog returns both local plan-mode tool registrations.
 func (c *Controller) Catalog() (*catalog.Catalog, error) {
-	if c == nil || c.tool == nil {
+	if c == nil || c.enter == nil || c.exit == nil {
 		return nil, errors.New("coding plan review: unavailable controller")
 	}
 
-	return catalog.New(catalog.Entry{
-		Tool:   c.tool,
-		Source: catalog.Source{Kind: catalog.SourceLocal, ID: tools.PlanCatalogID},
-		Risk:   catalog.RiskWrite,
-		Tags:   []string{"builtin", "coding", "plan", "review", "present"},
-	})
+	return catalog.New(
+		catalog.Entry{
+			Tool:   c.enter,
+			Source: catalog.Source{Kind: catalog.SourceLocal, ID: tools.PlanCatalogID},
+			Risk:   catalog.RiskWrite,
+			Tags:   []string{"builtin", "coding", "plan", "enter"},
+		},
+		catalog.Entry{
+			Tool:   c.exit,
+			Source: catalog.Source{Kind: catalog.SourceLocal, ID: tools.PlanCatalogID},
+			Risk:   catalog.RiskWrite,
+			Tags:   []string{"builtin", "coding", "plan", "exit"},
+		},
+	)
 }
 
-// LegacyTool returns submit_plan for pending-session reconciliation. It must
-// not be added to a new model-visible Tool snapshot.
-func (c *Controller) LegacyTool() agent.Tool {
+// BeforeTool turns enter/exit calls into pauses and rejects malformed calls.
+func (c *Controller) BeforeTool(_ context.Context, info agent.ToolCallInfo) agent.ToolDecision {
 	if c == nil {
-		return nil
-	}
-
-	return c.legacy
-}
-
-// BeforeTool validates submit_plan and freezes all later Tool calls after approval.
-func (c *Controller) BeforeTool(ctx context.Context, info agent.ToolCallInfo) agent.ToolDecision {
-	if c == nil {
-		if info.Name == ToolName || info.Name == PresentToolName {
-			return agent.DenyTool("Plan review is unavailable")
+		if info.Name == planmode.EnterToolName || info.Name == planmode.ExitToolName {
+			return agent.DenyTool("plan mode is unavailable")
 		}
 
 		return agent.ToolDecision{}
 	}
 
-	c.mu.Lock()
-	accepted := c.accepted != ""
-	c.mu.Unlock()
-	if accepted {
-		return agent.DenyTool("the submitted Plan was approved; end this Plan turn without calling more tools")
-	}
-	if info.Name != ToolName && info.Name != PresentToolName {
+	if info.Name != planmode.EnterToolName && info.Name != planmode.ExitToolName {
 		return agent.ToolDecision{}
 	}
-	if normalizedBatchSize(info) != 1 {
-		return agent.DenyTool(info.Name + " must be called alone")
+
+	if err := validateEmptyArguments(info.Args); err != nil {
+		return agent.DenyTool("invalid " + info.Name + " arguments: " + err.Error())
 	}
 
-	call := ai.ToolCallPart{
-		ID: info.ID, Name: info.Name, Args: info.Args,
+	switch info.Name {
+	case planmode.EnterToolName:
+		if c.service.PlanState().Plan() {
+			return agent.ToolDecision{}
+		}
+	case planmode.ExitToolName:
+		if !c.service.PlanState().GateArmed() {
+			return agent.DenyTool("exit_plan_mode requires plan mode to be active")
+		}
 	}
-	var err error
-	if info.Name == PresentToolName {
-		_, err = decodePresentArguments(call.Args)
-	} else {
-		_, err = c.requestFromCall(ctx, call)
-	}
-	if err != nil {
-		return agent.DenyTool("invalid " + info.Name + " arguments: " + err.Error())
+
+	if normalizedBatchSize(info) != 1 {
+		return agent.DenyTool(info.Name + " must be called alone")
 	}
 
 	return agent.ToolDecision{Action: agent.ToolDecisionPause}
 }
 
-// Reconcile reconstructs a submitted Plan from the first durable pending call.
+// Reconcile reconstructs a pending plan-mode decision from the first durable
+// pending call. The exit request reads the plan file from disk; content is
+// never taken from tool arguments.
 func (c *Controller) Reconcile(ctx context.Context, pending []ai.ToolCallPart) (*Request, error) {
 	if c == nil {
 		return nil, errors.New("coding plan review: nil controller")
 	}
 
 	var request *Request
-	if len(pending) > 0 && (pending[0].Name == ToolName || pending[0].Name == PresentToolName) {
+	if len(pending) > 0 &&
+		(pending[0].Name == planmode.EnterToolName || pending[0].Name == planmode.ExitToolName) {
 		if len(pending) != 1 {
 			return nil, fmt.Errorf("coding plan review: %s must be the only pending call", pending[0].Name)
 		}
 
-		var value Request
-		var err error
-		if pending[0].Name == PresentToolName {
-			value, err = c.preparePresent(ctx, pending[0])
-		} else {
-			value, err = c.requestFromCall(ctx, pending[0])
-		}
+		value, err := c.requestFromCall(ctx, pending[0])
 		if err != nil {
 			return nil, fmt.Errorf("coding plan review: reconcile pending call: %w", err)
 		}
+
 		request = &value
 	}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
 	if request == nil {
 		c.pending = nil
+
 		return nil, nil
 	}
+
 	cloned := *request
 	c.pending = &cloned
 	result := cloned
@@ -189,116 +172,107 @@ func (c *Controller) Reconcile(ctx context.Context, pending []ai.ToolCallPart) (
 	return &result, nil
 }
 
-func (c *Controller) preparePresent(ctx context.Context, call ai.ToolCallPart) (Request, error) {
-	arguments, err := decodePresentArguments(call.Args)
-	if err != nil {
-		return Request{}, err
-	}
-
-	sum := sha256.Sum256([]byte(arguments.Content))
-	desiredRevision := hex.EncodeToString(sum[:])
-	document, readErr := c.repo.Read(ctx, c.ref)
-	if readErr == nil && document.Revision == desiredRevision {
-		return NewProposal(call.ID, document.Revision, document.Content)
-	}
-	if readErr != nil && !errors.Is(readErr, plandoc.ErrNotFound) {
-		return Request{}, fmt.Errorf("read current Plan: %w", readErr)
-	}
-
-	document, err = c.repo.Replace(ctx, c.ref, arguments.ExpectedRevision, arguments.Content)
-	if err != nil {
-		return Request{}, fmt.Errorf("persist Plan: %w", err)
-	}
-
-	return NewProposal(call.ID, document.Revision, document.Content)
-}
-
-// Resolve persists the exact decision and records approval only in memory.
-func (c *Controller) Resolve(resolution Resolution) error {
+// Resolve persists the exact decision and reports the outcome to the runtime.
+func (c *Controller) Resolve(resolution Resolution) (Outcome, error) {
 	if c == nil {
-		return errors.New("coding plan review: nil controller")
+		return Outcome{}, errors.New("coding plan review: nil controller")
 	}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
 	if c.pending == nil {
-		return ErrNoPending
+		return Outcome{}, ErrNoPending
 	}
-	if resolution.RequestID != c.pending.ID || resolution.Revision != c.pending.Revision {
-		return ErrMismatch
+	if resolution.RequestID != c.pending.ID {
+		return Outcome{}, ErrMismatch
 	}
 	if err := ValidateResolution(*c.pending, resolution); err != nil {
-		return err
+		return Outcome{}, err
 	}
 
-	result := ContinueToolResult
-	if resolution.Decision == DecisionContinue && resolution.Feedback != "" {
-		result += "\n\nUser feedback:\n" + resolution.Feedback
-	}
-	if resolution.Decision == DecisionApprove {
-		result = ApprovalToolResult
-	}
 	if err := c.resolver.ResolveToolCalls(agent.ToolResolution{
 		ToolCallID: c.pending.ToolCallID,
-		Content:    agent.TextResult(result),
+		Content:    agent.TextResult(c.resultText(*c.pending, resolution)),
 	}); err != nil {
-		return fmt.Errorf("coding plan review: persist resolution: %w", err)
+		return Outcome{}, fmt.Errorf("coding plan review: persist resolution: %w", err)
 	}
 
-	if resolution.Decision == DecisionApprove {
-		c.accepted = c.pending.Revision
-	}
+	outcome := Outcome{Kind: c.pending.Kind, Decision: resolution.Decision}
 	c.pending = nil
 
-	return nil
+	return outcome, nil
 }
 
-// AcceptedRevision returns the process-local revision awaiting idle settlement.
-func (c *Controller) AcceptedRevision() (string, bool) {
+// Pending reports the currently displayed request, when any.
+func (c *Controller) Pending() *Request {
 	if c == nil {
-		return "", false
+		return nil
 	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	return c.accepted, c.accepted != ""
-}
-
-// ClearAccepted discards any process-local accepted revision.
-func (c *Controller) ClearAccepted() {
-	if c == nil {
-		return
+	if c.pending == nil {
+		return nil
 	}
-	c.mu.Lock()
-	c.accepted = ""
-	c.mu.Unlock()
+
+	result := *c.pending
+
+	return &result
 }
 
 func (c *Controller) requestFromCall(ctx context.Context, call ai.ToolCallPart) (Request, error) {
-	if call.Name != ToolName || call.ID == "" {
+	if call.ID == "" {
 		return Request{}, fmt.Errorf("%w: invalid Tool identity", ErrInvalid)
 	}
-
-	var arguments Arguments
-	if err := jsonx.Decode(call.Args, &arguments); err != nil {
-		return Request{}, fmt.Errorf("%w: expected only expected_revision", ErrInvalid)
-	}
-	if !validRevision(arguments.ExpectedRevision) {
-		return Request{}, fmt.Errorf("%w: expected_revision must be the revision returned by write_plan", ErrInvalid)
+	if err := validateEmptyArguments(call.Args); err != nil {
+		return Request{}, err
 	}
 
-	document, err := c.repo.Read(ctx, c.ref)
-	if errors.Is(err, plandoc.ErrNotFound) {
-		return Request{}, fmt.Errorf("%w: write the Plan before submitting it", ErrInvalid)
-	}
-	if err != nil {
-		return Request{}, fmt.Errorf("%w: current Plan could not be read; read or write it before resubmitting", ErrInvalid)
-	}
-	if document.Revision != arguments.ExpectedRevision {
-		return Request{}, fmt.Errorf("%w: plan revision changed; read or write the Plan and submit the current revision", ErrInvalid)
+	kind := KindEnter
+	if call.Name == planmode.ExitToolName {
+		kind = KindExit
 	}
 
-	return NewRequest(call.ID, document.Revision, document.Size)
+	content := ""
+	if kind == KindExit {
+		document, err := c.store.Read(ctx)
+		if err != nil && !errors.Is(err, planmode.ErrNotFound) {
+			return Request{}, fmt.Errorf("read plan file: %w", err)
+		}
+		if err == nil {
+			content = document.Content
+		}
+	}
+
+	return NewRequest(kind, call.ID, content)
+}
+
+func (c *Controller) resultText(request Request, resolution Resolution) string {
+	switch request.Kind {
+	case KindEnter:
+		if resolution.Decision == DecisionApprove {
+			return planmode.EnterResult
+		}
+
+		return planmode.DeclineResult
+	case KindExit:
+		switch resolution.Decision {
+		case DecisionApprove:
+			if !request.HasContent {
+				return planmode.ExitApprovedEmptyResult
+			}
+
+			return planmode.ApprovalResult(resolution.Comments)
+		case DecisionRevise:
+			return planmode.RevisionResult(resolution.Notes)
+		case DecisionQuit:
+			return planmode.ExitQuitResult
+		}
+	}
+
+	return planmode.ExitReviseResult
 }
 
 type declaredTool struct {
@@ -308,97 +282,33 @@ type declaredTool struct {
 
 func (t declaredTool) Decl() ai.Tool { return t.declaration }
 
-func inputSchema() *ai.Schema {
-	return &ai.Schema{
+func emptyInputDeclaration(declaration ai.Tool) ai.Tool {
+	declaration.InputSchema = &ai.Schema{
 		Type:                 "object",
 		AdditionalProperties: false,
-		Properties: map[string]*ai.Schema{
-			"expected_revision": {
-				Type:        "string",
-				Description: "Exact current revision returned by read_plan or write_plan.",
-			},
-		},
-		Required: []string{"expected_revision"},
+		Properties:           map[string]*ai.Schema{},
 		Extra: map[string]json.RawMessage{
-			"minProperties": json.RawMessage("1"),
-			"maxProperties": json.RawMessage("1"),
+			"maxProperties": json.RawMessage("0"),
 		},
 	}
+
+	return declaration
 }
 
-func presentInputSchema() *ai.Schema {
-	return &ai.Schema{
-		Type:                 "object",
-		AdditionalProperties: false,
-		Properties: map[string]*ai.Schema{
-			"expected_revision": {
-				Type: "string", Description: "Empty when creating the first Plan, otherwise the exact current revision returned by read_plan.",
-			},
-			"content": {
-				Type: "string", Description: "Complete decision-ready Markdown Plan shown to the user for review.",
-			},
-		},
-		Required: []string{"expected_revision", "content"},
-		Extra: map[string]json.RawMessage{
-			"minProperties": json.RawMessage("2"),
-			"maxProperties": json.RawMessage("2"),
-		},
-	}
-}
-
-func decodePresentArguments(data ai.JSON) (PresentArguments, error) {
-	if len(data) > maxPlanBytes+4096 {
-		return PresentArguments{}, fmt.Errorf("%w: arguments exceed the size limit", ErrInvalid)
+func validateEmptyArguments(data ai.JSON) error {
+	if len(strings.TrimSpace(string(data))) == 0 || strings.TrimSpace(string(data)) == "null" {
+		return nil
 	}
 
-	var arguments PresentArguments
-	if err := jsonx.Decode(data, &arguments); err != nil {
-		return PresentArguments{}, fmt.Errorf("%w: expected only expected_revision and content", ErrInvalid)
+	var value map[string]any
+	if err := json.Unmarshal(data, &value); err != nil {
+		return fmt.Errorf("%w: arguments must be empty", ErrInvalid)
 	}
-	if arguments.ExpectedRevision != "" && !validRevision(arguments.ExpectedRevision) {
-		return PresentArguments{}, fmt.Errorf("%w: expected_revision is malformed", ErrInvalid)
-	}
-	if strings.TrimSpace(arguments.Content) == "" || len(arguments.Content) > maxPlanBytes ||
-		!utf8.ValidString(arguments.Content) || strings.ContainsRune(arguments.Content, '\x00') {
-		return PresentArguments{}, fmt.Errorf("%w: content must be bounded UTF-8 Markdown", ErrInvalid)
+	if len(value) != 0 {
+		return fmt.Errorf("%w: arguments must be empty", ErrInvalid)
 	}
 
-	return arguments, nil
-}
-
-// ProposalFromCall strictly derives the content-addressed proposal identity
-// from one durable present_plan call without touching the repository.
-func ProposalFromCall(call ai.ToolCallPart) (Request, error) {
-	if call.ID == "" || call.Name != PresentToolName {
-		return Request{}, fmt.Errorf("%w: invalid present_plan identity", ErrInvalid)
-	}
-
-	arguments, err := decodePresentArguments(call.Args)
-	if err != nil {
-		return Request{}, err
-	}
-	sum := sha256.Sum256([]byte(arguments.Content))
-
-	return NewProposal(call.ID, hex.EncodeToString(sum[:]), arguments.Content)
-}
-
-// DecisionFromResult recognizes only Runtime-owned successful review results.
-func DecisionFromResult(result ai.ToolResultPart) (Decision, bool) {
-	if result.IsError || result.Name != PresentToolName || len(result.Content) != 1 {
-		return "", false
-	}
-	text, ok := result.Content[0].(ai.TextPart)
-	if !ok {
-		return "", false
-	}
-	if text.Text == ApprovalToolResult {
-		return DecisionApprove, true
-	}
-	if text.Text == ContinueToolResult || strings.HasPrefix(text.Text, ContinueToolResult+"\n\nUser feedback:\n") {
-		return DecisionContinue, true
-	}
-
-	return "", false
+	return nil
 }
 
 func normalizedBatchSize(info agent.ToolCallInfo) int {

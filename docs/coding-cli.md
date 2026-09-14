@@ -111,35 +111,123 @@ mode = "agent"
 [providers.anthropic.models."model-id"]
 ```
 
-`pips exec --mode plan` uses the same Runtime but exposes only read-only
-workspace/external capabilities plus the session-bound Plan document at
-`~/.pips/plans/<session-id>.md`. The model never supplies its path. New Plan
-documents are created only when Plan content is first persisted; Resume reuses
-the binding and Fork copies an existing snapshot. Plan Mode pauses for material
-choices through `ask_user`. A malformed structured question is retried through
-the one-field `ask_user_text` capability and, if that is malformed too, becomes
-a Runtime-owned free-form prompt; the checkpoint remains locked until an exact
-answer is persisted. After `plan_checkpoint`, `present_plan` atomically replaces
-the bound document and opens review for the complete Markdown content and exact
-revision. The interactive TUI shows that full Plan and can return it for more
-planning or approve an idle, process-local switch to Agent Mode. Approval does
-not run the model again and does not authorize any Shell, patch, MCP, external
-write, or Sandbox exception. Non-interactive `pips exec --mode plan` never
-chooses on the user's behalf: a pending question or review returns exit code `3`
-(input required). Plan Mode is a capability boundary, not secret isolation:
-files readable by the Pips process remain readable.
+Plan Mode is a persisted state machine, not a reduced Tool catalog. The
+ordinary catalog stays visible: Shell, MCP and Extension Tools, Subagents, and
+`ask_user` all remain available, and the only restriction is an edit gate on
+file writes. Plan Mode is a capability boundary for edits, not secret
+isolation: files readable by the Pips process remain readable.
 
-无路径参数的 `read_plan` Tool 读取当前绑定的 Plan 文档。旧版
-`write_plan`/`submit_plan` 仍可被兼容层识别，但当前 Plan 流程会拒绝它们；
-有效流程必须先调用 `plan_checkpoint`，再调用 `present_plan`。
+`pips exec --mode plan`, the interactive `/plan` command, `Shift+Tab`, and the
+ACP `session/set_mode` or `mode` configuration option all drive the same four
+states:
 
-A Session paused on `present_plan` cannot be resumed by an older binary that
-only understands the legacy `write_plan`/`submit_plan` handshake. Do not edit
-the Session JSONL or `~/.pips/plans/<session-id>.md` to force recovery. Reinstall
-or invoke a Pips binary that supports `present_plan`, launch `pips`, and select
-the Session through `/resume`; Runtime will reconcile the durable pending call
-idempotently. Downgrading is safe only after the review has been resolved and
-the interaction has settled.
+| State | Meaning |
+| --- | --- |
+| `Inactive` | Normal operation; no gate. |
+| `Pending` | Plan mode was toggled on and no prompt has been sent yet. |
+| `Active` | The edit gate is armed and the plan reminder is injected. |
+| `ExitPending` | Plan mode was toggled off while a turn was in flight; the gate holds until that turn completes. |
+
+A user toggle moves `Inactive` to `Pending`, and the first prompt of that
+Session activates `Active`. An approved `enter_plan_mode` enters `Active`
+directly and skips `Pending`. `Active` returns to `Inactive` on an approved or
+abandoned `exit_plan_mode`, or when the user toggles plan mode off while idle;
+toggling off during a turn defers the exit to `ExitPending`, which settles to
+`Inactive` when the turn completes. Only `Active` is durable: the state is
+stored in `<sessions-dir>/<session-id>/plan-mode.json`, and `Pending` or
+`ExitPending` collapse to `Inactive` on restart because they depend on
+interactions that did not survive it.
+
+Two model-visible Tools gate the mode. Both take no arguments, must be the only
+Tool call in their response, and pause for an explicit user decision:
+
+- `enter_plan_mode` — "Use this tool when a task has ambiguity about the right
+  approach or when the user asks you to write a plan. This tool enables a
+  read-only plan mode where you explore the codebase and create an
+  implementation plan for the user." An approved call returns "You have entered
+  plan mode. You should now focus on exploring the codebase and creating an
+  implementation plan." and arms `Active`; a declined call returns "The user
+  declined to enter plan mode. Continue in normal mode without it." and leaves
+  the state unchanged.
+- `exit_plan_mode` — "Exit plan mode and present your plan to the user.\n\nUse
+  this after you have finished writing your plan to the plan file in plan
+  mode." It opens the plan approval view. The Runtime reads the plan from disk
+  when the request is created; plan content is never passed as a Tool argument.
+
+The plan itself is ordinary Markdown at `<sessions-dir>/<session-id>/plan.md`,
+inside the Session-private directory. That directory is `0700` and the file is
+a `0600` regular file; replacement is atomic, symlinks and special files are
+rejected, UTF-8 and size bounds are enforced, and the file carries no metadata
+header. The model is given the absolute path by the prompt and writes it with
+the ordinary `apply_patch` Tool.
+
+While the gate is armed, `apply_patch` may only target that exact file. Any
+other target is rejected before execution with `Rejected: file edits are not
+allowed in plan mode - the only editable file is the plan file (<plan path>).`
+Plan-file writes are auto-approved: they create no permission request, are not
+recorded as workspace changes, and never appear in `git status`. Shell is not
+inspected, and Subagents are exempt from the gate because each Subagent
+evaluates it from its own state.
+
+Each request while plan mode is armed carries an ephemeral system suffix. It
+starts with `Plan mode is active. Do not make any edits or writes to the
+system.`, then a `## Plan File:` section that states either "A plan file exists
+at <path>. You can read it and make edits using the apply_patch tool." or "No
+plan written yet. Write your plan to <path> using the apply_patch tool.",
+followed by the instruction that this is the only editable file and that the
+turn should end with `ask_user` or `exit_plan_mode`. User turns append the
+plan-iteration-versus-execution guidance that keeps feedback in the plan
+instead of executing it, re-entering plan mode with a previous plan prepends a
+`## Returning to Plan Mode` section, and leaving plan mode adds `You have
+exited plan mode. You can now make edits, run tools, and take actions.` or
+`You are now in Agent mode. Continue with the task in the new mode.` None of
+these reminders are persisted to Session history.
+
+Exit decisions return these exact Tool results:
+
+| Outcome | Tool result |
+| --- | --- |
+| Approved, plan has content | `Your plan has been approved. You can now start coding.` |
+| Approved, plan empty or missing | `Plan mode exit approved. No plan content was found - you can proceed.` |
+| Request changes | `The user does not want to exit plan mode. Continue planning and ask the user what they would like to do.` |
+| Abandoned | `The user chose to abandon the plan entirely (via the Abandon option in the plan approval dialog). Plan mode has been disabled. Do not call exit_plan_mode again unless the user explicitly asks to re-enter plan mode.` |
+
+Review comments attached to an approval append `\n\nThe user approved the plan
+with the following review comments:\n` and one comment per line; revision notes
+attached to a request-changes decision append `\n\nUser revision notes:\n`. A
+request-changes decision keeps plan mode `Active`. Approval resolves mid-turn:
+the model receives the Tool result in the same turn and continues implementing.
+It runs no extra model request, grants no Tool approval, and creates no Sandbox
+exception.
+
+In the interactive TUI the approval view shows a scrollable preview with
+line-level comments: `a` approves (the label reads `approve w/ comments` when
+comments are pending), `s` requests changes, `c` comments on the selected line
+or range, `v` toggles a range anchored at the cursor, `x` drops the last
+comment, `y` copies the plan, `q` abandons the plan and turns plan mode off,
+`Tab` switches between preview and input, and `Esc` returns. An empty plan
+shows `No plan written yet.` with the approve, request-changes, and quit
+explanation. An agent-initiated `enter_plan_mode` opens a confirmation prompt
+("Enter plan mode?" / "a approve · d decline") instead. `/view-plan` (aliases
+`/show-plan` and `/plan-view`) reopens the
+plan preview, the status line shows the `plan` flag while plan mode is on, and
+the transcript prints `Agent entered plan mode`, `file edits outside session
+plan.md blocked until plan mode exits`, and `Plan mode off`.
+
+Non-interactive `pips exec --mode plan` never chooses on the user's behalf: a
+plan decision or structured question that needs user input returns exit code `3`
+(input required). Compaction preserves plan mode and injects the reminder again
+on the compacted context. A Team Worker and a Lead with an active Team cannot
+enter plan mode.
+
+The earlier Plan protocol was removed and has no compatibility layer:
+`read_plan`, `write_plan`, `present_plan`, `submit_plan`, and
+`plan_checkpoint` no longer exist, the `plandoc` and `planflow` packages are
+gone, plans are no longer stored under `~/.pips/plans/`, and the historical
+`PlanProposal` projection is no longer produced. A Session parked on one of
+those calls is not resumed by this binary. Do not edit the Session JSONL or any
+plan file to force recovery, and do not expect the Runtime to treat a
+historical Tool call or its arguments as authority.
 
 A higher-priority `--model` or `PIPS_MODEL` selection starts from that target
 model's default variant and reasoning; it never inherits those choices from the

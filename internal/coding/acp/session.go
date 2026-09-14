@@ -332,20 +332,31 @@ func (s *session) resolvePlanReview(
 ) (runtimeSequence, acpsdk.StopReason, error) {
 	const (
 		approveOption  acpsdk.PermissionOptionId = "approve_agent_mode"
-		continueOption acpsdk.PermissionOptionId = "continue_planning"
+		revisionOption acpsdk.PermissionOptionId = "continue_planning"
+		declineOption  acpsdk.PermissionOptionId = "decline_enter_plan_mode"
 	)
 
 	status := acpsdk.ToolCallStatusPending
 
+	options := []acpsdk.PermissionOption{
+		{OptionId: approveOption, Name: "Approve and start implementing", Kind: acpsdk.PermissionOptionKindAllowOnce},
+		{OptionId: revisionOption, Name: "Request changes", Kind: acpsdk.PermissionOptionKindRejectOnce},
+	}
+	title := "Review proposed plan"
+	if request.Kind == planreview.KindEnter {
+		options = []acpsdk.PermissionOption{
+			{OptionId: approveOption, Name: "Enter plan mode", Kind: acpsdk.PermissionOptionKindAllowOnce},
+			{OptionId: declineOption, Name: "Stay in normal mode", Kind: acpsdk.PermissionOptionKindRejectOnce},
+		}
+		title = "Enter plan mode"
+	}
+
 	response, err := s.outbound.requestPermission(ctx, acpsdk.RequestPermissionRequest{
 		SessionId: acpsdk.SessionId(s.id),
-		Options: []acpsdk.PermissionOption{
-			{OptionId: approveOption, Name: "Approve and enter Agent mode", Kind: acpsdk.PermissionOptionKindAllowOnce},
-			{OptionId: continueOption, Name: "Continue planning", Kind: acpsdk.PermissionOptionKindRejectOnce},
-		},
+		Options:   options,
 		ToolCall: acpsdk.ToolCallUpdate{
 			ToolCallId: acpsdk.ToolCallId(request.ToolCallID), Status: &status,
-			Title:    new("Review proposed plan"),
+			Title:    new(title),
 			RawInput: map[string]any{planContentField: request.Content},
 		},
 	})
@@ -360,7 +371,7 @@ func (s *session) resolvePlanReview(
 	}
 
 	if response.Outcome.Selected == nil {
-		return nil, "", fmt.Errorf("%w: missing Plan review outcome", ErrInvalid)
+		return nil, "", fmt.Errorf("%w: missing plan decision outcome", ErrInvalid)
 	}
 
 	decision := planreview.Decision("")
@@ -368,14 +379,24 @@ func (s *session) resolvePlanReview(
 	switch response.Outcome.Selected.OptionId {
 	case approveOption:
 		decision = planreview.DecisionApprove
-	case continueOption:
-		decision = planreview.DecisionContinue
+	case revisionOption:
+		if request.Kind == planreview.KindEnter {
+			return nil, "", fmt.Errorf("%w: unknown plan decision option", ErrInvalid)
+		}
+
+		decision = planreview.DecisionRevise
+	case declineOption:
+		if request.Kind != planreview.KindEnter {
+			return nil, "", fmt.Errorf("%w: unknown plan decision option", ErrInvalid)
+		}
+
+		decision = planreview.DecisionDecline
 	default:
-		return nil, "", fmt.Errorf("%w: unknown Plan review option", ErrInvalid)
+		return nil, "", fmt.Errorf("%w: unknown plan decision option", ErrInvalid)
 	}
 
 	return s.controller.ResolvePlanReview(ctx, planreview.Resolution{
-		RequestID: request.ID, Revision: request.Revision, Decision: decision,
+		RequestID: request.ID, Decision: decision,
 	}), "", nil
 }
 

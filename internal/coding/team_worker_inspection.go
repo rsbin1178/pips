@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/rsbin1178/pips/agent/harness"
+	"github.com/rsbin1178/pips/internal/coding/planmode"
 	"github.com/rsbin1178/pips/internal/coding/session"
 	"github.com/rsbin1178/pips/internal/coding/teamcontrol"
 	"github.com/rsbin1178/pips/internal/coding/teamstate"
@@ -340,7 +341,7 @@ func (r *Runtime) bootstrapTeamWorkerState(
 		SessionID: handle.Metadata().ID,
 		Provider:  r.model.Provider(), ModelID: r.model.ModelID(),
 		ContextWindow: r.resolved.Limits.ContextWindow,
-		Mode:          r.currentOperatingMode(), Path: handle.Session().Path(),
+		PlanMode:      planmode.StateInactive, Path: handle.Session().Path(),
 		HasPendingToolCalls: len(pending) != 0, Tree: tree,
 	})
 	if err != nil {

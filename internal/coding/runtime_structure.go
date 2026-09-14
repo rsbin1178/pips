@@ -18,7 +18,7 @@ import (
 	"github.com/rsbin1178/pips/internal/coding/config"
 	"github.com/rsbin1178/pips/internal/coding/hooks"
 	"github.com/rsbin1178/pips/internal/coding/modelcatalog"
-	"github.com/rsbin1178/pips/internal/coding/plandoc"
+	"github.com/rsbin1178/pips/internal/coding/planmode"
 	"github.com/rsbin1178/pips/internal/coding/session"
 	"github.com/rsbin1178/pips/internal/coding/tasklist"
 )
@@ -187,10 +187,14 @@ func (r *Runtime) Fork(ctx context.Context, entryID string) (string, error) {
 		return "", err
 	}
 	targetID := target.Metadata().ID
-	targetPlanRef := plandoc.Ref{
-		SessionID: targetID, WorkspaceID: target.Metadata().WorkspaceID,
+	targetPlanStore, planErr := planmode.NewStore(
+		r.paths.SessionsDir(),
+		targetID,
+		planmode.DefaultLimits(),
+	)
+	if planErr == nil {
+		planErr = r.planStore.CopyTo(operationCtx, targetPlanStore)
 	}
-	planErr := r.plans.Fork(operationCtx, r.planRef, targetPlanRef)
 	if err := errors.Join(planErr, target.Close()); err != nil {
 		return targetID, err
 	}

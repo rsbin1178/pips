@@ -7,6 +7,7 @@ import (
 
 	"github.com/rsbin1178/pips/agent/harness"
 	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/internal/coding/planmode"
 	"github.com/rsbin1178/pips/internal/coding/tasklist"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -20,7 +21,7 @@ func TestBootstrapStateAcceptsCustomProviderMetadata(t *testing.T) {
 		SessionID: "session-1",
 		Provider:  provider,
 		ModelID:   "deepseek-v4-flash",
-		Mode:      ModeAgent,
+		PlanMode:  planmode.StateInactive,
 		Path: []harness.Entry{{
 			Kind: harness.KindModelChange, ID: "entry-1",
 			Provider: provider, ModelID: "deepseek-v4-flash",
@@ -40,7 +41,7 @@ func TestBootstrapStateProjectsContextAndTaskProgress(t *testing.T) {
 	})
 	result, err := BootstrapState(BootstrapOptions{
 		SessionID: "session-1", Provider: ai.ProviderOpenAI, ModelID: "gpt-test",
-		ContextWindow: 1_000, Mode: ModeAgent,
+		ContextWindow: 1_000, PlanMode: planmode.StateInactive,
 		Path: []harness.Entry{{
 			Kind: harness.KindMessage, ID: "entry-1", Message: message,
 			Usage: &ai.Usage{InputTokens: 200, OutputTokens: 50},
@@ -71,7 +72,7 @@ func TestBootstrapTaskProgressSurvivesBoundedTranscriptTail(t *testing.T) {
 
 	result, err := BootstrapState(BootstrapOptions{
 		SessionID: "session-1", Provider: ai.ProviderOpenAI, ModelID: "gpt-test",
-		Mode: ModeAgent, Path: path,
+		PlanMode: planmode.StateInactive, Path: path,
 	})
 	require.NoError(t, err)
 	require.Len(t, result.State.Transcript, maxEventItems)
@@ -83,7 +84,7 @@ func TestBootstrapStateRejectsInvalidCustomProviderMetadata(t *testing.T) {
 	t.Parallel()
 
 	_, err := BootstrapState(BootstrapOptions{
-		SessionID: "session-1", Provider: "OpenCode", ModelID: "model", Mode: ModeAgent,
+		SessionID: "session-1", Provider: "OpenCode", ModelID: "model", PlanMode: planmode.StateInactive,
 	})
 	require.ErrorIs(t, err, ErrInvalidEvent)
 }
@@ -113,7 +114,7 @@ func TestBootstrapStateRebuildsBoundedTranscriptTreeAndCompaction(t *testing.T) 
 
 	result, err := BootstrapState(BootstrapOptions{
 		SessionID: "session-1", Provider: ai.ProviderOpenAI, ModelID: "gpt-test",
-		Mode: ModePlan, Path: path, Tree: tree,
+		PlanMode: planmode.StateActive, Path: path, Tree: tree,
 	})
 	require.NoError(t, err)
 	require.Len(t, result.State.Transcript, maxEventItems)

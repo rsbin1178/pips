@@ -112,7 +112,7 @@
 - 前置条件：至少配置一个可安全调用的 Extension 或 MCP tool；该工具在后续集成分册已验证。
 - 隔离夹具：同一模型、同一 Workspace，分别以关闭和开启 `tool_search` 启动两个新 Session。
 - 步骤：先用 `config show` 记录 resolved 值；关闭时要求模型“查找并使用指定延迟工具”；开启时重复；再用 `--tool-search=false` 覆盖启用配置。
-- 预期证据：关闭时目录没有 `tool_search`；开启时 `tool_search` 可发现允许的 Extension/MCP tool，但内建工具仍直接可见；flag 覆盖后再次关闭。私有 server tool、Plan Mode 禁止项和 child 不可见项不会因搜索而越权出现。
+- 预期证据：关闭时目录没有 `tool_search`；开启时 `tool_search` 可发现允许的 Extension/MCP tool，但内建工具仍直接可见；flag 覆盖后再次关闭。私有 server tool、child 不可见项和 Plan Mode 的编辑门控都不会因搜索而被绕过。
 - 通过条件：开关与 provenance 一致，搜索只扩大“已获准但延迟公开”的工具可发现性，不扩大权限。
 - 失败条件：关闭时仍出现搜索工具、开启后暴露私有/越权工具，或搜索结果含秘密配置。
 - 清理/回滚：关闭测试集成；恢复默认 `tool_search` 值。

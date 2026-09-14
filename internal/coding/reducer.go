@@ -10,6 +10,7 @@ import (
 	"github.com/rsbin1178/pips/agent"
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding/approval"
+	"github.com/rsbin1178/pips/internal/coding/planmode"
 	"github.com/rsbin1178/pips/internal/coding/planreview"
 	"github.com/rsbin1178/pips/internal/coding/question"
 	"github.com/rsbin1178/pips/internal/coding/subagent"
@@ -149,32 +150,10 @@ type QuestionState struct {
 	Required    *question.Request `json:"required,omitempty"`
 }
 
-// PlanReviewState is the current explicit Plan review request.
+// PlanReviewState is the current explicit plan-mode decision request.
 type PlanReviewState struct {
 	RequestedAt time.Time           `json:"requested_at,omitzero"`
 	Required    *planreview.Request `json:"required,omitempty"`
-}
-
-// PlanProposalStatus is the user disposition of one exact presented Plan.
-type PlanProposalStatus string
-
-const (
-	// PlanProposalPending is awaiting an explicit user decision.
-	PlanProposalPending PlanProposalStatus = "pending"
-	// PlanProposalContinued was returned for additional planning.
-	PlanProposalContinued PlanProposalStatus = "continued"
-	// PlanProposalApproved was accepted by the user.
-	PlanProposalApproved PlanProposalStatus = "approved"
-)
-
-// PlanProposal is the semantic full-content projection used by frontends.
-type PlanProposal struct {
-	ID         string             `json:"id"`
-	ToolCallID string             `json:"tool_call_id"`
-	Revision   string             `json:"revision"`
-	Size       int64              `json:"size"`
-	Content    string             `json:"content"`
-	Status     PlanProposalStatus `json:"status"`
 }
 
 // NonInteractiveError fails closed when explicit Plan review is pending.
@@ -240,7 +219,7 @@ type State struct {
 	Approval          ApprovalState                   `json:"approval"`
 	Question          QuestionState                   `json:"question"`
 	PlanReview        PlanReviewState                 `json:"plan_review"`
-	PlanProposals     []PlanProposal                  `json:"plan_proposals,omitempty"`
+	PlanMode          planmode.State                  `json:"plan_mode"`
 	Changes           *WorkspaceChanged               `json:"changes,omitempty"`
 	Diagnostics       []IntegrationDiagnostic         `json:"diagnostics"`
 	LastError         *RuntimeError                   `json:"last_error,omitempty"`
@@ -302,7 +281,6 @@ func (state State) Clone() State {
 		request := planreview.CloneRequest(*state.PlanReview.Required)
 		cloned.PlanReview.Required = &request
 	}
-	cloned.PlanProposals = slices.Clone(state.PlanProposals)
 	if state.Changes != nil {
 		changes := cloneWorkspaceChanged(*state.Changes)
 		cloned.Changes = &changes
@@ -447,11 +425,12 @@ func (state *State) apply(event Event) error {
 		}
 		state.ContextTokens = payload.TokensAfter
 	case ModeChanged:
-		if !state.SessionOpen || state.Phase != PhaseIdle || state.Interaction.Active ||
-			state.Compaction.Active || state.Approval.Kind != ApprovalNone ||
-			state.Question.Required != nil || state.PlanReview.Required != nil {
+		// Plan-mode tools move the effective operating mode mid-turn, so the
+		// mode transition only requires an open session.
+		if !state.SessionOpen || state.Compaction.Active {
 			return protocolError("mode cannot change in its current state")
 		}
+
 		state.Mode = payload.Mode
 	case InteractionStarted:
 		if !state.SessionOpen || state.Interaction.Active || payload.Mode != state.Mode {
@@ -700,29 +679,31 @@ func (state *State) apply(event Event) error {
 		if err := state.requireInteraction(event.InteractionID); err != nil ||
 			state.PlanReview.Required != nil || state.Question.Required != nil ||
 			state.Approval.Kind != ApprovalNone {
-			return protocolError("Plan review cannot be displayed")
+			return protocolError("plan decision cannot be displayed")
 		}
 
 		request := planreview.CloneRequest(payload.Request)
 		state.PlanReview = PlanReviewState{RequestedAt: event.Time, Required: &request}
-		if proposal, ok := planProposalFromRequest(request); ok {
-			state.PlanProposals = upsertPlanProposal(state.PlanProposals, proposal)
-		}
 	case PlanReviewResolved:
 		if err := state.requireInteraction(event.InteractionID); err != nil ||
 			state.PlanReview.Required == nil ||
-			planreview.ValidateResolution(*state.PlanReview.Required, planreview.Resolution{
-				RequestID: payload.RequestID,
-				Revision:  payload.Revision,
-				Decision:  payload.Decision,
-			}) != nil {
-			return protocolError("Plan review resolution does not match displayed request")
+			state.PlanReview.Required.ID != payload.RequestID ||
+			state.PlanReview.Required.Kind != payload.Kind ||
+			!planreview.ValidDecision(payload.Kind, payload.Decision) {
+			return protocolError("plan decision resolution does not match displayed request")
 		}
 
 		state.PlanReview = PlanReviewState{}
-		state.PlanProposals = resolvePlanProposal(
-			state.PlanProposals, payload.RequestID, payload.Revision, payload.Decision,
-		)
+	case PlanModeChanged:
+		if !state.SessionOpen || !payload.State.Valid() {
+			return protocolError("plan mode cannot change in its current state")
+		}
+
+		state.PlanMode = payload.State
+		state.Mode = ModeAgent
+		if payload.State.Plan() {
+			state.Mode = ModePlan
+		}
 	case QuestionRejected:
 		if err := state.requireInteraction(event.InteractionID); err != nil ||
 			state.Question.Required == nil ||
