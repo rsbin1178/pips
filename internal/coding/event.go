@@ -21,6 +21,7 @@ import (
 	"github.com/rsbin1178/pips/internal/coding/approval"
 	"github.com/rsbin1178/pips/internal/coding/changes"
 	"github.com/rsbin1178/pips/internal/coding/config"
+	"github.com/rsbin1178/pips/internal/coding/planmode"
 	"github.com/rsbin1178/pips/internal/coding/planreview"
 	"github.com/rsbin1178/pips/internal/coding/question"
 	"github.com/rsbin1178/pips/internal/coding/subagent"
@@ -90,6 +91,7 @@ const (
 	EventQuestionRejected         EventType = "question.rejected"
 	EventPlanReviewRequired       EventType = "plan_review.required"
 	EventPlanReviewResolved       EventType = "plan_review.resolved"
+	EventPlanModeChanged          EventType = "plan_mode.changed"
 	EventWorkspaceChanged         EventType = "workspace.changed"
 	EventStatusChanged            EventType = "status.changed"
 	EventIntegrationDiagnostic    EventType = "integration.diagnostic"
@@ -509,11 +511,16 @@ type PlanReviewRequired struct {
 	Request planreview.Request `json:"request"`
 }
 
-// PlanReviewResolved records the exact content-free review decision.
+// PlanReviewResolved records the exact content-free plan-mode decision.
 type PlanReviewResolved struct {
 	RequestID string              `json:"request_id"`
-	Revision  string              `json:"revision"`
+	Kind      planreview.Kind     `json:"kind"`
 	Decision  planreview.Decision `json:"decision"`
+}
+
+// PlanModeChanged records one plan-mode state-machine transition.
+type PlanModeChanged struct {
+	State planmode.State `json:"state"`
 }
 
 // WorkspaceChange is one normalized workspace-relative path change.
@@ -597,6 +604,7 @@ func (QuestionResolved) eventPayload()         {}
 func (QuestionRejected) eventPayload()         {}
 func (PlanReviewRequired) eventPayload()       {}
 func (PlanReviewResolved) eventPayload()       {}
+func (PlanModeChanged) eventPayload()          {}
 func (WorkspaceChanged) eventPayload()         {}
 func (StatusChanged) eventPayload()            {}
 func (IntegrationDiagnostic) eventPayload()    {}
@@ -665,7 +673,7 @@ func validateEnvelopeIDs(event Event) error {
 		if event.InteractionID == "" || event.RunID == "" {
 			return invalidEvent("%s requires interaction and run ids", event.Type)
 		}
-	case EventStatusChanged, EventIntegrationDiagnostic, EventError:
+	case EventPlanModeChanged, EventStatusChanged, EventIntegrationDiagnostic, EventError:
 		if event.RunID != "" && event.InteractionID == "" {
 			return invalidEvent("run id requires an interaction id")
 		}
@@ -851,13 +859,13 @@ func validatePayload(eventType EventType, payload EventPayload) error {
 			return invalidPayload(eventType, payload)
 		}
 	case PlanReviewResolved:
-		if eventType != EventPlanReviewResolved || planreview.ValidateResolutionShape(
-			planreview.Resolution{
-				RequestID: value.RequestID,
-				Revision:  value.Revision,
-				Decision:  value.Decision,
-			},
-		) != nil {
+		if eventType != EventPlanReviewResolved ||
+			!planreview.ValidDecision(value.Kind, value.Decision) ||
+			validateEventID("plan request id", value.RequestID, true) != nil {
+			return invalidPayload(eventType, payload)
+		}
+	case PlanModeChanged:
+		if eventType != EventPlanModeChanged || !value.State.Valid() {
 			return invalidPayload(eventType, payload)
 		}
 	case WorkspaceChanged:

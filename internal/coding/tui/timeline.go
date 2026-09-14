@@ -12,7 +12,7 @@ import (
 	"github.com/rsbin1178/pips/agent"
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding"
-	"github.com/rsbin1178/pips/internal/coding/planreview"
+	"github.com/rsbin1178/pips/internal/coding/planmode"
 	"github.com/rsbin1178/pips/internal/coding/question"
 	"github.com/rsbin1178/pips/internal/coding/subagent"
 )
@@ -38,6 +38,7 @@ const (
 	errorAccentBar        = "▌"
 	questionAnsweredTitle = "Question answered"
 	questionFailedTitle   = "Question failed"
+	planApprovedTitle     = "Plan · Approved"
 )
 
 type timelineBlock struct {
@@ -110,7 +111,7 @@ func projectTimelineExcluding(
 		for activityIndex < len(activities) && activities[activityIndex].position <= position {
 			activity := activities[activityIndex]
 			activityIndex++
-			if block, handled, visible := projectProtocolToolActivity(activity, state.PlanProposals); handled {
+			if block, handled, visible := projectProtocolToolActivity(activity); handled {
 				if visible {
 					blocks = append(blocks, block)
 				}
@@ -129,7 +130,7 @@ func projectTimelineExcluding(
 	for activityIndex < len(activities) {
 		activity := activities[activityIndex]
 		activityIndex++
-		if block, handled, visible := projectProtocolToolActivity(activity, state.PlanProposals); handled {
+		if block, handled, visible := projectProtocolToolActivity(activity); handled {
 			if visible {
 				blocks = append(blocks, block)
 			}
@@ -193,73 +194,50 @@ func projectTimelineExcluding(
 	return groupExploreBlocks(blocks)
 }
 
-func projectProtocolToolActivity(
-	activity toolActivity,
-	proposals []coding.PlanProposal,
-) (timelineBlock, bool, bool) {
+func projectProtocolToolActivity(activity toolActivity) (timelineBlock, bool, bool) {
 	switch activity.name {
-	case planreview.ToolName, planreview.PresentToolName:
-		block, visible := projectPlanReviewToolActivity(activity, proposals)
+	case planmode.EnterToolName, planmode.ExitToolName:
+		block, visible := projectPlanModeToolActivity(activity)
+
 		return block, true, visible
 	case question.ToolName, question.TextToolName:
 		block, visible := projectQuestionToolActivity(activity)
+
 		return block, true, visible
 	default:
 		return timelineBlock{}, false, false
 	}
 }
 
-func projectPlanReviewToolActivity(
-	activity toolActivity,
-	proposals []coding.PlanProposal,
-) (timelineBlock, bool) {
-	if activity.name != planreview.ToolName && activity.name != planreview.PresentToolName {
-		return timelineBlock{}, false
+// projectPlanModeToolActivity hides the model-facing plan tool result behind
+// one semantic decision block. The enter call keeps its tool activity row.
+func projectPlanModeToolActivity(activity toolActivity) (timelineBlock, bool) {
+	if activity.name != planmode.ExitToolName || activity.state == toolStateRunning ||
+		activity.state == toolStateInterrupted {
+		return projectToolActivity(activity), true
 	}
-	if activity.state == toolStateRunning {
-		return timelineBlock{}, false
-	}
-	if activity.name == planreview.PresentToolName {
-		for _, proposal := range proposals {
-			if proposal.ToolCallID != activity.id || proposal.Status == coding.PlanProposalPending {
-				continue
-			}
-
-			title := "Plan · Continue planning"
-			if proposal.Status == coding.PlanProposalApproved {
-				title = "Plan · Approved"
-			}
-
-			return timelineBlock{
-				kind: blockPlan, id: proposal.ID, title: title, body: proposal.Content,
-				position: activity.position,
-			}, true
-		}
-
-		return timelineBlock{}, false
+	title, ok := planModeDecisionTitle(activity.result)
+	if !ok {
+		return projectToolActivity(activity), true
 	}
 
-	block := timelineBlock{kind: blockQuestion, position: activity.position}
-	if activity.state == toolStateFailed || activity.state == toolStateInterrupted {
-		block.title = "Plan submission failed"
-		block.body = oneLineToolText(activity.result)
-		if block.body == "" {
-			block.body = "The submitted Plan could not be reviewed."
-		}
+	return timelineBlock{
+		kind: blockPlan, id: activity.id, title: title, position: activity.position,
+	}, true
+}
 
-		return block, true
+func planModeDecisionTitle(result string) (string, bool) {
+	switch {
+	case strings.HasPrefix(result, planmode.ExitApprovedResult),
+		strings.HasPrefix(result, planmode.ExitApprovedEmptyResult):
+		return planApprovedTitle, true
+	case strings.HasPrefix(result, planmode.ExitReviseResult):
+		return "Plan · Continue planning", true
+	case strings.HasPrefix(result, planmode.ExitQuitResult):
+		return "Plan · Abandoned", true
+	default:
+		return "", false
 	}
-	if strings.HasPrefix(activity.result, planreview.ApprovalToolResult) {
-		block.title = "Plan approved"
-		block.body = "The exact submitted revision was approved for an idle switch to Agent Mode."
-
-		return block, true
-	}
-
-	block.title = "Planning continued"
-	block.body = "The Plan was returned for another revision."
-
-	return block, true
 }
 
 func projectSubagentToolActivity(

@@ -159,6 +159,22 @@ Linux requires a working Bubblewrap 0.8.0+ sandbox and macOS uses the system
 Seatbelt sandbox. See [Coding execution security](docs/coding-security.md) for
 the platform and threat-model boundaries.
 
+### Screenshots
+
+A real session in the TUI: the model explores the workspace, patches files, and
+reports what changed.
+
+![TUI session with tool activity](docs/assets/tui-session.png)
+
+Plan Mode writes the plan to a session plan file and asks for review before any
+workspace edit.
+
+![Plan review prompt](docs/assets/plan-review.png)
+
+Slash commands, including `/plan`, are searchable from the command palette.
+
+![Command palette](docs/assets/command-palette.png)
+
 ## Capability map
 
 ### Go libraries

@@ -14,6 +14,7 @@ import (
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding/approval"
 	"github.com/rsbin1178/pips/internal/coding/changes"
+	"github.com/rsbin1178/pips/internal/coding/planmode"
 	"github.com/rsbin1178/pips/internal/coding/planreview"
 	"github.com/rsbin1178/pips/internal/coding/question"
 	"github.com/rsbin1178/pips/internal/coding/subagent"
@@ -59,6 +60,24 @@ func TestEventTaxonomyRoundTrip(t *testing.T) {
 			assert.Equal(t, test.event.Type, telemetry.Type)
 		})
 	}
+}
+
+func TestValidateEventAcceptsKnownPlanModeStatesOnly(t *testing.T) {
+	t.Parallel()
+
+	for _, state := range []planmode.State{
+		planmode.StateInactive, planmode.StatePending,
+		planmode.StateActive, planmode.StateExitPending,
+	} {
+		event := newSessionEvent(EventPlanModeChanged, PlanModeChanged{State: state})
+		assert.NoError(t, ValidateEvent(event), string(state))
+	}
+
+	event := newSessionEvent(EventPlanModeChanged, PlanModeChanged{State: "exploded"})
+	require.ErrorIs(t, ValidateEvent(event), ErrInvalidEvent)
+
+	mismatched := newSessionEvent(EventModeChanged, PlanModeChanged{State: planmode.StateActive})
+	require.ErrorIs(t, ValidateEvent(mismatched), ErrInvalidEvent)
 }
 
 func TestValidateEventAcceptsCustomProviderIdentity(t *testing.T) {
@@ -254,10 +273,7 @@ func TestProjectRedactsPresentedPlanContentButKeepsLocalContent(t *testing.T) {
 	t.Parallel()
 
 	const secretPlan = "# Private architecture\n\nDo not export this Plan."
-	request, err := planreview.ProposalFromCall(ai.ToolCallPart{
-		ID: "present-1", Name: planreview.PresentToolName,
-		Args: ai.JSON(`{"expected_revision":"","content":"# Private architecture\n\nDo not export this Plan."}`),
-	})
+	request, err := planreview.NewRequest(planreview.KindExit, "present-1", secretPlan)
 	require.NoError(t, err)
 	event := newInteractionEvent(
 		EventPlanReviewRequired,
@@ -269,7 +285,7 @@ func TestProjectRedactsPresentedPlanContentButKeepsLocalContent(t *testing.T) {
 	encodedSafe, err := json.Marshal(safe)
 	require.NoError(t, err)
 	assert.NotContains(t, string(encodedSafe), secretPlan)
-	assert.Contains(t, string(encodedSafe), request.Revision)
+	assert.Contains(t, string(encodedSafe), request.ToolCallID)
 
 	content, err := Project(event, DisclosureContent)
 	require.NoError(t, err)
@@ -526,9 +542,9 @@ func eventCases() []eventCase {
 		Answers: []question.Answer{{Selections: []string{"Core"}}},
 	}
 	planRequest, err := planreview.NewRequest(
+		planreview.KindExit,
 		"submit-plan",
-		"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-		512,
+		"# Plan\n\n1. Implement\n2. Verify\n",
 	)
 	if err != nil {
 		panic(err)
@@ -752,9 +768,13 @@ func eventCases() []eventCase {
 			EventPlanReviewResolved,
 			PlanReviewResolved{
 				RequestID: planRequest.ID,
-				Revision:  planRequest.Revision,
+				Kind:      planRequest.Kind,
 				Decision:  planreview.DecisionApprove,
 			},
+		)},
+		{name: "plan mode changed", event: newSessionEvent(
+			EventPlanModeChanged,
+			PlanModeChanged{State: planmode.StateActive},
 		)},
 		{name: "workspace changed", event: newInteractionEvent(
 			EventWorkspaceChanged,

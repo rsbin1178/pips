@@ -162,7 +162,7 @@ type Controller interface {
 
 type planReviewController interface {
 	ResolvePlanReview(context.Context, planreview.Resolution) iter.Seq2[coding.Event, error]
-	ReadPlanDocument(context.Context, string) (coding.PlanDocument, error)
+	ReadPlanDocument(context.Context) (coding.PlanDocument, error)
 }
 
 // ImageClipboard is the one-method clipboard boundary consumed by the TUI.

@@ -17,6 +17,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding"
+	"github.com/rsbin1178/pips/internal/coding/planmode"
 	"github.com/rsbin1178/pips/internal/coding/subagent"
 	codingtools "github.com/rsbin1178/pips/internal/coding/tools"
 )
@@ -42,6 +43,7 @@ const (
 	toolClassExplore
 	toolClassShell
 	toolClassPatch
+	toolClassPlan
 	toolClassSubagent
 )
 
@@ -315,6 +317,10 @@ func describeToolCall(call coding.ToolCall) (toolActivityClass, string, string) 
 		)
 	case toolNamePatch:
 		return toolClassPatch, "Update", workspaceLabel
+	case planmode.EnterToolName:
+		return toolClassPlan, "Enter plan mode", ""
+	case planmode.ExitToolName:
+		return toolClassPlan, "Submit for approval", ""
 	case subagent.ToolName, subagent.SpawnToolName:
 		role := subagent.Role(toolArgumentString(arguments, "role"))
 
@@ -709,7 +715,7 @@ func expandedToolActivityRows(
 			prefix: "  └ ", text: expandedToolCallLabel(activity), state: activity.state,
 		})
 		appendExpandedToolOutput(&rows, activity, "      └ ", "        ", width)
-	case toolClassSubagent:
+	case toolClassPlan, toolClassSubagent:
 		activity := activities[0]
 		appendExpandedToolOutput(&rows, activity, "  └ ", "    ", width)
 	case toolClassShell, toolClassPatch:
@@ -1024,6 +1030,12 @@ func toolActivityHeading(
 		}
 
 		return glyph, verb, ""
+	case toolClassPlan:
+		if state == toolStateFailed || state == toolStateInterrupted {
+			return glyph, activity.action + " · " + toolActivityReason(activity), activity.subject
+		}
+
+		return glyph, activity.action, activity.subject
 	case toolClassSubagent:
 		return glyph, activity.action, activity.subject
 	}

@@ -21,14 +21,22 @@ type readArgs struct {
 	Limit  *int   `json:"limit" description:"Optional maximum number of lines"`
 }
 
-//nolint:gocyclo // Pagination, UTF-8 validation, and two budgets form one streaming read state machine.
 func (s *service) read(ctx context.Context, args readArgs) (string, error) {
-	name, err := workspaceFilePath(args.Path)
+	offset, limit, err := lineWindow(args.Offset, args.Limit, s.limits.ReadLines)
 	if err != nil {
 		return "", failure(readName, err)
 	}
 
-	offset, limit, err := lineWindow(args.Offset, args.Limit, s.limits.ReadLines)
+	if planPath, ok := s.admittedPlanReadPath(args.Path); ok {
+		content, readErr := s.plan.Read(ctx)
+		if readErr != nil {
+			return "", failure(readName, readErr)
+		}
+
+		return readLines(ctx, planPath, strings.NewReader(content), offset, limit, s.limits)
+	}
+
+	name, err := workspaceFilePath(args.Path)
 	if err != nil {
 		return "", failure(readName, err)
 	}
@@ -54,7 +62,19 @@ func (s *service) read(ctx context.Context, args readArgs) (string, error) {
 		return "", failure(readName, fmt.Errorf("coding tools: rewind %q: %w", name, err))
 	}
 
-	reader := bufio.NewReaderSize(file, 64<<10)
+	return readLines(ctx, name, file, offset, limit, s.limits)
+}
+
+//nolint:gocyclo // Pagination, UTF-8 validation, and two budgets form one streaming read state machine.
+func readLines(
+	ctx context.Context,
+	name string,
+	source io.Reader,
+	offset int,
+	limit int,
+	limits Limits,
+) (string, error) {
+	reader := bufio.NewReaderSize(source, 64<<10)
 
 	var body strings.Builder
 
@@ -105,9 +125,9 @@ func (s *service) read(ctx context.Context, args readArgs) (string, error) {
 		prefix := strconv.Itoa(lineNumber) + ": "
 
 		entry := prefix + text + "\n"
-		if !appendBounded(&body, entry, s.limits.OutputBytes) {
+		if !appendBounded(&body, entry, limits.OutputBytes) {
 			if returned == 0 {
-				available := max(s.limits.OutputBytes-len(prefix)-1, 0)
+				available := max(limits.OutputBytes-len(prefix)-1, 0)
 
 				short, _ := truncateUTF8(text, available)
 

@@ -2,8 +2,6 @@ package acp
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"iter"
 	"sync"
@@ -471,8 +469,7 @@ func TestSessionResolvesExactPlanRevision(t *testing.T) {
 	t.Parallel()
 
 	content := "# Plan\n\nImplement it."
-	sum := sha256.Sum256([]byte(content))
-	request, err := planreview.NewProposal("call-plan", hex.EncodeToString(sum[:]), content)
+	request, err := planreview.NewRequest(planreview.KindExit, "call-plan", content)
 	require.NoError(t, err)
 
 	controller := &fakeController{
@@ -493,8 +490,8 @@ func TestSessionResolvesExactPlanRevision(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, acpsdk.StopReasonEndTurn, stop)
 	assert.Equal(t, planreview.Resolution{
-		RequestID: request.ID, Revision: request.Revision,
-		Decision: planreview.DecisionApprove,
+		RequestID: request.ID,
+		Decision:  planreview.DecisionApprove,
 	}, controller.plan)
 	require.Len(t, out.permissionRequests, 1)
 	rawInput := requireType[map[string]any](t, out.permissionRequests[0].ToolCall.RawInput)
@@ -506,8 +503,7 @@ func TestSessionContinuesPlanningAtExactRevision(t *testing.T) {
 	t.Parallel()
 
 	content := "# Plan\n\nRevise it."
-	sum := sha256.Sum256([]byte(content))
-	request, err := planreview.NewProposal("call-plan", hex.EncodeToString(sum[:]), content)
+	request, err := planreview.NewRequest(planreview.KindExit, "call-plan", content)
 	require.NoError(t, err)
 
 	controller := &fakeController{
@@ -528,8 +524,8 @@ func TestSessionContinuesPlanningAtExactRevision(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, acpsdk.StopReasonEndTurn, stop)
 	assert.Equal(t, planreview.Resolution{
-		RequestID: request.ID, Revision: request.Revision,
-		Decision: planreview.DecisionContinue,
+		RequestID: request.ID,
+		Decision:  planreview.DecisionRevise,
 	}, controller.plan)
 }
 

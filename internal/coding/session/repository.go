@@ -480,9 +480,12 @@ func (r *Repository) List(ctx context.Context) ([]Metadata, error) {
 
 	metas := make([]Metadata, 0, len(stored))
 	for _, value := range stored {
-		meta, err := projectMetadata(value)
+		meta, ok, err := projectStoredMetadata(value)
 		if err != nil {
 			return nil, err
+		}
+		if !ok {
+			continue
 		}
 		if meta.Kind != KindConversation {
 			continue
@@ -708,9 +711,12 @@ func projectSubagentListMetadata(
 	workspaceID string,
 	parentSessionID string,
 ) (Metadata, bool, error) {
-	meta, err := projectMetadata(value)
+	meta, ok, err := projectStoredMetadata(value)
 	if err != nil {
 		return Metadata{}, false, err
+	}
+	if !ok {
+		return Metadata{}, false, nil
 	}
 	if meta.Kind != KindSubagent || meta.WorkspaceID != workspaceID ||
 		meta.ParentSessionID != parentSessionID {
@@ -783,6 +789,23 @@ func newProvisionalHandle(
 	}
 
 	return &Handle{store: store, session: sess, meta: meta, lock: lock}, nil
+}
+
+// projectStoredMetadata projects one stored header and ignores records whose
+// coding metadata cannot be interpreted. Legacy or partially written sessions
+// carry no workspace or kind, so they cannot be listed, attributed to a parent
+// lineage, or repaired; they must never break listing or reconciliation.
+func projectStoredMetadata(value harness.SessionMetadata) (Metadata, bool, error) {
+	meta, err := projectMetadata(value)
+	if err != nil {
+		if errors.Is(err, ErrInvalid) {
+			return Metadata{}, false, nil
+		}
+
+		return Metadata{}, false, err
+	}
+
+	return meta, true, nil
 }
 
 func projectMetadata(stored harness.SessionMetadata) (Metadata, error) {

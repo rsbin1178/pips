@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"slices"
 	"strings"
 	"unicode"
 
@@ -19,6 +20,7 @@ import (
 
 type commandDescriptor struct {
 	name        string
+	aliases     []string
 	description string
 	idleOnly    bool
 	arguments   bool
@@ -36,6 +38,7 @@ var commands = []commandDescriptor{
 	{name: "new", description: "start a new session", idleOnly: true},
 	{name: "resume", description: "resume a workspace session", idleOnly: true},
 	{name: "plan", description: "enter read-only Plan Mode", idleOnly: true},
+	{name: "view-plan", aliases: []string{"show-plan", "plan-view"}, description: "preview the saved session plan", idleOnly: true},
 	{name: "mode", description: "switch Agent or Plan operating mode", idleOnly: true},
 	{name: "agents", description: "inspect read-only specialist runs", idleOnly: true},
 	{name: commandTeam, description: "propose or inspect a coding Team", idleOnly: true, arguments: true},
@@ -181,6 +184,12 @@ func (m *Model) executeCommand(command commandDescriptor) (tea.Model, tea.Cmd) {
 	switch command.name {
 	case "plan":
 		return m, m.runModeControl(coding.ModePlan)
+	case "view-plan":
+		previous := m.picker.previousComposer
+		m.closeCommandPicker(false)
+		m.restoreCommandComposer(previous)
+
+		return m, m.startPlanView()
 	case "mode":
 		previous := m.picker.previousComposer
 		m.closeCommandPicker(false)
@@ -313,7 +322,10 @@ func (m *Model) filteredCommands() []commandDescriptor {
 	filtered := make([]commandDescriptor, 0, len(commands))
 	for _, command := range commands {
 		if query == "" || strings.Contains(command.name, query) ||
-			strings.Contains(command.description, query) {
+			strings.Contains(command.description, query) ||
+			slices.ContainsFunc(command.aliases, func(alias string) bool {
+				return strings.Contains(alias, query)
+			}) {
 			filtered = append(filtered, command)
 		}
 	}

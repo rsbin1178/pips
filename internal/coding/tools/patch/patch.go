@@ -59,6 +59,9 @@ type Document struct {
 type Limits struct {
 	Bytes int
 	Files int
+	// PlanPath, when non-empty, admits that exact absolute plan-file path as a
+	// patch target in addition to workspace-relative paths.
+	PlanPath string
 }
 
 // Parse validates the complete patch before returning any operation.
@@ -102,7 +105,7 @@ func Parse(value string, limits Limits) (Document, error) {
 			return Document{}, fmt.Errorf("%w: unexpected line %d", ErrInvalid, index+1)
 		}
 
-		name, err := workspace.NormalizePath(strings.TrimSpace(rawPath), false)
+		name, err := normalizeTarget(strings.TrimSpace(rawPath), limits.PlanPath)
 		if err != nil {
 			return Document{}, fmt.Errorf("%w: line %d: %w", ErrInvalid, index+1, err)
 		}
@@ -252,6 +255,16 @@ func Apply(original []byte, hunks []Hunk) ([]byte, error) {
 	}
 
 	return []byte(updated), nil
+}
+
+// normalizeTarget admits the exact plan-file path when plan mode supplies one
+// and otherwise enforces the workspace-relative grammar.
+func normalizeTarget(rawPath, planPath string) (string, error) {
+	if planPath != "" && rawPath == planPath {
+		return planPath, nil
+	}
+
+	return workspace.NormalizePath(rawPath, false)
 }
 
 func parseHeader(line string) (Kind, string, bool) {

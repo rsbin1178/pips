@@ -34,7 +34,7 @@ import (
 	"github.com/rsbin1178/pips/internal/coding/model"
 	"github.com/rsbin1178/pips/internal/coding/modelcatalog"
 	"github.com/rsbin1178/pips/internal/coding/paths"
-	"github.com/rsbin1178/pips/internal/coding/plandoc"
+	"github.com/rsbin1178/pips/internal/coding/planmode"
 	"github.com/rsbin1178/pips/internal/coding/planreview"
 	"github.com/rsbin1178/pips/internal/coding/question"
 	"github.com/rsbin1178/pips/internal/coding/resource"
@@ -143,8 +143,10 @@ type Runtime struct {
 	repository      *session.Repository
 	session         *harness.Session
 	journal         *interactionJournal
-	plans           plandoc.Repository
-	planRef         plandoc.Ref
+	planStore       *planmode.Store
+	planMode        planmode.State
+	planReturning   bool
+	planExited      bool
 	policy          execution.Policy
 	executor        *execution.Executor
 	tempRoot        *execution.PrivateTempRoot
@@ -354,12 +356,26 @@ func openRuntime(
 		return nil, err
 	}
 	stack.add(func(context.Context) error { return handle.Close() })
-	planRepository, err := plandoc.New(options.Paths.PlansDir(), plandoc.DefaultLimits())
+	planStore, err := planmode.NewStore(
+		options.Paths.SessionsDir(),
+		handle.Metadata().ID,
+		planmode.DefaultLimits(),
+	)
 	if err != nil {
 		return nil, err
 	}
-	planRef := plandoc.Ref{
-		SessionID: handle.Metadata().ID, WorkspaceID: handle.Metadata().WorkspaceID,
+	planState, err := planStore.LoadState(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// The configured mode is the initial user intent for this process: a plan
+	// configuration toggles plan mode on (Pending), agent turns it off.
+	planState, err = applyConfiguredMode(planState, options.Config.Mode)
+	if err != nil {
+		return nil, err
+	}
+	if err := planStore.SaveState(ctx, planState); err != nil {
+		return nil, err
 	}
 
 	policy, err := newRuntimePolicy(options)
@@ -542,8 +558,8 @@ func openRuntime(
 		handle:        handle,
 		repository:    repository,
 		session:       handle.Session(),
-		plans:         planRepository,
-		planRef:       planRef,
+		planStore:     planStore,
+		planMode:      planState,
 		policy:        policy,
 		executor:      executor,
 		tempRoot:      scratchRoot,
@@ -610,7 +626,7 @@ func openRuntime(
 		Provider:            resolved.Ref.Provider,
 		ModelID:             resolved.Ref.Model,
 		ContextWindow:       resolved.Limits.ContextWindow,
-		Mode:                options.Config.Mode,
+		PlanMode:            planState,
 		Path:                runtime.session.Path(),
 		HasPendingToolCalls: len(pending) > 0,
 		Tree:                treeSnapshot,
@@ -648,8 +664,8 @@ func openRuntime(
 		return nil, err
 	}
 	runtime.planReviews, err = planreview.NewController(
-		runtime.plans,
-		runtime.planRef,
+		runtime.planStore,
+		runtime,
 		&runtime.resolver,
 	)
 	if err != nil {
@@ -1288,8 +1304,9 @@ func (r *Runtime) ReplacementPreflight(ctx context.Context) error {
 	return nil
 }
 
-// SetMode changes the process-local capability policy at an idle boundary.
-// Existing interactions retain the mode leased when they started.
+// SetMode applies one user-initiated plan-mode toggle. Entering plan mode
+// waits for the next prompt (Pending); leaving it while a turn is in flight
+// defers the exit until the turn completes (ExitPending).
 //
 //nolint:gocyclo // Runtime lifecycle and pending-state guards remain explicit.
 func (r *Runtime) SetMode(ctx context.Context, mode OperatingMode) error {
@@ -1316,28 +1333,43 @@ func (r *Runtime) SetMode(ctx context.Context, mode OperatingMode) error {
 
 		return stateError("set mode", phase, ErrRuntimeClosed)
 	}
-	if r.active != nil || r.interaction != nil || r.state.Phase != PhaseIdle ||
-		r.state.Compaction.Active || r.state.Approval.Kind != ApprovalNone ||
-		r.state.Question.Required != nil || r.state.PlanReview.Required != nil {
-		phase := r.state.Phase
-		r.mu.Unlock()
+	current := r.planMode
+	inFlight := r.active != nil || r.interaction != nil || r.state.Phase != PhaseIdle ||
+		r.state.Compaction.Active
+	r.mu.Unlock()
 
-		return stateError("set mode", phase, ErrRuntimeBusy)
+	var (
+		next planmode.State
+		err  error
+	)
+	if mode == ModePlan {
+		next, err = current.ToggleOn()
+	} else {
+		next, err = current.ToggleOff(inFlight)
 	}
-	if r.state.Mode == mode {
-		r.mu.Unlock()
-
+	if err != nil {
+		return err
+	}
+	if next == current {
 		return nil
 	}
 
 	operationCtx, cancel := context.WithCancel(ctx)
 	operation := &runtimeOperation{cancel: cancel, done: make(chan struct{})}
+
+	r.mu.Lock()
+	if r.active != nil {
+		r.mu.Unlock()
+		cancel()
+
+		return fmt.Errorf("%w: runtime is busy", ErrRuntimeBusy)
+	}
 	r.active = operation
 	r.mu.Unlock()
 	defer r.endOperation(operation)
 
 	emitter := newEventEmitter(operationCtx, r, nil, false)
-	if err := emitter.emit("", "", EventModeChanged, ModeChanged{Mode: mode}); err != nil {
+	if err := r.transitionPlanMode(operationCtx, next, "", emitter); err != nil {
 		return err
 	}
 

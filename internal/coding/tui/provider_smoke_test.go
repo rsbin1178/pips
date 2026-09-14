@@ -15,6 +15,7 @@ import (
 	"github.com/rsbin1178/pips/internal/coding"
 	"github.com/rsbin1178/pips/internal/coding/cli"
 	"github.com/rsbin1178/pips/internal/coding/paths"
+	"github.com/rsbin1178/pips/internal/coding/planmode"
 	"github.com/stretchr/testify/require"
 )
 
@@ -137,7 +138,7 @@ func TestProviderPlanConformance(t *testing.T) {
 	}
 
 	questionRequired := false
-	planWriteStarted := false
+	planExitStarted := false
 	scanner := bufio.NewScanner(bytes.NewReader(stdout.Bytes()))
 	scanner.Buffer(make([]byte, 64<<10), 1<<20)
 	for scanner.Scan() {
@@ -157,13 +158,13 @@ func TestProviderPlanConformance(t *testing.T) {
 				} `json:"call"`
 			}
 			require.NoError(t, json.Unmarshal(envelope.Payload, &payload))
-			planWriteStarted = planWriteStarted || payload.Call.Name == "write_plan"
+			planExitStarted = planExitStarted || payload.Call.Name == planmode.ExitToolName
 		default:
 		}
 	}
 	require.NoError(t, scanner.Err())
 	require.True(t, questionRequired, "broad product request reached no structured question")
-	require.False(t, planWriteStarted, "Plan write started before material product decisions")
+	require.False(t, planExitStarted, "Plan approval started before material product decisions")
 }
 
 func requiredSmokeEnvironment(t *testing.T, name string) string {

@@ -14,7 +14,6 @@ import (
 	"github.com/rsbin1178/pips/agent/harness"
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding/execution"
-	"github.com/rsbin1178/pips/internal/coding/planflow"
 	"github.com/rsbin1178/pips/internal/coding/subagent"
 )
 
@@ -32,7 +31,6 @@ type interaction struct {
 	harness           *harness.Harness
 	search            *catalog.ToolSearch
 	changeTracker     *interactionChangeTracker
-	planFlow          *planflow.Controller
 	usage             TokenUsage
 	stop              agent.StopReason
 	hookStopRequested bool

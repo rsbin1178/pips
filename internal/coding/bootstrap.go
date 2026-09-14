@@ -6,6 +6,7 @@ import (
 
 	"github.com/rsbin1178/pips/agent/harness"
 	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/internal/coding/planmode"
 	"github.com/rsbin1178/pips/internal/coding/tasklist"
 )
 
@@ -15,7 +16,7 @@ type BootstrapOptions struct {
 	Provider            ai.Provider
 	ModelID             string
 	ContextWindow       int
-	Mode                OperatingMode
+	PlanMode            planmode.State
 	Path                []harness.Entry
 	HasPendingToolCalls bool
 	Tree                harness.TreeSnapshot
@@ -43,8 +44,13 @@ func BootstrapState(options BootstrapOptions) (BootstrapResult, error) {
 	if options.ContextWindow < 0 {
 		return BootstrapResult{}, invalidEvent("invalid bootstrap context window")
 	}
-	if !validOperatingMode(options.Mode) {
-		return BootstrapResult{}, invalidEvent("invalid bootstrap operating mode")
+	if !options.PlanMode.Valid() {
+		return BootstrapResult{}, invalidEvent("invalid bootstrap plan mode")
+	}
+
+	mode := ModeAgent
+	if options.PlanMode.Plan() {
+		mode = ModePlan
 	}
 
 	recovery, err := replayInteractionJournal(options.Path)
@@ -62,7 +68,7 @@ func BootstrapState(options BootstrapOptions) (BootstrapResult, error) {
 	state := State{
 		SessionID: options.SessionID, SessionOpen: true,
 		Provider: options.Provider, ModelID: options.ModelID, ContextWindow: options.ContextWindow,
-		Mode: options.Mode, Phase: PhaseIdle,
+		Mode: mode, PlanMode: options.PlanMode, Phase: PhaseIdle,
 	}
 	if options.Tree.SessionID != "" {
 		state.Tree, err = sessionTreeFromHarness(options.Tree)
@@ -101,7 +107,6 @@ func BootstrapState(options BootstrapOptions) (BootstrapResult, error) {
 		state.Transcript = state.Transcript[len(state.Transcript)-maxEventItems:]
 	}
 	state.MessageCandidates = make([]CandidateIdentity, len(state.Transcript))
-	state.PlanProposals = projectPlanProposals(state.Transcript)
 	state.SyntheticMessages = syntheticMessageIndexes(state.Transcript)
 	state.ContextTokens = harness.EstimateContext(options.Path)
 
@@ -115,7 +120,7 @@ func BootstrapState(options BootstrapOptions) (BootstrapResult, error) {
 	if recovery.PendingID != "" {
 		if options.HasPendingToolCalls {
 			state.Interaction = InteractionState{
-				ID: recovery.PendingID, Active: true, Resumed: true, Mode: options.Mode,
+				ID: recovery.PendingID, Active: true, Resumed: true, Mode: mode,
 			}
 			state.Phase = PhasePaused
 		} else {

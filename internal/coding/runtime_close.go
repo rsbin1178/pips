@@ -43,6 +43,54 @@ func (r *Runtime) Close(ctx context.Context) error {
 	}
 }
 
+// isClosing reports whether Close owns the runtime.
+func (r *Runtime) isClosing() bool {
+	if r == nil {
+		return true
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return r.closing || r.closed
+}
+
+// hasParkedDecision reports whether a user-facing decision is still displayed
+// when Close starts. Such an interaction is preserved for the next open.
+func (r *Runtime) hasParkedDecision() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return r.state.Question.Required != nil || r.state.PlanReview.Required != nil
+}
+
+// retireParkedInteraction releases the runtime-owned resources of an
+// interaction that stays parked for a resumed run. Unlike finishInteraction it
+// writes no terminal journal entry and emits no terminal events, because the
+// pending decision — and the interaction that displays it — must remain
+// durable.
+func (r *Runtime) retireParkedInteraction(ctx context.Context, current *interaction) error {
+	if current == nil {
+		return nil
+	}
+
+	for _, runID := range current.runIDs {
+		current.search.Forget(runID)
+	}
+	r.clearHookToolContext()
+	r.pending.clear()
+	r.resolver.set(nil)
+
+	r.mu.Lock()
+	if r.interaction == current {
+		r.interaction = nil
+	}
+	r.recovery.PendingID = ""
+	r.mu.Unlock()
+
+	return current.integration.release(ctx)
+}
+
 func (r *Runtime) runCloseCleanup(ctx context.Context) {
 	for {
 		r.mu.Lock()
@@ -77,13 +125,23 @@ func (r *Runtime) closeResources(ctx context.Context, current *interaction) erro
 	r.mu.Unlock()
 
 	errs := make([]error, 0, 8)
+	// A parked question or Plan review outlives this process: its interaction
+	// journal stays open so the next open re-parks the same decision instead of
+	// failing the Session on unresolved pending calls.
+	parked := r.hasParkedDecision()
 	if current != nil {
-		if err := r.finishInteraction(
-			context.WithoutCancel(ctx),
-			current,
-			InteractionCanceled,
-			emitter,
-		); err != nil {
+		var err error
+		if parked {
+			err = r.retireParkedInteraction(context.WithoutCancel(ctx), current)
+		} else {
+			err = r.finishInteraction(
+				context.WithoutCancel(ctx),
+				current,
+				InteractionCanceled,
+				emitter,
+			)
+		}
+		if err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -110,8 +168,12 @@ func (r *Runtime) closeResources(ctx context.Context, current *interaction) erro
 	}
 	r.runSessionEnd(ctx, SessionClosedNormally, emitter)
 
-	if err := emitter.emit("", "", EventSessionClosed, SessionClosed{Reason: SessionClosedNormally}); err != nil {
-		errs = append(errs, err)
+	// The reducer keeps the Session open while a parked decision is displayed
+	// for the resumed run.
+	if !parked {
+		if err := emitter.emit("", "", EventSessionClosed, SessionClosed{Reason: SessionClosedNormally}); err != nil {
+			errs = append(errs, err)
+		}
 	}
 
 	resources := &cleanupStack{}

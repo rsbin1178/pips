@@ -383,24 +383,21 @@ func (c *Controller) WorkspaceStatus(
 	return status, err
 }
 
-// ReadPlanDocument loads one exact path-free Plan revision for review.
+// ReadPlanDocument loads the current session plan file for review.
 //
 //nolint:dupl // Optional Runtime read capabilities deliberately share the Controller lease boundary.
-func (c *Controller) ReadPlanDocument(
-	ctx context.Context,
-	expectedRevision string,
-) (coding.PlanDocument, error) {
+func (c *Controller) ReadPlanDocument(ctx context.Context) (coding.PlanDocument, error) {
 	var document coding.PlanDocument
 	err := c.withRuntime(func(runtime runtimeInstance) error {
 		reader, ok := runtime.(interface {
-			ReadPlanDocument(context.Context, string) (coding.PlanDocument, error)
+			ReadPlanDocument(context.Context) (coding.PlanDocument, error)
 		})
 		if !ok {
 			return fmt.Errorf("%w: runtime does not expose Plan documents", ErrInvalid)
 		}
 
 		var err error
-		document, err = reader.ReadPlanDocument(ctx, expectedRevision)
+		document, err = reader.ReadPlanDocument(ctx)
 
 		return err
 	})

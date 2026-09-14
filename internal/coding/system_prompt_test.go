@@ -3,7 +3,9 @@ package coding
 
 import (
 	"context"
+	"encoding/json"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -61,8 +63,7 @@ func TestBuildCodingSystemPromptKeepsSharedPrefixStableAcrossModes(t *testing.T)
 	agentOptions.ToolNames = []string{"read", "shell", "apply_patch"}
 	planOptions := base
 	planOptions.Mode = ModePlan
-	planOptions.PlanDocument = "session-bound:s-1"
-	planOptions.ToolNames = []string{"read", "read_plan", "write_plan", "present_plan"}
+	planOptions.ToolNames = []string{"read", "apply_patch", "shell", "enter_plan_mode", "exit_plan_mode"}
 
 	agentParts, err := buildCodingSystemPromptParts(agentOptions)
 	require.NoError(t, err)
@@ -73,11 +74,56 @@ func TestBuildCodingSystemPromptKeepsSharedPrefixStableAcrossModes(t *testing.T)
 	assert.NotEqual(t, agentParts.Suffix, planParts.Suffix)
 	assert.NotContains(t, agentParts.SharedPrefix, "operating_mode")
 	assert.NotContains(t, agentParts.SharedPrefix, "visible_tools")
+
+	// Plan mode injects its own per-request reminder, so the static prompt only
+	// states the capability boundary inside the JSON mode context.
 	assert.Contains(t, planParts.Suffix, `"operating_mode": "plan"`)
-	assert.Contains(t, planParts.Suffix, "present_plan alone")
-	assert.Contains(t, planParts.Suffix, "Phase 1 — Ground")
-	assert.Contains(t, planParts.Suffix, "mechanically completes")
-	assert.Contains(t, planParts.Suffix, "Plan approval is not Tool approval")
+	assert.Contains(t, planParts.Suffix, `"visible_tools": [`)
+	assert.Contains(t, planParts.Suffix, "Do not make any edits or writes")
+	assert.NotContains(t, planParts.Suffix, "present_plan alone")
+	assert.NotContains(t, planParts.Suffix, "plan_checkpoint")
+	assert.NotContains(t, planParts.Suffix, "Plan approval is not Tool approval")
+}
+
+func TestBuildCodingSystemPromptModeContextCarriesOnlyCapabilityMetadata(t *testing.T) {
+	t.Parallel()
+
+	parts, err := buildCodingSystemPromptParts(systemPromptOptions{
+		Model: "example/model", WorkingDirectory: "/workspace", Platform: "linux",
+		Date: "2026-07-25", Sandbox: "workspace-write", Approval: "on-request",
+		WorkspaceTrusted: true, Mode: ModePlan, ToolNames: []string{"read", "apply_patch"},
+	})
+	require.NoError(t, err)
+
+	context := modeContextDocument(t, parts.Suffix)
+	assert.Equal(t, []string{"operating_mode", "visible_tools"}, mapKeys(context))
+	assert.Equal(t, "plan", context["operating_mode"])
+	assert.Equal(t, []any{"apply_patch", "read"}, context["visible_tools"])
+}
+
+// modeContextDocument decodes the JSON mode context embedded in a prompt suffix.
+func modeContextDocument(t *testing.T, suffix string) map[string]any {
+	t.Helper()
+
+	_, encoded, found := strings.Cut(suffix, "<operating_mode_context>\n")
+	require.True(t, found, "mode context is missing")
+	encoded, _, found = strings.Cut(encoded, "\n</operating_mode_context>")
+	require.True(t, found, "mode context is not terminated")
+
+	var context map[string]any
+	require.NoError(t, json.Unmarshal([]byte(encoded), &context))
+
+	return context
+}
+
+func mapKeys(values map[string]any) []string {
+	result := make([]string, 0, len(values))
+	for key := range values {
+		result = append(result, key)
+	}
+	slices.Sort(result)
+
+	return result
 }
 
 func TestBuildCodingSystemPromptPrefersStructuredQuestionsWhenAvailable(t *testing.T) {

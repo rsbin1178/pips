@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"errors"
 
 	"github.com/rsbin1178/pips/agent"
@@ -18,10 +19,36 @@ type service struct {
 	tree       *workspace.Tree
 	limits     Limits
 	patchFault patchFault
+	plan       *PlanFile
+}
+
+// PlanFile is the injected plan-mode file boundary. The patch tool applies
+// changes to this exact file when plan mode admits it.
+type PlanFile struct {
+	Path     func() string
+	Admitted func() bool
+	Read     func(context.Context) (string, error)
+	Write    func(context.Context, string) error
 }
 
 type catalogConfig struct {
 	shell agent.Tool
+	plan  *PlanFile
+}
+
+// WithPlanFile admits the plan-mode file as an additional patch target while
+// plan mode is active.
+func WithPlanFile(file PlanFile) CatalogOption {
+	return func(cfg *catalogConfig) error {
+		if file.Path == nil || file.Admitted == nil || file.Read == nil || file.Write == nil {
+			return errors.New("coding tools: incomplete plan file boundary")
+		}
+
+		cloned := file
+		cfg.plan = &cloned
+
+		return nil
+	}
 }
 
 // CatalogOption adds an explicitly constructed coding tool.
@@ -76,7 +103,7 @@ func NewCatalog(
 		}
 	}
 
-	service := &service{tree: tree, limits: limits}
+	service := &service{tree: tree, limits: limits, plan: config.plan}
 	readTool := agent.Parallel(agent.NewTool(
 		readName,
 		"Read a bounded range of lines from a workspace text file. Use offset to continue truncated output.",

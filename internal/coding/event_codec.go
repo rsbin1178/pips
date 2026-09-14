@@ -194,6 +194,8 @@ func decodeEventPayload(eventType EventType, data []byte) (EventPayload, error) 
 		return decodePayload[PlanReviewRequired](data)
 	case EventPlanReviewResolved:
 		return decodePayload[PlanReviewResolved](data)
+	case EventPlanModeChanged:
+		return decodePayload[PlanModeChanged](data)
 	case EventWorkspaceChanged:
 		return decodePayload[WorkspaceChanged](data)
 	case EventStatusChanged:

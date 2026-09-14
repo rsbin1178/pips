@@ -143,6 +143,7 @@ type Model struct {
 	prompt               promptState
 	promptSeq            uint64
 	completionMarkers    []completionMarker
+	planModeNotices      []string
 	worktreeLoading      bool
 	worktreeGeneration   uint64
 	worktreeCancel       context.CancelFunc
@@ -287,7 +288,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		activity := m.startActivityClock(false)
 
 		return m, tea.Sequence(commit, tea.Batch(
-			m.composer.Focus(), m.startSubscription(), m.loadPlanReviewIfNeeded(), activity,
+			m.composer.Focus(), m.startSubscription(), m.loadPlanViewIfNeeded(), activity,
 		))
 	case subscriptionStartedMsg:
 		activityWasVisible := m.activityClockVisible()
@@ -322,7 +323,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.continueIfPaused(),
 			m.refreshTeamProjectionSnapshot(),
 			m.loadPausedSubagentControls(),
-			m.loadPlanReviewIfNeeded(),
+			m.loadPlanViewIfNeeded(),
 			m.startActivityClock(activityWasVisible),
 		)
 		if commit != nil {
@@ -405,24 +406,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 
 		return m, nil
 	case planDocumentMsg:
-		if m.prompt.kind != promptPlanReview ||
-			message.generation != m.prompt.generation ||
-			message.requestID != m.prompt.planReview.request.ID {
-			return m, nil
-		}
-		m.prompt.planReview.loading = false
-		m.prompt.planReview.err = message.err
-		if message.err == nil {
-			if message.document.Revision != m.prompt.planReview.request.Revision ||
-				message.document.Size != m.prompt.planReview.request.Size {
-				m.prompt.planReview.err = errors.New("plan revision changed; resubmit the current Plan")
-			} else {
-				m.prompt.planReview.document = message.document
-			}
-		}
-		m.setLayout()
-
-		return m, nil
+		return m.applyPlanDocument(message)
 	case bridgeImageMsg:
 		return m.updateBridgeImage(message)
 	case cancelResultMsg:
@@ -1246,19 +1230,7 @@ func (m *Model) readyView() tea.View {
 			}
 		}
 	}
-	if m.prompt.kind == promptPlanReview && m.prompt.planReview.editing && promptIndex >= 0 {
-		if cursorX, cursorY, ok := editorOffset(promptContent, m.prompt.planReview.editor.View()); ok {
-			view.Cursor = m.prompt.planReview.editor.Cursor()
-			if view.Cursor != nil {
-				promptOffset := lipgloss.Height(lipgloss.JoinVertical(
-					lipgloss.Left,
-					parts[:promptIndex]...,
-				))
-				view.Cursor.X += cursorX
-				view.Cursor.Y += promptOffset + cursorY
-			}
-		}
-	}
+	m.placePlanReviewCursor(&view, parts, promptContent, promptIndex)
 	if view.Cursor != nil {
 		cursorX, cursorY := m.composerBoxCursorOffset()
 		view.Cursor.X += cursorX
@@ -1519,6 +1491,7 @@ func (m *Model) setLayout() {
 	}
 	if m.prompt.kind == promptPlanReview {
 		m.prompt.planReview.editor.SetWidth(max(1, width-4))
+		m.prompt.planReview.commentEditor.SetWidth(max(1, width-4))
 	}
 	if m.route.kind == routeSessions || m.route.kind == routeSkills {
 		m.route.search.SetWidth(routeSearchInputWidth(width))
@@ -1670,7 +1643,7 @@ func (m *Model) toggleLatestTool() tea.Cmd {
 			detail := newToolDetailView(block)
 
 			return m.openToolDetailRoute(detail)
-		case blockUser, blockAssistant, blockDraft, blockQuestion, blockDiagnostic,
+		case blockUser, blockAssistant, blockDraft, blockPlan, blockQuestion, blockDiagnostic,
 			blockChange, blockError, blockCompletion, blockTeam:
 		}
 	}
@@ -1912,7 +1885,7 @@ func (m *Model) updateStream(message streamItemMsg) (tea.Model, tea.Cmd) {
 		m.invalidateAgentDetail(message.item),
 		m.invalidateTeamProjection(message.item.event),
 		m.observeSubagentControl(message.item.event),
-		m.loadPlanReviewIfNeeded(),
+		m.loadPlanViewIfNeeded(),
 	)
 
 	m.waiting = true
@@ -1943,12 +1916,14 @@ func (m *Model) reduceStreamItem(item streamItem) {
 	}
 
 	previousSessionID := m.state.SessionID
+	previousPlanMode := m.state.PlanMode
 	m.state = next
 	if previousSessionID != m.state.SessionID {
 		m.stopTeamWorkerRouteSubscription()
 		m.resetTeamProjection(m.state.SessionID)
 		m.resetSubagentInteractions()
 	}
+	m.queuePlanModeNotices(previousPlanMode)
 	m.trackTeamLifecycleEvent(item.event)
 	m.applyTeamInteractionEvent(item.event)
 	if item.event.Type == coding.EventSessionNavigated ||
@@ -2116,7 +2091,7 @@ func (m *Model) updateSubscription(message subscriptionEventMsg) (tea.Model, tea
 		m.invalidateAgentDetail(streamItem{event: message.record.Event}),
 		m.invalidateTeamProjection(message.record.Event),
 		m.observeSubagentControl(message.record.Event),
-		m.loadPlanReviewIfNeeded(),
+		m.loadPlanViewIfNeeded(),
 		m.startActivityClock(activityWasVisible),
 	)
 	wait := message.bridge.wait()
