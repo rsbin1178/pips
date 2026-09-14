@@ -1,6 +1,7 @@
 package coding
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -114,6 +115,29 @@ func TestRuntimeQuestionSurvivesRestartWithoutModelReplay(t *testing.T) {
 		Answers: []question.Answer{{Selections: []string{"React"}}},
 	}))
 	assert.Len(t, model.Requests(), 1)
+}
+
+func TestRuntimeCloseParkedOnQuestionIsClean(t *testing.T) {
+	t.Parallel()
+
+	base := t.TempDir()
+	first := openTestRuntimeAt(
+		t,
+		base,
+		SessionTarget{},
+		newRuntimeModel(runtimeQuestionResponse(t, "call-restart")),
+	)
+	sessionID := first.handle.Metadata().ID
+	collectRuntimeEvents(t, first.Prompt(t.Context(), ai.UserText("choose")))
+	require.NotNil(t, first.Snapshot().Question.Required)
+
+	require.NoError(t, first.Close(t.Context()))
+
+	second := openTestRuntimeAt(t, base, SessionTarget{ID: sessionID}, newRuntimeModel())
+	t.Cleanup(func() { _ = second.Close(context.Background()) })
+	require.Equal(t, PhasePaused, second.Snapshot().Phase)
+	events := collectRuntimeEvents(t, second.Continue(t.Context()))
+	assert.Contains(t, eventTypes(events), EventQuestionRequired)
 }
 
 func runtimeQuestionResponse(t *testing.T, callID string) *ai.Response {

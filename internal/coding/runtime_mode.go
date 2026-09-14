@@ -6,28 +6,15 @@ import (
 
 	"github.com/rsbin1178/pips/agent"
 	"github.com/rsbin1178/pips/agent/catalog"
-	"github.com/rsbin1178/pips/internal/coding/planreview"
-	"github.com/rsbin1178/pips/internal/coding/tools"
 )
 
+// catalogPolicyForMode leases the model-visible toolset. Plan mode keeps the
+// ordinary toolset on purpose: file edits are rejected by the plan edit gate
+// rather than hidden from the model.
 func catalogPolicyForMode(mode OperatingMode, tenantID string) (catalog.Policy, error) {
 	switch mode {
-	case ModeAgent:
+	case ModeAgent, ModePlan:
 		return catalog.AllowAll(tenantID, catalog.RiskPrivileged), nil
-	case ModePlan:
-		return catalog.Policy{
-			TenantID: tenantID, Allowlist: []string{"*"}, MaxRisk: catalog.RiskWrite,
-			Authorize: func(_ context.Context, _ string, descriptor catalog.Descriptor) (bool, error) {
-				if descriptor.Risk == catalog.RiskRead {
-					return true, nil
-				}
-
-				return descriptor.Risk == catalog.RiskWrite &&
-					(descriptor.Name == tools.WritePlanName || descriptor.Name == planreview.PresentToolName) &&
-					descriptor.Source.Kind == catalog.SourceLocal &&
-					descriptor.Source.ID == tools.PlanCatalogID, nil
-			},
-		}, nil
 	default:
 		return catalog.Policy{}, fmt.Errorf("%w: unsupported operating mode %q", ErrRuntimeInvalid, mode)
 	}

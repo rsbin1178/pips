@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/rsbin1178/pips/internal/coding/planmode"
 	patchdoc "github.com/rsbin1178/pips/internal/coding/tools/patch"
 	"github.com/rsbin1178/pips/internal/coding/workspace"
 )
@@ -44,12 +45,19 @@ func (s *service) applyPatch(ctx context.Context, args applyPatchArgs) (string, 
 	ctx, cancel := context.WithTimeout(ctx, s.limits.PatchTimeout)
 	defer cancel()
 
+	planPath := s.admittedPlanPath()
+
 	document, err := patchdoc.Parse(args.Patch, patchdoc.Limits{
-		Bytes: s.limits.PatchBytes,
-		Files: s.limits.PatchFiles,
+		Bytes:    s.limits.PatchBytes,
+		Files:    s.limits.PatchFiles,
+		PlanPath: planPath,
 	})
 	if err != nil {
 		return "", failure(applyPatchName, err)
+	}
+
+	if planPath != "" && targetsPlanFile(document, planPath) {
+		return s.applyPlanPatch(ctx, document, planPath)
 	}
 
 	changes, err := s.planPatch(ctx, document)
@@ -91,6 +99,124 @@ func (s *service) applyPatch(ctx context.Context, args applyPatchArgs) (string, 
 		Tool:   applyPatchName,
 		Body:   body.String(),
 		Counts: ResultCounts{Files: len(changes), Bytes: written},
+	}.render(), nil
+}
+
+// admittedPlanPath reports the plan file path when plan mode currently admits
+// patches against it.
+func (s *service) admittedPlanPath() string {
+	if s.plan == nil || !s.plan.Admitted() {
+		return ""
+	}
+
+	return s.plan.Path()
+}
+
+// admittedPlanReadPath reports the plan file path when plan mode currently
+// admits it and the requested path names exactly that file. Reads of the
+// session plan file stay workspace-external, so they are matched by exact
+// path rather than by the workspace tree.
+func (s *service) admittedPlanReadPath(value string) (string, bool) {
+	path := s.admittedPlanPath()
+	if path == "" || strings.TrimSpace(value) != path {
+		return "", false
+	}
+
+	return path, true
+}
+
+// targetsPlanFile reports whether any change writes the plan file.
+func targetsPlanFile(document patchdoc.Document, planPath string) bool {
+	for _, change := range document.Changes {
+		if change.Path == planPath {
+			return true
+		}
+	}
+
+	return false
+}
+
+// applyPlanPatch applies one patch whose only target is the session plan file.
+// Mixed or foreign targets are rejected before any write happens.
+func (s *service) applyPlanPatch(
+	ctx context.Context,
+	document patchdoc.Document,
+	planPath string,
+) (string, error) {
+	for _, change := range document.Changes {
+		if change.Path != planPath {
+			return "", failure(applyPatchName, fmt.Errorf(
+				"%w: plan-mode patches may only target the plan file", patchdoc.ErrInvalid,
+			))
+		}
+	}
+
+	current, readErr := s.plan.Read(ctx)
+	missing := errors.Is(readErr, planmode.ErrNotFound)
+	if readErr != nil && !missing {
+		return "", failure(applyPatchName, readErr)
+	}
+
+	content := current
+	existed := !missing
+
+	var body strings.Builder
+
+	written := 0
+
+	for _, change := range document.Changes {
+		kind := "M"
+
+		switch change.Kind {
+		case patchdoc.Add:
+			// The runtime seeds an empty plan file when plan mode activates, so
+			// the model's natural "write my plan" is an Add. Replace the file
+			// content instead of failing on the seeded file.
+			kind = "A"
+			if existed {
+				kind = "M"
+			}
+
+			content = string(change.Content)
+			existed = true
+		case patchdoc.Update:
+			if !existed {
+				return "", failure(applyPatchName, fmt.Errorf("%w: plan file does not exist", patchdoc.ErrConflict))
+			}
+
+			updated, applyErr := patchdoc.Apply([]byte(content), change.Hunks)
+			if applyErr != nil {
+				return "", failure(applyPatchName, applyErr)
+			}
+
+			content = string(updated)
+		case patchdoc.Delete:
+			if !existed {
+				return "", failure(applyPatchName, fmt.Errorf("%w: plan file does not exist", patchdoc.ErrConflict))
+			}
+
+			kind = "D"
+			content = ""
+			existed = false
+		}
+
+		body.WriteString(kind)
+		body.WriteByte(' ')
+		body.WriteString(planPath)
+		body.WriteByte('\n')
+
+		written += len(content)
+	}
+
+	if err := s.plan.Write(ctx, content); err != nil {
+		return "", failure(applyPatchName, err)
+	}
+
+	return result{
+		OK:     true,
+		Tool:   applyPatchName,
+		Body:   body.String(),
+		Counts: ResultCounts{Files: len(document.Changes), Bytes: written},
 	}.render(), nil
 }
 

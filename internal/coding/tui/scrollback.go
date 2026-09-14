@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding"
+	"github.com/rsbin1178/pips/internal/coding/planmode"
 )
 
 // scrollbackCursor separates immutable conversation history from the live
@@ -22,7 +23,6 @@ type scrollbackCursor struct {
 	tools        int
 	diagnostics  int
 	toolIDs      map[string]struct{}
-	planIDs      map[string]struct{}
 	completions  map[string]struct{}
 	teamAttempts map[teamAttemptKey]projectionFingerprint
 	changes      projectionFingerprint
@@ -41,6 +41,7 @@ func (m *Model) resetScrollback() {
 	teamAttempts := m.scrollback.teamAttempts
 	m.scrollback = scrollbackCursor{}
 	m.scrollback.teamAttempts = teamAttempts
+	m.planModeNotices = nil
 	m.streaming.reset()
 	m.timeline = ""
 }
@@ -245,7 +246,7 @@ func (m *Model) takeStableTimelineBlocks() []timelineBlock {
 	}
 
 	blocks := projectTimelineExcluding(delta, m.scrollback.toolIDs)
-	blocks = m.appendStablePlanProposalBlocks(blocks)
+	blocks = append(blocks, m.takePlanModeNoticeBlocks()...)
 
 	for _, marker := range m.pendingCompletionMarkers() {
 		if block, ok := projectCompletionMarker(marker); ok {
@@ -323,7 +324,6 @@ func (m *Model) activeTimelineBlocks() []timelineBlock {
 	}
 
 	blocks := projectTimelineExcluding(active, m.scrollback.toolIDs)
-	blocks = append(blocks, m.activePlanProposalBlocks(blocks)...)
 	for _, marker := range m.pendingCompletionMarkers() {
 		if block, ok := projectCompletionMarker(marker); ok {
 			blocks = append(blocks, block)
@@ -359,66 +359,47 @@ func (m *Model) activeTimelineBlocks() []timelineBlock {
 	return blocks
 }
 
-func (m *Model) appendStablePlanProposalBlocks(blocks []timelineBlock) []timelineBlock {
-	if m.scrollback.planIDs == nil {
-		m.scrollback.planIDs = make(map[string]struct{})
-	}
-	for _, block := range blocks {
-		if block.kind == blockPlan && block.id != "" {
-			m.scrollback.planIDs[block.id] = struct{}{}
-		}
-	}
+// Plan-mode transition notices committed to the terminal history.
+const (
+	planModeEnteredNotice = "Agent entered plan mode"
+	planModeGateNotice    = "file edits outside session plan.md blocked until plan mode exits"
+	planModeOffNotice     = "Plan mode off"
+)
 
-	for _, proposal := range m.state.PlanProposals {
-		if proposal.Status == coding.PlanProposalPending {
-			continue
-		}
-		if _, exists := m.scrollback.planIDs[proposal.ID]; exists {
-			continue
-		}
-
-		blocks = append(blocks, planProposalBlock(proposal, len(m.state.Transcript)))
-		m.scrollback.planIDs[proposal.ID] = struct{}{}
-	}
-
-	return blocks
+func (m *Model) queuePlanModeNotices(previous planmode.State) {
+	m.planModeNotices = append(m.planModeNotices, planModeTransitionNotices(previous, m.state.PlanMode)...)
 }
 
-func (m *Model) activePlanProposalBlocks(existing []timelineBlock) []timelineBlock {
-	seen := make(map[string]struct{}, len(existing))
-	for _, block := range existing {
-		if block.kind == blockPlan {
-			seen[block.id] = struct{}{}
-		}
+// planModeTransitionNotices returns the history lines for one state-machine
+// transition. Transient states (Pending, ExitPending) stay silent until they
+// settle.
+func planModeTransitionNotices(previous, next planmode.State) []string {
+	if previous == next {
+		return nil
+	}
+	if next == planmode.StateActive && previous != planmode.StateActive {
+		return []string{planModeEnteredNotice, planModeGateNotice}
+	}
+	if next == planmode.StateInactive && previous.Plan() {
+		return []string{planModeOffNotice}
 	}
 
-	blocks := make([]timelineBlock, 0, len(m.state.PlanProposals))
-	for _, proposal := range m.state.PlanProposals {
-		if proposal.Status == coding.PlanProposalPending {
-			continue
-		}
-		if _, committed := m.scrollback.planIDs[proposal.ID]; committed {
-			continue
-		}
-		if _, projected := seen[proposal.ID]; projected {
-			continue
-		}
-
-		blocks = append(blocks, planProposalBlock(proposal, len(m.state.Transcript)))
-	}
-
-	return blocks
+	return nil
 }
 
-func planProposalBlock(proposal coding.PlanProposal, position int) timelineBlock {
-	title := "Plan · Continue planning"
-	if proposal.Status == coding.PlanProposalApproved {
-		title = "Plan · Approved"
+func (m *Model) takePlanModeNoticeBlocks() []timelineBlock {
+	if len(m.planModeNotices) == 0 {
+		return nil
 	}
 
-	return timelineBlock{
-		kind: blockPlan, id: proposal.ID, title: title, body: proposal.Content, position: position,
-	}
+	notices := m.planModeNotices
+	m.planModeNotices = nil
+
+	return []timelineBlock{{
+		kind:     blockDiagnostic,
+		body:     strings.Join(notices, "\n"),
+		position: len(m.state.Transcript),
+	}}
 }
 
 func sliceMessageCandidates(

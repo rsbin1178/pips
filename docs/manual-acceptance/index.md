@@ -45,7 +45,7 @@
 | TUI、会话、树、压缩、主题、状态栏 | [TUI、会话与呈现](tui-sessions-presentation.md) | `MA-TUI-*` | 交互终端 |
 | Workspace 工具、Patch、Shell、Git、附件、图片 | [Workspace、工具、Git 与附件](workspace-tools-git-attachments.md) | `MA-WORK-*` | 写/Shell 用例安全敏感 |
 | Sandbox、网络、权限与审批 | [安全、Sandbox、权限与审批](security-sandbox-permissions.md) | `MA-SEC-*` | 平台条件与安全敏感 |
-| Plan Mode、计划审阅与结构化问题 | [Plan Mode、问题与审阅](plan-mode-questions-review.md) | `MA-PLAN-*` | 交互终端 |
+| Plan Mode、计划文件与计划审批 | [Plan Mode](plan-mode.md) | `MA-PLAN-*` | 交互终端 |
 | Skills、MCP、Extensions、Bundles、Plugins、Hooks | [集成能力](skills-mcp-extensions-plugins-hooks.md) | `MA-INT-*` | 按已配置集成选择 |
 | Builtin 与 Dynamic Subagents | [Subagent](builtin-dynamic-subagents.md) | `MA-SUB-*` | Dynamic 默认关闭 |
 | Coding Team | [Coding Team](coding-teams.md) | `MA-TEAM-*` | Git HEAD、交互确认 |

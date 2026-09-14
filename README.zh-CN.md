@@ -152,6 +152,20 @@ pips --mode plan
 可用的 Bubblewrap 0.8.0+ Sandbox，macOS 使用系统 Seatbelt Sandbox。平台与
 威胁模型边界见 [Coding 执行安全](docs/coding-security.md)。
 
+### 界面截图
+
+真实的 TUI 会话：模型探索工作区、修改文件，并在对话区说明改动结果。
+
+![TUI 会话与工具活动](docs/assets/tui-session.png)
+
+Plan Mode 把计划写入会话的 plan 文件，并在修改工作区之前请求审批。
+
+![Plan 审批界面](docs/assets/plan-review.png)
+
+斜杠命令（包括 `/plan`）都可以在命令面板中搜索。
+
+![命令面板](docs/assets/command-palette.png)
+
 ## 能力地图
 
 ### Go Library

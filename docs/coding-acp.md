@@ -60,6 +60,9 @@ Pips implements ACP protocol version `1` and supports:
 - text and resource-link prompts;
 - inline images and embedded text/blob resources;
 - stable form elicitation for Pips questions when the client advertises it;
+- plan-mode decisions projected as `session/request_permission` prompts: enter
+  offers approve or decline, exit offers approve or request changes, and a
+  cancelled decision leaves plan mode unchanged;
 - session-scoped stdio MCP servers supplied in lifecycle requests;
 - stable message IDs on live and replayed user/assistant chunks;
 - session title/time metadata and context-window usage updates.

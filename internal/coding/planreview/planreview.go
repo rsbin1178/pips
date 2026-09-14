@@ -1,4 +1,5 @@
-// Package planreview coordinates explicit review of one session-bound Plan.
+// Package planreview coordinates the explicit plan-mode decisions surfaced to
+// the user: the enter approval and the exit review.
 //
 //nolint:wsl_v5 // Closed protocol validation keeps identity checks adjacent.
 package planreview
@@ -12,103 +13,122 @@ import (
 	"unicode/utf8"
 )
 
-const maxFeedbackBytes = 16 << 10
+const (
+	// maxNotesBytes bounds one revision-notes payload.
+	maxNotesBytes = 16 << 10
+	// maxComments bounds the number of review comments attached to an approval.
+	maxComments = 128
+	// maxCommentBytes bounds one review comment.
+	maxCommentBytes = 4 << 10
+	// maxCommentsBytes bounds all review comments together.
+	maxCommentsBytes = 16 << 10
+)
 
 var (
-	// ErrInvalid means a request or resolution violates the Plan review protocol.
+	// ErrInvalid means a request or resolution violates the plan review protocol.
 	ErrInvalid = errors.New("coding plan review: invalid value")
-	// ErrNoPending means no submit_plan call is waiting for a decision.
+	// ErrNoPending means no plan decision is waiting for a resolution.
 	ErrNoPending = errors.New("coding plan review: no pending request")
-	// ErrMismatch means a decision does not identify the pending request exactly.
+	// ErrMismatch means a resolution does not identify the pending request exactly.
 	ErrMismatch = errors.New("coding plan review: request mismatch")
 )
 
-// Decision is the user's explicit disposition of a submitted Plan.
-type Decision string
+// Kind distinguishes the two plan-mode decisions.
+type Kind string
 
+// Plan-mode decision kinds.
 const (
-	// DecisionContinue resumes the same Plan interaction for revisions.
-	DecisionContinue Decision = "continue_planning"
-	// DecisionApprove accepts the exact revision and requests Agent Mode at idle.
-	DecisionApprove Decision = "approve_agent_mode"
+	// KindEnter asks the user to approve entering plan mode.
+	KindEnter Kind = "enter"
+	// KindExit presents the plan for approval, revision, or abandonment.
+	KindExit Kind = "exit"
 )
 
-// Arguments are the complete provider-visible submit_plan input.
-type Arguments struct {
-	ExpectedRevision string `json:"expected_revision"`
-}
+// Valid reports whether the kind is known.
+func (k Kind) Valid() bool { return k == KindEnter || k == KindExit }
 
-// PresentArguments atomically supplies the complete Plan and the optimistic
-// revision it replaces. An empty revision is create-only.
-type PresentArguments struct {
-	ExpectedRevision string `json:"expected_revision"`
-	Content          string `json:"content"`
-}
+// Decision is the user's explicit disposition of a plan-mode request.
+type Decision string
 
-// Request is the content-free identity of one submitted Plan revision.
+// Plan-mode decisions.
+const (
+	// DecisionApprove accepts the exit revision (or approves entering plan mode).
+	DecisionApprove Decision = "approve"
+	// DecisionDecline refuses to enter plan mode.
+	DecisionDecline Decision = "decline"
+	// DecisionRevise sends the plan back for another revision.
+	DecisionRevise Decision = "revise"
+	// DecisionQuit abandons the plan and turns plan mode off.
+	DecisionQuit Decision = "quit"
+)
+
+// Request is one content-bound plan-mode decision identity. The plan content
+// is read from disk when the request is created; it is never passed as a tool
+// argument.
 type Request struct {
+	Kind       Kind   `json:"kind"`
 	ID         string `json:"id"`
 	ToolCallID string `json:"tool_call_id"`
-	Revision   string `json:"revision"`
-	Size       int64  `json:"size"`
 	Content    string `json:"content,omitempty"`
+	HasContent bool   `json:"has_content"`
+	Size       int64  `json:"size"`
 }
 
-// Resolution is one exact user decision for a submitted Plan.
+// Resolution is one exact user decision for a pending request.
 type Resolution struct {
 	RequestID string   `json:"request_id"`
-	Revision  string   `json:"revision"`
 	Decision  Decision `json:"decision"`
-	Feedback  string   `json:"feedback,omitempty"`
+	Comments  []string `json:"comments,omitempty"`
+	Notes     string   `json:"notes,omitempty"`
 }
 
-// NewRequest deterministically binds a Tool call to the submitted revision.
-func NewRequest(toolCallID, revision string, size int64) (Request, error) {
-	if !validIdentity(toolCallID) || !validRevision(revision) || size < 0 {
+// Outcome reports what the runtime must apply after a resolution.
+type Outcome struct {
+	Kind     Kind
+	Decision Decision
+}
+
+// NewRequest binds one tool call to the plan content read from disk.
+func NewRequest(kind Kind, toolCallID, content string) (Request, error) {
+	if !kind.Valid() || !validIdentity(toolCallID) || !validContent(content) {
 		return Request{}, fmt.Errorf("%w: invalid request identity", ErrInvalid)
 	}
 
-	sum := sha256.Sum256([]byte(toolCallID + "\x00" + revision))
+	sum := sha256.Sum256([]byte(string(kind) + "\x00" + toolCallID))
 
 	return Request{
+		Kind:       kind,
 		ID:         "plan-" + hex.EncodeToString(sum[:]),
 		ToolCallID: toolCallID,
-		Revision:   revision,
-		Size:       size,
+		Content:    content,
+		HasContent: strings.TrimSpace(content) != "",
+		Size:       int64(len(content)),
 	}, nil
 }
 
-// NewProposal binds the exact full Plan content to the persisted revision.
-func NewProposal(toolCallID, revision, content string) (Request, error) {
-	request, err := NewRequest(toolCallID, revision, int64(len(content)))
-	if err != nil {
-		return Request{}, err
-	}
+// CloneRequest returns an independent request value.
+func CloneRequest(request Request) Request { return request }
 
-	sum := sha256.Sum256([]byte(content))
-	if hex.EncodeToString(sum[:]) != revision {
-		return Request{}, fmt.Errorf("%w: content revision mismatch", ErrInvalid)
-	}
+// CloneResolution returns an independent resolution value.
+func CloneResolution(resolution Resolution) Resolution {
+	resolution.Comments = append([]string(nil), resolution.Comments...)
 
-	request.Content = content
-
-	return request, nil
+	return resolution
 }
 
 // ValidateRequest verifies a request's deterministic identity and bounds.
 func ValidateRequest(request Request) error {
-	want, err := NewRequest(request.ToolCallID, request.Revision, request.Size)
+	if !request.Kind.Valid() || !validIdentity(request.ID) || !validIdentity(request.ToolCallID) {
+		return fmt.Errorf("%w: invalid request identity", ErrInvalid)
+	}
+
+	want, err := NewRequest(request.Kind, request.ToolCallID, request.Content)
 	if err != nil {
 		return err
 	}
-	if request.ID != want.ID {
+
+	if request.ID != want.ID || request.HasContent != want.HasContent || request.Size != want.Size {
 		return fmt.Errorf("%w: request digest mismatch", ErrInvalid)
-	}
-	if request.Content != "" {
-		proposal, err := NewProposal(request.ToolCallID, request.Revision, request.Content)
-		if err != nil || proposal.Size != request.Size {
-			return fmt.Errorf("%w: proposal content mismatch", ErrInvalid)
-		}
 	}
 
 	return nil
@@ -119,48 +139,104 @@ func ValidateResolution(request Request, resolution Resolution) error {
 	if err := ValidateRequest(request); err != nil {
 		return err
 	}
-	if resolution.RequestID != request.ID || resolution.Revision != request.Revision {
+
+	return ValidateResolutionShape(request.Kind, resolution, request.ID)
+}
+
+// ValidDecision reports whether one decision is well-formed for a request kind.
+// It validates the shape only; comments and notes are bounded by
+// [ValidateResolutionShape].
+func ValidDecision(kind Kind, decision Decision) bool {
+	switch kind {
+	case KindEnter:
+		return decision == DecisionApprove || decision == DecisionDecline
+	case KindExit:
+		return decision == DecisionApprove || decision == DecisionRevise || decision == DecisionQuit
+	default:
+		return false
+	}
+}
+
+// ValidateResolutionShape verifies bounded fields for one request kind.
+func ValidateResolutionShape(kind Kind, resolution Resolution, requestID string) error {
+	if !kind.Valid() || requestID == "" || resolution.RequestID != requestID {
 		return fmt.Errorf("%w: resolution does not match request", ErrInvalid)
 	}
 
-	return ValidateResolutionShape(resolution)
+	switch kind {
+	case KindEnter:
+		return validateEnterResolution(resolution)
+	case KindExit:
+		return validateExitResolution(resolution)
+	default:
+		return fmt.Errorf("%w: unsupported request kind", ErrInvalid)
+	}
 }
 
-// ValidateResolutionShape verifies bounded fields without a pending request.
-func ValidateResolutionShape(resolution Resolution) error {
-	if !validIdentity(resolution.RequestID) || !validRevision(resolution.Revision) {
-		return fmt.Errorf("%w: invalid resolution identity", ErrInvalid)
+func validateEnterResolution(resolution Resolution) error {
+	switch resolution.Decision {
+	case DecisionApprove, DecisionDecline:
+		if len(resolution.Comments) > 0 || resolution.Notes != "" {
+			return fmt.Errorf("%w: entry decisions carry no comments", ErrInvalid)
+		}
+
+		return nil
+	default:
+		return fmt.Errorf("%w: unsupported entry decision", ErrInvalid)
+	}
+}
+
+func validateExitResolution(resolution Resolution) error {
+	switch resolution.Decision {
+	case DecisionApprove:
+		if strings.TrimSpace(resolution.Notes) != "" {
+			return fmt.Errorf("%w: approval cannot include revision notes", ErrInvalid)
+		}
+
+		return validateComments(resolution.Comments)
+	case DecisionRevise:
+		if len(resolution.Comments) > 0 {
+			return fmt.Errorf("%w: revision requests carry notes only", ErrInvalid)
+		}
+		if !validOptionalText(resolution.Notes, maxNotesBytes) {
+			return fmt.Errorf("%w: revision notes are too large or invalid", ErrInvalid)
+		}
+
+		return nil
+	case DecisionQuit:
+		if len(resolution.Comments) > 0 || resolution.Notes != "" {
+			return fmt.Errorf("%w: abandoning carries no feedback", ErrInvalid)
+		}
+
+		return nil
+	default:
+		return fmt.Errorf("%w: unsupported exit decision", ErrInvalid)
+	}
+}
+
+func validateComments(comments []string) error {
+	if len(comments) > maxComments {
+		return fmt.Errorf("%w: too many review comments", ErrInvalid)
 	}
 
-	switch resolution.Decision {
-	case DecisionContinue:
-		if !validOptionalText(resolution.Feedback, maxFeedbackBytes) {
-			return fmt.Errorf("%w: feedback is too large or invalid", ErrInvalid)
+	total := 0
+	for _, comment := range comments {
+		if !validOptionalText(comment, maxCommentBytes) {
+			return fmt.Errorf("%w: review comment is too large or invalid", ErrInvalid)
 		}
-	case DecisionApprove:
-		if resolution.Feedback != "" {
-			return fmt.Errorf("%w: approval cannot include feedback", ErrInvalid)
-		}
-	default:
-		return fmt.Errorf("%w: unsupported decision", ErrInvalid)
+
+		total += len(comment)
+	}
+
+	if total > maxCommentsBytes {
+		return fmt.Errorf("%w: review comments are too large", ErrInvalid)
 	}
 
 	return nil
 }
 
-// CloneRequest returns an independent request value.
-func CloneRequest(request Request) Request { return request }
-
-// CloneResolution returns an independent resolution value.
-func CloneResolution(resolution Resolution) Resolution { return resolution }
-
-func validRevision(value string) bool {
-	if len(value) != sha256.Size*2 {
-		return false
-	}
-	_, err := hex.DecodeString(value)
-
-	return err == nil
+func validContent(value string) bool {
+	return utf8.ValidString(value) && len(value) <= 1<<20 && !strings.ContainsRune(value, '\x00')
 }
 
 func validIdentity(value string) bool {

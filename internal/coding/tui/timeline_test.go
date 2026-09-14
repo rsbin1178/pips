@@ -11,7 +11,7 @@ import (
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding"
 	"github.com/rsbin1178/pips/internal/coding/changes"
-	"github.com/rsbin1178/pips/internal/coding/planreview"
+	"github.com/rsbin1178/pips/internal/coding/planmode"
 	"github.com/rsbin1178/pips/internal/coding/question"
 	"github.com/rsbin1178/pips/internal/coding/subagent"
 	"github.com/stretchr/testify/assert"
@@ -83,53 +83,82 @@ func TestTimelineDistinguishesRejectedAndInvalidQuestions(t *testing.T) {
 	assert.Equal(t, "No answer was submitted.", blocks[1].body)
 }
 
-func TestTimelineProjectsPlanReviewSemantically(t *testing.T) {
+func TestTimelineLabelsPlanModeToolActivity(t *testing.T) {
 	t.Parallel()
 
 	state := coding.State{Transcript: []ai.Message{
-		ai.Assistant(ai.ToolCallPart{
-			ID: "submit-plan", Name: planreview.ToolName,
-			Args: ai.JSON(`{"expected_revision":"secret-revision"}`),
-		}),
-		ai.ToolResultText("submit-plan", planreview.ToolName, planreview.ApprovalToolResult),
+		ai.Assistant(ai.ToolCallPart{ID: "enter-plan", Name: planmode.EnterToolName}),
+		ai.ToolResultText("enter-plan", planmode.EnterToolName, planmode.EnterResult),
+		ai.Assistant(ai.ToolCallPart{ID: "exit-plan", Name: planmode.ExitToolName}),
+	}}
+	state.Tools = []coding.ToolState{{
+		Call:   coding.ToolCall{ID: "exit-plan", Name: planmode.ExitToolName},
+		Status: coding.ToolStatusRunning,
 	}}
 
 	blocks := projectTimeline(state)
-	require.Len(t, blocks, 1)
-	assert.Equal(t, "Plan approved", blocks[0].title)
+	require.Len(t, blocks, 2)
 	rendered := renderTimeline(blocks, newMarkdownRenderer(4), 80, themeDark, true)
-	assert.Contains(t, rendered, "idle switch to Agent Mode")
-	assert.NotContains(t, rendered, planreview.ToolName)
-	assert.NotContains(t, rendered, "secret-revision")
+	assert.Contains(t, rendered, "Enter plan mode")
+	assert.Contains(t, rendered, "Submit for approval")
+	assert.NotContains(t, rendered, planmode.EnterToolName)
+	assert.NotContains(t, rendered, planmode.ExitToolName)
+
+	failed := coding.State{Transcript: []ai.Message{
+		ai.Assistant(ai.ToolCallPart{ID: "exit-plan", Name: planmode.ExitToolName}),
+		ai.ToolResultError(
+			"exit-plan", planmode.ExitToolName,
+			"exit_plan_mode requires plan mode to be active",
+		),
+	}}
+	rendered = renderTimeline(projectTimeline(failed), newMarkdownRenderer(4), 80, themeDark, true)
+	assert.Contains(t, rendered, "Submit for approval · failed")
 }
 
-func TestTimelineRendersResolvedPresentPlanAsOneFullSemanticBlock(t *testing.T) {
+func TestTimelineProjectsPlanDecisionsSemantically(t *testing.T) {
 	t.Parallel()
 
-	const content = "# Student System Plan\n\n- API\n- Web UI\n- Tests"
-	state := coding.State{
-		Transcript: []ai.Message{
-			ai.Assistant(ai.ToolCallPart{
-				ID: "present-plan", Name: planreview.PresentToolName,
-				Args: ai.JSON(`{"expected_revision":"","content":"redacted from TUI parsing"}`),
-			}),
-			ai.ToolResultText("present-plan", planreview.PresentToolName, planreview.ApprovalToolResult),
+	tests := []struct {
+		name   string
+		result string
+		title  string
+	}{
+		{name: "approved", result: planmode.ExitApprovedResult, title: "Plan · Approved"},
+		{
+			name:   "approved with comments",
+			result: planmode.ApprovalResult([]string{"Line 2: add a rollback step"}),
+			title:  "Plan · Approved",
 		},
-		PlanProposals: []coding.PlanProposal{{
-			ID: "proposal-1", ToolCallID: "present-plan", Revision: strings.Repeat("a", 64),
-			Size: int64(len(content)), Content: content, Status: coding.PlanProposalApproved,
-		}},
+		{
+			name: "approved empty", result: planmode.ExitApprovedEmptyResult,
+			title: "Plan · Approved",
+		},
+		{
+			name: "revised", result: planmode.RevisionResult("tighten the steps"),
+			title: "Plan · Continue planning",
+		},
+		{name: "abandoned", result: planmode.ExitQuitResult, title: "Plan · Abandoned"},
 	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 
-	blocks := projectTimeline(state)
-	require.Len(t, blocks, 1)
-	assert.Equal(t, blockPlan, blocks[0].kind)
-	assert.Equal(t, "Plan · Approved", blocks[0].title)
-	rendered := renderTimeline(blocks, newMarkdownRenderer(4), 80, themeDark, true)
-	assert.Equal(t, 1, strings.Count(rendered, "Student System Plan"))
-	assert.Contains(t, rendered, "API")
-	assert.NotContains(t, rendered, "redacted from TUI parsing")
-	assert.NotContains(t, rendered, planreview.ApprovalToolResult)
+			state := coding.State{Transcript: []ai.Message{
+				ai.Assistant(ai.ToolCallPart{ID: "exit-plan", Name: planmode.ExitToolName}),
+				ai.ToolResultText("exit-plan", planmode.ExitToolName, test.result),
+			}}
+
+			blocks := projectTimeline(state)
+			require.Len(t, blocks, 1)
+			assert.Equal(t, blockPlan, blocks[0].kind)
+			assert.Equal(t, test.title, blocks[0].title)
+
+			rendered := renderTimeline(blocks, newMarkdownRenderer(4), 80, themeDark, true)
+			assert.NotContains(t, rendered, planmode.ExitToolName)
+			assert.NotContains(t, rendered, "The user")
+			assert.NotContains(t, rendered, "Revision notes")
+		})
+	}
 }
 
 func TestTimelineRendersNonGitAttributionAsNeutralInformation(t *testing.T) {

@@ -22,7 +22,6 @@ import (
 	"github.com/rsbin1178/pips/internal/coding/changes/git"
 	"github.com/rsbin1178/pips/internal/coding/hooks"
 	codingmcp "github.com/rsbin1178/pips/internal/coding/mcp"
-	"github.com/rsbin1178/pips/internal/coding/planflow"
 	"github.com/rsbin1178/pips/internal/coding/planreview"
 	"github.com/rsbin1178/pips/internal/coding/question"
 	"github.com/rsbin1178/pips/internal/coding/subagent"
@@ -156,6 +155,13 @@ func (r *Runtime) run(
 
 		return
 	case operationPrompt, operationAgentNotification:
+		if kind == operationPrompt {
+			if err = r.activatePendingPlanMode(ctx, emitter); err != nil {
+				emitter.fail(err)
+				return
+			}
+		}
+
 		interactionID, startErr := r.journal.start()
 		if startErr != nil {
 			emitter.fail(startErr)
@@ -220,6 +226,11 @@ func (r *Runtime) run(
 			return
 		}
 	case operationContinue:
+		if err = r.activatePendingPlanMode(ctx, emitter); err != nil {
+			emitter.fail(err)
+			return
+		}
+
 		current, err = r.openInteraction(
 			ctx,
 			r.recovery.PendingID,
@@ -260,9 +271,6 @@ func (r *Runtime) run(
 		r.mu.Unlock()
 
 		err = r.questions.Resolve(resolution.question)
-		if err == nil && current.planFlow != nil {
-			current.planFlow.ResolveQuestion()
-		}
 		if err == nil {
 			err = emitter.emit(
 				current.id,
@@ -302,11 +310,7 @@ func (r *Runtime) run(
 				},
 			)
 		}
-		if err == nil && current.planFlow != nil {
-			current.stop = agent.StopWhen
-			outcome := InteractionIncomplete
-			mechanicalOutcome = &outcome
-		} else if err == nil {
+		if err == nil {
 			err = r.reconcileAndContinue(ctx, current, emitter)
 		}
 	case operationResolvePlanReview:
@@ -314,10 +318,8 @@ func (r *Runtime) run(
 		current = r.interaction
 		r.mu.Unlock()
 
-		err = r.planReviews.Resolve(resolution.planReview)
-		if err == nil && current.planFlow != nil {
-			current.planFlow.ResolvePlanReview(resolution.planReview.Decision)
-		}
+		var outcome planreview.Outcome
+		outcome, err = r.planReviews.Resolve(resolution.planReview)
 		if err == nil {
 			err = emitter.emit(
 				current.id,
@@ -325,16 +327,15 @@ func (r *Runtime) run(
 				EventPlanReviewResolved,
 				PlanReviewResolved{
 					RequestID: resolution.planReview.RequestID,
-					Revision:  resolution.planReview.Revision,
-					Decision:  resolution.planReview.Decision,
+					Kind:      outcome.Kind,
+					Decision:  outcome.Decision,
 				},
 			)
 		}
-		if err == nil && resolution.planReview.Decision == planreview.DecisionApprove {
-			current.stop = agent.StopTerminated
-			outcome := InteractionSucceeded
-			mechanicalOutcome = &outcome
-		} else if err == nil {
+		if err == nil {
+			err = r.applyPlanOutcome(ctx, current, emitter, outcome)
+		}
+		if err == nil {
 			err = r.reconcileAndContinue(ctx, current, emitter)
 		}
 	case operationPreview, operationCompact, operationNavigate, operationFork,
@@ -657,10 +658,15 @@ func (r *Runtime) openInteraction(
 		return nil, errors.New("coding runtime: controlled shell is unavailable")
 	}
 
+	localOptions := []tools.CatalogOption{tools.WithControlledShell(shell)}
+	if planFile := r.planFileBoundary(); planFile != nil {
+		localOptions = append(localOptions, tools.WithPlanFile(*planFile))
+	}
+
 	localCatalog, err := tools.NewCatalog(
 		r.tree,
 		r.opts.ToolLimits,
-		tools.WithControlledShell(shell),
+		localOptions...,
 	)
 	if err != nil {
 		return nil, err
@@ -704,7 +710,6 @@ func (r *Runtime) openInteraction(
 		}
 		composedCatalogs = append(composedCatalogs, taskCatalog)
 	}
-	var planCoordinator *planflow.Controller
 	var (
 		childOwner          subagent.Ownership
 		childObserver       subagent.Observer
@@ -724,7 +729,7 @@ func (r *Runtime) openInteraction(
 		}
 		composedCatalogs = append(composedCatalogs, leadCatalog)
 	} else {
-		planCatalog, planErr := tools.NewPlanCatalog(r.plans, r.planRef)
+		planCatalog, planErr := r.planReviews.Catalog()
 		if planErr != nil {
 			return nil, planErr
 		}
@@ -746,23 +751,6 @@ func (r *Runtime) openInteraction(
 			mcpCatalog,
 		)
 		attachSubagentTools = true
-		if started.Mode == ModePlan {
-			planCoordinator, err = planflow.NewController()
-			if err != nil {
-				return nil, err
-			}
-			planFlowCatalog, flowErr := planCoordinator.Catalog()
-			if flowErr != nil {
-				return nil, flowErr
-			}
-			composedCatalogs = append(composedCatalogs, planFlowCatalog)
-
-			planReviewCatalog, reviewErr := r.planReviews.Catalog()
-			if reviewErr != nil {
-				return nil, reviewErr
-			}
-			composedCatalogs = append(composedCatalogs, planReviewCatalog)
-		}
 	}
 
 	ambientCatalog, err := catalog.Merge(composedCatalogs...)
@@ -869,11 +857,6 @@ func (r *Runtime) openInteraction(
 	if err != nil {
 		return nil, err
 	}
-	if planCoordinator != nil {
-		if err := planCoordinator.BindTools(visibleTools); err != nil {
-			return nil, err
-		}
-	}
 	systemPrompt, err := buildCodingSystemPromptParts(systemPromptOptions{
 		Model:               r.resolved.Ref.String(),
 		WorkingDirectory:    r.workspace.Root(),
@@ -883,7 +866,6 @@ func (r *Runtime) openInteraction(
 		Approval:            string(r.config.Approval),
 		WorkspaceTrusted:    r.trusted,
 		Mode:                started.Mode,
-		PlanDocument:        planDocumentReference(started.Mode, r.handle.Metadata().ID),
 		ToolNames:           agentToolNames(visibleTools),
 		ProjectInstructions: integration.projectInstructionsSnapshot(),
 		ExplicitSkills:      explicitSkills,
@@ -899,23 +881,11 @@ func (r *Runtime) openInteraction(
 		return nil, err
 	}
 	allTools = appendUniqueTools(allTools, visibleTools...)
-	if legacy := r.planReviews.LegacyTool(); legacy != nil {
-		allTools = appendUniqueTools(allTools, legacy)
-	}
 
 	extensionHooks := snapshot.Hooks()
 	extensionObserver := newGuardedAgentObserver(extensionHooks.Observe)
 	controlHooks := extensionHooks
 	controlHooks.Observe = nil
-	planEnforcementHooks := extension.Hooks{}
-	planPrepareHooks := extension.Hooks{}
-	if planCoordinator != nil {
-		planEnforcementHooks = extension.Hooks{
-			BeforeTool: planCoordinator.BeforeTool,
-			AfterTool:  planCoordinator.AfterTool,
-		}
-		planPrepareHooks = extension.Hooks{PrepareTurn: planCoordinator.PrepareTurn}
-	}
 	statefulBatchGuard := newStatefulToolBatchGuard(descriptors)
 	composed := extension.ComposeHooks(
 		extension.Hooks{BeforeTool: r.hookBeforeTool(emitter)},
@@ -923,7 +893,7 @@ func (r *Runtime) openInteraction(
 		extension.Hooks{AfterTool: leadCoordinatorAfterTool(leadCoordinator)},
 		extension.Hooks{BeforeTool: leasedToolGuard(started.Mode, descriptors, r.config.ToolSearch)},
 		extension.Hooks{BeforeTool: statefulBatchGuard.beforeTool},
-		planEnforcementHooks,
+		extension.Hooks{BeforeTool: r.planEditGate()},
 		extension.Hooks{BeforeTool: r.planReviews.BeforeTool},
 		extension.Hooks{BeforeTool: r.questions.BeforeTool},
 		extension.Hooks{BeforeTool: current.changeTracker.beforeTool},
@@ -931,7 +901,6 @@ func (r *Runtime) openInteraction(
 		extension.Hooks{BeforeTool: r.controller.BeforeTool},
 		extension.Hooks{PrepareTurn: search.PrepareTurn},
 		extension.Hooks{PrepareTurn: r.compactMainContext(current, emitter)},
-		planPrepareHooks,
 	)
 	failureGuard := newToolFailureGuard()
 	composed.BeforeTool = failureGuard.wrapBeforeTool(composed.BeforeTool)
@@ -939,9 +908,6 @@ func (r *Runtime) openInteraction(
 	composed = extension.ComposeHooks(composed, extension.Hooks{AfterTool: r.hookAfterTool(emitter)})
 
 	maxTurns := 0
-	if planCoordinator != nil {
-		maxTurns = planInteractionMaxTurns
-	}
 	agentOptions := append(
 		composed.AgentOptions(),
 		agent.WithMaxTurns(maxTurns),
@@ -949,11 +915,8 @@ func (r *Runtime) openInteraction(
 			return current.hookStopRequestedNow() || failureGuard.stopWhen(info)
 		}),
 		agent.WithToolTimeout(r.opts.ToolTimeout),
-		agent.WithRequest(r.requestPolicy),
+		agent.WithRequest(composePlanReminder(r.requestPolicy, r.planReminderInjector(current))),
 	)
-	if planCoordinator != nil {
-		agentOptions = append(agentOptions, agent.WithCandidateAnswer(planCoordinator.CandidateAnswer))
-	}
 
 	harnessOptions := []harness.Option{
 		harness.WithTools(visibleTools...),
@@ -980,12 +943,6 @@ func (r *Runtime) openInteraction(
 		extensionHooks,
 		extension.Hooks{AfterTool: r.hookAfterTool(nil)},
 	)
-	if started.Mode == ModePlan {
-		pendingHooks = extension.ComposeHooks(
-			extension.Hooks{BeforeTool: r.planReviews.BeforeTool},
-			extensionHooks,
-		)
-	}
 	if err := r.pending.set(allTools, pendingHooks, r.opts.ToolTimeout); err != nil {
 		return nil, err
 	}
@@ -994,7 +951,6 @@ func (r *Runtime) openInteraction(
 	current.integration = integration
 	current.harness = value
 	current.search = search
-	current.planFlow = planCoordinator
 	current.observer = extensionObserver
 	current.userDispatcher = userDispatcher
 
@@ -1523,11 +1479,16 @@ func (r *Runtime) finishInteraction(
 	if err := emitter.emit(current.id, "", EventStatusChanged, StatusChanged{Phase: PhaseIdle}); err != nil {
 		errs = append(errs, err)
 	}
-	if err := r.settleAcceptedPlanReview(ctx, current, emitter); err != nil {
-		errs = append(errs, err)
-	}
-	if err := r.emitTreeChanged(ctx, emitter); err != nil {
-		errs = append(errs, err)
+	// A closing runtime no longer owns a frontend: plan-mode settlement and the
+	// tree snapshot describe state for a client that is already gone, and both
+	// refuse to publish once Close owns the runtime.
+	if !r.isClosing() {
+		if err := r.settlePlanMode(ctx, current, emitter); err != nil {
+			errs = append(errs, err)
+		}
+		if err := r.emitTreeChanged(ctx, emitter); err != nil {
+			errs = append(errs, err)
+		}
 	}
 
 	for _, runID := range current.runIDs {
@@ -1549,37 +1510,6 @@ func (r *Runtime) finishInteraction(
 	}
 
 	return errors.Join(errs...)
-}
-
-func (r *Runtime) settleAcceptedPlanReview(
-	ctx context.Context,
-	current *interaction,
-	emitter *eventEmitter,
-) error {
-	revision, accepted := r.planReviews.AcceptedRevision()
-	if !accepted {
-		return nil
-	}
-	defer r.planReviews.ClearAccepted()
-
-	document, err := r.plans.Read(ctx, r.planRef)
-	if err != nil || document.Revision != revision {
-		return emitter.emit(current.id, "", EventIntegrationDiagnostic, IntegrationDiagnostic{
-			Component: "plan_review",
-			Code:      "accepted_revision_invalidated",
-			Message:   "The accepted Plan revision is no longer current; Pips remains in Plan Mode",
-		})
-	}
-
-	if err := emitter.emit("", "", EventModeChanged, ModeChanged{Mode: ModeAgent}); err != nil {
-		return err
-	}
-
-	r.mu.Lock()
-	r.config.Mode = ModeAgent
-	r.mu.Unlock()
-
-	return nil
 }
 
 func workspaceChanged(report changes.Report) WorkspaceChanged {
@@ -1644,14 +1574,7 @@ func (r *Runtime) Steer(messages ...ai.Message) error {
 		return err
 	}
 
-	if err := current.harness.Steer(cloneMessages(messages)...); err != nil {
-		return err
-	}
-	if current.planFlow != nil {
-		current.planFlow.InvalidateUserInput()
-	}
-
-	return nil
+	return current.harness.Steer(cloneMessages(messages)...)
 }
 
 // FollowUp queues messages after the current Agent invocation settles.
@@ -1661,14 +1584,7 @@ func (r *Runtime) FollowUp(messages ...ai.Message) error {
 		return err
 	}
 
-	if err := current.harness.FollowUp(cloneMessages(messages)...); err != nil {
-		return err
-	}
-	if current.planFlow != nil {
-		current.planFlow.InvalidateUserInput()
-	}
-
-	return nil
+	return current.harness.FollowUp(cloneMessages(messages)...)
 }
 
 func (r *Runtime) activeHarness(operation string) (*interaction, error) {

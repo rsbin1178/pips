@@ -559,3 +559,53 @@ func TestRepositoryRejectsInsecureSessionFileMode(t *testing.T) {
 		})
 	}
 }
+
+func TestRepositoryIgnoresLegacySessionsWithoutCodingMetadata(t *testing.T) {
+	t.Parallel()
+
+	dir := filepath.Join(t.TempDir(), "sessions")
+	repo, err := session.NewRepository(dir)
+	require.NoError(t, err)
+
+	conversation, err := repo.Create(t.Context(), session.CreateOptions{
+		WorkspaceID: "workspace-key", WorkspacePath: testWorkspacePath,
+	})
+	require.NoError(t, err)
+	_, err = conversation.Session().AppendMessage(ai.UserText("parent question"), nil)
+	require.NoError(t, err)
+	child, err := repo.Create(t.Context(), session.CreateOptions{
+		WorkspaceID:     "workspace-key",
+		WorkspacePath:   testWorkspacePath,
+		Kind:            session.KindSubagent,
+		ParentSessionID: conversation.Metadata().ID,
+		ParentRunID:     "run-parent",
+		Agent:           "explore",
+	})
+	require.NoError(t, err)
+	_, err = child.Session().AppendMessage(ai.UserText("inspect the package"), nil)
+	require.NoError(t, err)
+
+	// A session written by an older build has no workspace_path in its header.
+	legacyHeader := `{"type":"harness_session","version":1,"id":"s-legacy-0001",` +
+		`"created_at":"2026-07-23T06:51:12.408636Z","extra":{` +
+		`"pips.coding.session_kind":"subagent","pips.coding.workspace_id":"workspace-key",` +
+		`"pips.coding.parent_session_id":"` + conversation.Metadata().ID + `"}}` + "\n"
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, "s-legacy-0001.jsonl"),
+		[]byte(legacyHeader),
+		0o600,
+	))
+
+	children, err := repo.ListSubagents(t.Context(), "workspace-key", conversation.Metadata().ID)
+	require.NoError(t, err)
+	require.Len(t, children, 1)
+	assert.Equal(t, child.Metadata().ID, children[0].ID)
+
+	conversations, err := repo.List(t.Context())
+	require.NoError(t, err)
+	require.Len(t, conversations, 1)
+	assert.Equal(t, conversation.Metadata().ID, conversations[0].ID)
+
+	require.NoError(t, child.Close())
+	require.NoError(t, conversation.Close())
+}

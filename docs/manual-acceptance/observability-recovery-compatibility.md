@@ -67,9 +67,9 @@
 
 - 分类：本地确定性、兼容。变更等级：本地持久状态。
 - 前置条件：保存上一支持版本和候选版本；使用复制的 fixture state。
-- 隔离夹具：legacy config keys/env/flags、builtin subagent records、旧 Plan handshake、Agent profile v1alpha1、ACP stable-v1 fixtures、Session/Team history。
+- 隔离夹具：legacy config keys/env/flags、builtin subagent records、使用已删除 plan handshake 的历史 Session、Agent profile v1alpha1、ACP stable-v1 fixtures、Session/Team history。
 - 步骤：候选读取受支持旧状态；明确验证 removed `--provider`、`--model-api`、`PIPS_PROVIDER`、`PIPS_MODEL_API`、`[model]`、旧 `api`/request 字段报 migration error；运行 config/profile/event/ACP compatibility tests；做前后版本 open/resume matrix。
-- 预期证据：只承诺的旧记录可读；removed surface 不静默 normalize；unsupported schema/version fail closed 且原始文件不变；Dynamic bool default-off、builtin legacy wire 与 stable ACP v1 保持；pending `present_plan` 不允许不理解它的旧版破坏。
+- 预期证据：只承诺的旧记录可读；removed surface 不静默 normalize；unsupported schema/version fail closed 且原始文件不变；Dynamic bool default-off、builtin legacy wire 与 stable ACP v1 保持；已删除的 plan handshake 不会被当前版本静默恢复或自动代答。
 - 通过条件：兼容矩阵每项有结果与恢复路径，无 silent authority change/data loss。
 - 失败条件：旧配置变成不同 provider/protocol、unknown field 忽略、旧版写坏新状态、或测试 fixture 与实际 release artifact 不一致。
 - 清理/回滚：销毁复制 state；不要用旧版写真实新格式数据。

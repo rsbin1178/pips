@@ -6,10 +6,9 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/rsbin1178/pips/internal/coding/planflow"
-	"github.com/rsbin1178/pips/internal/coding/planreview"
 	"github.com/rsbin1178/pips/internal/coding/question"
 	"github.com/rsbin1178/pips/internal/coding/tasklist"
+	"github.com/rsbin1178/pips/internal/coding/tools"
 )
 
 const codingSystemPrompt = `You are Pips, a terminal-first coding agent operating in the user's local workspace. Be precise, safe, and useful.
@@ -50,7 +49,6 @@ type systemPromptOptions struct {
 	Approval            string
 	WorkspaceTrusted    bool
 	Mode                OperatingMode
-	PlanDocument        string
 	ToolNames           []string
 	ProjectInstructions string
 	ExplicitSkills      string
@@ -85,7 +83,6 @@ type systemPromptEnvironment struct {
 type systemPromptModeContext struct {
 	OperatingMode string   `json:"operating_mode"`
 	VisibleTools  []string `json:"visible_tools"`
-	PlanDocument  string   `json:"plan_document,omitempty"`
 }
 
 type systemPromptParts struct {
@@ -148,7 +145,6 @@ func buildCodingSystemPromptParts(options systemPromptOptions) (systemPromptPart
 	modeContext, err := json.MarshalIndent(systemPromptModeContext{
 		OperatingMode: string(options.Mode),
 		VisibleTools:  toolNames,
-		PlanDocument:  options.PlanDocument,
 	}, "", "  ")
 	if err != nil {
 		return systemPromptParts{}, fmt.Errorf("coding system prompt: encode mode context: %w", err)
@@ -234,22 +230,9 @@ func writeModeGuidance(prompt *strings.Builder, mode OperatingMode, toolNames []
 	prompt.WriteString("\n\n## Current mode behavior\n\n")
 
 	if mode == ModePlan {
-		prompt.WriteString("- Inspect and reason without changing workspace or external state. Do not claim to have edited files, run commands, or executed the Plan.\n")
-		prompt.WriteString("- Phase 1 — Ground: inspect repository evidence with read-only tools. Answer discoverable questions yourself and do not ask the user for facts available in the workspace.\n")
-		prompt.WriteString("- Phase 2 — Decide: identify only non-discoverable product choices that materially change the implementation. Use ask_user for one to four structured decisions at a time; never treat a recommendation as the user's selection.\n")
-		prompt.WriteString("- Phase 3 — Design and finalize: produce a decision-complete implementation Plan covering scope, affected components, data flow, error and recovery behavior, risks, tests, and rollout.\n")
-
-		if _, ok := available[planflow.ToolName]; ok {
-			prompt.WriteString("- Before writing the Plan, call plan_checkpoint alone. It is the no-question branch only when goal, success criteria, audience, scope, constraints, and every material product decision are established; otherwise call ask_user.\n")
-		}
-
-		if _, ok := available[planreview.PresentToolName]; ok {
-			prompt.WriteString("- After plan_checkpoint succeeds, call present_plan alone with the complete Markdown Plan and the current expected revision (empty only for first creation). Pips persists it atomically and immediately opens full review.\n")
-			prompt.WriteString("- Continue-planning feedback starts discovery again. Approval mechanically completes this interaction; do not generate a separate approval summary or attempt implementation.\n")
-		}
-
-		prompt.WriteString("- Plan approval is not Tool approval and grants no Shell, patch, MCP, external-write, sandbox, or full-access permission.\n")
-		prompt.WriteString("- Only provider-native Tool calls invoke tools. Never imitate <function_calls>, XML, JSON envelopes, or other Tool markup in assistant text.\n")
+		// Plan mode injects its own per-request reminder; the static prompt
+		// only states the capability boundary.
+		prompt.WriteString("- Plan mode is active. Do not make any edits or writes to the system outside the plan file.\n")
 	} else {
 		prompt.WriteString("- Agent Mode may implement requested changes, subject to the available tools, sandbox, and approval policy.\n")
 	}
@@ -262,7 +245,7 @@ func writeModeGuidance(prompt *strings.Builder, mode OperatingMode, toolNames []
 		prompt.WriteString("- Use shell for commands, builds, and tests, not as a substitute for a more precise available workspace tool.\n")
 	}
 
-	if _, ok := available["apply_patch"]; ok {
+	if _, ok := available[tools.ApplyPatchName]; ok {
 		prompt.WriteString("- Use apply_patch for deliberate source edits. Let project formatters or generators own mechanical and generated output.\n")
 	}
 
@@ -296,12 +279,4 @@ func hasAnyTool(available map[string]struct{}, names ...string) bool {
 	}
 
 	return false
-}
-
-func planDocumentReference(mode OperatingMode, sessionID string) string {
-	if mode != ModePlan {
-		return ""
-	}
-
-	return "session-bound:" + sessionID
 }

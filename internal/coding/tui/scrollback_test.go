@@ -15,6 +15,7 @@ import (
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding"
 	"github.com/rsbin1178/pips/internal/coding/changes"
+	"github.com/rsbin1178/pips/internal/coding/planmode"
 	"github.com/rsbin1178/pips/internal/coding/subagent"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -68,20 +69,47 @@ func TestScrollbackCommitsStableBlocksOnlyOnce(t *testing.T) {
 	assert.NotContains(t, active, "Read")
 }
 
-func TestScrollbackCommitsResolvedPlanProposalExactlyOnce(t *testing.T) {
+func TestScrollbackCommitsPlanModeNoticesExactlyOnce(t *testing.T) {
 	t.Parallel()
 
 	model := readyModel(t, true)
-	model.state.PlanProposals = []coding.PlanProposal{{
-		ID: "plan-1", ToolCallID: "present-1", Revision: strings.Repeat("a", 64),
-		Size: 36, Content: "# Full Plan\n\nOne semantic Plan block.",
-		Status: coding.PlanProposalApproved,
-	}}
+	model.state.PlanMode = planmode.StateActive
+	model.queuePlanModeNotices(planmode.StatePending)
 
 	first := model.takeStableTimeline()
-	assert.Equal(t, 1, strings.Count(first, "Full Plan"))
-	assert.Equal(t, 1, strings.Count(first, "One semantic Plan block"))
+	assert.Equal(t, 1, strings.Count(first, planModeEnteredNotice))
+	assert.Equal(t, 1, strings.Count(first, planModeGateNotice))
 	assert.Empty(t, model.takeStableTimeline())
+
+	model.state.PlanMode = planmode.StateInactive
+	model.queuePlanModeNotices(planmode.StateActive)
+
+	second := model.takeStableTimeline()
+	assert.Equal(t, 1, strings.Count(second, planModeOffNotice))
+	assert.Empty(t, model.takeStableTimeline())
+}
+
+func TestPlanModeTransitionNoticesStaySilentForTransientStates(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(
+		t,
+		[]string{planModeEnteredNotice, planModeGateNotice},
+		planModeTransitionNotices(planmode.StateInactive, planmode.StateActive),
+	)
+	assert.Equal(
+		t,
+		[]string{planModeOffNotice},
+		planModeTransitionNotices(planmode.StateActive, planmode.StateInactive),
+	)
+	assert.Equal(
+		t,
+		[]string{planModeOffNotice},
+		planModeTransitionNotices(planmode.StateExitPending, planmode.StateInactive),
+	)
+	assert.Empty(t, planModeTransitionNotices(planmode.StateInactive, planmode.StatePending))
+	assert.Empty(t, planModeTransitionNotices(planmode.StateActive, planmode.StateExitPending))
+	assert.Empty(t, planModeTransitionNotices(planmode.StatePending, planmode.StatePending))
 }
 
 func TestScrollbackKeepsConversationGapAcrossIncrementalCommits(t *testing.T) {
