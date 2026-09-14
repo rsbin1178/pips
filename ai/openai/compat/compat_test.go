@@ -55,7 +55,7 @@ func TestNamedProfiles(t *testing.T) {
 				w.Header().Set("Content-Type", "application/json")
 
 				if tc.provider == ai.ProviderXAI {
-					_, _ = w.Write([]byte(`{"id":"resp_1","model":"grok","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}`))
+					_, _ = w.Write([]byte(`{"id":"resp_1","model":"grok-4.6","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}`))
 					return
 				}
 
@@ -158,7 +158,7 @@ func TestXAIResponsesReasoningReplay(t *testing.T) {
 			assert.Equal(t, []any{"reasoning.encrypted_content"}, body["include"])
 
 			_, _ = w.Write([]byte(`{
-				"id":"resp_x1","model":"grok-4","status":"completed","output":[
+				"id":"resp_x1","model":"grok-4.6","status":"completed","output":[
 					{"type":"reasoning","id":"rs_x1","encrypted_content":"encrypted-state","summary":[{"type":"summary_text","text":"checking"}],"content":[{"type":"reasoning_text","text":"provider reasoning content"}],"status":"completed"},
 					{"type":"function_call","call_id":"call_x1","name":"lookup","arguments":"{}"}
 				]
@@ -187,11 +187,11 @@ func TestXAIResponsesReasoningReplay(t *testing.T) {
 			return
 		}
 
-		_, _ = w.Write([]byte(`{"id":"resp_x2","model":"grok-4","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}]}`))
+		_, _ = w.Write([]byte(`{"id":"resp_x2","model":"grok-4.6","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}]}`))
 	}))
 	t.Cleanup(server.Close)
 
-	model := compat.XAI("grok-4",
+	model := compat.XAI("grok-4.6",
 		openai.WithBaseURL(server.URL+"/v1"),
 		openai.WithAPIKey("key"),
 		openai.WithAllowHTTP(),
