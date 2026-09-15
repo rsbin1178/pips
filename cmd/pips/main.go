@@ -64,7 +64,7 @@ func runAfterSignalSetup(
 	}
 
 	command, err := cli.New(cli.Dependencies{
-		Build: cli.BuildInfo{Version: version, Commit: commit, Date: date},
+		Build: cli.ResolveBuildInfo(cli.BuildInfo{Version: version, Commit: commit, Date: date}),
 		Paths: layout,
 	})
 	if err != nil {
