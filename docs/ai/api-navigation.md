@@ -22,7 +22,8 @@ go doc -all github.com/rsbin1178/pips/ai/observability
 | 任务 | 主要符号 | 源码 |
 | --- | --- | --- |
 | 文本模型抽象 | `LanguageModel`、`Provider`、`Capabilities` | [`model.go`](../../ai/model.go)、[`provider.go`](../../ai/provider.go) |
-| 图片生成 | `ImageModel`、`ImageRequest`、`ImageResponse`、`GeneratedImage` | [`image.go`](../../ai/image.go) |
+| 图片生成 | `ImageModel`、`ImageRequest`、`ImageUsage`、`ImageResponse`、`GeneratedImage` | [`image.go`](../../ai/image.go) |
+| 图片编辑/变体/流式 | `ImageEditRequest`、`ImageVariationRequest`、`ImageEditor`、`ImageVariator`、`ImageStreamer`、`ImageStream`、`ImageStreamEvent`、`ImageStreamEventType` | [`image.go`](../../ai/image.go)、[`model.go`](../../ai/model.go) |
 | Embedding | `EmbeddingModel`、`EmbeddingRequest`、`EmbeddingResponse` | [`embedding.go`](../../ai/embedding.go) |
 | 服务端 Token 计数 | `TokenCounter` | [`model.go`](../../ai/model.go) |
 | 消息与 Part | `Message`、`Messages`、`SystemMessage`、`UserMessage`、`AssistantMessage`、`ToolMessage`、`Part` 及六种具体 Part | [`message.go`](../../ai/message.go) |
@@ -52,10 +53,10 @@ go doc -all github.com/rsbin1178/pips/ai/observability
 | 服务身份/能力 | `WithProvider`、`WithCapabilities` |
 | 协议兼容 | `Compatibility`、`WithCompatibility`、`WithCompatMode`，以及 `MaxTokensField`、`StreamUsageMode`、`StructuredOutputMode`、`ChatReasoningFormat`、`ReasoningHistoryField` 常量族 |
 | 请求扩展 | `RequestOptions`（MinP、RepetitionPenalty、ExtraFields） |
-| 图片 | `NewImageModel`、`ImageModel`、`ImageOptions` |
+| 图片 | `NewImageModel`、`ImageModel`、`ImageOptions`、`EditEncoding`（`EditEncodingAuto`/`EditEncodingMultipart`/`EditEncodingJSON`）；实现 `ai.ImageEditor`、`ai.ImageVariator`、`ai.ImageStreamer` |
 | Embedding | `NewEmbeddingModel`、`EmbeddingModel` |
 
-实现入口：[`openai.go`](../../ai/openai/openai.go)、[`options.go`](../../ai/openai/options.go)、[`compatibility.go`](../../ai/openai/compatibility.go)、[`chat.go`](../../ai/openai/chat.go)、[`responses.go`](../../ai/openai/responses.go)、[`image.go`](../../ai/openai/image.go)、[`embedding.go`](../../ai/openai/embedding.go)。
+实现入口：[`openai.go`](../../ai/openai/openai.go)、[`options.go`](../../ai/openai/options.go)、[`compatibility.go`](../../ai/openai/compatibility.go)、[`chat.go`](../../ai/openai/chat.go)、[`responses.go`](../../ai/openai/responses.go)、[`image.go`](../../ai/openai/image.go)、[`image_edit.go`](../../ai/openai/image_edit.go)、[`image_variations.go`](../../ai/openai/image_variations.go)、[`image_stream.go`](../../ai/openai/image_stream.go)、[`embedding.go`](../../ai/openai/embedding.go)。
 
 ## `ai/openai/compat`：审阅后的兼容 Profile
 
