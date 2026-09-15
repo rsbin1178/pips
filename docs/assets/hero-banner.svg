@@ -1,0 +1,122 @@
+<svg width="1200" height="240" viewBox="0 0 1200 240" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#181825"/>
+      <stop offset="50%" stop-color="#1e1e2e"/>
+      <stop offset="100%" stop-color="#181825"/>
+    </linearGradient>
+    <linearGradient id="brandGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#89b4fa"/>
+      <stop offset="35%" stop-color="#cba6f7"/>
+      <stop offset="100%" stop-color="#f5c2e7"/>
+    </linearGradient>
+    <pattern id="dotPattern" x="0" y="0" width="24" height="24" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1.2" fill="#313244" opacity="0.7"/>
+    </pattern>
+  </defs>
+
+  <!-- Background Card -->
+  <rect x="1" y="1" width="1198" height="238" rx="16" fill="url(#bgGrad)" stroke="#313244" stroke-width="1.5"/>
+  <rect x="1" y="1" width="1198" height="238" rx="16" fill="url(#dotPattern)"/>
+
+  <!-- Left: Block Pixel Logo -->
+  <g id="logo">
+    <rect x="60.0" y="78.0" width="13" height="13" rx="3" fill="#89b4fa" />
+    <rect x="76.5" y="78.0" width="13" height="13" rx="3" fill="#89b4fa" />
+    <rect x="93.0" y="78.0" width="13" height="13" rx="3" fill="#89b4fa" />
+    <rect x="109.5" y="78.0" width="13" height="13" rx="3" fill="#89b4fa" />
+    <rect x="162.3" y="78.0" width="13" height="13" rx="3" fill="#b4befe" />
+    <rect x="178.8" y="78.0" width="13" height="13" rx="3" fill="#b4befe" />
+    <rect x="195.3" y="78.0" width="13" height="13" rx="3" fill="#b4befe" />
+    <rect x="211.8" y="78.0" width="13" height="13" rx="3" fill="#b4befe" />
+    <rect x="248.1" y="78.0" width="13" height="13" rx="3" fill="#cba6f7" />
+    <rect x="264.6" y="78.0" width="13" height="13" rx="3" fill="#cba6f7" />
+    <rect x="281.1" y="78.0" width="13" height="13" rx="3" fill="#cba6f7" />
+    <rect x="297.6" y="78.0" width="13" height="13" rx="3" fill="#cba6f7" />
+    <rect x="366.9" y="78.0" width="13" height="13" rx="3" fill="#f5c2e7" />
+    <rect x="383.4" y="78.0" width="13" height="13" rx="3" fill="#f5c2e7" />
+    <rect x="399.9" y="78.0" width="13" height="13" rx="3" fill="#f5c2e7" />
+    <rect x="416.4" y="78.0" width="13" height="13" rx="3" fill="#f5c2e7" />
+    <rect x="60.0" y="94.5" width="13" height="13" rx="3" fill="#89b4fa" />
+    <rect x="76.5" y="94.5" width="13" height="13" rx="3" fill="#89b4fa" />
+    <rect x="126.0" y="94.5" width="13" height="13" rx="3" fill="#89b4fa" />
+    <rect x="178.8" y="94.5" width="13" height="13" rx="3" fill="#b4befe" />
+    <rect x="195.3" y="94.5" width="13" height="13" rx="3" fill="#b4befe" />
+    <rect x="248.1" y="94.5" width="13" height="13" rx="3" fill="#cba6f7" />
+    <rect x="264.6" y="94.5" width="13" height="13" rx="3" fill="#cba6f7" />
+    <rect x="314.1" y="94.5" width="13" height="13" rx="3" fill="#cba6f7" />
+    <rect x="350.4" y="94.5" width="13" height="13" rx="3" fill="#f5c2e7" />
+    <rect x="366.9" y="94.5" width="13" height="13" rx="3" fill="#f5c2e7" />
+    <rect x="60.0" y="111.0" width="13" height="13" rx="3" fill="#89b4fa" />
+    <rect x="76.5" y="111.0" width="13" height="13" rx="3" fill="#89b4fa" />
+    <rect x="93.0" y="111.0" width="13" height="13" rx="3" fill="#89b4fa" />
+    <rect x="109.5" y="111.0" width="13" height="13" rx="3" fill="#89b4fa" />
+    <rect x="178.8" y="111.0" width="13" height="13" rx="3" fill="#b4befe" />
+    <rect x="195.3" y="111.0" width="13" height="13" rx="3" fill="#b4befe" />
+    <rect x="248.1" y="111.0" width="13" height="13" rx="3" fill="#cba6f7" />
+    <rect x="264.6" y="111.0" width="13" height="13" rx="3" fill="#cba6f7" />
+    <rect x="281.1" y="111.0" width="13" height="13" rx="3" fill="#cba6f7" />
+    <rect x="297.6" y="111.0" width="13" height="13" rx="3" fill="#cba6f7" />
+    <rect x="366.9" y="111.0" width="13" height="13" rx="3" fill="#f5c2e7" />
+    <rect x="383.4" y="111.0" width="13" height="13" rx="3" fill="#f5c2e7" />
+    <rect x="399.9" y="111.0" width="13" height="13" rx="3" fill="#f5c2e7" />
+    <rect x="60.0" y="127.5" width="13" height="13" rx="3" fill="#89b4fa" />
+    <rect x="76.5" y="127.5" width="13" height="13" rx="3" fill="#89b4fa" />
+    <rect x="178.8" y="127.5" width="13" height="13" rx="3" fill="#b4befe" />
+    <rect x="195.3" y="127.5" width="13" height="13" rx="3" fill="#b4befe" />
+    <rect x="248.1" y="127.5" width="13" height="13" rx="3" fill="#cba6f7" />
+    <rect x="264.6" y="127.5" width="13" height="13" rx="3" fill="#cba6f7" />
+    <rect x="399.9" y="127.5" width="13" height="13" rx="3" fill="#f5c2e7" />
+    <rect x="416.4" y="127.5" width="13" height="13" rx="3" fill="#f5c2e7" />
+    <rect x="60.0" y="144.0" width="13" height="13" rx="3" fill="#89b4fa" />
+    <rect x="76.5" y="144.0" width="13" height="13" rx="3" fill="#89b4fa" />
+    <rect x="162.3" y="144.0" width="13" height="13" rx="3" fill="#b4befe" />
+    <rect x="178.8" y="144.0" width="13" height="13" rx="3" fill="#b4befe" />
+    <rect x="195.3" y="144.0" width="13" height="13" rx="3" fill="#b4befe" />
+    <rect x="211.8" y="144.0" width="13" height="13" rx="3" fill="#b4befe" />
+    <rect x="248.1" y="144.0" width="13" height="13" rx="3" fill="#cba6f7" />
+    <rect x="264.6" y="144.0" width="13" height="13" rx="3" fill="#cba6f7" />
+    <rect x="350.4" y="144.0" width="13" height="13" rx="3" fill="#f5c2e7" />
+    <rect x="366.9" y="144.0" width="13" height="13" rx="3" fill="#f5c2e7" />
+    <rect x="383.4" y="144.0" width="13" height="13" rx="3" fill="#f5c2e7" />
+    <rect x="399.9" y="144.0" width="13" height="13" rx="3" fill="#f5c2e7" />
+  </g>
+
+  <!-- Divider line -->
+  <line x1="475" y1="40" x2="475" y2="200" stroke="#313244" stroke-width="1.5" stroke-dasharray="5 5"/>
+
+  <!-- Right: Typography & Highlights -->
+  <g transform="translate(510, 52)">
+    <!-- Title -->
+    <text x="0" y="34" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="38" font-weight="800" fill="url(#brandGrad)" letter-spacing="-0.5">PIPS</text>
+    <text x="110" y="34" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="18" font-weight="500" fill="#a6adc8">·  Terminal Coding Agent &amp; Go AI Engine</text>
+
+    <!-- Subtitle -->
+    <text x="0" y="74" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="15" fill="#cdd6f4" font-weight="400">
+      Native OS Sandboxing  ·  Guarded Plan Mode  ·  Dual Agent &amp; Workflow Runtime
+    </text>
+
+    <!-- Feature Badges -->
+    <g transform="translate(0, 106)">
+      <!-- Pill 1 -->
+      <rect x="0" y="0" width="125" height="28" rx="7" fill="#1e1e2e" stroke="#45475a" stroke-width="1.2"/>
+      <circle cx="14" cy="14" r="4" fill="#a6e3a1"/>
+      <text x="26" y="18" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="12.5" font-weight="600" fill="#cdd6f4">Zero-SDK Go</text>
+
+      <!-- Pill 2 -->
+      <rect x="137" y="0" width="135" height="28" rx="7" fill="#1e1e2e" stroke="#45475a" stroke-width="1.2"/>
+      <circle cx="151" cy="14" r="4" fill="#89b4fa"/>
+      <text x="163" y="18" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="12.5" font-weight="600" fill="#cdd6f4">OS Sandboxed</text>
+
+      <!-- Pill 3 -->
+      <rect x="284" y="0" width="120" height="28" rx="7" fill="#1e1e2e" stroke="#45475a" stroke-width="1.2"/>
+      <circle cx="298" cy="14" r="4" fill="#f9e2af"/>
+      <text x="310" y="18" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="12.5" font-weight="600" fill="#cdd6f4">Plan Review</text>
+
+      <!-- Pill 4 -->
+      <rect x="416" y="0" width="145" height="28" rx="7" fill="#1e1e2e" stroke="#45475a" stroke-width="1.2"/>
+      <circle cx="430" cy="14" r="4" fill="#cba6f7"/>
+      <text x="442" y="18" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="12.5" font-weight="600" fill="#cdd6f4">Keyboard-First</text>
+    </g>
+  </g>
+</svg>

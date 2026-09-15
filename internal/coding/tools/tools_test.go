@@ -374,6 +374,45 @@ func TestResultParserKeepsProblemMetadataBackwardCompatible(t *testing.T) {
 	assert.Equal(t, "choose an existing Workspace directory", body)
 }
 
+func TestToolPathAndOffsetRobustness(t *testing.T) {
+	t.Parallel()
+
+	fixture := newToolFixture(t, tools.DefaultLimits())
+	fixture.write("file.txt", "line1\nline2\n")
+
+	// Read with offset 0 should start from line 1
+	text, err := fixture.exec(t.Context(), "read", `{"path":"file.txt","offset":0}`)
+	require.NoError(t, err)
+	header, body, err := tools.ParseResult(text)
+	require.NoError(t, err)
+	assert.True(t, header.OK)
+	assert.Contains(t, body, "1: line1\n2: line2\n")
+
+	// ls with path "" should list workspace root
+	text, err = fixture.exec(t.Context(), "ls", `{"path":""}`)
+	require.NoError(t, err)
+	header, body, err = tools.ParseResult(text)
+	require.NoError(t, err)
+	assert.True(t, header.OK)
+	assert.Contains(t, body, "file.txt\n")
+
+	// glob with path "" should glob from workspace root
+	text, err = fixture.exec(t.Context(), "glob", `{"pattern":"*.txt","path":""}`)
+	require.NoError(t, err)
+	header, body, err = tools.ParseResult(text)
+	require.NoError(t, err)
+	assert.True(t, header.OK)
+	assert.Contains(t, body, "file.txt\n")
+
+	// grep with path "" should grep from workspace root
+	text, err = fixture.exec(t.Context(), "grep", `{"pattern":"line1","path":""}`)
+	require.NoError(t, err)
+	header, body, err = tools.ParseResult(text)
+	require.NoError(t, err)
+	assert.True(t, header.OK)
+	assert.Contains(t, body, "file.txt:1:1:line1\n")
+}
+
 type toolFixture struct {
 	t       *testing.T
 	root    string

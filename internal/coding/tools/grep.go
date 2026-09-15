@@ -34,7 +34,7 @@ func (s *service) grep(ctx context.Context, args grepArgs) (string, error) {
 	}
 
 	base := "."
-	if args.Path != nil {
+	if args.Path != nil && strings.TrimSpace(*args.Path) != "" {
 		base = *args.Path
 	}
 

@@ -1,0 +1,190 @@
+<svg width="1200" height="560" viewBox="0 0 1200 560" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="cardGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1e1e2e"/>
+      <stop offset="100%" stop-color="#181825"/>
+    </linearGradient>
+    <linearGradient id="agentGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#89b4fa" stop-opacity="0.12"/>
+      <stop offset="100%" stop-color="#b4befe" stop-opacity="0.04"/>
+    </linearGradient>
+    <linearGradient id="workflowGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#cba6f7" stop-opacity="0.12"/>
+      <stop offset="100%" stop-color="#f5c2e7" stop-opacity="0.04"/>
+    </linearGradient>
+    <linearGradient id="secGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f9e2af" stop-opacity="0.10"/>
+      <stop offset="100%" stop-color="#fab387" stop-opacity="0.03"/>
+    </linearGradient>
+    <linearGradient id="modelGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#a6e3a1" stop-opacity="0.10"/>
+      <stop offset="100%" stop-color="#94e2d5" stop-opacity="0.03"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background Canvas -->
+  <rect width="1200" height="560" rx="16" fill="#11111b" stroke="#313244" stroke-width="1.5"/>
+
+  <!-- Header / Title -->
+  <g transform="translate(48, 32)">
+    <text x="0" y="0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="20" font-weight="700" fill="#cdd6f4">Pips Architecture Overview</text>
+    <text x="270" y="0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="13" font-weight="400" fill="#a6adc8">·  Layered Decoupling from CLI Interface to Native Model Wire</text>
+  </g>
+
+  <!-- Layer 1: Interfaces & Entrypoints -->
+  <g transform="translate(48, 56)">
+    <rect width="1104" height="76" rx="10" fill="url(#cardGrad)" stroke="#45475a" stroke-width="1"/>
+    <text x="20" y="24" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11" font-weight="700" fill="#89b4fa" letter-spacing="0.8">1. INTERFACES &amp; RUNTIME ADAPTERS</text>
+
+    <!-- Box 1: TUI -->
+    <g transform="translate(20, 34)">
+      <rect width="258" height="30" rx="6" fill="#181825" stroke="#585b70" stroke-width="0.8"/>
+      <text x="12" y="19" font-family="Menlo, monospace" font-size="11.5" fill="#cdd6f4">pips (Bubbletea TUI)</text>
+    </g>
+
+    <!-- Box 2: CLI Exec -->
+    <g transform="translate(294, 34)">
+      <rect width="258" height="30" rx="6" fill="#181825" stroke="#585b70" stroke-width="0.8"/>
+      <text x="12" y="19" font-family="Menlo, monospace" font-size="11.5" fill="#cdd6f4">pips exec (Headless / CI)</text>
+    </g>
+
+    <!-- Box 3: ACP Protocol -->
+    <g transform="translate(568, 34)">
+      <rect width="248" height="30" rx="6" fill="#181825" stroke="#585b70" stroke-width="0.8"/>
+      <text x="12" y="19" font-family="Menlo, monospace" font-size="11.5" fill="#cdd6f4">ACP v1 (Agent Client Protocol)</text>
+    </g>
+
+    <!-- Box 4: Go Libraries -->
+    <g transform="translate(832, 34)">
+      <rect width="252" height="30" rx="6" fill="#181825" stroke="#585b70" stroke-width="0.8"/>
+      <text x="12" y="19" font-family="Menlo, monospace" font-size="11.5" fill="#cdd6f4">Go SDK (import pips/...)</text>
+    </g>
+  </g>
+
+  <!-- Layer 2: Dual Core Execution Engine -->
+  <g transform="translate(48, 148)">
+    <!-- Column 1: Agent Runtime -->
+    <g transform="translate(0, 0)">
+      <rect width="542" height="114" rx="10" fill="url(#agentGrad)" stroke="#89b4fa" stroke-width="1.2"/>
+      <text x="20" y="24" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="12" font-weight="700" fill="#89b4fa">AGENT RUNTIME (pips/agent)</text>
+      <text x="225" y="24" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11.5" fill="#a6adc8">· Dynamic Autonomous Loops</text>
+
+      <!-- Row 1 -->
+      <g transform="translate(20, 38)">
+        <rect width="156" height="26" rx="5" fill="#181825" stroke="#45475a" stroke-width="0.8"/>
+        <text x="10" y="17" font-family="Menlo, monospace" font-size="10.5" fill="#cdd6f4">Dynamic Tool Calling</text>
+      </g>
+      <g transform="translate(186, 38)">
+        <rect width="156" height="26" rx="5" fill="#181825" stroke="#45475a" stroke-width="0.8"/>
+        <text x="10" y="17" font-family="Menlo, monospace" font-size="10.5" fill="#cdd6f4">Context Compaction</text>
+      </g>
+      <g transform="translate(352, 38)">
+        <rect width="170" height="26" rx="5" fill="#181825" stroke="#45475a" stroke-width="0.8"/>
+        <text x="10" y="17" font-family="Menlo, monospace" font-size="10.5" fill="#cdd6f4">Session Fork / Resume</text>
+      </g>
+
+      <!-- Row 2 -->
+      <g transform="translate(20, 72)">
+        <rect width="248" height="26" rx="5" fill="#181825" stroke="#45475a" stroke-width="0.8"/>
+        <text x="10" y="17" font-family="Menlo, monospace" font-size="10.5" fill="#cdd6f4">Type-Safe Tools (read/ls/glob/grep)</text>
+      </g>
+      <g transform="translate(278, 72)">
+        <rect width="244" height="26" rx="5" fill="#181825" stroke="#45475a" stroke-width="0.8"/>
+        <text x="10" y="17" font-family="Menlo, monospace" font-size="10.5" fill="#cdd6f4">Multi-Agent Team &amp; Mailboxes</text>
+      </g>
+    </g>
+
+    <!-- Column 2: Workflow Runtime -->
+    <g transform="translate(562, 0)">
+      <rect width="542" height="114" rx="10" fill="url(#workflowGrad)" stroke="#cba6f7" stroke-width="1.2"/>
+      <text x="20" y="24" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="12" font-weight="700" fill="#cba6f7">WORKFLOW ENGINE (pips/workflow)</text>
+      <text x="260" y="24" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11.5" fill="#a6adc8">· Deterministic Business Pipelines</text>
+
+      <!-- Row 1 -->
+      <g transform="translate(20, 38)">
+        <rect width="156" height="26" rx="5" fill="#181825" stroke="#45475a" stroke-width="0.8"/>
+        <text x="10" y="17" font-family="Menlo, monospace" font-size="10.5" fill="#cdd6f4">Versioned DAG</text>
+      </g>
+      <g transform="translate(186, 38)">
+        <rect width="156" height="26" rx="5" fill="#181825" stroke="#45475a" stroke-width="0.8"/>
+        <text x="10" y="17" font-family="Menlo, monospace" font-size="10.5" fill="#cdd6f4">Strict Schema Validate</text>
+      </g>
+      <g transform="translate(352, 38)">
+        <rect width="170" height="26" rx="5" fill="#181825" stroke="#45475a" stroke-width="0.8"/>
+        <text x="10" y="17" font-family="Menlo, monospace" font-size="10.5" fill="#cdd6f4">Checkpoint Resumption</text>
+      </g>
+
+      <!-- Row 2 -->
+      <g transform="translate(20, 72)">
+        <rect width="248" height="26" rx="5" fill="#181825" stroke="#45475a" stroke-width="0.8"/>
+        <text x="10" y="17" font-family="Menlo, monospace" font-size="10.5" fill="#cdd6f4">Conditional Branching &amp; Merges</text>
+      </g>
+      <g transform="translate(278, 72)">
+        <rect width="244" height="26" rx="5" fill="#181825" stroke="#45475a" stroke-width="0.8"/>
+        <text x="10" y="17" font-family="Menlo, monospace" font-size="10.5" fill="#cdd6f4">Explicit Compensation Routing</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- Layer 3: Security & Workspace Sandbox -->
+  <g transform="translate(48, 278)">
+    <rect width="1104" height="110" rx="10" fill="url(#secGrad)" stroke="#f9e2af" stroke-width="1.2"/>
+    <text x="20" y="24" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="12" font-weight="700" fill="#f9e2af">SECURITY &amp; WORKSPACE BOUNDARY (Defense in Depth)</text>
+
+    <!-- Sub-box 1: Plan Mode Gate -->
+    <g transform="translate(20, 36)">
+      <rect width="344" height="58" rx="7" fill="#181825" stroke="#45475a" stroke-width="0.8"/>
+      <text x="16" y="24" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="12" font-weight="700" fill="#f9e2af">Guarded Plan Mode</text>
+      <text x="16" y="44" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="10.5" fill="#a6adc8">Edits isolated to session plan.md · Inline Review Gate</text>
+    </g>
+
+    <!-- Sub-box 2: OS Native Sandbox -->
+    <g transform="translate(380, 36)">
+      <rect width="354" height="58" rx="7" fill="#181825" stroke="#45475a" stroke-width="0.8"/>
+      <text x="16" y="24" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="12" font-weight="700" fill="#f9e2af">OS-Native Sandbox (Seatbelt / Bubblewrap)</text>
+      <text x="16" y="44" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="10.5" fill="#a6adc8">macOS (Seatbelt) · Linux (bwrap) · Windows (WSL2)</text>
+    </g>
+
+    <!-- Sub-box 3: Operation Approvals -->
+    <g transform="translate(750, 36)">
+      <rect width="334" height="58" rx="7" fill="#181825" stroke="#45475a" stroke-width="0.8"/>
+      <text x="16" y="24" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="12" font-weight="700" fill="#f9e2af">Operation Approval Engine</text>
+      <text x="16" y="44" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="10.5" fill="#a6adc8">High-risk shell &amp; network calls require confirmation</text>
+    </g>
+  </g>
+
+  <!-- Layer 4: Zero-SDK Native Model Protocol -->
+  <g transform="translate(48, 404)">
+    <rect width="1104" height="114" rx="10" fill="url(#modelGrad)" stroke="#a6e3a1" stroke-width="1.2"/>
+    <text x="20" y="24" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="12" font-weight="700" fill="#a6e3a1">ZERO-SDK NATIVE PROVIDER LAYER (pips/ai)</text>
+    <text x="315" y="24" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11.5" fill="#a6adc8">· Direct HTTP/SSE Implementation Across All Operating Systems</text>
+
+    <!-- Provider 1: OpenAI -->
+    <g transform="translate(20, 36)">
+      <rect width="255" height="62" rx="7" fill="#181825" stroke="#45475a" stroke-width="0.8"/>
+      <text x="16" y="26" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="13" font-weight="700" fill="#cdd6f4">OpenAI Adapter</text>
+      <text x="16" y="46" font-family="Menlo, monospace" font-size="10.5" fill="#a6adc8">Chat Completions + Responses</text>
+    </g>
+
+    <!-- Provider 2: Anthropic -->
+    <g transform="translate(291, 36)">
+      <rect width="255" height="62" rx="7" fill="#181825" stroke="#45475a" stroke-width="0.8"/>
+      <text x="16" y="26" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="13" font-weight="700" fill="#cdd6f4">Anthropic Adapter</text>
+      <text x="16" y="46" font-family="Menlo, monospace" font-size="10.5" fill="#a6adc8">Messages (Thinking + Cache)</text>
+    </g>
+
+    <!-- Provider 3: Gemini -->
+    <g transform="translate(562, 36)">
+      <rect width="255" height="62" rx="7" fill="#181825" stroke="#45475a" stroke-width="0.8"/>
+      <text x="16" y="26" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="13" font-weight="700" fill="#cdd6f4">Gemini Adapter</text>
+      <text x="16" y="46" font-family="Menlo, monospace" font-size="10.5" fill="#a6adc8">generateContent (Tools + Schema)</text>
+    </g>
+
+    <!-- Provider 4: Cross-Platform Protocol -->
+    <g transform="translate(833, 36)">
+      <rect width="251" height="62" rx="7" fill="#181825" stroke="#45475a" stroke-width="0.8"/>
+      <text x="16" y="26" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="13" font-weight="700" fill="#a6e3a1">Pure Go Wire Engine</text>
+      <text x="16" y="46" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="10.5" fill="#a6adc8">SSE Stream · OTel Spans · Any OS</text>
+    </g>
+  </g>
+</svg>
