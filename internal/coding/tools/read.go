@@ -17,7 +17,7 @@ const readName = "read"
 
 type readArgs struct {
 	Path   string `json:"path" description:"Workspace-relative file path"`
-	Offset *int   `json:"offset" description:"Optional 1-based starting line"`
+	Offset *int   `json:"offset" description:"Optional 1-based starting line; 0 is treated as line 1"`
 	Limit  *int   `json:"limit" description:"Optional maximum number of lines"`
 }
 
@@ -182,6 +182,10 @@ func lineWindow(offsetValue, limitValue *int, maxLines int) (int, int, error) {
 	limit := maxLines
 	if limitValue != nil {
 		limit = *limitValue
+	}
+
+	if offset == 0 {
+		offset = 1
 	}
 
 	if offset < 1 || limit < 1 || limit > maxLines {

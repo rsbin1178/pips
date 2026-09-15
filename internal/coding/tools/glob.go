@@ -32,7 +32,7 @@ func (s *service) glob(ctx context.Context, args globArgs) (string, error) {
 	}
 
 	base := "."
-	if args.Path != nil {
+	if args.Path != nil && strings.TrimSpace(*args.Path) != "" {
 		base = *args.Path
 	}
 
