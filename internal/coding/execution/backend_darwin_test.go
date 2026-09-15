@@ -187,6 +187,7 @@ func TestDarwinNodeScratchPathIntegration(t *testing.T) {
 	require.NoError(t, os.Mkdir(productRoot, 0o700))
 	require.NoError(t, os.Mkdir(tempRoot, 0o700))
 	spec := fixture.operationSpec("")
+	spec.Timeout = 10 * time.Second
 	spec.Executable = nodePath
 	spec.Args = []string{"-e", "const fs=require('fs'); const path=require('path'); const target=path.join(process.env.TMPDIR, 'tsx-'+process.pid); fs.mkdirSync(target, {recursive:true}); console.log(target);"}
 	op, err := NewOperation(t.Context(), fixture.workspace, spec)
@@ -241,6 +242,7 @@ func TestDarwinTsxScratchPathIntegration(t *testing.T) {
 	require.NoError(t, os.Mkdir(productRoot, 0o700))
 	require.NoError(t, os.Mkdir(tempRoot, 0o700))
 	spec := fixture.operationSpec("")
+	spec.Timeout = 10 * time.Second
 	spec.Executable = tsxPath
 	spec.Args = []string{"-e", "import { mkdir } from 'node:fs/promises'; (async () => { const target = `${process.env.TMPDIR}/tsx-${process.pid}`; await mkdir(target, { recursive: true }); console.log(target); })();"}
 	op, err := NewOperation(t.Context(), fixture.workspace, spec)
