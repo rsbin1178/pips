@@ -6,7 +6,7 @@
 
 | 构造器 | 原生协议 | 默认密钥环境变量 | 额外接口 |
 | --- | --- | --- | --- |
-| `openai.New` | Chat Completions 或 Responses | `OPENAI_API_KEY` | 独立图片、Embedding 构造器 |
+| `openai.New` | Chat Completions 或 Responses | `OPENAI_API_KEY` | 独立图片（含 `ai.ImageEditor`、`ai.ImageVariator`、`ai.ImageStreamer`）、Embedding 构造器 |
 | `anthropic.New` | Messages | `ANTHROPIC_API_KEY` | `ai.TokenCounter` |
 | `gemini.New` | generateContent / streamGenerateContent | `GEMINI_API_KEY`，其次 `GOOGLE_API_KEY` | `ai.TokenCounter`、独立图片、Embedding 构造器 |
 | `compat.*` | 审阅后的 OpenAI 形状协议 | Profile 专用变量 | 返回 `*openai.Model` |
@@ -59,6 +59,53 @@ embeddings := openai.NewEmbeddingModel("text-embedding-3-small")
 ```
 
 `openai.ImageOptions` 和 `openai.RequestOptions` 各自是不同请求类型的 Provider escape hatch。OpenAI 没有实现 `ai.TokenCounter`。
+
+### OpenAI 图片
+
+`openai.ImageModel` 覆盖三个端点，并把每个文档化参数映射到类型化字段：
+
+| 端点 | 便携调用 | 编码 |
+| --- | --- | --- |
+| `POST /v1/images/generations` | `GenerateImages` | JSON |
+| `POST /v1/images/edits` | `EditImage`（`ai.ImageEditor`） | multipart 或 JSON，由 `openai.ImageOptions.EditEncoding` 选择 |
+| `POST /v1/images/variations` | `CreateVariations`（`ai.ImageVariator`） | multipart，仅 `dall-e-2` |
+
+参数映射：
+
+| OpenAI 参数 | 便携来源 |
+| --- | --- |
+| `model` | `NewImageModel` 的模型 ID |
+| `prompt` | `ImageRequest.Prompt` / `ImageEditRequest.Prompt` |
+| `n`、`size`、`quality` | 同名便携字段 |
+| `output_format` | `ImageRequest.OutputFormat` / `ImageEditRequest.OutputFormat` |
+| `response_format`、`background`、`moderation`、`style`、`user`、`output_compression`、`partial_images`、`input_fidelity` | `openai.ImageOptions` 同名字段 |
+| `mask`、多图输入 | `ImageEditRequest.Mask` / `.Images`（1–16 张） |
+| `stream` | 由 `StreamImages` / `StreamImageEdits` 置为 `true`；该键保留，不能经 `ExtraFields` 下发 |
+
+未显式设置的字段不会出现在请求体里，厂商默认值照常生效。`ExtraFields` 是补充通道：图片请求使用独立的保留键列表（`model`、`prompt`、`n`、`size`、`quality`、`output_format`、`output_compression`、`partial_images`、`input_fidelity`、`moderation`、`style`、`user`、`stream`、`image`、`image[]`、`mask`、`images`），而 `background`、`response_format` 等未设置的类型化键不在该列表内，可继续通过它下发；`stream` 例外，只有 `ai.ImageStreamer` 能消费事件流响应，因此它保持保留状态。与类型化字段已设置的值冲突、或凭证形状的键依然被拒绝。编辑与变体的 multipart 请求的表单只能承载标量，因此这些请求的 `ExtraFields` 值必须是 string、bool 或数字，嵌套值会被拒绝。
+
+响应侧：`data[].b64_json` 解码进 `GeneratedImage.Data`，`data[].url` 进入 `GeneratedImage.URL`，`revised_prompt` 进入 `GeneratedImage.RevisedPrompt`；两者都没有的条目会直接报错，不会产生 0 字节图片。`MIMEType` 依次取响应 `output_format`、请求 `OutputFormat`、URL 扩展名，内联字节的兜底是 `image/png`；无法判定时留空。顶层 `created`、`size`、`quality`、`background`、`output_format` 与 `usage`（含 `total_tokens`、`input_tokens_details`、`output_tokens_details`）都映射到 `ai.ImageResponse`。
+
+编辑请求的编码规则：`EditEncodingAuto`（默认）在任一来源图带内联字节时选 multipart，全部为 URL 或文件 ID 时选 JSON 变体；`EditEncodingMultipart` 要求所有来源都是内联字节（multipart 无法表达 URL 或文件 ID），`EditEncodingJSON` 把内联字节编码为 `data:<mime>;base64,` 的 `image_url`。multipart 使用重复的 `image[]` 部件（单图也是 `image[]`）与 `mask` 部件，JSON 变体使用 `images[].image_url|file_id` 二选一。
+
+流式（`ai.ImageStreamer`）：
+
+```go
+streamer := imageModel.(ai.ImageStreamer)
+for event, err := range streamer.StreamImages(ctx, ai.ImageRequest{
+	Prompt: "极简蓝色山脉图标",
+	ProviderOptions: map[ai.Provider]any{
+		ai.ProviderOpenAI: openai.ImageOptions{PartialImages: ai.Ptr(2)},
+	},
+}) {
+	// ai.ImageStreamPartial：Index 为 0 基局部图下标。
+	// ai.ImageStreamCompleted：最终图，且带 Usage。
+}
+```
+
+generations 使用 `image_generation.*`、edits 使用 `image_edit.*` 命名空间；未识别的事件被忽略。完成事件缺少图片数据时直接报错，不会产出空图。首事件之前的失败（包括 4xx/5xx）在首次迭代产出错误并保持可重试，产出后的失败终止流且不重放。
+
+本地校验只做结构性检查：空 prompt、edits 无图或超过 16 张、`partial_images` 不在 0–3、`output_compression` 不在 0–100、变体缺少内联图、来源图没有引用或同时给出多种引用、显式 multipart 遇到 URL/文件 ID 来源、未知的 `EditEncoding` 值。失败返回包装 `ai.ErrInvalidRequest` 的错误且不发送请求。是否支持某个参数仍由厂商按模型判定：能力表只作提示，适配器不会按模型名拦截。
 
 ### OpenAI 构造选项
 
@@ -215,7 +262,7 @@ req.ProviderOptions = map[ai.Provider]any{
 
 OpenAI 兼容模型会先按它的真实 Provider key 查找 `openai.RequestOptions`，再兼容查找 `ProviderOpenAI`。Anthropic/Gemini 的自定义 Provider 身份也有类似回退到原生 Provider key 的行为。
 
-`ExtraFields` 是只添加、不覆盖的有界递归合并。与保留字段或保留 dotted path 冲突会失败；可用 `ai.ValidateRequestBodyExtension` 对自定义扩展做提前校验，但适配器发送时仍会再次验证。不要用 ExtraFields 注入 `model`、消息、Tools、认证、流开关或其他已建模字段。
+`ExtraFields` 是只添加、不覆盖的有界递归合并。与保留字段或保留 dotted path 冲突会失败；可用 `ai.ValidateRequestBodyExtension` 对自定义扩展做提前校验，但适配器发送时仍会再次验证。不要用 ExtraFields 注入 `model`、消息、Tools、认证、流开关或其他已建模字段。图片请求使用独立的保留键列表，见 [OpenAI 图片](#openai-图片)。
 
 ## 自定义端点与网络安全
 

@@ -16,7 +16,7 @@ type LanguageModel interface {
 }
 ```
 
-图片和向量使用独立接口 `ai.ImageModel` 与 `ai.EmbeddingModel`；服务端计数能力是可选的 `ai.TokenCounter`。拆分接口可避免把“所有模型都支持所有能力”编码成错误假设。
+图片和向量使用独立接口 `ai.ImageModel` 与 `ai.EmbeddingModel`；服务端计数能力是可选的 `ai.TokenCounter`。拆分接口可避免把“所有模型都支持所有能力”编码成错误假设。图片的编辑、变体和流式同样是可选接口：`ai.ImageEditor`、`ai.ImageVariator`、`ai.ImageStreamer`，用类型断言发现。
 
 内置 Provider 模型具有以下生命周期约定：
 
@@ -152,18 +152,46 @@ messages = append(messages, ai.UserText("再简短一些。"))
 
 ## 图片、向量与 Token Counting
 
-图片生成与对话模型分开构造：
+图片生成、编辑与变体分开调用：
 
 ```go
 imageModel := openai.NewImageModel("gpt-image-1")
 result, err := imageModel.GenerateImages(ctx, ai.ImageRequest{
-	Prompt: "极简蓝色山脉图标",
-	N:      1,
-	Size:   "1024x1024",
+	Prompt:       "极简蓝色山脉图标",
+	N:            1,
+	Size:         "1024x1024",
+	OutputFormat: "webp",
 })
 ```
 
-OpenAI 与 Gemini 提供图片和 Embedding 适配器。Gemini 图片每次调用只生成一张，`N` 会被忽略。`EmbeddingResponse.Embeddings` 与输入顺序一致；`Dimensions` 只对支持降维的模型生效。
+`GeneratedImage` 用 `Data`（内联字节）或 `URL`（厂商托管的临时链接，OpenAI 为 60 分钟）二选一表达结果；适配器不会代抓 URL，需要字节时由调用方自行下载。`MIMEType` 依次取厂商回报的格式、请求的 `OutputFormat` 与 URL 扩展名；内联字节在没有任何格式信息时兜底为 `image/png`，仍无法判定时留空而不是猜测。`ImageResponse` 同时暴露 `CreatedAt`、`Size`、`Quality`、`Background` 与 `Usage`：`ai.ImageUsage` 内嵌 `ai.Usage`，并带 total 与输入/输出明细。
+
+`ai.ImageEditor` 与 `ai.ImageVariator` 是可选接口：
+
+```go
+editor, ok := imageModel.(ai.ImageEditor)
+if ok {
+	edited, err := editor.EditImage(ctx, ai.ImageEditRequest{
+		Prompt: "把背景换成纯色",
+		Images: []ai.ImagePart{{Source: ai.MediaSource{MIMEType: "image/png", Data: pngBytes}}},
+	})
+}
+```
+
+流式图片同样可选，产出 0 基下标的局部图事件与一个携带最终图和 usage 的完成事件：
+
+```go
+if streamer, ok := imageModel.(ai.ImageStreamer); ok {
+	for event, err := range streamer.StreamImages(ctx, req) {
+		if err != nil {
+			return err
+		}
+		// event.Type 为 ai.ImageStreamPartial 或 ai.ImageStreamCompleted。
+	}
+}
+```
+
+OpenAI 与 Gemini 提供图片和 Embedding 适配器。Gemini 图片每次调用只生成一张，`N` 会被忽略，且没有实现编辑、变体与流式接口。`EmbeddingResponse.Embeddings` 与输入顺序一致；`Dimensions` 只对支持降维的模型生效。
 
 Token Counting 通过类型断言发现：
 
