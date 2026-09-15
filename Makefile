@@ -1,13 +1,50 @@
 GO=go
 
-.PHONY: all build test test-short cover fuzz lint lint-fix fmt vet tidy audit deps-check \
-	mod-verify p0-verify provider-smoke sandbox-smoke help
+# Build stamp. The release version comes from the nearest tag; override on the
+# command line (make release VERSION=v0.1.2) when the tag is not yet created.
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+COMMIT  ?= $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
+DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+LDFLAGS  = -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
+
+# Release archives: Go targets archived as pips_<version>_<os>_<arch>.tar.gz.
+RELEASE_TARGETS ?= darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 windows/amd64
+
+.PHONY: all build version release test test-short cover fuzz lint lint-fix fmt vet tidy audit \
+	deps-check mod-verify p0-verify provider-smoke sandbox-smoke help
 
 all: fmt vet lint test build
 
-## build: Compile all packages
+## build: Compile all packages with the build stamp embedded
 build:
-	$(GO) build ./...
+	$(GO) build -ldflags "$(LDFLAGS)" ./...
+
+## version: Print the build stamp embedded by build and release
+version:
+	@echo "version=$(VERSION) commit=$(COMMIT) date=$(DATE)"
+
+## release: Cross-compile release archives and SHA256SUMS into dist/
+release:
+	@rm -rf dist
+	@mkdir -p dist
+	@for target in $(RELEASE_TARGETS); do \
+		os=$${target%/*}; \
+		arch=$${target#*/}; \
+		ext=""; \
+		if [ "$$os" = "windows" ]; then ext=".exe"; fi; \
+		name="pips_$(VERSION)_$${os}_$${arch}"; \
+		echo "building dist/$$name.tar.gz"; \
+		GOOS=$$os GOARCH=$$arch CGO_ENABLED=0 $(GO) build -trimpath \
+			-ldflags "-s -w $(LDFLAGS)" -o "dist/$$name/pips$$ext" ./cmd/pips || exit 1; \
+		tar -czf "dist/$$name.tar.gz" -C dist "$$name" || exit 1; \
+		rm -rf "dist/$$name"; \
+	done
+	@cd dist && if command -v sha256sum >/dev/null 2>&1; then \
+		sha256sum *.tar.gz > SHA256SUMS; \
+	else \
+		shasum -a 256 *.tar.gz > SHA256SUMS; \
+	fi
+	@ls -1 dist
 
 ## test: Run all tests with race detector and coverage
 test:
