@@ -3,6 +3,7 @@ package httpx_test
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -104,6 +105,162 @@ func TestPostStream(t *testing.T) {
 	buf := make([]byte, 64)
 	n, _ := body.Read(buf)
 	assert.Equal(t, "data: hi\n\n", string(buf[:n]))
+}
+
+func TestPostMultipart(t *testing.T) {
+	t.Parallel()
+
+	type partInfo struct {
+		field       string
+		filename    string
+		contentType string
+		body        string
+	}
+
+	var (
+		gotContentType string
+		gotParts       []partInfo
+	)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotContentType = r.Header.Get("Content-Type")
+
+		reader, err := r.MultipartReader()
+		assert.NoError(t, err)
+
+		for {
+			part, partErr := reader.NextPart()
+			if errors.Is(partErr, io.EOF) {
+				break
+			}
+
+			assert.NoError(t, partErr)
+
+			data, readErr := io.ReadAll(part)
+			assert.NoError(t, readErr)
+
+			gotParts = append(gotParts, partInfo{
+				field:       part.FormName(),
+				filename:    part.FileName(),
+				contentType: part.Header.Get("Content-Type"),
+				body:        string(data),
+			})
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"data":[{"b64_json":"QUJD"}]}`)
+	}))
+	defer server.Close()
+
+	client := httpx.New(localConfig(), server.URL)
+
+	fields := []httpx.FormField{{Name: "model", Value: "gpt-image-1"}, {Name: "n", Value: "2"}}
+	files := []httpx.FormFile{
+		{Field: "image[]", Name: "image-0.png", ContentType: "image/png", Data: []byte("first")},
+		{Field: "image[]", Name: "image-1.webp", ContentType: "image/webp", Data: []byte("second")},
+		{Field: "mask", Name: "mask.png", ContentType: "image/png", Data: []byte("mask")},
+	}
+
+	var out struct {
+		Data []struct {
+			B64JSON string `json:"b64_json"`
+		} `json:"data"`
+	}
+
+	raw, err := client.PostMultipart(t.Context(), "images/edits", nil, fields, files, &out, passErr)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"data":[{"b64_json":"QUJD"}]}`, string(raw))
+	assert.Equal(t, "QUJD", out.Data[0].B64JSON)
+	assert.Contains(t, gotContentType, "multipart/form-data")
+
+	require.Len(t, gotParts, 5)
+	assert.Equal(t, partInfo{field: "model", body: "gpt-image-1"}, gotParts[0])
+	assert.Equal(t, partInfo{field: "n", body: "2"}, gotParts[1])
+	assert.Equal(t, partInfo{
+		field: "image[]", filename: "image-0.png", contentType: "image/png", body: "first",
+	}, gotParts[2])
+	assert.Equal(t, partInfo{
+		field: "image[]", filename: "image-1.webp", contentType: "image/webp", body: "second",
+	}, gotParts[3])
+	assert.Equal(t, partInfo{
+		field: "mask", filename: "mask.png", contentType: "image/png", body: "mask",
+	}, gotParts[4])
+}
+
+func TestPostMultipartErrorDecoding(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "9")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = fmt.Fprint(w, `{"error":{"message":"overloaded"}}`)
+	}))
+	defer server.Close()
+
+	client := httpx.New(localConfig(), server.URL)
+
+	var (
+		gotStatus int
+		gotRetry  time.Duration
+		gotBody   []byte
+	)
+
+	_, err := client.PostMultipart(t.Context(), "images/edits", nil, nil, nil, nil,
+		func(status int, retryAfter time.Duration, body []byte) error {
+			gotStatus, gotRetry, gotBody = status, retryAfter, body
+			return errors.New("decoded")
+		})
+	require.EqualError(t, err, "decoded")
+	assert.Equal(t, http.StatusServiceUnavailable, gotStatus)
+	assert.Equal(t, 9*time.Second, gotRetry)
+	assert.Contains(t, string(gotBody), "overloaded")
+}
+
+func TestPostMultipartStream(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "text/event-stream", r.Header.Get("Accept"))
+
+		reader, err := r.MultipartReader()
+		assert.NoError(t, err)
+
+		part, partErr := reader.NextPart()
+		assert.NoError(t, partErr)
+		assert.Equal(t, "stream", part.FormName())
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "event: image_edit.completed\ndata: {\"type\":\"image_edit.completed\"}\n\n")
+	}))
+	defer server.Close()
+
+	client := httpx.New(localConfig(), server.URL)
+
+	body, err := client.PostMultipartStream(t.Context(), "images/edits", nil,
+		[]httpx.FormField{{Name: "stream", Value: "true"}}, nil, passErr)
+	require.NoError(t, err)
+
+	defer func() { _ = body.Close() }()
+
+	raw, err := io.ReadAll(body)
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), "image_edit.completed")
+}
+
+func TestPostMultipartStreamErrorPath(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = fmt.Fprint(w, `{"error":"bad image"}`)
+	}))
+	defer server.Close()
+
+	client := httpx.New(localConfig(), server.URL)
+
+	_, err := client.PostMultipartStream(t.Context(), "images/edits", nil, nil, nil, passErr)
+	require.ErrorContains(t, err, "status=400")
+	require.ErrorContains(t, err, "bad image")
 }
 
 func TestPostStreamErrorPath(t *testing.T) {
