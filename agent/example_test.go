@@ -30,7 +30,7 @@ func ExampleNewTool() {
 
 // Run drives the agent loop to completion and returns the final result.
 func Example_run() {
-	model := openai.New("gpt-4o", openai.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
+	model := openai.New("gpt-6-astra", openai.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
 
 	add := agent.NewTool("add", "Add two integers.",
 		func(_ context.Context, args struct {
@@ -58,7 +58,7 @@ func Example_run() {
 
 // Stream exposes the loop as events; breaking out cancels the run.
 func Example_stream() {
-	model := openai.New("gpt-4o", openai.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
+	model := openai.New("gpt-6-astra", openai.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
 
 	a, err := agent.New(model)
 	if err != nil {
@@ -80,7 +80,7 @@ func Example_stream() {
 // A gate pauses risky calls for out-of-band approval; ResolvePending answers
 // them and a second Run continues the conversation.
 func ExampleSession_ResolvePending() {
-	model := openai.New("gpt-4o", openai.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
+	model := openai.New("gpt-6-astra", openai.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
 
 	deploy := agent.NewTool("deploy", "Deploy to production.",
 		func(_ context.Context, _ struct{}) (string, error) {

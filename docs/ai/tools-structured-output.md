@@ -135,7 +135,7 @@ func main() {
 
 	answer, err := run(
 		context.Background(),
-		openai.New("gpt-4o", openai.WithAPIKey(key)),
+		openai.New("gpt-6-astra", openai.WithAPIKey(key)),
 		"巴黎现在天气如何？",
 	)
 	if err != nil {

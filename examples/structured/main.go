@@ -21,7 +21,7 @@ type Recipe struct {
 }
 
 func main() {
-	model := openai.New("gpt-4o", openai.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
+	model := openai.New("gpt-6-astra", openai.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
 	// Structured output is portable: anthropic.New / gemini.New work as-is
 	// (each adapter uses its provider's native schema format).
 

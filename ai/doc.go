@@ -11,7 +11,7 @@
 // The core abstraction is [LanguageModel]. Provider subpackages (openai,
 // anthropic, gemini) return implementations bound to a specific model:
 //
-//	model := openai.New("gpt-4o", openai.WithAPIKey(key))
+//	model := openai.New("gpt-6-astra", openai.WithAPIKey(key))
 //	resp, err := model.Generate(ctx, ai.Request{
 //	    Messages: ai.Messages{ai.UserText("Hello!")},
 //	})

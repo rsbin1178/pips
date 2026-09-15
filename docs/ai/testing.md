@@ -192,7 +192,7 @@ func TestOpenAIGateway(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{
   "id":"resp_1",
-  "model":"gpt-4o",
+  "model":"gpt-6-astra",
   "choices":[{"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],
   "usage":{"prompt_tokens":1,"completion_tokens":1}
 }`)
@@ -200,7 +200,7 @@ func TestOpenAIGateway(t *testing.T) {
 	defer server.Close()
 
 	model := openai.New(
-		"gpt-4o",
+		"gpt-6-astra",
 		openai.WithAPIKey("test-key"),
 		openai.WithBaseURL(server.URL),
 		openai.WithAllowHTTP(),
@@ -272,7 +272,7 @@ func TestLiveOpenAI(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	resp, err := openai.New("gpt-4o").Generate(ctx, ai.Request{
+	resp, err := openai.New("gpt-6-astra").Generate(ctx, ai.Request{
 		Messages:  ai.Messages{ai.UserText("Reply with OK only.")},
 		MaxTokens: ai.Ptr(10),
 	})

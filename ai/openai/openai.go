@@ -8,7 +8,7 @@
 //     first-class reasoning support.
 //
 // Select a surface with [WithAPI]; the default [APIAuto] routes
-// reasoning-family models (o-series, gpt-5*) to Responses and everything
+// reasoning-family models (o-series, gpt-5*, gpt-6*) to Responses and everything
 // else to Chat Completions.
 package openai
 
@@ -27,7 +27,7 @@ type API string
 
 // API surfaces.
 const (
-	// APIAuto picks per model: reasoning families (o1/o3/o4, gpt-5) use
+	// APIAuto picks per model: reasoning families (o1/o3/o4, gpt-5, gpt-6) use
 	// Responses, everything else Chat Completions.
 	APIAuto API = "auto"
 	// APIChatCompletions forces POST /v1/chat/completions.
@@ -167,7 +167,7 @@ func WithMaxStreamLineSize(n int) Option {
 	return func(o *options) { o.cfg.MaxStreamLineSize = n }
 }
 
-// New returns a Model bound to the given model ID (for example "gpt-4o").
+// New returns a Model bound to the given model ID (for example "gpt-6-astra").
 // Configuration problems (such as an invalid base URL) surface on the first
 // call, not from New.
 func New(model string, opts ...Option) *Model {
@@ -221,7 +221,7 @@ func (m *Model) resolveAPI() API { return ResolveAPI(m.model, m.api) }
 // isReasoningModel reports whether the model belongs to a reasoning family
 // that requires (or works best on) the Responses API.
 func isReasoningModel(model string) bool {
-	for _, prefix := range []string{"o1", "o3", "o4", "gpt-5"} {
+	for _, prefix := range []string{"o1", "o3", "o4", "gpt-5", "gpt-6"} {
 		if strings.HasPrefix(model, prefix) {
 			return true
 		}

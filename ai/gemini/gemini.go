@@ -92,7 +92,7 @@ func WithMaxStreamLineSize(n int) Option {
 }
 
 // New returns a Model bound to the given model ID (for example
-// "gemini-2.5-flash"). Configuration problems surface on the first call.
+// "gemini-3.8-flash"). Configuration problems surface on the first call.
 func New(model string, opts ...Option) *Model {
 	o := options{provider: ai.ProviderGemini}
 	for _, opt := range opts {

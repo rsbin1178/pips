@@ -12,7 +12,7 @@ import (
 )
 
 func main() {
-	model := gemini.New("gemini-2.5-flash", gemini.WithAPIKey(os.Getenv("GEMINI_API_KEY")))
+	model := gemini.New("gemini-3.8-flash", gemini.WithAPIKey(os.Getenv("GEMINI_API_KEY")))
 
 	req := ai.Request{
 		Messages: ai.Messages{

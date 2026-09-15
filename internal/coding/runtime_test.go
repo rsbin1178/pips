@@ -648,12 +648,12 @@ func TestRuntimeOpensCustomProviderMetadata(t *testing.T) {
 	provider := ai.Provider("opencode-go")
 	runtime := openTestRuntime(
 		t,
-		newRuntimeModelFor(provider, "deepseek-v4-flash"),
+		newRuntimeModelFor(provider, "deepseek-v4.1-flash"),
 	)
 
 	snapshot := runtime.Snapshot()
 	assert.Equal(t, provider, snapshot.Provider)
-	assert.Equal(t, "deepseek-v4-flash", snapshot.ModelID)
+	assert.Equal(t, "deepseek-v4.1-flash", snapshot.ModelID)
 }
 
 func TestValidateOpenOptionsRejectsNilObservers(t *testing.T) {

@@ -120,13 +120,13 @@ func TestContextModelDerivation(t *testing.T) {
 	sess := buildSession(t)
 	appendText(t, sess, ai.UserMessage{}, "hi", nil)
 
-	_, err := sess.AppendModelChange(ai.ProviderAnthropic, "claude-sonnet-4-5")
+	_, err := sess.AppendModelChange(ai.ProviderAnthropic, "claude-sonnet-5")
 	require.NoError(t, err)
 
 	cctx, err := sess.Context()
 	require.NoError(t, err)
 	assert.Equal(t, ai.ProviderAnthropic, cctx.Provider)
-	assert.Equal(t, "claude-sonnet-4-5", cctx.ModelID)
+	assert.Equal(t, "claude-sonnet-5", cctx.ModelID)
 	assert.Len(t, cctx.Messages, 1, "model_change is not a message")
 }
 

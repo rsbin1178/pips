@@ -36,7 +36,7 @@ func main() {
 		log.Fatal("OPENAI_API_KEY is required")
 	}
 
-	model := openai.New("gpt-4o", openai.WithAPIKey(key))
+	model := openai.New("gpt-6-astra", openai.WithAPIKey(key))
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -94,9 +94,9 @@ func summarize(ctx context.Context, model ai.LanguageModel, text string) (string
 同一个函数可接收：
 
 ```go
-openAIModel := openai.New("gpt-4o")
-anthropicModel := anthropic.New("claude-sonnet-4-5")
-geminiModel := gemini.New("gemini-2.5-flash")
+openAIModel := openai.New("gpt-6-astra")
+anthropicModel := anthropic.New("claude-sonnet-5")
+geminiModel := gemini.New("gemini-3.8-flash")
 ```
 
 三个构造器默认分别读取 `OPENAI_API_KEY`、`ANTHROPIC_API_KEY`、`GEMINI_API_KEY`（Gemini 其次读取 `GOOGLE_API_KEY`）。更完整的协议与选项差异见 [Provider 指南](providers.md)。可运行的切换示例见 [`examples/provider-switch`](../../examples/provider-switch/main.go)。

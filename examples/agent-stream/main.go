@@ -16,7 +16,7 @@ import (
 )
 
 func main() {
-	model := openai.New("gpt-4o", openai.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
+	model := openai.New("gpt-6-astra", openai.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
 
 	clock := agent.NewTool("now", "Current time in RFC 3339.",
 		func(_ context.Context, _ struct{}) (string, error) {

@@ -67,7 +67,7 @@ import (
 
 func main() {
 	model := openai.New(
-		"gpt-4o",
+		"gpt-6-astra",
 		openai.WithAPIKey(os.Getenv("OPENAI_API_KEY")),
 	)
 
