@@ -1,7 +1,6 @@
 package openai_test
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -26,37 +25,6 @@ func decodeBody(r *http.Request, v any) error {
 	defer r.Body.Close() //nolint:errcheck // test helper
 
 	return json.NewDecoder(r.Body).Decode(v)
-}
-
-func TestImageGeneration(t *testing.T) {
-	t.Parallel()
-
-	pixel := base64.StdEncoding.EncodeToString([]byte{0x89, 0x50, 0x4e, 0x47})
-
-	var captured map[string]any
-
-	base := localServer(t, func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, "/v1/images/generations", r.URL.Path)
-		assert.NoError(t, decodeBody(r, &captured))
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":[{"b64_json":"` + pixel + `"}],"usage":{"input_tokens":5,"output_tokens":100}}`))
-	})
-
-	model := openai.NewImageModel("gpt-image-1",
-		openai.WithAPIKey("sk-test"), openai.WithBaseURL(base),
-		openai.WithAllowHTTP(), openai.WithAllowPrivateIPs())
-
-	resp, err := model.GenerateImages(t.Context(), ai.ImageRequest{Prompt: "a cat", Size: "1024x1024"})
-	require.NoError(t, err)
-
-	assert.Equal(t, "gpt-image-1", captured["model"])
-	assert.Equal(t, "a cat", captured["prompt"])
-	assert.Equal(t, "1024x1024", captured["size"])
-
-	require.Len(t, resp.Images, 1)
-	assert.Equal(t, []byte{0x89, 0x50, 0x4e, 0x47}, resp.Images[0].Data)
-	assert.Equal(t, "image/png", resp.Images[0].MIMEType)
-	assert.Equal(t, 100, resp.Usage.OutputTokens)
 }
 
 func TestEmbeddings(t *testing.T) {
@@ -89,13 +57,10 @@ func TestEmbeddings(t *testing.T) {
 	assert.Equal(t, 8, resp.Usage.InputTokens)
 }
 
-func TestImageModelInterfaceIDs(t *testing.T) {
+func TestEmbeddingModelInterfaceIDs(t *testing.T) {
 	t.Parallel()
 
-	img := openai.NewImageModel("gpt-image-1", openai.WithAPIKey("x"))
-	assert.Equal(t, ai.ProviderOpenAI, img.Provider())
-	assert.Equal(t, "gpt-image-1", img.ModelID())
-
 	emb := openai.NewEmbeddingModel("text-embedding-3-small", openai.WithAPIKey("x"))
+	assert.Equal(t, ai.ProviderOpenAI, emb.Provider())
 	assert.Equal(t, "text-embedding-3-small", emb.ModelID())
 }
