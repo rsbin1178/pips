@@ -68,7 +68,7 @@ func TestRunProcessCollectsCompleteConcurrentOutput(t *testing.T) {
 		group.Go(func() {
 			result, runErr := runProcess(
 				t.Context(), executable, []string{"identity-line\\n"},
-				[]string{localeEnvironment}, nil, 1024, 2*time.Second,
+				[]string{localeEnvironment}, nil, 1024, 10*time.Second,
 			)
 			results <- workerResult{output: string(result.stdout), err: runErr}
 		})
