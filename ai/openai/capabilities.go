@@ -18,7 +18,8 @@ func (m *Model) Capabilities() ai.Capabilities {
 
 func capabilitiesFor(model string) ai.Capabilities {
 	switch {
-	case strings.HasPrefix(model, "gpt-image"), strings.HasPrefix(model, "dall-e"):
+	case strings.HasPrefix(model, "gpt-image"), strings.HasPrefix(model, "dall-e"),
+		strings.HasPrefix(model, "chatgpt-image"):
 		return ai.Capabilities{ImageGeneration: true}
 	case strings.HasPrefix(model, "text-embedding"):
 		return ai.Capabilities{Embeddings: true}

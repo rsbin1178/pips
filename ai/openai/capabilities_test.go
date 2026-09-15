@@ -20,6 +20,7 @@ func TestCapabilities(t *testing.T) {
 		{"gpt-6-astra", ai.Capabilities{Text: true, Vision: true, Documents: true, Tools: true, StructuredOutput: true, Reasoning: true, PromptCaching: true}},
 		{"o3-mini", ai.Capabilities{Text: true, Vision: true, Documents: true, Tools: true, StructuredOutput: true, Reasoning: true, PromptCaching: true}},
 		{"gpt-3.5-turbo", ai.Capabilities{Text: true, Tools: true}},
+		{"chatgpt-image-latest", ai.Capabilities{ImageGeneration: true}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.model, func(t *testing.T) {

@@ -1,9 +1,14 @@
 package openai
 
 import (
+	"encoding/json"
+	"fmt"
+	"sort"
+	"strconv"
 	"time"
 
 	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/ai/internal/httpx"
 	"github.com/rsbin1178/pips/ai/internal/jsonx"
 )
 
@@ -56,6 +61,93 @@ func mergeExtraFields(body any, extra map[string]any) (any, error) {
 		"top_logprobs", "include", "store", "background", "previous_response_id",
 		"conversation", "prompt", "n", "size", "quality",
 	)
+}
+
+// imageReservedFields are the request keys the Images API types own. Image
+// requests need their own list rather than the chat/Responses one, which also
+// blocks documented image parameters. Keys whose typed field is optional and
+// left unset stay deliverable through ExtraFields (background,
+// response_format, ...); a key that collides with an already-set typed value
+// still fails the merge.
+//
+// stream is reserved on purpose: only [ai.ImageStreamer] can consume an SSE
+// response, so letting a unary call set it would produce an unparseable body.
+var imageReservedFields = []string{
+	"model", "prompt", "n", "size", "quality", "output_format",
+	"output_compression", "partial_images", "input_fidelity",
+	"moderation", "style", "user", "stream", "image", "image[]", "mask", "images",
+}
+
+// mergeImageExtraFields folds image ExtraFields into an already-encoded JSON
+// request body. A no-op when there are no extras.
+func mergeImageExtraFields(body any, extra map[string]any) (any, error) {
+	return jsonx.MergeExtraFields(body, extra, imageReservedFields...)
+}
+
+// mergeImageFormFields renders image ExtraFields as multipart form fields,
+// rejecting keys that a typed field already set. Multipart bodies are flat, so
+// only scalar JSON values are accepted; nested values, reserved keys, typed
+// collisions, and credential-shaped keys return [jsonx.ErrUnsafeExtension].
+// Fields come back in a stable order.
+func mergeImageFormFields(extra map[string]any, typed []httpx.FormField) ([]httpx.FormField, error) {
+	if len(extra) == 0 {
+		return nil, nil
+	}
+
+	// Reuse the JSON merge seam for the shared size, reserved-path, and
+	// credential-shape checks, then render the flat scalar result.
+	merged, err := jsonx.MergeExtraFields(map[string]any{}, extra, imageReservedFields...)
+	if err != nil {
+		return nil, err
+	}
+
+	values, ok := merged.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("%w: image extra fields did not encode as an object", jsonx.ErrUnsafeExtension)
+	}
+
+	set := make(map[string]struct{}, len(typed))
+	for _, field := range typed {
+		set[field.Name] = struct{}{}
+	}
+
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+
+	sort.Strings(keys)
+
+	fields := make([]httpx.FormField, 0, len(keys))
+
+	for _, key := range keys {
+		if _, taken := set[key]; taken {
+			return nil, fmt.Errorf("%w: multipart field %q collides with a typed field", jsonx.ErrUnsafeExtension, key)
+		}
+
+		value, err := imageFormValue(key, values[key])
+		if err != nil {
+			return nil, err
+		}
+
+		fields = append(fields, httpx.FormField{Name: key, Value: value})
+	}
+
+	return fields, nil
+}
+
+// imageFormValue renders one scalar ExtraFields value as a form field value.
+func imageFormValue(key string, value any) (string, error) {
+	switch typed := value.(type) {
+	case string:
+		return typed, nil
+	case bool:
+		return strconv.FormatBool(typed), nil
+	case json.Number:
+		return typed.String(), nil
+	default:
+		return "", fmt.Errorf("%w: multipart field %q must be a scalar JSON value", jsonx.ErrUnsafeExtension, key)
+	}
 }
 
 // errorBody is OpenAI's error envelope, shared by both API surfaces.
