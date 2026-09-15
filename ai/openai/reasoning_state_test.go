@@ -52,13 +52,20 @@ func TestResponsesReasoningStateRoundTrip(t *testing.T) {
 func TestResponseReasoningInputItemLegacySummary(t *testing.T) {
 	t.Parallel()
 
+	legacy := responsesReasoningState{
+		ID:               "rs_legacy",
+		EncryptedContent: "legacy-state",
+	}
+
 	tests := []struct {
 		name         string
+		state        responsesReasoningState
 		fallbackText string
 		wantSummary  []responseSummary
 	}{
 		{
 			name:         "visible text becomes summary",
+			state:        legacy,
 			fallbackText: "checking",
 			wantSummary: []responseSummary{
 				{Type: typeSummaryText, Text: "checking"},
@@ -66,7 +73,17 @@ func TestResponseReasoningInputItemLegacySummary(t *testing.T) {
 		},
 		{
 			name:        "missing text becomes empty array",
+			state:       legacy,
 			wantSummary: []responseSummary{},
+		},
+		{
+			name: "provider content is not restated as summary",
+			state: responsesReasoningState{
+				ID:      "rs_text",
+				Content: []responseContent{{Type: "reasoning_text", Text: "checking"}},
+			},
+			fallbackText: "checking",
+			wantSummary:  []responseSummary{},
 		},
 	}
 
@@ -74,11 +91,7 @@ func TestResponseReasoningInputItemLegacySummary(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			legacy := responsesReasoningState{
-				ID:               "rs_legacy",
-				EncryptedContent: "legacy-state",
-			}
-			replayed := responseReasoningInputItem(legacy, tt.fallbackText)
+			replayed := responseReasoningInputItem(tt.state, tt.fallbackText)
 
 			require.NotNil(t, replayed.Summary)
 			assert.Equal(t, tt.wantSummary, *replayed.Summary)

@@ -63,13 +63,40 @@ func decodeResponsesReasoningState(signature string) (responsesReasoningState, b
 	return state, true
 }
 
+// reasoningTextOf returns the visible reasoning text of an output item. A
+// summary is the provider's rendering for display, so it wins; providers that
+// report raw reasoning text instead leave the summary empty.
+func reasoningTextOf(item responseItem) string {
+	if item.Summary != nil {
+		var summary strings.Builder
+		for _, part := range *item.Summary {
+			summary.WriteString(part.Text)
+		}
+
+		if summary.Len() > 0 {
+			return summary.String()
+		}
+	}
+
+	var content strings.Builder
+
+	for _, part := range item.Content {
+		if part.Type == "reasoning_text" {
+			content.WriteString(part.Text)
+		}
+	}
+
+	return content.String()
+}
+
 // responseReasoningInputItem restores a Provider reasoning item for a later
 // Responses request. Summary must be present even when it is empty. Visible
-// text is only a fallback for signatures persisted before structured summaries
-// were retained.
+// text only becomes the summary for signatures persisted before structured
+// summaries were retained: an item that already carries provider content would
+// otherwise send the same reasoning twice.
 func responseReasoningInputItem(state responsesReasoningState, fallbackText string) responseItem {
 	summary := state.Summary
-	if len(summary) == 0 && fallbackText != "" {
+	if len(summary) == 0 && len(state.Content) == 0 && fallbackText != "" {
 		summary = []responseSummary{{Type: typeSummaryText, Text: fallbackText}}
 	}
 

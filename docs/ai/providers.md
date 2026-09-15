@@ -46,6 +46,9 @@ model := openai.New(
 - Responses 会拒绝 `TopK`、`Seed`、两类 penalty 和 `Stop`；Reasoning 不接受显式 `BudgetTokens` 或 adaptive。
 - Chat Completions 的文件输入支持 Provider 文件 ID 或内联数据，不支持文件 URL。
 - Responses 的文件输入支持文件 ID、URL 和内联数据。
+- Responses 的 Tool Call 在 wire 上同时带 item id（`fc_…`）与 call id（`call_…`）；便携 `ToolCallPart.ID` 以 call id 为基底并追加 `|id=` 形式的 item id，回放历史时两个字段都会还原。严格校验输入项的兼容服务会拒绝缺少 item id 的 `function_call`，因此历史里没有该 id 时适配器会按 call id 派生一个。
+- Responses 的推理文本有两种流：`response.reasoning_summary_text.*`（摘要）与 `response.reasoning_text.*`（原始推理，开源或代理服务常用）。流式响应里同一个 item 以先出现的流为准，另一种忽略，避免同一段推理被拼接两次；非流式响应优先取 `summary`，为空时用 `content`。回放时只还原 Provider 给的 `content`，不会再合成一份 `summary`。
+- Responses 的请求体始终显式携带 `stream`（流式 `true`，非流式 `false`）。该字段在官方 schema 中可选，但存在省略后返回 500 的兼容服务；回放的 assistant 文本消息同样会补上 schema 标记为必填的 `status: "completed"`。
 - `Response.Raw` 保存所选 API 的原始 JSON，但便携业务逻辑不应解析它。
 
 图片与 Embedding 使用独立构造器：

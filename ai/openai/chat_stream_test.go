@@ -59,7 +59,7 @@ const responsesToolsStream = `event: response.created
 data: {"type":"response.created","response":{"id":"resp_s2","model":"gpt-5-2025-08-07","status":"in_progress"}}
 
 event: response.output_item.added
-data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","call_id":"call_a","name":"get_weather"}}
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_a","call_id":"call_a","name":"get_weather"}}
 
 event: response.function_call_arguments.delta
 data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\"city\":"}
@@ -71,7 +71,7 @@ event: response.function_call_arguments.done
 data: {"type":"response.function_call_arguments.done","output_index":0}
 
 event: response.completed
-data: {"type":"response.completed","response":{"id":"resp_s2","model":"gpt-5-2025-08-07","status":"completed","output":[{"type":"function_call","call_id":"call_a","name":"get_weather","arguments":"{\"city\":\"Paris\"}"}],"usage":{"input_tokens":40,"output_tokens":15}}}
+data: {"type":"response.completed","response":{"id":"resp_s2","model":"gpt-5-2025-08-07","status":"completed","output":[{"type":"function_call","id":"fc_a","call_id":"call_a","name":"get_weather","arguments":"{\"city\":\"Paris\"}"}],"usage":{"input_tokens":40,"output_tokens":15}}}
 
 `
 
