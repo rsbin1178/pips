@@ -4,6 +4,7 @@
 package execution
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -406,8 +407,8 @@ func runDarwinCapabilityProbe(
 	})
 
 	anyScript := fmt.Sprintf(
-		"/usr/bin/nc -z -w 1 127.0.0.1 %d && "+
-			"/usr/bin/curl --silent --show-error --max-time 1 --unix-socket %s http://localhost/ >/dev/null",
+		"/usr/bin/nc -z -w 2 127.0.0.1 %d && "+
+			"/usr/bin/curl --silent --show-error --max-time 3 --unix-socket %s http://localhost/ >/dev/null",
 		tcpAddress.Port,
 		shellSingleQuote(paths.unixSocket),
 	)
@@ -521,6 +522,15 @@ func serveDarwinUnixProbe(listener net.Listener) <-chan error {
 			done <- err
 
 			return
+		}
+
+		_ = connection.SetDeadline(time.Now().Add(2 * time.Second))
+		reader := bufio.NewReader(connection)
+		for {
+			line, readErr := reader.ReadString('\n')
+			if readErr != nil || strings.TrimRight(line, "\r\n") == "" {
+				break
+			}
 		}
 
 		_, writeErr := io.WriteString(
