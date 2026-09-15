@@ -30,6 +30,34 @@ type ImageModel interface {
 	ModelID() string
 }
 
+// ImageStreamer is the optional ability to stream images as they are
+// produced. Discover it by type assertion, like [TokenCounter]:
+//
+//	if streamer, ok := model.(ai.ImageStreamer); ok {
+//	    for event, err := range streamer.StreamImages(ctx, req) { ... }
+//	}
+type ImageStreamer interface {
+	// StreamImages streams a generation request.
+	StreamImages(ctx context.Context, req ImageRequest) ImageStream
+	// StreamImageEdits streams an edit request.
+	StreamImageEdits(ctx context.Context, req ImageEditRequest) ImageStream
+}
+
+// ImageEditor is the optional ability to edit existing images. Discover it by
+// type assertion, like [TokenCounter].
+type ImageEditor interface {
+	// EditImage applies an edit request and returns the completed response.
+	EditImage(ctx context.Context, req ImageEditRequest) (*ImageResponse, error)
+}
+
+// ImageVariator is the optional ability to create variations of an existing
+// image. Discover it by type assertion, like [TokenCounter].
+type ImageVariator interface {
+	// CreateVariations applies a variation request and returns the completed
+	// response.
+	CreateVariations(ctx context.Context, req ImageVariationRequest) (*ImageResponse, error)
+}
+
 // EmbeddingModel converts text into embedding vectors.
 type EmbeddingModel interface {
 	Embed(ctx context.Context, req EmbeddingRequest) (*EmbeddingResponse, error)
