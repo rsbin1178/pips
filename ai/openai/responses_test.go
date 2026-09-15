@@ -105,6 +105,9 @@ func TestResponsesGenerateText(t *testing.T) {
 
 	// System becomes top-level instructions; messages become typed input items.
 	assert.Equal(t, "You are terse.\nAnswer in one sentence.", captured["instructions"])
+	// The field is optional in the schema but always sent; compatible servers
+	// exist that reject a body without it.
+	assert.Equal(t, false, captured["stream"])
 	input := as[[]any](t, captured["input"])
 	require.Len(t, input, 1)
 	item := as[map[string]any](t, input[0])
@@ -215,11 +218,12 @@ func TestResponsesVisionAndToolWireFormat(t *testing.T) {
 	assert.Equal(t, "object", noArgsParams["type"])
 	assert.Empty(t, as[map[string]any](t, noArgsParams["properties"]))
 
-	// function_call output normalizes to tool_calls.
+	// function_call output normalizes to tool_calls, keeping the call id and
+	// the provider's item id.
 	assert.Equal(t, ai.FinishToolCalls, resp.FinishReason)
 	calls := resp.ToolCalls()
 	require.Len(t, calls, 1)
-	assert.Equal(t, "call_w1", calls[0].ID)
+	assert.Equal(t, "call_w1|id=fc_1", calls[0].ID)
 	assert.Equal(t, "get_weather", calls[0].Name)
 }
 
@@ -271,6 +275,9 @@ func TestResponsesToolResultHistoryWireFormat(t *testing.T) {
 	call := as[map[string]any](t, input[1])
 	assert.Equal(t, "function_call", call["type"])
 	assert.Equal(t, "call_w1", call["call_id"])
+	// Hand-built history carries no provider item id, so the adapter derives
+	// one: strict servers reject a function_call input item without it.
+	assert.Equal(t, "fc_call_w1", call["id"])
 
 	output := as[map[string]any](t, input[2])
 	assert.Equal(t, "function_call_output", output["type"])
@@ -337,6 +344,58 @@ func TestResponsesStructuredOutputWireFormat(t *testing.T) {
 	assert.Equal(t, true, format["strict"])
 }
 
+// TestResponsesGenerateReasoningText covers the non-streaming counterpart of
+// the reasoning flavors: a provider summary wins when there is one, and raw
+// reasoning content is used when the summary is empty.
+func TestResponsesGenerateReasoningText(t *testing.T) {
+	t.Parallel()
+
+	const summarized = `{
+		"id":"resp_rt","model":"gpt-5","status":"completed","output":[
+			{
+				"type":"reasoning","id":"rs_1","status":"completed",
+				"summary":[{"type":"summary_text","text":"summarized"}],
+				"content":[{"type":"reasoning_text","text":"raw chain"}]
+			},
+			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"384"}]}
+		]
+	}`
+
+	const rawOnly = `{
+		"id":"resp_rt2","model":"agnes-3.0-flash","status":"completed","output":[
+			{
+				"type":"reasoning","id":"rs_2","status":"completed",
+				"summary":[],
+				"content":[{"type":"reasoning_text","text":"checking the sum"}]
+			},
+			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"384"}]}
+		]
+	}`
+
+	tests := []struct {
+		name     string
+		response string
+		want     string
+	}{
+		{name: "summary wins", response: summarized, want: "summarized"},
+		{name: "content when summary is empty", response: rawOnly, want: "checking the sum"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			model := newResponsesModel(t, serveResponsesJSON(t, tt.response, nil))
+
+			resp, err := model.Generate(t.Context(), ai.Request{Messages: []ai.Message{ai.UserText("sum")}})
+			require.NoError(t, err)
+
+			assert.Equal(t, "384", resp.Text())
+			assert.Equal(t, tt.want, resp.Reasoning())
+		})
+	}
+}
+
 func TestResponsesStreamText(t *testing.T) {
 	t.Parallel()
 
@@ -368,9 +427,212 @@ func TestResponsesStreamToolCall(t *testing.T) {
 	assert.Equal(t, ai.FinishToolCalls, resp.FinishReason)
 	calls := resp.ToolCalls()
 	require.Len(t, calls, 1)
-	assert.Equal(t, "call_a", calls[0].ID)
+	assert.Equal(t, "call_a|id=fc_a", calls[0].ID)
 	assert.Equal(t, "get_weather", calls[0].Name)
 	assert.JSONEq(t, `{"city":"Paris"}`, string(calls[0].Args))
+}
+
+// TestResponsesStreamToolCallReplayPreservesItemID covers the field strict
+// servers require on a replayed call: the item id captured from the response
+// reappears beside the call id, and the tool output answers the call id alone.
+func TestResponsesStreamToolCallReplayPreservesItemID(t *testing.T) {
+	t.Parallel()
+
+	model := newResponsesModel(t, serveSSE(t, responsesToolsStream))
+
+	resp, err := ai.Collect(model.Stream(t.Context(), ai.Request{
+		Messages: []ai.Message{ai.UserText("weather?")},
+		Tools:    []ai.Tool{{Name: "get_weather"}},
+	}))
+	require.NoError(t, err)
+
+	var captured map[string]any
+
+	replayModel := newResponsesModel(t, serveResponsesJSON(t, responsesTextResponse, &captured))
+	_, err = replayModel.Generate(t.Context(), ai.Request{Messages: []ai.Message{
+		ai.UserText("weather?"),
+		resp.Message,
+		ai.ToolResultText(resp.ToolCalls()[0].ID, "get_weather", `{"temp":21}`),
+	}})
+	require.NoError(t, err)
+
+	input := as[[]any](t, captured["input"])
+	require.Len(t, input, 3)
+
+	call := as[map[string]any](t, input[1])
+	assert.Equal(t, "function_call", call["type"])
+	assert.Equal(t, "fc_a", call["id"])
+	assert.Equal(t, "call_a", call["call_id"])
+
+	output := as[map[string]any](t, input[2])
+	assert.Equal(t, "call_a", output["call_id"])
+}
+
+// TestResponsesFunctionCallItemIDRoundTrip covers the same round trip when the
+// response body is not streamed.
+func TestResponsesFunctionCallItemIDRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	firstModel := newResponsesModel(t, serveResponsesJSON(t, responsesToolsResponse, nil))
+
+	first, err := firstModel.Generate(t.Context(), ai.Request{
+		Messages: []ai.Message{ai.UserText("weather?")},
+	})
+	require.NoError(t, err)
+
+	calls := first.ToolCalls()
+	require.Len(t, calls, 1)
+	assert.Equal(t, "call_w1|id=fc_1", calls[0].ID)
+
+	var captured map[string]any
+
+	replayModel := newResponsesModel(t, serveResponsesJSON(t, responsesTextResponse, &captured))
+	_, err = replayModel.Generate(t.Context(), ai.Request{Messages: []ai.Message{
+		ai.UserText("weather?"),
+		first.Message,
+		ai.ToolResultText(calls[0].ID, "get_weather", `{"temp":21}`),
+	}})
+	require.NoError(t, err)
+
+	input := as[[]any](t, captured["input"])
+	require.Len(t, input, 3)
+
+	call := as[map[string]any](t, input[1])
+	assert.Equal(t, "fc_1", call["id"])
+	assert.Equal(t, "call_w1", call["call_id"])
+	assert.Equal(t, "get_weather", call["name"])
+
+	output := as[map[string]any](t, input[2])
+	assert.Equal(t, "call_w1", output["call_id"])
+}
+
+// TestResponsesStreamReasoningTextDeltas covers providers that stream visible
+// reasoning text instead of a summary (open-weight servers, proxies): the text
+// reaches ReasoningPart.Text, and replaying it sends the provider's content
+// without also restating it as a summary.
+func TestResponsesStreamReasoningTextDeltas(t *testing.T) {
+	t.Parallel()
+
+	const stream = `event: response.created
+data: {"type":"response.created","response":{"id":"resp_r2","model":"gpt-5","status":"in_progress"}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1","summary":[],"content":[],"status":"in_progress"}}
+
+event: response.reasoning_text.delta
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_1","delta":"checking "}
+
+event: response.reasoning_text.delta
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_1","delta":"the sum"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_1","summary":[],"content":[{"type":"reasoning_text","text":"checking the sum"}],"status":"completed"}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup"}}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","output_index":1,"delta":"{}"}
+
+event: response.function_call_arguments.done
+data: {"type":"response.function_call_arguments.done","output_index":1}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_r2","model":"gpt-5","status":"completed","output":[{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":"{}"}],"usage":{"input_tokens":4,"output_tokens":5}}}
+
+`
+
+	model := newResponsesModel(t, serveSSE(t, stream))
+	resp, err := ai.Collect(model.Stream(t.Context(), ai.Request{Messages: []ai.Message{ai.UserText("check")}}))
+	require.NoError(t, err)
+	require.Len(t, resp.Message.Parts, 2)
+
+	reasoning := as[ai.ReasoningPart](t, resp.Message.Parts[0])
+	assert.Equal(t, "checking the sum", reasoning.Text)
+	assert.NotEmpty(t, reasoning.Signature)
+
+	var captured map[string]any
+
+	replayModel := newResponsesModel(t, serveResponsesJSON(t, responsesTextResponse, &captured))
+	_, err = replayModel.Generate(t.Context(), ai.Request{Messages: []ai.Message{
+		ai.UserText("check"),
+		resp.Message,
+		ai.ToolResultText("call_1|id=fc_1", "lookup", "value"),
+	}})
+	require.NoError(t, err)
+
+	input := as[[]any](t, captured["input"])
+	require.Len(t, input, 4)
+
+	replayed := as[map[string]any](t, input[1])
+	assert.Equal(t, []any{}, replayed["summary"])
+	assert.Equal(t, []any{
+		map[string]any{"type": "reasoning_text", "text": "checking the sum"},
+	}, replayed["content"])
+}
+
+// TestResponsesStreamReasoningFlavorWinsOnce pins the rule for a server that
+// sends both flavors for one item: the first flavor seen is surfaced, the
+// other is dropped instead of being concatenated onto the same part.
+func TestResponsesStreamReasoningFlavorWinsOnce(t *testing.T) {
+	t.Parallel()
+
+	const summaryFirst = `event: response.created
+data: {"type":"response.created","response":{"id":"resp_f","model":"gpt-5","status":"in_progress"}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1"}}
+
+event: response.reasoning_summary_text.delta
+data: {"type":"response.reasoning_summary_text.delta","output_index":0,"delta":"summary"}
+
+event: response.reasoning_text.delta
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_1","delta":"raw"}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_f","model":"gpt-5","status":"completed","output":[]}}
+
+`
+
+	const textFirst = `event: response.created
+data: {"type":"response.created","response":{"id":"resp_f","model":"gpt-5","status":"in_progress"}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1"}}
+
+event: response.reasoning_text.delta
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_1","delta":"raw"}
+
+event: response.reasoning_summary_text.delta
+data: {"type":"response.reasoning_summary_text.delta","output_index":0,"delta":"summary"}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_f","model":"gpt-5","status":"completed","output":[]}}
+
+`
+
+	tests := []struct {
+		name     string
+		stream   string
+		wantText string
+	}{
+		{name: "summary first", stream: summaryFirst, wantText: "summary"},
+		{name: "reasoning text first", stream: textFirst, wantText: "raw"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			model := newResponsesModel(t, serveSSE(t, tt.stream))
+
+			resp, err := ai.Collect(model.Stream(t.Context(), ai.Request{Messages: []ai.Message{ai.UserText("check")}}))
+			require.NoError(t, err)
+
+			reasoning := as[ai.ReasoningPart](t, resp.Message.Parts[0])
+			assert.Equal(t, tt.wantText, reasoning.Text)
+		})
+	}
 }
 
 func TestResponsesStreamPreservesEncryptedReasoning(t *testing.T) {
@@ -504,6 +766,54 @@ func TestResponsesAndChatEquivalentShape(t *testing.T) {
 	assert.Equal(t, chatResp.FinishReason, respResp.FinishReason)
 	assert.Equal(t, "The capital of France is Paris.", chatResp.Text())
 	assert.Equal(t, "The capital of France is Paris.", respResp.Text())
+}
+
+// TestResponsesAssistantMessageStatus covers the lifecycle status the schema
+// marks required on a replayed assistant message.
+func TestResponsesAssistantMessageStatus(t *testing.T) {
+	t.Parallel()
+
+	var captured map[string]any
+
+	model := newResponsesModel(t, serveResponsesJSON(t, responsesTextResponse, &captured))
+
+	_, err := model.Generate(t.Context(), ai.Request{Messages: []ai.Message{
+		ai.UserText("hi"),
+		ai.Assistant(ai.Text("hello")),
+		ai.UserText("again"),
+	}})
+	require.NoError(t, err)
+
+	input := as[[]any](t, captured["input"])
+	require.Len(t, input, 3)
+
+	replayed := as[map[string]any](t, input[1])
+	assert.Equal(t, "message", replayed["type"])
+	assert.Equal(t, "assistant", replayed["role"])
+	assert.Equal(t, "completed", replayed["status"])
+	assert.Equal(t, []any{
+		map[string]any{"type": "output_text", "text": "hello"},
+	}, replayed["content"])
+}
+
+// TestResponsesStreamSendsStreamField pins the streaming half of the same
+// field: it is present and true.
+func TestResponsesStreamSendsStreamField(t *testing.T) {
+	t.Parallel()
+
+	var captured map[string]any
+
+	model := newResponsesModel(t, func(w http.ResponseWriter, r *http.Request) {
+		assert.NoError(t, json.NewDecoder(r.Body).Decode(&captured))
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(responsesTextStream))
+	})
+
+	_, err := ai.Collect(model.Stream(t.Context(), ai.Request{Messages: []ai.Message{ai.UserText("hi")}}))
+	require.NoError(t, err)
+
+	assert.Equal(t, true, captured["stream"])
 }
 
 func TestResponsesFailedStatusSurfacesError(t *testing.T) {
