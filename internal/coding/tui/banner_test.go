@@ -113,6 +113,12 @@ func TestStartupBannerIsBoundedAcrossThemes(t *testing.T) {
 				assert.NotContains(t, banner, "\x1b[")
 			}
 
+			if test.width >= 38 {
+				assert.Contains(t, banner, "██")
+			} else {
+				assert.NotContains(t, banner, "██")
+			}
+
 			for line := range strings.SplitSeq(banner, "\n") {
 				assert.LessOrEqual(t, ansi.StringWidth(line), test.width)
 			}

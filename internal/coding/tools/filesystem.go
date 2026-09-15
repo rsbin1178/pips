@@ -92,6 +92,10 @@ func readRegularFile(
 }
 
 func inspectTraversalBase(tree *workspace.Tree, name string) (string, error) {
+	if strings.TrimSpace(name) == "" {
+		name = "."
+	}
+
 	normalized, err := workspace.NormalizePath(name, true)
 	if err != nil {
 		return "", err

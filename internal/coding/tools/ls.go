@@ -23,7 +23,7 @@ func (s *service) ls(ctx context.Context, args lsArgs) (string, error) {
 	}
 
 	name := "."
-	if args.Path != nil {
+	if args.Path != nil && strings.TrimSpace(*args.Path) != "" {
 		name = *args.Path
 	}
 

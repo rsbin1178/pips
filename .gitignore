@@ -44,3 +44,4 @@ go.work.sum
 # Local Trellis state
 .trellis/
 **/research/vendor/
+.vhs/
