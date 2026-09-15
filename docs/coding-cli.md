@@ -291,15 +291,15 @@ base_url = "http://127.0.0.1:11434/v1"
 allow_http = true
 allow_private_ips = true
 
-[providers.local.models."qwen2.5-coder:7b"]
+[providers.local.models."qwen3-coder:7b"]
 context_window = 32768
 
-[providers.local.models."qwen2.5-coder:7b".request]
+[providers.local.models."qwen3-coder:7b".request]
 max_output_tokens = 4096
 top_k = 40
 seed = 7
 
-[providers.local.models."qwen2.5-coder:7b".request.extra_body]
+[providers.local.models."qwen3-coder:7b".request.extra_body]
 service_tier = "flex"
 ```
 

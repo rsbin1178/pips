@@ -426,7 +426,7 @@ func TestLoadInfersOnlyNestedModel(t *testing.T) {
 protocol = "openai/chat_completions"
 base_url = "https://opencode.ai/zen/go/v1"
 
-[providers.opencode-go.models."deepseek-v4-flash"]
+[providers.opencode-go.models."deepseek-v4.1-flash"]
 context_window = 1000000
 request.max_output_tokens = 65536
 `)
@@ -434,7 +434,7 @@ request.max_output_tokens = 65536
 	result, err := config.Load(config.LoadOptions{ConfigFile: path})
 	require.NoError(t, err)
 
-	assert.Equal(t, "opencode-go/deepseek-v4-flash", result.Config.Model.String())
+	assert.Equal(t, "opencode-go/deepseek-v4.1-flash", result.Config.Model.String())
 	require.Len(t, result.Config.Models, 1)
 	assert.Equal(t, 1000000, result.Config.Models[0].ContextWindow)
 	assert.Equal(t, 65536, *result.Config.Models[0].Options.MaxOutputTokens)

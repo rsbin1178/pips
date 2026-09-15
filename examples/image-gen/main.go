@@ -1,4 +1,4 @@
-// Command image-gen generates an image with gpt-image-1 and writes it to
+// Command image-gen generates an image with gpt-image-2 and writes it to
 // disk.
 package main
 
@@ -13,8 +13,8 @@ import (
 )
 
 func main() {
-	model := openai.NewImageModel("gpt-image-1", openai.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
-	// Gemini equivalent: gemini.NewImageModel("gemini-2.5-flash-image", ...)
+	model := openai.NewImageModel("gpt-image-2", openai.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
+	// Gemini equivalent: gemini.NewImageModel("gemini-3.8-flash-image", ...)
 
 	resp, err := model.GenerateImages(context.Background(), ai.ImageRequest{
 		Prompt: "A watercolor painting of a lighthouse at dawn",

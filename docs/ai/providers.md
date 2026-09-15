@@ -18,14 +18,14 @@
 最小构造：
 
 ```go
-model := openai.New("gpt-4o") // 默认读取 OPENAI_API_KEY
+model := openai.New("gpt-6-astra") // 默认读取 OPENAI_API_KEY
 ```
 
 `openai.Model` 支持两个 API surface：
 
 | `openai.API` | 路径 | 选择建议 |
 | --- | --- | --- |
-| `APIAuto` | 自动 | 默认；`o1`/`o3`/`o4`/`gpt-5*` 走 Responses，其余走 Chat Completions |
+| `APIAuto` | 自动 | 默认；`o1`/`o3`/`o4`/`gpt-5*`/`gpt-6*` 走 Responses，其余走 Chat Completions |
 | `APIChatCompletions` | `/v1/chat/completions` | 传统 Chat 或兼容服务 |
 | `APIResponses` | `/v1/responses` | OpenAI 推理与 agentic 场景 |
 
@@ -33,7 +33,7 @@ model := openai.New("gpt-4o") // 默认读取 OPENAI_API_KEY
 
 ```go
 model := openai.New(
-	"gpt-5",
+	"gpt-6-astra",
 	openai.WithAPI(openai.APIResponses),
 )
 ```
@@ -51,7 +51,7 @@ model := openai.New(
 图片与 Embedding 使用独立构造器：
 
 ```go
-images := openai.NewImageModel("gpt-image-1")
+images := openai.NewImageModel("gpt-image-2")
 embeddings := openai.NewEmbeddingModel("text-embedding-3-small")
 ```
 
@@ -91,7 +91,7 @@ embeddings := openai.NewEmbeddingModel("text-embedding-3-small")
 示例：
 
 ```go
-model := compat.DeepSeek("deepseek-chat")
+model := compat.DeepSeek("deepseek-v4.1-flash")
 resp, err := model.Generate(ctx, req)
 ```
 
@@ -118,7 +118,7 @@ model := compat.New(profile, "company-model")
 ## Anthropic
 
 ```go
-model := anthropic.New("claude-sonnet-4-5")
+model := anthropic.New("claude-sonnet-5")
 ```
 
 适配器使用 `/v1/messages`，支持文本、视觉、文件、Tools、原生结构输出、扩展思考、流式响应、Prompt Cache 和 `/v1/messages/count_tokens`。
@@ -127,7 +127,7 @@ Anthropic Messages 要求 `max_tokens`。当 `Request.MaxTokens == nil` 时，�
 
 ```go
 model := anthropic.New(
-	"claude-sonnet-4-5",
+	"claude-sonnet-5",
 	anthropic.WithMaxTokens(2_000),
 )
 ```
@@ -162,7 +162,7 @@ req.ProviderOptions = map[ai.Provider]any{
 ## Gemini
 
 ```go
-model := gemini.New("gemini-2.5-flash")
+model := gemini.New("gemini-3.8-flash")
 ```
 
 适配器使用 `generateContent` / `streamGenerateContent`，支持文本、图像、文档、音频/视频输入、Tools、结构化输出、Thinking、显式缓存资源和 `countTokens`。
@@ -184,7 +184,7 @@ Gemini Provider 文件 URI 使用 `FileURL` 的 URL 字段。当前适配器不�
 图片和向量：
 
 ```go
-images := gemini.NewImageModel("gemini-2.5-flash-image")
+images := gemini.NewImageModel("gemini-3.8-flash-image")
 embeddings := gemini.NewEmbeddingModel("gemini-embedding-001")
 ```
 

@@ -13,7 +13,7 @@ import (
 )
 
 func main() {
-	model := openai.New("gpt-4o", openai.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
+	model := openai.New("gpt-6-astra", openai.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
 
 	req := ai.Request{
 		Messages: ai.Messages{

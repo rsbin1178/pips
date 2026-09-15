@@ -125,7 +125,7 @@ func WithMaxStreamLineSize(n int) Option {
 }
 
 // New returns a Model bound to the given model ID (for example
-// "claude-sonnet-4-5"). Configuration problems surface on the first call.
+// "claude-sonnet-5"). Configuration problems surface on the first call.
 func New(model string, opts ...Option) *Model {
 	o := options{
 		apiVersion: defaultAPIVersion,

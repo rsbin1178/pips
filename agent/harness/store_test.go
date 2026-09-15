@@ -78,7 +78,7 @@ func TestJSONLRoundTripAllKinds(t *testing.T) {
 	first := appendText(t, sess, ai.UserMessage{}, "hi", nil)
 	appendText(t, sess, ai.AssistantMessage{}, "hello", &u)
 
-	_, err = sess.AppendModelChange(ai.ProviderOpenAI, "gpt-4o")
+	_, err = sess.AppendModelChange(ai.ProviderOpenAI, "gpt-6-astra")
 	require.NoError(t, err)
 	_, err = sess.AppendCompaction("summary", first, 1234)
 	require.NoError(t, err)

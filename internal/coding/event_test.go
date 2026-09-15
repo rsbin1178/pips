@@ -87,10 +87,10 @@ func TestValidateEventAcceptsCustomProviderIdentity(t *testing.T) {
 
 	events := []Event{
 		newSessionEvent(EventSessionOpened, SessionOpened{
-			Provider: provider, ModelID: "deepseek-v4-flash",
+			Provider: provider, ModelID: "deepseek-v4.1-flash",
 		}),
 		newTestEvent(EventMessageDelta, MessageDelta{
-			Kind: ai.StreamMessageStart, Provider: provider, Model: "deepseek-v4-flash",
+			Kind: ai.StreamMessageStart, Provider: provider, Model: "deepseek-v4.1-flash",
 		}),
 	}
 	for _, event := range events {
@@ -98,7 +98,7 @@ func TestValidateEventAcceptsCustomProviderIdentity(t *testing.T) {
 	}
 
 	invalid := newSessionEvent(EventSessionOpened, SessionOpened{
-		Provider: "OpenCode", ModelID: "deepseek-v4-flash",
+		Provider: "OpenCode", ModelID: "deepseek-v4.1-flash",
 	})
 	require.ErrorIs(t, ValidateEvent(invalid), ErrInvalidEvent)
 }

@@ -69,8 +69,8 @@ func TestCatalogResolvesOpenAIAutoBeforeReturningSnapshot(t *testing.T) {
 		model string
 		want  config.Protocol
 	}{
-		{name: "reasoning family", model: "gpt-5", want: config.ProtocolOpenAIResponses},
-		{name: "compatible regular model", model: "deepseek-v4-flash", want: config.ProtocolOpenAIChatCompletions},
+		{name: "reasoning family", model: "gpt-6-astra", want: config.ProtocolOpenAIResponses},
+		{name: "compatible regular model", model: "deepseek-v4.1-flash", want: config.ProtocolOpenAIChatCompletions},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

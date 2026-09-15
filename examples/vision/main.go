@@ -22,10 +22,10 @@ func main() {
 		log.Fatal(err)
 	}
 
-	model := openai.New("gpt-4o", openai.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
+	model := openai.New("gpt-6-astra", openai.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
 	// Same request works on the other providers:
-	//   model := anthropic.New("claude-sonnet-4-5", ...)
-	//   model := gemini.New("gemini-2.5-flash", ...)
+	//   model := anthropic.New("claude-sonnet-5", ...)
+	//   model := gemini.New("gemini-3.8-flash", ...)
 
 	resp, err := model.Generate(context.Background(), ai.Request{
 		Messages: ai.Messages{ai.User(

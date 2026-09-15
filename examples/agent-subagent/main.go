@@ -16,7 +16,7 @@ import (
 )
 
 func main() {
-	model := openai.New("gpt-4o", openai.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
+	model := openai.New("gpt-6-astra", openai.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
 
 	researcher, err := agent.New(model,
 		agent.WithSystem("You are a terse researcher. Answer in one sentence."),
