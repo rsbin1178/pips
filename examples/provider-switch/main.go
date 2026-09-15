@@ -17,7 +17,7 @@ import (
 
 func main() {
 	provider := flag.String("provider", "openai", "provider profile")
-	modelID := flag.String("model", "gpt-4o", "provider model ID")
+	modelID := flag.String("model", "gpt-6-astra", "provider model ID")
 	prompt := flag.String("prompt", "Explain a mutex in one sentence.", "user prompt")
 
 	flag.Parse()

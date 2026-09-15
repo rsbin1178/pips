@@ -11,7 +11,7 @@ import (
 func TestCapabilities(t *testing.T) {
 	t.Parallel()
 
-	caps := anthropic.New("claude-sonnet-4-5", anthropic.WithAPIKey("x")).Capabilities()
+	caps := anthropic.New("claude-sonnet-5", anthropic.WithAPIKey("x")).Capabilities()
 
 	// Chat capabilities are present; image generation and embeddings are not
 	// (the package intentionally exposes no image/embedding constructor).

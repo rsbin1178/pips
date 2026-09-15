@@ -9,7 +9,7 @@ import (
 )
 
 // ImageModel is an ai.ImageModel backed by a Gemini image-capable model (for
-// example "gemini-2.5-flash-image"). Image output arrives as inlineData parts
+// example "gemini-3.8-flash-image"). Image output arrives as inlineData parts
 // from generateContent. Create one with [NewImageModel].
 type ImageModel struct {
 	model *Model

@@ -17,7 +17,7 @@ import (
 )
 
 func main() {
-	base := openai.New("gpt-4o", openai.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
+	base := openai.New("gpt-6-astra", openai.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
 
 	// Request flow (outer to inner): observe → rate limit → retry → provider.
 	model := ai.Chain(base,

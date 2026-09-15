@@ -27,7 +27,7 @@ var weatherTool = ai.Tool{
 }
 
 func main() {
-	model := openai.New("gpt-4o", openai.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
+	model := openai.New("gpt-6-astra", openai.WithAPIKey(os.Getenv("OPENAI_API_KEY")))
 	ctx := context.Background()
 
 	messages := ai.Messages{ai.UserText("What's the weather in Paris right now?")}

@@ -12,7 +12,7 @@ import (
 )
 
 func main() {
-	model := anthropic.New("claude-sonnet-4-5", anthropic.WithAPIKey(os.Getenv("ANTHROPIC_API_KEY")))
+	model := anthropic.New("claude-sonnet-5", anthropic.WithAPIKey(os.Getenv("ANTHROPIC_API_KEY")))
 
 	req := ai.Request{
 		Messages: ai.Messages{

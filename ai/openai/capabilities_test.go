@@ -17,6 +17,7 @@ func TestCapabilities(t *testing.T) {
 	}{
 		{"gpt-4o", ai.Capabilities{Text: true, Vision: true, Documents: true, Tools: true, StructuredOutput: true, PromptCaching: true}},
 		{"gpt-5", ai.Capabilities{Text: true, Vision: true, Documents: true, Tools: true, StructuredOutput: true, Reasoning: true, PromptCaching: true}},
+		{"gpt-6-astra", ai.Capabilities{Text: true, Vision: true, Documents: true, Tools: true, StructuredOutput: true, Reasoning: true, PromptCaching: true}},
 		{"o3-mini", ai.Capabilities{Text: true, Vision: true, Documents: true, Tools: true, StructuredOutput: true, Reasoning: true, PromptCaching: true}},
 		{"gpt-3.5-turbo", ai.Capabilities{Text: true, Tools: true}},
 	}

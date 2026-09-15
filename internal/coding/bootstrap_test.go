@@ -20,16 +20,16 @@ func TestBootstrapStateAcceptsCustomProviderMetadata(t *testing.T) {
 	result, err := BootstrapState(BootstrapOptions{
 		SessionID: "session-1",
 		Provider:  provider,
-		ModelID:   "deepseek-v4-flash",
+		ModelID:   "deepseek-v4.1-flash",
 		PlanMode:  planmode.StateInactive,
 		Path: []harness.Entry{{
 			Kind: harness.KindModelChange, ID: "entry-1",
-			Provider: provider, ModelID: "deepseek-v4-flash",
+			Provider: provider, ModelID: "deepseek-v4.1-flash",
 		}},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, provider, result.State.Provider)
-	assert.Equal(t, "deepseek-v4-flash", result.State.ModelID)
+	assert.Equal(t, "deepseek-v4.1-flash", result.State.ModelID)
 }
 
 func TestBootstrapStateProjectsContextAndTaskProgress(t *testing.T) {
