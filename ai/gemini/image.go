@@ -54,7 +54,7 @@ func (m *ImageModel) GenerateImages(ctx context.Context, req ai.ImageRequest) (*
 		return nil, fmt.Errorf("gemini: image generateContent: %w", err)
 	}
 
-	out := &ai.ImageResponse{Usage: usageFrom(parsed.UsageMetadata), Raw: raw}
+	out := &ai.ImageResponse{Usage: ai.ImageUsage{Usage: usageFrom(parsed.UsageMetadata)}, Raw: raw}
 	if len(parsed.Candidates) == 0 {
 		return out, nil
 	}
