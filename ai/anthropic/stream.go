@@ -18,6 +18,7 @@ type streamDecoder struct {
 	blockKind map[int]blockKind
 	toolIndex map[int]int // content-block index -> ai tool-call index
 	nextTool  int
+	toolUse   bool
 
 	finish      ai.FinishReason
 	inputUsage  int
@@ -80,7 +81,7 @@ func (d *streamDecoder) handle(env streamEnvelope, yield func(ai.StreamEvent, er
 	case "message_delta":
 		return d.handleMessageDelta(env, yield)
 	case "message_stop":
-		return yield(ai.StreamEvent{Type: ai.StreamMessageEnd, FinishReason: d.finish, Usage: d.usage()}, nil)
+		return yield(ai.StreamEvent{Type: ai.StreamMessageEnd, FinishReason: d.finishReason(), Usage: d.usage()}, nil)
 	case "error":
 		msg := "stream error"
 		if env.Error != nil {
@@ -94,6 +95,25 @@ func (d *streamDecoder) handle(env streamEnvelope, yield func(ai.StreamEvent, er
 		// ping and unknown events carry no content.
 		return true
 	}
+}
+
+// finishReason returns the normalized stop reason for message_stop. Anthropic
+// reports it on message_delta, but compatible servers exist that never send
+// that event, so a missing reason falls back to what the streamed content
+// implies: a message that opened a tool_use block stopped to call the tool,
+// anything else completed normally. Only the server can distinguish a
+// max_tokens stop, so truncated messages are reported as their content
+// suggests and the lost reason cannot be recovered here.
+func (d *streamDecoder) finishReason() ai.FinishReason {
+	if d.finish != "" {
+		return d.finish
+	}
+
+	if d.toolUse {
+		return ai.FinishToolCalls
+	}
+
+	return ai.FinishStop
 }
 
 // finish and usage carry message-level results accumulated across events.
@@ -141,6 +161,7 @@ func (d *streamDecoder) handleBlockStart(env streamEnvelope, yield func(ai.Strea
 // startToolBlock begins a tool_use block.
 func (d *streamDecoder) startToolBlock(env streamEnvelope, yield func(ai.StreamEvent, error) bool) bool {
 	d.blockKind[env.Index] = blockToolUse
+	d.toolUse = true
 
 	toolIdx := d.nextTool
 	d.nextTool++

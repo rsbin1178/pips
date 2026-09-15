@@ -113,6 +113,76 @@ func TestStreamToolCalls(t *testing.T) {
 	assert.Equal(t, 20, resp.Usage.OutputTokens)
 }
 
+// Compatible servers (Agnes Messages API among them) stream message_start,
+// content blocks and message_stop but never the message_delta event, so the
+// stop reason has to come from the content.
+const noMessageDeltaToolsStream = `event: message_start
+data: {"type":"message_start","message":{"type":"message","model":"agnes-3.0-flash","usage":{"input_tokens":16,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0},"role":"assistant","id":"msg_s3","content":[]}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_a","name":"add","input":{}}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"a\": 128"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":", \"b\": 256}"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+`
+
+const noMessageDeltaTextStream = `event: message_start
+data: {"type":"message_start","message":{"type":"message","model":"agnes-3.0-flash","usage":{"input_tokens":9,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0},"role":"assistant","id":"msg_s4","content":[]}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"384"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+`
+
+func TestStreamInfersFinishReasonWithoutMessageDelta(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		stream      string
+		wantFinish  ai.FinishReason
+		wantToolUse bool
+	}{
+		{name: "tool use block", stream: noMessageDeltaToolsStream, wantFinish: ai.FinishToolCalls, wantToolUse: true},
+		{name: "text only", stream: noMessageDeltaTextStream, wantFinish: ai.FinishStop},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			model := newTestModel(t, serveSSE(t, test.stream))
+
+			resp, err := ai.Collect(model.Stream(t.Context(), ai.Request{
+				Messages: []ai.Message{ai.UserText("128 + 256?")},
+				Tools:    []ai.Tool{{Name: "add"}},
+			}))
+			require.NoError(t, err)
+			assert.Equal(t, test.wantFinish, resp.FinishReason)
+			assert.Equal(t, test.wantToolUse, len(resp.ToolCalls()) > 0)
+		})
+	}
+}
+
 func TestStreamErrorEvent(t *testing.T) {
 	t.Parallel()
 
