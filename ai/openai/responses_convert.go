@@ -3,7 +3,6 @@ package openai
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/rsbin1178/pips/ai"
 )
@@ -186,7 +185,14 @@ func responseAssistantItems(parts []ai.AssistantPart) []responseItem {
 			return
 		}
 
-		items = append(items, responseItem{Type: typeMessage, Role: "assistant", Content: text})
+		// A replayed assistant message is finished by definition, and the
+		// schema marks its status required.
+		items = append(items, responseItem{
+			Type:    typeMessage,
+			Role:    "assistant",
+			Status:  "completed",
+			Content: text,
+		})
 		text = nil
 	}
 
@@ -205,9 +211,12 @@ func responseAssistantItems(parts []ai.AssistantPart) []responseItem {
 		case ai.ToolCallPart:
 			flushText()
 
+			callID, itemID := decodeResponsesToolCallID(p.ID)
+
 			items = append(items, responseItem{
 				Type:      typeFunctionCall,
-				CallID:    p.ID,
+				ID:        functionCallItemID(callID, itemID),
+				CallID:    callID,
 				Name:      p.Name,
 				Arguments: string(p.Args),
 			})
@@ -223,9 +232,11 @@ func responseToolOutputs(parts []ai.ToolResultPart) ([]responseItem, error) {
 	var out []responseItem
 
 	for _, result := range parts {
+		callID, _ := decodeResponsesToolCallID(result.ToolCallID)
+
 		out = append(out, responseItem{
 			Type:   "function_call_output",
-			CallID: result.ToolCallID,
+			CallID: callID,
 			Output: textOf(ai.ProviderParts(result.Content)),
 		})
 	}
@@ -295,20 +306,14 @@ func appendOutputItem(msg *ai.AssistantMessage, item responseItem) {
 			}
 		}
 	case typeReasoning:
-		var text strings.Builder
-		if item.Summary != nil {
-			for _, summary := range *item.Summary {
-				text.WriteString(summary.Text)
-			}
-		}
-
+		text := reasoningTextOf(item)
 		signature := encodeResponsesReasoningState(item)
-		if text.Len() > 0 || signature != "" {
-			msg.Parts = append(msg.Parts, ai.ReasoningPart{Text: text.String(), Signature: signature})
+		if text != "" || signature != "" {
+			msg.Parts = append(msg.Parts, ai.ReasoningPart{Text: text, Signature: signature})
 		}
 	case typeFunctionCall:
 		msg.Parts = append(msg.Parts, ai.ToolCallPart{
-			ID:   item.CallID,
+			ID:   encodeResponsesToolCallID(item.CallID, item.ID),
 			Name: item.Name,
 			Args: ai.JSON(item.Arguments),
 		})

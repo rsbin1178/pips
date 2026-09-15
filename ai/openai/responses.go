@@ -57,10 +57,14 @@ func (m *Model) streamResponses(ctx context.Context, req ai.Request) ai.Stream {
 
 // emitResponsesStream translates the Responses semantic-event dialect. Each
 // SSE event's payload has a "type" field; the relevant ones are response
-// lifecycle, output_text/reasoning_summary deltas, and function-call item
+// lifecycle, output_text/reasoning deltas, and function-call item
 // add/args-delta.
 func emitResponsesStream(provider ai.Provider, events eventSource, yield func(ai.StreamEvent, error) bool) {
-	d := &responsesStreamState{provider: provider, toolSlot: make(map[int]int)}
+	d := &responsesStreamState{
+		provider:        provider,
+		toolSlot:        make(map[int]int),
+		reasoningFlavor: make(map[int]string),
+	}
 
 	for event, err := range events {
 		if err != nil {
@@ -90,7 +94,17 @@ type responsesStreamState struct {
 	// toolSlot maps a function_call output_index to its ai tool-call index.
 	toolSlot map[int]int
 	nextTool int
+	// reasoningFlavor records, per output_index, which reasoning text stream
+	// the response is using. See handleReasoningDelta.
+	reasoningFlavor map[int]string
 }
+
+// Reasoning text flavors. A response streams a reasoning item either as
+// summaries or as raw reasoning text, depending on the provider.
+const (
+	reasoningFlavorSummary = "summary"
+	reasoningFlavorText    = "text"
+)
 
 func (d *responsesStreamState) handle(ev responsesStreamEvent, yield func(ai.StreamEvent, error) bool) bool {
 	switch ev.Type {
@@ -99,7 +113,9 @@ func (d *responsesStreamState) handle(ev responsesStreamEvent, yield func(ai.Str
 	case "response.output_text.delta":
 		return yield(ai.StreamEvent{Type: ai.StreamTextDelta, Text: ev.Delta}, nil)
 	case "response.reasoning_summary_text.delta":
-		return yield(ai.StreamEvent{Type: ai.StreamReasoningDelta, Text: ev.Delta}, nil)
+		return d.handleReasoningDelta(ev, reasoningFlavorSummary, yield)
+	case "response.reasoning_text.delta":
+		return d.handleReasoningDelta(ev, reasoningFlavorText, yield)
 	case "response.output_item.added":
 		return d.handleItemAdded(ev, yield)
 	case "response.output_item.done":
@@ -111,18 +127,24 @@ func (d *responsesStreamState) handle(ev responsesStreamEvent, yield func(ai.Str
 	case "response.completed", "response.incomplete":
 		return d.handleTerminal(ev, yield)
 	case "response.failed":
-		if ev.Response != nil && ev.Response.Error != nil {
-			yield(ai.StreamEvent{}, responsesFailure(d.provider, ev.Response.Error, nil))
-			return false
-		}
-
-		return d.handleTerminal(ev, yield)
+		return d.handleFailed(ev, yield)
 	case "error":
 		yield(ai.StreamEvent{}, streamError(d.provider, ev))
 		return false
 	default:
 		return true
 	}
+}
+
+// handleFailed surfaces a response that failed mid-stream. A failure without
+// an error object is only observable through its terminal status.
+func (d *responsesStreamState) handleFailed(ev responsesStreamEvent, yield func(ai.StreamEvent, error) bool) bool {
+	if ev.Response != nil && ev.Response.Error != nil {
+		yield(ai.StreamEvent{}, responsesFailure(d.provider, ev.Response.Error, nil))
+		return false
+	}
+
+	return d.handleTerminal(ev, yield)
 }
 
 // streamError builds an *ai.Error for a Responses mid-stream error event,
@@ -177,9 +199,28 @@ func (d *responsesStreamState) handleItemAdded(ev responsesStreamEvent, yield fu
 	return yield(ai.StreamEvent{
 		Type:          ai.StreamToolCallStart,
 		ToolCallIndex: idx,
-		ToolCallID:    ev.Item.CallID,
+		ToolCallID:    encodeResponsesToolCallID(ev.Item.CallID, ev.Item.ID),
 		ToolCallName:  ev.Item.Name,
 	}, nil)
+}
+
+// handleReasoningDelta forwards a reasoning text fragment. Providers stream
+// either summaries (response.reasoning_summary_text.*) or raw reasoning text
+// (response.reasoning_text.*, what open-weight servers emit), and a response
+// that sends both is rendering the same reasoning twice. The first flavor seen
+// for an output index wins so the text reaches the caller exactly once.
+func (d *responsesStreamState) handleReasoningDelta(
+	ev responsesStreamEvent,
+	flavor string,
+	yield func(ai.StreamEvent, error) bool,
+) bool {
+	if seen, ok := d.reasoningFlavor[ev.OutputIndex]; ok && seen != flavor {
+		return true
+	}
+
+	d.reasoningFlavor[ev.OutputIndex] = flavor
+
+	return yield(ai.StreamEvent{Type: ai.StreamReasoningDelta, Text: ev.Delta}, nil)
 }
 
 func (d *responsesStreamState) handleReasoningItem(ev responsesStreamEvent, yield func(ai.StreamEvent, error) bool) bool {

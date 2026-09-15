@@ -19,7 +19,9 @@ type responsesRequest struct {
 	Text            *responsesText      `json:"text,omitempty"`
 	Reasoning       *responsesReasoning `json:"reasoning,omitempty"`
 	Include         []string            `json:"include,omitempty"`
-	Stream          bool                `json:"stream,omitempty"`
+	// Stream is always sent: the field is optional in the schema, but
+	// OpenAI-compatible servers exist that fail when it is absent.
+	Stream bool `json:"stream"`
 }
 
 // responseItem is one input or output item. Only the fields relevant to its
@@ -44,7 +46,10 @@ type responseItem struct {
 	// from every other item variant.
 	Summary          *[]responseSummary `json:"summary,omitempty"`
 	EncryptedContent string             `json:"encrypted_content,omitempty"`
-	Status           string             `json:"status,omitempty"`
+
+	// Status is the item lifecycle state, required on a replayed assistant
+	// message and carried over from the Provider on a reasoning item.
+	Status string `json:"status,omitempty"`
 }
 
 type responseContent struct {
