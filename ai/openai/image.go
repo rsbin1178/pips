@@ -2,16 +2,14 @@ package openai
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
-	"net/url"
-	"path"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/ai/internal/httpx"
+	"github.com/rsbin1178/pips/ai/internal/imagewire"
 )
 
 const imagesPath = "images/generations"
@@ -71,19 +69,13 @@ type imageRequest struct {
 
 // imageResponse is the wire body shared by all three images endpoints.
 type imageResponse struct {
-	Created      int64        `json:"created"`
-	Data         []imageDatum `json:"data"`
-	Background   string       `json:"background"`
-	OutputFormat string       `json:"output_format"`
-	Size         string       `json:"size"`
-	Quality      string       `json:"quality"`
-	Usage        *imageUsage  `json:"usage"`
-}
-
-type imageDatum struct {
-	B64JSON       string `json:"b64_json"`
-	URL           string `json:"url"`
-	RevisedPrompt string `json:"revised_prompt"`
+	Created      int64             `json:"created"`
+	Data         []imagewire.Datum `json:"data"`
+	Background   string            `json:"background"`
+	OutputFormat string            `json:"output_format"`
+	Size         string            `json:"size"`
+	Quality      string            `json:"quality"`
+	Usage        *imageUsage       `json:"usage"`
 }
 
 type imageUsageDetails struct {
@@ -238,10 +230,10 @@ func (m *ImageModel) imageResponseFrom(parsed imageResponse, requestedFormat str
 		out.CreatedAt = time.Unix(parsed.Created, 0).UTC()
 	}
 
-	mimeType := imageMIMEFor(parsed.OutputFormat, requestedFormat)
+	mimeType := imagewire.MIMEFor(parsed.OutputFormat, requestedFormat)
 
 	for index, datum := range parsed.Data {
-		image, err := imageFromDatum(datum, mimeType, index)
+		image, err := imagewire.Image(datum, mimeType, index)
 		if err != nil {
 			return nil, fmt.Errorf("%s: images: %w", m.model.label(), err)
 		}
@@ -250,68 +242,6 @@ func (m *ImageModel) imageResponseFrom(parsed imageResponse, requestedFormat str
 	}
 
 	return out, nil
-}
-
-// imageFromDatum maps one response data item. mimeType is the media type
-// inferred from the response metadata or the request; empty means unknown.
-func imageFromDatum(datum imageDatum, mimeType string, index int) (ai.GeneratedImage, error) {
-	switch {
-	case datum.B64JSON != "":
-		data, err := base64.StdEncoding.DecodeString(datum.B64JSON)
-		if err != nil {
-			return ai.GeneratedImage{}, fmt.Errorf("decoding image %d: %w", index, err)
-		}
-
-		if mimeType == "" {
-			mimeType = imageMediaPNG
-		}
-
-		return ai.GeneratedImage{Data: data, MIMEType: mimeType, RevisedPrompt: datum.RevisedPrompt}, nil
-	case datum.URL != "":
-		if mimeType == "" {
-			mimeType = imageMIMEFromURL(datum.URL)
-		}
-
-		return ai.GeneratedImage{URL: datum.URL, MIMEType: mimeType, RevisedPrompt: datum.RevisedPrompt}, nil
-	default:
-		return ai.GeneratedImage{}, fmt.Errorf("data item %d carries neither b64_json nor url", index)
-	}
-}
-
-// imageMIME maps a wire format name to a media type. It returns "" for an
-// unknown or empty format rather than guessing.
-func imageMIME(format string) string {
-	switch strings.ToLower(format) {
-	case "png":
-		return imageMediaPNG
-	case "jpeg", "jpg":
-		return imageMediaJPEG
-	case "webp":
-		return imageMediaWebP
-	default:
-		return ""
-	}
-}
-
-// imageMIMEFor picks the media type of produced image bytes: the format the
-// provider reports first, then the format the caller requested.
-func imageMIMEFor(outputFormat, requestedFormat string) string {
-	if mimeType := imageMIME(outputFormat); mimeType != "" {
-		return mimeType
-	}
-
-	return imageMIME(requestedFormat)
-}
-
-// imageMIMEFromURL infers a media type from a URL's file extension. It returns
-// "" when the extension is unknown.
-func imageMIMEFromURL(rawURL string) string {
-	parsed, err := url.Parse(rawURL)
-	if err != nil {
-		return ""
-	}
-
-	return imageMIME(strings.TrimPrefix(strings.ToLower(path.Ext(parsed.Path)), "."))
 }
 
 // imageUsageFrom maps the wire usage object onto the portable counters.

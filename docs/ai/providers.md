@@ -9,9 +9,10 @@
 | `openai.New` | Chat Completions 或 Responses | `OPENAI_API_KEY` | 独立图片（含 `ai.ImageEditor`、`ai.ImageVariator`、`ai.ImageStreamer`）、Embedding 构造器 |
 | `anthropic.New` | Messages | `ANTHROPIC_API_KEY` | `ai.TokenCounter` |
 | `gemini.New` | generateContent / streamGenerateContent | `GEMINI_API_KEY`，其次 `GOOGLE_API_KEY` | `ai.TokenCounter`、独立图片、Embedding 构造器 |
+| `agnes.NewImageModel` | Agnes Images | `AGNES_API_KEY` | 图片：`ai.ImageModel` + `ai.ImageEditor`（无流式/变体） |
 | `compat.*` | 审阅后的 OpenAI 形状协议 | Profile 专用变量 | 返回 `*openai.Model` |
 
-三个原生模型构造器均返回不可变、可并发复用的对象，且把配置错误延迟到首次调用。生产启动检查若需要立即失败，应主动执行一个受控 Smoke Test，而不是假定 `New` 会验证凭据。
+三个原生文本模型构造器均返回不可变、可并发复用的对象，且把配置错误延迟到首次调用。生产启动检查若需要立即失败，应主动执行一个受控 Smoke Test，而不是假定 `New` 会验证凭据。
 
 ## OpenAI
 
@@ -164,6 +165,47 @@ model := compat.New(profile, "company-model")
 自定义 Profile 的空 API 默认使用 Chat Completions；空能力默认是 Text + Tools。Profile 密钥为空是有意状态，绝不会退回读取 `OPENAI_API_KEY`。传给 `compat.New` 的额外 `openai.Option` 在 Profile 默认值之后应用，因此可覆盖端点、密钥或协议。
 
 `WithCompatibility` 可精确调整 max-token 字段、流 Usage、结构输出形态、Chat reasoning 形态、历史 reasoning 字段以及 Responses 的加密 reasoning include。只在目标端点协议已有测试证据时自定义这些值；它不负责 Provider 身份、认证、URL 或能力表。
+
+## Agnes
+
+```go
+images := agnes.NewImageModel("agnes-image-2.5-flash") // 默认读取 AGNES_API_KEY
+```
+
+`ai/agnes` 只覆盖 Agnes 图片系列（`agnes-image-2.5-flash` 等）；Agnes 的文本模型不属于该包的目标。适配器与 OpenAI Images 同形但不相同，代码注释与本节都记录了两者的差异。
+
+| 站点 | Base URL |
+| --- | --- |
+| 中国站（默认，`agnes.BaseURLCN`） | `https://api.agnes-ai.cn/v1` |
+| 国际站（`agnes.BaseURLGlobal`） | `https://apihub.agnes-ai.com/v1`，用 `agnes.WithBaseURL` 切换 |
+
+`NewImageModel` 返回的对象实现 `ai.ImageModel` 与 `ai.ImageEditor`：文生图与图生图/多图合成都走同一个端点 `POST /v1/images/generations`，Agnes 没有 `/v1/images/edits`。
+
+参数映射：
+
+| Agnes 参数 | 便携来源 |
+| --- | --- |
+| `model` | `NewImageModel` 的模型 ID |
+| `prompt` | `ImageRequest.Prompt` / `ImageEditRequest.Prompt` |
+| `size` | `ImageRequest.Size` / `ImageEditRequest.Size`（厂商必填：档位 `1K`/`2K`/`3K`/`4K`，也接受 `1024x768` 旧写法；适配器只在文生图缺失时本地拦截） |
+| `ratio` | `agnes.ImageOptions.Ratio`；文档枚举 `1:1`、`3:4`、`4:3`、`16:9`、`9:16`、`2:3`、`3:2`、`21:9`，空值省略并使用厂商默认 `1:1` |
+| `extra_body.response_format` | `agnes.ImageOptions.ResponseFormat`（`url` / `b64_json`），绝不放在顶层 |
+| `return_base64` | `agnes.ImageOptions.ReturnBase64`（仅文生图发送） |
+| `extra_body.image[]` | `ImageEditRequest.Images`：公共 HTTPS URL 直传；内联字节编码为 `data:<mime>;base64,…`，缺少 MIME 时按 `image/png` |
+
+厂商文档分歧：参数表把 `image` 列在顶层，但三处示例、错误排查与接入检查清单都要求放在 `extra_body.image`；适配器按后者实现（`ai/agnes/wire.go` 有对应注释），字段位置由测试锁定。
+
+`agnes.ImageOptions` 先按 `ai.ProviderAgnes` 查找，找不到时回退到 `ai.ProviderOpenAI`；两个 key 都要求 `agnes.ImageOptions` 类型，其它类型（例如 `openai.ImageOptions`）会被静默忽略，不会退化成 OpenAI 语义——与 [ProviderOptions 与 ExtraFields](#provideroptions-与-extrafields) 的约定一致。
+
+本地校验（失败不发请求）：空/空白 prompt、文生图缺少 `size`、`ratio` 不在文档枚举内、编辑无来源图、来源为空、来源同时带 URL 与内联字节 → `ai.ErrInvalidRequest`；`N > 1`、`Mask != nil`、来源为文件 ID → `ai.ErrUnsupported`；`N < 0` → `ai.ErrInvalidRequest`。图生图不发送 `return_base64`，其余未设置字段一律省略。
+
+响应：`created` → `CreatedAt`；`data[].url` → `URL`（适配器不代下载）；`data[].b64_json` → `Data`；`revised_prompt` → `RevisedPrompt`；两者皆空的条目直接报错，不会产出 0 字节图片。Agnes 未文档化 `usage` 与输出格式回显，`ImageResponse.Usage` 保持零值，原始响应体仍可从 `Raw` 读取。
+
+`ExtraFields` 使用 Agnes 专用保留键列表（`model`、`prompt`、`size`、`ratio`、`image`、`extra_body`、`return_base64`、`response_format`），这些键始终被拒绝，避免绕过文档化的字段位置（顶层的 `response_format` 正是厂商列为最常见的集成错误）；`seed` 等未建模参数可自由下发，凭证形状与超限值仍被拒绝。
+
+错误与超时：Agnes 的错误信封与 OpenAI 同形（实测 401 返回 `{"error":{...}}`），401/403 → `ErrAuth`、402 等其他 4xx → `ErrInvalidRequest`、429 → `ErrRateLimited`、5xx → `ErrOverloaded`，`Retry-After` 与 `Raw` 保留。生成耗时可达数十秒，官方建议客户端超时 60–360s，请用 `context.WithTimeout` 设置；当前所有档位与参考图免费，以厂商页面为准。
+
+Agnes 没有流式、变体与 mask，这些能力以“省略”表达：`ImageModel` 不实现 `ai.ImageStreamer`、`ai.ImageVariator`，调用方用类型断言发现。构造选项与 OpenAI 对齐：`WithAPIKey`、`WithBaseURL`、`WithHTTPClient`、`WithHeader`、`WithAllowHTTP`、`WithAllowPrivateIPs`、`WithMaxStreamLineSize`（Agnes 无流式，仅为构造器对齐保留）、`WithCapabilities`。
 
 ## Anthropic
 

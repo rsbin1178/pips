@@ -22,8 +22,8 @@ type LanguageModel interface {
 	Capabilities() Capabilities
 }
 
-// ImageModel generates images from text prompts. Implemented by the openai
-// and gemini adapters; absent capabilities surface as [ErrUnsupported].
+// ImageModel generates images from text prompts. Implemented by the openai,
+// gemini, and agnes adapters; absent capabilities surface as [ErrUnsupported].
 type ImageModel interface {
 	GenerateImages(ctx context.Context, req ImageRequest) (*ImageResponse, error)
 	Provider() Provider

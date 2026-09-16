@@ -9,6 +9,7 @@ const (
 	ProviderOpenAI     Provider = "openai"
 	ProviderAnthropic  Provider = "anthropic"
 	ProviderGemini     Provider = "gemini"
+	ProviderAgnes      Provider = "agnes"
 	ProviderDeepSeek   Provider = "deepseek"
 	ProviderGroq       Provider = "groq"
 	ProviderXAI        Provider = "xai"
