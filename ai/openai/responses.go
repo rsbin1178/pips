@@ -304,6 +304,7 @@ func (d *responsesStreamState) handleTerminal(ev responsesStreamEvent, yield fun
 				if item.Action.Query != "" {
 					queries = append(queries, item.Action.Query)
 				}
+
 				if len(item.Action.Queries) > 0 {
 					queries = append(queries, item.Action.Queries...)
 				}

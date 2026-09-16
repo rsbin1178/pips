@@ -361,6 +361,7 @@ func responseFromResponses(body responsesResponse, raw []byte, provider ai.Provi
 			if item.Action.Query != "" {
 				queries = append(queries, item.Action.Query)
 			}
+
 			if len(item.Action.Queries) > 0 {
 				queries = append(queries, item.Action.Queries...)
 			}
