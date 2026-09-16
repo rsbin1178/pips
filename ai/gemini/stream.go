@@ -87,9 +87,11 @@ func (s *streamState) emitChunk(chunk generateResponse, yield func(ai.StreamEven
 			if c.TextRange != nil {
 				key += fmt.Sprintf(":%d:%d", c.TextRange.Start, c.TextRange.End)
 			}
+
 			if s.seenCitations[key] {
 				continue
 			}
+
 			s.seenCitations[key] = true
 
 			cit := c
