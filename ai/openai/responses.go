@@ -300,8 +300,13 @@ func (d *responsesStreamState) handleTerminal(ev responsesStreamEvent, yield fun
 
 		var queries []string
 		for _, item := range ev.Response.Output {
-			if item.Type == "web_search_call" && item.Action != nil && item.Action.Query != "" {
-				queries = append(queries, item.Action.Query)
+			if item.Type == "web_search_call" && item.Action != nil {
+				if item.Action.Query != "" {
+					queries = append(queries, item.Action.Query)
+				}
+				if len(item.Action.Queries) > 0 {
+					queries = append(queries, item.Action.Queries...)
+				}
 			}
 		}
 		if len(queries) > 0 {
