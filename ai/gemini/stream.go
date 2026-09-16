@@ -42,10 +42,11 @@ type streamState struct {
 	startSent bool
 	endSent   bool
 	finish    ai.FinishReason
-	usage     *ai.Usage
-	grounding *ai.GroundingMetadata
-	toolIndex int
-	sawCall   bool
+	usage         *ai.Usage
+	grounding     *ai.GroundingMetadata
+	seenCitations map[string]bool
+	toolIndex     int
+	sawCall       bool
 }
 
 func (s *streamState) emitChunk(chunk generateResponse, yield func(ai.StreamEvent, error) bool) bool {
@@ -77,8 +78,20 @@ func (s *streamState) emitChunk(chunk generateResponse, yield func(ai.StreamEven
 	}
 
 	if candidate.GroundingMetadata != nil {
+		if s.seenCitations == nil {
+			s.seenCitations = make(map[string]bool)
+		}
 		citations := citationsFromGrounding(candidate.GroundingMetadata)
 		for _, c := range citations {
+			key := c.URL
+			if c.TextRange != nil {
+				key += fmt.Sprintf(":%d:%d", c.TextRange.Start, c.TextRange.End)
+			}
+			if s.seenCitations[key] {
+				continue
+			}
+			s.seenCitations[key] = true
+
 			cit := c
 			if !yield(ai.StreamEvent{
 				Type:     ai.StreamCitation,
