@@ -191,7 +191,7 @@ if streamer, ok := imageModel.(ai.ImageStreamer); ok {
 }
 ```
 
-OpenAI 与 Gemini 提供图片和 Embedding 适配器。Gemini 图片每次调用只生成一张，`N` 会被忽略，且没有实现编辑、变体与流式接口。`EmbeddingResponse.Embeddings` 与输入顺序一致；`Dimensions` 只对支持降维的模型生效。
+OpenAI、Gemini 与 Agnes 提供图片适配器；Agnes 只做图片，其构造器返回的对象实现 `ai.ImageModel` 与 `ai.ImageEditor`，参数使用档位 `size` 与 `ratio`，图生图与文生图共用同一端点。Gemini 图片每次调用只生成一张，`N` 会被忽略，且没有实现编辑、变体与流式接口。`EmbeddingResponse.Embeddings` 与输入顺序一致；`Dimensions` 只对支持降维的模型生效。
 
 Token Counting 通过类型断言发现：
 

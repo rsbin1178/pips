@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/ai/internal/imagewire"
 	"github.com/rsbin1178/pips/ai/internal/jsonx"
 	"github.com/rsbin1178/pips/ai/internal/sse"
 )
@@ -191,7 +192,7 @@ func emitImageEvent(namespace, requestedFormat string, parsed imageStreamPayload
 		return false
 	}
 
-	image, err := imageFromDatum(imageDatum{B64JSON: parsed.B64JSON}, imageMIMEFor(parsed.OutputFormat, requestedFormat), 0)
+	image, err := imagewire.Image(imagewire.Datum{B64JSON: parsed.B64JSON}, imagewire.MIMEFor(parsed.OutputFormat, requestedFormat), 0)
 	if err != nil {
 		yield(ai.ImageStreamEvent{}, fmt.Errorf("openai: images stream: %w", err))
 
@@ -220,7 +221,7 @@ func emitPartialImage(parsed imageStreamPayload, requestedFormat string, yield f
 		index = *parsed.PartialImageIndex
 	}
 
-	image, err := imageFromDatum(imageDatum{B64JSON: parsed.B64JSON}, imageMIMEFor(parsed.OutputFormat, requestedFormat), index)
+	image, err := imagewire.Image(imagewire.Datum{B64JSON: parsed.B64JSON}, imagewire.MIMEFor(parsed.OutputFormat, requestedFormat), index)
 	if err != nil {
 		yield(ai.ImageStreamEvent{}, fmt.Errorf("openai: images stream: %w", err))
 

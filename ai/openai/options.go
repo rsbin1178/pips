@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/ai/internal/apierr"
 	"github.com/rsbin1178/pips/ai/internal/httpx"
 	"github.com/rsbin1178/pips/ai/internal/jsonx"
 )
@@ -150,30 +151,7 @@ func imageFormValue(key string, value any) (string, error) {
 	}
 }
 
-// errorBody is OpenAI's error envelope, shared by both API surfaces.
-type errorBody struct {
-	Error struct {
-		Message string `json:"message"`
-		Type    string `json:"type"`
-		Code    any    `json:"code"` // string or number depending on endpoint
-	} `json:"error"`
-}
-
 // decodeError builds the httpx.ErrorDecoder for this model's provider.
 func (m *Model) decodeError(status int, retryAfter time.Duration, body []byte) error {
-	apiErr := ai.NewError(m.provider, status, string(body))
-	apiErr.RetryAfter = retryAfter
-	apiErr.Raw = body
-
-	var parsed errorBody
-	if err := jsonx.Unmarshal(body, &parsed); err == nil && parsed.Error.Message != "" {
-		apiErr.Message = parsed.Error.Message
-		apiErr.Type = parsed.Error.Type
-
-		if code, ok := parsed.Error.Code.(string); ok {
-			apiErr.Code = code
-		}
-	}
-
-	return apiErr
+	return apierr.Decode(m.provider, status, retryAfter, body)
 }
