@@ -16,7 +16,7 @@ type LanguageModel interface {
 }
 ```
 
-图片和向量使用独立接口 `ai.ImageModel` 与 `ai.EmbeddingModel`；服务端计数能力是可选的 `ai.TokenCounter`。拆分接口可避免把“所有模型都支持所有能力”编码成错误假设。图片的编辑、变体和流式同样是可选接口：`ai.ImageEditor`、`ai.ImageVariator`、`ai.ImageStreamer`，用类型断言发现。
+图片、向量与重排模型分别使用独立接口 `ai.ImageModel`、`ai.EmbeddingModel` 与 `ai.RerankModel`；服务端计数能力是可选的 `ai.TokenCounter`。拆分接口可避免把“所有模型都支持所有能力”编码成错误假设。图片的编辑、变体和流式同样是可选接口：`ai.ImageEditor`、`ai.ImageVariator`、`ai.ImageStreamer`，用类型断言发现。
 
 内置 Provider 模型具有以下生命周期约定：
 
@@ -134,7 +134,7 @@ messages = append(messages, ai.UserText("再简短一些。"))
 
 ## 能力提示
 
-`model.Capabilities()` 返回静态、尽力而为的 `ai.Capabilities`：文本、视觉、文档、音频/视频输入、Tools、结构化输出、推理、图片生成、Embeddings、Prompt Cache 和 Token Counting。
+`model.Capabilities()` 返回静态、尽力而为的 `ai.Capabilities`：文本、视觉、文档、音频/视频输入、Tools、结构化输出、推理、图片生成、Embeddings、重排（Reranking）、Prompt Cache 和 Token Counting。
 
 正确用法：
 

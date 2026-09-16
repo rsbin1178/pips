@@ -25,6 +25,7 @@ go doc -all github.com/rsbin1178/pips/ai/observability
 | 图片生成 | `ImageModel`、`ImageRequest`、`ImageUsage`、`ImageResponse`、`GeneratedImage` | [`image.go`](../../ai/image.go) |
 | 图片编辑/变体/流式 | `ImageEditRequest`、`ImageVariationRequest`、`ImageEditor`、`ImageVariator`、`ImageStreamer`、`ImageStream`、`ImageStreamEvent`、`ImageStreamEventType` | [`image.go`](../../ai/image.go)、[`model.go`](../../ai/model.go) |
 | Embedding | `EmbeddingModel`、`EmbeddingRequest`、`EmbeddingResponse`、`EmbeddingTaskType`、`EmbeddingEncodingFormat` | [`embedding.go`](../../ai/embedding.go) |
+| Rerank | `RerankModel`、`RerankRequest`、`RerankResponse`、`RerankResult` | [`rerank.go`](../../ai/rerank.go)、[`model.go`](../../ai/model.go) |
 | 服务端 Token 计数 | `TokenCounter` | [`model.go`](../../ai/model.go) |
 | 消息与 Part | `Message`、`Messages`、`SystemMessage`、`UserMessage`、`AssistantMessage`、`ToolMessage`、`Part` 及六种具体 Part | [`message.go`](../../ai/message.go) |
 | 消息构造与边界 | `SystemText`、`UserText`、`AssistantText`、`ToolResultText`、`Messages.SplitSystem`、`UnmarshalMessage`、`CloneMessage`、`MessageParts` | [`content.go`](../../ai/content.go)、[`message_validate.go`](../../ai/message_validate.go)、[`message_json.go`](../../ai/message_json.go) |
@@ -123,6 +124,22 @@ Profile 复用 `openai.Model`，但保持真实 `Provider`、凭据环境变量�
 | 能力 | 实现 `ai.ImageModel` 与 `ai.ImageEditor`（无流式与变体） |
 
 主要实现：[`agnes.go`](../../ai/agnes/agnes.go)、[`wire.go`](../../ai/agnes/wire.go)、[`options.go`](../../ai/agnes/options.go)、[`image.go`](../../ai/agnes/image.go)。
+
+## `ai/cohere`：Cohere 与兼容重排 Wire
+
+- Godoc：[`github.com/rsbin1178/pips/ai/cohere`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/cohere)
+- 源码：[`ai/cohere/`](../../ai/cohere)
+- 使用说明：[重排模型指南](rerank.md)
+
+| 任务 | 主要符号 |
+| --- | --- |
+| 构造重排模型 | `NewRerankModel`、`RerankModel`、`Option` |
+| 认证与传输 | `WithAPIKey`、`WithBaseURL`、`WithHTTPClient`、`WithHeader`、`WithAllowHTTP`、`WithAllowPrivateIPs`、`DefaultBaseURL` |
+| 厂商身份/能力 | `WithProvider`、`WithCapabilities` |
+| 请求扩展 | `RerankOptions`（MaxTokensPerDoc、RankFields、Priority、ExtraFields） |
+| 预设兼容构造器 | `SiliconFlowRerank`、`JinaRerank`、`TogetherRerank`、`BaseURLSiliconFlow`、`BaseURLJina`、`BaseURLTogether` |
+
+主要实现：[`cohere.go`](../../ai/cohere/cohere.go)、[`options.go`](../../ai/cohere/options.go)、[`rerank.go`](../../ai/cohere/rerank.go)、[`error.go`](../../ai/cohere/error.go)、[`compat.go`](../../ai/cohere/compat.go)。
 
 ## `ai/middleware/retry`
 
