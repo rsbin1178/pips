@@ -33,3 +33,41 @@ func TestToolEffectiveInputSchema(t *testing.T) {
 		assert.Same(t, input, (ai.Tool{InputSchema: input}).EffectiveInputSchema())
 	})
 }
+
+func TestToolExecutionModel(t *testing.T) {
+	t.Parallel()
+
+	t.Run("default is client executed", func(t *testing.T) {
+		t.Parallel()
+
+		tool := ai.Tool{Name: "custom_func"}
+		assert.Equal(t, ai.ToolKindFunction, tool.Kind)
+		assert.True(t, tool.IsClientExecuted())
+		assert.False(t, tool.IsProviderExecuted())
+		assert.True(t, tool.IsEnabled())
+	})
+
+	t.Run("provider executed", func(t *testing.T) {
+		t.Parallel()
+
+		tool := ai.Tool{
+			Kind:         ai.ToolKindProviderExecuted,
+			Name:         "google_search",
+			ProviderType: "google_search",
+		}
+		assert.True(t, tool.IsProviderExecuted())
+		assert.False(t, tool.IsClientExecuted())
+		assert.True(t, tool.IsEnabled())
+	})
+
+	t.Run("disabled tool", func(t *testing.T) {
+		t.Parallel()
+
+		tool := ai.Tool{
+			Kind:     ai.ToolKindProviderExecuted,
+			Name:     "web_search",
+			Disabled: true,
+		}
+		assert.False(t, tool.IsEnabled())
+	})
+}

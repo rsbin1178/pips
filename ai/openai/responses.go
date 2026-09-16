@@ -97,6 +97,7 @@ type responsesStreamState struct {
 	// reasoningFlavor records, per output_index, which reasoning text stream
 	// the response is using. See handleReasoningDelta.
 	reasoningFlavor map[int]string
+	nextCitation    int
 }
 
 // Reasoning text flavors. A response streams a reasoning item either as
@@ -119,7 +120,7 @@ func (d *responsesStreamState) handle(ev responsesStreamEvent, yield func(ai.Str
 	case "response.output_item.added":
 		return d.handleItemAdded(ev, yield)
 	case "response.output_item.done":
-		return d.handleReasoningItem(ev, yield)
+		return d.handleOutputItemDone(ev, yield)
 	case "response.function_call_arguments.delta":
 		return d.handleArgsDelta(ev, yield)
 	case "response.function_call_arguments.done":
@@ -236,6 +237,40 @@ func (d *responsesStreamState) handleReasoningItem(ev responsesStreamEvent, yiel
 	return yield(ai.StreamEvent{Type: ai.StreamReasoningDelta, Signature: signature}, nil)
 }
 
+func (d *responsesStreamState) handleOutputItemDone(ev responsesStreamEvent, yield func(ai.StreamEvent, error) bool) bool {
+	if ev.Item == nil {
+		return true
+	}
+
+	if ev.Item.Type == typeReasoning {
+		return d.handleReasoningItem(ev, yield)
+	}
+
+	if ev.Item.Type == typeMessage {
+		for _, c := range ev.Item.Content {
+			for _, ann := range c.Annotations {
+				if ann.Type == "url_citation" {
+					cit := ai.Citation{
+						URL:   ann.URL,
+						Title: ann.Title,
+						Index: d.nextCitation,
+						TextRange: &ai.TextRange{
+							Start: ann.StartIndex,
+							End:   ann.EndIndex,
+						},
+					}
+					d.nextCitation++
+					if !yield(ai.StreamEvent{Type: ai.StreamCitation, Citation: &cit}, nil) {
+						return false
+					}
+				}
+			}
+		}
+	}
+
+	return true
+}
+
 func (d *responsesStreamState) handleArgsDelta(ev responsesStreamEvent, yield func(ai.StreamEvent, error) bool) bool {
 	idx, ok := d.toolSlot[ev.OutputIndex]
 	if !ok {
@@ -262,6 +297,18 @@ func (d *responsesStreamState) handleTerminal(ev responsesStreamEvent, yield fun
 
 		usage := usageFromResponses(ev.Response.Usage)
 		end.Usage = &usage
+
+		var queries []string
+		for _, item := range ev.Response.Output {
+			if item.Type == "web_search_call" && item.Action != nil && item.Action.Query != "" {
+				queries = append(queries, item.Action.Query)
+			}
+		}
+		if len(queries) > 0 {
+			end.Grounding = &ai.GroundingMetadata{
+				WebSearchQueries: queries,
+			}
+		}
 	}
 
 	return yield(end, nil)

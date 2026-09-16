@@ -70,6 +70,11 @@ type Response struct {
 	// Usage is the token accounting for this request.
 	Usage Usage
 
+	// Citations lists source attributions produced by search or grounding tools.
+	Citations []Citation
+	// Grounding contains query-level grounding details when provided by the model.
+	Grounding *GroundingMetadata
+
 	// Raw is the provider's response body, untouched. It is an escape hatch
 	// for provider-specific fields; do not parse it in portable code.
 	Raw JSON

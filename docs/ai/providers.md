@@ -53,6 +53,15 @@ model := openai.New(
 - Responses 的请求体始终显式携带 `stream`（流式 `true`，非流式 `false`）。该字段在官方 schema 中可选，但存在省略后返回 500 的兼容服务；回放的 assistant 文本消息同样会补上 schema 标记为必填的 `status: "completed"`。
 - `Response.Raw` 保存所选 API 的原始 JSON，但便携业务逻辑不应解析它。
 
+### OpenAI 内置工具 (Built-in Tools)
+
+OpenAI Responses API 原生支持云端执行工具：
+- `openai.WebSearch()` / `openai.WebSearchPreview()`: 实时网络检索，模型自主调用并在响应中返回 `Citations` 与 `Grounding`。
+- `openai.CodeInterpreter()`: 云端 Python 代码沙箱执行。
+- `openai.FileSearch(vectorStoreIDs []string)`: 基于 Vector Store 的文件知识库检索。
+
+可在 `openai.RequestOptions` 中设置 `DisableBuiltinTools: true` 在请求级别关闭内置工具。若通过 Chat Completions 协议调用且传入了内置工具，除非配置了 `BuiltinToolsStrip` 兼容策略，否则会报错提示需要 Responses API。
+
 图片与 Embedding 使用独立构造器：
 
 ```go
@@ -169,6 +178,13 @@ model := compat.New(profile, "company-model")
 
 `WithCompatibility` 可精确调整 max-token 字段、流 Usage、结构输出形态、Chat reasoning 形态、历史 reasoning 字段以及 Responses 的加密 reasoning include。只在目标端点协议已有测试证据时自定义这些值；它不负责 Provider 身份、认证、URL 或能力表。
 
+### 兼容端点内置工具降级防护 (`BuiltinTools`)
+
+第三方兼容服务（DeepSeek、Groq、Together、Mistral、Cerebras 等）使用 OpenAI 请求结构，但并未实现服务端的 Web Search 或 Code Interpreter。为了防止上层调用传入内置工具导致第三方端点 HTTP 400 崩溃，兼容 Profile 的 `Compatibility.BuiltinTools` 策略如下：
+- `xaiProfile` 与原生 OpenAI：默认 `BuiltinToolsAllow`，原生转发。xAI 专属工具见 `compat.GrokWebSearch()`、`compat.GrokXSearch()`、`compat.GrokCodeExecution()`。
+- `deepSeekProfile`、`groqProfile`、`togetherProfile`、`cerebrasProfile`、`mistralProfile` 等：默认 `BuiltinToolsStrip`，自动安全剔除内置工具，保留普通客户端函数，平滑降级。
+- 严格校验模式：可显式配置 `BuiltinToolsReject`，请求携带内置工具时本地直接返回 `ai.ErrUnsupported`。
+
 ## Agnes
 
 ```go
@@ -275,6 +291,14 @@ req.ProviderOptions = map[ai.Provider]any{
 ```
 
 Gemini Provider 文件 URI 使用 `FileURL` 的 URL 字段。当前适配器不接受 `FileID` 作为 Gemini 输入。
+
+### Gemini 内置工具与 Search Grounding
+
+Gemini 原生支持服务端执行工具：
+- `gemini.GoogleSearch()`: Google 搜索增强 Grounding，结果统一解析为 `ai.Response.Citations` 与 `ai.Response.Grounding`。
+- `gemini.CodeExecution()`: 云端 Python 代码沙箱执行。
+
+请求级控制开关：在 `gemini.RequestOptions` 中可通过 `DisableSearchGrounding: true` 或 `DisableCodeExecution: true` 在请求级别禁用对应能力。
 
 图片和向量：
 

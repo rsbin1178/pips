@@ -55,6 +55,27 @@ const (
 	ReasoningHistoryContentChunks ReasoningHistoryField = "content_chunks"
 )
 
+// BuiltinToolsMode controls how provider-executed tools (web_search,
+// code_interpreter, etc.) are handled on OpenAI-compatible endpoints.
+type BuiltinToolsMode string
+
+const (
+	// BuiltinToolsAllow forwards provider-executed tools as requested. This
+	// is the default for native OpenAI and services known to support them
+	// (e.g. xAI).
+	BuiltinToolsAllow BuiltinToolsMode = "allow"
+
+	// BuiltinToolsStrip automatically omits provider-executed tools from the
+	// request payload, preserving only standard function tools. This provides
+	// graceful fallback on compatible services (DeepSeek, Groq, Together, etc.)
+	// that do not implement provider-hosted tools.
+	BuiltinToolsStrip BuiltinToolsMode = "strip"
+
+	// BuiltinToolsReject returns [ai.ErrUnsupported] if any provider-executed
+	// tool is present in the request.
+	BuiltinToolsReject BuiltinToolsMode = "reject"
+)
+
 // Compatibility describes documented wire differences on OpenAI-shaped
 // endpoints. Its zero value is OpenAI's default behavior.
 //
@@ -70,6 +91,18 @@ type Compatibility struct {
 	// IncludeEncryptedReasoning asks Responses-compatible providers to return
 	// replayable encrypted reasoning state.
 	IncludeEncryptedReasoning bool
+
+	// BuiltinTools controls how provider-executed tools are handled on
+	// compatible endpoints. The empty value defaults to [BuiltinToolsAllow].
+	BuiltinTools BuiltinToolsMode
+}
+
+func (c Compatibility) resolvedBuiltinTools() BuiltinToolsMode {
+	if c.BuiltinTools == "" {
+		return BuiltinToolsAllow
+	}
+
+	return c.BuiltinTools
 }
 
 func (c Compatibility) resolvedMaxTokensField() MaxTokensField {

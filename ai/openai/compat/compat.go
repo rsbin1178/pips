@@ -162,6 +162,7 @@ var deepSeekProfile = Profile{
 		StructuredOutput: openai.StructuredOutputJSONObject,
 		ChatReasoning:    openai.ChatReasoningDeepSeek,
 		ReasoningHistory: openai.ReasoningHistoryContent,
+		BuiltinTools:     openai.BuiltinToolsStrip,
 	},
 	Capabilities: ai.Capabilities{
 		Text:             true,
@@ -179,6 +180,7 @@ var groqProfile = Profile{
 	API:       openai.APIChatCompletions,
 	Compatibility: openai.Compatibility{
 		ReasoningHistory: openai.ReasoningHistoryReasoning,
+		BuiltinTools:     openai.BuiltinToolsStrip,
 	},
 	capabilitiesFor: groqCapabilities,
 }
@@ -198,6 +200,8 @@ var xaiProfile = Profile{
 		StructuredOutput: true,
 		Reasoning:        true,
 		PromptCaching:    true,
+		WebSearch:        true,
+		CodeExecution:    true,
 	},
 }
 
@@ -221,6 +225,7 @@ var cerebrasProfile = Profile{
 	API:       openai.APIChatCompletions,
 	Compatibility: openai.Compatibility{
 		ReasoningHistory: openai.ReasoningHistoryReasoning,
+		BuiltinTools:     openai.BuiltinToolsStrip,
 	},
 	capabilitiesFor: cerebrasCapabilities,
 }
@@ -234,6 +239,7 @@ var togetherProfile = Profile{
 		MaxTokensField:   openai.MaxTokensFieldLegacy,
 		ChatReasoning:    openai.ChatReasoningOmit,
 		ReasoningHistory: openai.ReasoningHistoryReasoning,
+		BuiltinTools:     openai.BuiltinToolsStrip,
 	},
 	Capabilities: ai.Capabilities{Text: true, Tools: true},
 }
@@ -246,6 +252,7 @@ var mistralProfile = Profile{
 	Compatibility: openai.Compatibility{
 		MaxTokensField:   openai.MaxTokensFieldLegacy,
 		ReasoningHistory: openai.ReasoningHistoryContentChunks,
+		BuiltinTools:     openai.BuiltinToolsStrip,
 	},
 	capabilitiesFor: mistralCapabilities,
 }

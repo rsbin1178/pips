@@ -40,8 +40,11 @@ const (
 	// StreamToolCallEnd closes the arguments of the call identified by
 	// ToolCallIndex.
 	StreamToolCallEnd StreamEventType = "tool_call_end"
+	// StreamCitation announces a source citation produced by a search or
+	// grounding tool; it carries Citation.
+	StreamCitation StreamEventType = "citation"
 	// StreamMessageEnd closes the response; it carries FinishReason and,
-	// when the provider reports it, Usage.
+	// when the provider reports it, Usage. It may also carry Grounding.
 	StreamMessageEnd StreamEventType = "message_end"
 )
 
@@ -72,10 +75,15 @@ type StreamEvent struct {
 	// ArgsDelta is the JSON-arguments fragment for tool_call_delta.
 	ArgsDelta string
 
+	// Citation is set on citation events.
+	Citation *Citation
+
 	// FinishReason and Usage are set on message_end. Usage is nil when the
-	// provider does not report it.
+	// provider does not report it. Grounding carries search metadata when
+	// available.
 	FinishReason FinishReason
 	Usage        *Usage
+	Grounding    *GroundingMetadata
 }
 
 // Collect drains a stream and assembles the complete [Response], preserving
@@ -160,12 +168,19 @@ func (a *accumulator) add(ev StreamEvent) {
 		}
 	case StreamToolCallEnd:
 		a.sealToolCall(ev.ToolCallIndex)
+	case StreamCitation:
+		if ev.Citation != nil {
+			a.resp.Citations = append(a.resp.Citations, *ev.Citation)
+		}
 	case StreamMessageEnd:
 		a.flush()
 
 		a.resp.FinishReason = ev.FinishReason
 		if ev.Usage != nil {
 			a.resp.Usage = *ev.Usage
+		}
+		if ev.Grounding != nil {
+			a.resp.Grounding = ev.Grounding
 		}
 	}
 }

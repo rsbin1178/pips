@@ -62,9 +62,12 @@ type wireFunctionResp struct {
 type wireTool struct {
 	FunctionDeclarations []wireFunctionDecl `json:"functionDeclarations,omitempty"`
 	GoogleSearch         *wireGoogleSearch  `json:"google_search,omitempty"`
+	CodeExecution        *wireCodeExecution `json:"code_execution,omitempty"`
 }
 
 type wireGoogleSearch struct{}
+
+type wireCodeExecution struct{}
 
 type wireFunctionDecl struct {
 	Name        string     `json:"name"`
@@ -123,9 +126,37 @@ type wirePromptFeedback struct {
 }
 
 type wireCandidate struct {
-	Content      wireContent `json:"content"`
-	FinishReason string      `json:"finishReason"`
-	Index        int         `json:"index"`
+	Content           wireContent            `json:"content"`
+	FinishReason      string                 `json:"finishReason"`
+	Index             int                    `json:"index"`
+	GroundingMetadata *wireGroundingMetadata `json:"groundingMetadata,omitempty"`
+}
+
+type wireGroundingMetadata struct {
+	WebSearchQueries  []string               `json:"webSearchQueries,omitempty"`
+	GroundingChunks   []wireGroundingChunk   `json:"groundingChunks,omitempty"`
+	GroundingSupports []wireGroundingSupport `json:"groundingSupports,omitempty"`
+	SearchEntryPoint  any                    `json:"searchEntryPoint,omitempty"`
+}
+
+type wireGroundingChunk struct {
+	Web *wireGroundingWeb `json:"web,omitempty"`
+}
+
+type wireGroundingWeb struct {
+	URI   string `json:"uri"`
+	Title string `json:"title"`
+}
+
+type wireGroundingSupport struct {
+	GroundingChunkIndices []int        `json:"groundingChunkIndices,omitempty"`
+	Segment               *wireSegment `json:"segment,omitempty"`
+}
+
+type wireSegment struct {
+	StartIndex int    `json:"startIndex,omitempty"`
+	EndIndex   int    `json:"endIndex,omitempty"`
+	Text       string `json:"text,omitempty"`
 }
 
 type wireUsage struct {

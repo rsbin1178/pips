@@ -43,6 +43,7 @@ type streamState struct {
 	endSent   bool
 	finish    ai.FinishReason
 	usage     *ai.Usage
+	grounding *ai.GroundingMetadata
 	toolIndex int
 	sawCall   bool
 }
@@ -73,6 +74,20 @@ func (s *streamState) emitChunk(chunk generateResponse, yield func(ai.StreamEven
 	candidate := chunk.Candidates[0]
 	if candidate.FinishReason != "" {
 		s.finish = finishReasonFrom(candidate.FinishReason)
+	}
+
+	if candidate.GroundingMetadata != nil {
+		citations := citationsFromGrounding(candidate.GroundingMetadata)
+		for _, c := range citations {
+			cit := c
+			if !yield(ai.StreamEvent{
+				Type:     ai.StreamCitation,
+				Citation: &cit,
+			}, nil) {
+				return false
+			}
+		}
+		s.grounding = groundingMetadataFrom(candidate.GroundingMetadata)
 	}
 
 	for _, part := range candidate.Content.Parts {
@@ -139,5 +154,10 @@ func (s *streamState) emitEnd(yield func(ai.StreamEvent, error) bool) {
 		finish = ai.FinishToolCalls
 	}
 
-	yield(ai.StreamEvent{Type: ai.StreamMessageEnd, FinishReason: finish, Usage: s.usage}, nil)
+	yield(ai.StreamEvent{
+		Type:         ai.StreamMessageEnd,
+		FinishReason: finish,
+		Usage:        s.usage,
+		Grounding:    s.grounding,
+	}, nil)
 }
