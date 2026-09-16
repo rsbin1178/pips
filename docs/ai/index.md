@@ -13,6 +13,7 @@
 | 正确处理同步与流式生成 | [生成与流式响应](generation-streaming.md) |
 | 实现工具循环或类型化 JSON 输出 | [Tools 与结构化输出](tools-structured-output.md) |
 | 选择 Provider、协议和兼容配置 | [Provider 指南](providers.md) |
+| 新增一个 Provider / 模型适配器 | [扩展指南](extending.md) |
 | 添加重试、限流、错误分类和监控 | [错误、中间件与可观测性](errors-middleware-observability.md) |
 | 在不使用真实密钥时测试业务逻辑 | [测试指南](testing.md) |
 | 查找公开包、类型、示例和源码 | [API 导航](api-navigation.md) |
@@ -26,6 +27,7 @@
 | [`ai/openai/compat`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/openai/compat) | 七个经过审阅的 OpenAI 兼容服务配置 |
 | [`ai/anthropic`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/anthropic) | Anthropic Messages、流式响应、Tools、结构化输出、Prompt Cache 与 Token Counting |
 | [`ai/gemini`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/gemini) | Gemini generateContent、流式响应、图片、Embeddings、缓存与 Token Counting |
+| [`ai/agnes`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/agnes) | Agnes Image API 的文生图与图生图/多图合成（单一端点，档位 + ratio） |
 | [`ai/middleware/retry`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/middleware/retry) | 有边界的指数退避重试 |
 | [`ai/middleware/ratelimit`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/middleware/ratelimit) | 客户端 RPM/TPM 限流 |
 | [`ai/observability`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/observability) | 与遥测后端无关的调用生命周期 Hooks |

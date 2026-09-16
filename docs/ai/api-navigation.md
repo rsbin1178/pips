@@ -108,6 +108,21 @@ Profile 复用 `openai.Model`，但保持真实 `Provider`、凭据环境变量�
 
 主要实现：[`gemini.go`](../../ai/gemini/gemini.go)、[`convert.go`](../../ai/gemini/convert.go)、[`generate.go`](../../ai/gemini/generate.go)、[`stream.go`](../../ai/gemini/stream.go)、[`count_tokens.go`](../../ai/gemini/count_tokens.go)、[`image.go`](../../ai/gemini/image.go)、[`embedding.go`](../../ai/gemini/embedding.go)。
 
+## `ai/agnes`：Agnes 图片 API
+
+- Godoc：[`github.com/rsbin1178/pips/ai/agnes`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/agnes)
+- 源码：[`ai/agnes/`](../../ai/agnes)
+- 使用说明：[Agnes](providers.md#agnes)
+
+| 任务 | 主要符号 |
+| --- | --- |
+| 构造图片模型 | `NewImageModel`、`ImageModel`、`Option` |
+| 站点与传输 | `BaseURLCN`、`BaseURLGlobal`、`DefaultBaseURL`、`WithAPIKey`、`WithBaseURL`、`WithHTTPClient`、`WithHeader`、`WithAllowHTTP`、`WithAllowPrivateIPs`、`WithMaxStreamLineSize`、`WithCapabilities` |
+| 请求扩展 | `ImageOptions`（Ratio、ResponseFormat、ReturnBase64、ExtraFields） |
+| 能力 | 实现 `ai.ImageModel` 与 `ai.ImageEditor`（无流式与变体） |
+
+主要实现：[`agnes.go`](../../ai/agnes/agnes.go)、[`wire.go`](../../ai/agnes/wire.go)、[`options.go`](../../ai/agnes/options.go)、[`image.go`](../../ai/agnes/image.go)。
+
 ## `ai/middleware/retry`
 
 - Godoc：[`github.com/rsbin1178/pips/ai/middleware/retry`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/middleware/retry)
@@ -148,4 +163,4 @@ Profile 复用 `openai.Model`，但保持真实 `Provider`、凭据环境变量�
 
 ## 非公开边界
 
-以下包虽然会出现在 `go list ./ai/...`，但不是公共使用面：`ai/internal/httpx`、`ai/internal/jsonx`、`ai/internal/sse`。其他 `ai/internal` 目录也遵守相同边界。外部应用不得导入它们；需要新增通用能力时应先通过公开 API 设计，而不是复制 internal 类型。
+以下包虽然会出现在 `go list ./ai/...`，但不是公共使用面：`ai/internal/httpx`、`ai/internal/jsonx`、`ai/internal/sse`、`ai/internal/apierr`、`ai/internal/imagewire`。其他 `ai/internal` 目录也遵守相同边界。外部应用不得导入它们；需要新增通用能力时应先通过公开 API 设计，而不是复制 internal 类型（扩展路径见[扩展指南](extending.md)）。
