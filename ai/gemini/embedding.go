@@ -36,6 +36,8 @@ type embedSingle struct {
 	Model                string      `json:"model"`
 	Content              wireContent `json:"content"`
 	OutputDimensionality *int        `json:"outputDimensionality,omitempty"`
+	TaskType             string      `json:"taskType,omitempty"`
+	Title                string      `json:"title,omitempty"`
 }
 
 type batchEmbedResponse struct {
@@ -44,9 +46,43 @@ type batchEmbedResponse struct {
 	} `json:"embeddings"`
 }
 
+func mapTaskType(tt ai.EmbeddingTaskType) (string, error) {
+	switch tt {
+	case "":
+		return "", nil
+	case ai.EmbeddingTaskTypeQuery:
+		return "RETRIEVAL_QUERY", nil
+	case ai.EmbeddingTaskTypeDocument:
+		return "RETRIEVAL_DOCUMENT", nil
+	case ai.EmbeddingTaskTypeSimilarity:
+		return "SEMANTIC_SIMILARITY", nil
+	case ai.EmbeddingTaskTypeClassification:
+		return "CLASSIFICATION", nil
+	case ai.EmbeddingTaskTypeClustering:
+		return "CLUSTERING", nil
+	case ai.EmbeddingTaskTypeQuestionAnswer:
+		return "QUESTION_ANSWERING", nil
+	case ai.EmbeddingTaskTypeFactCheck:
+		return "FACT_VERIFICATION", nil
+	case ai.EmbeddingTaskTypeCodeQuery:
+		return "CODE_RETRIEVAL_QUERY", nil
+	default:
+		return "", fmt.Errorf("gemini: unsupported embedding task type %q: %w", tt, ai.ErrUnsupported)
+	}
+}
+
 // Embed implements ai.EmbeddingModel using the batchEmbedContents endpoint so
 // multiple inputs are embedded in one request.
 func (m *EmbeddingModel) Embed(ctx context.Context, req ai.EmbeddingRequest) (*ai.EmbeddingResponse, error) {
+	if req.EncodingFormat != "" && req.EncodingFormat != ai.EmbeddingEncodingFormatFloat {
+		return nil, fmt.Errorf("gemini: unsupported encoding format %q: %w", req.EncodingFormat, ai.ErrUnsupported)
+	}
+
+	taskType, err := mapTaskType(req.TaskType)
+	if err != nil {
+		return nil, err
+	}
+
 	modelName := "models/" + m.model.model
 
 	body := embedContentRequest{Requests: make([]embedSingle, len(req.Input))}
@@ -55,6 +91,8 @@ func (m *EmbeddingModel) Embed(ctx context.Context, req ai.EmbeddingRequest) (*a
 			Model:                modelName,
 			Content:              wireContent{Parts: []wirePart{{Text: input}}},
 			OutputDimensionality: req.Dimensions,
+			TaskType:             taskType,
+			Title:                req.Title,
 		}
 	}
 

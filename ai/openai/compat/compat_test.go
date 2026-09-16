@@ -292,3 +292,57 @@ func TestCustomProfileDoesNotUseOpenAIKeyFallback(t *testing.T) {
 	_, err := model.Generate(t.Context(), ai.Request{Messages: []ai.Message{ai.UserText("hi")}})
 	require.NoError(t, err)
 }
+
+func TestCompatEmbedding(t *testing.T) {
+	t.Parallel()
+
+	t.Run("generic embedding with profile", func(t *testing.T) {
+		t.Parallel()
+
+		var gotPath string
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotPath = r.URL.Path
+			assert.Equal(t, "Bearer together-key", r.Header.Get("Authorization"))
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[{"index":0,"embedding":[0.1,0.2]}],"usage":{"prompt_tokens":4,"total_tokens":4}}`))
+		}))
+		t.Cleanup(server.Close)
+
+		profile, ok := compat.Lookup(ai.ProviderTogether)
+		require.True(t, ok)
+
+		emb := compat.Embedding(profile, "BAAI/bge-large-en-v1.5",
+			openai.WithBaseURL(server.URL), openai.WithAPIKey("together-key"),
+			openai.WithAllowHTTP(), openai.WithAllowPrivateIPs())
+
+		assert.Equal(t, ai.ProviderTogether, emb.Provider())
+		assert.Equal(t, "BAAI/bge-large-en-v1.5", emb.ModelID())
+
+		resp, err := emb.Embed(t.Context(), ai.EmbeddingRequest{Input: []string{"test"}})
+		require.NoError(t, err)
+		assert.Equal(t, "/embeddings", gotPath)
+		require.Len(t, resp.Embeddings, 1)
+		assert.Equal(t, []float32{0.1, 0.2}, resp.Embeddings[0])
+	})
+
+	t.Run("together helper", func(t *testing.T) {
+		t.Parallel()
+
+		emb := compat.TogetherEmbedding("BAAI/bge-large-en-v1.5",
+			openai.WithAPIKey("together-key"))
+
+		assert.Equal(t, ai.ProviderTogether, emb.Provider())
+		assert.Equal(t, "BAAI/bge-large-en-v1.5", emb.ModelID())
+	})
+
+	t.Run("mistral helper", func(t *testing.T) {
+		t.Parallel()
+
+		emb := compat.MistralEmbedding("mistral-embed",
+			openai.WithAPIKey("mistral-key"))
+
+		assert.Equal(t, ai.ProviderMistral, emb.Provider())
+		assert.Equal(t, "mistral-embed", emb.ModelID())
+	})
+}

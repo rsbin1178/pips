@@ -87,3 +87,63 @@ func TestEmbeddings(t *testing.T) {
 	assert.Equal(t, []float32{0.1, 0.2}, resp.Embeddings[0])
 	assert.Equal(t, []float32{0.3, 0.4}, resp.Embeddings[1])
 }
+
+func TestEmbeddingsTaskTypeAndTitle(t *testing.T) {
+	t.Parallel()
+
+	var captured map[string]any
+
+	base := localServer(t, func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/v1beta/models/text-embedding-004:batchEmbedContents", r.URL.Path)
+		assert.NoError(t, decodeBody(r, &captured))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"embeddings":[{"values":[0.5,0.6]}]}`))
+	})
+
+	model := gemini.NewEmbeddingModel("text-embedding-004",
+		gemini.WithAPIKey("gm-test"), gemini.WithBaseURL(base),
+		gemini.WithAllowHTTP(), gemini.WithAllowPrivateIPs())
+
+	resp, err := model.Embed(t.Context(), ai.EmbeddingRequest{
+		Input:    []string{"document text"},
+		TaskType: ai.EmbeddingTaskTypeDocument,
+		Title:    "Document Title",
+	})
+	require.NoError(t, err)
+
+	requests := as[[]any](t, captured["requests"])
+	require.Len(t, requests, 1)
+	first := as[map[string]any](t, requests[0])
+	assert.Equal(t, "models/text-embedding-004", first["model"])
+	assert.Equal(t, "RETRIEVAL_DOCUMENT", first["taskType"])
+	assert.Equal(t, "Document Title", first["title"])
+
+	require.Len(t, resp.Embeddings, 1)
+	assert.Equal(t, []float32{0.5, 0.6}, resp.Embeddings[0])
+}
+
+func TestEmbeddingsInvalidTaskType(t *testing.T) {
+	t.Parallel()
+
+	model := gemini.NewEmbeddingModel("text-embedding-004", gemini.WithAPIKey("gm-test"))
+
+	_, err := model.Embed(t.Context(), ai.EmbeddingRequest{
+		Input:    []string{"text"},
+		TaskType: "invalid_task_type",
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ai.ErrUnsupported)
+}
+
+func TestEmbeddingsUnsupportedEncodingFormat(t *testing.T) {
+	t.Parallel()
+
+	model := gemini.NewEmbeddingModel("text-embedding-004", gemini.WithAPIKey("gm-test"))
+
+	_, err := model.Embed(t.Context(), ai.EmbeddingRequest{
+		Input:          []string{"text"},
+		EncodingFormat: ai.EmbeddingEncodingFormatBase64,
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ai.ErrUnsupported)
+}
