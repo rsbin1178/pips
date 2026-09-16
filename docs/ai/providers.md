@@ -276,11 +276,26 @@ Gemini Provider 文件 URI 使用 `FileURL` 的 URL 字段。当前适配器不�
 图片和向量：
 
 ```go
-images := gemini.NewImageModel("gemini-3.8-flash-image")
+images := gemini.NewImageModel("gemini-2.5-flash-image") // 或 "imagen-3.0-generate-002"
 embeddings := gemini.NewEmbeddingModel("gemini-embedding-001")
 ```
 
-Gemini 图片通过 `generateContent` 请求 IMAGE modality，每次调用生成一张图片，`ImageRequest.N` 被忽略。Embedding 使用 batch endpoint，因此多个输入在一个请求中发送，并按返回顺序输出。
+`gemini.NewImageModel` 返回的对象同时实现 `ai.ImageModel` 与 `ai.ImageEditor`，支持双端点自动路由：
+
+1. **Gemini 原生多模态生图/编辑**（如 `gemini-2.5-flash-image`, `gemini-3.1-flash-image`, `gemini-3-pro-image`）：
+   - 调用 `:generateContent` 端点。
+   - 文生图与多图图生图编辑（`EditImage` 支持最多 14 张参考图多模态输入，不支持 `Mask`）。
+   - 智能解析便携 `Size` 为 `aspectRatio`（`16:9`、`1:1`、`4:3` 等）与 `imageSize`（`1K`、`2K`、`4K`）。
+   - 类型化 `gemini.ImageOptions` 支持 `AspectRatio`、`ImageSize`、`ThinkingLevel`、`SearchGrounding`（自动挂载 Google Search Grounding 工具）、`SafetySettings` 与 `ExtraFields`。
+   - 自动过滤思考过程草图（`thought: true`），只返回最终成品图；安全风控拦截（`finishReason: SAFETY` 等）或无图输出时显式报错（包装 `ai.ErrInvalidRequest`），不静默掩盖。
+   - 单次调用生成 1 张图，`N > 1` 返回 `ai.ErrUnsupported`，`N < 0` 返回 `ai.ErrInvalidRequest`。
+2. **Imagen 专用生图模型**（如 `imagen-3.0-generate-002`, `imagen-4.0-*`）：
+   - 自动路由至 `:predict` 端点，构建 `instances` 与 `parameters`。
+   - `N` 映射至 `sampleCount`（1~4，超出范围返回 `ai.ErrInvalidRequest`）。
+   - 支持 `aspectRatio` 与 `personGeneration`（`dont_allow`, `allow_adult`, `allow_all`）。
+   - Imagen 模型不支持图生图编辑（`EditImage` 返回 `ai.ErrUnsupported`）。
+
+Embedding 使用 batch endpoint，因此多个输入在一个请求中发送，并按返回顺序输出。
 
 Gemini 构造选项包括 `WithAPIKey`、`WithBaseURL`、`WithHTTPClient`、`WithHeader`、`WithProvider`、`WithAllowHTTP`、`WithAllowPrivateIPs` 和 `WithMaxStreamLineSize`。
 

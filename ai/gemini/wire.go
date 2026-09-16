@@ -11,12 +11,13 @@ const (
 // Gemini wire types — the subset this adapter produces and consumes.
 
 type generateRequest struct {
-	Contents          []wireContent     `json:"contents"`
-	SystemInstruction *wireContent      `json:"systemInstruction,omitempty"`
-	CachedContent     string            `json:"cachedContent,omitempty"`
-	Tools             []wireTool        `json:"tools,omitempty"`
-	ToolConfig        *wireToolConfig   `json:"toolConfig,omitempty"`
-	GenerationConfig  *generationConfig `json:"generationConfig,omitempty"`
+	Contents          []wireContent       `json:"contents"`
+	SystemInstruction *wireContent        `json:"systemInstruction,omitempty"`
+	CachedContent     string              `json:"cachedContent,omitempty"`
+	Tools             []wireTool          `json:"tools,omitempty"`
+	ToolConfig        *wireToolConfig     `json:"toolConfig,omitempty"`
+	SafetySettings    []wireSafetySetting `json:"safetySettings,omitempty"`
+	GenerationConfig  *generationConfig   `json:"generationConfig,omitempty"`
 }
 
 type wireContent struct {
@@ -60,7 +61,10 @@ type wireFunctionResp struct {
 
 type wireTool struct {
 	FunctionDeclarations []wireFunctionDecl `json:"functionDeclarations,omitempty"`
+	GoogleSearch         *wireGoogleSearch  `json:"google_search,omitempty"`
 }
+
+type wireGoogleSearch struct{}
 
 type wireFunctionDecl struct {
 	Name        string     `json:"name"`
@@ -78,20 +82,26 @@ type wireFunctionCallingConfig struct {
 }
 
 type generationConfig struct {
-	Temperature        *float64        `json:"temperature,omitempty"`
-	TopP               *float64        `json:"topP,omitempty"`
-	TopK               *int            `json:"topK,omitempty"`
-	Seed               *int64          `json:"seed,omitempty"`
-	FrequencyPenalty   *float64        `json:"frequencyPenalty,omitempty"`
-	PresencePenalty    *float64        `json:"presencePenalty,omitempty"`
-	ResponseLogProbs   *bool           `json:"responseLogprobs,omitempty"`
-	LogProbs           *int            `json:"logprobs,omitempty"`
-	MaxOutputTokens    *int            `json:"maxOutputTokens,omitempty"`
-	StopSequences      []string        `json:"stopSequences,omitempty"`
-	ResponseMIMEType   string          `json:"responseMimeType,omitempty"`
-	ResponseSchema     *ai.Schema      `json:"responseSchema,omitempty"`
-	ResponseModalities []string        `json:"responseModalities,omitempty"`
-	ThinkingConfig     *thinkingConfig `json:"thinkingConfig,omitempty"`
+	Temperature        *float64         `json:"temperature,omitempty"`
+	TopP               *float64         `json:"topP,omitempty"`
+	TopK               *int             `json:"topK,omitempty"`
+	Seed               *int64           `json:"seed,omitempty"`
+	FrequencyPenalty   *float64         `json:"frequencyPenalty,omitempty"`
+	PresencePenalty    *float64         `json:"presencePenalty,omitempty"`
+	ResponseLogProbs   *bool            `json:"responseLogprobs,omitempty"`
+	LogProbs           *int             `json:"logprobs,omitempty"`
+	MaxOutputTokens    *int             `json:"maxOutputTokens,omitempty"`
+	StopSequences      []string         `json:"stopSequences,omitempty"`
+	ResponseMIMEType   string           `json:"responseMimeType,omitempty"`
+	ResponseSchema     *ai.Schema       `json:"responseSchema,omitempty"`
+	ResponseModalities []string         `json:"responseModalities,omitempty"`
+	ThinkingConfig     *thinkingConfig  `json:"thinkingConfig,omitempty"`
+	ImageConfig        *wireImageConfig `json:"imageConfig,omitempty"`
+}
+
+type wireImageConfig struct {
+	AspectRatio string `json:"aspectRatio,omitempty"`
+	ImageSize   string `json:"imageSize,omitempty"`
 }
 
 type thinkingConfig struct {
@@ -101,10 +111,15 @@ type thinkingConfig struct {
 }
 
 type generateResponse struct {
-	Candidates    []wireCandidate `json:"candidates"`
-	UsageMetadata *wireUsage      `json:"usageMetadata"`
-	ModelVersion  string          `json:"modelVersion"`
-	ResponseID    string          `json:"responseId"`
+	Candidates     []wireCandidate     `json:"candidates"`
+	PromptFeedback *wirePromptFeedback `json:"promptFeedback,omitempty"`
+	UsageMetadata  *wireUsage          `json:"usageMetadata"`
+	ModelVersion   string              `json:"modelVersion"`
+	ResponseID     string              `json:"responseId"`
+}
+
+type wirePromptFeedback struct {
+	BlockReason string `json:"blockReason,omitempty"`
 }
 
 type wireCandidate struct {
@@ -119,4 +134,34 @@ type wireUsage struct {
 	ThoughtsTokenCount      int `json:"thoughtsTokenCount"`
 	CachedContentTokenCount int `json:"cachedContentTokenCount"`
 	TotalTokenCount         int `json:"totalTokenCount"`
+}
+
+type wireSafetySetting struct {
+	Category  string `json:"category"`
+	Threshold string `json:"threshold"`
+}
+
+type predictRequest struct {
+	Instances  []predictInstance  `json:"instances"`
+	Parameters *predictParameters `json:"parameters,omitempty"`
+}
+
+type predictInstance struct {
+	Prompt string `json:"prompt"`
+}
+
+type predictParameters struct {
+	SampleCount      int    `json:"sampleCount,omitempty"`
+	AspectRatio      string `json:"aspectRatio,omitempty"`
+	PersonGeneration string `json:"personGeneration,omitempty"`
+	SafetySetting    string `json:"safetySetting,omitempty"`
+}
+
+type predictResponse struct {
+	Predictions []predictionItem `json:"predictions"`
+}
+
+type predictionItem struct {
+	BytesBase64Encoded string `json:"bytesBase64Encoded"`
+	MIMEType           string `json:"mimeType"`
 }
