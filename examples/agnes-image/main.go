@@ -16,6 +16,12 @@ import (
 )
 
 func main() {
+	if err := run(); err != nil {
+		fail(err)
+	}
+}
+
+func run() error {
 	// 单次生成可能耗时数十秒，Agnes 官方建议客户端超时 60–360s。
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
@@ -24,7 +30,27 @@ func main() {
 	// 密钥默认读 AGNES_API_KEY，也可 agnes.WithAPIKey("sk-...") 显式传入。
 	model := agnes.NewImageModel("agnes-image-2.5-flash", agnes.WithAPIKey(os.Getenv("API_KEY")))
 
-	// 1) 文生图：size 是必填档位，与 ratio 组合决定实际像素。
+	if err := generateCity(ctx, model); err != nil {
+		return fmt.Errorf("文生图: %w", err)
+	}
+
+	if err := generateInlineCube(ctx, model); err != nil {
+		return fmt.Errorf("文生图（Base64）: %w", err)
+	}
+
+	if err := editCityToNight(ctx, model); err != nil {
+		return fmt.Errorf("图生图: %w", err)
+	}
+
+	if err := composePoster(ctx, model); err != nil {
+		return fmt.Errorf("多图合成: %w", err)
+	}
+
+	return nil
+}
+
+// 1) 文生图：size 是必填档位，与 ratio 组合决定实际像素。
+func generateCity(ctx context.Context, model *agnes.ImageModel) error {
 	gen, err := model.GenerateImages(ctx, ai.ImageRequest{
 		Prompt: "日出时分薄雾峡谷上方的发光浮空城市，电影级写实风格，广角构图，高视觉密度",
 		Size:   "2K", // 2K + 16:9 = 2624x1472
@@ -36,16 +62,25 @@ func main() {
 		},
 	})
 	if err != nil {
-		fail("文生图", err)
+		return err
 	}
 
-	if err := save(ctx, first(gen), "city.png"); err != nil {
-		log.Fatalf("保存失败: %v", err)
+	img, err := first(gen)
+	if err != nil {
+		return err
 	}
 
-	fmt.Println("已保存 city.png，厂商改写后的提示词:", first(gen).RevisedPrompt)
+	if err := save(ctx, img, "city.png"); err != nil {
+		return fmt.Errorf("保存失败: %w", err)
+	}
 
-	// 2) 文生图直接拿字节：return_base64 只对文生图有效。
+	fmt.Println("已保存 city.png，厂商改写后的提示词:", img.RevisedPrompt)
+
+	return nil
+}
+
+// 2) 文生图直接拿字节：return_base64 只对文生图有效。
+func generateInlineCube(ctx context.Context, model *agnes.ImageModel) error {
 	inline, err := model.GenerateImages(ctx, ai.ImageRequest{
 		Prompt: "白色背景上的玻璃方块产品图，柔和阴影，高细节",
 		Size:   "1K",
@@ -54,19 +89,28 @@ func main() {
 		},
 	})
 	if err != nil {
-		fail("文生图（Base64）", err)
+		return err
 	}
 
-	if err := save(ctx, first(inline), "cube.png"); err != nil {
-		log.Fatalf("保存失败: %v", err)
+	img, err := first(inline)
+	if err != nil {
+		return err
+	}
+
+	if err := save(ctx, img, "cube.png"); err != nil {
+		return fmt.Errorf("保存失败: %w", err)
 	}
 
 	fmt.Println("已保存 cube.png")
 
-	// 3) 图生图：本地文件作为来源，适配器把它编码成 data URI 放进 extra_body.image。
+	return nil
+}
+
+// 3) 图生图：本地文件作为来源，适配器把它编码成 data URI 放进 extra_body.image。
+func editCityToNight(ctx context.Context, model *agnes.ImageModel) error {
 	source, err := os.ReadFile("city.png")
 	if err != nil {
-		log.Fatalf("读取来源图失败: %v", err)
+		return fmt.Errorf("读取来源图失败: %w", err)
 	}
 
 	edited, err := model.EditImage(ctx, ai.ImageEditRequest{
@@ -78,50 +122,33 @@ func main() {
 		},
 	})
 	if err != nil {
-		fail("图生图", err)
+		return err
 	}
 
-	if err := save(ctx, first(edited), "city-night.png"); err != nil {
-		log.Fatalf("保存失败: %v", err)
+	img, err := first(edited)
+	if err != nil {
+		return err
+	}
+
+	if err := save(ctx, img, "city-night.png"); err != nil {
+		return fmt.Errorf("保存失败: %w", err)
 	}
 
 	fmt.Println("已保存 city-night.png")
 
-	// 4) 多图合成：先生成两张参考图，再把这两张图作为输入合成海报。
-	//    参考图用 Base64 拿字节，适配器会编码成 data URI 放进 extra_body.image；
-	//    Images 里元素的顺序就是参考图顺序，合成时按这个顺序引用「第一张/第二张」。
-	characterResp, err := model.GenerateImages(ctx, ai.ImageRequest{
-		Prompt: "角色设定图：银发机械师，正面站姿，简洁浅灰背景，全身，柔和棚拍光线",
-		Size:   "1K",
-		ProviderOptions: map[ai.Provider]any{
-			ai.ProviderAgnes: agnes.ImageOptions{ReturnBase64: true},
-		},
-	})
+	return nil
+}
+
+// 4) 多图合成：先生成两张参考图，再把这两张图作为输入合成海报。
+func composePoster(ctx context.Context, model *agnes.ImageModel) error {
+	character, err := generateReferenceImage(ctx, model, "角色设定图：银发机械师，正面站姿，简洁浅灰背景，全身，柔和棚拍光线", "ref-character.png")
 	if err != nil {
-		fail("生成参考图（角色）", err)
+		return fmt.Errorf("生成参考图（角色）: %w", err)
 	}
 
-	character := first(characterResp)
-
-	if err := save(ctx, character, "ref-character.png"); err != nil {
-		log.Fatalf("保存失败: %v", err)
-	}
-
-	productResp, err := model.GenerateImages(ctx, ai.ImageRequest{
-		Prompt: "产品参考图：磨砂金属手环，纯色背景，柔和阴影，高细节",
-		Size:   "1K",
-		ProviderOptions: map[ai.Provider]any{
-			ai.ProviderAgnes: agnes.ImageOptions{ReturnBase64: true},
-		},
-	})
+	product, err := generateReferenceImage(ctx, model, "产品参考图：磨砂金属手环，纯色背景，柔和阴影，高细节", "ref-product.png")
 	if err != nil {
-		fail("生成参考图（产品）", err)
-	}
-
-	product := first(productResp)
-
-	if err := save(ctx, product, "ref-product.png"); err != nil {
-		log.Fatalf("保存失败: %v", err)
+		return fmt.Errorf("生成参考图（产品）: %w", err)
 	}
 
 	fmt.Println("已保存 ref-character.png 与 ref-product.png，开始多图合成")
@@ -138,23 +165,54 @@ func main() {
 		},
 	})
 	if err != nil {
-		fail("多图合成", err)
+		return err
 	}
 
-	if err := save(ctx, first(combined), "poster.png"); err != nil {
-		log.Fatalf("保存失败: %v", err)
+	img, err := first(combined)
+	if err != nil {
+		return err
+	}
+
+	if err := save(ctx, img, "poster.png"); err != nil {
+		return fmt.Errorf("保存失败: %w", err)
 	}
 
 	fmt.Println("已保存 poster.png")
+
+	return nil
+}
+
+func generateReferenceImage(ctx context.Context, model *agnes.ImageModel, prompt, filename string) (ai.GeneratedImage, error) {
+	resp, err := model.GenerateImages(ctx, ai.ImageRequest{
+		Prompt: prompt,
+		Size:   "1K",
+		ProviderOptions: map[ai.Provider]any{
+			ai.ProviderAgnes: agnes.ImageOptions{ReturnBase64: true},
+		},
+	})
+	if err != nil {
+		return ai.GeneratedImage{}, err
+	}
+
+	img, err := first(resp)
+	if err != nil {
+		return ai.GeneratedImage{}, err
+	}
+
+	if err := save(ctx, img, filename); err != nil {
+		return ai.GeneratedImage{}, fmt.Errorf("保存失败: %w", err)
+	}
+
+	return img, nil
 }
 
 // first returns the first image of a response.
-func first(resp *ai.ImageResponse) ai.GeneratedImage {
-	if len(resp.Images) == 0 {
-		log.Fatal("响应里没有图片")
+func first(resp *ai.ImageResponse) (ai.GeneratedImage, error) {
+	if resp == nil || len(resp.Images) == 0 {
+		return ai.GeneratedImage{}, errors.New("响应里没有图片")
 	}
 
-	return resp.Images[0]
+	return resp.Images[0], nil
 }
 
 // save writes an image to disk. Inline bytes are written directly; a hosted URL
@@ -193,21 +251,21 @@ func save(ctx context.Context, img ai.GeneratedImage, path string) error {
 
 // fail logs a classified image failure and exits. Agnes failures carry the same
 // portable error classes as every other adapter.
-func fail(step string, err error) {
+func fail(err error) {
 	switch {
 	case errors.Is(err, ai.ErrInvalidRequest):
-		log.Fatalf("%s：请求不合法，无需重试: %v", step, err)
+		log.Fatalf("请求不合法，无需重试: %v", err)
 	case errors.Is(err, ai.ErrUnsupported):
-		log.Fatalf("%s：Agnes 不支持该能力（多图生成 / mask / 文件 ID）: %v", step, err)
+		log.Fatalf("Agnes 不支持该能力（多图生成 / mask / 文件 ID）: %v", err)
 	case ai.IsRetryable(err):
-		log.Fatalf("%s：可重试错误（429/5xx/网络），Retry-After 已解析: %v", step, err)
+		log.Fatalf("可重试错误（429/5xx/网络），Retry-After 已解析: %v", err)
 	default:
 		// 需要细节时用 errors.As 取结构化错误。
 		var apiErr *ai.Error
 		if errors.As(err, &apiErr) {
-			log.Fatalf("%s：HTTP %d type=%s code=%s message=%s", step, apiErr.StatusCode, apiErr.Type, apiErr.Code, apiErr.Message)
+			log.Fatalf("HTTP %d type=%s code=%s message=%s", apiErr.StatusCode, apiErr.Type, apiErr.Code, apiErr.Message)
 		}
 
-		log.Fatalf("%s：%v", step, err)
+		log.Fatalf("%v", err)
 	}
 }
