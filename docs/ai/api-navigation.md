@@ -24,7 +24,7 @@ go doc -all github.com/rsbin1178/pips/ai/observability
 | 文本模型抽象 | `LanguageModel`、`Provider`、`Capabilities` | [`model.go`](../../ai/model.go)、[`provider.go`](../../ai/provider.go) |
 | 图片生成 | `ImageModel`、`ImageRequest`、`ImageUsage`、`ImageResponse`、`GeneratedImage` | [`image.go`](../../ai/image.go) |
 | 图片编辑/变体/流式 | `ImageEditRequest`、`ImageVariationRequest`、`ImageEditor`、`ImageVariator`、`ImageStreamer`、`ImageStream`、`ImageStreamEvent`、`ImageStreamEventType` | [`image.go`](../../ai/image.go)、[`model.go`](../../ai/model.go) |
-| Embedding | `EmbeddingModel`、`EmbeddingRequest`、`EmbeddingResponse` | [`embedding.go`](../../ai/embedding.go) |
+| Embedding | `EmbeddingModel`、`EmbeddingRequest`、`EmbeddingResponse`、`EmbeddingTaskType`、`EmbeddingEncodingFormat` | [`embedding.go`](../../ai/embedding.go) |
 | 服务端 Token 计数 | `TokenCounter` | [`model.go`](../../ai/model.go) |
 | 消息与 Part | `Message`、`Messages`、`SystemMessage`、`UserMessage`、`AssistantMessage`、`ToolMessage`、`Part` 及六种具体 Part | [`message.go`](../../ai/message.go) |
 | 消息构造与边界 | `SystemText`、`UserText`、`AssistantText`、`ToolResultText`、`Messages.SplitSystem`、`UnmarshalMessage`、`CloneMessage`、`MessageParts` | [`content.go`](../../ai/content.go)、[`message_validate.go`](../../ai/message_validate.go)、[`message_json.go`](../../ai/message_json.go) |
@@ -68,6 +68,7 @@ go doc -all github.com/rsbin1178/pips/ai/observability
 | --- | --- |
 | 命名 Profile | `DeepSeek`、`Groq`、`XAI`、`OpenRouter`、`Cerebras`、`Together`、`Mistral` |
 | 构造自定义 Profile | `Profile`、`New` |
+| 构造向量模型 | `Embedding`、`TogetherEmbedding`、`MistralEmbedding` |
 | 构建 Provider 注册表 | `Lookup` |
 
 Profile 复用 `openai.Model`，但保持真实 `Provider`、凭据环境变量、协议、能力和 wire 差异。Native Bedrock Converse、Vertex AI 等不是 OpenAI compatibility profile。
