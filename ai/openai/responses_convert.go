@@ -46,11 +46,17 @@ func (m *Model) responsesRequestFrom(req ai.Request, stream bool) (any, error) {
 		return nil, err
 	}
 
+	providerOpts := requestOptions(req, m.provider)
+	tools, err := responsesToolsFrom(req.Tools, m.compat, providerOpts, m.label())
+	if err != nil {
+		return nil, err
+	}
+
 	out := responsesRequest{
 		Model:           m.model,
 		Input:           input,
 		Instructions:    ai.JoinSystemText(system),
-		Tools:           responsesToolsFrom(req.Tools),
+		Tools:           tools,
 		ToolChoice:      responsesToolChoiceFrom(req.ToolChoice),
 		Temperature:     req.Temperature,
 		TopP:            req.TopP,
@@ -100,7 +106,7 @@ func (m *Model) responsesRequestFrom(req ai.Request, stream bool) (any, error) {
 		}
 	}
 
-	return mergeExtraFields(out, requestOptions(req, m.provider).ExtraFields)
+	return mergeExtraFields(out, providerOpts.ExtraFields)
 }
 
 func responseInputFrom(msgs ai.Messages, label string) ([]responseItem, error) {
@@ -244,13 +250,59 @@ func responseToolOutputs(parts []ai.ToolResultPart) ([]responseItem, error) {
 	return out, nil
 }
 
-func responsesToolsFrom(tools []ai.Tool) []responsesTool {
+func responsesToolsFrom(
+	tools []ai.Tool,
+	compat Compatibility,
+	reqOpts RequestOptions,
+	label string,
+) ([]responsesTool, error) {
 	if len(tools) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	out := make([]responsesTool, 0, len(tools))
 	for _, tool := range tools {
+		if !tool.IsEnabled() {
+			continue
+		}
+
+		if tool.IsProviderExecuted() {
+			if reqOpts.DisableBuiltinTools {
+				continue
+			}
+
+			switch compat.resolvedBuiltinTools() {
+			case BuiltinToolsReject:
+				return nil, fmt.Errorf(
+					"%s: provider-executed tool %q is not supported: %w",
+					label,
+					tool.Name,
+					ai.ErrUnsupported,
+				)
+			case BuiltinToolsStrip:
+				continue
+			case BuiltinToolsAllow:
+				t := responsesTool{
+					Type: tool.ProviderType,
+				}
+				if t.Type == "" {
+					t.Type = tool.Name
+				}
+				if tool.ProviderData != nil {
+					switch d := tool.ProviderData.(type) {
+					case FileSearchData:
+						t.VectorStoreIDs = d.VectorStoreIDs
+					case *FileSearchData:
+						if d != nil {
+							t.VectorStoreIDs = d.VectorStoreIDs
+						}
+					}
+				}
+				out = append(out, t)
+			}
+			continue
+		}
+
 		out = append(out, responsesTool{
 			Type:        typeFunction,
 			Name:        tool.Name,
@@ -259,7 +311,7 @@ func responsesToolsFrom(tools []ai.Tool) []responsesTool {
 		})
 	}
 
-	return out
+	return out, nil
 }
 
 func responsesToolChoiceFrom(choice ai.ToolChoice) any {
@@ -281,9 +333,40 @@ func responsesToolChoiceFrom(choice ai.ToolChoice) any {
 // portable shape.
 func responseFromResponses(body responsesResponse, raw []byte, provider ai.Provider) *ai.Response {
 	msg := ai.AssistantMessage{}
+	var citations []ai.Citation
+	var queries []string
 
 	for _, item := range body.Output {
 		appendOutputItem(&msg, item)
+
+		if item.Type == typeMessage {
+			for _, content := range item.Content {
+				for _, ann := range content.Annotations {
+					if ann.Type == "url_citation" {
+						citations = append(citations, ai.Citation{
+							URL:   ann.URL,
+							Title: ann.Title,
+							Index: len(citations),
+							TextRange: &ai.TextRange{
+								Start: ann.StartIndex,
+								End:   ann.EndIndex,
+							},
+						})
+					}
+				}
+			}
+		}
+
+		if item.Type == "web_search_call" && item.Action != nil && item.Action.Query != "" {
+			queries = append(queries, item.Action.Query)
+		}
+	}
+
+	var grounding *ai.GroundingMetadata
+	if len(queries) > 0 {
+		grounding = &ai.GroundingMetadata{
+			WebSearchQueries: queries,
+		}
 	}
 
 	return &ai.Response{
@@ -293,6 +376,8 @@ func responseFromResponses(body responsesResponse, raw []byte, provider ai.Provi
 		Message:      msg,
 		FinishReason: finishReasonFromResponses(body),
 		Usage:        usageFromResponses(body.Usage),
+		Citations:    citations,
+		Grounding:    grounding,
 		Raw:          raw,
 	}
 }

@@ -24,6 +24,9 @@ type RequestOptions struct {
 	MinP *float64
 	// RepetitionPenalty is a compatible-provider sampling control.
 	RepetitionPenalty *float64
+	// DisableBuiltinTools suppresses all provider-executed tools (web search,
+	// code interpreter, file search) for this request.
+	DisableBuiltinTools bool
 	// ExtraFields is merged into the top level of the outgoing JSON request
 	// body after translation using bounded recursive add-only semantics. It is
 	// the escape hatch for non-reserved provider parameters the portable

@@ -15,10 +15,10 @@ func TestCapabilities(t *testing.T) {
 		model string
 		want  ai.Capabilities
 	}{
-		{"gpt-4o", ai.Capabilities{Text: true, Vision: true, Documents: true, Tools: true, StructuredOutput: true, PromptCaching: true}},
-		{"gpt-5", ai.Capabilities{Text: true, Vision: true, Documents: true, Tools: true, StructuredOutput: true, Reasoning: true, PromptCaching: true}},
-		{"gpt-6-astra", ai.Capabilities{Text: true, Vision: true, Documents: true, Tools: true, StructuredOutput: true, Reasoning: true, PromptCaching: true}},
-		{"o3-mini", ai.Capabilities{Text: true, Vision: true, Documents: true, Tools: true, StructuredOutput: true, Reasoning: true, PromptCaching: true}},
+		{"gpt-4o", ai.Capabilities{Text: true, Vision: true, Documents: true, Tools: true, StructuredOutput: true, PromptCaching: true, WebSearch: true, CodeExecution: true}},
+		{"gpt-5", ai.Capabilities{Text: true, Vision: true, Documents: true, Tools: true, StructuredOutput: true, Reasoning: true, PromptCaching: true, WebSearch: true, CodeExecution: true}},
+		{"gpt-6-astra", ai.Capabilities{Text: true, Vision: true, Documents: true, Tools: true, StructuredOutput: true, Reasoning: true, PromptCaching: true, WebSearch: true, CodeExecution: true}},
+		{"o3-mini", ai.Capabilities{Text: true, Vision: true, Documents: true, Tools: true, StructuredOutput: true, Reasoning: true, PromptCaching: true, WebSearch: true, CodeExecution: true}},
 		{"gpt-3.5-turbo", ai.Capabilities{Text: true, Tools: true}},
 		{"chatgpt-image-latest", ai.Capabilities{ImageGeneration: true}},
 	}

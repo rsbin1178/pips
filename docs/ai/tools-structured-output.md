@@ -252,12 +252,54 @@ req.ResponseFormat = &ai.ResponseFormat{
 
 顶层 Schema 必须是对象。`Strict` 在 OpenAI 可请求严格模式，其他 Provider 可能忽略；Anthropic 与 Gemini 都使用各自的原生 JSON Schema 输出格式。便携类型相同不表示三者的 Schema 方言和约束强度完全相同，关键工作流应为每个目标 Provider 做集成测试。
 
+## 厂商内置工具与服务端执行 (Provider-Executed Tools)
+
+某些大模型厂商（如 Google Gemini、OpenAI、xAI Grok）支持由其云端服务直接执行的内置工具（如网络实时搜索、代码沙箱执行、文件向量库检索等），模型直接在服务端执行并返回引用和最终结论。
+
+### 声明内置工具
+
+- **Google Gemini**:
+  - `gemini.GoogleSearch(opts ...gemini.ToolOption)`: Google Search Grounding 网页检索。
+  - `gemini.CodeExecution(opts ...gemini.ToolOption)`: 云端 Python 代码沙箱执行。
+- **OpenAI**:
+  - `openai.WebSearch(opts ...openai.ToolOption)`: 网页搜索（Responses API）。
+  - `openai.WebSearchPreview(opts ...openai.ToolOption)`: 搜索预览工具。
+  - `openai.CodeInterpreter(opts ...openai.ToolOption)`: 代码解释器沙箱。
+  - `openai.FileSearch(vectorStoreIDs []string, opts ...openai.ToolOption)`: 向量库文件检索。
+- **xAI (Grok)**:
+  - `compat.GrokWebSearch(opts ...openai.ToolOption)`: Grok 实时全网搜索。
+  - `compat.GrokXSearch(opts ...openai.ToolOption)`: Grok 实时 X (Twitter) 动态搜索。
+  - `compat.GrokCodeExecution(opts ...openai.ToolOption)`: Grok 代码沙箱执行。
+
+### 引文与 Grounding 元数据
+
+使用内置工具后，服务端返回的引用源和支撑语句会被统一解析并挂载在 `ai.Response` 上：
+- `resp.Citations []ai.Citation`: 统一引文列表，包含 `URL`、`Title`、`Snippet`、`Index` 与正文位置 `TextRange`。
+- `resp.Grounding *ai.GroundingMetadata`: 包含实际检索的 `WebSearchQueries`。
+- 流式生成时，每次发现引文均会触发 `ai.StreamCitation` 事件，并在 `StreamMessageEnd` 上挂载完整 `Grounding`。
+
+### 启用/停用与四层安全门禁
+
+兼容服务（如 DeepSeek、Groq、Together、Mistral）使用与 OpenAI 相同的协议结构，但并不支持 OpenAI 专属内置工具。如果不加防护，直接把 `openai.WebSearch()` 发给兼容服务会导致 HTTP 400 崩溃。
+
+针对此问题设计了四层防御门禁：
+1. **工具级开关**: `openai.WithEnabled(false)` / `gemini.WithEnabled(false)`，显式关闭单个工具。
+2. **请求级开关**: `openai.RequestOptions{DisableBuiltinTools: true}` 或 `gemini.RequestOptions{DisableSearchGrounding: true, DisableCodeExecution: true}`。
+3. **兼容策略门禁 (`openai.Compatibility.BuiltinTools`)**:
+   - `BuiltinToolsAllow`: 官方原生端点（OpenAI、xAI）默认，原生下发。
+   - `BuiltinToolsStrip`: 第三方兼容端点（DeepSeek、Groq、Together 等）默认，自动剔除内置工具，保留普通客户端函数，防止 400 报错。
+   - `BuiltinToolsReject`: 严格模式，包含不支持的内置工具时立即在本地返回 `ai.ErrUnsupported`。
+4. **能力发现**: `ai.Capabilities.WebSearch` 与 `ai.Capabilities.CodeExecution`。
+
+在 Agent 运行时中，使用 `agent.ProviderTool(tool ai.Tool)` 将内置工具接入 Agent。当模型在服务端执行搜索或沙箱时，本地运行时会自动识别 `tool.Decl().IsProviderExecuted()`，跳过本地执行循环，直接继续推理。
+
 ## Tools 与结构化输出如何选择
 
 | 需求 | 选择 |
 | --- | --- |
 | 模型只需返回可解析业务数据 | `GenerateTyped` / `ResponseFormat` |
-| 模型要请求应用读取或修改外部世界 | Tool |
+| 模型要请求应用读取或修改外部世界 | Tool (客户端函数) |
+| 模型需要厂商托管全网搜索或代码沙箱 | 厂商内置工具（如 `gemini.GoogleSearch()`、`openai.WebSearch()`） |
 | Tool 参数需要类型约束 | Tool 的 `InputSchema` |
 | 最终答案还必须是 JSON | Tool 循环结束后的 `ResponseFormat`，并做 Provider 集成测试 |
 

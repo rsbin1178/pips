@@ -7,10 +7,30 @@ import (
 	"slices"
 )
 
-// Tool declares a function the model may call. The model returns invocation
-// requests as [ToolCallPart]s; the application executes the call and replies
-// with a [ToolResultPart].
+// ToolKind identifies who executes the tool.
+type ToolKind string
+
+const (
+	// ToolKindFunction is a standard user-defined tool executed by the client
+	// application. The zero value of ToolKind defaults to this.
+	ToolKindFunction ToolKind = ""
+
+	// ToolKindProviderExecuted is a tool provided and executed autonomously by
+	// the model provider in the cloud (e.g. Google Search Grounding, Gemini
+	// Code Execution, OpenAI Web Search).
+	ToolKindProviderExecuted ToolKind = "provider_executed"
+)
+
+// Tool declares a function or provider-executed capability the model may call.
+// For [ToolKindFunction], the model returns invocation requests as
+// [ToolCallPart]s; the application executes the call and replies with a
+// [ToolResultPart]. For [ToolKindProviderExecuted], execution occurs
+// server-side on provider infrastructure.
 type Tool struct {
+	// Kind specifies the execution model of the tool. The zero value is
+	// [ToolKindFunction].
+	Kind ToolKind
+
 	// Name identifies the tool. Providers restrict names to
 	// letters/digits/underscores/dashes; stick to that subset for portability.
 	Name string
@@ -19,6 +39,30 @@ type Tool struct {
 	// InputSchema describes the arguments object as JSON Schema. A nil schema
 	// means the tool takes no arguments.
 	InputSchema *Schema
+
+	// ProviderType is the wire type discriminator used by the provider
+	// (e.g. "web_search", "google_search", "code_execution").
+	ProviderType string
+	// ProviderData carries provider-specific tool configuration.
+	ProviderData any
+	// Disabled when true causes the tool to be omitted from the request.
+	Disabled bool
+}
+
+// IsProviderExecuted reports whether the tool is executed server-side by the
+// provider.
+func (t Tool) IsProviderExecuted() bool {
+	return t.Kind == ToolKindProviderExecuted
+}
+
+// IsClientExecuted reports whether the tool requires client execution.
+func (t Tool) IsClientExecuted() bool {
+	return t.Kind == ToolKindFunction || t.Kind == ""
+}
+
+// IsEnabled reports whether the tool is enabled (not disabled).
+func (t Tool) IsEnabled() bool {
+	return !t.Disabled
 }
 
 // EffectiveInputSchema returns the JSON Schema Provider adapters should

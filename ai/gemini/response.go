@@ -22,6 +22,11 @@ func responseFrom(body generateResponse, raw []byte) *ai.Response {
 	resp.Message.Parts = partsFrom(candidate.Content.Parts)
 	resp.FinishReason = finishReasonFrom(candidate.FinishReason)
 
+	if candidate.GroundingMetadata != nil {
+		resp.Citations = citationsFromGrounding(candidate.GroundingMetadata)
+		resp.Grounding = groundingMetadataFrom(candidate.GroundingMetadata)
+	}
+
 	// Gemini reports STOP even when it emitted a tool call; normalize so
 	// callers see the same tool_calls reason as other providers.
 	if resp.FinishReason == ai.FinishStop && hasFunctionCall(resp.Message.Parts) {
@@ -96,4 +101,53 @@ func hasFunctionCall(parts []ai.AssistantPart) bool {
 	}
 
 	return false
+}
+
+func citationsFromGrounding(gm *wireGroundingMetadata) []ai.Citation {
+	if gm == nil || len(gm.GroundingChunks) == 0 {
+		return nil
+	}
+
+	out := make([]ai.Citation, 0, len(gm.GroundingChunks))
+	for i, chunk := range gm.GroundingChunks {
+		if chunk.Web == nil {
+			continue
+		}
+		c := ai.Citation{
+			URL:   chunk.Web.URI,
+			Title: chunk.Web.Title,
+			Index: i,
+		}
+		for _, s := range gm.GroundingSupports {
+			for _, idx := range s.GroundingChunkIndices {
+				if idx == i && s.Segment != nil {
+					c.TextRange = &ai.TextRange{
+						Start: s.Segment.StartIndex,
+						End:   s.Segment.EndIndex,
+					}
+					if s.Segment.Text != "" && c.Snippet == "" {
+						c.Snippet = s.Segment.Text
+					}
+					break
+				}
+			}
+			if c.TextRange != nil {
+				break
+			}
+		}
+		out = append(out, c)
+	}
+
+	return out
+}
+
+func groundingMetadataFrom(gm *wireGroundingMetadata) *ai.GroundingMetadata {
+	if gm == nil {
+		return nil
+	}
+
+	return &ai.GroundingMetadata{
+		WebSearchQueries: gm.WebSearchQueries,
+		Raw:              gm,
+	}
 }

@@ -131,6 +131,8 @@ func (m *Model) Capabilities() ai.Capabilities {
 		Reasoning:        true,
 		PromptCaching:    true,
 		TokenCounting:    true,
+		WebSearch:        true,
+		CodeExecution:    true,
 	}
 }
 

@@ -57,4 +57,10 @@ type Capabilities struct {
 	// TokenCounting reports whether the model exposes a server-side token-count
 	// operation without running inference.
 	TokenCounting bool
+	// WebSearch reports whether the model natively supports provider-executed
+	// web search.
+	WebSearch bool
+	// CodeExecution reports whether the model natively supports server-side
+	// code execution.
+	CodeExecution bool
 }

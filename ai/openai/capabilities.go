@@ -32,6 +32,8 @@ func capabilitiesFor(model string) ai.Capabilities {
 			StructuredOutput: true,
 			Reasoning:        true,
 			PromptCaching:    true, // automatic caching on OpenAI's side
+			WebSearch:        true,
+			CodeExecution:    true,
 		}
 	case strings.HasPrefix(model, "gpt-4o"), strings.HasPrefix(model, "gpt-4.1"),
 		strings.HasPrefix(model, "chatgpt-4o"), strings.HasPrefix(model, "gpt-4-turbo"):
@@ -42,6 +44,8 @@ func capabilitiesFor(model string) ai.Capabilities {
 			Tools:            true,
 			StructuredOutput: true,
 			PromptCaching:    true,
+			WebSearch:        true,
+			CodeExecution:    true,
 		}
 	case strings.HasPrefix(model, "gpt-4"), strings.HasPrefix(model, "gpt-3.5"):
 		return ai.Capabilities{Text: true, Tools: true}
