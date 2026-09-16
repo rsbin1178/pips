@@ -10,6 +10,7 @@
 | `anthropic.New` | Messages | `ANTHROPIC_API_KEY` | `ai.TokenCounter` |
 | `gemini.New` | generateContent / streamGenerateContent | `GEMINI_API_KEY`，其次 `GOOGLE_API_KEY` | `ai.TokenCounter`、独立图片、Embedding 构造器 |
 | `agnes.NewImageModel` | Agnes Images | `AGNES_API_KEY` | 图片：`ai.ImageModel` + `ai.ImageEditor`（无流式/变体） |
+| `cohere.NewRerankModel` | Cohere Rerank (`/v1/rerank`) | `COHERE_API_KEY` | 重排：`ai.RerankModel`（含 SiliconFlow/Jina/Together 兼容构造器） |
 | `compat.*` | 审阅后的 OpenAI 形状协议 | Profile 专用变量 | 返回 `*openai.Model` |
 
 三个原生文本模型构造器均返回不可变、可并发复用的对象，且把配置错误延迟到首次调用。生产启动检查若需要立即失败，应主动执行一个受控 Smoke Test，而不是假定 `New` 会验证凭据。
@@ -322,6 +323,26 @@ req.ProviderOptions = map[ai.Provider]any{
 OpenAI 兼容模型会先按它的真实 Provider key 查找 `openai.RequestOptions`，再兼容查找 `ProviderOpenAI`。Anthropic/Gemini 的自定义 Provider 身份也有类似回退到原生 Provider key 的行为。
 
 `ExtraFields` 是只添加、不覆盖的有界递归合并。与保留字段或保留 dotted path 冲突会失败；可用 `ai.ValidateRequestBodyExtension` 对自定义扩展做提前校验，但适配器发送时仍会再次验证。不要用 ExtraFields 注入 `model`、消息、Tools、认证、流开关或其他已建模字段。图片请求使用独立的保留键列表，见 [OpenAI 图片](#openai-图片)。
+
+## Cohere 与重排服务
+
+`ai/cohere` 提供针对 Cohere 官方及兼容服务的原生客户端，构造器返回实现 `ai.RerankModel` 的对象：
+
+```go
+// Cohere 官方（默认读取 COHERE_API_KEY）
+model := cohere.NewRerankModel("rerank-v3.5")
+
+// SiliconFlow 兼容端点（读取 SILICONFLOW_API_KEY）
+sfModel := cohere.SiliconFlowRerank("BAAI/bge-reranker-v2-m3")
+
+// Jina AI 兼容端点（读取 JINA_API_KEY）
+jinaModel := cohere.JinaRerank("jina-reranker-v3.5")
+
+// Together AI 兼容端点（读取 TOGETHER_API_KEY）
+togetherModel := cohere.TogetherRerank("Salesforce/Llama-Rank-v1")
+```
+
+详见 [重排模型指南](rerank.md)。
 
 ## 自定义端点与网络安全
 

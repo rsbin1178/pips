@@ -74,6 +74,7 @@ image, err := imagewire.Image(datum, imagewire.MIMEFor(reported, requested), ind
 | `ai.ImageVariator` | 变体 | `openai`（`dall-e-2`） |
 | `ai.ImageStreamer` | 图片流式事件 | `openai` |
 | `ai.EmbeddingModel` | 向量 | `openai`、`gemini` |
+| `ai.RerankModel` | 重排 | `cohere` |
 | `ai.TokenCounter` | 服务端 token 计数 | `anthropic`、`gemini` |
 
 - 厂商没有的能力用“省略”表达（Agnes 没有 `New` 文本构造器、没有 `ImageVariator`），调用方在编译期就得到拒绝。
