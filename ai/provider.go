@@ -17,6 +17,9 @@ const (
 	ProviderCerebras   Provider = "cerebras"
 	ProviderTogether   Provider = "together"
 	ProviderMistral    Provider = "mistral"
+	ProviderCohere     Provider = "cohere"
+	ProviderJina       Provider = "jina"
+	ProviderSiliconFlow Provider = "siliconflow"
 )
 
 // Capabilities reports, best effort, what a specific model supports. It is
@@ -45,6 +48,8 @@ type Capabilities struct {
 	ImageGeneration bool
 	// Embeddings reports whether the model produces embeddings.
 	Embeddings bool
+	// Reranking reports whether the model performs document reranking.
+	Reranking bool
 	// PromptCaching reports whether the provider supports prompt-cache reuse
 	// or cache-usage reporting for this model. Caching may be automatic or
 	// explicitly controlled by the request.
