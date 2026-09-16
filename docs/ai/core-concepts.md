@@ -191,7 +191,7 @@ if streamer, ok := imageModel.(ai.ImageStreamer); ok {
 }
 ```
 
-OpenAI、Gemini 与 Agnes 提供图片适配器；Agnes 只做图片，其构造器返回的对象实现 `ai.ImageModel` 与 `ai.ImageEditor`，参数使用档位 `size` 与 `ratio`，图生图与文生图共用同一端点。Gemini 图片每次调用只生成一张，`N` 会被忽略，且没有实现编辑、变体与流式接口。`EmbeddingResponse.Embeddings` 与输入顺序一致；`Dimensions` 只对支持降维的模型生效。
+OpenAI、Gemini 与 Agnes 提供图片适配器；Agnes 只做图片，其构造器返回的对象实现 `ai.ImageModel` 与 `ai.ImageEditor`，参数使用档位 `size` 与 `ratio`，图生图与文生图共用同一端点。Gemini 图片每次调用只生成一张，`N` 会被忽略，且没有实现编辑、变体与流式接口。`EmbeddingResponse.Embeddings` 与输入顺序一致；`Dimensions` 只对支持降维的模型生效。可选的 `TaskType` 支持下游检索优化（如 Query、Document），`Title` 在语料检索时辅助对齐语义，`EncodingFormat` 可在支持的厂商（OpenAI、Mistral）使用高效的 Base64 传输并在本地透明解码。
 
 Token Counting 通过类型断言发现：
 

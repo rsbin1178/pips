@@ -59,6 +59,8 @@ images := openai.NewImageModel("gpt-image-2")
 embeddings := openai.NewEmbeddingModel("text-embedding-3-small")
 ```
 
+OpenAI 向量模型支持 Base64 传输格式（通过 `ai.EmbeddingRequest.EncodingFormat` 指定为 `ai.EmbeddingEncodingFormatBase64`），适配器会在本地透明将其解码为 `[]float32`，以降低高吞吐场景下的网络带宽与反序列化开销。
+
 `openai.ImageOptions` 和 `openai.RequestOptions` 各自是不同请求类型的 Provider escape hatch。OpenAI 没有实现 `ai.TokenCounter`。
 
 ### OpenAI 图片
@@ -295,7 +297,7 @@ embeddings := gemini.NewEmbeddingModel("gemini-embedding-001")
    - 支持 `aspectRatio` 与 `personGeneration`（`dont_allow`, `allow_adult`, `allow_all`）。
    - Imagen 模型不支持图生图编辑（`EditImage` 返回 `ai.ErrUnsupported`）。
 
-Embedding 使用 batch endpoint，因此多个输入在一个请求中发送，并按返回顺序输出。
+Embedding 使用 batch endpoint，因此多个输入在一个请求中发送，并按返回顺序输出。支持映射 `TaskType`（如 `RETRIEVAL_QUERY`、`RETRIEVAL_DOCUMENT` 等）与语料 `Title`。
 
 Gemini 构造选项包括 `WithAPIKey`、`WithBaseURL`、`WithHTTPClient`、`WithHeader`、`WithProvider`、`WithAllowHTTP`、`WithAllowPrivateIPs` 和 `WithMaxStreamLineSize`。
 
