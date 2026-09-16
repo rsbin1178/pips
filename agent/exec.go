@@ -364,6 +364,17 @@ func (a *Agent) runTool(ctx context.Context, tools *toolbox, call ai.ToolCallPar
 		return execOutcome{part: errorResult(call, "unknown tool: "+call.Name)}
 	}
 
+	if tool.Decl().IsProviderExecuted() {
+		return execOutcome{
+			part: ai.ToolResultPart{
+				ToolCallID: call.ID,
+				Name:       call.Name,
+				Content:    TextResult("executed by provider"),
+			},
+			executed: false,
+		}
+	}
+
 	if ctx.Err() != nil {
 		return execOutcome{part: errorResult(call, "tool execution cancelled")}
 	}

@@ -172,3 +172,22 @@ func (b *toolbox) concurrent(name string) bool {
 
 	return ok && cs.Concurrent()
 }
+
+// ProviderTool wraps a provider-executed ai.Tool (such as Gemini's GoogleSearch
+// or OpenAI's WebSearch) as an agent.Tool. Provider-executed tools are managed
+// server-side by the model provider, so their Exec method is a no-op.
+func ProviderTool(tool ai.Tool) Tool {
+	return &providerTool{tool: tool}
+}
+
+type providerTool struct {
+	tool ai.Tool
+}
+
+func (p *providerTool) Decl() ai.Tool {
+	return p.tool
+}
+
+func (p *providerTool) Exec(ctx context.Context, call ToolCall) ([]ai.Part, error) {
+	return nil, nil
+}

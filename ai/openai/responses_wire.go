@@ -47,19 +47,35 @@ type responseItem struct {
 	Summary          *[]responseSummary `json:"summary,omitempty"`
 	EncryptedContent string             `json:"encrypted_content,omitempty"`
 
+	// web_search_call
+	Action *responseAction `json:"action,omitempty"`
+
 	// Status is the item lifecycle state, required on a replayed assistant
 	// message and carried over from the Provider on a reasoning item.
 	Status string `json:"status,omitempty"`
 }
 
+type responseAction struct {
+	Query string `json:"query,omitempty"`
+}
+
 type responseContent struct {
-	Type     string `json:"type"` // "input_text"|"output_text"|"reasoning_text"|"input_image"|"input_file"
-	Text     string `json:"text,omitempty"`
-	ImageURL string `json:"image_url,omitempty"`
-	FileData string `json:"file_data,omitempty"`
-	FileID   string `json:"file_id,omitempty"`
-	FileURL  string `json:"file_url,omitempty"`
-	Filename string `json:"filename,omitempty"`
+	Type        string               `json:"type"` // "input_text"|"output_text"|"reasoning_text"|"input_image"|"input_file"
+	Text        string               `json:"text,omitempty"`
+	ImageURL    string               `json:"image_url,omitempty"`
+	FileData    string               `json:"file_data,omitempty"`
+	FileID      string               `json:"file_id,omitempty"`
+	FileURL     string               `json:"file_url,omitempty"`
+	Filename    string               `json:"filename,omitempty"`
+	Annotations []responseAnnotation `json:"annotations,omitempty"`
+}
+
+type responseAnnotation struct {
+	Type       string `json:"type"` // "url_citation"
+	URL        string `json:"url,omitempty"`
+	Title      string `json:"title,omitempty"`
+	StartIndex int    `json:"start_index,omitempty"`
+	EndIndex   int    `json:"end_index,omitempty"`
 }
 
 type responseSummary struct {
@@ -68,11 +84,12 @@ type responseSummary struct {
 }
 
 type responsesTool struct {
-	Type        string     `json:"type"` // "function"
-	Name        string     `json:"name"`
-	Description string     `json:"description,omitempty"`
-	Parameters  *ai.Schema `json:"parameters,omitempty"`
-	Strict      bool       `json:"strict,omitempty"`
+	Type           string     `json:"type"` // "function"|"web_search"|"code_interpreter"|"file_search"
+	Name           string     `json:"name,omitempty"`
+	Description    string     `json:"description,omitempty"`
+	Parameters     *ai.Schema `json:"parameters,omitempty"`
+	Strict         bool       `json:"strict,omitempty"`
+	VectorStoreIDs []string   `json:"vector_store_ids,omitempty"`
 }
 
 type responsesToolChoiceForced struct {

@@ -21,10 +21,16 @@ func (m *Model) chatRequestFrom(req ai.Request, stream bool) (any, error) {
 		return nil, err
 	}
 
+	providerOptions := requestOptions(req, m.provider)
+	tools, err := chatToolsFrom(req.Tools, m.compat, providerOptions, m.label())
+	if err != nil {
+		return nil, err
+	}
+
 	out := chatRequest{
 		Model:            m.model,
 		Messages:         messages,
-		Tools:            chatToolsFrom(req.Tools),
+		Tools:            tools,
 		ToolChoice:       chatToolChoiceFrom(req.ToolChoice),
 		Temperature:      req.Temperature,
 		TopP:             req.TopP,
@@ -34,7 +40,6 @@ func (m *Model) chatRequestFrom(req ai.Request, stream bool) (any, error) {
 		Stop:             req.Stop,
 		Stream:           stream,
 	}
-	providerOptions := requestOptions(req, m.provider)
 	if m.provider == ai.ProviderOpenAI && req.TopK != nil {
 		return nil, fmt.Errorf("%s: top-k sampling: %w", m.label(), ai.ErrUnsupported)
 	}
@@ -473,13 +478,48 @@ func textOf[T ai.Part](parts []T) string {
 	return out.String()
 }
 
-func chatToolsFrom(tools []ai.Tool) []chatTool {
+func chatToolsFrom(
+	tools []ai.Tool,
+	compat Compatibility,
+	reqOpts RequestOptions,
+	label string,
+) ([]chatTool, error) {
 	if len(tools) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	out := make([]chatTool, 0, len(tools))
 	for _, tool := range tools {
+		if !tool.IsEnabled() {
+			continue
+		}
+
+		if tool.IsProviderExecuted() {
+			if reqOpts.DisableBuiltinTools {
+				continue
+			}
+
+			switch compat.resolvedBuiltinTools() {
+			case BuiltinToolsReject:
+				return nil, fmt.Errorf(
+					"%s: provider-executed tool %q is not supported by Chat Completions: %w",
+					label,
+					tool.Name,
+					ai.ErrUnsupported,
+				)
+			case BuiltinToolsStrip:
+				continue
+			case BuiltinToolsAllow:
+				return nil, fmt.Errorf(
+					"%s: provider-executed tool %q requires Responses API: %w",
+					label,
+					tool.Name,
+					ai.ErrUnsupported,
+				)
+			}
+			continue
+		}
+
 		out = append(out, chatTool{
 			Type: typeFunction,
 			Function: chatFunctionDef{
@@ -490,7 +530,7 @@ func chatToolsFrom(tools []ai.Tool) []chatTool {
 		})
 	}
 
-	return out
+	return out, nil
 }
 
 func chatToolChoiceFrom(choice ai.ToolChoice) any {

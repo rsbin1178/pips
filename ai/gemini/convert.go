@@ -18,6 +18,12 @@ type RequestOptions struct {
 	// CachedContent references an explicit Gemini cache resource, for example
 	// "cachedContents/abc123".
 	CachedContent string
+	// DisableSearchGrounding suppresses the google_search tool even if present
+	// in Request.Tools.
+	DisableSearchGrounding bool
+	// DisableCodeExecution suppresses the code_execution tool even if present
+	// in Request.Tools.
+	DisableCodeExecution bool
 	// ExtraFields is merged into the outgoing JSON request using bounded
 	// recursive add-only semantics. It is the escape hatch for non-reserved
 	// parameters not modeled portably (for example safetySettings).
@@ -66,7 +72,7 @@ func requestFrom(req ai.Request, provider ai.Provider) (any, error) {
 		Contents:          contents,
 		SystemInstruction: systemInstructionFrom(system),
 		CachedContent:     opts.CachedContent,
-		Tools:             toolsFrom(req.Tools),
+		Tools:             toolsFrom(req.Tools, opts),
 		ToolConfig:        toolConfigFrom(req.ToolChoice),
 		GenerationConfig:  generationConfigFrom(req),
 	}
@@ -297,13 +303,34 @@ func mediaPartFrom(src ai.MediaSource) wirePart {
 	return wirePart{InlineData: &wireBlob{MIMEType: src.MIMEType, Data: base64.StdEncoding.EncodeToString(src.Data)}}
 }
 
-func toolsFrom(tools []ai.Tool) []wireTool {
+func toolsFrom(tools []ai.Tool, opts RequestOptions) []wireTool {
 	if len(tools) == 0 {
 		return nil
 	}
 
-	decls := make([]wireFunctionDecl, 0, len(tools))
+	var decls []wireFunctionDecl
+	var hasGoogleSearch bool
+	var hasCodeExecution bool
+
 	for _, tool := range tools {
+		if tool.Disabled {
+			continue
+		}
+
+		if tool.IsProviderExecuted() {
+			switch tool.ProviderType {
+			case "google_search":
+				if !opts.DisableSearchGrounding {
+					hasGoogleSearch = true
+				}
+			case "code_execution":
+				if !opts.DisableCodeExecution {
+					hasCodeExecution = true
+				}
+			}
+			continue
+		}
+
 		decls = append(decls, wireFunctionDecl{
 			Name:        tool.Name,
 			Description: tool.Description,
@@ -311,7 +338,18 @@ func toolsFrom(tools []ai.Tool) []wireTool {
 		})
 	}
 
-	return []wireTool{{FunctionDeclarations: decls}}
+	var out []wireTool
+	if len(decls) > 0 {
+		out = append(out, wireTool{FunctionDeclarations: decls})
+	}
+	if hasGoogleSearch {
+		out = append(out, wireTool{GoogleSearch: &wireGoogleSearch{}})
+	}
+	if hasCodeExecution {
+		out = append(out, wireTool{CodeExecution: &wireCodeExecution{}})
+	}
+
+	return out
 }
 
 func toolConfigFrom(choice ai.ToolChoice) *wireToolConfig {
