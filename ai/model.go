@@ -65,6 +65,13 @@ type EmbeddingModel interface {
 	ModelID() string
 }
 
+// RerankModel re-orders candidate documents by semantic relevance to a query.
+type RerankModel interface {
+	Rerank(ctx context.Context, req RerankRequest) (*RerankResponse, error)
+	Provider() Provider
+	ModelID() string
+}
+
 // TokenCounter is the optional ability to count a request's input tokens
 // without running inference. Anthropic and Gemini expose dedicated endpoints;
 // OpenAI does not (its tokenization is client-side only). Discover it by type
