@@ -56,7 +56,8 @@ type responseItem struct {
 }
 
 type responseAction struct {
-	Query string `json:"query,omitempty"`
+	Query   string   `json:"query,omitempty"`
+	Queries []string `json:"queries,omitempty"`
 }
 
 type responseContent struct {
