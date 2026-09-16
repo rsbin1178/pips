@@ -126,6 +126,32 @@ func Mistral(model string, opts ...openai.Option) *openai.Model {
 	return New(mistralProfile, model, opts...)
 }
 
+// Embedding returns an OpenAI-protocol embedding model configured from profile.
+// Profile defaults (provider identity, base URL, and credentials) are applied
+// before opts, so callers may override any setting. An empty provider key is
+// intentional and never falls back to OPENAI_API_KEY.
+func Embedding(profile Profile, model string, opts ...openai.Option) *openai.EmbeddingModel {
+	defaults := []openai.Option{
+		openai.WithProvider(profile.Provider),
+		openai.WithBaseURL(profile.BaseURL),
+		openai.WithAPIKey(firstEnv(profile.APIKeyEnv...)),
+	}
+
+	return openai.NewEmbeddingModel(model, append(defaults, opts...)...)
+}
+
+// TogetherEmbedding returns an embedding model using Together AI's
+// OpenAI-compatible endpoint.
+func TogetherEmbedding(model string, opts ...openai.Option) *openai.EmbeddingModel {
+	return Embedding(togetherProfile, model, opts...)
+}
+
+// MistralEmbedding returns an embedding model using Mistral AI's
+// OpenAI-compatible endpoint.
+func MistralEmbedding(model string, opts ...openai.Option) *openai.EmbeddingModel {
+	return Embedding(mistralProfile, model, opts...)
+}
+
 var deepSeekProfile = Profile{
 	Provider:  ai.ProviderDeepSeek,
 	BaseURL:   "https://api.deepseek.com",
