@@ -80,10 +80,13 @@ type StreamEvent struct {
 
 	// FinishReason and Usage are set on message_end. Usage is nil when the
 	// provider does not report it. Grounding carries search metadata when
-	// available.
+	// available. Warnings reports anything the adapter did not send exactly as
+	// configured; it is set on message_end and is empty when the request was
+	// encoded as written.
 	FinishReason FinishReason
 	Usage        *Usage
 	Grounding    *GroundingMetadata
+	Warnings     []Warning
 }
 
 // Collect drains a stream and assembles the complete [Response], preserving
@@ -173,15 +176,25 @@ func (a *accumulator) add(ev StreamEvent) {
 			a.resp.Citations = append(a.resp.Citations, *ev.Citation)
 		}
 	case StreamMessageEnd:
-		a.flush()
+		a.finish(ev)
+	}
+}
 
-		a.resp.FinishReason = ev.FinishReason
-		if ev.Usage != nil {
-			a.resp.Usage = *ev.Usage
-		}
-		if ev.Grounding != nil {
-			a.resp.Grounding = ev.Grounding
-		}
+// finish closes the response with the terminal event's summary fields.
+func (a *accumulator) finish(ev StreamEvent) {
+	a.flush()
+
+	a.resp.FinishReason = ev.FinishReason
+	if ev.Usage != nil {
+		a.resp.Usage = *ev.Usage
+	}
+
+	if ev.Grounding != nil {
+		a.resp.Grounding = ev.Grounding
+	}
+
+	if len(ev.Warnings) > 0 {
+		a.resp.Warnings = append(a.resp.Warnings, ev.Warnings...)
 	}
 }
 

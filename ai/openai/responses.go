@@ -11,7 +11,7 @@ import (
 const responsesPath = "responses"
 
 func (m *Model) generateResponses(ctx context.Context, req ai.Request) (*ai.Response, error) {
-	body, err := m.responsesRequestFrom(req, false)
+	body, warnings, err := m.responsesRequestFrom(req, false)
 	if err != nil {
 		return nil, err
 	}
@@ -27,7 +27,10 @@ func (m *Model) generateResponses(ctx context.Context, req ai.Request) (*ai.Resp
 		return nil, responsesFailure(m.provider, parsed.Error, raw)
 	}
 
-	return responseFromResponses(parsed, raw, m.provider), nil
+	resp := responseFromResponses(parsed, raw, m.provider)
+	resp.Warnings = warnings
+
+	return resp, nil
 }
 
 // responsesFailure builds an error for a response whose status is "failed",
@@ -51,8 +54,13 @@ func responsesFailure(provider ai.Provider, e *responsesError, raw []byte) error
 }
 
 func (m *Model) streamResponses(ctx context.Context, req ai.Request) ai.Stream {
-	body, err := m.responsesRequestFrom(req, true)
-	return m.runStream(ctx, responsesPath, "responses", body, err, emitResponsesStream)
+	body, warnings, err := m.responsesRequestFrom(req, true)
+
+	emit := func(provider ai.Provider, events eventSource, yield func(ai.StreamEvent, error) bool) {
+		emitResponsesStream(provider, events, withWarnings(warnings, yield))
+	}
+
+	return m.runStream(ctx, responsesPath, "responses", body, err, emit)
 }
 
 // emitResponsesStream translates the Responses semantic-event dialect. Each

@@ -160,8 +160,13 @@ generations 使用 `image_generation.*`、edits 使用 `image_edit.*` 命名空�
 | `compat.XAI` | `xai` | `XAI_API_KEY` | Responses | 返回可续接的加密 reasoning 状态 |
 | `compat.OpenRouter` | `openrouter` | `OPENROUTER_API_KEY` | Chat | 上游模型不固定，能力保守；保留 reasoning details |
 | `compat.Cerebras` | `cerebras` | `CEREBRAS_API_KEY` | Chat | 能力按模型名保守推断 |
-| `compat.Together` | `together` | `TOGETHER_API_KEY` | Chat | 关闭便携 Chat reasoning 编码 |
+| `compat.Together` | `together` | `TOGETHER_API_KEY` | Chat | 转发 `reasoning_effort`，档位映射由厂商完成 |
 | `compat.Mistral` | `mistral` | `MISTRAL_API_KEY` | Chat | 结构输出；按模型名推断视觉/推理；保留 content chunks |
+| `compat.Zhipu` | `zhipu` | `ZHIPU_API_KEY` | Chat | 仅 `json_object` 结构输出；转发 `reasoning_effort`（GLM-5.2+ 读取，4.x 惰性） |
+| `compat.SiliconFlow` | `siliconflow` | `SILICONFLOW_API_KEY` | Chat | 仅 `max_tokens`；思考控制走 `extra_body` |
+| `compat.Kimi` | `kimi` | `MOONSHOT_API_KEY` | Chat | k3 读取顶层 `reasoning_effort`；k2.x 的 `thinking` 走 `extra_body` |
+| `compat.Qwen` | `qwen` | `DASHSCOPE_API_KEY` | Chat | 仅 `max_tokens`；tier-native 读取 `reasoning_effort`，legacy hybrid 走 `extra_body` |
+| `compat.MiniMax` | `minimax` | `MINIMAX_API_KEY` | Chat | `thinking`/`reasoning_split` 走 `extra_body`；转发 `reasoning_effort` |
 
 示例：
 
@@ -189,6 +194,32 @@ model := compat.New(profile, "company-model")
 自定义 Profile 的空 API 默认使用 Chat Completions；空能力默认是 Text + Tools。Profile 密钥为空是有意状态，绝不会退回读取 `OPENAI_API_KEY`。传给 `compat.New` 的额外 `openai.Option` 在 Profile 默认值之后应用，因此可覆盖端点、密钥或协议。
 
 `WithCompatibility` 可精确调整 max-token 字段、流 Usage、结构输出形态、Chat reasoning 形态、历史 reasoning 字段以及 Responses 的加密 reasoning include。只在目标端点协议已有测试证据时自定义这些值；它不负责 Provider 身份、认证、URL 或能力表。
+
+### Reasoning 旋钮：按家族发送，不做能力猜测 (`ChatReasoning`)
+
+各厂商读取的思考旋钮不同。已审阅 Profile 会声明本家族真正读取的那个旋钮；**不确定是否支持时一律如实转发**，绝不用"大概不支持"删字段或拦截用户显式配置（完整规范见 `.trellis/spec/backend/provider-compatibility-policy.md`）。
+
+| 厂商/家族 | 真正读取的旋钮 | Profile 默认 |
+| --- | --- | --- |
+| OpenAI 原生 / Cerebras / Groq / Together | `reasoning_effort` | `ChatReasoningEffort` |
+| DeepSeek V4 | `reasoning_effort` + `thinking{type}` | `ChatReasoningDeepSeek` |
+| OpenRouter / xAI（Chat） | `reasoning{effort}` | `ChatReasoningObject` |
+| Kimi k3 | 顶层 `reasoning_effort`；k2.x 读 `thinking{type,keep}`（`extra_body`） | `ChatReasoningEffort` |
+| Qwen tier-native（qwen3.8-max 等） | `reasoning_effort`；legacy hybrid 读 `enable_thinking` + `thinking_budget`（`extra_body`） | `ChatReasoningEffort` |
+| Zhipu GLM-5.2+ | `reasoning_effort`（+ `thinking{type}`）；4.x 为惰性字段 | `ChatReasoningEffort` |
+| MiniMax | `thinking{type}` / `reasoning_split`（`extra_body`） | `ChatReasoningEffort` |
+| Anthropic / Gemini | 各自协议内建思考字段 | 不适用 |
+
+`ChatReasoningOmit` 只有一个合法含义：**该协议根本不存在这个字段**。它不表示"这个模型可能不读它"（应如实转发），也不表示"档位枚举和别家不同"（应换成该家族读取的旋钮）。
+
+需要按模型换旋钮时，用配置声明覆盖 Profile 默认值（Provider 级或 model 级，model 优先），不在代码里按模型名分支：
+
+```toml
+[providers.kimi.models."kimi-k2.6".compatibility]
+chat_reasoning = "reasoning_effort"
+```
+
+写出去的请求若与配置不一致，必须可见：`ai.Response.Warnings` 以结构化条目（`unsupported`/`compatibility`/`deprecated`，含 `Feature` 与 `Details`）报出被省略或降级编码的字段；`pips config show` 与 `pips doctor` 回显最终生效的 reasoning 档位与编码。
 
 ### 兼容端点内置工具降级防护 (`BuiltinTools`)
 
@@ -398,6 +429,18 @@ emb := zhipu.NewEmbeddingModel("embedding-3")
 rerank := zhipu.NewRerankModel("") // 默认使用 "rerank"
 ```
 
+思考控制：`GLM-5.2` 及以上读取 `reasoning_effort`（`max` 默认，另有 `xhigh`/`high`/`medium`/`low`/`minimal`/`none`，`low`/`medium` 由厂商映射为 `high`，`xhigh` 映射为 `max`），`GLM-4.x` 只文档化 `thinking{type}`，`reasoning_effort` 对它们是惰性字段。门面包统一转发 `reasoning_effort`，档位映射交给厂商。
+
+`GLM-5.3` 是例外：它只接受 `low`/`high`/`max`，且**不再允许关闭思考**（传 `thinking{type}` 为 `disabled` 会报错）。Pips 不在代码里按模型名特判；请为该模型只声明合法档位：
+
+```toml
+[providers.zhipu.models."glm-5.3"]
+reasoning_levels = ["low", "high", "max"]
+default_reasoning_level = "max"
+```
+
+这样任何其它档位都会在本地被拒绝，并在错误里列出该模型声明支持的档位，而不是发出一个必然 400 的请求。
+
 ## Together AI 与 SiliconFlow
 
 `ai/together` 与 `ai/siliconflow` 为开源模型汇聚平台提供统一的四位一体能力门面：
@@ -428,7 +471,9 @@ model := kimi.New("kimi-k3")                 // 国际端点 https://api.moonsho
 cnModel := kimi.New("kimi-k2.6", kimi.WithBaseURL(kimi.DefaultChinaBaseURL))
 ```
 
-密钥环境变量为 `MOONSHOT_API_KEY`。国内端点 `https://api.moonshot.cn/v1`（`kimi.DefaultChinaBaseURL`）与国际端点的账号和密钥互不通用，用错站点会返回 401。`kimi-k3` 使用顶层 `reasoning_effort`（`low`/`high`/`max`）；部分模型把思考开关放在 `extra_body` 的 `thinking` 字段，可按需通过 `request.extra_body` 传入。平台没有任何向量、重排或生图端点。
+密钥环境变量为 `MOONSHOT_API_KEY`。国内端点 `https://api.moonshot.cn/v1`（`kimi.DefaultChinaBaseURL`）与国际端点的账号和密钥互不通用，用错站点会返回 401。
+
+思考控制按家族区分：`kimi-k3` 读取顶层 `reasoning_effort`（`low`/`high`/`max`，默认 `max`，且始终思考）；`kimi-k2.5`/`kimi-k2.6`/`kimi-k2.7-code` 读取 `thinking{type,keep}`，对 `reasoning_effort` 未声明支持。门面包与 `compat.Kimi` 默认发送 `reasoning_effort`：该字段在 k2.x 上是惰性的（不报错），因此用户显式配置的档位不会被框架吞掉；k2.x 的 `thinking` 开关通过 `request.extra_body` 传入。需要给某个模型换编码时，用配置里的 `compatibility.chat_reasoning` 覆盖，而不是改代码分支。平台没有任何向量、重排或生图端点。
 
 ## 阿里云百炼 DashScope / Qwen
 
@@ -486,7 +531,9 @@ resp, err := img.GenerateImages(ctx, ai.ImageRequest{
 - 结果 URL 有效期 24 小时，适配器不替你下载。
 - `qwen.WithPollInterval`（默认 3s）与 `qwen.WithPollTimeout`（默认 5m）控制轮询；调用方 context 自带 deadline 时以调用方为准。任务失败时返回带 sentinel 的 `*ai.Error`。
 
-`gte-rerank-v2` 官方公告将于 2026-05-30 下线，建议改用 `qwen3-rerank`。多模态向量仍只支持 DashScope 原生接口，不在本包内；思考控制（`enable_thinking`、`thinking_budget`）走扩展字段，可用 `request.extra_body` 传入。
+`gte-rerank-v2` 官方公告将于 2026-05-30 下线，建议改用 `qwen3-rerank`。多模态向量仍只支持 DashScope 原生接口，不在本包内。
+
+思考控制同样按家族区分：tier-native 家族（`qwen3.8-max` 等）读取 `reasoning_effort`（`qwen3.8-max` 可选 `low`/`medium`/`xhigh`，默认 `xhigh`），legacy hybrid 家族读取 `enable_thinking` 与 `thinking_budget`，对 `reasoning_effort` 为惰性。门面包默认发送 `reasoning_effort`：在 hybrid 家族上无效但不报错，因此不会因为"可能不生效"而丢掉用户配置；`enable_thinking`/`thinking_budget` 通过 `request.extra_body` 传入。注意 `qwen3.8-max` 同时设置 `reasoning_effort` 与 `thinking_budget` 会返回 400，两者只应选其一。
 
 ## MiniMax
 
@@ -505,7 +552,7 @@ cn := minimax.New("MiniMax-M3", minimax.WithBaseURL(minimax.DefaultChinaBaseURL)
 | OpenAI 兼容 | `https://api.minimax.io/v1` | `https://api.minimaxi.com/v1` |
 | Anthropic 兼容 | `https://api.minimax.io/anthropic/v1` | `https://api.minimaxi.com/anthropic/v1` |
 
-M2/M3 系列是推理模型且支持图像输入，M3 额外支持视频输入。生图端点 `/v1/image_generation` 使用 MiniMax 私有 schema，由 `minimax.NewImageModel` 直接实现：
+M2/M3 系列是推理模型且支持图像输入，M3 额外支持视频输入。思考控制在 OpenAI 兼容面上由 `thinking{type}`（`disabled`/`adaptive`）与 `reasoning_split` 表达，通过 `request.extra_body` 传入；MiniMax 未在 Chat Completions schema 中声明 `reasoning_effort`，未识别的采样字段会被忽略而不是报错，因此门面包仍按策略转发用户配置的档位，而不是静默丢弃。生图端点 `/v1/image_generation` 使用 MiniMax 私有 schema，由 `minimax.NewImageModel` 直接实现：
 
 ```go
 img := minimax.NewImageModel("image-01")

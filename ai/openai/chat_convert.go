@@ -12,19 +12,22 @@ import (
 )
 
 // chatRequestFrom translates a portable request into the Chat Completions
-// wire shape.
+// wire shape. It also reports anything the profile could not send as written,
+// so the caller can surface the mismatch instead of losing it.
 //
 //nolint:gocyclo // Each branch is an independently documented wire option.
-func (m *Model) chatRequestFrom(req ai.Request, stream bool) (any, error) {
+func (m *Model) chatRequestFrom(req ai.Request, stream bool) (any, []ai.Warning, error) {
+	warnings := &encodingWarnings{}
+
 	messages, err := chatMessagesFrom(req, m.compat, m.label())
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	providerOptions := requestOptions(req, m.provider)
-	tools, err := chatToolsFrom(req.Tools, m.compat, providerOptions, m.label())
+	tools, err := chatToolsFrom(req.Tools, m.compat, providerOptions, m.label(), warnings)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	out := chatRequest{
@@ -41,7 +44,7 @@ func (m *Model) chatRequestFrom(req ai.Request, stream bool) (any, error) {
 		Stream:           stream,
 	}
 	if m.provider == ai.ProviderOpenAI && req.TopK != nil {
-		return nil, fmt.Errorf("%s: top-k sampling: %w", m.label(), ai.ErrUnsupported)
+		return nil, nil, fmt.Errorf("%s: top-k sampling: %w", m.label(), ai.ErrUnsupported)
 	}
 	out.TopK = req.TopK
 	out.MinP = providerOptions.MinP
@@ -59,7 +62,7 @@ func (m *Model) chatRequestFrom(req ai.Request, stream bool) (any, error) {
 	case MaxTokensFieldCompletion:
 		out.MaxCompletionTokens = req.MaxTokens
 	default:
-		return nil, fmt.Errorf("%s: unsupported max-token field %q", m.label(), m.compat.MaxTokensField)
+		return nil, nil, fmt.Errorf("%s: unsupported max-token field %q", m.label(), m.compat.MaxTokensField)
 	}
 
 	if stream {
@@ -68,7 +71,7 @@ func (m *Model) chatRequestFrom(req ai.Request, stream bool) (any, error) {
 			out.StreamOptions = &chatStreamOptions{IncludeUsage: true}
 		case StreamUsageOmit:
 		default:
-			return nil, fmt.Errorf("%s: unsupported stream-usage mode %q", m.label(), m.compat.StreamUsage)
+			return nil, nil, fmt.Errorf("%s: unsupported stream-usage mode %q", m.label(), m.compat.StreamUsage)
 		}
 	}
 
@@ -91,17 +94,32 @@ func (m *Model) chatRequestFrom(req ai.Request, stream bool) (any, error) {
 			}
 		case StructuredOutputJSONObject:
 			out.ResponseFormat = &chatResponseFormat{Type: "json_object"}
+			if rf.Schema != nil {
+				warnings.downgraded(
+					"response_format",
+					m.label()+": a JSON schema was requested, but this endpoint accepts only json_object",
+				)
+			}
 		case StructuredOutputOmit:
+			warnings.unsupported(
+				"response_format",
+				m.label()+": this endpoint does not implement response_format",
+			)
 		default:
-			return nil, fmt.Errorf("%s: unsupported structured-output mode %q", m.label(), m.compat.StructuredOutput)
+			return nil, nil, fmt.Errorf("%s: unsupported structured-output mode %q", m.label(), m.compat.StructuredOutput)
 		}
 	}
 
 	if err := applyChatReasoning(&out, req.Reasoning, m.compat, m.label()); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	return mergeExtraFields(out, providerOptions.ExtraFields)
+	merged, err := mergeExtraFields(out, providerOptions.ExtraFields)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return merged, warnings.slice(), nil
 }
 
 func applyChatReasoning(out *chatRequest, reasoning *ai.ReasoningConfig, compat Compatibility, label string) error {
@@ -483,6 +501,7 @@ func chatToolsFrom(
 	compat Compatibility,
 	reqOpts RequestOptions,
 	label string,
+	warnings *encodingWarnings,
 ) ([]chatTool, error) {
 	if len(tools) == 0 {
 		return nil, nil
@@ -508,6 +527,11 @@ func chatToolsFrom(
 					ai.ErrUnsupported,
 				)
 			case BuiltinToolsStrip:
+				warnings.unsupported(
+					tool.Name,
+					label+": this endpoint does not implement provider-hosted tools, so the tool was omitted",
+				)
+
 				continue
 			case BuiltinToolsAllow:
 				return nil, fmt.Errorf(

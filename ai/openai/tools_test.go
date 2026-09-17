@@ -192,30 +192,41 @@ func TestOpenAIBuiltinToolsWireResponses(t *testing.T) {
 func TestOpenAIBuiltinToolsGatingModes(t *testing.T) {
 	t.Parallel()
 
-	var capturedBody map[string]any
+	// A fresh endpoint per subtest keeps the captured body local, so the
+	// subtests can run in parallel without sharing mutable state.
+	newEndpoint := func(t *testing.T) (string, func() map[string]any) {
+		t.Helper()
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewDecoder(r.Body).Decode(&capturedBody)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{
-			"id": "resp_123",
-			"model": "test-model",
-			"status": "completed",
-			"output": [{
-				"type": "message",
-				"role": "assistant",
-				"content": [{"type": "output_text", "text": "hello"}]
-			}]
-		}`))
-	}))
-	defer server.Close()
+		var capturedBody map[string]any
 
-	t.Run("BuiltinToolsStrip strips built-in tools silently", func(t *testing.T) {
-		capturedBody = nil
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewDecoder(r.Body).Decode(&capturedBody)
+
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"id": "resp_123",
+				"model": "test-model",
+				"status": "completed",
+				"output": [{
+					"type": "message",
+					"role": "assistant",
+					"content": [{"type": "output_text", "text": "hello"}]
+				}]
+			}`))
+		}))
+		t.Cleanup(server.Close)
+
+		return server.URL, func() map[string]any { return capturedBody }
+	}
+
+	t.Run("BuiltinToolsStrip omits built-in tools and says so", func(t *testing.T) {
+		t.Parallel()
+
+		baseURL, capturedBody := newEndpoint(t)
 
 		model := openai.New("test-model",
 			openai.WithAPIKey("test-key"),
-			openai.WithBaseURL(server.URL),
+			openai.WithBaseURL(baseURL),
 			openai.WithAllowHTTP(),
 			openai.WithAllowPrivateIPs(),
 			openai.WithAPI(openai.APIResponses),
@@ -232,20 +243,30 @@ func TestOpenAIBuiltinToolsGatingModes(t *testing.T) {
 			},
 		}
 
-		_, err := model.Generate(context.Background(), req)
+		response, err := model.Generate(context.Background(), req)
 		require.NoError(t, err)
 
-		rawTools, ok := capturedBody["tools"].([]any)
+		rawTools, ok := capturedBody()["tools"].([]any)
 		require.True(t, ok)
 		require.Len(t, rawTools, 1)
 		t0 := rawTools[0].(map[string]any)
 		assert.Equal(t, "calc", t0["name"])
+
+		// An omitted field must be visible to the caller, not silent
+		// (compatibility policy R5).
+		require.Len(t, response.Warnings, 1)
+		assert.Equal(t, ai.WarningUnsupported, response.Warnings[0].Type)
+		assert.Equal(t, "web_search", response.Warnings[0].Feature)
 	})
 
 	t.Run("BuiltinToolsReject returns ErrUnsupported", func(t *testing.T) {
+		t.Parallel()
+
+		baseURL, _ := newEndpoint(t)
+
 		model := openai.New("test-model",
 			openai.WithAPIKey("test-key"),
-			openai.WithBaseURL(server.URL),
+			openai.WithBaseURL(baseURL),
 			openai.WithAllowHTTP(),
 			openai.WithAllowPrivateIPs(),
 			openai.WithAPI(openai.APIResponses),

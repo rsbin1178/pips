@@ -4,6 +4,7 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"strconv"
 
 	"github.com/rsbin1178/pips/internal/coding/config"
@@ -105,56 +106,7 @@ func newConfigShowCommand(dependencies Dependencies, flags *rootFlags) *cobra.Co
 				),
 				config.FieldApproval: strconv.Quote(string(state.config.Config.Approval)),
 			}
-			extraBytes, err := json.Marshal(resolved.Options.ExtraBody)
-			if err != nil {
-				return fmt.Errorf("coding cli: encode extra_body summary: %w", err)
-			}
-			if _, err := fmt.Fprintf(
-				output,
-				"resolved.protocol = %q\nresolved.base_url = %q # origin=%s\n"+
-					"resolved.context_window = %d\n"+
-					"resolved.extra_body = <redacted> # keys=%d bytes=%d\n",
-				resolved.Protocol,
-				resolved.Endpoint.BaseURL,
-				resolved.Endpoint.Origin,
-				resolved.Limits.ContextWindow,
-				len(resolved.Options.ExtraBody),
-				len(extraBytes),
-			); err != nil {
-				return err
-			}
-			typedOptions := []struct {
-				name  string
-				value string
-			}{
-				{"max_output_tokens", optionalValue(resolved.Options.MaxOutputTokens)},
-				{"temperature", optionalValue(resolved.Options.Temperature)},
-				{"top_p", optionalValue(resolved.Options.TopP)},
-				{"top_k", optionalValue(resolved.Options.TopK)},
-				{"min_p", optionalValue(resolved.Options.MinP)},
-				{"seed", optionalValue(resolved.Options.Seed)},
-				{"frequency_penalty", optionalValue(resolved.Options.FrequencyPenalty)},
-				{"presence_penalty", optionalValue(resolved.Options.PresencePenalty)},
-				{"repetition_penalty", optionalValue(resolved.Options.RepetitionPenalty)},
-				{"stop_count", optionalSliceLength(resolved.Options.Stop)},
-				{"logprobs", optionalValue(resolved.Options.LogProbs)},
-				{"top_logprobs", optionalValue(resolved.Options.TopLogProbs)},
-				{"reasoning_mode", optionalValue(resolved.Options.ReasoningMode)},
-				{"reasoning_budget", optionalValue(resolved.Options.ReasoningBudget)},
-				{"include_reasoning", optionalValue(resolved.Options.IncludeReasoning)},
-			}
-			for _, option := range typedOptions {
-				if _, err := fmt.Fprintf(
-					output,
-					"resolved.request.%s = %s\n",
-					option.name,
-					option.value,
-				); err != nil {
-					return err
-				}
-			}
-
-			if err := writeCapabilityDeclarations(output, resolved.Capabilities); err != nil {
+			if err := writeResolvedModel(output, resolved); err != nil {
 				return err
 			}
 
@@ -179,6 +131,68 @@ func newConfigShowCommand(dependencies Dependencies, flags *rootFlags) *cobra.Co
 			return nil
 		},
 	}
+}
+
+// writeResolvedModel prints the resolved snapshot: protocol and endpoint,
+// every effective typed request option, declared capabilities, and the
+// reasoning level with the encoding that carries it.
+func writeResolvedModel(output io.Writer, resolved modelcatalog.ResolvedModel) error {
+	extraBytes, err := json.Marshal(resolved.Options.ExtraBody)
+	if err != nil {
+		return fmt.Errorf("coding cli: encode extra_body summary: %w", err)
+	}
+
+	if _, err := fmt.Fprintf(
+		output,
+		"resolved.protocol = %q\nresolved.base_url = %q # origin=%s\n"+
+			"resolved.context_window = %d\n"+
+			"resolved.extra_body = <redacted> # keys=%d bytes=%d\n",
+		resolved.Protocol,
+		resolved.Endpoint.BaseURL,
+		resolved.Endpoint.Origin,
+		resolved.Limits.ContextWindow,
+		len(resolved.Options.ExtraBody),
+		len(extraBytes),
+	); err != nil {
+		return err
+	}
+
+	typedOptions := []struct {
+		name  string
+		value string
+	}{
+		{"max_output_tokens", optionalValue(resolved.Options.MaxOutputTokens)},
+		{"temperature", optionalValue(resolved.Options.Temperature)},
+		{"top_p", optionalValue(resolved.Options.TopP)},
+		{"top_k", optionalValue(resolved.Options.TopK)},
+		{"min_p", optionalValue(resolved.Options.MinP)},
+		{"seed", optionalValue(resolved.Options.Seed)},
+		{"frequency_penalty", optionalValue(resolved.Options.FrequencyPenalty)},
+		{"presence_penalty", optionalValue(resolved.Options.PresencePenalty)},
+		{"repetition_penalty", optionalValue(resolved.Options.RepetitionPenalty)},
+		{"stop_count", optionalSliceLength(resolved.Options.Stop)},
+		{"logprobs", optionalValue(resolved.Options.LogProbs)},
+		{"top_logprobs", optionalValue(resolved.Options.TopLogProbs)},
+		{"reasoning_mode", optionalValue(resolved.Options.ReasoningMode)},
+		{"reasoning_budget", optionalValue(resolved.Options.ReasoningBudget)},
+		{"include_reasoning", optionalValue(resolved.Options.IncludeReasoning)},
+	}
+	for _, option := range typedOptions {
+		if _, err := fmt.Fprintf(
+			output,
+			"resolved.request.%s = %s\n",
+			option.name,
+			option.value,
+		); err != nil {
+			return err
+		}
+	}
+
+	if err := writeCapabilityDeclarations(output, resolved.Capabilities); err != nil {
+		return err
+	}
+
+	return writeResolvedReasoning(output, resolved)
 }
 
 func newConfigPathCommand(dependencies Dependencies, flags *rootFlags) *cobra.Command {

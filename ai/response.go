@@ -75,6 +75,11 @@ type Response struct {
 	// Grounding contains query-level grounding details when provided by the model.
 	Grounding *GroundingMetadata
 
+	// Warnings reports anything the adapter did not send exactly as
+	// configured, for example a field the endpoint does not implement. An
+	// empty slice means the request was encoded as written.
+	Warnings []Warning
+
 	// Raw is the provider's response body, untouched. It is an escape hatch
 	// for provider-specific fields; do not parse it in portable code.
 	Raw JSON
