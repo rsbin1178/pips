@@ -9,27 +9,30 @@ import (
 
 // responsesRequestFrom translates a portable request into the Responses wire
 // shape. The system prompt becomes top-level instructions; messages become a
-// flat list of typed input items.
+// flat list of typed input items. Like the Chat Completions converter it
+// reports anything the profile could not send as written.
 //
 //nolint:gocyclo // Unsupported-option checks and wire fields remain auditable together.
-func (m *Model) responsesRequestFrom(req ai.Request, stream bool) (any, error) {
+func (m *Model) responsesRequestFrom(req ai.Request, stream bool) (any, []ai.Warning, error) {
+	warnings := &encodingWarnings{}
+
 	if req.TopK != nil || req.Seed != nil || req.FrequencyPenalty != nil ||
 		req.PresencePenalty != nil || len(req.Stop) != 0 {
-		return nil, fmt.Errorf(
+		return nil, nil, fmt.Errorf(
 			"%s: request option is not supported by Responses: %w",
 			m.label(),
 			ai.ErrUnsupported,
 		)
 	}
 	if req.Reasoning != nil && req.Reasoning.BudgetTokens != 0 {
-		return nil, fmt.Errorf(
+		return nil, nil, fmt.Errorf(
 			"%s: reasoning budget is not supported by Responses: %w",
 			m.label(),
 			ai.ErrUnsupported,
 		)
 	}
 	if req.Reasoning != nil && req.Reasoning.Mode == ai.ReasoningModeAdaptive {
-		return nil, fmt.Errorf(
+		return nil, nil, fmt.Errorf(
 			"%s: adaptive reasoning is not supported by Responses: %w",
 			m.label(),
 			ai.ErrUnsupported,
@@ -38,18 +41,18 @@ func (m *Model) responsesRequestFrom(req ai.Request, stream bool) (any, error) {
 
 	system, conversation, err := req.Messages.SplitSystem()
 	if err != nil {
-		return nil, fmt.Errorf("%s: invalid messages: %w", m.label(), err)
+		return nil, nil, fmt.Errorf("%s: invalid messages: %w", m.label(), err)
 	}
 
 	input, err := responseInputFrom(conversation, m.label())
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	providerOpts := requestOptions(req, m.provider)
-	tools, err := responsesToolsFrom(req.Tools, m.compat, providerOpts, m.label())
+	tools, err := responsesToolsFrom(req.Tools, m.compat, providerOpts, m.label(), warnings)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	out := responsesRequest{
@@ -65,7 +68,7 @@ func (m *Model) responsesRequestFrom(req ai.Request, stream bool) (any, error) {
 	}
 	if req.LogProbs != nil {
 		if !req.LogProbs.Enabled {
-			return nil, fmt.Errorf(
+			return nil, nil, fmt.Errorf(
 				"%s: disabling logprobs is not supported by Responses: %w",
 				m.label(),
 				ai.ErrUnsupported,
@@ -106,7 +109,12 @@ func (m *Model) responsesRequestFrom(req ai.Request, stream bool) (any, error) {
 		}
 	}
 
-	return mergeExtraFields(out, providerOpts.ExtraFields)
+	merged, err := mergeExtraFields(out, providerOpts.ExtraFields)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return merged, warnings.slice(), nil
 }
 
 func responseInputFrom(msgs ai.Messages, label string) ([]responseItem, error) {
@@ -255,6 +263,7 @@ func responsesToolsFrom(
 	compat Compatibility,
 	reqOpts RequestOptions,
 	label string,
+	warnings *encodingWarnings,
 ) ([]responsesTool, error) {
 	if len(tools) == 0 {
 		return nil, nil
@@ -280,6 +289,11 @@ func responsesToolsFrom(
 					ai.ErrUnsupported,
 				)
 			case BuiltinToolsStrip:
+				warnings.unsupported(
+					tool.Name,
+					label+": this endpoint does not implement provider-hosted tools, so the tool was omitted",
+				)
+
 				continue
 			case BuiltinToolsAllow:
 				t := responsesTool{

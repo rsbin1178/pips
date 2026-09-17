@@ -353,11 +353,45 @@ still validated before a request. For budget-based Anthropic or Gemini models,
 use `reasoning_budgets = { low = 2048, high = 8192 }`; selecting a mapped level
 sends the numeric budget instead of an incompatible native effort enum.
 
+Which wire field carries a reasoning level on an OpenAI-shaped endpoint is a
+property of the provider family, not of the model name. Every reviewed profile
+declares the knob its family reads, and a model that reads a different one
+overrides it by declaration — Pips never dispatches on the model string:
+
+```toml
+[providers.kimi.compatibility]
+chat_reasoning = "reasoning_effort"
+
+[providers.kimi.models."kimi-k2.6".compatibility]
+chat_reasoning = "omit"
+```
+
+Accepted values are `reasoning_effort` (OpenAI-native, Groq, Cerebras,
+Together, Qwen tier-native, Kimi k3, GLM-5.2 and later), `reasoning_object`
+(`reasoning{effort}`: OpenRouter, xAI chat), `deepseek` (`reasoning_effort`
+plus `thinking{type}`), and `omit`. A model layer overrides the provider layer,
+which overrides the reviewed profile. `omit` is reserved for a protocol that
+has no such field at all; it is never a way to say "this model may not read
+it". A configured level is forwarded otherwise, and anything that is *not* sent
+as configured is reported rather than dropped.
+
+Family-specific thinking knobs that are not a portable reasoning level —
+`enable_thinking`/`thinking_budget` on Qwen hybrid models, `thinking{type}` on
+MiniMax and Kimi k2.x — travel through the model's `request.extra_body`.
+
 `pips config show` prints the resolved protocol, endpoint origin, context capacity,
-every effective typed request option, and every declared capability (marked
-`declared`, or `declared advisory` when no consumer reads it yet). Raw
-`extra_body` values stay hidden; only their top-level key count and encoded byte
-count are shown.
+every effective typed request option, the resolved reasoning level and the
+compatibility encoding that carries it (`resolved.reasoning.encoding`), plus a
+`resolved.reasoning.warning` when the profile cannot encode the configured
+selection. It also prints every declared capability (marked `declared`, or
+`declared advisory` when no consumer reads it yet). Raw `extra_body` values
+stay hidden; only their top-level key count and encoded byte count are shown.
+
+`pips doctor` reports the same unencoded selection as a `reasoning warn` line
+and exits successfully: only a `fail` changes the exit code. Doctor diagnoses
+without modifying anything, and it stays runnable on a configuration it cannot
+resolve — it prints `configuration fail` with the reason and next steps instead
+of exiting before it can say what is wrong.
 
 `--trust-workspace` records the canonical workspace identity in `~/.pips` and
 enables project `.pips` Skills/Bundles/MCP plus shared `.agents/skills` for

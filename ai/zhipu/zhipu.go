@@ -25,7 +25,15 @@ func New(model string, opts ...Option) *openai.Model {
 			// Zhipu returns reasoning_content, so continuation echoes that
 			// field rather than a generic reasoning field.
 			ReasoningHistory: openai.ReasoningHistoryContent,
-			BuiltinTools:     openai.BuiltinToolsStrip,
+			// GLM-5.2 and later read a top-level reasoning_effort and map
+			// out-of-ladder values server-side; the 4.x family treats
+			// reasoning_effort as inert. A configured level is forwarded
+			// rather than withheld (compatibility policy R1). GLM-5.3 accepts
+			// only low/high/max and cannot stop thinking, so declare exactly
+			// those reasoning_levels for it; the catalog then rejects any
+			// other selection locally (R2).
+			ChatReasoning: openai.ChatReasoningEffort,
+			BuiltinTools:  openai.BuiltinToolsStrip,
 		}),
 		openai.WithCapabilities(capabilitiesFor(model)),
 	}

@@ -405,6 +405,15 @@ var zhipuProfile = Profile{
 	Compatibility: openai.Compatibility{
 		MaxTokensField:   openai.MaxTokensFieldLegacy,
 		StructuredOutput: openai.StructuredOutputJSONObject,
+		// GLM-5.2 and later read reasoning_effort and map out-of-ladder values
+		// server-side; the 4.x family documents thinking{type} and treats
+		// reasoning_effort as inert. Forwarding is the reviewed default
+		// (compatibility policy R1). GLM-5.3 narrows the accepted values to
+		// low/high/max and no longer allows thinking to be disabled, so a
+		// model configured for it declares exactly those reasoning_levels --
+		// the catalog then rejects any other selection locally, naming the
+		// model (R2).
+		ChatReasoning:    openai.ChatReasoningEffort,
 		ReasoningHistory: openai.ReasoningHistoryContent,
 		BuiltinTools:     openai.BuiltinToolsStrip,
 	},
@@ -450,11 +459,15 @@ var kimiProfile = Profile{
 	APIKeyEnv: []string{"MOONSHOT_API_KEY"},
 	API:       openai.APIChatCompletions,
 	Compatibility: openai.Compatibility{
-		// The reviewed profile cannot vary by model, so it declines reasoning
-		// controls outright rather than sending reasoning_effort to the k2.x
-		// families that do not accept it. Kimi thinking is configured through
-		// request.extra_body instead.
-		ChatReasoning:    openai.ChatReasoningOmit,
+		// kimi-k3 reads a top-level reasoning_effort (low/high/max); the k2.x
+		// families read a thinking object and document reasoning_effort as not
+		// supported, without declaring an error. A configured level is
+		// forwarded either way: it is inert on k2.x, whose thinking knob stays
+		// reachable through request.extra_body, and withholding a user's
+		// explicit selection is not the adapter's call (compatibility policy
+		// R1). A model that reads a different encoding is declared per model
+		// through compatibility.chat_reasoning.
+		ChatReasoning:    openai.ChatReasoningEffort,
 		ReasoningHistory: openai.ReasoningHistoryContent,
 		BuiltinTools:     openai.BuiltinToolsStrip,
 	},
@@ -483,8 +496,15 @@ var qwenProfile = Profile{
 	APIKeyEnv: []string{"DASHSCOPE_API_KEY"},
 	API:       openai.APIChatCompletions,
 	Compatibility: openai.Compatibility{
-		MaxTokensField:   openai.MaxTokensFieldLegacy,
-		ChatReasoning:    openai.ChatReasoningOmit,
+		MaxTokensField: openai.MaxTokensFieldLegacy,
+		// DashScope's tier-native families (qwen3.8, qwen3.7, ...) read
+		// reasoning_effort; the legacy hybrids (qwen-plus, qwq, ...) read
+		// enable_thinking/thinking_budget and treat reasoning_effort as inert.
+		// Forwarding the level is correct for both: no documented failure on
+		// the inert path, and withholding a user's explicit selection is not
+		// the adapter's call (compatibility policy R1). The hybrid knobs stay
+		// reachable through request.extra_body.
+		ChatReasoning:    openai.ChatReasoningEffort,
 		ReasoningHistory: openai.ReasoningHistoryContent,
 		BuiltinTools:     openai.BuiltinToolsStrip,
 	},
@@ -513,7 +533,13 @@ var miniMaxProfile = Profile{
 	APIKeyEnv: []string{"MINIMAX_API_KEY"},
 	API:       openai.APIChatCompletions,
 	Compatibility: openai.Compatibility{
-		ChatReasoning:    openai.ChatReasoningOmit,
+		// MiniMax configures thinking through a thinking object plus
+		// reasoning_split on extra_body; its Chat Completions schema does not
+		// document reasoning_effort, and an unrecognized sampling field is
+		// ignored rather than rejected. A configured level is forwarded anyway
+		// so the user's explicit selection is never silently withheld
+		// (compatibility policy R1/R5).
+		ChatReasoning:    openai.ChatReasoningEffort,
 		ReasoningHistory: openai.ReasoningHistoryContent,
 		BuiltinTools:     openai.BuiltinToolsStrip,
 	},

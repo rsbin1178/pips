@@ -292,3 +292,64 @@ func TestCatalogMergesCapabilityDeclarations(t *testing.T) {
 	require.NotNil(t, cloned.Capabilities.Vision)
 	assert.NotSame(t, resolved.Capabilities.Vision, cloned.Capabilities.Vision)
 }
+
+// TestCatalogResolvesDeclaredReasoningKnob proves the reasoning encoder is
+// declarative: the reviewed profile supplies the provider default and the
+// configuration overrides it per provider or per model, with no model-name
+// dispatch in code (.trellis/spec/backend/provider-compatibility-policy.md R4).
+func TestCatalogResolvesDeclaredReasoningKnob(t *testing.T) {
+	t.Parallel()
+
+	object := openai.ChatReasoningObject
+	omit := openai.ChatReasoningOmit
+	ref := config.ModelRef{Provider: ai.ProviderKimi, Model: "kimi-k2.6"}
+
+	base := config.Config{
+		Model:     ref,
+		Providers: map[ai.Provider]config.ProviderConfig{},
+		Sandbox:   config.SandboxWorkspaceWrite,
+		Approval:  config.ApprovalOnRequest,
+	}
+
+	resolveKnob := func(t *testing.T, cfg config.Config) openai.ChatReasoningFormat {
+		t.Helper()
+
+		catalog, err := modelcatalog.New(cfg)
+		require.NoError(t, err)
+
+		resolved, err := catalog.Resolve(modelcatalog.Selection{Ref: ref})
+		require.NoError(t, err)
+
+		return resolved.Compatibility.ChatReasoning
+	}
+
+	assert.Equal(
+		t,
+		openai.ChatReasoningEffort,
+		resolveKnob(t, base.Clone()),
+		"the reviewed profile supplies the default knob",
+	)
+
+	providerDeclared := base.Clone()
+	providerDeclared.Providers = map[ai.Provider]config.ProviderConfig{
+		ai.ProviderKimi: {Compatibility: config.CompatibilityConfig{ChatReasoning: &object}},
+	}
+	assert.Equal(
+		t,
+		openai.ChatReasoningObject,
+		resolveKnob(t, providerDeclared),
+		"a provider declaration replaces the profile default",
+	)
+
+	modelDeclared := providerDeclared.Clone()
+	modelDeclared.Models = []config.ModelConfig{{
+		Ref:           ref,
+		Compatibility: config.CompatibilityConfig{ChatReasoning: &omit},
+	}}
+	assert.Equal(
+		t,
+		openai.ChatReasoningOmit,
+		resolveKnob(t, modelDeclared),
+		"a model declaration wins over the provider layer",
+	)
+}

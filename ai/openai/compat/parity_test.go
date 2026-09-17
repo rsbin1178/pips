@@ -65,7 +65,53 @@ func TestReviewedProfileFacadeParity(t *testing.T) {
 				assert.Equal(t, reviewed.Provider(), facade.Provider())
 				assert.Equal(t, reviewed.ModelID(), facade.ModelID())
 				assert.Equal(t, reviewed.Capabilities(), facade.Capabilities())
+				// Wire differences are part of the reviewed contract: a
+				// divergence would silently change the fields the coding agent
+				// sends for a built-in provider.
+				assert.Equal(t, reviewed.Compatibility(), facade.Compatibility())
 			})
 		}
+	}
+}
+
+// TestReviewedChatProfilesForwardReasoning pins the reasoning knob each
+// Chat Completions profile encodes. Ability guesses must not turn into a
+// withheld field: ChatReasoningOmit is reserved for a protocol that has no
+// such field at all, and every reviewed chat profile has one
+// (.trellis/spec/backend/provider-compatibility-policy.md R1).
+func TestReviewedChatProfilesForwardReasoning(t *testing.T) {
+	t.Parallel()
+
+	// The knob each provider family actually reads (policy R4).
+	want := map[ai.Provider]openai.ChatReasoningFormat{
+		ai.ProviderDeepSeek:   openai.ChatReasoningDeepSeek,
+		ai.ProviderOpenRouter: openai.ChatReasoningObject,
+		ai.ProviderKimi:       openai.ChatReasoningEffort,
+		ai.ProviderQwen:       openai.ChatReasoningEffort,
+		ai.ProviderMiniMax:    openai.ChatReasoningEffort,
+		ai.ProviderZhipu:      openai.ChatReasoningEffort,
+	}
+
+	for provider, format := range want {
+		profile, ok := compat.Lookup(provider)
+		require.True(t, ok, "provider %q must have a reviewed profile", provider)
+		assert.Equal(t, format, profile.Compatibility.ChatReasoning, "%s must read its own knob", provider)
+	}
+
+	for _, provider := range compat.Providers() {
+		profile, ok := compat.Lookup(provider)
+		require.True(t, ok, "provider %q must have a reviewed profile", provider)
+
+		if profile.API != openai.APIChatCompletions {
+			continue
+		}
+
+		assert.NotEqual(
+			t,
+			openai.ChatReasoningOmit,
+			profile.Compatibility.ChatReasoning,
+			"%s is a Chat Completions profile; withholding a configured level is not its call (policy R1)",
+			provider,
+		)
 	}
 }

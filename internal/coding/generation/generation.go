@@ -100,9 +100,10 @@ func validate(model modelcatalog.ResolvedModel, options config.ModelOptions) err
 				*options.ReasoningMode == config.ReasoningDisabled) {
 			return errors.New("request.reasoning_mode is unsupported by Chat Completions")
 		}
-		if model.Compatibility.ChatReasoning == openai.ChatReasoningOmit && hasReasoning(model, options) {
-			return errors.New("reasoning selection is disabled by compatibility.chat_reasoning=omit")
-		}
+		// A reasoning selection is never rejected here merely because a
+		// provider profile declines to encode it. Ability differences are
+		// forwarded and left to the provider; see
+		// .trellis/spec/backend/provider-compatibility-policy.md (R1).
 	case config.ProtocolAnthropicMessages:
 		if path := firstPresent([]optionPresence{
 			{"request.seed", options.Seed != nil},

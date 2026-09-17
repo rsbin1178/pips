@@ -136,3 +136,10 @@ func (c Compatibility) resolvedChatReasoning() ChatReasoningFormat {
 
 	return c.ChatReasoning
 }
+
+// EffectiveChatReasoning returns the reasoning encoding in effect, resolving
+// the empty field to the adapter default. Reporting code uses it to state what
+// will actually be sent for a configured reasoning level.
+func (c Compatibility) EffectiveChatReasoning() ChatReasoningFormat {
+	return c.resolvedChatReasoning()
+}

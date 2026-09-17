@@ -19,14 +19,19 @@ func newDoctorCommand(dependencies Dependencies, flags *rootFlags) *cobra.Comman
 		Short: "Check coding agent prerequisites",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			state, err := loadCommandState(cmd, dependencies, flags)
+			workspaceState, err := resolveWorkspaceState(cmd.Context(), dependencies, flags)
 			if err != nil {
 				return err
 			}
 
+			state, err := loadResolvedCommandState(cmd, dependencies, flags, workspaceState)
+			if err != nil {
+				return writeDoctorConfigFailure(cmd, workspaceState, err)
+			}
+
 			_, resolved, err := resolveConfiguredModel(state.config.Config)
 			if err != nil {
-				return err
+				return writeDoctorConfigFailure(cmd, state.workspace, err)
 			}
 
 			store, err := credential.NewEnvironmentStore(dependencies.LookupEnv)
@@ -57,12 +62,42 @@ func newDoctorCommand(dependencies Dependencies, flags *rootFlags) *cobra.Comman
 			}
 
 			if line := capabilityDoctorLine(resolved.Capabilities); line != "" {
+				if _, err := fmt.Fprintln(cmd.OutOrStdout(), line); err != nil {
+					return err
+				}
+			}
+
+			if line := reasoningDoctorLine(resolved); line != "" {
 				_, err = fmt.Fprintln(cmd.OutOrStdout(), line)
 			}
 
 			return err
 		},
 	}
+}
+
+// writeDoctorConfigFailure reports the diagnostics gathered before the
+// configuration could not be resolved, then returns the error. Doctor must
+// stay runnable on a broken file: exiting before it prints anything would make
+// the problem undiagnosable (compatibility policy R5).
+func writeDoctorConfigFailure(
+	cmd *cobra.Command,
+	state workspaceState,
+	cause error,
+) error {
+	_, writeErr := fmt.Fprintf(
+		cmd.OutOrStdout(),
+		"workspace ok %q\nconfig_file %q\nconfiguration fail %v\n"+
+			"Next steps: run `pips config show` to inspect the resolved values, then fix the reported key\n",
+		state.workspace.Root(),
+		state.configFile,
+		cause,
+	)
+	if writeErr != nil {
+		return writeErr
+	}
+
+	return cause
 }
 
 func doctorSandboxStatus(
