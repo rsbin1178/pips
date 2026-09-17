@@ -31,7 +31,8 @@ go doc -all github.com/rsbin1178/pips/ai/observability
 | 消息与 Part | `Message`、`Messages`、`SystemMessage`、`UserMessage`、`AssistantMessage`、`ToolMessage`、`Part` 及六种具体 Part | [`message.go`](../../ai/message.go) |
 | 消息构造与边界 | `SystemText`、`UserText`、`AssistantText`、`ToolResultText`、`Messages.SplitSystem`、`UnmarshalMessage`、`CloneMessage`、`MessageParts` | [`content.go`](../../ai/content.go)、[`message_validate.go`](../../ai/message_validate.go)、[`message_json.go`](../../ai/message_json.go) |
 | 生成请求 | `Request`、`LogProbsConfig`、`Ptr` | [`request.go`](../../ai/request.go) |
-| 完整响应 | `Response`、`FinishReason`、`Usage`，以及 `Text`、`Reasoning`、`ToolCalls` 方法 | [`response.go`](../../ai/response.go) |
+| 完整响应 | `Response`（含 `Warnings`）、`FinishReason`、`Usage`，以及 `Text`、`Reasoning`、`ToolCalls` 方法 | [`response.go`](../../ai/response.go) |
+| 兼容性告警 | `Warning`、`WarningType`（`unsupported`/`compatibility`/`deprecated`） | [`warning.go`](../../ai/warning.go) |
 | 流式响应 | `Stream`、`StreamEvent`、`StreamEventType`、`Collect` | [`stream.go`](../../ai/stream.go) |
 | Tool | `Tool`、`ToolChoice`、`ToolChoiceMode` | [`tool.go`](../../ai/tool.go) |
 | JSON Schema | `Schema`、`ParseSchema`、`SchemaFor` | [`tool.go`](../../ai/tool.go)、[`structured.go`](../../ai/structured.go) |

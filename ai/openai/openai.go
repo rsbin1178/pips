@@ -197,6 +197,11 @@ func (m *Model) Provider() ai.Provider { return m.provider }
 // ModelID implements ai.LanguageModel.
 func (m *Model) ModelID() string { return m.model }
 
+// Compatibility returns the wire differences configured on this model. Callers
+// use it to report what the adapter will actually send, for example whether a
+// configured reasoning level is encoded or dropped by the profile.
+func (m *Model) Compatibility() Compatibility { return m.compat }
+
 func (m *Model) label() string {
 	return string(m.provider)
 }

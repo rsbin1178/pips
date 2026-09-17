@@ -89,7 +89,6 @@ func TestCompileRejectsReasoningThatWouldBeDropped(t *testing.T) {
 	include := true
 	xhigh := config.ReasoningLevel(ai.ReasoningXHigh)
 	minimal := config.ReasoningLevel(ai.ReasoningMinimal)
-	high := config.ReasoningLevel(ai.ReasoningHigh)
 
 	tests := []struct {
 		name  string
@@ -131,14 +130,6 @@ func TestCompileRejectsReasoningThatWouldBeDropped(t *testing.T) {
 			},
 		},
 		{
-			name: "chat compatibility omits selected reasoning",
-			model: modelcatalog.ResolvedModel{
-				Ref:      config.ModelRef{Provider: "compatible", Model: "model"},
-				Protocol: config.ProtocolOpenAIChatCompletions, ReasoningLevel: &high,
-				Compatibility: openai.Compatibility{ChatReasoning: openai.ChatReasoningOmit},
-			},
-		},
-		{
 			name: "anthropic legacy mode cannot map xhigh",
 			model: modelcatalog.ResolvedModel{
 				Ref:      config.ModelRef{Provider: ai.ProviderAnthropic, Model: "claude"},
@@ -176,6 +167,55 @@ func TestCompileRejectsReasoningThatWouldBeDropped(t *testing.T) {
 			require.ErrorIs(t, err, generation.ErrInvalid)
 		})
 	}
+}
+
+// TestCompileAllowsReasoningTheProfileDoesNotEncode pins the behavior change
+// from the provider-compatibility policy: a profile that declines to encode
+// reasoning must not block startup. The level still reaches the request so the
+// wire layer can report what it did with it (policy R1/R5).
+func TestCompileAllowsReasoningTheProfileDoesNotEncode(t *testing.T) {
+	t.Parallel()
+
+	level := config.ReasoningLevel(ai.ReasoningHigh)
+	policy, err := generation.Compile(modelcatalog.ResolvedModel{
+		Ref:            config.ModelRef{Provider: "compatible", Model: "model"},
+		Protocol:       config.ProtocolOpenAIChatCompletions,
+		ReasoningLevel: &level,
+		Compatibility:  openai.Compatibility{ChatReasoning: openai.ChatReasoningOmit},
+	})
+	require.NoError(t, err)
+
+	request := ai.Request{}
+	policy(&request)
+	require.NotNil(t, request.Reasoning)
+	assert.Equal(t, ai.ReasoningHigh, request.Reasoning.Effort)
+}
+
+// TestCompileKeepsProtocolShapeRejections guards the hard failures the policy
+// deliberately retains: a field the protocol does not define is a local
+// configuration error, not a provider-ability guess (policy R3).
+func TestCompileKeepsProtocolShapeRejections(t *testing.T) {
+	t.Parallel()
+
+	budget := 4096
+	level := config.ReasoningLevel(ai.ReasoningHigh)
+
+	_, err := generation.Compile(modelcatalog.ResolvedModel{
+		Ref:      config.ModelRef{Provider: ai.ProviderQwen, Model: "qwen3.8-max"},
+		Protocol: config.ProtocolOpenAIChatCompletions, ReasoningLevel: &level,
+		Options: config.ModelOptions{ReasoningBudget: &budget},
+	})
+	require.ErrorIs(t, err, generation.ErrInvalid)
+	assert.Contains(t, err.Error(), "request.reasoning_budget is unsupported by Chat Completions")
+
+	minP := 0.1
+	_, err = generation.Compile(modelcatalog.ResolvedModel{
+		Ref:      config.ModelRef{Provider: ai.ProviderOpenAI, Model: "gpt"},
+		Protocol: config.ProtocolOpenAIResponses,
+		Options:  config.ModelOptions{MinP: &minP},
+	})
+	require.ErrorIs(t, err, generation.ErrInvalid)
+	assert.Contains(t, err.Error(), "request.min_p is unsupported by Responses")
 }
 
 func TestCompileAllowsBudgetMappedGeminiReasoning(t *testing.T) {

@@ -226,10 +226,11 @@ func (r *registry) resolve(selection Selection) (ResolvedModel, error) {
 	if selection.ReasoningOverride != nil {
 		if !slices.Contains(model.ReasoningLevels, *selection.ReasoningOverride) {
 			return ResolvedModel{}, fmt.Errorf(
-				"%w: model %q does not support reasoning level %q",
+				"%w: model %q does not support reasoning level %q; supported levels: %s",
 				ErrInvalid,
 				ref,
 				*selection.ReasoningOverride,
+				supportedReasoningLevels(model.ReasoningLevels),
 			)
 		}
 		reasoning = clonePointer(selection.ReasoningOverride)
@@ -256,6 +257,21 @@ func (r *registry) resolve(selection Selection) (ResolvedModel, error) {
 		ReasoningLevel:   reasoning,
 		ReasoningBudgets: maps.Clone(model.ReasoningBudgets),
 	}, nil
+}
+
+// supportedReasoningLevels renders a model's declared ladder so a rejected
+// selection can name what it would have accepted (compatibility policy R2).
+func supportedReasoningLevels(levels []config.ReasoningLevel) string {
+	if len(levels) == 0 {
+		return "none declared"
+	}
+
+	names := make([]string, 0, len(levels))
+	for _, level := range levels {
+		names = append(names, string(level))
+	}
+
+	return strings.Join(names, ", ")
 }
 
 func (r *registry) List() []Entry {

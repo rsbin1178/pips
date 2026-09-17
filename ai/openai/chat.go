@@ -31,7 +31,7 @@ func (m *Model) Stream(ctx context.Context, req ai.Request) ai.Stream {
 }
 
 func (m *Model) generateChat(ctx context.Context, req ai.Request) (*ai.Response, error) {
-	body, err := m.chatRequestFrom(req, false)
+	body, warnings, err := m.chatRequestFrom(req, false)
 	if err != nil {
 		return nil, err
 	}
@@ -48,12 +48,19 @@ func (m *Model) generateChat(ctx context.Context, req ai.Request) (*ai.Response,
 		return nil, fmt.Errorf("%s: chat completions: %w", m.label(), err)
 	}
 
+	resp.Warnings = warnings
+
 	return resp, nil
 }
 
 func (m *Model) streamChat(ctx context.Context, req ai.Request) ai.Stream {
-	body, err := m.chatRequestFrom(req, true)
-	return m.runStream(ctx, chatPath, "chat completions", body, err, emitChatStream)
+	body, warnings, err := m.chatRequestFrom(req, true)
+
+	emit := func(provider ai.Provider, events eventSource, yield func(ai.StreamEvent, error) bool) {
+		emitChatStream(provider, events, withWarnings(warnings, yield))
+	}
+
+	return m.runStream(ctx, chatPath, "chat completions", body, err, emit)
 }
 
 // chatStreamState tracks what has been emitted so the SSE chunk sequence
