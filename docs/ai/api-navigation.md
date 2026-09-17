@@ -22,6 +22,7 @@ go doc -all github.com/rsbin1178/pips/ai/observability
 | 任务 | 主要符号 | 源码 |
 | --- | --- | --- |
 | 文本模型抽象 | `LanguageModel`、`Provider`、`Capabilities` | [`model.go`](../../ai/model.go)、[`provider.go`](../../ai/provider.go) |
+| 能力声明覆盖 | `CapabilityOverride`、`CapabilityDeclaration`，方法 `Apply`、`Overlay`、`Clone`、`IsZero`、`Declarations` | [`capability.go`](../../ai/capability.go) |
 | 图片生成 | `ImageModel`、`ImageRequest`、`ImageUsage`、`ImageResponse`、`GeneratedImage` | [`image.go`](../../ai/image.go) |
 | 图片编辑/变体/流式 | `ImageEditRequest`、`ImageVariationRequest`、`ImageEditor`、`ImageVariator`、`ImageStreamer`、`ImageStream`、`ImageStreamEvent`、`ImageStreamEventType` | [`image.go`](../../ai/image.go)、[`model.go`](../../ai/model.go) |
 | Embedding | `EmbeddingModel`、`EmbeddingRequest`、`EmbeddingResponse`、`EmbeddingTaskType`、`EmbeddingEncodingFormat` | [`embedding.go`](../../ai/embedding.go) |
@@ -59,7 +60,7 @@ go doc -all github.com/rsbin1178/pips/ai/observability
 
 实现入口：[`openai.go`](../../ai/openai/openai.go)、[`options.go`](../../ai/openai/options.go)、[`compatibility.go`](../../ai/openai/compatibility.go)、[`chat.go`](../../ai/openai/chat.go)、[`responses.go`](../../ai/openai/responses.go)、[`image.go`](../../ai/openai/image.go)、[`image_edit.go`](../../ai/openai/image_edit.go)、[`image_variations.go`](../../ai/openai/image_variations.go)、[`image_stream.go`](../../ai/openai/image_stream.go)、[`embedding.go`](../../ai/openai/embedding.go)。
 
-## `ai/openai/compat`：审阅后的兼容 Profile
+## `ai/openai/compat`：审阅后的兼容 Profile（通用注册表 + 向后兼容）
 
 - Godoc：[`github.com/rsbin1178/pips/ai/openai/compat`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/openai/compat)
 - 源码：[`compat.go`](../../ai/openai/compat/compat.go)
@@ -67,12 +68,13 @@ go doc -all github.com/rsbin1178/pips/ai/observability
 
 | 任务 | 主要符号 |
 | --- | --- |
-| 命名 Profile | `DeepSeek`、`Groq`、`XAI`、`OpenRouter`、`Cerebras`、`Together`、`Mistral` |
-| 构造自定义 Profile | `Profile`、`New` |
-| 构造向量模型 | `Embedding`、`TogetherEmbedding`、`MistralEmbedding` |
-| 构建 Provider 注册表 | `Lookup` |
+| 构建 Provider 注册表 | `Providers`（全部已审阅 provider，稳定排序）、`Lookup` |
+| 构造自定义 Profile | `Profile`、`New`、`Embedding` |
+| 向后兼容的命名构造函数 | `DeepSeek`、`Groq`、`XAI`、`OpenRouter`、`Cerebras`、`Together`、`Mistral`、`Zhipu`、`SiliconFlow`、`Kimi`、`Qwen`、`MiniMax`（已标记 Deprecated） |
 
 Profile 复用 `openai.Model`，但保持真实 `Provider`、凭据环境变量、协议、能力和 wire 差异。Native Bedrock Converse、Vertex AI 等不是 OpenAI compatibility profile。
+
+`Providers` 与 `Lookup` 读取同一份审阅注册表，因此应用（例如 Coding Agent 的内置 provider 目录）应通过 `Providers` 派生内置列表，而不是复制一份 provider 名单。命名构造函数保留以兼容旧代码，新代码请优先使用各厂商独立门面包：`ai/deepseek`、`ai/groq`、`ai/xai`、`ai/openrouter`、`ai/cerebras`、`ai/together`、`ai/mistral`、`ai/zhipu`、`ai/siliconflow`、`ai/kimi`、`ai/qwen`、`ai/minimax`。
 
 ## `ai/anthropic`：Messages API
 
@@ -141,6 +143,163 @@ Profile 复用 `openai.Model`，但保持真实 `Provider`、凭据环境变量�
 
 主要实现：[`cohere.go`](../../ai/cohere/cohere.go)、[`options.go`](../../ai/cohere/options.go)、[`rerank.go`](../../ai/cohere/rerank.go)、[`error.go`](../../ai/cohere/error.go)、[`compat.go`](../../ai/cohere/compat.go)。
 
+## `ai/deepseek`
+
+- Godoc：[`github.com/rsbin1178/pips/ai/deepseek`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/deepseek)
+- 源码：[`ai/deepseek/`](../../ai/deepseek)
+
+DeepSeek 官方模型门面，原生支持 OpenAI 协议与 Anthropic Messages 协议双端点：
+| 任务 | 主要符号 |
+| --- | --- |
+| OpenAI 协议对话/推理 | `New(model, opts...)`（如 `deepseek-flash`, `deepseek-v4-pro`） |
+| Anthropic 协议对话/推理 | `NewAnthropic(model, opts...)`（连接 `https://api.deepseek.com/anthropic`） |
+| 选项配置 | `WithAPIKey`、`WithBaseURL`、`WithHTTPClient`、`WithHeader`、`WithAllowHTTP`、`WithAllowPrivateIPs`、`DefaultBaseURL`、`DefaultAnthropicBaseURL` |
+
+## `ai/groq`
+
+- Godoc：[`github.com/rsbin1178/pips/ai/groq`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/groq)
+- 源码：[`ai/groq/`](../../ai/groq)
+
+Groq 超高速推理门面，原生支持自动能力识别与 Reasoning Format 扩展：
+| 任务 | 主要符号 |
+| --- | --- |
+| 对话模型 | `New(model, opts...)` |
+| 推理格式选项 | `RequestOptions(reasoningFormat)`、`ReasoningFormatParsed`、`ReasoningFormatRaw`、`ReasoningFormatHidden` |
+| 选项配置 | `WithAPIKey`、`WithBaseURL`、`WithHTTPClient`、`WithHeader`、`WithAllowHTTP`、`WithAllowPrivateIPs`、`DefaultBaseURL` |
+
+## `ai/mistral`
+
+- Godoc：[`github.com/rsbin1178/pips/ai/mistral`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/mistral)
+- 源码：[`ai/mistral/`](../../ai/mistral)
+
+Mistral AI 专属门面：
+| 任务 | 主要符号 |
+| --- | --- |
+| 对话模型 | `New(model, opts...)` |
+| 向量嵌入 | `NewEmbeddingModel(model, opts...)` |
+| 选项配置 | `WithAPIKey`、`WithBaseURL`、`WithHTTPClient`、`WithHeader`、`WithAllowHTTP`、`WithAllowPrivateIPs`、`DefaultBaseURL` |
+
+## `ai/xai`
+
+- Godoc：[`github.com/rsbin1178/pips/ai/xai`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/xai)
+- 源码：[`ai/xai/`](../../ai/xai)
+
+xAI (Grok) 专属门面，支持 Responses API 与 Chat Completions 自由切换：
+| 任务 | 主要符号 |
+| --- | --- |
+| 对话/推理模型 | `New(model, opts...)`（默认 Responses API） |
+| 选项配置 | `WithAPI`（`openai.APIResponses` / `openai.APIChatCompletions`）、`WithAPIKey`、`WithBaseURL`、`WithHTTPClient`、`WithHeader`、`WithAllowHTTP`、`WithAllowPrivateIPs`、`DefaultBaseURL` |
+
+## `ai/cerebras`
+
+- Godoc：[`github.com/rsbin1178/pips/ai/cerebras`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/cerebras)
+- 源码：[`ai/cerebras/`](../../ai/cerebras)
+
+Cerebras 专属门面：
+| 任务 | 主要符号 |
+| --- | --- |
+| 对话模型 | `New(model, opts...)` |
+| 选项配置 | `WithAPIKey`、`WithBaseURL`、`WithHTTPClient`、`WithHeader`、`WithAllowHTTP`、`WithAllowPrivateIPs`、`DefaultBaseURL` |
+
+## `ai/zhipu`
+
+- Godoc：[`github.com/rsbin1178/pips/ai/zhipu`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/zhipu)
+- 源码：[`ai/zhipu/`](../../ai/zhipu)
+- 使用说明：[Provider 指南](providers.md)、[重排模型指南](rerank.md)
+
+智谱 AI 专属厂商门面，统一提供 GLM 对话、CogView 文生图、文本嵌入与文本重排：
+| 任务 | 主要符号 |
+| --- | --- |
+| 对话模型 | `New(model, opts...)` |
+| 图片生成 | `NewImageModel(model, opts...)`（CogView-4 / CogView-3-Plus） |
+| 向量嵌入 | `NewEmbeddingModel(model, opts...)` |
+| 文本重排 | `NewRerankModel(model, opts...)`、`DefaultRerankModel` |
+| 选项配置 | `WithAPIKey`、`WithBaseURL`、`WithHTTPClient`、`WithHeader`、`WithAllowHTTP`、`WithAllowPrivateIPs`、`DefaultBaseURL` |
+
+## `ai/together`
+
+- Godoc：[`github.com/rsbin1178/pips/ai/together`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/together)
+- 源码：[`ai/together/`](../../ai/together)
+- 使用说明：[Provider 指南](providers.md)、[重排模型指南](rerank.md)
+
+Together AI 专属厂商门面，统一提供对话、FLUX/SD 文生图、文本嵌入与文本重排：
+| 任务 | 主要符号 |
+| --- | --- |
+| 对话模型 | `New(model, opts...)` |
+| 图片生成 | `NewImageModel(model, opts...)`（FLUX.1、Stable Diffusion 等） |
+| 向量嵌入 | `NewEmbeddingModel(model, opts...)` |
+| 文本重排 | `NewRerankModel(model, opts...)` |
+| 选项配置 | `WithAPIKey`、`WithBaseURL`、`WithHTTPClient`、`WithHeader`、`WithAllowHTTP`、`WithAllowPrivateIPs`、`DefaultBaseURL` |
+
+## `ai/siliconflow`
+
+- Godoc：[`github.com/rsbin1178/pips/ai/siliconflow`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/siliconflow)
+- 源码：[`ai/siliconflow/`](../../ai/siliconflow)
+- 使用说明：[Provider 指南](providers.md)、[重排模型指南](rerank.md)
+
+硅基流动 SiliconFlow 专属厂商门面，统一提供对话、FLUX/SD 文生图、文本嵌入与文本重排：
+| 任务 | 主要符号 |
+| --- | --- |
+| 对话模型 | `New(model, opts...)` |
+| 图片生成 | `NewImageModel(model, opts...)`（FLUX.1、SD3 等） |
+| 向量嵌入 | `NewEmbeddingModel(model, opts...)` |
+| 文本重排 | `NewRerankModel(model, opts...)`、`DefaultRerankModel` |
+| 选项配置 | `WithAPIKey`、`WithBaseURL`、`WithHTTPClient`、`WithHeader`、`WithAllowHTTP`、`WithAllowPrivateIPs`、`DefaultBaseURL` |
+
+## `ai/openrouter`
+
+- Godoc：[`github.com/rsbin1178/pips/ai/openrouter`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/openrouter)
+- 源码：[`ai/openrouter/`](../../ai/openrouter)
+
+OpenRouter 聚合网关门面，一个 OpenAI 兼容端点路由到多家厂商模型：
+| 任务 | 主要符号 |
+| --- | --- |
+| 对话模型 | `New(model, opts...)`（模型为组织前缀 slug，如 `openai/gpt-5.2`） |
+| 归因头 | `WithReferer`（`HTTP-Referer`）、`WithAppTitle`（`X-OpenRouter-Title`） |
+| 选项配置 | `WithAPIKey`、`WithBaseURL`、`WithHTTPClient`、`WithHeader`、`WithAllowHTTP`、`WithAllowPrivateIPs`、`DefaultBaseURL` |
+
+## `ai/kimi`
+
+- Godoc：[`github.com/rsbin1178/pips/ai/kimi`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/kimi)
+- 源码：[`ai/kimi/`](../../ai/kimi)
+
+月之暗面 Kimi（Moonshot AI）门面，OpenAI 兼容对话、工具调用与视觉输入：
+| 任务 | 主要符号 |
+| --- | --- |
+| 对话模型 | `New(model, opts...)`（如 `kimi-k3`、`kimi-k2.6`、`moonshot-v1-128k`） |
+| 区域端点 | `DefaultBaseURL`（国际 `api.moonshot.ai`）、`DefaultChinaBaseURL`（中国 `api.moonshot.cn`） |
+| 选项配置 | `WithAPIKey`、`WithBaseURL`、`WithHTTPClient`、`WithHeader`、`WithAllowHTTP`、`WithAllowPrivateIPs` |
+
+## `ai/qwen`
+
+- Godoc：[`github.com/rsbin1178/pips/ai/qwen`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/qwen)
+- 源码：[`ai/qwen/`](../../ai/qwen)
+
+阿里云百炼 DashScope / Qwen 门面：OpenAI 兼容的对话与文本向量，加上 DashScope 原生的文本重排与异步文生图：
+| 任务 | 主要符号 |
+| --- | --- |
+| 对话模型 | `New(model, opts...)`（如 `qwen3.7-max`、`qwen-plus`、`qwen3-vl-plus`） |
+| 向量嵌入 | `NewEmbeddingModel(model, opts...)`（如 `text-embedding-v4`） |
+| 文本重排 | `NewRerankModel(model, opts...)`（`qwen3-rerank`、`gte-rerank-v2`、`qwen3-vl-rerank`）、`RerankOptions` |
+| 文生图 | `NewImageModel(model, opts...)`（`qwen-image-plus`、`wan2.6-t2i` 等）、`ImageOptions` |
+| 区域端点 | `DefaultBaseURL`（兼容面）、`DefaultChinaBaseURL`、`DefaultUSBaseURL`；`DefaultHTTPAPIURL`（原生面）、`DefaultChinaHTTPAPIURL` |
+| 任务轮询 | `WithPollInterval`（默认 3s）、`WithPollTimeout`（默认 5m） |
+| 选项配置 | `WithAPIKey`、`WithBaseURL`、`WithHTTPClient`、`WithHeader`、`WithAllowHTTP`、`WithAllowPrivateIPs` |
+
+## `ai/minimax`
+
+- Godoc：[`github.com/rsbin1178/pips/ai/minimax`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/minimax)
+- 源码：[`ai/minimax/`](../../ai/minimax)
+
+MiniMax 门面，同时提供 OpenAI 兼容对话、Anthropic 兼容 Messages 与私有 schema 生图：
+| 任务 | 主要符号 |
+| --- | --- |
+| OpenAI 兼容对话 | `New(model, opts...)`（如 `MiniMax-M3`） |
+| Anthropic 兼容对话 | `NewAnthropic(model, opts...)` |
+| 图片生成 | `NewImageModel(model, opts...)`（`image-01`）、`ImageOptions`、`SubjectReference` |
+| 区域端点 | `DefaultBaseURL` / `DefaultChinaBaseURL`、`DefaultAnthropicBaseURL` / `DefaultChinaAnthropicBaseURL` |
+| 选项配置 | `WithAPIKey`、`WithBaseURL`、`WithHTTPClient`、`WithHeader`、`WithAllowHTTP`、`WithAllowPrivateIPs` |
+
 ## `ai/middleware/retry`
 
 - Godoc：[`github.com/rsbin1178/pips/ai/middleware/retry`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/middleware/retry)
@@ -156,6 +315,13 @@ Profile 复用 `openai.Model`，但保持真实 `Provider`、凭据环境变量�
 - 使用说明：[Rate Limit 中间件](errors-middleware-observability.md#rate-limit-中间件)
 
 公开入口：`New`、`Option`、`WithRPM`、`WithTPM`。这是进程内客户端限流，不是分布式配额服务。
+
+## `ai/middleware/capability`
+
+- Godoc：[`github.com/rsbin1178/pips/ai/middleware/capability`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/middleware/capability)
+- 源码：[`capability.go`](../../ai/middleware/capability/capability.go)
+
+公开入口：`New(ai.CapabilityOverride) ai.Middleware`。它只覆盖被包装模型的 `Capabilities()`，`Generate`、`Stream`、`Provider`、`ModelID` 原样透传；零值 override 返回原模型，因此可以无条件挂链。Coding Agent 用它把用户声明的能力叠加到适配器自带的能力表之上。
 
 ## `ai/observability`
 

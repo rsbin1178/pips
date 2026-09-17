@@ -24,12 +24,24 @@
 | 包 | 用途 |
 | --- | --- |
 | [`ai`](https://pkg.go.dev/github.com/rsbin1178/pips/ai) | Provider 中立接口、请求、响应、流、Tools、Schema、错误与中间件组合 |
-| [`ai/openai`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/openai) | OpenAI Chat Completions、Responses、图片和 Embeddings |
-| [`ai/openai/compat`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/openai/compat) | 七个经过审阅的 OpenAI 兼容服务配置 |
+| [`ai/openai`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/openai) | OpenAI 原生 Chat Completions、Responses、图片和 Embeddings |
 | [`ai/anthropic`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/anthropic) | Anthropic Messages、流式响应、Tools、结构化输出、Prompt Cache 与 Token Counting |
 | [`ai/gemini`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/gemini) | Gemini generateContent、流式响应、图片、Embeddings、缓存与 Token Counting |
-| [`ai/agnes`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/agnes) | Agnes Image API 的文生图与图生图/多图合成（单一端点，档位 + ratio） |
+| [`ai/deepseek`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/deepseek) | DeepSeek 官方对话与深度思考（reasoner）模型 |
+| [`ai/groq`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/groq) | Groq 高速推理引擎（Llama、Qwen、DeepSeek 等模型） |
+| [`ai/mistral`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/mistral) | Mistral AI 对话与嵌入模型 |
+| [`ai/xai`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/xai) | xAI (Grok) 对话与推理模型 |
+| [`ai/cerebras`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/cerebras) | Cerebras 超高速推理引擎 |
+| [`ai/zhipu`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/zhipu) | 智谱 AI 统一厂商门面（GLM 对话、向量嵌入与文本重排） |
+| [`ai/together`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/together) | Together AI 统一厂商门面（开源模型对话、向量嵌入与文本重排） |
+| [`ai/siliconflow`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/siliconflow) | 硅基流动 SiliconFlow 统一厂商门面（开源模型对话、向量嵌入与文本重排） |
+| [`ai/openrouter`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/openrouter) | OpenRouter 聚合网关（OpenAI 兼容对话，模型 slug 路由） |
+| [`ai/kimi`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/kimi) | 月之暗面 Kimi（OpenAI 兼容对话、工具调用、视觉输入；国际/中国双端点） |
+| [`ai/qwen`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/qwen) | 阿里云百炼 DashScope / Qwen（OpenAI 兼容对话与文本向量 + 原生文本重排与异步文生图） |
+| [`ai/minimax`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/minimax) | MiniMax（OpenAI 兼容对话 + Anthropic 兼容 Messages + 私有 schema 文生图） |
 | [`ai/cohere`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/cohere) | Cohere 原生及兼容重排模型（Rerank Models） |
+| [`ai/agnes`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/agnes) | Agnes Image API 的文生图与图生图/多图合成（单一端点，档位 + ratio） |
+| [`ai/openai/compat`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/openai/compat) | 通用自建/第三方 OpenAI 兼容 Profile 与向后兼容适配 |
 | [`ai/middleware/retry`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/middleware/retry) | 有边界的指数退避重试 |
 | [`ai/middleware/ratelimit`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/middleware/ratelimit) | 客户端 RPM/TPM 限流 |
 | [`ai/observability`](https://pkg.go.dev/github.com/rsbin1178/pips/ai/observability) | 与遥测后端无关的调用生命周期 Hooks |

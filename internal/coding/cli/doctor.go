@@ -52,6 +52,13 @@ func newDoctorCommand(dependencies Dependencies, flags *rootFlags) *cobra.Comman
 				credential.APIKeyEnv,
 				sandboxStatus,
 			)
+			if err != nil {
+				return err
+			}
+
+			if line := capabilityDoctorLine(resolved.Capabilities); line != "" {
+				_, err = fmt.Fprintln(cmd.OutOrStdout(), line)
+			}
 
 			return err
 		},

@@ -181,10 +181,29 @@ func (c *Client) PostMultipart(ctx context.Context, path string, headers http.He
 
 // post sends one encoded payload and decodes the 2xx response body into out.
 func (c *Client) post(ctx context.Context, path string, headers http.Header, contentType string, payload []byte, out any, decodeErr ErrorDecoder) ([]byte, error) {
-	resp, err := c.send(ctx, path, headers, contentType, payload) //nolint:bodyclose // closed by drainClose below
+	resp, err := c.send(ctx, http.MethodPost, path, headers, contentType, payload) //nolint:bodyclose // closed by readJSON
 	if err != nil {
 		return nil, err
 	}
+
+	return c.readJSON(resp, out, decodeErr)
+}
+
+// GetJSON executes a GET request and decodes the 2xx response body into out.
+// Non-2xx responses are passed to decodeErr. Task-based provider APIs use it
+// to poll a previously submitted job.
+func (c *Client) GetJSON(ctx context.Context, path string, headers http.Header, out any, decodeErr ErrorDecoder) ([]byte, error) {
+	resp, err := c.send(ctx, http.MethodGet, path, headers, "", nil) //nolint:bodyclose // closed by readJSON
+	if err != nil {
+		return nil, err
+	}
+
+	return c.readJSON(resp, out, decodeErr)
+}
+
+// readJSON drains and decodes one response, mapping non-2xx status through
+// decodeErr.
+func (c *Client) readJSON(resp *http.Response, out any, decodeErr ErrorDecoder) ([]byte, error) {
 	defer drainClose(resp.Body)
 
 	raw, err := io.ReadAll(resp.Body)
@@ -240,7 +259,7 @@ func (c *Client) postStream(ctx context.Context, path string, headers http.Heade
 	headers = headers.Clone()
 	headers.Set("Accept", "text/event-stream")
 
-	resp, err := c.send(ctx, path, headers, contentType, payload) //nolint:bodyclose // closed on error paths here; success body is returned to the adapter, which owns closing it
+	resp, err := c.send(ctx, http.MethodPost, path, headers, contentType, payload) //nolint:bodyclose // closed on error paths here; success body is returned to the adapter, which owns closing it
 	if err != nil {
 		return nil, err
 	}
@@ -313,7 +332,7 @@ func writeFormFile(writer *multipart.Writer, file FormFile) error {
 	return nil
 }
 
-func (c *Client) send(ctx context.Context, path string, headers http.Header, contentType string, payload []byte) (*http.Response, error) {
+func (c *Client) send(ctx context.Context, method, path string, headers http.Header, contentType string, payload []byte) (*http.Response, error) {
 	if c.initErr != nil {
 		return nil, c.initErr
 	}
@@ -325,12 +344,19 @@ func (c *Client) send(ctx context.Context, path string, headers http.Header, con
 		u.RawQuery = query
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(payload))
+	var body io.Reader
+	if len(payload) > 0 {
+		body = bytes.NewReader(payload)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, u.String(), body)
 	if err != nil {
 		return nil, err
 	}
 
-	req.Header.Set("Content-Type", contentType)
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
 
 	maps.Copy(req.Header, headers)
 	// Config-level headers win over adapter headers.

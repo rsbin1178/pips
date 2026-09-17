@@ -25,7 +25,7 @@ func (m *Model) Generate(ctx context.Context, req ai.Request) (*ai.Response, err
 		return nil, fmt.Errorf("anthropic: messages: %w", err)
 	}
 
-	return responseFrom(parsed, raw), nil
+	return responseFrom(m.provider, parsed, raw), nil
 }
 
 // Stream implements ai.LanguageModel.
@@ -46,6 +46,6 @@ func (m *Model) Stream(ctx context.Context, req ai.Request) ai.Stream {
 		}
 		defer stream.Close() //nolint:errcheck // best-effort cleanup
 
-		newStreamDecoder().emit(newSSEParser(stream, m.client.MaxStreamLineSize()), yield)
+		newStreamDecoder(m.provider).emit(newSSEParser(stream, m.client.MaxStreamLineSize()), yield)
 	}
 }

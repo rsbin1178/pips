@@ -3,7 +3,7 @@ package anthropic
 import "github.com/rsbin1178/pips/ai"
 
 // responseFrom translates a Messages response body into the portable shape.
-func responseFrom(body messagesResponse, raw []byte) *ai.Response {
+func responseFrom(provider ai.Provider, body messagesResponse, raw []byte) *ai.Response {
 	msg := ai.AssistantMessage{}
 
 	for _, block := range body.Content {
@@ -15,7 +15,7 @@ func responseFrom(body messagesResponse, raw []byte) *ai.Response {
 	return &ai.Response{
 		ID:           body.ID,
 		Model:        body.Model,
-		Provider:     ai.ProviderAnthropic,
+		Provider:     provider,
 		Message:      msg,
 		FinishReason: finishReasonFrom(body.StopReason),
 		Usage:        usageFrom(body.Usage),
