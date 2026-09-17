@@ -271,12 +271,16 @@ type ProviderConfig struct {
 	AllowHTTP       bool
 	AllowPrivateIPs bool
 	Compatibility   CompatibilityConfig
+	// Capabilities is the provider-wide capability declaration. Models inherit
+	// it field by field; see ModelConfig.Capabilities.
+	Capabilities ai.CapabilityOverride
 }
 
 // Clone returns a fully detached provider definition.
 func (p ProviderConfig) Clone() ProviderConfig {
 	cloned := p
 	cloned.Compatibility = p.Compatibility.Clone()
+	cloned.Capabilities = p.Capabilities.Clone()
 
 	return cloned
 }
@@ -365,6 +369,7 @@ type ModelConfig struct {
 	ReasoningBudgets      map[ReasoningLevel]int
 	DefaultVariant        string
 	Compatibility         CompatibilityConfig
+	Capabilities          ai.CapabilityOverride
 	Options               ModelOptions
 	Variants              map[string]VariantConfig
 }
@@ -421,6 +426,7 @@ func DefaultSubagentConfig() SubagentConfig {
 func (m ModelConfig) Clone() ModelConfig {
 	cloned := m
 	cloned.Compatibility = m.Compatibility.Clone()
+	cloned.Capabilities = m.Capabilities.Clone()
 	cloned.ReasoningLevels = slices.Clone(m.ReasoningLevels)
 	cloned.DefaultReasoningLevel = clonePointer(m.DefaultReasoningLevel)
 	cloned.ReasoningBudgets = maps.Clone(m.ReasoningBudgets)
@@ -909,10 +915,16 @@ func validateRegistry(c Config) error {
 				return err
 			}
 		}
+		if err := validateToolDeclaration(definition.Capabilities, "provider "+string(provider)); err != nil {
+			return err
+		}
 	}
 
 	for _, model := range c.Models {
 		if err := validateModel(model); err != nil {
+			return err
+		}
+		if err := validateToolDeclaration(model.Capabilities, "model "+model.Ref.String()); err != nil {
 			return err
 		}
 		key := model.Ref.String()
@@ -920,6 +932,18 @@ func validateRegistry(c Config) error {
 			return fmt.Errorf("%w: duplicate model %q", ErrInvalid, key)
 		}
 		seen[key] = struct{}{}
+	}
+
+	return nil
+}
+
+// validateToolDeclaration rejects an explicit tools = false declaration. pips
+// is a tool-driven coding agent: without native tool calling it cannot read,
+// search, or edit a workspace. Rejecting the declaration up front keeps the
+// agent from sending a tool roster a model cannot accept.
+func validateToolDeclaration(capabilities ai.CapabilityOverride, scope string) error {
+	if capabilities.Tools != nil && !*capabilities.Tools {
+		return fmt.Errorf("%w: %s declares tools = false; pips requires native tool calling", ErrInvalid, scope)
 	}
 
 	return nil

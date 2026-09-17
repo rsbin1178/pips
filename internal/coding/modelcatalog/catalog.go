@@ -54,6 +54,7 @@ type ResolvedModel struct {
 	Endpoint         Endpoint
 	Limits           Limits
 	Compatibility    openai.Compatibility
+	Capabilities     ai.CapabilityOverride
 	Options          config.ModelOptions
 	Variant          string
 	ReasoningLevels  []config.ReasoningLevel
@@ -65,6 +66,7 @@ type ResolvedModel struct {
 func (m ResolvedModel) Clone() ResolvedModel {
 	cloned := m
 	cloned.Options = m.Options.Clone()
+	cloned.Capabilities = m.Capabilities.Clone()
 	cloned.ReasoningLevels = slices.Clone(m.ReasoningLevels)
 	cloned.ReasoningLevel = clonePointer(m.ReasoningLevel)
 	cloned.ReasoningBudgets = maps.Clone(m.ReasoningBudgets)
@@ -104,6 +106,7 @@ type providerDefinition struct {
 	endpoint      Endpoint
 	protocol      config.Protocol
 	compatibility openai.Compatibility
+	capabilities  ai.CapabilityOverride
 }
 
 // New validates the complete local registry and returns a network-free
@@ -197,6 +200,9 @@ func (r *registry) resolve(selection Selection) (ResolvedModel, error) {
 	if openAIShaped {
 		compatibility = model.Compatibility.Resolve(provider.compatibility)
 	}
+	// Capability declarations are presence-aware, so a model layer overrides
+	// only the fields it declares and inherits the rest from the provider.
+	capabilities := provider.capabilities.Overlay(model.Capabilities)
 
 	variantName := selection.Variant
 	if variantName == "" {
@@ -243,6 +249,7 @@ func (r *registry) resolve(selection Selection) (ResolvedModel, error) {
 		Endpoint:         provider.endpoint,
 		Limits:           Limits{ContextWindow: model.ContextWindow},
 		Compatibility:    compatibility,
+		Capabilities:     capabilities,
 		Options:          options,
 		Variant:          variantName,
 		ReasoningLevels:  slices.Clone(model.ReasoningLevels),
@@ -282,15 +289,10 @@ func resolveProviders(overrides map[ai.Provider]config.ProviderConfig) (map[ai.P
 			protocol: config.ProtocolGeminiGenerateContent,
 		},
 	}
-	for _, provider := range []ai.Provider{
-		ai.ProviderDeepSeek,
-		ai.ProviderGroq,
-		ai.ProviderXAI,
-		ai.ProviderOpenRouter,
-		ai.ProviderCerebras,
-		ai.ProviderTogether,
-		ai.ProviderMistral,
-	} {
+	// Every reviewed OpenAI-shaped profile in the ai layer is selectable as a
+	// built-in provider. Deriving the set from compat.Providers keeps this
+	// registry from drifting when the ai layer reviews a new provider.
+	for _, provider := range compat.Providers() {
 		profile, ok := compat.Lookup(provider)
 		if !ok {
 			return nil, fmt.Errorf("%w: missing reviewed profile %q", ErrInvalid, provider)
@@ -316,6 +318,7 @@ func resolveProviders(overrides map[ai.Provider]config.ProviderConfig) (map[ai.P
 		definition.endpoint.AllowHTTP = override.AllowHTTP
 		definition.endpoint.AllowPrivateIPs = override.AllowPrivateIPs
 		definition.compatibility = override.Compatibility.Resolve(definition.compatibility)
+		definition.capabilities = definition.capabilities.Overlay(override.Capabilities)
 		openAIShaped := config.IsOpenAIProtocol(definition.protocol)
 		if !openAIShaped && !reflect.DeepEqual(override.Compatibility, config.CompatibilityConfig{}) {
 			return nil, fmt.Errorf("%w: provider %q compatibility requires an OpenAI protocol", ErrInvalid, provider)

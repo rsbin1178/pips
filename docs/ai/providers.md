@@ -4,16 +4,28 @@
 
 ## 快速选择
 
-| 构造器 | 原生协议 | 默认密钥环境变量 | 额外接口 |
+| 构造器 | 原生协议 / 能力 | 默认密钥环境变量 | 额外接口与说明 |
 | --- | --- | --- | --- |
-| `openai.New` | Chat Completions 或 Responses | `OPENAI_API_KEY` | 独立图片（含 `ai.ImageEditor`、`ai.ImageVariator`、`ai.ImageStreamer`）、Embedding 构造器 |
+| `openai.New` | OpenAI 原生协议（Chat / Responses） | `OPENAI_API_KEY` | 独立图片（含 `ai.ImageEditor`、`ai.ImageVariator`、`ai.ImageStreamer`）、Embedding 构造器 |
 | `anthropic.New` | Messages | `ANTHROPIC_API_KEY` | `ai.TokenCounter` |
 | `gemini.New` | generateContent / streamGenerateContent | `GEMINI_API_KEY`，其次 `GOOGLE_API_KEY` | `ai.TokenCounter`、独立图片、Embedding 构造器 |
+| `deepseek.New` / `deepseek.NewAnthropic` | DeepSeek 原生服务（OpenAI & Anthropic 双协议） | `DEEPSEEK_API_KEY` | 支持最新 `deepseek-flash`、`deepseek-v4-pro`；支持 OpenAI 格式与 `/anthropic` Messages 格式 |
+| `groq.New` | Groq 高速推理 | `GROQ_API_KEY` | Llama、Qwen、DeepSeek 等极速推理，按模型自动识别能力，支持 `groq.RequestOptions` 设置 reasoning_format |
+| `mistral.New` | Mistral 原生服务 | `MISTRAL_API_KEY` | 对话及独立向量构造器（`mistral.NewEmbeddingModel`） |
+| `xai.New` | xAI (Grok) 服务 | `XAI_API_KEY` | 默认 Responses 原生协议，可配置 `xai.WithAPI(openai.APIChatCompletions)` 切换 |
+| `cerebras.New` | Cerebras 超高速推理 | `CEREBRAS_API_KEY` | 超高吞吐推理引擎，自动识别模型能力 |
+| `zhipu.New` | 智谱 BigModel 统一门面 | `ZHIPU_API_KEY` | 统一收口：`ai.LanguageModel`、`ai.EmbeddingModel`、`ai.RerankModel`、`ai.ImageModel`（CogView） |
+| `together.New` | Together AI 统一门面 | `TOGETHER_API_KEY` | 统一收口：`ai.LanguageModel`、`ai.EmbeddingModel`、`ai.RerankModel`、`ai.ImageModel`（FLUX/SD） |
+| `siliconflow.New` | SiliconFlow 统一门面 | `SILICONFLOW_API_KEY` | 统一收口：`ai.LanguageModel`、`ai.EmbeddingModel`、`ai.RerankModel`、`ai.ImageModel`（FLUX/SD） |
+| `openrouter.New` | OpenRouter 聚合网关（OpenAI 兼容） | `OPENROUTER_API_KEY` | 仅对话；模型用组织前缀 slug（如 `openai/gpt-5.2`）；`WithReferer`/`WithAppTitle` 设置归因头 |
+| `kimi.New` | Moonshot AI / Kimi（OpenAI 兼容） | `MOONSHOT_API_KEY` | 对话、工具调用、视觉输入；`DefaultChinaBaseURL` 切换国内端点 |
+| `qwen.New` / `qwen.NewEmbeddingModel` / `qwen.NewRerankModel` / `qwen.NewImageModel` | 阿里云百炼 DashScope | `DASHSCOPE_API_KEY` | 对话 + 文本向量（OpenAI 兼容）；文本重排与异步文生图走 DashScope 原生端点；多区域端点 |
+| `minimax.New` / `minimax.NewAnthropic` / `minimax.NewImageModel` | MiniMax | `MINIMAX_API_KEY` | OpenAI 兼容对话 + Anthropic 兼容 Messages + 私有 schema 文生图 |
+| `cohere.NewRerankModel` | Cohere Rerank (`/v1/rerank`) | `COHERE_API_KEY` | 原生重排：`ai.RerankModel` |
 | `agnes.NewImageModel` | Agnes Images | `AGNES_API_KEY` | 图片：`ai.ImageModel` + `ai.ImageEditor`（无流式/变体） |
-| `cohere.NewRerankModel` | Cohere Rerank (`/v1/rerank`) | `COHERE_API_KEY` | 重排：`ai.RerankModel`（含 SiliconFlow/Jina/Together 兼容构造器） |
-| `compat.*` | 审阅后的 OpenAI 形状协议 | Profile 专用变量 | 返回 `*openai.Model` |
+| `compat.New` | 通用自建/第三方 OpenAI 兼容网关 | Profile 专用变量 | 通过自定义 `compat.Profile` 连接私有网关、vLLM 或代理服务 |
 
-三个原生文本模型构造器均返回不可变、可并发复用的对象，且把配置错误延迟到首次调用。生产启动检查若需要立即失败，应主动执行一个受控 Smoke Test，而不是假定 `New` 会验证凭据。
+各原生与门面构造器均返回不可变、可并发复用的对象，且把配置错误延迟到首次调用。生产启动检查若需要立即失败，应主动执行一个受控 Smoke Test，而不是假定 `New` 会验证凭据。
 
 ## OpenAI
 
@@ -325,6 +337,193 @@ embeddings := gemini.NewEmbeddingModel("gemini-embedding-001")
 Embedding 使用 batch endpoint，因此多个输入在一个请求中发送，并按返回顺序输出。支持映射 `TaskType`（如 `RETRIEVAL_QUERY`、`RETRIEVAL_DOCUMENT` 等）与语料 `Title`。
 
 Gemini 构造选项包括 `WithAPIKey`、`WithBaseURL`、`WithHTTPClient`、`WithHeader`、`WithProvider`、`WithAllowHTTP`、`WithAllowPrivateIPs` 和 `WithMaxStreamLineSize`。
+
+## DeepSeek
+
+`ai/deepseek` 提供 DeepSeek 官方模型的专属门面。DeepSeek 官方已升级为 `deepseek-flash` 与 `deepseek-v4-pro`（内置混合思考，支持 reasoning 与非 reasoning 切换）。
+
+DeepSeek 官方提供两个原生协议入口：
+1. **OpenAI 兼容端点**（`https://api.deepseek.com`）：通过 `deepseek.New` 构造，支持 Prompt Caching、JSON Mode 与原生推理提取。
+2. **Anthropic Messages 兼容端点**（`https://api.deepseek.com/anthropic`）：通过 `deepseek.NewAnthropic` 构造，为 Claude 生态客户端提供完整的 Messages 格式支持。
+
+```go
+// 方式 1: OpenAI wire 协议（默认端点 https://api.deepseek.com）
+model := deepseek.New("deepseek-flash")
+
+// 方式 2: Anthropic Messages wire 协议（默认端点 https://api.deepseek.com/anthropic）
+claudeModel := deepseek.NewAnthropic("deepseek-v4-pro")
+```
+
+## Groq
+
+`ai/groq` 提供 Groq 超低延迟推理加速。内置根据模型名称（`vision`, `scout`, `qwen`, `deepseek`）自动推断多模态视觉与推理思考能力。
+
+针对思考模型（如 `deepseek-r1-distill-llama-70b`），Groq API 支持 `reasoning_format` 参数控制推理内容返回格式（`parsed`、`raw`、`hidden`）。可通过 `groq.RequestOptions` 轻松注入：
+
+```go
+model := groq.New("deepseek-r1-distill-llama-70b")
+
+resp, err := model.Generate(ctx, ai.Request{
+	Messages: []ai.Message{ai.UserText("Solve the puzzle")},
+	ProviderOptions: map[ai.Provider]any{
+		ai.ProviderGroq: groq.RequestOptions(groq.ReasoningFormatParsed),
+	},
+})
+```
+
+## xAI (Grok)
+
+`ai/xai` 提供 xAI 官方 Grok 系列模型的专属门面。默认使用 xAI 推荐的 `APIResponses`（原生端点 `/v1/responses`），保留加密 reasoning 状态；如需传统 Chat Completions，可通过 `xai.WithAPI` 自主选择：
+
+```go
+// 默认走 Responses API
+model := xai.New("grok-2-1212")
+
+// 显式指定走 Chat Completions API
+chatModel := xai.New("grok-2-1212", xai.WithAPI(openai.APIChatCompletions))
+```
+
+## 智谱 AI (Zhipu)
+
+`ai/zhipu` 统一收口智谱 BigModel 全产品线：
+- **对话模型**：`zhipu.New("glm-4-plus")`
+- **文生图模型**：`zhipu.NewImageModel("cogview-4")`（调用 `/images/generations` 端点，支持 CogView-4 与 CogView-3-Plus）
+- **向量嵌入**：`zhipu.NewEmbeddingModel("embedding-3")`
+- **文本重排**：`zhipu.NewRerankModel("rerank")`
+
+```go
+chat := zhipu.New("glm-4-plus")
+img := zhipu.NewImageModel("cogview-4")
+emb := zhipu.NewEmbeddingModel("embedding-3")
+rerank := zhipu.NewRerankModel("") // 默认使用 "rerank"
+```
+
+## Together AI 与 SiliconFlow
+
+`ai/together` 与 `ai/siliconflow` 为开源模型汇聚平台提供统一的四位一体能力门面：
+- 对话模型：`together.New(...)` / `siliconflow.New(...)`
+- 文生图模型：`together.NewImageModel(...)` / `siliconflow.NewImageModel(...)`（基于 FLUX.1、Stable Diffusion 等）
+- 向量模型：`together.NewEmbeddingModel(...)` / `siliconflow.NewEmbeddingModel(...)`
+- 重排模型：`together.NewRerankModel(...)` / `siliconflow.NewRerankModel(...)`
+
+## OpenRouter
+
+`ai/openrouter` 通过一个 OpenAI 兼容的 Chat Completions 端点路由到其模型目录。模型使用带组织前缀的 slug（`openai/gpt-5.2`、`anthropic/claude-sonnet-4.6`）。
+
+```go
+model := openrouter.New("openai/gpt-5.2",
+	openrouter.WithReferer("https://example.com"), // 可选：HTTP-Referer
+	openrouter.WithAppTitle("My App"),             // 可选：X-OpenRouter-Title
+)
+```
+
+Base URL 为 `https://openrouter.ai/api/v1`，鉴权为 `Authorization: Bearer $OPENROUTER_API_KEY`。OpenRouter 会归一化各家模型的 `choices`/`finish_reason`，并忽略所选模型不支持的采样参数。它提供的是对话路由，没有独立的向量或重排端点。
+
+## Kimi（Moonshot AI）
+
+`ai/kimi` 对接月之暗面 Kimi 开放平台的 OpenAI 兼容 Chat Completions API，支持流式、工具调用与视觉输入。
+
+```go
+model := kimi.New("kimi-k3")                 // 国际端点 https://api.moonshot.ai/v1
+cnModel := kimi.New("kimi-k2.6", kimi.WithBaseURL(kimi.DefaultChinaBaseURL))
+```
+
+密钥环境变量为 `MOONSHOT_API_KEY`。国内端点 `https://api.moonshot.cn/v1`（`kimi.DefaultChinaBaseURL`）与国际端点的账号和密钥互不通用，用错站点会返回 401。`kimi-k3` 使用顶层 `reasoning_effort`（`low`/`high`/`max`）；部分模型把思考开关放在 `extra_body` 的 `thinking` 字段，可按需通过 `request.extra_body` 传入。平台没有任何向量、重排或生图端点。
+
+## 阿里云百炼 DashScope / Qwen
+
+`ai/qwen` 覆盖 DashScope 的 OpenAI 兼容面：对话与文本向量共用同一个 base URL。
+
+```go
+chat := qwen.New("qwen3.7-max")
+emb := qwen.NewEmbeddingModel("text-embedding-v4")   // 支持 dimensions
+cn := qwen.New("qwen-plus", qwen.WithBaseURL(qwen.DefaultChinaBaseURL))
+```
+
+密钥环境变量为 `DASHSCOPE_API_KEY`。区域端点：
+
+| 区域 | Base URL |
+| --- | --- |
+| 国际（新加坡，默认） | `qwen.DefaultBaseURL` = `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` |
+| 中国（北京） | `qwen.DefaultChinaBaseURL` = `https://dashscope.aliyuncs.com/compatible-mode/v1` |
+| 美国（弗吉尼亚） | `qwen.DefaultUSBaseURL` = `https://dashscope-us.aliyuncs.com/compatible-mode/v1` |
+
+兼容面之外的 DashScope 能力由本包的专用适配器补齐。
+
+**文本重排**：`qwen.NewRerankModel` 走 DashScope 原生端点
+`services/rerank/text-rerank/text-rerank`，支持 `qwen3-rerank`、`gte-rerank-v2`、`qwen3-vl-rerank`。原生 API base 为 `qwen.DefaultHTTPAPIURL`（国际）或 `qwen.DefaultChinaHTTPAPIURL`（中国），与对话用的 compatible-mode base 不同。
+
+```go
+rerank := qwen.NewRerankModel("qwen3-rerank")
+
+resp, err := rerank.Rerank(ctx, ai.RerankRequest{
+	Query:           "什么是重排序模型",
+	Documents:       documents,
+	TopN:            ai.Ptr(5),
+	ReturnDocuments: true,
+	ProviderOptions: map[ai.Provider]any{
+		ai.ProviderQwen: qwen.RerankOptions{Instruct: "Retrieve relevant passages."},
+	},
+})
+```
+
+`Instruct` 只对 `qwen3-rerank` 与 `qwen3-vl-rerank` 生效。分数是本次请求内的相对值，不能跨请求比较。
+
+**文生图（异步任务）**：`qwen.NewImageModel` 提交任务后轮询到终态。
+
+```go
+img := qwen.NewImageModel("qwen-image-plus")
+
+resp, err := img.GenerateImages(ctx, ai.ImageRequest{
+	Prompt: "一只在窗台上晒太阳的猫",
+	Size:   "1664x928", // 适配器会转成 DashScope 的 "1664*928"
+	N:      1,
+})
+```
+
+- `wan2.6-*` 自动改用 messages 形状的提交端点（`services/aigc/image-generation/generation`），其余模型（`qwen-image*`、`wan2.5`/`wan2.2`/`wan2.1`/`wanx2.0`）走 `services/aigc/text2image/image-synthesis`。
+- 两种结果形状（`output.results[].url` 与 `output.choices[].message.content[].image`）都会被解析；`actual_prompt` 回填为 `RevisedPrompt`。
+- 结果 URL 有效期 24 小时，适配器不替你下载。
+- `qwen.WithPollInterval`（默认 3s）与 `qwen.WithPollTimeout`（默认 5m）控制轮询；调用方 context 自带 deadline 时以调用方为准。任务失败时返回带 sentinel 的 `*ai.Error`。
+
+`gte-rerank-v2` 官方公告将于 2026-05-30 下线，建议改用 `qwen3-rerank`。多模态向量仍只支持 DashScope 原生接口，不在本包内；思考控制（`enable_thinking`、`thinking_budget`）走扩展字段，可用 `request.extra_body` 传入。
+
+## MiniMax
+
+`ai/minimax` 同时提供两种协议，MiniMax 官方推荐 Anthropic 兼容路由用于高级模型特性：
+
+```go
+chat := minimax.New("MiniMax-M3")                  // POST /v1/chat/completions
+messages := minimax.NewAnthropic("MiniMax-M3")     // POST /anthropic/v1/messages
+cn := minimax.New("MiniMax-M3", minimax.WithBaseURL(minimax.DefaultChinaBaseURL))
+```
+
+密钥环境变量为 `MINIMAX_API_KEY`。区域端点：
+
+| 协议 | 国际（默认） | 中国 |
+| --- | --- | --- |
+| OpenAI 兼容 | `https://api.minimax.io/v1` | `https://api.minimaxi.com/v1` |
+| Anthropic 兼容 | `https://api.minimax.io/anthropic/v1` | `https://api.minimaxi.com/anthropic/v1` |
+
+M2/M3 系列是推理模型且支持图像输入，M3 额外支持视频输入。生图端点 `/v1/image_generation` 使用 MiniMax 私有 schema，由 `minimax.NewImageModel` 直接实现：
+
+```go
+img := minimax.NewImageModel("image-01")
+
+resp, err := img.GenerateImages(ctx, ai.ImageRequest{
+	Prompt: "一只在窗台上晒太阳的猫",
+	Size:   "16:9", // 含 ":" 作为 aspect_ratio，含 "x" 作为 width/height
+	N:      2,
+	ProviderOptions: map[ai.Provider]any{
+		ai.ProviderMiniMax: minimax.ImageOptions{ResponseFormat: "base64"},
+	},
+})
+```
+
+- `Size` 的 aspect_ratio 枚举为 `1:1`/`16:9`/`4:3`/`3:2`/`2:3`/`3:4`/`9:16`/`21:9`；`WxH` 形式要求每边 512..2048 且能被 8 整除。非法值在本地就以 `ai.ErrInvalidRequest` 失败。
+- `N` 上限为 9。`minimax.ImageOptions` 还支持 `PromptOptimizer`、`Watermark`、`Seed` 与 `SubjectReference`（图生图人像参考）。
+- `base_resp.status_code != 0` 会转成带 sentinel 的 `*ai.Error`：`1002`→`ErrRateLimited`，`1004`/`2049`→`ErrAuth`，`1008`/`1026`/`2013`→`ErrInvalidRequest`。MiniMax 用 HTTP 200 返回这些业务码，因此不能只看状态行。
+- `ResponseFormat` 为 `url`（默认）时返回有效期 24 小时的链接；为 `base64` 时直接返回 JPEG 字节，`MIMEType` 为 `image/jpeg`。
 
 ## ProviderOptions 与 ExtraFields
 

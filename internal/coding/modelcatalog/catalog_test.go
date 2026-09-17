@@ -5,6 +5,7 @@ import (
 
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/ai/openai"
+	"github.com/rsbin1178/pips/ai/openai/compat"
 	"github.com/rsbin1178/pips/internal/coding/config"
 	"github.com/rsbin1178/pips/internal/coding/modelcatalog"
 	"github.com/stretchr/testify/assert"
@@ -211,4 +212,83 @@ func TestCatalogEndpointValidationMatrix(t *testing.T) {
 			require.NoError(t, err)
 		})
 	}
+}
+
+// TestCatalogResolvesEveryReviewedCompatProvider locks the coding agent's
+// built-in provider registry to the ai layer's reviewed compat profiles. If the
+// ai layer reviews a new provider without it becoming selectable here, this
+// fails instead of surfacing later as "provider is not configured".
+func TestCatalogResolvesEveryReviewedCompatProvider(t *testing.T) {
+	t.Parallel()
+
+	reviewed := compat.Providers()
+	require.NotEmpty(t, reviewed)
+
+	for _, provider := range reviewed {
+		t.Run(string(provider), func(t *testing.T) {
+			t.Parallel()
+
+			profile, ok := compat.Lookup(provider)
+			require.True(t, ok)
+
+			cfg := config.Config{
+				Model:     config.ModelRef{Provider: provider, Model: "reviewed-model"},
+				Providers: map[ai.Provider]config.ProviderConfig{},
+				Sandbox:   config.SandboxWorkspaceWrite,
+				Approval:  config.ApprovalOnRequest,
+			}
+			catalog, err := modelcatalog.New(cfg)
+			require.NoError(t, err)
+
+			resolved, err := catalog.Resolve(modelcatalog.Selection{Ref: cfg.Model})
+			require.NoError(t, err)
+			assert.Equal(t, "built-in", resolved.Endpoint.Origin)
+			assert.Equal(t, profile.BaseURL, resolved.Endpoint.BaseURL)
+		})
+	}
+}
+
+func TestCatalogMergesCapabilityDeclarations(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Config{
+		Model: config.ModelRef{Provider: ai.ProviderOpenAI, Model: "gpt-vision"},
+		Models: []config.ModelConfig{{
+			Ref: config.ModelRef{Provider: ai.ProviderOpenAI, Model: "gpt-vision"},
+			Capabilities: ai.CapabilityOverride{
+				Vision:           ai.Ptr(false),
+				StructuredOutput: ai.Ptr(true),
+			},
+		}},
+		Providers: map[ai.Provider]config.ProviderConfig{
+			ai.ProviderOpenAI: {
+				Capabilities: ai.CapabilityOverride{
+					Vision: ai.Ptr(true),
+					Tools:  ai.Ptr(true),
+				},
+			},
+		},
+		Sandbox:  config.SandboxWorkspaceWrite,
+		Approval: config.ApprovalOnRequest,
+	}
+	catalog, err := modelcatalog.New(cfg)
+	require.NoError(t, err)
+
+	resolved, err := catalog.Resolve(modelcatalog.Selection{Ref: cfg.Model})
+	require.NoError(t, err)
+
+	require.NotNil(t, resolved.Capabilities.Vision)
+	assert.False(t, *resolved.Capabilities.Vision, "the model layer overrides the provider layer")
+
+	require.NotNil(t, resolved.Capabilities.Tools)
+	assert.True(t, *resolved.Capabilities.Tools, "the provider layer is inherited")
+
+	require.NotNil(t, resolved.Capabilities.StructuredOutput)
+	assert.True(t, *resolved.Capabilities.StructuredOutput)
+
+	assert.Nil(t, resolved.Capabilities.Reasoning, "nothing declares reasoning")
+
+	cloned := resolved.Clone()
+	require.NotNil(t, cloned.Capabilities.Vision)
+	assert.NotSame(t, resolved.Capabilities.Vision, cloned.Capabilities.Vision)
 }

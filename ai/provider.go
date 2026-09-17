@@ -6,20 +6,24 @@ type Provider string
 
 // Known providers.
 const (
-	ProviderOpenAI     Provider = "openai"
-	ProviderAnthropic  Provider = "anthropic"
-	ProviderGemini     Provider = "gemini"
-	ProviderAgnes      Provider = "agnes"
-	ProviderDeepSeek   Provider = "deepseek"
-	ProviderGroq       Provider = "groq"
-	ProviderXAI        Provider = "xai"
-	ProviderOpenRouter Provider = "openrouter"
-	ProviderCerebras   Provider = "cerebras"
-	ProviderTogether   Provider = "together"
-	ProviderMistral    Provider = "mistral"
-	ProviderCohere     Provider = "cohere"
-	ProviderJina       Provider = "jina"
+	ProviderOpenAI      Provider = "openai"
+	ProviderAnthropic   Provider = "anthropic"
+	ProviderGemini      Provider = "gemini"
+	ProviderAgnes       Provider = "agnes"
+	ProviderDeepSeek    Provider = "deepseek"
+	ProviderGroq        Provider = "groq"
+	ProviderXAI         Provider = "xai"
+	ProviderOpenRouter  Provider = "openrouter"
+	ProviderCerebras    Provider = "cerebras"
+	ProviderTogether    Provider = "together"
+	ProviderMistral     Provider = "mistral"
+	ProviderCohere      Provider = "cohere"
+	ProviderJina        Provider = "jina"
 	ProviderSiliconFlow Provider = "siliconflow"
+	ProviderZhipu       Provider = "zhipu"
+	ProviderKimi        Provider = "kimi"
+	ProviderQwen        Provider = "qwen"
+	ProviderMiniMax     Provider = "minimax"
 )
 
 // Capabilities reports, best effort, what a specific model supports. It is

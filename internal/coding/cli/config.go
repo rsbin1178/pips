@@ -154,6 +154,10 @@ func newConfigShowCommand(dependencies Dependencies, flags *rootFlags) *cobra.Co
 				}
 			}
 
+			if err := writeCapabilityDeclarations(output, resolved.Capabilities); err != nil {
+				return err
+			}
+
 			for _, field := range config.Fields() {
 				source, ok := state.config.Config.Source(field)
 				if !ok {

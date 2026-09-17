@@ -4,7 +4,7 @@
 1. **初筛（粗排）**：利用向量检索（`ai.EmbeddingModel`）或关键词检索（BM25）从海量语料快速召回 Top-50~100 候选；
 2. **精排（重排）**：利用交叉编码器（Cross-Encoder，`ai.RerankModel`）对 `(query, document)` 计算全注意力交互分数，输出高相关性的 Top-3~10 文档，显著提升相关性并降低大模型上下文噪音。
 
-Pips 在 `ai` 包中定义了 Provider 中立的 `ai.RerankModel` 接口，并通过 `ai/cohere` 原生适配器支持 Cohere 官方服务及各大主流 Cohere 兼容生态（SiliconFlow、Jina AI、Together AI、自建 vLLM / TEI 等）。
+Pips 在 `ai` 包中定义了 Provider 中立的 `ai.RerankModel` 接口。`ai/cohere` 覆盖 Cohere 官方服务及各大主流 Cohere 兼容生态（SiliconFlow、Jina AI、Together AI、智谱 AI、自建 vLLM / TEI 等）；`ai/qwen` 单独适配阿里云百炼 DashScope 的原生重排协议。
 
 ---
 
@@ -91,11 +91,44 @@ model := cohere.JinaRerank("jina-reranker-v3.5")
 ```
 
 ### 3. Together AI
-默认连接 `https://api.together.xyz/v1`，读取 `TOGETHER_API_KEY`：
+默认连接 `https://api.together.ai/v1`，读取 `TOGETHER_API_KEY`：
 
 ```go
 model := cohere.TogetherRerank("Salesforce/Llama-Rank-v1")
 ```
+
+### 4. 智谱 AI（Zhipu AI）
+通过专门的 `ai/zhipu` 厂商包调用，默认连接 `https://open.bigmodel.cn/api/paas/v4` 并读取 `ZHIPU_API_KEY`（模型 ID 默认为 `"rerank"`）：
+
+```go
+import "github.com/rsbin1178/pips/ai/zhipu"
+
+model := zhipu.NewRerankModel("rerank")
+```
+
+### 5. 阿里云百炼 DashScope / Qwen
+
+DashScope 的重排不是 Cohere 形状：它走原生端点
+`services/rerank/text-rerank/text-rerank`，请求体使用 `input` / `parameters` 包裹，因此由 `ai/qwen` 单独适配，而不再复用 `ai/cohere`。
+
+```go
+import "github.com/rsbin1178/pips/ai/qwen"
+
+model := qwen.NewRerankModel("qwen3-rerank")
+
+resp, err := model.Rerank(ctx, ai.RerankRequest{
+	Query:           "什么是重排序模型",
+	Documents:       documents,
+	TopN:            ai.Ptr(5),
+	ReturnDocuments: true,
+	ProviderOptions: map[ai.Provider]any{
+		ai.ProviderQwen: qwen.RerankOptions{Instruct: "Retrieve relevant passages."},
+	},
+})
+```
+
+默认连接 `qwen.DefaultHTTPAPIURL`（国际）并读取 `DASHSCOPE_API_KEY`；中国区域用
+`qwen.WithBaseURL(qwen.DefaultChinaHTTPAPIURL)`。支持 `qwen3-rerank`、`gte-rerank-v2` 与 `qwen3-vl-rerank`（多模态文档需要 DashScope 的 `input.documents` 对象形式，本包目前只发送纯文本字符串数组）。`Instruct` 仅对 `qwen3-rerank` 与 `qwen3-vl-rerank` 生效。
 
 ---
 
