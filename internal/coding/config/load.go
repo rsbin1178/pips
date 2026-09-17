@@ -192,6 +192,7 @@ type fileProvider struct {
 	AllowHTTP       *bool                `toml:"allow_http"`
 	AllowPrivateIPs *bool                `toml:"allow_private_ips"`
 	Compatibility   fileCompatibility    `toml:"compatibility"`
+	Capabilities    fileCapabilities     `toml:"capabilities"`
 	Models          map[string]fileModel `toml:"models"`
 }
 
@@ -204,6 +205,7 @@ type fileModel struct {
 	ReasoningBudgets      map[string]int         `toml:"reasoning_budgets"`
 	DefaultVariant        *string                `toml:"default_variant"`
 	Compatibility         fileCompatibility      `toml:"compatibility"`
+	Capabilities          fileCapabilities       `toml:"capabilities"`
 	Request               fileOptions            `toml:"request"`
 	Variants              map[string]fileVariant `toml:"variants"`
 }
@@ -239,6 +241,49 @@ type fileCompatibility struct {
 	ChatReasoning             *string `toml:"chat_reasoning"`
 	ReasoningHistory          *string `toml:"reasoning_history"`
 	IncludeEncryptedReasoning *bool   `toml:"include_encrypted_reasoning"`
+}
+
+// fileCapabilities is the presence-aware TOML shape of a capability
+// declaration. Every field is optional; an absent key inherits the layer
+// below it, which keeps an explicit false distinct from "not declared".
+type fileCapabilities struct {
+	Text             *bool `toml:"text"`
+	Vision           *bool `toml:"vision"`
+	Documents        *bool `toml:"documents"`
+	AudioInput       *bool `toml:"audio_input"`
+	VideoInput       *bool `toml:"video_input"`
+	Tools            *bool `toml:"tools"`
+	StructuredOutput *bool `toml:"structured_output"`
+	Reasoning        *bool `toml:"reasoning"`
+	ImageGeneration  *bool `toml:"image_generation"`
+	Embeddings       *bool `toml:"embeddings"`
+	Reranking        *bool `toml:"reranking"`
+	PromptCaching    *bool `toml:"prompt_caching"`
+	TokenCounting    *bool `toml:"token_counting"`
+	WebSearch        *bool `toml:"web_search"`
+	CodeExecution    *bool `toml:"code_execution"`
+}
+
+// decodeCapabilities translates the TOML shape into the portable override.
+// Every field is presence-aware, so no validation can fail here.
+func decodeCapabilities(value fileCapabilities) ai.CapabilityOverride {
+	return ai.CapabilityOverride{
+		Text:             value.Text,
+		Vision:           value.Vision,
+		Documents:        value.Documents,
+		AudioInput:       value.AudioInput,
+		VideoInput:       value.VideoInput,
+		Tools:            value.Tools,
+		StructuredOutput: value.StructuredOutput,
+		Reasoning:        value.Reasoning,
+		ImageGeneration:  value.ImageGeneration,
+		Embeddings:       value.Embeddings,
+		Reranking:        value.Reranking,
+		PromptCaching:    value.PromptCaching,
+		TokenCounting:    value.TokenCounting,
+		WebSearch:        value.WebSearch,
+		CodeExecution:    value.CodeExecution,
+	}
 }
 
 func loadFile(path string) (fileLayer, FileState, error) {
@@ -676,6 +721,7 @@ func decodeProvider(value fileProvider) (ProviderConfig, error) {
 		return ProviderConfig{}, err
 	}
 	result.Compatibility = compatibility
+	result.Capabilities = decodeCapabilities(value.Capabilities)
 
 	return result, nil
 }
@@ -731,6 +777,7 @@ func decodeModel(provider ai.Provider, modelID string, value fileModel) (ModelCo
 	if err != nil {
 		return ModelConfig{}, false, err
 	}
+	result.Capabilities = decodeCapabilities(value.Capabilities)
 	result.Options, err = decodeOptions(value.Request)
 	if err != nil {
 		return ModelConfig{}, false, err

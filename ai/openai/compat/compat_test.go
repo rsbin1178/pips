@@ -41,6 +41,7 @@ func TestNamedProfiles(t *testing.T) {
 		{"cerebras", ai.ProviderCerebras, compat.Cerebras, "/v1/chat/completions"},
 		{"together", ai.ProviderTogether, compat.Together, "/v1/chat/completions"},
 		{"mistral", ai.ProviderMistral, compat.Mistral, "/v1/chat/completions"},
+		{"zhipu", ai.ProviderZhipu, compat.Zhipu, "/v1/chat/completions"},
 	}
 
 	for _, tc := range profiles {
@@ -344,5 +345,15 @@ func TestCompatEmbedding(t *testing.T) {
 
 		assert.Equal(t, ai.ProviderMistral, emb.Provider())
 		assert.Equal(t, "mistral-embed", emb.ModelID())
+	})
+
+	t.Run("zhipu helper", func(t *testing.T) {
+		t.Parallel()
+
+		emb := compat.ZhipuEmbedding("embedding-3",
+			openai.WithAPIKey("zhipu-key"))
+
+		assert.Equal(t, ai.ProviderZhipu, emb.Provider())
+		assert.Equal(t, "embedding-3", emb.ModelID())
 	})
 }

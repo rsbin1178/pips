@@ -313,6 +313,36 @@ typed request options. Pips does not contact a remote model catalog; only the
 current model and locally configured nested model tables appear in `/model`.
 Unknown model capacity remains unknown rather than being guessed.
 
+Capabilities are declared, never fetched. Pips ships no model capability
+database; declare what a model supports on the provider (inherited by its
+models) or on a single model:
+
+```toml
+[providers.zhipu.capabilities]
+tools = true
+
+[providers.zhipu.models."glm-4v-plus".capabilities]
+vision = true
+reasoning = true
+structured_output = false
+```
+
+Every field is optional and presence-aware: a declared `false` is distinct
+from "not declared", and a model overrides only the fields it declares. The
+available names are `text`, `vision`, `documents`, `audio_input`,
+`video_input`, `tools`, `structured_output`, `reasoning`, `image_generation`,
+`embeddings`, `reranking`, `prompt_caching`, `token_counting`, `web_search`,
+and `code_execution`. An unknown name fails configuration loading.
+
+Declarations layer on top of whatever the protocol adapter already reports for
+the bound model, so a third-party model the adapter only knows as plain chat
+can still be declared vision-capable. Two declarations change runtime behavior
+today: `vision` gates image attachments in the composer, and
+`structured_output` selects a native JSON Schema response format for subagents
+instead of prompt-only JSON. Other declarations are accepted and reported as
+`advisory` by `pips config show` until a consumer reads them. `tools = false`
+is rejected, because Pips requires native tool calling.
+
 `context_window` is local context-capacity metadata. Request output is
 configured only with a model or variant `request.max_output_tokens`; that value
 is compiled into the provider request and may be overridden by an explicit
@@ -324,8 +354,10 @@ use `reasoning_budgets = { low = 2048, high = 8192 }`; selecting a mapped level
 sends the numeric budget instead of an incompatible native effort enum.
 
 `pips config show` prints the resolved protocol, endpoint origin, context capacity,
-and every effective typed request option. Raw `extra_body` values stay hidden;
-only their top-level key count and encoded byte count are shown.
+every effective typed request option, and every declared capability (marked
+`declared`, or `declared advisory` when no consumer reads it yet). Raw
+`extra_body` values stay hidden; only their top-level key count and encoded byte
+count are shown.
 
 `--trust-workspace` records the canonical workspace identity in `~/.pips` and
 enables project `.pips` Skills/Bundles/MCP plus shared `.agents/skills` for

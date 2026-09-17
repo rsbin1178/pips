@@ -39,9 +39,9 @@ func emitStream(events eventSource, yield func(ai.StreamEvent, error) bool) {
 }
 
 type streamState struct {
-	startSent bool
-	endSent   bool
-	finish    ai.FinishReason
+	startSent     bool
+	endSent       bool
+	finish        ai.FinishReason
 	usage         *ai.Usage
 	grounding     *ai.GroundingMetadata
 	seenCitations map[string]bool

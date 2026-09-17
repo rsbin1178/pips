@@ -15,6 +15,7 @@ import (
 // Thinking blocks emit thinking_delta then signature_delta; tool_use blocks
 // emit input_json_delta.
 type streamDecoder struct {
+	provider  ai.Provider
 	blockKind map[int]blockKind
 	toolIndex map[int]int // content-block index -> ai tool-call index
 	nextTool  int
@@ -36,8 +37,9 @@ const (
 	blockToolUse
 )
 
-func newStreamDecoder() *streamDecoder {
+func newStreamDecoder(provider ai.Provider) *streamDecoder {
 	return &streamDecoder{
+		provider:  provider,
 		blockKind: make(map[int]blockKind),
 		toolIndex: make(map[int]int),
 	}
@@ -88,7 +90,7 @@ func (d *streamDecoder) handle(env streamEnvelope, yield func(ai.StreamEvent, er
 			msg = env.Error.Message
 		}
 
-		yield(ai.StreamEvent{}, streamErrorFrom(env.Error, msg))
+		yield(ai.StreamEvent{}, streamErrorFrom(d.provider, env.Error, msg))
 
 		return false
 	default:
@@ -127,7 +129,7 @@ func (d *streamDecoder) usage() *ai.Usage {
 }
 
 func (d *streamDecoder) handleMessageStart(env streamEnvelope, yield func(ai.StreamEvent, error) bool) bool {
-	ev := ai.StreamEvent{Type: ai.StreamMessageStart, Provider: ai.ProviderAnthropic}
+	ev := ai.StreamEvent{Type: ai.StreamMessageStart, Provider: d.provider}
 	if env.Message != nil {
 		ev.ID = env.Message.ID
 		ev.Model = env.Message.Model
@@ -234,8 +236,8 @@ func errType(e *streamError) string {
 // streamErrorFrom builds an *ai.Error for a mid-stream error event, wrapping
 // the class sentinel that matches Anthropic's error type so errors.Is works
 // the same as on the HTTP-status path (e.g. overloaded_error → ErrOverloaded).
-func streamErrorFrom(e *streamError, msg string) error {
-	apiErr := &ai.Error{Provider: ai.ProviderAnthropic, Type: errType(e), Message: msg}
+func streamErrorFrom(provider ai.Provider, e *streamError, msg string) error {
+	apiErr := &ai.Error{Provider: provider, Type: errType(e), Message: msg}
 
 	switch errType(e) {
 	case "overloaded_error", "api_error":
