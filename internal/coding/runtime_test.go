@@ -383,11 +383,19 @@ func TestRuntimeBatchesAgentNotificationsForSameRoot(t *testing.T) {
 
 	model := newRuntimeModel(runtimeTextResponse("both completions handled"))
 	runtime := openTestRuntime(t, model)
+
+	// The coordinator wakes on every signal, including the one its own startup
+	// raises. A wakeup landing between the two Enqueues delivers the first
+	// notification alone and the second in a later batch: correct delivery, but
+	// not the batching this test is about. Park the coordinator, make the
+	// pending set atomic, then let one wakeup claim it.
+	require.NoError(t, runtime.stopNotificationCoordinator(t.Context()))
+
 	first := testAgentNotification(runtime, "s-child-batch-1", "root-batch")
 	second := testAgentNotification(runtime, "s-child-batch-2", "root-batch")
 	require.NoError(t, runtime.notifications.Enqueue(first))
 	require.NoError(t, runtime.notifications.Enqueue(second))
-	runtime.signalNotifications()
+	runtime.startNotificationCoordinator(t.Context())
 
 	require.Eventually(t, func() bool {
 		pending, err := runtime.notifications.Pending()
@@ -399,6 +407,29 @@ func TestRuntimeBatchesAgentNotificationsForSameRoot(t *testing.T) {
 	assert.True(t, requestContainsText(requests[0], first.AgentID))
 	assert.True(t, requestContainsText(requests[0], second.AgentID))
 	assert.Equal(t, []int{0}, runtime.Snapshot().SyntheticMessages)
+}
+
+// TestNextNotificationBatchGroupsOneRoot pins the batching rule itself, with no
+// dependence on when the coordinator happens to wake: one claim takes every
+// pending notification of the first root, in order, and leaves other roots for
+// a later claim.
+func TestNextNotificationBatchGroupsOneRoot(t *testing.T) {
+	t.Parallel()
+
+	model := newRuntimeModel(runtimeTextResponse("unused"))
+	runtime := openTestRuntime(t, model)
+	first := testAgentNotification(runtime, "s-batch-1", "root-a")
+	second := testAgentNotification(runtime, "s-batch-2", "root-a")
+	other := testAgentNotification(runtime, "s-batch-3", "root-b")
+
+	batch := runtime.nextNotificationBatch([]subagent.Notification{first, second, other})
+
+	assert.Equal(t, []string{"s-batch-1", "s-batch-2"}, notificationIDs(batch))
+
+	// The other root is claimed on its own once the first batch is delivered.
+	assert.Equal(t, []string{"s-batch-3"}, notificationIDs(
+		runtime.nextNotificationBatch([]subagent.Notification{other}),
+	))
 }
 
 func TestRuntimeQueuesAgentNotificationIntoMatchingActiveInteraction(t *testing.T) {
