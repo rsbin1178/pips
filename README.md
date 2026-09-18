@@ -256,3 +256,12 @@ make p0-verify
 ```
 
 Contributions via [Issues](https://github.com/rsbin1178/pips/issues) and Pull Requests are welcome.
+
+---
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE).
+
+Copyright 2026 rsbin1178. See [NOTICE](NOTICE) for attribution and
+third-party component licensing.
