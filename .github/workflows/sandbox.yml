@@ -68,9 +68,48 @@ jobs:
           uname -a
           go version
           bwrap --version
+      - name: Probe Linux sandbox host
+        id: sandbox
+        run: |
+          if ! command -v bwrap >/dev/null 2>&1; then
+            echo "::error title=bubblewrap missing::bubblewrap is not on PATH, so the sandbox runtime install step failed"
+            exit 1
+          fi
+
+          bwrap_bin=$(command -v bwrap)
+          echo "apparmor_restrict_unprivileged_userns=$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo absent)"
+
+          # The real-sandbox leg asserts two host properties: bubblewrap can
+          # create its namespaces at all, and a nested user namespace is denied
+          # inside them. A host that cannot provide both cannot exercise the
+          # sandbox, so report that once here instead of failing every
+          # integration test with the same sandbox_unavailable error.
+          if ! "$bwrap_bin" --unshare-all --ro-bind / / -- /bin/true >/dev/null 2>/tmp/sandbox-outer.err; then
+            reason="bubblewrap cannot create its namespaces on this host: $(tr '\n' ' ' </tmp/sandbox-outer.err)"
+          else
+            nested="$bwrap_bin --unshare-user --ro-bind / / -- /bin/true"
+            if "$bwrap_bin" --unshare-all --ro-bind / / -- /bin/sh -c "$nested" >/dev/null 2>&1; then
+              reason="a nested user namespace is permitted inside the sandbox here, but the deny-capability probe requires it to fail"
+            else
+              echo "sandbox=available" >>"$GITHUB_OUTPUT"
+              echo "sandbox runtime available; running the real-sandbox leg"
+              exit 0
+            fi
+          fi
+
+          echo "sandbox=unavailable" >>"$GITHUB_OUTPUT"
+          echo "::warning title=Linux sandbox unavailable on this host::$reason. Skipping the real-sandbox leg; this is a host limitation, not a pips failure."
+          {
+            echo "### Linux sandbox host probe"
+            echo ""
+            echo "$reason"
+            echo ""
+            echo "The real-sandbox integration leg was skipped for this host."
+          } >>"$GITHUB_STEP_SUMMARY"
       - name: Test execution package
         run: bash .github/scripts/go-test.sh -race ./internal/coding/execution/... ./internal/coding/approval/... ./internal/coding/changes/... ./internal/coding/tools/...
       - name: Test real Linux sandbox
+        if: steps.sandbox.outputs.sandbox == 'available'
         run: |
           PIPS_SANDBOX_INTEGRATION=1 bash .github/scripts/go-test.sh -race \
             ./internal/coding/execution/... ./internal/coding/changes/git ./internal/coding/tools \
