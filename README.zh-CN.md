@@ -256,3 +256,11 @@ make p0-verify
 ```
 
 欢迎提交 [Issues](https://github.com/rsbin1178/pips/issues) 与 Pull Requests 共同建设。
+
+---
+
+## 授权协议
+
+本项目基于 [Apache License 2.0](LICENSE) 授权。
+
+Copyright 2026 rsbin1178。署名与第三方组件授权信息见 [NOTICE](NOTICE)。
