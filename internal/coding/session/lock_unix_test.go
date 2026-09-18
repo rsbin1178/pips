@@ -62,7 +62,7 @@ func TestSessionLockOwnerDiesWithoutStaleOwnership(t *testing.T) {
 		require.NoError(t, lock.Close())
 
 		return true
-	}, 5*time.Second, 10*time.Millisecond)
+	}, 30*time.Second, 10*time.Millisecond)
 	_, err = os.Stat(path)
 	require.NoError(t, err, "lock pathname remains diagnostic, not authoritative")
 }

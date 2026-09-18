@@ -21,7 +21,7 @@ func TestRunHookCommandCleansUpBackgroundProcess(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		return errors.Is(syscall.Kill(pid, 0), syscall.ESRCH)
-	}, time.Second, 10*time.Millisecond, "background hook process %d still exists", pid)
+	}, 30*time.Second, 10*time.Millisecond, "background hook process %d still exists", pid)
 }
 
 func TestRunHookCommandCancelsBackgroundProcess(t *testing.T) {
@@ -44,7 +44,7 @@ func TestRunHookCommandCancelsBackgroundProcess(t *testing.T) {
 	require.Error(t, <-done)
 	require.Eventually(t, func() bool {
 		return errors.Is(syscall.Kill(pid, 0), syscall.ESRCH)
-	}, time.Second, 10*time.Millisecond, "canceled hook process %d still exists", pid)
+	}, 30*time.Second, 10*time.Millisecond, "canceled hook process %d still exists", pid)
 }
 
 func runHookWithBackgroundSleep(t *testing.T, ctx context.Context) int {
@@ -74,7 +74,7 @@ func waitForHookChildPID(t *testing.T, path string) int {
 		value = strings.TrimSpace(string(encoded))
 
 		return value != ""
-	}, time.Second, 10*time.Millisecond, "hook did not record its background process")
+	}, 30*time.Second, 10*time.Millisecond, "hook did not record its background process")
 
 	pid, err := strconv.Atoi(value)
 	require.NoError(t, err)

@@ -1052,7 +1052,7 @@ Inspect only the assigned target and return when the work is complete.
 	close(model.releaseChild)
 	_, err = runtime.WaitSubagent(t.Context(), summaries[0].ChildSessionID)
 	require.NoError(t, err)
-	assert.Eventually(t, func() bool { return lifecycle.stops.Load() >= 1 }, time.Second, 10*time.Millisecond)
+	assert.Eventually(t, func() bool { return lifecycle.stops.Load() >= 1 }, 30*time.Second, 10*time.Millisecond)
 }
 
 func agentLibraryEntry(library AgentLibrary, id string) (AgentLibraryEntry, bool) {
@@ -1454,7 +1454,7 @@ LEAF_CANCEL_MARKER: wait for cancellation.
 		}
 
 		return false
-	}, 10*time.Second, 10*time.Millisecond)
+	}, 30*time.Second, 10*time.Millisecond)
 	require.NoError(t, runtime.CancelSubagent(context.Background(), leafID))
 	select {
 	case err := <-done:

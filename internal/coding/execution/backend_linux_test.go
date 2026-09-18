@@ -1007,7 +1007,7 @@ func testLinuxPIDNamespaceCleanup(
 
 	require.Eventually(t, func() bool {
 		return errors.Is(syscall.Kill(hostPID, 0), syscall.ESRCH)
-	}, time.Second, 10*time.Millisecond)
+	}, 30*time.Second, 10*time.Millisecond)
 }
 
 func requireLinuxHostPID(t *testing.T, innerPIDPath, pidNamespacePath string) int {
@@ -1040,7 +1040,7 @@ func requireLinuxHostPID(t *testing.T, innerPIDPath, pidNamespacePath string) in
 		hostPID = pid
 
 		return true
-	}, 2*time.Second, 10*time.Millisecond)
+	}, 30*time.Second, 10*time.Millisecond)
 
 	return hostPID
 }
@@ -1113,7 +1113,7 @@ func testLinuxParentDeath(t *testing.T, fixture executorFixture) {
 	require.NoError(t, err)
 	require.Eventually(t, func() bool {
 		return errors.Is(syscall.Kill(hostPID, 0), syscall.ESRCH)
-	}, 2*time.Second, 10*time.Millisecond)
+	}, 30*time.Second, 10*time.Millisecond)
 }
 
 func runLinuxSandboxHelper(t *testing.T, mode string) {

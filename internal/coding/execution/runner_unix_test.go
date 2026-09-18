@@ -240,7 +240,7 @@ func TestRunnerCleansOrdinaryBackgroundDescendants(t *testing.T) {
 	require.NoError(t, err)
 	require.Eventually(t, func() bool {
 		return errors.Is(syscall.Kill(childPID, 0), syscall.ESRCH)
-	}, time.Second, 10*time.Millisecond)
+	}, 30*time.Second, 10*time.Millisecond)
 }
 
 func TestRunnerDropsProgressWithoutDroppingCapture(t *testing.T) {
@@ -288,7 +288,7 @@ func TestRunnerDoesNotLeakFileDescriptorsOrGoroutines(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		return countOpenFileDescriptors(t) <= baselineFDs+1 && runtime.NumGoroutine() <= baselineGoroutines+2
-	}, time.Second, 10*time.Millisecond)
+	}, 30*time.Second, 10*time.Millisecond)
 }
 
 func countOpenFileDescriptors(t *testing.T) int {

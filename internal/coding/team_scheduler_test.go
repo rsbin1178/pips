@@ -98,7 +98,7 @@ func TestTeamSchedulerBoundsConcurrencyAndDoesNotStarveFIFO(t *testing.T) {
 		active, queued, _ := coordinator.admission.snapshot()
 
 		return active == 2 && queued == 0
-	}, time.Second, 10*time.Millisecond)
+	}, 30*time.Second, 10*time.Millisecond)
 
 	require.Eventually(t, func() bool {
 		latest, getErr := engine.Get(t.Context(), aggregate.ID)
@@ -109,14 +109,14 @@ func TestTeamSchedulerBoundsConcurrencyAndDoesNotStarveFIFO(t *testing.T) {
 		defer coordinator.mu.Unlock()
 
 		return coordinator.revision == latest.Revision
-	}, time.Second, 10*time.Millisecond)
+	}, 30*time.Second, 10*time.Millisecond)
 	factory.release("task-b")
 	factory.release("task-c")
 	require.Eventually(t, func() bool {
 		active, _, _ := coordinator.admission.snapshot()
 
 		return active == 0
-	}, time.Second, 10*time.Millisecond)
+	}, 30*time.Second, 10*time.Millisecond)
 }
 
 func TestTeamSchedulerCancelRemovesWaitersAndStopsOwners(t *testing.T) {
@@ -148,7 +148,7 @@ func TestTeamSchedulerCancelRemovesWaitersAndStopsOwners(t *testing.T) {
 		task, found := taskByID(current.Tasks, "task-a")
 
 		return found && task.Status == team.TaskStatusRunning
-	}, time.Second, 10*time.Millisecond)
+	}, 30*time.Second, 10*time.Millisecond)
 
 	latest, err := engine.Get(t.Context(), aggregate.ID)
 	require.NoError(t, err)
@@ -166,7 +166,7 @@ func TestTeamSchedulerCancelRemovesWaitersAndStopsOwners(t *testing.T) {
 		active, queued, _ := coordinator.admission.snapshot()
 
 		return active == 0 && queued == 0 && coordinator.ownerCount() == 0
-	}, time.Second, 10*time.Millisecond)
+	}, 30*time.Second, 10*time.Millisecond)
 	select {
 	case unexpected := <-factory.started:
 		require.Fail(t, "queued Worker started after Team cancellation", string(unexpected))

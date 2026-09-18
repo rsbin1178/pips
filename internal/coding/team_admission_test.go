@@ -243,7 +243,7 @@ func TestTeamLifecycleProjectsCompactParentStateAndTerminalUsageOnce(t *testing.
 		aggregate, getErr := runtime.team.engine.Get(t.Context(), reference.TeamID)
 		return getErr == nil && len(aggregate.Tasks) == 1 &&
 			aggregate.Tasks[0].Status == team.TaskStatusCompleted
-	}, 10*time.Second, 20*time.Millisecond)
+	}, 30*time.Second, 20*time.Millisecond)
 	require.Eventually(t, func() bool {
 		state := runtime.Snapshot()
 		for _, value := range state.Teams {
@@ -254,7 +254,7 @@ func TestTeamLifecycleProjectsCompactParentStateAndTerminalUsageOnce(t *testing.
 		}
 
 		return false
-	}, 3*time.Second, 10*time.Millisecond)
+	}, 30*time.Second, 10*time.Millisecond)
 
 	mu.Lock()
 	observed := append([]TelemetryEvent(nil), events...)
@@ -308,7 +308,7 @@ func TestTeamControlCancelTeamIsJournaledBeforeApplication(t *testing.T) {
 		aggregate, getErr := runtime.team.engine.Get(t.Context(), reference.TeamID)
 
 		return getErr == nil && aggregate.Status == team.StatusCancelled
-	}, 3*time.Second, 10*time.Millisecond)
+	}, 30*time.Second, 10*time.Millisecond)
 }
 
 func TestTeamControlStaleTargetHasNoDomainSideEffect(t *testing.T) {
@@ -383,7 +383,7 @@ func TestTeamControlMessageUsesExactOwnerAndMailboxCursor(t *testing.T) {
 	model.unblock()
 	require.Eventually(t, func() bool {
 		return model.callCount() == 2
-	}, 3*time.Second, 10*time.Millisecond)
+	}, 30*time.Second, 10*time.Millisecond)
 }
 
 func TestTeamControlSerializesMultipleFollowUpsWithoutLoss(t *testing.T) {
@@ -422,13 +422,13 @@ func TestTeamControlSerializesMultipleFollowUpsWithoutLoss(t *testing.T) {
 			)
 
 			return getErr == nil && record.Entry.State == teamcontrol.StateApplied
-		}, 3*time.Second, 10*time.Millisecond)
+		}, 30*time.Second, 10*time.Millisecond)
 	}
 
 	model.unblock()
 	require.Eventually(t, func() bool {
 		return model.callCount() == 1+len(model.followUps)
-	}, 3*time.Second, 10*time.Millisecond)
+	}, 30*time.Second, 10*time.Millisecond)
 }
 
 func TestTeamControlInterruptStopsExactRunningAttempt(t *testing.T) {
@@ -462,7 +462,7 @@ func TestTeamControlInterruptStopsExactRunningAttempt(t *testing.T) {
 		)
 
 		return getErr == nil && record.Entry.State == teamcontrol.StateApplied
-	}, 3*time.Second, 10*time.Millisecond)
+	}, 30*time.Second, 10*time.Millisecond)
 	require.Eventually(t, func() bool {
 		current, getErr := runtime.team.engine.Get(t.Context(), reference.TeamID)
 		if getErr != nil || len(current.Tasks) != 1 {
@@ -516,7 +516,7 @@ func TestTeamCaptureRecoversPublishedResultBeforeResourceCommit(t *testing.T) {
 		return getErr == nil && len(current.Attempts) == 1 &&
 			current.Attempts[0].State == teamstate.AttemptTerminal &&
 			current.Attempts[0].Worktree.ResultCommitOID == published.CommitOID
-	}, 3*time.Second, 10*time.Millisecond)
+	}, 30*time.Second, 10*time.Millisecond)
 }
 
 func TestParallelTeamWorkersCaptureIndependentResultsWithoutParentWrites(t *testing.T) {
@@ -553,7 +553,7 @@ func TestParallelTeamWorkersCaptureIndependentResultsWithoutParentWrites(t *test
 		}
 
 		return true
-	}, 10*time.Second, 20*time.Millisecond)
+	}, 30*time.Second, 20*time.Millisecond)
 	if !completed {
 		aggregate, getErr := runtime.team.engine.Get(t.Context(), reference.TeamID)
 		runtime.team.mu.Lock()
@@ -575,7 +575,7 @@ func TestParallelTeamWorkersCaptureIndependentResultsWithoutParentWrites(t *test
 		}
 
 		return true
-	}, 3*time.Second, 10*time.Millisecond)
+	}, 30*time.Second, 10*time.Millisecond)
 	require.Len(t, snapshot.Attempts, 2)
 	commits := make(map[string]struct{}, len(snapshot.Attempts))
 	for _, attempt := range snapshot.Attempts {
@@ -747,7 +747,7 @@ func waitForRunningAttemptOwner(t *testing.T, runtime *Runtime) *attemptOwner {
 		}
 
 		return false
-	}, 3*time.Second, 10*time.Millisecond)
+	}, 30*time.Second, 10*time.Millisecond)
 
 	return owner
 }

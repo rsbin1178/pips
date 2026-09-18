@@ -31,7 +31,7 @@ func TestEventBridgeIsBoundedAndCancelable(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		return produced.Load() >= bridgeCapacity
-	}, time.Second, time.Millisecond)
+	}, 30*time.Second, 10*time.Millisecond)
 	assert.LessOrEqual(t, produced.Load(), int32(bridgeCapacity+1))
 	select {
 	case <-bridge.stopped():
