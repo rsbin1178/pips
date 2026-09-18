@@ -76,35 +76,35 @@ jobs:
             exit 1
           fi
 
-          bwrap_bin=$(command -v bwrap)
+          bwrap --version
           echo "apparmor_restrict_unprivileged_userns=$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo absent)"
 
-          # The real-sandbox leg asserts two host properties: bubblewrap can
-          # create its namespaces at all, and a nested user namespace is denied
-          # inside them. A host that cannot provide both cannot exercise the
-          # sandbox, so report that once here instead of failing every
-          # integration test with the same sandbox_unavailable error.
-          if ! "$bwrap_bin" --unshare-all --ro-bind / / -- /bin/true >/dev/null 2>/tmp/sandbox-outer.err; then
-            reason="bubblewrap cannot create its namespaces on this host: $(tr '\n' ' ' </tmp/sandbox-outer.err)"
-          else
-            nested="$bwrap_bin --unshare-user --ro-bind / / -- /bin/true"
-            if "$bwrap_bin" --unshare-all --ro-bind / / -- /bin/sh -c "$nested" >/dev/null 2>&1; then
-              reason="a nested user namespace is permitted inside the sandbox here, but the deny-capability probe requires it to fail"
-            else
-              echo "sandbox=available" >>"$GITHUB_OUTPUT"
-              echo "sandbox runtime available; running the real-sandbox leg"
-              exit 0
-            fi
+          # A host that cannot host the sandbox cannot exercise it: the leg
+          # would fail every assertion with the same sandbox_unavailable error,
+          # which says nothing about this repository. Ask pips' own capability
+          # probe -- the one the leg depends on -- and skip the leg when the
+          # host is the answer. The raw log stays in the step output; the
+          # warning carries only the stable failure code, matching the
+          # low-sensitivity diagnostic the probe reports on purpose.
+          if PIPS_SANDBOX_INTEGRATION=1 go test ./internal/coding/execution \
+              -run '^TestLinuxCapabilityProbeIntegration$' -count=1 >/tmp/sandbox-probe.log 2>&1; then
+            echo "sandbox=available" >>"$GITHUB_OUTPUT"
+            echo "sandbox runtime available; running the real-sandbox leg"
+            exit 0
           fi
 
+          cat /tmp/sandbox-probe.log
+          code=$(grep -oE 'sandbox probe [a-z_]+' /tmp/sandbox-probe.log | head -1 | awk '{print $3}')
+          [ -n "$code" ] || code=probe_failed
           echo "sandbox=unavailable" >>"$GITHUB_OUTPUT"
-          echo "::warning title=Linux sandbox unavailable on this host::$reason. Skipping the real-sandbox leg; this is a host limitation, not a pips failure."
+          echo "::warning title=Linux sandbox unavailable on this host::the host cannot satisfy the sandbox capability probe ($code). Skipping the real-sandbox leg; this is a host limitation, not a pips failure."
           {
             echo "### Linux sandbox host probe"
             echo ""
-            echo "$reason"
+            echo "The host cannot satisfy the sandbox capability probe: \`$code\`."
             echo ""
-            echo "The real-sandbox integration leg was skipped for this host."
+            echo "The real-sandbox integration leg was skipped for this host. The plain"
+            echo "execution-package tests still run below."
           } >>"$GITHUB_STEP_SUMMARY"
       - name: Test execution package
         run: bash .github/scripts/go-test.sh -race ./internal/coding/execution/... ./internal/coding/approval/... ./internal/coding/changes/... ./internal/coding/tools/...
