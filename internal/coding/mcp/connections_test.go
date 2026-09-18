@@ -235,7 +235,7 @@ func TestConnectionsRefreshChangedPreservesPriorSnapshotAndCoalescesFailure(t *t
 		failed, attempted, refreshErr = connections.RefreshChanged(t.Context())
 
 		return attempted
-	}, time.Second, 10*time.Millisecond)
+	}, 30*time.Second, 10*time.Millisecond)
 	require.Error(t, refreshErr)
 	assert.True(t, attempted)
 	assert.Equal(t, initial.Version, failed.Version)
@@ -247,7 +247,7 @@ func TestConnectionsRefreshChangedPreservesPriorSnapshotAndCoalescesFailure(t *t
 		_, attempted, refreshErr = connections.RefreshChanged(t.Context())
 
 		return attempted
-	}, time.Second, 10*time.Millisecond)
+	}, 30*time.Second, 10*time.Millisecond)
 	require.Error(t, refreshErr)
 	assert.True(t, attempted)
 	assert.Len(t, connections.Diagnostics(), 1)

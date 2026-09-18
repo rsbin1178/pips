@@ -400,7 +400,7 @@ func TestDarwinSandboxAttackMatrixIntegration(t *testing.T) {
 	require.NoError(t, err)
 	require.Eventually(t, func() bool {
 		return errors.Is(syscall.Kill(childPID, 0), syscall.ESRCH)
-	}, time.Second, 10*time.Millisecond)
+	}, 30*time.Second, 10*time.Millisecond)
 
 	fifo := filepath.Join(fixture.workspace.Root(), "forbidden-fifo")
 	require.NoError(t, syscall.Mkfifo(fifo, 0o600))

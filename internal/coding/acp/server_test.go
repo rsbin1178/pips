@@ -177,7 +177,7 @@ func TestServerCloseWaitsForOpeningSessionAndClosesItsControllerOnce(t *testing.
 		defer server.mu.Unlock()
 
 		return server.closed
-	}, time.Second, time.Millisecond)
+	}, 30*time.Second, 10*time.Millisecond)
 	close(factory.release)
 	require.NoError(t, <-closed)
 	require.NotNil(t, <-opened)

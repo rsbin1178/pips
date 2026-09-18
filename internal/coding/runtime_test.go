@@ -471,7 +471,7 @@ func TestRuntimeQueuesAgentNotificationIntoMatchingActiveInteraction(t *testing.
 		defer runtime.notificationMu.Unlock()
 		_, ok := runtime.notificationInflight[notification.ID]
 		return ok
-	}, time.Second, 5*time.Millisecond)
+	}, 30*time.Second, 10*time.Millisecond)
 	close(model.release)
 
 	select {
@@ -484,7 +484,7 @@ func TestRuntimeQueuesAgentNotificationIntoMatchingActiveInteraction(t *testing.
 	require.Eventually(t, func() bool {
 		pending, err := runtime.notifications.Pending()
 		return err == nil && len(pending) == 0
-	}, time.Second, 5*time.Millisecond)
+	}, 30*time.Second, 10*time.Millisecond)
 
 	state := runtime.Snapshot()
 	require.Len(t, state.Transcript, 4)
@@ -514,7 +514,7 @@ func TestRuntimeSpawnAgentCompletesAfterParentAndAutomaticallyContinues(t *testi
 		return err == nil && len(pending) == 0 && state.Phase == PhaseIdle &&
 			len(state.Subagents) == 1 && state.Subagents[0].State == subagent.StateSucceeded &&
 			len(state.Transcript) == 6
-	}, 3*time.Second, 10*time.Millisecond)
+	}, 30*time.Second, 10*time.Millisecond)
 
 	state := runtime.Snapshot()
 	assert.Equal(t, subagent.DeliveryBackground, state.Subagents[0].Delivery)

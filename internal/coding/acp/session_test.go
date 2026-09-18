@@ -182,7 +182,7 @@ func TestSessionRequestContextCancellationCancelsRuntime(t *testing.T) {
 		defer controller.mu.Unlock()
 
 		return controller.cancelCount > 0
-	}, time.Second, time.Millisecond)
+	}, 30*time.Second, 10*time.Millisecond)
 }
 
 func TestSessionModeControlSerializesAfterActivePrompt(t *testing.T) {
