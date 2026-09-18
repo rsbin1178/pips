@@ -74,7 +74,11 @@ jobs:
       - name: Test
         run: bash .github/scripts/go-test.sh ./...
       - name: Race-test Agent and Coding
-        run: bash .github/scripts/go-test.sh -race ./agent/... ./internal/coding/...
+        # The race detector already costs several times the plain run, and each
+        # package test binary parallelizes its own tests. On a two-core runner
+        # that oversubscription turns poll-based test waits into flaky timeouts,
+        # so cap how many package binaries run at once.
+        run: bash .github/scripts/go-test.sh -race -p 2 ./agent/... ./internal/coding/...
       - name: Provider adapter and scripted smoke
         run: make provider-smoke
       - name: Vet

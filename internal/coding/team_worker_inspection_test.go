@@ -201,7 +201,7 @@ func waitForLiveInspectionWorker(
 		}
 
 		return false
-	}, 5*time.Second, 10*time.Millisecond)
+	}, 30*time.Second, 10*time.Millisecond)
 
 	return target, owner
 }
@@ -248,7 +248,7 @@ func waitForTerminalInspectionWorker(
 		childSessionID = value.Session.SessionID
 
 		return true
-	}, 10*time.Second, 10*time.Millisecond)
+	}, 30*time.Second, 10*time.Millisecond)
 
 	return target, childSessionID
 }

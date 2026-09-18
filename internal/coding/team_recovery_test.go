@@ -271,7 +271,7 @@ func TestTeamResumeReconcilesTerminalChildWithNewLeaseGeneration(t *testing.T) {
 
 		return loadErr == nil && len(after.Attempts) == 1 &&
 			after.Attempts[0].State == teamstate.AttemptTerminal
-	}, 3*time.Second, 10*time.Millisecond)
+	}, 30*time.Second, 10*time.Millisecond)
 	assert.Greater(t, after.Attempts[0].Worktree.LeaseGeneration, oldGeneration)
 }
 
@@ -324,7 +324,7 @@ func TestTeamResumeReusesRecoverableJoinAttemptAfterDependencyRefIsRestored(t *t
 		}
 
 		return false
-	}, 15*time.Second, 20*time.Millisecond)
+	}, 30*time.Second, 20*time.Millisecond)
 
 	runner, err := gitcontrol.New(first.opts.GitPath, gitcontrol.DefaultLimits())
 	require.NoError(t, err)
