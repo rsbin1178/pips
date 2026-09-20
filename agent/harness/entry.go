@@ -152,6 +152,39 @@ func fromEnvelope(env entryJSON) (Entry, error) {
 	return entry, nil
 }
 
+// MarshalEntry encodes an entry into its stable JSON envelope: exactly one
+// entry, without the line terminator the JSONL store adds. The bytes are what
+// the JSONL store writes on a line and they round-trip through
+// [UnmarshalEntry], so an out-of-package [Store] can persist entries in the
+// same format instead of reimplementing it.
+func MarshalEntry(e Entry) ([]byte, error) {
+	envelope, err := toEnvelope(e)
+	if err != nil {
+		return nil, err
+	}
+
+	data, err := json.Marshal(envelope)
+	if err != nil {
+		return nil, fmt.Errorf("harness: encode entry: %w", err)
+	}
+
+	return data, nil
+}
+
+// UnmarshalEntry decodes an entry written by [MarshalEntry].
+//
+// Decoding is strict, matching the JSONL loader: unknown fields, trailing
+// data and oversized input are rejected rather than ignored, so a store can
+// tell a corrupted or version-skewed row from a readable one.
+func UnmarshalEntry(data []byte) (Entry, error) {
+	var envelope entryJSON
+	if err := decodeStrictLine(data, &envelope); err != nil {
+		return Entry{}, fmt.Errorf("harness: decode entry: %w", err)
+	}
+
+	return fromEnvelope(envelope)
+}
+
 // newID returns a short, time-sortable entry ID: a millisecond timestamp
 // prefix plus a random tail.
 func newID() string {
