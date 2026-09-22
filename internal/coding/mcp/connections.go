@@ -3,6 +3,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -46,18 +47,51 @@ type ConnectionDiagnostic struct {
 	Message  string
 }
 
-type ownedConnection struct {
-	client   *agentmcp.Client
-	resource io.Closer
+// ServerState is the closed lifecycle state of one configured server.
+type ServerState string
+
+// Supported server lifecycle states.
+const (
+	// ServerStatePending means the project permission record is missing or
+	// stale, so the server was never started.
+	ServerStatePending ServerState = "pending"
+	// ServerStateDisabled means the project permission decision is deny.
+	ServerStateDisabled ServerState = "disabled"
+	// ServerStateConnecting means the background connect is still running.
+	ServerStateConnecting ServerState = "connecting"
+	// ServerStateConnected means the server's tools are in the snapshot.
+	ServerStateConnected ServerState = "connected"
+	// ServerStateFailed means the server disabled only itself with a safe
+	// diagnostic.
+	ServerStateFailed ServerState = "failed"
+)
+
+// ServerStatus is a detached, credential-free projection of one configured
+// server. It never carries URL, headers, command, args, environment, or
+// working directory.
+type ServerStatus struct {
+	ID         string        `json:"id"`
+	Scope      Scope         `json:"scope"`
+	Transport  TransportType `json:"transport"`
+	Visibility Visibility    `json:"visibility"`
+	State      ServerState   `json:"state"`
+	// Tools lists the advertised (prefixed) tool names of a connected server.
+	Tools []string `json:"tools,omitempty"`
+	// Stage, Code, and Message describe a failed server; they hold the same
+	// fixed safe text as the matching ConnectionDiagnostic.
+	Stage   string `json:"stage,omitempty"`
+	Code    string `json:"code,omitempty"`
+	Message string `json:"message,omitempty"`
+	// StartedAt is zero for pending and disabled servers. SettledAt is zero
+	// while the server is still connecting.
+	StartedAt time.Time `json:"started_at,omitzero"`
+	SettledAt time.Time `json:"settled_at,omitzero"`
 }
 
-type connectedServer struct {
-	fingerprint string
-	visibility  Visibility
-}
+var errConnectionsClosed = errors.New("coding mcp: connections closed")
 
 // ConnectedServer is a detached, credential-free view of one successfully
-// connected server in the current Registry snapshot.
+// connected server in the current snapshot.
 type ConnectedServer struct {
 	ID          string
 	Fingerprint string
@@ -65,24 +99,58 @@ type ConnectedServer struct {
 	Entries     []catalog.Entry
 }
 
-// Connections owns successful MCP clients and one atomic Registry. Individual
-// server failures are diagnostics and do not disable unrelated servers.
-type Connections struct {
-	registry *agentmcp.Registry
-	owned    []ownedConnection
-	servers  map[string]connectedServer
+type managedServer struct {
+	id             string
+	fingerprint    string
+	scope          Scope
+	transport      TransportType
+	visibility     Visibility
+	connectTimeout time.Duration
+	definition     Definition
 
-	mu            sync.Mutex
-	diagnostics   []ConnectionDiagnostic
-	refreshFailed bool
-	closeOnce     sync.Once
-	closeErr      error
+	state     ServerState
+	stage     string
+	code      string
+	message   string
+	startedAt time.Time
+	settledAt time.Time
+	reported  bool
+
+	client   *agentmcp.Client
+	resource io.Closer
+	tools    []agent.Tool
 }
 
-// OpenConnections connects enabled definitions, primes each complete tool
-// snapshot, and installs the initial Registry generation.
+// Connections owns MCP clients and one atomic, versioned tool snapshot. Every
+// enabled server connects concurrently in the background: a server joins the
+// snapshot as soon as it settles, and individual failures are diagnostics that
+// do not disable unrelated servers.
+type Connections struct {
+	mu            sync.Mutex
+	servers       []*managedServer
+	snapshot      agentmcp.RegistrySnapshot
+	signature     string
+	options       []ConnectionDiagnostic
+	optionsTaken  bool
+	refresh       []ConnectionDiagnostic
+	refreshFailed bool
+	pending       int
+	settled       chan struct{}
+	closed        bool
+
+	cancel    context.CancelFunc
+	wg        sync.WaitGroup
+	closeOnce sync.Once
+	closeErr  error
+}
+
+// OpenConnections validates options and every enabled definition, installs an
+// empty initial snapshot, and starts one background connect per enabled
+// server. It returns before any server has connected; callers that need the
+// complete set use Wait.
 //
-//nolint:gocyclo // Each lifecycle stage has an independent per-server diagnostic and cleanup path.
+// Background connects derive from a detached copy of ctx so a request-scoped
+// caller context cannot abort them; Close is the only stop.
 func OpenConnections(
 	ctx context.Context,
 	resolved []ResolvedDefinition,
@@ -102,125 +170,270 @@ func OpenConnections(
 		return nil, err
 	}
 
-	connections := &Connections{
-		diagnostics: slices.Clone(options.Diagnostics),
-		servers:     make(map[string]connectedServer),
+	servers, err := newManagedServers(resolved)
+	if err != nil {
+		return nil, err
 	}
-	servers := make([]agentmcp.RegistryServer, 0, len(resolved))
 
-	for _, selected := range resolved {
-		if selected.Status != StatusEnabled {
-			continue
-		}
-
-		definition := cloneDefinition(selected.Definition)
-		if err := validateDefinition(definition); err != nil {
-			_ = connections.Close()
-
-			return nil, fmt.Errorf("%w: enabled server %q: %w", ErrInvalid, definition.ID, err)
-		}
-
-		transport, resource, transportErr := factory(ctx, definition)
-		if transportErr != nil {
-			connections.addDiagnostic(connectionDiagnostic(
-				definition.ID,
-				"transport",
-				"transport_failed",
-				"server transport could not be prepared",
-			))
-
-			continue
-		}
-
-		connectCtx, cancel := context.WithTimeout(ctx, definition.ConnectTimeout)
-		client, connectErr := agentmcp.Connect(
-			connectCtx,
-			options.Implementation,
-			transport,
-			agentmcp.WithToolNamePrefix(definition.ID),
-			agentmcp.WithMaxTools(options.MaxTools),
-		)
-
+	background, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	connections := &Connections{
+		servers:  servers,
+		options:  slices.Clone(options.Diagnostics),
+		settled:  make(chan struct{}),
+		cancel:   cancel,
+		snapshot: agentmcp.RegistrySnapshot{Version: 1, UpdatedAt: time.Now().UTC()},
+	}
+	connections.signature, err = entriesSignature(nil)
+	if err != nil {
 		cancel()
 
-		if connectErr != nil {
-			_ = closeConnection(nil, resource)
-
-			connections.addDiagnostic(connectionDiagnostic(
-				definition.ID,
-				"connect",
-				"connect_failed",
-				"server connection could not be initialized",
-			))
-
-			continue
-		}
-
-		listCtx, listCancel := context.WithTimeout(ctx, definition.ConnectTimeout)
-		tools, listErr := client.Tools(listCtx)
-
-		listCancel()
-
-		if listErr != nil {
-			_ = closeConnection(client, resource)
-
-			connections.addDiagnostic(connectionDiagnostic(
-				definition.ID,
-				"list",
-				"list_failed",
-				"server tools could not be listed",
-			))
-
-			continue
-		}
-
-		connections.owned = append(connections.owned, ownedConnection{
-			client: client, resource: resource,
-		})
-		servers = append(servers, agentmcp.RegistryServer{
-			ID: definition.ID,
-			Source: &primedSource{
-				client: client,
-				tools:  slices.Clone(tools),
-			},
-			Risk: catalog.RiskPrivileged,
-		})
-		connections.servers[definition.ID] = connectedServer{
-			fingerprint: definition.Fingerprint(),
-			visibility:  definition.effectiveVisibility(),
-		}
+		return nil, err
 	}
 
-	registry, err := agentmcp.NewRegistry(servers...)
-	if err != nil {
-		return nil, errors.Join(err, connections.Close())
-	}
-
-	if _, err := registry.Refresh(ctx); err != nil {
-		return nil, errors.Join(err, connections.Close())
-	}
-
-	connections.registry = registry
+	connections.start(background, factory, options)
 
 	return connections, nil
 }
 
-// Registry returns the initialized MCP Registry.
-func (c *Connections) Registry() *agentmcp.Registry {
+// start marks every enabled server as connecting and launches its background
+// connect. With nothing enabled the connection set settles immediately.
+func (c *Connections) start(
+	ctx context.Context,
+	factory TransportFactory,
+	options ConnectionOptions,
+) {
+	now := time.Now().UTC()
+	for _, server := range c.servers {
+		if server.state != ServerStateConnecting {
+			continue
+		}
+		server.startedAt = now
+		c.pending++
+	}
+	if c.pending == 0 {
+		close(c.settled)
+
+		return
+	}
+
+	for _, server := range c.servers {
+		if server.state != ServerStateConnecting {
+			continue
+		}
+		c.wg.Add(1)
+		go c.connect(ctx, server, factory, options)
+	}
+}
+
+func newManagedServers(resolved []ResolvedDefinition) ([]*managedServer, error) {
+	servers := make([]*managedServer, 0, len(resolved))
+	for _, selected := range resolved {
+		definition := cloneDefinition(selected.Definition)
+		server := &managedServer{
+			id: definition.ID, fingerprint: definition.Fingerprint(),
+			scope: definition.Scope, transport: definition.Transport,
+			visibility:     definition.effectiveVisibility(),
+			connectTimeout: definition.ConnectTimeout,
+			definition:     definition,
+		}
+		switch selected.Status {
+		case StatusEnabled:
+			if err := validateDefinition(definition); err != nil {
+				return nil, fmt.Errorf("%w: enabled server %q: %w", ErrInvalid, definition.ID, err)
+			}
+			server.state = ServerStateConnecting
+		case StatusDisabled:
+			server.state = ServerStateDisabled
+		case StatusPending:
+			server.state = ServerStatePending
+		default:
+			return nil, fmt.Errorf("%w: server %q has unknown status", ErrInvalid, definition.ID)
+		}
+		servers = append(servers, server)
+	}
+
+	return servers, nil
+}
+
+func (c *Connections) connect(
+	ctx context.Context,
+	server *managedServer,
+	factory TransportFactory,
+	options ConnectionOptions,
+) {
+	defer c.wg.Done()
+	defer c.settle()
+
+	transport, resource, transportErr := factory(ctx, server.definition)
+	if transportErr != nil {
+		c.fail(server, "transport", "transport_failed", "server transport could not be prepared")
+
+		return
+	}
+
+	connectCtx, cancel := context.WithTimeout(ctx, server.connectTimeout)
+	client, connectErr := agentmcp.Connect(
+		connectCtx,
+		options.Implementation,
+		transport,
+		agentmcp.WithToolNamePrefix(server.id),
+		agentmcp.WithMaxTools(options.MaxTools),
+	)
+	cancel()
+	if connectErr != nil {
+		_ = closeConnection(nil, resource)
+		c.fail(server, "connect", "connect_failed", "server connection could not be initialized")
+
+		return
+	}
+
+	listCtx, listCancel := context.WithTimeout(ctx, server.connectTimeout)
+	tools, listErr := client.Tools(listCtx)
+	listCancel()
+	if listErr != nil {
+		_ = closeConnection(client, resource)
+		c.fail(server, "list", "list_failed", "server tools could not be listed")
+
+		return
+	}
+
+	if err := c.install(server, client, resource, tools); err != nil {
+		_ = closeConnection(client, resource)
+		if !errors.Is(err, errConnectionsClosed) {
+			c.fail(server, "list", "catalog_invalid", "server tools could not join the tool catalog")
+		}
+	}
+}
+
+// install publishes one connected server. A client that arrives after Close
+// is rejected so the caller closes it instead of leaking it.
+func (c *Connections) install(
+	server *managedServer,
+	client *agentmcp.Client,
+	resource io.Closer,
+	tools []agent.Tool,
+) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.closed {
+		return errConnectionsClosed
+	}
+
+	previousTools, previousState := server.tools, server.state
+	server.tools = slices.Clone(tools)
+	server.state = ServerStateConnected
+	if err := c.rebuildLocked(); err != nil {
+		server.tools = previousTools
+		server.state = previousState
+
+		return err
+	}
+
+	server.settledAt = time.Now().UTC()
+	server.client = client
+	server.resource = resource
+
+	return nil
+}
+
+func (c *Connections) fail(server *managedServer, stage, code, message string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	server.state = ServerStateFailed
+	server.stage = stage
+	server.code = code
+	server.message = message
+	server.settledAt = time.Now().UTC()
+	server.tools = nil
+}
+
+func (c *Connections) settle() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.pending--
+	if c.pending == 0 {
+		close(c.settled)
+	}
+}
+
+// Wait blocks until every enabled server has connected or failed, or until
+// ctx ends. A nil receiver has nothing to wait for.
+func (c *Connections) Wait(ctx context.Context) error {
 	if c == nil {
 		return nil
 	}
 
-	return c.registry
+	select {
+	case <-c.settled:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
-// Snapshot returns the latest successfully installed Registry snapshot.
+// Settled reports whether every enabled server has connected or failed.
+func (c *Connections) Settled() bool {
+	if c == nil {
+		return true
+	}
+
+	select {
+	case <-c.settled:
+		return true
+	default:
+		return false
+	}
+}
+
+// Servers returns a credential-free status for every configured definition
+// in resolved order, including pending and disabled servers.
+func (c *Connections) Servers() []ServerStatus {
+	if c == nil {
+		return nil
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	values := make([]ServerStatus, 0, len(c.servers))
+	for _, server := range c.servers {
+		values = append(values, c.serverStatusLocked(server))
+	}
+
+	return values
+}
+
+func (c *Connections) serverStatusLocked(server *managedServer) ServerStatus {
+	status := ServerStatus{
+		ID: server.id, Scope: server.scope, Transport: server.transport,
+		Visibility: server.visibility, State: server.state,
+		Stage: server.stage, Code: server.code, Message: server.message,
+		StartedAt: server.startedAt, SettledAt: server.settledAt,
+	}
+	if server.state == ServerStateConnected {
+		status.Tools = make([]string, 0, len(server.tools))
+		for _, tool := range server.tools {
+			status.Tools = append(status.Tools, tool.Decl().Name)
+		}
+		slices.Sort(status.Tools)
+	}
+
+	return status
+}
+
+// Snapshot returns the latest successfully installed tool snapshot.
 func (c *Connections) Snapshot() agentmcp.RegistrySnapshot {
-	if c == nil || c.registry == nil {
+	if c == nil {
 		return agentmcp.RegistrySnapshot{}
 	}
 
-	return c.registry.Snapshot()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return cloneSnapshot(c.snapshot)
 }
 
 // Entries returns a detached current catalog filtered by configured
@@ -230,11 +443,13 @@ func (c *Connections) Entries(visibility Visibility) []catalog.Entry {
 		return nil
 	}
 
-	entries := c.Snapshot().Entries
-	selected := make([]catalog.Entry, 0, len(entries))
-	for _, entry := range entries {
-		server, exists := c.servers[entry.Source.ID]
-		if !exists || server.visibility != visibility {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	selected := make([]catalog.Entry, 0, len(c.snapshot.Entries))
+	for _, entry := range c.snapshot.Entries {
+		server := c.serverLocked(entry.Source.ID)
+		if server == nil || server.visibility != visibility {
 			continue
 		}
 		selected = append(selected, cloneEntry(entry))
@@ -245,7 +460,7 @@ func (c *Connections) Entries(visibility Visibility) []catalog.Entry {
 
 // ConnectedServers returns credential-free bindings for successfully
 // connected servers. Entry snapshots reflect the latest successfully
-// installed Registry generation.
+// installed snapshot.
 func (c *Connections) ConnectedServers(visibility Visibility) []ConnectedServer {
 	if c == nil || (visibility != VisibilityAmbient && visibility != VisibilityAgentPrivate) {
 		return nil
@@ -255,21 +470,32 @@ func (c *Connections) ConnectedServers(visibility Visibility) []ConnectedServer 
 	for _, entry := range c.Entries(visibility) {
 		byID[entry.Source.ID] = append(byID[entry.Source.ID], cloneEntry(entry))
 	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	values := make([]ConnectedServer, 0, len(c.servers))
-	for id, server := range c.servers {
-		if server.visibility != visibility {
+	for _, server := range c.servers {
+		if server.state != ServerStateConnected || server.visibility != visibility {
 			continue
 		}
 		values = append(values, ConnectedServer{
-			ID: id, Fingerprint: server.fingerprint, Visibility: server.visibility,
-			Entries: cloneEntries(byID[id]),
+			ID: server.id, Fingerprint: server.fingerprint, Visibility: server.visibility,
+			Entries: cloneEntries(byID[server.id]),
 		})
 	}
-	slices.SortFunc(values, func(left, right ConnectedServer) int {
-		return strings.Compare(left.ID, right.ID)
-	})
 
 	return values
+}
+
+func (c *Connections) serverLocked(id string) *managedServer {
+	for _, server := range c.servers {
+		if server.id == id {
+			return server
+		}
+	}
+
+	return nil
 }
 
 func cloneEntries(values []catalog.Entry) []catalog.Entry {
@@ -287,7 +513,15 @@ func cloneEntry(value catalog.Entry) catalog.Entry {
 	return value
 }
 
-// Diagnostics returns safe lifecycle diagnostics in occurrence order.
+func cloneSnapshot(snapshot agentmcp.RegistrySnapshot) agentmcp.RegistrySnapshot {
+	snapshot.Entries = cloneEntries(snapshot.Entries)
+
+	return snapshot
+}
+
+// Diagnostics returns every safe lifecycle diagnostic in a deterministic
+// order: option diagnostics, then one per failed server in resolved order,
+// then refresh diagnostics. Goroutine completion order never changes it.
 func (c *Connections) Diagnostics() []ConnectionDiagnostic {
 	if c == nil {
 		return nil
@@ -296,57 +530,222 @@ func (c *Connections) Diagnostics() []ConnectionDiagnostic {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	return slices.Clone(c.diagnostics)
-}
-
-// RefreshChanged refreshes only at an application-selected safe boundary.
-// A failed refresh preserves the prior snapshot and emits one coalesced
-// diagnostic until a later successful attempt.
-func (c *Connections) RefreshChanged(
-	ctx context.Context,
-) (agentmcp.RegistrySnapshot, bool, error) {
-	if c == nil || c.registry == nil {
-		return agentmcp.RegistrySnapshot{}, false, errors.New("coding mcp: connections not initialized")
+	values := slices.Clone(c.options)
+	for _, server := range c.servers {
+		if server.state == ServerStateFailed {
+			values = append(values, serverDiagnostic(server))
+		}
 	}
 
-	snapshot, attempted, err := c.registry.RefreshChanged(ctx)
+	return append(values, c.refresh...)
+}
+
+// TakeDiagnostics returns the option and failed-server diagnostics that no
+// earlier call has returned, in the same order as Diagnostics. Refresh
+// diagnostics are excluded because the caller reports refresh failures
+// inline at the interaction boundary.
+func (c *Connections) TakeDiagnostics() []ConnectionDiagnostic {
+	if c == nil {
+		return nil
+	}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if err != nil {
+	values := make([]ConnectionDiagnostic, 0)
+	if !c.optionsTaken {
+		c.optionsTaken = true
+		values = append(values, c.options...)
+	}
+	for _, server := range c.servers {
+		if server.state != ServerStateFailed || server.reported {
+			continue
+		}
+		server.reported = true
+		values = append(values, serverDiagnostic(server))
+	}
+
+	return values
+}
+
+func serverDiagnostic(server *managedServer) ConnectionDiagnostic {
+	return connectionDiagnostic(server.id, server.stage, server.code, server.message)
+}
+
+// RefreshChanged consumes pending tool list-change notifications only at an
+// application-selected safe boundary. Only the servers that signaled are
+// listed again. A failed refresh preserves the prior snapshot and emits one
+// coalesced diagnostic until a later successful attempt.
+func (c *Connections) RefreshChanged(
+	ctx context.Context,
+) (agentmcp.RegistrySnapshot, bool, error) {
+	if c == nil {
+		return agentmcp.RegistrySnapshot{}, false, errors.New("coding mcp: connections not initialized")
+	}
+
+	changed := c.changedServers()
+	if len(changed) == 0 {
+		return c.Snapshot(), false, nil
+	}
+
+	listed := make(map[*managedServer][]agent.Tool, len(changed))
+	var listErr error
+	for _, server := range changed {
+		listCtx, cancel := context.WithTimeout(ctx, server.connectTimeout)
+		tools, err := server.client.Tools(listCtx)
+		cancel()
+		if err != nil {
+			listErr = fmt.Errorf("coding mcp: refresh %q: %w", server.id, err)
+
+			break
+		}
+		listed[server] = tools
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if listErr == nil {
+		listErr = c.applyRefreshLocked(listed)
+	}
+	if listErr != nil {
 		if !c.refreshFailed {
-			c.diagnostics = append(c.diagnostics, connectionDiagnostic(
+			c.refresh = append(c.refresh, connectionDiagnostic(
 				"registry",
 				"refresh",
 				"refresh_failed",
 				"MCP tool refresh failed; the previous snapshot remains active",
 			))
 		}
-
 		c.refreshFailed = true
 
-		return snapshot, attempted, err
+		return cloneSnapshot(c.snapshot), true, listErr
 	}
+	c.refreshFailed = false
 
-	if attempted {
-		c.refreshFailed = false
-	}
-
-	return snapshot, attempted, nil
+	return cloneSnapshot(c.snapshot), true, nil
 }
 
-// Close closes successful clients and their resources in reverse order.
+func (c *Connections) changedServers() []*managedServer {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	changed := make([]*managedServer, 0)
+	for _, server := range c.servers {
+		if server.state != ServerStateConnected || c.closed {
+			continue
+		}
+		select {
+		case <-server.client.ToolListChanged():
+			changed = append(changed, server)
+		default:
+		}
+	}
+
+	return changed
+}
+
+func (c *Connections) applyRefreshLocked(listed map[*managedServer][]agent.Tool) error {
+	if c.closed {
+		return errConnectionsClosed
+	}
+
+	previous := make(map[*managedServer][]agent.Tool, len(listed))
+	for server, tools := range listed {
+		previous[server] = server.tools
+		server.tools = slices.Clone(tools)
+	}
+	if err := c.rebuildLocked(); err != nil {
+		for server, tools := range previous {
+			server.tools = tools
+		}
+
+		return err
+	}
+
+	return nil
+}
+
+// rebuildLocked assembles the merged catalog from every connected server in
+// resolved order and installs it only when it validates and materially
+// changed.
+func (c *Connections) rebuildLocked() error {
+	entries := make([]catalog.Entry, 0)
+	for _, server := range c.servers {
+		if server.state != ServerStateConnected {
+			continue
+		}
+		entries = append(entries, catalog.MCP(server.id, catalog.RiskPrivileged, server.tools...)...)
+	}
+	if _, err := catalog.New(entries...); err != nil {
+		return fmt.Errorf("coding mcp: invalid tool snapshot: %w", err)
+	}
+
+	signature, err := entriesSignature(entries)
+	if err != nil {
+		return err
+	}
+	if signature == c.signature {
+		return nil
+	}
+
+	c.signature = signature
+	c.snapshot = agentmcp.RegistrySnapshot{
+		Version:   c.snapshot.Version + 1,
+		UpdatedAt: time.Now().UTC(),
+		Entries:   cloneEntries(entries),
+	}
+
+	return nil
+}
+
+// entriesSignature mirrors the agent/mcp Registry material-change rule: the
+// JSON encoding of every advertised declaration with its source and risk.
+func entriesSignature(entries []catalog.Entry) (string, error) {
+	declarations := make([]any, 0, len(entries))
+	for _, entry := range entries {
+		declarations = append(declarations, struct {
+			Name   string
+			Source catalog.Source
+			Risk   catalog.Risk
+			Decl   any
+		}{entry.Tool.Decl().Name, entry.Source, entry.Risk, entry.Tool.Decl()})
+	}
+
+	data, err := json.Marshal(declarations)
+	if err != nil {
+		return "", fmt.Errorf("coding mcp: encode tool snapshot: %w", err)
+	}
+
+	return string(data), nil
+}
+
+// Close cancels in-flight connects, waits for them, and closes connected
+// clients and their resources in reverse resolved order.
 func (c *Connections) Close() error {
 	if c == nil {
 		return nil
 	}
 
 	c.closeOnce.Do(func() {
-		errs := make([]error, 0, len(c.owned)*2)
+		c.mu.Lock()
+		c.closed = true
+		c.mu.Unlock()
+		c.cancel()
+		c.wg.Wait()
 
-		for _, connection := range slices.Backward(c.owned) {
-			if err := closeConnection(connection.client, connection.resource); err != nil {
+		c.mu.Lock()
+		owned := make([]*managedServer, 0, len(c.servers))
+		for _, server := range c.servers {
+			if server.client != nil {
+				owned = append(owned, server)
+			}
+		}
+		c.mu.Unlock()
+
+		errs := make([]error, 0, len(owned))
+		for _, server := range slices.Backward(owned) {
+			if err := closeConnection(server.client, server.resource); err != nil {
 				errs = append(errs, err)
 			}
 		}
@@ -512,12 +911,6 @@ func effectivePort(value *url.URL) string {
 	return "80"
 }
 
-func (c *Connections) addDiagnostic(diagnostic ConnectionDiagnostic) {
-	c.mu.Lock()
-	c.diagnostics = append(c.diagnostics, diagnostic)
-	c.mu.Unlock()
-}
-
 func connectionDiagnostic(serverID, stage, code, message string) ConnectionDiagnostic {
 	return ConnectionDiagnostic{ServerID: serverID, Stage: stage, Code: code, Message: message}
 }
@@ -534,29 +927,4 @@ func closeConnection(client *agentmcp.Client, resource io.Closer) error {
 	}
 
 	return errors.Join(clientErr, resourceErr)
-}
-
-type primedSource struct {
-	client *agentmcp.Client
-
-	mu    sync.Mutex
-	tools []agent.Tool
-}
-
-func (s *primedSource) Tools(ctx context.Context) ([]agent.Tool, error) {
-	s.mu.Lock()
-	if s.tools != nil {
-		tools := slices.Clone(s.tools)
-		s.tools = nil
-		s.mu.Unlock()
-
-		return tools, nil
-	}
-	s.mu.Unlock()
-
-	return s.client.Tools(ctx)
-}
-
-func (s *primedSource) ToolListChanged() <-chan struct{} {
-	return s.client.ToolListChanged()
 }

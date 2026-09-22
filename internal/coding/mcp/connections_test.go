@@ -1,3 +1,4 @@
+//nolint:wsl_v5 // Connection fixtures keep gate, wait, and assertion steps adjacent.
 package mcp_test
 
 import (
@@ -123,9 +124,13 @@ func TestOpenConnectionsDegradesPerServerAndClosesInReverse(t *testing.T) {
 		Transport:      factory,
 	})
 	require.NoError(t, err)
+	require.NoError(t, connections.Wait(t.Context()))
+	assert.True(t, connections.Settled())
 
 	snapshot := connections.Snapshot()
-	assert.Equal(t, uint64(1), snapshot.Version)
+	// The initial empty snapshot is version 1; each materially changed join
+	// installs the next version regardless of goroutine completion order.
+	assert.Equal(t, uint64(3), snapshot.Version)
 	require.Len(t, snapshot.Entries, 2)
 	assert.Equal(t, "one_lookup", snapshot.Entries[0].Tool.Decl().Name)
 	assert.Equal(t, "two_search", snapshot.Entries[1].Tool.Decl().Name)
@@ -141,11 +146,252 @@ func TestOpenConnectionsDegradesPerServerAndClosesInReverse(t *testing.T) {
 		assert.NotContains(t, diagnostic.Message, "sentinel")
 	}
 
+	statuses := connections.Servers()
+	require.Len(t, statuses, 5)
+	assert.Equal(t, codingmcp.ServerStateConnected, statuses[0].State)
+	assert.Equal(t, []string{"one_lookup"}, statuses[0].Tools)
+	assert.Equal(t, codingmcp.ServerStateFailed, statuses[1].State)
+	assert.Equal(t, "transport", statuses[1].Stage)
+	assert.Equal(t, codingmcp.ServerStateFailed, statuses[2].State)
+	assert.Equal(t, "list_failed", statuses[2].Code)
+	assert.Equal(t, codingmcp.ServerStateConnected, statuses[3].State)
+	assert.Equal(t, codingmcp.ServerStateDisabled, statuses[4].State)
+	assert.True(t, statuses[4].StartedAt.IsZero())
+
 	require.NoError(t, connections.Close())
 	require.NoError(t, connections.Close())
 	mu.Lock()
 	assert.Equal(t, []string{"bad-list", "two", "one"}, closeOrder)
 	mu.Unlock()
+}
+
+func TestOpenConnectionsReturnsBeforeSlowServerJoinsAndPublishesIncrementally(t *testing.T) {
+	t.Parallel()
+
+	servers := map[string]*sdk.Server{
+		"fast": testMCPServer("fast", "lookup"),
+		"slow": testMCPServer("slow", "search"),
+	}
+	gate := make(chan struct{})
+	factory := func(ctx context.Context, definition codingmcp.Definition) (sdk.Transport, io.Closer, error) {
+		if definition.ID == "slow" {
+			select {
+			case <-gate:
+			case <-ctx.Done():
+				return nil, nil, ctx.Err()
+			}
+		}
+		serverTransport, clientTransport := sdk.NewInMemoryTransports()
+		session, err := servers[definition.ID].Connect(ctx, serverTransport, nil)
+
+		return clientTransport, session, err
+	}
+
+	connections, err := codingmcp.OpenConnections(
+		t.Context(),
+		[]codingmcp.ResolvedDefinition{enabledHTTPDefinition("fast"), enabledHTTPDefinition("slow")},
+		codingmcp.ConnectionOptions{
+			Implementation: &sdk.Implementation{Name: "pips-test", Version: "v1"},
+			MaxTools:       16, Transport: factory,
+		},
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, connections.Close()) })
+	assert.False(t, connections.Settled())
+
+	require.Eventually(t, func() bool {
+		return len(connections.Snapshot().Entries) == 1
+	}, 30*time.Second, 10*time.Millisecond)
+	assert.Equal(t, "fast_lookup", connections.Snapshot().Entries[0].Tool.Decl().Name)
+	assert.Equal(t, uint64(2), connections.Snapshot().Version)
+	statuses := connections.Servers()
+	require.Len(t, statuses, 2)
+	assert.Equal(t, codingmcp.ServerStateConnected, statuses[0].State)
+	assert.Equal(t, codingmcp.ServerStateConnecting, statuses[1].State)
+	assert.True(t, statuses[1].SettledAt.IsZero())
+	assert.False(t, connections.Settled())
+
+	waitCtx, cancel := context.WithCancel(t.Context())
+	cancel()
+	require.ErrorIs(t, connections.Wait(waitCtx), context.Canceled)
+
+	close(gate)
+	require.NoError(t, connections.Wait(t.Context()))
+	assert.True(t, connections.Settled())
+	snapshot := connections.Snapshot()
+	assert.Equal(t, uint64(3), snapshot.Version)
+	require.Len(t, snapshot.Entries, 2)
+	assert.Equal(t, "fast_lookup", snapshot.Entries[0].Tool.Decl().Name)
+	assert.Equal(t, "slow_search", snapshot.Entries[1].Tool.Decl().Name)
+	statuses = connections.Servers()
+	assert.Equal(t, codingmcp.ServerStateConnected, statuses[1].State)
+	assert.Equal(t, []string{"slow_search"}, statuses[1].Tools)
+	assert.False(t, statuses[1].SettledAt.Before(statuses[1].StartedAt))
+	assert.Empty(t, connections.Diagnostics())
+}
+
+func TestConnectionsCloseCancelsInFlightConnectWithoutInstallingLateClient(t *testing.T) {
+	t.Parallel()
+
+	server := testMCPServer("slow", "search")
+	gate := make(chan struct{})
+	var sessions sync.WaitGroup
+	factory := func(ctx context.Context, _ codingmcp.Definition) (sdk.Transport, io.Closer, error) {
+		<-gate
+		serverTransport, clientTransport := sdk.NewInMemoryTransports()
+		session, err := server.Connect(context.WithoutCancel(ctx), serverTransport, nil)
+		if err != nil {
+			return nil, nil, err
+		}
+		sessions.Add(1)
+
+		return clientTransport, closeRecorder{
+			close: session.Close, record: sessions.Done,
+		}, nil
+	}
+
+	definition := enabledHTTPDefinition("slow")
+	definition.Definition.ConnectTimeout = time.Minute
+	connections, err := codingmcp.OpenConnections(
+		t.Context(),
+		[]codingmcp.ResolvedDefinition{definition},
+		codingmcp.ConnectionOptions{
+			Implementation: &sdk.Implementation{Name: "pips-test", Version: "v1"},
+			MaxTools:       16, Transport: factory,
+		},
+	)
+	require.NoError(t, err)
+
+	closed := make(chan error, 1)
+	go func() { closed <- connections.Close() }()
+	// The factory ignores cancellation until the gate opens; Close must still
+	// finish once the late client arrives, and that client must be closed
+	// rather than installed.
+	close(gate)
+	select {
+	case err := <-closed:
+		require.NoError(t, err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("Close did not return after the in-flight connect finished")
+	}
+	sessions.Wait()
+	assert.True(t, connections.Settled())
+	assert.Empty(t, connections.Snapshot().Entries)
+	assert.Equal(t, uint64(1), connections.Snapshot().Version)
+	require.Len(t, connections.Servers(), 1)
+	assert.NotEqual(t, codingmcp.ServerStateConnected, connections.Servers()[0].State)
+}
+
+func TestConnectionsDiagnosticsStayOrderedAndTakeOnce(t *testing.T) {
+	t.Parallel()
+
+	gate := make(chan struct{})
+	factory := func(ctx context.Context, definition codingmcp.Definition) (sdk.Transport, io.Closer, error) {
+		if definition.ID == "first" {
+			select {
+			case <-gate:
+			case <-ctx.Done():
+			}
+		}
+
+		return nil, nil, errors.New("sentinel transport failure")
+	}
+
+	connections, err := codingmcp.OpenConnections(
+		t.Context(),
+		[]codingmcp.ResolvedDefinition{enabledHTTPDefinition("first"), enabledHTTPDefinition("second")},
+		codingmcp.ConnectionOptions{
+			Implementation: &sdk.Implementation{Name: "pips-test", Version: "v1"},
+			MaxTools:       16, Transport: factory,
+			Diagnostics: []codingmcp.ConnectionDiagnostic{{
+				ServerID: "plugin", Stage: "configuration", Code: "definition_limit",
+			}},
+		},
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, connections.Close()) })
+
+	require.Eventually(t, func() bool {
+		return connections.Servers()[1].State == codingmcp.ServerStateFailed
+	}, 30*time.Second, 10*time.Millisecond)
+	taken := connections.TakeDiagnostics()
+	require.Len(t, taken, 2)
+	assert.Equal(t, "plugin", taken[0].ServerID)
+	assert.Equal(t, "second", taken[1].ServerID)
+
+	close(gate)
+	require.NoError(t, connections.Wait(t.Context()))
+	all := connections.Diagnostics()
+	require.Len(t, all, 3)
+	assert.Equal(t, []string{"plugin", "first", "second"}, []string{
+		all[0].ServerID, all[1].ServerID, all[2].ServerID,
+	})
+	for _, diagnostic := range all {
+		assert.NotContains(t, diagnostic.Message, "sentinel")
+	}
+	taken = connections.TakeDiagnostics()
+	require.Len(t, taken, 1)
+	assert.Equal(t, "first", taken[0].ServerID)
+	assert.Empty(t, connections.TakeDiagnostics())
+	assert.Len(t, connections.Diagnostics(), 3)
+}
+
+func TestConnectionsServersProjectionIsCredentialFree(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context, codingmcp.Definition) (sdk.Transport, io.Closer, error) {
+		return nil, nil, errors.New("sentinel transport failure")
+	}
+	secrets := []string{
+		"https://secret-host.example.test/mcp", "Bearer sentinel-token",
+		"/usr/local/bin/sentinel-server", "--sentinel-arg", "sentinel-env-value",
+	}
+	resolved := []codingmcp.ResolvedDefinition{
+		{
+			Definition: codingmcp.Definition{
+				ID: "remote", Scope: codingmcp.ScopeAgentPlugin,
+				Transport: codingmcp.TransportStreamableHTTP, URL: secrets[0],
+				Headers:        []codingmcp.HTTPHeader{{Name: "Authorization", Value: secrets[1]}},
+				ConnectTimeout: time.Second,
+			},
+			Status: codingmcp.StatusEnabled,
+		},
+		{
+			Definition: codingmcp.Definition{
+				ID: "local", Scope: codingmcp.ScopeProject, Transport: codingmcp.TransportStdio,
+				Command: secrets[2], Args: []string{secrets[3]},
+				Environment:    []execution.EnvVar{{Name: "TOKEN", Value: secrets[4]}},
+				Visibility:     codingmcp.VisibilityAgentPrivate,
+				ConnectTimeout: time.Second,
+			},
+			Status: codingmcp.StatusPending,
+		},
+	}
+
+	connections, err := codingmcp.OpenConnections(t.Context(), resolved, codingmcp.ConnectionOptions{
+		Implementation: &sdk.Implementation{Name: "pips-test", Version: "v1"},
+		MaxTools:       16, Transport: factory,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, connections.Close()) })
+	require.NoError(t, connections.Wait(t.Context()))
+
+	statuses := connections.Servers()
+	require.Len(t, statuses, 2)
+	assert.Equal(t, codingmcp.ServerStateFailed, statuses[0].State)
+	assert.Equal(t, codingmcp.ScopeAgentPlugin, statuses[0].Scope)
+	assert.Equal(t, codingmcp.TransportStreamableHTTP, statuses[0].Transport)
+	assert.Equal(t, codingmcp.VisibilityAmbient, statuses[0].Visibility)
+	assert.Equal(t, codingmcp.ServerStatePending, statuses[1].State)
+	assert.Equal(t, codingmcp.VisibilityAgentPrivate, statuses[1].Visibility)
+	assert.True(t, statuses[1].StartedAt.IsZero())
+
+	encoded, err := json.Marshal(statuses)
+	require.NoError(t, err)
+	for _, secret := range secrets {
+		assert.NotContains(t, string(encoded), secret)
+	}
+	assert.NotContains(t, string(encoded), "sentinel")
 }
 
 func TestConfiguredHeadersNeverCrossOriginRedirect(t *testing.T) {
@@ -191,6 +437,7 @@ func TestConfiguredHeadersNeverCrossOriginRedirect(t *testing.T) {
 	headers := <-sourceHeaders
 	assert.Equal(t, "visible", headers.Get("X-Public"))
 	assert.NotEqual(t, "text/plain", headers.Get("Content-Type"))
+	require.NoError(t, connections.Wait(t.Context()))
 	assert.Zero(t, targetRequests.Load())
 	require.Len(t, connections.Diagnostics(), 1)
 	assert.Equal(t, "connect_failed", connections.Diagnostics()[0].Code)
@@ -218,6 +465,7 @@ func TestConnectionsRefreshChangedPreservesPriorSnapshotAndCoalescesFailure(t *t
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, connections.Close()) })
+	require.NoError(t, connections.Wait(t.Context()))
 
 	initial := connections.Snapshot()
 
@@ -295,6 +543,7 @@ func TestConnectionsPartitionAmbientAndAgentPrivateEntries(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, connections.Close()) })
+	require.NoError(t, connections.Wait(t.Context()))
 	require.Len(t, connections.Snapshot().Entries, 2)
 	require.Len(t, connections.Entries(codingmcp.VisibilityAmbient), 1)
 	assert.Equal(t, "ambient_lookup", connections.Entries(codingmcp.VisibilityAmbient)[0].Tool.Decl().Name)
@@ -333,6 +582,7 @@ func TestOpenConnectionsUsesDefaultStreamableHTTPTransport(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, connections.Close()) })
+	require.NoError(t, connections.Wait(t.Context()))
 	require.Len(t, connections.Snapshot().Entries, 1)
 	assert.Equal(t, "remote_health", connections.Snapshot().Entries[0].Tool.Decl().Name)
 }
@@ -384,6 +634,7 @@ func TestOpenConnectionsUsesDefaultStdioTransportWithoutAmbientSecrets(t *testin
 		},
 	)
 	require.NoError(t, err)
+	require.NoError(t, connections.Wait(t.Context()))
 
 	entries := connections.Snapshot().Entries
 	require.Len(t, entries, 1)
