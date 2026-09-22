@@ -22,7 +22,7 @@
 - 分类：实时 Provider、交互终端。变更等级：本地持久状态；可能产生费用。
 - 前置条件：`MA-TUI-001` 通过。
 - 隔离夹具：无秘密 prompt。
-- 步骤：在 Composer 输入多行文本，使用 `Ctrl+J` 或 `Shift+Enter` 换行并以 Enter 提交；模型响应期间观察 streaming；按 `/` 打开命令 picker，核对 `new`、`resume`、`plan`、`mode`、`agents`、`team`、`skills`、`model`、`permissions`、`statusline`、`theme`、`tree`、`fork`、`compact`、`review`、`reload`、`status`、`help`、`quit`；用 Esc 取消 picker 并确认草稿恢复。
+- 步骤：在 Composer 输入多行文本，使用 `Ctrl+J` 或 `Shift+Enter` 换行并以 Enter 提交；模型响应期间观察 streaming；按 `/` 打开命令 picker，核对 `new`、`resume`、`plan`、`mode`、`agents`、`team`、`skills`、`mcp`、`model`、`permissions`、`statusline`、`theme`、`tree`、`fork`、`compact`、`review`、`reload`、`status`、`help`、`quit`；用 Esc 取消 picker 并确认草稿恢复。
 - 预期证据：换行不会提前发送；一次 Enter 只提交一次；assistant 文本稳定增量呈现且最终只固化一次；命令过滤可用；Esc 恢复原草稿与附件；idle-only 命令在 busy 状态不可执行。
 - 通过条件：Composer、stream、picker 和取消行为均无丢字、重复或状态串线。
 - 失败条件：paste/换行误提交、最终消息重复、取消丢草稿、busy 时启动冲突控制。
