@@ -147,6 +147,7 @@ type runtimeInstance interface {
 	) (coding.TeamIntegrationResult, error)
 	CleanupTeam(context.Context, coding.TeamCleanupRequest) (coding.TeamCleanupResult, error)
 	Skills(context.Context) (coding.SkillSnapshot, error)
+	MCP(context.Context) (coding.MCPSnapshot, error)
 	SetSkillEnabled(context.Context, coding.SkillID, bool) error
 	ListWorkspaceFiles(context.Context) (attachment.Snapshot, error)
 	ResolveWorkspaceFile(context.Context, attachment.Reference) (attachment.Resolved, error)
@@ -424,6 +425,19 @@ func (c *Controller) Skills(ctx context.Context) (coding.SkillSnapshot, error) {
 	err := c.withRuntime(func(runtime runtimeInstance) error {
 		var err error
 		snapshot, err = runtime.Skills(ctx)
+
+		return err
+	})
+
+	return snapshot.Clone(), err
+}
+
+// MCP returns the current Runtime's content-free MCP connection snapshot.
+func (c *Controller) MCP(ctx context.Context) (coding.MCPSnapshot, error) {
+	var snapshot coding.MCPSnapshot
+	err := c.withRuntime(func(runtime runtimeInstance) error {
+		var err error
+		snapshot, err = runtime.MCP(ctx)
 
 		return err
 	})

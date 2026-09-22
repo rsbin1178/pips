@@ -20,6 +20,7 @@ import (
 	"github.com/rsbin1178/pips/internal/coding/changes"
 	"github.com/rsbin1178/pips/internal/coding/config"
 	"github.com/rsbin1178/pips/internal/coding/credential"
+	codingmcp "github.com/rsbin1178/pips/internal/coding/mcp"
 	"github.com/rsbin1178/pips/internal/coding/modelcatalog"
 	"github.com/rsbin1178/pips/internal/coding/paths"
 	"github.com/rsbin1178/pips/internal/coding/question"
@@ -464,6 +465,30 @@ func TestControllerWorkspaceFileOperationsHoldReplacementLease(t *testing.T) {
 	assert.Equal(t, "private", text.Content)
 	require.NoError(t, controller.NewSession(t.Context()))
 	require.NoError(t, controller.Close(t.Context()))
+}
+
+func TestControllerMCPReturnsDetachedRuntimeSnapshot(t *testing.T) {
+	t.Parallel()
+
+	fixture := newControllerFixture(t)
+	controller, err := newController(t.Context(), fixture.options, fixture.dependencies())
+	require.NoError(t, err)
+
+	snapshot, err := controller.MCP(t.Context())
+	require.NoError(t, err)
+	assert.True(t, snapshot.Settled)
+	require.Len(t, snapshot.Servers, 1)
+	assert.Equal(t, "docs", snapshot.Servers[0].ID)
+	assert.Equal(t, codingmcp.ServerStateConnected, snapshot.Servers[0].State)
+	snapshot.Servers[0].Tools[0] = "mutated"
+
+	again, err := controller.MCP(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"docs_lookup"}, again.Servers[0].Tools)
+
+	require.NoError(t, controller.Close(t.Context()))
+	_, err = controller.MCP(t.Context())
+	require.ErrorIs(t, err, ErrClosed)
 }
 
 func TestControllerListsOnlyCurrentWorkspaceSessions(t *testing.T) {
@@ -957,6 +982,15 @@ func (*fakeRuntime) Skills(context.Context) (coding.SkillSnapshot, error) {
 }
 
 func (*fakeRuntime) SetSkillEnabled(context.Context, coding.SkillID, bool) error { return nil }
+
+func (*fakeRuntime) MCP(context.Context) (coding.MCPSnapshot, error) {
+	return coding.MCPSnapshot{
+		GenerationID: 1, Settled: true,
+		Servers: []codingmcp.ServerStatus{{
+			ID: "docs", State: codingmcp.ServerStateConnected, Tools: []string{"docs_lookup"},
+		}},
+	}, nil
+}
 
 func (r *fakeRuntime) ListWorkspaceFiles(ctx context.Context) (attachment.Snapshot, error) {
 	if r.listAttachments != nil {
