@@ -67,7 +67,7 @@ func (m *Model) applyTheme(theme colorTheme) {
 	if m.prompt.kind == promptPlanReview {
 		m.prompt.planReview.editor.SetStyles(composerStyles(m.theme, m.options.NoColor))
 	}
-	if m.route.kind == routeSessions || m.route.kind == routeSkills {
+	if m.routeUsesSearch() {
 		m.route.search.SetStyles(sessionSearchStyles(m.theme, m.options.NoColor))
 	}
 	m.setLayout()

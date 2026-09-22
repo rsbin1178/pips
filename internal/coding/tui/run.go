@@ -150,6 +150,7 @@ type Controller interface {
 	) (coding.TeamIntegrationResult, error)
 	CleanupTeam(context.Context, coding.TeamCleanupRequest) (coding.TeamCleanupResult, error)
 	Skills(context.Context) (coding.SkillSnapshot, error)
+	MCP(context.Context) (coding.MCPSnapshot, error)
 	SetSkillEnabled(context.Context, coding.SkillID, bool) error
 	WaitSubagent(context.Context, string) (subagent.Result, error)
 	CancelSubagent(context.Context, string) error

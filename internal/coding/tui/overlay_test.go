@@ -481,6 +481,9 @@ type overlayController struct {
 	agentCanceled        []string
 	skillSnapshot        coding.SkillSnapshot
 	skillErr             error
+	mcpSnapshot          coding.MCPSnapshot
+	mcpErr               error
+	mcpCalls             int
 	permissions          runtimecontrol.PermissionState
 	permissionErr        error
 	permissionUpdates    []runtimecontrol.PermissionUpdate
@@ -710,6 +713,15 @@ func (*overlayController) CleanupTeam(
 
 func (c *overlayController) Skills(context.Context) (coding.SkillSnapshot, error) {
 	return c.skillSnapshot.Clone(), nil
+}
+
+func (c *overlayController) MCP(context.Context) (coding.MCPSnapshot, error) {
+	c.mcpCalls++
+	if c.mcpErr != nil {
+		return coding.MCPSnapshot{}, c.mcpErr
+	}
+
+	return c.mcpSnapshot.Clone(), nil
 }
 
 func (c *overlayController) SetSkillEnabled(

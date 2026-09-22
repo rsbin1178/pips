@@ -27,6 +27,7 @@ type commandDescriptor struct {
 }
 
 const (
+	commandMCP                      = "mcp"
 	commandPermissions              = "permissions"
 	commandStatus                   = "status"
 	commandTeam                     = "team"
@@ -43,6 +44,7 @@ var commands = []commandDescriptor{
 	{name: "agents", description: "inspect read-only specialist runs", idleOnly: true},
 	{name: commandTeam, description: "propose or inspect a coding Team", idleOnly: true, arguments: true},
 	{name: "skills", description: "enable or disable project Skills", idleOnly: true},
+	{name: commandMCP, description: "inspect MCP server connections"},
 	{name: "model", description: "switch the process-local model", idleOnly: true},
 	{name: commandPermissions, description: "change process-local execution permissions", idleOnly: true},
 	{name: "statusline", description: "configure status-line fields", idleOnly: true},
@@ -244,6 +246,11 @@ func (m *Model) executeCommand(command commandDescriptor) (tea.Model, tea.Cmd) {
 		m.closeCommandPicker(false)
 
 		return m, m.openSkillsRouteSnapshot(previous)
+	case commandMCP:
+		previous := m.picker.previousComposer
+		m.closeCommandPicker(false)
+
+		return m, m.openMCPRouteSnapshot(previous)
 	case "tree":
 		previous := m.picker.previousComposer
 		m.closeCommandPicker(false)
