@@ -607,6 +607,14 @@ func (r *Runtime) openInteraction(
 	}()
 
 	connections := integration.connectionsSnapshot()
+	// MCP servers connect in the background after Open and Reload. The
+	// interaction is the safe boundary that freezes the tool catalog, so it
+	// waits (bounded by each server's connect timeout) for the pending
+	// connections to settle and then reports any new failures exactly once.
+	if err := connections.Wait(ctx); err != nil {
+		return nil, err
+	}
+	r.recordOpenDiagnostics(ctx, emitter, connections)
 	if snapshot, attempted, err := connections.RefreshChanged(ctx); err != nil {
 		_ = emitter.emit("", "", EventIntegrationDiagnostic, IntegrationDiagnostic{
 			Component: componentMCP, Code: "refresh_failed",

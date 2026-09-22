@@ -720,7 +720,7 @@ func openRuntime(
 	if !openPolicy.teamWorker() {
 		runtime.publishTeamRecoveryCandidates(ctx, runtime.teamRecovery)
 	}
-	runtime.recordOpenDiagnostics(ctx, integration.connectionsSnapshot())
+	runtime.recordOpenDiagnostics(ctx, nil, integration.connectionsSnapshot())
 	runtime.recordAgentPluginDiagnostics(ctx, integration.agentPluginSnapshot())
 	if !openPolicy.teamWorker() {
 		runtime.startNotificationCoordinator(ctx)
@@ -1140,14 +1140,24 @@ func activateRuntimeResources(
 	return activateResources(ctx, runtime, loaded, compiled)
 }
 
+// recordOpenDiagnostics emits every MCP diagnostic that no earlier call has
+// reported. Servers connect in the background, so it runs again at each
+// interaction boundary once the connection set has settled.
 func (r *Runtime) recordOpenDiagnostics(
 	ctx context.Context,
+	emitter *eventEmitter,
 	connections *codingmcp.Connections,
 ) {
-	for _, diagnostic := range connections.Diagnostics() {
-		r.recordDiagnostic(ctx, IntegrationDiagnostic{
-			Component: componentMCP, Code: diagnostic.Code, Message: diagnostic.Message, Disabled: true,
-		})
+	for _, connectionDiagnostic := range connections.TakeDiagnostics() {
+		diagnostic := IntegrationDiagnostic{
+			Component: componentMCP, Code: connectionDiagnostic.Code,
+			Message: connectionDiagnostic.Message, Disabled: true,
+		}
+		if emitter != nil {
+			_ = emitter.emit("", "", EventIntegrationDiagnostic, diagnostic)
+			continue
+		}
+		r.recordDiagnostic(ctx, diagnostic)
 	}
 }
 
@@ -1574,7 +1584,7 @@ func (r *Runtime) Reload(ctx context.Context) (returnErr error) {
 	r.hookDefinitions = ambientHookDefinitions(next.hookDefinitionsSnapshot())
 	r.mu.Unlock()
 
-	r.recordOpenDiagnostics(ctx, next.connectionsSnapshot())
+	r.recordOpenDiagnostics(ctx, nil, next.connectionsSnapshot())
 	r.recordAgentPluginDiagnostics(ctx, next.agentPluginSnapshot())
 	r.recordHookDiagnostics(ctx, nil, candidate.pendingHookDiagnostics)
 	retireErr := previous.retire(context.WithoutCancel(ctx))
