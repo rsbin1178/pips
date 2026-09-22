@@ -518,6 +518,10 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.route.cursor = 0
 
 		return m, nil
+	case mcpRouteDataMsg:
+		return m, m.applyMCPRouteData(message)
+	case mcpRoutePollMsg:
+		return m, m.applyMCPRoutePoll(message)
 	case skillToggleResultMsg:
 		if m.route.kind != routeSkills || message.generation != m.route.generation {
 			return m, nil
@@ -713,7 +717,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.picker = pickerState{}
 			}
 		case routeControl:
-			if m.route.kind == routeSessions || m.route.kind == routeSkills {
+			if m.routeUsesSearch() {
 				m.dismissSessionPicker(false)
 			} else {
 				m.route = routeState{}
@@ -785,7 +789,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if m.lifecycle != lifecycleReady {
 			return m, nil
 		}
-		if m.route.kind == routeSessions || m.route.kind == routeSkills {
+		if m.routeUsesSearch() {
 			var command tea.Cmd
 			m.route.search, command = m.route.search.Update(message)
 
@@ -1493,7 +1497,7 @@ func (m *Model) setLayout() {
 		m.prompt.planReview.editor.SetWidth(max(1, width-4))
 		m.prompt.planReview.commentEditor.SetWidth(max(1, width-4))
 	}
-	if m.route.kind == routeSessions || m.route.kind == routeSkills {
+	if m.routeUsesSearch() {
 		m.route.search.SetWidth(routeSearchInputWidth(width))
 	}
 }

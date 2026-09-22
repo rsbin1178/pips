@@ -23,6 +23,7 @@ const (
 	routeTeam
 	routeTree
 	routeToolDetail
+	routeMCP
 )
 
 const routeSubagent = routeChild
@@ -46,6 +47,7 @@ type routeState struct {
 	sessionRecovery     map[string]runtimecontrol.TeamRecoveryHint
 	skills              []coding.SkillSummary
 	diagnostics         []coding.SkillDiagnostic
+	mcp                 coding.MCPSnapshot
 	agentLibrary        []coding.AgentLibraryEntry
 	agentsTab           agentsRouteTab
 	showDetails         bool
@@ -169,6 +171,8 @@ func (m *Model) activateRoute(request routeOpenRequest) tea.Cmd {
 		return m.activateSessionPickerSnapshot(request.previousComposer)
 	case routeSkills:
 		return m.activateSkillsRouteSnapshot(request.previousComposer)
+	case routeMCP:
+		return m.activateMCPRouteSnapshot(request.previousComposer)
 	case routeAgents:
 		command := m.activateAgentsRoute()
 		m.setRouteComposerSnapshot(request)
@@ -280,6 +284,8 @@ func (m *Model) updateRouteKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.updateSessionPickerKey(message)
 	case routeSkills:
 		return m.updateSkillsRouteKey(message)
+	case routeMCP:
+		return m.updateMCPRouteKey(message)
 	case routeAgents:
 		return m.updateAgentsRouteKey(message)
 	case routeChild:
@@ -297,12 +303,25 @@ func (m *Model) updateRouteKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
+// routeUsesSearch reports whether the active route owns the shared search
+// box, so paste, width, and style updates reach it.
+func (m *Model) routeUsesSearch() bool {
+	switch m.route.kind {
+	case routeSessions, routeSkills, routeMCP:
+		return true
+	default:
+		return false
+	}
+}
+
 func (m *Model) routeView() tea.View {
 	switch m.route.kind {
 	case routeSessions:
 		return m.sessionPickerView()
 	case routeSkills:
 		return m.skillsRouteView()
+	case routeMCP:
+		return m.mcpRouteView()
 	case routeAgents:
 		return m.agentsRouteView()
 	case routeChild:

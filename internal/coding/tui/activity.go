@@ -149,7 +149,7 @@ func (m *Model) teamPanelSurfaceVisible() bool {
 
 func (m *Model) routeActivityVisible() bool {
 	switch m.route.kind {
-	case routeSessions, routeSkills, routeAgents, routeTree:
+	case routeSessions, routeSkills, routeMCP, routeAgents, routeTree:
 		return m.route.loading || m.route.controlling
 	case routeChild:
 		return m.route.controlling ||

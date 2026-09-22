@@ -171,7 +171,7 @@ func (m *Model) claimPromptOwner() {
 	switch m.route.kind {
 	case routeSessions:
 		m.dismissSessionPicker(true)
-	case routeSkills:
+	case routeSkills, routeMCP:
 		previousInput := m.route.previousInput
 		previousComposer := m.route.previousComposer
 		m.route = routeState{}
