@@ -22,12 +22,12 @@
 - 分类：实时 Provider、安全敏感。变更等级：本地持久状态与外部系统。
 - 前置条件：受控 MCP stdio server 使用绝对普通可执行文件，或受控 HTTPS Streamable HTTP server；工具只返回固定数据。
 - 隔离夹具：用户 `${PIPS_ACCEPT_HOME}/mcp.json` 和项目 `.pips/mcp.json`；包含一个有效 server、一个连接失败 server、一个 unknown-field/duplicate-ID 负向夹具。
-- 步骤：验证 user server 可连接；项目未信任时不读取；信任后项目 server 为 pending，通过 TUI 分别 deny/allow exact fingerprint；调用工具；修改 definition 后 `/reload`；制造 list-changed refresh 失败。
-- 预期证据：schema 为 `pips.mcp/v1alpha1`；项目批准同时写严格 `.pips/permissions.toml` 与用户 Workspace record，缺一/stale 均 pending；失败 server 只禁用自身；reload 原子发布新 generation，失败保留旧 registry；stdio 子环境不含 secrets/proxy/agent/OTel/Pips 变量。
-- 通过条件：连接、工具调用、双记录 permission、隔离失败与 reload 均符合契约；重复 ID/authority 字段失败关闭。
-- 失败条件：项目自动启用、one-sided record 生效、shell command 拼接、HTTP auth/env inline 被接受、或失败清空所有 server。
+- 步骤：为有效 server 配置一个人为慢启动（或在 `connect_timeout` 内无法及时响应 initialize）的夹具；启动 TUI 并立即打开 `/mcp`；在 server 仍为 `connecting` 时发送第一个 prompt；验证 user server 可连接；项目未信任时不读取；信任后项目 server 为 pending，通过 TUI 分别 deny/allow exact fingerprint；调用工具；修改 definition 后 `/reload`；制造 list-changed refresh 失败。
+- 预期证据：TUI 在 server 连接完成前即可输入；`/mcp` 面板显示每个 server 的 `connected/connecting/failed/pending/disabled`、scope/transport/visibility、工具数与失败 stage/code，且不显示 URL、command、header 或环境值，`Ctrl+D` 列出完整工具名；第一个 prompt 在剩余 server 连上（或各自 `connect_timeout` 到期）后才到达模型，且模型请求包含该 server 的工具；schema 为 `pips.mcp/v1alpha1`；项目批准同时写严格 `.pips/permissions.toml` 与用户 Workspace record，缺一/stale 均 pending；失败 server 只禁用自身并在下一次 prompt 时恰好产生一条 `integration.diagnostic`；reload 原子发布新 generation，失败保留旧 snapshot；stdio 子环境不含 secrets/proxy/agent/OTel/Pips 变量。
+- 通过条件：启动不被 MCP 阻塞、`/mcp` 状态与实际连接一致、首个 prompt 有界等待、连接、工具调用、双记录 permission、隔离失败与 reload 均符合契约；重复 ID/authority 字段失败关闭。
+- 失败条件：TUI 就绪时间随 server 连接时间线性增长、首个 prompt 缺少已连接 server 的工具、`/mcp` 泄露 endpoint/command/env、项目自动启用、one-sided record 生效、shell command 拼接、HTTP auth/env inline 被接受、或失败清空所有 server。
 - 清理/回滚：关闭 server；撤销人工 permission；确认 private temp/child process 已清理。
-- 来源/测试锚点：[mcp](../../internal/coding/mcp)、[mcpstdio](../../internal/coding/execution/mcpstdio)、[MCP contract](../../.trellis/spec/backend/coding-application.md#skill-bundle-and-mcp-integrations)。
+- 来源/测试锚点：[mcp](../../internal/coding/mcp)、[mcpstdio](../../internal/coding/execution/mcpstdio)、[route_mcp.go](../../internal/coding/tui/route_mcp.go)、[runtime_mcp_test.go](../../internal/coding/runtime_mcp_test.go)、[MCP contract](../../.trellis/spec/backend/coding-application.md#skill-bundle-and-mcp-integrations)。
 - 结果：`未执行`。
 
 ## MA-INT-003：Extension 生命周期与不可变 Generation

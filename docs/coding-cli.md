@@ -742,6 +742,34 @@ or waiting indefinitely. Team admission is also interactive-only:
 chooses clean versus HEAD-only admission, interrupted-Work retry, Integration,
 or cleanup on the caller's behalf.
 
+### MCP servers connect in the background
+
+MCP servers declared in `$PIPS_HOME/mcp.json`, a trusted project's
+`.pips/mcp.json`, Agent Plugins, or an ACP session no longer delay startup.
+Every enabled server connects concurrently while the TUI (or `pips exec`, the
+ACP adapter, and `pips agents run`) finishes opening, and each server's tools
+join the catalog as soon as that server has connected and listed them. A
+server that fails at transport, connect, or list time disables only itself and
+reports the same safe `integration.diagnostic` as before.
+
+The first interaction after open or `/reload` is the safe boundary that freezes
+the tool catalog: if any server is still connecting when you send a prompt, the
+interaction waits for those servers before contacting the model, bounded by
+each server's own `connect_timeout` (connect plus list, at most one minute
+each, running in parallel). Cancelling the prompt cancels the wait. Later
+interactions never wait because the set has already settled.
+
+`/mcp` opens a read-only panel listing every configured server with its state
+(`connected`, `connecting`, `failed`, `pending` for a project server awaiting
+approval, or `disabled` for a denied one), scope, transport, visibility, tool
+count, and — for a failure — the stage and diagnostic code. The selected row
+expands to the connection duration and the first tool names; `Ctrl+D` shows
+the complete tool-name list or the failure detail; typing filters by ID,
+state, scope, transport, or tool name; `Esc` restores your draft. The panel
+refreshes itself while a server is still connecting and works while a request
+is running. It never shows endpoints, commands, headers, or environment values.
+Reconnecting still goes through `/reload`.
+
 ## Output
 
 `--output plain` is the default. Stdout contains only the final assistant text
