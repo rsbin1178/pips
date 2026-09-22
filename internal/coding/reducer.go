@@ -517,8 +517,13 @@ func (state *State) apply(event Event) error {
 			return protocolError("run %q cannot complete turn %d", event.RunID, payload.Turn)
 		}
 
+		// TurnCompleted carries usage cumulative for the run; the context the
+		// model actually saw is the last request alone, so subtract the
+		// previous turn's cumulative total before sizing it.
+		if state.Runs[index].ParentRunID == "" {
+			state.ContextTokens = contextTokensFromUsage(turnUsage(state.Runs[index].Usage, payload.Usage))
+		}
 		state.Runs[index].Usage = payload.Usage
-		state.ContextTokens = contextTokensFromUsage(payload.Usage)
 		state.Runs[index].TurnOpen = false
 		delete(state.openTurns, event.RunID)
 	case MessageCommitted:
@@ -739,6 +744,22 @@ func (state *State) apply(event Event) error {
 	}
 
 	return nil
+}
+
+// turnUsage derives one turn's usage from consecutive cumulative run totals.
+// A cumulative total that moved backwards is treated as a fresh count.
+func turnUsage(previous, cumulative TokenUsage) TokenUsage {
+	if cumulative.InputTokens < previous.InputTokens || cumulative.OutputTokens < previous.OutputTokens {
+		return cumulative
+	}
+
+	return TokenUsage{
+		InputTokens:       cumulative.InputTokens - previous.InputTokens,
+		OutputTokens:      cumulative.OutputTokens - previous.OutputTokens,
+		ReasoningTokens:   max(0, cumulative.ReasoningTokens-previous.ReasoningTokens),
+		CachedInputTokens: max(0, cumulative.CachedInputTokens-previous.CachedInputTokens),
+		CacheWriteTokens:  max(0, cumulative.CacheWriteTokens-previous.CacheWriteTokens),
+	}
 }
 
 func contextTokensFromUsage(usage TokenUsage) int {

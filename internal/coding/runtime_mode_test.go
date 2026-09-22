@@ -61,15 +61,30 @@ func TestCatalogPolicyForModeUsesTheCompletePrivilegedToolset(t *testing.T) {
 func TestLeasedToolGuardDeniesCallsOutsideSnapshot(t *testing.T) {
 	t.Parallel()
 
-	guard := leasedToolGuard(ModePlan, []catalog.Descriptor{{Name: "read"}}, false)
+	known := []agent.Tool{
+		agent.NewTool("read", "", func(context.Context, struct{}) (string, error) { return "", nil }),
+		agent.NewTool("apply_patch", "", func(context.Context, struct{}) (string, error) { return "", nil }),
+	}
+	guard := leasedToolGuard(ModePlan, []catalog.Descriptor{{Name: "read"}}, true, known)
 	assert.Equal(t, agent.ToolDecisionAllow, guard(t.Context(), agent.ToolCallInfo{
 		ToolCall: agent.ToolCall{Name: "read"},
+	}).Action)
+	assert.Equal(t, agent.ToolDecisionAllow, guard(t.Context(), agent.ToolCallInfo{
+		ToolCall: agent.ToolCall{Name: "tool_search"},
 	}).Action)
 	denied := guard(t.Context(), agent.ToolCallInfo{
 		ToolCall: agent.ToolCall{Name: "apply_patch"},
 	})
 	assert.Equal(t, agent.ToolDecisionDeny, denied.Action)
 	assert.Contains(t, denied.Reason, "plan mode")
+
+	// A misspelled name is a model slip, not a mode restriction.
+	unknown := guard(t.Context(), agent.ToolCallInfo{
+		ToolCall: agent.ToolCall{Name: "search_tools"},
+	})
+	assert.Equal(t, agent.ToolDecisionDeny, unknown.Action)
+	assert.Equal(t, `unknown tool "search_tools"`, unknown.Reason)
+	assert.NotContains(t, unknown.Reason, "mode")
 }
 
 func TestRuntimePlanModeInteractionLeasesTheFullToolCatalog(t *testing.T) {
