@@ -637,3 +637,35 @@ func reducerEvents() []Event {
 
 	return events
 }
+
+func TestReduceContextTokensUseLastTurnNotCumulativeRunUsage(t *testing.T) {
+	t.Parallel()
+
+	events := []Event{
+		newSessionEvent(EventSessionOpened, SessionOpened{Provider: ai.ProviderOpenAI, ModelID: "gpt-test"}),
+		newInteractionEvent(EventInteractionStarted, InteractionStarted{}),
+		newStatusEvent(EventStatusChanged, StatusChanged{Phase: PhaseRunning}),
+		newTestEvent(EventRunStarted, RunStarted{Agent: "coding"}),
+		newTestEvent(EventTurnStarted, TurnStarted{Turn: 1}),
+		newTestEvent(EventTurnCompleted, TurnCompleted{
+			Turn: 1, Usage: TokenUsage{InputTokens: 4000, OutputTokens: 200},
+		}),
+		newTestEvent(EventTurnStarted, TurnStarted{Turn: 2}),
+		// Cumulative for the run: the second request alone was 4300 + 100.
+		newTestEvent(EventTurnCompleted, TurnCompleted{
+			Turn: 2, Usage: TokenUsage{InputTokens: 8300, OutputTokens: 300},
+		}),
+	}
+
+	var state State
+	for index, event := range events {
+		var err error
+
+		event.Sequence = uint64(index + 1)
+		state, err = Reduce(state, event)
+		require.NoError(t, err)
+	}
+
+	assert.Equal(t, 4400, state.ContextTokens)
+	assert.Equal(t, TokenUsage{InputTokens: 8300, OutputTokens: 300}, state.Runs[0].Usage)
+}

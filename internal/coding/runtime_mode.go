@@ -24,6 +24,7 @@ func leasedToolGuard(
 	mode OperatingMode,
 	descriptors []catalog.Descriptor,
 	toolSearch bool,
+	known []agent.Tool,
 ) func(context.Context, agent.ToolCallInfo) agent.ToolDecision {
 	authorized := make(map[string]struct{}, len(descriptors)+1)
 	for _, descriptor := range descriptors {
@@ -36,9 +37,24 @@ func leasedToolGuard(
 		authorized["tool_search"] = struct{}{}
 	}
 
+	// A name the toolbox has never heard of is a model slip, not a policy
+	// decision. Reporting it as mode-unavailable misleads the model into
+	// believing the capability was disabled instead of retrying the right name.
+	exists := make(map[string]struct{}, len(known)+len(authorized))
+	for _, tool := range known {
+		exists[tool.Decl().Name] = struct{}{}
+	}
+	for name := range authorized {
+		exists[name] = struct{}{}
+	}
+
 	return func(_ context.Context, info agent.ToolCallInfo) agent.ToolDecision {
 		if _, ok := authorized[info.Name]; ok {
 			return agent.ToolDecision{}
+		}
+
+		if _, ok := exists[info.Name]; !ok {
+			return agent.DenyTool(fmt.Sprintf("unknown tool %q", info.Name))
 		}
 
 		return agent.DenyTool(fmt.Sprintf(

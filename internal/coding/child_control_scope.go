@@ -332,7 +332,7 @@ func newChildControlScope(
 	composed := extension.ComposeHooks(
 		extension.Hooks{BeforeTool: scope.guard.before(scope.plan.Limits)},
 		extension.Hooks{BeforeTool: scope.hooks.beforeTool},
-		extension.Hooks{BeforeTool: leasedToolGuard(scope.factory.mode, descriptors, scope.plan.ToolSearch)},
+		extension.Hooks{BeforeTool: leasedToolGuard(scope.factory.mode, descriptors, scope.plan.ToolSearch, allTools)},
 		extension.Hooks{BeforeTool: stateful.beforeTool},
 		extension.Hooks{BeforeTool: scope.questions.BeforeTool},
 		extension.Hooks{BeforeTool: scope.changes.beforeTool},
