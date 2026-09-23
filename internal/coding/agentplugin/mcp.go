@@ -24,6 +24,9 @@ import (
 
 var mcpTopFields = map[string]struct{}{"$schema": {}, "mcpServers": {}}
 
+// maxServerIDLength mirrors the native MCP server ID length limit.
+const maxServerIDLength = 48
+
 //nolint:gocyclo // Top-level isolation and independent server-entry recovery stay explicit.
 func loadMCP(
 	ctx context.Context,
@@ -83,6 +86,7 @@ func loadMCP(
 		names = names[:limits.MaxMCPServers]
 	}
 	definitions := make([]codingmcp.Definition, 0, len(names))
+	seen := make(map[string]struct{}, len(names))
 	for _, name := range names {
 		if err := ctx.Err(); err != nil {
 			diagnostics = append(diagnostics, componentDiagnostic(
@@ -109,6 +113,14 @@ func loadMCP(
 			))
 			continue
 		}
+		if _, duplicate := seen[definition.ID]; duplicate {
+			diagnostics = append(diagnostics, componentDiagnostic(
+				pkg, "mcp:"+name, "server_duplicate",
+				fmt.Sprintf("server name resolves to the same ID %q as an earlier server", definition.ID),
+			))
+			continue
+		}
+		seen[definition.ID] = struct{}{}
 		definitions = append(definitions, definition)
 	}
 
@@ -134,10 +146,10 @@ func decodeMCPServer(
 		definition, err := decodeStdioServer(name, object, pkg)
 		return definition, true, err
 	case "streamable-http":
-		definition, err := decodeRemoteServer(name, object, pkg)
+		definition, err := decodeRemoteServer(name, object)
 		return definition, true, err
 	case "sse":
-		_, err := decodeRemoteServer(name, object, pkg)
+		_, err := decodeRemoteServer(name, object)
 		return codingmcp.Definition{}, false, err
 	default:
 		return codingmcp.Definition{}, false, errors.New("unsupported server type")
@@ -186,7 +198,7 @@ func decodeStdioServer(
 	}
 
 	return codingmcp.Definition{
-		ID: internalServerID(pkg.instance, name), Scope: codingmcp.ScopeAgentPlugin,
+		ID: serverID(name), Scope: codingmcp.ScopeAgentPlugin,
 		Transport: codingmcp.TransportStdio, Command: command, Args: args,
 		Environment: environment, WorkingDir: workingDirectory,
 		PluginRoot: pkg.Root, PluginData: data, ConnectTimeout: 10 * time.Second,
@@ -240,7 +252,6 @@ func securePluginDataDirectory(directory string, parents bool) error {
 func decodeRemoteServer(
 	name string,
 	object map[string]json.RawMessage,
-	pkg Package,
 ) (codingmcp.Definition, error) {
 	if err := rejectUnknownFields(object, "type", "url", "headers"); err != nil {
 		return codingmcp.Definition{}, err
@@ -259,7 +270,7 @@ func decodeRemoteServer(
 	}
 
 	return codingmcp.Definition{
-		ID: internalServerID(pkg.instance, name), Scope: codingmcp.ScopeAgentPlugin,
+		ID: serverID(name), Scope: codingmcp.ScopeAgentPlugin,
 		Transport: codingmcp.TransportStreamableHTTP, URL: endpoint,
 		Headers: headers, ConnectTimeout: 10 * time.Second,
 	}, nil
@@ -434,10 +445,39 @@ func rejectUnknownFields(object map[string]json.RawMessage, allowed ...string) e
 	return nil
 }
 
-func internalServerID(root, server string) string {
-	sum := sha256.Sum256([]byte(root + "\x00" + server))
+// serverID derives the user-visible native server ID from a plugin mcp.json
+// server name. The name is lowercased and every run of characters outside
+// [a-z0-9_] becomes one hyphen so the ID satisfies the native pattern; names
+// that would exceed the native length limit are truncated and suffixed with a
+// short content hash so two long names stay distinct.
+func serverID(server string) string {
+	var builder strings.Builder
+	separator := false
+	for _, r := range strings.ToLower(server) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			builder.WriteRune(r)
+			separator = false
+		case r == '_' && !separator && builder.Len() > 0:
+			builder.WriteRune(r)
+			separator = true
+		case !separator && builder.Len() > 0:
+			builder.WriteRune('-')
+			separator = true
+		}
+	}
+	id := strings.TrimRight(builder.String(), "-_")
+	if id == "" {
+		id = "server"
+	}
+	if len(id) <= maxServerIDLength {
+		return id
+	}
+	sum := sha256.Sum256([]byte(server))
+	suffix := hex.EncodeToString(sum[:4])
+	id = strings.TrimRight(id[:maxServerIDLength-len(suffix)-1], "-_")
 
-	return "ap-" + hex.EncodeToString(sum[:12])
+	return id + "-" + suffix
 }
 
 func pluginDataPath(base, root string) string {
