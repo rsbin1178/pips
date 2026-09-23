@@ -84,6 +84,9 @@ func AllowAll(tenantID string, maxRisk Risk) Policy {
 type Catalog struct {
 	entries []Entry
 	byName  map[string]Entry
+	// docs is indexed in parallel with entries and built once so Search never
+	// re-tokenizes declarations on the request path.
+	docs []searchDocument
 }
 
 // New validates and indexes explicitly registered tools.
@@ -117,6 +120,7 @@ func New(entries ...Entry) (*Catalog, error) {
 		entry.Tags = slices.Clone(entry.Tags)
 		catalog.entries = append(catalog.entries, entry)
 		catalog.byName[decl.Name] = entry
+		catalog.docs = append(catalog.docs, buildSearchDocument(entry))
 	}
 
 	return catalog, nil
@@ -166,17 +170,27 @@ func (c *Catalog) Snapshot(ctx context.Context, policy Policy) ([]agent.Tool, er
 	return tools, nil
 }
 
-// Search returns policy-authorized descriptors whose name, description, source
-// or tags contain every query term. It never exposes a Tool implementation.
+// Search returns policy-authorized descriptors. An empty query returns every
+// authorized descriptor in registration order. A non-empty query ranks
+// candidates by relevance: each term is matched against the tool name,
+// top-level parameter names, and the free text formed by the description,
+// parameter descriptions, source, and tags. Name and parameter hits outweigh
+// text hits, and a tool is a candidate when at least one term matches. Ties
+// break on name. Search never exposes a Tool implementation.
 func (c *Catalog) Search(ctx context.Context, policy Policy, query string) ([]Descriptor, error) {
 	if c == nil {
 		return nil, errors.New("catalog: nil catalog")
 	}
 
-	terms := strings.Fields(strings.ToLower(query))
+	terms := SearchTokens(query)
 
-	matched := make([]Descriptor, 0, len(c.entries))
-	for _, entry := range c.entries {
+	type ranked struct {
+		descriptor Descriptor
+		score      int
+	}
+
+	matched := make([]ranked, 0, len(c.entries))
+	for index, entry := range c.entries {
 		descriptor := describe(entry)
 
 		allowed, err := policy.allows(ctx, descriptor)
@@ -184,12 +198,37 @@ func (c *Catalog) Search(ctx context.Context, policy Policy, query string) ([]De
 			return nil, fmt.Errorf("catalog: authorize %q: %w", descriptor.Name, err)
 		}
 
-		if allowed && descriptorMatches(entry, terms) {
-			matched = append(matched, descriptor)
+		if !allowed {
+			continue
 		}
+
+		score := 0
+		if len(terms) > 0 {
+			score = c.docs[index].score(terms)
+			if score == 0 {
+				continue
+			}
+		}
+
+		matched = append(matched, ranked{descriptor: descriptor, score: score})
 	}
 
-	return matched, nil
+	if len(terms) > 0 {
+		slices.SortStableFunc(matched, func(a, b ranked) int {
+			if a.score != b.score {
+				return b.score - a.score
+			}
+
+			return strings.Compare(a.descriptor.Name, b.descriptor.Name)
+		})
+	}
+
+	descriptors := make([]Descriptor, len(matched))
+	for index, item := range matched {
+		descriptors[index] = item.descriptor
+	}
+
+	return descriptors, nil
 }
 
 // Tools selects exact tool names from an already policy-gated catalog. It is
@@ -283,32 +322,4 @@ func validSource(source Source) bool {
 func describe(entry Entry) Descriptor {
 	decl := entry.Tool.Decl()
 	return Descriptor{Name: decl.Name, Description: decl.Description, Source: entry.Source, Risk: entry.Risk, Tags: slices.Clone(entry.Tags)}
-}
-
-func descriptorMatches(entry Entry, terms []string) bool {
-	if len(terms) == 0 {
-		return true
-	}
-
-	var text strings.Builder
-
-	decl := entry.Tool.Decl()
-	text.WriteString(decl.Name)
-	text.WriteByte(' ')
-	text.WriteString(decl.Description)
-	text.WriteByte(' ')
-	text.WriteString(entry.Source.Kind)
-	text.WriteByte(' ')
-	text.WriteString(entry.Source.ID)
-	text.WriteByte(' ')
-	text.WriteString(strings.Join(entry.Tags, " "))
-
-	lower := strings.ToLower(text.String())
-	for _, term := range terms {
-		if !strings.Contains(lower, term) {
-			return false
-		}
-	}
-
-	return true
 }

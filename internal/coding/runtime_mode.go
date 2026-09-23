@@ -3,6 +3,7 @@ package coding
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"github.com/rsbin1178/pips/agent"
 	"github.com/rsbin1178/pips/agent/catalog"
@@ -20,10 +21,13 @@ func catalogPolicyForMode(mode OperatingMode, tenantID string) (catalog.Policy, 
 	}
 }
 
+// leasedToolGuard denies calls outside the interaction's leased toolset.
+// searchName is the deferred discovery tool name when Tool Search is enabled
+// and empty when it is disabled.
 func leasedToolGuard(
 	mode OperatingMode,
 	descriptors []catalog.Descriptor,
-	toolSearch bool,
+	searchName string,
 	known []agent.Tool,
 ) func(context.Context, agent.ToolCallInfo) agent.ToolDecision {
 	authorized := make(map[string]struct{}, len(descriptors)+1)
@@ -31,10 +35,12 @@ func leasedToolGuard(
 		authorized[descriptor.Name] = struct{}{}
 	}
 
-	if toolSearch {
-		// tool_search is synthesized after catalog policy has already bounded
-		// its result set. Its activation path re-authorizes every selected tool.
-		authorized["tool_search"] = struct{}{}
+	if searchName != "" {
+		// The discovery tool is synthesized after catalog policy has already
+		// bounded its result set, and it stays callable even while hidden so
+		// a blind call receives the registry hint. Its activation path
+		// re-authorizes every selected tool.
+		authorized[searchName] = struct{}{}
 	}
 
 	// A name the toolbox has never heard of is a model slip, not a policy
@@ -48,13 +54,20 @@ func leasedToolGuard(
 		exists[name] = struct{}{}
 	}
 
+	knownNames := make([]string, 0, len(exists))
+	for name := range exists {
+		knownNames = append(knownNames, name)
+	}
+
+	slices.Sort(knownNames)
+
 	return func(_ context.Context, info agent.ToolCallInfo) agent.ToolDecision {
 		if _, ok := authorized[info.Name]; ok {
 			return agent.ToolDecision{}
 		}
 
 		if _, ok := exists[info.Name]; !ok {
-			return agent.DenyTool(fmt.Sprintf("unknown tool %q", info.Name))
+			return agent.DenyTool(unknownToolReason(info.Name, knownNames))
 		}
 
 		return agent.DenyTool(fmt.Sprintf(

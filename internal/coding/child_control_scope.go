@@ -33,23 +33,26 @@ import (
 // parent approval controller, parent pending runner, parent harness, or parent
 // interaction pointer.
 type childScopeFactory struct {
-	workspace            workspace.Workspace
-	tree                 *workspace.Tree
-	toolLimits           tools.Limits
-	policy               execution.Policy
-	executor             *execution.Executor
-	sandbox              config.SandboxMode
-	network              config.SandboxNetworkMode
-	requestPolicy        func(*ai.Request)
-	toolTimeout          time.Duration
-	inspector            *git.Inspector
-	hooks                []hooks.Definition
-	privateHooks         []hooks.Definition
-	hookRunner           hooks.Runner
-	onHookDiagnostics    func(context.Context, []hooks.Diagnostic)
-	model                ai.LanguageModel
-	mode                 OperatingMode
-	mcpEntries           []catalog.Entry
+	workspace         workspace.Workspace
+	tree              *workspace.Tree
+	toolLimits        tools.Limits
+	policy            execution.Policy
+	executor          *execution.Executor
+	sandbox           config.SandboxMode
+	network           config.SandboxNetworkMode
+	requestPolicy     func(*ai.Request)
+	toolTimeout       time.Duration
+	inspector         *git.Inspector
+	hooks             []hooks.Definition
+	privateHooks      []hooks.Definition
+	hookRunner        hooks.Runner
+	onHookDiagnostics func(context.Context, []hooks.Diagnostic)
+	model             ai.LanguageModel
+	mode              OperatingMode
+	mcpEntries        []catalog.Entry
+	// toolSearchNameFor resolves the discovery tool name for the provider that
+	// serves this child; nil uses catalog.DefaultToolSearchName.
+	toolSearchNameFor    func(ai.Provider) string
 	controls             *childControlRegistry
 	subagents            *subagent.Manager
 	delegationDispatcher subagent.Dispatcher
@@ -304,14 +307,20 @@ func newChildControlScope(
 	}
 	scope.changes = newInteractionChangeTracker(factory.inspector, descriptors)
 	policy := catalog.AllowAll(factory.workspace.Identity().Key(), catalog.RiskPrivileged)
-	search, err := catalog.NewToolSearch(childCatalog, policy, catalog.ToolSearchOptions{
-		Enabled: scope.plan.ToolSearch,
-	})
+	searchOptions := catalog.ToolSearchOptions{Enabled: scope.plan.ToolSearch}
+	if factory.toolSearchNameFor != nil {
+		searchOptions.Name = factory.toolSearchNameFor(factory.model.Provider())
+	}
+	search, err := catalog.NewToolSearch(childCatalog, policy, searchOptions)
 	if err != nil {
 		cancel()
-		return nil, err
+		return nil, fmt.Errorf("%w: tool search: %w", ErrRuntimeInvalid, err)
 	}
-	visibleTools, err := search.Tools(ctx)
+	searchName := ""
+	if scope.plan.ToolSearch {
+		searchName = search.Name()
+	}
+	executableTools, err := search.ExecutableTools(ctx)
 	if err != nil {
 		cancel()
 		return nil, err
@@ -321,7 +330,7 @@ func newChildControlScope(
 		cancel()
 		return nil, err
 	}
-	allTools = appendUniqueTools(allTools, visibleTools...)
+	allTools = appendUniqueTools(allTools, executableTools...)
 
 	preloaded, err := activateExplicitSkills(skillCatalog, scope.plan.PreloadedSkills)
 	if err != nil {
@@ -332,7 +341,7 @@ func newChildControlScope(
 	composed := extension.ComposeHooks(
 		extension.Hooks{BeforeTool: scope.guard.before(scope.plan.Limits)},
 		extension.Hooks{BeforeTool: scope.hooks.beforeTool},
-		extension.Hooks{BeforeTool: leasedToolGuard(scope.factory.mode, descriptors, scope.plan.ToolSearch, allTools)},
+		extension.Hooks{BeforeTool: leasedToolGuard(scope.factory.mode, descriptors, searchName, allTools)},
 		extension.Hooks{BeforeTool: stateful.beforeTool},
 		extension.Hooks{BeforeTool: scope.questions.BeforeTool},
 		extension.Hooks{BeforeTool: scope.changes.beforeTool},
@@ -364,7 +373,7 @@ func newChildControlScope(
 		scope.child,
 		harness.WithSystem(scope.plan.Instructions),
 		harness.WithSystemSuffix(preloaded),
-		harness.WithTools(visibleTools...),
+		harness.WithTools(executableTools...),
 		harness.WithSkillCatalog(skillCatalog),
 		harness.WithOnEvent(func(eventCtx context.Context, event agent.Event) {
 			if _, ok := event.Payload().(agent.RunCompleted); ok {

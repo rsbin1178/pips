@@ -63,9 +63,11 @@ model = "anthropic/project-model"
 		"show",
 		"--reasoning=high",
 		"--tool-search=false",
+		"--tool-search-name=proxy_search",
 	)
 	require.NoError(t, err)
 	assert.Contains(t, output, `config_file = "`+fixture.layout.ConfigFile()+`" # state=loaded`)
+	assert.Contains(t, output, `tool_search_name = "proxy_search" # source=flag detail="--tool-search-name"`)
 	assert.Contains(t, output, `model = "openai/env-model" # source=environment detail="PIPS_MODEL"`)
 	assert.Contains(t, output, `reasoning = "high" # source=flag detail="--reasoning"`)
 	assert.Contains(t, output, `resolved.protocol = "openai/responses"`)
@@ -92,8 +94,12 @@ model = "anthropic/project-model"
 	assert.Contains(t, output, `model = "openai/env-model" # source=environment detail="PIPS_MODEL"`)
 	assert.Contains(t, output, `resolved.protocol = "openai/responses"`)
 	assert.Contains(t, output, `tool_search = true # source=config_file detail="`)
+	assert.Contains(t, output, `tool_search_name = "pips_tool_search" # source=default detail="built-in"`)
 	assert.Contains(t, output, `mode = "plan" # source=config_file detail="`)
 	assert.NotContains(t, output, "project-model")
+
+	_, err = executeWithDependencies(t, dependencies, "config", "show", "--tool-search-name=bad name")
+	require.ErrorContains(t, err, "--tool-search-name")
 }
 
 func TestConfigPathDoesNotDecodeFiles(t *testing.T) {

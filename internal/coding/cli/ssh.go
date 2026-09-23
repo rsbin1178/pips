@@ -20,6 +20,7 @@ var sshIrrelevantFlags = []string{
 	"reasoning",
 	"sandbox",
 	"tool-search",
+	"tool-search-name",
 	"variant",
 }
 

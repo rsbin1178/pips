@@ -10,6 +10,9 @@
 // ToolSearch implements optional, source-aware deferred discovery. With
 // ToolSearchOptions{Enabled: true}, local and Team tools stay direct while MCP
 // and extension tools are deferred by default; DeferredSources customizes that
-// policy. AgentOptions installs the direct snapshot and prepare hook. Raw
-// files under a Skill's scripts/ folder are never discovered as tools.
+// policy. The discovery tool is named DefaultToolSearchName unless Name
+// overrides it, is only advertised while at least one authorized deferred tool
+// exists, and ranks Search results by name, parameter, and description hits.
+// AgentOptions installs the executable snapshot and prepare hook. Raw files
+// under a Skill's scripts/ folder are never discovered as tools.
 package catalog

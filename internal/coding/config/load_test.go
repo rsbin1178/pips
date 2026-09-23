@@ -72,6 +72,96 @@ func TestLoadDynamicSubagentsGatePrecedenceAndProvenance(t *testing.T) {
 	assert.Equal(t, "--dynamic-subagents", source.Detail)
 }
 
+func TestLoadToolSearchNamePrecedenceAndProviderOverride(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, `
+tool_search_name = "file_search"
+
+[providers.proxy]
+protocol = "openai/responses"
+base_url = "https://proxy.example/v1"
+tool_search_name = "proxy_search"
+
+[providers.proxy.models."gpt"]
+`)
+
+	defaults, err := config.Load(config.LoadOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, "pips_tool_search", defaults.Config.ToolSearchName)
+	assert.Equal(t, "pips_tool_search", defaults.Config.ToolSearchNameFor("anything"))
+	source, ok := defaults.Config.Source(config.FieldToolSearchName)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceDefault, source.Kind)
+
+	fromFile, err := config.Load(config.LoadOptions{ConfigFile: path})
+	require.NoError(t, err)
+	assert.Equal(t, "file_search", fromFile.Config.ToolSearchName)
+	assert.Equal(t, "file_search", fromFile.Config.ToolSearchNameFor("openai"))
+	assert.Equal(t, "proxy_search", fromFile.Config.ToolSearchNameFor("proxy"))
+	assert.Equal(t, "proxy_search", fromFile.Config.Providers["proxy"].ToolSearchName)
+	source, ok = fromFile.Config.Source(config.FieldToolSearchName)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceConfigFile, source.Kind)
+	require.NoError(t, fromFile.Config.ValidateRuntime())
+
+	fromEnv, err := config.Load(config.LoadOptions{
+		ConfigFile: path,
+		LookupEnv:  mapLookup(map[string]string{config.ToolSearchNameEnv: " env_search "}),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "env_search", fromEnv.Config.ToolSearchName)
+	assert.Equal(t, "proxy_search", fromEnv.Config.ToolSearchNameFor("proxy"))
+	source, ok = fromEnv.Config.Source(config.FieldToolSearchName)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceEnvironment, source.Kind)
+	assert.Equal(t, config.ToolSearchNameEnv, source.Detail)
+
+	flagName := "flag-search"
+	fromFlag, err := config.Load(config.LoadOptions{
+		ConfigFile:    path,
+		LookupEnv:     mapLookup(map[string]string{config.ToolSearchNameEnv: "env_search"}),
+		FlagOverrides: config.Patch{ToolSearchName: &flagName},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "flag-search", fromFlag.Config.ToolSearchName)
+	source, ok = fromFlag.Config.Source(config.FieldToolSearchName)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceFlag, source.Kind)
+	assert.Equal(t, "--tool-search-name", source.Detail)
+}
+
+func TestLoadRejectsInvalidToolSearchName(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	for name, content := range map[string]string{
+		"space":    "tool_search_name = \"tool search\"\n",
+		"dot":      "tool_search_name = \"tool.search\"\n",
+		"empty":    "tool_search_name = \"\"\n",
+		"too-long": "tool_search_name = \"" + strings.Repeat("a", 65) + "\"\n",
+		"provider": "[providers.proxy]\ntool_search_name = \"bad name\"\n",
+	} {
+		path := filepath.Join(dir, name+".toml")
+		writeFile(t, path, content)
+		_, err := config.Load(config.LoadOptions{ConfigFile: path})
+		require.ErrorIs(t, err, config.ErrInvalid, name)
+		require.ErrorContains(t, err, "tool_search_name", name)
+	}
+
+	_, err := config.Load(config.LoadOptions{
+		LookupEnv: mapLookup(map[string]string{config.ToolSearchNameEnv: "bad/name"}),
+	})
+	require.ErrorIs(t, err, config.ErrInvalid)
+	require.ErrorContains(t, err, config.ToolSearchNameEnv)
+
+	invalid := "bad name"
+	_, err = config.Load(config.LoadOptions{FlagOverrides: config.Patch{ToolSearchName: &invalid}})
+	require.ErrorIs(t, err, config.ErrInvalid)
+	require.ErrorContains(t, err, "flags")
+}
+
 func TestLoadSubagentBudgetsAndFieldProvenance(t *testing.T) {
 	t.Parallel()
 

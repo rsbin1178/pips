@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/rsbin1178/pips/agent/catalog"
 	"github.com/rsbin1178/pips/agent/continuation"
 	"github.com/rsbin1178/pips/agent/team"
 	"github.com/rsbin1178/pips/ai"
@@ -48,7 +49,7 @@ func TestTeamWorkerRuntimeUsesExactProfileAndCatalog(t *testing.T) {
 	}
 	for _, forbidden := range []string{
 		"write_plan", "run_subagent", "spawn_agent", "team_claim_task",
-		"team_release_task", "team_finish_task_attempt", "tool_search",
+		"team_release_task", "team_finish_task_attempt", catalog.DefaultToolSearchName,
 	} {
 		assert.NotContains(t, tools, forbidden)
 	}

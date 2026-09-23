@@ -72,6 +72,7 @@ func newConfigShowCommand(dependencies Dependencies, flags *rootFlags) *cobra.Co
 				config.FieldVariant:          quotedOrUnset(state.config.Config.Variant),
 				config.FieldReasoning:        optionalReasoning(state.config.Config.Reasoning),
 				config.FieldToolSearch:       strconv.FormatBool(state.config.Config.ToolSearch),
+				config.FieldToolSearchName:   strconv.Quote(state.config.Config.ToolSearchName),
 				config.FieldDynamicSubagents: strconv.FormatBool(state.config.Config.DynamicSubagents),
 				config.FieldSubagentMaxDepth: strconv.Itoa(
 					state.config.Config.Subagent.MaxDepth,

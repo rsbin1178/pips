@@ -19,7 +19,7 @@
   test -s "${PIPS_ACCEPT_ROOT}/pips.bash"
   ```
 
-- 预期证据：构建退出码为 0；`version` 是单行、非空且不包含凭据；帮助列出 `acp`、`agents`、`completion`、`config`、`doctor`、`exec`、`hooks`、`plugin`、`resume`、`session`、`ssh`、`version`；根 flags 至少包含 `--workspace`、`--config`、`--model`、`--variant`、`--reasoning`、`--tool-search`、`--dynamic-subagents`、`--mode`、`--sandbox`、`--approval`；补全文件非空。
+- 预期证据：构建退出码为 0；`version` 是单行、非空且不包含凭据；帮助列出 `acp`、`agents`、`completion`、`config`、`doctor`、`exec`、`hooks`、`plugin`、`resume`、`session`、`ssh`、`version`；根 flags 至少包含 `--workspace`、`--config`、`--model`、`--variant`、`--reasoning`、`--tool-search`、`--tool-search-name`、`--dynamic-subagents`、`--mode`、`--sandbox`、`--approval`；补全文件非空。
 - 通过条件：以上命令全为 0，命令与 flags 无遗漏，补全脚本对应 Bash 且不混入日志。
 - 失败条件：构建失败、版本为空、公开帮助面缺项，或补全输出为空/污染。
 - 清理/回滚：保留脱敏输出后删除或移入回收站的对象仅限 `${PIPS_ACCEPT_ROOT}/pips` 与 `${PIPS_ACCEPT_ROOT}/pips.bash`。
@@ -35,6 +35,7 @@
   ```toml
   mode = "agent"
   tool_search = true
+  tool_search_name = "pips_tool_search"
 
   [providers.openai.models."acceptance-model"]
   default = true
@@ -51,7 +52,7 @@
   PIPS_REASONING=high pips --workspace "${PIPS_ACCEPT_WORKSPACE}" config show --tool-search=false
   ```
 
-- 预期证据：`config path` 指向 `${PIPS_ACCEPT_HOME}/config.toml`；校验输出为成功；第一次 `show` 的 model 为 `openai/acceptance-model`、reasoning 为 `low`、tool search 为 `true`；第二次 reasoning 来源为环境变量 `PIPS_REASONING`、tool search 来源为 flag `--tool-search`。输出只显示配置值与来源，不显示 `API_KEY`。
+- 预期证据：`config path` 指向 `${PIPS_ACCEPT_HOME}/config.toml`；校验输出为成功；第一次 `show` 的 model 为 `openai/acceptance-model`、reasoning 为 `low`、tool search 为 `true`、`tool_search_name` 为 `"pips_tool_search"` 且来源为 config_file；第二次 reasoning 来源为环境变量 `PIPS_REASONING`、tool search 来源为 flag `--tool-search`。输出只显示配置值与来源，不显示 `API_KEY`。
 - 通过条件：解析值、选择结果和每个覆盖项的 provenance 均准确，且 project `.pips/config.toml` 未被隐式加载。
 - 失败条件：默认路径错误、分层优先级错误、未知字段被静默忽略、或输出泄露凭据。
 - 清理/回滚：保留原始夹具摘要；此文件随隔离 `PIPS_HOME` 清理。

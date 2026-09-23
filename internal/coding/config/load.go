@@ -26,6 +26,7 @@ const (
 	VariantEnv          = "PIPS_VARIANT"
 	ReasoningEnv        = "PIPS_REASONING"
 	ToolSearchEnv       = "PIPS_TOOL_SEARCH"
+	ToolSearchNameEnv   = "PIPS_TOOL_SEARCH_NAME"
 	DynamicSubagentsEnv = "PIPS_DYNAMIC_SUBAGENTS"
 	ModeEnv             = "PIPS_MODE"
 	SandboxEnv          = "PIPS_SANDBOX"
@@ -149,6 +150,7 @@ type fileConfig struct {
 	Reasoning             *string                    `toml:"reasoning"`
 	Providers             map[string]fileProvider    `toml:"providers"`
 	ToolSearch            *bool                      `toml:"tool_search"`
+	ToolSearchName        *string                    `toml:"tool_search_name"`
 	DynamicSubagents      *bool                      `toml:"dynamic_subagents"`
 	Mode                  *string                    `toml:"mode"`
 	TUI                   *fileTUI                   `toml:"tui"`
@@ -193,6 +195,7 @@ type fileProvider struct {
 	AllowPrivateIPs *bool                `toml:"allow_private_ips"`
 	Compatibility   fileCompatibility    `toml:"compatibility"`
 	Capabilities    fileCapabilities     `toml:"capabilities"`
+	ToolSearchName  *string              `toml:"tool_search_name"`
 	Models          map[string]fileModel `toml:"models"`
 }
 
@@ -616,6 +619,13 @@ func decodeLayer(value fileConfig) (fileLayer, error) {
 		layer.patch.Reasoning = &level
 	}
 	layer.patch.ToolSearch = value.ToolSearch
+	if value.ToolSearchName != nil {
+		name, err := ParseToolSearchName(*value.ToolSearchName)
+		if err != nil {
+			return fileLayer{}, err
+		}
+		layer.patch.ToolSearchName = &name
+	}
 	layer.patch.DynamicSubagents = value.DynamicSubagents
 	if value.Mode != nil {
 		mode, err := ParseOperatingMode(*value.Mode)
@@ -715,6 +725,13 @@ func decodeProvider(value fileProvider) (ProviderConfig, error) {
 	}
 	if value.AllowPrivateIPs != nil {
 		result.AllowPrivateIPs = *value.AllowPrivateIPs
+	}
+	if value.ToolSearchName != nil {
+		name, err := ParseToolSearchName(*value.ToolSearchName)
+		if err != nil {
+			return ProviderConfig{}, err
+		}
+		result.ToolSearchName = name
 	}
 	compatibility, err := decodeCompatibility(value.Compatibility)
 	if err != nil {
@@ -903,6 +920,7 @@ func applyEnvironment(value *Config, lookup LookupEnv) error {
 		{name: VariantEnv, parse: variantPatch},
 		{name: ReasoningEnv, parse: reasoningPatch},
 		{name: ToolSearchEnv, parse: toolSearchPatch},
+		{name: ToolSearchNameEnv, parse: toolSearchNamePatch},
 		{name: DynamicSubagentsEnv, parse: dynamicSubagentsPatch},
 		{name: ModeEnv, parse: operatingModePatch},
 		{name: SandboxEnv, parse: sandboxPatch},
@@ -937,6 +955,7 @@ func applyFlagOverrides(value *Config, patch Patch) error {
 		{detail: "--variant", patch: Patch{Variant: validated.Variant}, set: validated.Variant != nil},
 		{detail: "--reasoning", patch: Patch{Reasoning: validated.Reasoning}, set: validated.Reasoning != nil},
 		{detail: "--tool-search", patch: Patch{ToolSearch: validated.ToolSearch}, set: validated.ToolSearch != nil},
+		{detail: "--tool-search-name", patch: Patch{ToolSearchName: validated.ToolSearchName}, set: validated.ToolSearchName != nil},
 		{detail: "--dynamic-subagents", patch: Patch{DynamicSubagents: validated.DynamicSubagents}, set: validated.DynamicSubagents != nil},
 		{detail: "--mode", patch: Patch{Mode: validated.Mode}, set: validated.Mode != nil},
 		{detail: "--sandbox", patch: Patch{Sandbox: validated.Sandbox}, set: validated.Sandbox != nil},
@@ -975,6 +994,13 @@ func validatePatch(patch Patch) (Patch, error) {
 		result.Reasoning = &level
 	}
 	result.ToolSearch = patch.ToolSearch
+	if patch.ToolSearchName != nil {
+		name, err := ParseToolSearchName(*patch.ToolSearchName)
+		if err != nil {
+			return Patch{}, err
+		}
+		result.ToolSearchName = &name
+	}
 	result.DynamicSubagents = patch.DynamicSubagents
 	if patch.Mode != nil {
 		mode, err := ParseOperatingMode(string(*patch.Mode))
@@ -1029,6 +1055,15 @@ func toolSearchPatch(value string) (Patch, error) {
 		return Patch{}, err
 	}
 	return Patch{ToolSearch: &enabled}, nil
+}
+
+func toolSearchNamePatch(value string) (Patch, error) {
+	name, err := ParseToolSearchName(value)
+	if err != nil {
+		return Patch{}, err
+	}
+
+	return Patch{ToolSearchName: &name}, nil
 }
 
 func dynamicSubagentsPatch(value string) (Patch, error) {

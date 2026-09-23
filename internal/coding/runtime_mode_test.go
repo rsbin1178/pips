@@ -65,12 +65,12 @@ func TestLeasedToolGuardDeniesCallsOutsideSnapshot(t *testing.T) {
 		agent.NewTool("read", "", func(context.Context, struct{}) (string, error) { return "", nil }),
 		agent.NewTool("apply_patch", "", func(context.Context, struct{}) (string, error) { return "", nil }),
 	}
-	guard := leasedToolGuard(ModePlan, []catalog.Descriptor{{Name: "read"}}, true, known)
+	guard := leasedToolGuard(ModePlan, []catalog.Descriptor{{Name: "read"}}, catalog.DefaultToolSearchName, known)
 	assert.Equal(t, agent.ToolDecisionAllow, guard(t.Context(), agent.ToolCallInfo{
 		ToolCall: agent.ToolCall{Name: "read"},
 	}).Action)
 	assert.Equal(t, agent.ToolDecisionAllow, guard(t.Context(), agent.ToolCallInfo{
-		ToolCall: agent.ToolCall{Name: "tool_search"},
+		ToolCall: agent.ToolCall{Name: catalog.DefaultToolSearchName},
 	}).Action)
 	denied := guard(t.Context(), agent.ToolCallInfo{
 		ToolCall: agent.ToolCall{Name: "apply_patch"},
@@ -78,13 +78,75 @@ func TestLeasedToolGuardDeniesCallsOutsideSnapshot(t *testing.T) {
 	assert.Equal(t, agent.ToolDecisionDeny, denied.Action)
 	assert.Contains(t, denied.Reason, "plan mode")
 
-	// A misspelled name is a model slip, not a mode restriction.
+	// A misspelled name is a model slip, not a mode restriction, and the
+	// denial points at the closest known name.
 	unknown := guard(t.Context(), agent.ToolCallInfo{
 		ToolCall: agent.ToolCall{Name: "search_tools"},
 	})
 	assert.Equal(t, agent.ToolDecisionDeny, unknown.Action)
-	assert.Equal(t, `unknown tool "search_tools"`, unknown.Reason)
+	assert.Equal(t, `unknown tool "search_tools"; did you mean "pips_tool_search"?`, unknown.Reason)
 	assert.NotContains(t, unknown.Reason, "mode")
+
+	// A name with no close match gets the plain unknown message.
+	plain := guard(t.Context(), agent.ToolCallInfo{
+		ToolCall: agent.ToolCall{Name: "deploy_kubernetes_cluster"},
+	})
+	assert.Equal(t, agent.ToolDecisionDeny, plain.Action)
+	assert.Equal(t, `unknown tool "deploy_kubernetes_cluster"`, plain.Reason)
+
+	// Disabled search never authorizes the discovery name.
+	disabled := leasedToolGuard(ModePlan, []catalog.Descriptor{{Name: "read"}}, "", known)
+	hidden := disabled(t.Context(), agent.ToolCallInfo{
+		ToolCall: agent.ToolCall{Name: catalog.DefaultToolSearchName},
+	})
+	assert.Equal(t, agent.ToolDecisionDeny, hidden.Action)
+	assert.Contains(t, hidden.Reason, "unknown tool")
+}
+
+func TestSuggestToolNames(t *testing.T) {
+	t.Parallel()
+
+	known := []string{
+		"apply_patch", "read", "grep", "glob", "ls", "shell", "ask_user",
+		"pips_tool_search", "run_subagent", "spawn_agent", "update_plan",
+	}
+
+	tests := []struct {
+		name string
+		want []string
+	}{
+		{name: "search_tools", want: []string{"pips_tool_search"}},
+		{name: "tool_search", want: []string{"pips_tool_search"}},
+		{name: "toolSearch", want: []string{"pips_tool_search"}},
+		{name: "raed", want: []string{"read"}},
+		{name: "gerp", want: []string{"grep"}},
+		{name: "patch_apply", want: []string{"apply_patch"}},
+		// One shared token out of three is below the overlap threshold and
+		// the edit distance is too large, so no guess is offered.
+		{name: "spawn_subagent", want: nil},
+		{name: "deploy_kubernetes_cluster", want: nil},
+		{name: "", want: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tt.want, suggestToolNames(tt.name, known, 3))
+		})
+	}
+
+	assert.Equal(t, `unknown tool "x"`, unknownToolReason("x", known))
+	// A model-supplied name is escaped so the denial stays a single line.
+	assert.Equal(t, `unknown tool "re\nad"; did you mean "read"?`, unknownToolReason("re\nad", known))
+	// Closest first: one edit beats two, and the limit bounds the list.
+	files := []string{"write_file", "read_files", "read_file", "read_fill", "read_filler"}
+	assert.Equal(t, []string{"read_file", "read_fill", "read_files"}, suggestToolNames("read_fil", files, 3))
+	assert.Equal(
+		t,
+		`unknown tool "read_fil"; did you mean "read_file", "read_files"?`,
+		unknownToolReason("read_fil", files[:3]),
+	)
+	assert.Len(t, suggestToolNames("agent", []string{"run_agent", "spawn_agent", "list_agents", "stop_agent"}, 3), 3)
 }
 
 func TestRuntimePlanModeInteractionLeasesTheFullToolCatalog(t *testing.T) {

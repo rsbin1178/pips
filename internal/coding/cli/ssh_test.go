@@ -77,6 +77,13 @@ func TestSSHCommandRejectsIrrelevantFlagsAndNonTerminal(t *testing.T) {
 			},
 		},
 		{
+			name: "remote tool search name flag",
+			args: []string{"ssh", "host", "--tool-search-name", "proxy_search"},
+			terminal: func(io.Reader, io.Writer) (bool, bool) {
+				return true, true
+			},
+		},
+		{
 			name: "non terminal",
 			args: []string{"ssh", "host"},
 			terminal: func(io.Reader, io.Writer) (bool, bool) {

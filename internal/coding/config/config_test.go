@@ -21,6 +21,7 @@ func TestDefaults(t *testing.T) {
 	assert.Empty(t, cfg.Providers)
 	assert.Empty(t, cfg.Models)
 	assert.False(t, cfg.ToolSearch)
+	assert.Equal(t, "pips_tool_search", cfg.ToolSearchName)
 	assert.False(t, cfg.DynamicSubagents)
 	assert.Equal(t, config.ModeAgent, cfg.Mode)
 	assert.Equal(t, config.ThemeAuto, cfg.TUI.Theme)

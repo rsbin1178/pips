@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rsbin1178/pips/agent/catalog"
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding/config"
 	"github.com/rsbin1178/pips/internal/coding/execution"
@@ -26,28 +27,69 @@ func TestBuildCodingSystemPromptComposesDeterministicLayers(t *testing.T) {
 	t.Parallel()
 
 	prompt, err := buildCodingSystemPrompt(systemPromptOptions{
-		Model:               "example/model",
-		WorkingDirectory:    "/workspace",
-		Platform:            "linux",
-		Date:                "2026-07-25",
-		Sandbox:             "workspace-write",
-		Approval:            "on-request",
-		WorkspaceTrusted:    true,
-		Mode:                ModeAgent,
-		ToolNames:           []string{"tool_search", "read", "read", "spawn_agent"},
+		Model:            "example/model",
+		WorkingDirectory: "/workspace",
+		Platform:         "linux",
+		Date:             "2026-07-25",
+		Sandbox:          "workspace-write",
+		Approval:         "on-request",
+		WorkspaceTrusted: true,
+		Mode:             ModeAgent,
+		ToolNames:        []string{"pips_tool_search", "read", "read", "spawn_agent"},
+		ToolSearchName:   "pips_tool_search",
+		ToolSearchSources: []catalog.SourceSummary{
+			{Kind: catalog.SourceMCP, ID: "github", Tools: 12},
+			{Kind: catalog.SourceMCP, ID: "slack", Tools: 4},
+		},
 		ProjectInstructions: "<project_instructions>Keep the boundary.</project_instructions>",
 	})
 	require.NoError(t, err)
 
 	assert.Contains(t, prompt, "You are Pips, a terminal-first coding agent")
 	assert.Contains(t, prompt, `"working_directory": "/workspace"`)
-	assert.Contains(t, prompt, `"visible_tools": [`+"\n"+`    "read",`)
+	assert.Contains(t, prompt, `"visible_tools": [`+"\n"+`    "pips_tool_search",`+"\n"+`    "read",`)
 	assert.Equal(t, 1, strings.Count(prompt, `"read"`))
-	assert.Contains(t, prompt, "Use tool_search only when an Extension or MCP tool is needed")
+	assert.Contains(t, prompt, "Use pips_tool_search to discover deferred tools: mcp/github (12), mcp/slack (4). Then call the discovered tool directly.")
 	assert.Contains(t, prompt, "Use spawn_agent for independent background work")
 	assert.NotContains(t, prompt, "Use run_subagent for one isolated read-only specialist result")
 	assert.Less(t, strings.Index(prompt, "# Runtime environment"), strings.Index(prompt, "# Tool guidance"))
 	assert.Less(t, strings.Index(prompt, "# Tool guidance"), strings.Index(prompt, "# Project instructions"))
+}
+
+func TestBuildCodingSystemPromptOmitsToolSearchLineWhenHidden(t *testing.T) {
+	t.Parallel()
+
+	base := systemPromptOptions{
+		Model: "example/model", WorkingDirectory: "/workspace", Platform: "linux",
+		Date: "2026-07-25", Sandbox: "workspace-write", Approval: "on-request",
+		WorkspaceTrusted: true, Mode: ModeAgent,
+	}
+
+	// The name is configured but the tool is not visible: nothing is deferred.
+	hidden := base
+	hidden.ToolNames = []string{"read", "shell"}
+	hidden.ToolSearchName = "proxy_search"
+	prompt, err := buildCodingSystemPrompt(hidden)
+	require.NoError(t, err)
+	assert.NotContains(t, prompt, "proxy_search")
+	assert.NotContains(t, prompt, "discover deferred tools")
+
+	// A custom name is visible with one source.
+	visible := base
+	visible.ToolNames = []string{"read", "proxy_search"}
+	visible.ToolSearchName = "proxy_search"
+	visible.ToolSearchSources = []catalog.SourceSummary{{Kind: catalog.SourceExtension, ID: "review", Tools: 2}}
+	prompt, err = buildCodingSystemPrompt(visible)
+	require.NoError(t, err)
+	assert.Contains(t, prompt, "Use proxy_search to discover deferred tools: extension/review (2). Then call the discovered tool directly.")
+	assert.NotContains(t, prompt, "pips_tool_search")
+
+	// A visible name without a source summary still names the tool.
+	bare := visible
+	bare.ToolSearchSources = nil
+	prompt, err = buildCodingSystemPrompt(bare)
+	require.NoError(t, err)
+	assert.Contains(t, prompt, "Use proxy_search to discover deferred tools. Then call the discovered tool directly.")
 }
 
 func TestBuildCodingSystemPromptKeepsSharedPrefixStableAcrossModes(t *testing.T) {

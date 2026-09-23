@@ -134,7 +134,9 @@ func (t *funcTool[Args]) Exec(ctx context.Context, call ToolCall) ([]ai.Part, er
 }
 
 // toolbox indexes an agent's tools by name and keeps their declarations in
-// registration order for stable requests.
+// registration order for stable requests. A tool whose declaration is
+// Disabled stays executable by name but is omitted from every model request,
+// so a host can keep a capability callable without advertising it.
 type toolbox struct {
 	byName map[string]Tool
 	decls  []ai.Tool
@@ -154,7 +156,9 @@ func newToolbox(tools []Tool) (*toolbox, error) {
 		}
 
 		box.byName[decl.Name] = t
-		box.decls = append(box.decls, decl)
+		if decl.IsEnabled() {
+			box.decls = append(box.decls, decl)
+		}
 	}
 
 	return box, nil
