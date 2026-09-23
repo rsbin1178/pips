@@ -95,7 +95,10 @@ func TestLoadDirectoryImplementsPortableComponentsAndIsolation(t *testing.T) {
 		assert.Equal(t, os.FileMode(0o700), dataInfo.Mode().Perm())
 	}
 
+	assert.Equal(t, "local", stdio.ID, "plugin server IDs must be the readable mcp.json server name")
+
 	remote := definitionByTransport(t, definitions, codingmcp.TransportStreamableHTTP)
+	assert.Equal(t, "remote", remote.ID)
 	assert.Equal(t, "https://tools.example.com/mcp", remote.URL)
 	assert.Equal(t, []codingmcp.HTTPHeader{{Name: "X-Tenant", Value: "public"}}, remote.Headers)
 
@@ -479,6 +482,43 @@ func countDiagnosticCode(diagnostics []agentplugin.Diagnostic, code string) int 
 	}
 
 	return count
+}
+
+func TestServerIDsNormalizeNamesAndRejectDuplicatesWithinPlugin(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeManifest(t, root, "ids")
+	long := strings.Repeat("abcdefghij", 6)
+	writeFile(t, filepath.Join(root, "mcp.json"), `{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "Context 7": {"type": "streamable-http", "url": "https://one.example.com/mcp"},
+    "context-7": {"type": "streamable-http", "url": "https://two.example.com/mcp"},
+    "  --Weird__Name!!": {"type": "streamable-http", "url": "https://three.example.com/mcp"},
+    "`+long+`": {"type": "streamable-http", "url": "https://four.example.com/mcp"}
+  }
+}`)
+
+	result, err := agentplugin.LoadDirectory(
+		t.Context(), root, filepath.Join(t.TempDir(), "plugin-data"), agentplugin.DefaultLimits(),
+	)
+	require.NoError(t, err)
+
+	ids := make([]string, 0, 3)
+	for _, definition := range result.MCPDefinitions().List() {
+		ids = append(ids, definition.ID)
+	}
+	require.Len(t, ids, 3)
+	assert.Contains(t, ids, "context-7")
+	assert.Contains(t, ids, "weird_name")
+	for _, id := range ids {
+		assert.LessOrEqual(t, len(id), 48)
+		if strings.HasPrefix(id, "abcdefghij") {
+			assert.Regexp(t, `^abcdefghij[a-j]*-[0-9a-f]{8}$`, id)
+		}
+	}
+	assert.Contains(t, diagnosticCodes(result.Diagnostics()), "server_duplicate")
 }
 
 func writeManifest(t *testing.T, root, name string) {
