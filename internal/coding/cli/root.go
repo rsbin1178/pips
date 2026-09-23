@@ -87,6 +87,7 @@ type rootFlags struct {
 	variant          string
 	reasoning        string
 	toolSearch       bool
+	toolSearchName   string
 	dynamicSubagents bool
 	mode             string
 	sandbox          string
@@ -131,6 +132,7 @@ func New(dependencies Dependencies) (*cobra.Command, error) {
 	persistent.StringVar(&flags.variant, "variant", "", "named model request preset")
 	persistent.StringVar(&flags.reasoning, "reasoning", "", "model reasoning level")
 	persistent.BoolVar(&flags.toolSearch, "tool-search", false, "enable deferred tool search")
+	persistent.StringVar(&flags.toolSearchName, "tool-search-name", "", "deferred tool search tool name")
 	persistent.BoolVar(&flags.dynamicSubagents, "dynamic-subagents", false, "enable Alpha custom subagents")
 	persistent.StringVar(&flags.mode, "mode", "", "operating mode (agent or plan)")
 	persistent.StringVar(&flags.sandbox, "sandbox", "", "sandbox mode")

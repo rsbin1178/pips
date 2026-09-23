@@ -140,6 +140,13 @@ func parseFlagOverrides(cmd *cobra.Command, flags *rootFlags) (config.Patch, err
 	if isFlagChanged(cmd, "tool-search") {
 		patch.ToolSearch = &flags.toolSearch
 	}
+	if isFlagChanged(cmd, "tool-search-name") {
+		name, err := config.ParseToolSearchName(flags.toolSearchName)
+		if err != nil {
+			return config.Patch{}, fmt.Errorf("coding cli: --tool-search-name: %w", err)
+		}
+		patch.ToolSearchName = &name
+	}
 	if isFlagChanged(cmd, "dynamic-subagents") {
 		patch.DynamicSubagents = &flags.dynamicSubagents
 	}

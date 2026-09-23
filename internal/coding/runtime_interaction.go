@@ -802,6 +802,7 @@ func (r *Runtime) openInteraction(
 					r.recordHookDiagnostics(ctx, nil, diagnostics)
 				},
 				model: childModel, mode: started.Mode, mcpEntries: childMCPEntries, controls: r.childControls,
+				toolSearchNameFor:  r.config.ToolSearchNameFor,
 				subagents:          r.subagents,
 				onPauseChanged:     r.projectChildPause,
 				onWorkspaceChanged: r.projectChildWorkspaceChanged,
@@ -856,12 +857,29 @@ func (r *Runtime) openInteraction(
 
 	search, err := catalog.NewToolSearch(merged, policy, catalog.ToolSearchOptions{
 		Enabled: r.config.ToolSearch,
+		Name:    r.config.ToolSearchNameFor(r.resolved.Ref.Provider),
 	})
+	if err != nil {
+		// A name collision or malformed name is a configuration fault, not a
+		// model or infrastructure failure.
+		return nil, fmt.Errorf("%w: tool search: %w", ErrRuntimeInvalid, err)
+	}
+	searchName := ""
+	if r.config.ToolSearch {
+		searchName = search.Name()
+	}
+
+	// visibleTools is what the model is told about; executableTools adds the
+	// hidden discovery tool so a blind call still returns the registry hint.
+	visibleTools, err := search.Tools(ctx)
 	if err != nil {
 		return nil, err
 	}
-
-	visibleTools, err := search.Tools(ctx)
+	executableTools, err := search.ExecutableTools(ctx)
+	if err != nil {
+		return nil, err
+	}
+	searchSources, err := search.DeferredSources(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -875,6 +893,8 @@ func (r *Runtime) openInteraction(
 		WorkspaceTrusted:    r.trusted,
 		Mode:                started.Mode,
 		ToolNames:           agentToolNames(visibleTools),
+		ToolSearchName:      searchName,
+		ToolSearchSources:   searchSources,
 		ProjectInstructions: integration.projectInstructionsSnapshot(),
 		ExplicitSkills:      explicitSkills,
 		TeamWorker:          r.workerSystemPromptContext(),
@@ -888,7 +908,7 @@ func (r *Runtime) openInteraction(
 	if err != nil {
 		return nil, err
 	}
-	allTools = appendUniqueTools(allTools, visibleTools...)
+	allTools = appendUniqueTools(allTools, executableTools...)
 
 	extensionHooks := snapshot.Hooks()
 	extensionObserver := newGuardedAgentObserver(extensionHooks.Observe)
@@ -899,7 +919,7 @@ func (r *Runtime) openInteraction(
 		extension.Hooks{BeforeTool: r.hookBeforeTool(emitter)},
 		extension.Hooks{BeforeTool: r.teamGuard.beforeTool(descriptors)},
 		extension.Hooks{AfterTool: leadCoordinatorAfterTool(leadCoordinator)},
-		extension.Hooks{BeforeTool: leasedToolGuard(started.Mode, descriptors, r.config.ToolSearch, allTools)},
+		extension.Hooks{BeforeTool: leasedToolGuard(started.Mode, descriptors, searchName, allTools)},
 		extension.Hooks{BeforeTool: statefulBatchGuard.beforeTool},
 		extension.Hooks{BeforeTool: r.planEditGate()},
 		extension.Hooks{BeforeTool: r.planReviews.BeforeTool},
@@ -927,7 +947,7 @@ func (r *Runtime) openInteraction(
 	)
 
 	harnessOptions := []harness.Option{
-		harness.WithTools(visibleTools...),
+		harness.WithTools(executableTools...),
 		harness.WithSystem(systemPrompt.SharedPrefix),
 		harness.WithSystemSuffix(systemPrompt.Suffix),
 		harness.WithSkillCatalog(modelSkillCatalog),

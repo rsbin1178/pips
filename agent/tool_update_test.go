@@ -31,7 +31,7 @@ func TestPrepareTurnReplacesRunScopedToolsForDeferredSearch(t *testing.T) {
 	require.NoError(t, err)
 
 	model := newScriptedModel(
-		respond(callResponse(call("search", "tool_search", `{"query":"documentation"}`))),
+		respond(callResponse(call("search", catalog.DefaultToolSearchName, `{"query":"documentation"}`))),
 		respond(callResponse(call("lookup", "lookup_docs", `{}`))),
 		respond(textResponse("done")),
 	)
@@ -43,9 +43,9 @@ func TestPrepareTurnReplacesRunScopedToolsForDeferredSearch(t *testing.T) {
 
 	requests := model.Requests()
 	require.Len(t, requests, 3)
-	assert.ElementsMatch(t, []string{"read_status", "tool_search"}, declaredToolNames(requests[0].Tools))
-	assert.ElementsMatch(t, []string{"read_status", "tool_search", "lookup_docs"}, declaredToolNames(requests[1].Tools))
-	assert.ElementsMatch(t, []string{"read_status", "tool_search", "lookup_docs"}, declaredToolNames(requests[2].Tools))
+	assert.ElementsMatch(t, []string{"read_status", catalog.DefaultToolSearchName}, declaredToolNames(requests[0].Tools))
+	assert.ElementsMatch(t, []string{"read_status", catalog.DefaultToolSearchName, "lookup_docs"}, declaredToolNames(requests[1].Tools))
+	assert.ElementsMatch(t, []string{"read_status", catalog.DefaultToolSearchName, "lookup_docs"}, declaredToolNames(requests[2].Tools))
 }
 
 func TestToolSearchCanBeDisabledToExposeAuthorizedTools(t *testing.T) {

@@ -11,6 +11,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/rsbin1178/pips/agent/catalog"
 	"github.com/rsbin1178/pips/agent/harness"
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/ai/openai"
@@ -29,6 +30,7 @@ const (
 	FieldVariant               Field = "variant"
 	FieldReasoning             Field = "reasoning"
 	FieldToolSearch            Field = "tool_search"
+	FieldToolSearchName        Field = "tool_search_name"
 	FieldDynamicSubagents      Field = "dynamic_subagents"
 	FieldSubagentMaxDepth      Field = "subagent.max_depth"
 	FieldSubagentMaxConcurrent Field = "subagent.max_concurrent"
@@ -51,6 +53,7 @@ var fields = []Field{
 	FieldVariant,
 	FieldReasoning,
 	FieldToolSearch,
+	FieldToolSearchName,
 	FieldDynamicSubagents,
 	FieldSubagentMaxDepth,
 	FieldSubagentMaxConcurrent,
@@ -274,6 +277,9 @@ type ProviderConfig struct {
 	// Capabilities is the provider-wide capability declaration. Models inherit
 	// it field by field; see ModelConfig.Capabilities.
 	Capabilities ai.CapabilityOverride
+	// ToolSearchName overrides Config.ToolSearchName for interactions served
+	// by this provider. Empty inherits the global value; see ToolSearchNameFor.
+	ToolSearchName string
 }
 
 // Clone returns a fully detached provider definition.
@@ -454,6 +460,10 @@ type Config struct {
 	Providers  map[ai.Provider]ProviderConfig
 	Models     []ModelConfig
 	ToolSearch bool
+	// ToolSearchName is the deferred discovery tool name offered to the model.
+	// It defaults to catalog.DefaultToolSearchName; a provider entry may
+	// override it when a proxy reserves or rewrites the default name.
+	ToolSearchName string
 	// DynamicSubagents enables the Alpha custom Coding subagent dispatcher.
 	// It is intentionally disabled by default; profile discovery remains
 	// available for validation and inspection when this gate is off.
@@ -477,6 +487,7 @@ type Patch struct {
 	Variant          *string
 	Reasoning        *ReasoningLevel
 	ToolSearch       *bool
+	ToolSearchName   *string
 	DynamicSubagents *bool
 	Mode             *OperatingMode
 	Theme            *string
@@ -494,8 +505,9 @@ func Defaults() Config {
 	}
 
 	return Config{
-		Providers: map[ai.Provider]ProviderConfig{},
-		Mode:      ModeAgent,
+		Providers:      map[ai.Provider]ProviderConfig{},
+		ToolSearchName: catalog.DefaultToolSearchName,
+		Mode:           ModeAgent,
 		TUI: TUIConfig{
 			Theme:      DefaultThemeSelection,
 			StatusLine: statusline.Default(),
@@ -586,6 +598,20 @@ func isPermissionField(field Field) bool {
 	}
 }
 
+// ToolSearchNameFor resolves the deferred discovery tool name for an
+// interaction served by provider: the provider override when set, otherwise
+// the global value, otherwise catalog.DefaultToolSearchName.
+func (c Config) ToolSearchNameFor(provider ai.Provider) string {
+	if definition, ok := c.Providers[provider]; ok && definition.ToolSearchName != "" {
+		return definition.ToolSearchName
+	}
+	if c.ToolSearchName != "" {
+		return c.ToolSearchName
+	}
+
+	return catalog.DefaultToolSearchName
+}
+
 // ValidateRuntime verifies registry-independent fields required to resolve an
 // executable runtime. modelcatalog performs endpoint/protocol resolution.
 func (c Config) ValidateRuntime() error {
@@ -627,6 +653,11 @@ func (c Config) ValidateRuntime() error {
 	}
 	if err := validateApproval(c.Approval); err != nil {
 		return err
+	}
+	if c.ToolSearchName != "" {
+		if _, err := ParseToolSearchName(c.ToolSearchName); err != nil {
+			return err
+		}
 	}
 	if err := validateCompaction(c.Compaction); err != nil {
 		return err
@@ -750,6 +781,18 @@ func ParseReasoningLevel(value string) (ReasoningLevel, error) {
 // ParseVariant parses a named request preset.
 func ParseVariant(value string) (string, error) {
 	return parseIdentifier("variant", value, 64, false)
+}
+
+// ParseToolSearchName parses a portable deferred discovery tool name. Only the
+// syntax is checked here; collisions with catalog tools surface when the
+// Runtime constructs the interaction toolset.
+func ParseToolSearchName(value string) (string, error) {
+	name := strings.TrimSpace(value)
+	if err := catalog.ValidateToolSearchName(name); err != nil {
+		return "", fmt.Errorf("%w: tool_search_name %q must contain 1-64 letters, digits, underscores, or dashes", ErrInvalid, value)
+	}
+
+	return name, nil
 }
 
 // ParseSandboxMode parses a supported sandbox mode.
@@ -880,6 +923,10 @@ func apply(value Config, patch Patch, source Source) Config {
 		value.ToolSearch = *patch.ToolSearch
 		value.sources[FieldToolSearch] = source
 	}
+	if patch.ToolSearchName != nil {
+		value.ToolSearchName = *patch.ToolSearchName
+		value.sources[FieldToolSearchName] = source
+	}
 	if patch.DynamicSubagents != nil {
 		value.DynamicSubagents = *patch.DynamicSubagents
 		value.sources[FieldDynamicSubagents] = source
@@ -917,6 +964,11 @@ func validateRegistry(c Config) error {
 		}
 		if err := validateToolDeclaration(definition.Capabilities, "provider "+string(provider)); err != nil {
 			return err
+		}
+		if definition.ToolSearchName != "" {
+			if _, err := ParseToolSearchName(definition.ToolSearchName); err != nil {
+				return fmt.Errorf("provider %q: %w", provider, err)
+			}
 		}
 	}
 

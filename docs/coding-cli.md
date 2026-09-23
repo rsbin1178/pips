@@ -111,6 +111,27 @@ mode = "agent"
 [providers.anthropic.models."model-id"]
 ```
 
+### Deferred tool search
+
+| Setting | TOML | Environment | Flag | Default |
+| --- | --- | --- | --- | --- |
+| Enable deferred discovery of MCP and Extension tools | `tool_search` | `PIPS_TOOL_SEARCH` | `--tool-search` | `false` |
+| Discovery tool name offered to the model | `tool_search_name` | `PIPS_TOOL_SEARCH_NAME` | `--tool-search-name` | `pips_tool_search` |
+
+`tool_search_name` must match `^[A-Za-z0-9_-]{1,64}$` and must not equal a
+built-in or catalog tool name; a collision is rejected when the interaction
+starts. `[providers.<id>] tool_search_name` overrides the global value for
+interactions served by that provider, which is useful when a proxy reserves or
+rewrites a particular name. Set `tool_search_name = "tool_search"` to restore
+the pre-namespaced name.
+
+When search is enabled, the discovery tool is only advertised while at least
+one authorized MCP or Extension tool is registered, and the system prompt
+lists the searchable sources with their tool counts. A call to the discovery
+tool while nothing is deferred still executes and returns a hint that says so;
+a query that matches nothing lists the searchable sources instead. An unknown
+tool name is denied with up to three closest known names as a suggestion.
+
 Plan Mode is a persisted state machine, not a reduced Tool catalog. The
 ordinary catalog stays visible: Shell, MCP and Extension Tools, Subagents, and
 `ask_user` all remain available, and the only restriction is an edit gate on

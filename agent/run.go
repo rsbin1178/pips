@@ -520,8 +520,19 @@ func validateToolChoice(choice ai.ToolChoice, tools *toolbox) error {
 			return errors.New("exact tool choice has no name")
 		}
 
-		if tools == nil || tools.byName[choice.Name] == nil {
+		var tool Tool
+		if tools != nil {
+			tool = tools.byName[choice.Name]
+		}
+
+		if tool == nil {
 			return fmt.Errorf("exact tool choice %q is unavailable", choice.Name)
+		}
+
+		// A Disabled tool stays executable by name but is never declared to
+		// the model, so forcing it would name a tool the provider cannot see.
+		if !tool.Decl().IsEnabled() {
+			return fmt.Errorf("exact tool choice %q is not declared to the model", choice.Name)
 		}
 	default:
 		return fmt.Errorf("unknown tool choice mode %q", choice.Mode)

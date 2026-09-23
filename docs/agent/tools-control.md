@@ -177,11 +177,12 @@ Policy 默认拒绝：空 allowlist 不暴露任何工具，`MaxRisk` 零值只�
 
 ## 延迟工具发现
 
-当工具很多时，`catalog.ToolSearch` 可以先只暴露直接工具和 `tool_search`，在下一轮加载已搜索并重新授权的精确工具：
+当工具很多时，`catalog.ToolSearch` 可以先只暴露直接工具和一个发现工具（默认名为 `catalog.DefaultToolSearchName`，即 `pips_tool_search`），在下一轮加载已搜索并重新授权的精确工具：
 
 ```go
 search, err := catalog.NewToolSearch(cat, policy, catalog.ToolSearchOptions{
 	Enabled: true,
+	Name:    "pips_tool_search", // 留空使用 DefaultToolSearchName
 	Limit:   8,
 })
 if err != nil {
@@ -194,7 +195,13 @@ if err != nil {
 a, err := agent.New(model, opts...)
 ```
 
+`Name` 必须匹配 `^[A-Za-z0-9_-]{1,64}$`，且不能与目录或 `Initial` 中的任何工具重名；`search.Name()` 返回最终名称，系统提示和调用前 gate 应使用它而不是硬编码字符串。命名空间化的默认名避免了某些代理或提供商改写裸 `tool_search` 名称的问题。
+
 默认延迟 MCP 与 Extension 来源，本地和 Team 工具保持直接可见；`DeferredSources` 可覆盖。关闭 `Enabled` 时所有已授权工具直接可见。宿主在 `RunCompleted` 后可调用 `Forget(runID)` 提前清除运行选择；内部还有有界的运行记录清理。
+
+`catalog.Search` 对非空查询按相关度排序：查询词按 `_`、`-` 和 camelCase 切分（`catalog.SearchTokens` 暴露同一分词器），命中工具名或顶层参数名的权重高于命中描述、参数描述、来源和标签；任一词命中即为候选，空查询仍按注册顺序返回全部已授权条目。
+
+发现工具的结果包含 `matches`、`activated`、`sources`（当前已注册并授权的延迟来源及其工具数）和 `hint`。当会话中没有任何延迟工具时，`Tools()` 不会把发现工具暴露给模型，但 `ExecutableTools()` 仍保留一个隐藏副本，使模型按名称盲调时收到“没有注册 MCP 或 Extension 工具”的提示而不是未知工具错误；查询未命中时，`hint` 会列出可搜索来源并建议换更宽泛的词。`DeferredSources(ctx)` 返回同一份来源摘要，便于宿主写入系统提示。
 
 工具搜索只是模型上下文优化，不是授权绕过：搜索结果在展示和应用到下一轮时都会重新检查 Policy。
 

@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/rsbin1178/pips/agent/catalog"
 	"github.com/rsbin1178/pips/internal/coding/question"
 	"github.com/rsbin1178/pips/internal/coding/tasklist"
 	"github.com/rsbin1178/pips/internal/coding/tools"
@@ -41,15 +42,21 @@ const codingSystemPrompt = `You are Pips, a terminal-first coding agent operatin
 - In the final response, summarize what changed, name important files, report verification and any remaining limitation. Do not dump large file contents unless requested.`
 
 type systemPromptOptions struct {
-	Model               string
-	WorkingDirectory    string
-	Platform            string
-	Date                string
-	Sandbox             string
-	Approval            string
-	WorkspaceTrusted    bool
-	Mode                OperatingMode
-	ToolNames           []string
+	Model            string
+	WorkingDirectory string
+	Platform         string
+	Date             string
+	Sandbox          string
+	Approval         string
+	WorkspaceTrusted bool
+	Mode             OperatingMode
+	ToolNames        []string
+	// ToolSearchName is the deferred discovery tool name; its guidance line is
+	// emitted only when the name is among ToolNames.
+	ToolSearchName string
+	// ToolSearchSources summarizes the deferred sources the discovery tool can
+	// reach so the model knows what is searchable before it probes.
+	ToolSearchSources   []catalog.SourceSummary
 	ProjectInstructions string
 	ExplicitSkills      string
 	HookContext         []string
@@ -156,7 +163,7 @@ func buildCodingSystemPromptParts(options systemPromptOptions) (systemPromptPart
 	suffix.WriteString("<operating_mode_context>\n")
 	suffix.Write(modeContext)
 	suffix.WriteString("\n</operating_mode_context>")
-	writeModeGuidance(&suffix, options.Mode, toolNames)
+	writeModeGuidance(&suffix, options, toolNames)
 
 	if options.TeamWorker != nil {
 		workerContext, err := json.MarshalIndent(options.TeamWorker, "", "  ")
@@ -221,7 +228,7 @@ func writeSharedToolGuidance(prompt *strings.Builder) {
 	prompt.WriteString("- Prefer the most precise dedicated tool over a general command channel. Treat tool results as the authority for whether an operation succeeded.\n")
 }
 
-func writeModeGuidance(prompt *strings.Builder, mode OperatingMode, toolNames []string) {
+func writeModeGuidance(prompt *strings.Builder, options systemPromptOptions, toolNames []string) {
 	available := make(map[string]struct{}, len(toolNames))
 	for _, name := range toolNames {
 		available[name] = struct{}{}
@@ -229,7 +236,7 @@ func writeModeGuidance(prompt *strings.Builder, mode OperatingMode, toolNames []
 
 	prompt.WriteString("\n\n## Current mode behavior\n\n")
 
-	if mode == ModePlan {
+	if options.Mode == ModePlan {
 		// Plan mode injects its own per-request reminder; the static prompt
 		// only states the capability boundary.
 		prompt.WriteString("- Plan mode is active. Do not make any edits or writes to the system outside the plan file.\n")
@@ -253,8 +260,14 @@ func writeModeGuidance(prompt *strings.Builder, mode OperatingMode, toolNames []
 		prompt.WriteString("- Use update_plan for non-trivial multi-step work. Replace the complete list, keep exactly one step in_progress while work remains, update it as work proceeds, and mark work completed only after verification. Skip it for trivial requests.\n")
 	}
 
-	if _, ok := available["tool_search"]; ok {
-		prompt.WriteString("- Built-in tools are already visible. Use tool_search only when an Extension or MCP tool is needed, then use the discovered tool directly.\n")
+	if _, ok := available[options.ToolSearchName]; ok && options.ToolSearchName != "" {
+		prompt.WriteString("- Built-in tools are already visible. Use " + options.ToolSearchName + " to discover deferred tools")
+
+		if len(options.ToolSearchSources) > 0 {
+			prompt.WriteString(": " + catalog.FormatSourceSummaries(options.ToolSearchSources))
+		}
+
+		prompt.WriteString(". Then call the discovered tool directly.\n")
 	}
 
 	if _, ok := available[question.ToolName]; ok {
