@@ -17,6 +17,7 @@ import (
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/rsbin1178/pips/agent"
 	"github.com/rsbin1178/pips/agent/bundle"
+	"github.com/rsbin1178/pips/agent/catalog"
 	"github.com/rsbin1178/pips/agent/extension"
 	"github.com/rsbin1178/pips/agent/harness"
 	"github.com/rsbin1178/pips/ai"
@@ -119,18 +120,21 @@ type Runtime struct {
 	mu    sync.Mutex
 	state State
 
-	profile             runtimeProfile
-	worker              *workerRuntimeBinding
-	workspace           workspace.Workspace
-	tree                *workspace.Tree
-	config              config.Config
-	paths               paths.Layout
-	opts                ExecutionOptions
-	model               ai.LanguageModel
-	modelCatalog        modelcatalog.Catalog
-	credentials         credential.Store
-	resolved            modelcatalog.ResolvedModel
-	requestPolicy       generation.Policy
+	profile       runtimeProfile
+	worker        *workerRuntimeBinding
+	workspace     workspace.Workspace
+	tree          *workspace.Tree
+	config        config.Config
+	paths         paths.Layout
+	opts          ExecutionOptions
+	model         ai.LanguageModel
+	modelCatalog  modelcatalog.Catalog
+	credentials   credential.Store
+	resolved      modelcatalog.ResolvedModel
+	requestPolicy generation.Policy
+	// toolActivations keeps deferred tools activated by Tool Search visible
+	// for every later interaction of this Runtime (one Session).
+	toolActivations     *catalog.ActivationSet
 	instructionResolver *instructions.Resolver
 	promptDate          string
 	projectInstructions string
@@ -547,6 +551,7 @@ func openRuntime(
 		requestPolicy:       requestPolicy,
 		instructionResolver: instructionResolver,
 		promptDate:          time.Now().Format(time.DateOnly),
+		toolActivations:     catalog.NewActivationSet(catalog.DefaultActivationLimit),
 		projectInstructions: projectInstructions.SystemPrompt(),
 		hookDefinitions:     ambientHookDefinitions(trustedHooks),
 		hookToolContext:     make(map[string][]string),
@@ -1045,6 +1050,7 @@ func openMCP(
 		TerminateAfter: configured.MCPTerminate,
 		MaxTools:       configured.MCPMaxTools,
 		Diagnostics:    pluginDiagnostics,
+		ReadOnlyTools:  options.Config.MCPReadOnlyTools,
 	})
 }
 

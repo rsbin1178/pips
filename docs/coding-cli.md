@@ -132,6 +132,30 @@ tool while nothing is deferred still executes and returns a hint that says so;
 a query that matches nothing lists the searchable sources instead. An unknown
 tool name is denied with up to three closest known names as a suggestion.
 
+The discovery tool's `tools` argument accepts exact deferred tool names or a
+`kind/id` source selector such as `mcp/exa`, which activates every tool of that
+source. An activated tool stays available for the rest of the session (until
+the process exits or the session is replaced), so later prompts can call it
+directly; calling a deferred tool that is not active yet returns an error that
+names the discovery tool.
+
+### Tool calls and MCP read-only tools
+
+A model may request several tool calls in one response. They run as a queue:
+every tool is treated as a write and runs serially in call order, except tools
+marked read-only (`read`, `ls`, `glob`, `grep`, and MCP tools listed below),
+which may run concurrently. Approval still applies to each call.
+
+```toml
+[mcp_read_only_tools]
+exa = ["web_search_exa"] # remote MCP tool names
+docs = ["*"]             # every tool of the server
+```
+
+Keys are MCP server IDs. Marking a tool read-only affects only concurrency: its
+risk, approval, and Plan Mode handling are unchanged, and MCP `readOnlyHint`
+annotations are never trusted for this decision.
+
 Plan Mode is a persisted state machine, not a reduced Tool catalog. The
 ordinary catalog stays visible: Shell, MCP and Extension Tools, Subagents, and
 `ask_user` all remain available, and the only restriction is an edit gate on

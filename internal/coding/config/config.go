@@ -475,6 +475,12 @@ type Config struct {
 	SandboxWorkspaceWrite SandboxWorkspaceWriteConfig
 	Approval              ApprovalMode
 	Compaction            CompactionConfig
+	// MCPReadOnlyTools marks MCP tools, keyed by server ID, as read-only so
+	// they may run concurrently within one model response. Values are remote
+	// tool names or "*" for every tool of the server. It affects execution
+	// concurrency only; risk, approval, and visibility are unchanged. MCP
+	// readOnlyHint annotations are never trusted for this decision.
+	MCPReadOnlyTools map[string][]string
 
 	sources map[Field]Source
 }
@@ -535,6 +541,12 @@ func (c Config) Clone() Config {
 	cloned.Models = make([]ModelConfig, len(c.Models))
 	for index := range c.Models {
 		cloned.Models[index] = c.Models[index].Clone()
+	}
+	if c.MCPReadOnlyTools != nil {
+		cloned.MCPReadOnlyTools = make(map[string][]string, len(c.MCPReadOnlyTools))
+		for server, names := range c.MCPReadOnlyTools {
+			cloned.MCPReadOnlyTools[server] = slices.Clone(names)
+		}
 	}
 	cloned.sources = maps.Clone(c.sources)
 
@@ -663,6 +675,9 @@ func (c Config) ValidateRuntime() error {
 		return err
 	}
 	if err := validateSubagent(c.Subagent); err != nil {
+		return err
+	}
+	if err := validateMCPReadOnlyTools(c.MCPReadOnlyTools); err != nil {
 		return err
 	}
 
@@ -1234,4 +1249,25 @@ func cloneRawValue(value any) any {
 	default:
 		return item
 	}
+}
+
+// MCPReadOnlyWildcard marks every tool of one MCP server as read-only.
+const MCPReadOnlyWildcard = "*"
+
+func validateMCPReadOnlyTools(values map[string][]string) error {
+	for server, names := range values {
+		if strings.TrimSpace(server) == "" || strings.TrimSpace(server) != server {
+			return fmt.Errorf("%w: mcp_read_only_tools server ID %q must be non-empty without surrounding spaces", ErrInvalid, server)
+		}
+		if len(names) == 0 {
+			return fmt.Errorf("%w: mcp_read_only_tools.%s must list tool names or %q", ErrInvalid, server, MCPReadOnlyWildcard)
+		}
+		for _, name := range names {
+			if strings.TrimSpace(name) == "" || strings.TrimSpace(name) != name {
+				return fmt.Errorf("%w: mcp_read_only_tools.%s tool name %q must be non-empty without surrounding spaces", ErrInvalid, server, name)
+			}
+		}
+	}
+
+	return nil
 }

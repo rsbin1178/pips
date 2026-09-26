@@ -37,7 +37,16 @@ type ConnectionOptions struct {
 	MaxTools       int
 	Transport      TransportFactory
 	Diagnostics    []ConnectionDiagnostic
+	// ReadOnlyTools marks tools, keyed by server ID, as read-only so they may
+	// run concurrently within one model response. Values are remote MCP tool
+	// names or ReadOnlyWildcard. Risk stays privileged; remote readOnlyHint
+	// annotations are never consulted.
+	ReadOnlyTools map[string][]string
 }
+
+// ReadOnlyWildcard in ConnectionOptions.ReadOnlyTools marks every tool of a
+// server as read-only.
+const ReadOnlyWildcard = "*"
 
 // ConnectionDiagnostic is a safe, non-fatal server lifecycle condition.
 type ConnectionDiagnostic struct {
@@ -137,6 +146,7 @@ type Connections struct {
 	pending       int
 	settled       chan struct{}
 	closed        bool
+	readOnly      map[string]map[string]struct{}
 
 	cancel    context.CancelFunc
 	wg        sync.WaitGroup
@@ -182,6 +192,7 @@ func OpenConnections(
 		settled:  make(chan struct{}),
 		cancel:   cancel,
 		snapshot: agentmcp.RegistrySnapshot{Version: 1, UpdatedAt: time.Now().UTC()},
+		readOnly: readOnlySets(options.ReadOnlyTools),
 	}
 	connections.signature, err = entriesSignature(nil)
 	if err != nil {
@@ -675,7 +686,7 @@ func (c *Connections) rebuildLocked() error {
 		if server.state != ServerStateConnected {
 			continue
 		}
-		entries = append(entries, catalog.MCP(server.id, catalog.RiskPrivileged, server.tools...)...)
+		entries = append(entries, catalog.MCP(server.id, catalog.RiskPrivileged, c.markReadOnly(server)...)...)
 	}
 	if _, err := catalog.New(entries...); err != nil {
 		return fmt.Errorf("coding mcp: invalid tool snapshot: %w", err)
@@ -699,8 +710,50 @@ func (c *Connections) rebuildLocked() error {
 	return nil
 }
 
+// markReadOnly wraps the server's user-marked read-only tools with
+// agent.Parallel. Every other tool stays serial.
+func (c *Connections) markReadOnly(server *managedServer) []agent.Tool {
+	names, ok := c.readOnly[server.id]
+	if !ok {
+		return server.tools
+	}
+
+	_, all := names[ReadOnlyWildcard]
+	tools := make([]agent.Tool, len(server.tools))
+	for index, tool := range server.tools {
+		tools[index] = tool
+		if remote, ok := tool.(interface{ RemoteName() string }); ok {
+			if _, marked := names[remote.RemoteName()]; all || marked {
+				tools[index] = agent.Parallel(tool)
+			}
+		}
+	}
+
+	return tools
+}
+
+func readOnlySets(values map[string][]string) map[string]map[string]struct{} {
+	sets := make(map[string]map[string]struct{}, len(values))
+	for server, names := range values {
+		set := make(map[string]struct{}, len(names))
+		for _, name := range names {
+			set[name] = struct{}{}
+		}
+		sets[server] = set
+	}
+
+	return sets
+}
+
+func concurrent(tool agent.Tool) bool {
+	safe, ok := tool.(agent.ConcurrencySafe)
+
+	return ok && safe.Concurrent()
+}
+
 // entriesSignature mirrors the agent/mcp Registry material-change rule: the
-// JSON encoding of every advertised declaration with its source and risk.
+// JSON encoding of every advertised declaration with its source and risk,
+// plus its read-only (concurrent) marking.
 func entriesSignature(entries []catalog.Entry) (string, error) {
 	declarations := make([]any, 0, len(entries))
 	for _, entry := range entries {
@@ -709,7 +762,8 @@ func entriesSignature(entries []catalog.Entry) (string, error) {
 			Source catalog.Source
 			Risk   catalog.Risk
 			Decl   any
-		}{entry.Tool.Decl().Name, entry.Source, entry.Risk, entry.Tool.Decl()})
+			Par    bool `json:",omitempty"`
+		}{entry.Tool.Decl().Name, entry.Source, entry.Risk, entry.Tool.Decl(), concurrent(entry.Tool)})
 	}
 
 	data, err := json.Marshal(declarations)

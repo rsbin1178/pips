@@ -713,3 +713,40 @@ func writeFile(t *testing.T, path, content string) {
 	t.Helper()
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
 }
+
+func TestLoadMCPReadOnlyTools(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	writeFile(t, path, `
+[mcp_read_only_tools]
+exa = ["web_search_exa"]
+docs = ["*"]
+`)
+	loaded, err := config.Load(config.LoadOptions{ConfigFile: path})
+	require.NoError(t, err)
+	assert.Equal(t, map[string][]string{
+		"exa": {"web_search_exa"}, "docs": {config.MCPReadOnlyWildcard},
+	}, loaded.Config.MCPReadOnlyTools)
+
+	cloned := loaded.Config.Clone()
+	cloned.MCPReadOnlyTools["exa"][0] = "mutated"
+	assert.Equal(t, "web_search_exa", loaded.Config.MCPReadOnlyTools["exa"][0])
+
+	defaults, err := config.Load(config.LoadOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, defaults.Config.MCPReadOnlyTools)
+
+	for name, content := range map[string]string{
+		"empty-list": "[mcp_read_only_tools]\nexa = []\n",
+		"empty-name": "[mcp_read_only_tools]\nexa = [\"\"]\n",
+		"empty-id":   "[mcp_read_only_tools]\n\"\" = [\"x\"]\n",
+	} {
+		invalid := filepath.Join(dir, name+".toml")
+		writeFile(t, invalid, content)
+		_, err := config.Load(config.LoadOptions{ConfigFile: invalid})
+		require.ErrorIs(t, err, config.ErrInvalid, name)
+		require.ErrorContains(t, err, "mcp_read_only_tools", name)
+	}
+}

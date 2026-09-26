@@ -337,12 +337,10 @@ func newChildControlScope(
 		cancel()
 		return nil, err
 	}
-	stateful := newStatefulToolBatchGuard(descriptors)
 	composed := extension.ComposeHooks(
 		extension.Hooks{BeforeTool: scope.guard.before(scope.plan.Limits)},
 		extension.Hooks{BeforeTool: scope.hooks.beforeTool},
 		extension.Hooks{BeforeTool: leasedToolGuard(scope.factory.mode, descriptors, searchName, allTools)},
-		extension.Hooks{BeforeTool: stateful.beforeTool},
 		extension.Hooks{BeforeTool: scope.questions.BeforeTool},
 		extension.Hooks{BeforeTool: scope.changes.beforeTool},
 		extension.Hooks{BeforeTool: scope.controller.BeforeTool},

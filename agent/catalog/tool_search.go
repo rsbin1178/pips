@@ -40,6 +40,10 @@ func ValidateToolSearchName(name string) error {
 // default: MCP and extension tools are deferred, while local and Team tools
 // are direct. Name overrides DefaultToolSearchName; it must satisfy
 // ValidateToolSearchName and must not collide with a catalog or Initial tool.
+// Activations, when non-nil, keeps activated deferred tools visible beyond
+// the activating run: every later snapshot of any ToolSearch sharing the set
+// includes them, re-authorized by policy. When nil, an activation lasts only
+// for the run that performed it.
 type ToolSearchOptions struct {
 	Enabled         bool
 	Name            string
@@ -47,6 +51,7 @@ type ToolSearchOptions struct {
 	Initial         []agent.Tool
 	Limit           int
 	MaxRuns         int
+	Activations     *ActivationSet
 }
 
 // SourceSummary counts the policy-authorized deferred tools registered under
@@ -87,7 +92,9 @@ type ToolSearch struct {
 	name     string
 	limit    int
 	maxRuns  int
-	tool     agent.Tool
+	// activations is the optional cross-run activation store.
+	activations *ActivationSet
+	tool        agent.Tool
 	// hidden is the same discovery handler with a Disabled declaration. It
 	// keeps a blind call by name executable when no deferred tool exists, so
 	// the model receives the registry hint instead of an unknown-tool error.
@@ -155,10 +162,12 @@ func NewToolSearch(catalog *Catalog, policy Policy, options ToolSearchOptions) (
 		limit:    options.Limit,
 		maxRuns:  options.MaxRuns,
 		runs:     make(map[string]searchRun),
+
+		activations: options.Activations,
 	}
 	s.tool = agent.NewTool(
 		options.Name,
-		"Search the deferred MCP and Extension tools by capability and activate the best matches for the next turn. Built-in tools are already visible; do not search for them.",
+		"Search the deferred MCP and Extension tools by capability and activate the best matches for the next turn. Built-in tools are already visible; do not search for them. Pass tools with exact tool names or a kind/id source selector such as mcp/<server> to activate specific tools without a matching query.",
 		s.search,
 	)
 	s.hidden = hiddenTool{tool: s.tool}
@@ -192,7 +201,7 @@ func (s *ToolSearch) Name() string {
 
 type searchArgs struct {
 	Query string   `json:"query" description:"Capability to search for."`
-	Tools []string `json:"tools,omitempty" description:"Exact result names to activate. If omitted, the best matching results are activated."`
+	Tools []string `json:"tools,omitempty" description:"Deferred tools to activate: exact tool names, or kind/id source selectors (for example mcp/<server>) that activate every tool of that source. If omitted, the best matching results are activated."`
 }
 
 type searchResult struct {
@@ -341,6 +350,8 @@ func (s *ToolSearch) search(ctx context.Context, args searchArgs) (string, error
 	}
 
 	query := strings.TrimSpace(args.Query)
+
+	args.Tools = trimNonEmpty(args.Tools)
 	if query == "" && len(args.Tools) == 0 {
 		return "", errors.New("query or tools is required")
 	}
@@ -360,37 +371,158 @@ func (s *ToolSearch) search(ctx context.Context, args searchArgs) (string, error
 		hint = fmt.Sprintf(hintNoMatch, FormatSourceSummaries(sources))
 	}
 
-	available := make(map[string]struct{}, len(matches))
-	for _, match := range matches {
-		available[match.Name] = struct{}{}
-	}
-
-	selected := slices.Clone(args.Tools)
-	if len(selected) == 0 {
+	selected := make([]string, 0, len(args.Tools))
+	if len(args.Tools) == 0 {
 		for _, match := range matches {
 			selected = append(selected, match.Name)
+		}
+	} else {
+		selected, err = s.expandSelection(ctx, args.Tools, sources)
+		if err != nil {
+			return "", err
 		}
 	}
 
 	selected = uniqueStrings(selected)
-	for _, name := range selected {
-		if _, ok := available[name]; !ok {
-			return "", fmt.Errorf("tool %q was not returned by this search", name)
-		}
-	}
-
 	if _, err := s.catalog.Tools(ctx, s.policy, selected...); err != nil {
 		return "", err
 	}
 
-	s.mu.Lock()
-	s.pruneLocked()
-	s.runs[meta.RunID] = searchRun{names: selected, usedAt: time.Now().UTC()}
-	s.mu.Unlock()
+	if s.activations != nil {
+		s.activations.Add(selected...)
+	} else {
+		s.mu.Lock()
+		s.pruneLocked()
+		s.runs[meta.RunID] = searchRun{names: selected, usedAt: time.Now().UTC()}
+		s.mu.Unlock()
+	}
 
 	return encodeSearchResult(searchResult{
 		Matches: matches, Activated: selected, Sources: sources, Hint: hint,
 	})
+}
+
+// maxSelectionErrorNames bounds how many valid names a selection error lists.
+const maxSelectionErrorNames = 20
+
+// expandSelection resolves explicit activation requests. An entry containing
+// "/" is a kind/id source selector that expands to every authorized deferred
+// tool of that source; any other entry must name an authorized deferred tool.
+// The query does not need to match an explicit selection.
+func (s *ToolSearch) expandSelection(
+	ctx context.Context,
+	requested []string,
+	sources []SourceSummary,
+) ([]string, error) {
+	all, err := s.catalog.Search(ctx, s.policy, "")
+	if err != nil {
+		return nil, err
+	}
+
+	deferred := s.deferredMatches(all)
+
+	byName := make(map[string]struct{}, len(deferred))
+	for _, descriptor := range deferred {
+		byName[descriptor.Name] = struct{}{}
+	}
+
+	selected := make([]string, 0, len(requested))
+	for _, entry := range requested {
+		if kind, id, isSelector := strings.Cut(entry, "/"); isSelector {
+			before := len(selected)
+
+			for _, descriptor := range deferred {
+				if descriptor.Source.Kind == kind && descriptor.Source.ID == id {
+					selected = append(selected, descriptor.Name)
+				}
+			}
+
+			if len(selected) == before {
+				return nil, fmt.Errorf("unknown tool source %q; available sources: %s",
+					entry, FormatSourceSummaries(sources))
+			}
+
+			continue
+		}
+
+		if _, ok := byName[entry]; !ok {
+			return nil, fmt.Errorf("tool %q is not a searchable deferred tool; available tools: %s; sources: %s",
+				entry, selectionNames(deferred), FormatSourceSummaries(sources))
+		}
+
+		selected = append(selected, entry)
+	}
+
+	return selected, nil
+}
+
+func selectionNames(descriptors []Descriptor) string {
+	names := make([]string, 0, min(len(descriptors), maxSelectionErrorNames))
+	for _, descriptor := range descriptors[:min(len(descriptors), maxSelectionErrorNames)] {
+		names = append(names, descriptor.Name)
+	}
+
+	joined := strings.Join(names, ", ")
+	if len(descriptors) > maxSelectionErrorNames {
+		joined += fmt.Sprintf(", … (%d more)", len(descriptors)-maxSelectionErrorNames)
+	}
+
+	return joined
+}
+
+func trimNonEmpty(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			out = append(out, value)
+		}
+	}
+
+	return out
+}
+
+// BeforeTool denies a call to a registered, authorized deferred tool that is
+// not active for the calling run, telling the model to activate it through
+// the discovery tool first. Without it, such a call fails as an unknown tool.
+// Every other call is allowed; install it before ordinary policy gates.
+func (s *ToolSearch) BeforeTool(ctx context.Context, info agent.ToolCallInfo) agent.ToolDecision {
+	if s == nil || !s.enabled {
+		return agent.ToolDecision{}
+	}
+
+	entry, ok := s.catalog.byName[info.Name]
+	if !ok {
+		return agent.ToolDecision{}
+	}
+
+	if _, deferred := s.deferred[entry.Source.Kind]; !deferred || s.active(ctx, info.Name) {
+		return agent.ToolDecision{}
+	}
+
+	if _, err := s.catalog.Tools(ctx, s.policy, info.Name); err != nil {
+		return agent.ToolDecision{}
+	}
+
+	return agent.DenyTool(fmt.Sprintf(
+		"tool %q is not active; call %s with tools:[%q] first",
+		info.Name, s.name, info.Name,
+	))
+}
+
+func (s *ToolSearch) active(ctx context.Context, name string) bool {
+	if s.activations.Contains(name) {
+		return true
+	}
+
+	meta, ok := agent.RunMetadataFromContext(ctx)
+	if !ok {
+		return false
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return slices.Contains(s.runs[meta.RunID].names, name)
 }
 
 func encodeSearchResult(result searchResult) (string, error) {
@@ -403,6 +535,11 @@ func encodeSearchResult(result searchResult) (string, error) {
 }
 
 func (s *ToolSearch) snapshot(ctx context.Context, runID string) ([]agent.Tool, error) {
+	if s.activations != nil {
+		// Activated tools are already part of the direct snapshot.
+		return s.ExecutableTools(ctx)
+	}
+
 	s.mu.Lock()
 
 	state := s.runs[runID]
@@ -432,11 +569,15 @@ func (s *ToolSearch) snapshot(ctx context.Context, runID string) ([]agent.Tool, 
 func (s *ToolSearch) direct(tools []agent.Tool) ([]agent.Tool, bool) {
 	direct := make([]agent.Tool, 0, len(tools))
 	discoverable := false
+
 	for _, tool := range tools {
 		entry := s.catalog.byName[tool.Decl().Name]
 		if _, deferred := s.deferred[entry.Source.Kind]; deferred {
 			discoverable = true
-			continue
+
+			if !s.activations.Contains(tool.Decl().Name) {
+				continue
+			}
 		}
 
 		direct = append(direct, tool)

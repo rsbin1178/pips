@@ -83,6 +83,7 @@ type fileLayer struct {
 	subagentFields        []Field
 	sandboxWorkspaceWrite *SandboxWorkspaceWriteConfig
 	statusLine            *[]statusline.Item
+	mcpReadOnlyTools      map[string][]string
 }
 
 // Load resolves one configuration snapshot in increasing precedence order.
@@ -130,6 +131,9 @@ func Load(options LoadOptions) (Result, error) {
 				Kind: SourceConfigFile, Detail: options.ConfigFile,
 			}
 		}
+		if layer.mcpReadOnlyTools != nil {
+			result.Config.MCPReadOnlyTools = layer.mcpReadOnlyTools
+		}
 	}
 
 	if err := applyEnvironment(&result.Config, options.LookupEnv); err != nil {
@@ -159,6 +163,7 @@ type fileConfig struct {
 	Approval              *string                    `toml:"approval"`
 	Compaction            *fileCompaction            `toml:"compaction"`
 	Subagent              *fileSubagent              `toml:"subagent"`
+	MCPReadOnlyTools      map[string][]string        `toml:"mcp_read_only_tools"`
 }
 
 type fileTUI struct {
@@ -542,6 +547,12 @@ func decodeLayer(value fileConfig) (fileLayer, error) {
 	layer := fileLayer{
 		providers: make(map[ai.Provider]ProviderConfig, len(value.Providers)),
 		models:    []ModelConfig{},
+	}
+	if value.MCPReadOnlyTools != nil {
+		if err := validateMCPReadOnlyTools(value.MCPReadOnlyTools); err != nil {
+			return fileLayer{}, err
+		}
+		layer.mcpReadOnlyTools = value.MCPReadOnlyTools
 	}
 	if value.Compaction != nil {
 		compaction := DefaultCompactionConfig()
