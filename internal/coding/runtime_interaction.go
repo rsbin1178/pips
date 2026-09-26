@@ -858,6 +858,9 @@ func (r *Runtime) openInteraction(
 	search, err := catalog.NewToolSearch(merged, policy, catalog.ToolSearchOptions{
 		Enabled: r.config.ToolSearch,
 		Name:    r.config.ToolSearchNameFor(r.resolved.Ref.Provider),
+		// Activations outlive the interaction so a tool found once stays
+		// callable for the rest of the session.
+		Activations: r.toolActivations,
 	})
 	if err != nil {
 		// A name collision or malformed name is a configuration fault, not a
@@ -914,13 +917,12 @@ func (r *Runtime) openInteraction(
 	extensionObserver := newGuardedAgentObserver(extensionHooks.Observe)
 	controlHooks := extensionHooks
 	controlHooks.Observe = nil
-	statefulBatchGuard := newStatefulToolBatchGuard(descriptors)
 	composed := extension.ComposeHooks(
 		extension.Hooks{BeforeTool: r.hookBeforeTool(emitter)},
 		extension.Hooks{BeforeTool: r.teamGuard.beforeTool(descriptors)},
 		extension.Hooks{AfterTool: leadCoordinatorAfterTool(leadCoordinator)},
 		extension.Hooks{BeforeTool: leasedToolGuard(started.Mode, descriptors, searchName, allTools)},
-		extension.Hooks{BeforeTool: statefulBatchGuard.beforeTool},
+		extension.Hooks{BeforeTool: search.BeforeTool},
 		extension.Hooks{BeforeTool: r.planEditGate()},
 		extension.Hooks{BeforeTool: r.planReviews.BeforeTool},
 		extension.Hooks{BeforeTool: r.questions.BeforeTool},
