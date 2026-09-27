@@ -8,9 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
-	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -19,13 +16,9 @@ import (
 
 	"github.com/rsbin1178/pips/internal/coding/execution"
 	codingmcp "github.com/rsbin1178/pips/internal/coding/mcp"
-	"golang.org/x/net/http/httpguts"
 )
 
 var mcpTopFields = map[string]struct{}{"$schema": {}, "mcpServers": {}}
-
-// maxServerIDLength mirrors the native MCP server ID length limit.
-const maxServerIDLength = 48
 
 //nolint:gocyclo // Top-level isolation and independent server-entry recovery stay explicit.
 func loadMCP(
@@ -132,43 +125,35 @@ func decodeMCPServer(
 	raw json.RawMessage,
 	pkg Package,
 ) (codingmcp.Definition, bool, error) {
-	object, err := decodeObject(raw)
-	if err != nil {
-		return codingmcp.Definition{}, false, errors.New("server must be an object")
+	entry, err := codingmcp.DecodeServerEntry(raw, codingmcp.DialectAgentPlugin)
+	if errors.Is(err, codingmcp.ErrUnsupportedTransport) {
+		return codingmcp.Definition{}, false, nil
 	}
-	transport, err := requiredString(object, "type")
 	if err != nil {
-		return codingmcp.Definition{}, false, errors.New("server type is required")
+		return codingmcp.Definition{}, false, err
+	}
+	if entry.Transport == codingmcp.TransportStdio {
+		definition, err := resolveStdioServer(name, entry, pkg)
+
+		return definition, true, err
 	}
 
-	switch transport {
-	case "stdio":
-		definition, err := decodeStdioServer(name, object, pkg)
-		return definition, true, err
-	case "streamable-http":
-		definition, err := decodeRemoteServer(name, object)
-		return definition, true, err
-	case "sse":
-		_, err := decodeRemoteServer(name, object)
-		return codingmcp.Definition{}, false, err
-	default:
-		return codingmcp.Definition{}, false, errors.New("unsupported server type")
-	}
+	return codingmcp.Definition{
+		ID: codingmcp.ServerID(name), Scope: codingmcp.ScopeAgentPlugin,
+		Transport: codingmcp.TransportStreamableHTTP, URL: entry.URL,
+		Headers: entry.Headers, ConnectTimeout: 10 * time.Second,
+	}, true, nil
 }
 
-func decodeStdioServer(
+// resolveStdioServer applies the Agent Plugin-only parts of a stdio entry:
+// plugin-relative commands, PLUGIN_ROOT/PLUGIN_DATA placeholders, and the
+// plugin-rooted working directory.
+func resolveStdioServer(
 	name string,
-	object map[string]json.RawMessage,
+	entry codingmcp.ServerEntry,
 	pkg Package,
 ) (codingmcp.Definition, error) {
-	if err := rejectUnknownFields(object, "type", "command", "args", "env", "cwd"); err != nil {
-		return codingmcp.Definition{}, err
-	}
-	commandToken, err := requiredString(object, "command")
-	if err != nil || commandToken == "" {
-		return codingmcp.Definition{}, errors.New("stdio command must be a non-empty string")
-	}
-	command, err := resolveCommand(pkg.Root, commandToken)
+	command, err := resolveCommand(pkg.Root, entry.Command)
 	if err != nil {
 		return codingmcp.Definition{}, err
 	}
@@ -178,27 +163,27 @@ func decodeStdioServer(
 		return codingmcp.Definition{}, err
 	}
 
-	var args []string
-	if raw, exists := object["args"]; exists {
-		if err := json.Unmarshal(raw, &args); err != nil || args == nil {
-			return codingmcp.Definition{}, errors.New("stdio args must be an array of strings")
-		}
-	}
+	args := slices.Clone(entry.Args)
 	for index := range args {
 		args[index] = expandPluginVariables(args[index], pkg.Root, data)
 	}
 
-	environment, err := decodeEnvironment(object["env"], pkg.Root, data)
-	if err != nil {
-		return codingmcp.Definition{}, err
+	environment := slices.Clone(entry.Environment)
+	for index := range environment {
+		environment[index].Value = expandPluginVariables(environment[index].Value, pkg.Root, data)
 	}
-	workingDirectory, err := resolveWorkingDirectory(object["cwd"], pkg.Root, data)
+
+	var configuredDirectory *string
+	if entry.HasWorkingDir {
+		configuredDirectory = &entry.WorkingDir
+	}
+	workingDirectory, err := resolveWorkingDirectory(configuredDirectory, pkg.Root, data)
 	if err != nil {
 		return codingmcp.Definition{}, err
 	}
 
 	return codingmcp.Definition{
-		ID: serverID(name), Scope: codingmcp.ScopeAgentPlugin,
+		ID: codingmcp.ServerID(name), Scope: codingmcp.ScopeAgentPlugin,
 		Transport: codingmcp.TransportStdio, Command: command, Args: args,
 		Environment: environment, WorkingDir: workingDirectory,
 		PluginRoot: pkg.Root, PluginData: data, ConnectTimeout: 10 * time.Second,
@@ -249,33 +234,6 @@ func securePluginDataDirectory(directory string, parents bool) error {
 	return os.Chmod(directory, 0o700) //nolint:gosec // Client-managed data must be owner-writable.
 }
 
-func decodeRemoteServer(
-	name string,
-	object map[string]json.RawMessage,
-) (codingmcp.Definition, error) {
-	if err := rejectUnknownFields(object, "type", "url", "headers"); err != nil {
-		return codingmcp.Definition{}, err
-	}
-	endpoint, err := requiredString(object, "url")
-	if err != nil {
-		return codingmcp.Definition{}, errors.New("remote URL must satisfy Agent Plugins HTTP(S) rules")
-	}
-	endpoint, err = normalizeRemoteURL(endpoint)
-	if err != nil {
-		return codingmcp.Definition{}, errors.New("remote URL must satisfy Agent Plugins HTTP(S) rules")
-	}
-	headers, err := decodeHeaders(object["headers"])
-	if err != nil {
-		return codingmcp.Definition{}, err
-	}
-
-	return codingmcp.Definition{
-		ID: serverID(name), Scope: codingmcp.ScopeAgentPlugin,
-		Transport: codingmcp.TransportStreamableHTTP, URL: endpoint,
-		Headers: headers, ConnectTimeout: 10 * time.Second,
-	}, nil
-}
-
 func resolveCommand(root, token string) (string, error) {
 	if relative, found := strings.CutPrefix(token, "./"); found {
 		candidate := filepath.Join(root, filepath.FromSlash(relative))
@@ -304,40 +262,11 @@ func validateExecutable(command string) error {
 	return nil
 }
 
-func decodeEnvironment(raw json.RawMessage, root, data string) ([]execution.EnvVar, error) {
-	if raw == nil {
-		return nil, nil
-	}
-	var values map[string]string
-	if err := json.Unmarshal(raw, &values); err != nil || values == nil {
-		return nil, errors.New("stdio env must be an object of strings")
-	}
-	if _, exists := values["PLUGIN_ROOT"]; exists {
-		return nil, errors.New("stdio env cannot override PLUGIN_ROOT")
-	}
-	if _, exists := values["PLUGIN_DATA"]; exists {
-		return nil, errors.New("stdio env cannot override PLUGIN_DATA")
-	}
-	names := slices.Collect(mapsKeys(values))
-	slices.Sort(names)
-	environment := make([]execution.EnvVar, 0, len(names))
-	for _, name := range names {
-		environment = append(environment, execution.EnvVar{
-			Name: name, Value: expandPluginVariables(values[name], root, data),
-		})
-	}
-
-	return environment, nil
-}
-
-func resolveWorkingDirectory(raw json.RawMessage, root, data string) (string, error) {
-	if raw == nil {
+func resolveWorkingDirectory(configuredDirectory *string, root, data string) (string, error) {
+	if configuredDirectory == nil {
 		return root, nil
 	}
-	var configured string
-	if err := json.Unmarshal(raw, &configured); err != nil {
-		return "", errors.New("stdio cwd must be a string")
-	}
+	configured := *configuredDirectory
 	var permittedRoot string
 	switch {
 	case strings.HasPrefix(configured, "./"):
@@ -375,109 +304,6 @@ func expandPluginVariables(value, root, data string) string {
 		"${PLUGIN_ROOT}", root,
 		"${PLUGIN_DATA}", data,
 	).Replace(value)
-}
-
-func normalizeRemoteURL(value string) (string, error) {
-	parsed, err := url.Parse(value)
-	if err != nil || !validRemoteURLSyntax(value, parsed) {
-		return "", errors.New("invalid remote URL")
-	}
-	parsed.Scheme = strings.ToLower(parsed.Scheme)
-	if parsed.Scheme == "https" {
-		return parsed.String(), nil
-	}
-	host := parsed.Hostname()
-	if strings.EqualFold(host, "localhost") {
-		return parsed.String(), nil
-	}
-	address := net.ParseIP(host)
-	if address == nil || !address.IsLoopback() {
-		return "", errors.New("non-loopback HTTP URL")
-	}
-
-	return parsed.String(), nil
-}
-
-func validRemoteURLSyntax(value string, parsed *url.URL) bool {
-	return !strings.ContainsRune(value, '#') && parsed.IsAbs() && parsed.Host != "" &&
-		parsed.Opaque == "" && parsed.User == nil && parsed.Fragment == "" &&
-		(strings.EqualFold(parsed.Scheme, "http") || strings.EqualFold(parsed.Scheme, "https"))
-}
-
-func decodeHeaders(raw json.RawMessage) ([]codingmcp.HTTPHeader, error) {
-	if raw == nil {
-		return nil, nil
-	}
-	var values map[string]string
-	if err := json.Unmarshal(raw, &values); err != nil || values == nil {
-		return nil, errors.New("headers must be an object of literal strings")
-	}
-	names := slices.Collect(mapsKeys(values))
-	slices.Sort(names)
-	seen := make(map[string]struct{}, len(names))
-	headers := make([]codingmcp.HTTPHeader, 0, len(names))
-	for _, name := range names {
-		canonical := strings.ToLower(http.CanonicalHeaderKey(name))
-		if !httpguts.ValidHeaderFieldName(name) || !httpguts.ValidHeaderFieldValue(values[name]) {
-			return nil, errors.New("header name or value is invalid")
-		}
-		if _, duplicate := seen[canonical]; duplicate {
-			return nil, errors.New("headers contain a case-insensitive duplicate")
-		}
-		seen[canonical] = struct{}{}
-		headers = append(headers, codingmcp.HTTPHeader{Name: name, Value: values[name]})
-	}
-
-	return headers, nil
-}
-
-func rejectUnknownFields(object map[string]json.RawMessage, allowed ...string) error {
-	set := make(map[string]struct{}, len(allowed))
-	for _, field := range allowed {
-		set[field] = struct{}{}
-	}
-	for field := range object {
-		if _, exists := set[field]; !exists {
-			return fmt.Errorf("unknown server field %q", field)
-		}
-	}
-
-	return nil
-}
-
-// serverID derives the user-visible native server ID from a plugin mcp.json
-// server name. The name is lowercased and every run of characters outside
-// [a-z0-9_] becomes one hyphen so the ID satisfies the native pattern; names
-// that would exceed the native length limit are truncated and suffixed with a
-// short content hash so two long names stay distinct.
-func serverID(server string) string {
-	var builder strings.Builder
-	separator := false
-	for _, r := range strings.ToLower(server) {
-		switch {
-		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
-			builder.WriteRune(r)
-			separator = false
-		case r == '_' && !separator && builder.Len() > 0:
-			builder.WriteRune(r)
-			separator = true
-		case !separator && builder.Len() > 0:
-			builder.WriteRune('-')
-			separator = true
-		}
-	}
-	id := strings.TrimRight(builder.String(), "-_")
-	if id == "" {
-		id = "server"
-	}
-	if len(id) <= maxServerIDLength {
-		return id
-	}
-	sum := sha256.Sum256([]byte(server))
-	suffix := hex.EncodeToString(sum[:4])
-	id = strings.TrimRight(id[:maxServerIDLength-len(suffix)-1], "-_")
-
-	return id + "-" + suffix
 }
 
 func pluginDataPath(base, root string) string {

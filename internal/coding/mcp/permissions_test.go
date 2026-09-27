@@ -185,7 +185,7 @@ func (f permissionFixture) loadDefinitions(t *testing.T, args []string) codingmc
         }]}`,
 	)
 
-	definitions, err := codingmcp.LoadDefinitions(t.Context(), codingmcp.LoadOptions{
+	definitions, _, err := codingmcp.LoadDefinitions(t.Context(), codingmcp.LoadOptions{
 		Paths: f.layout, Tree: f.tree, ProjectTrusted: true, Limits: codingmcp.DefaultLimits(),
 	})
 	require.NoError(t, err)

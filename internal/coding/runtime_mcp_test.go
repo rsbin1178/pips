@@ -238,3 +238,73 @@ func TestRuntimeReportsBackgroundMCPFailureOnceAtInteractionBoundary(t *testing.
 	_, err = runtime.MCP(t.Context())
 	require.ErrorIs(t, err, ErrRuntimeClosed)
 }
+
+// TestRuntimeLoadsPortableNativeMCPWithCredentialReference uses t.Setenv, so
+// it cannot run in parallel.
+func TestRuntimeLoadsPortableNativeMCPWithCredentialReference(t *testing.T) {
+	t.Setenv("PIPS_TEST_RUNTIME_MCP_KEY", "runtime-secret")
+
+	server := sdk.NewServer(&sdk.Implementation{Name: "portable", Version: "v1"}, nil)
+	server.AddTool(&sdk.Tool{
+		Name: "lookup", InputSchema: json.RawMessage(`{"type":"object","additionalProperties":false}`),
+	}, func(context.Context, *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
+		return &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: "ok"}}}, nil
+	})
+	handler := sdk.NewStreamableHTTPHandler(
+		func(*http.Request) *sdk.Server { return server },
+		&sdk.StreamableHTTPOptions{JSONResponse: true},
+	)
+	keys := make(chan string, 16)
+	httpServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		select {
+		case keys <- request.Header.Get("X-Api-Key"):
+		default:
+		}
+		handler.ServeHTTP(writer, request)
+	}))
+	t.Cleanup(httpServer.Close)
+
+	base := t.TempDir()
+	layout, err := paths.New(base + "/home")
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(layout.Root(), 0o700))
+	require.NoError(t, os.WriteFile(layout.MCPFile(), fmt.Appendf(nil, `{
+  "schema": "pips.mcp/v1alpha2",
+  "mcpServers": {
+    "Docs": {
+      "type": "streamable-http",
+      "url": %q,
+      "headers": {"X-Api-Key": "${env:PIPS_TEST_RUNTIME_MCP_KEY}"}
+    },
+    "legacy": {"type": "sse", "url": "https://legacy.example.test/sse"}
+  }
+}`, httpServer.URL), 0o600))
+
+	model := newRuntimeModel(runtimeTextResponse("done"))
+	runtime := openTestRuntimeAt(t, base, SessionTarget{}, model)
+	collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("use the docs")))
+
+	assert.Equal(t, "runtime-secret", <-keys)
+	requests := model.Requests()
+	require.Len(t, requests, 1)
+	assert.Contains(t, toolNamesFromRequest(requests[0]), "docs_lookup")
+
+	snapshot, err := runtime.MCP(t.Context())
+	require.NoError(t, err)
+	require.Len(t, snapshot.Servers, 1)
+	assert.Equal(t, codingmcp.ScopeUser, snapshot.Servers[0].Scope)
+	assert.Equal(t, codingmcp.ServerStateConnected, snapshot.Servers[0].State)
+
+	diagnostics := make([]IntegrationDiagnostic, 0)
+	for _, diagnostic := range runtime.Snapshot().Diagnostics {
+		if diagnostic.Component == componentMCP {
+			diagnostics = append(diagnostics, diagnostic)
+		}
+	}
+	require.Len(t, diagnostics, 1)
+	assert.Equal(t, "transport_unsupported", diagnostics[0].Code)
+	assert.Contains(t, diagnostics[0].Message, `"legacy"`)
+	encoded, err := json.Marshal(runtime.Snapshot())
+	require.NoError(t, err)
+	assert.NotContains(t, string(encoded), "runtime-secret")
+}

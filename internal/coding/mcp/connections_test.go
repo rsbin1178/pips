@@ -19,6 +19,7 @@ import (
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/rsbin1178/pips/agent"
+	"github.com/rsbin1178/pips/agent/catalog"
 	agentmcp "github.com/rsbin1178/pips/agent/mcp"
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding/execution"
@@ -55,6 +56,15 @@ func TestCodingMCPStdioHelper(t *testing.T) {
 
 		return &sdk.CallToolResult{Content: []sdk.Content{
 			&sdk.TextContent{Text: "clean"},
+		}}, nil
+	})
+
+	server.AddTool(testSDKTool("credential"), func(
+		context.Context,
+		*sdk.CallToolRequest,
+	) (*sdk.CallToolResult, error) {
+		return &sdk.CallToolResult{Content: []sdk.Content{
+			&sdk.TextContent{Text: os.Getenv("MCP_SERVICE_API_KEY")},
 		}}, nil
 	})
 
@@ -637,9 +647,10 @@ func TestOpenConnectionsUsesDefaultStdioTransportWithoutAmbientSecrets(t *testin
 	require.NoError(t, connections.Wait(t.Context()))
 
 	entries := connections.Snapshot().Entries
-	require.Len(t, entries, 1)
-	parts, err := entries[0].Tool.Exec(t.Context(), agent.ToolCall{
-		ID: "env-1", Name: entries[0].Tool.Decl().Name, Args: ai.JSON(`{}`),
+	require.Len(t, entries, 2)
+	tool := findEntry(t, entries, "stdio_environment")
+	parts, err := tool.Exec(t.Context(), agent.ToolCall{
+		ID: "env-1", Name: tool.Decl().Name, Args: ai.JSON(`{}`),
 	})
 	require.NoError(t, err)
 	assert.Equal(t, []ai.Part{ai.Text("clean")}, parts)
@@ -686,4 +697,180 @@ func (c closeRecorder) Close() error {
 	c.record()
 
 	return c.close()
+}
+
+func TestNativeCredentialReferencesExpandOnlyInsideTheTransport(t *testing.T) {
+	t.Parallel()
+
+	executable, err := os.Executable()
+	require.NoError(t, err)
+	opened, err := workspace.Open(t.TempDir())
+	require.NoError(t, err)
+	tempRoot := t.TempDir()
+	require.NoError(t, os.Chmod(tempRoot, 0o700)) //nolint:gosec // Directories require owner traversal.
+
+	received := make(chan http.Header, 16)
+	server := testMCPServer("docs", "search")
+	handler := sdk.NewStreamableHTTPHandler(
+		func(*http.Request) *sdk.Server { return server },
+		&sdk.StreamableHTTPOptions{JSONResponse: true},
+	)
+	httpServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		select {
+		case received <- request.Header.Clone():
+		default:
+		}
+		handler.ServeHTTP(writer, request)
+	}))
+	t.Cleanup(httpServer.Close)
+
+	parent := map[string]string{
+		"DOCS_API_KEY": "docs-secret", "SERVICE_API_KEY": "stdio-secret",
+		"HOME": t.TempDir(), "PATH": filepath.Dir(executable),
+	}
+	remote := codingmcp.Definition{
+		ID: "docs", Scope: codingmcp.ScopeUser, Transport: codingmcp.TransportStreamableHTTP,
+		URL:            httpServer.URL,
+		Headers:        []codingmcp.HTTPHeader{{Name: "Authorization", Value: "Bearer ${env:DOCS_API_KEY}"}},
+		ConnectTimeout: 10 * time.Second,
+	}
+	local := codingmcp.Definition{
+		ID: "stdio", Scope: codingmcp.ScopeUser, Transport: codingmcp.TransportStdio,
+		Command: executable,
+		Args: []string{
+			"-test.run=^TestCodingMCPStdioHelper$",
+			"-pips-coding-mcp-stdio-helper=true",
+		},
+		Environment: []execution.EnvVar{
+			{Name: "MCP_SERVICE_API_KEY", Value: "${env:SERVICE_API_KEY}"},
+			{Name: "PIPS_TEST_MCP_SCOPE", Value: "session-only"},
+		},
+		ConnectTimeout: 10 * time.Second,
+	}
+	missing := codingmcp.Definition{
+		ID: "missing", Scope: codingmcp.ScopeUser, Transport: codingmcp.TransportStreamableHTTP,
+		URL:            httpServer.URL,
+		Headers:        []codingmcp.HTTPHeader{{Name: "X-Api-Key", Value: "${env:UNSET_API_KEY}"}},
+		ConnectTimeout: 10 * time.Second,
+	}
+	definitions, err := codingmcp.NewDefinitions([]codingmcp.Definition{remote, local, missing}, 3)
+	require.NoError(t, err)
+	fingerprints := make([]string, 0, 3)
+	resolved := make([]codingmcp.ResolvedDefinition, 0, 3)
+	for _, definition := range definitions.List() {
+		fingerprints = append(fingerprints, definition.Fingerprint())
+		resolved = append(resolved, codingmcp.ResolvedDefinition{
+			Definition: definition, Status: codingmcp.StatusEnabled,
+		})
+	}
+
+	connections, err := codingmcp.OpenConnections(t.Context(), resolved, codingmcp.ConnectionOptions{
+		Workspace:      opened,
+		Implementation: &sdk.Implementation{Name: "pips-test", Version: "v1"},
+		HTTPClient:     &http.Client{Timeout: 5 * time.Second},
+		TempRoot:       tempRoot,
+		Environment: func(name string) (string, bool) {
+			value, ok := parent[name]
+
+			return value, ok
+		},
+		MaxTools: 16,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, connections.Close()) })
+	require.NoError(t, connections.Wait(t.Context()))
+
+	headers := <-received
+	assert.Equal(t, "Bearer docs-secret", headers.Get("Authorization"))
+
+	tool := findEntry(t, connections.Snapshot().Entries, "stdio_credential")
+	parts, err := tool.Exec(t.Context(), agent.ToolCall{
+		ID: "credential-1", Name: tool.Decl().Name, Args: ai.JSON(`{}`),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []ai.Part{ai.Text("stdio-secret")}, parts)
+
+	statuses := connections.Servers()
+	require.Len(t, statuses, 3)
+	assert.Equal(t, codingmcp.ServerStateConnected, statuses[0].State)
+	assert.Equal(t, codingmcp.ServerStateConnected, statuses[1].State)
+	assert.Equal(t, codingmcp.ServerStateFailed, statuses[2].State)
+	assert.Equal(t, "credential_unavailable", statuses[2].Code)
+	assert.Contains(t, statuses[2].Message, "UNSET_API_KEY")
+
+	for index, definition := range definitions.List() {
+		assert.Equal(t, fingerprints[index], definition.Fingerprint())
+	}
+	encoded, err := json.Marshal(struct {
+		Statuses    []codingmcp.ServerStatus
+		Diagnostics []codingmcp.ConnectionDiagnostic
+		Definitions []codingmcp.Definition
+	}{statuses, connections.Diagnostics(), definitions.List()})
+	require.NoError(t, err)
+	assert.NotContains(t, string(encoded), "docs-secret")
+	assert.NotContains(t, string(encoded), "stdio-secret")
+}
+
+func TestAgentPluginHeadersAreNeverExpanded(t *testing.T) {
+	t.Parallel()
+
+	received := make(chan http.Header, 16)
+	server := testMCPServer("plugin", "search")
+	handler := sdk.NewStreamableHTTPHandler(
+		func(*http.Request) *sdk.Server { return server },
+		&sdk.StreamableHTTPOptions{JSONResponse: true},
+	)
+	httpServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		select {
+		case received <- request.Header.Clone():
+		default:
+		}
+		handler.ServeHTTP(writer, request)
+	}))
+	t.Cleanup(httpServer.Close)
+
+	connections, err := codingmcp.OpenConnections(t.Context(), []codingmcp.ResolvedDefinition{{
+		Definition: codingmcp.Definition{
+			ID: "plugin", Scope: codingmcp.ScopeAgentPlugin, Transport: codingmcp.TransportStreamableHTTP,
+			URL:            httpServer.URL,
+			Headers:        []codingmcp.HTTPHeader{{Name: "X-Literal", Value: "${env:HOME}"}},
+			ConnectTimeout: 10 * time.Second,
+		},
+		Status: codingmcp.StatusEnabled,
+	}}, codingmcp.ConnectionOptions{
+		Implementation: &sdk.Implementation{Name: "pips-test", Version: "v1"},
+		HTTPClient:     &http.Client{Timeout: 5 * time.Second},
+		MaxTools:       16,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, connections.Close()) })
+	require.NoError(t, connections.Wait(t.Context()))
+
+	assert.Equal(t, "${env:HOME}", (<-received).Get("X-Literal"))
+}
+
+func TestCredentialReferencesRequireEnvironmentLookup(t *testing.T) {
+	t.Parallel()
+
+	definition := enabledHTTPDefinition("docs")
+	definition.Definition.Headers = []codingmcp.HTTPHeader{{Name: "X-Api-Key", Value: "${env:DOCS_API_KEY}"}}
+	_, err := codingmcp.OpenConnections(t.Context(), []codingmcp.ResolvedDefinition{definition}, codingmcp.ConnectionOptions{
+		Implementation: &sdk.Implementation{Name: "pips-test", Version: "v1"},
+		HTTPClient:     &http.Client{Timeout: 5 * time.Second},
+		MaxTools:       16,
+	})
+	require.ErrorIs(t, err, codingmcp.ErrInvalid)
+}
+
+func findEntry(t *testing.T, entries []catalog.Entry, name string) agent.Tool {
+	t.Helper()
+
+	for _, entry := range entries {
+		if entry.Tool.Decl().Name == name {
+			return entry.Tool
+		}
+	}
+	t.Fatalf("tool %q not found", name)
+
+	return nil
 }

@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -95,36 +96,40 @@ func (d Definitions) List() []Definition {
 }
 
 // LoadDefinitions decodes strict user and trusted-project MCP definition files.
-// An untrusted project file is never inspected.
+// An untrusted project file is never inspected. File-level violations fail the
+// load; a pips.mcp/v1alpha2 entry that is invalid, unsupported, or duplicates
+// an earlier derived ID is skipped and reported as a diagnostic.
 //
 //nolint:gocyclo // User/project trust gates and collision checks are one ordered load boundary.
-func LoadDefinitions(ctx context.Context, options LoadOptions) (Definitions, error) {
+func LoadDefinitions(ctx context.Context, options LoadOptions) (Definitions, []ConnectionDiagnostic, error) {
 	if options.Paths.Root() == "" || options.Limits.MaxFileBytes <= 0 || options.Limits.MaxServers <= 0 {
-		return Definitions{}, fmt.Errorf("%w: invalid load options", ErrInvalid)
+		return Definitions{}, nil, fmt.Errorf("%w: invalid load options", ErrInvalid)
 	}
 
 	if options.ProjectTrusted && options.Tree == nil {
-		return Definitions{}, fmt.Errorf("%w: trusted project requires a workspace tree", ErrInvalid)
+		return Definitions{}, nil, fmt.Errorf("%w: trusted project requires a workspace tree", ErrInvalid)
 	}
 
 	if err := ctx.Err(); err != nil {
-		return Definitions{}, err
+		return Definitions{}, nil, err
 	}
 
 	userData, userExists, err := readUserFile(options.Paths.MCPFile(), options.Limits.MaxFileBytes)
 	if err != nil {
-		return Definitions{}, err
+		return Definitions{}, nil, err
 	}
 
 	values := make([]Definition, 0)
+	diagnostics := make([]ConnectionDiagnostic, 0)
 
 	if userExists {
-		decoded, decodeErr := decodeDefinitions(userData, ScopeUser, options.Limits)
+		decoded, skipped, decodeErr := decodeDefinitions(userData, ScopeUser, options.Limits)
 		if decodeErr != nil {
-			return Definitions{}, fmt.Errorf("coding mcp: decode user definitions: %w", decodeErr)
+			return Definitions{}, nil, fmt.Errorf("coding mcp: decode user definitions: %w", decodeErr)
 		}
 
 		values = append(values, decoded...)
+		diagnostics = append(diagnostics, skipped...)
 	}
 
 	if options.ProjectTrusted {
@@ -134,21 +139,134 @@ func LoadDefinitions(ctx context.Context, options LoadOptions) (Definitions, err
 			options.Limits.MaxFileBytes,
 		)
 		if readErr != nil {
-			return Definitions{}, readErr
+			return Definitions{}, nil, readErr
 		}
 
 		if projectExists {
-			decoded, decodeErr := decodeDefinitions(projectData, ScopeProject, options.Limits)
+			decoded, skipped, decodeErr := decodeDefinitions(projectData, ScopeProject, options.Limits)
 			if decodeErr != nil {
-				return Definitions{}, fmt.Errorf("coding mcp: decode project definitions: %w", decodeErr)
+				return Definitions{}, nil, fmt.Errorf("coding mcp: decode project definitions: %w", decodeErr)
 			}
 
 			values = append(values, decoded...)
+			diagnostics = append(diagnostics, skipped...)
 		}
 	}
 
-	return NewDefinitions(values, options.Limits.MaxServers)
+	definitions, err := NewDefinitions(values, options.Limits.MaxServers)
+	if err != nil {
+		return Definitions{}, nil, err
+	}
+
+	return definitions, diagnostics, nil
 }
+
+func decodeDefinitions(data []byte, scope Scope, limits Limits) ([]Definition, []ConnectionDiagnostic, error) {
+	var header struct {
+		Schema string `json:"schema"`
+	}
+	if err := json.Unmarshal(data, &header); err != nil {
+		// Report the strict decoder's precise syntax error, and never let a
+		// file the header probe rejected load as an empty definition set.
+		var file definitionFile
+		if strictErr := jsonx.Decode(data, &file); strictErr != nil {
+			return nil, nil, strictErr
+		}
+
+		return nil, nil, fmt.Errorf("%w: definition file schema must be a string", ErrInvalid)
+	}
+
+	switch header.Schema {
+	case DefinitionSchema:
+		return decodeServers(data, scope, limits)
+	case LegacyDefinitionSchema:
+		values, err := decodeLegacyDefinitions(data, scope, limits)
+
+		return values, nil, err
+	default:
+		return nil, nil, fmt.Errorf(
+			"%w: unsupported schema %q (use %q with an mcpServers object)",
+			ErrInvalid, header.Schema, DefinitionSchema,
+		)
+	}
+}
+
+type serversFile struct {
+	Schema     string                     `json:"schema"`
+	MCPServers map[string]json.RawMessage `json:"mcpServers"`
+}
+
+// decodeServers decodes a pips.mcp/v1alpha2 file. Entries use the same
+// closed variants and field rules as Agent Plugins mcp.json.
+func decodeServers(data []byte, scope Scope, limits Limits) ([]Definition, []ConnectionDiagnostic, error) {
+	var file serversFile
+	if err := jsonx.Decode(data, &file); err != nil {
+		return nil, nil, err
+	}
+
+	if file.MCPServers == nil {
+		return nil, nil, fmt.Errorf("%w: mcpServers must be an object", ErrInvalid)
+	}
+
+	if len(file.MCPServers) > limits.MaxServers {
+		return nil, nil, fmt.Errorf("%w: more than %d servers", ErrLimitExceeded, limits.MaxServers)
+	}
+
+	values := make([]Definition, 0, len(file.MCPServers))
+	diagnostics := make([]ConnectionDiagnostic, 0)
+	seen := make(map[string]string, len(file.MCPServers))
+	skip := func(name, code, reason string) {
+		diagnostics = append(diagnostics, connectionDiagnostic(
+			ServerID(name), "configuration", code,
+			fmt.Sprintf("%s MCP server %q was ignored: %s", scope, name, reason),
+		))
+	}
+
+	for _, name := range sortedKeys(file.MCPServers) {
+		entry, err := DecodeServerEntry(file.MCPServers[name], DialectNative)
+		if errors.Is(err, ErrUnsupportedTransport) {
+			skip(name, "transport_unsupported", "legacy HTTP+SSE is not supported; use streamable-http")
+
+			continue
+		}
+
+		if err != nil {
+			skip(name, "definition_invalid", err.Error())
+
+			continue
+		}
+
+		timeout := entry.ConnectTimeout
+		if timeout == 0 {
+			timeout = defaultConnectTimeout
+		}
+
+		definition := Definition{
+			ID: ServerID(name), Scope: scope, Transport: entry.Transport,
+			Visibility: entry.Visibility, Command: entry.Command, Args: entry.Args,
+			Environment: entry.Environment, URL: entry.URL, Headers: entry.Headers,
+			ConnectTimeout: timeout,
+		}
+		if err := validateDefinition(definition); err != nil {
+			skip(name, "definition_invalid", err.Error())
+
+			continue
+		}
+
+		if previous, duplicate := seen[definition.ID]; duplicate {
+			skip(name, "definition_duplicate", fmt.Sprintf("its ID %q is already used by %q", definition.ID, previous))
+
+			continue
+		}
+
+		seen[definition.ID] = name
+		values = append(values, definition)
+	}
+
+	return values, diagnostics, nil
+}
+
+const defaultConnectTimeout = 10 * time.Second
 
 type definitionFile struct {
 	Schema  string             `json:"schema"`
@@ -165,14 +283,13 @@ type definitionServer struct {
 	ConnectTimeout string   `json:"connect_timeout,omitempty"`
 }
 
-func decodeDefinitions(data []byte, scope Scope, limits Limits) ([]Definition, error) {
+// decodeLegacyDefinitions decodes a pips.mcp/v1alpha1 file. Its rules are
+// frozen: absolute commands, control-free arguments, no environment or
+// headers, and any violation fails the whole file.
+func decodeLegacyDefinitions(data []byte, scope Scope, limits Limits) ([]Definition, error) {
 	var file definitionFile
 	if err := jsonx.Decode(data, &file); err != nil {
 		return nil, err
-	}
-
-	if file.Schema != DefinitionSchema {
-		return nil, fmt.Errorf("%w: unsupported schema %q", ErrInvalid, file.Schema)
 	}
 
 	if len(file.Servers) > limits.MaxServers {
@@ -187,7 +304,7 @@ func decodeDefinitions(data []byte, scope Scope, limits Limits) ([]Definition, e
 			return nil, fmt.Errorf("%w: server %q", ErrDuplicate, server.ID)
 		}
 
-		timeout := 10 * time.Second
+		timeout := defaultConnectTimeout
 
 		if server.ConnectTimeout != "" {
 			parsed, err := time.ParseDuration(server.ConnectTimeout)
@@ -204,7 +321,7 @@ func decodeDefinitions(data []byte, scope Scope, limits Limits) ([]Definition, e
 			Command:    server.Command, Args: slices.Clone(server.Args),
 			URL: server.URL, ConnectTimeout: timeout,
 		}
-		if err := validateDefinition(definition); err != nil {
+		if err := validateLegacyDefinition(definition); err != nil {
 			return nil, fmt.Errorf("%w: server %d (%q): %w", ErrInvalid, index, server.ID, err)
 		}
 
@@ -214,6 +331,21 @@ func decodeDefinitions(data []byte, scope Scope, limits Limits) ([]Definition, e
 	}
 
 	return values, nil
+}
+
+// validateLegacyDefinition applies the frozen v1alpha1 rules. They are
+// exactly the strict session-scope rules (clean absolute command, control-free
+// arguments), so validating a session-scoped view keeps v1alpha1 acceptance,
+// error text, and check order byte-for-byte unchanged.
+func validateLegacyDefinition(definition Definition) error {
+	if definition.Scope != ScopeUser && definition.Scope != ScopeProject {
+		return errors.New("unsupported definition scope")
+	}
+
+	legacy := definition
+	legacy.Scope = ScopeSession
+
+	return validateDefinition(legacy)
 }
 
 func readUserFile(filePath string, maximum int64) ([]byte, bool, error) {
