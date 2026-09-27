@@ -28,8 +28,9 @@ const (
 	maximumTerminateDuration = 30 * time.Second
 )
 
-// Config defines one shell-free stdio server process. Native definitions use
-// absolute commands; Agent Plugins may also use a bare platform command.
+// Config defines one shell-free stdio server process. Session definitions use
+// absolute commands; configured definitions may also use a bare platform
+// command.
 type Config struct {
 	Workspace            workspace.Workspace
 	Command              string
@@ -37,10 +38,17 @@ type Config struct {
 	TempRoot             string
 	Environment          func(string) (string, bool)
 	EnvironmentOverrides []execution.EnvVar
-	WorkingDirectory     string
-	PluginRoot           string
-	PluginData           string
-	TerminateDuration    time.Duration
+	// Configured marks Command and EnvironmentOverrides as trusted server
+	// configuration from a native definition file rather than session input.
+	// A bare Command is resolved with platform executable search, an absolute
+	// Command is filesystem-resolved before the regular-executable check, and
+	// overrides overlay the sanitized baseline after well-formedness checks
+	// only. Agent Plugin transports (PluginRoot set) are always configured.
+	Configured        bool
+	WorkingDirectory  string
+	PluginRoot        string
+	PluginData        string
+	TerminateDuration time.Duration
 }
 
 // Resource owns a prepared SDK transport and its private environment root.
@@ -57,6 +65,7 @@ type Resource struct {
 type validatedCommandTransport struct {
 	commandTransport  *SDK.CommandTransport
 	configuredCommand string
+	configured        bool
 	pluginRoot        string
 	pluginData        string
 	workingDirectory  string
@@ -64,7 +73,7 @@ type validatedCommandTransport struct {
 }
 
 func (t *validatedCommandTransport) Connect(ctx context.Context) (SDK.Connection, error) {
-	command, err := validateCommand(t.configuredCommand, t.pluginRoot)
+	command, err := validateCommand(t.configuredCommand, t.pluginRoot, t.configured)
 	if err != nil {
 		return nil, err
 	}
@@ -95,7 +104,8 @@ func NewTransport(config Config) (*Resource, error) {
 		return nil, err
 	}
 
-	command, err := validateCommand(config.Command, config.PluginRoot)
+	configured := config.Configured || config.PluginRoot != ""
+	command, err := validateCommand(config.Command, config.PluginRoot, configured)
 	if err != nil {
 		return nil, err
 	}
@@ -141,7 +151,10 @@ func NewTransport(config Config) (*Resource, error) {
 	}
 
 	overrides := config.EnvironmentOverrides
-	if config.PluginRoot != "" {
+	if configured {
+		if err := validateConfiguredEnvironment(overrides); err != nil {
+			return nil, err
+		}
 		overrides = nil
 	}
 	environment, err := execution.NewChildEnvironment(
@@ -157,10 +170,12 @@ func NewTransport(config Config) (*Resource, error) {
 	if err != nil {
 		return nil, err
 	}
-	if config.PluginRoot != "" {
+	if configured {
 		for _, variable := range config.EnvironmentOverrides {
 			environment = setEnvironment(environment, variable.Name, variable.Value)
 		}
+	}
+	if config.PluginRoot != "" {
 		environment = setEnvironment(environment, "PLUGIN_ROOT", config.PluginRoot)
 		environment = setEnvironment(environment, "PLUGIN_DATA", config.PluginData)
 	}
@@ -180,8 +195,8 @@ func NewTransport(config Config) (*Resource, error) {
 			commandTransport: &SDK.CommandTransport{
 				Command: commandValue, TerminateDuration: terminateDuration,
 			},
-			configuredCommand: config.Command,
-			pluginRoot:        config.PluginRoot, pluginData: config.PluginData,
+			configuredCommand: config.Command, configured: configured,
+			pluginRoot: config.PluginRoot, pluginData: config.PluginData,
 			workingDirectory: config.WorkingDirectory,
 			environment:      slices.Clone(config.EnvironmentOverrides),
 		},
@@ -327,15 +342,46 @@ func validateWorkspace(ws workspace.Workspace) error {
 	return nil
 }
 
-func validateCommand(command, pluginRoot string) (string, error) {
+func validateCommand(command, pluginRoot string, configured bool) (string, error) {
 	switch {
-	case pluginRoot == "":
+	case !configured:
 		return validateAbsoluteCommand(command)
-	case filepath.IsAbs(command):
+	case pluginRoot != "" && filepath.IsAbs(command):
 		return resolveBundledCommand(command, pluginRoot)
+	case filepath.IsAbs(command):
+		return resolveConfiguredCommand(command)
 	default:
 		return resolveBareCommand(command)
 	}
+}
+
+// resolveConfiguredCommand runs the filesystem-resolved target of a clean
+// absolute native command, so package-manager symlinks such as
+// /opt/homebrew/bin/node work while the executed file is still the validated
+// regular executable.
+func resolveConfiguredCommand(command string) (string, error) {
+	if filepath.Clean(command) != command {
+		return "", errors.New("coding mcp stdio: command must be a clean absolute path")
+	}
+	resolved, err := filepath.EvalSymlinks(command)
+	if err != nil {
+		return "", fmt.Errorf("coding mcp stdio: resolve command: %w", err)
+	}
+
+	return validateAbsoluteCommand(resolved)
+}
+
+// validateConfiguredEnvironment checks configured overrides for process
+// well-formedness only; their names and values are trusted configuration.
+func validateConfiguredEnvironment(overrides []execution.EnvVar) error {
+	for _, variable := range overrides {
+		if variable.Name == "" || strings.ContainsAny(variable.Name, "=\x00") ||
+			strings.ContainsRune(variable.Value, '\x00') {
+			return errors.New("coding mcp stdio: malformed configured environment entry")
+		}
+	}
+
+	return nil
 }
 
 func resolveBareCommand(command string) (string, error) {

@@ -575,15 +575,14 @@ in `$PIPS_HOME/mcp.json` or trusted-project `.pips/mcp.json` with
 
 ```json
 {
-  "schema": "pips.mcp/v1alpha1",
-  "servers": [
-    {
-      "id": "source_control",
-      "type": "streamable_http",
+  "schema": "pips.mcp/v1alpha2",
+  "mcpServers": {
+    "source_control": {
+      "type": "streamable-http",
       "visibility": "agent_private",
       "url": "https://mcp.example.test/api"
     }
-  ]
+  }
 }
 ```
 
@@ -787,6 +786,75 @@ or waiting indefinitely. Team admission is also interactive-only:
 chooses clean versus HEAD-only admission, interrupted-Work retry, Integration,
 or cleanup on the caller's behalf.
 
+### MCP server configuration
+
+Declare MCP servers in `$PIPS_HOME/mcp.json` (user scope) or, for a trusted
+workspace, `.pips/mcp.json` (project scope). The native file uses the same
+`mcpServers` entries as an [Agent Plugin](#agent-plugins) `mcp.json`, so a
+server behaves the same wherever it is declared:
+
+```json
+{
+  "schema": "pips.mcp/v1alpha2",
+  "mcpServers": {
+    "exa": {
+      "type": "streamable-http",
+      "url": "https://mcp.exa.ai/mcp",
+      "headers": { "x-api-key": "${env:EXA_API_KEY}" }
+    },
+    "context7": {
+      "type": "streamable-http",
+      "url": "https://mcp.context7.com/mcp",
+      "headers": { "CONTEXT7_API_KEY": "${env:CONTEXT7_API_KEY}" }
+    },
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "${env:GITHUB_TOKEN}" },
+      "connect_timeout": "30s"
+    }
+  }
+}
+```
+
+| Field | Applies to | Meaning |
+| --- | --- | --- |
+| `type` | all | `stdio`, `streamable-http` (alias `http`). Omitted means `stdio` when `command` is set. `sse` is reported as unsupported. |
+| `command`, `args`, `env` | stdio | One executable token (bare name found on `PATH`, or a clean absolute path; symlinks run their target), its arguments, and variables added to the sanitized child environment. No shell is used. |
+| `url`, `headers` | streamable-http | HTTPS endpoint (plain HTTP only for `localhost`/loopback) and headers sent only to that origin. |
+| `connect_timeout` | all | Connect-plus-list budget, Go duration, default `10s`, at most `1m`. |
+| `visibility` | all | `ambient` (default) or `agent_private` (see custom Agents above). |
+
+Server IDs derive from the `mcpServers` names (lowercase, other characters
+become `-`), exactly as for Agent Plugins; they prefix tool names
+(`exa_web_search_exa`) and key `[mcp_read_only_tools]`.
+
+Keep credentials out of the file: `${env:NAME}` in an `env` or `headers` value
+is replaced with the Pips process's environment variable `NAME` when the server
+connects. Only that exact form is expanded, once and never recursively; other
+`${...}` text stays literal, and Agent Plugin files are never expanded because
+the Agent Plugins specification forbids secrets and expansion there. If the
+variable is unset or empty, only that server fails with
+`credential_unavailable`, naming the variable but never a value. Fingerprints,
+`/mcp`, diagnostics, and logs only ever contain the `${env:NAME}` reference, so
+rotating a secret does not invalidate a project approval.
+
+An invalid entry, an unsupported transport, or a second name that derives the
+same ID is skipped with one `integration.diagnostic`; the other servers still
+load. A file that is not valid JSON, has an unknown schema or top-level field,
+or lacks the `mcpServers` object stops startup with an error, as other Pips
+configuration files do. A copied `{"mcpServers": ...}` file only needs the
+`"schema": "pips.mcp/v1alpha2"` line.
+
+The previous `pips.mcp/v1alpha1` format (`"servers": [{"id": ..., "type":
+"streamable_http" | "stdio", ...}]`, absolute commands, no headers or env)
+is still read with its original rules. Project servers still need a matching
+project/user permission record before they connect.
+
+Every server, native, plugin, or ACP-supplied, uses the same MCP client. It
+offers the `2026-07-28` protocol revision and falls back to `2025-11-25` or
+earlier when the server does not support it.
+
 ### MCP servers connect in the background
 
 MCP servers declared in `$PIPS_HOME/mcp.json`, a trusted project's
@@ -852,6 +920,11 @@ Package projections include portable identity, the resolved root, and accepted
 Skill and MCP server counts. A manifest error makes `validate` fail. Invalid
 individual Skills or MCP server entries are reported but do not make otherwise
 valid sibling components disappear.
+
+Plugin `mcp.json` `headers` and `env` values are visible package data and are
+used literally. Do not put API keys there; declare credentialed servers in the
+native `mcp.json` with `${env:NAME}` references instead (see
+[MCP server configuration](#mcp-server-configuration)).
 
 Agent Plugins does not define an archive, registry, enablement database, or
 upgrade/rollback transaction. Install by placing the portable directory below

@@ -148,6 +148,75 @@ func TestNewTransportResolvesBareAgentPluginCommandWithPlatformSearch(t *testing
 	assert.NotContains(t, command.Path, "not-used")
 }
 
+func TestNewTransportConfiguredNativeCommandUsesSearchAndTrustedEnvironment(t *testing.T) {
+	t.Parallel()
+
+	ws, err := workspace.Open(t.TempDir())
+	require.NoError(t, err)
+
+	parent := map[string]string{"API_KEY": "ambient", "HOME": "/home/test", "PATH": "/usr/bin:/bin"}
+	resource, err := mcpstdio.NewTransport(mcpstdio.Config{
+		Workspace: ws, Command: "go", TempRoot: privateTempRoot(t), Configured: true,
+		Environment: func(name string) (string, bool) {
+			value, ok := parent[name]
+
+			return value, ok
+		},
+		EnvironmentOverrides: []execution.EnvVar{
+			{Name: "SERVICE_API_KEY", Value: "configured"},
+			{Name: "NODE_OPTIONS", Value: "--max-old-space-size=512"},
+		},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, resource.Close()) })
+
+	command := resource.Command()
+	require.NotNil(t, command)
+	assert.True(t, filepath.IsAbs(command.Path))
+	assert.Equal(t, ws.Root(), command.Dir)
+	environment := strings.Join(command.Env, "\n")
+	assert.Contains(t, environment, "SERVICE_API_KEY=configured")
+	assert.Contains(t, environment, "NODE_OPTIONS=--max-old-space-size=512")
+	assert.NotContains(t, environment, "API_KEY=ambient")
+	assert.NotContains(t, environment, "PLUGIN_ROOT")
+
+	_, err = mcpstdio.NewTransport(mcpstdio.Config{
+		Workspace: ws, Command: "go", TempRoot: privateTempRoot(t), Environment: os.LookupEnv,
+	})
+	require.Error(t, err, "session commands still require an absolute path")
+
+	_, err = mcpstdio.NewTransport(mcpstdio.Config{
+		Workspace: ws, Command: "go", TempRoot: privateTempRoot(t), Environment: os.LookupEnv,
+		Configured: true, EnvironmentOverrides: []execution.EnvVar{{Name: "BAD=NAME", Value: "x"}},
+	})
+	require.Error(t, err)
+}
+
+func TestNewTransportConfiguredAbsoluteCommandRunsSymlinkTarget(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation is not generally available to unprivileged Windows tests")
+	}
+
+	t.Parallel()
+
+	ws, err := workspace.Open(t.TempDir())
+	require.NoError(t, err)
+	executable, err := os.Executable()
+	require.NoError(t, err)
+	target, err := filepath.EvalSymlinks(executable)
+	require.NoError(t, err)
+	link := filepath.Join(canonicalTempDir(t), "server")
+	require.NoError(t, os.Symlink(target, link))
+
+	resource, err := mcpstdio.NewTransport(mcpstdio.Config{
+		Workspace: ws, Command: link, TempRoot: privateTempRoot(t), Environment: os.LookupEnv,
+		Configured: true,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, resource.Close()) })
+	assert.Equal(t, target, resource.Command().Path)
+}
+
 func TestNewTransportRejectsSymlinkExecutableAndPublicTempRoot(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX symlink privilege and mode-bit policy do not apply on Windows")

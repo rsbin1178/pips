@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"path/filepath"
@@ -23,8 +24,12 @@ import (
 )
 
 const (
-	// DefinitionSchema is the strict MCP definition file schema.
-	DefinitionSchema = "pips.mcp/v1alpha1"
+	// DefinitionSchema is the current strict MCP definition file schema: a
+	// portable `mcpServers` object shared with Agent Plugins mcp.json.
+	DefinitionSchema = "pips.mcp/v1alpha2"
+	// LegacyDefinitionSchema is the original `servers`-array schema. It is
+	// still accepted with unchanged rules and fingerprints.
+	LegacyDefinitionSchema = "pips.mcp/v1alpha1"
 	// PermissionSchema is the strict project-local permission file schema.
 	PermissionSchema = "pips.permissions/v1alpha1"
 )
@@ -92,7 +97,8 @@ type Definition struct {
 	ConnectTimeout time.Duration
 }
 
-// HTTPHeader is one validated literal header from an Agent Plugin MCP entry.
+// HTTPHeader is one validated header from an Agent Plugin or native MCP entry.
+// Native values may contain ${env:NAME} credential references.
 type HTTPHeader struct {
 	Name  string
 	Value string
@@ -190,48 +196,54 @@ func validateDefinition(definition Definition) error {
 	}
 }
 
-//nolint:gocyclo,nestif // Native and portable stdio contracts share one closed validation boundary.
+//nolint:gocyclo // Session, native, and portable stdio contracts share one closed validation boundary.
 func validateStdioDefinition(definition Definition) error {
 	if definition.URL != "" || len(definition.Headers) != 0 {
 		return errors.New("stdio definition cannot set URL or headers")
 	}
 
-	if definition.Scope == ScopeAgentPlugin {
-		if !validAgentPluginCommand(definition.Command) {
-			return errors.New("agent plugin stdio command must be bare or a clean absolute path")
+	if definition.Scope == ScopeSession {
+		if !filepath.IsAbs(definition.Command) || filepath.Clean(definition.Command) != definition.Command ||
+			!validText(definition.Command, 32<<10, false) {
+			return errors.New("stdio command must be a clean absolute path")
 		}
-	} else if !filepath.IsAbs(definition.Command) || filepath.Clean(definition.Command) != definition.Command ||
-		!validText(definition.Command, 32<<10, false) {
-		return errors.New("stdio command must be a clean absolute path")
+	} else if !validConfiguredCommand(definition.Command) {
+		return errors.New("stdio command must be a bare executable name or a clean absolute path")
 	}
 
 	if len(definition.Args) > 256 {
 		return errors.New("stdio definition has too many arguments")
 	}
-	if definition.Scope == ScopeAgentPlugin {
-		if err := validateAgentPluginEnvironment(definition.Environment); err != nil {
+	switch definition.Scope {
+	case ScopeAgentPlugin:
+		if err := validateConfiguredEnvironment(definition.Environment, true); err != nil {
 			return err
 		}
 		if !validAgentPluginPath(definition.PluginRoot) || !validAgentPluginPath(definition.PluginData) ||
 			!validAgentPluginPath(definition.WorkingDir) {
 			return errors.New("agent plugin stdio paths must be clean and absolute")
 		}
-	} else {
+	case ScopeSession:
 		if err := execution.ValidateEnvironment(definition.Environment); err != nil {
 			return err
 		}
-		if definition.WorkingDir != "" || definition.PluginRoot != "" || definition.PluginData != "" {
-			return errors.New("native stdio definition cannot set Agent Plugin paths")
+	default:
+		if err := validateConfiguredEnvironment(definition.Environment, false); err != nil {
+			return err
 		}
+	}
+	if definition.Scope != ScopeAgentPlugin &&
+		(definition.WorkingDir != "" || definition.PluginRoot != "" || definition.PluginData != "") {
+		return errors.New("native stdio definition cannot set Agent Plugin paths")
 	}
 
 	total := 0
 
 	for _, argument := range definition.Args {
-		valid := validText(argument, 32<<10, true)
-		if definition.Scope == ScopeAgentPlugin {
-			valid = len(argument) <= 32<<10 && utf8.ValidString(argument) &&
-				!strings.ContainsRune(argument, '\x00')
+		valid := len(argument) <= 32<<10 && utf8.ValidString(argument) &&
+			!strings.ContainsRune(argument, '\x00')
+		if definition.Scope == ScopeSession {
+			valid = validText(argument, 32<<10, true)
 		}
 		if !valid {
 			return errors.New("stdio definition has an invalid argument")
@@ -246,20 +258,31 @@ func validateStdioDefinition(definition Definition) error {
 	return nil
 }
 
-func validateAgentPluginEnvironment(environment []execution.EnvVar) error {
+// validateConfiguredEnvironment checks a trusted configuration overlay from a
+// native definition file or an Agent Plugin. Values are opaque, so only
+// well-formedness and bounds apply; native values must use well-formed
+// ${env:NAME} credential references.
+func validateConfiguredEnvironment(environment []execution.EnvVar, plugin bool) error {
 	if len(environment) > 256 {
-		return errors.New("agent plugin environment has too many entries")
+		return errors.New("stdio environment has too many entries")
 	}
 	total := 0
 	for _, variable := range environment {
 		if variable.Name == "" || strings.ContainsAny(variable.Name, "=\x00") ||
-			strings.ContainsRune(variable.Value, '\x00') ||
-			variable.Name == "PLUGIN_ROOT" || variable.Name == "PLUGIN_DATA" {
-			return errors.New("agent plugin environment contains an invalid entry")
+			strings.ContainsRune(variable.Value, '\x00') {
+			return errors.New("stdio environment contains an invalid entry")
+		}
+		if plugin && (variable.Name == "PLUGIN_ROOT" || variable.Name == "PLUGIN_DATA") {
+			return errors.New("agent plugin environment contains a reserved entry")
+		}
+		if !plugin {
+			if err := validateCredentialReferences(variable.Value); err != nil {
+				return fmt.Errorf("stdio environment %s: %w", variable.Name, err)
+			}
 		}
 		total += len(variable.Name) + len(variable.Value)
 		if total > 256<<10 {
-			return errors.New("agent plugin environment exceeds byte limit")
+			return errors.New("stdio environment exceeds byte limit")
 		}
 	}
 
@@ -291,6 +314,11 @@ func validateHTTPDefinition(definition Definition) error {
 			!validText(header.Value, 32<<10, true) {
 			return errors.New("streamable HTTP header is invalid")
 		}
+		if definition.expandsCredentials() {
+			if err := validateCredentialReferences(header.Value); err != nil {
+				return fmt.Errorf("streamable HTTP header %s: %w", header.Name, err)
+			}
+		}
 		name = strings.ToLower(name)
 		if _, duplicate := seenHeaders[name]; duplicate {
 			return errors.New("streamable HTTP headers contain a case-insensitive duplicate")
@@ -306,7 +334,9 @@ func validAgentPluginPath(value string) bool {
 		len(value) <= 32<<10 && utf8.ValidString(value) && !strings.ContainsRune(value, '\x00')
 }
 
-func validAgentPluginCommand(value string) bool {
+// validConfiguredCommand accepts one bare executable token resolved with
+// platform executable search, or a clean absolute path.
+func validConfiguredCommand(value string) bool {
 	if value == "" || len(value) > 32<<10 || !utf8.ValidString(value) ||
 		strings.ContainsRune(value, '\x00') {
 		return false

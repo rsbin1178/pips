@@ -108,7 +108,7 @@ func TestLoadDefinitionsStrictScopedAndFingerprintStable(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, tree.Close()) })
 
-	loaded, err := codingmcp.LoadDefinitions(t.Context(), codingmcp.LoadOptions{
+	loaded, _, err := codingmcp.LoadDefinitions(t.Context(), codingmcp.LoadOptions{
 		Paths: layout, Tree: tree, ProjectTrusted: true, Limits: codingmcp.DefaultLimits(),
 	})
 	require.NoError(t, err)
@@ -170,7 +170,7 @@ func TestLoadDefinitionsDoesNotInspectUntrustedProject(t *testing.T) {
 	layout, err := paths.New(t.TempDir())
 	require.NoError(t, err)
 
-	loaded, err := codingmcp.LoadDefinitions(t.Context(), codingmcp.LoadOptions{
+	loaded, _, err := codingmcp.LoadDefinitions(t.Context(), codingmcp.LoadOptions{
 		Paths: layout, ProjectTrusted: false, Limits: codingmcp.DefaultLimits(),
 	})
 	require.NoError(t, err)
@@ -222,7 +222,7 @@ func TestLoadDefinitionsRejectsUnsafeAndUnsupportedFields(t *testing.T) {
 			require.NoError(t, err)
 			writeFile(t, layout.MCPFile(), test.content)
 
-			_, err = codingmcp.LoadDefinitions(t.Context(), codingmcp.LoadOptions{
+			_, _, err = codingmcp.LoadDefinitions(t.Context(), codingmcp.LoadOptions{
 				Paths: layout, Limits: codingmcp.DefaultLimits(),
 			})
 			require.Error(t, err)
@@ -253,7 +253,7 @@ func TestLoadDefinitionsRejectsDuplicateAcrossScopesAndOversizedInput(t *testing
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, tree.Close()) })
 
-	_, err = codingmcp.LoadDefinitions(t.Context(), codingmcp.LoadOptions{
+	_, _, err = codingmcp.LoadDefinitions(t.Context(), codingmcp.LoadOptions{
 		Paths: layout, Tree: tree, ProjectTrusted: true, Limits: codingmcp.DefaultLimits(),
 	})
 	require.ErrorIs(t, err, codingmcp.ErrDuplicate)
@@ -262,7 +262,7 @@ func TestLoadDefinitionsRejectsDuplicateAcrossScopesAndOversizedInput(t *testing
 
 	limits := codingmcp.DefaultLimits()
 	limits.MaxFileBytes = 64
-	_, err = codingmcp.LoadDefinitions(t.Context(), codingmcp.LoadOptions{
+	_, _, err = codingmcp.LoadDefinitions(t.Context(), codingmcp.LoadOptions{
 		Paths: layout, Limits: limits,
 	})
 	require.ErrorIs(t, err, codingmcp.ErrLimitExceeded)
@@ -277,7 +277,7 @@ func TestLoadDefinitionsRejectsUserSymlink(t *testing.T) {
 	writeFile(t, target, `{"schema":"pips.mcp/v1alpha1","servers":[]}`)
 	require.NoError(t, os.Symlink(target, layout.MCPFile()))
 
-	_, err = codingmcp.LoadDefinitions(t.Context(), codingmcp.LoadOptions{
+	_, _, err = codingmcp.LoadDefinitions(t.Context(), codingmcp.LoadOptions{
 		Paths: layout, Limits: codingmcp.DefaultLimits(),
 	})
 	require.ErrorIs(t, err, codingmcp.ErrUnsafeFile)
@@ -288,4 +288,153 @@ func writeFile(t *testing.T, path, content string) {
 
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o750))
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+}
+
+func TestLoadDefinitionsV1Alpha2MatchesAgentPluginShape(t *testing.T) {
+	t.Parallel()
+
+	layout, err := paths.New(t.TempDir())
+	require.NoError(t, err)
+	writeFile(t, layout.MCPFile(), `{
+  "schema": "pips.mcp/v1alpha2",
+  "mcpServers": {
+    "exa": {
+      "type": "streamable-http",
+      "url": "https://mcp.exa.ai/mcp",
+      "headers": {"x-api-key": "${env:EXA_API_KEY}"}
+    },
+    "context7": {
+      "type": "http",
+      "url": "https://mcp.context7.com/mcp",
+      "headers": {"CONTEXT7_API_KEY": "${env:CONTEXT7_API_KEY}"},
+      "connect_timeout": "30s",
+      "visibility": "agent_private"
+    },
+    "GitHub Tools": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {"GITHUB_PERSONAL_ACCESS_TOKEN": "${env:GITHUB_TOKEN}"}
+    }
+  }
+}`)
+
+	loaded, diagnostics, err := codingmcp.LoadDefinitions(t.Context(), codingmcp.LoadOptions{
+		Paths: layout, Limits: codingmcp.DefaultLimits(),
+	})
+	require.NoError(t, err)
+	assert.Empty(t, diagnostics)
+
+	definitions := loaded.List()
+	require.Len(t, definitions, 3)
+
+	byID := make(map[string]codingmcp.Definition, len(definitions))
+	for _, definition := range definitions {
+		assert.Equal(t, codingmcp.ScopeUser, definition.Scope)
+		byID[definition.ID] = definition
+	}
+
+	exa := byID["exa"]
+	assert.Equal(t, codingmcp.TransportStreamableHTTP, exa.Transport)
+	assert.Equal(t, []codingmcp.HTTPHeader{{Name: "x-api-key", Value: "${env:EXA_API_KEY}"}}, exa.Headers)
+	assert.Equal(t, 10*time.Second, exa.ConnectTimeout)
+	assert.Equal(t, codingmcp.VisibilityAmbient, exa.EffectiveVisibility())
+
+	context7 := byID["context7"]
+	assert.Equal(t, codingmcp.TransportStreamableHTTP, context7.Transport)
+	assert.Equal(t, 30*time.Second, context7.ConnectTimeout)
+	assert.Equal(t, codingmcp.VisibilityAgentPrivate, context7.EffectiveVisibility())
+
+	github := byID["github-tools"]
+	assert.Equal(t, codingmcp.TransportStdio, github.Transport)
+	assert.Equal(t, "npx", github.Command)
+	assert.Equal(t, []execution.EnvVar{{Name: "GITHUB_PERSONAL_ACCESS_TOKEN", Value: "${env:GITHUB_TOKEN}"}}, github.Environment)
+
+	changed := exa
+	changed.Headers = []codingmcp.HTTPHeader{{Name: "x-api-key", Value: "${env:OTHER_KEY}"}}
+	assert.NotEqual(t, exa.Fingerprint(), changed.Fingerprint(), "the reference, not the secret, is fingerprinted")
+}
+
+func TestLoadDefinitionsV1Alpha2IsolatesInvalidEntries(t *testing.T) {
+	t.Parallel()
+
+	layout, err := paths.New(t.TempDir())
+	require.NoError(t, err)
+	writeFile(t, layout.MCPFile(), `{
+  "schema": "pips.mcp/v1alpha2",
+  "mcpServers": {
+    "a-good": {"type": "streamable-http", "url": "https://good.example.test/mcp"},
+    "b-insecure": {"type": "streamable-http", "url": "http://remote.example.test/mcp"},
+    "c-legacy": {"type": "sse", "url": "https://legacy.example.test/sse"},
+    "d-bad-ref": {"command": "uvx", "env": {"TOKEN": "${env:1BAD}"}},
+    "e-dup": {"command": "uvx"},
+    "E Dup": {"command": "uvx"},
+    "f-unknown": {"command": "uvx", "cwd": "./data"},
+    "g-zero-timeout": {"command": "uvx", "connect_timeout": "0s"}
+  }
+}`)
+
+	loaded, diagnostics, err := codingmcp.LoadDefinitions(t.Context(), codingmcp.LoadOptions{
+		Paths: layout, Limits: codingmcp.DefaultLimits(),
+	})
+	require.NoError(t, err)
+
+	ids := make([]string, 0)
+	for _, definition := range loaded.List() {
+		ids = append(ids, definition.ID)
+	}
+
+	assert.Equal(t, []string{"e-dup", "a-good"}, ids, "names are processed in byte order, as in Agent Plugins")
+
+	codes := make(map[string]string, len(diagnostics))
+	for _, diagnostic := range diagnostics {
+		assert.Equal(t, "configuration", diagnostic.Stage)
+		assert.Contains(t, diagnostic.Message, "user MCP server")
+		codes[diagnostic.ServerID] = diagnostic.Code
+	}
+
+	assert.Equal(t, map[string]string{
+		"b-insecure":     "definition_invalid",
+		"c-legacy":       "transport_unsupported",
+		"d-bad-ref":      "definition_invalid",
+		"e-dup":          "definition_duplicate",
+		"f-unknown":      "definition_invalid",
+		"g-zero-timeout": "definition_invalid",
+	}, codes)
+}
+
+func TestLoadDefinitionsV1Alpha2FileLevelViolationsFailClosed(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]string{
+		"standard file without schema": `{"mcpServers":{"exa":{"type":"http","url":"https://mcp.exa.ai/mcp"}}}`,
+		"unknown top-level field":      `{"schema":"pips.mcp/v1alpha2","mcpServers":{},"servers":[]}`,
+		"missing mcpServers":           `{"schema":"pips.mcp/v1alpha2"}`,
+		"non-object mcpServers":        `{"schema":"pips.mcp/v1alpha2","mcpServers":[]}`,
+		"duplicate nested key":         `{"schema":"pips.mcp/v1alpha2","mcpServers":{"a":{"command":"x","command":"y"}}}`,
+		"invalid JSON":                 `{"schema":"pips.mcp/v1alpha2",`,
+	}
+
+	for name, content := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			layout, err := paths.New(t.TempDir())
+			require.NoError(t, err)
+			writeFile(t, layout.MCPFile(), content)
+
+			_, _, err = codingmcp.LoadDefinitions(t.Context(), codingmcp.LoadOptions{
+				Paths: layout, Limits: codingmcp.DefaultLimits(),
+			})
+			require.Error(t, err)
+		})
+	}
+
+	layout, err := paths.New(t.TempDir())
+	require.NoError(t, err)
+	writeFile(t, layout.MCPFile(), tests["standard file without schema"])
+	_, _, err = codingmcp.LoadDefinitions(t.Context(), codingmcp.LoadOptions{
+		Paths: layout, Limits: codingmcp.DefaultLimits(),
+	})
+	require.ErrorIs(t, err, codingmcp.ErrInvalid)
+	assert.Contains(t, err.Error(), codingmcp.DefinitionSchema, "the error names the schema to add")
 }

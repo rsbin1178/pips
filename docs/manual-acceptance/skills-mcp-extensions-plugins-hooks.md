@@ -20,12 +20,12 @@
 ## MA-INT-002：MCP 定义、连接、权限与 Reload
 
 - 分类：实时 Provider、安全敏感。变更等级：本地持久状态与外部系统。
-- 前置条件：受控 MCP stdio server 使用绝对普通可执行文件，或受控 HTTPS Streamable HTTP server；工具只返回固定数据。
-- 隔离夹具：用户 `${PIPS_ACCEPT_HOME}/mcp.json` 和项目 `.pips/mcp.json`；包含一个有效 server、一个连接失败 server、一个 unknown-field/duplicate-ID 负向夹具。
+- 前置条件：受控 MCP stdio server（裸命令经 `PATH` 解析，或绝对路径可执行文件），以及受控 HTTPS Streamable HTTP server（要求 `X-Api-Key` 头）；工具只返回固定数据；验收 shell 导出测试凭据变量。
+- 隔离夹具：用户 `${PIPS_ACCEPT_HOME}/mcp.json`（`pips.mcp/v1alpha2`，`mcpServers` 形状，HTTP server 头为 `${env:NAME}` 引用）和项目 `.pips/mcp.json`；包含一个有效 server、一个连接失败 server、一个引用未设置变量的 server、一个 `sse`/unknown-field/派生 ID 重复的负向条目，以及一个旧版 `pips.mcp/v1alpha1` 文件对照。
 - 步骤：为有效 server 配置一个人为慢启动（或在 `connect_timeout` 内无法及时响应 initialize）的夹具；启动 TUI 并立即打开 `/mcp`；在 server 仍为 `connecting` 时发送第一个 prompt；验证 user server 可连接；项目未信任时不读取；信任后项目 server 为 pending，通过 TUI 分别 deny/allow exact fingerprint；调用工具；修改 definition 后 `/reload`；制造 list-changed refresh 失败。
-- 预期证据：TUI 在 server 连接完成前即可输入；`/mcp` 面板显示每个 server 的 `connected/connecting/failed/pending/disabled`、scope/transport/visibility、工具数与失败 stage/code，且不显示 URL、command、header 或环境值，`Ctrl+D` 列出完整工具名；第一个 prompt 在剩余 server 连上（或各自 `connect_timeout` 到期）后才到达模型，且模型请求包含该 server 的工具；schema 为 `pips.mcp/v1alpha1`；项目批准同时写严格 `.pips/permissions.toml` 与用户 Workspace record，缺一/stale 均 pending；失败 server 只禁用自身并在下一次 prompt 时恰好产生一条 `integration.diagnostic`；reload 原子发布新 generation，失败保留旧 snapshot；stdio 子环境不含 secrets/proxy/agent/OTel/Pips 变量。
+- 预期证据：TUI 在 server 连接完成前即可输入；`/mcp` 面板显示每个 server 的 `connected/connecting/failed/pending/disabled`、scope/transport/visibility、工具数与失败 stage/code，且不显示 URL、command、header 或环境值，`Ctrl+D` 列出完整工具名；第一个 prompt 在剩余 server 连上（或各自 `connect_timeout` 到期）后才到达模型，且模型请求包含该 server 的工具；schema 为 `pips.mcp/v1alpha2`（v1alpha1 仍按原规则读取）；`${env:NAME}` 只在连接时展开，server 收到真实头值，而 fingerprint、`/mcp`、诊断和日志只含引用；未设置变量的 server 单独失败为 `credential_unavailable` 且消息只含变量名；负向条目各产生一条 `definition_invalid`/`transport_unsupported`/`definition_duplicate` 诊断而其余 server 正常；支持新协议的 server 协商 `2026-07-28`，只支持旧协议的 server 回退到 `2025-11-25`；项目批准同时写严格 `.pips/permissions.toml` 与用户 Workspace record，缺一/stale 均 pending；失败 server 只禁用自身并在下一次 prompt 时恰好产生一条 `integration.diagnostic`；reload 原子发布新 generation，失败保留旧 snapshot；stdio 子环境不含 secrets/proxy/agent/OTel/Pips 变量。
 - 通过条件：启动不被 MCP 阻塞、`/mcp` 状态与实际连接一致、首个 prompt 有界等待、连接、工具调用、双记录 permission、隔离失败与 reload 均符合契约；重复 ID/authority 字段失败关闭。
-- 失败条件：TUI 就绪时间随 server 连接时间线性增长、首个 prompt 缺少已连接 server 的工具、`/mcp` 泄露 endpoint/command/env、项目自动启用、one-sided record 生效、shell command 拼接、HTTP auth/env inline 被接受、或失败清空所有 server。
+- 失败条件：TUI 就绪时间随 server 连接时间线性增长、首个 prompt 缺少已连接 server 的工具、`/mcp` 泄露 endpoint/command/env、项目自动启用、one-sided record 生效、shell command 拼接、v1alpha1 文件接受 headers/env、Agent Plugin 的 `${env:...}` 被展开、secret 值出现在 fingerprint/状态/诊断/日志中、单个无效条目导致启动失败、或失败清空所有 server。
 - 清理/回滚：关闭 server；撤销人工 permission；确认 private temp/child process 已清理。
 - 来源/测试锚点：[mcp](../../internal/coding/mcp)、[mcpstdio](../../internal/coding/execution/mcpstdio)、[route_mcp.go](../../internal/coding/tui/route_mcp.go)、[runtime_mcp_test.go](../../internal/coding/runtime_mcp_test.go)、[MCP contract](../../.trellis/spec/backend/coding-application.md#skill-bundle-and-mcp-integrations)。
 - 结果：`未执行`。

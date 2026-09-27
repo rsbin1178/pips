@@ -1018,7 +1018,7 @@ func openMCP(
 	permissions *codingmcp.Permissions,
 	pluginDefinitions codingmcp.Definitions,
 ) (*codingmcp.Connections, error) {
-	definitions, err := codingmcp.LoadDefinitions(ctx, codingmcp.LoadOptions{
+	definitions, loadDiagnostics, err := codingmcp.LoadDefinitions(ctx, codingmcp.LoadOptions{
 		Paths: options.Paths, Tree: tree, ProjectTrusted: options.Trusted,
 		Limits: configured.MCPLimits,
 	})
@@ -1049,7 +1049,7 @@ func openMCP(
 		Environment:    configured.Environment,
 		TerminateAfter: configured.MCPTerminate,
 		MaxTools:       configured.MCPMaxTools,
-		Diagnostics:    pluginDiagnostics,
+		Diagnostics:    append(loadDiagnostics, pluginDiagnostics...),
 		ReadOnlyTools:  options.Config.MCPReadOnlyTools,
 	})
 }

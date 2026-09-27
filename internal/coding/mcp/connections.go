@@ -277,6 +277,12 @@ func (c *Connections) connect(
 
 	transport, resource, transportErr := factory(ctx, server.definition)
 	if transportErr != nil {
+		var credential credentialError
+		if errors.As(transportErr, &credential) {
+			c.fail(server, "transport", "credential_unavailable", credential.Error())
+
+			return
+		}
 		c.fail(server, "transport", "transport_failed", "server transport could not be prepared")
 
 		return
@@ -821,6 +827,7 @@ func connectionTransportFactory(
 
 	needsStdio := false
 	needsHTTP := false
+	needsEnvironment := false
 
 	for _, selected := range resolved {
 		if selected.Status != StatusEnabled {
@@ -833,10 +840,15 @@ func connectionTransportFactory(
 		case TransportStreamableHTTP:
 			needsHTTP = true
 		}
+		needsEnvironment = needsEnvironment || selected.Definition.hasCredentialReferences()
 	}
 
 	if needsStdio && (options.Workspace.Root() == "" || options.TempRoot == "" || options.Environment == nil) {
 		return nil, fmt.Errorf("%w: stdio transport dependencies are missing", ErrInvalid)
+	}
+
+	if needsEnvironment && options.Environment == nil {
+		return nil, fmt.Errorf("%w: credential references require an environment lookup", ErrInvalid)
 	}
 
 	if needsHTTP && (options.HTTPClient == nil || options.HTTPClient.Timeout <= 0) {
@@ -846,13 +858,19 @@ func connectionTransportFactory(
 	return func(_ context.Context, definition Definition) (sdk.Transport, io.Closer, error) {
 		switch definition.Transport {
 		case TransportStdio:
+			environment, err := resolveEnvironment(definition, options.Environment)
+			if err != nil {
+				return nil, nil, err
+			}
+
 			resource, err := mcpstdio.NewTransport(mcpstdio.Config{
 				Workspace:            options.Workspace,
 				Command:              definition.Command,
 				Args:                 definition.Args,
 				TempRoot:             options.TempRoot,
 				Environment:          options.Environment,
-				EnvironmentOverrides: definition.Environment,
+				EnvironmentOverrides: environment,
+				Configured:           definition.Scope != ScopeSession,
 				WorkingDirectory:     definition.WorkingDir,
 				PluginRoot:           definition.PluginRoot,
 				PluginData:           definition.PluginData,
@@ -864,7 +882,12 @@ func connectionTransportFactory(
 
 			return resource.Transport(), resource, nil
 		case TransportStreamableHTTP:
-			httpClient, err := definitionHTTPClient(options.HTTPClient, definition)
+			headers, err := resolveHeaders(definition, options.Environment)
+			if err != nil {
+				return nil, nil, err
+			}
+
+			httpClient, err := definitionHTTPClient(options.HTTPClient, definition.URL, headers)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -909,12 +932,12 @@ func hasHeader(headers http.Header, name string) bool {
 	return false
 }
 
-func definitionHTTPClient(base *http.Client, definition Definition) (*http.Client, error) {
+func definitionHTTPClient(base *http.Client, rawURL string, headers []HTTPHeader) (*http.Client, error) {
 	if base == nil {
 		return nil, fmt.Errorf("%w: nil HTTP client", ErrInvalid)
 	}
 
-	endpoint, err := url.Parse(definition.URL)
+	endpoint, err := url.Parse(rawURL)
 	if err != nil {
 		return nil, fmt.Errorf("%w: parse HTTP endpoint", ErrInvalid)
 	}
@@ -924,9 +947,9 @@ func definitionHTTPClient(base *http.Client, definition Definition) (*http.Clien
 		transport = http.DefaultTransport
 	}
 	client.Transport = headerRoundTripper{
-		base: transport, headers: slices.Clone(definition.Headers), origin: endpoint,
+		base: transport, headers: slices.Clone(headers), origin: endpoint,
 	}
-	if len(definition.Headers) == 0 {
+	if len(headers) == 0 {
 		return &client, nil
 	}
 

@@ -27,12 +27,9 @@ func TestConfiguredHeadersAreAttachedOnlyToConfiguredOrigin(t *testing.T) {
 			return nil, assert.AnError
 		}),
 	}
-	client, err := definitionHTTPClient(base, Definition{
-		URL: "https://example.com/mcp",
-		Headers: []HTTPHeader{
-			{Name: "X-Plugin", Value: "configured"},
-			{Name: "Content-Type", Value: "configured"},
-		},
+	client, err := definitionHTTPClient(base, "https://example.com/mcp", []HTTPHeader{
+		{Name: "X-Plugin", Value: "configured"},
+		{Name: "Content-Type", Value: "configured"},
 	})
 	require.NoError(t, err)
 
