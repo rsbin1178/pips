@@ -259,6 +259,90 @@ func TestConnectUsesStreamableHTTPTransport(t *testing.T) {
 	require.NoError(t, client.Close())
 }
 
+func TestConnectNegotiatesLatestProtocolWithLegacyFallback(t *testing.T) {
+	t.Parallel()
+
+	latest := mcp.SupportedProtocolVersions()[0]
+	newServer := func() *mcp.Server {
+		server := mcp.NewServer(&mcp.Implementation{Name: "versioned", Version: "v1"}, nil)
+		server.AddTool(rawTool("health"), func(
+			context.Context,
+			*mcp.CallToolRequest,
+		) (*mcp.CallToolResult, error) {
+			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "healthy"}}}, nil
+		})
+
+		return server
+	}
+	httpTransport := func(t *testing.T, stateless bool) mcp.Transport {
+		t.Helper()
+
+		handler := mcp.NewStreamableHTTPHandler(
+			func(*http.Request) *mcp.Server { return newServer() },
+			&mcp.StreamableHTTPOptions{Stateless: stateless},
+		)
+		httpServer := httptest.NewServer(handler)
+		t.Cleanup(httpServer.Close)
+
+		return &mcp.StreamableClientTransport{Endpoint: httpServer.URL}
+	}
+
+	tests := []struct {
+		name      string
+		transport func(*testing.T) mcp.Transport
+		want      string
+	}{
+		{
+			name: "in-memory",
+			transport: func(t *testing.T) mcp.Transport {
+				t.Helper()
+
+				serverTransport, clientTransport := mcp.NewInMemoryTransports()
+				session, err := newServer().Connect(t.Context(), serverTransport, nil)
+				require.NoError(t, err)
+				t.Cleanup(func() { _ = session.Close() })
+
+				return clientTransport
+			},
+			want: latest,
+		},
+		{
+			name:      "stateless streamable HTTP",
+			transport: func(t *testing.T) mcp.Transport { t.Helper(); return httpTransport(t, true) },
+			want:      latest,
+		},
+		{
+			name:      "stateful streamable HTTP falls back",
+			transport: func(t *testing.T) mcp.Transport { t.Helper(); return httpTransport(t, false) },
+			want:      "2025-11-25",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			client, err := Connect(
+				t.Context(),
+				&mcp.Implementation{Name: "versioned-client", Version: "v1"},
+				test.transport(t),
+			)
+			require.NoError(t, err)
+			t.Cleanup(func() { assert.NoError(t, client.Close()) })
+
+			assert.Equal(t, test.want, client.Session().InitializeResult().ProtocolVersion)
+
+			tools, err := client.Tools(t.Context())
+			require.NoError(t, err)
+			require.Len(t, tools, 1)
+
+			parts, err := tools[0].Exec(t.Context(), agent.ToolCall{})
+			require.NoError(t, err)
+			assert.Equal(t, []ai.Part{ai.Text("healthy")}, parts)
+		})
+	}
+}
+
 func TestClientToolsRejectsInvalidSnapshots(t *testing.T) {
 	t.Parallel()
 
