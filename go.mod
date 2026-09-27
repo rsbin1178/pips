@@ -13,7 +13,7 @@ require (
 	github.com/coder/acp-go-sdk v0.13.5
 	github.com/creack/pty v1.1.24
 	github.com/google/jsonschema-go v0.4.3
-	github.com/modelcontextprotocol/go-sdk v1.6.1
+	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/pelletier/go-toml/v2 v2.3.1
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.11.1
