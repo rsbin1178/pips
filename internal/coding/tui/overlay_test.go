@@ -79,7 +79,7 @@ func TestApprovalOverlayYieldsToRunningShellAfterAllowSubmission(t *testing.T) {
 
 			content := ansi.Strip(model.View().Content)
 			assert.NotContains(t, content, "Approval required")
-			assert.NotContains(t, content, "allow_once")
+			assert.NotContains(t, content, "Allow once")
 			assert.Contains(t, content, "Running… · make test")
 			assert.Equal(t, coding.PhaseRunning, model.effectivePhase())
 
@@ -161,7 +161,9 @@ func TestApprovalOverlayRestoresPromptWhenAllowResolutionFails(t *testing.T) {
 	assert.False(t, model.prompt.loading)
 	content := ansi.Strip(model.View().Content)
 	assert.Contains(t, content, "Approval required")
-	assert.Contains(t, content, "allow_once")
+	// The restored prompt keeps its actionable choices with their direct keys.
+	assert.Contains(t, content, "Allow once (o)")
+	assert.Contains(t, content, "Deny (d)")
 	assert.ErrorContains(t, model.streamErr, "resolution failed")
 }
 

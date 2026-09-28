@@ -171,15 +171,10 @@ func projectTimelineExcluding(
 			})
 			continue
 		}
-		message := strings.TrimSpace(diagnostic.Message)
-		if message == "" {
-			message = diagnostic.Code
-		}
 		blocks = append(blocks, timelineBlock{
 			kind:     blockDiagnostic,
-			title:    diagnostic.Component,
-			body:     message,
-			status:   diagnostic.Code,
+			title:    diagnosticTitle(diagnostic),
+			body:     diagnosticBody(diagnostic),
 			position: len(state.Transcript),
 		})
 	}
@@ -192,6 +187,65 @@ func projectTimelineExcluding(
 	}
 
 	return groupExploreBlocks(blocks)
+}
+
+// diagnosticTitle names the integration in plain words. The raw code stays a
+// machine field and is never used as the body, so a message-less diagnostic
+// still explains itself.
+func diagnosticTitle(diagnostic coding.IntegrationDiagnostic) string {
+	if title, ok := diagnosticTitles[diagnostic.Component+"\x00"+diagnostic.Code]; ok {
+		return title
+	}
+	if title, ok := diagnosticComponentTitles[diagnostic.Component]; ok {
+		if diagnostic.Code == "" {
+			return title
+		}
+
+		return title + " · " + humanizeStatusCode(diagnostic.Code)
+	}
+	if diagnostic.Component == "" {
+		return humanizeStatusCode(diagnostic.Code)
+	}
+	if diagnostic.Code == "" {
+		return humanizeStatusCode(diagnostic.Component)
+	}
+
+	return humanizeStatusCode(diagnostic.Component) + " · " + humanizeStatusCode(diagnostic.Code)
+}
+
+// diagnosticBody keeps the message as the body and falls back to the humanized
+// code only when the diagnostic carries no message of its own.
+func diagnosticBody(diagnostic coding.IntegrationDiagnostic) string {
+	if message := strings.TrimSpace(diagnostic.Message); message != "" {
+		return message
+	}
+	if _, ok := diagnosticTitles[diagnostic.Component+"\x00"+diagnostic.Code]; ok &&
+		diagnostic.Code != "" {
+		return ""
+	}
+
+	return humanizeStatusCode(diagnostic.Code)
+}
+
+var diagnosticComponentTitles = map[string]string{
+	"runtime":  "Agent runtime",
+	"changes":  "Workspace changes",
+	"observer": "Observer",
+	"mcp":      "MCP",
+	"hooks":    "Hooks",
+	"team":     "Team",
+}
+
+var diagnosticTitles = map[string]string{
+	"runtime\x00interaction_interrupted":      "Previous request was interrupted",
+	"changes\x00capture_unstable":             "Workspace change summary unavailable",
+	"changes\x00not_repository":               "Git change summary unavailable",
+	"mcp\x00refresh_failed":                   "MCP server list refresh failed",
+	"mcp\x00connect_failed":                   "MCP server unavailable",
+	"observer\x00observer_disabled":           "Event observer disabled",
+	"observer\x00extension_observer_disabled": "Extension observer disabled",
+	"observer\x00agent_observer_disabled":     "Agent observer disabled",
+	"hooks\x00pending_trust":                  "Hooks are waiting for workspace trust",
 }
 
 func projectProtocolToolActivity(activity toolActivity) (timelineBlock, bool, bool) {
@@ -451,7 +505,7 @@ func subagentMetadata(value coding.SubagentState) string {
 		label = "Completed"
 		durationPrefix = " in "
 	case subagent.StateFailed:
-		label = "Failed"
+		label = labelFailed
 		if value.Code != "" {
 			label += ": " + humanizeStatusCode(value.Code)
 		}
@@ -616,7 +670,7 @@ func projectCompletionMarker(marker completionMarker) (timelineBlock, bool) {
 	case coding.InteractionFailed:
 		suffix = " · failed"
 	case coding.InteractionIncomplete:
-		suffix = " · incomplete (" + string(marker.stop) + ")"
+		suffix = " · " + stopReasonPhrase(marker.stop)
 	default:
 		return timelineBlock{}, false
 	}
@@ -631,6 +685,26 @@ func projectCompletionMarker(marker completionMarker) (timelineBlock, bool) {
 		kind: blockCompletion, body: body, status: string(marker.outcome),
 		position: marker.afterMessages,
 	}, true
+}
+
+// stopReasonPhrase names why a run ended short in the user's vocabulary.
+func stopReasonPhrase(reason agent.StopReason) string {
+	switch reason {
+	case agent.StopMaxTurns:
+		return "turn limit reached"
+	case agent.StopBudget:
+		return "budget exhausted"
+	case agent.StopWhen:
+		return "stopped by rule"
+	case agent.StopPaused:
+		return "paused"
+	case agent.StopTerminated:
+		return "terminated"
+	case agent.StopEndTurn, "":
+		return "incomplete"
+	default:
+		return humanizeStatusCode(string(reason))
+	}
 }
 
 func formatInteractionDuration(milliseconds int64) string {
@@ -673,12 +747,43 @@ func visibleToolParts(values []ai.Part) string {
 			parts = append(parts, "[image]")
 		case ai.FilePart:
 			parts = append(parts, "[file]")
+		case ai.StructuredContentPart:
+			// Structured payloads arrive as JSON objects; they are the only
+			// content some MCP Tools return.
+			parts = append(parts, string(part.Data))
+		case ai.ResourceLinkPart:
+			parts = append(parts, embeddedResourceLabel(part.Title, part.Name, part.URI))
+		case ai.EmbeddedResourcePart:
+			parts = append(parts, visibleEmbeddedResource(part))
 		case ai.ToolResultPart:
 			parts = append(parts, visibleToolParts(ai.ProviderParts(part.Content)))
 		}
 	}
 
 	return strings.TrimSpace(strings.Join(parts, ""))
+}
+
+// visibleEmbeddedResource keeps inline text resources readable and names the
+// binary ones without embedding their bytes.
+func visibleEmbeddedResource(part ai.EmbeddedResourcePart) string {
+	if part.Blob == nil {
+		return part.Text
+	}
+	if strings.HasPrefix(strings.ToLower(part.MIMEType), "image/") {
+		return "[image]"
+	}
+
+	return "[file]"
+}
+
+func embeddedResourceLabel(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+
+	return "[resource]"
 }
 
 func visibleMessageText(message ai.Message) string {
@@ -878,11 +983,11 @@ func renderRegularTimelineBlock(
 	}
 
 	title := block.title
-	if block.status != "" {
-		if title != "" {
-			title += " · "
-		}
-		title += block.status
+	if block.kind == blockDiagnostic {
+		// Diagnostic titles already carry their human wording; the raw code
+		// never becomes a second, repeated line.
+		body = wrapPlainText(body, width)
+		title = wrapPlainText(title, width)
 	}
 	if title != "" && !noColor {
 		style := timelineTitleStyle(block.kind, theme)
@@ -896,6 +1001,17 @@ func renderRegularTimelineBlock(
 	}
 
 	return title + "\n" + body
+}
+
+// wrapPlainText wraps a non-Markdown block body so it never runs past the
+// frame width, where the terminal would cut it without an ellipsis.
+func wrapPlainText(value string, width int) string {
+	value = strings.TrimRight(value, " ")
+	if value == "" || width < 1 {
+		return value
+	}
+
+	return strings.TrimRight(lipgloss.Wrap(value, width, ""), "\n")
 }
 
 func renderUserMessage(body string, width int, theme colorTheme, noColor bool) string {
@@ -930,17 +1046,9 @@ func renderUserMessage(body string, width int, theme colorTheme, noColor bool) s
 func renderErrorBlock(block timelineBlock, width int, theme colorTheme, noColor bool) string {
 	width = max(1, width)
 	body := strings.TrimSpace(block.body)
-	if block.status != "" {
-		first, rest, wrapped := strings.Cut(body, "\n")
-		if first == "" {
-			first = block.status
-		} else {
-			first += " (" + block.status + ")"
-		}
-		body = first
-		if wrapped {
-			body += "\n" + rest
-		}
+	if block.status != "" && body == "" {
+		// The code only stands in when there is no message of its own.
+		body = humanizeStatusCode(block.status)
 	}
 	if block.title != "" {
 		if body == "" {

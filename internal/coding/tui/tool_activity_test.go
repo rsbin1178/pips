@@ -268,9 +268,9 @@ func TestGenericToolSensitiveResultStaysOutOfCompactAndDetailViews(t *testing.T)
 
 	require.Len(t, blocks, 1)
 	detail := newToolDetailView(blocks[0])
-	assert.NotContains(t, detail.content, secret)
-	assert.Contains(t, detail.content, "[redacted]")
-	assert.Contains(t, detail.content, "[sensitive result omitted]")
+	assert.NotContains(t, detail.text(), secret)
+	assert.Contains(t, detail.text(), "[redacted]")
+	assert.Contains(t, detail.text(), "[sensitive result omitted]")
 }
 
 func TestShellToolSensitiveCommandAndOutputStayOutOfViews(t *testing.T) {
@@ -293,9 +293,9 @@ func TestShellToolSensitiveCommandAndOutputStayOutOfViews(t *testing.T) {
 
 	require.Len(t, blocks, 1)
 	detail := newToolDetailView(blocks[0])
-	assert.NotContains(t, detail.content, secret)
-	assert.Contains(t, detail.content, "[redacted]")
-	assert.Contains(t, detail.content, "[sensitive result omitted]")
+	assert.NotContains(t, detail.text(), secret)
+	assert.Contains(t, detail.text(), "[redacted]")
+	assert.Contains(t, detail.text(), "[sensitive result omitted]")
 }
 
 func TestTimelineRendersCodexStyleToolActivities(t *testing.T) {
@@ -481,8 +481,9 @@ func TestTimelineBoundsPatchCodeAndToolDetailKeepsBoundedRemainder(t *testing.T)
 	assert.NotContains(t, rendered, "+line-24")
 
 	detail := newToolDetailView(blocks[0])
-	assert.Contains(t, detail.content, "Changes:\nA many.txt")
-	assert.Contains(t, detail.content, "+line-24")
+	assert.Contains(t, detail.text(), "Added many.txt")
+	assert.Contains(t, detail.text(), "Changes\n  A many.txt")
+	assert.Contains(t, detail.text(), "+line-24")
 }
 
 func TestPatchCodePreviewBoundsLongLinesAndDetailBytes(t *testing.T) {

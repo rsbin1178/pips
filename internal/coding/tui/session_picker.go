@@ -381,7 +381,7 @@ func relativeSessionTime(createdAt, now time.Time) string {
 	}
 	duration := now.Sub(createdAt)
 	if duration < time.Minute {
-		return "just now"
+		return labelJustNow
 	}
 	if duration < time.Hour {
 		return relativeCount(int(duration/time.Minute), "minute")

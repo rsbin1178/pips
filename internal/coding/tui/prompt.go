@@ -4,6 +4,8 @@ package tui
 import (
 	"context"
 	"errors"
+	"fmt"
+	"image/color"
 	"iter"
 	"slices"
 	"strconv"
@@ -854,44 +856,16 @@ func (m *Model) approvalPromptView() string {
 	if source := m.promptSourceLine(); source != "" {
 		lines = append(lines, source)
 	}
-	//nolint:nestif // Child approval rendering keeps exact target ownership adjacent to its safe fields.
-	if m.prompt.subagent != nil {
-		state, ok := m.subagentInteractions.values[m.prompt.subagent.childSessionID]
-		if ok && state.Approval.Review != nil {
-			value := state.Approval.Review
-			command := append([]string{value.Operation.Executable()}, value.Operation.Args()...)
-			lines = append(lines,
-				value.Call.Name+": "+strings.Join(command, " "),
-				"cwd "+value.Operation.CWD()+" · reason: "+value.Operation.Justification(),
-			)
-		} else if ok && state.Approval.Unknown != nil {
-			value := state.Approval.Unknown
-			lines = append(lines,
-				"outcome unknown · "+value.Tool+" · "+value.Reason,
-			)
-		}
-	} else {
-		state := m.promptApprovalState()
-		if value := state.Required; value != nil {
-			lines = append(lines,
-				value.Tool+": "+strings.Join(value.Command, " "),
-				"cwd "+value.CWD+" · reason: "+value.Justification,
-			)
-		} else if value := state.Unknown; value != nil {
-			lines = append(lines,
-				"outcome unknown · "+value.Tool+" · "+value.Reason,
-			)
-		}
-	}
+	lines = append(lines, m.approvalPromptRequestLines()...)
 	lines = append(lines, "")
 	for index, choice := range m.prompt.choices {
 		prefix := "  "
 		if index == m.prompt.cursor {
 			prefix = "> "
 		}
-		lines = append(lines, prefix+string(choice))
+		lines = append(lines, prefix+approvalChoiceLabel(choice))
 	}
-	lines = append(lines, "↑/↓ choose · Enter confirm")
+	lines = append(lines, "↑/↓ choose · Enter confirm · or press the key shown in ( )")
 	if m.prompt.loading {
 		lines = append(lines, m.activityNotice("Working…"))
 	}
@@ -899,15 +873,171 @@ func (m *Model) approvalPromptView() string {
 		lines = append(lines, safeError(m.prompt.err))
 	}
 
-	bar := "▌"
-	if !m.options.NoColor {
-		bar = lipgloss.NewStyle().Foreground(paletteFor(m.theme).warning).Render(bar)
-	}
-	for index := range lines {
-		lines[index] = bar + " " + ansi.Truncate(lines[index], max(1, m.width-2), "…")
+	return renderGutterLines(lines, m.width, m.options.NoColor, paletteFor(m.theme).warning)
+}
+
+// approvalPromptRequestLines shows exactly what is being approved. The command
+// is wrapped inside the accent gutter and never silently truncated: a long
+// script is capped with an explicit count of the hidden lines.
+func (m *Model) approvalPromptRequestLines() []string {
+	maxRows := m.approvalCommandRows()
+	if m.prompt.subagent != nil {
+		state, ok := m.subagentInteractions.values[m.prompt.subagent.childSessionID]
+		switch {
+		case ok && state.Approval.Review != nil:
+			value := state.Approval.Review
+			command := append([]string{value.Operation.Executable()}, value.Operation.Args()...)
+
+			return approvalReviewLines(
+				value.Call.Name, command,
+				value.Operation.CWD(), value.Operation.Justification(), maxRows,
+			)
+		case ok && state.Approval.Unknown != nil:
+			return approvalUnknownLines(state.Approval.Unknown.Tool, state.Approval.Unknown.Reason)
+		default:
+			return nil
+		}
 	}
 
-	return strings.Join(lines, "\n")
+	state := m.promptApprovalState()
+	if value := state.Required; value != nil {
+		return approvalReviewLines(
+			value.Tool, value.Command, value.CWD, value.Justification, maxRows,
+		)
+	}
+	if value := state.Unknown; value != nil {
+		return approvalUnknownLines(value.Tool, value.Reason)
+	}
+
+	return nil
+}
+
+func (m *Model) approvalCommandRows() int {
+	return max(4, m.height-14)
+}
+
+// approvalReviewLines names the Tool and reproduces the command being approved
+// with its newlines intact, so a multi-step script cannot be approved unseen.
+func approvalReviewLines(tool string, command []string, cwd, justification string, maxRows int) []string {
+	lines := []string{tool}
+	rows := strings.Split(approvalCommandScript(command), "\n")
+	if maxRows > 0 && len(rows) > maxRows {
+		hidden := len(rows) - maxRows + 1
+		rows = append(append([]string{}, rows[:maxRows-1]...),
+			fmt.Sprintf("… %d more lines not shown", hidden))
+	}
+
+	for index, row := range rows {
+		prefix := "  "
+		if index == 0 {
+			prefix = detailShellPrompt
+		}
+		lines = append(lines, prefix+row)
+	}
+	if cwd != "" {
+		lines = append(lines, "cwd "+cwd)
+	}
+	if justification != "" {
+		lines = append(lines, "reason "+justification)
+	}
+
+	return lines
+}
+
+// approvalCommandScript unwraps a `<shell> -c <script>` invocation so the
+// reader approves the script rather than the interpreter wrapper. Only the
+// first two tokens are inspected: the script keeps its own whitespace and
+// newlines so multi-step commands stay readable.
+func approvalCommandScript(command []string) string {
+	return shellCommandScript(strings.Join(command, " "))
+}
+
+// splitLeadingToken splits value at its first whitespace run, returning the
+// token and the untrimmed remainder.
+func splitLeadingToken(value string) (string, string, bool) {
+	value = strings.TrimLeft(value, " \t")
+	if value == "" {
+		return "", "", false
+	}
+
+	index := strings.IndexAny(value, " \t")
+	if index < 0 {
+		return value, "", false
+	}
+
+	return value[:index], value[index+1:], true
+}
+
+// approvalUnknownLines explains an operation whose outcome could not be
+// confirmed, in prose rather than the raw reason code.
+func approvalUnknownLines(tool, reason string) []string {
+	return []string{
+		"Recovery required · " + tool,
+		approvalUnknownReason(reason),
+	}
+}
+
+func approvalUnknownReason(reason string) string {
+	switch reason {
+	case "started_without_durable_result":
+		return "The command started but its result was not recorded. Retry it, or mark it as failed."
+	case "":
+		return "The command result could not be confirmed."
+	default:
+		return humanizeStatusCode(reason)
+	}
+}
+
+// approvalChoiceLabel pairs each choice with the direct key that selects it.
+func approvalChoiceLabel(choice approval.Choice) string {
+	switch choice {
+	case approval.ChoiceAllowOnce:
+		return "Allow once (o)"
+	case approval.ChoiceAllowSession:
+		return "Allow for this session (s)"
+	case approval.ChoiceDeny:
+		return "Deny (d)"
+	case approval.ChoiceRetry:
+		return "Retry the command (r)"
+	case approval.ChoiceMarkFailed:
+		return "Mark as failed (f)"
+	case approval.ChoiceAcknowledge:
+		return "Acknowledge (a)"
+	default:
+		return humanizeStatusCode(string(choice))
+	}
+}
+
+// renderGutterLines wraps every prompt row inside the accent gutter so a long
+// command or justification stays readable instead of being cut off.
+func renderGutterLines(lines []string, width int, noColor bool, tone color.Color) string {
+	bar := "▌"
+	if !noColor {
+		bar = lipgloss.NewStyle().Foreground(tone).Render(bar)
+	}
+	available := max(1, width-2)
+	rows := make([]string, 0, len(lines))
+
+	for _, line := range lines {
+		line = strings.TrimRight(line, " ")
+		if line == "" || ansi.StringWidth(line) <= available {
+			rows = append(rows, bar+" "+line)
+
+			continue
+		}
+
+		leading := line[:len(line)-len(strings.TrimLeft(line, " "))]
+		wrapped := ansi.Wrap(
+			strings.TrimLeft(line, " "),
+			max(1, available-ansi.StringWidth(leading)),
+			"",
+		)
+		for part := range strings.SplitSeq(wrapped, "\n") {
+			rows = append(rows, bar+" "+leading+part)
+		}
+	}
+
+	return strings.Join(rows, "\n")
 }
 
 func (m *Model) promptApprovalState() coding.ApprovalState {
@@ -970,13 +1100,5 @@ func (m *Model) compactPromptView() string {
 		)
 	}
 
-	bar := "▌"
-	if !m.options.NoColor {
-		bar = lipgloss.NewStyle().Foreground(paletteFor(m.theme).warning).Render(bar)
-	}
-	for index := range lines {
-		lines[index] = bar + " " + ansi.Truncate(lines[index], max(1, m.width-2), "…")
-	}
-
-	return strings.Join(lines, "\n")
+	return renderGutterLines(lines, m.width, m.options.NoColor, paletteFor(m.theme).warning)
 }

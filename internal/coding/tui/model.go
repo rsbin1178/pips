@@ -826,6 +826,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case renderTickMsg:
 		m.renderWait = false
 		m.renderTranscript(false)
+		m.refreshToolDetailRoute()
 
 		return m, nil
 	case scrollbackRenderReadyMsg:
@@ -1624,6 +1625,33 @@ func (m *Model) timelineBlocks() []timelineBlock {
 	}
 
 	return blocks
+}
+
+// refreshToolDetailRoute keeps an open detail route aligned with live State:
+// while a Tool runs, its progress and result appear in place instead of only
+// after the route is reopened.
+func (m *Model) refreshToolDetailRoute() {
+	if m.route.kind != routeToolDetail || m.route.toolDetail == nil ||
+		len(m.route.toolDetail.callIDs) == 0 {
+		return
+	}
+
+	for _, block := range projectTimeline(m.state) {
+		if block.kind != blockTool || len(block.tools) == 0 {
+			continue
+		}
+		detail := newToolDetailView(block)
+		if !slices.Equal(detail.callIDs, m.route.toolDetail.callIDs) {
+			continue
+		}
+
+		// Keep the reader's position, clamping it to the new physical height.
+		offset := m.route.offset
+		m.route.toolDetail = &detail
+		m.route.offset = min(max(0, offset), m.toolDetailMaximumOffset())
+
+		return
+	}
 }
 
 func (m *Model) toggleLatestTool() tea.Cmd {

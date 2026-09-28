@@ -24,8 +24,14 @@ const (
 	keyLeft       = "left"
 	keyRight      = "right"
 	keyDown       = "down"
+	keyHome       = "home"
+	keyEnd        = "end"
 	keyBackspace  = "backspace"
 	appTitle      = "Pips"
+	// labelFailed and labelJustNow are shared display words; keeping them as
+	// constants keeps wording identical across the routes that show them.
+	labelFailed  = "Failed"
+	labelJustNow = "just now"
 )
 
 const (
