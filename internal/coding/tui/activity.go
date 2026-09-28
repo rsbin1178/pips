@@ -354,12 +354,14 @@ func semanticToolActivityStatus(activity toolActivity) activityStatus {
 		status.detail = activity.subject
 	case toolClassPatch:
 		status.label = "Updating workspace…"
-	case toolClassGeneric:
+	case toolClassGeneric, toolClassPlan:
 		status.label = "Calling…"
 		status.detail = activity.name
 	case toolClassSubagent:
 		status.label = activity.action + "…"
 		status.detail = activity.subject
+	case toolClassTaskList:
+		status.label = taskListActivityLabel(activity.state) + "…"
 	}
 
 	return status

@@ -75,14 +75,14 @@ func TestMCPCommandOpensReadOnlyStatusRoute(t *testing.T) {
 	content := ansi.Strip(model.View().Content)
 	assert.Contains(t, content, "MCP Servers")
 	assert.Contains(t, content, "2 connected · 1 failed · 1 pending · 1 disabled")
-	assert.Contains(t, content, "› ● docs · connected · 4 tools · user/streamable_http")
-	assert.Contains(t, content, "user · streamable_http · ambient")
+	assert.Contains(t, content, "› ● docs · connected · 4 tools · user · streamable_http")
+	assert.Contains(t, content, "user · streamable_http · shared with the session")
 	assert.Contains(t, content, "connected in 1.2s")
 	assert.Contains(t, content, "tools: docs_lookup, docs_search, docs_summarize (+1 more · Ctrl+D)")
-	assert.Contains(t, content, "● slow · connected · 1 tool · user/stdio")
-	assert.Contains(t, content, "✗ broken · failed · project/streamable_http")
-	assert.Contains(t, content, "○ triage · pending · project/stdio")
-	assert.Contains(t, content, "○ denied · disabled · project/stdio")
+	assert.Contains(t, content, "● slow · connected · 1 tool · user · stdio")
+	assert.Contains(t, content, "✗ broken · failed · project · streamable_http")
+	assert.Contains(t, content, "○ triage · pending · project · stdio")
+	assert.Contains(t, content, "○ denied · disabled · project · stdio")
 	assert.NotContains(t, content, "docs_translate")
 	assert.NotContains(t, content, "connecting…")
 	assert.Contains(t, content, "Ctrl+D details")
@@ -95,11 +95,10 @@ func TestMCPCommandOpensReadOnlyStatusRoute(t *testing.T) {
 	model.Update(key("down"))
 	model.Update(key("down"))
 	content = ansi.Strip(model.View().Content)
-	assert.Contains(t, content, "› ✗ broken · failed · project/streamable_http")
-	assert.Contains(t, content, "project · streamable_http · ambient")
-	assert.Contains(t, content, "failed at connect: connect_failed — server connection could not be initialized")
+	assert.Contains(t, content, "› ✗ broken · failed · project · streamable_http")
+	assert.Contains(t, content, "project · streamable_http · shared with the session")
+	assert.Contains(t, content, "failed while connecting: server connection could not be initialized")
 	assert.Contains(t, content, "Details · broken")
-	assert.Contains(t, content, "stage: connect")
 	assert.NotContains(t, content, "connected in 1.2s")
 
 	model.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
@@ -188,13 +187,13 @@ func TestMCPRoutePollsWhileConnectingAndStopsWhenSettled(t *testing.T) {
 	require.NotNil(t, poll, "an unsettled snapshot schedules a poll")
 	content := ansi.Strip(model.View().Content)
 	assert.Contains(t, content, "1 connected · 1 connecting · 1 failed · 1 pending · 1 disabled")
-	assert.Contains(t, content, "◌ slow · connecting · user/stdio")
+	assert.Contains(t, content, "◌ slow · connecting · user · stdio")
 	assert.Contains(t, content, "connecting…")
 	assert.Equal(t, 1, controller.mcpCalls)
 
 	model.Update(key("down"))
 	content = ansi.Strip(model.View().Content)
-	assert.Contains(t, content, "› ◌ slow · connecting · user/stdio")
+	assert.Contains(t, content, "› ◌ slow · connecting · user · stdio")
 	assert.Contains(t, content, "connecting for")
 
 	generation := model.route.generation
@@ -212,7 +211,7 @@ func TestMCPRoutePollsWhileConnectingAndStopsWhenSettled(t *testing.T) {
 	assert.Equal(t, 1, model.route.cursor, "cursor survives a background refresh")
 	content = ansi.Strip(model.View().Content)
 	assert.Contains(t, content, "2 connected · 1 failed · 1 pending · 1 disabled")
-	assert.Contains(t, content, "› ● slow · connected · 1 tool · user/stdio")
+	assert.Contains(t, content, "› ● slow · connected · 1 tool · user · stdio")
 	assert.NotContains(t, content, "connecting…")
 
 	model.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
@@ -272,9 +271,12 @@ func TestMCPRouteDetailPaneCoversEveryState(t *testing.T) {
 	model.route.showDetails = true
 
 	expected := map[string][]string{
-		"docs":   {"Details · docs", "docs_lookup", "docs_translate"},
-		"slow":   {"Details · slow", "connecting for"},
-		"broken": {"Details · broken", "stage: connect", "code: connect_failed", "server connection could not be initialized"},
+		"docs": {"Details · docs", "docs_lookup", "docs_translate"},
+		"slow": {"Details · slow", "connecting for"},
+		"broken": {
+			"Details · broken", "failed while connecting",
+			"server connection could not be initialized",
+		},
 		"triage": {"Details · triage", "awaiting project approval"},
 		"denied": {"Details · denied", "denied by project permissions"},
 	}
@@ -285,6 +287,8 @@ func TestMCPRouteDetailPaneCoversEveryState(t *testing.T) {
 			assert.Contains(t, content, fragment, server.ID)
 		}
 		assert.NotContains(t, content, "example.test")
+		// A failure message explains the cause; the raw code is not repeated.
+		assert.NotContains(t, content, "connect_failed")
 	}
 	assert.Equal(t, "No MCP servers are configured.", mcpRouteSummary(coding.MCPSnapshot{}))
 	assert.Equal(t, "0ms", mcpDuration(-time.Second))

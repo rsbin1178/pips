@@ -315,7 +315,7 @@ func (m *Model) renderMCPRouteRow(server codingmcp.ServerStatus, selected bool) 
 	if server.State == codingmcp.ServerStateConnected {
 		compact += " · " + mcpToolCountLabel(len(server.Tools))
 	}
-	compact += " · " + string(server.Scope) + "/" + string(server.Transport)
+	compact += " · " + mcpScopeLabel(server) + " · " + string(server.Transport)
 	if !selected {
 		return m.styleMCPRouteLines(
 			[]string{ansi.Truncate(compact, contentWidth, "…")},
@@ -326,7 +326,7 @@ func (m *Model) renderMCPRouteRow(server codingmcp.ServerStatus, selected bool) 
 
 	lines := []string{ansi.Truncate(compact, contentWidth, "…")}
 	details := []string{
-		string(server.Scope) + " · " + string(server.Transport) + " · " + string(server.Visibility),
+		mcpScopeLabel(server) + " · " + string(server.Transport) + " · " + mcpVisibilityLabel(server.Visibility),
 		mcpStateDetail(server, time.Now()),
 	}
 	if names := mcpCompactToolNames(server.Tools); names != "" {
@@ -339,6 +339,33 @@ func (m *Model) renderMCPRouteRow(server codingmcp.ServerStatus, selected bool) 
 	}
 
 	return m.styleMCPRouteLines(lines, server.State, true)
+}
+
+// mcpScopeLabel names who owns the server: the project, the user, or the app.
+func mcpScopeLabel(server codingmcp.ServerStatus) string {
+	switch string(server.Scope) {
+	case "project":
+		return "project"
+	case "user":
+		return "user"
+	case "agent_private", "private":
+		return "agent-private"
+	case "":
+		return "unscoped"
+	default:
+		return humanizeStatusCode(string(server.Scope))
+	}
+}
+
+func mcpVisibilityLabel(visibility codingmcp.Visibility) string {
+	switch visibility {
+	case codingmcp.VisibilityAmbient, "":
+		return "shared with the session"
+	case codingmcp.VisibilityAgentPrivate:
+		return "agent-private"
+	default:
+		return humanizeStatusCode(string(visibility))
+	}
 }
 
 func mcpStateGlyph(state codingmcp.ServerState) string {
@@ -371,9 +398,15 @@ func mcpStateDetail(server codingmcp.ServerStatus, now time.Time) string {
 	case codingmcp.ServerStateConnecting:
 		return "connecting for " + mcpDuration(now.Sub(server.StartedAt))
 	case codingmcp.ServerStateFailed:
-		detail := "failed at " + server.Stage + ": " + server.Code
-		if server.Message != "" {
-			detail += " — " + server.Message
+		// The actionable part is the message (it carries the fix hint), so it
+		// leads; the stage names where it failed and the code is omitted when a
+		// message already explains the failure.
+		detail := "failed while " + mcpStageLabel(server.Stage)
+		if message := strings.TrimSpace(server.Message); message != "" {
+			return detail + ": " + message
+		}
+		if server.Code != "" {
+			return detail + ": " + humanizeStatusCode(server.Code)
 		}
 
 		return detail
@@ -383,6 +416,23 @@ func mcpStateDetail(server codingmcp.ServerStatus, now time.Time) string {
 		return "disabled · denied by project permissions"
 	default:
 		return string(server.State)
+	}
+}
+
+func mcpStageLabel(stage string) string {
+	switch stage {
+	case "connect":
+		return "connecting"
+	case "configuration":
+		return "loading configuration"
+	case "initialize":
+		return "initializing"
+	case "tools":
+		return "listing tools"
+	case "":
+		return "starting"
+	default:
+		return humanizeStatusCode(stage)
 	}
 }
 
@@ -447,6 +497,28 @@ func (m *Model) styleMCPRouteLines(lines []string, state codingmcp.ServerState, 
 }
 
 // mcpServerDetail is the Ctrl+D pane: the complete tool-name list of the
+// mcpFailureSummary names where a server failed without repeating a code the
+// message already explains.
+func mcpFailureSummary(server codingmcp.ServerStatus) string {
+	summary := "failed while " + mcpStageLabel(server.Stage)
+	if strings.TrimSpace(server.Message) == "" && server.Code != "" {
+		summary += " · " + humanizeStatusCode(server.Code)
+	}
+
+	return summary
+}
+
+// wrapDetailText wraps one detail paragraph with a two-space hanging indent.
+func wrapDetailText(value string, width int) []string {
+	wrapped := ansi.Wrap(sanitizeToolText(value), max(1, width), "")
+	rows := make([]string, 0, 4)
+	for part := range strings.SplitSeq(wrapped, "\n") {
+		rows = append(rows, "  "+part)
+	}
+
+	return rows
+}
+
 // selected server, or its failure diagnostic. It never renders definitions,
 // endpoints, commands, or environment values.
 func (m *Model) mcpServerDetail(server codingmcp.ServerStatus, maximum int) string {
@@ -460,9 +532,9 @@ func (m *Model) mcpServerDetail(server codingmcp.ServerStatus, maximum int) stri
 			lines = append(lines, "  "+tool)
 		}
 	case codingmcp.ServerStateFailed:
-		lines = append(lines, "  stage: "+server.Stage, "  code: "+server.Code)
-		if server.Message != "" {
-			lines = append(lines, "  "+server.Message)
+		lines = append(lines, "  "+mcpFailureSummary(server))
+		if message := strings.TrimSpace(server.Message); message != "" {
+			lines = append(lines, wrapDetailText(server.Message, max(1, m.width-4))...)
 		}
 	case codingmcp.ServerStateConnecting, codingmcp.ServerStatePending, codingmcp.ServerStateDisabled:
 		lines = append(lines, "  "+mcpStateDetail(server, time.Now()))

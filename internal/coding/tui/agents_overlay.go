@@ -467,7 +467,13 @@ func renderAgentLibrarySummary(value coding.AgentLibraryEntry, marker string) []
 		lines = append(lines, "  required: "+safeDetailText(truncateText(strings.Join(value.RequiredTools, ", "), 180)))
 	}
 	if len(value.Diagnostics) > 0 {
-		lines = append(lines, "  diagnostic: "+safeDetailText(value.Diagnostics[0].Code))
+		// The message explains what happened; the code is only a fallback.
+		diagnostic := value.Diagnostics[0]
+		message := safeDetailText(strings.TrimSpace(diagnostic.Message))
+		if message == "" {
+			message = humanizeStatusCode(diagnostic.Code)
+		}
+		lines = append(lines, "  diagnostic: "+truncateText(message, 180))
 	}
 
 	return lines
@@ -778,7 +784,7 @@ func subagentOutcomeText(value subagent.Summary) string {
 
 	switch value.State {
 	case subagent.StateFailed:
-		label = "Failed"
+		label = labelFailed
 	case subagent.StateCanceled:
 		label = "Canceled"
 	case subagent.StateInterrupted:
@@ -913,7 +919,7 @@ func relativeTime(value time.Time) string {
 
 	duration := time.Since(value)
 	if duration < time.Minute {
-		return "just now"
+		return labelJustNow
 	}
 
 	if duration < time.Hour {
@@ -998,13 +1004,13 @@ func (m *Model) updateSubagentRouteKey(message tea.KeyPressMsg) (tea.Model, tea.
 		m.route.offset = max(0, m.route.offset-1)
 	case keyDown, "j":
 		m.route.offset = min(maximum, m.route.offset+1)
-	case "pgup":
+	case keyPageUp:
 		m.route.offset = max(0, m.route.offset-visible)
-	case "pgdown":
+	case keyPageDown:
 		m.route.offset = min(maximum, m.route.offset+visible)
-	case "home":
+	case keyHome:
 		m.route.offset = 0
-	case "end":
+	case keyEnd:
 		m.route.offset = maximum
 	}
 
@@ -1077,13 +1083,13 @@ func (m *Model) updateTeamWorkerScrollKey(key string) (tea.Cmd, bool) {
 	visible := max(1, m.height-5)
 	maximum := m.subagentRouteMaximumOffset()
 	switch key {
-	case "pgup":
+	case keyPageUp:
 		m.route.offset = max(0, m.route.offset-visible)
-	case "pgdown":
+	case keyPageDown:
 		m.route.offset = min(maximum, m.route.offset+visible)
-	case "home":
+	case keyHome:
 		m.route.offset = 0
-	case "end":
+	case keyEnd:
 		m.route.offset = maximum
 	default:
 		return nil, false
@@ -1121,14 +1127,6 @@ func (m *Model) subagentRouteView() tea.View {
 	width := max(1, m.width)
 	height := max(1, m.height)
 
-	separator := strings.Repeat("-", width)
-
-	if !m.options.NoColor {
-		separator = lipgloss.NewStyle().Foreground(
-			paletteFor(m.theme).separator,
-		).Render(strings.Repeat("─", width))
-	}
-
 	body := "Child activity unavailable."
 	switch {
 	case m.route.controlling:
@@ -1155,15 +1153,12 @@ func (m *Model) subagentRouteView() tea.View {
 		body += "\n\nRefresh: " + m.safeChildRouteError(m.route.refreshErr)
 	}
 
-	footerParts := []string{separator}
-	if m.route.childKind == childTeamWorker {
-		footerParts = append(footerParts, m.composerBox())
-	}
-	footerParts = append(footerParts, m.subagentRouteStatusLine())
-	footer := lipgloss.JoinVertical(lipgloss.Left, footerParts...)
+	footer := m.subagentRouteFooter(width)
 	bodyHeight := max(0, height-lipgloss.Height(footer))
 
-	body = fitScrollableContent(body, width, bodyHeight, m.route.offset)
+	// The child route is the only place a subagent's results are readable, so
+	// its body wraps instead of losing the right-hand end of long lines.
+	body = renderSubagentRouteBody(body, width, bodyHeight, m.route.offset)
 	if padding := bodyHeight - lipgloss.Height(body); padding > 0 {
 		body += strings.Repeat("\n", padding)
 	}
@@ -1186,36 +1181,124 @@ func (m *Model) subagentRouteView() tea.View {
 
 func (m *Model) subagentRouteStatusLine() string {
 	values := []string{"pips", genericSubagentLabel, "loading"}
+	worker := m.route.childKind == childTeamWorker
 
-	if m.route.childKind == childTeamWorker {
+	if worker {
 		values = m.teamWorkerRouteStatusValues()
+		values = append(values, "Enter message", "Ctrl+J newline", "PgUp/PgDn scroll", "Ctrl+X interrupt", "Esc Lead")
 	} else if m.route.detail != nil {
 		summary := m.route.detail.Summary
-
-		values = []string{"pips", subagentDisplayName(summary.Identity, summary.Role) + " subagent"}
-
+		name := subagentDisplayName(summary.Identity, summary.Role) + " subagent"
+		values = []string{"pips", name}
 		if model := safeDetailText(summary.Model); model != "" {
 			values = append(values, model)
 		}
-
-		values = append(values, string(summary.State))
+		values = append(values, subagentStateLabel(summary.State))
 	}
 
-	if m.route.childKind == childTeamWorker {
-		values = append(values, "Enter message", "Ctrl+J newline", "PgUp/PgDn scroll", "Ctrl+X interrupt", "Esc Lead")
-	} else {
-		values = append(values, "Ctrl+T parent", "Esc agents")
+	value := strings.Join(values, "  ·  ")
+	hint := ""
+	if !worker {
+		hint = m.subagentRouteHintLine()
 	}
 
 	if !m.options.NoColor {
 		palette := paletteFor(m.theme)
-		values[0] = lipgloss.NewStyle().Bold(true).Foreground(palette.workspace).Render(values[0])
-		values[1] = lipgloss.NewStyle().Bold(true).Foreground(palette.session).Render(values[1])
-		values[len(values)-2] = lipgloss.NewStyle().Foreground(palette.muted).Render(values[len(values)-2])
-		values[len(values)-1] = lipgloss.NewStyle().Foreground(palette.muted).Render(values[len(values)-1])
+		value = lipgloss.NewStyle().Foreground(palette.muted).Render(value)
+		if hint != "" {
+			hint = lipgloss.NewStyle().Foreground(paletteFor(m.theme).muted).Render(hint)
+		}
+	}
+	if hint == "" {
+		return ansi.Truncate(value, max(1, m.width), "…")
 	}
 
-	return ansi.Truncate(strings.Join(values, "  ·  "), max(1, m.width), "…")
+	// Hints live on their own footer row so a narrow terminal trims metadata
+	// rather than the keys the reader needs.
+	return ansi.Truncate(value, max(1, m.width), "…") + "\n" +
+		ansi.Truncate(hint, max(1, m.width), "…")
+}
+
+// subagentRouteHintLine selects the widest key-hint set that fits the footer
+// row on its own.
+func (m *Model) subagentRouteHintLine() string {
+	hints := [][]string{
+		{detailHintScrollFull, subagentHintInterrupt, subagentHintParent, subagentHintAgents},
+		{"↑/↓ scroll", subagentHintInterrupt, subagentHintParent, subagentHintAgents},
+		{"↑/↓", subagentHintInterrupt, subagentHintParent, subagentHintAgents},
+		{subagentHintInterrupt, subagentHintParent, subagentHintAgents},
+		{subagentHintParent, subagentHintAgents},
+	}
+	if isTerminalSubagent(m.subagentRouteSummaryState().State) {
+		for index := range hints {
+			hints[index] = slices.DeleteFunc(
+				slices.Clone(hints[index]), func(value string) bool { return value == subagentHintInterrupt },
+			)
+		}
+	}
+
+	separator := "  ·  "
+	for _, hint := range hints {
+		candidate := strings.Join(hint, separator)
+		if ansi.StringWidth(candidate) <= m.width {
+			return candidate
+		}
+	}
+
+	return ""
+}
+
+// subagentRouteFooter is the pinned footer of the child route: the separator,
+// an optional Worker composer, the identity status line, and the key hints.
+func (m *Model) subagentRouteFooter(width int) string {
+	separator := strings.Repeat("-", max(1, width))
+	if !m.options.NoColor {
+		separator = lipgloss.NewStyle().Foreground(
+			paletteFor(m.theme).separator,
+		).Render(strings.Repeat("─", max(1, width)))
+	}
+	parts := []string{separator}
+	if m.route.childKind == childTeamWorker {
+		parts = append(parts, m.composerBox())
+	}
+	parts = append(parts, m.subagentRouteStatusLine())
+
+	return lipgloss.JoinVertical(lipgloss.Left, parts...)
+}
+
+// subagentRouteSummaryState reports whether the open child has finished, so the
+// interrupt hint only appears while it can act.
+func (m *Model) subagentRouteSummaryState() subagent.Summary {
+	if m.route.detail == nil {
+		return subagent.Summary{}
+	}
+
+	return m.route.detail.Summary
+}
+
+const (
+	subagentHintInterrupt = "c interrupt"
+	subagentHintParent    = "Ctrl+T parent"
+	subagentHintAgents    = "Esc agents"
+)
+
+func subagentStateLabel(state subagent.State) string {
+	switch state {
+	case subagent.StateCreated:
+		return "Created"
+	case subagent.StateRunning:
+		return "Running"
+	case subagent.StateSucceeded:
+		return "Succeeded"
+	case subagent.StateFailed:
+		return labelFailed
+	case subagent.StateCanceled:
+		return "Canceled"
+	case subagent.StateInterrupted:
+		return "Interrupted"
+	default:
+		return humanizeStatusCode(string(state))
+	}
 }
 
 func (m *Model) teamWorkerRouteStatusValues() []string {
@@ -1378,19 +1461,64 @@ func (m *Model) applySubagentRouteRefresh(message subagentRouteDataMsg) (tea.Mod
 }
 
 func (m *Model) subagentRouteMaximumOffset() int {
+	content, visible := m.subagentRouteScrollContent()
+
+	return max(0, len(content)-visible)
+}
+
+// subagentRouteScrollContent returns the wrapped body rows and the number that
+// fit, so scrolling counts physical rows rather than logical lines.
+func (m *Model) subagentRouteScrollContent() ([]string, int) {
 	if m.route.childState == nil {
-		return 0
+		return nil, 1
 	}
 
-	visible := max(1, m.height-3)
-	if m.route.childKind == childTeamWorker {
-		visible = max(1, m.height-lipgloss.Height(m.composerBox())-2)
-	}
+	visible := max(1, m.height-lipgloss.Height(m.subagentRouteFooter(m.width)))
 	content := m.subagentRouteContent(*m.route.childState, m.route.detail)
 	if m.route.childKind == childTeamWorker {
 		content = m.teamWorkerRouteContent(*m.route.childState, m.route.childSummary)
 	}
-	lineCount := strings.Count(content, "\n") + 1
 
-	return max(0, lineCount-visible)
+	return wrapPlainLines(content, max(1, m.width)), visible
+}
+
+// renderSubagentRouteBody wraps each body row to the frame width with a
+// hanging indent, then windows the requested offset.
+func renderSubagentRouteBody(body string, width, height, offset int) string {
+	rows := wrapPlainLines(body, max(1, width))
+	if len(rows) == 0 {
+		return ""
+	}
+
+	start := min(max(0, offset), max(0, len(rows)-height))
+	end := min(len(rows), start+height)
+
+	return strings.Join(rows[start:end], "\n")
+}
+
+// wrapPlainLines wraps plain text rows to width, keeping each row's leading
+// indentation on every physical line. The wrap width excludes the indent so a
+// continuation line cannot push past the frame.
+func wrapPlainLines(body string, width int) []string {
+	rows := make([]string, 0, 16)
+	for line := range strings.SplitSeq(body, "\n") {
+		line = strings.TrimRight(line, " ")
+		if line == "" || ansi.StringWidth(line) <= width {
+			rows = append(rows, line)
+
+			continue
+		}
+
+		leading := line[:len(line)-len(strings.TrimLeft(line, " "))]
+		wrapped := ansi.Wrap(
+			strings.TrimLeft(line, " "),
+			max(1, width-ansi.StringWidth(leading)),
+			"",
+		)
+		for part := range strings.SplitSeq(wrapped, "\n") {
+			rows = append(rows, leading+part)
+		}
+	}
+
+	return rows
 }

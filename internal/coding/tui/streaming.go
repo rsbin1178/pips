@@ -88,7 +88,7 @@ func (m *Model) syncStreamingDraft(identity, source string) (string, bool) {
 	if stream.tail == "" {
 		stream.tail = streamTailPlaceholder
 	} else {
-		stream.tail = ansi.Truncate(stream.tail, max(1, m.width-2), "…")
+		stream.tail = truncateStreamingRows(stream.tail, max(1, m.width-2))
 	}
 
 	return promoted, continuation
@@ -113,7 +113,24 @@ func (m *Model) syncRetractableDraft(identity, source string) {
 		return
 	}
 
-	stream.tail = ansi.Truncate(lines[len(lines)-1], max(1, m.width-2), "…")
+	stream.tail = truncateStreamingRows(lines[len(lines)-1], max(1, m.width-2))
+}
+
+// truncateStreamingRows bounds each live row to the frame width. Markdown
+// rendering pads every row to the wrap width, so a row is only marked as
+// truncated when it carries real content beyond the limit.
+func truncateStreamingRows(value string, limit int) string {
+	lines := strings.Split(value, "\n")
+	for index, line := range lines {
+		line = strings.TrimRight(line, " ")
+		if ansi.StringWidth(line) > limit {
+			line = ansi.Truncate(line, limit, "…")
+		}
+
+		lines[index] = line
+	}
+
+	return strings.Join(lines, "\n")
 }
 
 func (m *Model) renderStreamingTablePreview(source string) string {

@@ -628,7 +628,8 @@ type routeBarrierRenderProbe struct {
 func (p *routeBarrierRenderProbe) Init() tea.Cmd {
 	write := p.printScrollback("PARENT-NATIVE")
 	_ = p.openToolDetailRoute(toolDetailView{
-		title: "CHILD-ROUTE", content: "route owns the managed frame",
+		title: "CHILD-ROUTE",
+		rows:  []toolDetailRow{{tone: detailToneBody, text: "route owns the managed frame"}},
 	})
 
 	return tea.Sequence(

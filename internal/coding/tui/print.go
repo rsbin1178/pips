@@ -11,8 +11,11 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/rsbin1178/pips/internal/coding"
 	"github.com/rsbin1178/pips/internal/coding/changes"
 	"github.com/rsbin1178/pips/internal/coding/config"
+	"github.com/rsbin1178/pips/internal/coding/modelcatalog"
+	"github.com/rsbin1178/pips/internal/coding/runtimecontrol"
 )
 
 type workspaceStatusResultMsg struct {
@@ -69,14 +72,38 @@ func (m *Model) printInspection(heading, body string) tea.Cmd {
 	if !m.options.NoColor {
 		heading = lipgloss.NewStyle().Bold(true).Foreground(paletteFor(m.theme).session).Render(heading)
 	}
-	lines := strings.Split(strings.TrimSpace(sanitizeInspectionText(body)), "\n")
-	for index := range lines {
-		if lines[index] != "" {
-			lines[index] = "  " + lines[index]
+	lines := wrapInspectionLines(sanitizeInspectionText(body), max(1, m.width))
+
+	return m.printScrollback(heading + "\n" + strings.Join(lines, "\n"))
+}
+
+// wrapInspectionLines wraps long inspection rows with a hanging indent so a
+// sentence breaks at a word boundary rather than mid-word.
+func wrapInspectionLines(body string, width int) []string {
+	indent := "  "
+	available := max(1, width-len(indent))
+	lines := make([]string, 0, 8)
+
+	for line := range strings.SplitSeq(strings.TrimSpace(body), "\n") {
+		line = strings.TrimRight(line, " ")
+		if line == "" || ansi.StringWidth(line) <= available {
+			lines = append(lines, indent+line)
+
+			continue
+		}
+
+		leading := line[:len(line)-len(strings.TrimLeft(line, " "))]
+		wrapped := ansi.Wrap(
+			strings.TrimLeft(line, " "),
+			max(1, available-ansi.StringWidth(leading)),
+			"",
+		)
+		for part := range strings.SplitSeq(wrapped, "\n") {
+			lines = append(lines, indent+leading+part)
 		}
 	}
 
-	return m.printScrollback(heading + "\n" + strings.Join(lines, "\n"))
+	return lines
 }
 
 func sanitizeInspectionText(value string) string {
@@ -96,43 +123,55 @@ func (m *Model) statusContent() string {
 	modeState := m.controller.Mode()
 	configState := m.controller.Config()
 	permissions := m.permissionState()
-	content := fmt.Sprintf(
-		"Status\n\nWorkspace: %s\nSession: %s\nModel: %s\n"+
-			"Variant: %s\nReasoning: %s\nProtocol: %s\nEndpoint: %s (%s)\n"+
-			"Context: %s\nRequest output: %s\n"+
-			"Compaction: %t (reserve %d · keep %d · summary max %d)\n"+
-			"Model override: %t\nMode: %s\nConfigured mode: %s\nMode override: %t\n"+
-			"Phase: %s\nSandbox: %s\nApproval: %s\nNetwork: %s\n"+
-			"Tool search: %t\nPending approval: %s\nDetached: %t",
-		m.options.Workspace,
-		m.state.SessionID,
-		modelState.Resolved.Ref,
-		valueOrDefault(modelState.Resolved.Variant),
-		reasoningOrDefault(modelState.Resolved.ReasoningLevel),
-		modelState.Resolved.Protocol,
-		modelState.Resolved.Endpoint.BaseURL,
-		modelState.Resolved.Endpoint.Origin,
-		knownLimit(modelState.Resolved.Limits.ContextWindow),
-		optionalInt(modelState.Resolved.Options.MaxOutputTokens),
-		configState.Compaction.Enabled,
-		configState.Compaction.ReserveTokens,
-		configState.Compaction.KeepRecentTokens,
-		configState.Compaction.SummaryMaxTokens,
-		modelState.Overridden,
-		modeState.Current,
-		modeState.Configured,
-		modeState.Overridden,
-		m.state.Phase,
-		permissionModeText(permissions.SandboxProfile.Filesystem.Effective),
-		permissionApprovalText(permissions.ApprovalPolicy.Effective),
-		permissionStatusNetworkText(
+	// Rows with nothing to report are omitted, and yes/no flags read as words,
+	// so the report stays scannable instead of listing empty fields.
+	lines := []string{
+		"Status",
+		"",
+		"Workspace: " + m.options.Workspace,
+		"Session: " + m.state.SessionID,
+		"Model: " + modelState.Resolved.Ref.String(),
+		"Variant: " + valueOrDefault(modelState.Resolved.Variant),
+		"Reasoning: " + reasoningOrDefault(modelState.Resolved.ReasoningLevel),
+		"Mode: " + string(modeState.Current) + modeStatusSuffix(modeState),
+		"Phase: " + phaseText(m.state.Phase),
+	}
+	lines = append(lines, optionalStatusLine(
+		"Protocol", strings.TrimSpace(string(modelState.Resolved.Protocol)),
+	))
+	lines = append(lines, optionalStatusLine("Endpoint", resolvedEndpointText(modelState.Resolved.Endpoint)))
+	lines = append(lines,
+		"Context: "+knownLimit(modelState.Resolved.Limits.ContextWindow),
+		"Request output: "+optionalInt(modelState.Resolved.Options.MaxOutputTokens),
+		"Compaction: "+compactionStatusText(configState.Compaction),
+		"Sandbox: "+permissionModeText(permissions.SandboxProfile.Filesystem.Effective),
+		"Approval: "+permissionApprovalText(permissions.ApprovalPolicy.Effective),
+		"Network: "+permissionStatusNetworkText(
 			permissions.SandboxProfile.Network.Effective,
 			permissions.SandboxProfile.NetworkEnforced,
 		),
-		configState.ToolSearch,
-		m.state.Approval.Kind,
-		m.controller.Detached(),
 	)
+	if modelState.Overridden || modeState.Overridden {
+		overrides := make([]string, 0, 2)
+		if modelState.Overridden {
+			overrides = append(overrides, "model")
+		}
+		if modeState.Overridden {
+			overrides = append(overrides, "mode")
+		}
+		lines = append(lines, "Overrides: "+strings.Join(overrides, ", "))
+	}
+	if !configState.ToolSearch {
+		lines = append(lines, "Tool search: off")
+	}
+	if kind := strings.TrimSpace(string(m.state.Approval.Kind)); kind != "" {
+		lines = append(lines, "Pending approval: "+humanizeStatusCode(kind))
+	}
+	if m.controller.Detached() {
+		lines = append(lines, "Detached: the runtime is no longer attached to this session")
+	}
+
+	content := strings.Join(lines, "\n")
 	if m.worktreeSummary != "" {
 		content += "\nRepository: " + m.worktreeSummary
 	}
@@ -140,17 +179,75 @@ func (m *Model) statusContent() string {
 		return content
 	}
 
-	lines := make([]string, 0, len(m.state.Diagnostics))
+	diagnostics := make([]string, 0, len(m.state.Diagnostics))
 	for _, diagnostic := range m.state.Diagnostics {
-		lines = append(lines, fmt.Sprintf(
-			"- %s/%s: %s",
-			diagnostic.Component,
-			diagnostic.Code,
-			diagnostic.Message,
-		))
+		line := "- " + diagnosticTitle(diagnostic)
+		if message := diagnosticBody(diagnostic); message != "" {
+			line += ": " + message
+		}
+		diagnostics = append(diagnostics, line)
 	}
 
-	return content + "\n\nIntegrations:\n" + strings.Join(lines, "\n")
+	return content + "\n\nIntegrations:\n" + strings.Join(diagnostics, "\n")
+}
+
+// modeStatusSuffix reports a mode that differs from the configured default
+// without exposing where either value came from.
+func modeStatusSuffix(state runtimecontrol.ModeState) string {
+	if !state.Overridden {
+		return ""
+	}
+
+	return " (session override)"
+}
+
+// optionalStatusLine drops a row whose value is unknown rather than printing an
+// empty field.
+func optionalStatusLine(label, value string) string {
+	if value == "" {
+		return label + ": unknown"
+	}
+
+	return label + ": " + value
+}
+
+func resolvedEndpointText(endpoint modelcatalog.Endpoint) string {
+	base := strings.TrimSpace(endpoint.BaseURL)
+	origin := strings.TrimSpace(endpoint.Origin)
+	switch {
+	case base == "" && origin == "":
+		return ""
+	case origin == "" || origin == base:
+		return base
+	case base == "":
+		return origin
+	default:
+		return base + " (" + origin + ")"
+	}
+}
+
+func compactionStatusText(config config.CompactionConfig) string {
+	if !config.Enabled {
+		return "off"
+	}
+
+	return fmt.Sprintf(
+		"on (reserve %d · keep %d · summary max %d)",
+		config.ReserveTokens, config.KeepRecentTokens, config.SummaryMaxTokens,
+	)
+}
+
+func phaseText(phase coding.Phase) string {
+	switch phase {
+	case coding.PhaseIdle:
+		return "idle"
+	case coding.PhaseRunning:
+		return "running"
+	case coding.PhasePaused:
+		return "paused"
+	default:
+		return humanizeStatusCode(string(phase))
+	}
 }
 
 func compactWorktreeSummary(status changes.WorktreeStatus) string {

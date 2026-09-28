@@ -289,7 +289,8 @@ func TestTimelineSummarizesChangesAndDiagnostics(t *testing.T) {
 	assert.Contains(t, rendered, "Workspace changes · 1 file (+3 -1) · partial report")
 	assert.Contains(t, rendered, "M  main.go")
 	assert.Contains(t, rendered, "/status for repository summary")
-	assert.Contains(t, rendered, "mcp · disabled")
+	assert.Contains(t, rendered, "MCP · disabled")
+	assert.Contains(t, rendered, "server unavailable")
 	assert.NotContains(t, rendered, "diff --git")
 }
 
@@ -655,7 +656,11 @@ func completionOutcomeSuffix(
 	case coding.InteractionFailed:
 		return " · failed"
 	case coding.InteractionIncomplete:
-		return " · incomplete (" + string(stop) + ")"
+		if phrase := stopReasonPhrase(stop); phrase != "" {
+			return " · " + phrase
+		}
+
+		return " · incomplete"
 	default:
 		return ""
 	}
@@ -675,7 +680,11 @@ func TestTimelineFailureKeepsErrorAndCancellationSuppressesIt(t *testing.T) {
 	require.Len(t, failedBlocks, 2)
 	assert.Equal(t, blockError, failedBlocks[0].kind)
 	assert.Equal(t, "▣ openai/test-model · 12s · failed", failedBlocks[1].body)
-	assert.Equal(t, "▌ provider unavailable (provider_failed)", renderTimeline(failedBlocks[:1], newMarkdownRenderer(8), 80, themeDark, true))
+	assert.Equal(
+		t,
+		"▌ provider unavailable",
+		renderTimeline(failedBlocks[:1], newMarkdownRenderer(8), 80, themeDark, true),
+	)
 
 	canceled := failed
 	canceled.Interaction.Outcome = coding.InteractionCanceled

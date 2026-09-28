@@ -15,10 +15,12 @@ import (
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/rsbin1178/pips/agent/harness"
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding"
 	"github.com/rsbin1178/pips/internal/coding/planmode"
 	"github.com/rsbin1178/pips/internal/coding/subagent"
+	"github.com/rsbin1178/pips/internal/coding/tasklist"
 	codingtools "github.com/rsbin1178/pips/internal/coding/tools"
 )
 
@@ -26,6 +28,8 @@ const (
 	compactToolPreviewLines = 4
 	compactExploreRows      = 6
 	maximumExpandedToolRows = 256
+	// compactToolPreviewWidth bounds a one-line JSON summary in compact rows.
+	compactToolPreviewWidth = 120
 	maximumToolDetailBytes  = 16 << 10
 	toolNameRead            = "read"
 	toolNameList            = "ls"
@@ -45,6 +49,7 @@ const (
 	toolClassPatch
 	toolClassPlan
 	toolClassSubagent
+	toolClassTaskList
 )
 
 type toolActivityState uint8
@@ -244,6 +249,9 @@ func describeToolActivity(record toolActivityRecord) toolActivity {
 	}
 	activity.class, activity.action, activity.subject = describeToolCall(record.call)
 	activity.invocation = compactToolInvocation(record.call)
+	if activity.name == harness.SkillToolName {
+		activity.invocation = strings.TrimSpace(activity.action + " " + activity.subject)
+	}
 	activity.state = classifyToolActivity(record)
 
 	if record.hasResult {
@@ -312,11 +320,16 @@ func describeToolCall(call coding.ToolCall) (toolActivityClass, string, string) 
 			toolArgumentString(arguments, "path"),
 		)
 	case toolNameShell:
+		// Show the script rather than the `<shell> -c` wrapper the caller used.
 		return toolClassShell, "Run", safeToolSubject(
-			toolArgumentString(arguments, "command"),
+			shellCommandScript(toolArgumentString(arguments, "command")),
 		)
 	case toolNamePatch:
 		return toolClassPatch, "Update", workspaceLabel
+	case tasklist.ToolName:
+		return toolClassTaskList, "", ""
+	case harness.SkillToolName:
+		return toolClassGeneric, "Loaded skill", toolArgumentString(arguments, "name")
 	case planmode.EnterToolName:
 		return toolClassPlan, "Enter plan mode", ""
 	case planmode.ExitToolName:
@@ -401,12 +414,14 @@ func compactToolInvocation(call coding.ToolCall) string {
 		return name
 	}
 
-	data, err := json.Marshal(fields)
-	if err != nil {
+	var buffer strings.Builder
+	encoder := json.NewEncoder(&buffer)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(fields); err != nil {
 		return name
 	}
 
-	return name + "(" + string(data) + ")"
+	return name + "(" + strings.TrimRight(buffer.String(), "\n") + ")"
 }
 
 func safeCompactURL(value string) string {
@@ -431,33 +446,66 @@ func compactToolPreview(activity toolActivity) []string {
 	case toolClassExplore:
 		return nil
 	case toolClassShell:
-		if !activity.hasHeader {
-			return nil
-		}
-		if activity.state == toolStateFailed {
-			return boundedFailureToolLines(activity.body, compactToolPreviewLines)
-		}
-
-		return boundedToolLines(activity.body, compactToolPreviewLines)
+		return compactShellPreview(activity)
 	case toolClassPatch:
-		if !activity.hasHeader {
-			return nil
-		}
-		if preview, ok := compactPatchDiffPreview(activity); ok {
-			return preview
-		}
-
-		return patchResultLines(activity.body, compactToolPreviewLines)
+		return compactPatchPreview(activity)
+	case toolClassTaskList:
+		return taskListPreviewRows(activity, compactToolPreviewLines)
 	case toolClassGeneric, toolClassSubagent:
-		lines := boundedToolLines(activity.body, 2)
-		if len(lines) > 0 {
-			return lines
-		}
-
-		return boundedToolLines(activity.update, 1)
+		return compactGenericPreview(activity)
+	case toolClassPlan:
+		return nil
 	default:
 		return nil
 	}
+}
+
+func compactShellPreview(activity toolActivity) []string {
+	if !activity.hasHeader {
+		return nil
+	}
+	if activity.state == toolStateFailed {
+		return boundedFailureToolLines(activity.body, compactToolPreviewLines)
+	}
+
+	return boundedToolLines(activity.body, compactToolPreviewLines)
+}
+
+func compactPatchPreview(activity toolActivity) []string {
+	if !activity.hasHeader {
+		return nil
+	}
+	if preview, ok := compactPatchDiffPreview(activity); ok {
+		return preview
+	}
+
+	return patchResultLines(activity.body, compactToolPreviewLines)
+}
+
+func compactGenericPreview(activity toolActivity) []string {
+	if summary := compactJSONSummary(activity.body); summary != "" {
+		return []string{summary}
+	}
+	if lines := boundedToolLines(activity.body, 2); len(lines) > 0 {
+		return lines
+	}
+
+	return boundedToolLines(activity.update, 1)
+}
+
+// compactJSONSummary renders a JSON result as one human line instead of a raw
+// JSON blob, so a compact card stays readable without opening the detail route.
+func compactJSONSummary(body string) string {
+	body = sanitizeToolText(body)
+	if body == "" || (body[0] != '{' && body[0] != '[') {
+		return ""
+	}
+	value, ok := decodeJSONTree([]byte(body))
+	if !ok {
+		return ""
+	}
+
+	return truncateText(jsonSummaryLine(value), compactToolPreviewWidth)
 }
 
 func safeToolSubject(value string) string {
@@ -604,6 +652,108 @@ func oneLineToolText(value string) string {
 	return strings.Join(strings.Fields(sanitizeToolText(value)), " ")
 }
 
+// isShellCommandFlag reports the flags that introduce an inline shell script.
+func isShellCommandFlag(flag string) bool {
+	switch flag {
+	case "-c", "-lc", "-cl":
+		return true
+	default:
+		return false
+	}
+}
+
+// shellCommandScript unwraps a `<shell> -c <script>` invocation so both the
+// compact heading and the detail Command block read the script itself. The
+// script keeps its own whitespace, and the heading flattens it for one line.
+func shellCommandScript(command string) string {
+	executable, rest, found := splitLeadingToken(command)
+	if !found || !isShellExecutable(executable) {
+		return command
+	}
+
+	flag, script, found := splitLeadingToken(rest)
+	if !found || !isShellCommandFlag(flag) || strings.TrimSpace(script) == "" {
+		return command
+	}
+
+	return script
+}
+
+func isShellExecutable(value string) bool {
+	name := value
+	if index := strings.LastIndexByte(name, '/'); index >= 0 {
+		name = name[index+1:]
+	}
+
+	switch name {
+	case "sh", "bash", "zsh", "dash", "ksh", "fish":
+		return true
+	default:
+		return false
+	}
+}
+
+// taskListActivityLabel names the update_plan Tool the way the user sees it.
+func taskListActivityLabel(state toolActivityState) string {
+	switch state {
+	case toolStateRunning:
+		return "Updating plan"
+	case toolStateFailed:
+		return "Plan update failed"
+	case toolStateInterrupted:
+		return "Plan update interrupted"
+	case toolStateSucceeded:
+		return "Updated plan"
+	default:
+		return "Update plan"
+	}
+}
+
+func taskListPreviewRows(activity toolActivity, maximum int) []string {
+	rows := taskListRows(activity, maximum)
+	if len(rows) == 0 {
+		return boundedToolLines(activity.body, 1)
+	}
+
+	if omitted := len(taskListRows(activity, 0)) - len(rows); omitted > 0 {
+		rows = append(rows, fmt.Sprintf("… %d more steps (ctrl+t for details)", omitted))
+	}
+
+	return rows
+}
+
+// taskListRows renders the decoded plan as a bounded checklist. Malformed
+// arguments stay generic instead of showing a partial list.
+func taskListRows(activity toolActivity, maximum int) []string {
+	update, err := tasklist.Decode(activity.arguments)
+	if err != nil {
+		return nil
+	}
+
+	rows := make([]string, 0, len(update.Plan))
+	for _, item := range update.Plan {
+		rows = append(rows, taskListGlyph(item.Status)+" "+oneLineToolText(item.Step))
+	}
+	if maximum > 0 && len(rows) > maximum {
+		rows = rows[:maximum]
+	}
+
+	return rows
+}
+
+func taskListGlyph(status tasklist.Status) string {
+	switch status {
+	case tasklist.StatusCompleted:
+		return "✔"
+	case tasklist.StatusInProgress:
+		return "◐"
+	case tasklist.StatusPending:
+		return "□"
+	default:
+		return "□"
+	}
+}
+
 func isSensitiveToolKey(key string) bool {
 	key = strings.ToLower(strings.ReplaceAll(key, "-", "_"))
 	if slices.Contains([]string{
@@ -715,7 +865,7 @@ func expandedToolActivityRows(
 			prefix: "  └ ", text: expandedToolCallLabel(activity), state: activity.state,
 		})
 		appendExpandedToolOutput(&rows, activity, "      └ ", "        ", width)
-	case toolClassPlan, toolClassSubagent:
+	case toolClassPlan, toolClassSubagent, toolClassTaskList:
 		activity := activities[0]
 		appendExpandedToolOutput(&rows, activity, "  └ ", "    ", width)
 	case toolClassShell, toolClassPatch:
@@ -796,6 +946,15 @@ func appendExpandedToolOutput(
 }
 
 func expandedToolOutput(activity toolActivity) string {
+	if activity.class == toolClassTaskList {
+		return strings.Join(taskListRows(activity, maximumExpandedToolRows), "\n")
+	}
+	if activity.class == toolClassPatch {
+		if changes := patchDetailChanges(activity); changes != "" {
+			return changes
+		}
+	}
+
 	parts := make([]string, 0, 2)
 	if facts := toolResultFacts(activity); facts != "" {
 		parts = append(parts, facts)
@@ -896,25 +1055,37 @@ func toolActivityRowColor(
 	exploreLimit int,
 	palette colorPalette,
 ) color.Color {
-	if class == toolClassPatch && len(activities) > 0 && index < len(activities[0].preview) {
-		row := strings.TrimLeft(activities[0].preview[index], " ")
-		switch {
-		case strings.HasPrefix(row, "A "), strings.HasPrefix(row, "+"):
-			return palette.idle
-		case strings.HasPrefix(row, "D "), strings.HasPrefix(row, "-"):
-			return palette.error
-		case strings.HasPrefix(row, "M "):
-			return palette.active
-		default:
-			return palette.muted
-		}
+	if class == toolClassPatch {
+		return patchRowColor(index, activities, palette)
 	}
 	if class != toolClassExplore || index >= len(activities) ||
 		(exploreLimit > 0 && len(activities) > exploreLimit && index == exploreLimit) {
 		return palette.muted
 	}
 
-	switch activities[index].state {
+	return toolStateColor(activities[index].state, palette)
+}
+
+func patchRowColor(index int, activities []toolActivity, palette colorPalette) color.Color {
+	if len(activities) == 0 || index >= len(activities[0].preview) {
+		return palette.muted
+	}
+
+	row := strings.TrimLeft(activities[0].preview[index], " ")
+	switch {
+	case strings.HasPrefix(row, "A "), strings.HasPrefix(row, "+"):
+		return palette.idle
+	case strings.HasPrefix(row, "D "), strings.HasPrefix(row, "-"):
+		return palette.error
+	case strings.HasPrefix(row, "M "):
+		return palette.active
+	default:
+		return palette.muted
+	}
+}
+
+func toolStateColor(state toolActivityState, palette colorPalette) color.Color {
+	switch state {
 	case toolStateRunning:
 		return palette.model
 	case toolStateFailed:
@@ -1018,6 +1189,18 @@ func toolActivityHeading(
 
 		return glyph, verb, ""
 	case toolClassGeneric:
+		if activity.name == harness.SkillToolName && activity.subject != "" {
+			label := activity.action + " " + activity.subject
+			switch state {
+			case toolStateRunning:
+				label = strings.Replace(label, "Loaded", "Loading", 1)
+			case toolStateFailed, toolStateInterrupted:
+				label += " · " + toolActivityReason(activity)
+			case toolStateSucceeded:
+			}
+
+			return glyph, label, ""
+		}
 		verb := "Called"
 		switch state {
 		case toolStateRunning:
@@ -1028,6 +1211,10 @@ func toolActivityHeading(
 			verb = "Call interrupted"
 		case toolStateSucceeded:
 		}
+
+		return glyph, verb, ""
+	case toolClassTaskList:
+		verb := taskListActivityLabel(state)
 
 		return glyph, verb, ""
 	case toolClassPlan:
@@ -1099,25 +1286,11 @@ func toolActivityRows(
 	activities []toolActivity,
 	exploreLimit int,
 ) []string {
-	switch class {
-	case toolClassExplore:
-		visible := len(activities)
-		if exploreLimit > 0 {
-			visible = min(visible, exploreLimit)
-		}
-		rows := make([]string, 0, visible)
-		for _, activity := range activities[:visible] {
-			row := strings.TrimSpace(activity.action + " " + activity.subject)
-			if activity.state == toolStateFailed || activity.state == toolStateInterrupted {
-				row += " · " + toolActivityReason(activity)
-			}
-			rows = append(rows, row)
-		}
-		if omitted := len(activities) - len(rows); omitted > 0 {
-			rows = append(rows, fmt.Sprintf("… %d more actions (ctrl+t for details)", omitted))
-		}
+	if class == toolClassExplore {
+		return exploreToolRows(activities, exploreLimit)
+	}
 
-		return rows
+	switch class {
 	case toolClassShell:
 		return activities[0].preview
 	case toolClassPatch:
@@ -1133,11 +1306,33 @@ func toolActivityRows(
 		return activities[0].preview
 	case toolClassGeneric:
 		return append([]string{activities[0].invocation}, activities[0].preview...)
-	case toolClassSubagent:
+	case toolClassSubagent, toolClassTaskList:
 		return activities[0].preview
+	case toolClassExplore, toolClassPlan:
+		return nil
 	default:
 		return nil
 	}
+}
+
+func exploreToolRows(activities []toolActivity, exploreLimit int) []string {
+	visible := len(activities)
+	if exploreLimit > 0 {
+		visible = min(visible, exploreLimit)
+	}
+	rows := make([]string, 0, visible)
+	for _, activity := range activities[:visible] {
+		row := strings.TrimSpace(activity.action + " " + activity.subject)
+		if activity.state == toolStateFailed || activity.state == toolStateInterrupted {
+			row += " · " + toolActivityReason(activity)
+		}
+		rows = append(rows, row)
+	}
+	if omitted := len(activities) - len(rows); omitted > 0 {
+		rows = append(rows, fmt.Sprintf("… %d more actions (ctrl+t for details)", omitted))
+	}
+
+	return rows
 }
 
 func toolActivityReason(activity toolActivity) string {
@@ -1188,60 +1383,6 @@ func toolActivityIDs(block timelineBlock) []string {
 	}
 
 	return ids
-}
-
-func redactToolArguments(arguments ai.JSON) string {
-	if len(arguments) == 0 {
-		return "{}"
-	}
-
-	var value any
-	if json.Unmarshal(arguments, &value) != nil {
-		return "[invalid arguments omitted]"
-	}
-	if _, ok := value.(map[string]any); !ok {
-		return "[non-object arguments omitted]"
-	}
-
-	redacted := redactToolValue(value)
-	data, err := json.MarshalIndent(redacted, "", "  ")
-	if err != nil {
-		return "{}"
-	}
-
-	return truncateText(string(data), maximumToolDetailBytes)
-}
-
-func redactToolValue(value any) any {
-	switch typed := value.(type) {
-	case map[string]any:
-		result := make(map[string]any, len(typed))
-		for key, child := range typed {
-			if isSensitiveToolKey(key) {
-				result[key] = "[redacted]"
-
-				continue
-			}
-			result[key] = redactToolValue(child)
-		}
-
-		return result
-	case []any:
-		result := make([]any, len(typed))
-		for index, child := range typed {
-			result[index] = redactToolValue(child)
-		}
-
-		return result
-	case string:
-		if containsSensitiveToolText(typed) {
-			return "[redacted]"
-		}
-
-		return typed
-	default:
-		return typed
-	}
 }
 
 func projectDurableSubagent(activity toolActivity) (coding.SubagentState, bool) {

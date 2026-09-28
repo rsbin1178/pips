@@ -52,10 +52,10 @@ func renderWorkspaceChangeBlock(
 
 	visible := min(len(entries), compactWorkspaceChangeRows)
 	for _, entry := range entries[:visible] {
-		line := ansi.Truncate(
-			"  "+workspaceChangeGlyph(entry.Kind)+"  "+workspaceChangePath(entry),
+		line := fitWorkspaceChangeLine(
+			"  "+workspaceChangeGlyph(entry.Kind)+"  ",
+			workspaceChangePath(entry),
 			width,
-			"…",
 		)
 		if !noColor {
 			line = lipgloss.NewStyle().
@@ -84,6 +84,49 @@ func renderWorkspaceChangeBlock(
 	}
 
 	return strings.Join(lines, "\n")
+}
+
+// fitWorkspaceChangeLine keeps the file name readable when the row does not
+// fit: the leading path segments are dropped before the basename is cut.
+func fitWorkspaceChangeLine(prefix, path string, width int) string {
+	line := prefix + path
+	if ansi.StringWidth(line) <= width {
+		return line
+	}
+
+	available := width - ansi.StringWidth(prefix)
+	shortened := shortenWorkspaceChangePath(path, available)
+
+	return ansi.Truncate(prefix+shortened, width, "…")
+}
+
+func shortenWorkspaceChangePath(path string, available int) string {
+	if available <= 0 {
+		return ""
+	}
+
+	if ansi.StringWidth(path) <= available {
+		return path
+	}
+
+	segments := strings.Split(path, "/")
+	if len(segments) < 2 {
+		return ansi.Truncate(path, available, "…")
+	}
+
+	// Walk outwards from the basename until the shortened path fits.
+	for start := len(segments) - 1; start > 0; start-- {
+		candidate := "…/" + strings.Join(segments[start:], "/")
+		if ansi.StringWidth(candidate) <= available {
+			return candidate
+		}
+	}
+
+	if basename := segments[len(segments)-1]; ansi.StringWidth(basename) <= available {
+		return basename
+	}
+
+	return ansi.Truncate(segments[len(segments)-1], available, "…")
 }
 
 func workspaceChangeSummary(value coding.WorkspaceChanged) string {
