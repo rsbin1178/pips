@@ -98,15 +98,22 @@ Pips 采用分层解耦架构，从终端交互、运行时编排、安全边界
 
 ## 快速上手
 
-要求 Go 1.26.5 或更高版本。
+从源码构建要求 Go 1.26.6 或更高版本。
 
 ### 1. 使用终端 Coding Agent
 
-安装命令行工具：
+从 [GitHub Releases](https://github.com/rsbin1178/pips/releases) 下载对应平台的二进制，
+或检出发布版本后安装：
 
 ```sh
-go install github.com/rsbin1178/pips/cmd/pips@latest
+git clone --branch v0.1.5 https://github.com/rsbin1178/pips.git
+cd pips
+go install ./cmd/pips
 ```
+
+当前版本通过 `go.mod` 固定使用修复后的 Bubble Tea fork。Go 不支持对包含这类
+`replace` 的目标模块执行 `go install ...@version`，请使用发布二进制或源码 checkout
+安装。应用托管 viewport 的 TUI 重构不包含在本次发布中。
 
 创建基础配置文件 `~/.pips/config.toml`：
 
