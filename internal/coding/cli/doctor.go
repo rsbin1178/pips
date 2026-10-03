@@ -61,6 +61,12 @@ func newDoctorCommand(dependencies Dependencies, flags *rootFlags) *cobra.Comman
 				return err
 			}
 
+			if _, err := fmt.Fprint(
+				cmd.OutOrStdout(), doctorProxyStatus(cmd.Context(), dependencies),
+			); err != nil {
+				return err
+			}
+
 			if line := capabilityDoctorLine(resolved.Capabilities); line != "" {
 				if _, err := fmt.Fprintln(cmd.OutOrStdout(), line); err != nil {
 					return err

@@ -30,7 +30,7 @@ func TestConfiguredHeadersAreAttachedOnlyToConfiguredOrigin(t *testing.T) {
 	client, err := definitionHTTPClient(base, "https://example.com/mcp", []HTTPHeader{
 		{Name: "X-Plugin", Value: "configured"},
 		{Name: "Content-Type", Value: "configured"},
-	})
+	}, nil)
 	require.NoError(t, err)
 
 	sameRequest, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "https://example.com/other", nil)

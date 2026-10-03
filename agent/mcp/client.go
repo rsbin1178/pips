@@ -92,7 +92,7 @@ func Connect(
 
 	sdkClient := mcp.NewClient(implementation, &sdkOptions)
 
-	session, err := sdkClient.Connect(ctx, transport, nil)
+	session, err := connectSession(ctx, sdkClient, transport)
 	if err != nil {
 		return nil, fmt.Errorf("agent/mcp: connect: %w", err)
 	}
@@ -101,6 +101,48 @@ func Connect(
 	client.tools = session
 
 	return client, nil
+}
+
+type connectResult struct {
+	session *mcp.ClientSession
+	err     error
+}
+
+// connectSession returns no later than ctx ends. After a failed handshake the
+// SDK closes its session synchronously, and that close waits for the
+// best-effort notifications/cancelled delivery to an unresponsive peer. The
+// wait finishes in the background instead, and a session that completes after
+// ctx ended is closed there.
+func connectSession(
+	ctx context.Context,
+	sdkClient *mcp.Client,
+	transport mcp.Transport,
+) (*mcp.ClientSession, error) {
+	done := make(chan connectResult, 1)
+	go func() {
+		session, err := sdkClient.Connect(ctx, transport, nil)
+		done <- connectResult{session: session, err: err}
+	}()
+
+	select {
+	case result := <-done:
+		return result.session, result.err
+	case <-ctx.Done():
+	}
+
+	select {
+	case result := <-done:
+		return result.session, result.err
+	default:
+	}
+
+	go func() {
+		if result := <-done; result.session != nil {
+			_ = result.session.Close()
+		}
+	}()
+
+	return nil, ctx.Err()
 }
 
 // Session returns the initialized official SDK session. The caller may use it
