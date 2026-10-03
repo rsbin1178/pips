@@ -25,7 +25,8 @@ type SessionMetadata struct {
 type Store interface {
 	// Metadata identifies the stored session.
 	Metadata() SessionMetadata
-	// Append persists one entry.
+	// Append persists one entry. ErrStoreAppendNotAttempted may be wrapped only
+	// when no bytes were written; write/flush/sync errors must not use it.
 	Append(e Entry) error
 	// Entries returns all entries in append order.
 	Entries() ([]Entry, error)

@@ -118,54 +118,104 @@ func partsChars(parts []ai.Part) int {
 	return chars
 }
 
-// EstimateContext estimates the context size of a branch: the last recorded
-// assistant usage (provider-reported input plus output) plus the
-// heuristically estimated messages after it.
-func EstimateContext(path []Entry) int {
-	contextPath := contextEntries(path)
-	contextIDs := make(map[string]struct{}, len(contextPath))
-	for _, entry := range contextPath {
-		contextIDs[entry.ID] = struct{}{}
-	}
-	lastUsage := -1
-
-	for i, e := range path {
-		if e.Kind == KindMessage && e.Usage != nil {
-			if _, visible := contextIDs[e.ID]; !visible {
-				continue
-			}
-			lastUsage = i
-		}
-	}
-
-	tokens := 0
-	if lastUsage >= 0 {
-		tokens = path[lastUsage].Usage.InputTokens + path[lastUsage].Usage.OutputTokens
-	}
-
-	for _, e := range contextPath {
-		if lastUsage >= 0 && !entryAfter(path, e.ID, lastUsage) {
-			continue
-		}
-
-		for _, msg := range entryContextMessages(e) {
-			tokens += EstimateTokens(msg)
-		}
-	}
-
-	return tokens
+// ContextEstimate describes the current model-visible conversation gauge.
+// Tokens is not cumulative billing usage. ProviderBaseline means the estimate
+// includes provider-counted prompt/tool overhead; callers must not add it again.
+// Without a baseline, FixedTokens reports the persisted overhead already in
+// Tokens. Callers with fresh policy data replace it, rather than adding twice:
+// Tokens - FixedTokens + currentOverhead. Model or prompt-policy changes not
+// recorded in path must invalidate a baseline at the application boundary.
+type ContextEstimate struct {
+	Tokens           int
+	ProviderBaseline bool
+	// FixedTokens is the checkpoint-estimated overhead included in Tokens.
+	// With a provider baseline it is zero: that baseline already covers overhead.
+	FixedTokens int
+	// BoundaryID identifies the latest context replacement or model change.
+	BoundaryID string
+	// UsageEntryID identifies the ordinary assistant response used as baseline.
+	UsageEntryID string
 }
 
-// entryAfter reports whether the entry with the given ID sits after index
-// in the path.
-func entryAfter(path []Entry, id string, index int) bool {
-	for _, e := range path[index+1:] {
-		if e.ID == id {
-			return true
+// EstimateContext estimates current context size, preserving the original API.
+// See [EstimateContextUsage] when the caller also supplies prompt/tool overhead.
+func EstimateContext(path []Entry) int {
+	return EstimateContextUsage(path).Tokens
+}
+
+// EstimateContextUsage uses the latest usable assistant usage after the last
+// replacement/model boundary, plus visible messages committed after that usage.
+// Pre-compaction usage is invalid even when its assistant message was retained.
+// Cache/reasoning counts are subsets of input/output, never additional tokens.
+func EstimateContextUsage(path []Entry) ContextEstimate {
+	var estimate ContextEstimate
+	lastUsage := -1
+	fixedTokens := 0
+	positions := make(map[string]int, len(path))
+	for index, entry := range path {
+		positions[entry.ID] = index
+		switch entry.Kind {
+		case KindCompaction, KindContextCheckpoint, KindModelChange:
+			lastUsage = -1
+			estimate.BoundaryID = entry.ID
+			fixedTokens = contextFixedTokens(entry, fixedTokens)
+		case KindMessage:
+			if hasContextUsage(entry) {
+				lastUsage = index
+			}
+		default:
+		}
+	}
+	if lastUsage >= 0 {
+		usage := path[lastUsage].Usage
+		estimate.Tokens = addContextTokens(usage.InputTokens, usage.OutputTokens)
+		estimate.ProviderBaseline = true
+		estimate.UsageEntryID = path[lastUsage].ID
+	} else {
+		estimate.Tokens = fixedTokens
+		estimate.FixedTokens = fixedTokens
+	}
+	for _, entry := range contextEntries(path) {
+		if lastUsage >= 0 && positions[entry.ID] <= lastUsage {
+			continue
+		}
+		for _, message := range entryContextMessages(entry) {
+			estimate.Tokens = addContextTokens(estimate.Tokens, EstimateTokens(message))
 		}
 	}
 
-	return false
+	return estimate
+}
+
+func addContextTokens(a, b int) int {
+	maximum := int(^uint(0) >> 1)
+	a, b = max(0, a), max(0, b)
+	if b > maximum-a {
+		return maximum
+	}
+	return a + b
+}
+
+func contextFixedTokens(entry Entry, previous int) int {
+	switch entry.Kind {
+	case KindContextCheckpoint:
+		if entry.Checkpoint != nil {
+			return entry.Checkpoint.FixedTokens
+		}
+	case KindModelChange:
+		return 0
+	default:
+	}
+
+	return previous
+}
+
+func hasContextUsage(entry Entry) bool {
+	_, assistant := entry.Message.(ai.AssistantMessage)
+
+	// Output-only usage cannot anchor the input context: providers may report
+	// output while omitting input accounting altogether.
+	return assistant && entry.Usage != nil && validUsage(*entry.Usage) && entry.Usage.InputTokens > 0
 }
 
 // entryContextMessages renders an entry's model-visible messages.
@@ -175,6 +225,12 @@ func entryContextMessages(e Entry) ai.Messages {
 		return ai.Messages{e.Message}
 	case KindCompaction:
 		return ai.Messages{ai.UserText(CompactionPrefix + e.Summary)}
+	case KindContextCheckpoint:
+		if e.Checkpoint != nil {
+			return e.Checkpoint.Messages
+		}
+
+		return nil
 	case KindBranchSummary:
 		return ai.Messages{ai.UserText(BranchSummaryPrefix + e.Summary)}
 	default:
@@ -208,7 +264,7 @@ type CompactionPlan struct {
 func PlanCompaction(path []Entry, settings CompactionSettings) *CompactionPlan {
 	settings = settings.withDefaults()
 
-	if len(path) == 0 || path[len(path)-1].Kind == KindCompaction {
+	if len(path) == 0 || path[len(path)-1].Kind == KindCompaction || path[len(path)-1].Kind == KindContextCheckpoint {
 		return nil
 	}
 
@@ -252,6 +308,9 @@ func PlanCompaction(path []Entry, settings CompactionSettings) *CompactionPlan {
 // previous compaction's retained boundary, carrying its summary forward.
 func compactionBoundary(path []Entry) (start int, previous string) {
 	for i, entry := range slices.Backward(path) {
+		if entry.Kind == KindContextCheckpoint {
+			return i, ""
+		}
 		if entry.Kind != KindCompaction {
 			continue
 		}
@@ -512,7 +571,12 @@ func summarizeMessages(ctx context.Context, model ai.LanguageModel, msgs ai.Mess
 		return "", fmt.Errorf("harness: summarization: %w", err)
 	}
 
-	return resp.Text(), nil
+	if resp == nil {
+		return "", ErrInvalidCompactionSummary
+	}
+	// Legacy callers retain their short-summary contract, but neither an empty
+	// history summary nor an empty split prefix may be hidden by a wrapper.
+	return ValidateCompactionSummary(resp.Text(), 1)
 }
 
 // serializeConversation renders messages as plain text for summarization

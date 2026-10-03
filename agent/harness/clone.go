@@ -31,6 +31,10 @@ func cloneEntry(value Entry) Entry {
 		usage := *value.Usage
 		value.Usage = &usage
 	}
+	if value.Checkpoint != nil {
+		checkpoint := cloneCheckpoint(*value.Checkpoint)
+		value.Checkpoint = &checkpoint
+	}
 	value.Data = slices.Clone(value.Data)
 
 	return value

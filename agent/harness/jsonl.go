@@ -194,9 +194,12 @@ func (s *JSONLStore) Append(e Entry) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if len(s.entries) >= maxSessionEntries {
+		return fmt.Errorf("%w: session exceeds %d entries", ErrStoreAppendNotAttempted, maxSessionEntries)
+	}
 	envelope, err := toEnvelope(e)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: %w", ErrStoreAppendNotAttempted, err)
 	}
 
 	if err := s.writeLine(envelope); err != nil {
@@ -232,12 +235,23 @@ func (s *JSONLStore) Close() error {
 
 func (s *JSONLStore) writeLine(v any) error {
 	if err := s.ensurePathIdentityLocked(); err != nil {
-		return err
+		return fmt.Errorf("%w: %w", ErrStoreAppendNotAttempted, err)
 	}
 
 	blob, err := json.Marshal(v)
 	if err != nil {
-		return fmt.Errorf("harness: encode session line: %w", err)
+		return fmt.Errorf("%w: encode session line: %w", ErrStoreAppendNotAttempted, err)
+	}
+
+	if len(blob)+1 > maxSessionLineSize {
+		return fmt.Errorf("%w: session line exceeds %d bytes", ErrStoreAppendNotAttempted, maxSessionLineSize)
+	}
+	info, err := s.file.Stat()
+	if err != nil {
+		return fmt.Errorf("%w: inspect session size: %w", ErrStoreAppendNotAttempted, err)
+	}
+	if info.Size()+int64(len(blob))+1 > maxSessionFileSize {
+		return fmt.Errorf("%w: session exceeds %d bytes", ErrStoreAppendNotAttempted, maxSessionFileSize)
 	}
 
 	w := bufio.NewWriter(s.file)
@@ -284,6 +298,11 @@ func decodeStrictLine(data []byte, target any) error {
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
 		return err
+	}
+	if entry, ok := target.(*entryJSON); ok && entry.Kind == KindContextCheckpoint {
+		if _, err := readUniqueCheckpointJSON(json.NewDecoder(bytes.NewReader(data)), 0); err != nil {
+			return err
+		}
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		if err == nil {
@@ -599,9 +618,24 @@ func (r Repo) Fork(sourceID, atEntryID, newID string) (*JSONLStore, error) {
 	return r.ForkSession(sess, atEntryID, newID, nil)
 }
 
+// ForkOptions supplies application-owned resources that generic Harness cannot
+// copy. It does not broaden archive authorization or grant filesystem access.
+type ForkOptions struct {
+	// PrepareArchives publishes and syncs each referenced archive for newID.
+	// IDs are unique and ordered by first occurrence on the selected path.
+	// The callback runs after the temporary transcript is synced but before
+	// its exclusive publication. On error the transcript is not published.
+	// The caller must specify newID and bind the callback to that destination.
+	// A failed or uncertain fork must not delete potentially referenced objects.
+	PrepareArchives func(archiveIDs []string) error
+}
+
 // ForkSession failure-atomically copies a validated source path into a new
 // stored Session. extra overlays source header metadata; nil preserves it.
 // The source Session remains unchanged and may stay open under its writer lock.
+// A path containing checkpoints requires one ForkOptions archive publisher;
+// without it the operation returns ErrForkArchivesRequired before publication.
+// At most one options value is accepted.
 //
 //nolint:gocyclo // Failure-atomic resource acquisition and cleanup remain in commit order.
 func (r Repo) ForkSession(
@@ -609,9 +643,13 @@ func (r Repo) ForkSession(
 	atEntryID string,
 	newID string,
 	extra map[string]string,
+	options ...ForkOptions,
 ) (*JSONLStore, error) {
 	if source == nil {
 		return nil, errors.New("harness: fork nil session")
+	}
+	if len(options) > 1 {
+		return nil, errors.New("harness: fork accepts at most one options value")
 	}
 
 	if atEntryID == "" {
@@ -623,6 +661,13 @@ func (r Repo) ForkSession(
 		return nil, err
 	}
 	path = normalizeForkPath(path)
+	if err := validateEntries(path); err != nil {
+		return nil, err
+	}
+	prepareArchives, err := forkArchivePreparation(path, newID, options)
+	if err != nil {
+		return nil, err
+	}
 
 	if newID == "" {
 		newID = newIDValue()
@@ -672,6 +717,11 @@ func (r Repo) ForkSession(
 	}
 	if err := forked.Close(); err != nil {
 		return nil, err
+	}
+	if prepareArchives != nil {
+		if err := prepareArchives(); err != nil {
+			return nil, fmt.Errorf("harness: prepare fork archives: %w", err)
+		}
 	}
 	if err := os.Link(tempPath, targetPath); err != nil {
 		return nil, fmt.Errorf("harness: commit fork: %w", err)
