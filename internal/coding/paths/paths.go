@@ -232,6 +232,9 @@ func (l Layout) ConfigFile() string { return l.configFile }
 // WorkspacesFile returns the workspace state store path.
 func (l Layout) WorkspacesFile() string { return l.workspacesFile }
 
+// GoalsDir returns session-bound Goal control sidecars, separate from transcripts.
+func (l Layout) GoalsDir() string { return filepath.Join(l.root, "goals") }
+
 // SessionsDir returns the Harness session repository path.
 func (l Layout) SessionsDir() string { return l.sessionsDir }
 

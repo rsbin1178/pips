@@ -61,7 +61,8 @@ func (r *Runtime) hasParkedDecision() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	return r.state.Question.Required != nil || r.state.PlanReview.Required != nil
+	return r.state.Question.Required != nil || r.state.PlanReview.Required != nil ||
+		(r.state.Goal.Active() && r.state.Approval.Kind != ApprovalNone)
 }
 
 // retireParkedInteraction releases the runtime-owned resources of an
@@ -94,6 +95,13 @@ func (r *Runtime) retireParkedInteraction(ctx context.Context, current *interact
 func (r *Runtime) runCloseCleanup(ctx context.Context) {
 	for {
 		r.mu.Lock()
+		if driver := r.goalDriver; driver != nil {
+			driver.cancel()
+			done := driver.done
+			r.mu.Unlock()
+			<-done
+			continue
+		}
 		active := r.active
 		if active == nil {
 			current := r.interaction

@@ -71,6 +71,13 @@ func (p *plainPresenter) Event(event coding.Event) error {
 		err = writeFormatted(p.stderr, "approval required: %s\n", payload.Tool)
 	case coding.ApprovalUnknown:
 		err = writeFormatted(p.stderr, "approval outcome unknown: %s\n", payload.Tool)
+	case coding.GoalChanged:
+		if payload.State.ID == "" {
+			err = writeString(p.stderr, "goal cleared\n")
+		} else {
+			err = writeFormatted(p.stderr, "goal %s: %d work segment(s), %d evaluation(s), %d token(s)\n",
+				payload.State.Status, payload.State.Attempts, payload.State.Evaluations, payload.State.Tokens)
+		}
 	case coding.RuntimeError:
 		err = writeFormatted(p.stderr, "runtime error: %s\n", payload.Code)
 	}

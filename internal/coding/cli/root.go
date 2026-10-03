@@ -70,6 +70,7 @@ type Dependencies struct {
 	LookupEnv    credential.LookupEnv
 	WorkingDir   func() (string, error)
 	SandboxProbe SandboxProbe
+	SystemProxy  SystemProxyProbe
 	Terminal     TerminalDetector
 	RunTUI       TUIRunner
 	RunSSH       SSHRunner
@@ -184,6 +185,10 @@ func defaultProcessDependencies(dependencies Dependencies) Dependencies {
 
 	if dependencies.SandboxProbe == nil {
 		dependencies.SandboxProbe = nativeSandboxProbe(dependencies)
+	}
+
+	if dependencies.SystemProxy == nil {
+		dependencies.SystemProxy = nativeSystemProxy
 	}
 
 	if dependencies.Terminal == nil {

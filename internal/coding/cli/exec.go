@@ -30,6 +30,8 @@ type execFlags struct {
 	output         string
 	session        string
 	trustWorkspace bool
+	goal           bool
+	goalBudget     int
 }
 
 func newExecCommand(
@@ -55,6 +57,19 @@ func newExecCommand(
 			prompt, err := readPrompt(cmd.Context(), cmd.InOrStdin(), args)
 			if err != nil {
 				return err
+			}
+
+			var goalRequest *coding.GoalRequest
+
+			if cmd.Flags().Changed("goal-budget") && (!flags.goal || flags.goalBudget <= 0) {
+				return fmt.Errorf("%w: --goal-budget requires --goal and a positive token count", ErrUsage)
+			}
+
+			if flags.goal {
+				goalRequest = &coding.GoalRequest{Condition: prompt, MaxTokens: flags.goalBudget}
+				if err := goalRequest.Validate(); err != nil {
+					return fmt.Errorf("%w: invalid goal: %w", ErrUsage, err)
+				}
 			}
 
 			resolved, err := resolveWorkspaceState(cmd.Context(), dependencies, root)
@@ -100,10 +115,12 @@ func newExecCommand(
 				flags.session != "",
 			)
 
-			return runExecRuntime(cmd.Context(), runtime, presenter, prompt)
+			return runExecRequest(cmd.Context(), runtime, presenter, prompt, goalRequest)
 		},
 	}
 
+	command.Flags().BoolVar(&flags.goal, "goal", false, "work toward the prompt until independently verified")
+	command.Flags().IntVar(&flags.goalBudget, "goal-budget", 0, "cumulative goal token budget (requires --goal)")
 	command.Flags().StringVar(&flags.output, "output", string(outputPlain), "output mode: plain or jsonl")
 	command.Flags().StringVar(&flags.session, "session", "", "resume a session by ID")
 	command.Flags().BoolVar(
@@ -121,6 +138,16 @@ func runExecRuntime(
 	runtime execRuntime,
 	presenter execPresenter,
 	prompt string,
+) error {
+	return runExecRequest(ctx, runtime, presenter, prompt, nil)
+}
+
+func runExecRequest(
+	ctx context.Context,
+	runtime execRuntime,
+	presenter execPresenter,
+	prompt string,
+	goal *coding.GoalRequest,
 ) (returnErr error) {
 	if runtime == nil || presenter == nil {
 		return errors.New("coding cli: incomplete exec runtime")
@@ -140,7 +167,7 @@ func runExecRuntime(
 		}
 	}()
 
-	finalState, baseline, returnErr = runExecOperation(ctx, runtime, presenter, prompt)
+	finalState, baseline, returnErr = runExecOperation(ctx, runtime, presenter, prompt, goal)
 	finalReady = returnErr == nil
 
 	return returnErr
@@ -151,6 +178,7 @@ func runExecOperation(
 	runtime execRuntime,
 	presenter execPresenter,
 	prompt string,
+	goal *coding.GoalRequest,
 ) (coding.State, int, error) {
 	state := runtime.Snapshot()
 	if err := presenter.Opened(state); err != nil {
@@ -162,15 +190,7 @@ func runExecOperation(
 		return coding.State{}, 0, err
 	}
 
-	if err := state.Approval.NonInteractiveError(); err != nil {
-		return coding.State{}, 0, err
-	}
-
-	if err := state.Question.NonInteractiveError(); err != nil {
-		return coding.State{}, 0, err
-	}
-
-	if err := state.PlanReview.NonInteractiveError(); err != nil {
+	if err := pendingExecError(state); err != nil {
 		return coding.State{}, 0, err
 	}
 
@@ -180,21 +200,32 @@ func runExecOperation(
 
 	baseline := len(state.Transcript)
 
-	if err := consumeEvents(runtime.Prompt(ctx, ai.UserText(prompt)), presenter); err != nil {
+	var events iter.Seq2[coding.Event, error]
+
+	if goal != nil {
+		starter, ok := runtime.(interface {
+			StartGoal(context.Context, coding.GoalRequest) iter.Seq2[coding.Event, error]
+		})
+		if !ok {
+			return coding.State{}, 0, errors.New("coding cli: runtime does not support goals")
+		}
+
+		events = starter.StartGoal(ctx, *goal)
+	} else {
+		events = runtime.Prompt(ctx, ai.UserText(prompt))
+	}
+
+	if err := consumeEvents(events, presenter); err != nil {
 		return coding.State{}, 0, err
 	}
 
 	finalState := runtime.Snapshot()
-	if err := finalState.Approval.NonInteractiveError(); err != nil {
+	if err := pendingExecError(finalState); err != nil {
 		return coding.State{}, 0, err
 	}
 
-	if err := finalState.Question.NonInteractiveError(); err != nil {
-		return coding.State{}, 0, err
-	}
-
-	if err := finalState.PlanReview.NonInteractiveError(); err != nil {
-		return coding.State{}, 0, err
+	if goal != nil && !finalState.Goal.Completed() {
+		return coding.State{}, 0, fmt.Errorf("coding cli: goal did not complete (status %q); inspect or resume it interactively", finalState.Goal.Status)
 	}
 
 	if err := validateSuccessfulInteraction(finalState); err != nil {
@@ -202,6 +233,18 @@ func runExecOperation(
 	}
 
 	return finalState, baseline, nil
+}
+
+func pendingExecError(state coding.State) error {
+	if err := state.Approval.NonInteractiveError(); err != nil {
+		return err
+	}
+
+	if err := state.Question.NonInteractiveError(); err != nil {
+		return err
+	}
+
+	return state.PlanReview.NonInteractiveError()
 }
 
 func settleOpenedRuntime(
