@@ -176,10 +176,15 @@ type fileSandboxWorkspaceWrite struct {
 }
 
 type fileCompaction struct {
-	Enabled          *bool `toml:"enabled"`
-	ReserveTokens    *int  `toml:"reserve_tokens"`
-	KeepRecentTokens *int  `toml:"keep_recent_tokens"`
-	SummaryMaxTokens *int  `toml:"summary_max_tokens"`
+	Enabled           *bool `toml:"enabled"`
+	ReserveTokens     *int  `toml:"reserve_tokens"`
+	KeepRecentTokens  *int  `toml:"keep_recent_tokens"`
+	SummaryMaxTokens  *int  `toml:"summary_max_tokens"`
+	ThresholdPercent  *int  `toml:"auto_threshold_percent"`
+	MinSummaryChars   *int  `toml:"min_summary_chars"`
+	AttemptsPerStage  *int  `toml:"attempts_per_stage"`
+	RetryDelaySeconds *int  `toml:"retry_delay_seconds"`
+	TimeoutSeconds    *int  `toml:"timeout_seconds"`
 }
 
 type fileSubagent struct {
@@ -567,6 +572,20 @@ func decodeLayer(value fileConfig) (fileLayer, error) {
 		}
 		if value.Compaction.SummaryMaxTokens != nil {
 			compaction.SummaryMaxTokens = *value.Compaction.SummaryMaxTokens
+		}
+		for _, field := range []struct {
+			source *int
+			target *int
+		}{
+			{value.Compaction.ThresholdPercent, &compaction.ThresholdPercent},
+			{value.Compaction.MinSummaryChars, &compaction.MinSummaryChars},
+			{value.Compaction.AttemptsPerStage, &compaction.AttemptsPerStage},
+			{value.Compaction.RetryDelaySeconds, &compaction.RetryDelaySeconds},
+			{value.Compaction.TimeoutSeconds, &compaction.TimeoutSeconds},
+		} {
+			if field.source != nil {
+				*field.target = *field.source
+			}
 		}
 		if err := validateCompaction(compaction); err != nil {
 			return fileLayer{}, err
