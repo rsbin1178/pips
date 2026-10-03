@@ -98,15 +98,23 @@ Pips enforces strict modular decoupling from interactive terminal frontends down
 
 ## Quick Start
 
-Requires Go 1.26.5 or later.
+Building from source requires Go 1.26.6 or later.
 
 ### 1. Using the Coding CLI
 
-Install the binary:
+Download a binary for your platform from [GitHub Releases](https://github.com/rsbin1178/pips/releases),
+or install from a release checkout:
 
 ```sh
-go install github.com/rsbin1178/pips/cmd/pips@latest
+git clone --branch v0.1.5 https://github.com/rsbin1178/pips.git
+cd pips
+go install ./cmd/pips
 ```
+
+This release pins a patched Bubble Tea fork through `go.mod`. Go does not support
+`go install ...@version` for a target module with this replacement; use a release
+binary or install from its source checkout instead. The viewport-based TUI
+redesign is not included in this release.
 
 Create a minimal configuration at `~/.pips/config.toml`:
 
