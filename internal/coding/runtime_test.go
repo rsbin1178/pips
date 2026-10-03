@@ -151,20 +151,20 @@ func TestRuntimeCompactsUnlimitedRunOnlyAfterContextThreshold(t *testing.T) {
 	t.Parallel()
 
 	toolResponse := runtimeToolResponse("call-read", "read", `{"path":"large.txt"}`)
-	toolResponse.Usage.InputTokens = 1_800
+	toolResponse.Usage.InputTokens = 90_000
 	model := newRuntimeModel(
 		toolResponse,
 		runtimeTextResponse("## Goal\nPreserve the earlier work."),
 		runtimeTextResponse("done after compaction"),
 	)
 	runtime := openTestRuntime(t, model)
-	appendRuntimeHistory(t, runtime, 425, 425, 425, 425)
+	appendRuntimeHistory(t, runtime, 1000, 1000, 1000, 1000)
 	require.NoError(t, os.WriteFile(
 		filepath.Join(runtime.workspace.Root(), "large.txt"),
 		[]byte("small file"),
 		0o600,
 	))
-	configureRuntimeCompaction(runtime, 2_000, 300, 2_100, 64)
+	configureRuntimeCompaction(runtime, 100_000, 16_000, 2_100, 64)
 
 	events := collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("read the file")))
 	types := eventTypes(events)
@@ -175,7 +175,7 @@ func TestRuntimeCompactsUnlimitedRunOnlyAfterContextThreshold(t *testing.T) {
 	assert.Equal(t, 1, countEventType(events, EventCompactionStarted))
 	assert.Equal(t, 1, countEventType(events, EventRunStarted))
 	assert.Equal(t, 1, countEventType(events, EventRunCompleted))
-	assert.Equal(t, 1, countHarnessKind(runtime.session.Path(), harness.KindCompaction))
+	assert.Equal(t, 1, countHarnessKind(runtime.session.Path(), harness.KindContextCheckpoint))
 	assert.Len(t, model.Requests(), 3)
 	assert.Equal(t, InteractionSucceeded, runtime.Snapshot().Interaction.Outcome)
 }
@@ -1424,12 +1424,12 @@ func TestRuntimeManualCompactionRejectsStalePreviewAndCommitsFreshPlan(t *testin
 
 	_, err = runtime.session.AppendMessage(ai.UserText("changed after preview"), nil)
 	require.NoError(t, err)
-	before := countHarnessKind(runtime.session.Path(), harness.KindCompaction)
+	before := countHarnessKind(runtime.session.Path(), harness.KindContextCheckpoint)
 	_, staleErr := collectRuntimeResult(runtime.Compact(t.Context(), CompactionRequest{
 		PreviewToken: preview.Token,
 	}))
 	require.ErrorIs(t, staleErr, ErrCompactionStale)
-	assert.Equal(t, before, countHarnessKind(runtime.session.Path(), harness.KindCompaction))
+	assert.Equal(t, before, countHarnessKind(runtime.session.Path(), harness.KindContextCheckpoint))
 
 	fresh, err := runtime.PreviewCompaction(t.Context())
 	require.NoError(t, err)
@@ -1441,7 +1441,7 @@ func TestRuntimeManualCompactionRejectsStalePreviewAndCommitsFreshPlan(t *testin
 	assert.Contains(t, eventTypes(events), EventCompactionStarted)
 	assert.Contains(t, eventTypes(events), EventCompactionCompleted)
 	assert.Contains(t, eventTypes(events), EventSessionTreeChanged)
-	assert.Equal(t, before+1, countHarnessKind(runtime.session.Path(), harness.KindCompaction))
+	assert.Equal(t, before+1, countHarnessKind(runtime.session.Path(), harness.KindContextCheckpoint))
 	requests := model.Requests()
 	require.Len(t, requests, 1)
 	require.NotNil(t, requests[0].MaxTokens)
@@ -1458,8 +1458,8 @@ func TestRuntimeAutomaticCompactionPrecedesInteractionCommit(t *testing.T) {
 		runtimeTextResponse("done"),
 	)
 	runtime := openTestRuntime(t, model)
-	configureRuntimeCompaction(runtime, 1800, 300, 1000, 64)
-	appendRuntimeHistory(t, runtime, 700, 700, 700, 700)
+	configureRuntimeCompaction(runtime, 100_000, 16_000, 1000, 64)
+	appendRuntimeHistory(t, runtime, 30000, 30000, 20000, 20000)
 	before := len(runtime.session.Path())
 
 	events := collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("new goal")))
@@ -1472,7 +1472,7 @@ func TestRuntimeAutomaticCompactionPrecedesInteractionCommit(t *testing.T) {
 
 	path := runtime.session.Path()
 	require.Greater(t, len(path), before)
-	assert.Equal(t, harness.KindCompaction, path[before].Kind,
+	assert.Equal(t, harness.KindContextCheckpoint, path[before].Kind,
 		"automatic compaction must commit before the interaction journal and user goal")
 	requests := model.Requests()
 	require.Len(t, requests, 2)
@@ -1551,7 +1551,7 @@ func configureRuntimeCompaction(
 	runtime.resolved.Limits.ContextWindow = contextWindow
 	runtime.config.Compaction = config.CompactionConfig{
 		Enabled: true, ReserveTokens: reserve, KeepRecentTokens: keepRecent,
-		SummaryMaxTokens: summaryMax,
+		SummaryMaxTokens: summaryMax, MinSummaryChars: 1, AttemptsPerStage: 1,
 	}
 }
 

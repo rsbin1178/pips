@@ -20,25 +20,27 @@ import (
 const maxPendingErrorBytes = 16 << 10
 
 type interaction struct {
-	mu                sync.Mutex
-	id                string
-	rootInteractionID string
-	source            InteractionSource
-	notificationIDs   []string
-	startedAt         time.Time
-	resumed           bool
-	integration       *IntegrationGeneration
-	harness           *harness.Harness
-	search            *catalog.ToolSearch
-	changeTracker     *interactionChangeTracker
-	usage             TokenUsage
-	stop              agent.StopReason
-	hookStopRequested bool
-	subagentUsage     map[string]struct{}
-	runIDs            []string
-	activeRunID       string
-	observer          *guardedAgentObserver
-	userDispatcher    subagent.Dispatcher
+	mu                       sync.Mutex
+	id                       string
+	rootInteractionID        string
+	source                   InteractionSource
+	notificationIDs          []string
+	startedAt                time.Time
+	resumed                  bool
+	integration              *IntegrationGeneration
+	harness                  *harness.Harness
+	search                   *catalog.ToolSearch
+	changeTracker            *interactionChangeTracker
+	usage                    TokenUsage
+	stop                     agent.StopReason
+	hookStopRequested        bool
+	subagentUsage            map[string]struct{}
+	runIDs                   []string
+	activeRunID              string
+	contextRecoveryAttempted bool
+	modelResponseObserved    bool
+	observer                 *guardedAgentObserver
+	userDispatcher           subagent.Dispatcher
 }
 
 func (i *interaction) requestHookStop() {

@@ -395,7 +395,7 @@ esac`,
 		t.Run(test.name, func(t *testing.T) {
 			stop := writeRuntimeHookScript(t, test.command)
 			toolResponse := runtimeToolResponse("call-read", "read", `{"path":"large.txt"}`)
-			toolResponse.Usage.InputTokens = 1_800
+			toolResponse.Usage.InputTokens = 90_000
 			model := newRuntimeModel(
 				toolResponse,
 				runtimeTextResponse("## Goal\nPreserve the earlier work."),
@@ -404,15 +404,15 @@ esac`,
 			runtime := openTrustedHookRuntime(t, model, lifecycleHookConfig(t, map[hooks.Event][]string{
 				test.event: {stop},
 			}), nil)
-			appendRuntimeHistory(t, runtime, 425, 425, 425, 425)
+			appendRuntimeHistory(t, runtime, 1000, 1000, 1000, 1000)
 			require.NoError(t, os.WriteFile(
 				filepath.Join(runtime.workspace.Root(), "large.txt"), []byte("small file"), 0o600,
 			))
-			configureRuntimeCompaction(runtime, 2_000, 300, 2_100, 64)
+			configureRuntimeCompaction(runtime, 100_000, 16_000, 2_100, 64)
 
 			events, err := collectRuntimeResult(runtime.Prompt(t.Context(), ai.UserText("read the file")))
 			require.NoError(t, err)
-			assert.Equal(t, test.wantCompactions, countHarnessKind(runtime.session.Path(), harness.KindCompaction))
+			assert.Equal(t, test.wantCompactions, countHarnessKind(runtime.session.Path(), harness.KindContextCheckpoint))
 			assert.Len(t, model.Requests(), test.wantModelRequest)
 			assert.Equal(t, InteractionIncomplete, runtime.Snapshot().Interaction.Outcome)
 			if test.wantCompactions == 0 {

@@ -30,6 +30,7 @@ type childModelResolver struct {
 type childModelBinding struct {
 	model         ai.LanguageModel
 	requestPolicy generation.Policy
+	contextWindow int
 }
 
 func newChildModelResolver(
@@ -93,7 +94,7 @@ func (r childModelResolver) bind(
 		return childModelBinding{}, fmt.Errorf("%w: configured child model is unavailable", subagent.ErrInvalid)
 	}
 	if resolved.Ref == r.base.Ref {
-		return childModelBinding{model: r.baseModel, requestPolicy: r.basePolicy}, nil
+		return childModelBinding{model: r.baseModel, requestPolicy: r.basePolicy, contextWindow: resolved.Limits.ContextWindow}, nil
 	}
 	if r.credentials == nil {
 		return childModelBinding{}, fmt.Errorf("%w: configured child model credentials are unavailable", subagent.ErrInvalid)
@@ -110,7 +111,7 @@ func (r childModelResolver) bind(
 		return childModelBinding{}, fmt.Errorf("%w: configured child model identity mismatch", subagent.ErrInvalid)
 	}
 
-	return childModelBinding{model: bound, requestPolicy: policy}, nil
+	return childModelBinding{model: bound, requestPolicy: policy, contextWindow: resolved.Limits.ContextWindow}, nil
 }
 
 func (r childModelResolver) resolve(selection string) (modelcatalog.ResolvedModel, error) {

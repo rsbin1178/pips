@@ -46,9 +46,15 @@ func cloneEventPayload(payload EventPayload) EventPayload {
 		return value
 	case RunCompleted:
 		return value
+	case RunInterrupted:
+		return value
 	case TurnStarted:
 		return value
 	case TurnCompleted:
+		if value.ContextTokens != nil {
+			tokens := *value.ContextTokens
+			value.ContextTokens = &tokens
+		}
 		return value
 	case MessageCommitted:
 		value.Message = cloneMessage(value.Message)
@@ -76,6 +82,9 @@ func cloneEventPayload(payload EventPayload) EventPayload {
 
 		return value
 	case SubagentLifecycle:
+		return value
+	case GoalChanged:
+		value.State = value.State.Clone()
 		return value
 	case TeamLifecycle:
 		return value

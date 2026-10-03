@@ -20,6 +20,7 @@ import (
 	"github.com/rsbin1178/pips/internal/coding/approval"
 	"github.com/rsbin1178/pips/internal/coding/changes"
 	"github.com/rsbin1178/pips/internal/coding/changes/git"
+	"github.com/rsbin1178/pips/internal/coding/compaction"
 	"github.com/rsbin1178/pips/internal/coding/hooks"
 	codingmcp "github.com/rsbin1178/pips/internal/coding/mcp"
 	"github.com/rsbin1178/pips/internal/coding/planreview"
@@ -138,7 +139,7 @@ func (r *Runtime) run(
 		}
 	}
 	if kind == operationPrompt || kind == operationAgentNotification {
-		if err := r.maybeCompact(ctx, emitter); err != nil {
+		if err := r.maybeCompactBeforeInput(ctx, emitter, messages, promptHookContext); err != nil {
 			if errors.Is(err, ErrHookStopped) {
 				return
 			}
@@ -375,6 +376,16 @@ func (r *Runtime) run(
 		stop, driveErr := r.driveHarness(ctx, current, messages, emitter)
 		messages = nil
 		if driveErr != nil {
+			recovered, recoveryErr := r.recoverContextBeforeOutput(ctx, current, driveErr, emitter)
+			if recovered {
+				continue
+			}
+			if errors.Is(recoveryErr, ErrHookStopped) {
+				current.stop = agent.StopWhen
+				emitter.fail(r.finishInteraction(context.WithoutCancel(ctx), current, InteractionIncomplete, emitter))
+				return
+			}
+			driveErr = errors.Join(driveErr, recoveryErr)
 			outcome := InteractionFailed
 			if errors.Is(driveErr, context.Canceled) || errors.Is(driveErr, errConsumerStopped) ||
 				errors.Is(parent.Err(), context.Canceled) {
@@ -401,11 +412,18 @@ func (r *Runtime) run(
 
 				return
 			}
-			if hookOutcome.Blocked && !hookOutcome.Stopped {
+			if hookOutcome.Stopped || (hookOutcome.Blocked && stopHookActive && ctx.Value(goalContextKey{}) != nil) {
+				current.requestHookStop()
+			}
+			if hookOutcome.Blocked && !hookOutcome.Stopped && !current.hookStopRequestedNow() {
 				messages = []ai.Message{ai.UserText(hookContinuationReason(hookOutcome.Reason))}
 				stopHookActive = true
 
 				continue
+			}
+			if ctx.Value(goalContextKey{}) != nil && current.hookStopRequestedNow() {
+				stop = agent.StopWhen
+				outcome = InteractionIncomplete
 			}
 			current.stop = stop
 			finishErr := r.finishInteraction(
@@ -486,7 +504,13 @@ func (r *Runtime) beginOperation(
 	if r.closed || r.closing {
 		return nil, nil, stateError(string(kind), r.state.Phase, ErrRuntimeClosed)
 	}
+	if r.compactionWriteUncertain {
+		return nil, nil, errCompactionWriteUncertain
+	}
 
+	if r.goalDriver != nil && parent.Value(goalContextKey{}) != r.goalDriver {
+		return nil, nil, stateError(string(kind), r.state.Phase, ErrRuntimeBusy)
+	}
 	if r.active != nil {
 		return nil, nil, stateError(string(kind), r.state.Phase, ErrRuntimeBusy)
 	}
@@ -679,6 +703,14 @@ func (r *Runtime) openInteraction(
 	if err != nil {
 		return nil, err
 	}
+	historyCatalog, err := catalog.New(catalog.Local("coding.history", catalog.RiskRead, tools.NewHistoryTool(r.bindHistory))...)
+	if err != nil {
+		return nil, err
+	}
+	localCatalog, err = catalog.Merge(localCatalog, historyCatalog)
+	if err != nil {
+		return nil, err
+	}
 
 	r.mu.Lock()
 	leadCoordinator := r.team
@@ -793,6 +825,7 @@ func (r *Runtime) openInteraction(
 				return nil, modelErr
 			}
 			childFactory := childScopeFactory{
+				repository: r.repository, fullCompaction: r.childScopeCompactionPolicy(),
 				workspace: r.workspace, tree: r.tree, toolLimits: r.opts.ToolLimits,
 				policy: r.policy, executor: r.executor, sandbox: r.config.Sandbox,
 				network:       r.config.SandboxWorkspaceWrite.Network,
@@ -938,6 +971,9 @@ func (r *Runtime) openInteraction(
 	composed = extension.ComposeHooks(composed, extension.Hooks{AfterTool: r.hookAfterTool(emitter)})
 
 	maxTurns := 0
+	if ctx.Value(goalContextKey{}) != nil {
+		maxTurns = goalWorkMaxTurns
+	}
 	agentOptions := append(
 		composed.AgentOptions(),
 		agent.WithMaxTurns(maxTurns),
@@ -945,9 +981,15 @@ func (r *Runtime) openInteraction(
 			return current.hookStopRequestedNow() || failureGuard.stopWhen(info)
 		}),
 		agent.WithToolTimeout(r.opts.ToolTimeout),
-		agent.WithRequest(composePlanReminder(r.requestPolicy, r.planReminderInjector(current))),
+		agent.WithRequest(r.applyContextRequest(current)),
 	)
 
+	if ctx.Value(goalContextKey{}) != nil {
+		goalState := r.GoalSnapshot()
+		if goalState.MaxTokens > 0 {
+			agentOptions = append(agentOptions, agent.WithMaxTokens(max(1, goalState.MaxTokens-goalState.Tokens)))
+		}
+	}
 	harnessOptions := []harness.Option{
 		harness.WithTools(executableTools...),
 		harness.WithSystem(systemPrompt.SharedPrefix),
@@ -961,7 +1003,7 @@ func (r *Runtime) openInteraction(
 		}),
 	}
 
-	value, err := harness.New(snapshot.Model(r.model), r.session, harnessOptions...)
+	value, err := harness.New(compaction.GuardModel(snapshot.Model(r.model), r.fullCompactionPolicy()), r.session, harnessOptions...)
 	if err != nil {
 		return nil, err
 	}
@@ -1096,11 +1138,15 @@ func (r *Runtime) driveHarness(
 	if err != nil {
 		return "", err
 	}
-	projector.synthetic = r.isAgentNotificationMessage
+	projector.contextTokens = r.contextTokens
+	projector.synthetic = func(message ai.Message) bool {
+		return r.isAgentNotificationMessage(message) || r.isGoalFeedback(message)
+	}
 
 	var stop agent.StopReason
 	inputPending := cloneMessages(messages)
 	for event, streamErr := range current.harness.PromptMessagesStream(ctx, messages...) {
+		markObservedModelOutput(current, event)
 		if event.Payload() != nil {
 			projected, projectErr := emitter.publishAgent(projector, event)
 			if projectErr != nil {
@@ -1640,6 +1686,9 @@ func (r *Runtime) activeHarness(operation string) (*interaction, error) {
 func (r *Runtime) Cancel() error {
 	if r == nil {
 		return ErrRuntimeClosed
+	}
+	if r.GoalSnapshot().Active() {
+		return r.PauseGoal(context.Background())
 	}
 
 	r.mu.Lock()

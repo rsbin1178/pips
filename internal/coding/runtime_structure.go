@@ -5,18 +5,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"iter"
-	"strconv"
-	"strings"
-	"time"
 
 	"github.com/rsbin1178/pips/agent/harness"
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding/config"
-	"github.com/rsbin1178/pips/internal/coding/hooks"
 	"github.com/rsbin1178/pips/internal/coding/modelcatalog"
 	"github.com/rsbin1178/pips/internal/coding/planmode"
 	"github.com/rsbin1178/pips/internal/coding/session"
@@ -63,7 +58,7 @@ func (r *Runtime) PreviewCompaction(ctx context.Context) (CompactionPreview, err
 	}
 	defer r.endOperation(operation)
 
-	preview, _, _ := r.prepareCompaction()
+	preview, _, _ := r.prepareFullCompaction(ctx)
 
 	return preview, nil
 }
@@ -90,6 +85,10 @@ func (r *Runtime) Navigate(
 		defer r.endOperation(operation)
 
 		emitter := newEventEmitter(operationCtx, r, yield, true)
+		if err := r.invalidateGoalEvidence(operationCtx); err != nil {
+			emitter.fail(err)
+			return
+		}
 		fromID := r.session.LeafID()
 		value, err := harness.New(
 			r.model,
@@ -138,7 +137,7 @@ func (r *Runtime) Compact(
 		defer r.endOperation(operation)
 
 		emitter := newEventEmitter(operationCtx, r, yield, true)
-		preview, plan, settings := r.prepareCompaction()
+		preview, plan, settings := r.prepareFullCompaction(operationCtx)
 		if !preview.Available || plan == nil {
 			err := fmt.Errorf("%w: %s", ErrCompactionUnavailable, preview.DisabledReason)
 			r.emitStructuralError("compaction_unavailable", "Compaction is unavailable", err, emitter)
@@ -156,7 +155,7 @@ func (r *Runtime) Compact(
 			)
 			return
 		}
-		if err := r.executeCompaction(
+		if err := r.executeFullCompaction(
 			operationCtx, CompactionManual, preview, plan, settings, request.Instructions, emitter,
 		); err != nil && !errors.Is(err, ErrHookStopped) {
 			r.emitStructuralError("compaction_failed", "Compaction failed", err, emitter)
@@ -211,69 +210,7 @@ func (r *Runtime) Fork(ctx context.Context, entryID string) (string, error) {
 }
 
 func (r *Runtime) maybeCompact(ctx context.Context, emitter *eventEmitter) error {
-	preview, plan, settings := r.prepareCompaction()
-	if !preview.Available || plan == nil ||
-		!harness.ShouldCompact(preview.EstimatedTokens, settings) {
-		return nil
-	}
-	r.mu.Lock()
-	suppressed := r.autoCompactionFailureToken == preview.Token
-	r.mu.Unlock()
-	if suppressed {
-		return ErrCompactionRetrySuppressed
-	}
-
-	err := r.executeCompaction(
-		ctx, CompactionAutomatic, preview, plan, settings, "", emitter,
-	)
-	r.mu.Lock()
-	if err != nil {
-		r.autoCompactionFailureToken = preview.Token
-	} else {
-		r.autoCompactionFailureToken = ""
-	}
-	r.mu.Unlock()
-
-	return err
-}
-
-func (r *Runtime) prepareCompaction() (
-	CompactionPreview,
-	*harness.CompactionPlan,
-	harness.CompactionSettings,
-) {
-	settings, disabledReason := effectiveCompactionSettings(r.config.Compaction, r.resolved)
-	if disabledReason != "" {
-		return CompactionPreview{
-			EstimatedTokens: harness.EstimateContext(r.session.Path()),
-			DisabledReason:  disabledReason,
-		}, nil, harness.CompactionSettings{}
-	}
-	path := r.session.Path()
-	plan := harness.PlanCompaction(path, settings)
-	estimated := harness.EstimateContext(path)
-	preview := CompactionPreview{
-		EstimatedTokens: estimated,
-		ThresholdTokens: settings.ContextTokens - settings.ReserveTokens,
-	}
-	if plan == nil {
-		preview.DisabledReason = "the active branch has no compactable history"
-
-		return preview, nil, settings
-	}
-	preview.Available = true
-	preview.FirstKeptID = plan.FirstKeptID
-	preview.SplitTurn = plan.SplitTurn
-	preview.SummarizedMessages = len(plan.ToSummarize) + len(plan.TurnPrefix)
-	contextValue, err := r.session.Context()
-	if err == nil {
-		preview.KeptMessages = max(len(contextValue.Messages)-preview.SummarizedMessages, 0)
-	}
-	preview.Token = compactionToken(
-		r.handle.Metadata().ID, r.session.LeafID(), plan, settings,
-	)
-
-	return preview, plan, settings
+	return r.maybeCompactWithPending(ctx, emitter, 0)
 }
 
 func effectiveCompactionSettings(
@@ -305,72 +242,6 @@ func effectiveCompactionSettings(
 	}, ""
 }
 
-func (r *Runtime) executeCompaction(
-	ctx context.Context,
-	mode CompactionMode,
-	preview CompactionPreview,
-	_ *harness.CompactionPlan,
-	settings harness.CompactionSettings,
-	instructions string,
-	emitter *eventEmitter,
-) error {
-	if err := r.runPreCompact(ctx, mode, preview, emitter); err != nil {
-		return err
-	}
-	if err := emitter.emit("", "", EventCompactionStarted, CompactionStarted{
-		Mode: mode, Preview: preview,
-	}); err != nil {
-		return err
-	}
-	started := time.Now()
-	value, err := harness.New(
-		r.model,
-		r.session,
-		harness.WithCompaction(settings),
-		harness.WithSummaryModel(requestPolicyModel{
-			LanguageModel: r.model,
-			apply:         r.requestPolicy,
-		}),
-	)
-	if err == nil {
-		err = value.Compact(ctx, instructions)
-	}
-	if err != nil {
-		return err
-	}
-	after := min(harness.EstimateContext(r.session.Path()), preview.EstimatedTokens)
-	duration := max(time.Since(started), time.Duration(0))
-	durationMS := min(duration.Milliseconds(), maxEventDurationMS)
-	postHookErr := r.runPostCompact(ctx, mode, preview.EstimatedTokens, after, durationMS, emitter)
-	if postHookErr != nil && !errors.Is(postHookErr, ErrHookStopped) {
-		return postHookErr
-	}
-	sessionStartOutcome, err := r.runSessionStartSource(ctx, "compact", emitter)
-	if err != nil {
-		return err
-	}
-	if err := emitter.emit("", "", EventCompactionCompleted, CompactionCompleted{
-		Mode: mode, TokensBefore: preview.EstimatedTokens, TokensAfter: after,
-		FirstKeptID:    preview.FirstKeptID,
-		DurationMillis: durationMS,
-	}); err != nil {
-		return err
-	}
-
-	if err := r.emitTreeChanged(ctx, emitter); err != nil {
-		return err
-	}
-
-	if sessionStartOutcome.Stopped {
-		return &HookStoppedError{
-			Event:  hooks.EventSessionStart,
-			Reason: sessionStartOutcome.Reason,
-		}
-	}
-
-	return postHookErr
-}
-
 func (r *Runtime) emitTreeChanged(ctx context.Context, emitter *eventEmitter) error {
 	tree, err := r.Tree(context.WithoutCancel(ctx))
 	if err != nil {
@@ -379,7 +250,7 @@ func (r *Runtime) emitTreeChanged(ctx context.Context, emitter *eventEmitter) er
 	transcript := transcriptFromPath(r.session.Path())
 
 	return emitter.emit("", "", EventSessionTreeChanged, SessionTreeChanged{
-		Tree: tree, Transcript: transcript, ContextTokens: harness.EstimateContext(r.session.Path()),
+		Tree: tree, Transcript: transcript, ContextTokens: r.contextTokens(),
 		Tasks: tasksFromPath(r.session.Path()),
 	})
 }
@@ -410,23 +281,6 @@ func transcriptFromPath(path []harness.Entry) ai.Messages {
 	}
 
 	return messages
-}
-
-func compactionToken(
-	sessionID string,
-	leafID string,
-	plan *harness.CompactionPlan,
-	settings harness.CompactionSettings,
-) string {
-	values := []string{
-		sessionID, leafID, plan.FirstKeptID,
-		strconv.Itoa(plan.TokensBefore), strconv.FormatBool(plan.SplitTurn),
-		strconv.Itoa(settings.ContextTokens), strconv.Itoa(settings.ReserveTokens),
-		strconv.Itoa(settings.KeepRecentTokens), strconv.Itoa(settings.SummaryTokens),
-	}
-	digest := sha256.Sum256([]byte(strings.Join(values, "\x00")))
-
-	return hex.EncodeToString(digest[:])
 }
 
 func validCompactionConfirmation(value, expected string) bool {
