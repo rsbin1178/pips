@@ -1092,10 +1092,16 @@ func (m *Model) compactPromptView() string {
 		lines = append(lines, "Unavailable: "+m.prompt.preview.DisabledReason, "Esc close")
 	default:
 		preview := m.prompt.preview
+		detail := "Summarize " + strconv.Itoa(preview.SummarizedMessages) + " messages · keep " + strconv.Itoa(preview.KeptMessages)
+		recovery := "Compaction may omit details. The durable branch remains recoverable."
+		if preview.Strategy == coding.CompactionStrategyFull {
+			detail = "Rebuild context from " + strconv.Itoa(preview.SummarizedMessages) + " messages · preserve latest user request"
+			recovery = "Original history stays in a private searchable archive. Plan, Goal and cumulative usage are not reset."
+		}
 		lines = append(lines,
 			"Estimated context: "+strconv.Itoa(preview.EstimatedTokens)+" tokens · threshold: "+strconv.Itoa(preview.ThresholdTokens),
-			"Summarize "+strconv.Itoa(preview.SummarizedMessages)+" messages · keep "+strconv.Itoa(preview.KeptMessages),
-			"Compaction may omit details. The durable branch remains recoverable.",
+			detail,
+			recovery,
 			"Enter confirm · Esc cancel",
 		)
 	}

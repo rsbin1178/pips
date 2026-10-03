@@ -120,11 +120,11 @@ func TestScrollbackKeepsConversationGapAcrossIncrementalCommits(t *testing.T) {
 		ai.UserText("first question"),
 		ai.AssistantText("first answer"),
 	}
-	first := commandOutput(model.commitStableTimeline())
+	first := modelCommandOutput(model, model.commitStableTimeline())
 	require.NotEmpty(t, first)
 
 	model.state.Transcript = append(model.state.Transcript, ai.UserText("second question"))
-	second := commandOutput(model.commitStableTimeline())
+	second := modelCommandOutput(model, model.commitStableTimeline())
 	require.NotEmpty(t, second)
 
 	assert.True(
@@ -142,7 +142,7 @@ func TestScrollbackKeepsConversationGapAcrossIncrementalCommits(t *testing.T) {
 
 	model.resetScrollback()
 	model.state.Transcript = []ai.Message{ai.UserText("resumed question")}
-	resumed := commandOutput(model.commitStableTimeline())
+	resumed := modelCommandOutput(model, model.commitStableTimeline())
 	assert.True(t, strings.HasPrefix(resumed, strings.Repeat("\n", conversationGapHeight)))
 }
 
@@ -271,7 +271,7 @@ func TestManagedAssistantTailOwnsNativeScrollbackBoundaryImmediately(t *testing.
 
 	model := readyModel(t, true)
 	model.state.Transcript = []ai.Message{ai.UserText("inspect the spacing")}
-	assert.Contains(t, commandOutput(model.commitStableTimeline()), "inspect the spacing")
+	assert.Contains(t, modelCommandOutput(model, model.commitStableTimeline()), "inspect the spacing")
 
 	model.state.Draft = []coding.MessageDelta{{
 		Kind: ai.StreamTextDelta,
@@ -307,185 +307,27 @@ func TestManagedStreamingContinuationDoesNotRepeatNativeBoundary(t *testing.T) {
 	assert.Contains(t, model.timeline, "continued row")
 }
 
-func TestScrollbackSplitsLongOutputWithinInlineInsertionBudget(t *testing.T) {
+func TestScrollbackKeepsLogicalPayloadUntilRendererExecution(t *testing.T) {
 	t.Parallel()
-
 	model := readyModel(t, true)
-	model.Update(tea.WindowSizeMsg{Width: 40, Height: 10})
 	model.scrollbackOutput = false
-
-	lines := make([]string, 30)
-	for index := range lines {
-		lines[index] = fmt.Sprintf("history line %02d", index)
-	}
-
-	content := strings.Join(lines, "\n")
-
-	managedHeight := lipgloss.Height(model.View().Content)
-	maximumRows := model.height - managedHeight
-	require.Positive(t, maximumRows)
-
-	outputs := commandOutputs(model.printScrollback(content))
-	require.Greater(t, len(outputs), 1)
-
-	for _, output := range outputs {
-		assert.LessOrEqual(
-			t,
-			bubbleTeaInsertRows(output, model.width),
-			maximumRows,
-			"one unmanaged insert must fit above the managed inline frame",
-		)
-	}
-
-	assert.Equal(t, content, strings.Join(outputs, "\n"))
-}
-
-func TestScrollbackPrewrapsWideStyledLinesWithoutLosingText(t *testing.T) {
-	t.Parallel()
-
-	model := readyModel(t, true)
+	content := "\x1b[31m" + strings.Repeat("界", 180) + "\x1b[0m"
+	command := model.printScrollback(content)
 	model.Update(tea.WindowSizeMsg{Width: 12, Height: 10})
-	model.scrollbackOutput = false
-	content := "\x1b[31m" + strings.Repeat("界", 18) + "\x1b[0m"
-
-	outputs := commandOutputs(model.printScrollback(content))
-	require.NotEmpty(t, outputs)
-
-	printed := strings.Join(outputs, "\n")
-	for line := range strings.SplitSeq(printed, "\n") {
-		assert.LessOrEqual(t, ansi.StringWidth(line), model.width)
-	}
-
-	assert.Equal(
-		t,
-		ansi.Strip(content),
-		strings.ReplaceAll(ansi.Strip(printed), "\n", ""),
-	)
+	outputs := commandOutputs(command)
+	require.Equal(t, []string{content}, outputs, "the renderer, not the model, owns physical wrapping")
 }
 
-func TestScrollbackRefreshesComposerCursorAfterInlineInsert(t *testing.T) {
+func TestScrollbackCompletionDoesNotToggleCursor(t *testing.T) {
 	t.Parallel()
-
 	model := readyModel(t, true)
-	model.Update(tea.WindowSizeMsg{Width: 40, Height: 10})
 	before := model.View().Cursor
-	require.NotNil(t, before)
-
 	messages := sequenceMessages(t, model.printScrollback("restored history"))
-	require.NotEmpty(t, messages)
-	refresh, ok := messages[len(messages)-1].(scrollbackCursorRefreshMsg)
+	require.Len(t, messages, 2, "one print and one physical completion; no timing messages")
+	done, ok := messages[1].(scrollbackWriteDoneMsg)
 	require.True(t, ok)
-
-	_, done := model.Update(refresh)
-	require.NotNil(t, done)
-
-	during := model.View().Cursor
-	require.NotNil(t, during)
-	assert.Equal(t, before.Position, during.Position)
-	assert.NotEqual(t, before.Blink, during.Blink)
-
-	model.Update(done())
-	after := model.View().Cursor
-	require.NotNil(t, after)
-	assert.Equal(t, before.Position, after.Position)
-	assert.Equal(t, before.Blink, after.Blink)
-	assert.False(t, model.refreshCursor)
-}
-
-func TestScrollbackFlushesCursorRefreshBeforeRestoringCursorStyle(t *testing.T) {
-	t.Parallel()
-
-	model := readyModel(t, true)
-	model.Update(tea.WindowSizeMsg{Width: 40, Height: 10})
-	probe := &cursorRefreshRenderProbe{Model: model}
-
-	var output bytes.Buffer
-
-	program := tea.NewProgram(
-		probe,
-		tea.WithInput(nil),
-		tea.WithOutput(&output),
-		tea.WithEnvironment([]string{"TERM=xterm-256color", "NO_COLOR=1"}),
-		tea.WithWindowSize(40, 10),
-		tea.WithFPS(60),
-		tea.WithoutSignalHandler(),
-	)
-
-	_, err := program.Run()
-	require.NoError(t, err)
-
-	rendered := output.String()
-	refreshAt := strings.Index(rendered, ansi.SetCursorStyle(1))
-	require.GreaterOrEqual(
-		t,
-		refreshAt,
-		0,
-		"the renderer must flush the temporary cursor frame after tea.Println",
-	)
-	refreshedOutput := rendered[refreshAt:]
-	view := model.View()
-	cursor := view.Cursor
-	require.NotNil(t, cursor)
-	rowsAboveCursor := lipgloss.Height(view.Content) - cursor.Y - 1
-	assert.True(
-		t,
-		strings.Contains(refreshedOutput, ansi.CursorUp(rowsAboveCursor)) ||
-			strings.Contains(refreshedOutput, ansi.CursorDown(rowsAboveCursor)) ||
-			strings.Contains(refreshedOutput, strings.Repeat("\n", rowsAboveCursor)),
-		"cursor refresh must emit a vertical move to the Composer row: %q",
-		refreshedOutput,
-	)
-	assert.Contains(t, refreshedOutput, ansi.CursorForward(cursor.X))
-}
-
-func TestScrollbackFlushesShrunkenManagedViewBeforeInlineInsert(t *testing.T) {
-	t.Parallel()
-
-	model := readyModel(t, true)
-	model.Update(tea.WindowSizeMsg{Width: 40, Height: 10})
-	model.scrollbackOutput = false
-	model.state.Draft = []coding.MessageDelta{{
-		Kind: ai.StreamTextDelta,
-		Text: strings.Join([]string{
-			"live line 01", "live line 02", "live line 03", "live line 04",
-			"live line 05", "live line 06", "live line 07", "live line 08",
-		}, "\n"),
-	}}
-	model.rerenderTranscript(false)
-	probe := &managedViewFlushProbe{
-		Model:   model,
-		content: "STABLE-01\nSTABLE-02\nSTABLE-03",
-	}
-
-	var output bytes.Buffer
-
-	program := tea.NewProgram(
-		probe,
-		tea.WithInput(nil),
-		tea.WithOutput(&output),
-		tea.WithEnvironment([]string{
-			"TERM=xterm-256color", "TERM_PROGRAM=Apple_Terminal", "NO_COLOR=1",
-		}),
-		tea.WithWindowSize(40, 10),
-		tea.WithFPS(60),
-		tea.WithoutSignalHandler(),
-	)
-
-	_, err := program.Run()
-	require.NoError(t, err)
-	require.Greater(t, probe.beforeHeight, probe.afterHeight)
-
-	insertRows := bubbleTeaInsertRows(probe.content, model.width)
-	want := strings.Repeat("\n", insertRows) +
-		ansi.CursorUp(insertRows+probe.afterHeight-1) +
-		ansi.InsertLine(insertRows) +
-		"STABLE-01"
-	assert.Contains(
-		t,
-		output.String(),
-		want,
-		"insertAbove must observe the shrunken managed frame, not the previous live draft",
-	)
+	model.Update(done)
+	assert.Equal(t, before, model.View().Cursor)
 }
 
 func TestBubbleTeaRouteTransitionFollowsNativeScrollbackInsert(t *testing.T) {
@@ -534,7 +376,7 @@ func TestStreamingDraftPromotesCompletedRowsAndKeepsManagedFrameStable(t *testin
 		Text: "stream line 01\n\nstream line 02\n\npartial",
 	}}
 
-	first := commandOutput(model.commitStableTimeline())
+	first := modelCommandOutput(model, model.commitStableTimeline())
 	require.Contains(t, first, "stream line 01")
 	assert.NotContains(t, first, "stream line 02")
 	assert.NotContains(t, first, "partial")
@@ -546,7 +388,7 @@ func TestStreamingDraftPromotesCompletedRowsAndKeepsManagedFrameStable(t *testin
 		Kind: ai.StreamTextDelta,
 		Text: " remainder\n\nstream line 03\n\nnext partial",
 	})
-	second := commandOutput(model.commitStableTimeline())
+	second := modelCommandOutput(model, model.commitStableTimeline())
 	require.Contains(t, second, "partial remainder")
 	assert.Contains(t, second, "stream line 02")
 	assert.NotContains(t, second, "stream line 03")
@@ -562,60 +404,12 @@ func TestStreamingDraftPromotesCompletedRowsAndKeepsManagedFrameStable(t *testin
 		"stream line 03\n\nnext partial"
 	model.state.Transcript = []ai.Message{ai.AssistantText(full)}
 	model.state.Draft = nil
-	final := commandOutput(model.commitStableTimeline())
+	final := modelCommandOutput(model, model.commitStableTimeline())
 	combined := first + "\n" + second + "\n" + final
 
 	for _, line := range strings.FieldsFunc(full, func(r rune) bool { return r == '\n' }) {
 		assert.Equalf(t, 1, strings.Count(ansi.Strip(combined), line), "line %q", line)
 	}
-}
-
-type managedViewFlushMsg struct{}
-
-type managedViewFlushProbe struct {
-	*Model
-	content      string
-	beforeHeight int
-	afterHeight  int
-}
-
-func (p *managedViewFlushProbe) Init() tea.Cmd {
-	return tea.Tick(2*renderFrame, func(time.Time) tea.Msg { return managedViewFlushMsg{} })
-}
-
-func (p *managedViewFlushProbe) Update(message tea.Msg) (tea.Model, tea.Cmd) {
-	if _, ok := message.(managedViewFlushMsg); ok {
-		p.beforeHeight = lipgloss.Height(p.Model.View().Content)
-		p.state.Draft = nil
-		p.rerenderTranscript(false)
-		p.afterHeight = lipgloss.Height(p.Model.View().Content)
-
-		return p, tea.Sequence(
-			p.printScrollback(p.content),
-			tea.Tick(4*renderFrame, func(time.Time) tea.Msg { return tea.Quit() }),
-		)
-	}
-
-	_, command := p.Model.Update(message)
-
-	return p, command
-}
-
-type cursorRefreshRenderProbe struct {
-	*Model
-}
-
-func (p *cursorRefreshRenderProbe) Init() tea.Cmd {
-	return tea.Sequence(
-		p.printScrollback("restored history"),
-		tea.Tick(4*renderFrame, func(time.Time) tea.Msg { return tea.Quit() }),
-	)
-}
-
-func (p *cursorRefreshRenderProbe) Update(message tea.Msg) (tea.Model, tea.Cmd) {
-	_, command := p.Model.Update(message)
-
-	return p, command
 }
 
 type routeBarrierRenderProbe struct {
@@ -1010,23 +804,6 @@ func TestScrollbackCommitsDistinctChangeAndErrorUpdates(t *testing.T) {
 
 	model.state.LastError = &coding.RuntimeError{Code: "second", Message: "second failure"}
 	assert.Contains(t, model.takeStableTimeline(), "second failure")
-}
-
-// bubbleTeaInsertRows mirrors cursedRenderer.insertAbove's row accounting.
-// Keeping the regression assertion aligned with the dependency catches a
-// multi-screen tea.Println before it reaches a real terminal.
-func bubbleTeaInsertRows(content string, width int) int {
-	lines := strings.Split(content, "\n")
-
-	rows := len(lines)
-	for _, line := range lines {
-		lineWidth := ansi.StringWidth(line)
-		if width > 0 && lineWidth > width {
-			rows += lineWidth / width
-		}
-	}
-
-	return rows
 }
 
 func sequenceMessages(t *testing.T, command tea.Cmd) []tea.Msg {

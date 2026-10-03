@@ -5,11 +5,8 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"strings"
-	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
-	"github.com/charmbracelet/x/ansi"
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding"
 	"github.com/rsbin1178/pips/internal/coding/planmode"
@@ -47,17 +44,15 @@ func (m *Model) resetScrollback() {
 }
 
 func (m *Model) commitStableTimeline() tea.Cmd {
-	if m.route.kind != routeNone || m.presentation.pendingRoute.pending() {
+	if !m.sizeReady || m.route.kind != routeNone || m.presentation.pendingRoute.pending() {
 		return nil
 	}
 
-	managedHeight := lipgloss.Height(m.readyView().Content)
 	blocks := m.takeStableTimelineBlocks()
 	writes := m.streamingScrollbackWrites(blocks)
 	m.rerenderTranscript(false)
-	waitForRender := managedHeight != lipgloss.Height(m.readyView().Content)
 
-	return m.printScrollbackWritesAfterRender(writes, waitForRender)
+	return m.printScrollbackWrites(writes)
 }
 
 // printScrollback is the single boundary for output that leaves Bubble Tea's
@@ -68,13 +63,6 @@ func (m *Model) printScrollback(content string) tea.Cmd {
 }
 
 func (m *Model) printScrollbackWrites(writes []scrollbackWrite) tea.Cmd {
-	return m.printScrollbackWritesAfterRender(writes, true)
-}
-
-func (m *Model) printScrollbackWritesAfterRender(
-	writes []scrollbackWrite,
-	waitForRender bool,
-) tea.Cmd {
 	var content strings.Builder
 
 	hasOutput := m.scrollbackOutput
@@ -104,84 +92,7 @@ func (m *Model) printScrollbackWritesAfterRender(
 
 	m.scrollbackOutput = true
 
-	return m.printPreparedScrollback(content.String(), waitForRender)
-}
-
-func (m *Model) printPreparedScrollback(content string, waitForRender bool) tea.Cmd {
-	// Bubble Tea's inline insertAbove implementation first reserves physical
-	// rows below the managed frame. One insert must therefore fit in the
-	// currently unused terminal rows; a multi-screen Println otherwise scrolls
-	// blank reservation rows into native history before writing the payload.
-	managedHeight := lipgloss.Height(m.readyView().Content)
-	maximumRows := max(1, m.height-managedHeight)
-	chunks := splitScrollbackContent(content, m.width, maximumRows)
-
-	writeSequence := m.presentation.beginScrollbackWrite()
-	commands := make([]tea.Cmd, 0, len(chunks)+3)
-	// The renderer flushes on its own frame clock. When a multi-line live
-	// draft becomes stable, the Model has already removed it from the managed
-	// View, but insertAbove can still observe the previous full-height cell
-	// buffer if Println runs immediately. Give the shrunken View one complete
-	// renderer window before Bubble Tea performs terminal-relative insertions.
-	if waitForRender {
-		commands = append(commands, tea.Tick(renderFrame, func(time.Time) tea.Msg {
-			return scrollbackRenderReadyMsg{}
-		}))
-	}
-
-	for _, chunk := range chunks {
-		if chunk == "" {
-			// insertAbove ignores an empty body, so retain a deliberately blank
-			// physical row with a zero-width terminal reset sequence.
-			chunk = "\x1b[0m"
-		}
-		commands = append(commands, tea.Println(chunk))
-	}
-
-	commands = append(commands, func() tea.Msg {
-		return scrollbackWriteDoneMsg{sequence: writeSequence}
-	})
-
-	// Bubble Tea v2.0.8 resets its renderer cursor after insertAbove, then
-	// skips an identical View. Keep a cursor-only change alive across one
-	// renderer frame so it cannot be coalesced with its restoration. The
-	// generation prevents overlapping stable commits from clearing a newer
-	// refresh before Bubble Tea restores the Composer coordinates.
-	m.cursorRefreshSeq++
-	sequence := m.cursorRefreshSeq
-
-	commands = append(commands, func() tea.Msg {
-		return scrollbackCursorRefreshMsg{sequence: sequence}
-	})
-
-	return tea.Sequence(commands...)
-}
-
-// splitScrollbackContent pre-wraps physical terminal rows and groups them so
-// each Bubble Tea insertAbove call fits above the managed inline frame. The
-// chunks must be executed in order; each completed insertion becomes the
-// backing history for the next one instead of introducing blank scrollback.
-func splitScrollbackContent(content string, width, maximumRows int) []string {
-	maximumRows = max(1, maximumRows)
-
-	lines := make([]string, 0, strings.Count(content, "\n")+1)
-	for line := range strings.SplitSeq(content, "\n") {
-		if width > 0 && ansi.StringWidth(line) > width {
-			lines = append(lines, strings.Split(ansi.Hardwrap(line, width, true), "\n")...)
-
-			continue
-		}
-
-		lines = append(lines, line)
-	}
-
-	chunks := make([]string, 0, (len(lines)+maximumRows-1)/maximumRows)
-	for start := 0; start < len(lines); start += maximumRows {
-		end := min(len(lines), start+maximumRows)
-		chunks = append(chunks, strings.Join(lines[start:end], "\n"))
-	}
-
-	return chunks
+	return m.enqueueScrollback(content.String())
 }
 
 // takeStableTimeline advances the scrollback cursor and returns the immutable

@@ -194,10 +194,10 @@ func TestTeamAttemptCursorFreezesForVisibleAndPendingRoutes(t *testing.T) {
 	assert.Empty(t, model.scrollback.teamAttempts)
 
 	model.presentation.pendingRoute = routeOpenRequest{}
-	printed := commandOutput(model.commitStableTimeline())
+	printed := modelCommandOutput(model, model.commitStableTimeline())
 	assert.Contains(t, printed, "Team Worker")
 	assert.Len(t, model.scrollback.teamAttempts, 1)
-	assert.Empty(t, commandOutput(model.commitStableTimeline()))
+	assert.Empty(t, modelCommandOutput(model, model.commitStableTimeline()))
 }
 
 func TestTeamAttemptProjectionPreservesStreamingAdjacency(t *testing.T) {

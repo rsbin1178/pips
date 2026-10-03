@@ -29,6 +29,7 @@ func (m *Model) printHelp() tea.Cmd {
 		"Help",
 		renderActionHelp(defaultActions, m.actionContext())+"\n\n"+
 			"Ctrl+J / Shift+Enter newline\n"+
+			"/goal <condition> [--budget <tokens>] works toward verified completion; /goal status|pause|resume|clear controls it.\n"+
 			"/team [objective] proposes or inspects a Team; recovery, Integration, and cleanup always require review.\n"+
 			"/resume may show a read-only Team recovery badge; Enter resumes only the conversation.\n"+
 			"The terminal owns conversation history: use its wheel or scrollback keys to navigate, "+
@@ -231,9 +232,17 @@ func compactionStatusText(config config.CompactionConfig) string {
 		return "off"
 	}
 
+	summary := "model default"
+	if config.SummaryMaxTokens > 0 {
+		summary = strconv.Itoa(config.SummaryMaxTokens)
+	}
+	threshold := config.ThresholdPercent
+	if threshold == 0 {
+		threshold = 85
+	}
 	return fmt.Sprintf(
-		"on (reserve %d · keep %d · summary max %d)",
-		config.ReserveTokens, config.KeepRecentTokens, config.SummaryMaxTokens,
+		"on (full checkpoint · threshold %d%% · reserve %d · summary max %s; keep_recent_tokens is legacy-only)",
+		threshold, config.ReserveTokens, summary,
 	)
 }
 

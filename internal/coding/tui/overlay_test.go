@@ -362,7 +362,7 @@ func TestHelpInspectionExplainsMouseSelectionAndWheelScrolling(t *testing.T) {
 
 	model := readyModel(t, true)
 	model.Update(tea.WindowSizeMsg{Width: 180, Height: 30})
-	content := commandOutput(model.printHelp())
+	content := modelCommandOutput(model, model.printHelp())
 
 	assert.Contains(t, content, "terminal owns conversation history")
 	assert.Contains(t, content, "drag normally to select and copy text")

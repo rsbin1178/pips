@@ -472,6 +472,16 @@ func compactShellPreview(activity toolActivity) []string {
 }
 
 func compactPatchPreview(activity toolActivity) []string {
+	if activity.state == toolStateFailed {
+		if containsSensitiveToolText(activity.body) {
+			return []string{"[sensitive result omitted]"}
+		}
+		if lines := boundedFailureToolLines(activity.body, compactToolPreviewLines); len(lines) > 0 {
+			return lines
+		}
+
+		return []string{toolActivityReason(activity)}
+	}
 	if !activity.hasHeader {
 		return nil
 	}

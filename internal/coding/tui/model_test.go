@@ -48,6 +48,8 @@ func TestTrustDefaultsToDenyAndBootstrapsSelection(t *testing.T) {
 	result := command()
 	updated, command = model.Update(result)
 	require.Same(t, model, updated)
+	require.Nil(t, command, "bootstrap alone cannot publish at placeholder geometry")
+	_, command = model.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	require.NotNil(t, command)
 	assert.Contains(t, driveModelCommandsCapture(t, model, command), "Pips")
 	assert.Equal(t, []bool{false}, decisions)
@@ -643,7 +645,8 @@ func TestSubscriptionSnapshotCommitsMissedStableTimeline(t *testing.T) {
 	}
 
 	_, command := model.Update(subscriptionStartedMsg{
-		supported: true,
+		generation: model.subscriptionSeq,
+		supported:  true,
 		observation: coding.EventObservation{
 			State: state,
 		},
@@ -678,6 +681,7 @@ func readyModelWithController(
 			return controller, nil
 		},
 	})
+	model.Update(tea.WindowSizeMsg{Width: defaultWidth, Height: defaultHeight})
 	_, command := model.Update(bootstrapResult{controller: controller})
 	if model.starting {
 		driveModelCommands(t, model, command)

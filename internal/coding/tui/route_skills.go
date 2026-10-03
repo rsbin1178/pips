@@ -86,7 +86,7 @@ func (m *Model) updateSkillsRouteKey(message tea.KeyPressMsg) (tea.Model, tea.Cm
 		}
 		m.setLayout()
 
-		return m, tea.Sequence(m.commitStableTimeline(), m.composer.Focus())
+		return m, m.afterScrollback(m.commitStableTimeline(), m.composer.Focus())
 	}
 	if m.route.controlling {
 		return m, nil

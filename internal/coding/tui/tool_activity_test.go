@@ -519,6 +519,117 @@ func TestPatchCodePreviewBoundsLongLinesAndDetailBytes(t *testing.T) {
 	assert.True(t, strings.HasSuffix(detail, "…"))
 }
 
+func TestTimelineShowsPatchFailureReason(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		code         string
+		body         string
+		unstructured bool
+		want         string
+	}{
+		{
+			name: "missing add prefix", code: "invalid_argument",
+			body: "coding patch: invalid patch: add line 4 must start with +",
+			want: "coding patch: invalid patch: add line 4 must start with +",
+		},
+		{
+			name: "missing hunk prefix", code: "invalid_argument",
+			body: "coding patch: invalid patch: hunk line 8 must start with space, +, or -",
+			want: "coding patch: invalid patch: hunk line 8 must start with space, +, or -",
+		},
+		{
+			name: "context conflict", code: "conflict",
+			body: "coding patch: context conflict: hunk 1 matched 0 locations",
+			want: "coding patch: context conflict: hunk 1 matched 0 locations",
+		},
+		{
+			name: "unstructured rejection", unstructured: true,
+			body: "tool call denied by policy",
+			want: "tool call denied by policy",
+		},
+		{
+			name: "code without body", code: "permission_denied",
+			want: "permission denied",
+		},
+		{
+			name: "sensitive error", code: "invalid_argument",
+			body: "invalid value API_KEY=do-not-disclose",
+			want: "[sensitive result omitted]",
+		},
+		{
+			name: "terminal control characters", code: "invalid_argument",
+			body: "\x1b[31minvalid patch\x1b[0m\r\nline\t4\x00",
+			want: "invalid patch\n    line    4",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			text := test.body
+			if !test.unstructured {
+				text = fmt.Sprintf(
+					`{"schema":"pips.coding.tool_result/v1alpha1","ok":false,"tool":"apply_patch","code":%q}`,
+					test.code,
+				) + "\n\n" + test.body
+			}
+			call := ai.ToolCallPart{
+				ID: "call-1", Name: "apply_patch",
+				Args: ai.JSON(`{"patch":"not a valid patch +do-not-render"}`),
+			}
+			result := ai.ToolResultError(call.ID, call.Name, text)
+			state := coding.State{
+				Transcript: []ai.Message{ai.Assistant(call), result},
+				Tools: []coding.ToolState{{
+					Call: coding.ToolCall{
+						ID: call.ID, Name: call.Name, Arguments: call.Args,
+					},
+					Status: coding.ToolStatusCompleted, Result: result,
+				}},
+			}
+			rendered := renderTimeline(
+				projectTimeline(state), newMarkdownRenderer(8), 100, themeDark, true,
+			)
+			assert.Equal(t, "✗ Workspace update failed\n  └ "+test.want, rendered)
+			assert.NotContains(t, rendered, "+do-not-render")
+			assert.NotContains(t, rendered, "do-not-disclose")
+
+			state.Tools = nil
+			replayed := renderTimeline(
+				projectTimeline(state), newMarkdownRenderer(8), 100, themeDark, true,
+			)
+			assert.Equal(t, rendered, replayed)
+		})
+	}
+}
+
+func TestTimelineBoundsPatchFailureReason(t *testing.T) {
+	t.Parallel()
+
+	body := "invalid patch\nfirst detail\nomitted detail\nanother detail\nlast detail"
+	result := ai.ToolResultError("call-1", "apply_patch",
+		`{"schema":"pips.coding.tool_result/v1alpha1","ok":false,"tool":"apply_patch","code":"invalid_argument"}`+
+			"\n\n"+body,
+	)
+	state := coding.State{Tools: []coding.ToolState{{
+		Call:   coding.ToolCall{ID: "call-1", Name: "apply_patch"},
+		Status: coding.ToolStatusCompleted, Result: result,
+	}}}
+	blocks := projectTimeline(state)
+	rendered := renderTimeline(blocks, newMarkdownRenderer(8), 80, themeDark, true)
+
+	assert.Equal(t, "✗ Workspace update failed\n"+
+		"  └ invalid patch\n"+
+		"    first detail\n"+
+		"    … +2 lines (ctrl+t for details)\n"+
+		"    last detail", rendered)
+	assert.NotContains(t, rendered, "omitted detail")
+	require.Len(t, blocks, 1)
+	assert.Contains(t, newToolDetailView(blocks[0]).text(), "omitted detail")
+}
+
 func TestTimelineDoesNotRenderPatchCodeForFailedOrMalformedCalls(t *testing.T) {
 	t.Parallel()
 

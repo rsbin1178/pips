@@ -39,6 +39,7 @@ var commands = []commandDescriptor{
 	{name: "new", description: "start a new session", idleOnly: true},
 	{name: "resume", description: "resume a workspace session", idleOnly: true},
 	{name: "plan", description: "enter read-only Plan Mode", idleOnly: true},
+	{name: "goal", description: "set, inspect, pause, resume, or clear a goal", arguments: true},
 	{name: "view-plan", aliases: []string{"show-plan", "plan-view"}, description: "preview the saved session plan", idleOnly: true},
 	{name: "mode", description: "switch Agent or Plan operating mode", idleOnly: true},
 	{name: "agents", description: "inspect read-only specialist runs", idleOnly: true},
@@ -177,6 +178,10 @@ func (m *Model) executeCommand(command commandDescriptor) (tea.Model, tea.Cmd) {
 		m.picker.err = errors.New("command argument is too long")
 
 		return m, nil
+	}
+
+	if command.name == "goal" {
+		return m.executeGoalCommand(arguments)
 	}
 
 	m.picker.query = command.name
