@@ -98,7 +98,35 @@ func TestMergeAgentPluginDefinitionsIsolatesDuplicateAndLimit(t *testing.T) {
 	assert.Equal(t, []string{"shared", "plugin-one"}, definitionIDs(merged.List()))
 	require.Len(t, diagnostics, 2)
 	assert.Equal(t, "definition_duplicate", diagnostics[0].Code)
+	assert.Equal(t,
+		`Agent Plugin MCP server "shared" conflicts with another configured server and was ignored`,
+		mcpDiagnosticMessage(diagnostics[0]),
+	)
 	assert.Equal(t, "definition_limit", diagnostics[1].Code)
+	assert.Equal(t,
+		`Agent Plugin MCP server "plugin-two" exceeds the client-wide server limit and was ignored`,
+		mcpDiagnosticMessage(diagnostics[1]),
+	)
+}
+
+func TestMCPDiagnosticMessageNamesRuntimeStageServer(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, "exa: server connection could not be initialized", mcpDiagnosticMessage(
+		codingmcp.ConnectionDiagnostic{
+			ServerID: "exa", Stage: "connect", Code: "connect_failed",
+			Message: "server connection could not be initialized",
+		},
+	))
+	assert.Equal(t, `user MCP server "exa" was ignored: bad`, mcpDiagnosticMessage(
+		codingmcp.ConnectionDiagnostic{
+			ServerID: "exa", Stage: "configuration", Code: "definition_invalid",
+			Message: `user MCP server "exa" was ignored: bad`,
+		},
+	))
+	assert.Equal(t, "refresh failed", mcpDiagnosticMessage(
+		codingmcp.ConnectionDiagnostic{Stage: "refresh", Message: "refresh failed"},
+	))
 }
 
 func definitionIDs(definitions []codingmcp.Definition) []string {

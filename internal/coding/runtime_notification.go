@@ -193,12 +193,23 @@ func (r *Runtime) deliverNotificationBatch(ctx context.Context) {
 		return
 	}
 
+	goalOwned, goalRevoked := r.goalNotificationOwnership(rootID)
+	if goalRevoked {
+		if err := r.notifications.Acknowledge(notificationIDs(batch)...); err == nil {
+			r.signalNotifications()
+		}
+		return
+	}
 	r.mu.Lock()
 	if r.closed || r.closing {
 		r.mu.Unlock()
 		return
 	}
 	current := r.interaction
+	if goalOwned && r.state.Goal.Status != GoalRunning && r.state.Goal.Status != GoalWaiting {
+		r.mu.Unlock()
+		return
+	}
 	phase := r.state.Phase
 	active := r.active
 	if active != nil && current != nil && phase == PhaseRunning &&
@@ -216,7 +227,7 @@ func (r *Runtime) deliverNotificationBatch(ctx context.Context) {
 
 		return
 	}
-	if active != nil || current != nil || phase != PhaseIdle {
+	if active != nil || current != nil || phase != PhaseIdle || r.goalDriver != nil {
 		r.mu.Unlock()
 		return
 	}
@@ -342,6 +353,9 @@ func (r *Runtime) acknowledgeNotificationMessage(message ai.Message) error {
 		ids = verified
 	}
 	if err := r.notifications.Acknowledge(ids...); err != nil {
+		return err
+	}
+	if err := r.recordGoalNotificationDelivery(ids); err != nil {
 		return err
 	}
 	r.signalNotifications()
