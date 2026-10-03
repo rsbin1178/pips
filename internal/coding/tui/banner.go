@@ -36,7 +36,25 @@ type startupBannerContext struct {
 	noColor   bool
 }
 
+// publishStartup rendezvous: neither default geometry nor bootstrap alone may
+// consume the banner/projection cursor or start follow-on subscription work.
+func (m *Model) publishStartup() tea.Cmd {
+	if m.lifecycle != lifecycleReady || !m.sizeReady || m.startupPublished {
+		return nil
+	}
+
+	m.startupPublished = true
+	commit := m.commitStartupOutput()
+
+	return m.afterScrollback(commit, m.composer.Focus(), m.startSubscription(),
+		m.loadPlanViewIfNeeded(), m.startActivityClock(false))
+}
+
 func (m *Model) commitStartupOutput() tea.Cmd {
+	if !m.sizeReady {
+		return nil
+	}
+
 	return m.commitBannerOutput(m.takeStartupBanner())
 }
 

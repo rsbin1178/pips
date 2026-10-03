@@ -27,7 +27,7 @@ func TestStreamingCodeBlockKeepsOneManagedTailAndCommitsEveryRowOnce(t *testing.
 
 	source.WriteString("```python\nvalue_00 = 0\npartial")
 	model.state.Draft = []coding.MessageDelta{{Kind: ai.StreamTextDelta, Text: source.String()}}
-	outputs := []string{commandOutput(model.commitStableTimeline())}
+	outputs := []string{modelCommandOutput(model, model.commitStableTimeline())}
 	managedHeight := lipgloss.Height(model.View().Content)
 
 	for index := 1; index < 20; index++ {
@@ -37,7 +37,7 @@ func TestStreamingCodeBlockKeepsOneManagedTailAndCommitsEveryRowOnce(t *testing.
 			Kind: ai.StreamTextDelta,
 			Text: delta,
 		})
-		outputs = append(outputs, commandOutput(model.commitStableTimeline()))
+		outputs = append(outputs, modelCommandOutput(model, model.commitStableTimeline()))
 		assert.Equal(
 			t,
 			managedHeight,
@@ -50,7 +50,7 @@ func TestStreamingCodeBlockKeepsOneManagedTailAndCommitsEveryRowOnce(t *testing.
 	source.WriteString("\n```")
 	model.state.Transcript = []ai.Message{ai.AssistantText(source.String())}
 	model.state.Draft = nil
-	outputs = append(outputs, commandOutput(model.commitStableTimeline()))
+	outputs = append(outputs, modelCommandOutput(model, model.commitStableTimeline()))
 
 	combined := ansi.Strip(strings.Join(outputs, "\n"))
 
@@ -71,7 +71,7 @@ func TestStreamingTableStaysMutableUntilFinalized(t *testing.T) {
 
 	source := "| name | result |\n"
 	model.state.Draft = []coding.MessageDelta{{Kind: ai.StreamTextDelta, Text: source}}
-	first := commandOutput(model.commitStableTimeline())
+	first := modelCommandOutput(model, model.commitStableTimeline())
 	assert.NotContains(t, ansi.Strip(first), "name")
 	assert.Equal(t, "Table · preparing…", ansi.Strip(model.streaming.tail))
 
@@ -83,7 +83,7 @@ func TestStreamingTableStaysMutableUntilFinalized(t *testing.T) {
 		Kind: ai.StreamTextDelta,
 		Text: delta,
 	})
-	second := commandOutput(model.commitStableTimeline())
+	second := modelCommandOutput(model, model.commitStableTimeline())
 	assert.NotContains(t, ansi.Strip(second), "alpha")
 	assert.Equal(t, "Table · 0 rows", ansi.Strip(model.streaming.tail))
 	assert.Equal(t, managedHeight, lipgloss.Height(model.View().Content))
@@ -94,7 +94,7 @@ func TestStreamingTableStaysMutableUntilFinalized(t *testing.T) {
 		Kind: ai.StreamTextDelta,
 		Text: delta,
 	})
-	third := commandOutput(model.commitStableTimeline())
+	third := modelCommandOutput(model, model.commitStableTimeline())
 	assert.NotContains(t, ansi.Strip(third), "alpha")
 	assert.Equal(t, "Table · 1 row · alpha | one", ansi.Strip(model.streaming.tail))
 	assert.Equal(t, managedHeight, lipgloss.Height(model.View().Content))
@@ -105,7 +105,7 @@ func TestStreamingTableStaysMutableUntilFinalized(t *testing.T) {
 		Kind: ai.StreamTextDelta,
 		Text: delta,
 	})
-	fourth := commandOutput(model.commitStableTimeline())
+	fourth := modelCommandOutput(model, model.commitStableTimeline())
 	assert.Empty(t, fourth)
 	assert.Equal(
 		t,
@@ -121,14 +121,14 @@ func TestStreamingTableStaysMutableUntilFinalized(t *testing.T) {
 		Kind: ai.StreamTextDelta,
 		Text: delta,
 	})
-	fifth := commandOutput(model.commitStableTimeline())
+	fifth := modelCommandOutput(model, model.commitStableTimeline())
 	assert.NotContains(t, ansi.Strip(fifth), "beta")
 	assert.Equal(t, "Table · 2 rows · beta | two", ansi.Strip(model.streaming.tail))
 	assert.Equal(t, managedHeight, lipgloss.Height(model.View().Content))
 
 	model.state.Transcript = []ai.Message{ai.AssistantText(source)}
 	model.state.Draft = nil
-	final := commandOutput(model.commitStableTimeline())
+	final := modelCommandOutput(model, model.commitStableTimeline())
 	combined := ansi.Strip(strings.Join(
 		[]string{first, second, third, fourth, fifth, final},
 		"\n",
@@ -157,7 +157,7 @@ func TestStreamingLongTableKeepsFixedPreviewHeight(t *testing.T) {
 		Kind: ai.StreamTextDelta,
 		Text: source.String(),
 	}}
-	assert.Empty(t, commandOutput(model.commitStableTimeline()))
+	assert.Empty(t, modelCommandOutput(model, model.commitStableTimeline()))
 	managedHeight := lipgloss.Height(model.View().Content)
 
 	for index := 1; index <= 40; index++ {
@@ -168,14 +168,14 @@ func TestStreamingLongTableKeepsFixedPreviewHeight(t *testing.T) {
 			Text: delta,
 		})
 
-		assert.Empty(t, commandOutput(model.commitStableTimeline()))
+		assert.Empty(t, modelCommandOutput(model, model.commitStableTimeline()))
 		assert.Contains(t, ansi.Strip(model.streaming.tail), fmt.Sprintf("Table · %d ", index))
 		assert.Equal(t, managedHeight, lipgloss.Height(model.View().Content))
 	}
 
 	model.state.Transcript = []ai.Message{ai.AssistantText(source.String())}
 	model.state.Draft = nil
-	final := ansi.Strip(commandOutput(model.commitStableTimeline()))
+	final := ansi.Strip(modelCommandOutput(model, model.commitStableTimeline()))
 	assert.NotContains(t, final, "Table ·")
 
 	for index := 1; index <= 40; index++ {
@@ -197,12 +197,12 @@ func TestInterruptedStreamingDraftFlushesUncommittedTail(t *testing.T) {
 		Text: "completed row\nunfinished tail",
 	}}
 
-	first := commandOutput(model.commitStableTimeline())
+	first := modelCommandOutput(model, model.commitStableTimeline())
 	assert.NotContains(t, ansi.Strip(first), "unfinished tail")
 	assert.Contains(t, ansi.Strip(model.View().Content), "unfinished tail")
 
 	model.state.Draft = nil
-	final := commandOutput(model.commitStableTimeline())
+	final := modelCommandOutput(model, model.commitStableTimeline())
 	combined := ansi.Strip(first + "\n" + final)
 	assert.Equal(t, 1, strings.Count(combined, "completed row"))
 	assert.Equal(t, 1, strings.Count(combined, "unfinished tail"))
@@ -308,7 +308,7 @@ func TestStreamingKeepsRenderCoordinatesAcrossResize(t *testing.T) {
 
 	source := "```text\nresize_row_0\nresize_row_1\npartial"
 	model.state.Draft = []coding.MessageDelta{{Kind: ai.StreamTextDelta, Text: source}}
-	first := commandOutput(model.commitStableTimeline())
+	first := modelCommandOutput(model, model.commitStableTimeline())
 	assert.Equal(t, 24, model.streaming.width)
 
 	model.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
@@ -319,12 +319,12 @@ func TestStreamingKeepsRenderCoordinatesAcrossResize(t *testing.T) {
 		Kind: ai.StreamTextDelta,
 		Text: delta,
 	})
-	second := commandOutput(model.commitStableTimeline())
+	second := modelCommandOutput(model, model.commitStableTimeline())
 	assert.Equal(t, 24, model.streaming.width)
 
 	model.state.Transcript = []ai.Message{ai.AssistantText(source)}
 	model.state.Draft = nil
-	final := commandOutput(model.commitStableTimeline())
+	final := modelCommandOutput(model, model.commitStableTimeline())
 	combined := ansi.Strip(first + "\n" + second + "\n" + final)
 
 	for _, row := range []string{"resize_row_0", "resize_row_1", "resize_row_2"} {
@@ -332,7 +332,7 @@ func TestStreamingKeepsRenderCoordinatesAcrossResize(t *testing.T) {
 	}
 }
 
-func TestStableStreamPromotionWaitsOnlyForManagedGeometryChanges(t *testing.T) {
+func TestStableStreamPromotionNeedsNoPaintTimer(t *testing.T) {
 	t.Parallel()
 
 	model := readyModel(t, true)
@@ -346,16 +346,19 @@ func TestStableStreamPromotionWaitsOnlyForManagedGeometryChanges(t *testing.T) {
 	}}
 
 	first := sequenceMessages(t, model.commitStableTimeline())
-	_, firstWaits := first[0].(scrollbackRenderReadyMsg)
-	assert.True(t, firstWaits, "the first tail row changes managed geometry")
+	require.Len(t, first, 2)
+	_, firstDone := first[1].(scrollbackWriteDoneMsg)
+	require.True(t, firstDone)
+	model.Update(first[1])
 
 	model.state.Draft = append(model.state.Draft, coding.MessageDelta{
 		Kind: ai.StreamTextDelta,
 		Text: " tail\n\nthird paragraph\n\nnext partial",
 	})
 	second := sequenceMessages(t, model.commitStableTimeline())
-	_, secondWaits := second[0].(scrollbackRenderReadyMsg)
-	assert.False(t, secondWaits, "fixed-height stream promotion must not add a frame delay")
+	require.Len(t, second, 2)
+	_, secondDone := second[1].(scrollbackWriteDoneMsg)
+	assert.True(t, secondDone)
 }
 
 func TestActiveMarkdownTableStart(t *testing.T) {

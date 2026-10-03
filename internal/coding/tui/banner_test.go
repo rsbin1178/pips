@@ -26,6 +26,7 @@ func TestStartupBannerPrintsOnceBeforeStableTimeline(t *testing.T) {
 			return controller, nil
 		},
 	})
+	model.Update(tea.WindowSizeMsg{Width: defaultWidth, Height: defaultHeight})
 	_, command := model.Update(bootstrapResult{controller: controller})
 	printed := driveModelCommandsCapture(t, model, command)
 
@@ -41,7 +42,7 @@ func TestStartupBannerPrintsOnceBeforeStableTimeline(t *testing.T) {
 	assert.NotContains(t, model.View().Content, "Start a conversation")
 
 	model.resetScrollback()
-	reprinted := commandOutput(model.commitStartupOutput())
+	reprinted := modelCommandOutput(model, model.commitStartupOutput())
 	assert.NotContains(t, reprinted, "Pips")
 	assert.Contains(t, reprinted, "inspect the repository")
 }
@@ -154,6 +155,54 @@ func commandOutputs(command tea.Cmd) []string {
 			}
 
 			outputs = append(outputs, commandOutputs(command)...)
+		}
+
+		return outputs
+	default:
+		return nil
+	}
+}
+
+// modelCommandOutput is the projection-test driver. Unlike the old extraction
+// helper it acknowledges native writes, so successive calls exercise the FIFO.
+func modelCommandOutput(model *Model, command tea.Cmd) string {
+	return strings.Join(modelCommandOutputs(model, command), "\n")
+}
+
+func modelCommandOutputs(model *Model, command tea.Cmd) []string {
+	if command == nil {
+		return nil
+	}
+
+	message := command()
+	if done, ok := message.(scrollbackWriteDoneMsg); ok {
+		return modelCommandOutputs(model, model.finishScrollbackWrite(done.sequence))
+	}
+
+	if batch, ok := message.(tea.BatchMsg); ok {
+		var outputs []string
+		for _, cmd := range batch {
+			outputs = append(outputs, modelCommandOutputs(model, cmd)...)
+		}
+
+		return outputs
+	}
+
+	value := reflect.ValueOf(message)
+	if !value.IsValid() || value.Type().PkgPath() != "charm.land/bubbletea/v2" {
+		return nil
+	}
+
+	switch value.Type().Name() {
+	case "printLineMessage":
+		return []string{value.FieldByName("messageBody").String()}
+	case "sequenceMsg":
+		var outputs []string
+
+		for index := range value.Len() {
+			if cmd, ok := value.Index(index).Interface().(tea.Cmd); ok {
+				outputs = append(outputs, modelCommandOutputs(model, cmd)...)
+			}
 		}
 
 		return outputs

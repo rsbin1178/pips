@@ -484,7 +484,7 @@ func TestStatusReportUsesHumanValuesAndWrapsHelp(t *testing.T) {
 	assert.NotContains(t, status, "Model override:")
 	assert.NotContains(t, status, "Detached: false")
 
-	help := commandOutput(model.printHelp())
+	help := modelCommandOutput(model, model.printHelp())
 	for line := range strings.SplitSeq(strings.TrimSpace(help), "\n") {
 		assert.LessOrEqual(t, ansi.StringWidth(line), 60)
 	}

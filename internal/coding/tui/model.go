@@ -89,13 +89,15 @@ type exitResetMsg struct{}
 
 // Model is the root Bubble Tea state machine.
 type Model struct {
-	ctx       context.Context //nolint:containedctx // Program context owns every asynchronous command.
-	options   Options
-	lifecycle lifecycle
-	width     int
-	height    int
-	allow     bool
-	err       error
+	ctx              context.Context //nolint:containedctx // Program context owns every asynchronous command.
+	options          Options
+	lifecycle        lifecycle
+	width            int
+	height           int
+	sizeReady        bool
+	startupPublished bool
+	allow            bool
+	err              error
 
 	controller           Controller
 	state                coding.State
@@ -115,6 +117,7 @@ type Model struct {
 	renderWait           bool
 	bridge               *eventBridge
 	subscription         *subscriptionBridge
+	subscriptionSeq      uint64
 	subscriptionMode     bool
 	starting             bool
 	cancelStart          bool
@@ -150,8 +153,6 @@ type Model struct {
 	worktreeSummary      string
 	activity             activityIndicator
 	statusLineItems      []statusline.Item
-	refreshCursor        bool
-	cursorRefreshSeq     uint64
 }
 
 func newModel(ctx context.Context, options Options) *Model {
@@ -230,9 +231,16 @@ func (m *Model) Init() tea.Cmd {
 func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch message := message.(type) {
 	case tea.WindowSizeMsg:
+		if message.Width <= 0 || message.Height <= 0 {
+			return m, nil
+		}
+		m.sizeReady = true
 		m.width = max(1, message.Width)
 		m.height = message.Height
 		m.setLayout()
+		if !m.startupPublished {
+			return m, m.publishStartup()
+		}
 		m.rerenderTranscript(false)
 
 		return m, nil
@@ -284,13 +292,15 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.lifecycle = lifecycleReady
 		m.syncApprovalPrompt()
 		m.setLayout()
-		commit := m.commitStartupOutput()
-		activity := m.startActivityClock(false)
-
-		return m, tea.Sequence(commit, tea.Batch(
-			m.composer.Focus(), m.startSubscription(), m.loadPlanViewIfNeeded(), activity,
-		))
+		return m, m.publishStartup()
 	case subscriptionStartedMsg:
+		if message.generation != m.subscriptionSeq {
+			if message.bridge != m.subscription {
+				message.bridge.stop()
+			}
+
+			return m, nil
+		}
 		activityWasVisible := m.activityClockVisible()
 		m.subscriptionMode = message.supported
 		if message.err != nil {
@@ -326,11 +336,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.loadPlanViewIfNeeded(),
 			m.startActivityClock(activityWasVisible),
 		)
-		if commit != nil {
-			return m, tea.Sequence(commit, wait)
-		}
-
-		return m, wait
+		return m, m.afterScrollback(commit, wait)
 	case subscriptionEventMsg:
 		return m.updateSubscription(message)
 	case bridgeStartedMsg:
@@ -409,6 +415,8 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m.applyPlanDocument(message)
 	case bridgeImageMsg:
 		return m.updateBridgeImage(message)
+	case goalControlResultMsg:
+		return m.applyGoalControl(message)
 	case cancelResultMsg:
 		if message.beforeStart {
 			m.streamErr = errors.Join(m.streamErr, message.err)
@@ -677,6 +685,12 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.route.controlling = false
 		}
 		if replacementControl {
+			// Accepted native output survives replacement, but its old session's
+			// subscription/focus continuations must not run against the new one.
+			for index := range m.presentation.writes {
+				m.presentation.writes[index].after = nil
+			}
+			m.presentation.pendingRoute = routeOpenRequest{}
 			m.stopTeamWorkerRouteSubscription()
 			m.stopSubscription()
 			m.state = m.controller.Snapshot()
@@ -736,15 +750,15 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if replacementControl {
-			commands := []tea.Cmd{commit, m.startSubscription()}
+			commands := []tea.Cmd{m.startSubscription()}
 			if message.operation == operationResume {
 				commands = append(commands, m.probeTeamRecoveryAfterResume())
 			}
 
-			return m, tea.Sequence(commands...)
+			return m, m.afterScrollback(commit, commands...)
 		}
 
-		return m, tea.Sequence(commit, m.continueIfPaused())
+		return m, m.afterScrollback(commit, m.continueIfPaused())
 	case teamRecoveryProbeMsg:
 		if message.err != nil || message.sessionID == "" ||
 			message.sessionID != m.state.SessionID || len(message.values) == 0 ||
@@ -786,7 +800,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseMsg:
 		return m, nil
 	case tea.PasteMsg:
-		if m.lifecycle != lifecycleReady {
+		if m.lifecycle != lifecycleReady || !m.sizeReady {
 			return m, nil
 		}
 		if m.routeUsesSearch() {
@@ -829,26 +843,8 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshToolDetailRoute()
 
 		return m, nil
-	case scrollbackRenderReadyMsg:
-		return m, nil
 	case scrollbackWriteDoneMsg:
 		return m, m.finishScrollbackWrite(message.sequence)
-	case scrollbackCursorRefreshMsg:
-		if message.sequence != m.cursorRefreshSeq {
-			return m, nil
-		}
-		m.refreshCursor = true
-
-		return m, tea.Tick(renderFrame, func(time.Time) tea.Msg {
-			return scrollbackCursorRefreshDoneMsg(message)
-		})
-	case scrollbackCursorRefreshDoneMsg:
-		if message.sequence != m.cursorRefreshSeq {
-			return m, nil
-		}
-		m.refreshCursor = false
-
-		return m, nil
 	case activityTickMsg:
 		if !m.activityClockVisible() {
 			return m, nil
@@ -876,6 +872,9 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 
 // View renders the inline lifecycle shell or ready chat layout.
 func (m *Model) View() tea.View {
+	if m.lifecycle == lifecycleReady && !m.sizeReady {
+		return tea.NewView("Loading…")
+	}
 	var content string
 
 	switch m.lifecycle {
@@ -902,6 +901,13 @@ func (m *Model) View() tea.View {
 
 func (m *Model) updateKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := message.String()
+	if m.lifecycle == lifecycleReady && !m.sizeReady {
+		if key == keyCtrlC {
+			return m, tea.Quit
+		}
+
+		return m, nil
+	}
 
 	switch m.lifecycle {
 	case lifecycleTrust:
@@ -1030,6 +1036,15 @@ func (m *Model) updateReadyKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.route.kind != routeNone && !inlineTeamRoute {
 		return m.updateRouteKey(message)
 	}
+	if m.state.Goal.ID != "" && message.String() == "ctrl+k" && m.picker.kind == pickerNone {
+		m.openCommandPicker()
+		m.picker.query = "goal "
+		m.syncCommandInput()
+		return m, nil
+	}
+	if m.goalCommandPickerActive() {
+		return m.updatePickerKey(message)
+	}
 	if m.prompt.kind != promptNone {
 		return m.updatePromptKey(message)
 	}
@@ -1148,7 +1163,7 @@ func (m *Model) readyView() tea.View {
 		}
 		footer = append(footer, activity)
 	}
-	if prompt := m.promptView(); prompt != "" {
+	if prompt := m.promptView(); prompt != "" && !m.goalCommandPickerActive() {
 		promptFooterIndex = len(footer)
 		promptContent = prompt
 		footer = append(footer, prompt)
@@ -1217,7 +1232,7 @@ func (m *Model) readyView() tea.View {
 	view.MouseMode = tea.MouseModeNone
 	view.WindowTitle = appTitle
 	view.Cursor = m.composer.Cursor()
-	if m.prompt.kind != promptNone || m.pickerHidesComposerCursor() || m.teamPanel.isFocused ||
+	if (m.prompt.kind != promptNone && !m.goalCommandPickerActive()) || m.pickerHidesComposerCursor() || m.teamPanel.isFocused ||
 		(m.teamRouteIsInline() && (m.route.loading || !teamRouteInputStage(m.route.team.stage))) {
 		view.Cursor = nil
 	}
@@ -1240,9 +1255,6 @@ func (m *Model) readyView() tea.View {
 		cursorX, cursorY := m.composerBoxCursorOffset()
 		view.Cursor.X += cursorX
 		view.Cursor.Y += composerOffset + cursorY
-		if m.refreshCursor {
-			view.Cursor.Blink = !view.Cursor.Blink
-		}
 	}
 
 	return view
@@ -1466,7 +1478,10 @@ func fitStatusLeft(head, tail, separator string, width int) string {
 }
 
 func (m *Model) statusExtras() []string {
-	extras := make([]string, 0, 3)
+	extras := make([]string, 0, 4)
+	if m.state.Goal.ID != "" {
+		extras = append(extras, "goal "+sanitizeInspectionText(string(m.state.Goal.Status)))
+	}
 	if m.queued > 0 {
 		extras = append(extras, fmt.Sprintf("%d queued", m.queued))
 	}
@@ -1732,17 +1747,7 @@ func (m *Model) actionContext() actionContext {
 
 type renderTickMsg struct{}
 
-type scrollbackCursorRefreshMsg struct {
-	sequence uint64
-}
-
 type scrollbackWriteDoneMsg struct {
-	sequence uint64
-}
-
-type scrollbackRenderReadyMsg struct{}
-
-type scrollbackCursorRefreshDoneMsg struct {
 	sequence uint64
 }
 
@@ -1886,6 +1891,9 @@ func (m *Model) startStream(operation streamOperation) tea.Cmd {
 }
 
 func (m *Model) continueIfPaused() tea.Cmd {
+	if m.state.Goal.Status == coding.GoalPaused || m.state.Goal.Status == coding.GoalInterrupted {
+		return nil
+	}
 	if m.state.Phase != coding.PhasePaused || m.bridge != nil || m.starting {
 		return nil
 	}
@@ -1923,11 +1931,7 @@ func (m *Model) updateStream(message streamItemMsg) (tea.Model, tea.Cmd) {
 	m.waiting = true
 	wait := m.bridge.wait()
 	commit := m.commitStableTimeline()
-	if commit != nil {
-		return m, tea.Sequence(commit, tea.Batch(wait, refresh))
-	}
-
-	return m, tea.Batch(wait, m.requestRender(), refresh)
+	return m, m.afterScrollback(commit, wait, m.requestRender(), refresh)
 }
 
 func (m *Model) reduceStreamItem(item streamItem) {
@@ -2095,8 +2099,15 @@ func (m *Model) startSubscription() tea.Cmd {
 		return nil
 	}
 
+	m.subscriptionSeq++
+	generation := m.subscriptionSeq
+	controller := m.controller
+
 	return func() tea.Msg {
-		return startSubscription(m.controller)
+		message := startSubscription(controller)
+		message.generation = generation
+
+		return message
 	}
 }
 
@@ -2128,11 +2139,7 @@ func (m *Model) updateSubscription(message subscriptionEventMsg) (tea.Model, tea
 	)
 	wait := message.bridge.wait()
 	commit := m.commitStableTimeline()
-	if commit != nil {
-		return m, tea.Sequence(commit, tea.Batch(wait, refresh))
-	}
-
-	return m, tea.Batch(wait, m.requestRender(), refresh)
+	return m, m.afterScrollback(commit, wait, m.requestRender(), refresh)
 }
 
 func (m *Model) reduceObservedEvent(event coding.Event) {
@@ -2176,10 +2183,13 @@ func cloneChildStates(values map[string]coding.State) map[string]coding.State {
 }
 
 func (m *Model) stopSubscription() {
-	if m == nil || m.subscription == nil {
+	if m == nil {
 		return
 	}
 
+	// Invalidate observations already dispatched as well as a live bridge.
+	// Clearing queued scrollback continuations alone cannot stop their replies.
+	m.subscriptionSeq++
 	m.subscription.stop()
 	m.subscription = nil
 }

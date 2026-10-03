@@ -4,7 +4,6 @@
 package tui
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -177,25 +176,6 @@ func TestPTYLifecycleRestoresTerminalBeforeControllerClose(t *testing.T) {
 	} {
 		assert.NotContains(t, value, private)
 	}
-}
-
-type synchronizedBuffer struct {
-	mu     sync.Mutex
-	buffer bytes.Buffer
-}
-
-func (b *synchronizedBuffer) Write(value []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	return b.buffer.Write(value)
-}
-
-func (b *synchronizedBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	return b.buffer.String()
 }
 
 func waitForPTYOutput(

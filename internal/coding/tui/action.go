@@ -94,7 +94,7 @@ var defaultActions = []actionBinding{
 	},
 	{
 		ID:       actionCommand,
-		Contexts: []actionContext{contextIdle},
+		Contexts: []actionContext{contextIdle, contextRunning, contextPaused},
 		Keys:     []string{"ctrl+k", "/"},
 		Label:    "commands",
 	},

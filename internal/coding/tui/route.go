@@ -99,31 +99,57 @@ func (r routeOpenRequest) pending() bool {
 	return r.kind != routeNone
 }
 
+// nativeWrite is one accepted logical payload. Only the head is dispatched.
+// The output sequence and queue deliberately survive session projection resets.
+type nativeWrite struct {
+	sequence uint64
+	content  string
+	after    []tea.Cmd
+}
+
 type presentationState struct {
 	writeSequence uint64
-	writes        map[uint64]struct{}
+	writes        []nativeWrite
 	pendingRoute  routeOpenRequest
-}
-
-func (p *presentationState) beginScrollbackWrite() uint64 {
-	p.writeSequence++
-	if p.writes == nil {
-		p.writes = make(map[uint64]struct{})
-	}
-
-	p.writes[p.writeSequence] = struct{}{}
-
-	return p.writeSequence
-}
-
-func (p *presentationState) finishScrollbackWrite(sequence uint64) bool {
-	delete(p.writes, sequence)
-
-	return len(p.writes) == 0
 }
 
 func (p *presentationState) hasScrollbackWrites() bool {
 	return len(p.writes) > 0
+}
+
+func (m *Model) enqueueScrollback(content string) tea.Cmd {
+	m.presentation.writeSequence++
+
+	m.presentation.writes = append(m.presentation.writes, nativeWrite{
+		sequence: m.presentation.writeSequence, content: content,
+	})
+	if len(m.presentation.writes) != 1 {
+		return nil
+	}
+
+	return m.dispatchScrollback()
+}
+
+func (m *Model) dispatchScrollback() tea.Cmd {
+	write := m.presentation.writes[0]
+
+	return tea.Sequence(tea.Println(write.content), func() tea.Msg {
+		return scrollbackWriteDoneMsg{sequence: write.sequence}
+	})
+}
+
+// afterScrollback attaches continuation commands to the last accepted write,
+// not to its dispatch command (which is nil while another write is in flight).
+// Commands capture their inputs now; none read mutable Model state off-loop.
+func (m *Model) afterScrollback(dispatch tea.Cmd, after ...tea.Cmd) tea.Cmd {
+	if !m.presentation.hasScrollbackWrites() {
+		return tea.Sequence(dispatch, tea.Batch(after...))
+	}
+
+	last := len(m.presentation.writes) - 1
+	m.presentation.writes[last].after = append(m.presentation.writes[last].after, after...)
+
+	return dispatch
 }
 
 // requestRouteOpen transfers full-area presentation ownership only after the
@@ -233,15 +259,27 @@ func (m *Model) setRouteComposerSnapshot(request routeOpenRequest) {
 }
 
 func (m *Model) finishScrollbackWrite(sequence uint64) tea.Cmd {
-	if !m.presentation.finishScrollbackWrite(sequence) ||
-		!m.presentation.pendingRoute.pending() {
+	if !m.presentation.hasScrollbackWrites() || m.presentation.writes[0].sequence != sequence {
 		return nil
+	}
+
+	after := m.presentation.writes[0].after
+	m.presentation.writes[0] = nativeWrite{}
+
+	m.presentation.writes = m.presentation.writes[1:]
+	if m.presentation.hasScrollbackWrites() {
+		return tea.Batch(m.dispatchScrollback(), tea.Batch(after...))
+	}
+
+	m.presentation.writes = nil
+	if !m.presentation.pendingRoute.pending() {
+		return tea.Batch(after...)
 	}
 
 	request := m.presentation.pendingRoute
 	m.presentation.pendingRoute = routeOpenRequest{}
 
-	return m.activateRoute(request)
+	return tea.Batch(m.activateRoute(request), tea.Batch(after...))
 }
 
 // closeRouteToParent restores the parent as presentation owner before it
@@ -261,7 +299,7 @@ func (m *Model) closeRouteToParent() tea.Cmd {
 	}
 	m.setLayout()
 
-	return tea.Sequence(
+	return m.afterScrollback(
 		m.commitStableTimeline(),
 		tea.Batch(m.composer.Focus(), m.startActivityClock(activityWasVisible)),
 	)

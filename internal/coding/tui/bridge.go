@@ -48,6 +48,7 @@ type subscriptionBridge struct {
 }
 
 type subscriptionStartedMsg struct {
+	generation  uint64
 	observation coding.EventObservation
 	bridge      *subscriptionBridge
 	supported   bool

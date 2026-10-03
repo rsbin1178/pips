@@ -102,7 +102,7 @@ func splitSessionSummaries(
 func (m *Model) closeSessionPicker(restoreInput bool) tea.Cmd {
 	m.dismissSessionPicker(restoreInput)
 
-	return tea.Sequence(m.commitStableTimeline(), m.composer.Focus())
+	return m.afterScrollback(m.commitStableTimeline(), m.composer.Focus())
 }
 
 func (m *Model) dismissSessionPicker(restoreInput bool) {
