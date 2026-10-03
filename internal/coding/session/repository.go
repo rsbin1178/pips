@@ -403,7 +403,10 @@ func (r *Repository) OpenTeamWorker(
 }
 
 // Fork creates and locks a failure-atomic copy of source's selected path. The
-// source remains open and unchanged; callers own the returned Handle.
+// source remains open and unchanged; callers own the returned Handle. Referenced
+// archives are independently published for the destination before its transcript.
+// Errors may leave unpublished-to-the-model archive objects; never remove them
+// based only on a failed or durability-uncertain transcript publication.
 func (r *Repository) Fork(
 	ctx context.Context,
 	source *Handle,
@@ -431,13 +434,15 @@ func (r *Repository) Fork(
 	if parentEntryID == "" {
 		parentEntryID = source.session.LeafID()
 	}
-	store, err := r.repo.ForkSession(source.session, options.AtEntryID, id, map[string]string{
+	store, err := r.repo.ForkSession(source.session, parentEntryID, id, map[string]string{
 		extraWorkspaceID:     source.meta.WorkspaceID,
 		extraWorkspacePath:   source.meta.WorkspacePath,
 		extraKind:            string(KindConversation),
 		extraParentSessionID: source.meta.ID,
 		extraParentEntryID:   parentEntryID,
-	})
+	}, harness.ForkOptions{PrepareArchives: func(archiveIDs []string) error {
+		return r.CopyArchives(ctx, source, id, archiveIDs)
+	}})
 	if err != nil {
 		return nil, errors.Join(err, lock.Close())
 	}
@@ -517,9 +522,10 @@ func (r *Repository) List(ctx context.Context) ([]Metadata, error) {
 	return metas, nil
 }
 
-// Delete permanently removes one durable conversation. Missing conversations
-// are already in the desired state and therefore succeed. Child and Team
-// Worker transcripts are never deleted through this user-facing boundary.
+// Delete permanently removes one durable conversation and only its own history
+// directory. The transcript deletion is synced before removing archives. Missing
+// conversations succeed without cleaning archives that might be referenced by
+// an uncertain write. Child and Team Worker transcripts are never deleted here.
 func (r *Repository) Delete(ctx context.Context, id string) (resultErr error) {
 	if err := r.validate(); err != nil {
 		return err
@@ -560,11 +566,7 @@ func (r *Repository) Delete(ctx context.Context, id string) (resultErr error) {
 		return err
 	}
 
-	if err := r.repo.Delete(id); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-
-	return nil
+	return r.deleteConversationFiles(ctx, id)
 }
 
 func secureStoredSession(path string) (bool, error) {
