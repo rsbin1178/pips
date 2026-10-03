@@ -153,6 +153,35 @@ func TestConnectValidatesAndWrapsFailures(t *testing.T) {
 	assert.ErrorContains(t, err, "agent/mcp: connect")
 }
 
+func TestConnectReturnsWhenContextEndsAgainstUnresponsivePeer(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	httpServer := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		<-release
+	}))
+	t.Cleanup(httpServer.Close)
+	t.Cleanup(func() { close(release) })
+
+	// The SDK delivers notifications/cancelled for the abandoned handshake for
+	// up to five seconds and its failed-handshake close waits for it. Connect
+	// must not inherit that wait.
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	client, err := Connect(
+		ctx,
+		&mcp.Implementation{Name: "http-client", Version: "v1"},
+		&mcp.StreamableClientTransport{Endpoint: httpServer.URL},
+	)
+	elapsed := time.Since(started)
+
+	assert.Nil(t, client)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.ErrorContains(t, err, "agent/mcp: connect")
+	assert.Less(t, elapsed, 3*time.Second)
+}
+
 func TestClientToolsPaginatesAndExposesSessionFeatures(t *testing.T) {
 	t.Parallel()
 

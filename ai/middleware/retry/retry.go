@@ -11,7 +11,7 @@ import (
 	"context"
 	"errors"
 	"math"
-	"math/rand/v2"
+	rand "math/rand/v2"
 	"time"
 
 	"github.com/rsbin1178/pips/ai"

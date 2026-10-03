@@ -273,19 +273,36 @@ func (c *Connections) connect(
 	options ConnectionOptions,
 ) {
 	defer c.wg.Done()
-	defer c.settle()
 
+	release := c.attempt(ctx, server, factory, options)
+	// A failed server settles before its connection is released: closing an
+	// SDK session can wait on an unresponsive peer, and Wait stays bounded by
+	// the connect timeout. Close still waits for the release through wg.
+	c.settle()
+	if release != nil {
+		_ = release()
+	}
+}
+
+// attempt connects and lists one server. It returns the release for a
+// connection that did not join the catalog, or nil.
+func (c *Connections) attempt(
+	ctx context.Context,
+	server *managedServer,
+	factory TransportFactory,
+	options ConnectionOptions,
+) func() error {
 	transport, resource, transportErr := factory(ctx, server.definition)
 	if transportErr != nil {
 		var credential credentialError
 		if errors.As(transportErr, &credential) {
 			c.fail(server, "transport", "credential_unavailable", credential.Error())
 
-			return
+			return nil
 		}
 		c.fail(server, "transport", "transport_failed", "server transport could not be prepared")
 
-		return
+		return nil
 	}
 
 	connectCtx, cancel := context.WithTimeout(ctx, server.connectTimeout)
@@ -298,28 +315,33 @@ func (c *Connections) connect(
 	)
 	cancel()
 	if connectErr != nil {
-		_ = closeConnection(nil, resource)
-		c.fail(server, "connect", "connect_failed", "server connection could not be initialized")
+		c.fail(server, "connect", "connect_failed", failureMessage(
+			"server connection could not be initialized", connectErr, server, resource,
+		))
 
-		return
+		return func() error { return closeConnection(nil, resource) }
 	}
 
 	listCtx, listCancel := context.WithTimeout(ctx, server.connectTimeout)
 	tools, listErr := client.Tools(listCtx)
 	listCancel()
 	if listErr != nil {
-		_ = closeConnection(client, resource)
-		c.fail(server, "list", "list_failed", "server tools could not be listed")
+		c.fail(server, "list", "list_failed", failureMessage(
+			"server tools could not be listed", listErr, server, resource,
+		))
 
-		return
+		return func() error { return closeConnection(client, resource) }
 	}
 
 	if err := c.install(server, client, resource, tools); err != nil {
-		_ = closeConnection(client, resource)
 		if !errors.Is(err, errConnectionsClosed) {
 			c.fail(server, "list", "catalog_invalid", "server tools could not join the tool catalog")
 		}
+
+		return func() error { return closeConnection(client, resource) }
 	}
+
+	return nil
 }
 
 // install publishes one connected server. A client that arrives after Close
@@ -887,7 +909,8 @@ func connectionTransportFactory(
 				return nil, nil, err
 			}
 
-			httpClient, err := definitionHTTPClient(options.HTTPClient, definition.URL, headers)
+			observation := &httpObservation{}
+			httpClient, err := definitionHTTPClient(options.HTTPClient, definition.URL, headers, observation)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -895,7 +918,7 @@ func connectionTransportFactory(
 			return &sdk.StreamableClientTransport{
 				Endpoint:   definition.URL,
 				HTTPClient: httpClient,
-			}, nil, nil
+			}, observation, nil
 		default:
 			return nil, nil, fmt.Errorf("%w: unsupported transport", ErrInvalid)
 		}
@@ -903,15 +926,17 @@ func connectionTransportFactory(
 }
 
 type headerRoundTripper struct {
-	base    http.RoundTripper
-	headers []HTTPHeader
-	origin  *url.URL
+	base        http.RoundTripper
+	headers     []HTTPHeader
+	origin      *url.URL
+	observation *httpObservation
 }
 
 func (t headerRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
 	cloned := request.Clone(request.Context())
 	cloned.Header = request.Header.Clone()
-	if sameOrigin(t.origin, cloned.URL) {
+	origin := sameOrigin(t.origin, cloned.URL)
+	if origin {
 		for _, header := range t.headers {
 			if !hasHeader(cloned.Header, header.Name) {
 				cloned.Header.Set(header.Name, header.Value)
@@ -919,7 +944,12 @@ func (t headerRoundTripper) RoundTrip(request *http.Request) (*http.Response, er
 		}
 	}
 
-	return t.base.RoundTrip(cloned)
+	response, err := t.base.RoundTrip(cloned)
+	if origin {
+		t.observation.record(cloned, response)
+	}
+
+	return response, err
 }
 
 func hasHeader(headers http.Header, name string) bool {
@@ -932,7 +962,12 @@ func hasHeader(headers http.Header, name string) bool {
 	return false
 }
 
-func definitionHTTPClient(base *http.Client, rawURL string, headers []HTTPHeader) (*http.Client, error) {
+func definitionHTTPClient(
+	base *http.Client,
+	rawURL string,
+	headers []HTTPHeader,
+	observation *httpObservation,
+) (*http.Client, error) {
 	if base == nil {
 		return nil, fmt.Errorf("%w: nil HTTP client", ErrInvalid)
 	}
@@ -947,7 +982,7 @@ func definitionHTTPClient(base *http.Client, rawURL string, headers []HTTPHeader
 		transport = http.DefaultTransport
 	}
 	client.Transport = headerRoundTripper{
-		base: transport, headers: slices.Clone(headers), origin: endpoint,
+		base: transport, headers: slices.Clone(headers), origin: endpoint, observation: observation,
 	}
 	if len(headers) == 0 {
 		return &client, nil

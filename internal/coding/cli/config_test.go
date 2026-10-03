@@ -303,6 +303,7 @@ sandbox = "workspace-write"
 	assert.Contains(t, output, "sandbox ok platform=test")
 	assert.Contains(t, output, "runtime=test-runtime runtime_version=1.2.3")
 	assert.Contains(t, output, "sandbox notice home_readable=true")
+	assert.Contains(t, output, "network ok proxy=none")
 
 	writeCLIFile(t, fixture.layout.ConfigFile(), `
 sandbox = "full-access"
@@ -438,6 +439,7 @@ func (f cliFixture) dependencies(environment map[string]string) cli.Dependencies
 				ProcessIsolation: true,
 			}, nil
 		},
+		SystemProxy: func(context.Context) string { return "" },
 	}
 }
 
