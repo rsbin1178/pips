@@ -54,6 +54,10 @@ func validateStoredEntry(entry Entry, seen map[string]int, entries []Entry) erro
 
 	switch entry.Kind {
 	case KindMessage, KindModelChange, KindCustom, KindName:
+	case KindContextCheckpoint:
+		if err := validateCheckpointSource(entry.ParentID, seen, entries); err != nil {
+			return err
+		}
 	case KindLeaf:
 		if entry.LeafID != "" {
 			if _, ok := seen[entry.LeafID]; !ok {
@@ -71,6 +75,9 @@ func validateStoredEntry(entry Entry, seen map[string]int, entries []Entry) erro
 		if !isAncestor(entry.FirstKeptID, entry.ParentID, seen, entries) {
 			return fmt.Errorf("compaction boundary %q is not on the active path", entry.FirstKeptID)
 		}
+		if !isCompactionBoundary(entry.FirstKeptID, entry.ParentID, seen, entries) {
+			return fmt.Errorf("compaction boundary %q crosses a full checkpoint", entry.FirstKeptID)
+		}
 	case KindBranchSummary:
 		if entry.FromID != rootEntryID {
 			if _, ok := seen[entry.FromID]; !ok {
@@ -84,6 +91,9 @@ func validateStoredEntry(entry Entry, seen map[string]int, entries []Entry) erro
 
 //nolint:gocyclo // The closed Entry kind union is intentionally validated in one switch.
 func validateEntryPayload(entry Entry) error {
+	if err := validateCheckpointEntry(entry); err != nil {
+		return err
+	}
 	if len(entry.Summary) > maxEntryTextBytes || len(entry.Data) > maxEntryTextBytes {
 		return fmt.Errorf("entry %q payload is too large", entry.ID)
 	}
@@ -107,6 +117,8 @@ func validateEntryPayload(entry Entry) error {
 		if strings.TrimSpace(string(entry.Provider)) == "" || strings.TrimSpace(entry.ModelID) == "" {
 			return fmt.Errorf("model change entry %q is incomplete", entry.ID)
 		}
+	case KindContextCheckpoint:
+		// The versioned checkpoint payload was validated above.
 	case KindCompaction:
 		if strings.TrimSpace(entry.Summary) == "" || entry.FirstKeptID == "" || entry.TokensBefore < 0 {
 			return fmt.Errorf("compaction entry %q is incomplete", entry.ID)

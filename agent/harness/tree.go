@@ -45,6 +45,9 @@ type TreeNode struct {
 	OnActivePath bool
 	HasSummary   bool
 	Compacted    bool
+	// CheckpointVersion is nonzero only for full context checkpoints. Kind
+	// distinguishes them from legacy retained-tail compactions.
+	CheckpointVersion int
 }
 
 // Tree returns a bounded defensive projection of the durable Session graph.
@@ -94,9 +97,12 @@ func (s *Session) Tree(limits TreeLimits) (TreeSnapshot, error) {
 			ID: entry.ID, ParentID: entry.ParentID, Kind: entry.Kind,
 			CreatedAt: entry.Time, Depth: depth, Label: labels[entry.ID],
 			Current: entry.ID == s.leaf, OnActivePath: active,
-			HasSummary: entry.Kind == KindCompaction || entry.Kind == KindBranchSummary,
-			Compacted:  entry.Kind == KindCompaction,
+			HasSummary: entry.Kind == KindCompaction || entry.Kind == KindBranchSummary || entry.Kind == KindContextCheckpoint,
+			Compacted:  entry.Kind == KindCompaction || entry.Kind == KindContextCheckpoint,
 		})
+		if entry.Checkpoint != nil {
+			snapshot.Nodes[len(snapshot.Nodes)-1].CheckpointVersion = entry.Checkpoint.Version
+		}
 	}
 
 	snapshot.Nodes = slices.Clone(snapshot.Nodes)

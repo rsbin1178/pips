@@ -24,6 +24,9 @@ const (
 	// KindCompaction replaces earlier history with a summary; context
 	// reconstruction cuts at FirstKeptID (see [Session.Context]).
 	KindCompaction Kind = "compaction"
+	// KindContextCheckpoint replaces all ancestor context with a versioned
+	// continuation seed. Ancestor entries remain available in the raw graph.
+	KindContextCheckpoint Kind = "context_checkpoint"
 	// KindBranchSummary carries a summary of an abandoned branch, injected
 	// when navigating the tree.
 	KindBranchSummary Kind = "branch_summary"
@@ -68,6 +71,10 @@ type Entry struct {
 	TokensBefore int
 	FromID       string
 
+	// Checkpoint and TokensBefore are set on context_checkpoint entries.
+	// ParentID identifies the complete ancestor context being replaced.
+	Checkpoint *ContextCheckpoint
+
 	// Custom names the application entry type and Data carries its payload.
 	Custom string
 	Data   ai.JSON
@@ -96,10 +103,11 @@ type entryJSON struct {
 	Provider ai.Provider `json:"provider,omitempty"`
 	ModelID  string      `json:"model_id,omitempty"`
 
-	Summary      string `json:"summary,omitempty"`
-	FirstKeptID  string `json:"first_kept_id,omitempty"`
-	TokensBefore int    `json:"tokens_before,omitempty"`
-	FromID       string `json:"from_id,omitempty"`
+	Summary      string             `json:"summary,omitempty"`
+	FirstKeptID  string             `json:"first_kept_id,omitempty"`
+	TokensBefore int                `json:"tokens_before,omitempty"`
+	FromID       string             `json:"from_id,omitempty"`
+	Checkpoint   *ContextCheckpoint `json:"checkpoint,omitempty"`
 
 	Custom string  `json:"custom,omitempty"`
 	Data   ai.JSON `json:"data,omitempty"`
@@ -113,11 +121,16 @@ type entryJSON struct {
 }
 
 func toEnvelope(e Entry) (entryJSON, error) {
+	if err := validateCheckpointEntry(e); err != nil {
+		return entryJSON{}, fmt.Errorf("%w: %w", ErrInvalidEntry, err)
+	}
+
 	envelope := entryJSON{
 		Kind: e.Kind, ID: e.ID, ParentID: e.ParentID, Time: e.Time, Usage: e.Usage,
 		Provider: e.Provider, ModelID: e.ModelID,
 		Summary: e.Summary, FirstKeptID: e.FirstKeptID, TokensBefore: e.TokensBefore, FromID: e.FromID,
-		Custom: e.Custom, Data: e.Data, TargetID: e.TargetID, Label: e.Label, Name: e.Name, LeafID: e.LeafID,
+		Checkpoint: e.Checkpoint,
+		Custom:     e.Custom, Data: e.Data, TargetID: e.TargetID, Label: e.Label, Name: e.Name, LeafID: e.LeafID,
 	}
 
 	if e.Message != nil {
@@ -137,7 +150,8 @@ func fromEnvelope(env entryJSON) (Entry, error) {
 		Kind: env.Kind, ID: env.ID, ParentID: env.ParentID, Time: env.Time, Usage: env.Usage,
 		Provider: env.Provider, ModelID: env.ModelID,
 		Summary: env.Summary, FirstKeptID: env.FirstKeptID, TokensBefore: env.TokensBefore, FromID: env.FromID,
-		Custom: env.Custom, Data: env.Data, TargetID: env.TargetID, Label: env.Label, Name: env.Name, LeafID: env.LeafID,
+		Checkpoint: env.Checkpoint,
+		Custom:     env.Custom, Data: env.Data, TargetID: env.TargetID, Label: env.Label, Name: env.Name, LeafID: env.LeafID,
 	}
 
 	if len(env.Message) > 0 {
@@ -147,6 +161,10 @@ func fromEnvelope(env entryJSON) (Entry, error) {
 		}
 
 		entry.Message = message
+	}
+
+	if err := validateCheckpointEntry(entry); err != nil {
+		return Entry{}, fmt.Errorf("%w: %w", ErrInvalidEntry, err)
 	}
 
 	return entry, nil

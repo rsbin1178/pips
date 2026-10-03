@@ -2,6 +2,7 @@
 package harness
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"sync"
@@ -25,6 +26,9 @@ type Session struct {
 	entries []Entry
 	byID    map[string]int
 	leaf    string // "" = root
+	// writeErr fences every writer after an uncertain checkpoint append, including
+	// completion journals and navigation. Only a fresh validated Session can resume.
+	writeErr error
 }
 
 // NewSession loads (or starts) a session over the given store.
@@ -140,6 +144,10 @@ func (s *Session) appendLocked(e Entry) (string, error) {
 }
 
 func (s *Session) appendUnderLocked(parentID string, e Entry) (string, error) {
+	if s.writeErr != nil {
+		return "", s.writeErr
+	}
+
 	e.ID = newID()
 	e.ParentID = parentID
 	e.Time = time.Now().UTC()
@@ -148,6 +156,10 @@ func (s *Session) appendUnderLocked(parentID string, e Entry) (string, error) {
 	}
 
 	if err := s.store.Append(e); err != nil {
+		if e.Kind == KindContextCheckpoint && !errors.Is(err, ErrStoreAppendNotAttempted) {
+			s.writeErr = fmt.Errorf("harness: checkpoint write durability uncertain; session writes fenced: %w", err)
+			return "", s.writeErr
+		}
 		return "", err
 	}
 
@@ -196,6 +208,10 @@ func (s *Session) AppendCompaction(summary, firstKeptID string, tokensBefore int
 	}
 	if !s.ancestorLocked(firstKeptID, s.leaf) {
 		return "", fmt.Errorf("%w: compaction boundary %s is not on the active path", ErrInvalidEntry, firstKeptID)
+	}
+
+	if !isCompactionBoundary(firstKeptID, s.leaf, s.byID, s.entries) {
+		return "", fmt.Errorf("%w: compaction boundary %s crosses a full checkpoint", ErrInvalidEntry, firstKeptID)
 	}
 
 	return s.appendLocked(Entry{
@@ -345,10 +361,10 @@ const (
 	BranchSummaryPrefix = "[Summary of an abandoned conversation branch]\n\n"
 )
 
-// Context reconstructs the model-visible conversation for the active branch:
-// the latest compaction entry replaces everything before its first-kept
-// entry with its summary, branch summaries render as summary messages, and
-// bookkeeping entries (custom, labels, names, leaves) are skipped.
+// Context reconstructs the model-visible conversation for the active branch.
+// A full checkpoint replaces its ancestors with its seed. A legacy compaction
+// replaces context before its first-kept entry with its summary. Branch summaries
+// render as summary messages; bookkeeping entries are skipped.
 func (s *Session) Context() (Context, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -358,27 +374,22 @@ func (s *Session) Context() (Context, error) {
 		return Context{}, err
 	}
 
+	return contextFromPath(path), nil
+}
+
+func contextFromPath(path []Entry) Context {
 	var out Context
-
-	for _, e := range contextEntries(path) {
-		switch e.Kind {
-		case KindMessage:
-			out.Messages = append(out.Messages, cloneMessage(e.Message))
-		case KindCompaction:
-			out.Messages = append(out.Messages, ai.UserText(CompactionPrefix+e.Summary))
-		case KindBranchSummary:
-			out.Messages = append(out.Messages, ai.UserText(BranchSummaryPrefix+e.Summary))
-		default:
+	for _, entry := range contextEntries(path) {
+		for _, message := range entryContextMessages(entry) {
+			out.Messages = append(out.Messages, cloneMessage(message))
 		}
 	}
-
-	for _, e := range path {
-		if e.Kind == KindModelChange {
-			out.Provider, out.ModelID = e.Provider, e.ModelID
+	for _, entry := range path {
+		if entry.Kind == KindModelChange {
+			out.Provider, out.ModelID = entry.Provider, entry.ModelID
 		}
 	}
-
-	return out, nil
+	return out
 }
 
 // Pending returns the unanswered tool calls on the active branch in call
@@ -399,20 +410,23 @@ func (s *Session) Pending() ([]ai.ToolCallPart, error) {
 	return pending, nil
 }
 
-// contextEntries applies the compaction transform: the latest compaction
-// entry leads, followed by the retained tail from its first-kept entry and
-// everything after the compaction itself.
+// contextEntries applies the latest replacement. A full checkpoint excludes
+// all ancestors. A legacy compaction keeps its explicit tail; validation prevents
+// that boundary from crossing behind a full checkpoint on the same path.
 func contextEntries(path []Entry) []Entry {
 	last := -1
 
 	for i, e := range path {
-		if e.Kind == KindCompaction {
+		if e.Kind == KindCompaction || e.Kind == KindContextCheckpoint {
 			last = i
 		}
 	}
 
 	if last < 0 {
 		return path
+	}
+	if path[last].Kind == KindContextCheckpoint {
+		return path[last:]
 	}
 
 	compaction := path[last]
