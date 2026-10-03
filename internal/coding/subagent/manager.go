@@ -21,6 +21,7 @@ import (
 	"github.com/rsbin1178/pips/agent/catalog"
 	"github.com/rsbin1178/pips/agent/harness"
 	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/internal/coding/compaction"
 	"github.com/rsbin1178/pips/internal/coding/session"
 	"github.com/rsbin1178/pips/internal/coding/tools"
 	"github.com/rsbin1178/pips/internal/coding/workspace"
@@ -61,9 +62,14 @@ type Config struct {
 	// GenerationID identifies the immutable Coding integration snapshot that
 	// compiled this manager's builtin execution plan. Custom dispatch will
 	// acquire a per-child generation lease in the next slice.
-	GenerationID   uint64
-	SummaryModel   ai.LanguageModel
-	Compaction     *harness.CompactionSettings
+	GenerationID uint64
+	SummaryModel ai.LanguageModel
+	Compaction   *harness.CompactionSettings
+	// FullCompaction selects full checkpoints with child-owned history. When
+	// non-nil it takes precedence over legacy Compaction and SummaryModel.
+	// Summary requests use Model and RequestPolicy without the builtin child's
+	// final-output schema. Custom dispatcher runners own their own integration.
+	FullCompaction *compaction.Policy
 	RequestPolicy  func(*ai.Request)
 	Lifecycle      Lifecycle
 	Options        ExecutionOptions
@@ -161,6 +167,11 @@ func New(config Config) (*Manager, error) {
 		config.Compaction = &settings
 	}
 
+	if config.FullCompaction != nil {
+		policy := *config.FullCompaction
+		config.FullCompaction = &policy
+	}
+
 	maxConcurrent := config.Options.MaxConcurrent
 	if maxConcurrent == 0 {
 		maxConcurrent = defaultMaxConcurrent
@@ -225,6 +236,7 @@ func inheritManagerConfig(config Config) Config {
 	config.GenerationID = root.GenerationID
 	config.SummaryModel = root.SummaryModel
 	config.Compaction = root.Compaction
+	config.FullCompaction = root.FullCompaction
 	config.Lifecycle = root.Lifecycle
 	config.Options = root.Options
 	config.AgentObservers = root.AgentObservers
@@ -300,6 +312,12 @@ func validateManagerObservers(config Config) error {
 }
 
 func validateCompactionDependencies(config Config) error {
+	if config.FullCompaction != nil {
+		if _, err := config.FullCompaction.Threshold(); err != nil {
+			return fmt.Errorf("%w: invalid full child compaction policy: %w", ErrInvalid, err)
+		}
+		return nil
+	}
 	if config.Compaction == nil {
 		if config.SummaryModel != nil {
 			return fmt.Errorf("%w: summary model requires child compaction", ErrInvalid)
@@ -335,6 +353,17 @@ func buildReadTools(config Config) ([]agent.Tool, error) {
 	}
 
 	names := []string{readToolName, listToolName, globToolName, searchToolName}
+	if config.FullCompaction != nil {
+		history, err := catalog.New(catalog.Local("session", catalog.RiskRead, tools.NewHistoryTool(nil))...)
+		if err != nil {
+			return nil, err
+		}
+		local, err = catalog.Merge(local, history)
+		if err != nil {
+			return nil, err
+		}
+		names = append(names, tools.HistoryName)
+	}
 	policy := catalog.Policy{
 		TenantID:  config.Parent.Metadata().WorkspaceID,
 		Allowlist: slices.Clone(names),
@@ -385,9 +414,13 @@ func (m *Manager) builtinExecutionPlan(request Request) (ExecutionPlan, error) {
 		if tool == nil {
 			return ExecutionPlan{}, fmt.Errorf("%w: nil builtin tool", ErrInvalid)
 		}
+		source := "builtin:workspace"
+		if tool.Decl().Name == tools.HistoryName {
+			source = "builtin:session"
+		}
 		capabilities = append(capabilities, EffectiveCapability{
 			WireName: tool.Decl().Name,
-			Source:   "builtin:workspace",
+			Source:   source,
 			Risk:     readToolName,
 		})
 	}
@@ -556,6 +589,7 @@ func (m *Manager) start(
 		stopParent = context.AfterFunc(ctx, cancel)
 	}
 	tracker := newRunTracker(created.Time, plan.Limits.MaxActivityTools)
+	tracker.task = request.Task
 	execution := &Execution{
 		manager:    m,
 		request:    request,
@@ -984,6 +1018,10 @@ type runTracker struct {
 	activitySummary      ActivitySummary
 	toolIndex            map[string]int
 	maxTools             int
+	task                 string
+	fixedTokens          int
+	historyAllowed       bool
+	checkpointErr        error
 }
 
 type runStopCause uint8
@@ -1084,11 +1122,11 @@ func (m *Manager) run(
 	options := m.agentOptions(execution.plan.Identity, child, tracker, spec, useNativeResponseFormat)
 
 	childHarness, err := harness.New(
-		m.config.Model,
+		compaction.GuardModel(m.config.Model, m.config.FullCompaction),
 		child.Session(),
 		harness.WithSystem(instructions),
 		harness.WithSystemSuffix(execution.hookContext),
-		harness.WithTools(m.tools...),
+		harness.WithTools(m.childTools(child, tracker)...),
 		harness.WithOnEvent(onEvent),
 		harness.WithAgentOptions(options...),
 	)
@@ -1212,6 +1250,9 @@ func (m *Manager) agentOptions(
 				request.MaxTokens = ai.Ptr(m.limits.MaxOutputTokens)
 			}
 
+			if m.config.FullCompaction != nil {
+				tracker.captureCheckpointRequest(request)
+			}
 			request.ResponseFormat = nil
 			if useNativeResponseFormat {
 				request.ResponseFormat = &ai.ResponseFormat{
@@ -1239,7 +1280,7 @@ func (m *Manager) prepareChildTurn(
 		return agent.TurnUpdate{}
 	}
 
-	messages, err := m.compactChildAfterToolTurn(ctx, info, child)
+	messages, err := m.compactChildAfterToolTurn(ctx, info, child, tracker)
 	if err != nil {
 		return agent.TurnUpdate{Err: err}
 	}
@@ -1317,9 +1358,15 @@ func (m *Manager) compactChildAfterToolTurn(
 	ctx context.Context,
 	info agent.RunInfo,
 	child *session.Handle,
+	tracker *runTracker,
 ) ([]ai.Message, error) {
-	if m.config.Compaction == nil || info.Response == nil ||
-		len(info.Response.ToolCalls()) == 0 {
+	if info.Response == nil || len(info.Response.ToolCalls()) == 0 {
+		return nil, nil
+	}
+	if m.config.FullCompaction != nil {
+		return m.checkpointChildAfterToolTurn(ctx, child, tracker)
+	}
+	if m.config.Compaction == nil {
 		return nil, nil
 	}
 

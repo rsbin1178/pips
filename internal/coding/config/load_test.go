@@ -435,9 +435,11 @@ max_output_tokens = 8192
 	assert.Equal(t, 8192, *result.Config.Models[0].Variants["balanced"].Options.MaxOutputTokens)
 	assert.Equal(t, 16000, result.Config.Models[0].ReasoningBudgets["high"])
 	assert.Equal(t, openai.StreamUsageOmit, *result.Config.Models[0].Compatibility.StreamUsage)
-	assert.Equal(t, config.CompactionConfig{
-		Enabled: true, ReserveTokens: 32768, KeepRecentTokens: 24000, SummaryMaxTokens: 4096,
-	}, result.Config.Compaction)
+	expectedCompaction := config.DefaultCompactionConfig()
+	expectedCompaction.ReserveTokens = 32768
+	expectedCompaction.KeepRecentTokens = 24000
+	expectedCompaction.SummaryMaxTokens = 4096
+	assert.Equal(t, expectedCompaction, result.Config.Compaction)
 	assert.Equal(
 		t,
 		openai.MaxTokensFieldLegacy,
@@ -639,7 +641,7 @@ func TestLoadRejectsLegacyAndInvalidConfiguration(t *testing.T) {
 			content: "[sandbox_workspace_write]\nnetwork = \"always\"\n",
 			want:    config.ErrInvalid,
 		},
-		{name: "invalid compaction", content: "[compaction]\nsummary_max_tokens = 30000\n", want: config.ErrInvalid},
+		{name: "invalid compaction", content: "[compaction]\nsummary_max_tokens = -1\n", want: config.ErrInvalid},
 		{
 			name:    "invalid reasoning history",
 			content: "[providers.local.compatibility]\nreasoning_history = \"future\"\n",

@@ -173,6 +173,14 @@ func TestValidateCompactionConfig(t *testing.T) {
 	require.NoError(t, cfg.ValidateRuntime())
 
 	cfg.Compaction.SummaryMaxTokens = cfg.Compaction.KeepRecentTokens + 1
+	require.NoError(t, cfg.ValidateRuntime(), "full checkpoints do not tie summary output to retained-tail size")
+	cfg.Compaction.SummaryMaxTokens = -1
+	require.ErrorIs(t, cfg.ValidateRuntime(), config.ErrInvalid)
+	cfg.Compaction = config.DefaultCompactionConfig()
+	cfg.Compaction.AttemptsPerStage = 4
+	require.ErrorIs(t, cfg.ValidateRuntime(), config.ErrInvalid)
+	cfg.Compaction = config.DefaultCompactionConfig()
+	cfg.Compaction.ThresholdPercent = 101
 	require.ErrorIs(t, cfg.ValidateRuntime(), config.ErrInvalid)
 }
 

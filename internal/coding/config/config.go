@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/rsbin1178/pips/agent/harness"
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/ai/openai"
+	"github.com/rsbin1178/pips/internal/coding/compaction"
 	"github.com/rsbin1178/pips/internal/coding/statusline"
 )
 
@@ -383,19 +385,31 @@ type ModelConfig struct {
 // CompactionConfig controls context compaction. Capacity comes from the
 // selected model; these values only describe product policy and budgets.
 type CompactionConfig struct {
-	Enabled          bool
-	ReserveTokens    int
+	Enabled       bool
+	ReserveTokens int
+	// KeepRecentTokens is accepted for legacy configuration compatibility.
+	// Full checkpoints do not retain a working tail.
 	KeepRecentTokens int
-	SummaryMaxTokens int
+	// SummaryMaxTokens is an optional override; zero inherits model policy.
+	SummaryMaxTokens  int
+	ThresholdPercent  int
+	MinSummaryChars   int
+	AttemptsPerStage  int
+	RetryDelaySeconds int
+	TimeoutSeconds    int
 }
 
-// DefaultCompactionConfig returns the safe product defaults.
+// DefaultCompactionConfig returns the bounded single-pass product policy.
 func DefaultCompactionConfig() CompactionConfig {
 	return CompactionConfig{
-		Enabled:          true,
-		ReserveTokens:    harness.DefaultCompactionReserveTokens,
-		KeepRecentTokens: harness.DefaultCompactionKeepRecentTokens,
-		SummaryMaxTokens: harness.DefaultCompactionSummaryTokens,
+		Enabled:           true,
+		ReserveTokens:     harness.DefaultCompactionReserveTokens,
+		KeepRecentTokens:  harness.DefaultCompactionKeepRecentTokens,
+		ThresholdPercent:  compaction.DefaultThresholdPercent,
+		MinSummaryChars:   compaction.DefaultMinSummaryChars,
+		AttemptsPerStage:  compaction.DefaultAttemptsPerStage,
+		RetryDelaySeconds: int(compaction.DefaultRetryDelay / time.Second),
+		TimeoutSeconds:    int(compaction.DefaultTimeout / time.Second),
 	}
 }
 
@@ -723,23 +737,19 @@ func validateSubagent(value SubagentConfig) error {
 }
 
 func validateCompaction(value CompactionConfig) error {
-	if !value.Enabled && value.ReserveTokens == 0 && value.KeepRecentTokens == 0 &&
-		value.SummaryMaxTokens == 0 {
+	if value == (CompactionConfig{}) {
 		return nil
 	}
-	if value.ReserveTokens <= 0 || value.KeepRecentTokens <= 0 || value.SummaryMaxTokens <= 0 {
-		return fmt.Errorf(
-			"%w: compaction token budgets must be positive",
-			ErrInvalid,
-		)
+	if value.ReserveTokens <= 0 || value.KeepRecentTokens < 0 || value.SummaryMaxTokens < 0 {
+		return fmt.Errorf("%w: compaction reserve must be positive and optional token budgets nonnegative", ErrInvalid)
 	}
-	if value.SummaryMaxTokens > value.KeepRecentTokens {
-		return fmt.Errorf(
-			"%w: compaction summary_max_tokens cannot exceed keep_recent_tokens",
-			ErrInvalid,
-		)
+	if value.ThresholdPercent < 0 || value.ThresholdPercent > 100 ||
+		value.MinSummaryChars < 0 || value.MinSummaryChars > 65536 ||
+		value.AttemptsPerStage < 0 || value.AttemptsPerStage > compaction.DefaultAttemptsPerStage ||
+		value.RetryDelaySeconds < 0 || value.RetryDelaySeconds > 60 ||
+		value.TimeoutSeconds < 0 || value.TimeoutSeconds > int(compaction.DefaultTimeout/time.Second) {
+		return fmt.Errorf("%w: compaction threshold, quality or retry limits are out of bounds", ErrInvalid)
 	}
-
 	return nil
 }
 
