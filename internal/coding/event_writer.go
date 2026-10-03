@@ -105,6 +105,7 @@ type agentProjector struct {
 	writer        *eventWriter
 	interactionID string
 	synthetic     func(ai.Message) bool
+	contextTokens func() int
 }
 
 func newAgentProjector(writer *eventWriter, interactionID string) (*agentProjector, error) {
@@ -170,7 +171,12 @@ func (p *agentProjector) project(event agent.Event) (Event, error) {
 		}
 	case agent.TurnCompleted:
 		eventType = EventTurnCompleted
-		payload = TurnCompleted{Turn: source.Turn, Usage: tokenUsageFromAI(source.Usage)}
+		completed := TurnCompleted{Turn: source.Turn, Usage: tokenUsageFromAI(source.Usage)}
+		if p.contextTokens != nil && event.ParentRunID == "" {
+			tokens := p.contextTokens()
+			completed.ContextTokens = &tokens
+		}
+		payload = completed
 	case agent.RunCompleted:
 		eventType = EventRunCompleted
 		payload = RunCompleted{

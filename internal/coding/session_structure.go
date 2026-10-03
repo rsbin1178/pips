@@ -16,6 +16,7 @@ const (
 	SessionNodeMessage       SessionNodeKind = "message"
 	SessionNodeModelChange   SessionNodeKind = "model_change"
 	SessionNodeCompaction    SessionNodeKind = "compaction"
+	SessionNodeCheckpoint    SessionNodeKind = "context_checkpoint"
 	SessionNodeBranchSummary SessionNodeKind = "branch_summary"
 	SessionNodeCustom        SessionNodeKind = "custom"
 	SessionNodeLabel         SessionNodeKind = "label"
@@ -63,6 +64,9 @@ const (
 	CompactionAutomatic CompactionMode = "automatic"
 )
 
+// CompactionStrategyFull selects full context reconstruction with an archive.
+const CompactionStrategyFull = "full"
+
 // CompactionPreview is a content-free, point-in-time compaction plan. Token
 // binds confirmation to the exact durable leaf and budget snapshot.
 type CompactionPreview struct {
@@ -75,6 +79,8 @@ type CompactionPreview struct {
 	KeptMessages       int    `json:"kept_messages"`
 	FirstKeptID        string `json:"first_kept_id,omitempty"`
 	SplitTurn          bool   `json:"split_turn"`
+	Strategy           string `json:"strategy,omitempty"`
+	SourceLeafID       string `json:"source_leaf_id,omitempty"`
 }
 
 // CompactionRequest confirms a preview. Instructions are content-bearing and
@@ -93,6 +99,8 @@ type CompactionState struct {
 	TokensAfter    int               `json:"tokens_after"`
 	FirstKeptID    string            `json:"first_kept_id,omitempty"`
 	DurationMillis int64             `json:"duration_ms"`
+	CheckpointID   string            `json:"checkpoint_id,omitempty"`
+	Strategy       string            `json:"strategy,omitempty"`
 }
 
 func sessionTreeFromHarness(value harness.TreeSnapshot) (SessionTree, error) {
@@ -125,6 +133,8 @@ func sessionNodeKindFromHarness(kind harness.Kind) (SessionNodeKind, error) {
 		return SessionNodeModelChange, nil
 	case harness.KindCompaction:
 		return SessionNodeCompaction, nil
+	case harness.KindContextCheckpoint:
+		return SessionNodeCheckpoint, nil
 	case harness.KindBranchSummary:
 		return SessionNodeBranchSummary, nil
 	case harness.KindCustom:
@@ -140,7 +150,7 @@ func sessionNodeKindFromHarness(kind harness.Kind) (SessionNodeKind, error) {
 
 func validSessionNodeKind(kind SessionNodeKind) bool {
 	switch kind {
-	case SessionNodeMessage, SessionNodeModelChange, SessionNodeCompaction,
+	case SessionNodeMessage, SessionNodeModelChange, SessionNodeCompaction, SessionNodeCheckpoint,
 		SessionNodeBranchSummary, SessionNodeCustom, SessionNodeLabel, SessionNodeName:
 		return true
 	default:

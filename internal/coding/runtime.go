@@ -120,18 +120,23 @@ type Runtime struct {
 	mu    sync.Mutex
 	state State
 
-	profile       runtimeProfile
-	worker        *workerRuntimeBinding
-	workspace     workspace.Workspace
-	tree          *workspace.Tree
-	config        config.Config
-	paths         paths.Layout
-	opts          ExecutionOptions
-	model         ai.LanguageModel
-	modelCatalog  modelcatalog.Catalog
-	credentials   credential.Store
-	resolved      modelcatalog.ResolvedModel
-	requestPolicy generation.Policy
+	profile                  runtimeProfile
+	worker                   *workerRuntimeBinding
+	workspace                workspace.Workspace
+	tree                     *workspace.Tree
+	config                   config.Config
+	paths                    paths.Layout
+	opts                     ExecutionOptions
+	model                    ai.LanguageModel
+	modelCatalog             modelcatalog.Catalog
+	credentials              credential.Store
+	resolved                 modelcatalog.ResolvedModel
+	requestPolicy            generation.Policy
+	contextFixedTokens       int
+	contextFixedKnown        bool
+	contextRequestKey        [32]byte
+	contextInvalidUsageID    string
+	compactionWriteUncertain bool
 	// toolActivations keeps deferred tools activated by Tool Search visible
 	// for every later interaction of this Runtime (one Session).
 	toolActivations     *catalog.ActivationSet
@@ -192,6 +197,9 @@ type Runtime struct {
 	closeDone                  chan struct{}
 	closeErr                   error
 	autoCompactionFailureToken string
+
+	goalControl *runtimeGoalControl
+	goalDriver  *runtimeGoalDriver
 
 	notificationMu       sync.Mutex
 	notificationCancel   context.CancelFunc
@@ -701,6 +709,7 @@ func openRuntime(
 			GenerationID:      integration.ID(),
 			SummaryModel:      childSummaryModel,
 			Compaction:        childCompaction,
+			FullCompaction:    runtime.fullCompactionPolicy(),
 			RequestPolicy:     requestPolicy,
 			Lifecycle:         runtime.subagentHookLifecycle(),
 			Options:           configured.Subagent,
@@ -717,6 +726,11 @@ func openRuntime(
 		}
 	}
 
+	if !openPolicy.teamWorker() {
+		if err := runtime.openGoalControl(ctx); err != nil {
+			return nil, err
+		}
+	}
 	runtime.observeSessionOpened(ctx, resumed)
 	if err := runtime.runSessionStart(ctx, resumed); err != nil {
 		return nil, err
@@ -1069,7 +1083,10 @@ func mergeAgentPluginDefinitions(
 		if _, duplicate := seen[definition.ID]; duplicate {
 			diagnostics = append(diagnostics, codingmcp.ConnectionDiagnostic{
 				ServerID: definition.ID, Stage: "configuration", Code: "definition_duplicate",
-				Message: "Agent Plugin server conflicts with another configured server and was ignored",
+				Message: fmt.Sprintf(
+					"Agent Plugin MCP server %q conflicts with another configured server and was ignored",
+					definition.ID,
+				),
 			})
 
 			continue
@@ -1077,7 +1094,10 @@ func mergeAgentPluginDefinitions(
 		if len(values) >= maximum {
 			diagnostics = append(diagnostics, codingmcp.ConnectionDiagnostic{
 				ServerID: definition.ID, Stage: "configuration", Code: "definition_limit",
-				Message: "Agent Plugin server exceeds the client-wide server limit and was ignored",
+				Message: fmt.Sprintf(
+					"Agent Plugin MCP server %q exceeds the client-wide server limit and was ignored",
+					definition.ID,
+				),
 			})
 
 			continue
@@ -1157,7 +1177,7 @@ func (r *Runtime) recordOpenDiagnostics(
 	for _, connectionDiagnostic := range connections.TakeDiagnostics() {
 		diagnostic := IntegrationDiagnostic{
 			Component: componentMCP, Code: connectionDiagnostic.Code,
-			Message: connectionDiagnostic.Message, Disabled: true,
+			Message: mcpDiagnosticMessage(connectionDiagnostic), Disabled: true,
 		}
 		if emitter != nil {
 			_ = emitter.emit("", "", EventIntegrationDiagnostic, diagnostic)
@@ -1165,6 +1185,16 @@ func (r *Runtime) recordOpenDiagnostics(
 		}
 		r.recordDiagnostic(ctx, diagnostic)
 	}
+}
+
+// mcpDiagnosticMessage names the server a runtime-stage diagnostic belongs
+// to. Configuration diagnostics already name the scope and server.
+func mcpDiagnosticMessage(diagnostic codingmcp.ConnectionDiagnostic) string {
+	if diagnostic.ServerID == "" || diagnostic.Stage == "configuration" {
+		return diagnostic.Message
+	}
+
+	return diagnostic.ServerID + ": " + diagnostic.Message
 }
 
 func (r *Runtime) recordAgentPluginDiagnostics(ctx context.Context, plugins agentplugin.Result) {
@@ -1310,7 +1340,7 @@ func (r *Runtime) ReplacementPreflight(ctx context.Context) error {
 	if r.closed || r.closing {
 		return stateError("replace Runtime", r.state.Phase, ErrRuntimeClosed)
 	}
-	if r.active != nil || r.interaction != nil || r.recovery.PendingID != "" ||
+	if r.goalDriver != nil || r.active != nil || r.interaction != nil || r.recovery.PendingID != "" ||
 		r.state.Phase != PhaseIdle || r.state.Compaction.Active ||
 		r.state.Approval.Kind != ApprovalNone || r.state.Question.Required != nil ||
 		r.state.PlanReview.Required != nil {
@@ -1515,6 +1545,11 @@ func (r *Runtime) runSequence(
 			return
 		}
 
+		if r.goalOperation(ctx, goalWorkOperation{
+			kind: kind, resolution: resolution, messages: cloned, notification: notification,
+		}, yield) {
+			return
+		}
 		r.run(ctx, kind, resolution, cloned, notification, yield)
 	}
 }
@@ -1550,7 +1585,7 @@ func (r *Runtime) Reload(ctx context.Context) (returnErr error) {
 		return stateError("reload", phase, ErrRuntimeClosed)
 	}
 
-	if r.active != nil || r.interaction != nil || r.state.Phase != PhaseIdle {
+	if r.goalDriver != nil || r.active != nil || r.interaction != nil || r.state.Phase != PhaseIdle {
 		phase := r.state.Phase
 		r.mu.Unlock()
 		return stateError("reload", phase, ErrRuntimeBusy)

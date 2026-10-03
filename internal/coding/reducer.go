@@ -194,6 +194,7 @@ func (state ApprovalState) NonInteractiveError() error {
 // State is the complete reducer projection used by interactive and
 // non-interactive frontends. Use [State.Clone] when retaining a snapshot.
 type State struct {
+	Goal          GoalState        `json:"goal"`
 	Sequence      uint64           `json:"sequence"`
 	SessionID     string           `json:"session_id,omitempty"`
 	SessionOpen   bool             `json:"session_open"`
@@ -236,6 +237,7 @@ type State struct {
 // Clone returns a deep defensive copy of State.
 func (state State) Clone() State {
 	cloned := state
+	cloned.Goal = state.Goal.Clone()
 
 	cloned.Transcript = make(ai.Messages, len(state.Transcript))
 	for index, message := range state.Transcript {
@@ -305,7 +307,7 @@ func (state State) IsSessionProvisional() bool {
 	hasTranscript := len(state.Transcript) != 0
 	hasTree := state.Tree.TotalNodes != 0 || len(state.Tree.Nodes) != 0 || state.Tree.LeafID != ""
 
-	return !hasInteraction && !hasTranscript && !hasTree
+	return state.Goal.ID == "" && !hasInteraction && !hasTranscript && !hasTree
 }
 
 // DurableState is the restart-stable subset of [State].
@@ -397,6 +399,7 @@ func (state *State) apply(event Event) error {
 		state.Tree = payload.Tree.Clone()
 		state.Transcript = cloneMessages(payload.Transcript)
 		state.SyntheticMessages = syntheticMessageIndexes(state.Transcript)
+		state.SyntheticMessages = append(state.SyntheticMessages, goalSyntheticMessageIndexes(state.Transcript, state.Goal.ID)...)
 		state.ContextTokens = payload.ContextTokens
 		state.Tasks = payload.Tasks.Clone()
 	case SessionNavigated:
@@ -415,6 +418,7 @@ func (state *State) apply(event Event) error {
 		state.Compaction = CompactionState{Active: true, Mode: payload.Mode, Preview: payload.Preview}
 	case CompactionCompleted:
 		if !state.Compaction.Active || state.Compaction.Mode != payload.Mode ||
+			state.Compaction.Preview.Strategy != payload.Strategy ||
 			state.Compaction.Preview.FirstKeptID != payload.FirstKeptID {
 			return protocolError("compaction cannot complete in its current state")
 		}
@@ -422,6 +426,7 @@ func (state *State) apply(event Event) error {
 			Mode: payload.Mode, Preview: state.Compaction.Preview,
 			TokensBefore: payload.TokensBefore, TokensAfter: payload.TokensAfter,
 			FirstKeptID: payload.FirstKeptID, DurationMillis: payload.DurationMillis,
+			CheckpointID: payload.CheckpointID, Strategy: payload.Strategy,
 		}
 		state.ContextTokens = payload.TokensAfter
 	case ModeChanged:
@@ -494,6 +499,26 @@ func (state *State) apply(event Event) error {
 		state.Runs[index].Usage = payload.Usage
 		state.Runs[index].Turn = max(state.Runs[index].Turn, payload.Turns)
 		delete(state.activeRuns, event.RunID)
+	case RunInterrupted:
+		index, err := state.activeRun(event.RunID)
+		if err != nil {
+			return err
+		}
+		if state.Runs[index].Turn > 1 || state.Runs[index].Usage != (TokenUsage{}) ||
+			len(state.activeTools) != 0 || len(state.Draft) != 0 {
+			return protocolError("cannot interrupt a run with completed usage, visible output or active tools")
+		}
+		for _, candidate := range state.MessageCandidates {
+			if candidate.RunID == event.RunID {
+				return protocolError("cannot interrupt a run with committed model output")
+			}
+		}
+		for _, tool := range state.Tools {
+			if tool.RunID == event.RunID {
+				return protocolError("cannot interrupt a run that executed tools")
+			}
+		}
+		state.failActiveRun(event.RunID)
 	case TurnStarted:
 		index, err := state.activeRun(event.RunID)
 		if err != nil {
@@ -521,7 +546,11 @@ func (state *State) apply(event Event) error {
 		// model actually saw is the last request alone, so subtract the
 		// previous turn's cumulative total before sizing it.
 		if state.Runs[index].ParentRunID == "" {
-			state.ContextTokens = contextTokensFromUsage(turnUsage(state.Runs[index].Usage, payload.Usage))
+			if payload.ContextTokens != nil {
+				state.ContextTokens = *payload.ContextTokens
+			} else {
+				state.ContextTokens = contextTokensFromUsage(turnUsage(state.Runs[index].Usage, payload.Usage))
+			}
 		}
 		state.Runs[index].Usage = payload.Usage
 		state.Runs[index].TurnOpen = false
@@ -620,6 +649,23 @@ func (state *State) apply(event Event) error {
 		if err := state.applySubagent(event, payload); err != nil {
 			return err
 		}
+	case GoalChanged:
+		if !state.SessionOpen || payload.Redacted {
+			return protocolError("Goal projection requires an open session and unredacted state")
+		}
+		if state.Goal.ID != "" && state.Goal.ID == payload.State.ID {
+			if payload.State.Revision < state.Goal.Revision || payload.State.Attempts < state.Goal.Attempts ||
+				payload.State.Evaluations < state.Goal.Evaluations || payload.State.Tokens < state.Goal.Tokens ||
+				payload.State.Condition != state.Goal.Condition || payload.State.MaxTokens != state.Goal.MaxTokens {
+				return protocolError("stale or incompatible Goal projection")
+			}
+			if !state.Goal.Active() && payload.State.Status != state.Goal.Status {
+				return protocolError("terminal Goal cannot reactivate")
+			}
+		} else if state.Goal.Active() && payload.State.ID != "" {
+			return protocolError("nonterminal Goal cannot be replaced")
+		}
+		state.Goal = payload.State.Clone()
 	case TeamLifecycle:
 		if err := state.applyTeamLifecycle(payload); err != nil {
 			return err
@@ -1043,7 +1089,7 @@ func (state *State) canStartAutomaticCompaction(mode CompactionMode) bool {
 	if mode != CompactionAutomatic || state.Phase != PhaseRunning || !state.Interaction.Active {
 		return false
 	}
-	if len(state.activeRuns) != 1 || len(state.openTurns) != 0 || len(state.activeTools) != 0 {
+	if len(state.activeRuns) > 1 || len(state.openTurns) != 0 || len(state.activeTools) != 0 {
 		return false
 	}
 	if state.Approval.Kind != ApprovalNone || state.Question.Required != nil ||

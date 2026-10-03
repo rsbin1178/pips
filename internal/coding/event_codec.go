@@ -152,6 +152,8 @@ func decodeEventPayload(eventType EventType, data []byte) (EventPayload, error) 
 		return decodePayload[RunStarted](data)
 	case EventRunCompleted:
 		return decodePayload[RunCompleted](data)
+	case EventRunInterrupted:
+		return decodePayload[RunInterrupted](data)
 	case EventTurnStarted:
 		return decodePayload[TurnStarted](data)
 	case EventTurnCompleted:
@@ -172,6 +174,8 @@ func decodeEventPayload(eventType EventType, data []byte) (EventPayload, error) 
 		EventSubagentCompleted, EventSubagentFailed, EventSubagentCanceled,
 		EventSubagentInterrupted:
 		return decodePayload[SubagentLifecycle](data)
+	case EventGoalChanged:
+		return decodePayload[GoalChanged](data)
 	case EventTeamLifecycle:
 		return decodePayload[TeamLifecycle](data)
 	case EventTeamControlLifecycle:

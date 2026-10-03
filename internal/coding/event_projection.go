@@ -84,7 +84,7 @@ func Project(event Event, disclosure Disclosure) (ExportEvent, error) {
 	return ExportEvent{event: projected}, nil
 }
 
-//nolint:gocyclo,cyclop // The privacy projection exhaustively handles the sealed payload taxonomy.
+//nolint:gocyclo,cyclop,funlen // The privacy projection exhaustively handles the sealed payload taxonomy.
 func projectSafePayload(payload EventPayload) EventPayload {
 	switch value := payload.(type) {
 	case MessageCommitted:
@@ -117,6 +117,13 @@ func projectSafePayload(payload EventPayload) EventPayload {
 			value.Result = result
 		}
 
+		return value
+	case GoalChanged:
+		value.State.Condition = ""
+		value.State.Reason = ""
+		value.State.Gaps = nil
+		value.State.References = nil
+		value.Redacted = true
 		return value
 	case ApprovalRequired:
 		value.Command = nil
@@ -316,6 +323,9 @@ func Telemetry(event Event) (TelemetryEvent, error) {
 		projected.Stop = value.Stop
 		projected.Turns = value.Turns
 		projected.Usage = value.Usage
+	case RunInterrupted:
+		projected.Code = value.Reason
+		projected.Failed = true
 	case TurnCompleted:
 		projected.Turns = value.Turn
 		projected.Usage = value.Usage
@@ -335,6 +345,10 @@ func Telemetry(event Event) (TelemetryEvent, error) {
 		projected.Failed = toolMessageFailed(value.Result)
 	case SubagentLifecycle:
 		projectSubagentTelemetry(&projected, event.Type, value)
+	case GoalChanged:
+		projected.Agent = "goal"
+		projected.Code = string(value.State.Status)
+		projected.Attempts = value.State.Attempts
 	case TeamLifecycle:
 		projectTeamTelemetry(&projected, value)
 	case TeamControlLifecycle:

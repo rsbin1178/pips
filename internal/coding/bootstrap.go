@@ -92,6 +92,14 @@ func BootstrapState(options BootstrapOptions) (BootstrapResult, error) {
 				!validIdentifierText(entry.ModelID, maxEventIDBytes, false) {
 				return BootstrapResult{}, protocolError("invalid model-change entry %q", entry.ID)
 			}
+		case harness.KindContextCheckpoint:
+			if entry.Checkpoint == nil || entry.Checkpoint.Validate() != nil {
+				return BootstrapResult{}, protocolError("invalid full context checkpoint")
+			}
+			state.Compaction = CompactionState{
+				TokensBefore: entry.TokensBefore, TokensAfter: harness.EstimateContext([]harness.Entry{entry}),
+				CheckpointID: entry.ID, Strategy: CompactionStrategyFull,
+			}
 		case harness.KindCompaction, harness.KindBranchSummary, harness.KindCustom,
 			harness.KindLabel, harness.KindName, harness.KindLeaf:
 			if entry.Kind == harness.KindCompaction {

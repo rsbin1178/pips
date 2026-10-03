@@ -1,8 +1,9 @@
 # Coding CLI contract
 
-`pips exec` runs exactly one non-interactive Coding Runtime interaction. It is
-an adapter over the same durable session, approval, event, and sandbox layers
-used by future interactive frontends; it does not contain a second Agent loop.
+By default, `pips exec` runs one non-interactive Coding Runtime interaction.
+`pips exec --goal` uses bounded, evidence-based continuation toward a completion
+condition. Both use the same durable session, approval, event, and sandbox
+layers as the interactive TUI; the CLI does not contain a second Agent loop.
 
 `pips acp` is the stdio editor protocol surface over the same Runtime. Its
 launch, capability, authentication, and lifecycle contract is documented in
@@ -78,6 +79,74 @@ terminal. A normal argument and non-empty redirected stdin are rejected as
 ambiguous. Prompt text is preserved as supplied, must contain non-whitespace
 content, must be valid UTF-8, and is limited to 1 MiB. NUL and control
 characters other than LF, CR, and TAB are rejected.
+
+## Goals
+
+Use a goal when work has a verifiable completion condition, rather than merely
+asking the model to keep answering:
+
+```text
+/goal all tests for the auth migration pass --budget 100000
+/goal status
+/goal pause
+/goal resume
+/goal clear
+```
+
+Bare `/goal` also shows status. Ctrl+K opens Goal controls while running or
+waiting for input; closing the picker leaves the original input prompt intact.
+Setting a goal starts work immediately. A
+session holds at most one unfinished goal; clear it before setting a different
+one. Conditions are limited to 4,000 Unicode characters. Status shows work
+segments, evaluations, observed tokens, the budget, and the latest reason.
+
+For automation, use the same runtime with a normal prompt or stdin:
+
+```sh
+pips exec --goal --goal-budget 100000 "all auth migration tests pass"
+printf 'the documented acceptance checks pass' | pips exec --goal
+```
+
+`--goal-budget` requires `--goal` and a positive integer. The default work limit
+is 25 bounded execution segments, including explicit approval-resume segments;
+it is not 25 individual tool calls. A token budget includes observed work and
+completion-check usage. It is a cooperative limit, not a billing guarantee:
+one provider call can overshoot an allowance before reporting usage.
+
+A worker saying "done" is not sufficient. An independent evaluator reviews
+recorded evidence, and a completion candidate receives a bounded read-only
+verification of workspace files and actual tool results. This verifier cannot
+edit files or execute shell commands; it audits saved test output rather than
+rerunning the tests itself. Missing or contradictory evidence produces a gap
+for the next work segment, not success. Model or malformed-protocol failures
+interrupt assessment and can be retried without repeating the work.
+
+Verification is intentionally bounded: the evidence ledger retains up to 32
+latest tool results with 4 KiB per result; an audit has up to four read rounds
+and eight tool calls. Keep checks and captured output focused. Dropped or
+truncated essential proof cannot pass verification; split larger objectives
+rather than relying on an unbounded transcript audit.
+
+Goals do not grant trust, bypass tool approval, approve Plan review, or answer
+questions on your behalf. Pending input keeps the goal blocked. In `exec`, a
+blocked, paused, interrupted, or budget-limited goal is not successful even if
+the last model interaction ended normally. Inspect and resume the session
+interactively to resolve required input.
+
+Pause and Ctrl+C stop autonomous continuation without declaring success.
+Clear cancels the goal but preserves its audit history. Reopening a session
+restores the goal and usage without automatically restarting work; explicitly
+run `/goal resume`. New and forked sessions do not inherit active control.
+Navigation invalidates old verification evidence. Compaction preserves the
+separate goal state. Repeated rounds with no new substantive evidence pause
+instead of running indefinitely. Background results do not rearm a paused or
+cancelled goal.
+
+Goal control is application-owned: `agent/goal` remains a policy and
+`agent/continuation` owns durable work/decision boundaries. A failed completion
+check can be retried without repeating successful work. See the
+[Goal and Loop library guide](agent/orchestration-goal-loop.md) for embedding
+those lower-level capabilities in other applications.
 
 ## Configuration, trust, and sessions
 

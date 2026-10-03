@@ -19,10 +19,12 @@ import (
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding/approval"
 	"github.com/rsbin1178/pips/internal/coding/changes/git"
+	"github.com/rsbin1178/pips/internal/coding/compaction"
 	"github.com/rsbin1178/pips/internal/coding/config"
 	"github.com/rsbin1178/pips/internal/coding/execution"
 	"github.com/rsbin1178/pips/internal/coding/hooks"
 	"github.com/rsbin1178/pips/internal/coding/question"
+	"github.com/rsbin1178/pips/internal/coding/session"
 	"github.com/rsbin1178/pips/internal/coding/subagent"
 	"github.com/rsbin1178/pips/internal/coding/tools"
 	"github.com/rsbin1178/pips/internal/coding/workspace"
@@ -33,6 +35,8 @@ import (
 // parent approval controller, parent pending runner, parent harness, or parent
 // interaction pointer.
 type childScopeFactory struct {
+	repository        *session.Repository
+	fullCompaction    *compaction.Policy
 	workspace         workspace.Workspace
 	tree              *workspace.Tree
 	toolLimits        tools.Limits
@@ -77,6 +81,10 @@ func (f childScopeFactory) clone() childScopeFactory {
 	f.hooks = slices.Clone(f.hooks)
 	f.privateHooks = slices.Clone(f.privateHooks)
 	f.mcpEntries = cloneCatalogEntries(f.mcpEntries)
+	if f.fullCompaction != nil {
+		policy := *f.fullCompaction
+		f.fullCompaction = &policy
+	}
 
 	return f
 }
@@ -181,6 +189,10 @@ type childControlScope struct {
 	childSessionID string
 	plan           subagent.ExecutionPlan
 	child          *harness.Session
+	childHandle    *session.Handle
+	historyAllowed bool
+	fixedTokens    int
+	fixedTokensErr error
 	lifecycleDone  <-chan struct{}
 	cancel         context.CancelFunc
 	generation     *IntegrationGeneration
@@ -223,6 +235,14 @@ func newChildControlScope(
 		factory.controls == nil {
 		return nil, fmt.Errorf("%w: incomplete child control dependencies", subagent.ErrInvalid)
 	}
+	if factory.fullCompaction != nil {
+		if factory.repository == nil {
+			return nil, fmt.Errorf("%w: child compaction repository is unavailable", subagent.ErrInvalid)
+		}
+		if _, err := factory.fullCompaction.Threshold(); err != nil {
+			return nil, fmt.Errorf("coding child: invalid compaction policy for selected model: %w", err)
+		}
+	}
 	if err := subagent.ValidateExecutionPlan(input.Plan); err != nil {
 		return nil, err
 	}
@@ -245,6 +265,7 @@ func newChildControlScope(
 		childSessionID: input.Child.Metadata().ID,
 		plan:           input.Plan.Clone(),
 		child:          input.Child.Session(),
+		childHandle:    input.Child,
 		lifecycleDone:  lifecycle.Done(),
 		cancel:         cancel,
 		generation:     generation,
@@ -345,6 +366,9 @@ func newChildControlScope(
 		extension.Hooks{BeforeTool: scope.changes.beforeTool},
 		extension.Hooks{BeforeTool: scope.controller.BeforeTool},
 		extension.Hooks{PrepareTurn: search.PrepareTurn},
+		// Harness has already flushed TurnCompleted before this hook. Search
+		// updates remain authoritative; compaction replaces messages only.
+		extension.Hooks{PrepareTurn: scope.prepareCompaction},
 		extension.Hooks{AfterTool: scope.hooks.afterTool},
 	)
 	failureGuard := newToolFailureGuard()
@@ -367,7 +391,7 @@ func newChildControlScope(
 		agent.WithOutputGuardrail("subagent_result", scope.validateOutput),
 	)
 	h, err := harness.New(
-		factory.model,
+		compaction.GuardModel(factory.model, factory.fullCompaction),
 		scope.child,
 		harness.WithSystem(scope.plan.Instructions),
 		harness.WithSystemSuffix(preloaded),
@@ -470,6 +494,13 @@ func (s *childControlScope) buildCatalog(
 	if err := appendSelected(questionCatalog); err != nil {
 		return nil, nil, nil, err
 	}
+	historyCatalog, err := s.historyCatalog(ambient)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if err := appendSelected(historyCatalog); err != nil {
+		return nil, nil, nil, err
+	}
 	if planSelectsDescriptor(s.plan, catalog.Descriptor{
 		Name:   harness.SkillToolName,
 		Source: catalog.Source{Kind: catalog.SourceLocal, ID: "coding.skills"},
@@ -482,6 +513,11 @@ func (s *childControlScope) buildCatalog(
 		entries = append(entries, catalog.Local("coding.skills", catalog.RiskRead, skillTool)...)
 	}
 	for _, entry := range s.factory.mcpEntries {
+		// Never reuse an ambient history implementation, even if accidentally
+		// supplied in this integration snapshot. Its binding may belong to a parent.
+		if entry.Tool.Decl().Name == tools.HistoryName {
+			continue
+		}
 		descriptor := catalog.Descriptor{
 			Name: entry.Tool.Decl().Name, Source: entry.Source, Risk: entry.Risk, Tags: slices.Clone(entry.Tags),
 		}
@@ -515,8 +551,43 @@ func (s *childControlScope) buildCatalog(
 	if err := validateChildPlanCapabilities(s.plan, descriptors); err != nil {
 		return nil, nil, nil, err
 	}
+	s.historyAllowed = slices.ContainsFunc(descriptors, childHistoryDescriptor)
 
 	return childCatalog, skillCatalog, descriptors, nil
+}
+
+func childHistoryDescriptor(descriptor catalog.Descriptor) bool {
+	return descriptor.Name == tools.HistoryName && descriptor.Source.Kind == catalog.SourceLocal &&
+		descriptor.Source.ID == "coding.history" && descriptor.Risk == catalog.RiskRead
+}
+
+func (s *childControlScope) historyCatalog(ambient []catalog.Descriptor) (*catalog.Catalog, error) {
+	for _, descriptor := range ambient {
+		if !childHistoryDescriptor(descriptor) || !planSelectsDescriptor(s.plan, descriptor) {
+			continue
+		}
+		if s.factory.repository == nil || s.childHandle == nil {
+			return nil, fmt.Errorf("%w: child history repository is unavailable", subagent.ErrInvalid)
+		}
+		store, err := s.factory.repository.Archives(s.childHandle)
+		if err != nil {
+			return nil, err
+		}
+		history := tools.NewHistoryTool(func(ctx context.Context) (*session.ArchiveReader, error) {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			snapshot, err := s.child.SnapshotContext()
+			if err != nil {
+				return nil, err
+			}
+			return store.Bind(compaction.ArchiveIDs(snapshot.Entries))
+		})
+		return catalog.New(catalog.Entry{
+			Tool: history, Source: descriptor.Source, Risk: descriptor.Risk, Tags: slices.Clone(descriptor.Tags),
+		})
+	}
+	return nil, nil
 }
 
 func catalogDescriptor(value *catalog.Catalog, name string) (catalog.Descriptor, error) {
@@ -923,6 +994,70 @@ func (s *childControlScope) requestPolicy(request *ai.Request) {
 			Strict: true,
 		}
 	}
+	if s.factory.fullCompaction != nil {
+		fixed, err := compaction.RequestOverheadTokens(*request)
+		s.mu.Lock()
+		s.fixedTokens, s.fixedTokensErr = fixed, err
+		s.mu.Unlock()
+	}
+}
+
+// prepareCompaction runs after ToolSearch and the durable TurnCompleted save
+// point. It never restores or replaces Tools, mutates limits, or consumes a
+// parent archive binding. A failed rewrite terminates this run before model I/O.
+func (s *childControlScope) prepareCompaction(ctx context.Context, info agent.RunInfo) agent.TurnUpdate {
+	if s.factory.fullCompaction == nil || info.Response == nil || len(info.Response.ToolCalls()) == 0 {
+		return agent.TurnUpdate{}
+	}
+	if err := ctx.Err(); err != nil {
+		return agent.TurnUpdate{Err: err}
+	}
+	s.mu.Lock()
+	fixed, fixedErr, closed := s.fixedTokens, s.fixedTokensErr, s.closed
+	s.mu.Unlock()
+	if closed {
+		return agent.TurnUpdate{Err: subagent.ErrClosed}
+	}
+	if fixedErr != nil {
+		return agent.TurnUpdate{Err: fixedErr}
+	}
+	plan, err := compaction.Capture(s.child, &fixed, nil)
+	if err != nil {
+		return agent.TurnUpdate{Err: fmt.Errorf("coding child: capture compaction: %w", err)}
+	}
+	policy := *s.factory.fullCompaction
+	threshold, err := policy.Threshold()
+	if err != nil {
+		return agent.TurnUpdate{Err: err}
+	}
+	if plan.TokensBefore < threshold {
+		return agent.TurnUpdate{}
+	}
+	if !s.historyAllowed {
+		return agent.TurnUpdate{Err: fmt.Errorf("%w: child compaction requires profile permission for session_history", compaction.ErrBudget)}
+	}
+	state, err := json.Marshal(struct {
+		SessionID    string                         `json:"child_session_id"`
+		AgentID      string                         `json:"agent_id"`
+		Instructions string                         `json:"current_assignment_instructions"`
+		Capabilities []subagent.EffectiveCapability `json:"current_capabilities"`
+		Limits       subagent.Limits                `json:"current_limits"`
+	}{s.childSessionID, s.plan.Identity.ID, s.plan.Instructions, s.plan.Capabilities, s.plan.Limits})
+	if err != nil {
+		return agent.TurnUpdate{Err: err}
+	}
+	// Summary requests use the resolved model's policy, not the child's
+	// final-response JSON schema or its ordinary output-token clamp.
+	_, err = compaction.Execute(ctx, s.factory.repository, s.childHandle, s.factory.model,
+		s.factory.requestPolicy, plan, policy, "", string(state))
+	if err != nil {
+		return agent.TurnUpdate{Err: fmt.Errorf("coding child: compact context: %w", err)}
+	}
+	rebuilt, err := s.child.Context()
+	if err != nil {
+		return agent.TurnUpdate{Err: err}
+	}
+	return agent.TurnUpdate{ReplaceMessages: rebuilt.Messages}
 }
 
 func (s *childControlScope) afterPendingTool(

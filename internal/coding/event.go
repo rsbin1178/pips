@@ -65,6 +65,7 @@ const (
 	EventInteractionCompleted     EventType = "interaction.completed"
 	EventRunStarted               EventType = "run.started"
 	EventRunCompleted             EventType = "run.completed"
+	EventRunInterrupted           EventType = "run.interrupted"
 	EventTurnStarted              EventType = "turn.started"
 	EventTurnCompleted            EventType = "turn.completed"
 	EventMessageCommitted         EventType = "message.committed"
@@ -200,8 +201,10 @@ type CompactionCompleted struct {
 	Mode           CompactionMode `json:"mode"`
 	TokensBefore   int            `json:"tokens_before"`
 	TokensAfter    int            `json:"tokens_after"`
-	FirstKeptID    string         `json:"first_kept_id"`
+	FirstKeptID    string         `json:"first_kept_id,omitempty"`
 	DurationMillis int64          `json:"duration_ms"`
+	CheckpointID   string         `json:"checkpoint_id,omitempty"`
+	Strategy       string         `json:"strategy,omitempty"`
 }
 
 // ModeChanged records one process-local capability-policy transition.
@@ -267,10 +270,19 @@ type TurnStarted struct {
 	Turn int `json:"turn"`
 }
 
+// RunInterrupted closes a request that produced no usable response before a
+// bounded context-recovery attempt. It does not complete the interaction.
+type RunInterrupted struct {
+	Reason string `json:"reason"`
+}
+
 // TurnCompleted closes one Agent model turn.
 type TurnCompleted struct {
 	Turn  int        `json:"turn"`
 	Usage TokenUsage `json:"usage"`
+	// ContextTokens is an owner-produced current-context snapshot, not usage.
+	// Older event producers omit it and retain the cumulative-delta fallback.
+	ContextTokens *int `json:"context_tokens,omitempty"`
 }
 
 // MessageCommitted carries one message durably appended to the Harness session.
@@ -584,6 +596,7 @@ func (InteractionStarted) eventPayload()       {}
 func (InteractionCompleted) eventPayload()     {}
 func (RunStarted) eventPayload()               {}
 func (RunCompleted) eventPayload()             {}
+func (RunInterrupted) eventPayload()           {}
 func (TurnStarted) eventPayload()              {}
 func (TurnCompleted) eventPayload()            {}
 func (MessageCommitted) eventPayload()         {}
@@ -652,7 +665,7 @@ func validateEnvelopeIDs(event Event) error {
 	case EventSessionOpened, EventSessionClosed, EventSessionTreeChanged,
 		EventSessionNavigated, EventSessionForked, EventCompactionStarted,
 		EventCompactionCompleted, EventModeChanged, EventTeamLifecycle,
-		EventTeamControlLifecycle, EventTeamIntegrationLifecycle:
+		EventTeamControlLifecycle, EventTeamIntegrationLifecycle, EventGoalChanged:
 		if event.InteractionID != "" || event.RunID != "" {
 			return invalidEvent("session event has interaction or run id")
 		}
@@ -664,7 +677,7 @@ func validateEnvelopeIDs(event Event) error {
 		if event.InteractionID == "" || event.RunID != "" {
 			return invalidEvent("%s requires only an interaction id", event.Type)
 		}
-	case EventRunStarted, EventRunCompleted, EventTurnStarted, EventTurnCompleted,
+	case EventRunStarted, EventRunCompleted, EventRunInterrupted, EventTurnStarted, EventTurnCompleted,
 		EventMessageCommitted, EventMessageDelta, EventMessageDiscarded,
 		EventToolStarted, EventToolUpdated,
 		EventToolCompleted, EventSubagentCreated, EventSubagentStarted,
@@ -729,7 +742,7 @@ func validatePayload(eventType EventType, payload EventPayload) error {
 	case CompactionCompleted:
 		if eventType != EventCompactionCompleted || !validCompactionMode(value.Mode) ||
 			value.TokensBefore < 0 || value.TokensAfter < 0 ||
-			value.TokensAfter > value.TokensBefore || validateEventID("first kept id", value.FirstKeptID, true) != nil ||
+			value.TokensAfter > value.TokensBefore || !validCompactionCompletionIdentity(value) ||
 			value.DurationMillis < 0 || value.DurationMillis > maxEventDurationMS {
 			return invalidPayload(eventType, payload)
 		}
@@ -780,8 +793,13 @@ func validatePayload(eventType EventType, payload EventPayload) error {
 		if eventType != EventTurnStarted || value.Turn < 1 {
 			return invalidPayload(eventType, payload)
 		}
+	case RunInterrupted:
+		if eventType != EventRunInterrupted || value.Reason != "context_overflow" {
+			return invalidPayload(eventType, payload)
+		}
 	case TurnCompleted:
-		if eventType != EventTurnCompleted || value.Turn < 1 || !validTokenUsage(value.Usage) {
+		if eventType != EventTurnCompleted || value.Turn < 1 || !validTokenUsage(value.Usage) ||
+			(value.ContextTokens != nil && *value.ContextTokens < 0) {
 			return invalidPayload(eventType, payload)
 		}
 	case MessageCommitted:
@@ -812,6 +830,17 @@ func validatePayload(eventType EventType, payload EventPayload) error {
 		}
 	case SubagentLifecycle:
 		if validateSubagentLifecycle(eventType, value) != nil {
+			return invalidPayload(eventType, payload)
+		}
+	case GoalChanged:
+		state := value.State
+		if value.Redacted && state.ID != "" {
+			if state.Condition != "" || state.Reason != "" || len(state.Gaps) != 0 || len(state.References) != 0 {
+				return invalidPayload(eventType, payload)
+			}
+			state.Condition = "redacted"
+		}
+		if eventType != EventGoalChanged || validateGoalState(state) != nil {
 			return invalidPayload(eventType, payload)
 		}
 	case TeamLifecycle:
@@ -1335,18 +1364,35 @@ func validateCompactionPreview(value CompactionPreview, requireAvailable bool) e
 	if requireAvailable && !value.Available || value.EstimatedTokens < 0 || value.ThresholdTokens < 0 ||
 		value.SummarizedMessages < 0 || value.KeptMessages < 0 ||
 		!validBoundedText(value.DisabledReason, maxDiagnosticMessage, true) ||
-		validateOptionalID(value.FirstKeptID) != nil ||
+		validateOptionalID(value.FirstKeptID) != nil || validateOptionalID(value.SourceLeafID) != nil ||
+		(value.Strategy != "" && value.Strategy != CompactionStrategyFull) ||
 		!validIdentifierText(value.Token, 128, !value.Available) {
 		return errors.New("invalid compaction preview")
 	}
-	if value.Available && (value.Token == "" || value.FirstKeptID == "" || value.DisabledReason != "") {
+	if !value.Available {
+		if value.Token != "" || value.FirstKeptID != "" || value.SourceLeafID != "" {
+			return errors.New("disabled compaction preview carries a plan")
+		}
+		return nil
+	}
+	if value.Token == "" || value.DisabledReason != "" {
 		return errors.New("available compaction preview is incomplete")
 	}
-	if !value.Available && (value.Token != "" || value.FirstKeptID != "") {
-		return errors.New("disabled compaction preview carries a plan")
+	if value.Strategy == CompactionStrategyFull {
+		if value.SourceLeafID == "" || value.FirstKeptID != "" || value.SplitTurn {
+			return errors.New("invalid full checkpoint preview")
+		}
+	} else if value.FirstKeptID == "" || value.SourceLeafID != "" {
+		return errors.New("invalid legacy compaction preview")
 	}
-
 	return nil
+}
+
+func validCompactionCompletionIdentity(value CompactionCompleted) bool {
+	if value.Strategy == CompactionStrategyFull {
+		return value.FirstKeptID == "" && validateEventID("checkpoint id", value.CheckpointID, true) == nil
+	}
+	return value.Strategy == "" && value.CheckpointID == "" && validateEventID("first kept id", value.FirstKeptID, true) == nil
 }
 
 func validateEventID(name, value string, required bool) error {

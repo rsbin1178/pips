@@ -9,10 +9,12 @@ import (
 
 	"github.com/rsbin1178/pips/agent/catalog"
 	"github.com/rsbin1178/pips/agent/harness"
+	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding/agentprofile"
 	"github.com/rsbin1178/pips/internal/coding/hooks"
 	codingmcp "github.com/rsbin1178/pips/internal/coding/mcp"
 	"github.com/rsbin1178/pips/internal/coding/subagent"
+	"github.com/rsbin1178/pips/internal/coding/tools"
 )
 
 const customSubagentInstructionPrefix = `You are a specialized child agent in a Coding runtime.
@@ -336,6 +338,16 @@ func (d *customSubagentDispatcher) Open(
 	factory := d.factory.clone()
 	factory.model = binding.model
 	factory.requestPolicy = binding.requestPolicy
+	if factory.fullCompaction != nil {
+		factory.fullCompaction.ContextWindow = binding.contextWindow
+		request := ai.Request{}
+		if binding.requestPolicy != nil {
+			binding.requestPolicy(&request)
+		}
+		if request.MaxTokens != nil {
+			factory.fullCompaction.ReserveTokens = max(factory.fullCompaction.ReserveTokens, *request.MaxTokens)
+		}
+	}
 	privateEntries, privateDefinitions, err := d.validatePrivateBindings(definition, input.Plan)
 	if err != nil {
 		return nil, err
@@ -520,6 +532,9 @@ func compileDelegableCapabilities(
 
 //nolint:goconst // The closed wire-name allowlist is intentionally visible at the authority boundary.
 func delegableDescriptor(descriptor catalog.Descriptor) bool {
+	if descriptor.Name == tools.HistoryName {
+		return childHistoryDescriptor(descriptor)
+	}
 	if capabilityRisk(descriptor.Risk) == "" {
 		return false
 	}
