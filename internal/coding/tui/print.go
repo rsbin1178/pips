@@ -32,9 +32,33 @@ func (m *Model) printHelp() tea.Cmd {
 			"/goal <condition> [--budget <tokens>] works toward verified completion; /goal status|pause|resume|clear controls it.\n"+
 			"/team [objective] proposes or inspects a Team; recovery, Integration, and cleanup always require review.\n"+
 			"/resume may show a read-only Team recovery badge; Enter resumes only the conversation.\n"+
-			"The terminal owns conversation history: use its wheel or scrollback keys to navigate, "+
-			"and drag normally to select and copy text.",
+			"/copy [n] [path] copies the nth-latest assistant reply (default: the latest) to the clipboard and a fallback file.\n"+
+			"/export [path] writes the loaded conversation as Markdown.\n"+
+			"/find [query] searches the conversation: Enter next match, Shift+Enter previous, Esc closes.\n"+
+			m.historyHelpLine(),
 	)
+}
+
+// historyHelpLine names the surface that owns the conversation, because that
+// ownership differs between the managed viewport and the inline compatibility
+// mode and the help text is the only place a user can read it.
+func (m *Model) historyHelpLine() string {
+	if !m.fullscreen() {
+		return "The terminal owns conversation history: use its wheel or scrollback keys to navigate, " +
+			"and drag normally to select and copy text."
+	}
+
+	line := "This session owns the conversation: the wheel and PgUp/PgDn (or Home/End) scroll it, " +
+		"Ctrl+F searches it, and Ctrl+O hands the whole transcript to the terminal for its own " +
+		"selection and search."
+	if m.mouseReportingEnabled() {
+		// Capturing the mouse takes bare drag-select away, so the modifier that
+		// restores it has to be stated where a user can find it.
+		line += "\nMouse reporting is on, so hold Shift (Option in iTerm2, macOS Terminal and " +
+			"tmux on macOS) while dragging to select text, or set [tui] mouse = false."
+	}
+
+	return line
 }
 
 func (m *Model) printStatus() tea.Cmd {
@@ -74,8 +98,18 @@ func (m *Model) printInspection(heading, body string) tea.Cmd {
 		heading = lipgloss.NewStyle().Bold(true).Foreground(paletteFor(m.theme).session).Render(heading)
 	}
 	lines := wrapInspectionLines(sanitizeInspectionText(body), max(1, m.width))
+	content := heading + "\n" + strings.Join(lines, "\n")
 
-	return m.printScrollback(heading + "\n" + strings.Join(lines, "\n"))
+	// Inspection output is conversation-visible content, so in fullscreen it joins
+	// the transcript instead of a terminal history that does not exist.
+	if m.fullscreen() {
+		m.appendNotice(content)
+		m.rerenderTranscript(false)
+
+		return nil
+	}
+
+	return m.printScrollback(content)
 }
 
 // wrapInspectionLines wraps long inspection rows with a hanging indent so a
@@ -176,12 +210,13 @@ func (m *Model) statusContent() string {
 	if m.worktreeSummary != "" {
 		content += "\nRepository: " + m.worktreeSummary
 	}
-	if len(m.state.Diagnostics) == 0 {
+	listed := visibleDiagnostics(m.state.Diagnostics)
+	if len(listed) == 0 {
 		return content
 	}
 
-	diagnostics := make([]string, 0, len(m.state.Diagnostics))
-	for _, diagnostic := range m.state.Diagnostics {
+	diagnostics := make([]string, 0, len(listed))
+	for _, diagnostic := range listed {
 		line := "- " + diagnosticTitle(diagnostic)
 		if message := diagnosticBody(diagnostic); message != "" {
 			line += ": " + message

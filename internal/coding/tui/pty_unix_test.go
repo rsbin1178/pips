@@ -31,12 +31,15 @@ func TestPTYLifecycleRestoresTerminalBeforeControllerClose(t *testing.T) {
 		controller := &ptyController{Controller: openScriptedController(t)}
 		_, _ = os.Stdout.WriteString("SHELL_HISTORY_MARKER\n")
 		err := Run(context.Background(), Options{
-			Input:       os.Stdin,
-			Output:      os.Stdout,
-			Environment: os.Environ(),
-			Workspace:   "/workspace",
-			Trusted:     true,
-			NoColor:     true,
+			Input:           os.Stdin,
+			Output:          os.Stdout,
+			Environment:     os.Environ(),
+			Workspace:       "/workspace",
+			Trusted:         true,
+			NoColor:         true,
+			PinPresentation: true,
+			Screen:          ScreenInline,
+			AltScreen:       AltScreenNever,
 			Bootstrap: func(context.Context, bool) (Controller, error) {
 				return controller, nil
 			},
@@ -202,6 +205,13 @@ type ptyController struct {
 
 	mu          sync.Mutex
 	promptLines int
+}
+
+func (c *ptyController) History(
+	context.Context,
+	coding.HistoryRequest,
+) (coding.HistoryPage, error) {
+	return coding.HistoryPage{}, coding.ErrHistoryUnavailable
 }
 
 func (c *ptyController) Snapshot() coding.State {

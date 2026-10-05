@@ -132,3 +132,72 @@ func TestMarkdownHeadingsRenderWithoutSourceMarkers(t *testing.T) {
 		}
 	}
 }
+
+func TestMarkdownLiveCacheReplacesOldVersions(t *testing.T) {
+	t.Parallel()
+
+	renderer := newMarkdownRenderer(128)
+	for index := range 150 {
+		source := fmt.Sprintf("Thinking version %d", index)
+		got, err := renderer.renderLive("thinking", source, 40, themeDark, false)
+		require.NoError(t, err)
+		want, err := newMarkdownRenderer(1).render(source, 40, themeDark, false)
+		require.NoError(t, err)
+		assert.Equal(t, want, got)
+		require.Len(t, renderer.entries, 1)
+		require.Len(t, renderer.live, 1)
+	}
+}
+
+func TestMarkdownCacheBoundsRenderedBytes(t *testing.T) {
+	t.Parallel()
+
+	renderer := newMarkdownRenderer(128)
+	renderer.maxBytes = 1024
+	for index := range 50 {
+		_, err := renderer.render(fmt.Sprintf("text %d", index), 20, themeDark, false)
+		require.NoError(t, err)
+		assert.LessOrEqual(t, renderer.bytes, renderer.maxBytes)
+	}
+	before := renderer.bytes
+	source := strings.Repeat("large document\n\n", 100)
+	got, err := renderer.renderLive("draft", source, 40, themeDark, false)
+	require.NoError(t, err)
+	assert.Contains(t, got, "large")
+	assert.Equal(t, before, renderer.bytes, "oversized outputs render without entering the cache")
+	assert.NotContains(t, renderer.live, "draft")
+}
+
+func TestMarkdownEngineReuseMatchesFreshRenderer(t *testing.T) {
+	t.Parallel()
+
+	renderer := newMarkdownRenderer(2)
+	for _, source := range []string{
+		"[link][target]\n\n[target]: https://example.com", "[link][target]",
+		"- first\n  - nested\n\n```go\nvar x = 1\n```", "plain after a list",
+		"| a | b |\n|---|---|\n|1|2|", "**bold** and `inline`",
+	} {
+		got, err := renderer.render(source, 40, themeDark, false)
+		require.NoError(t, err)
+		want, err := newMarkdownRenderer(1).render(source, 40, themeDark, false)
+		require.NoError(t, err)
+		assert.Equal(t, want, got)
+	}
+}
+
+func TestMarkdownEngineReleasesNestedAndOversizedBuffers(t *testing.T) {
+	t.Parallel()
+
+	renderer := newMarkdownRenderer(128)
+	_, err := renderer.render("A short paragraph", 40, themeDark, false)
+	require.NoError(t, err)
+	assert.NotNil(t, renderer.engine, "a flat bounded renderer can be reused")
+
+	_, err = renderer.render("- nested\n  - list", 40, themeDark, false)
+	require.NoError(t, err)
+	assert.Nil(t, renderer.engine, "popped nested buffers must not remain in the engine")
+
+	_, err = renderer.render(strings.Repeat("long paragraph ", 5000), 100, themeDark, false)
+	require.NoError(t, err)
+	assert.Nil(t, renderer.engine, "oversized buffers must not remain in the engine")
+}

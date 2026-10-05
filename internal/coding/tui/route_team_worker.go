@@ -391,7 +391,8 @@ func (m *Model) applyTeamWorkerControl(message teamWorkerControlResultMsg) tea.C
 }
 
 func (m *Model) teamWorkerRouteContent(state coding.State, child childSummary) string {
-	blocks := projectTimeline(state)
+	// Team worker projections follow the subagent rule: no reasoning text.
+	blocks := withoutThinkingBlocks(projectTimeline(state))
 	if marker, ok := teamWorkerCompletionMarker(state, child); ok {
 		blocks = append(blocks, marker)
 	}

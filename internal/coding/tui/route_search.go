@@ -69,10 +69,7 @@ func routeSearchInputWidth(width int) int {
 }
 
 func (m *Model) searchableRouteView(content string, searchX, searchY int) tea.View {
-	view := tea.NewView(content)
-	view.AltScreen = false
-	view.MouseMode = tea.MouseModeNone
-	view.WindowTitle = appTitle
+	view := m.presentationView(content)
 
 	view.Cursor = m.route.search.Cursor()
 	if view.Cursor != nil {

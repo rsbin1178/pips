@@ -30,6 +30,7 @@ func TestPTYLongHistoryVisibleBeforeInput(t *testing.T) {
 		err := Run(context.Background(), Options{
 			Input: os.Stdin, Output: os.Stdout, Environment: os.Environ(),
 			Workspace: t.TempDir(), Trusted: true, NoColor: true,
+			PinPresentation: true, Screen: ScreenInline, AltScreen: AltScreenNever,
 			Bootstrap: func(context.Context, bool) (Controller, error) {
 				return &longHistoryPTYController{stubController: stubController{state: state}}, nil
 			},

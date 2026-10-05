@@ -26,7 +26,12 @@ func TestStartupSizeBootstrapRendezvous(t *testing.T) {
 			state := readyState()
 			state.Transcript = []ai.Message{ai.UserText("STARTUP-HISTORY")}
 			controller := stubController{state: state}
-			model := newModel(t.Context(), Options{NoColor: true})
+			model := newModel(t.Context(), Options{
+				PinPresentation: true,
+				Screen:          ScreenInline,
+				AltScreen:       AltScreenNever,
+				NoColor:         true,
+			})
 			_, invalid := model.Update(tea.WindowSizeMsg{})
 			require.Nil(t, invalid)
 			var command tea.Cmd
@@ -183,7 +188,24 @@ func historyMarkers(count int) []string {
 	return lines
 }
 
+func (p *stableScreenProbe) finished() bool { return p.done.Load() }
+
 func runStableScreenProgram(t *testing.T, probe *stableScreenProbe, fps int) string {
+	t.Helper()
+
+	return runScreenProgram(t, probe, fps)
+}
+
+// screenProbe is a Program model that reports when its screen assertions are
+// ready. Each probe owns its own readiness condition because the interesting
+// moment differs: a completed native write for inline mode, a completed paged
+// transcript write for the managed viewport.
+type screenProbe interface {
+	tea.Model
+	finished() bool
+}
+
+func runScreenProgram(t *testing.T, probe screenProbe, fps int) string {
 	t.Helper()
 	var output synchronizedBuffer
 	program := tea.NewProgram(probe, tea.WithInput(nil), tea.WithOutput(&output),
@@ -192,7 +214,7 @@ func runStableScreenProgram(t *testing.T, probe *stableScreenProbe, fps int) str
 	finished := make(chan error, 1)
 	go func() { _, err := program.Run(); finished <- err }()
 	t.Cleanup(program.Kill)
-	require.Eventually(t, probe.done.Load, 30*time.Second, 10*time.Millisecond)
+	require.Eventually(t, probe.finished, 30*time.Second, 10*time.Millisecond)
 	capture := output.String() // completion is after synchronous renderer restoration
 	program.Quit()
 	require.NoError(t, <-finished)

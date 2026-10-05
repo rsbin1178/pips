@@ -12,7 +12,12 @@ import (
 func TestReviewStartupDoesNotAcceptHiddenCommandsBeforeSize(t *testing.T) {
 	t.Parallel()
 
-	model := newModel(t.Context(), Options{NoColor: true})
+	model := newModel(t.Context(), Options{
+		PinPresentation: true,
+		Screen:          ScreenInline,
+		AltScreen:       AltScreenNever,
+		NoColor:         true,
+	})
 	_, command := model.Update(bootstrapResult{controller: stubController{state: readyState()}})
 	require.Nil(t, command)
 

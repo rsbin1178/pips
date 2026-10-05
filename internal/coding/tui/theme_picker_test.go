@@ -58,6 +58,7 @@ func TestThemePickerRescansAndRestoresComposerOnCancel(t *testing.T) {
 	), 0o600))
 
 	model := newModel(t.Context(), Options{
+		PinPresentation: true, Screen: ScreenInline, AltScreen: AltScreenNever,
 		Workspace:      "/workspace",
 		ThemeDirectory: directory,
 		NoColor:        true,
@@ -89,6 +90,7 @@ func TestThemePickerRescansOnEveryOpen(t *testing.T) {
 	directory := t.TempDir()
 	require.NoError(t, os.Chmod(directory, 0o700))
 	model := newModel(t.Context(), Options{
+		PinPresentation: true, Screen: ScreenInline, AltScreen: AltScreenNever,
 		Workspace:      "/workspace",
 		ThemeDirectory: directory,
 		NoColor:        true,
@@ -151,6 +153,7 @@ func TestThemePickerClearsRecoveredSelectionDiagnostic(t *testing.T) {
 
 	controller := stubController{state: readyState()}
 	model := newModel(t.Context(), Options{
+		PinPresentation: true, Screen: ScreenInline, AltScreen: AltScreenNever,
 		Workspace: "/workspace",
 		NoColor:   true,
 		SaveTheme: func(context.Context, string) error { return nil },
@@ -178,6 +181,7 @@ func TestThemePickerSaveAppliesThemeAndKeepsStateOnFailure(t *testing.T) {
 	controller := stubController{state: readyState()}
 	var saved string
 	model := newModel(t.Context(), Options{
+		PinPresentation: true, Screen: ScreenInline, AltScreen: AltScreenNever,
 		Workspace: "/workspace",
 		NoColor:   true,
 		SaveTheme: func(_ context.Context, value string) error {
@@ -204,6 +208,7 @@ func TestThemePickerSaveAppliesThemeAndKeepsStateOnFailure(t *testing.T) {
 	assert.Equal(t, pickerNone, model.picker.kind)
 
 	model = newModel(t.Context(), Options{
+		PinPresentation: true, Screen: ScreenInline, AltScreen: AltScreenNever,
 		Workspace: "/workspace",
 		NoColor:   true,
 		SaveTheme: func(context.Context, string) error { return errors.New("disk full") },
@@ -220,6 +225,7 @@ func TestThemePickerSaveAppliesThemeAndKeepsStateOnFailure(t *testing.T) {
 	assert.Equal(t, "default-dark", model.theme.id)
 
 	model = newModel(t.Context(), Options{
+		PinPresentation: true, Screen: ScreenInline, AltScreen: AltScreenNever,
 		Workspace: "/workspace",
 		NoColor:   true,
 		SaveTheme: func(context.Context, string) error { return config.ErrThemeDurability },

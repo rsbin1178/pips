@@ -19,8 +19,6 @@ const (
 	maximumTeamRouteInputBytes = 16 << 10
 	maximumTeamRouteControls   = 64
 	teamRouteCleanupTimeout    = 5 * time.Second
-	keyPageUp                  = "pgup"
-	keyPageDown                = "pgdown"
 )
 
 type teamRouteStage uint8
@@ -1213,12 +1211,22 @@ func (m *Model) teamRouteView() tea.View {
 		max(1, m.height),
 		m.route.offset,
 	)
-	view := tea.NewView(content)
-	view.AltScreen = false
-	view.MouseMode = tea.MouseModeNone
-	view.WindowTitle = appTitle
+	return m.presentationView(content)
+}
 
-	return view
+// teamRouteMaximumOffset mirrors the clamp fitScrollableContentWindow applies to
+// the full-area Team view, so a wheel notch cannot scroll past the last row the
+// route can actually show.
+func (m *Model) teamRouteMaximumOffset() int {
+	content, _ := m.teamRouteContent()
+
+	height := max(1, m.height)
+	lines := strings.Count(content, "\n") + 1
+	if lines <= height {
+		return 0
+	}
+
+	return max(0, lines-max(1, height-1))
 }
 
 func (m *Model) teamRouteIsInline() bool {

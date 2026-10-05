@@ -758,6 +758,11 @@ All TUI selections are stored together in the active configuration file under
 [tui]
 theme = "nord"
 status_line = ["workspace", "session", "model", "phase"]
+screen = "fullscreen"      # fullscreen | inline
+alt_screen = "auto"        # auto | always | never
+mouse = true
+exit_output = "resume-hint" # transcript | resume-hint
+show_thinking_blocks = true # render model reasoning as dimmed Thinking blocks
 ```
 
 Theme and status-line selection are file-only: there is no `PIPS_THEME`,
@@ -768,6 +773,90 @@ configurable line; transient safety and operation indicators may still appear.
 A well-formed but unavailable theme ID is accepted by configuration loading,
 but the TUI falls back to `auto` when the registry cannot resolve it and shows
 a bounded notice.
+
+The interactive layout has two modes. `screen = "fullscreen"` (the default) gives
+the session a fixed-height region it owns: the wheel and PgUp/PgDn/Home/End scroll
+it, `Ctrl+O` hands the whole transcript to the terminal for its own wheel,
+selection, search and copy (`Esc` returns to the viewport at the same reading
+position), and `Ctrl+O`/`Esc` are the only keys the transcript mode consumes.
+`screen = "inline"` keeps the compatibility mode: stable output goes to the
+terminal's own history, the terminal owns scrolling and selection, and `Ctrl+O` is
+inert. The document handed to the terminal is written in bounded pages, so a long
+session yields between pages (including on exit with `exit_output = "transcript"`). `alt_screen` selects the buffer independently of the layout (`auto` uses the
+alternate screen unless Zellij or tmux control mode restricts it, `always` forces
+it, `never` draws the layout in the main buffer). `mouse = true` (the default)
+captures the mouse in fullscreen so a wheel notch can scroll the viewport. Text is
+selected in the viewport itself: drag over the conversation and the addressed rows
+are copied through the same clipboard path as `Ctrl+X` (an OSC 52 request plus a
+fallback file) with a short confirmation on the status line, and `Esc` clears the
+highlight. Rows are copied as they are painted, so a paragraph that wrapped is
+copied as the lines on screen; `/copy` and `/export` give the reflow-free text.
+With no route open, `Ctrl+R` releases the capture for the session (and takes it
+back), which hands selection, copy and link handling to the terminal; while the
+capture is on, holding Shift (Option in iTerm2, macOS Terminal and tmux on macOS)
+still bypasses it. Set `mouse = false` to start every session uncaptured and give up wheel
+scrolling. `exit_output` decides what a normal exit leaves on the terminal's main
+screen: `"resume-hint"` (the default) leaves only the resume hint, matching the
+reference agents, and `"transcript"` writes the whole conversation back so it stays
+scrollable after quitting (use `Ctrl+O` or `/export` to get the conversation back
+otherwise). Neither
+mode ever clears the terminal's scrollback, and both restore terminal state before
+the session is released.
+
+`show_thinking_blocks = true` (the default) renders the model's visible reasoning
+as a Thinking block in the fullscreen viewport: the whole thought is shown under
+a `Thinking` label, wrapped and dimmed in the active theme's muted color, and it
+grows in place as the turn streams. Only the reasoning text is shown — the
+provider's opaque continuation signature is never rendered. A provider that
+returns reasoning without visible text (encrypted-only reasoning) produces no
+block at all. Reasoning is rendered as plain text rather than Markdown, so it
+stays cheap to redraw on every streamed delta; long thoughts keep every row
+rather than collapsing. The setting only affects the managed viewport: inline
+mode hands history to the terminal and never renders reasoning, and `/copy` and
+`/export` never include reasoning text.
+
+Copy and export follow the same rule: the session owns the text, and the terminal
+is only one way to get it out. `Ctrl+X` copies the newest assistant reply, and
+`/copy [n] [path]` copies the nth-latest reply (`1` is the newest, which includes
+a reply that is still streaming). A copy with no path is sent to the clipboard as
+an OSC 52 request **and** written to a fallback file, because OSC 52 delivery
+cannot be confirmed: Apple Terminal has no OSC 52 at all, tmux needs
+`set -g set-clipboard on`, and an SSH session usually cannot reach the local
+clipboard. The fallback defaults to `$PIPS_HOME/last-copy.txt` (normally
+`~/.pips/last-copy.txt`) and `PIPS_COPY_FILE` overrides it. `/copy <path>` skips
+the clipboard and writes only that file, which is the documented answer when the
+clipboard is unreachable. `/export [path]` writes the loaded conversation as
+Markdown, by default to `$PIPS_HOME/last-export.md`. A relative path you type
+resolves inside the workspace; the default destination lives in the Pips home
+directory. Both write through an atomic replace and report the resolved path on
+the status line for a few seconds. The exported document is the conversation the
+session is holding — the same document in both presentation modes, without the
+`/help`- and `/status`-style notices — so a session whose older history has not
+been paged in yet exports what has been loaded.
+
+Searching the conversation is the session's job in the same way. `Ctrl+F` (or
+`/find [query]`) opens a find box in the composer's band: typing filters live, the
+status line reports `find · 3/17`, `Enter` moves to the next match and
+`Shift+Enter` to the previous one (both wrap), and `Esc` closes the box and leaves
+you at the match. Matches are highlighted in place; in `NO_COLOR` mode the counter
+and the jump position are the feedback. `↑`/`↓` and `PgUp`/`PgDn` still scroll the
+viewport while the box is open, and the wheel always works. `/find` needs the
+managed viewport, so in `inline` mode it says the terminal owns the conversation
+instead of opening a box over a tail the terminal already holds.
+
+The `Ctrl+T` detail panel — a Tool document, or the child session behind a
+subagent call, whichever the newest entry is — scrolls with the wheel exactly like
+its keys: one notch moves it three rows (one under a multiplexer), and it stops at
+its own first and last row. The wheel also works on every other list surface, and
+there it does what that surface's own scrolling keys do: `/agents` (Runs and
+Library) and the non-inline `/team` stages scroll their viewport and leave the
+selection where it is, while `/tree`, `/resume`, `/skills`, `/mcp` and the
+dropdowns above the composer (`/model`, `/theme`, `/permissions`, the command and
+file pickers) move their selection, because for those lists the selection *is* the
+scroll position. A selection list therefore wraps with the wheel exactly where it
+wraps with ↑/↓, and a picker never moves the conversation underneath it. The
+`/agents` hint line names the scroll inputs, and a picker's or panel's key hints
+stay authoritative for everything else.
 
 `/statusline` keeps the existing picker interactions: toggle and reorder items,
 preview the result, press Enter to save, or press Esc to cancel. `/theme` and

@@ -269,6 +269,10 @@ func (m *Model) updateAgentsRouteKey(message tea.KeyPressMsg) (tea.Model, tea.Cm
 
 	values := m.filteredChildren()
 
+	if m.updateRouteScrollKey(message) {
+		return m, nil
+	}
+
 	switch message.String() {
 	case "up", "k":
 		m.route.cursor = wrapIndex(m.route.cursor-1, len(values))
@@ -304,6 +308,10 @@ func (m *Model) updateAgentsRouteKey(message tea.KeyPressMsg) (tea.Model, tea.Cm
 
 func (m *Model) updateAgentLibraryRouteKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	values := m.filteredAgentLibrary()
+	if m.updateRouteScrollKey(message) {
+		return m, nil
+	}
+
 	switch message.String() {
 	case "up", "k":
 		m.route.cursor = wrapIndex(m.route.cursor-1, len(values))
@@ -329,6 +337,44 @@ func (m *Model) updateAgentLibraryRouteKey(message tea.KeyPressMsg) (tea.Model, 
 	}
 
 	return m, nil
+}
+
+// updateRouteScrollKey applies the shared full-area scrolling keys to a route
+// that renders through fitScrollableContent. It reports whether the key was a
+// scrolling key, so routes can keep their selection keys separate from their
+// viewport keys.
+func (m *Model) updateRouteScrollKey(message tea.KeyPressMsg) bool {
+	rows := m.routeScrollRows()
+	maximum := max(0, m.routeScrollLineCount()-rows)
+
+	switch message.String() {
+	case "pgup":
+		m.route.offset = max(0, m.route.offset-rows)
+	case "pgdown":
+		m.route.offset = min(maximum, m.route.offset+rows)
+	case "shift+up":
+		m.route.offset = max(0, m.route.offset-1)
+	case "shift+down":
+		m.route.offset = min(maximum, m.route.offset+1)
+	case "home":
+		m.route.offset = 0
+	case "end":
+		m.route.offset = maximum
+	default:
+		return false
+	}
+
+	return true
+}
+
+// routeScrollRows reports the rows a scrollable route body may occupy.
+func (m *Model) routeScrollRows() int {
+	return max(1, m.height-layoutStatusRows)
+}
+
+// routeScrollLineCount reports how many rows the current route content occupies.
+func (m *Model) routeScrollLineCount() int {
+	return lipgloss.Height(m.agentsRouteContent())
 }
 
 func (m *Model) filteredChildren() []childSummary {
@@ -412,7 +458,7 @@ func (m *Model) agentsRouteContent() string {
 		}
 		lines = append(lines, "", m.activityNotice(label))
 	}
-	lines = append(lines, "", "↑/↓ choose · type to search · Enter inspect · c interrupt · Ctrl+L Library · Ctrl+R Runs · Ctrl+T/Esc close")
+	lines = append(lines, "", wheelHintNavigation+" · type to search · Enter inspect · c interrupt · Ctrl+L Library · Ctrl+R Runs · Ctrl+T/Esc close")
 
 	return strings.Join(lines, "\n")
 }
@@ -432,7 +478,7 @@ func (m *Model) agentLibraryRouteContent(lines []string) string {
 	lines = append(lines,
 		"",
 		"Declared capabilities are intersected with active session authority at launch.",
-		"↑/↓ choose · Enter run · type to search · Ctrl+L Library · Ctrl+R Runs · Ctrl+T/Esc close",
+		"↑/↓ choose · "+wheelHintNavigation+" · Enter run · type to search · Ctrl+L Library · Ctrl+R Runs · Ctrl+T/Esc close",
 	)
 
 	return strings.Join(lines, "\n")
@@ -689,7 +735,9 @@ func teamWorkerTaskLabel(view coding.TeamView, taskID team.TaskID) string {
 
 //nolint:gocyclo,nestif // Terminal result/error enrichment remains adjacent to ordinary timeline projection.
 func (m *Model) subagentRouteContent(state coding.State, detail *subagent.Detail) string {
-	blocks := projectTimeline(state)
+	// A child projection never renders reasoning text: the spec keeps child
+	// thinking out of every parent-visible surface.
+	blocks := withoutThinkingBlocks(projectTimeline(state))
 	if detail != nil {
 		if detail.Summary.State == subagent.StateSucceeded && detail.Result != nil {
 			for index, block := range slices.Backward(blocks) {
@@ -944,12 +992,7 @@ func (m *Model) agentsRouteView() tea.View {
 		content = lipgloss.NewStyle().Foreground(paletteFor(m.theme).workspace).Render(content)
 	}
 
-	view := tea.NewView(content)
-	view.AltScreen = false
-	view.MouseMode = tea.MouseModeNone
-	view.WindowTitle = appTitle
-
-	return view
+	return m.presentationView(content)
 }
 
 func (m *Model) updateSubagentRouteKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -1163,10 +1206,7 @@ func (m *Model) subagentRouteView() tea.View {
 		body += strings.Repeat("\n", padding)
 	}
 
-	view := tea.NewView(lipgloss.JoinVertical(lipgloss.Left, body, footer))
-	view.AltScreen = false
-	view.MouseMode = tea.MouseModeNone
-	view.WindowTitle = appTitle
+	view := m.presentationView(lipgloss.JoinVertical(lipgloss.Left, body, footer))
 	if m.route.childKind == childTeamWorker && !m.route.controlling {
 		view.Cursor = m.composer.Cursor()
 		if view.Cursor != nil {

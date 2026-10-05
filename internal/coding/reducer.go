@@ -4,6 +4,7 @@ package coding
 import (
 	"bytes"
 	"fmt"
+	"maps"
 	"slices"
 	"time"
 
@@ -23,6 +24,34 @@ const (
 	maxRecentTeamControls     = 256
 	maxRecentTeamIntegrations = 64
 )
+
+// appendShared appends to a projection that the caller's State still observes.
+// The three-index slice pins capacity to length first, so append always
+// allocates a fresh backing array instead of writing into memory another State
+// may still read.
+func appendShared[T any](values []T, additions ...T) []T {
+	if len(additions) == 0 {
+		return values
+	}
+
+	return append(values[:len(values):len(values)], additions...)
+}
+
+// cloneBeforeWrite detaches a projection from the caller's State before its
+// elements are updated in place.
+func cloneBeforeWrite[T any](values []T) []T {
+	return slices.Clone(values)
+}
+
+// cloneIndexForWrite detaches one runtime index from the caller's State and
+// guarantees a writable map for states that never rebuilt their indexes.
+func cloneIndexForWrite(index map[string]int) map[string]int {
+	if len(index) == 0 {
+		return make(map[string]int, 4)
+	}
+
+	return maps.Clone(index)
+}
 
 // InteractionState is the current or most recently completed user interaction.
 type InteractionState struct {
@@ -345,28 +374,136 @@ func (state State) Durable() DurableState {
 	}
 }
 
-// Reduce applies one validated event to a defensive copy of state.
+// Reduce applies one validated event to a copy-on-write view of state.
+//
+// The returned State shares the immutable projections of the input (committed
+// Transcript messages, completed Tool results and lifecycle projections) and
+// privately owns everything [State.apply] writes, so neither State can observe
+// the other's later transitions. Callers that retain a value across mutations
+// of the Runtime use [State.Clone] instead.
 func Reduce(state State, event Event) (State, error) {
 	if err := ValidateEvent(event); err != nil {
 		return State{}, err
 	}
 
-	next := state.Clone()
-	if event.Sequence != next.Sequence+1 {
-		return State{}, protocolError("sequence %d follows %d", event.Sequence, next.Sequence)
-	}
-
-	if next.SessionID != "" && event.SessionID != next.SessionID {
-		return State{}, protocolError("session changed from %q to %q", next.SessionID, event.SessionID)
-	}
-
-	if err := next.apply(event); err != nil {
+	next := state
+	if err := next.reduce(event); err != nil {
 		return State{}, err
 	}
 
-	next.Sequence = event.Sequence
+	return next, nil
+}
 
-	return next.Clone(), nil
+// ReduceBatch applies one frame's worth of validated events as a single state
+// transition. Runs of MessageDelta events are folded into one Draft append;
+// every other event keeps its individual transition. The result is
+// field-for-field identical to applying the events one at a time, and the
+// first rejected event leaves no partial state behind.
+func ReduceBatch(state State, events []Event) (State, error) {
+	for _, event := range events {
+		if err := ValidateEvent(event); err != nil {
+			return State{}, err
+		}
+	}
+
+	next := state
+	next.ensureIndexes()
+
+	for index := 0; index < len(events); {
+		if events[index].Type != EventMessageDelta {
+			if err := next.reduce(events[index]); err != nil {
+				return State{}, err
+			}
+
+			index++
+
+			continue
+		}
+
+		end := index
+		for end < len(events) && events[end].Type == EventMessageDelta {
+			end++
+		}
+
+		if err := next.reduceDeltas(events[index:end]); err != nil {
+			return State{}, err
+		}
+
+		index = end
+	}
+
+	return next, nil
+}
+
+// reduce applies one validated event to a private copy of the caller's State.
+func (state *State) reduce(event Event) error {
+	state.ensureIndexes()
+
+	if event.Sequence != state.Sequence+1 {
+		return protocolError("sequence %d follows %d", event.Sequence, state.Sequence)
+	}
+
+	if state.SessionID != "" && event.SessionID != state.SessionID {
+		return protocolError("session changed from %q to %q", state.SessionID, event.SessionID)
+	}
+
+	if err := state.apply(event); err != nil {
+		return err
+	}
+
+	state.Sequence = event.Sequence
+
+	return nil
+}
+
+// reduceDeltas folds a contiguous run of MessageDelta events into one Draft
+// append while running every per-event validation the individual transitions
+// run. A rejected delta discards the whole run, matching ReduceBatch's
+// all-or-nothing contract.
+func (state *State) reduceDeltas(events []Event) error {
+	folded := make([]MessageDelta, 0, len(events))
+
+	for _, event := range events {
+		if event.Sequence != state.Sequence+1 {
+			return protocolError("sequence %d follows %d", event.Sequence, state.Sequence)
+		}
+
+		if state.SessionID != "" && event.SessionID != state.SessionID {
+			return protocolError("session changed from %q to %q", state.SessionID, event.SessionID)
+		}
+
+		payload, ok := event.Payload.(MessageDelta)
+		if !ok {
+			return invalidEvent("message delta payload is %T", event.Payload)
+		}
+
+		if err := state.checkDelta(event); err != nil {
+			return err
+		}
+
+		folded = append(folded, cloneMessageDelta(payload))
+		state.Sequence = event.Sequence
+	}
+
+	state.Draft = appendShared(state.Draft, folded...)
+
+	return nil
+}
+
+// runningTool returns the index of one running tool call, preferring the index
+// and falling back to the projection.
+func (state *State) runningTool(runID, callID string) int {
+	if index, exists := state.activeTools[toolStateKey(runID, callID)]; exists {
+		return index
+	}
+
+	for index, tool := range state.Tools {
+		if tool.Status == ToolStatusRunning && tool.RunID == runID && tool.Call.ID == callID {
+			return index
+		}
+	}
+
+	return -1
 }
 
 //nolint:gocyclo,cyclop,funlen,maintidx // The reducer is the single exhaustive event transition table.
@@ -476,9 +613,10 @@ func (state *State) apply(event Event) error {
 			return protocolError("run %q is already active", event.RunID)
 		}
 
-		state.Runs = append(state.Runs, RunState{
+		state.Runs = appendShared(state.Runs, RunState{
 			ID: event.RunID, ParentRunID: payload.ParentRunID, Agent: payload.Agent, Active: true,
 		})
+		state.activeRuns = cloneIndexForWrite(state.activeRuns)
 		state.activeRuns[event.RunID] = len(state.Runs) - 1
 	case RunCompleted:
 		index, err := state.activeRun(event.RunID)
@@ -486,7 +624,7 @@ func (state *State) apply(event Event) error {
 			return err
 		}
 
-		if _, open := state.openTurns[event.RunID]; open {
+		if state.openTurn(event.RunID) != 0 {
 			return protocolError("run %q has an open turn", event.RunID)
 		}
 
@@ -494,10 +632,12 @@ func (state *State) apply(event Event) error {
 			return protocolError("run %q completed with inconsistent turns", event.RunID)
 		}
 
+		state.Runs = cloneBeforeWrite(state.Runs)
 		state.Runs[index].Active = false
 		state.Runs[index].Stop = payload.Stop
 		state.Runs[index].Usage = payload.Usage
 		state.Runs[index].Turn = max(state.Runs[index].Turn, payload.Turns)
+		state.activeRuns = cloneIndexForWrite(state.activeRuns)
 		delete(state.activeRuns, event.RunID)
 	case RunInterrupted:
 		index, err := state.activeRun(event.RunID)
@@ -525,12 +665,14 @@ func (state *State) apply(event Event) error {
 			return err
 		}
 
-		if _, open := state.openTurns[event.RunID]; open || payload.Turn != state.Runs[index].Turn+1 {
+		if state.openTurn(event.RunID) != 0 || payload.Turn != state.Runs[index].Turn+1 {
 			return protocolError("run %q cannot start turn %d", event.RunID, payload.Turn)
 		}
 
+		state.Runs = cloneBeforeWrite(state.Runs)
 		state.Runs[index].Turn = payload.Turn
 		state.Runs[index].TurnOpen = true
+		state.openTurns = cloneIndexForWrite(state.openTurns)
 		state.openTurns[event.RunID] = payload.Turn
 	case TurnCompleted:
 		index, err := state.activeRun(event.RunID)
@@ -538,7 +680,7 @@ func (state *State) apply(event Event) error {
 			return err
 		}
 
-		if state.openTurns[event.RunID] != payload.Turn || state.Runs[index].Turn != payload.Turn {
+		if state.openTurn(event.RunID) != payload.Turn || state.Runs[index].Turn != payload.Turn {
 			return protocolError("run %q cannot complete turn %d", event.RunID, payload.Turn)
 		}
 
@@ -552,52 +694,45 @@ func (state *State) apply(event Event) error {
 				state.ContextTokens = contextTokensFromUsage(turnUsage(state.Runs[index].Usage, payload.Usage))
 			}
 		}
+		state.Runs = cloneBeforeWrite(state.Runs)
 		state.Runs[index].Usage = payload.Usage
 		state.Runs[index].TurnOpen = false
+		state.openTurns = cloneIndexForWrite(state.openTurns)
 		delete(state.openTurns, event.RunID)
 	case MessageCommitted:
 		if _, err := state.activeRun(event.RunID); err != nil {
 			return err
 		}
 
-		if state.openTurns[event.RunID] == 0 {
+		if state.openTurn(event.RunID) == 0 {
 			return protocolError("message committed outside an active turn")
 		}
 
 		candidate := CandidateIdentity{}
 		if _, isAssistant := payload.Message.(ai.AssistantMessage); isAssistant {
-			candidate = CandidateIdentity{RunID: event.RunID, Turn: state.openTurns[event.RunID]}
+			candidate = CandidateIdentity{RunID: event.RunID, Turn: state.openTurn(event.RunID)}
 		}
-		state.Transcript = append(state.Transcript, cloneMessage(payload.Message))
+		state.Transcript = appendShared(state.Transcript, cloneMessage(payload.Message))
 		if update, ok := tasklist.FromMessage(payload.Message); ok {
 			state.Tasks = tasklist.FromUpdate(update)
 		}
-		state.MessageCandidates = append(state.MessageCandidates, candidate)
+		state.MessageCandidates = appendShared(state.MessageCandidates, candidate)
 		if payload.Synthetic {
-			state.SyntheticMessages = append(state.SyntheticMessages, len(state.Transcript)-1)
+			state.SyntheticMessages = appendShared(state.SyntheticMessages, len(state.Transcript)-1)
 		}
 		state.Draft = nil
 		state.DraftCandidate = CandidateIdentity{}
 	case MessageDelta:
-		if _, err := state.activeRun(event.RunID); err != nil {
+		if err := state.checkDelta(event); err != nil {
 			return err
 		}
 
-		if state.openTurns[event.RunID] == 0 {
-			return protocolError("message delta emitted outside an active turn")
-		}
-
-		candidate := CandidateIdentity{RunID: event.RunID, Turn: state.openTurns[event.RunID]}
-		if state.DraftCandidate.Key() != "" && state.DraftCandidate != candidate {
-			return protocolError("message delta changed candidate identity")
-		}
-		state.DraftCandidate = candidate
-		state.Draft = append(state.Draft, cloneMessageDelta(payload))
+		state.Draft = appendShared(state.Draft, cloneMessageDelta(payload))
 	case MessageDiscarded:
 		if _, err := state.activeRun(event.RunID); err != nil {
 			return err
 		}
-		if state.openTurns[event.RunID] != payload.Turn {
+		if state.openTurn(event.RunID) != payload.Turn {
 			return protocolError("message candidate discarded outside its turn")
 		}
 		if state.DraftCandidate.Key() != "" && state.DraftCandidate != (CandidateIdentity{RunID: event.RunID, Turn: payload.Turn}) {
@@ -610,19 +745,20 @@ func (state *State) apply(event Event) error {
 			return err
 		}
 
-		if state.openTurns[event.RunID] != payload.Turn {
+		if state.openTurn(event.RunID) != payload.Turn {
 			return protocolError("tool %q started outside its turn", payload.Call.ID)
 		}
 
 		key := toolStateKey(event.RunID, payload.Call.ID)
-		if _, exists := state.activeTools[key]; exists {
+		if state.runningTool(event.RunID, payload.Call.ID) >= 0 {
 			return protocolError("tool call %q is already active", payload.Call.ID)
 		}
 
-		state.Tools = append(state.Tools, ToolState{
+		state.Tools = appendShared(state.Tools, ToolState{
 			RunID: event.RunID, Turn: payload.Turn,
 			Call: cloneToolCall(payload.Call), Status: ToolStatusRunning,
 		})
+		state.activeTools = cloneIndexForWrite(state.activeTools)
 		state.activeTools[key] = len(state.Tools) - 1
 	case ToolUpdated:
 		index, err := state.activeTool(event.RunID, payload.Call)
@@ -630,6 +766,7 @@ func (state *State) apply(event Event) error {
 			return err
 		}
 
+		state.Tools = cloneBeforeWrite(state.Tools)
 		state.Tools[index].Update, _ = ai.CloneParts(payload.Update)
 	case ToolCompleted:
 		index, err := state.activeTool(event.RunID, payload.Call)
@@ -637,6 +774,7 @@ func (state *State) apply(event Event) error {
 			return err
 		}
 
+		state.Tools = cloneBeforeWrite(state.Tools)
 		state.Tools[index].Status = ToolStatusCompleted
 		cloned, cloneErr := ai.CloneMessage(payload.Result)
 		if cloneErr == nil {
@@ -644,6 +782,7 @@ func (state *State) apply(event Event) error {
 				state.Tools[index].Result = result
 			}
 		}
+		state.activeTools = cloneIndexForWrite(state.activeTools)
 		delete(state.activeTools, toolStateKey(event.RunID, payload.Call.ID))
 	case SubagentLifecycle:
 		if err := state.applySubagent(event, payload); err != nil {
@@ -778,7 +917,7 @@ func (state *State) apply(event Event) error {
 
 		state.Phase = payload.Phase
 	case IntegrationDiagnostic:
-		state.Diagnostics = append(state.Diagnostics, payload)
+		state.Diagnostics = appendShared(state.Diagnostics, payload)
 	case RuntimeError:
 		lastError := payload
 
@@ -828,7 +967,7 @@ func (state *State) applyTeamLifecycle(payload TeamLifecycle) error {
 			return protocolError("Team lifecycle cannot start in state %q", payload.State)
 		}
 
-		state.Teams = append(state.Teams, TeamLifecycleState{TeamLifecycle: payload})
+		state.Teams = appendShared(state.Teams, TeamLifecycleState{TeamLifecycle: payload})
 		if len(state.Teams) > maxRecentTeamLifecycle {
 			state.Teams = slices.Clone(state.Teams[len(state.Teams)-maxRecentTeamLifecycle:])
 		}
@@ -844,6 +983,7 @@ func (state *State) applyTeamLifecycle(payload TeamLifecycle) error {
 		return protocolError("Team lifecycle cannot change from %q to %q", previous.State, payload.State)
 	}
 
+	state.Teams = cloneBeforeWrite(state.Teams)
 	state.Teams[index] = TeamLifecycleState{TeamLifecycle: payload}
 
 	return nil
@@ -862,7 +1002,7 @@ func (state *State) applyTeamControlLifecycle(payload TeamControlLifecycle) erro
 		}
 	}
 	if index < 0 {
-		state.TeamControls = append(
+		state.TeamControls = appendShared(
 			state.TeamControls,
 			TeamControlLifecycleState{TeamControlLifecycle: payload},
 		)
@@ -893,6 +1033,7 @@ func (state *State) applyTeamControlLifecycle(payload TeamControlLifecycle) erro
 		)
 	}
 
+	state.TeamControls = cloneBeforeWrite(state.TeamControls)
 	state.TeamControls[index] = TeamControlLifecycleState{TeamControlLifecycle: payload}
 
 	return nil
@@ -930,7 +1071,7 @@ func (state *State) applyTeamIntegrationLifecycle(payload TeamIntegrationLifecyc
 		if !validInitialTeamIntegrationStatus(payload.State) {
 			return protocolError("Team integration cannot begin in state %q", payload.State)
 		}
-		state.TeamIntegrations = append(
+		state.TeamIntegrations = appendShared(
 			state.TeamIntegrations,
 			TeamIntegrationLifecycleState{TeamIntegrationLifecycle: payload},
 		)
@@ -960,6 +1101,7 @@ func (state *State) applyTeamIntegrationLifecycle(payload TeamIntegrationLifecyc
 	if payload.VerificationState == "" {
 		payload.VerificationState = previousValue.VerificationState
 	}
+	state.TeamIntegrations = cloneBeforeWrite(state.TeamIntegrations)
 	state.TeamIntegrations[index] = TeamIntegrationLifecycleState{TeamIntegrationLifecycle: payload}
 
 	return nil
@@ -1111,7 +1253,7 @@ func (state *State) applySubagent(event Event, payload SubagentLifecycle) error 
 		return protocolError("subagent parent run does not match event run")
 	}
 	if payload.State == subagent.StateCreated && payload.ParentToolCallID != "" {
-		if _, ok := state.activeTools[toolStateKey(event.RunID, payload.ParentToolCallID)]; !ok {
+		if state.runningTool(event.RunID, payload.ParentToolCallID) < 0 {
 			return protocolError("subagent parent tool call is not active")
 		}
 	}
@@ -1138,6 +1280,7 @@ func (state *State) applySubagent(event Event, payload SubagentLifecycle) error 
 		activity = state.Subagents[index].Activity
 	}
 
+	state.Subagents = cloneBeforeWrite(state.Subagents)
 	state.Subagents[index] = SubagentState{
 		ChildSessionID:      payload.ChildSessionID,
 		ParentInteractionID: payload.ParentInteractionID,
@@ -1171,7 +1314,7 @@ func (state *State) appendSubagent(payload SubagentLifecycle) (int, error) {
 		return -1, protocolError("subagent %q did not start with created", payload.ChildSessionID)
 	}
 
-	state.Subagents = append(state.Subagents, SubagentState{})
+	state.Subagents = appendShared(state.Subagents, SubagentState{})
 	if len(state.Subagents) > maxRecentSubagents {
 		state.Subagents = slices.Clone(state.Subagents[len(state.Subagents)-maxRecentSubagents:])
 	}
@@ -1223,6 +1366,12 @@ func isTerminalSubagentState(state subagent.State) bool {
 }
 
 func (state *State) failActiveRun(runID string) {
+	state.Tools = cloneBeforeWrite(state.Tools)
+	state.Runs = cloneBeforeWrite(state.Runs)
+	state.activeRuns = cloneIndexForWrite(state.activeRuns)
+	state.openTurns = cloneIndexForWrite(state.openTurns)
+	state.activeTools = cloneIndexForWrite(state.activeTools)
+
 	for index := range state.Tools {
 		tool := &state.Tools[index]
 		if tool.Status == ToolStatusRunning && (runID == "" || tool.RunID == runID) {
@@ -1253,23 +1402,89 @@ func (state *State) requireInteraction(interactionID string) error {
 }
 
 func (state *State) activeRun(runID string) (int, error) {
-	index, exists := state.activeRuns[runID]
-	if !exists {
-		return 0, protocolError("run %q is not active", runID)
+	if index, exists := state.activeRuns[runID]; exists {
+		return index, nil
 	}
 
-	return index, nil
+	// The index may not cover a State assembled or extended outside the
+	// transition table; the projection still knows the answer.
+	for index, run := range state.Runs {
+		if run.Active && run.ID == runID {
+			return index, nil
+		}
+	}
+
+	return 0, protocolError("run %q is not active", runID)
+}
+
+// openTurn returns the open turn number of a run, falling back to the
+// projection when the index does not cover it.
+func (state *State) openTurn(runID string) int {
+	if turn, exists := state.openTurns[runID]; exists {
+		return turn
+	}
+
+	for _, run := range state.Runs {
+		if run.TurnOpen && run.ID == runID {
+			return run.Turn
+		}
+	}
+
+	return 0
+}
+
+// checkDelta validates one MessageDelta transition and binds the draft to its
+// candidate identity without appending to the draft, so a folded run of deltas
+// can share a single append.
+func (state *State) checkDelta(event Event) error {
+	if _, err := state.activeRun(event.RunID); err != nil {
+		return err
+	}
+
+	if state.openTurn(event.RunID) == 0 {
+		return protocolError("message delta emitted outside an active turn")
+	}
+
+	candidate := CandidateIdentity{RunID: event.RunID, Turn: state.openTurn(event.RunID)}
+	if state.DraftCandidate.Key() != "" && state.DraftCandidate != candidate {
+		return protocolError("message delta changed candidate identity")
+	}
+
+	state.DraftCandidate = candidate
+
+	return nil
 }
 
 func (state *State) activeTool(runID string, call ToolCall) (int, error) {
-	index, exists := state.activeTools[toolStateKey(runID, call.ID)]
-	if !exists || state.Tools[index].Call.Name != call.Name ||
+	index := state.runningTool(runID, call.ID)
+	if index < 0 || state.Tools[index].Call.Name != call.Name ||
 		!bytes.Equal(state.Tools[index].Call.Arguments, call.Arguments) ||
 		state.Tools[index].Turn < 1 {
 		return 0, protocolError("tool call %q is not active", call.ID)
 	}
 
 	return index, nil
+}
+
+// ensureIndexes rebuilds the runtime indexes for a State assembled outside the
+// transition table, such as a hand-built fixture or a restored projection.
+// States produced by apply always carry their indexes, so this is a no-op on
+// the streaming path. The lookups below also fall back to the projections on a
+// miss, so a State that grew after it was indexed still answers correctly.
+func (state *State) ensureIndexes() {
+	if len(state.Runs) == 0 && len(state.Tools) == 0 {
+		return
+	}
+
+	if len(state.Tools) > 0 && state.activeTools == nil {
+		state.rebuildIndexes()
+
+		return
+	}
+
+	if len(state.Runs) > 0 && (state.activeRuns == nil || state.openTurns == nil) {
+		state.rebuildIndexes()
+	}
 }
 
 func (state *State) rebuildIndexes() {

@@ -818,6 +818,10 @@ func (r *fakeRuntime) Tree(context.Context) (coding.SessionTree, error) {
 	return r.state.Tree.Clone(), nil
 }
 
+func (*fakeRuntime) History(context.Context, coding.HistoryRequest) (coding.HistoryPage, error) {
+	return coding.HistoryPage{}, coding.ErrHistoryUnavailable
+}
+
 func (*fakeRuntime) PreviewCompaction(context.Context) (coding.CompactionPreview, error) {
 	return coding.CompactionPreview{}, nil
 }

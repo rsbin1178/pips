@@ -32,6 +32,7 @@ const (
 	commandStatus                   = "status"
 	commandTeam                     = "team"
 	commandTheme                    = "theme"
+	commandFind                     = "find"
 	maximumCommandArgumentTailBytes = 16 << 10
 )
 
@@ -47,6 +48,9 @@ var commands = []commandDescriptor{
 	{name: "skills", description: "enable or disable project Skills", idleOnly: true},
 	{name: commandMCP, description: "inspect MCP server connections"},
 	{name: "model", description: "switch the process-local model", idleOnly: true},
+	{name: "copy", description: "copy an assistant reply (default: the latest) to the clipboard and a file", arguments: true},
+	{name: "export", description: "write the loaded conversation to a Markdown file", arguments: true},
+	{name: commandFind, aliases: []string{"search"}, description: "search the managed conversation", arguments: true},
 	{name: commandPermissions, description: "change process-local execution permissions", idleOnly: true},
 	{name: "statusline", description: "configure status-line fields", idleOnly: true},
 	{name: commandTheme, description: "choose the TUI color theme", idleOnly: true},
@@ -182,6 +186,15 @@ func (m *Model) executeCommand(command commandDescriptor) (tea.Model, tea.Cmd) {
 
 	if command.name == "goal" {
 		return m.executeGoalCommand(arguments)
+	}
+	if command.name == "copy" {
+		return m.executeCopyCommand(arguments)
+	}
+	if command.name == "export" {
+		return m.executeExportCommand(arguments)
+	}
+	if command.name == commandFind {
+		return m.executeFindCommand(arguments)
 	}
 
 	m.picker.query = command.name

@@ -940,6 +940,55 @@ func TestRuntimeApprovalPauseAndDenyContinuation(t *testing.T) {
 	require.NoError(t, runtime.Close(t.Context()))
 }
 
+// TestRuntimeReportsNonRepositoryOncePerSession asserts the workspace condition
+// is reported once, the way the reference agent warns once when a session starts
+// outside a repository, instead of repeating the notice on every turn.
+func TestRuntimeReportsNonRepositoryOncePerSession(t *testing.T) {
+	t.Parallel()
+
+	shell := func(id, command string) *ai.Response {
+		return runtimeToolResponse(
+			id,
+			"shell",
+			`{"command":"`+command+`","permissions":{"write_paths":[],"network":true},"justification":"test"}`,
+		)
+	}
+	model := newRuntimeModel(
+		shell("call-shell", "printf ok"),
+		runtimeTextResponse("first done"),
+		shell("call-shell-2", "printf again"),
+		runtimeTextResponse("second done"),
+	)
+	runtime := openTestRuntime(t, model)
+
+	first := collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("run")))
+	require.Equal(t, 1, countDiagnostic(first, "changes", "not_repository"),
+		"the first turn that needs a change baseline reports the workspace condition")
+
+	denyPendingApproval(t, runtime)
+
+	second := collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("run again")))
+	assert.Zero(t, countDiagnostic(second, "changes", "not_repository"),
+		"a workspace that is not a repository is a session property, not a per-turn failure")
+
+	denyPendingApproval(t, runtime)
+	require.NoError(t, runtime.Close(t.Context()))
+}
+
+// denyPendingApproval resolves the paused approval with a denial, which settles
+// the interaction without running the tool.
+func denyPendingApproval(t *testing.T, runtime *Runtime) {
+	t.Helper()
+
+	required := runtime.Snapshot().Approval.Required
+	require.NotNil(t, required)
+
+	collectRuntimeEvents(t, runtime.Resolve(t.Context(), approval.Resolution{
+		RequestID: required.RequestID,
+		Choice:    approval.ChoiceDeny,
+	}))
+}
+
 func TestRuntimeEarlyIteratorBreakFinalizesInteraction(t *testing.T) {
 	t.Parallel()
 

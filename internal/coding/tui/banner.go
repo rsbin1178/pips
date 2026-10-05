@@ -72,6 +72,15 @@ func (m *Model) commitBannerOutput(banner string) tea.Cmd {
 		parts = append(parts, stable)
 	}
 
+	// Fullscreen has no native history, so the banner becomes the first managed
+	// record instead of a terminal write.
+	if m.fullscreen() {
+		m.appendNotice(banner)
+		m.rerenderTranscript(false)
+
+		return nil
+	}
+
 	m.rerenderTranscript(false)
 
 	if len(parts) == 0 {

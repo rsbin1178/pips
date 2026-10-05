@@ -45,6 +45,11 @@ const (
 	FieldMode                  Field = "mode"
 	FieldTheme                 Field = "tui.theme"
 	FieldStatusLine            Field = "tui.status_line"
+	FieldScreen                Field = "tui.screen"
+	FieldAltScreen             Field = "tui.alt_screen"
+	FieldMouse                 Field = "tui.mouse"
+	FieldExitOutput            Field = "tui.exit_output"
+	FieldShowThinkingBlocks    Field = "tui.show_thinking_blocks"
 	FieldSandbox               Field = "sandbox"
 	FieldSandboxNetwork        Field = "sandbox_workspace_write.network"
 	FieldApproval              Field = "approval"
@@ -68,6 +73,11 @@ var fields = []Field{
 	FieldMode,
 	FieldTheme,
 	FieldStatusLine,
+	FieldScreen,
+	FieldAltScreen,
+	FieldMouse,
+	FieldExitOutput,
+	FieldShowThinkingBlocks,
 	FieldSandbox,
 	FieldSandboxNetwork,
 	FieldApproval,
@@ -105,7 +115,68 @@ const DefaultThemeSelection = ThemeAuto
 type TUIConfig struct {
 	Theme      string
 	StatusLine []statusline.Item
+	// Screen selects the interactive render layout: ScreenFullscreen owns a
+	// fixed-height layout and its own scrolling; ScreenInline keeps the
+	// terminal's native history and a mutable tail.
+	Screen string
+	// AltScreen selects the terminal buffer independently of the layout, so a
+	// fullscreen layout may still be drawn inline in the main buffer.
+	AltScreen string
+	// Mouse enables mouse capture. Cell-motion reporting is used under a
+	// terminal multiplexer, all-motion elsewhere.
+	Mouse bool
+	// ExitOutput selects what a normal exit leaves on the terminal's main
+	// screen: the whole conversation or only the resume hint.
+	ExitOutput string
+	// ShowThinkingBlocks renders visible model reasoning as dimmed Thinking
+	// blocks in the fullscreen viewport. The provider's opaque reasoning
+	// signature is never rendered either way.
+	ShowThinkingBlocks bool
 }
+
+// Interactive screen layouts.
+const (
+	ScreenFullscreen = "fullscreen"
+	ScreenInline     = "inline"
+)
+
+// Alternate-screen policies.
+const (
+	AltScreenAuto   = "auto"
+	AltScreenAlways = "always"
+	AltScreenNever  = "never"
+)
+
+// DefaultInteractiveScreen and DefaultAltScreenPolicy are the shipped defaults.
+const (
+	DefaultInteractiveScreen = ScreenFullscreen
+	DefaultAltScreenPolicy   = AltScreenAuto
+)
+
+// DefaultMouseReporting enables mouse capture by default; the alternate screen
+// has no terminal-native scrolling, so wheel support is part of the layout.
+const DefaultMouseReporting = true
+
+// Exit-output policies.
+const (
+	// ExitOutputTranscript writes the rendered conversation to the main screen
+	// after the terminal is restored, because the alternate screen is discarded
+	// on exit and would otherwise leave nothing to scroll.
+	ExitOutputTranscript = "transcript"
+	// ExitOutputResumeHint keeps only the resume hint and leaves the main screen
+	// as the renderer restored it.
+	ExitOutputResumeHint = "resume-hint"
+)
+
+// DefaultExitOutput ships the resume hint: a fullscreen session owns the
+// conversation, and quitting leaves the terminal as the renderer restored it.
+// The transcript handoff stays available as an explicit [tui] exit_output value.
+const DefaultExitOutput = ExitOutputResumeHint
+
+// DefaultShowThinkingBlocks renders the model's visible reasoning as dimmed
+// Thinking blocks, matching the reference agents. [tui] show_thinking_blocks =
+// false hides them without disabling the Thinking… activity indicator.
+const DefaultShowThinkingBlocks = true
 
 // SandboxMode selects the application sandbox boundary.
 type SandboxMode string
@@ -511,6 +582,11 @@ type Patch struct {
 	DynamicSubagents *bool
 	Mode             *OperatingMode
 	Theme            *string
+	Screen           *string
+	AltScreen        *string
+	Mouse            *bool
+	ExitOutput       *string
+	ShowThinking     *bool
 	Sandbox          *SandboxMode
 	Approval         *ApprovalMode
 }
@@ -531,6 +607,12 @@ func Defaults() Config {
 		TUI: TUIConfig{
 			Theme:      DefaultThemeSelection,
 			StatusLine: statusline.Default(),
+			Screen:     DefaultInteractiveScreen,
+			AltScreen:  DefaultAltScreenPolicy,
+			Mouse:      DefaultMouseReporting,
+			ExitOutput: DefaultExitOutput,
+
+			ShowThinkingBlocks: DefaultShowThinkingBlocks,
 		},
 		Sandbox: SandboxWorkspaceWrite,
 		SandboxWorkspaceWrite: SandboxWorkspaceWriteConfig{
@@ -669,6 +751,21 @@ func (c Config) ValidateRuntime() error {
 	}
 	if c.TUI.Theme != "" {
 		if _, err := ParseThemeSelection(c.TUI.Theme); err != nil {
+			return err
+		}
+	}
+	if c.TUI.Screen != "" {
+		if _, err := ParseInteractiveScreen(c.TUI.Screen); err != nil {
+			return err
+		}
+	}
+	if c.TUI.AltScreen != "" {
+		if _, err := ParseAltScreenPolicy(c.TUI.AltScreen); err != nil {
+			return err
+		}
+	}
+	if c.TUI.ExitOutput != "" {
+		if _, err := ParseExitOutput(c.TUI.ExitOutput); err != nil {
 			return err
 		}
 	}
@@ -860,6 +957,53 @@ func ParseOperatingMode(value string) (OperatingMode, error) {
 	return mode, nil
 }
 
+// ParseInteractiveScreen validates one persisted interactive render layout.
+func ParseInteractiveScreen(value string) (string, error) {
+	switch strings.TrimSpace(value) {
+	case ScreenFullscreen:
+		return ScreenFullscreen, nil
+	case ScreenInline:
+		return ScreenInline, nil
+	default:
+		return "", fmt.Errorf(
+			"%w: tui screen %q must be %q or %q",
+			ErrInvalid, value, ScreenFullscreen, ScreenInline,
+		)
+	}
+}
+
+// ParseExitOutput validates one persisted exit-output policy.
+func ParseExitOutput(value string) (string, error) {
+	switch strings.TrimSpace(value) {
+	case ExitOutputTranscript:
+		return ExitOutputTranscript, nil
+	case ExitOutputResumeHint:
+		return ExitOutputResumeHint, nil
+	default:
+		return "", fmt.Errorf(
+			"%w: tui exit_output %q must be %q or %q",
+			ErrInvalid, value, ExitOutputTranscript, ExitOutputResumeHint,
+		)
+	}
+}
+
+// ParseAltScreenPolicy validates one persisted alternate-screen policy.
+func ParseAltScreenPolicy(value string) (string, error) {
+	switch strings.TrimSpace(value) {
+	case AltScreenAuto:
+		return AltScreenAuto, nil
+	case AltScreenAlways:
+		return AltScreenAlways, nil
+	case AltScreenNever:
+		return AltScreenNever, nil
+	default:
+		return "", fmt.Errorf(
+			"%w: tui alt_screen %q must be %q, %q or %q",
+			ErrInvalid, value, AltScreenAuto, AltScreenAlways, AltScreenNever,
+		)
+	}
+}
+
 // ParseThemeSelection validates and normalizes one persisted TUI theme ID.
 // Empty values are the compatibility spelling for the automatic selection.
 func ParseThemeSelection(value string) (string, error) {
@@ -963,6 +1107,26 @@ func apply(value Config, patch Patch, source Source) Config {
 	if patch.Theme != nil {
 		value.TUI.Theme = *patch.Theme
 		value.sources[FieldTheme] = source
+	}
+	if patch.Screen != nil {
+		value.TUI.Screen = *patch.Screen
+		value.sources[FieldScreen] = source
+	}
+	if patch.AltScreen != nil {
+		value.TUI.AltScreen = *patch.AltScreen
+		value.sources[FieldAltScreen] = source
+	}
+	if patch.Mouse != nil {
+		value.TUI.Mouse = *patch.Mouse
+		value.sources[FieldMouse] = source
+	}
+	if patch.ExitOutput != nil {
+		value.TUI.ExitOutput = *patch.ExitOutput
+		value.sources[FieldExitOutput] = source
+	}
+	if patch.ShowThinking != nil {
+		value.TUI.ShowThinkingBlocks = *patch.ShowThinking
+		value.sources[FieldShowThinkingBlocks] = source
 	}
 	if patch.Sandbox != nil {
 		value.Sandbox = *patch.Sandbox

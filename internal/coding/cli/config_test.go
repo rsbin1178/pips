@@ -81,6 +81,11 @@ model = "anthropic/project-model"
 	assert.Contains(t, output, `subagent.max_tokens = 256000 # source=default detail="built-in"`)
 	assert.Contains(t, output, `mode = "plan" # source=config_file detail="`)
 	assert.Contains(t, output, `tui.theme = "auto" # source=default detail="built-in"`)
+	assert.Contains(t, output, `tui.screen = "fullscreen" # source=default detail="built-in"`)
+	assert.Contains(t, output, `tui.alt_screen = "auto" # source=default detail="built-in"`)
+	assert.Contains(t, output, `tui.mouse = true # source=default detail="built-in"`)
+	assert.Contains(t, output, `tui.exit_output = "resume-hint" # source=default detail="built-in"`)
+	assert.Contains(t, output, `tui.show_thinking_blocks = true # source=default detail="built-in"`)
 	assert.Contains(t, output, `sandbox_workspace_write.network = "allow" # source=config_file detail="`)
 	assert.NotContains(t, output, "model_max_output_tokens")
 	assert.NotContains(t, output, "project-model")
@@ -130,6 +135,10 @@ func TestConfigShowIncludesFileOnlyTUISelections(t *testing.T) {
 [tui]
 theme = "missing-custom-theme"
 status_line = ["model", "phase"]
+screen = "inline"
+alt_screen = "never"
+mouse = false
+exit_output = "resume-hint"
 [providers.openai.models."test-model"]
 `)
 
@@ -137,6 +146,10 @@ status_line = ["model", "phase"]
 	require.NoError(t, err)
 	assert.Contains(t, output, `tui.theme = "missing-custom-theme" # source=config_file detail="`)
 	assert.Contains(t, output, `tui.status_line = ["model","phase"] # source=config_file detail="`)
+	assert.Contains(t, output, `tui.screen = "inline" # source=config_file detail="`)
+	assert.Contains(t, output, `tui.alt_screen = "never" # source=config_file detail="`)
+	assert.Contains(t, output, `tui.mouse = false # source=config_file detail="`)
+	assert.Contains(t, output, `tui.exit_output = "resume-hint" # source=config_file detail="`)
 	assert.NotContains(t, output, "theme registry")
 }
 

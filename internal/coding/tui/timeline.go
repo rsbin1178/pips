@@ -4,6 +4,7 @@ package tui
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -31,6 +32,9 @@ const (
 	blockError
 	blockCompletion
 	blockTeam
+	// blockThinking carries one visible reasoning section. Appending it keeps the
+	// existing kinds' identity ints stable for cached records and tests.
+	blockThinking
 )
 
 const (
@@ -40,6 +44,12 @@ const (
 	questionFailedTitle   = "Question failed"
 	planApprovedTitle     = "Plan · Approved"
 )
+
+// thinkingTitle labels one visible reasoning section. Reasoning is rendered as
+// plain, dimmed prose rather than through the Markdown engine: a live section
+// grows with every streamed delta, and parsing it on each frame costs orders of
+// magnitude more CPU than wrapping it.
+const thinkingTitle = "Thinking"
 
 type timelineBlock struct {
 	kind             blockKind
@@ -70,41 +80,109 @@ func projectTimeline(state coding.State) []timelineBlock {
 	return projectTimelineExcluding(state, nil)
 }
 
-//nolint:gocyclo,cyclop // One pass keeps messages, Tools, and child identities in durable order.
 func projectTimelineExcluding(
 	state coding.State,
 	excludedTools map[string]struct{},
 ) []timelineBlock {
+	return projectTimelineActivities(state, projectToolActivities(state, excludedTools))
+}
+
+// committedProjection is the durable half of one timeline projection together
+// with what the volatile half needs to know about it.
+type committedProjection struct {
+	blocks []timelineBlock
+	// tailStart is the index of the first activity that belongs to the volatile
+	// tail, so a cached frame can project only that tail.
+	tailStart int
+	// cutoff is the highest conversation position the committed blocks cover. It
+	// bounds which completion markers are interleaved into the prefix.
+	cutoff int
+}
+
+// projectTimelineActivities composes the pure projection: the committed prefix
+// followed by the volatile tail. The incremental frame path reuses the prefix and
+// rebuilds only the tail, and must produce exactly this list.
+func projectTimelineActivities(state coding.State, activities []toolActivity) []timelineBlock {
+	committed := projectCommittedBlocks(state, activities)
+
+	return appendTimelineTail(
+		appendTimelinePrefix(nil, committed.blocks),
+		projectVolatileBlocks(state, activities[committed.tailStart:]),
+	)
+}
+
+// appendTimelinePrefix appends a committed prefix to dst. The result never
+// aliases committed, so a cached prefix is safe to pass here.
+func appendTimelinePrefix(dst, committed []timelineBlock) []timelineBlock {
+	return append(dst, committed...)
+}
+
+// appendTimelineTail appends the volatile tail after a prefix dst already holds.
+// Grouping is a left fold, so grouping the halves separately and merging the seam
+// matches grouping the concatenation. The merged block is copied first, which
+// keeps a cached prefix immutable.
+func appendTimelineTail(dst, tail []timelineBlock) []timelineBlock {
+	if len(tail) == 0 {
+		return dst
+	}
+
+	grouped := groupExploreBlocks(tail)
+	if len(dst) == 0 || !isExploreBlock(dst[len(dst)-1]) || !isLoneExploreBlock(grouped[0]) {
+		return append(dst, grouped...)
+	}
+
+	previous := &dst[len(dst)-1]
+	previous.tools = append(slices.Clone(previous.tools), grouped[0].tools...)
+	previous.id = grouped[0].id
+
+	return append(dst, grouped[1:]...)
+}
+
+// projectCommittedBlocks projects the durable half of the timeline: the messages
+// already committed to the transcript together with the tool activity that sits
+// between them.
+//
+//nolint:gocyclo,cyclop // The already projected Tools merge with messages in durable order.
+func projectCommittedBlocks(state coding.State, activities []toolActivity) committedProjection {
 	blocks := make([]timelineBlock, 0, len(state.Transcript)+len(state.Tools)+4)
-	activities := projectToolActivities(state, excludedTools)
 	syntheticMessages := make(map[int]struct{}, len(state.SyntheticMessages))
 	for _, index := range state.SyntheticMessages {
 		syntheticMessages[index] = struct{}{}
 	}
+	cutoff := 0
 	activityIndex := 0
 	for messageIndex, message := range state.Transcript {
 		position := messageIndex + 1
-		body := visibleMessageText(message)
 		candidateID := ""
 		if messageIndex < len(state.MessageCandidates) {
 			candidateID = state.MessageCandidates[messageIndex].Key()
 		}
 		_, synthetic := syntheticMessages[messageIndex]
-		if body != "" && !synthetic {
+		if !synthetic {
 			switch message.(type) {
-			case ai.UserMessage:
-				blocks = append(blocks, timelineBlock{
-					kind: blockUser, body: body, position: position,
-				})
 			case ai.AssistantMessage:
-				blocks = append(blocks, timelineBlock{
-					kind: blockAssistant, id: candidateID, body: body, position: position,
-				})
-			case ai.SystemMessage:
-				blocks = append(blocks, timelineBlock{
-					kind: blockDiagnostic, title: "System", body: body, position: position,
-				})
-			case ai.ToolMessage:
+				// An assistant turn can carry visible reasoning, which becomes its
+				// own Thinking block ahead of the answer text.
+				blocks = append(blocks, projectAssistantBlocks(message, position, candidateID)...)
+				cutoff = max(cutoff, position)
+			default:
+				body := visibleMessageText(message)
+				if body == "" {
+					break
+				}
+				switch message.(type) {
+				case ai.UserMessage:
+					blocks = append(blocks, timelineBlock{
+						kind: blockUser, body: body, position: position,
+					})
+					cutoff = max(cutoff, position)
+				case ai.SystemMessage:
+					blocks = append(blocks, timelineBlock{
+						kind: blockDiagnostic, title: "System", body: body, position: position,
+					})
+					cutoff = max(cutoff, position)
+				case ai.ToolMessage:
+				}
 			}
 		}
 
@@ -114,22 +192,38 @@ func projectTimelineExcluding(
 			if block, handled, visible := projectProtocolToolActivity(activity); handled {
 				if visible {
 					blocks = append(blocks, block)
+					cutoff = max(cutoff, block.position)
 				}
 
 				continue
 			}
 			if isSubagentToolName(activity.name) {
-				blocks = append(blocks, projectSubagentToolActivity(activity, state.Subagents))
+				block := projectSubagentToolActivity(activity, state.Subagents)
+				blocks = append(blocks, block)
+				cutoff = max(cutoff, block.position)
 
 				continue
 			}
-			blocks = append(blocks, projectToolActivity(activity))
+
+			block := projectToolActivity(activity)
+			blocks = append(blocks, block)
+			cutoff = max(cutoff, block.position)
 		}
 	}
 
-	for activityIndex < len(activities) {
-		activity := activities[activityIndex]
-		activityIndex++
+	return committedProjection{
+		blocks:    groupExploreBlocks(blocks),
+		tailStart: activityIndex,
+		cutoff:    cutoff,
+	}
+}
+
+// projectVolatileBlocks projects everything that can change while the transcript
+// stays put: tool activity still running, the live draft, and the session-level
+// notices that trail the timeline.
+func projectVolatileBlocks(state coding.State, tail []toolActivity) []timelineBlock {
+	blocks := make([]timelineBlock, 0, len(tail)+len(state.Diagnostics)+4)
+	for _, activity := range tail {
 		if block, handled, visible := projectProtocolToolActivity(activity); handled {
 			if visible {
 				blocks = append(blocks, block)
@@ -144,6 +238,10 @@ func projectTimelineExcluding(
 		}
 		blocks = append(blocks, projectToolActivity(activity))
 	}
+
+	// A live turn can stream reasoning before its answer; the Thinking block
+	// keeps one identity so its row count and anchor survive every delta.
+	blocks = append(blocks, draftReasoningBlocks(state)...)
 
 	draft := visibleDraftText(state.Draft)
 	if draft != "" {
@@ -161,14 +259,9 @@ func projectTimelineExcluding(
 	}
 
 	for _, diagnostic := range state.Diagnostics {
-		if diagnostic.Component == "changes" && diagnostic.Code == "not_repository" {
-			blocks = append(blocks, timelineBlock{
-				kind:  blockDiagnostic,
-				title: "Git change summary unavailable",
-				body: "This workspace is not a Git repository. Direct apply_patch edits remain visible " +
-					"in their tool activity; repository-wide shell and generator changes cannot be attributed.",
-				position: len(state.Transcript),
-			})
+		// Working outside a Git repository is a supported setup, so the TUI does
+		// not report the change summary as unavailable.
+		if nonRepositoryDiagnostic(diagnostic) {
 			continue
 		}
 		blocks = append(blocks, timelineBlock{
@@ -187,6 +280,143 @@ func projectTimelineExcluding(
 	}
 
 	return groupExploreBlocks(blocks)
+}
+
+// draftThinkingID is the identity of the in-flight turn's Thinking block. It is
+// deliberately turn-independent: the growing block keeps one identity across
+// every streamed delta, and the projection switches to the committed identity
+// once the message lands in the transcript.
+const draftThinkingID = "thinking:draft"
+
+// blockIsLive reports whether a block may still change on its own. The live
+// answer draft and the live reasoning draft both grow with every stream delta, so
+// neither may serve or refresh a reused rendering.
+func blockIsLive(block timelineBlock) bool {
+	return block.kind == blockDraft || block.id == draftThinkingID
+}
+
+// thinkingBlockID names one committed reasoning section. The message position
+// plus the part index is stable across re-renders and does not change when the
+// text keeps growing, which a content hash would.
+func thinkingBlockID(position, index int) string {
+	return "thinking:" + strconv.Itoa(position) + ":" + strconv.Itoa(index)
+}
+
+// projectAssistantBlocks renders one assistant message as its Thinking blocks
+// followed by the visible answer text. Reasoning that the provider withheld
+// (Redacted) or returned without text produces no block at all, so a model that
+// only returns encrypted state renders nothing rather than an empty header.
+func projectAssistantBlocks(message ai.Message, position int, candidateID string) []timelineBlock {
+	blocks := reasoningBlocks(message, position)
+	if body := visibleMessageText(message); body != "" {
+		blocks = append(blocks, timelineBlock{
+			kind: blockAssistant, id: candidateID, body: body, position: position,
+		})
+	}
+
+	return blocks
+}
+
+// reasoningBlocks projects the visible reasoning parts of one message, in part
+// order, as Thinking blocks. It reads the parts in place; see
+// [portableMessageParts].
+func reasoningBlocks(message ai.Message, position int) []timelineBlock {
+	parts, err := ai.MessagePartsView(message)
+	if err != nil {
+		return nil
+	}
+
+	var blocks []timelineBlock
+
+	index := 0
+
+	for _, part := range parts {
+		value, ok := part.(ai.ReasoningPart)
+		if !ok {
+			continue
+		}
+
+		if !value.Redacted && strings.TrimSpace(value.Text) != "" {
+			blocks = append(blocks, timelineBlock{
+				kind: blockThinking, id: thinkingBlockID(position, index),
+				body: value.Text, position: position,
+			})
+		}
+
+		index++
+	}
+
+	return blocks
+}
+
+// draftReasoningBlocks aggregates the in-flight turn's reasoning deltas. A
+// signature-only delta carries no text and contributes nothing.
+func draftReasoningBlocks(state coding.State) []timelineBlock {
+	var content strings.Builder
+	for _, delta := range state.Draft {
+		if delta.Kind == ai.StreamReasoningDelta {
+			content.WriteString(delta.Text)
+		}
+	}
+	body := strings.TrimSpace(content.String())
+	if body == "" {
+		return nil
+	}
+
+	return []timelineBlock{{
+		kind: blockThinking, id: draftThinkingID, body: body,
+		position: len(state.Transcript),
+	}}
+}
+
+// withoutThinkingBlocks drops Thinking blocks. Inline mode hands history to the
+// terminal's native scrollback, which renders no per-block styling, so the
+// managed viewport is the only place reasoning is projected.
+func withoutThinkingBlocks(blocks []timelineBlock) []timelineBlock {
+	if len(blocks) == 0 {
+		return blocks
+	}
+
+	filtered := make([]timelineBlock, 0, len(blocks))
+	for _, block := range blocks {
+		if block.kind == blockThinking {
+			continue
+		}
+
+		filtered = append(filtered, block)
+	}
+
+	return filtered
+}
+
+// Diagnostic identities the TUI treats specially by name.
+const (
+	diagnosticComponentChanges  = "changes"
+	diagnosticCodeNotRepository = "not_repository"
+)
+
+// nonRepositoryDiagnostic reports the runtime diagnostic that says the workspace
+// has no Git repository. It is a property of the workspace rather than a problem
+// with the turn, and there is nothing for the reader to act on: direct
+// apply_patch edits stay visible in Tool activity either way.
+func nonRepositoryDiagnostic(diagnostic coding.IntegrationDiagnostic) bool {
+	return diagnostic.Component == diagnosticComponentChanges &&
+		diagnostic.Code == diagnosticCodeNotRepository
+}
+
+// visibleDiagnostics returns the integration diagnostics the TUI lists in its
+// status view. The transcript projection applies the same filter inline, so a
+// suppressed diagnostic cannot reappear on another surface.
+func visibleDiagnostics(diagnostics []coding.IntegrationDiagnostic) []coding.IntegrationDiagnostic {
+	visible := make([]coding.IntegrationDiagnostic, 0, len(diagnostics))
+	for _, diagnostic := range diagnostics {
+		if nonRepositoryDiagnostic(diagnostic) {
+			continue
+		}
+		visible = append(visible, diagnostic)
+	}
+
+	return visible
 }
 
 // diagnosticTitle names the integration in plain words. The raw code stays a
@@ -239,7 +469,6 @@ var diagnosticComponentTitles = map[string]string{
 var diagnosticTitles = map[string]string{
 	"runtime\x00interaction_interrupted":      "Previous request was interrupted",
 	"changes\x00capture_unstable":             "Workspace change summary unavailable",
-	"changes\x00not_repository":               "Git change summary unavailable",
 	"mcp\x00refresh_failed":                   "MCP server list refresh failed",
 	"mcp\x00connect_failed":                   "MCP server unavailable",
 	"observer\x00observer_disabled":           "Event observer disabled",
@@ -467,20 +696,31 @@ func projectAnsweredQuestionActivity(
 	return block
 }
 
+// isExploreBlock reports whether a block is an exploration tool card, which is
+// the only kind consecutive blocks merge into one card.
+func isExploreBlock(block timelineBlock) bool {
+	return block.kind == blockTool && len(block.tools) > 0 &&
+		block.tools[0].class == toolClassExplore
+}
+
+// isLoneExploreBlock reports whether a block is one single exploration call, the
+// shape that may still absorb a following exploration block.
+func isLoneExploreBlock(block timelineBlock) bool {
+	return block.kind == blockTool && len(block.tools) == 1 &&
+		block.tools[0].class == toolClassExplore
+}
+
 func groupExploreBlocks(blocks []timelineBlock) []timelineBlock {
 	grouped := make([]timelineBlock, 0, len(blocks))
 	for _, block := range blocks {
-		isExplore := block.kind == blockTool && len(block.tools) == 1 &&
-			block.tools[0].class == toolClassExplore
-		if !isExplore || len(grouped) == 0 {
+		if !isLoneExploreBlock(block) || len(grouped) == 0 {
 			grouped = append(grouped, block)
 
 			continue
 		}
 
 		previous := &grouped[len(grouped)-1]
-		if previous.kind != blockTool || len(previous.tools) == 0 ||
-			previous.tools[0].class != toolClassExplore {
+		if !isExploreBlock(*previous) {
 			grouped = append(grouped, block)
 
 			continue
@@ -807,8 +1047,13 @@ func visibleMessageText(message ai.Message) string {
 	return strings.TrimSpace(strings.Join(parts, ""))
 }
 
+// portableMessageParts returns a message's parts for projection only. The
+// projection never writes them, and it runs over the whole conversation on every
+// cache miss, so it reads them in place instead of paying for a defensive copy:
+// see [ai.MessagePartsView]. Anything that keeps or mutates the result must use
+// [ai.MessageParts] instead.
 func portableMessageParts(message ai.Message) []ai.Part {
-	parts, err := ai.MessageParts(message)
+	parts, err := ai.MessagePartsView(message)
 	if err != nil {
 		return nil
 	}
@@ -868,26 +1113,7 @@ func renderTimelineContentWithOptions(
 
 	rendered := make([]string, 0, len(blocks))
 	for _, block := range blocks {
-		if block.kind == blockUser {
-			rendered = append(rendered, renderUserMessage(block.body, width, theme, noColor))
-
-			continue
-		}
-
-		if block.kind == blockCompletion {
-			rendered = append(rendered, renderCompletionMarker(block, theme, noColor))
-
-			continue
-		}
-
-		rendered = append(rendered, renderTimelineBlockWithOptions(
-			block,
-			markdown,
-			width,
-			theme,
-			noColor,
-			options,
-		))
+		rendered = append(rendered, renderTimelineEntry(block, markdown, width, theme, noColor, options))
 	}
 
 	var content strings.Builder
@@ -899,6 +1125,28 @@ func renderTimelineContentWithOptions(
 	}
 
 	return content.String()
+}
+
+// renderTimelineEntry renders one block exactly as the transcript renders it:
+// user messages and completion markers have their own renderers, everything else
+// goes through the shared block renderer. Per-record caching depends on this
+// being the single definition of "how one entry looks".
+func renderTimelineEntry(
+	block timelineBlock,
+	markdown *markdownRenderer,
+	width int,
+	theme colorTheme,
+	noColor bool,
+	options timelineRenderOptions,
+) string {
+	if block.kind == blockUser {
+		return renderUserMessage(block.body, width, theme, noColor)
+	}
+	if block.kind == blockCompletion {
+		return renderCompletionMarker(block, theme, noColor)
+	}
+
+	return renderTimelineBlockWithOptions(block, markdown, width, theme, noColor, options)
 }
 
 func renderTimelineBlock(
@@ -939,10 +1187,69 @@ func renderTimelineBlockWithOptions(
 	if block.kind == blockChange {
 		return renderWorkspaceChangeBlock(block, width, theme, noColor)
 	}
+	if block.kind == blockThinking {
+		return renderThinkingBlock(block, width, theme, noColor)
+	}
 
 	return renderRegularTimelineBlock(block, markdown, width, theme, noColor)
 }
 
+// renderThinkingBlock renders one visible reasoning section as plain, dimmed
+// prose under a muted label. The opaque Signature never reaches this function;
+// only ReasoningPart.Text does.
+//
+// Reasoning is deliberately not run through the Markdown renderer. A live
+// section is re-rendered on every streamed delta, and parsing it as Markdown
+// allocates tens of thousands of times per render, so a long thought turns each
+// frame into a CPU spike. Wrapping the same text costs a few hundred
+// microseconds and a handful of allocations, and the reader sees it in one
+// uniform color either way.
+func renderThinkingBlock(
+	block timelineBlock,
+	width int,
+	theme colorTheme,
+	noColor bool,
+) string {
+	body := sanitizeToolText(block.body)
+	if body == "" {
+		return ""
+	}
+
+	body = ansi.Wrap(body, max(1, width), "")
+	if noColor {
+		return thinkingTitle + "\n" + body
+	}
+
+	palette := paletteFor(theme)
+	muted := lipgloss.NewStyle().Foreground(palette.muted)
+	title := lipgloss.NewStyle().Bold(true).Foreground(palette.muted).Render(thinkingTitle)
+
+	return title + "\n" + muted.Render(body)
+}
+
+// renderMarkdownBlockBody renders one Markdown body, sharing live-version
+// ownership between the streaming answer and its settled record while preserving
+// the original text on a render error.
+func renderMarkdownBlockBody(block timelineBlock, markdown *markdownRenderer, width int, theme colorTheme, noColor bool) string {
+	if block.rendered {
+		return block.body
+	}
+
+	var value string
+	var err error
+	if blockIsLive(block) {
+		value, err = markdown.renderLive(kindName(block.kind), block.body, max(1, width), theme, noColor)
+	} else {
+		value, err = markdown.render(block.body, max(1, width), theme, noColor)
+	}
+	if err != nil {
+		return block.body
+	}
+
+	return value
+}
+
+// renderTeamActivityBlock renders one Team activity line.
 func renderTeamActivityBlock(
 	block timelineBlock,
 	width int,
@@ -976,10 +1283,8 @@ func renderRegularTimelineBlock(
 	}
 
 	body := block.body
-	if !block.rendered && (block.kind == blockAssistant || block.kind == blockDraft || block.kind == blockPlan) {
-		if value, err := markdown.render(body, max(1, width), theme, noColor); err == nil {
-			body = value
-		}
+	if block.kind == blockAssistant || block.kind == blockDraft || block.kind == blockPlan {
+		body = renderMarkdownBlockBody(block, markdown, width, theme, noColor)
 	}
 
 	title := block.title

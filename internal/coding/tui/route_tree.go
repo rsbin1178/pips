@@ -286,10 +286,7 @@ func (m *Model) treeRouteView() tea.View {
 		window += strings.Repeat("\n", padding)
 	}
 
-	view := tea.NewView(truncateHeight(header+"\n"+window+"\n"+footer, height))
-	view.AltScreen = false
-	view.MouseMode = tea.MouseModeNone
-	view.WindowTitle = appTitle
+	view := m.presentationView(truncateHeight(header+"\n"+window+"\n"+footer, height))
 
 	return view
 }

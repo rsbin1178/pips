@@ -96,6 +96,11 @@ func runInteractiveTarget(
 				config.TUIConfigSaveOptions{AllowCreate: allowConfigCreate},
 			)
 		},
+		SaveText: operatorTextSaver(
+			dependencies.Paths.Root(),
+			resolved.workspace.Root(),
+			dependencies.LookupEnv,
+		),
 		OnExit: func(info tui.ExitInfo) error {
 			if !info.Resumable {
 				return nil
