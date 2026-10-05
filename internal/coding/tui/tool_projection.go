@@ -39,11 +39,22 @@ func (m *Model) projectTimeline(state coding.State, excluded map[string]struct{}
 }
 
 // projectCommittedTimeline projects the durable half of the timeline and keeps
-// the activity list, so a cached frame can rebuild only the volatile tail.
-func (m *Model) projectCommittedTimeline() committedProjection {
-	m.toolActivities = m.projectActivities(m.state, nil)
+// the activity list and the scan behind it, so a cached frame can rebuild only the
+// volatile tail and the append path can resume the transcript fold.
+func (m *Model) projectCommittedTimeline() (committedProjection, toolScanState) {
+	if m.toolProjection.sessionID != m.state.SessionID {
+		m.toolProjection = toolProjectionCache{sessionID: m.state.SessionID}
+	}
 
-	return projectCommittedBlocks(m.state, m.toolActivities)
+	var scan toolScanState
+
+	scan.reset(len(m.state.Tools))
+	scan.scanTranscript(m.state.Transcript, nil)
+	scan.overlayLive(m.state.Tools, len(m.state.Transcript), nil)
+	m.toolActivities = describeToolActivities(&scan, &m.toolProjection)
+	m.toolProjection.retain(scan.records)
+
+	return projectCommittedBlocks(m.state, m.toolActivities), scan
 }
 
 func (c *toolProjectionCache) describe(record toolActivityRecord) toolActivity {
@@ -71,6 +82,19 @@ func (c *toolProjectionCache) describe(record toolActivityRecord) toolActivity {
 	c.entries[key.id] = toolProjectionEntry{key: key, activity: activity}
 
 	return activity
+}
+
+// cached returns the memoized description for a call ID without rebuilding the
+// key [toolProjectionCache.describe] compares, which is what lets the append path
+// reuse a description its scan did not touch.
+func (c *toolProjectionCache) cached(id string) (toolActivity, bool) {
+	if c == nil {
+		return toolActivity{}, false
+	}
+
+	entry, ok := c.entries[id]
+
+	return entry.activity, ok
 }
 
 func (c *toolProjectionCache) retain(records map[string]*toolActivityRecord) {

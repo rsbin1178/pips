@@ -347,6 +347,24 @@ func (m *Model) projectionStamp() projectionStamp {
 	}
 }
 
+// extendableFrom reports whether every committed input except the conversation
+// itself and the candidate identities is unchanged, which is the precondition for
+// extending a cached prefix by appended messages. The transcript and the
+// candidates are expected to grow; their covered ranges are verified separately.
+func (s projectionStamp) extendableFrom(base projectionStamp) bool {
+	return s.sessionID == base.sessionID &&
+		s.width == base.width &&
+		s.themeKey == base.themeKey &&
+		s.noColor == base.noColor &&
+		s.showThinking == base.showThinking &&
+		s.synthetics == base.synthetics &&
+		s.tools == base.tools &&
+		s.subagents == base.subagents &&
+		s.markers == base.markers &&
+		s.notices == base.notices &&
+		s.history == base.history
+}
+
 // timelineFrameCache is the committed prefix of one managed-viewport frame: the
 // older history pages, the operator notices and the durable conversation, each
 // with the transcript entry that names it. It stays valid while its stamp does.
@@ -360,7 +378,50 @@ type timelineFrameCache struct {
 	// markerSplit is how many completion markers the cached prefix already
 	// carries; the rest belong to the volatile tail.
 	markerSplit int
-	merged      bool
+	// mergedEntry is the index in entries whose store record holds the seam card
+	// the last frame folded into the volatile tail, or -1 when no seam was folded.
+	// It is an absolute index because entries can grow after the fold, and the
+	// store reuses everything before the record it names.
+	mergedEntry int
+	// covered is how many transcript messages the committed blocks were projected
+	// from, and cutoff the highest conversation position they commit.
+	covered int
+	cutoff  int
+	// candidateCount is how many candidate identities the covered range had. The
+	// stamp already fingerprints the whole transcript and candidate list, so the
+	// append path proves the covered range unchanged against stamp.transcript and
+	// stamp.candidates instead of keeping a second copy of each digest. The reducer
+	// appends to a State without writing memory another State may read, so a
+	// covered range is frozen by construction; those digests catch a replacement
+	// that kept the shape.
+	candidateCount int
+	// toolScan is the transcript fold the covered range was scanned with, and
+	// toolTailStart where the activity list it produced splits into committed and
+	// volatile. lastCommitted is the last committed block, with lastCommittedEntry
+	// naming its entry, because the exploration grouping can still fold an appended
+	// card into it.
+	toolScan           toolScanState
+	toolTailStart      int
+	lastCommitted      timelineBlock
+	lastCommittedEntry int
+}
+
+// entryForBlock names the entry that holds a block, or -1 when the entries do not
+// carry it. Entries after the last committed block are completion markers (and,
+// when thinking is hidden, dropped reasoning), so the scan from the end is short.
+func (m *Model) entryForBlock(entries []transcriptEntry, block timelineBlock) int {
+	identity := m.blockIdentity(block)
+	if identity == "" {
+		return -1
+	}
+
+	for index := len(entries) - 1; index >= 0; index-- {
+		if entries[index].id == identity {
+			return index
+		}
+	}
+
+	return -1
 }
 
 // frameProjection is one managed-viewport frame. The entries are split where the
@@ -373,15 +434,25 @@ type frameProjection struct {
 }
 
 // viewportProjection projects one managed-viewport frame, reusing the committed
-// prefix while its inputs are unchanged.
+// prefix while its inputs are unchanged and extending it when messages were
+// appended.
 func (m *Model) viewportProjection() frameProjection {
 	stamp := m.projectionStamp()
-	reused := m.frameCache.valid && m.frameCache.stamp == stamp
+	cache := &m.frameCache
+
+	reused := cache.valid && cache.stamp == stamp
+	// extendedFrom is the index the store must rebuild from when this frame grew
+	// the prefix by an append; -1 means the whole prefix is unchanged.
+	extendedFrom := -1
 	if !reused {
-		m.rebuildFrameCache(stamp)
+		if index, ok := m.extendFrameCache(stamp); ok {
+			reused = true
+			extendedFrom = index
+		} else {
+			m.rebuildFrameCache(stamp)
+		}
 	}
 
-	cache := &m.frameCache
 	tail := m.frameEntriesFor(m.volatileTimelineBlocks(cache.tailActivities, cache.markerSplit))
 	prefix := cache.entries
 
@@ -399,18 +470,39 @@ func (m *Model) viewportProjection() frameProjection {
 		prefix = prefix[:len(prefix)-1]
 	}
 
-	wasMerged := cache.merged
-	cache.merged = merged
+	// The store's record where the last frame folded a seam still holds that
+	// frame's merged card rather than the entry the cache kept, so this frame must
+	// rebuild from there. The index is absolute because entries can grow.
+	wasMergedEntry := cache.mergedEntry
+	if merged {
+		cache.mergedEntry = len(cache.entries) - 1
+	} else {
+		cache.mergedEntry = -1
+	}
 
-	if reused && len(prefix) > 0 {
+	if reused {
+		// A cache hit keeps the whole prefix; an extension keeps everything before
+		// the appended entries.
 		stable := len(prefix)
-		if wasMerged {
-			// The record at the seam still holds last frame's merged card.
-			stable = len(cache.entries) - 1
+		if extendedFrom >= 0 {
+			stable = min(extendedFrom, len(prefix))
+		}
+		if wasMergedEntry >= 0 {
+			stable = min(stable, wasMergedEntry)
 		}
 
-		if stable == len(prefix) {
+		switch {
+		case stable > 0 && stable == len(prefix):
 			return frameProjection{prefixEntries: prefix, tailEntries: tail, stable: stable}
+		case stable > 0:
+			// The prefix changed part way through: the store keeps its leading
+			// records and rebuilds the rest from the entries that follow them plus
+			// the fresh tail.
+			entries := make([]transcriptEntry, 0, len(prefix)-stable+len(tail))
+			entries = append(entries, prefix[stable:]...)
+			entries = append(entries, tail...)
+
+			return frameProjection{prefixEntries: prefix[:stable], tailEntries: entries, stable: stable}
 		}
 	}
 
@@ -426,7 +518,7 @@ func (m *Model) viewportProjection() frameProjection {
 // rebuildFrameCache re-projects the committed prefix and stores it with the stamp
 // it was built for.
 func (m *Model) rebuildFrameCache(stamp projectionStamp) {
-	committed := m.projectCommittedTimeline()
+	committed, scan := m.projectCommittedTimeline()
 	history := m.historyBlocks()
 	notices := m.noticeBlocks()
 
@@ -446,13 +538,328 @@ func (m *Model) rebuildFrameCache(stamp projectionStamp) {
 		entries = append(entries, m.entryFor(block))
 	}
 
-	m.frameCache = timelineFrameCache{
-		stamp:          stamp,
-		valid:          true,
-		entries:        entries,
-		tailActivities: m.toolActivities[committed.tailStart:],
-		markerSplit:    split,
+	var lastCommitted timelineBlock
+	if len(committed.blocks) > 0 {
+		lastCommitted = committed.blocks[len(committed.blocks)-1]
 	}
+
+	m.frameCache = timelineFrameCache{
+		stamp:              stamp,
+		valid:              true,
+		entries:            entries,
+		tailActivities:     m.toolActivities[committed.tailStart:],
+		markerSplit:        split,
+		mergedEntry:        -1,
+		covered:            len(m.state.Transcript),
+		cutoff:             committed.cutoff,
+		candidateCount:     len(m.state.MessageCandidates),
+		toolScan:           scan,
+		toolTailStart:      committed.tailStart,
+		lastCommitted:      lastCommitted,
+		lastCommittedEntry: m.entryForBlock(entries, lastCommitted),
+	}
+}
+
+// extendFrameCache grows the cached committed prefix by the messages appended
+// since the frame it was built for, instead of re-projecting the whole
+// conversation. It reports the index the store must rebuild from, and whether the
+// append was proven and applied; when it was not, the caller rebuilds the prefix
+// from scratch.
+//
+// The reducer appends to a State without writing memory another State may read,
+// so a covered range is frozen by construction; the cache still re-fingerprints
+// that range and refuses the fast path whenever an input outside it moved.
+func (m *Model) extendFrameCache(stamp projectionStamp) (int, bool) {
+	cache := &m.frameCache
+	if !cache.valid || cache.covered <= 0 || !stamp.extendableFrom(cache.stamp) {
+		return 0, false
+	}
+
+	messages := m.state.Transcript
+	candidates := m.state.MessageCandidates
+	if len(messages) <= cache.covered || len(candidates) < cache.candidateCount {
+		return 0, false
+	}
+	// The cached stamp already fingerprints the transcript and the candidate list
+	// it covered, so proving the covered range is two digest comparisons.
+	if projectionTranscriptDigest(messages[:cache.covered]) != cache.stamp.transcript {
+		return 0, false
+	}
+	if projectionCandidatesDigest(candidates[:cache.candidateCount]) != cache.stamp.candidates {
+		return 0, false
+	}
+
+	from := len(cache.entries)
+	if messageRangeCarriesToolParts(messages[cache.covered:]) {
+		return m.appendToolFrameCache(stamp, messages, candidates)
+	}
+
+	m.appendFrameCache(stamp, messages, candidates)
+
+	return from, true
+}
+
+// messageRangeCarriesToolParts reports whether any message holds tool activity,
+// which decides whether an append can keep the retained activity list.
+func messageRangeCarriesToolParts(messages ai.Messages) bool {
+	for _, message := range messages {
+		if messageCarriesToolParts(message) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// touchesCommittedToolRecord reports whether a message's tool activity names a
+// record the cached prefix already placed. The prefix cannot absorb such a part:
+// it would move that record's block, or change how it reads.
+func touchesCommittedToolRecord(scan *toolScanState, message ai.Message, covered int) bool {
+	parts, err := ai.MessagePartsView(message)
+	if err != nil {
+		return true
+	}
+
+	for _, part := range parts {
+		var id string
+
+		switch value := part.(type) {
+		case ai.ToolCallPart:
+			id = value.ID
+		case ai.ToolResultPart:
+			id = value.ToolCallID
+		default:
+			continue
+		}
+
+		record, ok := scan.records[id]
+		if !ok {
+			continue
+		}
+		if toolRecordCommitted(record, covered) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// toolRecordCommitted reports whether the committed projection already consumed a
+// record: it produces an activity, and its conversation position lies at or before
+// the last transcript message the prefix covered.
+func toolRecordCommitted(record *toolActivityRecord, covered int) bool {
+	if !record.live && !record.hasResult {
+		return false
+	}
+	if record.call.ID == "" || record.call.Name == "" {
+		return false
+	}
+
+	return record.position > 0 && record.position <= covered
+}
+
+// committedActivityEnd reports where an ordered activity list stops being
+// committed. The list is ordered by position, and a position past the last
+// transcript message can only belong to the live overlay, which the volatile tail
+// keeps.
+func committedActivityEnd(activities []toolActivity, messages int) int {
+	for index := range activities {
+		if activities[index].position > messages {
+			return index
+		}
+	}
+
+	return len(activities)
+}
+
+// messageCarriesToolParts reports whether a message holds a tool call or a tool
+// result. An unreadable message reports true so the caller rebuilds instead of
+// trusting an append it cannot inspect.
+func messageCarriesToolParts(message ai.Message) bool {
+	parts, err := ai.MessagePartsView(message)
+	if err != nil {
+		return true
+	}
+
+	for _, part := range parts {
+		switch part.(type) {
+		case ai.ToolCallPart, ai.ToolResultPart:
+			return true
+		}
+	}
+
+	return false
+}
+
+// appendFrameCache projects the messages in messages[covered:] and appends their
+// entries to the committed prefix. The caller has proven that the covered range
+// is unchanged and that the appended messages carry no tool activity.
+func (m *Model) appendFrameCache(
+	stamp projectionStamp,
+	messages ai.Messages,
+	candidates []coding.CandidateIdentity,
+) {
+	cache := &m.frameCache
+	covered := cache.covered
+
+	synthetic := make(map[int]struct{})
+	for _, index := range m.state.SyntheticMessages {
+		if index >= covered {
+			synthetic[index] = struct{}{}
+		}
+	}
+
+	blocks := make([]timelineBlock, 0, len(messages)-covered)
+	cutoff := cache.cutoff
+	for index := covered; index < len(messages); index++ {
+		if _, skip := synthetic[index]; skip {
+			continue
+		}
+
+		candidateID := ""
+		if index < len(candidates) {
+			candidateID = candidates[index].Key()
+		}
+
+		committed := 0
+		blocks, committed = appendCommittedMessageBlocks(blocks, messages[index], index+1, candidateID)
+		cutoff = max(cutoff, committed)
+	}
+
+	split := splitCompletionMarkers(m.completionMarkers, cutoff)
+	// Markers that leave the volatile tail for the committed prefix are placed
+	// among the appended blocks: every cached block sits at or before the old
+	// cutoff, so a marker with a later position can only belong after them.
+	blocks = insertCompletionMarkers(blocks, m.completionMarkers[cache.markerSplit:split])
+	if !stamp.showThinking {
+		blocks = withoutThinkingBlocks(blocks)
+	}
+
+	// Appended messages carry no tool parts, so no appended block can be an
+	// exploration card and the committed blocks need no grouping across the seam.
+	entries := make([]transcriptEntry, 0, len(blocks))
+	for _, block := range blocks {
+		entries = append(entries, m.entryFor(block))
+	}
+
+	// A live activity's conversation position is the end of the transcript, so
+	// the cached tail activities move with the appended messages.
+	for index := range cache.tailActivities {
+		if cache.tailActivities[index].position > covered {
+			cache.tailActivities[index].position = len(messages) + 1
+		}
+	}
+
+	cache.entries = append(cache.entries, entries...)
+	cache.covered = len(messages)
+	cache.cutoff = cutoff
+	cache.markerSplit = split
+	cache.stamp = stamp
+	cache.candidateCount = len(candidates)
+	m.frameExtends++
+}
+
+// appendToolFrameCache extends the committed prefix by messages that carry tool
+// activity. It resumes the retained transcript fold at the appended messages,
+// re-derives the activity list from the retained records, and appends the blocks
+// the new activity commits. It reports the index the store must rebuild from, and
+// whether the append was proven.
+func (m *Model) appendToolFrameCache(
+	stamp projectionStamp,
+	messages ai.Messages,
+	candidates []coding.CandidateIdentity,
+) (int, bool) {
+	cache := &m.frameCache
+	scan := &cache.toolScan
+	if scan.records == nil {
+		return 0, false
+	}
+
+	for _, message := range messages[cache.covered:] {
+		if touchesCommittedToolRecord(scan, message, cache.covered) {
+			return 0, false
+		}
+	}
+
+	scan.scanTranscript(messages, nil)
+	scan.overlayLive(m.state.Tools, len(messages), nil)
+
+	activities := describeToolActivities(scan, &m.toolProjection)
+	m.toolProjection.retain(scan.records)
+
+	// Every appended part is new to the fold, so it can only add an activity or
+	// move one later; the committed activities stay outside the appended range.
+	newTailStart := committedActivityEnd(activities, len(messages))
+	if newTailStart < cache.toolTailStart {
+		return 0, false
+	}
+
+	synthetic := make(map[int]struct{})
+	for _, index := range m.state.SyntheticMessages {
+		if index >= cache.covered {
+			synthetic[index] = struct{}{}
+		}
+	}
+
+	rangeBlocks, rangeCutoff := projectCommittedRange(
+		m.state, cache.covered, synthetic, candidates,
+		activities[cache.toolTailStart:newTailStart],
+	)
+
+	// The exploration grouping folds left, so an appended card can still merge
+	// into the last committed one. The merged card replaces both entries.
+	grouped := groupExploreBlocks(rangeBlocks)
+	seam := len(grouped) > 0 && isExploreBlock(cache.lastCommitted) && isLoneExploreBlock(grouped[0])
+	if seam && cache.lastCommittedEntry < 0 {
+		return 0, false
+	}
+
+	cutoff := max(cache.cutoff, rangeCutoff)
+	from := len(cache.entries)
+	lastCommitted := cache.lastCommitted
+
+	if seam {
+		card := cache.lastCommitted
+		card.tools = append(slices.Clone(card.tools), grouped[0].tools...)
+		card.id = grouped[0].id
+		cache.entries[cache.lastCommittedEntry] = m.entryFor(card)
+		lastCommitted = card
+		from = cache.lastCommittedEntry
+		grouped = grouped[1:]
+	}
+
+	// Markers the new cutoff moves into the prefix are placed among the appended
+	// blocks: every cached block sits at or before the old cutoff, so a marker with
+	// a later position can only belong after them.
+	split := splitCompletionMarkers(m.completionMarkers, cutoff)
+	visible := insertCompletionMarkers(grouped, m.completionMarkers[cache.markerSplit:split])
+	if !stamp.showThinking {
+		visible = withoutThinkingBlocks(visible)
+	}
+
+	entries := make([]transcriptEntry, 0, len(visible))
+	for _, block := range visible {
+		entries = append(entries, m.entryFor(block))
+	}
+
+	if len(grouped) > 0 {
+		lastCommitted = grouped[len(grouped)-1]
+	}
+
+	cache.entries = append(cache.entries, entries...)
+	cache.covered = len(messages)
+	cache.cutoff = cutoff
+	cache.markerSplit = split
+	cache.toolTailStart = newTailStart
+	cache.tailActivities = activities[newTailStart:]
+	cache.stamp = stamp
+	cache.candidateCount = len(candidates)
+	cache.lastCommitted = lastCommitted
+	cache.lastCommittedEntry = m.entryForBlock(cache.entries, lastCommitted)
+	m.toolActivities = activities
+	m.frameExtends++
+
+	return from, true
 }
 
 // volatileTimelineBlocks projects the live tail: the activity still running, the

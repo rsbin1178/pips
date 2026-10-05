@@ -138,6 +138,45 @@ func appendTimelineTail(dst, tail []timelineBlock) []timelineBlock {
 	return append(dst, grouped[1:]...)
 }
 
+// appendCommittedMessageBlocks appends one transcript message's durable blocks
+// and reports the conversation position it commits, or zero when the message
+// commits none. It is the per-message half of [projectCommittedBlocks], shared so
+// the append path can project only the messages that arrived since the cached
+// frame instead of the whole conversation. It appends in place for the same
+// reason [appendCommittedActivityBlock] does.
+func appendCommittedMessageBlocks(
+	blocks []timelineBlock,
+	message ai.Message,
+	position int,
+	candidateID string,
+) ([]timelineBlock, int) {
+	if _, ok := message.(ai.AssistantMessage); ok {
+		// An assistant turn can carry visible reasoning, which becomes its own
+		// Thinking block ahead of the answer text.
+		return append(blocks, projectAssistantBlocks(message, position, candidateID)...), position
+	}
+
+	body := visibleMessageText(message)
+	if body == "" {
+		return blocks, 0
+	}
+
+	switch message.(type) {
+	case ai.UserMessage:
+		return append(blocks, timelineBlock{
+			kind: blockUser, body: body, position: position,
+		}), position
+	case ai.SystemMessage:
+		return append(blocks, timelineBlock{
+			kind: blockDiagnostic, title: "System", body: body, position: position,
+		}), position
+	default:
+		// A Tool message's result reaches the timeline through the tool activity
+		// overlay, never as a message block.
+		return blocks, 0
+	}
+}
+
 // projectCommittedBlocks projects the durable half of the timeline: the messages
 // already committed to the transcript together with the tool activity that sits
 // between them.
@@ -157,57 +196,19 @@ func projectCommittedBlocks(state coding.State, activities []toolActivity) commi
 		if messageIndex < len(state.MessageCandidates) {
 			candidateID = state.MessageCandidates[messageIndex].Key()
 		}
-		_, synthetic := syntheticMessages[messageIndex]
-		if !synthetic {
-			switch message.(type) {
-			case ai.AssistantMessage:
-				// An assistant turn can carry visible reasoning, which becomes its
-				// own Thinking block ahead of the answer text.
-				blocks = append(blocks, projectAssistantBlocks(message, position, candidateID)...)
-				cutoff = max(cutoff, position)
-			default:
-				body := visibleMessageText(message)
-				if body == "" {
-					break
-				}
-				switch message.(type) {
-				case ai.UserMessage:
-					blocks = append(blocks, timelineBlock{
-						kind: blockUser, body: body, position: position,
-					})
-					cutoff = max(cutoff, position)
-				case ai.SystemMessage:
-					blocks = append(blocks, timelineBlock{
-						kind: blockDiagnostic, title: "System", body: body, position: position,
-					})
-					cutoff = max(cutoff, position)
-				case ai.ToolMessage:
-				}
-			}
+		if _, synthetic := syntheticMessages[messageIndex]; !synthetic {
+			committed := 0
+			blocks, committed = appendCommittedMessageBlocks(blocks, message, position, candidateID)
+			cutoff = max(cutoff, committed)
 		}
 
 		for activityIndex < len(activities) && activities[activityIndex].position <= position {
 			activity := activities[activityIndex]
 			activityIndex++
-			if block, handled, visible := projectProtocolToolActivity(activity); handled {
-				if visible {
-					blocks = append(blocks, block)
-					cutoff = max(cutoff, block.position)
-				}
 
-				continue
-			}
-			if isSubagentToolName(activity.name) {
-				block := projectSubagentToolActivity(activity, state.Subagents)
-				blocks = append(blocks, block)
-				cutoff = max(cutoff, block.position)
-
-				continue
-			}
-
-			block := projectToolActivity(activity)
-			blocks = append(blocks, block)
-			cutoff = max(cutoff, block.position)
+			committed := 0
+			blocks, committed = appendCommittedActivityBlock(state, activity, blocks)
+			cutoff = max(cutoff, committed)
 		}
 	}
 
@@ -216,6 +217,79 @@ func projectCommittedBlocks(state coding.State, activities []toolActivity) commi
 		tailStart: activityIndex,
 		cutoff:    cutoff,
 	}
+}
+
+// projectCommittedRange projects the messages in Transcript[covered:] together
+// with the activity the appended messages commit, in durable order. It is the
+// append path's half of [projectCommittedBlocks]: for the messages an append
+// added it must produce exactly the blocks that function would.
+func projectCommittedRange(
+	state coding.State,
+	covered int,
+	synthetic map[int]struct{},
+	candidates []coding.CandidateIdentity,
+	activities []toolActivity,
+) ([]timelineBlock, int) {
+	blocks := make([]timelineBlock, 0, len(state.Transcript)-covered+len(activities))
+	cutoff := 0
+
+	activityIndex := 0
+
+	for messageIndex := covered; messageIndex < len(state.Transcript); messageIndex++ {
+		position := messageIndex + 1
+		candidateID := ""
+		if messageIndex < len(candidates) {
+			candidateID = candidates[messageIndex].Key()
+		}
+		if _, skip := synthetic[messageIndex]; !skip {
+			committed := 0
+			blocks, committed = appendCommittedMessageBlocks(
+				blocks, state.Transcript[messageIndex], position, candidateID,
+			)
+			cutoff = max(cutoff, committed)
+		}
+
+		for activityIndex < len(activities) && activities[activityIndex].position <= position {
+			activity := activities[activityIndex]
+			activityIndex++
+
+			committed := 0
+			blocks, committed = appendCommittedActivityBlock(state, activity, blocks)
+			cutoff = max(cutoff, committed)
+		}
+	}
+
+	return blocks, cutoff
+}
+
+// appendCommittedActivityBlock appends one settled tool activity's committed block
+// and reports the conversation position it commits, or zero when the activity
+// produces no card. A protocol activity can be handled without a card of its own.
+// It appends in place rather than returning the block, because every committed
+// activity goes through here on a full projection.
+func appendCommittedActivityBlock(
+	state coding.State,
+	activity toolActivity,
+	blocks []timelineBlock,
+) ([]timelineBlock, int) {
+	block, handled, visible := projectProtocolToolActivity(activity)
+	if handled {
+		if !visible {
+			return blocks, 0
+		}
+
+		return append(blocks, block), block.position
+	}
+
+	if isSubagentToolName(activity.name) {
+		block = projectSubagentToolActivity(activity, state.Subagents)
+
+		return append(blocks, block), block.position
+	}
+
+	block = projectToolActivity(activity)
+
+	return append(blocks, block), block.position
 }
 
 // projectVolatileBlocks projects everything that can change while the transcript

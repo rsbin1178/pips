@@ -2,6 +2,7 @@
 package tui
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"image/color"
@@ -95,6 +96,11 @@ type toolActivityRecord struct {
 	update         []ai.Part
 	result         ai.ToolResultPart
 	hasResult      bool
+	// described reports that the per-tool description cache holds this record's
+	// current activity. Describing a record materialises its visible result text,
+	// so the append path only pays for the records a scan or the live overlay
+	// touched again; see [describeToolActivities].
+	described bool
 }
 
 type durableSubagentArgs struct {
@@ -125,39 +131,57 @@ func projectToolActivities(
 	return projectToolActivitiesCached(state, excluded, nil)
 }
 
-//nolint:gocyclo // Transcript reconstruction and live overlay are one ordered merge.
-func projectToolActivitiesCached(
-	state coding.State,
-	excluded map[string]struct{},
-	cache *toolProjectionCache,
-) []toolActivity {
-	records := make(map[string]*toolActivityRecord)
-	ordered := make([]*toolActivityRecord, 0, len(state.Tools))
+// toolScanState is the durable half of the tool activity scan: every record the
+// transcript fold and the live overlay produced, in first-seen order, and how
+// many transcript messages that fold has covered. The append path resumes it at
+// the messages that arrived since the cached frame instead of rescanning the
+// whole conversation.
+type toolScanState struct {
+	records map[string]*toolActivityRecord
+	ordered []*toolActivityRecord
+	scanned int
+}
 
-	recordFor := func(id string) *toolActivityRecord {
-		if id == "" {
-			return nil
-		}
-		if _, skip := excluded[id]; skip {
-			return nil
-		}
-		if record, ok := records[id]; ok {
-			return record
-		}
+// reset clears the scan state for a fresh fold. capacity seeds the record slice
+// with the live ToolState count the caller already knows about.
+func (s *toolScanState) reset(capacity int) {
+	s.records = make(map[string]*toolActivityRecord)
+	s.ordered = make([]*toolActivityRecord, 0, capacity)
+	s.scanned = 0
+}
 
-		record := &toolActivityRecord{order: len(ordered)}
-		records[id] = record
-		ordered = append(ordered, record)
-
+// recordFor returns the record for a call ID, creating it in first-seen order. It
+// reports nil for an empty ID or one the caller excluded.
+func (s *toolScanState) recordFor(id string, excluded map[string]struct{}) *toolActivityRecord {
+	if id == "" {
+		return nil
+	}
+	if _, skip := excluded[id]; skip {
+		return nil
+	}
+	if record, ok := s.records[id]; ok {
 		return record
 	}
 
-	for messageIndex, message := range state.Transcript {
+	record := &toolActivityRecord{order: len(s.ordered)}
+	s.records[id] = record
+	s.ordered = append(s.ordered, record)
+
+	return record
+}
+
+// scanTranscript folds the tool calls and results of the transcript from the
+// previous cursor into the scan state. Every record it touches is left needing a
+// fresh description.
+//
+//nolint:gocyclo // Transcript reconstruction is one ordered fold over the parts.
+func (s *toolScanState) scanTranscript(messages ai.Messages, excluded map[string]struct{}) {
+	for messageIndex := s.scanned; messageIndex < len(messages); messageIndex++ {
 		position := messageIndex + 1
-		for _, part := range portableMessageParts(message) {
+		for _, part := range portableMessageParts(messages[messageIndex]) {
 			switch value := part.(type) {
 			case ai.ToolCallPart:
-				record := recordFor(value.ID)
+				record := s.recordFor(value.ID, excluded)
 				if record == nil {
 					continue
 				}
@@ -167,8 +191,9 @@ func projectToolActivitiesCached(
 				if record.position == 0 {
 					record.position = position
 				}
+				record.described = false
 			case ai.ToolResultPart:
-				record := recordFor(value.ToolCallID)
+				record := s.recordFor(value.ToolCallID, excluded)
 				if record == nil {
 					continue
 				}
@@ -182,14 +207,38 @@ func projectToolActivitiesCached(
 				record.hasResult = true
 				record.position = position
 				record.resultPosition = position
+				record.described = false
 			}
 		}
 	}
 
-	for _, live := range state.Tools {
-		record := recordFor(live.Call.ID)
+	s.scanned = len(messages)
+}
+
+// overlayLive applies the live ToolState onto the scanned records. Live state only
+// adds status and progress that is not durable yet, so the overlay is idempotent
+// and the append path can reapply it after the scan cursor moved: an activity with
+// no durable result sits at the end of the transcript, and that end moved.
+//
+// The append path has already established that the running-tool fingerprint is
+// unchanged, so only the call identity the overlay restates and the end-of-
+// transcript position it seats can differ from the previous frame; the rest of the
+// assignment is a no-op and does not invalidate a cached description.
+func (s *toolScanState) overlayLive(
+	tools []coding.ToolState,
+	transcriptLen int,
+	excluded map[string]struct{},
+) {
+	for _, live := range tools {
+		record := s.recordFor(live.Call.ID, excluded)
 		if record == nil {
 			continue
+		}
+
+		if record.described &&
+			(record.call.Name != live.Call.Name ||
+				!bytes.Equal(record.call.Arguments, live.Call.Arguments)) {
+			record.described = false
 		}
 
 		record.call = live.Call
@@ -202,16 +251,23 @@ func projectToolActivitiesCached(
 			record.result = result
 			record.hasResult = true
 			if record.resultPosition == 0 {
-				record.position = len(state.Transcript) + 1
+				record.position = transcriptLen + 1
+				record.described = false
 			}
 		}
 		if record.position == 0 {
-			record.position = len(state.Transcript) + 1
+			record.position = transcriptLen + 1
+			record.described = false
 		}
 	}
+}
 
-	activities := make([]toolActivity, 0, len(ordered))
-	for _, record := range ordered {
+// describeToolActivities turns the scan state into the ordered activity list the
+// timeline projection consumes. A record keeps its description until a scan or the
+// live overlay touches it again, so an append only re-describes what it changed.
+func describeToolActivities(scan *toolScanState, cache *toolProjectionCache) []toolActivity {
+	activities := make([]toolActivity, 0, len(scan.ordered))
+	for _, record := range scan.ordered {
 		// A transcript ToolCall without a result is not yet stable and may be
 		// followed immediately by ToolStarted. Wait for live state so the call
 		// cannot be committed prematurely between those two events.
@@ -222,7 +278,16 @@ func projectToolActivitiesCached(
 			continue
 		}
 
+		if record.described {
+			if cached, ok := cache.cached(record.call.ID); ok {
+				activities = append(activities, cached)
+
+				continue
+			}
+		}
+
 		activities = append(activities, cache.describe(*record))
+		record.described = true
 	}
 
 	sort.SliceStable(activities, func(left, right int) bool {
@@ -233,7 +298,22 @@ func projectToolActivitiesCached(
 		return activities[left].order < activities[right].order
 	})
 
-	cache.retain(records)
+	return activities
+}
+
+func projectToolActivitiesCached(
+	state coding.State,
+	excluded map[string]struct{},
+	cache *toolProjectionCache,
+) []toolActivity {
+	var scan toolScanState
+
+	scan.reset(len(state.Tools))
+	scan.scanTranscript(state.Transcript, excluded)
+	scan.overlayLive(state.Tools, len(state.Transcript), excluded)
+
+	activities := describeToolActivities(&scan, cache)
+	cache.retain(scan.records)
 
 	return activities
 }

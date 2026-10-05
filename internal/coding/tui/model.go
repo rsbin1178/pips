@@ -151,8 +151,11 @@ type Model struct {
 	pending []streamItem
 	// frameAdvances and frameRenders count the managed frame's state advances and
 	// re-projections, so a test can assert the frame-boundary reduction.
-	frameAdvances    int
-	frameRenders     int
+	frameAdvances int
+	frameRenders  int
+	// frameExtends counts committed prefixes the append path extended instead of
+	// rebuilding, so a test can tell an incremental commit frame from a full one.
+	frameExtends     int
 	bridge           *eventBridge
 	subscription     *subscriptionBridge
 	subscriptionSeq  uint64
