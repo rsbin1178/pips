@@ -362,11 +362,30 @@ func projectVolatileBlocks(state coding.State, tail []toolActivity) []timelineBl
 // once the message lands in the transcript.
 const draftThinkingID = "thinking:draft"
 
-// blockIsLive reports whether a block may still change on its own. The live
-// answer draft and the live reasoning draft both grow with every stream delta, so
-// neither may serve or refresh a reused rendering.
+// blockIsLive reports whether a block is one of the streaming drafts. Both grow
+// with every stream delta, so their Markdown shares one bounded live slot instead
+// of entering the settled LRU.
 func blockIsLive(block timelineBlock) bool {
 	return block.kind == blockDraft || block.id == draftThinkingID
+}
+
+// blockIsUnsettled reports whether a block's rendering can still change under its
+// own identity, so no record rendered from an earlier frame may serve it. It is
+// wider than [blockIsLive]: a tool card arrives while its activity runs and changes
+// again when its result lands, both under the one identity that activity carries.
+// The transcript store's reuse therefore cannot rest on identity alone.
+func blockIsUnsettled(block timelineBlock) bool {
+	if blockIsLive(block) {
+		return true
+	}
+
+	for index := range block.tools {
+		if !block.tools[index].settled {
+			return true
+		}
+	}
+
+	return false
 }
 
 // thinkingBlockID names one committed reasoning section. The message position

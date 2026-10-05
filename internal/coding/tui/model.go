@@ -1938,7 +1938,7 @@ func (m *Model) syncTranscriptStore(blocks []timelineBlock, leading int) {
 	for _, block := range blocks {
 		entries = append(entries, transcriptEntry{
 			id:    m.blockIdentity(block),
-			live:  blockIsLive(block),
+			live:  blockIsUnsettled(block),
 			block: block,
 		})
 	}
