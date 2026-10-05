@@ -161,23 +161,71 @@ func TestTimelineProjectsPlanDecisionsSemantically(t *testing.T) {
 	}
 }
 
-func TestTimelineRendersNonGitAttributionAsNeutralInformation(t *testing.T) {
+// suppressedDiagnosticFixture is the notice the TUI drops for a workspace
+// without Git: it only reports that change attribution is unavailable.
+func suppressedDiagnosticFixture() coding.IntegrationDiagnostic {
+	return coding.IntegrationDiagnostic{
+		Component: diagnosticComponentChanges, Code: diagnosticCodeNotRepository,
+		Message: "workspace change attribution is unavailable for this interaction",
+	}
+}
+
+// keptDiagnosticFixture is an ordinary integration notice that must stay visible.
+func keptDiagnosticFixture() coding.IntegrationDiagnostic {
+	return coding.IntegrationDiagnostic{
+		Component: "hooks", Code: "pending_trust", Message: "workspace is not trusted",
+	}
+}
+
+// TestTimelineHidesTheNonRepositoryDiagnostic asserts a workspace without Git
+// produces no conversation notice. The missing change summary is a property of
+// the workspace rather than a problem with the turn, and the notice is not
+// actionable, so the transcript stays quiet.
+func TestTimelineHidesTheNonRepositoryDiagnostic(t *testing.T) {
 	t.Parallel()
 
-	state := coding.State{Diagnostics: []coding.IntegrationDiagnostic{{
-		Component: "changes", Code: "not_repository",
-		Message: "workspace change attribution is unavailable for this interaction",
-	}}}
+	suppressed := suppressedDiagnosticFixture()
+	state := coding.State{Diagnostics: []coding.IntegrationDiagnostic{suppressed}}
+
 	blocks := projectTimeline(state)
-	require.Len(t, blocks, 1)
-	assert.Equal(t, "Git change summary unavailable", blocks[0].title)
-	assert.Empty(t, blocks[0].status)
-	assert.Contains(t, blocks[0].body, "Direct apply_patch edits remain visible")
-	assert.Contains(t, blocks[0].body, "cannot be attributed")
+	assert.Empty(t, blocks, "a workspace without Git produces no transcript notice")
 
 	rendered := renderTimeline(blocks, newMarkdownRenderer(4), 80, themeDark, true)
-	assert.NotContains(t, rendered, "changes · not_repository")
-	assert.NotContains(t, rendered, "Run failed")
+	assert.NotContains(t, rendered, suppressed.Message)
+	assert.NotContains(t, rendered, diagnosticCodeNotRepository)
+}
+
+// TestVisibleDiagnosticsKeepsEveryOtherIntegrationNotice guards the status
+// surface: only the missing-repository notice is suppressed.
+func TestVisibleDiagnosticsKeepsEveryOtherIntegrationNotice(t *testing.T) {
+	t.Parallel()
+
+	visible := visibleDiagnostics([]coding.IntegrationDiagnostic{
+		suppressedDiagnosticFixture(),
+		keptDiagnosticFixture(),
+	})
+
+	assert.Equal(t, []coding.IntegrationDiagnostic{keptDiagnosticFixture()}, visible)
+}
+
+// TestFrameOmitsTheNonRepositoryNotice drives the real viewport: a session
+// opened outside a repository shows its conversation and no change notice at
+// all, in both presentations.
+func TestFrameOmitsTheNonRepositoryNotice(t *testing.T) {
+	t.Parallel()
+
+	state := readyState()
+	state.Transcript = []ai.Message{ai.UserText("question"), ai.Assistant(ai.Text("answer"))}
+	state.Diagnostics = []coding.IntegrationDiagnostic{suppressedDiagnosticFixture()}
+
+	fullscreen := fullscreenModel(t, stubController{state: state}, true)
+	frame := ansi.Strip(fullscreen.View().Content)
+	assert.Contains(t, frame, "answer")
+	assert.NotContains(t, frame, suppressedDiagnosticFixture().Message)
+
+	inline := readyModelWithController(t, stubController{state: state}, true)
+	inline.rerenderTranscript(true)
+	assert.NotContains(t, ansi.Strip(inline.View().Content), suppressedDiagnosticFixture().Message)
 }
 
 func TestTimelineUsesUniformInterBlockSpacing(t *testing.T) {
@@ -223,20 +271,28 @@ func TestTimelineUsesUniformOuterContentMargin(t *testing.T) {
 	assert.Contains(t, lines, questionFailedTitle)
 }
 
-func TestTimelineNeverProjectsReasoningOrSignatures(t *testing.T) {
+func TestTimelineRendersThinkingTextButNeverSignatures(t *testing.T) {
 	t.Parallel()
 
-	const secret = "reasoning-signature-secret"
+	const (
+		reasoning = "visible reasoning"
+		signature = "opaque-signature-secret"
+	)
+
 	state := coding.State{
 		Transcript: []ai.Message{
 			ai.UserText("question"),
 			ai.Assistant(
 				ai.Text("visible answer"),
-				ai.ReasoningPart{Text: secret, Signature: secret},
+				ai.ReasoningPart{Text: reasoning, Signature: signature},
+			),
+			ai.Assistant(
+				ai.Text("second answer"),
+				ai.ReasoningPart{Redacted: true, Signature: signature},
 			),
 		},
 		Draft: []coding.MessageDelta{
-			{Kind: ai.StreamReasoningDelta, Text: secret, Signature: secret},
+			{Kind: ai.StreamReasoningDelta, Text: reasoning, Signature: signature},
 			{Kind: ai.StreamTextDelta, Text: "visible draft"},
 		},
 		Tools: []coding.ToolState{{
@@ -258,7 +314,19 @@ func TestTimelineNeverProjectsReasoningOrSignatures(t *testing.T) {
 	assert.Contains(t, rendered, "visible draft")
 	assert.Contains(t, rendered, "✻ Exploring")
 	assert.Contains(t, rendered, "Read")
-	assert.NotContains(t, rendered, secret)
+	assert.Contains(t, rendered, reasoning)
+	assert.Contains(t, rendered, thinkingTitle)
+	// The opaque continuation signature never reaches the frame, and redacted
+	// reasoning produces no block at all.
+	assert.NotContains(t, rendered, signature)
+
+	thinking := 0
+	for _, block := range blocks {
+		if block.kind == blockThinking {
+			thinking++
+		}
+	}
+	assert.Equal(t, 2, thinking, "one committed block plus the live draft block")
 }
 
 func TestTimelineSummarizesChangesAndDiagnostics(t *testing.T) {

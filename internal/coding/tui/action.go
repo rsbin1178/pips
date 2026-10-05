@@ -12,11 +12,19 @@ type actionContext string
 
 const (
 	keyEnter      = "enter"
+	keyPageUp     = "pgup"
+	keyPageDown   = "pgdown"
+	keyCtrlD      = "ctrl+d"
+	keyCtrlR      = "ctrl+r"
+	keyCtrlF      = "ctrl+f"
+	keyCtrlG      = "ctrl+g"
+	keyCtrlO      = "ctrl+o"
 	keyTab        = "tab"
 	keyCtrlC      = "ctrl+c"
 	keyCtrlT      = "ctrl+t"
 	keyCtrlU      = "ctrl+u"
 	keyCtrlV      = "ctrl+v"
+	keyCtrlX      = "ctrl+x"
 	keyCtrlJ      = "ctrl+j"
 	keyShiftEnter = "shift+enter"
 	keySpace      = "space"
@@ -52,6 +60,14 @@ const (
 	actionCancel     actionID = "cancel"
 	actionToggleMode actionID = "toggle_mode"
 	actionPasteImage actionID = "paste_image"
+	actionTranscript actionID = "transcript"
+	actionCopy       actionID = "copy_reply"
+	actionSearch     actionID = "search"
+	// actionToggleMouseCapture is the Grok-parity Ctrl+R: it releases the terminal's
+	// mouse capture so the terminal's own selection, copy and link handling work, and
+	// takes it back again. The choice is per session; `[tui] mouse = false` remains the
+	// persisted opt-out.
+	actionToggleMouseCapture actionID = "toggle_mouse_capture"
 )
 
 type actionBinding struct {
@@ -109,6 +125,36 @@ var defaultActions = []actionBinding{
 		Contexts: []actionContext{contextIdle, contextRunning, contextPaused},
 		Keys:     []string{keyCtrlT},
 		Label:    "latest details",
+	},
+	{
+		ID:       actionTranscript,
+		Contexts: []actionContext{contextIdle, contextRunning, contextPaused},
+		Keys:     []string{keyCtrlO},
+		Label:    "transcript",
+	},
+	{
+		// Ctrl+X copies and never mutates conversation state, so it stays
+		// available while a turn runs. The Team worker route claims the same key
+		// for interrupt before this table is consulted.
+		ID:       actionCopy,
+		Contexts: []actionContext{contextIdle, contextRunning, contextPaused},
+		Keys:     []string{keyCtrlX},
+		Label:    "copy reply",
+	},
+	{
+		// The find box only exists over the managed viewport; inline mode reports
+		// that the terminal owns the search instead of opening a box that could
+		// not scroll.
+		ID:       actionSearch,
+		Contexts: []actionContext{contextIdle, contextRunning, contextPaused},
+		Keys:     []string{keyCtrlF},
+		Label:    commandFind,
+	},
+	{
+		ID:       actionToggleMouseCapture,
+		Contexts: []actionContext{contextIdle, contextRunning, contextPaused},
+		Keys:     []string{keyCtrlR},
+		Label:    "mouse capture",
 	},
 	{
 		ID:       actionCancel,

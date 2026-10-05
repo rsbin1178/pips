@@ -243,6 +243,28 @@ func TestResolveActivityUsesSemanticToolLabels(t *testing.T) {
 	}
 }
 
+func TestRunningToolStatusDoesNotProjectOutput(t *testing.T) {
+	t.Parallel()
+
+	tools := []coding.ToolState{
+		{
+			Call: coding.ToolCall{ID: "done", Name: "shell"}, Status: coding.ToolStatusCompleted,
+			Result: codingToolResultFor("done", "shell", strings.Repeat("large result\n", 1024)),
+		},
+		{
+			Call:   coding.ToolCall{ID: "active", Name: "shell", Arguments: ai.JSON(`{"command":"pwd"}`)},
+			Status: coding.ToolStatusRunning, Update: []ai.Part{ai.Text("progress must not enter status")},
+		},
+	}
+	activities := runningToolActivities(tools)
+	require.Len(t, activities, 1)
+	assert.Equal(t, "active", activities[0].id)
+	assert.Equal(t, "pwd", activities[0].subject)
+	assert.Empty(t, activities[0].update)
+	assert.Empty(t, activities[0].result)
+	assert.Empty(t, activities[0].preview)
+}
+
 func TestActivityIndicatorRendersSemanticColorAndNoColorFallback(t *testing.T) {
 	t.Parallel()
 

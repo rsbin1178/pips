@@ -27,6 +27,7 @@ func TestTrustDefaultsToDenyAndBootstrapsSelection(t *testing.T) {
 
 	var decisions []bool
 	model := newModel(t.Context(), Options{
+		PinPresentation: true, Screen: ScreenInline, AltScreen: AltScreenNever,
 		Workspace: "/workspace",
 		Bootstrap: func(_ context.Context, trusted bool) (Controller, error) {
 			decisions = append(decisions, trusted)
@@ -60,6 +61,7 @@ func TestTrustListSupportsArrowNavigationAndNarrowNoColor(t *testing.T) {
 	t.Parallel()
 
 	model := newModel(t.Context(), Options{
+		PinPresentation: true, Screen: ScreenInline, AltScreen: AltScreenNever,
 		Workspace: "/workspace/with/a/long/name",
 		NoColor:   true,
 		Bootstrap: func(context.Context, bool) (Controller, error) { return nil, nil },
@@ -84,6 +86,7 @@ func TestTrustListHighlightsColorSelection(t *testing.T) {
 	t.Parallel()
 
 	model := newModel(t.Context(), Options{
+		PinPresentation: true, Screen: ScreenInline, AltScreen: AltScreenNever,
 		Workspace: "/workspace",
 		Bootstrap: func(context.Context, bool) (Controller, error) { return nil, nil },
 	})
@@ -98,6 +101,7 @@ func TestTrustAllowsExplicitKeyboardSelection(t *testing.T) {
 
 	trusted := false
 	model := newModel(t.Context(), Options{
+		PinPresentation: true, Screen: ScreenInline, AltScreen: AltScreenNever,
 		Workspace: "/workspace",
 		Bootstrap: func(_ context.Context, selected bool) (Controller, error) {
 			trusted = selected
@@ -116,6 +120,7 @@ func TestBootstrapErrorBecomesFatalView(t *testing.T) {
 	t.Parallel()
 
 	model := newModel(t.Context(), Options{
+		PinPresentation: true, Screen: ScreenInline, AltScreen: AltScreenNever,
 		Workspace: "/workspace",
 		Trusted:   true,
 		Bootstrap: func(context.Context, bool) (Controller, error) {
@@ -134,6 +139,7 @@ func TestTrustPersistenceFailureRemainsRetryable(t *testing.T) {
 	t.Parallel()
 
 	model := newModel(t.Context(), Options{
+		PinPresentation: true, Screen: ScreenInline, AltScreen: AltScreenNever,
 		Workspace: "/workspace",
 		Bootstrap: func(context.Context, bool) (Controller, error) {
 			return nil, &TrustError{Err: errors.New("read-only store")}
@@ -677,6 +683,12 @@ func readyModelWithController(
 	model := newModel(t.Context(), Options{
 		Workspace: "/workspace",
 		NoColor:   noColor,
+		// The inline presentation is the long-standing behavior this suite
+		// verifies: terminal-native history plus a mutable tail. Fullscreen
+		// coverage uses fullscreenModel.
+		PinPresentation: true,
+		Screen:          ScreenInline,
+		AltScreen:       AltScreenNever,
 		Bootstrap: func(context.Context, bool) (Controller, error) {
 			return controller, nil
 		},
@@ -718,9 +730,28 @@ type stubController struct {
 	Controller
 	state            coding.State
 	configStatusLine []statusline.Item
+	// tui, when set, overrides the presentation fields of the stub configuration.
+	tui config.TUIConfig
+	// historyPage/historyErr stand in for the Runtime's durable history read.
+	historyPage coding.HistoryPage
+	historyErr  error
 }
 
 func (c stubController) Snapshot() coding.State { return c.state.Clone() }
+
+// History defaults to an empty page so the embedded nil Controller is never
+// reached; tests that exercise paging set historyPage.
+func (c stubController) History(
+	context.Context,
+	coding.HistoryRequest,
+) (coding.HistoryPage, error) {
+	if c.historyErr != nil {
+		return coding.HistoryPage{}, c.historyErr
+	}
+
+	return c.historyPage, nil
+}
+
 func (c stubController) Mode() runtimecontrol.ModeState {
 	mode := c.state.Mode
 	if mode == "" {
@@ -794,6 +825,9 @@ func (c stubController) Config() config.Config {
 		value.TUI.StatusLine = make([]statusline.Item, len(c.configStatusLine))
 		copy(value.TUI.StatusLine, c.configStatusLine)
 	}
+	if c.tui.Screen != "" {
+		value.TUI = c.tui
+	}
 
 	return value
 }
@@ -841,4 +875,32 @@ func (c *cancelController) Cancel() error {
 	c.state.Interaction.Active = false
 
 	return nil
+}
+
+// fullscreenModel builds a ready model whose transcript viewport owns
+// presentation, so a test can assert the managed layout rather than the terminal
+// native one.
+func fullscreenModel(t *testing.T, controller Controller, noColor bool) *Model {
+	t.Helper()
+
+	model := newModel(t.Context(), Options{
+		Workspace:       "/workspace",
+		NoColor:         noColor,
+		PinPresentation: true,
+		Screen:          ScreenFullscreen,
+		AltScreen:       AltScreenAlways,
+		MouseReporting:  true,
+		Bootstrap: func(context.Context, bool) (Controller, error) {
+			return controller, nil
+		},
+	})
+	model.Update(tea.WindowSizeMsg{Width: defaultWidth, Height: defaultHeight})
+	_, command := model.Update(bootstrapResult{controller: controller})
+	if model.starting {
+		driveModelCommands(t, model, command)
+	} else {
+		model.presentation = presentationState{}
+	}
+
+	return model
 }

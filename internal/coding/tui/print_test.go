@@ -34,6 +34,26 @@ func TestInspectionCommandsPrintIntoScrollback(t *testing.T) {
 	}
 }
 
+// TestStatusOmitsTheMissingRepositoryNotice asserts /status lists every real
+// integration notice and drops the one that only reports a workspace without
+// Git: the missing change summary is a property of the workspace, and the agent
+// stays fully usable there.
+func TestStatusOmitsTheMissingRepositoryNotice(t *testing.T) {
+	t.Parallel()
+
+	model := readyModelWithController(t, newOverlayController(readyState()), true)
+	model.state.Diagnostics = []coding.IntegrationDiagnostic{
+		suppressedDiagnosticFixture(),
+		keptDiagnosticFixture(),
+	}
+
+	status := model.statusContent()
+
+	assert.Contains(t, status, keptDiagnosticFixture().Message)
+	assert.NotContains(t, status, suppressedDiagnosticFixture().Message)
+	assert.NotContains(t, status, diagnosticCodeNotRepository)
+}
+
 func TestPrintInspectionRemovesTerminalControlSequences(t *testing.T) {
 	t.Parallel()
 

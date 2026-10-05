@@ -1,0 +1,436 @@
+//nolint:wsl_v5 // Scenarios keep their arrangement, mutation and assertion adjacent.
+package tui
+
+import (
+	"errors"
+	"testing"
+
+	tea "charm.land/bubbletea/v2"
+	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/internal/coding"
+	"github.com/rsbin1178/pips/internal/coding/config"
+	"github.com/rsbin1178/pips/internal/coding/subagent"
+	"github.com/stretchr/testify/require"
+)
+
+// viewportProjectionBlocks is the cached frame's block list.
+func viewportProjectionBlocks(model *Model) []timelineBlock {
+	return viewportProjectionFrameBlocks(model.viewportProjection())
+}
+
+// viewportProjectionFrameBlocks flattens one cached frame, prefix then tail.
+func viewportProjectionFrameBlocks(frame frameProjection) []timelineBlock {
+	blocks := make([]timelineBlock, 0, len(frame.prefixEntries)+len(frame.tailEntries))
+	for _, entry := range frame.prefixEntries {
+		blocks = append(blocks, entry.block)
+	}
+	for _, entry := range frame.tailEntries {
+		blocks = append(blocks, entry.block)
+	}
+
+	return blocks
+}
+
+// projectionCacheModel builds a fullscreen model over a small conversation that
+// carries visible reasoning, so the thinking-visibility toggle has something to
+// change.
+func projectionCacheModel(t *testing.T) *Model {
+	t.Helper()
+
+	state := readyState()
+	state.Transcript = []ai.Message{
+		ai.UserText("hello"),
+		ai.Assistant(
+			ai.Text("hi"),
+			ai.ReasoningPart{Text: "reasoned"},
+		),
+	}
+	state.MessageCandidates = []coding.CandidateIdentity{
+		{RunID: "run-1", Turn: 1},
+		{RunID: "run-1", Turn: 2},
+	}
+
+	model := fullscreenModel(t, stubController{state: state}, false)
+	model.state = state
+	model.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+
+	return model
+}
+
+// projectionRunningReadTool is a live tool the volatile tail carries until it
+// settles.
+func projectionRunningReadTool() coding.ToolState {
+	return coding.ToolState{
+		RunID: "run-1", Turn: 3,
+		Call: coding.ToolCall{
+			ID: "call-1", Name: "read", Arguments: ai.JSON(`{"path":"main.go"}`),
+		},
+		Status: coding.ToolStatusRunning,
+	}
+}
+
+// projectionRunningSubagentTool is the live delegation the subagent lifecycle
+// enriches.
+func projectionRunningSubagentTool() coding.ToolState {
+	return coding.ToolState{
+		RunID: "run-1", Turn: 3,
+		Call: coding.ToolCall{
+			ID: "call-sub", Name: subagent.ToolName,
+			Arguments: ai.JSON(`{"role":"explore","task":"Inspect the timeline"}`),
+		},
+		Status: coding.ToolStatusRunning,
+	}
+}
+
+// projectionCacheScenario mutates a warmed model. arrange, when set, runs before
+// the cache is warmed so the scenario can start from the state it mutates.
+type projectionCacheScenario struct {
+	name    string
+	arrange func(t *testing.T, model *Model)
+	mutate  func(t *testing.T, model *Model)
+}
+
+// TestProjectionCacheMatchesPureProjection pins requirement D4: the incremental
+// frame is exactly the pure projection, before and after every input surface
+// changes. Each scenario warms the cache first, mutates, then compares, so a
+// stale prefix cannot hide behind a cold cache.
+func TestProjectionCacheMatchesPureProjection(t *testing.T) {
+	t.Parallel()
+
+	scenarios := []projectionCacheScenario{
+		{
+			name: "append committed message",
+			mutate: func(_ *testing.T, model *Model) {
+				model.state.Transcript = append(model.state.Transcript, ai.UserText("follow up"))
+				model.state.MessageCandidates = append(
+					model.state.MessageCandidates,
+					coding.CandidateIdentity{RunID: "run-1", Turn: 3},
+				)
+			},
+		},
+		{
+			name: "replace transcript",
+			mutate: func(_ *testing.T, model *Model) {
+				model.state.Transcript = []ai.Message{
+					ai.UserText("compacted"),
+					ai.AssistantText("summary"),
+					ai.UserText("more"),
+				}
+				model.state.MessageCandidates = nil
+			},
+		},
+		{
+			name: "tool started",
+			mutate: func(_ *testing.T, model *Model) {
+				model.state.Tools = append(model.state.Tools, projectionRunningReadTool())
+			},
+		},
+		{
+			name: "tool progress updated",
+			arrange: func(_ *testing.T, model *Model) {
+				model.state.Tools = []coding.ToolState{projectionRunningReadTool()}
+			},
+			mutate: func(_ *testing.T, model *Model) {
+				model.state.Tools[0].Update = []ai.Part{ai.Text("progress 2")}
+			},
+		},
+		{
+			name: "tool completed",
+			arrange: func(_ *testing.T, model *Model) {
+				model.state.Tools = []coding.ToolState{projectionRunningReadTool()}
+			},
+			mutate: func(_ *testing.T, model *Model) {
+				model.state.Tools[0].Status = coding.ToolStatusCompleted
+				model.state.Tools[0].Result = codingToolResultFor("call-1", "read", "file contents")
+			},
+		},
+		{
+			name: "subagent appended",
+			arrange: func(_ *testing.T, model *Model) {
+				model.state.Tools = []coding.ToolState{projectionRunningSubagentTool()}
+			},
+			mutate: func(_ *testing.T, model *Model) {
+				model.state.Subagents = append(model.state.Subagents, coding.SubagentState{
+					ChildSessionID: "child-1", ParentToolCallID: "call-sub",
+					Role: subagent.RoleExplore, State: subagent.StateRunning,
+					TaskPreview: "Inspect the timeline",
+					Activity: subagent.ActivitySummary{
+						Action: subagent.ActivityActionRead, Target: "main.go",
+					},
+					ToolCalls: 2, DurationMillis: 1500,
+				})
+			},
+		},
+		{
+			name: "subagent updated",
+			arrange: func(_ *testing.T, model *Model) {
+				model.state.Tools = []coding.ToolState{projectionRunningSubagentTool()}
+				model.state.Subagents = []coding.SubagentState{{
+					ChildSessionID: "child-1", ParentToolCallID: "call-sub",
+					Role: subagent.RoleExplore, State: subagent.StateRunning,
+					TaskPreview: "Inspect the timeline",
+				}}
+			},
+			mutate: func(_ *testing.T, model *Model) {
+				model.state.Subagents[0].State = subagent.StateSucceeded
+				model.state.Subagents[0].Activity = subagent.ActivitySummary{
+					Action: subagent.ActivityActionSearch, Target: "timeline.go",
+				}
+				model.state.Subagents[0].ToolCalls = 5
+				model.state.Subagents[0].DurationMillis = 4200
+			},
+		},
+		{
+			name: "team lifecycles appended",
+			mutate: func(_ *testing.T, model *Model) {
+				model.state.Teams = append(model.state.Teams, coding.TeamLifecycleState{
+					TeamLifecycle: coding.TeamLifecycle{
+						TeamID: "team-1", MemberID: "member-1", TaskID: "task-1",
+						AttemptID: "attempt-1", State: coding.TeamLifecycleRunning,
+						Activity: coding.TeamActivityWorking,
+					},
+				})
+				model.state.TeamControls = append(model.state.TeamControls,
+					coding.TeamControlLifecycleState{
+						TeamControlLifecycle: coding.TeamControlLifecycle{
+							TeamID: "team-1", Revision: 1, CommandID: "command-1",
+							Action: coding.TeamControlMessage, State: coding.TeamControlPending,
+						},
+					})
+				model.state.TeamIntegrations = append(model.state.TeamIntegrations,
+					coding.TeamIntegrationLifecycleState{
+						TeamIntegrationLifecycle: coding.TeamIntegrationLifecycle{
+							TeamID: "team-1", IntegrationID: "integration-1",
+							State: coding.TeamIntegrationReady,
+						},
+					})
+			},
+		},
+		{
+			name: "draft growth",
+			mutate: func(_ *testing.T, model *Model) {
+				model.state.Draft = []coding.MessageDelta{
+					{Kind: ai.StreamTextDelta, Text: "partial answer"},
+				}
+				model.state.DraftCandidate = coding.CandidateIdentity{RunID: "run-1", Turn: 3}
+			},
+		},
+		{
+			name: "draft commit",
+			arrange: func(_ *testing.T, model *Model) {
+				model.state.Draft = []coding.MessageDelta{
+					{Kind: ai.StreamTextDelta, Text: "partial answer"},
+				}
+				model.state.DraftCandidate = coding.CandidateIdentity{RunID: "run-1", Turn: 3}
+			},
+			mutate: func(_ *testing.T, model *Model) {
+				model.state.Draft = nil
+				model.state.DraftCandidate = coding.CandidateIdentity{}
+				model.state.Transcript = append(model.state.Transcript, ai.AssistantText("committed answer"))
+				model.state.MessageCandidates = append(
+					model.state.MessageCandidates,
+					coding.CandidateIdentity{RunID: "run-1", Turn: 3},
+				)
+			},
+		},
+		{
+			name: "width change",
+			mutate: func(_ *testing.T, model *Model) {
+				model.width = 50
+				model.transcript.setLeading(0)
+			},
+		},
+		{
+			name: "theme change",
+			mutate: func(_ *testing.T, model *Model) {
+				model.theme = themeLight
+			},
+		},
+		{
+			name: "no color",
+			mutate: func(_ *testing.T, model *Model) {
+				model.options.NoColor = true
+			},
+		},
+		{
+			name: "show thinking toggled",
+			mutate: func(_ *testing.T, model *Model) {
+				model.controller = stubController{
+					state: model.state,
+					tui: config.TUIConfig{
+						Screen:             config.ScreenFullscreen,
+						ShowThinkingBlocks: false,
+					},
+				}
+			},
+		},
+		{
+			name: "session switch",
+			mutate: func(_ *testing.T, model *Model) {
+				model.state.SessionID = "session-2"
+				model.state.Transcript = []ai.Message{ai.UserText("another session")}
+				model.state.MessageCandidates = nil
+			},
+		},
+		{
+			name: "plan mode notices added",
+			mutate: func(_ *testing.T, model *Model) {
+				model.planModeNotices = []string{"notice"}
+			},
+		},
+		{
+			name: "plan mode notices cleared",
+			arrange: func(_ *testing.T, model *Model) {
+				model.planModeNotices = []string{"notice"}
+			},
+			mutate: func(_ *testing.T, model *Model) {
+				model.planModeNotices = nil
+			},
+		},
+		{
+			name: "completion marker appended",
+			mutate: func(_ *testing.T, model *Model) {
+				model.completionMarkers = append(model.completionMarkers, completionMarker{
+					interactionID:  "interaction-1",
+					afterMessages:  len(model.state.Transcript),
+					outcome:        coding.InteractionSucceeded,
+					durationMillis: 7_000,
+					model:          "openai/test-model",
+				})
+			},
+		},
+		{
+			name: "stream error set",
+			mutate: func(_ *testing.T, model *Model) {
+				model.streamErr = errors.New("boom")
+			},
+		},
+		{
+			name: "stream error cleared",
+			arrange: func(_ *testing.T, model *Model) {
+				model.streamErr = errors.New("boom")
+			},
+			mutate: func(_ *testing.T, model *Model) {
+				model.streamErr = nil
+			},
+		},
+	}
+
+	for _, scenario := range scenarios {
+		t.Run(scenario.name, func(t *testing.T) {
+			t.Parallel()
+
+			model := projectionCacheModel(t)
+			if scenario.arrange != nil {
+				scenario.arrange(t, model)
+			}
+			// Warm the cache against the pre-mutation model so the comparison
+			// below exercises reuse, not a cold rebuild.
+			require.NotEmpty(t, viewportProjectionBlocks(model))
+
+			scenario.mutate(t, model)
+
+			require.Equal(t, model.transcriptBlocks(), viewportProjectionBlocks(model))
+			// Projecting twice must be stable: the second frame reuses the first.
+			require.Equal(t, viewportProjectionBlocks(model), viewportProjectionBlocks(model))
+		})
+	}
+}
+
+// TestProjectionCacheRebuildsPrefixOnlyWhenInputsChange pins the two paths apart:
+// a volatile draft keeps the committed prefix, a committed append discards it.
+func TestProjectionCacheRebuildsPrefixOnlyWhenInputsChange(t *testing.T) {
+	t.Parallel()
+
+	model := projectionCacheModel(t)
+
+	// Warm the cache.
+	model.viewportProjection()
+	prefixLength := len(model.frameCache.entries)
+	require.Greater(t, prefixLength, 0)
+
+	// A draft delta is volatile: the committed prefix is reused verbatim.
+	model.state.Draft = []coding.MessageDelta{
+		{Kind: ai.StreamTextDelta, Text: "partial answer"},
+	}
+	frame := model.viewportProjection()
+	require.Equal(t, prefixLength, frame.stable)
+
+	// A committed append changes the stamp: the store must rebuild from scratch.
+	model.state.Transcript = append(model.state.Transcript, ai.UserText("committed"))
+	model.state.MessageCandidates = append(
+		model.state.MessageCandidates,
+		coding.CandidateIdentity{RunID: "run-1", Turn: 3},
+	)
+	frame = model.viewportProjection()
+	require.Zero(t, frame.stable)
+}
+
+// TestProjectionCacheToolLifecycle proves a running tool's progress update
+// invalidates the committed prefix while an unrelated draft delta does not.
+func TestProjectionCacheToolLifecycle(t *testing.T) {
+	t.Parallel()
+
+	model := projectionCacheModel(t)
+	model.state.Tools = []coding.ToolState{projectionRunningReadTool()}
+
+	// Warm the cache against the running tool.
+	require.Equal(t, model.transcriptBlocks(), viewportProjectionBlocks(model))
+	before := model.frameCache.stamp
+
+	// An unrelated draft delta leaves the committed inputs untouched.
+	model.state.Draft = []coding.MessageDelta{
+		{Kind: ai.StreamTextDelta, Text: "unrelated"},
+	}
+	frame := model.viewportProjection()
+	require.Equal(t, model.transcriptBlocks(), viewportProjectionFrameBlocks(frame))
+	require.Greater(t, frame.stable, 0)
+	require.Equal(t, before, model.frameCache.stamp)
+
+	// The tool's progress update changes the committed fingerprint, so the
+	// cached prefix is rebuilt.
+	model.state.Tools[0].Update = []ai.Part{ai.Text("progress 2")}
+	frame = model.viewportProjection()
+	require.Equal(t, model.transcriptBlocks(), viewportProjectionFrameBlocks(frame))
+	require.Zero(t, frame.stable)
+	require.NotEqual(t, before, model.frameCache.stamp)
+}
+
+// TestProjectionLeavesMessagePartsUntouched pins the invariant behind reading
+// message parts in place: the projection only reads them, so projecting a
+// conversation must leave every message exactly as it found it. A writer in this
+// path would corrupt the State the Runtime also owns.
+func TestProjectionLeavesMessagePartsUntouched(t *testing.T) {
+	t.Parallel()
+
+	state := readyState()
+	state.Transcript = []ai.Message{
+		ai.UserText("hello"),
+		ai.Assistant(ai.Text("hi"), ai.ReasoningPart{Text: "reasoned"}),
+		codingToolResultFor("call-1", "read", "file contents"),
+		ai.Assistant(ai.Text("done"), ai.ToolCallPart{
+			ID: "call-2", Name: "read", Args: ai.JSON(`{"path":"main.go"}`),
+		}),
+	}
+	state.MessageCandidates = []coding.CandidateIdentity{
+		{RunID: "run-1", Turn: 1},
+		{RunID: "run-1", Turn: 2},
+	}
+	state.Tools = []coding.ToolState{projectionRunningReadTool()}
+
+	before := make(ai.Messages, len(state.Transcript))
+	for index, message := range state.Transcript {
+		cloned, err := ai.CloneMessage(message)
+		require.NoError(t, err)
+
+		before[index] = cloned
+	}
+
+	model := projectionCacheModel(t)
+	model.state = state
+
+	require.NotEmpty(t, viewportProjectionBlocks(model), "the cached frame projects")
+	require.NotEmpty(t, model.transcriptBlocks(), "the pure projection projects")
+
+	require.Equal(t, before, state.Transcript, "the projection must only read the conversation")
+}

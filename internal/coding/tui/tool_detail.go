@@ -99,10 +99,7 @@ func (m *Model) toolDetailRouteView() tea.View {
 	if height > 2 {
 		content = padHeight(m.toolDetailBody(rows, bodyHeight), bodyHeight) + "\n" + footer
 	}
-	view := tea.NewView(truncateHeight(content, height))
-	view.AltScreen = false
-	view.MouseMode = tea.MouseModeNone
-	view.WindowTitle = appTitle
+	view := m.presentationView(truncateHeight(content, height))
 
 	return view
 }

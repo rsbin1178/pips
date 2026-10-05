@@ -101,7 +101,14 @@ func newConfigShowCommand(dependencies Dependencies, flags *rootFlags) *cobra.Co
 				config.FieldMode:       strconv.Quote(string(state.config.Config.Mode)),
 				config.FieldTheme:      strconv.Quote(state.config.Config.TUI.Theme),
 				config.FieldStatusLine: string(statusLine),
-				config.FieldSandbox:    strconv.Quote(string(state.config.Config.Sandbox)),
+				config.FieldScreen:     strconv.Quote(state.config.Config.TUI.Screen),
+				config.FieldAltScreen:  strconv.Quote(state.config.Config.TUI.AltScreen),
+				config.FieldMouse:      strconv.FormatBool(state.config.Config.TUI.Mouse),
+				config.FieldExitOutput: strconv.Quote(state.config.Config.TUI.ExitOutput),
+				config.FieldShowThinkingBlocks: strconv.FormatBool(
+					state.config.Config.TUI.ShowThinkingBlocks,
+				),
+				config.FieldSandbox: strconv.Quote(string(state.config.Config.Sandbox)),
 				config.FieldSandboxNetwork: strconv.Quote(
 					string(state.config.Config.SandboxWorkspaceWrite.Network),
 				),

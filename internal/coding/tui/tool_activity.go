@@ -118,11 +118,18 @@ type durableSubagentResult struct {
 // transcript and overlays live ToolState by call ID. The transcript remains
 // the replay source of truth; live state only adds status/progress that is not
 // durable yet.
-//
-//nolint:gocyclo // Transcript reconstruction and live overlay are one ordered merge.
 func projectToolActivities(
 	state coding.State,
 	excluded map[string]struct{},
+) []toolActivity {
+	return projectToolActivitiesCached(state, excluded, nil)
+}
+
+//nolint:gocyclo // Transcript reconstruction and live overlay are one ordered merge.
+func projectToolActivitiesCached(
+	state coding.State,
+	excluded map[string]struct{},
+	cache *toolProjectionCache,
 ) []toolActivity {
 	records := make(map[string]*toolActivityRecord)
 	ordered := make([]*toolActivityRecord, 0, len(state.Tools))
@@ -215,7 +222,7 @@ func projectToolActivities(
 			continue
 		}
 
-		activities = append(activities, describeToolActivity(*record))
+		activities = append(activities, cache.describe(*record))
 	}
 
 	sort.SliceStable(activities, func(left, right int) bool {
@@ -225,6 +232,8 @@ func projectToolActivities(
 
 		return activities[left].order < activities[right].order
 	})
+
+	cache.retain(records)
 
 	return activities
 }

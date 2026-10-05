@@ -20,6 +20,7 @@ func TestStartupBannerPrintsOnceBeforeStableTimeline(t *testing.T) {
 	state.Transcript = []ai.Message{ai.UserText("inspect the repository")}
 	controller := stubController{state: state}
 	model := newModel(t.Context(), Options{
+		PinPresentation: true, Screen: ScreenInline, AltScreen: AltScreenNever,
 		Workspace: "/workspace",
 		NoColor:   true,
 		Bootstrap: func(context.Context, bool) (Controller, error) {

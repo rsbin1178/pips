@@ -9,17 +9,24 @@ import (
 	"fmt"
 	"image/color"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"charm.land/glamour/v2"
 	glamouransi "charm.land/glamour/v2/ansi"
 	"charm.land/glamour/v2/styles"
 )
 
-const markdownCacheCapacity = 128
+const (
+	markdownCacheCapacity = 128
+	markdownCacheBytes    = 8 << 20
+	markdownEngineBytes   = 256 << 10
+)
 
 type themeFingerprint string
 
 type markdownKey struct {
+	live    string
 	hash    string
 	width   int
 	theme   themeFingerprint
@@ -32,9 +39,14 @@ type markdownEntry struct {
 }
 
 type markdownRenderer struct {
-	capacity int
-	entries  map[markdownKey]*list.Element
-	recent   *list.List
+	capacity  int
+	entries   map[markdownKey]*list.Element
+	recent    *list.List
+	bytes     int
+	maxBytes  int
+	live      map[string]markdownKey
+	engine    *glamour.TermRenderer
+	engineKey markdownKey
 }
 
 func newMarkdownRenderer(capacity int) *markdownRenderer {
@@ -46,6 +58,8 @@ func newMarkdownRenderer(capacity int) *markdownRenderer {
 		capacity: capacity,
 		entries:  make(map[markdownKey]*list.Element, capacity),
 		recent:   list.New(),
+		maxBytes: markdownCacheBytes,
+		live:     make(map[string]markdownKey),
 	}
 }
 
@@ -55,11 +69,29 @@ func (r *markdownRenderer) render(
 	theme colorTheme,
 	noColor bool,
 ) (string, error) {
-	if width < 1 {
-		width = 1
-	}
+	return r.renderCached("", content, width, theme, noColor)
+}
 
+// renderLive replaces the preceding version in one bounded slot. A new stream
+// prefix must not leave an entire obsolete ANSI document in the settled LRU.
+func (r *markdownRenderer) renderLive(
+	slot, content string,
+	width int,
+	theme colorTheme,
+	noColor bool,
+) (string, error) {
+	return r.renderCached(slot, content, width, theme, noColor)
+}
+
+func (r *markdownRenderer) renderCached(
+	slot, content string,
+	width int,
+	theme colorTheme,
+	noColor bool,
+) (string, error) {
+	width = max(1, width)
 	key := newMarkdownKey(content, width, theme, noColor)
+	key.live = slot
 	if element, exists := r.entries[key]; exists {
 		entry, ok := element.Value.(markdownEntry)
 		if !ok {
@@ -69,23 +101,58 @@ func (r *markdownRenderer) render(
 
 		return entry.value, nil
 	}
-
-	renderer, err := glamour.NewTermRenderer(
-		glamour.WithStyles(markdownStyle(theme, noColor)),
-		glamour.WithWordWrap(width),
-	)
-	if err != nil {
-		return content, fmt.Errorf("coding tui: create markdown renderer: %w", err)
+	if previous, ok := r.live[slot]; slot != "" && ok {
+		r.remove(r.entries[previous])
 	}
 
-	rendered, err := renderer.Render(content)
+	rendered, err := r.renderUncached(content, width, theme, noColor)
 	if err != nil {
-		return content, fmt.Errorf("coding tui: render markdown: %w", err)
+		return content, err
 	}
-	rendered = strings.Trim(rendered, "\n")
 	r.insert(markdownEntry{key: key, value: rendered})
 
 	return rendered, nil
+}
+
+// The event loop owns this renderer. Reuse its configuration, but never share
+// the stateful engine between concurrently rendered Models.
+func (r *markdownRenderer) renderUncached(content string, width int, theme colorTheme, noColor bool) (string, error) {
+	key := markdownKey{width: max(1, width), theme: themeFingerprint(theme.fingerprint), noColor: noColor}
+	if r.engine == nil || r.engineKey != key {
+		engine, err := glamour.NewTermRenderer(
+			glamour.WithStyles(markdownStyle(theme, noColor)),
+			glamour.WithWordWrap(key.width),
+		)
+		if err != nil {
+			return content, fmt.Errorf("coding tui: create markdown renderer: %w", err)
+		}
+		r.engine, r.engineKey = engine, key
+	}
+
+	rendered, err := r.engine.Render(content)
+	// Glamour's block-stack backing array retains popped buffers. Reuse only
+	// flat, bounded paragraph engines; a large/nested document must release it.
+	if len(content) > markdownEngineBytes || len(rendered) > markdownEngineBytes || !independentMarkdownParagraph(content) {
+		r.engine = nil
+	}
+	if err != nil {
+		// A failed traversal need not have unwound the engine's block stack.
+		r.engine = nil
+		return content, fmt.Errorf("coding tui: render markdown: %w", err)
+	}
+
+	return strings.Trim(rendered, "\n"), nil
+}
+
+// independentMarkdownParagraph reports whether one paragraph is plain enough for
+// its renderer to be reused. Structured content (lists, links, code, tables) and
+// anything containing a line break can leave buffers on the engine's block
+// stack, so those renders release the engine instead.
+func independentMarkdownParagraph(paragraph string) bool {
+	first, _ := utf8.DecodeRuneInString(paragraph)
+
+	return unicode.IsLetter(first) && !strings.HasSuffix(paragraph, " ") &&
+		!strings.ContainsAny(paragraph, "\r\n\t[]<>`\\&") && strings.IndexFunc(paragraph, unicode.IsControl) < 0
 }
 
 func markdownStyle(theme colorTheme, noColor bool) glamouransi.StyleConfig {
@@ -133,26 +200,40 @@ func themeColorPointer(value color.Color) *string {
 }
 
 func (r *markdownRenderer) insert(entry markdownEntry) {
+	if previous := r.entries[entry.key]; previous != nil {
+		r.remove(previous)
+	}
+	if len(entry.value) > r.maxBytes {
+		return
+	}
+	for r.recent.Len() >= r.capacity || r.bytes+len(entry.value) > r.maxBytes {
+		r.remove(r.recent.Back())
+	}
+
 	element := r.recent.PushFront(entry)
 	r.entries[entry.key] = element
+	r.bytes += len(entry.value)
+	if entry.key.live != "" {
+		r.live[entry.key.live] = entry.key
+	}
+}
 
-	if r.recent.Len() <= r.capacity {
+func (r *markdownRenderer) remove(element *list.Element) {
+	if element == nil {
 		return
 	}
-
-	oldest := r.recent.Back()
-	if oldest == nil {
-		return
-	}
-	entry, ok := oldest.Value.(markdownEntry)
+	entry, ok := element.Value.(markdownEntry)
 	if !ok {
-		r.recent.Remove(oldest)
-
+		r.recent.Remove(element)
 		return
 	}
 
-	r.recent.Remove(oldest)
+	r.recent.Remove(element)
 	delete(r.entries, entry.key)
+	r.bytes -= len(entry.value)
+	if entry.key.live != "" {
+		delete(r.live, entry.key.live)
+	}
 }
 
 func newMarkdownKey(

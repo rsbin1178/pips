@@ -167,8 +167,13 @@ type fileConfig struct {
 }
 
 type fileTUI struct {
-	Theme      *string   `toml:"theme"`
-	StatusLine *[]string `toml:"status_line"`
+	Theme              *string   `toml:"theme"`
+	StatusLine         *[]string `toml:"status_line"`
+	Screen             *string   `toml:"screen"`
+	AltScreen          *string   `toml:"alt_screen"`
+	Mouse              *bool     `toml:"mouse"`
+	ExitOutput         *string   `toml:"exit_output"`
+	ShowThinkingBlocks *bool     `toml:"show_thinking_blocks"`
 }
 
 type fileSandboxWorkspaceWrite struct {
@@ -671,6 +676,29 @@ func decodeLayer(value fileConfig) (fileLayer, error) {
 				return fileLayer{}, err
 			}
 			layer.patch.Theme = &theme
+		}
+		if value.TUI.Screen != nil {
+			screen, err := ParseInteractiveScreen(*value.TUI.Screen)
+			if err != nil {
+				return fileLayer{}, err
+			}
+			layer.patch.Screen = &screen
+		}
+		if value.TUI.AltScreen != nil {
+			policy, err := ParseAltScreenPolicy(*value.TUI.AltScreen)
+			if err != nil {
+				return fileLayer{}, err
+			}
+			layer.patch.AltScreen = &policy
+		}
+		layer.patch.Mouse = value.TUI.Mouse
+		layer.patch.ShowThinking = value.TUI.ShowThinkingBlocks
+		if value.TUI.ExitOutput != nil {
+			policy, err := ParseExitOutput(*value.TUI.ExitOutput)
+			if err != nil {
+				return fileLayer{}, err
+			}
+			layer.patch.ExitOutput = &policy
 		}
 		if value.TUI.StatusLine != nil {
 			items := make([]statusline.Item, len(*value.TUI.StatusLine))

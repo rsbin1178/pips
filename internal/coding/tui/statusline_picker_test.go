@@ -40,6 +40,7 @@ func TestBootstrapAppliesExplicitEmptyStatusLine(t *testing.T) {
 		configStatusLine: []statusline.Item{},
 	}
 	model := newModel(t.Context(), Options{
+		PinPresentation: true, Screen: ScreenInline, AltScreen: AltScreenNever,
 		Workspace: "/workspace",
 		StatusLine: []statusline.Item{
 			statusline.Workspace,
@@ -60,6 +61,7 @@ func TestStatusLinePickerSavesAndCancelHasNoSideEffects(t *testing.T) {
 	}
 	var saved []statusline.Item
 	model := newModel(t.Context(), Options{
+		PinPresentation: true, Screen: ScreenInline, AltScreen: AltScreenNever,
 		Workspace: "/workspace", NoColor: true,
 		StatusLine: []statusline.Item{statusline.Workspace, statusline.Phase},
 		SaveStatusLine: func(_ context.Context, items []statusline.Item) error {
@@ -97,6 +99,7 @@ func TestStatusLinePickerSaveFailureKeepsPreviousSelection(t *testing.T) {
 		configStatusLine: []statusline.Item{statusline.Workspace},
 	}
 	model := newModel(t.Context(), Options{
+		PinPresentation: true, Screen: ScreenInline, AltScreen: AltScreenNever,
 		Workspace: "/workspace", NoColor: true,
 		StatusLine: []statusline.Item{statusline.Workspace},
 		SaveStatusLine: func(context.Context, []statusline.Item) error {
@@ -124,6 +127,7 @@ func TestStatusLinePickerDurabilityWarningAppliesCommittedSelection(t *testing.T
 		configStatusLine: []statusline.Item{statusline.Workspace},
 	}
 	model := newModel(t.Context(), Options{
+		PinPresentation: true, Screen: ScreenInline, AltScreen: AltScreenNever,
 		Workspace: "/workspace",
 		NoColor:   true,
 		SaveStatusLine: func(context.Context, []statusline.Item) error {

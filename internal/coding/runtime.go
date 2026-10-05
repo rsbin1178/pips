@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -148,42 +149,47 @@ type Runtime struct {
 	hookDefinitions     []hooks.Definition
 	hookRunner          hooks.Runner
 
-	handle          *session.Handle
-	repository      *session.Repository
-	session         *harness.Session
-	journal         *interactionJournal
-	planStore       *planmode.Store
-	planMode        planmode.State
-	planReturning   bool
-	planExited      bool
-	policy          execution.Policy
-	executor        *execution.Executor
-	tempRoot        *execution.PrivateTempRoot
-	inspector       *git.Inspector
-	permissions     *codingmcp.Permissions
-	extensions      *extension.Runtime
-	compiled        []extension.Extension
-	skillSettings   *skillsettings.Manager
-	integration     *IntegrationGeneration
-	generationID    uint64
-	trusted         bool
-	controller      *approval.Controller
-	questions       *question.Controller
-	planReviews     *planreview.Controller
-	resolver        activeResolver
-	pending         pendingRunner
-	observers       *agentObservers
-	telemetry       *telemetryObservers
-	subagents       *subagent.Manager
-	childControls   *childControlRegistry
-	notifications   *subagent.NotificationInbox
-	children        map[string]*childProjection
-	agentDrafts     map[string]agentDraftRecord
-	teamGuard       teamCapabilityGuard
-	admission       *teamAdmission
-	team            *teamCoordinator
-	teamRecovery    []TeamRecoveryCandidate
-	teamRecoveryErr error
+	handle        *session.Handle
+	repository    *session.Repository
+	session       *harness.Session
+	journal       *interactionJournal
+	planStore     *planmode.Store
+	planMode      planmode.State
+	planReturning bool
+	planExited    bool
+	policy        execution.Policy
+	executor      *execution.Executor
+	tempRoot      *execution.PrivateTempRoot
+	inspector     *git.Inspector
+	// nonRepositoryReported latches the "workspace is not a Git repository"
+	// notice. The reference agent warns once, when a session starts outside a
+	// repository, instead of repeating the warning on every turn, so this Runtime
+	// reports the condition at most once per session.
+	nonRepositoryReported atomic.Bool
+	permissions           *codingmcp.Permissions
+	extensions            *extension.Runtime
+	compiled              []extension.Extension
+	skillSettings         *skillsettings.Manager
+	integration           *IntegrationGeneration
+	generationID          uint64
+	trusted               bool
+	controller            *approval.Controller
+	questions             *question.Controller
+	planReviews           *planreview.Controller
+	resolver              activeResolver
+	pending               pendingRunner
+	observers             *agentObservers
+	telemetry             *telemetryObservers
+	subagents             *subagent.Manager
+	childControls         *childControlRegistry
+	notifications         *subagent.NotificationInbox
+	children              map[string]*childProjection
+	agentDrafts           map[string]agentDraftRecord
+	teamGuard             teamCapabilityGuard
+	admission             *teamAdmission
+	team                  *teamCoordinator
+	teamRecovery          []TeamRecoveryCandidate
+	teamRecoveryErr       error
 
 	writer      *eventWriter
 	publisher   *eventPublisher

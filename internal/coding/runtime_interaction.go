@@ -1246,6 +1246,14 @@ func (r *Runtime) emitChangeDiagnostic(
 		return nil
 	}
 
+	// "Not a repository" is a property of the workspace, not a failure of one
+	// turn: report it once and let the interaction continue, so a session outside
+	// a repository does not accumulate one notice per turn.
+	if diagnostic.Component == "changes" && diagnostic.Code == "not_repository" &&
+		r.nonRepositoryReported.Swap(true) {
+		return nil
+	}
+
 	return emitter.emit(current.id, "", EventIntegrationDiagnostic, diagnostic)
 }
 

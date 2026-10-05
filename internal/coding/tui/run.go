@@ -88,6 +88,7 @@ type Controller interface {
 	ResolveWorkspaceFile(context.Context, attachment.Reference) (attachment.Resolved, error)
 	Snapshot() coding.State
 	SessionID() string
+	History(context.Context, coding.HistoryRequest) (coding.HistoryPage, error)
 	Model() runtimecontrol.ModelState
 	Capabilities() ai.Capabilities
 	Mode() runtimecontrol.ModeState
@@ -196,6 +197,31 @@ type StatusLineSaver func(context.Context, []statusline.Item) error
 // ThemeSaver persists only the requested theme ID in the active config file.
 type ThemeSaver func(context.Context, string) error
 
+// TextKind names the destination policy for operator-requested text, so one
+// saver can serve both the copy fallback and an export.
+type TextKind string
+
+const (
+	// TextKindCopy is the durable fallback for a clipboard copy, which OSC 52
+	// cannot confirm.
+	TextKindCopy TextKind = "copy"
+	// TextKindExport is a requested conversation document.
+	TextKindExport TextKind = "export"
+)
+
+// TextSaveRequest is one operator-requested text write. An empty Path asks the
+// saver for its default destination for Kind.
+type TextSaveRequest struct {
+	Kind    TextKind
+	Path    string
+	Content string
+}
+
+// TextSaver persists operator-requested text and returns the path it wrote.
+// The TUI never owns destination policy: it hands over the requested path and
+// reports back whatever the saver resolved.
+type TextSaver func(context.Context, TextSaveRequest) (string, error)
+
 // Options contain the CLI-owned resources used by one TUI Program.
 type Options struct {
 	Input          io.Reader
@@ -205,13 +231,34 @@ type Options struct {
 	ThemeDirectory string
 	Trusted        bool
 	NoColor        bool
-	Bootstrap      Bootstrap
-	Clipboard      ImageClipboard
-	ImageIngress   ImageIngress
-	OnExit         ExitHandler
-	StatusLine     []statusline.Item
-	SaveStatusLine StatusLineSaver
-	SaveTheme      ThemeSaver
+	// Screen selects the interactive render layout.
+	Screen ScreenMode
+	// AltScreen selects the terminal buffer independently of the layout, so a
+	// fullscreen layout can still be drawn inline in the main buffer.
+	AltScreen AltScreenPolicy
+	// MouseReporting enables mouse capture. Cell-motion reporting is used under a
+	// multiplexer and all-motion elsewhere.
+	MouseReporting bool
+	// ExitOutput selects what a normal exit leaves on the main screen:
+	// config.ExitOutputTranscript writes the conversation, ExitOutputResumeHint
+	// leaves only the resume hint. It is authoritative only with
+	// PinPresentation; otherwise the persisted [tui] exit_output decides.
+	ExitOutput string
+	// PinPresentation makes Screen, AltScreen and MouseReporting authoritative
+	// instead of deriving them from the persisted [tui] configuration. The CLI
+	// leaves this false so configuration decides; tests and embedded callers set
+	// it so a specific presentation can be asserted.
+	PinPresentation bool
+	Bootstrap       Bootstrap
+	Clipboard       ImageClipboard
+	ImageIngress    ImageIngress
+	OnExit          ExitHandler
+	StatusLine      []statusline.Item
+	SaveStatusLine  StatusLineSaver
+	SaveTheme       ThemeSaver
+	// SaveText persists Ctrl+X, /copy and /export output. A nil saver keeps the
+	// clipboard path and reports that no file fallback is available.
+	SaveText TextSaver
 }
 
 // Run owns the terminal Program and closes any acquired Controller after the
@@ -301,6 +348,12 @@ func Run(ctx context.Context, options Options) (returnErr error) {
 		Resumable: finalModel.state.SessionID != "" && !finalModel.state.IsSessionProvisional(),
 	}
 	cleanup()
+	if normal {
+		returnErr = errors.Join(
+			returnErr,
+			writeExitTranscript(options.Output, finalModel.transcriptExitRows()),
+		)
+	}
 	returnErr = finishRunExit(returnErr, normal, options.OnExit, exitInfo)
 
 	return returnErr

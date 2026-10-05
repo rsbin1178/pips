@@ -95,6 +95,7 @@ type runtimeInstance interface {
 	WorkspaceStatus(context.Context) (changes.WorktreeStatus, error)
 	PlanDocumentPath() (string, error)
 	Tree(context.Context) (coding.SessionTree, error)
+	History(context.Context, coding.HistoryRequest) (coding.HistoryPage, error)
 	PreviewCompaction(context.Context) (coding.CompactionPreview, error)
 	Navigate(context.Context, string, bool) iter.Seq2[coding.Event, error]
 	Compact(context.Context, coding.CompactionRequest) iter.Seq2[coding.Event, error]
@@ -554,6 +555,29 @@ func (c *Controller) Reload(ctx context.Context) error {
 
 // Snapshot returns the current Runtime state, or the last attached state after
 // a failed replacement leaves the Controller detached.
+// History reads bounded older conversation history from the live Runtime. It is
+// read-only, so it works while the Runtime is running a turn.
+func (c *Controller) History(ctx context.Context, request coding.HistoryRequest) (coding.HistoryPage, error) {
+	if c == nil {
+		return coding.HistoryPage{}, coding.ErrHistoryUnavailable
+	}
+
+	c.mu.Lock()
+	runtime := c.runtime
+	c.mu.Unlock()
+
+	if runtime == nil {
+		return coding.HistoryPage{}, coding.ErrHistoryUnavailable
+	}
+
+	page, err := runtime.History(ctx, request)
+	if err != nil {
+		return coding.HistoryPage{}, fmt.Errorf("runtime control: read session history: %w", err)
+	}
+
+	return page, nil
+}
+
 func (c *Controller) Snapshot() coding.State {
 	if c == nil {
 		return coding.State{}
@@ -561,11 +585,16 @@ func (c *Controller) Snapshot() coding.State {
 
 	c.mu.Lock()
 	runtime := c.runtime
-	last := c.lastState.Clone()
 	c.mu.Unlock()
 
 	if runtime == nil {
-		return last
+		// The last committed projection is the only one left after Close or a
+		// detached replacement. Cloning it inside this branch keeps the live
+		// path at one Runtime snapshot per call.
+		c.mu.Lock()
+		defer c.mu.Unlock()
+
+		return c.lastState.Clone()
 	}
 
 	return runtime.Snapshot()

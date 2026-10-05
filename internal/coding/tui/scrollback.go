@@ -48,6 +48,16 @@ func (m *Model) commitStableTimeline() tea.Cmd {
 		return nil
 	}
 
+	// Fullscreen has no terminal history to catch up on, so a stable commit is a
+	// re-render of the managed region and nothing else. The empty write queue also
+	// means routes and continuations activate immediately instead of waiting for a
+	// native insertion that would not paint anything.
+	if m.fullscreen() {
+		m.rerenderTranscript(false)
+
+		return nil
+	}
+
 	blocks := m.takeStableTimelineBlocks()
 	writes := m.streamingScrollbackWrites(blocks)
 	m.rerenderTranscript(false)
@@ -99,11 +109,22 @@ func (m *Model) printScrollbackWrites(writes []scrollbackWrite) tea.Cmd {
 // delta to print. Keeping projection separate from the Tea command makes the
 // append-only contract directly testable.
 func (m *Model) takeStableTimeline() string {
+	if m.fullscreen() {
+		return ""
+	}
+
 	return m.renderTimelineBlocks(m.takeStableTimelineBlocks())
 }
 
 //nolint:gocyclo // One cursor transaction atomically advances every durable projection.
 func (m *Model) takeStableTimelineBlocks() []timelineBlock {
+	// Nothing leaves the managed frame in fullscreen mode: the transcript store
+	// owns every entry, so there is no native history to synchronize with and the
+	// projection cursor stays at zero.
+	if m.fullscreen() {
+		return nil
+	}
+
 	m.reconcileScrollback()
 
 	stableTools := m.scrollback.tools
@@ -156,7 +177,7 @@ func (m *Model) takeStableTimelineBlocks() []timelineBlock {
 		delta.LastError = nil
 	}
 
-	blocks := projectTimelineExcluding(delta, m.scrollback.toolIDs)
+	blocks := m.projectTimeline(delta, m.scrollback.toolIDs)
 	blocks = append(blocks, m.takePlanModeNoticeBlocks()...)
 
 	for _, marker := range m.pendingCompletionMarkers() {
@@ -192,7 +213,9 @@ func (m *Model) takeStableTimelineBlocks() []timelineBlock {
 		m.scrollback.streamError = streamError
 	}
 
-	return blocks
+	// Inline mode writes these rows to the terminal's native scrollback, which
+	// renders no per-block styling, so it never carries reasoning text.
+	return withoutThinkingBlocks(blocks)
 }
 
 func (m *Model) renderTimelineBlocks(blocks []timelineBlock) string {
@@ -234,7 +257,7 @@ func (m *Model) activeTimelineBlocks() []timelineBlock {
 		active.LastError = nil
 	}
 
-	blocks := projectTimelineExcluding(active, m.scrollback.toolIDs)
+	blocks := m.projectTimeline(active, m.scrollback.toolIDs)
 	for _, marker := range m.pendingCompletionMarkers() {
 		if block, ok := projectCompletionMarker(marker); ok {
 			blocks = append(blocks, block)
@@ -267,7 +290,75 @@ func (m *Model) activeTimelineBlocks() []timelineBlock {
 
 	blocks = append(blocks, m.activeTeamAttemptBlocks()...)
 
+	// The inline tail is written to the terminal's native scrollback like the
+	// stable blocks above it, so it never carries reasoning text either.
+	return withoutThinkingBlocks(blocks)
+}
+
+// fullscreenTimelineBlocks projects the entire conversation for the transcript
+// viewport. Unlike activeTimelineBlocks it has no projection cursor: nothing has
+// been handed to the terminal, so the managed region owns every entry, including
+// the plan-mode notices and completion markers that the inline path prints once.
+func (m *Model) fullscreenTimelineBlocks() []timelineBlock {
+	return m.managedTimelineBlocks(true, m.showThinkingBlocks())
+}
+
+// managedTimelineBlocks builds the mode-independent projection both the managed
+// viewport and an export use. Only the viewport includes the operator-facing
+// notices (banner, /help, /status), because inline mode hands those to the
+// terminal instead of keeping them: including them here would make the same
+// session export a different document per presentation mode.
+//
+// includeThinking gates reasoning text. The viewport shows it as dimmed Thinking
+// blocks; an export carries the conversation without it, matching the
+// reference agents (see research/q3-q4-export-copy-and-search.md).
+func (m *Model) managedTimelineBlocks(includeNotices, includeThinking bool) []timelineBlock {
+	blocks := m.timelineBlocks()
+	if includeNotices {
+		blocks = append(m.noticeBlocks(), blocks...)
+	}
+	// Durable history older than the bootstrap window leads the conversation.
+	blocks = append(m.historyBlocks(), blocks...)
+	blocks = append(blocks, m.activePlanModeNoticeBlocks()...)
+	blocks = append(blocks, m.activeTeamAttemptBlocks()...)
+
+	if m.streaming.active {
+		replaced := false
+		for index := range blocks {
+			if blocks[index].kind == blockDraft {
+				blocks[index] = m.streamingTailBlock(blocks[index])
+				replaced = true
+
+				break
+			}
+		}
+		if !replaced {
+			if index := m.matchingStreamingAssistantIndex(blocks); index >= 0 {
+				blocks[index] = m.streamingTailBlock(blocks[index])
+			}
+		}
+	}
+
+	if !includeThinking {
+		blocks = withoutThinkingBlocks(blocks)
+	}
+
 	return blocks
+}
+
+// activePlanModeNoticeBlocks returns plan-mode transition notices without
+// consuming them, so the fullscreen projection can show them while they remain
+// queued for the inline path.
+func (m *Model) activePlanModeNoticeBlocks() []timelineBlock {
+	if len(m.planModeNotices) == 0 {
+		return nil
+	}
+
+	return []timelineBlock{{
+		kind:     blockDiagnostic,
+		body:     strings.Join(m.planModeNotices, "\n"),
+		position: len(m.state.Transcript),
+	}}
 }
 
 // Plan-mode transition notices committed to the terminal history.

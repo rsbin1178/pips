@@ -368,14 +368,21 @@ func semanticToolActivityStatus(activity toolActivity) activityStatus {
 }
 
 func runningToolActivities(values []coding.ToolState) []toolActivity {
-	state := coding.State{Tools: values}
-	projected := projectToolActivities(state, nil)
+	var running []toolActivity
 
-	running := make([]toolActivity, 0, len(projected))
-	for _, activity := range projected {
-		if activity.state == toolStateRunning {
-			running = append(running, activity)
+	for _, value := range values {
+		if value.Status != coding.ToolStatusRunning || value.Call.ID == "" || value.Call.Name == "" {
+			continue
 		}
+
+		// Status needs invocation metadata, never the output previews of past
+		// calls (or even the current call's potentially large progress output).
+		activity := toolActivity{
+			id: value.Call.ID, name: oneLineToolText(value.Call.Name),
+			state: toolStateRunning,
+		}
+		activity.class, activity.action, activity.subject = describeToolCall(value.Call)
+		running = append(running, activity)
 	}
 
 	return running

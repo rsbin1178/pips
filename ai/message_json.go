@@ -316,6 +316,17 @@ func unmarshalMessageParts(data []byte, expected messageRole) ([]Part, error) {
 	return parts, nil
 }
 
+// MessagePartsView returns a message's parts without copying them. Callers must
+// treat the parts, and every slice they expose, as read-only: the message keeps
+// ownership and may share them with other copies of the same state. Use
+// [MessageParts] when the result is stored, mutated, or must outlive the message.
+//
+// Unlike MessageParts it does not validate the message first; it only reports a
+// message kind it cannot read. Call [ValidateMessage] when that guarantee matters.
+func MessagePartsView(message Message) ([]Part, error) {
+	return messagePartsView(message)
+}
+
 func messagePartsView(message Message) ([]Part, error) {
 	switch message := message.(type) {
 	case SystemMessage:

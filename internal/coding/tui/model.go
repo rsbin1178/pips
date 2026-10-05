@@ -103,6 +103,7 @@ type Model struct {
 	state                coding.State
 	childStates          map[string]coding.State
 	composer             composerState
+	toolProjection       toolProjectionCache
 	markdown             *markdownRenderer
 	theme                colorTheme
 	themeSelection       string
@@ -111,14 +112,59 @@ type Model struct {
 	themeIsDark          bool
 	themeDiagnostics     []themeDiagnostic
 	timeline             string
+	transcript           transcriptStore
+	transcriptScroll     scrollRegion
+	selection            selectionState
+	search               searchState
+	mouseCaptureOff      bool
+	transcriptMode       transcriptModeState
+	transcriptHanded     bool // Escape hatch already wrote the rows to the main buffer.
+	frameHit             frameHitMap
+	history              historyState
+	notices              []noticeEntry
+	noticeSequence       uint64
 	scrollback           scrollbackCursor
 	scrollbackOutput     bool
 	streaming            streamProjection
 	renderWait           bool
-	bridge               *eventBridge
-	subscription         *subscriptionBridge
-	subscriptionSeq      uint64
-	subscriptionMode     bool
+	renderDirty          bool
+	// viewStable marks an update that only accounted for deferred deltas: the
+	// visible frame did not change, so View() reuses the last composition instead
+	// of re-styling the whole frame for a delta the reader cannot see yet.
+	// viewCached reports that viewCache holds a composition, and viewComposes
+	// counts them.
+	viewStable   bool
+	viewCached   bool
+	viewCache    tea.View
+	viewComposes int
+	// frameCache reuses the committed prefix of the managed timeline between
+	// frames, and frameEntries is the buffer the volatile tail is named in.
+	// toolActivities is the activity list that prefix was projected from, so the
+	// volatile tail can be rebuilt without rescanning the transcript.
+	frameCache     timelineFrameCache
+	frameEntries   []transcriptEntry
+	toolActivities []toolActivity
+	// pending holds drained stream items whose events only touch the live draft.
+	// They are applied once per frame at the render tick instead of once per
+	// event, so a burst of deltas costs one state advance and one render. Durable
+	// events, errors, approvals and session transitions never wait here.
+	pending []streamItem
+	// frameAdvances and frameRenders count the managed frame's state advances and
+	// re-projections, so a test can assert the frame-boundary reduction.
+	frameAdvances    int
+	frameRenders     int
+	bridge           *eventBridge
+	subscription     *subscriptionBridge
+	subscriptionSeq  uint64
+	subscriptionMode bool
+	// runtimeState marks a subscription to a controller that reduces events
+	// itself, so the parent projection is read from the Runtime instead of
+	// being reduced a second time (route A of the single-reduction design).
+	runtimeState bool
+	// observedSequence is the sequence of the last parent-Session event
+	// delivered to this Model. It is not the projection's sequence: an adopted
+	// Runtime snapshot can legitimately be ahead of the delivered records.
+	observedSequence     uint64
 	starting             bool
 	cancelStart          bool
 	waiting              bool
@@ -133,6 +179,10 @@ type Model struct {
 	canceling            bool
 	exitArmed            bool
 	bannerPrinted        bool
+	textSaveSeq          uint64
+	statusNotice         string
+	statusNoticeErr      bool
+	statusNoticeSeq      uint64
 	picker               pickerState
 	pickerSeq            uint64
 	route                routeState
@@ -143,6 +193,7 @@ type Model struct {
 	directAgent          *directAgentSelection
 	teamPanel            teamPanelState
 	presentation         presentationState
+	presentationSnapshot presentationSnapshot
 	prompt               promptState
 	promptSeq            uint64
 	completionMarkers    []completionMarker
@@ -189,20 +240,21 @@ func newModel(ctx context.Context, options Options) *Model {
 	}
 
 	model := &Model{
-		ctx:             ctx,
-		options:         options,
-		lifecycle:       lifecycle,
-		width:           defaultWidth,
-		height:          defaultHeight,
-		composer:        composer,
-		markdown:        newMarkdownRenderer(markdownCacheCapacity),
-		theme:           themeDark,
-		themeSelection:  config.ThemeAuto,
-		themeRegistry:   loadThemeRegistry(""),
-		themeIsDark:     true,
-		activity:        newActivityIndicator(),
-		childStates:     make(map[string]coding.State),
-		statusLineItems: slices.Clone(statusLineItems),
+		ctx:              ctx,
+		options:          options,
+		transcriptScroll: newScrollRegion(),
+		lifecycle:        lifecycle,
+		width:            defaultWidth,
+		height:           defaultHeight,
+		composer:         composer,
+		markdown:         newMarkdownRenderer(markdownCacheCapacity),
+		theme:            themeDark,
+		themeSelection:   config.ThemeAuto,
+		themeRegistry:    loadThemeRegistry(""),
+		themeIsDark:      true,
+		activity:         newActivityIndicator(),
+		childStates:      make(map[string]coding.State),
+		statusLineItems:  slices.Clone(statusLineItems),
 	}
 	model.setLayout()
 
@@ -229,6 +281,10 @@ func (m *Model) Init() tea.Cmd {
 //
 //nolint:funlen,gocyclo // The sealed Tea message union stays visible in one dispatcher.
 func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
+	// Only the deferred-delta path marks the composed view stable again; every
+	// other update can change what the frame renders.
+	m.viewStable = false
+
 	switch message := message.(type) {
 	case tea.WindowSizeMsg:
 		if message.Width <= 0 || message.Height <= 0 {
@@ -280,7 +336,9 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		m.controller = message.controller
+		m.dropPending()
 		m.state = message.controller.Snapshot()
+		m.resetHistory()
 		configuredTUI := message.controller.Config().TUI
 		if configuredTUI.StatusLine == nil {
 			configuredTUI.StatusLine = statusline.Default()
@@ -303,6 +361,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		activityWasVisible := m.activityClockVisible()
 		m.subscriptionMode = message.supported
+		m.runtimeState = message.supported
 		if message.err != nil {
 			m.streamErr = message.err
 			m.setLayout()
@@ -318,7 +377,9 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 
 		m.subscription = message.bridge
 		previousSessionID := m.state.SessionID
+		m.dropPending()
 		m.state = message.observation.State
+		m.observedSequence = m.state.Sequence
 		if previousSessionID != m.state.SessionID {
 			m.stopTeamWorkerRouteSubscription()
 			m.resetTeamProjection(m.state.SessionID)
@@ -435,6 +496,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.waiting = false
 		m.canceling = false
 		m.streamErr = errors.Join(m.streamErr, message.err)
+		m.flushPending()
 		if !m.subscriptionMode {
 			m.state = m.controller.Snapshot()
 		}
@@ -693,8 +755,10 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.presentation.pendingRoute = routeOpenRequest{}
 			m.stopTeamWorkerRouteSubscription()
 			m.stopSubscription()
+			m.dropPending()
 			m.state = m.controller.Snapshot()
 		} else if !m.subscriptionMode {
+			m.dropPending()
 			m.state = m.controller.Snapshot()
 		}
 		if message.err != nil {
@@ -715,8 +779,10 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		switch message.operation {
 		case operationNew, operationResume, operationFork:
 			m.completionMarkers = nil
+			m.transcriptHanded = false
 			m.resetTeamProjection(m.state.SessionID)
 			m.resetScrollback()
+			m.resetHistory()
 		case operationModel, operationReload, operationMode, operationPermissions:
 		}
 		switch {
@@ -793,15 +859,43 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.exitArmed = false
 
 		return m, nil
-	case tea.MouseWheelMsg:
-		// Mouse reporting stays disabled. Native terminal selection and
-		// scrollback consume drag and wheel gestures before they reach the model.
+	case statusNoticeExpiredMsg:
+		if message.generation != m.statusNoticeSeq {
+			return m, nil
+		}
+		m.statusNotice = ""
+		m.statusNoticeErr = false
+		// A copy confirmation and the selection it describes expire together, so
+		// the highlight lives exactly as long as the notice that explains it.
+		m.clearSelection()
+		m.setLayout()
+
 		return m, nil
+	case selectionRedrawMsg:
+		return m, nil
+	case textSavedMsg:
+		if message.generation != m.textSaveSeq {
+			return m, nil
+		}
+		if message.err != nil {
+			return m, m.setStatusError(
+				"could not write " + string(message.kind) + ": " + safeError(message.err),
+			)
+		}
+
+		return m, m.setStatusNotice(
+			textSavedNotice(message.kind, message.path, message.clipboard),
+		)
+	case tea.MouseWheelMsg:
+		return m, m.scrollWheel(message)
 	case tea.MouseMsg:
 		return m, nil
 	case tea.PasteMsg:
 		if m.lifecycle != lifecycleReady || !m.sizeReady {
 			return m, nil
+		}
+		if m.searchOwnsKeys() {
+			return m, m.updateSearchPaste(message)
 		}
 		if m.routeUsesSearch() {
 			var command tea.Cmd
@@ -839,12 +933,25 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateKey(message)
 	case renderTickMsg:
 		m.renderWait = false
-		m.renderTranscript(false)
+		var commit tea.Cmd
+		if m.renderDirty || len(m.pending) > 0 {
+			// The frame boundary: the deltas accumulated since the last tick
+			// advance the parent state once, and the frame is projected once.
+			m.flushPending()
+			m.setLayout()
+			commit = m.commitStableTimeline()
+		}
 		m.refreshToolDetailRoute()
 
-		return m, nil
+		return m, commit
 	case scrollbackWriteDoneMsg:
 		return m, m.finishScrollbackWrite(message.sequence)
+	case transcriptPageMsg:
+		return m, m.updateTranscriptPage(message)
+	case historyPageMsg:
+		m.applyHistoryPage(message)
+
+		return m, nil
 	case activityTickMsg:
 		if !m.activityClockVisible() {
 			return m, nil
@@ -853,6 +960,14 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.activity.Update(message)
 	default:
 		if m.lifecycle == lifecycleReady {
+			// The find box has focus while it is open, so its cursor blink and any
+			// other input message belong to it rather than to the hidden composer.
+			if m.searchOwnsKeys() {
+				var command tea.Cmd
+				m.search.input, command = m.search.input.Update(message)
+
+				return m, command
+			}
 			if m.route.kind == routeSessions {
 				var command tea.Cmd
 				m.route.search, command = m.route.search.Update(message)
@@ -870,8 +985,24 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	}
 }
 
-// View renders the inline lifecycle shell or ready chat layout.
+// View composes the frame the renderer paints. The framework calls it after
+// every message, and a deferred delta changes none of its inputs, so the
+// composition of those updates is reused instead of repeated.
 func (m *Model) View() tea.View {
+	if m.viewStable && m.viewCached {
+		return m.viewCache
+	}
+
+	m.viewComposes++
+	m.viewCache = m.composeView()
+	m.viewCached = true
+
+	return m.viewCache
+}
+
+// composeView builds the frame: the inline lifecycle shell, or the ready chat
+// layout.
+func (m *Model) composeView() tea.View {
 	if m.lifecycle == lifecycleReady && !m.sizeReady {
 		return tea.NewView("Loading…")
 	}
@@ -1032,6 +1163,11 @@ func (m *Model) updateReadyKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 		return m, nil
 	}
+	// The escape hatch owns every key while it is open: the terminal has the
+	// mouse and scroll keys back, so there is no composer to feed here.
+	if m.transcriptMode.active {
+		return m.updateTranscriptModeKey(message)
+	}
 	inlineTeamRoute := m.teamRouteIsInline()
 	if m.route.kind != routeNone && !inlineTeamRoute {
 		return m.updateRouteKey(message)
@@ -1057,7 +1193,21 @@ func (m *Model) updateReadyKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if command, handled := m.updateTeamPanelKey(message); handled {
 		return m, command
 	}
+	// The find box owns the ready view's keys while it is open: it is a reading
+	// surface, so the composer, its history and the command picker stay untouched
+	// until it closes.
+	if m.searchOwnsKeys() {
+		return m.updateSearchKey(message)
+	}
 	key := message.String()
+	// A drag selection answers Escape first, the way the find box does: the key
+	// closes the gesture the reader just made instead of canceling the turn behind
+	// it.
+	if key == keyEscape && m.selection.visible {
+		m.clearSelection()
+
+		return m, redrawSelection()
+	}
 	if key == keyEscape && m.directAgent != nil && !m.directAgent.running &&
 		m.composer.Value() == "" {
 		m.directAgent = nil
@@ -1075,6 +1225,9 @@ func (m *Model) updateReadyKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 		return m, nil
 	}
+	if command, handled := m.updateTranscriptScrollKey(message); handled {
+		return m, command
+	}
 	if m.worktreeLoading && (key == keyCtrlC || key == keyEscape) {
 		m.cancelWorkspaceStatus()
 
@@ -1091,28 +1244,29 @@ func (m *Model) updateReadyKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.composer.InsertString("\n")
 			m.setLayout()
 		case actionCancel:
-			if context == contextRunning {
-				return m, m.cancelStream()
+			return m.cancelOrExit(context)
+		case actionTranscript:
+			return m, m.toggleTranscriptMode()
+		case actionCopy:
+			return m, m.copyAssistant(1, "")
+		case actionSearch:
+			if !m.fullscreen() {
+				return m, m.setStatusNotice(
+					"search needs the managed viewport; the terminal owns the conversation inline",
+				)
 			}
-			if m.composer.Value() != "" {
-				m.composer.Reset()
-				m.setLayout()
-				m.exitArmed = false
-			} else if m.exitArmed {
-				return m, tea.Quit
-			} else {
-				m.exitArmed = true
 
-				return m, tea.Tick(exitConfirmTime, func(time.Time) tea.Msg {
-					return exitResetMsg{}
-				})
-			}
+			m.openSearch("")
+
+			return m, nil
 		case actionSubmit:
 			return m, m.submit(context)
 		case actionFollowUp:
 			return m, m.queueMessage(commandFollowUp)
 		case actionToggleTool:
 			return m, m.toggleLatestTool()
+		case actionToggleMouseCapture:
+			return m, m.toggleMouseCapture()
 		case actionToggleMode:
 			mode := coding.ModePlan
 			if m.controller.Mode().Current == coding.ModePlan {
@@ -1148,40 +1302,70 @@ func (m *Model) updateReadyKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, command
 }
 
+// cancelOrExit is the shared meaning of Ctrl+C: stop the running turn, clear a
+// draft, or arm and then perform the quit.
+func (m *Model) cancelOrExit(context actionContext) (tea.Model, tea.Cmd) {
+	if context == contextRunning {
+		return m, m.cancelStream()
+	}
+	if m.composer.Value() != "" {
+		m.composer.Reset()
+		m.setLayout()
+		m.exitArmed = false
+
+		return m, nil
+	}
+	if m.exitArmed {
+		return m, tea.Quit
+	}
+	m.exitArmed = true
+
+	return m, tea.Tick(exitConfirmTime, func(time.Time) tea.Msg {
+		return exitResetMsg{}
+	})
+}
+
 //nolint:gocyclo // Footer composition follows the explicit route/prompt/picker state machine.
 func (m *Model) readyView() tea.View {
+	if m.transcriptMode.active {
+		return m.transcriptModeView()
+	}
 	if m.route.kind != routeNone && !m.teamRouteIsInline() {
 		return m.routeView()
 	}
 
+	caps := m.layout()
 	footer := make([]string, 0, 5)
 	promptFooterIndex := -1
 	promptContent := ""
-	if activity := m.activityLine(); activity != "" {
+	if activity := m.activityLine(); activity != "" && caps.activity {
 		for range conversationGapHeight {
 			footer = append(footer, "")
 		}
 		footer = append(footer, activity)
 	}
 	if prompt := m.promptView(); prompt != "" && !m.goalCommandPickerActive() {
+		if caps.promptRows > 0 {
+			prompt = truncateTailHeight(prompt, caps.promptRows)
+		}
 		promptFooterIndex = len(footer)
 		promptContent = prompt
 		footer = append(footer, prompt)
 	}
 	if inline := m.inlineTeamRouteView(); inline != "" {
-		footer = append(footer, inline)
+		footer = append(footer, truncateHeight(inline, max(1, caps.panelRows)))
 	}
 	if notice := m.directAgentNotice(); notice != "" {
-		footer = append(footer, notice)
+		footer = append(footer, truncateHeight(notice, 1))
 	}
 	for range conversationGapHeight {
 		footer = append(footer, "")
 	}
 	composerFooterIndex := len(footer)
-	footer = append(footer, m.composerBox())
+	footer = append(footer, m.composerBand())
 	if m.picker.kind != pickerNone {
 		usedHeight := lipgloss.Height(lipgloss.JoinVertical(lipgloss.Left, footer...))
-		availableRows := max(1, m.height-usedHeight)
+		availableRows := max(1, min(caps.pickerRows, m.height-usedHeight))
 		switch m.picker.kind {
 		case pickerModel:
 			footer = append(footer, m.pickerView(availableRows))
@@ -1200,10 +1384,11 @@ func (m *Model) readyView() tea.View {
 		default:
 			footer = append(footer, m.commandPickerView(availableRows))
 		}
+		footer[len(footer)-1] = truncateHeight(footer[len(footer)-1], availableRows)
 	} else {
 		footer = append(footer, m.statusLineView())
 		if panel := m.teamPanelView(); panel != "" {
-			footer = append(footer, panel)
+			footer = append(footer, truncateHeight(panel, max(1, caps.panelRows)))
 		}
 	}
 
@@ -1212,7 +1397,12 @@ func (m *Model) readyView() tea.View {
 		0,
 		m.height-lipgloss.Height(lipgloss.JoinVertical(lipgloss.Left, footer...)),
 	)
-	if timeline := truncateTailHeight(m.timeline, timelineHeight); timeline != "" {
+	// The transcript region is the only elastic band: it receives whatever the
+	// fixed bands leave. Its window is owned here rather than by the terminal, so
+	// a scrolled-up reader keeps the same rows when new output arrives.
+	transcriptRows := 0
+	if timeline := m.transcriptWindow(timelineHeight); timeline != "" {
+		transcriptRows = lipgloss.Height(timeline)
 		parts = append(parts, timeline)
 	}
 	composerIndex := len(parts) + composerFooterIndex
@@ -1226,12 +1416,22 @@ func (m *Model) readyView() tea.View {
 		parts[:composerIndex]...,
 	))
 	content := lipgloss.JoinVertical(lipgloss.Left, parts...)
-	view := tea.NewView(content)
-	view.SetContent(content)
-	view.AltScreen = false
-	view.MouseMode = tea.MouseModeNone
-	view.WindowTitle = appTitle
+	// An over-tall frame keeps its tail, so whatever is dropped off the top is
+	// transcript rows and the hit map has to account for them.
+	dropped := clampFrameTailOffset(content, m.height)
+	view := m.presentationView(clampFrameTail(content, m.height))
+	m.frameHit = frameHitMap{
+		painted:    m.sizeReady,
+		transcript: max(0, transcriptRows-min(dropped, transcriptRows)),
+		topDropped: min(dropped, transcriptRows),
+	}
+	if m.mouseReportingEnabled() {
+		view.OnMouse = m.handleMouse
+	}
 	view.Cursor = m.composer.Cursor()
+	if m.searchOwnsKeys() {
+		view.Cursor = m.search.input.Cursor()
+	}
 	if (m.prompt.kind != promptNone && !m.goalCommandPickerActive()) || m.pickerHidesComposerCursor() || m.teamPanel.isFocused ||
 		(m.teamRouteIsInline() && (m.route.loading || !teamRouteInputStage(m.route.team.stage))) {
 		view.Cursor = nil
@@ -1254,7 +1454,7 @@ func (m *Model) readyView() tea.View {
 	if view.Cursor != nil {
 		cursorX, cursorY := m.composerBoxCursorOffset()
 		view.Cursor.X += cursorX
-		view.Cursor.Y += composerOffset + cursorY
+		view.Cursor.Y += composerOffset + cursorY - clampFrameTailOffset(content, m.height)
 	}
 
 	return view
@@ -1478,7 +1678,25 @@ func fitStatusLeft(head, tail, separator string, width int) string {
 }
 
 func (m *Model) statusExtras() []string {
-	extras := make([]string, 0, 4)
+	extras := make([]string, 0, 5)
+	// A copy or export confirmation is transient, so it leads and a narrow
+	// terminal truncates the standing hints instead of the outcome.
+	notice := strings.TrimSpace(sanitizeInspectionText(m.statusNotice))
+	if notice != "" {
+		if !m.options.NoColor {
+			color := paletteFor(m.theme).muted
+			if m.statusNoticeErr {
+				color = paletteFor(m.theme).error
+			}
+			notice = lipgloss.NewStyle().Foreground(color).Render(notice)
+		}
+		extras = append(extras, notice)
+	}
+	// The find box owns the composer's band, so its state is reported here, where
+	// the match counter stays visible while the query is typed.
+	if m.searchOwnsKeys() {
+		extras = append(extras, m.searchStatusText())
+	}
 	if m.state.Goal.ID != "" {
 		extras = append(extras, "goal "+sanitizeInspectionText(string(m.state.Goal.Status)))
 	}
@@ -1490,6 +1708,21 @@ func (m *Model) statusExtras() []string {
 	}
 	if m.worktreeLoading {
 		extras = append(extras, "inspecting Git")
+	}
+	// A history read is transient and reports its own failure, so it is stated
+	// before the standing scroll hint that a narrow terminal would otherwise keep.
+	switch {
+	case m.history.loading:
+		extras = append(extras, "loading older history")
+	case m.history.err != nil:
+		extras = append(extras, "older history unavailable")
+	case m.historyOffered() && !m.transcriptScroll.follow:
+		extras = append(extras, "PgUp for older history")
+	}
+	// A paused reader needs to know that the newest output is off screen and how
+	// to get back to it; without this the viewport looks stuck.
+	if !m.transcriptScroll.follow && m.transcriptScroll.maxOffset() > 0 {
+		extras = append(extras, "scrolled · End for latest")
 	}
 	if !m.options.NoColor {
 		style := lipgloss.NewStyle().Foreground(paletteFor(m.theme).muted)
@@ -1504,7 +1737,7 @@ func (m *Model) statusExtras() []string {
 func (m *Model) setLayout() {
 	width := max(1, m.width)
 	m.composer.SetWidth(composerEditorWidth(width))
-	composerHeight := max(1, min(composerMaxLines, m.composer.Height()))
+	composerHeight := min(m.composerEditorRows(), max(layoutComposerMinRows, m.composer.Height()))
 	m.composer.SetHeight(composerHeight)
 	if m.prompt.kind == promptQuestion {
 		m.prompt.question.editor.SetWidth(max(1, width-4))
@@ -1516,14 +1749,31 @@ func (m *Model) setLayout() {
 	if m.routeUsesSearch() {
 		m.route.search.SetWidth(routeSearchInputWidth(width))
 	}
+	if m.search.active {
+		m.search.input.SetWidth(composerEditorWidth(width))
+	}
 }
 
 func (m *Model) composerBox() string {
 	return m.composerBoxContent(m.composer.View())
 }
 
+// composerBand is the ready frame's bottom band: the composer, or the find box
+// while it is open. They share the box decoration and the cursor offset, so the
+// frame height and the caret math do not change when the search opens.
+func (m *Model) composerBand() string {
+	if !m.searchOwnsKeys() {
+		return m.composerBox()
+	}
+
+	return m.composerBoxContent(routeSearchLine(
+		m.search.input.View(),
+		composerEditorWidth(max(1, m.width)),
+	))
+}
+
 func (m *Model) composerBoxContent(content string) string {
-	if !m.hasComposerBox() {
+	if !m.drawsComposerBox(m.layout()) {
 		return content
 	}
 
@@ -1553,7 +1803,7 @@ func composerEditorWidth(width int) int {
 }
 
 func (m *Model) composerBoxCursorOffset() (int, int) {
-	if !m.hasComposerBox() {
+	if !m.drawsComposerBox(m.layout()) {
 		return 0, 0
 	}
 
@@ -1594,17 +1844,28 @@ func (m *Model) effectivePhase() coding.Phase {
 }
 
 func (m *Model) renderTranscript(forceBottom bool) {
-	m.renderTranscriptContent(forceBottom, true)
+	m.renderTranscriptContent(forceBottom)
 }
 
+// rerenderTranscript rebuilds the region for a change that did not touch the
+// conversation itself, such as a resize or a theme switch.
 func (m *Model) rerenderTranscript(forceBottom bool) {
-	m.renderTranscriptContent(forceBottom, false)
+	m.renderTranscriptContent(forceBottom)
 }
 
-func (m *Model) renderTranscriptContent(forceBottom, newContent bool) {
-	_ = forceBottom
-	_ = newContent
-	blocks := m.activeTimelineBlocks()
+func (m *Model) renderTranscriptContent(forceBottom bool) {
+	m.renderDirty = false
+	m.frameRenders++
+	// The transcript region changed, so a composed view is stale whatever the last
+	// update was.
+	m.viewStable = false
+	if m.fullscreen() {
+		m.renderManagedTranscript(forceBottom)
+
+		return
+	}
+
+	blocks := m.transcriptBlocks()
 	m.timeline = renderTimelineContent(
 		blocks,
 		m.markdown,
@@ -1612,9 +1873,224 @@ func (m *Model) renderTranscriptContent(forceBottom, newContent bool) {
 		m.theme,
 		m.options.NoColor,
 	)
-	if m.managedTimelineNeedsLeadingGap(blocks) {
+	// The seam between terminal-native history and the mutable region is part of
+	// the managed content, so the region's rows must include it too.
+	gap := m.managedTimelineNeedsLeadingGap(blocks)
+	if gap {
 		m.timeline = strings.Repeat("\n", conversationGapHeight) + m.timeline
 	}
+
+	leading := 0
+	if gap {
+		leading = conversationGapHeight
+	}
+
+	m.syncTranscriptStore(blocks, leading)
+	m.finishTranscriptFrame(forceBottom)
+}
+
+// renderManagedTranscript renders one fullscreen frame. Fullscreen has no
+// terminal-native history, so the whole conversation lives in the transcript
+// store and the leading gap never applies. The committed prefix of the projection
+// is reused while its inputs are unchanged, and the store keeps the rendered rows
+// of that prefix, so a streaming frame costs the live tail.
+func (m *Model) renderManagedTranscript(forceBottom bool) {
+	// The streaming tail rewrites a block that may already be committed, so the
+	// incremental frame does not apply here. It is set by the inline scrollback
+	// path, which fullscreen never runs.
+	if m.streaming.active {
+		blocks := m.transcriptBlocks()
+		m.timeline = ""
+		m.syncTranscriptStore(blocks, 0)
+		m.finishTranscriptFrame(forceBottom)
+
+		return
+	}
+
+	frame := m.viewportProjection()
+	m.timeline = ""
+	m.syncTranscriptEntries(frame.prefixEntries, frame.tailEntries, frame.stable, 0)
+	m.finishTranscriptFrame(forceBottom)
+}
+
+// finishTranscriptFrame publishes the freshly built region to the reader.
+func (m *Model) finishTranscriptFrame(forceBottom bool) {
+	m.transcriptScroll.setSource(&m.transcript)
+	if forceBottom {
+		m.transcriptScroll.gotoBottom()
+	}
+	// Matches are row indexes, so a reflow, a prepended page or new output has to
+	// re-resolve them; the reader's match is kept by identity. The store
+	// fingerprints everything a scan reads, so an unchanged frame is skipped.
+	if m.search.active && m.search.scanned != m.transcript.revision {
+		m.refreshSearch()
+	}
+}
+
+// syncTranscriptStore projects the active blocks into per-record rendered rows.
+// Records are reused by identity, so an unchanged record is never re-rendered and
+// a streaming delta costs one entry.
+func (m *Model) syncTranscriptStore(blocks []timelineBlock, leading int) {
+	entries := make([]transcriptEntry, 0, len(blocks))
+	for _, block := range blocks {
+		entries = append(entries, transcriptEntry{
+			id:    m.blockIdentity(block),
+			live:  blockIsLive(block),
+			block: block,
+		})
+	}
+
+	m.transcript.sync(
+		m.width,
+		m.theme,
+		m.themeFingerprint(),
+		m.options.NoColor,
+		m.markdown,
+		leading,
+		entries,
+		nil,
+		-1,
+	)
+}
+
+// syncTranscriptEntries refreshes the store from an already-split frame. stable is
+// the number of leading entries whose records did not change, so the store keeps
+// their rendered rows and rebuilds only the tail.
+func (m *Model) syncTranscriptEntries(prefix, tail []transcriptEntry, stable, leading int) {
+	m.transcript.sync(
+		m.width,
+		m.theme,
+		m.themeFingerprint(),
+		m.options.NoColor,
+		m.markdown,
+		leading,
+		prefix,
+		tail,
+		stable,
+	)
+}
+
+// blockIdentity names a block for anchoring and cache reuse.
+//
+// Durable blocks carry their own identity (a candidate key, a Tool call ID, or a
+// plan-mode activity ID). Blocks the projection cannot name fall back to their
+// conversation position, which is stable for everything already on screen: an
+// earlier entry never changes position because a later one arrived. A block with
+// neither is deliberately uncacheable.
+func (m *Model) blockIdentity(block timelineBlock) string {
+	switch {
+	case block.id != "":
+		return kindName(block.kind) + ":" + block.id
+	case len(block.tools) > 0 && block.tools[0].id != "":
+		return "tool:" + block.tools[0].id
+	case block.kind == blockDraft:
+		return "draft"
+	case block.position > 0:
+		return "at:" + itoa(block.position) + ":" + kindName(block.kind)
+	default:
+		return ""
+	}
+}
+
+// kindName renders a block kind for identity strings.
+func kindName(kind blockKind) string {
+	return itoa(int(kind))
+}
+
+func splitTranscriptRows(rendered string) []string {
+	if rendered == "" {
+		return nil
+	}
+
+	return strings.Split(rendered, "\n")
+}
+
+func (m *Model) themeFingerprint() themeFingerprint {
+	return themeFingerprint(m.theme.Fingerprint())
+}
+
+// transcriptBlocks selects the projection the transcript renders from.
+//
+// Inline mode renders only the uncommitted tail, because everything already
+// stable has been printed to the terminal's own history. Fullscreen mode owns the
+// whole conversation, so it renders the full projection and keeps the stable
+// content in the store instead of writing it out.
+func (m *Model) transcriptBlocks() []timelineBlock {
+	if m.fullscreen() {
+		return m.fullscreenTimelineBlocks()
+	}
+
+	return m.activeTimelineBlocks()
+}
+
+// updateTranscriptScrollKey applies the conversation scrolling keys. They are
+// deliberately separate from the composer's up/down history browsing, which is
+// claimed first.
+func (m *Model) updateTranscriptScrollKey(message tea.KeyPressMsg) (tea.Cmd, bool) {
+	region := &m.transcriptScroll
+	page := max(1, region.height-layoutStatusRows)
+	atTop := false
+
+	switch message.String() {
+	case keyPageUp:
+		region.scrollBy(-page)
+		atTop = true
+	case keyPageDown:
+		region.scrollBy(page)
+	case keyCtrlU:
+		region.scrollBy(-max(1, page/2))
+		atTop = true
+	case keyCtrlD:
+		region.scrollBy(max(1, page/2))
+	case keyHome:
+		region.gotoTop()
+		atTop = true
+	case keyEnd, keyCtrlG:
+		region.gotoBottom()
+	default:
+		return nil, false
+	}
+
+	// Reaching the top asks for the page above it. The request is bounded and
+	// idempotent, so a reader who keeps scrolling simply gets more history.
+	if atTop && region.offset == 0 {
+		return m.requestOlderHistory(), true
+	}
+
+	return nil, true
+}
+
+// transcriptWindow sizes the transcript region and returns its visible rows.
+func (m *Model) transcriptWindow(height int) string {
+	if height <= 0 {
+		m.transcriptScroll.setHeight(0)
+
+		return ""
+	}
+
+	m.transcriptScroll.setHeight(height)
+	visible := m.transcriptScroll.visible()
+	if m.selection.visible {
+		visible = m.highlightSelectionWindow(visible)
+	}
+	if m.searchOwnsKeys() {
+		visible = m.highlightSearchWindow(visible)
+	}
+
+	return visible
+}
+
+// clampFrameTailOffset reports how many leading rows clampFrameTail removed, so a
+// cursor measured against the untrimmed composition can be shifted with it.
+func clampFrameTailOffset(content string, height int) int {
+	if height <= 0 {
+		return 0
+	}
+	if rows := lipgloss.Height(content); rows > height {
+		return rows - height
+	}
+
+	return 0
 }
 
 // managedTimelineNeedsLeadingGap owns the seam between terminal-native
@@ -1632,7 +2108,7 @@ func (m *Model) managedTimelineNeedsLeadingGap(blocks []timelineBlock) bool {
 }
 
 func (m *Model) timelineBlocks() []timelineBlock {
-	blocks := insertCompletionMarkers(projectTimeline(m.state), m.completionMarkers)
+	blocks := insertCompletionMarkers(m.projectTimeline(m.state, nil), m.completionMarkers)
 	if m.streamErr != nil {
 		blocks = append(blocks, timelineBlock{
 			kind: blockError, title: "Operation", body: safeError(m.streamErr),
@@ -1714,7 +2190,14 @@ func truncateText(value string, maximum int) string {
 	return value + "…"
 }
 
+// Only live increments can wait for the next frame. Durable commits, errors,
+// approvals and route transitions retain their synchronous presentation boundary.
+func deferredTranscriptEvent(event coding.Event) bool {
+	return event.Type == coding.EventMessageDelta || event.Type == coding.EventToolUpdated
+}
+
 func (m *Model) requestRender() tea.Cmd {
+	m.renderDirty = true
 	if m.renderWait {
 		return nil
 	}
@@ -1919,55 +2402,267 @@ func (m *Model) updateStream(message streamItemMsg) (tea.Model, tea.Cmd) {
 		return m, m.bridge.wait()
 	}
 
-	m.reduceStreamItem(message.item)
-	m.setLayout()
-	refresh := tea.Batch(
-		m.invalidateAgentDetail(message.item),
-		m.invalidateTeamProjection(message.item.event),
-		m.observeSubagentControl(message.item.event),
-		m.loadPlanViewIfNeeded(),
-	)
+	batch := make([]streamItem, 0, streamBatchMax)
+	batch = append(batch, message.item)
+	batch = append(batch, message.bridge.drainBatch(streamBatchMax-1, streamBatchBudget)...)
+
+	advanced := m.queueStreamBatch(batch)
+	if advanced {
+		m.setLayout()
+	}
+	refresh := tea.Batch(m.streamBatchRefresh(batch)...)
 
 	m.waiting = true
 	wait := m.bridge.wait()
-	commit := m.commitStableTimeline()
-	return m, m.afterScrollback(commit, wait, m.requestRender(), refresh)
+	var commit, render tea.Cmd
+	if m.streamErr == nil && !advanced {
+		// The update only accounted for deltas: the reader cannot see them yet, so
+		// the frame that is already composed is still current.
+		m.viewStable = true
+		render = m.requestRender()
+	} else {
+		commit = m.commitStableTimeline()
+	}
+
+	return m, m.afterScrollback(commit, wait, render, refresh)
 }
 
-func (m *Model) reduceStreamItem(item streamItem) {
-	if item.err != nil {
-		m.streamErr = item.err
+// queueStreamBatch accounts for one drained batch. Deltas ahead of the first
+// durable event only mark the frame dirty and wait for the render tick; the
+// durable part, and everything the producer queued behind it, is applied now so
+// approvals, errors, commits and session transitions keep their synchronous
+// boundary. It reports whether the parent state advanced during this update.
+func (m *Model) queueStreamBatch(batch []streamItem) bool {
+	split := 0
+	for split < len(batch) && deferredTranscriptEvent(batch[split].event) {
+		split++
+	}
 
+	m.pending = append(m.pending, batch[:split]...)
+	if split == len(batch) {
+		return false
+	}
+
+	m.flushPending()
+	m.reduceStreamBatch(batch[split:])
+
+	return true
+}
+
+// flushPending applies the deltas accumulated since the last frame as one batch,
+// so a frame advances the parent state once however many deltas it carried.
+func (m *Model) flushPending() {
+	if len(m.pending) == 0 {
 		return
 	}
 
-	next, err := coding.Reduce(m.state, item.event)
-	if err != nil {
-		m.streamErr = err
-		if m.bridge != nil {
-			m.bridge.once.Do(m.bridge.cancel)
-		}
+	items := m.pending
+	m.pending = m.pending[:0]
+	m.reduceStreamBatch(items)
+}
 
+// dropPending discards deltas that belong to a projection the model is about to
+// replace, so they cannot be applied to the replacement.
+func (m *Model) dropPending() {
+	m.pending = m.pending[:0]
+}
+
+// reduceStreamBatch advances the TUI projection for one drained frame.
+//
+// The Runtime already applied these events in subscription mode, so the parent
+// state is taken from the Runtime once per batch instead of running the
+// transition table a second time (R2). Every other frontend responsibility -
+// child Sessions, Team and subagent projections, stream errors, completion
+// markers and approval prompts - still runs per event.
+func (m *Model) reduceStreamBatch(items []streamItem) {
+	if len(items) == 0 {
 		return
 	}
+
+	valid, streamErr := streamItemsBeforeError(items)
 
 	previousSessionID := m.state.SessionID
 	previousPlanMode := m.state.PlanMode
-	m.state = next
+
+	if !m.advanceParentState(valid) {
+		return
+	}
+
 	if previousSessionID != m.state.SessionID {
 		m.stopTeamWorkerRouteSubscription()
 		m.resetTeamProjection(m.state.SessionID)
 		m.resetSubagentInteractions()
 	}
 	m.queuePlanModeNotices(previousPlanMode)
-	m.trackTeamLifecycleEvent(item.event)
-	m.applyTeamInteractionEvent(item.event)
-	if item.event.Type == coding.EventSessionNavigated ||
-		item.event.Type == coding.EventCompactionCompleted {
+
+	parent := false
+	for _, item := range valid {
+		if m.isParentSessionEvent(item.event) {
+			parent = true
+		}
+
+		m.observeStreamEvent(item.event)
+	}
+
+	if streamErr != nil {
+		m.failStream(streamErr)
+
+		return
+	}
+
+	if parent {
+		m.syncApprovalPrompt()
+	}
+}
+
+// streamItemsBeforeError splits a drained batch at its first bridge error. The
+// producer stops after an error, so an error is expected last.
+func streamItemsBeforeError(items []streamItem) ([]streamItem, error) {
+	for index, item := range items {
+		if item.err != nil {
+			return items[:index], item.err
+		}
+	}
+
+	return items, nil
+}
+
+// streamBatchRefresh collects the per-event route refreshes for a frame.
+// Deferred deltas never drive those refreshes, so they are skipped.
+func (m *Model) streamBatchRefresh(batch []streamItem) []tea.Cmd {
+	refresh := make([]tea.Cmd, 0, len(batch)+1)
+
+	for _, item := range batch {
+		if deferredTranscriptEvent(item.event) {
+			continue
+		}
+
+		refresh = append(refresh,
+			m.invalidateAgentDetail(item),
+			m.invalidateTeamProjection(item.event),
+			m.observeSubagentControl(item.event),
+		)
+	}
+
+	return append(refresh, m.loadPlanViewIfNeeded())
+}
+
+// advanceParentState applies one frame of parent-Session events to m.state and
+// reports whether the projection can still be rendered.
+func (m *Model) advanceParentState(items []streamItem) bool {
+	events := make([]coding.Event, 0, len(items))
+	for _, item := range items {
+		if m.isParentSessionEvent(item.event) {
+			events = append(events, item.event)
+		}
+	}
+
+	if len(events) == 0 {
+		return true
+	}
+
+	if m.runtimeState && m.controller != nil {
+		if err := m.checkParentSequence(events); err != nil {
+			m.failStream(err)
+
+			return false
+		}
+
+		m.frameAdvances++
+
+		return m.adoptRuntimeState(events[len(events)-1])
+	}
+
+	next, err := coding.ReduceBatch(m.state, events)
+	if err != nil {
+		m.failStream(err)
+
+		return false
+	}
+
+	m.frameAdvances++
+	m.state = next
+	m.observedSequence = next.Sequence
+
+	return true
+}
+
+// checkParentSequence verifies that the parent-Session events of one frame
+// continue the last delivered event, so an out-of-order or missing delivery is
+// still detected when the Runtime owns the reduction. Child-Session events run
+// on their own Session sequence and never appear here.
+func (m *Model) checkParentSequence(events []coding.Event) error {
+	previous := m.observedSequence
+
+	for _, event := range events {
+		if event.Sequence != previous+1 {
+			return fmt.Errorf("coding tui: event sequence %d follows %d", event.Sequence, previous)
+		}
+
+		previous = event.Sequence
+	}
+
+	m.observedSequence = previous
+
+	return nil
+}
+
+// adoptRuntimeState takes the parent projection from the Runtime that already
+// applied these events. The snapshot is a defensive copy, and the Runtime
+// sequence must be at least as advanced as the last event observed here.
+func (m *Model) adoptRuntimeState(last coding.Event) bool {
+	snapshot := m.controller.Snapshot()
+	if snapshot.Sequence < last.Sequence {
+		m.failStream(fmt.Errorf(
+			"coding tui: runtime snapshot at sequence %d lags event %d",
+			snapshot.Sequence, last.Sequence,
+		))
+
+		return false
+	}
+
+	m.state = snapshot
+
+	return true
+}
+
+// failStream records a stream failure and stops the running bridge.
+func (m *Model) failStream(err error) {
+	m.streamErr = err
+	if m.bridge != nil {
+		m.bridge.once.Do(m.bridge.cancel)
+	}
+}
+
+// observeStreamEvent runs the per-event frontend bookkeeping for one drained
+// event. Child-Session events only update their own projection.
+func (m *Model) observeStreamEvent(event coding.Event) {
+	if !m.isParentSessionEvent(event) {
+		m.reduceChildEvent(event)
+
+		return
+	}
+
+	m.updateSubagentRouteSummary(event)
+	m.trackTeamLifecycleEvent(event)
+	m.applyTeamInteractionEvent(event)
+	switch event.Type {
+	case coding.EventSessionNavigated:
+		// A new conversation replaces what the main buffer holds, so the exit
+		// handoff may write it again. Compaction keeps the flag: the rows the
+		// escape hatch already printed are still on the screen.
+		m.transcriptHanded = false
+		m.resetHistory()
+		m.resetScrollback()
+	case coding.EventCompactionCompleted:
 		m.resetScrollback()
 	}
-	m.recordCompletion(item.event)
-	m.syncApprovalPrompt()
+
+	m.recordCompletion(event)
+}
+
+func (m *Model) isParentSessionEvent(event coding.Event) bool {
+	return m.state.SessionID == "" || event.SessionID == m.state.SessionID
 }
 
 func (m *Model) recordCompletion(event coding.Event) {
@@ -2020,6 +2715,10 @@ func (m *Model) modelLabel() string {
 }
 
 func (m *Model) finishStream() tea.Cmd {
+	// The last deltas of the turn are part of its final projection, so they are
+	// applied before the stream is closed and the snapshot is compared.
+	m.flushPending()
+
 	if !m.subscriptionMode {
 		snapshot := m.controller.Snapshot()
 		if m.streamErr == nil && snapshot.Sequence != m.state.Sequence {
@@ -2127,29 +2826,45 @@ func (m *Model) updateSubscription(message subscriptionEventMsg) (tea.Model, tea
 		return m, m.startSubscription()
 	}
 
-	activityWasVisible := m.activityClockVisible()
-	m.reduceObservedEvent(message.record.Event)
-	m.setLayout()
-	refresh := tea.Batch(
-		m.invalidateAgentDetail(streamItem{event: message.record.Event}),
-		m.invalidateTeamProjection(message.record.Event),
-		m.observeSubagentControl(message.record.Event),
-		m.loadPlanViewIfNeeded(),
-		m.startActivityClock(activityWasVisible),
-	)
-	wait := message.bridge.wait()
-	commit := m.commitStableTimeline()
-	return m, m.afterScrollback(commit, wait, m.requestRender(), refresh)
-}
-
-func (m *Model) reduceObservedEvent(event coding.Event) {
-	if m.state.SessionID == "" || event.SessionID == m.state.SessionID {
-		m.reduceStreamItem(streamItem{event: event})
-		m.updateSubagentRouteSummary(event)
-
-		return
+	// Drain what is already queued so one MVU update advances a whole frame
+	// instead of one delta at a time.
+	batch := make([]streamItem, 0, streamBatchMax)
+	batch = append(batch, streamItem{event: message.record.Event})
+	for _, record := range message.bridge.drainBatch(streamBatchMax-1, streamBatchBudget) {
+		batch = append(batch, streamItem{event: record.Event})
 	}
 
+	activityWasVisible := m.activityClockVisible()
+	advanced := m.queueStreamBatch(batch)
+	if advanced {
+		m.setLayout()
+	}
+	refresh := tea.Batch(append(m.streamBatchRefresh(batch), m.startActivityClock(activityWasVisible))...)
+	wait := message.bridge.wait()
+	var commit, render tea.Cmd
+	if m.streamErr == nil && !advanced {
+		// The update only accounted for deltas: the reader cannot see them yet, so
+		// the frame that is already composed is still current.
+		m.viewStable = true
+		render = m.requestRender()
+	} else {
+		commit = m.commitStableTimeline()
+	}
+
+	return m, m.afterScrollback(commit, wait, render, refresh)
+}
+
+// reduceObservedEvent applies one already-observed event. Batched updates use
+// reduceStreamBatch; this single-event entry point remains for callers that hold
+// exactly one event, such as mode control waiting for its subscribed event.
+func (m *Model) reduceObservedEvent(event coding.Event) {
+	m.reduceStreamBatch([]streamItem{{event: event}})
+}
+
+// reduceChildEvent projects one child-Session event into the TUI's own child
+// state. A parent subscription does not carry child Runtime States, so child
+// projections keep using the shared transition table.
+func (m *Model) reduceChildEvent(event coding.Event) {
 	state := m.childStates[event.SessionID]
 	wasAtBottom := m.route.kind == routeChild && m.route.childKind == childSubagent &&
 		m.route.childSessionID == event.SessionID &&
@@ -2160,6 +2875,7 @@ func (m *Model) reduceObservedEvent(event coding.Event) {
 
 		return
 	}
+
 	m.childStates[event.SessionID] = next
 	if m.route.kind == routeChild && m.route.childKind == childSubagent &&
 		m.route.childSessionID == event.SessionID {
