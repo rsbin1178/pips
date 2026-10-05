@@ -82,6 +82,10 @@ type toolActivity struct {
 	header         codingtools.ResultHeader
 	hasHeader      bool
 	preview        []string
+	// settled reports that the card is backed by a durable transcript result and
+	// its live activity has finished, so its rendering is final. It is what lets
+	// the transcript store reuse a settled card's rows; see [blockIsUnsettled].
+	settled bool
 }
 
 type toolActivityRecord struct {
@@ -342,6 +346,11 @@ func describeToolActivity(record toolActivityRecord) toolActivity {
 		activity.invocation = strings.TrimSpace(activity.action + " " + activity.subject)
 	}
 	activity.state = classifyToolActivity(record)
+	// A card is final only once its result is durable and the live activity that
+	// could still overwrite it has finished. A terminal state alone is not enough:
+	// a card can read a live result before the durable one lands, and the durable
+	// one can carry different text.
+	activity.settled = record.resultPosition > 0 && record.status != coding.ToolStatusRunning
 
 	if record.hasResult {
 		activity.result = visibleToolParts(record.result.Content)

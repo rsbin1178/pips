@@ -4,6 +4,7 @@ package tui
 import (
 	"errors"
 	"strconv"
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -683,6 +684,122 @@ func TestProjectionStoreKeepsUpWithTheSeam(t *testing.T) {
 	model.state.MessageCandidates = append(model.state.MessageCandidates, coding.CandidateIdentity{})
 	model.rerenderTranscript(false)
 	require.Equal(t, model.transcriptBlocks(), storeBlocks(&model.transcript), "frame two store")
+}
+
+// storeRows is the row text the transcript store currently holds. It is what the
+// reader sees, so it catches a record the store reused past its block.
+func storeRows(model *Model) string {
+	rows := make([]string, 0, model.transcript.rowCount())
+	for index := range model.transcript.records {
+		record := &model.transcript.records[index]
+		if !record.loaded {
+			model.transcript.materialize(record)
+		}
+		rows = append(rows, record.rows...)
+	}
+
+	return strings.Join(rows, "\n")
+}
+
+// toolBlockOf returns the last tool card in a block list.
+func toolBlockOf(blocks []timelineBlock) timelineBlock {
+	var block timelineBlock
+
+	for _, candidate := range blocks {
+		if candidate.kind == blockTool {
+			block = candidate
+		}
+	}
+
+	return block
+}
+
+// TestTranscriptStoreRendersACompletedToolCardAgain pins the store's reuse rule for
+// a card that settles without changing its identity: with the call already
+// committed, the card read "Running" while the tool ran, and the frame that carries
+// the result must render it again instead of keeping the earlier row.
+func TestTranscriptStoreRendersACompletedToolCardAgain(t *testing.T) {
+	t.Parallel()
+
+	call := coding.ToolCall{ID: "call-sh", Name: "shell", Arguments: ai.JSON(`{"command":"echo hi"}`)}
+
+	state := readyState()
+	state.Transcript = []ai.Message{
+		ai.UserText("hello"),
+		ai.Assistant(ai.Text("running"), ai.ToolCallPart{ID: call.ID, Name: call.Name, Args: call.Arguments}),
+	}
+	state.MessageCandidates = []coding.CandidateIdentity{{}, {RunID: "run-1", Turn: 1}}
+	state.Tools = []coding.ToolState{{RunID: "run-1", Turn: 2, Call: call, Status: coding.ToolStatusRunning}}
+
+	model := fullscreenModel(t, stubController{state: state}, false)
+	model.state = state
+	model.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	model.rerenderTranscript(false)
+	require.Contains(t, storeRows(model), "Running")
+
+	model.state.Transcript = append(
+		model.state.Transcript, codingToolResultFor(call.ID, call.Name, "hi"),
+	)
+	model.state.MessageCandidates = append(model.state.MessageCandidates, coding.CandidateIdentity{})
+	model.state.Tools[0].Status = coding.ToolStatusCompleted
+	model.state.Tools[0].Result = ai.ToolMessage{Parts: []ai.ToolResultPart{{
+		ToolCallID: call.ID, Name: call.Name, Content: []ai.Part{ai.Text("hi")},
+	}}}
+	model.rerenderTranscript(false)
+
+	require.NotContains(t, storeRows(model), "Running", "the settled card is rendered again")
+	require.Equal(t, model.transcriptBlocks(), storeBlocks(&model.transcript))
+}
+
+// TestTranscriptStoreKeepsUpWithALiveResultBecomingDurable pins what keeps a card
+// live: a card that reads a live-only result is terminal but not final, so the
+// frame that later carries the durable result must be rendered rather than served
+// from the record the live result produced.
+func TestTranscriptStoreKeepsUpWithALiveResultBecomingDurable(t *testing.T) {
+	t.Parallel()
+
+	call := coding.ToolCall{ID: "call-sh", Name: "shell", Arguments: ai.JSON(`{"command":"echo hi"}`)}
+
+	state := readyState()
+	state.Transcript = []ai.Message{
+		ai.UserText("hello"),
+		ai.Assistant(ai.Text("running"), ai.ToolCallPart{ID: call.ID, Name: call.Name, Args: call.Arguments}),
+	}
+	state.MessageCandidates = []coding.CandidateIdentity{{}, {RunID: "run-1", Turn: 1}}
+	state.Tools = []coding.ToolState{{
+		RunID: "run-1", Turn: 2, Call: call, Status: coding.ToolStatusRunning,
+		// Only the live activity has a result so far.
+		Result: ai.ToolMessage{Parts: []ai.ToolResultPart{{
+			ToolCallID: call.ID, Name: call.Name, Content: []ai.Part{ai.Text("live output")},
+		}}},
+	}}
+
+	model := fullscreenModel(t, stubController{state: state}, false)
+	model.state = state
+	model.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+
+	// Step one: the tool is running.
+	model.rerenderTranscript(false)
+	require.True(t, blockIsUnsettled(toolBlockOf(model.transcriptBlocks())))
+
+	// Step two: the live activity finished, but its own result is all there is, so
+	// the card reads terminal while its durable text is still to come.
+	model.state.Tools[0].Status = coding.ToolStatusCompleted
+	model.rerenderTranscript(false)
+	require.True(t, blockIsUnsettled(toolBlockOf(model.transcriptBlocks())),
+		"a card reading a live-only result is not final")
+
+	// Step three: the durable result lands and the live activity is gone.
+	model.state.Transcript = append(
+		model.state.Transcript, codingToolResultFor(call.ID, call.Name, "durable output"),
+	)
+	model.state.MessageCandidates = append(model.state.MessageCandidates, coding.CandidateIdentity{})
+	model.state.Tools = nil
+	model.rerenderTranscript(false)
+
+	require.False(t, blockIsUnsettled(toolBlockOf(model.transcriptBlocks())))
+	require.Equal(t, model.transcriptBlocks(), storeBlocks(&model.transcript),
+		"the frame carrying the durable result is rendered, not reused")
 }
 
 // TestProjectionLeavesMessagePartsUntouched pins the invariant behind reading

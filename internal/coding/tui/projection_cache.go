@@ -886,7 +886,7 @@ func (m *Model) volatileTimelineBlocks(activities []toolActivity, markerSplit in
 func (m *Model) entryFor(block timelineBlock) transcriptEntry {
 	return transcriptEntry{
 		id:    m.blockIdentity(block),
-		live:  blockIsLive(block),
+		live:  blockIsUnsettled(block),
 		block: block,
 	}
 }

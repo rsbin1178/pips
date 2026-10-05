@@ -38,7 +38,9 @@ type transcriptRecord struct {
 	// renders as nothing is loaded with no rows, which is not the same as having
 	// been released.
 	loaded bool
-	// live marks the single record that may still change.
+	// live marks a record that was rendered from a block that had not settled. Such
+	// a record is never reused: a block can settle while keeping its identity, so
+	// the next frame renders it again and drops this one. See [blockIsUnsettled].
 	live bool
 	// block is the projection this record renders, kept so the rows can be
 	// reproduced after a release.
@@ -100,7 +102,9 @@ type transcriptStore struct {
 }
 
 // transcriptEntry is one projected entry offered to the store. A record that is
-// reused from the previous build is never rendered again.
+// reused from the previous build is never rendered again. live marks a block that
+// has not settled, so the store renders it instead of serving a record an earlier
+// frame produced.
 type transcriptEntry struct {
 	id    string
 	live  bool
@@ -267,8 +271,12 @@ func (s *transcriptStore) build(
 
 	for _, entry := range entries {
 		id := uniqueRecordID(next, entry.id)
+		// Reuse the previous rendering only when neither side is unsettled: a block
+		// can settle while keeping its identity, and the record it leaves behind was
+		// rendered from the block that frame has just replaced.
 		if !entry.live && id != "" {
-			if at, ok := reuseIndex[id]; ok && at < len(previous) && previous[at].id == id {
+			if at, ok := reuseIndex[id]; ok && at < len(previous) && previous[at].id == id &&
+				!previous[at].live {
 				record := previous[at]
 				record.live = false
 				next[id] = len(records)
