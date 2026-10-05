@@ -3,6 +3,7 @@ package tui
 
 import (
 	"errors"
+	"strconv"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -234,6 +235,68 @@ func TestProjectionCacheMatchesPureProjection(t *testing.T) {
 			},
 		},
 		{
+			name: "commit several messages at once",
+			mutate: func(_ *testing.T, model *Model) {
+				model.state.Transcript = append(
+					model.state.Transcript,
+					ai.AssistantText("first"),
+					ai.UserText("second"),
+					ai.AssistantText("third"),
+				)
+				model.state.MessageCandidates = append(
+					model.state.MessageCandidates,
+					coding.CandidateIdentity{RunID: "run-1", Turn: 3},
+					coding.CandidateIdentity{},
+					coding.CandidateIdentity{RunID: "run-1", Turn: 4},
+				)
+			},
+		},
+		{
+			name: "commit a tool result",
+			arrange: func(_ *testing.T, model *Model) {
+				model.state.Tools = []coding.ToolState{projectionRunningReadTool()}
+			},
+			mutate: func(_ *testing.T, model *Model) {
+				model.state.Transcript = append(
+					model.state.Transcript,
+					codingToolResultFor("call-1", "read", "file contents"),
+				)
+				model.state.MessageCandidates = append(
+					model.state.MessageCandidates, coding.CandidateIdentity{},
+				)
+			},
+		},
+		{
+			name: "commit text message with a pending marker",
+			arrange: func(_ *testing.T, model *Model) {
+				model.completionMarkers = append(model.completionMarkers, completionMarker{
+					interactionID:  "interaction-1",
+					afterMessages:  len(model.state.Transcript),
+					outcome:        coding.InteractionSucceeded,
+					durationMillis: 1_000,
+					model:          "openai/test-model",
+				})
+			},
+			mutate: func(_ *testing.T, model *Model) {
+				model.state.Transcript = append(model.state.Transcript, ai.UserText("follow up"))
+				model.state.MessageCandidates = append(
+					model.state.MessageCandidates, coding.CandidateIdentity{},
+				)
+			},
+		},
+		{
+			name: "append a synthetic message",
+			mutate: func(_ *testing.T, model *Model) {
+				model.state.Transcript = append(model.state.Transcript, ai.AssistantText("hidden"))
+				model.state.MessageCandidates = append(
+					model.state.MessageCandidates, coding.CandidateIdentity{},
+				)
+				model.state.SyntheticMessages = append(
+					model.state.SyntheticMessages, len(model.state.Transcript)-1,
+				)
+			},
+		},
+		{
 			name: "width change",
 			mutate: func(_ *testing.T, model *Model) {
 				model.width = 50
@@ -338,7 +401,7 @@ func TestProjectionCacheMatchesPureProjection(t *testing.T) {
 }
 
 // TestProjectionCacheRebuildsPrefixOnlyWhenInputsChange pins the two paths apart:
-// a volatile draft keeps the committed prefix, a committed append discards it.
+// a volatile draft keeps the committed prefix, a committed append extends it.
 func TestProjectionCacheRebuildsPrefixOnlyWhenInputsChange(t *testing.T) {
 	t.Parallel()
 
@@ -355,15 +418,167 @@ func TestProjectionCacheRebuildsPrefixOnlyWhenInputsChange(t *testing.T) {
 	}
 	frame := model.viewportProjection()
 	require.Equal(t, prefixLength, frame.stable)
+	require.Zero(t, model.frameExtends)
 
-	// A committed append changes the stamp: the store must rebuild from scratch.
+	// A committed append grows the conversation: the prefix is extended, so the
+	// store keeps every record the old prefix already had.
 	model.state.Transcript = append(model.state.Transcript, ai.UserText("committed"))
 	model.state.MessageCandidates = append(
 		model.state.MessageCandidates,
 		coding.CandidateIdentity{RunID: "run-1", Turn: 3},
 	)
 	frame = model.viewportProjection()
+	require.Equal(t, 1, model.frameExtends)
+	require.Equal(t, prefixLength, frame.stable)
+	require.Equal(t, model.transcriptBlocks(), viewportProjectionFrameBlocks(frame))
+}
+
+// TestProjectionCacheExtendsCommittedAppends pins the append path's observable
+// behaviour frame after frame: every text commit extends the cached prefix, keeps
+// the records before it, and still projects exactly the pure projection.
+func TestProjectionCacheExtendsCommittedAppends(t *testing.T) {
+	t.Parallel()
+
+	model := projectionCacheModel(t)
+	model.viewportProjection()
+	prefixLength := len(model.frameCache.entries)
+	require.Greater(t, prefixLength, 0)
+
+	for turn := 3; turn <= 5; turn++ {
+		model.state.Transcript = append(
+			model.state.Transcript, ai.AssistantText("answer "+strconv.Itoa(turn)),
+		)
+		model.state.MessageCandidates = append(
+			model.state.MessageCandidates,
+			coding.CandidateIdentity{RunID: "run-1", Turn: turn},
+		)
+
+		frame := model.viewportProjection()
+		require.Equal(t, turn-2, model.frameExtends, "every text commit extends")
+		require.Equal(t, prefixLength, frame.stable, "the store keeps the covered prefix")
+		require.Equal(t, model.transcriptBlocks(), viewportProjectionFrameBlocks(frame))
+		prefixLength = len(model.frameCache.entries)
+	}
+}
+
+// TestProjectionCacheExtendsAcrossAPendingMarker pins the marker seam: a commit
+// whose frame moves a trailing completion marker into the committed prefix still
+// projects exactly the pure projection.
+func TestProjectionCacheExtendsAcrossAPendingMarker(t *testing.T) {
+	t.Parallel()
+
+	model := projectionCacheModel(t)
+	model.completionMarkers = []completionMarker{{
+		interactionID:  "interaction-1",
+		afterMessages:  len(model.state.Transcript),
+		outcome:        coding.InteractionSucceeded,
+		durationMillis: 7_000,
+		model:          "openai/test-model",
+	}}
+	model.viewportProjection()
+	require.Zero(t, model.frameCache.markerSplit, "the marker starts in the volatile tail")
+
+	model.state.Transcript = append(model.state.Transcript, ai.UserText("after the marker"))
+	model.state.MessageCandidates = append(model.state.MessageCandidates, coding.CandidateIdentity{})
+
+	frame := model.viewportProjection()
+	require.Equal(t, 1, model.frameExtends)
+	require.Equal(t, 1, model.frameCache.markerSplit, "the marker moved into the prefix")
+	require.Equal(t, model.transcriptBlocks(), viewportProjectionFrameBlocks(frame))
+}
+
+// TestProjectionCacheExtendsACommittedToolResult pins the tool append path: a
+// tool result whose call the prefix had not placed yet extends the committed
+// prefix instead of reprojecting it, and the store still equals the projection.
+func TestProjectionCacheExtendsACommittedToolResult(t *testing.T) {
+	t.Parallel()
+
+	state := readyState()
+	state.Transcript = []ai.Message{
+		ai.UserText("hello"),
+		ai.Assistant(
+			ai.Text("reading"),
+			ai.ToolCallPart{ID: "call-1", Name: "read", Args: ai.JSON(`{"path":"a.go"}`)},
+		),
+	}
+	state.MessageCandidates = []coding.CandidateIdentity{{}, {RunID: "run-1", Turn: 1}}
+
+	model := fullscreenModel(t, stubController{state: state}, false)
+	model.state = state
+	model.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	model.rerenderTranscript(false)
+	prefixLength := len(model.frameCache.entries)
+
+	// The call was not placed yet, so the result extends the prefix.
+	model.state.Transcript = append(
+		model.state.Transcript, codingToolResultFor("call-1", "read", "contents"),
+	)
+	model.state.MessageCandidates = append(model.state.MessageCandidates, coding.CandidateIdentity{})
+	model.rerenderTranscript(false)
+
+	require.Equal(t, 1, model.frameExtends, "the tool result commit extends")
+	require.Greater(t, len(model.frameCache.entries), prefixLength)
+	require.Equal(t, model.transcriptBlocks(), storeBlocks(&model.transcript))
+}
+
+// TestProjectionCacheFallsBackWhenToolActivityTouchesACommittedRecord pins the
+// tool path's fallback: a result for a call the prefix already placed would move
+// that card, so the prefix is reprojected rather than extended.
+//
+// The store's record for that card is deliberately not asserted here. Reusing
+// rendered rows by entry identity is the transcript store's own contract, and a
+// committed card whose block changed under the same identity is a pre-existing
+// concern that the append path neither introduces nor owns.
+func TestProjectionCacheFallsBackWhenToolActivityTouchesACommittedRecord(t *testing.T) {
+	t.Parallel()
+
+	state := readyState()
+	state.Transcript = []ai.Message{
+		ai.UserText("hello"),
+		ai.Assistant(
+			ai.Text("reading"),
+			ai.ToolCallPart{ID: "call-1", Name: "read", Args: ai.JSON(`{"path":"a.go"}`)},
+		),
+		codingToolResultFor("call-1", "read", "first contents"),
+	}
+	state.MessageCandidates = []coding.CandidateIdentity{{}, {RunID: "run-1", Turn: 1}, {}}
+
+	model := fullscreenModel(t, stubController{state: state}, false)
+	model.state = state
+	model.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	model.rerenderTranscript(false)
+
+	// A second result for the same call names a card the prefix already holds.
+	model.state.Transcript = append(
+		model.state.Transcript, codingToolResultFor("call-1", "read", "second contents"),
+	)
+	model.state.MessageCandidates = append(model.state.MessageCandidates, coding.CandidateIdentity{})
+	model.rerenderTranscript(false)
+
+	require.Zero(t, model.frameExtends, "a restated tool result rebuilds")
+	require.Equal(t, model.transcriptBlocks(), viewportProjectionBlocks(model))
+}
+
+// TestProjectionCacheFallsBackWhenCoveredPrefixChanged pins the append path's
+// second fallback: a transcript whose covered range no longer matches the cached
+// fingerprint is reprojected, so a rewrite inside that range cannot serve stale
+// rows.
+func TestProjectionCacheFallsBackWhenCoveredPrefixChanged(t *testing.T) {
+	t.Parallel()
+
+	model := projectionCacheModel(t)
+	model.viewportProjection()
+
+	replaced := append([]ai.Message(nil), model.state.Transcript...)
+	replaced[0] = ai.UserText("rewritten")
+	replaced = append(replaced, ai.UserText("and grown"))
+	model.state.Transcript = replaced
+	model.state.MessageCandidates = append(model.state.MessageCandidates, coding.CandidateIdentity{})
+
+	frame := model.viewportProjection()
+	require.Zero(t, model.frameExtends, "a rewritten covered range rebuilds")
 	require.Zero(t, frame.stable)
+	require.Equal(t, model.transcriptBlocks(), viewportProjectionFrameBlocks(frame))
 }
 
 // TestProjectionCacheToolLifecycle proves a running tool's progress update
@@ -394,6 +609,80 @@ func TestProjectionCacheToolLifecycle(t *testing.T) {
 	require.Equal(t, model.transcriptBlocks(), viewportProjectionFrameBlocks(frame))
 	require.Zero(t, frame.stable)
 	require.NotEqual(t, before, model.frameCache.stamp)
+}
+
+// TestProjectionCacheFallsBackWhenTheTranscriptWindowSlides pins the fallback at
+// the Runtime's transcript cap: a commit that also drops the oldest message moved
+// the covered range, so the prefix is reprojected rather than extended.
+func TestProjectionCacheFallsBackWhenTheTranscriptWindowSlides(t *testing.T) {
+	t.Parallel()
+
+	model := projectionCacheModel(t)
+	model.viewportProjection()
+
+	slid := append([]ai.Message(nil), model.state.Transcript[1:]...)
+	slid = append(slid, ai.UserText("pushed past the cap"), ai.UserText("and again"))
+	model.state.Transcript = slid
+	model.state.MessageCandidates = append(
+		model.state.MessageCandidates,
+		coding.CandidateIdentity{}, coding.CandidateIdentity{},
+	)
+
+	frame := model.viewportProjection()
+	require.Zero(t, model.frameExtends, "a sliding window rebuilds")
+	require.Zero(t, frame.stable)
+	require.Equal(t, model.transcriptBlocks(), viewportProjectionFrameBlocks(frame))
+}
+
+// storeBlocks is the block list the transcript store currently holds. The store
+// is what the reader sees, so a frame that kept a stale record past its seam
+// shows up here even when that frame's entry list looked right.
+func storeBlocks(store *transcriptStore) []timelineBlock {
+	blocks := make([]timelineBlock, 0, len(store.records))
+	for index := range store.records {
+		blocks = append(blocks, store.records[index].block)
+	}
+
+	return blocks
+}
+
+// TestProjectionStoreKeepsUpWithTheSeam pins the record list behind `stable`:
+// every frame's store must equal the pure projection, including frames where the
+// live tail folded into the last committed exploration card, because the store
+// keeps the records before `stable` verbatim.
+func TestProjectionStoreKeepsUpWithTheSeam(t *testing.T) {
+	t.Parallel()
+
+	state := readyState()
+	state.Transcript = []ai.Message{
+		ai.UserText("hello"),
+		ai.Assistant(
+			ai.Text("reading"),
+			ai.ToolCallPart{ID: "call-done", Name: "read", Args: ai.JSON(`{"path":"a.go"}`)},
+		),
+		codingToolResultFor("call-done", "read", "contents"),
+	}
+	state.MessageCandidates = []coding.CandidateIdentity{{}, {RunID: "run-1", Turn: 1}, {}}
+	state.Tools = []coding.ToolState{{
+		RunID: "run-1", Turn: 2,
+		Call:   coding.ToolCall{ID: "call-live", Name: "read", Arguments: ai.JSON(`{"path":"b.go"}`)},
+		Status: coding.ToolStatusRunning,
+	}}
+
+	model := fullscreenModel(t, stubController{state: state}, false)
+	model.state = state
+	model.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+
+	// Frame one folds the live exploration card into the committed one.
+	model.rerenderTranscript(false)
+	require.Equal(t, model.transcriptBlocks(), storeBlocks(&model.transcript), "frame one store")
+
+	// Frame two grows the conversation: the record at the seam must be rebuilt
+	// rather than kept as last frame's merged card.
+	model.state.Transcript = append(model.state.Transcript, ai.UserText("more"))
+	model.state.MessageCandidates = append(model.state.MessageCandidates, coding.CandidateIdentity{})
+	model.rerenderTranscript(false)
+	require.Equal(t, model.transcriptBlocks(), storeBlocks(&model.transcript), "frame two store")
 }
 
 // TestProjectionLeavesMessagePartsUntouched pins the invariant behind reading
