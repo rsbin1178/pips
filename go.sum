@@ -1,7 +1,5 @@
 charm.land/bubbles/v2 v2.1.1 h1:7r55WzBxpo/R3z98hGmY7KKPd3ET6vsf0Fb9sDHOV60=
 charm.land/bubbles/v2 v2.1.1/go.mod h1:GE6M31gaWZVXzGw73OeuTTgy4lX+OtkH0E5ymnNsHxo=
-charm.land/glamour/v2 v2.0.1 h1:xl+r00A4aJWU0z8fgwKd9fQQ4rsphqGUzuEiXZP5n+c=
-charm.land/glamour/v2 v2.0.1/go.mod h1:jo9z8XqVKPeEFMVdvCRLGk++RyJ3CdUwgNr7EvXLw3k=
 charm.land/lipgloss/v2 v2.0.5 h1:kbNxgeeUOYv5J0YdpxFjfvf3dFvqH8Aci4zB6xqFtrY=
 charm.land/lipgloss/v2 v2.0.5/go.mod h1:9oqhxt4yxIMe6q5A4kHr44DremZk7J9UNh74GlWa5nc=
 github.com/MakeNowJust/heredoc v1.0.0 h1:cXCdzVdstXyiTqTvfqk9SDHpKNjxuom+DOlyEeQ4pzQ=
@@ -102,6 +100,8 @@ github.com/rogpeppe/go-internal v1.14.1 h1:UQB4HGPB6osV0SQTLymcB4TgvyWu6ZyliaW0t
 github.com/rogpeppe/go-internal v1.14.1/go.mod h1:MaRKkUm5W0goXpeCfT7UZI6fk/L7L7so1lCWt35ZSgc=
 github.com/rsbin1178/bubbletea/v2 v2.0.11-0.20261003033827-30f699bb8af2 h1:JM1uJZ6voX39lT1NhQGPTr33M9Ah20yIKkCtqIak13s=
 github.com/rsbin1178/bubbletea/v2 v2.0.11-0.20261003033827-30f699bb8af2/go.mod h1:QEiVFN8X5zDAsn421tekSQbo7br0TcB4pzqhOSok5lI=
+github.com/rsbin1178/glamour/v2 v2.0.2-0.20261006162314-63d07721665c h1:s8uHmsNwygbafldHoD39+YvICINYoYCx3vB3MOekDqk=
+github.com/rsbin1178/glamour/v2 v2.0.2-0.20261006162314-63d07721665c/go.mod h1:jo9z8XqVKPeEFMVdvCRLGk++RyJ3CdUwgNr7EvXLw3k=
 github.com/russross/blackfriday/v2 v2.1.0/go.mod h1:+Rmxgy9KzJVeS9/2gXHxylqXiyQDYRxCVz55jmeOWTM=
 github.com/segmentio/asm v1.1.3 h1:WM03sfUOENvvKexOLp+pCqgb/WDjsi7EK8gIsICtzhc=
 github.com/segmentio/asm v1.1.3/go.mod h1:Ld3L4ZXGNcSLRg4JBsZ3//1+f/TjYl0Mzen/DQy1EJg=
