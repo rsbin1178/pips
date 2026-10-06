@@ -295,6 +295,7 @@ type CompatibilityConfig struct {
 	ChatReasoning             *openai.ChatReasoningFormat
 	ReasoningHistory          *openai.ReasoningHistoryField
 	IncludeEncryptedReasoning *bool
+	PromptCacheKey            *bool
 }
 
 // Clone returns a fully detached compatibility override.
@@ -306,6 +307,7 @@ func (c CompatibilityConfig) Clone() CompatibilityConfig {
 	cloned.ChatReasoning = clonePointer(c.ChatReasoning)
 	cloned.ReasoningHistory = clonePointer(c.ReasoningHistory)
 	cloned.IncludeEncryptedReasoning = clonePointer(c.IncludeEncryptedReasoning)
+	cloned.PromptCacheKey = clonePointer(c.PromptCacheKey)
 
 	return cloned
 }
@@ -334,6 +336,9 @@ func (c CompatibilityConfig) Resolve(base openai.Compatibility) openai.Compatibi
 	}
 	if c.IncludeEncryptedReasoning != nil {
 		base.IncludeEncryptedReasoning = *c.IncludeEncryptedReasoning
+	}
+	if c.PromptCacheKey != nil {
+		base.PromptCacheKey = *c.PromptCacheKey
 	}
 
 	return base

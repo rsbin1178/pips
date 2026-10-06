@@ -22,6 +22,11 @@ func TestPluginListReportsPortablePackagesAndDiagnostics(t *testing.T) {
   "unknown": true
 }`)
 
+	// Loading reports the resolved package root, so the expectation follows the
+	// same resolution; macOS temporary directories are symlinked.
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	require.NoError(t, err)
+
 	output, err := executeWithDependencies(
 		t, fixture.dependencies(nil), "plugin", "list", "--json",
 	)
@@ -37,7 +42,7 @@ func TestPluginListReportsPortablePackagesAndDiagnostics(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(output), &decoded))
 	require.Len(t, decoded.Plugins, 1)
 	assert.Equal(t, "example-plugin", decoded.Plugins[0].Name)
-	assert.Equal(t, root, decoded.Plugins[0].Root)
+	assert.Equal(t, resolvedRoot, decoded.Plugins[0].Root)
 	require.Len(t, decoded.Diagnostics, 1)
 	assert.Equal(t, "unknown_field_ignored", decoded.Diagnostics[0].Code)
 }

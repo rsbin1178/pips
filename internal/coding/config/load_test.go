@@ -752,3 +752,39 @@ docs = ["*"]
 		require.ErrorContains(t, err, "mcp_read_only_tools", name)
 	}
 }
+
+// TestLoadDecodesThePromptCacheKeyCompatKnob pins the opt-in gate for endpoints
+// that reject prompt_cache_key: an undeclared provider keeps the field off, and
+// a gateway can turn it on from its own configuration.
+func TestLoadDecodesThePromptCacheKeyCompatKnob(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	absent := filepath.Join(dir, "absent.toml")
+	writeFile(t, absent, "[providers.openai.models.gpt]\n")
+
+	loaded, err := config.Load(config.LoadOptions{ConfigFile: absent})
+	require.NoError(t, err)
+	require.Len(t, loaded.Config.Models, 1)
+	assert.Nil(t, loaded.Config.Models[0].Compatibility.PromptCacheKey)
+
+	declared := filepath.Join(dir, "declared.toml")
+	writeFile(t, declared, `
+[providers.local]
+protocol = "openai/chat_completions"
+base_url = "http://127.0.0.1:11434/v1"
+allow_http = true
+allow_private_ips = true
+
+[providers.local.compatibility]
+prompt_cache_key = true
+`)
+
+	loaded, err = config.Load(config.LoadOptions{ConfigFile: declared})
+	require.NoError(t, err)
+
+	provider, ok := loaded.Config.Providers[ai.Provider("local")]
+	require.True(t, ok, "the declared provider must be registered")
+	require.NotNil(t, provider.Compatibility.PromptCacheKey)
+	assert.True(t, *provider.Compatibility.PromptCacheKey)
+}

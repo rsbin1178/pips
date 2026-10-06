@@ -39,6 +39,15 @@ func TestSSHCommandBuildsValidatedRequest(t *testing.T) {
 			return nil
 		},
 		Environment: []string{"TERM=xterm-256color", "API_KEY=must-not-be-in-argv"},
+		// The interactive terminal gate reads TERM through this lookup, so the test
+		// never depends on the developer's shell environment.
+		LookupEnv: func(name string) (string, bool) {
+			if name == "TERM" {
+				return "xterm-256color", true
+			}
+
+			return "", false
+		},
 	})
 	require.NoError(t, err)
 

@@ -283,19 +283,25 @@ recorded as workspace changes, and never appear in `git status`. Shell is not
 inspected, and Subagents are exempt from the gate because each Subagent
 evaluates it from its own state.
 
-Each request while plan mode is armed carries an ephemeral system suffix. It
-starts with `Plan mode is active. Do not make any edits or writes to the
-system.`, then a `## Plan File:` section that states either "A plan file exists
-at <path>. You can read it and make edits using the apply_patch tool." or "No
-plan written yet. Write your plan to <path> using the apply_patch tool.",
-followed by the instruction that this is the only editable file and that the
-turn should end with `ask_user` or `exit_plan_mode`. User turns append the
-plan-iteration-versus-execution guidance that keeps feedback in the plan
-instead of executing it, re-entering plan mode with a previous plan prepends a
-`## Returning to Plan Mode` section, and leaving plan mode adds `You have
-exited plan mode. You can now make edits, run tools, and take actions.` or
-`You are now in Agent mode. Continue with the task in the new mode.` None of
-these reminders are persisted to Session history.
+While plan mode is armed, each turn leads with a runtime reminder committed as a
+synthetic `<system-reminder>` user message immediately before the user's prompt.
+It never touches the system prompt, so the request prefix before it stays
+byte-identical from turn to turn and provider prompt caching still covers the
+conversation. The full variant starts with `Plan mode is active. Do not make any
+edits or writes to the system.`, then a `## Plan File:` section that states
+either "A plan file exists at <path>. You can read it and make edits using the
+apply_patch tool." or "No plan written yet. Write your plan to <path> using the
+apply_patch tool.", followed by the instruction that this is the only editable
+file and that the turn should end with `ask_user` or `exit_plan_mode`, plus the
+plan-iteration-versus-execution guidance. Consecutive turns alternate it with the
+one-line `Plan mode is still active. Do not make any edits or writes to the
+system except for the plan file.`. Re-entering plan mode with a previous plan
+prepends a `## Returning to Plan Mode` section, and leaving plan mode adds
+`You have exited plan mode. You can now make edits, run tools, and take
+actions.` or `You are now in Agent mode. Continue with the task in the new
+mode.` The same mechanism carries Coding Goal context and task state. Reminders
+are recorded in the transcript and are hidden from the conversation view, so
+they persist with the Session.
 
 Exit decisions return these exact Tool results:
 
@@ -324,9 +330,18 @@ shows `No plan written yet.` with the approve, request-changes, and quit
 explanation. An agent-initiated `enter_plan_mode` opens a confirmation prompt
 ("Enter plan mode?" / "a approve · d decline") instead. `/view-plan` (aliases
 `/show-plan` and `/plan-view`) reopens the
-plan preview, the status line shows the `plan` flag while plan mode is on, and
-the transcript prints `Agent entered plan mode`, `file edits outside session
-plan.md blocked until plan mode exits`, and `Plan mode off`.
+plan preview — `↑`/`↓`, the wheel and PgUp/PgDn scroll it, `r` retries a read
+that failed, and `Esc` closes it — and the status line shows the `plan` flag
+while plan mode is on.
+
+The transcript commits two plan-mode rows, each an ordinary line that scrolls
+with the conversation rather than a notice pinned under the live tail. An
+approved agent-initiated `enter_plan_mode` commits `Agent entered plan mode ·
+active permission mode: <mode> · file edits outside session plan.md blocked
+until plan mode exits`, and a closed plan review commits `Plan approved · plan
+mode off · active permission mode: <mode>` or `Plan abandoned · plan mode off ·
+active permission mode: <mode>`. A user `/plan`, `Shift+Tab`, a declined entry,
+or a request-changes decision commits no row.
 
 Non-interactive `pips exec --mode plan` never chooses on the user's behalf: a
 plan decision or structured question that needs user input returns exit code `3`
@@ -773,6 +788,75 @@ configurable line; transient safety and operation indicators may still appear.
 A well-formed but unavailable theme ID is accepted by configuration loading,
 but the TUI falls back to `auto` when the registry cannot resolve it and shows
 a bounded notice.
+
+The status line draws the enabled fields in order, separated by `·`. Two of them
+are percentages with an abbreviated label: `context_used` renders the share of
+the model context window in use as `N% ctx`, and `cache_hit_rate` renders the
+share of the last turn's prompt the provider served from its prompt cache as
+`N% cache`. Each is omitted while its denominator is unknown — no context
+window, or no reported prompt size — and a provider that reports no cache reads
+shows an honest `0% cache`. `model` renders a short display name instead of
+`provider/model`: the provider prefix and any nested catalog path are dropped, so
+`xai/grok-4.5` reads as `Grok 4.5` and `cline-pass/deepseek-v4.1-flash` as
+`DeepSeek V4.1 Flash`. The other fields are `workspace`, `session`,
+`task_progress` (`Tasks completed/total`), `phase`, `mode` (Plan mode), and
+`team`. `/statusline` toggles and reorders them.
+
+`/status` opens the read-only runtime panel, shaped like the reference CLI's
+tabbed settings view: four pages — `Status`, `Config`, `Usage`, `Stats` —
+switched with `Tab`/`→` and `Shift+Tab`/`←`.
+
+- `Status` names the session, its workspace and kind, the resolved model and
+  endpoint, the connected MCP servers (`N connected · /mcp`), the effective
+  permissions, the runtime state and the build stamps.
+- `Config` lists the effective settings (execution, model, runtime, interface).
+  `/` focuses its search box, `↓` or `Enter` returns to the list, and the list
+  never shows configuration paths, source kinds, environment names, or raw enum
+  names.
+- `Usage` reports this session's local usage: the context gauge, the cache hit
+  rate, the last turn's tokens, the workspace diff, how long the session has been
+  running, and — once this process has watched a turn run — a `By model` block with
+  each model's turns and token split. pips tracks the last completed interaction
+  rather than a lifetime total and prices nothing, so it states what it measured
+  instead of an estimate; the per-model numbers cover what this process watched, so
+  a resumed session starts from zero.
+- `Stats` aggregates the local Session store's headers: a year-long activity grid
+  with a `Less`/`More` ramp, then the sessions, active days, current and longest
+  streaks, most active day, and first session the selected range covers. `r`
+  cycles the range through `All time`, `Last 30 days`, and `Last 7 days`.
+
+`↑`/`↓`, PgUp/PgDn, Home/End and the wheel scroll a page, `R` re-reads its data,
+and `Esc` closes the panel. In fullscreen rendering the pointer works too: a left
+click on a tab switches pages, a click on the `Stats` range row selects that
+window, and a click on the `Config` search box focuses it. The panel ignores
+motion and drag, so the pointer never takes the conversation's selection gesture
+away from it. The Session store is read only when `Usage` or
+`Stats` is first opened — a glance at `Status` reads no history — and that read
+takes session headers rather than transcripts: it is one bounded entry per
+session, not the picker's full prefix. A session whose file cannot be read is
+counted (`N sessions could not be read`) instead of blanking the page. The
+runtime answers a workspace read only while idle, so a panel opened over a
+running turn says the repository summary waits instead of reporting a failure.
+Surfaces that only read (`/status`, `/mcp`, `/agents`, `/tree`, `/skills`,
+`/view-plan`, `/statusline`, `/theme`) stay reachable while a turn runs. The
+actions inside them that would change the runtime that turn owns — switching a
+tree node, toggling a Skill, cancelling a child run, arming a direct Agent —
+wait for the turn to finish and say so, and `/plan`, `/mode`, `/permissions`,
+`/model`, `/new`, `/resume`, `/fork`, `/reload`, `/compact`, `/review` and
+`Shift+Tab` remain idle-only.
+
+Every model request also carries the session ID as the provider's prompt-cache
+routing key, so requests from one conversation stay on the same cache and a
+resumed session keeps reusing the cache it built. It is sent as
+`prompt_cache_key` only where the endpoint documents the field — OpenAI, xAI,
+Kimi, and Mistral today. Endpoints that answer the field with an error instead of
+ignoring it (Groq, Cerebras, DeepSeek, and strict relays) never receive it, and a
+custom gateway can opt in with:
+
+```toml
+[providers.<id>.compatibility]
+prompt_cache_key = true
+```
 
 The interactive layout has two modes. `screen = "fullscreen"` (the default) gives
 the session a fixed-height region it owns: the wheel and PgUp/PgDn/Home/End scroll
