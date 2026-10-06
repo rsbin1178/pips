@@ -413,9 +413,18 @@ func setFirstError(target *error, candidate error) {
 	}
 }
 
+// processGroupSignalUnavailable reports whether a failed process-group signal
+// means the group is gone or is no longer ours to signal. Cleanup runs after the
+// direct child is reaped, so its pid can be recycled into an unrelated process
+// group; EPERM then describes someone else's process and must not be reported as
+// a failure of the operation that already completed.
+func processGroupSignalUnavailable(err error) bool {
+	return errors.Is(err, syscall.ESRCH) || errors.Is(err, syscall.EPERM)
+}
+
 func signalProcessGroup(pid int, signal syscall.Signal) error {
 	err := syscall.Kill(-pid, signal)
-	if errors.Is(err, syscall.ESRCH) {
+	if processGroupSignalUnavailable(err) {
 		return nil
 	}
 
@@ -424,7 +433,7 @@ func signalProcessGroup(pid int, signal syscall.Signal) error {
 
 func processGroupExists(pid int) (bool, error) {
 	err := syscall.Kill(-pid, 0)
-	if errors.Is(err, syscall.ESRCH) {
+	if processGroupSignalUnavailable(err) {
 		return false, nil
 	}
 

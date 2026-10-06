@@ -68,7 +68,7 @@ func (w *eventWriter) prepareAtLocked(
 		InteractionID: interactionID,
 		RunID:         runID,
 		Type:          eventType,
-		Payload:       cloneEventPayload(payload),
+		Payload:       normalizeEventPayload(cloneEventPayload(payload)),
 	}
 	if err := ValidateEvent(event); err != nil {
 		return Event{}, err

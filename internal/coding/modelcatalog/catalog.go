@@ -295,6 +295,9 @@ func resolveProviders(overrides map[ai.Provider]config.ProviderConfig) (map[ai.P
 		ai.ProviderOpenAI: {
 			endpoint: Endpoint{BaseURL: openai.DefaultBaseURL(), Origin: originBuiltIn},
 			protocol: config.ProtocolOpenAIResponses,
+			// OpenAI documents prompt_cache_key on both Responses and Chat
+			// Completions and names session IDs as the expected value.
+			compatibility: openai.Compatibility{PromptCacheKey: true},
 		},
 		ai.ProviderAnthropic: {
 			endpoint: Endpoint{BaseURL: anthropic.DefaultBaseURL(), Origin: originBuiltIn},

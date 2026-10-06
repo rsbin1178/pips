@@ -157,10 +157,13 @@ type Runtime struct {
 	planMode      planmode.State
 	planReturning bool
 	planExited    bool
-	policy        execution.Policy
-	executor      *execution.Executor
-	tempRoot      *execution.PrivateTempRoot
-	inspector     *git.Inspector
+	// planReminderCount alternates the full and sparse plan reminders across
+	// turns. Entry and compaction reset it so the next reminder is full.
+	planReminderCount uint32
+	policy            execution.Policy
+	executor          *execution.Executor
+	tempRoot          *execution.PrivateTempRoot
+	inspector         *git.Inspector
 	// nonRepositoryReported latches the "workspace is not a Git repository"
 	// notice. The reference agent warns once, when a session starts outside a
 	// repository, instead of repeating the warning on every turn, so this Runtime

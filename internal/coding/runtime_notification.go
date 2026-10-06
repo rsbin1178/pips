@@ -486,9 +486,17 @@ func singleUserText(message ai.Message) (string, bool) {
 	return part.Text, ok
 }
 
+// syntheticMessageIndexes rebuilds the runtime-generated transcript records of a
+// restored session: agent notifications, goal feedback and turn reminders.
 func syntheticMessageIndexes(messages []ai.Message) []int {
 	var indexes []int
 	for index, message := range messages {
+		if isSystemReminder(message) {
+			indexes = append(indexes, index)
+
+			continue
+		}
+
 		text, ok := singleUserText(message)
 		if !ok {
 			continue

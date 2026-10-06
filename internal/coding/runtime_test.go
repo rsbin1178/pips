@@ -2020,15 +2020,31 @@ func telemetryTypes(events []TelemetryEvent) []EventType {
 	return values
 }
 
+// countUserMessages counts the turns' user prompts. Runtime reminders travel as
+// synthetic user messages, so they are not prompts.
 func countUserMessages(messages []ai.Message) int {
 	count := 0
 	for _, message := range messages {
-		if _, ok := message.(ai.UserMessage); ok {
+		if _, ok := message.(ai.UserMessage); ok && !isSystemReminder(message) {
 			count++
 		}
 	}
 
 	return count
+}
+
+// requestReminderText returns the reminder the request's current turn added, if
+// any. Reminders are transcript records, so an earlier turn's reminder is still
+// in the request; the last one is the one this turn injected.
+func requestReminderText(request ai.Request) string {
+	text := ""
+	for _, message := range request.Messages {
+		if isSystemReminder(message) {
+			text, _ = singleUserText(message)
+		}
+	}
+
+	return text
 }
 
 func requestSystemText(request ai.Request) string {
@@ -2491,3 +2507,23 @@ func (*delayedCancelRuntimeModel) Capabilities() ai.Capabilities {
 }
 
 var _ ai.LanguageModel = (*delayedCancelRuntimeModel)(nil)
+
+// TestRuntimeSetsTheSessionPromptCacheKey pins the automatic routing key: every
+// model request carries the session ID, which providers use to route prompt
+// caching, so a resumed conversation keeps reusing the cache it built. Whether
+// the field reaches the wire stays a per-provider compatibility decision.
+func TestRuntimeSetsTheSessionPromptCacheKey(t *testing.T) {
+	t.Parallel()
+
+	model := newRuntimeModel()
+	runtime := openTestRuntimeAt(t, t.TempDir(), SessionTarget{}, model)
+	setRuntimeResponses(model, runtimeTextResponse("done"))
+	collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("hello")))
+
+	sessionID := runtime.Snapshot().SessionID
+	require.NotEmpty(t, sessionID)
+
+	requests := model.Requests()
+	require.NotEmpty(t, requests)
+	assert.Equal(t, sessionID, requests[0].PromptCacheKey)
+}

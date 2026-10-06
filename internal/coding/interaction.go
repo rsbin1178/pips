@@ -35,6 +35,8 @@ type interaction struct {
 	stop                     agent.StopReason
 	hookStopRequested        bool
 	subagentUsage            map[string]struct{}
+	usageByModel             map[string]TokenUsage
+	subagentTotal            TokenUsage
 	runIDs                   []string
 	activeRunID              string
 	contextRecoveryAttempted bool
@@ -64,7 +66,11 @@ func (i *interaction) hookStopRequestedNow() bool {
 	return i.hookStopRequested
 }
 
-func (i *interaction) addSubagentUsage(childSessionID string, usage TokenUsage) {
+// addSubagentUsage folds one child's terminal usage into the interaction and
+// attributes it to the model that ran the child. The parent's completion total
+// includes the child, so a breakdown that credited the child to the parent's
+// model would misreport every child that ran on another model.
+func (i *interaction) addSubagentUsage(childSessionID, modelRef string, usage TokenUsage) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 
@@ -77,7 +83,66 @@ func (i *interaction) addSubagentUsage(childSessionID string, usage TokenUsage) 
 	}
 
 	i.subagentUsage[childSessionID] = struct{}{}
+
+	if i.usageByModel == nil {
+		i.usageByModel = make(map[string]TokenUsage)
+	}
+
+	addModelUsage(i.usageByModel, usageModelRef(modelRef), usage)
+	addUsage(&i.subagentTotal, usage)
 	addUsage(&i.usage, usage)
+}
+
+// modelUsage splits the interaction's total by the model that ran each part:
+// every folded child under its own model, and the remainder under the parent's.
+// Background children appear on neither side, because the parent total never
+// included them.
+func (i *interaction) modelUsage(parentModelRef string) map[string]TokenUsage {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	if i.usage == (TokenUsage{}) {
+		return nil
+	}
+
+	split := make(map[string]TokenUsage, len(i.usageByModel)+1)
+	for model, usage := range i.usageByModel {
+		split[model] = usage
+	}
+
+	if parent := subtractUsage(i.usage, i.subagentTotal); parent != (TokenUsage{}) {
+		addModelUsage(split, usageModelRef(parentModelRef), parent)
+	}
+
+	return split
+}
+
+// usageModelRef keeps one canonical key per model identity, so an unknown ref
+// does not split one model across two entries.
+func usageModelRef(ref string) string {
+	if ref == "" {
+		return "unknown"
+	}
+
+	return ref
+}
+
+// addModelUsage credits one report to a per-model entry.
+func addModelUsage(values map[string]TokenUsage, model string, usage TokenUsage) {
+	current := values[model]
+	addUsage(&current, usage)
+	values[model] = current
+}
+
+// subtractUsage returns total minus part, per class, never below zero.
+func subtractUsage(total, part TokenUsage) TokenUsage {
+	return TokenUsage{
+		InputTokens:       max(0, total.InputTokens-part.InputTokens),
+		OutputTokens:      max(0, total.OutputTokens-part.OutputTokens),
+		ReasoningTokens:   max(0, total.ReasoningTokens-part.ReasoningTokens),
+		CachedInputTokens: max(0, total.CachedInputTokens-part.CachedInputTokens),
+		CacheWriteTokens:  max(0, total.CacheWriteTokens-part.CacheWriteTokens),
+	}
 }
 
 type guardedAgentObserver struct {

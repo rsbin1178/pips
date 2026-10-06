@@ -1140,8 +1140,14 @@ func (r *Runtime) driveHarness(
 	}
 	projector.contextTokens = r.contextTokens
 	projector.synthetic = func(message ai.Message) bool {
-		return r.isAgentNotificationMessage(message) || r.isGoalFeedback(message)
+		return r.isAgentNotificationMessage(message) ||
+			r.isGoalFeedback(message) ||
+			isSystemReminder(message)
 	}
+
+	// The turn's runtime context leads the input, so it is committed to the
+	// transcript before the prompt and then rides with the conversation.
+	messages = r.turnMessages(current, messages)
 
 	var stop agent.StopReason
 	inputPending := cloneMessages(messages)
@@ -1176,8 +1182,9 @@ func (r *Runtime) driveHarness(
 						event.RunID,
 						EventMessageCommitted,
 						MessageCommitted{
-							Message:   message,
-							Synthetic: current.source == InteractionSourceAgentNotification,
+							Message: message,
+							Synthetic: current.source == InteractionSourceAgentNotification ||
+								isSystemReminder(message),
 						},
 					); err != nil {
 						return "", err
@@ -1555,6 +1562,7 @@ func (r *Runtime) finishInteraction(
 
 	if err := emitter.emit(current.id, "", EventInteractionCompleted, InteractionCompleted{
 		Outcome: outcome, Stop: current.stop, Usage: current.usage,
+		ModelUsage:     current.modelUsage(r.resolved.Ref.String()),
 		DurationMillis: durationMillis,
 	}); err != nil {
 		errs = append(errs, err)

@@ -48,7 +48,7 @@ func (r *Runtime) subagentObserver(
 			DurationMillis: event.Duration.Milliseconds(),
 		}
 		if isTerminalSubagentState(event.State) && event.Delivery != subagent.DeliveryBackground {
-			current.addSubagentUsage(event.ChildSessionID, payload.Usage)
+			current.addSubagentUsage(event.ChildSessionID, payload.Model, payload.Usage)
 		}
 		// Nested lifecycle belongs to its actual parent child run, which is not
 		// an active run in the root conversation reducer. Keep it out of the

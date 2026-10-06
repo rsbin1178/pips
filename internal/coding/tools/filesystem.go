@@ -84,11 +84,43 @@ func readRegularFile(
 		return nil, fmt.Errorf("%w: %q exceeds %d bytes", errFileTooLarge, name, maxBytes)
 	}
 
-	if bytes.IndexByte(data, 0) >= 0 || !utf8.Valid(data) {
+	if bytes.IndexByte(data, 0) >= 0 || !utf8.Valid(data) || controlHeavySample(data) {
 		return nil, fmt.Errorf("%w: %q", errBinaryFile, name)
 	}
 
 	return data, nil
+}
+
+const (
+	// binarySampleBytes is the prefix inspected for the non-printable ratio.
+	binarySampleBytes = 8 << 10
+	// binaryControlPercent is the share of control bytes that marks a sample as
+	// non-text.
+	binaryControlPercent = 30
+)
+
+// controlHeavySample reports whether control bytes dominate the sample. Captured
+// terminal output and similar payloads trip it, so escape sequences stay out of
+// the model context and the event stream.
+func controlHeavySample(data []byte) bool {
+	sample := data
+	if len(sample) > binarySampleBytes {
+		sample = sample[:binarySampleBytes]
+	}
+
+	if len(sample) == 0 {
+		return false
+	}
+
+	control := 0
+
+	for _, value := range sample {
+		if value < 9 || value >= 14 && value <= 31 {
+			control++
+		}
+	}
+
+	return control*100 > len(sample)*binaryControlPercent
 }
 
 func inspectTraversalBase(tree *workspace.Tree, name string) (string, error) {

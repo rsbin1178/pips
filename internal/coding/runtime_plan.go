@@ -196,6 +196,8 @@ func (r *Runtime) transitionPlanMode(
 
 	exited := previous.GateArmed() && next == planmode.StateInactive
 
+	entered := next == planmode.StateActive && previous != planmode.StateActive
+
 	r.mu.Lock()
 	r.planMode = next
 	if returning {
@@ -203,6 +205,9 @@ func (r *Runtime) transitionPlanMode(
 	}
 	if exited {
 		r.planExited = true
+	}
+	if entered {
+		r.planReminderCount = 0
 	}
 	r.mu.Unlock()
 

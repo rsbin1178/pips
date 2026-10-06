@@ -469,6 +469,86 @@ func (r *Repository) validateForkSource(source *Handle, atEntryID string) error 
 
 // List returns typed session metadata in newest-first order without taking
 // writer locks.
+// MetadataListing is a header-level view of the store: every durable conversation
+// with the metadata a statistics surface reads, plus how many Sessions could not
+// be read at all.
+type MetadataListing struct {
+	Sessions   []Metadata
+	Unreadable int
+}
+
+// ListMetadata returns header-level metadata for every durable conversation
+// without reading session bodies. It reads one bounded entry per Session instead
+// of the picker's full prefix, which is what makes a statistics surface cheap;
+// the returned Sessions therefore carry header fields (id, kind, creation time)
+// and no name, preview, or transcript counts.
+//
+// A Session whose file fails the security check is skipped and counted rather
+// than failing the whole listing, because one bad file must not blank a page that
+// only reduces history.
+func (r *Repository) ListMetadata(ctx context.Context) (MetadataListing, error) {
+	if err := r.validate(); err != nil {
+		return MetadataListing{}, err
+	}
+
+	if err := ctx.Err(); err != nil {
+		return MetadataListing{}, err
+	}
+
+	stored, err := r.repo.List()
+	if err != nil {
+		return MetadataListing{}, err
+	}
+
+	listing := MetadataListing{}
+	for _, value := range stored {
+		meta, ok, err := projectStoredMetadata(value)
+		if err != nil || !ok {
+			continue
+		}
+		if meta.Kind != KindConversation {
+			continue
+		}
+		if err := secureSessionFile(value.Path); err != nil {
+			listing.Unreadable++
+
+			continue
+		}
+		// One entry is enough to tell a used Session from an abandoned header, and
+		// keeps the read proportional to the Session count instead of its size.
+		prefix, prefixErr := harness.ReadJSONLPrefix(value.Path, harness.JSONLPrefixLimits{
+			MaxBytes: metadataPrefixBytes, MaxEntries: 1,
+		})
+		if prefixErr != nil {
+			listing.Unreadable++
+
+			continue
+		}
+		if len(prefix.Entries) == 0 && !meta.RetainEmpty {
+			continue
+		}
+
+		listing.Sessions = append(listing.Sessions, meta)
+	}
+	sortMetadata(listing.Sessions)
+
+	return listing, nil
+}
+
+// metadataPrefixBytes bounds the entry read ListMetadata performs per Session.
+const metadataPrefixBytes = 8 << 10
+
+// sortMetadata orders a listing newest first, then by identifier.
+func sortMetadata(metas []Metadata) {
+	slices.SortFunc(metas, func(a, b Metadata) int {
+		if order := b.CreatedAt.Compare(a.CreatedAt); order != 0 {
+			return order
+		}
+
+		return strings.Compare(a.ID, b.ID)
+	})
+}
+
 func (r *Repository) List(ctx context.Context) ([]Metadata, error) {
 	if err := r.validate(); err != nil {
 		return nil, err
@@ -511,13 +591,7 @@ func (r *Repository) List(ctx context.Context) ([]Metadata, error) {
 		metas = append(metas, meta)
 	}
 
-	slices.SortFunc(metas, func(a, b Metadata) int {
-		if order := b.CreatedAt.Compare(a.CreatedAt); order != 0 {
-			return order
-		}
-
-		return strings.Compare(a.ID, b.ID)
-	})
+	sortMetadata(metas)
 
 	return metas, nil
 }
