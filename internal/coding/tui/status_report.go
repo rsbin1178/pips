@@ -391,6 +391,7 @@ func (m *Model) statusStatsLines() []statusPageLine {
 			"First session", statusValueOrDefault(summary.firstDay),
 		),
 	)
+	lines = append(lines, m.statusAllTimeLines()...)
 	if unreadable := m.route.statusSessions.Unreadable; unreadable > 0 {
 		lines = append(lines, statusBlank(), statusText(
 			statusLabelIndent+fmt.Sprintf(

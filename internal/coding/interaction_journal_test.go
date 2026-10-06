@@ -193,6 +193,9 @@ func TestBootstrapStateMatchesLiveDurableState(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, live.Durable(), bootstrapped.State.Durable())
+	assert.Equal(t, int64(50), live.Interaction.DurationMillis)
+	assert.Equal(t, int64(50), bootstrapped.State.Interaction.DurationMillis,
+		"a reopened Session rebuilds the measured duration from the journal")
 }
 
 func TestBootstrapStateRecoversOnlyDurablePendingInteraction(t *testing.T) {

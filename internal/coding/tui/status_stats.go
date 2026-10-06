@@ -2,12 +2,15 @@
 package tui
 
 import (
+	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/rsbin1178/pips/internal/coding"
 	"github.com/rsbin1178/pips/internal/coding/session"
 )
 
@@ -299,4 +302,151 @@ func padCells(value string, width int) string {
 	}
 
 	return text
+}
+
+// statusProjectionSummary is the all-time reduction of the listed Sessions'
+// projections. A projection is cumulative per Session, so this ignores the
+// selected range: a 7- or 30-day window cannot filter it without per-day buckets.
+type statusProjectionSummary struct {
+	listed          int
+	usable          int
+	missing         int
+	unreadable      int
+	totalTokens     int
+	favouriteModel  string
+	favouriteTokens int
+	longestMillis   int64
+	averageMillis   int64
+	activeSessions  int
+}
+
+// aggregateStatusProjections sums the listed Sessions' usable projections in one
+// pass. A missing or unusable projection contributes nothing, so one bad file
+// cannot blank the page.
+func aggregateStatusProjections(
+	sessions []session.Metadata,
+	projections map[string]usageProjectionSnapshot,
+) statusProjectionSummary {
+	summary := statusProjectionSummary{listed: len(sessions)}
+	byModel := make(map[string]int)
+	activeTotal := int64(0)
+	for _, meta := range sessions {
+		snapshot, ok := projections[meta.ID]
+		if !ok || snapshot.read == usageProjectionMissing {
+			summary.missing++
+
+			continue
+		}
+		if snapshot.read != usageProjectionUsable {
+			summary.unreadable++
+
+			continue
+		}
+		summary.usable++
+		for ref, usage := range snapshot.projection.totals() {
+			modelTotal := tokenUsageTotal(usage)
+			summary.totalTokens += modelTotal
+			byModel[ref] += modelTotal
+		}
+		if millis := snapshot.projection.activeMillis(); millis > 0 {
+			summary.activeSessions++
+			activeTotal += millis
+			summary.longestMillis = max(summary.longestMillis, millis)
+		}
+	}
+	summary.favouriteModel, summary.favouriteTokens = favouriteProjectedModel(byModel)
+	if summary.activeSessions > 0 {
+		summary.averageMillis = activeTotal / int64(summary.activeSessions)
+	}
+
+	return summary
+}
+
+// tokenUsageTotal is the number of tokens the Session consumed. Input already
+// includes the cached classes and output already includes reasoning, so adding
+// those sub-classes on top would count them twice — the same rule the cost
+// arithmetic follows.
+func tokenUsageTotal(usage coding.TokenUsage) int {
+	return usage.InputTokens + usage.OutputTokens
+}
+
+// favouriteProjectedModel picks the model with the most projected tokens. Ties
+// break on the reference, so the row does not reshuffle between frames.
+func favouriteProjectedModel(byModel map[string]int) (string, int) {
+	refs := make([]string, 0, len(byModel))
+	for ref := range byModel {
+		refs = append(refs, ref)
+	}
+	sort.Strings(refs)
+
+	favourite, tokens := "", 0
+	for _, ref := range refs {
+		if byModel[ref] > tokens {
+			favourite, tokens = ref, byModel[ref]
+		}
+	}
+
+	return favourite, tokens
+}
+
+// statusAllTimeLines reduces the listed Sessions' projections into the cumulative
+// numbers the range rows cannot describe.
+func (m *Model) statusAllTimeLines() []statusPageLine {
+	summary := aggregateStatusProjections(m.route.statusSessions.Sessions, m.route.statusProjections)
+	lines := []statusPageLine{statusBlank(), statusHeading("All time")}
+	lines = append(lines, statusField("Total tokens", tokenCountText(summary.totalTokens)))
+	if summary.favouriteModel == "" {
+		lines = append(lines, statusField("Favourite model", "none"))
+	} else {
+		lines = append(lines, statusField(
+			"Favourite model",
+			summary.favouriteModel+" · "+tokenCountText(summary.favouriteTokens)+" tokens",
+		))
+	}
+	if summary.longestMillis <= 0 {
+		lines = append(lines, statusField("Longest session", "none"))
+	} else {
+		lines = append(lines, statusField(
+			"Longest session", formatInteractionDuration(summary.longestMillis)+" active",
+		))
+	}
+	if summary.activeSessions == 0 {
+		lines = append(lines, statusField("Average session", "none"))
+	} else {
+		lines = append(lines, statusField(
+			"Average session",
+			fmt.Sprintf(
+				"%s active over %s",
+				formatInteractionDuration(summary.averageMillis),
+				statusSessionCountText(summary.activeSessions),
+			),
+		))
+	}
+	lines = append(lines, statusText(statusLabelIndent+statusProjectionCoverageText(summary)))
+
+	return lines
+}
+
+// statusProjectionCoverageText states how many listed Sessions carry a usable
+// projection, so Sessions without one are visibly absent rather than silently
+// zero.
+func statusProjectionCoverageText(summary statusProjectionSummary) string {
+	text := fmt.Sprintf(
+		"Projection coverage: %d of %d sessions have a usable projection.",
+		summary.usable, summary.listed,
+	)
+	if summary.missing > 0 || summary.unreadable > 0 {
+		text += fmt.Sprintf(" %d missing, %d unreadable.", summary.missing, summary.unreadable)
+	}
+
+	return text
+}
+
+// statusSessionCountText pluralizes a Session count.
+func statusSessionCountText(count int) string {
+	if count == 1 {
+		return "1 session"
+	}
+
+	return strconv.Itoa(count) + " sessions"
 }

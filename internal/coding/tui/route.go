@@ -78,6 +78,7 @@ type routeState struct {
 	statusTab           statusPanelTab
 	statusRange         statusStatsRange
 	statusSessions      session.MetadataListing
+	statusProjections   map[string]usageProjectionSnapshot
 	statusMCP           coding.MCPSnapshot
 	statusDataRequested bool
 	statusDataLoading   bool

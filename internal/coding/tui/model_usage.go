@@ -118,6 +118,7 @@ func (t *modelUsageTally) projectionRequest(state coding.State) (usageProjection
 	return usageProjectionRequest{
 		sessionID:     state.SessionID,
 		interactionID: interaction.ID,
+		activeMillis:  interaction.DurationMillis,
 		models:        interaction.ModelUsage,
 	}, true
 }

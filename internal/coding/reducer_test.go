@@ -84,6 +84,35 @@ func TestReduceLiveAndJSONReplayMatch(t *testing.T) {
 	assert.Equal(t, 2, live.Tasks.Total)
 }
 
+// TestReduceInteractionCompletionCarriesDuration pins the runtime's measured
+// duration onto the restart-stable interaction state.
+func TestReduceInteractionCompletionCarriesDuration(t *testing.T) {
+	t.Parallel()
+
+	events := []Event{
+		newSessionEvent(EventSessionOpened, SessionOpened{Provider: ai.ProviderOpenAI, ModelID: "gpt-test"}),
+		newInteractionEvent(EventInteractionStarted, InteractionStarted{}),
+		newInteractionEvent(EventInteractionCompleted, InteractionCompleted{
+			Outcome: InteractionSucceeded, Usage: TokenUsage{InputTokens: 5}, DurationMillis: 12_345,
+		}),
+	}
+
+	var state State
+
+	for index, event := range events {
+		event.Sequence = uint64(index + 1)
+
+		var err error
+
+		state, err = Reduce(state, event)
+		require.NoError(t, err)
+	}
+
+	assert.Equal(t, int64(12_345), state.Interaction.DurationMillis)
+	assert.Equal(t, int64(12_345), state.Durable().Interaction.DurationMillis,
+		"the journal rebuilds the duration, so it belongs to the durable subset")
+}
+
 func TestReduceReturnsDefensiveState(t *testing.T) {
 	t.Parallel()
 

@@ -121,7 +121,7 @@ func BootstrapState(options BootstrapOptions) (BootstrapResult, error) {
 	if recovery.LastID != "" {
 		state.Interaction = InteractionState{
 			ID: recovery.LastID, Outcome: recovery.LastOutcome, Stop: recovery.LastStop,
-			Usage: recovery.LastUsage,
+			Usage: recovery.LastUsage, DurationMillis: recovery.LastDurationMS,
 		}
 	}
 
