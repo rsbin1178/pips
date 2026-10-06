@@ -11,6 +11,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/rsbin1178/pips/internal/coding"
+	"github.com/rsbin1178/pips/internal/coding/config"
 	"github.com/rsbin1178/pips/internal/coding/session"
 )
 
@@ -336,18 +337,24 @@ type statusProjectionSummary struct {
 	longestMillis   int64
 	averageMillis   int64
 	activeSessions  int
+	totalCost       float64
+	unpricedModels  int
 }
 
 // aggregateStatusProjections sums the listed Sessions' usable projections in one
 // pass. A missing or unusable projection contributes nothing, so one bad file
-// cannot blank the page.
+// cannot blank the page. The cost reduction prices each distinct model once and
+// counts the models the configured table could not price.
 func aggregateStatusProjections(
 	sessions []session.Metadata,
 	projections map[string]usageProjectionSnapshot,
+	cost config.CostConfig,
 ) statusProjectionSummary {
 	summary := statusProjectionSummary{listed: len(sessions)}
 	byModel := make(map[string]int)
+	unpriced := make(map[string]struct{})
 	activeTotal := int64(0)
+	totalCost := 0.0
 	for _, meta := range sessions {
 		snapshot, ok := projections[meta.ID]
 		if !ok || snapshot.read == usageProjectionMissing {
@@ -365,6 +372,11 @@ func aggregateStatusProjections(
 			modelTotal := tokenUsageTotal(usage)
 			summary.totalTokens += modelTotal
 			byModel[ref] += modelTotal
+			if amount, priced := modelCost(cost, ref, usage); priced {
+				totalCost += amount
+			} else {
+				unpriced[ref] = struct{}{}
+			}
 		}
 		if millis := snapshot.projection.activeMillis(); millis > 0 {
 			summary.activeSessions++
@@ -376,6 +388,8 @@ func aggregateStatusProjections(
 	if summary.activeSessions > 0 {
 		summary.averageMillis = activeTotal / int64(summary.activeSessions)
 	}
+	summary.totalCost = totalCost
+	summary.unpricedModels = len(unpriced)
 
 	return summary
 }
@@ -410,7 +424,10 @@ func favouriteProjectedModel(byModel map[string]int) (string, int) {
 // statusAllTimeLines reduces the listed Sessions' projections into the cumulative
 // numbers the range rows cannot describe.
 func (m *Model) statusAllTimeLines() []statusPageLine {
-	summary := aggregateStatusProjections(m.route.statusSessions.Sessions, m.route.statusProjections)
+	cost := m.controller.Config().Cost
+	summary := aggregateStatusProjections(
+		m.route.statusSessions.Sessions, m.route.statusProjections, cost,
+	)
 	lines := []statusPageLine{statusBlank(), statusHeading("All time")}
 	lines = append(lines, statusField("Total tokens", tokenCountText(summary.totalTokens)))
 	if summary.favouriteModel == "" {
@@ -440,6 +457,9 @@ func (m *Model) statusAllTimeLines() []statusPageLine {
 			),
 		))
 	}
+	lines = append(lines, statusField(
+		"Cost", costText(summary.totalCost, cost.Currency, summary.unpricedModels),
+	))
 	lines = append(lines, statusText(statusLabelIndent+statusProjectionCoverageText(summary)))
 
 	return lines

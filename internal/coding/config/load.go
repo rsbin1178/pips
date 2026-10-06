@@ -81,6 +81,7 @@ type fileLayer struct {
 	compaction            *CompactionConfig
 	subagent              *SubagentConfig
 	subagentFields        []Field
+	cost                  *CostConfig
 	sandboxWorkspaceWrite *SandboxWorkspaceWriteConfig
 	statusLine            *[]statusline.Item
 	mcpReadOnlyTools      map[string][]string
@@ -131,6 +132,9 @@ func Load(options LoadOptions) (Result, error) {
 				Kind: SourceConfigFile, Detail: options.ConfigFile,
 			}
 		}
+		if layer.cost != nil {
+			result.Config.Cost = *layer.cost
+		}
 		if layer.mcpReadOnlyTools != nil {
 			result.Config.MCPReadOnlyTools = layer.mcpReadOnlyTools
 		}
@@ -163,7 +167,20 @@ type fileConfig struct {
 	Approval              *string                    `toml:"approval"`
 	Compaction            *fileCompaction            `toml:"compaction"`
 	Subagent              *fileSubagent              `toml:"subagent"`
+	Cost                  *fileCost                  `toml:"cost"`
 	MCPReadOnlyTools      map[string][]string        `toml:"mcp_read_only_tools"`
+}
+
+type fileCost struct {
+	Currency *string                     `toml:"currency"`
+	Models   map[string]fileModelPricing `toml:"models"`
+}
+
+type fileModelPricing struct {
+	InputPerMillionTokens       *float64 `toml:"input_per_million_tokens"`
+	CachedInputPerMillionTokens *float64 `toml:"cached_input_per_million_tokens"`
+	CacheWritePerMillionTokens  *float64 `toml:"cache_write_per_million_tokens"`
+	OutputPerMillionTokens      *float64 `toml:"output_per_million_tokens"`
 }
 
 type fileTUI struct {
@@ -629,6 +646,13 @@ func decodeLayer(value fileConfig) (fileLayer, error) {
 		}
 		layer.subagent = &subagent
 	}
+	if value.Cost != nil {
+		cost, err := decodeCost(*value.Cost)
+		if err != nil {
+			return fileLayer{}, err
+		}
+		layer.cost = &cost
+	}
 	if value.SandboxWorkspaceWrite != nil {
 		settings := SandboxWorkspaceWriteConfig{Network: SandboxNetworkOnRequest}
 		if value.SandboxWorkspaceWrite.Network != nil {
@@ -765,6 +789,54 @@ func decodeLayer(value fileConfig) (fileLayer, error) {
 	}
 
 	return layer, nil
+}
+
+// decodeCost resolves the [cost] table. Every price is optional and an absent
+// one counts zero; a negative price fails the load so a typo cannot silently
+// become free tokens. The strict decoder already rejects an unknown key.
+func decodeCost(value fileCost) (CostConfig, error) {
+	cost := CostConfig{
+		Currency: DefaultCostCurrency,
+		Models:   make(map[string]ModelPricing, len(value.Models)),
+	}
+	if value.Currency != nil {
+		if currency := strings.TrimSpace(*value.Currency); currency != "" {
+			cost.Currency = currency
+		}
+	}
+	for _, ref := range sortedMapKeys(value.Models) {
+		pricing, err := decodeModelPricing(value.Models[ref])
+		if err != nil {
+			return CostConfig{}, fmt.Errorf("cost model %q: %w", ref, err)
+		}
+		cost.Models[ref] = pricing
+	}
+
+	return cost, nil
+}
+
+func decodeModelPricing(value fileModelPricing) (ModelPricing, error) {
+	pricing := ModelPricing{}
+	for _, field := range []struct {
+		name   string
+		source *float64
+		target *float64
+	}{
+		{"input_per_million_tokens", value.InputPerMillionTokens, &pricing.InputPerMillionTokens},
+		{"cached_input_per_million_tokens", value.CachedInputPerMillionTokens, &pricing.CachedInputPerMillionTokens},
+		{"cache_write_per_million_tokens", value.CacheWritePerMillionTokens, &pricing.CacheWritePerMillionTokens},
+		{"output_per_million_tokens", value.OutputPerMillionTokens, &pricing.OutputPerMillionTokens},
+	} {
+		if field.source == nil {
+			continue
+		}
+		if *field.source < 0 {
+			return ModelPricing{}, fmt.Errorf("%w: %s must not be negative", ErrInvalid, field.name)
+		}
+		*field.target = *field.source
+	}
+
+	return pricing, nil
 }
 
 func decodeProvider(value fileProvider) (ProviderConfig, error) {
