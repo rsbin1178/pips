@@ -483,12 +483,11 @@ func TestManagerClassifiesMalformedConvergenceAsNoProgress(t *testing.T) {
 	assert.Equal(t, "no_progress", result.Code)
 }
 
-func TestManagerCompactsChildContextBetweenToolTurns(t *testing.T) {
-	t.Parallel()
-
-	settings := harness.CompactionSettings{
-		ContextTokens: 800, ReserveTokens: 100, KeepRecentTokens: 250, SummaryTokens: 64,
-	}
+// compactChildResponses builds this test's scripted child turns. Every subtest
+// needs its own copy: a run normalizes the response it receives in place
+// (normalizeModelToolArguments), and the subtests run in parallel, so one shared
+// response would be read by one goroutine while another writes it.
+func compactChildResponses() []*ai.Response {
 	responses := []*ai.Response{
 		responseToolCall(ai.ToolCallPart{
 			ID: "call-1", Name: readToolName, Args: ai.JSON(`{"path":"large.txt"}`),
@@ -501,10 +500,20 @@ func TestManagerCompactsChildContextBetweenToolTurns(t *testing.T) {
 	responses[0].Usage = ai.Usage{InputTokens: 100, OutputTokens: 20}
 	responses[1].Usage = ai.Usage{InputTokens: 500, OutputTokens: 20}
 
+	return responses
+}
+
+func TestManagerCompactsChildContextBetweenToolTurns(t *testing.T) {
+	t.Parallel()
+
+	settings := harness.CompactionSettings{
+		ContextTokens: 800, ReserveTokens: 100, KeepRecentTokens: 250, SummaryTokens: 64,
+	}
+
 	t.Run("success", func(t *testing.T) {
 		t.Parallel()
 
-		model := &testModel{responses: slices.Clone(responses)}
+		model := &testModel{responses: compactChildResponses()}
 		summarizer := &testModel{responses: []*ai.Response{responseText("compact summary")}}
 		fixture := newManagerFixtureWithConfig(
 			t, model, ExecutionOptions{}, func(config *Config) {
@@ -532,7 +541,7 @@ func TestManagerCompactsChildContextBetweenToolTurns(t *testing.T) {
 	t.Run("summary failure stops before another child request", func(t *testing.T) {
 		t.Parallel()
 
-		model := &testModel{responses: slices.Clone(responses)}
+		model := &testModel{responses: compactChildResponses()}
 		summarizer := &testModel{}
 		fixture := newManagerFixtureWithConfig(
 			t, model, ExecutionOptions{}, func(config *Config) {
@@ -559,7 +568,7 @@ func TestManagerCompactsChildContextBetweenToolTurns(t *testing.T) {
 	t.Run("cancellation interrupts summary", func(t *testing.T) {
 		t.Parallel()
 
-		model := &testModel{responses: slices.Clone(responses)}
+		model := &testModel{responses: compactChildResponses()}
 		summarizer := &blockingTestModel{entered: make(chan struct{})}
 		fixture := newManagerFixtureWithConfig(
 			t, model, ExecutionOptions{}, func(config *Config) {

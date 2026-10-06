@@ -7,6 +7,11 @@ import "context"
 //
 // Bare implementations perform exactly one attempt per call and never retry;
 // wrap them with middleware for resilience.
+//
+// Every call returns a fresh response owned by its caller: an Agent run
+// normalizes the returned message in place, so an implementation must not hand
+// back a cached or shared [Response] — one run would write it while another
+// reads it.
 type LanguageModel interface {
 	// Generate performs a blocking request and returns the completed response.
 	Generate(ctx context.Context, req Request) (*Response, error)
