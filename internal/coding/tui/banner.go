@@ -11,10 +11,12 @@ import (
 )
 
 const (
-	maxStartupBannerWidth  = 72
-	workspaceLabel         = "workspace"
-	pipsLogoWidth          = 27
-	pipsLogoHeight         = 5
+	maxStartupBannerWidth = 72
+	workspaceLabel        = "workspace"
+	pipsLogoWidth         = 27
+	// pipsLogoHeight matches the four header lines beside it, so the block
+	// letters and the text end on the same row.
+	pipsLogoHeight         = 4
 	pipsSideBySideMinInner = 58
 	pipsStackedMinInner    = 34
 )
@@ -24,7 +26,6 @@ var pipsBlockLetters = [pipsLogoHeight][4]string{
 	{"█████ ", "████", "█████ ", " ████"},
 	{"██  ██", " ██ ", "██  ██", "██   "},
 	{"█████ ", " ██ ", "█████ ", " ███ "},
-	{"██    ", " ██ ", "██    ", "   ██"},
 	{"██    ", "████", "██    ", "████ "},
 }
 
@@ -73,9 +74,10 @@ func (m *Model) commitBannerOutput(banner string) tea.Cmd {
 	}
 
 	// Fullscreen has no native history, so the banner becomes the first managed
-	// record instead of a terminal write.
+	// record instead of a terminal write. The managed renderer insets a transcript
+	// entry for it; inline mode prints the text itself, so it insets it here.
 	if m.fullscreen() {
-		m.appendNotice(banner)
+		m.appendBanner(banner)
 		m.rerenderTranscript(false)
 
 		return nil
@@ -85,6 +87,10 @@ func (m *Model) commitBannerOutput(banner string) tea.Cmd {
 
 	if len(parts) == 0 {
 		return nil
+	}
+
+	if banner != "" {
+		parts[0] = insetRows(banner, timelineInset(m.width))
 	}
 
 	return m.printScrollback(strings.Join(parts, "\n\n"))
@@ -100,14 +106,24 @@ func (m *Model) takeStartupBanner() string {
 	return m.renderBanner()
 }
 
-func (m *Model) renderBanner() string {
-	return renderStartupBanner(startupBannerContext{
-		width:     m.width,
+// bannerContext is the header's source at one width. The managed viewport keeps
+// it so a resize re-renders the header instead of re-wrapping a stored string.
+func (m *Model) bannerContext(width int) startupBannerContext {
+	return startupBannerContext{
+		width:     max(1, width),
 		workspace: filepath.Base(m.options.Workspace),
 		model:     string(m.state.Provider) + "/" + m.state.ModelID,
 		theme:     m.theme,
 		noColor:   m.options.NoColor,
-	})
+	}
+}
+
+// renderBanner renders the header at the transcript's content width: without a
+// box it is ordinary conversation content, so it takes the same column band as a
+// message. The inset itself is applied by whoever places the text, because the
+// managed viewport renders it as an entry while inline mode prints it.
+func (m *Model) renderBanner() string {
+	return renderStartupBanner(m.bannerContext(max(1, m.width-2*timelineInset(m.width))))
 }
 
 func interpolateColor(c1, c2 color.Color, t float64) color.Color {
@@ -154,7 +170,7 @@ func renderStartupBanner(context startupBannerContext) string {
 		workspace = workspaceLabel
 	}
 
-	innerWidth := max(1, width-4)
+	innerWidth := max(1, width)
 	palette := paletteFor(context.theme)
 
 	var lines []string
@@ -183,16 +199,10 @@ func renderStartupBanner(context startupBannerContext) string {
 		return ansi.Truncate(content, width, "…")
 	}
 
-	style := lipgloss.NewStyle().
-		Padding(0, 1).
-		Border(lipgloss.RoundedBorder(), true)
-	if context.noColor {
-		style = style.Border(lipgloss.NormalBorder(), true)
-	} else {
-		style = style.BorderForeground(palette.separator)
-	}
-
-	return style.Render(content)
+	// The banner is plain header text rather than a box: it renders inside the
+	// transcript's content column, so it needs no border of its own and no
+	// padding to hold that border off the text.
+	return content
 }
 
 func renderSideBySideBannerLines(
@@ -212,7 +222,6 @@ func renderSideBySideBannerLines(
 		rightLines[1] = ansi.Truncate("workspace  "+workspace, rightWidth, "…")
 		rightLines[2] = ansi.Truncate("model      "+context.model, rightWidth, "…")
 		rightLines[3] = ansi.Truncate("Type / for commands", rightWidth, "…")
-		rightLines[4] = ""
 	} else {
 		titlePrefix := lipgloss.NewStyle().Bold(true).Foreground(palette.session).Render("✻ " + appTitle)
 		agentSuffix := lipgloss.NewStyle().Foreground(palette.muted).Render(" · coding agent")
@@ -230,8 +239,6 @@ func renderSideBySideBannerLines(
 		slashKey := lipgloss.NewStyle().Bold(true).Foreground(palette.workspace).Render("/")
 		cmdLabel := lipgloss.NewStyle().Foreground(palette.muted).Render(" for commands")
 		rightLines[3] = ansi.Truncate(typeLabel+slashKey+cmdLabel, rightWidth, "…")
-
-		rightLines[4] = ""
 	}
 
 	lines := make([]string, pipsLogoHeight)

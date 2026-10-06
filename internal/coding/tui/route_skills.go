@@ -101,7 +101,12 @@ func (m *Model) updateSkillsRouteKey(message tea.KeyPressMsg) (tea.Model, tea.Cm
 	case "ctrl+d":
 		m.route.showDetails = !m.route.showDetails
 	case keyEnter, " ":
-		if len(values) == 0 || m.route.loading || m.state.Phase != coding.PhaseIdle {
+		if len(values) == 0 || m.route.loading {
+			return m, nil
+		}
+		if m.actionContext() != contextIdle {
+			m.route.err = errRouteActionNeedsIdle
+
 			return m, nil
 		}
 

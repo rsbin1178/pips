@@ -350,7 +350,7 @@ func (m *Model) newQuestionPrompt(request question.Request) questionPromptState 
 	editor.MaxHeight = 4
 	editor.MaxContentHeight = 8
 	editor.SetVirtualCursor(false)
-	editor.SetWidth(max(1, m.width-4))
+	editor.SetWidth(max(1, m.promptBandWidth()-4))
 	editor.SetStyles(composerStyles(m.theme, m.options.NoColor))
 
 	selected := make([][]bool, len(request.Questions))
@@ -669,6 +669,14 @@ func (m *Model) promptView() string {
 	}
 }
 
+// promptBandWidth is the render width of the modal prompt band. The band shares
+// the Composer's text column, so it gives up the same two columns on each side
+// that a conversation row is inset by, and its accent gutter then lines up with
+// the transcript's accented blocks.
+func (m *Model) promptBandWidth() int {
+	return max(1, m.width-2*timelineInset(m.width))
+}
+
 //nolint:gocyclo,nestif // The inline question renderer mirrors the explicit navigation state machine.
 func (m *Model) questionPromptView() string {
 	state := &m.prompt.question
@@ -686,7 +694,9 @@ func (m *Model) questionPromptView() string {
 			lines = append(lines, "Error: "+safeError(state.err))
 		}
 
-		return strings.Join(lines, "\n")
+		// This prompt has no accent gutter, so every row still has to be
+		// bounded to the band on its own.
+		return truncateBandRows(strings.Join(lines, "\n"), m.promptBandWidth())
 	}
 	if len(request.Questions) == 0 {
 		return "△ Structured question unavailable"
@@ -748,7 +758,7 @@ func (m *Model) questionPromptView() string {
 				if option.Preview != "" {
 					preview, err := m.markdown.render(
 						option.Preview,
-						max(1, m.width-6),
+						max(1, m.promptBandWidth()-6),
 						m.theme,
 						m.options.NoColor,
 					)
@@ -763,7 +773,7 @@ func (m *Model) questionPromptView() string {
 			questionFocus(cursor == customIndex)+strconv.Itoa(customIndex+1)+". Type something",
 			cursor == customIndex,
 		))
-		lines = append(lines, strings.Repeat("─", max(1, min(m.width-2, 72))))
+		lines = append(lines, strings.Repeat("─", max(1, min(m.promptBandWidth()-2, 72))))
 		chatIndex := customIndex + 1
 		lines = append(lines, m.styleQuestionChoice(
 			questionFocus(cursor == chatIndex)+strconv.Itoa(chatIndex+1)+". Chat about this",
@@ -800,7 +810,7 @@ func (m *Model) questionPromptView() string {
 		bar = lipgloss.NewStyle().Foreground(paletteFor(m.theme).session).Render(bar)
 	}
 	for index := range lines {
-		lines[index] = bar + " " + ansi.Truncate(lines[index], max(1, m.width-2), "…")
+		lines[index] = bar + " " + ansi.Truncate(lines[index], max(1, m.promptBandWidth()-2), "…")
 	}
 
 	return strings.Join(lines, "\n")
@@ -873,7 +883,7 @@ func (m *Model) approvalPromptView() string {
 		lines = append(lines, safeError(m.prompt.err))
 	}
 
-	return renderGutterLines(lines, m.width, m.options.NoColor, paletteFor(m.theme).warning)
+	return renderGutterLines(lines, m.promptBandWidth(), m.options.NoColor, paletteFor(m.theme).warning)
 }
 
 // approvalPromptRequestLines shows exactly what is being approved. The command
@@ -1040,6 +1050,17 @@ func renderGutterLines(lines []string, width int, noColor bool, tone color.Color
 	return strings.Join(rows, "\n")
 }
 
+// truncateBandRows bounds every row of an unguttered prompt to the band width, so
+// a long prompt or editor row cannot widen the frame the renderer paints.
+func truncateBandRows(content string, width int) string {
+	rows := strings.Split(content, "\n")
+	for index, row := range rows {
+		rows[index] = ansi.Truncate(row, max(1, width), "…")
+	}
+
+	return strings.Join(rows, "\n")
+}
+
 func (m *Model) promptApprovalState() coding.ApprovalState {
 	if m.prompt.team == nil {
 		return m.state.Approval
@@ -1106,5 +1127,5 @@ func (m *Model) compactPromptView() string {
 		)
 	}
 
-	return renderGutterLines(lines, m.width, m.options.NoColor, paletteFor(m.theme).warning)
+	return renderGutterLines(lines, m.promptBandWidth(), m.options.NoColor, paletteFor(m.theme).warning)
 }

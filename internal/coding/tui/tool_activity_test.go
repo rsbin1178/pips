@@ -181,7 +181,7 @@ func TestGenericToolMalformedArgumentsFallBackToIdentity(t *testing.T) {
 	rendered := renderTimeline(
 		projectTimeline(state), newMarkdownRenderer(8), 80, themeDark, true,
 	)
-	assert.Equal(t, "✻ Calling\n  └ custom.lookup", rendered)
+	assert.Equal(t, insetExpected("✻ Calling\n  └ custom.lookup"), rendered)
 }
 
 func TestToolCompactProjectionOmitsUnsafePaths(t *testing.T) {
@@ -376,7 +376,7 @@ func TestTimelineRendersGenericCallAndBoundedResult(t *testing.T) {
 		themeDark,
 		true,
 	)
-	assert.Contains(t, rendered, "• Called\n  └ exa.web_search_exa")
+	assert.Contains(t, rendered, insetExpected("• Called\n  └ exa.web_search_exa"))
 	assert.Contains(t, rendered, "Codex tool presentation")
 	assert.Contains(t, rendered, "No search results found.")
 }
@@ -592,7 +592,7 @@ func TestTimelineShowsPatchFailureReason(t *testing.T) {
 			rendered := renderTimeline(
 				projectTimeline(state), newMarkdownRenderer(8), 100, themeDark, true,
 			)
-			assert.Equal(t, "✗ Workspace update failed\n  └ "+test.want, rendered)
+			assert.Equal(t, insetExpected("✗ Workspace update failed\n  └ "+test.want), rendered)
 			assert.NotContains(t, rendered, "+do-not-render")
 			assert.NotContains(t, rendered, "do-not-disclose")
 
@@ -620,11 +620,11 @@ func TestTimelineBoundsPatchFailureReason(t *testing.T) {
 	blocks := projectTimeline(state)
 	rendered := renderTimeline(blocks, newMarkdownRenderer(8), 80, themeDark, true)
 
-	assert.Equal(t, "✗ Workspace update failed\n"+
+	assert.Equal(t, insetExpected("✗ Workspace update failed\n"+
 		"  └ invalid patch\n"+
 		"    first detail\n"+
 		"    … +2 lines (ctrl+t for details)\n"+
-		"    last detail", rendered)
+		"    last detail"), rendered)
 	assert.NotContains(t, rendered, "omitted detail")
 	require.Len(t, blocks, 1)
 	assert.Contains(t, newToolDetailView(blocks[0]).text(), "omitted detail")
@@ -708,7 +708,7 @@ func TestTimelineNamesSingleFilePatchOperation(t *testing.T) {
 				themeDark,
 				true,
 			)
-			assert.Equal(t, test.want, rendered)
+			assert.Equal(t, insetExpected(test.want), rendered)
 			assert.NotContains(t, rendered, strings.TrimSpace(test.row))
 		})
 	}
@@ -737,7 +737,9 @@ func TestTimelineBoundsExplorationRowsAtNarrowWidths(t *testing.T) {
 		themeDark,
 		true,
 	)
-	assert.Contains(t, rendered, "… 3 more actions (ctrl+t")
+	// The inset narrows the content band, so a narrow frame truncates the key
+	// hint while keeping the bounded action count.
+	assert.Contains(t, rendered, "… 3 more actions")
 	assert.Len(t, strings.Split(rendered, "\n"), 8)
 	for line := range strings.SplitSeq(rendered, "\n") {
 		assert.LessOrEqual(t, ansi.StringWidth(line), 32)

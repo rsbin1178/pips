@@ -57,6 +57,8 @@ func TestPlanReviewPromptApprovesWithLineComments(t *testing.T) {
 	assert.Equal(t, []string{"Line 1: Split this into two steps"}, controller.resolutions[0].Comments)
 	assert.Empty(t, controller.resolutions[0].Notes)
 	assert.Equal(t, promptNone, model.prompt.kind)
+	require.Len(t, model.completionMarkers, 1)
+	assert.Contains(t, model.completionMarkers[0].notice, "Plan approved · plan mode off")
 }
 
 func TestPlanReviewPromptScrollsAndCommentsOnARange(t *testing.T) {
@@ -128,6 +130,7 @@ func TestPlanReviewPromptRequestsChangesWithNotes(t *testing.T) {
 	assert.Equal(t, planreview.DecisionRevise, controller.resolutions[0].Decision)
 	assert.Equal(t, "Add migration rollback details.", controller.resolutions[0].Notes)
 	assert.Empty(t, controller.resolutions[0].Comments)
+	assert.Empty(t, model.completionMarkers, "a revision request prints no row")
 }
 
 func TestPlanReviewPromptEscapeAndTabReturnToPreview(t *testing.T) {
@@ -173,6 +176,8 @@ func TestPlanReviewPromptQuitsOrCopiesThePlan(t *testing.T) {
 	require.Len(t, controller.resolutions, 1)
 	assert.Equal(t, planreview.DecisionQuit, controller.resolutions[0].Decision)
 	assert.Empty(t, state.comments)
+	require.Len(t, model.completionMarkers, 1)
+	assert.Contains(t, model.completionMarkers[0].notice, "Plan abandoned · plan mode off")
 }
 
 func TestPlanReviewPromptExplainsAnEmptyPlan(t *testing.T) {
@@ -226,6 +231,9 @@ func TestPlanEnterPromptApprovesAndDeclines(t *testing.T) {
 	assert.Equal(t, planreview.DecisionApprove, approveController.resolutions[0].Decision)
 	assert.Empty(t, approveController.resolutions[0].Comments)
 	assert.Empty(t, approveController.resolutions[0].Notes)
+	// The approved agent-initiated entry commits its transition row.
+	require.Len(t, model.completionMarkers, 1)
+	assert.Contains(t, model.completionMarkers[0].notice, "Agent entered plan mode")
 
 	declineController := newPlanPromptController(t, planreview.KindEnter, "")
 	model = readyModelWithController(t, declineController, true)
@@ -236,6 +244,7 @@ func TestPlanEnterPromptApprovesAndDeclines(t *testing.T) {
 
 	require.Len(t, declineController.resolutions, 1)
 	assert.Equal(t, planreview.DecisionDecline, declineController.resolutions[0].Decision)
+	assert.Empty(t, model.completionMarkers, "a declined entry prints no row")
 }
 
 func TestViewPlanCommandPreviewsTheSavedPlan(t *testing.T) {
@@ -272,6 +281,30 @@ func TestViewPlanCommandPreviewsTheSavedPlan(t *testing.T) {
 			assert.Nil(t, command)
 		})
 	}
+}
+
+// TestViewPlanScrollsWithTheWheel pins the read-only plan preview's scroll
+// inputs: a wheel notch moves the same window its PgUp/PgDn keys do, and it
+// clamps at the top.
+func TestViewPlanScrollsWithTheWheel(t *testing.T) {
+	t.Parallel()
+
+	controller := &planPromptController{
+		stubController: stubController{state: readyState()},
+		document: coding.PlanDocument{
+			Exists:  true,
+			Content: "# Plan\n\n" + strings.Repeat("- step\n", 40),
+		},
+	}
+	model := readyModelWithController(t, controller, true)
+	model.Update(tea.WindowSizeMsg{Width: 60, Height: 24})
+	driveModelCommands(t, model, model.startPlanView())
+	require.Equal(t, promptPlanView, model.prompt.kind)
+
+	model.Update(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
+	assert.Equal(t, wheelLinesDefault, model.prompt.planView.offset)
+	model.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	assert.Zero(t, model.prompt.planView.offset)
 }
 
 func TestViewPlanPromptReportsAMissingPlan(t *testing.T) {

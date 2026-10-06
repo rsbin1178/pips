@@ -46,6 +46,16 @@ func (m *Model) permissionState() runtimecontrol.PermissionState {
 	return m.controller.Permissions()
 }
 
+// refreshPermissionMode caches the effective sandbox mode for the Composer's
+// permission row, which is drawn on every frame.
+func (m *Model) refreshPermissionMode() {
+	if m.controller == nil {
+		return
+	}
+
+	m.permissionMode = m.controller.Permissions().Sandbox
+}
+
 func (m *Model) updatePermissionsPickerKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.picker.kind != pickerPermissions || m.picker.controlling {
 		return m, nil

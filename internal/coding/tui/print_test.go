@@ -4,41 +4,45 @@ import (
 	"strings"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/rsbin1178/pips/internal/coding"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestInspectionCommandsPrintIntoScrollback(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name    string
-		command commandDescriptor
-		want    string
-	}{
-		{name: "help", command: commandDescriptor{name: "help"}, want: "Help"},
-		{name: "status", command: commandDescriptor{name: "status"}, want: "Status"},
+	model := readyModelWithController(t, newOverlayController(readyState()), true)
+	model.state.Changes = &coding.WorkspaceChanged{
+		Entries: []coding.WorkspaceChange{{Kind: "modified", Path: "main.go"}},
 	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
+	_, command := model.executeCommand(commandDescriptor{name: "help"})
 
-			model := readyModelWithController(t, newOverlayController(readyState()), true)
-			model.state.Changes = &coding.WorkspaceChanged{
-				Entries: []coding.WorkspaceChange{{Kind: "modified", Path: "main.go"}},
-			}
-			_, command := model.executeCommand(test.command)
-			assert.Contains(t, driveModelCommandsCapture(t, model, command), test.want)
-			assert.Equal(t, routeNone, model.route.kind)
-		})
-	}
+	assert.Contains(t, driveModelCommandsCapture(t, model, command), "Help")
+	assert.Equal(t, routeNone, model.route.kind)
 }
 
-// TestStatusOmitsTheMissingRepositoryNotice asserts /status lists every real
-// integration notice and drops the one that only reports a workspace without
-// Git: the missing change summary is a property of the workspace, and the agent
-// stays fully usable there.
-func TestStatusOmitsTheMissingRepositoryNotice(t *testing.T) {
+// TestInspectionOutputWaitsForAnOpenRoute pins the print path: a report that
+// arrives while a route owns the screen is held instead of landing above the
+// preview, and it prints once the route returns.
+func TestInspectionOutputWaitsForAnOpenRoute(t *testing.T) {
+	t.Parallel()
+
+	model := readyModelWithController(t, newOverlayController(readyState()), true)
+	model.Update(tea.WindowSizeMsg{Width: 60, Height: 24})
+	model.openMCPRoute()
+	require.Equal(t, routeMCP, model.route.kind)
+
+	command := model.printInspection("Status", "held while a route owns the screen")
+	assert.Nil(t, command, "no native write may land above the route")
+	assert.Empty(t, model.presentation.writes)
+
+	printed := driveModelCommandsCapture(t, model, model.closeRouteToParent())
+	assert.Contains(t, printed, "held while a route owns the screen")
+}
+
+func TestStatusReportOmitsTheMissingRepositoryNotice(t *testing.T) {
 	t.Parallel()
 
 	model := readyModelWithController(t, newOverlayController(readyState()), true)
@@ -47,7 +51,7 @@ func TestStatusOmitsTheMissingRepositoryNotice(t *testing.T) {
 		keptDiagnosticFixture(),
 	}
 
-	status := model.statusContent()
+	status := statusPageText(model, statusTabStatus)
 
 	assert.Contains(t, status, keptDiagnosticFixture().Message)
 	assert.NotContains(t, status, suppressedDiagnosticFixture().Message)

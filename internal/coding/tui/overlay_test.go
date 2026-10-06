@@ -289,38 +289,38 @@ func TestStatusCommandRefreshesCompactWorktreeSummaryAsynchronously(t *testing.T
 		status:            status,
 	}
 	model := readyModelWithController(t, controller, true)
-
-	command := model.loadWorkspaceStatus()
+	model.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	_, command := model.executeCommand(commandDescriptor{name: commandStatus})
+	require.Equal(t, routeStatus, model.route.kind)
 	require.NotNil(t, command)
 	assert.True(t, model.worktreeLoading)
 	assert.Contains(t, model.statusLine(), "inspecting Git")
-	_, printedCommand := model.Update(command())
-	printed := commandOutput(printedCommand)
+	driveModelCommands(t, model, command)
 
 	assert.False(t, model.worktreeLoading)
-	assert.Contains(t, printed, "Status")
-	assert.Contains(t, printed, "Repository: main ↑1 ↓0 · 2 changed")
-	assert.NotContains(t, printed, "diff --git")
-	assert.NotContains(t, printed, "runtime.go")
-	assert.Contains(t, model.statusContent(), "Repository: main ↑1 ↓0 · 2 changed")
 	assert.Equal(t, 1, controller.calls)
+	report := statusPageText(model, statusTabStatus)
+	assert.Contains(t, report, "Repository: main ↑1 ↓0 · 2 changed")
+	assert.NotContains(t, report, "diff --git")
+	assert.NotContains(t, report, "runtime.go")
 }
 
-func TestStatusKeepsRuntimeDetailsWhenGitStatusFails(t *testing.T) {
+func TestStatusRouteKeepsRuntimeDetailsWhenGitStatusFails(t *testing.T) {
 	t.Parallel()
 
 	controller := &worktreeController{
 		overlayController: newOverlayController(readyState()),
 		err:               errors.New("git inspector unavailable"),
 	}
-	model := readyModelWithController(t, controller, true)
-	_, printedCommand := model.Update(model.loadWorkspaceStatus()())
-	printed := commandOutput(printedCommand)
+	model := readyModelWithController(t, controller, false)
+	model.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	_, command := model.executeCommand(commandDescriptor{name: commandStatus})
+	driveModelCommands(t, model, command)
 
-	assert.Contains(t, printed, "Status")
-	assert.Contains(t, printed, "Model:")
-	assert.Contains(t, printed, "Repository: unavailable")
-	assert.Contains(t, printed, "git inspector unavailable")
+	require.Error(t, model.route.err)
+	report := statusPageText(model, statusTabStatus)
+	assert.Contains(t, report, "Model:")
+	assert.Contains(t, report, "Repository: unavailable (Git status: git inspector unavailable)")
 }
 
 func TestStatusInspectionCanBeCanceledWithoutPrintingAnError(t *testing.T) {
@@ -350,9 +350,9 @@ func TestStatusInspectionShowsOnlyRequestOutputLimit(t *testing.T) {
 	t.Parallel()
 
 	model := readyModelWithController(t, newOverlayController(readyState()), true)
-	content := model.statusContent()
+	content := statusPageText(model, statusTabStatus)
 
-	assert.Contains(t, content, "Context:")
+	assert.Contains(t, content, "Context window:")
 	assert.Contains(t, content, "Request output:")
 	assert.NotContains(t, content, "Model output:")
 }
@@ -459,18 +459,19 @@ func approvalReviewState() coding.State {
 
 type overlayController struct {
 	interactionController
-	capabilities ai.Capabilities
-	resolutions  []approval.Resolution
-	sessions     []session.Metadata
-	teamRecovery map[string]runtimecontrol.TeamRecoveryHint
-	recoveries   []coding.TeamRecoveryCandidate
-	resumed      []string
-	models       []modelcatalog.Selection
-	entries      []modelcatalog.Entry
-	newCalls     int
-	tree         coding.SessionTree
-	preview      coding.CompactionPreview
-	navigations  []struct {
+	capabilities       ai.Capabilities
+	resolutions        []approval.Resolution
+	sessions           []session.Metadata
+	unreadableSessions int
+	teamRecovery       map[string]runtimecontrol.TeamRecoveryHint
+	recoveries         []coding.TeamRecoveryCandidate
+	resumed            []string
+	models             []modelcatalog.Selection
+	entries            []modelcatalog.Entry
+	newCalls           int
+	tree               coding.SessionTree
+	preview            coding.CompactionPreview
+	navigations        []struct {
 		entryID   string
 		summarize bool
 	}
@@ -685,6 +686,15 @@ func (*overlayController) Continue(context.Context) iter.Seq2[coding.Event, erro
 
 func (c *overlayController) ListSessions(context.Context) ([]session.Metadata, error) {
 	return append([]session.Metadata(nil), c.sessions...), nil
+}
+
+// ListAllSessions stands in for the cross-Workspace header listing the status
+// panel's statistics page reads.
+func (c *overlayController) ListAllSessions(context.Context) (session.MetadataListing, error) {
+	return session.MetadataListing{
+		Sessions:   append([]session.Metadata(nil), c.sessions...),
+		Unreadable: c.unreadableSessions,
+	}, nil
 }
 
 func (c *overlayController) ListSessionSummaries(

@@ -101,6 +101,7 @@ type Controller interface {
 	Config() config.Config
 	Detached() bool
 	ListSessions(context.Context) ([]session.Metadata, error)
+	ListAllSessions(context.Context) (session.MetadataListing, error)
 	ListSessionSummaries(context.Context) ([]runtimecontrol.SessionSummary, error)
 	ListSubagents(context.Context) ([]subagent.Summary, error)
 	InspectSubagent(context.Context, string) (subagent.Detail, error)
@@ -223,14 +224,25 @@ type TextSaveRequest struct {
 type TextSaver func(context.Context, TextSaveRequest) (string, error)
 
 // Options contain the CLI-owned resources used by one TUI Program.
+// BuildStamp is the build identity the TUI reports, so a display surface never
+// has to import the CLI that stamped the binary.
+type BuildStamp struct {
+	Version string
+	Commit  string
+	Date    string
+}
+
 type Options struct {
-	Input          io.Reader
-	Output         io.Writer
-	Environment    []string
-	Workspace      string
-	ThemeDirectory string
-	Trusted        bool
-	NoColor        bool
+	Input       io.Reader
+	Output      io.Writer
+	Environment []string
+	Workspace   string
+	// SessionsDirectory is the store root the Usage page's projection sidecar
+	// lives under. An empty value keeps the projection unavailable.
+	SessionsDirectory string
+	ThemeDirectory    string
+	Trusted           bool
+	NoColor           bool
 	// Screen selects the interactive render layout.
 	Screen ScreenMode
 	// AltScreen selects the terminal buffer independently of the layout, so a
@@ -253,6 +265,7 @@ type Options struct {
 	Clipboard       ImageClipboard
 	ImageIngress    ImageIngress
 	OnExit          ExitHandler
+	Build           BuildStamp
 	StatusLine      []statusline.Item
 	SaveStatusLine  StatusLineSaver
 	SaveTheme       ThemeSaver

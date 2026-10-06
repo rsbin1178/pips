@@ -245,13 +245,18 @@ func matchColumns(row, query string) (int, int, bool) {
 
 // highlightColumns wraps a visual column range in style, preserving the escape
 // sequences around it so the row's own styling survives the splice.
+// highlightColumns paints one addressed span. The span's own styling is replaced
+// rather than wrapped: a row can carry its own SGR inside the span (inline code
+// background, a bold run, a dimmed suffix), and any reset in there would cancel
+// the highlight the span is meant to carry, leaving most of the addressed cells
+// unpainted.
 func highlightColumns(value string, start, end int, style lipgloss.Style) string {
 	if end <= start {
 		return value
 	}
 
 	return ansi.Cut(value, 0, start) +
-		style.Render(ansi.Cut(value, start, end)) +
+		style.Render(ansi.Strip(ansi.Cut(value, start, end))) +
 		ansi.Cut(value, end, ansi.StringWidth(value))
 }
 

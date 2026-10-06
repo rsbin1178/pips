@@ -8,12 +8,42 @@ import (
 
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding"
 	"github.com/rsbin1178/pips/internal/coding/attachment"
+	"github.com/rsbin1178/pips/internal/coding/config"
+	"github.com/rsbin1178/pips/internal/coding/runtimecontrol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// TestComposerBoxShowsThePermissionMode pins the box's bottom border: the
+// right-aligned permission mode replaces the end of that rule, so the mode names
+// itself without spending an inner row of the input. A short window keeps the
+// plain border instead.
+func TestComposerBoxShowsThePermissionMode(t *testing.T) {
+	t.Parallel()
+
+	controller := newOverlayController(readyState())
+	controller.permissions = runtimecontrol.PermissionState{Sandbox: config.SandboxWorkspaceWrite}
+	model := fullscreenModel(t, controller, false)
+	model.Update(tea.WindowSizeMsg{Width: 60, Height: 24})
+
+	rows := strings.Split(ansi.Strip(model.View().Content), "\n")
+	row := lineContaining(rows, "Workspace write")
+	require.Greater(t, row, 0, "the box names the permission mode")
+	gap := strings.Repeat(" ", composerModeGap)
+	assert.True(t, strings.HasPrefix(rows[row], "╰──"), "the bottom border opens the label row")
+	assert.True(t, strings.HasSuffix(rows[row], "Workspace write"+gap+"─╯"),
+		"the label sits in the right corner of the border")
+	assert.True(t, strings.HasPrefix(rows[row-1], "│ "+inputArrow),
+		"the input row sits directly above the border")
+
+	model.Update(tea.WindowSizeMsg{Width: 60, Height: 10})
+	assert.NotContains(t, ansi.Strip(model.View().Content), "Workspace write",
+		"a short window keeps the plain border")
+}
 
 func TestComposerInsertPasteThresholds(t *testing.T) {
 	t.Parallel()

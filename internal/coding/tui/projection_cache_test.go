@@ -337,18 +337,18 @@ func TestProjectionCacheMatchesPureProjection(t *testing.T) {
 			},
 		},
 		{
-			name: "plan mode notices added",
+			name: "plan mode notice appended",
 			mutate: func(_ *testing.T, model *Model) {
-				model.planModeNotices = []string{"notice"}
+				model.queuePlanModeNotice("plan row")
 			},
 		},
 		{
-			name: "plan mode notices cleared",
+			name: "second plan mode notice appended",
 			arrange: func(_ *testing.T, model *Model) {
-				model.planModeNotices = []string{"notice"}
+				model.queuePlanModeNotice("plan row")
 			},
 			mutate: func(_ *testing.T, model *Model) {
-				model.planModeNotices = nil
+				model.queuePlanModeNotice("second plan row")
 			},
 		},
 		{

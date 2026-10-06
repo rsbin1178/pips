@@ -49,6 +49,11 @@ func (m *Model) presentationView(content string) tea.View {
 	view.SetContent(content)
 	view.WindowTitle = appTitle
 	view.AltScreen, view.MouseMode = m.terminalModes()
+	// A frame that captures the pointer resolves gestures against what it painted,
+	// so every surface gets the same handler: it decides what its own frame affords.
+	if m.mouseReportingEnabled() {
+		view.OnMouse = m.handleMouse
+	}
 
 	return view
 }

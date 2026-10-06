@@ -7,9 +7,85 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/rsbin1178/pips/ai"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// TestConversationAlignsWithTheComposerTextColumn pins the layout contract: a
+// message, its wrapped rows and the text inside the input box share one column,
+// so the conversation reads as a single column with the Composer.
+func TestConversationAlignsWithTheComposerTextColumn(t *testing.T) {
+	t.Parallel()
+
+	state := readyState()
+	state.Transcript = []ai.Message{ai.UserText("align me")}
+	model := fullscreenModel(t, stubController{state: state}, true)
+	model.Update(tea.WindowSizeMsg{Width: 60, Height: 24})
+
+	messageColumn, composerColumn := -1, -1
+	for row := range strings.SplitSeq(ansi.Strip(model.View().Content), "\n") {
+		// Columns are display cells, not bytes: the frame is full of box drawing.
+		if at := strings.Index(row, inputArrow); at >= 0 {
+			column := ansi.StringWidth(row[:at])
+			if strings.Contains(row, "❯ align me") {
+				messageColumn = column
+			}
+			if strings.HasPrefix(strings.TrimSpace(row), "│ "+inputArrow) {
+				composerColumn = column
+			}
+		}
+	}
+
+	require.Equal(t, transcriptHorizontalInset, messageColumn, "the message sits at the Composer's text column")
+	require.Equal(t, messageColumn, composerColumn, "the input box's text shares that column")
+}
+
+// TestFullscreenFrameFillsTheContainer pins the layout: a frame that owns the
+// screen pads its transcript band, so the Composer and the status line land on
+// the bottom of the container instead of floating under a short conversation. A
+// frame in the terminal's main buffer keeps its content height, so the shell's
+// own history stays visible above it.
+func TestFullscreenFrameFillsTheContainer(t *testing.T) {
+	t.Parallel()
+
+	fullscreen := fullscreenModel(t, stubController{state: readyState()}, true)
+	fullscreen.Update(tea.WindowSizeMsg{Width: 80, Height: 30})
+	frame := ansi.Strip(fullscreen.View().Content)
+	assert.Equal(t, 30, frameHeight(frame), "the frame fills the container")
+	rows := strings.Split(frame, "\n")
+	assert.Contains(t, rows[len(rows)-1], "idle", "the status line closes the frame")
+
+	inline := readyModel(t, true)
+	inline.Update(tea.WindowSizeMsg{Width: 80, Height: 30})
+	assert.Less(t, frameHeight(ansi.Strip(inline.View().Content)), 30,
+		"a main-buffer frame keeps the terminal's history visible")
+}
+
+// TestPromptAlignsWithTheComposerTextColumn pins that a modal prompt moves in
+// with the rest of the frame content: its accent gutter takes the column where a
+// transcript's accented block puts its own, so only the bordered boxes start at
+// the frame edge.
+func TestPromptAlignsWithTheComposerTextColumn(t *testing.T) {
+	t.Parallel()
+
+	model := readyModelWithController(t, newOverlayController(approvalReviewState()), true)
+	model.Update(tea.WindowSizeMsg{Width: 60, Height: 24})
+	require.Equal(t, promptApproval, model.prompt.kind)
+
+	gutterColumn, borderColumn := -1, -1
+	for row := range strings.SplitSeq(ansi.Strip(model.View().Content), "\n") {
+		if at := strings.Index(row, errorAccentBar); at >= 0 && gutterColumn < 0 {
+			gutterColumn = ansi.StringWidth(row[:at])
+		}
+		if at := strings.Index(row, "┌"); at >= 0 && borderColumn < 0 {
+			borderColumn = ansi.StringWidth(row[:at])
+		}
+	}
+
+	require.Equal(t, transcriptHorizontalInset, gutterColumn, "the accent gutter shares the content column")
+	require.Equal(t, 0, borderColumn, "only the bordered Composer starts at the frame edge")
+}
 
 // frameHeight counts the physical rows a composed view occupies.
 func frameHeight(content string) int {

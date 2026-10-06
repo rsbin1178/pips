@@ -74,6 +74,12 @@ func newPTYHarness(t *testing.T, envVar, testName string, rows, cols uint16, ext
 		_ = slave.Close()
 		_ = master.Close()
 		<-readDone
+
+		// A failure is only diagnosable with the helper's own output, and the
+		// buffer is complete once the reader has drained.
+		if t.Failed() {
+			t.Logf("helper output:\n%s", harness.output.String())
+		}
 	})
 
 	return harness

@@ -58,9 +58,15 @@ func (m *Model) updateTreeRouteKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd)
 	case "f":
 		m.route.forkMode = true
 	case keyEnter, "s":
-		if len(values) == 0 || m.route.loading || m.state.Phase != coding.PhaseIdle {
+		if len(values) == 0 || m.route.loading {
 			return m, nil
 		}
+		if m.actionContext() != contextIdle {
+			m.route.err = errRouteActionNeedsIdle
+
+			return m, nil
+		}
+		m.route.err = nil
 		entryID := values[m.route.cursor].ID
 		if m.route.forkMode {
 			return m, m.runControl(operationFork, entryID, modelcatalog.Selection{})

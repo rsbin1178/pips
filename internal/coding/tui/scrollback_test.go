@@ -15,7 +15,7 @@ import (
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding"
 	"github.com/rsbin1178/pips/internal/coding/changes"
-	"github.com/rsbin1178/pips/internal/coding/planmode"
+	"github.com/rsbin1178/pips/internal/coding/planreview"
 	"github.com/rsbin1178/pips/internal/coding/subagent"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -69,47 +69,113 @@ func TestScrollbackCommitsStableBlocksOnlyOnce(t *testing.T) {
 	assert.NotContains(t, active, "Read")
 }
 
-func TestScrollbackCommitsPlanModeNoticesExactlyOnce(t *testing.T) {
+func TestScrollbackCommitsPlanModeNoticeExactlyOnce(t *testing.T) {
 	t.Parallel()
 
 	model := readyModel(t, true)
-	model.state.PlanMode = planmode.StateActive
-	model.queuePlanModeNotices(planmode.StatePending)
+	// The rows are one line each; a wide frame keeps the renderer from wrapping
+	// them and breaking the exact-text assertions.
+	model.width = 400
+	entered := planModeEnteredNotice("workspace-write")
+	model.queuePlanModeNotice(entered)
 
 	first := model.takeStableTimeline()
-	assert.Equal(t, 1, strings.Count(first, planModeEnteredNotice))
-	assert.Equal(t, 1, strings.Count(first, planModeGateNotice))
+	assert.Equal(t, 1, strings.Count(first, entered))
 	assert.Empty(t, model.takeStableTimeline())
 
-	model.state.PlanMode = planmode.StateInactive
-	model.queuePlanModeNotices(planmode.StateActive)
+	exited := planModeExitedNotice("approved", "workspace-write")
+	model.queuePlanModeNotice(exited)
 
 	second := model.takeStableTimeline()
-	assert.Equal(t, 1, strings.Count(second, planModeOffNotice))
+	assert.Equal(t, 1, strings.Count(second, exited))
 	assert.Empty(t, model.takeStableTimeline())
 }
 
-func TestPlanModeTransitionNoticesStaySilentForTransientStates(t *testing.T) {
+// TestFullscreenPlanModeNoticeKeepsItsConversationPosition pins the reported
+// defect: a plan-mode row is committed at the transition, so later conversation
+// renders after it instead of the row being pinned at the bottom of the frame.
+func TestFullscreenPlanModeNoticeKeepsItsConversationPosition(t *testing.T) {
 	t.Parallel()
 
-	assert.Equal(
-		t,
-		[]string{planModeEnteredNotice, planModeGateNotice},
-		planModeTransitionNotices(planmode.StateInactive, planmode.StateActive),
-	)
-	assert.Equal(
-		t,
-		[]string{planModeOffNotice},
-		planModeTransitionNotices(planmode.StateActive, planmode.StateInactive),
-	)
-	assert.Equal(
-		t,
-		[]string{planModeOffNotice},
-		planModeTransitionNotices(planmode.StateExitPending, planmode.StateInactive),
-	)
-	assert.Empty(t, planModeTransitionNotices(planmode.StateInactive, planmode.StatePending))
-	assert.Empty(t, planModeTransitionNotices(planmode.StateActive, planmode.StateExitPending))
-	assert.Empty(t, planModeTransitionNotices(planmode.StatePending, planmode.StatePending))
+	state := readyState()
+	state.Transcript = []ai.Message{ai.UserText("plan this")}
+	model := fullscreenModel(t, stubController{state: state}, true)
+	model.width = 400
+	notice := planModeEnteredNotice("workspace-write")
+	model.queuePlanModeNotice(notice)
+
+	render := func(frame frameProjection) string {
+		return renderTimelineContent(
+			viewportProjectionFrameBlocks(frame),
+			model.markdown, model.width, model.theme, model.options.NoColor,
+		)
+	}
+
+	assert.Contains(t, render(model.viewportProjection()), notice)
+
+	model.state.Transcript = append(model.state.Transcript, ai.AssistantText("here is the plan"))
+
+	rendered := render(model.viewportProjection())
+	require.Equal(t, 1, strings.Count(rendered, notice))
+	assert.Less(t, strings.Index(rendered, "plan this"), strings.Index(rendered, notice))
+	assert.Less(t, strings.Index(rendered, notice), strings.Index(rendered, "here is the plan"))
+}
+
+// TestPlanModeNoticeOnlyForAgentEntryAndClosedReview pins the grok-build scope:
+// a row prints for an approved agent-initiated entry and for a closed exit
+// review, and nothing prints for a declined entry, a revision request, or a
+// state-machine transition the user drove.
+func TestPlanModeNoticeOnlyForAgentEntryAndClosedReview(t *testing.T) {
+	t.Parallel()
+
+	permission := readyModel(t, true).planModeNoticePermission()
+	cases := []struct {
+		name     string
+		kind     planreview.Kind
+		decision planreview.Decision
+		want     string
+	}{
+		{
+			name: "approved agent entry", kind: planreview.KindEnter,
+			decision: planreview.DecisionApprove, want: planModeEnteredNotice(permission),
+		},
+		{
+			name: "declined agent entry", kind: planreview.KindEnter,
+			decision: planreview.DecisionDecline, want: "",
+		},
+		{
+			name: "approved exit review", kind: planreview.KindExit,
+			decision: planreview.DecisionApprove, want: planModeExitedNotice("approved", permission),
+		},
+		{
+			name: "revision request", kind: planreview.KindExit,
+			decision: planreview.DecisionRevise, want: "",
+		},
+		{
+			name: "abandoned plan", kind: planreview.KindExit,
+			decision: planreview.DecisionQuit, want: planModeExitedNotice("abandoned", permission),
+		},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			model := readyModel(t, true)
+			model.queuePlanReviewNotice(
+				planreview.Request{Kind: testCase.kind, ID: "plan-request"},
+				planreview.Resolution{RequestID: "plan-request", Decision: testCase.decision},
+			)
+
+			if testCase.want == "" {
+				assert.Empty(t, model.completionMarkers)
+
+				return
+			}
+			require.Len(t, model.completionMarkers, 1)
+			assert.Equal(t, testCase.want, model.completionMarkers[0].notice)
+		})
+	}
 }
 
 func TestScrollbackKeepsConversationGapAcrossIncrementalCommits(t *testing.T) {
@@ -136,8 +202,8 @@ func TestScrollbackKeepsConversationGapAcrossIncrementalCommits(t *testing.T) {
 	assert.Contains(
 		t,
 		combined,
-		"first answer"+strings.Repeat("\n", conversationGapHeight+1)+
-			"❯ second question",
+		insetExpected("first answer"+strings.Repeat("\n", conversationGapHeight+1)+
+			"❯ second question"),
 	)
 
 	model.resetScrollback()
@@ -625,7 +691,7 @@ func TestScrollbackReconstructsDurableToolAndSuppressesLateDuplicate(t *testing.
 		},
 		Status: coding.ToolStatusCompleted, Result: result,
 	}}
-	assert.Contains(t, model.takeStableTimeline(), "Called\n  └ exa.web_search_exa")
+	assert.Contains(t, model.takeStableTimeline(), insetExpected("• Called\n  └ exa.web_search_exa"))
 
 	model.state.Transcript = append(model.state.Transcript, result)
 	assert.Empty(t, model.takeStableTimeline())

@@ -37,6 +37,12 @@ func (m *Model) scrollWheel(message tea.MouseWheelMsg) tea.Cmd {
 		return moveSelection(lines, m.updatePickerKey)
 	}
 
+	// The read-only plan preview lives in the prompt band rather than in a route,
+	// so its own scrolling keys get the notch here.
+	if m.prompt.kind == promptPlanView {
+		return m.scrollPlanView(lines)
+	}
+
 	return m.scrollRoute(lines)
 }
 
@@ -91,6 +97,8 @@ func (m *Model) scrollRoute(lines int) tea.Cmd {
 		m.route.offset = min(max(0, m.route.offset+lines), m.teamRouteMaximumOffset())
 	case routeTree, routeMCP, routeSkills, routeSessions:
 		return moveSelection(lines, m.updateRouteKey)
+	case routeStatus:
+		m.scrollStatusRoute(lines)
 	default:
 	}
 

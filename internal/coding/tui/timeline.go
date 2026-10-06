@@ -51,6 +51,21 @@ const (
 // magnitude more CPU than wrapping it.
 const thinkingTitle = "Thinking"
 
+// transcriptHorizontalInset is how far conversation rows move in from the frame
+// edge, matching the Composer's text column: the input box spends one border
+// cell and one padding cell before its content.
+const transcriptHorizontalInset = 2
+
+// timelineInset reports the inset conversation rows use at one frame width. Only
+// a frame wide enough for the bordered Composer has a text column to align with.
+func timelineInset(width int) int {
+	if width < composerBoxMinWidth {
+		return 0
+	}
+
+	return transcriptHorizontalInset
+}
+
 type timelineBlock struct {
 	kind             blockKind
 	id               string
@@ -61,12 +76,21 @@ type timelineBlock struct {
 	rendered         bool
 	tools            []toolActivity
 	workspaceChanges *coding.WorkspaceChanged
+	// notice marks operator output (the banner, /help, /status, goal reports)
+	// that the frame pins to the terminal edge. It is the one entry kind that
+	// keeps the full width, because the banner is a bordered box that lines up
+	// with the Composer box instead of with the conversation inside it.
+	notice bool
 }
 
 type timelineRenderOptions struct {
 	expandToolResults bool
 }
 
+// completionMarker is a one-line durable row placed at a conversation position.
+// Most markers report an interaction outcome; a marker whose notice is set
+// instead carries a pre-rendered row that is not a completion (today, the
+// plan-mode transition lines), and its outcome fields are unused.
 type completionMarker struct {
 	interactionID  string
 	afterMessages  int
@@ -74,6 +98,7 @@ type completionMarker struct {
 	stop           agent.StopReason
 	durationMillis int64
 	model          string
+	notice         string
 }
 
 func projectTimeline(state coding.State) []timelineBlock {
@@ -961,6 +986,21 @@ func compactTokenCount(value int) string {
 	return fmt.Sprintf("%.1fm", float64(value)/1000000)
 }
 
+// appendMarker inserts one marker while keeping the list ordered by conversation
+// position, which insertCompletionMarkers and splitCompletionMarkers rely on.
+func appendMarker(markers []completionMarker, marker completionMarker) []completionMarker {
+	index := len(markers)
+	for index > 0 && markers[index-1].afterMessages > marker.afterMessages {
+		index--
+	}
+
+	markers = append(markers, completionMarker{})
+	copy(markers[index+1:], markers[index:len(markers)-1])
+	markers[index] = marker
+
+	return markers
+}
+
 func insertCompletionMarkers(
 	blocks []timelineBlock,
 	markers []completionMarker,
@@ -995,6 +1035,15 @@ func insertCompletionMarkers(
 }
 
 func projectCompletionMarker(marker completionMarker) (timelineBlock, bool) {
+	if marker.notice != "" {
+		return timelineBlock{
+			kind:     blockDiagnostic,
+			id:       "plan-notice:" + marker.interactionID,
+			body:     marker.notice,
+			position: marker.afterMessages,
+		}, true
+	}
+
 	suffix := ""
 	switch marker.outcome {
 	case coding.InteractionSucceeded:
@@ -1224,7 +1273,33 @@ func renderTimelineContentWithOptions(
 // user messages and completion markers have their own renderers, everything else
 // goes through the shared block renderer. Per-record caching depends on this
 // being the single definition of "how one entry looks".
+//
+// Conversation rows are inset to the Composer's text column; operator notices
+// keep the full width because the banner is a bordered box that lines up with
+// the Composer box rather than with the conversation inside it, and the printed
+// reports are the same text inline mode hands to the terminal.
 func renderTimelineEntry(
+	block timelineBlock,
+	markdown *markdownRenderer,
+	width int,
+	theme colorTheme,
+	noColor bool,
+	options timelineRenderOptions,
+) string {
+	if block.notice {
+		return renderTimelineEntryCore(block, markdown, width, theme, noColor, options)
+	}
+
+	inset := timelineInset(width)
+
+	return insetRows(
+		renderTimelineEntryCore(block, markdown, max(1, width-2*inset), theme, noColor, options),
+		inset,
+	)
+}
+
+// renderTimelineEntryCore renders one block at the width it owns.
+func renderTimelineEntryCore(
 	block timelineBlock,
 	markdown *markdownRenderer,
 	width int,
@@ -1240,6 +1315,27 @@ func renderTimelineEntry(
 	}
 
 	return renderTimelineBlockWithOptions(block, markdown, width, theme, noColor, options)
+}
+
+// insetRows moves every rendered row in from the frame edge, which is what lines
+// a row up with the Composer's text column. Blank rows stay empty instead of
+// carrying trailing whitespace.
+func insetRows(content string, inset int) string {
+	if inset <= 0 || content == "" {
+		return content
+	}
+
+	prefix := strings.Repeat(" ", inset)
+	rows := strings.Split(content, "\n")
+	for index, row := range rows {
+		if row == "" {
+			continue
+		}
+
+		rows[index] = prefix + row
+	}
+
+	return strings.Join(rows, "\n")
 }
 
 func renderTimelineBlock(

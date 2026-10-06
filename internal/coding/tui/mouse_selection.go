@@ -177,11 +177,18 @@ func (m *Model) selectionText() string {
 		return ""
 	}
 
+	inset := timelineInset(m.width)
 	lines := make([]string, 0, len(rows))
 	for offset, row := range rows {
 		line := ansi.Strip(row)
 
 		left, right := selectionSpan(start.row+offset, start, end, ansi.StringWidth(line))
+		// The transcript inset is presentation, not text: a selection that
+		// starts inside it copies the row without the margin, the way the same
+		// selection copies it before the inset existed.
+		if left < inset {
+			left = min(inset, right)
+		}
 		if right > left {
 			line = ansi.Cut(line, left, right)
 		} else {
