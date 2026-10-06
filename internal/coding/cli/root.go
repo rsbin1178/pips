@@ -14,6 +14,7 @@ import (
 	"github.com/rsbin1178/pips/internal/coding/credential"
 	"github.com/rsbin1178/pips/internal/coding/execution"
 	"github.com/rsbin1178/pips/internal/coding/execution/sshclient"
+	"github.com/rsbin1178/pips/internal/coding/execution/systemproxy"
 	"github.com/rsbin1178/pips/internal/coding/paths"
 	"github.com/rsbin1178/pips/internal/coding/runtimecontrol"
 	"github.com/rsbin1178/pips/internal/coding/subagent"
@@ -188,7 +189,7 @@ func defaultProcessDependencies(dependencies Dependencies) Dependencies {
 	}
 
 	if dependencies.SystemProxy == nil {
-		dependencies.SystemProxy = nativeSystemProxy
+		dependencies.SystemProxy = systemproxy.Probe
 	}
 
 	if dependencies.Terminal == nil {

@@ -259,6 +259,7 @@ type fileCompatibility struct {
 	ChatReasoning             *string `toml:"chat_reasoning"`
 	ReasoningHistory          *string `toml:"reasoning_history"`
 	IncludeEncryptedReasoning *bool   `toml:"include_encrypted_reasoning"`
+	PromptCacheKey            *bool   `toml:"prompt_cache_key"`
 }
 
 // fileCapabilities is the presence-aware TOML shape of a capability
@@ -910,7 +911,10 @@ func decodeOptions(value fileOptions) (ModelOptions, error) {
 }
 
 func decodeCompatibility(value fileCompatibility) (CompatibilityConfig, error) {
-	result := CompatibilityConfig{IncludeEncryptedReasoning: value.IncludeEncryptedReasoning}
+	result := CompatibilityConfig{
+		IncludeEncryptedReasoning: value.IncludeEncryptedReasoning,
+		PromptCacheKey:            value.PromptCacheKey,
+	}
 	if value.MaxTokensField != nil {
 		parsed := openai.MaxTokensField(strings.TrimSpace(*value.MaxTokensField))
 		if parsed != openai.MaxTokensFieldCompletion && parsed != openai.MaxTokensFieldLegacy {

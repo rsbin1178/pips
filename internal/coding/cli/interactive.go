@@ -73,15 +73,21 @@ func runInteractiveTarget(
 	allowConfigCreate := strings.TrimSpace(flags.configFile) == ""
 
 	return dependencies.RunTUI(cmd.Context(), tui.Options{
-		Input:          cmd.InOrStdin(),
-		Output:         cmd.OutOrStdout(),
-		Environment:    dependencies.Environment,
-		Workspace:      resolved.workspace.Root(),
-		ThemeDirectory: dependencies.Paths.TUIThemesDir(),
-		Trusted:        resolved.isTrusted,
-		NoColor:        noColor,
-		Bootstrap:      bootstrap,
-		ImageIngress:   ingress,
+		Input:             cmd.InOrStdin(),
+		Output:            cmd.OutOrStdout(),
+		Environment:       dependencies.Environment,
+		Workspace:         resolved.workspace.Root(),
+		SessionsDirectory: dependencies.Paths.SessionsDir(),
+		ThemeDirectory:    dependencies.Paths.TUIThemesDir(),
+		Trusted:           resolved.isTrusted,
+		NoColor:           noColor,
+		Bootstrap:         bootstrap,
+		ImageIngress:      ingress,
+		Build: tui.BuildStamp{
+			Version: dependencies.Build.Version,
+			Commit:  dependencies.Build.Commit,
+			Date:    dependencies.Build.Date,
+		},
 		SaveStatusLine: func(_ context.Context, items []statusline.Item) error {
 			return config.SaveStatusLineWithOptions(
 				resolved.configFile,

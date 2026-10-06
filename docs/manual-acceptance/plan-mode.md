@@ -100,7 +100,7 @@ Plan Mode 是「状态机 + Session 私有计划文件」的模型，不是受�
 - 前置条件：存在一份已保存的计划；当前不处于审批视图。
 - 隔离夹具：无秘密计划内容。
 - 步骤：依次执行 `/view-plan`、`/show-plan`、`/plan-view`；滚动预览并复制；比较执行前后的 plan 状态；进入与退出 plan mode 时观察状态栏与转录。
-- 预期证据：三个命令打开同一份计划预览且不改变 plan 状态、不触发模型请求；状态栏在 plan mode 期间显示 `plan` 标志；转录出现 `Agent entered plan mode`、`file edits outside session plan.md blocked until plan mode exits`、`Plan mode off`；私有计划路径不出现在对话、managed footer 或状态栏。
+- 预期证据：三个命令打开同一份计划预览且不改变 plan 状态、不触发模型请求；状态栏在 plan mode 期间显示 `plan` 标志；转录只在模型自主进入（`enter_plan_mode` 获批）时出现一条 `Agent entered plan mode · active permission mode: <mode> · file edits outside session plan.md blocked until plan mode exits`，并在计划审批关闭时出现 `Plan approved · plan mode off · active permission mode: <mode>` 或 `Plan abandoned · plan mode off · active permission mode: <mode>`；两行按发生时序随对话滚动，不固定在消息底部；用户 `/plan`、`Shift+Tab`、拒绝进入或请求修改都不产生转录行；私有计划路径不出现在对话、managed footer 或状态栏。
 - 通过条件：查看计划与实际状态一致，别名行为一致，转录行语义准确。
 - 失败条件：查看计划导致状态变化、预览内容过期、或状态栏/转录缺失或泄露私有路径。
 - 清理/回滚：关闭预览并退出进程。
