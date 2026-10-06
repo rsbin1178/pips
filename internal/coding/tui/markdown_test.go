@@ -201,3 +201,36 @@ func TestMarkdownEngineReleasesNestedAndOversizedBuffers(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, renderer.engine, "oversized buffers must not remain in the engine")
 }
+
+// TestMarkdownTableDrawsRowDividers pins the table look: the renderer turns on
+// glamour's opt-in row border, so a table draws a rule under its header and one
+// between its body rows, in both the colour and the NO_COLOR style.
+func TestMarkdownTableDrawsRowDividers(t *testing.T) {
+	t.Parallel()
+
+	const source = "| a | b |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |\n"
+	for _, noColor := range []bool{false, true} {
+		renderer := newMarkdownRenderer(2)
+		rendered, err := renderer.render(source, 40, themeDark, noColor)
+		require.NoError(t, err)
+		assert.Equal(t, 2, markdownTableRules(ansi.Strip(rendered)),
+			"noColor=%v: want the header rule and one divider\n%s", noColor, ansi.Strip(rendered))
+	}
+}
+
+// markdownTableRules counts the horizontal rules a rendered table draws: lines
+// made only of border runes that carry at least one rule character.
+func markdownTableRules(rendered string) int {
+	rules := 0
+	for line := range strings.SplitSeq(rendered, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if strings.ContainsAny(trimmed, "-─") && strings.Trim(trimmed, "-─|│┼+ ") == "" {
+			rules++
+		}
+	}
+
+	return rules
+}

@@ -180,6 +180,12 @@ func markdownStyle(theme colorTheme, noColor bool) glamouransi.StyleConfig {
 		style.CodeBlock.BackgroundColor = themeColorPointer(palette.codeBackground)
 	}
 
+	// A divider between table body rows. The separator characters are already part of
+	// each style (─ for the colour styles, - for ASCII), so this only turns the rule
+	// on; glamour leaves it off by default.
+	rowBorder := true
+	style.Table.RowBorder = &rowBorder
+
 	outerMargin := uint(0)
 	style.Document.Margin = &outerMargin
 	style.H1.Prefix = ""
