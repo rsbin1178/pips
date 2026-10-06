@@ -767,6 +767,8 @@ type stubController struct {
 	configStatusLine []statusline.Item
 	// tui, when set, overrides the presentation fields of the stub configuration.
 	tui config.TUIConfig
+	// cost, when set, replaces the stub configuration's empty price table.
+	cost config.CostConfig
 	// historyPage/historyErr stand in for the Runtime's durable history read.
 	historyPage coding.HistoryPage
 	historyErr  error
@@ -862,6 +864,9 @@ func (c stubController) Config() config.Config {
 	}
 	if c.tui.Screen != "" {
 		value.TUI = c.tui
+	}
+	if c.cost.Currency != "" || c.cost.Models != nil {
+		value.Cost = c.cost
 	}
 
 	return value

@@ -200,7 +200,9 @@ func (m *Model) statusModelsLines() []statusPageLine {
 			}
 		}
 	}
-	summary := aggregateStatusProjections(m.route.statusSessions.Sessions, m.route.statusProjections)
+	summary := aggregateStatusProjections(
+		m.route.statusSessions.Sessions, m.route.statusProjections, m.controller.Config().Cost,
+	)
 	lines = append(lines, statusBlank(), statusText(
 		statusLabelIndent+statusProjectionCoverageText(summary),
 	))

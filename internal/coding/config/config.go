@@ -134,6 +134,36 @@ type TUIConfig struct {
 	ShowThinkingBlocks bool
 }
 
+// DefaultCostCurrency is the currency a cost table without an explicit one
+// reports.
+const DefaultCostCurrency = "USD"
+
+// ModelPricing is one model's configured prices, each per million tokens. Every
+// field is optional and an absent one counts zero.
+type ModelPricing struct {
+	InputPerMillionTokens       float64
+	CachedInputPerMillionTokens float64
+	CacheWritePerMillionTokens  float64
+	OutputPerMillionTokens      float64
+}
+
+// CostConfig is the resolved [cost] price table the Usage page prices its rows
+// with. It is input data for a number, not a layered setting, so it carries no
+// Field or Source and is not shown on the panel's Config page.
+type CostConfig struct {
+	Currency string
+	Models   map[string]ModelPricing
+}
+
+// Price returns one model ref's prices and whether the ref has an entry at all.
+// A ref with no entry is priced at zero and reported unpriced, so a caller can
+// count what it could not price instead of presenting a partial sum as complete.
+func (c CostConfig) Price(ref string) (ModelPricing, bool) {
+	pricing, ok := c.Models[ref]
+
+	return pricing, ok
+}
+
 // Interactive screen layouts.
 const (
 	ScreenFullscreen = "fullscreen"
@@ -561,6 +591,7 @@ type Config struct {
 	Subagent              SubagentConfig
 	Mode                  OperatingMode
 	TUI                   TUIConfig
+	Cost                  CostConfig
 	Sandbox               SandboxMode
 	SandboxWorkspaceWrite SandboxWorkspaceWriteConfig
 	Approval              ApprovalMode
@@ -619,6 +650,10 @@ func Defaults() Config {
 
 			ShowThinkingBlocks: DefaultShowThinkingBlocks,
 		},
+		Cost: CostConfig{
+			Currency: DefaultCostCurrency,
+			Models:   map[string]ModelPricing{},
+		},
 		Sandbox: SandboxWorkspaceWrite,
 		SandboxWorkspaceWrite: SandboxWorkspaceWriteConfig{
 			Network: SandboxNetworkOnRequest,
@@ -639,6 +674,9 @@ func (c Config) Clone() Config {
 		cloned.Providers[provider] = definition.Clone()
 	}
 	cloned.TUI.StatusLine = slices.Clone(c.TUI.StatusLine)
+	if c.Cost.Models != nil {
+		cloned.Cost.Models = maps.Clone(c.Cost.Models)
+	}
 	cloned.Models = make([]ModelConfig, len(c.Models))
 	for index := range c.Models {
 		cloned.Models[index] = c.Models[index].Clone()

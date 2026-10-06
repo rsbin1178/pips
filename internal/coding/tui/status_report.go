@@ -276,10 +276,21 @@ func (m *Model) statusUsageLines() []statusPageLine {
 		statusField("Started", m.statusSessionStartedText()),
 	)
 	if models := m.modelUsage.models(); len(models) > 0 {
+		cost := m.controller.Config().Cost
+		total, unpriced := 0.0, 0
 		lines = append(lines, statusBlank(), statusHeading("By model"))
 		for _, entry := range models {
-			lines = append(lines, statusField(entry.name, entry.text()))
+			lines = append(lines, statusField(
+				entry.name,
+				entry.text()+" · "+modelCostText(cost, entry.ref, entry.usage),
+			))
+			if amount, priced := modelCost(cost, entry.ref, entry.usage); priced {
+				total += amount
+			} else {
+				unpriced++
+			}
 		}
+		lines = append(lines, statusField("Cost", costText(total, cost.Currency, unpriced)))
 		lines = append(lines, statusText(
 			statusLabelIndent+"Counted by this process; a resumed session starts over.",
 		))
@@ -310,9 +321,20 @@ func (m *Model) statusUsageProjectionLines() []statusPageLine {
 			statusLabelIndent+"History unknown: no usable projection for this session.",
 		))
 	default:
+		cost := m.controller.Config().Cost
+		total, unpriced := 0.0, 0
 		for _, ref := range view.models() {
-			lines = append(lines, statusField(ref, usageTotalsText(view.totals[ref])))
+			lines = append(lines, statusField(
+				ref,
+				usageTotalsText(view.totals[ref])+" · "+modelCostText(cost, ref, view.totals[ref]),
+			))
+			if amount, priced := modelCost(cost, ref, view.totals[ref]); priced {
+				total += amount
+			} else {
+				unpriced++
+			}
 		}
+		lines = append(lines, statusField("Cost", costText(total, cost.Currency, unpriced)))
 		lines = append(lines, statusText(statusLabelIndent+m.usageProjectionRangeText(view)))
 	}
 	if view.err != nil {

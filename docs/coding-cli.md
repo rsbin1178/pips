@@ -802,6 +802,32 @@ shows an honest `0% cache`. `model` renders a short display name instead of
 `task_progress` (`Tasks completed/total`), `phase`, `mode` (Plan mode), and
 `team`. `/statusline` toggles and reorders them.
 
+Cost rows are configured in a separate top-level `[cost]` table, so a price
+table never appears among the layered settings on the panel's `Config` page:
+
+```toml
+[cost]
+currency = "USD"                      # absent means USD; USD/EUR/CNY/JPY print a symbol
+
+# Prices are per million tokens. A model absent from this table costs 0.
+[cost.models."anthropic/claude-sonnet-4-5"]
+input_per_million_tokens        = 3.00    # uncached input
+cached_input_per_million_tokens = 0.30    # cache read
+cache_write_per_million_tokens  = 3.75    # cache creation
+output_per_million_tokens       = 15.00   # includes reasoning
+```
+
+The model key is the `provider/modelID` ref the panel prints. Every price is
+optional and an absent one counts 0; a negative or non-numeric price fails the
+load. The cost rule charges the cached classes in place of their share of the
+input rate and never charges reasoning again on top of output, so the inclusive
+token fields are not counted twice. A model with no price contributes 0 and is
+named as unpriced, and every total states how many models it could not price. A
+total below one unit prints four decimals, so a cheap session does not read as
+`0.00`. The table ships with the binary that reads it: `pips` decodes the
+configuration with a strict schema, so an older binary rejects a config that
+carries `[cost]` rather than silently ignoring the prices.
+
 `/status` opens the read-only runtime panel, shaped like the reference CLI's
 tabbed settings view: five pages — `Status`, `Config`, `Usage`, `Stats`,
 `Models` — switched with `Tab`/`→` and `Shift+Tab`/`←`.
@@ -822,8 +848,9 @@ tabbed settings view: five pages — `Status`, `Config`, `Usage`, `Stats`,
   the Session as `<sessions>/s-<id>/usage.json`, once per completed turn — and names
   the interaction it covers. A Session written before this change reads `History
   unknown` instead of an estimate, and a projection rebuilt from a damaged file
-  reads `History incomplete`. Neither block prices anything or reports a lifetime
-  total.
+  reads `History incomplete`. Each block carries a per-model cost and a session
+  total priced from the `[cost]` table, naming how many models it could not price;
+  neither block reports a lifetime total.
 - `Stats` aggregates the local Session store: a year-long activity grid with a
   `Less`/`More` ramp, then the sessions, active days, current and longest streaks,
   most active day, and first session the selected range covers. `r` cycles the
@@ -831,7 +858,8 @@ tabbed settings view: five pages — `Status`, `Config`, `Usage`, `Stats`,
   **all time** block reduces every listed Session's usage projection: total tokens
   (input plus output — the cached and reasoning classes are sub-classes of those
   two), the favourite model measured by that total, the longest Session's active
-  turn time, and the average over Sessions that have activity, with a coverage
+  turn time, and the average over Sessions that have activity, plus one cost total
+  over those projections priced from the `[cost]` table, with a coverage
   line naming how many Sessions carry a usable projection. The block is cumulative
   per Session, so the range selector does not filter it.
 - `Models` reduces the per-day projections over the same range selector that `Stats`

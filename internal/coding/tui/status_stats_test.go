@@ -11,6 +11,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/rsbin1178/pips/internal/coding"
+	"github.com/rsbin1178/pips/internal/coding/config"
 	"github.com/rsbin1178/pips/internal/coding/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -154,7 +155,7 @@ func TestStatusAggregateProjectionsReducesEveryListedSession(t *testing.T) {
 		projections[meta.ID] = usageProjectionSnapshot{projection: projection, read: read}
 	}
 
-	summary := aggregateStatusProjections(metas, projections)
+	summary := aggregateStatusProjections(metas, projections, config.CostConfig{})
 	assert.Equal(t, 4, summary.listed)
 	assert.Equal(t, 2, summary.usable)
 	assert.Equal(t, 1, summary.missing)
