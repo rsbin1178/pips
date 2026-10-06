@@ -476,7 +476,7 @@ func TestStatusReportUsesHumanValuesAndWrapsHelp(t *testing.T) {
 	model := readyModelWithController(t, newOverlayController(readyState()), true)
 	model.Update(tea.WindowSizeMsg{Width: 60, Height: 24})
 
-	status := model.statusContent()
+	status := statusPageText(model, statusTabStatus)
 	assert.Contains(t, status, "Phase: idle")
 	assert.Contains(t, status, "Mode: agent")
 	assert.Contains(t, status, "Compaction: ")
@@ -535,10 +535,13 @@ func TestApprovalPromptShowsWholeCommandAndHumanChoices(t *testing.T) {
 	assert.Contains(t, content, "Allow for this session (s)")
 	assert.Contains(t, content, "Deny (d)")
 
-	// Narrow terminals wrap instead of dropping the dangerous tail.
+	// Narrow terminals wrap instead of dropping the dangerous tail. The phrase
+	// itself cannot survive intact: the wrap falls inside the last option, so
+	// assert the destination and the flag are both still on screen.
 	model.Update(tea.WindowSizeMsg{Width: 36, Height: 24})
 	narrow := ansi.Strip(model.View().Content)
-	assert.Contains(t, narrow, "git push origin HEAD --force")
+	assert.Contains(t, narrow, "git push origin HEAD")
+	assert.Contains(t, narrow, "force")
 	for line := range strings.SplitSeq(narrow, "\n") {
 		assert.LessOrEqual(t, ansi.StringWidth(line), 36)
 	}

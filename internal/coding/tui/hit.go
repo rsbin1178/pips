@@ -20,11 +20,22 @@ type frameHitMap struct {
 	topDropped int
 }
 
-// handleMouse is installed on the ready frame's View while mouse reporting is on.
-// It is the only place a pointer can act on an entry, and it acts on exactly one
-// surface: the transcript.
+// handleMouse is installed on every frame's View while mouse reporting is on. It
+// resolves a pointer event against what the last painted frame afforded: the panel
+// answers clicks on its tabs, search box and range row, and the transcript answers
+// the selection gesture.
 func (m *Model) handleMouse(message tea.MouseMsg) tea.Cmd {
-	if !m.frameHit.painted || !m.mouseReportingEnabled() {
+	if !m.mouseReportingEnabled() {
+		return nil
+	}
+
+	// A full-area panel owns the pointer while it is open, and it only affords the
+	// controls it painted.
+	if m.route.kind == routeStatus {
+		return m.statusRouteMouse(message)
+	}
+
+	if !m.frameHit.painted {
 		return nil
 	}
 

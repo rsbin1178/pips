@@ -20,9 +20,9 @@ const (
 	layoutComposerBorderRows = 2
 	// layoutComposerMinRows keeps one editable row even in a short window.
 	layoutComposerMinRows = 1
-	// layoutUnbounded lets a band take every remaining row. Comfortable windows
-	// have room for the full picker/panel list, so those bands are only capped
-	// once the window is actually short.
+	// layoutUnbounded lets a band take every remaining row. A comfortable window
+	// has room for the full Team panel list, so that band is only capped once the
+	// window is actually short.
 	layoutUnbounded = 1 << 20
 )
 
@@ -37,6 +37,18 @@ const (
 	layoutRoomMinimal     = 3
 )
 
+// The picker band is capped on every rung, so opening a list never hides the
+// conversation the chosen entry is about to act on.
+const (
+	// layoutPickerHeightPercent is the share of the window a picker band may
+	// cover, mirroring fzf's `--height 40%` guidance.
+	layoutPickerHeightPercent = 40
+	// layoutPickerMaxRows is the ceiling for a palette list: the reference
+	// palettes scroll their rows instead of growing (fzf `--height 40%`, VS Code
+	// quick picks, comparable TUIs at 8-12 rows).
+	layoutPickerMaxRows = 12
+)
+
 // layoutCaps are the maximum rows each band may occupy at one window height.
 // A zero-height transcript is a valid outcome: the composer and status line keep
 // working even when there is no room to show history.
@@ -46,23 +58,27 @@ type layoutCaps struct {
 	pickerRows   int  // picker panel band
 	panelRows    int  // team panel band
 	activity     bool // whether the activity line may be shown
+	composerMode bool // whether the Composer's bottom border may name the permission mode
 	interactive  bool // whether an input surface is drawn at all
 }
 
 // layoutCapsFor resolves the degradation ladder for one terminal height.
 func layoutCapsFor(height int) layoutCaps {
+	caps := layoutCaps{}
+
 	switch {
 	case height >= layoutRoomComfortable:
-		return layoutCaps{
+		caps = layoutCaps{
 			composerRows: composerMaxLines + layoutComposerBorderRows,
 			promptRows:   layoutRoomComfortable,
 			pickerRows:   layoutUnbounded,
 			panelRows:    layoutUnbounded,
 			activity:     true,
+			composerMode: true,
 			interactive:  true,
 		}
 	case height >= layoutRoomCompact:
-		return layoutCaps{
+		caps = layoutCaps{
 			composerRows: 4 + layoutComposerBorderRows,
 			promptRows:   3,
 			pickerRows:   3,
@@ -71,7 +87,7 @@ func layoutCapsFor(height int) layoutCaps {
 			interactive:  true,
 		}
 	case height >= layoutRoomTight:
-		return layoutCaps{
+		caps = layoutCaps{
 			composerRows: 3,
 			promptRows:   1,
 			pickerRows:   1,
@@ -80,7 +96,7 @@ func layoutCapsFor(height int) layoutCaps {
 			interactive:  true,
 		}
 	case height >= layoutRoomMinimal:
-		return layoutCaps{
+		caps = layoutCaps{
 			composerRows: 2,
 			promptRows:   1,
 			pickerRows:   0,
@@ -89,8 +105,39 @@ func layoutCapsFor(height int) layoutCaps {
 			interactive:  true,
 		}
 	default:
-		return layoutCaps{interactive: false}
+		caps = layoutCaps{interactive: false}
 	}
+
+	// The picker band may take less than its tier allows, never more.
+	caps.pickerRows = min(caps.pickerRows, pickerRowsFor(height))
+
+	return caps
+}
+
+// pickerRowsFor bounds how much of the window a picker band may cover. A list or
+// panel that swallowed the window would hide the conversation the chosen entry is
+// about to act on — and the frame's own timeline with it — so the band takes at
+// most two fifths of the window, the share fzf ships as `--height 40%`.
+func pickerRowsFor(height int) int {
+	if height <= 0 {
+		return 0
+	}
+
+	return max(1, height*layoutPickerHeightPercent/100)
+}
+
+// pickerBandRows resolves the band one open picker may draw at the current
+// geometry. Every picker is bounded by the window's share above; a palette list
+// is additionally capped at layoutPickerMaxRows, because the reference palettes
+// scroll their rows rather than growing. The permissions picker is a settings
+// form rather than a palette, so it keeps the band's own budget.
+func (m *Model) pickerBandRows(caps layoutCaps, available int) int {
+	rows := min(caps.pickerRows, available)
+	if m.picker.kind != pickerPermissions {
+		rows = min(rows, layoutPickerMaxRows)
+	}
+
+	return max(1, rows)
 }
 
 // drawsComposerBox reports whether the current geometry leaves room for the

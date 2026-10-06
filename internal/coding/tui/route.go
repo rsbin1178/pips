@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"time"
 
 	"charm.land/bubbles/v2/textinput"
@@ -24,6 +25,7 @@ const (
 	routeTree
 	routeToolDetail
 	routeMCP
+	routeStatus
 )
 
 const routeSubagent = routeChild
@@ -72,6 +74,15 @@ type routeState struct {
 	tree       coding.SessionTree
 	forkMode   bool
 	toolDetail *toolDetailView
+
+	statusTab           statusPanelTab
+	statusRange         statusStatsRange
+	statusSessions      session.MetadataListing
+	statusMCP           coding.MCPSnapshot
+	statusDataRequested bool
+	statusDataLoading   bool
+	statusDataErr       error
+	statusHits          statusPanelHits
 }
 
 // routeOpenRequest is a typed route transition intent. Keeping the payload as
@@ -99,6 +110,10 @@ func (r routeOpenRequest) pending() bool {
 	return r.kind != routeNone
 }
 
+// errRouteActionNeedsIdle explains a reading surface that stays open while a turn
+// runs but whose action would change the runtime that turn owns.
+var errRouteActionNeedsIdle = errors.New("available once the current turn finishes")
+
 // nativeWrite is one accepted logical payload. Only the head is dispatched.
 // The output sequence and queue deliberately survive session projection resets.
 type nativeWrite struct {
@@ -111,6 +126,10 @@ type presentationState struct {
 	writeSequence uint64
 	writes        []nativeWrite
 	pendingRoute  routeOpenRequest
+	// heldInspections carries inspection output that arrived while a full-area
+	// route owned the screen. The route returns it to the parent once its own
+	// deferred conversation output has been committed.
+	heldInspections []string
 }
 
 func (p *presentationState) hasScrollbackWrites() bool {
@@ -199,6 +218,8 @@ func (m *Model) activateRoute(request routeOpenRequest) tea.Cmd {
 		return m.activateSkillsRouteSnapshot(request.previousComposer)
 	case routeMCP:
 		return m.activateMCPRouteSnapshot(request.previousComposer)
+	case routeStatus:
+		return m.activateStatusRoute(request.previousComposer)
 	case routeAgents:
 		command := m.activateAgentsRoute()
 		m.setRouteComposerSnapshot(request)
@@ -299,10 +320,54 @@ func (m *Model) closeRouteToParent() tea.Cmd {
 	}
 	m.setLayout()
 
+	// Held inspection output follows the catch-up, so the conversation keeps its
+	// own blocks adjacent instead of splitting them with an inspection report. The
+	// returned command is whichever of the two queued the first native write.
+	commit := m.commitStableTimeline()
+	flush := m.flushHeldInspections()
+	dispatch := commit
+	if dispatch == nil {
+		dispatch = flush
+	}
+
 	return m.afterScrollback(
-		m.commitStableTimeline(),
+		dispatch,
 		tea.Batch(m.composer.Focus(), m.startActivityClock(activityWasVisible)),
 	)
+}
+
+// holdInspection keeps inspection output until the parent owns presentation
+// again, and reports whether it was held.
+func (m *Model) holdInspection(content string) bool {
+	if m.route.kind == routeNone && !m.presentation.pendingRoute.pending() {
+		return false
+	}
+
+	m.presentation.heldInspections = append(m.presentation.heldInspections, content)
+
+	return true
+}
+
+// flushHeldInspections prints inspection output that a route held back. It runs
+// behind the route's own catch-up command, so it enqueues its own native writes.
+func (m *Model) flushHeldInspections() tea.Cmd {
+	held := m.presentation.heldInspections
+	m.presentation.heldInspections = nil
+	if len(held) == 0 {
+		return nil
+	}
+
+	commands := make([]tea.Cmd, 0, len(held))
+	for _, content := range held {
+		if command := m.printScrollback(content); command != nil {
+			commands = append(commands, command)
+		}
+	}
+	if len(commands) == 0 {
+		return nil
+	}
+
+	return tea.Batch(commands...)
 }
 
 func newChildRouteRequest(previous routeState, child childSummary) routeOpenRequest {
@@ -324,6 +389,8 @@ func (m *Model) updateRouteKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.updateSkillsRouteKey(message)
 	case routeMCP:
 		return m.updateMCPRouteKey(message)
+	case routeStatus:
+		return m.updateStatusRouteKey(message)
 	case routeAgents:
 		return m.updateAgentsRouteKey(message)
 	case routeChild:
@@ -345,7 +412,7 @@ func (m *Model) updateRouteKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // box, so paste, width, and style updates reach it.
 func (m *Model) routeUsesSearch() bool {
 	switch m.route.kind {
-	case routeSessions, routeSkills, routeMCP:
+	case routeSessions, routeSkills, routeMCP, routeStatus:
 		return true
 	default:
 		return false
@@ -360,6 +427,8 @@ func (m *Model) routeView() tea.View {
 		return m.skillsRouteView()
 	case routeMCP:
 		return m.mcpRouteView()
+	case routeStatus:
+		return m.statusRouteView()
 	case routeAgents:
 		return m.agentsRouteView()
 	case routeChild:

@@ -283,6 +283,7 @@ func projectionMarkersDigest(markers []completionMarker) uint64 {
 		hash = mixProjectionString(hash, string(value.stop))
 		hash = mixProjectionString(hash, value.model)
 		hash = mixProjectionInt(hash, int(value.durationMillis))
+		hash = mixProjectionText(hash, value.notice)
 	}
 
 	return hash
@@ -876,8 +877,6 @@ func (m *Model) volatileTimelineBlocks(activities []toolActivity, markerSplit in
 			kind: blockError, title: "Operation", body: safeError(m.streamErr),
 		})
 	}
-
-	blocks = append(blocks, m.activePlanModeNoticeBlocks()...)
 
 	return append(blocks, m.activeTeamAttemptBlocks()...)
 }

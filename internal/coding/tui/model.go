@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"charm.land/bubbles/v2/textarea"
@@ -32,9 +33,16 @@ const (
 	statusHorizontalInset = 2
 	composerMaxLines      = 8
 	conversationGapHeight = 1
-	renderFrame           = 33 * time.Millisecond
-	exitConfirmTime       = 2 * time.Second
-	maxCompletionMarkers  = 256
+	// composerBoxMinWidth is the narrowest frame that still draws the bordered
+	// Composer. Conversation rows align with that box's text, so a narrower
+	// frame — which has no box — keeps the full width.
+	composerBoxMinWidth = 24
+	// composerModeGap keeps the permission mode's label off the box's bottom
+	// border rule.
+	composerModeGap      = 2
+	renderFrame          = 33 * time.Millisecond
+	exitConfirmTime      = 2 * time.Second
+	maxCompletionMarkers = 256
 )
 
 type lifecycle uint8
@@ -101,6 +109,9 @@ type Model struct {
 
 	controller           Controller
 	state                coding.State
+	modelUsage           modelUsageTally
+	usageProjection      usageProjectionView
+	usageProjectionSeq   uint64
 	childStates          map[string]coding.State
 	composer             composerState
 	toolProjection       toolProjectionCache
@@ -128,12 +139,17 @@ type Model struct {
 	streaming            streamProjection
 	renderWait           bool
 	renderDirty          bool
-	// viewStable marks an update that only accounted for deferred deltas: the
-	// visible frame did not change, so View() reuses the last composition instead
-	// of re-styling the whole frame for a delta the reader cannot see yet.
+	// viewStable marks an update that did not change what the frame renders: a
+	// deferred delta the reader cannot see yet, or a delivery the subscription
+	// already owns and the operation iterator only repeats. View() then reuses the
+	// last composition instead of re-styling the whole frame for it.
+	// viewStale records that the cached composition was invalidated outside an
+	// Update - a direct rerenderTranscript - and no View call has adopted that
+	// invalidation yet, so no update may reuse the cache until it has.
 	// viewCached reports that viewCache holds a composition, and viewComposes
 	// counts them.
 	viewStable   bool
+	viewStale    bool
 	viewCached   bool
 	viewCache    tea.View
 	viewComposes int
@@ -167,21 +183,25 @@ type Model struct {
 	// observedSequence is the sequence of the last parent-Session event
 	// delivered to this Model. It is not the projection's sequence: an adopted
 	// Runtime snapshot can legitimately be ahead of the delivered records.
-	observedSequence     uint64
-	starting             bool
-	cancelStart          bool
-	waiting              bool
-	streamErr            error
-	composerResolving    bool
-	composerResolveSeq   uint64
-	composerCancel       context.CancelFunc
-	clipboardLoading     bool
-	clipboardGeneration  uint64
-	clipboardCancel      context.CancelFunc
-	queued               int
-	canceling            bool
-	exitArmed            bool
-	bannerPrinted        bool
+	observedSequence    uint64
+	starting            bool
+	cancelStart         bool
+	waiting             bool
+	streamErr           error
+	composerResolving   bool
+	composerResolveSeq  uint64
+	composerCancel      context.CancelFunc
+	clipboardLoading    bool
+	clipboardGeneration uint64
+	clipboardCancel     context.CancelFunc
+	queued              int
+	canceling           bool
+	exitArmed           bool
+	bannerPrinted       bool
+	// permissionMode caches the effective sandbox mode the Composer's permission
+	// row shows. Reading it while rendering would clone the Controller's whole
+	// configuration, so it is refreshed when a control result can change it.
+	permissionMode       config.SandboxMode
 	textSaveSeq          uint64
 	statusNotice         string
 	statusNoticeErr      bool
@@ -200,7 +220,7 @@ type Model struct {
 	prompt               promptState
 	promptSeq            uint64
 	completionMarkers    []completionMarker
-	planModeNotices      []string
+	planNoticeSeq        uint64
 	worktreeLoading      bool
 	worktreeGeneration   uint64
 	worktreeCancel       context.CancelFunc
@@ -285,7 +305,9 @@ func (m *Model) Init() tea.Cmd {
 //nolint:funlen,gocyclo // The sealed Tea message union stays visible in one dispatcher.
 func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	// Only the deferred-delta path marks the composed view stable again; every
-	// other update can change what the frame renders.
+	// other update can change what the frame renders. viewStale intentionally
+	// outlives this update: an invalidation that no View call has adopted yet must
+	// keep the cache unusable for the updates that follow it.
 	m.viewStable = false
 
 	switch message := message.(type) {
@@ -341,6 +363,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.controller = message.controller
 		m.dropPending()
 		m.state = message.controller.Snapshot()
+		m.refreshPermissionMode()
 		m.resetHistory()
 		configuredTUI := message.controller.Config().TUI
 		if configuredTUI.StatusLine == nil {
@@ -354,6 +377,10 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.syncApprovalPrompt()
 		m.setLayout()
 		return m, m.publishStartup()
+	case usageProjectionResultMsg:
+		m.applyUsageProjectionResult(message)
+
+		return m, nil
 	case subscriptionStartedMsg:
 		if message.generation != m.subscriptionSeq {
 			if message.bridge != m.subscription {
@@ -593,6 +620,10 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case mcpRouteDataMsg:
 		return m, m.applyMCPRouteData(message)
+	case statusRouteDataMsg:
+		m.applyStatusPanelData(message)
+
+		return m, nil
 	case mcpRoutePollMsg:
 		return m, m.applyMCPRoutePoll(message)
 	case skillToggleResultMsg:
@@ -784,10 +815,15 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.completionMarkers = nil
 			m.transcriptHanded = false
 			m.resetTeamProjection(m.state.SessionID)
+			m.resetNotices()
 			m.resetScrollback()
 			m.resetHistory()
 		case operationModel, operationReload, operationMode, operationPermissions:
 		}
+		// A control result can carry a permission change (the picker's apply, a
+		// reload, a Full Access confirmation), so the Composer's cached row is
+		// refreshed with it instead of on every frame.
+		m.refreshPermissionMode()
 		switch {
 		case pickerControl:
 			if m.picker.kind == pickerCommand {
@@ -846,18 +882,18 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.worktreeCancel = nil
 		}
 		m.worktreeLoading = false
-		if message.err != nil {
-			body := strings.TrimPrefix(m.statusContent(), "Status\n\n") +
-				"\nRepository: unavailable (Git status: " + safeError(message.err) + ")"
+		if m.route.kind == routeStatus {
+			m.applyStatusRepositoryData(message)
 
-			return m, m.printInspection("Status", body)
+			return m, nil
 		}
-		m.worktreeSummary = compactWorktreeSummary(message.status)
+		// The read outlived its surface: keep the loaded summary for the next
+		// /status, and drop a failure no surface can act on.
+		if message.err == nil {
+			m.worktreeSummary = compactWorktreeSummary(message.status)
+		}
 
-		return m, m.printInspection(
-			"Status",
-			strings.TrimPrefix(m.statusContent(), "Status\n\n"),
-		)
+		return m, nil
 	case exitResetMsg:
 		m.exitArmed = false
 
@@ -990,15 +1026,19 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 
 // View composes the frame the renderer paints. The framework calls it after
 // every message, and a deferred delta changes none of its inputs, so the
-// composition of those updates is reused instead of repeated.
+// composition of those updates is reused instead of repeated. A delivery the
+// subscription already owns is reused the same way.
 func (m *Model) View() tea.View {
-	if m.viewStable && m.viewCached {
+	// Reuse requires a composition that still describes the current state: one an
+	// invalidation outside an Update took away is composed again, not resurrected.
+	if m.viewStable && m.viewCached && !m.viewStale {
 		return m.viewCache
 	}
 
 	m.viewComposes++
 	m.viewCache = m.composeView()
 	m.viewCached = true
+	m.viewStale = false
 
 	return m.viewCache
 }
@@ -1006,8 +1046,14 @@ func (m *Model) View() tea.View {
 // composeView builds the frame: the inline lifecycle shell, or the ready chat
 // layout.
 func (m *Model) composeView() tea.View {
+	// The per-model tally is a projection of state, so it observes state wherever a
+	// frame observes it: every state change goes through a composition.
+	m.modelUsage.observe(m.state)
 	if m.lifecycle == lifecycleReady && !m.sizeReady {
-		return tea.NewView("Loading…")
+		// A frame composed before the terminal reports its size would lay the
+		// ready layout out against placeholder geometry, so this waits for that
+		// size with nothing drawn rather than a transient label.
+		return tea.NewView("")
 	}
 	var content string
 
@@ -1015,7 +1061,9 @@ func (m *Model) composeView() tea.View {
 	case lifecycleTrust:
 		content = m.trustView()
 	case lifecycleLoading:
-		content = "Starting Pips…"
+		// The banner and any stable history are published once the frame is
+		// ready, so the loading lifecycle draws nothing rather than leaving a
+		// transient label where that output belongs.
 	case lifecycleReady:
 		return m.readyView()
 	case lifecycleFatal:
@@ -1348,6 +1396,9 @@ func (m *Model) readyView() tea.View {
 		footer = append(footer, activity)
 	}
 	if prompt := m.promptView(); prompt != "" && !m.goalCommandPickerActive() {
+		// The band shares the Composer's text column, so its accent gutter lines
+		// up with the transcript's accented blocks instead of the frame edge.
+		prompt = insetRows(prompt, timelineInset(m.width))
 		if caps.promptRows > 0 {
 			prompt = truncateTailHeight(prompt, caps.promptRows)
 		}
@@ -1368,7 +1419,7 @@ func (m *Model) readyView() tea.View {
 	footer = append(footer, m.composerBand())
 	if m.picker.kind != pickerNone {
 		usedHeight := lipgloss.Height(lipgloss.JoinVertical(lipgloss.Left, footer...))
-		availableRows := max(1, min(caps.pickerRows, m.height-usedHeight))
+		availableRows := m.pickerBandRows(caps, m.height-usedHeight)
 		switch m.picker.kind {
 		case pickerModel:
 			footer = append(footer, m.pickerView(availableRows))
@@ -1428,9 +1479,8 @@ func (m *Model) readyView() tea.View {
 		transcript: max(0, transcriptRows-min(dropped, transcriptRows)),
 		topDropped: min(dropped, transcriptRows),
 	}
-	if m.mouseReportingEnabled() {
-		view.OnMouse = m.handleMouse
-	}
+	// presentationView installs the pointer handler for every frame, so the ready
+	// view only has to record where its transcript band sat.
 	view.Cursor = m.composer.Cursor()
 	if m.searchOwnsKeys() {
 		view.Cursor = m.search.input.Cursor()
@@ -1554,6 +1604,74 @@ func (m *Model) statusLineWithItems(items []statusline.Item) string {
 	return alignStatusLine(leftValue, strings.Join(right, separator), width)
 }
 
+// modelNameTokens pins the spelling of vendor tokens that plain capitalization
+// would render wrong. Everything else is capitalized from the id as written.
+var modelNameTokens = map[string]string{
+	"deepseek": "DeepSeek",
+	"gpt":      "GPT",
+	"glm":      "GLM",
+	"vl":       "VL",
+}
+
+// modelDisplayName names the active model the way the reference status line
+// does: a short display name instead of provider/model. The provider prefix and
+// any nested catalog path are dropped, so clinepass plus
+// cline-pass/deepseek-v4.1-flash reads as DeepSeek V4.1 Flash.
+func modelDisplayName(provider ai.Provider, modelID string) string {
+	name := strings.TrimSpace(modelID)
+	if name == "" {
+		return string(provider)
+	}
+
+	if index := strings.LastIndex(name, "/"); index >= 0 {
+		name = name[index+1:]
+	}
+
+	tokens := strings.FieldsFunc(name, func(character rune) bool {
+		return character == '-' || character == '_'
+	})
+	words := make([]string, 0, len(tokens))
+	for _, token := range tokens {
+		if word, ok := modelNameTokens[strings.ToLower(token)]; ok {
+			words = append(words, word)
+
+			continue
+		}
+
+		words = append(words, capitalizeFirst(token))
+	}
+	if len(words) == 0 {
+		return string(provider)
+	}
+
+	return strings.Join(words, " ")
+}
+
+// capitalizeFirst upper-cases the first rune of a model token and keeps the rest
+// as written, so v4.1 stays a version rather than becoming a word.
+func capitalizeFirst(token string) string {
+	first, size := utf8.DecodeRuneInString(token)
+	if size == 0 {
+		return token
+	}
+
+	return string(unicode.ToUpper(first)) + token[size:]
+}
+
+// promptCacheHitRate reports the share of prompt tokens the provider served from
+// its cache, as a whole percentage. Input tokens already include the cached
+// ones, so the rate is cached over input; false means the caller has no reported
+// prompt size to divide by.
+func promptCacheHitRate(usage coding.TokenUsage) (int, bool) {
+	if usage.InputTokens <= 0 {
+		return 0, false
+	}
+
+	cached := min(max(usage.CachedInputTokens, 0), usage.InputTokens)
+
+	return int(float64(cached) / float64(usage.InputTokens) * 100), true
+}
+
 //nolint:gocyclo // Each closed status field has one visible formatting branch.
 func (m *Model) statusLineItem(item statusline.Item, width int) string {
 	workspaceName := filepath.Base(m.options.Workspace)
@@ -1587,7 +1705,7 @@ func (m *Model) statusLineItem(item statusline.Item, width int) string {
 		value = sessionLabel
 		style = style.Bold(true).Foreground(palette.session)
 	case statusline.Model:
-		value = fmt.Sprintf("%s/%s", m.state.Provider, m.state.ModelID)
+		value = modelDisplayName(m.state.Provider, m.state.ModelID)
 		style = style.Foreground(palette.model)
 	case statusline.ContextUsed:
 		window := m.state.ContextWindow
@@ -1595,7 +1713,12 @@ func (m *Model) statusLineItem(item statusline.Item, width int) string {
 			percent := min(100, max(0, int(
 				(float64(m.state.ContextTokens)/float64(window))*100,
 			)))
-			value = fmt.Sprintf("Context %d%% used", percent)
+			value = fmt.Sprintf("%d%% ctx", percent)
+			style = style.Foreground(palette.model)
+		}
+	case statusline.CacheHitRate:
+		if percent, ok := promptCacheHitRate(m.state.Interaction.Usage); ok {
+			value = fmt.Sprintf("%d%% cache", percent)
 			style = style.Foreground(palette.model)
 		}
 	case statusline.TaskProgress:
@@ -1743,11 +1866,11 @@ func (m *Model) setLayout() {
 	composerHeight := min(m.composerEditorRows(), max(layoutComposerMinRows, m.composer.Height()))
 	m.composer.SetHeight(composerHeight)
 	if m.prompt.kind == promptQuestion {
-		m.prompt.question.editor.SetWidth(max(1, width-4))
+		m.prompt.question.editor.SetWidth(max(1, m.promptBandWidth()-4))
 	}
 	if m.prompt.kind == promptPlanReview {
-		m.prompt.planReview.editor.SetWidth(max(1, width-4))
-		m.prompt.planReview.commentEditor.SetWidth(max(1, width-4))
+		m.prompt.planReview.editor.SetWidth(max(1, m.promptBandWidth()-4))
+		m.prompt.planReview.commentEditor.SetWidth(max(1, m.promptBandWidth()-4))
 	}
 	if m.routeUsesSearch() {
 		m.route.search.SetWidth(routeSearchInputWidth(width))
@@ -1776,30 +1899,87 @@ func (m *Model) composerBand() string {
 }
 
 func (m *Model) composerBoxContent(content string) string {
-	if !m.drawsComposerBox(m.layout()) {
+	caps := m.layout()
+	if !m.drawsComposerBox(caps) {
 		return content
 	}
 
+	border := lipgloss.RoundedBorder()
+	if m.options.NoColor {
+		border = lipgloss.NormalBorder()
+	}
+
+	// The bottom side is drawn by hand below, because the permission mode
+	// replaces part of its rule instead of taking an inner row of the input.
 	style := lipgloss.NewStyle().
 		Width(max(1, m.width)).
 		Padding(0, 1).
-		Border(lipgloss.RoundedBorder(), true)
-	if m.options.NoColor {
-		style = style.Border(lipgloss.NormalBorder(), true)
-	} else {
+		Border(border, true, true, false, true)
+	if !m.options.NoColor {
 		style = style.BorderForeground(paletteFor(m.theme).separator)
 	}
 
-	return style.Render(content)
+	return style.Render(content) + "\n" + m.composerBottomBorder(caps, border)
+}
+
+// drawsComposerMode reports whether the box's bottom border carries the
+// permission mode. Only a comfortable window names the mode; a shorter frame
+// draws the plain border.
+func (m *Model) drawsComposerMode(caps layoutCaps) bool {
+	return caps.composerMode && m.drawsComposerBox(caps)
+}
+
+// composerBottomBorder closes the box and right-aligns the active permission
+// mode inside that rule, so the mode reads as a label of the frame rather than
+// another line of the input.
+func (m *Model) composerBottomBorder(caps layoutCaps, border lipgloss.Border) string {
+	// Cells between the two corners. The label keeps one gap on each side and a
+	// single rule cell before the bottom-right corner, so its distance to that
+	// corner does not change with the box width.
+	inner := max(0, max(1, m.width)-2)
+	label := ""
+
+	if m.drawsComposerMode(caps) {
+		available := inner - 2*composerModeGap - ansi.StringWidth(border.Bottom)
+		if available > 0 {
+			label = ansi.Truncate(permissionModeText(m.permissionMode), available, "…")
+		}
+	}
+
+	if label == "" {
+		return border.BottomLeft + strings.Repeat(border.Bottom, inner) + border.BottomRight
+	}
+
+	rule := max(0, inner-2*composerModeGap-ansi.StringWidth(border.Bottom)-ansi.StringWidth(label))
+	gap := strings.Repeat(" ", composerModeGap)
+	head := border.BottomLeft + strings.Repeat(border.Bottom, rule) + gap
+	tail := gap + border.Bottom + border.BottomRight
+
+	if m.options.NoColor {
+		return head + label + tail
+	}
+
+	palette := paletteFor(m.theme)
+	ruleStyle := lipgloss.NewStyle().Foreground(palette.separator)
+
+	return ruleStyle.Render(head) +
+		lipgloss.NewStyle().Foreground(palette.muted).Render(label) +
+		ruleStyle.Render(tail)
 }
 
 func (m *Model) hasComposerBox() bool {
-	return m.width >= 24
+	return m.width >= composerBoxMinWidth
+}
+
+// composerBoxInnerWidth is the box's content width: the frame minus the border and
+// one padding cell on each side.
+func composerBoxInnerWidth(width int) int {
+	return max(1, width-4)
 }
 
 func composerEditorWidth(width int) int {
-	if width >= 24 {
-		return max(1, width-4)
+	if width >= composerBoxMinWidth {
+		return composerBoxInnerWidth(width)
 	}
 
 	return max(1, width)
@@ -1829,10 +2009,17 @@ func (m *Model) activityLine() string {
 		return ""
 	}
 
-	return ansi.Truncate(
-		m.activity.View(status, m.theme, m.options.NoColor),
-		max(1, m.width),
-		"…",
+	// The activity row is part of the footer that describes the live turn, so it
+	// shares the Composer's text column with the status line and the input.
+	inset := timelineInset(m.width)
+
+	return insetRows(
+		ansi.Truncate(
+			m.activity.View(status, m.theme, m.options.NoColor),
+			max(1, m.width-2*inset),
+			"…",
+		),
+		inset,
 	)
 }
 
@@ -1860,8 +2047,9 @@ func (m *Model) renderTranscriptContent(forceBottom bool) {
 	m.renderDirty = false
 	m.frameRenders++
 	// The transcript region changed, so a composed view is stale whatever the last
-	// update was.
+	// update was, and this invalidation outlives the update until View adopts it.
 	m.viewStable = false
+	m.viewStale = true
 	if m.fullscreen() {
 		m.renderManagedTranscript(forceBottom)
 
@@ -2080,7 +2268,36 @@ func (m *Model) transcriptWindow(height int) string {
 		visible = m.highlightSearchWindow(visible)
 	}
 
+	// A frame that owns the screen pads the region to its band, so the Composer
+	// and status line sit on the bottom row of the container instead of floating
+	// under a short conversation. A frame in the main buffer must stay
+	// content-sized: padding it would scroll the terminal's own history away.
+	if m.ownsScreen() {
+		visible = padRows(visible, height)
+	}
+
 	return visible
+}
+
+// ownsScreen reports whether the frame is drawn in the alternate buffer, where
+// the app owns every row and no native history has to stay visible above it.
+func (m *Model) ownsScreen() bool {
+	screen, policy, _, _ := m.resolvePresentation()
+	if screen != ScreenFullscreen {
+		return false
+	}
+
+	return m.useAltScreen(screen, policy)
+}
+
+// padRows grows a composed band to exactly height rows with blank rows below it.
+func padRows(content string, height int) string {
+	rows := lipgloss.Height(content)
+	if rows >= height {
+		return content
+	}
+
+	return content + strings.Repeat("\n", height-rows)
 }
 
 // clampFrameTailOffset reports how many leading rows clampFrameTail removed, so a
@@ -2400,6 +2617,12 @@ func (m *Model) updateStream(message streamItemMsg) (tea.Model, tea.Cmd) {
 	}
 
 	if m.subscriptionMode && message.item.err == nil {
+		// The subscription is the parent projection's source and already received
+		// this event, so the delivery only advances the wait. It renders nothing
+		// new, so the composed view stays current and View reuses it instead of
+		// re-styling the whole frame. A cache an unadopted invalidation took away
+		// is composed again rather than resurrected.
+		m.viewStable = true
 		m.waiting = true
 
 		return m, m.bridge.wait()
@@ -2485,7 +2708,6 @@ func (m *Model) reduceStreamBatch(items []streamItem) {
 	valid, streamErr := streamItemsBeforeError(items)
 
 	previousSessionID := m.state.SessionID
-	previousPlanMode := m.state.PlanMode
 
 	if !m.advanceParentState(valid) {
 		return
@@ -2496,7 +2718,6 @@ func (m *Model) reduceStreamBatch(items []streamItem) {
 		m.resetTeamProjection(m.state.SessionID)
 		m.resetSubagentInteractions()
 	}
-	m.queuePlanModeNotices(previousPlanMode)
 
 	parent := false
 	for _, item := range valid {
@@ -2545,6 +2766,11 @@ func (m *Model) streamBatchRefresh(batch []streamItem) []tea.Cmd {
 			m.invalidateTeamProjection(item.event),
 			m.observeSubagentControl(item.event),
 		)
+	}
+	// A completed interaction's split is written to the Session's sidecar here,
+	// where the state it was projected from is already advanced.
+	if command := m.usageProjectionWriteCommand(); command != nil {
+		refresh = append(refresh, command)
 	}
 
 	return append(refresh, m.loadPlanViewIfNeeded())
@@ -2655,6 +2881,7 @@ func (m *Model) observeStreamEvent(event coding.Event) {
 		// handoff may write it again. Compaction keeps the flag: the rows the
 		// escape hatch already printed are still on the screen.
 		m.transcriptHanded = false
+		m.resetNotices()
 		m.resetHistory()
 		m.resetScrollback()
 	case coding.EventCompactionCompleted:
@@ -2689,7 +2916,7 @@ func (m *Model) recordCompletion(event coding.Event) {
 		}
 	}
 
-	m.completionMarkers = append(m.completionMarkers, completionMarker{
+	m.completionMarkers = appendMarker(m.completionMarkers, completionMarker{
 		interactionID:  event.InteractionID,
 		afterMessages:  len(m.state.Transcript),
 		outcome:        completed.Outcome,

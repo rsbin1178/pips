@@ -244,13 +244,17 @@ func TestTimelineUsesUniformInterBlockSpacing(t *testing.T) {
 		true,
 	)
 	separator := strings.Repeat("\n", conversationGapHeight+1)
+	inset := strings.Repeat(" ", transcriptHorizontalInset)
 	assert.Equal(t, strings.Join([]string{
-		"assistant",
-		questionFailedTitle + "\nfirst failure",
-		questionFailedTitle + "\nsecond failure",
+		inset + "assistant",
+		inset + questionFailedTitle + "\n" + inset + "first failure",
+		inset + questionFailedTitle + "\n" + inset + "second failure",
 	}, separator), rendered)
 }
 
+// TestTimelineUsesUniformOuterContentMargin asserts every entry starts at the
+// Composer's text column: a message lines up with the text inside the input box
+// instead of with the frame edge, and no entry starts further in.
 func TestTimelineUsesUniformOuterContentMargin(t *testing.T) {
 	t.Parallel()
 
@@ -264,11 +268,19 @@ func TestTimelineUsesUniformOuterContentMargin(t *testing.T) {
 		themeDark,
 		true,
 	)
+	inset := strings.Repeat(" ", transcriptHorizontalInset)
 	lines := strings.Split(rendered, "\n")
 	require.NotEmpty(t, lines)
-	assert.False(t, strings.HasPrefix(lines[0], " "))
-	assert.Equal(t, "assistant", strings.TrimRight(lines[0], " "))
-	assert.Contains(t, lines, questionFailedTitle)
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+
+		indent := len(line) - len(strings.TrimLeft(line, " "))
+		require.Equal(t, transcriptHorizontalInset, indent, "row starts at the Composer text column: %q", line)
+	}
+	assert.Equal(t, inset+"assistant", strings.TrimRight(lines[0], " "))
+	assert.Contains(t, lines, inset+questionFailedTitle)
 }
 
 func TestTimelineRendersThinkingTextButNeverSignatures(t *testing.T) {
@@ -541,7 +553,7 @@ func TestTimelineRendersUserMessageAsArrowBlock(t *testing.T) {
 		themeDark,
 		true,
 	)
-	assert.Equal(t, "❯ first line\n  second line", plain)
+	assert.Equal(t, "  ❯ first line\n    second line", plain)
 	assert.Equal(t, 1, strings.Count(plain, inputArrow))
 
 	colored := renderTimeline(
@@ -605,7 +617,7 @@ func TestTimelineSanitizesUserMessageProjection(t *testing.T) {
 		themeDark,
 		true,
 	)
-	assert.Equal(t, "❯ first\n  second\n  third", rendered)
+	assert.Equal(t, "  ❯ first\n    second\n    third", rendered)
 	assert.NotContains(t, rendered, "\x1b[")
 }
 
@@ -750,7 +762,7 @@ func TestTimelineFailureKeepsErrorAndCancellationSuppressesIt(t *testing.T) {
 	assert.Equal(t, "▣ openai/test-model · 12s · failed", failedBlocks[1].body)
 	assert.Equal(
 		t,
-		"▌ provider unavailable",
+		"  ▌ provider unavailable",
 		renderTimeline(failedBlocks[:1], newMarkdownRenderer(8), 80, themeDark, true),
 	)
 
@@ -762,4 +774,17 @@ func TestTimelineFailureKeepsErrorAndCancellationSuppressesIt(t *testing.T) {
 	}})
 	require.Len(t, canceledBlocks, 1)
 	assert.Equal(t, "▣ openai/test-model · 12s · interrupted", canceledBlocks[0].body)
+}
+
+// insetExpected shifts a rendered fixture to the transcript's content column, so
+// a test states the text of an entry without repeating the layout inset.
+func insetExpected(text string) string {
+	lines := strings.Split(text, "\n")
+	for index, line := range lines {
+		if line != "" {
+			lines[index] = "  " + line
+		}
+	}
+
+	return strings.Join(lines, "\n")
 }

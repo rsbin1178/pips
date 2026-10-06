@@ -7,6 +7,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding"
@@ -33,6 +34,73 @@ func TestCommandPickerDisablesRuntimeReplacementUnlessIdle(t *testing.T) {
 	assert.Zero(t, controller.newCalls)
 }
 
+// TestReadingCommandsStayReachableWhileRunning pins the split around a running
+// turn: surfaces that only read open, while every command that would change the
+// runtime that turn owns still refuses with the idle error.
+func TestReadingCommandsStayReachableWhileRunning(t *testing.T) {
+	t.Parallel()
+
+	reachable := []string{
+		"view-plan", "agents", "skills", "statusline", commandTheme,
+		"tree", commandStatus, commandMCP,
+	}
+	for _, name := range reachable {
+		t.Run("reads/"+name, func(t *testing.T) {
+			t.Parallel()
+
+			model := runningCommandModel(t)
+			model.executeCommand(commandDescriptor{name: name})
+			require.NoError(t, model.picker.err, "/%s must stay reachable while a turn runs", name)
+		})
+	}
+
+	blocked := []string{
+		"new", "resume", "plan", "mode", commandTeam, "model",
+		commandPermissions, "fork", "compact", "review", "reload",
+	}
+	for _, name := range blocked {
+		t.Run("changes/"+name, func(t *testing.T) {
+			t.Parallel()
+
+			model := runningCommandModel(t)
+			_, command := model.executeCommand(commandDescriptor{name: name, idleOnly: true})
+			assert.Nil(t, command)
+			require.Error(t, model.picker.err)
+			assert.Contains(t, model.picker.err.Error(), "available only while idle")
+		})
+	}
+}
+
+// runningCommandModel is a ready model whose action context is a running turn.
+func runningCommandModel(t *testing.T) *Model {
+	t.Helper()
+
+	state := readyState()
+	state.Phase = coding.PhaseRunning
+	state.Interaction = coding.InteractionState{ID: "interaction-1", Active: true}
+	model := readyModelWithController(t, newOverlayController(state), true)
+	model.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	model.openCommandPicker()
+
+	return model
+}
+
+// TestCommandQueryLeadsWithAnExactNameMatch pins command resolution: a query that
+// spells a command's whole name selects that command, not the longer name that
+// merely contains it.
+func TestCommandQueryLeadsWithAnExactNameMatch(t *testing.T) {
+	t.Parallel()
+
+	model := readyModel(t, true)
+	model.openCommandPicker()
+	model.picker.query = commandStatus
+
+	filtered := model.filteredCommands()
+	require.Len(t, filtered, 2)
+	assert.Equal(t, commandStatus, filtered[0].name)
+	assert.Equal(t, "statusline", filtered[1].name)
+}
+
 func TestCommandPickerRendersBelowComposerAndFiltersInPlace(t *testing.T) {
 	t.Parallel()
 
@@ -50,26 +118,46 @@ func TestCommandPickerRendersBelowComposerAndFiltersInPlace(t *testing.T) {
 	require.GreaterOrEqual(t, composerLine, 0)
 	require.Greater(t, resumeLine, composerLine)
 	assert.True(t, strings.HasPrefix(lines[composerLine-1], "╭"))
-	assert.True(t, strings.HasPrefix(lines[composerLine+1], "╰"))
+	// The permission mode rides the box's bottom border, so that border follows
+	// the input row directly.
+	assert.True(t, strings.HasPrefix(lines[composerLine+1], "╰─"))
+	assert.Contains(t, lines[composerLine+1], permissionModeText(model.permissionMode))
 	assert.Less(t, composerLine+1, resumeLine)
 	assert.NotContains(t, content, "Commands\n")
-	assert.NotContains(t, content, "openai/test-model")
+	assert.NotContains(t, content, "Test Model", "the picker band replaces the status line")
 	assert.Contains(t, view.Content, "\x1b[")
 	assert.Equal(t, pickerCommand, model.picker.kind)
 	require.NotNil(t, view.Cursor)
 }
 
-func TestCommandPickerUsesRemainingHeightAndLightweightSelection(t *testing.T) {
+// TestCommandPickerBoundsItsHeightAndKeepsSelectionLightweight pins the picker
+// band: the command list is a window of at most two fifths of the window and at
+// most layoutPickerMaxRows rows, so it never covers the timeline the command is
+// about to act on. The window follows the cursor, so every command stays
+// reachable, and the selected row stays a plain marker rather than a full-row
+// background.
+func TestCommandPickerBoundsItsHeightAndKeepsSelectionLightweight(t *testing.T) {
 	t.Parallel()
 
 	model := readyModel(t, false)
 	model.Update(tea.WindowSizeMsg{Width: 72, Height: 30})
 	model.openCommandPicker()
 
+	first, last := commands[0].name, commands[len(commands)-1].name
 	content := ansi.Strip(model.View().Content)
-	for _, command := range commands {
-		assert.Contains(t, content, "/"+command.name)
-	}
+	assert.Contains(t, content, "/"+first, "the window opens at the cursor")
+	assert.NotContains(t, content, "/"+last, "the inventory is longer than the band")
+
+	model.picker.cursor = len(commands) - 1
+	content = ansi.Strip(model.View().Content)
+	assert.Contains(t, content, "/"+last, "the window follows the cursor")
+	assert.NotContains(t, content, "/"+first, "and drops what scrolled out")
+
+	budget := model.pickerBandRows(model.layout(), model.height)
+	assert.LessOrEqual(t, budget, layoutPickerMaxRows)
+	assert.LessOrEqual(t, budget, pickerRowsFor(model.height))
+	assert.LessOrEqual(t, lipgloss.Height(model.commandPickerView(budget)), budget, "the band stays inside the budget")
+
 	selected := model.renderCommandPickerRow(commands[0], true)
 	assert.Contains(t, selected, "› /new")
 	assert.NotContains(t, selected, "\x1b[48;")

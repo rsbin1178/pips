@@ -41,20 +41,23 @@ var commands = []commandDescriptor{
 	{name: "resume", description: "resume a workspace session", idleOnly: true},
 	{name: "plan", description: "enter read-only Plan Mode", idleOnly: true},
 	{name: "goal", description: "set, inspect, pause, resume, or clear a goal", arguments: true},
-	{name: "view-plan", aliases: []string{"show-plan", "plan-view"}, description: "preview the saved session plan", idleOnly: true},
+	// Reading a session, a document, or the current settings leaves a running
+	// turn untouched, so those surfaces stay reachable while it streams. The
+	// actions inside them that do change the runtime remain idle-only.
+	{name: "view-plan", aliases: []string{"show-plan", "plan-view"}, description: "preview the saved session plan"},
 	{name: "mode", description: "switch Agent or Plan operating mode", idleOnly: true},
-	{name: "agents", description: "inspect read-only specialist runs", idleOnly: true},
+	{name: "agents", description: "inspect read-only specialist runs"},
 	{name: commandTeam, description: "propose or inspect a coding Team", idleOnly: true, arguments: true},
-	{name: "skills", description: "enable or disable project Skills", idleOnly: true},
+	{name: "skills", description: "enable or disable project Skills"},
 	{name: commandMCP, description: "inspect MCP server connections"},
 	{name: "model", description: "switch the process-local model", idleOnly: true},
 	{name: "copy", description: "copy an assistant reply (default: the latest) to the clipboard and a file", arguments: true},
 	{name: "export", description: "write the loaded conversation to a Markdown file", arguments: true},
 	{name: commandFind, aliases: []string{"search"}, description: "search the managed conversation", arguments: true},
 	{name: commandPermissions, description: "change process-local execution permissions", idleOnly: true},
-	{name: "statusline", description: "configure status-line fields", idleOnly: true},
-	{name: commandTheme, description: "choose the TUI color theme", idleOnly: true},
-	{name: "tree", description: "navigate the current session tree", idleOnly: true},
+	{name: "statusline", description: "configure status-line fields"},
+	{name: commandTheme, description: "choose the TUI color theme"},
+	{name: "tree", description: "navigate the current session tree"},
 	{name: "fork", description: "fork a node into a new session", idleOnly: true},
 	{name: "compact", description: "preview and compact older context", idleOnly: true},
 	{name: "review", description: "review workspace changes in Plan Mode", idleOnly: true},
@@ -309,7 +312,7 @@ func (m *Model) executeCommand(command commandDescriptor) (tea.Model, tea.Cmd) {
 		m.closeCommandPicker(false)
 		m.restoreCommandComposer(previous)
 
-		return m, m.printStatus()
+		return m, m.openStatusRoute()
 	case string(actionHelp):
 		previous := m.picker.previousComposer
 		m.closeCommandPicker(false)
@@ -353,6 +356,15 @@ func (m *Model) filteredCommands() []commandDescriptor {
 			}) {
 			filtered = append(filtered, command)
 		}
+	}
+	// An exact name match leads, so `/status` runs `/status` instead of the longer
+	// command that merely contains the query.
+	if exact := slices.IndexFunc(filtered, func(command commandDescriptor) bool {
+		return command.name == query
+	}); exact > 0 {
+		command := filtered[exact]
+		copy(filtered[1:exact+1], filtered[:exact])
+		filtered[0] = command
 	}
 
 	return filtered

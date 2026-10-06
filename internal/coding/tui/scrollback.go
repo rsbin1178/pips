@@ -4,12 +4,13 @@ package tui
 import (
 	"crypto/sha256"
 	"fmt"
+	"strconv"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding"
-	"github.com/rsbin1178/pips/internal/coding/planmode"
+	"github.com/rsbin1178/pips/internal/coding/config"
 )
 
 // scrollbackCursor separates immutable conversation history from the live
@@ -38,7 +39,9 @@ func (m *Model) resetScrollback() {
 	teamAttempts := m.scrollback.teamAttempts
 	m.scrollback = scrollbackCursor{}
 	m.scrollback.teamAttempts = teamAttempts
-	m.planModeNotices = nil
+	// Inspection output belongs to the projection being replaced, so a session
+	// change drops whatever a route was holding instead of printing it later.
+	m.presentation.heldInspections = nil
 	m.streaming.reset()
 	m.timeline = ""
 }
@@ -178,7 +181,6 @@ func (m *Model) takeStableTimelineBlocks() []timelineBlock {
 	}
 
 	blocks := m.projectTimeline(delta, m.scrollback.toolIDs)
-	blocks = append(blocks, m.takePlanModeNoticeBlocks()...)
 
 	for _, marker := range m.pendingCompletionMarkers() {
 		if block, ok := projectCompletionMarker(marker); ok {
@@ -298,7 +300,7 @@ func (m *Model) activeTimelineBlocks() []timelineBlock {
 // fullscreenTimelineBlocks projects the entire conversation for the transcript
 // viewport. Unlike activeTimelineBlocks it has no projection cursor: nothing has
 // been handed to the terminal, so the managed region owns every entry, including
-// the plan-mode notices and completion markers that the inline path prints once.
+// the markers that the inline path prints once.
 func (m *Model) fullscreenTimelineBlocks() []timelineBlock {
 	return m.managedTimelineBlocks(true, m.showThinkingBlocks())
 }
@@ -319,7 +321,6 @@ func (m *Model) managedTimelineBlocks(includeNotices, includeThinking bool) []ti
 	}
 	// Durable history older than the bootstrap window leads the conversation.
 	blocks = append(m.historyBlocks(), blocks...)
-	blocks = append(blocks, m.activePlanModeNoticeBlocks()...)
 	blocks = append(blocks, m.activeTeamAttemptBlocks()...)
 
 	if m.streaming.active {
@@ -346,62 +347,43 @@ func (m *Model) managedTimelineBlocks(includeNotices, includeThinking bool) []ti
 	return blocks
 }
 
-// activePlanModeNoticeBlocks returns plan-mode transition notices without
-// consuming them, so the fullscreen projection can show them while they remain
-// queued for the inline path.
-func (m *Model) activePlanModeNoticeBlocks() []timelineBlock {
-	if len(m.planModeNotices) == 0 {
-		return nil
+// queuePlanModeNotice records one plan-mode transition row at the current
+// conversation position. Rows are printed for an approved agent-initiated
+// enter_plan_mode and for a closed plan review; a user /plan or Shift+Tab toggle
+// prints none, matching grok-build.
+func (m *Model) queuePlanModeNotice(body string) {
+	if body == "" {
+		return
 	}
 
-	return []timelineBlock{{
-		kind:     blockDiagnostic,
-		body:     strings.Join(m.planModeNotices, "\n"),
-		position: len(m.state.Transcript),
-	}}
+	m.planNoticeSeq++
+	m.completionMarkers = appendMarker(m.completionMarkers, completionMarker{
+		interactionID: "plan-" + strconv.FormatUint(m.planNoticeSeq, 10),
+		afterMessages: len(m.state.Transcript),
+		notice:        body,
+	})
 }
 
-// Plan-mode transition notices committed to the terminal history.
-const (
-	planModeEnteredNotice = "Agent entered plan mode"
-	planModeGateNotice    = "file edits outside session plan.md blocked until plan mode exits"
-	planModeOffNotice     = "Plan mode off"
-)
-
-func (m *Model) queuePlanModeNotices(previous planmode.State) {
-	m.planModeNotices = append(m.planModeNotices, planModeTransitionNotices(previous, m.state.PlanMode)...)
+// planModeEnteredNotice is the row an approved agent-initiated entry prints.
+func planModeEnteredNotice(permission string) string {
+	return "Agent entered plan mode · active permission mode: " + permission +
+		" · file edits outside session plan.md blocked until plan mode exits"
 }
 
-// planModeTransitionNotices returns the history lines for one state-machine
-// transition. Transient states (Pending, ExitPending) stay silent until they
-// settle.
-func planModeTransitionNotices(previous, next planmode.State) []string {
-	if previous == next {
-		return nil
-	}
-	if next == planmode.StateActive && previous != planmode.StateActive {
-		return []string{planModeEnteredNotice, planModeGateNotice}
-	}
-	if next == planmode.StateInactive && previous.Plan() {
-		return []string{planModeOffNotice}
-	}
-
-	return nil
+// planModeExitedNotice is the row a closed plan review prints, carrying its
+// approved or abandoned verdict.
+func planModeExitedNotice(verdict, permission string) string {
+	return "Plan " + verdict + " · plan mode off · active permission mode: " + permission
 }
 
-func (m *Model) takePlanModeNoticeBlocks() []timelineBlock {
-	if len(m.planModeNotices) == 0 {
-		return nil
+// planModeNoticePermission names the permission mode armed underneath plan mode.
+func (m *Model) planModeNoticePermission() string {
+	m.refreshPermissionMode()
+	if m.permissionMode == "" {
+		return string(config.SandboxWorkspaceWrite)
 	}
 
-	notices := m.planModeNotices
-	m.planModeNotices = nil
-
-	return []timelineBlock{{
-		kind:     blockDiagnostic,
-		body:     strings.Join(notices, "\n"),
-		position: len(m.state.Transcript),
-	}}
+	return string(m.permissionMode)
 }
 
 func sliceMessageCandidates(

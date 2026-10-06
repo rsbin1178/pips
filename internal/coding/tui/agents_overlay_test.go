@@ -150,7 +150,7 @@ func TestSubagentDetailShowsToolFailureOutputInline(t *testing.T) {
 	content := testSubagentRouteContent(readyModel(t, true), detail)
 	assert.Contains(t, content, "Read missing.go · not found")
 	assert.Contains(t, content, "missing.go: no such file")
-	assert.Contains(t, content, "▌ Explore failed\n▌ execution failed")
+	assert.Contains(t, content, insetExpected("▌ Explore failed\n▌ execution failed"))
 }
 
 func TestSubagentDetailExpandedToolResultIsBoundedAndRedacted(t *testing.T) {
@@ -179,7 +179,9 @@ func TestSubagentDetailExpandedToolResultIsBoundedAndRedacted(t *testing.T) {
 	colored := testSubagentRouteContent(coloredModel, detail)
 
 	assert.Contains(t, plain, "[sensitive")
-	assert.Contains(t, plain, "result omitted]")
+	// The placeholder is one phrase, so assert it across the line the inset and
+	// the narrow frame wrapped it onto.
+	assert.Contains(t, strings.Join(strings.Fields(plain), " "), "[sensitive result omitted]")
 	assert.NotContains(t, plain, "must-not-render")
 	assert.Equal(t, plain, ansi.Strip(colored))
 	assert.Equal(t, lipgloss.Height(plain), lipgloss.Height(colored))

@@ -690,20 +690,53 @@ const maxTranscriptNotices = 64
 type noticeEntry struct {
 	sequence uint64
 	body     string
+	// notice reports that the entry is operator output pinned to the frame edge.
+	// The header is transcript content instead, so it takes the content column.
+	notice bool
+	// banner re-renders the header at the current width and theme, so a resize
+	// cannot re-wrap a string that was rendered for an earlier one.
+	banner *startupBannerContext
 }
 
-// appendNotice records operator-facing output for the managed transcript.
+// appendNotice records operator-facing output for the managed transcript. It
+// keeps the frame edge, because inline mode hands the same text to the terminal.
 func (m *Model) appendNotice(content string) {
+	m.appendNoticeEntry(content, true, nil)
+}
+
+// appendBanner records the startup and `/new` header, which is plain transcript
+// content: without a box it has no frame edge to line up with, so it takes the
+// same content column as a message.
+func (m *Model) appendBanner(content string) {
+	context := m.bannerContext(max(1, m.width-2*timelineInset(m.width)))
+	m.appendNoticeEntry(content, false, &context)
+}
+
+func (m *Model) appendNoticeEntry(content string, notice bool, banner *startupBannerContext) {
 	content = strings.TrimRight(content, "\n")
 	if content == "" {
 		return
 	}
 
 	m.noticeSequence++
-	m.notices = append(m.notices, noticeEntry{sequence: m.noticeSequence, body: content})
+	m.notices = append(m.notices, noticeEntry{
+		sequence: m.noticeSequence,
+		body:     content,
+		notice:   notice,
+		banner:   banner,
+	})
 	if len(m.notices) > maxTranscriptNotices {
 		m.notices = m.notices[len(m.notices)-maxTranscriptNotices:]
 	}
+}
+
+// resetNotices drops operator-facing output that belonged to a replaced
+// session, so the managed viewport shows one session at a time and the new
+// banner becomes its first record. Inline mode never keeps these notices: it
+// hands the same text to the terminal, whose native history survives the
+// replacement. The sequence stays monotonic so no record identity repeats.
+func (m *Model) resetNotices() {
+	m.notices = nil
 }
 
 // noticeBlocks renders the operator-facing notices as leading transcript entries.
@@ -714,11 +747,22 @@ func (m *Model) noticeBlocks() []timelineBlock {
 
 	blocks := make([]timelineBlock, 0, len(m.notices))
 	for _, notice := range m.notices {
+		body := notice.body
+		if notice.banner != nil {
+			// The header is presentation, not a frozen record: it re-renders at
+			// the frame's current geometry and theme.
+			context := *notice.banner
+			context.width = max(1, m.width-2*timelineInset(m.width))
+			context.theme = m.theme
+			context.noColor = m.options.NoColor
+			body = renderStartupBanner(context)
+		}
 		blocks = append(blocks, timelineBlock{
 			kind:     blockDiagnostic,
 			id:       "notice:" + strconv.FormatUint(notice.sequence, 10),
-			body:     notice.body,
+			body:     body,
 			position: 0,
+			notice:   notice.notice,
 		})
 	}
 

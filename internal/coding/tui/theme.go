@@ -7,6 +7,7 @@ import (
 
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/rsbin1178/pips/internal/coding"
 )
@@ -14,6 +15,10 @@ import (
 const (
 	inputArrow       = "❯"
 	inputPromptWidth = 2
+	// cursorShape is the terminal cursor every input surface asks for. A bar
+	// leaves the character under the caret readable, which the default block
+	// cursor covers.
+	cursorShape = tea.CursorBar
 
 	themeIDAuto            = "auto"
 	themeIDDefaultDark     = "default-dark"
@@ -108,7 +113,10 @@ func paletteFor(theme colorTheme) colorPalette {
 
 func composerStyles(theme colorTheme, noColor bool) textarea.Styles {
 	if noColor {
-		return textarea.Styles{}
+		styles := textarea.Styles{}
+		styles.Cursor.Shape = cursorShape
+
+		return styles
 	}
 
 	styles := textarea.DefaultDarkStyles()
@@ -117,6 +125,11 @@ func composerStyles(theme colorTheme, noColor bool) textarea.Styles {
 	}
 
 	palette := paletteFor(theme)
+	// The cursor is part of the theme. A bar that changes color with the palette
+	// leaves the character under the caret readable in every theme.
+	styles.Cursor.Shape = cursorShape
+	styles.Cursor.Color = palette.session
+
 	prompt := lipgloss.NewStyle().Foreground(palette.composerPrompt)
 	styles.Focused.Prompt = prompt
 	styles.Blurred.Prompt = prompt
@@ -128,7 +141,6 @@ func composerStyles(theme colorTheme, noColor bool) textarea.Styles {
 		styles.Blurred.Text = text
 		styles.Focused.Placeholder = muted
 		styles.Blurred.Placeholder = muted
-		styles.Cursor.Color = palette.session
 	}
 
 	return styles
@@ -136,7 +148,10 @@ func composerStyles(theme colorTheme, noColor bool) textarea.Styles {
 
 func sessionSearchStyles(theme colorTheme, noColor bool) textinput.Styles {
 	if noColor {
-		return textinput.Styles{}
+		styles := textinput.Styles{}
+		styles.Cursor.Shape = cursorShape
+
+		return styles
 	}
 
 	styles := textinput.DefaultDarkStyles()
@@ -145,6 +160,9 @@ func sessionSearchStyles(theme colorTheme, noColor bool) textinput.Styles {
 	}
 
 	palette := paletteFor(theme)
+	styles.Cursor.Shape = cursorShape
+	styles.Cursor.Color = palette.session
+
 	styles.Focused.Prompt = lipgloss.NewStyle().Foreground(palette.session)
 	styles.Focused.Text = lipgloss.NewStyle().Foreground(palette.workspace)
 	styles.Focused.Placeholder = lipgloss.NewStyle().Foreground(palette.muted)

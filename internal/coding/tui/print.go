@@ -61,10 +61,6 @@ func (m *Model) historyHelpLine() string {
 	return line
 }
 
-func (m *Model) printStatus() tea.Cmd {
-	return m.loadWorkspaceStatus()
-}
-
 func (m *Model) loadWorkspaceStatus() tea.Cmd {
 	if m.worktreeLoading {
 		return nil
@@ -106,6 +102,11 @@ func (m *Model) printInspection(heading, body string) tea.Cmd {
 		m.appendNotice(content)
 		m.rerenderTranscript(false)
 
+		return nil
+	}
+	// A full-area route owns the screen, so a native insertion would land above the
+	// preview the user is reading. Hold it until the route returns.
+	if m.holdInspection(content) {
 		return nil
 	}
 
@@ -153,80 +154,6 @@ func sanitizeInspectionText(value string) string {
 	}, value)
 }
 
-func (m *Model) statusContent() string {
-	modelState := m.controller.Model()
-	modeState := m.controller.Mode()
-	configState := m.controller.Config()
-	permissions := m.permissionState()
-	// Rows with nothing to report are omitted, and yes/no flags read as words,
-	// so the report stays scannable instead of listing empty fields.
-	lines := []string{
-		"Status",
-		"",
-		"Workspace: " + m.options.Workspace,
-		"Session: " + m.state.SessionID,
-		"Model: " + modelState.Resolved.Ref.String(),
-		"Variant: " + valueOrDefault(modelState.Resolved.Variant),
-		"Reasoning: " + reasoningOrDefault(modelState.Resolved.ReasoningLevel),
-		"Mode: " + string(modeState.Current) + modeStatusSuffix(modeState),
-		"Phase: " + phaseText(m.state.Phase),
-	}
-	lines = append(lines, optionalStatusLine(
-		"Protocol", strings.TrimSpace(string(modelState.Resolved.Protocol)),
-	))
-	lines = append(lines, optionalStatusLine("Endpoint", resolvedEndpointText(modelState.Resolved.Endpoint)))
-	lines = append(lines,
-		"Context: "+knownLimit(modelState.Resolved.Limits.ContextWindow),
-		"Request output: "+optionalInt(modelState.Resolved.Options.MaxOutputTokens),
-		"Compaction: "+compactionStatusText(configState.Compaction),
-		"Sandbox: "+permissionModeText(permissions.SandboxProfile.Filesystem.Effective),
-		"Approval: "+permissionApprovalText(permissions.ApprovalPolicy.Effective),
-		"Network: "+permissionStatusNetworkText(
-			permissions.SandboxProfile.Network.Effective,
-			permissions.SandboxProfile.NetworkEnforced,
-		),
-	)
-	if modelState.Overridden || modeState.Overridden {
-		overrides := make([]string, 0, 2)
-		if modelState.Overridden {
-			overrides = append(overrides, "model")
-		}
-		if modeState.Overridden {
-			overrides = append(overrides, "mode")
-		}
-		lines = append(lines, "Overrides: "+strings.Join(overrides, ", "))
-	}
-	if !configState.ToolSearch {
-		lines = append(lines, "Tool search: off")
-	}
-	if kind := strings.TrimSpace(string(m.state.Approval.Kind)); kind != "" {
-		lines = append(lines, "Pending approval: "+humanizeStatusCode(kind))
-	}
-	if m.controller.Detached() {
-		lines = append(lines, "Detached: the runtime is no longer attached to this session")
-	}
-
-	content := strings.Join(lines, "\n")
-	if m.worktreeSummary != "" {
-		content += "\nRepository: " + m.worktreeSummary
-	}
-	listed := visibleDiagnostics(m.state.Diagnostics)
-	if len(listed) == 0 {
-		return content
-	}
-
-	diagnostics := make([]string, 0, len(listed))
-	for _, diagnostic := range listed {
-		line := "- " + diagnosticTitle(diagnostic)
-		if message := diagnosticBody(diagnostic); message != "" {
-			line += ": " + message
-		}
-		diagnostics = append(diagnostics, line)
-	}
-
-	return content + "\n\nIntegrations:\n" + strings.Join(diagnostics, "\n")
-}
-
 // modeStatusSuffix reports a mode that differs from the configured default
 // without exposing where either value came from.
 func modeStatusSuffix(state runtimecontrol.ModeState) string {
@@ -235,16 +162,6 @@ func modeStatusSuffix(state runtimecontrol.ModeState) string {
 	}
 
 	return " (session override)"
-}
-
-// optionalStatusLine drops a row whose value is unknown rather than printing an
-// empty field.
-func optionalStatusLine(label, value string) string {
-	if value == "" {
-		return label + ": unknown"
-	}
-
-	return label + ": " + value
 }
 
 func resolvedEndpointText(endpoint modelcatalog.Endpoint) string {
@@ -359,14 +276,6 @@ func safeStatusPath(value string) string {
 	}
 
 	return value
-}
-
-func knownLimit(value int) string {
-	if value == 0 {
-		return "unknown"
-	}
-
-	return strconv.Itoa(value)
 }
 
 func optionalInt(value *int) string {

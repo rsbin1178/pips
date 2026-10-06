@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/rsbin1178/pips/ai"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestStartupBannerPrintsOnceBeforeStableTimeline(t *testing.T) {
@@ -36,8 +37,19 @@ func TestStartupBannerPrintsOnceBeforeStableTimeline(t *testing.T) {
 	assert.Contains(t, printed, "workspace")
 	assert.Contains(t, printed, "openai/test-model")
 	assert.Contains(t, printed, "Type / for commands")
-	assert.Contains(t, printed, "┌")
-	assert.Contains(t, printed, "└")
+	// The header is plain transcript text: no box, and every row starts in the
+	// same content column a message uses.
+	assert.NotContains(t, printed, "┌")
+	assert.NotContains(t, printed, "└")
+	inset := strings.Repeat(" ", transcriptHorizontalInset)
+	for row := range strings.SplitSeq(printed, "\n") {
+		if strings.TrimSpace(row) == "" {
+			continue
+		}
+
+		assert.True(t, strings.HasPrefix(row, inset), "header row starts at the content column: %q", row)
+	}
+
 	assert.Less(t, strings.Index(printed, "Pips"), strings.Index(printed, "inspect the repository"))
 	assert.NotContains(t, model.View().Content, "✻ Pips")
 	assert.NotContains(t, model.View().Content, "Start a conversation")
@@ -83,6 +95,56 @@ func TestNewSessionBannerPrintsOnlyAfterSuccessfulNew(t *testing.T) {
 	assert.Nil(t, command)
 	_, command = model.Update(tea.BackgroundColorMsg{Color: color.White})
 	assert.Nil(t, command)
+}
+
+// TestFullscreenNewSessionReplacesThePreviousBanner is the managed-viewport
+// counterpart of the inline contract: the transcript shows one session at a
+// time, so repeated /new leaves a single banner instead of stacking one banner
+// per replacement.
+func TestFullscreenNewSessionReplacesThePreviousBanner(t *testing.T) {
+	t.Parallel()
+
+	model := fullscreenModel(t, stubController{state: readyState()}, true)
+	// Tall enough that an accumulated second banner would be visible.
+	model.Update(tea.WindowSizeMsg{Width: 100, Height: 60})
+	assert.Len(t, model.notices, 1, "the startup banner is the first managed record")
+
+	for range 3 {
+		_, command := model.Update(controlResultMsg{operation: operationNew})
+		driveModelCommands(t, model, command)
+
+		frame := ansi.Strip(model.View().Content)
+		assert.Equal(t, 1, strings.Count(frame, "coding agent"), "one banner per session")
+		assert.Len(t, model.notices, 1, "the replaced session's notices are dropped")
+	}
+
+	_, command := model.Update(controlResultMsg{operation: operationResume})
+	driveModelCommands(t, model, command)
+
+	assert.Empty(t, model.notices, "resume prints no banner and drops the previous session's")
+	assert.NotContains(t, ansi.Strip(model.View().Content), "coding agent")
+}
+
+// TestStartupBannerLogoMatchesTheHeaderLines pins the header's height: the block
+// wordmark is exactly as tall as the four lines of text beside it, so the banner
+// ends on the same row as `Type / for commands` with no trailing blank row.
+func TestStartupBannerLogoMatchesTheHeaderLines(t *testing.T) {
+	t.Parallel()
+
+	banner := ansi.Strip(renderStartupBanner(startupBannerContext{
+		width:     72,
+		workspace: "workspace",
+		model:     "openai/test-model",
+		theme:     themeDark,
+		noColor:   true,
+	}))
+	rows := strings.Split(banner, "\n")
+	require.Len(t, rows, 4, "the wordmark is as tall as the header lines")
+
+	for index, want := range []string{"coding agent", "workspace", "model", "Type / for commands"} {
+		assert.Contains(t, rows[index], "█", "row %d carries part of the wordmark", index)
+		assert.Contains(t, rows[index], want, "row %d carries its header line", index)
+	}
 }
 
 func TestStartupBannerIsBoundedAcrossThemes(t *testing.T) {

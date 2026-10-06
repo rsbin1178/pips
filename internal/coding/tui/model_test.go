@@ -54,7 +54,7 @@ func TestTrustDefaultsToDenyAndBootstrapsSelection(t *testing.T) {
 	require.NotNil(t, command)
 	assert.Contains(t, driveModelCommandsCapture(t, model, command), "Pips")
 	assert.Equal(t, []bool{false}, decisions)
-	assert.Contains(t, model.View().Content, "openai/test-model")
+	assert.Contains(t, model.View().Content, "Test Model")
 }
 
 func TestTrustListSupportsArrowNavigationAndNarrowNoColor(t *testing.T) {
@@ -135,6 +135,41 @@ func TestBootstrapErrorBecomesFatalView(t *testing.T) {
 	assert.Contains(t, model.View().Content, "configuration is invalid")
 }
 
+// TestLoadingFrameDrawsNothing pins the startup frame: the banner and stable
+// history are published once the frame is ready, so the loading lifecycle leaves
+// no transient label behind.
+func TestLoadingFrameDrawsNothing(t *testing.T) {
+	t.Parallel()
+
+	model := newModel(t.Context(), Options{
+		PinPresentation: true, Screen: ScreenInline, AltScreen: AltScreenNever,
+		Workspace: "/workspace",
+		Trusted:   true,
+		Bootstrap: func(context.Context, bool) (Controller, error) { return nil, nil },
+	})
+	require.Equal(t, lifecycleLoading, model.lifecycle)
+	assert.Empty(t, model.View().Content)
+}
+
+// TestFrameBeforeTerminalSizeDrawsNothing pins the frame between bootstrap and
+// the terminal's first size report: the ready layout needs that size, and a
+// label shown only for that gap would just flicker.
+func TestFrameBeforeTerminalSizeDrawsNothing(t *testing.T) {
+	t.Parallel()
+
+	controller := stubController{state: readyState()}
+	model := newModel(t.Context(), Options{
+		PinPresentation: true, Screen: ScreenInline, AltScreen: AltScreenNever,
+		Workspace: "/workspace",
+		Trusted:   true,
+		Bootstrap: func(context.Context, bool) (Controller, error) { return controller, nil },
+	})
+	_, _ = model.Update(bootstrapResult{controller: controller})
+	require.Equal(t, lifecycleReady, model.lifecycle)
+	require.False(t, model.sizeReady)
+	assert.Empty(t, model.View().Content)
+}
+
 func TestTrustPersistenceFailureRemainsRetryable(t *testing.T) {
 	t.Parallel()
 
@@ -193,7 +228,7 @@ func TestReadyStatusLineUsesProvisionalLabelAndStyledSegments(t *testing.T) {
 	status := model.statusLine()
 	plain := ansi.Strip(status)
 	assert.LessOrEqual(t, ansi.StringWidth(status), model.statusLineWidth())
-	assert.Contains(t, plain, "workspace  ·  new  ·  openai/test-model  ·  idle")
+	assert.Contains(t, plain, "workspace  ·  new  ·  Test Model  ·  idle")
 	assert.NotContains(t, plain, "Agent mode")
 	assert.NotContains(t, plain, "shift+tab to cycle")
 	assert.Contains(t, status, "\x1b[")

@@ -98,6 +98,180 @@ func TestStreamFrameReusesTheComposedView(t *testing.T) {
 	assert.Equal(t, 1, model.viewComposes)
 }
 
+// TestStreamFrameReusesTheComposedViewForDuplicateIteratorDelivery pins the
+// confirmed avoidable recomposition: the Runtime publishes one accepted event to
+// the subscription hub and to the operation iterator, and in subscription mode
+// the iterator's copy is already owned by the subscription. Such a delivery
+// renders nothing, so it must not re-style the whole frame.
+func TestStreamFrameReusesTheComposedViewForDuplicateIteratorDelivery(t *testing.T) {
+	t.Parallel()
+
+	model := subscriptionModel(t)
+	model.subscriptionMode = true
+	model.bridge = &eventBridge{cancel: func() {}, items: make(chan streamItem, 4)}
+
+	_, _ = model.Update(subscriptionEventMsg{
+		bridge: model.subscription, ok: true,
+		record: coding.EventRecord{Event: streamTestTextDelta(1)},
+	})
+	settled := model.View().Content
+	model.viewComposes = 0
+
+	for duplicate := range 5 {
+		_, command := model.Update(streamItemMsg{
+			bridge: model.bridge, ok: true,
+			item: streamItem{event: streamTestTextDelta(1)},
+		})
+		require.NotNil(t, command, "the iterator wait continues after a duplicate delivery")
+		require.True(t, model.waiting)
+		require.Equal(t, settled, model.View().Content, "a duplicate delivery renders nothing new")
+		require.Zero(t, model.viewComposes, "duplicate %d did not recompose the frame", duplicate)
+	}
+
+	require.Len(t, model.pending, 1, "the duplicate is not applied a second time")
+
+	// The frame boundary still paints what the subscription delivered.
+	model.Update(renderTickMsg{})
+	assert.Contains(t, model.View().Content, "delta")
+	assert.Equal(t, 1, model.viewComposes)
+}
+
+// TestStreamFrameReusesComposedViewForDuplicateDeliveryInline covers the same
+// delivery under the inline presentation, which owns the mutable tail rather than
+// the managed region: the reuse rule belongs to the frame cache, not to one mode.
+func TestStreamFrameReusesComposedViewForDuplicateDeliveryInline(t *testing.T) {
+	t.Parallel()
+
+	model := readyModel(t, true)
+	model.subscriptionMode = true
+	model.bridge = &eventBridge{cancel: func() {}, items: make(chan streamItem, 4)}
+	require.NotEmpty(t, model.View().Content)
+	model.viewComposes = 0
+
+	_, command := model.Update(streamItemMsg{
+		bridge: model.bridge, ok: true,
+		item: streamItem{event: streamTestTextDelta(1)},
+	})
+	require.NotNil(t, command)
+	require.NotEmpty(t, model.View().Content)
+	assert.Zero(t, model.viewComposes, "an invisible delivery does not recompose the inline frame")
+}
+
+// TestStreamFrameKeepsPendingInvalidationAheadOfDuplicateDelivery pins the other
+// half of the reuse rule: an invalidation that no View call has adopted yet - a
+// session transition rerendering the region directly - must be composed before
+// any later delivery may reuse the cache.
+func TestStreamFrameKeepsPendingInvalidationAheadOfDuplicateDelivery(t *testing.T) {
+	t.Parallel()
+
+	model := subscriptionModel(t)
+	model.subscriptionMode = true
+	model.bridge = &eventBridge{cancel: func() {}, items: make(chan streamItem, 4)}
+
+	_, _ = model.Update(subscriptionEventMsg{
+		bridge: model.subscription, ok: true,
+		record: coding.EventRecord{Event: streamTestTextDelta(1)},
+	})
+	model.Update(renderTickMsg{})
+	require.Contains(t, model.View().Content, "delta")
+
+	// The projection is replaced directly, as the session replacement path does,
+	// and the region is rerendered without an Update or a View in between.
+	model.state.Transcript = []ai.Message{ai.UserText("replacement transcript")}
+	model.rerenderTranscript(false)
+	model.viewComposes = 0
+
+	// An invisible duplicate delivery arrives before the framework paints again.
+	_, _ = model.Update(streamItemMsg{
+		bridge: model.bridge, ok: true,
+		item: streamItem{event: streamTestTextDelta(2)},
+	})
+	assert.Contains(t, model.View().Content, "replacement transcript",
+		"a delivery that renders nothing must not resurrect an invalidated composition")
+	assert.Equal(t, 1, model.viewComposes, "the unadopted invalidation is composed once")
+}
+
+// TestStreamFrameKeepsDuplicateReuseOffErrorEofAndForeignBridges keeps the reuse
+// attached to the one delivery it was proven for: a successful event from the
+// current operation bridge while the subscription owns the projection.
+func TestStreamFrameKeepsDuplicateReuseOffErrorEofAndForeignBridges(t *testing.T) {
+	t.Parallel()
+
+	duplicateModel := func(t *testing.T, sequence uint64) *Model {
+		t.Helper()
+
+		model := subscriptionModel(t)
+		model.subscriptionMode = true
+		model.bridge = &eventBridge{cancel: func() {}, items: make(chan streamItem, 4)}
+		_, _ = model.Update(subscriptionEventMsg{
+			bridge: model.subscription, ok: true,
+			record: coding.EventRecord{Event: streamTestTextDelta(sequence)},
+		})
+		require.NotEmpty(t, model.View().Content)
+
+		return model
+	}
+
+	t.Run("cold cache composes instead of reusing nothing", func(t *testing.T) {
+		t.Parallel()
+
+		model := subscriptionModel(t)
+		model.subscriptionMode = true
+		model.bridge = &eventBridge{cancel: func() {}, items: make(chan streamItem, 4)}
+		model.viewComposes = 0
+
+		_, _ = model.Update(streamItemMsg{
+			bridge: model.bridge, ok: true,
+			item: streamItem{event: streamTestTextDelta(1)},
+		})
+		require.NotEmpty(t, model.View().Content)
+		assert.Equal(t, 1, model.viewComposes, "the first frame is composed")
+	})
+
+	t.Run("bridge error keeps its immediate boundary", func(t *testing.T) {
+		t.Parallel()
+
+		model := duplicateModel(t, 1)
+		model.viewComposes = 0
+		_, _ = model.Update(streamItemMsg{
+			bridge: model.bridge, ok: true,
+			item: streamItem{err: errors.New("bridge failed")},
+		})
+
+		require.Error(t, model.streamErr)
+		assert.Contains(t, model.View().Content, "bridge failed")
+		assert.Equal(t, 1, model.viewComposes, "an error is not an invisible delivery")
+	})
+
+	t.Run("closed stream repaints its final frame", func(t *testing.T) {
+		t.Parallel()
+
+		model := duplicateModel(t, 1)
+		model.viewComposes = 0
+		_, _ = model.Update(streamItemMsg{bridge: model.bridge, ok: false})
+
+		assert.Nil(t, model.bridge)
+		assert.NotEmpty(t, model.View().Content)
+		assert.Equal(t, 1, model.viewComposes, "the end of the stream repaints the frame")
+	})
+
+	t.Run("foreign bridge delivery is not reused", func(t *testing.T) {
+		t.Parallel()
+
+		model := duplicateModel(t, 1)
+		model.viewComposes = 0
+		foreign := &eventBridge{cancel: func() {}, items: make(chan streamItem, 1)}
+		_, command := model.Update(streamItemMsg{
+			bridge: foreign, ok: true,
+			item: streamItem{event: streamTestTextDelta(2)},
+		})
+
+		assert.Nil(t, command)
+		assert.NotEmpty(t, model.View().Content)
+		assert.Equal(t, 1, model.viewComposes, "a replaced bridge's delivery has no reusable frame")
+	})
+}
+
 // TestStreamFrameKeepsInputResponsive covers D6: queued deltas never delay
 // terminal input, and they are not lost while the input is handled.
 func TestStreamFrameKeepsInputResponsive(t *testing.T) {

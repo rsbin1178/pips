@@ -102,7 +102,7 @@ func (m *Model) newPromptEditor(placeholder string) textarea.Model {
 	editor.MaxHeight = 4
 	editor.MaxContentHeight = 8
 	editor.SetVirtualCursor(false)
-	editor.SetWidth(max(1, m.width-4))
+	editor.SetWidth(max(1, m.promptBandWidth()-4))
 	editor.SetStyles(composerStyles(m.theme, m.options.NoColor))
 
 	return editor
@@ -364,6 +364,8 @@ func (m *Model) resolvePlanReviewResolution(
 
 		return m, nil
 	}
+	m.queuePlanReviewNotice(state.request, resolution)
+
 	reviewer, ok := m.controller.(planReviewController)
 	if !ok {
 		state.err = errors.New("plan review is unavailable")
@@ -377,6 +379,21 @@ func (m *Model) resolvePlanReviewResolution(
 	return m, m.startStream(func(ctx context.Context) iter.Seq2[coding.Event, error] {
 		return reviewer.ResolvePlanReview(ctx, resolution)
 	})
+}
+
+// queuePlanReviewNotice records the transcript row a review decision prints.
+// Only an approved agent-initiated entry and a closed exit review carry one; a
+// declined entry, a revision request, and a user /plan or Shift+Tab toggle
+// print none, matching grok-build.
+func (m *Model) queuePlanReviewNotice(request planreview.Request, resolution planreview.Resolution) {
+	switch {
+	case request.Kind == planreview.KindEnter && resolution.Decision == planreview.DecisionApprove:
+		m.queuePlanModeNotice(planModeEnteredNotice(m.planModeNoticePermission()))
+	case request.Kind == planreview.KindExit && resolution.Decision == planreview.DecisionApprove:
+		m.queuePlanModeNotice(planModeExitedNotice("approved", m.planModeNoticePermission()))
+	case request.Kind == planreview.KindExit && resolution.Decision == planreview.DecisionQuit:
+		m.queuePlanModeNotice(planModeExitedNotice("abandoned", m.planModeNoticePermission()))
+	}
 }
 
 func (m *Model) planReviewPromptView() string {
@@ -427,7 +444,7 @@ func (m *Model) planExitReviewLines(state *planReviewPromptState) []string {
 	lines := make([]string, 0, end-state.offset+8)
 	for index := state.offset; index < end; index++ {
 		if !planReviewHasContent(state) {
-			lines = append(lines, "  "+ansi.Truncate(all[index], max(1, m.width-4), "…"))
+			lines = append(lines, "  "+ansi.Truncate(all[index], max(1, m.promptBandWidth()-4), "…"))
 
 			continue
 		}
@@ -519,7 +536,7 @@ func (m *Model) planPreviewRow(
 		marker = "›"
 	}
 	gutter := marker + " " + fmt.Sprintf("%*d", numberWidth, index+1) + " │ "
-	available := max(1, max(1, m.width-2)-ansi.StringWidth(gutter))
+	available := max(1, max(1, m.promptBandWidth()-2)-ansi.StringWidth(gutter))
 
 	return gutter + ansi.Truncate(content, available, "…")
 }
@@ -537,17 +554,17 @@ func planSelectionBounds(state *planReviewPromptState) (int, int) {
 }
 
 func (m *Model) planPreviewLines(state *planReviewPromptState) []string {
-	if state.lines != nil && state.linesWidth == m.width {
+	if state.lines != nil && state.linesWidth == m.promptBandWidth() {
 		return state.lines
 	}
 
 	body := planReviewBody(state)
-	rendered, err := m.markdown.render(body, max(1, m.width-8), m.theme, m.options.NoColor)
+	rendered, err := m.markdown.render(body, max(1, m.promptBandWidth()-8), m.theme, m.options.NoColor)
 	if err != nil {
 		rendered = body
 	}
 	state.lines = strings.Split(strings.TrimRight(rendered, "\n"), "\n")
-	state.linesWidth = m.width
+	state.linesWidth = m.promptBandWidth()
 
 	return state.lines
 }
@@ -584,6 +601,19 @@ func clampPlanOffset(offset, count, viewport int) int {
 	return max(0, min(offset, max(0, count-viewport)))
 }
 
+// scrollPlanView moves the read-only plan preview by one wheel notch, clamped to
+// the same window its PgUp/PgDn keys use.
+func (m *Model) scrollPlanView(lines int) tea.Cmd {
+	state := &m.prompt.planView
+	state.offset = clampPlanOffset(
+		max(0, state.offset+lines),
+		len(m.planViewLines(state)),
+		planPreviewHeight(m.height),
+	)
+
+	return nil
+}
+
 func planReviewComments(comments []planComment) []string {
 	if len(comments) == 0 {
 		return nil
@@ -613,7 +643,7 @@ func (m *Model) renderPlanPromptLines(lines []string) string {
 		bar = lipgloss.NewStyle().Foreground(paletteFor(m.theme).session).Render(bar)
 	}
 	for index := range lines {
-		lines[index] = bar + " " + ansi.Truncate(lines[index], max(1, m.width-2), "…")
+		lines[index] = bar + " " + ansi.Truncate(lines[index], max(1, m.promptBandWidth()-2), "…")
 	}
 
 	return strings.Join(lines, "\n")
@@ -732,7 +762,7 @@ func (m *Model) planViewPromptView() string {
 		state.offset = clampPlanOffset(state.offset, len(all), viewport)
 		end := min(len(all), state.offset+viewport)
 		for index := state.offset; index < end; index++ {
-			lines = append(lines, "  "+ansi.Truncate(all[index], max(1, m.width-4), "…"))
+			lines = append(lines, "  "+ansi.Truncate(all[index], max(1, m.promptBandWidth()-4), "…"))
 		}
 		if len(all) == 0 {
 			lines = append(lines, "No plan written yet.")
@@ -744,22 +774,22 @@ func (m *Model) planViewPromptView() string {
 }
 
 func (m *Model) planViewLines(state *planViewPromptState) []string {
-	if state.lines != nil && state.linesWidth == m.width {
+	if state.lines != nil && state.linesWidth == m.promptBandWidth() {
 		return state.lines
 	}
 	content := strings.TrimSpace(state.document.Content)
 	if !state.document.Exists || content == "" {
 		state.lines = []string{}
-		state.linesWidth = m.width
+		state.linesWidth = m.promptBandWidth()
 
 		return state.lines
 	}
-	rendered, err := m.markdown.render(content, max(1, m.width-4), m.theme, m.options.NoColor)
+	rendered, err := m.markdown.render(content, max(1, m.promptBandWidth()-4), m.theme, m.options.NoColor)
 	if err != nil {
 		rendered = content
 	}
 	state.lines = strings.Split(strings.TrimRight(rendered, "\n"), "\n")
-	state.linesWidth = m.width
+	state.linesWidth = m.promptBandWidth()
 
 	return state.lines
 }

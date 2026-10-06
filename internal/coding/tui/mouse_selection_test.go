@@ -143,11 +143,11 @@ func TestDragSelectionCopiesOnlyTheAddressedCells(t *testing.T) {
 	model, calls := selectionModel(t, true, "MARKER-ALPHA")
 	row := paintedRow(t, model, "MARKER-ALPHA")
 
-	// The prompt glyph occupies the first two cells, so a drag that starts after
-	// them copies the text without the glyph.
-	model.handleMouse(tea.MouseClickMsg{X: 2, Y: row, Button: tea.MouseLeft})
-	model.handleMouse(tea.MouseMotionMsg{X: 8, Y: row, Button: tea.MouseLeft})
-	command := model.handleMouse(tea.MouseReleaseMsg{X: 8, Y: row, Button: tea.MouseLeft})
+	// The transcript inset and the prompt glyph occupy the first four cells, so
+	// a drag that starts after them copies the text without the glyph.
+	model.handleMouse(tea.MouseClickMsg{X: 4, Y: row, Button: tea.MouseLeft})
+	model.handleMouse(tea.MouseMotionMsg{X: 10, Y: row, Button: tea.MouseLeft})
+	command := model.handleMouse(tea.MouseReleaseMsg{X: 10, Y: row, Button: tea.MouseLeft})
 	require.NotNil(t, command)
 
 	runCommandTree(t, command)
@@ -239,4 +239,30 @@ func TestEscapeClearsTheSelectionBeforeCanceling(t *testing.T) {
 	require.Len(t, messages, 1)
 	assert.IsType(t, selectionRedrawMsg{}, messages[0], "Escape closes the selection, not the session")
 	assert.False(t, model.selection.visible)
+}
+
+// TestSelectionHighlightRepaintsTheWholeSpan pins the fix for a highlight that a
+// row's own styling used to swallow: a transcript row can carry its own SGR inside
+// the addressed span (inline code background, a bold run, a dimmed suffix), and a
+// reset in there cancelled the reverse video, leaving most of the selected cells
+// unpainted.
+func TestSelectionHighlightRepaintsTheWholeSpan(t *testing.T) {
+	t.Parallel()
+
+	const row = "\x1b[38;5;252mplain \x1b[38;5;203;48;5;236mcode\x1b[m\x1b[38;5;252m tail\x1b[m"
+	width := ansi.StringWidth(row)
+
+	painted := highlightColumns(row, 0, width, selectionStyle)
+
+	assert.Equal(t, 1, strings.Count(painted, "\x1b[7m"),
+		"one highlight opens the span: %q", painted)
+	assert.Equal(t, width, ansi.StringWidth(painted), "the row keeps its width")
+	assert.NotContains(t, painted, "48;5;236",
+		"the span's own styling is replaced, so nothing inside can cancel the highlight")
+
+	// A partially addressed row keeps the unselected cells as they were.
+	partial := highlightColumns(row, 2, 6, selectionStyle)
+	assert.True(t, strings.HasPrefix(partial, "\x1b[38;5;252mpl"), "the prefix keeps its style")
+	assert.Equal(t, width, ansi.StringWidth(partial))
+	assert.Equal(t, 1, strings.Count(partial, "\x1b[7m"))
 }

@@ -294,6 +294,11 @@ func (m *Model) updateAgentsRouteKey(message tea.KeyPressMsg) (tea.Model, tea.Cm
 		if len(values) == 0 || m.route.controlling {
 			return m, nil
 		}
+		if m.actionContext() != contextIdle {
+			m.route.err = errRouteActionNeedsIdle
+
+			return m, nil
+		}
 
 		return m, m.cancelChild(values[m.route.cursor])
 	default:
@@ -325,6 +330,13 @@ func (m *Model) updateAgentLibraryRouteKey(message tea.KeyPressMsg) (tea.Model, 
 		m.route.cursor = 0
 	case keyEnter:
 		if len(values) == 0 {
+			return m, nil
+		}
+		// Arming a direct Agent rewrites what the next submission means, so it
+		// waits for the same idle boundary the runtime changes do.
+		if m.actionContext() != contextIdle {
+			m.route.err = errRouteActionNeedsIdle
+
 			return m, nil
 		}
 

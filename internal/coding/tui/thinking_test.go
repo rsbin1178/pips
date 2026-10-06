@@ -226,7 +226,7 @@ func TestThinkingDraftStreamsUnfolded(t *testing.T) {
 
 	labels := 0
 	for row := range strings.SplitSeq(frame, "\n") {
-		if strings.TrimRight(row, " ") == thinkingTitle {
+		if strings.TrimSpace(row) == thinkingTitle {
 			labels++
 		}
 	}

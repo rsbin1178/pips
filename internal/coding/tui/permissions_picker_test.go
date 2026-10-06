@@ -18,10 +18,17 @@ func TestCommandPickerOffersPermissionsAndOmitsDiff(t *testing.T) {
 
 	model := readyModelWithController(t, newOverlayController(readyState()), true)
 	model.openCommandPicker()
-	content := ansi.Strip(model.View().Content)
 
-	assert.Contains(t, content, "/permissions")
-	assert.NotContains(t, content, "/diff")
+	// The list is a window, so ask for the command by name: the inventory must
+	// offer it, and must not offer the removed one.
+	model.picker.query = "perm"
+	model.syncCommandInput()
+	assert.Contains(t, ansi.Strip(model.View().Content), "/permissions")
+
+	model.picker.query = "diff"
+	model.syncCommandInput()
+	assert.Contains(t, ansi.Strip(model.View().Content), "No matching commands.",
+		"the removed command is not offered")
 }
 
 func TestPermissionsPickerIsDraftOnlyAndRestoresComposer(t *testing.T) {
@@ -66,6 +73,9 @@ func TestPermissionsPickerHidesConfiguredValuesAndProvenance(t *testing.T) {
 		NetworkOverridden:  true,
 	}
 	model := readyModelWithController(t, controller, true)
+	// The panel is a form taller than a short band: give it a window where the
+	// whole form fits, so the assertions below are about its content.
+	model.Update(tea.WindowSizeMsg{Width: 80, Height: 40})
 	model.openPermissionsPicker()
 	content := ansi.Strip(model.View().Content)
 
@@ -221,7 +231,7 @@ func TestPermissionsPickerKeepsApprovalAndNetworkOnRequestDistinct(t *testing.T)
 	assert.Contains(t, pickerContent, "Policy: Ask before risky actions")
 	assert.Contains(t, pickerContent, "active inside Sandbox")
 
-	statusContent := model.statusContent()
+	statusContent := statusPageText(model, statusTabStatus)
 	assert.Contains(t, statusContent, "Approval: Ask before risky actions")
 	assert.Contains(t, statusContent, "Network: Ask when needed (active)")
 }
@@ -286,7 +296,7 @@ func TestStatusHidesPermissionProvenance(t *testing.T) {
 		},
 	}
 	model := readyModelWithController(t, controller, true)
-	content := model.statusContent()
+	content := statusPageText(model, statusTabStatus)
 
 	assert.Contains(t, content, "Sandbox: Workspace write")
 	assert.Contains(t, content, "Approval: Block actions that need approval")
@@ -303,7 +313,7 @@ func TestStatusHidesPermissionProvenance(t *testing.T) {
 	controller.permissions.Sandbox = config.SandboxFullAccess
 	controller.permissions.SandboxProfile.Filesystem.Effective = config.SandboxFullAccess
 	controller.permissions.SandboxProfile.NetworkEnforced = false
-	content = model.statusContent()
+	content = statusPageText(model, statusTabStatus)
 	assert.Contains(t, content, "Sandbox: Full access")
 	assert.Contains(t, content, "Network: Unrestricted under Full access")
 }
