@@ -95,6 +95,12 @@ type Compatibility struct {
 	// BuiltinTools controls how provider-executed tools are handled on
 	// compatible endpoints. The empty value defaults to [BuiltinToolsAllow].
 	BuiltinTools BuiltinToolsMode
+
+	// PromptCacheKey forwards [ai.Request.PromptCacheKey] as prompt_cache_key.
+	// It is opt-in: several OpenAI-compatible endpoints reject the field with a
+	// 400 or 422 instead of ignoring it, so only profiles that document support
+	// enable it.
+	PromptCacheKey bool
 }
 
 func (c Compatibility) resolvedBuiltinTools() BuiltinToolsMode {

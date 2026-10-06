@@ -21,6 +21,9 @@ func New(model string, opts ...Option) *openai.Model {
 			// max_tokens.
 			MaxTokensField:            openai.MaxTokensFieldLegacy,
 			IncludeEncryptedReasoning: true,
+			// xAI documents prompt_cache_key (alongside x-grok-conv-id) as the
+			// session-scoped routing hint for prompt caching.
+			PromptCacheKey: true,
 		}),
 		openai.WithCapabilities(ai.Capabilities{
 			Text:             true,

@@ -291,6 +291,7 @@ var xaiProfile = Profile{
 	Compatibility: openai.Compatibility{
 		MaxTokensField:            openai.MaxTokensFieldLegacy,
 		IncludeEncryptedReasoning: true,
+		PromptCacheKey:            true,
 	},
 	Capabilities: ai.Capabilities{
 		Text:             true,
@@ -351,6 +352,7 @@ var mistralProfile = Profile{
 		MaxTokensField:   openai.MaxTokensFieldLegacy,
 		ReasoningHistory: openai.ReasoningHistoryContentChunks,
 		BuiltinTools:     openai.BuiltinToolsStrip,
+		PromptCacheKey:   true,
 	},
 	capabilitiesFor: mistralCapabilities,
 }
@@ -470,6 +472,9 @@ var kimiProfile = Profile{
 		ChatReasoning:    openai.ChatReasoningEffort,
 		ReasoningHistory: openai.ReasoningHistoryContent,
 		BuiltinTools:     openai.BuiltinToolsStrip,
+		// Moonshot documents prompt_cache_key, and its guidance keeps the same
+		// value across a resumed session.
+		PromptCacheKey: true,
 	},
 	capabilitiesFor: kimiCapabilities,
 }

@@ -19,6 +19,7 @@ type responsesRequest struct {
 	Text            *responsesText      `json:"text,omitempty"`
 	Reasoning       *responsesReasoning `json:"reasoning,omitempty"`
 	Include         []string            `json:"include,omitempty"`
+	PromptCacheKey  string              `json:"prompt_cache_key,omitempty"`
 	// Stream is always sent: the field is optional in the schema, but
 	// OpenAI-compatible servers exist that fail when it is absent.
 	Stream bool `json:"stream"`
@@ -138,7 +139,8 @@ type responsesUsage struct {
 	InputTokens        int `json:"input_tokens"`
 	OutputTokens       int `json:"output_tokens"`
 	InputTokensDetails *struct {
-		CachedTokens int `json:"cached_tokens"`
+		CachedTokens     int `json:"cached_tokens"`
+		CacheWriteTokens int `json:"cache_write_tokens"`
 	} `json:"input_tokens_details"`
 	OutputTokensDetails *struct {
 		ReasoningTokens int `json:"reasoning_tokens"`
