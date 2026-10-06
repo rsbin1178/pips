@@ -35,13 +35,28 @@ type usageModelTotals struct {
 	ReasoningTokens   int `json:"reasoning_tokens"`
 }
 
-// usageProjectionTotals is the accumulated contribution a projection has folded
-// together: the per-model token totals and the summed active turn time. prior and
-// last_interaction share the shape, so the replace-on-same-id rule covers every
-// number the page shows, tokens and milliseconds alike.
-type usageProjectionTotals struct {
+// usageProjectionDayKeyFormat is the local calendar date a day bucket is filed
+// under, so a day reads as the writer's day rather than an instant.
+const usageProjectionDayKeyFormat = "2006-01-02"
+
+// usageProjectionDay is one local calendar day's contribution: the active turn
+// time and the per-model tokens recorded under that day. The day is the
+// interaction's completion day in the writer's zone, the day the activity grid
+// would also count the turn under.
+type usageProjectionDay struct {
 	ActiveMillis int64                       `json:"active_millis"`
 	Models       map[string]usageModelTotals `json:"models"`
+}
+
+// usageProjectionTotals is the accumulated contribution a projection has folded
+// together: the per-model token totals, the summed active turn time, and the same
+// numbers bucketed per local day. prior and last_interaction share the shape, so
+// the replace-on-same-id rule covers every number the page shows, tokens,
+// milliseconds and days alike.
+type usageProjectionTotals struct {
+	ActiveMillis int64                         `json:"active_millis"`
+	Models       map[string]usageModelTotals   `json:"models"`
+	Daily        map[string]usageProjectionDay `json:"daily,omitempty"`
 }
 
 // UnmarshalJSON accepts both shapes this file has had: the object above, and the
@@ -69,7 +84,14 @@ func (t *usageProjectionTotals) UnmarshalJSON(data []byte) error {
 			}
 		}
 
-		*t = usageProjectionTotals{ActiveMillis: millis, Models: models}
+		var daily map[string]usageProjectionDay
+		if raw, ok := fields["daily"]; ok {
+			if err := json.Unmarshal(raw, &daily); err != nil {
+				return err
+			}
+		}
+
+		*t = usageProjectionTotals{ActiveMillis: millis, Models: models, Daily: daily}
 
 		return nil
 	}
@@ -90,10 +112,12 @@ func (t *usageProjectionTotals) UnmarshalJSON(data []byte) error {
 }
 
 // isProjectionTotalsShape reports whether every key belongs to the current
-// object shape, which is what tells it apart from the flat map of models.
+// object shape, which is what tells it apart from the flat map of models. A new
+// key the object shape gains must be listed here, or a current file carrying it
+// reads as a legacy map and loses its totals.
 func isProjectionTotalsShape(fields map[string]json.RawMessage) bool {
 	for key := range fields {
-		if key != "active_millis" && key != "models" {
+		if key != "active_millis" && key != "models" && key != "daily" {
 			return false
 		}
 	}
@@ -101,11 +125,15 @@ func isProjectionTotalsShape(fields map[string]json.RawMessage) bool {
 	return true
 }
 
-// usageProjectionInteraction is the contribution of one interaction.
+// usageProjectionInteraction is the contribution of one interaction. Day is the
+// interaction's completion day in the writer's zone, and Daily holds that day's
+// contribution, so folding the interaction into prior needs no recomputation.
 type usageProjectionInteraction struct {
-	ID           string                      `json:"id"`
-	ActiveMillis int64                       `json:"active_millis"`
-	Models       map[string]usageModelTotals `json:"models"`
+	ID           string                        `json:"id"`
+	Day          string                        `json:"day,omitempty"`
+	ActiveMillis int64                         `json:"active_millis"`
+	Models       map[string]usageModelTotals   `json:"models"`
+	Daily        map[string]usageProjectionDay `json:"daily,omitempty"`
 }
 
 // usageProjection is one Session's on-disk totals. The last interaction is kept
@@ -142,6 +170,31 @@ func (p usageProjection) totals() map[string]coding.TokenUsage {
 // activeMillis is the Session's accumulated active turn time.
 func (p usageProjection) activeMillis() int64 {
 	return max(0, p.Prior.ActiveMillis+p.LastInteraction.ActiveMillis)
+}
+
+// dailyTotals flattens prior plus the last interaction into one entry per local
+// day, so a daily view and the totals are reduced from the same contributions and
+// cannot disagree. A file written before days were projected has neither map and
+// reads as zero days while keeping its totals.
+func (p usageProjection) dailyTotals() map[string]usageProjectionDay {
+	if len(p.Prior.Daily) == 0 && len(p.LastInteraction.Daily) == 0 {
+		return nil
+	}
+
+	days := make(map[string]usageProjectionDay, len(p.Prior.Daily)+len(p.LastInteraction.Daily))
+	for day, value := range p.Prior.Daily {
+		days[day] = value
+	}
+	for day, value := range p.LastInteraction.Daily {
+		days[day] = mergeUsageDay(days[day], value)
+	}
+
+	return days
+}
+
+// usageProjectionDayKey is the local calendar day a completion is filed under.
+func usageProjectionDayKey(value time.Time) string {
+	return localDay(value).Format(usageProjectionDayKeyFormat)
 }
 
 // usage converts the stored fields back to the shared token type.
@@ -265,10 +318,16 @@ func writeUsageProjection(
 	if next.LastInteraction.ID != interactionID && len(next.LastInteraction.Models) > 0 {
 		next.Prior = mergeUsageTotals(next.Prior, next.LastInteraction)
 	}
+	day := usageProjectionDayKey(now)
+	contribution := usageTotals(models)
 	next.LastInteraction = usageProjectionInteraction{
 		ID:           interactionID,
+		Day:          day,
 		ActiveMillis: max(0, activeMillis),
-		Models:       usageTotals(models),
+		Models:       contribution,
+		Daily: map[string]usageProjectionDay{
+			day: {ActiveMillis: max(0, activeMillis), Models: contribution},
+		},
 	}
 	if next.Prior.Models == nil {
 		next.Prior.Models = map[string]usageModelTotals{}
@@ -292,9 +351,41 @@ func usageTotals(models map[string]coding.TokenUsage) map[string]usageModelTotal
 }
 
 // mergeUsageTotals folds one interaction's contribution into the earlier totals,
-// carrying both the token classes and the active time under the same rule.
+// carrying the token classes, the active time and the per-day buckets under the
+// same rule. The last interaction's own day is folded into prior.daily, so the
+// daily view keeps matching the totals.
 func mergeUsageTotals(base usageProjectionTotals, added usageProjectionInteraction) usageProjectionTotals {
 	merged := usageProjectionTotals{
+		ActiveMillis: base.ActiveMillis + added.ActiveMillis,
+		Models:       make(map[string]usageModelTotals, len(base.Models)+len(added.Models)),
+		Daily:        make(map[string]usageProjectionDay, len(base.Daily)+len(added.Daily)),
+	}
+	for ref, value := range base.Models {
+		merged.Models[ref] = value
+	}
+	for ref, value := range added.Models {
+		current := merged.Models[ref]
+		current.InputTokens += value.InputTokens
+		current.CachedInputTokens += value.CachedInputTokens
+		current.CacheWriteTokens += value.CacheWriteTokens
+		current.OutputTokens += value.OutputTokens
+		current.ReasoningTokens += value.ReasoningTokens
+		merged.Models[ref] = current
+	}
+	for day, value := range base.Daily {
+		merged.Daily[day] = value
+	}
+	for day, value := range added.Daily {
+		merged.Daily[day] = mergeUsageDay(merged.Daily[day], value)
+	}
+
+	return merged
+}
+
+// mergeUsageDay sums one day's contribution into the earlier one, copying the
+// per-model maps so a merge never aliases (and mutates) the file it read.
+func mergeUsageDay(base, added usageProjectionDay) usageProjectionDay {
+	merged := usageProjectionDay{
 		ActiveMillis: base.ActiveMillis + added.ActiveMillis,
 		Models:       make(map[string]usageModelTotals, len(base.Models)+len(added.Models)),
 	}

@@ -803,8 +803,8 @@ shows an honest `0% cache`. `model` renders a short display name instead of
 `team`. `/statusline` toggles and reorders them.
 
 `/status` opens the read-only runtime panel, shaped like the reference CLI's
-tabbed settings view: four pages — `Status`, `Config`, `Usage`, `Stats` —
-switched with `Tab`/`→` and `Shift+Tab`/`←`.
+tabbed settings view: five pages — `Status`, `Config`, `Usage`, `Stats`,
+`Models` — switched with `Tab`/`→` and `Shift+Tab`/`←`.
 
 - `Status` names the session, its workspace and kind, the resolved model and
   endpoint, the connected MCP servers (`N connected · /mcp`), the effective
@@ -834,6 +834,12 @@ switched with `Tab`/`→` and `Shift+Tab`/`←`.
   turn time, and the average over Sessions that have activity, with a coverage
   line naming how many Sessions carry a usable projection. The block is cumulative
   per Session, so the range selector does not filter it.
+- `Models` reduces the per-day projections over the same range selector that `Stats`
+  cycles with `r`: one row per model with its tokens in range and its all-time
+  total, above a daily strip shaded against that model's busiest day in range and
+  trimmed to the panel width. A model with no tokens in the range keeps its
+  all-time total and shows no strip, so a narrow window never reads as "never
+  used".
 
 `↑`/`↓`, PgUp/PgDn, Home/End and the wheel scroll a page, `R` re-reads its data,
 and `Esc` closes the panel. In fullscreen rendering the pointer works too: a left
