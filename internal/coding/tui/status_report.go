@@ -371,6 +371,14 @@ func usageTotalsText(usage coding.TokenUsage) string {
 	)
 }
 
+// statusListingTruncationText states that the listing stopped early and how many
+// Sessions it read, so a cancelled pass does not read as a complete one. The
+// unreadable count keeps its own line: it counts Sessions that could not be read
+// at all, which is a different fact from a pass that stopped.
+func statusListingTruncationText(listing session.MetadataListing) string {
+	return "read cancelled · " + statusSessionCountText(len(listing.Sessions)) + " read"
+}
+
 // statusStatsLines is the local activity page: the year-long grid, the range the
 // numbers describe, and those numbers.
 func (m *Model) statusStatsLines() []statusPageLine {
@@ -417,6 +425,11 @@ func (m *Model) statusStatsLines() []statusPageLine {
 		),
 	)
 	lines = append(lines, m.statusAllTimeLines()...)
+	if m.route.statusSessions.Truncated {
+		lines = append(lines, statusBlank(), statusText(
+			statusLabelIndent+statusListingTruncationText(m.route.statusSessions),
+		))
+	}
 	if unreadable := m.route.statusSessions.Unreadable; unreadable > 0 {
 		lines = append(lines, statusBlank(), statusText(
 			statusLabelIndent+fmt.Sprintf(

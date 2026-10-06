@@ -206,6 +206,11 @@ func (m *Model) statusModelsLines() []statusPageLine {
 	lines = append(lines, statusBlank(), statusText(
 		statusLabelIndent+statusProjectionCoverageText(summary),
 	))
+	if m.route.statusSessions.Truncated {
+		lines = append(lines, statusBlank(), statusText(
+			statusLabelIndent+statusListingTruncationText(m.route.statusSessions),
+		))
+	}
 	if m.route.statusDataErr != nil {
 		lines = append(lines, statusBlank(), statusText(
 			"Session history unavailable: "+safeError(m.route.statusDataErr),

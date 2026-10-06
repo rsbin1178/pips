@@ -2,6 +2,7 @@
 package tui
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"time"
@@ -215,12 +216,14 @@ func (m *Model) activateStatusRoute(previous composerSnapshot) tea.Cmd {
 // loadStatusRouteData reads the local Session store and the published MCP
 // generation. Neither needs an idle runtime. Every listed Session's usage
 // projection is read in the same pass, so the Stats page reduces the store
-// without a per-frame read.
-func (m *Model) loadStatusRouteData() tea.Cmd {
+// without a per-frame read. The Session-store read uses the route's own context,
+// so closing the panel or starting a replacement read stops it instead of
+// letting it finish for a result nobody reads.
+func (m *Model) loadStatusRouteData(ctx context.Context) tea.Cmd {
 	generation := m.route.generation
 
 	return func() tea.Msg {
-		sessions, sessionErr := m.controller.ListAllSessions(m.ctx)
+		sessions, sessionErr := m.controller.ListAllSessions(ctx)
 		snapshot, mcpErr := m.controller.MCP(m.ctx)
 
 		return statusRouteDataMsg{
@@ -231,6 +234,19 @@ func (m *Model) loadStatusRouteData() tea.Cmd {
 			err:         errors.Join(sessionErr, mcpErr),
 		}
 	}
+}
+
+// deriveStatusRouteContext cancels the panel's previous Session-store read and
+// returns a fresh child of the program context, so the route owns exactly one
+// live read at a time.
+func (m *Model) deriveStatusRouteContext() context.Context {
+	if m.route.statusCancel != nil {
+		m.route.statusCancel()
+	}
+	ctx, cancel := context.WithCancel(m.ctx)
+	m.route.statusCancel = cancel
+
+	return ctx
 }
 
 // readStatusProjections reads every listed Session's sidecar in the listing's
@@ -372,7 +388,7 @@ func (m *Model) requestStatusPanelData() tea.Cmd {
 	m.route.statusDataLoading = true
 	m.setLayout()
 
-	return m.loadStatusRouteData()
+	return m.loadStatusRouteData(m.deriveStatusRouteContext())
 }
 
 // statusTabKey applies the tab-specific key: the repository read on Status, and
@@ -400,17 +416,18 @@ func (m *Model) statusTabKey() tea.Cmd {
 }
 
 // reloadStatusRouteData re-reads the page's loaded data, which is also the retry
-// path when a read failed.
+// path when a read failed. A replacement read supersedes the previous one: the
+// generation moves on, so a result that raced the reload is dropped, and the
+// previous read is cancelled rather than left to finish unread.
 func (m *Model) reloadStatusRouteData() tea.Cmd {
-	if m.route.statusDataLoading {
-		return nil
-	}
+	m.routeSeq++
+	m.route.generation = m.routeSeq
 	m.route.statusDataRequested = true
 	m.route.statusDataLoading = true
 	m.route.statusDataErr = nil
 	m.setLayout()
 
-	return m.loadStatusRouteData()
+	return m.loadStatusRouteData(m.deriveStatusRouteContext())
 }
 
 // scrollStatusPage applies one scrolling key to the current page.

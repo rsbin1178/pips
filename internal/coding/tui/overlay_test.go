@@ -463,6 +463,7 @@ type overlayController struct {
 	resolutions        []approval.Resolution
 	sessions           []session.Metadata
 	unreadableSessions int
+	truncatedSessions  bool
 	teamRecovery       map[string]runtimecontrol.TeamRecoveryHint
 	recoveries         []coding.TeamRecoveryCandidate
 	resumed            []string
@@ -694,6 +695,7 @@ func (c *overlayController) ListAllSessions(context.Context) (session.MetadataLi
 	return session.MetadataListing{
 		Sessions:   append([]session.Metadata(nil), c.sessions...),
 		Unreadable: c.unreadableSessions,
+		Truncated:  c.truncatedSessions,
 	}, nil
 }
 
