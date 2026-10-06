@@ -65,6 +65,9 @@ type InteractionState struct {
 	Stop              agent.StopReason      `json:"stop,omitempty"`
 	Usage             TokenUsage            `json:"usage"`
 	ModelUsage        map[string]TokenUsage `json:"model_usage,omitempty"`
+	// DurationMillis is the runtime's measured active turn time. The interaction
+	// journal rebuilds it on reopen, so unlike ModelUsage it stays durable.
+	DurationMillis int64 `json:"duration_ms"`
 }
 
 // RunState is one Agent invocation projected for frontend rendering.
@@ -607,6 +610,7 @@ func (state *State) apply(event Event) error {
 		state.Interaction.Stop = payload.Stop
 		state.Interaction.Usage = payload.Usage
 		state.Interaction.ModelUsage = maps.Clone(payload.ModelUsage)
+		state.Interaction.DurationMillis = payload.DurationMillis
 		state.Draft = nil
 		state.Approval = ApprovalState{}
 		state.Question = QuestionState{}

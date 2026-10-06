@@ -824,10 +824,16 @@ switched with `Tab`/`→` and `Shift+Tab`/`←`.
   unknown` instead of an estimate, and a projection rebuilt from a damaged file
   reads `History incomplete`. Neither block prices anything or reports a lifetime
   total.
-- `Stats` aggregates the local Session store's headers: a year-long activity grid
-  with a `Less`/`More` ramp, then the sessions, active days, current and longest
-  streaks, most active day, and first session the selected range covers. `r`
-  cycles the range through `All time`, `Last 30 days`, and `Last 7 days`.
+- `Stats` aggregates the local Session store: a year-long activity grid with a
+  `Less`/`More` ramp, then the sessions, active days, current and longest streaks,
+  most active day, and first session the selected range covers. `r` cycles the
+  range through `All time`, `Last 30 days`, and `Last 7 days`. Below that an
+  **all time** block reduces every listed Session's usage projection: total tokens
+  (input plus output — the cached and reasoning classes are sub-classes of those
+  two), the favourite model measured by that total, the longest Session's active
+  turn time, and the average over Sessions that have activity, with a coverage
+  line naming how many Sessions carry a usable projection. The block is cumulative
+  per Session, so the range selector does not filter it.
 
 `↑`/`↓`, PgUp/PgDn, Home/End and the wheel scroll a page, `R` re-reads its data,
 and `Esc` closes the panel. In fullscreen rendering the pointer works too: a left

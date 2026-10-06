@@ -2,11 +2,15 @@
 package tui
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/rsbin1178/pips/internal/coding"
 	"github.com/rsbin1178/pips/internal/coding/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -106,4 +110,94 @@ func TestStatusHeatmapGridKeepsFutureDaysBlank(t *testing.T) {
 		"today's cell carries activity: %q", tuesday)
 	assert.Equal(t, ansi.StringWidth(tuesday)-2, ansi.StringWidth(wednesday),
 		"a day after today leaves its cell blank: %q", wednesday)
+}
+
+// statusProjectionStore writes a mixed store: two usable projections, one absent
+// and one corrupt, and returns the directory and the listed Sessions.
+func statusProjectionStore(t *testing.T) (string, []session.Metadata) {
+	t.Helper()
+
+	directory := t.TempDir()
+	// The cached and reasoning classes are present so the reduction cannot count
+	// them twice: input includes the cached tokens and output includes reasoning.
+	require.True(t, writeUsageProjection(
+		directory, "s-1", "i-1", 60_000,
+		map[string]coding.TokenUsage{"demo/model": {
+			InputTokens: 100, CachedInputTokens: 40, OutputTokens: 20, ReasoningTokens: 5,
+		}},
+		time.Now(),
+	).wrote)
+	require.True(t, writeUsageProjection(
+		directory, "s-2", "i-1", 30_000,
+		map[string]coding.TokenUsage{"other/model": {InputTokens: 300}},
+		time.Now(),
+	).wrote)
+
+	corrupt := filepath.Join(directory, "s-4")
+	require.NoError(t, os.MkdirAll(corrupt, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(corrupt, usageProjectionFile), []byte("{not json"), 0o600))
+
+	return directory, []session.Metadata{{ID: "s-1"}, {ID: "s-2"}, {ID: "s-3"}, {ID: "s-4"}}
+}
+
+// TestStatusAggregateProjectionsReducesEveryListedSession pins the all-time
+// reduction: total tokens, the favourite model by tokens, the longest and average
+// active time, and the coverage of a store mixing usable, missing and corrupt
+// projections. A bad projection contributes nothing.
+func TestStatusAggregateProjectionsReducesEveryListedSession(t *testing.T) {
+	t.Parallel()
+
+	directory, metas := statusProjectionStore(t)
+	projections := make(map[string]usageProjectionSnapshot, len(metas))
+	for _, meta := range metas {
+		projection, read := readUsageProjectionStatus(directory, meta.ID)
+		projections[meta.ID] = usageProjectionSnapshot{projection: projection, read: read}
+	}
+
+	summary := aggregateStatusProjections(metas, projections)
+	assert.Equal(t, 4, summary.listed)
+	assert.Equal(t, 2, summary.usable)
+	assert.Equal(t, 1, summary.missing)
+	assert.Equal(t, 1, summary.unreadable)
+	assert.Equal(t, 420, summary.totalTokens)
+	assert.Equal(t, "other/model", summary.favouriteModel)
+	assert.Equal(t, 300, summary.favouriteTokens)
+	assert.Equal(t, int64(60_000), summary.longestMillis)
+	assert.Equal(t, int64(45_000), summary.averageMillis)
+	assert.Equal(t, 2, summary.activeSessions)
+}
+
+// TestStatusPanelStatsAllTimeRendersTheProjections pins the rendered all-time
+// block over the mixed store, while the range rows keep responding to the key.
+func TestStatusPanelStatsAllTimeRendersTheProjections(t *testing.T) {
+	t.Parallel()
+
+	directory, metas := statusProjectionStore(t)
+	now := time.Now()
+	controller := newOverlayController(readyState())
+	for _, meta := range metas {
+		meta.CreatedAt = now
+		controller.sessions = append(controller.sessions, meta)
+	}
+	model := readyModelWithController(t, controller, true)
+	model.options.SessionsDirectory = directory
+	model.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	model.executeCommand(commandDescriptor{name: commandStatus})
+	driveModelCommands(t, model, model.selectStatusTab(statusTabStats))
+
+	page := statusPageText(model, statusTabStats)
+	assert.Contains(t, page, "All time")
+	assert.Contains(t, page, "Total tokens: 420")
+	assert.Contains(t, page, "Favourite model: other/model · 300 tokens")
+	assert.Contains(t, page, "Longest session: 1m active")
+	assert.Contains(t, page, "Average session: 45s active over 2 sessions")
+	assert.Contains(t, page,
+		"Projection coverage: 2 of 4 sessions have a usable projection. 1 missing, 1 unreadable.")
+
+	// The range rows stay range-sensitive: the block is labelled all time, and the
+	// key still cycles the window.
+	assert.Contains(t, page, "Sessions: 4")
+	model.Update(tea.KeyPressMsg{Text: "r"})
+	assert.Equal(t, statusStatsLast30, model.route.statusRange)
+	assert.Contains(t, statusPageText(model, statusTabStats), "All time")
 }

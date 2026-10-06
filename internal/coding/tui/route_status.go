@@ -164,10 +164,11 @@ func (m *Model) statusRouteMouse(message tea.MouseMsg) tea.Cmd {
 // panel reads header-level Session metadata and the published MCP generation, so
 // it stays available while a turn runs.
 type statusRouteDataMsg struct {
-	generation uint64
-	sessions   session.MetadataListing
-	mcp        coding.MCPSnapshot
-	err        error
+	generation  uint64
+	sessions    session.MetadataListing
+	projections map[string]usageProjectionSnapshot
+	mcp         coding.MCPSnapshot
+	err         error
 }
 
 // openStatusRoute reads the runtime status into its own full-area panel. It is
@@ -212,7 +213,9 @@ func (m *Model) activateStatusRoute(previous composerSnapshot) tea.Cmd {
 }
 
 // loadStatusRouteData reads the local Session store and the published MCP
-// generation. Neither needs an idle runtime.
+// generation. Neither needs an idle runtime. Every listed Session's usage
+// projection is read in the same pass, so the Stats page reduces the store
+// without a per-frame read.
 func (m *Model) loadStatusRouteData() tea.Cmd {
 	generation := m.route.generation
 
@@ -221,12 +224,31 @@ func (m *Model) loadStatusRouteData() tea.Cmd {
 		snapshot, mcpErr := m.controller.MCP(m.ctx)
 
 		return statusRouteDataMsg{
-			generation: generation,
-			sessions:   sessions,
-			mcp:        snapshot.Clone(),
-			err:        errors.Join(sessionErr, mcpErr),
+			generation:  generation,
+			sessions:    sessions,
+			projections: m.readStatusProjections(sessions),
+			mcp:         snapshot.Clone(),
+			err:         errors.Join(sessionErr, mcpErr),
 		}
 	}
+}
+
+// readStatusProjections reads every listed Session's sidecar in the listing's
+// off-loop command. A Session without a usable projection is remembered as such,
+// so one bad file contributes nothing and never blanks the page.
+func (m *Model) readStatusProjections(sessions session.MetadataListing) map[string]usageProjectionSnapshot {
+	directory := strings.TrimSpace(m.options.SessionsDirectory)
+	if directory == "" || len(sessions.Sessions) == 0 {
+		return nil
+	}
+
+	projections := make(map[string]usageProjectionSnapshot, len(sessions.Sessions))
+	for _, meta := range sessions.Sessions {
+		projection, read := readUsageProjectionStatus(directory, meta.ID)
+		projections[meta.ID] = usageProjectionSnapshot{projection: projection, read: read}
+	}
+
+	return projections
 }
 
 func (m *Model) applyStatusPanelData(message statusRouteDataMsg) {
@@ -236,6 +258,7 @@ func (m *Model) applyStatusPanelData(message statusRouteDataMsg) {
 	m.route.statusDataLoading = false
 	m.route.statusDataErr = message.err
 	m.route.statusSessions = message.sessions
+	m.route.statusProjections = message.projections
 	m.route.statusMCP = message.mcp
 	m.setLayout()
 }

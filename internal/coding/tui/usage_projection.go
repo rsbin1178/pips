@@ -3,7 +3,9 @@ package tui
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -33,33 +35,101 @@ type usageModelTotals struct {
 	ReasoningTokens   int `json:"reasoning_tokens"`
 }
 
-// usageProjectionInteraction is the contribution of one interaction.
-type usageProjectionInteraction struct {
-	ID     string                      `json:"id"`
-	Models map[string]usageModelTotals `json:"models"`
+// usageProjectionTotals is the accumulated contribution a projection has folded
+// together: the per-model token totals and the summed active turn time. prior and
+// last_interaction share the shape, so the replace-on-same-id rule covers every
+// number the page shows, tokens and milliseconds alike.
+type usageProjectionTotals struct {
+	ActiveMillis int64                       `json:"active_millis"`
+	Models       map[string]usageModelTotals `json:"models"`
 }
 
-// usageProjection is one Session's on-disk token totals. The last interaction is
-// kept apart from the earlier totals because a resumed process can re-emit the
-// same interaction: rewriting its id replaces that contribution instead of
-// adding it twice, so the totals stay exact and the file stays bounded.
+// UnmarshalJSON accepts both shapes this file has had: the object above, and the
+// flat map of models a file written before durations were projected carries. A
+// pre-slice file therefore keeps its folded tokens and reads as zero active time
+// instead of losing them to the unknown-field rule.
+func (t *usageProjectionTotals) UnmarshalJSON(data []byte) error {
+	fields := make(map[string]json.RawMessage)
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+
+	if isProjectionTotalsShape(fields) {
+		var millis int64
+		if raw, ok := fields["active_millis"]; ok {
+			if err := json.Unmarshal(raw, &millis); err != nil {
+				return err
+			}
+		}
+
+		var models map[string]usageModelTotals
+		if raw, ok := fields["models"]; ok {
+			if err := json.Unmarshal(raw, &models); err != nil {
+				return err
+			}
+		}
+
+		*t = usageProjectionTotals{ActiveMillis: millis, Models: models}
+
+		return nil
+	}
+
+	models := make(map[string]usageModelTotals, len(fields))
+	for ref, raw := range fields {
+		var value usageModelTotals
+		if err := json.Unmarshal(raw, &value); err != nil {
+			return fmt.Errorf("coding tui: decode projected model %q: %w", ref, err)
+		}
+
+		models[ref] = value
+	}
+
+	*t = usageProjectionTotals{Models: models}
+
+	return nil
+}
+
+// isProjectionTotalsShape reports whether every key belongs to the current
+// object shape, which is what tells it apart from the flat map of models.
+func isProjectionTotalsShape(fields map[string]json.RawMessage) bool {
+	for key := range fields {
+		if key != "active_millis" && key != "models" {
+			return false
+		}
+	}
+
+	return true
+}
+
+// usageProjectionInteraction is the contribution of one interaction.
+type usageProjectionInteraction struct {
+	ID           string                      `json:"id"`
+	ActiveMillis int64                       `json:"active_millis"`
+	Models       map[string]usageModelTotals `json:"models"`
+}
+
+// usageProjection is one Session's on-disk totals. The last interaction is kept
+// apart from the earlier totals because a resumed process can re-emit the same
+// interaction: rewriting its id replaces that contribution instead of adding it
+// twice, so the totals stay exact and the file stays bounded.
 type usageProjection struct {
-	Schema          string                      `json:"schema"`
-	SessionID       string                      `json:"session_id"`
-	UpdatedAt       time.Time                   `json:"updated_at"`
-	Prior           map[string]usageModelTotals `json:"prior"`
-	LastInteraction usageProjectionInteraction  `json:"last_interaction"`
+	Schema          string                     `json:"schema"`
+	SessionID       string                     `json:"session_id"`
+	UpdatedAt       time.Time                  `json:"updated_at"`
+	LastActivityAt  time.Time                  `json:"last_activity_at"`
+	Prior           usageProjectionTotals      `json:"prior"`
+	LastInteraction usageProjectionInteraction `json:"last_interaction"`
 }
 
 // totals flattens prior plus the last interaction into one entry per model, which
 // is what both the Usage page and a later reader consume.
 func (p usageProjection) totals() map[string]coding.TokenUsage {
-	if len(p.Prior) == 0 && len(p.LastInteraction.Models) == 0 {
+	if len(p.Prior.Models) == 0 && len(p.LastInteraction.Models) == 0 {
 		return nil
 	}
 
-	totals := make(map[string]coding.TokenUsage, len(p.Prior)+len(p.LastInteraction.Models))
-	for ref, value := range p.Prior {
+	totals := make(map[string]coding.TokenUsage, len(p.Prior.Models)+len(p.LastInteraction.Models))
+	for ref, value := range p.Prior.Models {
 		totals[ref] = value.usage()
 	}
 	for ref, value := range p.LastInteraction.Models {
@@ -67,6 +137,11 @@ func (p usageProjection) totals() map[string]coding.TokenUsage {
 	}
 
 	return totals
+}
+
+// activeMillis is the Session's accumulated active turn time.
+func (p usageProjection) activeMillis() int64 {
+	return max(0, p.Prior.ActiveMillis+p.LastInteraction.ActiveMillis)
 }
 
 // usage converts the stored fields back to the shared token type.
@@ -92,10 +167,11 @@ func usageModelTotalsFrom(usage coding.TokenUsage) usageModelTotals {
 }
 
 // usageProjectionRequest is the per-model split one completed interaction
-// contributes to its Session's sidecar.
+// contributes to its Session's sidecar, with the runtime's measured duration.
 type usageProjectionRequest struct {
 	sessionID     string
 	interactionID string
+	activeMillis  int64
 	models        map[string]coding.TokenUsage
 }
 
@@ -108,28 +184,57 @@ type usageProjectionWriteResult struct {
 	err         error
 }
 
+// usageProjectionRead classifies one sidecar read: usable, absent, or present but
+// unusable. The Stats coverage line counts each, so a Session without a
+// projection is visibly absent rather than silently zero.
+type usageProjectionRead uint8
+
+const (
+	usageProjectionUsable usageProjectionRead = iota
+	usageProjectionMissing
+	usageProjectionUnreadable
+)
+
+// usageProjectionSnapshot is one listed Session's sidecar as the panel read it.
+type usageProjectionSnapshot struct {
+	projection usageProjection
+	read       usageProjectionRead
+}
+
 // readUsageProjection loads one Session's sidecar. A missing, unreadable, corrupt
 // or unknown-schema file is reported as unusable rather than an error: the caller
 // says the Session's history is unknown instead of failing.
 func readUsageProjection(directory, sessionID string) (usageProjection, bool) {
+	projection, read := readUsageProjectionStatus(directory, sessionID)
+
+	return projection, read == usageProjectionUsable
+}
+
+// readUsageProjectionStatus reads one sidecar and reports why it is unusable, so
+// a caller that counts coverage can tell an absent file from a corrupt one.
+func readUsageProjectionStatus(directory, sessionID string) (usageProjection, usageProjectionRead) {
 	if strings.TrimSpace(directory) == "" || strings.TrimSpace(sessionID) == "" {
-		return usageProjection{}, false
+		return usageProjection{}, usageProjectionMissing
 	}
 
 	data, err := os.ReadFile(filepath.Join(directory, sessionID, usageProjectionFile))
 	if err != nil {
-		return usageProjection{}, false
+		if errors.Is(err, fs.ErrNotExist) {
+			return usageProjection{}, usageProjectionMissing
+		}
+
+		return usageProjection{}, usageProjectionUnreadable
 	}
 
 	var projection usageProjection
 	if err := json.Unmarshal(data, &projection); err != nil {
-		return usageProjection{}, false
+		return usageProjection{}, usageProjectionUnreadable
 	}
 	if projection.Schema != usageProjectionSchema {
-		return usageProjection{}, false
+		return usageProjection{}, usageProjectionUnreadable
 	}
 
-	return projection, true
+	return projection, usageProjectionUsable
 }
 
 // writeUsageProjection merges one completed interaction's per-model split into the
@@ -138,6 +243,7 @@ func readUsageProjection(directory, sessionID string) (usageProjection, bool) {
 // without a split must not wipe a good file.
 func writeUsageProjection(
 	directory, sessionID, interactionID string,
+	activeMillis int64,
 	models map[string]coding.TokenUsage,
 	now time.Time,
 ) usageProjectionWriteResult {
@@ -147,23 +253,25 @@ func writeUsageProjection(
 
 	existing, priorUsable := readUsageProjection(directory, sessionID)
 	next := usageProjection{
-		Schema:    usageProjectionSchema,
-		SessionID: sessionID,
-		UpdatedAt: now.UTC(),
+		Schema:         usageProjectionSchema,
+		SessionID:      sessionID,
+		UpdatedAt:      now.UTC(),
+		LastActivityAt: now.UTC(),
 	}
 	if priorUsable {
 		next.Prior = existing.Prior
 		next.LastInteraction = existing.LastInteraction
 	}
 	if next.LastInteraction.ID != interactionID && len(next.LastInteraction.Models) > 0 {
-		next.Prior = mergeUsageTotals(next.Prior, next.LastInteraction.Models)
+		next.Prior = mergeUsageTotals(next.Prior, next.LastInteraction)
 	}
 	next.LastInteraction = usageProjectionInteraction{
-		ID:     interactionID,
-		Models: usageTotals(models),
+		ID:           interactionID,
+		ActiveMillis: max(0, activeMillis),
+		Models:       usageTotals(models),
 	}
-	if next.Prior == nil {
-		next.Prior = map[string]usageModelTotals{}
+	if next.Prior.Models == nil {
+		next.Prior.Models = map[string]usageModelTotals{}
 	}
 
 	if err := replaceUsageProjection(directory, sessionID, next); err != nil {
@@ -183,20 +291,24 @@ func usageTotals(models map[string]coding.TokenUsage) map[string]usageModelTotal
 	return totals
 }
 
-// mergeUsageTotals folds one interaction's contribution into the earlier totals.
-func mergeUsageTotals(base, added map[string]usageModelTotals) map[string]usageModelTotals {
-	merged := make(map[string]usageModelTotals, len(base)+len(added))
-	for ref, value := range base {
-		merged[ref] = value
+// mergeUsageTotals folds one interaction's contribution into the earlier totals,
+// carrying both the token classes and the active time under the same rule.
+func mergeUsageTotals(base usageProjectionTotals, added usageProjectionInteraction) usageProjectionTotals {
+	merged := usageProjectionTotals{
+		ActiveMillis: base.ActiveMillis + added.ActiveMillis,
+		Models:       make(map[string]usageModelTotals, len(base.Models)+len(added.Models)),
 	}
-	for ref, value := range added {
-		current := merged[ref]
+	for ref, value := range base.Models {
+		merged.Models[ref] = value
+	}
+	for ref, value := range added.Models {
+		current := merged.Models[ref]
 		current.InputTokens += value.InputTokens
 		current.CachedInputTokens += value.CachedInputTokens
 		current.CacheWriteTokens += value.CacheWriteTokens
 		current.OutputTokens += value.OutputTokens
 		current.ReasoningTokens += value.ReasoningTokens
-		merged[ref] = current
+		merged.Models[ref] = current
 	}
 
 	return merged
@@ -364,6 +476,7 @@ func (m *Model) usageProjectionWriteCommand() tea.Cmd {
 			directory,
 			request.sessionID,
 			request.interactionID,
+			request.activeMillis,
 			request.models,
 			time.Now(),
 		)

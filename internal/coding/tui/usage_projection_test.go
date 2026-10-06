@@ -38,7 +38,7 @@ func TestUsageProjectionRoundTrips(t *testing.T) {
 		},
 	}
 
-	result := writeUsageProjection(directory, sessionID, "i-1", models, time.Now())
+	result := writeUsageProjection(directory, sessionID, "i-1", 42_000, models, time.Now())
 	require.NoError(t, result.err)
 	require.True(t, result.wrote)
 
@@ -47,13 +47,15 @@ func TestUsageProjectionRoundTrips(t *testing.T) {
 	assert.Equal(t, usageProjectionSchema, read.Schema)
 	assert.Equal(t, sessionID, read.SessionID)
 	assert.Equal(t, "i-1", read.LastInteraction.ID)
+	assert.Equal(t, int64(42_000), read.activeMillis())
 	assert.Equal(t, models, read.totals())
 
 	// The field names are the format's contract for every later reader.
 	encoded, err := json.Marshal(read)
 	require.NoError(t, err)
 	for _, key := range []string{
-		"schema", "session_id", "updated_at", "prior", "last_interaction",
+		"schema", "session_id", "updated_at", "last_activity_at", "prior", "last_interaction",
+		"active_millis", "models",
 		"input_tokens", "cached_input_tokens", "cache_write_tokens",
 		"output_tokens", "reasoning_tokens",
 	} {
@@ -68,24 +70,30 @@ func TestUsageProjectionReplacesTheSameInteraction(t *testing.T) {
 
 	directory, sessionID := usageProjectionFixture(t)
 	first := map[string]coding.TokenUsage{"demo/model": {InputTokens: 100}}
-	require.True(t, writeUsageProjection(directory, sessionID, "i-1", first, time.Now()).wrote)
+	require.True(t, writeUsageProjection(directory, sessionID, "i-1", 1_000, first, time.Now()).wrote)
 
-	// The same interaction reported again replaces its share instead of adding it.
+	// The same interaction reported again replaces its share instead of adding it,
+	// for the tokens and the milliseconds alike.
 	revised := map[string]coding.TokenUsage{"demo/model": {InputTokens: 150}}
-	require.True(t, writeUsageProjection(directory, sessionID, "i-1", revised, time.Now()).wrote)
+	require.True(t, writeUsageProjection(directory, sessionID, "i-1", 2_500, revised, time.Now()).wrote)
 	read, usable := readUsageProjection(directory, sessionID)
 	require.True(t, usable)
-	assert.Empty(t, read.Prior, "the same interaction does not fold into prior")
+	assert.Empty(t, read.Prior.Models, "the same interaction does not fold into prior")
+	assert.Equal(t, int64(2_500), read.activeMillis(), "the same interaction replaces its duration")
 	assert.Equal(t, map[string]coding.TokenUsage{"demo/model": {InputTokens: 150}}, read.totals())
 
-	// A new interaction folds the previous contribution into prior first.
+	// A new interaction folds the previous contribution into prior first, advancing
+	// both the tokens and the milliseconds.
 	next := map[string]coding.TokenUsage{"demo/model": {InputTokens: 50}}
-	require.True(t, writeUsageProjection(directory, sessionID, "i-2", next, time.Now()).wrote)
+	require.True(t, writeUsageProjection(directory, sessionID, "i-2", 3_000, next, time.Now()).wrote)
 	read, usable = readUsageProjection(directory, sessionID)
 	require.True(t, usable)
+	assert.Equal(t, int64(5_500), read.activeMillis())
 	assert.Equal(t, map[string]coding.TokenUsage{"demo/model": {InputTokens: 200}}, read.totals())
-	assert.Equal(t, usageModelTotals{InputTokens: 150}, read.Prior["demo/model"])
+	assert.Equal(t, usageModelTotals{InputTokens: 150}, read.Prior.Models["demo/model"])
+	assert.Equal(t, int64(2_500), read.Prior.ActiveMillis)
 	assert.Equal(t, usageModelTotals{InputTokens: 50}, read.LastInteraction.Models["demo/model"])
+	assert.Equal(t, int64(3_000), read.LastInteraction.ActiveMillis)
 }
 
 // TestUsageProjectionRefusesUnusableFiles pins degradation: a corrupt file and an
@@ -112,6 +120,66 @@ func TestUsageProjectionRefusesUnusableFiles(t *testing.T) {
 	assert.False(t, usable, "a missing file is unusable")
 }
 
+// TestUsageProjectionWithoutActiveMillisReadsAsZeroTime pins the schema's forward
+// compatibility: active_millis is additive, so a file that predates it stays
+// usable and reports zero active time instead of being refused.
+func TestUsageProjectionWithoutActiveMillisReadsAsZeroTime(t *testing.T) {
+	t.Parallel()
+
+	t.Run("before this slice", func(t *testing.T) {
+		t.Parallel()
+
+		directory, sessionID := usageProjectionFixture(t)
+		dir := filepath.Join(directory, sessionID)
+		require.NoError(t, os.MkdirAll(dir, 0o700))
+
+		// The earlier slice wrote prior as a map of models and no active_millis.
+		legacy, err := json.Marshal(map[string]any{
+			"schema":     usageProjectionSchema,
+			"session_id": sessionID,
+			"prior":      map[string]any{"demo/model": map[string]any{"input_tokens": 10}},
+			"last_interaction": map[string]any{
+				"id":     "i-1",
+				"models": map[string]any{"demo/model": map[string]any{"input_tokens": 5}},
+			},
+		})
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(dir, usageProjectionFile), legacy, 0o600))
+
+		read, usable := readUsageProjection(directory, sessionID)
+		require.True(t, usable, "a file without active_millis stays usable")
+		assert.Zero(t, read.activeMillis(), "an absent active_millis reads as zero time")
+		assert.Equal(t, "i-1", read.LastInteraction.ID)
+	})
+
+	t.Run("current shape without the field", func(t *testing.T) {
+		t.Parallel()
+
+		directory, sessionID := usageProjectionFixture(t)
+		dir := filepath.Join(directory, sessionID)
+		require.NoError(t, os.MkdirAll(dir, 0o700))
+
+		current, err := json.Marshal(map[string]any{
+			"schema":     usageProjectionSchema,
+			"session_id": sessionID,
+			"prior": map[string]any{
+				"models": map[string]any{"demo/model": map[string]any{"input_tokens": 10}},
+			},
+			"last_interaction": map[string]any{
+				"id":     "i-1",
+				"models": map[string]any{"demo/model": map[string]any{"input_tokens": 5}},
+			},
+		})
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(dir, usageProjectionFile), current, 0o600))
+
+		read, usable := readUsageProjection(directory, sessionID)
+		require.True(t, usable)
+		assert.Zero(t, read.activeMillis())
+		assert.Equal(t, map[string]coding.TokenUsage{"demo/model": {InputTokens: 15}}, read.totals())
+	})
+}
+
 // TestUsageProjectionReportsIncompleteHistory pins the marker a writer keeps when
 // the file it replaced was unusable: the totals restart, so the page must say the
 // earlier turns are missing.
@@ -124,7 +192,7 @@ func TestUsageProjectionReportsIncompleteHistory(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, usageProjectionFile), []byte("{not json"), 0o600))
 
 	result := writeUsageProjection(
-		directory, sessionID, "i-1",
+		directory, sessionID, "i-1", 1_000,
 		map[string]coding.TokenUsage{"demo/model": {InputTokens: 5}}, time.Now(),
 	)
 	require.NoError(t, result.err)
@@ -142,6 +210,7 @@ func TestUsageProjectionSecuresTheFile(t *testing.T) {
 		directory,
 		sessionID,
 		"i-1",
+		1_000,
 		map[string]coding.TokenUsage{"demo/model": {InputTokens: 1}},
 		time.Now(),
 	).wrote)
@@ -172,7 +241,7 @@ func TestUsageProjectionCleansUpAFailedWrite(t *testing.T) {
 		require.NoError(t, os.WriteFile(filepath.Join(dir, usageProjectionFile, "keep"), []byte("x"), 0o600))
 
 		result := writeUsageProjection(
-			directory, sessionID, "i-1",
+			directory, sessionID, "i-1", 1_000,
 			map[string]coding.TokenUsage{"demo/model": {InputTokens: 1}}, time.Now(),
 		)
 		require.Error(t, result.err)
@@ -193,7 +262,7 @@ func TestUsageProjectionCleansUpAFailedWrite(t *testing.T) {
 
 		directory, sessionID := usageProjectionFixture(t)
 		require.True(t, writeUsageProjection(
-			directory, sessionID, "i-1",
+			directory, sessionID, "i-1", 1_000,
 			map[string]coding.TokenUsage{"demo/model": {InputTokens: 100}}, time.Now(),
 		).wrote)
 
@@ -202,7 +271,7 @@ func TestUsageProjectionCleansUpAFailedWrite(t *testing.T) {
 		t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
 
 		result := writeUsageProjection(
-			directory, sessionID, "i-2",
+			directory, sessionID, "i-2", 2_000,
 			map[string]coding.TokenUsage{"demo/model": {InputTokens: 50}}, time.Now(),
 		)
 		require.Error(t, result.err)
@@ -220,7 +289,7 @@ func TestWriteUsageProjectionSkipsAnEmptySplit(t *testing.T) {
 	t.Parallel()
 
 	directory, sessionID := usageProjectionFixture(t)
-	result := writeUsageProjection(directory, sessionID, "i-1", nil, time.Now())
+	result := writeUsageProjection(directory, sessionID, "i-1", 1_000, nil, time.Now())
 	require.NoError(t, result.err)
 	assert.False(t, result.wrote)
 
@@ -237,15 +306,17 @@ func TestModelUsageTallyRequestsOneProjectionPerInteraction(t *testing.T) {
 	state := readyState()
 	state.SessionID = "s-1"
 	state.Interaction = coding.InteractionState{
-		ID:         "i-1",
-		Usage:      coding.TokenUsage{InputTokens: 10},
-		ModelUsage: map[string]coding.TokenUsage{"demo/model": {InputTokens: 10}},
+		ID:             "i-1",
+		Usage:          coding.TokenUsage{InputTokens: 10},
+		ModelUsage:     map[string]coding.TokenUsage{"demo/model": {InputTokens: 10}},
+		DurationMillis: 4_500,
 	}
 
 	tally := modelUsageTally{}
 	request, ok := tally.projectionRequest(state)
 	require.True(t, ok)
 	assert.Equal(t, "i-1", request.interactionID)
+	assert.Equal(t, int64(4_500), request.activeMillis, "the measured duration rides the request")
 	assert.Equal(t, map[string]coding.TokenUsage{"demo/model": {InputTokens: 10}}, request.models)
 
 	_, ok = tally.projectionRequest(state)
@@ -270,7 +341,7 @@ func TestStatusPanelUsageRendersTheProjectionStates(t *testing.T) {
 		t.Parallel()
 
 		directory, sessionID := usageProjectionFixture(t)
-		require.True(t, writeUsageProjection(directory, sessionID, "i-1", models, time.Now()).wrote)
+		require.True(t, writeUsageProjection(directory, sessionID, "i-1", 61_000, models, time.Now()).wrote)
 		model := usageProjectionPageModel(t, directory)
 
 		driveModelCommands(t, model, model.loadUsageProjection())
@@ -360,9 +431,10 @@ func TestStreamRefreshWritesTheCompletedInteractionSplit(t *testing.T) {
 	model := usageProjectionPageModel(t, directory)
 	state := model.state
 	state.Interaction = coding.InteractionState{
-		ID:         "i-1",
-		Usage:      coding.TokenUsage{InputTokens: 10},
-		ModelUsage: map[string]coding.TokenUsage{"demo/model": {InputTokens: 10}},
+		ID:             "i-1",
+		Usage:          coding.TokenUsage{InputTokens: 10},
+		ModelUsage:     map[string]coding.TokenUsage{"demo/model": {InputTokens: 10}},
+		DurationMillis: 7_000,
 	}
 	model.state = state
 
@@ -373,6 +445,7 @@ func TestStreamRefreshWritesTheCompletedInteractionSplit(t *testing.T) {
 	read, usable := readUsageProjection(directory, "session-1")
 	require.True(t, usable)
 	assert.Equal(t, "i-1", read.LastInteraction.ID)
+	assert.Equal(t, int64(7_000), read.activeMillis(), "the state's duration lands in the file")
 	assert.Equal(t, map[string]coding.TokenUsage{"demo/model": {InputTokens: 10}}, read.totals())
 	assert.True(t, model.usageProjection.usable, "the write result lands on the page cache")
 }
@@ -385,4 +458,31 @@ func usageProjectionPageModel(t *testing.T, directory string) *Model {
 	model.options.SessionsDirectory = directory
 
 	return model
+}
+
+// TestUsageProjectionReadsAPreSliceFile pins the read direction of the format
+// change: a file written before durations were projected stores `prior` as a flat
+// map of models, and it must keep those folded tokens while reading as zero
+// active time.
+func TestUsageProjectionReadsAPreSliceFile(t *testing.T) {
+	t.Parallel()
+
+	directory, sessionID := usageProjectionFixture(t)
+	dir := filepath.Join(directory, sessionID)
+	require.NoError(t, os.MkdirAll(dir, 0o700))
+
+	legacy := `{"schema":"` + usageProjectionSchema + `","session_id":"` + sessionID + `",` +
+		`"updated_at":"2026-10-06T12:00:00Z",` +
+		`"prior":{"demo/model":{"input_tokens":100,"output_tokens":20}},` +
+		`"last_interaction":{"id":"i-1","models":{"demo/model":{"input_tokens":5,"output_tokens":1}}}}`
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, usageProjectionFile), []byte(legacy), 0o600,
+	))
+
+	projection, usable := readUsageProjection(directory, sessionID)
+	require.True(t, usable, "a pre-slice file stays readable")
+	assert.Equal(t, int64(0), projection.activeMillis(), "an absent duration reads as zero")
+	assert.Equal(t, map[string]coding.TokenUsage{
+		"demo/model": {InputTokens: 105, OutputTokens: 21},
+	}, projection.totals(), "the folded tokens survive the shape change")
 }
