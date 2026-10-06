@@ -35,6 +35,13 @@ func (m *Model) handleMouse(message tea.MouseMsg) tea.Cmd {
 		return m.statusRouteMouse(message)
 	}
 
+	// A full-area list route owns the whole pointer gesture: it consumes motion,
+	// drag and release so they never reach the transcript, and only a left press
+	// moves its cursor.
+	if command, handled := m.routeListMouse(message); handled {
+		return command
+	}
+
 	if !m.frameHit.painted {
 		return nil
 	}

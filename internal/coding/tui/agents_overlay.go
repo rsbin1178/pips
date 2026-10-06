@@ -40,6 +40,27 @@ const (
 	agentsTabLibrary
 )
 
+// agentsRouteTabLine is the content line the tab row is drawn on, beneath the
+// title line, and agentsRoutePreamble is the content line where the first item
+// row starts. The pointer map measures both.
+const (
+	agentsRouteTabLine  = 1
+	agentsRoutePreamble = 5
+	agentsTabGap        = "  "
+)
+
+func agentsRouteTabs() []agentsRouteTab {
+	return []agentsRouteTab{agentsTabRuns, agentsTabLibrary}
+}
+
+func (tab agentsRouteTab) title() string {
+	if tab == agentsTabLibrary {
+		return "Library"
+	}
+
+	return "Runs"
+}
+
 type childSummary struct {
 	kind           childKind
 	subagent       subagent.Summary
@@ -253,13 +274,11 @@ func (m *Model) updateAgentsRouteKey(message tea.KeyPressMsg) (tea.Model, tea.Cm
 		return m, nil
 	}
 	if key := message.String(); key == "ctrl+l" {
-		m.route.agentsTab = agentsTabLibrary
-		m.route.cursor = 0
+		m.selectAgentsRouteTab(agentsTabLibrary)
 
 		return m, nil
 	} else if key == "ctrl+r" {
-		m.route.agentsTab = agentsTabRuns
-		m.route.cursor = 0
+		m.selectAgentsRouteTab(agentsTabRuns)
 
 		return m, nil
 	}
@@ -435,14 +454,59 @@ func (m *Model) filteredAgentLibrary() []coding.AgentLibraryEntry {
 	return values
 }
 
+// agentsRouteTabBar draws the Runs/Library switch beneath the title line, with the
+// active tab emphasized. Under NO_COLOR the active tab is bracketed so the
+// selection survives without styling, and the bar is fitted to the width.
+func (m *Model) agentsRouteTabBar(width int) string {
+	return ansi.Truncate(
+		strings.Join(m.agentsRouteTabTitles(), agentsTabGap), max(1, width), "…",
+	)
+}
+
+func (m *Model) agentsRouteTabTitles() []string {
+	tabs := agentsRouteTabs()
+	titles := make([]string, 0, len(tabs))
+	for _, tab := range tabs {
+		title := tab.title()
+		switch {
+		case tab != m.route.agentsTab:
+		case m.options.NoColor:
+			title = "[" + title + "]"
+		default:
+			title = lipgloss.NewStyle().Bold(true).Foreground(
+				paletteFor(m.theme).session,
+			).Render(title)
+		}
+		titles = append(titles, title)
+	}
+
+	return titles
+}
+
+// selectAgentsRouteTab switches the view, resetting the cursor like the tab keys.
+func (m *Model) selectAgentsRouteTab(tab agentsRouteTab) {
+	m.route.agentsTab = tab
+	m.route.cursor = 0
+}
+
 func (m *Model) agentsRouteContent() string {
+	content, _ := m.agentsRouteContentWithRows()
+
+	return content
+}
+
+// agentsRouteContentWithRows renders the route and reports each addressable row's
+// painted line count, so the pointer map measures the same rows the frame paints.
+func (m *Model) agentsRouteContentWithRows() (string, []int) {
 	title := "Agents · Runs"
 	if m.route.agentsTab == agentsTabLibrary {
 		title = "Agents · Library"
 	}
-	lines := []string{title, "", "Search: " + m.route.query, ""}
+	lines := []string{
+		title, m.agentsRouteTabBar(max(1, m.width)), "", "Search: " + m.route.query, "",
+	}
 	if m.route.loading {
-		return strings.Join(append(lines, m.activityNotice("Loading…")), "\n")
+		return strings.Join(append(lines, m.activityNotice("Loading…")), "\n"), nil
 	}
 	if m.route.agentsTab == agentsTabLibrary {
 		return m.agentLibraryRouteContent(lines)
@@ -452,14 +516,15 @@ func (m *Model) agentsRouteContent() string {
 	if len(values) == 0 {
 		lines = append(lines, "No child Agents in this session.")
 	}
-
+	heights := make([]int, 0, len(values))
 	for index, value := range values {
 		marker := "  "
 		if index == m.route.cursor {
 			marker = "› "
 		}
-
-		lines = append(lines, m.renderChildSummary(value, marker)...)
+		rows := m.renderChildSummary(value, marker)
+		lines = append(lines, rows...)
+		heights = append(heights, len(rows))
 	}
 
 	if m.route.controlling {
@@ -472,20 +537,23 @@ func (m *Model) agentsRouteContent() string {
 	}
 	lines = append(lines, "", wheelHintNavigation+" · type to search · Enter inspect · c interrupt · Ctrl+L Library · Ctrl+R Runs · Ctrl+T/Esc close")
 
-	return strings.Join(lines, "\n")
+	return strings.Join(lines, "\n"), heights
 }
 
-func (m *Model) agentLibraryRouteContent(lines []string) string {
+func (m *Model) agentLibraryRouteContent(lines []string) (string, []int) {
 	values := m.filteredAgentLibrary()
 	if len(values) == 0 {
 		lines = append(lines, "No Agent definitions are available in this workspace.")
 	}
+	heights := make([]int, 0, len(values))
 	for index, value := range values {
 		marker := "  "
 		if index == m.route.cursor {
 			marker = "› "
 		}
-		lines = append(lines, renderAgentLibrarySummary(value, marker)...)
+		rows := renderAgentLibrarySummary(value, marker)
+		lines = append(lines, rows...)
+		heights = append(heights, len(rows))
 	}
 	lines = append(lines,
 		"",
@@ -493,7 +561,7 @@ func (m *Model) agentLibraryRouteContent(lines []string) string {
 		"↑/↓ choose · "+wheelHintNavigation+" · Enter run · type to search · Ctrl+L Library · Ctrl+R Runs · Ctrl+T/Esc close",
 	)
 
-	return strings.Join(lines, "\n")
+	return strings.Join(lines, "\n"), heights
 }
 
 func renderAgentLibrarySummary(value coding.AgentLibraryEntry, marker string) []string {
@@ -994,17 +1062,51 @@ func relativeTime(value time.Time) string {
 }
 
 func (m *Model) agentsRouteView() tea.View {
-	content := m.agentsRouteContent()
+	m.route.listHits = routeListHit{}
+	m.route.tabHits = routeTabHits{}
+	content, heights := m.agentsRouteContentWithRows()
 	if m.route.err != nil {
 		content += "\n\nError: " + safeError(m.route.err)
 	}
 
-	content = fitScrollableContent(content, max(1, m.width), max(1, m.height), m.route.offset)
+	width := max(1, m.width)
+	height := max(1, m.height)
+	window, windowStart := fitScrollableContentWindow(content, width, height, m.route.offset)
+	// The painted window counts content lines only: the trailing indicator row is
+	// not one, so it must not answer as a row or as the tab bar.
+	painted := paintedContentRows(content, height)
+	m.recordRouteListHit(routeListHit{
+		painted: true, frameTop: 0, windowStart: windowStart, windowRows: painted,
+		firstLine: agentsRoutePreamble, first: 0, heights: heights, gap: 0,
+	})
+	m.route.tabHits = m.agentsRouteTabHitMap(windowStart, painted, width)
 	if !m.options.NoColor {
-		content = lipgloss.NewStyle().Foreground(paletteFor(m.theme).workspace).Render(content)
+		window = lipgloss.NewStyle().Foreground(paletteFor(m.theme).workspace).Render(window)
 	}
 
-	return m.presentationView(content)
+	return m.presentationView(window)
+}
+
+// agentsRouteTabHitMap records the tab titles the frame paints, clamped to the
+// width so a clipped title only answers where it is visible.
+func (m *Model) agentsRouteTabHitMap(windowStart, windowRows, width int) routeTabHits {
+	hits := routeTabHits{
+		kind: routeAgents, painted: true, columns: max(1, width),
+		line: agentsRouteTabLine, windowStart: windowStart, windowRows: windowRows,
+	}
+	titles := m.agentsRouteTabTitles()
+	column := 0
+	for index, tab := range agentsRouteTabs() {
+		span := ansi.StringWidth(titles[index])
+		if column < width {
+			hits.tabs = append(hits.tabs, routeTabHit{
+				start: column, end: min(column+span, width), tab: tab,
+			})
+		}
+		column += span + ansi.StringWidth(agentsTabGap)
+	}
+
+	return hits
 }
 
 func (m *Model) updateSubagentRouteKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {

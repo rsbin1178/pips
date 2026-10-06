@@ -879,7 +879,13 @@ and `Esc` closes the panel. In fullscreen rendering the pointer works too: a lef
 click on a tab switches pages, a click on the `Stats` range row selects that
 window, and a click on the `Config` search box focuses it. The panel ignores
 motion and drag, so the pointer never takes the conversation's selection gesture
-away from it. The Session store is read only when `Usage` or
+away from it. The same capture covers the full-area lists — `/resume`, `/skills`,
+`/mcp`, `/tree`, `/agents` and its Runs/Library tabs — where a left click moves
+that route's selection to the row it landed on. A click only selects: it never
+resumes a Session, toggles a Skill, marks a fork, navigates the tree, opens a
+child, or answers an approval or question, because a click that focuses the
+terminal window lands at the last pointer position. The Session store is read only
+when `Usage` or
 `Stats` is first opened — a glance at `Status` reads no history — and that read
 takes session headers rather than transcripts: it is one bounded entry per
 session, not the picker's full prefix. A session whose file cannot be read is
@@ -918,8 +924,12 @@ inert. The document handed to the terminal is written in bounded pages, so a lon
 session yields between pages (including on exit with `exit_output = "transcript"`). `alt_screen` selects the buffer independently of the layout (`auto` uses the
 alternate screen unless Zellij or tmux control mode restricts it, `always` forces
 it, `never` draws the layout in the main buffer). `mouse = true` (the default)
-captures the mouse in fullscreen so a wheel notch can scroll the viewport. Text is
-selected in the viewport itself: drag over the conversation and the addressed rows
+captures the mouse in fullscreen so a wheel notch can scroll the viewport and a
+left click can move the selection on a full-area list (`/resume`, `/skills`,
+`/mcp`, `/tree`, `/agents` and its Runs/Library tabs) — a click selects a row and
+activates nothing, and motion events are ignored, so the pointer never repaints a
+frame by hovering. Text is selected in the viewport itself: drag over the
+conversation and the addressed rows
 are copied through the same clipboard path as `Ctrl+X` (an OSC 52 request plus a
 fallback file) with a short confirmation on the status line, and `Esc` clears the
 highlight. Rows are copied as they are painted, so a paragraph that wrapped is

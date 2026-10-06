@@ -271,6 +271,7 @@ func (m *Model) treeRouteChrome() (string, string) {
 }
 
 func (m *Model) treeRouteView() tea.View {
+	m.route.listHits = routeListHit{}
 	width := max(1, m.width)
 	height := max(1, m.height)
 	header, hint := m.treeRouteChrome()
@@ -287,7 +288,8 @@ func (m *Model) treeRouteView() tea.View {
 		ansi.Truncate(hint, width, "…")
 	bodyHeight := max(1, height-lipgloss.Height(header)-lipgloss.Height(footer))
 
-	window := fitScrollableContent(body, width, bodyHeight, m.route.offset)
+	window, windowStart := fitScrollableContentWindow(body, width, bodyHeight, m.route.offset)
+	m.recordTreeRouteHit(header, windowStart, paintedContentRows(body, bodyHeight))
 	if padding := bodyHeight - lipgloss.Height(window); padding > 0 {
 		window += strings.Repeat("\n", padding)
 	}
@@ -295,6 +297,27 @@ func (m *Model) treeRouteView() tea.View {
 	view := m.presentationView(truncateHeight(header+"\n"+window+"\n"+footer, height))
 
 	return view
+}
+
+// recordTreeRouteHit records the node rows the frame paints. The tree windows its
+// own rows by selection before the frame fits them, so the painted body starts at
+// the node its window returned and every node is one row. paintedRows is the
+// content rows the fit window paints, which excludes its trailing indicator.
+func (m *Model) recordTreeRouteHit(header string, windowStart, paintedRows int) {
+	values := m.filteredTreeNodes()
+	if m.route.loading || len(values) == 0 {
+		return
+	}
+	first, end := m.treeRouteWindow(values)
+	heights := make([]int, len(values))
+	for index := range heights {
+		heights[index] = 1
+	}
+	m.recordRouteListHit(routeListHit{
+		painted: true, frameTop: lipgloss.Height(header), windowStart: windowStart,
+		windowRows: max(0, min((end-first)-windowStart, paintedRows)), firstLine: 0,
+		first: first, heights: heights, gap: 0,
+	})
 }
 
 // formatRelativeTime renders a compact age for a durable node timestamp.
