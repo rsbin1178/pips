@@ -204,6 +204,7 @@ func (r *run) turn(ctx context.Context, turn int) (result *RunResult, next bool,
 		}
 	}
 
+	resp.Message = normalizeModelToolArguments(resp.Message)
 	r.sess.Append(resp.Message)
 
 	if !r.emit(MessageCommitted{Turn: turn, Message: resp.Message}) {
