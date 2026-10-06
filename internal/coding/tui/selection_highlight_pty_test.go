@@ -61,7 +61,12 @@ func TestPTYSelectionHighlightCoversStyledCells(t *testing.T) {
 		os.Exit(0)
 	}
 
-	h := newPTYHarness(t, "PIPS_TUI_SELHIGHLIGHT_HELPER", testName, 24, 80)
+	// The repo harness pins NO_COLOR=1 for the helper process, and the renderer
+	// derives its colour profile from the process environment: with that pinned,
+	// every attribute — the selection's reverse video included — is stripped
+	// before it reaches the terminal, whatever Options the helper passes. The
+	// empty override clears it for this helper only.
+	h := newPTYHarness(t, "PIPS_TUI_SELHIGHLIGHT_HELPER", testName, 24, 80, "NO_COLOR=")
 	require.Eventually(t, func() bool {
 		return h.screenMatches(80, 24, func(e *vt.Emulator) bool {
 			return strings.Contains(e.String(), "STYLED-ROW")
