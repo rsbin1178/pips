@@ -49,6 +49,7 @@ func newPTYHarness(t *testing.T, envVar, testName string, rows, cols uint16, ext
 	environment := append(os.Environ(), envVar+"=1",
 		"TERM=xterm-256color", "NO_COLOR=1")
 	environment = append(environment, extraEnv...)
+	environment = harnessEnvironment(environment)
 
 	process, err := os.StartProcess(executable,
 		[]string{executable, "-test.run=^" + testName + "$"}, &os.ProcAttr{
@@ -104,6 +105,39 @@ func (h *ptyHarness) screenMatches(width, height int, check func(*vt.Emulator) b
 	}
 
 	return check(e)
+}
+
+// harnessEnvironment collapses duplicate variables so the last entry for a key
+// wins, and drops a key whose winning override is empty.
+//
+// The helper is a real process: a pinned NO_COLOR=1 reaches libraries that read
+// the process environment directly, whatever Options the test hands the program,
+// so an extraEnv override has to be able to clear it.
+func harnessEnvironment(entries []string) []string {
+	last := make(map[string]int, len(entries))
+
+	for index, entry := range entries {
+		if key, _, ok := strings.Cut(entry, "="); ok {
+			last[key] = index
+		}
+	}
+
+	values := make([]string, 0, len(entries))
+
+	for index, entry := range entries {
+		key, _, _ := strings.Cut(entry, "=")
+		if last[key] != index {
+			continue
+		}
+
+		if entry == key+"=" {
+			continue
+		}
+
+		values = append(values, entry)
+	}
+
+	return values
 }
 
 func (h *ptyHarness) waitForExit() *os.ProcessState {
