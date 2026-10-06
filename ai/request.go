@@ -39,6 +39,12 @@ type Request struct {
 	// Reasoning requests and tunes model reasoning.
 	Reasoning *ReasoningConfig
 
+	// PromptCacheKey is a stable routing key for provider prompt caching: OpenAI
+	// documents it as prompt_cache_key and names session IDs as the expected
+	// value. Adapters send it only where the endpoint accepts it, and endpoints
+	// with no such concept ignore it.
+	PromptCacheKey string
+
 	// ProviderOptions passes provider-specific extensions that have no
 	// portable representation. Each adapter looks up its own [Provider] key
 	// and type-asserts the value to its documented options type; unknown keys

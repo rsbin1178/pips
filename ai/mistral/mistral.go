@@ -21,6 +21,8 @@ func New(model string, opts ...Option) *openai.Model {
 			MaxTokensField:   openai.MaxTokensFieldLegacy,
 			ReasoningHistory: openai.ReasoningHistoryContentChunks,
 			BuiltinTools:     openai.BuiltinToolsStrip,
+			// Mistral documents prompt_cache_key for requests that share a prefix.
+			PromptCacheKey: true,
 		}),
 		openai.WithCapabilities(capabilitiesFor(model)),
 	}

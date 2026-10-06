@@ -110,6 +110,12 @@ func (m *Model) chatRequestFrom(req ai.Request, stream bool) (any, []ai.Warning,
 		}
 	}
 
+	// The cache routing key is opt-in: endpoints that reject the field instead
+	// of ignoring it only receive it from a profile that declares support.
+	if m.compat.PromptCacheKey {
+		out.PromptCacheKey = req.PromptCacheKey
+	}
+
 	if err := applyChatReasoning(&out, req.Reasoning, m.compat, m.label()); err != nil {
 		return nil, nil, err
 	}
@@ -656,11 +662,12 @@ func usageFromChat(u *chatUsage) ai.Usage {
 	}
 
 	out := ai.Usage{
-		InputTokens:  u.PromptTokens,
-		OutputTokens: u.CompletionTokens,
+		InputTokens:       chatPromptTokens(u),
+		OutputTokens:      u.CompletionTokens,
+		CachedInputTokens: chatCachedTokens(u),
 	}
 	if u.PromptTokensDetails != nil {
-		out.CachedInputTokens = u.PromptTokensDetails.CachedTokens
+		out.CacheWriteTokens = u.PromptTokensDetails.CacheWriteTokens
 	}
 
 	if u.CompletionTokensDetails != nil {
@@ -668,4 +675,31 @@ func usageFromChat(u *chatUsage) ai.Usage {
 	}
 
 	return out
+}
+
+// chatPromptTokens is the request's prompt size. DeepSeek's cache counters sum
+// to prompt_tokens, so a gateway that forwards only those still reports a size
+// instead of an empty prompt.
+func chatPromptTokens(u *chatUsage) int {
+	if u.PromptTokens > 0 {
+		return u.PromptTokens
+	}
+
+	return u.PromptCacheHitTokens + u.PromptCacheMissTokens
+}
+
+// chatCachedTokens reads the prompt tokens the provider served from its cache.
+// OpenAI-compatible endpoints report them in three shapes: the nested OpenAI
+// details object, the top-level cached_tokens alias Kimi/Moonshot and DashScope
+// use, and DeepSeek's prompt_cache_hit_tokens. The first non-zero reading wins,
+// so an explicit zero in one shape cannot hide a real count in another.
+func chatCachedTokens(u *chatUsage) int {
+	if u.PromptTokensDetails != nil && u.PromptTokensDetails.CachedTokens > 0 {
+		return u.PromptTokensDetails.CachedTokens
+	}
+	if u.CachedTokens > 0 {
+		return u.CachedTokens
+	}
+
+	return u.PromptCacheHitTokens
 }

@@ -66,6 +66,12 @@ func (m *Model) responsesRequestFrom(req ai.Request, stream bool) (any, []ai.War
 		MaxOutputTokens: req.MaxTokens,
 		Stream:          stream,
 	}
+	// The cache routing key is opt-in: endpoints that reject the field instead
+	// of ignoring it only receive it from a profile that declares support.
+	if m.compat.PromptCacheKey {
+		out.PromptCacheKey = req.PromptCacheKey
+	}
+
 	if req.LogProbs != nil {
 		if !req.LogProbs.Enabled {
 			return nil, nil, fmt.Errorf(
@@ -456,6 +462,7 @@ func usageFromResponses(u *responsesUsage) ai.Usage {
 	out := ai.Usage{InputTokens: u.InputTokens, OutputTokens: u.OutputTokens}
 	if u.InputTokensDetails != nil {
 		out.CachedInputTokens = u.InputTokensDetails.CachedTokens
+		out.CacheWriteTokens = u.InputTokensDetails.CacheWriteTokens
 	}
 
 	if u.OutputTokensDetails != nil {

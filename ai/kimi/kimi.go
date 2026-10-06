@@ -34,6 +34,9 @@ func New(model string, opts ...Option) *openai.Model {
 			ChatReasoning:    openai.ChatReasoningEffort,
 			ReasoningHistory: openai.ReasoningHistoryContent,
 			BuiltinTools:     openai.BuiltinToolsStrip,
+			// Moonshot documents prompt_cache_key, and its guidance keeps the
+			// same value across a resumed session.
+			PromptCacheKey: true,
 		}),
 		openai.WithCapabilities(capabilitiesFor(model)),
 	}

@@ -33,6 +33,7 @@ type chatRequest struct {
 	ReasoningEffort     string              `json:"reasoning_effort,omitempty"`
 	Reasoning           *chatReasoning      `json:"reasoning,omitempty"`
 	Thinking            *chatThinking       `json:"thinking,omitempty"`
+	PromptCacheKey      string              `json:"prompt_cache_key,omitempty"`
 }
 
 type chatStreamOptions struct {
@@ -143,10 +144,18 @@ type chatChoiceMessage struct {
 }
 
 type chatUsage struct {
-	PromptTokens        int `json:"prompt_tokens"`
-	CompletionTokens    int `json:"completion_tokens"`
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	// PromptCacheHitTokens and PromptCacheMissTokens are DeepSeek's native
+	// top-level cache counters, whose sum is prompt_tokens.
+	PromptCacheHitTokens  int `json:"prompt_cache_hit_tokens"`
+	PromptCacheMissTokens int `json:"prompt_cache_miss_tokens"`
+	// CachedTokens is the top-level alias Kimi/Moonshot and DashScope report
+	// instead of the nested OpenAI details object.
+	CachedTokens        int `json:"cached_tokens"`
 	PromptTokensDetails *struct {
-		CachedTokens int `json:"cached_tokens"`
+		CachedTokens     int `json:"cached_tokens"`
+		CacheWriteTokens int `json:"cache_write_tokens"`
 	} `json:"prompt_tokens_details"`
 	CompletionTokensDetails *struct {
 		ReasoningTokens int `json:"reasoning_tokens"`
