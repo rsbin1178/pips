@@ -815,11 +815,15 @@ switched with `Tab`/`→` and `Shift+Tab`/`←`.
   names.
 - `Usage` reports this session's local usage: the context gauge, the cache hit
   rate, the last turn's tokens, the workspace diff, how long the session has been
-  running, and — once this process has watched a turn run — a `By model` block with
-  each model's turns and token split. pips tracks the last completed interaction
-  rather than a lifetime total and prices nothing, so it states what it measured
-  instead of an estimate; the per-model numbers cover what this process watched, so
-  a resumed session starts from zero.
+  running, and two per-model blocks it never merges. `By model` covers what this
+  process watched run, with each model's turns and token split, and states the
+  range it measured; a subagent's tokens are credited to the model that ran it.
+  `This session on disk` reads the Session's own usage projection — written beside
+  the Session as `<sessions>/s-<id>/usage.json`, once per completed turn — and names
+  the interaction it covers. A Session written before this change reads `History
+  unknown` instead of an estimate, and a projection rebuilt from a damaged file
+  reads `History incomplete`. Neither block prices anything or reports a lifetime
+  total.
 - `Stats` aggregates the local Session store's headers: a year-long activity grid
   with a `Less`/`More` ramp, then the sessions, active days, current and longest
   streaks, most active day, and first session the selected range covers. `r`
