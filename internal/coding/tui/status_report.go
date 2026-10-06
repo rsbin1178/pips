@@ -23,11 +23,12 @@ const (
 	statusTabConfig
 	statusTabUsage
 	statusTabStats
+	statusTabModels
 	statusPanelTabCount
 )
 
 // statusPanelTabTitles are the tab labels the panel draws.
-var statusPanelTabTitles = [...]string{"Status", "Config", "Usage", "Stats"}
+var statusPanelTabTitles = [...]string{"Status", "Config", "Usage", "Stats", "Models"}
 
 func (tab statusPanelTab) title() string {
 	if int(tab) >= len(statusPanelTabTitles) {
@@ -108,6 +109,8 @@ func (m *Model) statusPageLines(tab statusPanelTab) []statusPageLine {
 		return m.statusUsageLines()
 	case statusTabStats:
 		return m.statusStatsLines()
+	case statusTabModels:
+		return m.statusModelsLines()
 	default:
 		return m.statusOverviewLines()
 	}

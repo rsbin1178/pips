@@ -482,7 +482,105 @@ func TestUsageProjectionReadsAPreSliceFile(t *testing.T) {
 	projection, usable := readUsageProjection(directory, sessionID)
 	require.True(t, usable, "a pre-slice file stays readable")
 	assert.Equal(t, int64(0), projection.activeMillis(), "an absent duration reads as zero")
+	assert.Empty(t, projection.LastInteraction.Day, "a pre-slice file records no day")
+	assert.Empty(t, projection.dailyTotals(), "a pre-slice file reads as zero days")
 	assert.Equal(t, map[string]coding.TokenUsage{
 		"demo/model": {InputTokens: 105, OutputTokens: 21},
 	}, projection.totals(), "the folded tokens survive the shape change")
+}
+
+// TestUsageProjectionFoldsADayIntoPrior pins the day bucket: a new interaction
+// folds the previous one into prior.daily under the day it was completed on, and
+// the new contribution lands on its own day, so the daily view matches the totals.
+func TestUsageProjectionFoldsADayIntoPrior(t *testing.T) {
+	t.Parallel()
+
+	directory, sessionID := usageProjectionFixture(t)
+	day1 := time.Date(2026, 10, 5, 23, 0, 0, 0, time.Local)
+	day2 := time.Date(2026, 10, 6, 1, 0, 0, 0, time.Local)
+
+	require.True(t, writeUsageProjection(
+		directory, sessionID, "i-1", 1_000,
+		map[string]coding.TokenUsage{"demo/model": {InputTokens: 100}}, day1,
+	).wrote)
+	require.True(t, writeUsageProjection(
+		directory, sessionID, "i-2", 3_000,
+		map[string]coding.TokenUsage{"demo/model": {InputTokens: 50}}, day2,
+	).wrote)
+
+	read, usable := readUsageProjection(directory, sessionID)
+	require.True(t, usable)
+	assert.Equal(t, "2026-10-06", read.LastInteraction.Day)
+	assert.Equal(t, map[string]coding.TokenUsage{"demo/model": {InputTokens: 150}}, read.totals())
+	assert.Equal(t, int64(4_000), read.activeMillis())
+
+	days := read.dailyTotals()
+	require.Len(t, days, 2)
+	assert.Equal(t, 100, days["2026-10-05"].Models["demo/model"].InputTokens,
+		"the earlier turn folds into its own day")
+	assert.Equal(t, int64(1_000), days["2026-10-05"].ActiveMillis)
+	assert.Equal(t, 50, days["2026-10-06"].Models["demo/model"].InputTokens,
+		"the last turn stays on its completion day")
+	assert.Equal(t, int64(3_000), days["2026-10-06"].ActiveMillis)
+}
+
+// TestUsageProjectionReplacesTheSameInteractionAcrossDays pins the day-change
+// rule: rewriting one interaction on a new day replaces its contribution outright,
+// moving it to the new day without touching any total.
+func TestUsageProjectionReplacesTheSameInteractionAcrossDays(t *testing.T) {
+	t.Parallel()
+
+	directory, sessionID := usageProjectionFixture(t)
+	day1 := time.Date(2026, 10, 5, 23, 0, 0, 0, time.Local)
+	day2 := time.Date(2026, 10, 6, 1, 0, 0, 0, time.Local)
+	models := map[string]coding.TokenUsage{"demo/model": {InputTokens: 100}}
+
+	require.True(t, writeUsageProjection(directory, sessionID, "i-1", 1_000, models, day1).wrote)
+	require.True(t, writeUsageProjection(directory, sessionID, "i-1", 1_000, models, day2).wrote)
+
+	read, usable := readUsageProjection(directory, sessionID)
+	require.True(t, usable)
+	assert.Equal(t, "2026-10-06", read.LastInteraction.Day)
+	assert.Empty(t, read.Prior.Models, "a same-id rewrite does not fold into prior")
+	assert.Equal(t, int64(1_000), read.activeMillis(), "the duration is replaced, not doubled")
+	assert.Equal(t, map[string]coding.TokenUsage{"demo/model": {InputTokens: 100}}, read.totals())
+
+	days := read.dailyTotals()
+	require.Len(t, days, 1, "the contribution moves to the new day")
+	_, stale := days["2026-10-05"]
+	assert.False(t, stale, "the old day no longer holds the contribution")
+	assert.Equal(t, int64(1_000), days["2026-10-06"].ActiveMillis)
+}
+
+// TestUsageProjectionReadsACurrentFileWithDailyBuckets pins the shape predicate: a
+// current file that carries a daily map must not be misread as a legacy flat map
+// of models, which would lose its totals (active_millis is a number and cannot
+// decode as a model).
+func TestUsageProjectionReadsACurrentFileWithDailyBuckets(t *testing.T) {
+	t.Parallel()
+
+	directory, sessionID := usageProjectionFixture(t)
+	dir := filepath.Join(directory, sessionID)
+	require.NoError(t, os.MkdirAll(dir, 0o700))
+
+	current := `{"schema":"` + usageProjectionSchema + `","session_id":"` + sessionID + `",` +
+		`"prior":{"active_millis":900000,` +
+		`"models":{"demo/model":{"input_tokens":100}},` +
+		`"daily":{"2026-10-05":{"active_millis":300000,"models":{"demo/model":{"input_tokens":40}}}}},` +
+		`"last_interaction":{"id":"i-1","day":"2026-10-06","active_millis":41000,` +
+		`"models":{"demo/model":{"input_tokens":5}},` +
+		`"daily":{"2026-10-06":{"active_millis":41000,"models":{"demo/model":{"input_tokens":5}}}}}}`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, usageProjectionFile), []byte(current), 0o600))
+
+	projection, usable := readUsageProjection(directory, sessionID)
+	require.True(t, usable, "a current file with a daily map stays usable")
+	assert.Equal(t, map[string]coding.TokenUsage{"demo/model": {InputTokens: 105}}, projection.totals())
+	assert.Equal(t, int64(941_000), projection.activeMillis())
+
+	days := projection.dailyTotals()
+	require.Len(t, days, 2)
+	assert.Equal(t, int64(300_000), days["2026-10-05"].ActiveMillis)
+	assert.Equal(t, 40, days["2026-10-05"].Models["demo/model"].InputTokens)
+	assert.Equal(t, int64(41_000), days["2026-10-06"].ActiveMillis)
+	assert.Equal(t, 5, days["2026-10-06"].Models["demo/model"].InputTokens)
 }

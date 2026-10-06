@@ -54,6 +54,24 @@ func (value statusStatsRange) window() int {
 	}
 }
 
+// coversDay reports whether a stored local-day key falls inside the range ending
+// today. The stored key is a local date, so a reader in another zone sees the days
+// as they were written; the unbounded range covers every day.
+func (value statusStatsRange) coversDay(day string, now time.Time) bool {
+	window := value.window()
+	if window == 0 {
+		return true
+	}
+	parsed, err := time.ParseInLocation(usageProjectionDayKeyFormat, day, time.Local)
+	if err != nil {
+		return false
+	}
+	today := localDay(now)
+	start := today.AddDate(0, 0, -(window - 1))
+
+	return !parsed.Before(start) && !parsed.After(today)
+}
+
 // statusHeatmapLevels is the five-step density ramp the activity grid shades a
 // day with: one glyph per step rather than blended background colors, so the grid
 // keeps its meaning in every theme and under NO_COLOR.

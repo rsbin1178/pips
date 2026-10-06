@@ -364,7 +364,8 @@ func (m *Model) requestUsageProjection() tea.Cmd {
 // reduces it is opened, so a glance at the Status page reads nothing.
 func (m *Model) requestStatusPanelData() tea.Cmd {
 	if m.route.statusDataRequested ||
-		(m.route.statusTab != statusTabUsage && m.route.statusTab != statusTabStats) {
+		(m.route.statusTab != statusTabUsage && m.route.statusTab != statusTabStats &&
+			m.route.statusTab != statusTabModels) {
 		return nil
 	}
 	m.route.statusDataRequested = true
@@ -378,7 +379,7 @@ func (m *Model) requestStatusPanelData() tea.Cmd {
 // the time range on Stats, matching the reference panel's split.
 func (m *Model) statusTabKey() tea.Cmd {
 	switch m.route.statusTab {
-	case statusTabStats:
+	case statusTabStats, statusTabModels:
 		m.route.statusRange = m.route.statusRange.next()
 
 		return nil
@@ -488,7 +489,7 @@ func (m *Model) statusRouteChrome(width int) ([]string, int, int) {
 	chrome := []string{
 		renderUserMessage("/status", width, m.theme, m.options.NoColor),
 		m.sessionPickerSeparator(width),
-		m.statusRouteTabBar(),
+		m.statusRouteTabBar(width),
 	}
 	searchX, searchY := 0, 0
 	if m.route.statusTab == statusTabConfig {
@@ -506,8 +507,13 @@ func (m *Model) statusRouteChrome(width int) ([]string, int, int) {
 
 // statusRouteTabBar draws the pages with the active one highlighted. Under
 // NO_COLOR the active page is bracketed so the selection survives without styling.
-func (m *Model) statusRouteTabBar() string {
-	return statusLabelIndent + strings.Join(m.statusRouteTabTitles(), statusTabGap)
+// The bar is fitted to the panel width like the chrome rows around it, so a narrow
+// terminal clips the trailing pages instead of wrapping the header.
+func (m *Model) statusRouteTabBar(width int) string {
+	return ansi.Truncate(
+		statusLabelIndent+strings.Join(m.statusRouteTabTitles(), statusTabGap),
+		max(1, width), "…",
+	)
 }
 
 // statusRouteTabTitles renders one title per page, emphasizing the active one. The
@@ -691,7 +697,7 @@ func (m *Model) statusRouteFooterText(width int) string {
 	switch m.route.statusTab {
 	case statusTabConfig:
 		hint += " · / search"
-	case statusTabStats:
+	case statusTabStats, statusTabModels:
 		hint += " · r range · R reload"
 	case statusTabUsage:
 		hint += " · R reload"

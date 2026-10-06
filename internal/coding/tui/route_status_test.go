@@ -83,7 +83,7 @@ func TestStatusPanelSwitchesTabsAndSearchesSettings(t *testing.T) {
 	assert.Contains(t, config, "Sandbox: Workspace write")
 	assert.Contains(t, config, "Status line: ")
 	// NO_COLOR keeps the active page visible without styling.
-	assert.Contains(t, model.statusRouteTabBar(), "[Config]")
+	assert.Contains(t, model.statusRouteTabBar(80), "[Config]")
 
 	model.Update(tea.KeyPressMsg{Text: "/"})
 	require.True(t, model.statusSearching())
