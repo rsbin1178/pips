@@ -869,6 +869,11 @@ tabbed settings view: five pages — `Status`, `Config`, `Usage`, `Stats`,
   all-time total and shows no strip, so a narrow window never reads as "never
   used".
 
+A listing that stopped early says so — `read cancelled · N sessions read` — on its
+own line beside the count of Sessions that could not be read, so a partial listing
+never reads as a complete one. Closing the panel stops its store read instead of
+letting it finish unread.
+
 `↑`/`↓`, PgUp/PgDn, Home/End and the wheel scroll a page, `R` re-reads its data,
 and `Esc` closes the panel. In fullscreen rendering the pointer works too: a left
 click on a tab switches pages, a click on the `Stats` range row selects that

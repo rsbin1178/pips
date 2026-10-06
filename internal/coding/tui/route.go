@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"errors"
 	"time"
 
@@ -83,7 +84,10 @@ type routeState struct {
 	statusDataRequested bool
 	statusDataLoading   bool
 	statusDataErr       error
-	statusHits          statusPanelHits
+	// statusCancel stops the panel's in-flight Session-store read when the route
+	// closes or starts a replacement read, so a pass nobody reads stops early.
+	statusCancel context.CancelFunc
+	statusHits   statusPanelHits
 }
 
 // routeOpenRequest is a typed route transition intent. Keeping the payload as
@@ -311,6 +315,12 @@ func (m *Model) finishScrollbackWrite(sequence uint64) tea.Cmd {
 func (m *Model) closeRouteToParent() tea.Cmd {
 	activityWasVisible := m.activityClockVisible()
 	m.stopTeamWorkerRouteSubscription()
+
+	// Closing the panel stops its Session-store read before the route that owns
+	// the cancel is reset, so a pass nobody will read does not run to the end.
+	if m.route.statusCancel != nil {
+		m.route.statusCancel()
+	}
 	previous := m.route.previousComposer
 	hasPrevious := m.route.hasPreviousComposer
 	m.route = routeState{}

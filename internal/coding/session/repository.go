@@ -471,10 +471,15 @@ func (r *Repository) validateForkSource(source *Handle, atEntryID string) error 
 // writer locks.
 // MetadataListing is a header-level view of the store: every durable conversation
 // with the metadata a statistics surface reads, plus how many Sessions could not
-// be read at all.
+// be read at all and whether the pass stopped before reading the rest.
 type MetadataListing struct {
 	Sessions   []Metadata
 	Unreadable int
+	// Truncated reports that the pass stopped early because its context was
+	// cancelled. The listing still carries every Session it read, so a cancelled
+	// read is partial data rather than a failure. Unreadable counts Sessions that
+	// could not be read at all and keeps that meaning separate.
+	Truncated bool
 }
 
 // ListMetadata returns header-level metadata for every durable conversation
@@ -485,7 +490,8 @@ type MetadataListing struct {
 //
 // A Session whose file fails the security check is skipped and counted rather
 // than failing the whole listing, because one bad file must not blank a page that
-// only reduces history.
+// only reduces history. A cancelled context stops the pass and marks the listing
+// truncated; the Sessions read so far are still returned and sorted.
 func (r *Repository) ListMetadata(ctx context.Context) (MetadataListing, error) {
 	if err := r.validate(); err != nil {
 		return MetadataListing{}, err
@@ -502,6 +508,15 @@ func (r *Repository) ListMetadata(ctx context.Context) (MetadataListing, error) 
 
 	listing := MetadataListing{}
 	for _, value := range stored {
+		// A pass whose context is cancelled mid-way returns what it already read
+		// instead of failing, so a caller that no longer needs the listing can stop
+		// it without discarding a partial one. The pre-call check above still turns a
+		// read that never started into an error.
+		if err := ctx.Err(); err != nil {
+			listing.Truncated = true
+
+			break
+		}
 		meta, ok, err := projectStoredMetadata(value)
 		if err != nil || !ok {
 			continue

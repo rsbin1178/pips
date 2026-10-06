@@ -2,8 +2,10 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -304,4 +306,155 @@ func TestStatusPanelClicksSwitchTabsRangeAndSearch(t *testing.T) {
 	model.handleMouse(tea.MouseClickMsg{X: 4, Y: hits.search.bottom + 1, Button: tea.MouseLeft})
 	model.handleMouse(tea.MouseMotionMsg{X: 20, Y: hits.search.bottom + 1, Button: tea.MouseLeft})
 	assert.False(t, model.selection.visible, "the transcript gesture stays with the transcript")
+}
+
+// TestStatusPanelSaysWhenTheListingWasTruncated pins the truncation footer: the
+// pages that reduce the listing state that it stopped early and how many Sessions
+// it read, on its own line beside the unreadable count.
+func TestStatusPanelSaysWhenTheListingWasTruncated(t *testing.T) {
+	t.Parallel()
+
+	controller := newOverlayController(readyState())
+	controller.truncatedSessions = true
+	controller.unreadableSessions = 2
+	controller.sessions = []session.Metadata{{ID: "s-1", CreatedAt: time.Now()}}
+	model := readyModelWithController(t, controller, true)
+	model.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	model.executeCommand(commandDescriptor{name: commandStatus})
+	driveModelCommands(t, model, model.selectStatusTab(statusTabStats))
+
+	stats := statusPageText(model, statusTabStats)
+	assert.Contains(t, stats, "read cancelled · 1 session read")
+	assert.Contains(t, stats, "2 sessions could not be read and are not counted.")
+
+	models := statusPageText(model, statusTabModels)
+	assert.Contains(t, models, "read cancelled · 1 session read")
+}
+
+// TestStatusPanelKeepsTheTruncationFooterOffACompleteListing pins that a complete
+// listing renders no truncation line.
+func TestStatusPanelKeepsTheTruncationFooterOffACompleteListing(t *testing.T) {
+	t.Parallel()
+
+	controller := newOverlayController(readyState())
+	controller.sessions = []session.Metadata{{ID: "s-1", CreatedAt: time.Now()}}
+	model := readyModelWithController(t, controller, true)
+	model.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	model.executeCommand(commandDescriptor{name: commandStatus})
+	driveModelCommands(t, model, model.selectStatusTab(statusTabStats))
+
+	assert.NotContains(t, statusPageText(model, statusTabStats), "read cancelled")
+	assert.NotContains(t, statusPageText(model, statusTabModels), "read cancelled")
+}
+
+// statusReadsController records the contexts the panel's Session-store read uses
+// and can hold a read open until its context is cancelled, so a test can prove
+// the route owns the cancel.
+type statusReadsController struct {
+	*overlayController
+	mu      sync.Mutex
+	reads   []context.Context
+	block   bool
+	started chan struct{}
+}
+
+func (c *statusReadsController) ListAllSessions(ctx context.Context) (session.MetadataListing, error) {
+	c.mu.Lock()
+	c.reads = append(c.reads, ctx)
+	block := c.block
+	c.mu.Unlock()
+	if block {
+		select {
+		case c.started <- struct{}{}:
+		default:
+		}
+		<-ctx.Done()
+
+		return session.MetadataListing{}, ctx.Err()
+	}
+
+	return session.MetadataListing{
+		Sessions:   append([]session.Metadata(nil), c.sessions...),
+		Unreadable: c.unreadableSessions,
+		Truncated:  c.truncatedSessions,
+	}, nil
+}
+
+func (c *statusReadsController) readContexts() []context.Context {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return append([]context.Context(nil), c.reads...)
+}
+
+// runStatusRead executes the panel's command tree far enough to reach the read
+// itself, so a blocking controller can hold it open.
+func runStatusRead(command tea.Cmd) {
+	if command == nil {
+		return
+	}
+	message := command()
+	if batch, ok := message.(tea.BatchMsg); ok {
+		for _, inner := range batch {
+			if inner != nil {
+				inner()
+			}
+		}
+	}
+}
+
+// TestStatusPanelCloseCancelsTheStoreRead pins the cancel ownership: closing the
+// panel stops the in-flight Session-store read instead of letting it finish for a
+// result nobody reads.
+func TestStatusPanelCloseCancelsTheStoreRead(t *testing.T) {
+	t.Parallel()
+
+	controller := &statusReadsController{
+		overlayController: newOverlayController(readyState()),
+		block:             true,
+		started:           make(chan struct{}, 1),
+	}
+	model := readyModelWithController(t, controller, true)
+	model.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	model.executeCommand(commandDescriptor{name: commandStatus})
+
+	load := model.selectStatusTab(statusTabStats)
+	require.NotNil(t, load)
+	go runStatusRead(load)
+
+	require.Eventually(t, func() bool {
+		return len(controller.readContexts()) == 1
+	}, 30*time.Second, 10*time.Millisecond, "the panel starts the store read")
+	readCtx := controller.readContexts()[0]
+
+	model.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	require.Equal(t, routeNone, model.route.kind)
+	require.Eventually(t, func() bool {
+		return readCtx.Err() != nil
+	}, 30*time.Second, 10*time.Millisecond, "closing the panel cancels the read")
+}
+
+// TestStatusPanelReloadCancelsThePreviousRead pins the replacement rule: a reload
+// cancels the read it supersedes, so an old pass cannot keep running behind a new
+// one.
+func TestStatusPanelReloadCancelsThePreviousRead(t *testing.T) {
+	t.Parallel()
+
+	controller := &statusReadsController{
+		overlayController: newOverlayController(readyState()),
+		started:           make(chan struct{}, 1),
+	}
+	model := readyModelWithController(t, controller, true)
+	model.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	model.executeCommand(commandDescriptor{name: commandStatus})
+
+	driveModelCommands(t, model, model.selectStatusTab(statusTabStats))
+	require.Len(t, controller.readContexts(), 1)
+	previous := controller.readContexts()[0]
+	require.NoError(t, previous.Err(), "the first read is still live")
+
+	_, command := model.Update(tea.KeyPressMsg{Text: "R"})
+	require.ErrorIs(t, previous.Err(), context.Canceled, "a reload cancels the read it replaces")
+	driveModelCommands(t, model, command)
+	require.Len(t, controller.readContexts(), 2)
 }
