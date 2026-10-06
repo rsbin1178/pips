@@ -125,6 +125,14 @@ func (t *funcTool[Args]) Exec(ctx context.Context, call ToolCall) ([]ai.Part, er
 	var args Args
 
 	if !t.noArgs && len(call.Args) > 0 {
+		if original, undecodable := modelToolArgumentsUndecodable(call.Args); undecodable {
+			return nil, fmt.Errorf(
+				"invalid arguments: the arguments were not well-formed JSON; fix the syntax and retry"+
+					"\n\nYour original arguments:\n%s",
+				original,
+			)
+		}
+
 		if err := json.Unmarshal(call.Args, &args); err != nil {
 			return nil, fmt.Errorf("invalid arguments: %w", err)
 		}
