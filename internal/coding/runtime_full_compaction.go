@@ -122,7 +122,7 @@ func (r *Runtime) syntheticCompactionMessage(message ai.Message) bool {
 		return true
 	}
 
-	return r.isAgentNotificationMessage(message)
+	return r.isAgentNotificationMessage(message) || isSystemReminder(message)
 }
 
 func (r *Runtime) prepareFullCompaction(ctx context.Context) (CompactionPreview, *compaction.Plan, compaction.Policy) {
@@ -249,6 +249,10 @@ func (r *Runtime) executeFullCompaction(
 	after := r.contextTokens()
 	postHookErr := r.runPostCompact(ctx, mode, preview.EstimatedTokens, after, durationMS, emitter)
 
+	// A compacted conversation lost the plan context, so the next reminder is
+	// the full variant again.
+	r.resetPlanReminderCount()
+
 	startOutcome, startErr := r.runSessionStartSource(ctx, "compact", emitter)
 	if emitErr := emitter.emit("", "", EventCompactionCompleted, CompactionCompleted{
 		Mode: mode, TokensBefore: preview.EstimatedTokens, TokensAfter: after,
@@ -282,28 +286,25 @@ func (r *Runtime) taskSystemContext() string {
 	return "\nCurrent task state (runtime data, not permission to change scope):\n" + string(encoded)
 }
 
-func (r *Runtime) applyContextRequest(current *interaction) func(*ai.Request) {
-	apply := composePlanReminder(r.requestPolicy, r.planReminderInjector(current))
+// applyContextRequest installs the generation policy on every request. Turn
+// runtime context (Plan mode, Coding Goal, task state) is not injected here: it
+// is committed once per turn as a synthetic reminder message, so it cannot move
+// the request prefix ahead of the conversation.
+func (r *Runtime) applyContextRequest(*interaction) func(*ai.Request) {
+	// One stable key per session: the provider routes prompt-cache lookups by it,
+	// so a resumed conversation keeps reusing the cache it built. Adapters send
+	// it only where the endpoint documents prompt_cache_key.
+	cacheKey := ""
+	if r.handle != nil {
+		cacheKey = r.handle.Metadata().ID
+	}
 
 	return func(request *ai.Request) {
-		apply(request)
-
-		state := r.goalSystemContext() + r.taskSystemContext()
-		if state != "" {
-			prefix := 0
-			for prefix < len(request.Messages) {
-				if _, system := request.Messages[prefix].(ai.SystemMessage); !system {
-					break
-				}
-
-				prefix++
-			}
-
-			messages := make(ai.Messages, 0, len(request.Messages)+1)
-			messages = append(messages, request.Messages[:prefix]...)
-			messages = append(messages, ai.SystemText(state))
-			messages = append(messages, request.Messages[prefix:]...)
-			request.Messages = messages
+		if r.requestPolicy != nil {
+			r.requestPolicy(request)
+		}
+		if cacheKey != "" {
+			request.PromptCacheKey = cacheKey
 		}
 
 		r.recordContextRequest(request)

@@ -246,10 +246,11 @@ const (
 
 // InteractionCompleted closes one user interaction.
 type InteractionCompleted struct {
-	Outcome        InteractionOutcome `json:"outcome"`
-	Stop           agent.StopReason   `json:"stop,omitempty"`
-	Usage          TokenUsage         `json:"usage"`
-	DurationMillis int64              `json:"duration_ms"`
+	Outcome        InteractionOutcome    `json:"outcome"`
+	Stop           agent.StopReason      `json:"stop,omitempty"`
+	Usage          TokenUsage            `json:"usage"`
+	ModelUsage     map[string]TokenUsage `json:"model_usage,omitempty"`
+	DurationMillis int64                 `json:"duration_ms"`
 }
 
 // RunStarted opens one Agent invocation within an interaction.
@@ -701,221 +702,648 @@ func validateEnvelopeIDs(event Event) error {
 func validatePayload(eventType EventType, payload EventPayload) error {
 	switch value := payload.(type) {
 	case SessionOpened:
-		if eventType != EventSessionOpened || !validProvider(value.Provider) ||
-			!validIdentifierText(value.ModelID, maxEventIDBytes, true) ||
-			(value.Provider == "") != (value.ModelID == "") || value.ContextWindow < 0 ||
-			!validOperatingMode(value.Mode) {
-			return invalidPayload(eventType, payload)
+		if eventType != EventSessionOpened {
+			return payloadMismatch(eventType, payload)
+		}
+
+		if err := validateSessionOpenedPayload(value); err != nil {
+			return payloadInvalid(eventType, payload, err)
 		}
 	case SessionClosed:
-		if eventType != EventSessionClosed || !validSessionCloseReason(value.Reason) {
-			return invalidPayload(eventType, payload)
+		if eventType != EventSessionClosed {
+			return payloadMismatch(eventType, payload)
+		}
+
+		if err := validateSessionClosedPayload(value); err != nil {
+			return payloadInvalid(eventType, payload, err)
 		}
 	case SessionTreeChanged:
-		if eventType != EventSessionTreeChanged || validateSessionTree(value.Tree) != nil ||
-			len(value.Transcript) > maxEventItems || value.ContextTokens < 0 ||
-			tasklist.ValidateSnapshot(value.Tasks) != nil {
-			return invalidPayload(eventType, payload)
+		if eventType != EventSessionTreeChanged {
+			return payloadMismatch(eventType, payload)
 		}
-		for _, message := range value.Transcript {
-			if validateMessage(message) != nil {
-				return invalidPayload(eventType, payload)
-			}
+
+		if err := validateSessionTreeChangedPayload(value); err != nil {
+			return payloadInvalid(eventType, payload, err)
 		}
 	case SessionNavigated:
-		if eventType != EventSessionNavigated || validateOptionalID(value.FromID) != nil ||
-			validateOptionalID(value.ToID) != nil {
-			return invalidPayload(eventType, payload)
+		if eventType != EventSessionNavigated {
+			return payloadMismatch(eventType, payload)
+		}
+
+		if err := validateSessionNavigatedPayload(value); err != nil {
+			return payloadInvalid(eventType, payload, err)
 		}
 	case SessionForked:
-		if eventType != EventSessionForked ||
-			validateEventID("source session id", value.SourceSessionID, true) != nil ||
-			validateEventID("target session id", value.TargetSessionID, true) != nil ||
-			validateOptionalID(value.AtEntryID) != nil || value.SourceSessionID == value.TargetSessionID {
-			return invalidPayload(eventType, payload)
+		if eventType != EventSessionForked {
+			return payloadMismatch(eventType, payload)
+		}
+
+		if err := validateSessionForkedPayload(value); err != nil {
+			return payloadInvalid(eventType, payload, err)
 		}
 	case CompactionStarted:
-		if eventType != EventCompactionStarted || !validCompactionMode(value.Mode) ||
-			validateCompactionPreview(value.Preview, true) != nil {
-			return invalidPayload(eventType, payload)
+		if eventType != EventCompactionStarted {
+			return payloadMismatch(eventType, payload)
+		}
+
+		if err := validateCompactionStartedPayload(value); err != nil {
+			return payloadInvalid(eventType, payload, err)
 		}
 	case CompactionCompleted:
-		if eventType != EventCompactionCompleted || !validCompactionMode(value.Mode) ||
-			value.TokensBefore < 0 || value.TokensAfter < 0 ||
-			value.TokensAfter > value.TokensBefore || !validCompactionCompletionIdentity(value) ||
-			value.DurationMillis < 0 || value.DurationMillis > maxEventDurationMS {
-			return invalidPayload(eventType, payload)
+		if eventType != EventCompactionCompleted {
+			return payloadMismatch(eventType, payload)
+		}
+
+		if err := validateCompactionCompletedPayload(value); err != nil {
+			return payloadInvalid(eventType, payload, err)
 		}
 	case ModeChanged:
-		if eventType != EventModeChanged || !validOperatingMode(value.Mode) {
-			return invalidPayload(eventType, payload)
+		if eventType != EventModeChanged {
+			return payloadMismatch(eventType, payload)
+		}
+
+		if !validOperatingMode(value.Mode) {
+			return payloadInvalid(eventType, payload, errors.New("invalid operating mode"))
 		}
 	case InteractionStarted:
-		if eventType != EventInteractionStarted ||
-			!validOperatingMode(value.Mode) ||
-			(value.Source != InteractionSourceUser &&
-				value.Source != InteractionSourceAgentNotification) ||
-			len(value.NotificationIDs) > maxEventItems {
-			return invalidPayload(eventType, payload)
+		if eventType != EventInteractionStarted {
+			return payloadMismatch(eventType, payload)
 		}
-		if value.Source == InteractionSourceAgentNotification {
-			if validateEventID("root interaction id", value.RootInteractionID, true) != nil ||
-				len(value.NotificationIDs) == 0 {
-				return invalidPayload(eventType, payload)
-			}
-			for _, id := range value.NotificationIDs {
-				if validateEventID("notification id", id, true) != nil {
-					return invalidPayload(eventType, payload)
-				}
-			}
-		} else if value.RootInteractionID != "" || len(value.NotificationIDs) != 0 {
-			return invalidPayload(eventType, payload)
+
+		if err := validateInteractionStartedPayload(value); err != nil {
+			return payloadInvalid(eventType, payload, err)
 		}
 	case InteractionCompleted:
-		if eventType != EventInteractionCompleted || !validInteractionOutcome(value.Outcome) ||
-			!validInteractionStop(value.Outcome, value.Stop) ||
-			value.DurationMillis < 0 || value.DurationMillis > maxEventDurationMS ||
-			!validTokenUsage(value.Usage) {
-			return invalidPayload(eventType, payload)
+		if eventType != EventInteractionCompleted {
+			return payloadMismatch(eventType, payload)
+		}
+
+		if err := validateInteractionCompletedPayload(value); err != nil {
+			return payloadInvalid(eventType, payload, err)
 		}
 	case RunStarted:
-		if eventType != EventRunStarted ||
-			validateOptionalID(value.ParentRunID) != nil ||
-			!validIdentifierText(value.Agent, maxEventIDBytes, true) {
-			return invalidPayload(eventType, payload)
+		if eventType != EventRunStarted {
+			return payloadMismatch(eventType, payload)
+		}
+
+		if err := validateRunStartedPayload(value); err != nil {
+			return payloadInvalid(eventType, payload, err)
 		}
 	case RunCompleted:
-		if eventType != EventRunCompleted || !validStopReason(value.Stop) ||
-			value.Turns < 0 || !validTokenUsage(value.Usage) {
-			return invalidPayload(eventType, payload)
+		if eventType != EventRunCompleted {
+			return payloadMismatch(eventType, payload)
+		}
+
+		if err := validateRunCompletedPayload(value); err != nil {
+			return payloadInvalid(eventType, payload, err)
 		}
 	case TurnStarted:
-		if eventType != EventTurnStarted || value.Turn < 1 {
-			return invalidPayload(eventType, payload)
+		if eventType != EventTurnStarted {
+			return payloadMismatch(eventType, payload)
+		}
+
+		if value.Turn < 1 {
+			return payloadInvalid(eventType, payload, errors.New("turn must be positive"))
 		}
 	case RunInterrupted:
-		if eventType != EventRunInterrupted || value.Reason != "context_overflow" {
-			return invalidPayload(eventType, payload)
+		if eventType != EventRunInterrupted {
+			return payloadMismatch(eventType, payload)
+		}
+
+		if value.Reason != "context_overflow" {
+			return payloadInvalid(eventType, payload, errors.New("invalid interruption reason"))
 		}
 	case TurnCompleted:
-		if eventType != EventTurnCompleted || value.Turn < 1 || !validTokenUsage(value.Usage) ||
-			(value.ContextTokens != nil && *value.ContextTokens < 0) {
-			return invalidPayload(eventType, payload)
+		if eventType != EventTurnCompleted {
+			return payloadMismatch(eventType, payload)
+		}
+
+		if err := validateTurnCompletedPayload(value); err != nil {
+			return payloadInvalid(eventType, payload, err)
 		}
 	case MessageCommitted:
-		if eventType != EventMessageCommitted || validateMessage(value.Message) != nil {
-			return invalidPayload(eventType, payload)
+		if eventType != EventMessageCommitted {
+			return payloadMismatch(eventType, payload)
+		}
+
+		if err := validateMessage(value.Message); err != nil {
+			return payloadInvalid(eventType, payload, fmt.Errorf("invalid committed message: %w", err))
 		}
 	case MessageDelta:
-		if eventType != EventMessageDelta || validateMessageDelta(value) != nil {
-			return invalidPayload(eventType, payload)
+		if eventType != EventMessageDelta {
+			return payloadMismatch(eventType, payload)
+		}
+
+		if err := validateMessageDelta(value); err != nil {
+			return payloadInvalid(eventType, payload, err)
 		}
 	case MessageDiscarded:
-		if eventType != EventMessageDiscarded || value.Turn < 1 {
-			return invalidPayload(eventType, payload)
+		if eventType != EventMessageDiscarded {
+			return payloadMismatch(eventType, payload)
+		}
+
+		if value.Turn < 1 {
+			return payloadInvalid(eventType, payload, errors.New("turn must be positive"))
 		}
 	case ToolStarted:
-		if eventType != EventToolStarted || value.Turn < 1 || validateToolCall(value.Call) != nil {
-			return invalidPayload(eventType, payload)
+		if eventType != EventToolStarted {
+			return payloadMismatch(eventType, payload)
+		}
+
+		if value.Turn < 1 {
+			return payloadInvalid(eventType, payload, errors.New("turn must be positive"))
+		}
+
+		if err := validateToolCall(value.Call); err != nil {
+			return payloadInvalid(eventType, payload, err)
 		}
 	case ToolUpdated:
-		if eventType != EventToolUpdated || value.Turn < 1 || validateToolCall(value.Call) != nil ||
-			len(value.Update) > maxEventItems || validateParts(value.Update, 0) != nil {
-			return invalidPayload(eventType, payload)
+		if eventType != EventToolUpdated {
+			return payloadMismatch(eventType, payload)
+		}
+
+		if err := validateToolUpdatedPayload(value); err != nil {
+			return payloadInvalid(eventType, payload, err)
 		}
 	case ToolCompleted:
-		if eventType != EventToolCompleted || value.Turn < 1 || validateToolCall(value.Call) != nil ||
-			validateToolMessage(value.Result, value.Call.ID) != nil {
-			return invalidPayload(eventType, payload)
+		if eventType != EventToolCompleted {
+			return payloadMismatch(eventType, payload)
+		}
+
+		if err := validateToolCompletedPayload(value); err != nil {
+			return payloadInvalid(eventType, payload, err)
 		}
 	case SubagentLifecycle:
-		if validateSubagentLifecycle(eventType, value) != nil {
-			return invalidPayload(eventType, payload)
+		if err := validateSubagentLifecycle(eventType, value); err != nil {
+			return payloadInvalid(eventType, payload, err)
 		}
 	case GoalChanged:
-		state := value.State
-		if value.Redacted && state.ID != "" {
-			if state.Condition != "" || state.Reason != "" || len(state.Gaps) != 0 || len(state.References) != 0 {
-				return invalidPayload(eventType, payload)
-			}
-			state.Condition = "redacted"
+		if eventType != EventGoalChanged {
+			return payloadMismatch(eventType, payload)
 		}
-		if eventType != EventGoalChanged || validateGoalState(state) != nil {
-			return invalidPayload(eventType, payload)
+
+		if err := validateGoalChangedPayload(value); err != nil {
+			return payloadInvalid(eventType, payload, err)
 		}
 	case TeamLifecycle:
-		if eventType != EventTeamLifecycle || validateTeamLifecycle(value) != nil {
-			return invalidPayload(eventType, payload)
+		if eventType != EventTeamLifecycle {
+			return payloadMismatch(eventType, payload)
+		}
+
+		if err := validateTeamLifecycle(value); err != nil {
+			return payloadInvalid(eventType, payload, err)
 		}
 	case TeamControlLifecycle:
-		if eventType != EventTeamControlLifecycle || validateTeamControlLifecycle(value) != nil {
-			return invalidPayload(eventType, payload)
+		if eventType != EventTeamControlLifecycle {
+			return payloadMismatch(eventType, payload)
+		}
+
+		if err := validateTeamControlLifecycle(value); err != nil {
+			return payloadInvalid(eventType, payload, err)
 		}
 	case TeamIntegrationLifecycle:
-		if eventType != EventTeamIntegrationLifecycle || validateTeamIntegrationLifecycle(value) != nil {
-			return invalidPayload(eventType, payload)
+		if eventType != EventTeamIntegrationLifecycle {
+			return payloadMismatch(eventType, payload)
+		}
+
+		if err := validateTeamIntegrationLifecycle(value); err != nil {
+			return payloadInvalid(eventType, payload, err)
 		}
 	case ApprovalRequired:
-		if eventType != EventApprovalRequired || validateApprovalRequired(value) != nil {
-			return invalidPayload(eventType, payload)
+		if eventType != EventApprovalRequired {
+			return payloadMismatch(eventType, payload)
+		}
+
+		if err := validateApprovalRequired(value); err != nil {
+			return payloadInvalid(eventType, payload, err)
 		}
 	case ApprovalUnknown:
-		if eventType != EventApprovalUnknown || validateApprovalUnknown(value) != nil {
-			return invalidPayload(eventType, payload)
+		if eventType != EventApprovalUnknown {
+			return payloadMismatch(eventType, payload)
+		}
+
+		if err := validateApprovalUnknown(value); err != nil {
+			return payloadInvalid(eventType, payload, err)
 		}
 	case ApprovalResolved:
-		if eventType != EventApprovalResolved || validateEventID("request id", value.RequestID, true) != nil ||
-			!validApprovalChoice(value.Choice) {
-			return invalidPayload(eventType, payload)
+		if eventType != EventApprovalResolved {
+			return payloadMismatch(eventType, payload)
+		}
+
+		if err := validateApprovalResolvedPayload(value); err != nil {
+			return payloadInvalid(eventType, payload, err)
 		}
 	case QuestionRequired:
-		if eventType != EventQuestionRequired || validateQuestionRequired(value) != nil {
-			return invalidPayload(eventType, payload)
+		if eventType != EventQuestionRequired {
+			return payloadMismatch(eventType, payload)
+		}
+
+		if err := validateQuestionRequired(value); err != nil {
+			return payloadInvalid(eventType, payload, err)
 		}
 	case QuestionResolved:
-		if eventType != EventQuestionResolved || validateQuestionResolved(value) != nil {
-			return invalidPayload(eventType, payload)
+		if eventType != EventQuestionResolved {
+			return payloadMismatch(eventType, payload)
+		}
+
+		if err := validateQuestionResolved(value); err != nil {
+			return payloadInvalid(eventType, payload, err)
 		}
 	case QuestionRejected:
-		if eventType != EventQuestionRejected ||
-			validateEventID("question request id", value.RequestID, true) != nil ||
-			!validDigest(value.SchemaDigest) {
-			return invalidPayload(eventType, payload)
+		if eventType != EventQuestionRejected {
+			return payloadMismatch(eventType, payload)
+		}
+
+		if err := validateQuestionRejectedPayload(value); err != nil {
+			return payloadInvalid(eventType, payload, err)
 		}
 	case PlanReviewRequired:
-		if eventType != EventPlanReviewRequired ||
-			planreview.ValidateRequest(value.Request) != nil {
-			return invalidPayload(eventType, payload)
+		if eventType != EventPlanReviewRequired {
+			return payloadMismatch(eventType, payload)
+		}
+
+		if err := planreview.ValidateRequest(value.Request); err != nil {
+			return payloadInvalid(eventType, payload, fmt.Errorf("invalid plan review request: %w", err))
 		}
 	case PlanReviewResolved:
-		if eventType != EventPlanReviewResolved ||
-			!planreview.ValidDecision(value.Kind, value.Decision) ||
-			validateEventID("plan request id", value.RequestID, true) != nil {
-			return invalidPayload(eventType, payload)
+		if eventType != EventPlanReviewResolved {
+			return payloadMismatch(eventType, payload)
+		}
+
+		if err := validatePlanReviewResolvedPayload(value); err != nil {
+			return payloadInvalid(eventType, payload, err)
 		}
 	case PlanModeChanged:
-		if eventType != EventPlanModeChanged || !value.State.Valid() {
-			return invalidPayload(eventType, payload)
+		if eventType != EventPlanModeChanged {
+			return payloadMismatch(eventType, payload)
+		}
+
+		if !value.State.Valid() {
+			return payloadInvalid(eventType, payload, errors.New("invalid plan mode state"))
 		}
 	case WorkspaceChanged:
-		if eventType != EventWorkspaceChanged || validateWorkspaceChanged(value) != nil {
-			return invalidPayload(eventType, payload)
+		if eventType != EventWorkspaceChanged {
+			return payloadMismatch(eventType, payload)
+		}
+
+		if err := validateWorkspaceChanged(value); err != nil {
+			return payloadInvalid(eventType, payload, err)
 		}
 	case StatusChanged:
-		if eventType != EventStatusChanged || !validPhase(value.Phase) {
-			return invalidPayload(eventType, payload)
+		if eventType != EventStatusChanged {
+			return payloadMismatch(eventType, payload)
+		}
+
+		if !validPhase(value.Phase) {
+			return payloadInvalid(eventType, payload, errors.New("invalid runtime phase"))
 		}
 	case IntegrationDiagnostic:
-		if eventType != EventIntegrationDiagnostic || validateDiagnostic(value) != nil {
-			return invalidPayload(eventType, payload)
+		if eventType != EventIntegrationDiagnostic {
+			return payloadMismatch(eventType, payload)
+		}
+
+		if err := validateDiagnostic(value); err != nil {
+			return payloadInvalid(eventType, payload, err)
 		}
 	case RuntimeError:
-		if eventType != EventError || !validCode(value.Code) ||
-			!validBoundedText(value.Message, maxDiagnosticMessage, true) {
-			return invalidPayload(eventType, payload)
+		if eventType != EventError {
+			return payloadMismatch(eventType, payload)
+		}
+
+		if err := validateRuntimeErrorPayload(value); err != nil {
+			return payloadInvalid(eventType, payload, err)
 		}
 	default:
-		return invalidPayload(eventType, payload)
+		return payloadMismatch(eventType, payload)
+	}
+
+	return nil
+}
+
+func validateSessionOpenedPayload(value SessionOpened) error {
+	if !validProvider(value.Provider) {
+		return errors.New("invalid provider")
+	}
+
+	if !validIdentifierText(value.ModelID, maxEventIDBytes, true) {
+		return errors.New("invalid model id")
+	}
+
+	if (value.Provider == "") != (value.ModelID == "") {
+		return errors.New("provider and model id must both be set or both be empty")
+	}
+
+	if value.ContextWindow < 0 {
+		return errors.New("context window must not be negative")
+	}
+
+	if !validOperatingMode(value.Mode) {
+		return errors.New("invalid operating mode")
+	}
+
+	return nil
+}
+
+func validateSessionClosedPayload(value SessionClosed) error {
+	if !validSessionCloseReason(value.Reason) {
+		return errors.New("invalid session close reason")
+	}
+
+	return nil
+}
+
+func validateSessionTreeChangedPayload(value SessionTreeChanged) error {
+	if validateSessionTree(value.Tree) != nil {
+		return errors.New("invalid session tree")
+	}
+
+	if len(value.Transcript) > maxEventItems {
+		return errors.New("session transcript has too many messages")
+	}
+
+	if value.ContextTokens < 0 {
+		return errors.New("context tokens must not be negative")
+	}
+
+	if tasklist.ValidateSnapshot(value.Tasks) != nil {
+		return errors.New("invalid task snapshot")
+	}
+
+	for index, message := range value.Transcript {
+		if validateMessage(message) != nil {
+			return fmt.Errorf("invalid transcript message %d", index)
+		}
+	}
+
+	return nil
+}
+
+func validateSessionNavigatedPayload(value SessionNavigated) error {
+	if validateOptionalID(value.FromID) != nil {
+		return errors.New("invalid from id")
+	}
+
+	if validateOptionalID(value.ToID) != nil {
+		return errors.New("invalid to id")
+	}
+
+	return nil
+}
+
+func validateSessionForkedPayload(value SessionForked) error {
+	if validateEventID("source session id", value.SourceSessionID, true) != nil {
+		return errors.New("invalid source session id")
+	}
+
+	if validateEventID("target session id", value.TargetSessionID, true) != nil {
+		return errors.New("invalid target session id")
+	}
+
+	if validateOptionalID(value.AtEntryID) != nil {
+		return errors.New("invalid fork entry id")
+	}
+
+	if value.SourceSessionID == value.TargetSessionID {
+		return errors.New("fork source and target sessions are equal")
+	}
+
+	return nil
+}
+
+func validateCompactionStartedPayload(value CompactionStarted) error {
+	if !validCompactionMode(value.Mode) {
+		return errors.New("invalid compaction mode")
+	}
+
+	if validateCompactionPreview(value.Preview, true) != nil {
+		return errors.New("invalid compaction preview")
+	}
+
+	return nil
+}
+
+func validateCompactionCompletedPayload(value CompactionCompleted) error {
+	if !validCompactionMode(value.Mode) {
+		return errors.New("invalid compaction mode")
+	}
+
+	if value.TokensBefore < 0 || value.TokensAfter < 0 {
+		return errors.New("compaction tokens must not be negative")
+	}
+
+	if value.TokensAfter > value.TokensBefore {
+		return errors.New("compaction tokens grew")
+	}
+
+	if !validCompactionCompletionIdentity(value) {
+		return errors.New("invalid compaction identity")
+	}
+
+	if value.DurationMillis < 0 || value.DurationMillis > maxEventDurationMS {
+		return errors.New("invalid compaction duration")
+	}
+
+	return nil
+}
+
+func validateInteractionStartedPayload(value InteractionStarted) error {
+	if !validOperatingMode(value.Mode) {
+		return errors.New("invalid operating mode")
+	}
+
+	if value.Source != InteractionSourceUser && value.Source != InteractionSourceAgentNotification {
+		return errors.New("invalid interaction source")
+	}
+
+	if len(value.NotificationIDs) > maxEventItems {
+		return errors.New("too many notification ids")
+	}
+
+	if value.Source == InteractionSourceAgentNotification {
+		if validateEventID("root interaction id", value.RootInteractionID, true) != nil {
+			return errors.New("invalid root interaction id")
+		}
+
+		if len(value.NotificationIDs) == 0 {
+			return errors.New("agent notification requires at least one notification id")
+		}
+
+		for _, id := range value.NotificationIDs {
+			if validateEventID("notification id", id, true) != nil {
+				return errors.New("invalid notification id")
+			}
+		}
+
+		return nil
+	}
+
+	if value.RootInteractionID != "" || len(value.NotificationIDs) != 0 {
+		return errors.New("user interaction carries notification identity")
+	}
+
+	return nil
+}
+
+func validateInteractionCompletedPayload(value InteractionCompleted) error {
+	if !validInteractionOutcome(value.Outcome) {
+		return errors.New("invalid interaction outcome")
+	}
+
+	if !validInteractionStop(value.Outcome, value.Stop) {
+		return errors.New("invalid stop reason for outcome")
+	}
+
+	if value.DurationMillis < 0 || value.DurationMillis > maxEventDurationMS {
+		return errors.New("invalid interaction duration")
+	}
+
+	if !validTokenUsage(value.Usage) {
+		return errors.New("invalid token usage")
+	}
+
+	return nil
+}
+
+func validateRunStartedPayload(value RunStarted) error {
+	if validateOptionalID(value.ParentRunID) != nil {
+		return errors.New("invalid parent run id")
+	}
+
+	if !validIdentifierText(value.Agent, maxEventIDBytes, true) {
+		return errors.New("invalid agent name")
+	}
+
+	return nil
+}
+
+func validateRunCompletedPayload(value RunCompleted) error {
+	if !validStopReason(value.Stop) {
+		return errors.New("invalid stop reason")
+	}
+
+	if value.Turns < 0 {
+		return errors.New("turns must not be negative")
+	}
+
+	if !validTokenUsage(value.Usage) {
+		return errors.New("invalid token usage")
+	}
+
+	return nil
+}
+
+func validateTurnCompletedPayload(value TurnCompleted) error {
+	if value.Turn < 1 {
+		return errors.New("turn must be positive")
+	}
+
+	if !validTokenUsage(value.Usage) {
+		return errors.New("invalid token usage")
+	}
+
+	if value.ContextTokens != nil && *value.ContextTokens < 0 {
+		return errors.New("context tokens must not be negative")
+	}
+
+	return nil
+}
+
+func validateToolUpdatedPayload(value ToolUpdated) error {
+	if value.Turn < 1 {
+		return errors.New("turn must be positive")
+	}
+
+	if err := validateToolCall(value.Call); err != nil {
+		return err
+	}
+
+	if len(value.Update) > maxEventItems {
+		return errors.New("tool update has too many parts")
+	}
+
+	if err := validateParts(value.Update, 0); err != nil {
+		return fmt.Errorf("invalid tool update: %w", err)
+	}
+
+	return nil
+}
+
+func validateToolCompletedPayload(value ToolCompleted) error {
+	if value.Turn < 1 {
+		return errors.New("turn must be positive")
+	}
+
+	if err := validateToolCall(value.Call); err != nil {
+		return err
+	}
+
+	if err := validateToolMessage(value.Result, value.Call.ID); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func validateGoalChangedPayload(value GoalChanged) error {
+	state := value.State
+	if value.Redacted && state.ID != "" {
+		if state.Condition != "" || state.Reason != "" || len(state.Gaps) != 0 || len(state.References) != 0 {
+			return errors.New("redacted goal state carries content")
+		}
+
+		state.Condition = "redacted"
+	}
+
+	if validateGoalState(state) != nil {
+		return errors.New("invalid goal state")
+	}
+
+	return nil
+}
+
+func validateApprovalResolvedPayload(value ApprovalResolved) error {
+	if validateEventID("request id", value.RequestID, true) != nil {
+		return errors.New("invalid request id")
+	}
+
+	if !validApprovalChoice(value.Choice) {
+		return errors.New("invalid approval choice")
+	}
+
+	return nil
+}
+
+func validateQuestionRejectedPayload(value QuestionRejected) error {
+	if validateEventID("question request id", value.RequestID, true) != nil {
+		return errors.New("invalid question request id")
+	}
+
+	if !validDigest(value.SchemaDigest) {
+		return errors.New("invalid schema digest")
+	}
+
+	return nil
+}
+
+func validatePlanReviewResolvedPayload(value PlanReviewResolved) error {
+	if !planreview.ValidDecision(value.Kind, value.Decision) {
+		return errors.New("invalid plan review decision")
+	}
+
+	if validateEventID("plan request id", value.RequestID, true) != nil {
+		return errors.New("invalid plan request id")
+	}
+
+	return nil
+}
+
+func validateRuntimeErrorPayload(value RuntimeError) error {
+	if !validCode(value.Code) {
+		return errors.New("invalid error code")
+	}
+
+	if !validBoundedText(value.Message, maxDiagnosticMessage, true) {
+		return errors.New("invalid error message")
 	}
 
 	return nil
@@ -1657,11 +2085,10 @@ func validateToolCall(call ToolCall) error {
 		return errors.New("invalid tool call")
 	}
 
-	if len(call.Arguments) > 0 {
-		arguments := bytes.TrimSpace(call.Arguments)
-		if !json.Valid(arguments) || len(arguments) < 2 || arguments[0] != '{' {
-			return errors.New("tool arguments must be a JSON object")
-		}
+	// Arguments are model output: the tool layer turns anything it cannot decode
+	// into an error result, so the event contract only requires well-formed JSON.
+	if arguments := bytes.TrimSpace(call.Arguments); len(arguments) > 0 && !json.Valid(arguments) {
+		return errors.New("tool arguments must be valid JSON")
 	}
 
 	return nil
@@ -1809,8 +2236,12 @@ func validateDiagnostic(value IntegrationDiagnostic) error {
 	return nil
 }
 
-func invalidPayload(eventType EventType, payload EventPayload) error {
+func payloadMismatch(eventType EventType, payload EventPayload) error {
 	return invalidEvent("type %q does not accept payload %T", eventType, payload)
+}
+
+func payloadInvalid(eventType EventType, payload EventPayload, reason error) error {
+	return invalidEvent("type %q payload %T is invalid: %v", eventType, payload, reason)
 }
 
 func invalidEvent(format string, args ...any) error {

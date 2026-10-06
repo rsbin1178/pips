@@ -76,7 +76,14 @@ func runSessionLockHelper() {
 	}
 	defer func() { _ = lock.Close() }()
 	_, _ = os.Stdout.WriteString("locked\n")
-	select {}
+
+	// Park without a bare select{}: once the testing framework's goroutines
+	// finish, the runtime reports that as "all goroutines are asleep", aborts the
+	// child, and releases the lock before the parent's assertions run. A pending
+	// timer keeps the process alive without tripping that detector.
+	for {
+		time.Sleep(time.Hour)
+	}
 }
 
 func TestLockedErrorWithoutOwnerRemainsCompatible(t *testing.T) {

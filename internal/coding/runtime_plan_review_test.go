@@ -158,14 +158,12 @@ func TestRuntimePlanModeExitApprovalAppliesThePlanFile(t *testing.T) {
 	assert.True(t, exitRequest.HasContent)
 	assert.Equal(t, content, exitRequest.Content)
 
-	// Every request after an armed turn carries the plan reminder, including
-	// the iteration guidance for a user-initiated interaction.
+	// Agent-initiated entry is instructed by the enter tool result; the reminder
+	// is a turn-start injection, so it is not re-added mid-turn.
 	requests := model.Requests()
 	require.Len(t, requests, 3)
-	reminder := requestSystemText(requests[2])
-	assert.Contains(t, reminder, "Plan mode is active. Do not make any edits or writes to the system.")
-	assert.Contains(t, reminder, planPath)
-	assert.Contains(t, reminder, "Plan mode is still active.")
+	assert.Equal(t, planmode.EnterResult, requestToolResultText(requests[2], "enter-plan"))
+	assert.Empty(t, requestReminderText(requests[2]))
 
 	events = collectRuntimeEvents(t, runtime.ResolvePlanReview(t.Context(), planreview.Resolution{
 		RequestID: exitRequest.ID,
@@ -195,7 +193,7 @@ func TestRuntimePlanModeExitApprovalAppliesThePlanFile(t *testing.T) {
 	requests = model.Requests()
 	require.Len(t, requests, 4, "the approved turn must resume without a new interaction")
 	assert.Equal(t, planmode.ExitApprovedResult, lastToolResultText(t, model, "exit-plan"))
-	assert.NotContains(t, requestSystemText(requests[3]), "Plan mode is active.")
+	assert.NotContains(t, requestReminderText(requests[3]), "Plan mode is active.")
 }
 
 func TestRuntimePlanModeExitRevisionKeepsPlanModeActive(t *testing.T) {
@@ -457,6 +455,79 @@ func planReviewRequest(t *testing.T, runtime *Runtime) planreview.Request {
 	require.NotNil(t, request, "no plan review is displayed")
 
 	return *request
+}
+
+// TestRuntimePlanReminderRidesTheTurn pins the grok-build placement: the plan
+// reminder is a synthetic <system-reminder> user message committed at the start
+// of a turn, so the request prefix before it stays byte-identical from turn to
+// turn and a provider's prompt cache still covers the conversation.
+func TestRuntimePlanReminderRidesTheTurn(t *testing.T) {
+	t.Parallel()
+
+	const content = "# Plan\n\n1. Implement the gate"
+
+	model, runtime := openActivePlanModeRuntime(t, content)
+	setRuntimeResponses(model, runtimeTextResponse("still planning"))
+	collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("revise the plan")))
+
+	requests := model.Requests()
+	require.NotEmpty(t, requests)
+	last := requests[len(requests)-1]
+
+	reminder := requestReminderText(last)
+	assert.Contains(t, reminder, "Plan mode is active. Do not make any edits or writes to the system.")
+	assert.Contains(t, reminder, runtime.planStore.Path())
+	assert.Contains(t, reminder, "Plan mode is still active.")
+
+	// The turn's reminder leads its input, immediately before the user prompt.
+	index := -1
+	for position, message := range last.Messages {
+		if isSystemReminder(message) {
+			index = position
+		}
+	}
+	require.GreaterOrEqual(t, index, 0, "the request must carry the reminder")
+	require.Less(t, index, len(last.Messages)-1, "the reminder must precede the prompt")
+	_, prompt := last.Messages[index+1].(ai.UserMessage)
+	assert.True(t, prompt, "the reminder must precede the user prompt")
+
+	// It is a transcript record marked synthetic, so it persists with the
+	// conversation and stays hidden from the reader.
+	state := runtime.Snapshot()
+	transcriptIndex := -1
+	for position, message := range state.Transcript {
+		if isSystemReminder(message) {
+			transcriptIndex = position
+
+			break
+		}
+	}
+	require.GreaterOrEqual(t, transcriptIndex, 0, "the reminder must be committed")
+	assert.Contains(t, state.SyntheticMessages, transcriptIndex)
+	assert.Contains(t, transcriptText(state.Transcript), "Plan mode is active.")
+}
+
+// TestRuntimePlanReminderAlternatesFullAndSparse pins grok-build's reminder_count:
+// consecutive turns in plan mode alternate the full reminder with the one-line
+// variant, which bounds how much repeated plan context the conversation keeps.
+func TestRuntimePlanReminderAlternatesFullAndSparse(t *testing.T) {
+	t.Parallel()
+
+	const content = "# Plan\n\n1. Implement the gate"
+
+	model, runtime := openActivePlanModeRuntime(t, content)
+
+	setRuntimeResponses(model, runtimeTextResponse("still planning"))
+	collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("revise the plan")))
+	full := requestReminderText(model.Requests()[len(model.Requests())-1])
+	require.Contains(t, full, "Plan mode is active. Do not make any edits or writes to the system.")
+	require.Contains(t, full, planmode.ExitToolName)
+
+	setRuntimeResponses(model, runtimeTextResponse("still planning"))
+	collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("and again")))
+	sparse := requestReminderText(model.Requests()[len(model.Requests())-1])
+	assert.Contains(t, sparse, planmode.StillActiveReminder)
+	assert.NotContains(t, sparse, "Plan mode is active. Do not make any edits")
 }
 
 // openActivePlanModeRuntime drives the model-facing entry approval so the edit

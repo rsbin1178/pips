@@ -303,3 +303,30 @@ func countOpenFileDescriptors(t *testing.T) int {
 
 	return len(entries)
 }
+
+func TestProcessGroupSignalUnavailableClassifiesGoneGroups(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "no failure", err: nil, want: false},
+		{name: "group already gone", err: syscall.ESRCH, want: true},
+		{
+			name: "pid recycled into another owner",
+			err:  &os.SyscallError{Syscall: "kill", Err: syscall.EPERM},
+			want: true,
+		},
+		{name: "other failure", err: syscall.EINVAL, want: false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, test.want, processGroupSignalUnavailable(test.err))
+		})
+	}
+}

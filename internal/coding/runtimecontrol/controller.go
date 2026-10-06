@@ -776,6 +776,33 @@ func (c *Controller) ListSessions(ctx context.Context) ([]session.Metadata, erro
 	return filtered, nil
 }
 
+// ListAllSessions returns header-level metadata for every durable Session in the
+// user store, across Workspaces. It reads one bounded entry per Session, takes no
+// writer lock, and opens no Runtime, so a statistics surface can reduce local
+// history without touching a live Session and without paying for the picker's
+// full prefix read.
+func (c *Controller) ListAllSessions(ctx context.Context) (session.MetadataListing, error) {
+	if c == nil {
+		return session.MetadataListing{}, ErrClosed
+	}
+
+	c.mu.Lock()
+	if c.closed || c.closing {
+		c.mu.Unlock()
+
+		return session.MetadataListing{}, ErrClosed
+	}
+	directory := c.base.Paths.SessionsDir()
+	c.mu.Unlock()
+
+	repository, err := session.NewRepository(directory)
+	if err != nil {
+		return session.MetadataListing{}, err
+	}
+
+	return repository.ListMetadata(ctx)
+}
+
 // ListSessionSummaries returns current-Workspace conversations with bounded
 // Team recovery hints. It never opens a Runtime, child Session, Team lease,
 // scheduler, model, or Tool.

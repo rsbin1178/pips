@@ -54,7 +54,7 @@ func (s *service) read(ctx context.Context, args readArgs) (string, error) {
 		return "", failure(readName, fmt.Errorf("coding tools: sample %q: %w", name, sampleErr))
 	}
 
-	if bytes.IndexByte(sample[:sampled], 0) >= 0 {
+	if bytes.IndexByte(sample[:sampled], 0) >= 0 || controlHeavySample(sample[:sampled]) {
 		return "", failure(readName, fmt.Errorf("%w: %q", errBinaryFile, name))
 	}
 

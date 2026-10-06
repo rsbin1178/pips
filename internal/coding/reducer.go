@@ -55,15 +55,16 @@ func cloneIndexForWrite(index map[string]int) map[string]int {
 
 // InteractionState is the current or most recently completed user interaction.
 type InteractionState struct {
-	ID                string             `json:"id,omitempty"`
-	Active            bool               `json:"active"`
-	Resumed           bool               `json:"resumed"`
-	Mode              OperatingMode      `json:"mode,omitempty"`
-	Source            InteractionSource  `json:"source,omitempty"`
-	RootInteractionID string             `json:"root_interaction_id,omitempty"`
-	Outcome           InteractionOutcome `json:"outcome,omitempty"`
-	Stop              agent.StopReason   `json:"stop,omitempty"`
-	Usage             TokenUsage         `json:"usage"`
+	ID                string                `json:"id,omitempty"`
+	Active            bool                  `json:"active"`
+	Resumed           bool                  `json:"resumed"`
+	Mode              OperatingMode         `json:"mode,omitempty"`
+	Source            InteractionSource     `json:"source,omitempty"`
+	RootInteractionID string                `json:"root_interaction_id,omitempty"`
+	Outcome           InteractionOutcome    `json:"outcome,omitempty"`
+	Stop              agent.StopReason      `json:"stop,omitempty"`
+	Usage             TokenUsage            `json:"usage"`
+	ModelUsage        map[string]TokenUsage `json:"model_usage,omitempty"`
 }
 
 // RunState is one Agent invocation projected for frontend rendering.
@@ -267,6 +268,7 @@ type State struct {
 func (state State) Clone() State {
 	cloned := state
 	cloned.Goal = state.Goal.Clone()
+	cloned.Interaction.ModelUsage = maps.Clone(state.Interaction.ModelUsage)
 
 	cloned.Transcript = make(ai.Messages, len(state.Transcript))
 	for index, message := range state.Transcript {
@@ -359,6 +361,10 @@ func (state State) Durable() DurableState {
 	// Operating mode is process-local. Keep the interaction shape durable, but
 	// never let a reopened session infer its next capability policy from history.
 	cloned.Interaction.Mode = ""
+	// The per-model split is live accounting. Its durable form is the Session's
+	// usage projection beside the store; the journal records the interaction
+	// total only, so a reopened session must not claim a split it cannot rebuild.
+	cloned.Interaction.ModelUsage = nil
 
 	return DurableState{
 		SessionID:         cloned.SessionID,
@@ -600,6 +606,7 @@ func (state *State) apply(event Event) error {
 		state.Interaction.Outcome = payload.Outcome
 		state.Interaction.Stop = payload.Stop
 		state.Interaction.Usage = payload.Usage
+		state.Interaction.ModelUsage = maps.Clone(payload.ModelUsage)
 		state.Draft = nil
 		state.Approval = ApprovalState{}
 		state.Question = QuestionState{}

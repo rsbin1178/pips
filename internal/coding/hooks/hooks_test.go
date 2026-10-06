@@ -201,10 +201,17 @@ func TestRunnerProtocol(t *testing.T) {
 	t.Parallel()
 
 	workspaceRoot := t.TempDir()
+
+	// The reviewed shell reports the physical working directory it was given, so
+	// the hook compares $PWD against the resolved path; macOS temporary
+	// directories are symlinked.
+	resolvedRoot, err := filepath.EvalSymlinks(workspaceRoot)
+	require.NoError(t, err)
+
 	runner := Runner{
 		Workspace: workspaceRoot,
 		Environment: []string{
-			"PIPS_HOOK_CWD=" + workspaceRoot,
+			"PIPS_HOOK_CWD=" + resolvedRoot,
 			"PIPS_HOOK_VALUE=present",
 		},
 		Limits: DefaultLimits(),

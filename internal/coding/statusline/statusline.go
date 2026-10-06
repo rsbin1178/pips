@@ -16,6 +16,7 @@ const (
 	Session      Item = "session"
 	Model        Item = "model"
 	ContextUsed  Item = "context_used"
+	CacheHitRate Item = "cache_hit_rate"
 	TaskProgress Item = "task_progress"
 	Phase        Item = "phase"
 	Mode         Item = "mode"
@@ -27,6 +28,7 @@ var inventory = []Item{
 	Session,
 	Model,
 	ContextUsed,
+	CacheHitRate,
 	TaskProgress,
 	Phase,
 	Mode,
@@ -68,9 +70,11 @@ func Description(item Item) (string, error) {
 	case Session:
 		return "active session identifier", nil
 	case Model:
-		return "provider and model", nil
+		return "model display name", nil
 	case ContextUsed:
 		return "percentage of the model context window used", nil
+	case CacheHitRate:
+		return "share of the last turn's prompt served from the provider cache", nil
 	case TaskProgress:
 		return "completed update_plan tasks", nil
 	case Phase:

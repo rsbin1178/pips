@@ -4,12 +4,9 @@ package coding
 import (
 	"context"
 	"encoding/json"
-	"slices"
 	"strings"
 
 	"github.com/rsbin1178/pips/agent"
-	"github.com/rsbin1178/pips/ai"
-	"github.com/rsbin1178/pips/internal/coding/generation"
 	"github.com/rsbin1178/pips/internal/coding/planmode"
 	"github.com/rsbin1178/pips/internal/coding/planreview"
 	"github.com/rsbin1178/pips/internal/coding/question"
@@ -55,35 +52,7 @@ func (r *Runtime) planEditGate() func(context.Context, agent.ToolCallInfo) agent
 	}
 }
 
-// planReminderInjector prepends the plan-mode reminder to every model request
-// while plan mode is armed. Unlike a prepare-turn update, a request hook also
-// reaches the first request of a run.
-func (r *Runtime) planReminderInjector(current *interaction) func(*ai.Request) {
-	return func(request *ai.Request) {
-		reminder := r.planReminderText(current)
-		if reminder == "" {
-			return
-		}
-
-		prefix := 0
-		for prefix < len(request.Messages) {
-			if _, ok := request.Messages[prefix].(ai.SystemMessage); !ok {
-				break
-			}
-
-			prefix++
-		}
-
-		suffix := reminder
-		if prefix > 0 {
-			suffix = "\n" + suffix
-		}
-
-		request.Messages = slices.Insert(request.Messages, prefix, ai.Message(ai.SystemText(suffix)))
-	}
-}
-
-// planReminderText renders the reminder for the next request, consuming the
+// planReminderText renders the plan reminder for the turn, consuming the
 // one-shot transition notices.
 func (r *Runtime) planReminderText(current *interaction) string {
 	if !r.PlanState().GateArmed() {
@@ -103,9 +72,16 @@ func (r *Runtime) planReminderText(current *interaction) string {
 		Edit: tools.ApplyPatchName, Ask: question.ToolName, Exit: planmode.ExitToolName,
 	}
 
+	full := r.takeFullPlanReminder()
+
 	if current != nil && current.source != InteractionSourceUser {
 		// Runtime-generated continuations already carry the plan context;
 		// they only need the short boundary reminder.
+		return planmode.StillActiveReminder
+	}
+	if !full {
+		// Alternating the full reminder with the one-line variant bounds how much
+		// repeated plan context the conversation accumulates.
 		return planmode.StillActiveReminder
 	}
 
@@ -123,20 +99,26 @@ func (r *Runtime) planReminderText(current *interaction) string {
 	return reminder + "\n\n" + planmode.IterationGuidance(question.ToolName)
 }
 
-// composePlanReminder chains the plan reminder after the application request
-// policy so both hooks observe every request.
-func composePlanReminder(
-	policy generation.Policy,
-	inject func(*ai.Request),
-) func(*ai.Request) {
-	return func(request *ai.Request) {
-		if policy != nil {
-			policy(request)
-		}
-		if inject != nil {
-			inject(request)
-		}
-	}
+// takeFullPlanReminder reports whether this turn's plan reminder is the full
+// variant and advances the alternation. Even counts are full, odd counts are the
+// sparse variant, matching grok-build's reminder_count.
+func (r *Runtime) takeFullPlanReminder() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	full := r.planReminderCount%2 == 0
+	r.planReminderCount++
+
+	return full
+}
+
+// resetPlanReminderCount makes the next reminder the full variant. Entry and
+// compaction both reset it so the model regains the plan path and tool hints.
+func (r *Runtime) resetPlanReminderCount() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.planReminderCount = 0
 }
 
 // applyPlanOutcome applies the plan-mode state transition of one resolved
