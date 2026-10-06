@@ -165,6 +165,7 @@ func (m *Model) filteredSkillsRouteValues() []coding.SkillSummary {
 }
 
 func (m *Model) skillsRouteView() tea.View {
+	m.route.listHits = routeListHit{}
 	content, searchX, searchY := m.skillsRouteContent()
 
 	return m.searchableRouteView(content, searchX, searchY)
@@ -202,9 +203,13 @@ func (m *Model) skillsRouteContent() (string, int, int) {
 	if !listPadding {
 		paddingHeight = 0
 	}
-	fixedHeight := lipgloss.Height(lipgloss.JoinVertical(lipgloss.Left, prefix...)) + paddingHeight
-	available := max(1, height-fixedHeight)
-	list := m.skillsRouteList(available)
+	prefixHeight := lipgloss.Height(lipgloss.JoinVertical(lipgloss.Left, prefix...))
+	available := max(1, height-(prefixHeight+paddingHeight))
+	listTop := prefixHeight
+	if listPadding {
+		listTop++
+	}
+	list := m.skillsRouteList(available, listTop)
 	parts := make([]string, 0, len(prefix)+4)
 	parts = append(parts, prefix...)
 	if listPadding {
@@ -217,17 +222,19 @@ func (m *Model) skillsRouteContent() (string, int, int) {
 	return truncateHeight(content, height), searchX, searchY
 }
 
-func (m *Model) skillsRouteList(maximum int) string {
+func (m *Model) skillsRouteList(maximum, frameTop int) string {
 	if m.route.loading {
 		return m.styleSessionPickerNotice(m.activityNotice("Loading Skills…"), false)
 	}
 	if m.route.err != nil && len(m.route.skills) == 0 {
 		return m.styleSessionPickerNotice("Error: "+safeError(m.route.err), true)
 	}
+	noticeLines := 0
 	errorNotice := ""
 	if m.route.err != nil {
 		errorNotice = m.styleSessionPickerNotice("Error: "+safeError(m.route.err), true)
-		maximum = max(1, maximum-lipgloss.Height(errorNotice)-1)
+		noticeLines = lipgloss.Height(errorNotice) + 1
+		maximum = max(1, maximum-noticeLines)
 	}
 
 	values := m.filteredSkillsRouteValues()
@@ -246,10 +253,15 @@ func (m *Model) skillsRouteList(maximum int) string {
 	heights := make([]int, len(values))
 	for index, skill := range values {
 		rows[index] = m.renderSkillsRouteRow(skill, index == m.route.cursor)
-		heights[index] = lipgloss.Height(rows[index]) + 1
+		heights[index] = lipgloss.Height(rows[index])
 	}
-	start, end := selectionWindowByHeight(heights, m.route.cursor, maximum)
+	start, end := selectionWindowByHeight(selectionHeights(heights, 1), m.route.cursor, maximum)
 	visible := truncateHeight(strings.Join(rows[start:end], "\n\n"), maximum)
+	m.recordRouteListHit(routeListHit{
+		painted: true, frameTop: frameTop + noticeLines, windowStart: 0,
+		windowRows: lipgloss.Height(visible), firstLine: 0, first: start,
+		heights: heights, gap: 1,
+	})
 	if errorNotice != "" {
 		visible = errorNotice + "\n" + visible
 	}

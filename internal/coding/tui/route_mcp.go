@@ -170,6 +170,7 @@ func (m *Model) filteredMCPRouteValues() []codingmcp.ServerStatus {
 }
 
 func (m *Model) mcpRouteView() tea.View {
+	m.route.listHits = routeListHit{}
 	content, searchX, searchY := m.mcpRouteContent()
 
 	return m.searchableRouteView(content, searchX, searchY)
@@ -216,9 +217,13 @@ func (m *Model) mcpRouteContent() (string, int, int) {
 	if !listPadding {
 		paddingHeight = 1
 	}
-	fixedHeight := lipgloss.Height(lipgloss.JoinVertical(lipgloss.Left, prefix...)) + paddingHeight
-	available := max(1, height-fixedHeight)
-	list := m.mcpRouteList(available)
+	prefixHeight := lipgloss.Height(lipgloss.JoinVertical(lipgloss.Left, prefix...))
+	available := max(1, height-(prefixHeight+paddingHeight))
+	listTop := prefixHeight
+	if listPadding {
+		listTop++
+	}
+	list := m.mcpRouteList(available, listTop)
 	parts := make([]string, 0, len(prefix)+4)
 	parts = append(parts, prefix...)
 	if listPadding {
@@ -256,17 +261,19 @@ func mcpRouteSummary(snapshot coding.MCPSnapshot) string {
 	return strings.Join(parts, " · ")
 }
 
-func (m *Model) mcpRouteList(maximum int) string {
+func (m *Model) mcpRouteList(maximum, frameTop int) string {
 	if m.route.loading {
 		return m.styleSessionPickerNotice(m.activityNotice("Loading MCP servers…"), false)
 	}
 	if m.route.err != nil && len(m.route.mcp.Servers) == 0 {
 		return m.styleSessionPickerNotice("Error: "+safeError(m.route.err), true)
 	}
+	noticeLines := 0
 	errorNotice := ""
 	if m.route.err != nil {
 		errorNotice = m.styleSessionPickerNotice("Error: "+safeError(m.route.err), true)
-		maximum = max(1, maximum-lipgloss.Height(errorNotice)-1)
+		noticeLines = lipgloss.Height(errorNotice) + 1
+		maximum = max(1, maximum-noticeLines)
 	}
 
 	values := m.filteredMCPRouteValues()
@@ -290,10 +297,15 @@ func (m *Model) mcpRouteList(maximum int) string {
 	heights := make([]int, len(values))
 	for index, server := range values {
 		rows[index] = m.renderMCPRouteRow(server, index == cursor)
-		heights[index] = lipgloss.Height(rows[index]) + 1
+		heights[index] = lipgloss.Height(rows[index])
 	}
-	start, end := selectionWindowByHeight(heights, cursor, maximum)
+	start, end := selectionWindowByHeight(selectionHeights(heights, 1), cursor, maximum)
 	visible := truncateHeight(strings.Join(rows[start:end], "\n\n"), maximum)
+	m.recordRouteListHit(routeListHit{
+		painted: true, frameTop: frameTop + noticeLines, windowStart: 0,
+		windowRows: lipgloss.Height(visible), firstLine: 0, first: start,
+		heights: heights, gap: 1,
+	})
 	if errorNotice != "" {
 		visible = errorNotice + "\n" + visible
 	}

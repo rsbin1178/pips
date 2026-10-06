@@ -88,6 +88,10 @@ type routeState struct {
 	// closes or starts a replacement read, so a pass nobody reads stops early.
 	statusCancel context.CancelFunc
 	statusHits   statusPanelHits
+	// listHits and tabHits describe the rows and tab row the last painted frame
+	// afforded, so a click selects against what the reader saw.
+	listHits routeListHit
+	tabHits  routeTabHits
 }
 
 // routeOpenRequest is a typed route transition intent. Keeping the payload as

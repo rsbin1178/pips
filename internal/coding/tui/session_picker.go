@@ -188,6 +188,7 @@ func (m *Model) filteredSessionPickerValues() []session.Metadata {
 }
 
 func (m *Model) sessionPickerView() tea.View {
+	m.route.listHits = routeListHit{}
 	content, searchX, searchY := m.sessionPickerContent()
 
 	return m.searchableRouteView(content, searchX, searchY)
@@ -223,9 +224,13 @@ func (m *Model) sessionPickerContent() (string, int, int) {
 	if !listPadding {
 		paddingHeight = 0
 	}
-	fixedHeight := lipgloss.Height(lipgloss.JoinVertical(lipgloss.Left, prefix...)) + paddingHeight
-	available := max(1, height-fixedHeight)
-	list := m.sessionPickerList(available)
+	prefixHeight := lipgloss.Height(lipgloss.JoinVertical(lipgloss.Left, prefix...))
+	available := max(1, height-(prefixHeight+paddingHeight))
+	listTop := prefixHeight
+	if listPadding {
+		listTop++
+	}
+	list := m.sessionPickerList(available, listTop)
 	parts := make([]string, 0, len(prefix)+4)
 	parts = append(parts, prefix...)
 	if listPadding {
@@ -258,7 +263,9 @@ func (m *Model) sessionPickerSeparator(width int) string {
 	return lipgloss.NewStyle().Foreground(paletteFor(m.theme).session).Render(value)
 }
 
-func (m *Model) sessionPickerList(maximum int) string {
+// sessionPickerList renders the visible rows and records the row window the frame
+// paints, so a click resolves against the same heights the renderer used.
+func (m *Model) sessionPickerList(maximum, frameTop int) string {
 	if m.route.controlling {
 		return m.styleSessionPickerNotice(m.activityNotice("Resuming session…"), false)
 	}
@@ -278,12 +285,28 @@ func (m *Model) sessionPickerList(maximum int) string {
 	heights := make([]int, len(values))
 	for index, value := range values {
 		rows[index] = m.renderSessionPickerRow(value, index == m.route.cursor)
-		heights[index] = lipgloss.Height(rows[index]) + 1
+		heights[index] = lipgloss.Height(rows[index])
 	}
-	start, end := selectionWindowByHeight(heights, m.route.cursor, maximum)
-	visible := strings.Join(rows[start:end], "\n\n")
+	start, end := selectionWindowByHeight(selectionHeights(heights, 1), m.route.cursor, maximum)
+	visible := truncateHeight(strings.Join(rows[start:end], "\n\n"), maximum)
+	m.recordRouteListHit(routeListHit{
+		painted: true, frameTop: frameTop, windowStart: 0,
+		windowRows: lipgloss.Height(visible), firstLine: 0, first: start,
+		heights: heights, gap: 1,
+	})
 
-	return truncateHeight(visible, maximum)
+	return visible
+}
+
+// selectionHeights pads each item with the blank separator the list joins rows
+// with, so the selection window budgets the same lines the renderer paints.
+func selectionHeights(heights []int, gap int) []int {
+	padded := make([]int, len(heights))
+	for index, height := range heights {
+		padded[index] = max(1, height) + gap
+	}
+
+	return padded
 }
 
 func (m *Model) renderSessionPickerRow(value session.Metadata, selected bool) string {
