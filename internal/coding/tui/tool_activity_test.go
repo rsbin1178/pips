@@ -790,6 +790,8 @@ func codingToolResultFor(callID, name, body string) ai.ToolMessage {
 // TestSanitizeToolTextLeavesCleanProseUntouched pins the allocation-free path a
 // streaming reasoning body takes: plain prose is returned as the caller's own
 // string, so a frame does not copy the whole thought again.
+//
+//nolint:paralleltest // AllocsPerRun measures the whole process and refuses a parallel test.
 func TestSanitizeToolTextLeavesCleanProseUntouched(t *testing.T) {
 	// AllocsPerRun measures the whole process, so this test cannot run in parallel.
 	// A streaming body ends mid-thought, so it carries no trailing whitespace.

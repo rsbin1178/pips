@@ -54,6 +54,8 @@ type liveFrozen struct {
 // markdownFrozenRows returns the rendered rows of content[:prefixEnd], extending
 // the slot's frozen prefix by the newly frozen region rather than rendering the
 // whole prefix again.
+//
+//nolint:gocyclo // The freeze key, the rewind check and the extension are one ordered slot update.
 func (r *markdownRenderer) markdownFrozenRows(
 	slot, content string,
 	prefixEnd int,
@@ -135,7 +137,7 @@ func markdownRowsAfter(value string, count int) (string, bool) {
 	}
 
 	offset := 0
-	for index := 0; index < count; index++ {
+	for range count {
 		at := strings.IndexByte(value[offset:], '\n')
 		if at < 0 {
 			return "", false
@@ -150,6 +152,8 @@ func markdownRowsAfter(value string, count int) (string, bool) {
 // liveMarkdownBoundary reports where a frozen prefix may end and the text of the
 // block immediately before it. ok is false when the body holds no boundary that
 // may be frozen.
+//
+//nolint:gocyclo // One pass keeps the fence, bracket and pending-boundary state adjacent.
 func liveMarkdownBoundary(content string) (prefixEnd int, block string, ok bool) {
 	fence := ""
 	start, end := -1, -1
@@ -336,7 +340,7 @@ func markdownBlankLine(line string) bool {
 // markdownIndented reports whether a line is indented far enough to be code.
 func markdownIndented(line string) bool {
 	columns := 0
-	for index := 0; index < len(line); index++ {
+	for index := range len(line) {
 		switch line[index] {
 		case ' ':
 			columns++

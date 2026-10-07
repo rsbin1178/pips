@@ -23,6 +23,7 @@ func settledThinkingBlock(body string) timelineBlock {
 // liveThinkingCorpus holds the reasoning shapes a streamed thought produces.
 func liveThinkingCorpus() map[string]string {
 	plain := strings.Repeat("Weighing the options for the next step, sentence after sentence. ", 10)
+
 	return map[string]string{
 		"single line":    "One unbroken thought with no line break at all",
 		"paragraphs":     "First reasoning paragraph.\n\nSecond reasoning paragraph.\n\nThird one.\n",
@@ -54,6 +55,7 @@ func TestLiveThinkingMatchesSettledSection(t *testing.T) {
 				for _, noColor := range []bool{false, true} {
 					// One renderer across the stream, as the frame loop uses it.
 					renderer := newMarkdownRenderer(128)
+
 					for size := 0; size <= len(body); size++ {
 						content := body[:size]
 						got := renderThinkingBlock(liveThinkingBlock(content), renderer, width, themeDark, noColor)
@@ -82,6 +84,7 @@ func TestLiveThinkingMatchesSettledSectionAcrossFrames(t *testing.T) {
 	}, "\n\n")
 
 	renderer := newMarkdownRenderer(128)
+
 	for frame := 1; frame <= len(body); frame++ {
 		content := body[:frame]
 		got := renderThinkingBlock(liveThinkingBlock(content), renderer, 60, themeDark, false)
@@ -105,8 +108,8 @@ func TestLiveThinkingFreezesWholeLines(t *testing.T) {
 	assert.True(t, strings.HasSuffix(frozen.source, "\n"), "a frozen prefix ends on a line break")
 	assert.Greater(t, len(frozen.source), len(body)/2, "the frozen prefix must cover most of the body")
 	assert.NotEmpty(t, frozen.rows)
-	assert.Equal(t, len(frozen.rows), len(frozen.styled))
-	assert.Equal(t, len(frozen.rows), len(frozen.widths))
+	assert.Len(t, frozen.rows, len(frozen.styled))
+	assert.Len(t, frozen.rows, len(frozen.widths))
 }
 
 // TestLiveThinkingFrameExtendsTheFrozenRows pins the bound: a frame wraps the
@@ -120,9 +123,12 @@ func TestLiveThinkingFrameExtendsTheFrozenRows(t *testing.T) {
 	renderer := newMarkdownRenderer(128)
 
 	var body strings.Builder
+
 	wrapped := 0
+
 	for index := range frames {
 		fmt.Fprintf(&body, "Reasoning paragraph %d that keeps streaming words.\n\n", index)
+
 		renderer.thinkingWrapped = 0
 		renderThinkingBlock(liveThinkingBlock(body.String()), renderer, 80, themeDark, false)
 		wrapped += renderer.thinkingWrapped
@@ -150,6 +156,7 @@ func TestLiveThinkingDropsFrozenRowsWhenTheBodyIsReplaced(t *testing.T) {
 			t.Parallel()
 
 			renderer := newMarkdownRenderer(128)
+
 			for index, content := range sequence {
 				width := 60
 				if name == "geometry" && index > 0 {
@@ -181,6 +188,7 @@ func FuzzLiveThinkingMatchesSettledSection(f *testing.F) {
 	for _, seed := range liveThinkingCorpus() {
 		f.Add(seed)
 	}
+
 	f.Add("a\n\nb")
 	f.Add("x")
 	f.Add("\n\n\n")
