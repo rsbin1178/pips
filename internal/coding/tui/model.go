@@ -2113,7 +2113,7 @@ func (m *Model) finishTranscriptFrame(forceBottom bool) {
 	// Matches are row indexes, so a reflow, a prepended page or new output has to
 	// re-resolve them; the reader's match is kept by identity. The store
 	// fingerprints everything a scan reads, so an unchanged frame is skipped.
-	if m.search.active && m.search.scanned != m.transcript.revision {
+	if m.search.active && m.search.scanned != m.transcript.fingerprint() {
 		m.refreshSearch()
 	}
 }

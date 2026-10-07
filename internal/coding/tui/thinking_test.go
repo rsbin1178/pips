@@ -82,7 +82,7 @@ func TestThinkingBlockRendersTheWholeBody(t *testing.T) {
 	body := "step one\n\nstep two\n\nstep three\n\nstep four\n\n" + tail
 	block := timelineBlock{kind: blockThinking, id: thinkingBlockID(2, 0), body: body}
 
-	got := renderThinkingBlock(block, 60, themeDark, true)
+	got := renderThinkingBlock(block, nil, 60, themeDark, true)
 
 	rows := strings.Split(got, "\n")
 	require.NotEmpty(t, rows)
@@ -103,7 +103,7 @@ func TestThinkingBlockUsesTheThemeMutedColor(t *testing.T) {
 	block := timelineBlock{kind: blockThinking, id: draftThinkingID, body: body}
 
 	for _, theme := range []colorTheme{themeDark, themeLight} {
-		got := renderThinkingBlock(block, 60, theme, false)
+		got := renderThinkingBlock(block, nil, 60, theme, false)
 		muted := lipgloss.NewStyle().Foreground(paletteFor(theme).muted)
 
 		assert.Equal(t, muted.Render(thinkingGlyph+" "+body), got,
@@ -115,7 +115,7 @@ func TestThinkingBlockWrapsToTheRenderWidth(t *testing.T) {
 	t.Parallel()
 
 	body := strings.TrimSpace(strings.Repeat("reasoning word ", 20))
-	got := renderThinkingBlock(timelineBlock{kind: blockThinking, id: draftThinkingID, body: body}, 20, themeDark, true)
+	got := renderThinkingBlock(timelineBlock{kind: blockThinking, id: draftThinkingID, body: body}, nil, 20, themeDark, true)
 
 	rows := strings.Split(got, "\n")
 	require.Greater(t, len(rows), 2, "the long reasoning wraps onto several rows")
@@ -128,10 +128,10 @@ func TestThinkingBlockDropsEmptyAndUnsafeText(t *testing.T) {
 	t.Parallel()
 
 	block := timelineBlock{kind: blockThinking, id: draftThinkingID, body: "   \n  "}
-	assert.Empty(t, renderThinkingBlock(block, 60, themeDark, true))
+	assert.Empty(t, renderThinkingBlock(block, nil, 60, themeDark, true))
 
 	block.body = "before\x1b[31mafter"
-	got := renderThinkingBlock(block, 60, themeDark, false)
+	got := renderThinkingBlock(block, nil, 60, themeDark, false)
 	assert.NotContains(t, got, "\x1b[31mafter", "model text cannot inject its own styling")
 	assert.Contains(t, ansi.Strip(got), "beforeafter")
 }

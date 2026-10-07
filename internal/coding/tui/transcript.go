@@ -99,6 +99,9 @@ type transcriptStore struct {
 	renders int
 	// evictions counts records whose rows were released since the last reset.
 	evictions int
+	// liveRowsHashed counts the live record's rows read since the last reset, so
+	// tests can assert that a frame's revision does not read them.
+	liveRowsHashed int
 }
 
 // transcriptEntry is one projected entry offered to the store. A record that is
@@ -325,9 +328,11 @@ func (s *transcriptStore) reindex() {
 	s.indexDirty = false
 }
 
-// updateRevision fingerprints the record set, its geometry and the live record's
-// text. A search scan is skipped while the fingerprint is unchanged, so holding
-// the find box open during a stream does not re-read every record each frame.
+// updateRevision fingerprints the record set, its geometry and the live
+// record's height, so a search scan can skip a frame in which nothing it reads
+// changed. It deliberately does not read the live record's text: only a search
+// looks at that, and hashing a growing thought on every frame is what made the
+// frame cost scale with the stream. [fingerprint] adds the text when asked.
 func (s *transcriptStore) updateRevision() {
 	hash := uint64(14695981039346656037)
 	mix := func(value uint64) {
@@ -349,23 +354,35 @@ func (s *transcriptStore) updateRevision() {
 	}
 
 	for index := range s.records {
-		record := &s.records[index]
-		mix(uint64(record.lines))
+		mix(uint64(s.records[index].lines)) //nolint:gosec // lines is a row count; it is never negative.
+	}
 
+	s.revision = hash
+}
+
+// fingerprint returns what a search scan compares against: the frame's revision
+// with the live record's text folded in. A live record can change its text
+// without changing its height, so the text is the only thing that tells a search
+// it has to read the rows again.
+func (s *transcriptStore) fingerprint() uint64 {
+	hash := s.revision
+
+	for index := range s.records {
+		record := &s.records[index]
 		if !record.live {
 			continue
 		}
 
-		// Only the live record can change its text without changing its
-		// identity, so it is the only content the fingerprint has to cover.
+		s.liveRowsHashed += len(record.rows)
+
 		for _, row := range record.rows {
 			for offset := range len(row) {
-				mix(uint64(row[offset]))
+				hash = (hash ^ uint64(row[offset])) * 1099511628211
 			}
 		}
 	}
 
-	s.revision = hash
+	return hash
 }
 
 // loadRecord returns one record's rows, rendering them if they were released.
