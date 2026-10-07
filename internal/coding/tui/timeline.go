@@ -406,6 +406,13 @@ func incompleteReplyBlock(reply coding.IncompleteReply, position int) timelineBl
 	}
 
 	lines = append(lines, "Incomplete text retained below; it is not part of the conversation.")
+	if reply.Bytes > len(reply.Text) {
+		// The record holds only a bounded prefix of what was produced, so say
+		// so instead of letting the shown text read as the whole fragment.
+		lines = append(lines, fmt.Sprintf(
+			"The retained text was cut short: %d of %d bytes kept.", len(reply.Text), reply.Bytes,
+		))
+	}
 	if reply.Text != "" {
 		lines = append(lines, "", reply.Text)
 	}

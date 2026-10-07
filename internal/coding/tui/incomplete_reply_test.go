@@ -34,6 +34,28 @@ func TestTimelineRendersIncompleteReplyAsItsOwnBlock(t *testing.T) {
 	assert.Contains(t, rendered, "half an answer")
 }
 
+// TestTimelineSaysWhenTheRetainedTextWasCutShort keeps the block honest about
+// its own bound: Bytes is the size before the emitter truncated the record, so
+// a larger Bytes means what is shown is not the whole fragment.
+func TestTimelineSaysWhenTheRetainedTextWasCutShort(t *testing.T) {
+	t.Parallel()
+
+	render := func(bytes int) string {
+		state := coding.State{
+			Transcript: []ai.Message{ai.UserText("ask"), ai.AssistantText("COMMITTED-REPLY")},
+			IncompleteReplies: []coding.IncompleteReply{{
+				Turn: 1, Text: "half an answer", Reason: "stream ended early", Bytes: bytes,
+			}},
+		}
+
+		return renderTimeline(projectTimeline(state), newMarkdownRenderer(4), 80, themeDark, true)
+	}
+
+	assert.Contains(t, render(64<<10), "The retained text was cut short: 14 of 65536 bytes kept")
+	assert.NotContains(t, render(len("half an answer")), "cut short",
+		"a record that holds everything produced says nothing about truncation")
+}
+
 func TestAssistantCopyExcludesIncompleteReply(t *testing.T) {
 	t.Parallel()
 
