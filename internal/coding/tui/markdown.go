@@ -118,15 +118,16 @@ func (r *markdownRenderer) renderLive(
 // renderLiveRows is [markdownRenderer.renderLive] for the managed transcript
 // store, which consumes rows. It assembles the frame's rows directly instead of
 // joining the whole frozen prefix and the tail into one string and splitting it
-// again: a frame's allocation is then the row headers it hands the store, not a
-// fresh copy of the whole rendered document.
+// again, and it returns the frozen rows and the tail as two segments so the store
+// never copies the whole live body's row headers into one slice. inset is the
+// frame-edge indent the store wants, applied to each row once.
 func (r *markdownRenderer) renderLiveRows(
 	slot, content string,
-	width int,
+	width, inset int,
 	theme colorTheme,
 	noColor bool,
-) ([]string, error) {
-	if rows, ok := r.renderLiveIncrementalRows(slot, content, width, theme, noColor); ok {
+) (rowSegments, error) {
+	if rows, ok := r.renderLiveIncrementalRows(slot, content, width, inset, theme, noColor); ok {
 		r.evictLive(slot)
 
 		return rows, nil
@@ -134,10 +135,10 @@ func (r *markdownRenderer) renderLiveRows(
 
 	rendered, err := r.renderCached(slot, content, width, theme, noColor)
 	if err != nil {
-		return nil, err
+		return rowSegments{}, err
 	}
 
-	return splitTranscriptRows(rendered), nil
+	return rowSegments{frozen: insetRowSlice(splitTranscriptRows(rendered), inset)}, nil
 }
 
 // renderLiveIncremental renders a growing live body from its frozen prefix. ok
@@ -149,54 +150,53 @@ func (r *markdownRenderer) renderLiveIncremental(
 	theme colorTheme,
 	noColor bool,
 ) (string, bool) {
-	rows, ok := r.renderLiveIncrementalRows(slot, content, width, theme, noColor)
+	rows, ok := r.renderLiveIncrementalRows(slot, content, width, 0, theme, noColor)
 	if !ok {
 		return "", false
 	}
 
-	return strings.Join(rows, "\n"), true
+	return strings.Join(rows.all(), "\n"), true
 }
 
 // renderLiveIncrementalRows assembles one frame's rows from the frozen prefix
-// and the live tail.
+// and the live tail, keeping them apart so the caller can hand both to the store.
 func (r *markdownRenderer) renderLiveIncrementalRows(
 	slot, content string,
-	width int,
+	width, inset int,
 	theme colorTheme,
 	noColor bool,
-) ([]string, bool) {
+) (rowSegments, bool) {
 	prefixEnd, block, ok := liveMarkdownBoundary(content)
 	if !ok || prefixEnd <= 0 || block == "" || prefixEnd > len(content) {
-		return nil, false
+		return rowSegments{}, false
 	}
 
-	head, ok := r.markdownFrozenRows(slot, content, prefixEnd, block, width, theme, noColor)
+	head, ok := r.markdownFrozenRows(slot, content, prefixEnd, block, width, inset, theme, noColor)
 	if !ok {
-		return nil, false
+		return rowSegments{}, false
 	}
 
 	blockRendered, err := r.render(block, width, theme, noColor)
 	if err != nil {
-		return nil, false
+		return rowSegments{}, false
 	}
 
 	// The seam carries the last frozen block, so the tail is rendered in the
 	// context that decides the rows between them.
 	seam, err := r.renderUncached(block+"\n\n"+content[prefixEnd:], width, theme, noColor)
 	if err != nil {
-		return nil, false
+		return rowSegments{}, false
 	}
 
 	tail, found := markdownRowsAfter(seam, markdownRowCount(blockRendered))
 	if !found {
-		return nil, false
+		return rowSegments{}, false
 	}
 
-	rows := make([]string, 0, len(head)+markdownRowCount(tail))
-	rows = append(rows, head...)
-	rows = append(rows, splitTranscriptRows(tail)...)
-
-	return rows, true
+	return rowSegments{
+		frozen: head,
+		tail:   insetRowSlice(splitTranscriptRows(tail), inset),
+	}, true
 }
 
 // evictLive drops the live version stored for a slot, so a fallback render's

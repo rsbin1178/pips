@@ -367,10 +367,10 @@ func TestLiveMarkdownRowsMatchTheStringRender(t *testing.T) {
 					want, err := streaming.renderLive("draft", content, width, themeDark, false)
 					require.NoError(t, err)
 
-					rows, err := rowRenderer.renderLiveRows("draft", content, width, themeDark, false)
+					rows, err := rowRenderer.renderLiveRows("draft", content, width, 0, themeDark, false)
 					require.NoError(t, err)
 
-					require.Equal(t, splitTranscriptRows(want), rows, "width %d size %d", width, size)
+					require.Equal(t, splitTranscriptRows(want), rows.all(), "width %d size %d", width, size)
 				}
 			}
 		})
@@ -400,6 +400,59 @@ func TestLiveEntryRowsMatchTheWholeRender(t *testing.T) {
 		want := splitTranscriptRows(renderTimelineEntry(
 			block, newMarkdownRenderer(1), width, themeDark, false, timelineRenderOptions{},
 		))
-		require.Equal(t, want, rows, "size %d", size)
+		require.Equal(t, want, rows.all(), "size %d", size)
+	}
+}
+
+// TestRowSegmentsWindow pins the two-segment row view the live record hands the
+// store: a window inside one segment is a subslice, a window across the seam is
+// the two in order, and out-of-range bounds clamp instead of panicking.
+func TestRowSegmentsWindow(t *testing.T) {
+	t.Parallel()
+
+	segments := rowSegments{frozen: []string{"a", "b", "c"}, tail: []string{"d", "e"}}
+
+	assert.Equal(t, 5, segments.count())
+	assert.Equal(t, []string{"b", "c"}, segments.window(1, 3))
+	assert.Equal(t, []string{"c", "d"}, segments.window(2, 4))
+	assert.Equal(t, []string{"d", "e"}, segments.window(3, 5))
+	assert.Equal(t, []string{"a", "b", "c", "d", "e"}, segments.window(0, 99))
+	assert.Equal(t, []string{"a", "b", "c", "d", "e"}, segments.all())
+	assert.Nil(t, segments.window(4, 4))
+	assert.Nil(t, segments.window(9, 12))
+
+	flat := rowSegments{frozen: []string{"x", "y"}}
+	assert.Equal(t, []string{"x"}, flat.window(0, 1))
+	assert.Equal(t, []string{"x", "y"}, flat.all())
+}
+
+// TestLiveThinkingEntryRowsMatchTheWholeRender streams a live thought through the
+// store's row path and asserts it equals a whole-section render of the entry,
+// glyph, padding and inset included, at every size and in both colour modes.
+func TestLiveThinkingEntryRowsMatchTheWholeRender(t *testing.T) {
+	t.Parallel()
+
+	document := strings.Join([]string{
+		"第一个思考段落，包含中文与标点。",
+		"Second thought paragraph with ordinary words.",
+		"Third thought paragraph, still streaming",
+	}, "\n\n")
+
+	for _, noColor := range []bool{false, true} {
+		for _, width := range []int{24, 60, 118} {
+			streaming := newMarkdownRenderer(128)
+			for size := 0; size <= len(document); size++ {
+				block := timelineBlock{kind: blockThinking, id: draftThinkingID, body: document[:size]}
+
+				rows, ok := liveEntryRows(block, streaming, width, themeDark, noColor)
+				require.True(t, ok)
+
+				want := splitTranscriptRows(renderTimelineEntry(
+					block, newMarkdownRenderer(1), width, themeDark, noColor, timelineRenderOptions{},
+				))
+				require.Equal(t, want, rows.all(),
+					"noColor %v width %d size %d", noColor, width, size)
+			}
+		}
 	}
 }

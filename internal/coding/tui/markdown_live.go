@@ -30,6 +30,56 @@ import (
 // the tail and dropping that block's own rows, which reproduces the whole
 // document's rows byte for byte (see TestLiveMarkdownMatchesWholeRender).
 
+// rowSegments is rendered rows kept as a frozen prefix and a growing tail. A
+// live record hands the store the two slices instead of copying the whole live
+// body's row headers into one, and the frozen rows carry their inset already, so
+// a frame neither re-prefixes them nor re-splits them.
+type rowSegments struct {
+	frozen []string
+	tail   []string
+}
+
+// count is the number of rows both segments hold.
+func (s rowSegments) count() int {
+	return len(s.frozen) + len(s.tail)
+}
+
+// window returns rows [from, to). A window that lies inside one segment is a
+// subslice and allocates nothing; only a window that straddles the seam copies.
+func (s rowSegments) window(from, to int) []string {
+	from, to = max(0, from), min(to, s.count())
+	if from >= to {
+		return nil
+	}
+
+	if to <= len(s.frozen) {
+		return s.frozen[from:to]
+	}
+
+	if from >= len(s.frozen) {
+		return s.tail[from-len(s.frozen) : to-len(s.frozen)]
+	}
+
+	rows := make([]string, 0, to-from)
+	rows = append(rows, s.frozen[from:]...)
+	rows = append(rows, s.tail[:to-len(s.frozen)]...)
+
+	return rows
+}
+
+// all returns the rows as one slice, for callers that hand the document on.
+func (s rowSegments) all() []string {
+	if len(s.tail) == 0 {
+		return s.frozen
+	}
+
+	rows := make([]string, 0, s.count())
+	rows = append(rows, s.frozen...)
+	rows = append(rows, s.tail...)
+
+	return rows
+}
+
 // liveFrozen is the frozen prefix of one live slot. A streaming body freezes a
 // new boundary as each paragraph completes, and rendering the whole prefix again
 // every time would keep the frame cost growing with the body, so the frozen rows
@@ -38,45 +88,45 @@ type liveFrozen struct {
 	// source is the body prefix the rendered rows cover. It shares the caller's
 	// backing array, so keeping it costs no copy.
 	source string
-	// rows are source's rendered rows. A frame appends the tail's rows to a copy
-	// of this slice instead of joining the whole prefix into one string, so the
-	// frame's allocation is the row headers it hands the store, not a fresh copy
-	// of the whole rendered document.
+	// rows are source's rendered rows, with the frame inset already applied.
 	rows []string
 	// block is the last frozen block of source, and blockRows how many rows it
 	// renders to. Both are the context the next extension renders against.
 	block     string
 	blockRows int
 	// The geometry the rows were rendered at. Rows rendered for another width,
-	// theme or colour mode cannot be extended.
+	// theme, colour mode or inset cannot be extended.
 	width   int
+	inset   int
 	theme   themeFingerprint
 	noColor bool
 }
 
 // markdownFrozenRows returns the rendered rows of content[:prefixEnd], extending
 // the slot's frozen prefix by the newly frozen region rather than rendering the
-// whole prefix again.
+// whole prefix again. inset is applied to each row as it is frozen, so the frame
+// that hands these rows to the store never re-prefixes them.
 func (r *markdownRenderer) markdownFrozenRows(
 	slot, content string,
 	prefixEnd int,
 	block string,
-	width int,
+	width, inset int,
 	theme colorTheme,
 	noColor bool,
 ) ([]string, bool) {
 	fingerprint := themeFingerprint(theme.fingerprint)
 
 	frozen, exists := r.frozen[slot]
-	if !exists || frozen.width != width || frozen.theme != fingerprint || frozen.noColor != noColor {
-		frozen = &liveFrozen{width: width, theme: fingerprint, noColor: noColor}
+	if !exists || frozen.width != width || frozen.inset != inset ||
+		frozen.theme != fingerprint || frozen.noColor != noColor {
+		frozen = &liveFrozen{width: width, inset: inset, theme: fingerprint, noColor: noColor}
 		r.frozen[slot] = frozen
 	}
 
 	covered := len(frozen.source)
 	if covered > prefixEnd || !strings.HasPrefix(content, frozen.source) {
 		// The body was replaced or rewound: the frozen rows no longer describe it.
-		*frozen = liveFrozen{width: width, theme: fingerprint, noColor: noColor}
+		*frozen = liveFrozen{width: width, inset: inset, theme: fingerprint, noColor: noColor}
 		covered = 0
 	}
 
@@ -98,7 +148,7 @@ func (r *markdownRenderer) markdownFrozenRows(
 			return nil, false
 		}
 
-		frozen.rows = append(frozen.rows, splitTranscriptRows(tail)...)
+		frozen.rows = append(frozen.rows, insetRowSlice(splitTranscriptRows(tail), inset)...)
 		frozen.source = content[:prefixEnd]
 	}
 
