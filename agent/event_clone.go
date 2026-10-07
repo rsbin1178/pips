@@ -17,7 +17,8 @@ type partSliceKey struct {
 
 func cloneEvent(event Event) Event {
 	switch payload := event.payload.(type) {
-	case RunStarted, TurnStarted, CandidateDiscarded, TurnCompleted, RunCompleted:
+	case RunStarted, TurnStarted, CandidateDiscarded, CandidateIncomplete,
+		TurnCompleted, RunCompleted:
 		return event
 	case ModelStreamEvent:
 		if payload.Event.Usage == nil && payload.Event.Retry == nil {

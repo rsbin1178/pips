@@ -93,6 +93,10 @@ func (m *Model) exportConversation(path string) tea.Cmd {
 // assistantResponses returns the visible text of every assistant reply, newest
 // first. A live streaming draft counts as the newest reply, so Ctrl+X during a
 // turn copies what the model has produced so far.
+//
+// State.IncompleteReplies is deliberately not a source here: its text was
+// abandoned before commit and is not an answer, so copying it would hand the
+// user a fragment as if it were the reply.
 func (m *Model) assistantResponses() []string {
 	responses := make([]string, 0, 4)
 	for _, message := range slices.Backward(m.state.Transcript) {

@@ -49,6 +49,8 @@ func validateEventPayload(payload EventPayload) error {
 		return validateMessageCommitted(value)
 	case CandidateDiscarded:
 		turn = value.Turn
+	case CandidateIncomplete:
+		return validateCandidateIncomplete(value)
 	case ToolStarted:
 		turn = value.Turn
 	case ToolUpdated:
@@ -62,6 +64,29 @@ func validateEventPayload(payload EventPayload) error {
 	}
 
 	return validateEventTurn(turn)
+}
+
+// validateCandidateIncomplete bounds the retained text and keeps its reported
+// original size consistent, so a consumer can trust both the record and
+// whether that record was truncated to fit.
+func validateCandidateIncomplete(event CandidateIncomplete) error {
+	if err := validateEventTurn(event.Turn); err != nil {
+		return err
+	}
+
+	if len(event.Text) > maxIncompleteTextBytes {
+		return invalidEvent("incomplete reply text exceeds the retention bound")
+	}
+
+	if event.Bytes < len(event.Text) {
+		return invalidEvent("incomplete reply reports fewer bytes than it retains")
+	}
+
+	if len(event.Reason) > maxIncompleteReasonBytes {
+		return invalidEvent("incomplete reply reason is too long")
+	}
+
+	return nil
 }
 
 func validateMessageCommitted(event MessageCommitted) error {
@@ -112,6 +137,8 @@ func eventPayloadType(payload EventPayload) (EventType, bool) {
 		return EventMessageCommitted, true
 	case CandidateDiscarded:
 		return EventCandidateDiscarded, true
+	case CandidateIncomplete:
+		return EventCandidateIncomplete, true
 	case ToolStarted:
 		return EventToolStarted, true
 	case ToolUpdated:
@@ -153,7 +180,7 @@ func validModelStreamEventType(eventType ai.StreamEventType) bool {
 
 func validStopReason(reason StopReason) bool {
 	switch reason {
-	case StopEndTurn, StopMaxTurns, StopBudget, StopPaused, StopWhen, StopTerminated:
+	case StopEndTurn, StopMaxTurns, StopBudget, StopPaused, StopWhen, StopTerminated, StopTruncated:
 		return true
 	default:
 		return false
