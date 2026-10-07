@@ -55,7 +55,7 @@ func TestPTYThinkingBlocksRenderInTheViewport(t *testing.T) {
 		return h.screenMatches(60, 20, func(e *vt.Emulator) bool {
 			frame := e.String()
 
-			return e.IsAltScreen() && strings.Contains(frame, thinkingTitle) &&
+			return e.IsAltScreen() && strings.Contains(frame, thinkingGlyph) &&
 				strings.Contains(frame, "step one") &&
 				strings.Contains(frame, "REASON-TAIL") &&
 				strings.Contains(frame, "ANSWER-MARKER")

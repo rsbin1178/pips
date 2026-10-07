@@ -73,8 +73,8 @@ func TestProjectTimelineSkipsRedactedAndEmptyReasoning(t *testing.T) {
 }
 
 // TestThinkingBlockRendersTheWholeBody pins the reader-facing contract: a
-// Thinking block shows every reasoning row, with no fold, glyph or truncation
-// marker, so nothing the model wrote is hidden.
+// Thinking block shows every reasoning row under the section glyph, with no fold
+// or truncation marker, so nothing the model wrote is hidden.
 func TestThinkingBlockRendersTheWholeBody(t *testing.T) {
 	t.Parallel()
 
@@ -84,7 +84,11 @@ func TestThinkingBlockRendersTheWholeBody(t *testing.T) {
 
 	got := renderThinkingBlock(block, 60, themeDark, true)
 
-	assert.Equal(t, thinkingTitle+"\n"+body, got)
+	rows := strings.Split(got, "\n")
+	require.NotEmpty(t, rows)
+	assert.Equal(t, thinkingGlyph+" step one", rows[0], "the glyph leads the first reasoning row")
+	assert.Contains(t, got, "  step two", "continuation rows align under the glyph")
+	assert.NotContains(t, got, "Thinking", "the section spends no header row on a label")
 	assert.Contains(t, got, tail)
 	assert.NotContains(t, got, "… +")
 	assert.NotContains(t, got, "ctrl+e")
@@ -102,9 +106,8 @@ func TestThinkingBlockUsesTheThemeMutedColor(t *testing.T) {
 		got := renderThinkingBlock(block, 60, theme, false)
 		muted := lipgloss.NewStyle().Foreground(paletteFor(theme).muted)
 
-		assert.Contains(t, got, muted.Render(body), "the body carries the theme's muted color")
-		assert.Contains(t, got, lipgloss.NewStyle().Bold(true).Foreground(paletteFor(theme).muted).
-			Render(thinkingTitle), "the label carries the theme's muted color")
+		assert.Equal(t, muted.Render(thinkingGlyph+" "+body), got,
+			"the glyph and the body share the theme's muted color")
 	}
 }
 
@@ -147,9 +150,12 @@ func TestShowThinkingBlocksOffHidesTheText(t *testing.T) {
 	model := fullscreenModel(t, controller, true)
 	frame := ansi.Strip(model.View().Content)
 
-	assert.NotContains(t, frame, thinkingTitle)
 	assert.NotContains(t, frame, tail)
 	assert.Contains(t, frame, "visible answer")
+	for row := range strings.SplitSeq(frame, "\n") {
+		assert.False(t, strings.HasPrefix(strings.TrimSpace(row), thinkingGlyph),
+			"no reasoning block reaches the frame: %q", row)
+	}
 }
 
 func TestInlineModeNeverProjectsThinkingBlocks(t *testing.T) {
@@ -224,11 +230,11 @@ func TestThinkingDraftStreamsUnfolded(t *testing.T) {
 	frame := ansi.Strip(model.View().Content)
 	assert.Contains(t, frame, "fourth")
 
-	labels := 0
+	glyphs := 0
 	for row := range strings.SplitSeq(frame, "\n") {
-		if strings.TrimSpace(row) == thinkingTitle {
-			labels++
+		if strings.HasPrefix(strings.TrimSpace(row), thinkingGlyph) {
+			glyphs++
 		}
 	}
-	assert.Equal(t, 1, labels, "the draft stays one block")
+	assert.Equal(t, 1, glyphs, "the draft stays one block")
 }

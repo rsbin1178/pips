@@ -327,7 +327,7 @@ func TestTimelineRendersThinkingTextButNeverSignatures(t *testing.T) {
 	assert.Contains(t, rendered, "✻ Exploring")
 	assert.Contains(t, rendered, "Read")
 	assert.Contains(t, rendered, reasoning)
-	assert.Contains(t, rendered, thinkingTitle)
+	assert.Contains(t, rendered, thinkingGlyph)
 	// The opaque continuation signature never reaches the frame, and redacted
 	// reasoning produces no block at all.
 	assert.NotContains(t, rendered, signature)
