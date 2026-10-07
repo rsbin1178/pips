@@ -384,6 +384,7 @@ func newChildControlScope(
 		agent.WithName("subagent/"+scope.plan.Identity.ID),
 		agent.WithMaxTurns(scope.plan.Limits.MaxTurns),
 		agent.WithMaxTokens(scope.plan.Limits.MaxTokens),
+		streamRecoveryOption(),
 		agent.WithParallelTools(1),
 		agent.WithStopWhen(scope.guard.stopWhen),
 		agent.WithToolTimeout(factory.toolTimeout),

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"math"
 	"slices"
 	"time"
 
@@ -25,7 +26,10 @@ const (
 // run-scoped state lives in the [Session] passed to each run.
 //
 // Resilience is layered at the model, not the agent: wrap the model with
-// [ai.Chain] and the ai middleware packages before passing it in.
+// [ai.Chain] and the ai middleware packages before passing it in. The one
+// exception is [WithStreamRecovery]: only the loop can retract output a
+// frontend has already rendered, so a turn whose stream broke after producing
+// output is re-issued here rather than inside the middleware.
 type Agent struct {
 	model ai.LanguageModel
 	tools *toolbox
@@ -46,25 +50,72 @@ const (
 )
 
 type config struct {
-	name          string
-	system        string
-	tools         []Tool
-	maxTurns      int
-	maxTokens     int
-	toolTimeout   time.Duration
-	parallelTools int
-	steeringMode  QueueMode
-	followUpMode  QueueMode
-	stopWhen      func(RunInfo) bool
-	beforeTool    gate
-	afterTool     func(context.Context, ToolResultInfo) *ToolResultOverride
-	prepareTurn   func(context.Context, RunInfo) TurnUpdate
-	candidate     func(context.Context, CandidateAnswerInfo) CandidateAnswerDecision
-	transform     func(context.Context, []ai.Message) ([]ai.Message, error)
-	onEvent       func(context.Context, Event)
-	requestFn     func(*ai.Request)
-	inputGuards   []inputGuardrail
-	outputGuards  []outputGuardrail
+	name           string
+	system         string
+	tools          []Tool
+	maxTurns       int
+	maxTokens      int
+	toolTimeout    time.Duration
+	parallelTools  int
+	steeringMode   QueueMode
+	followUpMode   QueueMode
+	stopWhen       func(RunInfo) bool
+	streamRecovery streamRecovery
+	beforeTool     gate
+	afterTool      func(context.Context, ToolResultInfo) *ToolResultOverride
+	prepareTurn    func(context.Context, RunInfo) TurnUpdate
+	candidate      func(context.Context, CandidateAnswerInfo) CandidateAnswerDecision
+	transform      func(context.Context, []ai.Message) ([]ai.Message, error)
+	onEvent        func(context.Context, Event)
+	requestFn      func(*ai.Request)
+	inputGuards    []inputGuardrail
+	outputGuards   []outputGuardrail
+}
+
+// Stream recovery limits. The backoff doubles per re-issue up to the ceiling,
+// which mirrors the retry middleware's shape one layer up.
+const (
+	// DefaultStreamRecoveryBase is the backoff before the first re-issue.
+	DefaultStreamRecoveryBase = time.Second
+	// DefaultStreamRecoveryMax caps one backoff delay.
+	DefaultStreamRecoveryMax = 30 * time.Second
+)
+
+// streamRecovery bounds the re-issue of a turn whose model stream failed after
+// it had already streamed output.
+type streamRecovery struct {
+	attempts int
+	base     time.Duration
+	max      time.Duration
+}
+
+func newStreamRecovery(attempts int, base, ceiling time.Duration) streamRecovery {
+	if attempts <= 0 {
+		return streamRecovery{}
+	}
+
+	recovery := streamRecovery{attempts: attempts, base: base, max: ceiling}
+	if recovery.base <= 0 {
+		recovery.base = DefaultStreamRecoveryBase
+	}
+
+	if recovery.max < recovery.base {
+		recovery.max = DefaultStreamRecoveryMax
+	}
+
+	return recovery
+}
+
+func (r streamRecovery) enabled() bool { return r.attempts > 0 }
+
+// backoff returns the delay before re-issue number attempt (zero-based).
+func (r streamRecovery) backoff(attempt int) time.Duration {
+	delay := float64(r.base) * math.Pow(2, float64(attempt))
+	if delay > float64(r.max) {
+		delay = float64(r.max)
+	}
+
+	return time.Duration(delay)
 }
 
 // Option configures an [Agent].
@@ -117,6 +168,22 @@ func WithParallelTools(limit int) Option {
 // checked after each completed turn.
 func WithStopWhen(cond func(RunInfo) bool) Option {
 	return func(c *config) { c.stopWhen = cond }
+}
+
+// WithStreamRecovery re-issues a turn whose model stream failed after it had
+// already streamed output, up to attempts extra tries with exponential backoff
+// (base, capped by maxDelay; zero values select [DefaultStreamRecoveryBase] and
+// [DefaultStreamRecoveryMax]). Zero attempts — the default — surfaces the
+// failure instead.
+//
+// The middleware owns failures that produced nothing; this option covers the
+// ones that arrived after output, where replaying from the middleware would
+// duplicate what the frontend already rendered. Before each re-issue the loop
+// emits [CandidateDiscarded] so a consumer drops the partial output, which
+// makes the retry safe: nothing from the failed attempt was committed and no
+// tool ran.
+func WithStreamRecovery(attempts int, base, maxDelay time.Duration) Option {
+	return func(c *config) { c.streamRecovery = newStreamRecovery(attempts, base, maxDelay) }
 }
 
 // WithBeforeTool installs a gate consulted before each tool call executes.
