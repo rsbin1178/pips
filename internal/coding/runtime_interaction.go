@@ -977,6 +977,7 @@ func (r *Runtime) openInteraction(
 	agentOptions := append(
 		composed.AgentOptions(),
 		agent.WithMaxTurns(maxTurns),
+		streamRecoveryOption(),
 		agent.WithStopWhen(func(info agent.RunInfo) bool {
 			return current.hookStopRequestedNow() || failureGuard.stopWhen(info)
 		}),

@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -13,47 +14,47 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestWithCodingRetryUsesFiveRetryBudget(t *testing.T) {
+func TestWithCodingRetryUsesTenRetryBudget(t *testing.T) {
 	t.Parallel()
 
-	t.Run("sixth attempt succeeds", func(t *testing.T) {
+	// The retry budget follows the default the other agent frontends ship; pin
+	// the number so a change is deliberate.
+	assert.Equal(t, 10, codingModelMaxRetries)
+
+	transient := func(failures int) []error {
+		errs := make([]error, 0, failures)
+		for index := 1; index <= failures; index++ {
+			errs = append(errs, fmt.Errorf("transient %d", index))
+		}
+
+		return errs
+	}
+
+	t.Run("tenth retry succeeds", func(t *testing.T) {
 		t.Parallel()
 
-		base := newRetryModel(
-			errors.New("transient 1"),
-			errors.New("transient 2"),
-			errors.New("transient 3"),
-			errors.New("transient 4"),
-			errors.New("transient 5"),
-			nil,
-		)
+		// One initial attempt plus ten replays: the eleventh call answers.
+		base := newRetryModel(append(transient(codingModelMaxRetries), nil)...)
 		model := withCodingRetry(base, noRetrySleep())
 
 		response, err := ai.Collect(model.Stream(t.Context(), ai.Request{}))
 
 		require.NoError(t, err)
 		assert.Equal(t, "ok", response.Text())
-		assert.Equal(t, int32(6), base.calls.Load())
+		assert.Equal(t, int32(codingModelMaxRetries+1), base.calls.Load())
 	})
 
-	t.Run("six failures exhaust budget", func(t *testing.T) {
+	t.Run("budget exhaustion surfaces the last failure", func(t *testing.T) {
 		t.Parallel()
 
 		finalErr := errors.New("final transport failure")
-		base := newRetryModel(
-			errors.New("transient 1"),
-			errors.New("transient 2"),
-			errors.New("transient 3"),
-			errors.New("transient 4"),
-			errors.New("transient 5"),
-			finalErr,
-		)
+		base := newRetryModel(append(transient(codingModelMaxRetries), finalErr)...)
 		model := withCodingRetry(base, noRetrySleep())
 
 		_, err := ai.Collect(model.Stream(t.Context(), ai.Request{}))
 
 		require.ErrorIs(t, err, finalErr)
-		assert.Equal(t, int32(6), base.calls.Load())
+		assert.Equal(t, int32(codingModelMaxRetries+1), base.calls.Load())
 	})
 }
 

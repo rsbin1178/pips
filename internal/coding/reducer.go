@@ -82,6 +82,19 @@ type RunState struct {
 	Usage       TokenUsage       `json:"usage"`
 }
 
+// RetryState is the live retry notice for the run in flight: a model request
+// that failed and is starting a new attempt. A frontend renders the wait from
+// it instead of appearing stalled. Attempt is the 1-based retry ordinal and
+// MaxRetries the budget it counts against; Deadline is when the next attempt
+// starts, and it is zero when the producer reported no delay.
+type RetryState struct {
+	Active     bool      `json:"active,omitempty"`
+	Attempt    int       `json:"attempt,omitempty"`
+	MaxRetries int       `json:"max_retries,omitempty"`
+	Reason     string    `json:"reason,omitempty"`
+	Deadline   time.Time `json:"deadline,omitzero"`
+}
+
 // CandidateIdentity binds provisional deltas and their eventual commit or
 // discard to one Agent run and turn. Text equality is never ownership.
 type CandidateIdentity struct {
@@ -259,8 +272,11 @@ type State struct {
 	LastError         *RuntimeError                   `json:"last_error,omitempty"`
 	Tree              SessionTree                     `json:"tree"`
 	Compaction        CompactionState                 `json:"compaction"`
-	ContextTokens     int                             `json:"context_tokens"`
-	Tasks             tasklist.Snapshot               `json:"tasks"`
+	// Retry is the live retry notice for the run in flight; the next event of
+	// any other kind clears it, because any of them ends the wait.
+	Retry         RetryState        `json:"retry,omitzero"`
+	ContextTokens int               `json:"context_tokens"`
+	Tasks         tasklist.Snapshot `json:"tasks"`
 
 	activeRuns  map[string]int
 	openTurns   map[string]int
@@ -456,6 +472,12 @@ func (state *State) reduce(event Event) error {
 		return protocolError("session changed from %q to %q", state.SessionID, event.SessionID)
 	}
 
+	// A retry notice stands only until the next event: whatever follows ends
+	// the wait it announced.
+	if event.Type != EventModelRetry {
+		state.Retry = RetryState{}
+	}
+
 	if err := state.apply(event); err != nil {
 		return err
 	}
@@ -471,6 +493,9 @@ func (state *State) reduce(event Event) error {
 // all-or-nothing contract.
 func (state *State) reduceDeltas(events []Event) error {
 	folded := make([]MessageDelta, 0, len(events))
+
+	// The folded run is streaming output, which ends any announced wait.
+	state.Retry = RetryState{}
 
 	for _, event := range events {
 		if event.Sequence != state.Sequence+1 {
@@ -751,6 +776,22 @@ func (state *State) apply(event Event) error {
 		}
 		state.Draft = nil
 		state.DraftCandidate = CandidateIdentity{}
+	case ModelRetry:
+		if _, err := state.activeRun(event.RunID); err != nil {
+			return err
+		}
+
+		if state.openTurn(event.RunID) == 0 {
+			return protocolError("model retry emitted outside an active turn")
+		}
+
+		state.Retry = RetryState{
+			Active:     true,
+			Attempt:    payload.Attempt,
+			MaxRetries: payload.MaxRetries,
+			Reason:     payload.Reason,
+			Deadline:   event.Time.Add(time.Duration(payload.DelayMillis) * time.Millisecond),
+		}
 	case ToolStarted:
 		if _, err := state.activeRun(event.RunID); err != nil {
 			return err

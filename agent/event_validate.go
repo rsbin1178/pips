@@ -143,6 +143,7 @@ func validModelStreamEventType(eventType ai.StreamEventType) bool {
 		ai.StreamToolCallStart,
 		ai.StreamToolCallDelta,
 		ai.StreamToolCallEnd,
+		ai.StreamRetry,
 		ai.StreamMessageEnd:
 		return true
 	default:

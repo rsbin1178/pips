@@ -426,6 +426,7 @@ func (r *Runtime) runTeamProposalAgent(
 			agent.WithName(teamProposalAgentName),
 			agent.WithMaxTurns(teamProposalAgentMaxTurns),
 			agent.WithMaxTokens(teamProposalAgentMaxTokens),
+			streamRecoveryOption(),
 			agent.WithParallelTools(1),
 			agent.WithToolTimeout(r.opts.ToolTimeout),
 			agent.WithStopWhen(func(agent.RunInfo) bool { return collector.called() }),

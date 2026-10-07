@@ -63,6 +63,8 @@ func cloneEventPayload(payload EventPayload) EventPayload {
 		return cloneMessageDelta(value)
 	case MessageDiscarded:
 		return value
+	case ModelRetry:
+		return value
 	case ToolStarted:
 		value.Call = cloneToolCall(value.Call)
 		return value
@@ -231,6 +233,34 @@ func messageDeltaFromAI(event ai.StreamEvent) MessageDelta {
 
 func toolCallFromAI(call ai.ToolCallPart) ToolCall {
 	return ToolCall{ID: call.ID, Name: call.Name, Arguments: slices.Clone(call.Args)}
+}
+
+// modelRetryFromAI projects one retry notice. The notice is progress, not
+// output: it carries no content, so the projection only has to keep the retry
+// arithmetic inside the range the event contract accepts.
+func modelRetryFromAI(turn int, notice *ai.RetryNotice) ModelRetry {
+	retry := ModelRetry{Turn: turn}
+
+	if notice != nil {
+		retry.Attempt = notice.Attempt
+		retry.MaxRetries = notice.MaxRetries
+		retry.DelayMillis = notice.Delay.Milliseconds()
+		retry.Reason = notice.Reason
+	}
+
+	if retry.Attempt < 1 {
+		retry.Attempt = 1
+	}
+
+	if retry.MaxRetries < retry.Attempt {
+		retry.MaxRetries = retry.Attempt
+	}
+
+	if retry.DelayMillis < 0 {
+		retry.DelayMillis = 0
+	}
+
+	return retry
 }
 
 func toolResultMessage(result ai.ToolResultPart) ai.ToolMessage {

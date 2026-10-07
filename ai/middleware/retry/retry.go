@@ -5,6 +5,7 @@
 // Retry-After delay is honored when present. Streaming is retried only before
 // the first event is produced — once output has been observed, replaying the
 // request could duplicate content, so the original error is surfaced instead.
+// Each streaming re-attempt is announced with one [ai.StreamRetry] event.
 package retry
 
 import (
@@ -122,6 +123,10 @@ func (m *model) Generate(ctx context.Context, req ai.Request) (*ai.Response, err
 
 // Stream retries only before any event is produced. Once the first event
 // arrives the stream is passed through verbatim.
+//
+// Every re-attempt is announced with one [ai.StreamRetry] event carrying the
+// attempt that is about to start and the backoff before it, so a consumer can
+// report the wait instead of looking stalled.
 func (m *model) Stream(ctx context.Context, req ai.Request) ai.Stream {
 	return func(yield func(ai.StreamEvent, error) bool) {
 		for attempt := range m.cfg.maxAttempts {
@@ -137,7 +142,17 @@ func (m *model) Stream(ctx context.Context, req ai.Request) ai.Stream {
 				return
 			}
 
-			if sleepErr := m.cfg.sleep(ctx, m.backoff(attempt, err)); sleepErr != nil {
+			delay := m.backoff(attempt, err)
+			// attempt is zero-based, so this is retry attempt+1 of the
+			// maxAttempts-1 replays the configuration allows.
+			if !yield(ai.StreamEvent{
+				Type:  ai.StreamRetry,
+				Retry: ai.NewRetryNotice(attempt+1, m.cfg.maxAttempts-1, delay, err),
+			}, nil) {
+				return
+			}
+
+			if sleepErr := m.cfg.sleep(ctx, delay); sleepErr != nil {
 				yield(ai.StreamEvent{}, sleepErr)
 				return
 			}

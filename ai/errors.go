@@ -2,8 +2,11 @@ package ai
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 )
@@ -133,6 +136,11 @@ func IsRetryable(err error) bool {
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		// The caller's context is gone; retrying under it cannot succeed.
 		return false
+	case isCertificateFailure(err):
+		// A certificate the client cannot verify is not transient: the caller
+		// has to fix it, so report it on the first attempt. Transient TLS
+		// conditions (handshake timeouts, resets) stay retryable.
+		return false
 	case errors.Is(err, ErrRateLimited), errors.Is(err, ErrOverloaded):
 		return true
 	case errors.Is(err, ErrAuth), errors.Is(err, ErrInvalidRequest), errors.Is(err, ErrUnsupported):
@@ -148,4 +156,63 @@ func IsRetryable(err error) bool {
 	// Bare (non-*Error) errors reaching the retry layer are transport errors
 	// such as connection resets or timeouts.
 	return true
+}
+
+// isCertificateFailure reports whether err is a certificate validation failure
+// rather than a transient TLS condition.
+func isCertificateFailure(err error) bool {
+	var verification *tls.CertificateVerificationError
+	if errors.As(err, &verification) {
+		return true
+	}
+
+	var (
+		unknownAuthority x509.UnknownAuthorityError
+		hostname         x509.HostnameError
+		invalid          x509.CertificateInvalidError
+	)
+
+	return errors.As(err, &unknownAuthority) ||
+		errors.As(err, &hostname) ||
+		errors.As(err, &invalid)
+}
+
+// NewRetryNotice builds the notice for the retry that is about to start after
+// err. attempt is its 1-based ordinal and budget is the number of retries
+// available. The reason is classified provider-neutrally, so the same failure
+// renders the same way whoever re-issues the request: the retry middleware or
+// an agent loop replaying a turn.
+func NewRetryNotice(attempt, budget int, delay time.Duration, err error) *RetryNotice {
+	if attempt < 1 {
+		attempt = 1
+	}
+
+	if budget < attempt {
+		budget = attempt
+	}
+
+	return &RetryNotice{
+		Attempt:    attempt,
+		MaxRetries: budget,
+		Delay:      delay,
+		Reason:     retryReason(err),
+	}
+}
+
+// retryReason renders the failure class a frontend shows next to the wait. It
+// stays a short phrase: the provider's own wording belongs to the terminal
+// error, which still carries the full chain.
+func retryReason(err error) string {
+	switch {
+	case errors.Is(err, ErrRateLimited):
+		return "rate limited"
+	case errors.Is(err, ErrOverloaded):
+		return "provider overloaded"
+	case errors.Is(err, io.ErrUnexpectedEOF), errors.Is(err, io.EOF):
+		return "stream ended early"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "request timed out"
+	default:
+		return "connection error"
+	}
 }

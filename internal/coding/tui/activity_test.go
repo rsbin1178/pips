@@ -5,6 +5,7 @@ import (
 	"iter"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -159,6 +160,72 @@ func TestResolveActivity(t *testing.T) {
 		{
 			name: "compaction", context: activityContext{state: withCompaction(running)},
 			kind: activityCompacting, label: activityLabelCompacting, visible: true,
+		},
+		{
+			name: "retrying a stream counts down the wait",
+			context: activityContext{
+				state: withRetry(running, coding.RetryState{
+					Active: true, Attempt: 2, MaxRetries: 6, Reason: "stream ended early",
+					Deadline: retryTestTime.Add(4 * time.Second),
+				}),
+				now: retryTestTime,
+			},
+			kind:  activityRetrying,
+			label: activityLabelRetrying, detail: "retry 2/6 · in 4s · stream ended early",
+			visible: true,
+		},
+		{
+			name: "retrying without a clock shows the attempt only",
+			context: activityContext{state: withRetry(running, coding.RetryState{
+				Active: true, Attempt: 1, MaxRetries: 2,
+			})},
+			kind: activityRetrying, label: activityLabelRetrying, detail: "retry 1/2",
+			visible: true,
+		},
+		{
+			name: "waiting when the model goes quiet",
+			context: activityContext{
+				state:            running,
+				now:              retryTestTime,
+				lastModelEventAt: retryTestTime.Add(-25 * time.Second),
+			},
+			kind: activityWaiting, label: activityLabelWaiting, detail: "no data for 25s",
+			visible: true,
+		},
+		{
+			name: "recent model data is not a stall",
+			context: activityContext{
+				state:            running,
+				now:              retryTestTime,
+				lastModelEventAt: retryTestTime.Add(-5 * time.Second),
+			},
+			kind: activityThinking, label: activityLabelThinking, visible: true,
+		},
+		{
+			name: "a running tool outranks a quiet model",
+			context: activityContext{
+				state: withTools(running, coding.ToolState{
+					Call: coding.ToolCall{
+						ID: "call-1", Name: "shell", Arguments: ai.JSON(`{"command":"make test"}`),
+					},
+					Status: coding.ToolStatusRunning,
+				}),
+				now:              retryTestTime,
+				lastModelEventAt: retryTestTime.Add(-90 * time.Second),
+			},
+			kind: activityTool, label: "Running…", detail: "make test", visible: true,
+		},
+		{
+			name: "no open turn means no stall report",
+			context: activityContext{
+				state: withDraft(
+					working,
+					coding.MessageDelta{Kind: ai.StreamTextDelta, Text: "done"},
+				),
+				now:              retryTestTime,
+				lastModelEventAt: retryTestTime.Add(-90 * time.Second),
+			},
+			kind: activityResponding, label: activityLabelResponding, visible: true,
 		},
 		{
 			name: "interrupting takes priority", context: activityContext{
@@ -608,6 +675,15 @@ func withCompaction(state coding.State) coding.State {
 	return state
 }
 
+// retryTestTime anchors a retry countdown so the rendered detail is exact.
+var retryTestTime = time.Date(2026, time.July, 21, 8, 30, 0, 0, time.UTC)
+
+func withRetry(state coding.State, retry coding.RetryState) coding.State {
+	state.Retry = retry
+
+	return state
+}
+
 func TestActivityLabelsRemainSingleLine(t *testing.T) {
 	t.Parallel()
 
@@ -618,6 +694,8 @@ func TestActivityLabelsRemainSingleLine(t *testing.T) {
 		activityLabelApproval,
 		activityLabelRecovery,
 		activityLabelCompacting,
+		activityLabelRetrying,
+		activityLabelWaiting,
 		activityLabelInterrupting,
 	} {
 		assert.False(t, strings.ContainsAny(label, "\r\n"))

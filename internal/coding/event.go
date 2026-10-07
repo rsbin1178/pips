@@ -71,6 +71,7 @@ const (
 	EventMessageCommitted         EventType = "message.committed"
 	EventMessageDelta             EventType = "message.delta"
 	EventMessageDiscarded         EventType = "message.discarded"
+	EventModelRetry               EventType = "model.retry"
 	EventToolStarted              EventType = "tool.started"
 	EventToolUpdated              EventType = "tool.updated"
 	EventToolCompleted            EventType = "tool.completed"
@@ -312,6 +313,20 @@ type MessageDelta struct {
 // rejected before it could become a committed assistant message.
 type MessageDiscarded struct {
 	Turn int `json:"turn"`
+}
+
+// ModelRetry reports that a model request is being re-attempted after a
+// retryable failure. It is progress, not output: nothing is added to the
+// transcript, and the attempt in flight replaces the one that failed. Attempt
+// is the 1-based ordinal of the retry about to start, MaxRetries is the retry
+// budget available, DelayMillis is the backoff before it, and Reason is a
+// short, content-free cause.
+type ModelRetry struct {
+	Turn        int    `json:"turn,omitempty"`
+	Attempt     int    `json:"attempt"`
+	MaxRetries  int    `json:"max_retries"`
+	DelayMillis int64  `json:"delay_ms"`
+	Reason      string `json:"reason,omitempty"`
 }
 
 // ToolCall is the bounded model request projected into tool lifecycle events.
@@ -603,6 +618,7 @@ func (TurnCompleted) eventPayload()            {}
 func (MessageCommitted) eventPayload()         {}
 func (MessageDelta) eventPayload()             {}
 func (MessageDiscarded) eventPayload()         {}
+func (ModelRetry) eventPayload()               {}
 func (ToolStarted) eventPayload()              {}
 func (ToolUpdated) eventPayload()              {}
 func (ToolCompleted) eventPayload()            {}
@@ -679,7 +695,7 @@ func validateEnvelopeIDs(event Event) error {
 			return invalidEvent("%s requires only an interaction id", event.Type)
 		}
 	case EventRunStarted, EventRunCompleted, EventRunInterrupted, EventTurnStarted, EventTurnCompleted,
-		EventMessageCommitted, EventMessageDelta, EventMessageDiscarded,
+		EventMessageCommitted, EventMessageDelta, EventMessageDiscarded, EventModelRetry,
 		EventToolStarted, EventToolUpdated,
 		EventToolCompleted, EventSubagentCreated, EventSubagentStarted,
 		EventSubagentProgress, EventSubagentCompleted, EventSubagentFailed,
@@ -844,6 +860,14 @@ func validatePayload(eventType EventType, payload EventPayload) error {
 
 		if value.Turn < 1 {
 			return payloadInvalid(eventType, payload, errors.New("turn must be positive"))
+		}
+	case ModelRetry:
+		if eventType != EventModelRetry {
+			return payloadMismatch(eventType, payload)
+		}
+
+		if err := validateModelRetryPayload(value); err != nil {
+			return payloadInvalid(eventType, payload, err)
 		}
 	case ToolStarted:
 		if eventType != EventToolStarted {
@@ -2074,6 +2098,26 @@ func validateMessageDelta(delta MessageDelta) error {
 		}
 	default:
 		return errors.New("unknown delta kind")
+	}
+
+	return nil
+}
+
+// validateModelRetryPayload bounds the retry notice: an attempt always names a
+// reachable attempt number, and the reason stays a short display string that
+// the disclosure projection can keep as-is.
+func validateModelRetryPayload(retry ModelRetry) error {
+	switch {
+	case retry.Turn < 0:
+		return errors.New("retry turn must not be negative")
+	case retry.Attempt < 1:
+		return errors.New("retry attempt must be positive")
+	case retry.MaxRetries < retry.Attempt:
+		return errors.New("retry budget must cover the attempt")
+	case retry.DelayMillis < 0:
+		return errors.New("retry delay must not be negative")
+	case !validBoundedText(retry.Reason, maxDiagnosticMessage, true):
+		return errors.New("invalid retry reason")
 	}
 
 	return nil

@@ -3,6 +3,7 @@ package retry_test
 import (
 	"context"
 	"errors"
+	"io"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -159,6 +160,66 @@ func TestStreamRetriesBeforeFirstEvent(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "hello", resp.Text())
 	assert.Equal(t, int32(2), base.calls.Load())
+}
+
+func TestStreamAnnouncesRetryBeforeReattempt(t *testing.T) {
+	t.Parallel()
+
+	base := &scriptedModel{
+		responses: []*ai.Response{nil, {Message: ai.AssistantText("hello")}},
+		errs:      []error{ai.NewError(ai.ProviderOpenAI, 503, "overloaded"), nil},
+	}
+
+	var delays []time.Duration
+
+	model := retry.New(
+		retry.WithMaxAttempts(3),
+		retry.WithJitter(func() float64 { return 1 }),
+		noSleep(&delays),
+	)(base)
+
+	var notices []ai.RetryNotice
+
+	for ev, err := range model.Stream(t.Context(), ai.Request{}) {
+		require.NoError(t, err)
+
+		if ev.Type == ai.StreamRetry {
+			require.NotNil(t, ev.Retry)
+
+			notices = append(notices, *ev.Retry)
+		}
+	}
+
+	require.Len(t, notices, 1)
+	assert.Equal(t, 1, notices[0].Attempt, "the notice counts retries, not tries")
+	assert.Equal(t, 2, notices[0].MaxRetries)
+	assert.Equal(t, "provider overloaded", notices[0].Reason)
+	require.Len(t, delays, 1)
+	assert.Equal(t, delays[0], notices[0].Delay, "the advertised wait is the wait performed")
+}
+
+func TestStreamRetryReasonNamesEarlyStreamEnd(t *testing.T) {
+	t.Parallel()
+
+	base := &scriptedModel{
+		responses: []*ai.Response{nil, {Message: ai.AssistantText("hello")}},
+		errs:      []error{io.ErrUnexpectedEOF, nil},
+	}
+
+	var notices []ai.RetryNotice
+
+	model := retry.New(retry.WithMaxAttempts(2), noSleep(new([]time.Duration)))(base)
+
+	for ev, err := range model.Stream(t.Context(), ai.Request{}) {
+		require.NoError(t, err)
+
+		if ev.Retry != nil {
+			notices = append(notices, *ev.Retry)
+		}
+	}
+
+	require.Len(t, notices, 1)
+	assert.Equal(t, "stream ended early", notices[0].Reason)
 }
 
 // midStreamModel yields one event then fails, to prove no replay after output.
