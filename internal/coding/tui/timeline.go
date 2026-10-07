@@ -1383,7 +1383,7 @@ func renderTimelineBlockWithOptions(
 		return renderWorkspaceChangeBlock(block, width, theme, noColor)
 	}
 	if block.kind == blockThinking {
-		return renderThinkingBlock(block, width, theme, noColor)
+		return renderThinkingBlock(block, markdown, width, theme, noColor)
 	}
 
 	return renderRegularTimelineBlock(block, markdown, width, theme, noColor)
@@ -1393,14 +1393,18 @@ func renderTimelineBlockWithOptions(
 // prose led by the section glyph. The opaque Signature never reaches this
 // function; only ReasoningPart.Text does.
 //
-// Reasoning is deliberately not run through the Markdown renderer. A live
-// section is re-rendered on every streamed delta, and parsing it as Markdown
-// allocates tens of thousands of times per render, so a long thought turns each
-// frame into a CPU spike. Wrapping the same text costs a few hundred
-// microseconds and a handful of allocations, and the reader sees it in one
-// uniform color either way.
+// Reasoning is deliberately not run through the Markdown renderer. A live section
+// is re-rendered on every streamed delta, and parsing it as Markdown allocates
+// tens of thousands of times per render, so a long thought turns each frame into
+// a CPU spike. Wrapping the same text costs a few hundred microseconds and a
+// handful of allocations, and the reader sees it in one uniform color either way.
+//
+// A live section still grows, so it is assembled from the rows frozen at its last
+// line break instead of re-wrapping and re-styling the whole thought; see
+// [thinking_live.go]. A settled section never changes and is rendered once.
 func renderThinkingBlock(
 	block timelineBlock,
+	markdown *markdownRenderer,
 	width int,
 	theme colorTheme,
 	noColor bool,
@@ -1414,30 +1418,27 @@ func renderThinkingBlock(
 	prefix := thinkingGlyph + " "
 	prefixWidth := ansi.StringWidth(prefix)
 
-	var content string
 	if width <= prefixWidth {
 		// A frame this narrow has no room beside the glyph; keep the prose.
-		content = ansi.Wrap(body, width, "")
-	} else {
-		indent := strings.Repeat(" ", prefixWidth)
-		rows := strings.Split(ansi.Wrap(body, width-prefixWidth, ""), "\n")
-		for index := range rows {
-			if strings.TrimSpace(rows[index]) == "" {
-				// A blank separator row keeps no trailing indent.
-				rows[index] = ""
+		content := ansi.Wrap(body, width, "")
 
-				continue
-			}
-			if index == 0 {
-				rows[index] = prefix + rows[index]
-
-				continue
-			}
-			rows[index] = indent + rows[index]
-		}
-		content = strings.Join(rows, "\n")
+		return styleThinkingRows(content, theme, noColor)
 	}
 
+	indent := strings.Repeat(" ", prefixWidth)
+	limit := width - prefixWidth
+	if markdown != nil && blockIsLive(block) {
+		return markdown.renderLiveThinking(body, prefix, indent, limit, theme, noColor)
+	}
+
+	rows := thinkingRows(body, prefix, indent, limit, false)
+
+	return styleThinkingRows(strings.Join(rows, "\n"), theme, noColor)
+}
+
+// styleThinkingRows applies the section's dim colour and the alignment lipgloss
+// gives a rendered block.
+func styleThinkingRows(content string, theme colorTheme, noColor bool) string {
 	if noColor {
 		return content
 	}

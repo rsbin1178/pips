@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -736,6 +737,13 @@ func patchResultLines(value string, maximum int) []string {
 }
 
 func sanitizeToolText(value string) string {
+	if cleanToolText(value) {
+		// A body that carries no control sequence and no control character is
+		// already what the pass below would build, so a streaming frame does not
+		// copy the whole thought again.
+		return value
+	}
+
 	value = ansi.Strip(value)
 	value = strings.ReplaceAll(value, "\r\n", "\n")
 	value = strings.ReplaceAll(value, "\r", "\n")
@@ -754,6 +762,32 @@ func sanitizeToolText(value string) string {
 	}
 
 	return strings.TrimSpace(sanitized.String())
+}
+
+// cleanToolText reports whether sanitizeToolText returns value unchanged: no
+// escape sequence, no carriage return, tab or other control character, no
+// invalid UTF-8, and no surrounding space to trim. Plain prose is the common
+// case, so the check is one allocation-free pass.
+func cleanToolText(value string) bool {
+	if value == "" {
+		return true
+	}
+
+	first, _ := utf8.DecodeRuneInString(value)
+	last, _ := utf8.DecodeLastRuneInString(value)
+	if unicode.IsSpace(first) || unicode.IsSpace(last) {
+		return false
+	}
+
+	for _, char := range value {
+		// RuneError covers a byte the pass below would replace; a real U+FFFD in
+		// the input only costs the slow path.
+		if char != '\n' && (char == utf8.RuneError || unicode.IsControl(char)) {
+			return false
+		}
+	}
+
+	return true
 }
 
 func oneLineToolText(value string) string {

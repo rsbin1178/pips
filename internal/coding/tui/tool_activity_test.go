@@ -786,3 +786,46 @@ func codingToolResultFor(callID, name, body string) ai.ToolMessage {
 		`{"schema":"pips.coding.tool_result/v1alpha1","ok":true,"tool":"`+name+`"}`+"\n\n"+body,
 	)
 }
+
+// TestSanitizeToolTextLeavesCleanProseUntouched pins the allocation-free path a
+// streaming reasoning body takes: plain prose is returned as the caller's own
+// string, so a frame does not copy the whole thought again.
+func TestSanitizeToolTextLeavesCleanProseUntouched(t *testing.T) {
+	// AllocsPerRun measures the whole process, so this test cannot run in parallel.
+	// A streaming body ends mid-thought, so it carries no trailing whitespace.
+	body := strings.TrimRight(strings.Repeat("Reasoning prose with ordinary words and 中文.\n\n", 64), "\n")
+
+	allocs := testing.AllocsPerRun(50, func() {
+		if got := sanitizeToolText(body); got != body {
+			t.Fatalf("clean prose was rewritten: %q", got)
+		}
+	})
+	assert.Zero(t, allocs, "a clean body must not be copied")
+}
+
+// TestSanitizeToolTextStillTransformsDirtyText pins the contract the clean-text
+// check must not swallow: every input that needs work is still rewritten.
+func TestSanitizeToolTextStillTransformsDirtyText(t *testing.T) {
+	t.Parallel()
+
+	for name, testCase := range map[string]struct{ input, want string }{
+		"carriage return": {"line one\r\nline two", "line one\nline two"},
+		"bare return":     {"line one\rline two", "line one\nline two"},
+		"tab":             {"a\tb", "a    b"},
+		"escape sequence": {"\x1b[31mred\x1b[0m", "red"},
+		"bell":            {"ring\x07", "ring"},
+		"trim leading":    {"  padded", "padded"},
+		"trim trailing":   {"padded\n\n", "padded"},
+		"null byte":       {"a\x00b", "ab"},
+		"c1 control":      {"a\u0085b", "ab"},
+		"invalid utf8":    {"a\xffb", "ab"},
+		"only spaces":     {"   ", ""},
+		"empty":           {"", ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, testCase.want, sanitizeToolText(testCase.input))
+		})
+	}
+}

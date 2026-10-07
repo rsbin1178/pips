@@ -46,14 +46,18 @@ type markdownRenderer struct {
 	maxBytes int
 	live     map[string]markdownKey
 	// frozen holds the assembled prefix of each live slot, so a streaming frame
-	// extends it instead of rendering the whole body again.
+	// extends it instead of rendering the whole body again. thinking is the same
+	// state for the one live Thinking section, which is rendered as prose rather
+	// than Markdown.
 	frozen    map[string]*liveFrozen
+	thinking  liveThinking
 	engine    *glamour.TermRenderer
 	engineKey markdownKey
 	// renderedBytes counts the source bytes handed to the engine since the last
-	// reset, so tests can assert that a streaming frame does not render the whole
-	// body again.
-	renderedBytes int
+	// reset, and thinkingWrapped the reasoning bytes handed to the wrapper, so
+	// tests can assert that a streaming frame does not reprocess the whole body.
+	renderedBytes   int
+	thinkingWrapped int
 }
 
 func newMarkdownRenderer(capacity int) *markdownRenderer {
