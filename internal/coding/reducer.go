@@ -84,14 +84,15 @@ type RunState struct {
 
 // RetryState is the live retry notice for the run in flight: a model request
 // that failed and is starting a new attempt. A frontend renders the wait from
-// it instead of appearing stalled. Deadline is when the next attempt starts,
-// and it is zero when the producer reported no delay.
+// it instead of appearing stalled. Attempt is the 1-based retry ordinal and
+// MaxRetries the budget it counts against; Deadline is when the next attempt
+// starts, and it is zero when the producer reported no delay.
 type RetryState struct {
-	Active   bool      `json:"active,omitempty"`
-	Attempt  int       `json:"attempt,omitempty"`
-	Max      int       `json:"max,omitempty"`
-	Reason   string    `json:"reason,omitempty"`
-	Deadline time.Time `json:"deadline,omitzero"`
+	Active     bool      `json:"active,omitempty"`
+	Attempt    int       `json:"attempt,omitempty"`
+	MaxRetries int       `json:"max_retries,omitempty"`
+	Reason     string    `json:"reason,omitempty"`
+	Deadline   time.Time `json:"deadline,omitzero"`
 }
 
 // CandidateIdentity binds provisional deltas and their eventual commit or
@@ -785,11 +786,11 @@ func (state *State) apply(event Event) error {
 		}
 
 		state.Retry = RetryState{
-			Active:   true,
-			Attempt:  payload.Attempt,
-			Max:      payload.Max,
-			Reason:   payload.Reason,
-			Deadline: event.Time.Add(time.Duration(payload.DelayMillis) * time.Millisecond),
+			Active:     true,
+			Attempt:    payload.Attempt,
+			MaxRetries: payload.MaxRetries,
+			Reason:     payload.Reason,
+			Deadline:   event.Time.Add(time.Duration(payload.DelayMillis) * time.Millisecond),
 		}
 	case ToolStarted:
 		if _, err := state.activeRun(event.RunID); err != nil {

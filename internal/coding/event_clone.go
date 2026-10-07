@@ -236,14 +236,14 @@ func toolCallFromAI(call ai.ToolCallPart) ToolCall {
 }
 
 // modelRetryFromAI projects one retry notice. The notice is progress, not
-// output: it carries no content, so the projection only has to keep the attempt
+// output: it carries no content, so the projection only has to keep the retry
 // arithmetic inside the range the event contract accepts.
 func modelRetryFromAI(turn int, notice *ai.RetryNotice) ModelRetry {
 	retry := ModelRetry{Turn: turn}
 
 	if notice != nil {
 		retry.Attempt = notice.Attempt
-		retry.Max = notice.Max
+		retry.MaxRetries = notice.MaxRetries
 		retry.DelayMillis = notice.Delay.Milliseconds()
 		retry.Reason = notice.Reason
 	}
@@ -252,8 +252,8 @@ func modelRetryFromAI(turn int, notice *ai.RetryNotice) ModelRetry {
 		retry.Attempt = 1
 	}
 
-	if retry.Max < retry.Attempt {
-		retry.Max = retry.Attempt
+	if retry.MaxRetries < retry.Attempt {
+		retry.MaxRetries = retry.Attempt
 	}
 
 	if retry.DelayMillis < 0 {

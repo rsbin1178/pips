@@ -165,22 +165,67 @@ func TestResolveActivity(t *testing.T) {
 			name: "retrying a stream counts down the wait",
 			context: activityContext{
 				state: withRetry(running, coding.RetryState{
-					Active: true, Attempt: 2, Max: 6, Reason: "stream ended early",
+					Active: true, Attempt: 2, MaxRetries: 6, Reason: "stream ended early",
 					Deadline: retryTestTime.Add(4 * time.Second),
 				}),
 				now: retryTestTime,
 			},
 			kind:  activityRetrying,
-			label: activityLabelRetrying, detail: "attempt 2/6 · in 4s · stream ended early",
+			label: activityLabelRetrying, detail: "retry 2/6 · in 4s · stream ended early",
 			visible: true,
 		},
 		{
 			name: "retrying without a clock shows the attempt only",
 			context: activityContext{state: withRetry(running, coding.RetryState{
-				Active: true, Attempt: 1, Max: 2,
+				Active: true, Attempt: 1, MaxRetries: 2,
 			})},
-			kind: activityRetrying, label: activityLabelRetrying, detail: "attempt 1/2",
+			kind: activityRetrying, label: activityLabelRetrying, detail: "retry 1/2",
 			visible: true,
+		},
+		{
+			name: "waiting when the model goes quiet",
+			context: activityContext{
+				state:            running,
+				now:              retryTestTime,
+				lastModelEventAt: retryTestTime.Add(-25 * time.Second),
+			},
+			kind: activityWaiting, label: activityLabelWaiting, detail: "no data for 25s",
+			visible: true,
+		},
+		{
+			name: "recent model data is not a stall",
+			context: activityContext{
+				state:            running,
+				now:              retryTestTime,
+				lastModelEventAt: retryTestTime.Add(-5 * time.Second),
+			},
+			kind: activityThinking, label: activityLabelThinking, visible: true,
+		},
+		{
+			name: "a running tool outranks a quiet model",
+			context: activityContext{
+				state: withTools(running, coding.ToolState{
+					Call: coding.ToolCall{
+						ID: "call-1", Name: "shell", Arguments: ai.JSON(`{"command":"make test"}`),
+					},
+					Status: coding.ToolStatusRunning,
+				}),
+				now:              retryTestTime,
+				lastModelEventAt: retryTestTime.Add(-90 * time.Second),
+			},
+			kind: activityTool, label: "Running…", detail: "make test", visible: true,
+		},
+		{
+			name: "no open turn means no stall report",
+			context: activityContext{
+				state: withDraft(
+					working,
+					coding.MessageDelta{Kind: ai.StreamTextDelta, Text: "done"},
+				),
+				now:              retryTestTime,
+				lastModelEventAt: retryTestTime.Add(-90 * time.Second),
+			},
+			kind: activityResponding, label: activityLabelResponding, visible: true,
 		},
 		{
 			name: "interrupting takes priority", context: activityContext{
@@ -650,6 +695,7 @@ func TestActivityLabelsRemainSingleLine(t *testing.T) {
 		activityLabelRecovery,
 		activityLabelCompacting,
 		activityLabelRetrying,
+		activityLabelWaiting,
 		activityLabelInterrupting,
 	} {
 		assert.False(t, strings.ContainsAny(label, "\r\n"))

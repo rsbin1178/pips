@@ -2,6 +2,8 @@ package ai_test
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"net"
@@ -111,6 +113,23 @@ func TestIsRetryable(t *testing.T) {
 		},
 		{"plain transport error", errors.New("connection reset by peer"), true},
 		{"wrapped rate limit", fmt.Errorf("call: %w", ai.NewError(ai.ProviderOpenAI, 429, "x")), true},
+		{
+			// A certificate the client cannot verify is the user's to fix, so
+			// it is reported on the first attempt instead of being replayed.
+			"certificate verification",
+			&url.Error{Op: "Post", URL: "https://example.invalid", Err: &tls.CertificateVerificationError{}},
+			false,
+		},
+		{
+			"unknown authority",
+			fmt.Errorf("dial: %w", x509.UnknownAuthorityError{}),
+			false,
+		},
+		{
+			"certificate hostname mismatch",
+			x509.HostnameError{Certificate: &x509.Certificate{}, Host: "example.invalid"},
+			false,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

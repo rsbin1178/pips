@@ -85,8 +85,8 @@ func TestRuntimeReissuesInterruptedStreamAndReportsTheWait(t *testing.T) {
 	}
 
 	require.Len(t, notices, 1)
-	assert.Equal(t, 2, notices[0].Attempt, "the notice names the attempt about to start")
-	assert.Equal(t, streamRecoveryAttempts+1, notices[0].Max)
+	assert.Equal(t, 1, notices[0].Attempt, "the notice counts retries, not tries")
+	assert.Equal(t, streamRecoveryAttempts, notices[0].MaxRetries)
 	assert.Equal(t, "stream ended early", notices[0].Reason)
 	assert.Contains(t, eventTypes(events), EventMessageDiscarded,
 		"the partial candidate is retracted before the re-issue")

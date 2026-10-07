@@ -318,13 +318,13 @@ type MessageDiscarded struct {
 // ModelRetry reports that a model request is being re-attempted after a
 // retryable failure. It is progress, not output: nothing is added to the
 // transcript, and the attempt in flight replaces the one that failed. Attempt
-// is the 1-based attempt about to start, Max is the highest attempt number
-// available, DelayMillis is the backoff before it, and Reason is a short,
-// content-free cause.
+// is the 1-based ordinal of the retry about to start, MaxRetries is the retry
+// budget available, DelayMillis is the backoff before it, and Reason is a
+// short, content-free cause.
 type ModelRetry struct {
 	Turn        int    `json:"turn,omitempty"`
 	Attempt     int    `json:"attempt"`
-	Max         int    `json:"max"`
+	MaxRetries  int    `json:"max_retries"`
 	DelayMillis int64  `json:"delay_ms"`
 	Reason      string `json:"reason,omitempty"`
 }
@@ -2112,8 +2112,8 @@ func validateModelRetryPayload(retry ModelRetry) error {
 		return errors.New("retry turn must not be negative")
 	case retry.Attempt < 1:
 		return errors.New("retry attempt must be positive")
-	case retry.Max < retry.Attempt:
-		return errors.New("retry max must cover the attempt")
+	case retry.MaxRetries < retry.Attempt:
+		return errors.New("retry budget must cover the attempt")
 	case retry.DelayMillis < 0:
 		return errors.New("retry delay must not be negative")
 	case !validBoundedText(retry.Reason, maxDiagnosticMessage, true):

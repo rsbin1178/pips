@@ -2,6 +2,8 @@ package ai
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -134,6 +136,11 @@ func IsRetryable(err error) bool {
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		// The caller's context is gone; retrying under it cannot succeed.
 		return false
+	case isCertificateFailure(err):
+		// A certificate the client cannot verify is not transient: the caller
+		// has to fix it, so report it on the first attempt. Transient TLS
+		// conditions (handshake timeouts, resets) stay retryable.
+		return false
 	case errors.Is(err, ErrRateLimited), errors.Is(err, ErrOverloaded):
 		return true
 	case errors.Is(err, ErrAuth), errors.Is(err, ErrInvalidRequest), errors.Is(err, ErrUnsupported):
@@ -151,24 +158,44 @@ func IsRetryable(err error) bool {
 	return true
 }
 
-// NewRetryNotice builds the notice for an attempt that is about to start after
-// err. The reason is classified provider-neutrally, so the same failure renders
-// the same way whoever re-issues the request: the retry middleware or an agent
-// loop replaying a turn.
-func NewRetryNotice(attempt, maxAttempts int, delay time.Duration, err error) *RetryNotice {
+// isCertificateFailure reports whether err is a certificate validation failure
+// rather than a transient TLS condition.
+func isCertificateFailure(err error) bool {
+	var verification *tls.CertificateVerificationError
+	if errors.As(err, &verification) {
+		return true
+	}
+
+	var (
+		unknownAuthority x509.UnknownAuthorityError
+		hostname         x509.HostnameError
+		invalid          x509.CertificateInvalidError
+	)
+
+	return errors.As(err, &unknownAuthority) ||
+		errors.As(err, &hostname) ||
+		errors.As(err, &invalid)
+}
+
+// NewRetryNotice builds the notice for the retry that is about to start after
+// err. attempt is its 1-based ordinal and budget is the number of retries
+// available. The reason is classified provider-neutrally, so the same failure
+// renders the same way whoever re-issues the request: the retry middleware or
+// an agent loop replaying a turn.
+func NewRetryNotice(attempt, budget int, delay time.Duration, err error) *RetryNotice {
 	if attempt < 1 {
 		attempt = 1
 	}
 
-	if maxAttempts < attempt {
-		maxAttempts = attempt
+	if budget < attempt {
+		budget = attempt
 	}
 
 	return &RetryNotice{
-		Attempt: attempt,
-		Max:     maxAttempts,
-		Delay:   delay,
-		Reason:  retryReason(err),
+		Attempt:    attempt,
+		MaxRetries: budget,
+		Delay:      delay,
+		Reason:     retryReason(err),
 	}
 }
 

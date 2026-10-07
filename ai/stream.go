@@ -103,11 +103,15 @@ type StreamEvent struct {
 // RetryNotice describes an attempt that is about to start after a retryable
 // failure. It is display metadata: a consumer may render it, ignore it, or
 // store it, and none of that changes the response being assembled.
+//
+// The counters follow the convention the other agent frontends use: Attempt is
+// the retry ordinal — 1 for the first replay — and MaxRetries is the retry
+// budget, so "1/10" reads as the first of at most ten replays.
 type RetryNotice struct {
-	// Attempt is the 1-based number of the attempt that is about to start.
+	// Attempt is the 1-based ordinal of the retry that is about to start.
 	Attempt int
-	// Max is the highest attempt number available, so Attempt <= Max.
-	Max int
+	// MaxRetries is the budget of retries available, so Attempt <= MaxRetries.
+	MaxRetries int
 	// Delay is the backoff before the next attempt starts.
 	Delay time.Duration
 	// Reason is a short, provider-neutral cause, safe to display as-is.

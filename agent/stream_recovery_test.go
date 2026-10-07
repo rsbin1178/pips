@@ -115,8 +115,8 @@ func TestStreamRecoveryReissuesTurnAfterPartialOutput(t *testing.T) {
 	}, types)
 
 	require.NotNil(t, notice)
-	assert.Equal(t, 2, notice.Attempt, "the notice names the attempt about to start")
-	assert.Equal(t, 2, notice.Max)
+	assert.Equal(t, 1, notice.Attempt, "the notice counts retries, not tries")
+	assert.Equal(t, 1, notice.MaxRetries)
 	assert.Equal(t, time.Millisecond, notice.Delay)
 	assert.Equal(t, "stream ended early", notice.Reason)
 
@@ -157,8 +157,8 @@ func TestStreamRecoveryGivesUpAfterBoundedAttempts(t *testing.T) {
 	_, notice, err := collectStream(t, a, agent.NewSession())
 	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
 	require.NotNil(t, notice)
-	assert.Equal(t, 3, notice.Attempt)
-	assert.Equal(t, 3, notice.Max)
+	assert.Equal(t, 2, notice.Attempt)
+	assert.Equal(t, 2, notice.MaxRetries)
 	assert.Equal(t, int32(3), model.calls.Load(), "one try plus two re-issues")
 }
 

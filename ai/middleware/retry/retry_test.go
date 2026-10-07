@@ -191,8 +191,8 @@ func TestStreamAnnouncesRetryBeforeReattempt(t *testing.T) {
 	}
 
 	require.Len(t, notices, 1)
-	assert.Equal(t, 2, notices[0].Attempt, "the notice names the attempt about to start")
-	assert.Equal(t, 3, notices[0].Max)
+	assert.Equal(t, 1, notices[0].Attempt, "the notice counts retries, not tries")
+	assert.Equal(t, 2, notices[0].MaxRetries)
 	assert.Equal(t, "provider overloaded", notices[0].Reason)
 	require.Len(t, delays, 1)
 	assert.Equal(t, delays[0], notices[0].Delay, "the advertised wait is the wait performed")

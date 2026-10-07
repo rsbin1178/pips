@@ -143,11 +143,11 @@ func (m *model) Stream(ctx context.Context, req ai.Request) ai.Stream {
 			}
 
 			delay := m.backoff(attempt, err)
-			// attempt is zero-based, so the attempt about to start is
-			// attempt+2 in the 1-based numbering the notice reports.
+			// attempt is zero-based, so this is retry attempt+1 of the
+			// maxAttempts-1 replays the configuration allows.
 			if !yield(ai.StreamEvent{
 				Type:  ai.StreamRetry,
-				Retry: ai.NewRetryNotice(attempt+2, m.cfg.maxAttempts, delay, err),
+				Retry: ai.NewRetryNotice(attempt+1, m.cfg.maxAttempts-1, delay, err),
 			}, nil) {
 				return
 			}

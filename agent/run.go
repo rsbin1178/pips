@@ -597,13 +597,13 @@ func (r *run) callTurn(
 // retryNotice announces the re-issue that is about to start. The loop reports
 // the wait on the same stream channel the retry middleware uses, so a frontend
 // renders one kind of notice whichever layer replays the request. Attempt is
-// the try about to start, counting the loop's own first call as attempt one.
+// the 1-based ordinal of this re-issue against the loop's re-issue budget.
 func retryNotice(turn, attempt, recoveryAttempts int, delay time.Duration, err error) ModelStreamEvent {
 	return ModelStreamEvent{
 		Turn: turn,
 		Event: ai.StreamEvent{
 			Type:  ai.StreamRetry,
-			Retry: ai.NewRetryNotice(attempt+2, recoveryAttempts+1, delay, err),
+			Retry: ai.NewRetryNotice(attempt+1, recoveryAttempts, delay, err),
 		},
 	}
 }

@@ -30,6 +30,7 @@ const (
 	activityRecovery
 	activityCompacting
 	activityRetrying
+	activityWaiting
 	activityPaused
 	activityInterrupting
 )
@@ -45,9 +46,16 @@ const (
 	activityLabelRecovery     = "Waiting for recovery…"
 	activityLabelCompacting   = "Compacting context…"
 	activityLabelRetrying     = "Retrying…"
+	activityLabelWaiting      = "Waiting for the model…"
 	activityLabelPaused       = "Paused…"
 	activityLabelInterrupting = "Interrupting…"
 )
+
+// modelStallThreshold is how long an open turn may go without carrying any
+// model progress before the activity row says so. A gateway that buffers a
+// response looks identical to a dead one without this signal; twenty seconds is
+// the threshold the other agent frontends use.
+const modelStallThreshold = 20 * time.Second
 
 type activityStatus struct {
 	kind   activityKind
@@ -63,6 +71,20 @@ type activityContext struct {
 	isResolvingAllowedApproval bool
 	// now anchors a retry countdown. A zero time renders the notice without one.
 	now time.Time
+	// lastModelEventAt is when the parent stream last carried model progress.
+	// Together with now it tells a slow model from a silent one.
+	lastModelEventAt time.Time
+}
+
+// modelIdle is how long an open turn has gone without model progress. Zero
+// means there is nothing to report: no turn is live, or the caller does not
+// track arrival times at all (a test, or a non-interactive frontend).
+func (context activityContext) modelIdle() time.Duration {
+	if context.now.IsZero() || context.lastModelEventAt.IsZero() || !hasOpenTurn(context.state.Runs) {
+		return 0
+	}
+
+	return context.now.Sub(context.lastModelEventAt)
 }
 
 var activitySpinner = spinner.Spinner{
@@ -311,11 +333,12 @@ func resolveBlockingActivity(context activityContext) (activityStatus, bool) {
 	return activityStatus{}, false
 }
 
-// retryActivityDetail spells out how much of the retry budget is spent, how
-// long the wait is, and why the request is being re-attempted, so a viewer can
-// tell a slow retry from a stall.
+// retryActivityDetail spells out where the retry stands, how long the wait is,
+// and why the request is being re-attempted, so a viewer can tell a slow retry
+// from a stall. The counter reads "retry 2/10": the second replay of a budget
+// of ten, which is how the other agent frontends count them.
 func retryActivityDetail(retry coding.RetryState, now time.Time) string {
-	detail := fmt.Sprintf("attempt %d/%d", retry.Attempt, retry.Max)
+	detail := fmt.Sprintf("retry %d/%d", retry.Attempt, retry.MaxRetries)
 
 	if !now.IsZero() {
 		if remaining := retry.Deadline.Sub(now).Round(time.Second); remaining >= time.Second {
@@ -351,6 +374,14 @@ func resolveProgressActivity(context activityContext) (activityStatus, bool) {
 		return activityStatus{
 			kind: activityTool, label: activityLabelTools,
 			detail: fmt.Sprintf("%d active", len(activities)),
+		}, true
+	}
+
+	if idle := context.modelIdle(); idle >= modelStallThreshold {
+		return activityStatus{
+			kind:   activityWaiting,
+			label:  activityLabelWaiting,
+			detail: "no data for " + idle.Round(time.Second).String(),
 		}, true
 	}
 
@@ -502,6 +533,8 @@ func activityColor(kind activityKind, palette colorPalette) color.Color {
 	case activityApproval, activityRecovery, activityPaused, activityInterrupting:
 		return palette.warning
 	case activityRetrying:
+		return palette.warning
+	case activityWaiting:
 		return palette.warning
 	case activityUnknown:
 		return palette.muted

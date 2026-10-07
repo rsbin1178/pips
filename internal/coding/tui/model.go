@@ -191,7 +191,11 @@ type Model struct {
 	// observedSequence is the sequence of the last parent-Session event
 	// delivered to this Model. It is not the projection's sequence: an adopted
 	// Runtime snapshot can legitimately be ahead of the delivered records.
-	observedSequence    uint64
+	observedSequence uint64
+	// lastModelEventAt is when the parent stream last carried model progress: a
+	// new turn, a streaming delta, or a retry notice. The activity row uses it
+	// to report a silent model instead of looking merely slow.
+	lastModelEventAt    time.Time
 	starting            bool
 	cancelStart         bool
 	waiting             bool
@@ -2009,6 +2013,7 @@ func (m *Model) activityStatus() (activityStatus, bool) {
 		isCanceling:                m.canceling,
 		isResolvingAllowedApproval: m.mainApprovalExecutionStarting(),
 		now:                        time.Now(),
+		lastModelEventAt:           m.lastModelEventAt,
 	})
 }
 
@@ -2790,6 +2795,22 @@ func (m *Model) streamBatchRefresh(batch []streamItem) []tea.Cmd {
 	return append(refresh, m.loadPlanViewIfNeeded())
 }
 
+// modelProgressObserved reports whether a frame carried anything that shows the
+// model is working: a new interaction, run, or turn, a streaming delta, or a
+// retry notice. Tool lifecycle events deliberately do not count, because a
+// running tool owns the activity row on its own.
+func modelProgressObserved(events []coding.Event) bool {
+	for _, event := range events {
+		switch event.Type {
+		case coding.EventInteractionStarted, coding.EventRunStarted, coding.EventTurnStarted,
+			coding.EventMessageDelta, coding.EventModelRetry:
+			return true
+		}
+	}
+
+	return false
+}
+
 // advanceParentState applies one frame of parent-Session events to m.state and
 // reports whether the projection can still be rendered.
 func (m *Model) advanceParentState(items []streamItem) bool {
@@ -2802,6 +2823,10 @@ func (m *Model) advanceParentState(items []streamItem) bool {
 
 	if len(events) == 0 {
 		return true
+	}
+
+	if modelProgressObserved(events) {
+		m.lastModelEventAt = time.Now()
 	}
 
 	if m.runtimeState && m.controller != nil {

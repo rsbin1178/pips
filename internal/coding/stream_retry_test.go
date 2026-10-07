@@ -49,12 +49,12 @@ func retryEvents(extra ...Event) []Event {
 func TestReduceModelRetryTracksWaitUntilTheNextEvent(t *testing.T) {
 	t.Parallel()
 
-	notice := ModelRetry{Turn: 1, Attempt: 2, Max: 3, DelayMillis: 4_000, Reason: "stream ended early"}
+	notice := ModelRetry{Turn: 1, Attempt: 2, MaxRetries: 3, DelayMillis: 4_000, Reason: "stream ended early"}
 
 	waiting := reduceAll(t, retryEvents(newTestEvent(EventModelRetry, notice)))
 	require.True(t, waiting.Retry.Active)
 	assert.Equal(t, 2, waiting.Retry.Attempt)
-	assert.Equal(t, 3, waiting.Retry.Max)
+	assert.Equal(t, 3, waiting.Retry.MaxRetries)
 	assert.Equal(t, "stream ended early", waiting.Retry.Reason)
 	assert.Equal(t, eventTestTime.Add(4*time.Second), waiting.Retry.Deadline,
 		"the deadline anchors the countdown a frontend renders")
@@ -78,7 +78,7 @@ func TestReduceBatchEndsTheWaitWhenADeltaFollows(t *testing.T) {
 	prefix := retryEvents()
 	state := reduceAll(t, prefix)
 
-	notice := newTestEvent(EventModelRetry, ModelRetry{Turn: 1, Attempt: 2, Max: 3, Reason: "connection error"})
+	notice := newTestEvent(EventModelRetry, ModelRetry{Turn: 1, Attempt: 2, MaxRetries: 3, Reason: "connection error"})
 	notice.Sequence = uint64(len(prefix) + 1)
 
 	waiting, err := ReduceBatch(state, []Event{notice})
@@ -107,7 +107,7 @@ func TestReduceModelRetryRequiresAnActiveTurn(t *testing.T) {
 		newInteractionEvent(EventInteractionStarted, InteractionStarted{}),
 		newStatusEvent(EventStatusChanged, StatusChanged{Phase: PhaseRunning}),
 		newTestEvent(EventRunStarted, RunStarted{Agent: "coding"}),
-		newTestEvent(EventModelRetry, ModelRetry{Turn: 1, Attempt: 1, Max: 1}),
+		newTestEvent(EventModelRetry, ModelRetry{Turn: 1, Attempt: 1, MaxRetries: 1}),
 	}
 
 	prefix := events[:len(events)-1]
@@ -124,7 +124,7 @@ func TestModelRetryEventRoundTripsAndRejectsMalformedPayloads(t *testing.T) {
 	t.Parallel()
 
 	event := newTestEvent(EventModelRetry, ModelRetry{
-		Turn: 1, Attempt: 2, Max: 6, DelayMillis: 1_500, Reason: "connection error",
+		Turn: 1, Attempt: 2, MaxRetries: 6, DelayMillis: 1_500, Reason: "connection error",
 	})
 	require.NoError(t, ValidateEvent(event))
 
@@ -137,17 +137,17 @@ func TestModelRetryEventRoundTripsAndRejectsMalformedPayloads(t *testing.T) {
 	assert.Equal(t, event.Payload, decoded.Payload)
 
 	bad := []ModelRetry{
-		{Turn: 1, Attempt: 0, Max: 1}, // no attempt number
-		{Turn: 1, Attempt: 3, Max: 2}, // unreachable attempt
-		{Turn: 1, Attempt: 1, Max: 1, DelayMillis: -1},
-		{Turn: -1, Attempt: 1, Max: 1}, // negative turn
-		{Turn: 1, Attempt: 1, Max: 1, Reason: strings.Repeat("x", maxDiagnosticMessage+1)},
+		{Turn: 1, Attempt: 0, MaxRetries: 1}, // no attempt number
+		{Turn: 1, Attempt: 3, MaxRetries: 2}, // unreachable attempt
+		{Turn: 1, Attempt: 1, MaxRetries: 1, DelayMillis: -1},
+		{Turn: -1, Attempt: 1, MaxRetries: 1}, // negative turn
+		{Turn: 1, Attempt: 1, MaxRetries: 1, Reason: strings.Repeat("x", maxDiagnosticMessage+1)},
 	}
 	for _, payload := range bad {
 		assert.ErrorIs(t, ValidateEvent(newTestEvent(EventModelRetry, payload)), ErrInvalidEvent)
 	}
 
-	assert.ErrorIs(t, ValidateEvent(newTestEvent(EventMessageDelta, ModelRetry{Attempt: 1, Max: 1})),
+	assert.ErrorIs(t, ValidateEvent(newTestEvent(EventMessageDelta, ModelRetry{Attempt: 1, MaxRetries: 1})),
 		ErrInvalidEvent, "the payload must not ride another type")
 }
 
@@ -178,7 +178,7 @@ func TestAgentProjectorMapsModelStreamRetryToModelRetryEvent(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, 1, retry.Turn)
 	assert.Equal(t, 2, retry.Attempt)
-	assert.Equal(t, 6, retry.Max)
+	assert.Equal(t, 6, retry.MaxRetries)
 	assert.Equal(t, int64(4_000), retry.DelayMillis)
 	assert.Equal(t, "stream ended early", retry.Reason)
 }
