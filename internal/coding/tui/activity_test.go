@@ -5,6 +5,7 @@ import (
 	"iter"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -159,6 +160,27 @@ func TestResolveActivity(t *testing.T) {
 		{
 			name: "compaction", context: activityContext{state: withCompaction(running)},
 			kind: activityCompacting, label: activityLabelCompacting, visible: true,
+		},
+		{
+			name: "retrying a stream counts down the wait",
+			context: activityContext{
+				state: withRetry(running, coding.RetryState{
+					Active: true, Attempt: 2, Max: 6, Reason: "stream ended early",
+					Deadline: retryTestTime.Add(4 * time.Second),
+				}),
+				now: retryTestTime,
+			},
+			kind:  activityRetrying,
+			label: activityLabelRetrying, detail: "attempt 2/6 · in 4s · stream ended early",
+			visible: true,
+		},
+		{
+			name: "retrying without a clock shows the attempt only",
+			context: activityContext{state: withRetry(running, coding.RetryState{
+				Active: true, Attempt: 1, Max: 2,
+			})},
+			kind: activityRetrying, label: activityLabelRetrying, detail: "attempt 1/2",
+			visible: true,
 		},
 		{
 			name: "interrupting takes priority", context: activityContext{
@@ -608,6 +630,15 @@ func withCompaction(state coding.State) coding.State {
 	return state
 }
 
+// retryTestTime anchors a retry countdown so the rendered detail is exact.
+var retryTestTime = time.Date(2026, time.July, 21, 8, 30, 0, 0, time.UTC)
+
+func withRetry(state coding.State, retry coding.RetryState) coding.State {
+	state.Retry = retry
+
+	return state
+}
+
 func TestActivityLabelsRemainSingleLine(t *testing.T) {
 	t.Parallel()
 
@@ -618,6 +649,7 @@ func TestActivityLabelsRemainSingleLine(t *testing.T) {
 		activityLabelApproval,
 		activityLabelRecovery,
 		activityLabelCompacting,
+		activityLabelRetrying,
 		activityLabelInterrupting,
 	} {
 		assert.False(t, strings.ContainsAny(label, "\r\n"))

@@ -3,6 +3,7 @@ package ai
 import (
 	"iter"
 	"strings"
+	"time"
 )
 
 // Stream is a sequence of streaming events. Iterate with range; breaking out
@@ -23,6 +24,8 @@ type StreamEventType string
 // Stream event types, in the order a well-formed stream produces them:
 // one message_start; any interleaving of text_delta, reasoning_delta, and
 // tool_call_start/tool_call_delta/tool_call_end groups; one message_end.
+// A retry event may appear anywhere before message_end: it reports that the
+// request is being re-attempted, and it is not model output.
 const (
 	// StreamMessageStart opens the response; it carries Provider, ID, and
 	// Model.
@@ -46,6 +49,11 @@ const (
 	// StreamMessageEnd closes the response; it carries FinishReason and,
 	// when the provider reports it, Usage. It may also carry Grounding.
 	StreamMessageEnd StreamEventType = "message_end"
+	// StreamRetry reports that a retryable failure ended the attempt in
+	// flight and a new attempt is starting. It carries [StreamEvent.Retry]
+	// and no model output; consumers keep whatever they already received and
+	// report the wait instead of treating the failure as terminal.
+	StreamRetry StreamEventType = "retry"
 )
 
 // StreamEvent is one normalized increment of a streaming response. Only the
@@ -87,12 +95,29 @@ type StreamEvent struct {
 	Usage        *Usage
 	Grounding    *GroundingMetadata
 	Warnings     []Warning
+
+	// Retry is set on retry events and nil for every other type.
+	Retry *RetryNotice
+}
+
+// RetryNotice describes an attempt that is about to start after a retryable
+// failure. It is display metadata: a consumer may render it, ignore it, or
+// store it, and none of that changes the response being assembled.
+type RetryNotice struct {
+	// Attempt is the 1-based number of the attempt that is about to start.
+	Attempt int
+	// Max is the highest attempt number available, so Attempt <= Max.
+	Max int
+	// Delay is the backoff before the next attempt starts.
+	Delay time.Duration
+	// Reason is a short, provider-neutral cause, safe to display as-is.
+	Reason string
 }
 
 // Collect drains a stream and assembles the complete [Response], preserving
 // part order (text, reasoning, and tool calls appear where they occurred).
 // On mid-stream failure it returns the partial response together with the
-// error.
+// error. Retry events are ignored: they report a wait, not output.
 func Collect(stream Stream) (*Response, error) {
 	acc := newAccumulator()
 
@@ -175,6 +200,9 @@ func (a *accumulator) add(ev StreamEvent) {
 		if ev.Citation != nil {
 			a.resp.Citations = append(a.resp.Citations, *ev.Citation)
 		}
+	case StreamRetry:
+		// A retry notice carries no output and must not close an open text or
+		// reasoning part, so the accumulated response is unchanged.
 	case StreamMessageEnd:
 		a.finish(ev)
 	}

@@ -164,6 +164,8 @@ func decodeEventPayload(eventType EventType, data []byte) (EventPayload, error) 
 		return decodePayload[MessageDelta](data)
 	case EventMessageDiscarded:
 		return decodePayload[MessageDiscarded](data)
+	case EventModelRetry:
+		return decodePayload[ModelRetry](data)
 	case EventToolStarted:
 		return decodePayload[ToolStarted](data)
 	case EventToolUpdated:

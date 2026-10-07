@@ -29,6 +29,7 @@ const (
 	activityApproval
 	activityRecovery
 	activityCompacting
+	activityRetrying
 	activityPaused
 	activityInterrupting
 )
@@ -43,6 +44,7 @@ const (
 	activityLabelApproval     = "Waiting for approval…"
 	activityLabelRecovery     = "Waiting for recovery…"
 	activityLabelCompacting   = "Compacting context…"
+	activityLabelRetrying     = "Retrying…"
 	activityLabelPaused       = "Paused…"
 	activityLabelInterrupting = "Interrupting…"
 )
@@ -59,6 +61,8 @@ type activityContext struct {
 	hasBridge                  bool
 	isCanceling                bool
 	isResolvingAllowedApproval bool
+	// now anchors a retry countdown. A zero time renders the notice without one.
+	now time.Time
 }
 
 var activitySpinner = spinner.Spinner{
@@ -293,7 +297,37 @@ func resolveBlockingActivity(context activityContext) (activityStatus, bool) {
 		}, true
 	}
 
+	if context.state.Retry.Active {
+		return activityStatus{
+			kind:  activityRetrying,
+			label: activityLabelRetrying,
+			detail: retryActivityDetail(
+				context.state.Retry,
+				context.now,
+			),
+		}, true
+	}
+
 	return activityStatus{}, false
+}
+
+// retryActivityDetail spells out how much of the retry budget is spent, how
+// long the wait is, and why the request is being re-attempted, so a viewer can
+// tell a slow retry from a stall.
+func retryActivityDetail(retry coding.RetryState, now time.Time) string {
+	detail := fmt.Sprintf("attempt %d/%d", retry.Attempt, retry.Max)
+
+	if !now.IsZero() {
+		if remaining := retry.Deadline.Sub(now).Round(time.Second); remaining >= time.Second {
+			detail += " · in " + remaining.String()
+		}
+	}
+
+	if retry.Reason != "" {
+		detail += " · " + retry.Reason
+	}
+
+	return detail
 }
 
 func resolveProgressActivity(context activityContext) (activityStatus, bool) {
@@ -466,6 +500,8 @@ func activityColor(kind activityKind, palette colorPalette) color.Color {
 	case activityTool:
 		return palette.idle
 	case activityApproval, activityRecovery, activityPaused, activityInterrupting:
+		return palette.warning
+	case activityRetrying:
 		return palette.warning
 	case activityUnknown:
 		return palette.muted

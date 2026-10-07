@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 )
@@ -148,4 +149,43 @@ func IsRetryable(err error) bool {
 	// Bare (non-*Error) errors reaching the retry layer are transport errors
 	// such as connection resets or timeouts.
 	return true
+}
+
+// NewRetryNotice builds the notice for an attempt that is about to start after
+// err. The reason is classified provider-neutrally, so the same failure renders
+// the same way whoever re-issues the request: the retry middleware or an agent
+// loop replaying a turn.
+func NewRetryNotice(attempt, maxAttempts int, delay time.Duration, err error) *RetryNotice {
+	if attempt < 1 {
+		attempt = 1
+	}
+
+	if maxAttempts < attempt {
+		maxAttempts = attempt
+	}
+
+	return &RetryNotice{
+		Attempt: attempt,
+		Max:     maxAttempts,
+		Delay:   delay,
+		Reason:  retryReason(err),
+	}
+}
+
+// retryReason renders the failure class a frontend shows next to the wait. It
+// stays a short phrase: the provider's own wording belongs to the terminal
+// error, which still carries the full chain.
+func retryReason(err error) string {
+	switch {
+	case errors.Is(err, ErrRateLimited):
+		return "rate limited"
+	case errors.Is(err, ErrOverloaded):
+		return "provider overloaded"
+	case errors.Is(err, io.ErrUnexpectedEOF), errors.Is(err, io.EOF):
+		return "stream ended early"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "request timed out"
+	default:
+		return "connection error"
+	}
 }

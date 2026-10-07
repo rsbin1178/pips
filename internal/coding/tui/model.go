@@ -2008,6 +2008,7 @@ func (m *Model) activityStatus() (activityStatus, bool) {
 		hasBridge:                  m.bridge != nil,
 		isCanceling:                m.canceling,
 		isResolvingAllowedApproval: m.mainApprovalExecutionStarting(),
+		now:                        time.Now(),
 	})
 }
 
