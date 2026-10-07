@@ -102,6 +102,11 @@ type transcriptStore struct {
 	// liveRowsHashed counts the live record's rows read since the last reset, so
 	// tests can assert that a frame's revision does not read them.
 	liveRowsHashed int
+	// materializations counts records whose rows were rendered (fresh or after a
+	// release) since the last reset, and rowsMaterialized the rows they produced,
+	// so a test can tell a windowed frame from a whole-document one.
+	materializations int
+	rowsMaterialized int
 }
 
 // transcriptEntry is one projected entry offered to the store. A record that is
@@ -118,6 +123,8 @@ type transcriptEntry struct {
 func (s *transcriptStore) resetRenders() {
 	s.renders = 0
 	s.evictions = 0
+	s.materializations = 0
+	s.rowsMaterialized = 0
 }
 
 // keyMatches reports whether the resident rows are still valid for this
@@ -402,6 +409,8 @@ func (s *transcriptStore) materialize(record *transcriptRecord) {
 	record.rows = s.render(record.block)
 	record.lines = len(record.rows)
 	record.loaded = true
+	s.materializations++
+	s.rowsMaterialized += len(record.rows)
 }
 
 // render produces one block's rows at the store's current geometry.

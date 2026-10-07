@@ -171,11 +171,19 @@ type Model struct {
 	frameRenders  int
 	// frameExtends counts committed prefixes the append path extended instead of
 	// rebuilding, so a test can tell an incremental commit frame from a full one.
-	frameExtends     int
-	bridge           *eventBridge
-	subscription     *subscriptionBridge
-	subscriptionSeq  uint64
-	subscriptionMode bool
+	frameExtends int
+	// streamDeliveries and subscriptionDeliveries count the messages the event
+	// loop handled on each bridge, and streamItems the drained records they
+	// carried, so a test can tell per-event delivery from per-batch delivery.
+	// streamBatches counts the drained updates that applied a batch.
+	streamDeliveries       int
+	subscriptionDeliveries int
+	streamItems            int
+	streamBatches          int
+	bridge                 *eventBridge
+	subscription           *subscriptionBridge
+	subscriptionSeq        uint64
+	subscriptionMode       bool
 	// runtimeState marks a subscription to a controller that reduces events
 	// itself, so the parent projection is read from the Runtime instead of
 	// being reduced a second time (route A of the single-reduction design).
@@ -2612,6 +2620,7 @@ func (m *Model) updateStream(message streamItemMsg) (tea.Model, tea.Cmd) {
 	}
 
 	m.waiting = false
+	m.streamDeliveries++
 	if !message.ok {
 		return m, m.finishStream()
 	}
@@ -2622,6 +2631,7 @@ func (m *Model) updateStream(message streamItemMsg) (tea.Model, tea.Cmd) {
 		// new, so the composed view stays current and View reuses it instead of
 		// re-styling the whole frame. A cache an unadopted invalidation took away
 		// is composed again rather than resurrected.
+		m.streamItems++
 		m.viewStable = true
 		m.waiting = true
 
@@ -2631,6 +2641,7 @@ func (m *Model) updateStream(message streamItemMsg) (tea.Model, tea.Cmd) {
 	batch := make([]streamItem, 0, streamBatchMax)
 	batch = append(batch, message.item)
 	batch = append(batch, message.bridge.drainBatch(streamBatchMax-1, streamBatchBudget)...)
+	m.streamItems += len(batch)
 
 	advanced := m.queueStreamBatch(batch)
 	if advanced {
@@ -2659,6 +2670,8 @@ func (m *Model) updateStream(message streamItemMsg) (tea.Model, tea.Cmd) {
 // approvals, errors, commits and session transitions keep their synchronous
 // boundary. It reports whether the parent state advanced during this update.
 func (m *Model) queueStreamBatch(batch []streamItem) bool {
+	m.streamBatches++
+
 	split := 0
 	for split < len(batch) && deferredTranscriptEvent(batch[split].event) {
 		split++
@@ -3056,6 +3069,8 @@ func (m *Model) updateSubscription(message subscriptionEventMsg) (tea.Model, tea
 		return m, m.startSubscription()
 	}
 
+	m.subscriptionDeliveries++
+
 	// Drain what is already queued so one MVU update advances a whole frame
 	// instead of one delta at a time.
 	batch := make([]streamItem, 0, streamBatchMax)
@@ -3063,6 +3078,7 @@ func (m *Model) updateSubscription(message subscriptionEventMsg) (tea.Model, tea
 	for _, record := range message.bridge.drainBatch(streamBatchMax-1, streamBatchBudget) {
 		batch = append(batch, streamItem{event: record.Event})
 	}
+	m.streamItems += len(batch)
 
 	activityWasVisible := m.activityClockVisible()
 	advanced := m.queueStreamBatch(batch)

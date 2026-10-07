@@ -58,6 +58,12 @@ type markdownRenderer struct {
 	// tests can assert that a streaming frame does not reprocess the whole body.
 	renderedBytes   int
 	thinkingWrapped int
+	// engineBuilds counts the documents that had to build a fresh glamour engine
+	// (goldmark parser + bluemonday), and uncachedRenders the documents that
+	// missed the content cache. A settled frame should build no engine; a
+	// streaming frame builds one only when it cannot reuse the live assembly.
+	engineBuilds    int
+	uncachedRenders int
 }
 
 func newMarkdownRenderer(capacity int) *markdownRenderer {
@@ -202,6 +208,7 @@ func (r *markdownRenderer) renderCached(
 // the stateful engine between concurrently rendered Models.
 func (r *markdownRenderer) renderUncached(content string, width int, theme colorTheme, noColor bool) (string, error) {
 	r.renderedBytes += len(content)
+	r.uncachedRenders++
 
 	key := markdownKey{width: max(1, width), theme: themeFingerprint(theme.fingerprint), noColor: noColor}
 	if r.engine == nil || r.engineKey != key {
@@ -213,6 +220,7 @@ func (r *markdownRenderer) renderUncached(content string, width int, theme color
 			return content, fmt.Errorf("coding tui: create markdown renderer: %w", err)
 		}
 		r.engine, r.engineKey = engine, key
+		r.engineBuilds++
 	}
 
 	rendered, err := r.engine.Render(content)
