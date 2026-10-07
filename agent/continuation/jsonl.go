@@ -188,7 +188,10 @@ func (store *JSONLStore) CompareAndSwap(
 
 	defer func() { _ = file.Close() }()
 
-	if err := file.Truncate(size); err != nil {
+	// Truncate by path rather than through the append handle: Windows opens an
+	// O_APPEND handle without GENERIC_WRITE, and SetEndOfFile requires it. The
+	// append handle writes at the new end of file either way.
+	if err := os.Truncate(path, size); err != nil {
 		return fmt.Errorf("continuation: truncate uncommitted execution tail: %w", err)
 	}
 
