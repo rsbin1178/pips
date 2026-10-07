@@ -200,9 +200,96 @@ func TestMarkdownEngineReleasesNestedAndOversizedBuffers(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, renderer.engine, "popped nested buffers must not remain in the engine")
 
-	_, err = renderer.render(strings.Repeat("long paragraph ", 5000), 100, themeDark, false)
+	// A flat document past the byte cap still releases the engine: it is not the
+	// block shape but the size that no longer earns reuse.
+	_, err = renderer.render(strings.Repeat("long paragraph ", 20000), 100, themeDark, false)
 	require.NoError(t, err)
 	assert.Nil(t, renderer.engine, "oversized buffers must not remain in the engine")
+}
+
+// TestMarkdownFlatDocumentsReuseTheEngine pins the seam's engine reuse: a flat
+// multi-paragraph document, which is exactly the shape of a live seam render, is
+// rendered on one reusable engine instead of rebuilding glamour's goldmark
+// parser and bluemonday policy for every frame.
+func TestMarkdownFlatDocumentsReuseTheEngine(t *testing.T) {
+	t.Parallel()
+
+	renderer := newMarkdownRenderer(128)
+	for index := range 20 {
+		source := fmt.Sprintf(
+			"Paragraph %d of a flat answer that keeps streaming.\n\nSecond paragraph of frame %d.",
+			index, index,
+		)
+		_, err := renderer.renderUncached(source, 60, themeDark, false)
+		require.NoError(t, err)
+	}
+
+	assert.Equal(t, 1, renderer.engineBuilds,
+		"a flat multi-paragraph document reuses one engine across every render")
+	assert.NotNil(t, renderer.engine)
+}
+
+// TestMarkdownEngineReuseAcrossDocumentsIsByteIdentical guards the reuse for
+// correctness: rendering a document after any other document on a reused engine
+// produces the bytes a fresh engine produces.
+func TestMarkdownEngineReuseAcrossDocumentsIsByteIdentical(t *testing.T) {
+	t.Parallel()
+
+	documents := []string{
+		"first flat paragraph.\n\nsecond flat paragraph.",
+		"another flat paragraph, still streaming",
+		"# Heading\n\nBody under the heading.",
+		"- item one\n- item two\n\nAfter the list.",
+		"Intro.\n\n> quoted\n\nAfter the quote.",
+		"| a | b |\n| - | - |\n| 1 | 2 |",
+		"```go\nfunc main() {}\n```",
+		"Intro.\n\nSee [target].\n\n[target]: https://example.com",
+		"一段中文说明。\n\n第二段中文说明。",
+		// A streamed body ends mid-word, so a frame's document can end on a space
+		// or carry a hard break; both are inline and must stay reusable.
+		"a paragraph whose stream stopped on a space ",
+		"line one  \nline two with a hard break",
+		"first paragraph.\n\nsecond paragraph ending on a space ",
+	}
+	for left, first := range documents {
+		for right, second := range documents {
+			reused := newMarkdownRenderer(0)
+			_, err := reused.renderUncached(first, 60, themeDark, false)
+			require.NoError(t, err)
+			got, err := reused.renderUncached(second, 60, themeDark, false)
+			require.NoError(t, err)
+
+			fresh := newMarkdownRenderer(0)
+			want, err := fresh.renderUncached(second, 60, themeDark, false)
+			require.NoError(t, err)
+
+			require.Equal(t, want, got, "document %d after document %d", right, left)
+		}
+	}
+}
+
+// TestLiveMarkdownFrameReusesOneEngine pins the streaming cost: growing a live
+// answer frame by frame builds the renderer engine once, so a frame no longer
+// pays for a fresh goldmark parser and bluemonday policy.
+func TestLiveMarkdownFrameReusesOneEngine(t *testing.T) {
+	t.Parallel()
+
+	document := strings.Join([]string{
+		"First paragraph of a streaming answer.",
+		"Second paragraph that grows with the stream.",
+		"Third paragraph of the answer.",
+		"Fourth paragraph, still streaming",
+	}, "\n\n")
+
+	renderer := newMarkdownRenderer(128)
+	for size := 1; size <= len(document); size++ {
+		_, err := renderer.renderLive("draft", document[:size], 60, themeDark, false)
+		require.NoError(t, err)
+	}
+
+	assert.Equal(t, 1, renderer.engineBuilds,
+		"a flat streaming answer builds the engine once, not once per frame")
+	assert.Positive(t, renderer.uncachedRenders)
 }
 
 // TestMarkdownTableDrawsRowDividers pins the table look: the renderer turns on

@@ -58,6 +58,12 @@ type markdownRenderer struct {
 	// tests can assert that a streaming frame does not reprocess the whole body.
 	renderedBytes   int
 	thinkingWrapped int
+	// engineBuilds counts the documents that had to build a fresh glamour engine
+	// (goldmark parser + bluemonday), and uncachedRenders the documents that
+	// missed the content cache. A settled frame should build no engine; a
+	// streaming frame builds one only when it cannot reuse the live assembly.
+	engineBuilds    int
+	uncachedRenders int
 }
 
 func newMarkdownRenderer(capacity int) *markdownRenderer {
@@ -109,6 +115,32 @@ func (r *markdownRenderer) renderLive(
 	return r.renderCached(slot, content, width, theme, noColor)
 }
 
+// renderLiveRows is [markdownRenderer.renderLive] for the managed transcript
+// store, which consumes rows. It assembles the frame's rows directly instead of
+// joining the whole frozen prefix and the tail into one string and splitting it
+// again, and it returns the frozen rows and the tail as two segments so the store
+// never copies the whole live body's row headers into one slice. inset is the
+// frame-edge indent the store wants, applied to each row once.
+func (r *markdownRenderer) renderLiveRows(
+	slot, content string,
+	width, inset int,
+	theme colorTheme,
+	noColor bool,
+) (rowSegments, error) {
+	if rows, ok := r.renderLiveIncrementalRows(slot, content, width, inset, theme, noColor); ok {
+		r.evictLive(slot)
+
+		return rows, nil
+	}
+
+	rendered, err := r.renderCached(slot, content, width, theme, noColor)
+	if err != nil {
+		return rowSegments{}, err
+	}
+
+	return rowSegments{frozen: insetRowSlice(splitTranscriptRows(rendered), inset)}, nil
+}
+
 // renderLiveIncremental renders a growing live body from its frozen prefix. ok
 // is false when no boundary may be frozen or a render failed, so the caller
 // renders the body whole.
@@ -118,41 +150,53 @@ func (r *markdownRenderer) renderLiveIncremental(
 	theme colorTheme,
 	noColor bool,
 ) (string, bool) {
-	prefixEnd, block, ok := liveMarkdownBoundary(content)
-	if !ok || prefixEnd <= 0 || block == "" || prefixEnd > len(content) {
-		return "", false
-	}
-
-	head, ok := r.markdownFrozenRows(slot, content, prefixEnd, block, width, theme, noColor)
+	rows, ok := r.renderLiveIncrementalRows(slot, content, width, 0, theme, noColor)
 	if !ok {
 		return "", false
 	}
 
+	return strings.Join(rows.all(), "\n"), true
+}
+
+// renderLiveIncrementalRows assembles one frame's rows from the frozen prefix
+// and the live tail, keeping them apart so the caller can hand both to the store.
+func (r *markdownRenderer) renderLiveIncrementalRows(
+	slot, content string,
+	width, inset int,
+	theme colorTheme,
+	noColor bool,
+) (rowSegments, bool) {
+	prefixEnd, block, ok := liveMarkdownBoundary(content)
+	if !ok || prefixEnd <= 0 || block == "" || prefixEnd > len(content) {
+		return rowSegments{}, false
+	}
+
+	head, ok := r.markdownFrozenRows(slot, content, prefixEnd, block, width, inset, theme, noColor)
+	if !ok {
+		return rowSegments{}, false
+	}
+
 	blockRendered, err := r.render(block, width, theme, noColor)
 	if err != nil {
-		return "", false
+		return rowSegments{}, false
 	}
 
 	// The seam carries the last frozen block, so the tail is rendered in the
 	// context that decides the rows between them.
 	seam, err := r.renderUncached(block+"\n\n"+content[prefixEnd:], width, theme, noColor)
 	if err != nil {
-		return "", false
+		return rowSegments{}, false
 	}
 
 	tail, found := markdownRowsAfter(seam, markdownRowCount(blockRendered))
 	if !found {
-		return "", false
+		return rowSegments{}, false
 	}
 
-	if tail == "" {
-		return head, true
-	}
-	if head == "" {
-		return tail, true
-	}
-
-	return head + "\n" + tail, true
+	return rowSegments{
+		frozen: head,
+		tail:   insetRowSlice(splitTranscriptRows(tail), inset),
+	}, true
 }
 
 // evictLive drops the live version stored for a slot, so a fallback render's
@@ -202,6 +246,7 @@ func (r *markdownRenderer) renderCached(
 // the stateful engine between concurrently rendered Models.
 func (r *markdownRenderer) renderUncached(content string, width int, theme colorTheme, noColor bool) (string, error) {
 	r.renderedBytes += len(content)
+	r.uncachedRenders++
 
 	key := markdownKey{width: max(1, width), theme: themeFingerprint(theme.fingerprint), noColor: noColor}
 	if r.engine == nil || r.engineKey != key {
@@ -213,12 +258,13 @@ func (r *markdownRenderer) renderUncached(content string, width int, theme color
 			return content, fmt.Errorf("coding tui: create markdown renderer: %w", err)
 		}
 		r.engine, r.engineKey = engine, key
+		r.engineBuilds++
 	}
 
 	rendered, err := r.engine.Render(content)
 	// Glamour's block-stack backing array retains popped buffers. Reuse only
 	// flat, bounded paragraph engines; a large/nested document must release it.
-	if len(content) > markdownEngineBytes || len(rendered) > markdownEngineBytes || !independentMarkdownParagraph(content) {
+	if len(content) > markdownEngineBytes || len(rendered) > markdownEngineBytes || !independentMarkdownDocument(content) {
 		r.engine = nil
 	}
 	if err != nil {
@@ -230,15 +276,48 @@ func (r *markdownRenderer) renderUncached(content string, width int, theme color
 	return strings.Trim(rendered, "\n"), nil
 }
 
-// independentMarkdownParagraph reports whether one paragraph is plain enough for
-// its renderer to be reused. Structured content (lists, links, code, tables) and
-// anything containing a line break can leave buffers on the engine's block
-// stack, so those renders release the engine instead.
-func independentMarkdownParagraph(paragraph string) bool {
-	first, _ := utf8.DecodeRuneInString(paragraph)
+// independentMarkdownDocument reports whether a document's rendering cannot
+// leave buffers on the engine's block stack, so the engine may be kept for the
+// next document.
+//
+// Every blank-line-delimited block must be a plain top-level paragraph of
+// ordinary text. A heading, list, quote, table, fence, HTML block or link
+// reference pushes block state and glamour retains popped buffers, so those
+// documents release the engine. A trailing space, a soft line break and a hard
+// line break are inline, so they stay reusable: they are exactly what a streamed
+// body ends on while its last word is still arriving.
+//
+// Reusing the engine for a flat, bounded document costs no correctness: each
+// Render parses the document from scratch, and the live seam (one frozen
+// paragraph plus the tail) is exactly this shape.
+// TestMarkdownEngineReuseAcrossDocumentsIsByteIdentical pins that.
+func independentMarkdownDocument(document string) bool {
+	first, _ := utf8.DecodeRuneInString(document)
+	if !unicode.IsLetter(first) {
+		return false
+	}
+	if strings.ContainsAny(document, "[]<>`\\&") ||
+		strings.IndexFunc(document, func(r rune) bool { return unicode.IsControl(r) && r != '\n' }) >= 0 {
+		return false
+	}
 
-	return unicode.IsLetter(first) && !strings.HasSuffix(paragraph, " ") &&
-		!strings.ContainsAny(paragraph, "\r\n\t[]<>`\\&") && strings.IndexFunc(paragraph, unicode.IsControl) < 0
+	// A trailing blank line is a separator, not a block, so it does not decide
+	// whether the engine is reusable.
+	for block := range strings.SplitSeq(strings.TrimRight(document, "\n"), "\n\n") {
+		for line := range strings.SplitSeq(block, "\n") {
+			// A blank interior line or an indented line is a container
+			// continuation or indented code.
+			if markdownBlankLine(line) || strings.TrimLeft(line, " \t") != line {
+				return false
+			}
+
+			if markdownBlockStarts(line) {
+				return false
+			}
+		}
+	}
+
+	return true
 }
 
 func markdownStyle(theme colorTheme, noColor bool) glamouransi.StyleConfig {

@@ -32,8 +32,10 @@ type transcriptRecord struct {
 	// lines is the record's row count at the store's current geometry. It stays
 	// valid after the rows themselves are released.
 	lines int
-	// rows are the physical rows of this record, or nil once released.
-	rows []string
+	// rows are the physical rows of this record, or empty once released. A live
+	// record keeps its frozen prefix and its growing tail apart, so a frame hands
+	// the store two slices instead of copying the whole live body's row headers.
+	rows rowSegments
 	// loaded reports whether rows holds the record's rendering. A record that
 	// renders as nothing is loaded with no rows, which is not the same as having
 	// been released.
@@ -58,7 +60,7 @@ func (r transcriptRecord) height() int {
 // the reading position and every anchor still resolve and the rows can be
 // rendered again.
 func (r *transcriptRecord) release() {
-	r.rows = nil
+	r.rows = rowSegments{}
 	r.loaded = false
 }
 
@@ -102,6 +104,11 @@ type transcriptStore struct {
 	// liveRowsHashed counts the live record's rows read since the last reset, so
 	// tests can assert that a frame's revision does not read them.
 	liveRowsHashed int
+	// materializations counts records whose rows were rendered (fresh or after a
+	// release) since the last reset, and rowsMaterialized the rows they produced,
+	// so a test can tell a windowed frame from a whole-document one.
+	materializations int
+	rowsMaterialized int
 }
 
 // transcriptEntry is one projected entry offered to the store. A record that is
@@ -118,6 +125,8 @@ type transcriptEntry struct {
 func (s *transcriptStore) resetRenders() {
 	s.renders = 0
 	s.evictions = 0
+	s.materializations = 0
+	s.rowsMaterialized = 0
 }
 
 // keyMatches reports whether the resident rows are still valid for this
@@ -373,13 +382,24 @@ func (s *transcriptStore) fingerprint() uint64 {
 			continue
 		}
 
-		s.liveRowsHashed += len(record.rows)
+		s.liveRowsHashed += record.rows.count()
 
-		for _, row := range record.rows {
-			for offset := range len(row) {
-				hash = (hash ^ uint64(row[offset])) * 1099511628211
-			}
+		for _, row := range record.rows.frozen {
+			hash = hashTranscriptRow(hash, row)
 		}
+
+		for _, row := range record.rows.tail {
+			hash = hashTranscriptRow(hash, row)
+		}
+	}
+
+	return hash
+}
+
+// hashTranscriptRow folds one row into a search fingerprint.
+func hashTranscriptRow(hash uint64, row string) uint64 {
+	for offset := range len(row) {
+		hash = (hash ^ uint64(row[offset])) * 1099511628211
 	}
 
 	return hash
@@ -388,7 +408,7 @@ func (s *transcriptStore) fingerprint() uint64 {
 // loadRecord returns one record's rows, rendering them if they were released.
 // Rows are only ever reused inside one rendering key, so a record that reloads
 // renders to the same rows it did before.
-func (s *transcriptStore) loadRecord(index int) []string {
+func (s *transcriptStore) loadRecord(index int) rowSegments {
 	record := &s.records[index]
 	if !record.loaded {
 		s.materialize(record)
@@ -400,15 +420,25 @@ func (s *transcriptStore) loadRecord(index int) []string {
 // materialize renders one record's rows in place.
 func (s *transcriptStore) materialize(record *transcriptRecord) {
 	record.rows = s.render(record.block)
-	record.lines = len(record.rows)
+	record.lines = record.rows.count()
 	record.loaded = true
+	s.materializations++
+	s.rowsMaterialized += record.lines
 }
 
-// render produces one block's rows at the store's current geometry.
-func (s *transcriptStore) render(block timelineBlock) []string {
-	return splitTranscriptRows(renderTimelineEntry(
-		block, s.markdown, max(1, s.width), s.theme, s.noColor, timelineRenderOptions{},
-	))
+// render produces one block's rows at the store's current geometry. A live
+// Markdown block is assembled as its frozen rows and its tail directly, so a
+// frame hands the store the rows it keeps without joining the whole frozen
+// prefix into one string and splitting it again.
+func (s *transcriptStore) render(block timelineBlock) rowSegments {
+	width := max(1, s.width)
+	if rows, ok := liveEntryRows(block, s.markdown, width, s.theme, s.noColor); ok {
+		return rows
+	}
+
+	return rowSegments{frozen: splitTranscriptRows(renderTimelineEntry(
+		block, s.markdown, width, s.theme, s.noColor, timelineRenderOptions{},
+	))}
 }
 
 // rowCount reports the region's row count, including the leading rows.
@@ -485,12 +515,12 @@ func (s *transcriptStore) rowsIn(start, end int) []string {
 
 		recordRows := s.loadRecord(index)
 		from := max(0, position-recordStart)
-		to := min(len(recordRows), end-recordStart)
+		to := min(recordRows.count(), end-recordStart)
 		if from >= to {
 			continue
 		}
 
-		rows = append(rows, recordRows[from:to]...)
+		rows = recordRows.appendWindow(rows, from, to)
 		position = recordStart + to
 	}
 
@@ -519,7 +549,7 @@ func (s *transcriptStore) flatten() []string {
 			rows = append(rows, "")
 		}
 
-		rows = append(rows, s.loadRecord(index)...)
+		rows = append(rows, s.loadRecord(index).all()...)
 	}
 
 	s.trim()
@@ -541,10 +571,23 @@ func (s *transcriptStore) searchRows(query string) []int {
 
 	matches := make([]int, 0, 8)
 	for index := range s.records {
-		for offset, row := range s.loadRecord(index) {
+		recordRows := s.loadRecord(index)
+		offset := 0
+
+		for _, row := range recordRows.frozen {
 			if rowMatches(row, query) {
 				matches = append(matches, s.starts[index]+offset)
 			}
+
+			offset++
+		}
+
+		for _, row := range recordRows.tail {
+			if rowMatches(row, query) {
+				matches = append(matches, s.starts[index]+offset)
+			}
+
+			offset++
 		}
 	}
 
@@ -575,7 +618,11 @@ func (s *transcriptStore) residentRowBytes() int {
 			continue
 		}
 
-		for _, row := range s.records[index].rows {
+		for _, row := range s.records[index].rows.frozen {
+			resident += len(row)
+		}
+
+		for _, row := range s.records[index].rows.tail {
 			resident += len(row)
 		}
 	}

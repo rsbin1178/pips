@@ -695,7 +695,7 @@ func storeRows(model *Model) string {
 		if !record.loaded {
 			model.transcript.materialize(record)
 		}
-		rows = append(rows, record.rows...)
+		rows = append(rows, record.rows.all()...)
 	}
 
 	return strings.Join(rows, "\n")

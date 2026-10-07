@@ -136,7 +136,7 @@ func TestLiveMarkdownFreezesLongPrefixes(t *testing.T) {
 	frozen, exists := renderer.frozen["draft"]
 	require.True(t, exists, "the live slot must hold its frozen prefix")
 	assert.Equal(t, document[:prefixEnd], frozen.source)
-	assert.NotEmpty(t, frozen.rendered)
+	assert.NotEmpty(t, frozen.rows)
 	assert.Equal(t, block, frozen.block)
 }
 
@@ -349,5 +349,129 @@ func TestLiveMarkdownBoundaryStopsAtALinkReference(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, liveMarkdownReference(t, testCase.document, 60, false), got)
 		})
+	}
+}
+
+// TestLiveMarkdownRowsMatchTheStringRender pins the managed store's row path: the
+// rows it is handed must be exactly the rows of the string render, so consuming
+// rows instead of a joined document cannot change what is drawn.
+func TestLiveMarkdownRowsMatchTheStringRender(t *testing.T) {
+	t.Parallel()
+
+	for name, document := range liveMarkdownCorpus() {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			for _, width := range []int{24, 40, 118} {
+				streaming := newMarkdownRenderer(128)
+				rowRenderer := newMarkdownRenderer(128)
+
+				for size := 0; size <= len(document); size++ {
+					content := document[:size]
+					want, err := streaming.renderLive("draft", content, width, themeDark, false)
+					require.NoError(t, err)
+
+					rows, err := rowRenderer.renderLiveRows("draft", content, width, 0, themeDark, false)
+					require.NoError(t, err)
+
+					require.Equal(t, splitTranscriptRows(want), rows.all(), "width %d size %d", width, size)
+				}
+			}
+		})
+	}
+}
+
+// TestLiveEntryRowsMatchTheWholeRender streams a draft block through the store's
+// row path and asserts it equals a whole-document render of the entry, inset
+// included, at every size.
+func TestLiveEntryRowsMatchTheWholeRender(t *testing.T) {
+	t.Parallel()
+
+	document := strings.Join([]string{
+		"First paragraph of the streaming answer.",
+		"Second paragraph with a **bold** run.",
+		"Third paragraph, still streaming",
+	}, "\n\n")
+
+	const width = 118
+
+	streaming := newMarkdownRenderer(128)
+
+	for size := 0; size <= len(document); size++ {
+		block := timelineBlock{kind: blockDraft, id: "draft", body: document[:size]}
+
+		rows, ok := liveEntryRows(block, streaming, width, themeDark, false)
+		require.True(t, ok)
+
+		want := splitTranscriptRows(renderTimelineEntry(
+			block, newMarkdownRenderer(1), width, themeDark, false, timelineRenderOptions{},
+		))
+		require.Equal(t, want, rows.all(), "size %d", size)
+	}
+}
+
+// TestRowSegmentsAppendWindow pins the two-segment row view the live record hands
+// the store: appending a window inside one segment is a subslice, appending one
+// across the seam writes both in order, and out-of-range bounds clamp instead of
+// panicking. The destination is the frame's row buffer, so a straddling window
+// must not allocate beyond it.
+//
+// It is deliberately not parallel: testing.AllocsPerRun refuses to run inside a
+// parallel test.
+//
+//nolint:paralleltest // AllocsPerRun measures the whole process and refuses a parallel test.
+func TestRowSegmentsAppendWindow(t *testing.T) {
+	segments := rowSegments{frozen: []string{"a", "b", "c"}, tail: []string{"d", "e"}}
+
+	assert.Equal(t, 5, segments.count())
+	assert.Equal(t, []string{"b", "c"}, segments.appendWindow(nil, 1, 3))
+	assert.Equal(t, []string{"c", "d"}, segments.appendWindow(nil, 2, 4))
+	assert.Equal(t, []string{"d", "e"}, segments.appendWindow(nil, 3, 5))
+	assert.Equal(t, []string{"a", "b", "c", "d", "e"}, segments.appendWindow(nil, 0, 99))
+	assert.Equal(t, []string{"a", "b", "c", "d", "e"}, segments.all())
+	assert.Nil(t, segments.appendWindow(nil, 4, 4))
+	assert.Nil(t, segments.appendWindow(nil, 9, 12))
+
+	flat := rowSegments{frozen: []string{"x", "y"}}
+	assert.Equal(t, []string{"x"}, flat.appendWindow(nil, 0, 1))
+	assert.Equal(t, []string{"x", "y"}, flat.all())
+
+	dst := make([]string, 0, 16)
+	allocs := testing.AllocsPerRun(100, func() {
+		dst = segments.appendWindow(dst[:0], 2, 4)
+	})
+	require.Zero(t, allocs, "a straddling window with room in dst must not allocate")
+	assert.Equal(t, []string{"c", "d"}, dst)
+}
+
+// TestLiveThinkingEntryRowsMatchTheWholeRender streams a live thought through the
+// store's row path and asserts it equals a whole-section render of the entry,
+// glyph, padding and inset included, at every size and in both colour modes.
+func TestLiveThinkingEntryRowsMatchTheWholeRender(t *testing.T) {
+	t.Parallel()
+
+	document := strings.Join([]string{
+		"第一个思考段落，包含中文与标点。",
+		"Second thought paragraph with ordinary words.",
+		"Third thought paragraph, still streaming",
+	}, "\n\n")
+
+	for _, noColor := range []bool{false, true} {
+		for _, width := range []int{24, 60, 118} {
+			streaming := newMarkdownRenderer(128)
+
+			for size := 0; size <= len(document); size++ {
+				block := timelineBlock{kind: blockThinking, id: draftThinkingID, body: document[:size]}
+
+				rows, ok := liveEntryRows(block, streaming, width, themeDark, noColor)
+				require.True(t, ok)
+
+				want := splitTranscriptRows(renderTimelineEntry(
+					block, newMarkdownRenderer(1), width, themeDark, noColor, timelineRenderOptions{},
+				))
+				require.Equal(t, want, rows.all(),
+					"noColor %v width %d size %d", noColor, width, size)
+			}
+		}
 	}
 }
