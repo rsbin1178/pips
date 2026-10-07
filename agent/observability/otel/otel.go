@@ -118,7 +118,7 @@ func (o *Observer) Observe(ctx context.Context, event agent.Event) {
 	case agent.RunCompleted:
 		o.end(&o.runs, event.RunID, event, false, payload.Stop)
 	case agent.ModelStreamEvent, agent.MessageCommitted, agent.CandidateDiscarded,
-		agent.ToolUpdated:
+		agent.CandidateIncomplete, agent.ToolUpdated:
 		// These events do not change span lifecycle or aggregate metrics.
 	}
 }
