@@ -329,3 +329,48 @@ func TestFullscreenStartupPutsTheBannerInTheTranscript(t *testing.T) {
 	assert.Contains(t, inspection, "Status")
 	assert.Empty(t, model.presentation.writes)
 }
+
+// buildRevisionProbe builds a store holding one settled record and one live
+// record with the given body.
+func buildRevisionProbe(store *transcriptStore, live string) {
+	store.build(40, themeDark, themeFingerprint(themeDark.fingerprint), false, newMarkdownRenderer(8),
+		[]transcriptEntry{
+			{id: "settled", block: timelineBlock{kind: blockAssistant, id: "settled", body: "settled paragraph"}},
+			{id: "draft", live: true, block: timelineBlock{kind: blockDraft, id: "draft", body: live}},
+		})
+}
+
+// TestStoreRevisionDoesNotReadTheLiveRows pins that a frame's revision is cheap:
+// hashing the live record's growing text is left to the search scan that reads
+// it, instead of running on every frame.
+func TestStoreRevisionDoesNotReadTheLiveRows(t *testing.T) {
+	t.Parallel()
+
+	var store transcriptStore
+	buildRevisionProbe(&store, strings.Repeat("streaming words ", 40))
+
+	store.liveRowsHashed = 0
+	store.updateRevision()
+
+	assert.Zero(t, store.liveRowsHashed, "a frame's revision must not read the live text")
+
+	store.fingerprint()
+	assert.Positive(t, store.liveRowsHashed, "a search fingerprint must read the live text")
+}
+
+// TestStoreFingerprintSeesLiveTextAtTheSameHeight pins that the lazy fingerprint
+// still catches a live record whose text changed without changing its height,
+// which is the only reason a search has to re-read its rows.
+func TestStoreFingerprintSeesLiveTextAtTheSameHeight(t *testing.T) {
+	t.Parallel()
+
+	var before, after transcriptStore
+	buildRevisionProbe(&before, "aaaa bbbb")
+	buildRevisionProbe(&after, "cccc dddd")
+
+	require.Len(t, before.rowsIn(0, before.rowCount()), len(after.rowsIn(0, after.rowCount())),
+		"the probe bodies must render to the same row count so the height cannot differ")
+	require.Equal(t, before.revision, after.revision, "the height-only revision cannot tell them apart")
+	assert.NotEqual(t, before.fingerprint(), after.fingerprint(),
+		"a search must be told the live text changed")
+}

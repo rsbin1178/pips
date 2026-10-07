@@ -159,12 +159,15 @@ func TestMarkdownCacheBoundsRenderedBytes(t *testing.T) {
 		require.NoError(t, err)
 		assert.LessOrEqual(t, renderer.bytes, renderer.maxBytes)
 	}
-	before := renderer.bytes
 	source := strings.Repeat("large document\n\n", 100)
 	got, err := renderer.renderLive("draft", source, 40, themeDark, false)
 	require.NoError(t, err)
 	assert.Contains(t, got, "large")
-	assert.Equal(t, before, renderer.bytes, "oversized outputs render without entering the cache")
+	// The live render itself is oversized, so it never becomes a cache entry. The
+	// frozen prefix it is assembled from may enter the settled cache, but the byte
+	// budget still bounds what the renderer holds.
+	assert.LessOrEqual(t, renderer.bytes, renderer.maxBytes,
+		"oversized outputs render without pushing the cache past its budget")
 	assert.NotContains(t, renderer.live, "draft")
 }
 

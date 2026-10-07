@@ -39,14 +39,25 @@ type markdownEntry struct {
 }
 
 type markdownRenderer struct {
-	capacity  int
-	entries   map[markdownKey]*list.Element
-	recent    *list.List
-	bytes     int
-	maxBytes  int
-	live      map[string]markdownKey
+	capacity int
+	entries  map[markdownKey]*list.Element
+	recent   *list.List
+	bytes    int
+	maxBytes int
+	live     map[string]markdownKey
+	// frozen holds the assembled prefix of each live slot, so a streaming frame
+	// extends it instead of rendering the whole body again. thinking is the same
+	// state for the one live Thinking section, which is rendered as prose rather
+	// than Markdown.
+	frozen    map[string]*liveFrozen
+	thinking  liveThinking
 	engine    *glamour.TermRenderer
 	engineKey markdownKey
+	// renderedBytes counts the source bytes handed to the engine since the last
+	// reset, and thinkingWrapped the reasoning bytes handed to the wrapper, so
+	// tests can assert that a streaming frame does not reprocess the whole body.
+	renderedBytes   int
+	thinkingWrapped int
 }
 
 func newMarkdownRenderer(capacity int) *markdownRenderer {
@@ -60,6 +71,7 @@ func newMarkdownRenderer(capacity int) *markdownRenderer {
 		recent:   list.New(),
 		maxBytes: markdownCacheBytes,
 		live:     make(map[string]markdownKey),
+		frozen:   make(map[string]*liveFrozen),
 	}
 }
 
@@ -74,13 +86,85 @@ func (r *markdownRenderer) render(
 
 // renderLive replaces the preceding version in one bounded slot. A new stream
 // prefix must not leave an entire obsolete ANSI document in the settled LRU.
+//
+// A growing body misses the content cache on every frame, so the render is
+// assembled from a frozen prefix whenever a boundary allows it; the work then
+// scales with the live tail instead of with the whole body. See
+// [markdown_live.go] for the boundary contract.
 func (r *markdownRenderer) renderLive(
 	slot, content string,
 	width int,
 	theme colorTheme,
 	noColor bool,
 ) (string, error) {
+	if rendered, ok := r.renderLiveIncremental(slot, content, width, theme, noColor); ok {
+		// The assembled frame is never a reusable cache entry: it changes every
+		// frame. Dropping the previous version still keeps an obsolete document
+		// out of the settled LRU when a fallback render stored one.
+		r.evictLive(slot)
+
+		return rendered, nil
+	}
+
 	return r.renderCached(slot, content, width, theme, noColor)
+}
+
+// renderLiveIncremental renders a growing live body from its frozen prefix. ok
+// is false when no boundary may be frozen or a render failed, so the caller
+// renders the body whole.
+func (r *markdownRenderer) renderLiveIncremental(
+	slot, content string,
+	width int,
+	theme colorTheme,
+	noColor bool,
+) (string, bool) {
+	prefixEnd, block, ok := liveMarkdownBoundary(content)
+	if !ok || prefixEnd <= 0 || block == "" || prefixEnd > len(content) {
+		return "", false
+	}
+
+	head, ok := r.markdownFrozenRows(slot, content, prefixEnd, block, width, theme, noColor)
+	if !ok {
+		return "", false
+	}
+
+	blockRendered, err := r.render(block, width, theme, noColor)
+	if err != nil {
+		return "", false
+	}
+
+	// The seam carries the last frozen block, so the tail is rendered in the
+	// context that decides the rows between them.
+	seam, err := r.renderUncached(block+"\n\n"+content[prefixEnd:], width, theme, noColor)
+	if err != nil {
+		return "", false
+	}
+
+	tail, found := markdownRowsAfter(seam, markdownRowCount(blockRendered))
+	if !found {
+		return "", false
+	}
+
+	if tail == "" {
+		return head, true
+	}
+	if head == "" {
+		return tail, true
+	}
+
+	return head + "\n" + tail, true
+}
+
+// evictLive drops the live version stored for a slot, so a fallback render's
+// obsolete document does not survive the next assembled frame.
+func (r *markdownRenderer) evictLive(slot string) {
+	if slot == "" {
+		return
+	}
+
+	if previous, exists := r.live[slot]; exists {
+		r.remove(r.entries[previous])
+	}
 }
 
 func (r *markdownRenderer) renderCached(
@@ -117,6 +201,8 @@ func (r *markdownRenderer) renderCached(
 // The event loop owns this renderer. Reuse its configuration, but never share
 // the stateful engine between concurrently rendered Models.
 func (r *markdownRenderer) renderUncached(content string, width int, theme colorTheme, noColor bool) (string, error) {
+	r.renderedBytes += len(content)
+
 	key := markdownKey{width: max(1, width), theme: themeFingerprint(theme.fingerprint), noColor: noColor}
 	if r.engine == nil || r.engineKey != key {
 		engine, err := glamour.NewTermRenderer(

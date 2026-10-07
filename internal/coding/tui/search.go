@@ -122,7 +122,7 @@ func (m *Model) refreshSearch() {
 	}
 
 	m.search.matches = m.transcript.searchRows(m.searchQuery())
-	m.search.scanned = m.transcript.revision
+	m.search.scanned = m.transcript.fingerprint()
 
 	if len(m.search.matches) == 0 {
 		m.search.index = -1
