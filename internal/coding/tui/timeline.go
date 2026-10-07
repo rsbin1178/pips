@@ -45,11 +45,17 @@ const (
 	planApprovedTitle     = "Plan · Approved"
 )
 
-// thinkingTitle labels one visible reasoning section. Reasoning is rendered as
-// plain, dimmed prose rather than through the Markdown engine: a live section
-// grows with every streamed delta, and parsing it on each frame costs orders of
-// magnitude more CPU than wrapping it.
-const thinkingTitle = "Thinking"
+// thinkingGlyph leads one visible reasoning section. The block follows the
+// transcript's glyph convention — an icon before the content, like a user
+// message's arrow and a tool heading's state glyph — instead of spending a
+// header row on a "Thinking" label. The glyph sits outside the tool state set
+// (✻ running, • succeeded, ✗ failed, ! interrupted), so a settled reasoning
+// block cannot be mistaken for a running tool.
+//
+// Reasoning is rendered as plain, dimmed prose rather than through the Markdown
+// engine: a live section grows with every streamed delta, and parsing it on each
+// frame costs orders of magnitude more CPU than wrapping it.
+const thinkingGlyph = "✧"
 
 // transcriptHorizontalInset is how far conversation rows move in from the frame
 // edge, matching the Composer's text column: the input box spends one border
@@ -1384,8 +1390,8 @@ func renderTimelineBlockWithOptions(
 }
 
 // renderThinkingBlock renders one visible reasoning section as plain, dimmed
-// prose under a muted label. The opaque Signature never reaches this function;
-// only ReasoningPart.Text does.
+// prose led by the section glyph. The opaque Signature never reaches this
+// function; only ReasoningPart.Text does.
 //
 // Reasoning is deliberately not run through the Markdown renderer. A live
 // section is re-rendered on every streamed delta, and parsing it as Markdown
@@ -1404,16 +1410,39 @@ func renderThinkingBlock(
 		return ""
 	}
 
-	body = ansi.Wrap(body, max(1, width), "")
-	if noColor {
-		return thinkingTitle + "\n" + body
+	width = max(1, width)
+	prefix := thinkingGlyph + " "
+	prefixWidth := ansi.StringWidth(prefix)
+
+	var content string
+	if width <= prefixWidth {
+		// A frame this narrow has no room beside the glyph; keep the prose.
+		content = ansi.Wrap(body, width, "")
+	} else {
+		indent := strings.Repeat(" ", prefixWidth)
+		rows := strings.Split(ansi.Wrap(body, width-prefixWidth, ""), "\n")
+		for index := range rows {
+			if strings.TrimSpace(rows[index]) == "" {
+				// A blank separator row keeps no trailing indent.
+				rows[index] = ""
+
+				continue
+			}
+			if index == 0 {
+				rows[index] = prefix + rows[index]
+
+				continue
+			}
+			rows[index] = indent + rows[index]
+		}
+		content = strings.Join(rows, "\n")
 	}
 
-	palette := paletteFor(theme)
-	muted := lipgloss.NewStyle().Foreground(palette.muted)
-	title := lipgloss.NewStyle().Bold(true).Foreground(palette.muted).Render(thinkingTitle)
+	if noColor {
+		return content
+	}
 
-	return title + "\n" + muted.Render(body)
+	return lipgloss.NewStyle().Foreground(paletteFor(theme).muted).Render(content)
 }
 
 // renderMarkdownBlockBody renders one Markdown body, sharing live-version
