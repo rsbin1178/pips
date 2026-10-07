@@ -246,7 +246,10 @@ func (store *JSONLStore) CompareAndSwap(
 		return &CorruptStoreError{Path: path, Reason: "aggregate changed while opening for append", Err: err}
 	}
 
-	if err := file.Truncate(size); err != nil {
+	// Truncate by path rather than through the append handle: Windows opens an
+	// O_APPEND handle without GENERIC_WRITE, and SetEndOfFile requires it. The
+	// append handle writes at the new end of file either way.
+	if err := os.Truncate(path, size); err != nil {
 		return fmt.Errorf("team: truncate uncommitted aggregate tail: %w", err)
 	}
 

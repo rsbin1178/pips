@@ -126,7 +126,10 @@ func TestContextCheckpointJSONLSizeFailureDoesNotAdvanceLeaf(t *testing.T) {
 	require.NoError(t, err)
 	leaf := appendCheckpointMessage(t, session, ai.UserText("original"), nil)
 	before := session.Entries()
-	require.NoError(t, store.file.Truncate(maxSessionFileSize-1))
+	// Grow the file through a fresh handle. The store holds it with O_APPEND, and
+	// Windows opens an O_APPEND handle without GENERIC_WRITE, so the handle itself
+	// cannot SetEndOfFile.
+	require.NoError(t, os.Truncate(path, maxSessionFileSize-1))
 	_, err = session.AppendContextCheckpoint(leaf, testCheckpoint(), 100)
 	require.ErrorContains(t, err, "session exceeds")
 	assert.Equal(t, leaf, session.LeafID())
