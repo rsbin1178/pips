@@ -223,3 +223,28 @@ func TestStreamRecoverySkipsNonRetryableFailure(t *testing.T) {
 	assert.Nil(t, notice)
 	assert.Equal(t, int32(1), model.calls.Load())
 }
+
+// TestStreamRecoveryReportsTheFragmentItGivesUpOn keeps the discard mode
+// honest. Regenerating replaces the fragment on every attempt, so the one to
+// report is the last the consumer was looking at — and it must be reported
+// rather than erased, which is what the silent retraction used to do.
+func TestStreamRecoveryReportsTheFragmentItGivesUpOn(t *testing.T) {
+	t.Parallel()
+
+	model := &continuationModel{attempts: []continuationAttempt{
+		{deltas: []string{"half"}, err: io.ErrUnexpectedEOF},
+		{deltas: []string{"more"}, err: io.ErrUnexpectedEOF},
+	}}
+
+	a, err := agent.New(model, agent.WithStreamRecovery(1, time.Millisecond, time.Millisecond))
+	require.NoError(t, err)
+
+	stream := collectContinuationStream(t, a, agent.NewSession())
+	require.ErrorIs(t, stream.err, io.ErrUnexpectedEOF)
+	assert.Equal(t, 1, stream.discards, "the regeneration retracts the draft it replaced")
+
+	require.Len(t, stream.incompletes, 1)
+	assert.Equal(t, "more", stream.incompletes[0].Text,
+		"the reported fragment is the one the consumer was looking at")
+	assert.Equal(t, "stream ended early", stream.incompletes[0].Reason)
+}

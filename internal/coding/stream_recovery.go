@@ -14,10 +14,6 @@ import (
 // stream that broke after producing output. Three re-issues with the same
 // backoff cover the same outage shape without stacking a second ten-retry
 // budget on the same request.
-//
-// In continuation mode nothing from a failed attempt is retracted: the text it
-// produced is retained and sent back as a trailing assistant prefix, so a
-// re-issue cannot duplicate content or repeat a tool call.
 const (
 	streamRecoveryAttempts  = 3
 	streamRecoveryBaseDelay = 2 * time.Second
@@ -26,9 +22,20 @@ const (
 
 // streamRecoveryOption is the shared recovery policy for the interaction loop,
 // subagents, team workers, and the internal draft/proposal agents, so every
-// Coding run survives an interrupted stream the same way. Continuation keeps
-// the partial answer instead of discarding it, so a consumer's live draft
-// keeps growing across the re-issue.
+// Coding run survives an interrupted stream the same way.
+//
+// It regenerates rather than continues, and that is a measured default rather
+// than a preference. Continuing re-issues the turn with the retained text as a
+// trailing assistant message: a shape the request format allows but no provider
+// guarantees, because trailing-assistant support is vendor-specific — some APIs
+// document a prefill switch, some infer it from the position, and some reject
+// the shape outright. On the gateway this was probed against, every
+// continuation shape was either refused or silently dropped the prefix (the
+// model answered the original question from scratch in six of six samples),
+// and the merge then glued the stale fragment onto a fresh answer, which reads
+// worse than re-asking. `agent.WithStreamContinuation` remains available for a
+// provider that is *verified* to honour the shape — verified by a probe showing
+// the prefix survived into the model's output, not by a 200 on the request.
 func streamRecoveryOption() agent.Option {
-	return agent.WithStreamContinuation(streamRecoveryAttempts, streamRecoveryBaseDelay, streamRecoveryMaxDelay)
+	return agent.WithStreamRecovery(streamRecoveryAttempts, streamRecoveryBaseDelay, streamRecoveryMaxDelay)
 }

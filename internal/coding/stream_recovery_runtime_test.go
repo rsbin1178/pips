@@ -91,13 +91,13 @@ func TestRuntimeReissuesInterruptedStreamAndReportsTheWait(t *testing.T) {
 	assert.Equal(t, streamRecoveryAttempts, notices[0].MaxRetries)
 	assert.Equal(t, "stream ended early", notices[0].Reason)
 
-	// Continuation keeps the partial answer, so the turn neither retracts the
-	// candidate nor reports it as incomplete. The committed message is the
-	// retained prefix followed by the remainder the re-issue produced.
-	assert.NotContains(t, eventTypes(events), EventMessageDiscarded,
-		"continuation never retracts the partial candidate")
+	// The default recovery regenerates, so the partial the consumer was looking
+	// at is retracted before the re-issue streams — and because the turn
+	// succeeds it is superseded rather than reported as an incomplete reply.
+	assert.Contains(t, eventTypes(events), EventMessageDiscarded,
+		"regenerating retracts the partial candidate it replaces")
 	assert.NotContains(t, eventTypes(events), EventMessageIncomplete,
-		"a successful continuation is not an incomplete reply")
+		"a superseded fragment is not an incomplete reply")
 
 	// The notice is live state rather than transcript, and the reducer keeps it
 	// only for the duration of the wait (see the reducer test in
@@ -113,8 +113,8 @@ func TestRuntimeReissuesInterruptedStreamAndReportsTheWait(t *testing.T) {
 	require.True(t, ok)
 	text, ok := assistant.Parts[0].(ai.TextPart)
 	require.True(t, ok)
-	assert.Equal(t, "halfrecovered", text.Text,
-		"the committed answer is the retained prefix plus the continuation")
+	assert.Equal(t, "recovered", text.Text,
+		"the committed answer is the re-issue's own answer, not a glued fragment")
 
 	require.NoError(t, runtime.Close(t.Context()))
 }

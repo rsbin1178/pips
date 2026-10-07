@@ -693,29 +693,44 @@ func (r *run) callTurn(
 			// works and a dead turn costs more.
 			abandonPrefix = true
 		case !produced || attempt >= recovery.attempts || !ai.IsRetryable(err) || ctx.Err() != nil:
-			// Give up. In continuation mode keep whatever text the failing
-			// attempt produced and report it as an explicitly incomplete
-			// reply rather than discarding it silently.
-			if recovery.mode == recoveryContinue && !fellBack {
-				if retained, ok := retainPrefix(resp); ok {
+			// Give up. Whatever text the failing attempt produced is reported as
+			// an explicitly incomplete reply, whether the turn was continuing or
+			// regenerating: a fragment the consumer saw must never vanish without
+			// a trace.
+			//
+			// Continuation attempts extend one answer, so their fragments
+			// accumulate. Regenerate attempts are independent alternatives, so
+			// only the fragment the consumer was actually looking at — the last
+			// one — is reported.
+			// prefix is read by the report below; havePrefix is not, because
+			// this arm returns — the turn is over either way.
+			if retained, ok := retainPrefix(resp); ok {
+				if recovery.mode == recoveryContinue && !fellBack {
 					prefix += retained
-					havePrefix = true
+				} else {
+					prefix = retained
 				}
 			}
 
-			if havePrefix && !r.emitIncomplete(turn, prefix, err) {
+			if prefix != "" && !r.emitIncomplete(turn, prefix, err) {
 				return nil, true, nil
 			}
 
 			return resp, false, err
 		default:
-			if recovery.mode == recoveryContinue && !fellBack {
-				if retained, ok := retainPrefix(resp); ok {
+			if retained, ok := retainPrefix(resp); ok {
+				if recovery.mode == recoveryContinue && !fellBack {
+					// A continuation extends one answer, so its fragment
+					// accumulates. A continuation that produced no usable text
+					// keeps the existing prefix and still consumes an attempt.
 					prefix += retained
 					havePrefix = true
+				} else {
+					// A regenerating turn replaces the fragment: its attempts
+					// are alternatives, and the last one is what the consumer
+					// was looking at when the turn gave up.
+					prefix = retained
 				}
-				// A continuation that produced no usable text keeps the existing
-				// prefix and still consumes an attempt.
 			}
 
 			delay := recovery.backoff(attempt)
