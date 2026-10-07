@@ -63,6 +63,8 @@ func cloneEventPayload(payload EventPayload) EventPayload {
 		return cloneMessageDelta(value)
 	case MessageDiscarded:
 		return value
+	case IncompleteReply:
+		return value
 	case ModelRetry:
 		return value
 	case ToolStarted:

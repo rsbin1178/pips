@@ -35,6 +35,10 @@ const (
 	// blockThinking carries one visible reasoning section. Appending it keeps the
 	// existing kinds' identity ints stable for cached records and tests.
 	blockThinking
+	// blockIncomplete carries the retained text of an abandoned provisional
+	// answer. It is its own kind so it can never render as, or be mistaken for,
+	// a committed assistant message.
+	blockIncomplete
 )
 
 const (
@@ -377,6 +381,10 @@ func projectVolatileBlocks(state coding.State, tail []toolActivity) []timelineBl
 		})
 	}
 
+	for _, reply := range state.IncompleteReplies {
+		blocks = append(blocks, incompleteReplyBlock(reply, len(state.Transcript)))
+	}
+
 	if state.LastError != nil && state.Interaction.Outcome != coding.InteractionCanceled {
 		blocks = append(blocks, timelineBlock{
 			kind: blockError, body: state.LastError.Message,
@@ -385,6 +393,29 @@ func projectVolatileBlocks(state coding.State, tail []toolActivity) []timelineBl
 	}
 
 	return groupExploreBlocks(blocks)
+}
+
+// incompleteReplyBlock renders one abandoned provisional answer as its own
+// block. The text is model output the user would otherwise never see, so it is
+// shown, but the label and the explicit sentence keep it from reading as part
+// of the conversation.
+func incompleteReplyBlock(reply coding.IncompleteReply, position int) timelineBlock {
+	lines := make([]string, 0, 4)
+	if reason := strings.TrimSpace(reply.Reason); reason != "" {
+		lines = append(lines, "Reason: "+reason)
+	}
+
+	lines = append(lines, "Incomplete text retained below; it is not part of the conversation.")
+	if reply.Text != "" {
+		lines = append(lines, "", reply.Text)
+	}
+
+	return timelineBlock{
+		kind:     blockIncomplete,
+		title:    "Interrupted reply",
+		body:     strings.Join(lines, "\n"),
+		position: position,
+	}
 }
 
 // draftThinkingID is the identity of the in-flight turn's Thinking block. It is
@@ -1088,6 +1119,8 @@ func stopReasonPhrase(reason agent.StopReason) string {
 		return "paused"
 	case agent.StopTerminated:
 		return "terminated"
+	case agent.StopTruncated:
+		return "output limit reached"
 	case agent.StopEndTurn, "":
 		return "incomplete"
 	default:
@@ -1385,8 +1418,32 @@ func renderTimelineBlockWithOptions(
 	if block.kind == blockThinking {
 		return renderThinkingBlock(block, markdown, width, theme, noColor)
 	}
+	if block.kind == blockIncomplete {
+		return renderIncompleteReplyBlock(block, width, theme, noColor)
+	}
 
 	return renderRegularTimelineBlock(block, markdown, width, theme, noColor)
+}
+
+// renderIncompleteReplyBlock renders an abandoned provisional answer as plain
+// wrapped prose under an error-toned label. It deliberately skips the Markdown
+// engine: the retained text is a fragment, and rendering it as Markdown would
+// give it the same look as a committed answer.
+func renderIncompleteReplyBlock(block timelineBlock, width int, theme colorTheme, noColor bool) string {
+	width = max(1, width)
+	body := wrapPlainText(strings.TrimSpace(block.body), width)
+	title := block.title
+	if title != "" && !noColor {
+		title = timelineTitleStyle(blockIncomplete, theme).Render(title)
+	}
+	if body == "" {
+		return title
+	}
+	if title == "" {
+		return body
+	}
+
+	return title + "\n" + body
 }
 
 // renderThinkingBlock renders one visible reasoning section as plain, dimmed
@@ -1786,6 +1843,8 @@ func timelineTitleStyle(kind blockKind, theme colorTheme) lipgloss.Style {
 		color = palette.muted
 	case blockDiagnostic:
 		color = palette.diagnostic
+	case blockIncomplete:
+		color = palette.error
 	}
 
 	return lipgloss.NewStyle().Bold(true).Foreground(color)
