@@ -65,7 +65,9 @@ func markObservedModelOutput(current *interaction, event agent.Event) {
 	case agent.MessageCommitted, agent.ToolStarted:
 		current.modelResponseObserved = true
 	case agent.ModelStreamEvent:
-		if value.Event.Type != ai.StreamMessageStart {
+		// A retry notice reports a wait rather than model output, so it must
+		// not mark the run as having produced a response.
+		if value.Event.Type != ai.StreamMessageStart && value.Event.Type != ai.StreamRetry {
 			current.modelResponseObserved = true
 		}
 	}

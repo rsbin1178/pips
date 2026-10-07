@@ -176,9 +176,7 @@ func (r *run) turn(ctx context.Context, turn int) (result *RunResult, next bool,
 
 	previousResponse := r.lastResp
 
-	resp, stopped, err := r.agent.callModel(
-		ctx, r.model, turnTools, requestUpdate, turn, msgs, r.emit, r.streaming,
-	)
+	resp, stopped, err := r.callTurn(ctx, turn, turnTools, requestUpdate, msgs)
 	if stopped {
 		return nil, false, nil
 	}
@@ -556,9 +554,81 @@ func (r *run) finish(stop StopReason, turns int, pending []ai.ToolCallPart) (*Ru
 	}, nil
 }
 
+// callTurn performs one turn's model call, re-issuing it when a stream that had
+// already produced output failed with a retryable error. Every re-issue first
+// discards the provisional candidate so a frontend drops the partial output.
+// Nothing from the failed attempt reached the session and no tool ran, so a
+// re-issue can neither duplicate content nor repeat an effect.
+func (r *run) callTurn(
+	ctx context.Context,
+	turn int,
+	turnTools *toolbox,
+	requestUpdate *runModelRequest,
+	msgs []ai.Message,
+) (resp *ai.Response, stopped bool, err error) {
+	recovery := r.agent.cfg.streamRecovery
+
+	for attempt := 0; ; attempt++ {
+		var produced bool
+
+		resp, produced, stopped, err = r.agent.callModel(
+			ctx, r.model, turnTools, requestUpdate, turn, msgs, r.emit, r.streaming,
+		)
+		if stopped || err == nil {
+			return resp, stopped, err
+		}
+
+		if !produced || attempt >= recovery.attempts || !ai.IsRetryable(err) || ctx.Err() != nil {
+			return resp, false, err
+		}
+
+		delay := recovery.backoff(attempt)
+		if !r.emit(CandidateDiscarded{Turn: turn}) ||
+			!r.emit(retryNotice(turn, attempt, recovery.attempts, delay, err)) {
+			return nil, true, nil
+		}
+
+		if sleepErr := sleepContext(ctx, delay); sleepErr != nil {
+			return nil, false, sleepErr
+		}
+	}
+}
+
+// retryNotice announces the re-issue that is about to start. The loop reports
+// the wait on the same stream channel the retry middleware uses, so a frontend
+// renders one kind of notice whichever layer replays the request. Attempt is
+// the 1-based ordinal of this re-issue against the loop's re-issue budget.
+func retryNotice(turn, attempt, recoveryAttempts int, delay time.Duration, err error) ModelStreamEvent {
+	return ModelStreamEvent{
+		Turn: turn,
+		Event: ai.StreamEvent{
+			Type:  ai.StreamRetry,
+			Retry: ai.NewRetryNotice(attempt+1, recoveryAttempts, delay, err),
+		},
+	}
+}
+
+// sleepContext waits for delay or the context, whichever comes first.
+func sleepContext(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		return ctx.Err()
+	}
+
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
 // callModel performs one model call. When streaming, deltas tee through emit
-// while [ai.Collect] folds them into the completed response; stopped reports
-// that the consumer quit mid-stream.
+// while [ai.Collect] folds them into the completed response; produced reports
+// that the call streamed output before it ended, and stopped reports that the
+// consumer quit mid-stream.
 func (a *Agent) callModel(
 	ctx context.Context,
 	model ai.LanguageModel,
@@ -568,12 +638,12 @@ func (a *Agent) callModel(
 	msgs []ai.Message,
 	emit emitFunc,
 	streaming bool,
-) (resp *ai.Response, stopped bool, err error) {
+) (resp *ai.Response, produced, stopped bool, err error) {
 	req := a.requestWithTools(msgs, tools, update)
 
 	if !streaming {
 		resp, err = model.Generate(ctx, req)
-		return resp, false, err
+		return resp, false, false, err
 	}
 
 	resp, err = ai.Collect(func(yield func(ai.StreamEvent, error) bool) {
@@ -588,6 +658,11 @@ func (a *Agent) callModel(
 				return
 			}
 
+			// A retry notice reports a wait, so it is not output.
+			if ev.Type != ai.StreamMessageStart && ev.Type != ai.StreamRetry {
+				produced = true
+			}
+
 			if !emit(ModelStreamEvent{Turn: turn, Event: ev}) {
 				stopped = true
 				return
@@ -600,10 +675,10 @@ func (a *Agent) callModel(
 	})
 
 	if stopped {
-		return nil, true, nil
+		return nil, produced, true, nil
 	}
 
-	return resp, false, err
+	return resp, produced, false, err
 }
 
 // shouldStop checks the configured stop conditions after a completed turn.

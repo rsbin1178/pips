@@ -139,8 +139,7 @@ func (p *agentProjector) project(event agent.Event) (Event, error) {
 		eventType = EventTurnStarted
 		payload = TurnStarted{Turn: source.Turn}
 	case agent.ModelStreamEvent:
-		eventType = EventMessageDelta
-		payload = messageDeltaFromAI(source.Event)
+		eventType, payload = modelStreamProjection(source.Turn, source.Event)
 	case agent.MessageCommitted:
 		eventType = EventMessageCommitted
 		payload = MessageCommitted{Message: cloneMessage(source.Message)}
@@ -193,4 +192,15 @@ func (p *agentProjector) project(event agent.Event) (Event, error) {
 		eventType,
 		payload,
 	)
+}
+
+// modelStreamProjection maps one normalized stream event to its Coding event.
+// Deltas build the provisional draft; a retry notice reports progress, so it
+// becomes its own event and never enters that draft.
+func modelStreamProjection(turn int, event ai.StreamEvent) (EventType, EventPayload) {
+	if event.Type == ai.StreamRetry {
+		return EventModelRetry, modelRetryFromAI(turn, event.Retry)
+	}
+
+	return EventMessageDelta, messageDeltaFromAI(event)
 }

@@ -20,7 +20,7 @@ func cloneEvent(event Event) Event {
 	case RunStarted, TurnStarted, CandidateDiscarded, TurnCompleted, RunCompleted:
 		return event
 	case ModelStreamEvent:
-		if payload.Event.Usage == nil {
+		if payload.Event.Usage == nil && payload.Event.Retry == nil {
 			return event
 		}
 	}
@@ -33,12 +33,19 @@ func cloneEvent(event Event) Event {
 func cloneEventPayload(payload EventPayload) EventPayload {
 	switch value := payload.(type) {
 	case ModelStreamEvent:
-		if value.Event.Usage == nil {
+		if value.Event.Usage == nil && value.Event.Retry == nil {
 			return payload
 		}
 
-		usage := *value.Event.Usage
-		value.Event.Usage = &usage
+		if value.Event.Usage != nil {
+			usage := *value.Event.Usage
+			value.Event.Usage = &usage
+		}
+
+		if value.Event.Retry != nil {
+			notice := *value.Event.Retry
+			value.Event.Retry = &notice
+		}
 
 		return value
 	case MessageCommitted:
