@@ -520,7 +520,7 @@ func (s *transcriptStore) rowsIn(start, end int) []string {
 			continue
 		}
 
-		rows = append(rows, recordRows.window(from, to)...)
+		rows = recordRows.appendWindow(rows, from, to)
 		position = recordStart + to
 	}
 

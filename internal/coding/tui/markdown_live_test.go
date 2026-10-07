@@ -404,26 +404,36 @@ func TestLiveEntryRowsMatchTheWholeRender(t *testing.T) {
 	}
 }
 
-// TestRowSegmentsWindow pins the two-segment row view the live record hands the
-// store: a window inside one segment is a subslice, a window across the seam is
-// the two in order, and out-of-range bounds clamp instead of panicking.
-func TestRowSegmentsWindow(t *testing.T) {
-	t.Parallel()
-
+// TestRowSegmentsAppendWindow pins the two-segment row view the live record hands
+// the store: appending a window inside one segment is a subslice, appending one
+// across the seam writes both in order, and out-of-range bounds clamp instead of
+// panicking. The destination is the frame's row buffer, so a straddling window
+// must not allocate beyond it.
+//
+// It is deliberately not parallel: testing.AllocsPerRun refuses to run inside a
+// parallel test.
+func TestRowSegmentsAppendWindow(t *testing.T) {
 	segments := rowSegments{frozen: []string{"a", "b", "c"}, tail: []string{"d", "e"}}
 
 	assert.Equal(t, 5, segments.count())
-	assert.Equal(t, []string{"b", "c"}, segments.window(1, 3))
-	assert.Equal(t, []string{"c", "d"}, segments.window(2, 4))
-	assert.Equal(t, []string{"d", "e"}, segments.window(3, 5))
-	assert.Equal(t, []string{"a", "b", "c", "d", "e"}, segments.window(0, 99))
+	assert.Equal(t, []string{"b", "c"}, segments.appendWindow(nil, 1, 3))
+	assert.Equal(t, []string{"c", "d"}, segments.appendWindow(nil, 2, 4))
+	assert.Equal(t, []string{"d", "e"}, segments.appendWindow(nil, 3, 5))
+	assert.Equal(t, []string{"a", "b", "c", "d", "e"}, segments.appendWindow(nil, 0, 99))
 	assert.Equal(t, []string{"a", "b", "c", "d", "e"}, segments.all())
-	assert.Nil(t, segments.window(4, 4))
-	assert.Nil(t, segments.window(9, 12))
+	assert.Nil(t, segments.appendWindow(nil, 4, 4))
+	assert.Nil(t, segments.appendWindow(nil, 9, 12))
 
 	flat := rowSegments{frozen: []string{"x", "y"}}
-	assert.Equal(t, []string{"x"}, flat.window(0, 1))
+	assert.Equal(t, []string{"x"}, flat.appendWindow(nil, 0, 1))
 	assert.Equal(t, []string{"x", "y"}, flat.all())
+
+	dst := make([]string, 0, 16)
+	allocs := testing.AllocsPerRun(100, func() {
+		dst = segments.appendWindow(dst[:0], 2, 4)
+	})
+	require.Zero(t, allocs, "a straddling window with room in dst must not allocate")
+	assert.Equal(t, []string{"c", "d"}, dst)
 }
 
 // TestLiveThinkingEntryRowsMatchTheWholeRender streams a live thought through the

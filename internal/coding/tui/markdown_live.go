@@ -44,27 +44,26 @@ func (s rowSegments) count() int {
 	return len(s.frozen) + len(s.tail)
 }
 
-// window returns rows [from, to). A window that lies inside one segment is a
-// subslice and allocates nothing; only a window that straddles the seam copies.
-func (s rowSegments) window(from, to int) []string {
+// appendWindow appends rows [from, to) to dst and returns the extended slice. It
+// appends the segment subslices directly, so a window that straddles the seam
+// needs no intermediate slice: the only growth is the caller's own destination.
+func (s rowSegments) appendWindow(dst []string, from, to int) []string {
 	from, to = max(0, from), min(to, s.count())
 	if from >= to {
-		return nil
+		return dst
 	}
 
 	if to <= len(s.frozen) {
-		return s.frozen[from:to]
+		return append(dst, s.frozen[from:to]...)
 	}
 
 	if from >= len(s.frozen) {
-		return s.tail[from-len(s.frozen) : to-len(s.frozen)]
+		return append(dst, s.tail[from-len(s.frozen):to-len(s.frozen)]...)
 	}
 
-	rows := make([]string, 0, to-from)
-	rows = append(rows, s.frozen[from:]...)
-	rows = append(rows, s.tail[:to-len(s.frozen)]...)
+	dst = append(dst, s.frozen[from:]...)
 
-	return rows
+	return append(dst, s.tail[:to-len(s.frozen)]...)
 }
 
 // all returns the rows as one slice, for callers that hand the document on.
