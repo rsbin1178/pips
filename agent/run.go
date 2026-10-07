@@ -1,14 +1,28 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"iter"
+	"slices"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/rsbin1178/pips/ai"
 )
+
+// lengthSalvageAttempts bounds how many times one turn continues a response
+// the output-token limit cut off. Two continues match Grok Build's default.
+const lengthSalvageAttempts = 2
+
+// lengthSalvageInstruction asks the model to resume a response the
+// output-token limit cut off. It is provider-neutral: adapters map the leading
+// system block to their native instruction surface.
+const lengthSalvageInstruction = "Your previous response exceeded the output token limit and was cut off. " +
+	"Continue from exactly where it stopped. Do not repeat what you already wrote."
 
 // Run appends msgs to the session and drives the agent loop to completion:
 // call the model, execute requested tools, feed results back, repeat. It
@@ -127,6 +141,9 @@ type run struct {
 
 	usage    ai.Usage
 	lastResp *ai.Response
+	// salvageContinues counts the length-salvage continues this run has
+	// consumed, bounding how many times one truncated answer is resumed.
+	salvageContinues int
 }
 
 type runModelRequest struct {
@@ -397,7 +414,16 @@ func (r *run) decide(ctx context.Context, turn int, natural bool, naturalStop St
 		return r.partial(turn), false, err
 	}
 
-	if natural && !r.sess.HasQueued() {
+	// A response the output-token limit cut off is real output, so the loop
+	// keeps it and asks for the remainder instead of ending the turn. Once the
+	// budget is spent the same response reports StopTruncated, never a
+	// successful end_turn.
+	salvage := r.salvageable()
+	if !salvage && naturalStop == StopEndTurn && r.lengthTruncated() {
+		naturalStop = StopTruncated
+	}
+
+	if natural && !r.sess.HasQueued() && !salvage {
 		result, err := r.finish(naturalStop, turn, nil)
 		return result, false, err
 	}
@@ -412,11 +438,16 @@ func (r *run) decide(ctx context.Context, turn int, natural bool, naturalStop St
 		return result, false, err
 	}
 
+	if salvage {
+		r.salvageContinues++
+		r.addNextSystemSuffix(lengthSalvageInstruction)
+	}
+
 	r.pending = r.sess.drainSteering(r.agent.cfg.steeringMode)
 
 	if natural && len(r.pending) == 0 {
 		r.pending = r.sess.drainFollowUps(r.agent.cfg.followUpMode)
-		if len(r.pending) == 0 {
+		if len(r.pending) == 0 && !salvage {
 			// The queues emptied between HasQueued and the drains.
 			result, err := r.finish(naturalStop, turn, nil)
 			return result, false, err
@@ -424,6 +455,39 @@ func (r *run) decide(ctx context.Context, turn int, natural bool, naturalStop St
 	}
 
 	return nil, true, nil
+}
+
+// lengthTruncated reports that the last response is a no-tool answer the
+// output-token limit cut off with text worth continuing.
+func (r *run) lengthTruncated() bool {
+	resp := r.lastResp
+
+	return resp != nil &&
+		resp.FinishReason == ai.FinishLength &&
+		len(resp.ToolCalls()) == 0 &&
+		strings.TrimSpace(resp.Text()) != ""
+}
+
+// salvageable reports whether the last response should be continued and the
+// per-run salvage budget still allows it.
+func (r *run) salvageable() bool {
+	return r.lengthTruncated() && r.salvageContinues < lengthSalvageAttempts
+}
+
+// addNextSystemSuffix appends a one-request system instruction to the next
+// request, preserving any constraint a prepare-turn hook already set.
+func (r *run) addNextSystemSuffix(suffix string) {
+	if r.nextRequest == nil {
+		r.nextRequest = &runModelRequest{}
+	}
+
+	if r.nextRequest.systemSuffix == "" {
+		r.nextRequest.systemSuffix = suffix
+
+		return
+	}
+
+	r.nextRequest.systemSuffix += "\n" + suffix
 }
 
 func (r *run) prepare(ctx context.Context, turn int, response *ai.Response) error {
@@ -555,10 +619,13 @@ func (r *run) finish(stop StopReason, turns int, pending []ai.ToolCallPart) (*Ru
 }
 
 // callTurn performs one turn's model call, re-issuing it when a stream that had
-// already produced output failed with a retryable error. Every re-issue first
-// discards the provisional candidate so a frontend drops the partial output.
-// Nothing from the failed attempt reached the session and no tool ran, so a
-// re-issue can neither duplicate content nor repeat an effect.
+// already produced output failed with a retryable error. In the default
+// discard mode every re-issue first retracts the provisional candidate so a
+// frontend drops the partial output. In continuation mode the partial text is
+// kept and sent back as a trailing assistant prefix, so the re-issue asks only
+// for the missing remainder. Nothing from the failed attempt reached the
+// session and no tool ran, so a re-issue can neither duplicate content nor
+// repeat an effect.
 func (r *run) callTurn(
 	ctx context.Context,
 	turn int,
@@ -568,23 +635,79 @@ func (r *run) callTurn(
 ) (resp *ai.Response, stopped bool, err error) {
 	recovery := r.agent.cfg.streamRecovery
 
+	// prefix accumulates the text retained across failed attempts; a non-empty
+	// prefix switches every later attempt to the continuation request.
+	var (
+		prefix     string
+		havePrefix bool
+	)
+
 	for attempt := 0; ; attempt++ {
+		attemptMsgs, attemptUpdate := msgs, requestUpdate
+
+		var filter *continuationFilter
+
+		if havePrefix {
+			// Build a fresh slice: msgs shares its backing array with the
+			// session snapshot, so appending to it would corrupt the session.
+			attemptMsgs = slices.Concat(msgs, []ai.Message{ai.Assistant(ai.TextPart{Text: prefix})})
+			attemptUpdate = continuationRequestUpdate(requestUpdate, streamContinuationInstruction)
+			filter = newContinuationFilter(prefix)
+		}
+
 		var produced bool
 
 		resp, produced, stopped, err = r.agent.callModel(
-			ctx, r.model, turnTools, requestUpdate, turn, msgs, r.emit, r.streaming,
+			ctx, r.model, turnTools, attemptUpdate, turn, attemptMsgs, r.emit, r.streaming, filter,
 		)
-		if stopped || err == nil {
-			return resp, stopped, err
+		if stopped {
+			return nil, true, nil
+		}
+
+		if err == nil {
+			if havePrefix {
+				resp = mergeContinuation(prefix, resp)
+			}
+
+			return resp, false, nil
 		}
 
 		if !produced || attempt >= recovery.attempts || !ai.IsRetryable(err) || ctx.Err() != nil {
+			// Give up. In continuation mode keep whatever text the failing
+			// attempt produced and report it as an explicitly incomplete
+			// reply rather than discarding it silently.
+			if recovery.mode == recoveryContinue {
+				if retained, ok := retainPrefix(resp); ok {
+					prefix += retained
+					havePrefix = true
+				}
+			}
+
+			if havePrefix && !r.emitIncomplete(turn, prefix, err) {
+				return nil, true, nil
+			}
+
 			return resp, false, err
 		}
 
+		if recovery.mode == recoveryContinue {
+			if retained, ok := retainPrefix(resp); ok {
+				prefix += retained
+				havePrefix = true
+			}
+			// A continuation that produced no usable text keeps the existing
+			// prefix and still consumes an attempt.
+		}
+
 		delay := recovery.backoff(attempt)
-		if !r.emit(CandidateDiscarded{Turn: turn}) ||
-			!r.emit(retryNotice(turn, attempt, recovery.attempts, delay, err)) {
+
+		switch {
+		case havePrefix:
+			if !r.emit(retryNotice(turn, attempt, recovery.attempts, delay, err)) {
+				return nil, true, nil
+			}
+		case !r.emit(CandidateDiscarded{Turn: turn}),
+			!r.emit(retryNotice(turn, attempt, recovery.attempts, delay, err)):
 			return nil, true, nil
 		}
 
@@ -592,6 +715,45 @@ func (r *run) callTurn(
 			return nil, false, sleepErr
 		}
 	}
+}
+
+// continuationRequestUpdate returns the request constraint for a continuation
+// attempt: the turn's original constraint plus the continuation instruction as
+// a one-request system suffix. Tools and tool choice are preserved so the
+// continuation cannot alter the tool snapshot.
+func continuationRequestUpdate(base *runModelRequest, instruction string) *runModelRequest {
+	update := &runModelRequest{}
+	if base != nil {
+		*update = *base
+	}
+
+	if update.systemSuffix == "" {
+		update.systemSuffix = instruction
+
+		return update
+	}
+
+	update.systemSuffix += "\n" + instruction
+
+	return update
+}
+
+// emitIncomplete reports a retained partial answer that will not be committed.
+// It returns false when the stream consumer stopped.
+func (r *run) emitIncomplete(turn int, prefix string, err error) bool {
+	return r.emit(CandidateIncomplete{
+		Turn:   turn,
+		Text:   boundIncompleteText(prefix),
+		Bytes:  len(prefix),
+		Reason: incompleteReason(err),
+	})
+}
+
+// incompleteReason names the failure class shown next to an incomplete reply.
+// It reuses the retry notice's classification, so a consumer reads the same
+// phrase whether the failure was retried or abandoned.
+func incompleteReason(err error) string {
+	return ai.NewRetryNotice(1, 1, 0, err).Reason
 }
 
 // retryNotice announces the re-issue that is about to start. The loop reports
@@ -628,7 +790,9 @@ func sleepContext(ctx context.Context, delay time.Duration) error {
 // callModel performs one model call. When streaming, deltas tee through emit
 // while [ai.Collect] folds them into the completed response; produced reports
 // that the call streamed output before it ended, and stopped reports that the
-// consumer quit mid-stream.
+// consumer quit mid-stream. filter, when non-nil, trims the restatement a
+// continuation may open with before either the draft or the accumulator sees
+// it.
 func (a *Agent) callModel(
 	ctx context.Context,
 	model ai.LanguageModel,
@@ -638,6 +802,7 @@ func (a *Agent) callModel(
 	msgs []ai.Message,
 	emit emitFunc,
 	streaming bool,
+	filter *continuationFilter,
 ) (resp *ai.Response, produced, stopped bool, err error) {
 	req := a.requestWithTools(msgs, tools, update)
 
@@ -649,6 +814,19 @@ func (a *Agent) callModel(
 	resp, err = ai.Collect(func(yield func(ai.StreamEvent, error) bool) {
 		for ev, streamErr := range model.Stream(ctx, req) {
 			if streamErr != nil {
+				// A break also ends the stream: release buffered text before
+				// the error so a continuation's output is retained, not lost.
+				for _, forwarded := range filter.flush() {
+					if !emit(ModelStreamEvent{Turn: turn, Event: forwarded}) {
+						stopped = true
+						return
+					}
+
+					if !yield(forwarded, nil) {
+						return
+					}
+				}
+
 				yield(ai.StreamEvent{}, streamErr)
 				return
 			}
@@ -658,18 +836,22 @@ func (a *Agent) callModel(
 				return
 			}
 
-			// A retry notice reports a wait, so it is not output.
+			// A retry notice reports a wait, so it is not output. The raw
+			// event decides this: a buffered delta the filter has not released
+			// yet still means the call produced output.
 			if ev.Type != ai.StreamMessageStart && ev.Type != ai.StreamRetry {
 				produced = true
 			}
 
-			if !emit(ModelStreamEvent{Turn: turn, Event: ev}) {
-				stopped = true
-				return
-			}
+			for _, forwarded := range filter.forward(ev) {
+				if !emit(ModelStreamEvent{Turn: turn, Event: forwarded}) {
+					stopped = true
+					return
+				}
 
-			if !yield(ev, nil) {
-				return
+				if !yield(forwarded, nil) {
+					return
+				}
 			}
 		}
 	})
@@ -700,4 +882,195 @@ func (a *Agent) shouldStop(info RunInfo) (StopReason, bool) {
 // session.
 func toolMessage(results []ai.ToolResultPart) ai.ToolMessage {
 	return ai.ToolResults(results...)
+}
+
+// streamContinuationInstruction asks the model to resume a stream that broke
+// mid-answer. It is provider-neutral, delivered as a one-request system
+// suffix on the continuation request.
+const streamContinuationInstruction = "The previous response was interrupted mid-stream. " +
+	"Continue it: output only the missing remainder, starting exactly where the text above stops. " +
+	"Do not repeat, rephrase, summarise, or restart anything already written."
+
+// Continuation overlap trim. A provider may restate the tail of the prefix
+// when asked to continue; the filter drops that repeat so the live draft and
+// the committed message agree.
+const (
+	// continuationOverlapBytes caps how much of the prefix tail is compared
+	// against the continuation's opening.
+	continuationOverlapBytes = 256
+	// continuationMinOverlapBytes is the shortest match treated as a real
+	// restatement; anything shorter is coincidence.
+	continuationMinOverlapBytes = 16
+	// maxIncompleteTextBytes bounds the text a CandidateIncomplete event
+	// retains, so a broken stream cannot push an unbounded draft into a
+	// consumer's durable trace.
+	maxIncompleteTextBytes = 64 << 10
+	// maxIncompleteReasonBytes bounds the failure phrase beside that text.
+	maxIncompleteReasonBytes = 64
+)
+
+// retainPrefix returns the text a failed attempt produced, which a
+// continuation re-issues as a trailing assistant message. It refuses a
+// response carrying tool calls — those cannot be replayed as text — and one
+// whose text is empty after trimming.
+func retainPrefix(resp *ai.Response) (string, bool) {
+	if resp == nil {
+		return "", false
+	}
+
+	var text strings.Builder
+
+	for _, part := range resp.Message.Parts {
+		switch part := part.(type) {
+		case ai.ToolCallPart:
+			return "", false
+		case ai.TextPart:
+			text.WriteString(part.Text)
+		}
+	}
+
+	retained := text.String()
+	if strings.TrimSpace(retained) == "" {
+		return "", false
+	}
+
+	return retained, true
+}
+
+// mergeContinuation prepends the retained prefix to the final attempt's
+// response and folds adjacent text parts, so the committed message reads as one
+// continuous answer. Tool calls, reasoning, citations, finish reason, and usage
+// come from the final attempt.
+func mergeContinuation(prefix string, resp *ai.Response) *ai.Response {
+	if resp == nil {
+		return nil
+	}
+
+	parts := make([]ai.AssistantPart, 0, len(resp.Message.Parts)+1)
+	parts = append(parts, ai.TextPart{Text: prefix})
+
+	for _, part := range resp.Message.Parts {
+		if text, ok := part.(ai.TextPart); ok && len(parts) > 0 {
+			if last, ok := parts[len(parts)-1].(ai.TextPart); ok {
+				parts[len(parts)-1] = ai.TextPart{Text: last.Text + text.Text}
+
+				continue
+			}
+		}
+
+		parts = append(parts, part)
+	}
+
+	resp.Message.Parts = parts
+
+	return resp
+}
+
+// boundIncompleteText truncates retained text to maxIncompleteTextBytes
+// without splitting a UTF-8 rune, so a bounded event still encodes cleanly.
+func boundIncompleteText(text string) string {
+	if len(text) <= maxIncompleteTextBytes {
+		return text
+	}
+
+	truncated := text[:maxIncompleteTextBytes]
+	for len(truncated) > 0 {
+		r, size := utf8.DecodeLastRuneInString(truncated)
+		if r != utf8.RuneError || size > 1 {
+			break
+		}
+
+		truncated = truncated[:len(truncated)-1]
+	}
+
+	return truncated
+}
+
+// continuationFilter trims the restatement a continuation may open with. It
+// sits between the model stream and both the live emit and the accumulator, so
+// neither the rendered draft nor the committed message contains the repeat.
+type continuationFilter struct {
+	prefix  []byte
+	window  int
+	buffer  []byte
+	trimmed bool
+}
+
+func newContinuationFilter(prefix string) *continuationFilter {
+	return &continuationFilter{
+		prefix: []byte(prefix),
+		window: min(len(prefix), continuationOverlapBytes),
+	}
+}
+
+// forward maps one model event to the events to pass downstream, buffering
+// text until enough is held to detect an overlap. Non-text events pass through
+// untouched and do not release the buffer, so a continuation that opens with
+// reasoning still gets its text trimmed.
+func (f *continuationFilter) forward(ev ai.StreamEvent) []ai.StreamEvent {
+	if f == nil {
+		return []ai.StreamEvent{ev}
+	}
+
+	switch ev.Type {
+	case ai.StreamTextDelta:
+		if f.trimmed {
+			return []ai.StreamEvent{ev}
+		}
+
+		f.buffer = append(f.buffer, ev.Text...)
+		if len(f.buffer) < f.window {
+			return nil
+		}
+
+		return f.release()
+	case ai.StreamMessageEnd:
+		return append(f.release(), ev)
+	default:
+		return []ai.StreamEvent{ev}
+	}
+}
+
+// flush releases any buffered text when a stream ends without a message-end
+// event. It is a no-op for an unfiltered call.
+func (f *continuationFilter) flush() []ai.StreamEvent {
+	if f == nil {
+		return nil
+	}
+
+	return f.release()
+}
+
+// release flushes the buffer once, dropping the overlap it repeats from the
+// prefix tail. A continuation shorter than the window releases its whole
+// buffer here at stream end.
+func (f *continuationFilter) release() []ai.StreamEvent {
+	if f.trimmed {
+		return nil
+	}
+
+	f.trimmed = true
+
+	drop := longestOverlap(f.prefix, f.buffer, f.window)
+	released := f.buffer[drop:]
+	f.buffer = nil
+
+	if len(released) == 0 {
+		return nil
+	}
+
+	return []ai.StreamEvent{{Type: ai.StreamTextDelta, Text: string(released)}}
+}
+
+// longestOverlap returns the length of the longest suffix of prefix, capped at
+// window, that is also a prefix of buffered. A match shorter than
+// continuationMinOverlapBytes is coincidence and returns zero.
+func longestOverlap(prefix, buffered []byte, window int) int {
+	for length := min(window, len(buffered)); length >= continuationMinOverlapBytes; length-- {
+		if bytes.Equal(prefix[len(prefix)-length:], buffered[:length]) {
+			return length
+		}
+	}
+
+	return 0
 }

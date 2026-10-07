@@ -84,17 +84,31 @@ const (
 // streamRecovery bounds the re-issue of a turn whose model stream failed after
 // it had already streamed output.
 type streamRecovery struct {
+	mode     recoveryMode
 	attempts int
 	base     time.Duration
 	max      time.Duration
 }
 
-func newStreamRecovery(attempts int, base, ceiling time.Duration) streamRecovery {
+// recoveryMode selects what a re-issue does with the partial answer a failed
+// attempt streamed.
+type recoveryMode int
+
+const (
+	// recoveryDiscard retracts the partial and re-issues the same request.
+	// It is the zero value, so an unconfigured agent keeps today's semantics.
+	recoveryDiscard recoveryMode = iota
+	// recoveryContinue keeps the partial and sends it back as a trailing
+	// assistant prefix, asking the model for the missing remainder.
+	recoveryContinue
+)
+
+func newStreamRecovery(mode recoveryMode, attempts int, base, ceiling time.Duration) streamRecovery {
 	if attempts <= 0 {
 		return streamRecovery{}
 	}
 
-	recovery := streamRecovery{attempts: attempts, base: base, max: ceiling}
+	recovery := streamRecovery{mode: mode, attempts: attempts, base: base, max: ceiling}
 	if recovery.base <= 0 {
 		recovery.base = DefaultStreamRecoveryBase
 	}
@@ -181,7 +195,26 @@ func WithStopWhen(cond func(RunInfo) bool) Option {
 // makes the retry safe: nothing from the failed attempt was committed and no
 // tool ran.
 func WithStreamRecovery(attempts int, base, maxDelay time.Duration) Option {
-	return func(c *config) { c.streamRecovery = newStreamRecovery(attempts, base, maxDelay) }
+	return func(c *config) {
+		c.streamRecovery = newStreamRecovery(recoveryDiscard, attempts, base, maxDelay)
+	}
+}
+
+// WithStreamContinuation is [WithStreamRecovery]'s alternative: a re-issue
+// keeps the partial answer and sends it back as a trailing assistant prefix,
+// asking the model only for the missing remainder (see
+// [WithStreamRecovery] for the attempt and backoff semantics). Retained text
+// is never retracted or regenerated, so a consumer's live draft keeps growing
+// across the re-issue.
+//
+// Both options configure the same budget; the one set last wins. When no
+// text prefix can be retained — the partial carried a tool call, or produced
+// no text — the loop falls back to the discard path. Zero attempts (the
+// default) surfaces the failure instead.
+func WithStreamContinuation(attempts int, base, maxDelay time.Duration) Option {
+	return func(c *config) {
+		c.streamRecovery = newStreamRecovery(recoveryContinue, attempts, base, maxDelay)
+	}
 }
 
 // WithBeforeTool installs a gate consulted before each tool call executes.

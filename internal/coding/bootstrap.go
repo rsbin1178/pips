@@ -58,6 +58,11 @@ func BootstrapState(options BootstrapOptions) (BootstrapResult, error) {
 		return BootstrapResult{}, err
 	}
 
+	incompleteReplies, err := replayIncompleteReplies(options.Path)
+	if err != nil {
+		return BootstrapResult{}, err
+	}
+
 	if options.HasPendingToolCalls && recovery.PendingID == "" {
 		return BootstrapResult{}, fmt.Errorf(
 			"%w: pending tool calls have no interaction journal",
@@ -116,6 +121,7 @@ func BootstrapState(options BootstrapOptions) (BootstrapResult, error) {
 	}
 	state.MessageCandidates = make([]CandidateIdentity, len(state.Transcript))
 	state.SyntheticMessages = syntheticMessageIndexes(state.Transcript)
+	state.IncompleteReplies = incompleteReplies
 	state.ContextTokens = harness.EstimateContext(options.Path)
 
 	if recovery.LastID != "" {

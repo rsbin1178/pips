@@ -461,6 +461,10 @@ func terminalInteractionOutcome(stop agent.StopReason) (InteractionOutcome, bool
 		return InteractionSucceeded, true
 	case agent.StopPaused:
 		return "", false
+	case agent.StopTruncated:
+		// The answer was cut off by the output limit and salvage ran out, so
+		// the interaction is incomplete even though the partial is committed.
+		return InteractionIncomplete, true
 	default:
 		return InteractionIncomplete, true
 	}
@@ -1155,6 +1159,12 @@ func (r *Runtime) driveHarness(
 	for event, streamErr := range current.harness.PromptMessagesStream(ctx, messages...) {
 		markObservedModelOutput(current, event)
 		if event.Payload() != nil {
+			if incomplete, ok := event.Payload().(agent.CandidateIncomplete); ok {
+				if err := r.persistIncompleteReply(current.id, incomplete); err != nil {
+					return "", err
+				}
+			}
+
 			projected, projectErr := emitter.publishAgent(projector, event)
 			if projectErr != nil {
 				return "", projectErr
@@ -1216,6 +1226,23 @@ func (r *Runtime) driveHarness(
 	}
 
 	return stop, nil
+}
+
+// persistIncompleteReply durably records one abandoned provisional answer
+// before its event is projected, so a restart restores the retained text even
+// if the live projection fails. It reuses the interaction journal's custom
+// record seam rather than adding a second durable store.
+func (r *Runtime) persistIncompleteReply(
+	interactionID string,
+	event agent.CandidateIncomplete,
+) error {
+	return appendIncompleteReply(r.session, incompleteReplyRecord{
+		InteractionID: interactionID,
+		Turn:          event.Turn,
+		Text:          event.Text,
+		Reason:        event.Reason,
+		Bytes:         event.Bytes,
+	})
 }
 
 func (r *Runtime) emitObserverDiagnostics(

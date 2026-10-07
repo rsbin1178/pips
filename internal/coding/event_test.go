@@ -626,6 +626,11 @@ func eventCases() []eventCase {
 		{name: "message discarded", event: newTestEvent(
 			EventMessageDiscarded, MessageDiscarded{Turn: 1},
 		)},
+		{name: "message incomplete", event: newTestEvent(
+			EventMessageIncomplete, IncompleteReply{
+				Turn: 1, Text: "half an answer", Reason: "stream ended early", Bytes: 14,
+			},
+		)},
 		{name: "tool started", event: newTestEvent(
 			EventToolStarted, ToolStarted{Turn: 1, Call: toolCall},
 		)},

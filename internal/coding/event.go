@@ -71,6 +71,7 @@ const (
 	EventMessageCommitted         EventType = "message.committed"
 	EventMessageDelta             EventType = "message.delta"
 	EventMessageDiscarded         EventType = "message.discarded"
+	EventMessageIncomplete        EventType = "message.incomplete"
 	EventModelRetry               EventType = "model.retry"
 	EventToolStarted              EventType = "tool.started"
 	EventToolUpdated              EventType = "tool.updated"
@@ -313,6 +314,20 @@ type MessageDelta struct {
 // rejected before it could become a committed assistant message.
 type MessageDiscarded struct {
 	Turn int `json:"turn"`
+}
+
+// IncompleteReply carries the text of a provisional answer abandoned before
+// session commit because its stream broke and recovery ran out. The text is
+// model output, so it is shown as an explicitly incomplete reply, but it is
+// never part of the conversation: it is not appended to the transcript and
+// must not reach the Harness session or the next model request. Bytes is the
+// retained text's size before the emitter's bound was applied, so a consumer
+// can tell a truncated record from a complete one.
+type IncompleteReply struct {
+	Turn   int    `json:"turn"`
+	Text   string `json:"text"`
+	Reason string `json:"reason,omitempty"`
+	Bytes  int    `json:"bytes"`
 }
 
 // ModelRetry reports that a model request is being re-attempted after a
@@ -618,6 +633,7 @@ func (TurnCompleted) eventPayload()            {}
 func (MessageCommitted) eventPayload()         {}
 func (MessageDelta) eventPayload()             {}
 func (MessageDiscarded) eventPayload()         {}
+func (IncompleteReply) eventPayload()          {}
 func (ModelRetry) eventPayload()               {}
 func (ToolStarted) eventPayload()              {}
 func (ToolUpdated) eventPayload()              {}
@@ -695,7 +711,8 @@ func validateEnvelopeIDs(event Event) error {
 			return invalidEvent("%s requires only an interaction id", event.Type)
 		}
 	case EventRunStarted, EventRunCompleted, EventRunInterrupted, EventTurnStarted, EventTurnCompleted,
-		EventMessageCommitted, EventMessageDelta, EventMessageDiscarded, EventModelRetry,
+		EventMessageCommitted, EventMessageDelta, EventMessageDiscarded, EventMessageIncomplete,
+		EventModelRetry,
 		EventToolStarted, EventToolUpdated,
 		EventToolCompleted, EventSubagentCreated, EventSubagentStarted,
 		EventSubagentProgress, EventSubagentCompleted, EventSubagentFailed,
@@ -860,6 +877,14 @@ func validatePayload(eventType EventType, payload EventPayload) error {
 
 		if value.Turn < 1 {
 			return payloadInvalid(eventType, payload, errors.New("turn must be positive"))
+		}
+	case IncompleteReply:
+		if eventType != EventMessageIncomplete {
+			return payloadMismatch(eventType, payload)
+		}
+
+		if err := validateIncompleteReply(value); err != nil {
+			return payloadInvalid(eventType, payload, err)
 		}
 	case ModelRetry:
 		if eventType != EventModelRetry {
@@ -1945,7 +1970,8 @@ func validInteractionStop(outcome InteractionOutcome, stop agent.StopReason) boo
 	case InteractionSucceeded:
 		return stop == agent.StopEndTurn || stop == agent.StopTerminated
 	case InteractionIncomplete:
-		return stop == agent.StopMaxTurns || stop == agent.StopBudget || stop == agent.StopWhen
+		return stop == agent.StopMaxTurns || stop == agent.StopBudget || stop == agent.StopWhen ||
+			stop == agent.StopTruncated
 	case InteractionFailed, InteractionCanceled:
 		return true
 	default:
@@ -1956,7 +1982,7 @@ func validInteractionStop(outcome InteractionOutcome, stop agent.StopReason) boo
 func validStopReason(reason agent.StopReason) bool {
 	switch reason {
 	case agent.StopEndTurn, agent.StopMaxTurns, agent.StopBudget, agent.StopPaused,
-		agent.StopWhen, agent.StopTerminated:
+		agent.StopWhen, agent.StopTerminated, agent.StopTruncated:
 		return true
 	default:
 		return false
@@ -2098,6 +2124,31 @@ func validateMessageDelta(delta MessageDelta) error {
 		}
 	default:
 		return errors.New("unknown delta kind")
+	}
+
+	return nil
+}
+
+// validateIncompleteReply bounds the retained text and keeps its reported
+// original size consistent, so a consumer can trust both the record and
+// whether that record was truncated to fit. The retained text is model output,
+// so it is not empty by contract and may be large; the reason stays a short
+// display phrase.
+func validateIncompleteReply(reply IncompleteReply) error {
+	if reply.Turn < 0 {
+		return errors.New("incomplete reply turn must not be negative")
+	}
+
+	if !validBoundedText(reply.Text, maxEventTextBytes, true) {
+		return errors.New("invalid incomplete reply text")
+	}
+
+	if !validBoundedText(reply.Reason, maxDiagnosticMessage, true) {
+		return errors.New("invalid incomplete reply reason")
+	}
+
+	if reply.Bytes < len(reply.Text) {
+		return errors.New("incomplete reply reports fewer bytes than it retains")
 	}
 
 	return nil

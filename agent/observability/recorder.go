@@ -76,7 +76,7 @@ func (r *Recorder) Observe(_ context.Context, event agent.Event) {
 	case agent.RunStarted:
 		r.metrics.RunsStarted++
 	case agent.TurnStarted, agent.ModelStreamEvent, agent.MessageCommitted,
-		agent.CandidateDiscarded, agent.ToolUpdated:
+		agent.CandidateDiscarded, agent.CandidateIncomplete, agent.ToolUpdated:
 		// These events carry no durable aggregate currently.
 	case agent.TurnCompleted:
 		trace.Turns = max(trace.Turns, payload.Turn)

@@ -25,6 +25,10 @@ const (
 	// EventCandidateDiscarded reports a provisional answer rejected before
 	// session commit. Candidate content is deliberately absent.
 	EventCandidateDiscarded EventType = "candidate_discarded"
+	// EventCandidateIncomplete reports a provisional answer abandoned before
+	// session commit whose text is retained so a consumer can show it as
+	// explicitly incomplete.
+	EventCandidateIncomplete EventType = "candidate_incomplete"
 	// EventToolStarted opens one tool-call lifecycle.
 	EventToolStarted EventType = "tool_started"
 	// EventToolUpdated carries a best-effort progress update from a running
@@ -101,6 +105,21 @@ type CandidateDiscarded struct {
 	Turn int
 }
 
+// CandidateIncomplete reports that a provisional answer was abandoned before
+// session commit because its stream broke and recovery ran out, and that its
+// text is retained so a consumer can show it as an explicitly incomplete
+// reply. Turn is one-based.
+type CandidateIncomplete struct {
+	Turn int
+	// Text is the retained answer text, bounded by the emitter.
+	Text string
+	// Bytes is the retained text's size before that bound was applied, so a
+	// consumer can tell a truncated record from a complete one.
+	Bytes int
+	// Reason is a short provider-neutral phrase naming the failure class.
+	Reason string
+}
+
 // ToolStarted opens the lifecycle of Call in the one-based Turn.
 type ToolStarted struct {
 	Turn int
@@ -137,16 +156,17 @@ type RunCompleted struct {
 	Usage ai.Usage
 }
 
-func (RunStarted) isEventPayload()         {}
-func (TurnStarted) isEventPayload()        {}
-func (ModelStreamEvent) isEventPayload()   {}
-func (MessageCommitted) isEventPayload()   {}
-func (CandidateDiscarded) isEventPayload() {}
-func (ToolStarted) isEventPayload()        {}
-func (ToolUpdated) isEventPayload()        {}
-func (ToolCompleted) isEventPayload()      {}
-func (TurnCompleted) isEventPayload()      {}
-func (RunCompleted) isEventPayload()       {}
+func (RunStarted) isEventPayload()          {}
+func (TurnStarted) isEventPayload()         {}
+func (ModelStreamEvent) isEventPayload()    {}
+func (MessageCommitted) isEventPayload()    {}
+func (CandidateDiscarded) isEventPayload()  {}
+func (CandidateIncomplete) isEventPayload() {}
+func (ToolStarted) isEventPayload()         {}
+func (ToolUpdated) isEventPayload()         {}
+func (ToolCompleted) isEventPayload()       {}
+func (TurnCompleted) isEventPayload()       {}
+func (RunCompleted) isEventPayload()        {}
 
 // NewEvent constructs a validated event and snapshots all mutable payload
 // data. occurredAt is normalized to UTC. It returns an error matching

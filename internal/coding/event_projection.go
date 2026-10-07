@@ -90,6 +90,11 @@ func projectSafePayload(payload EventPayload) EventPayload {
 	case MessageCommitted:
 		value.Message = safeMessage(value.Message)
 		return value
+	case IncompleteReply:
+		// Retained text is model output, so DisclosureSafe keeps it exactly as
+		// it keeps committed assistant text; only the failure phrase rides
+		// along. The reply is not conversation, but it is not secret either.
+		return value
 	case MessageDelta:
 		value.ResponseID = ""
 		switch value.Kind {
@@ -403,7 +408,7 @@ func Telemetry(event Event) (TelemetryEvent, error) {
 	case RuntimeError:
 		projected.Code = value.Code
 		projected.Failed = true
-	case TurnStarted, MessageCommitted:
+	case TurnStarted, MessageCommitted, IncompleteReply:
 	}
 
 	return projected, nil

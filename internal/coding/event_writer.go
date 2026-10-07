@@ -151,6 +151,14 @@ func (p *agentProjector) project(event agent.Event) (Event, error) {
 	case agent.CandidateDiscarded:
 		eventType = EventMessageDiscarded
 		payload = MessageDiscarded{Turn: source.Turn}
+	case agent.CandidateIncomplete:
+		eventType = EventMessageIncomplete
+		payload = IncompleteReply{
+			Turn:   source.Turn,
+			Text:   source.Text,
+			Reason: source.Reason,
+			Bytes:  source.Bytes,
+		}
 	case agent.ToolStarted:
 		eventType = EventToolStarted
 		payload = ToolStarted{Turn: source.Turn, Call: toolCallFromAI(source.Call)}

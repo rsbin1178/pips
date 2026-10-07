@@ -28,6 +28,10 @@ const (
 	// StopTerminated means every tool result in the final batch carried the
 	// [ErrTerminate] hint, ending the run at the tools' request.
 	StopTerminated StopReason = "terminated"
+	// StopTruncated means the model's answer was cut off by the output token
+	// limit and the salvage budget was spent before it finished. The partial
+	// answers remain in the session, but the run is not a completed turn.
+	StopTruncated StopReason = "truncated"
 )
 
 // RunInfo is a read-only snapshot of run progress, passed to the

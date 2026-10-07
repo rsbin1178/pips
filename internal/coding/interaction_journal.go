@@ -16,6 +16,10 @@ import (
 const (
 	interactionCustomType = "pips.coding.interaction/v1alpha1"
 	interactionIDBytes    = 16
+	// incompleteCustomType is the durable record for text retained from an
+	// abandoned provisional answer. It is a second custom type beside the
+	// interaction journal so an old session without it still replays.
+	incompleteCustomType = "pips.coding.incomplete/v1alpha1"
 )
 
 type interactionJournalEvent string
@@ -232,6 +236,91 @@ func validTerminalInteractionRecord(record interactionRecord) bool {
 
 	return validTokenUsage(*record.Usage) && record.DurationMS >= 0 &&
 		record.DurationMS <= maxEventDurationMS
+}
+
+// incompleteReplyRecord is the durable form of one [IncompleteReply]. It is
+// written beside the interaction journal through the same AppendCustom seam,
+// so a restart can restore the retained text without treating it as
+// conversation.
+type incompleteReplyRecord struct {
+	InteractionID string `json:"interaction_id"`
+	Turn          int    `json:"turn"`
+	Text          string `json:"text"`
+	Reason        string `json:"reason,omitempty"`
+	Bytes         int    `json:"bytes"`
+}
+
+// appendIncompleteReply persists one abandoned provisional answer.
+func appendIncompleteReply(store interactionStore, record incompleteReplyRecord) error {
+	if err := validateEventID("interaction id", record.InteractionID, true); err != nil {
+		return err
+	}
+
+	payload := IncompleteReply{
+		Turn: record.Turn, Text: record.Text, Reason: record.Reason, Bytes: record.Bytes,
+	}
+	if err := validateIncompleteReply(payload); err != nil {
+		return invalidEvent("invalid incomplete reply record: %v", err)
+	}
+
+	data, err := json.Marshal(record)
+	if err != nil {
+		return fmt.Errorf("coding incomplete reply: encode record: %w", err)
+	}
+
+	if _, err := store.AppendCustom(incompleteCustomType, data); err != nil {
+		return fmt.Errorf("coding incomplete reply: append record: %w", err)
+	}
+
+	return nil
+}
+
+// replayIncompleteReplies reconstructs the retained abandoned answers from the
+// durable custom records. It is the BootstrapState half of the durable trace;
+// a decode failure is ErrEventProtocol, matching the interaction journal.
+func replayIncompleteReplies(path []harness.Entry) ([]IncompleteReply, error) {
+	var replies []IncompleteReply
+
+	for _, entry := range path {
+		if entry.Kind != harness.KindCustom || entry.Custom != incompleteCustomType {
+			continue
+		}
+
+		record, err := decodeIncompleteReplyRecord(entry.Data)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"%w: decode incomplete reply entry %q: %w",
+				ErrEventProtocol,
+				entry.ID,
+				err,
+			)
+		}
+
+		replies = append(replies, IncompleteReply{
+			Turn: record.Turn, Text: record.Text, Reason: record.Reason, Bytes: record.Bytes,
+		})
+	}
+
+	return replies, nil
+}
+
+func decodeIncompleteReplyRecord(data ai.JSON) (incompleteReplyRecord, error) {
+	var record incompleteReplyRecord
+	if err := strictDecode(data, &record); err != nil {
+		return incompleteReplyRecord{}, err
+	}
+
+	if err := validateEventID("interaction id", record.InteractionID, true); err != nil {
+		return incompleteReplyRecord{}, err
+	}
+
+	if err := validateIncompleteReply(IncompleteReply{
+		Turn: record.Turn, Text: record.Text, Reason: record.Reason, Bytes: record.Bytes,
+	}); err != nil {
+		return incompleteReplyRecord{}, err
+	}
+
+	return record, nil
 }
 
 func newInteractionID() (string, error) {

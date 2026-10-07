@@ -253,7 +253,12 @@ type State struct {
 	Transcript    ai.Messages      `json:"transcript"`
 	// SyntheticMessages contains transcript indexes owned by Runtime-generated
 	// protocol input. Frontends render them as neutral activity, not user chat.
-	SyntheticMessages []int                           `json:"synthetic_messages,omitempty"`
+	SyntheticMessages []int `json:"synthetic_messages,omitempty"`
+	// IncompleteReplies retains the text of provisional answers abandoned when
+	// a broken stream's recovery budget ran out. It is deliberately separate
+	// from Transcript: the text is shown as an explicitly incomplete reply and
+	// must never reach the Harness session or the next model request.
+	IncompleteReplies []IncompleteReply               `json:"incomplete_replies,omitempty"`
 	Draft             []MessageDelta                  `json:"draft"`
 	DraftCandidate    CandidateIdentity               `json:"draft_candidate,omitzero"`
 	MessageCandidates []CandidateIdentity             `json:"message_candidates,omitempty"`
@@ -294,6 +299,7 @@ func (state State) Clone() State {
 		cloned.Transcript[index] = cloneMessage(message)
 	}
 	cloned.SyntheticMessages = slices.Clone(state.SyntheticMessages)
+	cloned.IncompleteReplies = slices.Clone(state.IncompleteReplies)
 
 	cloned.Draft = slices.Clone(state.Draft)
 	for index := range cloned.Draft {
@@ -774,6 +780,21 @@ func (state *State) apply(event Event) error {
 		if state.DraftCandidate.Key() != "" && state.DraftCandidate != (CandidateIdentity{RunID: event.RunID, Turn: payload.Turn}) {
 			return protocolError("message discard does not match draft candidate")
 		}
+		state.Draft = nil
+		state.DraftCandidate = CandidateIdentity{}
+	case IncompleteReply:
+		if _, err := state.activeRun(event.RunID); err != nil {
+			return err
+		}
+		if state.openTurn(event.RunID) != payload.Turn {
+			return protocolError("incomplete reply emitted outside its turn")
+		}
+
+		// The abandoned answer's text is recorded for display only, never in
+		// the transcript. The draft must go with it: RunInterrupted's contract
+		// rejects an interrupt that has visible output, so a live draft left
+		// behind would make the give-up path unpublishable.
+		state.IncompleteReplies = appendShared(state.IncompleteReplies, payload)
 		state.Draft = nil
 		state.DraftCandidate = CandidateIdentity{}
 	case ModelRetry:
