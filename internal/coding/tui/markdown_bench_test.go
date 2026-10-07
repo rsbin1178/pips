@@ -34,3 +34,32 @@ func BenchmarkThinkingStreamRender(b *testing.B) {
 		})
 	}
 }
+
+// benchmarkLiveMarkdownBody builds a streaming answer of the given size as
+// ordinary paragraphs, the shape a real assistant message has.
+func benchmarkLiveMarkdownBody(bytes int) string {
+	paragraph := "A streamed answer paragraph with ordinary words and a **bold** run.\n\n"
+	return strings.Repeat(paragraph, bytes/len(paragraph)+1)[:bytes]
+}
+
+// BenchmarkLiveMarkdownFrame measures one frame's render of a growing live
+// answer. The body is one paragraph longer each iteration, so a whole-document
+// render would grow with it; the frozen prefix keeps the frame's cost tied to
+// the tail.
+func BenchmarkLiveMarkdownFrame(b *testing.B) {
+	for _, size := range []int{4 << 10, 32 << 10, 128 << 10} {
+		b.Run(fmt.Sprintf("bytes=%d", size), func(b *testing.B) {
+			base := benchmarkLiveMarkdownBody(size)
+			renderer := newMarkdownRenderer(128)
+
+			b.ReportAllocs()
+
+			for index := 0; b.Loop(); index++ {
+				body := base + fmt.Sprintf("frame %07d keeps streaming.\n\n", index)
+				if _, err := renderer.renderLive("draft", body, 100, themeDark, false); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
