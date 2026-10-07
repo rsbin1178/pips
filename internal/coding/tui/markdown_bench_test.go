@@ -94,3 +94,29 @@ func BenchmarkLiveThinkingFrame(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkLiveMarkdownRowsFrame measures one frame of the managed store's row
+// path for a growing live answer. Unlike BenchmarkLiveMarkdownFrame it does not
+// join the frozen prefix and the tail into one string, so the frame's allocation
+// is the row headers it hands the store.
+func BenchmarkLiveMarkdownRowsFrame(b *testing.B) {
+	for _, size := range []int{4 << 10, 32 << 10, 128 << 10} {
+		b.Run(fmt.Sprintf("bytes=%d", size), func(b *testing.B) {
+			base := benchmarkLiveMarkdownBody(size)
+			renderer := newMarkdownRenderer(128)
+
+			b.ReportAllocs()
+
+			for index := 0; b.Loop(); index++ {
+				body := base + fmt.Sprintf("frame %07d keeps streaming.\n\n", index)
+				rows, err := renderer.renderLiveRows("draft", body, 100, themeDark, false)
+				if err != nil {
+					b.Fatal(err)
+				}
+				if len(rows) == 0 {
+					b.Fatal("no rows")
+				}
+			}
+		})
+	}
+}

@@ -134,7 +134,7 @@ func TestLiveMarkdownFreezesLongPrefixes(t *testing.T) {
 	frozen, exists := renderer.frozen["draft"]
 	require.True(t, exists, "the live slot must hold its frozen prefix")
 	assert.Equal(t, document[:prefixEnd], frozen.source)
-	assert.NotEmpty(t, frozen.rendered)
+	assert.NotEmpty(t, frozen.rows)
 	assert.Equal(t, block, frozen.block)
 }
 
@@ -346,5 +346,60 @@ func TestLiveMarkdownBoundaryStopsAtALinkReference(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, liveMarkdownReference(t, testCase.document, 60, false), got)
 		})
+	}
+}
+
+// TestLiveMarkdownRowsMatchTheStringRender pins the managed store's row path: the
+// rows it is handed must be exactly the rows of the string render, so consuming
+// rows instead of a joined document cannot change what is drawn.
+func TestLiveMarkdownRowsMatchTheStringRender(t *testing.T) {
+	t.Parallel()
+
+	for name, document := range liveMarkdownCorpus() {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			for _, width := range []int{24, 40, 118} {
+				streaming := newMarkdownRenderer(128)
+				rowRenderer := newMarkdownRenderer(128)
+				for size := 0; size <= len(document); size++ {
+					content := document[:size]
+					want, err := streaming.renderLive("draft", content, width, themeDark, false)
+					require.NoError(t, err)
+
+					rows, err := rowRenderer.renderLiveRows("draft", content, width, themeDark, false)
+					require.NoError(t, err)
+
+					require.Equal(t, splitTranscriptRows(want), rows, "width %d size %d", width, size)
+				}
+			}
+		})
+	}
+}
+
+// TestLiveEntryRowsMatchTheWholeRender streams a draft block through the store's
+// row path and asserts it equals a whole-document render of the entry, inset
+// included, at every size.
+func TestLiveEntryRowsMatchTheWholeRender(t *testing.T) {
+	t.Parallel()
+
+	document := strings.Join([]string{
+		"First paragraph of the streaming answer.",
+		"Second paragraph with a **bold** run.",
+		"Third paragraph, still streaming",
+	}, "\n\n")
+
+	const width = 118
+	streaming := newMarkdownRenderer(128)
+	for size := 0; size <= len(document); size++ {
+		block := timelineBlock{kind: blockDraft, id: "draft", body: document[:size]}
+
+		rows, ok := liveEntryRows(block, streaming, width, themeDark, false)
+		require.True(t, ok)
+
+		want := splitTranscriptRows(renderTimelineEntry(
+			block, newMarkdownRenderer(1), width, themeDark, false, timelineRenderOptions{},
+		))
+		require.Equal(t, want, rows, "size %d", size)
 	}
 }

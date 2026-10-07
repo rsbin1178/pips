@@ -1468,6 +1468,83 @@ func renderMarkdownBlockBody(block timelineBlock, markdown *markdownRenderer, wi
 	return value
 }
 
+// markdownBlockBodyRows is [renderMarkdownBlockBody] for the managed transcript
+// store, which consumes rows. A live answer is assembled as rows directly, so a
+// frame does not join the whole frozen prefix into one string only to split it
+// again. ok is false when the body must take the string path.
+func markdownBlockBodyRows(block timelineBlock, markdown *markdownRenderer, width int, theme colorTheme, noColor bool) ([]string, bool) {
+	if block.rendered || markdown == nil || !blockIsLive(block) {
+		return nil, false
+	}
+
+	rows, err := markdown.renderLiveRows(kindName(block.kind), block.body, max(1, width), theme, noColor)
+	if err != nil {
+		return nil, false
+	}
+
+	return rows, true
+}
+
+// insetRowSlice is [insetRows] over rows that are already split, so a renderer
+// that produces rows never has to join them into a string first.
+func insetRowSlice(rows []string, inset int) []string {
+	if inset <= 0 || len(rows) == 0 {
+		return rows
+	}
+
+	prefix := strings.Repeat(" ", inset)
+	insetRows := make([]string, len(rows))
+	for index, row := range rows {
+		if row == "" {
+			continue
+		}
+
+		insetRows[index] = prefix + row
+	}
+
+	return insetRows
+}
+
+// liveEntryRows returns the rows of a live Markdown block for the managed
+// transcript store, so a frame does not join the whole frozen prefix into one
+// string only to split it again. ok is false for every block that must take the
+// string path, and the caller falls back to [renderTimelineEntry].
+func liveEntryRows(
+	block timelineBlock,
+	markdown *markdownRenderer,
+	width int,
+	theme colorTheme,
+	noColor bool,
+) ([]string, bool) {
+	if block.notice || block.title != "" {
+		return nil, false
+	}
+	if block.kind != blockDraft && block.kind != blockAssistant && block.kind != blockPlan {
+		return nil, false
+	}
+
+	inset := timelineInset(width)
+	rows, ok := markdownBlockBodyRows(block, markdown, max(1, width-2*inset), theme, noColor)
+	if !ok {
+		return nil, false
+	}
+
+	// A body that renders as nothing returns the title, which is empty here.
+	blank := true
+	for _, row := range rows {
+		if strings.TrimSpace(row) != "" {
+			blank = false
+
+			break
+		}
+	}
+	if blank {
+		return nil, true
+	}
+
+	return insetRowSlice(rows, inset), true
+}
+
 // renderTeamActivityBlock renders one Team activity line.
 func renderTeamActivityBlock(
 	block timelineBlock,

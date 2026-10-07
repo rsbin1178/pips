@@ -115,6 +115,31 @@ func (r *markdownRenderer) renderLive(
 	return r.renderCached(slot, content, width, theme, noColor)
 }
 
+// renderLiveRows is [markdownRenderer.renderLive] for the managed transcript
+// store, which consumes rows. It assembles the frame's rows directly instead of
+// joining the whole frozen prefix and the tail into one string and splitting it
+// again: a frame's allocation is then the row headers it hands the store, not a
+// fresh copy of the whole rendered document.
+func (r *markdownRenderer) renderLiveRows(
+	slot, content string,
+	width int,
+	theme colorTheme,
+	noColor bool,
+) ([]string, error) {
+	if rows, ok := r.renderLiveIncrementalRows(slot, content, width, theme, noColor); ok {
+		r.evictLive(slot)
+
+		return rows, nil
+	}
+
+	rendered, err := r.renderCached(slot, content, width, theme, noColor)
+	if err != nil {
+		return nil, err
+	}
+
+	return splitTranscriptRows(rendered), nil
+}
+
 // renderLiveIncremental renders a growing live body from its frozen prefix. ok
 // is false when no boundary may be frozen or a render failed, so the caller
 // renders the body whole.
@@ -124,41 +149,54 @@ func (r *markdownRenderer) renderLiveIncremental(
 	theme colorTheme,
 	noColor bool,
 ) (string, bool) {
-	prefixEnd, block, ok := liveMarkdownBoundary(content)
-	if !ok || prefixEnd <= 0 || block == "" || prefixEnd > len(content) {
-		return "", false
-	}
-
-	head, ok := r.markdownFrozenRows(slot, content, prefixEnd, block, width, theme, noColor)
+	rows, ok := r.renderLiveIncrementalRows(slot, content, width, theme, noColor)
 	if !ok {
 		return "", false
 	}
 
+	return strings.Join(rows, "\n"), true
+}
+
+// renderLiveIncrementalRows assembles one frame's rows from the frozen prefix
+// and the live tail.
+func (r *markdownRenderer) renderLiveIncrementalRows(
+	slot, content string,
+	width int,
+	theme colorTheme,
+	noColor bool,
+) ([]string, bool) {
+	prefixEnd, block, ok := liveMarkdownBoundary(content)
+	if !ok || prefixEnd <= 0 || block == "" || prefixEnd > len(content) {
+		return nil, false
+	}
+
+	head, ok := r.markdownFrozenRows(slot, content, prefixEnd, block, width, theme, noColor)
+	if !ok {
+		return nil, false
+	}
+
 	blockRendered, err := r.render(block, width, theme, noColor)
 	if err != nil {
-		return "", false
+		return nil, false
 	}
 
 	// The seam carries the last frozen block, so the tail is rendered in the
 	// context that decides the rows between them.
 	seam, err := r.renderUncached(block+"\n\n"+content[prefixEnd:], width, theme, noColor)
 	if err != nil {
-		return "", false
+		return nil, false
 	}
 
 	tail, found := markdownRowsAfter(seam, markdownRowCount(blockRendered))
 	if !found {
-		return "", false
+		return nil, false
 	}
 
-	if tail == "" {
-		return head, true
-	}
-	if head == "" {
-		return tail, true
-	}
+	rows := make([]string, 0, len(head)+markdownRowCount(tail))
+	rows = append(rows, head...)
+	rows = append(rows, splitTranscriptRows(tail)...)
 
-	return head + "\n" + tail, true
+	return rows, true
 }
 
 // evictLive drops the live version stored for a slot, so a fallback render's

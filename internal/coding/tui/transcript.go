@@ -413,10 +413,18 @@ func (s *transcriptStore) materialize(record *transcriptRecord) {
 	s.rowsMaterialized += len(record.rows)
 }
 
-// render produces one block's rows at the store's current geometry.
+// render produces one block's rows at the store's current geometry. A live
+// Markdown block is assembled as rows directly, so a frame hands the store the
+// rows it keeps instead of joining the whole frozen prefix into one string and
+// splitting it again.
 func (s *transcriptStore) render(block timelineBlock) []string {
+	width := max(1, s.width)
+	if rows, ok := liveEntryRows(block, s.markdown, width, s.theme, s.noColor); ok {
+		return rows
+	}
+
 	return splitTranscriptRows(renderTimelineEntry(
-		block, s.markdown, max(1, s.width), s.theme, s.noColor, timelineRenderOptions{},
+		block, s.markdown, width, s.theme, s.noColor, timelineRenderOptions{},
 	))
 }
 

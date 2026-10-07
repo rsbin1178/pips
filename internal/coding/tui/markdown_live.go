@@ -38,8 +38,11 @@ type liveFrozen struct {
 	// source is the body prefix the rendered rows cover. It shares the caller's
 	// backing array, so keeping it costs no copy.
 	source string
-	// rendered is source's rendered rows.
-	rendered string
+	// rows are source's rendered rows. A frame appends the tail's rows to a copy
+	// of this slice instead of joining the whole prefix into one string, so the
+	// frame's allocation is the row headers it hands the store, not a fresh copy
+	// of the whole rendered document.
+	rows []string
 	// block is the last frozen block of source, and blockRows how many rows it
 	// renders to. Both are the context the next extension renders against.
 	block     string
@@ -61,7 +64,7 @@ func (r *markdownRenderer) markdownFrozenRows(
 	width int,
 	theme colorTheme,
 	noColor bool,
-) (string, bool) {
+) ([]string, bool) {
 	fingerprint := themeFingerprint(theme.fingerprint)
 
 	frozen, exists := r.frozen[slot]
@@ -87,35 +90,28 @@ func (r *markdownRenderer) markdownFrozenRows(
 
 		extended, err := r.renderUncached(document, width, theme, noColor)
 		if err != nil {
-			return "", false
+			return nil, false
 		}
 
 		tail, found := markdownRowsAfter(extended, frozen.blockRows)
 		if !found {
-			return "", false
+			return nil, false
 		}
 
-		switch {
-		case tail == "":
-		case frozen.rendered == "":
-			frozen.rendered = tail
-		default:
-			frozen.rendered += "\n" + tail
-		}
-
+		frozen.rows = append(frozen.rows, splitTranscriptRows(tail)...)
 		frozen.source = content[:prefixEnd]
 	}
 
 	if frozen.block != block {
 		rendered, err := r.render(block, width, theme, noColor)
 		if err != nil {
-			return "", false
+			return nil, false
 		}
 
 		frozen.block, frozen.blockRows = block, markdownRowCount(rendered)
 	}
 
-	return frozen.rendered, true
+	return frozen.rows, true
 }
 
 // markdownRowCount counts the rows of a rendered document.
