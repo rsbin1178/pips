@@ -226,7 +226,7 @@ func (r *markdownRenderer) renderUncached(content string, width int, theme color
 	rendered, err := r.engine.Render(content)
 	// Glamour's block-stack backing array retains popped buffers. Reuse only
 	// flat, bounded paragraph engines; a large/nested document must release it.
-	if len(content) > markdownEngineBytes || len(rendered) > markdownEngineBytes || !independentMarkdownParagraph(content) {
+	if len(content) > markdownEngineBytes || len(rendered) > markdownEngineBytes || !independentMarkdownDocument(content) {
 		r.engine = nil
 	}
 	if err != nil {
@@ -238,15 +238,48 @@ func (r *markdownRenderer) renderUncached(content string, width int, theme color
 	return strings.Trim(rendered, "\n"), nil
 }
 
-// independentMarkdownParagraph reports whether one paragraph is plain enough for
-// its renderer to be reused. Structured content (lists, links, code, tables) and
-// anything containing a line break can leave buffers on the engine's block
-// stack, so those renders release the engine instead.
-func independentMarkdownParagraph(paragraph string) bool {
-	first, _ := utf8.DecodeRuneInString(paragraph)
+// independentMarkdownDocument reports whether a document's rendering cannot
+// leave buffers on the engine's block stack, so the engine may be kept for the
+// next document.
+//
+// Every blank-line-delimited block must be a plain top-level paragraph of
+// ordinary text. A heading, list, quote, table, fence, HTML block or link
+// reference pushes block state and glamour retains popped buffers, so those
+// documents release the engine. A trailing space, a soft line break and a hard
+// line break are inline, so they stay reusable: they are exactly what a streamed
+// body ends on while its last word is still arriving.
+//
+// Reusing the engine for a flat, bounded document costs no correctness: each
+// Render parses the document from scratch, and the live seam (one frozen
+// paragraph plus the tail) is exactly this shape.
+// TestMarkdownEngineReuseAcrossDocumentsIsByteIdentical pins that.
+func independentMarkdownDocument(document string) bool {
+	first, _ := utf8.DecodeRuneInString(document)
+	if !unicode.IsLetter(first) {
+		return false
+	}
+	if strings.ContainsAny(document, "[]<>`\\&") ||
+		strings.IndexFunc(document, func(r rune) bool { return unicode.IsControl(r) && r != '\n' }) >= 0 {
+		return false
+	}
 
-	return unicode.IsLetter(first) && !strings.HasSuffix(paragraph, " ") &&
-		!strings.ContainsAny(paragraph, "\r\n\t[]<>`\\&") && strings.IndexFunc(paragraph, unicode.IsControl) < 0
+	// A trailing blank line is a separator, not a block, so it does not decide
+	// whether the engine is reusable.
+	for _, block := range strings.Split(strings.TrimRight(document, "\n"), "\n\n") {
+		for _, line := range strings.Split(block, "\n") {
+			// A blank interior line or an indented line is a container
+			// continuation or indented code.
+			if markdownBlankLine(line) || strings.TrimLeft(line, " \t") != line {
+				return false
+			}
+
+			if markdownBlockStarts(line) {
+				return false
+			}
+		}
+	}
+
+	return true
 }
 
 func markdownStyle(theme colorTheme, noColor bool) glamouransi.StyleConfig {
