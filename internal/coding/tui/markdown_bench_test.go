@@ -109,10 +109,12 @@ func BenchmarkLiveMarkdownRowsFrame(b *testing.B) {
 
 			for index := 0; b.Loop(); index++ {
 				body := base + fmt.Sprintf("frame %07d keeps streaming.\n\n", index)
+
 				rows, err := renderer.renderLiveRows("draft", body, 100, 0, themeDark, false)
 				if err != nil {
 					b.Fatal(err)
 				}
+
 				if rows.count() == 0 {
 					b.Fatal("no rows")
 				}
@@ -136,10 +138,12 @@ func BenchmarkLiveMarkdownStoreFrame(b *testing.B) {
 
 			for index := 0; b.Loop(); index++ {
 				block.body = base + fmt.Sprintf("frame %07d keeps streaming.\n\n", index)
+
 				rows, ok := liveEntryRows(block, renderer, 118, themeDark, false)
 				if !ok {
 					b.Fatal("live rows unavailable")
 				}
+
 				if rows.count() == 0 {
 					b.Fatal("no rows")
 				}
@@ -163,10 +167,12 @@ func BenchmarkLiveThinkingStoreFrame(b *testing.B) {
 
 			for index := 0; b.Loop(); index++ {
 				block.body = fmt.Sprintf("%s%07d", base[:len(base)-7], index)
+
 				rows, ok := liveEntryRows(block, renderer, 118, themeDark, false)
 				if !ok {
 					b.Fatal("live rows unavailable")
 				}
+
 				if rows.count() == 0 {
 					b.Fatal("no rows")
 				}

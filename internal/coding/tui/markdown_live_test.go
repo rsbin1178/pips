@@ -365,6 +365,7 @@ func TestLiveMarkdownRowsMatchTheStringRender(t *testing.T) {
 			for _, width := range []int{24, 40, 118} {
 				streaming := newMarkdownRenderer(128)
 				rowRenderer := newMarkdownRenderer(128)
+
 				for size := 0; size <= len(document); size++ {
 					content := document[:size]
 					want, err := streaming.renderLive("draft", content, width, themeDark, false)
@@ -393,7 +394,9 @@ func TestLiveEntryRowsMatchTheWholeRender(t *testing.T) {
 	}, "\n\n")
 
 	const width = 118
+
 	streaming := newMarkdownRenderer(128)
+
 	for size := 0; size <= len(document); size++ {
 		block := timelineBlock{kind: blockDraft, id: "draft", body: document[:size]}
 
@@ -415,6 +418,8 @@ func TestLiveEntryRowsMatchTheWholeRender(t *testing.T) {
 //
 // It is deliberately not parallel: testing.AllocsPerRun refuses to run inside a
 // parallel test.
+//
+//nolint:paralleltest // AllocsPerRun measures the whole process and refuses a parallel test.
 func TestRowSegmentsAppendWindow(t *testing.T) {
 	segments := rowSegments{frozen: []string{"a", "b", "c"}, tail: []string{"d", "e"}}
 
@@ -454,6 +459,7 @@ func TestLiveThinkingEntryRowsMatchTheWholeRender(t *testing.T) {
 	for _, noColor := range []bool{false, true} {
 		for _, width := range []int{24, 60, 118} {
 			streaming := newMarkdownRenderer(128)
+
 			for size := 0; size <= len(document); size++ {
 				block := timelineBlock{kind: blockThinking, id: draftThinkingID, body: document[:size]}
 

@@ -303,8 +303,8 @@ func independentMarkdownDocument(document string) bool {
 
 	// A trailing blank line is a separator, not a block, so it does not decide
 	// whether the engine is reusable.
-	for _, block := range strings.Split(strings.TrimRight(document, "\n"), "\n\n") {
-		for _, line := range strings.Split(block, "\n") {
+	for block := range strings.SplitSeq(strings.TrimRight(document, "\n"), "\n\n") {
+		for line := range strings.SplitSeq(block, "\n") {
 			// A blank interior line or an indented line is a container
 			// continuation or indented code.
 			if markdownBlankLine(line) || strings.TrimLeft(line, " \t") != line {
