@@ -106,8 +106,6 @@ func newStreamRecovery(attempts int, base, ceiling time.Duration) streamRecovery
 	return recovery
 }
 
-func (r streamRecovery) enabled() bool { return r.attempts > 0 }
-
 // backoff returns the delay before re-issue number attempt (zero-based).
 func (r streamRecovery) backoff(attempt int) time.Duration {
 	delay := float64(r.base) * math.Pow(2, float64(attempt))

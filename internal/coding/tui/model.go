@@ -2805,6 +2805,9 @@ func modelProgressObserved(events []coding.Event) bool {
 		case coding.EventInteractionStarted, coding.EventRunStarted, coding.EventTurnStarted,
 			coding.EventMessageDelta, coding.EventModelRetry:
 			return true
+		default:
+			// Other events are either not model progress or own a row of their
+			// own; new event types stay inert here.
 		}
 	}
 

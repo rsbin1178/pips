@@ -144,7 +144,7 @@ func TestModelRetryEventRoundTripsAndRejectsMalformedPayloads(t *testing.T) {
 		{Turn: 1, Attempt: 1, MaxRetries: 1, Reason: strings.Repeat("x", maxDiagnosticMessage+1)},
 	}
 	for _, payload := range bad {
-		assert.ErrorIs(t, ValidateEvent(newTestEvent(EventModelRetry, payload)), ErrInvalidEvent)
+		require.ErrorIs(t, ValidateEvent(newTestEvent(EventModelRetry, payload)), ErrInvalidEvent)
 	}
 
 	assert.ErrorIs(t, ValidateEvent(newTestEvent(EventMessageDelta, ModelRetry{Attempt: 1, MaxRetries: 1})),
