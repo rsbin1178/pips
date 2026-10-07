@@ -15,24 +15,31 @@ import (
 // follows a boundary.
 func liveMarkdownCorpus() map[string]string {
 	return map[string]string{
-		"paragraphs":      "First paragraph of the answer.\n\nSecond paragraph of the answer.\n\nThird one.\n",
-		"single":          "Only one paragraph, still streaming",
-		"atx":             "# Heading\n\nBody paragraph under the heading.\n\nAnother paragraph.\n",
-		"setext":          "Title\n=====\n\nBody.\n\nSub\n---\n\nMore.\n",
-		"tight list":      "Intro paragraph.\n\n- item one\n- item two\n\nAfter the list.\n",
-		"loose list":      "Intro.\n\n- item one\n\n- item two\n\nAfter.\n\nClosing paragraph.\n",
-		"nested":          "Intro.\n\n- outer\n  - inner\n\nAfter the nesting.\n\nTail.\n",
-		"ordered":         "Steps:\n\n1. first\n2. second\n\nDone.\n\nMore prose.\n",
-		"fence":           "Intro.\n\n```go\nfunc main() {}\n```\n\nAfter the code.\n\nTail.\n",
-		"fence info":      "Intro.\n\n```go title=x\nx := 1\n```\n\nAfter.\n\nTail.\n",
-		"tilde":           "Intro.\n\n~~~\nplain\n~~~\n\nAfter.\n\nTail.\n",
-		"indented":        "Intro.\n\n    indented code\n\nAfter.\n\nTail.\n",
-		"quote":           "Intro.\n\n> quoted line\n\nAfter the quote.\n\nTail.\n",
-		"table":           "Intro.\n\n| a | b |\n| - | - |\n| 1 | 2 |\n\nAfter the table.\n\nTail.\n",
-		"rule":            "Intro.\n\n---\n\nAfter the rule.\n\nTail.\n",
-		"inline":          "A **bold** start.\n\nA [link](https://example.com) and `code`.\n\nTail.\n",
-		"definition":      "[target]: https://example.com\n\nSee [target] here.\n\nTail.\n",
-		"def later":       "Intro.\n\n[target]: https://example.com\n\nSee [target].\n\nTail.\n",
+		"paragraphs": "First paragraph of the answer.\n\nSecond paragraph of the answer.\n\nThird one.\n",
+		"single":     "Only one paragraph, still streaming",
+		"atx":        "# Heading\n\nBody paragraph under the heading.\n\nAnother paragraph.\n",
+		"setext":     "Title\n=====\n\nBody.\n\nSub\n---\n\nMore.\n",
+		"tight list": "Intro paragraph.\n\n- item one\n- item two\n\nAfter the list.\n",
+		"loose list": "Intro.\n\n- item one\n\n- item two\n\nAfter.\n\nClosing paragraph.\n",
+		"nested":     "Intro.\n\n- outer\n  - inner\n\nAfter the nesting.\n\nTail.\n",
+		"ordered":    "Steps:\n\n1. first\n2. second\n\nDone.\n\nMore prose.\n",
+		"fence":      "Intro.\n\n```go\nfunc main() {}\n```\n\nAfter the code.\n\nTail.\n",
+		"fence info": "Intro.\n\n```go title=x\nx := 1\n```\n\nAfter.\n\nTail.\n",
+		"tilde":      "Intro.\n\n~~~\nplain\n~~~\n\nAfter.\n\nTail.\n",
+		"indented":   "Intro.\n\n    indented code\n\nAfter.\n\nTail.\n",
+		"quote":      "Intro.\n\n> quoted line\n\nAfter the quote.\n\nTail.\n",
+		"table":      "Intro.\n\n| a | b |\n| - | - |\n| 1 | 2 |\n\nAfter the table.\n\nTail.\n",
+		"rule":       "Intro.\n\n---\n\nAfter the rule.\n\nTail.\n",
+		"inline":     "A **bold** start.\n\nA [link](https://example.com) and `code`.\n\nTail.\n",
+		"definition": "[target]: https://example.com\n\nSee [target] here.\n\nTail.\n",
+		"def later":  "Intro.\n\n[target]: https://example.com\n\nSee [target].\n\nTail.\n",
+		// A usage can precede its definition, and a definition's label can span
+		// lines: goldmark resolves references over the whole document, so neither
+		// may end up on the opposite side of a frozen boundary from the other.
+		"forward ref":     "Intro.\n\nUse [later] first.\n\n[later]: /url\n\nTail.\n",
+		"multi label":     "A.\n\n[x\ny]: https://e.com \"t\"\n\nB.\n\nC uses [x y] here.\n",
+		"code bracket":    "Intro.\n\n```go\narr[0] = 1\n```\n\nAfter.\n\nTail.\n",
+		"shortcut refs":   "Intro paragraph.\n\nSee [one] and [two] and [three].\n\n[one]: /a\n\n[two]: /b\n\nTail.\n",
 		"html":            "Intro.\n\n<div>block</div>\n\nAfter.\n\nTail.\n",
 		"cjk":             "第一段说明文字，包含中文与标点。\n\n第二段继续说明，保持宽度测量。\n\n第三段结束。\n",
 		"emoji":           "Intro with 🎯 emoji.\n\nSecond 🚀 paragraph.\n\nTail.\n",
@@ -304,5 +311,40 @@ func TestLiveMarkdownFrozenPrefixFollowsGeometryChanges(t *testing.T) {
 		want, err := newMarkdownRenderer(1).render(body, step.width, step.theme, step.noColor)
 		require.NoError(t, err)
 		assert.Equal(t, want, got, "width %d noColor %v", step.width, step.noColor)
+	}
+}
+
+// TestLiveMarkdownBoundaryStopsAtALinkReference pins the freeze rule for link
+// references: goldmark resolves them over the whole document, so a bracket on
+// either side of a boundary can change the other side's rows. A usage before its
+// definition, a definition whose label spans lines, and a definition that a later
+// usage relies on all have to stop the freeze.
+func TestLiveMarkdownBoundaryStopsAtALinkReference(t *testing.T) {
+	t.Parallel()
+
+	for name, testCase := range map[string]struct{ document, wantBlock string }{
+		"forward reference":  {"Intro.\n\nUse [later] first.\n\n[later]: /url\n\nTail.\n", "Intro."},
+		"multiline label":    {"A.\n\n[x\ny]: https://e.com \"t\"\n\nB.\n\nC uses [x y] here.\n", "A."},
+		"definition first":   {"Intro.\n\n[t]: https://x\n\nSee [t].\n\nmore", "Intro."},
+		"usage after first":  {"Intro paragraph.\n\nSee [one] here.\n\n[one]: /a\n\nTail.\n", "Intro paragraph."},
+		"no definition":      {"Intro.\n\nA [label] with no definition anywhere.\n\nTail.\n", "Intro."},
+		"bracket in a fence": {"Intro.\n\n```go\narr[0] = 1\n```\n\nAfter.\n", "Intro."},
+		"plain prose":        {"First paragraph.\n\nSecond paragraph.\n\nstill growing", "Second paragraph."},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			prefixEnd, block, ok := liveMarkdownBoundary(testCase.document)
+			require.True(t, ok, "the document must expose a freeze boundary")
+			assert.Equal(t, testCase.wantBlock, block)
+			assert.LessOrEqual(t, prefixEnd, len(testCase.document))
+
+			// Whatever the scanner decides, the assembled render must equal the
+			// whole render, which is the property the freeze rule exists for.
+			renderer := newMarkdownRenderer(128)
+			got, err := renderer.renderLive("draft", testCase.document, 60, themeDark, false)
+			require.NoError(t, err)
+			assert.Equal(t, liveMarkdownReference(t, testCase.document, 60, false), got)
+		})
 	}
 }

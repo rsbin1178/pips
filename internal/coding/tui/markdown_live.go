@@ -22,8 +22,9 @@ import (
 //     depends on what follows, and lists and block quotes can still be re-read
 //     as loose or continued when more text arrives, so none of them may end a
 //     frozen prefix;
-//   - the prefix defines no link reference, because a definition in the frozen
-//     prefix would not reach the separately rendered tail.
+//   - the prefix carries no bracket, because goldmark resolves link references
+//     over the whole document, so a `[...]` on either side of the boundary can
+//     change the other side's rows.
 //
 // The seam is reconstructed by rendering the prefix's last block together with
 // the tail and dropping that block's own rows, which reproduces the whole
@@ -152,7 +153,15 @@ func markdownRowsAfter(value string, count int) (string, bool) {
 func liveMarkdownBoundary(content string) (prefixEnd int, block string, ok bool) {
 	fence := ""
 	start, end := -1, -1
-	hasDefinition := false
+	// A frozen prefix must take no part in link reference resolution. goldmark
+	// collects definitions from the whole document, so a bracket on either side of
+	// the boundary can change the other side's rows: a usage in the prefix that a
+	// definition in the tail resolves, or a definition in the prefix whose scope a
+	// usage in the tail would otherwise lose. A definition's label may span lines,
+	// so the test is the bracket itself rather than a per-line pattern. Autolinks,
+	// linkified bare URLs and inline links are resolved without definitions and
+	// stay freezable.
+	seenBracket := false
 	// A boundary is only settled by the first line after it: a definition
 	// marker there turns the block above into a term, which cannot be frozen.
 	pending, pendingEnd, pendingBlock := false, 0, ""
@@ -191,7 +200,7 @@ func liveMarkdownBoundary(content string) (prefixEnd int, block string, ok bool)
 		if markdownBlankLine(line) {
 			if start >= 0 {
 				pendingBlock = content[start:end]
-				pending = !hasDefinition && freezableMarkdownBlock(pendingBlock)
+				pending = !seenBracket && freezableMarkdownBlock(pendingBlock)
 				pendingEnd = next
 				start = -1
 			}
@@ -207,8 +216,8 @@ func liveMarkdownBoundary(content string) (prefixEnd int, block string, ok bool)
 
 		end = lineEnd
 
-		if markdownReferenceDefinition(line) {
-			hasDefinition = true
+		if strings.ContainsRune(line, '[') {
+			seenBracket = true
 		}
 
 		offset = next
@@ -246,7 +255,7 @@ func freezableMarkdownBlock(text string) bool {
 			return false
 		}
 
-		if markdownBlockStarts(line) || markdownReferenceDefinition(line) {
+		if markdownBlockStarts(line) {
 			return false
 		}
 
@@ -425,19 +434,4 @@ func markdownHTMLBlockStart(line string) bool {
 	}
 
 	return (rest >= 'a' && rest <= 'z') || (rest >= 'A' && rest <= 'Z')
-}
-
-// markdownReferenceDefinition reports whether a line defines a link or footnote
-// reference that later text in the same document could resolve.
-func markdownReferenceDefinition(line string) bool {
-	if !strings.HasPrefix(line, "[") {
-		return false
-	}
-
-	close := strings.Index(line, "]:")
-	if close < 2 {
-		return false
-	}
-
-	return !strings.ContainsAny(line[1:close], "[]")
 }
