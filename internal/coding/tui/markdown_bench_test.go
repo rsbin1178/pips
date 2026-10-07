@@ -94,3 +94,89 @@ func BenchmarkLiveThinkingFrame(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkLiveMarkdownRowsFrame measures one frame of the managed store's row
+// path for a growing live answer. Unlike BenchmarkLiveMarkdownFrame it does not
+// join the frozen prefix and the tail into one string, so the frame's allocation
+// is the row headers it hands the store.
+func BenchmarkLiveMarkdownRowsFrame(b *testing.B) {
+	for _, size := range []int{4 << 10, 32 << 10, 128 << 10} {
+		b.Run(fmt.Sprintf("bytes=%d", size), func(b *testing.B) {
+			base := benchmarkLiveMarkdownBody(size)
+			renderer := newMarkdownRenderer(128)
+
+			b.ReportAllocs()
+
+			for index := 0; b.Loop(); index++ {
+				body := base + fmt.Sprintf("frame %07d keeps streaming.\n\n", index)
+
+				rows, err := renderer.renderLiveRows("draft", body, 100, 0, themeDark, false)
+				if err != nil {
+					b.Fatal(err)
+				}
+
+				if rows.count() == 0 {
+					b.Fatal("no rows")
+				}
+			}
+		})
+	}
+}
+
+// BenchmarkLiveMarkdownStoreFrame measures one frame of the managed store's row
+// production for a growing live answer, inset included: the frozen rows carry the
+// inset already and the frame appends only the tail, so it allocates the tail
+// instead of the whole body's row headers.
+func BenchmarkLiveMarkdownStoreFrame(b *testing.B) {
+	for _, size := range []int{4 << 10, 32 << 10, 128 << 10} {
+		b.Run(fmt.Sprintf("bytes=%d", size), func(b *testing.B) {
+			base := benchmarkLiveMarkdownBody(size)
+			renderer := newMarkdownRenderer(128)
+			block := timelineBlock{kind: blockDraft, id: "draft"}
+
+			b.ReportAllocs()
+
+			for index := 0; b.Loop(); index++ {
+				block.body = base + fmt.Sprintf("frame %07d keeps streaming.\n\n", index)
+
+				rows, ok := liveEntryRows(block, renderer, 118, themeDark, false)
+				if !ok {
+					b.Fatal("live rows unavailable")
+				}
+
+				if rows.count() == 0 {
+					b.Fatal("no rows")
+				}
+			}
+		})
+	}
+}
+
+// BenchmarkLiveThinkingStoreFrame measures one frame of the managed store's row
+// production for a growing live thought: the frozen rows carry their padding and
+// inset already and the frame pads only the tail, so it no longer joins the whole
+// thought into one string.
+func BenchmarkLiveThinkingStoreFrame(b *testing.B) {
+	for _, size := range []int{4 << 10, 32 << 10, 128 << 10} {
+		b.Run(fmt.Sprintf("bytes=%d", size), func(b *testing.B) {
+			base := benchmarkThinkingBody(size)
+			renderer := newMarkdownRenderer(128)
+			block := timelineBlock{kind: blockThinking, id: draftThinkingID}
+
+			b.ReportAllocs()
+
+			for index := 0; b.Loop(); index++ {
+				block.body = fmt.Sprintf("%s%07d", base[:len(base)-7], index)
+
+				rows, ok := liveEntryRows(block, renderer, 118, themeDark, false)
+				if !ok {
+					b.Fatal("live rows unavailable")
+				}
+
+				if rows.count() == 0 {
+					b.Fatal("no rows")
+				}
+			}
+		})
+	}
+}

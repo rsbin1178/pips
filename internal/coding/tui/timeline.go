@@ -1468,6 +1468,131 @@ func renderMarkdownBlockBody(block timelineBlock, markdown *markdownRenderer, wi
 	return value
 }
 
+// markdownBlockBodyRows is [renderMarkdownBlockBody] for the managed transcript
+// store, which consumes rows. A live answer is assembled as rows directly, so a
+// frame does not join the whole frozen prefix into one string only to split it
+// again. ok is false when the body must take the string path.
+func markdownBlockBodyRows(block timelineBlock, markdown *markdownRenderer, width, inset int, theme colorTheme, noColor bool) (rowSegments, bool) {
+	if block.rendered || markdown == nil || !blockIsLive(block) {
+		return rowSegments{}, false
+	}
+
+	rows, err := markdown.renderLiveRows(kindName(block.kind), block.body, max(1, width), inset, theme, noColor)
+	if err != nil {
+		return rowSegments{}, false
+	}
+
+	return rows, true
+}
+
+// insetRowSlice is [insetRows] over rows that are already split, so a renderer
+// that produces rows never has to join them into a string first.
+func insetRowSlice(rows []string, inset int) []string {
+	if inset <= 0 || len(rows) == 0 {
+		return rows
+	}
+
+	prefix := strings.Repeat(" ", inset)
+	insetRows := make([]string, len(rows))
+	for index, row := range rows {
+		if row == "" {
+			continue
+		}
+
+		insetRows[index] = prefix + row
+	}
+
+	return insetRows
+}
+
+// thinkingBlockRows is the managed store's row path for the live Thinking block:
+// it returns the frozen rows and the tail with the glyph, the dim colour, the
+// block padding and the frame inset already applied. ok is false when the block
+// must take the string path.
+func thinkingBlockRows(block timelineBlock, markdown *markdownRenderer, width, inset int, theme colorTheme, noColor bool) (rowSegments, bool) {
+	if markdown == nil || !blockIsLive(block) {
+		return rowSegments{}, false
+	}
+
+	body := sanitizeToolText(block.body)
+	if body == "" {
+		return rowSegments{}, true
+	}
+
+	width = max(1, width)
+	prefix := thinkingGlyph + " "
+	prefixWidth := ansi.StringWidth(prefix)
+	if width <= prefixWidth {
+		// A frame this narrow has no room beside the glyph; keep the prose.
+		return rowSegments{}, false
+	}
+
+	indent := strings.Repeat(" ", prefixWidth)
+
+	return markdown.renderLiveThinkingRows(body, prefix, indent, width-prefixWidth, inset, theme, noColor), true
+}
+
+// liveEntryRows returns the rows of a live block for the managed transcript
+// store, as a frozen prefix and a tail with the frame inset already applied, so
+// the store never joins or re-insets the whole live body. ok is false for every
+// block that must take the string path, and the caller falls back to
+// [renderTimelineEntry].
+func liveEntryRows(
+	block timelineBlock,
+	markdown *markdownRenderer,
+	width int,
+	theme colorTheme,
+	noColor bool,
+) (rowSegments, bool) {
+	if block.notice || block.title != "" {
+		return rowSegments{}, false
+	}
+
+	inset := timelineInset(width)
+	contentWidth := max(1, width-2*inset)
+
+	var (
+		rows rowSegments
+		ok   bool
+	)
+
+	switch block.kind {
+	case blockDraft, blockAssistant, blockPlan:
+		rows, ok = markdownBlockBodyRows(block, markdown, contentWidth, inset, theme, noColor)
+	case blockThinking:
+		rows, ok = thinkingBlockRows(block, markdown, contentWidth, inset, theme, noColor)
+	default:
+		return rowSegments{}, false
+	}
+	if !ok {
+		return rowSegments{}, false
+	}
+
+	// A body that renders as nothing returns the title, which is empty here.
+	if rowSegmentsBlank(rows) {
+		return rowSegments{}, true
+	}
+
+	return rows, true
+}
+
+// rowSegmentsBlank reports whether every row of both segments is blank.
+func rowSegmentsBlank(rows rowSegments) bool {
+	for _, row := range rows.frozen {
+		if strings.TrimSpace(row) != "" {
+			return false
+		}
+	}
+
+	for _, row := range rows.tail {
+		if strings.TrimSpace(row) != "" {
+			return false
+		}
+	}
+
+	return true
+}
+
 // renderTeamActivityBlock renders one Team activity line.
 func renderTeamActivityBlock(
 	block timelineBlock,
