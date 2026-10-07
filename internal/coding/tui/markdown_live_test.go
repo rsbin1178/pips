@@ -67,6 +67,7 @@ func TestLiveMarkdownMatchesWholeRender(t *testing.T) {
 				// One renderer across the whole stream, so the frozen prefix and
 				// its cache are exercised the way a frame loop uses them.
 				streaming := newMarkdownRenderer(128)
+
 				for size := 0; size <= len(document); size++ {
 					content := document[:size]
 					got, err := streaming.renderLive("draft", content, width, themeDark, false)
@@ -97,6 +98,7 @@ func TestLiveMarkdownMatchesWholeRenderWithColor(t *testing.T) {
 	}, "\n\n")
 
 	streaming := newMarkdownRenderer(128)
+
 	for size := 0; size <= len(document); size++ {
 		content := document[:size]
 		got, err := streaming.renderLive("draft", content, 60, themeDark, true)
@@ -236,6 +238,7 @@ func FuzzLiveMarkdownMatchesWholeRender(f *testing.F) {
 	for _, seed := range liveMarkdownCorpus() {
 		f.Add(seed)
 	}
+
 	f.Add("```\nunclosed\n\n# heading\n\ntext")
 	f.Add("a\n\n> q\n\n- l\n\n1. o\n\n| t |\n\n---\n\ntext")
 

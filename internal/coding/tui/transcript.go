@@ -363,7 +363,7 @@ func (s *transcriptStore) updateRevision() {
 	}
 
 	for index := range s.records {
-		mix(uint64(s.records[index].lines))
+		mix(uint64(s.records[index].lines)) //nolint:gosec // lines is a row count; it is never negative.
 	}
 
 	s.revision = hash
