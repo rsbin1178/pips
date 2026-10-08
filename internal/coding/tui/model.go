@@ -348,9 +348,10 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 
 		m.themeBackgroundKnown = true
 		m.themeIsDark = message.IsDark()
-		if m.themeSelection == config.ThemeAuto {
-			m.applyTheme(m.themeForSelection(config.ThemeAuto))
-		}
+		// The detected canvas decides which surfaces may be painted for every
+		// selection, so the effective snapshot is re-stamped here too. An explicit
+		// theme selection is still never replaced by a background message.
+		m.applyTheme(m.themeForSelection(m.themeSelection))
 
 		return m, nil
 	case bootstrapResult:

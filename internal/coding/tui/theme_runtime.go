@@ -59,7 +59,7 @@ func (m *Model) applyTheme(theme colorTheme) {
 	if !theme.valid() {
 		return
 	}
-	m.theme = theme
+	m.theme = theme.forCanvas(m.themeIsDark, m.themeBackgroundKnown)
 	m.composer.SetStyles(composerStyles(m.theme, m.options.NoColor))
 	if m.prompt.kind == promptQuestion {
 		m.prompt.question.editor.SetStyles(composerStyles(m.theme, m.options.NoColor))
