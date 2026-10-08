@@ -191,8 +191,12 @@ func TestPTYSearchAndListWheel(t *testing.T) {
 	// scrolls it and leaves the selection where it is.
 	_, err = master.Write([]byte("\x0bagents\r"))
 	require.NoError(t, err)
+	// Wait for the list body, not for its title. The title renders as soon as the
+	// route is entered, while the rows arrive with the Agent data and the frame
+	// shows a loading placeholder until they do; asserting on the title alone can
+	// parse a frame whose rows and overflow label are not there yet.
 	require.Eventually(t, func() bool {
-		return strings.Contains(frame(), "Agents · Runs")
+		return strings.Contains(frame(), "Agents · Runs") && searchPTYLinesPattern.MatchString(frame())
 	}, 30*time.Second, 10*time.Millisecond)
 
 	listStart, listTotal := searchPTYOverflowLines(t, frame())
