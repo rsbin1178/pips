@@ -3,6 +3,7 @@ package tui
 
 import (
 	"fmt"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -369,6 +370,19 @@ func TestMarkdownCodeSurfaceFollowsTheCanvas(t *testing.T) {
 		t.Run(theme.id, func(t *testing.T) {
 			t.Parallel()
 
+			if theme.borrowsTerminalColors() {
+				// A theme that borrows the terminal's own colours has no canvas of its
+				// own, so it never paints the surface.
+				for _, dark := range []bool{true, false} {
+					rendered, err := newMarkdownRenderer(1).render(source, 60, theme.forCanvas(dark, true), false)
+					require.NoError(t, err)
+					assert.Contains(t, rendered, "code")
+					assert.Empty(t, markdownSurfaces(rendered), "%s: %s", theme.id, rendered)
+				}
+
+				return
+			}
+
 			canvasDark := !theme.isLight()
 			cases := map[string]colorTheme{
 				"own canvas": theme.forCanvas(canvasDark, true),
@@ -492,6 +506,98 @@ func TestMarkdownSurfaceStampSeparatesCacheEntries(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, onCanvas, again, "each stamp keeps its own entry")
 	assert.Len(t, renderer.entries, 2)
+}
+
+// markdownFixedColours lists the distinct SGR sequences that name a colour outside
+// the terminal's own palette: an indexed or RGB foreground or background.
+// Parameters are read one at a time, so an RGB channel value is never mistaken for
+// the next parameter.
+func markdownFixedColours(rendered string) []string {
+	var found []string
+
+	for _, match := range markdownSGRPattern.FindAllStringSubmatch(rendered, -1) {
+		parameters := strings.Split(match[1], ";")
+		for index := range parameters {
+			if parameters[index] != "38" && parameters[index] != "48" {
+				continue
+			}
+			if index+1 < len(parameters) && (parameters[index+1] == "5" || parameters[index+1] == "2") {
+				found = append(found, match[0])
+
+				break
+			}
+		}
+	}
+	slices.Sort(found)
+
+	return slices.Compact(found)
+}
+
+// markdownColourFields lists the colour fields a style config still carries, so a
+// theme that must paint no colour of its own is checked for completeness rather
+// than for whichever constructs a test happens to render.
+func markdownColourFields(config any) []string {
+	var fields []string
+
+	var walk func(prefix string, value reflect.Value)
+	walk = func(prefix string, value reflect.Value) {
+		if value.Kind() == reflect.Pointer {
+			if !value.IsNil() {
+				walk(prefix, value.Elem())
+			}
+
+			return
+		}
+		if value.Kind() != reflect.Struct {
+			return
+		}
+
+		for index := range value.NumField() {
+			name := value.Type().Field(index).Name
+			field := value.Field(index)
+			if name != "Color" && name != "BackgroundColor" {
+				walk(prefix+"."+name, field)
+
+				continue
+			}
+			colour, ok := field.Interface().(*string)
+			if ok && colour != nil {
+				fields = append(fields, prefix+"."+name+"="+*colour)
+			}
+		}
+	}
+	walk("", reflect.ValueOf(config))
+	slices.Sort(fields)
+
+	return fields
+}
+
+// TestMarkdownTerminalThemePaintsNoColourOfItsOwn pins the canvas-proof palette:
+// the document reaches the terminal with the profile's own foreground and
+// background, a fence keeps only bold and italic, and the colourless bundled style
+// is the one the renderer asks chroma for.
+func TestMarkdownTerminalThemePaintsNoColourOfItsOwn(t *testing.T) {
+	t.Parallel()
+
+	theme := mustBuiltinTheme(themeIDTerminal)
+	require.True(t, theme.borrowsTerminalColors())
+
+	style := markdownStyle(theme, false)
+	assert.Empty(t, markdownColourFields(style))
+	assert.Equal(t, chromaStyleBW, style.CodeBlock.Theme)
+	assert.Equal(t, chromaStyleBW, markdownChromaTheme(theme))
+	assert.Nil(t, style.CodeBlock.Chroma)
+
+	rendered, err := newMarkdownRenderer(1).render(
+		"# Heading\n\nBody `inline` text.\n\n```go\nx := 1\n```\n",
+		60,
+		theme.forCanvas(false, true),
+		false,
+	)
+	require.NoError(t, err)
+	assert.Contains(t, rendered, "Heading")
+	assert.Empty(t, markdownFixedColours(rendered), "%q", rendered)
+	assert.Empty(t, markdownSurfaces(rendered), "%q", rendered)
 }
 
 // TestMarkdownSyntaxColoursFollowTheTheme pins the fence palette to the theme

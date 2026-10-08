@@ -230,7 +230,7 @@ func loadThemeRegistry(directory string) themeRegistry {
 			registry.addDiagnostic("invalid_id")
 			continue
 		}
-		if _, exists := builtinThemeDefinition(id); exists {
+		if isBuiltinThemeID(id) {
 			registry.addDiagnostic("builtin_collision")
 			continue
 		}
@@ -609,6 +609,13 @@ func resolveCustomTheme(
 	switch {
 	case definition.inherits != "":
 		if builtin, exists := builtinThemeByID(definition.inherits); exists {
+			if builtin.borrowsTerminalColors() {
+				// A borrowed palette has no hex form: inheriting it would collapse the
+				// terminal's own slots into approximations of black.
+				states[id] = themeInvalid
+
+				return colorTheme{}, false
+			}
 			base = builtin
 		} else {
 			var parentOK bool
@@ -740,7 +747,7 @@ func mustBuiltinTheme(id string) colorTheme {
 func builtinThemeEntries() []themeEntry {
 	ids := []string{
 		themeIDDefaultDark, themeIDDefaultLight, themeIDDracula, themeIDNord, themeIDGruvboxDark,
-		themeIDCatppuccinMocha, themeIDOneDark, themeIDSolarizedLight,
+		themeIDCatppuccinMocha, themeIDOneDark, themeIDSolarizedLight, themeIDTerminal,
 	}
 	entries := make([]themeEntry, 0, len(ids))
 	for _, id := range ids {
@@ -836,7 +843,63 @@ func paletteStringsFromPalette(palette colorPalette) themePaletteStrings {
 	}
 }
 
+// canvasProofBuiltins are the built-ins whose palette is the terminal's own. Such
+// a palette holds colour slots and a default foreground, which a theme file's hex
+// values cannot express, so these snapshots are built from values instead of
+// being parsed from the theme file shape.
+var canvasProofBuiltins = map[string]func() colorTheme{
+	themeIDTerminal: newTerminalTheme,
+}
+
+// newTerminalTheme borrows the terminal's 16-colour palette and its default
+// foreground, so the theme is readable on a light and on a dark profile without
+// detection and paints no surface of its own. Near-gray roles use bright black,
+// the slot a profile tunes as its own dim tone.
+func newTerminalTheme() colorTheme {
+	palette := colorPalette{
+		separator:      lipgloss.BrightBlack,
+		composerPrompt: lipgloss.BrightBlack,
+		muted:          lipgloss.BrightBlack,
+		workspace:      lipgloss.NoColor{},
+		session:        lipgloss.Blue,
+		model:          lipgloss.Magenta,
+		idle:           lipgloss.Green,
+		active:         lipgloss.Cyan,
+		warning:        lipgloss.Yellow,
+		error:          lipgloss.Red,
+		change:         lipgloss.BrightGreen,
+		code:           lipgloss.BrightCyan,
+		codeBackground: lipgloss.NoColor{},
+		diagnostic:     lipgloss.BrightBlack,
+	}
+
+	return newResolvedTheme(themeIDTerminal, "Terminal", themeBackgroundAny, palette)
+}
+
+func builtinCanvasProofTheme(id string) (colorTheme, bool) {
+	build, ok := canvasProofBuiltins[id]
+	if !ok {
+		return colorTheme{}, false
+	}
+
+	return build(), true
+}
+
+// isBuiltinThemeID covers both built-in shapes, so a user file cannot shadow one.
+func isBuiltinThemeID(id string) bool {
+	if _, ok := builtinThemeDefinition(id); ok {
+		return true
+	}
+	_, ok := canvasProofBuiltins[id]
+
+	return ok
+}
+
 func builtinThemeByID(id string) (colorTheme, bool) {
+	if theme, ok := builtinCanvasProofTheme(id); ok {
+		return theme, true
+	}
+
 	definition, ok := builtinThemeDefinition(id)
 	if !ok {
 		return colorTheme{}, false

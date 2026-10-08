@@ -72,6 +72,9 @@ func TestThemePickerMarksTheOppositePolarity(t *testing.T) {
 	assert.Contains(t, content, "solarized-light "+themePolarityMark)
 	assert.NotContains(t, content, "default-dark "+themePolarityMark)
 	assert.NotContains(t, content, "auto "+themePolarityMark)
+	// A palette that borrows the terminal's own colours fits either canvas.
+	assert.Contains(t, content, "terminal · Terminal · adaptive · built-in")
+	assert.NotContains(t, content, "terminal "+themePolarityMark)
 	assert.Contains(t, content, "Notice: "+themePolarityMark+
 		" marks a theme built for the other background; this terminal is dark")
 

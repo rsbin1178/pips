@@ -29,6 +29,7 @@ const (
 	themeIDCatppuccinMocha = "catppuccin-mocha"
 	themeIDOneDark         = "one-dark"
 	themeIDSolarizedLight  = "solarized-light"
+	themeIDTerminal        = "terminal"
 )
 
 // themeBackground describes the terminal background a theme is designed for.
@@ -37,6 +38,9 @@ type themeBackground string
 const (
 	themeBackgroundDark  themeBackground = "dark"
 	themeBackgroundLight themeBackground = "light"
+	// themeBackgroundAny marks a palette that borrows the terminal's own colours,
+	// so it is readable on either background and paints no surface of its own.
+	themeBackgroundAny themeBackground = "any"
 )
 
 // colorPalette is the semantic color vocabulary used by TUI renderers. Theme
@@ -83,13 +87,21 @@ var (
 
 func (theme colorTheme) isLight() bool { return theme.background == themeBackgroundLight }
 
+// borrowsTerminalColors reports whether the palette is the terminal's own, which
+// is what makes the snapshot readable on either background.
+func (theme colorTheme) borrowsTerminalColors() bool {
+	return theme.background == themeBackgroundAny
+}
+
 // forCanvas stamps the terminal background this snapshot will be drawn on.
 // Markdown paints a code surface only when the theme's own background family is
 // the one the terminal reported; an unknown terminal matches nothing, so a
-// surface that cannot be verified is a surface that is not painted. The
-// fingerprint changes with the stamp because the Markdown cache keys on it.
+// surface that cannot be verified is a surface that is not painted. A palette
+// that borrows the terminal's colours never paints one at all. The fingerprint
+// changes with the stamp because the Markdown cache keys on it.
 func (theme colorTheme) forCanvas(dark, known bool) colorTheme {
-	codeSurface := known && (theme.background == themeBackgroundDark) == dark
+	codeSurface := known && !theme.borrowsTerminalColors() &&
+		(theme.background == themeBackgroundDark) == dark
 	if codeSurface == theme.codeSurface {
 		return theme
 	}
@@ -101,9 +113,17 @@ func (theme colorTheme) forCanvas(dark, known bool) colorTheme {
 }
 
 func (theme colorTheme) valid() bool {
-	return theme.id != "" && theme.fingerprint != "" &&
-		(theme.background == themeBackgroundDark || theme.background == themeBackgroundLight) &&
+	return theme.id != "" && theme.fingerprint != "" && theme.knownBackground() &&
 		paletteComplete(theme.palette)
+}
+
+func (theme colorTheme) knownBackground() bool {
+	switch theme.background {
+	case themeBackgroundDark, themeBackgroundLight, themeBackgroundAny:
+		return true
+	default:
+		return false
+	}
 }
 
 func paletteComplete(palette colorPalette) bool {

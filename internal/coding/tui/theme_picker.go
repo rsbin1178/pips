@@ -174,7 +174,7 @@ func (m *Model) themePickerView(maxHeight int) string {
 			current = " · current"
 		}
 		background := string(option.background)
-		if option.automatic {
+		if option.automatic || option.background == themeBackgroundAny {
 			background = "adaptive"
 		}
 		id := option.id

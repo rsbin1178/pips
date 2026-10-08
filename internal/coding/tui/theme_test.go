@@ -13,6 +13,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/rsbin1178/pips/ai"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -117,11 +118,11 @@ func TestBuiltinThemeRegistryIsStableAndComplete(t *testing.T) {
 
 	registry := loadThemeRegistry("")
 	options := registry.Options()
-	require.Len(t, options, 9)
+	require.Len(t, options, 10)
 	assert.Equal(t, "auto", options[0].id)
 	assert.True(t, options[0].automatic)
 	entries := registry.Entries()
-	require.Len(t, entries, 8)
+	require.Len(t, entries, 9)
 
 	ids := make([]string, 0, len(entries))
 	for _, entry := range entries {
@@ -147,18 +148,24 @@ func TestBuiltinThemeRegistryIsStableAndComplete(t *testing.T) {
 	}
 	assert.Equal(t, []string{
 		"default-dark", "default-light", "dracula", "nord", "gruvbox-dark",
-		"catppuccin-mocha", "one-dark", "solarized-light",
+		"catppuccin-mocha", "one-dark", "solarized-light", "terminal",
 	}, ids)
 	assert.Equal(t, themeDark, mustTheme(t, registry, "default-dark"))
 	assert.Equal(t, themeLight, mustTheme(t, registry, "default-light"))
 	assert.Equal(t, themeBackgroundDark, mustTheme(t, registry, "dracula").background)
 	assert.Equal(t, themeBackgroundLight, mustTheme(t, registry, "solarized-light").background)
+	assert.Equal(t, themeBackgroundAny, mustTheme(t, registry, themeIDTerminal).background)
 }
 
 func TestBuiltinThemeRepresentativeContrast(t *testing.T) {
 	t.Parallel()
 
 	for _, entry := range loadThemeRegistry("").Entries() {
+		if entry.theme.borrowsTerminalColors() {
+			// The code fill is never painted for a theme that borrows the terminal's
+			// own colours, so workspace-versus-code_background says nothing about it.
+			continue
+		}
 		ratio := themeContrast(entry.theme.palette.workspace, entry.theme.palette.codeBackground)
 		assert.GreaterOrEqual(t, ratio, 4.0, entry.theme.id)
 	}
@@ -185,11 +192,11 @@ separator = "#123456"
 
 	registry := loadThemeRegistry(directory)
 	entries := registry.Entries()
-	require.Len(t, entries, 10)
-	assert.Equal(t, "alpha", entries[8].theme.id)
-	assert.Equal(t, "zebra", entries[9].theme.id)
-	assert.Equal(t, themeSourceUser, entries[8].source)
+	require.Len(t, entries, 11)
+	assert.Equal(t, "alpha", entries[9].theme.id)
+	assert.Equal(t, "zebra", entries[10].theme.id)
 	assert.Equal(t, themeSourceUser, entries[9].source)
+	assert.Equal(t, themeSourceUser, entries[10].source)
 
 	alpha := mustTheme(t, registry, "alpha")
 	assert.Equal(t, themeBackgroundLight, alpha.background)
@@ -261,13 +268,13 @@ func TestThemeDiscoveryRejectsUnsafeDirectoryAndFilesWithoutBreakingBuiltins(t *
 	t.Parallel()
 
 	missing := loadThemeRegistry(filepath.Join(t.TempDir(), "themes"))
-	assert.Len(t, missing.Entries(), 8)
+	assert.Len(t, missing.Entries(), 9)
 	assert.Empty(t, missing.Diagnostics())
 
 	unsafe := t.TempDir()
 	require.NoError(t, os.Chmod(unsafe, 0o755))
 	registry := loadThemeRegistry(unsafe)
-	assert.Len(t, registry.Entries(), 8)
+	assert.Len(t, registry.Entries(), 9)
 	require.NotEmpty(t, registry.Diagnostics())
 	assert.Equal(t, "directory", registry.Diagnostics()[0].category)
 
@@ -277,7 +284,7 @@ func TestThemeDiscoveryRejectsUnsafeDirectoryAndFilesWithoutBreakingBuiltins(t *
 `)
 	require.NoError(t, os.Chmod(filepath.Join(directory, "unsafe.toml"), 0o666))
 	registry = loadThemeRegistry(directory)
-	assert.Len(t, registry.Entries(), 8)
+	assert.Len(t, registry.Entries(), 9)
 	assert.Contains(t, diagnosticCategories(registry), "permissions")
 }
 
@@ -290,7 +297,7 @@ func TestThemeFilenameIDDoesNotTrimWhitespace(t *testing.T) {
 `)
 
 	registry := loadThemeRegistry(directory)
-	assert.Len(t, registry.Entries(), 8)
+	assert.Len(t, registry.Entries(), 9)
 	_, ok := registry.Resolve("spaced")
 	assert.False(t, ok)
 	assert.Contains(t, diagnosticCategories(registry), "invalid_id")
@@ -306,13 +313,13 @@ func TestThemeAggregateBytesBoundaryUsesActualContentSize(t *testing.T) {
 	}
 
 	registry := loadThemeRegistry(directory)
-	assert.Len(t, registry.Entries(), 8+int(maxThemeBytes/maxThemeFileBytes))
+	assert.Len(t, registry.Entries(), 9+int(maxThemeBytes/maxThemeFileBytes))
 	assert.NotContains(t, diagnosticCategories(registry), "size")
 
 	writeThemeFile(t, directory, "boundary-over", `schema = "pips.tui.theme/v1alpha1"
 `)
 	registry = loadThemeRegistry(directory)
-	assert.Len(t, registry.Entries(), 8+int(maxThemeBytes/maxThemeFileBytes))
+	assert.Len(t, registry.Entries(), 9+int(maxThemeBytes/maxThemeFileBytes))
 	assert.Contains(t, diagnosticCategories(registry), "size")
 }
 
@@ -362,7 +369,7 @@ func TestThemeFileBoundsAndStrictSchema(t *testing.T) {
 	writeThemeFile(t, directory, "missing-schema", "[palette]\nerror = \"#fff\"\n")
 
 	registry := loadThemeRegistry(directory)
-	assert.Len(t, registry.Entries(), 10)
+	assert.Len(t, registry.Entries(), 11)
 	assert.Contains(t, diagnosticCategories(registry), "size")
 	assert.Contains(t, diagnosticCategories(registry), "invalid")
 }
@@ -439,6 +446,48 @@ func TestThemeCanvasStampDecidesTheCodeSurface(t *testing.T) {
 	assert.NotEqual(t, dark.fingerprint, own.fingerprint, "the stamp is part of the render identity")
 	assert.Equal(t, own, own.forCanvas(true, true), "re-stamping one canvas changes nothing")
 	assert.NotEqual(t, own.fingerprint, dark.forCanvas(false, true).fingerprint)
+}
+
+// TestCanvasProofThemeCannotBeInherited pins that a user theme cannot inherit the
+// terminal's own palette: the hex theme-file shape has no way to carry a borrowed
+// colour slot, so every role would collapse into an approximation of black.
+func TestCanvasProofThemeCannotBeInherited(t *testing.T) {
+	t.Parallel()
+
+	registry := loadThemeRegistryFromText(t, map[string]string{
+		"borrowed": "schema = \"pips.tui.theme/v1alpha1\"\ninherits = \"terminal\"\n",
+	})
+
+	_, ok := registry.Resolve("borrowed")
+	assert.False(t, ok)
+	assert.Contains(t, diagnosticCategories(registry), "inheritance")
+}
+
+// TestTerminalThemeFrameNamesNoFixedColour renders the canvas-proof theme through
+// the model and pins that the frame names no colour outside the terminal's own
+// palette, which is what makes the theme readable on either canvas with no
+// detection and no surface of its own.
+func TestTerminalThemeFrameNamesNoFixedColour(t *testing.T) {
+	t.Parallel()
+
+	state := readyState()
+	state.Transcript = []ai.Message{
+		ai.UserText("show the fence"),
+		ai.AssistantText("# Summary\n\nBody `inline` text.\n\n```go\nx := 1\n```\n"),
+	}
+
+	model := readyModelWithController(t, stubController{state: state}, false)
+	model.applyTheme(mustBuiltinTheme(themeIDTerminal))
+	model.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	model.resetScrollback()
+	frame := model.takeStableTimeline()
+	model.rerenderTranscript(true)
+	frame += model.View().Content
+
+	assert.Contains(t, frame, "Summary")
+	assert.Contains(t, frame, "inline")
+	assert.Empty(t, markdownFixedColours(frame), "%q", frame)
+	assert.Empty(t, markdownSurfaces(frame), "%q", frame)
 }
 
 func mustTheme(t *testing.T, registry themeRegistry, id string) colorTheme {
