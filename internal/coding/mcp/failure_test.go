@@ -36,7 +36,8 @@ func TestOpenConnectionsNamesSafeConnectFailureCauses(t *testing.T) {
 		return server.URL
 	}
 
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	var listenConfig net.ListenConfig
+	listener, err := listenConfig.Listen(t.Context(), "tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	refused := "http://" + listener.Addr().String() + "/mcp"
 	require.NoError(t, listener.Close())

@@ -111,7 +111,7 @@ func buildConfig(options []Option) (config, error) {
 		}
 	}
 
-	if cfg.clientOptions.CreateMessageHandler != nil && cfg.clientOptions.CreateMessageWithToolsHandler != nil {
+	if cfg.clientOptions.CreateMessageHandler != nil && cfg.clientOptions.CreateMessageWithToolsHandler != nil { //nolint:staticcheck // Sampling is deprecated by SEP-2577 but still negotiated; drop it when the SDK removes it.
 		return config{}, errors.New("agent/mcp: client options set both sampling handlers")
 	}
 

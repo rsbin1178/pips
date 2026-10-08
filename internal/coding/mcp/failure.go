@@ -25,6 +25,7 @@ func (o *httpObservation) record(request *http.Request, response *http.Response)
 	if o == nil || response == nil || request.Method != http.MethodPost {
 		return
 	}
+
 	o.status.Store(int32(response.StatusCode)) //nolint:gosec // HTTP status codes are three digits.
 }
 
@@ -53,9 +54,9 @@ func failureMessage(base string, err error, server *managedServer, resource any)
 	return base + ": " + cause
 }
 
-//nolint:gocyclo // One closed classification per failure family keeps the order explicit.
 func failureCause(err error, server *managedServer, resource any) string {
 	remote := server.transport == TransportStreamableHTTP
+
 	var operation *net.OpError
 	if errors.As(err, &operation) && operation.Op == "proxyconnect" {
 		return "the HTTP proxy could not be reached; check HTTPS_PROXY"

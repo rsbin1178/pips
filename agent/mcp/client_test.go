@@ -150,7 +150,7 @@ func TestConnectValidatesAndWrapsFailures(t *testing.T) {
 	_, err = Connect(t.Context(), implementation, failingTransport{err: want})
 	require.Error(t, err)
 	require.ErrorIs(t, err, want)
-	assert.ErrorContains(t, err, "agent/mcp: connect")
+	require.ErrorContains(t, err, "agent/mcp: connect")
 }
 
 func TestConnectReturnsWhenContextEndsAgainstUnresponsivePeer(t *testing.T) {
@@ -168,6 +168,7 @@ func TestConnectReturnsWhenContextEndsAgainstUnresponsivePeer(t *testing.T) {
 	// must not inherit that wait.
 	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
 	defer cancel()
+
 	started := time.Now()
 	client, err := Connect(
 		ctx,
@@ -178,7 +179,7 @@ func TestConnectReturnsWhenContextEndsAgainstUnresponsivePeer(t *testing.T) {
 
 	assert.Nil(t, client)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
-	assert.ErrorContains(t, err, "agent/mcp: connect")
+	require.ErrorContains(t, err, "agent/mcp: connect")
 	assert.Less(t, elapsed, 3*time.Second)
 }
 

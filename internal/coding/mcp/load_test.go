@@ -29,12 +29,14 @@ func TestNewDefinitionsOwnsSessionEnvironmentAndMergeRejectsCollisions(t *testin
 	}}
 	definitions, err := codingmcp.NewDefinitions(input, 2)
 	require.NoError(t, err)
+
 	fingerprint := definitions.List()[0].Fingerprint()
 
 	input[0].Args[0] = "changed"
 	input[0].Environment[0].Value = "changed"
 	listed := definitions.List()
 	listed[0].Environment[0].Value = "listed-change"
+
 	assert.Equal(t, "serve", definitions.List()[0].Args[0])
 	assert.Equal(t, "one", definitions.List()[0].Environment[0].Value)
 	assert.Equal(t, fingerprint, definitions.List()[0].Fingerprint())
@@ -71,6 +73,7 @@ func TestNewDefinitionsRejectsUnsafeSessionEnvironmentAndLimits(t *testing.T) {
 	definition.Environment = nil
 	_, err = codingmcp.NewDefinitions([]codingmcp.Definition{definition}, 0)
 	require.ErrorIs(t, err, codingmcp.ErrInvalid)
+
 	second := definition
 	second.ID = "editor_tools_two"
 	_, err = codingmcp.NewDefinitions([]codingmcp.Definition{definition, second}, 1)
