@@ -177,12 +177,13 @@ func TestSessionRequestContextCancellationCancelsRuntime(t *testing.T) {
 	prompted := <-result
 	require.NoError(t, prompted.err)
 	assert.Equal(t, acpsdk.StopReasonCancelled, prompted.stop)
-	assert.Eventually(t, func() bool {
-		controller.mu.Lock()
-		defer controller.mu.Unlock()
+	// The turn delivers the cancellation before it finishes, so this needs no wait: it
+	// used to be an Eventually that ran its full thirty seconds whenever the prompt
+	// returned before the AfterFunc callback had been scheduled.
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
 
-		return controller.cancelCount > 0
-	}, 30*time.Second, 10*time.Millisecond)
+	assert.Equal(t, 1, controller.cancelCount)
 }
 
 func TestSessionModeControlSerializesAfterActivePrompt(t *testing.T) {

@@ -421,7 +421,7 @@ func (s *session) beginTurn(
 	s.idle = make(chan struct{})
 	s.mu.Unlock()
 
-	stopCancel := context.AfterFunc(turnCtx, func() {
+	stopCancel := deliverCancelOnDone(turnCtx, func() {
 		_ = s.controller.Cancel()
 	})
 	finish := func() {
