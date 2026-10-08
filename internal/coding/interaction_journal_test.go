@@ -3,6 +3,7 @@ package coding
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/rsbin1178/pips/agent"
@@ -32,7 +33,7 @@ func TestInteractionJournalLifecycle(t *testing.T) {
 	assert.Equal(t, "interaction-1", recovery.PendingID)
 
 	usage := TokenUsage{InputTokens: 4, OutputTokens: 2}
-	require.NoError(t, journal.complete(interactionID, InteractionSucceeded, "", usage, 25))
+	require.NoError(t, journal.complete(interactionID, InteractionSucceeded, "", usage, 25, interactionTally{}))
 
 	recovery, err = journal.replay()
 	require.NoError(t, err)
@@ -46,6 +47,63 @@ func TestInteractionJournalLifecycle(t *testing.T) {
 	require.Len(t, path, 2)
 	assert.Equal(t, interactionCustomType, path[0].Custom)
 	assert.Equal(t, interactionCustomType, path[1].Custom)
+}
+
+func TestInteractionJournalPersistsRetryTally(t *testing.T) {
+	t.Parallel()
+
+	session, err := harness.NewSession(harness.NewMemoryStore("session-1"))
+	require.NoError(t, err)
+
+	journal, err := newInteractionJournal(session, func() (string, error) {
+		return "interaction-1", nil
+	})
+	require.NoError(t, err)
+
+	interactionID, err := journal.start()
+	require.NoError(t, err)
+
+	tally := interactionTally{
+		Retries:      3,
+		RetryReasons: map[string]int{"stream idle": 2, "stream ended early": 1},
+	}
+
+	require.NoError(t, journal.complete(
+		interactionID, InteractionSucceeded, agent.StopEndTurn, TokenUsage{InputTokens: 4}, 25, tally,
+	), interactionTally{})
+
+	// The tally is a durable diagnostic, so it has to be readable from the
+	// record the store holds rather than only from the live interaction.
+	path := session.Path()
+	require.Len(t, path, 2)
+
+	record, err := decodeInteractionRecord(path[1].Data)
+	require.NoError(t, err)
+	assert.Equal(t, 3, record.Retries)
+	assert.Equal(t, map[string]int{"stream idle": 2, "stream ended early": 1}, record.RetryReasons)
+
+	recovery, err := journal.replay()
+	require.NoError(t, err)
+	assert.Equal(t, InteractionSucceeded, recovery.LastOutcome)
+	assert.Equal(t, int64(25), recovery.LastDurationMS)
+}
+
+func TestInteractionTallyIsDefensivelyCopied(t *testing.T) {
+	t.Parallel()
+
+	current := &interaction{}
+	current.recordRetry("stream idle")
+	current.recordRetry("stream idle")
+	current.recordRetry("")
+
+	tally := current.retryTally()
+	assert.Equal(t, 3, tally.Retries, "a reason-less retry is still counted")
+	assert.Equal(t, map[string]int{"stream idle": 2}, tally.RetryReasons)
+
+	tally.RetryReasons["stream idle"] = 99
+
+	assert.Equal(t, map[string]int{"stream idle": 2}, current.retryTally().RetryReasons,
+		"a caller cannot mutate the recorded breakdown")
 }
 
 func TestInteractionJournalPersistsIncompleteStop(t *testing.T) {
@@ -66,6 +124,7 @@ func TestInteractionJournalPersistsIncompleteStop(t *testing.T) {
 		agent.StopBudget,
 		TokenUsage{InputTokens: 10},
 		25,
+		interactionTally{},
 	))
 
 	recovery, err := journal.replay()
@@ -111,6 +170,37 @@ func TestReplayInteractionJournalRejectsMalformedLifecycle(t *testing.T) {
 			path: []harness.Entry{interactionEntry(t, "entry-1", interactionRecord{
 				Event: interactionTerminalEvent, InteractionID: "interaction-1",
 				Outcome: InteractionFailed, Usage: &TokenUsage{},
+			})},
+		},
+		{
+			name: "started record carrying a retry tally",
+			path: []harness.Entry{interactionEntry(t, "entry-1", interactionRecord{
+				Event: interactionStartedEvent, InteractionID: "interaction-1", Retries: 2,
+			})},
+		},
+		{
+			name: "terminal record with a negative retry count",
+			path: []harness.Entry{interactionEntry(t, "entry-1", interactionRecord{
+				Event: interactionTerminalEvent, InteractionID: "interaction-1",
+				Outcome: InteractionFailed, Usage: &TokenUsage{}, Retries: -1,
+			})},
+		},
+		{
+			name: "terminal record with an unbounded retry reason",
+			path: []harness.Entry{interactionEntry(t, "entry-1", interactionRecord{
+				Event: interactionTerminalEvent, InteractionID: "interaction-1",
+				Outcome:      InteractionFailed,
+				Usage:        &TokenUsage{},
+				Retries:      1,
+				RetryReasons: map[string]int{strings.Repeat("x", maxDiagnosticMessage+1): 1},
+			})},
+		},
+		{
+			name: "terminal record whose breakdown exceeds its count",
+			path: []harness.Entry{interactionEntry(t, "entry-1", interactionRecord{
+				Event: interactionTerminalEvent, InteractionID: "interaction-1",
+				Outcome: InteractionFailed, Usage: &TokenUsage{},
+				Retries: 1, RetryReasons: map[string]int{"stream idle": 2},
 			})},
 		},
 	}
@@ -159,7 +249,7 @@ func TestBootstrapStateMatchesLiveDurableState(t *testing.T) {
 	require.NoError(t, err)
 
 	usage := TokenUsage{InputTokens: 8, OutputTokens: 3}
-	require.NoError(t, journal.complete(interactionID, InteractionSucceeded, "", usage, 50))
+	require.NoError(t, journal.complete(interactionID, InteractionSucceeded, "", usage, 50, interactionTally{}))
 
 	liveEvents := []Event{
 		newSessionEvent(EventSessionOpened, SessionOpened{
