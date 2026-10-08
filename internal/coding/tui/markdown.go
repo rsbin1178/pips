@@ -327,22 +327,32 @@ func markdownStyle(theme colorTheme, noColor bool) glamouransi.StyleConfig {
 	}
 	if noColor {
 		style = styles.ASCIIStyleConfig
-	} else if theme.id != themeDark.id && theme.id != themeLight.id {
-		palette := paletteFor(theme)
-		style.Text.Color = themeColorPointer(palette.workspace)
-		style.BlockQuote.Color = themeColorPointer(palette.muted)
-		style.H1.Color = themeColorPointer(palette.model)
-		style.H2.Color = themeColorPointer(palette.model)
-		style.H3.Color = themeColorPointer(palette.model)
-		style.H4.Color = themeColorPointer(palette.model)
-		style.H5.Color = themeColorPointer(palette.model)
-		style.H6.Color = themeColorPointer(palette.model)
-		style.Link.Color = themeColorPointer(palette.session)
-		style.LinkText.Color = themeColorPointer(palette.session)
-		style.Code.Color = themeColorPointer(palette.code)
-		style.Code.BackgroundColor = themeColorPointer(palette.codeBackground)
-		style.CodeBlock.Color = themeColorPointer(palette.code)
-		style.CodeBlock.BackgroundColor = themeColorPointer(palette.codeBackground)
+	} else {
+		// Fenced code is highlighted with a bundled chroma style named per theme.
+		// A style config that carries its own Chroma entries makes glamour register
+		// them under one fixed name, "charm", and reuse whatever a first render in
+		// the process registered, so a light theme inherited a dark theme's token
+		// colors. Naming the style avoids that shared registry entirely.
+		style.CodeBlock.Chroma = nil
+		style.CodeBlock.Theme = markdownChromaTheme(theme)
+
+		if theme.id != themeDark.id && theme.id != themeLight.id {
+			palette := paletteFor(theme)
+			style.Text.Color = themeColorPointer(palette.workspace)
+			style.BlockQuote.Color = themeColorPointer(palette.muted)
+			style.H1.Color = themeColorPointer(palette.model)
+			style.H2.Color = themeColorPointer(palette.model)
+			style.H3.Color = themeColorPointer(palette.model)
+			style.H4.Color = themeColorPointer(palette.model)
+			style.H5.Color = themeColorPointer(palette.model)
+			style.H6.Color = themeColorPointer(palette.model)
+			style.Link.Color = themeColorPointer(palette.session)
+			style.LinkText.Color = themeColorPointer(palette.session)
+			style.Code.Color = themeColorPointer(palette.code)
+			style.Code.BackgroundColor = themeColorPointer(palette.codeBackground)
+			style.CodeBlock.Color = themeColorPointer(palette.code)
+			style.CodeBlock.BackgroundColor = themeColorPointer(palette.codeBackground)
+		}
 	}
 
 	// A divider between table body rows. The separator characters are already part of
@@ -368,6 +378,40 @@ func themeColorPointer(value color.Color) *string {
 	canonical := colorString(value)
 
 	return &canonical
+}
+
+// Chroma's names for the bundled styles whose theme id differs from them.
+const (
+	chromaStyleGitHubDark = "github-dark"
+	chromaStyleGitHub     = "github"
+	chromaStyleGruvbox    = "gruvbox"
+	chromaStyleOneDark    = "onedark"
+)
+
+// markdownChromaTheme names the bundled chroma style that highlights fenced code
+// for a theme, so the tokens follow the theme instead of the first render in the
+// process. A theme the switch does not name, such as one loaded from a file,
+// follows the family its background was resolved for.
+func markdownChromaTheme(theme colorTheme) string {
+	switch theme.id {
+	case themeIDDefaultDark:
+		return chromaStyleGitHubDark
+	case themeIDDefaultLight:
+		return chromaStyleGitHub
+	case themeIDGruvboxDark:
+		return chromaStyleGruvbox
+	case themeIDOneDark:
+		return chromaStyleOneDark
+	// These four share their name with the chroma style built for them.
+	case themeIDDracula, themeIDNord, themeIDCatppuccinMocha, themeIDSolarizedLight:
+		return theme.id
+	}
+
+	if theme.isLight() {
+		return chromaStyleGitHub
+	}
+
+	return chromaStyleGitHubDark
 }
 
 func (r *markdownRenderer) insert(entry markdownEntry) {
