@@ -24,6 +24,8 @@ version:
 	@echo "version=$(VERSION) commit=$(COMMIT) date=$(DATE)"
 
 ## release: Cross-compile release archives and SHA256SUMS into dist/
+# release: cross-compile every target into dist/ with LICENSE beside the binary,
+# a .zip as well as a .tar.gz for Windows, and SHA256SUMS covering both formats.
 release:
 	@rm -rf dist
 	@mkdir -p dist
@@ -36,14 +38,21 @@ release:
 		echo "building dist/$$name.tar.gz"; \
 		GOOS=$$os GOARCH=$$arch CGO_ENABLED=0 $(GO) build -trimpath \
 			-ldflags "-s -w $(LDFLAGS)" -o "dist/$$name/pips$$ext" ./cmd/pips || exit 1; \
+		cp LICENSE "dist/$$name/LICENSE" || exit 1; \
 		tar -czf "dist/$$name.tar.gz" -C dist "$$name" || exit 1; \
+		if [ "$$os" = "windows" ]; then \
+			echo "building dist/$$name.zip"; \
+			(cd dist && zip -qr "$$name.zip" "$$name") || exit 1; \
+		fi; \
 		rm -rf "dist/$$name"; \
 	done
-	@cd dist && if command -v sha256sum >/dev/null 2>&1; then \
-		sha256sum *.tar.gz > SHA256SUMS; \
-	else \
-		shasum -a 256 *.tar.gz > SHA256SUMS; \
-	fi
+	@cd dist && for pattern in '*.tar.gz' '*.zip'; do \
+		for file in $$pattern; do \
+			[ -f "$$file" ] || continue; \
+			if command -v sha256sum >/dev/null 2>&1; then sha256sum "$$file"; \
+			else shasum -a 256 "$$file"; fi; \
+		done; \
+	done > SHA256SUMS
 	@ls -1 dist
 
 ## test: Run all tests with race detector and coverage

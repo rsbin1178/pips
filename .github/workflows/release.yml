@@ -1,7 +1,8 @@
 name: Release
 
 # Tags are the release trigger. The full quality gate runs in Quality on main,
-# so this workflow re-checks the provider adapters and vet before publishing.
+# so this workflow re-checks the provider adapters and vet before publishing,
+# then proves the published installer against the release it just created.
 on:
   push:
     tags:
@@ -23,7 +24,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          # git describe resolves the stamped version from the tag history.
+          # git describe resolves the stamped version and the previous tag for
+          # the compare link.
           fetch-depth: 0
       - uses: actions/setup-go@v6
         with:
@@ -35,21 +37,100 @@ jobs:
         run: make provider-smoke
       - name: Vet
         run: go vet ./...
+      - name: Lint the install script
+        run: |
+          if command -v shellcheck >/dev/null 2>&1; then
+            shellcheck --version
+            shellcheck install.sh
+          else
+            echo "::warning::shellcheck is not on this runner; only the syntax check ran"
+            sh -n install.sh
+          fi
       - name: Build release artifacts
         run: make release
       - name: Verify the stamped binary
         run: |
           tar -xzf dist/pips_*_linux_amd64.tar.gz -C /tmp
           /tmp/pips_*_linux_amd64/pips version
+      - name: Prepare release notes
+        id: notes
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+
+          notes="docs/releases/$GITHUB_REF_NAME.md"
+          if [ ! -f "$notes" ]; then
+            echo "::warning::$notes is missing, falling back to GitHub's generated notes"
+            echo "have_notes=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          cp "$notes" /tmp/release-notes.md
+
+          # The notes file carries prose only: the compare range is computed here
+          # so it cannot go stale, and a first release simply omits it.
+          previous=$(git describe --tags --abbrev=0 "$GITHUB_REF_NAME^" 2>/dev/null || true)
+          if [ -n "$previous" ]; then
+            printf '\n---\n\n**Full Changelog**: https://github.com/%s/compare/%s...%s\n' \
+              "$GITHUB_REPOSITORY" "$previous" "$GITHUB_REF_NAME" >> /tmp/release-notes.md
+          else
+            echo "::warning::no reachable previous tag; the compare link was omitted"
+          fi
+
+          echo "have_notes=true" >> "$GITHUB_OUTPUT"
       - name: Publish GitHub release
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/SHA256SUMS \
-            --title "$GITHUB_REF_NAME" \
-            --generate-notes \
-            --verify-tag
+          set -euo pipefail
+
+          if [ "${{ steps.notes.outputs.have_notes }}" = "true" ]; then
+            gh release create "$GITHUB_REF_NAME" dist/* \
+              --title "$GITHUB_REF_NAME" \
+              --notes-file /tmp/release-notes.md \
+              --verify-tag
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* \
+              --title "$GITHUB_REF_NAME" \
+              --generate-notes \
+              --verify-tag
+          fi
+      - name: Verify the published installer
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          # The installer prefers a token when it can find one; on a runner
+          # without gh logged in it would otherwise hit the anonymous rate limit.
+          GH_TOKEN: ${{ github.token }}
+          PIPS_VERSION: ${{ github.ref_name }}
+          PIPS_NO_MODIFY_PATH: "1"
+        run: |
+          set -euo pipefail
+
+          dest="$(mktemp -d)/bin"
+          export PIPS_BIN_DIR="$dest"
+
+          # Assets can take a moment to become downloadable after the release is
+          # created, so retry rather than failing the release on propagation.
+          for attempt in 1 2 3 4 5; do
+            if sh install.sh; then
+              break
+            fi
+
+            if [ "$attempt" = "5" ]; then
+              echo "::error::install.sh could not install $PIPS_VERSION"
+              exit 1
+            fi
+
+            echo "install attempt $attempt failed; retrying in 15s" >&2
+            sleep 15
+          done
+
+          "$dest/pips" version
+          "$dest/pips" version | head -1 | grep -Fx "pips $PIPS_VERSION" ||
+            { echo "::error::the installed binary does not report $PIPS_VERSION"; exit 1; }
       - name: Report manual build
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
-        run: cat dist/SHA256SUMS
+        run: |
+          cat dist/SHA256SUMS
+          echo "::notice::manual build; no release published"

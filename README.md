@@ -98,15 +98,42 @@ Pips enforces strict modular decoupling from interactive terminal frontends down
 
 ## Quick Start
 
-Building from source requires Go 1.26.6 or later.
+### 1. Install
 
-### 1. Using the Coding CLI
-
-Download a binary for your platform from [GitHub Releases](https://github.com/rsbin1178/pips/releases),
-or install from a release checkout:
+**macOS and Linux**
 
 ```sh
-git clone --branch v0.1.5 https://github.com/rsbin1178/pips.git
+curl -fsSL https://raw.githubusercontent.com/rsbin1178/pips/main/install.sh | sh
+```
+
+The installer downloads this platform's archive from
+[GitHub Releases](https://github.com/rsbin1178/pips/releases), verifies its SHA-256 against the
+published `SHA256SUMS`, and installs `pips` into the first writable directory of `/usr/local/bin`,
+`/opt/homebrew/bin`, `~/.local/bin`, or `~/bin`. **Nothing is installed if the checksum does not
+match.** When that directory is not on your `PATH`, it appends the export line to `~/.zshrc`,
+`~/.bashrc`, and `~/.profile`.
+
+| Variable | Effect |
+| --- | --- |
+| `PIPS_VERSION` | install a specific tag (`PIPS_VERSION=v0.1.7`) instead of the latest release |
+| `PIPS_BIN_DIR` | install into this directory instead of the search above |
+| `PIPS_NO_MODIFY_PATH=1` | never edit shell rc files; print the `PATH` line instead |
+| `GH_TOKEN` | use a token for the releases API, which avoids its anonymous rate limit |
+
+<details>
+<summary>Windows, manual downloads, and building from source</summary>
+
+Windows ships `pips_<tag>_windows_amd64.zip` beside the Linux and macOS archives. Extract it, put
+`pips.exe` on your `PATH`, and verify it against `SHA256SUMS`. Running inside WSL2 is recommended so
+the default `workspace-write` sandbox is enforced.
+
+Archives are named `pips_<tag>_<os>_<arch>.tar.gz`, where `os` is `darwin` or `linux` and `arch` is
+`amd64` or `arm64`. Extract the archive, make `pips` executable, and put it on your `PATH`.
+
+Building from source requires Go 1.26.6 or later:
+
+```sh
+git clone --branch v0.1.7 https://github.com/rsbin1178/pips.git   # or the tag you want
 cd pips
 go install ./cmd/pips
 ```
@@ -115,6 +142,10 @@ This release pins a patched Bubble Tea fork through `go.mod`. Go does not suppor
 `go install ...@version` for a target module with this replacement; use a release
 binary or install from its source checkout instead. The viewport-based TUI
 redesign is not included in this release.
+
+</details>
+
+### 2. Using the Coding CLI
 
 Create a minimal configuration at `~/.pips/config.toml`:
 
@@ -156,7 +187,7 @@ pips resume <session-id>
 
 ---
 
-### 2. Using the Go Libraries
+### 3. Using the Go Libraries
 
 Add dependencies to your Go module:
 
