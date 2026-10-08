@@ -454,7 +454,8 @@ func markdownChromaTheme(theme colorTheme) string {
 	case themeIDOneDark:
 		return chromaStyleOneDark
 	// These four share their name with the chroma style built for them.
-	case themeIDDracula, themeIDNord, themeIDCatppuccinMocha, themeIDSolarizedLight:
+	case themeIDDracula, themeIDNord, themeIDSolarizedLight,
+		themeIDCatppuccinLatte, themeIDCatppuccinFrappe, themeIDCatppuccinMacchiato, themeIDCatppuccinMocha:
 		return theme.id
 	}
 

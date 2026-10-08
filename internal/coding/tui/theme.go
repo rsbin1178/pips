@@ -20,16 +20,19 @@ const (
 	// cursor covers.
 	cursorShape = tea.CursorBar
 
-	themeIDAuto            = "auto"
-	themeIDDefaultDark     = "default-dark"
-	themeIDDefaultLight    = "default-light"
-	themeIDDracula         = "dracula"
-	themeIDNord            = "nord"
-	themeIDGruvboxDark     = "gruvbox-dark"
-	themeIDCatppuccinMocha = "catppuccin-mocha"
-	themeIDOneDark         = "one-dark"
-	themeIDSolarizedLight  = "solarized-light"
-	themeIDTerminal        = "terminal"
+	themeIDAuto                = "auto"
+	themeIDDefaultDark         = "default-dark"
+	themeIDDefaultLight        = "default-light"
+	themeIDDracula             = "dracula"
+	themeIDNord                = "nord"
+	themeIDGruvboxDark         = "gruvbox-dark"
+	themeIDCatppuccinLatte     = "catppuccin-latte"
+	themeIDCatppuccinFrappe    = "catppuccin-frappe"
+	themeIDCatppuccinMacchiato = "catppuccin-macchiato"
+	themeIDCatppuccinMocha     = "catppuccin-mocha"
+	themeIDOneDark             = "one-dark"
+	themeIDSolarizedLight      = "solarized-light"
+	themeIDTerminal            = "terminal"
 )
 
 // themeBackground describes the terminal background a theme is designed for.

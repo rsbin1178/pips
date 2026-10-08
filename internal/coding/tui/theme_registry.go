@@ -749,6 +749,7 @@ func builtinThemeEntries() []themeEntry {
 	// once a family contributes more than one palette.
 	ids := []string{
 		themeIDDefaultDark, themeIDDefaultLight, themeIDTerminal,
+		themeIDCatppuccinLatte, themeIDCatppuccinFrappe, themeIDCatppuccinMacchiato,
 		themeIDCatppuccinMocha, themeIDDracula, themeIDGruvboxDark, themeIDNord,
 		themeIDOneDark, themeIDSolarizedLight,
 	}
@@ -794,6 +795,21 @@ var builtinThemePalettes = map[string]themePaletteStrings{
 		session: "#83A598", model: "#D3869B", idle: "#B8BB26", active: "#FABD2F", warning: "#FE8019",
 		error: "#FB4934", change: "#8EC07C", code: "#EBDBB2", codeBackground: "#282828", diagnostic: "#928374",
 	},
+	themeIDCatppuccinLatte: {
+		separator: "#BCC0CC", composerPrompt: "#6C6F85", muted: "#6C6F85", workspace: "#4C4F69",
+		session: "#1E66F5", model: "#8839EF", idle: "#40A02B", active: "#DF8E1D", warning: "#FE640B",
+		error: "#D20F39", change: "#179299", code: "#4C4F69", codeBackground: "#CCD0DA", diagnostic: "#7C7F93",
+	},
+	themeIDCatppuccinFrappe: {
+		separator: "#51576D", composerPrompt: "#737994", muted: "#737994", workspace: "#C6D0F5",
+		session: "#8CAAEE", model: "#CA9EE6", idle: "#A6D189", active: "#E5C890", warning: "#EF9F76",
+		error: "#E78284", change: "#81C8BE", code: "#C6D0F5", codeBackground: "#414559", diagnostic: "#949CBB",
+	},
+	themeIDCatppuccinMacchiato: {
+		separator: "#494D64", composerPrompt: "#6E738D", muted: "#6E738D", workspace: "#CAD3F5",
+		session: "#8AADF4", model: "#C6A0F6", idle: "#A6DA95", active: "#EED49F", warning: "#F5A97F",
+		error: "#ED8796", change: "#8BD5CA", code: "#CAD3F5", codeBackground: "#363A4F", diagnostic: "#939AB7",
+	},
 	themeIDCatppuccinMocha: {
 		separator: "#45475A", composerPrompt: "#A6ADC8", muted: "#A6ADC8", workspace: "#CDD6F4",
 		session: "#89DCEB", model: "#CBA6F7", idle: "#A6E3A1", active: "#F9E2AF", warning: "#FAB387",
@@ -818,14 +834,17 @@ type builtinThemeMetadata struct {
 }
 
 var builtinThemeMetadataByID = map[string]builtinThemeMetadata{
-	themeIDDefaultDark:     {name: "Default Dark", background: themeBackgroundDark},
-	themeIDDefaultLight:    {name: "Default Light", background: themeBackgroundLight},
-	themeIDDracula:         {name: "Dracula", background: themeBackgroundDark},
-	themeIDNord:            {name: "Nord", background: themeBackgroundDark},
-	themeIDGruvboxDark:     {name: "Gruvbox Dark", background: themeBackgroundDark},
-	themeIDCatppuccinMocha: {name: "Catppuccin Mocha", background: themeBackgroundDark},
-	themeIDOneDark:         {name: "One Dark", background: themeBackgroundDark},
-	themeIDSolarizedLight:  {name: "Solarized Light", background: themeBackgroundLight},
+	themeIDDefaultDark:         {name: "Default Dark", background: themeBackgroundDark},
+	themeIDDefaultLight:        {name: "Default Light", background: themeBackgroundLight},
+	themeIDDracula:             {name: "Dracula", background: themeBackgroundDark},
+	themeIDNord:                {name: "Nord", background: themeBackgroundDark},
+	themeIDGruvboxDark:         {name: "Gruvbox Dark", background: themeBackgroundDark},
+	themeIDCatppuccinLatte:     {name: "Catppuccin Latte", background: themeBackgroundLight},
+	themeIDCatppuccinFrappe:    {name: "Catppuccin Frappé", background: themeBackgroundDark},
+	themeIDCatppuccinMacchiato: {name: "Catppuccin Macchiato", background: themeBackgroundDark},
+	themeIDCatppuccinMocha:     {name: "Catppuccin Mocha", background: themeBackgroundDark},
+	themeIDOneDark:             {name: "One Dark", background: themeBackgroundDark},
+	themeIDSolarizedLight:      {name: "Solarized Light", background: themeBackgroundLight},
 }
 
 func builtinThemeDefinition(id string) (themeDefinition, bool) {

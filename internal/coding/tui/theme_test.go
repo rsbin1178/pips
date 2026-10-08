@@ -118,11 +118,11 @@ func TestBuiltinThemeRegistryIsStableAndComplete(t *testing.T) {
 
 	registry := loadThemeRegistry("")
 	options := registry.Options()
-	require.Len(t, options, 10)
+	require.Len(t, options, 13)
 	assert.Equal(t, "auto", options[0].id)
 	assert.True(t, options[0].automatic)
 	entries := registry.Entries()
-	require.Len(t, entries, 9)
+	require.Len(t, entries, 12)
 
 	ids := make([]string, 0, len(entries))
 	for _, entry := range entries {
@@ -147,7 +147,8 @@ func TestBuiltinThemeRegistryIsStableAndComplete(t *testing.T) {
 		assert.NotNil(t, entry.theme.palette.diagnostic)
 	}
 	assert.Equal(t, []string{
-		"default-dark", "default-light", "terminal", "catppuccin-mocha",
+		"default-dark", "default-light", "terminal",
+		"catppuccin-latte", "catppuccin-frappe", "catppuccin-macchiato", "catppuccin-mocha",
 		"dracula", "gruvbox-dark", "nord", "one-dark", "solarized-light",
 	}, ids)
 	assert.Equal(t, themeDark, mustTheme(t, registry, "default-dark"))
@@ -192,11 +193,11 @@ separator = "#123456"
 
 	registry := loadThemeRegistry(directory)
 	entries := registry.Entries()
-	require.Len(t, entries, 11)
-	assert.Equal(t, "alpha", entries[9].theme.id)
-	assert.Equal(t, "zebra", entries[10].theme.id)
-	assert.Equal(t, themeSourceUser, entries[9].source)
-	assert.Equal(t, themeSourceUser, entries[10].source)
+	require.Len(t, entries, builtinThemeCount()+2)
+	assert.Equal(t, "alpha", entries[builtinThemeCount()].theme.id)
+	assert.Equal(t, "zebra", entries[builtinThemeCount()+1].theme.id)
+	assert.Equal(t, themeSourceUser, entries[builtinThemeCount()].source)
+	assert.Equal(t, themeSourceUser, entries[builtinThemeCount()+1].source)
 
 	alpha := mustTheme(t, registry, "alpha")
 	assert.Equal(t, themeBackgroundLight, alpha.background)
@@ -268,13 +269,13 @@ func TestThemeDiscoveryRejectsUnsafeDirectoryAndFilesWithoutBreakingBuiltins(t *
 	t.Parallel()
 
 	missing := loadThemeRegistry(filepath.Join(t.TempDir(), "themes"))
-	assert.Len(t, missing.Entries(), 9)
+	assert.Len(t, missing.Entries(), builtinThemeCount())
 	assert.Empty(t, missing.Diagnostics())
 
 	unsafe := t.TempDir()
 	require.NoError(t, os.Chmod(unsafe, 0o755))
 	registry := loadThemeRegistry(unsafe)
-	assert.Len(t, registry.Entries(), 9)
+	assert.Len(t, registry.Entries(), builtinThemeCount())
 	require.NotEmpty(t, registry.Diagnostics())
 	assert.Equal(t, "directory", registry.Diagnostics()[0].category)
 
@@ -284,7 +285,7 @@ func TestThemeDiscoveryRejectsUnsafeDirectoryAndFilesWithoutBreakingBuiltins(t *
 `)
 	require.NoError(t, os.Chmod(filepath.Join(directory, "unsafe.toml"), 0o666))
 	registry = loadThemeRegistry(directory)
-	assert.Len(t, registry.Entries(), 9)
+	assert.Len(t, registry.Entries(), builtinThemeCount())
 	assert.Contains(t, diagnosticCategories(registry), "permissions")
 }
 
@@ -297,7 +298,7 @@ func TestThemeFilenameIDDoesNotTrimWhitespace(t *testing.T) {
 `)
 
 	registry := loadThemeRegistry(directory)
-	assert.Len(t, registry.Entries(), 9)
+	assert.Len(t, registry.Entries(), builtinThemeCount())
 	_, ok := registry.Resolve("spaced")
 	assert.False(t, ok)
 	assert.Contains(t, diagnosticCategories(registry), "invalid_id")
@@ -313,13 +314,13 @@ func TestThemeAggregateBytesBoundaryUsesActualContentSize(t *testing.T) {
 	}
 
 	registry := loadThemeRegistry(directory)
-	assert.Len(t, registry.Entries(), 9+int(maxThemeBytes/maxThemeFileBytes))
+	assert.Len(t, registry.Entries(), builtinThemeCount()+int(maxThemeBytes/maxThemeFileBytes))
 	assert.NotContains(t, diagnosticCategories(registry), "size")
 
 	writeThemeFile(t, directory, "boundary-over", `schema = "pips.tui.theme/v1alpha1"
 `)
 	registry = loadThemeRegistry(directory)
-	assert.Len(t, registry.Entries(), 9+int(maxThemeBytes/maxThemeFileBytes))
+	assert.Len(t, registry.Entries(), builtinThemeCount()+int(maxThemeBytes/maxThemeFileBytes))
 	assert.Contains(t, diagnosticCategories(registry), "size")
 }
 
@@ -369,7 +370,7 @@ func TestThemeFileBoundsAndStrictSchema(t *testing.T) {
 	writeThemeFile(t, directory, "missing-schema", "[palette]\nerror = \"#fff\"\n")
 
 	registry := loadThemeRegistry(directory)
-	assert.Len(t, registry.Entries(), 11)
+	assert.Len(t, registry.Entries(), builtinThemeCount()+2)
 	assert.Contains(t, diagnosticCategories(registry), "size")
 	assert.Contains(t, diagnosticCategories(registry), "invalid")
 }
@@ -545,6 +546,10 @@ func themeLuminance(value color.Color) float64 {
 
 	return 0.2126*channel(r) + 0.7152*channel(g) + 0.0722*channel(b)
 }
+
+// builtinThemeCount offsets the discovery expectations: a new built-in must not
+// require editing every fixture count.
+func builtinThemeCount() int { return len(builtinThemeEntries()) }
 
 func diagnosticCategories(registry themeRegistry) []string {
 	categories := make([]string, 0, len(registry.Diagnostics()))
