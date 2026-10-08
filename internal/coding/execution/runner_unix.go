@@ -56,7 +56,8 @@ func (e *Executor) run(ctx context.Context, plan *Plan, sink Sink) (Result, erro
 	trigger := make(chan error, 1)
 	chunks := make(chan OutputChunk, plan.operation.output.QueueDepth)
 	readersDone := startOutputReaders(pipes, collector, plan.operation.output.ChunkBytes, chunks, trigger)
-	dispatchDone := startDispatcher(runCtx, sink, chunks, trigger)
+	failures := &outputFailure{}
+	dispatchDone := startDispatcher(runCtx, sink, chunks, trigger, failures)
 	stdinDone := startStdinWriter(pipes.stdinParent, plan.launch.stdin, trigger)
 
 	waitDone := make(chan error, 1)
@@ -66,6 +67,7 @@ func (e *Executor) run(ctx context.Context, plan *Plan, sink Sink) (Result, erro
 	cleanupErr := cleanupProcessGroup(command.Process.Pid, e.termGrace)
 	readerErr := e.finishIO(runCtx, ctx, pipes, readersDone, dispatchDone, stdinDone, chunks, trigger, &runErr)
 	closeErr = errors.Join(closeErr, readerErr, pipes.closeAll())
+	runErr = preferSinkFailure(runErr, failures.failure())
 
 	result.Duration = e.deps.now().Sub(startedAt)
 	result.Stdout, result.Stderr = collector.results()
@@ -179,6 +181,7 @@ func startDispatcher(
 	sink Sink,
 	chunks <-chan OutputChunk,
 	trigger chan<- error,
+	failures *outputFailure,
 ) <-chan struct{} {
 	done := make(chan struct{})
 	go func() {
@@ -190,7 +193,9 @@ func startDispatcher(
 			}
 
 			if err := sink.WriteOutput(ctx, chunk); err != nil {
-				notifyTrigger(trigger, fmt.Errorf("coding execution: output sink: %w", err))
+				failure := fmt.Errorf("coding execution: output sink: %w", err)
+				failures.record(failure)
+				notifyTrigger(trigger, failure)
 
 				return
 			}
@@ -420,6 +425,46 @@ func notifyTrigger(trigger chan<- error, err error) {
 func setFirstError(target *error, candidate error) {
 	if *target == nil {
 		*target = candidate
+	}
+}
+
+// outputFailure remembers the sink's own failure. The dispatcher reports it on the
+// trigger as well, but the first error to reach the runner wins that race, and the
+// caller's failing sink is the more useful answer than an operation deadline that
+// expired while the runner was draining.
+type outputFailure struct {
+	mu  sync.Mutex
+	err error
+}
+
+func (f *outputFailure) record(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.err == nil {
+		f.err = err
+	}
+}
+
+func (f *outputFailure) failure() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.err
+}
+
+// preferSinkFailure returns the sink's failure as the reason the run stopped, with
+// anything else that happened joined behind it.
+func preferSinkFailure(runErr, sinkErr error) error {
+	switch {
+	case sinkErr == nil:
+		return runErr
+	case runErr == nil:
+		return sinkErr
+	case errors.Is(runErr, sinkErr):
+		return runErr
+	default:
+		return errors.Join(sinkErr, runErr)
 	}
 }
 
