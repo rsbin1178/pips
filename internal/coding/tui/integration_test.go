@@ -162,6 +162,32 @@ func driveModelCommands(t *testing.T, model *Model, initial tea.Cmd) {
 	driveModelCommandsCapture(t, model, initial)
 }
 
+// commandMessages flattens one command's batches into every message it produces,
+// for tests that must look past the first one.
+func commandMessages(t *testing.T, initial tea.Cmd) []tea.Msg {
+	t.Helper()
+
+	messages := make([]tea.Msg, 0, 4)
+	commands := []tea.Cmd{initial}
+	for steps := 0; len(commands) > 0 && steps < 100; steps++ {
+		command := commands[0]
+		commands = commands[1:]
+		if command == nil {
+			continue
+		}
+
+		message := command()
+		if batch, ok := message.(tea.BatchMsg); ok {
+			commands = append(commands, batch...)
+
+			continue
+		}
+		messages = append(messages, message)
+	}
+
+	return messages
+}
+
 func commandMessage(t *testing.T, initial tea.Cmd) tea.Msg {
 	t.Helper()
 

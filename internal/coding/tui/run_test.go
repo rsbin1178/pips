@@ -18,6 +18,7 @@ func TestResetTerminalModesDisablesMouseAndAlternateScroll(t *testing.T) {
 	require.NoError(t, resetTerminalModes(&output))
 	assert.Equal(t, resetTerminalInteraction, output.String())
 	assert.Contains(t, output.String(), "\x1b[?1007l")
+	assert.Contains(t, output.String(), "\x1b[?2031l", "light/dark reporting must be reset")
 	assert.Contains(t, output.String(), "\x1b[?1002l")
 	assert.Contains(t, output.String(), "\x1b[?1003l")
 	assert.NotContains(t, output.String(), "\x1b[?1007h")

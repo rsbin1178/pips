@@ -16,6 +16,7 @@ import (
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding"
@@ -298,9 +299,15 @@ func newModel(ctx context.Context, options Options) *Model {
 
 // Init starts bootstrap immediately for an already trusted Workspace.
 func (m *Model) Init() tea.Cmd {
-	commands := make([]tea.Cmd, 0, 3)
+	commands := make([]tea.Cmd, 0, 4)
 	if !m.options.NoColor {
 		commands = append(commands, tea.RequestBackgroundColor)
+		// Ask the terminal to report the desktop's light/dark preference whenever it
+		// changes. The enable sequence expects no reply, so it is safe to write
+		// directly; the extension's one-shot query is not sent because it does expect
+		// one, and Bubble Tea only gates its own reply-carrying queries on input being
+		// enabled.
+		commands = append(commands, tea.Raw(ansi.SetModeLightDark))
 	}
 	if m.lifecycle == lifecycleLoading {
 		commands = append(commands, m.bootstrap(true))
@@ -337,6 +344,10 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.rerenderTranscript(false)
 
 		return m, nil
+	case uv.DarkColorSchemeEvent:
+		return m, m.applyAppearance(true)
+	case uv.LightColorSchemeEvent:
+		return m, m.applyAppearance(false)
 	case tea.BackgroundColorMsg:
 		// NO_COLOR is a strict no-style mode. Do not let injected or late
 		// background messages mutate adaptive-theme state, either: doing so can

@@ -773,11 +773,14 @@ and a palette from a file follows the family its background resolves to.
 
 Open the command picker with `/` and choose `/theme`. The picker lists `auto`,
 built-ins, and discovered user themes in stable order. Press Enter to apply a
-selection immediately; Esc cancels. `auto` starts with the dark default and
-then follows Bubble Tea's terminal background detection. An explicit ID is
-never replaced by later background messages; a detected background does decide
-which surfaces the theme may paint, so an explicit selection is re-stamped
-without changing the ID. Theme changes update the managed
+selection immediately; Esc cancels. `auto` starts with the dark default and then
+follows the terminal's background: it is answered by the terminal itself, and,
+when the terminal reports the desktop's appearance (the `CSI ? 2031 h` light/dark
+extension, supported by Contour, Ghostty, Kitty, tmux, VTE 0.82+, Zellij, Helix
+and others), a desktop that switches light/dark also re-resolves `auto`. An
+explicit ID is never replaced by later background messages; the detected canvas
+does decide which surfaces the theme may paint, so an explicit selection is
+re-stamped without changing the ID. Theme changes update the managed
 TUI view, input styles, Markdown rendering, and theme-separated Markdown
 cache entries without restarting the session.
 
@@ -785,7 +788,9 @@ The picker marks every row whose declared background is the opposite of the
 detected terminal background — a light palette inside a dark terminal renders
 body text at roughly 1:1 contrast — and says which background it detected. `auto`
 is never marked, `terminal` fits either background, and nothing is marked until
-the terminal answers the background probe.
+the terminal answers the background probe. Opening the picker asks the terminal
+for its background again, so the marks describe the terminal as it is now rather
+than as it was at startup; nothing polls on its own.
 
 Markdown draws on the terminal's own canvas. No heading paints a background, a
 code fence paints no block background, and the inline-code fill is painted only

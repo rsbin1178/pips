@@ -332,9 +332,8 @@ func (m *Model) openThemeCommand() (tea.Model, tea.Cmd) {
 	previous := m.picker.previousComposer
 	m.closeCommandPicker(false)
 	m.restoreCommandComposer(previous)
-	m.openThemePicker()
 
-	return m, nil
+	return m, m.openThemePicker()
 }
 
 func (m *Model) restoreCommandComposer(snapshot composerSnapshot) {

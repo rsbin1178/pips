@@ -56,7 +56,9 @@ func (m *Model) detectedCanvasName() string {
 	return "light"
 }
 
-func (m *Model) openThemePicker() {
+// openThemePicker opens the picker and returns the command that refreshes the
+// canvas it renders against.
+func (m *Model) openThemePicker() tea.Cmd {
 	registry := loadThemeRegistry(m.options.ThemeDirectory)
 	options := registry.Options()
 	requested := config.NormalizeThemeSelection(m.themeSelection)
@@ -91,6 +93,16 @@ func (m *Model) openThemePicker() {
 		themeSelection:   selection,
 	}
 	m.setLayout()
+
+	// The canvas can have changed since startup (a profile switch, the desktop
+	// appearance) and the picker is where every row's polarity is on screen, so ask
+	// again; the reply takes the same path as the startup answer. Bubble Tea gates
+	// the query on input being enabled, so no reply is left for the shell.
+	if m.options.NoColor {
+		return nil
+	}
+
+	return tea.RequestBackgroundColor
 }
 
 func (m *Model) updateThemePickerKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {

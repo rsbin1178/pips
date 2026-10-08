@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/rsbin1178/pips/internal/coding/config"
 )
 
@@ -29,6 +30,23 @@ func (m *Model) loadInitialTheme(selection string) {
 		m.themeSelection = config.ThemeAuto
 	}
 	m.applyTheme(m.themeForSelection(config.ThemeAuto))
+}
+
+// applyAppearance records the desktop appearance a terminal reported through the
+// light/dark extension and then asks for the terminal's own background, because
+// that colour is what the canvas stamp, the painted surfaces and the picker marks
+// describe. The reported value stands when the terminal answers no query, which is
+// why it is applied first.
+func (m *Model) applyAppearance(dark bool) tea.Cmd {
+	if m.options.NoColor {
+		return nil
+	}
+
+	m.themeBackgroundKnown = true
+	m.themeIsDark = dark
+	m.applyTheme(m.themeForSelection(m.themeSelection))
+
+	return tea.RequestBackgroundColor
 }
 
 func (m *Model) themeForSelection(selection string) colorTheme {
