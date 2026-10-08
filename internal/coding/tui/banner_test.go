@@ -135,7 +135,7 @@ func TestStartupBannerLogoMatchesTheHeaderLines(t *testing.T) {
 		width:     72,
 		workspace: "workspace",
 		model:     "openai/test-model",
-		version:   "v9.9.9",
+		version:   "v9.9.9-3-gabc1234-dirty",
 		theme:     themeDark,
 		noColor:   true,
 	}))
@@ -145,6 +145,39 @@ func TestStartupBannerLogoMatchesTheHeaderLines(t *testing.T) {
 	for index, want := range []string{"v9.9.9", "workspace", "model", "Type / for commands"} {
 		assert.Contains(t, rows[index], "█", "row %d carries part of the wordmark", index)
 		assert.Contains(t, rows[index], want, "row %d carries its header line", index)
+	}
+
+	// The header names the release, not the commit or the working tree.
+	assert.NotContains(t, rows[0], "gabc1234")
+	assert.NotContains(t, rows[0], "dirty")
+}
+
+// TestStartupBannerVersionLabelShowsTheRelease pins what the header reports for the
+// version strings the build stamp actually produces.
+func TestStartupBannerVersionLabelShowsTheRelease(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		version string
+		want    string
+	}{
+		{"release tag", "v0.1.7", "v0.1.7"},
+		{"between releases", "v0.1.7-6-g274ace2", "v0.1.7"},
+		{"uncommitted work", "v0.1.7-dirty", "v0.1.7"},
+		{"both suffixes", "v0.1.7-6-g274ace2-dirty", "v0.1.7"},
+		{"prerelease keeps its own suffix", "v0.2.0-rc1", "v0.2.0-rc1"},
+		{"no version", "", "dev"},
+		{"whitespace only", "   ", "dev"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			context := startupBannerContext{version: test.version}
+			assert.Equal(t, test.want, context.versionLabel())
+		})
 	}
 }
 

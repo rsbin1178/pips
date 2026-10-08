@@ -38,17 +38,51 @@ type startupBannerContext struct {
 	noColor   bool
 }
 
-// versionLabel is the header's version text. A build without one reports "dev",
-// which is what an unstamped build reports elsewhere; the fallback lives here
-// rather than where the context is built, so a context assembled anywhere still
-// renders a whole header instead of a dangling separator.
+// versionLabel is the header's version text: the release the build belongs to.
+//
+// A build between releases reports a git describe string, "v0.1.7-6-g274ace2", and a
+// build with uncommitted changes appends "-dirty". The header names the release
+// rather than the commit or the working tree, so both suffixes are dropped. A tag
+// carrying its own suffix, such as "v0.2.0-rc1", is left alone, because it does not
+// have the describe shape. A build with no version reports "dev", which is what an
+// unstamped build reports elsewhere; the fallback lives here rather than where the
+// context is built, so a context assembled anywhere still renders a whole header
+// instead of a dangling separator.
 func (context startupBannerContext) versionLabel() string {
-	version := strings.TrimSpace(context.version)
+	version := strings.TrimSuffix(strings.TrimSpace(context.version), "-dirty")
+
+	if tag, rest, found := strings.Cut(version, "-"); found && isDescribeTail(rest) {
+		version = tag
+	}
+
 	if version == "" {
 		return "dev"
 	}
 
 	return version
+}
+
+// isDescribeTail reports whether rest is the suffix git describe appends after a tag,
+// the commit count and the abbreviated hash: "6-g274ace2".
+func isDescribeTail(rest string) bool {
+	count, hash, found := strings.Cut(rest, "-")
+	if !found || count == "" || len(hash) < 2 || hash[0] != 'g' {
+		return false
+	}
+
+	for _, char := range count {
+		if char < '0' || char > '9' {
+			return false
+		}
+	}
+
+	for _, char := range hash[1:] {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+
+	return true
 }
 
 // publishStartup rendezvous: neither default geometry nor bootstrap alone may
