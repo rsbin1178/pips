@@ -58,6 +58,40 @@ func TestWithCodingRetryUsesTenRetryBudget(t *testing.T) {
 	})
 }
 
+// The attempt budget bounds the work, but a provider that has gone silent can
+// spend a full stream idle window on every attempt, so the episode is bounded by
+// wall clock too — from the same policy value the loop's recovery uses.
+func TestWithCodingRetryBoundsTheEpisodeOnTheWallClock(t *testing.T) {
+	t.Parallel()
+
+	// Two ten-minute stream idle windows, matching the reference
+	// implementation's max(600s, 2×idle). Pinned so a change is deliberate.
+	assert.Equal(t, 20*time.Minute, RetryWindow)
+
+	finalErr := errors.New("provider stopped answering")
+	base := newRetryModel(finalErr)
+
+	// A clock that jumps an hour per reading: the first reading starts the
+	// episode and the second is already past the window, so the ceiling can be
+	// observed without waiting it out. Without the wiring the whole
+	// eleven-attempt budget would run.
+	now := time.Unix(0, 0)
+	clock := retry.ClockFunc(func() time.Time {
+		current := now
+		now = now.Add(time.Hour)
+
+		return current
+	})
+
+	model := withCodingRetry(base, noRetrySleep(), retry.WithClock(clock))
+
+	_, err := ai.Collect(model.Stream(t.Context(), ai.Request{}))
+
+	require.ErrorIs(t, err, finalErr)
+	assert.Equal(t, int32(1), base.calls.Load(),
+		"the coding chain stops as soon as the episode is spent")
+}
+
 func TestWithCodingRetryPreservesRetrySafetyAndIdentity(t *testing.T) {
 	t.Parallel()
 

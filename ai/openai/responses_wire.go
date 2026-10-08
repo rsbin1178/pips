@@ -125,10 +125,14 @@ type responsesResponse struct {
 	Error             *responsesError      `json:"error"`
 }
 
-// responsesError is the error object on a failed response.
+// responsesError is the error object on a failed response, and the nested shape
+// a router in front of the Responses API uses for mid-stream errors. Such a
+// router carries the class in Type ("server_error") and a more specific Code
+// ("internal_server_error"), while the Responses dialect puts the class in Code.
 type responsesError struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
+	Type    string `json:"type"`
 }
 
 type responsesIncomplete struct {
@@ -155,7 +159,9 @@ type responsesStreamEvent struct {
 	OutputIndex int                `json:"output_index"`
 	Item        *responseItem      `json:"item"`
 	Response    *responsesResponse `json:"response"`
-	// error events
-	Message string `json:"message"`
-	Code    string `json:"code"`
+	// error events: the Responses dialect names the failure at the top level,
+	// while a router in front of it nests the same fields under "error".
+	Message string          `json:"message"`
+	Code    string          `json:"code"`
+	Error   *responsesError `json:"error"`
 }

@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/rsbin1178/pips/agent"
+	"github.com/rsbin1178/pips/internal/coding/model"
 )
 
 // Stream recovery bounds for every Coding Agent run. A turn whose model stream
@@ -39,9 +40,19 @@ const (
 // *verified* to honour the shape — verified by a probe showing the prefix
 // survived into the model's output, not by a 200 on the request.
 func streamRecoveryOption(continuation bool) agent.Option {
+	// The re-issue budget is bounded by wall clock as well as by attempts, from
+	// the same policy value the model middleware uses: an attempt that goes
+	// silent can sit on a full stream idle window, so a count alone would let one
+	// turn hold the interaction for hours. See model.RetryWindow.
 	if continuation {
-		return agent.WithStreamContinuation(streamRecoveryAttempts, streamRecoveryBaseDelay, streamRecoveryMaxDelay)
+		return agent.ComposeOptions(
+			agent.WithStreamContinuation(streamRecoveryAttempts, streamRecoveryBaseDelay, streamRecoveryMaxDelay),
+			agent.WithStreamRecoveryWindow(model.RetryWindow),
+		)
 	}
 
-	return agent.WithStreamRecovery(streamRecoveryAttempts, streamRecoveryBaseDelay, streamRecoveryMaxDelay)
+	return agent.ComposeOptions(
+		agent.WithStreamRecovery(streamRecoveryAttempts, streamRecoveryBaseDelay, streamRecoveryMaxDelay),
+		agent.WithStreamRecoveryWindow(model.RetryWindow),
+	)
 }

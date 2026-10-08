@@ -183,6 +183,78 @@ func TestStreamRecoveryReissuesAfterAnIdleAbort(t *testing.T) {
 	assert.Equal(t, "final", text.Text)
 }
 
+// A recovery episode is bounded by wall clock as well as by attempts: a
+// provider that has stopped answering can spend a full idle window on every
+// attempt, so the attempt budget alone does not bound the waiting.
+func TestStreamRecoveryWindowStopsReissuing(t *testing.T) {
+	t.Parallel()
+
+	model := &interruptedStreamModel{failures: 5, err: io.ErrUnexpectedEOF}
+
+	a, err := agent.New(
+		model,
+		agent.WithStreamRecovery(3, time.Millisecond, time.Millisecond),
+		agent.WithStreamRecoveryWindow(time.Nanosecond),
+	)
+	require.NoError(t, err)
+
+	types, notice, notices, err := collectStream(t, a, agent.NewSession())
+
+	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+	assert.Equal(t, int32(2), model.calls.Load(),
+		"the first re-issue fits before the window is spent, the second never starts")
+	assert.Equal(t, 1, notices)
+	require.NotNil(t, notice)
+	assert.Equal(t, 1, notice.Attempt)
+	assert.Contains(t, types, agent.EventCandidateIncomplete,
+		"giving up on the window reports the fragment the same way an exhausted budget does")
+}
+
+func TestStreamRecoveryWindowLeavesARoomyEpisodeAlone(t *testing.T) {
+	t.Parallel()
+
+	model := &interruptedStreamModel{failures: 1, err: io.ErrUnexpectedEOF}
+
+	a, err := agent.New(
+		model,
+		agent.WithStreamRecovery(1, time.Millisecond, time.Millisecond),
+		agent.WithStreamRecoveryWindow(time.Hour),
+	)
+	require.NoError(t, err)
+
+	sess := agent.NewSession()
+
+	types, _, notices, err := collectStream(t, a, sess)
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, notices)
+	assert.Contains(t, types, agent.EventMessageCommitted)
+	assert.Equal(t, int32(2), model.calls.Load())
+}
+
+// A frontend hands the loop one policy value rather than knowing which options
+// make it up, so composition has to apply every part of it.
+func TestComposeOptionsAppliesEveryRecoveryOption(t *testing.T) {
+	t.Parallel()
+
+	model := &interruptedStreamModel{failures: 5, err: io.ErrUnexpectedEOF}
+
+	a, err := agent.New(
+		model,
+		agent.ComposeOptions(
+			agent.WithStreamRecovery(1, time.Millisecond, time.Millisecond),
+			agent.WithStreamRecoveryWindow(time.Nanosecond),
+		),
+	)
+	require.NoError(t, err)
+
+	_, _, notices, err := collectStream(t, a, agent.NewSession())
+
+	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+	assert.Equal(t, 1, notices, "the re-issue budget was applied")
+	assert.Equal(t, int32(2), model.calls.Load(), "the window was applied too")
+}
+
 func TestStreamRecoveryIsOffByDefault(t *testing.T) {
 	t.Parallel()
 

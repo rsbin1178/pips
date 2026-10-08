@@ -32,6 +32,8 @@ type interaction struct {
 	search                   *catalog.ToolSearch
 	changeTracker            *interactionChangeTracker
 	usage                    TokenUsage
+	retries                  int
+	retryReasons             map[string]int
 	stop                     agent.StopReason
 	hookStopRequested        bool
 	subagentUsage            map[string]struct{}
@@ -97,6 +99,50 @@ func (i *interaction) addSubagentUsage(childSessionID, modelRef string, usage To
 // every folded child under its own model, and the remainder under the parent's.
 // Background children appear on neither side, because the parent total never
 // included them.
+// recordRetry counts one retry notice this interaction observed. The reason is
+// optional on the notice, so the breakdown can be a subset of the count; new
+// reasons stop at the bound so a durable record always stays valid.
+func (i *interaction) recordRetry(reason string) {
+	if i == nil {
+		return
+	}
+
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	if i.retries >= maxRetryTally {
+		return
+	}
+
+	i.retries++
+
+	if reason == "" {
+		return
+	}
+
+	if i.retryReasons == nil {
+		i.retryReasons = make(map[string]int, 1)
+	}
+
+	if _, known := i.retryReasons[reason]; !known && len(i.retryReasons) >= maxRetryReasons {
+		return
+	}
+
+	i.retryReasons[reason]++
+}
+
+// retryTally snapshots the retry accounting for the terminal journal record.
+func (i *interaction) retryTally() interactionTally {
+	if i == nil {
+		return interactionTally{}
+	}
+
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	return interactionTally{Retries: i.retries, RetryReasons: i.retryReasons}.clone()
+}
+
 func (i *interaction) modelUsage(parentModelRef string) map[string]TokenUsage {
 	i.mu.Lock()
 	defer i.mu.Unlock()

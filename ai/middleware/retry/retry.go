@@ -6,6 +6,11 @@
 // the first event is produced — once output has been observed, replaying the
 // request could duplicate content, so the original error is surfaced instead.
 // Each streaming re-attempt is announced with one [ai.StreamRetry] event.
+//
+// [WithMaxElapsed] additionally bounds how long one request's replay episode may
+// last on the wall clock. The attempt budget bounds the work; for a provider that
+// has stopped answering, only time bounds the waiting, because each attempt can
+// spend a full idle window before it fails.
 package retry
 
 import (
@@ -25,10 +30,30 @@ const (
 	defaultMaxDelay    = 30 * time.Second
 )
 
+// Clock reports the current time.
+type Clock interface {
+	Now() time.Time
+}
+
+// ClockFunc adapts a function to Clock.
+type ClockFunc func() time.Time
+
+// Now implements Clock.
+func (function ClockFunc) Now() time.Time { return function() }
+
+type systemClock struct{}
+
+func (systemClock) Now() time.Time { return time.Now() }
+
 type config struct {
 	maxAttempts int
 	baseDelay   time.Duration
 	maxDelay    time.Duration
+	// maxElapsed bounds one request's replay episode; zero leaves the attempt
+	// budget as the only bound.
+	maxElapsed time.Duration
+	// clock is the time source the episode is measured against.
+	clock Clock
 	// sleep is the delay function, overridable in tests.
 	sleep func(context.Context, time.Duration) error
 	// jitter returns a fraction in [0,1) used for full jitter; overridable in
@@ -56,6 +81,26 @@ func WithMaxDelay(d time.Duration) Option {
 	return func(c *config) { c.maxDelay = d }
 }
 
+// WithMaxElapsed bounds the wall clock one request's replay episode may spend,
+// including the time its attempts take. Once the episode has lasted d, no further
+// attempt is scheduled and the last failure is surfaced; nothing in flight is
+// interrupted, so the worst case is d plus that one attempt. Zero — the default —
+// leaves the attempt budget as the only bound.
+func WithMaxElapsed(d time.Duration) Option {
+	return func(c *config) { c.maxElapsed = d }
+}
+
+// WithClock replaces the time source the replay episode is measured against. It
+// exists mainly for tests that need an exact ceiling; a nil clock is ignored and
+// the system clock stays in place.
+func WithClock(clock Clock) Option {
+	return func(c *config) {
+		if clock != nil {
+			c.clock = clock
+		}
+	}
+}
+
 // WithSleep overrides the delay function. It exists mainly for tests, letting
 // them collapse backoff and record the delays; production code should not
 // need it.
@@ -77,6 +122,7 @@ func New(opts ...Option) ai.Middleware {
 		maxDelay:    defaultMaxDelay,
 		sleep:       sleepCtx,
 		jitter:      rand.Float64,
+		clock:       systemClock{},
 	}
 	for _, opt := range opts {
 		opt(&cfg)
@@ -100,6 +146,8 @@ type model struct {
 
 // Generate retries the wrapped call on retryable errors.
 func (m *model) Generate(ctx context.Context, req ai.Request) (*ai.Response, error) {
+	started := m.cfg.clock.Now()
+
 	var lastErr error
 
 	for attempt := range m.cfg.maxAttempts {
@@ -110,6 +158,10 @@ func (m *model) Generate(ctx context.Context, req ai.Request) (*ai.Response, err
 
 		lastErr = err
 		if !ai.IsRetryable(err) || attempt == m.cfg.maxAttempts-1 {
+			return resp, err
+		}
+
+		if m.spent(started) {
 			return resp, err
 		}
 
@@ -129,6 +181,8 @@ func (m *model) Generate(ctx context.Context, req ai.Request) (*ai.Response, err
 // report the wait instead of looking stalled.
 func (m *model) Stream(ctx context.Context, req ai.Request) ai.Stream {
 	return func(yield func(ai.StreamEvent, error) bool) {
+		started := m.cfg.clock.Now()
+
 		for attempt := range m.cfg.maxAttempts {
 			retriable, err := m.streamAttempt(ctx, req, yield)
 			if err == nil {
@@ -138,6 +192,13 @@ func (m *model) Stream(ctx context.Context, req ai.Request) ai.Stream {
 			// A pre-first-event error may be retryable; anything after the
 			// first event is terminal and was already yielded.
 			if !retriable || !ai.IsRetryable(err) || attempt == m.cfg.maxAttempts-1 {
+				yield(ai.StreamEvent{}, err)
+				return
+			}
+
+			// The episode has spent its window, so an attempt that would exceed
+			// it is never announced or started: the failure stands as it is.
+			if m.spent(started) {
 				yield(ai.StreamEvent{}, err)
 				return
 			}
@@ -185,6 +246,12 @@ func (m *model) streamAttempt(ctx context.Context, req ai.Request, yield func(ai
 	}
 
 	return false, nil
+}
+
+// spent reports whether the replay episode that began at started has used up its
+// ceiling. An unset ceiling never expires.
+func (m *model) spent(started time.Time) bool {
+	return m.cfg.maxElapsed > 0 && m.cfg.clock.Now().Sub(started) >= m.cfg.maxElapsed
 }
 
 // backoff computes the delay before the next attempt: full-jittered

@@ -475,7 +475,7 @@ func (r *Runtime) finishUnopenedInteraction(
 	outcome InteractionOutcome,
 	emitter *eventEmitter,
 ) error {
-	journalErr := r.journal.complete(interactionID, outcome, "", TokenUsage{}, 0)
+	journalErr := r.journal.complete(interactionID, outcome, "", TokenUsage{}, 0, interactionTally{})
 	eventErr := emitter.emit(
 		interactionID,
 		"",
@@ -1176,6 +1176,10 @@ func (r *Runtime) driveHarness(
 				}
 			}
 
+			if retry, ok := projected.Payload.(ModelRetry); ok {
+				current.recordRetry(retry.Reason)
+			}
+
 			if completed, ok := projected.Payload.(RunCompleted); ok {
 				stop = completed.Stop
 				addUsage(&current.usage, completed.Usage)
@@ -1584,7 +1588,7 @@ func (r *Runtime) finishInteraction(
 	durationMillis := min(duration.Milliseconds(), maxEventDurationMS)
 
 	if err := r.journal.complete(
-		current.id, outcome, current.stop, current.usage, durationMillis,
+		current.id, outcome, current.stop, current.usage, durationMillis, current.retryTally(),
 	); err != nil {
 		errs = append(errs, err)
 	}
