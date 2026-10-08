@@ -3,12 +3,14 @@ package tui
 
 import (
 	"fmt"
+	"image/color"
 	"reflect"
 	"regexp"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/alecthomas/chroma/v2"
 	"github.com/alecthomas/chroma/v2/styles"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
@@ -637,19 +639,26 @@ func TestMarkdownSyntaxColoursFollowTheTheme(t *testing.T) {
 // TestMarkdownChromaThemesAreBundledStyles keeps the per-theme syntax styles
 // resolvable. Chroma answers an unknown name with its own default style, so a
 // typo or a rename would silently drop the theme's palette instead of failing.
-func TestMarkdownChromaThemesAreBundledStyles(t *testing.T) {
+func TestMarkdownChromaThemesFollowTheirPalette(t *testing.T) {
 	t.Parallel()
 
 	for _, entry := range builtinThemeEntries() {
 		theme := entry.theme
 		name := markdownChromaTheme(theme)
 
-		assert.Equal(t, name, styles.Get(name).Name, "theme %s names a bundled chroma style", theme.id)
+		assert.Equal(t, name, styles.Get(name).Name, "theme %s names a style that resolves", theme.id)
+		if theme.borrowsTerminalColors() {
+			assert.Equal(t, chromaStyleBW, name, "a borrowed palette keeps the colourless style")
+
+			continue
+		}
+		assert.Equal(t, pipsChromaPrefix+theme.id, name,
+			"a built-in names the style derived from its own palette")
 	}
 
-	// Every built-in names its own bundled style: the id-sharing majority, the
-	// three spelled-out Tokyo Night ids, and the two default themes. A silent
-	// family fallback would fail here.
+	// The syntax style behind each built-in is its own family's: the id-sharing
+	// majority, the three spelled-out Tokyo Night ids, and the two default themes.
+	// A silent family fallback would fail here.
 	spelled := map[string]string{
 		themeIDDefaultDark:     chromaStyleGitHubDark,
 		themeIDDefaultLight:    chromaStyleGitHub,
@@ -665,12 +674,65 @@ func TestMarkdownChromaThemesAreBundledStyles(t *testing.T) {
 		if !ok {
 			want = entry.theme.id
 		}
-		assert.Equal(t, want, markdownChromaTheme(entry.theme), entry.theme.id)
+		assert.Equal(t, want, bundledChromaStyle(entry.theme), entry.theme.id)
 	}
 
-	// A theme from a file follows the family its background resolves to.
+	// A theme from a file follows the family its background resolves to, because
+	// nothing derives a style for a palette that arrives at runtime.
 	light := newResolvedTheme("acme-light", "Acme Light", themeBackgroundLight, themeLight.palette)
 	dark := newResolvedTheme("acme-dark", "Acme Dark", themeBackgroundDark, themeDark.palette)
 	assert.Equal(t, chromaStyleGitHub, markdownChromaTheme(light))
 	assert.Equal(t, chromaStyleGitHubDark, markdownChromaTheme(dark))
+}
+
+// TestMarkdownDiffFencesFollowThePalette pins where a diff fence gets its
+// colours: the added and removed tokens carry the theme's own accents and no fill,
+// whatever the bundled style the syntax comes from used to paint. A light theme
+// used to draw #ddffdd bars, and three families drew no diff distinction at all.
+func TestMarkdownDiffFencesFollowThePalette(t *testing.T) {
+	t.Parallel()
+
+	const fence = "```diff\n+added\n-removed\n```\n"
+
+	for _, entry := range builtinThemeEntries() {
+		theme := entry.theme
+		if theme.borrowsTerminalColors() {
+			continue
+		}
+		palette := paletteFor(theme)
+		style := styles.Get(markdownChromaTheme(theme))
+
+		for token, want := range map[chroma.TokenType]color.Color{
+			chroma.GenericInserted: palette.change,
+			chroma.GenericDeleted:  palette.error,
+		} {
+			resolved := style.Get(token)
+			assert.Equal(t, chroma.MustParseColour(colorString(want)), resolved.Colour, "%s %v", theme.id, token)
+			assert.False(t, resolved.Background.IsSet(), "%s %v carries no fill", theme.id, token)
+		}
+
+		rendered, err := newMarkdownRenderer(1).render(fence, 60, theme, false)
+		require.NoError(t, err)
+		assert.Contains(t, rendered, "added")
+
+		added := markdownLineEscape(rendered, "+added")
+		removed := markdownLineEscape(rendered, "-removed")
+		assert.NotEmpty(t, added, "%s: %s", theme.id, rendered)
+		assert.NotEmpty(t, removed, "%s: %s", theme.id, rendered)
+		assert.NotEqual(t, added, removed, "%s keeps the two sides apart", theme.id)
+		assert.Empty(t, markdownSurfaces(rendered), "%s: %q", theme.id, rendered)
+	}
+}
+
+// markdownLineEscape returns the SGR parameters that colour a line whose content
+// starts with needle, which is how a diff line's colour is read back.
+func markdownLineEscape(rendered, needle string) string {
+	pattern := regexp.MustCompile(`\x1b\[([0-9;]+)m` + regexp.QuoteMeta(needle))
+
+	match := pattern.FindStringSubmatch(rendered)
+	if match == nil {
+		return ""
+	}
+
+	return match[1]
 }

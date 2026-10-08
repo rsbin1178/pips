@@ -437,11 +437,11 @@ const (
 	chromaStyleBW = "bw"
 )
 
-// markdownChromaTheme names the bundled chroma style that highlights fenced code
-// for a theme, so the tokens follow the theme instead of the first render in the
-// process. A theme the switch does not name, such as one loaded from a file,
-// follows the family its background was resolved for.
-func markdownChromaTheme(theme colorTheme) string {
+// bundledChromaStyle names the chroma style a theme's syntax is drawn from, so
+// the tokens follow the theme instead of the first render in the process. A theme
+// the switch does not name, such as one loaded from a file, follows the family its
+// background was resolved for.
+func bundledChromaStyle(theme colorTheme) string {
 	if theme.borrowsTerminalColors() {
 		// A theme with no polarity of its own cannot hand chroma absolute token
 		// colours, so it names the bundled style that carries none.
