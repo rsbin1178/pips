@@ -45,11 +45,13 @@ func NewDefinitions(values []Definition, maximum int) (Definitions, error) {
 	if maximum <= 0 {
 		return Definitions{}, fmt.Errorf("%w: invalid definition limit", ErrInvalid)
 	}
+
 	if len(values) > maximum {
 		return Definitions{}, fmt.Errorf("%w: more than %d servers", ErrLimitExceeded, maximum)
 	}
 
 	cloned := make([]Definition, 0, len(values))
+
 	seen := make(map[string]Scope, len(values))
 	for index, definition := range values {
 		if err := validateDefinition(definition); err != nil {
@@ -61,6 +63,7 @@ func NewDefinitions(values []Definition, maximum int) (Definitions, error) {
 				err,
 			)
 		}
+
 		if previous, duplicate := seen[definition.ID]; duplicate {
 			return Definitions{}, fmt.Errorf(
 				"%w: server %q in %s and %s scopes",

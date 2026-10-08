@@ -21,6 +21,7 @@ func TestFailureCauseClassifiesOnlyByErrorType(t *testing.T) {
 	proxy := &net.OpError{Op: "proxyconnect", Net: "tcp", Err: errors.New("dial 10.0.0.1:7890: refused")}
 	rejected := &httpObservation{}
 	rejected.status.Store(http.StatusForbidden)
+
 	recovered := &httpObservation{}
 	recovered.status.Store(http.StatusOK)
 

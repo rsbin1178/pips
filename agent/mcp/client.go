@@ -119,6 +119,7 @@ func connectSession(
 	transport mcp.Transport,
 ) (*mcp.ClientSession, error) {
 	done := make(chan connectResult, 1)
+
 	go func() {
 		session, err := sdkClient.Connect(ctx, transport, nil)
 		done <- connectResult{session: session, err: err}
