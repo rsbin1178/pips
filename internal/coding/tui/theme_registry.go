@@ -230,7 +230,7 @@ func loadThemeRegistry(directory string) themeRegistry {
 			registry.addDiagnostic("invalid_id")
 			continue
 		}
-		if _, exists := builtinThemeDefinition(id); exists {
+		if isBuiltinThemeID(id) {
 			registry.addDiagnostic("builtin_collision")
 			continue
 		}
@@ -609,6 +609,13 @@ func resolveCustomTheme(
 	switch {
 	case definition.inherits != "":
 		if builtin, exists := builtinThemeByID(definition.inherits); exists {
+			if builtin.borrowsTerminalColors() {
+				// A borrowed palette has no hex form: inheriting it would collapse the
+				// terminal's own slots into approximations of black.
+				states[id] = themeInvalid
+
+				return colorTheme{}, false
+			}
 			base = builtin
 		} else {
 			var parentOK bool
@@ -715,6 +722,19 @@ func newResolvedTheme(id, name string, background themeBackground, palette color
 	}
 }
 
+// fingerprintWithCodeSurface derives the render fingerprint of a snapshot
+// stamped for a canvas. Markdown caches on the fingerprint, so a stamped
+// snapshot must not collide with an unstamped one.
+func fingerprintWithCodeSurface(fingerprint string, codeSurface bool) string {
+	surface := "off"
+	if codeSurface {
+		surface = "on"
+	}
+	digest := sha256.Sum256([]byte(fingerprint + "\ncode_surface=" + surface))
+
+	return hex.EncodeToString(digest[:])
+}
+
 func mustBuiltinTheme(id string) colorTheme {
 	theme, ok := builtinThemeByID(id)
 	if !ok {
@@ -725,66 +745,189 @@ func mustBuiltinTheme(id string) colorTheme {
 }
 
 func builtinThemeEntries() []themeEntry {
+	// Grouped by family, light variant first, so the picker reads as a catalogue
+	// once a family contributes more than one palette.
 	ids := []string{
-		themeIDDefaultDark, themeIDDefaultLight, themeIDDracula, themeIDNord, themeIDGruvboxDark,
-		themeIDCatppuccinMocha, themeIDOneDark, themeIDSolarizedLight,
+		themeIDDefaultDark, themeIDDefaultLight, themeIDTerminal,
+		themeIDCatppuccinLatte, themeIDCatppuccinFrappe, themeIDCatppuccinMacchiato, themeIDCatppuccinMocha,
+		themeIDDracula, themeIDGruvboxLight, themeIDGruvboxDark,
+		themeIDModusOperandi, themeIDModusVivendi,
+		themeIDNord, themeIDOneDark,
+		themeIDRosePineDawn, themeIDRosePineMoon, themeIDRosePine,
+		themeIDSolarizedLight, themeIDSolarizedDark,
+		themeIDTokyoNightLight, themeIDTokyoNightStorm, themeIDTokyoNight,
 	}
 	entries := make([]themeEntry, 0, len(ids))
 	for _, id := range ids {
-		theme, ok := builtinThemeByID(id)
-		if !ok {
-			continue
-		}
-		entries = append(entries, themeEntry{theme: theme, source: themeSourceBuiltin})
+		// An id in this list without a palette is a programming error, not a theme
+		// to skip: the registry tests pin the exact set.
+		entries = append(entries, themeEntry{theme: mustBuiltinTheme(id), source: themeSourceBuiltin})
 	}
 
 	return entries
 }
 
+// A few upstream colours sit on more than one role, or on the same role in two
+// variants of a family. Naming them keeps the palette table readable and ties each
+// value to the role its family documents.
+const (
+	tokyoNightComment    = "#565F89" // Tokyo Night comment, Night and Storm
+	rosePineSubtle       = "#908CAA" // Rosé Pine subtle, main and Moon
+	tokyoNightForeground = "#A9B1D6" // Tokyo Night editor foreground, Night and Storm
+	rosePineText         = "#E0DEF4" // Rosé Pine text, main and Moon
+
+	gruvboxGray    = "#928374" // gruvbox neutral gray, both variants
+	solarizedBase0 = "#839496" // Solarized base0, light chrome and dark canvas
+)
+
+// builtinThemePalettes and builtinThemeMetadataByID hold every built-in that is
+// expressed as theme-file values. The tables are package-level so that adding a
+// theme stays data, and so that resolving one does not rebuild a map; a palette
+// that borrows the terminal's own colours lives in canvasProofBuiltins instead.
+var builtinThemePalettes = map[string]themePaletteStrings{
+	themeIDDefaultDark: {
+		separator: "#3F4752", composerPrompt: "#6E7681", muted: "#8B949E", workspace: "#E6EDF3",
+		session: "#5FAFFF", model: "#AF87FF", idle: "#5FD7AF", active: "#FFD75F", warning: "#FFAF5F",
+		error: "#FF5F5F", change: "#87D75F", code: "#E6EDF3", codeBackground: "#161B22", diagnostic: "#7D8B99",
+	},
+	themeIDDefaultLight: {
+		separator: "#D0D7DE", composerPrompt: "#57606A", muted: "#57606A", workspace: "#24292F",
+		session: "#0969DA", model: "#8250DF", idle: "#1A7F37", active: "#9A6700", warning: "#BC4C00",
+		error: "#CF222E", change: "#1A7F37", code: "#24292F", codeBackground: "#F6F8FA", diagnostic: "#586069",
+	},
+	themeIDDracula: {
+		separator: "#44475A", composerPrompt: "#6272A4", muted: "#6272A4", workspace: "#F8F8F2",
+		session: "#8BE9FD", model: "#BD93F9", idle: "#50FA7B", active: "#F1FA8C", warning: "#FFB86C",
+		error: "#FF5555", change: "#FF79C6", code: "#F8F8F2", codeBackground: "#44475A", diagnostic: "#6272A4",
+	},
+	themeIDModusOperandi: {
+		separator: "#9F9F9F", composerPrompt: "#595959", muted: "#595959", workspace: "#000000",
+		session: "#0031A9", model: "#721045", idle: "#006800", active: "#6F5500", warning: "#8A290F",
+		error: "#A60000", change: "#005E8B", code: "#000000", codeBackground: "#F2F2F2", diagnostic: "#595959",
+	},
+	themeIDModusVivendi: {
+		separator: "#646464", composerPrompt: "#989898", muted: "#989898", workspace: "#FFFFFF",
+		session: "#2FAFFF", model: "#FEACD0", idle: "#44BC44", active: "#D0BC00", warning: "#DB7B5F",
+		error: "#FF5F59", change: "#00D3D0", code: "#FFFFFF", codeBackground: "#1E1E1E", diagnostic: "#989898",
+	},
+	themeIDNord: {
+		separator: "#4C566A", composerPrompt: "#81A1C1", muted: "#81A1C1", workspace: "#D8DEE9",
+		session: "#88C0D0", model: "#B48EAD", idle: "#A3BE8C", active: "#EBCB8B", warning: "#D08770",
+		error: "#BF616A", change: "#8FBCBB", code: "#D8DEE9", codeBackground: "#3B4252", diagnostic: "#81A1C1",
+	},
+	themeIDGruvboxLight: {
+		separator: "#D5C4A1", composerPrompt: gruvboxGray, muted: gruvboxGray, workspace: "#282828",
+		session: "#076678", model: "#8F3F71", idle: "#79740E", active: "#B57614", warning: "#AF3A03",
+		error: "#9D0006", change: "#427B58", code: "#282828", codeBackground: "#EBDBB2", diagnostic: "#7C6F64",
+	},
+	themeIDGruvboxDark: {
+		separator: "#504945", composerPrompt: gruvboxGray, muted: gruvboxGray, workspace: "#EBDBB2",
+		session: "#83A598", model: "#D3869B", idle: "#B8BB26", active: "#FABD2F", warning: "#FE8019",
+		error: "#FB4934", change: "#8EC07C", code: "#EBDBB2", codeBackground: "#3C3836", diagnostic: gruvboxGray,
+	},
+	themeIDCatppuccinLatte: {
+		separator: "#BCC0CC", composerPrompt: "#6C6F85", muted: "#6C6F85", workspace: "#4C4F69",
+		session: "#1E66F5", model: "#8839EF", idle: "#40A02B", active: "#DF8E1D", warning: "#FE640B",
+		error: "#D20F39", change: "#179299", code: "#4C4F69", codeBackground: "#CCD0DA", diagnostic: "#7C7F93",
+	},
+	themeIDCatppuccinFrappe: {
+		separator: "#51576D", composerPrompt: "#737994", muted: "#737994", workspace: "#C6D0F5",
+		session: "#8CAAEE", model: "#CA9EE6", idle: "#A6D189", active: "#E5C890", warning: "#EF9F76",
+		error: "#E78284", change: "#81C8BE", code: "#C6D0F5", codeBackground: "#414559", diagnostic: "#949CBB",
+	},
+	themeIDCatppuccinMacchiato: {
+		separator: "#494D64", composerPrompt: "#6E738D", muted: "#6E738D", workspace: "#CAD3F5",
+		session: "#8AADF4", model: "#C6A0F6", idle: "#A6DA95", active: "#EED49F", warning: "#F5A97F",
+		error: "#ED8796", change: "#8BD5CA", code: "#CAD3F5", codeBackground: "#363A4F", diagnostic: "#939AB7",
+	},
+	themeIDCatppuccinMocha: {
+		separator: "#45475A", composerPrompt: "#6C7086", muted: "#6C7086", workspace: "#CDD6F4",
+		session: "#89B4FA", model: "#CBA6F7", idle: "#A6E3A1", active: "#F9E2AF", warning: "#FAB387",
+		error: "#F38BA8", change: "#94E2D5", code: "#CDD6F4", codeBackground: "#313244", diagnostic: "#9399B2",
+	},
+	themeIDOneDark: {
+		separator: "#3E4451", composerPrompt: "#5C6370", muted: "#5C6370", workspace: "#ABB2BF",
+		session: "#61AFEF", model: "#C678DD", idle: "#98C379", active: "#E5C07B", warning: "#D19A66",
+		error: "#E06C75", change: "#56B6C2", code: "#ABB2BF", codeBackground: "#2C313A", diagnostic: "#5C6370",
+	},
+	themeIDTokyoNight: {
+		separator: "#363B54", composerPrompt: tokyoNightComment, muted: tokyoNightComment, workspace: tokyoNightForeground,
+		session: "#7AA2F7", model: "#BB9AF7", idle: "#9ECE6A", active: "#E0AF68", warning: "#FF9E64",
+		error: "#F7768E", change: "#73DACA", code: tokyoNightForeground, codeBackground: "#292E42", diagnostic: "#787C99",
+	},
+	themeIDTokyoNightStorm: {
+		separator: "#3B4261", composerPrompt: tokyoNightComment, muted: tokyoNightComment, workspace: tokyoNightForeground,
+		session: "#7AA2F7", model: "#BB9AF7", idle: "#9ECE6A", active: "#E0AF68", warning: "#FF9E64",
+		error: "#F7768E", change: "#73DACA", code: tokyoNightForeground, codeBackground: "#292E42", diagnostic: "#8089B3",
+	},
+	themeIDTokyoNightLight: {
+		separator: "#C1C2C7", composerPrompt: "#6C6E75", muted: "#6C6E75", workspace: "#343B58",
+		session: "#2959AA", model: "#5A3E8E", idle: "#33635C", active: "#8F5E15", warning: "#965027",
+		error: "#8C4351", change: "#0F4B6E", code: "#343B58", codeBackground: "#DCDEE3", diagnostic: "#707280",
+	},
+	themeIDRosePine: {
+		separator: "#403D52", composerPrompt: rosePineSubtle, muted: "#6E6A86", workspace: rosePineText,
+		session: "#9CCFD8", model: "#C4A7E7", idle: "#31748F", active: "#F6C177", warning: "#EBBCBA",
+		error: "#EB6F92", change: "#31748F", code: rosePineText, codeBackground: "#26233A", diagnostic: rosePineSubtle,
+	},
+	themeIDRosePineMoon: {
+		separator: "#44415A", composerPrompt: rosePineSubtle, muted: "#6E6A86", workspace: rosePineText,
+		session: "#9CCFD8", model: "#C4A7E7", idle: "#3E8FB0", active: "#F6C177", warning: "#EA9A97",
+		error: "#EB6F92", change: "#3E8FB0", code: rosePineText, codeBackground: "#393552", diagnostic: rosePineSubtle,
+	},
+	themeIDRosePineDawn: {
+		separator: "#DFDAD9", composerPrompt: "#797593", muted: "#9893A5", workspace: "#464261",
+		session: "#56949F", model: "#907AA9", idle: "#286983", active: "#EA9D34", warning: "#D7827E",
+		error: "#B4637A", change: "#286983", code: "#464261", codeBackground: "#F2E9E1", diagnostic: "#797593",
+	},
+	themeIDSolarizedDark: {
+		separator: "#586E75", composerPrompt: "#586E75", muted: "#586E75", workspace: solarizedBase0,
+		session: "#268BD2", model: "#D33682", idle: "#859900", active: "#B58900", warning: "#CB4B16",
+		error: "#DC322F", change: "#2AA198", code: solarizedBase0, codeBackground: "#073642", diagnostic: "#657B83",
+	},
+	themeIDSolarizedLight: {
+		separator: "#93A1A1", composerPrompt: solarizedBase0, muted: solarizedBase0, workspace: "#657B83",
+		session: "#268BD2", model: "#D33682", idle: "#859900", active: "#B58900", warning: "#CB4B16",
+		error: "#DC322F", change: "#2AA198", code: "#657B83", codeBackground: "#FDF6E3", diagnostic: solarizedBase0,
+	},
+}
+
+// builtinThemeMetadata is what a built-in declares beside its palette.
+type builtinThemeMetadata struct {
+	name       string
+	background themeBackground
+}
+
+var builtinThemeMetadataByID = map[string]builtinThemeMetadata{
+	themeIDDefaultDark:         {name: "Default Dark", background: themeBackgroundDark},
+	themeIDDefaultLight:        {name: "Default Light", background: themeBackgroundLight},
+	themeIDDracula:             {name: "Dracula", background: themeBackgroundDark},
+	themeIDNord:                {name: "Nord", background: themeBackgroundDark},
+	themeIDGruvboxDark:         {name: "Gruvbox Dark", background: themeBackgroundDark},
+	themeIDGruvboxLight:        {name: "Gruvbox Light", background: themeBackgroundLight},
+	themeIDModusOperandi:       {name: "Modus Operandi", background: themeBackgroundLight},
+	themeIDModusVivendi:        {name: "Modus Vivendi", background: themeBackgroundDark},
+	themeIDSolarizedDark:       {name: "Solarized Dark", background: themeBackgroundDark},
+	themeIDCatppuccinLatte:     {name: "Catppuccin Latte", background: themeBackgroundLight},
+	themeIDCatppuccinFrappe:    {name: "Catppuccin Frappé", background: themeBackgroundDark},
+	themeIDCatppuccinMacchiato: {name: "Catppuccin Macchiato", background: themeBackgroundDark},
+	themeIDCatppuccinMocha:     {name: "Catppuccin Mocha", background: themeBackgroundDark},
+	themeIDOneDark:             {name: "One Dark", background: themeBackgroundDark},
+	themeIDSolarizedLight:      {name: "Solarized Light", background: themeBackgroundLight},
+	themeIDRosePine:            {name: "Rosé Pine", background: themeBackgroundDark},
+	themeIDRosePineMoon:        {name: "Rosé Pine Moon", background: themeBackgroundDark},
+	themeIDRosePineDawn:        {name: "Rosé Pine Dawn", background: themeBackgroundLight},
+	themeIDTokyoNight:          {name: "Tokyo Night", background: themeBackgroundDark},
+	themeIDTokyoNightStorm:     {name: "Tokyo Night Storm", background: themeBackgroundDark},
+	themeIDTokyoNightLight:     {name: "Tokyo Night Light", background: themeBackgroundLight},
+}
+
 func builtinThemeDefinition(id string) (themeDefinition, bool) {
-	palettes := map[string]themePaletteStrings{
-		themeIDDefaultDark: {
-			separator: "#3F4752", composerPrompt: "#6E7681", muted: "#8B949E", workspace: "#E6EDF3",
-			session: "#5FAFFF", model: "#AF87FF", idle: "#5FD7AF", active: "#FFD75F", warning: "#FFAF5F",
-			error: "#FF5F5F", change: "#87D75F", code: "#E6EDF3", codeBackground: "#161B22", diagnostic: "#7D8B99",
-		},
-		themeIDDefaultLight: {
-			separator: "#D0D7DE", composerPrompt: "#57606A", muted: "#57606A", workspace: "#24292F",
-			session: "#0969DA", model: "#8250DF", idle: "#1A7F37", active: "#9A6700", warning: "#BC4C00",
-			error: "#CF222E", change: "#1A7F37", code: "#24292F", codeBackground: "#F6F8FA", diagnostic: "#586069",
-		},
-		themeIDDracula: {
-			separator: "#44475A", composerPrompt: "#6272A4", muted: "#6272A4", workspace: "#F8F8F2",
-			session: "#8BE9FD", model: "#BD93F9", idle: "#50FA7B", active: "#F1FA8C", warning: "#FFB86C",
-			error: "#FF5555", change: "#FF79C6", code: "#F8F8F2", codeBackground: "#282A36", diagnostic: "#6272A4",
-		},
-		themeIDNord: {
-			separator: "#4C566A", composerPrompt: "#81A1C1", muted: "#81A1C1", workspace: "#D8DEE9",
-			session: "#88C0D0", model: "#B48EAD", idle: "#A3BE8C", active: "#EBCB8B", warning: "#D08770",
-			error: "#BF616A", change: "#8FBCBB", code: "#D8DEE9", codeBackground: "#2E3440", diagnostic: "#81A1C1",
-		},
-		themeIDGruvboxDark: {
-			separator: "#504945", composerPrompt: "#928374", muted: "#928374", workspace: "#EBDBB2",
-			session: "#83A598", model: "#D3869B", idle: "#B8BB26", active: "#FABD2F", warning: "#FE8019",
-			error: "#FB4934", change: "#8EC07C", code: "#EBDBB2", codeBackground: "#282828", diagnostic: "#928374",
-		},
-		themeIDCatppuccinMocha: {
-			separator: "#45475A", composerPrompt: "#A6ADC8", muted: "#A6ADC8", workspace: "#CDD6F4",
-			session: "#89DCEB", model: "#CBA6F7", idle: "#A6E3A1", active: "#F9E2AF", warning: "#FAB387",
-			error: "#F38BA8", change: "#94E2D5", code: "#CDD6F4", codeBackground: "#1E1E2E", diagnostic: "#A6ADC8",
-		},
-		themeIDOneDark: {
-			separator: "#3E4451", composerPrompt: "#5C6370", muted: "#5C6370", workspace: "#ABB2BF",
-			session: "#61AFEF", model: "#C678DD", idle: "#98C379", active: "#E5C07B", warning: "#D19A66",
-			error: "#E06C75", change: "#56B6C2", code: "#ABB2BF", codeBackground: "#282C34", diagnostic: "#5C6370",
-		},
-		themeIDSolarizedLight: {
-			separator: "#93A1A1", composerPrompt: "#839496", muted: "#839496", workspace: "#657B83",
-			session: "#268BD2", model: "#6C71C4", idle: "#859900", active: "#B58900", warning: "#CB4B16",
-			error: "#DC322F", change: "#2AA198", code: "#657B83", codeBackground: "#FDF6E3", diagnostic: "#839496",
-		},
+	metadata, ok := builtinThemeMetadataByID[id]
+	if !ok {
+		return themeDefinition{}, false
 	}
-	values, ok := palettes[id]
+	values, ok := builtinThemePalettes[id]
 	if !ok {
 		return themeDefinition{}, false
 	}
@@ -792,16 +935,12 @@ func builtinThemeDefinition(id string) (themeDefinition, bool) {
 	if err != nil {
 		panic(err)
 	}
-	background := themeBackgroundDark
-	if id == themeIDDefaultLight || id == themeIDSolarizedLight {
-		background = themeBackgroundLight
-	}
-	name := map[string]string{
-		themeIDDefaultDark: "Default Dark", themeIDDefaultLight: "Default Light", themeIDDracula: "Dracula",
-		themeIDNord: "Nord", themeIDGruvboxDark: "Gruvbox Dark", themeIDCatppuccinMocha: "Catppuccin Mocha",
-		themeIDOneDark: "One Dark", themeIDSolarizedLight: "Solarized Light",
-	}[id]
-	return themeDefinition{id: id, name: name, background: &background, palette: paletteDefinitionFromStrings(paletteStringsFromPalette(palette))}, true
+	background := metadata.background
+
+	return themeDefinition{
+		id: id, name: metadata.name, background: &background,
+		palette: paletteDefinitionFromStrings(paletteStringsFromPalette(palette)),
+	}, true
 }
 
 func paletteDefinitionFromStrings(values themePaletteStrings) themePaletteDefinition {
@@ -823,7 +962,63 @@ func paletteStringsFromPalette(palette colorPalette) themePaletteStrings {
 	}
 }
 
+// canvasProofBuiltins are the built-ins whose palette is the terminal's own. Such
+// a palette holds colour slots and a default foreground, which a theme file's hex
+// values cannot express, so these snapshots are built from values instead of
+// being parsed from the theme file shape.
+var canvasProofBuiltins = map[string]func() colorTheme{
+	themeIDTerminal: newTerminalTheme,
+}
+
+// newTerminalTheme borrows the terminal's 16-colour palette and its default
+// foreground, so the theme is readable on a light and on a dark profile without
+// detection and paints no surface of its own. Near-gray roles use bright black,
+// the slot a profile tunes as its own dim tone.
+func newTerminalTheme() colorTheme {
+	palette := colorPalette{
+		separator:      lipgloss.BrightBlack,
+		composerPrompt: lipgloss.BrightBlack,
+		muted:          lipgloss.BrightBlack,
+		workspace:      lipgloss.NoColor{},
+		session:        lipgloss.Blue,
+		model:          lipgloss.Magenta,
+		idle:           lipgloss.Green,
+		active:         lipgloss.Cyan,
+		warning:        lipgloss.Yellow,
+		error:          lipgloss.Red,
+		change:         lipgloss.BrightGreen,
+		code:           lipgloss.BrightCyan,
+		codeBackground: lipgloss.NoColor{},
+		diagnostic:     lipgloss.BrightBlack,
+	}
+
+	return newResolvedTheme(themeIDTerminal, "Terminal", themeBackgroundAny, palette)
+}
+
+func builtinCanvasProofTheme(id string) (colorTheme, bool) {
+	build, ok := canvasProofBuiltins[id]
+	if !ok {
+		return colorTheme{}, false
+	}
+
+	return build(), true
+}
+
+// isBuiltinThemeID covers both built-in shapes, so a user file cannot shadow one.
+func isBuiltinThemeID(id string) bool {
+	if _, ok := builtinThemeDefinition(id); ok {
+		return true
+	}
+	_, ok := canvasProofBuiltins[id]
+
+	return ok
+}
+
 func builtinThemeByID(id string) (colorTheme, bool) {
+	if theme, ok := builtinCanvasProofTheme(id); ok {
+		return theme, true
+	}
+
 	definition, ok := builtinThemeDefinition(id)
 	if !ok {
 		return colorTheme{}, false

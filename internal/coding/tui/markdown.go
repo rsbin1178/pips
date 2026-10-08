@@ -327,6 +327,16 @@ func markdownStyle(theme colorTheme, noColor bool) glamouransi.StyleConfig {
 	}
 	if noColor {
 		style = styles.ASCIIStyleConfig
+	} else if theme.borrowsTerminalColors() {
+		// A palette that borrows the terminal's own colours has none of its own to
+		// draw with. The dark config supplies the glyphs and nothing else: every
+		// colour it carries is cleared, and fences are highlighted by a bundled
+		// style without token colours, so the document reaches the terminal with
+		// the profile's foreground and background only.
+		style = styles.DarkStyleConfig
+		style.CodeBlock.Chroma = nil
+		style.CodeBlock.Theme = markdownChromaTheme(theme)
+		clearMarkdownForegrounds(&style)
 	} else {
 		// Fenced code is highlighted with a bundled chroma style named per theme.
 		// A style config that carries its own Chroma entries makes glamour register
@@ -349,11 +359,25 @@ func markdownStyle(theme colorTheme, noColor bool) glamouransi.StyleConfig {
 			style.Link.Color = themeColorPointer(palette.session)
 			style.LinkText.Color = themeColorPointer(palette.session)
 			style.Code.Color = themeColorPointer(palette.code)
-			style.Code.BackgroundColor = themeColorPointer(palette.codeBackground)
+			if theme.codeSurface {
+				style.Code.BackgroundColor = themeColorPointer(palette.codeBackground)
+			}
 			style.CodeBlock.Color = themeColorPointer(palette.code)
-			style.CodeBlock.BackgroundColor = themeColorPointer(palette.codeBackground)
 		}
 	}
+
+	// Absolute fills reach Markdown from glamour's own configs and follow no
+	// palette. H1 carries a fixed indigo band in the dark and light configs alike;
+	// the code block's background is never painted, because chroma writes the fence
+	// body and clears its own background; and the inline-code fill is a surface
+	// claim about the canvas, which the theme may not be allowed to make. Markdown
+	// draws on the terminal's own canvas, so an unmatched code surface also leaves
+	// the cell to the terminal.
+	if !theme.codeSurface {
+		style.Code.BackgroundColor = nil
+	}
+	style.H1.BackgroundColor = nil
+	style.CodeBlock.BackgroundColor = nil
 
 	// A divider between table body rows. The separator characters are already part of
 	// each style (─ for the colour styles, - for ASCII), so this only turns the rule
@@ -374,6 +398,24 @@ func markdownStyle(theme colorTheme, noColor bool) glamouransi.StyleConfig {
 	return style
 }
 
+// clearMarkdownForegrounds removes every foreground glamour's configs carry, so a
+// theme that borrows the terminal's own colours draws its document with the
+// terminal's default foreground. The H1 band, the code fill and the code block's
+// background are absolute surfaces as well and are cleared for every theme below.
+func clearMarkdownForegrounds(style *glamouransi.StyleConfig) {
+	style.Document.Color = nil
+	style.Heading.Color = nil
+	style.H1.Color = nil
+	style.H6.Color = nil
+	style.HorizontalRule.Color = nil
+	style.Link.Color = nil
+	style.LinkText.Color = nil
+	style.Image.Color = nil
+	style.ImageText.Color = nil
+	style.Code.Color = nil
+	style.CodeBlock.Color = nil
+}
+
 func themeColorPointer(value color.Color) *string {
 	canonical := colorString(value)
 
@@ -386,13 +428,26 @@ const (
 	chromaStyleGitHub     = "github"
 	chromaStyleGruvbox    = "gruvbox"
 	chromaStyleOneDark    = "onedark"
+	// Tokyo Night spells its bundled styles without the hyphen its theme ids carry.
+	chromaStyleTokyoNightNight = "tokyonight-night"
+	chromaStyleTokyoNightStorm = "tokyonight-storm"
+	chromaStyleTokyoNightDay   = "tokyonight-day"
+	// chromaStyleBW carries no token colours at all, only bold and italic, which
+	// is what a theme with no polarity of its own can safely highlight with.
+	chromaStyleBW = "bw"
 )
 
-// markdownChromaTheme names the bundled chroma style that highlights fenced code
-// for a theme, so the tokens follow the theme instead of the first render in the
-// process. A theme the switch does not name, such as one loaded from a file,
-// follows the family its background was resolved for.
-func markdownChromaTheme(theme colorTheme) string {
+// bundledChromaStyle names the chroma style a theme's syntax is drawn from, so
+// the tokens follow the theme instead of the first render in the process. A theme
+// the switch does not name, such as one loaded from a file, follows the family its
+// background was resolved for.
+func bundledChromaStyle(theme colorTheme) string {
+	if theme.borrowsTerminalColors() {
+		// A theme with no polarity of its own cannot hand chroma absolute token
+		// colours, so it names the bundled style that carries none.
+		return chromaStyleBW
+	}
+
 	switch theme.id {
 	case themeIDDefaultDark:
 		return chromaStyleGitHubDark
@@ -402,8 +457,17 @@ func markdownChromaTheme(theme colorTheme) string {
 		return chromaStyleGruvbox
 	case themeIDOneDark:
 		return chromaStyleOneDark
+	case themeIDTokyoNight:
+		return chromaStyleTokyoNightNight
+	case themeIDTokyoNightStorm:
+		return chromaStyleTokyoNightStorm
+	case themeIDTokyoNightLight:
+		return chromaStyleTokyoNightDay
 	// These four share their name with the chroma style built for them.
-	case themeIDDracula, themeIDNord, themeIDCatppuccinMocha, themeIDSolarizedLight:
+	case themeIDDracula, themeIDNord, themeIDSolarizedLight,
+		themeIDCatppuccinLatte, themeIDCatppuccinFrappe, themeIDCatppuccinMacchiato, themeIDCatppuccinMocha,
+		themeIDRosePine, themeIDRosePineMoon, themeIDRosePineDawn,
+		themeIDGruvboxLight, themeIDSolarizedDark, themeIDModusOperandi, themeIDModusVivendi:
 		return theme.id
 	}
 

@@ -3,10 +3,14 @@ package tui
 
 import (
 	"fmt"
+	"image/color"
+	"reflect"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/alecthomas/chroma/v2"
 	"github.com/alecthomas/chroma/v2/styles"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
@@ -331,6 +335,273 @@ func markdownTableRules(rendered string) int {
 // highlighted fence, which is how these tests read the syntax palette back.
 var markdownOperatorEscape = regexp.MustCompile(`\x1b\[([0-9;]+)m:=`)
 
+// markdownSGRPattern matches one SGR sequence and captures its parameters.
+var markdownSGRPattern = regexp.MustCompile(`\x1b\[([0-9;]*)m`)
+
+// markdownSurfaces lists the distinct SGR sequences in rendered text that set a
+// background color. Parameters are read one at a time, because a substring
+// search for "48" also matches an RGB channel such as 248.
+func markdownSurfaces(rendered string) []string {
+	var surfaces []string
+
+	for _, match := range markdownSGRPattern.FindAllStringSubmatch(rendered, -1) {
+		for parameter := range strings.SplitSeq(match[1], ";") {
+			if parameter == "48" {
+				surfaces = append(surfaces, match[0])
+
+				break
+			}
+		}
+	}
+	slices.Sort(surfaces)
+
+	return slices.Compact(surfaces)
+}
+
+// TestMarkdownCodeSurfaceFollowsTheCanvas pins the fill to the canvas the theme
+// was built for. A light palette inside a dark terminal used to paint a bright
+// inline-code pill, and an unanswered background probe left nothing to verify, so
+// the surface is painted only on the theme's own canvas.
+func TestMarkdownCodeSurfaceFollowsTheCanvas(t *testing.T) {
+	t.Parallel()
+
+	const source = "text `code` text\n"
+
+	for _, entry := range builtinThemeEntries() {
+		theme := entry.theme
+		t.Run(theme.id, func(t *testing.T) {
+			t.Parallel()
+
+			if theme.borrowsTerminalColors() {
+				// A theme that borrows the terminal's own colours has no canvas of its
+				// own, so it never paints the surface.
+				for _, dark := range []bool{true, false} {
+					rendered, err := newMarkdownRenderer(1).render(source, 60, theme.forCanvas(dark, true), false)
+					require.NoError(t, err)
+					assert.Contains(t, rendered, "code")
+					assert.Empty(t, markdownSurfaces(rendered), "%s: %s", theme.id, rendered)
+				}
+
+				return
+			}
+
+			canvasDark := !theme.isLight()
+			cases := map[string]colorTheme{
+				"own canvas": theme.forCanvas(canvasDark, true),
+				"mismatch":   theme.forCanvas(!canvasDark, true),
+				"unknown":    theme.forCanvas(false, false),
+			}
+
+			for name, stamped := range cases {
+				rendered, err := newMarkdownRenderer(1).render(source, 60, stamped, false)
+				require.NoError(t, err)
+				assert.Contains(t, rendered, "code", "%s: %s", name, rendered)
+
+				if name == "own canvas" {
+					assert.NotEmpty(t, markdownSurfaces(rendered), "%s: %s", name, rendered)
+
+					continue
+				}
+				assert.Empty(t, markdownSurfaces(rendered), "%s: %s", name, rendered)
+			}
+		})
+	}
+}
+
+// TestMarkdownFencesPaintNoBlockSurface pins that a fence body never carries a
+// block fill: chroma clears its own background and glamour only applies the code
+// block's style to a block prefix the code block does not define.
+func TestMarkdownFencesPaintNoBlockSurface(t *testing.T) {
+	t.Parallel()
+
+	const fence = "```go\nx := 1\n```\n"
+
+	for _, entry := range builtinThemeEntries() {
+		theme := entry.theme
+		for _, stamped := range []colorTheme{
+			theme.forCanvas(!theme.isLight(), true),
+			theme.forCanvas(false, false),
+		} {
+			rendered, err := newMarkdownRenderer(1).render(fence, 60, stamped, false)
+			require.NoError(t, err)
+			assert.Empty(t, markdownSurfaces(rendered), "%s: %s", theme.id, rendered)
+		}
+	}
+}
+
+// TestMarkdownHeadingsPaintNoBackground pins that every heading level draws on
+// the terminal's canvas. Glamour's dark and light configs fill H1 with a fixed
+// indigo band, which no palette can follow and which was dark under every light
+// theme.
+func TestMarkdownHeadingsPaintNoBackground(t *testing.T) {
+	t.Parallel()
+
+	for _, entry := range builtinThemeEntries() {
+		theme := entry.theme
+		t.Run(theme.id, func(t *testing.T) {
+			t.Parallel()
+
+			for level := 1; level <= 6; level++ {
+				source := strings.Repeat("#", level) + " 说明\n\n正文"
+				for _, stamped := range []colorTheme{
+					theme.forCanvas(!theme.isLight(), true),
+					theme.forCanvas(false, false),
+				} {
+					rendered, err := newMarkdownRenderer(1).render(source, 60, stamped, false)
+					require.NoError(t, err)
+					assert.Contains(t, rendered, "说明")
+					assert.Empty(t, markdownSurfaces(rendered), "h%d: %s", level, rendered)
+				}
+			}
+		})
+	}
+}
+
+// TestMarkdownStyleKeepsChromaOutOfTheSharedRegistry pins the fix from
+// 10-08-theme-light-syntax. A style config carrying its own Chroma entries makes
+// glamour register them under one fixed name, "charm", and reuse whatever a first
+// render in the process registered, so a light theme inherited a dark theme's
+// token colors. No theme or colour mode may take that path again.
+func TestMarkdownStyleKeepsChromaOutOfTheSharedRegistry(t *testing.T) {
+	t.Parallel()
+
+	for _, entry := range builtinThemeEntries() {
+		theme := entry.theme
+		for _, noColor := range []bool{false, true} {
+			for _, stamped := range []colorTheme{
+				theme,
+				theme.forCanvas(!theme.isLight(), true),
+				theme.forCanvas(false, false),
+			} {
+				style := markdownStyle(stamped, noColor)
+				assert.Nil(t, style.CodeBlock.Chroma, "%s noColor=%v", theme.id, noColor)
+				assert.Nil(t, style.H1.BackgroundColor, "%s noColor=%v", theme.id, noColor)
+				assert.Nil(t, style.CodeBlock.BackgroundColor, "%s noColor=%v", theme.id, noColor)
+				if !stamped.codeSurface {
+					assert.Nil(t, style.Code.BackgroundColor, "%s noColor=%v", theme.id, noColor)
+				}
+			}
+		}
+	}
+}
+
+// TestMarkdownSurfaceStampSeparatesCacheEntries pins the render identity: the
+// canvas stamp decides a visible escape, so two stamps of one theme must not
+// share a cached document.
+func TestMarkdownSurfaceStampSeparatesCacheEntries(t *testing.T) {
+	t.Parallel()
+
+	renderer := newMarkdownRenderer(8)
+	const source = "text `code` text\n"
+
+	onCanvas, err := renderer.render(source, 60, themeLight.forCanvas(false, true), false)
+	require.NoError(t, err)
+	offCanvas, err := renderer.render(source, 60, themeLight.forCanvas(true, true), false)
+	require.NoError(t, err)
+
+	assert.NotEqual(t, onCanvas, offCanvas)
+	assert.NotEmpty(t, markdownSurfaces(onCanvas))
+	assert.Empty(t, markdownSurfaces(offCanvas))
+	require.Len(t, renderer.entries, 2)
+
+	again, err := renderer.render(source, 60, themeLight.forCanvas(false, true), false)
+	require.NoError(t, err)
+	assert.Equal(t, onCanvas, again, "each stamp keeps its own entry")
+	assert.Len(t, renderer.entries, 2)
+}
+
+// markdownFixedColours lists the distinct SGR sequences that name a colour outside
+// the terminal's own palette: an indexed or RGB foreground or background.
+// Parameters are read one at a time, so an RGB channel value is never mistaken for
+// the next parameter.
+func markdownFixedColours(rendered string) []string {
+	var found []string
+
+	for _, match := range markdownSGRPattern.FindAllStringSubmatch(rendered, -1) {
+		parameters := strings.Split(match[1], ";")
+		for index := range parameters {
+			if parameters[index] != "38" && parameters[index] != "48" {
+				continue
+			}
+			if index+1 < len(parameters) && (parameters[index+1] == "5" || parameters[index+1] == "2") {
+				found = append(found, match[0])
+
+				break
+			}
+		}
+	}
+	slices.Sort(found)
+
+	return slices.Compact(found)
+}
+
+// markdownColourFields lists the colour fields a style config still carries, so a
+// theme that must paint no colour of its own is checked for completeness rather
+// than for whichever constructs a test happens to render.
+func markdownColourFields(config any) []string {
+	var fields []string
+
+	var walk func(prefix string, value reflect.Value)
+	walk = func(prefix string, value reflect.Value) {
+		if value.Kind() == reflect.Pointer {
+			if !value.IsNil() {
+				walk(prefix, value.Elem())
+			}
+
+			return
+		}
+		if value.Kind() != reflect.Struct {
+			return
+		}
+
+		for index := range value.NumField() {
+			name := value.Type().Field(index).Name
+			field := value.Field(index)
+			if name != "Color" && name != "BackgroundColor" {
+				walk(prefix+"."+name, field)
+
+				continue
+			}
+			colour, ok := field.Interface().(*string)
+			if ok && colour != nil {
+				fields = append(fields, prefix+"."+name+"="+*colour)
+			}
+		}
+	}
+	walk("", reflect.ValueOf(config))
+	slices.Sort(fields)
+
+	return fields
+}
+
+// TestMarkdownTerminalThemePaintsNoColourOfItsOwn pins the canvas-proof palette:
+// the document reaches the terminal with the profile's own foreground and
+// background, a fence keeps only bold and italic, and the colourless bundled style
+// is the one the renderer asks chroma for.
+func TestMarkdownTerminalThemePaintsNoColourOfItsOwn(t *testing.T) {
+	t.Parallel()
+
+	theme := mustBuiltinTheme(themeIDTerminal)
+	require.True(t, theme.borrowsTerminalColors())
+
+	style := markdownStyle(theme, false)
+	assert.Empty(t, markdownColourFields(style))
+	assert.Equal(t, chromaStyleBW, style.CodeBlock.Theme)
+	assert.Equal(t, chromaStyleBW, markdownChromaTheme(theme))
+	assert.Nil(t, style.CodeBlock.Chroma)
+
+	rendered, err := newMarkdownRenderer(1).render(
+		"# Heading\n\nBody `inline` text.\n\n```go\nx := 1\n```\n",
+		60,
+		theme.forCanvas(false, true),
+		false,
+	)
+	require.NoError(t, err)
+	assert.Contains(t, rendered, "Heading")
+	assert.Empty(t, markdownFixedColours(rendered), "%q", rendered)
+	assert.Empty(t, markdownSurfaces(rendered), "%q", rendered)
+}
+
 // TestMarkdownSyntaxColoursFollowTheTheme pins the fence palette to the theme
 // rather than to whatever rendered first. A style config carrying its own chroma
 // entries makes glamour register them under one fixed name and reuse whichever
@@ -368,19 +639,100 @@ func TestMarkdownSyntaxColoursFollowTheTheme(t *testing.T) {
 // TestMarkdownChromaThemesAreBundledStyles keeps the per-theme syntax styles
 // resolvable. Chroma answers an unknown name with its own default style, so a
 // typo or a rename would silently drop the theme's palette instead of failing.
-func TestMarkdownChromaThemesAreBundledStyles(t *testing.T) {
+func TestMarkdownChromaThemesFollowTheirPalette(t *testing.T) {
 	t.Parallel()
 
 	for _, entry := range builtinThemeEntries() {
 		theme := entry.theme
 		name := markdownChromaTheme(theme)
 
-		assert.Equal(t, name, styles.Get(name).Name, "theme %s names a bundled chroma style", theme.id)
+		assert.Equal(t, name, styles.Get(name).Name, "theme %s names a style that resolves", theme.id)
+		if theme.borrowsTerminalColors() {
+			assert.Equal(t, chromaStyleBW, name, "a borrowed palette keeps the colourless style")
+
+			continue
+		}
+		assert.Equal(t, pipsChromaPrefix+theme.id, name,
+			"a built-in names the style derived from its own palette")
 	}
 
-	// A theme from a file follows the family its background resolves to.
+	// The syntax style behind each built-in is its own family's: the id-sharing
+	// majority, the three spelled-out Tokyo Night ids, and the two default themes.
+	// A silent family fallback would fail here.
+	spelled := map[string]string{
+		themeIDDefaultDark:     chromaStyleGitHubDark,
+		themeIDDefaultLight:    chromaStyleGitHub,
+		themeIDGruvboxDark:     chromaStyleGruvbox,
+		themeIDOneDark:         chromaStyleOneDark,
+		themeIDTokyoNight:      chromaStyleTokyoNightNight,
+		themeIDTokyoNightStorm: chromaStyleTokyoNightStorm,
+		themeIDTokyoNightLight: chromaStyleTokyoNightDay,
+		themeIDTerminal:        chromaStyleBW,
+	}
+	for _, entry := range builtinThemeEntries() {
+		want, ok := spelled[entry.theme.id]
+		if !ok {
+			want = entry.theme.id
+		}
+		assert.Equal(t, want, bundledChromaStyle(entry.theme), entry.theme.id)
+	}
+
+	// A theme from a file follows the family its background resolves to, because
+	// nothing derives a style for a palette that arrives at runtime.
 	light := newResolvedTheme("acme-light", "Acme Light", themeBackgroundLight, themeLight.palette)
 	dark := newResolvedTheme("acme-dark", "Acme Dark", themeBackgroundDark, themeDark.palette)
 	assert.Equal(t, chromaStyleGitHub, markdownChromaTheme(light))
 	assert.Equal(t, chromaStyleGitHubDark, markdownChromaTheme(dark))
+}
+
+// TestMarkdownDiffFencesFollowThePalette pins where a diff fence gets its
+// colours: the added and removed tokens carry the theme's own accents and no fill,
+// whatever the bundled style the syntax comes from used to paint. A light theme
+// used to draw #ddffdd bars, and three families drew no diff distinction at all.
+func TestMarkdownDiffFencesFollowThePalette(t *testing.T) {
+	t.Parallel()
+
+	const fence = "```diff\n+added\n-removed\n```\n"
+
+	for _, entry := range builtinThemeEntries() {
+		theme := entry.theme
+		if theme.borrowsTerminalColors() {
+			continue
+		}
+		palette := paletteFor(theme)
+		style := styles.Get(markdownChromaTheme(theme))
+
+		for token, want := range map[chroma.TokenType]color.Color{
+			chroma.GenericInserted: palette.change,
+			chroma.GenericDeleted:  palette.error,
+		} {
+			resolved := style.Get(token)
+			assert.Equal(t, chroma.MustParseColour(colorString(want)), resolved.Colour, "%s %v", theme.id, token)
+			assert.False(t, resolved.Background.IsSet(), "%s %v carries no fill", theme.id, token)
+		}
+
+		rendered, err := newMarkdownRenderer(1).render(fence, 60, theme, false)
+		require.NoError(t, err)
+		assert.Contains(t, rendered, "added")
+
+		added := markdownLineEscape(rendered, "+added")
+		removed := markdownLineEscape(rendered, "-removed")
+		assert.NotEmpty(t, added, "%s: %s", theme.id, rendered)
+		assert.NotEmpty(t, removed, "%s: %s", theme.id, rendered)
+		assert.NotEqual(t, added, removed, "%s keeps the two sides apart", theme.id)
+		assert.Empty(t, markdownSurfaces(rendered), "%s: %q", theme.id, rendered)
+	}
+}
+
+// markdownLineEscape returns the SGR parameters that colour a line whose content
+// starts with needle, which is how a diff line's colour is read back.
+func markdownLineEscape(rendered, needle string) string {
+	pattern := regexp.MustCompile(`\x1b\[([0-9;]+)m` + regexp.QuoteMeta(needle))
+
+	match := pattern.FindStringSubmatch(rendered)
+	if match == nil {
+		return ""
+	}
+
+	return match[1]
 }

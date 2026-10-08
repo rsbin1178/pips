@@ -20,15 +20,29 @@ const (
 	// cursor covers.
 	cursorShape = tea.CursorBar
 
-	themeIDAuto            = "auto"
-	themeIDDefaultDark     = "default-dark"
-	themeIDDefaultLight    = "default-light"
-	themeIDDracula         = "dracula"
-	themeIDNord            = "nord"
-	themeIDGruvboxDark     = "gruvbox-dark"
-	themeIDCatppuccinMocha = "catppuccin-mocha"
-	themeIDOneDark         = "one-dark"
-	themeIDSolarizedLight  = "solarized-light"
+	themeIDAuto                = "auto"
+	themeIDDefaultDark         = "default-dark"
+	themeIDDefaultLight        = "default-light"
+	themeIDDracula             = "dracula"
+	themeIDNord                = "nord"
+	themeIDGruvboxDark         = "gruvbox-dark"
+	themeIDCatppuccinLatte     = "catppuccin-latte"
+	themeIDCatppuccinFrappe    = "catppuccin-frappe"
+	themeIDCatppuccinMacchiato = "catppuccin-macchiato"
+	themeIDCatppuccinMocha     = "catppuccin-mocha"
+	themeIDOneDark             = "one-dark"
+	themeIDSolarizedLight      = "solarized-light"
+	themeIDRosePine            = "rose-pine"
+	themeIDRosePineMoon        = "rose-pine-moon"
+	themeIDRosePineDawn        = "rose-pine-dawn"
+	themeIDTokyoNight          = "tokyo-night"
+	themeIDTokyoNightStorm     = "tokyo-night-storm"
+	themeIDTokyoNightLight     = "tokyo-night-light"
+	themeIDGruvboxLight        = "gruvbox-light"
+	themeIDModusOperandi       = "modus-operandi"
+	themeIDModusVivendi        = "modus-vivendi"
+	themeIDSolarizedDark       = "solarized-dark"
+	themeIDTerminal            = "terminal"
 )
 
 // themeBackground describes the terminal background a theme is designed for.
@@ -37,6 +51,9 @@ type themeBackground string
 const (
 	themeBackgroundDark  themeBackground = "dark"
 	themeBackgroundLight themeBackground = "light"
+	// themeBackgroundAny marks a palette that borrows the terminal's own colours,
+	// so it is readable on either background and paints no surface of its own.
+	themeBackgroundAny themeBackground = "any"
 )
 
 // colorPalette is the semantic color vocabulary used by TUI renderers. Theme
@@ -67,6 +84,11 @@ type colorTheme struct {
 	background  themeBackground
 	palette     colorPalette
 	fingerprint string
+	// codeSurface reports whether Markdown may paint the inline-code background
+	// on the canvas this snapshot will be drawn on. A surface fill is a claim
+	// about the canvas, so it is stamped from the detected terminal background
+	// rather than read from the palette; the zero value paints nothing.
+	codeSurface bool
 }
 
 // themeDark and themeLight retain the names used by existing renderers and
@@ -78,10 +100,43 @@ var (
 
 func (theme colorTheme) isLight() bool { return theme.background == themeBackgroundLight }
 
+// borrowsTerminalColors reports whether the palette is the terminal's own, which
+// is what makes the snapshot readable on either background.
+func (theme colorTheme) borrowsTerminalColors() bool {
+	return theme.background == themeBackgroundAny
+}
+
+// forCanvas stamps the terminal background this snapshot will be drawn on.
+// Markdown paints a code surface only when the theme's own background family is
+// the one the terminal reported; an unknown terminal matches nothing, so a
+// surface that cannot be verified is a surface that is not painted. A palette
+// that borrows the terminal's colours never paints one at all. The fingerprint
+// changes with the stamp because the Markdown cache keys on it.
+func (theme colorTheme) forCanvas(dark, known bool) colorTheme {
+	codeSurface := known && !theme.borrowsTerminalColors() &&
+		(theme.background == themeBackgroundDark) == dark
+	if codeSurface == theme.codeSurface {
+		return theme
+	}
+
+	theme.codeSurface = codeSurface
+	theme.fingerprint = fingerprintWithCodeSurface(theme.fingerprint, codeSurface)
+
+	return theme
+}
+
 func (theme colorTheme) valid() bool {
-	return theme.id != "" && theme.fingerprint != "" &&
-		(theme.background == themeBackgroundDark || theme.background == themeBackgroundLight) &&
+	return theme.id != "" && theme.fingerprint != "" && theme.knownBackground() &&
 		paletteComplete(theme.palette)
+}
+
+func (theme colorTheme) knownBackground() bool {
+	switch theme.background {
+	case themeBackgroundDark, themeBackgroundLight, themeBackgroundAny:
+		return true
+	default:
+		return false
+	}
 }
 
 func paletteComplete(palette colorPalette) bool {
