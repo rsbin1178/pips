@@ -532,6 +532,31 @@ request.max_output_tokens = 65536
 	assert.Equal(t, 65536, *result.Config.Models[0].Options.MaxOutputTokens)
 }
 
+func TestLoadStreamContinuationPerModel(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, `
+[providers.openai.models."flash"]
+default = true
+stream_continuation = true
+
+[providers.openai.models."pro"]
+`)
+
+	result, err := config.Load(config.LoadOptions{ConfigFile: path})
+	require.NoError(t, err)
+
+	require.Len(t, result.Config.Models, 2)
+	byRef := make(map[string]config.ModelConfig, len(result.Config.Models))
+	for _, model := range result.Config.Models {
+		byRef[model.Ref.String()] = model
+	}
+	assert.True(t, byRef["openai/flash"].StreamContinuation)
+	assert.False(t, byRef["openai/pro"].StreamContinuation,
+		"an absent stream_continuation keeps the regenerate default")
+}
+
 func TestLoadMultipleModelsRequireDefaultOrProcessSelection(t *testing.T) {
 	t.Parallel()
 
@@ -648,6 +673,11 @@ func TestLoadRejectsLegacyAndInvalidConfiguration(t *testing.T) {
 			want:    config.ErrInvalid,
 		},
 		{name: "unknown request", content: "[providers.openai.models.gpt.request]\ntypo = true\n", want: config.ErrDecode},
+		{
+			name:    "unknown model stream continuation key",
+			content: "[providers.openai.models.gpt]\nstream_continuations = true\n",
+			want:    config.ErrDecode,
+		},
 		{name: "duplicate nested model", content: "[providers.openai.models.gpt]\n[providers.openai.models.gpt]\n", want: config.ErrDecode},
 		{name: "multiple defaults", content: "[providers.openai.models.one]\ndefault = true\n[providers.openai.models.two]\ndefault = true\n", want: config.ErrInvalid},
 		{name: "invalid default variant", content: "[providers.openai.models.gpt]\ndefault_variant = \"missing\"\n", want: config.ErrInvalid},

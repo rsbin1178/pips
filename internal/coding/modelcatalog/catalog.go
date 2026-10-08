@@ -49,17 +49,18 @@ type Limits struct {
 
 // ResolvedModel is an immutable-by-convention runtime snapshot.
 type ResolvedModel struct {
-	Ref              config.ModelRef
-	Protocol         config.Protocol
-	Endpoint         Endpoint
-	Limits           Limits
-	Compatibility    openai.Compatibility
-	Capabilities     ai.CapabilityOverride
-	Options          config.ModelOptions
-	Variant          string
-	ReasoningLevels  []config.ReasoningLevel
-	ReasoningLevel   *config.ReasoningLevel
-	ReasoningBudgets map[config.ReasoningLevel]int
+	Ref                config.ModelRef
+	Protocol           config.Protocol
+	Endpoint           Endpoint
+	Limits             Limits
+	StreamContinuation bool
+	Compatibility      openai.Compatibility
+	Capabilities       ai.CapabilityOverride
+	Options            config.ModelOptions
+	Variant            string
+	ReasoningLevels    []config.ReasoningLevel
+	ReasoningLevel     *config.ReasoningLevel
+	ReasoningBudgets   map[config.ReasoningLevel]int
 }
 
 // Clone returns a fully detached runtime snapshot.
@@ -81,12 +82,13 @@ func (m ResolvedModel) Equal(other ResolvedModel) bool {
 
 // Entry is one selectable model and its declared presets.
 type Entry struct {
-	Ref              config.ModelRef
-	ContextWindow    int
-	ReasoningLevels  []config.ReasoningLevel
-	DefaultReasoning *config.ReasoningLevel
-	Variants         []string
-	DefaultVariant   string
+	Ref                config.ModelRef
+	ContextWindow      int
+	StreamContinuation bool
+	ReasoningLevels    []config.ReasoningLevel
+	DefaultReasoning   *config.ReasoningLevel
+	Variants           []string
+	DefaultVariant     string
 }
 
 // Catalog is the read-only model lookup boundary used by CLI/TUI/runtime.
@@ -245,17 +247,18 @@ func (r *registry) resolve(selection Selection) (ResolvedModel, error) {
 	}
 
 	return ResolvedModel{
-		Ref:              ref,
-		Protocol:         protocol,
-		Endpoint:         provider.endpoint,
-		Limits:           Limits{ContextWindow: model.ContextWindow},
-		Compatibility:    compatibility,
-		Capabilities:     capabilities,
-		Options:          options,
-		Variant:          variantName,
-		ReasoningLevels:  slices.Clone(model.ReasoningLevels),
-		ReasoningLevel:   reasoning,
-		ReasoningBudgets: maps.Clone(model.ReasoningBudgets),
+		Ref:                ref,
+		Protocol:           protocol,
+		Endpoint:           provider.endpoint,
+		Limits:             Limits{ContextWindow: model.ContextWindow},
+		StreamContinuation: model.StreamContinuation,
+		Compatibility:      compatibility,
+		Capabilities:       capabilities,
+		Options:            options,
+		Variant:            variantName,
+		ReasoningLevels:    slices.Clone(model.ReasoningLevels),
+		ReasoningLevel:     reasoning,
+		ReasoningBudgets:   maps.Clone(model.ReasoningBudgets),
 	}, nil
 }
 
@@ -395,9 +398,10 @@ func entryFrom(model config.ModelConfig) Entry {
 
 	return Entry{
 		Ref: model.Ref, ContextWindow: model.ContextWindow,
-		ReasoningLevels:  slices.Clone(model.ReasoningLevels),
-		DefaultReasoning: clonePointer(model.DefaultReasoningLevel),
-		Variants:         variants, DefaultVariant: model.DefaultVariant,
+		StreamContinuation: model.StreamContinuation,
+		ReasoningLevels:    slices.Clone(model.ReasoningLevels),
+		DefaultReasoning:   clonePointer(model.DefaultReasoningLevel),
+		Variants:           variants, DefaultVariant: model.DefaultVariant,
 	}
 }
 
