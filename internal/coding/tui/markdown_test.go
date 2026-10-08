@@ -3,9 +3,11 @@ package tui
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 
+	"github.com/alecthomas/chroma/v2/styles"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -323,4 +325,62 @@ func markdownTableRules(rendered string) int {
 	}
 
 	return rules
+}
+
+// markdownOperatorEscape matches the escape that colors a ":=" operator inside a
+// highlighted fence, which is how these tests read the syntax palette back.
+var markdownOperatorEscape = regexp.MustCompile(`\x1b\[([0-9;]+)m:=`)
+
+// TestMarkdownSyntaxColoursFollowTheTheme pins the fence palette to the theme
+// rather than to whatever rendered first. A style config carrying its own chroma
+// entries makes glamour register them under one fixed name and reuse whichever
+// config registered it first in the process, so a light theme used to inherit a
+// dark theme's token colors.
+func TestMarkdownSyntaxColoursFollowTheTheme(t *testing.T) {
+	t.Parallel()
+
+	const fence = "```go\nx := 1\n```\n"
+
+	colours := func(themes ...colorTheme) map[string]string {
+		rendered := make(map[string]string, len(themes))
+
+		for _, theme := range themes {
+			out, err := newMarkdownRenderer(128).render(fence, 40, theme, false)
+			require.NoError(t, err)
+
+			match := markdownOperatorEscape.FindStringSubmatch(out)
+			require.NotNil(t, match, "no colored operator for %s in %q", theme.id, out)
+
+			rendered[theme.id] = match[1]
+		}
+
+		return rendered
+	}
+
+	lightFirst := colours(themeLight, themeDark)
+	darkFirst := colours(themeDark, themeLight)
+
+	assert.Equal(t, lightFirst, darkFirst, "a fence renders the same colours either way")
+	assert.NotEqual(t, lightFirst[themeDark.id], lightFirst[themeLight.id],
+		"the light and dark families highlight a fence differently")
+}
+
+// TestMarkdownChromaThemesAreBundledStyles keeps the per-theme syntax styles
+// resolvable. Chroma answers an unknown name with its own default style, so a
+// typo or a rename would silently drop the theme's palette instead of failing.
+func TestMarkdownChromaThemesAreBundledStyles(t *testing.T) {
+	t.Parallel()
+
+	for _, entry := range builtinThemeEntries() {
+		theme := entry.theme
+		name := markdownChromaTheme(theme)
+
+		assert.Equal(t, name, styles.Get(name).Name, "theme %s names a bundled chroma style", theme.id)
+	}
+
+	// A theme from a file follows the family its background resolves to.
+	light := newResolvedTheme("acme-light", "Acme Light", themeBackgroundLight, themeLight.palette)
+	dark := newResolvedTheme("acme-dark", "Acme Dark", themeBackgroundDark, themeDark.palette)
+	assert.Equal(t, chromaStyleGitHub, markdownChromaTheme(light))
+	assert.Equal(t, chromaStyleGitHubDark, markdownChromaTheme(dark))
 }
