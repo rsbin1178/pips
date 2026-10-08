@@ -509,4 +509,28 @@ func reportRowDivergence(t *testing.T, corpus, content string, width, size int) 
 	t.Logf("fresh renderers agree: %v (replayed with no accumulated state)",
 		reflect.DeepEqual(splitTranscriptRows(freshWant), freshRows.all()))
 	t.Logf("TERM=%q COLORTERM=%q NO_COLOR=%q", os.Getenv("TERM"), os.Getenv("COLORTERM"), os.Getenv("NO_COLOR"))
+
+	// A one-line Go fence isolates the syntax-highlight path. The CI divergence
+	// was a single colour inside a fence, where one path called ":=" an operator
+	// and the other called it punctuation, which no wait length can explain.
+	// Printing both paths for the smallest document that can show it leaves the
+	// next occurrence with a minimal case instead of a whole corpus entry.
+	const probe = "```go\nx := 1\n```\n"
+
+	probeWant, err := newMarkdownRenderer(128).renderLive("draft", probe, width, themeDark, false)
+	if err != nil {
+		t.Logf("minimal fence, string path failed: %v", err)
+
+		return
+	}
+
+	probeRows, err := newMarkdownRenderer(128).renderLiveRows("draft", probe, width, 0, themeDark, false)
+	if err != nil {
+		t.Logf("minimal fence, row path failed: %v", err)
+
+		return
+	}
+
+	t.Logf("minimal fence rows, string path: %q", splitTranscriptRows(probeWant))
+	t.Logf("minimal fence rows, row path:    %q", probeRows.all())
 }

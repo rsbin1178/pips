@@ -442,6 +442,27 @@ func TestClientToolsRejectsInvalidSnapshots(t *testing.T) {
 	}
 }
 
+// listChangeWait bounds the wait for a notification the SDK server raises on
+// its own goroutines. The signal normally arrives about ten milliseconds after
+// the tool list changes, so the budget is only reached when the runner starves
+// the process; it follows the repository's asynchronous-test convention of at
+// least 30s. A bare two-second deadline failed on CI for that reason.
+const listChangeWait = 30 * time.Second
+
+// awaitSignal waits for one signal on a coalescing channel, and reports how
+// long it waited when none arrives.
+func awaitSignal(t *testing.T, signal <-chan struct{}, description string) {
+	t.Helper()
+
+	started := time.Now()
+
+	select {
+	case <-signal:
+	case <-time.After(listChangeWait):
+		t.Fatalf("waited %v for %s", time.Since(started).Round(time.Millisecond), description)
+	}
+}
+
 func TestClientToolListChangedCoalescesAndChainsHandler(t *testing.T) {
 	t.Parallel()
 
@@ -460,17 +481,8 @@ func TestClientToolListChangedCoalescesAndChainsHandler(t *testing.T) {
 
 	server.AddTool(rawTool("added"), nil)
 
-	select {
-	case <-client.ToolListChanged():
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for bridge list-change signal")
-	}
-
-	select {
-	case <-chained:
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for chained SDK handler")
-	}
+	awaitSignal(t, client.ToolListChanged(), "the bridge list-change signal")
+	awaitSignal(t, chained, "the chained SDK handler")
 
 	client.handleToolListChanged()
 	client.handleToolListChanged()
