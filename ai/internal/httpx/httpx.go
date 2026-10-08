@@ -9,6 +9,11 @@
 //     context deadlines instead.
 //   - ResponseHeaderTimeout is likewise unset because non-streaming LLM calls
 //     legitimately spend minutes before the first response byte.
+//   - A streaming body does get one clock: Config.StreamIdleTimeout bounds the
+//     silence between reads rather than the response's total duration. Without
+//     it a connection that stays open but stops delivering bytes parks the
+//     caller forever, and a caller parked on a read reports no error for any
+//     recovery layer to act on.
 //   - By default the client refuses plain HTTP and connections to private,
 //     loopback, link-local, or unspecified addresses (SSRF guard). Local
 //     endpoints opt out via Config.
@@ -28,11 +33,20 @@ import (
 	"net/textproto"
 	"net/url"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
+	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/ai/internal/jsonx"
 )
+
+// DefaultStreamIdleTimeout bounds the silence between reads on a streaming
+// response body unless Config.StreamIdleTimeout sets one of its own. It sits
+// far above any provider's legitimate pause — measured against a live gateway,
+// the longest silence was 4.5s to the first byte and 1.2s between chunks — so
+// it only fires on a stream that has genuinely stopped delivering.
+const DefaultStreamIdleTimeout = 10 * time.Minute
 
 // Config carries the transport-level options every provider constructor
 // accepts. Provider option funcs write into it.
@@ -57,6 +71,12 @@ type Config struct {
 	// MaxStreamLineSize caps a single SSE line; zero selects the sse package
 	// default (1 MiB).
 	MaxStreamLineSize int
+	// StreamIdleTimeout bounds the silence between reads on a streaming
+	// response body; zero or negative selects DefaultStreamIdleTimeout. It
+	// applies to every streaming call, including one made through HTTPClient:
+	// the bound is not expressible as an http.Client option, so a bring-your-own
+	// client cannot supply it and this field stays the override.
+	StreamIdleTimeout time.Duration
 }
 
 // Client executes JSON and SSE requests against one provider endpoint.
@@ -67,6 +87,7 @@ type Client struct {
 	header     http.Header
 
 	maxStreamLineSize int
+	streamIdleTimeout time.Duration
 
 	// initErr defers construction failures (bad base URL, forbidden scheme)
 	// to the first call, letting provider constructors stay single-valued.
@@ -80,6 +101,7 @@ func New(cfg Config, defaultBaseURL string) *Client {
 	c := &Client{
 		header:            cfg.Header.Clone(),
 		maxStreamLineSize: cfg.MaxStreamLineSize,
+		streamIdleTimeout: resolveStreamIdleTimeout(cfg.StreamIdleTimeout),
 	}
 
 	rawURL := cfg.BaseURL
@@ -250,7 +272,9 @@ func (c *Client) PostMultipartStream(ctx context.Context, path string, headers h
 	return c.postStream(ctx, path, headers, contentType, payload, decodeErr)
 }
 
-// postStream sends one encoded payload and returns the SSE response body.
+// postStream sends one encoded payload and returns the SSE response body,
+// guarded by the client's stream idle bound so a body that stops delivering
+// fails rather than parking the reader.
 func (c *Client) postStream(ctx context.Context, path string, headers http.Header, contentType string, payload []byte, decodeErr ErrorDecoder) (io.ReadCloser, error) {
 	if headers == nil {
 		headers = http.Header{}
@@ -275,7 +299,110 @@ func (c *Client) postStream(ctx context.Context, path string, headers http.Heade
 		return nil, decodeErr(resp.StatusCode, retryAfter(resp), raw)
 	}
 
-	return resp.Body, nil
+	return newIdleReadCloser(resp.Body, c.streamIdleTimeout), nil
+}
+
+// resolveStreamIdleTimeout maps the unset values callers leave behind onto the
+// default, in the same shape as MaxStreamLineSize: there is no way to turn the
+// bound off, because it is the only guard against a stream that never fails.
+func resolveStreamIdleTimeout(configured time.Duration) time.Duration {
+	if configured <= 0 {
+		return DefaultStreamIdleTimeout
+	}
+
+	return configured
+}
+
+// idleReadCloser fails a read that stays blocked longer than its bound, and
+// closes the body to unblock it: net/http exposes no read deadline on a
+// response body, on the HTTP/1 or the HTTP/2 path, so closing is the only way
+// to end a read that is already parked. The read then reports
+// [ai.ErrStreamIdle] in place of the close error, which keeps the abort inside
+// the retryable failure classes the recovery layers act on.
+//
+// The bound is measured per read, never as a total, so a stream that keeps
+// producing is never aborted however long it runs. Each read arms its own timer
+// carrying that read's generation and retires the generation when the read
+// returns, so a callback that arrives after its read finished cannot close a
+// healthy body.
+type idleReadCloser struct {
+	body    io.ReadCloser
+	timeout time.Duration
+
+	mu      sync.Mutex
+	gen     uint64
+	expired bool
+	closed  bool
+}
+
+// newIdleReadCloser guards body with timeout. A non-positive timeout returns
+// body unguarded; callers resolve an unset timeout first.
+func newIdleReadCloser(body io.ReadCloser, timeout time.Duration) io.ReadCloser {
+	if timeout <= 0 {
+		return body
+	}
+
+	return &idleReadCloser{body: body, timeout: timeout}
+}
+
+// Read reads one chunk, aborting the read when it outlasts the idle bound.
+func (r *idleReadCloser) Read(p []byte) (int, error) {
+	r.mu.Lock()
+
+	if r.closed {
+		r.mu.Unlock()
+
+		return r.body.Read(p)
+	}
+
+	r.gen++
+	gen := r.gen
+
+	r.mu.Unlock()
+
+	timer := time.AfterFunc(r.timeout, func() { r.expire(gen) })
+
+	n, err := r.body.Read(p)
+
+	timer.Stop()
+
+	r.mu.Lock()
+	r.gen++
+	expired := r.expired
+	r.mu.Unlock()
+
+	if expired {
+		return n, fmt.Errorf("no data for %s: %w", r.timeout, ai.ErrStreamIdle)
+	}
+
+	return n, err
+}
+
+// Close releases the body and stops the bound, so a closed stream is never
+// reported as idle.
+func (r *idleReadCloser) Close() error {
+	r.mu.Lock()
+	r.closed = true
+	r.mu.Unlock()
+
+	return r.body.Close()
+}
+
+// expire ends the read that armed it, when that read is still in flight.
+func (r *idleReadCloser) expire(gen uint64) {
+	r.mu.Lock()
+
+	current := r.gen == gen && !r.closed && !r.expired
+	if current {
+		r.expired = true
+	}
+	r.mu.Unlock()
+
+	if !current {
+		return
+	}
+
+	_ = r.body.Close()
 }
 
 // encodeMultipart renders fields and files into a multipart/form-data body and

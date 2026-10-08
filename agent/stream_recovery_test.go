@@ -3,6 +3,7 @@ package agent_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"sync/atomic"
 	"testing"
@@ -120,6 +121,52 @@ func TestStreamRecoveryReissuesTurnAfterPartialOutput(t *testing.T) {
 	assert.Equal(t, time.Millisecond, notice.Delay)
 	assert.Equal(t, "stream ended early", notice.Reason)
 
+	assert.Equal(t, int32(2), model.calls.Load())
+
+	msgs := sess.Messages()
+	require.Len(t, msgs, 2)
+
+	assistant, ok := msgs[1].(ai.AssistantMessage)
+	require.True(t, ok)
+	text, ok := assistant.Parts[0].(ai.TextPart)
+	require.True(t, ok)
+	assert.Equal(t, "final", text.Text)
+}
+
+// A stream that produced output and then went silent is aborted by the
+// transport as ai.ErrStreamIdle. It has to recover exactly like any other
+// post-output failure: this pins the design claim that the idle bound needs no
+// mechanism of its own.
+func TestStreamRecoveryReissuesAfterAnIdleAbort(t *testing.T) {
+	t.Parallel()
+
+	// Wrapped the way an adapter reports it, so the test covers the
+	// errors.Is traversal the recovery gate actually performs.
+	model := &interruptedStreamModel{
+		failures: 1,
+		err:      fmt.Errorf("openai: responses stream: %w", ai.ErrStreamIdle),
+	}
+
+	a, err := agent.New(model, agent.WithStreamRecovery(1, time.Millisecond, time.Millisecond))
+	require.NoError(t, err)
+
+	sess := agent.NewSession()
+
+	types, notice, err := collectStream(t, a, sess)
+	require.NoError(t, err)
+
+	assert.Equal(t, []agent.EventType{
+		agent.EventRunStarted,
+		agent.EventTurnStarted,
+		agent.EventCandidateDiscarded,
+		agent.EventMessageCommitted,
+		agent.EventTurnCompleted,
+		agent.EventRunCompleted,
+	}, types)
+
+	require.NotNil(t, notice)
+	assert.Equal(t, 1, notice.Attempt)
+	assert.Equal(t, "stream idle", notice.Reason, "the notice names the silence, not a connection error")
 	assert.Equal(t, int32(2), model.calls.Load())
 
 	msgs := sess.Messages()
