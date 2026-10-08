@@ -90,6 +90,15 @@ jobs:
           sh -n install.sh
           shellcheck --version
           shellcheck install.sh
+      - name: Parse the PowerShell installer
+        # PowerShell has no shellcheck; the parser catches the syntax errors that
+        # would break `irm ... | iex` before a release tag does.
+        run: |
+          pwsh -NoProfile -Command '
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile("install.ps1", [ref]$null, [ref]$errors)
+            if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Error $_ }; exit 1 }
+            Write-Host "install.ps1 parses cleanly"'
       - name: Lint
         uses: golangci/golangci-lint-action@v9
         with:

@@ -106,23 +106,34 @@ Pips 采用分层解耦架构，从终端交互、运行时编排、安全边界
 curl -fsSL https://raw.githubusercontent.com/rsbin1178/pips/main/install.sh | sh
 ```
 
-安装脚本会从 [GitHub Releases](https://github.com/rsbin1178/pips/releases) 下载对应平台的归档，用发布出来的
-`SHA256SUMS` 校验 SHA-256，并把 `pips` 装进 `/usr/local/bin`、`/opt/homebrew/bin`、`~/.local/bin`、`~/bin`
-中第一个可写的目录。**校验不通过就什么都不装。** 当该目录不在 `PATH` 上时，它会把 export 行追加到
-`~/.zshrc`、`~/.bashrc` 与 `~/.profile`。
+**Windows（PowerShell 5.1 及以上）**
+
+```powershell
+irm https://raw.githubusercontent.com/rsbin1178/pips/main/install.ps1 | iex
+```
+
+两个安装脚本都会从 [GitHub Releases](https://github.com/rsbin1178/pips/releases) 下载对应平台的归档，并用
+发布出来的 `SHA256SUMS` 校验 SHA-256。**校验不通过就什么都不装。** shell 脚本装进 `/usr/local/bin`、
+`/opt/homebrew/bin`、`~/.local/bin`、`~/bin` 中第一个可写的目录，并在该目录不在 `PATH` 上时把 export 行追加到
+`~/.zshrc`、`~/.bashrc` 与 `~/.profile`；PowerShell 脚本装进 `%LOCALAPPDATA%\Programs\pips` 并加入用户
+`PATH`。
 
 | 环境变量 | 作用 |
 | --- | --- |
 | `PIPS_VERSION` | 安装指定 tag（例如 `PIPS_VERSION=v0.1.7`），而不是最新发布 |
-| `PIPS_BIN_DIR` | 指定安装目录，跳过上面的搜索顺序 |
-| `PIPS_NO_MODIFY_PATH=1` | 不修改任何 shell 配置，只打印那行 `PATH` |
+| `PIPS_BIN_DIR` | 指定安装目录，跳过上面的默认位置 |
+| `PIPS_NO_MODIFY_PATH=1` | 不改动 shell 配置与用户 `PATH`，只打印那行 |
 | `GH_TOKEN` | 用 token 访问 releases API，避开匿名速率限制 |
 
 <details>
-<summary>Windows、手动下载与源码构建</summary>
+<summary>Windows 说明、手动下载与源码构建</summary>
 
-Windows 除 Linux/macOS 的归档外还提供 `pips_<tag>_windows_amd64.zip`：解压后把 `pips.exe` 放进 `PATH`，
-并用 `SHA256SUMS` 校验。建议在 WSL2 中运行，这样默认的 `workspace-write` 沙箱才会生效。
+原生 Windows 没有沙箱后端：默认的 `workspace-write` 与 `read-only` 在此无法执行命令。建议在 WSL2 中运行
+pips，这样默认沙箱才会生效——在 WSL2 里就用上面 macOS/Linux 那行。原生 Windows 下需要加
+`--sandbox full-access`，此时命令不受沙箱约束。`install.ps1` 在 Windows PowerShell 5.1 与 PowerShell 7 上
+都能用。
+
+Windows 除 Linux/macOS 的归档外还提供 `pips_<tag>_windows_amd64.zip`，可自行解压。
 
 归档命名为 `pips_<tag>_<os>_<arch>.tar.gz`，其中 `os` 为 `darwin` 或 `linux`，`arch` 为 `amd64` 或
 `arm64`；解压、赋予可执行权限、放进 `PATH` 即可。

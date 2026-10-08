@@ -106,26 +106,37 @@ Pips enforces strict modular decoupling from interactive terminal frontends down
 curl -fsSL https://raw.githubusercontent.com/rsbin1178/pips/main/install.sh | sh
 ```
 
-The installer downloads this platform's archive from
-[GitHub Releases](https://github.com/rsbin1178/pips/releases), verifies its SHA-256 against the
-published `SHA256SUMS`, and installs `pips` into the first writable directory of `/usr/local/bin`,
-`/opt/homebrew/bin`, `~/.local/bin`, or `~/bin`. **Nothing is installed if the checksum does not
-match.** When that directory is not on your `PATH`, it appends the export line to `~/.zshrc`,
-`~/.bashrc`, and `~/.profile`.
+**Windows (PowerShell 5.1 or newer)**
+
+```powershell
+irm https://raw.githubusercontent.com/rsbin1178/pips/main/install.ps1 | iex
+```
+
+Both installers download this platform's archive from
+[GitHub Releases](https://github.com/rsbin1178/pips/releases) and verify its SHA-256 against the
+published `SHA256SUMS`. **Nothing is installed if the checksum does not match.** The shell installer
+installs into the first writable directory of `/usr/local/bin`, `/opt/homebrew/bin`, `~/.local/bin`, or
+`~/bin` and appends the export line to `~/.zshrc`, `~/.bashrc`, and `~/.profile` when that directory is
+not on your `PATH`; the PowerShell installer installs into `%LOCALAPPDATA%\Programs\pips` and adds it
+to your user `PATH`.
 
 | Variable | Effect |
 | --- | --- |
 | `PIPS_VERSION` | install a specific tag (`PIPS_VERSION=v0.1.7`) instead of the latest release |
-| `PIPS_BIN_DIR` | install into this directory instead of the search above |
-| `PIPS_NO_MODIFY_PATH=1` | never edit shell rc files; print the `PATH` line instead |
+| `PIPS_BIN_DIR` | install into this directory instead of the default above |
+| `PIPS_NO_MODIFY_PATH=1` | never edit shell rc files or the user `PATH`; print the line instead |
 | `GH_TOKEN` | use a token for the releases API, which avoids its anonymous rate limit |
 
 <details>
-<summary>Windows, manual downloads, and building from source</summary>
+<summary>Windows notes, manual downloads, and building from source</summary>
 
-Windows ships `pips_<tag>_windows_amd64.zip` beside the Linux and macOS archives. Extract it, put
-`pips.exe` on your `PATH`, and verify it against `SHA256SUMS`. Running inside WSL2 is recommended so
-the default `workspace-write` sandbox is enforced.
+Native Windows has no sandbox backend: the default `workspace-write` mode and `read-only` cannot run
+commands there. Running pips inside WSL2 is recommended so the default sandbox is enforced — inside
+WSL2, use the macOS/Linux one-liner above. On native Windows, pass `--sandbox full-access`, which runs
+commands unconfined. `install.ps1` works in Windows PowerShell 5.1 and in PowerShell 7.
+
+Windows ships `pips_<tag>_windows_amd64.zip` beside the Linux and macOS archives, for extracting by
+hand.
 
 Archives are named `pips_<tag>_<os>_<arch>.tar.gz`, where `os` is `darwin` or `linux` and `arch` is
 `amd64` or `arm64`. Extract the archive, make `pips` executable, and put it on your `PATH`.
