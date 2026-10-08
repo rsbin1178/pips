@@ -83,6 +83,13 @@ jobs:
         run: make provider-smoke
       - name: Vet
         run: go vet ./...
+      - name: Lint the install script
+        # install.sh is fetched and piped into a shell by users, so it gets the
+        # same treatment as the Go tree: syntax always, shellcheck on the runner.
+        run: |
+          sh -n install.sh
+          shellcheck --version
+          shellcheck install.sh
       - name: Lint
         uses: golangci/golangci-lint-action@v9
         with:
