@@ -13,20 +13,20 @@ import (
 const (
 	maxStartupBannerWidth = 72
 	workspaceLabel        = "workspace"
-	pipsLogoWidth         = 27
+	pipsLogoWidth         = 28
 	// pipsLogoHeight matches the four header lines beside it, so the block
 	// letters and the text end on the same row.
 	pipsLogoHeight         = 4
-	pipsSideBySideMinInner = 58
-	pipsStackedMinInner    = 34
+	pipsSideBySideMinInner = 59
+	pipsStackedMinInner    = 35
 )
 
 //nolint:goconst // Block letters use repeated glyph fragments for ASCII art definition.
 var pipsBlockLetters = [pipsLogoHeight][4]string{
-	{"█████ ", "████", "█████ ", " ████"},
-	{"██  ██", " ██ ", "██  ██", "██   "},
-	{"█████ ", " ██ ", "█████ ", " ███ "},
-	{"██    ", "████", "██    ", "████ "},
+	{"█████ ", "████", "█████ ", " █████"},
+	{"██  ██", " ██ ", "██  ██", "██    "},
+	{"█████ ", " ██ ", "█████ ", "  ████"},
+	{"██    ", "████", "██    ", "█████ "},
 }
 
 type startupBannerContext struct {
