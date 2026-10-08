@@ -61,15 +61,18 @@ type config struct {
 	followUpMode   QueueMode
 	stopWhen       func(RunInfo) bool
 	streamRecovery streamRecovery
-	beforeTool     gate
-	afterTool      func(context.Context, ToolResultInfo) *ToolResultOverride
-	prepareTurn    func(context.Context, RunInfo) TurnUpdate
-	candidate      func(context.Context, CandidateAnswerInfo) CandidateAnswerDecision
-	transform      func(context.Context, []ai.Message) ([]ai.Message, error)
-	onEvent        func(context.Context, Event)
-	requestFn      func(*ai.Request)
-	inputGuards    []inputGuardrail
-	outputGuards   []outputGuardrail
+	// streamRecoveryWindow bounds the wall clock one turn's re-issue episode may
+	// spend, independently of the attempt budget.
+	streamRecoveryWindow time.Duration
+	beforeTool           gate
+	afterTool            func(context.Context, ToolResultInfo) *ToolResultOverride
+	prepareTurn          func(context.Context, RunInfo) TurnUpdate
+	candidate            func(context.Context, CandidateAnswerInfo) CandidateAnswerDecision
+	transform            func(context.Context, []ai.Message) ([]ai.Message, error)
+	onEvent              func(context.Context, Event)
+	requestFn            func(*ai.Request)
+	inputGuards          []inputGuardrail
+	outputGuards         []outputGuardrail
 }
 
 // Stream recovery limits. The backoff doubles per re-issue up to the ceiling,
@@ -198,6 +201,31 @@ func WithStreamRecovery(attempts int, base, maxDelay time.Duration) Option {
 	return func(c *config) {
 		c.streamRecovery = newStreamRecovery(recoveryDiscard, attempts, base, maxDelay)
 	}
+}
+
+// ComposeOptions applies several options as one, so a frontend can hand the loop
+// a single coherent policy value without knowing which options make it up.
+func ComposeOptions(options ...Option) Option {
+	return func(c *config) {
+		for _, option := range options {
+			if option != nil {
+				option(c)
+			}
+		}
+	}
+}
+
+// WithStreamRecoveryWindow bounds the wall clock one turn's re-issue episode may
+// spend. The episode starts when the first re-issue is scheduled, so a slow but
+// successful first attempt never counts against it, and once the window is spent
+// no further re-issue starts: the turn gives up through the same path as an
+// exhausted budget, reporting the retained fragment as incomplete. Zero — the
+// default — leaves the attempt budget as the only bound.
+//
+// It applies whenever recovery is enabled and is independent of the attempt and
+// backoff options, so the two can be set in either order.
+func WithStreamRecoveryWindow(window time.Duration) Option {
+	return func(c *config) { c.streamRecoveryWindow = window }
 }
 
 // WithStreamContinuation is [WithStreamRecovery]'s alternative: a re-issue

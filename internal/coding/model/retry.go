@@ -1,6 +1,8 @@
 package model
 
 import (
+	"time"
+
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/ai/middleware/capability"
 	"github.com/rsbin1178/pips/ai/middleware/retry"
@@ -14,6 +16,16 @@ import (
 // provider Retry-After wins when it is longer.
 const codingModelMaxRetries = 10
 
+// RetryWindow bounds the wall clock one model request may spend replaying, and
+// through the Coding recovery option it bounds one turn's re-issue episode too.
+// It is two of the transport's stream idle windows (ten minutes by default),
+// matching the reference implementation's max(600s, 2×idle): without it a
+// provider that has gone silent can spend a full idle window on every attempt,
+// so the attempt budget alone would let one request hold a turn for nearly two
+// hours before failing. A provider whose idle bound is raised needs this raised
+// with it.
+const RetryWindow = 20 * time.Minute
+
 // withCodingModel wraps an adapter with the coding middleware chain: the
 // resolved capability declaration is applied on top of whatever the adapter
 // reports, then calls are retried.
@@ -22,10 +34,11 @@ func withCodingModel(model ai.LanguageModel, capabilities ai.CapabilityOverride)
 }
 
 func withCodingRetry(model ai.LanguageModel, options ...retry.Option) ai.LanguageModel {
-	retryOptions := make([]retry.Option, 0, len(options)+1)
+	retryOptions := make([]retry.Option, 0, len(options)+2)
 	retryOptions = append(
 		retryOptions,
 		retry.WithMaxAttempts(codingModelMaxRetries+1),
+		retry.WithMaxElapsed(RetryWindow),
 	)
 	retryOptions = append(retryOptions, options...)
 

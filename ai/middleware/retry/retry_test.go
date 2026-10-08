@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -310,4 +311,183 @@ func TestRetryPassesThroughIdentity(t *testing.T) {
 	assert.Equal(t, ai.ProviderOpenAI, model.Provider())
 	assert.Equal(t, "test", model.ModelID())
 	assert.True(t, model.Capabilities().Text)
+}
+
+// steppingClock is a clock the test advances, so a wall-clock ceiling can be
+// asserted exactly instead of timed.
+type steppingClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func newSteppingClock() *steppingClock {
+	return &steppingClock{now: time.Unix(0, 0)}
+}
+
+func (c *steppingClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.now
+}
+
+// total reports how far the clock has moved from its start.
+func (c *steppingClock) total() time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.now.Sub(time.Unix(0, 0))
+}
+
+func (c *steppingClock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.now = c.now.Add(d)
+}
+
+// drainingSleep records each delay and advances the clock, so the waits count
+// against the ceiling the way they do in production.
+func drainingSleep(clock *steppingClock, delays *[]time.Duration) retry.Option {
+	return retry.WithSleep(func(_ context.Context, d time.Duration) error {
+		*delays = append(*delays, d)
+		clock.advance(d)
+
+		return nil
+	})
+}
+
+func TestStreamMaxElapsedStopsReplayingBeforeTheBudget(t *testing.T) {
+	t.Parallel()
+
+	clock := newSteppingClock()
+	base := &scriptedModel{
+		responses: []*ai.Response{nil},
+		errs:      []error{io.ErrUnexpectedEOF},
+	}
+
+	var (
+		notices []ai.RetryNotice
+		delays  []time.Duration
+		lastErr error
+	)
+
+	model := retry.New(
+		retry.WithMaxAttempts(11),
+		retry.WithBaseDelay(500*time.Millisecond),
+		retry.WithMaxElapsed(5*time.Second),
+		retry.WithJitter(func() float64 { return 1 }),
+		retry.WithClock(clock),
+		drainingSleep(clock, &delays),
+	)(base)
+
+	for ev, err := range model.Stream(t.Context(), ai.Request{}) {
+		if err != nil {
+			lastErr = err
+
+			break
+		}
+
+		if ev.Retry != nil {
+			notices = append(notices, *ev.Retry)
+		}
+	}
+
+	// 500ms + 1s + 2s + 4s = 7.5s of waiting, so the ceiling stops the episode
+	// well before the eleven-attempt budget is spent.
+	assert.Equal(t, int32(5), base.calls.Load(), "the ceiling stops the episode early")
+	require.ErrorIs(t, lastErr, io.ErrUnexpectedEOF, "the last failure is surfaced")
+
+	require.Len(t, notices, 4)
+	assert.Equal(t, 4, notices[len(notices)-1].Attempt)
+	assert.Equal(t, 10, notices[len(notices)-1].MaxRetries)
+	assert.Equal(t, 7*time.Second+500*time.Millisecond, clock.total(), "the waits are what consumed the window")
+}
+
+func TestStreamMaxElapsedLeavesARoomyEpisodeAlone(t *testing.T) {
+	t.Parallel()
+
+	clock := newSteppingClock()
+	base := &scriptedModel{
+		responses: []*ai.Response{nil, nil, nil, {Message: ai.AssistantText("ok")}},
+		errs:      []error{io.ErrUnexpectedEOF, io.ErrUnexpectedEOF, io.ErrUnexpectedEOF, nil},
+	}
+
+	var notices []ai.RetryNotice
+
+	model := retry.New(
+		retry.WithMaxAttempts(11),
+		retry.WithMaxElapsed(time.Hour),
+		retry.WithJitter(func() float64 { return 1 }),
+		retry.WithClock(clock),
+		drainingSleep(clock, new([]time.Duration)),
+	)(base)
+
+	for ev, err := range model.Stream(t.Context(), ai.Request{}) {
+		require.NoError(t, err)
+
+		if ev.Retry != nil {
+			notices = append(notices, *ev.Retry)
+		}
+	}
+
+	assert.Len(t, notices, 3)
+	assert.Equal(t, int32(4), base.calls.Load(), "a roomy ceiling does not interfere")
+}
+
+func TestStreamWithoutMaxElapsedKeepsTheWholeBudget(t *testing.T) {
+	t.Parallel()
+
+	clock := newSteppingClock()
+	base := &scriptedModel{
+		responses: []*ai.Response{nil},
+		errs:      []error{io.ErrUnexpectedEOF},
+	}
+
+	model := retry.New(
+		retry.WithMaxAttempts(4),
+		retry.WithJitter(func() float64 { return 1 }),
+		retry.WithClock(clock),
+		drainingSleep(clock, new([]time.Duration)),
+	)(base)
+
+	for _, err := range model.Stream(t.Context(), ai.Request{}) {
+		if err == nil {
+			continue // a re-attempt announcement is progress, not a result
+		}
+
+		require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+	}
+
+	assert.Equal(t, int32(4), base.calls.Load(), "without a ceiling the budget is the only bound")
+	assert.Equal(t, 3500*time.Millisecond, clock.total(),
+		"the waits alone already exceeded a one-minute ceiling the episode did not have")
+}
+
+func TestGenerateMaxElapsedStopsReplaying(t *testing.T) {
+	t.Parallel()
+
+	clock := newSteppingClock()
+	base := &scriptedModel{
+		responses: []*ai.Response{nil},
+		errs:      []error{io.ErrUnexpectedEOF},
+	}
+
+	var delays []time.Duration
+
+	model := retry.New(
+		retry.WithMaxAttempts(5),
+		retry.WithBaseDelay(500*time.Millisecond),
+		retry.WithMaxElapsed(250*time.Millisecond),
+		retry.WithJitter(func() float64 { return 1 }),
+		retry.WithClock(clock),
+		drainingSleep(clock, &delays),
+	)(base)
+
+	_, err := model.Generate(t.Context(), ai.Request{})
+
+	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+	assert.Equal(t, int32(2), base.calls.Load(),
+		"one replay fits before the window is spent, and the next is not started")
+	assert.Len(t, delays, 1)
 }
