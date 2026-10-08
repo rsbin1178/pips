@@ -114,7 +114,7 @@ func TestFullscreenNewSessionReplacesThePreviousBanner(t *testing.T) {
 		driveModelCommands(t, model, command)
 
 		frame := ansi.Strip(model.View().Content)
-		assert.Equal(t, 1, strings.Count(frame, "coding agent"), "one banner per session")
+		assert.Equal(t, 1, strings.Count(frame, "✻ Pips"), "one banner per session")
 		assert.Len(t, model.notices, 1, "the replaced session's notices are dropped")
 	}
 
@@ -122,7 +122,7 @@ func TestFullscreenNewSessionReplacesThePreviousBanner(t *testing.T) {
 	driveModelCommands(t, model, command)
 
 	assert.Empty(t, model.notices, "resume prints no banner and drops the previous session's")
-	assert.NotContains(t, ansi.Strip(model.View().Content), "coding agent")
+	assert.NotContains(t, ansi.Strip(model.View().Content), "✻ Pips")
 }
 
 // TestStartupBannerLogoMatchesTheHeaderLines pins the header's height: the block
@@ -135,13 +135,14 @@ func TestStartupBannerLogoMatchesTheHeaderLines(t *testing.T) {
 		width:     72,
 		workspace: "workspace",
 		model:     "openai/test-model",
+		version:   "v9.9.9",
 		theme:     themeDark,
 		noColor:   true,
 	}))
 	rows := strings.Split(banner, "\n")
 	require.Len(t, rows, 4, "the wordmark is as tall as the header lines")
 
-	for index, want := range []string{"coding agent", "workspace", "model", "Type / for commands"} {
+	for index, want := range []string{"v9.9.9", "workspace", "model", "Type / for commands"} {
 		assert.Contains(t, rows[index], "█", "row %d carries part of the wordmark", index)
 		assert.Contains(t, rows[index], want, "row %d carries its header line", index)
 	}

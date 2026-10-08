@@ -33,8 +33,22 @@ type startupBannerContext struct {
 	width     int
 	workspace string
 	model     string
+	version   string
 	theme     colorTheme
 	noColor   bool
+}
+
+// versionLabel is the header's version text. A build without one reports "dev",
+// which is what an unstamped build reports elsewhere; the fallback lives here
+// rather than where the context is built, so a context assembled anywhere still
+// renders a whole header instead of a dangling separator.
+func (context startupBannerContext) versionLabel() string {
+	version := strings.TrimSpace(context.version)
+	if version == "" {
+		return "dev"
+	}
+
+	return version
 }
 
 // publishStartup rendezvous: neither default geometry nor bootstrap alone may
@@ -113,6 +127,7 @@ func (m *Model) bannerContext(width int) startupBannerContext {
 		width:     max(1, width),
 		workspace: filepath.Base(m.options.Workspace),
 		model:     string(m.state.Provider) + "/" + m.state.ModelID,
+		version:   m.options.Build.Version,
 		theme:     m.theme,
 		noColor:   m.options.NoColor,
 	}
@@ -218,14 +233,14 @@ func renderSideBySideBannerLines(
 	var rightLines [pipsLogoHeight]string
 
 	if context.noColor {
-		rightLines[0] = ansi.Truncate("✻ "+appTitle+" · coding agent", rightWidth, "…")
+		rightLines[0] = ansi.Truncate("✻ "+appTitle+" · "+context.versionLabel(), rightWidth, "…")
 		rightLines[1] = ansi.Truncate("workspace  "+workspace, rightWidth, "…")
 		rightLines[2] = ansi.Truncate("model      "+context.model, rightWidth, "…")
 		rightLines[3] = ansi.Truncate("Type / for commands", rightWidth, "…")
 	} else {
 		titlePrefix := lipgloss.NewStyle().Bold(true).Foreground(palette.session).Render("✻ " + appTitle)
-		agentSuffix := lipgloss.NewStyle().Foreground(palette.muted).Render(" · coding agent")
-		rightLines[0] = ansi.Truncate(titlePrefix+agentSuffix, rightWidth, "…")
+		versionSuffix := lipgloss.NewStyle().Foreground(palette.muted).Render(" · " + context.versionLabel())
+		rightLines[0] = ansi.Truncate(titlePrefix+versionSuffix, rightWidth, "…")
 
 		wsLabel := lipgloss.NewStyle().Foreground(palette.muted).Render("workspace  ")
 		wsVal := lipgloss.NewStyle().Foreground(palette.workspace).Render(workspace)
@@ -265,15 +280,15 @@ func renderStackedBannerLines(
 
 	if context.noColor {
 		lines = append(lines,
-			ansi.Truncate("✻ "+appTitle+" · coding agent", innerWidth, "…"),
+			ansi.Truncate("✻ "+appTitle+" · "+context.versionLabel(), innerWidth, "…"),
 			ansi.Truncate(workspace+"  ·  "+context.model, innerWidth, "…"),
 			ansi.Truncate("Type / for commands", innerWidth, "…"),
 		)
 	} else {
 		titlePart := lipgloss.NewStyle().Bold(true).Foreground(palette.session).Render("✻ " + appTitle)
-		agentPart := lipgloss.NewStyle().Foreground(palette.muted).Render(" · coding agent")
+		versionPart := lipgloss.NewStyle().Foreground(palette.muted).Render(" · " + context.versionLabel())
 		lines = append(lines,
-			ansi.Truncate(titlePart+agentPart, innerWidth, "…"),
+			ansi.Truncate(titlePart+versionPart, innerWidth, "…"),
 			lipgloss.NewStyle().Foreground(palette.muted).Render(ansi.Truncate(workspace+"  ·  "+context.model, innerWidth, "…")),
 			lipgloss.NewStyle().Foreground(palette.muted).Render(ansi.Truncate("Type / for commands", innerWidth, "…")),
 		)
