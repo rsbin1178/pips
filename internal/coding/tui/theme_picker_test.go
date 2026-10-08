@@ -153,6 +153,41 @@ func TestThemePickerPolarityHintReachesTheFrame(t *testing.T) {
 	assert.Contains(t, ansi.Strip(model.View().Content), "solarized-light "+themePolarityMark)
 }
 
+// TestThemePickerAsksForTheCanvasWhenItOpens pins the refresh: the picker is where
+// every row's polarity is on screen, so it re-asks the terminal instead of showing
+// whatever the canvas was at startup.
+func TestThemePickerAsksForTheCanvasWhenItOpens(t *testing.T) {
+	t.Parallel()
+
+	model := readyModel(t, false)
+	model.openCommandPicker()
+	model.picker.query = "theme"
+	_, command := model.executeCommand(commandDescriptor{name: "theme", idleOnly: true})
+	require.Equal(t, pickerTheme, model.picker.kind)
+	require.NotNil(t, command)
+
+	// The request marker itself is what the program turns into the query, so its
+	// presence among the commands is the observable effect.
+	assert.Contains(t, commandMessages(t, command), tea.RequestBackgroundColor())
+
+	// The answer marks the rows from the canvas it reports.
+	for index, option := range model.picker.themes {
+		if option.id == themeIDDefaultDark {
+			model.picker.cursor = index
+
+			break
+		}
+	}
+	model.Update(tea.BackgroundColorMsg{Color: color.White})
+	assert.Equal(t, themeIDDefaultLight, model.theme.id)
+
+	// A run that paints no colour never asks: the answer would only move surfaces
+	// the run does not draw.
+	plain := readyModel(t, true)
+	assert.Nil(t, plain.openThemePicker())
+	assert.False(t, plain.themeBackgroundKnown)
+}
+
 func TestNoColorIgnoresBackgroundMessages(t *testing.T) {
 	t.Parallel()
 
