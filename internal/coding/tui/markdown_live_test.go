@@ -2,6 +2,8 @@ package tui
 
 import (
 	"fmt"
+	"os"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -374,7 +376,10 @@ func TestLiveMarkdownRowsMatchTheStringRender(t *testing.T) {
 					rows, err := rowRenderer.renderLiveRows("draft", content, width, 0, themeDark, false)
 					require.NoError(t, err)
 
-					require.Equal(t, splitTranscriptRows(want), rows.all(), "width %d size %d", width, size)
+					wantRows := splitTranscriptRows(want)
+					if !assert.Equal(t, wantRows, rows.all(), "width %d size %d", width, size) {
+						reportRowDivergence(t, name, content, width, size)
+					}
 				}
 			}
 		})
@@ -474,4 +479,34 @@ func TestLiveThinkingEntryRowsMatchTheWholeRender(t *testing.T) {
 			}
 		}
 	}
+}
+
+// reportRowDivergence runs after the two row paths disagree, and says which kind of
+// disagreement it is. Replaying the same document, at the same width and size,
+// through renderers that have seen nothing else separates a row-path bug — which
+// fresh renderers reproduce — from an effect of the state a renderer accumulates
+// while streaming, which re-running the input will never show. The environment is
+// reported too: a terminal color profile is the one input that can make two renders
+// of the same bytes differ without either path being wrong.
+func reportRowDivergence(t *testing.T, corpus, content string, width, size int) {
+	t.Helper()
+
+	freshWant, err := newMarkdownRenderer(128).renderLive("draft", content, width, themeDark, false)
+	if err != nil {
+		t.Logf("re-render of the string path failed: %v", err)
+
+		return
+	}
+
+	freshRows, err := newMarkdownRenderer(128).renderLiveRows("draft", content, width, 0, themeDark, false)
+	if err != nil {
+		t.Logf("re-render of the row path failed: %v", err)
+
+		return
+	}
+
+	t.Logf("row divergence: corpus=%s width=%d size=%d", corpus, width, size)
+	t.Logf("fresh renderers agree: %v (replayed with no accumulated state)",
+		reflect.DeepEqual(splitTranscriptRows(freshWant), freshRows.all()))
+	t.Logf("TERM=%q COLORTERM=%q NO_COLOR=%q", os.Getenv("TERM"), os.Getenv("COLORTERM"), os.Getenv("NO_COLOR"))
 }
