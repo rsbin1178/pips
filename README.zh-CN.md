@@ -98,15 +98,39 @@ Pips 采用分层解耦架构，从终端交互、运行时编排、安全边界
 
 ## 快速上手
 
-从源码构建要求 Go 1.26.6 或更高版本。
+### 1. 安装
 
-### 1. 使用终端 Coding Agent
-
-从 [GitHub Releases](https://github.com/rsbin1178/pips/releases) 下载对应平台的二进制，
-或检出发布版本后安装：
+**macOS 与 Linux**
 
 ```sh
-git clone --branch v0.1.5 https://github.com/rsbin1178/pips.git
+curl -fsSL https://raw.githubusercontent.com/rsbin1178/pips/main/install.sh | sh
+```
+
+安装脚本会从 [GitHub Releases](https://github.com/rsbin1178/pips/releases) 下载对应平台的归档，用发布出来的
+`SHA256SUMS` 校验 SHA-256，并把 `pips` 装进 `/usr/local/bin`、`/opt/homebrew/bin`、`~/.local/bin`、`~/bin`
+中第一个可写的目录。**校验不通过就什么都不装。** 当该目录不在 `PATH` 上时，它会把 export 行追加到
+`~/.zshrc`、`~/.bashrc` 与 `~/.profile`。
+
+| 环境变量 | 作用 |
+| --- | --- |
+| `PIPS_VERSION` | 安装指定 tag（例如 `PIPS_VERSION=v0.1.7`），而不是最新发布 |
+| `PIPS_BIN_DIR` | 指定安装目录，跳过上面的搜索顺序 |
+| `PIPS_NO_MODIFY_PATH=1` | 不修改任何 shell 配置，只打印那行 `PATH` |
+| `GH_TOKEN` | 用 token 访问 releases API，避开匿名速率限制 |
+
+<details>
+<summary>Windows、手动下载与源码构建</summary>
+
+Windows 除 Linux/macOS 的归档外还提供 `pips_<tag>_windows_amd64.zip`：解压后把 `pips.exe` 放进 `PATH`，
+并用 `SHA256SUMS` 校验。建议在 WSL2 中运行，这样默认的 `workspace-write` 沙箱才会生效。
+
+归档命名为 `pips_<tag>_<os>_<arch>.tar.gz`，其中 `os` 为 `darwin` 或 `linux`，`arch` 为 `amd64` 或
+`arm64`；解压、赋予可执行权限、放进 `PATH` 即可。
+
+从源码构建要求 Go 1.26.6 或更高版本：
+
+```sh
+git clone --branch v0.1.7 https://github.com/rsbin1178/pips.git   # 或你需要的 tag
 cd pips
 go install ./cmd/pips
 ```
@@ -114,6 +138,10 @@ go install ./cmd/pips
 当前版本通过 `go.mod` 固定使用修复后的 Bubble Tea fork。Go 不支持对包含这类
 `replace` 的目标模块执行 `go install ...@version`，请使用发布二进制或源码 checkout
 安装。应用托管 viewport 的 TUI 重构不包含在本次发布中。
+
+</details>
+
+### 2. 使用终端 Coding Agent
 
 创建基础配置文件 `~/.pips/config.toml`：
 
@@ -155,7 +183,7 @@ pips resume <session-id>
 
 ---
 
-### 2. 作为 Go 基础库引入
+### 3. 作为 Go 基础库引入
 
 在现有 Go 项目中引入核心模块：
 
