@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/ai/openai"
@@ -832,4 +834,63 @@ func TestResponsesFailedStatusSurfacesError(t *testing.T) {
 	require.ErrorAs(t, err, &apiErr)
 	assert.Equal(t, "server_error", apiErr.Code)
 	assert.Equal(t, "model overloaded", apiErr.Message)
+}
+
+// The idle bound is installed below the SSE layer, so the abort has to survive
+// that layer and keep the adapter's wrapping: a silent stream must not look
+// like a clean end of stream, and the output delivered before the silence must
+// still reach the caller.
+func TestResponsesStreamIdleAbortSurfacesThroughTheSSELayer(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(
+			"data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\"}}\n\n" +
+				"data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n"))
+
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			panic("httptest writer does not implement http.Flusher")
+		}
+
+		flusher.Flush()
+
+		select {
+		case <-time.After(300 * time.Millisecond):
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	model := openai.New("gpt-5",
+		openai.WithAPIKey("sk-test"),
+		openai.WithBaseURL(server.URL+"/v1"),
+		openai.WithAllowHTTP(),
+		openai.WithAllowPrivateIPs(),
+		openai.WithAPI(openai.APIResponses),
+		openai.WithStreamIdleTimeout(50*time.Millisecond),
+	)
+
+	var (
+		text strings.Builder
+		err  error
+	)
+
+	for ev, streamErr := range model.Stream(t.Context(), ai.Request{Messages: ai.Messages{ai.UserText("hi")}}) {
+		if streamErr != nil {
+			err = streamErr
+
+			break
+		}
+
+		if ev.Type == ai.StreamTextDelta {
+			text.WriteString(ev.Text)
+		}
+	}
+
+	require.Error(t, err, "a silent stream has to fail, not end cleanly")
+	require.ErrorIs(t, err, ai.ErrStreamIdle)
+	assert.Contains(t, err.Error(), "responses stream:", "the adapter's wrapping survives the abort")
+	assert.Equal(t, "partial", text.String(), "output delivered before the silence is not lost")
 }

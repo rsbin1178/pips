@@ -3,6 +3,7 @@ package agent_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"sync/atomic"
 	"testing"
@@ -54,19 +55,21 @@ func (m *interruptedStreamModel) Provider() ai.Provider         { return ai.Prov
 func (m *interruptedStreamModel) ModelID() string               { return "interrupted-1" }
 func (m *interruptedStreamModel) Capabilities() ai.Capabilities { return ai.Capabilities{Text: true} }
 
-// collectStream drains one agent stream, returning the non-delta event types and
-// the last retry notice seen.
-func collectStream(t *testing.T, a *agent.Agent, sess *agent.Session) ([]agent.EventType, *ai.RetryNotice, error) {
+// collectStream drains one agent stream, returning the non-delta event types,
+// the last retry notice seen, and how many notices the stream carried, so a
+// test can pin the count rather than only the last one.
+func collectStream(t *testing.T, a *agent.Agent, sess *agent.Session) ([]agent.EventType, *ai.RetryNotice, int, error) {
 	t.Helper()
 
 	var (
-		types  []agent.EventType
-		notice *ai.RetryNotice
+		types   []agent.EventType
+		notice  *ai.RetryNotice
+		notices int
 	)
 
 	for ev, err := range a.Stream(t.Context(), sess, ai.UserText("hi")) {
 		if err != nil {
-			return types, notice, err
+			return types, notice, notices, err
 		}
 
 		require.NoError(t, ev.Validate())
@@ -75,6 +78,7 @@ func collectStream(t *testing.T, a *agent.Agent, sess *agent.Session) ([]agent.E
 		case agent.ModelStreamEvent:
 			if payload.Event.Type == ai.StreamRetry {
 				notice = payload.Event.Retry
+				notices++
 			}
 
 			continue
@@ -87,7 +91,7 @@ func collectStream(t *testing.T, a *agent.Agent, sess *agent.Session) ([]agent.E
 		types = append(types, ev.Type())
 	}
 
-	return types, notice, nil
+	return types, notice, notices, nil
 }
 
 func TestStreamRecoveryReissuesTurnAfterPartialOutput(t *testing.T) {
@@ -100,7 +104,7 @@ func TestStreamRecoveryReissuesTurnAfterPartialOutput(t *testing.T) {
 
 	sess := agent.NewSession()
 
-	types, notice, err := collectStream(t, a, sess)
+	types, notice, _, err := collectStream(t, a, sess)
 	require.NoError(t, err)
 
 	// The partial candidate is retracted before the re-issue, and only the
@@ -132,6 +136,53 @@ func TestStreamRecoveryReissuesTurnAfterPartialOutput(t *testing.T) {
 	assert.Equal(t, "final", text.Text)
 }
 
+// A stream that produced output and then went silent is aborted by the
+// transport as ai.ErrStreamIdle. It has to recover exactly like any other
+// post-output failure: this pins the design claim that the idle bound needs no
+// mechanism of its own.
+func TestStreamRecoveryReissuesAfterAnIdleAbort(t *testing.T) {
+	t.Parallel()
+
+	// Wrapped the way an adapter reports it, so the test covers the
+	// errors.Is traversal the recovery gate actually performs.
+	model := &interruptedStreamModel{
+		failures: 1,
+		err:      fmt.Errorf("openai: responses stream: %w", ai.ErrStreamIdle),
+	}
+
+	a, err := agent.New(model, agent.WithStreamRecovery(1, time.Millisecond, time.Millisecond))
+	require.NoError(t, err)
+
+	sess := agent.NewSession()
+
+	types, notice, notices, err := collectStream(t, a, sess)
+	require.NoError(t, err)
+
+	assert.Equal(t, []agent.EventType{
+		agent.EventRunStarted,
+		agent.EventTurnStarted,
+		agent.EventCandidateDiscarded,
+		agent.EventMessageCommitted,
+		agent.EventTurnCompleted,
+		agent.EventRunCompleted,
+	}, types)
+
+	require.NotNil(t, notice)
+	assert.Equal(t, 1, notices, "one re-issue means exactly one notice")
+	assert.Equal(t, 1, notice.Attempt)
+	assert.Equal(t, "stream idle", notice.Reason, "the notice names the silence, not a connection error")
+	assert.Equal(t, int32(2), model.calls.Load())
+
+	msgs := sess.Messages()
+	require.Len(t, msgs, 2)
+
+	assistant, ok := msgs[1].(ai.AssistantMessage)
+	require.True(t, ok)
+	text, ok := assistant.Parts[0].(ai.TextPart)
+	require.True(t, ok)
+	assert.Equal(t, "final", text.Text)
+}
+
 func TestStreamRecoveryIsOffByDefault(t *testing.T) {
 	t.Parallel()
 
@@ -140,7 +191,7 @@ func TestStreamRecoveryIsOffByDefault(t *testing.T) {
 	a, err := agent.New(model)
 	require.NoError(t, err)
 
-	_, notice, err := collectStream(t, a, agent.NewSession())
+	_, notice, _, err := collectStream(t, a, agent.NewSession())
 	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
 	assert.Nil(t, notice)
 	assert.Equal(t, int32(1), model.calls.Load())
@@ -154,7 +205,7 @@ func TestStreamRecoveryGivesUpAfterBoundedAttempts(t *testing.T) {
 	a, err := agent.New(model, agent.WithStreamRecovery(2, time.Millisecond, time.Millisecond))
 	require.NoError(t, err)
 
-	_, notice, err := collectStream(t, a, agent.NewSession())
+	_, notice, _, err := collectStream(t, a, agent.NewSession())
 	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
 	require.NotNil(t, notice)
 	assert.Equal(t, 2, notice.Attempt)
@@ -201,7 +252,7 @@ func TestStreamRecoveryRequiresObservedOutput(t *testing.T) {
 
 	// A request that produced nothing belongs to the model middleware, which
 	// has its own budget; the loop must not stack a second budget on top.
-	_, notice, err := collectStream(t, a, agent.NewSession())
+	_, notice, _, err := collectStream(t, a, agent.NewSession())
 	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
 	assert.Nil(t, notice)
 	assert.Equal(t, int32(1), model.calls.Load())
@@ -218,7 +269,7 @@ func TestStreamRecoverySkipsNonRetryableFailure(t *testing.T) {
 	a, err := agent.New(model, agent.WithStreamRecovery(2, time.Millisecond, time.Millisecond))
 	require.NoError(t, err)
 
-	_, notice, err := collectStream(t, a, agent.NewSession())
+	_, notice, _, err := collectStream(t, a, agent.NewSession())
 	require.Error(t, err)
 	assert.Nil(t, notice)
 	assert.Equal(t, int32(1), model.calls.Load())

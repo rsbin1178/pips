@@ -102,6 +102,15 @@ func TestIsRetryable(t *testing.T) {
 		{"context canceled", context.Canceled, false},
 		{"context deadline", context.DeadlineExceeded, false},
 		{"wrapped cancel", fmt.Errorf("do: %w", context.Canceled), false},
+		{"stream idle", ai.ErrStreamIdle, true},
+		{"wrapped stream idle", fmt.Errorf("openai stream: %w", ai.ErrStreamIdle), true},
+		{
+			// A parked stream is retryable, but a cancelled turn is not: the
+			// context arm must win even when the abort carries both.
+			"cancelled stream idle",
+			fmt.Errorf("openai stream: %w", errors.Join(ai.ErrStreamIdle, context.Canceled)),
+			false,
+		},
 		{"net timeout", &net.OpError{Op: "dial", Err: timeoutError{}}, true},
 		{
 			"TLS handshake timeout",

@@ -32,6 +32,12 @@ var (
 	// ErrInvalidMessage means a portable message has an unsupported concrete
 	// form, role-specific content, or sequence position.
 	ErrInvalidMessage = errors.New("ai: invalid message")
+	// ErrStreamIdle means a streaming response delivered bytes and then stayed
+	// silent past the client's idle bound, so the stream was aborted. It is a
+	// failure class of its own rather than a context deadline because both
+	// recovery layers act on retryable errors: a parked stream that never
+	// fails is the one interruption nothing else can reach.
+	ErrStreamIdle = errors.New("ai: stream idle")
 )
 
 // Error is a structured provider error. Adapters return it (wrapped around a
@@ -136,6 +142,11 @@ func IsRetryable(err error) bool {
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		// The caller's context is gone; retrying under it cannot succeed.
 		return false
+	case errors.Is(err, ErrStreamIdle):
+		// A stream that went silent is retryable even though the abort itself
+		// is local: the provider may answer normally on a fresh attempt. The
+		// context arm above stays first so a cancelled turn still loses.
+		return true
 	case isCertificateFailure(err):
 		// A certificate the client cannot verify is not transient: the caller
 		// has to fix it, so report it on the first attempt. Transient TLS
@@ -210,6 +221,8 @@ func retryReason(err error) string {
 		return "provider overloaded"
 	case errors.Is(err, io.ErrUnexpectedEOF), errors.Is(err, io.EOF):
 		return "stream ended early"
+	case errors.Is(err, ErrStreamIdle):
+		return "stream idle"
 	case errors.Is(err, context.DeadlineExceeded):
 		return "request timed out"
 	default:

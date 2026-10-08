@@ -222,6 +222,33 @@ func TestStreamRetryReasonNamesEarlyStreamEnd(t *testing.T) {
 	assert.Equal(t, "stream ended early", notices[0].Reason)
 }
 
+func TestStreamRetryReasonNamesStreamIdle(t *testing.T) {
+	t.Parallel()
+
+	// A stream that produced nothing and then went silent is retryable, so the
+	// middleware replays it and the notice has to name the silence rather than
+	// falling back to the generic connection wording.
+	base := &scriptedModel{
+		responses: []*ai.Response{nil, {Message: ai.AssistantText("hello")}},
+		errs:      []error{ai.ErrStreamIdle, nil},
+	}
+
+	var notices []ai.RetryNotice
+
+	model := retry.New(retry.WithMaxAttempts(2), noSleep(new([]time.Duration)))(base)
+
+	for ev, err := range model.Stream(t.Context(), ai.Request{}) {
+		require.NoError(t, err)
+
+		if ev.Retry != nil {
+			notices = append(notices, *ev.Retry)
+		}
+	}
+
+	require.Len(t, notices, 1)
+	assert.Equal(t, "stream idle", notices[0].Reason)
+}
+
 // midStreamModel yields one event then fails, to prove no replay after output.
 type midStreamModel struct {
 	calls atomic.Int32
