@@ -3,6 +3,7 @@ package coding
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -196,6 +197,15 @@ func TestReplayInteractionJournalRejectsMalformedLifecycle(t *testing.T) {
 			})},
 		},
 		{
+			name: "terminal record with too many distinct reasons",
+			path: []harness.Entry{interactionEntry(t, "entry-1", interactionRecord{
+				Event: interactionTerminalEvent, InteractionID: "interaction-1",
+				Outcome: InteractionFailed, Usage: &TokenUsage{},
+				Retries:      maxRetryReasons + 1,
+				RetryReasons: manyReasons(maxRetryReasons + 1),
+			})},
+		},
+		{
 			name: "terminal record whose breakdown exceeds its count",
 			path: []harness.Entry{interactionEntry(t, "entry-1", interactionRecord{
 				Event: interactionTerminalEvent, InteractionID: "interaction-1",
@@ -345,4 +355,15 @@ func (failingInteractionStore) Path() []harness.Entry { return nil }
 
 func (failingInteractionStore) AppendCustom(string, ai.JSON) (string, error) {
 	return "", errInteractionAppend
+}
+
+// manyReasons builds a breakdown with n distinct reasons, each counted once.
+func manyReasons(n int) map[string]int {
+	reasons := make(map[string]int, n)
+
+	for index := range n {
+		reasons[fmt.Sprintf("reason %d", index)] = 1
+	}
+
+	return reasons
 }

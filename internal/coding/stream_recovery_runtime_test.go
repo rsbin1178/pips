@@ -141,8 +141,9 @@ func TestRuntimePersistsRetryTallyInTheInteractionJournal(t *testing.T) {
 	// durable, not merely in memory.
 	second := openTestRuntimeAt(t, base, SessionTarget{ID: sessionID}, model)
 
-	tally := recordedRetryTally(t, second.journal.store.Path())
+	tally, terminals := recordedRetryTally(t, second.journal.store.Path())
 
+	assert.Equal(t, 1, terminals, "one interaction writes one terminal record")
 	assert.Equal(t, 1, tally.Retries)
 	assert.Equal(t, map[string]int{"stream ended early": 1}, tally.RetryReasons)
 
@@ -150,11 +151,18 @@ func TestRuntimePersistsRetryTallyInTheInteractionJournal(t *testing.T) {
 }
 
 // recordedRetryTally reads the retry accounting off the most recent terminal
-// interaction record in a durable session path.
-func recordedRetryTally(t *testing.T, path []harness.Entry) interactionTally {
+// interaction record in a durable session path, and reports how many terminal
+// records the path holds.
+func recordedRetryTally(t *testing.T, path []harness.Entry) (interactionTally, int) {
 	t.Helper()
 
-	for _, entry := range slices.Backward(path) {
+	var (
+		tally     interactionTally
+		terminals int
+		found     bool
+	)
+
+	for entry := range slices.Values(path) {
 		if entry.Kind != harness.KindCustom || entry.Custom != interactionCustomType {
 			continue
 		}
@@ -162,14 +170,18 @@ func recordedRetryTally(t *testing.T, path []harness.Entry) interactionTally {
 		record, err := decodeInteractionRecord(entry.Data)
 		require.NoError(t, err)
 
-		if record.Event == interactionTerminalEvent {
-			return interactionTally{Retries: record.Retries, RetryReasons: record.RetryReasons}
+		if record.Event != interactionTerminalEvent {
+			continue
 		}
+
+		terminals++
+		tally = interactionTally{Retries: record.Retries, RetryReasons: record.RetryReasons}
+		found = true
 	}
 
-	t.Fatal("no terminal interaction record in the durable path")
+	require.True(t, found, "the durable path holds a terminal interaction record")
 
-	return interactionTally{}
+	return tally, terminals
 }
 
 // abandonedRuntimeModel streams a partial answer and then fails with a
