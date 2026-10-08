@@ -50,8 +50,12 @@ jobs:
         run: make release
       - name: Verify the stamped binary
         run: |
-          tar -xzf dist/pips_*_linux_amd64.tar.gz -C /tmp
-          /tmp/pips_*_linux_amd64/pips version
+          set -euo pipefail
+
+          dir="$(mktemp -d)"
+          tar -xzf dist/pips_*_linux_amd64.tar.gz -C "$dir"
+          binary="$(find "$dir" -name pips -type f | head -1)"
+          "$binary" version
       - name: Prepare release notes
         id: notes
         if: startsWith(github.ref, 'refs/tags/v')
@@ -96,6 +100,12 @@ jobs:
               --generate-notes \
               --verify-tag
           fi
+      - name: Report manual build
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        run: |
+          cat dist/SHA256SUMS
+          echo "::notice::manual build; no release published"
+
   verify-installers:
     name: Verify ${{ matrix.name }}
     needs: publish
@@ -108,7 +118,6 @@ jobs:
         include:
           - name: install.sh on Linux
             os: ubuntu-24.04
-            shell: bash
             script: |
               set -euo pipefail
               dest="$(mktemp -d)/bin"
@@ -128,7 +137,6 @@ jobs:
                 { echo "::error::the installed binary does not report $PIPS_VERSION"; exit 1; }
           - name: install.ps1 on Windows
             os: windows-latest
-            shell: pwsh
             script: |
               $dest = Join-Path $env:RUNNER_TEMP 'pips-bin'
               $env:PIPS_BIN_DIR = $dest
@@ -149,7 +157,6 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Install the release this workflow just published
-        shell: ${{ matrix.shell }}
         env:
           # Both installers prefer a token when they can find one; a runner
           # without gh logged in would otherwise hit the anonymous rate limit.
@@ -158,8 +165,3 @@ jobs:
           PIPS_NO_MODIFY_PATH: "1"
         run: ${{ matrix.script }}
 
-      - name: Report manual build
-        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
-        run: |
-          cat dist/SHA256SUMS
-          echo "::notice::manual build; no release published"
