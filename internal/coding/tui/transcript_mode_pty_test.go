@@ -33,6 +33,9 @@ type ptyHarness struct {
 	before *term.State
 	exited chan struct{}
 	state  *os.ProcessState
+	// readDone closes once the reader goroutine has copied everything the helper
+	// wrote, which is not the same moment as the helper exiting.
+	readDone chan struct{}
 }
 
 func newPTYHarness(t *testing.T, envVar, testName string, rows, cols uint16, extraEnv ...string) *ptyHarness {
@@ -60,21 +63,21 @@ func newPTYHarness(t *testing.T, envVar, testName string, rows, cols uint16, ext
 	require.NoError(t, err)
 
 	harness := &ptyHarness{
-		t:      t,
-		master: master,
-		slave:  slave,
-		output: &synchronizedBuffer{},
-		before: before,
-		exited: make(chan struct{}),
+		t:        t,
+		master:   master,
+		slave:    slave,
+		output:   &synchronizedBuffer{},
+		before:   before,
+		exited:   make(chan struct{}),
+		readDone: make(chan struct{}),
 	}
-	readDone := make(chan struct{})
-	go func() { _, _ = io.Copy(harness.output, master); close(readDone) }()
+	go func() { _, _ = io.Copy(harness.output, master); close(harness.readDone) }()
 	go func() { harness.state, _ = process.Wait(); close(harness.exited) }()
 	t.Cleanup(func() {
 		_ = process.Kill()
 		_ = slave.Close()
 		_ = master.Close()
-		<-readDone
+		<-harness.readDone
 
 		// A failure is only diagnosable with the helper's own output, and the
 		// buffer is complete once the reader has drained.
@@ -145,11 +148,37 @@ func (h *ptyHarness) waitForExit() *os.ProcessState {
 
 	select {
 	case <-h.exited:
-		return h.state
 	case <-time.After(30 * time.Second):
 		h.t.Fatal("the helper did not exit")
 
 		return nil
+	}
+
+	h.drain()
+
+	return h.state
+}
+
+// drain waits until the reader goroutine has copied everything the helper wrote. The
+// reader runs separately from the process, so a test that reads the output the moment
+// the process exits is reading a buffer that may still be growing: the harness itself
+// only treats the buffer as complete once the reader has drained, and assertions
+// deserve the same guarantee.
+//
+// Closing our own copy of the slave is what lets the reader finish. The master only
+// reaches EOF once every slave descriptor is closed, and nothing else uses this one
+// after the helper has started.
+func (h *ptyHarness) drain() {
+	h.t.Helper()
+
+	_ = h.slave.Close()
+
+	select {
+	case <-h.readDone:
+	case <-time.After(10 * time.Second):
+		// Fail here rather than hand the test a truncated stream: a symptom of a
+		// stuck reader would otherwise look like the application misbehaving.
+		h.t.Fatal("the PTY reader did not drain after the helper exited")
 	}
 }
 

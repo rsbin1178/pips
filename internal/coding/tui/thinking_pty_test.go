@@ -79,7 +79,10 @@ func TestPTYThinkingBlocksRenderInTheViewport(t *testing.T) {
 	emulator := newScreenReplay(60, 20)
 	_, err := emulator.Write([]byte(h.output.String()))
 	require.NoError(t, err)
-	assert.False(t, emulator.IsAltScreen(), "the alternate screen is restored")
+
+	if !assert.False(t, emulator.IsAltScreen(), "the alternate screen is restored") {
+		reportStrandedAltScreen(t, h.output.String())
+	}
 
 	history := stableScreenHistory(emulator)
 	assert.NotContains(t, history, "ANSWER-MARKER")

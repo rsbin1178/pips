@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"strings"
 	"sync"
+	"testing"
 
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/vt"
@@ -50,4 +51,24 @@ func newScreenReplay(width, height int) *vt.Emulator {
 	}
 
 	return e
+}
+
+// reportStrandedAltScreen says which of the two failures this is. A stream that
+// never leaves the alternate screen is either truncated before the exit sequences
+// or re-entered after them during teardown, and the two need different fixes: the
+// first is the harness losing bytes, the second is the application painting after
+// it was asked to stop.
+func reportStrandedAltScreen(t *testing.T, stream string) {
+	t.Helper()
+
+	tail := stream
+	if len(tail) > 200 {
+		tail = tail[len(tail)-200:]
+	}
+
+	t.Logf("alternate screen still current: stream %d bytes, enter=%v, leave=%v, tail=%q",
+		len(stream),
+		strings.Contains(stream, "\x1b[?1049h"),
+		strings.Contains(stream, "\x1b[?1049l"),
+		tail)
 }
