@@ -28,10 +28,10 @@ func TestBuildConfigValidatesOptions(t *testing.T) {
 		{
 			name: "conflicting sampling handlers",
 			options: []Option{WithClientOptions(&mcp.ClientOptions{
-				CreateMessageHandler: func(_ context.Context, _ *mcp.CreateMessageRequest) (*mcp.CreateMessageResult, error) {
+				CreateMessageHandler: func(_ context.Context, _ *mcp.CreateMessageRequest) (*mcp.CreateMessageResult, error) { //nolint:staticcheck // Exercises the deprecated sampling handlers on purpose.
 					return nil, nil
 				},
-				CreateMessageWithToolsHandler: func(_ context.Context, _ *mcp.CreateMessageWithToolsRequest) (*mcp.CreateMessageWithToolsResult, error) {
+				CreateMessageWithToolsHandler: func(_ context.Context, _ *mcp.CreateMessageWithToolsRequest) (*mcp.CreateMessageWithToolsResult, error) { //nolint:staticcheck // Exercises the deprecated sampling handlers on purpose.
 					return nil, nil
 				},
 			})},
