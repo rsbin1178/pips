@@ -55,6 +55,101 @@ func TestThemeBackgroundMessageRestampsAnExplicitSelection(t *testing.T) {
 	assert.False(t, model.theme.codeSurface, "a light canvas is not dracula's own")
 }
 
+// TestThemePickerMarksTheOppositePolarity pins the hint that a theme is built for
+// the other terminal background. A light palette inside a dark terminal is
+// unreadable rather than merely ugly, so the picker says which rows do not fit
+// the canvas it detected.
+func TestThemePickerMarksTheOppositePolarity(t *testing.T) {
+	t.Parallel()
+
+	dark := readyModel(t, false)
+	dark.themeBackgroundKnown = true
+	dark.themeIsDark = true
+	dark.openThemePicker()
+
+	content := ansi.Strip(dark.themePickerView(30))
+	assert.Contains(t, content, "default-light "+themePolarityMark)
+	assert.Contains(t, content, "solarized-light "+themePolarityMark)
+	assert.NotContains(t, content, "default-dark "+themePolarityMark)
+	assert.NotContains(t, content, "auto "+themePolarityMark)
+	assert.Contains(t, content, "Notice: "+themePolarityMark+
+		" marks a theme built for the other background; this terminal is dark")
+
+	light := readyModel(t, false)
+	light.themeBackgroundKnown = true
+	light.themeIsDark = false
+	light.openThemePicker()
+
+	content = ansi.Strip(light.themePickerView(30))
+	assert.Contains(t, content, "default-dark "+themePolarityMark)
+	assert.NotContains(t, content, "default-light "+themePolarityMark)
+	assert.Contains(t, content, "this terminal is light")
+
+	// Before the terminal answers there is no canvas to disagree with.
+	unknown := readyModel(t, false)
+	unknown.openThemePicker()
+	content = ansi.Strip(unknown.themePickerView(30))
+	assert.NotContains(t, content, themePolarityMark)
+	assert.NotContains(t, content, "marks a theme built for")
+}
+
+// TestThemePickerShortTerminalKeepsThePolarityNotice pins that the new notice
+// competes for height like every other trailing line and never costs the cursor
+// row or the footer.
+func TestThemePickerShortTerminalKeepsThePolarityNotice(t *testing.T) {
+	t.Parallel()
+
+	model := readyModel(t, false)
+	model.themeBackgroundKnown = true
+	model.themeIsDark = true
+	model.openThemePicker()
+	model.picker.themeDiagnostics = []themeDiagnostic{{category: "file", count: 1}}
+	for index, option := range model.picker.themes {
+		if option.id == "solarized-light" {
+			model.picker.cursor = index
+			break
+		}
+	}
+
+	content := ansi.Strip(model.themePickerView(3))
+	// Three lines keep the cursor row, its mark, and the operating hints; the
+	// notice yields its tail to them.
+	assert.Contains(t, content, "› solarized-light "+themePolarityMark)
+	assert.Contains(t, content, "↑/↓ choose · Enter apply · Esc cancel")
+	assert.Contains(t, content, "Notice: "+themePolarityMark)
+	assert.LessOrEqual(t, len(strings.Split(content, "\n")), 3)
+}
+
+// TestThemePickerPolarityHintReachesTheFrame drives /theme the way an operator
+// does and reads the hint off the composed frame, so the mark survives the
+// picker's layout and height budget rather than only its row builder.
+func TestThemePickerPolarityHintReachesTheFrame(t *testing.T) {
+	t.Parallel()
+
+	model := readyModel(t, false)
+	model.Update(tea.BackgroundColorMsg{Color: color.Black})
+	require.True(t, model.themeBackgroundKnown)
+
+	model.openCommandPicker()
+	model.picker.query = "theme"
+	_, _ = model.executeCommand(commandDescriptor{name: "theme", idleOnly: true})
+	require.Equal(t, pickerTheme, model.picker.kind)
+
+	frame := ansi.Strip(model.View().Content)
+	assert.Contains(t, frame, "default-light "+themePolarityMark)
+	assert.Contains(t, frame, "this terminal is dark")
+
+	// The mark follows the selection window, so the last row shows it too.
+	for range model.picker.themes {
+		if model.picker.themes[model.picker.cursor].id == "solarized-light" {
+			break
+		}
+		model.Update(key(keyDown))
+	}
+	require.Equal(t, "solarized-light", model.picker.themes[model.picker.cursor].id)
+	assert.Contains(t, ansi.Strip(model.View().Content), "solarized-light "+themePolarityMark)
+}
+
 func TestNoColorIgnoresBackgroundMessages(t *testing.T) {
 	t.Parallel()
 

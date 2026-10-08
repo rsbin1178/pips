@@ -24,6 +24,38 @@ var (
 	errThemeSelectionUnavailable = errors.New("theme selection is unavailable")
 )
 
+// themePolarityMark flags a theme whose declared background is the opposite of
+// the terminal's. It is the same attention glyph the prompt bands use.
+const themePolarityMark = "△"
+
+// themePolarityMismatch reports whether a theme is built for the other terminal
+// background. auto adapts to whichever background it finds and a theme that
+// declares no polarity fits either one, so neither is ever marked. An unanswered
+// background probe marks nothing, because there is no answer to compare against.
+func (m *Model) themePolarityMismatch(option themeOption) bool {
+	if !m.themeBackgroundKnown || option.automatic {
+		return false
+	}
+
+	switch option.background {
+	case themeBackgroundDark:
+		return !m.themeIsDark
+	case themeBackgroundLight:
+		return m.themeIsDark
+	default:
+		return false
+	}
+}
+
+// detectedCanvasName names the terminal background the model detected.
+func (m *Model) detectedCanvasName() string {
+	if m.themeIsDark {
+		return "dark"
+	}
+
+	return "light"
+}
+
 func (m *Model) openThemePicker() {
 	registry := loadThemeRegistry(m.options.ThemeDirectory)
 	options := registry.Options()
@@ -131,6 +163,7 @@ func (m *Model) themePickerView(maxHeight int) string {
 	header := "Theme · saved in active config.toml"
 	rows := make([]string, len(m.picker.themes))
 	heights := make([]int, len(rows))
+	marked := false
 	for index, option := range m.picker.themes {
 		marker := "  "
 		if index == m.picker.cursor {
@@ -144,13 +177,25 @@ func (m *Model) themePickerView(maxHeight int) string {
 		if option.automatic {
 			background = "adaptive"
 		}
-		line := marker + option.id + " · " + option.name + " · " + background +
+		id := option.id
+		if m.themePolarityMismatch(option) {
+			id += " " + themePolarityMark
+			marked = true
+		}
+		line := marker + id + " · " + option.name + " · " + background +
 			" · " + string(option.source) + current
 		if !m.options.NoColor && index == m.picker.cursor {
 			line = lipgloss.NewStyle().Foreground(paletteFor(m.theme).session).Render(line)
 		}
 		rows[index] = ansi.Truncate(line, max(1, m.width), "…")
 		heights[index] = max(1, lipgloss.Height(rows[index]))
+	}
+
+	noticeLines := make([]string, 0, 1)
+	if marked {
+		noticeLines = append(noticeLines, "Notice: "+themePolarityMark+
+			" marks a theme built for the other background; this terminal is "+
+			m.detectedCanvasName())
 	}
 
 	diagnosticLines := make([]string, 0, len(m.picker.themeDiagnostics))
@@ -166,22 +211,29 @@ func (m *Model) themePickerView(maxHeight int) string {
 	}
 	footer := "↑/↓ choose · Enter apply · Esc cancel"
 
-	// Keep the selected row, diagnostics, status, and footer as separate
+	// Keep the selected row, notices, status, and footer as separate
 	// height-budgeted regions. Rendering every row and truncating the complete
 	// result can hide both the cursor and the footer on short terminals.
 	if len(diagnosticLines) > 1 {
 		diagnosticLines = []string{"Notice: " + joinThemeDiagnostics(m.picker.themeDiagnostics)}
 	}
-	trailing := append(slices.Clone(diagnosticLines), statusLines...)
+	trailing := append(slices.Clone(noticeLines), diagnosticLines...)
+	trailing = append(trailing, statusLines...)
 	trailing = append(trailing, footer)
 	includeHeader := len(trailing)+2 <= maxHeight
 	if !includeHeader && len(trailing)+1 > maxHeight && len(statusLines) > 0 {
-		compact := append(slices.Clone(diagnosticLines), statusLines...)
+		compact := append(slices.Clone(noticeLines), diagnosticLines...)
+		compact = append(compact, statusLines...)
 		compact = append(compact, footer)
 		trailing = []string{strings.Join(compact[:len(compact)-1], " · "), footer}
 	}
 	if len(trailing)+1 > maxHeight {
-		trailing = []string{strings.Join(trailing, " · ")}
+		// One trailing line has to carry everything. The footer is the only
+		// actionable text, so it leads and the notices fold into what is left.
+		joined := append([]string{footer}, noticeLines...)
+		joined = append(joined, diagnosticLines...)
+		joined = append(joined, statusLines...)
+		trailing = []string{strings.Join(joined, " · ")}
 	}
 
 	rowBudget := maxHeight - len(trailing)
