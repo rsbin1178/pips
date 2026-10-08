@@ -894,3 +894,71 @@ func TestResponsesStreamIdleAbortSurfacesThroughTheSSELayer(t *testing.T) {
 	assert.Contains(t, err.Error(), "responses stream:", "the adapter's wrapping survives the abort")
 	assert.Equal(t, "partial", text.String(), "output delivered before the silence is not lost")
 }
+
+// A mid-stream error event arrives in two shapes: the Responses dialect puts
+// code and message at the event's top level, while a router in front of it nests
+// them under "error" and carries the class in the nested "type". Both have to
+// reach the caller with the provider's text and class intact, because this is
+// the event the interrupted-stream recovery exists to handle.
+func TestResponsesStreamErrorAcceptsBothShapes(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		event    string
+		wantMsg  string
+		wantCode string
+		wantSent error
+	}{
+		{
+			name:     "top level",
+			event:    `{"type":"error","code":"server_error","message":"upstream closed"}`,
+			wantMsg:  "upstream closed",
+			wantCode: "server_error",
+			wantSent: ai.ErrOverloaded,
+		},
+		{
+			name:     "nested code",
+			event:    `{"type":"error","error":{"code":"rate_limit_exceeded","message":"slow down"}}`,
+			wantMsg:  "slow down",
+			wantCode: "rate_limit_exceeded",
+			wantSent: ai.ErrRateLimited,
+		},
+		{
+			name: "nested type carries the class",
+			event: `{"type":"error","error":{"code":"internal_server_error",` +
+				`"message":"upstream stream closed before a terminal event","type":"server_error"}}`,
+			wantMsg:  "upstream stream closed before a terminal event",
+			wantCode: "internal_server_error",
+			wantSent: ai.ErrOverloaded,
+		},
+		{
+			name:     "top level wins over nested",
+			event:    `{"type":"error","code":"server_error","message":"outer","error":{"code":"other","message":"inner"}}`,
+			wantMsg:  "outer",
+			wantCode: "server_error",
+			wantSent: ai.ErrOverloaded,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			model := newResponsesModel(t, serveSSE(t, "data: "+tc.event+"\n\n"))
+
+			_, err := ai.Collect(model.Stream(t.Context(), ai.Request{
+				Messages: []ai.Message{ai.UserText("hi")},
+			}))
+
+			require.Error(t, err)
+			require.ErrorIs(t, err, tc.wantSent)
+
+			var apiErr *ai.Error
+			require.ErrorAs(t, err, &apiErr)
+			assert.Equal(t, tc.wantMsg, apiErr.Message)
+			assert.Equal(t, tc.wantCode, apiErr.Code)
+			assert.Contains(t, err.Error(), tc.wantMsg, "the provider's text reaches the caller")
+		})
+	}
+}
