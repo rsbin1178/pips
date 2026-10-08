@@ -38,6 +38,10 @@ const (
 	themeIDTokyoNight          = "tokyo-night"
 	themeIDTokyoNightStorm     = "tokyo-night-storm"
 	themeIDTokyoNightLight     = "tokyo-night-light"
+	themeIDGruvboxLight        = "gruvbox-light"
+	themeIDModusOperandi       = "modus-operandi"
+	themeIDModusVivendi        = "modus-vivendi"
+	themeIDSolarizedDark       = "solarized-dark"
 	themeIDTerminal            = "terminal"
 )
 

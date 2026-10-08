@@ -749,19 +749,19 @@ func builtinThemeEntries() []themeEntry {
 	// once a family contributes more than one palette.
 	ids := []string{
 		themeIDDefaultDark, themeIDDefaultLight, themeIDTerminal,
-		themeIDCatppuccinLatte, themeIDCatppuccinFrappe, themeIDCatppuccinMacchiato,
-		themeIDCatppuccinMocha, themeIDDracula, themeIDGruvboxDark, themeIDNord,
-		themeIDOneDark,
-		themeIDRosePineDawn, themeIDRosePineMoon, themeIDRosePine, themeIDSolarizedLight,
+		themeIDCatppuccinLatte, themeIDCatppuccinFrappe, themeIDCatppuccinMacchiato, themeIDCatppuccinMocha,
+		themeIDDracula, themeIDGruvboxLight, themeIDGruvboxDark,
+		themeIDModusOperandi, themeIDModusVivendi,
+		themeIDNord, themeIDOneDark,
+		themeIDRosePineDawn, themeIDRosePineMoon, themeIDRosePine,
+		themeIDSolarizedLight, themeIDSolarizedDark,
 		themeIDTokyoNightLight, themeIDTokyoNightStorm, themeIDTokyoNight,
 	}
 	entries := make([]themeEntry, 0, len(ids))
 	for _, id := range ids {
-		theme, ok := builtinThemeByID(id)
-		if !ok {
-			continue
-		}
-		entries = append(entries, themeEntry{theme: theme, source: themeSourceBuiltin})
+		// An id in this list without a palette is a programming error, not a theme
+		// to skip: the registry tests pin the exact set.
+		entries = append(entries, themeEntry{theme: mustBuiltinTheme(id), source: themeSourceBuiltin})
 	}
 
 	return entries
@@ -797,10 +797,25 @@ var builtinThemePalettes = map[string]themePaletteStrings{
 		session: "#8BE9FD", model: "#BD93F9", idle: "#50FA7B", active: "#F1FA8C", warning: "#FFB86C",
 		error: "#FF5555", change: "#FF79C6", code: "#F8F8F2", codeBackground: "#282A36", diagnostic: "#6272A4",
 	},
+	themeIDModusOperandi: {
+		separator: "#9F9F9F", composerPrompt: "#595959", muted: "#595959", workspace: "#000000",
+		session: "#0031A9", model: "#721045", idle: "#006800", active: "#6F5500", warning: "#8A290F",
+		error: "#A60000", change: "#005E8B", code: "#000000", codeBackground: "#F2F2F2", diagnostic: "#595959",
+	},
+	themeIDModusVivendi: {
+		separator: "#646464", composerPrompt: "#989898", muted: "#989898", workspace: "#FFFFFF",
+		session: "#2FAFFF", model: "#FEACD0", idle: "#44BC44", active: "#D0BC00", warning: "#DB7B5F",
+		error: "#FF5F59", change: "#00D3D0", code: "#FFFFFF", codeBackground: "#1E1E1E", diagnostic: "#989898",
+	},
 	themeIDNord: {
 		separator: "#4C566A", composerPrompt: "#81A1C1", muted: "#81A1C1", workspace: "#D8DEE9",
 		session: "#88C0D0", model: "#B48EAD", idle: "#A3BE8C", active: "#EBCB8B", warning: "#D08770",
 		error: "#BF616A", change: "#8FBCBB", code: "#D8DEE9", codeBackground: "#2E3440", diagnostic: "#81A1C1",
+	},
+	themeIDGruvboxLight: {
+		separator: "#D5C4A1", composerPrompt: "#928374", muted: "#928374", workspace: "#282828",
+		session: "#076678", model: "#8F3F71", idle: "#79740E", active: "#B57614", warning: "#AF3A03",
+		error: "#9D0006", change: "#427B58", code: "#282828", codeBackground: "#EBDBB2", diagnostic: "#7C6F64",
 	},
 	themeIDGruvboxDark: {
 		separator: "#504945", composerPrompt: "#928374", muted: "#928374", workspace: "#EBDBB2",
@@ -862,6 +877,11 @@ var builtinThemePalettes = map[string]themePaletteStrings{
 		session: "#56949F", model: "#907AA9", idle: "#286983", active: "#EA9D34", warning: "#D7827E",
 		error: "#B4637A", change: "#286983", code: "#464261", codeBackground: "#F2E9E1", diagnostic: "#797593",
 	},
+	themeIDSolarizedDark: {
+		separator: "#586E75", composerPrompt: "#586E75", muted: "#586E75", workspace: "#839496",
+		session: "#268BD2", model: "#D33682", idle: "#859900", active: "#B58900", warning: "#CB4B16",
+		error: "#DC322F", change: "#2AA198", code: "#839496", codeBackground: "#073642", diagnostic: "#657B83",
+	},
 	themeIDSolarizedLight: {
 		separator: "#93A1A1", composerPrompt: "#839496", muted: "#839496", workspace: "#657B83",
 		session: "#268BD2", model: "#6C71C4", idle: "#859900", active: "#B58900", warning: "#CB4B16",
@@ -881,6 +901,10 @@ var builtinThemeMetadataByID = map[string]builtinThemeMetadata{
 	themeIDDracula:             {name: "Dracula", background: themeBackgroundDark},
 	themeIDNord:                {name: "Nord", background: themeBackgroundDark},
 	themeIDGruvboxDark:         {name: "Gruvbox Dark", background: themeBackgroundDark},
+	themeIDGruvboxLight:        {name: "Gruvbox Light", background: themeBackgroundLight},
+	themeIDModusOperandi:       {name: "Modus Operandi", background: themeBackgroundLight},
+	themeIDModusVivendi:        {name: "Modus Vivendi", background: themeBackgroundDark},
+	themeIDSolarizedDark:       {name: "Solarized Dark", background: themeBackgroundDark},
 	themeIDCatppuccinLatte:     {name: "Catppuccin Latte", background: themeBackgroundLight},
 	themeIDCatppuccinFrappe:    {name: "Catppuccin Frappé", background: themeBackgroundDark},
 	themeIDCatppuccinMacchiato: {name: "Catppuccin Macchiato", background: themeBackgroundDark},
