@@ -747,19 +747,29 @@ or answer anything for the parent interaction.
 ### Interactive TUI themes and status line
 
 The interactive TUI supports the automatic selection `auto` and these built-in
-IDs:
+IDs, grouped by family with the light variant first:
 
 - `default-dark` — the Pips default dark palette;
 - `default-light` — the Pips default light palette;
-- `dracula`;
-- `nord`;
-- `gruvbox-dark`;
-- `catppuccin-mocha`;
-- `one-dark`;
-- `solarized-light`;
 - `terminal` — the terminal-native palette: it borrows your profile's own
   16-color slots and default foreground, so it stays readable on a light and a
-  dark background and paints no surface of its own.
+  dark background and paints no surface of its own;
+- `catppuccin-latte`, `catppuccin-frappe`, `catppuccin-macchiato`,
+  `catppuccin-mocha` — the Catppuccin flavours, light to darkest;
+- `dracula`;
+- `gruvbox-light`, `gruvbox-dark`;
+- `modus-operandi`, `modus-vivendi` — the Modus pair, built for WCAG AAA
+  contrast;
+- `nord`;
+- `one-dark`;
+- `rose-pine-dawn`, `rose-pine-moon`, `rose-pine`;
+- `solarized-light`, `solarized-dark`;
+- `tokyo-night-light`, `tokyo-night-storm`, `tokyo-night`.
+
+Every built-in highlights its fenced code with the syntax style that belongs to
+the same family, so the UI accents and the code block agree: `tokyo-night`
+borrows Tokyo Night's `tokyonight-night` style, `gruvbox-dark` borrows Gruvbox's,
+and a palette from a file follows the family its background resolves to.
 
 Open the command picker with `/` and choose `/theme`. The picker lists `auto`,
 built-ins, and discovered user themes in stable order. Press Enter to apply a
