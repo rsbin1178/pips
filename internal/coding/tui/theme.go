@@ -119,10 +119,13 @@ func composerStyles(theme colorTheme, noColor bool) textarea.Styles {
 		return styles
 	}
 
-	styles := textarea.DefaultDarkStyles()
-	if theme.isLight() {
-		styles = textarea.DefaultLightStyles()
-	}
+	// The composer draws on the terminal's own canvas, so no style here carries a
+	// background. The component defaults do: their cursor line is filled with the
+	// palette's bright white for a light background and black for a dark one,
+	// which paints a white band across the input inside a dark terminal and a
+	// black one inside a light terminal. Every other color comes from the theme,
+	// so a light theme changes the text, not the surface it sits on.
+	styles := textarea.Styles{}
 
 	palette := paletteFor(theme)
 	// The cursor is part of the theme. A bar that changes color with the palette
@@ -134,14 +137,12 @@ func composerStyles(theme colorTheme, noColor bool) textarea.Styles {
 	styles.Focused.Prompt = prompt
 	styles.Blurred.Prompt = prompt
 
-	if theme.id != themeDark.id && theme.id != themeLight.id {
-		text := lipgloss.NewStyle().Foreground(palette.workspace)
-		muted := lipgloss.NewStyle().Foreground(palette.muted)
-		styles.Focused.Text = text
-		styles.Blurred.Text = text
-		styles.Focused.Placeholder = muted
-		styles.Blurred.Placeholder = muted
-	}
+	text := lipgloss.NewStyle().Foreground(palette.workspace)
+	muted := lipgloss.NewStyle().Foreground(palette.muted)
+	styles.Focused.Text = text
+	styles.Blurred.Text = text
+	styles.Focused.Placeholder = muted
+	styles.Blurred.Placeholder = muted
 
 	return styles
 }
@@ -159,13 +160,17 @@ func sessionSearchStyles(theme colorTheme, noColor bool) textinput.Styles {
 		styles = textinput.DefaultLightStyles()
 	}
 
+	// As in the composer, every color comes from the theme and no style carries a
+	// background: the search field draws on the terminal's own canvas too.
 	palette := paletteFor(theme)
 	styles.Cursor.Shape = cursorShape
 	styles.Cursor.Color = palette.session
 
+	muted := lipgloss.NewStyle().Foreground(palette.muted)
 	styles.Focused.Prompt = lipgloss.NewStyle().Foreground(palette.session)
 	styles.Focused.Text = lipgloss.NewStyle().Foreground(palette.workspace)
-	styles.Focused.Placeholder = lipgloss.NewStyle().Foreground(palette.muted)
+	styles.Focused.Placeholder = muted
+	styles.Focused.Suggestion = muted
 	styles.Blurred = styles.Focused
 
 	return styles

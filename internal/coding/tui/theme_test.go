@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -65,6 +66,50 @@ func TestInputSurfacesAskForTheBarCursor(t *testing.T) {
 	dracula := mustBuiltinTheme(themeIDDracula)
 	colored.applyTheme(dracula)
 	assert.Equal(t, dracula.palette.session, colored.composer.Cursor().Color, "the Composer follows a theme switch")
+}
+
+// TestInputSurfacesPaintNoBackground pins every input surface to the terminal's
+// own canvas. The widget defaults fill the cursor line with the palette's bright
+// white for a light background and black for a dark one, which painted a white
+// band across the composer inside a dark terminal and a black one inside a light
+// terminal: switching theme changed the surface the input sits on.
+func TestInputSurfacesPaintNoBackground(t *testing.T) {
+	t.Parallel()
+
+	unset := lipgloss.NewStyle().GetBackground()
+
+	for _, entry := range builtinThemeEntries() {
+		theme := entry.theme
+		composer := composerStyles(theme, false)
+		search := sessionSearchStyles(theme, false)
+
+		surfaces := []struct {
+			name  string
+			style lipgloss.Style
+		}{
+			{"composer base", composer.Focused.Base},
+			{"composer cursor line", composer.Focused.CursorLine},
+			{"composer cursor line number", composer.Focused.CursorLineNumber},
+			{"composer end of buffer", composer.Focused.EndOfBuffer},
+			{"composer line number", composer.Focused.LineNumber},
+			{"composer placeholder", composer.Focused.Placeholder},
+			{"composer prompt", composer.Focused.Prompt},
+			{"composer text", composer.Focused.Text},
+			{"blurred composer cursor line", composer.Blurred.CursorLine},
+			{"blurred composer text", composer.Blurred.Text},
+			{"blurred composer placeholder", composer.Blurred.Placeholder},
+			{"blurred composer prompt", composer.Blurred.Prompt},
+			{"search placeholder", search.Focused.Placeholder},
+			{"search prompt", search.Focused.Prompt},
+			{"search suggestion", search.Focused.Suggestion},
+			{"search text", search.Focused.Text},
+			{"blurred search text", search.Blurred.Text},
+		}
+
+		for _, surface := range surfaces {
+			assert.Equal(t, unset, surface.style.GetBackground(), "%s %s", theme.id, surface.name)
+		}
+	}
 }
 
 func TestBuiltinThemeRegistryIsStableAndComplete(t *testing.T) {
