@@ -13,28 +13,76 @@ import (
 const (
 	maxStartupBannerWidth = 72
 	workspaceLabel        = "workspace"
-	pipsLogoWidth         = 27
+	pipsLogoWidth         = 28
 	// pipsLogoHeight matches the four header lines beside it, so the block
 	// letters and the text end on the same row.
 	pipsLogoHeight         = 4
-	pipsSideBySideMinInner = 58
-	pipsStackedMinInner    = 34
+	pipsSideBySideMinInner = 59
+	pipsStackedMinInner    = 35
 )
 
 //nolint:goconst // Block letters use repeated glyph fragments for ASCII art definition.
 var pipsBlockLetters = [pipsLogoHeight][4]string{
-	{"█████ ", "████", "█████ ", " ████"},
-	{"██  ██", " ██ ", "██  ██", "██   "},
-	{"█████ ", " ██ ", "█████ ", " ███ "},
-	{"██    ", "████", "██    ", "████ "},
+	{"█████ ", "████", "█████ ", " █████"},
+	{"██  ██", " ██ ", "██  ██", "██    "},
+	{"█████ ", " ██ ", "█████ ", "  ████"},
+	{"██    ", "████", "██    ", "█████ "},
 }
 
 type startupBannerContext struct {
 	width     int
 	workspace string
 	model     string
+	version   string
 	theme     colorTheme
 	noColor   bool
+}
+
+// versionLabel is the header's version text: the release the build belongs to.
+//
+// A build between releases reports a git describe string, "v0.1.7-6-g274ace2", and a
+// build with uncommitted changes appends "-dirty". The header names the release
+// rather than the commit or the working tree, so both suffixes are dropped. A tag
+// carrying its own suffix, such as "v0.2.0-rc1", is left alone, because it does not
+// have the describe shape. A build with no version reports "dev", which is what an
+// unstamped build reports elsewhere; the fallback lives here rather than where the
+// context is built, so a context assembled anywhere still renders a whole header
+// instead of a dangling separator.
+func (context startupBannerContext) versionLabel() string {
+	version := strings.TrimSuffix(strings.TrimSpace(context.version), "-dirty")
+
+	if tag, rest, found := strings.Cut(version, "-"); found && isDescribeTail(rest) {
+		version = tag
+	}
+
+	if version == "" {
+		return "dev"
+	}
+
+	return version
+}
+
+// isDescribeTail reports whether rest is the suffix git describe appends after a tag,
+// the commit count and the abbreviated hash: "6-g274ace2".
+func isDescribeTail(rest string) bool {
+	count, hash, found := strings.Cut(rest, "-")
+	if !found || count == "" || len(hash) < 2 || hash[0] != 'g' {
+		return false
+	}
+
+	for _, char := range count {
+		if char < '0' || char > '9' {
+			return false
+		}
+	}
+
+	for _, char := range hash[1:] {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+
+	return true
 }
 
 // publishStartup rendezvous: neither default geometry nor bootstrap alone may
@@ -113,6 +161,7 @@ func (m *Model) bannerContext(width int) startupBannerContext {
 		width:     max(1, width),
 		workspace: filepath.Base(m.options.Workspace),
 		model:     string(m.state.Provider) + "/" + m.state.ModelID,
+		version:   m.options.Build.Version,
 		theme:     m.theme,
 		noColor:   m.options.NoColor,
 	}
@@ -218,14 +267,14 @@ func renderSideBySideBannerLines(
 	var rightLines [pipsLogoHeight]string
 
 	if context.noColor {
-		rightLines[0] = ansi.Truncate("✻ "+appTitle+" · coding agent", rightWidth, "…")
+		rightLines[0] = ansi.Truncate("✻ "+appTitle+" · "+context.versionLabel(), rightWidth, "…")
 		rightLines[1] = ansi.Truncate("workspace  "+workspace, rightWidth, "…")
 		rightLines[2] = ansi.Truncate("model      "+context.model, rightWidth, "…")
 		rightLines[3] = ansi.Truncate("Type / for commands", rightWidth, "…")
 	} else {
 		titlePrefix := lipgloss.NewStyle().Bold(true).Foreground(palette.session).Render("✻ " + appTitle)
-		agentSuffix := lipgloss.NewStyle().Foreground(palette.muted).Render(" · coding agent")
-		rightLines[0] = ansi.Truncate(titlePrefix+agentSuffix, rightWidth, "…")
+		versionSuffix := lipgloss.NewStyle().Foreground(palette.muted).Render(" · " + context.versionLabel())
+		rightLines[0] = ansi.Truncate(titlePrefix+versionSuffix, rightWidth, "…")
 
 		wsLabel := lipgloss.NewStyle().Foreground(palette.muted).Render("workspace  ")
 		wsVal := lipgloss.NewStyle().Foreground(palette.workspace).Render(workspace)
@@ -265,15 +314,15 @@ func renderStackedBannerLines(
 
 	if context.noColor {
 		lines = append(lines,
-			ansi.Truncate("✻ "+appTitle+" · coding agent", innerWidth, "…"),
+			ansi.Truncate("✻ "+appTitle+" · "+context.versionLabel(), innerWidth, "…"),
 			ansi.Truncate(workspace+"  ·  "+context.model, innerWidth, "…"),
 			ansi.Truncate("Type / for commands", innerWidth, "…"),
 		)
 	} else {
 		titlePart := lipgloss.NewStyle().Bold(true).Foreground(palette.session).Render("✻ " + appTitle)
-		agentPart := lipgloss.NewStyle().Foreground(palette.muted).Render(" · coding agent")
+		versionPart := lipgloss.NewStyle().Foreground(palette.muted).Render(" · " + context.versionLabel())
 		lines = append(lines,
-			ansi.Truncate(titlePart+agentPart, innerWidth, "…"),
+			ansi.Truncate(titlePart+versionPart, innerWidth, "…"),
 			lipgloss.NewStyle().Foreground(palette.muted).Render(ansi.Truncate(workspace+"  ·  "+context.model, innerWidth, "…")),
 			lipgloss.NewStyle().Foreground(palette.muted).Render(ansi.Truncate("Type / for commands", innerWidth, "…")),
 		)
