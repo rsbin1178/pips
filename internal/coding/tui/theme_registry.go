@@ -775,6 +775,9 @@ const (
 	rosePineSubtle       = "#908CAA" // Rosé Pine subtle, main and Moon
 	tokyoNightForeground = "#A9B1D6" // Tokyo Night editor foreground, Night and Storm
 	rosePineText         = "#E0DEF4" // Rosé Pine text, main and Moon
+
+	gruvboxGray    = "#928374" // gruvbox neutral gray, both variants
+	solarizedBase0 = "#839496" // Solarized base0, light chrome and dark canvas
 )
 
 // builtinThemePalettes and builtinThemeMetadataByID hold every built-in that is
@@ -813,14 +816,14 @@ var builtinThemePalettes = map[string]themePaletteStrings{
 		error: "#BF616A", change: "#8FBCBB", code: "#D8DEE9", codeBackground: "#2E3440", diagnostic: "#81A1C1",
 	},
 	themeIDGruvboxLight: {
-		separator: "#D5C4A1", composerPrompt: "#928374", muted: "#928374", workspace: "#282828",
+		separator: "#D5C4A1", composerPrompt: gruvboxGray, muted: gruvboxGray, workspace: "#282828",
 		session: "#076678", model: "#8F3F71", idle: "#79740E", active: "#B57614", warning: "#AF3A03",
 		error: "#9D0006", change: "#427B58", code: "#282828", codeBackground: "#EBDBB2", diagnostic: "#7C6F64",
 	},
 	themeIDGruvboxDark: {
-		separator: "#504945", composerPrompt: "#928374", muted: "#928374", workspace: "#EBDBB2",
+		separator: "#504945", composerPrompt: gruvboxGray, muted: gruvboxGray, workspace: "#EBDBB2",
 		session: "#83A598", model: "#D3869B", idle: "#B8BB26", active: "#FABD2F", warning: "#FE8019",
-		error: "#FB4934", change: "#8EC07C", code: "#EBDBB2", codeBackground: "#282828", diagnostic: "#928374",
+		error: "#FB4934", change: "#8EC07C", code: "#EBDBB2", codeBackground: "#282828", diagnostic: gruvboxGray,
 	},
 	themeIDCatppuccinLatte: {
 		separator: "#BCC0CC", composerPrompt: "#6C6F85", muted: "#6C6F85", workspace: "#4C4F69",
@@ -878,14 +881,14 @@ var builtinThemePalettes = map[string]themePaletteStrings{
 		error: "#B4637A", change: "#286983", code: "#464261", codeBackground: "#F2E9E1", diagnostic: "#797593",
 	},
 	themeIDSolarizedDark: {
-		separator: "#586E75", composerPrompt: "#586E75", muted: "#586E75", workspace: "#839496",
+		separator: "#586E75", composerPrompt: "#586E75", muted: "#586E75", workspace: solarizedBase0,
 		session: "#268BD2", model: "#D33682", idle: "#859900", active: "#B58900", warning: "#CB4B16",
-		error: "#DC322F", change: "#2AA198", code: "#839496", codeBackground: "#073642", diagnostic: "#657B83",
+		error: "#DC322F", change: "#2AA198", code: solarizedBase0, codeBackground: "#073642", diagnostic: "#657B83",
 	},
 	themeIDSolarizedLight: {
-		separator: "#93A1A1", composerPrompt: "#839496", muted: "#839496", workspace: "#657B83",
+		separator: "#93A1A1", composerPrompt: solarizedBase0, muted: solarizedBase0, workspace: "#657B83",
 		session: "#268BD2", model: "#6C71C4", idle: "#859900", active: "#B58900", warning: "#CB4B16",
-		error: "#DC322F", change: "#2AA198", code: "#657B83", codeBackground: "#FDF6E3", diagnostic: "#839496",
+		error: "#DC322F", change: "#2AA198", code: "#657B83", codeBackground: "#FDF6E3", diagnostic: solarizedBase0,
 	},
 }
 
