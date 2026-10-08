@@ -249,9 +249,19 @@ func (e *Executor) finishIO(
 	case err := <-trigger:
 		setFirstError(runErr, err)
 
-		_ = pipes.closeReadEnds()
+		// The trigger stopped the process in waitForProcess, so the readers reach EOF on
+		// their own: drain them before touching the pipes. Closing the read ends here
+		// made the retained capture and the byte count describe how fast the readers
+		// happened to be scheduled rather than what the process wrote, which is what the
+		// output-limit fixture hit on CI. The grace still bounds a child that holds the
+		// pipe open.
+		select {
+		case <-readersDone:
+		case <-drainTimer.C:
+			_ = pipes.closeReadEnds()
 
-		<-readersDone
+			<-readersDone
+		}
 	case <-runCtx.Done():
 		setFirstError(runErr, executionContextError(runCtx, callerCtx))
 
