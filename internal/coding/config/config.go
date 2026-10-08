@@ -475,9 +475,14 @@ type VariantConfig struct {
 
 // ModelConfig contains local metadata and request defaults for one model.
 type ModelConfig struct {
-	Ref                   ModelRef
-	Protocol              Protocol
-	ContextWindow         int
+	Ref           ModelRef
+	Protocol      Protocol
+	ContextWindow int
+	// StreamContinuation opts this model into prefix continuation, keeping a
+	// broken turn's partial answer instead of regenerating it. It stays a
+	// per-model opt-in because a provider must be verified to honour a
+	// trailing assistant message; the default regenerates.
+	StreamContinuation    bool
 	ReasoningLevels       []ReasoningLevel
 	DefaultReasoningLevel *ReasoningLevel
 	ReasoningBudgets      map[ReasoningLevel]int

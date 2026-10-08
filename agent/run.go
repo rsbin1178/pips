@@ -637,9 +637,13 @@ func (r *run) callTurn(
 
 	// prefix accumulates the text retained across failed attempts; a non-empty
 	// prefix switches every later attempt to the continuation request.
+	// fellBack records that the prefix was abandoned because the provider would
+	// not serve the continuation shape or the continuation added nothing: the
+	// turn then answers from the start rather than dying with a fragment.
 	var (
 		prefix     string
 		havePrefix bool
+		fellBack   bool
 	)
 
 	for attempt := 0; ; attempt++ {
@@ -647,12 +651,15 @@ func (r *run) callTurn(
 
 		var filter *continuationFilter
 
-		if havePrefix {
+		switch {
+		case havePrefix:
 			// Build a fresh slice: msgs shares its backing array with the
 			// session snapshot, so appending to it would corrupt the session.
 			attemptMsgs = slices.Concat(msgs, []ai.Message{ai.Assistant(ai.TextPart{Text: prefix})})
 			attemptUpdate = continuationRequestUpdate(requestUpdate, streamContinuationInstruction)
 			filter = newContinuationFilter(prefix)
+		case fellBack:
+			attemptUpdate = continuationRequestUpdate(requestUpdate, streamRestartInstruction)
 		}
 
 		var produced bool
@@ -664,55 +671,101 @@ func (r *run) callTurn(
 			return nil, true, nil
 		}
 
-		if err == nil {
+		// abandonPrefix marks the two escape arms: the continuation cannot be
+		// honoured, so the turn drops the fragment and answers from the start.
+		abandonPrefix := false
+
+		switch {
+		case err == nil && havePrefix && !fellBack && continuationEmpty(resp):
+			// The provider accepted the continuation and added nothing.
+			// Committing the prefix alone would present a fragment as the whole
+			// reply, so answer from the start instead.
+			abandonPrefix = true
+		case err == nil:
 			if havePrefix {
 				resp = mergeContinuation(prefix, resp)
 			}
 
 			return resp, false, nil
-		}
-
-		if !produced || attempt >= recovery.attempts || !ai.IsRetryable(err) || ctx.Err() != nil {
-			// Give up. In continuation mode keep whatever text the failing
-			// attempt produced and report it as an explicitly incomplete
-			// reply rather than discarding it silently.
-			if recovery.mode == recoveryContinue {
-				if retained, ok := retainPrefix(resp); ok {
+		case havePrefix && !fellBack && !ai.IsRetryable(err) && ctx.Err() == nil:
+			// The provider refused the continuation shape. Dropping the prefix
+			// costs the work already done, but the turn's own request still
+			// works and a dead turn costs more.
+			abandonPrefix = true
+		case !produced || attempt >= recovery.attempts || !ai.IsRetryable(err) || ctx.Err() != nil:
+			// Give up. Whatever text the failing attempt produced is reported as
+			// an explicitly incomplete reply, whether the turn was continuing or
+			// regenerating: a fragment the consumer saw must never vanish without
+			// a trace.
+			//
+			// Continuation attempts extend one answer, so their fragments
+			// accumulate. Regenerate attempts are independent alternatives, so
+			// only the fragment the consumer was actually looking at — the last
+			// one — is reported.
+			// prefix is read by the report below; havePrefix is not, because
+			// this arm returns — the turn is over either way.
+			if retained, ok := retainPrefix(resp); ok {
+				if recovery.mode == recoveryContinue && !fellBack {
 					prefix += retained
-					havePrefix = true
+				} else {
+					prefix = retained
 				}
 			}
 
-			if havePrefix && !r.emitIncomplete(turn, prefix, err) {
+			if prefix != "" && !r.emitIncomplete(turn, prefix, err) {
 				return nil, true, nil
 			}
 
 			return resp, false, err
-		}
-
-		if recovery.mode == recoveryContinue {
+		default:
 			if retained, ok := retainPrefix(resp); ok {
-				prefix += retained
-				havePrefix = true
+				if recovery.mode == recoveryContinue && !fellBack {
+					// A continuation extends one answer, so its fragment
+					// accumulates. A continuation that produced no usable text
+					// keeps the existing prefix and still consumes an attempt.
+					prefix += retained
+					havePrefix = true
+				} else {
+					// A regenerating turn replaces the fragment: its attempts
+					// are alternatives, and the last one is what the consumer
+					// was looking at when the turn gave up.
+					prefix = retained
+				}
 			}
-			// A continuation that produced no usable text keeps the existing
-			// prefix and still consumes an attempt.
-		}
 
-		delay := recovery.backoff(attempt)
+			delay := recovery.backoff(attempt)
 
-		switch {
-		case havePrefix:
-			if !r.emit(retryNotice(turn, attempt, recovery.attempts, delay, err)) {
+			switch {
+			case havePrefix:
+				if !r.emit(retryNotice(turn, attempt, recovery.attempts, delay, err)) {
+					return nil, true, nil
+				}
+			case !r.emit(CandidateDiscarded{Turn: turn}),
+				!r.emit(retryNotice(turn, attempt, recovery.attempts, delay, err)):
 				return nil, true, nil
 			}
-		case !r.emit(CandidateDiscarded{Turn: turn}),
-			!r.emit(retryNotice(turn, attempt, recovery.attempts, delay, err)):
-			return nil, true, nil
+
+			if sleepErr := sleepContext(ctx, delay); sleepErr != nil {
+				return nil, false, sleepErr
+			}
+
+			continue
 		}
 
-		if sleepErr := sleepContext(ctx, delay); sleepErr != nil {
-			return nil, false, sleepErr
+		if abandonPrefix {
+			fellBack = true
+			havePrefix = false
+			prefix = ""
+
+			// The consumer rendered the fragment, so it has to be told the
+			// draft is no longer being honoured before the restart streams.
+			if !r.emit(CandidateDiscarded{Turn: turn}) {
+				return nil, true, nil
+			}
+
+			if sleepErr := sleepContext(ctx, recovery.backoff(attempt)); sleepErr != nil {
+				return nil, false, sleepErr
+			}
 		}
 	}
 }
@@ -890,6 +943,26 @@ func toolMessage(results []ai.ToolResultPart) ai.ToolMessage {
 const streamContinuationInstruction = "The previous response was interrupted mid-stream. " +
 	"Continue it: output only the missing remainder, starting exactly where the text above stops. " +
 	"Do not repeat, rephrase, summarise, or restart anything already written."
+
+// streamRestartInstruction accompanies the request that answers from the start
+// after a continuation was abandoned. The model is told why the turn is being
+// re-issued, so it neither assumes the fragment it wrote still stands nor reads
+// the re-issue as a new user request.
+const streamRestartInstruction = "Your previous response was interrupted mid-stream and nothing of it was kept. " +
+	"Write the complete answer again from the start — no apology, no recap of the interruption."
+
+// continuationEmpty reports that a continuation was accepted but contributed
+// no answer text. Committing the retained prefix alone in that case would
+// present a fragment as the whole reply.
+func continuationEmpty(resp *ai.Response) bool {
+	if resp == nil || len(resp.ToolCalls()) > 0 {
+		return false
+	}
+
+	_, hasText := retainPrefix(resp)
+
+	return !hasText
+}
 
 // Continuation overlap trim. A provider may restate the tail of the prefix
 // when asked to continue; the filter drops that repeat so the live draft and

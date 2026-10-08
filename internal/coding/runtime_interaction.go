@@ -840,6 +840,7 @@ func (r *Runtime) openInteraction(
 				},
 				model: childModel, mode: started.Mode, mcpEntries: childMCPEntries, controls: r.childControls,
 				toolSearchNameFor:  r.config.ToolSearchNameFor,
+				streamContinuation: r.resolved.StreamContinuation,
 				subagents:          r.subagents,
 				onPauseChanged:     r.projectChildPause,
 				onWorkspaceChanged: r.projectChildWorkspaceChanged,
@@ -981,7 +982,7 @@ func (r *Runtime) openInteraction(
 	agentOptions := append(
 		composed.AgentOptions(),
 		agent.WithMaxTurns(maxTurns),
-		streamRecoveryOption(),
+		streamRecoveryOption(r.resolved.StreamContinuation),
 		agent.WithStopWhen(func(info agent.RunInfo) bool {
 			return current.hookStopRequestedNow() || failureGuard.stopWhen(info)
 		}),
