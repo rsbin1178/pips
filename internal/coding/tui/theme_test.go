@@ -118,11 +118,11 @@ func TestBuiltinThemeRegistryIsStableAndComplete(t *testing.T) {
 
 	registry := loadThemeRegistry("")
 	options := registry.Options()
-	require.Len(t, options, 13)
+	require.Len(t, options, 19)
 	assert.Equal(t, "auto", options[0].id)
 	assert.True(t, options[0].automatic)
 	entries := registry.Entries()
-	require.Len(t, entries, 12)
+	require.Len(t, entries, 18)
 
 	ids := make([]string, 0, len(entries))
 	for _, entry := range entries {
@@ -149,13 +149,17 @@ func TestBuiltinThemeRegistryIsStableAndComplete(t *testing.T) {
 	assert.Equal(t, []string{
 		"default-dark", "default-light", "terminal",
 		"catppuccin-latte", "catppuccin-frappe", "catppuccin-macchiato", "catppuccin-mocha",
-		"dracula", "gruvbox-dark", "nord", "one-dark", "solarized-light",
+		"dracula", "gruvbox-dark", "nord", "one-dark",
+		"rose-pine-dawn", "rose-pine-moon", "rose-pine", "solarized-light",
+		"tokyo-night-light", "tokyo-night-storm", "tokyo-night",
 	}, ids)
 	assert.Equal(t, themeDark, mustTheme(t, registry, "default-dark"))
 	assert.Equal(t, themeLight, mustTheme(t, registry, "default-light"))
 	assert.Equal(t, themeBackgroundDark, mustTheme(t, registry, "dracula").background)
 	assert.Equal(t, themeBackgroundLight, mustTheme(t, registry, "solarized-light").background)
 	assert.Equal(t, themeBackgroundAny, mustTheme(t, registry, themeIDTerminal).background)
+	assert.Equal(t, themeBackgroundLight, mustTheme(t, registry, themeIDRosePineDawn).background)
+	assert.Equal(t, themeBackgroundDark, mustTheme(t, registry, themeIDTokyoNight).background)
 }
 
 func TestBuiltinThemeRepresentativeContrast(t *testing.T) {

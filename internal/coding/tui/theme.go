@@ -32,6 +32,12 @@ const (
 	themeIDCatppuccinMocha     = "catppuccin-mocha"
 	themeIDOneDark             = "one-dark"
 	themeIDSolarizedLight      = "solarized-light"
+	themeIDRosePine            = "rose-pine"
+	themeIDRosePineMoon        = "rose-pine-moon"
+	themeIDRosePineDawn        = "rose-pine-dawn"
+	themeIDTokyoNight          = "tokyo-night"
+	themeIDTokyoNightStorm     = "tokyo-night-storm"
+	themeIDTokyoNightLight     = "tokyo-night-light"
 	themeIDTerminal            = "terminal"
 )
 

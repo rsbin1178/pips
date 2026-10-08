@@ -751,7 +751,9 @@ func builtinThemeEntries() []themeEntry {
 		themeIDDefaultDark, themeIDDefaultLight, themeIDTerminal,
 		themeIDCatppuccinLatte, themeIDCatppuccinFrappe, themeIDCatppuccinMacchiato,
 		themeIDCatppuccinMocha, themeIDDracula, themeIDGruvboxDark, themeIDNord,
-		themeIDOneDark, themeIDSolarizedLight,
+		themeIDOneDark,
+		themeIDRosePineDawn, themeIDRosePineMoon, themeIDRosePine, themeIDSolarizedLight,
+		themeIDTokyoNightLight, themeIDTokyoNightStorm, themeIDTokyoNight,
 	}
 	entries := make([]themeEntry, 0, len(ids))
 	for _, id := range ids {
@@ -764,6 +766,16 @@ func builtinThemeEntries() []themeEntry {
 
 	return entries
 }
+
+// A few upstream colours sit on more than one role, or on the same role in two
+// variants of a family. Naming them keeps the palette table readable and ties each
+// value to the role its family documents.
+const (
+	tokyoNightComment    = "#565F89" // Tokyo Night comment, Night and Storm
+	rosePineSubtle       = "#908CAA" // Rosé Pine subtle, main and Moon
+	tokyoNightForeground = "#A9B1D6" // Tokyo Night editor foreground, Night and Storm
+	rosePineText         = "#E0DEF4" // Rosé Pine text, main and Moon
+)
 
 // builtinThemePalettes and builtinThemeMetadataByID hold every built-in that is
 // expressed as theme-file values. The tables are package-level so that adding a
@@ -820,6 +832,36 @@ var builtinThemePalettes = map[string]themePaletteStrings{
 		session: "#61AFEF", model: "#C678DD", idle: "#98C379", active: "#E5C07B", warning: "#D19A66",
 		error: "#E06C75", change: "#56B6C2", code: "#ABB2BF", codeBackground: "#282C34", diagnostic: "#5C6370",
 	},
+	themeIDTokyoNight: {
+		separator: "#363B54", composerPrompt: tokyoNightComment, muted: tokyoNightComment, workspace: tokyoNightForeground,
+		session: "#7AA2F7", model: "#BB9AF7", idle: "#9ECE6A", active: "#E0AF68", warning: "#FF9E64",
+		error: "#F7768E", change: "#73DACA", code: tokyoNightForeground, codeBackground: "#292E42", diagnostic: "#787C99",
+	},
+	themeIDTokyoNightStorm: {
+		separator: "#3B4261", composerPrompt: tokyoNightComment, muted: tokyoNightComment, workspace: tokyoNightForeground,
+		session: "#7AA2F7", model: "#BB9AF7", idle: "#9ECE6A", active: "#E0AF68", warning: "#FF9E64",
+		error: "#F7768E", change: "#73DACA", code: tokyoNightForeground, codeBackground: "#292E42", diagnostic: "#8089B3",
+	},
+	themeIDTokyoNightLight: {
+		separator: "#C1C2C7", composerPrompt: "#6C6E75", muted: "#6C6E75", workspace: "#343B58",
+		session: "#2959AA", model: "#5A3E8E", idle: "#33635C", active: "#8F5E15", warning: "#965027",
+		error: "#8C4351", change: "#0F4B6E", code: "#343B58", codeBackground: "#DCDEE3", diagnostic: "#707280",
+	},
+	themeIDRosePine: {
+		separator: "#403D52", composerPrompt: rosePineSubtle, muted: "#6E6A86", workspace: rosePineText,
+		session: "#9CCFD8", model: "#C4A7E7", idle: "#31748F", active: "#F6C177", warning: "#EBBCBA",
+		error: "#EB6F92", change: "#31748F", code: rosePineText, codeBackground: "#26233A", diagnostic: rosePineSubtle,
+	},
+	themeIDRosePineMoon: {
+		separator: "#44415A", composerPrompt: rosePineSubtle, muted: "#6E6A86", workspace: rosePineText,
+		session: "#9CCFD8", model: "#C4A7E7", idle: "#3E8FB0", active: "#F6C177", warning: "#EA9A97",
+		error: "#EB6F92", change: "#3E8FB0", code: rosePineText, codeBackground: "#393552", diagnostic: rosePineSubtle,
+	},
+	themeIDRosePineDawn: {
+		separator: "#DFDAD9", composerPrompt: "#797593", muted: "#9893A5", workspace: "#464261",
+		session: "#56949F", model: "#907AA9", idle: "#286983", active: "#EA9D34", warning: "#D7827E",
+		error: "#B4637A", change: "#286983", code: "#464261", codeBackground: "#F2E9E1", diagnostic: "#797593",
+	},
 	themeIDSolarizedLight: {
 		separator: "#93A1A1", composerPrompt: "#839496", muted: "#839496", workspace: "#657B83",
 		session: "#268BD2", model: "#6C71C4", idle: "#859900", active: "#B58900", warning: "#CB4B16",
@@ -845,6 +887,12 @@ var builtinThemeMetadataByID = map[string]builtinThemeMetadata{
 	themeIDCatppuccinMocha:     {name: "Catppuccin Mocha", background: themeBackgroundDark},
 	themeIDOneDark:             {name: "One Dark", background: themeBackgroundDark},
 	themeIDSolarizedLight:      {name: "Solarized Light", background: themeBackgroundLight},
+	themeIDRosePine:            {name: "Rosé Pine", background: themeBackgroundDark},
+	themeIDRosePineMoon:        {name: "Rosé Pine Moon", background: themeBackgroundDark},
+	themeIDRosePineDawn:        {name: "Rosé Pine Dawn", background: themeBackgroundLight},
+	themeIDTokyoNight:          {name: "Tokyo Night", background: themeBackgroundDark},
+	themeIDTokyoNightStorm:     {name: "Tokyo Night Storm", background: themeBackgroundDark},
+	themeIDTokyoNightLight:     {name: "Tokyo Night Light", background: themeBackgroundLight},
 }
 
 func builtinThemeDefinition(id string) (themeDefinition, bool) {

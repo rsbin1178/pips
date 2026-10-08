@@ -647,6 +647,27 @@ func TestMarkdownChromaThemesAreBundledStyles(t *testing.T) {
 		assert.Equal(t, name, styles.Get(name).Name, "theme %s names a bundled chroma style", theme.id)
 	}
 
+	// Every built-in names its own bundled style: the id-sharing majority, the
+	// three spelled-out Tokyo Night ids, and the two default themes. A silent
+	// family fallback would fail here.
+	spelled := map[string]string{
+		themeIDDefaultDark:     chromaStyleGitHubDark,
+		themeIDDefaultLight:    chromaStyleGitHub,
+		themeIDGruvboxDark:     chromaStyleGruvbox,
+		themeIDOneDark:         chromaStyleOneDark,
+		themeIDTokyoNight:      chromaStyleTokyoNightNight,
+		themeIDTokyoNightStorm: chromaStyleTokyoNightStorm,
+		themeIDTokyoNightLight: chromaStyleTokyoNightDay,
+		themeIDTerminal:        chromaStyleBW,
+	}
+	for _, entry := range builtinThemeEntries() {
+		want, ok := spelled[entry.theme.id]
+		if !ok {
+			want = entry.theme.id
+		}
+		assert.Equal(t, want, markdownChromaTheme(entry.theme), entry.theme.id)
+	}
+
 	// A theme from a file follows the family its background resolves to.
 	light := newResolvedTheme("acme-light", "Acme Light", themeBackgroundLight, themeLight.palette)
 	dark := newResolvedTheme("acme-dark", "Acme Dark", themeBackgroundDark, themeDark.palette)

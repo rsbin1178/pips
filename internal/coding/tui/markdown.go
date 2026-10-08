@@ -428,6 +428,10 @@ const (
 	chromaStyleGitHub     = "github"
 	chromaStyleGruvbox    = "gruvbox"
 	chromaStyleOneDark    = "onedark"
+	// Tokyo Night spells its bundled styles without the hyphen its theme ids carry.
+	chromaStyleTokyoNightNight = "tokyonight-night"
+	chromaStyleTokyoNightStorm = "tokyonight-storm"
+	chromaStyleTokyoNightDay   = "tokyonight-day"
 	// chromaStyleBW carries no token colours at all, only bold and italic, which
 	// is what a theme with no polarity of its own can safely highlight with.
 	chromaStyleBW = "bw"
@@ -453,9 +457,16 @@ func markdownChromaTheme(theme colorTheme) string {
 		return chromaStyleGruvbox
 	case themeIDOneDark:
 		return chromaStyleOneDark
+	case themeIDTokyoNight:
+		return chromaStyleTokyoNightNight
+	case themeIDTokyoNightStorm:
+		return chromaStyleTokyoNightStorm
+	case themeIDTokyoNightLight:
+		return chromaStyleTokyoNightDay
 	// These four share their name with the chroma style built for them.
 	case themeIDDracula, themeIDNord, themeIDSolarizedLight,
-		themeIDCatppuccinLatte, themeIDCatppuccinFrappe, themeIDCatppuccinMacchiato, themeIDCatppuccinMocha:
+		themeIDCatppuccinLatte, themeIDCatppuccinFrappe, themeIDCatppuccinMacchiato, themeIDCatppuccinMocha,
+		themeIDRosePine, themeIDRosePineMoon, themeIDRosePineDawn:
 		return theme.id
 	}
 
