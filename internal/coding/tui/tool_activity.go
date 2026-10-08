@@ -1423,6 +1423,10 @@ func renderToolHeading(
 	return ansi.Truncate(heading, max(1, width), "…")
 }
 
+// toolActivityRows returns the rows a compact block renders. The caller owns the
+// result: a preview line lives in the cached activity, and a renderer that prefixes
+// or styles rows used to write that back, so every re-render added another branch
+// prefix and kept the first render's colour escapes inside the text.
 func toolActivityRows(
 	class toolActivityClass,
 	activities []toolActivity,
@@ -1434,7 +1438,7 @@ func toolActivityRows(
 
 	switch class {
 	case toolClassShell:
-		return activities[0].preview
+		return slices.Clone(activities[0].preview)
 	case toolClassPatch:
 		if _, parsed := parsePatchDisplayChanges(activities[0]); !parsed {
 			if _, _, single := singlePatchChange(activities[0]); single {
@@ -1445,11 +1449,11 @@ func toolActivityRows(
 			return nil
 		}
 
-		return activities[0].preview
+		return slices.Clone(activities[0].preview)
 	case toolClassGeneric:
 		return append([]string{activities[0].invocation}, activities[0].preview...)
 	case toolClassSubagent, toolClassTaskList:
-		return activities[0].preview
+		return slices.Clone(activities[0].preview)
 	case toolClassExplore, toolClassPlan:
 		return nil
 	default:
