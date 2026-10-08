@@ -798,7 +798,7 @@ var builtinThemePalettes = map[string]themePaletteStrings{
 	themeIDDracula: {
 		separator: "#44475A", composerPrompt: "#6272A4", muted: "#6272A4", workspace: "#F8F8F2",
 		session: "#8BE9FD", model: "#BD93F9", idle: "#50FA7B", active: "#F1FA8C", warning: "#FFB86C",
-		error: "#FF5555", change: "#FF79C6", code: "#F8F8F2", codeBackground: "#282A36", diagnostic: "#6272A4",
+		error: "#FF5555", change: "#FF79C6", code: "#F8F8F2", codeBackground: "#44475A", diagnostic: "#6272A4",
 	},
 	themeIDModusOperandi: {
 		separator: "#9F9F9F", composerPrompt: "#595959", muted: "#595959", workspace: "#000000",
@@ -813,7 +813,7 @@ var builtinThemePalettes = map[string]themePaletteStrings{
 	themeIDNord: {
 		separator: "#4C566A", composerPrompt: "#81A1C1", muted: "#81A1C1", workspace: "#D8DEE9",
 		session: "#88C0D0", model: "#B48EAD", idle: "#A3BE8C", active: "#EBCB8B", warning: "#D08770",
-		error: "#BF616A", change: "#8FBCBB", code: "#D8DEE9", codeBackground: "#2E3440", diagnostic: "#81A1C1",
+		error: "#BF616A", change: "#8FBCBB", code: "#D8DEE9", codeBackground: "#3B4252", diagnostic: "#81A1C1",
 	},
 	themeIDGruvboxLight: {
 		separator: "#D5C4A1", composerPrompt: gruvboxGray, muted: gruvboxGray, workspace: "#282828",
@@ -823,7 +823,7 @@ var builtinThemePalettes = map[string]themePaletteStrings{
 	themeIDGruvboxDark: {
 		separator: "#504945", composerPrompt: gruvboxGray, muted: gruvboxGray, workspace: "#EBDBB2",
 		session: "#83A598", model: "#D3869B", idle: "#B8BB26", active: "#FABD2F", warning: "#FE8019",
-		error: "#FB4934", change: "#8EC07C", code: "#EBDBB2", codeBackground: "#282828", diagnostic: gruvboxGray,
+		error: "#FB4934", change: "#8EC07C", code: "#EBDBB2", codeBackground: "#3C3836", diagnostic: gruvboxGray,
 	},
 	themeIDCatppuccinLatte: {
 		separator: "#BCC0CC", composerPrompt: "#6C6F85", muted: "#6C6F85", workspace: "#4C4F69",
@@ -841,14 +841,14 @@ var builtinThemePalettes = map[string]themePaletteStrings{
 		error: "#ED8796", change: "#8BD5CA", code: "#CAD3F5", codeBackground: "#363A4F", diagnostic: "#939AB7",
 	},
 	themeIDCatppuccinMocha: {
-		separator: "#45475A", composerPrompt: "#A6ADC8", muted: "#A6ADC8", workspace: "#CDD6F4",
-		session: "#89DCEB", model: "#CBA6F7", idle: "#A6E3A1", active: "#F9E2AF", warning: "#FAB387",
-		error: "#F38BA8", change: "#94E2D5", code: "#CDD6F4", codeBackground: "#1E1E2E", diagnostic: "#A6ADC8",
+		separator: "#45475A", composerPrompt: "#6C7086", muted: "#6C7086", workspace: "#CDD6F4",
+		session: "#89B4FA", model: "#CBA6F7", idle: "#A6E3A1", active: "#F9E2AF", warning: "#FAB387",
+		error: "#F38BA8", change: "#94E2D5", code: "#CDD6F4", codeBackground: "#313244", diagnostic: "#9399B2",
 	},
 	themeIDOneDark: {
 		separator: "#3E4451", composerPrompt: "#5C6370", muted: "#5C6370", workspace: "#ABB2BF",
 		session: "#61AFEF", model: "#C678DD", idle: "#98C379", active: "#E5C07B", warning: "#D19A66",
-		error: "#E06C75", change: "#56B6C2", code: "#ABB2BF", codeBackground: "#282C34", diagnostic: "#5C6370",
+		error: "#E06C75", change: "#56B6C2", code: "#ABB2BF", codeBackground: "#2C313A", diagnostic: "#5C6370",
 	},
 	themeIDTokyoNight: {
 		separator: "#363B54", composerPrompt: tokyoNightComment, muted: tokyoNightComment, workspace: tokyoNightForeground,
@@ -887,7 +887,7 @@ var builtinThemePalettes = map[string]themePaletteStrings{
 	},
 	themeIDSolarizedLight: {
 		separator: "#93A1A1", composerPrompt: solarizedBase0, muted: solarizedBase0, workspace: "#657B83",
-		session: "#268BD2", model: "#6C71C4", idle: "#859900", active: "#B58900", warning: "#CB4B16",
+		session: "#268BD2", model: "#D33682", idle: "#859900", active: "#B58900", warning: "#CB4B16",
 		error: "#DC322F", change: "#2AA198", code: "#657B83", codeBackground: "#FDF6E3", diagnostic: solarizedBase0,
 	},
 }
