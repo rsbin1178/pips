@@ -433,3 +433,121 @@ func TestCandidateIncompleteEventValidates(t *testing.T) {
 	require.ErrorIs(t, err, agent.ErrInvalidEvent,
 		"a record cannot claim fewer original bytes than it retains")
 }
+
+// The restart instruction is unexported; the test pins a stable phrase from it
+// so a request carrying it is provable without exporting the constant.
+const restartInstructionPhrase = "Write the complete answer again from the start"
+
+// lastRequestMessage returns the message a request ends with, which is where a
+// continuation's retained prefix would appear.
+func lastRequestMessage(t *testing.T, req ai.Request) ai.Message {
+	t.Helper()
+
+	require.NotEmpty(t, req.Messages)
+
+	return req.Messages[len(req.Messages)-1]
+}
+
+// TestStreamContinuationFallsBackWhenTheProviderRefusesTheShape covers a
+// provider that will not serve a request ending in an assistant message: the
+// loop drops the fragment and answers from the start rather than losing a turn
+// its own request could still complete.
+func TestStreamContinuationFallsBackWhenTheProviderRefusesTheShape(t *testing.T) {
+	t.Parallel()
+
+	model := &continuationModel{attempts: []continuationAttempt{
+		{deltas: []string{"half"}, err: io.ErrUnexpectedEOF},
+		{err: ai.NewError(ai.ProviderOpenAI, 400, "invalid request")},
+		{deltas: []string{"whole answer"}, finish: ai.FinishStop},
+	}}
+
+	a, err := agent.New(model, agent.WithStreamContinuation(3, time.Millisecond, time.Millisecond))
+	require.NoError(t, err)
+
+	sess := agent.NewSession()
+	stream := collectContinuationStream(t, a, sess)
+	require.NoError(t, stream.err)
+	assert.Empty(t, stream.incompletes, "the turn completed, so nothing is abandoned")
+	assert.Equal(t, 1, stream.discards, "the fragment is dropped before the restart")
+
+	requests := model.Requests()
+	require.Len(t, requests, 3)
+
+	// The continuation really was tried first and really did carry the
+	// fragment, so the fallback is not passing by accident.
+	replayed, ok := lastRequestMessage(t, requests[1]).(ai.AssistantMessage)
+	require.True(t, ok, "the first re-issue is the continuation")
+	require.Len(t, replayed.Parts, 1)
+
+	replayedText, ok := replayed.Parts[0].(ai.TextPart)
+	require.True(t, ok)
+	assert.Equal(t, "half", replayedText.Text)
+	assert.Contains(t, requestSystem(t, requests[1]), continuationInstructionPhrase)
+
+	// The restart goes back to the turn's own request shape and says why.
+	assert.NotContains(t, requestSystem(t, requests[2]), continuationInstructionPhrase)
+	assert.Contains(t, requestSystem(t, requests[2]), restartInstructionPhrase)
+
+	_, tailIsAssistant := lastRequestMessage(t, requests[2]).(ai.AssistantMessage)
+	assert.False(t, tailIsAssistant, "the restart sends the turn's own request")
+
+	assistant := committedAssistant(t, sess)
+	text, ok := assistant.Parts[0].(ai.TextPart)
+	require.True(t, ok)
+	assert.Equal(t, "whole answer", text.Text,
+		"the answer comes from the restart, not from the abandoned fragment")
+}
+
+// TestStreamContinuationFallsBackWhenTheContinuationAddsNothing covers the
+// other way a continuation can be unusable: the provider accepts it and returns
+// no answer text. Committing the fragment alone would present it as the whole
+// reply, so the turn answers from the start instead.
+func TestStreamContinuationFallsBackWhenTheContinuationAddsNothing(t *testing.T) {
+	t.Parallel()
+
+	model := &continuationModel{attempts: []continuationAttempt{
+		{deltas: []string{"half"}, err: io.ErrUnexpectedEOF},
+		{finish: ai.FinishStop},
+		{deltas: []string{"whole answer"}, finish: ai.FinishStop},
+	}}
+
+	a, err := agent.New(model, agent.WithStreamContinuation(3, time.Millisecond, time.Millisecond))
+	require.NoError(t, err)
+
+	sess := agent.NewSession()
+	stream := collectContinuationStream(t, a, sess)
+	require.NoError(t, stream.err)
+	assert.Empty(t, stream.incompletes)
+	assert.Equal(t, 1, stream.discards)
+
+	requests := model.Requests()
+	require.Len(t, requests, 3)
+	assert.Contains(t, requestSystem(t, requests[2]), restartInstructionPhrase)
+
+	assistant := committedAssistant(t, sess)
+	text, ok := assistant.Parts[0].(ai.TextPart)
+	require.True(t, ok)
+	assert.Equal(t, "whole answer", text.Text)
+}
+
+// TestStreamContinuationFallsBackOnlyOnce pins the bound: a restart that also
+// fails gives up instead of restarting again, so the escape cannot loop.
+func TestStreamContinuationFallsBackOnlyOnce(t *testing.T) {
+	t.Parallel()
+
+	invalid := ai.NewError(ai.ProviderOpenAI, 400, "invalid request")
+
+	model := &continuationModel{attempts: []continuationAttempt{
+		{deltas: []string{"half"}, err: io.ErrUnexpectedEOF},
+		{err: invalid},
+		{err: invalid},
+	}}
+
+	a, err := agent.New(model, agent.WithStreamContinuation(5, time.Millisecond, time.Millisecond))
+	require.NoError(t, err)
+
+	stream := collectContinuationStream(t, a, agent.NewSession())
+	require.Error(t, stream.err)
+	assert.Equal(t, 1, stream.discards, "the fallback happens once")
+	assert.Len(t, model.Requests(), 3, "and it does not restart a second time")
+}

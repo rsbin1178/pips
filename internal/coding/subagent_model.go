@@ -31,6 +31,9 @@ type childModelBinding struct {
 	model         ai.LanguageModel
 	requestPolicy generation.Policy
 	contextWindow int
+	// streamContinuation is this child model's own recovery opt-in. It comes
+	// from the model the child actually runs, not from the parent's.
+	streamContinuation bool
 }
 
 func newChildModelResolver(
@@ -94,7 +97,10 @@ func (r childModelResolver) bind(
 		return childModelBinding{}, fmt.Errorf("%w: configured child model is unavailable", subagent.ErrInvalid)
 	}
 	if resolved.Ref == r.base.Ref {
-		return childModelBinding{model: r.baseModel, requestPolicy: r.basePolicy, contextWindow: resolved.Limits.ContextWindow}, nil
+		return childModelBinding{
+			model: r.baseModel, requestPolicy: r.basePolicy,
+			contextWindow: resolved.Limits.ContextWindow, streamContinuation: resolved.StreamContinuation,
+		}, nil
 	}
 	if r.credentials == nil {
 		return childModelBinding{}, fmt.Errorf("%w: configured child model credentials are unavailable", subagent.ErrInvalid)
@@ -111,7 +117,10 @@ func (r childModelResolver) bind(
 		return childModelBinding{}, fmt.Errorf("%w: configured child model identity mismatch", subagent.ErrInvalid)
 	}
 
-	return childModelBinding{model: bound, requestPolicy: policy, contextWindow: resolved.Limits.ContextWindow}, nil
+	return childModelBinding{
+		model: bound, requestPolicy: policy,
+		contextWindow: resolved.Limits.ContextWindow, streamContinuation: resolved.StreamContinuation,
+	}, nil
 }
 
 func (r childModelResolver) resolve(selection string) (modelcatalog.ResolvedModel, error) {

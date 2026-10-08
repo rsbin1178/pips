@@ -353,3 +353,31 @@ func TestCatalogResolvesDeclaredReasoningKnob(t *testing.T) {
 		"a model declaration wins over the provider layer",
 	)
 }
+
+func TestCatalogResolvesStreamContinuationPerModel(t *testing.T) {
+	t.Parallel()
+
+	ref := config.ModelRef{Provider: ai.ProviderOpenAI, Model: "flash"}
+	cfg := config.Config{
+		Model: ref,
+		Models: []config.ModelConfig{{
+			Ref:                ref,
+			StreamContinuation: true,
+		}},
+		Providers: map[ai.Provider]config.ProviderConfig{},
+		Sandbox:   config.SandboxWorkspaceWrite,
+		Approval:  config.ApprovalOnRequest,
+	}
+
+	catalog, err := modelcatalog.New(cfg)
+	require.NoError(t, err)
+
+	resolved, err := catalog.Resolve(modelcatalog.Selection{Ref: ref})
+	require.NoError(t, err)
+	assert.True(t, resolved.StreamContinuation,
+		"the model's opt-in reaches the resolved snapshot the coding call sites read")
+
+	entries := catalog.List()
+	require.Len(t, entries, 1)
+	assert.True(t, entries[0].StreamContinuation)
+}

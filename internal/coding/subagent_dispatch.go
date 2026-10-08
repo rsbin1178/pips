@@ -338,6 +338,7 @@ func (d *customSubagentDispatcher) Open(
 	factory := d.factory.clone()
 	factory.model = binding.model
 	factory.requestPolicy = binding.requestPolicy
+	factory.streamContinuation = binding.streamContinuation
 	if factory.fullCompaction != nil {
 		factory.fullCompaction.ContextWindow = binding.contextWindow
 		request := ai.Request{}

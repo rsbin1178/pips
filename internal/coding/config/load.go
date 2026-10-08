@@ -235,6 +235,7 @@ type fileModel struct {
 	Default               bool                   `toml:"default"`
 	Protocol              *string                `toml:"protocol"`
 	ContextWindow         *int                   `toml:"context_window"`
+	StreamContinuation    *bool                  `toml:"stream_continuation"`
 	ReasoningLevels       []string               `toml:"reasoning_levels"`
 	DefaultReasoningLevel *string                `toml:"default_reasoning_level"`
 	ReasoningBudgets      map[string]int         `toml:"reasoning_budgets"`
@@ -893,6 +894,9 @@ func decodeModel(provider ai.Provider, modelID string, value fileModel) (ModelCo
 	}
 	if value.ContextWindow != nil {
 		result.ContextWindow = *value.ContextWindow
+	}
+	if value.StreamContinuation != nil {
+		result.StreamContinuation = *value.StreamContinuation
 	}
 	for _, raw := range value.ReasoningLevels {
 		level, parseErr := ParseReasoningLevel(raw)

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/internal/coding/config"
 	"github.com/rsbin1178/pips/internal/coding/planmode"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -91,13 +92,13 @@ func TestRuntimeReissuesInterruptedStreamAndReportsTheWait(t *testing.T) {
 	assert.Equal(t, streamRecoveryAttempts, notices[0].MaxRetries)
 	assert.Equal(t, "stream ended early", notices[0].Reason)
 
-	// Continuation keeps the partial answer, so the turn neither retracts the
-	// candidate nor reports it as incomplete. The committed message is the
-	// retained prefix followed by the remainder the re-issue produced.
-	assert.NotContains(t, eventTypes(events), EventMessageDiscarded,
-		"continuation never retracts the partial candidate")
+	// The default recovery regenerates, so the partial the consumer was looking
+	// at is retracted before the re-issue streams — and because the turn
+	// succeeds it is superseded rather than reported as an incomplete reply.
+	assert.Contains(t, eventTypes(events), EventMessageDiscarded,
+		"regenerating retracts the partial candidate it replaces")
 	assert.NotContains(t, eventTypes(events), EventMessageIncomplete,
-		"a successful continuation is not an incomplete reply")
+		"a superseded fragment is not an incomplete reply")
 
 	// The notice is live state rather than transcript, and the reducer keeps it
 	// only for the duration of the wait (see the reducer test in
@@ -113,8 +114,8 @@ func TestRuntimeReissuesInterruptedStreamAndReportsTheWait(t *testing.T) {
 	require.True(t, ok)
 	text, ok := assistant.Parts[0].(ai.TextPart)
 	require.True(t, ok)
-	assert.Equal(t, "halfrecovered", text.Text,
-		"the committed answer is the retained prefix plus the continuation")
+	assert.Equal(t, "recovered", text.Text,
+		"the committed answer is the re-issue's own answer, not a glued fragment")
 
 	require.NoError(t, runtime.Close(t.Context()))
 }
@@ -207,6 +208,141 @@ func TestRuntimeRetainsAbandonedPartialAsIncompleteReply(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, restored.State.IncompleteReplies, 1)
 	assert.Equal(t, "half", restored.State.IncompleteReplies[0].Text)
+
+	require.NoError(t, runtime.Close(t.Context()))
+}
+
+// continuationRuntimeModel streams a partial answer and then breaks once,
+// recording every request so the test can prove the re-issue carried the prefix
+// as a trailing assistant message rather than answering from scratch.
+type continuationRuntimeModel struct {
+	mu       sync.Mutex
+	calls    int
+	requests []ai.Request
+}
+
+func (m *continuationRuntimeModel) Generate(context.Context, ai.Request) (*ai.Response, error) {
+	return nil, errors.New("continuationRuntimeModel: Generate is not scripted")
+}
+
+func (m *continuationRuntimeModel) Stream(_ context.Context, request ai.Request) ai.Stream {
+	m.mu.Lock()
+	m.calls++
+	attempt := m.calls
+	m.requests = append(m.requests, request)
+	m.mu.Unlock()
+
+	return func(yield func(ai.StreamEvent, error) bool) {
+		if !yield(ai.StreamEvent{Type: ai.StreamMessageStart, ID: "resp-1"}, nil) {
+			return
+		}
+
+		if attempt == 1 {
+			if !yield(ai.StreamEvent{Type: ai.StreamTextDelta, Text: "half the answer"}, nil) {
+				return
+			}
+
+			yield(ai.StreamEvent{}, io.ErrUnexpectedEOF)
+
+			return
+		}
+
+		yield(ai.StreamEvent{Type: ai.StreamTextDelta, Text: " and the rest"}, nil)
+		yield(ai.StreamEvent{Type: ai.StreamMessageEnd, FinishReason: ai.FinishStop}, nil)
+	}
+}
+
+func (m *continuationRuntimeModel) requestsSnapshot() []ai.Request {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return append([]ai.Request(nil), m.requests...)
+}
+
+func (m *continuationRuntimeModel) Provider() ai.Provider { return ai.ProviderOpenAI }
+func (m *continuationRuntimeModel) ModelID() string       { return "continuation-runtime" }
+func (m *continuationRuntimeModel) Capabilities() ai.Capabilities {
+	return ai.Capabilities{Text: true, Tools: true}
+}
+
+// TestRuntimeContinuesInterruptedStreamWhenModelOptsIn covers the per-model
+// opt-in: with stream_continuation = true the broken turn keeps the partial the
+// consumer already saw and re-issues it as a trailing assistant prefix, so the
+// committed answer is prefix + continuation and nothing is retracted.
+func TestRuntimeContinuesInterruptedStreamWhenModelOptsIn(t *testing.T) {
+	t.Parallel()
+
+	model := &continuationRuntimeModel{}
+	runtime := openTestRuntimeConfiguredWithSandboxAndConfig(
+		t, t.TempDir(), SessionTarget{}, model, nil, nil, nil, false,
+		config.SandboxWorkspaceWrite,
+		func(cfg *config.Config) {
+			cfg.Models = append(cfg.Models, config.ModelConfig{
+				Ref:                config.ModelRef{Provider: ai.ProviderOpenAI, Model: model.ModelID()},
+				StreamContinuation: true,
+			})
+		},
+	)
+	events := collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("hello")))
+	assertEventSequence(t, events)
+
+	assert.NotContains(t, eventTypes(events), EventMessageDiscarded,
+		"a continued turn keeps what the consumer rendered")
+
+	snapshot := runtime.Snapshot()
+	assert.Equal(t, InteractionSucceeded, snapshot.Interaction.Outcome)
+	require.Len(t, snapshot.Transcript, 2)
+	assistant, ok := snapshot.Transcript[1].(ai.AssistantMessage)
+	require.True(t, ok)
+	text, ok := assistant.Parts[0].(ai.TextPart)
+	require.True(t, ok)
+	assert.Equal(t, "half the answer and the rest", text.Text,
+		"the committed answer is the retained prefix plus the continuation")
+
+	requests := model.requestsSnapshot()
+	require.Len(t, requests, 2, "the broken stream is re-issued exactly once")
+	last := requests[1].Messages[len(requests[1].Messages)-1]
+	prefixMsg, ok := last.(ai.AssistantMessage)
+	require.True(t, ok, "the continuation request ends with a trailing assistant message")
+	prefixText, ok := prefixMsg.Parts[0].(ai.TextPart)
+	require.True(t, ok)
+	assert.Equal(t, "half the answer", prefixText.Text)
+	assert.Contains(t, requestSystemText(requests[1]), "Continue it",
+		"the continuation request carries the continuation instruction")
+
+	require.NoError(t, runtime.Close(t.Context()))
+}
+
+// TestRuntimeRegeneratesInterruptedStreamByDefault pins the default policy: a
+// model that does not opt in keeps the regenerate-and-discard recovery, so its
+// broken turn retracts the partial and commits the re-issue's own answer.
+func TestRuntimeRegeneratesInterruptedStreamByDefault(t *testing.T) {
+	t.Parallel()
+
+	model := &continuationRuntimeModel{}
+	runtime := openTestRuntime(t, model)
+	events := collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("hello")))
+	assertEventSequence(t, events)
+
+	assert.Contains(t, eventTypes(events), EventMessageDiscarded,
+		"the default retracts the partial it replaces")
+
+	snapshot := runtime.Snapshot()
+	assert.Equal(t, InteractionSucceeded, snapshot.Interaction.Outcome)
+	require.Len(t, snapshot.Transcript, 2)
+	assistant, ok := snapshot.Transcript[1].(ai.AssistantMessage)
+	require.True(t, ok)
+	text, ok := assistant.Parts[0].(ai.TextPart)
+	require.True(t, ok)
+	assert.Equal(t, " and the rest", text.Text,
+		"the default commits the re-issue's own answer, not a glued fragment")
+
+	requests := model.requestsSnapshot()
+	require.Len(t, requests, 2)
+	_, lastIsAssistant := requests[1].Messages[len(requests[1].Messages)-1].(ai.AssistantMessage)
+	assert.False(t, lastIsAssistant, "the regenerating re-issue does not carry the partial back")
+	assert.NotContains(t, requestSystemText(requests[1]), "Continue it",
+		"the regenerating re-issue carries no continuation instruction")
 
 	require.NoError(t, runtime.Close(t.Context()))
 }
