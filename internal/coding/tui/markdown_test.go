@@ -4,6 +4,7 @@ package tui
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -330,6 +331,168 @@ func markdownTableRules(rendered string) int {
 // markdownOperatorEscape matches the escape that colors a ":=" operator inside a
 // highlighted fence, which is how these tests read the syntax palette back.
 var markdownOperatorEscape = regexp.MustCompile(`\x1b\[([0-9;]+)m:=`)
+
+// markdownSGRPattern matches one SGR sequence and captures its parameters.
+var markdownSGRPattern = regexp.MustCompile(`\x1b\[([0-9;]*)m`)
+
+// markdownSurfaces lists the distinct SGR sequences in rendered text that set a
+// background color. Parameters are read one at a time, because a substring
+// search for "48" also matches an RGB channel such as 248.
+func markdownSurfaces(rendered string) []string {
+	var surfaces []string
+
+	for _, match := range markdownSGRPattern.FindAllStringSubmatch(rendered, -1) {
+		for parameter := range strings.SplitSeq(match[1], ";") {
+			if parameter == "48" {
+				surfaces = append(surfaces, match[0])
+
+				break
+			}
+		}
+	}
+	slices.Sort(surfaces)
+
+	return slices.Compact(surfaces)
+}
+
+// TestMarkdownCodeSurfaceFollowsTheCanvas pins the fill to the canvas the theme
+// was built for. A light palette inside a dark terminal used to paint a bright
+// inline-code pill, and an unanswered background probe left nothing to verify, so
+// the surface is painted only on the theme's own canvas.
+func TestMarkdownCodeSurfaceFollowsTheCanvas(t *testing.T) {
+	t.Parallel()
+
+	const source = "text `code` text\n"
+
+	for _, entry := range builtinThemeEntries() {
+		theme := entry.theme
+		t.Run(theme.id, func(t *testing.T) {
+			t.Parallel()
+
+			canvasDark := !theme.isLight()
+			cases := map[string]colorTheme{
+				"own canvas": theme.forCanvas(canvasDark, true),
+				"mismatch":   theme.forCanvas(!canvasDark, true),
+				"unknown":    theme.forCanvas(false, false),
+			}
+
+			for name, stamped := range cases {
+				rendered, err := newMarkdownRenderer(1).render(source, 60, stamped, false)
+				require.NoError(t, err)
+				assert.Contains(t, rendered, "code", "%s: %s", name, rendered)
+
+				if name == "own canvas" {
+					assert.NotEmpty(t, markdownSurfaces(rendered), "%s: %s", name, rendered)
+
+					continue
+				}
+				assert.Empty(t, markdownSurfaces(rendered), "%s: %s", name, rendered)
+			}
+		})
+	}
+}
+
+// TestMarkdownFencesPaintNoBlockSurface pins that a fence body never carries a
+// block fill: chroma clears its own background and glamour only applies the code
+// block's style to a block prefix the code block does not define.
+func TestMarkdownFencesPaintNoBlockSurface(t *testing.T) {
+	t.Parallel()
+
+	const fence = "```go\nx := 1\n```\n"
+
+	for _, entry := range builtinThemeEntries() {
+		theme := entry.theme
+		for _, stamped := range []colorTheme{
+			theme.forCanvas(!theme.isLight(), true),
+			theme.forCanvas(false, false),
+		} {
+			rendered, err := newMarkdownRenderer(1).render(fence, 60, stamped, false)
+			require.NoError(t, err)
+			assert.Empty(t, markdownSurfaces(rendered), "%s: %s", theme.id, rendered)
+		}
+	}
+}
+
+// TestMarkdownHeadingsPaintNoBackground pins that every heading level draws on
+// the terminal's canvas. Glamour's dark and light configs fill H1 with a fixed
+// indigo band, which no palette can follow and which was dark under every light
+// theme.
+func TestMarkdownHeadingsPaintNoBackground(t *testing.T) {
+	t.Parallel()
+
+	for _, entry := range builtinThemeEntries() {
+		theme := entry.theme
+		t.Run(theme.id, func(t *testing.T) {
+			t.Parallel()
+
+			for level := 1; level <= 6; level++ {
+				source := strings.Repeat("#", level) + " 说明\n\n正文"
+				for _, stamped := range []colorTheme{
+					theme.forCanvas(!theme.isLight(), true),
+					theme.forCanvas(false, false),
+				} {
+					rendered, err := newMarkdownRenderer(1).render(source, 60, stamped, false)
+					require.NoError(t, err)
+					assert.Contains(t, rendered, "说明")
+					assert.Empty(t, markdownSurfaces(rendered), "h%d: %s", level, rendered)
+				}
+			}
+		})
+	}
+}
+
+// TestMarkdownStyleKeepsChromaOutOfTheSharedRegistry pins the fix from
+// 10-08-theme-light-syntax. A style config carrying its own Chroma entries makes
+// glamour register them under one fixed name, "charm", and reuse whatever a first
+// render in the process registered, so a light theme inherited a dark theme's
+// token colors. No theme or colour mode may take that path again.
+func TestMarkdownStyleKeepsChromaOutOfTheSharedRegistry(t *testing.T) {
+	t.Parallel()
+
+	for _, entry := range builtinThemeEntries() {
+		theme := entry.theme
+		for _, noColor := range []bool{false, true} {
+			for _, stamped := range []colorTheme{
+				theme,
+				theme.forCanvas(!theme.isLight(), true),
+				theme.forCanvas(false, false),
+			} {
+				style := markdownStyle(stamped, noColor)
+				assert.Nil(t, style.CodeBlock.Chroma, "%s noColor=%v", theme.id, noColor)
+				assert.Nil(t, style.H1.BackgroundColor, "%s noColor=%v", theme.id, noColor)
+				assert.Nil(t, style.CodeBlock.BackgroundColor, "%s noColor=%v", theme.id, noColor)
+				if !stamped.codeSurface {
+					assert.Nil(t, style.Code.BackgroundColor, "%s noColor=%v", theme.id, noColor)
+				}
+			}
+		}
+	}
+}
+
+// TestMarkdownSurfaceStampSeparatesCacheEntries pins the render identity: the
+// canvas stamp decides a visible escape, so two stamps of one theme must not
+// share a cached document.
+func TestMarkdownSurfaceStampSeparatesCacheEntries(t *testing.T) {
+	t.Parallel()
+
+	renderer := newMarkdownRenderer(8)
+	const source = "text `code` text\n"
+
+	onCanvas, err := renderer.render(source, 60, themeLight.forCanvas(false, true), false)
+	require.NoError(t, err)
+	offCanvas, err := renderer.render(source, 60, themeLight.forCanvas(true, true), false)
+	require.NoError(t, err)
+
+	assert.NotEqual(t, onCanvas, offCanvas)
+	assert.NotEmpty(t, markdownSurfaces(onCanvas))
+	assert.Empty(t, markdownSurfaces(offCanvas))
+	require.Len(t, renderer.entries, 2)
+
+	again, err := renderer.render(source, 60, themeLight.forCanvas(false, true), false)
+	require.NoError(t, err)
+	assert.Equal(t, onCanvas, again, "each stamp keeps its own entry")
+	assert.Len(t, renderer.entries, 2)
+}
 
 // TestMarkdownSyntaxColoursFollowTheTheme pins the fence palette to the theme
 // rather than to whatever rendered first. A style config carrying its own chroma

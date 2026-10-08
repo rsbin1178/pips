@@ -336,6 +336,14 @@ func markdownStyle(theme colorTheme, noColor bool) glamouransi.StyleConfig {
 		style.CodeBlock.Chroma = nil
 		style.CodeBlock.Theme = markdownChromaTheme(theme)
 
+		// Markdown draws on the terminal's own canvas, so the inline-code fill is a
+		// surface claim about that canvas: it is painted only when the theme's own
+		// background family is the one the terminal reported. A mismatch and an
+		// unanswered background probe both leave the cell to the terminal.
+		if !theme.codeSurface {
+			style.Code.BackgroundColor = nil
+		}
+
 		if theme.id != themeDark.id && theme.id != themeLight.id {
 			palette := paletteFor(theme)
 			style.Text.Color = themeColorPointer(palette.workspace)
@@ -349,11 +357,19 @@ func markdownStyle(theme colorTheme, noColor bool) glamouransi.StyleConfig {
 			style.Link.Color = themeColorPointer(palette.session)
 			style.LinkText.Color = themeColorPointer(palette.session)
 			style.Code.Color = themeColorPointer(palette.code)
-			style.Code.BackgroundColor = themeColorPointer(palette.codeBackground)
+			if theme.codeSurface {
+				style.Code.BackgroundColor = themeColorPointer(palette.codeBackground)
+			}
 			style.CodeBlock.Color = themeColorPointer(palette.code)
-			style.CodeBlock.BackgroundColor = themeColorPointer(palette.codeBackground)
 		}
 	}
+
+	// Two fills reach Markdown from glamour's own configs and follow no palette.
+	// H1 carries a fixed indigo band in the dark and light configs alike; the code
+	// block's background is never painted, because chroma writes the fence body and
+	// clears its own background. Both are absolute surfaces, so neither survives.
+	style.H1.BackgroundColor = nil
+	style.CodeBlock.BackgroundColor = nil
 
 	// A divider between table body rows. The separator characters are already part of
 	// each style (─ for the colour styles, - for ASCII), so this only turns the rule

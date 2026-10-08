@@ -419,6 +419,28 @@ func TestThemeNoColorGeometryRemainsUnstyled(t *testing.T) {
 	assert.Equal(t, ansi.StringWidth(ansi.Strip(colored)), ansi.StringWidth(plain))
 }
 
+// TestThemeCanvasStampDecidesTheCodeSurface keeps the surface decision and the
+// render fingerprint in step: the stamp decides a visible escape, so it is part
+// of the identity the Markdown cache keys on, and re-stamping one canvas is a
+// no-op.
+func TestThemeCanvasStampDecidesTheCodeSurface(t *testing.T) {
+	t.Parallel()
+
+	dark := mustBuiltinTheme(themeIDDracula)
+	light := mustBuiltinTheme(themeIDSolarizedLight)
+
+	assert.False(t, dark.codeSurface, "an unstamped snapshot paints no surface")
+	assert.False(t, dark.forCanvas(false, true).codeSurface, "a mismatched canvas paints no surface")
+	assert.False(t, dark.forCanvas(true, false).codeSurface, "an unanswered probe paints no surface")
+	assert.True(t, dark.forCanvas(true, true).codeSurface, "a theme paints on its own canvas")
+	assert.True(t, light.forCanvas(false, true).codeSurface)
+
+	own := dark.forCanvas(true, true)
+	assert.NotEqual(t, dark.fingerprint, own.fingerprint, "the stamp is part of the render identity")
+	assert.Equal(t, own, own.forCanvas(true, true), "re-stamping one canvas changes nothing")
+	assert.NotEqual(t, own.fingerprint, dark.forCanvas(false, true).fingerprint)
+}
+
 func mustTheme(t *testing.T, registry themeRegistry, id string) colorTheme {
 	t.Helper()
 	if id == "auto-or-default-dark" {

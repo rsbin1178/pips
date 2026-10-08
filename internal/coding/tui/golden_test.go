@@ -49,8 +49,9 @@ func TestViewGoldenDigests(t *testing.T) {
 
 			controller := stubController{state: test.state}
 			model := readyModelWithController(t, controller, test.noColor)
-			model.theme = test.theme
-			model.composer.SetStyles(composerStyles(test.theme, test.noColor))
+			// applyTheme is the funnel that stamps the detected canvas onto the
+			// snapshot, so the digest covers the surface decision the renderer sees.
+			model.applyTheme(test.theme)
 			model.Update(tea.WindowSizeMsg{Width: test.width, Height: test.height})
 			model.resetScrollback()
 			stable := model.takeStableTimeline()

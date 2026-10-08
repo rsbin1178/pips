@@ -34,6 +34,27 @@ func TestThemeBackgroundMessagesOnlyChangeAutoSelection(t *testing.T) {
 	assert.Equal(t, "dracula", model.theme.id)
 }
 
+// TestThemeBackgroundMessageRestampsAnExplicitSelection pins that a detected
+// canvas revises the surfaces an explicit selection may paint without replacing
+// the selection itself.
+func TestThemeBackgroundMessageRestampsAnExplicitSelection(t *testing.T) {
+	t.Parallel()
+
+	model := readyModel(t, false)
+	model.themeSelection = "dracula"
+	model.applyTheme(model.themeForSelection(model.themeSelection))
+	require.Equal(t, "dracula", model.theme.id)
+	assert.False(t, model.theme.codeSurface, "the canvas is unknown before detection")
+
+	model.Update(tea.BackgroundColorMsg{Color: color.Black})
+	assert.Equal(t, "dracula", model.theme.id, "an explicit selection is never replaced")
+	assert.True(t, model.theme.codeSurface, "a dark canvas is the one dracula was built for")
+
+	model.Update(tea.BackgroundColorMsg{Color: color.White})
+	assert.Equal(t, "dracula", model.theme.id)
+	assert.False(t, model.theme.codeSurface, "a light canvas is not dracula's own")
+}
+
 func TestNoColorIgnoresBackgroundMessages(t *testing.T) {
 	t.Parallel()
 

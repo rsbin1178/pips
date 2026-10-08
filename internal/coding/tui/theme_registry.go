@@ -715,6 +715,19 @@ func newResolvedTheme(id, name string, background themeBackground, palette color
 	}
 }
 
+// fingerprintWithCodeSurface derives the render fingerprint of a snapshot
+// stamped for a canvas. Markdown caches on the fingerprint, so a stamped
+// snapshot must not collide with an unstamped one.
+func fingerprintWithCodeSurface(fingerprint string, codeSurface bool) string {
+	surface := "off"
+	if codeSurface {
+		surface = "on"
+	}
+	digest := sha256.Sum256([]byte(fingerprint + "\ncode_surface=" + surface))
+
+	return hex.EncodeToString(digest[:])
+}
+
 func mustBuiltinTheme(id string) colorTheme {
 	theme, ok := builtinThemeByID(id)
 	if !ok {

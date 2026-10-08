@@ -67,6 +67,11 @@ type colorTheme struct {
 	background  themeBackground
 	palette     colorPalette
 	fingerprint string
+	// codeSurface reports whether Markdown may paint the inline-code background
+	// on the canvas this snapshot will be drawn on. A surface fill is a claim
+	// about the canvas, so it is stamped from the detected terminal background
+	// rather than read from the palette; the zero value paints nothing.
+	codeSurface bool
 }
 
 // themeDark and themeLight retain the names used by existing renderers and
@@ -77,6 +82,23 @@ var (
 )
 
 func (theme colorTheme) isLight() bool { return theme.background == themeBackgroundLight }
+
+// forCanvas stamps the terminal background this snapshot will be drawn on.
+// Markdown paints a code surface only when the theme's own background family is
+// the one the terminal reported; an unknown terminal matches nothing, so a
+// surface that cannot be verified is a surface that is not painted. The
+// fingerprint changes with the stamp because the Markdown cache keys on it.
+func (theme colorTheme) forCanvas(dark, known bool) colorTheme {
+	codeSurface := known && (theme.background == themeBackgroundDark) == dark
+	if codeSurface == theme.codeSurface {
+		return theme
+	}
+
+	theme.codeSurface = codeSurface
+	theme.fingerprint = fingerprintWithCodeSurface(theme.fingerprint, codeSurface)
+
+	return theme
+}
 
 func (theme colorTheme) valid() bool {
 	return theme.id != "" && theme.fingerprint != "" &&
