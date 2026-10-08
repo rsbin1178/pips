@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/ai/internal/httpx"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -349,4 +350,141 @@ func TestBaseURLPathPrefixPreserved(t *testing.T) {
 	_, err := client.PostJSON(t.Context(), "chat/completions", nil, struct{}{}, nil, passErr)
 	require.NoError(t, err)
 	assert.Equal(t, "/compat/v1/chat/completions", gotPath)
+}
+
+func TestPostStreamIdleBoundAbortsASilentStream(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: first\n\n")
+
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			panic("httptest writer does not implement http.Flusher")
+		}
+
+		flusher.Flush()
+
+		// Stay open without sending anything, so only the client's idle bound
+		// can end this response.
+		select {
+		case <-time.After(300 * time.Millisecond):
+			_, _ = fmt.Fprint(w, "data: too-late\n\n")
+		case <-r.Context().Done():
+		}
+	}))
+	defer server.Close()
+
+	cfg := localConfig()
+	cfg.StreamIdleTimeout = 100 * time.Millisecond
+	client := httpx.New(cfg, server.URL)
+
+	body, err := client.PostStream(t.Context(), "stream", nil, struct{}{}, passErr)
+	require.NoError(t, err)
+
+	defer func() { _ = body.Close() }()
+
+	raw, err := io.ReadAll(body)
+
+	require.Error(t, err, "a silent stream has to fail rather than park")
+	require.ErrorIs(t, err, ai.ErrStreamIdle)
+	assert.Equal(t, "data: first\n\n", string(raw), "bytes delivered before the silence survive")
+}
+
+func TestPostStreamIdleBoundKeepsALongStreamAlive(t *testing.T) {
+	t.Parallel()
+
+	const (
+		events = 40
+		gap    = 10 * time.Millisecond
+	)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+
+		for i := range events {
+			_, _ = fmt.Fprintf(w, "data: %d\n\n", i)
+
+			flusher, ok := w.(http.Flusher)
+			if !ok {
+				panic("httptest writer does not implement http.Flusher")
+			}
+
+			flusher.Flush()
+
+			select {
+			case <-time.After(gap):
+			case <-r.Context().Done():
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	cfg := localConfig()
+	cfg.StreamIdleTimeout = 300 * time.Millisecond
+	client := httpx.New(cfg, server.URL)
+
+	body, err := client.PostStream(t.Context(), "stream", nil, struct{}{}, passErr)
+	require.NoError(t, err)
+
+	defer func() { _ = body.Close() }()
+
+	// The stream runs longer than the bound in total; because the bound is
+	// measured between reads, every event still arrives.
+	raw, err := io.ReadAll(body)
+
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), "data: 0\n\n")
+	assert.Contains(t, string(raw), "data: 39\n\n")
+}
+
+// The production transport negotiates HTTP/2, where unblocking a parked read by
+// closing the body is the http2 implementation's path rather than http1's.
+func TestPostStreamIdleBoundAbortsOverHTTP2(t *testing.T) {
+	t.Parallel()
+
+	var h2 atomic.Bool
+
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h2.Store(r.ProtoMajor == 2)
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: first\n\n")
+
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			panic("httptest writer does not implement http.Flusher")
+		}
+
+		flusher.Flush()
+
+		select {
+		case <-time.After(300 * time.Millisecond):
+		case <-r.Context().Done():
+		}
+	}))
+	server.EnableHTTP2 = true
+	server.StartTLS()
+
+	defer server.Close()
+
+	cfg := httpx.Config{
+		StreamIdleTimeout: 100 * time.Millisecond,
+		HTTPClient:        server.Client(),
+	}
+	client := httpx.New(cfg, server.URL)
+
+	body, err := client.PostStream(t.Context(), "stream", nil, struct{}{}, passErr)
+	require.NoError(t, err)
+
+	defer func() { _ = body.Close() }()
+
+	raw, err := io.ReadAll(body)
+
+	require.Error(t, err)
+	require.ErrorIs(t, err, ai.ErrStreamIdle)
+	assert.Equal(t, "data: first\n\n", string(raw))
+	assert.True(t, h2.Load(), "the abort has to cover the HTTP/2 path")
 }

@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/ai/internal/httpx"
@@ -165,6 +166,14 @@ func WithAllowPrivateIPs() Option {
 // WithMaxStreamLineSize raises the per-line SSE ceiling (default 1 MiB).
 func WithMaxStreamLineSize(n int) Option {
 	return func(o *options) { o.cfg.MaxStreamLineSize = n }
+}
+
+// WithStreamIdleTimeout bounds the silence between reads on a streaming
+// response before the stream is aborted with [ai.ErrStreamIdle]. It bounds an
+// idle gap rather than the response's total duration, so a long answer is never
+// cut short; zero or negative selects the default of ten minutes.
+func WithStreamIdleTimeout(d time.Duration) Option {
+	return func(o *options) { o.cfg.StreamIdleTimeout = d }
 }
 
 // New returns a Model bound to the given model ID (for example "gpt-6-astra").
