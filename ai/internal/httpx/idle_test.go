@@ -140,3 +140,33 @@ func TestNewIdleReadCloserWithoutABoundReturnsTheBody(t *testing.T) {
 	assert.True(t, ok, "an unguarded stream returns the original body")
 	assert.Same(t, body, got)
 }
+
+func TestIdleReadCloserCloseWinsOverTheBound(t *testing.T) {
+	t.Parallel()
+
+	body := newStallBody()
+	reader := newIdleReadCloser(body, time.Hour)
+
+	defer func() { _ = reader.Close() }()
+
+	// A read parked far inside the bound is released by Close, and the close is
+	// what it reports: a stream the caller closed is not a silent stream.
+	parked := make(chan error, 1)
+
+	go func() {
+		_, err := reader.Read(make([]byte, 16))
+		parked <- err
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+
+	require.NoError(t, reader.Close())
+
+	select {
+	case err := <-parked:
+		require.Error(t, err)
+		require.NotErrorIs(t, err, ai.ErrStreamIdle)
+	case <-time.After(30 * time.Second):
+		t.Fatal("Close did not release a parked read")
+	}
+}

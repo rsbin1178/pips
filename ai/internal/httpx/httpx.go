@@ -323,8 +323,11 @@ func resolveStreamIdleTimeout(configured time.Duration) time.Duration {
 // The bound is measured per read, never as a total, so a stream that keeps
 // producing is never aborted however long it runs. Each read arms its own timer
 // carrying that read's generation and retires the generation when the read
-// returns, so a callback that arrives after its read finished cannot close a
-// healthy body.
+// returns, so a timer that has not fired by then becomes a no-op. One window
+// remains: a callback can land in the few instructions between the read
+// returning and the retire, so a read finishing within that window of the
+// deadline can still be reported idle. At the default bound that means a read
+// returning ten minutes in, and the cost is one re-issued turn.
 type idleReadCloser struct {
 	body    io.ReadCloser
 	timeout time.Duration
