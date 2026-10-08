@@ -41,7 +41,8 @@ const (
 		ansi.ResetModeMouseExtUtf8 +
 		ansi.ResetModeMouseExtSgr +
 		ansi.ResetModeMouseExtUrxvt +
-		ansi.ResetModeMouseExtSgrPixel
+		ansi.ResetModeMouseExtSgrPixel +
+		ansi.ResetModeLightDark
 )
 
 var errInvalidOptions = errors.New("coding tui: invalid options")

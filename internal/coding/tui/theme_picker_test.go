@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/rsbin1178/pips/internal/coding/config"
 	"github.com/stretchr/testify/assert"
@@ -186,6 +187,50 @@ func TestThemePickerAsksForTheCanvasWhenItOpens(t *testing.T) {
 	plain := readyModel(t, true)
 	assert.Nil(t, plain.openThemePicker())
 	assert.False(t, plain.themeBackgroundKnown)
+}
+
+// TestColorSchemeReportReResolvesAuto pins the desktop-appearance signal: a
+// terminal that reports the light/dark extension re-resolves auto, keeps an
+// explicit selection, and then asks for the terminal's own background, which is
+// what the surfaces and the marks describe.
+func TestColorSchemeReportReResolvesAuto(t *testing.T) {
+	t.Parallel()
+
+	model := readyModel(t, false)
+	require.Equal(t, config.ThemeAuto, model.themeSelection)
+
+	_, command := model.Update(uv.DarkColorSchemeEvent{})
+	assert.Equal(t, "default-dark", model.theme.id)
+	assert.Contains(t, commandMessages(t, command), tea.RequestBackgroundColor())
+
+	_, _ = model.Update(uv.LightColorSchemeEvent{})
+	assert.Equal(t, "default-light", model.theme.id)
+
+	model.themeSelection = "dracula"
+	model.applyTheme(model.themeForSelection(model.themeSelection))
+	_, _ = model.Update(uv.LightColorSchemeEvent{})
+	assert.Equal(t, "dracula", model.theme.id, "an explicit selection is never replaced")
+	assert.False(t, model.theme.codeSurface, "a light appearance is not dracula's canvas")
+
+	// NO_COLOR ignores the report, exactly as it ignores the background answer.
+	plain := readyModel(t, true)
+	before := plain.theme.id
+	_, command = plain.Update(uv.DarkColorSchemeEvent{})
+	assert.Nil(t, command)
+	assert.False(t, plain.themeBackgroundKnown)
+	assert.Equal(t, before, plain.theme.id)
+}
+
+// TestInitEnablesColorSchemeReports pins that the startup sequence asks the
+// terminal to report appearance changes, and that a NO_COLOR run does not.
+func TestInitEnablesColorSchemeReports(t *testing.T) {
+	t.Parallel()
+
+	model := readyModel(t, false)
+	assert.Contains(t, commandMessages(t, model.Init()), tea.RawMsg{Msg: ansi.SetModeLightDark})
+
+	plain := readyModel(t, true)
+	assert.NotContains(t, commandMessages(t, plain.Init()), tea.RawMsg{Msg: ansi.SetModeLightDark})
 }
 
 func TestNoColorIgnoresBackgroundMessages(t *testing.T) {
