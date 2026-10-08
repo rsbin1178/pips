@@ -10,6 +10,9 @@ file is missing the workflow warns and falls back to GitHub's generated notes.
   default, and the English section opens with a link to the Chinese one.
 - Write prose only. The workflow appends the `Full Changelog` compare link, so the file does not
   repeat it, and there is nothing to update if the previous tag is not what you expected.
+- Write plainly. State what changed and what it costs. No "the largest change in the release", no
+  adjectives selling the release, no rhetorical framing of a fix. If a sentence would look out of place
+  in the repository's own docs, it does not belong here.
 - Group by what a user gets, not by commit type. Say what changed, what it means for them, and how it
   was verified; leave internal refactors out unless they change behaviour.
 - Be honest about limits: a fix that covers one platform, a bound that is a ceiling rather than a
@@ -30,6 +33,12 @@ file is missing the workflow warns and falls back to GitHub's generated notes.
 curl -fsSL https://raw.githubusercontent.com/rsbin1178/pips/main/install.sh | sh
 ```
 
+Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/rsbin1178/pips/main/install.ps1 | iex
+```
+
 ## <area>
 
 - <what changed, and what it means>
@@ -48,6 +57,12 @@ curl -fsSL https://raw.githubusercontent.com/rsbin1178/pips/main/install.sh | sh
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/rsbin1178/pips/main/install.sh | sh
+```
+
+Windows（PowerShell）：
+
+```powershell
+irm https://raw.githubusercontent.com/rsbin1178/pips/main/install.ps1 | iex
 ```
 
 ## <领域>
