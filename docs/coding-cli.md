@@ -756,15 +756,33 @@ IDs:
 - `gruvbox-dark`;
 - `catppuccin-mocha`;
 - `one-dark`;
-- `solarized-light`.
+- `solarized-light`;
+- `terminal` — the terminal-native palette: it borrows your profile's own
+  16-color slots and default foreground, so it stays readable on a light and a
+  dark background and paints no surface of its own.
 
 Open the command picker with `/` and choose `/theme`. The picker lists `auto`,
 built-ins, and discovered user themes in stable order. Press Enter to apply a
 selection immediately; Esc cancels. `auto` starts with the dark default and
 then follows Bubble Tea's terminal background detection. An explicit ID is
-not changed by later background messages. Theme changes update the managed
+never replaced by later background messages; a detected background does decide
+which surfaces the theme may paint, so an explicit selection is re-stamped
+without changing the ID. Theme changes update the managed
 TUI view, input styles, Markdown rendering, and theme-separated Markdown
 cache entries without restarting the session.
+
+The picker marks every row whose declared background is the opposite of the
+detected terminal background — a light palette inside a dark terminal renders
+body text at roughly 1:1 contrast — and says which background it detected. `auto`
+is never marked, `terminal` fits either background, and nothing is marked until
+the terminal answers the background probe.
+
+Markdown draws on the terminal's own canvas. No heading paints a background, a
+code fence paints no block background, and the inline-code fill is painted only
+when the theme's own background is the one the terminal reported, so a light
+theme inside a dark terminal drops the fill instead of drawing a bright pill.
+A fence keeps only the token colors of its bundled syntax palette; a `diff`
+fence therefore still shows its added and removed fills.
 
 All TUI selections are stored together in the active configuration file under
 `[tui]`:
@@ -1051,7 +1069,11 @@ diagnostic = "#81A1C1"
 
 `schema` is required. `name`, `inherits`, `background`, and palette fields are
 optional; omitted values inherit from the parent, or from the default dark or
-light built-in selected by `background`. Colors accept only `#RGB` and
+light built-in selected by `background`. `background` accepts `dark` and
+`light`; the built-in `terminal` declares `any` instead, and cannot be inherited
+because a palette that borrows the terminal's own slots has no hex form.
+`code_background` is the inline-code fill and is painted only while the theme's
+own background matches the detected terminal. Colors accept only `#RGB` and
 `#RRGGBB`. IDs use lowercase letters, digits, and hyphens, are at most 32
 bytes, and cannot be `auto`. Invalid files are skipped individually and do not
 prevent startup. Inheritance supports built-ins and other user themes, with a
