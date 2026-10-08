@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"sync"
 	"testing"
 
+	"github.com/rsbin1178/pips/agent/harness"
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding/config"
 	"github.com/rsbin1178/pips/internal/coding/planmode"
@@ -118,6 +120,68 @@ func TestRuntimeReissuesInterruptedStreamAndReportsTheWait(t *testing.T) {
 		"the committed answer is the re-issue's own answer, not a glued fragment")
 
 	require.NoError(t, runtime.Close(t.Context()))
+}
+
+// TestRuntimePersistsRetryTallyInTheInteractionJournal covers the gap this
+// change exists for: a retry is live state, so without a durable tally the only
+// way to know how much retrying an interaction needed was to watch it happen.
+func TestRuntimePersistsRetryTallyInTheInteractionJournal(t *testing.T) {
+	t.Parallel()
+
+	base := t.TempDir()
+	model := &interruptedRuntimeModel{failure: io.ErrUnexpectedEOF, reply: "recovered"}
+
+	first := openTestRuntimeAt(t, base, SessionTarget{}, model)
+	collectRuntimeEvents(t, first.Prompt(t.Context(), ai.UserText("hello")))
+
+	sessionID := first.handle.Metadata().ID
+	require.NoError(t, first.Close(t.Context()))
+
+	// Reopen rather than reading the live runtime's path: the tally has to be
+	// durable, not merely in memory.
+	second := openTestRuntimeAt(t, base, SessionTarget{ID: sessionID}, model)
+
+	tally, terminals := recordedRetryTally(t, second.journal.store.Path())
+
+	assert.Equal(t, 1, terminals, "one interaction writes one terminal record")
+	assert.Equal(t, 1, tally.Retries)
+	assert.Equal(t, map[string]int{"stream ended early": 1}, tally.RetryReasons)
+
+	require.NoError(t, second.Close(t.Context()))
+}
+
+// recordedRetryTally reads the retry accounting off the most recent terminal
+// interaction record in a durable session path, and reports how many terminal
+// records the path holds.
+func recordedRetryTally(t *testing.T, path []harness.Entry) (interactionTally, int) {
+	t.Helper()
+
+	var (
+		tally     interactionTally
+		terminals int
+		found     bool
+	)
+
+	for entry := range slices.Values(path) {
+		if entry.Kind != harness.KindCustom || entry.Custom != interactionCustomType {
+			continue
+		}
+
+		record, err := decodeInteractionRecord(entry.Data)
+		require.NoError(t, err)
+
+		if record.Event != interactionTerminalEvent {
+			continue
+		}
+
+		terminals++
+		tally = interactionTally{Retries: record.Retries, RetryReasons: record.RetryReasons}
+		found = true
+	}
+
+	require.True(t, found, "the durable path holds a terminal interaction record")
+
+	return tally, terminals
 }
 
 // abandonedRuntimeModel streams a partial answer and then fails with a

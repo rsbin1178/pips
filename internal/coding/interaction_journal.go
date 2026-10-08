@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 
 	"github.com/rsbin1178/pips/agent"
@@ -20,6 +21,14 @@ const (
 	// abandoned provisional answer. It is a second custom type beside the
 	// interaction journal so an old session without it still replays.
 	incompleteCustomType = "pips.coding.incomplete/v1alpha1"
+	// maxRetryReasons bounds the distinct reasons one interaction's retry tally
+	// may name. ai.retryReason produces a closed set of six, so this is a
+	// corruption guard rather than a product limit.
+	maxRetryReasons = 16
+	// maxRetryTally bounds one interaction's retry count, for the same reason: a
+	// terminal record that failed validation would make the whole journal
+	// unreplayable, so the tally is capped where it is accumulated.
+	maxRetryTally = 1 << 20
 )
 
 type interactionJournalEvent string
@@ -36,6 +45,56 @@ type interactionRecord struct {
 	Stop          agent.StopReason        `json:"stop,omitempty"`
 	Usage         *TokenUsage             `json:"usage,omitempty"`
 	DurationMS    int64                   `json:"duration_ms,omitempty"`
+	// Retries and RetryReasons are the interaction's retry accounting. They are
+	// a durable diagnostic rather than transcript state: they answer how much
+	// retrying an interaction needed and why, without a frontend having watched
+	// it live. A session written before they existed simply omits them.
+	Retries      int            `json:"retries,omitempty"`
+	RetryReasons map[string]int `json:"retry_reasons,omitempty"`
+}
+
+// interactionTally is the retry accounting one interaction accumulated: the
+// total number of retries and a breakdown by the short, content-free reason the
+// retry notice carried. A notice may omit its reason, so the breakdown can be a
+// subset of the count but never exceeds it.
+type interactionTally struct {
+	Retries      int
+	RetryReasons map[string]int
+}
+
+// clone returns a defensive copy, so a recorded breakdown cannot be mutated
+// through a snapshot a caller still holds.
+func (tally interactionTally) clone() interactionTally {
+	if len(tally.RetryReasons) == 0 {
+		return interactionTally{Retries: tally.Retries}
+	}
+
+	reasons := make(map[string]int, len(tally.RetryReasons))
+	maps.Copy(reasons, tally.RetryReasons)
+
+	return interactionTally{Retries: tally.Retries, RetryReasons: reasons}
+}
+
+// validInteractionTally bounds a tally the way the journal bounds every other
+// durable field, so a corrupt record is rejected rather than replayed.
+func validInteractionTally(tally interactionTally) bool {
+	if tally.Retries < 0 || tally.Retries > maxRetryTally ||
+		len(tally.RetryReasons) > maxRetryReasons {
+		return false
+	}
+
+	total := 0
+
+	for reason, count := range tally.RetryReasons {
+		if !validBoundedText(reason, maxDiagnosticMessage, false) ||
+			count <= 0 || count > maxRetryTally {
+			return false
+		}
+
+		total += count
+	}
+
+	return total <= tally.Retries
 }
 
 type interactionStore interface {
@@ -89,6 +148,7 @@ func (journal *interactionJournal) complete(
 	stop agent.StopReason,
 	usage TokenUsage,
 	durationMillis int64,
+	tally interactionTally,
 ) error {
 	if err := validateEventID("interaction id", interactionID, true); err != nil {
 		return err
@@ -106,9 +166,16 @@ func (journal *interactionJournal) complete(
 		return invalidEvent("invalid terminal interaction accounting")
 	}
 
+	if !validInteractionTally(tally) {
+		return invalidEvent("invalid terminal interaction retry tally")
+	}
+
+	tally = tally.clone()
+
 	return journal.append(interactionRecord{
 		Event: interactionTerminalEvent, InteractionID: interactionID, Outcome: outcome,
 		Stop: stop, Usage: &usage, DurationMS: durationMillis,
+		Retries: tally.Retries, RetryReasons: tally.RetryReasons,
 	})
 }
 
@@ -214,7 +281,8 @@ func decodeInteractionRecord(data ai.JSON) (interactionRecord, error) {
 
 	switch record.Event {
 	case interactionStartedEvent:
-		if record.Outcome != "" || record.Stop != "" || record.Usage != nil || record.DurationMS != 0 {
+		if record.Outcome != "" || record.Stop != "" || record.Usage != nil || record.DurationMS != 0 ||
+			record.Retries != 0 || record.RetryReasons != nil {
 			return interactionRecord{}, errors.New("started record has terminal fields")
 		}
 	case interactionTerminalEvent:
@@ -235,7 +303,11 @@ func validTerminalInteractionRecord(record interactionRecord) bool {
 	}
 
 	return validTokenUsage(*record.Usage) && record.DurationMS >= 0 &&
-		record.DurationMS <= maxEventDurationMS
+		record.DurationMS <= maxEventDurationMS &&
+		validInteractionTally(interactionTally{
+			Retries:      record.Retries,
+			RetryReasons: record.RetryReasons,
+		})
 }
 
 // incompleteReplyRecord is the durable form of one [IncompleteReply]. It is

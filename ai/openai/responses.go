@@ -43,14 +43,28 @@ func responsesFailure(provider ai.Provider, e *responsesError, raw []byte) error
 		Raw:      raw,
 	}
 
-	switch e.Code {
-	case "rate_limit_exceeded":
-		return apiErr.WithSentinel(ai.ErrRateLimited)
-	case "server_error":
-		return apiErr.WithSentinel(ai.ErrOverloaded)
-	default:
-		return apiErr
+	if sentinel := responsesErrorClass(e.Code, e.Type); sentinel != nil {
+		return apiErr.WithSentinel(sentinel)
 	}
+
+	return apiErr
+}
+
+// responsesErrorClass maps the class values a provider may use onto the
+// provider-neutral sentinels. The Responses dialect names the class in the code,
+// while the nested shape a router sends may carry a more specific code beside the
+// family in the type, so every candidate is tried and the first known class wins.
+func responsesErrorClass(values ...string) error {
+	for _, value := range values {
+		switch value {
+		case "rate_limit_exceeded":
+			return ai.ErrRateLimited
+		case "server_error":
+			return ai.ErrOverloaded
+		}
+	}
+
+	return nil
 }
 
 func (m *Model) streamResponses(ctx context.Context, req ai.Request) ai.Stream {
@@ -158,18 +172,31 @@ func (d *responsesStreamState) handleFailed(ev responsesStreamEvent, yield func(
 
 // streamError builds an *ai.Error for a Responses mid-stream error event,
 // wrapping a class sentinel when the error code identifies one so errors.Is
-// behaves the same as on the HTTP-status path.
+// behaves the same as on the HTTP-status path. It accepts both shapes the event
+// arrives in: the dialect's top-level code and message, and the nested object a
+// router sends, preferring the top level when both are present.
 func streamError(provider ai.Provider, ev responsesStreamEvent) error {
 	apiErr := &ai.Error{Provider: provider, Code: ev.Code, Message: ev.Message}
+	classes := []string{ev.Code}
 
-	switch ev.Code {
-	case "rate_limit_exceeded":
-		return apiErr.WithSentinel(ai.ErrRateLimited)
-	case "server_error":
-		return apiErr.WithSentinel(ai.ErrOverloaded)
-	default:
-		return apiErr
+	if ev.Error != nil {
+		if apiErr.Code == "" {
+			apiErr.Code = ev.Error.Code
+		}
+
+		if apiErr.Message == "" {
+			apiErr.Message = ev.Error.Message
+		}
+
+		apiErr.Type = ev.Error.Type
+		classes = append(classes, ev.Error.Code, ev.Error.Type)
 	}
+
+	if sentinel := responsesErrorClass(classes...); sentinel != nil {
+		return apiErr.WithSentinel(sentinel)
+	}
+
+	return apiErr
 }
 
 func (d *responsesStreamState) handleCreated(ev responsesStreamEvent, yield func(ai.StreamEvent, error) bool) bool {

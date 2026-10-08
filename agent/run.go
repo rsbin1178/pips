@@ -634,6 +634,7 @@ func (r *run) callTurn(
 	msgs []ai.Message,
 ) (resp *ai.Response, stopped bool, err error) {
 	recovery := r.agent.cfg.streamRecovery
+	window := r.agent.cfg.streamRecoveryWindow
 
 	// prefix accumulates the text retained across failed attempts; a non-empty
 	// prefix switches every later attempt to the continuation request.
@@ -644,6 +645,10 @@ func (r *run) callTurn(
 		prefix     string
 		havePrefix bool
 		fellBack   bool
+		// episodeStart marks when the first re-issue was scheduled, which is what
+		// the recovery window is measured from: a slow first attempt that
+		// succeeds must not consume it.
+		episodeStart time.Time
 	)
 
 	for attempt := 0; ; attempt++ {
@@ -675,6 +680,8 @@ func (r *run) callTurn(
 		// honoured, so the turn drops the fragment and answers from the start.
 		abandonPrefix := false
 
+		windowSpent := !episodeStart.IsZero() && window > 0 && time.Since(episodeStart) >= window
+
 		switch {
 		case err == nil && havePrefix && !fellBack && continuationEmpty(resp):
 			// The provider accepted the continuation and added nothing.
@@ -692,7 +699,8 @@ func (r *run) callTurn(
 			// costs the work already done, but the turn's own request still
 			// works and a dead turn costs more.
 			abandonPrefix = true
-		case !produced || attempt >= recovery.attempts || !ai.IsRetryable(err) || ctx.Err() != nil:
+		case !produced || attempt >= recovery.attempts || !ai.IsRetryable(err) || ctx.Err() != nil ||
+			windowSpent:
 			// Give up. Whatever text the failing attempt produced is reported as
 			// an explicitly incomplete reply, whether the turn was continuing or
 			// regenerating: a fragment the consumer saw must never vanish without
@@ -718,6 +726,10 @@ func (r *run) callTurn(
 
 			return resp, false, err
 		default:
+			if episodeStart.IsZero() {
+				episodeStart = time.Now()
+			}
+
 			if retained, ok := retainPrefix(resp); ok {
 				if recovery.mode == recoveryContinue && !fellBack {
 					// A continuation extends one answer, so its fragment
