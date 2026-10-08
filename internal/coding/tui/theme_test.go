@@ -147,8 +147,8 @@ func TestBuiltinThemeRegistryIsStableAndComplete(t *testing.T) {
 		assert.NotNil(t, entry.theme.palette.diagnostic)
 	}
 	assert.Equal(t, []string{
-		"default-dark", "default-light", "dracula", "nord", "gruvbox-dark",
-		"catppuccin-mocha", "one-dark", "solarized-light", "terminal",
+		"default-dark", "default-light", "terminal", "catppuccin-mocha",
+		"dracula", "gruvbox-dark", "nord", "one-dark", "solarized-light",
 	}, ids)
 	assert.Equal(t, themeDark, mustTheme(t, registry, "default-dark"))
 	assert.Equal(t, themeLight, mustTheme(t, registry, "default-light"))

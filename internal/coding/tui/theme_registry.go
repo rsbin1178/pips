@@ -745,9 +745,12 @@ func mustBuiltinTheme(id string) colorTheme {
 }
 
 func builtinThemeEntries() []themeEntry {
+	// Grouped by family, light variant first, so the picker reads as a catalogue
+	// once a family contributes more than one palette.
 	ids := []string{
-		themeIDDefaultDark, themeIDDefaultLight, themeIDDracula, themeIDNord, themeIDGruvboxDark,
-		themeIDCatppuccinMocha, themeIDOneDark, themeIDSolarizedLight, themeIDTerminal,
+		themeIDDefaultDark, themeIDDefaultLight, themeIDTerminal,
+		themeIDCatppuccinMocha, themeIDDracula, themeIDGruvboxDark, themeIDNord,
+		themeIDOneDark, themeIDSolarizedLight,
 	}
 	entries := make([]themeEntry, 0, len(ids))
 	for _, id := range ids {
@@ -761,50 +764,76 @@ func builtinThemeEntries() []themeEntry {
 	return entries
 }
 
+// builtinThemePalettes and builtinThemeMetadataByID hold every built-in that is
+// expressed as theme-file values. The tables are package-level so that adding a
+// theme stays data, and so that resolving one does not rebuild a map; a palette
+// that borrows the terminal's own colours lives in canvasProofBuiltins instead.
+var builtinThemePalettes = map[string]themePaletteStrings{
+	themeIDDefaultDark: {
+		separator: "#3F4752", composerPrompt: "#6E7681", muted: "#8B949E", workspace: "#E6EDF3",
+		session: "#5FAFFF", model: "#AF87FF", idle: "#5FD7AF", active: "#FFD75F", warning: "#FFAF5F",
+		error: "#FF5F5F", change: "#87D75F", code: "#E6EDF3", codeBackground: "#161B22", diagnostic: "#7D8B99",
+	},
+	themeIDDefaultLight: {
+		separator: "#D0D7DE", composerPrompt: "#57606A", muted: "#57606A", workspace: "#24292F",
+		session: "#0969DA", model: "#8250DF", idle: "#1A7F37", active: "#9A6700", warning: "#BC4C00",
+		error: "#CF222E", change: "#1A7F37", code: "#24292F", codeBackground: "#F6F8FA", diagnostic: "#586069",
+	},
+	themeIDDracula: {
+		separator: "#44475A", composerPrompt: "#6272A4", muted: "#6272A4", workspace: "#F8F8F2",
+		session: "#8BE9FD", model: "#BD93F9", idle: "#50FA7B", active: "#F1FA8C", warning: "#FFB86C",
+		error: "#FF5555", change: "#FF79C6", code: "#F8F8F2", codeBackground: "#282A36", diagnostic: "#6272A4",
+	},
+	themeIDNord: {
+		separator: "#4C566A", composerPrompt: "#81A1C1", muted: "#81A1C1", workspace: "#D8DEE9",
+		session: "#88C0D0", model: "#B48EAD", idle: "#A3BE8C", active: "#EBCB8B", warning: "#D08770",
+		error: "#BF616A", change: "#8FBCBB", code: "#D8DEE9", codeBackground: "#2E3440", diagnostic: "#81A1C1",
+	},
+	themeIDGruvboxDark: {
+		separator: "#504945", composerPrompt: "#928374", muted: "#928374", workspace: "#EBDBB2",
+		session: "#83A598", model: "#D3869B", idle: "#B8BB26", active: "#FABD2F", warning: "#FE8019",
+		error: "#FB4934", change: "#8EC07C", code: "#EBDBB2", codeBackground: "#282828", diagnostic: "#928374",
+	},
+	themeIDCatppuccinMocha: {
+		separator: "#45475A", composerPrompt: "#A6ADC8", muted: "#A6ADC8", workspace: "#CDD6F4",
+		session: "#89DCEB", model: "#CBA6F7", idle: "#A6E3A1", active: "#F9E2AF", warning: "#FAB387",
+		error: "#F38BA8", change: "#94E2D5", code: "#CDD6F4", codeBackground: "#1E1E2E", diagnostic: "#A6ADC8",
+	},
+	themeIDOneDark: {
+		separator: "#3E4451", composerPrompt: "#5C6370", muted: "#5C6370", workspace: "#ABB2BF",
+		session: "#61AFEF", model: "#C678DD", idle: "#98C379", active: "#E5C07B", warning: "#D19A66",
+		error: "#E06C75", change: "#56B6C2", code: "#ABB2BF", codeBackground: "#282C34", diagnostic: "#5C6370",
+	},
+	themeIDSolarizedLight: {
+		separator: "#93A1A1", composerPrompt: "#839496", muted: "#839496", workspace: "#657B83",
+		session: "#268BD2", model: "#6C71C4", idle: "#859900", active: "#B58900", warning: "#CB4B16",
+		error: "#DC322F", change: "#2AA198", code: "#657B83", codeBackground: "#FDF6E3", diagnostic: "#839496",
+	},
+}
+
+// builtinThemeMetadata is what a built-in declares beside its palette.
+type builtinThemeMetadata struct {
+	name       string
+	background themeBackground
+}
+
+var builtinThemeMetadataByID = map[string]builtinThemeMetadata{
+	themeIDDefaultDark:     {name: "Default Dark", background: themeBackgroundDark},
+	themeIDDefaultLight:    {name: "Default Light", background: themeBackgroundLight},
+	themeIDDracula:         {name: "Dracula", background: themeBackgroundDark},
+	themeIDNord:            {name: "Nord", background: themeBackgroundDark},
+	themeIDGruvboxDark:     {name: "Gruvbox Dark", background: themeBackgroundDark},
+	themeIDCatppuccinMocha: {name: "Catppuccin Mocha", background: themeBackgroundDark},
+	themeIDOneDark:         {name: "One Dark", background: themeBackgroundDark},
+	themeIDSolarizedLight:  {name: "Solarized Light", background: themeBackgroundLight},
+}
+
 func builtinThemeDefinition(id string) (themeDefinition, bool) {
-	palettes := map[string]themePaletteStrings{
-		themeIDDefaultDark: {
-			separator: "#3F4752", composerPrompt: "#6E7681", muted: "#8B949E", workspace: "#E6EDF3",
-			session: "#5FAFFF", model: "#AF87FF", idle: "#5FD7AF", active: "#FFD75F", warning: "#FFAF5F",
-			error: "#FF5F5F", change: "#87D75F", code: "#E6EDF3", codeBackground: "#161B22", diagnostic: "#7D8B99",
-		},
-		themeIDDefaultLight: {
-			separator: "#D0D7DE", composerPrompt: "#57606A", muted: "#57606A", workspace: "#24292F",
-			session: "#0969DA", model: "#8250DF", idle: "#1A7F37", active: "#9A6700", warning: "#BC4C00",
-			error: "#CF222E", change: "#1A7F37", code: "#24292F", codeBackground: "#F6F8FA", diagnostic: "#586069",
-		},
-		themeIDDracula: {
-			separator: "#44475A", composerPrompt: "#6272A4", muted: "#6272A4", workspace: "#F8F8F2",
-			session: "#8BE9FD", model: "#BD93F9", idle: "#50FA7B", active: "#F1FA8C", warning: "#FFB86C",
-			error: "#FF5555", change: "#FF79C6", code: "#F8F8F2", codeBackground: "#282A36", diagnostic: "#6272A4",
-		},
-		themeIDNord: {
-			separator: "#4C566A", composerPrompt: "#81A1C1", muted: "#81A1C1", workspace: "#D8DEE9",
-			session: "#88C0D0", model: "#B48EAD", idle: "#A3BE8C", active: "#EBCB8B", warning: "#D08770",
-			error: "#BF616A", change: "#8FBCBB", code: "#D8DEE9", codeBackground: "#2E3440", diagnostic: "#81A1C1",
-		},
-		themeIDGruvboxDark: {
-			separator: "#504945", composerPrompt: "#928374", muted: "#928374", workspace: "#EBDBB2",
-			session: "#83A598", model: "#D3869B", idle: "#B8BB26", active: "#FABD2F", warning: "#FE8019",
-			error: "#FB4934", change: "#8EC07C", code: "#EBDBB2", codeBackground: "#282828", diagnostic: "#928374",
-		},
-		themeIDCatppuccinMocha: {
-			separator: "#45475A", composerPrompt: "#A6ADC8", muted: "#A6ADC8", workspace: "#CDD6F4",
-			session: "#89DCEB", model: "#CBA6F7", idle: "#A6E3A1", active: "#F9E2AF", warning: "#FAB387",
-			error: "#F38BA8", change: "#94E2D5", code: "#CDD6F4", codeBackground: "#1E1E2E", diagnostic: "#A6ADC8",
-		},
-		themeIDOneDark: {
-			separator: "#3E4451", composerPrompt: "#5C6370", muted: "#5C6370", workspace: "#ABB2BF",
-			session: "#61AFEF", model: "#C678DD", idle: "#98C379", active: "#E5C07B", warning: "#D19A66",
-			error: "#E06C75", change: "#56B6C2", code: "#ABB2BF", codeBackground: "#282C34", diagnostic: "#5C6370",
-		},
-		themeIDSolarizedLight: {
-			separator: "#93A1A1", composerPrompt: "#839496", muted: "#839496", workspace: "#657B83",
-			session: "#268BD2", model: "#6C71C4", idle: "#859900", active: "#B58900", warning: "#CB4B16",
-			error: "#DC322F", change: "#2AA198", code: "#657B83", codeBackground: "#FDF6E3", diagnostic: "#839496",
-		},
+	metadata, ok := builtinThemeMetadataByID[id]
+	if !ok {
+		return themeDefinition{}, false
 	}
-	values, ok := palettes[id]
+	values, ok := builtinThemePalettes[id]
 	if !ok {
 		return themeDefinition{}, false
 	}
@@ -812,16 +841,12 @@ func builtinThemeDefinition(id string) (themeDefinition, bool) {
 	if err != nil {
 		panic(err)
 	}
-	background := themeBackgroundDark
-	if id == themeIDDefaultLight || id == themeIDSolarizedLight {
-		background = themeBackgroundLight
-	}
-	name := map[string]string{
-		themeIDDefaultDark: "Default Dark", themeIDDefaultLight: "Default Light", themeIDDracula: "Dracula",
-		themeIDNord: "Nord", themeIDGruvboxDark: "Gruvbox Dark", themeIDCatppuccinMocha: "Catppuccin Mocha",
-		themeIDOneDark: "One Dark", themeIDSolarizedLight: "Solarized Light",
-	}[id]
-	return themeDefinition{id: id, name: name, background: &background, palette: paletteDefinitionFromStrings(paletteStringsFromPalette(palette))}, true
+	background := metadata.background
+
+	return themeDefinition{
+		id: id, name: metadata.name, background: &background,
+		palette: paletteDefinitionFromStrings(paletteStringsFromPalette(palette)),
+	}, true
 }
 
 func paletteDefinitionFromStrings(values themePaletteStrings) themePaletteDefinition {
