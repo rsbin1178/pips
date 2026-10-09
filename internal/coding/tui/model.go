@@ -222,6 +222,11 @@ type Model struct {
 	// model with no reasoning knob shows no suffix.
 	reasoningLevel    string
 	reasoningDeclared bool
+	// copiedNotice is the reserved band's copy confirmation. It is separate from
+	// statusNotice because a drag copy writes the clipboard alone: there is no
+	// file to name, so the status line has nothing to add.
+	copiedNotice    string
+	copiedNoticeSeq uint64
 	textSaveSeq          uint64
 	statusNotice         string
 	statusNoticeErr      bool
@@ -945,7 +950,15 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.setLayout()
 
 		return m, nil
-	case selectionRedrawMsg:
+	case copiedNoticeExpiredMsg:
+		if message.generation != m.copiedNoticeSeq {
+			return m, nil
+		}
+		m.copiedNotice = ""
+		m.setLayout()
+
+		return m, nil
+	case frameRedrawMsg:
 		return m, nil
 	case textSavedMsg:
 		if message.generation != m.textSaveSeq {
@@ -1292,7 +1305,7 @@ func (m *Model) updateReadyKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if key == keyEscape && m.selection.visible {
 		m.clearSelection()
 
-		return m, redrawSelection()
+		return m, redrawFrame()
 	}
 	if key == keyEscape && m.directAgent != nil && !m.directAgent.running &&
 		m.composer.Value() == "" {
@@ -1447,9 +1460,14 @@ func (m *Model) readyView() tea.View {
 	if notice := m.directAgentNotice(); notice != "" {
 		footer = append(footer, truncateHeight(notice, 1))
 	}
-	for range conversationGapHeight {
-		footer = append(footer, "")
-	}
+	// The reserved band occupies the row the frame used to leave blank here, so
+	// the Composer's position does not depend on whether the band has anything to
+	// say. It is part of the footer, which means it is already counted in the
+	// transcript's elastic height below. Whether the band affords a click is
+	// decided here, with the contents it draws, and recorded below.
+	bandHint := m.bandScrollHint()
+	bandFooterIndex := len(footer)
+	footer = append(footer, m.reservedBand())
 	composerFooterIndex := len(footer)
 	footer = append(footer, m.composerBand())
 	if m.picker.kind != pickerNone {
@@ -1495,6 +1513,7 @@ func (m *Model) readyView() tea.View {
 		parts = append(parts, timeline)
 	}
 	composerIndex := len(parts) + composerFooterIndex
+	bandIndex := len(parts) + bandFooterIndex
 	promptIndex := -1
 	if promptFooterIndex >= 0 {
 		promptIndex = len(parts) + promptFooterIndex
@@ -1508,11 +1527,19 @@ func (m *Model) readyView() tea.View {
 	// An over-tall frame keeps its tail, so whatever is dropped off the top is
 	// transcript rows and the hit map has to account for them.
 	dropped := clampFrameTailOffset(content, m.height)
-	view := m.presentationView(clampFrameTail(content, m.height))
+	transcriptVisible := max(0, transcriptRows-min(dropped, transcriptRows))
+	// The turn indicator is drawn into the top row of the frame rather than into a
+	// band of its own; see turn_indicator.go for why that row is the only free one,
+	// and why a frame with no visible transcript row draws none.
+	indicator := transcriptVisible > 0 && m.turnIndicatorShown()
+	content = m.drawTurnIndicator(clampFrameTail(content, m.height), indicator)
+	view := m.presentationView(content)
 	m.frameHit = frameHitMap{
-		painted:    m.sizeReady,
-		transcript: max(0, transcriptRows-min(dropped, transcriptRows)),
-		topDropped: min(dropped, transcriptRows),
+		painted:       m.sizeReady,
+		transcript:    transcriptVisible,
+		topDropped:    min(dropped, transcriptRows),
+		band:          m.bandRowOf(parts, bandIndex, dropped, bandHint != ""),
+		turnIndicator: indicator,
 	}
 	// presentationView installs the pointer handler for every frame, so the ready
 	// view only has to record where its transcript band sat.
@@ -1880,11 +1907,10 @@ func (m *Model) statusExtras() []string {
 	case m.historyOffered() && !m.transcriptScroll.follow:
 		extras = append(extras, "PgUp for older history")
 	}
-	// A paused reader needs to know that the newest output is off screen and how
-	// to get back to it; without this the viewport looks stuck.
-	if !m.transcriptScroll.follow && m.transcriptScroll.maxOffset() > 0 {
-		extras = append(extras, "scrolled · End for latest")
-	}
+	// A paused reader learns that the newest output is off screen from the arrow
+	// the reserved band draws under the transcript, and returns to it with End or
+	// a click on that band. The status line no longer repeats the hint: two
+	// surfaces saying the same thing compete for a narrow line.
 	if !m.options.NoColor {
 		style := lipgloss.NewStyle().Foreground(paletteFor(m.theme).muted)
 		for index := range extras {

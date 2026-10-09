@@ -237,7 +237,7 @@ func TestEscapeClearsTheSelectionBeforeCanceling(t *testing.T) {
 	require.NotNil(t, command)
 	messages := runCommandTree(t, command)
 	require.Len(t, messages, 1)
-	assert.IsType(t, selectionRedrawMsg{}, messages[0], "Escape closes the selection, not the session")
+	assert.IsType(t, frameRedrawMsg{}, messages[0], "Escape closes the selection, not the session")
 	assert.False(t, model.selection.visible)
 }
 

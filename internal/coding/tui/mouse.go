@@ -152,14 +152,25 @@ func (m *Model) wheelLines(message tea.MouseWheelMsg) (int, bool) {
 	}
 }
 
-// viewportOwnsPointer reports whether the managed transcript is the surface a
-// pointer may act on: the ready viewport is showing, nothing else owns input, and
-// the escape hatch is not holding the screen open for the terminal.
-func (m *Model) viewportOwnsPointer() bool {
-	return m.lifecycle == lifecycleReady && m.sizeReady && m.fullscreen() &&
+// readyViewOwnsPointer reports whether the ready frame is the one on screen: the
+// layout's own transcript band is what the pointer acts on, and nothing else
+// (a route, a prompt, a picker, the transcript escape hatch, an inline Team stage)
+// has taken the pointer or the keyboard.
+func (m *Model) readyViewOwnsPointer() bool {
+	return m.lifecycle == lifecycleReady && m.sizeReady &&
 		m.route.kind == routeNone && !m.teamRouteIsInline() &&
 		m.prompt.kind == promptNone && m.picker.kind == pickerNone &&
 		!m.transcriptMode.active
+}
+
+// viewportOwnsPointer reports whether the managed transcript is the surface a
+// pointer may act on as a selection: the ready viewport is showing, nothing else
+// owns input, and the escape hatch is not holding the screen open for the
+// terminal. The reserved band's arrow needs less than this — it is answered
+// wherever the ready frame is the one on screen — so it asks
+// [readyViewOwnsPointer] instead.
+func (m *Model) viewportOwnsPointer() bool {
+	return m.readyViewOwnsPointer() && m.fullscreen()
 }
 
 // mouseReportingEnabled reports whether this frame asked the terminal for mouse
