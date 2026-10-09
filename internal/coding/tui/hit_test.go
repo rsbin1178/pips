@@ -109,11 +109,26 @@ func TestFrameHitMapMatchesThePaintedFrame(t *testing.T) {
 		"the band fills its allocation when the store is longer")
 
 	// The band is the top of the frame, so the first painted row is the window's
-	// first row.
+	// first row. The turn indicator is the one thing the frame draws over that row,
+	// so its span is checked separately and the rest of the row must match.
 	frameRows := strings.Split(view.Content, "\n")
 	windowRows := strings.Split(model.transcriptScroll.visible(), "\n")
 	require.NotEmpty(t, windowRows)
-	assert.Equal(t, windowRows[0], strings.TrimRight(frameRows[0], " "),
+
+	withoutIndicator := func(row string) string { return row }
+	if model.frameHit.turnIndicator {
+		_, left, right, ok := model.turnIndicator()
+		require.True(t, ok)
+		assert.Equal(t, turnIndicatorIcon, ansi.Strip(ansi.Cut(frameRows[0], left, right)),
+			"the frame draws the indicator in the transcript's first row")
+		withoutIndicator = func(row string) string {
+			return ansi.Truncate(row, left, "") + ansi.TruncateLeft(row, right, "")
+		}
+	}
+
+	assert.Equal(t,
+		strings.TrimRight(withoutIndicator(windowRows[0]), " "),
+		strings.TrimRight(withoutIndicator(frameRows[0]), " "),
 		"the band is painted at the top of the frame")
 
 	first, ok := model.entryRowAt(0)

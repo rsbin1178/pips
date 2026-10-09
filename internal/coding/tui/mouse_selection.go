@@ -34,20 +34,20 @@ type selectionState struct {
 	visible bool
 }
 
-// selectionRedrawMsg asks for one more frame after a pointer gesture changed the
-// selection. Mouse handling happens outside Update, and the renderer only
-// repaints when a message comes back from the handler.
-type selectionRedrawMsg struct{}
+// frameRedrawMsg asks for one more frame after a pointer gesture changed
+// something the frame draws. Mouse handling happens outside Update, and the
+// renderer only repaints when a message comes back from the handler.
+type frameRedrawMsg struct{}
 
 // selectionStyle paints the selected cells. It is the same reverse-video
 // treatment the find box gives a match — both mean "this text is addressed" — and
 // NO_COLOR drops both.
 var selectionStyle = lipgloss.NewStyle().Reverse(true)
 
-// redrawSelection returns the no-op command that makes the renderer paint the
+// redrawFrame returns the no-op command that makes the renderer paint the
 // gesture's result.
-func redrawSelection() tea.Cmd {
-	return func() tea.Msg { return selectionRedrawMsg{} }
+func redrawFrame() tea.Cmd {
+	return func() tea.Msg { return frameRedrawMsg{} }
 }
 
 // handleSelectionMouse routes a pointer gesture that is not a wheel notch. A
@@ -68,7 +68,7 @@ func (m *Model) handleSelectionMouse(message tea.MouseMsg) tea.Cmd {
 		point := selectionPoint{row: row, column: max(0, message.X)}
 		m.selection = selectionState{anchor: point, focus: point, dragging: true, visible: true}
 
-		return redrawSelection()
+		return redrawFrame()
 	case tea.MouseMotionMsg:
 		if !m.selection.dragging {
 			return nil
@@ -76,7 +76,7 @@ func (m *Model) handleSelectionMouse(message tea.MouseMsg) tea.Cmd {
 
 		m.selection.focus = selectionPoint{row: m.selectionRowAt(message.Y), column: max(0, message.X)}
 
-		return redrawSelection()
+		return redrawFrame()
 	case tea.MouseReleaseMsg:
 		if !m.selection.dragging || message.Button != tea.MouseLeft {
 			return nil
@@ -102,7 +102,9 @@ func (m *Model) selectionRowAt(frameRow int) int {
 }
 
 // finishSelection ends a drag: a press and release on one cell is a click and
-// activates the entry, anything longer is a selection and is copied.
+// activates the entry, anything longer is a selection and is copied to the
+// clipboard alone. The highlight is left standing until the copy reports back, so
+// a copy that could not be made keeps the text it addressed visible.
 func (m *Model) finishSelection() tea.Cmd {
 	selection := m.selection
 	m.selection.dragging = false
@@ -113,14 +115,7 @@ func (m *Model) finishSelection() tea.Cmd {
 		return m.activateEntry(selection.anchor.row)
 	}
 
-	text := m.selectionText()
-	if strings.TrimSpace(text) == "" {
-		m.selection = selectionState{}
-
-		return redrawSelection()
-	}
-
-	return tea.Batch(m.saveText(TextKindCopy, "", text, true), redrawSelection())
+	return tea.Batch(m.copySelection(), redrawFrame())
 }
 
 // clearSelection drops the highlight, which is what Escape and a capture change

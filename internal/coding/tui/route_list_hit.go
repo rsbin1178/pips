@@ -143,13 +143,13 @@ func (m *Model) routeListMouse(message tea.MouseMsg) (tea.Cmd, bool) {
 		if tab, ok := m.agentsRouteTabAt(click.Y, click.X); ok {
 			m.selectAgentsRouteTab(tab)
 
-			return redrawSelection(), true
+			return redrawFrame(), true
 		}
 	}
 	if index, ok := m.routeListRowAt(click.Y, click.X); ok {
 		m.selectRouteListRow(index)
 
-		return redrawSelection(), true
+		return redrawFrame(), true
 	}
 
 	return nil, true

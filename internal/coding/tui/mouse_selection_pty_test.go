@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"github.com/charmbracelet/x/vt"
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding/config"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -31,8 +33,9 @@ func sgrMouse(button, column, row int, release bool) string {
 }
 
 // TestPTYDragSelectCopiesTheRows is the end-to-end proof of the gesture: a real
-// terminal sends press, drag and release, and the addressed rows reach both the
-// OSC 52 clipboard request and the fallback file.
+// terminal sends press, drag and release, and the addressed rows reach the OSC 52
+// clipboard request. The fallback saver must never run: a drag is a transient
+// reading gesture, so it leaves no file behind even when one is configured.
 func TestPTYDragSelectCopiesTheRows(t *testing.T) {
 	const testName = "TestPTYDragSelectCopiesTheRows"
 	if os.Getenv("PIPS_TUI_SELECTION_PTY_HELPER") == "1" {
@@ -111,15 +114,21 @@ func TestPTYDragSelectCopiesTheRows(t *testing.T) {
 		return strings.Contains(h.output.String(), payload)
 	}, 30*time.Second, 10*time.Millisecond, "helper output: %s", h.output.String())
 
+	// The reserved band reports what the gesture took, and the highlight is gone:
+	// the copy succeeded, so the addressed text is no longer pending.
 	require.Eventually(t, func() bool {
-		written, err := os.ReadFile(copyPath)
-
-		return err == nil && string(written) == expected
-	}, 30*time.Second, 10*time.Millisecond)
+		return strings.Contains(h.frame(60, 24), "copied 3 lines")
+	}, 30*time.Second, 10*time.Millisecond, "helper output: %s", h.output.String())
+	assert.NotContains(t, h.frame(60, 24), "\x1b[7m", "the selection highlight is cleared")
 
 	h.write("\x0bquit\r")
 	result := h.waitForExit()
 	require.NotNil(t, result)
 	require.Equal(t, 0, result.ExitCode(), "helper output: %s", h.output.String())
 	h.assertRestored()
+
+	// The process has exited, so every command it started has finished: a saver
+	// that had been asked to write would have left its file behind by now.
+	_, statErr := os.Stat(copyPath)
+	assert.ErrorIs(t, statErr, fs.ErrNotExist, "a drag copy never reaches the text saver")
 }

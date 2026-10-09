@@ -765,6 +765,9 @@ type stubController struct {
 	Controller
 	state            coding.State
 	configStatusLine []statusline.Item
+	// modelState, when set, is what Model() reports. It stands in for the
+	// resolved snapshot the status line reads its reasoning level from.
+	modelState *runtimecontrol.ModelState
 	// tui, when set, overrides the presentation fields of the stub configuration.
 	tui config.TUIConfig
 	// cost, when set, replaces the stub configuration's empty price table.
@@ -775,6 +778,17 @@ type stubController struct {
 }
 
 func (c stubController) Snapshot() coding.State { return c.state.Clone() }
+
+// Model defaults to the zero state, so a stub that does not script a resolved
+// model reports no reasoning level rather than reaching the embedded nil
+// Controller.
+func (c stubController) Model() runtimecontrol.ModelState {
+	if c.modelState == nil {
+		return runtimecontrol.ModelState{}
+	}
+
+	return *c.modelState
+}
 
 // History defaults to an empty page so the embedded nil Controller is never
 // reached; tests that exercise paging set historyPage.

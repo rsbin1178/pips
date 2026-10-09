@@ -151,7 +151,8 @@ func TestPTYSearchAndListWheel(t *testing.T) {
 
 	scrolled := frame()
 	assert.NotContains(t, scrolled, "MARKER-199", "the jump left the tail")
-	assert.Contains(t, scrolled, "scrolled · End for latest", "the reader is paused")
+	assert.Contains(t, scrolled, bandScrollIcon,
+		"the reserved band tells the paused reader where the newest rows are")
 
 	// Escape closes the box and hands the composer band back.
 	_, err = master.Write([]byte{0x1b})
