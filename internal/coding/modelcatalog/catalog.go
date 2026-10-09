@@ -75,6 +75,23 @@ func (m ResolvedModel) Clone() ResolvedModel {
 	return cloned
 }
 
+// EffectiveReasoningLevel reports the reasoning level the request assembly sends
+// for this model, and whether one is selected at all.
+//
+// [registry.resolve] folds the explicit selection, the variant's level and the
+// model's DefaultReasoningLevel into ReasoningLevel, and the generation layer
+// sends exactly that value. A false result means pips sends no level and the
+// provider's own default applies, which pips cannot know: it ships no model
+// capability database. A caller must therefore show that case as "default" or
+// omit it rather than inventing a level.
+func (m ResolvedModel) EffectiveReasoningLevel() (config.ReasoningLevel, bool) {
+	if m.ReasoningLevel == nil || *m.ReasoningLevel == "" {
+		return "", false
+	}
+
+	return *m.ReasoningLevel, true
+}
+
 // Equal reports value equality without relying on pointer or map identity.
 func (m ResolvedModel) Equal(other ResolvedModel) bool {
 	return reflect.DeepEqual(m, other)

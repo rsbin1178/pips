@@ -214,7 +214,14 @@ type Model struct {
 	// permissionMode caches the effective sandbox mode the Composer's permission
 	// row shows. Reading it while rendering would clone the Controller's whole
 	// configuration, so it is refreshed when a control result can change it.
-	permissionMode       config.SandboxMode
+	permissionMode config.SandboxMode
+	// reasoningLevel caches the effective reasoning level the status line shows
+	// beside the model name, for the same reason: Controller.Model() clones the
+	// resolved snapshot, and the status line is drawn on every frame.
+	// reasoningDeclared records whether the bound model declares any level, so a
+	// model with no reasoning knob shows no suffix.
+	reasoningLevel    string
+	reasoningDeclared bool
 	textSaveSeq          uint64
 	statusNotice         string
 	statusNoticeErr      bool
@@ -388,6 +395,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.dropPending()
 		m.state = message.controller.Snapshot()
 		m.refreshPermissionMode()
+		m.refreshReasoningLevel()
 		m.resetHistory()
 		configuredTUI := message.controller.Config().TUI
 		if configuredTUI.StatusLine == nil {
@@ -846,8 +854,11 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// A control result can carry a permission change (the picker's apply, a
 		// reload, a Full Access confirmation), so the Composer's cached row is
-		// refreshed with it instead of on every frame.
+		// refreshed with it instead of on every frame. The same result can have
+		// replaced the bound model, so the status line's cached reasoning level is
+		// refreshed here too.
 		m.refreshPermissionMode()
+		m.refreshReasoningLevel()
 		switch {
 		case pickerControl:
 			if m.picker.kind == pickerCommand {
@@ -1729,7 +1740,7 @@ func (m *Model) statusLineItem(item statusline.Item, width int) string {
 		value = sessionLabel
 		style = style.Bold(true).Foreground(palette.session)
 	case statusline.Model:
-		value = modelDisplayName(m.state.Provider, m.state.ModelID)
+		value = m.modelStatusValue()
 		style = style.Foreground(palette.model)
 	case statusline.ContextUsed:
 		window := m.state.ContextWindow

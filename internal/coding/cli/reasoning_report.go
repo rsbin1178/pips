@@ -23,11 +23,12 @@ func reasoningEncoding(resolved modelcatalog.ResolvedModel) (string, bool) {
 // reasoningSelection returns the level that will be sent, or "" when the
 // selection falls back to the provider default.
 func reasoningSelection(resolved modelcatalog.ResolvedModel) string {
-	if resolved.ReasoningLevel == nil {
+	level, ok := resolved.EffectiveReasoningLevel()
+	if !ok {
 		return ""
 	}
 
-	return string(*resolved.ReasoningLevel)
+	return string(level)
 }
 
 // writeResolvedReasoning prints the reasoning state that will actually reach
