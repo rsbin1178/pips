@@ -224,6 +224,17 @@ type TextSaveRequest struct {
 // reports back whatever the saver resolved.
 type TextSaver func(context.Context, TextSaveRequest) (string, error)
 
+// TextClipboard writes copied text to the terminal's clipboard and reports
+// whether the write reached it.
+//
+// The default is nil, which sends an OSC 52 request through the Program — the
+// only writer allowed to touch the terminal. A caller that owns another route to
+// the clipboard, such as a remote session bridge, supplies its own; it replaces
+// the request for every copy the TUI makes (the drag gesture, Ctrl+X, /copy), and
+// its error is reported instead of being assumed away. An explicit /copy or
+// /export with a path keeps its saver, which is the durable half of that result.
+type TextClipboard func(content string) error
+
 // Options contain the CLI-owned resources used by one TUI Program.
 // BuildStamp is the build identity the TUI reports, so a display surface never
 // has to import the CLI that stamped the binary.
@@ -273,6 +284,9 @@ type Options struct {
 	// SaveText persists Ctrl+X, /copy and /export output. A nil saver keeps the
 	// clipboard path and reports that no file fallback is available.
 	SaveText TextSaver
+	// ClipboardWriter overrides the OSC 52 write a copy performs. A nil writer
+	// keeps the terminal path.
+	ClipboardWriter TextClipboard
 }
 
 // Run owns the terminal Program and closes any acquired Controller after the

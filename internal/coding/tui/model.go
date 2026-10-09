@@ -227,6 +227,9 @@ type Model struct {
 	// file to name, so the status line has nothing to add.
 	copiedNotice    string
 	copiedNoticeSeq uint64
+	// clipboardCopySeq generations the clipboard-only copy's outcome, so a stale
+	// result cannot clear a newer selection.
+	clipboardCopySeq     uint64
 	textSaveSeq          uint64
 	statusNotice         string
 	statusNoticeErr      bool
@@ -944,9 +947,6 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.statusNotice = ""
 		m.statusNoticeErr = false
-		// A copy confirmation and the selection it describes expire together, so
-		// the highlight lives exactly as long as the notice that explains it.
-		m.clearSelection()
 		m.setLayout()
 
 		return m, nil
@@ -973,6 +973,19 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.setStatusNotice(
 			textSavedNotice(message.kind, message.path, message.clipboard),
 		)
+	case clipboardResultMsg:
+		// An error is always worth reporting, whichever copy produced it; the
+		// success effects belong to the drag gesture the reader just made.
+		if message.err != nil {
+			return m, m.setStatusError("could not copy: " + safeError(message.err))
+		}
+		if !message.selection || message.generation != m.clipboardCopySeq {
+			return m, nil
+		}
+		m.clearSelection()
+		m.setLayout()
+
+		return m, m.showCopiedNotice(message.lines)
 	case tea.MouseWheelMsg:
 		return m, m.scrollWheel(message)
 	case tea.MouseMsg:

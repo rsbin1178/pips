@@ -97,9 +97,9 @@ func TestDragSelectionMadeBackwardsCopiesTheSameText(t *testing.T) {
 	command := model.handleMouse(tea.MouseReleaseMsg{X: 0, Y: first, Button: tea.MouseLeft})
 	require.NotNil(t, command)
 
-	runCommandTree(t, command)
-	require.Len(t, *calls, 1)
-	assert.Equal(t, "❯ MARKER-A\n\n❯ MARKER-B", (*calls)[0].Content)
+	messages := runCommandTree(t, command)
+	assert.Equal(t, []string{"❯ MARKER-A\n\n❯ MARKER-B"}, clipboardTexts(messages))
+	assert.Empty(t, *calls, "the drag writes the clipboard alone")
 }
 
 func TestDragSelectionCopiesTheAddressedRows(t *testing.T) {
@@ -118,23 +118,20 @@ func TestDragSelectionCopiesTheAddressedRows(t *testing.T) {
 	require.NotNil(t, command, "the release copies what the drag addressed")
 
 	messages := runCommandTree(t, command)
-	require.Len(t, *calls, 1)
-	assert.Equal(t, TextKindCopy, (*calls)[0].Kind)
 	// The blank row that separates the two entries is on screen, so it is part of
 	// what the drag addressed.
-	assert.Equal(t, "❯ MARKER-A\n\n❯ MARKER-B", (*calls)[0].Content)
 	assert.Equal(t, []string{"❯ MARKER-A\n\n❯ MARKER-B"}, clipboardTexts(messages))
+	assert.Empty(t, *calls, "a drag copy never reaches the text saver")
+	require.True(t, model.selection.visible, "the highlight lives until the copy reports back")
 
-	saved, ok := findTextSaved(messages)
+	result, ok := findClipboardResult(messages)
 	require.True(t, ok)
-	_, notice := model.Update(saved)
-	require.NotNil(t, notice)
-	assert.Contains(t, strings.Join(model.statusExtras(), "\n"), "/resolved/copy")
-
-	// The highlight stays until the confirmation that explains it expires.
-	assert.True(t, model.selection.visible)
-	model.Update(statusNoticeExpiredMsg{generation: model.statusNoticeSeq})
-	assert.False(t, model.selection.visible, "the selection and its notice expire together")
+	_, notice := model.Update(result)
+	assert.False(t, model.selection.visible, "a confirmed copy clears the highlight")
+	assert.Equal(t, "copied 3 lines", model.copiedNotice)
+	assert.NotNil(t, notice, "the confirmation expires on its own timer")
+	assert.NotContains(t, strings.Join(model.statusExtras(), "\n"), "copied",
+		"the band owns the confirmation; the status line does not repeat it")
 }
 
 func TestDragSelectionCopiesOnlyTheAddressedCells(t *testing.T) {
@@ -150,9 +147,9 @@ func TestDragSelectionCopiesOnlyTheAddressedCells(t *testing.T) {
 	command := model.handleMouse(tea.MouseReleaseMsg{X: 10, Y: row, Button: tea.MouseLeft})
 	require.NotNil(t, command)
 
-	runCommandTree(t, command)
-	require.Len(t, *calls, 1)
-	assert.Equal(t, "MARKER", (*calls)[0].Content)
+	messages := runCommandTree(t, command)
+	assert.Equal(t, []string{"MARKER"}, clipboardTexts(messages))
+	assert.Empty(t, *calls, "the drag writes the clipboard alone")
 }
 
 func TestDragSelectionSkipsASelectionThatIsOnlyPadding(t *testing.T) {
@@ -162,15 +159,18 @@ func TestDragSelectionSkipsASelectionThatIsOnlyPadding(t *testing.T) {
 	row := paintedRow(t, model, "MARKER-A")
 
 	// The cells past the row's text are the renderer's padding, and a reader who
-	// drags only over them has addressed nothing.
+	// drags only over them has addressed nothing. The gesture did not copy, so the
+	// highlight stays and the notice says why nothing happened. The notice is set
+	// before the command returns, so there is no timer to wait out here.
 	model.handleMouse(tea.MouseClickMsg{X: 38, Y: row, Button: tea.MouseLeft})
 	model.handleMouse(tea.MouseMotionMsg{X: 39, Y: row, Button: tea.MouseLeft})
 	command := model.handleMouse(tea.MouseReleaseMsg{X: 39, Y: row, Button: tea.MouseLeft})
 	require.NotNil(t, command)
 
-	runCommandTree(t, command)
 	assert.Empty(t, *calls, "padding is not copied")
-	assert.False(t, model.selection.visible)
+	assert.True(t, model.selection.visible, "a copy that did not happen keeps the selection")
+	assert.True(t, model.statusNoticeErr)
+	assert.Contains(t, ansi.Strip(model.statusLine()), "nothing selected to copy")
 }
 
 func TestSelectionHighlightKeepsTheRowWidth(t *testing.T) {

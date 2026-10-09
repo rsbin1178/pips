@@ -102,7 +102,9 @@ func (m *Model) selectionRowAt(frameRow int) int {
 }
 
 // finishSelection ends a drag: a press and release on one cell is a click and
-// activates the entry, anything longer is a selection and is copied.
+// activates the entry, anything longer is a selection and is copied to the
+// clipboard alone. The highlight is left standing until the copy reports back, so
+// a copy that could not be made keeps the text it addressed visible.
 func (m *Model) finishSelection() tea.Cmd {
 	selection := m.selection
 	m.selection.dragging = false
@@ -113,14 +115,7 @@ func (m *Model) finishSelection() tea.Cmd {
 		return m.activateEntry(selection.anchor.row)
 	}
 
-	text := m.selectionText()
-	if strings.TrimSpace(text) == "" {
-		m.selection = selectionState{}
-
-		return redrawFrame()
-	}
-
-	return tea.Batch(m.saveText(TextKindCopy, "", text, true), redrawFrame())
+	return tea.Batch(m.copySelection(), redrawFrame())
 }
 
 // clearSelection drops the highlight, which is what Escape and a capture change
