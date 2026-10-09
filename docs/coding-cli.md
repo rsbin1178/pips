@@ -757,7 +757,9 @@ IDs, grouped by family with the light variant first:
 - `catppuccin-latte`, `catppuccin-frappe`, `catppuccin-macchiato`,
   `catppuccin-mocha` — the Catppuccin flavours, light to darkest;
 - `dracula`;
+- `everforest-light`, `everforest-dark`;
 - `gruvbox-light`, `gruvbox-dark`;
+- `kanagawa`;
 - `modus-operandi`, `modus-vivendi` — the Modus pair, built for WCAG AAA
   contrast;
 - `nord`;
@@ -766,10 +768,38 @@ IDs, grouped by family with the light variant first:
 - `solarized-light`, `solarized-dark`;
 - `tokyo-night-light`, `tokyo-night-storm`, `tokyo-night`.
 
-Every built-in highlights its fenced code with the syntax style that belongs to
-the same family, so the UI accents and the code block agree: `tokyo-night`
-borrows Tokyo Night's `tokyonight-night` style, `gruvbox-dark` borrows Gruvbox's,
-and a palette from a file follows the family its background resolves to.
+A built-in whose family ships a syntax style of its own highlights fenced code
+with that style, so the UI accents and the code block agree: `tokyo-night`
+borrows Tokyo Night's `tokyonight-night` style and `gruvbox-dark` borrows
+Gruvbox's.
+
+A family chroma ships no style for — Everforest, Kanagawa and the others — and
+every palette loaded from a file get a complete style derived from their own 14
+palette roles instead, so a fence reads as part of its theme rather than as a
+borrowed one. The derivation follows the palette's meaning rather than any one
+family's syntax theme:
+
+- `workspace` is plain code text, names and identifiers;
+- `muted` is everything to skim past: comments, punctuation, string delimiters
+  and subordinate headings;
+- `model` is the primary accent (the one headings use): keywords, types, markup;
+- `session` is the secondary accent (links and the cursor use it): calls,
+  builtins, prompts;
+- `change` is the value accent: strings, added diff lines;
+- `active` is the attention accent: numbers and constants;
+- `warning` is the caution accent: escapes, decorators, entities;
+- `error` is reserved for failures: exceptions, lexer errors, removed diff
+  lines.
+
+`separator`, `composer_prompt`, `code_background` and `diagnostic` are chrome,
+surfaces and the status panel's own channel, so a fence never draws with them.
+The full role-to-token table lives in `markdown_palette_style.go`.
+
+A fence paints no fill, so its tokens are read against your terminal's own
+background rather than against the theme's `code_background`; the accents are
+tuned the way each family tunes them, and the guard checks the two pairings that
+do share `code_background` — the fence body and the inline-code pill — at 4.0:1 or
+better for every built-in.
 
 Open the command picker with `/` and choose `/theme`. The picker lists `auto`,
 built-ins, and discovered user themes in stable order. Press Enter to apply a
@@ -796,8 +826,8 @@ Markdown draws on the terminal's own canvas. No heading paints a background, a
 code fence paints no block background, and the inline-code fill is painted only
 when the theme's own background is the one the terminal reported, so a light
 theme inside a dark terminal drops the fill instead of drawing a bright pill.
-A fence keeps only the token colors of its bundled syntax palette; a `diff`
-fence therefore still shows its added and removed fills.
+A fence never paints a token fill: a `diff` fence's added and removed lines
+carry the theme's own `change` and `error` colors on the terminal's canvas.
 
 All TUI selections are stored together in the active configuration file under
 `[tui]`:
@@ -831,7 +861,13 @@ window, or no reported prompt size — and a provider that reports no cache read
 shows an honest `0% cache`. `model` renders a short display name instead of
 `provider/model`: the provider prefix and any nested catalog path are dropped, so
 `xai/grok-4.5` reads as `Grok 4.5` and `cline-pass/deepseek-v4.1-flash` as
-`DeepSeek V4.1 Flash`. The other fields are `workspace`, `session`,
+`DeepSeek V4.1 Flash`. The name is followed by the reasoning level the next
+request will carry, in parentheses — `Claude Opus 4.1 (high)`. That level comes
+from the resolved model, so a configured `default` shows the level the model's own
+metadata resolves it to; a model that declares reasoning levels but has none
+selected shows `(default)`, which is the honest answer because the provider's own
+default is unknown to Pips; a model with no reasoning levels shows no suffix at
+all. The other fields are `workspace`, `session`,
 `task_progress` (`Tasks completed/total`), `phase`, `mode` (Plan mode), and
 `team`. `/statusline` toggles and reorders them.
 
@@ -962,10 +998,13 @@ left click can move the selection on a full-area list (`/resume`, `/skills`,
 `/mcp`, `/tree`, `/agents` and its Runs/Library tabs) — a click selects a row and
 activates nothing, and motion events are ignored, so the pointer never repaints a
 frame by hovering. Text is selected in the viewport itself: drag over the
-conversation and the addressed rows
-are copied through the same clipboard path as `Ctrl+X` (an OSC 52 request plus a
-fallback file) with a short confirmation on the status line, and `Esc` clears the
-highlight. Rows are copied as they are painted, so a paragraph that wrapped is
+conversation and the addressed rows go to the clipboard through an OSC 52 request
+only — a drag is a transient reading gesture, so it never writes the fallback
+file that `Ctrl+X`, `/copy` and `/export` use — and the reserved band under the
+transcript confirms it with `copied 3 lines`. A confirmed copy clears the
+highlight; a copy that could not be made keeps the selection and reports why.
+`Esc` clears the selection too. Rows are copied as they are painted, so a
+paragraph that wrapped is
 copied as the lines on screen; `/copy` and `/export` give the reflow-free text.
 With no route open, `Ctrl+R` releases the capture for the session (and takes it
 back), which hands selection, copy and link handling to the terminal; while the
@@ -978,6 +1017,35 @@ scrollable after quitting (use `Ctrl+O` or `/export` to get the conversation bac
 otherwise). Neither
 mode ever clears the terminal's scrollback, and both restore terminal state before
 the session is released.
+
+Between the activity line and the composer box the frame reserves one blank row:
+the reserved band. It stays blank while there is nothing to say, and it carries
+the immediate feedback that is not the status line's job. While the transcript is
+not at the bottom — after PgUp/PgDn, Home/End or a wheel notch — it shows a
+centred `▼`, and a left click anywhere on that row returns to the newest rows
+exactly as `End` does; the status line no longer repeats that hint. The glyph
+carries no label: the band is a signpost, and the status line is where keys are
+named. When a drag copy is confirmed, the band reports `copied 3 lines` for a few
+seconds, on the same clock as a status notice; with both present the confirmation
+keeps the right edge and the signpost is centred to its left, and the
+confirmation wins the row when the two cannot both be shown. The band is one row
+on every frame, so the composer never moves when its contents change.
+
+The band's up counterpart is the turn indicator. While anything is above the
+window, the transcript's first row carries a centred `▲`; a left click on that
+one cell puts the newest prompt above the window at its top, so repeated clicks
+walk back through the conversation one turn at a time — that is why the arrow
+stays on screen after each jump, and why it only leaves once the window reaches
+the beginning of the conversation. The two arrows bracket the reader: `▲` walks
+back a turn, `▼` returns to the newest rows. Both are the filled triangles on
+purpose: the hollow triangle is this UI's
+attention marker (an awaiting approval, a compacting context, the theme picker's
+polarity mark), so the scroll pair reads as movement instead of as a warning. The
+indicator is drawn into the first row rather than into a band of its
+own, because there is no free row above the transcript — reserving one would take
+a row from the messages and would change the window height that decides whether
+the indicator is needed at all, so showing it could hide it again on the next
+frame. It costs no message row and disappears as soon as your prompt is on screen.
 
 `show_thinking_blocks = true` (the default) renders the model's visible reasoning
 as a Thinking block in the fullscreen viewport: the whole thought is shown under
