@@ -114,6 +114,74 @@ func (m *Model) assistantResponses() []string {
 	return responses
 }
 
+// clipboardResultMsg reports the outcome of one copy's clipboard half. The
+// Program's own OSC 52 request has no completion signal, so it only ever carries
+// an error from a caller-supplied writer; the drag gesture reads the outcome to
+// decide whether the highlight it addressed still stands.
+type clipboardResultMsg struct {
+	generation uint64
+	lines      int
+	// selection marks the drag gesture, whose success clears the highlight and
+	// whose line count the band reports. A path copy and an export report through
+	// the saver instead.
+	selection bool
+	err       error
+}
+
+// copyToClipboard hands content to the clipboard. It is the TUI's one clipboard
+// write: the drag gesture and /copy both go through it, so a caller that supplies
+// [Options.ClipboardWriter] replaces the OSC 52 request for every copy rather than
+// for one of them.
+func (m *Model) copyToClipboard(content string, lines int, selection bool) tea.Cmd {
+	m.clipboardCopySeq++
+
+	generation := m.clipboardCopySeq
+	write := m.options.ClipboardWriter
+
+	commands := make([]tea.Cmd, 0, 2)
+	if write == nil {
+		commands = append(commands, tea.SetClipboard(content))
+	}
+	commands = append(commands, func() tea.Msg {
+		var err error
+		if write != nil {
+			err = write(content)
+		}
+
+		return clipboardResultMsg{
+			generation: generation, lines: lines, selection: selection, err: err,
+		}
+	})
+
+	return tea.Batch(commands...)
+}
+
+// copySelection is the drag gesture's copy: the clipboard alone, never the text
+// saver. A selection is a transient reading gesture, so leaving a file behind for
+// it would make the same gesture produce a different side effect depending on
+// whether a saver happened to be configured. An explicit /copy, /export or a copy
+// with a path keeps its saver, which is what makes those results durable.
+//
+// The selection is deliberately left alone here: the outcome message clears it on
+// success and leaves it standing on failure, so the highlight always describes a
+// copy that has not been confirmed yet.
+func (m *Model) copySelection() tea.Cmd {
+	text := m.selectionText()
+	if strings.TrimSpace(text) == "" {
+		// Nothing was addressed, so nothing was copied. The highlight stays so the
+		// reader can see what the drag covered, and the notice says why nothing
+		// happened.
+		return m.setStatusError("nothing selected to copy")
+	}
+
+	return m.copyToClipboard(text, copiedLineCount(text), true)
+}
+
+// copiedLineCount counts the lines a copy took, which is what the band reports.
+func copiedLineCount(text string) int {
+	return strings.Count(strings.TrimRight(text, "\n"), "\n") + 1
+}
+
 // saveText runs one operator-requested text write. The clipboard half is an
 // OSC 52 request through the Program writer, so the single-writer contract
 // holds; the file half is the durable confirmation the terminal cannot give.
@@ -125,7 +193,7 @@ func (m *Model) saveText(kind TextKind, path, content string, clipboard bool) te
 
 	commands := make([]tea.Cmd, 0, 2)
 	if clipboard {
-		commands = append(commands, tea.SetClipboard(content))
+		commands = append(commands, m.copyToClipboard(content, 0, false))
 	}
 	if saver != nil {
 		m.textSaveSeq++

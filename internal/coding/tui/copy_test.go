@@ -118,6 +118,16 @@ func findTextSaved(messages []tea.Msg) (textSavedMsg, bool) {
 	return textSavedMsg{}, false
 }
 
+func findClipboardResult(messages []tea.Msg) (clipboardResultMsg, bool) {
+	for _, message := range messages {
+		if result, ok := message.(clipboardResultMsg); ok {
+			return result, true
+		}
+	}
+
+	return clipboardResultMsg{}, false
+}
+
 func TestCopyTakesTheStreamingDraftAsTheNewestReply(t *testing.T) {
 	t.Parallel()
 

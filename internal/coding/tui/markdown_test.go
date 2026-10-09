@@ -11,7 +11,6 @@ import (
 	"testing"
 
 	"github.com/alecthomas/chroma/v2"
-	"github.com/alecthomas/chroma/v2/styles"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -636,29 +635,16 @@ func TestMarkdownSyntaxColoursFollowTheTheme(t *testing.T) {
 		"the light and dark families highlight a fence differently")
 }
 
-// TestMarkdownChromaThemesAreBundledStyles keeps the per-theme syntax styles
+// TestMarkdownChromaThemesFollowTheirPalette keeps the per-theme syntax styles
 // resolvable. Chroma answers an unknown name with its own default style, so a
 // typo or a rename would silently drop the theme's palette instead of failing.
 func TestMarkdownChromaThemesFollowTheirPalette(t *testing.T) {
 	t.Parallel()
 
-	for _, entry := range builtinThemeEntries() {
-		theme := entry.theme
-		name := markdownChromaTheme(theme)
-
-		assert.Equal(t, name, styles.Get(name).Name, "theme %s names a style that resolves", theme.id)
-		if theme.borrowsTerminalColors() {
-			assert.Equal(t, chromaStyleBW, name, "a borrowed palette keeps the colourless style")
-
-			continue
-		}
-		assert.Equal(t, pipsChromaPrefix+theme.id, name,
-			"a built-in names the style derived from its own palette")
-	}
-
-	// The syntax style behind each built-in is its own family's: the id-sharing
-	// majority, the three spelled-out Tokyo Night ids, and the two default themes.
-	// A silent family fallback would fail here.
+	// The syntax style behind each built-in whose family ships one is that
+	// family's: the id-sharing majority, the three spelled-out Tokyo Night ids,
+	// the two default themes and the colourless canvas-proof palette. A silent
+	// family fallback would fail here.
 	spelled := map[string]string{
 		themeIDDefaultDark:     chromaStyleGitHubDark,
 		themeIDDefaultLight:    chromaStyleGitHub,
@@ -669,20 +655,129 @@ func TestMarkdownChromaThemesFollowTheirPalette(t *testing.T) {
 		themeIDTokyoNightLight: chromaStyleTokyoNightDay,
 		themeIDTerminal:        chromaStyleBW,
 	}
+
 	for _, entry := range builtinThemeEntries() {
-		want, ok := spelled[entry.theme.id]
-		if !ok {
-			want = entry.theme.id
+		theme := entry.theme
+		name := markdownChromaTheme(theme)
+
+		assert.Equal(t, name, lookupChromaStyle(name).Name, "theme %s names a style that resolves", theme.id)
+		if theme.borrowsTerminalColors() {
+			assert.Equal(t, chromaStyleBW, name, "a borrowed palette keeps the colourless style")
+
+			continue
 		}
-		assert.Equal(t, want, bundledChromaStyle(entry.theme), entry.theme.id)
+		if _, bundled := builtinFamilyChromaStyles[theme.id]; bundled {
+			assert.Equal(t, pipsChromaPrefix+theme.id, name,
+				"a built-in with a family style keeps the style derived from that family")
+			want := spelled[theme.id]
+			if want == "" {
+				want = theme.id
+			}
+			assert.Equal(t, want, bundledChromaStyle(theme), theme.id)
+
+			continue
+		}
+		// The family ships no bundled style, so there is nothing to inherit: the
+		// built-in carries a complete style derived from its own palette.
+		assert.Equal(t, pipsChromaPrefix+theme.paletteStyle, name,
+			"a built-in with no family style names the style derived from its own palette")
+		assert.NotContains(t, []string{chromaStyleGitHub, chromaStyleGitHubDark}, name,
+			"%s must not fall back to a family style", theme.id)
+	}
+}
+
+// TestMarkdownDerivedStylesCarryEveryMappedToken pins the complete derivation:
+// for the built-ins whose family ships no chroma style, every row of the
+// documented role -> token table is present in the registered style and carries
+// that row's palette role.
+func TestMarkdownDerivedStylesCarryEveryMappedToken(t *testing.T) {
+	t.Parallel()
+
+	derived := 0
+	for _, entry := range builtinThemeEntries() {
+		theme := entry.theme
+		if theme.borrowsTerminalColors() {
+			continue
+		}
+		if _, bundled := builtinFamilyChromaStyles[theme.id]; bundled {
+			continue
+		}
+		derived++
+
+		palette := paletteFor(theme)
+		style := lookupChromaStyle(markdownChromaTheme(theme))
+		require.Equal(t, markdownChromaTheme(theme), style.Name, theme.id)
+
+		for _, row := range paletteSyntaxTokens {
+			resolved := style.Get(row.token)
+			assert.Equal(t, chroma.MustParseColour(colorString(row.role.colour(palette))), resolved.Colour,
+				"%s %v takes its colour from its palette role", theme.id, row.token)
+			assert.False(t, resolved.Background.IsSet(),
+				"%s %v paints no fill: a fence draws on the terminal's canvas", theme.id, row.token)
+		}
+	}
+	assert.NotZero(t, derived, "the families chroma ships no style for are derived")
+}
+
+// TestMarkdownUserThemesDeriveTheirOwnSyntaxStyle drives the runtime path: a
+// theme file loaded through loadThemeRegistry resolves to a style derived from
+// its own palette, not to the family style its background would have picked.
+// Two files with the same palette keep separate styles, and a changed palette
+// never reuses the previous palette's style.
+func TestMarkdownUserThemesDeriveTheirOwnSyntaxStyle(t *testing.T) {
+	t.Parallel()
+
+	const palette = `
+[palette]
+model = "#FF00AA"
+change = "#00C8A0"
+`
+	registry := loadThemeRegistryFromText(t, map[string]string{
+		"ocean": `schema = "pips.tui.theme/v1alpha1"
+name = "Ocean"
+inherits = "nord"
+` + palette,
+		"tide": `schema = "pips.tui.theme/v1alpha1"
+name = "Tide"
+inherits = "nord"
+` + palette,
+		"coral": `schema = "pips.tui.theme/v1alpha1"
+name = "Coral"
+inherits = "nord"
+
+[palette]
+model = "#123456"
+`,
+	})
+
+	ocean := mustTheme(t, registry, "ocean")
+	tide := mustTheme(t, registry, "tide")
+	coral := mustTheme(t, registry, "coral")
+
+	for _, theme := range []colorTheme{ocean, tide, coral} {
+		name := markdownChromaTheme(theme)
+		assert.Equal(t, pipsChromaPrefix+theme.paletteStyle, name, theme.id)
+		assert.Equal(t, name, lookupChromaStyle(name).Name, "%s resolves", theme.id)
+		assert.NotContains(t, []string{chromaStyleGitHub, chromaStyleGitHubDark}, name,
+			"%s must not fall back to a family style", theme.id)
 	}
 
-	// A theme from a file follows the family its background resolves to, because
-	// nothing derives a style for a palette that arrives at runtime.
-	light := newResolvedTheme("acme-light", "Acme Light", themeBackgroundLight, themeLight.palette)
-	dark := newResolvedTheme("acme-dark", "Acme Dark", themeBackgroundDark, themeDark.palette)
-	assert.Equal(t, chromaStyleGitHub, markdownChromaTheme(light))
-	assert.Equal(t, chromaStyleGitHubDark, markdownChromaTheme(dark))
+	// Same palette, different identity: separate styles, both carrying the
+	// palette's own model role in the keyword class.
+	assert.NotEqual(t, markdownChromaTheme(ocean), markdownChromaTheme(tide),
+		"two themes that share a palette still keep separate styles")
+	assert.Equal(t, "#FF00AA", colorString(ocean.palette.model))
+	for _, theme := range []colorTheme{ocean, tide} {
+		keyword := lookupChromaStyle(markdownChromaTheme(theme)).Get(chroma.Keyword)
+		assert.Equal(t, chroma.MustParseColour(colorString(theme.palette.model)), keyword.Colour,
+			"%s keyword follows its own palette", theme.id)
+	}
+
+	// A different palette resolves to a different style, so a theme can never
+	// pick up another palette's tokens.
+	assert.NotEqual(t, markdownChromaTheme(coral), markdownChromaTheme(ocean))
+	coralKeyword := lookupChromaStyle(markdownChromaTheme(coral)).Get(chroma.Keyword)
+	assert.Equal(t, chroma.MustParseColour("#123456"), coralKeyword.Colour)
 }
 
 // TestMarkdownDiffFencesFollowThePalette pins where a diff fence gets its
@@ -700,7 +795,7 @@ func TestMarkdownDiffFencesFollowThePalette(t *testing.T) {
 			continue
 		}
 		palette := paletteFor(theme)
-		style := styles.Get(markdownChromaTheme(theme))
+		style := lookupChromaStyle(markdownChromaTheme(theme))
 
 		for token, want := range map[chroma.TokenType]color.Color{
 			chroma.GenericInserted: palette.change,

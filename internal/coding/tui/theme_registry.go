@@ -308,6 +308,10 @@ func loadThemeRegistry(directory string) themeRegistry {
 	}
 	slices.Sort(ids)
 	for _, id := range ids {
+		// A theme loaded from a file has no family style to inherit, so its
+		// complete fence style is derived from its palette here, at the one point
+		// that builds a registry — before the model can render with it.
+		registerPaletteChromaStyle(resolved[id])
 		registry.entries = append(registry.entries, themeEntry{
 			theme:  resolved[id],
 			source: themeSourceUser,
@@ -715,10 +719,12 @@ func newResolvedTheme(id, name string, background themeBackground, palette color
 		colorString(palette.codeBackground), colorString(palette.diagnostic),
 	)
 	digest := sha256.Sum256([]byte(canonical))
+	fingerprint := hex.EncodeToString(digest[:])
 
 	return colorTheme{
 		id: id, name: name, background: background, palette: palette,
-		fingerprint: hex.EncodeToString(digest[:]),
+		fingerprint:  fingerprint,
+		paletteStyle: fingerprint[:paletteStyleChars],
 	}
 }
 
@@ -750,7 +756,10 @@ func builtinThemeEntries() []themeEntry {
 	ids := []string{
 		themeIDDefaultDark, themeIDDefaultLight, themeIDTerminal,
 		themeIDCatppuccinLatte, themeIDCatppuccinFrappe, themeIDCatppuccinMacchiato, themeIDCatppuccinMocha,
-		themeIDDracula, themeIDGruvboxLight, themeIDGruvboxDark,
+		themeIDDracula,
+		themeIDEverforestLight, themeIDEverforestDark,
+		themeIDGruvboxLight, themeIDGruvboxDark,
+		themeIDKanagawa,
 		themeIDModusOperandi, themeIDModusVivendi,
 		themeIDNord, themeIDOneDark,
 		themeIDRosePineDawn, themeIDRosePineMoon, themeIDRosePine,
@@ -778,6 +787,18 @@ const (
 
 	gruvboxGray    = "#928374" // gruvbox neutral gray, both variants
 	solarizedBase0 = "#839496" // Solarized base0, light chrome and dark canvas
+
+	// Everforest and Kanagawa reuse a tone on more than one role, as their
+	// official palettes name it once and their own themes reuse it.
+	everforestDarkGrey0  = "#7A8478" // Everforest dark grey0
+	everforestDarkGrey1  = "#859289" // Everforest dark grey1
+	everforestLightGrey0 = "#A6B0A0" // Everforest light grey0
+	everforestLightGrey1 = "#939F91" // Everforest light grey1
+	kanagawaFujiGray     = "#727169" // Kanagawa fujiGray, the comment tone
+	// kanagawaCarpYellow is the tone the Kanagawa family uses for identifiers. The
+	// palette below deliberately does not use it for a role, and
+	// TestFamilyStyledBuiltInsKeepTheKnownTokenTies pins why.
+	kanagawaCarpYellow = "#E6C384"
 )
 
 // builtinThemePalettes and builtinThemeMetadataByID hold every built-in that is
@@ -799,6 +820,32 @@ var builtinThemePalettes = map[string]themePaletteStrings{
 		separator: "#44475A", composerPrompt: "#6272A4", muted: "#6272A4", workspace: "#F8F8F2",
 		session: "#8BE9FD", model: "#BD93F9", idle: "#50FA7B", active: "#F1FA8C", warning: "#FFB86C",
 		error: "#FF5555", change: "#FF79C6", code: "#F8F8F2", codeBackground: "#44475A", diagnostic: "#6272A4",
+	},
+	// Everforest, from sainnhe/everforest autoload/everforest.vim (medium
+	// background). Roles reuse the family's own names: fg for text, grey0/grey1
+	// for chrome, and the six accents for session/model/idle/active/warning/error.
+	themeIDEverforestDark: {
+		separator: "#475258", composerPrompt: everforestDarkGrey1, muted: everforestDarkGrey1, workspace: "#D3C6AA",
+		session: "#7FBBB3", model: "#D699B6", idle: "#A7C080", active: "#DBBC7F", warning: "#E69875",
+		error: "#E67E80", change: "#83C092", code: "#D3C6AA", codeBackground: "#2D353B", diagnostic: everforestDarkGrey0,
+	},
+	themeIDEverforestLight: {
+		separator: "#E6E2CC", composerPrompt: everforestLightGrey1, muted: everforestLightGrey1, workspace: "#5C6A72",
+		session: "#3A94C5", model: "#DF69BA", idle: "#8DA101", active: "#DFA000", warning: "#F57D26",
+		error: "#F85552", change: "#35A77C", code: "#5C6A72", codeBackground: "#FDF6E3", diagnostic: everforestLightGrey0,
+	},
+	// Kanagawa, from rebelot/kanagawa.nvim lua/kanagawa/colors.lua and the "wave"
+	// theme in lua/kanagawa/themes.lua: fujiWhite on sumiInk3 for text, fujiGray
+	// for comments and chrome, and the theme's own syn.* accents for the rest.
+	// active is autumnYellow rather than the carpYellow the family uses for
+	// identifiers: carpYellow sits at exactly the same distance from two entries of
+	// the 256-colour cube, so chroma's nearest-colour search would return either
+	// one depending on map order and a fence's numbers would change shade between
+	// frames. TestBuiltinSyntaxColoursMapToASingleEscape keeps that from returning.
+	themeIDKanagawa: {
+		separator: "#54546D", composerPrompt: kanagawaFujiGray, muted: kanagawaFujiGray, workspace: "#DCD7BA",
+		session: "#7E9CD8", model: "#957FB8", idle: "#98BB6C", active: "#DCA561", warning: "#FFA066",
+		error: "#E82424", change: "#7AA89F", code: "#DCD7BA", codeBackground: "#2A2A37", diagnostic: kanagawaFujiGray,
 	},
 	themeIDModusOperandi: {
 		separator: "#9F9F9F", composerPrompt: "#595959", muted: "#595959", workspace: "#000000",
@@ -902,6 +949,9 @@ var builtinThemeMetadataByID = map[string]builtinThemeMetadata{
 	themeIDDefaultDark:         {name: "Default Dark", background: themeBackgroundDark},
 	themeIDDefaultLight:        {name: "Default Light", background: themeBackgroundLight},
 	themeIDDracula:             {name: "Dracula", background: themeBackgroundDark},
+	themeIDEverforestDark:      {name: "Everforest Dark", background: themeBackgroundDark},
+	themeIDEverforestLight:     {name: "Everforest Light", background: themeBackgroundLight},
+	themeIDKanagawa:            {name: "Kanagawa", background: themeBackgroundDark},
 	themeIDNord:                {name: "Nord", background: themeBackgroundDark},
 	themeIDGruvboxDark:         {name: "Gruvbox Dark", background: themeBackgroundDark},
 	themeIDGruvboxLight:        {name: "Gruvbox Light", background: themeBackgroundLight},

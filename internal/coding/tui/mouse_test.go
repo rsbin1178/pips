@@ -8,6 +8,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/rsbin1178/pips/agent/team"
 	"github.com/rsbin1178/pips/ai"
@@ -56,6 +57,153 @@ func TestFullscreenWheelScrollsTheManagedTranscript(t *testing.T) {
 	model.Update(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
 	assert.True(t, model.transcriptScroll.follow, "reaching the bottom resumes following")
 	assert.Equal(t, bottom, model.transcriptScroll.offset)
+}
+
+// TestPointerHandlerLeavesTheWheelToUpdate pins the message contract a frame that
+// captures the pointer has to respect: the renderer forwards a mouse message to
+// the installed handler and then to Update, so the wheel is answered exactly once,
+// in Update. Answering it in the handler too would scroll twice per notch.
+func TestPointerHandlerLeavesTheWheelToUpdate(t *testing.T) {
+	t.Parallel()
+
+	model := wheelModel(t, nil)
+	_ = model.View()
+	require.True(t, model.transcriptScroll.follow)
+	bottom := model.transcriptScroll.offset
+	require.Positive(t, bottom, "the fixture must overflow the window")
+
+	assert.Nil(t, model.handleMouse(tea.MouseWheelMsg{Button: tea.MouseWheelUp, Y: 4}),
+		"the pointer handler does not answer the wheel")
+	assert.Equal(t, bottom, model.transcriptScroll.offset,
+		"the pointer handler leaves the notch to Update")
+
+	model.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp, Y: 4})
+	assert.Equal(t, bottom-wheelLinesDefault, model.transcriptScroll.offset,
+		"one notch moves the transcript once")
+}
+
+// TestReservedBandClickIsDroppedBehindAnOverlay keeps the recorded band row from
+// outliving the frame that painted it: once a picker owns the screen, a click at
+// that row is not the band's.
+func TestReservedBandClickIsDroppedBehindAnOverlay(t *testing.T) {
+	t.Parallel()
+
+	model := wheelModel(t, nil)
+	model.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	_ = model.View()
+	require.GreaterOrEqual(t, model.frameHit.band, 0)
+	band := model.frameHit.band
+
+	// A picker owns the screen while the recorded row is still the band's.
+	model.openCommandPicker()
+
+	_, handled := model.bandMouse(tea.MouseClickMsg{X: 0, Y: band, Button: tea.MouseLeft})
+	assert.False(t, handled, "the band does not answer behind an overlay")
+	assert.False(t, model.transcriptScroll.follow)
+}
+
+// TestReservedBandClickTargetMatchesThePaintedRow pins the row arithmetic at the
+// two edges a tall fixture hides: a band at the top of the frame (no transcript
+// rows above it) and a frame too short to keep the band. lipgloss answers
+// Height("") with 1, so an empty prefix used to shift the recorded row down one
+// and the click landed on the composer border instead of the arrow.
+func TestReservedBandClickTargetMatchesThePaintedRow(t *testing.T) {
+	t.Parallel()
+
+	for _, height := range []int{2, 3, 4, 5, 10, 24} {
+		model := wheelModel(t, nil)
+		model.Update(tea.WindowSizeMsg{Width: 40, Height: height})
+		model.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+
+		content := model.View().Content
+		rows := strings.Split(content, "\n")
+		band := model.frameHit.band
+
+		if band < 0 {
+			assert.NotContains(t, content, bandScrollIcon,
+				"height %d: a frame with no arrow records no target", height)
+
+			continue
+		}
+		require.Less(t, band, len(rows), "height %d: the target is inside the frame", height)
+		assert.Contains(t, rows[band], bandScrollIcon,
+			"height %d: the recorded row is the one the arrow was painted at", height)
+
+		command := model.handleMouse(tea.MouseClickMsg{X: 0, Y: band, Button: tea.MouseLeft})
+		assert.NotNil(t, command, "height %d: the arrow's own row answers", height)
+		assert.True(t, model.transcriptScroll.follow, "height %d", height)
+	}
+}
+
+// TestReservedBandArrowHidesWhenAResizeReachesTheBottom pins the hint's gate. A
+// window that grows clamps the offset onto the new maximum without restoring the
+// region's follow flag, so a hint driven by that flag would point at rows that are
+// already on screen.
+func TestReservedBandArrowHidesWhenAResizeReachesTheBottom(t *testing.T) {
+	t.Parallel()
+
+	model := wheelModel(t, nil)
+	model.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	require.False(t, model.transcriptScroll.follow)
+	require.Contains(t, ansi.Strip(model.View().Content), bandScrollIcon)
+
+	// Grow the window by less than the scrollback, so the offset is clamped onto
+	// the new maximum and the flag is left behind.
+	model.Update(tea.WindowSizeMsg{Width: 40, Height: 20})
+	require.True(t, model.transcriptScroll.atBottom(), "the clamp reached the new maximum")
+	require.False(t, model.transcriptScroll.follow, "the fixture still leaves the flag behind")
+
+	assert.NotContains(t, ansi.Strip(model.View().Content), bandScrollIcon,
+		"the arrow points at nothing once the newest rows are on screen")
+	assert.Equal(t, -1, model.frameHit.band, "and it is not a click target either")
+}
+
+// TestReservedBandHintIsCentred pins the band's layout: the scroll hint sits in the
+// middle of the row rather than at the text column, because the band is a standing
+// invitation to move rather than a field of the status line. The two margins differ
+// by at most one column, which is what an odd remainder leaves.
+func TestReservedBandHintIsCentred(t *testing.T) {
+	t.Parallel()
+
+	model := wheelModel(t, nil)
+
+	for _, width := range []int{24, 40, 60, 80, 121} {
+		model.Update(tea.WindowSizeMsg{Width: width, Height: 20})
+		model.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+
+		band := ansi.Strip(model.reservedBand())
+		require.NotEmpty(t, band, "width %d", width)
+		require.Contains(t, band, bandScrollIcon, "width %d", width)
+
+		trimmed := strings.TrimSpace(band)
+		left := strings.Index(band, trimmed)
+		right := ansi.StringWidth(band) - left - ansi.StringWidth(trimmed)
+		assert.LessOrEqual(t, max(left, right)-min(left, right), 1,
+			"width %d: margins %d and %d around %q", width, left, right, trimmed)
+		assert.Equal(t, width, ansi.StringWidth(band), "the band still fills the row at width %d", width)
+	}
+}
+
+// TestReservedBandHintAndCopyConfirmationShareTheRow pins what happens when both
+// occupants are present: the confirmation keeps the status line's right edge and
+// the hint is centred in what is left of it, so neither covers the other.
+func TestReservedBandHintAndCopyConfirmationShareTheRow(t *testing.T) {
+	t.Parallel()
+
+	model := wheelModel(t, nil)
+	model.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
+	model.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	// The confirmation is raised through its own setter, so this drives the shipped
+	// path rather than poking the field it writes.
+	require.NotNil(t, model.showCopiedNotice(3))
+	require.Equal(t, "copied 3 lines", model.copiedNotice)
+
+	band := ansi.Strip(model.reservedBand())
+	assert.Contains(t, band, bandScrollIcon, "the hint is there beside the confirmation")
+	assert.Contains(t, band, "copied 3 lines", "and so is the confirmation")
+	assert.Less(t, strings.Index(band, bandScrollIcon), strings.Index(band, "copied 3 lines"),
+		"the hint sits to the left of the confirmation")
+	assert.Equal(t, 80, ansi.StringWidth(band))
 }
 
 // TestWheelDeltaIsConservativeUnderAMultiplexer pins the per-terminal policy: one
@@ -133,20 +281,116 @@ func TestWheelIsRoutedToTheSurfaceThatOwnsTheScreen(t *testing.T) {
 	})
 }
 
-// TestStatusLineReportsAPausedReader is the visible half of R4: a reader who is
-// not following the tail can see that the newest output is off screen.
-func TestStatusLineReportsAPausedReader(t *testing.T) {
+// TestReservedBandReportsAPausedReader is the visible half of R4: a reader who is
+// not following the tail can see that the newest output is off screen, from the
+// arrow the reserved band draws under the transcript. The status line no longer
+// repeats the hint.
+func TestReservedBandReportsAPausedReader(t *testing.T) {
 	t.Parallel()
 
 	model := wheelModel(t, nil)
-	assert.NotContains(t, ansi.Strip(model.statusLine()), "scrolled ·")
+	assert.NotContains(t, ansi.Strip(model.View().Content), bandScrollIcon,
+		"a reader who is following the tail sees no arrow")
+	assert.NotContains(t, ansi.Strip(model.statusLine()), "End for latest")
 
 	model.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
-	assert.Contains(t, ansi.Strip(model.statusLine()), "scrolled · End for latest")
+	assert.Contains(t, ansi.Strip(model.View().Content), bandScrollIcon,
+		"a paused reader is told where the newest rows are")
+	assert.NotContains(t, ansi.Strip(strings.Join(model.statusExtras(), "\n")), "End for latest",
+		"the status line's scroll hint is gone: the band owns it")
+	assert.NotContains(t, ansi.Strip(model.statusLine()), "End for latest")
 
 	model.Update(tea.KeyPressMsg{Code: tea.KeyEnd})
-	assert.NotContains(t, ansi.Strip(model.statusLine()), "scrolled ·")
+	assert.NotContains(t, ansi.Strip(model.View().Content), bandScrollIcon)
 	assert.True(t, model.transcriptScroll.follow)
+}
+
+// TestReservedBandClickReturnsToTheLatest pins the pointer half of the arrow:
+// a left click on the band row the arrow was painted at restores the newest rows,
+// and the band records that affordance with the frame it painted.
+func TestReservedBandClickReturnsToTheLatest(t *testing.T) {
+	t.Parallel()
+
+	model := wheelModel(t, nil)
+	model.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	require.False(t, model.transcriptScroll.follow)
+
+	// Compose the frame the click will be resolved against.
+	content := model.View().Content
+	require.GreaterOrEqual(t, model.frameHit.band, 0, "the frame records the band row")
+
+	// The band is the row between the transcript and the Composer border, so the
+	// border is directly below it. This is the integration half of the layout
+	// claim: a unit test of reservedBand() alone would pass with the band unwired.
+	rows := strings.Split(content, "\n")
+	border := -1
+	for index, row := range rows {
+		// Rounded under colour, normal under NO_COLOR, which this fixture uses.
+		if strings.ContainsAny(row, "╭┌") {
+			border = index
+
+			break
+		}
+	}
+	require.Positive(t, border, "the Composer box is on screen")
+	assert.Equal(t, border-1, model.frameHit.band, "the band sits directly above the Composer border")
+
+	command := model.handleMouse(tea.MouseClickMsg{X: 0, Y: model.frameHit.band, Button: tea.MouseLeft})
+	assert.NotNil(t, command)
+	assert.True(t, model.transcriptScroll.follow, "the click returns to the newest rows")
+	assert.NotContains(t, ansi.Strip(model.View().Content), bandScrollIcon)
+}
+
+// TestReservedBandClickIsDroppedWhenTheFrameDrewNoArrow keeps the hit map honest:
+// a band row that afforded nothing answers nothing, so a click on a blank band
+// cannot move a reader who is already at the bottom.
+func TestReservedBandClickIsDroppedWhenTheFrameDrewNoArrow(t *testing.T) {
+	t.Parallel()
+
+	model := wheelModel(t, nil)
+	_ = model.View()
+	assert.Equal(t, -1, model.frameHit.band, "a frame with no arrow records no band target")
+
+	_, handled := model.bandMouse(tea.MouseClickMsg{X: 0, Y: 0, Button: tea.MouseLeft})
+	assert.False(t, handled)
+}
+
+// TestReservedBandIsOneRowAtEveryWidth pins the layout contract: the band is a
+// single reserved row between the activity text and the Composer border, and it
+// is the row the frame used to leave blank there.
+func TestReservedBandIsOneRowAtEveryWidth(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, conversationGapHeight, layoutBandRows,
+		"the band is the row the pre-Composer gap already reserved")
+
+	model := wheelModel(t, nil)
+	for _, width := range []int{12, 24, 40, 80, 200} {
+		model.Update(tea.WindowSizeMsg{Width: width, Height: defaultHeight})
+		band := model.reservedBand()
+		assert.LessOrEqual(t, lipgloss.Height(band), layoutBandRows, "width %d", width)
+		assert.Empty(t, ansi.Strip(band), "a following reader sees a blank band at width %d", width)
+	}
+}
+
+// TestReservedBandArrowFitsANarrowNoColorFrame pins the readable degrade: the
+// arrow is plain text at every width, never wider than the frame, and carries no
+// colour escape in NO_COLOR (wheelModel is the colour-free fixture).
+func TestReservedBandArrowFitsANarrowNoColorFrame(t *testing.T) {
+	t.Parallel()
+
+	model := wheelModel(t, nil)
+	for _, width := range []int{12, 20, 40, 80} {
+		model.Update(tea.WindowSizeMsg{Width: width, Height: defaultHeight})
+		model.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp, Y: 4})
+		require.False(t, model.transcriptScroll.follow, "width %d", width)
+
+		band := model.reservedBand()
+		assert.Equal(t, 1, lipgloss.Height(band), "the band stays one row at width %d", width)
+		assert.LessOrEqual(t, ansi.StringWidth(band), width, "the band fits the frame at width %d", width)
+		assert.NotContains(t, band, "\x1b[", "NO_COLOR keeps the band free of escapes at width %d", width)
+		assert.Contains(t, band, bandScrollIcon, "width %d", width)
+	}
 }
 
 // TestHelpStatesTheModifierDragFallback records the user-visible cost of mouse

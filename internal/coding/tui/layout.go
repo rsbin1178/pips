@@ -7,7 +7,7 @@ import (
 
 // The ready chat frame is composed from vertical bands, top to bottom:
 //
-//	transcript | prompt | composer | status
+//	transcript | prompt | band | composer | status
 //
 // Every band receives an explicit height before composition, and the composed
 // frame is bounded to the terminal height by clampFrame. The transcript is the
@@ -16,6 +16,12 @@ import (
 const (
 	// layoutStatusRows is the status band height; the status line never wraps.
 	layoutStatusRows = 1
+	// layoutBandRows is the reserved band between the activity line and the
+	// Composer. The band is one row on every frame — the transcript's elastic
+	// height is computed after it — so the Composer never moves when the band's
+	// contents change. It is the same row the frame used to leave blank there,
+	// which is why reserving it explicitly moves no existing frame.
+	layoutBandRows = 1
 	// layoutComposerBorderRows is the rounded border contributed by composerBox.
 	layoutComposerBorderRows = 2
 	// layoutComposerMinRows keeps one editable row even in a short window.

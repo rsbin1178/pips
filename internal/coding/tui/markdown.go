@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"image/color"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -45,6 +46,10 @@ type markdownRenderer struct {
 	bytes    int
 	maxBytes int
 	live     map[string]markdownKey
+	// liveFrames holds the last frame each live slot produced, so a slot whose
+	// tail is expensive can be served from the previous frame instead of paying
+	// for the whole un-frozen tail again on every tick. See reuseLiveFrame.
+	liveFrames map[string]liveFrame
 	// frozen holds the assembled prefix of each live slot, so a streaming frame
 	// extends it instead of rendering the whole body again. thinking is the same
 	// state for the one live Thinking section, which is rendered as prose rather
@@ -96,23 +101,22 @@ func (r *markdownRenderer) render(
 // A growing body misses the content cache on every frame, so the render is
 // assembled from a frozen prefix whenever a boundary allows it; the work then
 // scales with the live tail instead of with the whole body. See
-// [markdown_live.go] for the boundary contract.
+// [markdown_live.go] for the boundary contract, and [markdownRenderer.renderLiveRows]
+// for the bound on what one un-freezable tail may cost per frame.
 func (r *markdownRenderer) renderLive(
 	slot, content string,
 	width int,
 	theme colorTheme,
 	noColor bool,
 ) (string, error) {
-	if rendered, ok := r.renderLiveIncremental(slot, content, width, theme, noColor); ok {
-		// The assembled frame is never a reusable cache entry: it changes every
-		// frame. Dropping the previous version still keeps an obsolete document
-		// out of the settled LRU when a fallback render stored one.
-		r.evictLive(slot)
-
-		return rendered, nil
+	// The inline path and the managed store differ only in the indent they apply
+	// to each row, so both go through the same frame and share its cost bound.
+	rows, err := r.renderLiveRows(slot, content, width, 0, theme, noColor)
+	if err != nil {
+		return content, err
 	}
 
-	return r.renderCached(slot, content, width, theme, noColor)
+	return strings.Join(rows.all(), "\n"), nil
 }
 
 // renderLiveRows is [markdownRenderer.renderLive] for the managed transcript
@@ -121,7 +125,33 @@ func (r *markdownRenderer) renderLive(
 // again, and it returns the frozen rows and the tail as two segments so the store
 // never copies the whole live body's row headers into one slice. inset is the
 // frame-edge indent the store wants, applied to each row once.
+//
+// A live body whose tail cannot be frozen re-renders that whole tail every frame,
+// so this is also where the cost of one such frame is bounded: see
+// [markdownRenderer.reuseLiveFrame].
 func (r *markdownRenderer) renderLiveRows(
+	slot, content string,
+	width, inset int,
+	theme colorTheme,
+	noColor bool,
+) (rowSegments, error) {
+	if rows, ok := r.reuseLiveFrame(slot, content, width, inset, theme, noColor); ok {
+		return rows, nil
+	}
+
+	started := time.Now()
+	rows, err := r.renderLiveRowsNow(slot, content, width, inset, theme, noColor)
+	if err != nil {
+		return rows, err
+	}
+	r.rememberLiveFrame(slot, content, width, inset, theme, noColor, rows, time.Since(started))
+
+	return rows, nil
+}
+
+// renderLiveRowsNow assembles the frame for the current content, paying for the
+// whole un-frozen tail.
+func (r *markdownRenderer) renderLiveRowsNow(
 	slot, content string,
 	width, inset int,
 	theme colorTheme,
@@ -141,21 +171,136 @@ func (r *markdownRenderer) renderLiveRows(
 	return rowSegments{frozen: insetRowSlice(splitTranscriptRows(rendered), inset)}, nil
 }
 
-// renderLiveIncremental renders a growing live body from its frozen prefix. ok
-// is false when no boundary may be frozen or a render failed, so the caller
-// renders the body whole.
-func (r *markdownRenderer) renderLiveIncremental(
+// A liveFrame is what the last render of one live slot produced, with what it
+// cost. The un-frozen tail of a live body cannot be frozen while it sits inside a
+// code fence, a list, a blockquote or a table, so a streaming block re-renders its
+// whole tail on every frame: the cost grows with the tail and the work is O(body²)
+// over one message.
+type liveFrame struct {
+	content  string
+	rows     rowSegments
+	width    int
+	inset    int
+	theme    themeFingerprint
+	noColor  bool
+	cost     time.Duration
+	rendered time.Time
+}
+
+const (
+	// liveFrameFactor is how much longer than its own cost a live frame stands
+	// before the renderer pays for the tail again.
+	liveFrameFactor = 2
+	// liveFrameBytes is how large an un-frozen tail has to be before its frame may
+	// be reused at all. Below it a frame costs a small fraction of one render tick,
+	// so rendering it every tick is both cheap and exact — which is what keeps a
+	// body that small byte-identical to a whole render on every frame. Above it the
+	// cost grows with the tail (measured: 1.4-2.7 µs per byte for an open fence, plus
+	// a few milliseconds of renderer setup), the frame's own cost decides how long it
+	// stands, and a frame may therefore be one cooldown behind the content it was
+	// asked for.
+	//
+	// The staleness is bounded and never corrupt: a reused frame is the whole render
+	// of the content it was rendered from, never a mix. What it is not is a valid
+	// frame for newer content whose structure changed — a fence that closed and
+	// reopened, say. Exactness comes back the moment the renderer pays for the tail
+	// again, which is the first frame after the cooldown lapses: a body that stops
+	// growing is therefore exact within one cooldown of its last render, and stays
+	// exact because the frame then holds that content (reuse needs strict growth).
+	// Measured on a 98 KiB open fence at the TUI's own 33 ms cadence: 7.6 repaints a
+	// second, worst observed lag 270 ms and 15 KiB of content behind.
+	liveFrameBytes = 8 << 10
+	// maxLiveFrames bounds the frames kept for reuse. One live body is the normal
+	// case; the bound only stops a long session's settled slots from pinning their
+	// last tail.
+	maxLiveFrames = 8
+)
+
+// cooldown is how long a live frame stands. It is never shorter than one render
+// frame, so a tail that fits inside the frame budget renders exactly as often as
+// it did before, and it grows with the frame's own cost, so an expensive tail
+// takes at most liveFrameFactor frames' worth of wall time for one render.
+// Bounding that share is what keeps a pathological block from owning the event
+// loop.
+func (frame liveFrame) cooldown() time.Duration {
+	return max(renderFrame, liveFrameFactor*frame.cost)
+}
+
+// reusable reports whether the frame is large enough to be worth reusing. The
+// test is on the frame's own size rather than on a clock, so a body small enough
+// to render exactly every frame always does.
+func (frame liveFrame) reusable() bool {
+	return len(frame.content) >= liveFrameBytes
+}
+
+// reuseLiveFrame reports whether the last frame this slot produced still stands.
+// A frame may only stand for a strictly longer document that extends the one it
+// was rendered for, so a new message, a rewound draft, a resize or a theme change
+// always renders. The rows it returns are the frame's own, so the composed view
+// stays internally consistent even though its tail is one render behind.
+func (r *markdownRenderer) reuseLiveFrame(
 	slot, content string,
-	width int,
+	width, inset int,
 	theme colorTheme,
 	noColor bool,
-) (string, bool) {
-	rows, ok := r.renderLiveIncrementalRows(slot, content, width, 0, theme, noColor)
-	if !ok {
-		return "", false
+) (rowSegments, bool) {
+	if slot == "" {
+		return rowSegments{}, false
+	}
+	frame, ok := r.liveFrames[slot]
+	if !ok || !frame.reusable() {
+		return rowSegments{}, false
+	}
+	if frame.width != width || frame.inset != inset || frame.noColor != noColor ||
+		frame.theme != themeFingerprint(theme.fingerprint) {
+		return rowSegments{}, false
+	}
+	if len(content) <= len(frame.content) || !strings.HasPrefix(content, frame.content) {
+		return rowSegments{}, false
+	}
+	if time.Since(frame.rendered) >= frame.cooldown() {
+		return rowSegments{}, false
 	}
 
-	return strings.Join(rows.all(), "\n"), true
+	return frame.rows, true
+}
+
+func (r *markdownRenderer) rememberLiveFrame(
+	slot, content string,
+	width, inset int,
+	theme colorTheme,
+	noColor bool,
+	rows rowSegments,
+	cost time.Duration,
+) {
+	if slot == "" {
+		return
+	}
+	if r.liveFrames == nil {
+		r.liveFrames = make(map[string]liveFrame, maxLiveFrames)
+	}
+	r.evictStaleLiveFrames()
+	r.liveFrames[slot] = liveFrame{
+		content: content, rows: rows, width: width, inset: inset,
+		theme: themeFingerprint(theme.fingerprint), noColor: noColor,
+		cost: cost, rendered: time.Now(),
+	}
+}
+
+// evictStaleLiveFrames keeps the reuse map bounded. A settled slot never asks
+// again, so the least recently rendered frame is the first to go.
+func (r *markdownRenderer) evictStaleLiveFrames() {
+	if len(r.liveFrames) < maxLiveFrames {
+		return
+	}
+	oldestSlot := ""
+	var oldest time.Time
+	for slot, frame := range r.liveFrames {
+		if oldestSlot == "" || frame.rendered.Before(oldest) {
+			oldestSlot, oldest = slot, frame.rendered
+		}
+	}
+	delete(r.liveFrames, oldestSlot)
 }
 
 // renderLiveIncrementalRows assembles one frame's rows from the frozen prefix
@@ -261,7 +406,15 @@ func (r *markdownRenderer) renderUncached(content string, width int, theme color
 		r.engineBuilds++
 	}
 
+	// glamour resolves the fence style through chroma's process-global, unlocked
+	// registry, so the read has to be ordered against pips's derived-style
+	// registrations (which a runtime theme load performs). ensureChromaStyle
+	// registers this theme's own style if a path that skips loadThemeRegistry
+	// built the snapshot; the read lock below is what makes the pair race-free.
+	ensureChromaStyle(theme)
+	chromaStyleRegistryMu.RLock()
 	rendered, err := r.engine.Render(content)
+	chromaStyleRegistryMu.RUnlock()
 	// Glamour's block-stack backing array retains popped buffers. Reuse only
 	// flat, bounded paragraph engines; a large/nested document must release it.
 	if len(content) > markdownEngineBytes || len(rendered) > markdownEngineBytes || !independentMarkdownDocument(content) {
@@ -437,38 +590,54 @@ const (
 	chromaStyleBW = "bw"
 )
 
-// bundledChromaStyle names the chroma style a theme's syntax is drawn from, so
-// the tokens follow the theme instead of the first render in the process. A theme
-// the switch does not name, such as one loaded from a file, follows the family its
-// background was resolved for.
-func bundledChromaStyle(theme colorTheme) string {
+// builtinFamilyChromaStyles is the bundled chroma style behind every built-in
+// whose family ships one. Most ids share their name with the chroma style built
+// for them; the rest are spelled out. An id missing from this table is a family
+// chroma ships no style for, and such a theme gets a complete style derived from
+// its own palette instead (see markdown_palette_style.go).
+var builtinFamilyChromaStyles = map[string]string{
+	themeIDDefaultDark:     chromaStyleGitHubDark,
+	themeIDDefaultLight:    chromaStyleGitHub,
+	themeIDGruvboxDark:     chromaStyleGruvbox,
+	themeIDOneDark:         chromaStyleOneDark,
+	themeIDTokyoNight:      chromaStyleTokyoNightNight,
+	themeIDTokyoNightStorm: chromaStyleTokyoNightStorm,
+	themeIDTokyoNightLight: chromaStyleTokyoNightDay,
+	themeIDDracula:         themeIDDracula,
+	themeIDNord:            themeIDNord,
+	themeIDSolarizedLight:  themeIDSolarizedLight,
+	themeIDSolarizedDark:   themeIDSolarizedDark,
+	themeIDGruvboxLight:    themeIDGruvboxLight,
+	themeIDModusOperandi:   themeIDModusOperandi,
+	themeIDModusVivendi:    themeIDModusVivendi,
+	themeIDCatppuccinLatte: themeIDCatppuccinLatte, themeIDCatppuccinFrappe: themeIDCatppuccinFrappe,
+	themeIDCatppuccinMacchiato: themeIDCatppuccinMacchiato, themeIDCatppuccinMocha: themeIDCatppuccinMocha,
+	themeIDRosePine: themeIDRosePine, themeIDRosePineMoon: themeIDRosePineMoon,
+	themeIDRosePineDawn: themeIDRosePineDawn,
+}
+
+// familyChromaStyle names the bundled style that carries a built-in theme's
+// family syntax tokens, and reports false when chroma ships no style for that
+// family — which is exactly the set of themes pips derives a complete style for.
+func familyChromaStyle(theme colorTheme) (string, bool) {
 	if theme.borrowsTerminalColors() {
 		// A theme with no polarity of its own cannot hand chroma absolute token
 		// colours, so it names the bundled style that carries none.
-		return chromaStyleBW
+		return chromaStyleBW, true
 	}
+	name, ok := builtinFamilyChromaStyles[theme.id]
 
-	switch theme.id {
-	case themeIDDefaultDark:
-		return chromaStyleGitHubDark
-	case themeIDDefaultLight:
-		return chromaStyleGitHub
-	case themeIDGruvboxDark:
-		return chromaStyleGruvbox
-	case themeIDOneDark:
-		return chromaStyleOneDark
-	case themeIDTokyoNight:
-		return chromaStyleTokyoNightNight
-	case themeIDTokyoNightStorm:
-		return chromaStyleTokyoNightStorm
-	case themeIDTokyoNightLight:
-		return chromaStyleTokyoNightDay
-	// These four share their name with the chroma style built for them.
-	case themeIDDracula, themeIDNord, themeIDSolarizedLight,
-		themeIDCatppuccinLatte, themeIDCatppuccinFrappe, themeIDCatppuccinMacchiato, themeIDCatppuccinMocha,
-		themeIDRosePine, themeIDRosePineMoon, themeIDRosePineDawn,
-		themeIDGruvboxLight, themeIDSolarizedDark, themeIDModusOperandi, themeIDModusVivendi:
-		return theme.id
+	return name, ok
+}
+
+// bundledChromaStyle names the chroma style a theme's syntax is drawn from, so
+// the tokens follow the theme instead of the first render in the process. It is
+// the render path's last resort: every built-in resolves through its own family
+// style or through a derived style, and every theme loaded from a file resolves
+// through the style derived from its own palette.
+func bundledChromaStyle(theme colorTheme) string {
+	if name, ok := familyChromaStyle(theme); ok {
+		return name
 	}
 
 	if theme.isLight() {

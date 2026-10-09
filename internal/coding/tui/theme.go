@@ -24,6 +24,9 @@ const (
 	themeIDDefaultDark         = "default-dark"
 	themeIDDefaultLight        = "default-light"
 	themeIDDracula             = "dracula"
+	themeIDEverforestDark      = "everforest-dark"
+	themeIDEverforestLight     = "everforest-light"
+	themeIDKanagawa            = "kanagawa"
 	themeIDNord                = "nord"
 	themeIDGruvboxDark         = "gruvbox-dark"
 	themeIDCatppuccinLatte     = "catppuccin-latte"
@@ -84,6 +87,11 @@ type colorTheme struct {
 	background  themeBackground
 	palette     colorPalette
 	fingerprint string
+	// paletteStyle is the digest that names the complete chroma style derived
+	// from this palette. It is computed once, from the same canonical form as the
+	// fingerprint, so it is stable when the snapshot is stamped for a canvas and
+	// two themes with the same palette but different ids keep separate styles.
+	paletteStyle string
 	// codeSurface reports whether Markdown may paint the inline-code background
 	// on the canvas this snapshot will be drawn on. A surface fill is a claim
 	// about the canvas, so it is stamped from the detected terminal background
