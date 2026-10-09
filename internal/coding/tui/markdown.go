@@ -406,7 +406,15 @@ func (r *markdownRenderer) renderUncached(content string, width int, theme color
 		r.engineBuilds++
 	}
 
+	// glamour resolves the fence style through chroma's process-global, unlocked
+	// registry, so the read has to be ordered against pips's derived-style
+	// registrations (which a runtime theme load performs). ensureChromaStyle
+	// registers this theme's own style if a path that skips loadThemeRegistry
+	// built the snapshot; the read lock below is what makes the pair race-free.
+	ensureChromaStyle(theme)
+	chromaStyleRegistryMu.RLock()
 	rendered, err := r.engine.Render(content)
+	chromaStyleRegistryMu.RUnlock()
 	// Glamour's block-stack backing array retains popped buffers. Reuse only
 	// flat, bounded paragraph engines; a large/nested document must release it.
 	if len(content) > markdownEngineBytes || len(rendered) > markdownEngineBytes || !independentMarkdownDocument(content) {
@@ -582,38 +590,54 @@ const (
 	chromaStyleBW = "bw"
 )
 
-// bundledChromaStyle names the chroma style a theme's syntax is drawn from, so
-// the tokens follow the theme instead of the first render in the process. A theme
-// the switch does not name, such as one loaded from a file, follows the family its
-// background was resolved for.
-func bundledChromaStyle(theme colorTheme) string {
+// builtinFamilyChromaStyles is the bundled chroma style behind every built-in
+// whose family ships one. Most ids share their name with the chroma style built
+// for them; the rest are spelled out. An id missing from this table is a family
+// chroma ships no style for, and such a theme gets a complete style derived from
+// its own palette instead (see markdown_palette_style.go).
+var builtinFamilyChromaStyles = map[string]string{
+	themeIDDefaultDark:     chromaStyleGitHubDark,
+	themeIDDefaultLight:    chromaStyleGitHub,
+	themeIDGruvboxDark:     chromaStyleGruvbox,
+	themeIDOneDark:         chromaStyleOneDark,
+	themeIDTokyoNight:      chromaStyleTokyoNightNight,
+	themeIDTokyoNightStorm: chromaStyleTokyoNightStorm,
+	themeIDTokyoNightLight: chromaStyleTokyoNightDay,
+	themeIDDracula:         themeIDDracula,
+	themeIDNord:            themeIDNord,
+	themeIDSolarizedLight:  themeIDSolarizedLight,
+	themeIDSolarizedDark:   themeIDSolarizedDark,
+	themeIDGruvboxLight:    themeIDGruvboxLight,
+	themeIDModusOperandi:   themeIDModusOperandi,
+	themeIDModusVivendi:    themeIDModusVivendi,
+	themeIDCatppuccinLatte: themeIDCatppuccinLatte, themeIDCatppuccinFrappe: themeIDCatppuccinFrappe,
+	themeIDCatppuccinMacchiato: themeIDCatppuccinMacchiato, themeIDCatppuccinMocha: themeIDCatppuccinMocha,
+	themeIDRosePine: themeIDRosePine, themeIDRosePineMoon: themeIDRosePineMoon,
+	themeIDRosePineDawn: themeIDRosePineDawn,
+}
+
+// familyChromaStyle names the bundled style that carries a built-in theme's
+// family syntax tokens, and reports false when chroma ships no style for that
+// family — which is exactly the set of themes pips derives a complete style for.
+func familyChromaStyle(theme colorTheme) (string, bool) {
 	if theme.borrowsTerminalColors() {
 		// A theme with no polarity of its own cannot hand chroma absolute token
 		// colours, so it names the bundled style that carries none.
-		return chromaStyleBW
+		return chromaStyleBW, true
 	}
+	name, ok := builtinFamilyChromaStyles[theme.id]
 
-	switch theme.id {
-	case themeIDDefaultDark:
-		return chromaStyleGitHubDark
-	case themeIDDefaultLight:
-		return chromaStyleGitHub
-	case themeIDGruvboxDark:
-		return chromaStyleGruvbox
-	case themeIDOneDark:
-		return chromaStyleOneDark
-	case themeIDTokyoNight:
-		return chromaStyleTokyoNightNight
-	case themeIDTokyoNightStorm:
-		return chromaStyleTokyoNightStorm
-	case themeIDTokyoNightLight:
-		return chromaStyleTokyoNightDay
-	// These four share their name with the chroma style built for them.
-	case themeIDDracula, themeIDNord, themeIDSolarizedLight,
-		themeIDCatppuccinLatte, themeIDCatppuccinFrappe, themeIDCatppuccinMacchiato, themeIDCatppuccinMocha,
-		themeIDRosePine, themeIDRosePineMoon, themeIDRosePineDawn,
-		themeIDGruvboxLight, themeIDSolarizedDark, themeIDModusOperandi, themeIDModusVivendi:
-		return theme.id
+	return name, ok
+}
+
+// bundledChromaStyle names the chroma style a theme's syntax is drawn from, so
+// the tokens follow the theme instead of the first render in the process. It is
+// the render path's last resort: every built-in resolves through its own family
+// style or through a derived style, and every theme loaded from a file resolves
+// through the style derived from its own palette.
+func bundledChromaStyle(theme colorTheme) string {
+	if name, ok := familyChromaStyle(theme); ok {
+		return name
 	}
 
 	if theme.isLight() {

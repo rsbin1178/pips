@@ -118,11 +118,11 @@ func TestBuiltinThemeRegistryIsStableAndComplete(t *testing.T) {
 
 	registry := loadThemeRegistry("")
 	options := registry.Options()
-	require.Len(t, options, 23)
+	require.Len(t, options, 26)
 	assert.Equal(t, "auto", options[0].id)
 	assert.True(t, options[0].automatic)
 	entries := registry.Entries()
-	require.Len(t, entries, 22)
+	require.Len(t, entries, 25)
 
 	ids := make([]string, 0, len(entries))
 	for _, entry := range entries {
@@ -149,7 +149,8 @@ func TestBuiltinThemeRegistryIsStableAndComplete(t *testing.T) {
 	assert.Equal(t, []string{
 		"default-dark", "default-light", "terminal",
 		"catppuccin-latte", "catppuccin-frappe", "catppuccin-macchiato", "catppuccin-mocha",
-		"dracula", "gruvbox-light", "gruvbox-dark", "modus-operandi", "modus-vivendi",
+		"dracula", "everforest-light", "everforest-dark",
+		"gruvbox-light", "gruvbox-dark", "kanagawa", "modus-operandi", "modus-vivendi",
 		"nord", "one-dark", "rose-pine-dawn", "rose-pine-moon", "rose-pine",
 		"solarized-light", "solarized-dark", "tokyo-night-light", "tokyo-night-storm", "tokyo-night",
 	}, ids)
@@ -163,19 +164,41 @@ func TestBuiltinThemeRegistryIsStableAndComplete(t *testing.T) {
 	assert.Equal(t, themeBackgroundLight, mustTheme(t, registry, themeIDGruvboxLight).background)
 	assert.Equal(t, themeBackgroundDark, mustTheme(t, registry, themeIDSolarizedDark).background)
 	assert.Equal(t, themeBackgroundLight, mustTheme(t, registry, themeIDModusOperandi).background)
+	assert.Equal(t, themeBackgroundDark, mustTheme(t, registry, themeIDEverforestDark).background)
+	assert.Equal(t, themeBackgroundLight, mustTheme(t, registry, themeIDEverforestLight).background)
+	assert.Equal(t, themeBackgroundDark, mustTheme(t, registry, themeIDKanagawa).background)
+	assert.Equal(t, "Everforest Dark", mustTheme(t, registry, themeIDEverforestDark).name)
+	assert.Equal(t, "Everforest Light", mustTheme(t, registry, themeIDEverforestLight).name)
+	assert.Equal(t, "Kanagawa", mustTheme(t, registry, themeIDKanagawa).name)
 }
 
+// TestBuiltinThemeRepresentativeContrast pins the two pairings a palette actually
+// paints on `code_background`: the inline-code pill draws the `code` role on it,
+// and the fence body is the same foreground, so both must clear 4.0.
+//
+// The syntax accents are deliberately not checked against `code_background`: a
+// fence paints them on the terminal's own canvas, which pips does not know, and
+// the catalogue's accents are tuned against that canvas rather than against the
+// pill's surface. Measured across the catalogue, several built-ins already sit
+// below 3:1 there (dracula's muted is 1.94:1, catppuccin-latte's active 1.70:1),
+// which is a property of each family's own palette and not of this guard.
 func TestBuiltinThemeRepresentativeContrast(t *testing.T) {
 	t.Parallel()
 
 	for _, entry := range loadThemeRegistry("").Entries() {
-		if entry.theme.borrowsTerminalColors() {
+		theme := entry.theme
+		if theme.borrowsTerminalColors() {
 			// The code fill is never painted for a theme that borrows the terminal's
-			// own colours, so workspace-versus-code_background says nothing about it.
+			// own colours, so code_background says nothing about it.
 			continue
 		}
-		ratio := themeContrast(entry.theme.palette.workspace, entry.theme.palette.codeBackground)
-		assert.GreaterOrEqual(t, ratio, 4.0, entry.theme.id)
+		body := themeContrast(theme.palette.workspace, theme.palette.codeBackground)
+		pill := themeContrast(theme.palette.code, theme.palette.codeBackground)
+		t.Logf("%-18s workspace %s and code %s on code_background %s = %.2f:1 / %.2f:1",
+			theme.id, colorString(theme.palette.workspace), colorString(theme.palette.code),
+			colorString(theme.palette.codeBackground), body, pill)
+		assert.GreaterOrEqual(t, body, 4.0, "%s fence body", theme.id)
+		assert.GreaterOrEqual(t, pill, 4.0, "%s inline-code pill", theme.id)
 	}
 }
 
