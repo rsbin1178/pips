@@ -11,7 +11,6 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/rsbin1178/pips/agent/team"
-	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding"
 	"github.com/rsbin1178/pips/internal/coding/subagent"
 	"github.com/rsbin1178/pips/internal/coding/teamstate"
@@ -385,13 +384,13 @@ func resolveProgressActivity(context activityContext) (activityStatus, bool) {
 		}, true
 	}
 
-	if hasDraftKind(context.state.Draft, ai.StreamTextDelta) {
+	if context.state.Draft.HasTextDelta() {
 		return activityStatus{
 			kind: activityResponding, label: activityLabelResponding,
 		}, true
 	}
 
-	if hasDraftKind(context.state.Draft, ai.StreamReasoningDelta) ||
+	if context.state.Draft.HasReasoningDelta() ||
 		hasOpenTurn(context.state.Runs) {
 		return activityStatus{
 			kind: activityThinking, label: activityLabelThinking,
@@ -498,16 +497,6 @@ func resolvePhaseActivity(phase coding.Phase) (activityStatus, bool) {
 	default:
 		return activityStatus{}, false
 	}
-}
-
-func hasDraftKind(deltas []coding.MessageDelta, kind ai.StreamEventType) bool {
-	for _, delta := range deltas {
-		if delta.Kind == kind {
-			return true
-		}
-	}
-
-	return false
 }
 
 func hasOpenTurn(runs []coding.RunState) bool {

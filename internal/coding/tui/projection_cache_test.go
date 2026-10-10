@@ -211,22 +211,18 @@ func TestProjectionCacheMatchesPureProjection(t *testing.T) {
 		{
 			name: "draft growth",
 			mutate: func(_ *testing.T, model *Model) {
-				model.state.Draft = []coding.MessageDelta{
-					{Kind: ai.StreamTextDelta, Text: "partial answer"},
-				}
+				model.state.Draft = coding.NewStreamDraft(coding.MessageDelta{Kind: ai.StreamTextDelta, Text: "partial answer"})
 				model.state.DraftCandidate = coding.CandidateIdentity{RunID: "run-1", Turn: 3}
 			},
 		},
 		{
 			name: "draft commit",
 			arrange: func(_ *testing.T, model *Model) {
-				model.state.Draft = []coding.MessageDelta{
-					{Kind: ai.StreamTextDelta, Text: "partial answer"},
-				}
+				model.state.Draft = coding.NewStreamDraft(coding.MessageDelta{Kind: ai.StreamTextDelta, Text: "partial answer"})
 				model.state.DraftCandidate = coding.CandidateIdentity{RunID: "run-1", Turn: 3}
 			},
 			mutate: func(_ *testing.T, model *Model) {
-				model.state.Draft = nil
+				model.state.Draft = coding.StreamDraft{}
 				model.state.DraftCandidate = coding.CandidateIdentity{}
 				model.state.Transcript = append(model.state.Transcript, ai.AssistantText("committed answer"))
 				model.state.MessageCandidates = append(
@@ -414,9 +410,7 @@ func TestProjectionCacheRebuildsPrefixOnlyWhenInputsChange(t *testing.T) {
 	require.Greater(t, prefixLength, 0)
 
 	// A draft delta is volatile: the committed prefix is reused verbatim.
-	model.state.Draft = []coding.MessageDelta{
-		{Kind: ai.StreamTextDelta, Text: "partial answer"},
-	}
+	model.state.Draft = coding.NewStreamDraft(coding.MessageDelta{Kind: ai.StreamTextDelta, Text: "partial answer"})
 	frame := model.viewportProjection()
 	require.Equal(t, prefixLength, frame.stable)
 	require.Zero(t, model.frameExtends)
@@ -595,9 +589,7 @@ func TestProjectionCacheToolLifecycle(t *testing.T) {
 	before := model.frameCache.stamp
 
 	// An unrelated draft delta leaves the committed inputs untouched.
-	model.state.Draft = []coding.MessageDelta{
-		{Kind: ai.StreamTextDelta, Text: "unrelated"},
-	}
+	model.state.Draft = coding.NewStreamDraft(coding.MessageDelta{Kind: ai.StreamTextDelta, Text: "unrelated"})
 	frame := model.viewportProjection()
 	require.Equal(t, model.transcriptBlocks(), viewportProjectionFrameBlocks(frame))
 	require.Greater(t, frame.stable, 0)

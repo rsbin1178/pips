@@ -139,12 +139,14 @@ func BenchmarkTranscriptProjectionFrame(b *testing.B) {
 
 	b.Run("draft_only", func(b *testing.B) {
 		model := projectionBenchModel(b, messages, tools)
-		model.state.Draft = []coding.MessageDelta{{Kind: ai.StreamReasoningDelta, Text: "thinking"}}
+		model.state.Draft = coding.NewStreamDraft(coding.MessageDelta{Kind: ai.StreamReasoningDelta, Text: "thinking"})
 		model.rerenderTranscript(false)
 		b.ReportAllocs()
 
 		for index := 0; b.Loop(); index++ {
-			model.state.Draft[0].Text = "thinking " + strconv.Itoa(index)
+			model.state.Draft = coding.NewStreamDraft(coding.MessageDelta{
+				Kind: ai.StreamReasoningDelta, Text: "thinking " + strconv.Itoa(index),
+			})
 			model.rerenderTranscript(false)
 		}
 	})

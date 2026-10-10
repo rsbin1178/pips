@@ -397,9 +397,9 @@ func TestStreamingTailDropsPaddingWithoutSpuriousEllipsis(t *testing.T) {
 	model := readyModel(t, true)
 	model.Update(tea.WindowSizeMsg{Width: 40, Height: 12})
 	model.state.Phase = coding.PhaseRunning
-	model.state.Draft = []coding.MessageDelta{{
+	model.state.Draft = coding.NewStreamDraft(coding.MessageDelta{
 		Kind: ai.StreamTextDelta, Text: "Short answer",
-	}}
+	})
 
 	promoted, _ := model.syncStreamingDraft("draft-1", "Short answer")
 	assert.Empty(t, promoted)

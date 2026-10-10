@@ -215,16 +215,13 @@ func TestThinkingDraftStreamsUnfolded(t *testing.T) {
 	model.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	model.state.Phase = coding.PhaseRunning
 	model.state.Interaction = coding.InteractionState{ID: "interaction-1", Active: true}
-	model.state.Draft = []coding.MessageDelta{
-		{Kind: ai.StreamReasoningDelta, Text: "first\n\nsecond\n\nthird\n"},
-	}
+	model.state.Draft = coding.NewStreamDraft(coding.MessageDelta{Kind: ai.StreamReasoningDelta, Text: "first\n\nsecond\n\nthird\n"})
 	model.renderTranscript(true)
 
 	assert.Contains(t, ansi.Strip(model.View().Content), "third")
 
 	// The turn keeps streaming, and the new text lands in the same block.
-	model.state.Draft = append(model.state.Draft,
-		coding.MessageDelta{Kind: ai.StreamReasoningDelta, Text: "fourth\n"})
+	model.state.Draft = model.state.Draft.Append(coding.MessageDelta{Kind: ai.StreamReasoningDelta, Text: "fourth\n"})
 	model.renderTranscript(false)
 
 	frame := ansi.Strip(model.View().Content)

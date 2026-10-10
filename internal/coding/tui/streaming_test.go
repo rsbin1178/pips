@@ -26,14 +26,14 @@ func TestStreamingCodeBlockKeepsOneManagedTailAndCommitsEveryRowOnce(t *testing.
 	var source strings.Builder
 
 	source.WriteString("```python\nvalue_00 = 0\npartial")
-	model.state.Draft = []coding.MessageDelta{{Kind: ai.StreamTextDelta, Text: source.String()}}
+	model.state.Draft = coding.NewStreamDraft(coding.MessageDelta{Kind: ai.StreamTextDelta, Text: source.String()})
 	outputs := []string{modelCommandOutput(model, model.commitStableTimeline())}
 	managedHeight := lipgloss.Height(model.View().Content)
 
 	for index := 1; index < 20; index++ {
 		delta := fmt.Sprintf("_%02d\nvalue_%02d = %d", index, index, index)
 		source.WriteString(delta)
-		model.state.Draft = append(model.state.Draft, coding.MessageDelta{
+		model.state.Draft = model.state.Draft.Append(coding.MessageDelta{
 			Kind: ai.StreamTextDelta,
 			Text: delta,
 		})
@@ -49,7 +49,7 @@ func TestStreamingCodeBlockKeepsOneManagedTailAndCommitsEveryRowOnce(t *testing.
 
 	source.WriteString("\n```")
 	model.state.Transcript = []ai.Message{ai.AssistantText(source.String())}
-	model.state.Draft = nil
+	model.state.Draft = coding.StreamDraft{}
 	outputs = append(outputs, modelCommandOutput(model, model.commitStableTimeline()))
 
 	combined := ansi.Strip(strings.Join(outputs, "\n"))
@@ -70,7 +70,7 @@ func TestStreamingTableStaysMutableUntilFinalized(t *testing.T) {
 	model.state.Interaction.Active = true
 
 	source := "| name | result |\n"
-	model.state.Draft = []coding.MessageDelta{{Kind: ai.StreamTextDelta, Text: source}}
+	model.state.Draft = coding.NewStreamDraft(coding.MessageDelta{Kind: ai.StreamTextDelta, Text: source})
 	first := modelCommandOutput(model, model.commitStableTimeline())
 	assert.NotContains(t, ansi.Strip(first), "name")
 	assert.Equal(t, "Table · preparing…", ansi.Strip(model.streaming.tail))
@@ -79,7 +79,7 @@ func TestStreamingTableStaysMutableUntilFinalized(t *testing.T) {
 
 	delta := "| --- | --- |\n| alpha"
 	source += delta
-	model.state.Draft = append(model.state.Draft, coding.MessageDelta{
+	model.state.Draft = model.state.Draft.Append(coding.MessageDelta{
 		Kind: ai.StreamTextDelta,
 		Text: delta,
 	})
@@ -90,7 +90,7 @@ func TestStreamingTableStaysMutableUntilFinalized(t *testing.T) {
 
 	delta = " | one |\n| beta"
 	source += delta
-	model.state.Draft = append(model.state.Draft, coding.MessageDelta{
+	model.state.Draft = model.state.Draft.Append(coding.MessageDelta{
 		Kind: ai.StreamTextDelta,
 		Text: delta,
 	})
@@ -101,7 +101,7 @@ func TestStreamingTableStaysMutableUntilFinalized(t *testing.T) {
 
 	delta = " | two"
 	source += delta
-	model.state.Draft = append(model.state.Draft, coding.MessageDelta{
+	model.state.Draft = model.state.Draft.Append(coding.MessageDelta{
 		Kind: ai.StreamTextDelta,
 		Text: delta,
 	})
@@ -117,7 +117,7 @@ func TestStreamingTableStaysMutableUntilFinalized(t *testing.T) {
 
 	delta = " |\n"
 	source += delta
-	model.state.Draft = append(model.state.Draft, coding.MessageDelta{
+	model.state.Draft = model.state.Draft.Append(coding.MessageDelta{
 		Kind: ai.StreamTextDelta,
 		Text: delta,
 	})
@@ -127,7 +127,7 @@ func TestStreamingTableStaysMutableUntilFinalized(t *testing.T) {
 	assert.Equal(t, managedHeight, lipgloss.Height(model.View().Content))
 
 	model.state.Transcript = []ai.Message{ai.AssistantText(source)}
-	model.state.Draft = nil
+	model.state.Draft = coding.StreamDraft{}
 	final := modelCommandOutput(model, model.commitStableTimeline())
 	combined := ansi.Strip(strings.Join(
 		[]string{first, second, third, fourth, fifth, final},
@@ -153,17 +153,17 @@ func TestStreamingLongTableKeepsFixedPreviewHeight(t *testing.T) {
 	var source strings.Builder
 
 	source.WriteString("| name | result |\n| --- | --- |\n")
-	model.state.Draft = []coding.MessageDelta{{
+	model.state.Draft = coding.NewStreamDraft(coding.MessageDelta{
 		Kind: ai.StreamTextDelta,
 		Text: source.String(),
-	}}
+	})
 	assert.Empty(t, modelCommandOutput(model, model.commitStableTimeline()))
 	managedHeight := lipgloss.Height(model.View().Content)
 
 	for index := 1; index <= 40; index++ {
 		delta := fmt.Sprintf("| row_%02d | value_%02d |\n", index, index)
 		source.WriteString(delta)
-		model.state.Draft = append(model.state.Draft, coding.MessageDelta{
+		model.state.Draft = model.state.Draft.Append(coding.MessageDelta{
 			Kind: ai.StreamTextDelta,
 			Text: delta,
 		})
@@ -174,7 +174,7 @@ func TestStreamingLongTableKeepsFixedPreviewHeight(t *testing.T) {
 	}
 
 	model.state.Transcript = []ai.Message{ai.AssistantText(source.String())}
-	model.state.Draft = nil
+	model.state.Draft = coding.StreamDraft{}
 	final := ansi.Strip(modelCommandOutput(model, model.commitStableTimeline()))
 	assert.NotContains(t, final, "Table ·")
 
@@ -192,16 +192,16 @@ func TestInterruptedStreamingDraftFlushesUncommittedTail(t *testing.T) {
 	model.scrollbackOutput = false
 	model.state.Phase = coding.PhaseRunning
 	model.state.Interaction.Active = true
-	model.state.Draft = []coding.MessageDelta{{
+	model.state.Draft = coding.NewStreamDraft(coding.MessageDelta{
 		Kind: ai.StreamTextDelta,
 		Text: "completed row\nunfinished tail",
-	}}
+	})
 
 	first := modelCommandOutput(model, model.commitStableTimeline())
 	assert.NotContains(t, ansi.Strip(first), "unfinished tail")
 	assert.Contains(t, ansi.Strip(model.View().Content), "unfinished tail")
 
-	model.state.Draft = nil
+	model.state.Draft = coding.StreamDraft{}
 	final := modelCommandOutput(model, model.commitStableTimeline())
 	combined := ansi.Strip(first + "\n" + final)
 	assert.Equal(t, 1, strings.Count(combined, "completed row"))
@@ -260,9 +260,9 @@ func TestPlanStreamingCandidateIsRetractableAndCommitsExactlyOnce(t *testing.T) 
 	model.state.Phase = coding.PhaseRunning
 	model.state.Interaction = coding.InteractionState{Active: true, Mode: coding.ModePlan}
 	model.state.DraftCandidate = coding.CandidateIdentity{RunID: "plan-run", Turn: 1}
-	model.state.Draft = []coding.MessageDelta{{
+	model.state.Draft = coding.NewStreamDraft(coding.MessageDelta{
 		Kind: ai.StreamTextDelta, Text: "provisional Plan that must remain retractable",
-	}}
+	})
 
 	writes := model.streamingScrollbackWrites(nil)
 	assert.Empty(t, writes)
@@ -270,7 +270,7 @@ func TestPlanStreamingCandidateIsRetractableAndCommitsExactlyOnce(t *testing.T) 
 	assert.True(t, model.streaming.retractable)
 	assert.Zero(t, model.streaming.emitted)
 
-	model.state.Draft = nil
+	model.state.Draft = coding.StreamDraft{}
 	model.state.DraftCandidate = coding.CandidateIdentity{}
 	writes = model.streamingScrollbackWrites(nil)
 	assert.Empty(t, writes)
@@ -279,9 +279,9 @@ func TestPlanStreamingCandidateIsRetractableAndCommitsExactlyOnce(t *testing.T) 
 	const accepted = "# Accepted Plan\n\nOne authoritative block."
 
 	model.state.DraftCandidate = coding.CandidateIdentity{RunID: "plan-run", Turn: 2}
-	model.state.Draft = []coding.MessageDelta{{Kind: ai.StreamTextDelta, Text: accepted}}
+	model.state.Draft = coding.NewStreamDraft(coding.MessageDelta{Kind: ai.StreamTextDelta, Text: accepted})
 	assert.Empty(t, model.streamingScrollbackWrites(nil))
-	model.state.Draft = nil
+	model.state.Draft = coding.StreamDraft{}
 	model.state.DraftCandidate = coding.CandidateIdentity{}
 	stable := []timelineBlock{{kind: blockAssistant, id: "plan-run:2", body: accepted}}
 	writes = model.streamingScrollbackWrites(stable)
@@ -307,7 +307,7 @@ func TestStreamingKeepsRenderCoordinatesAcrossResize(t *testing.T) {
 	model.state.Interaction.Active = true
 
 	source := "```text\nresize_row_0\nresize_row_1\npartial"
-	model.state.Draft = []coding.MessageDelta{{Kind: ai.StreamTextDelta, Text: source}}
+	model.state.Draft = coding.NewStreamDraft(coding.MessageDelta{Kind: ai.StreamTextDelta, Text: source})
 	first := modelCommandOutput(model, model.commitStableTimeline())
 	assert.Equal(t, 24, model.streaming.width)
 
@@ -315,7 +315,7 @@ func TestStreamingKeepsRenderCoordinatesAcrossResize(t *testing.T) {
 
 	delta := "_tail\nresize_row_2\n```"
 	source += delta
-	model.state.Draft = append(model.state.Draft, coding.MessageDelta{
+	model.state.Draft = model.state.Draft.Append(coding.MessageDelta{
 		Kind: ai.StreamTextDelta,
 		Text: delta,
 	})
@@ -323,7 +323,7 @@ func TestStreamingKeepsRenderCoordinatesAcrossResize(t *testing.T) {
 	assert.Equal(t, 24, model.streaming.width)
 
 	model.state.Transcript = []ai.Message{ai.AssistantText(source)}
-	model.state.Draft = nil
+	model.state.Draft = coding.StreamDraft{}
 	final := modelCommandOutput(model, model.commitStableTimeline())
 	combined := ansi.Strip(first + "\n" + second + "\n" + final)
 
@@ -340,10 +340,10 @@ func TestStableStreamPromotionNeedsNoPaintTimer(t *testing.T) {
 	model.scrollbackOutput = false
 	model.state.Phase = coding.PhaseRunning
 	model.state.Interaction.Active = true
-	model.state.Draft = []coding.MessageDelta{{
+	model.state.Draft = coding.NewStreamDraft(coding.MessageDelta{
 		Kind: ai.StreamTextDelta,
 		Text: "first paragraph\n\nsecond paragraph\n\npartial",
-	}}
+	})
 
 	first := sequenceMessages(t, model.commitStableTimeline())
 	require.Len(t, first, 2)
@@ -351,7 +351,7 @@ func TestStableStreamPromotionNeedsNoPaintTimer(t *testing.T) {
 	require.True(t, firstDone)
 	model.Update(first[1])
 
-	model.state.Draft = append(model.state.Draft, coding.MessageDelta{
+	model.state.Draft = model.state.Draft.Append(coding.MessageDelta{
 		Kind: ai.StreamTextDelta,
 		Text: " tail\n\nthird paragraph\n\nnext partial",
 	})
