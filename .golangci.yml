@@ -153,7 +153,10 @@ formatters:
     - gofumpt
   settings:
     gofumpt:
-      extra-rules: true
+      # golangci-lint 2.14 split the old extra-rules flag: group-params is the
+      # rule the tree is formatted to, and naming it directly drops the
+      # deprecation warning every run used to print.
+      extra.group-params: true
   exclusions:
     generated: lax
     paths:
