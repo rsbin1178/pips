@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/ai/openai"
@@ -555,6 +556,76 @@ stream_continuation = true
 	assert.True(t, byRef["openai/flash"].StreamContinuation)
 	assert.False(t, byRef["openai/pro"].StreamContinuation,
 		"an absent stream_continuation keeps the regenerate default")
+}
+
+func TestLoadStreamIdleTimeoutPerProviderAndModel(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, `
+[providers.openai]
+stream_idle_timeout_seconds = 900
+
+[providers.openai.models."slow"]
+default = true
+stream_idle_timeout_seconds = 1800
+
+[providers.openai.models."inherits"]
+`)
+	result, err := config.Load(config.LoadOptions{ConfigFile: path})
+	require.NoError(t, err)
+
+	assert.Equal(t, 15*time.Minute, result.Config.Providers[ai.ProviderOpenAI].StreamIdleTimeout)
+
+	byRef := make(map[string]config.ModelConfig, len(result.Config.Models))
+	for _, model := range result.Config.Models {
+		byRef[model.Ref.String()] = model
+	}
+	assert.Equal(t, 30*time.Minute, byRef["openai/slow"].StreamIdleTimeout,
+		"the model's own bound wins over the provider's")
+	assert.Zero(t, byRef["openai/inherits"].StreamIdleTimeout,
+		"an absent key declares nothing and inherits the provider's value later")
+}
+
+func TestLoadRejectsStreamIdleTimeoutOutOfRange(t *testing.T) {
+	t.Parallel()
+
+	// The bound is a liveness guard, so an explicit zero is refused rather than
+	// read as "not declared": it would switch the guard off.
+	tests := []struct {
+		name    string
+		content string
+	}{
+		{
+			name:    "provider zero",
+			content: "[providers.openai]\nstream_idle_timeout_seconds = 0\n",
+		},
+		{
+			name:    "provider negative",
+			content: "[providers.openai]\nstream_idle_timeout_seconds = -1\n",
+		},
+		{
+			name:    "provider above the ceiling",
+			content: "[providers.openai]\nstream_idle_timeout_seconds = 3601\n",
+		},
+		{
+			name:    "model zero",
+			content: "[providers.openai.models.\"m\"]\nstream_idle_timeout_seconds = 0\n",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			path := filepath.Join(t.TempDir(), "config.toml")
+			writeFile(t, path, test.content)
+
+			_, err := config.Load(config.LoadOptions{ConfigFile: path})
+			require.ErrorIs(t, err, config.ErrInvalid)
+			assert.Contains(t, err.Error(), "stream_idle_timeout_seconds")
+		})
+	}
 }
 
 func TestLoadMultipleModelsRequireDefaultOrProcessSelection(t *testing.T) {

@@ -847,7 +847,8 @@ func TestResponsesStreamIdleAbortSurfacesThroughTheSSELayer(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte(
 			"data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\"}}\n\n" +
-				"data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n"))
+				"data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
+		))
 
 		flusher, ok := w.(http.Flusher)
 		if !ok {

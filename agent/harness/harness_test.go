@@ -257,7 +257,8 @@ func TestHarnessPauseAndResolve(t *testing.T) {
 		harness.WithAgentOptions(agent.WithBeforeTool(
 			func(_ context.Context, _ agent.ToolCallInfo) agent.ToolDecision {
 				return agent.ToolDecision{Action: agent.ToolDecisionPause}
-			})),
+			},
+		)),
 	)
 	require.NoError(t, err)
 

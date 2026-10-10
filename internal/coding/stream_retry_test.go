@@ -68,8 +68,8 @@ func TestReduceModelRetryTracksWaitUntilTheNextEvent(t *testing.T) {
 	))
 	assert.False(t, resumed.Retry.Active)
 	assert.Zero(t, resumed.Retry.Deadline)
-	require.Len(t, resumed.Draft, 1)
-	assert.Equal(t, "retried", resumed.Draft[0].Text)
+	require.Equal(t, 1, resumed.Draft.Len())
+	assert.Equal(t, "retried", resumed.Draft.Materialize()[0].Text)
 }
 
 func TestReduceBatchEndsTheWaitWhenADeltaFollows(t *testing.T) {
@@ -94,7 +94,8 @@ func TestReduceBatchEndsTheWaitWhenADeltaFollows(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, resumed.Retry.Active)
 	require.NotEmpty(t, resumed.Draft)
-	assert.Equal(t, "again", resumed.Draft[len(resumed.Draft)-1].Text)
+	records := resumed.Draft.Materialize()
+	assert.Equal(t, "again", records[len(records)-1].Text)
 }
 
 func TestReduceModelRetryRequiresAnActiveTurn(t *testing.T) {

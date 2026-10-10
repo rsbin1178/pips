@@ -338,7 +338,7 @@ func TestSubagentRouteRendersOrdinaryLiveState(t *testing.T) {
 		Tools: []coding.ToolState{{
 			RunID: "child-run", Turn: 1, Call: call, Status: coding.ToolStatusRunning,
 		}},
-		Draft: []coding.MessageDelta{{Kind: ai.StreamTextDelta, Text: "Reading now…"}},
+		Draft: coding.NewStreamDraft(coding.MessageDelta{Kind: ai.StreamTextDelta, Text: "Reading now…"}),
 	}
 	detail := subagent.Detail{Summary: subagent.Summary{
 		ChildSessionID: "child-1", Role: subagent.RoleExplore,

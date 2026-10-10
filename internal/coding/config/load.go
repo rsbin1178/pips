@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/pelletier/go-toml/v2"
 	"github.com/rsbin1178/pips/ai"
@@ -221,29 +222,31 @@ type fileSubagent struct {
 }
 
 type fileProvider struct {
-	BaseURL         *string              `toml:"base_url"`
-	Protocol        *string              `toml:"protocol"`
-	AllowHTTP       *bool                `toml:"allow_http"`
-	AllowPrivateIPs *bool                `toml:"allow_private_ips"`
-	Compatibility   fileCompatibility    `toml:"compatibility"`
-	Capabilities    fileCapabilities     `toml:"capabilities"`
-	ToolSearchName  *string              `toml:"tool_search_name"`
-	Models          map[string]fileModel `toml:"models"`
+	BaseURL                  *string              `toml:"base_url"`
+	Protocol                 *string              `toml:"protocol"`
+	AllowHTTP                *bool                `toml:"allow_http"`
+	AllowPrivateIPs          *bool                `toml:"allow_private_ips"`
+	Compatibility            fileCompatibility    `toml:"compatibility"`
+	Capabilities             fileCapabilities     `toml:"capabilities"`
+	ToolSearchName           *string              `toml:"tool_search_name"`
+	StreamIdleTimeoutSeconds *int                 `toml:"stream_idle_timeout_seconds"`
+	Models                   map[string]fileModel `toml:"models"`
 }
 
 type fileModel struct {
-	Default               bool                   `toml:"default"`
-	Protocol              *string                `toml:"protocol"`
-	ContextWindow         *int                   `toml:"context_window"`
-	StreamContinuation    *bool                  `toml:"stream_continuation"`
-	ReasoningLevels       []string               `toml:"reasoning_levels"`
-	DefaultReasoningLevel *string                `toml:"default_reasoning_level"`
-	ReasoningBudgets      map[string]int         `toml:"reasoning_budgets"`
-	DefaultVariant        *string                `toml:"default_variant"`
-	Compatibility         fileCompatibility      `toml:"compatibility"`
-	Capabilities          fileCapabilities       `toml:"capabilities"`
-	Request               fileOptions            `toml:"request"`
-	Variants              map[string]fileVariant `toml:"variants"`
+	Default                  bool                   `toml:"default"`
+	Protocol                 *string                `toml:"protocol"`
+	ContextWindow            *int                   `toml:"context_window"`
+	StreamContinuation       *bool                  `toml:"stream_continuation"`
+	StreamIdleTimeoutSeconds *int                   `toml:"stream_idle_timeout_seconds"`
+	ReasoningLevels          []string               `toml:"reasoning_levels"`
+	DefaultReasoningLevel    *string                `toml:"default_reasoning_level"`
+	ReasoningBudgets         map[string]int         `toml:"reasoning_budgets"`
+	DefaultVariant           *string                `toml:"default_variant"`
+	Compatibility            fileCompatibility      `toml:"compatibility"`
+	Capabilities             fileCapabilities       `toml:"capabilities"`
+	Request                  fileOptions            `toml:"request"`
+	Variants                 map[string]fileVariant `toml:"variants"`
 }
 
 type fileVariant struct {
@@ -840,6 +843,29 @@ func decodeModelPricing(value fileModelPricing) (ModelPricing, error) {
 	return pricing, nil
 }
 
+// decodeStreamIdleTimeout converts a declared streaming idle bound from seconds.
+// The bound is a transport liveness guard, so a value the transport cannot act
+// on is refused rather than clamped, and an absent key stays zero — "not
+// declared", which selects the next layer down. An explicit zero is refused
+// rather than read as "not declared": a user writing zero is trying to switch the
+// guard off, and that would let a parked stream hold a turn forever.
+func decodeStreamIdleTimeout(seconds *int) (time.Duration, error) {
+	if seconds == nil {
+		return 0, nil
+	}
+
+	minimum := int(minStreamIdleTimeout / time.Second)
+	maximum := int(maxStreamIdleTimeout / time.Second)
+	if *seconds < minimum || *seconds > maximum {
+		return 0, fmt.Errorf(
+			"%w: stream_idle_timeout_seconds must be within %d..%d; the idle guard cannot be disabled",
+			ErrInvalid, minimum, maximum,
+		)
+	}
+
+	return time.Duration(*seconds) * time.Second, nil
+}
+
 func decodeProvider(value fileProvider) (ProviderConfig, error) {
 	var result ProviderConfig
 	if value.BaseURL != nil {
@@ -871,6 +897,10 @@ func decodeProvider(value fileProvider) (ProviderConfig, error) {
 	}
 	result.Compatibility = compatibility
 	result.Capabilities = decodeCapabilities(value.Capabilities)
+	result.StreamIdleTimeout, err = decodeStreamIdleTimeout(value.StreamIdleTimeoutSeconds)
+	if err != nil {
+		return ProviderConfig{}, err
+	}
 
 	return result, nil
 }
@@ -897,6 +927,10 @@ func decodeModel(provider ai.Provider, modelID string, value fileModel) (ModelCo
 	}
 	if value.StreamContinuation != nil {
 		result.StreamContinuation = *value.StreamContinuation
+	}
+	result.StreamIdleTimeout, err = decodeStreamIdleTimeout(value.StreamIdleTimeoutSeconds)
+	if err != nil {
+		return ModelConfig{}, false, err
 	}
 	for _, raw := range value.ReasoningLevels {
 		level, parseErr := ParseReasoningLevel(raw)

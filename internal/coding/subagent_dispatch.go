@@ -339,6 +339,7 @@ func (d *customSubagentDispatcher) Open(
 	factory.model = binding.model
 	factory.requestPolicy = binding.requestPolicy
 	factory.streamContinuation = binding.streamContinuation
+	factory.streamIdleTimeout = binding.streamIdleTimeout
 	if factory.fullCompaction != nil {
 		factory.fullCompaction.ContextWindow = binding.contextWindow
 		request := ai.Request{}

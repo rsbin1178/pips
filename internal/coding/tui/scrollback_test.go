@@ -43,10 +43,10 @@ func TestScrollbackCommitsStableBlocksOnlyOnce(t *testing.T) {
 		Call:   coding.ToolCall{ID: "call-1", Name: "read"},
 		Status: coding.ToolStatusCompleted,
 	}}
-	model.state.Draft = []coding.MessageDelta{{
+	model.state.Draft = coding.NewStreamDraft(coding.MessageDelta{
 		Kind: ai.StreamTextDelta,
 		Text: "still changing",
-	}}
+	})
 
 	committed := model.takeStableTimeline()
 	require.NotEmpty(t, committed)
@@ -218,10 +218,10 @@ func TestParentScrollbackDefersWhileFullAreaRouteOwnsView(t *testing.T) {
 	model := readyModel(t, true)
 	model.route = routeState{kind: routeSubagent, childSessionID: "child-1"}
 	model.state.Transcript = []ai.Message{ai.UserText("keep this in the parent")}
-	model.state.Draft = []coding.MessageDelta{{
+	model.state.Draft = coding.NewStreamDraft(coding.MessageDelta{
 		Kind: ai.StreamTextDelta,
 		Text: "parent response is still changing",
-	}}
+	})
 
 	command := model.commitStableTimeline()
 
@@ -273,10 +273,10 @@ func TestReturningFromSubagentFlushesHiddenParentStreamOnce(t *testing.T) {
 	model.state.Phase = coding.PhaseRunning
 	model.state.Interaction.Active = true
 	model.state.Transcript = []ai.Message{ai.UserText("design the middleware")}
-	model.state.Draft = []coding.MessageDelta{{
+	model.state.Draft = coding.NewStreamDraft(coding.MessageDelta{
 		Kind: ai.StreamTextDelta,
 		Text: "first parent row\npartial",
-	}}
+	})
 
 	beforeRoute := driveModelCommandsCapture(t, model, model.commitStableTimeline())
 	require.Contains(t, ansi.Strip(beforeRoute), "design the middleware")
@@ -288,7 +288,7 @@ func TestReturningFromSubagentFlushesHiddenParentStreamOnce(t *testing.T) {
 		ai.UserText("design the middleware"),
 		ai.AssistantText("first parent row\npartial response completed"),
 	}
-	model.state.Draft = nil
+	model.state.Draft = coding.StreamDraft{}
 	model.state.Tools = []coding.ToolState{{
 		Call:   coding.ToolCall{ID: "call-1", Name: "read"},
 		Status: coding.ToolStatusCompleted,
@@ -339,10 +339,10 @@ func TestManagedAssistantTailOwnsNativeScrollbackBoundaryImmediately(t *testing.
 	model.state.Transcript = []ai.Message{ai.UserText("inspect the spacing")}
 	assert.Contains(t, modelCommandOutput(model, model.commitStableTimeline()), "inspect the spacing")
 
-	model.state.Draft = []coding.MessageDelta{{
+	model.state.Draft = coding.NewStreamDraft(coding.MessageDelta{
 		Kind: ai.StreamTextDelta,
 		Text: "I will inspect it now.",
-	}}
+	})
 	model.renderTranscript(false)
 
 	assert.True(
@@ -363,10 +363,10 @@ func TestManagedStreamingContinuationDoesNotRepeatNativeBoundary(t *testing.T) {
 		emitted: 1,
 		tail:    "continued row",
 	}
-	model.state.Draft = []coding.MessageDelta{{
+	model.state.Draft = coding.NewStreamDraft(coding.MessageDelta{
 		Kind: ai.StreamTextDelta,
 		Text: "continued row",
-	}}
+	})
 	model.renderTranscript(false)
 
 	assert.False(t, strings.HasPrefix(model.timeline, "\n"))
@@ -437,10 +437,10 @@ func TestStreamingDraftPromotesCompletedRowsAndKeepsManagedFrameStable(t *testin
 	model.scrollbackOutput = false
 	model.state.Phase = coding.PhaseRunning
 	model.state.Interaction.Active = true
-	model.state.Draft = []coding.MessageDelta{{
+	model.state.Draft = coding.NewStreamDraft(coding.MessageDelta{
 		Kind: ai.StreamTextDelta,
 		Text: "stream line 01\n\nstream line 02\n\npartial",
-	}}
+	})
 
 	first := modelCommandOutput(model, model.commitStableTimeline())
 	require.Contains(t, first, "stream line 01")
@@ -450,7 +450,7 @@ func TestStreamingDraftPromotesCompletedRowsAndKeepsManagedFrameStable(t *testin
 	assert.Contains(t, ansi.Strip(model.View().Content), "partial")
 	managedHeight := lipgloss.Height(model.View().Content)
 
-	model.state.Draft = append(model.state.Draft, coding.MessageDelta{
+	model.state.Draft = model.state.Draft.Append(coding.MessageDelta{
 		Kind: ai.StreamTextDelta,
 		Text: " remainder\n\nstream line 03\n\nnext partial",
 	})
@@ -469,7 +469,7 @@ func TestStreamingDraftPromotesCompletedRowsAndKeepsManagedFrameStable(t *testin
 	full := "stream line 01\n\nstream line 02\n\npartial remainder\n\n" +
 		"stream line 03\n\nnext partial"
 	model.state.Transcript = []ai.Message{ai.AssistantText(full)}
-	model.state.Draft = nil
+	model.state.Draft = coding.StreamDraft{}
 	final := modelCommandOutput(model, model.commitStableTimeline())
 	combined := first + "\n" + second + "\n" + final
 
@@ -575,9 +575,9 @@ func TestScrollbackHoldsExplorationGroupUntilAssistantResponse(t *testing.T) {
 	assert.Contains(t, active, "• Explored")
 	assert.Contains(t, active, "Read model.go")
 
-	model.state.Draft = []coding.MessageDelta{{
+	model.state.Draft = coding.NewStreamDraft(coding.MessageDelta{
 		Kind: ai.StreamTextDelta, Text: "The file contains the state machine.",
-	}}
+	})
 	committed := model.takeStableTimeline()
 	assert.Contains(t, committed, "• Explored")
 	assert.Contains(t, committed, "Read model.go")

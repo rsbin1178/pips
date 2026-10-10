@@ -9,6 +9,7 @@ import (
 
 	"github.com/rsbin1178/pips/internal/coding/config"
 	"github.com/rsbin1178/pips/internal/coding/generation"
+	"github.com/rsbin1178/pips/internal/coding/model"
 	"github.com/rsbin1178/pips/internal/coding/modelcatalog"
 	"github.com/spf13/cobra"
 )
@@ -142,23 +143,33 @@ func newConfigShowCommand(dependencies Dependencies, flags *rootFlags) *cobra.Co
 }
 
 // writeResolvedModel prints the resolved snapshot: protocol and endpoint,
-// every effective typed request option, declared capabilities, and the
-// reasoning level with the encoding that carries it.
+// every effective typed request option, declared capabilities, the reasoning
+// level with the encoding that carries it, and the transport bound with the
+// retry window derived from it.
 func writeResolvedModel(output io.Writer, resolved modelcatalog.ResolvedModel) error {
 	extraBytes, err := json.Marshal(resolved.Options.ExtraBody)
 	if err != nil {
 		return fmt.Errorf("coding cli: encode extra_body summary: %w", err)
 	}
 
+	idleBound := unsetValue
+	if resolved.StreamIdleTimeout > 0 {
+		idleBound = resolved.StreamIdleTimeout.String()
+	}
+
 	if _, err := fmt.Fprintf(
 		output,
 		"resolved.protocol = %q\nresolved.base_url = %q # origin=%s\n"+
 			"resolved.context_window = %d\n"+
+			"resolved.stream_idle_timeout = %s\n"+
+			"resolved.retry_window = %s\n"+
 			"resolved.extra_body = <redacted> # keys=%d bytes=%d\n",
 		resolved.Protocol,
 		resolved.Endpoint.BaseURL,
 		resolved.Endpoint.Origin,
 		resolved.Limits.ContextWindow,
+		idleBound,
+		model.RetryWindowFor(resolved.StreamIdleTimeout),
 		len(resolved.Options.ExtraBody),
 		len(extraBytes),
 	); err != nil {

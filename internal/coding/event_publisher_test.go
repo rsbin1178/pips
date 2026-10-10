@@ -8,10 +8,177 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding/subagent"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func draftPublisherRuntime(t *testing.T) *Runtime {
+	t.Helper()
+
+	state := contractState(t)
+	records := make([]MessageDelta, streamDraftChunkSize-1)
+	for index := range records {
+		records[index] = MessageDelta{Kind: ai.StreamTextDelta, Text: "prefix ", Usage: &TokenUsage{OutputTokens: 7}}
+	}
+	state.Draft = NewStreamDraft(records...)
+	writer, err := newEventWriter(state.SessionID, func() time.Time { return eventTestTime })
+	require.NoError(t, err)
+	writer.sequence = state.Sequence
+
+	childState := state.Clone()
+	childState.SessionID = "draft-child"
+	childWriter, err := newEventWriter(childState.SessionID, func() time.Time { return eventTestTime })
+	require.NoError(t, err)
+	childWriter.sequence = childState.Sequence
+
+	runtime := &Runtime{
+		state: state, writer: writer,
+		children: map[string]*childProjection{childState.SessionID: {
+			state: childState, writer: childWriter, interactionID: childState.Interaction.ID,
+		}},
+	}
+	runtime.publisher = newEventPublisher(runtime)
+	t.Cleanup(runtime.publisher.close)
+
+	return runtime
+}
+
+func TestEventPublisherFailedCommitPreservesDraft(t *testing.T) {
+	t.Parallel()
+
+	for _, target := range []string{"parent", "child"} {
+		t.Run(target, func(t *testing.T) {
+			t.Parallel()
+
+			runtime := draftPublisherRuntime(t)
+			observation, err := runtime.ObserveEvents()
+			require.NoError(t, err)
+			t.Cleanup(observation.Subscription.Close)
+			before, writer := observation.State, runtime.writer
+			child := runtime.children["draft-child"]
+			if target == "child" {
+				before, writer = observation.Children["draft-child"], child.writer
+			}
+			beforeRecords := before.Draft.Materialize()
+			event := newTestEvent(EventMessageDelta, reasoningDelta("must not publish"))
+			event.Sequence, event.SessionID = before.Sequence+1, before.SessionID
+			_, err = Reduce(before, event)
+			require.NoError(t, err, "reduction must succeed so the failure reaches writer.commit")
+
+			// A stale writer must reject after candidate reduction, before the
+			// candidate's new chunks or summary are installed or delivered.
+			writer.sequence++
+			writerSequence := writer.sequence
+			delivered := 0
+			emitter := newEventEmitter(t.Context(), runtime, func(Event, error) bool {
+				delivered++
+				return true
+			}, true)
+			runtime.publisher.mu.Lock()
+			if target == "child" {
+				err = runtime.publisher.publishChildLocked(t.Context(), child, event)
+			} else {
+				err = runtime.publisher.publishLocked(t.Context(), emitter, writer, event)
+			}
+			runtime.publisher.mu.Unlock()
+			require.ErrorIs(t, err, ErrEventProtocol)
+			assert.Equal(t, writerSequence, writer.sequence)
+			assert.Zero(t, delivered)
+			assert.Equal(t, observation.Cursor, runtime.publisher.hub.currentCursor())
+
+			after, err := runtime.ObserveEvents()
+			require.NoError(t, err)
+			after.Subscription.Close()
+			state := after.State
+			if target == "child" {
+				state = after.Children["draft-child"]
+			}
+			requireEqualState(t, before, state, "failed writer commit installed a candidate")
+			assert.Equal(t, beforeRecords, state.Draft.Materialize())
+			assert.Equal(t, beforeRecords, before.Draft.Materialize(), "failed commit rewrote retained chunks")
+			assert.False(t, state.Draft.HasReasoningDelta())
+		})
+	}
+}
+
+func TestStreamDraftConcurrentRuntimeReaders(t *testing.T) {
+	t.Parallel()
+
+	runtime := draftPublisherRuntime(t)
+	initial, err := runtime.ObserveEvents()
+	require.NoError(t, err)
+	initial.Subscription.Close()
+	baseSequence := initial.State.Sequence
+	const baseCount = streamDraftChunkSize - 1
+	require.Equal(t, baseCount, initial.State.Draft.Len())
+	retained := []State{initial.State, initial.Children["draft-child"]}
+	child := runtime.children["draft-child"]
+	ctx := t.Context()
+	const count = 3*streamDraftChunkSize + 1
+	steps := make(chan struct{})
+	result := make(chan error, 1)
+	go func() {
+		defer close(steps)
+		for index := range count {
+			usage := TokenUsage{OutputTokens: index + 1}
+			delta := MessageDelta{Kind: ai.StreamReasoningDelta, Text: "next ", Usage: &usage}
+			if err := runtime.publisher.emit(ctx, nil, initial.State.Interaction.ID, "run-1", EventMessageDelta, delta); err != nil {
+				result <- err
+				return
+			}
+			runtime.publisher.mu.Lock()
+			err := runtime.publisher.publishChildGeneratedLocked(ctx, child, eventTestTime, "run-1", EventMessageDelta, delta)
+			runtime.publisher.mu.Unlock()
+			if err != nil {
+				result <- err
+				return
+			}
+			usage.OutputTokens = -1
+			select {
+			case steps <- struct{}{}:
+			case <-ctx.Done():
+				result <- ctx.Err()
+				return
+			}
+		}
+		result <- nil
+	}()
+
+	for range steps {
+		snapshot := runtime.Snapshot()
+		observation, observeErr := runtime.ObserveEvents()
+		require.NoError(t, observeErr)
+		observation.Subscription.Close()
+		states := []State{snapshot, observation.State, observation.Children["draft-child"]}
+		for _, state := range states {
+			records := state.Draft.Materialize()
+			require.Equal(t, baseCount+state.Sequence-baseSequence, uint64(len(records)))
+			for index, record := range records {
+				wantUsage := 7
+				if index >= baseCount {
+					wantUsage = index - baseCount + 1
+				}
+				require.NotNil(t, record.Usage)
+				assert.Equal(t, wantUsage, record.Usage.OutputTokens)
+			}
+			records[0].Usage.OutputTokens = -2
+			assert.Equal(t, 7, state.Draft.Materialize()[0].Usage.OutputTokens)
+		}
+		retained = append(retained, states...)
+	}
+	require.NoError(t, <-result)
+	assert.Equal(t, baseSequence+count, runtime.Snapshot().Sequence)
+	assert.Equal(t, baseSequence+count, child.state.Sequence)
+	for _, state := range retained {
+		records := state.Draft.Materialize()
+		assert.Equal(t, baseCount+state.Sequence-baseSequence, uint64(len(records)))
+		assert.Len(t, records, state.Draft.Len())
+		assert.Equal(t, 7, records[0].Usage.OutputTokens)
+		assert.Equal(t, (state.Sequence-baseSequence)*uint64(len("next ")), uint64(len(state.Draft.ReasoningText())))
+	}
+}
 
 func TestEventPublisherSerializesConcurrentSequenceCommits(t *testing.T) {
 	t.Parallel()

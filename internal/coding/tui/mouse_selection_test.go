@@ -78,7 +78,6 @@ func TestSelectionSpanCoversTheDrag(t *testing.T) {
 			assert.Equal(t, test.want, [2]int{left, right})
 		})
 	}
-
 }
 
 // TestDragSelectionMadeBackwardsCopiesTheSameText asserts the gesture orders its

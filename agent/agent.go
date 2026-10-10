@@ -64,6 +64,10 @@ type config struct {
 	// streamRecoveryWindow bounds the wall clock one turn's re-issue episode may
 	// spend, independently of the attempt budget.
 	streamRecoveryWindow time.Duration
+	// streamReplayAttempts is the re-issue budget for a failed attempt whose only
+	// output a consumer can drop. Zero keeps one tier, where both failure shapes
+	// share the [WithStreamRecovery] attempt budget.
+	streamReplayAttempts int
 	beforeTool           gate
 	afterTool            func(context.Context, ToolResultInfo) *ToolResultOverride
 	prepareTurn          func(context.Context, RunInfo) TurnUpdate
@@ -196,7 +200,9 @@ func WithStopWhen(cond func(RunInfo) bool) Option {
 // duplicate what the frontend already rendered. Before each re-issue the loop
 // emits [CandidateDiscarded] so a consumer drops the partial output, which
 // makes the retry safe: nothing from the failed attempt was committed and no
-// tool ran.
+// tool ran. A failure whose only output was reasoning draws
+// [WithStreamReplayAttempts] instead of this budget, since nothing of it has to
+// be retracted.
 func WithStreamRecovery(attempts int, base, maxDelay time.Duration) Option {
 	return func(c *config) {
 		c.streamRecovery = newStreamRecovery(recoveryDiscard, attempts, base, maxDelay)
@@ -226,6 +232,25 @@ func ComposeOptions(options ...Option) Option {
 // backoff options, so the two can be set in either order.
 func WithStreamRecoveryWindow(window time.Duration) Option {
 	return func(c *config) { c.streamRecoveryWindow = window }
+}
+
+// WithStreamReplayAttempts sets the re-issue budget for a failed attempt whose
+// only output a consumer can drop: reasoning deltas, with no answer text and no
+// tool call. Such an attempt is equivalent to one that produced nothing, so it
+// earns the replay allowance the model middleware gives a request that failed
+// before its first event, while [WithStreamRecovery]'s budget stays reserved for
+// the failures that retract answer content the consumer already read. A frontend
+// that owns both budgets passes the middleware's value here.
+//
+// The two allowances are counted apart, so neither failure shape can spend the
+// other's; [WithStreamRecoveryWindow] bounds their sum on the wall clock. Zero —
+// the default — keeps one tier, so a reasoning-only failure spends the same
+// attempt budget as one that produced answer content. It applies whenever
+// recovery is enabled and is independent of the attempt and backoff options, so
+// the two can be set in either order; on its own it enables nothing, because a
+// budget configures recovery rather than switching it on.
+func WithStreamReplayAttempts(attempts int) Option {
+	return func(c *config) { c.streamReplayAttempts = attempts }
 }
 
 // WithStreamContinuation is [WithStreamRecovery]'s alternative: a re-issue

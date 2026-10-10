@@ -106,7 +106,7 @@ func BenchmarkStreamBatchUpdate(b *testing.B) {
 				// The live draft itself grows outside the measured transition;
 				// reset it so one frame is one Draft append, matching a stream
 				// that commits a message per turn.
-				model.state.Draft = nil
+				model.state.Draft = coding.StreamDraft{}
 				model.Update(streamItemMsg{bridge: model.bridge, item: frame[0], ok: true})
 				if model.streamErr != nil {
 					b.Fatal(model.streamErr)

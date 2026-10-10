@@ -2,6 +2,7 @@ package modelcatalog_test
 
 import (
 	"testing"
+	"time"
 
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/ai/openai"
@@ -380,4 +381,53 @@ func TestCatalogResolvesStreamContinuationPerModel(t *testing.T) {
 	entries := catalog.List()
 	require.Len(t, entries, 1)
 	assert.True(t, entries[0].StreamContinuation)
+}
+
+// TestCatalogResolvesStreamIdleTimeout covers the inheritance rule: a model that
+// declares nothing takes the provider's bound, and a model that declares one
+// keeps it. Zero at both layers stays zero, which is what selects the transport
+// default — and therefore the default retry window.
+func TestCatalogResolvesStreamIdleTimeout(t *testing.T) {
+	t.Parallel()
+
+	inherits := config.ModelRef{Provider: ai.ProviderOpenAI, Model: "inherits"}
+	overrides := config.ModelRef{Provider: ai.ProviderOpenAI, Model: "overrides"}
+	undeclared := config.ModelRef{Provider: ai.ProviderAnthropic, Model: "undeclared"}
+
+	cfg := config.Config{
+		Model: inherits,
+		Models: []config.ModelConfig{
+			{Ref: inherits},
+			{Ref: overrides, StreamIdleTimeout: 30 * time.Minute},
+			{Ref: undeclared},
+		},
+		Providers: map[ai.Provider]config.ProviderConfig{
+			ai.ProviderOpenAI: {StreamIdleTimeout: 15 * time.Minute},
+		},
+		Sandbox:  config.SandboxWorkspaceWrite,
+		Approval: config.ApprovalOnRequest,
+	}
+
+	catalog, err := modelcatalog.New(cfg)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name string
+		ref  config.ModelRef
+		want time.Duration
+	}{
+		{name: "model inherits the provider", ref: inherits, want: 15 * time.Minute},
+		{name: "model overrides the provider", ref: overrides, want: 30 * time.Minute},
+		{name: "neither layer declares one", ref: undeclared, want: 0},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			resolved, err := catalog.Resolve(modelcatalog.Selection{Ref: test.ref})
+			require.NoError(t, err)
+			assert.Equal(t, test.want, resolved.StreamIdleTimeout)
+		})
+	}
 }

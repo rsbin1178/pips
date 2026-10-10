@@ -413,7 +413,7 @@ func (r *Runtime) runAgentDraftProposal(
 			agent.WithName(agentDraftAgentName),
 			agent.WithMaxTurns(agentDraftAgentMaxTurns),
 			agent.WithMaxTokens(agentDraftAgentMaxTokens),
-			streamRecoveryOption(r.resolved.StreamContinuation),
+			streamRecoveryOption(r.resolved.StreamContinuation, r.resolved.StreamIdleTimeout),
 			agent.WithParallelTools(1),
 			agent.WithToolTimeout(r.opts.ToolTimeout),
 			agent.WithStopWhen(func(agent.RunInfo) bool { return collector.called() }),

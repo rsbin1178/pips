@@ -626,6 +626,13 @@ func (r *run) finish(stop StopReason, turns int, pending []ai.ToolCallPart) (*Ru
 // for the missing remainder. Nothing from the failed attempt reached the
 // session and no tool ran, so a re-issue can neither duplicate content nor
 // repeat an effect.
+//
+// A failed attempt that produced only droppable output — reasoning, with no
+// answer text and no tool call — is equivalent to a request that produced
+// nothing, so it is charged to the replay allowance: what the model middleware
+// would have given it. The two allowances are counted apart, so neither failure
+// shape spends the other's; a frontend that sets no replay allowance keeps one
+// tier, and both shapes share the re-issue budget.
 func (r *run) callTurn(
 	ctx context.Context,
 	turn int,
@@ -635,6 +642,7 @@ func (r *run) callTurn(
 ) (resp *ai.Response, stopped bool, err error) {
 	recovery := r.agent.cfg.streamRecovery
 	window := r.agent.cfg.streamRecoveryWindow
+	replayAttempts := r.agent.cfg.streamReplayAttempts
 
 	// prefix accumulates the text retained across failed attempts; a non-empty
 	// prefix switches every later attempt to the continuation request.
@@ -649,6 +657,12 @@ func (r *run) callTurn(
 		// the recovery window is measured from: a slow first attempt that
 		// succeeds must not consume it.
 		episodeStart time.Time
+		// spent and replayed count the re-issues already scheduled per failure
+		// shape: one that retracted answer content, and one that dropped
+		// reasoning only. Without a replay allowance the two shapes share spent,
+		// which keeps a single tier.
+		spent    int
+		replayed int
 	)
 
 	for attempt := 0; ; attempt++ {
@@ -667,9 +681,9 @@ func (r *run) callTurn(
 			attemptUpdate = continuationRequestUpdate(requestUpdate, streamRestartInstruction)
 		}
 
-		var produced bool
+		var produced, retractable bool
 
-		resp, produced, stopped, err = r.agent.callModel(
+		resp, produced, retractable, stopped, err = r.agent.callModel(
 			ctx, r.model, turnTools, attemptUpdate, turn, attemptMsgs, r.emit, r.streaming, filter,
 		)
 		if stopped {
@@ -681,6 +695,19 @@ func (r *run) callTurn(
 		abandonPrefix := false
 
 		windowSpent := !episodeStart.IsZero() && window > 0 && time.Since(episodeStart) >= window
+
+		// budget is the allowance this failure draws on and used is how much of
+		// it the turn has already spent. Answer text and tool calls draw the
+		// re-issue budget, because every re-issue retracts content a consumer
+		// read. Reasoning alone draws the replay allowance when recovery is
+		// enabled and the frontend set one, and shares the re-issue budget
+		// otherwise: a budget configures recovery, it does not enable it.
+		budget, used := recovery.attempts, spent
+		replayTier := recovery.attempts > 0 && replayAttempts > 0 && !retractable
+
+		if replayTier {
+			budget, used = replayAttempts, replayed
+		}
 
 		switch {
 		case err == nil && havePrefix && !fellBack && continuationEmpty(resp):
@@ -699,19 +726,14 @@ func (r *run) callTurn(
 			// costs the work already done, but the turn's own request still
 			// works and a dead turn costs more.
 			abandonPrefix = true
-		case !produced || attempt >= recovery.attempts || !ai.IsRetryable(err) || ctx.Err() != nil ||
+		case !produced || used >= budget || !ai.IsRetryable(err) || ctx.Err() != nil ||
 			windowSpent:
-			// Give up. Whatever text the failing attempt produced is reported as
-			// an explicitly incomplete reply, whether the turn was continuing or
-			// regenerating: a fragment the consumer saw must never vanish without
-			// a trace.
-			//
+			// Give up, reporting whatever the failing attempt produced.
 			// Continuation attempts extend one answer, so their fragments
 			// accumulate. Regenerate attempts are independent alternatives, so
 			// only the fragment the consumer was actually looking at — the last
-			// one — is reported.
-			// prefix is read by the report below; havePrefix is not, because
-			// this arm returns — the turn is over either way.
+			// one — is reported. prefix is read by the report below; havePrefix
+			// is not, because this arm returns — the turn is over either way.
 			if retained, ok := retainPrefix(resp); ok {
 				if recovery.mode == recoveryContinue && !fellBack {
 					prefix += retained
@@ -720,7 +742,7 @@ func (r *run) callTurn(
 				}
 			}
 
-			if prefix != "" && !r.emitIncomplete(turn, prefix, err) {
+			if !r.reportAbandoned(turn, prefix, produced, err) {
 				return nil, true, nil
 			}
 
@@ -745,15 +767,21 @@ func (r *run) callTurn(
 				}
 			}
 
+			if replayTier {
+				replayed++
+			} else {
+				spent++
+			}
+
 			delay := recovery.backoff(attempt)
 
 			switch {
 			case havePrefix:
-				if !r.emit(retryNotice(turn, attempt, recovery.attempts, delay, err)) {
+				if !r.emit(retryNotice(turn, used, budget, delay, err)) {
 					return nil, true, nil
 				}
 			case !r.emit(CandidateDiscarded{Turn: turn}),
-				!r.emit(retryNotice(turn, attempt, recovery.attempts, delay, err)):
+				!r.emit(retryNotice(turn, used, budget, delay, err)):
 				return nil, true, nil
 			}
 
@@ -803,6 +831,23 @@ func continuationRequestUpdate(base *runModelRequest, instruction string) *runMo
 	return update
 }
 
+// reportAbandoned reports what a turn that is giving up leaves behind. Retained
+// answer text becomes an explicitly incomplete reply, so a fragment the consumer
+// saw never vanishes without a trace. When nothing was retained but the attempt
+// did stream output, that output was reasoning: it is not an answer fragment to
+// report, but the consumer rendered it, and a turn that gives up must not leave a
+// live draft behind. It returns false when the consumer stopped.
+func (r *run) reportAbandoned(turn int, prefix string, produced bool, err error) bool {
+	switch {
+	case prefix != "":
+		return r.emitIncomplete(turn, prefix, err)
+	case produced:
+		return r.emit(CandidateDiscarded{Turn: turn})
+	default:
+		return true
+	}
+}
+
 // emitIncomplete reports a retained partial answer that will not be committed.
 // It returns false when the stream consumer stopped.
 func (r *run) emitIncomplete(turn int, prefix string, err error) bool {
@@ -823,14 +868,15 @@ func incompleteReason(err error) string {
 
 // retryNotice announces the re-issue that is about to start. The loop reports
 // the wait on the same stream channel the retry middleware uses, so a frontend
-// renders one kind of notice whichever layer replays the request. Attempt is
-// the 1-based ordinal of this re-issue against the loop's re-issue budget.
-func retryNotice(turn, attempt, recoveryAttempts int, delay time.Duration, err error) ModelStreamEvent {
+// renders one kind of notice whichever layer replays the request. spent is how
+// many re-issues the failure shape has already used, so this one's ordinal is
+// spent+1 against its budget.
+func retryNotice(turn, spent, budget int, delay time.Duration, err error) ModelStreamEvent {
 	return ModelStreamEvent{
 		Turn: turn,
 		Event: ai.StreamEvent{
 			Type:  ai.StreamRetry,
-			Retry: ai.NewRetryNotice(attempt+1, recoveryAttempts, delay, err),
+			Retry: ai.NewRetryNotice(spent+1, budget, delay, err),
 		},
 	}
 }
@@ -854,10 +900,11 @@ func sleepContext(ctx context.Context, delay time.Duration) error {
 
 // callModel performs one model call. When streaming, deltas tee through emit
 // while [ai.Collect] folds them into the completed response; produced reports
-// that the call streamed output before it ended, and stopped reports that the
-// consumer quit mid-stream. filter, when non-nil, trims the restatement a
-// continuation may open with before either the draft or the accumulator sees
-// it.
+// that the call streamed output before it ended, retractable reports that the
+// output included content a consumer would have to retract — answer text or a
+// tool call — and stopped reports that the consumer quit mid-stream. filter,
+// when non-nil, trims the restatement a continuation may open with before
+// either the draft or the accumulator sees it.
 func (a *Agent) callModel(
 	ctx context.Context,
 	model ai.LanguageModel,
@@ -868,12 +915,12 @@ func (a *Agent) callModel(
 	emit emitFunc,
 	streaming bool,
 	filter *continuationFilter,
-) (resp *ai.Response, produced, stopped bool, err error) {
+) (resp *ai.Response, produced, retractable, stopped bool, err error) {
 	req := a.requestWithTools(msgs, tools, update)
 
 	if !streaming {
 		resp, err = model.Generate(ctx, req)
-		return resp, false, false, err
+		return resp, false, false, false, err
 	}
 
 	resp, err = ai.Collect(func(yield func(ai.StreamEvent, error) bool) {
@@ -906,6 +953,14 @@ func (a *Agent) callModel(
 			// yet still means the call produced output.
 			if ev.Type != ai.StreamMessageStart && ev.Type != ai.StreamRetry {
 				produced = true
+
+				// Reasoning is the one output a re-issue can drop and redo
+				// without costing the consumer an answer, so it does not make
+				// the attempt retractable. Any other kind does, including one
+				// this layer does not model yet.
+				if ev.Type != ai.StreamReasoningDelta {
+					retractable = true
+				}
 			}
 
 			for _, forwarded := range filter.forward(ev) {
@@ -922,10 +977,10 @@ func (a *Agent) callModel(
 	})
 
 	if stopped {
-		return nil, produced, true, nil
+		return nil, produced, retractable, true, nil
 	}
 
-	return resp, produced, false, err
+	return resp, produced, retractable, false, err
 }
 
 // shouldStop checks the configured stop conditions after a completed turn.
