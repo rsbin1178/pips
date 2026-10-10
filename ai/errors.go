@@ -38,6 +38,13 @@ var (
 	// recovery layers act on retryable errors: a parked stream that never
 	// fails is the one interruption nothing else can reach.
 	ErrStreamIdle = errors.New("ai: stream idle")
+	// ErrResponseTimeout means a streaming request reached the peer but its
+	// response headers never arrived within the client's bound, so the request
+	// was abandoned. Like [ErrStreamIdle] it is a failure class of its own
+	// rather than a context deadline, because both recovery layers act on
+	// retryable errors: a peer that never starts answering is worth another
+	// attempt, while a deadline the caller set is not.
+	ErrResponseTimeout = errors.New("ai: response timed out")
 )
 
 // Error is a structured provider error. Adapters return it (wrapped around a
@@ -142,10 +149,11 @@ func IsRetryable(err error) bool {
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		// The caller's context is gone; retrying under it cannot succeed.
 		return false
-	case errors.Is(err, ErrStreamIdle):
-		// A stream that went silent is retryable even though the abort itself
-		// is local: the provider may answer normally on a fresh attempt. The
-		// context arm above stays first so a cancelled turn still loses.
+	case errors.Is(err, ErrStreamIdle), errors.Is(err, ErrResponseTimeout):
+		// A stream that went silent, or a peer that never started answering, is
+		// retryable even though the abort itself is local: the provider may
+		// answer normally on a fresh attempt. The context arm above stays first
+		// so a cancelled turn still loses.
 		return true
 	case isCertificateFailure(err):
 		// A certificate the client cannot verify is not transient: the caller
@@ -223,6 +231,8 @@ func retryReason(err error) string {
 		return "stream ended early"
 	case errors.Is(err, ErrStreamIdle):
 		return "stream idle"
+	case errors.Is(err, ErrResponseTimeout):
+		return "response timed out"
 	case errors.Is(err, context.DeadlineExceeded):
 		return "request timed out"
 	default:
