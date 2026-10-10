@@ -245,23 +245,23 @@ func testTeamWorkerOpenOptions(
 	}
 
 	return OpenOptions{
-			Workspace: worktree,
-			Trusted:   true,
-			Config:    cfg,
-			Paths:     layout,
-			Model:     model,
-			Execution: ExecutionOptions{
-				SandboxProbe: func(context.Context, *execution.Executor) error { return nil },
-			},
-		}, runtimeOpenPolicy{
-			profile: profileTeamWorker,
-			worker: &workerRuntimeBinding{
-				lineage: lineage, worktree: resource, team: engine,
-				objective:             "Implement the approved Team objective.",
-				task:                  "Modify the assigned files and verify the result.",
-				dependencyEvidence:    "No dependencies.",
-				capabilityFingerprint: "worker-v1",
-				ownerGeneration:       7,
-			},
-		}
+		Workspace: worktree,
+		Trusted:   true,
+		Config:    cfg,
+		Paths:     layout,
+		Model:     model,
+		Execution: ExecutionOptions{
+			SandboxProbe: func(context.Context, *execution.Executor) error { return nil },
+		},
+	}, runtimeOpenPolicy{
+		profile: profileTeamWorker,
+		worker: &workerRuntimeBinding{
+			lineage: lineage, worktree: resource, team: engine,
+			objective:             "Implement the approved Team objective.",
+			task:                  "Modify the assigned files and verify the result.",
+			dependencyEvidence:    "No dependencies.",
+			capabilityFingerprint: "worker-v1",
+			ownerGeneration:       7,
+		},
+	}
 }

@@ -1157,7 +1157,7 @@ func (w *codingAttemptWorker) waitPausedCommand(
 
 func (w *codingAttemptWorker) nextFollowUp(
 	pending *[]ownerCommand,
-) (prompt string, next bool, interrupted bool) {
+) (prompt string, next, interrupted bool) {
 	for {
 		var command ownerCommand
 		if len(*pending) != 0 {

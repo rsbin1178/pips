@@ -595,7 +595,7 @@ func planPatchArgs(document string) string {
 // planWriteResponse scripts one apply_patch call that fills the session plan
 // file. The empty plan file is created up front so the patch stays valid
 // whether or not entering plan mode seeds it.
-func planWriteResponse(t *testing.T, runtime *Runtime, id string, content string) *ai.Response {
+func planWriteResponse(t *testing.T, runtime *Runtime, id, content string) *ai.Response {
 	t.Helper()
 
 	_, err := runtime.planStore.Replace(t.Context(), "")
@@ -611,7 +611,7 @@ func planWriteResponse(t *testing.T, runtime *Runtime, id string, content string
 	return runtimeToolResponse(id, tools.ApplyPatchName, planPatchArgs(document.String()))
 }
 
-func planPatchAdd(path string, content string) string {
+func planPatchAdd(path, content string) string {
 	var builder strings.Builder
 	builder.WriteString("*** Begin Patch\n*** Add File: " + path + "\n")
 	for _, line := range strings.Split(strings.TrimSuffix(content, "\n"), "\n") {
