@@ -388,6 +388,11 @@ type ProviderConfig struct {
 	// ToolSearchName overrides Config.ToolSearchName for interactions served
 	// by this provider. Empty inherits the global value; see ToolSearchNameFor.
 	ToolSearchName string
+	// StreamIdleTimeout bounds the silence between reads on a streaming response
+	// body for this provider's endpoints, and is the default for its models; see
+	// ModelConfig.StreamIdleTimeout. Zero inherits the transport default. It is
+	// local transport policy: it is never sent as a request option.
+	StreamIdleTimeout time.Duration
 }
 
 // Clone returns a fully detached provider definition.
@@ -482,7 +487,14 @@ type ModelConfig struct {
 	// broken turn's partial answer instead of regenerating it. It stays a
 	// per-model opt-in because a provider must be verified to honour a
 	// trailing assistant message; the default regenerates.
-	StreamContinuation    bool
+	StreamContinuation bool
+	// StreamIdleTimeout bounds the silence between reads on a streaming response
+	// body, overriding the provider's value. It is the knob for a model that
+	// legitimately pauses — a long reasoning block the endpoint does not stream
+	// incrementally — and the retry window scales with it. Zero inherits the
+	// provider's value, and then the transport default. Like ContextWindow it is
+	// local metadata: it is never sent as a request option.
+	StreamIdleTimeout     time.Duration
 	ReasoningLevels       []ReasoningLevel
 	DefaultReasoningLevel *ReasoningLevel
 	ReasoningBudgets      map[ReasoningLevel]int
@@ -1191,21 +1203,8 @@ func apply(value Config, patch Patch, source Source) Config {
 func validateRegistry(c Config) error {
 	seen := make(map[string]struct{}, len(c.Models))
 	for provider, definition := range c.Providers {
-		if parsed, err := ParseProvider(string(provider)); err != nil || parsed != provider {
-			return fmt.Errorf("%w: invalid provider definition %q", ErrInvalid, provider)
-		}
-		if definition.Protocol != "" {
-			if _, err := ParseProtocol(string(definition.Protocol)); err != nil {
-				return err
-			}
-		}
-		if err := validateToolDeclaration(definition.Capabilities, "provider "+string(provider)); err != nil {
+		if err := validateProviderDefinition(provider, definition); err != nil {
 			return err
-		}
-		if definition.ToolSearchName != "" {
-			if _, err := ParseToolSearchName(definition.ToolSearchName); err != nil {
-				return fmt.Errorf("provider %q: %w", provider, err)
-			}
 		}
 	}
 
@@ -1226,6 +1225,31 @@ func validateRegistry(c Config) error {
 	return nil
 }
 
+// validateProviderDefinition checks one provider layer's own invariants. The
+// registry owns the cross-entry rules (duplicate models, the selected model);
+// this owns the shape of a single definition.
+func validateProviderDefinition(provider ai.Provider, definition ProviderConfig) error {
+	scope := "provider " + string(provider)
+	if parsed, err := ParseProvider(string(provider)); err != nil || parsed != provider {
+		return fmt.Errorf("%w: invalid provider definition %q", ErrInvalid, provider)
+	}
+	if definition.Protocol != "" {
+		if _, err := ParseProtocol(string(definition.Protocol)); err != nil {
+			return err
+		}
+	}
+	if err := validateToolDeclaration(definition.Capabilities, scope); err != nil {
+		return err
+	}
+	if definition.ToolSearchName != "" {
+		if _, err := ParseToolSearchName(definition.ToolSearchName); err != nil {
+			return fmt.Errorf("provider %q: %w", provider, err)
+		}
+	}
+
+	return validateStreamIdleTimeout(definition.StreamIdleTimeout, scope)
+}
+
 // validateToolDeclaration rejects an explicit tools = false declaration. pips
 // is a tool-driven coding agent: without native tool calling it cannot read,
 // search, or edit a workspace. Rejecting the declaration up front keeps the
@@ -1236,6 +1260,37 @@ func validateToolDeclaration(capabilities ai.CapabilityOverride, scope string) e
 	}
 
 	return nil
+}
+
+// Stream idle bounds. The floor rejects a bound that would abort a stream before
+// any provider could answer, and the ceiling keeps a stream that has stopped
+// delivering from parking a turn without limit. Zero is not a bound: it means
+// "not declared" and selects the next layer down, ending at the transport
+// default.
+const (
+	minStreamIdleTimeout = time.Second
+	maxStreamIdleTimeout = time.Hour
+)
+
+// validateStreamIdleTimeout rejects a declared streaming idle bound outside the
+// range the transport can act on. Zero is always valid and means "not declared".
+func validateStreamIdleTimeout(value time.Duration, scope string) error {
+	switch {
+	case value == 0:
+		return nil
+	case value < minStreamIdleTimeout:
+		return fmt.Errorf(
+			"%w: %s stream idle timeout must be at least %s",
+			ErrInvalid, scope, minStreamIdleTimeout,
+		)
+	case value > maxStreamIdleTimeout:
+		return fmt.Errorf(
+			"%w: %s stream idle timeout must be at most %s",
+			ErrInvalid, scope, maxStreamIdleTimeout,
+		)
+	default:
+		return nil
+	}
 }
 
 //nolint:gocyclo // This is the single complete model-definition invariant boundary.
@@ -1250,6 +1305,9 @@ func validateModel(model ModelConfig) error {
 	}
 	if model.ContextWindow < 0 {
 		return fmt.Errorf("%w: model %q context window cannot be negative", ErrInvalid, model.Ref)
+	}
+	if err := validateStreamIdleTimeout(model.StreamIdleTimeout, "model "+model.Ref.String()); err != nil {
+		return err
 	}
 	if err := validateOptions(model.Options, "model "+model.Ref.String()+" request"); err != nil {
 		return err

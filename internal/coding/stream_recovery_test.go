@@ -64,7 +64,9 @@ func TestStreamRecoveryOptionGrantsTheModelReplayBudget(t *testing.T) {
 
 			scripted := &reasoningOnlyModel{}
 
-			a, err := agent.New(scripted, streamRecoveryOption(continuation))
+			// The idle bound is left unset, so the episode stays at the transport
+			// default; the derivation itself is covered in the model package.
+			a, err := agent.New(scripted, streamRecoveryOption(continuation, 0))
 			require.NoError(t, err)
 
 			var (

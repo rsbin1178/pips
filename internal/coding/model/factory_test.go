@@ -4,9 +4,12 @@ package model_test
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/ai/openai"
@@ -232,5 +235,98 @@ func TestConfiguredReasoningLevelReachesTheWire(t *testing.T) {
 
 			assert.Equal(t, "high", captured["reasoning_effort"])
 		})
+	}
+}
+
+// TestConfiguredStreamIdleTimeoutReachesTheTransport walks the whole coding path
+// for the transport bound: configuration -> catalog -> adapter -> HTTP read. The
+// declared bound is one second, so a stalled stream has to abort there rather
+// than at the ten-minute default; the test finishing at all is the proof.
+func TestConfiguredStreamIdleTimeoutReachesTheTransport(t *testing.T) {
+	t.Parallel()
+
+	// Buffered so the handler never blocks, and read only after the stream has
+	// ended, which keeps the capture race-free.
+	requestBody := make(chan []byte, 1)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		payload, _ := io.ReadAll(r.Body)
+		requestBody <- payload
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(
+			"data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\"}}\n\n" +
+				"data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n"))
+
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			panic("httptest writer does not implement http.Flusher")
+		}
+
+		flusher.Flush()
+
+		select {
+		case <-time.After(30 * time.Second):
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	ref := config.ModelRef{Provider: ai.ProviderOpenAI, Model: "gpt-5"}
+	cfg := config.Config{
+		Model: ref,
+		Models: []config.ModelConfig{{
+			Ref:               ref,
+			StreamIdleTimeout: time.Second,
+		}},
+		Providers: map[ai.Provider]config.ProviderConfig{
+			ai.ProviderOpenAI: {
+				BaseURL:         server.URL + "/v1",
+				Protocol:        config.ProtocolOpenAIResponses,
+				AllowHTTP:       true,
+				AllowPrivateIPs: true,
+			},
+		},
+		Sandbox:  config.SandboxWorkspaceWrite,
+		Approval: config.ApprovalOnRequest,
+	}
+
+	catalog, err := modelcatalog.New(cfg)
+	require.NoError(t, err)
+
+	resolved, err := catalog.Resolve(modelcatalog.Selection{Ref: ref})
+	require.NoError(t, err)
+	require.Equal(t, time.Second, resolved.StreamIdleTimeout,
+		"the declared bound survives resolution")
+
+	bound, err := model.New(t.Context(), resolved, &credentialStore{})
+	require.NoError(t, err)
+
+	var (
+		text      strings.Builder
+		streamErr error
+	)
+
+	for ev, err := range bound.Stream(t.Context(), ai.Request{Messages: []ai.Message{ai.UserText("hi")}}) {
+		if err != nil {
+			streamErr = err
+
+			break
+		}
+
+		if ev.Type == ai.StreamTextDelta {
+			text.WriteString(ev.Text)
+		}
+	}
+
+	require.Error(t, streamErr, "a stream that stops delivering has to fail")
+	require.ErrorIs(t, streamErr, ai.ErrStreamIdle)
+	assert.Equal(t, "partial", text.String(), "bytes delivered before the silence survive")
+
+	select {
+	case payload := <-requestBody:
+		assert.NotContains(t, string(payload), "stream_idle",
+			"the bound is local transport policy, never a request option")
+	default:
 	}
 }

@@ -42,22 +42,27 @@ const (
 // is selected per model by `stream_continuation = true`, for a provider that is
 // *verified* to honour the shape — verified by a probe showing the prefix
 // survived into the model's output, not by a 200 on the request.
-func streamRecoveryOption(continuation bool) agent.Option {
+//
+// The caller also passes the model's streaming idle bound, which the episode's
+// wall clock bound is derived from; see model.RetryWindowFor.
+func streamRecoveryOption(continuation bool, streamIdleTimeout time.Duration) agent.Option {
 	reissue := agent.WithStreamRecovery(streamRecoveryAttempts, streamRecoveryBaseDelay, streamRecoveryMaxDelay)
 	if continuation {
 		reissue = agent.WithStreamContinuation(streamRecoveryAttempts, streamRecoveryBaseDelay, streamRecoveryMaxDelay)
 	}
 
 	// The re-issue budget is bounded by wall clock as well as by attempts, from
-	// the same policy value the model middleware uses: an attempt that goes
+	// the same derived value the model middleware uses: an attempt that goes
 	// silent can sit on a full stream idle window, so a count alone would let one
-	// turn hold the interaction for hours. See model.RetryWindow.
+	// turn hold the interaction for hours. Deriving it from the model's own idle
+	// bound is what keeps a provider that legitimately pauses longer than the
+	// transport default from being replayed against an under-sized episode.
 	return agent.ComposeOptions(
 		reissue,
 		// An attempt that produced only reasoning is equivalent to one that
 		// produced nothing, so it earns the middleware's own replay budget
 		// instead of the smaller re-issue budget above.
 		agent.WithStreamReplayAttempts(model.RetryBudget),
-		agent.WithStreamRecoveryWindow(model.RetryWindow),
+		agent.WithStreamRecoveryWindow(model.RetryWindowFor(streamIdleTimeout)),
 	)
 }
