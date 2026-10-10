@@ -371,3 +371,118 @@ func TestStreamRecoveryReportsTheFragmentItGivesUpOn(t *testing.T) {
 		"the reported fragment is the one the consumer was looking at")
 	assert.Equal(t, "stream ended early", stream.incompletes[0].Reason)
 }
+
+// TestStreamReplayAttemptsAloneEnableNothing pins that the allowance configures
+// recovery rather than switching it on: with no attempt budget there is nothing
+// to spend it against. Giving up still retracts the thinking the consumer
+// rendered, because a failed run must not be left holding a live draft.
+func TestStreamReplayAttemptsAloneEnableNothing(t *testing.T) {
+	t.Parallel()
+
+	model := &continuationModel{attempts: []continuationAttempt{
+		{reasoning: []string{"first thought"}, err: io.ErrUnexpectedEOF},
+		{reasoning: []string{"second thought"}, err: io.ErrUnexpectedEOF},
+	}}
+
+	a, err := agent.New(model, agent.WithStreamReplayAttempts(9))
+	require.NoError(t, err)
+
+	stream := collectContinuationStream(t, a, agent.NewSession())
+
+	require.ErrorIs(t, stream.err, io.ErrUnexpectedEOF)
+	assert.Empty(t, stream.notices)
+	assert.Len(t, model.Requests(), 1)
+	assert.Equal(t, 1, stream.discards,
+		"giving up retracts the thinking the consumer rendered")
+	assert.Empty(t, stream.incompletes)
+}
+
+// TestStreamReplayAttemptsCoverReasoningOnlyFailures pins the split budget: a
+// failure whose only output was reasoning is equivalent to one that produced
+// nothing, because dropping the thinking costs the consumer no answer. It draws
+// the replay allowance the model middleware would have spent, while the
+// re-issue budget stays reserved for answer content.
+func TestStreamReplayAttemptsCoverReasoningOnlyFailures(t *testing.T) {
+	t.Parallel()
+
+	model := &continuationModel{attempts: []continuationAttempt{
+		{reasoning: []string{"first thought"}, err: io.ErrUnexpectedEOF},
+		{reasoning: []string{"second thought"}, err: io.ErrUnexpectedEOF},
+		{reasoning: []string{"third thought"}, err: io.ErrUnexpectedEOF},
+		{deltas: []string{"answer"}, finish: ai.FinishStop},
+	}}
+
+	a, err := agent.New(
+		model,
+		agent.WithStreamRecovery(1, time.Millisecond, time.Millisecond),
+		agent.WithStreamReplayAttempts(3),
+	)
+	require.NoError(t, err)
+
+	stream := collectContinuationStream(t, a, agent.NewSession())
+
+	require.NoError(t, stream.err)
+	assert.Equal(t, []string{"first thought", "second thought", "third thought"}, stream.reasoning)
+	assert.Equal(t, "answer", stream.emitted())
+	require.Len(t, stream.notices, 3, "the replay allowance covers three re-issues, not the re-issue budget")
+	assert.Equal(t, 3, stream.notices[2].Attempt)
+	assert.Equal(t, 3, stream.notices[2].MaxRetries, "the notice reports the replay budget")
+	assert.Equal(t, 3, stream.discards, "every replay retracts the thinking the consumer rendered")
+	assert.Empty(t, stream.incompletes, "reasoning is not an answer fragment to report")
+	assert.Len(t, model.Requests(), 4)
+}
+
+// TestStreamReplayAttemptsLeaveTheOutputBudgetAlone is the other half of the
+// split: a failure that produced answer content still spends the smaller
+// re-issue budget, because each of its re-issues retracts what the consumer
+// read.
+func TestStreamReplayAttemptsLeaveTheOutputBudgetAlone(t *testing.T) {
+	t.Parallel()
+
+	model := &continuationModel{attempts: []continuationAttempt{
+		{deltas: []string{"half"}, err: io.ErrUnexpectedEOF},
+		{deltas: []string{"more"}, err: io.ErrUnexpectedEOF},
+	}}
+
+	a, err := agent.New(
+		model,
+		agent.WithStreamRecovery(1, time.Millisecond, time.Millisecond),
+		agent.WithStreamReplayAttempts(9),
+	)
+	require.NoError(t, err)
+
+	stream := collectContinuationStream(t, a, agent.NewSession())
+
+	require.ErrorIs(t, stream.err, io.ErrUnexpectedEOF)
+	require.Len(t, stream.notices, 1, "answer output does not reach the replay allowance")
+	assert.Equal(t, 1, stream.notices[0].MaxRetries, "the notice reports the re-issue budget")
+	assert.Equal(t, 1, stream.discards)
+	require.Len(t, stream.incompletes, 1)
+	assert.Equal(t, "more", stream.incompletes[0].Text)
+	assert.Len(t, model.Requests(), 2)
+}
+
+// TestStreamRecoveryWithoutReplayAllowanceKeepsOneTier keeps the default
+// honest: an agent that sets no replay allowance bounds both failure shapes with
+// one budget, which is what every existing frontend already gets.
+func TestStreamRecoveryWithoutReplayAllowanceKeepsOneTier(t *testing.T) {
+	t.Parallel()
+
+	model := &continuationModel{attempts: []continuationAttempt{
+		{reasoning: []string{"first thought"}, err: io.ErrUnexpectedEOF},
+		{reasoning: []string{"second thought"}, err: io.ErrUnexpectedEOF},
+	}}
+
+	a, err := agent.New(model, agent.WithStreamRecovery(1, time.Millisecond, time.Millisecond))
+	require.NoError(t, err)
+
+	stream := collectContinuationStream(t, a, agent.NewSession())
+
+	require.ErrorIs(t, stream.err, io.ErrUnexpectedEOF)
+	require.Len(t, stream.notices, 1)
+	assert.Equal(t, 1, stream.notices[0].MaxRetries)
+	assert.Equal(t, 2, stream.discards,
+		"the re-issue retracts the first thinking and the give-up retracts the second")
+	assert.Empty(t, stream.incompletes, "reasoning is not an answer fragment to report")
+	assert.Len(t, model.Requests(), 2)
+}

@@ -8,13 +8,18 @@ import (
 	"github.com/rsbin1178/pips/ai/middleware/retry"
 )
 
-// codingModelMaxRetries is the retry budget for one model request in a Coding
-// run: ten replays of a failure that produced nothing, following the default
-// the other agent frontends ship (Claude Code retries transient failures up to
-// ten times; Grok Build's live retry state reports a budget in the same range).
-// The backoff doubles from 500ms with full jitter, capped at 30s, and a
-// provider Retry-After wins when it is longer.
-const codingModelMaxRetries = 10
+// RetryBudget is the retry budget for one model request in a Coding run: ten
+// replays of a failure that produced nothing, following the default the other
+// agent frontends ship (Claude Code retries transient failures up to ten times;
+// Grok Build's live retry state reports a budget in the same range). The backoff
+// doubles from 500ms with full jitter, capped at 30s, and a provider Retry-After
+// wins when it is longer.
+//
+// Coding also hands this value to the Agent loop's stream recovery as its replay
+// allowance, so a stream that failed after producing only reasoning — nothing a
+// consumer has to retract — earns the same budget as a request that produced
+// nothing at all. One value keeps the two owners from drifting apart.
+const RetryBudget = 10
 
 // RetryWindow bounds the wall clock one model request may spend replaying, and
 // through the Coding recovery option it bounds one turn's re-issue episode too.
@@ -37,7 +42,7 @@ func withCodingRetry(model ai.LanguageModel, options ...retry.Option) ai.Languag
 	retryOptions := make([]retry.Option, 0, len(options)+2)
 	retryOptions = append(
 		retryOptions,
-		retry.WithMaxAttempts(codingModelMaxRetries+1),
+		retry.WithMaxAttempts(RetryBudget+1),
 		retry.WithMaxElapsed(RetryWindow),
 	)
 	retryOptions = append(retryOptions, options...)

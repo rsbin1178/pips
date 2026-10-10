@@ -19,7 +19,7 @@ func TestWithCodingRetryUsesTenRetryBudget(t *testing.T) {
 
 	// The retry budget follows the default the other agent frontends ship; pin
 	// the number so a change is deliberate.
-	assert.Equal(t, 10, codingModelMaxRetries)
+	assert.Equal(t, 10, RetryBudget)
 
 	transient := func(failures int) []error {
 		errs := make([]error, 0, failures)
@@ -34,27 +34,27 @@ func TestWithCodingRetryUsesTenRetryBudget(t *testing.T) {
 		t.Parallel()
 
 		// One initial attempt plus ten replays: the eleventh call answers.
-		base := newRetryModel(append(transient(codingModelMaxRetries), nil)...)
+		base := newRetryModel(append(transient(RetryBudget), nil)...)
 		model := withCodingRetry(base, noRetrySleep())
 
 		response, err := ai.Collect(model.Stream(t.Context(), ai.Request{}))
 
 		require.NoError(t, err)
 		assert.Equal(t, "ok", response.Text())
-		assert.Equal(t, int32(codingModelMaxRetries+1), base.calls.Load())
+		assert.Equal(t, int32(RetryBudget+1), base.calls.Load())
 	})
 
 	t.Run("budget exhaustion surfaces the last failure", func(t *testing.T) {
 		t.Parallel()
 
 		finalErr := errors.New("final transport failure")
-		base := newRetryModel(append(transient(codingModelMaxRetries), finalErr)...)
+		base := newRetryModel(append(transient(RetryBudget), finalErr)...)
 		model := withCodingRetry(base, noRetrySleep())
 
 		_, err := ai.Collect(model.Stream(t.Context(), ai.Request{}))
 
 		require.ErrorIs(t, err, finalErr)
-		assert.Equal(t, int32(codingModelMaxRetries+1), base.calls.Load())
+		assert.Equal(t, int32(RetryBudget+1), base.calls.Load())
 	})
 }
 
