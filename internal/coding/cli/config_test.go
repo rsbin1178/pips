@@ -37,6 +37,7 @@ network = "allow"
 
 [providers.openai.models."env-model"]
 reasoning_levels = ["low", "high"]
+stream_idle_timeout_seconds = 1800
 
 [providers.openai.models."env-model".request]
 max_output_tokens = 8192
@@ -72,6 +73,9 @@ model = "anthropic/project-model"
 	assert.Contains(t, output, `reasoning = "high" # source=flag detail="--reasoning"`)
 	assert.Contains(t, output, `resolved.protocol = "openai/responses"`)
 	assert.Contains(t, output, `resolved.context_window = 0`)
+	assert.Contains(t, output, `resolved.stream_idle_timeout = 30m0s`)
+	assert.Contains(t, output, `resolved.retry_window = 1h0m0s`,
+		"the window line shows what the declared bound implies")
 	assert.Contains(t, output, `resolved.request.max_output_tokens = 8192`)
 	assert.Contains(t, output, `resolved.request.temperature = 0.25`)
 	assert.Contains(t, output, `resolved.request.logprobs = true`)
@@ -150,6 +154,9 @@ exit_output = "resume-hint"
 	assert.Contains(t, output, `tui.alt_screen = "never" # source=config_file detail="`)
 	assert.Contains(t, output, `tui.mouse = false # source=config_file detail="`)
 	assert.Contains(t, output, `tui.exit_output = "resume-hint" # source=config_file detail="`)
+	assert.Contains(t, output, `resolved.stream_idle_timeout = <unset>`)
+	assert.Contains(t, output, `resolved.retry_window = 20m0s`,
+		"an undeclared bound still reports the window it implies")
 	assert.NotContains(t, output, "theme registry")
 }
 

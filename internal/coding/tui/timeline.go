@@ -514,13 +514,7 @@ func reasoningBlocks(message ai.Message, position int) []timelineBlock {
 // draftReasoningBlocks aggregates the in-flight turn's reasoning deltas. A
 // signature-only delta carries no text and contributes nothing.
 func draftReasoningBlocks(state coding.State) []timelineBlock {
-	var content strings.Builder
-	for _, delta := range state.Draft {
-		if delta.Kind == ai.StreamReasoningDelta {
-			content.WriteString(delta.Text)
-		}
-	}
-	body := strings.TrimSpace(content.String())
+	body := strings.TrimSpace(state.Draft.ReasoningText())
 	if body == "" {
 		return nil
 	}
@@ -1249,15 +1243,8 @@ func portableMessageParts(message ai.Message) []ai.Part {
 	return parts
 }
 
-func visibleDraftText(deltas []coding.MessageDelta) string {
-	var content strings.Builder
-	for _, delta := range deltas {
-		if delta.Kind == ai.StreamTextDelta {
-			content.WriteString(delta.Text)
-		}
-	}
-
-	return content.String()
+func visibleDraftText(draft coding.StreamDraft) string {
+	return draft.Text()
 }
 
 func renderTimeline(

@@ -170,6 +170,37 @@ func TestReduceMessageDiscardedClearsOnlyProvisionalDraft(t *testing.T) {
 	assert.Empty(t, state.Transcript)
 }
 
+// TestReduceMessageDiscardedClearsAReasoningOnlyDraft pins the give-up sequence
+// the loop takes when an attempt streamed reasoning and nothing else. Reasoning
+// is not an answer fragment, so there is no `CandidateIncomplete` to report;
+// the discard is the only event that can retract the draft the consumer
+// rendered, and a turn that gives up must not leave one live.
+func TestReduceMessageDiscardedClearsAReasoningOnlyDraft(t *testing.T) {
+	t.Parallel()
+
+	// Three-index slice so the append allocates instead of writing over the
+	// fixture's own delta.
+	events := retryEvents()[:5:5]
+	events = append(events, newTestEvent(
+		EventMessageDelta,
+		MessageDelta{Kind: ai.StreamReasoningDelta, Text: "thinking"},
+	))
+
+	state := reduceAll(t, events)
+	require.NotEmpty(t, state.Draft)
+	require.True(t, state.Draft.HasReasoningDelta())
+	assert.NotEmpty(t, state.DraftCandidate.Key())
+
+	discarded := newTestEvent(EventMessageDiscarded, MessageDiscarded{Turn: 1})
+	discarded.Sequence = state.Sequence + 1
+
+	next, err := Reduce(state, discarded)
+	require.NoError(t, err)
+	assert.Empty(t, next.Draft)
+	assert.Empty(t, next.DraftCandidate.Key())
+	assert.Empty(t, next.Transcript)
+}
+
 func TestReduceRecordsDurablePromptRequestTime(t *testing.T) {
 	t.Parallel()
 

@@ -94,10 +94,10 @@ func visualRunningState() coding.State {
 	state.Phase = coding.PhaseRunning
 	state.Interaction = coding.InteractionState{ID: "interaction-1", Active: true}
 	state.Transcript = []ai.Message{ai.UserText("Run the focused tests.")}
-	state.Draft = []coding.MessageDelta{{
+	state.Draft = coding.NewStreamDraft(coding.MessageDelta{
 		Kind: ai.StreamTextDelta,
 		Text: "I am checking the changed packages and will summarize the result.",
-	}}
+	})
 	state.Tools = []coding.ToolState{{
 		Call: coding.ToolCall{
 			ID: "call-1", Name: "shell",

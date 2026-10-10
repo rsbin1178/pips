@@ -646,7 +646,7 @@ func TestBridgeStartBatchesStreamWaitAndActivityTick(t *testing.T) {
 }
 
 func withDraft(state coding.State, deltas ...coding.MessageDelta) coding.State {
-	state.Draft = deltas
+	state.Draft = coding.NewStreamDraft(deltas...)
 
 	return state
 }

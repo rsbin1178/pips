@@ -44,7 +44,7 @@ func TestSubscribedFrameAdoptsRuntimeState(t *testing.T) {
 	state.Phase = coding.PhaseRunning
 	state.Interaction = coding.InteractionState{ID: "interaction-1", Active: true}
 	state.Runs = []coding.RunState{{ID: "run-1", Active: true, TurnOpen: true, Turn: 1}}
-	state.Draft = []coding.MessageDelta{{Kind: ai.StreamReasoningDelta, Text: "from runtime "}}
+	state.Draft = coding.NewStreamDraft(coding.MessageDelta{Kind: ai.StreamReasoningDelta, Text: "from runtime "})
 
 	controller := runtimeStateController{stubController: stubController{state: state}}
 
@@ -93,7 +93,7 @@ func TestSubscribedFrameAdoptsRuntimeState(t *testing.T) {
 			require.NoError(t, model.streamErr)
 			assert.Equal(t, uint64(8), model.state.Sequence, "the snapshot is the projection")
 			require.NotEmpty(t, model.state.Draft)
-			assert.Equal(t, "from runtime ", model.state.Draft[0].Text)
+			assert.Equal(t, "from runtime ", model.state.Draft.Materialize()[0].Text)
 		})
 	}
 }

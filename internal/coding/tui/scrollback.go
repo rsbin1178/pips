@@ -165,7 +165,7 @@ func (m *Model) takeStableTimelineBlocks() []timelineBlock {
 		m.scrollback.messages,
 		stableMessages,
 	)
-	delta.Draft = nil
+	delta.Draft = coding.StreamDraft{}
 	delta.Tools = delta.Tools[m.scrollback.tools:stableTools]
 
 	delta.Diagnostics = delta.Diagnostics[m.scrollback.diagnostics:]

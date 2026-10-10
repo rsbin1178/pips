@@ -196,24 +196,39 @@ func TestReduceBatchMatchesSequentialReduce(t *testing.T) {
 	}
 }
 
-func TestReduceBatchRejectsTrailingIllegalEventAtomically(t *testing.T) {
+func TestReduceBatchRejectsIllegalEventAtomically(t *testing.T) {
 	t.Parallel()
 
-	base := sequencedEvents(append(batchPrefix(),
-		newTestEvent(EventMessageDelta, MessageDelta{Kind: ai.StreamTextDelta, Text: "ok "}),
-	)...)
-	state := reduceSequentially(t, base)
+	const count = 2*streamDraftChunkSize + 5
+	for _, rejectedIndex := range []int{0, streamDraftChunkSize + 2, count - 1} {
+		t.Run(fmt.Sprintf("rejected_at_%d", rejectedIndex), func(t *testing.T) {
+			t.Parallel()
 
-	legal := newTestEvent(EventMessageDelta, MessageDelta{Kind: ai.StreamTextDelta, Text: "still ok "})
-	legal.Sequence = state.Sequence + 1
+			state := contractState(t)
+			before := state.Clone()
+			beforeRecords := state.Draft.Materialize()
+			events := make([]Event, count)
+			for index := range events {
+				events[index] = newTestEvent(EventMessageDelta, reasoningDelta("provisional "))
+				events[index].Sequence = state.Sequence + uint64(index) + 1
+			}
 
-	illegal := newTestEvent(EventMessageDelta, MessageDelta{Kind: ai.StreamTextDelta, Text: "no run"})
-	illegal.RunID = "run-unknown"
-	illegal.Sequence = state.Sequence + 2
+			// Force an earlier delta run to build unpublished chunks before
+			// the middle/end rejection; none may reach the retained state.
+			events[streamDraftChunkSize] = sequenceEvent(
+				events[streamDraftChunkSize].Sequence,
+				newStatusEvent(EventIntegrationDiagnostic, IntegrationDiagnostic{Component: "test", Code: "provisional"}),
+			)
+			events[rejectedIndex].RunID = "run-unknown"
 
-	rejected, err := ReduceBatch(state, []Event{legal, illegal})
-	require.ErrorIs(t, err, ErrEventProtocol)
-	assert.Equal(t, State{}, rejected, "a rejected batch must not hand back a partial state")
+			rejected, err := ReduceBatch(state, events)
+			require.ErrorIs(t, err, ErrEventProtocol)
+			assert.Equal(t, State{}, rejected, "a rejected batch must not hand back a partial state")
+			requireEqualState(t, before, state, "a rejected batch changed the input state or summary")
+			assert.Equal(t, beforeRecords, state.Draft.Materialize(), "a rejected batch rewrote shared records")
+			assert.Equal(t, beforeRecords, before.Draft.Materialize(), "a rejected batch rewrote a retained snapshot")
+		})
+	}
 }
 
 // TestReduceBatchKeepsEveryFrameDelta pins the "no dropped character inside a
@@ -231,20 +246,34 @@ func TestReduceBatchKeepsEveryFrameDelta(t *testing.T) {
 				batched := reduceInFrames(t, test.events, frame)
 				assert.Equal(t, draftText(sequential.Draft), draftText(batched.Draft),
 					"frame=%d", frame)
-				assert.Equal(t, sequential.Draft, batched.Draft, "frame=%d", frame)
+				assert.True(t, sequential.Draft.Equal(batched.Draft), "frame=%d", frame)
 			}
 		})
 	}
 }
 
-func draftText(deltas []MessageDelta) string {
+func draftText(draft StreamDraft) string {
 	var builder strings.Builder
 
-	for _, delta := range deltas {
+	for _, delta := range draft.Materialize() {
 		builder.WriteString(delta.Text)
 	}
 
 	return builder.String()
+}
+
+// requireEqualState compares two states field-for-field while comparing the
+// immutable draft by logical contents: two equal drafts built by different
+// batch splits need not share chunk pointers.
+func requireEqualState(t *testing.T, want, got State, msg string, args ...any) {
+	t.Helper()
+
+	wantDraft, gotDraft := want.Draft, got.Draft
+	want.Draft, got.Draft = StreamDraft{}, StreamDraft{}
+
+	message := append([]any{msg}, args...)
+	require.Equal(t, want, got, message...)
+	require.True(t, wantDraft.Equal(gotDraft), message...)
 }
 
 // FuzzReduceBatchEquivalence drives legal event sequences through both
@@ -265,7 +294,7 @@ func FuzzReduceBatchEquivalence(f *testing.F) {
 
 		for _, frame := range []int{2, 3, 5, 32} {
 			batched := reduceInFrames(t, events, frame)
-			require.Equal(t, sequential, batched, "frame=%d script=%v", frame, script)
+			requireEqualState(t, sequential, batched, "frame=%d script=%v", frame, script)
 			require.Equal(t, draftText(sequential.Draft), draftText(batched.Draft),
 				"frame=%d", frame)
 		}

@@ -44,17 +44,16 @@ func withSpareCapacity[T any](values []T) []T {
 	return headroom
 }
 
-// TestReduceKeepsSiblingStatesIndependent pins the Go append-aliasing trap: two
-// states derived from one base must not write into each other's backing arrays.
+// TestReduceKeepsSiblingStatesIndependent pins the copy-on-write trap: two
+// states derived from one base must not write into each other's draft, even
+// when the base shares an underfilled immutable tail.
 func TestReduceKeepsSiblingStatesIndependent(t *testing.T) {
 	t.Parallel()
 
 	base := contractState(t)
-	base.Draft = withSpareCapacity(base.Draft)
-	require.Greater(t, cap(base.Draft), len(base.Draft), "base must expose spare draft capacity")
-
 	retained := base.Draft
-	retainedCopy := append([]MessageDelta(nil), retained...)
+	retainedRecords := retained.Materialize()
+	require.Less(t, retained.Len(), streamDraftChunkSize, "base must expose an underfilled draft tail")
 	transcriptCopy := append(ai.Messages(nil), base.Transcript...)
 
 	first, err := Reduce(base, deltaEvent(base.Sequence+1, "first "))
@@ -63,13 +62,12 @@ func TestReduceKeepsSiblingStatesIndependent(t *testing.T) {
 	second, err := Reduce(base, deltaEvent(base.Sequence+1, "second "))
 	require.NoError(t, err)
 
-	assert.Equal(t, retainedCopy, retained, "base draft changed")
-	assert.Len(t, retained, len(retainedCopy))
+	assert.Equal(t, retainedRecords, retained.Materialize(), "base draft changed")
 	assert.Equal(t, transcriptCopy, base.Transcript, "base transcript changed")
 	assert.Equal(t, "first ", lastDraftText(first), "sibling Reduce overwrote the first draft tail")
 	assert.Equal(t, "second ", lastDraftText(second))
-	require.Len(t, first.Draft, len(retainedCopy)+1)
-	require.Len(t, second.Draft, len(retainedCopy)+1)
+	require.Equal(t, retained.Len()+1, first.Draft.Len())
+	require.Equal(t, retained.Len()+1, second.Draft.Len())
 }
 
 // TestReduceAppendKeepsRetainedSlicesIntact proves that every append-type
@@ -84,9 +82,9 @@ func TestReduceAppendKeepsRetainedSlicesIntact(t *testing.T) {
 		t.Parallel()
 
 		base := base
-		base.Draft = withSpareCapacity(base.Draft)
+		require.Less(t, base.Draft.Len(), streamDraftChunkSize, "base must expose an underfilled draft tail")
 		retained := base.Draft
-		retainedCopy := append([]MessageDelta(nil), retained...)
+		retainedRecords := retained.Materialize()
 
 		first, err := Reduce(base, deltaEvent(base.Sequence+1, "first "))
 		require.NoError(t, err)
@@ -94,8 +92,7 @@ func TestReduceAppendKeepsRetainedSlicesIntact(t *testing.T) {
 		second, err := Reduce(base, deltaEvent(base.Sequence+1, "second "))
 		require.NoError(t, err)
 
-		assert.Equal(t, retainedCopy, retained)
-		assert.Len(t, retained, len(retainedCopy))
+		assert.Equal(t, retainedRecords, retained.Materialize())
 		assert.Equal(t, "first ", lastDraftText(first))
 		assert.Equal(t, "second ", lastDraftText(second))
 	})
@@ -271,7 +268,7 @@ func TestStateCloneIsDeepAgainstCallerMutation(t *testing.T) {
 	t.Parallel()
 
 	state := contractState(t)
-	wantDraftText := state.Draft[0].Text
+	wantDraftText := state.Draft.Materialize()[0].Text
 	snapshot := state.Clone()
 
 	require.NotEmpty(t, snapshot.Transcript)
@@ -289,7 +286,8 @@ func TestStateCloneIsDeepAgainstCallerMutation(t *testing.T) {
 	inline.Parts[1] = inlinePart
 	snapshot.Transcript[0] = inline
 	snapshot.Tools[0].Call.Arguments[0] = 'X'
-	snapshot.Draft[0].Text = "mutated"
+	snapshotDraft := snapshot.Draft.Materialize()
+	snapshotDraft[0].Text = "mutated"
 	snapshot.SyntheticMessages = append(snapshot.SyntheticMessages, 99)
 
 	original, ok := state.Transcript[0].(ai.AssistantMessage)
@@ -298,15 +296,16 @@ func TestStateCloneIsDeepAgainstCallerMutation(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, byte('{'), originalPart.Args[0], "transcript []byte argument aliased the snapshot")
 	assert.Equal(t, byte('{'), state.Tools[0].Call.Arguments[0], "tool []byte argument aliased the snapshot")
-	assert.Equal(t, wantDraftText, state.Draft[0].Text)
+	assert.Equal(t, wantDraftText, state.Draft.Materialize()[0].Text)
+	assert.Equal(t, wantDraftText, snapshot.Draft.Materialize()[0].Text, "materialized draft aliased its snapshot")
 	assert.NotContains(t, state.SyntheticMessages, 99)
 
 	// The reverse direction: continuing to reduce the original must not rewrite
 	// the snapshot the caller already holds.
 	next, err := Reduce(state, deltaEvent(state.Sequence+1, "later "))
 	require.NoError(t, err)
-	require.Len(t, next.Draft, len(snapshot.Draft)+1)
-	assert.Len(t, snapshot.Draft, len(state.Draft))
+	require.Equal(t, snapshot.Draft.Len()+1, next.Draft.Len())
+	assert.Equal(t, state.Draft.Len(), snapshot.Draft.Len())
 }
 
 // TestRuntimeSnapshotIsDefensive checks the same contract through the Runtime
@@ -351,9 +350,10 @@ func sequenceEvent(sequence uint64, event Event) Event {
 }
 
 func lastDraftText(state State) string {
-	if len(state.Draft) == 0 {
+	records := state.Draft.Materialize()
+	if len(records) == 0 {
 		return ""
 	}
 
-	return state.Draft[len(state.Draft)-1].Text
+	return records[len(records)-1].Text
 }

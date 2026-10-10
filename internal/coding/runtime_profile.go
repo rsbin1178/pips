@@ -136,7 +136,7 @@ func validateWorkerRuntimeBinding(options OpenOptions, binding *workerRuntimeBin
 	return nil
 }
 
-func sameWorkspaceIdentity(left workspace.Identity, right workspace.Identity) bool {
+func sameWorkspaceIdentity(left, right workspace.Identity) bool {
 	return left.Path() == right.Path() && left.Device() == right.Device() &&
 		left.Inode() == right.Inode() && left.Key() == right.Key()
 }

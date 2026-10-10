@@ -13,8 +13,10 @@ import (
 
 const teamStateConflictRetries = 32
 
-type attemptResourceMutation func(*teamstate.AttemptResource) error
-type attemptSnapshotMutation func(*teamstate.Snapshot, *teamstate.AttemptResource) error
+type (
+	attemptResourceMutation func(*teamstate.AttemptResource) error
+	attemptSnapshotMutation func(*teamstate.Snapshot, *teamstate.AttemptResource) error
+)
 
 func ensureAttemptResource(
 	ctx context.Context,

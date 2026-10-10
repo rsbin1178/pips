@@ -49,7 +49,6 @@ func (m *Manager) inspectVerified(
 	resource Resource,
 	verified verifiedResource,
 ) (Status, error) {
-
 	expected, err := m.treeManifest(ctx, resource.Workspace.Path, verified.expectedOID)
 	if err != nil {
 		return Status{}, err

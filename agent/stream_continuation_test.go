@@ -112,6 +112,7 @@ func (m *continuationModel) Requests() []ai.Request {
 type continuationStream struct {
 	types       []agent.EventType
 	deltas      []string
+	reasoning   []string
 	discards    int
 	incompletes []agent.CandidateIncomplete
 	notices     []*ai.RetryNotice
@@ -140,6 +141,10 @@ func collectContinuationStream(t *testing.T, a *agent.Agent, sess *agent.Session
 		case agent.ModelStreamEvent:
 			if payload.Event.Type == ai.StreamTextDelta {
 				out.deltas = append(out.deltas, payload.Event.Text)
+			}
+
+			if payload.Event.Type == ai.StreamReasoningDelta {
+				out.reasoning = append(out.reasoning, payload.Event.Text)
 			}
 
 			if payload.Event.Retry != nil {

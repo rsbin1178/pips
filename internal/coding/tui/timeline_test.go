@@ -303,10 +303,10 @@ func TestTimelineRendersThinkingTextButNeverSignatures(t *testing.T) {
 				ai.ReasoningPart{Redacted: true, Signature: signature},
 			),
 		},
-		Draft: []coding.MessageDelta{
-			{Kind: ai.StreamReasoningDelta, Text: reasoning, Signature: signature},
-			{Kind: ai.StreamTextDelta, Text: "visible draft"},
-		},
+		Draft: coding.NewStreamDraft(
+			coding.MessageDelta{Kind: ai.StreamReasoningDelta, Text: reasoning, Signature: signature},
+			coding.MessageDelta{Kind: ai.StreamTextDelta, Text: "visible draft"},
+		),
 		Tools: []coding.ToolState{{
 			Call:   coding.ToolCall{ID: "call-1", Name: "read"},
 			Status: coding.ToolStatusRunning,
@@ -498,7 +498,7 @@ func TestTimelineRendersAssistantWithoutSpeakerLabel(t *testing.T) {
 
 	state := coding.State{
 		Transcript: []ai.Message{ai.AssistantText("### 算法说明\n\n正文")},
-		Draft:      []coding.MessageDelta{{Kind: ai.StreamTextDelta, Text: "continued"}},
+		Draft:      coding.NewStreamDraft(coding.MessageDelta{Kind: ai.StreamTextDelta, Text: "continued"}),
 	}
 	blocks := projectTimeline(state)
 	require.Len(t, blocks, 2)

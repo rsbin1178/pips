@@ -69,7 +69,7 @@ func TestStreamFrameCoalescesStateAdvances(t *testing.T) {
 
 	assert.Equal(t, frames, model.frameAdvances, "one state advance per frame")
 	assert.Equal(t, frames, model.frameRenders, "one render per frame")
-	assert.Equal(t, deltas, len(model.state.Draft), "every delta is applied exactly once")
+	assert.Equal(t, deltas, model.state.Draft.Len(), "every delta is applied exactly once")
 }
 
 // TestStreamFrameReusesTheComposedView pins the View memo: the framework calls

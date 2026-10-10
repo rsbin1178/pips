@@ -13,6 +13,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/ai/anthropic"
@@ -54,13 +55,18 @@ type ResolvedModel struct {
 	Endpoint           Endpoint
 	Limits             Limits
 	StreamContinuation bool
-	Compatibility      openai.Compatibility
-	Capabilities       ai.CapabilityOverride
-	Options            config.ModelOptions
-	Variant            string
-	ReasoningLevels    []config.ReasoningLevel
-	ReasoningLevel     *config.ReasoningLevel
-	ReasoningBudgets   map[config.ReasoningLevel]int
+	// StreamIdleTimeout is the streaming idle bound the transport applies, after
+	// the model's value has overridden the provider's. Zero means neither
+	// declared one, so the adapter's own default stands; the retry window is
+	// derived from whichever bound ends up in effect.
+	StreamIdleTimeout time.Duration
+	Compatibility     openai.Compatibility
+	Capabilities      ai.CapabilityOverride
+	Options           config.ModelOptions
+	Variant           string
+	ReasoningLevels   []config.ReasoningLevel
+	ReasoningLevel    *config.ReasoningLevel
+	ReasoningBudgets  map[config.ReasoningLevel]int
 }
 
 // Clone returns a fully detached runtime snapshot.
@@ -126,6 +132,9 @@ type providerDefinition struct {
 	protocol      config.Protocol
 	compatibility openai.Compatibility
 	capabilities  ai.CapabilityOverride
+	// streamIdleTimeout is the provider-wide streaming idle bound a model
+	// inherits unless it declares its own. Zero selects the transport default.
+	streamIdleTimeout time.Duration
 }
 
 // New validates the complete local registry and returns a network-free
@@ -223,6 +232,13 @@ func (r *registry) resolve(selection Selection) (ResolvedModel, error) {
 	// only the fields it declares and inherits the rest from the provider.
 	capabilities := provider.capabilities.Overlay(model.Capabilities)
 
+	// The streaming idle bound resolves the same way, with a zero at either
+	// layer meaning "not declared" rather than "no silence allowed".
+	streamIdleTimeout := provider.streamIdleTimeout
+	if model.StreamIdleTimeout > 0 {
+		streamIdleTimeout = model.StreamIdleTimeout
+	}
+
 	variantName := selection.Variant
 	if variantName == "" {
 		variantName = model.DefaultVariant
@@ -269,6 +285,7 @@ func (r *registry) resolve(selection Selection) (ResolvedModel, error) {
 		Endpoint:           provider.endpoint,
 		Limits:             Limits{ContextWindow: model.ContextWindow},
 		StreamContinuation: model.StreamContinuation,
+		StreamIdleTimeout:  streamIdleTimeout,
 		Compatibility:      compatibility,
 		Capabilities:       capabilities,
 		Options:            options,
@@ -358,6 +375,7 @@ func resolveProviders(overrides map[ai.Provider]config.ProviderConfig) (map[ai.P
 		definition.endpoint.AllowPrivateIPs = override.AllowPrivateIPs
 		definition.compatibility = override.Compatibility.Resolve(definition.compatibility)
 		definition.capabilities = definition.capabilities.Overlay(override.Capabilities)
+		definition.streamIdleTimeout = override.StreamIdleTimeout
 		openAIShaped := config.IsOpenAIProtocol(definition.protocol)
 		if !openAIShaped && !reflect.DeepEqual(override.Compatibility, config.CompatibilityConfig{}) {
 			return nil, fmt.Errorf("%w: provider %q compatibility requires an OpenAI protocol", ErrInvalid, provider)

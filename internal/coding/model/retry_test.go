@@ -19,7 +19,7 @@ func TestWithCodingRetryUsesTenRetryBudget(t *testing.T) {
 
 	// The retry budget follows the default the other agent frontends ship; pin
 	// the number so a change is deliberate.
-	assert.Equal(t, 10, codingModelMaxRetries)
+	assert.Equal(t, 10, RetryBudget)
 
 	transient := func(failures int) []error {
 		errs := make([]error, 0, failures)
@@ -34,27 +34,27 @@ func TestWithCodingRetryUsesTenRetryBudget(t *testing.T) {
 		t.Parallel()
 
 		// One initial attempt plus ten replays: the eleventh call answers.
-		base := newRetryModel(append(transient(codingModelMaxRetries), nil)...)
-		model := withCodingRetry(base, noRetrySleep())
+		base := newRetryModel(append(transient(RetryBudget), nil)...)
+		model := withCodingRetry(base, RetryWindowFor(0), noRetrySleep())
 
 		response, err := ai.Collect(model.Stream(t.Context(), ai.Request{}))
 
 		require.NoError(t, err)
 		assert.Equal(t, "ok", response.Text())
-		assert.Equal(t, int32(codingModelMaxRetries+1), base.calls.Load())
+		assert.Equal(t, int32(RetryBudget+1), base.calls.Load())
 	})
 
 	t.Run("budget exhaustion surfaces the last failure", func(t *testing.T) {
 		t.Parallel()
 
 		finalErr := errors.New("final transport failure")
-		base := newRetryModel(append(transient(codingModelMaxRetries), finalErr)...)
-		model := withCodingRetry(base, noRetrySleep())
+		base := newRetryModel(append(transient(RetryBudget), finalErr)...)
+		model := withCodingRetry(base, RetryWindowFor(0), noRetrySleep())
 
 		_, err := ai.Collect(model.Stream(t.Context(), ai.Request{}))
 
 		require.ErrorIs(t, err, finalErr)
-		assert.Equal(t, int32(codingModelMaxRetries+1), base.calls.Load())
+		assert.Equal(t, int32(RetryBudget+1), base.calls.Load())
 	})
 }
 
@@ -64,9 +64,10 @@ func TestWithCodingRetryUsesTenRetryBudget(t *testing.T) {
 func TestWithCodingRetryBoundsTheEpisodeOnTheWallClock(t *testing.T) {
 	t.Parallel()
 
-	// Two ten-minute stream idle windows, matching the reference
-	// implementation's max(600s, 2×idle). Pinned so a change is deliberate.
-	assert.Equal(t, 20*time.Minute, RetryWindow)
+	// An unset idle bound selects the transport default, so the episode stays at
+	// the twenty minutes Coding has always shipped. Pinned so a change is
+	// deliberate; the derivation itself is covered by TestRetryWindowFor.
+	assert.Equal(t, 20*time.Minute, RetryWindowFor(0))
 
 	finalErr := errors.New("provider stopped answering")
 	base := newRetryModel(finalErr)
@@ -83,13 +84,88 @@ func TestWithCodingRetryBoundsTheEpisodeOnTheWallClock(t *testing.T) {
 		return current
 	})
 
-	model := withCodingRetry(base, noRetrySleep(), retry.WithClock(clock))
+	model := withCodingRetry(base, RetryWindowFor(0), noRetrySleep(), retry.WithClock(clock))
 
 	_, err := ai.Collect(model.Stream(t.Context(), ai.Request{}))
 
 	require.ErrorIs(t, err, finalErr)
 	assert.Equal(t, int32(1), base.calls.Load(),
 		"the coding chain stops as soon as the episode is spent")
+}
+
+// TestRetryWindowFor pins the formula the episode follows: max(floor, 2×idle),
+// with an unset bound standing in the transport default. The window has to stay
+// at least twice the idle bound, because one attempt that goes silent can spend
+// a whole idle window and the episode still has to hold a second attempt.
+func TestRetryWindowFor(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, 10*time.Minute, RetryWindowFloor)
+
+	tests := []struct {
+		name string
+		idle time.Duration
+		want time.Duration
+	}{
+		{name: "unset selects the transport default", idle: 0, want: 20 * time.Minute},
+		{name: "the transport default", idle: ai.DefaultStreamIdleTimeout, want: 20 * time.Minute},
+		{name: "a raised bound doubles", idle: 30 * time.Minute, want: time.Hour},
+		{name: "a lowered bound keeps the floor", idle: 30 * time.Second, want: 10 * time.Minute},
+		{name: "just below the floor is not doubled", idle: 4 * time.Minute, want: 10 * time.Minute},
+		{name: "just above the floor is doubled", idle: 6 * time.Minute, want: 12 * time.Minute},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, test.want, RetryWindowFor(test.idle))
+		})
+	}
+}
+
+// TestWithCodingRetryUsesTheDerivedWindow covers the wiring rather than the
+// formula: a model whose idle bound is raised earns a proportionally longer
+// replay episode, which is what keeps a legitimately slow provider from being
+// replayed against an episode sized for the default bound.
+func TestWithCodingRetryUsesTheDerivedWindow(t *testing.T) {
+	t.Parallel()
+
+	// Every reading advances fifteen minutes, so the episode's ceiling is what
+	// decides how many attempts fit before it is spent.
+	stepping := func() retry.Option {
+		now := time.Unix(0, 0)
+
+		return retry.WithClock(retry.ClockFunc(func() time.Time {
+			current := now
+			now = now.Add(15 * time.Minute)
+
+			return current
+		}))
+	}
+
+	tests := []struct {
+		name  string
+		idle  time.Duration
+		calls int32
+	}{
+		{name: "transport default", idle: 0, calls: 2},
+		{name: "raised idle bound", idle: 30 * time.Minute, calls: 4},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			base := newRetryModel(errors.New("provider stopped answering"))
+			model := withCodingRetry(base, RetryWindowFor(test.idle), noRetrySleep(), stepping())
+
+			_, err := ai.Collect(model.Stream(t.Context(), ai.Request{}))
+
+			require.Error(t, err)
+			assert.Equal(t, test.calls, base.calls.Load())
+		})
+	}
 }
 
 func TestWithCodingRetryPreservesRetrySafetyAndIdentity(t *testing.T) {
@@ -99,7 +175,7 @@ func TestWithCodingRetryPreservesRetrySafetyAndIdentity(t *testing.T) {
 		t.Parallel()
 
 		base := newRetryModel(ai.NewError(ai.ProviderOpenAI, 400, "bad request"))
-		model := withCodingRetry(base, noRetrySleep())
+		model := withCodingRetry(base, RetryWindowFor(0), noRetrySleep())
 
 		_, err := ai.Collect(model.Stream(t.Context(), ai.Request{}))
 
@@ -112,7 +188,7 @@ func TestWithCodingRetryPreservesRetrySafetyAndIdentity(t *testing.T) {
 
 		base := newRetryModel(errors.New("stream interrupted"))
 		base.emitBeforeError = true
-		model := withCodingRetry(base, noRetrySleep())
+		model := withCodingRetry(base, RetryWindowFor(0), noRetrySleep())
 
 		var (
 			texts  []string
@@ -137,7 +213,7 @@ func TestWithCodingRetryPreservesRetrySafetyAndIdentity(t *testing.T) {
 		t.Parallel()
 
 		base := newRetryModel(nil)
-		model := withCodingRetry(base, noRetrySleep())
+		model := withCodingRetry(base, RetryWindowFor(0), noRetrySleep())
 
 		assert.Equal(t, base.Provider(), model.Provider())
 		assert.Equal(t, base.ModelID(), model.ModelID())

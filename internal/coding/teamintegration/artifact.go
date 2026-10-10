@@ -337,11 +337,11 @@ func (m *Manager) Prepare(ctx context.Context, request PrepareRequest) (Preview,
 
 	retained := func(cause error) (Preview, error) {
 		return Preview{
-				ID: id, AttemptIDs: attemptIDs(selection.Artifacts),
-				CommitOID: commitOID, TreeOID: treeOID,
-			}, &RetainedError{
-				IntegrationID: id, Cause: cause,
-			}
+			ID: id, AttemptIDs: attemptIDs(selection.Artifacts),
+			CommitOID: commitOID, TreeOID: treeOID,
+		}, &RetainedError{
+			IntegrationID: id, Cause: cause,
+		}
 	}
 	if err := m.git.AddWorktree(
 		ctx, parent.repository.TopLevel, derived.directory, derived.branchRef, derived.lockReason,

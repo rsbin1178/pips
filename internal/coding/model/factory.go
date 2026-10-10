@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
+	"time"
 
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/ai/anthropic"
@@ -20,8 +22,6 @@ var ErrInvalid = errors.New("coding model: invalid configuration")
 
 // New constructs a native or compatible provider adapter from one complete
 // immutable resolved snapshot.
-//
-//nolint:gocyclo // Each protocol owns a distinct typed option family.
 func New(
 	ctx context.Context,
 	resolved modelcatalog.ResolvedModel,
@@ -44,52 +44,60 @@ func New(
 
 	switch resolved.Protocol {
 	case config.ProtocolOpenAIResponses, config.ProtocolOpenAIChatCompletions:
-		options := []openai.Option{
+		options := adapterOptions(resolved, []openai.Option{
 			openai.WithAPIKey(secret.APIKey()),
 			openai.WithProvider(resolved.Ref.Provider),
 			openai.WithBaseURL(resolved.Endpoint.BaseURL),
 			openai.WithAPI(openAIAPI(resolved.Protocol)),
 			openai.WithCompatibility(resolved.Compatibility),
-		}
-		if resolved.Endpoint.AllowHTTP {
-			options = append(options, openai.WithAllowHTTP())
-		}
-		if resolved.Endpoint.AllowPrivateIPs {
-			options = append(options, openai.WithAllowPrivateIPs())
-		}
+		}, openai.WithAllowHTTP, openai.WithAllowPrivateIPs, openai.WithStreamIdleTimeout)
 
-		return withCodingModel(openai.New(resolved.Ref.Model, options...), resolved.Capabilities), nil
+		return withCodingModel(openai.New(resolved.Ref.Model, options...), resolved), nil
 	case config.ProtocolAnthropicMessages:
-		options := []anthropic.Option{
+		options := adapterOptions(resolved, []anthropic.Option{
 			anthropic.WithAPIKey(secret.APIKey()),
 			anthropic.WithProvider(resolved.Ref.Provider),
 			anthropic.WithBaseURL(resolved.Endpoint.BaseURL),
-		}
-		if resolved.Endpoint.AllowHTTP {
-			options = append(options, anthropic.WithAllowHTTP())
-		}
-		if resolved.Endpoint.AllowPrivateIPs {
-			options = append(options, anthropic.WithAllowPrivateIPs())
-		}
+		}, anthropic.WithAllowHTTP, anthropic.WithAllowPrivateIPs, anthropic.WithStreamIdleTimeout)
 
-		return withCodingModel(anthropic.New(resolved.Ref.Model, options...), resolved.Capabilities), nil
+		return withCodingModel(anthropic.New(resolved.Ref.Model, options...), resolved), nil
 	case config.ProtocolGeminiGenerateContent:
-		options := []gemini.Option{
+		options := adapterOptions(resolved, []gemini.Option{
 			gemini.WithAPIKey(secret.APIKey()),
 			gemini.WithProvider(resolved.Ref.Provider),
 			gemini.WithBaseURL(resolved.Endpoint.BaseURL),
-		}
-		if resolved.Endpoint.AllowHTTP {
-			options = append(options, gemini.WithAllowHTTP())
-		}
-		if resolved.Endpoint.AllowPrivateIPs {
-			options = append(options, gemini.WithAllowPrivateIPs())
-		}
+		}, gemini.WithAllowHTTP, gemini.WithAllowPrivateIPs, gemini.WithStreamIdleTimeout)
 
-		return withCodingModel(gemini.New(resolved.Ref.Model, options...), resolved.Capabilities), nil
+		return withCodingModel(gemini.New(resolved.Ref.Model, options...), resolved), nil
 	default:
 		return nil, fmt.Errorf("%w: unsupported protocol %q", ErrInvalid, resolved.Protocol)
 	}
+}
+
+// adapterOptions completes one adapter's option list with the endpoint and
+// transport settings every provider package shares. Each package has its own
+// option type, so the three setters are passed in rather than the list being
+// rebuilt per branch — which keeps a new endpoint or transport knob from being
+// added to two protocols and forgotten in the third.
+func adapterOptions[T any](
+	resolved modelcatalog.ResolvedModel,
+	base []T,
+	allowHTTP func() T,
+	allowPrivateIPs func() T,
+	streamIdleTimeout func(time.Duration) T,
+) []T {
+	options := slices.Clone(base)
+	if resolved.Endpoint.AllowHTTP {
+		options = append(options, allowHTTP())
+	}
+	if resolved.Endpoint.AllowPrivateIPs {
+		options = append(options, allowPrivateIPs())
+	}
+	if resolved.StreamIdleTimeout > 0 {
+		options = append(options, streamIdleTimeout(resolved.StreamIdleTimeout))
+	}
+
+	return options
 }
 
 func openAIAPI(protocol config.Protocol) openai.API {

@@ -114,7 +114,7 @@ func TestTranscriptStoreReusesSettledRecords(t *testing.T) {
 	model.transcript.resetRenders()
 
 	// A streaming delta changes only the draft record.
-	model.state.Draft = []coding.MessageDelta{{Kind: ai.StreamTextDelta, Text: "streaming…"}}
+	model.state.Draft = coding.NewStreamDraft(coding.MessageDelta{Kind: ai.StreamTextDelta, Text: "streaming…"})
 	model.rerenderTranscript(false)
 
 	assert.LessOrEqual(t, model.transcript.renders, 1,
@@ -188,7 +188,7 @@ func TestTranscriptStoreKeepsLiveRecordIdentity(t *testing.T) {
 	state := readyState()
 	state.Interaction = coding.InteractionState{ID: "interaction-1", Active: true}
 	state.Phase = coding.PhaseRunning
-	state.Draft = []coding.MessageDelta{{Kind: ai.StreamTextDelta, Text: "partial answer"}}
+	state.Draft = coding.NewStreamDraft(coding.MessageDelta{Kind: ai.StreamTextDelta, Text: "partial answer"})
 	model := readyModelWithController(t, stubController{state: state}, true)
 	model.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	model.resetScrollback()
@@ -204,7 +204,7 @@ func TestTranscriptStoreKeepsLiveRecordIdentity(t *testing.T) {
 
 	before := model.transcript.rowCount()
 	// The draft settles into an assistant message carrying the same candidate.
-	model.state.Draft = nil
+	model.state.Draft = coding.StreamDraft{}
 	model.state.MessageCandidates = append(model.state.MessageCandidates, model.state.DraftCandidate)
 	model.state.Transcript = append(model.state.Transcript, ai.AssistantText("partial answer"))
 	model.rerenderTranscript(false)

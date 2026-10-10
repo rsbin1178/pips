@@ -133,7 +133,7 @@ func TestCopyTakesTheStreamingDraftAsTheNewestReply(t *testing.T) {
 
 	model, calls := copyModel(t, ai.AssistantText("COMMITTED-REPLY"))
 	state := model.state
-	state.Draft = []coding.MessageDelta{{Kind: ai.StreamTextDelta, Text: "PARTIAL"}}
+	state.Draft = coding.NewStreamDraft(coding.MessageDelta{Kind: ai.StreamTextDelta, Text: "PARTIAL"})
 	model.state = state
 
 	command := model.copyAssistant(1, "")

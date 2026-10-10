@@ -326,10 +326,10 @@ func TestReadyBoundsLongLiveTailToTerminalHeight(t *testing.T) {
 	for index := range lines {
 		lines[index] = fmt.Sprintf("stream line %02d", index)
 	}
-	model.state.Draft = []coding.MessageDelta{{
+	model.state.Draft = coding.NewStreamDraft(coding.MessageDelta{
 		Kind: ai.StreamTextDelta,
 		Text: strings.Join(lines, "\n"),
-	}}
+	})
 	model.rerenderTranscript(false)
 
 	view := model.View()
@@ -340,7 +340,7 @@ func TestReadyBoundsLongLiveTailToTerminalHeight(t *testing.T) {
 	assert.Less(t, view.Cursor.Y, model.height)
 
 	model.state.Transcript = []ai.Message{ai.AssistantText(strings.Join(lines, "\n"))}
-	model.state.Draft = nil
+	model.state.Draft = coding.StreamDraft{}
 	committed := model.takeStableTimeline()
 	assert.Contains(t, committed, "stream line 00")
 	assert.Contains(t, committed, "stream line 29")

@@ -194,11 +194,13 @@ func TestPTYRouteListClickMCPSelects(t *testing.T) {
 	const testName = "TestPTYRouteListClickMCPSelects"
 	if os.Getenv(routeClickMCPEnv) == "1" {
 		runRouteClickHelper(t, func(controller *overlayController) {
-			controller.mcpSnapshot = coding.MCPSnapshot{GenerationID: 1, Settled: true,
+			controller.mcpSnapshot = coding.MCPSnapshot{
+				GenerationID: 1, Settled: true,
 				Servers: []codingmcp.ServerStatus{
 					{ID: "MCP-ALPHA", Scope: codingmcp.ScopeUser, Transport: codingmcp.TransportStdio, State: codingmcp.ServerStateConnected},
 					{ID: "MCP-BETA", Scope: codingmcp.ScopeUser, Transport: codingmcp.TransportStdio, State: codingmcp.ServerStateConnected},
-				}}
+				},
+			}
 		})
 	}
 

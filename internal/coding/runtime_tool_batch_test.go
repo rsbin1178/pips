@@ -34,14 +34,17 @@ func TestRuntimeBatchedWriteToolsRunSeriallyInOrder(t *testing.T) {
 	model := newRuntimeModel(
 		runtimeToolBatchResponse(
 			ai.ToolCallPart{ID: "add", Name: "apply_patch", Args: ai.JSON(
-				`{"patch":"*** Begin Patch\n*** Add File: notes.txt\n+one\n*** End Patch\n"}`)},
+				`{"patch":"*** Begin Patch\n*** Add File: notes.txt\n+one\n*** End Patch\n"}`,
+			)},
 			ai.ToolCallPart{ID: "update", Name: "apply_patch", Args: ai.JSON(
-				`{"patch":"*** Begin Patch\n*** Update File: notes.txt\n@@\n-one\n+two\n*** End Patch\n"}`)},
+				`{"patch":"*** Begin Patch\n*** Update File: notes.txt\n@@\n-one\n+two\n*** End Patch\n"}`,
+			)},
 		),
 		runtimeToolBatchResponse(
 			ai.ToolCallPart{ID: "read", Name: "read", Args: ai.JSON(`{"path":"notes.txt"}`)},
 			ai.ToolCallPart{ID: "rewrite", Name: "apply_patch", Args: ai.JSON(
-				`{"patch":"*** Begin Patch\n*** Update File: notes.txt\n@@\n-two\n+three\n*** End Patch\n"}`)},
+				`{"patch":"*** Begin Patch\n*** Update File: notes.txt\n@@\n-two\n+three\n*** End Patch\n"}`,
+			)},
 		),
 		runtimeTextResponse("done"),
 	)

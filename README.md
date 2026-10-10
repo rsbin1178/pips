@@ -9,7 +9,7 @@
 <p align="center">
   <a href="https://github.com/rsbin1178/pips/actions/workflows/quality.yml"><img src="https://github.com/rsbin1178/pips/actions/workflows/quality.yml/badge.svg?branch=main" alt="CI Quality Gate" /></a>
   <a href="https://pkg.go.dev/github.com/rsbin1178/pips"><img src="https://pkg.go.dev/badge/github.com/rsbin1178/pips.svg" alt="Go Reference" /></a>
-  <img src="https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go&logoColor=white" alt="Go Version" />
+  <img src="https://img.shields.io/badge/Go-1.27+-00ADD8?logo=go&logoColor=white" alt="Go Version" />
   <img src="docs/assets/badge-platform.svg" alt="Platform: macOS | Linux | Windows" />
   <img src="https://img.shields.io/badge/Theme-Catppuccin_Mocha-cba6f7" alt="Theme" />
 </p>
@@ -141,7 +141,7 @@ hand.
 Archives are named `pips_<tag>_<os>_<arch>.tar.gz`, where `os` is `darwin` or `linux` and `arch` is
 `amd64` or `arm64`. Extract the archive, make `pips` executable, and put it on your `PATH`.
 
-Building from source requires Go 1.26.6 or later:
+Building from source requires Go 1.27.2 or later:
 
 ```sh
 git clone --branch v0.1.7 https://github.com/rsbin1178/pips.git   # or the tag you want

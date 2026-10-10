@@ -108,7 +108,7 @@ jobs:
       - name: Lint
         uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.12.2
+          version: v2.14.0
           # Keep existing lint debt visible without letting new changes add to it.
           args: --new-from-rev=HEAD~ ./...
       - name: Build

@@ -81,14 +81,17 @@ type statusPageLine struct {
 func statusHeading(text string) statusPageLine {
 	return statusPageLine{kind: statusLineHeading, text: text}
 }
+
 func statusField(label, value string) statusPageLine {
 	return statusPageLine{kind: statusLineField, label: label, value: value}
 }
+
 func statusPair(label, value, label2, value2 string) statusPageLine {
 	return statusPageLine{
 		kind: statusLinePair, label: label, value: value, label2: label2, value2: value2,
 	}
 }
+
 func statusText(text string) statusPageLine { return statusPageLine{kind: statusLineText, text: text} }
 func statusBlank() statusPageLine           { return statusPageLine{} }
 

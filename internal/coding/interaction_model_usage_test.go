@@ -29,7 +29,8 @@ func TestInteractionModelUsage(t *testing.T) {
 		id    string
 		model string
 		usage TokenUsage
-	}) func(*interaction) {
+	},
+	) func(*interaction) {
 		return func(subject *interaction) {
 			for _, child := range children {
 				subject.addSubagentUsage(child.id, child.model, child.usage)

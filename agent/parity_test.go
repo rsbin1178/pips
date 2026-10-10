@@ -180,7 +180,8 @@ func TestTransformContext(t *testing.T) {
 	a, err := agent.New(model, agent.WithTransformContext(
 		func(_ context.Context, msgs []ai.Message) ([]ai.Message, error) {
 			return msgs[len(msgs)-1:], nil
-		}))
+		},
+	))
 	require.NoError(t, err)
 
 	sess := agent.NewSession(ai.UserText("old"), ai.AssistantText("older"))
@@ -201,7 +202,8 @@ func TestTransformContextErrorFailsRun(t *testing.T) {
 	a, err := agent.New(model, agent.WithTransformContext(
 		func(_ context.Context, _ []ai.Message) ([]ai.Message, error) {
 			return nil, errors.New("compaction failed")
-		}))
+		},
+	))
 	require.NoError(t, err)
 
 	result, err := a.Run(t.Context(), agent.NewSession(), ai.UserText("hi"))

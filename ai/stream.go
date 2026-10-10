@@ -18,6 +18,15 @@ import (
 // pre-flight failures surface as an error on the first iteration.
 type Stream = iter.Seq2[StreamEvent, error]
 
+// DefaultStreamIdleTimeout is the silence between reads that aborts a streaming
+// response body when the caller sets no bound of its own, surfacing as
+// [ErrStreamIdle]. It sits far above any provider's legitimate pause, so it only
+// fires on a stream that has genuinely stopped delivering. Provider adapters
+// expose a per-model override, and a caller that derives policy from the bound —
+// the Coding retry window, for instance — reads it here rather than restating
+// the number.
+const DefaultStreamIdleTimeout = 10 * time.Minute
+
 // StreamEventType discriminates [StreamEvent] variants.
 type StreamEventType string
 

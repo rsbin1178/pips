@@ -46,7 +46,10 @@ import (
 // far above any provider's legitimate pause — measured against a live gateway,
 // the longest silence was 4.5s to the first byte and 1.2s between chunks — so
 // it only fires on a stream that has genuinely stopped delivering.
-const DefaultStreamIdleTimeout = 10 * time.Minute
+//
+// It is [ai.DefaultStreamIdleTimeout], so the transport and any caller deriving
+// policy from the bound share one number.
+const DefaultStreamIdleTimeout = ai.DefaultStreamIdleTimeout
 
 // Config carries the transport-level options every provider constructor
 // accepts. Provider option funcs write into it.

@@ -176,7 +176,7 @@ func (a *workerAdmission) close() []workerCandidate {
 	return queued
 }
 
-func (a *workerAdmission) snapshot() (active int, queued int, byKey map[string]int) {
+func (a *workerAdmission) snapshot() (active, queued int, byKey map[string]int) {
 	if a == nil {
 		return 0, 0, nil
 	}

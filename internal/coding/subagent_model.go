@@ -4,6 +4,7 @@ package coding
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding/config"
@@ -34,6 +35,9 @@ type childModelBinding struct {
 	// streamContinuation is this child model's own recovery opt-in. It comes
 	// from the model the child actually runs, not from the parent's.
 	streamContinuation bool
+	// streamIdleTimeout is that model's streaming idle bound, which the child's
+	// recovery episode is derived from. Zero leaves the transport default.
+	streamIdleTimeout time.Duration
 }
 
 func newChildModelResolver(
@@ -99,7 +103,9 @@ func (r childModelResolver) bind(
 	if resolved.Ref == r.base.Ref {
 		return childModelBinding{
 			model: r.baseModel, requestPolicy: r.basePolicy,
-			contextWindow: resolved.Limits.ContextWindow, streamContinuation: resolved.StreamContinuation,
+			contextWindow:      resolved.Limits.ContextWindow,
+			streamContinuation: resolved.StreamContinuation,
+			streamIdleTimeout:  resolved.StreamIdleTimeout,
 		}, nil
 	}
 	if r.credentials == nil {
@@ -119,7 +125,9 @@ func (r childModelResolver) bind(
 
 	return childModelBinding{
 		model: bound, requestPolicy: policy,
-		contextWindow: resolved.Limits.ContextWindow, streamContinuation: resolved.StreamContinuation,
+		contextWindow:      resolved.Limits.ContextWindow,
+		streamContinuation: resolved.StreamContinuation,
+		streamIdleTimeout:  resolved.StreamIdleTimeout,
 	}, nil
 }
 

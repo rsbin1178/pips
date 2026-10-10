@@ -9,7 +9,7 @@
 <p align="center">
   <a href="https://github.com/rsbin1178/pips/actions/workflows/quality.yml"><img src="https://github.com/rsbin1178/pips/actions/workflows/quality.yml/badge.svg?branch=main" alt="CI Quality Gate" /></a>
   <a href="https://pkg.go.dev/github.com/rsbin1178/pips"><img src="https://pkg.go.dev/badge/github.com/rsbin1178/pips.svg" alt="Go Reference" /></a>
-  <img src="https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go&logoColor=white" alt="Go Version" />
+  <img src="https://img.shields.io/badge/Go-1.27+-00ADD8?logo=go&logoColor=white" alt="Go Version" />
   <img src="docs/assets/badge-platform.svg" alt="Platform: macOS | Linux | Windows" />
   <img src="https://img.shields.io/badge/Theme-Catppuccin_Mocha-cba6f7" alt="Theme" />
 </p>
@@ -138,7 +138,7 @@ Windows 除 Linux/macOS 的归档外还提供 `pips_<tag>_windows_amd64.zip`，�
 归档命名为 `pips_<tag>_<os>_<arch>.tar.gz`，其中 `os` 为 `darwin` 或 `linux`，`arch` 为 `amd64` 或
 `arm64`；解压、赋予可执行权限、放进 `PATH` 即可。
 
-从源码构建要求 Go 1.26.6 或更高版本：
+从源码构建要求 Go 1.27.2 或更高版本：
 
 ```sh
 git clone --branch v0.1.7 https://github.com/rsbin1178/pips.git   # 或你需要的 tag

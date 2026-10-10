@@ -205,7 +205,7 @@ func TestTeamAttemptProjectionPreservesStreamingAdjacency(t *testing.T) {
 
 	model := readyModel(t, true)
 	model.state.Transcript = []ai.Message{ai.UserText("start the Team")}
-	model.state.Draft = []coding.MessageDelta{{Kind: ai.StreamTextDelta, Text: "parent answer"}}
+	model.state.Draft = coding.NewStreamDraft(coding.MessageDelta{Kind: ai.StreamTextDelta, Text: "parent answer"})
 	value := teamProjectionAttempt("worker-1", "task-1", "attempt-1")
 	value.State = coding.TeamLifecycleCompleted
 	model.state.Teams = []coding.TeamLifecycleState{{TeamLifecycle: value}}
@@ -219,7 +219,7 @@ func TestTeamAttemptProjectionPreservesStreamingAdjacency(t *testing.T) {
 	assert.Contains(t, managed, "Team Worker")
 
 	model.state.Transcript = append(model.state.Transcript, ai.AssistantText("parent answer"))
-	model.state.Draft = nil
+	model.state.Draft = coding.StreamDraft{}
 	second := model.takeStableTimeline()
 	answer := strings.Index(second, "parent answer")
 	teamBlock := strings.Index(second, "Team Worker")

@@ -56,7 +56,10 @@ type childScopeFactory struct {
 	// streamContinuation is the child model's own recovery opt-in, taken from
 	// the binding for the model the child runs rather than from its parent's.
 	streamContinuation bool
-	mcpEntries         []catalog.Entry
+	// streamIdleTimeout is that model's streaming idle bound, which the child's
+	// recovery episode is derived from. Zero leaves the transport default.
+	streamIdleTimeout time.Duration
+	mcpEntries        []catalog.Entry
 	// toolSearchNameFor resolves the discovery tool name for the provider that
 	// serves this child; nil uses catalog.DefaultToolSearchName.
 	toolSearchNameFor    func(ai.Provider) string
@@ -387,7 +390,7 @@ func newChildControlScope(
 		agent.WithName("subagent/"+scope.plan.Identity.ID),
 		agent.WithMaxTurns(scope.plan.Limits.MaxTurns),
 		agent.WithMaxTokens(scope.plan.Limits.MaxTokens),
-		streamRecoveryOption(factory.streamContinuation),
+		streamRecoveryOption(factory.streamContinuation, factory.streamIdleTimeout),
 		agent.WithParallelTools(1),
 		agent.WithStopWhen(scope.guard.stopWhen),
 		agent.WithToolTimeout(factory.toolTimeout),

@@ -259,7 +259,7 @@ type State struct {
 	// from Transcript: the text is shown as an explicitly incomplete reply and
 	// must never reach the Harness session or the next model request.
 	IncompleteReplies []IncompleteReply               `json:"incomplete_replies,omitempty"`
-	Draft             []MessageDelta                  `json:"draft"`
+	Draft             StreamDraft                     `json:"draft"`
 	DraftCandidate    CandidateIdentity               `json:"draft_candidate,omitzero"`
 	MessageCandidates []CandidateIdentity             `json:"message_candidates,omitempty"`
 	Runs              []RunState                      `json:"runs"`
@@ -301,13 +301,8 @@ func (state State) Clone() State {
 	cloned.SyntheticMessages = slices.Clone(state.SyntheticMessages)
 	cloned.IncompleteReplies = slices.Clone(state.IncompleteReplies)
 
-	cloned.Draft = slices.Clone(state.Draft)
-	for index := range cloned.Draft {
-		if state.Draft[index].Usage != nil {
-			usage := *state.Draft[index].Usage
-			cloned.Draft[index].Usage = &usage
-		}
-	}
+	// Draft is an immutable value shared with the input; its chunks are never
+	// written after publication, so no defensive copy is needed.
 	cloned.MessageCandidates = slices.Clone(state.MessageCandidates)
 
 	cloned.Runs = slices.Clone(state.Runs)
@@ -521,11 +516,11 @@ func (state *State) reduceDeltas(events []Event) error {
 			return err
 		}
 
-		folded = append(folded, cloneMessageDelta(payload))
+		folded = append(folded, payload)
 		state.Sequence = event.Sequence
 	}
 
-	state.Draft = appendShared(state.Draft, folded...)
+	state.Draft = state.Draft.AppendBatch(folded)
 
 	return nil
 }
@@ -623,7 +618,7 @@ func (state *State) apply(event Event) error {
 			ID: event.InteractionID, Active: true, Resumed: payload.Resumed,
 			Mode: payload.Mode, Source: payload.Source, RootInteractionID: payload.RootInteractionID,
 		}
-		state.Draft = nil
+		state.Draft = StreamDraft{}
 		state.Approval = ApprovalState{}
 		state.Question = QuestionState{}
 		state.PlanReview = PlanReviewState{}
@@ -642,7 +637,7 @@ func (state *State) apply(event Event) error {
 		state.Interaction.Usage = payload.Usage
 		state.Interaction.ModelUsage = maps.Clone(payload.ModelUsage)
 		state.Interaction.DurationMillis = payload.DurationMillis
-		state.Draft = nil
+		state.Draft = StreamDraft{}
 		state.Approval = ApprovalState{}
 		state.Question = QuestionState{}
 		state.PlanReview = PlanReviewState{}
@@ -687,7 +682,7 @@ func (state *State) apply(event Event) error {
 			return err
 		}
 		if state.Runs[index].Turn > 1 || state.Runs[index].Usage != (TokenUsage{}) ||
-			len(state.activeTools) != 0 || len(state.Draft) != 0 {
+			len(state.activeTools) != 0 || state.Draft.Len() != 0 {
 			return protocolError("cannot interrupt a run with completed usage, visible output or active tools")
 		}
 		for _, candidate := range state.MessageCandidates {
@@ -762,14 +757,14 @@ func (state *State) apply(event Event) error {
 		if payload.Synthetic {
 			state.SyntheticMessages = appendShared(state.SyntheticMessages, len(state.Transcript)-1)
 		}
-		state.Draft = nil
+		state.Draft = StreamDraft{}
 		state.DraftCandidate = CandidateIdentity{}
 	case MessageDelta:
 		if err := state.checkDelta(event); err != nil {
 			return err
 		}
 
-		state.Draft = appendShared(state.Draft, cloneMessageDelta(payload))
+		state.Draft = state.Draft.Append(payload)
 	case MessageDiscarded:
 		if _, err := state.activeRun(event.RunID); err != nil {
 			return err
@@ -780,7 +775,7 @@ func (state *State) apply(event Event) error {
 		if state.DraftCandidate.Key() != "" && state.DraftCandidate != (CandidateIdentity{RunID: event.RunID, Turn: payload.Turn}) {
 			return protocolError("message discard does not match draft candidate")
 		}
-		state.Draft = nil
+		state.Draft = StreamDraft{}
 		state.DraftCandidate = CandidateIdentity{}
 	case IncompleteReply:
 		if _, err := state.activeRun(event.RunID); err != nil {
@@ -795,7 +790,7 @@ func (state *State) apply(event Event) error {
 		// rejects an interrupt that has visible output, so a live draft left
 		// behind would make the give-up path unpublishable.
 		state.IncompleteReplies = appendShared(state.IncompleteReplies, payload)
-		state.Draft = nil
+		state.Draft = StreamDraft{}
 		state.DraftCandidate = CandidateIdentity{}
 	case ModelRetry:
 		if _, err := state.activeRun(event.RunID); err != nil {
@@ -1311,7 +1306,7 @@ func (state *State) canStartAutomaticCompaction(mode CompactionMode) bool {
 		state.PlanReview.Required != nil {
 		return false
 	}
-	if len(state.Draft) != 0 {
+	if state.Draft.Len() != 0 {
 		return false
 	}
 
@@ -1463,7 +1458,7 @@ func (state *State) failActiveRun(runID string) {
 		}
 	}
 
-	state.Draft = nil
+	state.Draft = StreamDraft{}
 }
 
 func (state *State) requireInteraction(interactionID string) error {
