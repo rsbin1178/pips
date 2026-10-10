@@ -7,13 +7,23 @@
 //   - No http.Client.Timeout is ever set: it would cap the total time to read
 //     a response body and kill long streams. Callers bound requests with
 //     context deadlines instead.
-//   - ResponseHeaderTimeout is likewise unset because non-streaming LLM calls
-//     legitimately spend minutes before the first response byte.
-//   - A streaming body does get one clock: Config.StreamIdleTimeout bounds the
-//     silence between reads rather than the response's total duration. Without
-//     it a connection that stays open but stops delivering bytes parks the
-//     caller forever, and a caller parked on a read reports no error for any
-//     recovery layer to act on.
+//   - A streaming request is bounded in two places instead, and both live here
+//     rather than in an http.Client option so a bring-your-own client gets them
+//     too. Config.ResponseHeaderTimeout caps the wait for response headers, and
+//     Config.StreamIdleTimeout bounds the silence between reads on the body.
+//     Neither bounds the response's total duration, and a non-streaming call
+//     keeps no bound at all: it legitimately generates for minutes before its
+//     headers arrive. Without them a peer that accepts a request and then goes
+//     quiet parks the caller forever, and a caller parked on a read reports no
+//     error for any recovery layer to act on.
+//   - The transport runs its own liveness checks, so a peer that stops
+//     answering is reported rather than parked: an HTTP/2 ping after a stretch
+//     of silence, a close when the ping goes unanswered, and explicit TCP
+//     keep-alive probes for a path that drops the connection's state. They
+//     mirror what the other agent frontends configure.
+//   - Every request carries a User-Agent naming this client and its build, so a
+//     gateway's logs can attribute the traffic. Config.UserAgent overrides it,
+//     and an adapter or Config.Header entry that sets the header wins over both.
 //   - By default the client refuses plain HTTP and connections to private,
 //     loopback, link-local, or unspecified addresses (SSRF guard). Local
 //     endpoints opt out via Config.
@@ -32,7 +42,9 @@ import (
 	"net/http"
 	"net/textproto"
 	"net/url"
+	"runtime/debug"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -51,6 +63,56 @@ import (
 // policy from the bound share one number.
 const DefaultStreamIdleTimeout = ai.DefaultStreamIdleTimeout
 
+// DefaultResponseHeaderTimeout caps how long a streaming call waits for its
+// response headers unless Config.ResponseHeaderTimeout sets a bound of its own.
+// A streaming peer returns headers in seconds — measured against a live
+// gateway, in under four — so the bound only fires on a request the peer has
+// parked without answering at all. Non-streaming calls keep no bound: they
+// legitimately generate for minutes before their headers arrive.
+const DefaultResponseHeaderTimeout = 10 * time.Minute
+
+// Liveness settings for the built-in transport. They exist so a peer that stops
+// answering, or a path that forgets the connection, is reported as an error
+// within about a minute rather than parking the caller until the operating
+// system gives up, which on the common defaults runs to minutes.
+const (
+	// DefaultSendPingTimeout is how long an HTTP/2 connection may receive no
+	// frame at all before the client pings it.
+	DefaultSendPingTimeout = 30 * time.Second
+	// DefaultPingTimeout closes an HTTP/2 connection whose ping goes
+	// unanswered.
+	DefaultPingTimeout = 10 * time.Second
+	// DefaultTCPKeepAliveIdle is how long a connection may sit idle before the
+	// kernel sends its first keep-alive probe.
+	DefaultTCPKeepAliveIdle = 30 * time.Second
+	// DefaultTCPKeepAliveInterval is the gap between those probes.
+	DefaultTCPKeepAliveInterval = 10 * time.Second
+	// DefaultTCPKeepAliveCount is how many probes may go unanswered before the
+	// kernel drops the connection.
+	DefaultTCPKeepAliveCount = 3
+)
+
+// version is the build stamp the User-Agent reports. Release builds inject it
+// with -X; a module-installed binary falls back to the version Go embeds.
+var version = ""
+
+// DefaultUserAgent names this client and its build on every request, so a
+// gateway's logs can attribute the traffic to pips instead of to an anonymous
+// HTTP client. A build that carries no version reports "pips" alone.
+func DefaultUserAgent() string {
+	if stamped := strings.TrimSpace(version); stamped != "" {
+		return "pips/" + stamped
+	}
+
+	if info, ok := debug.ReadBuildInfo(); ok {
+		if module := strings.TrimSpace(info.Main.Version); module != "" && module != "(devel)" {
+			return "pips/" + module
+		}
+	}
+
+	return "pips"
+}
+
 // Config carries the transport-level options every provider constructor
 // accepts. Provider option funcs write into it.
 type Config struct {
@@ -67,6 +129,10 @@ type Config struct {
 	// Header is applied to every request. Adapter-set headers are written
 	// first, so Header entries override them on key collision.
 	Header http.Header
+	// UserAgent is sent as the request's User-Agent; empty sends
+	// DefaultUserAgent. A Header entry or an adapter-set User-Agent wins over
+	// both.
+	UserAgent string
 	// AllowHTTP permits plain-HTTP base URLs (local inference servers).
 	AllowHTTP bool
 	// AllowPrivateIPs disables the SSRF dial guard (local inference servers).
@@ -80,6 +146,11 @@ type Config struct {
 	// the bound is not expressible as an http.Client option, so a bring-your-own
 	// client cannot supply it and this field stays the override.
 	StreamIdleTimeout time.Duration
+	// ResponseHeaderTimeout caps the wait for response headers on a streaming
+	// call; zero or negative selects DefaultResponseHeaderTimeout. Like the idle
+	// bound it is not expressible as an http.Client option, so a bring-your-own
+	// HTTPClient gets it too.
+	ResponseHeaderTimeout time.Duration
 }
 
 // Client executes JSON and SSE requests against one provider endpoint.
@@ -88,9 +159,11 @@ type Client struct {
 	httpClient *http.Client
 	base       *url.URL
 	header     http.Header
+	userAgent  string
 
-	maxStreamLineSize int
-	streamIdleTimeout time.Duration
+	maxStreamLineSize     int
+	streamIdleTimeout     time.Duration
+	responseHeaderTimeout time.Duration
 
 	// initErr defers construction failures (bad base URL, forbidden scheme)
 	// to the first call, letting provider constructors stay single-valued.
@@ -102,9 +175,11 @@ type Client struct {
 // surface on the first request.
 func New(cfg Config, defaultBaseURL string) *Client {
 	c := &Client{
-		header:            cfg.Header.Clone(),
-		maxStreamLineSize: cfg.MaxStreamLineSize,
-		streamIdleTimeout: resolveStreamIdleTimeout(cfg.StreamIdleTimeout),
+		header:                cfg.Header.Clone(),
+		userAgent:             resolveUserAgent(cfg.UserAgent),
+		maxStreamLineSize:     cfg.MaxStreamLineSize,
+		streamIdleTimeout:     resolveStreamIdleTimeout(cfg.StreamIdleTimeout),
+		responseHeaderTimeout: resolveResponseHeaderTimeout(cfg.ResponseHeaderTimeout),
 	}
 
 	rawURL := cfg.BaseURL
@@ -276,8 +351,9 @@ func (c *Client) PostMultipartStream(ctx context.Context, path string, headers h
 }
 
 // postStream sends one encoded payload and returns the SSE response body,
-// guarded by the client's stream idle bound so a body that stops delivering
-// fails rather than parking the reader.
+// guarded by the client's response-header bound and stream idle bound, so a
+// peer that never answers and a body that stops delivering both fail rather
+// than parking the reader.
 func (c *Client) postStream(ctx context.Context, path string, headers http.Header, contentType string, payload []byte, decodeErr ErrorDecoder) (io.ReadCloser, error) {
 	if headers == nil {
 		headers = http.Header{}
@@ -286,15 +362,44 @@ func (c *Client) postStream(ctx context.Context, path string, headers http.Heade
 	headers = headers.Clone()
 	headers.Set("Accept", "text/event-stream")
 
-	resp, err := c.send(ctx, http.MethodPost, path, headers, contentType, payload) //nolint:bodyclose // closed on error paths here; success body is returned to the adapter, which owns closing it
-	if err != nil {
+	// The wait for response headers gets a bound of its own. net/http exposes no
+	// deadline for that phase, so the bound is applied by cancelling the
+	// request's context. The body inherits that context, so the cancel is handed
+	// to the reader and runs when the body closes.
+	headerCtx, cancelHeader := context.WithCancel(ctx)
+
+	timer := time.AfterFunc(c.responseHeaderTimeout, cancelHeader)
+	resp, err := c.send(headerCtx, http.MethodPost, path, headers, contentType, payload)
+	expired := !timer.Stop()
+
+	switch {
+	case err != nil:
+		cancelHeader()
+
+		if expired && ctx.Err() == nil {
+			// The cause is reported as text: wrapping it would put a transport
+			// deadline back into the chain, where it reads as the caller's.
+			return nil, fmt.Errorf("no response headers within %s (last error: %s): %w",
+				c.responseHeaderTimeout, err.Error(), ai.ErrResponseTimeout)
+		}
+
 		return nil, err
+	case expired && ctx.Err() == nil:
+		// The bound fired as the headers arrived, so the body's context is
+		// already cancelled and the body cannot be read: report the bound.
+		cancelHeader()
+
+		_ = resp.Body.Close()
+
+		return nil, fmt.Errorf("no response headers within %s: %w", c.responseHeaderTimeout, ai.ErrResponseTimeout)
 	}
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		defer drainClose(resp.Body)
+	body := &cancelOnClose{ReadCloser: resp.Body, cancel: cancelHeader}
 
-		raw, readErr := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodySize))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		defer drainClose(body)
+
+		raw, readErr := io.ReadAll(io.LimitReader(body, maxErrorBodySize))
 		if readErr != nil {
 			return nil, fmt.Errorf("reading error body (status %d): %w", resp.StatusCode, readErr)
 		}
@@ -302,7 +407,23 @@ func (c *Client) postStream(ctx context.Context, path string, headers http.Heade
 		return nil, decodeErr(resp.StatusCode, retryAfter(resp), raw)
 	}
 
-	return newIdleReadCloser(resp.Body, c.streamIdleTimeout), nil
+	return newIdleReadCloser(body, c.streamIdleTimeout), nil
+}
+
+// cancelOnClose hands the request context a streaming call was opened with to
+// the body's reader, so that context is released when the body closes rather
+// than when its headers arrive.
+type cancelOnClose struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+// Close releases the body and the context its request was opened with.
+func (b *cancelOnClose) Close() error {
+	err := b.ReadCloser.Close()
+	b.cancel()
+
+	return err
 }
 
 // resolveStreamIdleTimeout maps the unset values callers leave behind onto the
@@ -314,6 +435,26 @@ func resolveStreamIdleTimeout(configured time.Duration) time.Duration {
 	}
 
 	return configured
+}
+
+// resolveResponseHeaderTimeout maps the unset values callers leave behind onto
+// the default. Like the idle bound it cannot be switched off: a peer that
+// accepts a request and never answers is the failure nothing else reaches.
+func resolveResponseHeaderTimeout(configured time.Duration) time.Duration {
+	if configured <= 0 {
+		return DefaultResponseHeaderTimeout
+	}
+
+	return configured
+}
+
+// resolveUserAgent maps an unset User-Agent onto this client's own name.
+func resolveUserAgent(configured string) string {
+	if configured = strings.TrimSpace(configured); configured != "" {
+		return configured
+	}
+
+	return DefaultUserAgent()
 }
 
 // idleReadCloser fails a read that stays blocked longer than its bound, and
@@ -495,6 +636,12 @@ func (c *Client) send(ctx context.Context, method, path string, headers http.Hea
 	// Config-level headers win over adapter headers.
 	maps.Copy(req.Header, c.header)
 
+	// The client names itself unless the caller already did: an adapter's own
+	// header or a Config.Header entry wins over the default.
+	if req.Header.Get("User-Agent") == "" {
+		req.Header.Set("User-Agent", c.userAgent)
+	}
+
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -540,26 +687,47 @@ func drainClose(body io.ReadCloser) {
 }
 
 // newTransport builds the tuned default transport. See the package comment
-// for why no header/overall timeouts appear here.
+// for why no overall timeout appears here and which liveness settings it
+// carries.
 func newTransport(allowPrivateIPs bool) *http.Transport {
-	dialer := &net.Dialer{
-		Timeout:   10 * time.Second,
-		KeepAlive: 30 * time.Second,
-	}
-	if !allowPrivateIPs {
-		dialer.ControlContext = guardControl
-	}
-
 	return &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
-		DialContext:           dialer.DialContext,
+		DialContext:           newDialer(allowPrivateIPs).DialContext,
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          100,
 		MaxIdleConnsPerHost:   32,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: time.Second,
+		// A connection that receives no frame for a stretch of silence is
+		// pinged, and closed when the ping goes unanswered. Without this the
+		// caller waits for the operating system to notice, which runs to
+		// minutes.
+		HTTP2: &http.HTTP2Config{
+			SendPingTimeout: DefaultSendPingTimeout,
+			PingTimeout:     DefaultPingTimeout,
+		},
 	}
+}
+
+// newDialer builds the dialer the transport dials with: a bounded connect, and
+// keep-alive probes configured explicitly rather than left at the operating
+// system's defaults.
+func newDialer(allowPrivateIPs bool) *net.Dialer {
+	dialer := &net.Dialer{
+		Timeout: 10 * time.Second,
+		KeepAliveConfig: net.KeepAliveConfig{
+			Enable:   true,
+			Idle:     DefaultTCPKeepAliveIdle,
+			Interval: DefaultTCPKeepAliveInterval,
+			Count:    DefaultTCPKeepAliveCount,
+		},
+	}
+	if !allowPrivateIPs {
+		dialer.ControlContext = guardControl
+	}
+
+	return dialer
 }
 
 // ErrPrivateAddress is returned (wrapped) when the SSRF guard blocks a dial
