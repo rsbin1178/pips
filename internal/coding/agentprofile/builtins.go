@@ -6,33 +6,59 @@ import (
 )
 
 // BuiltinDefinitions returns the program-owned compatibility identities. Their
-// exact prompt and typed output adapters remain in subagent until the durable
-// protocol migration consumes the common identity model.
+// prompt and optional structured output contract are rendered by the subagent
+// package when the unified dispatcher compiles one into an execution plan.
+//
+// The toolsets mirror the source built-ins: general-purpose keeps the full
+// delegable catalog, while explore, plan, and review are read-only. review is a
+// pips extension.
 func BuiltinDefinitions() []Definition {
 	definitions := []Definition{
-		builtinDefinition("explore", "Explore", "Gather bounded workspace evidence."),
-		builtinDefinition("plan", "Plan", "Produce an evidence-backed implementation plan."),
-		builtinDefinition("review", "Review", "Report evidence-backed defects and risks."),
+		builtinDefinition(
+			"general-purpose",
+			"General purpose",
+			"General purpose agent for multi-step tasks.",
+			CapabilityAll,
+		),
+		builtinDefinition(
+			"explore",
+			"Explore",
+			"Fast, read-only agent specialized for codebase exploration.",
+			CapabilityReadOnly,
+		),
+		builtinDefinition(
+			"plan",
+			"Plan",
+			"Software architect for planning implementation strategies.",
+			CapabilityReadOnly,
+		),
+		builtinDefinition(
+			"review",
+			"Review",
+			"Report evidence-backed defects and risks.",
+			CapabilityReadOnly,
+		),
 	}
 
 	return definitions
 }
 
-func builtinDefinition(id, name, description string) Definition {
+func builtinDefinition(id, name, description string, mode CapabilityMode) Definition {
 	digest := sha256.Sum256([]byte("pips builtin agent/v1\n" + id))
 
 	return Definition{
-		ID:          id,
-		Kind:        KindBuiltin,
-		Scope:       ScopeBuiltin,
-		Source:      "builtin:" + id,
-		Digest:      hex.EncodeToString(digest[:]),
-		Schema:      "pips.agent/builtin/v1",
-		Name:        name,
-		Description: description,
-		Model:       modelInherit,
-		Visibility:  Visibility{User: true, Model: true},
-		Delivery:    []Delivery{DeliveryForeground, DeliveryBackground},
-		Output:      OutputContract{Format: OutputText},
+		ID:             id,
+		Kind:           KindBuiltin,
+		Scope:          ScopeBuiltin,
+		Source:         "builtin:" + id,
+		Digest:         hex.EncodeToString(digest[:]),
+		Schema:         "pips.agent/builtin/v1",
+		Name:           name,
+		Description:    description,
+		Model:          modelInherit,
+		CapabilityMode: mode,
+		Visibility:     Visibility{User: true, Model: true},
+		Delivery:       []Delivery{DeliveryForeground, DeliveryBackground},
+		Output:         OutputContract{Format: OutputText},
 	}
 }

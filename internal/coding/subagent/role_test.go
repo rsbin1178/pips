@@ -1,6 +1,7 @@
 package subagent
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -9,283 +10,72 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestRoleResultsFailClosed(t *testing.T) {
+func TestBuiltinPromptAndResultSchema(t *testing.T) {
+	t.Parallel()
+
+	for _, id := range []string{"explore", "plan", "review"} {
+		prompt, err := BuiltinPrompt(id, false, true)
+		require.NoError(t, err, id)
+		assert.Contains(t, prompt, "Return your final answer as plain text", id)
+
+		schema, ok := BuiltinResultSchema(id)
+		require.True(t, ok, id)
+		assert.True(t, json.Valid(schema), id)
+
+		structured, err := BuiltinPrompt(id, true, true)
+		require.NoError(t, err, id)
+		assert.Contains(t, structured, "Return only the JSON object required by your response schema", id)
+
+		portable, err := BuiltinPrompt(id, true, false)
+		require.NoError(t, err, id)
+		assert.Contains(t, portable, "Native structured output is unavailable", id)
+	}
+
+	prompt, err := BuiltinPrompt("general-purpose", true, true)
+	require.NoError(t, err)
+	assert.Contains(t, prompt, "Return your final answer as plain text")
+
+	_, ok := BuiltinResultSchema("general-purpose")
+	assert.False(t, ok)
+
+	_, err = BuiltinPrompt("unknown", false, true)
+	require.ErrorIs(t, err, ErrInvalid)
+}
+
+func TestBuiltinResultSchemaMatchesRoleStruct(t *testing.T) {
+	t.Parallel()
+
+	schema, ok := BuiltinResultSchema("explore")
+	require.True(t, ok)
+
+	var decoded struct {
+		Type       string                     `json:"type"`
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	require.NoError(t, json.Unmarshal(schema, &decoded))
+	assert.Equal(t, "object", decoded.Type)
+	assert.Contains(t, decoded.Properties, "summary")
+	assert.Contains(t, decoded.Properties, "evidence")
+	assert.Contains(t, decoded.Properties, "unknowns")
+}
+
+func TestDispatchRequestValidation(t *testing.T) {
 	t.Parallel()
 
 	limits := DefaultLimits()
-
-	tests := []struct {
-		name string
-		role Role
-		text string
-	}{
-		{
-			name: "path escape", role: RoleReview,
-			text: `{"summary":"x","findings":[{"severity":"high","title":"x","path":"../secret","line":1,"evidence":"x","recommendation":"x"}],"residual_risks":[]}`,
-		},
-		{
-			name: "absolute path", role: RolePlan,
-			text: `{"summary":"x","assumptions":[],"steps":[{"title":"x","files":["/tmp/x"],"rationale":"x"}],"risks":[],"verification":[]}`,
-		},
-		{
-			name: "severity enum", role: RoleReview,
-			text: `{"summary":"x","findings":[{"severity":"urgent","title":"x","path":"a.go","line":1,"evidence":"x","recommendation":"x"}],"residual_risks":[]}`,
-		},
-		{
-			name: "unknown field", role: RoleExplore,
-			text: `{"summary":"x","evidence":[],"unknowns":[],"extra":true}`,
-		},
-		{
-			name: "trailing json", role: RoleReview,
-			text: `{"summary":"x","findings":[],"residual_risks":[]} {}`,
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-
-			spec, err := specFor(test.role)
-			require.NoError(t, err)
-			_, err = spec.decode(test.text, limits)
-			require.ErrorIs(t, err, ErrInvalidResult)
-		})
-	}
-}
-
-func TestExploreResultOmitsInvalidEvidenceItems(t *testing.T) {
-	t.Parallel()
-
-	spec, err := specFor(RoleExplore)
+	_, err := normalizeDispatchRequest(Request{AgentID: "explore", Task: "x"})
 	require.NoError(t, err)
+	_, err = normalizeDispatchRequest(Request{Task: "x"})
+	require.ErrorIs(t, err, ErrInvalid)
+	_, err = normalizeDispatchRequest(Request{AgentID: "Explore", Task: "x"})
+	require.ErrorIs(t, err, ErrInvalid)
+	_, err = normalizeDispatchRequest(Request{AgentID: "explore", Role: RolePlan, Task: "x"})
+	require.ErrorIs(t, err, ErrInvalid)
 
-	result, err := spec.decode(
-		`{"summary":"Found the entry point.","evidence":[`+
-			`{"path":"cmd/pips/main.go","start_line":10,"end_line":12,"claim":"Starts the CLI."},`+
-			`{"path":"internal/coding/runtime.go","start_line":44,"end_line":0,"claim":"Invalid range."},`+
-			`{"path":"../secret","start_line":1,"end_line":1,"claim":"Escapes the workspace."},`+
-			`{"path":"internal/coding/open.go","start_line":20,"end_line":25,"claim":"Opens the runtime."}`+
-			`],"unknowns":["The provider path was not inspected."]}`,
-		DefaultLimits(),
-	)
-	require.NoError(t, err)
-
-	want := ExploreResult{
-		Summary: "Found the entry point.",
-		Evidence: []Evidence{
-			{
-				Path: "cmd/pips/main.go", StartLine: 10, EndLine: 12,
-				Claim: "Starts the CLI.",
-			},
-			{
-				Path: "internal/coding/open.go", StartLine: 20, EndLine: 25,
-				Claim: "Opens the runtime.",
-			},
-		},
-		Unknowns: []string{
-			"The provider path was not inspected.",
-			exploreEvidenceOmissionNotice,
-		},
-	}
-	assert.Equal(t, want, result)
-}
-
-func TestExploreResultAlwaysRecordsEvidenceOmissionWithinLimit(t *testing.T) {
-	t.Parallel()
-
-	spec, err := specFor(RoleExplore)
-	require.NoError(t, err)
-
-	limits := DefaultLimits()
-	limits.MaxResultItems = 2
-
-	result, err := spec.decode(
-		`{"summary":"x","evidence":[`+
-			`{"path":"bad.go","start_line":2,"end_line":1,"claim":"bad"}`+
-			`],"unknowns":["first","second"]}`,
-		limits,
-	)
-	require.NoError(t, err)
-
-	want := ExploreResult{
-		Summary:  "x",
-		Evidence: []Evidence{},
-		Unknowns: []string{"first", exploreEvidenceOmissionNotice},
-	}
-	assert.Equal(t, want, result)
-}
-
-func TestRoleResultsRequireExplicitCollections(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-		role Role
-		text string
-	}{
-		{
-			name: "explore missing evidence", role: RoleExplore,
-			text: `{"summary":"x","unknowns":[]}`,
-		},
-		{
-			name: "plan null steps", role: RolePlan,
-			text: `{"summary":"x","assumptions":[],"steps":null,"risks":[],"verification":[]}`,
-		},
-		{
-			name: "plan step missing files", role: RolePlan,
-			text: `{"summary":"x","assumptions":[],"steps":[{"title":"x","rationale":"x"}],"risks":[],"verification":[]}`,
-		},
-		{
-			name: "review missing residual risks", role: RoleReview,
-			text: `{"summary":"x","findings":[]}`,
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-
-			spec, err := specFor(test.role)
-			require.NoError(t, err)
-			_, err = spec.decode(test.text, DefaultLimits())
-			require.ErrorIs(t, err, ErrInvalidResult)
-		})
-	}
-}
-
-func TestRolePlainTextFallbackProducesSummaryOnlyResult(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-		role Role
-		text string
-		want any
-	}{
-		{
-			name: "explore Chinese text",
-			role: RoleExplore,
-			text: "列出了工作区内容。",
-			want: ExploreResult{
-				Summary: "列出了工作区内容。", Evidence: []Evidence{}, Unknowns: []string{},
-			},
-		},
-		{
-			name: "plan sentence",
-			role: RolePlan,
-			text: "plan subagent 工作正常",
-			want: PlanResult{
-				Summary:      "plan subagent 工作正常",
-				Assumptions:  []string{},
-				Steps:        []PlanStep{},
-				Risks:        []string{},
-				Verification: []string{},
-			},
-		},
-		{
-			name: "review sentence",
-			role: RoleReview,
-			text: "review subagent 工作正常",
-			want: ReviewResult{
-				Summary:       "review subagent 工作正常",
-				Findings:      []ReviewFinding{},
-				ResidualRisks: []string{},
-			},
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-
-			spec, err := specFor(test.role)
-			require.NoError(t, err)
-
-			result, err := spec.decodeResult(test.text, DefaultLimits(), true)
-			require.NoError(t, err)
-			assert.Equal(t, test.want, result)
-		})
-	}
-}
-
-func TestRoleCompatibilityUnwrapsOnlyExactJSONFence(t *testing.T) {
-	t.Parallel()
-
-	spec, err := specFor(RoleExplore)
-	require.NoError(t, err)
-
-	result, err := spec.decodeResult(
-		"```json\n"+
-			`{"summary":"x","evidence":[],"unknowns":[]}`+
-			"\n```",
-		DefaultLimits(),
-		true,
-	)
-	require.NoError(t, err)
-	assert.Equal(t, ExploreResult{
-		Summary: "x", Evidence: []Evidence{}, Unknowns: []string{},
-	}, result)
-
-	_, err = spec.decodeResult("```json\n{\"summary\":\n```", DefaultLimits(), true)
-	require.ErrorIs(t, err, ErrInvalidResult)
-	_, err = spec.decodeResult(
-		"```json\n"+`{"summary":"x","evidence":[],"unknowns":[]}`+"\n```",
-		DefaultLimits(),
-		false,
-	)
-	require.ErrorIs(t, err, ErrInvalidResult)
-
-	inner := `{"summary":"x","evidence":[],"unknowns":[]}`
-	fenced := "```json\n" + inner + "\n```"
-	limits := DefaultLimits()
-	limits.MaxResultBytes = len(inner)
-	limits.MaxFieldBytes = len(inner)
-	_, err = spec.decodeResult(fenced, limits, true)
-	require.ErrorIs(t, err, ErrInvalidResult)
-}
-
-func TestRolePlainTextFallbackKeepsJSONAndNativePathsStrict(t *testing.T) {
-	t.Parallel()
-
-	spec, err := specFor(RoleExplore)
-	require.NoError(t, err)
-
-	_, err = spec.decodeResult(`{"summary":`, DefaultLimits(), true)
-	require.ErrorIs(t, err, ErrInvalidResult)
-	_, err = spec.decodeResult(
-		`{"summary":"x","evidence":[],"unknowns":[],"extra":true}`,
-		DefaultLimits(),
-		true,
-	)
-	require.ErrorIs(t, err, ErrInvalidResult)
-
-	_, err = spec.decodeResult("plain summary", DefaultLimits(), false)
-	require.ErrorIs(t, err, ErrInvalidResult)
-
-	limits := DefaultLimits()
-	_, err = spec.decodeResult(strings.Repeat("x", limits.MaxFieldBytes+1), limits, true)
-	require.ErrorIs(t, err, ErrInvalidResult)
-
-	invalidUTF8 := string([]byte{
-		'{', '"', 's', 'u', 'm', 'm', 'a', 'r', 'y', '"', ':', '"', 0xff,
-		'"', ',', '"', 'e', 'v', 'i', 'd', 'e', 'n', 'c', 'e', '"', ':', '[', ']',
-		',', '"', 'u', 'n', 'k', 'n', 'o', 'w', 'n', 's', '"', ':', '[', ']', '}',
-	})
-	_, err = spec.decodeResult(invalidUTF8, DefaultLimits(), true)
-	require.ErrorIs(t, err, ErrInvalidResult)
-}
-
-func TestRoleRequestAndResultBudgets(t *testing.T) {
-	t.Parallel()
-
-	limits := DefaultLimits()
-	request := Request{Role: RoleExplore, Task: strings.Repeat("x", limits.MaxTaskBytes+1)}
-	require.ErrorIs(t, validateRequest(request, limits), ErrInvalid)
-	require.ErrorIs(t, validateRequest(Request{Role: "custom", Task: "x"}, limits), ErrInvalid)
-	require.ErrorIs(t, validateRequest(Request{Role: RoleExplore, Task: "x\x00y"}, limits), ErrInvalid)
-
-	spec, err := specFor(RoleExplore)
-	require.NoError(t, err)
-	_, err = spec.decode(strings.Repeat("x", limits.MaxResultBytes+1), limits)
-	assert.ErrorIs(t, err, ErrInvalidResult)
+	require.ErrorIs(t, validateDispatchRequest(Request{AgentID: "explore", Task: strings.Repeat("x", limits.MaxTaskBytes+1)}, limits), ErrInvalid)
+	require.ErrorIs(t, validateDispatchRequest(Request{AgentID: "explore", Task: "x\x00y"}, limits), ErrInvalid)
+	require.ErrorIs(t, validateDispatchRequest(Request{AgentID: "explore", Task: "  "}, limits), ErrInvalid)
+	require.NoError(t, validateDispatchRequest(Request{AgentID: "explore", Task: "x"}, limits))
 }
 
 func TestLimitsRejectUnsafeOverrides(t *testing.T) {

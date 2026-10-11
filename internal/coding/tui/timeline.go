@@ -742,7 +742,7 @@ func enrichSubagentToolActivity(
 }
 
 func isSubagentToolName(name string) bool {
-	return name == subagent.ToolName || name == subagent.SpawnToolName
+	return name == subagent.ToolName
 }
 
 func projectToolActivity(activity toolActivity) timelineBlock {

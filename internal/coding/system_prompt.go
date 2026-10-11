@@ -8,6 +8,7 @@ import (
 
 	"github.com/rsbin1178/pips/agent/catalog"
 	"github.com/rsbin1178/pips/internal/coding/question"
+	"github.com/rsbin1178/pips/internal/coding/subagent"
 	"github.com/rsbin1178/pips/internal/coding/tasklist"
 	"github.com/rsbin1178/pips/internal/coding/tools"
 )
@@ -275,12 +276,8 @@ func writeModeGuidance(prompt *strings.Builder, options systemPromptOptions, too
 		prompt.WriteString("- Continue independently when the answer can be inferred safely or deferred without materially changing the result.\n")
 	}
 
-	if _, ok := available["run_subagent"]; ok {
-		prompt.WriteString("- Use run_subagent for one isolated read-only specialist result that blocks the current task. The parent remains responsible for validating and integrating the result.\n")
-	}
-
-	if _, ok := available["spawn_agent"]; ok {
-		prompt.WriteString("- Use spawn_agent for independent background work. Continue useful parent work while it runs; completion is delivered automatically, so do not poll or duplicate the task.\n")
+	if _, ok := available[subagent.ToolName]; ok {
+		prompt.WriteString("- Use spawn_subagent to delegate one independent task to a child agent. Omit subagent_type for a general-purpose child, or name a read-only specialist (explore, plan, review). It returns immediately with a subagent_id by default; the child's completion is delivered automatically, so continue useful parent work and incorporate the results before concluding.\n")
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 	"github.com/rsbin1178/pips/internal/coding/hooks"
 	codingmcp "github.com/rsbin1178/pips/internal/coding/mcp"
 	"github.com/rsbin1178/pips/internal/coding/subagent"
+	"github.com/rsbin1178/pips/internal/coding/tools"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -32,7 +33,7 @@ func TestCompileDelegableCapabilitiesIsAnAmbientSubset(t *testing.T) {
 			Risk: catalog.RiskPrivileged, Tags: []string{"builtin", "process"},
 		},
 		{
-			Name: "run_subagent", Source: catalog.Source{Kind: catalog.SourceLocal, ID: "coding.subagent"},
+			Name: "spawn_subagent", Source: catalog.Source{Kind: catalog.SourceLocal, ID: "coding.subagent"},
 			Risk: catalog.RiskRead, Tags: []string{"builtin"},
 		},
 		{
@@ -47,7 +48,7 @@ func TestCompileDelegableCapabilitiesIsAnAmbientSubset(t *testing.T) {
 			{Kind: agentprofile.SelectorTag, Value: "process"},
 		},
 		Require: []agentprofile.Selector{{Kind: agentprofile.SelectorTool, Value: "shell"}},
-	}, ambient)
+	}, "", ambient)
 	require.NoError(t, err)
 	assert.Equal(t, []subagent.EffectiveCapability{
 		{WireName: "read", Source: "local/coding", Risk: "read"},
@@ -55,9 +56,9 @@ func TestCompileDelegableCapabilitiesIsAnAmbientSubset(t *testing.T) {
 	}, capabilities)
 
 	_, err = compileDelegableCapabilities(agentprofile.ToolSelection{
-		Allow:   []agentprofile.Selector{{Kind: agentprofile.SelectorTool, Value: "run_subagent"}},
-		Require: []agentprofile.Selector{{Kind: agentprofile.SelectorTool, Value: "run_subagent"}},
-	}, ambient)
+		Allow:   []agentprofile.Selector{{Kind: agentprofile.SelectorTool, Value: "spawn_subagent"}},
+		Require: []agentprofile.Selector{{Kind: agentprofile.SelectorTool, Value: "spawn_subagent"}},
+	}, "", ambient)
 	require.ErrorIs(t, err, subagent.ErrInvalid)
 	assert.Contains(t, err.Error(), "required capability")
 }
@@ -74,7 +75,7 @@ func TestCompileDelegableCapabilitiesProperties(t *testing.T) {
 		{Name: "admin", Source: catalog.Source{Kind: catalog.SourceMCP, ID: "github"}, Risk: catalog.RiskPrivileged, Tags: []string{"remote"}},
 		{Name: "ask_user", Source: catalog.Source{Kind: catalog.SourceLocal, ID: "coding.question"}, Risk: catalog.RiskRead, Tags: []string{"input"}},
 		{Name: harness.SkillToolName, Source: catalog.Source{Kind: catalog.SourceLocal, ID: "coding.skills"}, Risk: catalog.RiskRead, Tags: []string{"skills"}},
-		{Name: "run_subagent", Source: catalog.Source{Kind: catalog.SourceLocal, ID: "coding.subagent"}, Risk: catalog.RiskRead, Tags: []string{"delegation"}},
+		{Name: "spawn_subagent", Source: catalog.Source{Kind: catalog.SourceLocal, ID: "coding.subagent"}, Risk: catalog.RiskRead, Tags: []string{"delegation"}},
 		{Name: "write_plan", Source: catalog.Source{Kind: catalog.SourceLocal, ID: "coding.plan"}, Risk: catalog.RiskWrite, Tags: []string{"planning"}},
 	}
 	selectors := []agentprofile.Selector{
@@ -93,7 +94,7 @@ func TestCompileDelegableCapabilitiesProperties(t *testing.T) {
 			}
 		}
 
-		capabilities, err := compileDelegableCapabilities(agentprofile.ToolSelection{Allow: allow}, ambient)
+		capabilities, err := compileDelegableCapabilities(agentprofile.ToolSelection{Allow: allow}, "", ambient)
 		require.NoError(t, err)
 
 		compiled[mask] = capabilities
@@ -142,12 +143,12 @@ func TestCompileDelegableCapabilitiesRejectsNonDelegableInjection(t *testing.T) 
 		Name: "read", Source: catalog.Source{Kind: catalog.SourceLocal, ID: "coding"},
 		Risk: catalog.RiskRead, Tags: []string{"selected"},
 	}}
-	baseline, err := compileDelegableCapabilities(selection, ambient)
+	baseline, err := compileDelegableCapabilities(selection, "", ambient)
 	require.NoError(t, err)
 
 	injected := append(slices.Clone(ambient),
 		catalog.Descriptor{
-			Name: "run_subagent", Source: catalog.Source{Kind: catalog.SourceLocal, ID: "coding.subagent"},
+			Name: "spawn_subagent", Source: catalog.Source{Kind: catalog.SourceLocal, ID: "coding.subagent"},
 			Risk: catalog.RiskRead, Tags: []string{"selected"},
 		},
 		catalog.Descriptor{
@@ -164,7 +165,7 @@ func TestCompileDelegableCapabilitiesRejectsNonDelegableInjection(t *testing.T) 
 		},
 	)
 
-	capabilities, err := compileDelegableCapabilities(selection, injected)
+	capabilities, err := compileDelegableCapabilities(selection, "", injected)
 	require.NoError(t, err)
 	assert.Equal(t, baseline, capabilities)
 }
@@ -179,9 +180,9 @@ func TestCompileDelegableCapabilitiesRequireFailsClosed(t *testing.T) {
 	}{
 		{
 			name:     "delegation tool",
-			selector: agentprofile.Selector{Kind: agentprofile.SelectorTool, Value: "run_subagent"},
+			selector: agentprofile.Selector{Kind: agentprofile.SelectorTool, Value: "spawn_subagent"},
 			descriptor: catalog.Descriptor{
-				Name: "run_subagent", Source: catalog.Source{Kind: catalog.SourceLocal, ID: "coding.subagent"},
+				Name: "spawn_subagent", Source: catalog.Source{Kind: catalog.SourceLocal, ID: "coding.subagent"},
 				Risk: catalog.RiskRead,
 			},
 		},
@@ -218,7 +219,7 @@ func TestCompileDelegableCapabilitiesRequireFailsClosed(t *testing.T) {
 			selection := agentprofile.ToolSelection{
 				Allow: []agentprofile.Selector{test.selector}, Require: []agentprofile.Selector{test.selector},
 			}
-			_, err := compileDelegableCapabilities(selection, []catalog.Descriptor{test.descriptor})
+			_, err := compileDelegableCapabilities(selection, "", []catalog.Descriptor{test.descriptor})
 			require.ErrorIs(t, err, subagent.ErrInvalid)
 			assert.Contains(t, err.Error(), fmt.Sprintf("required capability %q", test.selector.String()))
 		})
@@ -285,68 +286,6 @@ func TestCompileProfileLimitsOnlyNarrowsCeiling(t *testing.T) {
 	}
 }
 
-func TestCompileDelegationTargetsRequiresExactModelVisibleNonAncestorCustomIDs(t *testing.T) {
-	t.Parallel()
-
-	custom := func(id string) agentprofile.Definition {
-		return agentprofile.Definition{ID: id, Kind: agentprofile.KindCustom}
-	}
-	dispatcher := &customSubagentDispatcher{
-		modelDefinitions: map[string]agentprofile.Definition{
-			"allowed-agent": custom("allowed-agent"),
-		},
-		maxDelegationDepth: 2,
-		delegationDepth:    1,
-		ancestry:           []string{"root-agent"},
-	}
-	targets, err := dispatcher.compileDelegationTargets(agentprofile.Definition{
-		ID: "middle-agent", Kind: agentprofile.KindCustom,
-		Delegation: agentprofile.DelegationSelection{Allow: []string{"allowed-agent"}},
-	}, subagent.DeliveryForeground)
-	require.NoError(t, err)
-	assert.Equal(t, []string{"allowed-agent"}, targets)
-
-	for name, definition := range map[string]agentprofile.Definition{
-		"self": {
-			ID: "middle-agent", Kind: agentprofile.KindCustom,
-			Delegation: agentprofile.DelegationSelection{Allow: []string{"middle-agent"}},
-		},
-		"ancestor": {
-			ID: "middle-agent", Kind: agentprofile.KindCustom,
-			Delegation: agentprofile.DelegationSelection{Allow: []string{"root-agent"}},
-		},
-		"missing or user only": {
-			ID: "middle-agent", Kind: agentprofile.KindCustom,
-			Delegation: agentprofile.DelegationSelection{Allow: []string{"user-only-agent"}},
-		},
-		"builtin": {
-			ID: "middle-agent", Kind: agentprofile.KindCustom,
-			Delegation: agentprofile.DelegationSelection{Allow: []string{"explore"}},
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-
-			_, err := dispatcher.compileDelegationTargets(definition, subagent.DeliveryForeground)
-			require.ErrorIs(t, err, subagent.ErrInvalid)
-		})
-	}
-
-	_, err = dispatcher.compileDelegationTargets(agentprofile.Definition{
-		ID: "middle-agent", Kind: agentprofile.KindCustom,
-		Delegation: agentprofile.DelegationSelection{Allow: []string{"allowed-agent"}},
-	}, subagent.DeliveryBackground)
-	require.ErrorIs(t, err, subagent.ErrInvalid)
-
-	exhausted := *dispatcher
-	exhausted.delegationDepth = exhausted.maxDelegationDepth
-	_, err = exhausted.compileDelegationTargets(agentprofile.Definition{
-		ID: "middle-agent", Kind: agentprofile.KindCustom,
-		Delegation: agentprofile.DelegationSelection{Allow: []string{"allowed-agent"}},
-	}, subagent.DeliveryForeground)
-	require.ErrorIs(t, err, subagent.ErrInvalid)
-}
-
 func TestCompilePrivateIntegrationsRequiresExactGenerationBindings(t *testing.T) {
 	t.Parallel()
 
@@ -380,12 +319,12 @@ func TestCompilePrivateIntegrationsRequiresExactGenerationBindings(t *testing.T)
 	require.Len(t, entries, 1)
 	assert.Equal(t, "private_search", entries[0].Tool.Decl().Name)
 	descriptors := descriptorsForEntries(entries)
-	capabilities, err := compileDelegableCapabilities(agentprofile.ToolSelection{}, descriptors)
+	capabilities, err := compileDelegableCapabilities(agentprofile.ToolSelection{}, "", descriptors)
 	require.NoError(t, err)
 	assert.Empty(t, capabilities, "binding a private server does not select any tool by itself")
 	capabilities, err = compileDelegableCapabilities(agentprofile.ToolSelection{Allow: []agentprofile.Selector{{
 		Kind: agentprofile.SelectorSource, Value: "mcp/private_docs",
-	}}}, descriptors)
+	}}}, "", descriptors)
 	require.NoError(t, err)
 	assert.Equal(t, []subagent.EffectiveCapability{{
 		WireName: "private_search", Source: "mcp/private_docs", Risk: "privileged",
@@ -410,4 +349,68 @@ func TestCompilePrivateIntegrationsRequiresExactGenerationBindings(t *testing.T)
 	require.ErrorIs(t, err, subagent.ErrInvalid)
 	_, _, err = dispatcher.compilePrivateMCP(agentprofile.MCPSelection{Private: []string{"ambient_or_missing"}})
 	require.ErrorIs(t, err, subagent.ErrInvalid)
+}
+
+func TestCompileDelegableCapabilitiesByMode(t *testing.T) {
+	t.Parallel()
+
+	ambient := []catalog.Descriptor{
+		{Name: "read", Source: catalog.Source{Kind: catalog.SourceLocal, ID: "coding"}, Risk: catalog.RiskRead},
+		{Name: "ls", Source: catalog.Source{Kind: catalog.SourceLocal, ID: "coding"}, Risk: catalog.RiskRead},
+		{Name: "glob", Source: catalog.Source{Kind: catalog.SourceLocal, ID: "coding"}, Risk: catalog.RiskRead},
+		{Name: "grep", Source: catalog.Source{Kind: catalog.SourceLocal, ID: "coding"}, Risk: catalog.RiskRead},
+		{Name: "apply_patch", Source: catalog.Source{Kind: catalog.SourceLocal, ID: "coding"}, Risk: catalog.RiskWrite},
+		{Name: "shell", Source: catalog.Source{Kind: catalog.SourceLocal, ID: "coding"}, Risk: catalog.RiskPrivileged},
+		{Name: "ask_user", Source: catalog.Source{Kind: catalog.SourceLocal, ID: "coding.question"}, Risk: catalog.RiskRead},
+		{Name: harness.SkillToolName, Source: catalog.Source{Kind: catalog.SourceLocal, ID: "coding.skills"}, Risk: catalog.RiskRead},
+		{Name: tools.HistoryName, Source: catalog.Source{Kind: catalog.SourceLocal, ID: "coding.history"}, Risk: catalog.RiskRead},
+		{Name: "mcp_search", Source: catalog.Source{Kind: catalog.SourceMCP, ID: "github"}, Risk: catalog.RiskWrite},
+		{Name: "spawn_subagent", Source: catalog.Source{Kind: catalog.SourceLocal, ID: "coding.subagent"}, Risk: catalog.RiskRead},
+	}
+
+	readOnly := []string{"read", "ls", "glob", "grep", "ask_user", harness.SkillToolName, tools.HistoryName, "mcp_search"}
+
+	tests := []struct {
+		name string
+		mode agentprofile.CapabilityMode
+		want []string
+	}{
+		{"read-only", agentprofile.CapabilityReadOnly, readOnly},
+		{
+			"read-write", agentprofile.CapabilityReadWrite,
+			[]string{"read", "ls", "glob", "grep", "apply_patch", "ask_user", harness.SkillToolName, tools.HistoryName, "mcp_search"},
+		},
+		{
+			"execute", agentprofile.CapabilityExecute,
+			[]string{"read", "ls", "glob", "grep", "shell", "ask_user", harness.SkillToolName, tools.HistoryName, "mcp_search"},
+		},
+		{
+			"all", agentprofile.CapabilityAll,
+			[]string{
+				"read", "ls", "glob", "grep", "apply_patch", "shell",
+				"ask_user", harness.SkillToolName, tools.HistoryName, "mcp_search",
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			capabilities, err := compileDelegableCapabilities(agentprofile.ToolSelection{}, test.mode, ambient)
+			require.NoError(t, err)
+			names := make([]string, len(capabilities))
+			for index, capability := range capabilities {
+				names[index] = capability.WireName
+			}
+
+			assert.Equal(t, test.want, names)
+		})
+	}
+
+	// An explicit allowlist is already constrained, so a mode does not apply.
+	explicit, err := compileDelegableCapabilities(agentprofile.ToolSelection{
+		Allow: []agentprofile.Selector{{Kind: agentprofile.SelectorTool, Value: "shell"}},
+	}, agentprofile.CapabilityReadOnly, ambient)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"shell"}, []string{explicit[0].WireName})
 }

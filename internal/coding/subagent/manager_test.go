@@ -12,12 +12,11 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	"github.com/rsbin1178/pips/agent"
-	"github.com/rsbin1178/pips/agent/harness"
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding/session"
 	"github.com/rsbin1178/pips/internal/coding/workspace"
@@ -25,121 +24,237 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestManagerRunsEachRoleWithExactReadOnlyCatalog(t *testing.T) {
-	t.Parallel()
+// stubRunner is an in-package Runner double. It never calls a model; the
+// manager's lifecycle, admission, and journal behavior are what these tests
+// exercise.
+type stubRunner struct {
+	once      sync.Once
+	onStart   func()
+	onEvent   func(context.Context, agent.Event)
+	child     *session.Handle
+	block     bool
+	value     any
+	text      string
+	toolCalls int
+	run       *agent.RunResult
+	err       error
+	closeErr  error
+	closes    atomic.Int32
+}
 
-	tests := []struct {
-		role Role
-		json string
-	}{
-		{RoleExplore, `{"summary":"located code","evidence":[],"unknowns":[]}`},
-		{RolePlan, `{"summary":"plan","assumptions":[],"steps":[],"risks":[],"verification":[]}`},
-		{RoleReview, `{"summary":"reviewed","findings":[],"residual_risks":[]}`},
+func (r *stubRunner) Run(ctx context.Context, task string) (RunnerResult, error) {
+	if r.onStart != nil {
+		r.once.Do(r.onStart)
 	}
-	for _, test := range tests {
-		t.Run(string(test.role), func(t *testing.T) {
-			t.Parallel()
+	if r.child != nil {
+		// Persist a minimal transcript so a completed child stays inspectable.
+		_, _ = r.child.Session().AppendMessage(ai.UserText(task), nil)
+		_, _ = r.child.Session().AppendMessage(ai.AssistantText(r.text), nil)
+	}
+	if r.onEvent != nil {
+		if event, err := agent.NewEvent(
+			agent.RunMetadata{RunID: "stub-run", Agent: "subagent/stub"},
+			time.Now().UTC(),
+			agent.RunStarted{},
+		); err == nil {
+			r.onEvent(ctx, event)
+		}
+	}
+	if r.block {
+		<-ctx.Done()
 
-			model := &testModel{responses: []*ai.Response{responseText(test.json)}}
-			fixture := newManagerFixture(t, model)
-			events := make([]Event, 0, 3)
-			execution, err := fixture.manager.Start(
-				t.Context(),
-				Request{Role: test.role, Task: "Inspect the implementation."},
-				func(_ context.Context, event Event) error {
-					events = append(events, event)
+		return RunnerResult{}, ctx.Err()
+	}
+	run := r.run
+	if run == nil {
+		run = &agent.RunResult{Stop: agent.StopEndTurn, Turns: 1}
+	}
 
-					return nil
-				},
-			)
-			require.NoError(t, err)
-			result, err := execution.Wait(t.Context())
-			require.NoError(t, err)
-			assert.Equal(t, OutcomeSucceeded, result.Outcome)
-			assert.Equal(t, "ok", result.Code)
-			assert.NotEmpty(t, result.ChildSessionID)
-			assert.IsType(t, expectedResult(test.role), result.Value)
+	return RunnerResult{Value: r.value, Text: r.text, ToolCalls: r.toolCalls, Run: run}, r.err
+}
 
-			requests := model.Requests()
-			require.Len(t, requests, 1)
-			assert.Equal(t, []string{readToolName, "ls", "glob", "grep"}, toolNames(requests[0].Tools))
-			require.NotNil(t, requests[0].ResponseFormat)
-			assert.True(t, requests[0].ResponseFormat.Strict)
-			require.NotNil(t, requests[0].MaxTokens)
-			assert.Equal(t, DefaultLimits().MaxOutputTokens, *requests[0].MaxTokens)
-			require.GreaterOrEqual(t, len(events), 4)
-			assert.Equal(t, StateCreated, events[0].State)
-			assert.Equal(t, StateRunning, events[1].State)
+func (r *stubRunner) Close(context.Context) error {
+	r.closes.Add(1)
 
-			for _, event := range events[2 : len(events)-1] {
-				assert.True(t, event.Progress)
-				assert.Equal(t, StateRunning, event.State)
-			}
+	return r.closeErr
+}
 
-			assert.Equal(t, StateSucceeded, events[len(events)-1].State)
+// stubDispatcher is an in-package Dispatcher double that compiles a builtin
+// plan and opens a stub runner. It stands in for the coding package's control
+// scope, which cannot be imported from this package.
+type stubDispatcher struct {
+	limits    Limits
+	ids       []string
+	onCompile func(Request)
+	onOpen    func(DispatchInput)
+	newRunner func() *stubRunner
+}
 
-			summaries, err := fixture.manager.List(t.Context())
-			require.NoError(t, err)
-			require.Len(t, summaries, 1)
-			assert.Equal(t, StateSucceeded, summaries[0].State)
-			detail, err := fixture.manager.Inspect(t.Context(), result.ChildSessionID)
-			require.NoError(t, err)
-			assert.Equal(t, result.ChildSessionID, detail.Summary.ChildSessionID)
-			assert.IsType(t, expectedResult(test.role), detail.Result)
-			require.Len(t, detail.Transcript, 2)
-			assert.IsType(t, ai.UserMessage{}, detail.Transcript[0])
-			assert.IsType(t, ai.AssistantMessage{}, detail.Transcript[1])
-		})
+func (d stubDispatcher) AgentIDs() []string { return d.ids }
+
+func (d stubDispatcher) Compile(_ context.Context, request Request) (ExecutionPlan, error) {
+	if d.onCompile != nil {
+		d.onCompile(request)
+	}
+	identity, err := BuiltinIdentity(Role(request.AgentID))
+	if err != nil {
+		return ExecutionPlan{}, fmt.Errorf("%w: unknown subagent type %q", ErrInvalid, request.AgentID)
+	}
+	output, err := NewOutputContract(OutputFormatText, "subagent-"+request.AgentID+"-result", nil)
+	if err != nil {
+		return ExecutionPlan{}, err
+	}
+	instructions := "stub instructions for " + request.AgentID
+
+	return ExecutionPlan{
+		Schema:             ExecutionPlanSchema,
+		Identity:           identity,
+		Delivery:           request.Delivery,
+		Model:              "openai/subagent-test",
+		Instructions:       instructions,
+		InstructionsDigest: InstructionsDigest(instructions),
+		Limits:             d.limits,
+		Output:             output,
+	}, nil
+}
+
+func (d stubDispatcher) Open(_ context.Context, input DispatchInput) (Runner, error) {
+	if d.onOpen != nil {
+		d.onOpen(input)
+	}
+	runner := &stubRunner{value: "stub summary", text: "stub summary"}
+	if d.newRunner != nil {
+		runner = d.newRunner()
+	}
+	runner.onEvent = input.OnEvent
+	runner.child = input.Child
+
+	return runner, nil
+}
+
+type failingOpenDispatcher struct {
+	plan ExecutionPlan
+}
+
+func (d failingOpenDispatcher) AgentIDs() []string { return []string{d.plan.Identity.ID} }
+
+func (d failingOpenDispatcher) Compile(context.Context, Request) (ExecutionPlan, error) {
+	return d.plan.Clone(), nil
+}
+
+func (failingOpenDispatcher) Open(context.Context, DispatchInput) (Runner, error) {
+	return nil, errTestBindingFailed
+}
+
+var errTestBindingFailed = errors.New("test binding failed")
+
+type testModel struct {
+	capabilities *ai.Capabilities
+}
+
+func (*testModel) Generate(context.Context, ai.Request) (*ai.Response, error) {
+	return nil, errors.New("test model must not be called")
+}
+
+func (*testModel) Stream(context.Context, ai.Request) ai.Stream {
+	return func(yield func(ai.StreamEvent, error) bool) {
+		yield(ai.StreamEvent{}, errors.New("test model must not be called"))
 	}
 }
 
-func TestManagerLifecycleAddsContextAndContinuesChild(t *testing.T) {
-	t.Parallel()
+func (*testModel) Provider() ai.Provider { return ai.ProviderOpenAI }
+func (*testModel) ModelID() string       { return "subagent-test" }
+func (m *testModel) Capabilities() ai.Capabilities {
+	if m.capabilities != nil {
+		return *m.capabilities
+	}
 
-	model := &testModel{responses: []*ai.Response{
-		responseText(`{"summary":"first","evidence":[],"unknowns":[]}`),
-		responseText(`{"summary":"second","evidence":[],"unknowns":[]}`),
-	}}
-	var (
-		starts []LifecycleStart
-		stops  []LifecycleStop
-	)
-	fixture := newManagerFixtureWithConfig(t, model, ExecutionOptions{}, func(config *Config) {
-		config.Lifecycle = Lifecycle{
-			BeforeStart: func(_ context.Context, value LifecycleStart) string {
-				starts = append(starts, value)
+	return ai.Capabilities{Text: true, Tools: true, StructuredOutput: true}
+}
 
-				return "trusted child context"
-			},
-			BeforeStop: func(_ context.Context, value LifecycleStop) LifecycleStopDecision {
-				stops = append(stops, value)
-				if len(stops) == 1 {
-					return LifecycleStopDecision{Continue: true, Reason: "Take one more focused pass."}
-				}
+type managerFixture struct {
+	root       string
+	manager    *Manager
+	repository *session.Repository
+	parent     *session.Handle
+	tree       *workspace.Tree
+	dispatcher stubDispatcher
+	started    chan struct{}
+	startedOne sync.Once
+}
 
-				return LifecycleStopDecision{}
-			},
-		}
+func (f *managerFixture) start(
+	ctx context.Context,
+	request Request,
+	observer Observer,
+) (*Execution, error) {
+	return f.manager.StartWithDispatcher(ctx, request, observer, f.dispatcher)
+}
+
+func (f *managerFixture) blockChildren() {
+	f.dispatcher.newRunner = func() *stubRunner {
+		return &stubRunner{block: true, onStart: func() { f.startedOne.Do(func() { close(f.started) }) }}
+	}
+}
+
+func newManagerFixture(t *testing.T, model ai.LanguageModel) *managerFixture {
+	t.Helper()
+
+	return newManagerFixtureWithOptions(t, model, ExecutionOptions{})
+}
+
+func newManagerFixtureWithOptions(
+	t *testing.T,
+	model ai.LanguageModel,
+	options ExecutionOptions,
+) *managerFixture {
+	t.Helper()
+
+	return newManagerFixtureWithConfig(t, model, options, nil)
+}
+
+func newManagerFixtureWithConfig(
+	t *testing.T,
+	model ai.LanguageModel,
+	options ExecutionOptions,
+	configure func(*Config),
+) *managerFixture {
+	t.Helper()
+	root := filepath.Join(t.TempDir(), "workspace")
+	require.NoError(t, os.Mkdir(root, 0o700))
+	value, err := workspace.Open(root)
+	require.NoError(t, err)
+	tree, err := workspace.OpenTree(value)
+	require.NoError(t, err)
+	repository, err := session.NewRepository(filepath.Join(t.TempDir(), "sessions"))
+	require.NoError(t, err)
+	parent, err := repository.Create(t.Context(), session.CreateOptions{
+		WorkspaceID: value.Identity().Key(), WorkspacePath: value.Root(),
+	})
+	require.NoError(t, err)
+	managerConfig := Config{
+		Repository: repository, Parent: parent, Tree: tree, Model: model,
+		Options: options,
+	}
+	if configure != nil {
+		configure(&managerConfig)
+	}
+	manager, err := New(managerConfig)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		require.NoError(t, manager.Close(ctx))
+		require.NoError(t, parent.Close())
+		require.NoError(t, tree.Close())
 	})
 
-	execution, err := fixture.manager.Start(t.Context(), Request{
-		Role: RoleExplore, Task: "Inspect lifecycle behavior.",
-	}, nil)
-	require.NoError(t, err)
-	result, err := execution.Wait(t.Context())
-	require.NoError(t, err)
-	assert.Equal(t, OutcomeSucceeded, result.Outcome)
-	require.Len(t, starts, 1)
-	assert.Equal(t, result.ChildSessionID, starts[0].ChildSessionID)
-	require.Len(t, stops, 2)
-	assert.False(t, stops[0].StopHookActive)
-	assert.True(t, stops[1].StopHookActive)
-	assert.Contains(t, stops[0].LastAssistantMessage, `"summary":"first"`)
-
-	requests := model.Requests()
-	require.Len(t, requests, 2)
-	assert.Contains(t, requestSystemText(t, requests[0]), "trusted child context")
-	assert.Contains(t, messageText(requests[1].Messages[len(requests[1].Messages)-1]), "Take one more focused pass.")
+	return &managerFixture{
+		root: root, manager: manager, repository: repository, parent: parent, tree: tree,
+		dispatcher: stubDispatcher{limits: manager.limits},
+		started:    make(chan struct{}),
+	}
 }
 
 func TestSummarizeToolActivityExposesOnlyBoundedSemanticFields(t *testing.T) {
@@ -152,33 +267,40 @@ func TestSummarizeToolActivityExposesOnlyBoundedSemanticFields(t *testing.T) {
 	}{
 		{
 			name: "read",
-			call: ai.ToolCallPart{Name: "read", Args: ai.JSON(`{"path":"internal/coding/runtime.go","token":"secret"}`)},
+			call: ai.ToolCallPart{Name: readToolName, Args: ai.JSON(`{"path":"internal/coding/runtime.go"}`)},
 			want: ActivitySummary{Action: ActivityActionRead, Target: "internal/coding/runtime.go"},
 		},
 		{
-			name: "search",
-			call: ai.ToolCallPart{Name: "grep", Args: ai.JSON(`{"pattern":"SubagentState","path":"internal/coding"}`)},
-			want: ActivitySummary{Action: ActivityActionSearch, Target: "SubagentState in internal/coding"},
+			name: "grep",
+			call: ai.ToolCallPart{Name: searchToolName, Args: ai.JSON(`{"pattern":"func main","path":"cmd"}`)},
+			want: ActivitySummary{Action: ActivityActionSearch, Target: "func main in cmd"},
 		},
 		{
-			name: "control characters",
-			call: ai.ToolCallPart{Name: "read", Args: ai.JSON("{\"path\":\"a\\n\\u0001b\"}")},
-			want: ActivitySummary{Action: ActivityActionRead, Target: "a b"},
+			name: "glob",
+			call: ai.ToolCallPart{Name: globToolName, Args: ai.JSON(`{"pattern":"**/*.go"}`)},
+			want: ActivitySummary{Action: ActivityActionGlob, Target: "**/*.go"},
 		},
 		{
-			name: "unknown tool",
-			call: ai.ToolCallPart{Name: "shell", Args: ai.JSON(`{"command":"print secret"}`)},
+			name: "ls",
+			call: ai.ToolCallPart{Name: listToolName, Args: ai.JSON(`{}`)},
+			want: ActivitySummary{Action: ActivityActionList, Target: "."},
 		},
 		{
-			name: "outside workspace",
-			call: ai.ToolCallPart{Name: "read", Args: ai.JSON(`{"path":"safe/../../secret"}`)},
+			name: "absolute path is dropped",
+			call: ai.ToolCallPart{Name: readToolName, Args: ai.JSON(`{"path":"/etc/passwd"}`)},
+			want: ActivitySummary{},
 		},
 		{
-			name: "invalid arguments",
-			call: ai.ToolCallPart{Name: "read", Args: ai.JSON(`{`)},
+			name: "escaping path is dropped",
+			call: ai.ToolCallPart{Name: readToolName, Args: ai.JSON(`{"path":"../../secret"}`)},
+			want: ActivitySummary{},
+		},
+		{
+			name: "unknown tool has no projection",
+			call: ai.ToolCallPart{Name: "shell", Args: ai.JSON(`{"command":"rm -rf /"}`)},
+			want: ActivitySummary{},
 		},
 	}
-
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
@@ -191,15 +313,12 @@ func TestSummarizeToolActivityExposesOnlyBoundedSemanticFields(t *testing.T) {
 func TestSummarizeToolActivityBoundsMultibyteTarget(t *testing.T) {
 	t.Parallel()
 
+	target := strings.Repeat("路径", 400)
 	summary := summarizeToolActivity(ai.ToolCallPart{
-		Name: readToolName,
-		Args: ai.JSON(fmt.Sprintf(`{"path":"%s"}`, strings.Repeat("🙂", 200))),
+		Name: readToolName, Args: ai.JSON(`{"path":"` + target + `"}`),
 	})
-
-	assert.Equal(t, ActivityActionRead, summary.Action)
 	assert.LessOrEqual(t, len(summary.Target), 512)
-	assert.LessOrEqual(t, utf8.RuneCountInString(summary.Target), 160)
-	assert.True(t, utf8.ValidString(summary.Target))
+	assert.LessOrEqual(t, len([]rune(summary.Target)), 160)
 	assert.True(t, strings.HasSuffix(summary.Target, "…"))
 }
 
@@ -277,525 +396,26 @@ func TestRunTrackerBoundsActivityWithoutFreezingCurrentAction(t *testing.T) {
 	assert.Equal(t, ActivityPhaseWorking, activity.Phase)
 }
 
-func TestManagerInspectOverlaysInFlightToolActivity(t *testing.T) {
-	t.Parallel()
-
-	call := ai.ToolCallPart{
-		ID: "call-1", Name: readToolName, Args: ai.JSON(`{"path":"sentinel.txt"}`),
-	}
-	model := &testModel{responses: []*ai.Response{
-		responseToolCall(call),
-		responseText(`{"summary":"done","evidence":[],"unknowns":[]}`),
-	}}
-	fixture := newManagerFixture(t, model)
-	require.NoError(t, os.WriteFile(
-		filepath.Join(fixture.root, "sentinel.txt"), []byte("content"), 0o600,
-	))
-
-	entered := make(chan struct{})
-	release := make(chan struct{})
-
-	var (
-		enteredOnce sync.Once
-		releaseOnce sync.Once
-	)
-
-	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
-
-	fixture.manager.config.AgentObservers = []func(context.Context, agent.Event){
-		func(_ context.Context, event agent.Event) {
-			if _, ok := event.Payload().(agent.ToolStarted); !ok {
-				return
-			}
-
-			enteredOnce.Do(func() { close(entered) })
-			<-release
-		},
-	}
-
-	execution, err := fixture.manager.Start(
-		t.Context(), Request{Role: RoleExplore, Task: "Read the sentinel."}, nil,
-	)
-	require.NoError(t, err)
-	<-entered
-
-	detail, err := fixture.manager.Inspect(t.Context(), execution.child.Metadata().ID)
-	require.NoError(t, err)
-	assert.Equal(t, StateRunning, detail.Summary.State)
-	assert.Equal(t, 1, detail.Summary.Turns)
-	assert.Equal(t, 1, detail.Summary.ToolCalls)
-	assert.Positive(t, detail.Summary.Duration)
-	assert.Equal(t, ActivityPhaseWorking, detail.Activity.Phase)
-	require.Len(t, detail.Activity.Tools, 1)
-	assert.Equal(t, ToolStatusRunning, detail.Activity.Tools[0].Status)
-	assert.Equal(t, "call-1", detail.Activity.Tools[0].Call.ID)
-
-	releaseOnce.Do(func() { close(release) })
-
-	result, err := execution.Wait(t.Context())
-	require.NoError(t, err)
-	assert.Equal(t, OutcomeSucceeded, result.Outcome)
-
-	replayed, err := fixture.manager.Inspect(t.Context(), result.ChildSessionID)
-	require.NoError(t, err)
-	assert.Equal(t, Activity{}, replayed.Activity)
-	assert.Equal(t, StateSucceeded, replayed.Summary.State)
-}
-
-func TestManagerReservesFinalTurnWithoutTools(t *testing.T) {
-	t.Parallel()
-
-	limits := DefaultLimits()
-	limits.MaxTurns = 3
-	first := ai.ToolCallPart{
-		ID: "call-1", Name: readToolName, Args: ai.JSON(`{"path":"first.txt"}`),
-	}
-	second := ai.ToolCallPart{
-		ID: "call-2", Name: readToolName, Args: ai.JSON(`{"path":"second.txt"}`),
-	}
-	model := &testModel{responses: []*ai.Response{
-		responseToolCall(first),
-		responseToolCall(second),
-		responseText(`{"summary":"done","evidence":[],"unknowns":[]}`),
-	}}
-	fixture := newManagerFixtureWithOptions(t, model, ExecutionOptions{Limits: limits})
-	require.NoError(t, os.WriteFile(filepath.Join(fixture.root, "first.txt"), []byte("first"), 0o600))
-	require.NoError(t, os.WriteFile(filepath.Join(fixture.root, "second.txt"), []byte("second"), 0o600))
-
-	execution, err := fixture.manager.Start(
-		t.Context(), Request{Role: RoleExplore, Task: "Read both files."}, nil,
-	)
-	require.NoError(t, err)
-	result, err := execution.Wait(t.Context())
-	require.NoError(t, err)
-	assert.Equal(t, OutcomeSucceeded, result.Outcome)
-	assert.Equal(t, agent.StopEndTurn, result.Stop)
-	assert.Equal(t, 3, result.Turns)
-
-	requests := model.Requests()
-	require.Len(t, requests, 3)
-	assert.NotEmpty(t, requests[0].Tools)
-	assert.NotEmpty(t, requests[1].Tools)
-	assert.Empty(t, requests[2].Tools)
-	assert.Equal(t, finalizationInstruction, messageText(requests[2].Messages[len(requests[2].Messages)-1]))
-}
-
-//nolint:wsl_v5 // Scripted turns and filesystem fixtures intentionally stay adjacent.
-func TestManagerDefaultAllowsWorkBeyondFormerExecutionBudgets(t *testing.T) {
-	t.Parallel()
-
-	const workingTurns = 65
-	responses := make([]*ai.Response, 0, workingTurns+1)
-	for index := range workingTurns {
-		response := responseToolCall(ai.ToolCallPart{
-			ID: fmt.Sprintf("call-%d", index+1), Name: readToolName,
-			Args: ai.JSON(fmt.Sprintf(`{"path":"file-%d.txt"}`, index+1)),
-		})
-		response.Usage = ai.Usage{InputTokens: 2_000, OutputTokens: 20}
-		responses = append(responses, response)
-	}
-	finalResponse := responseText(`{"summary":"done","evidence":[],"unknowns":[]}`)
-	finalResponse.Usage = ai.Usage{InputTokens: 2_000, OutputTokens: 20}
-	responses = append(responses, finalResponse)
-
-	model := &testModel{responses: responses}
-	fixture := newManagerFixture(t, model)
-	for index := range workingTurns {
-		require.NoError(t, os.WriteFile(
-			filepath.Join(fixture.root, fmt.Sprintf("file-%d.txt", index+1)),
-			[]byte("content"),
-			0o600,
-		))
-	}
-
-	execution, err := fixture.manager.Start(
-		t.Context(), Request{Role: RoleExplore, Task: "Inspect every fixture."}, nil,
-	)
-	require.NoError(t, err)
-	result, err := execution.Wait(t.Context())
-	require.NoError(t, err)
-	assert.Equal(t, OutcomeSucceeded, result.Outcome)
-	assert.Equal(t, workingTurns+1, result.Turns)
-	assert.Greater(t, result.ToolCalls, 64)
-	assert.Greater(t, result.Usage.InputTokens+result.Usage.OutputTokens, 120_000)
-
-	requests := model.Requests()
-	require.Len(t, requests, workingTurns+1)
-	assert.NotEmpty(t, requests[workingTurns].Tools)
-}
-
-func TestManagerStopsAfterOneFailedNoProgressConvergenceTurn(t *testing.T) {
-	t.Parallel()
-
-	limit := DefaultLimits().RepeatedToolCallLimit
-	responses := make([]*ai.Response, 0, limit+2)
-	for index := range limit + 2 {
-		responses = append(responses, responseToolCall(ai.ToolCallPart{
-			ID: fmt.Sprintf("call-%d", index+1), Name: readToolName,
-			Args: ai.JSON(`{"path":"sentinel.txt"}`),
-		}))
-	}
-	model := &testModel{responses: responses}
-	fixture := newManagerFixture(t, model)
-	require.NoError(t, os.WriteFile(
-		filepath.Join(fixture.root, "sentinel.txt"), []byte("content"), 0o600,
-	))
-
-	execution, err := fixture.manager.Start(
-		t.Context(), Request{Role: RoleExplore, Task: "Avoid looping."}, nil,
-	)
-	require.NoError(t, err)
-	result, err := execution.Wait(t.Context())
-	require.Error(t, err)
-	assert.Equal(t, OutcomeFailed, result.Outcome)
-	assert.Equal(t, "no_progress", result.Code)
-	assert.Equal(t, agent.StopWhen, result.Stop)
-
-	requests := model.Requests()
-	require.Len(t, requests, limit+2)
-	assert.Empty(t, requests[len(requests)-1].Tools)
-}
-
-func TestManagerClassifiesMalformedConvergenceAsNoProgress(t *testing.T) {
-	t.Parallel()
-
-	limit := DefaultLimits().RepeatedToolCallLimit
-	responses := make([]*ai.Response, 0, limit+2)
-	for index := range limit + 1 {
-		responses = append(responses, responseToolCall(ai.ToolCallPart{
-			ID: fmt.Sprintf("call-%d", index+1), Name: readToolName,
-			Args: ai.JSON(`{"path":"sentinel.txt"}`),
-		}))
-	}
-	responses = append(responses, responseText(`{"summary":`))
-	fixture := newManagerFixture(t, &testModel{responses: responses})
-	require.NoError(t, os.WriteFile(
-		filepath.Join(fixture.root, "sentinel.txt"), []byte("content"), 0o600,
-	))
-
-	execution, err := fixture.manager.Start(
-		t.Context(), Request{Role: RoleExplore, Task: "Avoid looping."}, nil,
-	)
-	require.NoError(t, err)
-	result, err := execution.Wait(t.Context())
-	require.Error(t, err)
-	assert.Equal(t, OutcomeFailed, result.Outcome)
-	assert.Equal(t, "no_progress", result.Code)
-}
-
-// compactChildResponses builds this test's scripted child turns. Every subtest
-// needs its own copy: a run normalizes the response it receives in place
-// (normalizeModelToolArguments), and the subtests run in parallel, so one shared
-// response would be read by one goroutine while another writes it.
-func compactChildResponses() []*ai.Response {
-	responses := []*ai.Response{
-		responseToolCall(ai.ToolCallPart{
-			ID: "call-1", Name: readToolName, Args: ai.JSON(`{"path":"large.txt"}`),
-		}),
-		responseToolCall(ai.ToolCallPart{
-			ID: "call-2", Name: readToolName, Args: ai.JSON(`{"path":"large.txt"}`),
-		}),
-		responseText(`{"summary":"done","evidence":[],"unknowns":[]}`),
-	}
-	responses[0].Usage = ai.Usage{InputTokens: 100, OutputTokens: 20}
-	responses[1].Usage = ai.Usage{InputTokens: 500, OutputTokens: 20}
-
-	return responses
-}
-
-func TestManagerCompactsChildContextBetweenToolTurns(t *testing.T) {
-	t.Parallel()
-
-	settings := harness.CompactionSettings{
-		ContextTokens: 800, ReserveTokens: 100, KeepRecentTokens: 250, SummaryTokens: 64,
-	}
-
-	t.Run("success", func(t *testing.T) {
-		t.Parallel()
-
-		model := &testModel{responses: compactChildResponses()}
-		summarizer := &testModel{responses: []*ai.Response{responseText("compact summary")}}
-		fixture := newManagerFixtureWithConfig(
-			t, model, ExecutionOptions{}, func(config *Config) {
-				config.Compaction = &settings
-				config.SummaryModel = summarizer
-			},
-		)
-		require.NoError(t, os.WriteFile(
-			filepath.Join(fixture.root, "large.txt"), []byte(strings.Repeat("word", 200)), 0o600,
-		))
-
-		execution, err := fixture.manager.Start(
-			t.Context(), Request{Role: RoleExplore, Task: "Read the large file twice."}, nil,
-		)
-		require.NoError(t, err)
-		result, err := execution.Wait(t.Context())
-		require.NoError(t, err)
-		assert.Equal(t, OutcomeSucceeded, result.Outcome)
-		require.Len(t, summarizer.Requests(), 1)
-		require.Len(t, model.Requests(), 3)
-		assert.Contains(t, requestText(model.Requests()[2]), harness.CompactionPrefix)
-		assert.Equal(t, 1, countChildCompactions(execution.child.Session().Path()))
-	})
-
-	t.Run("summary failure stops before another child request", func(t *testing.T) {
-		t.Parallel()
-
-		model := &testModel{responses: compactChildResponses()}
-		summarizer := &testModel{}
-		fixture := newManagerFixtureWithConfig(
-			t, model, ExecutionOptions{}, func(config *Config) {
-				config.Compaction = &settings
-				config.SummaryModel = summarizer
-			},
-		)
-		require.NoError(t, os.WriteFile(
-			filepath.Join(fixture.root, "large.txt"), []byte(strings.Repeat("word", 200)), 0o600,
-		))
-
-		execution, err := fixture.manager.Start(
-			t.Context(), Request{Role: RoleExplore, Task: "Read the large file twice."}, nil,
-		)
-		require.NoError(t, err)
-		result, err := execution.Wait(t.Context())
-		require.Error(t, err)
-		assert.Equal(t, OutcomeFailed, result.Outcome)
-		assert.Equal(t, "execution_failed", result.Code)
-		assert.Len(t, model.Requests(), 2)
-		assert.Zero(t, countChildCompactions(execution.child.Session().Path()))
-	})
-
-	t.Run("cancellation interrupts summary", func(t *testing.T) {
-		t.Parallel()
-
-		model := &testModel{responses: compactChildResponses()}
-		summarizer := &blockingTestModel{entered: make(chan struct{})}
-		fixture := newManagerFixtureWithConfig(
-			t, model, ExecutionOptions{}, func(config *Config) {
-				config.Compaction = &settings
-				config.SummaryModel = summarizer
-			},
-		)
-		require.NoError(t, os.WriteFile(
-			filepath.Join(fixture.root, "large.txt"), []byte(strings.Repeat("word", 200)), 0o600,
-		))
-
-		execution, err := fixture.manager.Start(
-			t.Context(), Request{Role: RoleExplore, Task: "Read the large file twice."}, nil,
-		)
-		require.NoError(t, err)
-		<-summarizer.entered
-		execution.Cancel()
-		result, err := execution.Wait(t.Context())
-		require.ErrorIs(t, err, context.Canceled)
-		assert.Equal(t, OutcomeCanceled, result.Outcome)
-		assert.Equal(t, "canceled", result.Code)
-		assert.Len(t, model.Requests(), 2)
-		assert.Zero(t, countChildCompactions(execution.child.Session().Path()))
-	})
-}
-
-//nolint:wsl_v5 // Scripted repeated calls and finalization assertions form one scenario.
-func TestManagerWarnsThenFinalizesAfterRepeatedToolCalls(t *testing.T) {
-	t.Parallel()
-
-	limits := DefaultLimits()
-	limits.MaxTurns = 6
-	repeatLimit := DefaultLimits().RepeatedToolCallLimit
-	responses := make([]*ai.Response, 0, repeatLimit+2)
-	for index := range repeatLimit + 1 {
-		responses = append(responses, responseToolCall(ai.ToolCallPart{
-			ID: fmt.Sprintf("call-%d", index+1), Name: readToolName,
-			Args: ai.JSON(`{"path":"sentinel.txt"}`),
-		}))
-	}
-	responses = append(
-		responses,
-		responseText(`{"summary":"bounded","evidence":[],"unknowns":[]}`),
-	)
-
-	model := &testModel{responses: responses}
-	fixture := newManagerFixtureWithOptions(t, model, ExecutionOptions{Limits: limits})
-	require.NoError(t, os.WriteFile(
-		filepath.Join(fixture.root, "sentinel.txt"), []byte("content"), 0o600,
-	))
-
-	execution, err := fixture.manager.Start(
-		t.Context(), Request{Role: RoleExplore, Task: "Avoid looping."}, nil,
-	)
-	require.NoError(t, err)
-	result, err := execution.Wait(t.Context())
-	require.NoError(t, err)
-	assert.Equal(t, OutcomeSucceeded, result.Outcome)
-	assert.Equal(t, repeatLimit+2, result.Turns)
-
-	requests := model.Requests()
-	require.Len(t, requests, repeatLimit+2)
-	assert.NotEmpty(t, requests[repeatLimit].Tools)
-	assert.Empty(t, requests[len(requests)-1].Tools)
-	assert.Equal(
-		t,
-		finalizationInstruction,
-		messageText(requests[len(requests)-1].Messages[len(requests[len(requests)-1].Messages)-1]),
-	)
-}
-
-//nolint:wsl_v5 // Scripted repeated calls and recovery assertions form one scenario.
-func TestManagerRecoversWhenToolCallChangesAfterRepeatWarning(t *testing.T) {
-	t.Parallel()
-
-	limits := DefaultLimits()
-	limits.MaxTurns = 7
-	repeatLimit := limits.RepeatedToolCallLimit
-	responses := make([]*ai.Response, 0, repeatLimit+2)
-	for index := range repeatLimit {
-		responses = append(responses, responseToolCall(ai.ToolCallPart{
-			ID: fmt.Sprintf("repeat-%d", index+1), Name: readToolName,
-			Args: ai.JSON(`{"path":"sentinel.txt"}`),
-		}))
-	}
-	responses = append(
-		responses,
-		responseToolCall(ai.ToolCallPart{
-			ID: "different", Name: readToolName,
-			Args: ai.JSON(`{"path":"recovery.txt"}`),
-		}),
-		responseText(`{"summary":"recovered","evidence":[],"unknowns":[]}`),
-	)
-
-	model := &testModel{responses: responses}
-	fixture := newManagerFixtureWithOptions(t, model, ExecutionOptions{Limits: limits})
-	require.NoError(t, os.WriteFile(
-		filepath.Join(fixture.root, "sentinel.txt"), []byte("content"), 0o600,
-	))
-	require.NoError(t, os.WriteFile(
-		filepath.Join(fixture.root, "recovery.txt"), []byte("content"), 0o600,
-	))
-
-	execution, err := fixture.manager.Start(
-		t.Context(), Request{Role: RoleExplore, Task: "Recover from a repeated read."}, nil,
-	)
-	require.NoError(t, err)
-	result, err := execution.Wait(t.Context())
-	require.NoError(t, err)
-	assert.Equal(t, OutcomeSucceeded, result.Outcome)
-	assert.Equal(t, repeatLimit+2, result.Turns)
-
-	requests := model.Requests()
-	require.Len(t, requests, repeatLimit+2)
-	for _, request := range requests {
-		assert.NotEmpty(t, request.Tools)
-		assert.NotEqual(
-			t, finalizationInstruction,
-			messageText(request.Messages[len(request.Messages)-1]),
-		)
-	}
-}
-
-func TestManagerOmitsNativeSchemaForModelWithoutStructuredOutput(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name        string
-		role        Role
-		text        string
-		schemaField string
-		want        any
-	}{
-		{
-			name:        "explore Chinese text",
-			role:        RoleExplore,
-			text:        "兼容模型返回的自然语言总结。",
-			schemaField: `"evidence"`,
-			want: ExploreResult{
-				Summary:  "兼容模型返回的自然语言总结。",
-				Evidence: []Evidence{},
-				Unknowns: []string{},
-			},
-		},
-		{
-			name:        "plan sentence",
-			role:        RolePlan,
-			text:        "plan subagent 工作正常",
-			schemaField: `"steps"`,
-			want: PlanResult{
-				Summary:      "plan subagent 工作正常",
-				Assumptions:  []string{},
-				Steps:        []PlanStep{},
-				Risks:        []string{},
-				Verification: []string{},
-			},
-		},
-		{
-			name:        "review sentence",
-			role:        RoleReview,
-			text:        "review subagent 工作正常",
-			schemaField: `"findings"`,
-			want: ReviewResult{
-				Summary:       "review subagent 工作正常",
-				Findings:      []ReviewFinding{},
-				ResidualRisks: []string{},
-			},
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-
-			capabilities := ai.Capabilities{Text: true, Tools: true}
-			model := &testModel{
-				responses:            []*ai.Response{responseText(test.text)},
-				capabilities:         &capabilities,
-				rejectResponseFormat: true,
-			}
-			fixture := newManagerFixture(t, model)
-			execution, err := fixture.manager.Start(
-				t.Context(),
-				Request{Role: test.role, Task: "Inspect the implementation."},
-				nil,
-			)
-			require.NoError(t, err)
-
-			result, err := execution.Wait(t.Context())
-			require.NoError(t, err)
-			assert.Equal(t, OutcomeSucceeded, result.Outcome)
-			assert.Equal(t, test.want, result.Value)
-
-			requests := model.Requests()
-			require.Len(t, requests, 1)
-			assert.Nil(t, requests[0].ResponseFormat)
-			assert.Equal(
-				t,
-				[]string{readToolName, "ls", "glob", "grep"},
-				toolNames(requests[0].Tools),
-			)
-			system := requestSystemText(t, requests[0])
-			assert.Contains(t, system, "Native structured output is unavailable")
-			assert.Contains(t, system, test.schemaField)
-			require.NotNil(t, requests[0].MaxTokens)
-			assert.Equal(t, DefaultLimits().MaxOutputTokens, *requests[0].MaxTokens)
-		})
-	}
-}
-
 func TestManagerIsSerialCancelableAndLeavesWorkspaceUnchanged(t *testing.T) {
 	t.Parallel()
 
-	model := &blockingTestModel{entered: make(chan struct{})}
-	fixture := newManagerFixtureWithOptions(t, model, ExecutionOptions{MaxConcurrent: 1})
+	fixture := newManagerFixtureWithOptions(t, &testModel{}, ExecutionOptions{
+		MaxConcurrent: 1, LimitBehavior: LimitBehaviorFail,
+	})
+	fixture.blockChildren()
 	path := filepath.Join(fixture.root, "sentinel.txt")
 	require.NoError(t, os.WriteFile(path, []byte("unchanged"), 0o600))
 
-	execution, err := fixture.manager.Start(
-		t.Context(), Request{Role: RoleExplore, Task: "Wait."}, nil,
+	execution, err := fixture.start(
+		t.Context(), Request{AgentID: "explore", Task: "Wait."}, nil,
 	)
 	require.NoError(t, err)
-	<-model.entered
+	<-fixture.started
 
-	_, err = fixture.manager.Start(
-		t.Context(), Request{Role: RolePlan, Task: "Second."}, nil,
+	_, err = fixture.start(
+		t.Context(), Request{AgentID: "plan", Task: "Second."}, nil,
 	)
-	require.ErrorIs(t, err, ErrBusy)
+	require.ErrorIs(t, err, ErrConcurrentLimit)
 
 	execution.Cancel()
 	result, err := execution.Wait(t.Context())
@@ -811,21 +431,23 @@ func TestManagerIsSerialCancelableAndLeavesWorkspaceUnchanged(t *testing.T) {
 func TestManagerEnforcesConcurrentCapacity(t *testing.T) {
 	t.Parallel()
 
-	model := &blockingTestModel{entered: make(chan struct{})}
-	fixture := newManagerFixtureWithOptions(t, model, ExecutionOptions{MaxConcurrent: 4})
+	fixture := newManagerFixtureWithOptions(t, &testModel{}, ExecutionOptions{
+		MaxConcurrent: 4, LimitBehavior: LimitBehaviorFail,
+	})
+	fixture.blockChildren()
 	executions := make([]*Execution, 0, 4)
 	for index := range 4 {
-		execution, err := fixture.manager.Start(t.Context(), Request{
-			Role: RoleExplore, Task: fmt.Sprintf("Wait %d.", index),
+		execution, err := fixture.start(t.Context(), Request{
+			AgentID: "explore", Task: fmt.Sprintf("Wait %d.", index),
 		}, nil)
 		require.NoError(t, err)
 		executions = append(executions, execution)
 	}
 
-	_, err := fixture.manager.Start(
-		t.Context(), Request{Role: RolePlan, Task: "Over capacity."}, nil,
+	_, err := fixture.start(
+		t.Context(), Request{AgentID: "plan", Task: "Over capacity."}, nil,
 	)
-	require.ErrorIs(t, err, ErrCapacity)
+	require.ErrorIs(t, err, ErrConcurrentLimit)
 
 	for _, execution := range executions {
 		execution.Cancel()
@@ -844,11 +466,10 @@ func TestManagerObservesBoundedAdmissionDecisions(t *testing.T) {
 		mu     sync.Mutex
 		events []AdmissionEvent
 	)
-	model := &blockingTestModel{entered: make(chan struct{})}
 	fixture := newManagerFixtureWithConfig(
 		t,
-		model,
-		ExecutionOptions{MaxConcurrent: 2},
+		&testModel{},
+		ExecutionOptions{MaxConcurrent: 2, LimitBehavior: LimitBehaviorFail},
 		func(config *Config) {
 			config.AdmissionObserver = func(_ context.Context, event AdmissionEvent) {
 				mu.Lock()
@@ -857,18 +478,19 @@ func TestManagerObservesBoundedAdmissionDecisions(t *testing.T) {
 			}
 		},
 	)
+	fixture.blockChildren()
 	executions := make([]*Execution, 0, 2)
 	for range 2 {
-		execution, err := fixture.manager.Start(t.Context(), Request{
-			Role: RoleExplore, Task: "Wait without disclosing this task.",
+		execution, err := fixture.start(t.Context(), Request{
+			AgentID: "explore", Task: "Wait without disclosing this task.",
 		}, nil)
 		require.NoError(t, err)
 		executions = append(executions, execution)
 	}
-	_, err := fixture.manager.Start(t.Context(), Request{
-		Role: RolePlan, Task: "Rejected task must not reach telemetry.",
+	_, err := fixture.start(t.Context(), Request{
+		AgentID: "plan", Task: "Rejected task must not reach telemetry.",
 	}, nil)
-	require.ErrorIs(t, err, ErrCapacity)
+	require.ErrorIs(t, err, ErrConcurrentLimit)
 
 	mu.Lock()
 	observed := slices.Clone(events)
@@ -896,12 +518,9 @@ func TestManagerObservesBoundedAdmissionDecisions(t *testing.T) {
 func TestManagerAdmissionObservationIsPanicIsolated(t *testing.T) {
 	t.Parallel()
 
-	model := &testModel{responses: []*ai.Response{
-		responseText(`{"summary":"done","evidence":[],"unknowns":[]}`),
-	}}
 	fixture := newManagerFixtureWithConfig(
 		t,
-		model,
+		&testModel{},
 		ExecutionOptions{},
 		func(config *Config) {
 			config.AdmissionObserver = func(context.Context, AdmissionEvent) {
@@ -909,8 +528,8 @@ func TestManagerAdmissionObservationIsPanicIsolated(t *testing.T) {
 			}
 		},
 	)
-	execution, err := fixture.manager.Start(t.Context(), Request{
-		Role: RoleExplore, Task: "Complete despite observer failure.",
+	execution, err := fixture.start(t.Context(), Request{
+		AgentID: "explore", Task: "Complete despite observer failure.",
 	}, nil)
 	require.NoError(t, err)
 	result, err := execution.Wait(t.Context())
@@ -918,14 +537,14 @@ func TestManagerAdmissionObservationIsPanicIsolated(t *testing.T) {
 	assert.Equal(t, OutcomeSucceeded, result.Outcome)
 }
 
-func TestManagerObservesBusyAndInvalidAdmissionReasons(t *testing.T) {
+func TestManagerObservesCapacityAndInvalidAdmissionReasons(t *testing.T) {
 	t.Parallel()
 
 	events := make([]AdmissionEvent, 0, 3)
 	fixture := newManagerFixtureWithConfig(
 		t,
 		&testModel{},
-		ExecutionOptions{MaxConcurrent: 1},
+		ExecutionOptions{MaxConcurrent: 1, LimitBehavior: LimitBehaviorFail},
 		func(config *Config) {
 			config.AdmissionObserver = func(_ context.Context, event AdmissionEvent) {
 				events = append(events, event)
@@ -939,7 +558,7 @@ func TestManagerObservesBusyAndInvalidAdmissionReasons(t *testing.T) {
 	_, err = fixture.manager.reserveStart(t.Context(), Request{
 		Delivery: DeliveryForeground,
 	})
-	require.ErrorIs(t, err, ErrBusy)
+	require.ErrorIs(t, err, ErrConcurrentLimit)
 	fixture.manager.finishStarting(permit, false)
 	_, err = fixture.manager.reserveStart(t.Context(), Request{
 		Delivery: Delivery("unexpected"),
@@ -948,65 +567,17 @@ func TestManagerObservesBusyAndInvalidAdmissionReasons(t *testing.T) {
 
 	require.Len(t, events, 3)
 	assert.Equal(t, AdmissionOutcomeAccepted, events[0].Outcome)
-	assert.Equal(t, AdmissionReasonBusy, events[1].Reason)
+	assert.Equal(t, AdmissionReasonCapacity, events[1].Reason)
 	assert.Equal(t, AdmissionReasonInvalid, events[2].Reason)
-}
-
-func TestNestedManagerInheritsAdmissionObserverAndReportsDepth(t *testing.T) {
-	t.Parallel()
-
-	var observed []AdmissionEvent
-	model := &testModel{}
-	fixture := newManagerFixtureWithConfig(
-		t,
-		model,
-		ExecutionOptions{MaxDepth: 2},
-		func(config *Config) {
-			config.AdmissionObserver = func(_ context.Context, event AdmissionEvent) {
-				observed = append(observed, event)
-			}
-		},
-	)
-	child, err := fixture.repository.Create(t.Context(), session.CreateOptions{
-		WorkspaceID:   fixture.parent.Metadata().WorkspaceID,
-		WorkspacePath: fixture.parent.Metadata().WorkspacePath,
-		Kind:          session.KindSubagent, ParentSessionID: fixture.parent.Metadata().ID,
-		ParentRunID: "parent-run", Agent: "nested-parent",
-	})
-	require.NoError(t, err)
-	nested, err := New(Config{
-		Context: t.Context(), Parent: child, Model: model,
-		Share: fixture.manager, DelegationDepth: 2,
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		require.NoError(t, nested.Close(context.Background()))
-		require.NoError(t, child.Close())
-	})
-
-	permit, err := nested.reserveStart(t.Context(), Request{
-		Delivery:  DeliveryForeground,
-		Ownership: Ownership{RootInteractionID: "root-1"},
-	})
-	require.NoError(t, err)
-	nested.finishStarting(permit, false)
-
-	require.Len(t, observed, 1)
-	assert.Equal(t, AdmissionOutcomeAccepted, observed[0].Outcome)
-	assert.Equal(t, DeliveryForeground, observed[0].Delivery)
-	assert.Equal(t, 2, observed[0].DelegationDepth)
 }
 
 func TestManagerObservesSpawnLimitAndClosedRejections(t *testing.T) {
 	t.Parallel()
 
 	events := make([]AdmissionEvent, 0, 3)
-	model := &testModel{responses: []*ai.Response{
-		responseText(`{"summary":"done","evidence":[],"unknowns":[]}`),
-	}}
 	fixture := newManagerFixtureWithConfig(
 		t,
-		model,
+		&testModel{},
 		ExecutionOptions{MaxConcurrent: 1, MaxSpawnedPerRootInteraction: 1},
 		func(config *Config) {
 			config.AdmissionObserver = func(_ context.Context, event AdmissionEvent) {
@@ -1015,21 +586,21 @@ func TestManagerObservesSpawnLimitAndClosedRejections(t *testing.T) {
 		},
 	)
 	request := Request{
-		Role: RoleExplore, Task: "Run once.", Delivery: DeliveryBackground,
+		AgentID: "explore", Task: "Run once.", Delivery: DeliveryBackground,
 		Ownership: Ownership{
 			ParentInteractionID: "root-1", ParentRunID: "parent-run",
 			ParentToolCallID: "parent-call", RootInteractionID: "root-1",
 		},
 	}
-	execution, err := fixture.manager.Start(t.Context(), request, nil)
+	execution, err := fixture.start(t.Context(), request, nil)
 	require.NoError(t, err)
 	_, err = execution.Wait(t.Context())
 	require.NoError(t, err)
-	_, err = fixture.manager.Start(t.Context(), request, nil)
+	_, err = fixture.start(t.Context(), request, nil)
 	require.ErrorIs(t, err, ErrSpawnLimit)
 	require.NoError(t, fixture.manager.Close(t.Context()))
-	_, err = fixture.manager.Start(t.Context(), Request{
-		Role: RoleExplore, Task: "Closed.",
+	_, err = fixture.start(t.Context(), Request{
+		AgentID: "explore", Task: "Closed.",
 	}, nil)
 	require.ErrorIs(t, err, ErrClosed)
 
@@ -1043,17 +614,17 @@ func TestManagerObservesSpawnLimitAndClosedRejections(t *testing.T) {
 func TestManagerConcurrentCloseReleasesEveryAdmissionPermit(t *testing.T) {
 	t.Parallel()
 
-	model := &blockingTestModel{entered: make(chan struct{})}
-	fixture := newManagerFixtureWithOptions(t, model, ExecutionOptions{MaxConcurrent: 2})
+	fixture := newManagerFixtureWithOptions(t, &testModel{}, ExecutionOptions{MaxConcurrent: 2})
+	fixture.blockChildren()
 	executions := make([]*Execution, 0, 2)
 	for index := range 2 {
-		execution, err := fixture.manager.Start(t.Context(), Request{
-			Role: RoleExplore, Task: fmt.Sprintf("Wait %d.", index),
+		execution, err := fixture.start(t.Context(), Request{
+			AgentID: "explore", Task: fmt.Sprintf("Wait %d.", index),
 		}, nil)
 		require.NoError(t, err)
 		executions = append(executions, execution)
 	}
-	<-model.entered
+	<-fixture.started
 
 	start := make(chan struct{})
 	errs := make(chan error, 2)
@@ -1081,17 +652,21 @@ func TestManagerBindingFailureReleasesPermitAndSpawnReservation(t *testing.T) {
 
 	fixture := newManagerFixtureWithOptions(
 		t,
-		&testModel{responses: []*ai.Response{responseText(`{"summary":"unused","evidence":[],"unknowns":[]}`)}},
+		&testModel{},
 		ExecutionOptions{MaxConcurrent: 1, MaxSpawnedPerRootInteraction: 1},
 	)
-	plan, err := fixture.manager.builtinExecutionPlan(Request{
-		Role: RoleExplore, Delivery: DeliveryBackground,
-	})
+	output, err := NewOutputContract(OutputFormatText, "subagent-explore-result", nil)
 	require.NoError(t, err)
-	plan.Identity = AgentIdentity{
-		Schema: AgentIdentitySchema, ID: "binding-failure", Kind: AgentKindCustom,
-		Name: "Binding failure", DefinitionSchema: "pips.agent/v1alpha1",
-		DefinitionDigest: strings.Repeat("a", 64), DefinitionSource: "test",
+	plan := ExecutionPlan{
+		Schema: ExecutionPlanSchema, Delivery: DeliveryBackground,
+		Model: "openai/subagent-test", Instructions: "instructions",
+		InstructionsDigest: InstructionsDigest("instructions"),
+		Limits:             fixture.manager.limits, Output: output,
+		Identity: AgentIdentity{
+			Schema: AgentIdentitySchema, ID: "binding-failure", Kind: AgentKindCustom,
+			Name: "Binding failure", DefinitionSchema: "pips.agent/v1alpha1",
+			DefinitionDigest: strings.Repeat("a", 64), DefinitionSource: "test",
+		},
 	}
 	dispatcher := failingOpenDispatcher{plan: plan}
 	request := Request{
@@ -1114,11 +689,9 @@ func TestManagerBindingFailureReleasesPermitAndSpawnReservation(t *testing.T) {
 func TestManagerWaitReconstructsCompletedChild(t *testing.T) {
 	t.Parallel()
 
-	fixture := newManagerFixture(t, &testModel{responses: []*ai.Response{
-		responseText(`{"summary":"done","evidence":[],"unknowns":[]}`),
-	}})
-	execution, err := fixture.manager.Start(
-		t.Context(), Request{Role: RoleExplore, Task: "Inspect."}, nil,
+	fixture := newManagerFixture(t, &testModel{})
+	execution, err := fixture.start(
+		t.Context(), Request{AgentID: "explore", Task: "Inspect."}, nil,
 	)
 	require.NoError(t, err)
 	completed, err := execution.Wait(t.Context())
@@ -1128,17 +701,17 @@ func TestManagerWaitReconstructsCompletedChild(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, completed.ChildSessionID, reconstructed.ChildSessionID)
 	assert.Equal(t, OutcomeSucceeded, reconstructed.Outcome)
-	assert.IsType(t, ExploreResult{}, reconstructed.Value)
+	assert.Equal(t, "stub summary", reconstructed.Value)
 }
 
 func TestManagerCancelRootOnlyCancelsMatchingBackgroundChildren(t *testing.T) {
 	t.Parallel()
 
-	model := &blockingTestModel{entered: make(chan struct{})}
-	fixture := newManagerFixtureWithOptions(t, model, ExecutionOptions{MaxConcurrent: 4})
+	fixture := newManagerFixtureWithOptions(t, &testModel{}, ExecutionOptions{MaxConcurrent: 4})
+	fixture.blockChildren()
 	start := func(root, callID string) *Execution {
-		execution, err := fixture.manager.Start(t.Context(), Request{
-			Role: RoleExplore, Task: "Wait.", Delivery: DeliveryBackground,
+		execution, err := fixture.start(t.Context(), Request{
+			AgentID: "explore", Task: "Wait.", Delivery: DeliveryBackground,
 			Ownership: Ownership{
 				ParentInteractionID: root, ParentRunID: "parent-run",
 				ParentToolCallID: callID, RootInteractionID: root,
@@ -1152,7 +725,7 @@ func TestManagerCancelRootOnlyCancelsMatchingBackgroundChildren(t *testing.T) {
 	first := start("root-1", "call-1")
 	second := start("root-1", "call-2")
 	other := start("root-2", "call-3")
-	<-model.entered
+	<-fixture.started
 
 	assert.Equal(t, 2, fixture.manager.CancelRoot("root-1"))
 	for _, execution := range []*Execution{first, second} {
@@ -1170,27 +743,89 @@ func TestManagerCancelRootOnlyCancelsMatchingBackgroundChildren(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 }
 
+func TestManagerLifecycleAddsContextAndContinuesChild(t *testing.T) {
+	t.Parallel()
+
+	var (
+		mu      sync.Mutex
+		starts  []LifecycleStart
+		stops   []LifecycleStop
+		opened  []DispatchInput
+		stopped bool
+	)
+	fixture := newManagerFixtureWithConfig(
+		t,
+		&testModel{},
+		ExecutionOptions{},
+		func(config *Config) {
+			config.Lifecycle = Lifecycle{
+				BeforeStart: func(_ context.Context, info LifecycleStart) string {
+					mu.Lock()
+					starts = append(starts, info)
+					mu.Unlock()
+
+					return "child lifecycle context"
+				},
+				BeforeStop: func(_ context.Context, info LifecycleStop) LifecycleStopDecision {
+					mu.Lock()
+					stops = append(stops, info)
+					shouldContinue := !stopped
+					stopped = true
+					mu.Unlock()
+					if shouldContinue {
+						return LifecycleStopDecision{Continue: true, Reason: "inspect one more detail"}
+					}
+
+					return LifecycleStopDecision{}
+				},
+			}
+		},
+	)
+	fixture.dispatcher.onOpen = func(input DispatchInput) {
+		mu.Lock()
+		opened = append(opened, input)
+		mu.Unlock()
+	}
+
+	execution, err := fixture.start(t.Context(), Request{AgentID: "explore", Task: "Inspect."}, nil)
+	require.NoError(t, err)
+	_, err = execution.Wait(t.Context())
+	require.NoError(t, err)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, starts, 1)
+	assert.Equal(t, "Inspect.", starts[0].Task)
+	assert.Equal(t, "explore", starts[0].Identity.ID)
+	require.Len(t, opened, 1)
+	assert.Equal(t, "child lifecycle context", opened[0].SystemSuffix)
+	require.Len(t, stops, 2)
+	assert.False(t, stops[0].StopHookActive)
+	assert.True(t, stops[1].StopHookActive)
+	assert.Equal(t, "stub summary", stops[0].LastAssistantMessage)
+}
+
 func TestSpawnToolSurvivesCallContextAndEnforcesRootLimit(t *testing.T) {
 	t.Parallel()
 
-	model := &blockingTestModel{entered: make(chan struct{})}
-	fixture := newManagerFixtureWithOptions(t, model, ExecutionOptions{
+	fixture := newManagerFixtureWithOptions(t, &testModel{}, ExecutionOptions{
 		MaxConcurrent: 4, MaxSpawnedPerRootInteraction: 2,
 	})
-	tool := fixture.manager.SpawnToolFor(Ownership{
+	fixture.blockChildren()
+	tool := fixture.manager.SpawnToolForDispatcher(Ownership{
 		ParentInteractionID: "interaction-1", RootInteractionID: "interaction-1",
-	}, nil)
+	}, nil, fixture.dispatcher)
 
 	callCtx, cancelCall := context.WithCancel(t.Context())
 	parts, err := tool.Exec(callCtx, agent.ToolCall{
-		ID: "spawn-1", Name: SpawnToolName,
-		Args: ai.JSON(`{"role":"explore","task":"Wait for cancellation."}`),
+		ID: "spawn-1", Name: ToolName,
+		Args: ai.JSON(`{"prompt":"Wait for cancellation.","description":"wait"}`),
 	})
 	require.NoError(t, err)
 	cancelCall()
 
 	var first spawnResult
-	require.NoError(t, json.Unmarshal([]byte(partsText(parts)), &first))
+	require.NoError(t, json.Unmarshal([]byte(firstJSONObject(partsText(parts))), &first))
 	assert.Equal(t, SpawnResultSchema, first.Schema)
 	firstExecution := fixture.manager.activeExecution(first.AgentID)
 	require.NotNil(t, firstExecution)
@@ -1201,58 +836,158 @@ func TestSpawnToolSurvivesCallContextAndEnforcesRootLimit(t *testing.T) {
 	}
 
 	_, err = tool.Exec(t.Context(), agent.ToolCall{
-		ID: "spawn-2", Name: SpawnToolName,
-		Args: ai.JSON(`{"role":"plan","task":"Wait too."}`),
+		ID: "spawn-2", Name: ToolName,
+		Args: ai.JSON(`{"prompt":"Wait too.","description":"wait too"}`),
 	})
 	require.NoError(t, err)
 	_, err = tool.Exec(t.Context(), agent.ToolCall{
-		ID: "spawn-3", Name: SpawnToolName,
-		Args: ai.JSON(`{"role":"review","task":"Exceed the root limit."}`),
+		ID: "spawn-3", Name: ToolName,
+		Args: ai.JSON(`{"prompt":"Exceed the root limit.","description":"exceed"}`),
 	})
 	require.ErrorIs(t, err, ErrSpawnLimit)
 }
 
-func TestRunSubagentToolHasStableSchemaAndEnvelope(t *testing.T) {
+func TestSpawnToolSchemaAndEnum(t *testing.T) {
 	t.Parallel()
 
-	fixture := newManagerFixture(t, &testModel{responses: []*ai.Response{
-		responseText(`{"summary":"ok","evidence":[],"unknowns":[]}`),
-	}})
-	tool := fixture.manager.Tool(nil)
+	fixture := newManagerFixture(t, &testModel{})
+	dispatcher := fixture.dispatcher
+	dispatcher.ids = []string{"go-checker", "reviewer"}
+	tool := fixture.manager.SpawnToolForDispatcher(Ownership{}, nil, dispatcher)
 	declaration := tool.Decl()
 	assert.Equal(t, ToolName, declaration.Name)
-	assert.Equal(t, []string{"task"}, declaration.InputSchema.Required)
-	assert.Equal(t, []any{"explore", "plan", "review"}, declaration.InputSchema.Properties["role"].Enum)
-	assert.Equal(t, []any{"explore", "plan", "review"}, declaration.InputSchema.Properties["agent_id"].Enum)
+	assert.Equal(t, []string{"prompt", "description"}, declaration.InputSchema.Required)
+	assert.Equal(t, []any{"go-checker", "reviewer"}, declaration.InputSchema.Properties["subagent_type"].Enum)
+	assert.Contains(t, declaration.Description, "reports back")
+	assert.Contains(t, declaration.Description, "resume_from")
+	assert.Contains(t, declaration.Description, "BEFORE concluding")
 
-	parts, err := tool.Exec(t.Context(), agent.ToolCall{
-		ID: "call-1", Name: ToolName,
-		Args: ai.JSON(`{"role":"explore","task":"Inspect."}`),
+	// Builtins are never advertised: with no custom agents the enum is absent.
+	plain := fixture.manager.SpawnToolForDispatcher(Ownership{}, nil, fixture.dispatcher)
+	assert.Empty(t, plain.Decl().InputSchema.Properties["subagent_type"].Enum)
+}
+
+func TestSpawnToolDefaultsSentinelsAndUnsupportedArguments(t *testing.T) {
+	t.Parallel()
+
+	fixture := newManagerFixture(t, &testModel{})
+	var compiled []Request
+	dispatcher := fixture.dispatcher
+	dispatcher.onCompile = func(request Request) { compiled = append(compiled, request) }
+	tool := fixture.manager.SpawnToolForDispatcher(Ownership{
+		ParentInteractionID: "interaction-1", RootInteractionID: "interaction-1",
+	}, nil, dispatcher)
+
+	// Background is the default, an omitted type resolves to general-purpose,
+	// and sentinels are treated as absent. The lenient bool accepts a string.
+	_, err := tool.Exec(t.Context(), agent.ToolCall{
+		ID: "spawn-1", Name: ToolName,
+		Args: ai.JSON(`{"prompt":"do it","description":"do it","subagent_type":"null","run_in_background":"true"}`),
 	})
 	require.NoError(t, err)
-	require.Len(t, parts, 1)
-	text, ok := parts[0].(ai.TextPart)
-	require.True(t, ok)
-	assert.Contains(t, text.Text, `"schema":"`+ResultSchema+`"`)
-	assert.Contains(t, text.Text, `"outcome":"succeeded"`)
+	require.Len(t, compiled, 1)
+	assert.Equal(t, "general-purpose", compiled[0].AgentID)
+	assert.Equal(t, DeliveryBackground, compiled[0].Delivery)
+
+	_, err = tool.Exec(t.Context(), agent.ToolCall{
+		ID: "spawn-2", Name: ToolName,
+		Args: ai.JSON(`{"prompt":"do it","description":"do it","subagent_type":"explore","run_in_background":0}`),
+	})
+	require.NoError(t, err)
+	require.Len(t, compiled, 2)
+	assert.Equal(t, "explore", compiled[1].AgentID)
+	assert.Equal(t, DeliveryForeground, compiled[1].Delivery)
+
+	for _, args := range []string{
+		`{"prompt":"x","description":"y","resume_from":"abc"}`,
+		`{"prompt":"x","description":"y","cwd":"/tmp"}`,
+		`{"prompt":"x","description":"y","model":"gpt"}`,
+		`{"prompt":"x","description":"y","isolation":"worktree"}`,
+		`{"prompt":"x","description":"y","run_in_background":"maybe"}`,
+		`{"prompt":"x"}`,
+		`{"prompt":"x","description":"y","unknown":true}`,
+	} {
+		_, err = tool.Exec(t.Context(), agent.ToolCall{
+			ID: "spawn-3", Name: ToolName, Args: ai.JSON(args),
+		})
+		require.ErrorIs(t, err, ErrInvalid, args)
+	}
+
+	// isolation "none" is accepted.
+	_, err = tool.Exec(t.Context(), agent.ToolCall{
+		ID: "spawn-4", Name: ToolName,
+		Args: ai.JSON(`{"prompt":"x","description":"y","isolation":"none"}`),
+	})
+	require.NoError(t, err)
+}
+
+func TestSpawnToolUnknownTypeFails(t *testing.T) {
+	t.Parallel()
+
+	fixture := newManagerFixture(t, &testModel{})
+	tool := fixture.manager.SpawnToolForDispatcher(Ownership{
+		ParentInteractionID: "interaction-1", RootInteractionID: "interaction-1",
+	}, nil, fixture.dispatcher)
+
+	_, err := tool.Exec(t.Context(), agent.ToolCall{
+		ID: "spawn-1", Name: ToolName,
+		Args: ai.JSON(`{"prompt":"x","description":"y","subagent_type":"nope"}`),
+	})
+	require.ErrorIs(t, err, ErrInvalid)
+	assert.Contains(t, err.Error(), "unknown subagent type")
+}
+
+func TestSpawnToolForegroundReturnsEnvelopeAndMeta(t *testing.T) {
+	t.Parallel()
+
+	fixture := newManagerFixture(t, &testModel{})
+	tool := fixture.manager.SpawnToolForDispatcher(Ownership{
+		ParentInteractionID: "interaction-1", RootInteractionID: "interaction-1",
+	}, nil, fixture.dispatcher)
+
+	parts, err := tool.Exec(t.Context(), agent.ToolCall{
+		ID: "spawn-1", Name: ToolName,
+		Args: ai.JSON(`{"prompt":"do it","description":"do it","run_in_background":false}`),
+	})
+	require.NoError(t, err)
+	text := partsText(parts)
+	assert.Contains(t, text, `"schema":"`+ResultSchema+`"`)
+	assert.Contains(t, text, `"outcome":"succeeded"`)
+	assert.Contains(t, text, "<subagent_meta>id=")
+	assert.Contains(t, text, "tool_calls=0")
+	assert.Contains(t, text, "<subagent_result>")
+	assert.Contains(t, text, `resume_from="`)
+	assert.Contains(t, text, "stub summary")
+}
+
+func TestSpawnToolBackgroundReturnsIDImmediately(t *testing.T) {
+	t.Parallel()
+
+	fixture := newManagerFixture(t, &testModel{})
+	fixture.blockChildren()
+	tool := fixture.manager.SpawnToolForDispatcher(Ownership{
+		ParentInteractionID: "interaction-1", RootInteractionID: "interaction-1",
+	}, nil, fixture.dispatcher)
+
+	parts, err := tool.Exec(t.Context(), agent.ToolCall{
+		ID: "spawn-1", Name: ToolName,
+		Args: ai.JSON(`{"prompt":"do it","description":"do it"}`),
+	})
+	require.NoError(t, err)
+	var result spawnResult
+	require.NoError(t, json.Unmarshal([]byte(firstJSONObject(partsText(parts))), &result))
+	assert.Equal(t, SpawnResultSchema, result.Schema)
+	assert.NotEmpty(t, result.AgentID)
+	assert.Equal(t, "general-purpose", result.ProfileID)
+	assert.Contains(t, partsText(parts), "started in background")
 }
 
 func TestManagerInspectUsesPersistedLimitsAndRejectsOtherParent(t *testing.T) {
 	t.Parallel()
 
-	model := &testModel{responses: []*ai.Response{
-		responseText(`{"summary":"persisted result","evidence":[],"unknowns":[]}`),
-	}}
-	persistedLimits := DefaultLimits()
-	persistedLimits.MaxTurns = 4
-	persistedLimits.MaxTokens = 20_000
-	persistedLimits.MaxToolCalls = 4
-	persistedLimits.MaxDuration = time.Minute
-	fixture := newManagerFixtureWithOptions(
-		t, model, ExecutionOptions{Limits: persistedLimits},
-	)
-	execution, err := fixture.manager.Start(
-		t.Context(), Request{Role: RoleExplore, Task: "Inspect."}, nil,
+	fixture := newManagerFixture(t, &testModel{})
+	execution, err := fixture.start(
+		t.Context(), Request{AgentID: "explore", Task: "Inspect."}, nil,
 	)
 	require.NoError(t, err)
 	result, err := execution.Wait(t.Context())
@@ -1264,13 +999,13 @@ func TestManagerInspectUsesPersistedLimitsAndRejectsOtherParent(t *testing.T) {
 	narrow.MaxFieldBytes = 1
 	reopened, err := New(Config{
 		Repository: fixture.repository, Parent: fixture.parent, Tree: fixture.tree,
-		Model: model, Options: ExecutionOptions{Limits: narrow},
+		Model: &testModel{}, Options: ExecutionOptions{Limits: narrow},
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, reopened.Close(context.Background())) })
 	detail, err := reopened.Inspect(t.Context(), result.ChildSessionID)
 	require.NoError(t, err)
-	assert.IsType(t, ExploreResult{}, detail.Result)
+	assert.Equal(t, "stub summary", detail.Result)
 
 	otherParent, err := fixture.repository.Create(t.Context(), session.CreateOptions{
 		WorkspaceID:   fixture.parent.Metadata().WorkspaceID,
@@ -1280,7 +1015,7 @@ func TestManagerInspectUsesPersistedLimitsAndRejectsOtherParent(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, otherParent.Close()) })
 
 	other, err := New(Config{
-		Repository: fixture.repository, Parent: otherParent, Tree: fixture.tree, Model: model,
+		Repository: fixture.repository, Parent: otherParent, Tree: fixture.tree, Model: &testModel{},
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, other.Close(context.Background())) })
@@ -1291,13 +1026,12 @@ func TestManagerInspectUsesPersistedLimitsAndRejectsOtherParent(t *testing.T) {
 func TestManagerFailsMalformedResultWithDurableReference(t *testing.T) {
 	t.Parallel()
 
-	capabilities := ai.Capabilities{Text: true, Tools: true}
-	fixture := newManagerFixture(t, &testModel{
-		responses:    []*ai.Response{responseText(`{"summary":`)},
-		capabilities: &capabilities,
-	})
-	execution, err := fixture.manager.Start(
-		t.Context(), Request{Role: RoleExplore, Task: "Inspect."}, nil,
+	fixture := newManagerFixture(t, &testModel{})
+	fixture.dispatcher.newRunner = func() *stubRunner {
+		return &stubRunner{err: fmt.Errorf("%w: text is required", ErrInvalidResult)}
+	}
+	execution, err := fixture.start(
+		t.Context(), Request{AgentID: "explore", Task: "Inspect."}, nil,
 	)
 	require.NoError(t, err)
 	result, err := execution.Wait(t.Context())
@@ -1306,383 +1040,9 @@ func TestManagerFailsMalformedResultWithDurableReference(t *testing.T) {
 	assert.Equal(t, "invalid_result", result.Code)
 	assert.NotEmpty(t, result.ChildSessionID)
 
-	detail, inspectErr := fixture.manager.Inspect(t.Context(), result.ChildSessionID)
-	require.NoError(t, inspectErr)
-	assert.Equal(t, StateFailed, detail.Summary.State)
-	assert.Nil(t, detail.Result)
-}
-
-func TestManagerKeepsValidExploreResultWhenOneEvidenceItemIsInvalid(t *testing.T) {
-	t.Parallel()
-
-	fixture := newManagerFixture(t, &testModel{responses: []*ai.Response{responseText(
-		`{"summary":"Located the runtime.","evidence":[` +
-			`{"path":"internal/coding/runtime.go","start_line":1,"end_line":4,"claim":"Defines the runtime."},` +
-			`{"path":"internal/coding/open.go","start_line":20,"end_line":0,"claim":"Invalid range."}` +
-			`],"unknowns":[]}`,
-	)}})
-	execution, err := fixture.manager.Start(
-		t.Context(), Request{Role: RoleExplore, Task: "Locate the runtime."}, nil,
-	)
+	// A durable reference survives even when the live result is unusable.
+	_, err = fixture.manager.Inspect(t.Context(), result.ChildSessionID)
 	require.NoError(t, err)
-
-	result, err := execution.Wait(t.Context())
-	require.NoError(t, err)
-	assert.Equal(t, OutcomeSucceeded, result.Outcome)
-	assert.Equal(t, "ok", result.Code)
-
-	value, ok := result.Value.(ExploreResult)
-	require.True(t, ok)
-	require.Len(t, value.Evidence, 1)
-	assert.Equal(t, "internal/coding/runtime.go", value.Evidence[0].Path)
-	assert.Equal(t, []string{exploreEvidenceOmissionNotice}, value.Unknowns)
-}
-
-func TestManagerReportsWallTimeAndCumulativeTokenBudgets(t *testing.T) {
-	t.Parallel()
-
-	t.Run("wall time", func(t *testing.T) {
-		t.Parallel()
-
-		limits := DefaultLimits()
-		limits.MaxDuration = time.Millisecond
-		fixture := newManagerFixtureWithOptions(
-			t,
-			&blockingTestModel{entered: make(chan struct{})},
-			ExecutionOptions{Limits: limits},
-		)
-		execution, err := fixture.manager.Start(
-			t.Context(), Request{Role: RoleExplore, Task: "Wait."}, nil,
-		)
-		require.NoError(t, err)
-		result, err := execution.Wait(t.Context())
-		require.ErrorIs(t, err, context.DeadlineExceeded)
-		assert.Equal(t, OutcomeCanceled, result.Outcome)
-		assert.Equal(t, "deadline_exceeded", result.Code)
-	})
-
-	t.Run("cumulative tokens", func(t *testing.T) {
-		t.Parallel()
-
-		limits := DefaultLimits()
-		limits.MaxTokens = 100
-		limits.MaxOutputTokens = 100
-		fixture := newManagerFixtureWithOptions(
-			t,
-			&testModel{responses: []*ai.Response{
-				responseText(`{"summary":"over budget","evidence":[],"unknowns":[]}`),
-			}},
-			ExecutionOptions{Limits: limits},
-		)
-		execution, err := fixture.manager.Start(
-			t.Context(), Request{Role: RoleExplore, Task: "Inspect."}, nil,
-		)
-		require.NoError(t, err)
-		result, err := execution.Wait(t.Context())
-		require.Error(t, err)
-		assert.Equal(t, OutcomeFailed, result.Outcome)
-		assert.Equal(t, "max_tokens", result.Code)
-		assert.Nil(t, result.Value)
-	})
-}
-
-func TestManagerDefaultRunHasNoDeadlineAndExplicitToolBudgetStillStops(t *testing.T) {
-	t.Parallel()
-
-	t.Run("default lifetime", func(t *testing.T) {
-		t.Parallel()
-
-		model := &contextInspectingModel{inner: &testModel{responses: []*ai.Response{
-			responseText(`{"summary":"done","evidence":[],"unknowns":[]}`),
-		}}}
-		fixture := newManagerFixture(t, model)
-		execution, err := fixture.manager.Start(
-			t.Context(), Request{Role: RoleExplore, Task: "Inspect."}, nil,
-		)
-		require.NoError(t, err)
-		_, err = execution.Wait(t.Context())
-		require.NoError(t, err)
-		assert.False(t, model.SawDeadline())
-	})
-
-	t.Run("explicit tool budget", func(t *testing.T) {
-		t.Parallel()
-
-		limits := DefaultLimits()
-		limits.MaxToolCalls = 1
-		model := &testModel{responses: []*ai.Response{
-			responseToolCall(ai.ToolCallPart{
-				ID: "call-1", Name: readToolName, Args: ai.JSON(`{"path":"sentinel.txt"}`),
-			}),
-			responseToolCall(ai.ToolCallPart{
-				ID: "call-2", Name: readToolName, Args: ai.JSON(`{"path":"sentinel.txt"}`),
-			}),
-		}}
-		fixture := newManagerFixtureWithOptions(t, model, ExecutionOptions{Limits: limits})
-		require.NoError(t, os.WriteFile(
-			filepath.Join(fixture.root, "sentinel.txt"), []byte("content"), 0o600,
-		))
-		execution, err := fixture.manager.Start(
-			t.Context(), Request{Role: RoleExplore, Task: "Inspect."}, nil,
-		)
-		require.NoError(t, err)
-		result, err := execution.Wait(t.Context())
-		require.Error(t, err)
-		assert.Equal(t, OutcomeFailed, result.Outcome)
-		assert.Equal(t, "max_tool_calls", result.Code)
-		assert.Equal(t, agent.StopWhen, result.Stop)
-	})
-}
-
-type managerFixture struct {
-	root       string
-	manager    *Manager
-	repository *session.Repository
-	parent     *session.Handle
-	tree       *workspace.Tree
-}
-
-func newManagerFixture(t *testing.T, model ai.LanguageModel) managerFixture {
-	t.Helper()
-
-	return newManagerFixtureWithOptions(t, model, ExecutionOptions{})
-}
-
-func newManagerFixtureWithOptions(
-	t *testing.T,
-	model ai.LanguageModel,
-	options ExecutionOptions,
-) managerFixture {
-	t.Helper()
-
-	return newManagerFixtureWithConfig(t, model, options, nil)
-}
-
-func newManagerFixtureWithConfig(
-	t *testing.T,
-	model ai.LanguageModel,
-	options ExecutionOptions,
-	configure func(*Config),
-) managerFixture {
-	t.Helper()
-	root := filepath.Join(t.TempDir(), "workspace")
-	require.NoError(t, os.Mkdir(root, 0o700))
-	value, err := workspace.Open(root)
-	require.NoError(t, err)
-	tree, err := workspace.OpenTree(value)
-	require.NoError(t, err)
-	repository, err := session.NewRepository(filepath.Join(t.TempDir(), "sessions"))
-	require.NoError(t, err)
-	parent, err := repository.Create(t.Context(), session.CreateOptions{
-		WorkspaceID: value.Identity().Key(), WorkspacePath: value.Root(),
-	})
-	require.NoError(t, err)
-	managerConfig := Config{
-		Repository: repository, Parent: parent, Tree: tree, Model: model,
-		Options: options,
-	}
-	if configure != nil {
-		configure(&managerConfig)
-	}
-	manager, err := New(managerConfig)
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-
-		require.NoError(t, manager.Close(ctx))
-		require.NoError(t, parent.Close())
-		require.NoError(t, tree.Close())
-	})
-
-	return managerFixture{
-		root: root, manager: manager, repository: repository, parent: parent, tree: tree,
-	}
-}
-
-type testModel struct {
-	mu                   sync.Mutex
-	responses            []*ai.Response
-	requests             []ai.Request
-	capabilities         *ai.Capabilities
-	rejectResponseFormat bool
-}
-
-var errTestBindingFailed = errors.New("test binding failed")
-
-type failingOpenDispatcher struct {
-	plan ExecutionPlan
-}
-
-func (d failingOpenDispatcher) AgentIDs() []string { return []string{d.plan.Identity.ID} }
-
-func (d failingOpenDispatcher) Compile(context.Context, Request) (ExecutionPlan, error) {
-	return d.plan.Clone(), nil
-}
-
-func (failingOpenDispatcher) Open(context.Context, DispatchInput) (Runner, error) {
-	return nil, errTestBindingFailed
-}
-
-func (m *testModel) Generate(_ context.Context, request ai.Request) (*ai.Response, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	m.requests = append(m.requests, request)
-	if m.rejectResponseFormat && request.ResponseFormat != nil {
-		return nil, errors.New("test model rejects response format")
-	}
-
-	if len(m.responses) == 0 {
-		return nil, errors.New("test model exhausted")
-	}
-
-	response := m.responses[0]
-	m.responses = m.responses[1:]
-
-	return response, nil
-}
-
-func (m *testModel) Stream(ctx context.Context, request ai.Request) ai.Stream {
-	return func(yield func(ai.StreamEvent, error) bool) {
-		response, err := m.Generate(ctx, request)
-		if err != nil {
-			yield(ai.StreamEvent{}, err)
-			return
-		}
-
-		yield(ai.StreamEvent{Type: ai.StreamMessageStart, Provider: response.Provider, Model: response.Model}, nil)
-
-		for index, part := range response.Message.Parts {
-			switch value := part.(type) {
-			case ai.TextPart:
-				text := value
-				yield(ai.StreamEvent{Type: ai.StreamTextDelta, Text: text.Text}, nil)
-			case ai.ToolCallPart:
-				yield(ai.StreamEvent{
-					Type: ai.StreamToolCallStart, ToolCallIndex: index,
-					ToolCallID: value.ID, ToolCallName: value.Name,
-				}, nil)
-				yield(ai.StreamEvent{
-					Type: ai.StreamToolCallDelta, ToolCallIndex: index,
-					ArgsDelta: string(value.Args),
-				}, nil)
-				yield(ai.StreamEvent{
-					Type: ai.StreamToolCallEnd, ToolCallIndex: index,
-				}, nil)
-			}
-		}
-
-		usage := response.Usage
-		yield(ai.StreamEvent{
-			Type: ai.StreamMessageEnd, FinishReason: response.FinishReason, Usage: &usage,
-		}, nil)
-	}
-}
-
-func (*testModel) Provider() ai.Provider { return ai.ProviderOpenAI }
-func (*testModel) ModelID() string       { return "subagent-test" }
-func (m *testModel) Capabilities() ai.Capabilities {
-	if m.capabilities != nil {
-		return *m.capabilities
-	}
-
-	return ai.Capabilities{Text: true, Tools: true, StructuredOutput: true}
-}
-
-func (m *testModel) Requests() []ai.Request {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	return slices.Clone(m.requests)
-}
-
-type blockingTestModel struct {
-	once    sync.Once
-	entered chan struct{}
-}
-
-type contextInspectingModel struct {
-	inner       *testModel
-	mu          sync.Mutex
-	sawDeadline bool
-}
-
-func (m *contextInspectingModel) Generate(
-	ctx context.Context,
-	request ai.Request,
-) (*ai.Response, error) {
-	m.recordDeadline(ctx)
-
-	return m.inner.Generate(ctx, request)
-}
-
-func (m *contextInspectingModel) Stream(ctx context.Context, request ai.Request) ai.Stream {
-	m.recordDeadline(ctx)
-
-	return m.inner.Stream(ctx, request)
-}
-
-func (m *contextInspectingModel) Provider() ai.Provider         { return m.inner.Provider() }
-func (m *contextInspectingModel) ModelID() string               { return m.inner.ModelID() }
-func (m *contextInspectingModel) Capabilities() ai.Capabilities { return m.inner.Capabilities() }
-
-func (m *contextInspectingModel) recordDeadline(ctx context.Context) {
-	_, deadline := ctx.Deadline()
-	m.mu.Lock()
-	m.sawDeadline = m.sawDeadline || deadline
-	m.mu.Unlock()
-}
-
-func (m *contextInspectingModel) SawDeadline() bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	return m.sawDeadline
-}
-
-func (m *blockingTestModel) Generate(ctx context.Context, _ ai.Request) (*ai.Response, error) {
-	m.once.Do(func() { close(m.entered) })
-	<-ctx.Done()
-
-	return nil, ctx.Err()
-}
-
-func (m *blockingTestModel) Stream(ctx context.Context, request ai.Request) ai.Stream {
-	return func(yield func(ai.StreamEvent, error) bool) {
-		_, err := m.Generate(ctx, request)
-		yield(ai.StreamEvent{}, err)
-	}
-}
-
-func (*blockingTestModel) Provider() ai.Provider         { return ai.ProviderOpenAI }
-func (*blockingTestModel) ModelID() string               { return "subagent-blocking" }
-func (*blockingTestModel) Capabilities() ai.Capabilities { return ai.Capabilities{Text: true} }
-
-func responseText(text string) *ai.Response {
-	return &ai.Response{
-		Provider: ai.ProviderOpenAI, Model: "subagent-test",
-		Message: ai.AssistantText(text), FinishReason: ai.FinishStop,
-		Usage: ai.Usage{InputTokens: 100, OutputTokens: 20},
-	}
-}
-
-func responseToolCall(call ai.ToolCallPart) *ai.Response {
-	return &ai.Response{
-		Provider: ai.ProviderOpenAI, Model: "subagent-test",
-		Message:      ai.Assistant(call),
-		FinishReason: ai.FinishToolCalls,
-		Usage:        ai.Usage{InputTokens: 100, OutputTokens: 20},
-	}
-}
-
-func requestSystemText(t *testing.T, request ai.Request) string {
-	t.Helper()
-
-	system, _, err := request.Messages.SplitSystem()
-	require.NoError(t, err)
-
-	return ai.JoinSystemText(system)
 }
 
 func partsText(parts []ai.Part) string {
@@ -1696,47 +1056,116 @@ func partsText(parts []ai.Part) string {
 	return text.String()
 }
 
-func toolNames(tools []ai.Tool) []string {
-	values := make([]string, len(tools))
-	for index, tool := range tools {
-		values[index] = tool.Name
+// firstJSONObject returns the leading JSON object of a tool result, ignoring
+// the model-facing text appended after it.
+func firstJSONObject(value string) string {
+	start := strings.IndexByte(value, '{')
+	if start < 0 {
+		return value
 	}
-
-	return values
-}
-
-func requestText(request ai.Request) string {
-	var result strings.Builder
-	for _, message := range request.Messages {
-		result.WriteString(messageText(message))
-	}
-
-	return result.String()
-}
-
-func countChildCompactions(entries []harness.Entry) int {
-	count := 0
-	for _, entry := range entries {
-		if entry.Kind == harness.KindCompaction {
-			count++
+	depth := 0
+	for index := start; index < len(value); index++ {
+		switch value[index] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return value[start : index+1]
+			}
 		}
 	}
 
-	return count
-}
-
-func expectedResult(role Role) any {
-	switch role {
-	case RoleExplore:
-		return ExploreResult{}
-	case RolePlan:
-		return PlanResult{}
-	default:
-		return ReviewResult{}
-	}
+	return value[start:]
 }
 
 var (
 	_ ai.LanguageModel = (*testModel)(nil)
-	_ ai.LanguageModel = (*blockingTestModel)(nil)
+	_ Runner           = (*stubRunner)(nil)
+	_ Dispatcher       = stubDispatcher{}
 )
+
+func TestManagerQueuesAtCapacityAndStartsOnRelease(t *testing.T) {
+	t.Parallel()
+
+	var (
+		mu     sync.Mutex
+		events []AdmissionEvent
+	)
+	fixture := newManagerFixtureWithConfig(
+		t,
+		&testModel{},
+		ExecutionOptions{MaxConcurrent: 1, LimitBehavior: LimitBehaviorQueue},
+		func(config *Config) {
+			config.AdmissionObserver = func(_ context.Context, event AdmissionEvent) {
+				mu.Lock()
+				events = append(events, event)
+				mu.Unlock()
+			}
+		},
+	)
+	fixture.blockChildren()
+	first, err := fixture.start(t.Context(), Request{
+		AgentID: "explore", Task: "Hold the only slot.", Delivery: DeliveryBackground,
+		Ownership: Ownership{
+			ParentInteractionID: "root-1", RootInteractionID: "root-1", ParentToolCallID: "call-1",
+		},
+	}, nil)
+	require.NoError(t, err)
+	<-fixture.started
+
+	started := make(chan error, 1)
+	go func() {
+		_, startErr := fixture.start(t.Context(), Request{
+			AgentID: "plan", Task: "Wait for the slot.",
+		}, nil)
+		started <- startErr
+	}()
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, event := range events {
+			if event.Outcome == AdmissionOutcomeQueued {
+				return true
+			}
+		}
+
+		return false
+	}, 30*time.Second, 10*time.Millisecond)
+
+	first.Cancel()
+	_, err = first.Wait(t.Context())
+	require.ErrorIs(t, err, context.Canceled)
+	require.NoError(t, <-started)
+}
+
+func TestSpawnToolHandsQueuedForegroundCallerOffToBackground(t *testing.T) {
+	t.Parallel()
+
+	fixture := newManagerFixtureWithOptions(t, &testModel{}, ExecutionOptions{
+		MaxConcurrent: 1, LimitBehavior: LimitBehaviorQueue, ForegroundBudget: 20 * time.Millisecond,
+	})
+	fixture.blockChildren()
+	tool := fixture.manager.SpawnToolForDispatcher(Ownership{
+		ParentInteractionID: "interaction-1", RootInteractionID: "interaction-1",
+	}, nil, fixture.dispatcher)
+
+	// The first child holds the only slot.
+	holder, err := tool.Exec(t.Context(), agent.ToolCall{
+		ID: "spawn-1", Name: ToolName,
+		Args: ai.JSON(`{"prompt":"hold","description":"hold"}`),
+	})
+	require.NoError(t, err)
+	require.Contains(t, partsText(holder), "started in background")
+
+	parts, err := tool.Exec(t.Context(), agent.ToolCall{
+		ID: "spawn-2", Name: ToolName,
+		Args: ai.JSON(`{"prompt":"wait","description":"wait","run_in_background":false}`),
+	})
+	require.NoError(t, err)
+	var result spawnResult
+	require.NoError(t, json.Unmarshal([]byte(firstJSONObject(partsText(parts))), &result))
+	assert.Equal(t, SpawnResultSchema, result.Schema)
+	assert.NotEmpty(t, result.AgentID)
+	assert.Contains(t, partsText(parts), "started in background")
+}

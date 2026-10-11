@@ -62,12 +62,8 @@ type childScopeFactory struct {
 	mcpEntries        []catalog.Entry
 	// toolSearchNameFor resolves the discovery tool name for the provider that
 	// serves this child; nil uses catalog.DefaultToolSearchName.
-	toolSearchNameFor    func(ai.Provider) string
-	controls             *childControlRegistry
-	subagents            *subagent.Manager
-	delegationDispatcher subagent.Dispatcher
-	delegationOwner      subagent.Ownership
-	delegationObserver   subagent.Observer
+	toolSearchNameFor func(ai.Provider) string
+	controls          *childControlRegistry
 	// onPauseChanged projects only the child Session phase transition. It is
 	// deliberately separate from parent interaction state so a child waiting
 	// for input can be surfaced and controlled without pausing its parent.
@@ -215,7 +211,6 @@ type childControlScope struct {
 	hooks       childHookScope
 	guard       childToolGuard
 	validator   subagent.OutputValidator
-	nested      *subagent.Manager
 
 	pause       ChildPauseKind
 	approval    approval.State
@@ -256,11 +251,7 @@ func newChildControlScope(
 		return nil, err
 	}
 	acquired := true
-	var nested *subagent.Manager
 	defer func() {
-		if returnErr != nil && nested != nil {
-			returnErr = errors.Join(returnErr, nested.Close(context.WithoutCancel(ctx)))
-		}
 		if returnErr != nil && acquired {
 			returnErr = errors.Join(returnErr, generation.release(context.WithoutCancel(ctx)))
 		}
@@ -288,22 +279,6 @@ func newChildControlScope(
 		return nil, err
 	}
 	scope.validator = validator
-	if factory.delegationDispatcher != nil {
-		if factory.subagents == nil || len(scope.plan.DelegationTargets) == 0 {
-			cancel()
-			return nil, fmt.Errorf("%w: incomplete recursive delegation dependencies", subagent.ErrInvalid)
-		}
-		nested, err = subagent.New(subagent.Config{
-			Context: lifecycle, Parent: input.Child, Model: factory.model,
-			RequestPolicy: factory.requestPolicy, Share: factory.subagents,
-			DelegationDepth: scope.plan.DelegationDepth + 1,
-		})
-		if err != nil {
-			cancel()
-			return nil, err
-		}
-		scope.nested = nested
-	}
 
 	controller, err := approval.New(
 		factory.workspace,
@@ -397,11 +372,18 @@ func newChildControlScope(
 		agent.WithRequest(scope.requestPolicy),
 		agent.WithOutputGuardrail("subagent_result", scope.validateOutput),
 	)
+	systemSuffix := strings.TrimSpace(input.SystemSuffix)
+	if preloaded != "" {
+		if systemSuffix != "" {
+			systemSuffix += "\n"
+		}
+		systemSuffix += preloaded
+	}
 	h, err := harness.New(
 		compaction.GuardModel(factory.model, factory.fullCompaction),
 		scope.child,
 		harness.WithSystem(scope.plan.Instructions),
-		harness.WithSystemSuffix(preloaded),
+		harness.WithSystemSuffix(systemSuffix),
 		harness.WithTools(executableTools...),
 		harness.WithSkillCatalog(skillCatalog),
 		harness.WithOnEvent(func(eventCtx context.Context, event agent.Event) {
@@ -534,15 +516,8 @@ func (s *childControlScope) buildCatalog(
 			})
 		}
 	}
-	if s.nested != nil {
-		delegationTool := s.nested.ToolForTargets(
-			s.factory.delegationOwner,
-			s.factory.delegationObserver,
-			s.factory.delegationDispatcher,
-			s.plan.DelegationTargets,
-		)
-		entries = append(entries, catalog.Local("coding.subagent", catalog.RiskRead, delegationTool)...)
-	}
+	// Depth is capped at one: a child never receives a delegation tool, so
+	// recursion cannot start below the root conversation.
 	childCatalog, err := catalog.New(entries...)
 	if err != nil {
 		return nil, nil, nil, err
@@ -649,7 +624,7 @@ func (s *childControlScope) Run(ctx context.Context, task string) (subagent.Runn
 	}
 	messages := []ai.Message{ai.UserText(task)}
 	for {
-		result, err := s.harness.PromptMessages(ctx, messages...)
+		result, err := s.harness.PromptMessagesRun(ctx, messages...)
 		messages = nil
 		if err != nil {
 			return s.finishRun(ctx, subagent.RunnerResult{Run: result, ToolCalls: s.guard.count()}, err)
@@ -1108,9 +1083,6 @@ func (s *childControlScope) Close(ctx context.Context) error {
 		s.pending.clear()
 		s.resolver.set(nil)
 		s.factory.controls.remove(s.childSessionID, s)
-		if s.nested != nil {
-			s.closeErr = errors.Join(s.closeErr, s.nested.Close(ctx))
-		}
 		s.closeErr = errors.Join(s.closeErr, s.generation.release(ctx))
 	})
 

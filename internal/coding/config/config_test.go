@@ -22,7 +22,10 @@ func TestDefaults(t *testing.T) {
 	assert.Empty(t, cfg.Models)
 	assert.False(t, cfg.ToolSearch)
 	assert.Equal(t, "pips_tool_search", cfg.ToolSearchName)
-	assert.False(t, cfg.DynamicSubagents)
+	// Custom subagents are on by default; the flag/env/file can force them off.
+	assert.True(t, cfg.DynamicSubagents)
+	// Builtin agents return free text unless structured results are opted in.
+	assert.False(t, cfg.Subagent.StructuredResults)
 	assert.Equal(t, config.ModeAgent, cfg.Mode)
 	assert.Equal(t, config.ThemeAuto, cfg.TUI.Theme)
 	assert.Equal(t, statusline.Default(), cfg.TUI.StatusLine)

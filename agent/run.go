@@ -38,6 +38,20 @@ func (a *Agent) Run(ctx context.Context, sess *Session, msgs ...ai.Message) (*Ru
 	return a.loop(ctx, sess, msgs, func(Event) bool { return true }, false)
 }
 
+// RunStream is [Agent.Run] with streaming model calls: it reports every event
+// to deliver and returns the same terminal result Run does. It exists for
+// callers that must stream — a provider whose non-streaming response carries no
+// content still answers a stream — but that also need the terminal result
+// rather than an event iterator.
+//
+// deliver must return true. Returning false abandons the run exactly as
+// breaking out of [Agent.Stream] does, and RunStream then returns a nil result.
+func (a *Agent) RunStream(
+	ctx context.Context, sess *Session, deliver func(Event) bool, msgs ...ai.Message,
+) (*RunResult, error) {
+	return a.loop(ctx, sess, msgs, deliver, true)
+}
+
 // Stream is [Agent.Run] as an event sequence: it yields run, turn, and tool
 // lifecycle events plus model deltas as they happen. Breaking out of the loop
 // cancels the run; the session keeps everything appended up to that point,

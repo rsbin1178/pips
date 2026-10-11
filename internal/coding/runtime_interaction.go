@@ -812,68 +812,64 @@ func (r *Runtime) openInteraction(
 	}
 	merged := ambientCatalog
 	var userDispatcher subagent.Dispatcher
-	//nolint:nestif // Dynamic dispatch must stay beside the frozen interaction snapshot it captures.
+	//nolint:nestif // The unified dispatcher must stay beside the frozen interaction snapshot it captures.
 	if attachSubagentTools {
-		var dispatcher subagent.Dispatcher
-		if r.config.DynamicSubagents {
-			childModel := snapshot.Model(r.model)
-			childModels, modelErr := newChildModelResolver(
-				r.modelCatalog,
-				r.resolved,
-				childModel,
-				r.requestPolicy,
-				r.credentials,
-				snapshot.Model,
+		childModel := snapshot.Model(r.model)
+		childModels, modelErr := newChildModelResolver(
+			r.modelCatalog,
+			r.resolved,
+			childModel,
+			r.requestPolicy,
+			r.credentials,
+			snapshot.Model,
+		)
+		if modelErr != nil {
+			return nil, modelErr
+		}
+		childFactory := childScopeFactory{
+			repository: r.repository, fullCompaction: r.childScopeCompactionPolicy(),
+			workspace: r.workspace, tree: r.tree, toolLimits: r.opts.ToolLimits,
+			policy: r.policy, executor: r.executor, sandbox: r.config.Sandbox,
+			network:       r.config.SandboxWorkspaceWrite.Network,
+			requestPolicy: r.requestPolicy, toolTimeout: r.opts.ToolTimeout,
+			inspector: r.inspector, hooks: r.hookDefinitions, hookRunner: r.hookRunner,
+			onHookDiagnostics: func(ctx context.Context, diagnostics []hooks.Diagnostic) {
+				r.recordHookDiagnostics(ctx, nil, diagnostics)
+			},
+			model: childModel, mode: started.Mode, mcpEntries: childMCPEntries, controls: r.childControls,
+			toolSearchNameFor:  r.config.ToolSearchNameFor,
+			streamContinuation: r.resolved.StreamContinuation,
+			streamIdleTimeout:  r.resolved.StreamIdleTimeout,
+			onPauseChanged:     r.projectChildPause,
+			onWorkspaceChanged: r.projectChildWorkspaceChanged,
+		}
+		newDispatcher := func(audience agentprofile.Audience) (*customSubagentDispatcher, error) {
+			return newCustomSubagentDispatcher(
+				integration,
+				integration.agentProfilesSnapshot(),
+				audience,
+				ambientDescriptors,
+				resolvedSkills.enabledSkills(),
+				runtimeSubagentLimits(r.opts.Subagent),
+				childModels,
+				childFactory,
+				r.config.ToolSearch,
+				r.config.Subagent.StructuredResults,
+				r.config.DynamicSubagents,
 			)
-			if modelErr != nil {
-				return nil, modelErr
-			}
-			childFactory := childScopeFactory{
-				repository: r.repository, fullCompaction: r.childScopeCompactionPolicy(),
-				workspace: r.workspace, tree: r.tree, toolLimits: r.opts.ToolLimits,
-				policy: r.policy, executor: r.executor, sandbox: r.config.Sandbox,
-				network:       r.config.SandboxWorkspaceWrite.Network,
-				requestPolicy: r.requestPolicy, toolTimeout: r.opts.ToolTimeout,
-				inspector: r.inspector, hooks: r.hookDefinitions, hookRunner: r.hookRunner,
-				onHookDiagnostics: func(ctx context.Context, diagnostics []hooks.Diagnostic) {
-					r.recordHookDiagnostics(ctx, nil, diagnostics)
-				},
-				model: childModel, mode: started.Mode, mcpEntries: childMCPEntries, controls: r.childControls,
-				toolSearchNameFor:  r.config.ToolSearchNameFor,
-				streamContinuation: r.resolved.StreamContinuation,
-				streamIdleTimeout:  r.resolved.StreamIdleTimeout,
-				subagents:          r.subagents,
-				onPauseChanged:     r.projectChildPause,
-				onWorkspaceChanged: r.projectChildWorkspaceChanged,
-			}
-			newDispatcher := func(audience agentprofile.Audience) (*customSubagentDispatcher, error) {
-				return newCustomSubagentDispatcher(
-					integration,
-					integration.agentProfilesSnapshot(),
-					audience,
-					ambientDescriptors,
-					resolvedSkills.enabledSkills(),
-					runtimeSubagentLimits(r.opts.Subagent),
-					childModels,
-					childFactory,
-					r.config.ToolSearch,
-					r.opts.Subagent.MaxDepth,
-				)
-			}
-			customDispatcher, dispatchErr := newDispatcher(agentprofile.AudienceModel)
-			if dispatchErr != nil {
-				return nil, dispatchErr
-			}
-			dispatcher = customDispatcher
-			userDispatcher, dispatchErr = newDispatcher(agentprofile.AudienceUser)
-			if dispatchErr != nil {
-				return nil, dispatchErr
-			}
+		}
+		customDispatcher, dispatchErr := newDispatcher(agentprofile.AudienceModel)
+		if dispatchErr != nil {
+			return nil, dispatchErr
+		}
+		var dispatcher subagent.Dispatcher = customDispatcher
+		userDispatcher, dispatchErr = newDispatcher(agentprofile.AudienceUser)
+		if dispatchErr != nil {
+			return nil, dispatchErr
 		}
 		subagentTools, subagentErr := catalog.New(catalog.Local(
 			"coding.subagent",
 			catalog.RiskRead,
-			r.subagents.ToolForDispatcher(childOwner, childObserver, dispatcher),
 			r.subagents.SpawnToolForDispatcher(childOwner, childObserver, dispatcher),
 		)...)
 		if subagentErr != nil {

@@ -160,6 +160,53 @@ func TestStreamToolLoop(t *testing.T) {
 	assert.Equal(t, "5", final.Text)
 }
 
+// RunStream is the blocking streaming sibling: it reports the same events as
+// Stream and also returns the terminal result.
+func TestRunStreamReturnsResultAndReportsEvents(t *testing.T) {
+	t.Parallel()
+
+	model := newScriptedModel(
+		respond(callResponse(call("c1", "add", `{"a":2,"b":3}`))),
+		respond(textResponse("5")),
+	)
+
+	a, err := agent.New(model, agent.WithTools(addTool()))
+	require.NoError(t, err)
+
+	sess := agent.NewSession()
+
+	var (
+		types  []agent.EventType
+		deltas int
+	)
+
+	result, err := a.RunStream(t.Context(), sess, func(ev agent.Event) bool {
+		require.NoError(t, ev.Validate())
+
+		if _, ok := ev.Payload().(agent.ModelStreamEvent); ok {
+			deltas++
+
+			return true
+		}
+
+		types = append(types, ev.Type())
+
+		return true
+	}, ai.UserText("2+3?"))
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	assert.Equal(t, agent.StopEndTurn, result.Stop)
+	assert.Equal(t, 2, result.Turns)
+	assert.Equal(t, "5", result.Text())
+	assert.Positive(t, deltas)
+	assert.Contains(t, types, agent.EventRunCompleted)
+
+	// RunStream and Stream build identical sessions.
+	msgs := sess.Messages()
+	require.Len(t, msgs, 4)
+}
+
 func TestCandidateAnswerRetryDiscardsDraftAndConstrainsOneRequest(t *testing.T) {
 	t.Parallel()
 

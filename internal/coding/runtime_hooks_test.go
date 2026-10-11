@@ -18,6 +18,7 @@ import (
 	"github.com/rsbin1178/pips/internal/coding/execution"
 	"github.com/rsbin1178/pips/internal/coding/hooks"
 	"github.com/rsbin1178/pips/internal/coding/paths"
+	"github.com/rsbin1178/pips/internal/coding/subagent"
 	"github.com/rsbin1178/pips/internal/coding/workspace"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -303,8 +304,8 @@ func TestRuntimeSubagentHooksAddContextAndContinueChild(t *testing.T) {
 	model := newRuntimeModel(
 		runtimeToolResponse(
 			"delegate-1",
-			"run_subagent",
-			`{"role":"explore","task":"Locate the runtime composition root."}`,
+			subagent.ToolName,
+			`{"prompt":"Locate the runtime composition root.","description":"delegate","subagent_type":"explore","run_in_background":false}`,
 		),
 		runtimeTextResponse(`{"summary":"first","evidence":[],"unknowns":[]}`),
 		runtimeTextResponse(`{"summary":"second","evidence":[],"unknowns":[]}`),

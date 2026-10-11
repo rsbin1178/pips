@@ -931,6 +931,8 @@ func subagentOutcomeText(value subagent.Summary) string {
 
 func renderSubagentResult(value any) []string {
 	switch result := value.(type) {
+	case string:
+		return renderTextResult(result)
 	case subagent.ExploreResult:
 		return renderExploreResult(result)
 	case subagent.PlanResult:
@@ -940,6 +942,23 @@ func renderSubagentResult(value any) []string {
 	default:
 		return []string{"  Validated result is unavailable."}
 	}
+}
+
+// renderTextResult renders the default free-text builtin result, which is the
+// child's final assistant text rather than a typed object.
+func renderTextResult(value string) []string {
+	trimmed := strings.TrimSpace(sanitizeToolText(value))
+	if trimmed == "" {
+		return []string{"  Validated result is unavailable."}
+	}
+
+	lines := strings.Split(trimmed, "\n")
+	rendered := make([]string, 0, len(lines))
+	for _, line := range lines {
+		rendered = append(rendered, "  "+strings.TrimRight(line, " \t"))
+	}
+
+	return rendered
 }
 
 func renderExploreResult(result subagent.ExploreResult) []string {

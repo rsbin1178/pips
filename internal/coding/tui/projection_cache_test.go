@@ -78,7 +78,7 @@ func projectionRunningSubagentTool() coding.ToolState {
 		RunID: "run-1", Turn: 3,
 		Call: coding.ToolCall{
 			ID: "call-sub", Name: subagent.ToolName,
-			Arguments: ai.JSON(`{"role":"explore","task":"Inspect the timeline"}`),
+			Arguments: ai.JSON(`{"prompt":"Inspect the timeline","description":"inspect","subagent_type":"explore"}`),
 		},
 		Status: coding.ToolStatusRunning,
 	}

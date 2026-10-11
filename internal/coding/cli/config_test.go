@@ -31,6 +31,7 @@ mode = "plan"
 [subagent]
 max_concurrent = 6
 max_turns = 80
+structured_results = true
 
 [sandbox_workspace_write]
 network = "allow"
@@ -83,6 +84,8 @@ model = "anthropic/project-model"
 	assert.Contains(t, output, `subagent.max_concurrent = 6 # source=config_file detail="`)
 	assert.Contains(t, output, `subagent.max_turns = 80 # source=config_file detail="`)
 	assert.Contains(t, output, `subagent.max_tokens = 256000 # source=default detail="built-in"`)
+	assert.Contains(t, output, `subagent.structured_results = true # source=config_file detail="`)
+	assert.Contains(t, output, `dynamic_subagents = true # source=default detail="built-in"`)
 	assert.Contains(t, output, `mode = "plan" # source=config_file detail="`)
 	assert.Contains(t, output, `tui.theme = "auto" # source=default detail="built-in"`)
 	assert.Contains(t, output, `tui.screen = "fullscreen" # source=default detail="built-in"`)

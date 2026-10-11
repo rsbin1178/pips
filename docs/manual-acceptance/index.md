@@ -47,7 +47,7 @@
 | Sandbox、网络、权限与审批 | [安全、Sandbox、权限与审批](security-sandbox-permissions.md) | `MA-SEC-*` | 平台条件与安全敏感 |
 | Plan Mode、计划文件与计划审批 | [Plan Mode](plan-mode.md) | `MA-PLAN-*` | 交互终端 |
 | Skills、MCP、Extensions、Bundles、Plugins、Hooks | [集成能力](skills-mcp-extensions-plugins-hooks.md) | `MA-INT-*` | 按已配置集成选择 |
-| Builtin 与 Dynamic Subagents | [Subagent](builtin-dynamic-subagents.md) | `MA-SUB-*` | Dynamic 默认关闭 |
+| Builtin 与 Dynamic Subagents | [Subagent](builtin-dynamic-subagents.md) | `MA-SUB-*` | Dynamic 默认开启 |
 | Coding Team | [Coding Team](coding-teams.md) | `MA-TEAM-*` | Git HEAD、交互确认 |
 | Remote SSH 与 ACP | [远程 SSH 与 ACP](remote-ssh-acp.md) | `MA-REMOTE-*` | 外部系统/ACP 客户端 |
 | 事件、Telemetry、恢复与兼容 | [可观测性、恢复与兼容](observability-recovery-compatibility.md) | `MA-OPS-*` | 含自动证据和运营观察 |
