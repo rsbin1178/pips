@@ -197,5 +197,8 @@ func (m *Model) selectRouteListRow(index int) {
 		} else {
 			m.route.cursor = clampIndex(index, len(m.filteredChildren()))
 		}
+	case routeNone, routeChild, routeTeam, routeToolDetail, routeStatus, routeHelp:
+		// The remaining routes address no list cursor, so a click on them selects no
+		// row. They are named rather than defaulted so a new route has to decide.
 	}
 }

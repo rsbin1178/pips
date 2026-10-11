@@ -91,7 +91,7 @@ func (m *Model) exportConversation(path string) tea.Cmd {
 }
 
 // assistantResponses returns the visible text of every assistant reply, newest
-// first. A live streaming draft counts as the newest reply, so Ctrl+X during a
+// first. A live streaming draft counts as the newest reply, so Ctrl+Y during a
 // turn copies what the model has produced so far.
 //
 // State.IncompleteReplies is deliberately not a source here: its text was

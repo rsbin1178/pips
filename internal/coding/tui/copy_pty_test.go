@@ -43,7 +43,7 @@ func copyPTYModeByName(name string) (copyPTYMode, bool) {
 	return copyPTYMode{}, false
 }
 
-// TestPTYCopyWritesOSC52AndTheFallbackFile is the end-to-end guard for Ctrl+X in
+// TestPTYCopyWritesOSC52AndTheFallbackFile is the end-to-end guard for Ctrl+Y in
 // both presentation modes: the OSC 52 request must reach the terminal through the
 // Program writer, and the fallback file must exist because that delivery cannot be
 // confirmed.
@@ -145,8 +145,8 @@ func runCopyPTY(t *testing.T, mode copyPTYMode) {
 		return ready
 	}, 30*time.Second, 10*time.Millisecond)
 
-	// Ctrl+X copies the newest assistant reply.
-	_, err = master.Write([]byte{0x18})
+	// Ctrl+Y copies the newest assistant reply.
+	_, err = master.Write([]byte{0x19})
 	require.NoError(t, err)
 
 	payload := "\x1b]52;c;" +

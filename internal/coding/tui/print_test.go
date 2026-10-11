@@ -17,9 +17,9 @@ func TestInspectionCommandsPrintIntoScrollback(t *testing.T) {
 	model.state.Changes = &coding.WorkspaceChanged{
 		Entries: []coding.WorkspaceChange{{Kind: "modified", Path: "main.go"}},
 	}
-	_, command := model.executeCommand(commandDescriptor{name: "help"})
+	_, command := model.executeCommand(commandDescriptor{name: "goal"})
 
-	assert.Contains(t, driveModelCommandsCapture(t, model, command), "Help")
+	assert.Contains(t, driveModelCommandsCapture(t, model, command), "Goal")
 	assert.Equal(t, routeNone, model.route.kind)
 }
 

@@ -253,14 +253,16 @@ func (m *Model) deriveStatusRouteContext() context.Context {
 // off-loop command. A Session without a usable projection is remembered as such,
 // so one bad file contributes nothing and never blanks the page.
 func (m *Model) readStatusProjections(sessions session.MetadataListing) map[string]usageProjectionSnapshot {
-	directory := strings.TrimSpace(m.options.SessionsDirectory)
-	if directory == "" || len(sessions.Sessions) == 0 {
+	if len(sessions.Sessions) == 0 {
 		return nil
 	}
 
 	projections := make(map[string]usageProjectionSnapshot, len(sessions.Sessions))
 	for _, meta := range sessions.Sessions {
-		projection, read := readUsageProjectionStatus(directory, meta.ID)
+		projection, read := readUsageProjectionStatus(
+			m.sessionStateDir(meta.WorkspacePath, meta.ID),
+			meta.ID,
+		)
 		projections[meta.ID] = usageProjectionSnapshot{projection: projection, read: read}
 	}
 
@@ -300,7 +302,7 @@ func (m *Model) updateStatusRouteKey(message tea.KeyPressMsg) (tea.Model, tea.Cm
 		return m, m.closeRouteToParent()
 	case keyTab, keyRight, "l":
 		return m, m.selectStatusTab(m.route.statusTab.step(1))
-	case "shift+tab", keyLeft, "h":
+	case keyShiftTab, keyLeft, "h":
 		return m, m.selectStatusTab(m.route.statusTab.step(-1))
 	case "/":
 		if m.route.statusTab == statusTabConfig {
@@ -327,7 +329,7 @@ func (m *Model) updateStatusSearchKey(message tea.KeyPressMsg) (tea.Model, tea.C
 		return m, m.closeRouteToParent()
 	case keyTab, keyRight:
 		return m, m.selectStatusTab(m.route.statusTab.step(1))
-	case "shift+tab", keyLeft:
+	case keyShiftTab, keyLeft:
 		return m, m.selectStatusTab(m.route.statusTab.step(-1))
 	case keyEnter, keyDown, "j":
 		m.stopStatusSearch()

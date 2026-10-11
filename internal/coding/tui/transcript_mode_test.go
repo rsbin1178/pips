@@ -145,22 +145,8 @@ func TestTranscriptModeIsInertInline(t *testing.T) {
 	assert.False(t, model.transcriptMode.active)
 	assert.Nil(t, command)
 	assert.False(t, model.View().AltScreen)
-	assert.Contains(t, model.historyHelpLine(), "terminal owns conversation history",
+	assert.Contains(t, helpPageText(model, helpTabShortcuts), "the terminal owns it",
 		"inline help still names the terminal as the owner")
-}
-
-// TestHistoryHelpNamesTheOwningSurface keeps the help text honest about which
-// surface scrolls the conversation.
-func TestHistoryHelpNamesTheOwningSurface(t *testing.T) {
-	t.Parallel()
-
-	inline := readyModel(t, true)
-	assert.Contains(t, inline.historyHelpLine(), "terminal owns conversation history")
-
-	fullscreen := fullscreenModel(t, stubController{state: readyState()}, true)
-	assert.Contains(t, fullscreen.historyHelpLine(), "Ctrl+O")
-	assert.Contains(t, renderActionHelp(defaultActions, contextIdle), keyCtrlO+" — transcript",
-		"the binding is discoverable in the help listing")
 }
 
 // TestTranscriptExitRowsOnlyForTheFullscreenTranscript pins which exits hand the

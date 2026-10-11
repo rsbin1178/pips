@@ -318,7 +318,7 @@ func (m *Model) executeCommand(command commandDescriptor) (tea.Model, tea.Cmd) {
 		m.closeCommandPicker(false)
 		m.restoreCommandComposer(previous)
 
-		return m, m.printHelp()
+		return m, m.openHelp()
 	case "quit":
 		m.closeCommandPicker(false)
 

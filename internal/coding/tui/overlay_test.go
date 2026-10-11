@@ -357,18 +357,16 @@ func TestStatusInspectionShowsOnlyRequestOutputLimit(t *testing.T) {
 	assert.NotContains(t, content, "Model output:")
 }
 
-func TestHelpInspectionExplainsMouseSelectionAndWheelScrolling(t *testing.T) {
+func TestHelpPanelExplainsMouseSelectionAndWheelScrolling(t *testing.T) {
 	t.Parallel()
 
-	model := readyModel(t, true)
-	model.Update(tea.WindowSizeMsg{Width: 180, Height: 30})
-	content := modelCommandOutput(model, model.printHelp())
+	model := fullscreenModel(t, stubController{state: readyState()}, true)
+	model.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	content := helpPageText(model, helpTabShortcuts)
 
-	assert.Contains(t, content, "terminal owns conversation history")
-	assert.Contains(t, content, "drag normally to select and copy text")
-	assert.Contains(t, content, "/team [objective]")
-	assert.Contains(t, content, "Enter resumes only the conversation")
-	assert.NotContains(t, content, "PgUp/PgDown/End")
+	assert.Contains(t, content, "scroll the conversation")
+	assert.Contains(t, content, "wheel over the draft")
+	assert.Contains(t, content, "hold Shift")
 	assert.NotContains(t, content, "/mouse")
 }
 

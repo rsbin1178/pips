@@ -114,31 +114,43 @@ func TestStatusHeatmapGridKeepsFutureDaysBlank(t *testing.T) {
 }
 
 // statusProjectionStore writes a mixed store: two usable projections, one absent
-// and one corrupt, and returns the directory and the listed Sessions.
+// and one corrupt, and returns the store root and the listed Sessions.
 func statusProjectionStore(t *testing.T) (string, []session.Metadata) {
 	t.Helper()
 
-	directory := t.TempDir()
+	root := t.TempDir()
+	layout, err := session.NewStoreLayout(root)
+	require.NoError(t, err)
+	// Each Session's state directory comes from the store layout, so the sidecar
+	// lands under the Session's own group directory.
+	workspace := "/workspace/status"
+	stateDir := func(id string) string { return layout.StateDir(workspace, id) }
+
 	// The cached and reasoning classes are present so the reduction cannot count
 	// them twice: input includes the cached tokens and output includes reasoning.
 	require.True(t, writeUsageProjection(
-		directory, "s-1", "i-1", 60_000,
+		stateDir("s-1"), "s-1", "i-1", 60_000,
 		map[string]coding.TokenUsage{"demo/model": {
 			InputTokens: 100, CachedInputTokens: 40, OutputTokens: 20, ReasoningTokens: 5,
 		}},
 		time.Now(),
 	).wrote)
 	require.True(t, writeUsageProjection(
-		directory, "s-2", "i-1", 30_000,
+		stateDir("s-2"), "s-2", "i-1", 30_000,
 		map[string]coding.TokenUsage{"other/model": {InputTokens: 300}},
 		time.Now(),
 	).wrote)
 
-	corrupt := filepath.Join(directory, "s-4")
+	corrupt := stateDir("s-4")
 	require.NoError(t, os.MkdirAll(corrupt, 0o700))
 	require.NoError(t, os.WriteFile(filepath.Join(corrupt, usageProjectionFile), []byte("{not json"), 0o600))
 
-	return directory, []session.Metadata{{ID: "s-1"}, {ID: "s-2"}, {ID: "s-3"}, {ID: "s-4"}}
+	return root, []session.Metadata{
+		{ID: "s-1", WorkspacePath: workspace},
+		{ID: "s-2", WorkspacePath: workspace},
+		{ID: "s-3", WorkspacePath: workspace},
+		{ID: "s-4", WorkspacePath: workspace},
+	}
 }
 
 // TestStatusAggregateProjectionsReducesEveryListedSession pins the all-time
@@ -149,9 +161,11 @@ func TestStatusAggregateProjectionsReducesEveryListedSession(t *testing.T) {
 	t.Parallel()
 
 	directory, metas := statusProjectionStore(t)
+	layout, err := session.NewStoreLayout(directory)
+	require.NoError(t, err)
 	projections := make(map[string]usageProjectionSnapshot, len(metas))
 	for _, meta := range metas {
-		projection, read := readUsageProjectionStatus(directory, meta.ID)
+		projection, read := readUsageProjectionStatus(layout.StateDir(meta.WorkspacePath, meta.ID), meta.ID)
 		projections[meta.ID] = usageProjectionSnapshot{projection: projection, read: read}
 	}
 
