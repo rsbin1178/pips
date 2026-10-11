@@ -48,7 +48,10 @@ func TestArchiveCopyFailureCleansStageAndPreservesDestination(t *testing.T) {
 	staged := archiveStage(t, store, archiveEntries("copy evidence"))
 	require.NoError(t, staged.Publish(t.Context()))
 	destination := "reserved-fork"
-	dir, err := openArchiveDirectory(repo.dir, destination, true)
+	destinationStore := &ArchiveStore{
+		dir: repo.dir, sessionID: destination, rel: siblingArchiveRel(store, destination),
+	}
+	dir, err := openArchiveDirectory(repo.dir, destinationStore.rel, true)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, dir.Close()) })
 	failure := errors.New("copy read failed")
@@ -56,10 +59,9 @@ func TestArchiveCopyFailureCleansStageAndPreservesDestination(t *testing.T) {
 	require.ErrorIs(t, err, failure)
 	_, err = copyArchiveFile(t.Context(), dir, strings.NewReader("wrong bytes"), staged.Info())
 	require.ErrorIs(t, err, ErrArchiveCorrupt)
-	names, err := os.ReadDir(filepath.Join(repo.dir, destination+".history"))
+	names, err := os.ReadDir(archiveDirPath(destinationStore))
 	require.NoError(t, err)
 	assert.Empty(t, names)
-	destinationStore := &ArchiveStore{dir: repo.dir, sessionID: destination}
 	path := archiveObjectPath(destinationStore, staged.ID())
 	collision := bytes.Repeat([]byte{'x'}, 32)
 	require.NoError(t, os.WriteFile(path, collision, 0o600))
@@ -139,7 +141,7 @@ func TestArchiveSearchScanBudgetReturnsResumableMiss(t *testing.T) {
 func TestArchiveCanceledDuringCopyLeavesNoTemporaryObject(t *testing.T) {
 	t.Parallel()
 	_, _, store := archiveFixture(t)
-	dir, err := openArchiveDirectory(store.dir, store.sessionID, true)
+	dir, err := openArchiveDirectory(store.dir, store.rel, true)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, dir.Close()) })
 	ctx, cancel := context.WithCancel(t.Context())
@@ -147,7 +149,7 @@ func TestArchiveCanceledDuringCopyLeavesNoTemporaryObject(t *testing.T) {
 	reader := &archiveCancelReader{cancel: cancel}
 	_, err = copyArchiveFile(ctx, dir, reader, ArchiveInfo{ID: strings.Repeat("0", 64)})
 	require.ErrorIs(t, err, context.Canceled)
-	names, err := os.ReadDir(filepath.Join(store.dir, store.sessionID+".history"))
+	names, err := os.ReadDir(archiveDirPath(store))
 	require.NoError(t, err)
 	assert.Empty(t, names)
 }
@@ -155,7 +157,7 @@ func TestArchiveCanceledDuringCopyLeavesNoTemporaryObject(t *testing.T) {
 func TestArchiveRejectsOversizedManifestBeforeAllocation(t *testing.T) {
 	t.Parallel()
 	_, _, store := archiveFixture(t)
-	dir, err := openArchiveDirectory(store.dir, store.sessionID, true)
+	dir, err := openArchiveDirectory(store.dir, store.rel, true)
 	require.NoError(t, err)
 	require.NoError(t, dir.Close())
 	object := make([]byte, archiveHeaderBytes)

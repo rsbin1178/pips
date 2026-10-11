@@ -196,6 +196,7 @@ type Runtime struct {
 
 	writer      *eventWriter
 	publisher   *eventPublisher
+	artifacts   *sessionArtifacts
 	interaction *interaction
 	active      *runtimeOperation
 	recovery    InteractionRecovery
@@ -377,8 +378,8 @@ func openRuntime(
 		return nil, err
 	}
 	stack.add(func(context.Context) error { return handle.Close() })
-	planStore, err := planmode.NewStore(
-		options.Paths.SessionsDir(),
+	planStore, err := planmode.NewStoreAt(
+		handle.StateDir(),
 		handle.Metadata().ID,
 		planmode.DefaultLimits(),
 	)
@@ -608,6 +609,9 @@ func openRuntime(
 	if err != nil {
 		return nil, err
 	}
+	runtime.artifacts = newSessionArtifacts(handle, options.Paths.SessionsDir())
+	stack.add(func(context.Context) error { return runtime.artifacts.Close() })
+	runtime.recordPromptContextSnapshot()
 
 	pending, err := runtime.session.Pending()
 	if err != nil {
@@ -1014,7 +1018,9 @@ func openSession(
 	}
 
 	handle, err := repository.Open(ctx, session.OpenOptions{
-		ID: options.Session.ID, WorkspaceID: options.Workspace.Identity().Key(),
+		ID:            options.Session.ID,
+		WorkspaceID:   options.Workspace.Identity().Key(),
+		WorkspacePath: options.Workspace.Root(),
 	})
 	if err != nil {
 		return nil, true, err

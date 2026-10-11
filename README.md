@@ -286,6 +286,7 @@ For more examples, check the [`examples/`](examples/) directory.
 - [Agent Composition & Patterns](docs/agents.md)
 - [Workflow Engine Go Reference](https://pkg.go.dev/github.com/rsbin1178/pips/workflow)
 - [Coding CLI Guide](docs/coding-cli.md)
+- [Session Storage](docs/coding-session-storage.md)
 - [Execution Security & Sandboxing](docs/coding-security.md)
 - [Agent Client Protocol (ACP) Guide](docs/coding-acp.md)
 - [Manual Acceptance Guidelines](docs/manual-acceptance/index.md)

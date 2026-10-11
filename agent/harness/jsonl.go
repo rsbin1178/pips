@@ -219,6 +219,14 @@ func (s *JSONLStore) Entries() ([]Entry, error) {
 	return cloneEntries(s.entries), nil
 }
 
+// Len returns the number of stored entries without copying them.
+func (s *JSONLStore) Len() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return len(s.entries)
+}
+
 // Close releases the underlying file. The store is unusable afterwards.
 func (s *JSONLStore) Close() error {
 	s.mu.Lock()
@@ -500,6 +508,11 @@ func readBoundedJSONLLine(
 type Repo struct {
 	// Dir is the directory holding the session files.
 	Dir string
+	// Path overrides the default <Dir>/<id>.jsonl mapping when set. A caller
+	// with its own layout (for example one session per directory) supplies it so
+	// Fork and Delete address the same files this Repo creates. List always
+	// enumerates Dir and therefore requires the default mapping.
+	Path func(id string) (string, error)
 }
 
 // Create starts a new stored session. An empty id gets a generated one.
@@ -676,10 +689,12 @@ func (r Repo) ForkSession(
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(r.Dir, 0o750); err != nil {
+	// Stage beside the target so the publishing link stays within one filesystem.
+	targetDir := filepath.Dir(targetPath)
+	if err := os.MkdirAll(targetDir, 0o750); err != nil {
 		return nil, fmt.Errorf("harness: create session dir: %w", err)
 	}
-	temp, err := os.CreateTemp(r.Dir, ".fork-*.tmp")
+	temp, err := os.CreateTemp(targetDir, ".fork-*.tmp")
 	if err != nil {
 		return nil, err
 	}
@@ -768,6 +783,18 @@ func normalizeForkPath(path []Entry) []Entry {
 func (r Repo) sessionPath(id string) (string, error) {
 	if err := validateSessionID(id); err != nil {
 		return "", err
+	}
+
+	if r.Path != nil {
+		path, err := r.Path(id)
+		if err != nil {
+			return "", err
+		}
+		if path == "" || strings.ContainsRune(path, '\x00') {
+			return "", fmt.Errorf("harness: invalid session path for %q", id)
+		}
+
+		return path, nil
 	}
 
 	return filepath.Join(r.Dir, id+jsonlExt), nil

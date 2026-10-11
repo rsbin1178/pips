@@ -66,12 +66,26 @@ type Store struct {
 // NewStore opens (creating when needed) the private plan directory of one
 // conversation session under the Harness sessions directory.
 func NewStore(sessionsDir, sessionID string, limits Limits) (*Store, error) {
+	if strings.TrimSpace(sessionsDir) == "" || strings.ContainsRune(sessionsDir, '\x00') {
+		return nil, fmt.Errorf("%w: invalid sessions directory", ErrInvalid)
+	}
+
+	if err := session.ValidateID(sessionID); err != nil {
+		return nil, fmt.Errorf("%w: invalid session identity", ErrInvalid)
+	}
+
+	return NewStoreAt(filepath.Join(sessionsDir, sessionID), sessionID, limits)
+}
+
+// NewStoreAt opens (creating when needed) the private plan directory at
+// directory, which is the Session's state directory in the layered store.
+func NewStoreAt(directory, sessionID string, limits Limits) (*Store, error) {
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		return nil, ErrUnsupported
 	}
 
-	if strings.TrimSpace(sessionsDir) == "" || strings.ContainsRune(sessionsDir, '\x00') {
-		return nil, fmt.Errorf("%w: invalid sessions directory", ErrInvalid)
+	if strings.TrimSpace(directory) == "" || strings.ContainsRune(directory, '\x00') {
+		return nil, fmt.Errorf("%w: invalid plan directory", ErrInvalid)
 	}
 
 	if err := session.ValidateID(sessionID); err != nil {
@@ -86,7 +100,6 @@ func NewStore(sessionsDir, sessionID string, limits Limits) (*Store, error) {
 		return nil, fmt.Errorf("%w: invalid limits", ErrInvalid)
 	}
 
-	directory := filepath.Join(sessionsDir, sessionID)
 	if err := ensurePrivateDirectory(directory); err != nil {
 		return nil, err
 	}

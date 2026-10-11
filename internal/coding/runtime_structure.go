@@ -186,8 +186,8 @@ func (r *Runtime) Fork(ctx context.Context, entryID string) (string, error) {
 		return "", err
 	}
 	targetID := target.Metadata().ID
-	targetPlanStore, planErr := planmode.NewStore(
-		r.paths.SessionsDir(),
+	targetPlanStore, planErr := planmode.NewStoreAt(
+		target.StateDir(),
 		targetID,
 		planmode.DefaultLimits(),
 	)

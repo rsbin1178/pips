@@ -4,7 +4,7 @@ package session
 
 import "os"
 
-func openArchiveDirectory(string, string, bool) (*os.File, error) {
+func openArchiveDirectory(string, []string, bool) (*os.File, error) {
 	return nil, ErrUnsupportedPlatform
 }
 

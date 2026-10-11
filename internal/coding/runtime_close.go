@@ -192,6 +192,9 @@ func (r *Runtime) closeResources(ctx context.Context, current *interaction) erro
 	}
 	resources.add(func(context.Context) error { return r.tree.Close() })
 	resources.add(func(context.Context) error { return r.handle.Close() })
+	// The session store flushes before its handle releases the writer lock: the
+	// derived search document still reads the open transcript.
+	resources.add(func(context.Context) error { return r.artifacts.Close() })
 	resources.add(func(context.Context) error { return r.inspector.Close() })
 	resources.add(r.extensions.Shutdown)
 	resources.add(r.integration.retire)

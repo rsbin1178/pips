@@ -17,7 +17,8 @@ func TestRuntimePlanDocumentPathIsSessionBoundAndDoesNotCreateFile(t *testing.T)
 	require.NoError(t, err)
 	assert.Equal(t, runtime.planStore.Path(), path)
 	assert.Equal(t, "plan.md", filepath.Base(path))
-	assert.Equal(t, runtime.handle.Metadata().ID, filepath.Base(filepath.Dir(path)))
+	assert.Equal(t, runtime.handle.StateDir(), filepath.Dir(path),
+		"a session's plan lives in its own state directory")
 
 	document, err := runtime.planStore.Read(t.Context())
 	require.ErrorIs(t, err, planmode.ErrNotFound)
