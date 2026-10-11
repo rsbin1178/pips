@@ -20,6 +20,7 @@ import (
 	"github.com/rsbin1178/pips/internal/coding/execution"
 	"github.com/rsbin1178/pips/internal/coding/paths"
 	"github.com/rsbin1178/pips/internal/coding/question"
+	"github.com/rsbin1178/pips/internal/coding/subagent"
 	"github.com/rsbin1178/pips/internal/coding/teamcontrol"
 	"github.com/rsbin1178/pips/internal/coding/teamstate"
 	"github.com/rsbin1178/pips/internal/coding/teamworktree"
@@ -202,7 +203,7 @@ func TestTeamConfirmationPersistsAggregateAndNarrowsLeadCatalog(t *testing.T) {
 		assert.Contains(t, names, expected)
 	}
 	for _, forbidden := range []string{
-		"apply_patch", "shell", "write_plan", "run_subagent", "spawn_agent",
+		"apply_patch", "shell", "write_plan", subagent.ToolName,
 		"team_claim_task", "team_release_task", "team_finish_task_attempt",
 	} {
 		assert.NotContains(t, names, forbidden)

@@ -35,7 +35,7 @@ func TestBuildCodingSystemPromptComposesDeterministicLayers(t *testing.T) {
 		Approval:         "on-request",
 		WorkspaceTrusted: true,
 		Mode:             ModeAgent,
-		ToolNames:        []string{"pips_tool_search", "read", "read", "spawn_agent"},
+		ToolNames:        []string{"pips_tool_search", "read", "read", "spawn_subagent"},
 		ToolSearchName:   "pips_tool_search",
 		ToolSearchSources: []catalog.SourceSummary{
 			{Kind: catalog.SourceMCP, ID: "github", Tools: 12},
@@ -50,8 +50,8 @@ func TestBuildCodingSystemPromptComposesDeterministicLayers(t *testing.T) {
 	assert.Contains(t, prompt, `"visible_tools": [`+"\n"+`    "pips_tool_search",`+"\n"+`    "read",`)
 	assert.Equal(t, 1, strings.Count(prompt, `"read"`))
 	assert.Contains(t, prompt, "Use pips_tool_search to discover deferred tools: mcp/github (12), mcp/slack (4). Then call the discovered tool directly.")
-	assert.Contains(t, prompt, "Use spawn_agent for independent background work")
-	assert.NotContains(t, prompt, "Use run_subagent for one isolated read-only specialist result")
+	assert.Contains(t, prompt, "Use spawn_subagent to delegate one independent task")
+	assert.NotContains(t, prompt, "Use spawn_agent for independent background work")
 	assert.Less(t, strings.Index(prompt, "# Runtime environment"), strings.Index(prompt, "# Tool guidance"))
 	assert.Less(t, strings.Index(prompt, "# Tool guidance"), strings.Index(prompt, "# Project instructions"))
 }
@@ -244,8 +244,7 @@ func TestRuntimeInjectsMainSystemPromptAndProjectInstructions(t *testing.T) {
 	assert.Contains(t, system, `"approval": "on-request"`)
 	assert.Contains(t, system, `"workspace_trusted": false`)
 	assert.Contains(t, system, `"apply_patch"`)
-	assert.Contains(t, system, `"run_subagent"`)
-	assert.Contains(t, system, `"spawn_agent"`)
+	assert.Contains(t, system, `"spawn_subagent"`)
 	assert.Contains(t, system, `"update_plan"`)
 }
 

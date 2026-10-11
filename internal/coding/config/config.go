@@ -42,6 +42,13 @@ const (
 	FieldSubagentMaxTokens     Field = "subagent.max_tokens" //nolint:gosec // Tokens are an execution budget, not credentials.
 	FieldSubagentMaxToolCalls  Field = "subagent.max_tool_calls"
 	FieldSubagentMaxDuration   Field = "subagent.max_duration_minutes"
+	// FieldSubagentStructuredResults restores the typed JSON result contract
+	// for builtin agents. It defaults to false: a builtin agent returns its
+	// final text.
+	FieldSubagentStructuredResults Field = "subagent.structured_results"
+	// FieldSubagentLimitBehavior selects what happens when the concurrent
+	// subagent cap is reached: queue (default) or fail.
+	FieldSubagentLimitBehavior Field = "subagent.limit_behavior"
 	FieldMode                  Field = "mode"
 	FieldTheme                 Field = "tui.theme"
 	FieldStatusLine            Field = "tui.status_line"
@@ -70,6 +77,8 @@ var fields = []Field{
 	FieldSubagentMaxTokens,
 	FieldSubagentMaxToolCalls,
 	FieldSubagentMaxDuration,
+	FieldSubagentStructuredResults,
+	FieldSubagentLimitBehavior,
 	FieldMode,
 	FieldTheme,
 	FieldStatusLine,
@@ -555,9 +564,9 @@ func DefaultCompactionConfig() CompactionConfig {
 }
 
 // SubagentConfig contains the user-configurable production admission and
-// execution budgets. MaxDepth defaults to zero (recursive delegation off);
-// zero is invalid for every other TOML field. The complete programmatic zero
-// value remains a legacy embedding boundary and is normalized by Runtime.
+// execution budgets. MaxDepth defaults to one: a child may not spawn another
+// child. Zero is invalid for every other TOML field. The complete programmatic
+// zero value remains a legacy embedding boundary and is normalized by Runtime.
 type SubagentConfig struct {
 	MaxDepth                     int
 	MaxConcurrent                int
@@ -567,19 +576,49 @@ type SubagentConfig struct {
 	MaxTokens                    int
 	MaxToolCalls                 int
 	MaxDurationMinutes           int
+	// StructuredResults restores the typed JSON result contract for builtin
+	// agents. The default is a free-text summary, matching grok-build.
+	StructuredResults bool
+	// LimitBehavior selects what happens at the concurrent subagent cap:
+	// "queue" parks the spawn until a slot frees, "fail" rejects it. The empty
+	// value is the legacy embedding boundary and resolves to "queue".
+	LimitBehavior string
 }
 
 // DefaultSubagentConfig returns the bounded production policy.
 func DefaultSubagentConfig() SubagentConfig {
 	return SubagentConfig{
-		MaxDepth:                     0,
-		MaxConcurrent:                4,
+		MaxDepth:                     1,
+		MaxConcurrent:                32,
 		MaxSpawnedPerRootInteraction: 8,
 		MaxAutoFollowUps:             4,
 		MaxTurns:                     64,
 		MaxTokens:                    256_000,
 		MaxToolCalls:                 128,
 		MaxDurationMinutes:           30,
+		StructuredResults:            false,
+		LimitBehavior:                LimitBehaviorQueue,
+	}
+}
+
+// LimitBehavior values for SubagentConfig.LimitBehavior.
+const (
+	// LimitBehaviorQueue parks a spawn at the cap until a slot frees.
+	LimitBehaviorQueue = "queue"
+	// LimitBehaviorFail rejects a spawn at the cap.
+	LimitBehaviorFail = "fail"
+)
+
+// ParseLimitBehavior accepts the two supported limit behaviors and reports
+// false for anything else.
+func ParseLimitBehavior(value string) (string, bool) {
+	switch value {
+	case LimitBehaviorQueue:
+		return LimitBehaviorQueue, true
+	case LimitBehaviorFail:
+		return LimitBehaviorFail, true
+	default:
+		return "", false
 	}
 }
 
@@ -653,15 +692,18 @@ type Patch struct {
 	ToolSearch       *bool
 	ToolSearchName   *string
 	DynamicSubagents *bool
-	Mode             *OperatingMode
-	Theme            *string
-	Screen           *string
-	AltScreen        *string
-	Mouse            *bool
-	ExitOutput       *string
-	ShowThinking     *bool
-	Sandbox          *SandboxMode
-	Approval         *ApprovalMode
+	// SubagentLimitBehavior overrides the concurrent-cap behavior. It is
+	// env-only; an invalid value falls back to queue.
+	SubagentLimitBehavior *string
+	Mode                  *OperatingMode
+	Theme                 *string
+	Screen                *string
+	AltScreen             *string
+	Mouse                 *bool
+	ExitOutput            *string
+	ShowThinking          *bool
+	Sandbox               *SandboxMode
+	Approval              *ApprovalMode
 }
 
 // Defaults returns the built-in application settings. Model is intentionally
@@ -698,7 +740,11 @@ func Defaults() Config {
 		Approval:   ApprovalOnRequest,
 		Compaction: DefaultCompactionConfig(),
 		Subagent:   DefaultSubagentConfig(),
-		sources:    sources,
+		// Custom subagents are on by default. PIPS_DYNAMIC_SUBAGENTS and
+		// --dynamic-subagents keep their precedence, so an operator can still
+		// force them off.
+		DynamicSubagents: true,
+		sources:          sources,
 	}
 }
 
@@ -907,6 +953,11 @@ func validateSubagent(value SubagentConfig) error {
 				item.minimum,
 				item.maximum,
 			)
+		}
+	}
+	if value.LimitBehavior != "" {
+		if _, ok := ParseLimitBehavior(value.LimitBehavior); !ok {
+			return fmt.Errorf("%w: subagent.limit_behavior must be queue or fail", ErrInvalid)
 		}
 	}
 
@@ -1179,6 +1230,10 @@ func apply(value Config, patch Patch, source Source) Config {
 	if patch.DynamicSubagents != nil {
 		value.DynamicSubagents = *patch.DynamicSubagents
 		value.sources[FieldDynamicSubagents] = source
+	}
+	if patch.SubagentLimitBehavior != nil {
+		value.Subagent.LimitBehavior = *patch.SubagentLimitBehavior
+		value.sources[FieldSubagentLimitBehavior] = source
 	}
 	if patch.Mode != nil {
 		value.Mode = *patch.Mode

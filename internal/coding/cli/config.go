@@ -99,6 +99,12 @@ func newConfigShowCommand(dependencies Dependencies, flags *rootFlags) *cobra.Co
 				config.FieldSubagentMaxDuration: strconv.Itoa(
 					state.config.Config.Subagent.MaxDurationMinutes,
 				),
+				config.FieldSubagentStructuredResults: strconv.FormatBool(
+					state.config.Config.Subagent.StructuredResults,
+				),
+				config.FieldSubagentLimitBehavior: strconv.Quote(
+					state.config.Config.Subagent.LimitBehavior,
+				),
 				config.FieldMode:       strconv.Quote(string(state.config.Config.Mode)),
 				config.FieldTheme:      strconv.Quote(state.config.Config.TUI.Theme),
 				config.FieldStatusLine: string(statusLine),

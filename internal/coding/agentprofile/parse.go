@@ -209,6 +209,19 @@ func decodeDefinitionFrontmatter(front string, limits Limits) (Definition, error
 				return Definition{}, profileErrorf("invalid_model", "model must be inherit or a canonical configured model reference")
 			}
 			definition.Model = decoded
+		case "capability_mode":
+			decoded, err := yamlString(value, key)
+			if err != nil {
+				return Definition{}, err
+			}
+			mode, ok := ParseCapabilityMode(decoded)
+			if !ok {
+				return Definition{}, profileErrorf(
+					"invalid_capability_mode",
+					"capability_mode must be read-only, read-write, execute, or all",
+				)
+			}
+			definition.CapabilityMode = mode
 		case "visibility":
 			decoded, err := decodeVisibility(value, definition.Visibility)
 			if err != nil {
@@ -239,12 +252,6 @@ func decodeDefinitionFrontmatter(front string, limits Limits) (Definition, error
 				return Definition{}, err
 			}
 			definition.Skills = decoded
-		case "delegation":
-			decoded, err := decodeDelegationSelection(value, limits)
-			if err != nil {
-				return Definition{}, err
-			}
-			definition.Delegation = decoded
 		case "mcp":
 			decoded, err := decodePrivateResourceSelection(value, "mcp", limits.MaxSelectors)
 			if err != nil {
@@ -381,7 +388,7 @@ func validModelSelection(value string, maximum int) bool {
 
 func unsupportedProfileField(value string) bool {
 	switch value {
-	case "permissions", "permissionMode", "sandbox", "mcpServers", "env", "command":
+	case "permissions", "permissionMode", "sandbox", "mcpServers", "env", "command", "delegation":
 		return true
 	default:
 		return false
@@ -440,55 +447,6 @@ func validPrivateResourceID(value string) bool {
 	}
 
 	return !separator
-}
-
-func decodeDelegationSelection(node *yaml.Node, limits Limits) (DelegationSelection, error) {
-	entries, err := mappingEntries(node, "delegation")
-	if err != nil {
-		return DelegationSelection{}, err
-	}
-	selection := DelegationSelection{}
-	for index := 0; index < len(entries); index += 2 {
-		key := entries[index].Value
-		value := entries[index+1]
-		switch key {
-		case "allow":
-			selection.Allow, err = decodeAgentIDs(value, "delegation.allow", limits)
-		default:
-			return DelegationSelection{}, profileErrorf(
-				"unknown_field",
-				"delegation field %q is not recognized",
-				key,
-			)
-		}
-		if err != nil {
-			return DelegationSelection{}, err
-		}
-	}
-
-	return selection, nil
-}
-
-func decodeAgentIDs(node *yaml.Node, field string, limits Limits) ([]string, error) {
-	values, err := yamlStringList(node, field)
-	if err != nil {
-		return nil, err
-	}
-	if len(values) > limits.MaxSelectors {
-		return nil, profileErrorf("selector_limit", "%s exceeds the selector limit", field)
-	}
-	seen := make(map[string]struct{}, len(values))
-	for _, value := range values {
-		if !validDefinitionID(value, limits.MaxIDBytes) {
-			return nil, profileErrorf("invalid_delegation", "%s contains an invalid Agent ID", field)
-		}
-		if _, duplicate := seen[value]; duplicate {
-			return nil, profileErrorf("invalid_delegation", "%s contains duplicate Agent ID %q", field, value)
-		}
-		seen[value] = struct{}{}
-	}
-
-	return values, nil
 }
 
 func decodeVisibility(node *yaml.Node, defaults Visibility) (Visibility, error) {

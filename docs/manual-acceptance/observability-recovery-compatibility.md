@@ -69,7 +69,7 @@
 - 前置条件：保存上一支持版本和候选版本；使用复制的 fixture state。
 - 隔离夹具：legacy config keys/env/flags、builtin subagent records、使用已删除 plan handshake 的历史 Session、Agent profile v1alpha1、ACP stable-v1 fixtures、Session/Team history。
 - 步骤：候选读取受支持旧状态；明确验证 removed `--provider`、`--model-api`、`PIPS_PROVIDER`、`PIPS_MODEL_API`、`[model]`、旧 `api`/request 字段报 migration error；运行 config/profile/event/ACP compatibility tests；做前后版本 open/resume matrix。
-- 预期证据：只承诺的旧记录可读；removed surface 不静默 normalize；unsupported schema/version fail closed 且原始文件不变；Dynamic bool default-off、builtin legacy wire 与 stable ACP v1 保持；已删除的 plan handshake 不会被当前版本静默恢复或自动代答。
+- 预期证据：只承诺的旧记录可读；removed surface 不静默 normalize；unsupported schema/version fail closed 且原始文件不变；Dynamic bool 默认开启且可显式关闭、builtin legacy wire 与 stable ACP v1 保持；已删除的 plan handshake 不会被当前版本静默恢复或自动代答。
 - 通过条件：兼容矩阵每项有结果与恢复路径，无 silent authority change/data loss。
 - 失败条件：旧配置变成不同 provider/protocol、unknown field 忽略、旧版写坏新状态、或测试 fixture 与实际 release artifact 不一致。
 - 清理/回滚：销毁复制 state；不要用旧版写真实新格式数据。
@@ -98,7 +98,7 @@
 - 预期证据：查询含时区/窗口/version/cohort/model mix/sample/exclusions；所有目标满足且 P0/P1 为 0；告警实际触发到 owner；rollback 后新能力关闭而历史/兼容能力保留；审批记录明确。
 - 通过条件：运营负责人和独立 reviewer 均签署，且没有用本地测试/短 smoke 替代时间窗口。
 - 失败条件：窗口未到、样本不足却判 GA、指标缺失/含秘密、rollback 未演练、未解决 P0/P1，或竞品比较使用过期二手信息。
-- 清理/回滚：若任一失败，维持/恢复 default-off；保存发布系统证据，不向仓库提交秘密。
+- 清理/回滚：若任一失败，把 Dynamic gate 显式关闭；保存发布系统证据，不向仓库提交秘密。
 - 来源/测试锚点：[Dynamic readiness](../coding-dynamic-subagents-readiness.md)、[observability](../../internal/coding/observability)、组织发布治理记录（外部证据）。
 - 结果：`未执行`。
 

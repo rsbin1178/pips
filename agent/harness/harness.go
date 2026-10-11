@@ -369,6 +369,45 @@ func (h *Harness) PromptMessages(ctx context.Context, msgs ...ai.Message) (*agen
 	return result, nil
 }
 
+// PromptMessagesRun drives the agent loop in streaming mode and returns the
+// terminal result. It persists the same save points as [Harness.PromptMessages]
+// and reports events through the harness's configured observer, so a caller
+// that needs the result rather than an event iterator still streams the model
+// call.
+func (h *Harness) PromptMessagesRun(
+	ctx context.Context,
+	msgs ...ai.Message,
+) (*agent.RunResult, error) {
+	run, runCtx, err := h.preparePrompt(ctx, msgs)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if run != nil {
+			_ = h.finishPrompt(run)
+		}
+	}()
+
+	result, runErr := run.runner.RunStream(
+		runCtx,
+		run.session,
+		func(agent.Event) bool { return true },
+		msgs...,
+	)
+	recorderErr := h.finishPrompt(run)
+	run = nil
+
+	if recorderErr != nil {
+		return result, recorderErr
+	}
+
+	if runErr != nil {
+		return result, runErr
+	}
+
+	return result, nil
+}
+
 // PromptStream is the streaming form of [Harness.Prompt]. It persists the
 // same save points as the blocking path and restores the harness to idle when
 // the consumer stops early.

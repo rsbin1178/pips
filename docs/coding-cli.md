@@ -468,7 +468,8 @@ the bound model, so a third-party model the adapter only knows as plain chat
 can still be declared vision-capable. Two declarations change runtime behavior
 today: `vision` admits image attachments in the composer, and
 `structured_output` selects a native JSON Schema response format for subagents
-instead of prompt-only JSON. Other declarations are accepted and reported as
+that opt into `structured_results = true`, instead of the prompt-only JSON
+fallback. Other declarations are accepted and reported as
 `advisory` by `pips config show` until a consumer reads them. `tools = false`
 is rejected, because Pips requires native tool calling.
 
@@ -553,20 +554,18 @@ authority boundary.
 
 ### Dynamic custom Agents (Alpha)
 
-Custom Coding Agents are reusable Markdown definitions. They are an Alpha
-feature and are disabled by default: discovery and validation still work while
-the gate is off, but Pips will not expose custom definitions to the parent
-model or dispatch them. Enable the gate at the highest-precedence layer that
-fits the use case:
+Custom Coding Agents are reusable Markdown definitions. They are enabled by
+default: discovery, validation, and dispatch all work without configuration.
+Turn them off at the highest-precedence layer that fits the use case:
 
 ```toml
 # ~/.pips/config.toml (or the file selected by --config)
-dynamic_subagents = true
+dynamic_subagents = false
 ```
 
 ```sh
-PIPS_DYNAMIC_SUBAGENTS=true pips agents list
-pips --dynamic-subagents agents run go-checker "inspect internal/coding"
+PIPS_DYNAMIC_SUBAGENTS=false pips agents list
+pips --dynamic-subagents=false agents run go-checker "inspect internal/coding"
 ```
 
 `pips config show` reports the resolved `dynamic_subagents` value and its
@@ -582,21 +581,47 @@ in the same selected user file:
 
 ```toml
 [subagent]
-max_concurrent = 4
+max_concurrent = 32
+limit_behavior = "queue"
 max_spawned_per_root_interaction = 8
 max_auto_follow_ups = 4
 max_turns = 64
 max_tokens = 256000
 max_tool_calls = 128
 max_duration_minutes = 30
-max_depth = 0
+max_depth = 1
+structured_results = false
 ```
 
 Every value is positive and hard-bounded; invalid or unknown fields make
 configuration validation fail before Runtime open. A partial table changes only
 the named values, and `pips config show` reports each effective value and source.
+`limit_behavior` is `queue` (default) or `fail`. At the `max_concurrent` cap a
+`queue` spawn waits in arrival order and `fail` rejects it with the model-facing
+`Concurrent subagent limit reached` message; `max_concurrent` clamps to at least
+one, so the cap can be tuned but never disabled. `PIPS_SUBAGENT_LIMIT_BEHAVIOR`
+overrides the configured value and an unrecognized value falls back to `queue`.
+A foreground spawn that waits out its budget (default ten minutes,
+`PIPS_SUBAGENT_AWAIT_BUDGET_MS`) is handed off to the background and returns its
+`subagent_id` immediately.
 These are production defaults, not new authority: profile selectors, child-owned
 approval, Sandbox, and the frozen generation capability intersection still apply.
+
+Built-in agent types are `general-purpose` (the full delegable catalog),
+`explore` and `plan` (read-only), and `review` (a pips extension, read-only). An
+omitted `subagent_type` resolves to `general-purpose`. Built-in agents return
+their final assistant text as the result. `structured_results = true` restores
+the typed JSON contract, where the child must return the role's schema and the
+result is validated locally. Child runs drive the model through the streaming
+path, so a provider whose non-streaming response carries no content still
+returns a result.
+
+The single delegation tool is `spawn_subagent`. Its required arguments are
+`prompt` and `description`; `subagent_type`, `run_in_background` (default
+`true`), `isolation`, `resume_from`, `cwd`, and `model` are optional.
+`isolation` accepts only `none`, and `resume_from`/`cwd`/`model` are rejected
+until their phases land. The model-visible `subagent_type` enum lists custom
+Agents only; built-in types are never enumerated.
 
 Pips discovers `*.md` definitions from these roots in increasing precedence:
 
@@ -624,6 +649,7 @@ schema: pips.agent/v1alpha1
 name: Go checker
 description: Inspect one bounded Go target and report evidence.
 model: inherit
+capability_mode: read-only
 visibility:
   user: true
   model: false
@@ -638,8 +664,6 @@ tools:
 skills:
   allow: [golang-code-style]
   preload: [golang-code-style]
-delegation:
-  allow: [test-runner]
 mcp:
   private: [source_control]
 hooks:
@@ -664,10 +688,17 @@ locally in addition to any provider structured-output support.
 weakening the profile. Skills select only already loaded, trusted Skills, and
 `preload` must be a subset of `allow`.
 
-`delegation.allow` names exact model-visible custom Agent IDs. Recursion is
-foreground-only, serial, cycle-checked, and disabled unless
-`[subagent].max_depth` is set to `1..3`; a recursive child receives only an
-exact `run_subagent` target list, never `spawn_agent`.
+`capability_mode` is `read-only`, `read-write`, `execute`, or `all`, with the
+source's input aliases accepted. It narrows the tool kinds a child may use and
+applies only when `tools.allow` is empty: an explicit allowlist already names its
+tools. `read-only` keeps read, list, glob, grep, session history, question, and
+Skill tools; `read-write` adds file editing; `execute` adds shell; `all` keeps
+every delegable tool. Tools without a local source identity (MCP and extension
+tools) survive every mode.
+
+A child cannot delegate further: `[subagent].max_depth` defaults to `1`, and the
+delegation tool is never offered to a child. The retired `delegation` frontmatter
+key is rejected as an unsupported field.
 
 `mcp.private` and `hooks.private` bind exact, already configured and trusted
 Agent-private integration IDs. They do not accept inline commands, URLs,
@@ -700,7 +731,7 @@ Pips freezes the intersection of the profile's selections with the active
 Runtime's delegable catalog, operating mode, Workspace trust, Sandbox,
 approval policy, model catalog, Skill/MCP generation, and per-call checks.
 Consequently a profile may request `apply_patch`, `shell`, an eligible MCP Tool,
-Tool Search, `ask_user`, an exact recursive target, or an exact configured
+Tool Search, `ask_user`, a `capability_mode`, or an exact configured
 private integration, but it receives the capability only when every Runtime
 and generation check permits it. It cannot define credentials, endpoints,
 environment variables, commands, Sandbox or permission overrides, or a new

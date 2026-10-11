@@ -64,6 +64,43 @@ func TestHarnessPromptPersistsRun(t *testing.T) {
 	assert.Equal(t, "Be terse.", requestSystemText(t, model.Requests()[0]))
 }
 
+// PromptMessagesRun streams the model call and still returns the terminal
+// result, persisting the same save points as the blocking path.
+func TestHarnessPromptMessagesRunPersistsRun(t *testing.T) {
+	t.Parallel()
+
+	model := newScriptedModel("m",
+		callResponse("c1", "add", `{"a":2,"b":3}`),
+		textResponse("It is 5.", 30),
+	)
+
+	sess := buildSession(t)
+
+	h, err := harness.New(model, sess, harness.WithTools(addTool()), harness.WithSystem("Be terse."))
+	require.NoError(t, err)
+
+	result, err := h.PromptMessagesRun(t.Context(), ai.UserText("2+3?"))
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, agent.StopEndTurn, result.Stop)
+	assert.Equal(t, "It is 5.", result.Text())
+	assert.Equal(t, harness.PhaseIdle, h.Phase())
+
+	// Same persisted exchange as the blocking path.
+	entries := sess.Entries()
+	require.Len(t, entries, 4)
+
+	for _, e := range entries {
+		assert.Equal(t, harness.KindMessage, e.Kind)
+	}
+
+	require.NotNil(t, entries[1].Usage)
+	assert.Equal(t, 10, entries[1].Usage.InputTokens)
+	require.NotNil(t, entries[3].Usage)
+	assert.Equal(t, 30, entries[3].Usage.InputTokens)
+	assert.Equal(t, "Be terse.", requestSystemText(t, model.Requests()[0]))
+}
+
 func TestHarnessResumesAcrossInstances(t *testing.T) {
 	t.Parallel()
 

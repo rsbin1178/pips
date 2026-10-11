@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -724,6 +725,7 @@ func openRuntime(
 			Compaction:        childCompaction,
 			FullCompaction:    runtime.fullCompactionPolicy(),
 			RequestPolicy:     requestPolicy,
+			StructuredResults: runtime.config.Subagent.StructuredResults,
 			Lifecycle:         runtime.subagentHookLifecycle(),
 			Options:           configured.Subagent,
 			AgentObservers:    []func(context.Context, agent.Event){runtime.observers.observe},
@@ -887,6 +889,8 @@ func configuredSubagentOptions(
 		MaxConcurrent:                configured.MaxConcurrent,
 		MaxSpawnedPerRootInteraction: configured.MaxSpawnedPerRootInteraction,
 		MaxAutoFollowUps:             configured.MaxAutoFollowUps,
+		LimitBehavior:                subagent.ParseLimitBehavior(configured.LimitBehavior),
+		ForegroundBudget:             subagentForegroundBudget(),
 	}
 	if override.Limits != (subagent.Limits{}) {
 		result.Limits = override.Limits
@@ -905,6 +909,22 @@ func configuredSubagentOptions(
 	}
 
 	return result
+}
+
+// subagentForegroundBudget resolves the foreground queued-spawn budget. The
+// environment override wins over the default; a non-positive or unparseable
+// value keeps the default.
+func subagentForegroundBudget() time.Duration {
+	raw := strings.TrimSpace(os.Getenv(config.SubagentAwaitBudgetEnv))
+	if raw == "" {
+		return subagent.DefaultForegroundBudget
+	}
+	millis, err := strconv.Atoi(raw)
+	if err != nil || millis <= 0 {
+		return subagent.DefaultForegroundBudget
+	}
+
+	return time.Duration(millis) * time.Millisecond
 }
 
 func newRuntimeScratchRoot(productRoot string) (*execution.PrivateTempRoot, error) {

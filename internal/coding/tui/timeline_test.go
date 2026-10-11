@@ -413,19 +413,19 @@ func TestTimelineProjectsSpawnAgentInOriginalToolRow(t *testing.T) {
 	state := coding.State{
 		Transcript: []ai.Message{
 			ai.Assistant(ai.ToolCallPart{
-				ID: "spawn-1", Name: subagent.SpawnToolName,
-				Args: ai.JSON(`{"role":"review","task":"Review the runtime"}`),
+				ID: "spawn-1", Name: subagent.ToolName,
+				Args: ai.JSON(`{"prompt":"Review the runtime","description":"review","subagent_type":"review"}`),
 			}),
 			ai.ToolResultText(
-				"spawn-1", subagent.SpawnToolName,
+				"spawn-1", subagent.ToolName,
 				`{"schema":"pips.coding.agent.spawn/v1alpha1","agent_id":"child-1","role":"review","state":"running"}`,
 			),
 		},
 		Tools: []coding.ToolState{{
 			RunID: "run-1",
 			Call: coding.ToolCall{
-				ID: "spawn-1", Name: subagent.SpawnToolName,
-				Arguments: ai.JSON(`{"role":"review","task":"Review the runtime"}`),
+				ID: "spawn-1", Name: subagent.ToolName,
+				Arguments: ai.JSON(`{"prompt":"Review the runtime","description":"review","subagent_type":"review"}`),
 			},
 			Status: coding.ToolStatusCompleted,
 		}},
@@ -447,7 +447,7 @@ func TestTimelineProjectsSpawnAgentInOriginalToolRow(t *testing.T) {
 	rendered := renderTimeline(blocks, newMarkdownRenderer(4), 100, themeDark, true)
 	assert.Contains(t, rendered, "✻ Reviewing Review the runtime")
 	assert.Contains(t, rendered, "Read internal/coding/runtime.go · 2 tools")
-	assert.NotContains(t, rendered, subagent.SpawnToolName)
+	assert.NotContains(t, rendered, subagent.ToolName)
 	assert.NotContains(t, rendered, "pips.coding.agent.spawn")
 }
 

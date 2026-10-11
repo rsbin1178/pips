@@ -299,8 +299,8 @@ func (e Event) matcherTargets(target string) []string {
 		values = append(values, "Bash")
 	case "apply_patch":
 		values = append(values, "Edit", "Write")
-	case "run_subagent", "spawn_agent":
-		values = append(values, "Agent")
+	case "spawn_subagent":
+		values = append(values, "Agent", "Task")
 	}
 
 	return values

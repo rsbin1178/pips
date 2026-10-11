@@ -183,6 +183,7 @@ max_duration_minutes = 45
 		MaxDepth:      2,
 		MaxConcurrent: 6, MaxSpawnedPerRootInteraction: 12, MaxAutoFollowUps: 5,
 		MaxTurns: 80, MaxTokens: 500_000, MaxToolCalls: 200, MaxDurationMinutes: 45,
+		LimitBehavior: config.LimitBehaviorQueue,
 	}, result.Config.Subagent)
 	for _, field := range []config.Field{
 		config.FieldSubagentMaxDepth,
@@ -216,6 +217,84 @@ func TestLoadSubagentPartialTableRetainsDefaultFieldSources(t *testing.T) {
 	source, ok = result.Config.Source(config.FieldSubagentMaxTurns)
 	require.True(t, ok)
 	assert.Equal(t, config.SourceDefault, source.Kind)
+}
+
+func TestLoadSubagentStructuredResults(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, "[subagent]\nstructured_results = true\n")
+	result, err := config.Load(config.LoadOptions{ConfigFile: path})
+	require.NoError(t, err)
+	assert.True(t, result.Config.Subagent.StructuredResults)
+	source, ok := result.Config.Source(config.FieldSubagentStructuredResults)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceConfigFile, source.Kind)
+	assert.Equal(t, path, source.Detail)
+
+	// A partial table that omits the field keeps the free-text default.
+	partial := filepath.Join(t.TempDir(), "partial.toml")
+	writeFile(t, partial, "[subagent]\nmax_concurrent = 2\n")
+	kept, err := config.Load(config.LoadOptions{ConfigFile: partial})
+	require.NoError(t, err)
+	assert.False(t, kept.Config.Subagent.StructuredResults)
+	source, ok = kept.Config.Source(config.FieldSubagentStructuredResults)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceDefault, source.Kind)
+}
+
+func TestLoadSubagentLimitBehaviorDefaultsAndSources(t *testing.T) {
+	t.Parallel()
+
+	// A partial table keeps the queue default with default provenance.
+	partial := filepath.Join(t.TempDir(), "partial.toml")
+	writeFile(t, partial, "[subagent]\nmax_concurrent = 2\n")
+	kept, err := config.Load(config.LoadOptions{ConfigFile: partial})
+	require.NoError(t, err)
+	assert.Equal(t, config.LimitBehaviorQueue, kept.Config.Subagent.LimitBehavior)
+	source, ok := kept.Config.Source(config.FieldSubagentLimitBehavior)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceDefault, source.Kind)
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, "[subagent]\nlimit_behavior = \"fail\"\n")
+	result, err := config.Load(config.LoadOptions{ConfigFile: path})
+	require.NoError(t, err)
+	assert.Equal(t, config.LimitBehaviorFail, result.Config.Subagent.LimitBehavior)
+	source, ok = result.Config.Source(config.FieldSubagentLimitBehavior)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceConfigFile, source.Kind)
+	assert.Equal(t, path, source.Detail)
+
+	invalid := filepath.Join(t.TempDir(), "invalid.toml")
+	writeFile(t, invalid, "[subagent]\nlimit_behavior = \"retry\"\n")
+	_, err = config.Load(config.LoadOptions{ConfigFile: invalid})
+	require.ErrorIs(t, err, config.ErrInvalid)
+}
+
+func TestLoadSubagentLimitBehaviorEnvPrecedence(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, "[subagent]\nlimit_behavior = \"fail\"\n")
+	result, err := config.Load(config.LoadOptions{
+		ConfigFile: path,
+		LookupEnv:  mapLookup(map[string]string{config.SubagentLimitBehaviorEnv: "queue"}),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, config.LimitBehaviorQueue, result.Config.Subagent.LimitBehavior)
+	source, ok := result.Config.Source(config.FieldSubagentLimitBehavior)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceEnvironment, source.Kind)
+	assert.Equal(t, config.SubagentLimitBehaviorEnv, source.Detail)
+
+	// An unrecognized value falls back to queue instead of failing the load.
+	fallback, err := config.Load(config.LoadOptions{
+		ConfigFile: path,
+		LookupEnv:  mapLookup(map[string]string{config.SubagentLimitBehaviorEnv: "retry"}),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, config.LimitBehaviorQueue, fallback.Config.Subagent.LimitBehavior)
 }
 
 func TestLoadSubagentBudgetsRejectInvalidAndUnknownValues(t *testing.T) {

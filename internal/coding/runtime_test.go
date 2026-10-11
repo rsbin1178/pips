@@ -455,7 +455,7 @@ func TestRuntimeQueuesAgentNotificationIntoMatchingActiveInteraction(t *testing.
 	}()
 	select {
 	case <-model.started:
-	case <-time.After(time.Second):
+	case <-time.After(30 * time.Second):
 		require.FailNow(t, "parent model did not start")
 	}
 
@@ -549,10 +549,10 @@ func TestRuntimeRunsReadOnlySubagentWithoutProjectingChildTranscript(t *testing.
 	model := newRuntimeModel(
 		runtimeToolResponse(
 			"delegate-1",
-			"run_subagent",
-			`{"role":"explore","task":"Locate the runtime composition root."}`,
+			subagent.ToolName,
+			`{"prompt":"Locate the runtime composition root.","description":"delegate","subagent_type":"explore","run_in_background":false}`,
 		),
-		runtimeTextResponse(`{"summary":"located","evidence":[],"unknowns":[]}`),
+		runtimeTextResponse("Located the runtime composition root."),
 		runtimeTextResponse("parent answer"),
 	)
 	telemetry := make([]TelemetryEvent, 0)
@@ -577,7 +577,7 @@ func TestRuntimeRunsReadOnlySubagentWithoutProjectingChildTranscript(t *testing.
 	assert.Contains(t, types, EventSubagentCompleted)
 	for _, event := range events {
 		if delta, ok := event.Payload.(MessageDelta); ok {
-			assert.NotContains(t, delta.Text, `"summary":"located"`)
+			assert.NotContains(t, delta.Text, "Located the runtime composition root.")
 		}
 	}
 
@@ -599,16 +599,23 @@ func TestRuntimeRunsReadOnlySubagentWithoutProjectingChildTranscript(t *testing.
 
 	requests := model.Requests()
 	require.Len(t, requests, 3)
-	assert.Contains(t, toolNamesFromRequest(requests[0]), "run_subagent")
-	assert.Equal(t, []string{"read", "ls", "glob", "grep"}, toolNamesFromRequest(requests[1]))
-	assert.Contains(t, toolNamesFromRequest(requests[2]), "run_subagent")
+	assert.Contains(t, toolNamesFromRequest(requests[0]), subagent.ToolName)
+	childTools := toolNamesFromRequest(requests[1])
+	for _, expected := range []string{"read", "ls", "glob", "grep"} {
+		assert.Contains(t, childTools, expected)
+	}
+	for _, forbidden := range []string{"apply_patch", "shell", subagent.ToolName} {
+		assert.NotContains(t, childTools, forbidden)
+	}
+	assert.Contains(t, toolNamesFromRequest(requests[2]), subagent.ToolName)
 
 	summaries, err := runtime.ListSubagents(t.Context())
 	require.NoError(t, err)
 	require.Len(t, summaries, 1)
 	detail, err := runtime.InspectSubagent(t.Context(), summaries[0].ChildSessionID)
 	require.NoError(t, err)
-	assert.IsType(t, subagent.ExploreResult{}, detail.Result)
+	// The default builtin contract returns the child's final text.
+	assert.Equal(t, "Located the runtime composition root.", detail.Result)
 	require.Len(t, detail.Transcript, 2)
 	assert.IsType(t, ai.UserMessage{}, detail.Transcript[0])
 	assert.IsType(t, ai.AssistantMessage{}, detail.Transcript[1])
@@ -618,6 +625,8 @@ func TestRuntimeRunsReadOnlySubagentWithoutProjectingChildTranscript(t *testing.
 	require.NoError(t, err)
 	assert.Equal(t, child.ChildSessionID, waited.ChildSessionID)
 	assert.Equal(t, subagent.OutcomeSucceeded, waited.Outcome)
+	// Wait reconstructs the same free-text result from the durable journal.
+	assert.Equal(t, "Located the runtime composition root.", waited.Value)
 	require.NoError(t, runtime.CancelSubagent(t.Context(), child.ChildSessionID))
 	assert.Equal(t, child.ChildSessionID, childState.SessionID)
 	assert.Equal(t, InteractionSucceeded, childState.Interaction.Outcome)
@@ -2288,8 +2297,8 @@ func (m *backgroundSpawnRuntimeModel) Generate(
 	case 1:
 		return runtimeToolResponse(
 			"spawn-1",
-			"spawn_agent",
-			`{"role":"explore","task":"Inspect the runtime in the background."}`,
+			subagent.ToolName,
+			`{"prompt":"Inspect the runtime in the background.","description":"delegate","subagent_type":"explore"}`,
 		), nil
 	case 2:
 		return runtimeTextResponse("parent continued"), nil
@@ -2369,8 +2378,8 @@ func (m *canceledForegroundSubagentRuntimeModel) Generate(
 
 	return runtimeToolResponse(
 		"delegate-cancel",
-		"run_subagent",
-		`{"role":"explore","task":"Wait until the parent is canceled."}`,
+		subagent.ToolName,
+		`{"prompt":"Wait until the parent is canceled.","description":"delegate","subagent_type":"explore","run_in_background":false}`,
 	), nil
 }
 

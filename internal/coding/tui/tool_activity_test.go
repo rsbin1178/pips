@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding"
+	"github.com/rsbin1178/pips/internal/coding/subagent"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -386,13 +387,13 @@ func TestTimelineReconstructsDurableSubagentToolActivity(t *testing.T) {
 
 	result := ai.ToolResultText(
 		"call-1",
-		"run_subagent",
+		subagent.ToolName,
 		`{"schema":"pips.coding.subagent.result/v1alpha1","role":"explore","child_session_id":"child-1","outcome":"succeeded","code":"ok","turns":3,"tool_calls":8,"usage":{"InputTokens":1200,"OutputTokens":300},"duration_millis":23000}`,
 	)
 	state := coding.State{Transcript: []ai.Message{
 		ai.Assistant(ai.ToolCallPart{
-			ID: "call-1", Name: "run_subagent",
-			Args: ai.JSON(`{"role":"explore","task":"Audit the Tool presentation paths"}`),
+			ID: "call-1", Name: subagent.ToolName,
+			Args: ai.JSON(`{"prompt":"Audit the Tool presentation paths","description":"audit","subagent_type":"explore"}`),
 		}),
 		result,
 	}}
@@ -406,7 +407,7 @@ func TestTimelineReconstructsDurableSubagentToolActivity(t *testing.T) {
 	)
 	assert.Contains(t, rendered, "• Explored Audit the Tool presentation paths")
 	assert.Contains(t, rendered, "Completed in 23s · 8 tools · 1.5k tokens")
-	assert.NotContains(t, rendered, "run_subagent")
+	assert.NotContains(t, rendered, subagent.ToolName)
 	assert.NotContains(t, rendered, "child-1")
 }
 

@@ -146,7 +146,7 @@ tool name and these Codex-compatible aliases:
 
 - `shell` also matches `Bash`;
 - `apply_patch` also matches `Edit` and `Write`;
-- `run_subagent` and `spawn_agent` also match `Agent`.
+- `spawn_subagent` also matches `Agent`.
 
 MCP and other local function tools match their exact Pips tool name. Matching
 groups from user and project files all run. Commands for one event start

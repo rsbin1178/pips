@@ -708,7 +708,7 @@ func TestScrollbackUpdatesOneSubagentCardAndCommitsOnlyTerminal(t *testing.T) {
 	model.state.Transcript = []ai.Message{
 		ai.Assistant(ai.ToolCallPart{
 			ID: "call-1", Name: subagent.ToolName,
-			Args: ai.JSON(`{"role":"plan","task":"Plan the change"}`),
+			Args: ai.JSON(`{"prompt":"Plan the change","description":"plan","subagent_type":"plan"}`),
 		}),
 		model.state.Tools[0].Result,
 	}
@@ -744,7 +744,7 @@ func TestScrollbackHoldsCompletedSubagentToolUntilLifecycleIsTerminal(t *testing
 		RunID: "parent-run",
 		Call: coding.ToolCall{
 			ID: "call-1", Name: subagent.ToolName,
-			Arguments: ai.JSON(`{"role":"plan","task":"Plan the change"}`),
+			Arguments: ai.JSON(`{"prompt":"Plan the change","description":"plan","subagent_type":"plan"}`),
 		},
 		Status: coding.ToolStatusCompleted,
 		Result: ai.ToolResultText(
@@ -756,7 +756,7 @@ func TestScrollbackHoldsCompletedSubagentToolUntilLifecycleIsTerminal(t *testing
 	model.state.Transcript = []ai.Message{
 		ai.Assistant(ai.ToolCallPart{
 			ID: "call-1", Name: subagent.ToolName,
-			Args: ai.JSON(`{"role":"plan","task":"Plan the change"}`),
+			Args: ai.JSON(`{"prompt":"Plan the change","description":"plan","subagent_type":"plan"}`),
 		}),
 		model.state.Tools[0].Result,
 	}
@@ -788,7 +788,7 @@ func TestScrollbackSuppressesLateLifecycleAfterDurableSubagentRecovery(t *testin
 		RunID: "parent-run",
 		Call: coding.ToolCall{
 			ID: "call-1", Name: subagent.ToolName,
-			Arguments: ai.JSON(`{"role":"explore","task":"Inspect runtime"}`),
+			Arguments: ai.JSON(`{"prompt":"Inspect runtime","description":"inspect","subagent_type":"explore"}`),
 		},
 		Status: coding.ToolStatusCompleted,
 		Result: ai.ToolResultText(

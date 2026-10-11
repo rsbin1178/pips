@@ -10,6 +10,7 @@ import (
 	"github.com/rsbin1178/pips/internal/coding/config"
 	"github.com/rsbin1178/pips/internal/coding/planmode"
 	"github.com/rsbin1178/pips/internal/coding/planreview"
+	"github.com/rsbin1178/pips/internal/coding/subagent"
 	"github.com/rsbin1178/pips/internal/coding/tasklist"
 	"github.com/rsbin1178/pips/internal/coding/tools"
 	"github.com/stretchr/testify/assert"
@@ -108,7 +109,7 @@ func TestSuggestToolNames(t *testing.T) {
 
 	known := []string{
 		"apply_patch", "read", "grep", "glob", "ls", "shell", "ask_user",
-		"pips_tool_search", "run_subagent", "spawn_agent", "update_plan",
+		"pips_tool_search", subagent.ToolName, "update_plan",
 	}
 
 	tests := []struct {

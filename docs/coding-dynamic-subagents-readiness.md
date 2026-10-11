@@ -12,21 +12,24 @@ required.
 ## Ownership and release boundary
 
 Dynamic Subagent is a Coding Agent capability. Profile discovery/compilation,
-exact recursive targets, child Sessions and approvals, private integration
-bindings, model drafts, recovery, and release policy live in `internal/coding`
+capability-mode tool selection, child Sessions and approvals, private
+integration bindings, model drafts, recovery, and release policy live in `internal/coding`
 and `internal/coding/subagent`. The generic `agent` packages continue to supply
 only reusable Harness, Tool, Catalog, cancellation, and usage primitives.
 
-The existing default-off boolean is the kill switch:
+Custom Agents are on by default. The gate is now an off switch rather than an
+opt-in:
 
 ```toml
 dynamic_subagents = false
 ```
 
 `PIPS_DYNAMIC_SUBAGENTS` and `--dynamic-subagents` keep their existing
-environment/flag precedence. A rollback must remove any higher-precedence true
-override and verify the result with `pips config show`. Pips does not implement
-a local percentage cohort system or a second release-stage setting.
+environment/flag precedence. Turning the gate off stops new custom dispatch and
+draft promotion without deleting definitions or making historical child
+Sessions unreadable; verify the resolved value with `pips config show`. Pips does
+not implement a local percentage cohort system or a second release-stage
+setting.
 
 ## Beta telemetry
 
@@ -36,21 +39,25 @@ Pips does not create an export goroutine or queue.
 
 | Instrument | Purpose | Bounded dimensions |
 | --- | --- | --- |
-| `pips.coding.subagent.admissions` counter | Shared tree budget decisions before child creation | `coding.subagent.admission.outcome=accepted|rejected`, `coding.subagent.admission.reason=busy|capacity|spawn_limit|closed|invalid`, `coding.subagent.delivery=foreground|background`, `coding.subagent.depth=0..3` |
+| `pips.coding.subagent.admissions` counter | Shared tree budget decisions | `coding.subagent.admission.outcome=accepted|queued|rejected`, `coding.subagent.admission.reason=capacity|queue_timeout|spawn_limit|closed|invalid`, `coding.subagent.delivery=foreground|background`, `coding.subagent.depth=0..1` |
 | `pips.coding.subagents` counter | Durable child lifecycle edges | role, state, delivery |
 | `pips.coding.subagent.duration` histogram | Terminal child duration | role, state, delivery |
 | `pips.coding.approvals` and `pips.coding.questions` counters | Input-control lifecycle | existing fixed state/tool dimensions |
 | `pips.coding.integration.diagnostics` counter | Disabled integrations/observers and fixed diagnostic codes | component and code |
 
-Admission is immediate success or error; there is no Subagent queue and
-therefore no queue-depth metric. Approval/question events currently provide
-counts but no safe wait-duration correlation contract. Generation/private
-lease correctness is covered by lifecycle/diagnostic signals and race tests;
-adding a new resource-lifecycle metric requires separate evidence and review.
+Admission is accepted immediately, queued in arrival order, or rejected. A
+queued spawn emits a content-free `queued` outcome; the queue has no depth
+metric, and no queue entry, task, or child identity is ever recorded.
+Approval/question events currently provide counts but no safe wait-duration
+correlation contract. Generation/private lease correctness is covered by
+lifecycle/diagnostic signals and race tests; adding a new resource-lifecycle
+metric requires separate evidence and review.
 
 The admission signal is not a durable `pips.coding.event/v1alpha1` event. A
-capacity rejection happens before a child Session exists, so no placeholder
-Session or journal entry is created solely for metrics.
+foreground capacity rejection happens before a child Session exists, so no
+placeholder Session or journal entry is created solely for metrics. A background
+spawn returns its `subagent_id` before its slot is granted, so a later admission
+refusal is recorded as that child's own terminal state.
 
 The following values are forbidden as metric attributes or aggregate telemetry
 fields: Agent/profile ID, definition source/digest, Session/interaction/run/Tool
@@ -101,12 +108,13 @@ users, invents cohorts, or silently changes the feature flag.
 
 ## Rollback drill
 
-Perform this on the exact candidate artifact before default-on or GA:
+Perform this on the exact candidate artifact before a release that ships a new
+default. Custom Agents are on by default, so the drill verifies the off switch.
 
 1. Capture `pips config show`, `pips agents list`, one builtin run, one custom
    run, and the resulting child IDs. Keep the Agent definition file in place.
-2. Set `dynamic_subagents = false`, remove any higher-precedence true
-   environment/flag override, and restart or reopen the Runtime.
+2. Set `dynamic_subagents = false` (or `PIPS_DYNAMIC_SUBAGENTS=false`), then
+   restart or reopen the Runtime.
 3. Verify `pips config show` resolves the gate to false and identifies the
    intended source.
 4. Verify `pips agents list` still reports the definition as unavailable,
@@ -128,13 +136,14 @@ operator. A failed drill blocks promotion to the next stage.
 
 Repository-controlled evidence:
 
-- [x] bounded production execution/admission defaults and shared recursive
+- [x] bounded production execution/admission defaults and shared child
   budget;
 - [x] authority-subset property tests, malicious definition fuzzing, and
   approval/recovery/private-integration red-team coverage;
-- [x] bounded exact recursion, Agent-private configured MCP/Hook references,
-  and user-promoted non-executable model drafts;
-- [x] default-off bool compatibility, `pips.agent/v1alpha1`, legacy builtin and
+- [x] single-level delegation with builtin agent types and capability modes,
+  Agent-private configured MCP/Hook references, and user-promoted
+  non-executable model drafts;
+- [x] default-on with an off switch, `pips.agent/v1alpha1`, legacy builtin and
   old-plan read compatibility;
 - [x] content-free admission/lifecycle telemetry and automated rollback
   regression;

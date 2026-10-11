@@ -376,6 +376,29 @@ func TestSubagentRouteKeepsAssistantOutputUntilValidatedResultArrives(t *testing
 	assert.Contains(t, content, "First inspect the runtime, then update its tests.")
 }
 
+func TestSubagentRouteRendersFreeTextResult(t *testing.T) {
+	t.Parallel()
+
+	const answer = "Located the runtime composition root."
+	detail := subagent.Detail{
+		Summary: subagent.Summary{
+			ChildSessionID: "child-1",
+			Role:           subagent.RoleExplore,
+			State:          subagent.StateSucceeded,
+		},
+		Transcript: []ai.Message{
+			ai.UserText("Locate the runtime composition root."),
+			ai.AssistantText("The root is internal/coding/runtime.go."),
+		},
+		Result: answer,
+	}
+	model := readyModel(t, true)
+
+	content := model.subagentRouteContent(testSubagentState(detail), &detail)
+	assert.Contains(t, content, answer)
+	assert.NotContains(t, content, "Validated result is unavailable")
+}
+
 func TestAgentsRouteCancelsSelectedChild(t *testing.T) {
 	t.Parallel()
 

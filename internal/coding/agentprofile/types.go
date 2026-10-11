@@ -70,6 +70,39 @@ const (
 	DeliveryBackground Delivery = "background"
 )
 
+// CapabilityMode selects which tool classes an agent type may use. It is a
+// property of the type, never a spawn argument, and it narrows the Runtime's
+// delegable catalog rather than granting anything by itself.
+type CapabilityMode string
+
+const (
+	// CapabilityReadOnly keeps read, search, history, question, and Skill tools.
+	CapabilityReadOnly CapabilityMode = "read-only"
+	// CapabilityReadWrite adds file editing to the read-only set.
+	CapabilityReadWrite CapabilityMode = "read-write"
+	// CapabilityExecute adds shell execution to the read-only set.
+	CapabilityExecute CapabilityMode = "execute"
+	// CapabilityAll keeps every delegable tool.
+	CapabilityAll CapabilityMode = "all"
+)
+
+// ParseCapabilityMode accepts the canonical spelling and the tolerated input
+// aliases that the source enum accepts. It reports false for an unknown value.
+func ParseCapabilityMode(value string) (CapabilityMode, bool) {
+	switch value {
+	case string(CapabilityReadOnly), "readonly", "readOnly", "read_only", "ReadOnly":
+		return CapabilityReadOnly, true
+	case string(CapabilityReadWrite), "readwrite", "readWrite", "read_write", "ReadWrite":
+		return CapabilityReadWrite, true
+	case string(CapabilityExecute), "Execute", "EXECUTE":
+		return CapabilityExecute, true
+	case string(CapabilityAll), "All", "ALL":
+		return CapabilityAll, true
+	default:
+		return "", false
+	}
+}
+
 // Audience identifies the caller whose visible profiles are requested.
 type Audience string
 
@@ -148,13 +181,6 @@ type SkillSelection struct {
 	Preload []string
 }
 
-// DelegationSelection names the exact custom Agents this profile may invoke.
-// Runtime still resolves every ID against the frozen model-visible registry;
-// parsing this request never grants delegation authority by itself.
-type DelegationSelection struct {
-	Allow []string
-}
-
 // MCPSelection names exact configured Agent-private MCP servers. It does not
 // select any tool by itself; Tools remains the capability authority surface.
 type MCPSelection struct {
@@ -197,15 +223,17 @@ type Definition struct {
 	Description  string
 	Instructions string
 	Model        string
-	Visibility   Visibility
-	Delivery     []Delivery
-	Limits       ExecutionLimits
-	Tools        ToolSelection
-	Skills       SkillSelection
-	Delegation   DelegationSelection
-	MCP          MCPSelection
-	Hooks        HookSelection
-	Output       OutputContract
+	// CapabilityMode narrows the tool kinds this type may use. It applies only
+	// when Tools.Allow is empty; an explicit allowlist already names its tools.
+	CapabilityMode CapabilityMode
+	Visibility     Visibility
+	Delivery       []Delivery
+	Limits         ExecutionLimits
+	Tools          ToolSelection
+	Skills         SkillSelection
+	MCP            MCPSelection
+	Hooks          HookSelection
+	Output         OutputContract
 }
 
 // Clone returns a detached definition snapshot.
@@ -216,7 +244,6 @@ func (d Definition) Clone() Definition {
 	cloned.Tools.Require = slices.Clone(d.Tools.Require)
 	cloned.Skills.Allow = slices.Clone(d.Skills.Allow)
 	cloned.Skills.Preload = slices.Clone(d.Skills.Preload)
-	cloned.Delegation.Allow = slices.Clone(d.Delegation.Allow)
 	cloned.MCP.Private = slices.Clone(d.MCP.Private)
 	cloned.Hooks.Private = slices.Clone(d.Hooks.Private)
 	cloned.Output.Schema = slices.Clone(d.Output.Schema)

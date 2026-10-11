@@ -109,8 +109,8 @@ type toolActivityRecord struct {
 }
 
 type durableSubagentArgs struct {
-	Role subagent.Role `json:"role"`
-	Task string        `json:"task"`
+	Role subagent.Role `json:"subagent_type"`
+	Task string        `json:"prompt"`
 }
 
 type durableSubagentResult struct {
@@ -433,11 +433,11 @@ func describeToolCall(call coding.ToolCall) (toolActivityClass, string, string) 
 		return toolClassPlan, "Enter plan mode", ""
 	case planmode.ExitToolName:
 		return toolClassPlan, "Submit for approval", ""
-	case subagent.ToolName, subagent.SpawnToolName:
-		role := subagent.Role(toolArgumentString(arguments, "role"))
+	case subagent.ToolName:
+		role := subagent.Role(toolArgumentString(arguments, "subagent_type"))
 
 		return toolClassSubagent, subagentActivityLabel(role, subagent.StateRunning),
-			oneLineSubagentTask(toolArgumentString(arguments, "task"))
+			oneLineSubagentTask(toolArgumentString(arguments, "prompt"))
 	default:
 		return toolClassGeneric, "Call", call.Name
 	}

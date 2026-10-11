@@ -31,13 +31,15 @@ type Dispatcher interface {
 }
 
 // DispatchInput is the bounded, application-owned input for a child runtime
-// binding. The Session belongs solely to this child execution.
+// binding. The Session belongs solely to this child execution. SystemSuffix is
+// the trusted lifecycle-hook context rendered into the child's system prompt.
 type DispatchInput struct {
-	Plan     ExecutionPlan
-	Request  Request
-	Child    *session.Handle
-	Observer Observer
-	OnEvent  func(context.Context, agent.Event)
+	Plan         ExecutionPlan
+	Request      Request
+	Child        *session.Handle
+	Observer     Observer
+	OnEvent      func(context.Context, agent.Event)
+	SystemSuffix string
 }
 
 // Runner owns the child-specific execution/control scope for one compiled
@@ -65,12 +67,12 @@ func validateDispatchedPlan(request Request, plan ExecutionPlan, ceiling Limits)
 	if err := validateExecutionPlan(plan, false); err != nil {
 		return err
 	}
-	if plan.Identity.Kind != AgentKindCustom && plan.Identity.Kind != AgentKindEphemeral {
-		return fmt.Errorf("%w: dispatcher may not replace a builtin execution", ErrInvalid)
-	}
-	if plan.Identity.ID != request.AgentID || request.Role != "" ||
+	if plan.Identity.ID != request.AgentID ||
 		plan.Delivery != request.Delivery || !limitsDoNotExpand(ceiling, plan.Limits) {
 		return fmt.Errorf("%w: dispatched plan differs from admitted request or limits", ErrInvalid)
+	}
+	if request.Role != "" && plan.Identity.LegacyRole() != request.Role {
+		return fmt.Errorf("%w: dispatched plan role differs from the admitted request", ErrInvalid)
 	}
 
 	return nil

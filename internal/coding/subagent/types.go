@@ -14,11 +14,9 @@ import (
 var (
 	// ErrInvalid means configuration, request, or durable data is invalid.
 	ErrInvalid = errors.New("coding subagent: invalid input")
-	// ErrBusy preserves the single-slot compatibility error when a manager is
-	// configured with MaxConcurrent equal to one.
-	ErrBusy = errors.New("coding subagent: busy")
-	// ErrCapacity means the Runtime's concurrent child limit is exhausted.
-	ErrCapacity = errors.New("coding subagent: capacity exhausted")
+	// ErrCapacity means the Runtime's concurrent child limit is exhausted. It
+	// is the compatibility alias of ErrConcurrentLimit.
+	ErrCapacity = ErrConcurrentLimit
 	// ErrSpawnLimit means one root interaction exhausted its child budget.
 	ErrSpawnLimit = errors.New("coding subagent: spawn limit exhausted")
 	// ErrClosed means the manager no longer accepts executions.
@@ -152,7 +150,11 @@ type Result struct {
 	ToolCalls      int
 	Usage          ai.Usage
 	Duration       time.Duration
-	Value          any
+	// Structured reports that Value is a typed structured result rather than
+	// the default free-text summary. It selects the clone decoder so a text
+	// result is never re-decoded into a role's typed shape.
+	Structured bool
+	Value      any
 }
 
 // Event is one content-bounded child lifecycle update.

@@ -29,9 +29,15 @@ const (
 	ToolSearchEnv       = "PIPS_TOOL_SEARCH"
 	ToolSearchNameEnv   = "PIPS_TOOL_SEARCH_NAME"
 	DynamicSubagentsEnv = "PIPS_DYNAMIC_SUBAGENTS"
-	ModeEnv             = "PIPS_MODE"
-	SandboxEnv          = "PIPS_SANDBOX"
-	ApprovalEnv         = "PIPS_APPROVAL"
+	// SubagentLimitBehaviorEnv overrides [subagent].limit_behavior. It is not
+	// pinnable; an invalid value falls back to queue.
+	SubagentLimitBehaviorEnv = "PIPS_SUBAGENT_LIMIT_BEHAVIOR"
+	// SubagentAwaitBudgetEnv bounds a foreground queued spawn's wait in
+	// milliseconds before it is handed off to the background.
+	SubagentAwaitBudgetEnv = "PIPS_SUBAGENT_AWAIT_BUDGET_MS"
+	ModeEnv                = "PIPS_MODE"
+	SandboxEnv             = "PIPS_SANDBOX"
+	ApprovalEnv            = "PIPS_APPROVAL"
 )
 
 var (
@@ -211,14 +217,16 @@ type fileCompaction struct {
 }
 
 type fileSubagent struct {
-	MaxDepth                     *int `toml:"max_depth"`
-	MaxConcurrent                *int `toml:"max_concurrent"`
-	MaxSpawnedPerRootInteraction *int `toml:"max_spawned_per_root_interaction"`
-	MaxAutoFollowUps             *int `toml:"max_auto_follow_ups"`
-	MaxTurns                     *int `toml:"max_turns"`
-	MaxTokens                    *int `toml:"max_tokens"`
-	MaxToolCalls                 *int `toml:"max_tool_calls"`
-	MaxDurationMinutes           *int `toml:"max_duration_minutes"`
+	MaxDepth                     *int    `toml:"max_depth"`
+	MaxConcurrent                *int    `toml:"max_concurrent"`
+	MaxSpawnedPerRootInteraction *int    `toml:"max_spawned_per_root_interaction"`
+	MaxAutoFollowUps             *int    `toml:"max_auto_follow_ups"`
+	MaxTurns                     *int    `toml:"max_turns"`
+	MaxTokens                    *int    `toml:"max_tokens"`
+	MaxToolCalls                 *int    `toml:"max_tool_calls"`
+	MaxDurationMinutes           *int    `toml:"max_duration_minutes"`
+	StructuredResults            *bool   `toml:"structured_results"`
+	LimitBehavior                *string `toml:"limit_behavior"`
 }
 
 type fileProvider struct {
@@ -649,6 +657,20 @@ func decodeLayer(value fileConfig) (fileLayer, error) {
 			value.Subagent.MaxDurationMinutes,
 			&subagent.MaxDurationMinutes,
 		)
+		if value.Subagent.StructuredResults != nil {
+			subagent.StructuredResults = *value.Subagent.StructuredResults
+			layer.subagentFields = append(layer.subagentFields, FieldSubagentStructuredResults)
+		}
+		if value.Subagent.LimitBehavior != nil {
+			mode, ok := ParseLimitBehavior(*value.Subagent.LimitBehavior)
+			if !ok {
+				return fileLayer{}, fmt.Errorf(
+					"%w: subagent.limit_behavior must be queue or fail", ErrInvalid,
+				)
+			}
+			subagent.LimitBehavior = mode
+			layer.subagentFields = append(layer.subagentFields, FieldSubagentLimitBehavior)
+		}
 		if err := validateSubagent(subagent); err != nil {
 			return fileLayer{}, err
 		}
@@ -1126,6 +1148,7 @@ func applyEnvironment(value *Config, lookup LookupEnv) error {
 		{name: ToolSearchEnv, parse: toolSearchPatch},
 		{name: ToolSearchNameEnv, parse: toolSearchNamePatch},
 		{name: DynamicSubagentsEnv, parse: dynamicSubagentsPatch},
+		{name: SubagentLimitBehaviorEnv, parse: subagentLimitBehaviorPatch},
 		{name: ModeEnv, parse: operatingModePatch},
 		{name: SandboxEnv, parse: sandboxPatch},
 		{name: ApprovalEnv, parse: approvalPatch},
@@ -1277,6 +1300,17 @@ func dynamicSubagentsPatch(value string) (Patch, error) {
 	}
 
 	return Patch{DynamicSubagents: &enabled}, nil
+}
+
+// subagentLimitBehaviorPatch mirrors the source resolution: an unrecognized
+// value is not a configuration error, it falls back to the queue default.
+func subagentLimitBehaviorPatch(value string) (Patch, error) {
+	behavior, ok := ParseLimitBehavior(strings.ToLower(strings.TrimSpace(value)))
+	if !ok {
+		behavior = LimitBehaviorQueue
+	}
+
+	return Patch{SubagentLimitBehavior: &behavior}, nil
 }
 
 func parseBoolPatch(value string) (bool, error) {
