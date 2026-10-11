@@ -230,6 +230,8 @@ type fileProvider struct {
 	Capabilities             fileCapabilities     `toml:"capabilities"`
 	ToolSearchName           *string              `toml:"tool_search_name"`
 	StreamIdleTimeoutSeconds *int                 `toml:"stream_idle_timeout_seconds"`
+	UserAgentEnabled         *bool                `toml:"user_agent_enabled"`
+	UserAgent                *string              `toml:"user_agent"`
 	Models                   map[string]fileModel `toml:"models"`
 }
 
@@ -239,6 +241,8 @@ type fileModel struct {
 	ContextWindow            *int                   `toml:"context_window"`
 	StreamContinuation       *bool                  `toml:"stream_continuation"`
 	StreamIdleTimeoutSeconds *int                   `toml:"stream_idle_timeout_seconds"`
+	UserAgentEnabled         *bool                  `toml:"user_agent_enabled"`
+	UserAgent                *string                `toml:"user_agent"`
 	ReasoningLevels          []string               `toml:"reasoning_levels"`
 	DefaultReasoningLevel    *string                `toml:"default_reasoning_level"`
 	ReasoningBudgets         map[string]int         `toml:"reasoning_budgets"`
@@ -843,6 +847,24 @@ func decodeModelPricing(value fileModelPricing) (ModelPricing, error) {
 	return pricing, nil
 }
 
+// decodeUserAgent normalizes and checks a declared User-Agent. A declared value
+// is trimmed because surrounding whitespace is not part of a header value, and
+// an absent key stays nil — "not declared", which sends the client's own
+// default. A value the transport could not send as written is refused here so a
+// typo surfaces when the file is read rather than when a turn starts.
+func decodeUserAgent(enabled *bool, value *string, scope string) (*string, error) {
+	if value == nil {
+		return nil, nil
+	}
+
+	trimmed := strings.TrimSpace(*value)
+	if err := validateUserAgent(enabled, &trimmed, scope); err != nil {
+		return nil, err
+	}
+
+	return &trimmed, nil
+}
+
 // decodeStreamIdleTimeout converts a declared streaming idle bound from seconds.
 // The bound is a transport liveness guard, so a value the transport cannot act
 // on is refused rather than clamped, and an absent key stays zero — "not
@@ -901,6 +923,11 @@ func decodeProvider(value fileProvider) (ProviderConfig, error) {
 	if err != nil {
 		return ProviderConfig{}, err
 	}
+	result.UserAgentEnabled = clonePointer(value.UserAgentEnabled)
+	result.UserAgent, err = decodeUserAgent(value.UserAgentEnabled, value.UserAgent, "provider")
+	if err != nil {
+		return ProviderConfig{}, err
+	}
 
 	return result, nil
 }
@@ -929,6 +956,11 @@ func decodeModel(provider ai.Provider, modelID string, value fileModel) (ModelCo
 		result.StreamContinuation = *value.StreamContinuation
 	}
 	result.StreamIdleTimeout, err = decodeStreamIdleTimeout(value.StreamIdleTimeoutSeconds)
+	if err != nil {
+		return ModelConfig{}, false, err
+	}
+	result.UserAgentEnabled = clonePointer(value.UserAgentEnabled)
+	result.UserAgent, err = decodeUserAgent(value.UserAgentEnabled, value.UserAgent, "model "+parsedModelID)
 	if err != nil {
 		return ModelConfig{}, false, err
 	}

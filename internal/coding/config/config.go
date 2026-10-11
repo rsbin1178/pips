@@ -393,6 +393,15 @@ type ProviderConfig struct {
 	// ModelConfig.StreamIdleTimeout. Zero inherits the transport default. It is
 	// local transport policy: it is never sent as a request option.
 	StreamIdleTimeout time.Duration
+	// UserAgentEnabled declares whether this provider's requests carry a
+	// User-Agent header at all. Nil sends the client's own default; a false
+	// declaration sends no header.
+	UserAgentEnabled *bool
+	// UserAgent replaces the User-Agent this provider's requests carry, and is
+	// the default for its models. Nil sends the client's own default, and the
+	// value is trimmed. Like StreamIdleTimeout it is local transport policy: it
+	// is never sent as a request option.
+	UserAgent *string
 }
 
 // Clone returns a fully detached provider definition.
@@ -400,6 +409,8 @@ func (p ProviderConfig) Clone() ProviderConfig {
 	cloned := p
 	cloned.Compatibility = p.Compatibility.Clone()
 	cloned.Capabilities = p.Capabilities.Clone()
+	cloned.UserAgentEnabled = clonePointer(p.UserAgentEnabled)
+	cloned.UserAgent = clonePointer(p.UserAgent)
 
 	return cloned
 }
@@ -503,6 +514,13 @@ type ModelConfig struct {
 	Capabilities          ai.CapabilityOverride
 	Options               ModelOptions
 	Variants              map[string]VariantConfig
+	// UserAgentEnabled declares whether this model's requests carry a
+	// User-Agent header at all, overriding the provider's declaration. Nil
+	// inherits it, and then the client's own default.
+	UserAgentEnabled *bool
+	// UserAgent replaces the User-Agent this model's requests carry, overriding
+	// the provider's value. Nil inherits it, and then the client's own default.
+	UserAgent *string
 }
 
 // CompactionConfig controls context compaction. Capacity comes from the
@@ -574,6 +592,8 @@ func (m ModelConfig) Clone() ModelConfig {
 	cloned.DefaultReasoningLevel = clonePointer(m.DefaultReasoningLevel)
 	cloned.ReasoningBudgets = maps.Clone(m.ReasoningBudgets)
 	cloned.Options = m.Options.Clone()
+	cloned.UserAgentEnabled = clonePointer(m.UserAgentEnabled)
+	cloned.UserAgent = clonePointer(m.UserAgent)
 	cloned.Variants = make(map[string]VariantConfig, len(m.Variants))
 	for name, variant := range m.Variants {
 		variant.ReasoningLevel = clonePointer(variant.ReasoningLevel)
@@ -1247,7 +1267,11 @@ func validateProviderDefinition(provider ai.Provider, definition ProviderConfig)
 		}
 	}
 
-	return validateStreamIdleTimeout(definition.StreamIdleTimeout, scope)
+	if err := validateStreamIdleTimeout(definition.StreamIdleTimeout, scope); err != nil {
+		return err
+	}
+
+	return validateUserAgent(definition.UserAgentEnabled, definition.UserAgent, scope)
 }
 
 // validateToolDeclaration rejects an explicit tools = false declaration. pips
@@ -1271,6 +1295,41 @@ const (
 	minStreamIdleTimeout = time.Second
 	maxStreamIdleTimeout = time.Hour
 )
+
+// User-Agent declarations. A declared value is a header value, so it carries no
+// control characters and stays within a header's practical length. An empty
+// declaration is rejected rather than read as "send nothing" — that is what
+// user_agent_enabled is for — and declaring both fields at one layer is a
+// contradiction rather than a precedence rule to guess at.
+const maxUserAgentLength = 256
+
+// validateUserAgent rejects a declaration the transport could not send as
+// written. A layer that declares neither field is valid and inherits.
+func validateUserAgent(enabled *bool, agent *string, scope string) error {
+	if agent == nil {
+		return nil
+	}
+
+	trimmed := strings.TrimSpace(*agent)
+	switch {
+	case trimmed == "":
+		return fmt.Errorf(
+			"%w: %s: user_agent is empty; set user_agent_enabled = false to send no User-Agent",
+			ErrInvalid, scope,
+		)
+	case enabled != nil && !*enabled:
+		return fmt.Errorf(
+			"%w: %s: user_agent is declared while user_agent_enabled is false; declare one of them",
+			ErrInvalid, scope,
+		)
+	}
+
+	if _, err := parseIdentifier("user_agent", trimmed, maxUserAgentLength, true); err != nil {
+		return fmt.Errorf("%w: %s: %w", ErrInvalid, scope, err)
+	}
+
+	return nil
+}
 
 // validateStreamIdleTimeout rejects a declared streaming idle bound outside the
 // range the transport can act on. Zero is always valid and means "not declared".
@@ -1307,6 +1366,13 @@ func validateModel(model ModelConfig) error {
 		return fmt.Errorf("%w: model %q context window cannot be negative", ErrInvalid, model.Ref)
 	}
 	if err := validateStreamIdleTimeout(model.StreamIdleTimeout, "model "+model.Ref.String()); err != nil {
+		return err
+	}
+	if err := validateUserAgent(
+		model.UserAgentEnabled,
+		model.UserAgent,
+		"model "+model.Ref.String(),
+	); err != nil {
 		return err
 	}
 	if err := validateOptions(model.Options, "model "+model.Ref.String()+" request"); err != nil {

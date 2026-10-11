@@ -431,3 +431,55 @@ func TestCatalogResolvesStreamIdleTimeout(t *testing.T) {
 		})
 	}
 }
+
+// TestCatalogResolvesUserAgent covers the inheritance rule for the User-Agent
+// declaration: a model inherits each field from its provider unless it declares
+// its own, a disabled switch sends no header whatever value sits beside it, and
+// an undeclared pair keeps the client's own default.
+func TestCatalogResolvesUserAgent(t *testing.T) {
+	t.Parallel()
+
+	inherits := config.ModelRef{Provider: ai.ProviderOpenAI, Model: "inherits"}
+	overrides := config.ModelRef{Provider: ai.ProviderOpenAI, Model: "overrides"}
+	silent := config.ModelRef{Provider: ai.ProviderOpenAI, Model: "silent"}
+	undeclared := config.ModelRef{Provider: ai.ProviderAnthropic, Model: "undeclared"}
+
+	cfg := config.Config{
+		Model: inherits,
+		Models: []config.ModelConfig{
+			{Ref: inherits},
+			{Ref: overrides, UserAgent: new("pips-coder")},
+			{Ref: silent, UserAgentEnabled: new(false)},
+			{Ref: undeclared},
+		},
+		Providers: map[ai.Provider]config.ProviderConfig{
+			ai.ProviderOpenAI: {UserAgent: new("gateway-probe/1")},
+		},
+		Sandbox:  config.SandboxWorkspaceWrite,
+		Approval: config.ApprovalOnRequest,
+	}
+
+	catalog, err := modelcatalog.New(cfg)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name string
+		ref  config.ModelRef
+		want *string
+	}{
+		{name: "model inherits the provider", ref: inherits, want: new("gateway-probe/1")},
+		{name: "model overrides the provider", ref: overrides, want: new("pips-coder")},
+		{name: "model switches the header off", ref: silent, want: new("")},
+		{name: "neither layer declares one", ref: undeclared, want: nil},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			resolved, err := catalog.Resolve(modelcatalog.Selection{Ref: test.ref})
+			require.NoError(t, err)
+			assert.Equal(t, test.want, resolved.UserAgent)
+		})
+	}
+}

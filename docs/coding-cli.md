@@ -466,11 +466,29 @@ and `code_execution`. An unknown name fails configuration loading.
 Declarations layer on top of whatever the protocol adapter already reports for
 the bound model, so a third-party model the adapter only knows as plain chat
 can still be declared vision-capable. Two declarations change runtime behavior
-today: `vision` gates image attachments in the composer, and
+today: `vision` admits image attachments in the composer, and
 `structured_output` selects a native JSON Schema response format for subagents
 instead of prompt-only JSON. Other declarations are accepted and reported as
 `advisory` by `pips config show` until a consumer reads them. `tools = false`
 is rejected, because Pips requires native tool calling.
+
+An image is attached whatever the active model declares: the draft is never
+dropped to enforce a capability. A model that does not accept image input says
+so as soon as an image lands in the draft, and again if Enter is pressed. The
+draft keeps the image, and the notice names the remedy — remove the image, or
+declare `vision = true` for that model.
+
+The transcript shows attachments as references, never as payloads. A file
+attached with `@` reads as `[File · <path> · <n> lines]`, an image as
+`[Image · <name> · <width>×<height>]`. The model still receives the complete
+file content and the image bytes; only the display collapses, so provider
+requests, prompt caching, session files, and resume are unaffected. A paste
+larger than 1000 characters or 8 lines becomes a
+`[Pasted text #N · <chars> chars · <lines> lines]` chip in the draft, and the
+pasted text itself is sent in full. Pasting the same content again with the
+cursor on that chip expands it back into editable text in place, up to 100,000
+characters; a larger paste stays a chip so the editor is never handed a buffer it
+cannot hold.
 
 `context_window` is local context-capacity metadata. Request output is
 configured only with a model or variant `request.max_output_tokens`; that value
@@ -1000,7 +1018,7 @@ activates nothing, and motion events are ignored, so the pointer never repaints 
 frame by hovering. Text is selected in the viewport itself: drag over the
 conversation and the addressed rows go to the clipboard through an OSC 52 request
 only — a drag is a transient reading gesture, so it never writes the fallback
-file that `Ctrl+X`, `/copy` and `/export` use — and the reserved band under the
+file that `Ctrl+Y`, `/copy` and `/export` use — and the reserved band under the
 transcript confirms it with `copied 3 lines`. A confirmed copy clears the
 highlight; a copy that could not be made keeps the selection and reports why.
 `Esc` clears the selection too. Rows are copied as they are painted, so a
@@ -1017,6 +1035,24 @@ scrollable after quitting (use `Ctrl+O` or `/export` to get the conversation bac
 otherwise). Neither
 mode ever clears the terminal's scrollback, and both restore terminal state before
 the session is released.
+
+The composer scrolls its own draft. When the draft is taller than the box — more
+lines than rows, or one line that soft-wraps past it — a wheel notch over the
+composer moves the draft instead of the conversation. A draft that fits leaves the
+notch to the transcript, so pointing at a one-line input never stops the
+conversation from scrolling. `Ctrl+A` selects the whole draft: typing or pasting
+replaces it, `Backspace`/`Delete` clears it, and `Esc` keeps the draft and drops
+the selection. `Home` and `Ctrl+E` still move within a line. `Ctrl+Y` copies the
+newest assistant reply.
+
+`Ctrl+X` (or `Ctrl+?`, or the `/help` command) opens the Help panel, a full-area
+route like `/status`: two pages, `Shortcuts` and `Commands`, switched with
+`Tab`/`←`/`→`, scrolled with `↑`/`↓`, `PgUp`/`PgDn` or the wheel, and closed with
+`Esc`. The Shortcuts page is generated from the binding table, so every key the
+ready view answers to is listed under the context it works in, followed by what
+the draft and the conversation answer to — including which surface owns the
+conversation and the modifier that selects text while the mouse is captured. The
+Commands page lists the Composer's `/` commands.
 
 Between the activity line and the composer box the frame reserves one blank row:
 the reserved band. It stays blank while there is nothing to say, and it carries
@@ -1060,7 +1096,7 @@ mode hands history to the terminal and never renders reasoning, and `/copy` and
 `/export` never include reasoning text.
 
 Copy and export follow the same rule: the session owns the text, and the terminal
-is only one way to get it out. `Ctrl+X` copies the newest assistant reply, and
+is only one way to get it out. `Ctrl+Y` copies the newest assistant reply, and
 `/copy [n] [path]` copies the nth-latest reply (`1` is the newest, which includes
 a reply that is still streaming). A copy with no path is sent to the clipboard as
 an OSC 52 request **and** written to a fallback file, because OSC 52 delivery
@@ -1075,8 +1111,8 @@ resolves inside the workspace; the default destination lives in the Pips home
 directory. Both write through an atomic replace and report the resolved path on
 the status line for a few seconds. The exported document is the conversation the
 session is holding — the same document in both presentation modes, without the
-`/help`- and `/status`-style notices — so a session whose older history has not
-been paged in yet exports what has been loaded.
+startup banner or the inspection notices — so a session whose older history has
+not been paged in yet exports what has been loaded.
 
 Searching the conversation is the session's job in the same way. `Ctrl+F` (or
 `/find [query]`) opens a find box in the composer's band: typing filters live, the
