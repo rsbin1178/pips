@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/rsbin1178/pips/agent/harness"
@@ -73,15 +74,32 @@ type ArchiveInfo struct {
 type ArchiveStore struct {
 	dir       string
 	sessionID string
+	// rel is the owning session directory relative to dir, one component each.
+	rel []string
 }
 
 // Archives binds storage ownership without enumerating or creating any objects.
 func (r *Repository) Archives(handle *Handle) (*ArchiveStore, error) {
-	if r == nil || handle == nil || handle.session == nil || handle.lock == nil ||
-		validateSessionID(handle.meta.ID) != nil || handle.meta.Path != r.sessionPath(handle.meta.ID) {
+	if r == nil || handle == nil || handle.session == nil || handle.store == nil ||
+		validateSessionID(handle.meta.ID) != nil || handle.meta.Path != handle.transcriptPath ||
+		filepath.Join(r.dir, filepath.Join(handle.sessionRel...)) != handle.sessionDir {
 		return nil, ErrArchiveInvalid
 	}
-	return &ArchiveStore{dir: r.dir, sessionID: handle.meta.ID}, nil
+	// Publishing an archive is durable content, so a provisional session
+	// materializes here: until it does, there is no directory to publish into and
+	// no writer lock to hold.
+	if err := handle.store.Materialize(); err != nil {
+		return nil, err
+	}
+	if handle.writerLock() == nil {
+		return nil, ErrArchiveInvalid
+	}
+
+	return &ArchiveStore{
+		dir:       r.dir,
+		sessionID: handle.meta.ID,
+		rel:       slices.Clone(handle.sessionRel),
+	}, nil
 }
 
 // ValidateArchiveID accepts only a lowercase SHA-256 content identity.
@@ -98,7 +116,23 @@ func ValidateArchiveID(id string) error {
 }
 
 func (s *ArchiveStore) valid() bool {
-	return s != nil && filepath.IsAbs(s.dir) && validateSessionID(s.sessionID) == nil
+	return s != nil && filepath.IsAbs(s.dir) && validateSessionID(s.sessionID) == nil &&
+		validRelativeDirectory(s.rel)
+}
+
+// validRelativeDirectory accepts only single safe path components.
+func validRelativeDirectory(rel []string) bool {
+	if len(rel) == 0 {
+		return false
+	}
+	for _, name := range rel {
+		if name == "" || name == "." || name == ".." || len(name) > 255 ||
+			strings.ContainsAny(name, `/\`+"\x00") {
+			return false
+		}
+	}
+
+	return true
 }
 
 // StagedArchive owns one unpublished private temporary file. Close always
@@ -136,7 +170,7 @@ func (s *ArchiveStore) Stage(ctx context.Context, source ArchiveSource, entries 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	dir, err := openArchiveDirectory(s.dir, s.sessionID, true)
+	dir, err := openArchiveDirectory(s.dir, s.rel, true)
 	if err != nil {
 		return nil, archiveStorageError(err)
 	}
@@ -224,7 +258,7 @@ func (s *ArchiveStore) openVerified(ctx context.Context, id string) (*os.File, a
 	if err := ctx.Err(); err != nil {
 		return nil, archiveManifest{}, err
 	}
-	dir, err := openArchiveDirectory(s.dir, s.sessionID, false)
+	dir, err := openArchiveDirectory(s.dir, s.rel, false)
 	if err != nil {
 		return nil, archiveManifest{}, archiveStorageError(err)
 	}
@@ -258,13 +292,26 @@ func (r *Repository) CopyArchives(ctx context.Context, source *Handle, destinati
 	return ctx.Err()
 }
 
+// siblingArchiveRel returns the archive directory components of another session
+// in the same group as store. A fork stays in the source workspace, so only the
+// session component changes.
+func siblingArchiveRel(store *ArchiveStore, id string) []string {
+	if store == nil || len(store.rel) == 0 {
+		return []string{id}
+	}
+
+	return append(slices.Clone(store.rel[:len(store.rel)-1]), id)
+}
+
 func copyArchive(ctx context.Context, source *ArchiveStore, destinationID, id string) error {
 	file, manifest, err := source.openVerified(ctx, id)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = file.Close() }()
-	dir, err := openArchiveDirectory(source.dir, destinationID, true)
+	// A fork keeps the source workspace, so only the session component changes.
+	destinationRel := siblingArchiveRel(source, destinationID)
+	dir, err := openArchiveDirectory(source.dir, destinationRel, true)
 	if err != nil {
 		return archiveStorageError(err)
 	}

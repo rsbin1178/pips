@@ -85,7 +85,7 @@ func (m *Manager) walkOwnedDescendants(
 	visited[parentMeta.ID] = struct{}{}
 	defer delete(visited, parentMeta.ID)
 
-	metas, err := m.config.Repository.ListSubagents(ctx, parentMeta.WorkspaceID, parentMeta.ID)
+	metas, err := m.config.Repository.ListSubagents(ctx, parentMeta)
 	if err != nil {
 		return err
 	}
@@ -301,7 +301,7 @@ func (m *Manager) childHandle(
 	parent := m.config.Parent.Metadata()
 
 	child, err := m.config.Repository.Open(ctx, session.OpenOptions{
-		ID: childSessionID, WorkspaceID: parent.WorkspaceID,
+		ID: childSessionID, WorkspaceID: parent.WorkspaceID, WorkspacePath: parent.WorkspacePath,
 	})
 	if err != nil {
 		return nil, false, err

@@ -545,7 +545,7 @@ func reconcileDescendants(
 	visited[parentMeta.ID] = struct{}{}
 	defer delete(visited, parentMeta.ID)
 
-	children, err := repository.ListSubagents(ctx, parentMeta.WorkspaceID, parentMeta.ID)
+	children, err := repository.ListSubagents(ctx, parentMeta)
 	if err != nil {
 		return err
 	}
@@ -598,7 +598,7 @@ func reconcileDescendant(
 	}
 	parentMeta := parent.Metadata()
 	child, err := repository.Open(ctx, session.OpenOptions{
-		ID: childMeta.ID, WorkspaceID: parentMeta.WorkspaceID,
+		ID: childMeta.ID, WorkspaceID: parentMeta.WorkspaceID, WorkspacePath: parentMeta.WorkspacePath,
 	})
 	if err != nil {
 		return fmt.Errorf("coding subagent: open child for reconciliation: %w", err)

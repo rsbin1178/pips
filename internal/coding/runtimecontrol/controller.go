@@ -759,6 +759,7 @@ func (c *Controller) ListSessions(ctx context.Context) ([]session.Metadata, erro
 	}
 	directory := c.base.Paths.SessionsDir()
 	workspaceID := c.base.Workspace.Identity().Key()
+	workspacePath := c.base.Workspace.Root()
 	c.mu.Unlock()
 
 	metas, err := c.deps.listSession(ctx, directory)
@@ -768,7 +769,7 @@ func (c *Controller) ListSessions(ctx context.Context) ([]session.Metadata, erro
 
 	filtered := make([]session.Metadata, 0, len(metas))
 	for _, meta := range metas {
-		if meta.WorkspaceID == workspaceID {
+		if meta.BelongsToWorkspace(workspacePath, workspaceID) {
 			filtered = append(filtered, meta)
 		}
 	}

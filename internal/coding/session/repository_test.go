@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/rsbin1178/pips/agent/harness"
@@ -15,6 +16,20 @@ import (
 )
 
 const testWorkspacePath = "/workspace"
+
+// testSubagentIdentity is a valid versioned identity for a child agent.
+func testSubagentIdentity(agent string) *session.SubagentIdentity {
+	return &session.SubagentIdentity{
+		Schema:           "pips.coding.subagent.identity/v1alpha1",
+		AgentID:          agent,
+		Kind:             "builtin",
+		Name:             agent,
+		DefinitionSchema: "pips.coding.subagent.definition/v1alpha1",
+		DefinitionDigest: strings.Repeat("a", 64),
+		DefinitionSource: "builtin:" + agent,
+		PlanDigest:       strings.Repeat("b", 64),
+	}
+}
 
 func TestRepositoryForkPreservesSourceAndProjectsBoundedPickerMetadata(t *testing.T) {
 	t.Parallel()
@@ -100,9 +115,10 @@ func TestRepositoryCreateOpenListAndLock(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, metas)
 
+	// A session with no entries is provisional: nothing has been written, so there
+	// is no directory to open yet and the answer is "not stored", not "locked".
 	_, err = repo.Open(t.Context(), session.OpenOptions{ID: meta.ID, WorkspaceID: "workspace-key"})
-	require.Error(t, err)
-	require.ErrorIs(t, err, session.ErrLocked)
+	require.ErrorIs(t, err, session.ErrInvalid)
 
 	_, err = handle.Session().AppendCustom("test.started", nil)
 	require.NoError(t, err)
@@ -127,7 +143,7 @@ func TestRepositoryCreateOpenListAndLock(t *testing.T) {
 	assert.Equal(t, harness.KindCustom, entries[0].Kind)
 	require.NoError(t, reopened.Close())
 
-	lockInfo, err := os.Stat(filepath.Join(repo.Dir(), meta.ID+".lock"))
+	lockInfo, err := os.Stat(repo.Layout().LockFile(testWorkspacePath, meta.ID))
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0o600), lockInfo.Mode().Perm())
 }
@@ -155,7 +171,7 @@ func TestRepositoryDeleteConversationIsIdempotentAndLockSafe(t *testing.T) {
 	require.NoFileExists(t, path)
 	require.NoError(t, repo.Delete(t.Context(), id))
 	require.NoError(t, repo.Delete(t.Context(), "missing-session"))
-	require.NoFileExists(t, filepath.Join(repo.Dir(), "missing-session.lock"))
+	require.NoFileExists(t, repo.Layout().LockFile(testWorkspacePath, "missing-session"))
 
 	metadata, err := repo.List(t.Context())
 	require.NoError(t, err)
@@ -168,12 +184,13 @@ func TestRepositoryDeleteRejectsChildTranscript(t *testing.T) {
 	repo, err := session.NewRepository(filepath.Join(t.TempDir(), "sessions"))
 	require.NoError(t, err)
 	child, err := repo.Create(t.Context(), session.CreateOptions{
-		WorkspaceID:     "workspace-key",
-		WorkspacePath:   testWorkspacePath,
-		Kind:            session.KindSubagent,
-		ParentSessionID: "parent-session",
-		ParentRunID:     "parent-run",
-		Agent:           "explore",
+		WorkspaceID:      "workspace-key",
+		WorkspacePath:    testWorkspacePath,
+		Kind:             session.KindSubagent,
+		ParentSessionID:  "parent-session",
+		ParentRunID:      "parent-run",
+		Agent:            "explore",
+		SubagentIdentity: testSubagentIdentity("explore"),
 	})
 	require.NoError(t, err)
 	id := child.Metadata().ID
@@ -200,12 +217,13 @@ func TestRepositorySeparatesConversationAndSubagentSessions(t *testing.T) {
 	require.NoError(t, err)
 
 	child, err := repo.Create(t.Context(), session.CreateOptions{
-		WorkspaceID:     "workspace-key",
-		WorkspacePath:   testWorkspacePath,
-		Kind:            session.KindSubagent,
-		ParentSessionID: conversation.Metadata().ID,
-		ParentRunID:     "run-parent",
-		Agent:           "explore",
+		WorkspaceID:      "workspace-key",
+		WorkspacePath:    testWorkspacePath,
+		Kind:             session.KindSubagent,
+		ParentSessionID:  conversation.Metadata().ID,
+		ParentRunID:      "run-parent",
+		Agent:            "explore",
+		SubagentIdentity: testSubagentIdentity("explore"),
 	})
 	require.NoError(t, err)
 	_, err = child.Session().AppendMessage(ai.UserText("inspect the package"), nil)
@@ -217,11 +235,7 @@ func TestRepositorySeparatesConversationAndSubagentSessions(t *testing.T) {
 	assert.Equal(t, conversation.Metadata().ID, conversations[0].ID)
 	assert.Equal(t, session.KindConversation, conversations[0].Kind)
 
-	children, err := repo.ListSubagents(
-		t.Context(),
-		"workspace-key",
-		conversation.Metadata().ID,
-	)
+	children, err := repo.ListSubagents(t.Context(), conversation.Metadata())
 	require.NoError(t, err)
 	require.Len(t, children, 1)
 	assert.Equal(t, child.Metadata().ID, children[0].ID)
@@ -286,7 +300,9 @@ func TestRepositorySeparatesTeamWorkerLineageAndWorkspace(t *testing.T) {
 	conversations, err := repo.List(t.Context())
 	require.NoError(t, err)
 	assert.Empty(t, conversations)
-	subagents, err := repo.ListSubagents(t.Context(), "worker-workspace", "s-parent")
+	subagents, err := repo.ListSubagents(t.Context(), session.Metadata{
+		ID: "s-parent", WorkspaceID: "worker-workspace",
+	})
 	require.NoError(t, err)
 	assert.Empty(t, subagents)
 	workers, err := repo.ListTeamWorkers(t.Context(), "s-parent", "team-one", 10)
@@ -464,12 +480,13 @@ func TestRepositoryRejectsInvalidInputAndCancellation(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 }
 
-func TestRepositoryIgnoresLegacyModelMetadata(t *testing.T) {
+func TestRepositoryIgnoresLegacyFlatSessions(t *testing.T) {
 	t.Parallel()
 
 	repo, err := session.NewRepository(filepath.Join(t.TempDir(), "sessions"))
 	require.NoError(t, err)
 
+	// A legacy store wrote <id>.jsonl files directly in the store root.
 	legacy, err := (harness.Repo{Dir: repo.Dir()}).Create("legacy", map[string]string{
 		"pips.coding.workspace_id":   "workspace-key",
 		"pips.coding.workspace_path": testWorkspacePath,
@@ -482,27 +499,17 @@ func TestRepositoryIgnoresLegacyModelMetadata(t *testing.T) {
 	_, err = legacySession.AppendModelChange("anthropic", "legacy-model")
 	require.NoError(t, err)
 	require.NoError(t, legacy.Close())
-	empty, err := (harness.Repo{Dir: repo.Dir()}).Create("empty", map[string]string{
-		"pips.coding.workspace_id":   "workspace-key",
-		"pips.coding.workspace_path": testWorkspacePath,
-	})
-	require.NoError(t, err)
-	require.NoError(t, empty.Close())
 
-	handle, err := repo.Open(t.Context(), session.OpenOptions{
+	// v2 walks workspace groups only, so a flat file is neither listed nor open.
+	metas, err := repo.List(t.Context())
+	require.NoError(t, err)
+	assert.Empty(t, metas)
+
+	_, err = repo.Open(t.Context(), session.OpenOptions{
 		ID:          "legacy",
 		WorkspaceID: "workspace-key",
 	})
-	require.NoError(t, err)
-	assert.Equal(t, "legacy", handle.Metadata().ID)
-	assert.Equal(t, "workspace-key", handle.Metadata().WorkspaceID)
-	require.NoError(t, handle.Close())
-
-	metas, err := repo.List(t.Context())
-	require.NoError(t, err)
-	require.Len(t, metas, 1)
-	assert.Equal(t, handle.Metadata().ID, metas[0].ID)
-	assert.Equal(t, handle.Metadata().WorkspaceID, metas[0].WorkspaceID)
+	require.ErrorIs(t, err, session.ErrInvalid)
 }
 
 func TestRepositoryRejectsInsecureDirectoryAndLock(t *testing.T) {
@@ -518,10 +525,22 @@ func TestRepositoryRejectsInsecureDirectoryAndLock(t *testing.T) {
 	repo, err := session.NewRepository(filepath.Join(base, "sessions"))
 	require.NoError(t, err)
 
+	handle, err := repo.Create(t.Context(), session.CreateOptions{
+		WorkspaceID: "workspace-key", WorkspacePath: testWorkspacePath,
+	})
+	require.NoError(t, err)
+	id := handle.Metadata().ID
+	_, err = handle.Session().AppendCustom("test.started", nil)
+	require.NoError(t, err)
+	require.NoError(t, handle.Close())
+
+	// A symlinked lock path is never followed: the foreign file is untouched.
 	foreign := filepath.Join(base, "foreign")
 	require.NoError(t, os.WriteFile(foreign, []byte("do not follow"), 0o600))
-	require.NoError(t, os.Symlink(foreign, filepath.Join(repo.Dir(), "known.lock")))
-	_, err = repo.Open(t.Context(), session.OpenOptions{ID: "known", WorkspaceID: "workspace"})
+	lockPath := repo.Layout().LockFile(testWorkspacePath, id)
+	require.NoError(t, os.Remove(lockPath))
+	require.NoError(t, os.Symlink(foreign, lockPath))
+	_, err = repo.Open(t.Context(), session.OpenOptions{ID: id, WorkspaceID: "workspace-key"})
 	require.Error(t, err)
 	require.NotErrorIs(t, err, os.ErrNotExist)
 
@@ -574,12 +593,13 @@ func TestRepositoryIgnoresLegacySessionsWithoutCodingMetadata(t *testing.T) {
 	_, err = conversation.Session().AppendMessage(ai.UserText("parent question"), nil)
 	require.NoError(t, err)
 	child, err := repo.Create(t.Context(), session.CreateOptions{
-		WorkspaceID:     "workspace-key",
-		WorkspacePath:   testWorkspacePath,
-		Kind:            session.KindSubagent,
-		ParentSessionID: conversation.Metadata().ID,
-		ParentRunID:     "run-parent",
-		Agent:           "explore",
+		WorkspaceID:      "workspace-key",
+		WorkspacePath:    testWorkspacePath,
+		Kind:             session.KindSubagent,
+		ParentSessionID:  conversation.Metadata().ID,
+		ParentRunID:      "run-parent",
+		Agent:            "explore",
+		SubagentIdentity: testSubagentIdentity("explore"),
 	})
 	require.NoError(t, err)
 	_, err = child.Session().AppendMessage(ai.UserText("inspect the package"), nil)
@@ -596,7 +616,7 @@ func TestRepositoryIgnoresLegacySessionsWithoutCodingMetadata(t *testing.T) {
 		0o600,
 	))
 
-	children, err := repo.ListSubagents(t.Context(), "workspace-key", conversation.Metadata().ID)
+	children, err := repo.ListSubagents(t.Context(), conversation.Metadata())
 	require.NoError(t, err)
 	require.Len(t, children, 1)
 	assert.Equal(t, child.Metadata().ID, children[0].ID)
@@ -608,4 +628,58 @@ func TestRepositoryIgnoresLegacySessionsWithoutCodingMetadata(t *testing.T) {
 
 	require.NoError(t, child.Close())
 	require.NoError(t, conversation.Close())
+}
+
+// TestRepositoryProvisionalSessionLeavesNothingOnDisk is the regression test for a
+// real report: launching the TUI and quitting without sending a prompt left an
+// empty session directory in the store, one per launch.
+//
+// A session with no entries is provisional, so it has no directory, no writer
+// lock, and no index record until its first entry. RetainEmpty is the explicit
+// opt-in for a caller that needs the session to exist before then.
+func TestRepositoryProvisionalSessionLeavesNothingOnDisk(t *testing.T) {
+	t.Parallel()
+
+	root := filepath.Join(t.TempDir(), "sessions")
+	repo, err := session.NewRepository(root)
+	require.NoError(t, err)
+
+	handle, err := repo.Create(t.Context(), session.CreateOptions{
+		WorkspaceID: "workspace-key", WorkspacePath: testWorkspacePath,
+	})
+	require.NoError(t, err)
+
+	id := handle.Metadata().ID
+	require.NoError(t, handle.Close())
+
+	entries, err := os.ReadDir(root)
+	require.NoError(t, err)
+	assert.Empty(t, entries, "a session with no entries must leave the store untouched")
+
+	metas, err := repo.List(t.Context())
+	require.NoError(t, err)
+	assert.Empty(t, metas)
+
+	_, err = repo.Open(t.Context(), session.OpenOptions{ID: id, WorkspaceID: "workspace-key"})
+	require.ErrorIs(t, err, session.ErrInvalid)
+
+	// The first entry is what publishes everything.
+	appending, err := repo.Create(t.Context(), session.CreateOptions{
+		WorkspaceID: "workspace-key", WorkspacePath: testWorkspacePath,
+	})
+	require.NoError(t, err)
+	_, err = appending.Session().AppendCustom("test.started", nil)
+	require.NoError(t, err)
+	assert.FileExists(t, repo.Layout().MetadataFile(testWorkspacePath, appending.Metadata().ID))
+	require.NoError(t, appending.Close())
+
+	// RetainEmpty is the opt-in for a session that must exist before its first entry.
+	retained, err := repo.Create(t.Context(), session.CreateOptions{
+		WorkspaceID: "workspace-key", WorkspacePath: testWorkspacePath, RetainEmpty: true,
+	})
+	require.NoError(t, err)
+	retainedID := retained.Metadata().ID
+	require.NoError(t, retained.Close())
+	assert.FileExists(t, repo.Layout().MetadataFile(testWorkspacePath, retainedID))
+	assert.FileExists(t, repo.Layout().LockFile(testWorkspacePath, retainedID))
 }

@@ -88,6 +88,8 @@ Harness 不会在调用开始时盲目持久化输入。用户消息在第一个
 
 ## JSONL 运行边界
 
+Coding 应用把每个会话存成一个目录，`transcript.jsonl` 只是其中的一层；完整的存储分层、路径规则与迁移方式见 [Session Storage](../coding-session-storage.md)。`Repo` 也支持 `Path` 覆盖，供应用自行决定 `id → 文件` 的映射。
+
 JSONL Store 使用单文件追加日志，创建文件权限为 `0600`，目录为 `0750`。读取时执行严格、有界的结构验证。
 
 运维约束：

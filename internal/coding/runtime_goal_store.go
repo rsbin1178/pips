@@ -43,13 +43,17 @@ var (
 	goalControllerRef = continuation.HandlerRef{Kind: "coding.goal.assessment", Version: "1"}
 )
 
+// goalStateDirName is the Goal continuation store inside a session's state
+// directory, so a session's whole durable state stays in one place.
+const goalStateDirName = "goal"
+
 //nolint:gocyclo // Recovery validates ownership before restoring a paused projection.
 func (r *Runtime) openGoalControl(ctx context.Context) error {
 	id := r.handle.Metadata().ID
 	if err := session.ValidateID(id); err != nil {
 		return err
 	}
-	directory := filepath.Join(r.paths.GoalsDir(), id)
+	directory := filepath.Join(r.handle.StateDir(), goalStateDirName)
 	if err := ensureOwnerOnlyDirectory(directory); err != nil {
 		return err
 	}

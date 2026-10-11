@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 
 	term "github.com/charmbracelet/x/term"
 	"github.com/rsbin1178/pips/internal/coding"
@@ -80,6 +81,14 @@ type Dependencies struct {
 	OpenACP      ACPControllerOpener
 	RunACP       ACPRunner
 	Environment  []string
+
+	// updateAPIBase, updateDownloadBase, updateOS, and updateArch override the
+	// release source and platform of `pips update`. They exist so tests can
+	// serve a release over httptest instead of reaching the network.
+	updateAPIBase      string
+	updateDownloadBase string
+	updateOS           string
+	updateArch         string
 }
 
 type rootFlags struct {
@@ -169,6 +178,7 @@ func New(dependencies Dependencies) (*cobra.Command, error) {
 		newHooksCommand(dependencies, flags),
 		newDoctorCommand(dependencies, flags),
 		newVersionCommand(dependencies.Build),
+		newUpdateCommand(dependencies),
 		newCompletionCommand(),
 	)
 
@@ -206,6 +216,14 @@ func defaultProcessDependencies(dependencies Dependencies) Dependencies {
 
 	if dependencies.Environment == nil {
 		dependencies.Environment = os.Environ()
+	}
+
+	if dependencies.updateOS == "" {
+		dependencies.updateOS = runtime.GOOS
+	}
+
+	if dependencies.updateArch == "" {
+		dependencies.updateArch = runtime.GOARCH
 	}
 
 	return dependencies

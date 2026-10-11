@@ -54,8 +54,10 @@ func publishRepositoryCheckpoint(t *testing.T, repo *Repository, handle *Handle,
 	return archiveID, checkpoint
 }
 
-func repositoryHistoryPath(repo *Repository, id string) string {
-	return filepath.Join(repo.Dir(), id+".history")
+// repositoryArchiveDir is the content-addressed archive directory of one
+// session in the fixture workspace.
+func repositoryArchiveDir(repo *Repository, id string) string {
+	return repo.Layout().ArchiveDir("/workspace", id)
 }
 
 func TestRepositoryCheckpointForkSurvivesSourceDelete(t *testing.T) {
@@ -79,9 +81,9 @@ func TestRepositoryCheckpointForkSurvivesSourceDelete(t *testing.T) {
 	_, err = archives.Verify(t.Context(), unselected)
 	require.ErrorIs(t, err, ErrArchiveNotFound, "only the selected path's references are copied")
 	for _, id := range []string{first, second} {
-		original, err := os.Stat(filepath.Join(repositoryHistoryPath(repo, source.Metadata().ID), id+".archive"))
+		original, err := os.Stat(filepath.Join(repositoryArchiveDir(repo, source.Metadata().ID), id+".archive"))
 		require.NoError(t, err)
-		copied, err := os.Stat(filepath.Join(repositoryHistoryPath(repo, fork.Metadata().ID), id+".archive"))
+		copied, err := os.Stat(filepath.Join(repositoryArchiveDir(repo, fork.Metadata().ID), id+".archive"))
 		require.NoError(t, err)
 		assert.False(t, os.SameFile(original, copied), "the fork owns independent archive files")
 	}
@@ -90,7 +92,7 @@ func TestRepositoryCheckpointForkSurvivesSourceDelete(t *testing.T) {
 	require.NoError(t, source.Close())
 	require.NoError(t, repo.Delete(t.Context(), sourceID))
 	require.NoFileExists(t, source.Metadata().Path)
-	require.NoDirExists(t, repositoryHistoryPath(repo, sourceID))
+	require.NoDirExists(t, repositoryArchiveDir(repo, sourceID))
 	forkID := fork.Metadata().ID
 	require.NoError(t, fork.Close())
 	reopened, err := repo.Open(t.Context(), OpenOptions{ID: forkID, WorkspaceID: "workspace"})
@@ -118,7 +120,7 @@ func TestRepositoryCheckpointForkSurvivesSourceDelete(t *testing.T) {
 	}
 	require.NoError(t, reopened.Close())
 	require.NoError(t, repo.Delete(t.Context(), forkID))
-	require.NoDirExists(t, repositoryHistoryPath(repo, forkID))
+	require.NoDirExists(t, repositoryArchiveDir(repo, forkID))
 }
 
 func TestRepositoryCheckpointForkFailureDoesNotPublishTranscript(t *testing.T) {
@@ -131,7 +133,7 @@ func TestRepositoryCheckpointForkFailureDoesNotPublishTranscript(t *testing.T) {
 			second, _ := publishRepositoryCheckpoint(t, repo, source, "second archive")
 			ids := []string{first, second}
 			slices.Sort(ids)
-			badPath := filepath.Join(repositoryHistoryPath(repo, source.Metadata().ID), ids[1]+".archive")
+			badPath := filepath.Join(repositoryArchiveDir(repo, source.Metadata().ID), ids[1]+".archive")
 			if failure == "missing" {
 				require.NoError(t, os.Remove(badPath))
 			} else {
@@ -142,28 +144,29 @@ func TestRepositoryCheckpointForkFailureDoesNotPublishTranscript(t *testing.T) {
 			require.Error(t, err)
 			assert.Nil(t, fork)
 			assert.Equal(t, before, source.Session().Entries())
-			transcripts, err := filepath.Glob(filepath.Join(repo.Dir(), "*.jsonl"))
+			// Only the source published a transcript; the failed fork left none.
+			transcripts, err := filepath.Glob(filepath.Join(repo.Layout().GroupDir("/workspace"), "*", TranscriptFileName))
 			require.NoError(t, err)
 			assert.Equal(t, []string{source.Metadata().Path}, transcripts)
-			stages, err := filepath.Glob(filepath.Join(repo.Dir(), ".fork-*.tmp"))
+			stages, err := filepath.Glob(filepath.Join(repo.Layout().GroupDir("/workspace"), "*", ".fork-*.tmp"))
 			require.NoError(t, err)
 			assert.Empty(t, stages)
 
 			// The first archive was already durably published before copying the
 			// second failed. Fork errors never trigger broad archive rollback.
-			histories, err := filepath.Glob(filepath.Join(repo.Dir(), "*.history"))
+			archiveDirs, err := filepath.Glob(filepath.Join(repo.Layout().GroupDir("/workspace"), "*", ArchiveDirName))
 			require.NoError(t, err)
-			require.Len(t, histories, 2)
-			for _, history := range histories {
-				if history == repositoryHistoryPath(repo, source.Metadata().ID) {
+			require.Len(t, archiveDirs, 2)
+			for _, archiveDir := range archiveDirs {
+				if archiveDir == repositoryArchiveDir(repo, source.Metadata().ID) {
 					continue
 				}
-				require.FileExists(t, filepath.Join(history, ids[0]+".archive"))
-				targetID := strings.TrimSuffix(filepath.Base(history), ".history")
+				require.FileExists(t, filepath.Join(archiveDir, ids[0]+".archive"))
+				targetID := filepath.Base(filepath.Dir(archiveDir))
 				_, err = repo.Open(t.Context(), OpenOptions{ID: targetID, WorkspaceID: "workspace"})
 				require.ErrorIs(t, err, os.ErrNotExist, "failed fork releases the destination writer lock")
 				require.NoError(t, repo.Delete(t.Context(), targetID))
-				require.FileExists(t, filepath.Join(history, ids[0]+".archive"), "missing transcript does not authorize orphan cleanup")
+				require.NoDirExists(t, archiveDir, "deleting the session removes its whole directory including orphan archives")
 			}
 		})
 	}
@@ -174,33 +177,40 @@ func TestRepositoryCheckpointDeleteRetainsArchivesOnUncertainSync(t *testing.T) 
 	repo, source := repositoryCheckpointSource(t)
 	id, _ := publishRepositoryCheckpoint(t, repo, source, "retained on uncertain deletion")
 	require.NoError(t, source.Close())
-	root, err := os.OpenRoot(repo.Dir())
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, root.Close()) })
-	archivePath := filepath.Join(repositoryHistoryPath(repo, source.Metadata().ID), id+".archive")
+	archivePath := filepath.Join(repositoryArchiveDir(repo, source.Metadata().ID), id+".archive")
 	syncErr := errors.New("injected directory sync failure")
-	err = deleteConversationAt(t.Context(), root, source.Metadata().ID, func() error {
-		require.FileExists(t, archivePath, "archive cleanup must wait for transcript unlink durability")
+	err := deleteSessionDirectoryAt(t.Context(), repo.Layout().GroupDir("/workspace"), source.Metadata().ID, func(*os.Root) error {
 		return syncErr
 	})
 	require.ErrorIs(t, err, syncErr)
 	require.ErrorContains(t, err, "durability uncertain")
+	// The failed sync renames the session back, leaving it fully intact.
 	require.FileExists(t, archivePath)
+	require.FileExists(t, source.Metadata().Path)
+	require.FileExists(t, repo.Layout().MetadataFile("/workspace", source.Metadata().ID))
+	// A later, durable delete removes the whole session directory.
 	require.NoError(t, repo.Delete(t.Context(), source.Metadata().ID))
-	require.FileExists(t, archivePath)
+	require.NoFileExists(t, archivePath)
 }
 
-func TestRepositoryCheckpointDeleteRejectsHistorySymlink(t *testing.T) {
+func TestRepositoryCheckpointDeleteRemovesArchiveSymlinkWithoutFollowing(t *testing.T) {
 	t.Parallel()
 	repo, source := repositoryCheckpointSource(t)
+	_, _ = publishRepositoryCheckpoint(t, repo, source, "source evidence")
 	other := repositoryCheckpointHandle(t, repo)
 	otherArchive, _ := publishRepositoryCheckpoint(t, repo, other, "other session evidence")
 	require.NoError(t, source.Close())
-	require.NoError(t, os.Symlink(repositoryHistoryPath(repo, other.Metadata().ID), repositoryHistoryPath(repo, source.Metadata().ID)))
-	err := repo.Delete(t.Context(), source.Metadata().ID)
-	require.ErrorIs(t, err, ErrArchiveInvalid)
-	require.FileExists(t, source.Metadata().Path)
-	require.FileExists(t, filepath.Join(repositoryHistoryPath(repo, other.Metadata().ID), otherArchive+".archive"))
+	// A symlinked archives directory is removed as a link, never followed.
+	require.NoError(t, os.RemoveAll(repositoryArchiveDir(repo, source.Metadata().ID)))
+	require.NoError(t, os.Symlink(repositoryArchiveDir(repo, other.Metadata().ID), repositoryArchiveDir(repo, source.Metadata().ID)))
+	require.NoError(t, repo.Delete(t.Context(), source.Metadata().ID))
+	require.NoFileExists(t, source.Metadata().Path)
+	require.NoDirExists(t, repositoryArchiveDir(repo, source.Metadata().ID))
+	require.FileExists(t, filepath.Join(repositoryArchiveDir(repo, other.Metadata().ID), otherArchive+".archive"))
+	archives, err := repo.Archives(other)
+	require.NoError(t, err)
+	_, err = archives.Verify(t.Context(), otherArchive)
+	require.NoError(t, err)
 }
 
 func TestRepositoryCheckpointDeleteDoesNotFollowArchiveContents(t *testing.T) {
@@ -209,10 +219,10 @@ func TestRepositoryCheckpointDeleteDoesNotFollowArchiveContents(t *testing.T) {
 	_, _ = publishRepositoryCheckpoint(t, repo, source, "deletable evidence")
 	other := repositoryCheckpointHandle(t, repo)
 	otherArchive, _ := publishRepositoryCheckpoint(t, repo, other, "must remain")
-	require.NoError(t, os.Symlink(repositoryHistoryPath(repo, other.Metadata().ID), filepath.Join(repositoryHistoryPath(repo, source.Metadata().ID), "foreign")))
+	require.NoError(t, os.Symlink(repositoryArchiveDir(repo, other.Metadata().ID), filepath.Join(repositoryArchiveDir(repo, source.Metadata().ID), "foreign")))
 	require.NoError(t, source.Close())
 	require.NoError(t, repo.Delete(t.Context(), source.Metadata().ID))
-	require.NoDirExists(t, repositoryHistoryPath(repo, source.Metadata().ID))
+	require.NoDirExists(t, repositoryArchiveDir(repo, source.Metadata().ID))
 	archives, err := repo.Archives(other)
 	require.NoError(t, err)
 	_, err = archives.Verify(t.Context(), otherArchive)
@@ -233,7 +243,7 @@ func TestRepositoryCheckpointCorruptTranscriptStaysFailClosed(t *testing.T) {
 	after, err := os.ReadFile(source.Metadata().Path)
 	require.NoError(t, err)
 	assert.Equal(t, corrupt, after)
-	require.FileExists(t, filepath.Join(repositoryHistoryPath(repo, source.Metadata().ID), id+".archive"))
+	require.FileExists(t, filepath.Join(repositoryArchiveDir(repo, source.Metadata().ID), id+".archive"))
 }
 
 func TestRepositoryLegacyForkDeleteDoesNotCreateHistory(t *testing.T) {
@@ -241,7 +251,7 @@ func TestRepositoryLegacyForkDeleteDoesNotCreateHistory(t *testing.T) {
 	repo, source := repositoryCheckpointSource(t)
 	fork, err := repo.Fork(t.Context(), source, ForkOptions{})
 	require.NoError(t, err)
-	require.NoDirExists(t, repositoryHistoryPath(repo, fork.Metadata().ID))
+	require.NoDirExists(t, repositoryArchiveDir(repo, fork.Metadata().ID))
 	require.NoError(t, fork.Close())
 	require.NoError(t, repo.Delete(t.Context(), fork.Metadata().ID))
 	require.NoError(t, repo.Delete(t.Context(), fork.Metadata().ID))

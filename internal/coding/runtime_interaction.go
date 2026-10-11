@@ -945,12 +945,14 @@ func (r *Runtime) openInteraction(
 	if err != nil {
 		return nil, err
 	}
+	r.artifacts.writeSystemPrompt(systemPrompt)
 
 	allTools, err := merged.Snapshot(ctx, policy)
 	if err != nil {
 		return nil, err
 	}
 	allTools = appendUniqueTools(allTools, executableTools...)
+	r.artifacts.writeToolDefinitions(allTools)
 
 	extensionHooks := snapshot.Hooks()
 	extensionObserver := newGuardedAgentObserver(extensionHooks.Observe)
@@ -1634,6 +1636,9 @@ func (r *Runtime) finishInteraction(
 	if err := current.integration.release(ctx); err != nil {
 		errs = append(errs, err)
 	}
+	// The search document is derived and rebuildable, so refreshing it once per
+	// completed interaction keeps listing surfaces off the transcript.
+	r.artifacts.writeSearchDoc()
 
 	return errors.Join(errs...)
 }

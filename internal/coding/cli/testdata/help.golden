@@ -17,6 +17,7 @@ Available Commands:
   resume           Resume a durable coding session
   session          Inspect durable coding sessions
   ssh              Run Pips in a remote workspace
+  update           Update the pips binary from a GitHub release
   version          Print build version information
 
 Flags:
