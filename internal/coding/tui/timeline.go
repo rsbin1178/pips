@@ -1208,14 +1208,48 @@ func embeddedResourceLabel(values ...string) string {
 	return "[resource]"
 }
 
+// Attachment provenance headers. The Composer writes one ahead of every payload
+// it inlines into a user message so the model receives it (see
+// attachment.Text.PromptText and composer_submission.go). They open the text part
+// they belong to, which is what makes them recognizable here.
+const (
+	workspaceFileProvenancePrefix  = "[Workspace file: "
+	clipboardImageProvenancePrefix = "[Clipboard image: "
+	workspaceImageProvenancePrefix = "[Workspace image: "
+)
+
+// visibleMessageText renders a message's parts for the transcript. An attachment's
+// provenance collapses to the reference it names: the Composer inlines a file's
+// content and an image's bytes into the message so the model receives them, while
+// the reader wants the reference, not the payload. The message itself is never
+// rewritten, so provider requests, prompt caching, session files and resume keep
+// the complete copy.
 func visibleMessageText(message ai.Message) string {
 	values := portableMessageParts(message)
 	parts := make([]string, 0, len(values))
+	// namedImage marks a text part that already named the image the next part
+	// carries, so the pair reads as one reference instead of two markers.
+	namedImage := false
+
 	for _, part := range values {
 		switch part := part.(type) {
 		case ai.TextPart:
+			if label, isImage, ok := attachmentReference(part.Text); ok {
+				parts = append(parts, label)
+				namedImage = isImage
+
+				continue
+			}
+
+			namedImage = false
 			parts = append(parts, part.Text)
 		case ai.ImagePart:
+			if namedImage {
+				namedImage = false
+
+				continue
+			}
+
 			parts = append(parts, "[image]")
 		case ai.FilePart:
 			label := strings.TrimSpace(part.Name)
@@ -1227,6 +1261,65 @@ func visibleMessageText(message ai.Message) string {
 	}
 
 	return strings.TrimSpace(strings.Join(parts, ""))
+}
+
+// attachmentReference renders one Composer attachment provenance as the reference
+// the transcript shows, and reports whether it named an image.
+func attachmentReference(text string) (label string, isImage, ok bool) {
+	trimmed := strings.TrimLeft(text, "\n")
+
+	switch {
+	case strings.HasPrefix(trimmed, workspaceFileProvenancePrefix):
+		header, body, found := strings.Cut(trimmed, "\n")
+		path := provenanceDetail(header, workspaceFileProvenancePrefix)
+		if path == "" {
+			return "", false, false
+		}
+		if !found || strings.TrimSpace(body) == "" {
+			return "[File · " + path + "]", false, true
+		}
+
+		// The content is what the reader does not need; its size is what they do.
+		// Trailing blank lines are not lines the reader counts.
+		lines := logicalLineCount(strings.TrimRight(body, "\r\n"))
+
+		return fmt.Sprintf("[File · %s · %s]", path, lineCountLabel(lines)), false, true
+	case strings.HasPrefix(trimmed, clipboardImageProvenancePrefix):
+		return imageReference(trimmed, clipboardImageProvenancePrefix)
+	case strings.HasPrefix(trimmed, workspaceImageProvenancePrefix):
+		return imageReference(trimmed, workspaceImageProvenancePrefix)
+	default:
+		return "", false, false
+	}
+}
+
+func imageReference(text, prefix string) (string, bool, bool) {
+	header, _, _ := strings.Cut(text, "\n")
+	detail := provenanceDetail(header, prefix)
+	if detail == "" {
+		return "", false, false
+	}
+
+	return "[Image · " + detail + "]", true, true
+}
+
+// provenanceDetail returns the text between a provenance prefix and its closing
+// bracket, or "" when the header is not the shape the Composer writes.
+func provenanceDetail(header, prefix string) string {
+	if !strings.HasPrefix(header, prefix) || !strings.HasSuffix(header, "]") {
+		return ""
+	}
+
+	return strings.TrimSuffix(strings.TrimPrefix(header, prefix), "]")
+}
+
+// lineCountLabel words how much content an attachment carries.
+func lineCountLabel(lines int) string {
+	if lines == 1 {
+		return "1 line"
+	}
+
+	return fmt.Sprintf("%d lines", lines)
 }
 
 // portableMessageParts returns a message's parts for projection only. The

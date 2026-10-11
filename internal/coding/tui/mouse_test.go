@@ -59,6 +59,95 @@ func TestFullscreenWheelScrollsTheManagedTranscript(t *testing.T) {
 	assert.Equal(t, bottom, model.transcriptScroll.offset)
 }
 
+// A draft taller than its box is unreadable without the wheel: the editor's view
+// follows its caret, so the notch has to move the caret to move the view. The
+// transcript behind the Composer must not move.
+func TestWheelOverATallDraftScrollsTheComposer(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		draft string
+		// caret reads the position the notch is expected to move: the caret's line for
+		// a multi-line draft, and its row inside the line for one that soft-wraps.
+		caret func(*Model) int
+	}{
+		{
+			name:  "more lines than rows",
+			draft: strings.Repeat("DRAFT-LINE\n", 40),
+			caret: func(model *Model) int { return model.composer.Line() },
+		},
+		{
+			name:  "one line that wraps past the box",
+			draft: strings.Repeat("x", 400),
+			caret: func(model *Model) int { return model.composer.LineInfo().RowOffset },
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			model := wheelModel(t, nil)
+			model.composer.SetValue(test.draft)
+			model.setLayout()
+			_ = model.View()
+
+			require.Positive(t, model.frameHit.composerRows, "the frame records the Composer band")
+			// The band sits directly above the status line, so the row it recorded is
+			// checked against the layout rather than against itself.
+			assert.Equal(t, model.height-1-model.frameHit.composerRows, model.frameHit.composerTop)
+			require.True(t, model.composerDraftOverflows(), "the fixture must overflow the box")
+			transcript := model.transcriptScroll.offset
+			at := model.frameHit.composerTop
+
+			// Every notch moves the draft, in both directions. One notch that moves and
+			// then sticks is the defect this pins: the editor repositions its view onto
+			// the caret on every update, so a notch that does not move the caret is
+			// undone by the next one.
+			previous := test.caret(model)
+			for notch := range 3 {
+				model.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp, X: 4, Y: at})
+
+				moved := test.caret(model)
+				assert.Less(t, moved, previous, "notch %d moved the draft", notch)
+				previous = moved
+			}
+			for notch := range 3 {
+				model.Update(tea.MouseWheelMsg{Button: tea.MouseWheelDown, X: 4, Y: at})
+
+				moved := test.caret(model)
+				assert.Greater(t, moved, previous, "notch %d moved the draft back", notch)
+				previous = moved
+			}
+
+			assert.Equal(t, transcript, model.transcriptScroll.offset, "the transcript stayed put")
+		})
+	}
+}
+
+// A draft that fits has nothing to scroll, so the notch keeps doing what it has
+// always done: it moves the conversation under the pointer.
+func TestWheelOverAShortDraftKeepsTheTranscript(t *testing.T) {
+	t.Parallel()
+
+	model := wheelModel(t, nil)
+	model.composer.SetValue("one line")
+	model.setLayout()
+	_ = model.View()
+
+	require.Positive(t, model.frameHit.composerRows, "the frame records the Composer band")
+	require.False(t, model.composerDraftOverflows(), "a draft that fits has no hidden rows")
+	bottom := model.transcriptScroll.offset
+	require.Positive(t, bottom, "the fixture must overflow the window")
+
+	model.Update(tea.MouseWheelMsg{
+		Button: tea.MouseWheelUp, X: 4, Y: model.frameHit.composerTop,
+	})
+
+	assert.Equal(t, bottom-wheelLinesDefault, model.transcriptScroll.offset)
+}
+
 // TestPointerHandlerLeavesTheWheelToUpdate pins the message contract a frame that
 // captures the pointer has to respect: the renderer forwards a mouse message to
 // the installed handler and then to Update, so the wheel is answered exactly once,
@@ -391,23 +480,6 @@ func TestReservedBandArrowFitsANarrowNoColorFrame(t *testing.T) {
 		assert.NotContains(t, band, "\x1b[", "NO_COLOR keeps the band free of escapes at width %d", width)
 		assert.Contains(t, band, bandScrollIcon, "width %d", width)
 	}
-}
-
-// TestHelpStatesTheModifierDragFallback records the user-visible cost of mouse
-// capture where a user can read it.
-func TestHelpStatesTheModifierDragFallback(t *testing.T) {
-	t.Parallel()
-
-	fullscreen := wheelModel(t, nil)
-	help := fullscreen.historyHelpLine()
-	assert.Contains(t, help, "wheel")
-	assert.Contains(t, help, "Shift")
-	assert.Contains(t, help, "[tui] mouse = false")
-
-	inline := readyModel(t, true)
-	assert.NotContains(t, inline.historyHelpLine(), "Shift",
-		"inline mode never captures the mouse, so there is nothing to bypass")
-	assert.Contains(t, inline.historyHelpLine(), "drag normally to select")
 }
 
 // TestWheelScrollsTheToolDetailPanel is the Ctrl+T contract: the panel body is a

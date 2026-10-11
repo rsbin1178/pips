@@ -230,7 +230,7 @@ type TextSaver func(context.Context, TextSaveRequest) (string, error)
 // The default is nil, which sends an OSC 52 request through the Program — the
 // only writer allowed to touch the terminal. A caller that owns another route to
 // the clipboard, such as a remote session bridge, supplies its own; it replaces
-// the request for every copy the TUI makes (the drag gesture, Ctrl+X, /copy), and
+// the request for every copy the TUI makes (the drag gesture, Ctrl+Y, /copy), and
 // its error is reported instead of being assumed away. An explicit /copy or
 // /export with a path keeps its saver, which is the durable half of that result.
 type TextClipboard func(content string) error
@@ -281,7 +281,7 @@ type Options struct {
 	StatusLine      []statusline.Item
 	SaveStatusLine  StatusLineSaver
 	SaveTheme       ThemeSaver
-	// SaveText persists Ctrl+X, /copy and /export output. A nil saver keeps the
+	// SaveText persists Ctrl+Y, /copy and /export output. A nil saver keeps the
 	// clipboard path and reports that no file fallback is available.
 	SaveText TextSaver
 	// ClipboardWriter overrides the OSC 52 write a copy performs. A nil writer

@@ -765,6 +765,9 @@ type stubController struct {
 	Controller
 	state            coding.State
 	configStatusLine []statusline.Item
+	// capabilities, when set, is what Capabilities() reports. A stub that does not
+	// script one reports the image-capable model most tests assume.
+	capabilities ai.Capabilities
 	// modelState, when set, is what Model() reports. It stands in for the
 	// resolved snapshot the status line reads its reasoning level from.
 	modelState *runtimecontrol.ModelState
@@ -778,6 +781,17 @@ type stubController struct {
 }
 
 func (c stubController) Snapshot() coding.State { return c.state.Clone() }
+
+// Capabilities defaults to a model that takes text, tools and images, so the
+// embedded nil Controller is never reached and an image draft is sendable unless
+// a test scripts otherwise.
+func (c stubController) Capabilities() ai.Capabilities {
+	if c.capabilities == (ai.Capabilities{}) {
+		return ai.Capabilities{Text: true, Tools: true, Vision: true}
+	}
+
+	return c.capabilities
+}
 
 // Model defaults to the zero state, so a stub that does not script a resolved
 // model reports no reasoning level rather than reaching the embedded nil

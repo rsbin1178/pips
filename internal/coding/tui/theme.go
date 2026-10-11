@@ -210,6 +210,21 @@ func composerStyles(theme colorTheme, noColor bool) textarea.Styles {
 	return styles
 }
 
+// composerSelectionStyles draws a whole-draft selection on top of the theme's
+// editor styling. Reverse video is the terminal's own foreground/background swap
+// rather than a palette color, so the selection stays legible in every theme and
+// the composer keeps its no-background rule.
+func composerSelectionStyles(base textarea.Styles) textarea.Styles {
+	selected := base
+	selection := base.Focused.Text.Reverse(true)
+	selected.Focused.Text = selection
+	selected.Focused.CursorLine = selection
+	selected.Blurred.Text = selection
+	selected.Blurred.CursorLine = selection
+
+	return selected
+}
+
 func sessionSearchStyles(theme colorTheme, noColor bool) textinput.Styles {
 	if noColor {
 		styles := textinput.Styles{}

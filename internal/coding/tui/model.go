@@ -533,15 +533,10 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.clipboardLoading = false
 		if message.err != nil {
-			m.streamErr = message.err
-			m.setLayout()
-
-			return m, nil
+			return m, m.publishRefusal(message.err)
 		}
-		m.streamErr = m.composer.InsertImage(message.image)
-		m.setLayout()
 
-		return m, nil
+		return m, m.publishRefusal(m.insertComposerImage(message.image))
 	case planDocumentMsg:
 		return m.applyPlanDocument(message)
 	case bridgeImageMsg:
@@ -1006,17 +1001,15 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if m.route.kind == routeTeam && m.route.team != nil &&
 			teamRouteInputStage(m.route.team.stage) {
 			_, err := m.composer.InsertPaste(message.Content)
-			m.streamErr = err
 			m.setLayout()
 
-			return m, nil
+			return m, m.publishRefusal(err)
 		}
 		if m.route.kind == routeChild && m.route.childKind == childTeamWorker {
 			_, err := m.composer.InsertPaste(message.Content)
-			m.streamErr = err
 			m.setLayout()
 
-			return m, nil
+			return m, m.publishRefusal(err)
 		}
 		if m.route.kind != routeNone || m.prompt.kind != promptNone || m.composerResolving ||
 			m.clipboardLoading ||
@@ -1025,12 +1018,18 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		_, err := m.composer.InsertPaste(message.Content)
-		m.streamErr = err
 		m.setLayout()
 
-		return m, nil
+		return m, m.publishRefusal(err)
 	case tea.KeyPressMsg:
-		return m.updateKey(message)
+		// A keystroke can remove the attachment a refusal was about, so the notice is
+		// re-checked against the draft the key just changed.
+		model, command := m.updateKey(message)
+		if commit := m.reconcileComposerRefusal(); commit != nil {
+			return model, m.afterScrollback(commit, command)
+		}
+
+		return model, command
 	case renderTickMsg:
 		m.renderWait = false
 		var commit tea.Cmd
@@ -1312,13 +1311,11 @@ func (m *Model) updateReadyKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.updateSearchKey(message)
 	}
 	key := message.String()
-	// A drag selection answers Escape first, the way the find box does: the key
-	// closes the gesture the reader just made instead of canceling the turn behind
-	// it.
-	if key == keyEscape && m.selection.visible {
-		m.clearSelection()
-
-		return m, redrawFrame()
+	// Escape ends the gesture the reader just made, the way the find box does: a drag
+	// selection or a whole-draft selection answers it before the cancel/exit binding
+	// behind it.
+	if command, handled := m.dismissReadingGesture(key); handled {
+		return m, command
 	}
 	if key == keyEscape && m.directAgent != nil && !m.directAgent.running &&
 		m.composer.Value() == "" {
@@ -1327,12 +1324,12 @@ func (m *Model) updateReadyKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 		return m, nil
 	}
-	if key == "up" && m.composer.AtFirstVisualRow() && m.composer.HistoryUp() {
+	if key == "up" && !m.composer.SelectionActive() && m.composer.AtFirstVisualRow() && m.composer.HistoryUp() {
 		m.setLayout()
 
 		return m, nil
 	}
-	if key == keyDown && m.composer.AtLastVisualRow() && m.composer.HistoryDown() {
+	if key == keyDown && !m.composer.SelectionActive() && m.composer.AtLastVisualRow() && m.composer.HistoryDown() {
 		m.setLayout()
 
 		return m, nil
@@ -1388,6 +1385,8 @@ func (m *Model) updateReadyKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, m.runModeControl(mode)
 		case actionPasteImage:
 			return m, m.readClipboardImage()
+		case actionSelectAll:
+			return m, m.selectAllDraft()
 		case actionCommand, actionHelp:
 			if action == actionCommand {
 				m.openCommandPicker()
@@ -1395,7 +1394,7 @@ func (m *Model) updateReadyKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 
-			return m, m.printHelp()
+			return m, m.openHelp()
 		}
 
 		return m, nil
@@ -1553,6 +1552,8 @@ func (m *Model) readyView() tea.View {
 		topDropped:    min(dropped, transcriptRows),
 		band:          m.bandRowOf(parts, bandIndex, dropped, bandHint != ""),
 		turnIndicator: indicator,
+		composerTop:   frameRowOf(parts, composerIndex, dropped),
+		composerRows:  lipgloss.Height(footer[composerFooterIndex]),
 	}
 	// presentationView installs the pointer handler for every frame, so the ready
 	// view only has to record where its transcript band sat.
@@ -2505,6 +2506,90 @@ func (m *Model) requestRender() tea.Cmd {
 	})
 }
 
+// publishRefusal records an operator-facing refusal and publishes it in the same
+// update. setLayout only resizes the Composer, and the refusal is drawn from the
+// transcript, so a refusal that does not commit leaves the draft on screen with
+// Enter doing nothing and nothing explaining why. Every refusal path returns
+// through here; a nil error publishes nothing and keeps the draft.
+func (m *Model) publishRefusal(err error) tea.Cmd {
+	if err == nil {
+		return nil
+	}
+
+	m.streamErr = err
+	m.setLayout()
+
+	return m.commitStableTimeline()
+}
+
+// selectAllDraft selects the whole draft and states the keys that act on it. The
+// notice is not decoration: the composer draws the selection but cannot say what the
+// next key will do to it.
+func (m *Model) selectAllDraft() tea.Cmd {
+	selected := m.composer.ToggleSelectAll()
+	m.setLayout()
+	if !selected {
+		return nil
+	}
+
+	return m.setStatusNotice(composerSelectionNotice)
+}
+
+// dismissReadingGesture answers Escape for the two reading gestures the ready view
+// owns: a drag selection in the transcript, and a whole-draft selection in the
+// Composer. Escape ends the gesture the reader just made, so neither may reach the
+// cancel/exit binding behind it. It reports whether it answered the key.
+func (m *Model) dismissReadingGesture(key string) (tea.Cmd, bool) {
+	if key != keyEscape {
+		return nil, false
+	}
+
+	if m.selection.visible {
+		m.clearSelection()
+
+		return redrawFrame(), true
+	}
+	if m.composer.SelectionActive() {
+		m.composer.CollapseSelection()
+		m.setLayout()
+
+		return redrawFrame(), true
+	}
+
+	return nil, false
+}
+
+// composerImageRefusal reports why an image held by the draft will not send, or
+// nil when the active model accepts image input.
+func (m *Model) composerImageRefusal() error {
+	if m.controller.Capabilities().Vision {
+		return nil
+	}
+
+	return errComposerVisionUnsupported
+}
+
+// reconcileComposerRefusal drops a refusal whose cause is gone. The refusal is
+// about the draft, so it must not outlive it: once the draft no longer holds an
+// image the active model cannot accept, the notice would tell the operator to fix
+// something they already fixed. It returns the commit that takes the notice off
+// screen, or nil when there was nothing to clear.
+func (m *Model) reconcileComposerRefusal() tea.Cmd {
+	if !errors.Is(m.streamErr, errComposerVisionUnsupported) {
+		return nil
+	}
+	if composerSnapshotHasImages(m.composer.Snapshot()) && !m.controller.Capabilities().Vision {
+		return nil
+	}
+
+	m.streamErr = nil
+	// The inline path prints the notice once and remembers it; a later refusal has
+	// to be able to print again.
+	m.scrollback.streamError = ""
+
+	return m.commitStableTimeline()
+}
+
 func actionContextFor(state coding.State) actionContext {
 	switch state.Phase {
 	case coding.PhaseRunning:
@@ -2572,10 +2657,7 @@ func (m *Model) prepareSubmission(
 	if composerSnapshotHasImages(snapshot) {
 		vision = m.controller.Capabilities().Vision
 		if !vision {
-			m.streamErr = errComposerVisionUnsupported
-			m.setLayout()
-
-			return nil
+			return m.publishRefusal(errComposerVisionUnsupported)
 		}
 	}
 	if composerSnapshotHasFiles(snapshot) {
@@ -2608,8 +2690,7 @@ func (m *Model) prepareSubmission(
 	message, err := resolveComposerSnapshot(m.ctx, snapshot, vision, nil)
 	if err != nil {
 		if strings.TrimSpace(m.composer.Value()) != "" {
-			m.streamErr = err
-			m.setLayout()
+			return m.publishRefusal(err)
 		}
 
 		return nil
@@ -2625,9 +2706,7 @@ func (m *Model) dispatchSubmission(
 ) tea.Cmd {
 	if kind == submissionPrompt {
 		if err := m.composer.RecordHistory(snapshot); err != nil {
-			m.streamErr = err
-
-			return nil
+			return m.publishRefusal(err)
 		}
 		m.composer.Reset()
 		m.setLayout()

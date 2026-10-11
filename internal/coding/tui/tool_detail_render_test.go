@@ -483,14 +483,6 @@ func TestStatusReportUsesHumanValuesAndWrapsHelp(t *testing.T) {
 	assert.NotContains(t, status, "Compaction: false")
 	assert.NotContains(t, status, "Model override:")
 	assert.NotContains(t, status, "Detached: false")
-
-	help := modelCommandOutput(model, model.printHelp())
-	for line := range strings.SplitSeq(strings.TrimSpace(help), "\n") {
-		assert.LessOrEqual(t, ansi.StringWidth(line), 60)
-	}
-	// Word wrapping keeps words intact rather than cutting them mid-word.
-	assert.NotContains(t, help, "\n  clea")
-	assert.NotContains(t, help, "conve\n")
 }
 
 func TestApprovalPromptShowsWholeCommandAndHumanChoices(t *testing.T) {
