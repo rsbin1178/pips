@@ -17,8 +17,7 @@ import (
 func TestWithCodingRetryUsesTenRetryBudget(t *testing.T) {
 	t.Parallel()
 
-	// The retry budget follows the default the other agent frontends ship; pin
-	// the number so a change is deliberate.
+	// Pin the retry budget so a change is deliberate.
 	assert.Equal(t, 10, RetryBudget)
 
 	transient := func(failures int) []error {

@@ -19,8 +19,7 @@
 //   - The transport runs its own liveness checks, so a peer that stops
 //     answering is reported rather than parked: an HTTP/2 ping after a stretch
 //     of silence, a close when the ping goes unanswered, and explicit TCP
-//     keep-alive probes for a path that drops the connection's state. They
-//     mirror what the other agent frontends configure.
+//     keep-alive probes for a path that drops the connection's state.
 //   - Every request carries a User-Agent naming this client and its build, so a
 //     gateway's logs can attribute the traffic. Config.UserAgent replaces that
 //     value, and a declared value that is empty sends no User-Agent header at
