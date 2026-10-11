@@ -53,7 +53,7 @@ const (
 // modelStallThreshold is how long an open turn may go without carrying any
 // model progress before the activity row says so. A gateway that buffers a
 // response looks identical to a dead one without this signal; twenty seconds is
-// the threshold the other agent frontends use.
+// the default threshold.
 const modelStallThreshold = 20 * time.Second
 
 type activityStatus struct {
@@ -335,7 +335,7 @@ func resolveBlockingActivity(context activityContext) (activityStatus, bool) {
 // retryActivityDetail spells out where the retry stands, how long the wait is,
 // and why the request is being re-attempted, so a viewer can tell a slow retry
 // from a stall. The counter reads "retry 2/10": the second replay of a budget
-// of ten, which is how the other agent frontends count them.
+// of ten.
 func retryActivityDetail(retry coding.RetryState, now time.Time) string {
 	detail := fmt.Sprintf("retry %d/%d", retry.Attempt, retry.MaxRetries)
 

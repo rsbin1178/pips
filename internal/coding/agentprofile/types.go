@@ -87,7 +87,7 @@ const (
 )
 
 // ParseCapabilityMode accepts the canonical spelling and the tolerated input
-// aliases that the source enum accepts. It reports false for an unknown value.
+// aliases. It reports false for an unknown value.
 func ParseCapabilityMode(value string) (CapabilityMode, bool) {
 	switch value {
 	case string(CapabilityReadOnly), "readonly", "readOnly", "read_only", "ReadOnly":

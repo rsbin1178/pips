@@ -3,8 +3,8 @@
 Pips supports reviewed command hooks around the Coding Runtime. The lifecycle
 events and their control effects are defined by Pips for its own Runtime
 boundaries. The configuration and command response schema are deliberately
-Pips-native: do not copy another agent's hook configuration into Pips expecting
-it to run.
+Pips-native: do not copy configuration from another tool into Pips expecting it
+to run.
 
 A trusted hook is local automation with the authority of the operating-system
 user that starts Pips. It runs outside the Coding Sandbox and model-tool
