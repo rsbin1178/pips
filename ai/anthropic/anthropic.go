@@ -125,6 +125,13 @@ func WithMaxStreamLineSize(n int) Option {
 	return func(o *options) { o.cfg.MaxStreamLineSize = n }
 }
 
+// WithUserAgent replaces the User-Agent every request carries, so a gateway's
+// logs can attribute the traffic. An empty value sends no User-Agent header at
+// all; leaving the option out sends the client's own default.
+func WithUserAgent(agent string) Option {
+	return func(o *options) { o.cfg.UserAgent = &agent }
+}
+
 // WithStreamIdleTimeout bounds the silence between reads on a streaming
 // response before the stream is aborted with [ai.ErrStreamIdle]. It bounds an
 // idle gap rather than the response's total duration, so a long answer is never

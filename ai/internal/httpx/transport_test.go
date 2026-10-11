@@ -36,12 +36,13 @@ func TestResolveUserAgent(t *testing.T) {
 
 	cases := []struct {
 		name string
-		in   string
+		in   *string
 		want string
 	}{
-		{"unset selects the client name", "", DefaultUserAgent()},
-		{"blank selects the client name", "   ", DefaultUserAgent()},
-		{"explicit value wins", "gateway-probe/1", "gateway-probe/1"},
+		{"unset selects the client name", nil, DefaultUserAgent()},
+		{"an empty declaration sends nothing", new(""), ""},
+		{"a declared value is trimmed", new("  gateway-probe/1  "), "gateway-probe/1"},
+		{"explicit value wins", new("gateway-probe/1"), "gateway-probe/1"},
 	}
 
 	for _, tc := range cases {
@@ -145,13 +146,21 @@ func TestRequestCarriesTheUserAgent(t *testing.T) {
 		},
 		{
 			name:   "an explicit config value wins",
-			config: func(cfg *Config) { cfg.UserAgent = "gateway-probe/1" },
+			config: func(cfg *Config) { cfg.UserAgent = new("gateway-probe/1") },
 			want:   func() string { return "gateway-probe/1" },
 		},
 		{
 			name:   "a config header wins over both",
 			config: func(cfg *Config) { cfg.Header = http.Header{"User-Agent": []string{"header-agent/2"}} },
 			want:   func() string { return "header-agent/2" },
+		},
+		{
+			name: "a config header wins over a disabled value",
+			config: func(cfg *Config) {
+				cfg.UserAgent = new("")
+				cfg.Header = http.Header{"User-Agent": []string{"header-agent/2"}}
+			},
+			want: func() string { return "header-agent/2" },
 		},
 	}
 
@@ -180,6 +189,31 @@ func TestRequestCarriesTheUserAgent(t *testing.T) {
 			assert.Equal(t, tc.want(), <-seen)
 		})
 	}
+}
+
+// TestDisabledUserAgentSendsNoHeader pins what "off" means on the wire: the
+// header is absent rather than blank, which is how net/http omits a header that
+// is present but empty.
+func TestDisabledUserAgentSendsNoHeader(t *testing.T) {
+	t.Parallel()
+
+	seen := make(chan bool, 1)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, present := r.Header["User-Agent"]
+		seen <- present
+
+		_, _ = fmt.Fprint(w, `{}`)
+	}))
+	defer server.Close()
+
+	cfg := localConfig()
+	cfg.UserAgent = new("")
+	client := New(cfg, server.URL)
+
+	_, err := client.PostJSON(t.Context(), "x", nil, struct{}{}, nil, noErrorDecoder)
+	require.NoError(t, err)
+	assert.False(t, <-seen, "a disabled User-Agent is absent from the request")
 }
 
 // parkedServer accepts a request and never answers it, which is the shape the

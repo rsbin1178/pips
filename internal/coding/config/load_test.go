@@ -628,6 +628,93 @@ func TestLoadRejectsStreamIdleTimeoutOutOfRange(t *testing.T) {
 	}
 }
 
+func TestLoadUserAgentPerProviderAndModel(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, `
+[providers.openai]
+user_agent = "gateway-probe/1"
+
+[providers.openai.models."named"]
+default = true
+user_agent = "pips-coder"
+
+[providers.openai.models."silent"]
+user_agent_enabled = false
+
+[providers.openai.models."inherits"]
+`)
+	result, err := config.Load(config.LoadOptions{ConfigFile: path})
+	require.NoError(t, err)
+
+	assert.Equal(t, new("gateway-probe/1"), result.Config.Providers[ai.ProviderOpenAI].UserAgent)
+
+	byRef := make(map[string]config.ModelConfig, len(result.Config.Models))
+	for _, model := range result.Config.Models {
+		byRef[model.Ref.String()] = model
+	}
+
+	assert.Equal(t, new("pips-coder"), byRef["openai/named"].UserAgent,
+		"the model's own value wins over the provider's")
+	assert.Equal(t, new(false), byRef["openai/silent"].UserAgentEnabled,
+		"a model switches the header off on its own")
+	assert.Nil(t, byRef["openai/inherits"].UserAgent, "an absent key declares nothing")
+	assert.Nil(t, byRef["openai/inherits"].UserAgentEnabled, "an absent switch declares nothing")
+}
+
+func TestLoadRejectsUnusableUserAgent(t *testing.T) {
+	t.Parallel()
+
+	// "Send nothing" has its own switch, so an empty value is a mistake to
+	// report rather than a second way of saying it, and declaring a value beside
+	// a disabled switch is a contradiction rather than a precedence rule.
+	tests := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{
+			name:    "provider declares an empty value",
+			content: "[providers.openai]\nuser_agent = \"\"\n",
+			want:    "user_agent is empty",
+		},
+		{
+			name:    "model declares a blank value",
+			content: "[providers.openai.models.\"m\"]\nuser_agent = \"   \"\n",
+			want:    "user_agent is empty",
+		},
+		{
+			name:    "provider declares both fields",
+			content: "[providers.openai]\nuser_agent_enabled = false\nuser_agent = \"x/1\"\n",
+			want:    "user_agent_enabled is false",
+		},
+		{
+			name:    "model declares both fields",
+			content: "[providers.openai.models.\"m\"]\nuser_agent_enabled = false\nuser_agent = \"x/1\"\n",
+			want:    "user_agent_enabled is false",
+		},
+		{
+			name:    "a value carries a control character",
+			content: "[providers.openai]\nuser_agent = \"probe\\u0001\"\n",
+			want:    "unsupported characters",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			path := filepath.Join(t.TempDir(), "config.toml")
+			writeFile(t, path, test.content)
+
+			_, err := config.Load(config.LoadOptions{ConfigFile: path})
+			require.ErrorIs(t, err, config.ErrInvalid)
+			assert.Contains(t, err.Error(), test.want)
+		})
+	}
+}
+
 func TestLoadMultipleModelsRequireDefaultOrProcessSelection(t *testing.T) {
 	t.Parallel()
 

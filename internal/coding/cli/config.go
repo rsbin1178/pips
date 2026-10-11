@@ -157,12 +157,22 @@ func writeResolvedModel(output io.Writer, resolved modelcatalog.ResolvedModel) e
 		idleBound = resolved.StreamIdleTimeout.String()
 	}
 
+	userAgent := unsetValue
+	switch {
+	case resolved.UserAgent == nil:
+	case *resolved.UserAgent == "":
+		userAgent = "<disabled>"
+	default:
+		userAgent = strconv.Quote(*resolved.UserAgent)
+	}
+
 	if _, err := fmt.Fprintf(
 		output,
 		"resolved.protocol = %q\nresolved.base_url = %q # origin=%s\n"+
 			"resolved.context_window = %d\n"+
 			"resolved.stream_idle_timeout = %s\n"+
 			"resolved.retry_window = %s\n"+
+			"resolved.user_agent = %s\n"+
 			"resolved.extra_body = <redacted> # keys=%d bytes=%d\n",
 		resolved.Protocol,
 		resolved.Endpoint.BaseURL,
@@ -170,6 +180,7 @@ func writeResolvedModel(output io.Writer, resolved modelcatalog.ResolvedModel) e
 		resolved.Limits.ContextWindow,
 		idleBound,
 		model.RetryWindowFor(resolved.StreamIdleTimeout),
+		userAgent,
 		len(resolved.Options.ExtraBody),
 		len(extraBytes),
 	); err != nil {

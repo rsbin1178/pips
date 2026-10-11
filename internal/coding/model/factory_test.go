@@ -331,3 +331,99 @@ func TestConfiguredStreamIdleTimeoutReachesTheTransport(t *testing.T) {
 	default:
 	}
 }
+
+// TestConfiguredUserAgentReachesTheWire walks the whole coding path for the
+// header: configuration -> catalog -> adapter -> HTTP request. The three states
+// are the client's own default, a declared value, and a declaration that
+// switches the header off entirely.
+func TestConfiguredUserAgentReachesTheWire(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		declared config.ModelConfig
+		want     string
+		prefix   bool
+	}{
+		{
+			name:     "an undeclared model sends the client's own default",
+			declared: config.ModelConfig{},
+			want:     "pips",
+			prefix:   true,
+		},
+		{
+			name:     "a declared value is sent",
+			declared: config.ModelConfig{UserAgent: new("pips-coder/2")},
+			want:     "pips-coder/2",
+		},
+		{
+			name:     "a disabled switch sends nothing",
+			declared: config.ModelConfig{UserAgentEnabled: new(false)},
+			want:     "",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Buffered so the handler never blocks, and read only after the call
+			// returns, which keeps the capture race-free.
+			seen := make(chan string, 1)
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				seen <- r.Header.Get("User-Agent")
+
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(
+					`{"id":"chat_1","model":"gpt-5",` +
+						`"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`,
+				))
+			}))
+			t.Cleanup(server.Close)
+
+			ref := config.ModelRef{Provider: ai.ProviderOpenAI, Model: "gpt-5"}
+			entry := test.declared
+			entry.Ref = ref
+
+			cfg := config.Config{
+				Model:  ref,
+				Models: []config.ModelConfig{entry},
+				Providers: map[ai.Provider]config.ProviderConfig{
+					ai.ProviderOpenAI: {
+						BaseURL:         server.URL + "/v1",
+						Protocol:        config.ProtocolOpenAIChatCompletions,
+						AllowHTTP:       true,
+						AllowPrivateIPs: true,
+					},
+				},
+				Sandbox:  config.SandboxWorkspaceWrite,
+				Approval: config.ApprovalOnRequest,
+			}
+
+			catalog, err := modelcatalog.New(cfg)
+			require.NoError(t, err)
+
+			resolved, err := catalog.Resolve(modelcatalog.Selection{Ref: ref})
+			require.NoError(t, err)
+
+			bound, err := model.New(t.Context(), resolved, &credentialStore{})
+			require.NoError(t, err)
+
+			_, err = bound.Generate(t.Context(), ai.Request{Messages: []ai.Message{ai.UserText("hello")}})
+			require.NoError(t, err)
+
+			got := <-seen
+
+			switch {
+			case test.want == "":
+				assert.Empty(t, got, "a disabled header is absent rather than blank")
+			case test.prefix:
+				assert.True(t, strings.HasPrefix(got, test.want),
+					"the request carries %q, got %q", test.want, got)
+			default:
+				assert.Equal(t, test.want, got)
+			}
+		})
+	}
+}
