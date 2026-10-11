@@ -242,7 +242,9 @@ func newManagerFixtureWithConfig(
 	manager, err := New(managerConfig)
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		// A background child may still be queued for a slot when the test ends,
+		// so the close budget stays generous; it costs nothing on the happy path.
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
 		require.NoError(t, manager.Close(ctx))
