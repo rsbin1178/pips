@@ -16,11 +16,11 @@ Dynamic Subagent 是 Coding Agent 应用层能力：定义发现/编译、child 
 - 前置条件：有效 Provider；custom gate 保持默认开启。
 - 隔离夹具：Workspace 含一个小型 Go package 与已知 diff。
 - 步骤：让 parent 调用 `spawn_subagent`（`run_in_background: false`）分别运行 builtin `explore` 查找证据、`plan` 给出实施步骤、`review` 审阅已知 diff；再省略 `subagent_type` 验证默认解析为 `general-purpose`。
-- 预期证据：每次调用创建独立 child Session，默认把最终 assistant 文本作为结果返回（`result` 是字符串）；设置 `[subagent].structured_results = true` 后恢复严格结构结果，explore evidence、plan steps/files、review findings/residual risks 本地校验；`general-purpose` 得到完整可委托目录，`explore`/`plan`/`review` 只得到只读工具（无 `apply_patch`、无 `shell`）；builtin 不受 `dynamic_subagents = false` 影响；child 无 parent transcript/写权限扩张；child 通过流式路径驱动模型。
+- 预期证据：每次调用创建独立 child Session，默认把最终 assistant 文本作为结果返回（`result` 是字符串）；设置 `[subagents].structured_results = true` 后恢复严格结构结果，explore evidence、plan steps/files、review findings/residual risks 本地校验；`general-purpose` 得到完整可委托目录，`explore`/`plan`/`review` 只得到只读工具（无 `apply_patch`、无 `shell`）；builtin 不受 `dynamic_subagents = false` 影响；child 无 parent transcript/写权限扩张；child 通过流式路径驱动模型。
 - 通过条件：三角色成功、结果契约与配置一致、上限正确；parent 只得到有界结果，不得到 hidden reasoning。
 - 失败条件：关闭 custom 后 builtin 消失、只读类型拿到 `apply_patch`/`shell`、child 越权写入、或失败结果被当成功。
 - 清理/回滚：等待/取消所有 child 后退出；child Session 随隔离 home 清理。
-- 来源/测试锚点：[role.go](../../internal/coding/subagent/role.go)、[builtins.go](../../internal/coding/agentprofile/builtins.go)、[subagent_dispatch.go](../../internal/coding/subagent_dispatch.go)、[role_test.go](../../internal/coding/subagent/role_test.go)。
+- 来源/测试锚点：[role.go](../../internal/coding/subagent/role.go)、[builtins.go](../../internal/coding/agentprofile/builtins.go)、[subagents_dispatch.go](../../internal/coding/subagent_dispatch.go)、[role_test.go](../../internal/coding/subagent/role_test.go)。
 - 结果：`未执行`。
 
 ## MA-SUB-002：显式关闭、发现可见与 Dispatch 禁止
@@ -96,7 +96,7 @@ Dynamic Subagent 是 Coding Agent 应用层能力：定义发现/编译、child 
 ## MA-SUB-006：并发、Spawn 与执行预算——queue / fail
 
 - 分类：本地确定性、默认开启。变更等级：本地持久状态。
-- 前置条件：配置较小但有效的 `[subagent]` limits；scripted model 能保持 child 运行；分别用 `limit_behavior = "queue"` 与 `"fail"` 各跑一轮。
+- 前置条件：配置较小但有效的 `[subagents]` limits；scripted model 能保持 child 运行；分别用 `limit_behavior = "queue"` 与 `"fail"` 各跑一轮。
 - 隔离夹具：将 `max_concurrent`、`max_spawned_per_root_interaction`、`max_auto_follow_ups`、turn/token/tool/duration 设为易触发值。
 - 步骤：并发启动直到 capacity；额外再启动；触发 spawn limit、turn/token/tool/duration limit；关闭 Runtime 时仍有 child；运行：
 
@@ -151,6 +151,36 @@ Dynamic Subagent 是 Coding Agent 应用层能力：定义发现/编译、child 
 - 来源/测试锚点：[OTel observer](../../internal/coding/observability/otel/otel.go)、[readiness](../coding-dynamic-subagents-readiness.md)、[rollback regression](../../internal/coding/dynamic_subagent_test.go)。
 - 结果：`未执行`。
 
+## MA-SUB-010：Role、Persona 与 model 优先级
+
+- 分类：实时 Provider、默认开启。变更等级：本地持久状态；可能产生费用。
+- 前置条件：有效 Provider 与至少两个已配置模型；`dynamic_subagents` 保持默认开启。
+- 隔离夹具：`${PIPS_ACCEPT_HOME}/roles/explore.toml`（`prompt_file` 指向同目录的 markdown）、`${PIPS_ACCEPT_HOME}/personas/explore.toml`（`instructions` 与 `outputs`）、以及一个同名 inline `[subagents.roles.explore]` 覆盖。
+- 步骤：让 parent 以 `subagent_type: "explore"` 前台委派一次，分别验证只有文件、文件+inline、以及 `model` 指向未配置值三种情形；再让 `default_isolation = "worktree"` 的 role 委派一次。
+- 预期证据：child 的 plan 记录 `persona`、`persona_reminder` 与 `reasoning_effort`；system prompt 含 `<role-instructions>` 与 role prompt 正文；child transcript 在 task 之前恰有一条 `<system-reminder>` user 消息；inline 声明覆盖同名文件；`default_capability_mode` 与类型自身 mode 取交集（`explore` 仍是只读）；无法解析的 model 逐级回退并在 integration diagnostic 中报告，最终使用 parent 模型；`worktree` role 的 child 在独立 worktree 中运行，plan 记录 `isolation: "worktree"`。
+- 通过条件：优先级与交集正确、persona 只注入一次、model 回退有可见诊断且不静默丢弃设置。
+- 失败条件：persona 出现在 spawn schema、role 扩大权限、`worktree` default 被静默忽略或回退到 parent workspace、或未配置 model 导致 spawn 失败。
+- 清理/回滚：移除验收用 role/persona 文件与 inline 配置；确认无新增 child。
+- 来源/测试锚点：[subagentsprofile](../../internal/coding/subagentprofile)、[subagents_dispatch.go](../../internal/coding/subagent_dispatch.go)、[child_control_scope.go](../../internal/coding/child_control_scope.go)、[subagents_persona_test.go](../../internal/coding/subagent_persona_test.go)。
+- 结果：`未执行`。
+
+## MA-SUB-011：Isolation、cwd 与 resume_from
+
+- 分类：实时 Provider、默认开启。变更等级：本地持久状态与 Git ref；可能产生费用。
+- 前置条件：Workspace 是已有提交的 Git 仓库；parent 能用 `spawn_subagent` 前台委派。
+- 隔离夹具：`${PIPS_ACCEPT_ROOT}` 下的一个 Git 仓库（含一个已提交文件），以及仓库外的一个空目录作为 `cwd`。
+- 步骤：
+  1. 让 parent 以 `isolation: "worktree"` 前台委派一个 bounded 编辑任务，记录返回的 `worktree_path`。
+  2. 让 parent 以 `cwd` 指向仓库外目录委派一次，令 child 写入一个相对路径文件。
+  3. 前台委派一个 child 并等其完成，然后用返回的 `subagent_id` 作为 `resume_from` 再委派一次。
+  4. 分别用仍处 running 的 `subagent_id`、以及一个不存在的 id 作为 `resume_from` 委派一次。
+- 预期证据：worktree child 的编辑只出现在 `git worktree list` 列出的 worktree 目录，parent 工作树保持原样，worktree 目录与其在 `refs/heads/pips/subagent/` 下的分支在 child 结束后保留，结果 envelope 含 `worktree_path`；`cwd` child 的相对写入落在该目录而非 parent workspace；resume child 的 transcript 以 source 的对话前缀开头，`plan.resume_from` 指向 source，system prompt 与 tool config 重新渲染，usage 为沿袭累计值；running、不存在、跨 parent 的 source 都在创建 child 前失败，不留下半成品 child。
+- 通过条件：隔离与继承语义可复现，所有失败路径 fail closed。
+- 失败条件：worktree 未创建却继续执行、parent 工作树被 child 修改、resume 丢弃 source transcript、resume 接受 running/跨 parent source、或 `cwd` 与 `isolation: "worktree"` 同时生效。
+- 清理/回滚：删除验收用 worktree 目录与 `refs/heads/pips/subagent/*` 分支，清理验收用 `cwd` 目录。
+- 来源/测试锚点：[subagent_worktree.go](../../internal/coding/subagent_worktree.go)、[teamworktree](../../internal/coding/teamworktree)、[manager_resume.go](../../internal/coding/subagent/manager_resume.go)、[subagent_isolation_test.go](../../internal/coding/subagent_isolation_test.go)。
+- 结果：`未执行`。
+
 ## 分册判定
 
-Builtin 发布至少通过 `MA-SUB-001`。Custom Alpha 需通过 `002` 至 `008`；Selected Beta 还需完成 `009` 中的候选 artifact/Telemetry/rollback 条件。GA 只有在真实观察窗口和独立审阅完成后才能通过，仓库测试不能代替运营证据。
+Builtin 发布至少通过 `MA-SUB-001`。Custom Alpha 需通过 `002` 至 `008`、`010` 与 `011`；Selected Beta 还需完成 `009` 中的候选 artifact/Telemetry/rollback 条件。GA 只有在真实观察窗口和独立审阅完成后才能通过，仓库测试不能代替运营证据。

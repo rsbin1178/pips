@@ -44,6 +44,7 @@ import (
 	"github.com/rsbin1178/pips/internal/coding/session"
 	"github.com/rsbin1178/pips/internal/coding/skillsettings"
 	"github.com/rsbin1178/pips/internal/coding/subagent"
+	"github.com/rsbin1178/pips/internal/coding/subagentprofile"
 	"github.com/rsbin1178/pips/internal/coding/tools"
 	"github.com/rsbin1178/pips/internal/coding/workspace"
 )
@@ -58,6 +59,9 @@ const (
 	componentAgentPlugin    = "agent-plugin"
 	componentHook           = "hook"
 	componentIntegration    = "integration"
+	// componentSubagent reports a degraded subagent selection, such as a model
+	// that fell back to the parent.
+	componentSubagent = "subagent"
 )
 
 // SessionTarget selects a new session when ID is empty or a durable session
@@ -87,11 +91,13 @@ type ExecutionOptions struct {
 	ResourceLimits     resource.Limits
 	AgentProfileLimits agentprofile.Limits
 	AgentPluginLimits  agentplugin.Limits
-	MCPLimits          codingmcp.Limits
-	MCPDefinitions     codingmcp.Definitions
-	ToolLimits         tools.Limits
-	GitLimits          git.Limits
-	Subagent           subagent.ExecutionOptions
+	// SubagentProfileLimits bounds role and persona discovery.
+	SubagentProfileLimits subagentprofile.Limits
+	MCPLimits             codingmcp.Limits
+	MCPDefinitions        codingmcp.Definitions
+	ToolLimits            tools.Limits
+	GitLimits             git.Limits
+	Subagent              subagent.ExecutionOptions
 }
 
 // OpenOptions explicitly bind one Runtime to one Workspace, configuration,
@@ -462,6 +468,15 @@ func openRuntime(
 	if err != nil {
 		return nil, err
 	}
+	loadedSubagentProfiles, err := subagentprofile.Load(ctx, subagentprofile.Options{
+		Paths: options.Paths, Tree: tree, ProjectTrusted: options.Trusted,
+		InlineRoles:    options.Config.Subagent.Roles,
+		InlinePersonas: options.Config.Subagent.Personas,
+		Limits:         configured.SubagentProfileLimits,
+	})
+	if err != nil {
+		return nil, err
+	}
 	loadedPlugins := agentplugin.Result{}
 	if !openPolicy.teamWorker() {
 		loadedPlugins, err = agentplugin.Load(ctx, agentplugin.Options{
@@ -548,8 +563,8 @@ func openRuntime(
 		return setup.Release(ctx)
 	})
 	integration := newIntegrationGeneration(
-		1, setup, connections, loadedResources, loadedProfiles, skillPolicy,
-		projectInstructions.SystemPrompt(), loadedPlugins, trustedHooks,
+		1, setup, connections, loadedResources, loadedProfiles, loadedSubagentProfiles,
+		skillPolicy, projectInstructions.SystemPrompt(), loadedPlugins, trustedHooks,
 	)
 	connectionsOwnedByStack = false
 	setupOwnedByStack = false
@@ -851,6 +866,9 @@ func withExecutionDefaults(options ExecutionOptions) ExecutionOptions {
 	if options.AgentProfileLimits.MaxEntries == 0 {
 		options.AgentProfileLimits = agentprofile.DefaultLimits()
 	}
+	if options.SubagentProfileLimits.MaxEntries == 0 {
+		options.SubagentProfileLimits = subagentprofile.DefaultLimits()
+	}
 	if options.AgentPluginLimits.MaxPlugins == 0 {
 		options.AgentPluginLimits = agentplugin.DefaultLimits()
 	}
@@ -874,7 +892,7 @@ func configuredSubagentOptions(
 	configured config.SubagentConfig,
 	override subagent.ExecutionOptions,
 ) subagent.ExecutionOptions {
-	if configured == (config.SubagentConfig{}) {
+	if configured.IsZero() {
 		configured = config.DefaultSubagentConfig()
 	}
 	limits := subagent.DefaultLimits()

@@ -395,6 +395,22 @@ func (m *Manager) start(
 	if err != nil {
 		return nil, err
 	}
+	// A resume is resolved before the plan is compiled, because the source
+	// type and model replace whatever the caller asked for.
+	resume, resumeSource, err := m.resolveResumeSource(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if resumeSource != nil {
+			// The source is only read from and its transcript is already copied
+			// by the fork, so a close failure cannot change an early return.
+			_ = resumeSource.Close()
+		}
+	}()
+	if resume != nil {
+		request = applyResumeSource(request, resume)
+	}
 	if err := validateDispatchRequest(request, m.limits); err != nil {
 		return nil, err
 	}
@@ -408,6 +424,9 @@ func (m *Manager) start(
 	}
 	if err == nil {
 		err = m.validateDelegationPlan(plan)
+	}
+	if err == nil {
+		err = validateResumePlan(resume, plan)
 	}
 	if err != nil {
 		return nil, err
@@ -474,17 +493,20 @@ func (m *Manager) start(
 		PlanDigest:       planDigest,
 	}
 
-	child, err := m.config.Repository.Create(startCtx, session.CreateOptions{
-		WorkspaceID:      parentMeta.WorkspaceID,
-		WorkspacePath:    parentMeta.WorkspacePath,
-		Kind:             session.KindSubagent,
-		ParentSessionID:  parentMeta.ID,
-		ParentRunID:      request.Ownership.ParentRunID,
-		Agent:            request.AgentID,
-		SubagentIdentity: &childIdentity,
-	})
-	if err != nil {
-		return nil, err
+	child, err := m.createChildSession(
+		startCtx, parentMeta, request, childIdentity, resume, resumeSource,
+	)
+	var sourceCloseErr error
+	if resumeSource != nil {
+		sourceCloseErr = resumeSource.Close()
+		resumeSource = nil
+	}
+	if err != nil || sourceCloseErr != nil {
+		if child != nil {
+			sourceCloseErr = errors.Join(sourceCloseErr, child.Close())
+		}
+
+		return nil, errors.Join(err, sourceCloseErr)
 	}
 
 	created := record{
@@ -519,6 +541,11 @@ func (m *Manager) start(
 		stopParent = context.AfterFunc(ctx, cancel)
 	}
 	tracker := newRunTracker(created.Time, plan.Limits.MaxActivityTools)
+	if resume != nil {
+		// A resumed child reports the source's usage plus its own, so the
+		// lineage's token accounting stays cumulative.
+		tracker.baselineUsage = resume.Usage
+	}
 	execution := &Execution{
 		manager:    m,
 		request:    request,
@@ -554,6 +581,7 @@ func (m *Manager) start(
 			m.observeChild(eventCtx, child, observer, request, created, tracker, event)
 		},
 		SystemSuffix: execution.hookContext,
+		Resume:       resume,
 	})
 	if openErr != nil {
 		cancel()
@@ -947,6 +975,7 @@ func resultFromDetail(detail Detail) Result {
 	value := detail.Summary
 	result := Result{
 		Identity: value.Identity, Role: value.Role, ChildSessionID: value.ChildSessionID,
+		Persona: detail.Plan.Persona, WorktreePath: value.WorktreePath,
 		Code: value.Code, Turns: value.Turns, ToolCalls: value.ToolCalls,
 		Usage: value.Usage, Duration: value.Duration, Value: detail.Result,
 		Structured: detail.Plan.Output.Format != OutputFormatText,
@@ -1014,9 +1043,12 @@ type runTracker struct {
 	finalizationCause    finalizationCause
 	finalizationInjected bool
 	usage                ai.Usage
+	baselineUsage        ai.Usage
 	value                any
 	text                 string
 	err                  error
+	cwd                  string
+	worktreePath         string
 	activity             Activity
 	activitySummary      ActivitySummary
 	toolIndex            map[string]int
@@ -1107,6 +1139,8 @@ func (m *Manager) run(
 	tracker.value = output.Value
 	tracker.text = output.Text
 	tracker.toolCalls = output.ToolCalls
+	tracker.cwd = output.Cwd
+	tracker.worktreePath = output.WorktreePath
 	tracker.mu.Unlock()
 	m.finishExecution(
 		ctx,
@@ -1170,9 +1204,9 @@ func trackChildEvent(
 
 	switch payload := event.Payload().(type) {
 	case agent.TurnCompleted:
-		tracker.usage = payload.Usage
+		tracker.usage = addUsage(tracker.baselineUsage, payload.Usage)
 	case agent.RunCompleted:
-		tracker.usage = payload.Usage
+		tracker.usage = addUsage(tracker.baselineUsage, payload.Usage)
 	}
 
 	_, runStarted := event.Payload().(agent.RunStarted)
@@ -1556,6 +1590,9 @@ func (m *Manager) finishExecution(
 	turns := tracker.turns
 	toolCalls := tracker.toolCalls
 	usage := tracker.usage
+	baselineUsage := tracker.baselineUsage
+	cwd := tracker.cwd
+	worktreePath := tracker.worktreePath
 	stopCause := tracker.stopCause
 	convergenceActive := tracker.finalizationCause == finalizationNoProgress &&
 		tracker.finalizationInjected
@@ -1571,6 +1608,8 @@ func (m *Manager) finishExecution(
 		Role:           execution.request.Role,
 		ChildSessionID: child.Metadata().ID,
 		ChildRunID:     runID,
+		Persona:        execution.plan.Persona,
+		WorktreePath:   worktreePath,
 		Turns:          turns,
 		ToolCalls:      toolCalls,
 		Usage:          usage,
@@ -1581,7 +1620,7 @@ func (m *Manager) finishExecution(
 	if runResult != nil {
 		result.Stop = runResult.Stop
 		result.Turns = runResult.Turns
-		result.Usage = runResult.Usage
+		result.Usage = addUsage(baselineUsage, runResult.Usage)
 	}
 
 	tokenExceeded := execution.plan.Limits.MaxTokens > 0 &&
@@ -1609,6 +1648,8 @@ func (m *Manager) finishExecution(
 	terminal.Usage = result.Usage
 	terminal.DurationMillis = result.Duration.Milliseconds()
 	terminal.ResultBytes = len(text)
+	terminal.Cwd = cwd
+	terminal.WorktreePath = worktreePath
 	terminal.Time = time.Now().UTC()
 	persistErr := m.appendMirrored(child.Session(), terminal)
 	runnerCloseErr := error(nil)
@@ -1837,6 +1878,13 @@ func messageText(message ai.Message) string {
 	}
 
 	return result.String()
+}
+
+// addUsage returns the cumulative usage of a child lineage.
+func addUsage(base, delta ai.Usage) ai.Usage {
+	base.Add(delta)
+
+	return base
 }
 
 func cloneResult(result Result) Result {

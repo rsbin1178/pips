@@ -33,6 +33,8 @@ type Dispatcher interface {
 // DispatchInput is the bounded, application-owned input for a child runtime
 // binding. The Session belongs solely to this child execution. SystemSuffix is
 // the trusted lifecycle-hook context rendered into the child's system prompt.
+// Resume is present only for a child that forked a completed sibling, and it
+// carries that source's inherited working directory and preserved worktree.
 type DispatchInput struct {
 	Plan         ExecutionPlan
 	Request      Request
@@ -40,6 +42,14 @@ type DispatchInput struct {
 	Observer     Observer
 	OnEvent      func(context.Context, agent.Event)
 	SystemSuffix string
+	Resume       *ResumeSource
+	// Directory is the child's effective working directory when it differs
+	// from the parent workspace. An empty value means the child shares the
+	// parent workspace.
+	Directory string
+	// WorktreePath is the preserved Worktree the child runs in. It is set only
+	// alongside Directory and only when that directory is a Worktree.
+	WorktreePath string
 }
 
 // Runner owns the child-specific execution/control scope for one compiled
@@ -55,12 +65,16 @@ type Runner interface {
 
 // RunnerResult is the validated terminal output returned by a child-owned
 // Runner. Run is retained for standard stop/usage accounting; Value and Text
-// have already passed the exact frozen output contract.
+// have already passed the exact frozen output contract. Cwd and WorktreePath
+// are the effective child directory the binding resolved, and WorktreePath is
+// empty when the child ran in the parent workspace.
 type RunnerResult struct {
-	Run       *agent.RunResult
-	Value     any
-	Text      string
-	ToolCalls int
+	Run          *agent.RunResult
+	Value        any
+	Text         string
+	ToolCalls    int
+	Cwd          string
+	WorktreePath string
 }
 
 func validateDispatchedPlan(request Request, plan ExecutionPlan, ceiling Limits) error {
@@ -73,6 +87,12 @@ func validateDispatchedPlan(request Request, plan ExecutionPlan, ceiling Limits)
 	}
 	if request.Role != "" && plan.Identity.LegacyRole() != request.Role {
 		return fmt.Errorf("%w: dispatched plan role differs from the admitted request", ErrInvalid)
+	}
+	// A dispatcher may add a definition-owned worktree default, but it must
+	// never drop a caller's worktree request, directory, or resume source.
+	if plan.Cwd != request.Cwd || plan.ResumeFrom != request.ResumeFrom ||
+		request.Isolation == IsolationWorktree && plan.Isolation != IsolationWorktree {
+		return fmt.Errorf("%w: dispatched plan differs from the admitted workspace selection", ErrInvalid)
 	}
 
 	return nil

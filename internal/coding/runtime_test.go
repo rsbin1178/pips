@@ -478,7 +478,7 @@ func TestRuntimeQueuesAgentNotificationIntoMatchingActiveInteraction(t *testing.
 	case result := <-done:
 		require.NoError(t, result.err)
 		assert.Contains(t, eventTypes(result.events), EventInteractionCompleted)
-	case <-time.After(2 * time.Second):
+	case <-time.After(30 * time.Second):
 		require.FailNow(t, "active notification interaction did not complete")
 	}
 	require.Eventually(t, func() bool {

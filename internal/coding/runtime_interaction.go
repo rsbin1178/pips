@@ -21,11 +21,13 @@ import (
 	"github.com/rsbin1178/pips/internal/coding/changes"
 	"github.com/rsbin1178/pips/internal/coding/changes/git"
 	"github.com/rsbin1178/pips/internal/coding/compaction"
+	"github.com/rsbin1178/pips/internal/coding/execution"
 	"github.com/rsbin1178/pips/internal/coding/hooks"
 	codingmcp "github.com/rsbin1178/pips/internal/coding/mcp"
 	"github.com/rsbin1178/pips/internal/coding/planreview"
 	"github.com/rsbin1178/pips/internal/coding/question"
 	"github.com/rsbin1178/pips/internal/coding/subagent"
+	"github.com/rsbin1178/pips/internal/coding/teamworktree"
 	"github.com/rsbin1178/pips/internal/coding/tools"
 )
 
@@ -842,6 +844,19 @@ func (r *Runtime) openInteraction(
 			streamIdleTimeout:  r.resolved.StreamIdleTimeout,
 			onPauseChanged:     r.projectChildPause,
 			onWorkspaceChanged: r.projectChildWorkspaceChanged,
+			executorConfig: execution.ExecutorConfig{
+				TempRoot:    r.opts.TempRoot,
+				Environment: r.opts.Environment,
+				Protected:   []string{r.paths.Root()},
+			},
+			gitConfig: git.Config{
+				GitPath: r.opts.GitPath, TempRoot: r.opts.TempRoot, Limits: r.opts.GitLimits,
+			},
+			worktrees: &childWorktrees{options: teamworktree.Options{
+				GitPath: r.opts.GitPath, ProductRoot: r.paths.Root(),
+				WorktreesRoot: r.paths.WorktreesRoot(), LeasesRoot: r.paths.TeamLeasesDir(),
+				Limits: teamworktree.DefaultLimits(),
+			}},
 		}
 		newDispatcher := func(audience agentprofile.Audience) (*customSubagentDispatcher, error) {
 			return newCustomSubagentDispatcher(
@@ -856,6 +871,15 @@ func (r *Runtime) openInteraction(
 				r.config.ToolSearch,
 				r.config.Subagent.StructuredResults,
 				r.config.DynamicSubagents,
+				subagentPresets{
+					registry:       integration.subagentProfilesSnapshot(),
+					modelOverrides: r.config.Subagent.Models,
+					onDiagnostic: func(ctx context.Context, code, message string) {
+						r.recordDiagnostic(ctx, IntegrationDiagnostic{
+							Component: componentSubagent, Code: code, Message: message,
+						})
+					},
+				},
 			)
 		}
 		customDispatcher, dispatchErr := newDispatcher(agentprofile.AudienceModel)

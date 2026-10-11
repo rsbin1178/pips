@@ -693,6 +693,132 @@ func (r *Repository) Fork(
 	return newHandle(store, sessionDir, source.meta.WorkspacePath, source.meta.WorkspaceID)
 }
 
+// ForkSubagentOptions identify the source node copied into a new child Session
+// and the lineage the copy belongs to.
+type ForkSubagentOptions struct {
+	// ParentSessionID is the session the new child belongs to. It is the new
+	// child's parent, which for a resume is the parent conversation rather than
+	// the source child.
+	ParentSessionID string
+	ParentRunID     string
+	Agent           string
+	// SubagentIdentity is the new child's frozen identity snapshot. It
+	// replaces any identity carried by the source header.
+	SubagentIdentity *SubagentIdentity
+	// AtEntryID selects the source node copied into the new child. An empty
+	// value selects the source's current leaf.
+	AtEntryID string
+}
+
+// ForkSubagent failure-atomically copies one completed source child Session
+// into a new child Session owned by options.ParentSessionID. The source stays
+// unchanged and readable, so the same source can be resumed more than once.
+// The new child inherits the source transcript, its tool calls and results,
+// and its checkpoint and archive references.
+//
+//nolint:gocyclo // Failure-atomic resource acquisition and cleanup remain in commit order.
+func (r *Repository) ForkSubagent(
+	ctx context.Context,
+	source *Handle,
+	options ForkSubagentOptions,
+) (*Handle, error) {
+	if err := r.validate(); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if options.ParentSessionID == "" || strings.TrimSpace(options.Agent) == "" {
+		return nil, fmt.Errorf("%w: child fork needs a parent and an agent", ErrInvalid)
+	}
+	// A resumed child is always created from a compiled execution plan, so it
+	// never needs the legacy identity-less session the Create path tolerates.
+	if options.SubagentIdentity == nil || options.SubagentIdentity.IsZero() ||
+		validateSubagentIdentity(*options.SubagentIdentity) != nil {
+		return nil, fmt.Errorf("%w: child fork needs a valid subagent identity", ErrInvalid)
+	}
+	if err := r.validateForkSource(source, options.AtEntryID); err != nil {
+		return nil, err
+	}
+
+	id, err := newSessionID()
+	if err != nil {
+		return nil, err
+	}
+
+	group, err := r.root.EnsureGroup(source.meta.WorkspacePath)
+	if err != nil {
+		return nil, err
+	}
+
+	sessionDir := group.SessionDirOf(id)
+	if err := ensureSessionDirectory(sessionDir); err != nil {
+		return nil, err
+	}
+
+	lock, err := acquireSessionLock(ctx, filepath.Join(sessionDir, LockFileName))
+	if err != nil {
+		return nil, err
+	}
+
+	parentEntryID := options.AtEntryID
+	if parentEntryID == "" {
+		parentEntryID = source.session.LeafID()
+	}
+
+	record := NewMetadataRecord(
+		id,
+		WorkspaceRef{ID: source.meta.WorkspaceID, Path: source.meta.WorkspacePath},
+		KindSubagent,
+		time.Now(),
+	)
+	record.Parent = &ParentRef{SessionID: options.ParentSessionID, RunID: options.ParentRunID}
+	record.Agent = options.Agent
+	record.Subagent = subagentRefFrom(*options.SubagentIdentity)
+	metaPath := filepath.Join(sessionDir, MetadataFileName)
+	if err := WriteMetadataRecord(metaPath, record); err != nil {
+		return nil, errors.Join(err, lock.Close())
+	}
+
+	extra := map[string]string{
+		extraWorkspaceID:     source.meta.WorkspaceID,
+		extraWorkspacePath:   source.meta.WorkspacePath,
+		extraKind:            string(KindSubagent),
+		extraParentSessionID: options.ParentSessionID,
+		extraParentRunID:     options.ParentRunID,
+		extraAgent:           options.Agent,
+	}
+	maps.Copy(extra, subagentIdentityExtras(*options.SubagentIdentity))
+
+	transcriptPath := filepath.Join(sessionDir, TranscriptFileName)
+	forkRepo := harness.Repo{
+		Dir:  sessionDir,
+		Path: func(string) (string, error) { return transcriptPath, nil },
+	}
+	inner, err := forkRepo.ForkSession(source.session, parentEntryID, id, extra, harness.ForkOptions{
+		Keep: forkSubagentTranscriptEntry,
+		PrepareArchives: func(archiveIDs []string) error {
+			return r.CopyArchives(ctx, source, id, archiveIDs)
+		},
+	})
+	if err != nil {
+		return nil, errors.Join(err, lock.Close())
+	}
+
+	store := newMaterializedStore(inner, metaPath, record, lock)
+
+	return newHandle(store, sessionDir, source.meta.WorkspacePath, source.meta.WorkspaceID)
+}
+
+// forkSubagentTranscriptEntry keeps one source child's model-visible
+// transcript and drops its bookkeeping entries. The custom entries in a child
+// Session name that child and describe the changes it already reported, so
+// copying them into the resumed child would make the parent index claim a
+// descendant that does not exist and would re-report the source's work.
+func forkSubagentTranscriptEntry(entry harness.Entry) bool {
+	return entry.Kind != harness.KindCustom
+}
+
 func (r *Repository) validateForkSource(source *Handle, atEntryID string) error {
 	if source == nil || source.session == nil || source.meta.WorkspaceID == "" ||
 		source.transcriptPath == "" || !strings.HasPrefix(source.sessionDir, r.dir+string(filepath.Separator)) {

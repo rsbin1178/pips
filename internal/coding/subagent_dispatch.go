@@ -3,7 +3,9 @@ package coding
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 
@@ -11,9 +13,11 @@ import (
 	"github.com/rsbin1178/pips/agent/harness"
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding/agentprofile"
+	"github.com/rsbin1178/pips/internal/coding/config"
 	"github.com/rsbin1178/pips/internal/coding/hooks"
 	codingmcp "github.com/rsbin1178/pips/internal/coding/mcp"
 	"github.com/rsbin1178/pips/internal/coding/subagent"
+	"github.com/rsbin1178/pips/internal/coding/subagentprofile"
 	"github.com/rsbin1178/pips/internal/coding/tools"
 )
 
@@ -44,6 +48,22 @@ type customSubagentDispatcher struct {
 	factory           childScopeFactory
 	toolSearch        bool
 	includeCustom     bool
+	presets           subagentPresets
+}
+
+// subagentPresets is the immutable role, persona, and per-type model override
+// snapshot one dispatcher resolves against, plus the diagnostic sink used when
+// a selection degrades to the parent model.
+type subagentPresets struct {
+	registry       subagentprofile.Registry
+	modelOverrides map[string]string
+	onDiagnostic   func(context.Context, string, string)
+}
+
+func (p subagentPresets) warn(ctx context.Context, code, message string) {
+	if p.onDiagnostic != nil {
+		p.onDiagnostic(ctx, code, message)
+	}
 }
 
 func newCustomSubagentDispatcher(
@@ -58,6 +78,7 @@ func newCustomSubagentDispatcher(
 	toolSearch bool,
 	structuredResults bool,
 	includeCustom bool,
+	presets subagentPresets,
 ) (*customSubagentDispatcher, error) {
 	if integration == nil || models.catalog == nil || factory.controls == nil {
 		return nil, fmt.Errorf("%w: incomplete custom subagent dispatcher", ErrRuntimeInvalid)
@@ -101,7 +122,15 @@ func newCustomSubagentDispatcher(
 		factory:           factory.clone(),
 		toolSearch:        toolSearch,
 		includeCustom:     includeCustom,
+		presets:           cloneSubagentPresets(presets),
 	}, nil
+}
+
+func cloneSubagentPresets(presets subagentPresets) subagentPresets {
+	presets.registry = presets.registry.Clone()
+	presets.modelOverrides = maps.Clone(presets.modelOverrides)
+
+	return presets
 }
 
 // dispatchableDefinition reports whether a registry definition may be compiled
@@ -208,7 +237,7 @@ func (d *customSubagentDispatcher) withNonInteractiveInput() *customSubagentDisp
 }
 
 func (d *customSubagentDispatcher) Compile(
-	_ context.Context,
+	ctx context.Context,
 	request subagent.Request,
 ) (subagent.ExecutionPlan, error) {
 	if d == nil || request.AgentID == "" {
@@ -230,8 +259,11 @@ func (d *customSubagentDispatcher) Compile(
 			"%w: private integrations require a persisted custom Agent", subagent.ErrInvalid,
 		)
 	}
-	var err error
-	definition, err = d.prepareDefinition(definition)
+	// A preset is never a spawn argument, so the resolved type name is the only
+	// selector for both the role and the persona.
+	role, _ := d.presets.registry.Role(request.AgentID)
+	persona, personaApplied := d.presets.registry.Persona(request.AgentID)
+	definition, err := d.prepareDefinition(definition)
 	if err != nil {
 		return subagent.ExecutionPlan{}, err
 	}
@@ -247,7 +279,7 @@ func (d *customSubagentDispatcher) Compile(
 	capabilityAmbient := append(cloneDescriptors(d.ambient), descriptorsForEntries(privateMCPEntries)...)
 	capabilities, err := compileDelegableCapabilities(
 		definition.Tools,
-		capabilityModeFor(definition),
+		capabilityModeFor(definition, role),
 		capabilityAmbient,
 	)
 	if err != nil {
@@ -272,13 +304,20 @@ func (d *customSubagentDispatcher) Compile(
 	if err != nil {
 		return subagent.ExecutionPlan{}, err
 	}
-	instructions, err := compileProfileInstructions(definition, output)
+	instructions, err := compileProfileInstructions(definition, output, role.Prompt)
 	if err != nil {
 		return subagent.ExecutionPlan{}, err
 	}
-	selectedModel, err := d.models.planModel(definition.Model)
+	selectedModel, err := d.resolvePlanModel(ctx, request, role, persona, definition)
 	if err != nil {
 		return subagent.ExecutionPlan{}, err
+	}
+	// A resumed child inherits its source's environment, so the caller's and any
+	// preset isolation never apply to it; only the source's preserved Worktree
+	// keeps the child isolated.
+	isolation := resolveChildIsolation(request.Isolation, role, persona)
+	if request.ResumeFrom != "" {
+		isolation = request.Isolation
 	}
 
 	plan := subagent.ExecutionPlan{
@@ -297,12 +336,122 @@ func (d *customSubagentDispatcher) Compile(
 		PrivateHooks:       privateHooks,
 		Limits:             limits,
 		Output:             output,
+		Persona:            personaName(request.AgentID, personaApplied),
+		PersonaReminder:    persona.Reminder,
+		ReasoningEffort:    resolveReasoningEffort(role, persona),
+		Isolation:          isolation,
+		Cwd:                request.Cwd,
+		ResumeFrom:         request.ResumeFrom,
 	}
 	if err := subagent.ValidateExecutionPlan(plan); err != nil {
 		return subagent.ExecutionPlan{}, err
 	}
 
 	return plan, nil
+}
+
+// resolveChildIsolation applies the child isolation precedence. A caller that
+// already requests a worktree keeps it; otherwise the role tier and then the
+// persona tier may request one. A caller spelling of "none" does not cancel a
+// configured worktree default, matching the definition-default rule that fills
+// isolation only while nothing has selected a worktree.
+func resolveChildIsolation(
+	requested string,
+	role config.SubagentRole,
+	persona config.SubagentPersona,
+) string {
+	if requested == subagent.IsolationWorktree ||
+		subagentprofile.IsolationWorktree(role.DefaultIsolation) ||
+		subagentprofile.IsolationWorktree(persona.DefaultIsolation) {
+		return subagent.IsolationWorktree
+	}
+
+	return ""
+}
+
+// personaName reports the applied persona name, or the empty string when the
+// type has no persona.
+func personaName(name string, applied bool) string {
+	if !applied {
+		return ""
+	}
+
+	return name
+}
+
+// resolveReasoningEffort applies the role tier before the persona tier. pips
+// has no spawn-level reasoning argument and no per-definition effort.
+func resolveReasoningEffort(role config.SubagentRole, persona config.SubagentPersona) string {
+	if role.ReasoningEffort != "" {
+		return role.ReasoningEffort
+	}
+
+	return persona.ReasoningEffort
+}
+
+// resolvePlanModel selects the frozen child model. A resumed child is pinned
+// to its source model, and a source model that left the catalogue fails the
+// spawn instead of silently switching the child onto another model. A fresh
+// child walks the configured precedence chain and falls back to the parent
+// model.
+func (d *customSubagentDispatcher) resolvePlanModel(
+	ctx context.Context,
+	request subagent.Request,
+	role config.SubagentRole,
+	persona config.SubagentPersona,
+	definition agentprofile.Definition,
+) (string, error) {
+	if request.ResumeFrom != "" {
+		model, err := d.models.planModel(request.Model)
+		if err != nil {
+			return "", fmt.Errorf(
+				"%w: cannot resume %q: source model %q is no longer available",
+				subagent.ErrInvalid, request.ResumeFrom, request.Model,
+			)
+		}
+
+		return model, nil
+	}
+
+	return d.resolveChildModel(ctx, request.Model, role, persona, definition)
+}
+
+// resolveChildModel walks the model precedence chain and falls back to the
+// parent model when a candidate cannot be resolved. Order: spawn, role,
+// persona, per-type override, definition, parent.
+func (d *customSubagentDispatcher) resolveChildModel(
+	ctx context.Context,
+	spawnModel string,
+	role config.SubagentRole,
+	persona config.SubagentPersona,
+	definition agentprofile.Definition,
+) (string, error) {
+	candidates := []struct {
+		tier  string
+		value string
+	}{
+		{"spawn", spawnModel},
+		{"role", role.Model},
+		{"persona", persona.Model},
+		{"model override", d.presets.modelOverrides[definition.ID]},
+		{"definition", definition.Model},
+	}
+	for _, candidate := range candidates {
+		if !subagent.IsNotSentinel(candidate.value) {
+			continue
+		}
+		model, fellBack := d.models.planModelOrParent(candidate.value)
+		if !fellBack {
+			return model, nil
+		}
+		d.presets.warn(ctx, "subagent_model_fallback", fmt.Sprintf(
+			"subagent model %q from the %s selection is unavailable; using the parent model",
+			candidate.value, candidate.tier,
+		))
+	}
+	model, _ := d.models.planModelOrParent("inherit")
+
+	return model, nil
 }
 
 // prepareDefinition fills in the rendered prompt and optional structured
@@ -355,12 +504,11 @@ func (d *customSubagentDispatcher) Open(
 	if !exists {
 		return nil, fmt.Errorf("%w: custom plan identity is unavailable", subagent.ErrInvalid)
 	}
-	selectedModel, err := d.models.planModel(definition.Model)
-	if err != nil {
+	// The plan freezes the fully resolved model, including any role, persona,
+	// or per-type override, so Open only proves the frozen selection is still
+	// usable in this interaction's captured catalog.
+	if _, err := d.models.planModel(input.Plan.Model); err != nil {
 		return nil, err
-	}
-	if input.Plan.Model != selectedModel {
-		return nil, fmt.Errorf("%w: custom plan model differs from its frozen profile selection", subagent.ErrInvalid)
 	}
 	binding, err := d.models.bind(ctx, input.Plan.Model)
 	if err != nil {
@@ -390,7 +538,27 @@ func (d *customSubagentDispatcher) Open(
 
 	ambient := append(cloneDescriptors(d.ambient), descriptorsForEntries(privateEntries)...)
 
-	return newChildControlScope(ctx, factory, d.generation, ambient, d.skills, input)
+	directory, err := resolveChildDirectory(ctx, factory, input)
+	if err != nil {
+		return nil, err
+	}
+	var resources *childDirectoryResources
+	if directory.override != "" {
+		factory, resources, err = bindChildDirectory(factory, directory.override)
+		if err != nil {
+			return nil, err
+		}
+	}
+	factory.directoryResources = resources
+	input.Directory = directory.override
+	input.WorktreePath = directory.worktree
+
+	scope, err := newChildControlScope(ctx, factory, d.generation, ambient, d.skills, input)
+	if err != nil {
+		return nil, errors.Join(err, resources.Close())
+	}
+
+	return scope, nil
 }
 
 func (d *customSubagentDispatcher) compilePrivateMCP(
@@ -493,13 +661,42 @@ func definitionAllowsDelivery(definition agentprofile.Definition, delivery subag
 
 // capabilityModeFor selects the capability mode that applies to a definition.
 // An explicit tools.allow already names its tools, so the mode only narrows an
-// otherwise unconstrained definition.
-func capabilityModeFor(definition agentprofile.Definition) agentprofile.CapabilityMode {
+// otherwise unconstrained definition. A role's default mode narrows the
+// definition's own mode through the capability lattice.
+func capabilityModeFor(
+	definition agentprofile.Definition,
+	role config.SubagentRole,
+) agentprofile.CapabilityMode {
 	if len(definition.Tools.Allow) > 0 {
 		return ""
 	}
+	requested, _ := agentprofile.ParseCapabilityMode(role.DefaultCapabilityMode)
 
-	return definition.CapabilityMode
+	return intersectCapabilityModes(definition.CapabilityMode, requested)
+}
+
+// intersectCapabilityModes narrows two capability modes. The empty mode means
+// unconstrained, All is the identity, ReadOnly is the bottom, and the two
+// orthogonal modes (ReadWrite, Execute) intersect at ReadOnly.
+func intersectCapabilityModes(
+	left, right agentprofile.CapabilityMode,
+) agentprofile.CapabilityMode {
+	switch {
+	case left == "":
+		return right
+	case right == "":
+		return left
+	case left == agentprofile.CapabilityAll:
+		return right
+	case right == agentprofile.CapabilityAll:
+		return left
+	case left == agentprofile.CapabilityReadOnly || right == agentprofile.CapabilityReadOnly:
+		return agentprofile.CapabilityReadOnly
+	case left == right:
+		return left
+	default:
+		return agentprofile.CapabilityReadOnly
+	}
 }
 
 func compileDelegableCapabilities(
@@ -719,8 +916,12 @@ func compileProfileOutput(definition agentprofile.Definition) (subagent.OutputCo
 func compileProfileInstructions(
 	definition agentprofile.Definition,
 	output subagent.OutputContract,
+	rolePrompt string,
 ) (string, error) {
 	instructions := customSubagentInstructionPrefix + "\n\n" + definition.Instructions
+	if rolePrompt != "" {
+		instructions += "\n\n<role-instructions>\n" + rolePrompt + "\n</role-instructions>"
+	}
 	if output.Format == subagent.OutputFormatJSONSchema {
 		instructions += "\n\nReturn exactly one JSON object matching this output schema. Do not use Markdown fences or commentary outside the object.\nJSON Schema: " + string(output.Schema)
 	}

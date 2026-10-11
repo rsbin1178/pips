@@ -1,6 +1,7 @@
 package subagent
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -96,6 +97,54 @@ func TestExecutionPlanPrivateBindingsAreDetachedAndDigestCovered(t *testing.T) {
 			invalid := plan.Clone()
 			mutate(&invalid)
 			require.ErrorIs(t, ValidateExecutionPlan(invalid), ErrInvalid)
+		})
+	}
+}
+
+func TestExecutionPlanPersonaFieldsAreValidatedAndDigestCovered(t *testing.T) {
+	t.Parallel()
+
+	plan := testDelegationExecutionPlan(t)
+	require.NoError(t, ValidateExecutionPlan(plan))
+
+	// The empty persona fields stay out of the canonical JSON, so a plan
+	// persisted before this release keeps its digest.
+	encoded, err := json.Marshal(plan)
+	require.NoError(t, err)
+	assert.NotContains(t, string(encoded), "persona")
+	assert.NotContains(t, string(encoded), "reasoning_effort")
+
+	plan.Persona = "scout"
+	plan.PersonaReminder = "Persona guidance."
+	plan.ReasoningEffort = "high"
+	require.NoError(t, ValidateExecutionPlan(plan))
+	digest, err := plan.Digest()
+	require.NoError(t, err)
+
+	changed := plan.Clone()
+	changed.PersonaReminder = "Different guidance."
+	other, err := changed.Digest()
+	require.NoError(t, err)
+	assert.NotEqual(t, digest, other)
+
+	for name, mutate := range map[string]func(*ExecutionPlan){
+		"invalid persona name": func(value *ExecutionPlan) { value.Persona = "../escape" },
+		"invalid reasoning":    func(value *ExecutionPlan) { value.ReasoningEffort = "turbo" },
+		"untrimmed reminder":   func(value *ExecutionPlan) { value.PersonaReminder = " guidance " },
+		"oversized reminder":   func(value *ExecutionPlan) { value.PersonaReminder = strings.Repeat("x", maxPersonaReminderBytes+1) },
+		"reminder with NUL":    func(value *ExecutionPlan) { value.PersonaReminder = "guide\x00ance" },
+		"persona on legacy plan": func(value *ExecutionPlan) {
+			value.Legacy = true
+			value.Instructions = ""
+			value.InstructionsDigest = ""
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			invalid := plan.Clone()
+			mutate(&invalid)
+			require.ErrorIs(t, validateExecutionPlan(invalid, true), ErrInvalid)
 		})
 	}
 }

@@ -40,13 +40,16 @@ type stubRunner struct {
 	err       error
 	closeErr  error
 	closes    atomic.Int32
+	// skipTranscript leaves the child Session with no model-visible message,
+	// which is the shape a resume source must not accept.
+	skipTranscript bool
 }
 
 func (r *stubRunner) Run(ctx context.Context, task string) (RunnerResult, error) {
 	if r.onStart != nil {
 		r.once.Do(r.onStart)
 	}
-	if r.child != nil {
+	if r.child != nil && !r.skipTranscript {
 		// Persist a minimal transcript so a completed child stays inspectable.
 		_, _ = r.child.Session().AppendMessage(ai.UserText(task), nil)
 		_, _ = r.child.Session().AppendMessage(ai.AssistantText(r.text), nil)
@@ -113,6 +116,9 @@ func (d stubDispatcher) Compile(_ context.Context, request Request) (ExecutionPl
 		Model:              "openai/subagent-test",
 		Instructions:       instructions,
 		InstructionsDigest: InstructionsDigest(instructions),
+		Isolation:          request.Isolation,
+		Cwd:                request.Cwd,
+		ResumeFrom:         request.ResumeFrom,
 		Limits:             d.limits,
 		Output:             output,
 	}, nil
@@ -863,6 +869,11 @@ func TestSpawnToolSchemaAndEnum(t *testing.T) {
 	assert.Contains(t, declaration.Description, "reports back")
 	assert.Contains(t, declaration.Description, "resume_from")
 	assert.Contains(t, declaration.Description, "BEFORE concluding")
+	// A persona is resolved inside the child from the agent type name, so it is
+	// deliberately absent from the spawn surface.
+	_, hasPersona := declaration.InputSchema.Properties["persona"]
+	assert.False(t, hasPersona)
+	assert.Contains(t, declaration.InputSchema.Properties, "model")
 
 	// Builtins are never advertised: with no custom agents the enum is absent.
 	plain := fixture.manager.SpawnToolForDispatcher(Ownership{}, nil, fixture.dispatcher)
@@ -902,9 +913,8 @@ func TestSpawnToolDefaultsSentinelsAndUnsupportedArguments(t *testing.T) {
 
 	for _, args := range []string{
 		`{"prompt":"x","description":"y","resume_from":"abc"}`,
-		`{"prompt":"x","description":"y","cwd":"/tmp"}`,
-		`{"prompt":"x","description":"y","model":"gpt"}`,
-		`{"prompt":"x","description":"y","isolation":"worktree"}`,
+		`{"prompt":"x","description":"y","cwd":"/pips/definitely/missing/directory"}`,
+		`{"prompt":"x","description":"y","isolation":"container"}`,
 		`{"prompt":"x","description":"y","run_in_background":"maybe"}`,
 		`{"prompt":"x"}`,
 		`{"prompt":"x","description":"y","unknown":true}`,
@@ -921,6 +931,35 @@ func TestSpawnToolDefaultsSentinelsAndUnsupportedArguments(t *testing.T) {
 		Args: ai.JSON(`{"prompt":"x","description":"y","isolation":"none"}`),
 	})
 	require.NoError(t, err)
+
+	// An explicit worktree isolation and an existing cwd are accepted and
+	// forwarded; the dispatcher resolves the definition default and the child
+	// binding owns the directory.
+	_, err = tool.Exec(t.Context(), agent.ToolCall{
+		ID: "spawn-5", Name: ToolName,
+		Args: ai.JSON(`{"prompt":"x","description":"y","isolation":"worktree"}`),
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, compiled)
+	assert.Equal(t, IsolationWorktree, compiled[len(compiled)-1].Isolation)
+
+	directory := t.TempDir()
+	_, err = tool.Exec(t.Context(), agent.ToolCall{
+		ID: "spawn-6", Name: ToolName,
+		Args: ai.JSON(fmt.Sprintf(`{"prompt":"x","description":"y","cwd":%q}`, directory)),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, directory, compiled[len(compiled)-1].Cwd)
+
+	// An explicit model is accepted and forwarded; the dispatcher owns the
+	// model precedence chain and the fallback to the parent model.
+	_, err = tool.Exec(t.Context(), agent.ToolCall{
+		ID: "spawn-7", Name: ToolName,
+		Args: ai.JSON(`{"prompt":"x","description":"y","model":"openai/gpt"}`),
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, compiled)
+	assert.Equal(t, "openai/gpt", compiled[len(compiled)-1].Model)
 }
 
 func TestSpawnToolUnknownTypeFails(t *testing.T) {
@@ -1159,6 +1198,10 @@ func TestSpawnToolHandsQueuedForegroundCallerOffToBackground(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Contains(t, partsText(holder), "started in background")
+	// A background spawn returns before its slot is granted, so wait until the
+	// holder is actually running; otherwise the foreground caller can take the
+	// free slot and block on the blocked child forever.
+	<-fixture.started
 
 	parts, err := tool.Exec(t.Context(), agent.ToolCall{
 		ID: "spawn-2", Name: ToolName,

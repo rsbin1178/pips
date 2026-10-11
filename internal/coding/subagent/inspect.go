@@ -356,6 +356,8 @@ func summaryFrom(meta session.Metadata, value record) Summary {
 		State:          value.State,
 		TaskPreview:    value.TaskPreview,
 		Model:          value.Model,
+		Cwd:            value.Cwd,
+		WorktreePath:   value.WorktreePath,
 		CreatedAt:      meta.CreatedAt,
 		Duration:       time.Duration(value.DurationMillis) * time.Millisecond,
 		Turns:          value.Turns,
