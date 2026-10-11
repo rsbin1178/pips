@@ -577,7 +577,7 @@ type SubagentConfig struct {
 	MaxToolCalls                 int
 	MaxDurationMinutes           int
 	// StructuredResults restores the typed JSON result contract for builtin
-	// agents. The default is a free-text summary, matching grok-build.
+	// agents. The default is a free-text summary.
 	StructuredResults bool
 	// LimitBehavior selects what happens at the concurrent subagent cap:
 	// "queue" parks the spawn until a slot frees, "fail" rejects it. The empty

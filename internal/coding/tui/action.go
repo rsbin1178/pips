@@ -67,7 +67,7 @@ const (
 	actionTranscript actionID = "transcript"
 	actionCopy       actionID = "copy_reply"
 	actionSearch     actionID = "search"
-	// actionToggleMouseCapture is the Grok-parity Ctrl+R: it releases the terminal's
+	// actionToggleMouseCapture is the Ctrl+R binding: it releases the terminal's
 	// mouse capture so the terminal's own selection, copy and link handling work, and
 	// takes it back again. The choice is per session; `[tui] mouse = false` remains the
 	// persisted opt-out.

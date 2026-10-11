@@ -15,7 +15,7 @@ import (
 )
 
 // lengthSalvageAttempts bounds how many times one turn continues a response
-// the output-token limit cut off. Two continues match Grok Build's default.
+// the output-token limit cut off. The default budget is two continues per turn.
 const lengthSalvageAttempts = 2
 
 // lengthSalvageInstruction asks the model to resume a response the

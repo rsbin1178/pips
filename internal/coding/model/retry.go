@@ -10,9 +10,8 @@ import (
 )
 
 // RetryBudget is the retry budget for one model request in a Coding run: ten
-// replays of a failure that produced nothing, following the default the other
-// agent frontends ship (Claude Code retries transient failures up to ten times;
-// Grok Build's live retry state reports a budget in the same range). The backoff
+// replays of a failure that produced nothing, the bound current agent
+// frontends converge on. The backoff
 // doubles from 500ms with full jitter, capped at 30s, and a provider Retry-After
 // wins when it is longer.
 //
