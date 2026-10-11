@@ -51,7 +51,14 @@ type record struct {
 	Usage               ai.Usage      `json:"usage"`
 	DurationMillis      int64         `json:"duration_millis,omitempty"`
 	ResultBytes         int           `json:"result_bytes,omitempty"`
-	Time                time.Time     `json:"time"`
+	// Cwd is the child's effective working directory. It is recorded on the
+	// terminal record only, because it is resolved once the child binding
+	// opens, and an empty value means the parent workspace.
+	Cwd string `json:"cwd,omitempty"`
+	// WorktreePath is the preserved worktree the child ran in, recorded on the
+	// terminal record only.
+	WorktreePath string    `json:"worktree_path,omitempty"`
+	Time         time.Time `json:"time"`
 }
 
 type recordLimits struct {
@@ -350,13 +357,20 @@ func validRecordOwnership(value record) bool {
 func validRecordCounters(value record) bool {
 	return len(value.TaskPreview) <= 1024 && value.DurationMillis >= 0 && value.Turns >= 0 &&
 		value.ToolCalls >= 0 && value.ResultBytes >= 0 && validUsage(value.Usage) &&
-		validJournalText(value.TaskPreview)
+		validJournalText(value.TaskPreview) &&
+		validRecordPath(value.Cwd) && validRecordPath(value.WorktreePath)
+}
+
+// validRecordPath bounds one terminal child directory.
+func validRecordPath(value string) bool {
+	return len(value) <= maxPlanCwdBytes && validJournalText(value)
 }
 
 func validateRecordState(value record) error {
 	switch value.State {
 	case StateCreated:
-		if value.ChildRunID != "" || value.Code != "" || value.DurationMillis != 0 {
+		if value.ChildRunID != "" || value.Code != "" || value.DurationMillis != 0 ||
+			value.Cwd != "" || value.WorktreePath != "" {
 			return fmt.Errorf("%w: invalid created record", ErrInvalid)
 		}
 	case StateRunning:

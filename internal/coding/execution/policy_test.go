@@ -314,6 +314,31 @@ func TestPolicyRejectsOperationsFromAnotherOrChangedWorkspace(t *testing.T) {
 	assert.ErrorIs(t, err, execution.ErrUnauthorized)
 }
 
+func TestPolicyRebindMovesTheWorkspaceBinding(t *testing.T) {
+	t.Parallel()
+
+	fixture := newOperationFixture(t)
+	other := newOperationFixture(t)
+	policy := mustPolicy(t, fixture, execution.PolicyConfig{
+		Sandbox:       config.SandboxWorkspaceWrite,
+		Approval:      config.ApprovalOnRequest,
+		SandboxSource: config.Source{Kind: config.SourceDefault},
+	})
+	operation := mustOperation(t, other, other.spec())
+
+	decision := policy.Evaluate(operation)
+	require.Equal(t, execution.VerdictDeny, decision.Verdict())
+	require.Equal(t, "workspace_mismatch", decision.Reason())
+
+	// Rebound to the operation's own workspace, the same ceiling evaluates it.
+	rebound, err := policy.Rebind(other.workspace)
+	require.NoError(t, err)
+
+	decision = rebound.Evaluate(operation)
+	assert.Equal(t, execution.VerdictAllow, decision.Verdict())
+	assert.Equal(t, "baseline", decision.Reason())
+}
+
 func mustPolicy(t *testing.T, fixture operationFixture, cfg execution.PolicyConfig) execution.Policy {
 	t.Helper()
 

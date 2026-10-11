@@ -60,6 +60,15 @@ type childScopeFactory struct {
 	// recovery episode is derived from. Zero leaves the transport default.
 	streamIdleTimeout time.Duration
 	mcpEntries        []catalog.Entry
+	// executorConfig and gitConfig let a child that runs outside the parent
+	// workspace build its own process executor and Git inspector there.
+	executorConfig execution.ExecutorConfig
+	gitConfig      git.Config
+	// worktrees provisions a preserved child Worktree on first use.
+	worktrees *childWorktrees
+	// directoryResources is the child-scoped binding set the constructed scope
+	// takes ownership of. It is nil for a child in the parent workspace.
+	directoryResources *childDirectoryResources
 	// toolSearchNameFor resolves the discovery tool name for the provider that
 	// serves this child; nil uses catalog.DefaultToolSearchName.
 	toolSearchNameFor func(ai.Provider) string
@@ -199,6 +208,14 @@ type childControlScope struct {
 	cancel         context.CancelFunc
 	generation     *IntegrationGeneration
 	factory        childScopeFactory
+	// directoryResources owns the child-scoped tree and Git inspector when the
+	// child runs outside the parent workspace. It is nil for a shared child.
+	directoryResources *childDirectoryResources
+	// directoryOverride is the child's effective working directory when it
+	// differs from the parent workspace, and worktreePath is its preserved
+	// Worktree when it has one.
+	directoryOverride string
+	worktreePath      string
 
 	resolver    activeResolver
 	pending     pendingRunner
@@ -268,6 +285,10 @@ func newChildControlScope(
 		generation:     generation,
 		factory:        factory.clone(),
 		resume:         make(chan struct{}, 1),
+
+		directoryResources: factory.directoryResources,
+		directoryOverride:  strings.TrimSpace(input.Directory),
+		worktreePath:       input.WorktreePath,
 	}
 	scope.hooks = newChildHookScope(
 		factory.hooks, factory.privateHooks, factory.hookRunner,
@@ -622,7 +643,10 @@ func (s *childControlScope) Run(ctx context.Context, task string) (subagent.Runn
 	if s == nil || s.harness == nil {
 		return subagent.RunnerResult{}, fmt.Errorf("%w: child control scope is unavailable", subagent.ErrClosed)
 	}
-	messages := []ai.Message{ai.UserText(task)}
+	messages, err := s.initialMessages(task)
+	if err != nil {
+		return s.finishRun(ctx, subagent.RunnerResult{}, err)
+	}
 	for {
 		result, err := s.harness.PromptMessagesRun(ctx, messages...)
 		messages = nil
@@ -648,11 +672,67 @@ func (s *childControlScope) Run(ctx context.Context, task string) (subagent.Runn
 	}
 }
 
+const (
+	personaReminderPrefix = "<system-reminder>\n"
+	personaReminderSuffix = "\n</system-reminder>"
+)
+
+func personaReminderText(instructions string) string {
+	return personaReminderPrefix + instructions + personaReminderSuffix
+}
+
+// initialMessages builds the child's first prompt. A persona contributes one
+// synthetic user item inserted before the task prompt at the inherited-prefix
+// boundary. It is persisted with the run, it is not re-inserted when the
+// transcript already carries it, and it is never injected into a resumed
+// child, whose forked transcript already carries whatever its source had.
+func (s *childControlScope) initialMessages(task string) ([]ai.Message, error) {
+	messages := make([]ai.Message, 0, 2)
+	reminder := s.plan.PersonaReminder
+	if reminder != "" && s.plan.ResumeFrom == "" {
+		present, err := s.transcriptCarriesReminder(reminder)
+		if err != nil {
+			return nil, err
+		}
+		if !present {
+			messages = append(messages, ai.UserText(personaReminderText(reminder)))
+		}
+	}
+
+	return append(messages, ai.UserText(task)), nil
+}
+
+func (s *childControlScope) transcriptCarriesReminder(reminder string) (bool, error) {
+	conversation, err := s.child.Context()
+	if err != nil {
+		return false, err
+	}
+
+	return messagesCarryReminder(conversation.Messages, reminder), nil
+}
+
+// messagesCarryReminder reports whether a persisted conversation already holds
+// this exact persona reminder. It is what keeps a resumed child from
+// re-inserting the reminder it already carries.
+func messagesCarryReminder(messages []ai.Message, reminder string) bool {
+	expected := personaReminderText(reminder)
+	for _, message := range messages {
+		if childMessageText(message) == expected {
+			return true
+		}
+	}
+
+	return false
+}
+
 func (s *childControlScope) finishRun(
 	ctx context.Context,
 	result subagent.RunnerResult,
 	runErr error,
 ) (subagent.RunnerResult, error) {
+	result.Cwd = s.directoryOverride
+	result.WorktreePath = s.worktreePath
+
 	return result, errors.Join(runErr, s.finishChanges(context.WithoutCancel(ctx)))
 }
 
@@ -976,12 +1056,30 @@ func (s *childControlScope) requestPolicy(request *ai.Request) {
 			Strict: true,
 		}
 	}
+	s.applyReasoningEffort(request)
 	if s.factory.fullCompaction != nil {
 		fixed, err := compaction.RequestOverheadTokens(*request)
 		s.mu.Lock()
 		s.fixedTokens, s.fixedTokensErr = fixed, err
 		s.mu.Unlock()
 	}
+}
+
+// applyReasoningEffort applies the resolved role or persona reasoning level.
+// It is applied only for a model that exposes reasoning controls, so a level
+// declared for a non-reasoning model cannot reach the wire.
+func (s *childControlScope) applyReasoningEffort(request *ai.Request) {
+	if s.plan.ReasoningEffort == "" {
+		return
+	}
+	capabilities := s.factory.model.Capabilities()
+	if !capabilities.Reasoning {
+		return
+	}
+	if request.Reasoning == nil {
+		request.Reasoning = &ai.ReasoningConfig{}
+	}
+	request.Reasoning.Effort = ai.ReasoningEffort(s.plan.ReasoningEffort)
 }
 
 // prepareCompaction runs after ToolSearch and the durable TurnCompleted save
@@ -1083,7 +1181,11 @@ func (s *childControlScope) Close(ctx context.Context) error {
 		s.pending.clear()
 		s.resolver.set(nil)
 		s.factory.controls.remove(s.childSessionID, s)
-		s.closeErr = errors.Join(s.closeErr, s.generation.release(ctx))
+		s.closeErr = errors.Join(
+			s.closeErr,
+			s.generation.release(ctx),
+			s.directoryResources.Close(),
+		)
 	})
 
 	s.mu.Lock()

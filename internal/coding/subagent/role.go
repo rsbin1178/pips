@@ -8,6 +8,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/internal/coding/session"
 )
 
 const safetyInstructions = `You are a read-only specialist inside a coding agent.
@@ -158,7 +159,8 @@ func (s roleSpec) instructionsFor(nativeStructuredOutput bool) (string, error) {
 // normalizeDispatchRequest validates the canonical agent ID every child
 // execution must carry. A builtin ID is resolved by the dispatcher like any
 // other definition; this only rejects an unusable ID or a conflicting legacy
-// role alias.
+// role alias. It also canonicalizes the isolation spelling and drops a
+// sentinel resume source.
 func normalizeDispatchRequest(request Request) (Request, error) {
 	if !validAgentID(request.AgentID) {
 		return Request{}, fmt.Errorf("%w: invalid agent_id", ErrInvalid)
@@ -168,6 +170,14 @@ func normalizeDispatchRequest(request Request) (Request, error) {
 		if err != nil || identity.ID != request.AgentID {
 			return Request{}, fmt.Errorf("%w: role and agent_id differ", ErrInvalid)
 		}
+	}
+	isolation, ok := NormalizeIsolation(request.Isolation)
+	if !ok {
+		return Request{}, fmt.Errorf("%w: unknown isolation %q", ErrInvalid, strings.TrimSpace(request.Isolation))
+	}
+	request.Isolation = isolation
+	if !IsNotSentinel(request.ResumeFrom) {
+		request.ResumeFrom = ""
 	}
 
 	return request, nil
@@ -197,10 +207,43 @@ func validateDispatchRequest(request Request, limits Limits) error {
 		return fmt.Errorf("%w: background execution requires complete ownership", ErrInvalid)
 	}
 
+	if err := validateRequestWorkspace(request); err != nil {
+		return err
+	}
+
 	for _, current := range request.Task {
 		if current < 0x20 && current != '\n' && current != '\r' && current != '\t' {
 			return fmt.Errorf("%w: task contains unsupported control characters", ErrInvalid)
 		}
+	}
+
+	return nil
+}
+
+// validateRequestWorkspace rejects an unusable child working directory or
+// resume source. A directory is never combined with worktree isolation, and a
+// caller-supplied directory never reaches a resumed child.
+func validateRequestWorkspace(request Request) error {
+	if request.ResumeFrom != "" {
+		if session.ValidateID(request.ResumeFrom) != nil {
+			return fmt.Errorf("%w: invalid resume source", ErrInvalid)
+		}
+		if request.Cwd != "" {
+			return fmt.Errorf("%w: a resumed child inherits its source directory", ErrInvalid)
+		}
+
+		return nil
+	}
+	if request.Cwd == "" {
+		return nil
+	}
+	if !validChildCwd(request.Cwd) {
+		return fmt.Errorf("%w: cwd must be an absolute clean path", ErrInvalid)
+	}
+	if request.Isolation == IsolationWorktree {
+		return fmt.Errorf(
+			"%w: cwd and %q isolation are mutually exclusive", ErrInvalid, IsolationWorktree,
+		)
 	}
 
 	return nil

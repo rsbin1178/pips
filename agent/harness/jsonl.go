@@ -634,6 +634,10 @@ func (r Repo) Fork(sourceID, atEntryID, newID string) (*JSONLStore, error) {
 // ForkOptions supplies application-owned resources that generic Harness cannot
 // copy. It does not broaden archive authorization or grant filesystem access.
 type ForkOptions struct {
+	// Keep selects the entries copied into the new Session. It runs before the
+	// selected path is made self-contained, so parent links are rebuilt over
+	// the retained entries. A nil filter copies every selected entry.
+	Keep func(Entry) bool
 	// PrepareArchives publishes and syncs each referenced archive for newID.
 	// IDs are unique and ordered by first occurrence on the selected path.
 	// The callback runs after the temporary transcript is synced but before
@@ -673,7 +677,7 @@ func (r Repo) ForkSession(
 	if err != nil {
 		return nil, err
 	}
-	path = normalizeForkPath(path)
+	path = normalizeForkPath(applyForkFilter(path, options))
 	if err := validateEntries(path); err != nil {
 		return nil, err
 	}
@@ -749,6 +753,25 @@ func (r Repo) ForkSession(
 	committed = true
 
 	return OpenJSONL(targetPath)
+}
+
+// applyForkFilter drops entries a fork must not copy. It runs before the path
+// is made self-contained, so parent links are rebuilt over the retained
+// entries.
+func applyForkFilter(path []Entry, options []ForkOptions) []Entry {
+	if len(options) != 1 || options[0].Keep == nil {
+		return path
+	}
+
+	keep := options[0].Keep
+	retained := make([]Entry, 0, len(path))
+	for _, entry := range path {
+		if keep(entry) {
+			retained = append(retained, entry)
+		}
+	}
+
+	return retained
 }
 
 // normalizeForkPath makes a selected linear branch self-contained. Labels

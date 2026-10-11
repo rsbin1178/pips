@@ -34,32 +34,38 @@ const (
 	FieldToolSearch            Field = "tool_search"
 	FieldToolSearchName        Field = "tool_search_name"
 	FieldDynamicSubagents      Field = "dynamic_subagents"
-	FieldSubagentMaxDepth      Field = "subagent.max_depth"
-	FieldSubagentMaxConcurrent Field = "subagent.max_concurrent"
-	FieldSubagentMaxSpawned    Field = "subagent.max_spawned_per_root_interaction"
-	FieldSubagentMaxFollowUps  Field = "subagent.max_auto_follow_ups"
-	FieldSubagentMaxTurns      Field = "subagent.max_turns"
-	FieldSubagentMaxTokens     Field = "subagent.max_tokens" //nolint:gosec // Tokens are an execution budget, not credentials.
-	FieldSubagentMaxToolCalls  Field = "subagent.max_tool_calls"
-	FieldSubagentMaxDuration   Field = "subagent.max_duration_minutes"
+	FieldSubagentMaxDepth      Field = "subagents.max_depth"
+	FieldSubagentMaxConcurrent Field = "subagents.max_concurrent"
+	FieldSubagentMaxSpawned    Field = "subagents.max_spawned_per_root_interaction"
+	FieldSubagentMaxFollowUps  Field = "subagents.max_auto_follow_ups"
+	FieldSubagentMaxTurns      Field = "subagents.max_turns"
+	FieldSubagentMaxTokens     Field = "subagents.max_tokens"
+	FieldSubagentMaxToolCalls  Field = "subagents.max_tool_calls"
+	FieldSubagentMaxDuration   Field = "subagents.max_duration_minutes"
 	// FieldSubagentStructuredResults restores the typed JSON result contract
 	// for builtin agents. It defaults to false: a builtin agent returns its
 	// final text.
-	FieldSubagentStructuredResults Field = "subagent.structured_results"
+	FieldSubagentStructuredResults Field = "subagents.structured_results"
 	// FieldSubagentLimitBehavior selects what happens when the concurrent
 	// subagent cap is reached: queue (default) or fail.
-	FieldSubagentLimitBehavior Field = "subagent.limit_behavior"
-	FieldMode                  Field = "mode"
-	FieldTheme                 Field = "tui.theme"
-	FieldStatusLine            Field = "tui.status_line"
-	FieldScreen                Field = "tui.screen"
-	FieldAltScreen             Field = "tui.alt_screen"
-	FieldMouse                 Field = "tui.mouse"
-	FieldExitOutput            Field = "tui.exit_output"
-	FieldShowThinkingBlocks    Field = "tui.show_thinking_blocks"
-	FieldSandbox               Field = "sandbox"
-	FieldSandboxNetwork        Field = "sandbox_workspace_write.network"
-	FieldApproval              Field = "approval"
+	FieldSubagentLimitBehavior Field = "subagents.limit_behavior"
+	// FieldSubagentModels is the per-type model override table.
+	FieldSubagentModels Field = "subagents.models"
+	// FieldSubagentRoles is the inline role declaration table.
+	FieldSubagentRoles Field = "subagents.roles"
+	// FieldSubagentPersonas is the inline persona declaration table.
+	FieldSubagentPersonas   Field = "subagents.personas"
+	FieldMode               Field = "mode"
+	FieldTheme              Field = "tui.theme"
+	FieldStatusLine         Field = "tui.status_line"
+	FieldScreen             Field = "tui.screen"
+	FieldAltScreen          Field = "tui.alt_screen"
+	FieldMouse              Field = "tui.mouse"
+	FieldExitOutput         Field = "tui.exit_output"
+	FieldShowThinkingBlocks Field = "tui.show_thinking_blocks"
+	FieldSandbox            Field = "sandbox"
+	FieldSandboxNetwork     Field = "sandbox_workspace_write.network"
+	FieldApproval           Field = "approval"
 )
 
 var fields = []Field{
@@ -79,6 +85,9 @@ var fields = []Field{
 	FieldSubagentMaxDuration,
 	FieldSubagentStructuredResults,
 	FieldSubagentLimitBehavior,
+	FieldSubagentModels,
+	FieldSubagentRoles,
+	FieldSubagentPersonas,
 	FieldMode,
 	FieldTheme,
 	FieldStatusLine,
@@ -564,9 +573,10 @@ func DefaultCompactionConfig() CompactionConfig {
 }
 
 // SubagentConfig contains the user-configurable production admission and
-// execution budgets. MaxDepth defaults to one: a child may not spawn another
-// child. Zero is invalid for every other TOML field. The complete programmatic
-// zero value remains a legacy embedding boundary and is normalized by Runtime.
+// execution budgets, parsed from the `[subagents]` table. MaxDepth defaults to
+// one: a child may not spawn another child. Zero is invalid for every other
+// TOML field. The complete programmatic zero value remains a legacy embedding
+// boundary and is normalized by Runtime.
 type SubagentConfig struct {
 	MaxDepth                     int
 	MaxConcurrent                int
@@ -583,6 +593,24 @@ type SubagentConfig struct {
 	// "queue" parks the spawn until a slot frees, "fail" rejects it. The empty
 	// value is the legacy embedding boundary and resolves to "queue".
 	LimitBehavior string
+	// Models overrides the model of one agent type by exact name. An
+	// unresolvable reference falls back to the parent model.
+	Models map[string]string
+	// Roles and Personas are inline declarations keyed by exact agent type
+	// name. They take precedence over the same-named file declarations.
+	Roles    map[string]SubagentRole
+	Personas map[string]SubagentPersona
+}
+
+// IsZero reports whether the config is the legacy programmatic zero value.
+// Runtime normalizes that boundary; file loading always starts from
+// DefaultSubagentConfig. It exists because the maps make the struct
+// non-comparable.
+func (c SubagentConfig) IsZero() bool {
+	return c.MaxDepth == 0 && c.MaxConcurrent == 0 && c.MaxSpawnedPerRootInteraction == 0 &&
+		c.MaxAutoFollowUps == 0 && c.MaxTurns == 0 && c.MaxTokens == 0 &&
+		c.MaxToolCalls == 0 && c.MaxDurationMinutes == 0 && !c.StructuredResults &&
+		c.LimitBehavior == "" && len(c.Models) == 0 && len(c.Roles) == 0 && len(c.Personas) == 0
 }
 
 // DefaultSubagentConfig returns the bounded production policy.
@@ -663,7 +691,8 @@ type Config struct {
 	// DynamicSubagents enables the Alpha custom Coding subagent dispatcher.
 	// It is intentionally disabled by default; profile discovery remains
 	// available for validation and inspection when this gate is off.
-	DynamicSubagents      bool
+	DynamicSubagents bool
+	// Subagent holds the parsed `[subagents]` table.
 	Subagent              SubagentConfig
 	Mode                  OperatingMode
 	TUI                   TUIConfig
@@ -925,7 +954,7 @@ func validateSubagent(value SubagentConfig) error {
 	// Preserve the legacy programmatic Config literal boundary. File loading
 	// always starts from DefaultSubagentConfig, so a user cannot select this
 	// compatibility form through TOML.
-	if value == (SubagentConfig{}) {
+	if value.IsZero() {
 		return nil
 	}
 
@@ -958,6 +987,16 @@ func validateSubagent(value SubagentConfig) error {
 	if value.LimitBehavior != "" {
 		if _, ok := ParseLimitBehavior(value.LimitBehavior); !ok {
 			return fmt.Errorf("%w: subagent.limit_behavior must be queue or fail", ErrInvalid)
+		}
+	}
+	for name, role := range value.Roles {
+		if err := ValidateSubagentRole(name, role); err != nil {
+			return err
+		}
+	}
+	for name, persona := range value.Personas {
+		if err := ValidateSubagentPersona(name, persona); err != nil {
+			return err
 		}
 	}
 

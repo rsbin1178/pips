@@ -59,6 +59,8 @@ type Policy struct {
 	sandbox       config.SandboxMode
 	network       config.SandboxNetworkMode
 	approval      config.ApprovalMode
+	source        config.Source
+	configured    []string
 	protected     []string
 	ceiling       Fingerprint
 }
@@ -93,9 +95,26 @@ func NewPolicy(ws workspace.Workspace, cfg PolicyConfig) (Policy, error) {
 		sandbox:       cfg.Sandbox,
 		network:       effectiveNetworkMode(cfg.Network),
 		approval:      cfg.Approval,
+		source:        cfg.SandboxSource,
+		configured:    slices.Clone(cfg.Protected),
 		protected:     protected,
 		ceiling:       protectedCeiling(protected),
 	}, nil
+}
+
+// Rebind returns an equivalent policy bound to another workspace. The sandbox,
+// network, approval, and source ceiling are unchanged; only the workspace
+// identity and its derived protected paths move with the binding. A caller
+// that runs a child process in its own workspace must rebind, because an
+// operation is bound to the workspace it is evaluated against.
+func (p Policy) Rebind(ws workspace.Workspace) (Policy, error) {
+	return NewPolicy(ws, PolicyConfig{
+		Sandbox:       p.sandbox,
+		Network:       p.network,
+		Approval:      p.approval,
+		SandboxSource: p.source,
+		Protected:     slices.Clone(p.configured),
+	})
 }
 
 // Evaluate applies policy and exact session grants to an operation.

@@ -94,11 +94,25 @@ type Ownership struct {
 // alias for explore, plan, and review. Custom definitions are admitted only
 // through a Runtime-compiled ExecutionPlan.
 type Request struct {
-	AgentID   string
-	Role      Role
-	Task      string
-	Ownership Ownership
-	Delivery  Delivery
+	AgentID string
+	Role    Role
+	Task    string
+	// Model is the model the caller explicitly requested for the child. It is
+	// the first tier of the child model precedence chain; empty means unset.
+	Model string
+	// Isolation is the caller-selected execution environment: empty, "none",
+	// or "worktree". A role or persona default fills it in when it does not
+	// already request a worktree.
+	Isolation string
+	// Cwd is the sanitized caller-supplied child working directory. It is
+	// dropped when the child resumes a sibling.
+	Cwd string
+	// ResumeFrom names the completed sibling child whose transcript, tool
+	// state, and usage this execution inherits. It overrides AgentID and Model
+	// with the source's frozen values.
+	ResumeFrom string
+	Ownership  Ownership
+	Delivery   Delivery
 }
 
 // Lifecycle provides Runtime-owned child lifecycle callbacks. Manager only
@@ -143,13 +157,19 @@ type Result struct {
 	Role           Role
 	ChildSessionID string
 	ChildRunID     string
-	Outcome        Outcome
-	Code           string
-	Stop           agent.StopReason
-	Turns          int
-	ToolCalls      int
-	Usage          ai.Usage
-	Duration       time.Duration
+	// Persona is the resolved persona name applied to the child, or empty when
+	// the agent type has none.
+	Persona string
+	// WorktreePath is the preserved worktree the child ran in, or empty when
+	// the child ran in the parent workspace.
+	WorktreePath string
+	Outcome      Outcome
+	Code         string
+	Stop         agent.StopReason
+	Turns        int
+	ToolCalls    int
+	Usage        ai.Usage
+	Duration     time.Duration
 	// Structured reports that Value is a typed structured result rather than
 	// the default free-text summary. It selects the clone decoder so a text
 	// result is never re-decoded into a role's typed shape.
@@ -214,12 +234,17 @@ type Summary struct {
 	State          State
 	TaskPreview    string
 	Model          string
-	CreatedAt      time.Time
-	Duration       time.Duration
-	Turns          int
-	ToolCalls      int
-	Usage          ai.Usage
-	Code           string
+	// Cwd is the child's effective working directory, empty when it shares the
+	// parent workspace.
+	Cwd string
+	// WorktreePath is the child's preserved worktree, empty when it has none.
+	WorktreePath string
+	CreatedAt    time.Time
+	Duration     time.Duration
+	Turns        int
+	ToolCalls    int
+	Usage        ai.Usage
+	Code         string
 }
 
 // ActivityPhase describes the currently observable child execution phase.

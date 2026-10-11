@@ -167,7 +167,7 @@ func TestLoadSubagentBudgetsAndFieldProvenance(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "config.toml")
-	writeFile(t, path, `[subagent]
+	writeFile(t, path, `[subagents]
 max_depth = 2
 max_concurrent = 6
 max_spawned_per_root_interaction = 12
@@ -206,7 +206,7 @@ func TestLoadSubagentPartialTableRetainsDefaultFieldSources(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "config.toml")
-	writeFile(t, path, "[subagent]\nmax_concurrent = 2\n")
+	writeFile(t, path, "[subagents]\nmax_concurrent = 2\n")
 	result, err := config.Load(config.LoadOptions{ConfigFile: path})
 	require.NoError(t, err)
 	assert.Equal(t, 2, result.Config.Subagent.MaxConcurrent)
@@ -223,7 +223,7 @@ func TestLoadSubagentStructuredResults(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "config.toml")
-	writeFile(t, path, "[subagent]\nstructured_results = true\n")
+	writeFile(t, path, "[subagents]\nstructured_results = true\n")
 	result, err := config.Load(config.LoadOptions{ConfigFile: path})
 	require.NoError(t, err)
 	assert.True(t, result.Config.Subagent.StructuredResults)
@@ -234,7 +234,7 @@ func TestLoadSubagentStructuredResults(t *testing.T) {
 
 	// A partial table that omits the field keeps the free-text default.
 	partial := filepath.Join(t.TempDir(), "partial.toml")
-	writeFile(t, partial, "[subagent]\nmax_concurrent = 2\n")
+	writeFile(t, partial, "[subagents]\nmax_concurrent = 2\n")
 	kept, err := config.Load(config.LoadOptions{ConfigFile: partial})
 	require.NoError(t, err)
 	assert.False(t, kept.Config.Subagent.StructuredResults)
@@ -248,7 +248,7 @@ func TestLoadSubagentLimitBehaviorDefaultsAndSources(t *testing.T) {
 
 	// A partial table keeps the queue default with default provenance.
 	partial := filepath.Join(t.TempDir(), "partial.toml")
-	writeFile(t, partial, "[subagent]\nmax_concurrent = 2\n")
+	writeFile(t, partial, "[subagents]\nmax_concurrent = 2\n")
 	kept, err := config.Load(config.LoadOptions{ConfigFile: partial})
 	require.NoError(t, err)
 	assert.Equal(t, config.LimitBehaviorQueue, kept.Config.Subagent.LimitBehavior)
@@ -257,7 +257,7 @@ func TestLoadSubagentLimitBehaviorDefaultsAndSources(t *testing.T) {
 	assert.Equal(t, config.SourceDefault, source.Kind)
 
 	path := filepath.Join(t.TempDir(), "config.toml")
-	writeFile(t, path, "[subagent]\nlimit_behavior = \"fail\"\n")
+	writeFile(t, path, "[subagents]\nlimit_behavior = \"fail\"\n")
 	result, err := config.Load(config.LoadOptions{ConfigFile: path})
 	require.NoError(t, err)
 	assert.Equal(t, config.LimitBehaviorFail, result.Config.Subagent.LimitBehavior)
@@ -267,7 +267,7 @@ func TestLoadSubagentLimitBehaviorDefaultsAndSources(t *testing.T) {
 	assert.Equal(t, path, source.Detail)
 
 	invalid := filepath.Join(t.TempDir(), "invalid.toml")
-	writeFile(t, invalid, "[subagent]\nlimit_behavior = \"retry\"\n")
+	writeFile(t, invalid, "[subagents]\nlimit_behavior = \"retry\"\n")
 	_, err = config.Load(config.LoadOptions{ConfigFile: invalid})
 	require.ErrorIs(t, err, config.ErrInvalid)
 }
@@ -276,7 +276,7 @@ func TestLoadSubagentLimitBehaviorEnvPrecedence(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "config.toml")
-	writeFile(t, path, "[subagent]\nlimit_behavior = \"fail\"\n")
+	writeFile(t, path, "[subagents]\nlimit_behavior = \"fail\"\n")
 	result, err := config.Load(config.LoadOptions{
 		ConfigFile: path,
 		LookupEnv:  mapLookup(map[string]string{config.SubagentLimitBehaviorEnv: "queue"}),
@@ -301,11 +301,11 @@ func TestLoadSubagentBudgetsRejectInvalidAndUnknownValues(t *testing.T) {
 	t.Parallel()
 
 	for _, content := range []string{
-		"[subagent]\nmax_depth = 4\n",
-		"[subagent]\nmax_turns = 1\n",
-		"[subagent]\nmax_tokens = 999999999\n",
-		"[subagent]\nmax_duration_minutes = 0\n",
-		"[subagent]\nunknown = 1\n",
+		"[subagents]\nmax_depth = 4\n",
+		"[subagents]\nmax_turns = 1\n",
+		"[subagents]\nmax_tokens = 999999999\n",
+		"[subagents]\nmax_duration_minutes = 0\n",
+		"[subagents]\nunknown = 1\n",
 	} {
 		t.Run(content, func(t *testing.T) {
 			t.Parallel()
@@ -871,6 +871,11 @@ func TestLoadRejectsLegacyAndInvalidConfiguration(t *testing.T) {
 			wantText: "default = true",
 		},
 		{name: "legacy flat models", content: "[[models]]\nid = \"openai/gpt\"\n", want: config.ErrMigration},
+		{
+			name:    "legacy subagent table",
+			content: "[subagent]\nmax_concurrent = 2\n",
+			want:    config.ErrMigration, wantText: "[subagents]",
+		},
 		{
 			name:    "legacy provider api",
 			content: "[providers.openai]\napi = \"responses\"\n",

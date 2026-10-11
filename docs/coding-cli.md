@@ -580,7 +580,7 @@ Production child admission and execution budgets are configured independently
 in the same selected user file:
 
 ```toml
-[subagent]
+[subagents]
 max_concurrent = 32
 limit_behavior = "queue"
 max_spawned_per_root_interaction = 8
@@ -591,6 +591,9 @@ max_tool_calls = 128
 max_duration_minutes = 30
 max_depth = 1
 structured_results = false
+
+[subagents.models]
+explore = "anthropic/claude-sonnet-4-5"
 ```
 
 Every value is positive and hard-bounded; invalid or unknown fields make
@@ -619,9 +622,102 @@ returns a result.
 The single delegation tool is `spawn_subagent`. Its required arguments are
 `prompt` and `description`; `subagent_type`, `run_in_background` (default
 `true`), `isolation`, `resume_from`, `cwd`, and `model` are optional.
-`isolation` accepts only `none`, and `resume_from`/`cwd`/`model` are rejected
-until their phases land. The model-visible `subagent_type` enum lists custom
-Agents only; built-in types are never enumerated.
+`isolation` accepts `none` (the default, shared workspace) or `worktree`.
+`model` names a configured model for the child and is resolved through the
+precedence below. The model-visible `subagent_type` enum lists custom Agents
+only; built-in types are never enumerated.
+
+### Roles and personas
+
+A role or persona is a named preset for one agent type. It is never a spawn
+argument: pips selects it by the resolved `subagent_type`, so a preset named
+`explore` applies to `explore`. A preset can narrow a type's authority and
+supply defaults, and it can never widen the delegable catalog.
+
+A **role** declares `description` (required), `default_capability_mode`, `model`,
+`reasoning_effort`, `prompt_file`, and `default_isolation`. Its `prompt_file` is
+rendered into the child's system prompt inside a `<role-instructions>` block. A
+**persona** declares `instructions`, `description`, `instructions_file`,
+`inputs`, `outputs`, `default_isolation`, `model`, and `reasoning_effort`; it has
+no capability mode. Its instructions are injected as a synthetic `<system-reminder>`
+user message before the child's task prompt, persisted with the child
+transcript, and skipped when a resumed child already carries them. pips parses
+and validates a persona's `inputs`/`outputs` for configuration fidelity and does
+not surface them to the parent model.
+
+Pips discovers one preset per `*.toml` file, named by the file stem, from these
+roots in increasing precedence:
+
+| Scope | Root | Trust requirement |
+| --- | --- | --- |
+| User roles | `$PIPS_HOME/roles/` (normally `~/.pips/roles/`) | none |
+| User personas | `$PIPS_HOME/personas/` (normally `~/.pips/personas/`) | none |
+| Project roles | `.pips/roles/` | trusted Workspace only |
+| Project personas | `.pips/personas/` | trusted Workspace only |
+
+Inline `[subagents.roles.<name>]` and `[subagents.personas.<name>]` tables in the
+selected user file take precedence over the same-named file. A preset name must
+be a lowercase ASCII agent type name, and an invalid declaration is reported as
+a diagnostic and dropped rather than failing the load.
+
+```toml
+[subagents.roles.explore]
+description = "Read-only codebase reconnaissance."
+default_capability_mode = "read-only"
+model = "anthropic/claude-sonnet-4-5"
+reasoning_effort = "low"
+prompt_file = "explore.md"
+default_isolation = "none"
+
+[subagents.personas.explore]
+instructions = "Report only what you observed, with exact paths and line ranges."
+
+[[subagents.personas.explore.outputs]]
+name = "summary"
+description = "One paragraph of findings."
+```
+
+The child model is selected from the first resolvable tier:
+spawn `model` > role `model` > persona `model` > `[subagents.models].<type>` >
+the definition's `model` > the parent session's model. A tier whose model is not
+in the configured catalog is reported as an `integration` diagnostic and the
+next tier is tried, so an unusable selection never fails the spawn. The resolved
+model, reasoning level, and persona are frozen into the child's execution plan.
+`reasoning_effort` is applied only for a model that reports reasoning support.
+`default_isolation` accepts `none` or `worktree`. A preset that requests
+`worktree` gives its type a child-owned Worktree, and a caller spelling of
+`none` does not cancel it.
+
+### Isolation, working directory, and resume
+
+`isolation = "worktree"` runs the child in a Git worktree created from the
+parent workspace's current `HEAD`, below the Worktrees root — a sibling of
+`$PIPS_HOME` named `<pips home>-worktrees`, normally `~/.pips-worktrees` — at
+`subagents/<workspace-token>/subagent-<child-session-id>`, on an owned branch
+under `refs/heads/pips/subagent/` derived from the child session id. The
+Worktree is preserved after the child finishes, and its path is returned as
+`worktree_path` in the result envelope and as a `<worktree_path>` line in the
+completion text. A workspace that is not a Git repository, and a Worktree that
+cannot be provisioned, fail the spawn instead of silently running the child in
+the parent workspace.
+
+`cwd` points the child at one existing directory instead of the parent
+workspace. It is sanitized (surrounding quotes and backticks stripped, a
+leading `~` expanded, sentinel placeholders dropped), must already exist, is
+mutually exclusive with `isolation = "worktree"`, and is ignored when
+`resume_from` is set. A path that does not exist alongside
+`isolation = "worktree"` is cleared so the Worktree wins.
+
+`resume_from` continues a completed child of the same parent. The source must
+be a terminal child of the current parent Session; a running, missing, foreign,
+or interrupted source fails the spawn. The resumed child inherits the source's
+transcript, its tool calls and results, and its cumulative token usage, while
+its system prompt and tool configuration are rendered freshly from the current
+definition. The source's agent type and model replace whatever the caller asked
+for, and a source model that left the configured catalog fails the spawn
+instead of silently switching models. The resumed child reuses the source's
+Worktree when it had one, inherits its directory when that still exists, and
+otherwise runs in the parent workspace.
 
 Pips discovers `*.md` definitions from these roots in increasing precedence:
 
@@ -696,7 +792,7 @@ Skill tools; `read-write` adds file editing; `execute` adds shell; `all` keeps
 every delegable tool. Tools without a local source identity (MCP and extension
 tools) survive every mode.
 
-A child cannot delegate further: `[subagent].max_depth` defaults to `1`, and the
+A child cannot delegate further: `[subagents].max_depth` defaults to `1`, and the
 delegation tool is never offered to a child. The retired `delegation` frontmatter
 key is rejected as an unsupported field.
 

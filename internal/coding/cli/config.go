@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"slices"
 	"strconv"
+	"strings"
 
 	"github.com/rsbin1178/pips/internal/coding/config"
 	"github.com/rsbin1178/pips/internal/coding/generation"
@@ -15,6 +17,21 @@ import (
 )
 
 const unsetValue = "<unset>"
+
+// declaredNames renders the sorted keys of one inline declaration table. It
+// keeps `config show` bounded and free of preset bodies.
+func declaredNames[V any](values map[string]V) string {
+	if len(values) == 0 {
+		return "<none>"
+	}
+	names := make([]string, 0, len(values))
+	for name := range values {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+
+	return strconv.Quote(strings.Join(names, ","))
+}
 
 func newConfigCommand(dependencies Dependencies, flags *rootFlags) *cobra.Command {
 	command := &cobra.Command{
@@ -105,13 +122,16 @@ func newConfigShowCommand(dependencies Dependencies, flags *rootFlags) *cobra.Co
 				config.FieldSubagentLimitBehavior: strconv.Quote(
 					state.config.Config.Subagent.LimitBehavior,
 				),
-				config.FieldMode:       strconv.Quote(string(state.config.Config.Mode)),
-				config.FieldTheme:      strconv.Quote(state.config.Config.TUI.Theme),
-				config.FieldStatusLine: string(statusLine),
-				config.FieldScreen:     strconv.Quote(state.config.Config.TUI.Screen),
-				config.FieldAltScreen:  strconv.Quote(state.config.Config.TUI.AltScreen),
-				config.FieldMouse:      strconv.FormatBool(state.config.Config.TUI.Mouse),
-				config.FieldExitOutput: strconv.Quote(state.config.Config.TUI.ExitOutput),
+				config.FieldSubagentModels:   declaredNames(state.config.Config.Subagent.Models),
+				config.FieldSubagentRoles:    declaredNames(state.config.Config.Subagent.Roles),
+				config.FieldSubagentPersonas: declaredNames(state.config.Config.Subagent.Personas),
+				config.FieldMode:             strconv.Quote(string(state.config.Config.Mode)),
+				config.FieldTheme:            strconv.Quote(state.config.Config.TUI.Theme),
+				config.FieldStatusLine:       string(statusLine),
+				config.FieldScreen:           strconv.Quote(state.config.Config.TUI.Screen),
+				config.FieldAltScreen:        strconv.Quote(state.config.Config.TUI.AltScreen),
+				config.FieldMouse:            strconv.FormatBool(state.config.Config.TUI.Mouse),
+				config.FieldExitOutput:       strconv.Quote(state.config.Config.TUI.ExitOutput),
 				config.FieldShowThinkingBlocks: strconv.FormatBool(
 					state.config.Config.TUI.ShowThinkingBlocks,
 				),

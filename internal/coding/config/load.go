@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -29,7 +30,7 @@ const (
 	ToolSearchEnv       = "PIPS_TOOL_SEARCH"
 	ToolSearchNameEnv   = "PIPS_TOOL_SEARCH_NAME"
 	DynamicSubagentsEnv = "PIPS_DYNAMIC_SUBAGENTS"
-	// SubagentLimitBehaviorEnv overrides [subagent].limit_behavior. It is not
+	// SubagentLimitBehaviorEnv overrides [subagents].limit_behavior. It is not
 	// pinnable; an invalid value falls back to queue.
 	SubagentLimitBehaviorEnv = "PIPS_SUBAGENT_LIMIT_BEHAVIOR"
 	// SubagentAwaitBudgetEnv bounds a foreground queued spawn's wait in
@@ -173,7 +174,7 @@ type fileConfig struct {
 	SandboxWorkspaceWrite *fileSandboxWorkspaceWrite `toml:"sandbox_workspace_write"`
 	Approval              *string                    `toml:"approval"`
 	Compaction            *fileCompaction            `toml:"compaction"`
-	Subagent              *fileSubagent              `toml:"subagent"`
+	Subagent              *fileSubagent              `toml:"subagents"`
 	Cost                  *fileCost                  `toml:"cost"`
 	MCPReadOnlyTools      map[string][]string        `toml:"mcp_read_only_tools"`
 }
@@ -217,16 +218,19 @@ type fileCompaction struct {
 }
 
 type fileSubagent struct {
-	MaxDepth                     *int    `toml:"max_depth"`
-	MaxConcurrent                *int    `toml:"max_concurrent"`
-	MaxSpawnedPerRootInteraction *int    `toml:"max_spawned_per_root_interaction"`
-	MaxAutoFollowUps             *int    `toml:"max_auto_follow_ups"`
-	MaxTurns                     *int    `toml:"max_turns"`
-	MaxTokens                    *int    `toml:"max_tokens"`
-	MaxToolCalls                 *int    `toml:"max_tool_calls"`
-	MaxDurationMinutes           *int    `toml:"max_duration_minutes"`
-	StructuredResults            *bool   `toml:"structured_results"`
-	LimitBehavior                *string `toml:"limit_behavior"`
+	MaxDepth                     *int                       `toml:"max_depth"`
+	MaxConcurrent                *int                       `toml:"max_concurrent"`
+	MaxSpawnedPerRootInteraction *int                       `toml:"max_spawned_per_root_interaction"`
+	MaxAutoFollowUps             *int                       `toml:"max_auto_follow_ups"`
+	MaxTurns                     *int                       `toml:"max_turns"`
+	MaxTokens                    *int                       `toml:"max_tokens"`
+	MaxToolCalls                 *int                       `toml:"max_tool_calls"`
+	MaxDurationMinutes           *int                       `toml:"max_duration_minutes"`
+	StructuredResults            *bool                      `toml:"structured_results"`
+	LimitBehavior                *string                    `toml:"limit_behavior"`
+	Models                       map[string]string          `toml:"models"`
+	Roles                        map[string]SubagentRole    `toml:"roles"`
+	Personas                     map[string]SubagentPersona `toml:"personas"`
 }
 
 type fileProvider struct {
@@ -471,6 +475,12 @@ func rejectLegacySchema(data []byte) error {
 			ErrMigration,
 		)
 	}
+	if _, exists := raw["subagent"]; exists {
+		return fmt.Errorf(
+			"%w: rename the [subagent] table to [subagents]",
+			ErrMigration,
+		)
+	}
 
 	providers, ok := raw["providers"].(map[string]any)
 	if !ok {
@@ -670,6 +680,18 @@ func decodeLayer(value fileConfig) (fileLayer, error) {
 			}
 			subagent.LimitBehavior = mode
 			layer.subagentFields = append(layer.subagentFields, FieldSubagentLimitBehavior)
+		}
+		if value.Subagent.Models != nil {
+			subagent.Models = maps.Clone(value.Subagent.Models)
+			layer.subagentFields = append(layer.subagentFields, FieldSubagentModels)
+		}
+		if value.Subagent.Roles != nil {
+			subagent.Roles = maps.Clone(value.Subagent.Roles)
+			layer.subagentFields = append(layer.subagentFields, FieldSubagentRoles)
+		}
+		if value.Subagent.Personas != nil {
+			subagent.Personas = maps.Clone(value.Subagent.Personas)
+			layer.subagentFields = append(layer.subagentFields, FieldSubagentPersonas)
 		}
 		if err := validateSubagent(subagent); err != nil {
 			return fileLayer{}, err
