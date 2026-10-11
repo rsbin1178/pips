@@ -1,10 +1,10 @@
 # Coding lifecycle hooks
 
 Pips supports reviewed command hooks around the Coding Runtime. The lifecycle
-events and their control effects follow the current [Codex Hooks](https://learn.chatgpt.com/docs/hooks)
-model where Pips has the same Runtime boundary. The configuration and command
-response schema are deliberately Pips-native: do not copy `.codex`, Claude
-Code, or Pi configuration into Pips expecting it to run.
+events and their control effects are defined by Pips for its own Runtime
+boundaries. The configuration and command response schema are deliberately
+Pips-native: do not copy another agent's hook configuration into Pips expecting
+it to run.
 
 A trusted hook is local automation with the authority of the operating-system
 user that starts Pips. It runs outside the Coding Sandbox and model-tool
@@ -142,7 +142,7 @@ The supported events are:
 `matcher` is an RE2 regular expression. Omit it, use `""`, or use `"*"` to
 match every occurrence. `UserPromptSubmit` and `Stop` retain a configured
 matcher for source fidelity but ignore it. Tool hooks match Pips's canonical
-tool name and these Codex-compatible aliases:
+tool name and these compatible aliases:
 
 - `shell` also matches `Bash`;
 - `apply_patch` also matches `Edit` and `Write`;

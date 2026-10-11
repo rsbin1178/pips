@@ -36,7 +36,7 @@ func ValidateToolSearchName(name string) error {
 // application built-ins and remain visible on every snapshot. When Enabled is
 // false, every policy-authorized catalog tool is exposed normally. When true,
 // only DeferredSources are discovered through the discovery tool; all other
-// sources stay visible. An empty DeferredSources uses the Claude Code-like
+// sources stay visible. An empty DeferredSources uses the conventional
 // default: MCP and extension tools are deferred, while local and Team tools
 // are direct. Name overrides DefaultToolSearchName; it must satisfy
 // ValidateToolSearchName and must not collide with a catalog or Initial tool.
@@ -78,7 +78,7 @@ func FormatSourceSummaries(sources []SourceSummary) string {
 	return strings.Join(parts, ", ")
 }
 
-// ToolSearch provides Claude-style deferred tool discovery without exposing
+// ToolSearch provides deferred tool discovery without exposing
 // every declaration on the first model request. Add Tools() when building the
 // agent and use PrepareTurn as its prepare-turn hook. Search results are
 // policy-filtered before they reach the model, then re-authorized when the

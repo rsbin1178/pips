@@ -25,7 +25,7 @@ func TestDefaultActionsAreUniqueAndDriveHints(t *testing.T) {
 	assert.False(t, ok)
 }
 
-// Ctrl+X is the shortcuts list, the key grok-build users already reach for. It has
+// Ctrl+X is the shortcuts list, the conventional key for it. It has
 // to reach the help block, and it must no longer be the copy binding.
 func TestCtrlXShowsTheShortcutList(t *testing.T) {
 	t.Parallel()

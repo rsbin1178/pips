@@ -350,7 +350,7 @@ func (m *Model) managedTimelineBlocks(includeNotices, includeThinking bool) []ti
 // queuePlanModeNotice records one plan-mode transition row at the current
 // conversation position. Rows are printed for an approved agent-initiated
 // enter_plan_mode and for a closed plan review; a user /plan or Shift+Tab toggle
-// prints none, matching grok-build.
+// prints none.
 func (m *Model) queuePlanModeNotice(body string) {
 	if body == "" {
 		return

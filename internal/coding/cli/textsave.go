@@ -12,8 +12,7 @@ import (
 )
 
 const (
-	// copyFileEnv overrides where a clipboard copy is also written, the same
-	// escape hatch Grok Build documents as GROK_COPY_FILE.
+	// copyFileEnv overrides where a clipboard copy is also written.
 	copyFileEnv = "PIPS_COPY_FILE"
 
 	defaultCopyFileName   = "last-copy.txt"

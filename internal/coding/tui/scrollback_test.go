@@ -121,7 +121,7 @@ func TestFullscreenPlanModeNoticeKeepsItsConversationPosition(t *testing.T) {
 	assert.Less(t, strings.Index(rendered, notice), strings.Index(rendered, "here is the plan"))
 }
 
-// TestPlanModeNoticeOnlyForAgentEntryAndClosedReview pins the grok-build scope:
+// TestPlanModeNoticeOnlyForAgentEntryAndClosedReview pins the notice scope:
 // a row prints for an approved agent-initiated entry and for a closed exit
 // review, and nothing prints for a declined entry, a revision request, or a
 // state-machine transition the user drove.

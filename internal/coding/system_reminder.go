@@ -8,9 +8,9 @@ import (
 
 // Runtime context a turn needs (Plan mode, Coding Goal, task state) travels as a
 // synthetic user message wrapped in <system-reminder>, not as a system message
-// appended to the prompt. This follows grok-build: the system prefix and the
-// conversation before the reminder stay byte-identical from turn to turn, so a
-// provider's prompt cache still covers them when the reminder text changes. A
+// appended to the prompt. The system prefix and the conversation before the
+// reminder stay byte-identical from turn to turn, so a provider's prompt cache
+// still covers them when the reminder text changes. A
 // system message placed before the conversation would move the cache boundary
 // ahead of the entire transcript.
 const (

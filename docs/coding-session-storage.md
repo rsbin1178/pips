@@ -4,10 +4,9 @@ pips keeps one session in one directory, under a workspace group, with each kind
 of durable state in its own layer. Listing reads a small index file and never
 opens a transcript.
 
-The design follows the same shape as grok-build's session store: a workspace
-group holding one directory per session, a small metadata index, an
-authoritative protocol stream, model-input snapshots, and rebuildable derived
-state. The research notes and the full layer table live in
+The design keeps a workspace group holding one directory per session, a small
+metadata index, an authoritative protocol stream, model-input snapshots, and
+rebuildable derived state. The research notes and the full layer table live in
 `.trellis/tasks/10-10-session-store-v2/` (`research/` and `design.md`).
 
 ## Layout
