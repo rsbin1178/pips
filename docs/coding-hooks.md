@@ -195,12 +195,39 @@ The event-specific fields are:
 | `PostCompact` | `trigger`, `tokens_before`, `tokens_after`, `duration_ms` |
 | `SubagentStart` | `agent_id`, `agent_type`, `task` |
 | `SubagentStop` | `agent_id`, `agent_type`, `stop_hook_active`, `last_assistant_message` |
-| `Stop` | `stop_hook_active`, `last_assistant_message` |
+| `Stop` | `stop_hook_active`, `last_assistant_message`, optional `background_tasks` |
 
 Prompt input excludes attachment bytes and hidden Runtime/model state.
 `tool_response` is a bounded text-only projection with error and truncation
 metadata; non-text parts are omitted. Inputs, stdout, stderr, reasons, and
 model-visible hook context are bounded.
+
+### Stop payload: `background_tasks`
+
+`Stop` also carries the background tasks this session still has running, so a
+handler can decide whether a turn really ended. Each entry names the task, its
+kind, its state, and — for a monitor — the command it watches:
+
+```json
+{
+  "background_tasks": [
+    {
+      "id": "monitor-1",
+      "type": "monitor",
+      "status": "running",
+      "description": "tail -f /var/log/deploy.log"
+    }
+  ]
+}
+```
+
+A monitor is the only type this release registers, so `type` is always
+`monitor` today; a later one-shot background command or child adds its own type
+to the same list. A monitor carries no `command` field: `command` belongs to a
+one-shot shell task, and the watched command travels in `description` instead.
+Every free-text field is clipped to 1000 characters with an in-string
+`… [+N chars]` marker, so a handler can tell a clipped value from a short one,
+and an empty list is omitted from the payload entirely.
 
 ## Handler responses
 

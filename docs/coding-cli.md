@@ -970,6 +970,93 @@ transcript, and it does not enter the conversation's timeline. A conversation-
 initiated wake is attributed to the conversation's own call and does appear on
 the conversation's timeline.
 
+### Background watches (`monitor`)
+
+`monitor` starts one long-running shell command and turns each of its stdout
+lines into a model-visible event. It is not a polling surface: the tool result
+is only a receipt, and the model is woken by the events.
+
+| Field | Required | Default | Meaning |
+| --- | --- | --- | --- |
+| `command` | yes | — | Shell command or script. Each stdout line is an event; exit ends the watch. |
+| `description` | yes | — | Short human-readable label shown with every event. |
+| `timeout_ms` | no | `36000000` | Deadline in milliseconds; 10 h is also the ceiling. |
+| `persistent` | no | `false` | Run until `kill_background_task` or the session ends. `persistent` wins over `timeout_ms`. |
+
+`persistent: true` resolves the deadline to zero, and the result reports it as
+`timeout_ms: 0`. A non-persistent deadline above 36000000 ms is refused with
+`persistent must be true when timeout_ms exceeds 36000000ms`; that is the only
+validation error the tool has. The receipt reports the task id, and from then on
+the watch reports itself.
+
+Authorization is `shell`'s: the same approval permit, journal record, policy,
+Sandbox profile, and change audit, under the same capability-mode class. The
+only difference is that the run is detached from the Tool call that started it,
+so it keeps the call's ambient values and drops its cancellation. A `read-only`
+or `read-write` session is never offered the tool; `execute` and `all` are.
+
+**Bounds.** A watch is bounded five ways: one read of the output file is at most
+1 MiB, the line buffer keeps the last 1 MiB, one line is truncated at 500 bytes,
+one batch is truncated at 3000 bytes, and the pipeline polls every 200 ms. Line
+and batch truncation walk back to a rune boundary and append a literal
+`...(truncated)`. Empty lines produce nothing. stderr is not an event source.
+
+**Volume.** A token bucket of 10 events, refilled one every 2 s, decides what is
+delivered. Events beyond it are dropped silently. The first event after a burst
+precedes itself with a catch-up notice naming how many were suppressed, and 30 s
+of sustained suppression stops the pipeline with a message telling the model to
+write a more selective command. The limiter stops the pipeline, never the
+process.
+
+**Delivery.** An event reaches the conversation one of two ways. While a turn is
+running, the events drain at the next turn boundary as one hidden synthetic
+`<system-reminder>` user message, so the model keeps working and the reminder is
+not read as the user's reply. While the session is idle, the same batch runs as
+one turn of its own. Both paths use one batch format: a single event renders as
+`<monitor-event task_id="…">[label] text</monitor-event>`, and more than one
+renders with a count preamble (`N monitor events from M monitors`), one
+`<monitor>` block per task in first-seen order, and `[n]` numbering inside each
+block. A task's arrival order is preserved, and an event whose wrapped text
+carries no usable label falls back to `event`.
+
+**Termination.** A natural exit, a timeout, and a kill each produce exactly one
+model-visible completion, and the pipeline itself emits no terminal event. The
+completion names the task, the reason (`exited (code n)`, `killed by signal …`,
+or `ended`), the description and duration, and a bounded tail of the watch's own
+output. A command that cannot report a clean exit code — a kill, an operation
+deadline, an output limit — is reported as `ended`, because the executor
+classifies a cancelled run by its context before it inspects the wait status. A
+kill that the model itself requested already returned its outcome as a Tool
+result, so that kill's terminal report does not wake the model a second time; a
+kill from the tasks pane, which has no Tool result behind it, adds the notice
+that the task must not be restarted. The start receipt lists any other background
+task still running, so a duplicate watch is visible at launch.
+
+**Stopping one.** `kill_background_task` takes the `task_id` a `monitor` call
+returned and answers `killed`, `already_exited`, or `not_found`. The tasks pane's
+kill control calls the same method, so there is one control path. There is no
+task-output tool: the events are the delivery, and a completion inlines its own
+bounded tail instead of promising a poll.
+
+**Tasks pane.** A registered watch is a row under `Watchers`, labelled
+`Monitor`, showing the description (or the command when there is none), the
+running state, and its own elapsed time. `x` stops it and `Enter`/`Ctrl+F` opens
+a bounded detail view of its description, status, elapsed time, and a bounded
+tail of its own output; a watch has no transcript to open.
+
+**Lifetime.** The registry is process-local. A watch does not survive a restart,
+matching the session semantics of the reference: a crash cannot reconstruct one.
+Teardown reaps every live watch, so none outlives its session.
+
+**Telemetry.** One content-free counter, `pips.coding.background.tasks`, records
+each watch's lifecycle with its kind and a closed outcome
+(`started`/`exited`/`killed`/`failed`) and a duration. The command, the
+description, a path, the output, and the task id are never exported.
+
+There is no configuration key, environment variable, or feature gate for the
+watch surface. The only filters that remove it are a capability mode — the same
+one that removes `shell` — and the host's own tool selection.
+
 ### Interactive TUI themes and status line
 
 The interactive TUI supports the automatic selection `auto` and these built-in
