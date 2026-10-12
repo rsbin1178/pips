@@ -126,6 +126,38 @@ func (r *Runtime) runCloseCleanup(ctx context.Context) {
 	}
 }
 
+// stopOwnedWork ends the runtime's owned work: the Team coordinator, the child
+// subagents, and every background task. The order matters. Children stop while
+// the parent Session is still open so their terminal lifecycle and durable
+// completion notification can be committed safely, and no background task
+// outlives its session. The notification coordinator is already stopped, so a
+// teardown's terminal reports are recorded but not delivered.
+func (r *Runtime) stopOwnedWork(ctx context.Context) error {
+	r.mu.Lock()
+	coordinator := r.team
+	r.mu.Unlock()
+
+	var errs []error
+
+	if coordinator != nil {
+		r.teamGuard.beginClose(coordinator.id)
+
+		if err := coordinator.close(ctx); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	if err := r.subagents.Close(ctx); err != nil {
+		errs = append(errs, err)
+	}
+
+	if err := r.backgroundTasks.Reap(ctx); err != nil {
+		errs = append(errs, err)
+	}
+
+	return errors.Join(errs...)
+}
+
 func (r *Runtime) closeResources(ctx context.Context, current *interaction) error {
 	emitter := newEventEmitter(ctx, r, func(Event, error) bool { return true }, true)
 	r.mu.Lock()
@@ -160,18 +192,7 @@ func (r *Runtime) closeResources(ctx context.Context, current *interaction) erro
 	if err := r.stopNotificationCoordinator(ctx); err != nil {
 		errs = append(errs, err)
 	}
-	r.mu.Lock()
-	coordinator := r.team
-	r.mu.Unlock()
-	if coordinator != nil {
-		r.teamGuard.beginClose(coordinator.id)
-		if err := coordinator.close(ctx); err != nil {
-			errs = append(errs, err)
-		}
-	}
-	// Children stop while the parent Session is still open so their terminal
-	// lifecycle and durable completion notification can be committed safely.
-	if err := r.subagents.Close(ctx); err != nil {
+	if err := r.stopOwnedWork(ctx); err != nil {
 		errs = append(errs, err)
 	}
 	r.runSessionEnd(ctx, SessionClosedNormally, emitter)
