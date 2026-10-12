@@ -32,8 +32,9 @@ type PlanFile struct {
 }
 
 type catalogConfig struct {
-	shell agent.Tool
-	plan  *PlanFile
+	shell   agent.Tool
+	monitor agent.Tool
+	plan    *PlanFile
 }
 
 // WithPlanFile admits the plan-mode file as an additional patch target while
@@ -72,6 +73,29 @@ func WithControlledShell(tool agent.Tool) CatalogOption {
 		}
 
 		cfg.shell = tool
+
+		return nil
+	}
+}
+
+// WithControlledMonitor adds the monitor wrapper returned by
+// approval.Controller. A monitor starts a process like shell does, so it is
+// offered in exactly the modes that offer shell.
+func WithControlledMonitor(tool agent.Tool) CatalogOption {
+	return func(cfg *catalogConfig) error {
+		if tool == nil {
+			return errors.New("coding tools: nil controlled monitor")
+		}
+
+		if tool.Decl().Name != monitorName {
+			return errors.New("coding tools: controlled monitor has unexpected name")
+		}
+
+		if cfg.monitor != nil {
+			return errors.New("coding tools: controlled monitor already configured")
+		}
+
+		cfg.monitor = tool
 
 		return nil
 	}
@@ -143,6 +167,15 @@ func NewCatalog(
 			catalog.RiskPrivileged,
 			"process",
 			"shell",
+		))
+	}
+
+	if config.monitor != nil {
+		entries = append(entries, localEntry(
+			config.monitor,
+			catalog.RiskPrivileged,
+			"process",
+			"monitor",
 		))
 	}
 

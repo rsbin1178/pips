@@ -714,6 +714,11 @@ func openRuntime(
 			options.Config.Sandbox,
 			options.Config.SandboxWorkspaceWrite.Network,
 		),
+		tools.NewMonitorHandlerForSandbox(
+			runtime.backgroundTasks,
+			options.Config.Sandbox,
+			options.Config.SandboxWorkspaceWrite.Network,
+		),
 	)
 	if err != nil {
 		return nil, err

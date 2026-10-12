@@ -440,19 +440,26 @@ func newShellArgumentError(reason, message string, cause error) *shellArgumentEr
 }
 
 func shellFailure(err error) error {
+	return controlledFailure(shellName, err)
+}
+
+// controlledFailure renders one controlled handler's strict-decode rejection in
+// the shared tool envelope, so every control-boundary refusal is reported the
+// same way.
+func controlledFailure(tool string, err error) error {
 	var argument *shellArgumentError
 	if errors.As(err, &argument) {
 		problem := shellArgumentProblem(argument)
 		return &toolError{
 			result: result{
-				OK: false, Tool: shellName, Code: "invalid_argument",
+				OK: false, Tool: tool, Code: "invalid_argument",
 				Reason: argument.reason, Problem: &problem, Body: argument.message,
 			},
 			cause: argument,
 		}
 	}
 
-	return failure(shellName, err)
+	return failure(tool, err)
 }
 
 func shellArgumentProblem(argument *shellArgumentError) ResultProblem {
@@ -460,6 +467,10 @@ func shellArgumentProblem(argument *shellArgumentError) ResultProblem {
 	switch argument.reason {
 	case "command_shape":
 		field = "command"
+	case "description_shape":
+		field = "description"
+	case "persistent_shape":
+		field = "persistent"
 	case "cwd_relative":
 		field = "cwd"
 	case "timeout_range":
