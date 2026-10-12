@@ -729,6 +729,15 @@ func openRuntime(
 				apply:         requestPolicy,
 			}
 		}
+		var activeMessages *subagent.MessagePorts
+		if runtime.config.ActiveAgentMessages {
+			// The messaging gate is a process-local surface with no durable
+			// state: the coordinator lives in the Manager's shared state, and
+			// these ports are the only deliveries it cannot make itself.
+			activeMessages = &subagent.MessagePorts{
+				DeliverParent: runtime.deliverChildMessageToParent,
+			}
+		}
 		runtime.subagents, err = subagent.New(subagent.Config{
 			Context:           ctx,
 			Repository:        repository,
@@ -746,6 +755,7 @@ func openRuntime(
 			AgentObservers:    []func(context.Context, agent.Event){runtime.observers.observe},
 			EventObservers:    []subagent.AgentEventObserver{runtime.observeChildAgentEvent},
 			AdmissionObserver: runtime.observeSubagentAdmission,
+			ActiveMessages:    activeMessages,
 		})
 		if err != nil {
 			return nil, err

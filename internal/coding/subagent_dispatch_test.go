@@ -366,6 +366,7 @@ func TestCompileDelegableCapabilitiesByMode(t *testing.T) {
 		{Name: tools.HistoryName, Source: catalog.Source{Kind: catalog.SourceLocal, ID: "coding.history"}, Risk: catalog.RiskRead},
 		{Name: "mcp_search", Source: catalog.Source{Kind: catalog.SourceMCP, ID: "github"}, Risk: catalog.RiskWrite},
 		{Name: "spawn_subagent", Source: catalog.Source{Kind: catalog.SourceLocal, ID: "coding.subagent"}, Risk: catalog.RiskRead},
+		{Name: SendMessageToolName, Source: catalog.Source{Kind: catalog.SourceLocal, ID: "coding.subagent"}, Risk: catalog.RiskRead},
 	}
 
 	readOnly := []string{"read", "ls", "glob", "grep", "ask_user", harness.SkillToolName, tools.HistoryName, "mcp_search"}
@@ -378,17 +379,24 @@ func TestCompileDelegableCapabilitiesByMode(t *testing.T) {
 		{"read-only", agentprofile.CapabilityReadOnly, readOnly},
 		{
 			"read-write", agentprofile.CapabilityReadWrite,
-			[]string{"read", "ls", "glob", "grep", "apply_patch", "ask_user", harness.SkillToolName, tools.HistoryName, "mcp_search"},
+			[]string{
+				"read", "ls", "glob", "grep", "apply_patch", "ask_user",
+				harness.SkillToolName, tools.HistoryName, "mcp_search", SendMessageToolName,
+			},
 		},
 		{
 			"execute", agentprofile.CapabilityExecute,
-			[]string{"read", "ls", "glob", "grep", "shell", "ask_user", harness.SkillToolName, tools.HistoryName, "mcp_search"},
+			[]string{
+				"read", "ls", "glob", "grep", "shell", "ask_user",
+				harness.SkillToolName, tools.HistoryName, "mcp_search", SendMessageToolName,
+			},
 		},
 		{
 			"all", agentprofile.CapabilityAll,
 			[]string{
 				"read", "ls", "glob", "grep", "apply_patch", "shell",
 				"ask_user", harness.SkillToolName, tools.HistoryName, "mcp_search",
+				SendMessageToolName,
 			},
 		},
 	}

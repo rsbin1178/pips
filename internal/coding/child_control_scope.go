@@ -66,6 +66,9 @@ type childScopeFactory struct {
 	gitConfig      git.Config
 	// worktrees provisions a preserved child Worktree on first use.
 	worktrees *childWorktrees
+	// messages is the tree's child messaging coordinator. It is nil while the
+	// messaging gate is closed, which keeps the messaging Tool unoffered.
+	messages *subagent.MessageCoordinator
 	// directoryResources is the child-scoped binding set the constructed scope
 	// takes ownership of. It is nil for a child in the parent workspace.
 	directoryResources *childDirectoryResources
@@ -238,6 +241,28 @@ type childControlScope struct {
 	closed      bool
 	closeOnce   sync.Once
 	closeErr    error
+
+	// ownership is this child's own durable ownership. It binds the child's
+	// messaging sender identity.
+	ownership subagent.Ownership
+	// inbound holds admitted messages that no live hand-off has consumed yet.
+	// They are injected at this child's next turn boundary.
+	inbound []inboundMessage
+	// runActive reports that a prompt run is in flight, so an admitted message
+	// can be handed to the harness immediately. runEnded reports that the run
+	// has finished, so this scope accepts nothing further.
+	runActive bool
+	runEnded  bool
+}
+
+// inboundMessage is one admitted message waiting for this child's next turn
+// boundary. release frees its tree-wide admission once the message is consumed
+// or dropped.
+type inboundMessage struct {
+	id       string
+	delivery subagent.MessageDelivery
+	text     string
+	release  func()
 }
 
 func newChildControlScope(
@@ -289,6 +314,7 @@ func newChildControlScope(
 		directoryResources: factory.directoryResources,
 		directoryOverride:  strings.TrimSpace(input.Directory),
 		worktreePath:       input.WorktreePath,
+		ownership:          input.Request.Ownership,
 	}
 	scope.hooks = newChildHookScope(
 		factory.hooks, factory.privateHooks, factory.hookRunner,
@@ -522,6 +548,7 @@ func (s *childControlScope) buildCatalog(
 		}
 		entries = append(entries, catalog.Local("coding.skills", catalog.RiskRead, skillTool)...)
 	}
+	entries = append(entries, s.messageCatalogEntries()...)
 	for _, entry := range s.factory.mcpEntries {
 		// Never reuse an ambient history implementation, even if accidentally
 		// supplied in this integration snapshot. Its binding may belong to a parent.
@@ -557,6 +584,41 @@ func (s *childControlScope) buildCatalog(
 	s.historyAllowed = slices.ContainsFunc(descriptors, childHistoryDescriptor)
 
 	return childCatalog, skillCatalog, descriptors, nil
+}
+
+// messageCatalogEntries returns this child's messaging Tool when its plan
+// selects one and the messaging gate is open. The child's own binding carries
+// its sender identity, so a message it sends is attributed to this child.
+func (s *childControlScope) messageCatalogEntries() []catalog.Entry {
+	if s == nil || s.plan.Identity.ID == "" || s.factory.messages == nil {
+		return nil
+	}
+	descriptor := catalog.Descriptor{
+		Name:   SendMessageToolName,
+		Source: catalog.Source{Kind: catalog.SourceLocal, ID: messageCatalogID},
+		Risk:   catalog.RiskRead,
+	}
+	if !planSelectsDescriptor(s.plan, descriptor) {
+		return nil
+	}
+	// A child-initiated wake has no parent Run to attribute the woken child to,
+	// so its wake port is closed: the coordinator refuses that wake rather than
+	// dropping it.
+	tool := newSendMessageTool(s.factory.messages, subagent.NewMessageBinding(
+		subagent.MessageSenderIdentity{
+			SessionID: s.childSessionID,
+			AttemptID: s.childSessionID,
+			Child:     true,
+			Ownership: s.ownership,
+			AgentID:   s.plan.Identity.ID,
+		},
+		nil,
+	))
+	if tool == nil {
+		return nil
+	}
+
+	return catalog.Local(messageCatalogID, catalog.RiskRead, tool)
 }
 
 func childHistoryDescriptor(descriptor catalog.Descriptor) bool {
@@ -647,13 +709,29 @@ func (s *childControlScope) Run(ctx context.Context, task string) (subagent.Runn
 	if err != nil {
 		return s.finishRun(ctx, subagent.RunnerResult{}, err)
 	}
+	s.beginRun()
+	defer s.markRunEnded()
 	for {
+		// A message admitted before this run started, or while it was paused,
+		// is injected at the next turn boundary instead of being lost.
+		messages = append(messages, s.drainPending()...)
 		result, err := s.harness.PromptMessagesRun(ctx, messages...)
 		messages = nil
 		if err != nil {
 			return s.finishRun(ctx, subagent.RunnerResult{Run: result, ToolCalls: s.guard.count()}, err)
 		}
 		if result == nil || result.Stop != agent.StopPaused {
+			// Closing the run and taking its last pending set happen under one
+			// critical section, so a concurrent admission either lands in this
+			// set and gets its turn, or sees the ended run and is refused. A
+			// message is therefore never accepted into a run that will not
+			// continue.
+			if pending := s.endRunAndDrain(); len(pending) > 0 {
+				s.beginRun()
+				messages = pending
+
+				continue
+			}
 			value, text := s.output()
 
 			return s.finishRun(ctx, subagent.RunnerResult{
@@ -670,6 +748,168 @@ func (s *childControlScope) Run(ctx context.Context, task string) (subagent.Runn
 			return s.finishRun(ctx, subagent.RunnerResult{Run: result, ToolCalls: s.guard.count()}, err)
 		}
 	}
+}
+
+// AdmitMessage implements subagent.MessageSink. It is the single entry point
+// for a message into this child. The message is queued here and injected at the
+// child's next turn boundary, or handed to the live run immediately.
+func (s *childControlScope) AdmitMessage(
+	ctx context.Context,
+	delivery subagent.MessageDelivery,
+	messageID string,
+	text string,
+	onRelease func(),
+) error {
+	if s == nil {
+		return subagent.ErrMessageClosed
+	}
+	release := releaseOnce(onRelease)
+	if err := ctx.Err(); err != nil {
+		release()
+
+		return err
+	}
+
+	s.mu.Lock()
+	switch {
+	case s.closed:
+		s.mu.Unlock()
+		release()
+
+		return subagent.ErrMessageClosed
+	case s.runEnded:
+		s.mu.Unlock()
+		release()
+
+		return subagent.ErrMessageFinalizing
+	case len(s.inbound) >= subagent.MaxChildMessageAdmissions:
+		s.mu.Unlock()
+		release()
+
+		return subagent.ErrMessageSaturated
+	}
+	s.inbound = append(s.inbound, inboundMessage{
+		id: messageID, delivery: delivery, text: text, release: release,
+	})
+	live := s.runActive
+	s.mu.Unlock()
+
+	if live {
+		s.forwardPending()
+	}
+
+	return nil
+}
+
+// beginRun records that this child's prompt run is in flight.
+func (s *childControlScope) beginRun() {
+	s.mu.Lock()
+	s.runActive = true
+	s.runEnded = false
+	s.mu.Unlock()
+}
+
+// endRunAndDrain closes this child's run and takes the messages no live
+// hand-off consumed. Closing and draining under one critical section is what
+// keeps an admission from being accepted into a run that has already stopped.
+func (s *childControlScope) endRunAndDrain() []ai.Message {
+	s.mu.Lock()
+	s.runActive = false
+	s.runEnded = true
+	pending := s.inbound
+	s.inbound = nil
+	s.mu.Unlock()
+
+	return inboundMessages(pending)
+}
+
+// markRunEnded records that this child's run has finished, so the scope
+// accepts no further message.
+func (s *childControlScope) markRunEnded() {
+	s.mu.Lock()
+	s.runActive = false
+	s.runEnded = true
+	s.mu.Unlock()
+}
+
+// forwardPending hands every pending message to the live run, oldest first. A
+// message the run cannot take yet stays pending for the next turn boundary.
+func (s *childControlScope) forwardPending() {
+	for {
+		s.mu.Lock()
+		if len(s.inbound) == 0 {
+			s.mu.Unlock()
+
+			return
+		}
+		item := s.inbound[0]
+		s.inbound = s.inbound[1:]
+		s.mu.Unlock()
+
+		if err := s.injectMessage(item); err != nil {
+			s.requeueMessage(item)
+
+			return
+		}
+		item.release()
+	}
+}
+
+// injectMessage hands one message to the running harness under its delivery
+// verb. The harness reports ErrIdle when no run is active.
+func (s *childControlScope) injectMessage(item inboundMessage) error {
+	message := ai.UserText(item.text)
+	switch item.delivery {
+	case subagent.MessageDeliveryQueue:
+		return s.harness.FollowUp(message)
+	case subagent.MessageDeliveryInterject:
+		return s.harness.Interject(message)
+	default:
+		return s.harness.Steer(message)
+	}
+}
+
+// requeueMessage returns one message to the head of the pending set.
+func (s *childControlScope) requeueMessage(item inboundMessage) {
+	s.mu.Lock()
+	s.inbound = append([]inboundMessage{item}, s.inbound...)
+	s.mu.Unlock()
+}
+
+// drainPending removes and returns the pending messages as user turns, oldest
+// first, releasing each admission as it is consumed.
+func (s *childControlScope) drainPending() []ai.Message {
+	s.mu.Lock()
+	pending := s.inbound
+	s.inbound = nil
+	s.mu.Unlock()
+
+	return inboundMessages(pending)
+}
+
+// inboundMessages renders admitted messages as user turns, releasing each
+// admission as it is consumed.
+func inboundMessages(pending []inboundMessage) []ai.Message {
+	if len(pending) == 0 {
+		return nil
+	}
+	messages := make([]ai.Message, 0, len(pending))
+	for _, item := range pending {
+		messages = append(messages, ai.UserText(item.text))
+		item.release()
+	}
+
+	return messages
+}
+
+// releaseOnce bounds one admitted message's release to a single call.
+func releaseOnce(release func()) func() {
+	if release == nil {
+		return func() {}
+	}
+	var once sync.Once
+
+	return func() { once.Do(release) }
 }
 
 const (
@@ -730,6 +970,7 @@ func (s *childControlScope) finishRun(
 	result subagent.RunnerResult,
 	runErr error,
 ) (subagent.RunnerResult, error) {
+	s.markRunEnded()
 	result.Cwd = s.directoryOverride
 	result.WorktreePath = s.worktreePath
 
@@ -1175,7 +1416,14 @@ func (s *childControlScope) Close(ctx context.Context) error {
 	s.closeOnce.Do(func() {
 		s.mu.Lock()
 		s.closed = true
+		undelivered := s.inbound
+		s.inbound = nil
 		s.mu.Unlock()
+		for _, item := range undelivered {
+			// A message this child never consumed still frees its tree-wide
+			// admission.
+			item.release()
+		}
 		s.cancel()
 		s.signalResume()
 		s.pending.clear()

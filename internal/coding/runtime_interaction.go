@@ -816,6 +816,17 @@ func (r *Runtime) openInteraction(
 	var userDispatcher subagent.Dispatcher
 	//nolint:nestif // The unified dispatcher must stay beside the frozen interaction snapshot it captures.
 	if attachSubagentTools {
+		// The messaging Tool is registered before the interaction's dispatcher
+		// exists, so its wake port resolves that dispatcher lazily.
+		var modelDispatcher subagent.Dispatcher
+		messageEntries := r.subagentMessageEntry(
+			current.id, current.rootInteractionID, func() subagent.Dispatcher {
+				return modelDispatcher
+			}, childObserver,
+		)
+		ambientDescriptors = append(
+			ambientDescriptors, descriptorsForEntries(messageEntries)...,
+		)
 		childModel := snapshot.Model(r.model)
 		childModels, modelErr := newChildModelResolver(
 			r.modelCatalog,
@@ -839,6 +850,7 @@ func (r *Runtime) openInteraction(
 				r.recordHookDiagnostics(ctx, nil, diagnostics)
 			},
 			model: childModel, mode: started.Mode, mcpEntries: childMCPEntries, controls: r.childControls,
+			messages:           r.subagents.MessageCoordinator(),
 			toolSearchNameFor:  r.config.ToolSearchNameFor,
 			streamContinuation: r.resolved.StreamContinuation,
 			streamIdleTimeout:  r.resolved.StreamIdleTimeout,
@@ -887,15 +899,18 @@ func (r *Runtime) openInteraction(
 			return nil, dispatchErr
 		}
 		var dispatcher subagent.Dispatcher = customDispatcher
+		modelDispatcher = customDispatcher
 		userDispatcher, dispatchErr = newDispatcher(agentprofile.AudienceUser)
 		if dispatchErr != nil {
 			return nil, dispatchErr
 		}
-		subagentTools, subagentErr := catalog.New(catalog.Local(
+		subagentEntries := catalog.Local(
 			"coding.subagent",
 			catalog.RiskRead,
 			r.subagents.SpawnToolForDispatcher(childOwner, childObserver, dispatcher),
-		)...)
+		)
+		subagentEntries = append(subagentEntries, messageEntries...)
+		subagentTools, subagentErr := catalog.New(subagentEntries...)
 		if subagentErr != nil {
 			return nil, subagentErr
 		}
@@ -1736,6 +1751,17 @@ func (r *Runtime) FollowUp(messages ...ai.Message) error {
 	}
 
 	return current.harness.FollowUp(cloneMessages(messages)...)
+}
+
+// Interject queues messages ahead of the current Agent invocation's pending
+// steering, so they are injected before any message already queued to steer.
+func (r *Runtime) Interject(messages ...ai.Message) error {
+	current, err := r.activeHarness("interject")
+	if err != nil {
+		return err
+	}
+
+	return current.harness.Interject(cloneMessages(messages)...)
 }
 
 func (r *Runtime) activeHarness(operation string) (*interaction, error) {

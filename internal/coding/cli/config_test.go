@@ -89,6 +89,7 @@ model = "anthropic/project-model"
 	assert.Contains(t, output, `subagents.personas = <none> # source=default detail="built-in"`)
 	assert.Contains(t, output, `subagents.models = <none> # source=default detail="built-in"`)
 	assert.Contains(t, output, `dynamic_subagents = true # source=default detail="built-in"`)
+	assert.Contains(t, output, `active_agent_messages = false # source=default detail="built-in"`)
 	assert.Contains(t, output, `mode = "plan" # source=config_file detail="`)
 	assert.Contains(t, output, `tui.theme = "auto" # source=default detail="built-in"`)
 	assert.Contains(t, output, `tui.screen = "fullscreen" # source=default detail="built-in"`)

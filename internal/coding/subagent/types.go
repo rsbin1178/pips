@@ -111,8 +111,12 @@ type Request struct {
 	// state, and usage this execution inherits. It overrides AgentID and Model
 	// with the source's frozen values.
 	ResumeFrom string
-	Ownership  Ownership
-	Delivery   Delivery
+	// WakeOf names the completed child a message woke. A wake continues the
+	// source in the background with the message as its prompt; it is a distinct
+	// request from ResumeFrom, which a caller declares for a new named child.
+	WakeOf    string
+	Ownership Ownership
+	Delivery  Delivery
 }
 
 // Lifecycle provides Runtime-owned child lifecycle callbacks. Manager only
