@@ -292,13 +292,14 @@ func TestSubagentDetailKeepsEveryChronologicalToolAction(t *testing.T) {
 	assert.Less(t, strings.Index(content, "Next I will search."), strings.Index(content, "Search Second"))
 }
 
-func TestSubagentRouteUsesMainSurfaceWithoutPanelChrome(t *testing.T) {
+func TestSubagentRouteDrawsFramedChildTranscript(t *testing.T) {
 	t.Parallel()
 
 	detail := subagent.Detail{
 		Summary: subagent.Summary{
 			ChildSessionID: "child-1", Role: subagent.RoleReview,
 			State: subagent.StateRunning, Model: "openai/model",
+			TaskPreview: "Review the timeline",
 		},
 		Transcript: []ai.Message{
 			ai.UserText("Review the timeline."),
@@ -316,12 +317,212 @@ func TestSubagentRouteUsesMainSurfaceWithoutPanelChrome(t *testing.T) {
 	assert.Contains(t, view.Content, "❯ Review the timeline.")
 	assert.Contains(t, view.Content, "I will inspect it now.")
 	assert.Contains(t, view.Content, "pips  ·  review subagent  ·  openai/model  ·  Running")
-	assert.Contains(t, view.Content, "↑/↓ PgUp/PgDn scroll")
+	assert.Contains(t, view.Content, "q close")
 	assert.Contains(t, view.Content, "Ctrl+T parent")
+	// The read-only child transcript is framed: the title row carries the child's
+	// identity and the close control, and a border encloses the whole surface.
+	// This model is NO_COLOR, so the frame uses the plain border the Composer
+	// box also falls back to.
+	assert.Contains(t, view.Content, lipgloss.NormalBorder().TopLeft)
+	assert.Contains(t, view.Content, lipgloss.NormalBorder().BottomLeft)
+	assert.Contains(t, view.Content, subagentFrameClose)
+	assert.Contains(t, view.Content, "“Review the timeline”")
 	assert.NotContains(t, view.Content, "Subagent · review · running")
-	assert.NotContains(t, view.Content, "╭")
-	assert.NotContains(t, view.Content, "╰")
-	assert.Nil(t, view.Cursor)
+	assert.Nil(t, view.Cursor, "the child transcript view is read-only")
+	for line := range strings.SplitSeq(view.Content, "\n") {
+		assert.LessOrEqual(t, ansi.StringWidth(line), model.width)
+	}
+}
+
+// TestSubagentTranscriptRouteScrollsToItsLastRow pins the scroll window against
+// the bordered frame: the frame loses rows to its border and title line, so a
+// window measured against the bare terminal would strand the final rows.
+func TestSubagentTranscriptRouteScrollsToItsLastRow(t *testing.T) {
+	t.Parallel()
+
+	var transcript []ai.Message
+	for index := range 60 {
+		transcript = append(transcript, ai.AssistantText(fmt.Sprintf("LINE-%03d", index)))
+	}
+	detail := subagent.Detail{
+		Summary: subagent.Summary{
+			ChildSessionID: "child-1", Role: subagent.RoleExplore,
+			State: subagent.StateRunning, Model: "openai/model",
+		},
+		Transcript: transcript,
+	}
+	state := testSubagentState(detail)
+	model := fullscreenModel(t, stubController{state: readyState()}, true)
+	model.Update(tea.WindowSizeMsg{Width: 60, Height: 20})
+	model.route = routeState{
+		kind: routeChild, childSessionID: "child-1", detail: &detail, childState: &state,
+	}
+
+	top := ansi.Strip(model.View().Content)
+	assert.Contains(t, top, "LINE-000", "the first row is visible before scrolling")
+	assert.NotContains(t, top, "LINE-059")
+
+	model.Update(key("end"))
+	bottom := ansi.Strip(model.View().Content)
+	assert.Contains(t, bottom, "LINE-059", "End reaches the final row:\n%s", bottom)
+	assert.NotContains(t, bottom, "LINE-000")
+}
+
+func TestSubagentFrameCloseControlIsClickable(t *testing.T) {
+	t.Parallel()
+
+	newFrameModel := func(t *testing.T) (*Model, *subagent.Detail) {
+		t.Helper()
+
+		detail := &subagent.Detail{Summary: subagent.Summary{
+			ChildSessionID: "child-1", Role: subagent.RoleExplore,
+			State: subagent.StateRunning, Model: "openai/model",
+		}}
+		controller := newOverlayController(readyState())
+		controller.agentDetail = *detail
+		model := fullscreenModel(t, controller, true)
+		state := testSubagentState(*detail)
+		model.route = routeState{
+			kind: routeSubagent, childSessionID: "child-1",
+			detail: detail, childState: &state,
+		}
+
+		return model, detail
+	}
+
+	model, _ := newFrameModel(t)
+	content := model.View().Content
+	require.Contains(t, content, subagentFrameClose)
+	require.True(t, model.subagentFrameHit.painted)
+
+	// The control is where the frame painted it.
+	rows := strings.Split(content, "\n")
+	require.Greater(t, len(rows), model.subagentFrameHit.row)
+	title := []rune(rows[model.subagentFrameHit.row])
+	require.GreaterOrEqual(t, len(title), model.subagentFrameHit.end)
+	assert.Equal(t, subagentFrameClose,
+		string(title[model.subagentFrameHit.start:model.subagentFrameHit.end]))
+
+	// A click on it closes through the same function the keys use.
+	model.handleMouse(tea.MouseClickMsg{
+		Button: tea.MouseLeft, X: model.subagentFrameHit.start, Y: model.subagentFrameHit.row,
+	})
+	assert.Equal(t, routeNone, model.route.kind)
+
+	// A click elsewhere on the title row leaves the child view open.
+	model, _ = newFrameModel(t)
+	model.View()
+	command := model.handleMouse(tea.MouseClickMsg{
+		Button: tea.MouseLeft, X: 3, Y: model.subagentFrameHit.row,
+	})
+	assert.Nil(t, command)
+	assert.Equal(t, routeSubagent, model.route.kind)
+}
+
+func TestSubagentTranscriptRouteKeys(t *testing.T) {
+	t.Parallel()
+
+	openRoute := func(t *testing.T) (*Model, *overlayController) {
+		t.Helper()
+
+		detail := subagent.Detail{Summary: subagent.Summary{
+			ChildSessionID: "child-1", Role: subagent.RoleReview,
+			State: subagent.StateRunning, Model: "openai/model",
+		}}
+		controller := newOverlayController(readyState())
+		controller.agentDetail = detail
+		model := readyModelWithController(t, controller, true)
+		state := testSubagentState(detail)
+		model.route = routeState{
+			kind: routeSubagent, childSessionID: "child-1",
+			detail: &detail, childState: &state,
+		}
+
+		return model, controller
+	}
+
+	t.Run("q closes to the parent chat", func(t *testing.T) {
+		t.Parallel()
+
+		model, _ := openRoute(t)
+		model.Update(key("q"))
+		assert.Equal(t, routeNone, model.route.kind)
+	})
+
+	t.Run("Ctrl+T closes to the parent chat", func(t *testing.T) {
+		t.Parallel()
+
+		model, _ := openRoute(t)
+		model.Update(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
+		assert.Equal(t, routeNone, model.route.kind)
+	})
+
+	t.Run("Ctrl+C interrupts the child instead of closing", func(t *testing.T) {
+		t.Parallel()
+
+		model, controller := openRoute(t)
+		_, command := model.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+		require.NotNil(t, command)
+		driveModelCommands(t, model, command)
+		assert.Equal(t, []string{"child-1"}, controller.agentCanceled)
+		assert.Equal(t, routeSubagent, model.route.kind,
+			"the view stays open while the child stops")
+	})
+
+	t.Run("Ctrl+Q bubbles to quit", func(t *testing.T) {
+		t.Parallel()
+
+		model, _ := openRoute(t)
+		_, command := model.Update(tea.KeyPressMsg{Code: 'q', Mod: tea.ModCtrl})
+		require.NotNil(t, command)
+		_, quitting := command().(tea.QuitMsg)
+		assert.True(t, quitting, "Ctrl+Q reaches the quit handler untouched")
+	})
+
+	t.Run("composer and root-only chords stay masked", func(t *testing.T) {
+		t.Parallel()
+
+		model, _ := openRoute(t)
+		_, command := model.Update(tea.KeyPressMsg{Code: 'k', Mod: tea.ModCtrl})
+		assert.Nil(t, command)
+		assert.Equal(t, pickerNone, model.picker.kind,
+			"Ctrl+K cannot open the command palette inside the child view")
+		model.Update(key("z"))
+		assert.Empty(t, model.composer.Value(), "the child view has no composer")
+		assert.Equal(t, routeSubagent, model.route.kind)
+	})
+}
+
+func TestSubagentRouteReplaysOnOpen(t *testing.T) {
+	t.Parallel()
+
+	detail := subagent.Detail{
+		Summary: subagent.Summary{
+			ChildSessionID: "child-1", Role: subagent.RoleExplore,
+			State: subagent.StateSucceeded, Model: "openai/model",
+		},
+		Transcript: []ai.Message{
+			ai.UserText("Inspect runtime.go."),
+			ai.AssistantText("The runtime owns the child control scope."),
+		},
+	}
+	controller := newOverlayController(readyState())
+	controller.agentDetail = detail
+	model := readyModelWithController(t, controller, true)
+	child := subagentChildSummary(detail.Summary)
+	model.route.children = []childSummary{child}
+
+	// The child view is empty and the child has already finished, so opening it
+	// replays the durable transcript rather than showing an empty surface.
+	command := model.activateChildRoute(newChildRouteRequest(model.route, child))
+	require.NotNil(t, command)
+	require.Equal(t, routeSubagent, model.route.kind)
+	assert.Nil(t, model.route.childState, "nothing is shown before the replay lands")
+
+	driveModelCommands(t, model, command)
+	assert.Equal(t, []string{"child-1"}, controller.agentInspections)
+	require.NotNil(t, model.route.childState)
+	assert.Contains(t, model.View().Content, "The runtime owns the child control scope.")
 }
 
 func TestSubagentRouteRendersOrdinaryLiveState(t *testing.T) {
@@ -447,11 +648,11 @@ func TestAgentsRouteLibraryShowsSafeDefinitionMetadata(t *testing.T) {
 	model := readyModelWithController(t, controller, true)
 	driveModelCommands(t, model, model.openAgentsRoute())
 
-	_, command := model.Update(tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
+	_, command := model.Update(tea.KeyPressMsg{Code: 'a', Mod: tea.ModCtrl})
 	require.Nil(t, command)
-	assert.Equal(t, agentsTabLibrary, model.route.agentsTab)
+	assert.Equal(t, agentsTabAgents, model.route.agentsTab)
 	content := ansi.Strip(model.View().Content)
-	assert.Contains(t, content, "Agents · Library")
+	assert.Contains(t, content, "Agents · Definitions")
 	assert.Contains(t, content, "Go checker")
 	assert.Contains(t, content, "user:pips/go-checker.md")
 	assert.Contains(t, content, "declared tools: tool:read, tool:grep")

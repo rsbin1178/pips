@@ -643,7 +643,7 @@ func TestSubagentRouteWrapsResultsAndKeepsHints(t *testing.T) {
 			Findings: []subagent.ReviewFinding{{
 				Severity: "high", Title: "Diagnostics never wrap",
 				Path: "internal/coding/tui/timeline.go", Line: 12,
-				Evidence: claim, Recommendation: claim,
+				Evidence: claim, Recommendation: claim + " ENDMARK",
 			}},
 		},
 	}
@@ -664,12 +664,14 @@ func TestSubagentRouteWrapsResultsAndKeepsHints(t *testing.T) {
 		assert.LessOrEqual(t, ansi.StringWidth(line), 80)
 	}
 
-	// A body taller than the frame scrolls to its final row.
+	// A body taller than the frame scrolls to its final row: at the maximum
+	// offset the frame shows the tail of the result.
 	model.Update(tea.WindowSizeMsg{Width: 60, Height: 10})
 	maximum := model.subagentRouteMaximumOffset()
 	require.Positive(t, maximum)
 	model.route.offset = maximum
-	assert.Contains(t, model.View().Content, "Recommendation")
+	assert.Contains(t, model.View().Content, "ENDMARK",
+		"the final body row is on screen at the maximum offset")
 }
 
 // Regression: an untrusted Tool payload could carry ESC in an object key or a

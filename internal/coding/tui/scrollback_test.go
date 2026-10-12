@@ -697,12 +697,15 @@ func TestScrollbackReconstructsDurableToolAndSuppressesLateDuplicate(t *testing.
 	assert.Empty(t, model.takeStableTimeline())
 }
 
-func TestScrollbackUpdatesOneSubagentCardAndCommitsOnlyTerminal(t *testing.T) {
+func TestScrollbackUpdatesOneSubagentLifecycleRowAndCommitsOnlyTerminal(t *testing.T) {
 	t.Parallel()
 
 	model := readyModel(t, true)
 	model.state.Tools = []coding.ToolState{{
-		Call:   coding.ToolCall{ID: "call-1", Name: subagent.ToolName},
+		Call: coding.ToolCall{
+			ID: "call-1", Name: subagent.ToolName,
+			Arguments: ai.JSON(`{"prompt":"Plan the change","description":"plan","subagent_type":"plan"}`),
+		},
 		Status: coding.ToolStatusRunning,
 	}}
 	model.state.Transcript = []ai.Message{
@@ -720,8 +723,8 @@ func TestScrollbackUpdatesOneSubagentCardAndCommitsOnlyTerminal(t *testing.T) {
 	active := renderTimelineContent(
 		model.activeTimelineBlocks(), model.markdown, model.width, model.theme, true,
 	)
-	assert.Contains(t, active, "✻ Planning Plan the change")
-	assert.Contains(t, active, "Running")
+	assert.Contains(t, active, "✻ Subagent running: “plan”")
+	assert.Contains(t, active, "· Waiting (plan · openai/test)")
 	assert.NotContains(t, active, subagent.ToolName)
 
 	model.state.Subagents[0].State = subagent.StateSucceeded
@@ -729,8 +732,82 @@ func TestScrollbackUpdatesOneSubagentCardAndCommitsOnlyTerminal(t *testing.T) {
 	model.state.Subagents[0].DurationMillis = 2_000
 	model.state.Tools[0].Status = coding.ToolStatusCompleted
 	committed := model.takeStableTimeline()
-	assert.Contains(t, committed, "• Planned Plan the change")
-	assert.Contains(t, committed, "Completed in 2s")
+	assert.Contains(t, committed, "• Subagent completed in 2s: “plan”")
+	assert.Empty(t, model.takeStableTimeline())
+}
+
+// backgroundSpawnModel builds a model whose transcript and live state both hold
+// one completed background spawn, so the two-row background shape can be driven
+// from the projection frontier.
+func backgroundSpawnModel(t *testing.T) (*Model, *coding.SubagentState) {
+	t.Helper()
+
+	model := readyModel(t, true)
+	model.state.Phase = coding.PhaseRunning
+	model.state.Interaction = coding.InteractionState{ID: "interaction-1", Active: true}
+	arguments := ai.JSON(
+		`{"prompt":"Audit the paths","description":"audit","subagent_type":"explore","run_in_background":true}`,
+	)
+	result := ai.ToolResultText(
+		"call-1",
+		subagent.ToolName,
+		`{"schema":"pips.coding.agent.spawn/v1alpha1","agent_id":"child-1","state":"running"}`,
+	)
+	model.state.Tools = []coding.ToolState{{
+		RunID: "parent-run",
+		Call:  coding.ToolCall{ID: "call-1", Name: subagent.ToolName, Arguments: arguments},
+		// A background spawn call returns as soon as the child is registered, so
+		// its Tool state is already completed while the child keeps running.
+		Status: coding.ToolStatusCompleted,
+		Result: result,
+	}}
+	model.state.Transcript = []ai.Message{
+		ai.Assistant(ai.ToolCallPart{ID: "call-1", Name: subagent.ToolName, Args: arguments}),
+		result,
+	}
+	model.state.Subagents = []coding.SubagentState{{
+		ChildSessionID: "child-1", ParentRunID: "parent-run", ParentToolCallID: "call-1",
+		Delivery: subagent.DeliveryBackground, Role: subagent.RoleExplore,
+		State: subagent.StateRunning, TaskPreview: "Audit the paths",
+	}}
+
+	return model, &model.state.Subagents[0]
+}
+
+func TestScrollbackCommitsBackgroundSpawnAsTwoRows(t *testing.T) {
+	t.Parallel()
+
+	model, child := backgroundSpawnModel(t)
+
+	// A background child does not hold the parent transcript, so its opening row
+	// commits while the child is still running.
+	opening := model.takeStableTimeline()
+	assert.Equal(t, 1, strings.Count(opening, "Subagent started: “audit”"))
+	assert.NotContains(t, opening, "Subagent completed")
+	assert.Empty(t, model.takeStableTimeline())
+
+	// The child's terminal state appends a second, separate row and leaves the
+	// opening row alone, which is the source's background shape.
+	child.State = subagent.StateSucceeded
+	child.DurationMillis = 3_000
+	terminal := model.takeStableTimeline()
+	assert.Equal(t, 1, strings.Count(terminal, "Subagent completed in 3s: “audit”"))
+	assert.NotContains(t, terminal, "Subagent started")
+	assert.Empty(t, model.takeStableTimeline())
+}
+
+func TestScrollbackReplaysFinishedBackgroundChildAsOneRow(t *testing.T) {
+	t.Parallel()
+
+	model, child := backgroundSpawnModel(t)
+	child.State = subagent.StateSucceeded
+	child.DurationMillis = 3_000
+
+	// A replay projects the child's terminal row from the durable transcript, so
+	// the separate-row path must not append a second copy of it.
+	replayed := model.takeStableTimeline()
+	assert.Equal(t, 1, strings.Count(replayed, "Subagent completed in 3s: “audit”"))
+	assert.NotContains(t, replayed, "Subagent started")
 	assert.Empty(t, model.takeStableTimeline())
 }
 
@@ -770,13 +847,13 @@ func TestScrollbackHoldsCompletedSubagentToolUntilLifecycleIsTerminal(t *testing
 	active := renderTimelineContent(
 		model.activeTimelineBlocks(), model.markdown, model.width, model.theme, true,
 	)
-	assert.Equal(t, 1, strings.Count(active, "Planning Plan the change"))
+	assert.Equal(t, 1, strings.Count(active, "Subagent running: “plan”"))
 
 	model.state.Subagents[0].State = subagent.StateSucceeded
 	model.state.Subagents[0].Code = "ok"
 	model.state.Subagents[0].DurationMillis = 2_000
 	committed := model.takeStableTimeline()
-	assert.Equal(t, 1, strings.Count(committed, "Planned Plan the change"))
+	assert.Equal(t, 1, strings.Count(committed, "Subagent completed in 2s: “plan”"))
 	assert.Empty(t, model.takeStableTimeline())
 }
 
@@ -799,7 +876,7 @@ func TestScrollbackSuppressesLateLifecycleAfterDurableSubagentRecovery(t *testin
 	}}
 
 	recovered := model.takeStableTimeline()
-	assert.Equal(t, 1, strings.Count(recovered, "Explored Inspect runtime"))
+	assert.Equal(t, 1, strings.Count(recovered, "Subagent completed in 1s: “inspect”"))
 
 	model.state.Subagents = []coding.SubagentState{{
 		ChildSessionID: "child-1", ParentRunID: "parent-run",

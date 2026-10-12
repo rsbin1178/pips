@@ -21,6 +21,8 @@ const (
 	keyCtrlO      = "ctrl+o"
 	keyTab        = "tab"
 	keyCtrlC      = "ctrl+c"
+	keyCtrlQ      = "ctrl+q"
+	keyCtrlB      = "ctrl+b"
 	keyCtrlT      = "ctrl+t"
 	keyCtrlU      = "ctrl+u"
 	keyCtrlV      = "ctrl+v"

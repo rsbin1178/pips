@@ -770,7 +770,7 @@ output:
 Inspect only the task supplied by the caller. Report evidence and uncertainty.
 ```
 
-`visibility.user` controls the Library and direct user invocation;
+`visibility.user` controls the Agents definition tab and direct user invocation;
 `visibility.model` controls whether the parent model can discover the profile.
 `delivery` can contain `foreground`, `background`, or both. A profile's
 `model` is either `inherit` or a configured Pips `provider/model` reference;
@@ -883,7 +883,7 @@ and compiled again. A failed review or write retains only the process-local
 draft until the command exits; a successful write becomes discoverable on the
 next normal Runtime open or reload, not in the generation that reviewed it.
 
-In the interactive TUI, open `/agents`, press `Ctrl+L` for the Library, choose
+In the interactive TUI, open `/agents`, press `Ctrl+A` for the Agents tab, choose
 an available user-visible profile with Enter, then enter its task in the
 Composer. `Ctrl+R` returns to durable Runs. Child approval and question prompts
 identify the exact child and resolve only that child Session; they do not grant
@@ -1138,7 +1138,7 @@ click on a tab switches pages, a click on the `Stats` range row selects that
 window, and a click on the `Config` search box focuses it. The panel ignores
 motion and drag, so the pointer never takes the conversation's selection gesture
 away from it. The same capture covers the full-area lists — `/resume`, `/skills`,
-`/mcp`, `/tree`, `/agents` and its Runs/Library tabs — where a left click moves
+`/mcp`, `/tree`, `/agents` and its Runs/Agents tabs — where a left click moves
 that route's selection to the row it landed on. A click only selects: it never
 resumes a Session, toggles a Skill, marks a fork, navigates the tree, opens a
 child, or answers an approval or question, because a click that focuses the
@@ -1184,7 +1184,7 @@ alternate screen unless Zellij or tmux control mode restricts it, `always` force
 it, `never` draws the layout in the main buffer). `mouse = true` (the default)
 captures the mouse in fullscreen so a wheel notch can scroll the viewport and a
 left click can move the selection on a full-area list (`/resume`, `/skills`,
-`/mcp`, `/tree`, `/agents` and its Runs/Library tabs) — a click selects a row and
+`/mcp`, `/tree`, `/agents` and its Runs/Agents tabs) — a click selects a row and
 activates nothing, and motion events are ignored, so the pointer never repaints a
 frame by hovering. Text is selected in the viewport itself: drag over the
 conversation and the addressed rows go to the clipboard through an OSC 52 request
@@ -1300,7 +1300,7 @@ subagent call, whichever the newest entry is — scrolls with the wheel exactly 
 its keys: one notch moves it three rows (one under a multiplexer), and it stops at
 its own first and last row. The wheel also works on every other list surface, and
 there it does what that surface's own scrolling keys do: `/agents` (Runs and
-Library) and the non-inline `/team` stages scroll their viewport and leave the
+Agents) and the non-inline `/team` stages scroll their viewport and leave the
 selection where it is, while `/tree`, `/resume`, `/skills`, `/mcp` and the
 dropdowns above the composer (`/model`, `/theme`, `/permissions`, the command and
 file pickers) move their selection, because for those lists the selection *is* the
@@ -1308,6 +1308,32 @@ scroll position. A selection list therefore wraps with the wheel exactly where i
 wraps with ↑/↓, and a picker never moves the conversation underneath it. The
 `/agents` hint line names the scroll inputs, and a picker's or panel's key hints
 stay authoritative for everything else.
+
+The tasks pane is the compact strip above the composer that shows what the session
+is running. It groups rows into `Workflows`, `Subagents`, `Tasks`, and `Watchers`
+in that order with running rows first, and it opens itself when a child subagent
+starts and closes when the last one stops. Only `Subagents` has rows in this
+release: pips runs no workflows, keeps no list of background commands, and has no
+watcher surface. `Ctrl+B` focuses the pane (revealing it if the automatic rule hid
+it), `↑`/`↓` or `j`/`k` move the selection, `h` shows or hides finished rows, `x`
+cancels the selected running child, `Enter` (or `Ctrl+F` while the pane is focused)
+opens its transcript, `←`/`→` collapse or expand every section, and `Tab` or `Esc`
+gives the keys back to the composer. A row paints a state glyph, the task, the
+elapsed time, the child's live activity and model, and the `[✗]` and `[↗]`
+controls, which are clickable wherever the frame reports mouse events.
+
+A spawn appears in the parent transcript as one lifecycle line: `Subagent
+running: "…"` while a foreground child works, `Subagent started: "…"` for a
+background child, and `Subagent completed in …: "…"` (or `failed in …` /
+`cancelled in …`) once it stops. A foreground child's line stays in the live tail
+and commits once in its terminal form; a background child commits its opening line
+straight away and gets a separate terminal line when it finishes.
+
+`Ctrl+T` opens the newest child's transcript in a bordered, read-only frame whose
+title row carries the child's state, identity, task, live activity, elapsed time,
+and `[✗]` close control. `q` and `Ctrl+T` close it back to chat, `Esc` returns to
+`/agents`, and `Ctrl+C` cancels the child rather than the conversation. The frame
+has no composer.
 
 `/statusline` keeps the existing picker interactions: toggle and reorder items,
 preview the result, press Enter to save, or press Esc to cancel. `/theme` and
