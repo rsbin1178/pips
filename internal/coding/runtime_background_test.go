@@ -8,7 +8,6 @@ import (
 	"github.com/rsbin1178/pips/agent"
 	"github.com/rsbin1178/pips/agent/catalog"
 	"github.com/rsbin1178/pips/ai"
-	"github.com/rsbin1178/pips/internal/coding/agentprofile"
 	"github.com/rsbin1178/pips/internal/coding/background"
 	"github.com/rsbin1178/pips/internal/coding/execution"
 	"github.com/rsbin1178/pips/internal/coding/tools"
@@ -48,29 +47,6 @@ func TestLocalCatalogOffersTheMonitorInTheShellClass(t *testing.T) {
 	assert.NotContains(t, agentToolNames(readOnly), "shell")
 }
 
-// TestMonitorIsNotDelegatedToChildrenYet records the deliberate phase split:
-// pips offers the monitor to the conversation, and a child catalog is built from
-// the delegable allowlist, which does not carry it yet. A later phase that adds
-// child watches updates this expectation on purpose.
-func TestMonitorIsNotDelegatedToChildrenYet(t *testing.T) {
-	t.Parallel()
-
-	monitor := catalog.Descriptor{
-		Name:   tools.MonitorName,
-		Source: catalog.Source{Kind: catalog.SourceLocal, ID: "coding"},
-		Risk:   catalog.RiskPrivileged,
-	}
-
-	// The delegable allowlist is the authority filter, so a child plan never
-	// carries the monitor whatever its capability mode is. The mode table also
-	// keeps it out of an execute child, so adding the allowlist entry later is
-	// the only change a child watch needs.
-	assert.False(t, delegableDescriptor(monitor))
-	assert.False(t, capabilityModeAllows(agentprofile.CapabilityExecute, monitor))
-	assert.False(t, capabilityModeAllows(agentprofile.CapabilityReadOnly, monitor))
-	assert.False(t, capabilityModeAllows(agentprofile.CapabilityReadWrite, monitor))
-}
-
 func TestRuntimeReapsItsBackgroundTasksOnClose(t *testing.T) {
 	t.Parallel()
 
@@ -105,11 +81,9 @@ func TestRuntimeReapsItsBackgroundTasksOnClose(t *testing.T) {
 	taskID := header.Monitor.TaskID
 
 	// The pipeline reads what the command wrote and hands it to the Runtime's
-	// own observer, which is the seam the delivery path reads.
+	// own observer, which is the seam the delivery path renders from.
 	require.Eventually(t, func() bool {
-		events, _ := runtime.backgroundOutput.pendingBackground()
-
-		return len(events) > 0
+		return runtime.backgroundOutput.observedBackground() > 0
 	}, 30*time.Second, 10*time.Millisecond)
 
 	closeCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

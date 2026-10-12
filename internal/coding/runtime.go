@@ -228,6 +228,9 @@ type Runtime struct {
 	notificationInflight map[string]struct{}
 	notificationMessages map[string][]string
 	notificationBatches  map[string]int
+	// backgroundAttempts bounds how often one parent message is handed to a
+	// turn, so a turn that never commits cannot spin the coordinator.
+	backgroundAttempts map[string]int
 }
 
 type runtimeOperation struct {
