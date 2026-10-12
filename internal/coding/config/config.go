@@ -28,12 +28,17 @@ type Field string
 
 // Configuration fields.
 const (
-	FieldModel            Field = "model"
-	FieldVariant          Field = "variant"
-	FieldReasoning        Field = "reasoning"
-	FieldToolSearch       Field = "tool_search"
-	FieldToolSearchName   Field = "tool_search_name"
+	FieldModel          Field = "model"
+	FieldVariant        Field = "variant"
+	FieldReasoning      Field = "reasoning"
+	FieldToolSearch     Field = "tool_search"
+	FieldToolSearchName Field = "tool_search_name"
+	// FieldDynamicSubagents is the master subagent switch. It defaults to true.
 	FieldDynamicSubagents Field = "dynamic_subagents"
+	// FieldSubagentEnabled is the `[subagents]` spelling of the same master
+	// switch as FieldDynamicSubagents. Both fields report one resolved value,
+	// because the two spellings are one setting rather than two.
+	FieldSubagentEnabled Field = "subagents.enabled"
 	// FieldActiveAgentMessages enables model-authored messages to a live or
 	// completed child. It defaults to false.
 	FieldActiveAgentMessages   Field = "active_agent_messages"
@@ -57,7 +62,10 @@ const (
 	// FieldSubagentRoles is the inline role declaration table.
 	FieldSubagentRoles Field = "subagents.roles"
 	// FieldSubagentPersonas is the inline persona declaration table.
-	FieldSubagentPersonas   Field = "subagents.personas"
+	FieldSubagentPersonas Field = "subagents.personas"
+	// FieldSubagentToggle is the per-type enable/disable table. An absent key
+	// means the type stays enabled.
+	FieldSubagentToggle     Field = "subagents.toggle"
 	FieldMode               Field = "mode"
 	FieldTheme              Field = "tui.theme"
 	FieldStatusLine         Field = "tui.status_line"
@@ -78,6 +86,7 @@ var fields = []Field{
 	FieldToolSearch,
 	FieldToolSearchName,
 	FieldDynamicSubagents,
+	FieldSubagentEnabled,
 	FieldActiveAgentMessages,
 	FieldSubagentMaxDepth,
 	FieldSubagentMaxConcurrent,
@@ -92,6 +101,7 @@ var fields = []Field{
 	FieldSubagentModels,
 	FieldSubagentRoles,
 	FieldSubagentPersonas,
+	FieldSubagentToggle,
 	FieldMode,
 	FieldTheme,
 	FieldStatusLine,
@@ -600,6 +610,9 @@ type SubagentConfig struct {
 	// Models overrides the model of one agent type by exact name. An
 	// unresolvable reference falls back to the parent model.
 	Models map[string]string
+	// Toggle disables individual agent types by exact, case-sensitive name. An
+	// absent key leaves the type enabled, so an empty table changes nothing.
+	Toggle map[string]bool
 	// Roles and Personas are inline declarations keyed by exact agent type
 	// name. They take precedence over the same-named file declarations.
 	Roles    map[string]SubagentRole
@@ -611,10 +624,31 @@ type SubagentConfig struct {
 // DefaultSubagentConfig. It exists because the maps make the struct
 // non-comparable.
 func (c SubagentConfig) IsZero() bool {
+	return c.budgetsZero() && !c.StructuredResults && c.LimitBehavior == "" && c.presetsEmpty()
+}
+
+func (c SubagentConfig) budgetsZero() bool {
 	return c.MaxDepth == 0 && c.MaxConcurrent == 0 && c.MaxSpawnedPerRootInteraction == 0 &&
 		c.MaxAutoFollowUps == 0 && c.MaxTurns == 0 && c.MaxTokens == 0 &&
-		c.MaxToolCalls == 0 && c.MaxDurationMinutes == 0 && !c.StructuredResults &&
-		c.LimitBehavior == "" && len(c.Models) == 0 && len(c.Roles) == 0 && len(c.Personas) == 0
+		c.MaxToolCalls == 0 && c.MaxDurationMinutes == 0
+}
+
+func (c SubagentConfig) presetsEmpty() bool {
+	return len(c.Models) == 0 && len(c.Toggle) == 0 && len(c.Roles) == 0 && len(c.Personas) == 0
+}
+
+// TypeEnabled reports whether one agent type may be dispatched from a
+// per-type toggle table. An absent key means enabled, so an empty table
+// disables nothing. The lookup is exact and case-sensitive.
+func TypeEnabled(toggle map[string]bool, name string) bool {
+	enabled, ok := toggle[name]
+
+	return !ok || enabled
+}
+
+// TypeEnabled reports whether this configuration allows one agent type.
+func (c SubagentConfig) TypeEnabled(name string) bool {
+	return TypeEnabled(c.Toggle, name)
 }
 
 // DefaultSubagentConfig returns the bounded production policy.
@@ -729,6 +763,12 @@ type Patch struct {
 	ToolSearch       *bool
 	ToolSearchName   *string
 	DynamicSubagents *bool
+	// NoSubagents is the `--no-subagents` spelling of the master switch. Its
+	// value is the flag's own value, so a passed `--no-subagents` is true and
+	// an explicit `--no-subagents=false` is false. It is CLI-only; it exists so
+	// the two flag spellings can be detected and a contradiction between them
+	// reported instead of one silently winning.
+	NoSubagents *bool
 	// ActiveAgentMessages opens the child messaging gate. It is env-only and
 	// file-only; no CLI flag selects it.
 	ActiveAgentMessages *bool
@@ -1280,6 +1320,9 @@ func apply(value Config, patch Patch, source Source) Config {
 	if patch.DynamicSubagents != nil {
 		value.DynamicSubagents = *patch.DynamicSubagents
 		value.sources[FieldDynamicSubagents] = source
+		// The `[subagents]` spelling resolves to the same switch, so it reports
+		// the same value and the same deciding tier.
+		value.sources[FieldSubagentEnabled] = source
 	}
 	if patch.ActiveAgentMessages != nil {
 		value.ActiveAgentMessages = *patch.ActiveAgentMessages

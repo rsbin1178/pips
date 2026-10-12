@@ -6,9 +6,9 @@ Dynamic Subagent 是 Coding Agent 应用层能力：定义发现/编译、child 
 
 ## 能力与非能力边界
 
-当前可验收：Builtin 前台执行；custom profile 发现/校验、直接调用、model 前台/后台调用；并发/次数/turn/token/tool/duration/depth 上限；精确递归；child 独立审批/问题；配置好的 private MCP/Hook；draft 生成与人工 promotion；恢复、kill switch 和无内容 Telemetry。
+当前可验收：Builtin 前台执行；custom profile 发现/校验、直接调用、model 前台/后台调用；并发/次数/turn/token/tool/duration/depth 上限；精确递归；child 独立审批/问题；配置好的 private MCP/Hook；draft 生成与人工 promotion；role/persona 与 model 优先级；worktree/cwd/resume 隔离与继承；`[subagents]` 配置面与逐类型 toggle；恢复、kill switch 和无内容 Telemetry。
 
-当前没有实现、不得写成能力或验收通过：等待式调度队列、queue depth、百分比/cohort rollout、第二套 release-stage 配置、本地自动分发参与者、为了准入指标创建的持久化准入事件/占位 Session、profile 内 inline MCP/Hook/凭据/命令，以及跨用户共享 draft/草稿协作。Selected Beta/GA 是运营流程，不是另一套 Runtime stage。
+当前没有实现、不得写成能力或验收通过：queue depth、百分比/cohort rollout、第二套 release-stage 配置、本地自动分发参与者、为了准入指标创建的持久化准入事件/占位 Session、`sampling_limit`/`workflow_max_concurrent`、远端 settings 层与 `[features]` 门、`Agent(...)` 形式的 tool allowlist 语法、profile 内 inline MCP/Hook/凭据/命令，以及跨用户共享 draft/草稿协作。Selected Beta/GA 是运营流程，不是另一套 Runtime stage。
 
 ## MA-SUB-001：Builtin explore、plan、review
 
@@ -26,19 +26,20 @@ Dynamic Subagent 是 Coding Agent 应用层能力：定义发现/编译、child 
 ## MA-SUB-002：显式关闭、发现可见与 Dispatch 禁止
 
 - 分类：本地确定性、显式关闭。变更等级：本地持久状态。
-- 前置条件：`${PIPS_ACCEPT_HOME}/agents/go-checker.md` 是合法 custom profile；通过 `dynamic_subagents = false` 或 `PIPS_DYNAMIC_SUBAGENTS=false` 把 gate 显式关闭。
+- 前置条件：`${PIPS_ACCEPT_HOME}/agents/go-checker.md` 是合法 custom profile；用下列任一层把 gate 显式关闭：`dynamic_subagents = false`、`[subagents] enabled = false`、`PIPS_DYNAMIC_SUBAGENTS=false`、`--dynamic-subagents=false` 或 `--no-subagents`。
 - 隔离夹具：profile 只允许 `read`/`grep`，user/model visibility 为 true。
 - 步骤：
 
   ```bash
   pips config show
+  pips --no-subagents config show
   pips agents validate
   pips agents list --all
   pips agents show go-checker
   pips agents run go-checker "inspect fixture"
   ```
 
-- 预期证据：`config show` 显示 false 及来源；validate/list/show 可做静态管理并不输出完整 instruction body；run 在模型调用和 child 创建前被拒绝；profile bytes 不变；builtin 仍可运行。
+- 预期证据：`config show` 在 `dynamic_subagents` 与 `subagents.enabled` 两行都显示 false，并标明决定该值的层（文件 / `PIPS_DYNAMIC_SUBAGENTS` / `--no-subagents`）；`[subagents]` 表存在但缺 `enabled` 时两行仍为 true；同一文件里两种写法取值冲突时校验失败并同时点名两个键；validate/list/show 可做静态管理并不输出完整 instruction body；run 在模型调用和 child 创建前被拒绝；profile bytes 不变；builtin 仍可运行。
 - 通过条件：gate 只禁止新 custom dispatch/generate-promotion 能力，不删除定义或历史 child。
 - 失败条件：默认启用、关闭时仍发 Provider 请求/写 Session、或 rollback 删除定义。
 - 清理/回滚：保留 profile 给后续用例；确认无新增 child。
@@ -181,6 +182,28 @@ Dynamic Subagent 是 Coding Agent 应用层能力：定义发现/编译、child 
 - 来源/测试锚点：[subagent_worktree.go](../../internal/coding/subagent_worktree.go)、[teamworktree](../../internal/coding/teamworktree)、[manager_resume.go](../../internal/coding/subagent/manager_resume.go)、[subagent_isolation_test.go](../../internal/coding/subagent_isolation_test.go)。
 - 结果：`未执行`。
 
+## MA-SUB-012：`[subagents]` 配置面与逐类型 toggle
+
+- 分类：本地确定性 + 实时 Provider、默认开启。变更等级：本地持久状态；可能产生费用。
+- 前置条件：gate 保持默认开启；一个合法 custom profile（`go-checker`）；至少一个 builtin 类型作为对照。
+- 隔离夹具：selected user 文件里写 `[subagents] enabled = false`、`[subagents.toggle]`（含一个 builtin、一个 custom、一个不存在的名字），以及指向被关掉类型的 `[subagents.models]` 与 `[subagents.roles]` 各一条。
+- 步骤：
+
+  ```bash
+  pips config show
+  pips --no-subagents config show
+  pips --no-subagents --dynamic-subagents=true config show
+  pips agents list
+  ```
+
+  随后把 `[subagents] enabled` 改回 true、只保留 toggle，重启 Runtime，让 parent 分别以被关掉的 custom 类型与被关掉的 builtin 类型前台委派一次；在 `/agents` 的 Agents 页签查看这两个类型。
+- 预期证据：`config show` 逐字段报值与来源，`dynamic_subagents` 与 `subagents.enabled` 同值同源，`subagents.toggle` 按声明显示（含不存在的名字），被关掉类型的 `models`/`roles` 仍被解析并作为声明报出；`[subagents]` 表缺 `enabled` 时不会关闭子代理；同层两种写法冲突、以及 `--no-subagents --dynamic-subagents=true` 都显式失败并点名冲突的键；被关掉的类型委派返回 `Subagent '<type>' is disabled via [subagents.toggle] in config.toml`，不出现在模型可见的 `subagent_type` 列表里，在 `/agents` 显示为 `disabled by configuration`；`pips agents list` 仍按定义文件列出该类型（它不读运行时配置）；开关关闭时 builtin 仍可运行，但被 toggle 关掉的 builtin 不可运行。
+- 通过条件：一个开关只有一个解析值且两种写法都可报告；缺 `enabled` 的表不关闭子代理；任何显式设置都不被静默丢弃；被关掉的类型在模型面、`/agents` 与运行入口一致地不可用。
+- 失败条件：两种写法冲突时一方静默生效、缺 `enabled` 的表把子代理关掉、toggle 只影响文档而不影响 dispatch、或 `config show` 漏报新字段。
+- 清理/回滚：删除验收用 `enabled`/`toggle` 配置并恢复默认；确认无新增 child。
+- 来源/测试锚点：[load.go](../../internal/coding/config/load.go)、[config.go](../../internal/coding/config/config.go)、[cli/config.go](../../internal/coding/cli/config.go)、[subagents_dispatch.go](../../internal/coding/subagent_dispatch.go)、[dynamic_subagent_test.go](../../internal/coding/dynamic_subagent_test.go)、[load_test.go](../../internal/coding/config/load_test.go)。
+- 结果：`未执行`。
+
 ## 分册判定
 
-Builtin 发布至少通过 `MA-SUB-001`。Custom Alpha 需通过 `002` 至 `008`、`010` 与 `011`；Selected Beta 还需完成 `009` 中的候选 artifact/Telemetry/rollback 条件。GA 只有在真实观察窗口和独立审阅完成后才能通过，仓库测试不能代替运营证据。
+Builtin 发布至少通过 `MA-SUB-001`。Custom Alpha 需通过 `002` 至 `008`、`010` 至 `012`；Selected Beta 还需完成 `009` 中的候选 artifact/Telemetry/rollback 条件。GA 只有在真实观察窗口和独立审阅完成后才能通过，仓库测试不能代替运营证据。

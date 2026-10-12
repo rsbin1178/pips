@@ -100,6 +100,7 @@ type rootFlags struct {
 	toolSearch       bool
 	toolSearchName   string
 	dynamicSubagents bool
+	noSubagents      bool
 	mode             string
 	sandbox          string
 	approval         string
@@ -145,6 +146,7 @@ func New(dependencies Dependencies) (*cobra.Command, error) {
 	persistent.BoolVar(&flags.toolSearch, "tool-search", false, "enable deferred tool search")
 	persistent.StringVar(&flags.toolSearchName, "tool-search-name", "", "deferred tool search tool name")
 	persistent.BoolVar(&flags.dynamicSubagents, "dynamic-subagents", true, "enable custom subagents")
+	persistent.BoolVar(&flags.noSubagents, "no-subagents", false, "disable subagents")
 	persistent.StringVar(&flags.mode, "mode", "", "operating mode (agent or plan)")
 	persistent.StringVar(&flags.sandbox, "sandbox", "", "sandbox mode")
 	persistent.StringVar(&flags.approval, "approval", "", "approval mode")

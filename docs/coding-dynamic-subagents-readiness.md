@@ -18,18 +18,26 @@ and `internal/coding/subagent`. The generic `agent` packages continue to supply
 only reusable Harness, Tool, Catalog, cancellation, and usage primitives.
 
 Custom Agents are on by default. The gate is now an off switch rather than an
-opt-in:
+opt-in, with one resolved value and several spellings:
 
 ```toml
 dynamic_subagents = false
+# or, in the same file, the [subagents] spelling:
+# [subagents]
+# enabled = false
 ```
 
-`PIPS_DYNAMIC_SUBAGENTS` and `--dynamic-subagents` keep their existing
-environment/flag precedence. Turning the gate off stops new custom dispatch and
-draft promotion without deleting definitions or making historical child
-Sessions unreadable; verify the resolved value with `pips config show`. Pips does
-not implement a local percentage cohort system or a second release-stage
-setting.
+`PIPS_DYNAMIC_SUBAGENTS`, `--dynamic-subagents`, and the new `--no-subagents`
+resolve at the existing tiers: flag > environment > file > default. The two file
+spellings are one setting: agreeing values are accepted, and disagreeing values
+fail validation naming both keys, so neither can silently win. Turning the gate
+off stops new custom dispatch and draft promotion without deleting definitions
+or making historical child Sessions unreadable; verify the resolved value with
+`pips config show`, which reports it under both `dynamic_subagents` and
+`subagents.enabled`. A single agent type can be disabled on its own with
+`[subagents.toggle]`; that narrows dispatch only and leaves the gate itself on.
+Pips does not implement a local percentage cohort system or a second
+release-stage setting.
 
 ## Beta telemetry
 
@@ -113,12 +121,15 @@ default. Custom Agents are on by default, so the drill verifies the off switch.
 
 1. Capture `pips config show`, `pips agents list`, one builtin run, one custom
    run, and the resulting child IDs. Keep the Agent definition file in place.
-2. Set `dynamic_subagents = false` (or `PIPS_DYNAMIC_SUBAGENTS=false`), then
-   restart or reopen the Runtime.
-3. Verify `pips config show` resolves the gate to false and identifies the
-   intended source.
-4. Verify `pips agents list` still reports the definition as unavailable,
-   without instruction-body disclosure.
+2. Set `dynamic_subagents = false`, or `[subagents] enabled = false`, or
+   `PIPS_DYNAMIC_SUBAGENTS=false`, or pass `--no-subagents`, then restart or
+   reopen the Runtime.
+3. Verify `pips config show` resolves the gate to false under both
+   `dynamic_subagents` and `subagents.enabled` and identifies the intended
+   source.
+4. Verify the definition is still discovered and diagnosed (`pips agents list`,
+   `pips agents validate`) without instruction-body disclosure, and that the
+   Runtime Agent Library reports it as unavailable.
 5. Verify new custom direct/model dispatch and Agent draft generation/promotion
    are rejected before model execution or file writes.
 6. Verify builtin `explore`, `plan`, and `review` still execute, and prior child
@@ -145,6 +156,10 @@ Repository-controlled evidence:
   non-executable model drafts;
 - [x] default-on with an off switch, `pips.agent/v1alpha1`, legacy builtin and
   old-plan read compatibility;
+- [x] converged `[subagents]` configuration surface: one master switch with a
+  `[subagents] enabled` spelling and the `--no-subagents` flag, a per-type
+  `[subagents.toggle]` dispatch gate, and a `pips config show` report that
+  resolves both switch spellings to one value and source;
 - [x] content-free admission/lifecycle telemetry and automated rollback
   regression;
 - [x] final repository gate outputs recorded in the Trellis readiness task.

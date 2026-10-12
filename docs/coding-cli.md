@@ -561,19 +561,32 @@ Turn them off at the highest-precedence layer that fits the use case:
 ```toml
 # ~/.pips/config.toml (or the file selected by --config)
 dynamic_subagents = false
+# The same switch, written in the [subagents] table:
+# [subagents]
+# enabled = false
 ```
 
 ```sh
 PIPS_DYNAMIC_SUBAGENTS=false pips agents list
 pips --dynamic-subagents=false agents run go-checker "inspect internal/coding"
+pips --no-subagents agents run go-checker "inspect internal/coding"
 ```
 
-`pips config show` reports the resolved `dynamic_subagents` value and its
-source. Disabling the gate stops new custom dispatch without deleting
-definitions or making historical child Sessions unreadable. Built-in
-`explore`, `plan`, and `review` remain available through their compatible
-protocol. Selected-Beta telemetry, staged distribution, rollback drill, and GA
-evidence are defined in the
+`dynamic_subagents` and `[subagents] enabled` are two spellings of one switch;
+`--dynamic-subagents` and `--no-subagents` are its two flag spellings, and
+`PIPS_DYNAMIC_SUBAGENTS` is its environment spelling. Precedence is
+flag > environment > file > default (`true`), and a `[subagents]` table that
+omits `enabled` never turns subagents off. Two spellings in the same layer are
+one setting: setting both to the same value is accepted, and setting both to
+different values fails validation with a message naming both keys rather than
+letting one silently win. `pips config show` reports the resolved value under
+both `dynamic_subagents` and `subagents.enabled`, with the layer that decided
+it. Disabling the switch stops new custom dispatch without deleting definitions
+or making historical child Sessions unreadable. Built-in `explore`, `plan`, and
+`review` remain available through their compatible protocol, unless the
+individual type is disabled by `[subagents.toggle]`, which applies to built-in
+and custom types alike. Selected-Beta telemetry, staged distribution, rollback
+drill, and GA evidence are defined in the
 [Dynamic Subagent readiness runbook](coding-dynamic-subagents-readiness.md).
 
 Production child admission and execution budgets are configured independently
@@ -592,6 +605,10 @@ max_duration_minutes = 30
 max_depth = 1
 structured_results = false
 
+[subagents.toggle]
+# exact agent type name -> may it be dispatched; an absent key stays enabled
+explore = false
+
 [subagents.models]
 explore = "anthropic/claude-sonnet-4-5"
 ```
@@ -609,6 +626,18 @@ A foreground spawn that waits out its budget (default ten minutes,
 `subagent_id` immediately.
 These are production defaults, not new authority: profile selectors, child-owned
 approval, Sandbox, and the frozen generation capability intersection still apply.
+
+`[subagents.toggle]` disables individual agent types by exact, case-sensitive
+name; an absent key leaves the type enabled, so an empty table changes nothing.
+A disabled type is refused with `Subagent '<type>' is disabled via
+[subagents.toggle] in config.toml`, is removed from the model-visible
+`subagent_type` list, and is reported as `disabled by configuration` on the
+`/agents` `Agents` tab. It applies to built-in and custom types alike, and it
+narrows dispatch only: the `models`, `roles`, and `personas` entries for a
+disabled type are still validated and reported as declared, and are simply never
+applied. `pips agents list` reports what definition files declare, so it does
+not read this configuration and still lists a disabled type. `pips config show`
+reports the table as declared, including a key that names no existing type.
 
 Built-in agent types are `general-purpose` (the full delegable catalog),
 `explore` and `plan` (read-only), and `review` (a pips extension, read-only). An

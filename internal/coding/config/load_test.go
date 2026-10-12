@@ -73,6 +73,154 @@ func TestLoadDynamicSubagentsGatePrecedenceAndProvenance(t *testing.T) {
 	assert.Equal(t, "--dynamic-subagents", source.Detail)
 }
 
+func TestLoadSubagentsEnabledSpellingMergesWithTopLevelSwitch(t *testing.T) {
+	t.Parallel()
+
+	// A `[subagents]` table that only tunes limits never turns subagents off.
+	tuningOnly := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, tuningOnly, "[subagents]\nmax_concurrent = 4\n")
+	result, err := config.Load(config.LoadOptions{ConfigFile: tuningOnly})
+	require.NoError(t, err)
+	assert.True(t, result.Config.DynamicSubagents)
+	assert.Equal(t, 4, result.Config.Subagent.MaxConcurrent)
+	for _, field := range []config.Field{config.FieldDynamicSubagents, config.FieldSubagentEnabled} {
+		source, ok := result.Config.Source(field)
+		require.True(t, ok)
+		assert.Equal(t, config.SourceDefault, source.Kind)
+	}
+
+	// The table spelling is the same switch, so it reports the same value and
+	// the same deciding tier as the top-level spelling.
+	tableSpelling := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, tableSpelling, "[subagents]\nenabled = false\n")
+	result, err = config.Load(config.LoadOptions{ConfigFile: tableSpelling})
+	require.NoError(t, err)
+	assert.False(t, result.Config.DynamicSubagents)
+	for _, field := range []config.Field{config.FieldDynamicSubagents, config.FieldSubagentEnabled} {
+		source, ok := result.Config.Source(field)
+		require.True(t, ok)
+		assert.Equal(t, config.SourceConfigFile, source.Kind)
+		assert.Equal(t, tableSpelling, source.Detail)
+	}
+
+	// An agreeing pair is one setting written twice, not a contradiction.
+	agreeing := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, agreeing, "dynamic_subagents = false\n\n[subagents]\nenabled = false\n")
+	result, err = config.Load(config.LoadOptions{ConfigFile: agreeing})
+	require.NoError(t, err)
+	assert.False(t, result.Config.DynamicSubagents)
+
+	// Disagreeing spellings are one layer contradicting itself.
+	disagreeing := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, disagreeing, "dynamic_subagents = false\n\n[subagents]\nenabled = true\n")
+	_, err = config.Load(config.LoadOptions{ConfigFile: disagreeing})
+	require.ErrorIs(t, err, config.ErrInvalid)
+	require.ErrorContains(t, err, "dynamic_subagents")
+	require.ErrorContains(t, err, "[subagents] enabled")
+
+	// Environment stays above both file spellings.
+	result, err = config.Load(config.LoadOptions{
+		ConfigFile: agreeing,
+		LookupEnv:  mapLookup(map[string]string{config.DynamicSubagentsEnv: "true"}),
+	})
+	require.NoError(t, err)
+	assert.True(t, result.Config.DynamicSubagents)
+	source, ok := result.Config.Source(config.FieldSubagentEnabled)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceEnvironment, source.Kind)
+	assert.Equal(t, config.DynamicSubagentsEnv, source.Detail)
+}
+
+func TestLoadNoSubagentsFlagSpellingAndConflict(t *testing.T) {
+	t.Parallel()
+
+	// `--no-subagents` resolves the switch to false and reports its own name.
+	disabled := true
+	result, err := config.Load(config.LoadOptions{
+		FlagOverrides: config.Patch{NoSubagents: &disabled},
+	})
+	require.NoError(t, err)
+	assert.False(t, result.Config.DynamicSubagents)
+	source, ok := result.Config.Source(config.FieldDynamicSubagents)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceFlag, source.Kind)
+	assert.Equal(t, "--no-subagents", source.Detail)
+	source, ok = result.Config.Source(config.FieldSubagentEnabled)
+	require.True(t, ok)
+	assert.Equal(t, "--no-subagents", source.Detail)
+
+	// An explicit `--no-subagents=false` asks for the switch to stay on.
+	enabled := false
+	result, err = config.Load(config.LoadOptions{
+		FlagOverrides: config.Patch{NoSubagents: &enabled},
+	})
+	require.NoError(t, err)
+	assert.True(t, result.Config.DynamicSubagents)
+
+	// Both flag spellings may be passed when they agree.
+	disabledFlag := true
+	off := false
+	result, err = config.Load(config.LoadOptions{
+		FlagOverrides: config.Patch{DynamicSubagents: &off, NoSubagents: &disabledFlag},
+	})
+	require.NoError(t, err)
+	assert.False(t, result.Config.DynamicSubagents)
+	source, ok = result.Config.Source(config.FieldDynamicSubagents)
+	require.True(t, ok)
+	assert.Equal(t, "--dynamic-subagents", source.Detail)
+
+	// Two explicit flag spellings that disagree are refused, and the flag tier
+	// stays above a contradicting file.
+	on := true
+	contradictingFile := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, contradictingFile, "[subagents]\nenabled = false\n")
+	_, err = config.Load(config.LoadOptions{
+		ConfigFile:    contradictingFile,
+		FlagOverrides: config.Patch{DynamicSubagents: &on, NoSubagents: &disabledFlag},
+	})
+	require.ErrorIs(t, err, config.ErrInvalid)
+	require.ErrorContains(t, err, "--dynamic-subagents")
+	require.ErrorContains(t, err, "--no-subagents")
+
+	result, err = config.Load(config.LoadOptions{
+		ConfigFile:    contradictingFile,
+		FlagOverrides: config.Patch{DynamicSubagents: &on},
+	})
+	require.NoError(t, err)
+	assert.True(t, result.Config.DynamicSubagents)
+}
+
+func TestLoadSubagentToggleTable(t *testing.T) {
+	t.Parallel()
+
+	// An absent table enables every type.
+	result, err := config.Load(config.LoadOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, result.Config.Subagent.Toggle)
+	assert.True(t, result.Config.Subagent.TypeEnabled("explore"))
+	source, ok := result.Config.Source(config.FieldSubagentToggle)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceDefault, source.Kind)
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, "[subagents.toggle]\nexplore = false\ngo-checker = true\n")
+	result, err = config.Load(config.LoadOptions{ConfigFile: path})
+	require.NoError(t, err)
+	assert.Equal(t, map[string]bool{"explore": false, "go-checker": true}, result.Config.Subagent.Toggle)
+	assert.False(t, result.Config.Subagent.TypeEnabled("explore"))
+	assert.True(t, result.Config.Subagent.TypeEnabled("go-checker"))
+	// An absent key means enabled, and the lookup is exact and case-sensitive.
+	assert.True(t, result.Config.Subagent.TypeEnabled("plan"))
+	assert.True(t, result.Config.Subagent.TypeEnabled("Explore"))
+	source, ok = result.Config.Source(config.FieldSubagentToggle)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceConfigFile, source.Kind)
+	assert.Equal(t, path, source.Detail)
+
+	// A table that only carries a toggle still keeps the other defaults.
+	assert.Equal(t, config.DefaultSubagentConfig().MaxConcurrent, result.Config.Subagent.MaxConcurrent)
+}
+
 func TestLoadActiveAgentMessagesGatePrecedenceAndProvenance(t *testing.T) {
 	t.Parallel()
 

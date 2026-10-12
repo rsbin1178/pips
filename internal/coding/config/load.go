@@ -221,6 +221,9 @@ type fileCompaction struct {
 }
 
 type fileSubagent struct {
+	// Enabled is the `[subagents]` spelling of the master switch. It is merged
+	// with the top-level dynamic_subagents key rather than stacked on it.
+	Enabled                      *bool                      `toml:"enabled"`
 	MaxDepth                     *int                       `toml:"max_depth"`
 	MaxConcurrent                *int                       `toml:"max_concurrent"`
 	MaxSpawnedPerRootInteraction *int                       `toml:"max_spawned_per_root_interaction"`
@@ -232,6 +235,7 @@ type fileSubagent struct {
 	StructuredResults            *bool                      `toml:"structured_results"`
 	LimitBehavior                *string                    `toml:"limit_behavior"`
 	Models                       map[string]string          `toml:"models"`
+	Toggle                       map[string]bool            `toml:"toggle"`
 	Roles                        map[string]SubagentRole    `toml:"roles"`
 	Personas                     map[string]SubagentPersona `toml:"personas"`
 }
@@ -688,6 +692,10 @@ func decodeLayer(value fileConfig) (fileLayer, error) {
 			subagent.Models = maps.Clone(value.Subagent.Models)
 			layer.subagentFields = append(layer.subagentFields, FieldSubagentModels)
 		}
+		if value.Subagent.Toggle != nil {
+			subagent.Toggle = maps.Clone(value.Subagent.Toggle)
+			layer.subagentFields = append(layer.subagentFields, FieldSubagentToggle)
+		}
 		if value.Subagent.Roles != nil {
 			subagent.Roles = maps.Clone(value.Subagent.Roles)
 			layer.subagentFields = append(layer.subagentFields, FieldSubagentRoles)
@@ -741,8 +749,13 @@ func decodeLayer(value fileConfig) (fileLayer, error) {
 		}
 		layer.patch.ToolSearchName = &name
 	}
-	layer.patch.DynamicSubagents = value.DynamicSubagents
+	subagentsEnabled, err := resolveFileSubagentsEnabled(value.DynamicSubagents, value.Subagent)
+	if err != nil {
+		return fileLayer{}, err
+	}
+	layer.patch.DynamicSubagents = subagentsEnabled
 	layer.patch.ActiveAgentMessages = value.ActiveAgentMessages
+
 	if value.Mode != nil {
 		mode, err := ParseOperatingMode(*value.Mode)
 		if err != nil {
@@ -1154,6 +1167,50 @@ func decodeCompatibility(value fileCompatibility) (CompatibilityConfig, error) {
 	return result, nil
 }
 
+// resolveFileSubagentsEnabled merges the two spellings of the master subagent
+// switch. They are one setting in one file layer: agreeing spellings are
+// accepted, and disagreeing ones are refused rather than silently resolved in
+// favour of either.
+func resolveFileSubagentsEnabled(topLevel *bool, table *fileSubagent) (*bool, error) {
+	if table == nil || table.Enabled == nil {
+		return topLevel, nil
+	}
+	if topLevel == nil {
+		return table.Enabled, nil
+	}
+	if *topLevel != *table.Enabled {
+		return nil, fmt.Errorf(
+			"%w: dynamic_subagents and [subagents] enabled are the same switch and disagree; "+
+				"set only one of them",
+			ErrInvalid,
+		)
+	}
+
+	return topLevel, nil
+}
+
+// resolveFlagSubagentsEnabled merges the two CLI spellings of the master
+// subagent switch. Both are explicit when both are passed, so a disagreement is
+// a usage error rather than a silent win for either flag.
+func resolveFlagSubagentsEnabled(dynamic, noSubagents *bool) (*bool, error) {
+	switch {
+	case noSubagents == nil:
+		return dynamic, nil
+	case dynamic == nil:
+		enabled := !*noSubagents
+
+		return &enabled, nil
+	case *dynamic == *noSubagents:
+		return nil, fmt.Errorf(
+			"%w: --dynamic-subagents and --no-subagents are the same switch and disagree; "+
+				"pass only one of them",
+			ErrInvalid,
+		)
+	default:
+		return dynamic, nil
+	}
+}
+
 func applyEnvironment(value *Config, lookup LookupEnv) error {
 	if lookup == nil {
 		return nil
@@ -1200,6 +1257,12 @@ func applyFlagOverrides(value *Config, patch Patch) error {
 	if err != nil {
 		return fmt.Errorf("coding config: flags: %w", err)
 	}
+	// `--no-subagents` is the second spelling of the master switch, so it
+	// reports its own flag name as the source detail.
+	subagentsDetail := "--dynamic-subagents"
+	if validated.DynamicSubagents != nil && patch.NoSubagents != nil && patch.DynamicSubagents == nil {
+		subagentsDetail = "--no-subagents"
+	}
 	overrides := []struct {
 		detail string
 		patch  Patch
@@ -1210,7 +1273,7 @@ func applyFlagOverrides(value *Config, patch Patch) error {
 		{detail: "--reasoning", patch: Patch{Reasoning: validated.Reasoning}, set: validated.Reasoning != nil},
 		{detail: "--tool-search", patch: Patch{ToolSearch: validated.ToolSearch}, set: validated.ToolSearch != nil},
 		{detail: "--tool-search-name", patch: Patch{ToolSearchName: validated.ToolSearchName}, set: validated.ToolSearchName != nil},
-		{detail: "--dynamic-subagents", patch: Patch{DynamicSubagents: validated.DynamicSubagents}, set: validated.DynamicSubagents != nil},
+		{detail: subagentsDetail, patch: Patch{DynamicSubagents: validated.DynamicSubagents}, set: validated.DynamicSubagents != nil},
 		{detail: "--mode", patch: Patch{Mode: validated.Mode}, set: validated.Mode != nil},
 		{detail: "--sandbox", patch: Patch{Sandbox: validated.Sandbox}, set: validated.Sandbox != nil},
 		{detail: "--approval", patch: Patch{Approval: validated.Approval}, set: validated.Approval != nil},
@@ -1255,7 +1318,11 @@ func validatePatch(patch Patch) (Patch, error) {
 		}
 		result.ToolSearchName = &name
 	}
-	result.DynamicSubagents = patch.DynamicSubagents
+	subagentsEnabled, err := resolveFlagSubagentsEnabled(patch.DynamicSubagents, patch.NoSubagents)
+	if err != nil {
+		return Patch{}, err
+	}
+	result.DynamicSubagents = subagentsEnabled
 	result.ActiveAgentMessages = patch.ActiveAgentMessages
 	if patch.Mode != nil {
 		mode, err := ParseOperatingMode(string(*patch.Mode))
