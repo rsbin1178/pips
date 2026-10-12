@@ -51,6 +51,7 @@ type result struct {
 	Counts     ResultCounts
 	Next       ResultNext
 	Execution  *ResultExecution
+	Monitor    *ResultMonitor
 	Diagnostic *execution.SandboxDiagnostic
 	Body       string
 }
@@ -79,6 +80,15 @@ type ResultExecutionStream struct {
 	Sanitized bool  `json:"sanitized,omitempty"`
 }
 
+// ResultMonitor is the structured output of one monitor Tool call: the task id
+// the model addresses, the resolved deadline, and whether it is persistent. A
+// persistent monitor resolves its deadline to zero.
+type ResultMonitor struct {
+	TaskID     string `json:"task_id"`
+	TimeoutMS  int64  `json:"timeout_ms"`
+	Persistent bool   `json:"persistent"`
+}
+
 // ResultHeader is the machine-readable first line of every coding-tool result.
 type ResultHeader struct {
 	Schema     string                       `json:"schema"`
@@ -91,6 +101,7 @@ type ResultHeader struct {
 	Counts     ResultCounts                 `json:"counts,omitzero"`
 	Next       ResultNext                   `json:"next,omitzero"`
 	Execution  *ResultExecution             `json:"execution,omitempty"`
+	Monitor    *ResultMonitor               `json:"monitor,omitempty"`
 	Diagnostic *execution.SandboxDiagnostic `json:"diagnostic,omitempty"`
 }
 
@@ -106,6 +117,7 @@ func (r result) render() string {
 		Counts:     r.Counts,
 		Next:       r.Next,
 		Execution:  r.Execution,
+		Monitor:    r.Monitor,
 		Diagnostic: r.Diagnostic,
 	})
 	if err != nil {

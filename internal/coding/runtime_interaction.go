@@ -696,7 +696,15 @@ func (r *Runtime) openInteraction(
 		return nil, errors.New("coding runtime: controlled shell is unavailable")
 	}
 
-	localOptions := []tools.CatalogOption{tools.WithControlledShell(shell)}
+	monitor, ok := r.controller.Tool(tools.MonitorName)
+	if !ok {
+		return nil, errors.New("coding runtime: controlled monitor is unavailable")
+	}
+
+	localOptions := []tools.CatalogOption{
+		tools.WithControlledShell(shell),
+		tools.WithControlledMonitor(monitor),
+	}
 	if planFile := r.planFileBoundary(); planFile != nil {
 		localOptions = append(localOptions, tools.WithPlanFile(*planFile))
 	}

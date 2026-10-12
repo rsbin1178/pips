@@ -64,14 +64,7 @@ func New(
 }
 
 type controllerExecutor interface {
-	Prepare(context.Context, execution.Operation, execution.Authorization) (preparedExecution, error)
-}
-
-// preparedExecution owns one single-use execution plan. Run consumes and
-// closes it; Close abandons it before Run.
-type preparedExecution interface {
-	Run(context.Context, execution.Sink) (execution.Result, error)
-	Close() error
+	Prepare(context.Context, execution.Operation, execution.Authorization) (PreparedExecution, error)
 }
 
 type executorAdapter struct {
@@ -82,7 +75,7 @@ func (a executorAdapter) Prepare(
 	ctx context.Context,
 	operation execution.Operation,
 	authorization execution.Authorization,
-) (preparedExecution, error) {
+) (PreparedExecution, error) {
 	plan, err := a.executor.Plan(ctx, operation, authorization)
 	if err != nil {
 		return nil, err
@@ -360,6 +353,16 @@ func (c *Controller) executeDirect(
 
 	if err := appendReceipt(c.journal, receiptFor(lifecycle, eventStarted, "", 1, "")); err != nil {
 		return nil, errors.Join(err, prepared.Close())
+	}
+
+	// A detached handler owns the run: the Tool result is its receipt, and the
+	// process keeps going after this call returns. The lifecycle stays
+	// started-without-result until the harness persists the receipt, exactly as
+	// it does for a synchronous call, so the volatile marker covers that window.
+	if detached, ok := handler.(DetachedHandler); ok {
+		c.volatile[lifecycle.receipt.RequestID] = struct{}{}
+
+		return detached.Detach(ctx, call, prepared)
 	}
 
 	result, runErr := prepared.Run(ctx, &agentProgressSink{})
