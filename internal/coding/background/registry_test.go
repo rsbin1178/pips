@@ -24,6 +24,8 @@ type recorder struct {
 	completions []background.Completion
 }
 
+func (r *recorder) BackgroundStarted(background.Snapshot) {}
+
 func (r *recorder) BackgroundEvent(event background.Event) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

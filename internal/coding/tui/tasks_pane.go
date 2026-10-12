@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"image/color"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/rsbin1178/pips/internal/coding"
+	"github.com/rsbin1178/pips/internal/coding/background"
 	"github.com/rsbin1178/pips/internal/coding/subagent"
 )
 
@@ -28,10 +30,11 @@ const (
 	tasksPaneGroupCount
 )
 
-// tasksPaneGroupLabels is the section vocabulary in display order. Only
-// Subagents has a pips source today: pips runs no workflows, keeps no list of
-// background commands, and has no watcher surface, so the other three groups
-// contribute no header and no rows.
+// tasksPaneGroupLabels is the section vocabulary in display order. Two groups
+// have a pips source today: Subagents projects the session's children, and
+// Watchers projects its registered background tasks. pips runs no workflows and
+// keeps no list of one-shot background commands, so those contribute no header
+// and no rows.
 var tasksPaneGroupLabels = [tasksPaneGroupCount]string{
 	"Workflows", "Subagents", "Tasks", "Watchers",
 }
@@ -54,18 +57,32 @@ const (
 
 	tasksPaneHeaderExpanded  = "▾"
 	tasksPaneHeaderCollapsed = "▸"
+	// backgroundTaskTag labels a watch row, so a monitor is never read as a
+	// child.
+	backgroundTaskTag = "Monitor"
 )
 
 // tasksPaneRow is one selectable line of the pane: a child of the current
-// session, projected from the same record the timeline reads.
+// session, or a background task the session registered. Both are projections
+// of the same runtime state the timeline reads.
 type tasksPaneRow struct {
-	childID    string
+	// childID addresses a subagent row and taskID a background-task row; exactly
+	// one is set, and it is what the row's two actions address.
+	childID string
+	taskID  string
+	// tag labels a row whose source is not a child, so a watch is never read as
+	// one.
+	tag        string
 	label      string
 	activity   string
 	model      string
 	state      subagent.State
 	durationMS int64
 	running    bool
+	// startedAt and endedAt are a background task's own clock. A child's elapsed
+	// time comes from durationMS, or from first observation while it runs.
+	startedAt time.Time
+	endedAt   time.Time
 }
 
 // tasksPaneEntry is one painted line: either a group header with its count or a
@@ -129,12 +146,14 @@ func (m *Model) resetTasksPane() {
 // syncTasksPane applies the auto open/close rule after one frame of events and
 // records when each running child was first observed.
 func (m *Model) syncTasksPane(now time.Time) {
-	m.applyTasksPaneVisibility(m.observeRunningChildren(now))
+	m.applyTasksPaneVisibility(m.observeRunningRows(now))
 }
 
-// observeRunningChildren records the children that are still running and drops
-// the record of one that stopped, and reports how many are running.
-func (m *Model) observeRunningChildren(now time.Time) int {
+// observeRunningRows records the children that are still running and drops the
+// record of one that stopped, and reports how many rows are running. A running
+// background task counts too: an automatically-opened pane that hid a watch
+// would leave the reader no way to see it.
+func (m *Model) observeRunningRows(now time.Time) int {
 	if m.tasksPane.seen == nil {
 		m.tasksPane.seen = make(map[string]time.Time)
 	}
@@ -152,6 +171,12 @@ func (m *Model) observeRunningChildren(now time.Time) int {
 		running++
 		if _, seen := m.tasksPane.seen[child.ChildSessionID]; !seen {
 			m.tasksPane.seen[child.ChildSessionID] = now
+		}
+	}
+
+	for _, task := range m.state.BackgroundTasks {
+		if task.ID != "" && !task.Completed {
+			running++
 		}
 	}
 
@@ -210,11 +235,11 @@ func (m *Model) tasksPaneRunning() bool {
 	return false
 }
 
-// tasksPaneRows projects every row the pane can show: the session's children, in
-// the section order, running rows first. A finished row is listed only when the
-// reader asked for finished rows.
+// tasksPaneRows projects every row the pane can show: the session's children and
+// its background tasks, in the section order, running rows first. A finished row
+// is listed only when the reader asked for finished rows.
 func (m *Model) tasksPaneRows() []tasksPaneRow {
-	rows := make([]tasksPaneRow, 0, len(m.state.Subagents))
+	rows := make([]tasksPaneRow, 0, len(m.state.Subagents)+len(m.state.BackgroundTasks))
 	for _, child := range m.state.Subagents {
 		if child.ChildSessionID == "" {
 			continue
@@ -234,6 +259,12 @@ func (m *Model) tasksPaneRows() []tasksPaneRow {
 		})
 	}
 
+	for _, task := range m.state.BackgroundTasks {
+		if row, ok := tasksPaneBackgroundRow(task, m.tasksPane.showDone); ok {
+			rows = append(rows, row)
+		}
+	}
+
 	sort.SliceStable(rows, func(left, right int) bool {
 		if rows[left].running != rows[right].running {
 			return rows[left].running
@@ -245,6 +276,80 @@ func (m *Model) tasksPaneRows() []tasksPaneRow {
 	return rows
 }
 
+// tasksPaneBackgroundRow projects one registered background task into a row. A
+// finished task is listed only when the reader asked for finished rows.
+func tasksPaneBackgroundRow(
+	task coding.BackgroundTaskLifecycle,
+	showDone bool,
+) (tasksPaneRow, bool) {
+	if task.ID == "" {
+		return tasksPaneRow{}, false
+	}
+
+	running := !task.Completed
+	if !running && !showDone {
+		return tasksPaneRow{}, false
+	}
+
+	return tasksPaneRow{
+		taskID: task.ID, tag: backgroundTaskTag,
+		label:     backgroundTaskRowLabel(task),
+		state:     backgroundTaskState(task),
+		running:   running,
+		startedAt: task.StartedAt, endedAt: task.EndedAt,
+	}, true
+}
+
+// backgroundTaskState maps a task's own outcome onto the states the pane already
+// paints, so a watch reuses the child rows' spinner and settled marks.
+func backgroundTaskState(task coding.BackgroundTaskLifecycle) subagent.State {
+	if !task.Completed {
+		return subagent.StateRunning
+	}
+	if task.Signal == "" && task.ExitCode == 0 {
+		return subagent.StateSucceeded
+	}
+
+	return subagent.StateFailed
+}
+
+// backgroundTaskRowLabel is the row text for one background task: the
+// description with newlines flattened, else the command.
+func backgroundTaskRowLabel(task coding.BackgroundTaskLifecycle) string {
+	if text := oneLineToolText(task.Description); text != "" {
+		return text
+	}
+
+	return oneLineToolText(task.Command)
+}
+
+// backgroundTaskStatusText names one task's outcome for a detail heading.
+func backgroundTaskStatusText(task coding.BackgroundTaskLifecycle) string {
+	switch {
+	case !task.Completed:
+		return "running"
+	case task.Signal != "":
+		return "killed by signal " + task.Signal
+	case task.ExitCode != 0:
+		return "exited (code " + strconv.Itoa(task.ExitCode) + ")"
+	default:
+		return "exited (code 0)"
+	}
+}
+
+// backgroundTaskElapsedText renders one task's own elapsed time.
+func backgroundTaskElapsedText(task coding.BackgroundTaskLifecycle, now time.Time) string {
+	if task.StartedAt.IsZero() {
+		return ""
+	}
+	end := task.EndedAt
+	if end.IsZero() {
+		end = now
+	}
+
+	return formatInteractionDuration(end.Sub(task.StartedAt).Milliseconds())
+}
+
 func tasksPaneRowLabel(child coding.SubagentState) string {
 	if preview := oneLineSubagentTask(child.TaskPreview); preview != "" {
 		return preview
@@ -253,9 +358,13 @@ func tasksPaneRowLabel(child coding.SubagentState) string {
 	return subagentDisplayName(child.Identity, child.Role)
 }
 
-// tasksPaneGroupOf reports the section a row belongs to. Every pips row is a
-// subagent today; the indirection is what a second row source would extend.
-func tasksPaneGroupOf(tasksPaneRow) tasksPaneGroup {
+// tasksPaneGroupOf reports the section a row belongs to. A child is a
+// Subagent; a session-registered background task is a Watcher.
+func tasksPaneGroupOf(row tasksPaneRow) tasksPaneGroup {
+	if row.taskID != "" {
+		return tasksPaneWatchers
+	}
+
 	return tasksPaneSubagents
 }
 
@@ -445,6 +554,9 @@ func (m *Model) tasksPaneRowLine(
 	// at the right edge where the reader expects to aim at them.
 	labelWidth := max(0, width-ansi.StringWidth(meta)-ansi.StringWidth(marker)-ansi.StringWidth(icon)-1)
 	label := ansi.Truncate(entry.row.label, labelWidth, "…")
+	if entry.row.tag != "" {
+		label = ansi.Truncate(entry.row.tag+" "+entry.row.label, labelWidth, "…")
+	}
 	left := marker + icon + " " + label
 	padding := strings.Repeat(" ", max(0, width-ansi.StringWidth(left)-ansi.StringWidth(meta)))
 	line := ansi.Truncate(left+padding+meta, width, "…")
@@ -504,7 +616,16 @@ func (m *Model) tasksPaneRowIcon(row tasksPaneRow) string {
 // child's live activity when it has one, and the model.
 func (m *Model) tasksPaneRowMeta(row tasksPaneRow, now time.Time) string {
 	elapsed := formatInteractionDuration(row.durationMS)
-	if row.running {
+	switch {
+	case !row.startedAt.IsZero():
+		// A background task carries its own start, so its clock does not depend
+		// on when this process first observed it.
+		end := row.endedAt
+		if end.IsZero() {
+			end = now
+		}
+		elapsed = formatInteractionDuration(end.Sub(row.startedAt).Milliseconds())
+	case row.running:
 		elapsed = ""
 		if seen, ok := m.tasksPane.seen[row.childID]; ok && !now.IsZero() {
 			elapsed = formatInteractionDuration(now.Sub(seen).Milliseconds())
@@ -626,23 +747,30 @@ func (m *Model) tasksPaneSelection() (tasksPaneRow, bool) {
 	return rows[index], true
 }
 
-// inspectTasksPaneSelection opens the selected child's transcript. It is the
-// same route Ctrl+T opens, so there is one child surface rather than two.
+// inspectTasksPaneSelection opens the selected row's bounded detail. A child
+// opens its transcript through the one child route; a background task opens the
+// same detail surface a tool call does, because a watch has no transcript.
 func (m *Model) inspectTasksPaneSelection() tea.Cmd {
 	row, ok := m.tasksPaneSelection()
 	if !ok {
 		return nil
 	}
+	if row.taskID != "" {
+		return m.inspectBackgroundTask(row.taskID)
+	}
 
 	return m.openSubagentRoute(row.childID)
 }
 
-// killTasksPaneSelection cancels the selected child through the existing control
-// surface. A row that is not running affords nothing.
+// killTasksPaneSelection stops the selected row through the one control surface
+// its kind uses. A row that is not running affords nothing.
 func (m *Model) killTasksPaneSelection() tea.Cmd {
 	row, ok := m.tasksPaneSelection()
 	if !ok || !row.running || m.route.controlling {
 		return nil
+	}
+	if row.taskID != "" {
+		return m.killBackgroundTask(row.taskID)
 	}
 
 	return m.cancelSubagent(row.childID)
@@ -707,9 +835,17 @@ func (m *Model) tasksPaneHitCommand(hit tasksPaneHitRow, column int) (tea.Cmd, b
 	row := rows[hit.index]
 
 	if inColumnSpan(column, hit.killStart, hit.killEnd) && row.running {
+		if row.taskID != "" {
+			return m.killBackgroundTask(row.taskID), true
+		}
+
 		return m.cancelSubagent(row.childID), true
 	}
 	if inColumnSpan(column, hit.inspectStart, hit.inspectEnd) {
+		if row.taskID != "" {
+			return m.inspectBackgroundTask(row.taskID), true
+		}
+
 		return m.openSubagentRoute(row.childID), true
 	}
 	m.tasksPane.cursor = hit.index
@@ -722,4 +858,100 @@ func (m *Model) tasksPaneHitCommand(hit tasksPaneHitRow, column int) (tea.Cmd, b
 // A control the row did not paint carries a negative start and answers nothing.
 func inColumnSpan(column, start, end int) bool {
 	return start >= 0 && column >= start && column < end
+}
+
+// backgroundKillResultMsg carries one stop answer back to the pane.
+type backgroundKillResultMsg struct {
+	taskID  string
+	outcome background.Outcome
+	err     error
+}
+
+// backgroundInspectResultMsg carries one bounded inspection back to the pane.
+type backgroundInspectResultMsg struct {
+	taskID     string
+	inspection coding.BackgroundTaskInspection
+	err        error
+}
+
+// killBackgroundTask stops one watch through the same control method the model's
+// own stop Tool uses.
+func (m *Model) killBackgroundTask(taskID string) tea.Cmd {
+	fetch := func() tea.Msg {
+		outcome, err := m.controller.KillBackgroundTask(m.ctx, taskID)
+
+		return backgroundKillResultMsg{taskID: taskID, outcome: outcome, err: err}
+	}
+
+	return fetch
+}
+
+// inspectBackgroundTask loads one watch's bounded detail and opens it.
+func (m *Model) inspectBackgroundTask(taskID string) tea.Cmd {
+	fetch := func() tea.Msg {
+		inspection, err := m.controller.InspectBackgroundTask(m.ctx, taskID)
+
+		return backgroundInspectResultMsg{taskID: taskID, inspection: inspection, err: err}
+	}
+
+	return fetch
+}
+
+// applyBackgroundKillResult reports what the control plane answered. The row
+// itself changes from the event stream, so this only tells the reader.
+func (m *Model) applyBackgroundKillResult(message backgroundKillResultMsg) tea.Cmd {
+	if message.err != nil {
+		m.appendNotice("Stopping " + message.taskID + " failed: " + safeDetailText(message.err.Error()))
+
+		return nil
+	}
+
+	switch message.outcome {
+	case background.OutcomeKilled:
+		m.appendNotice("Stopping " + message.taskID + "…")
+	case background.OutcomeAlreadyExited:
+		m.appendNotice(message.taskID + " had already completed.")
+	default:
+		m.appendNotice(message.taskID + " was not found.")
+	}
+
+	return nil
+}
+
+// applyBackgroundInspectResult opens the watch's bounded detail view, or reports
+// why it is unavailable.
+func (m *Model) applyBackgroundInspectResult(message backgroundInspectResultMsg) tea.Cmd {
+	if message.err != nil {
+		m.appendNotice("Watch details unavailable: " + safeDetailText(message.err.Error()))
+
+		return nil
+	}
+
+	return m.openToolDetailRoute(newBackgroundTaskDetailView(message.inspection))
+}
+
+// newBackgroundTaskDetailView renders one watch's bounded detail: its identity,
+// its status and elapsed time, and the sanitized tail of its own output. The
+// tail is the only content, so the view stays bounded whatever the watch
+// printed.
+func newBackgroundTaskDetailView(inspection coding.BackgroundTaskInspection) toolDetailView {
+	task := inspection.Lifecycle()
+	state := subagentToolState(backgroundTaskState(task))
+
+	view := toolDetailView{title: "Watch details", callIDs: nonEmpty(task.ID)}
+	view.rows = append(view.rows, detailHeadingRow(
+		toolActivityGlyph(state), backgroundTaskRowLabel(task), "", state,
+	))
+	view.rows = append(view.rows, detailNoteRow(strings.Join(nonEmpty(
+		task.ID, backgroundTaskStatusText(task), backgroundTaskElapsedText(task, time.Now()),
+	), " · ")))
+
+	if output := strings.TrimSpace(sanitizeToolText(inspection.Output)); output != "" {
+		view.rows = append(view.rows, detailSection(detailOutputLabel))
+		view.rows = append(view.rows, detailCodeRows(
+			"", truncateText(output, maximumToolDetailBytes/2), detailToneBody, 1,
+		)...)
+	}
+
+	return view
 }

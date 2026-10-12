@@ -310,6 +310,8 @@ type observerRecorder struct {
 	completions []background.Completion
 }
 
+func (r *observerRecorder) BackgroundStarted(background.Snapshot) {}
+
 func (r *observerRecorder) BackgroundEvent(event background.Event) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

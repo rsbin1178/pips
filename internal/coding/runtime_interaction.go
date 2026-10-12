@@ -18,6 +18,7 @@ import (
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding/agentprofile"
 	"github.com/rsbin1178/pips/internal/coding/approval"
+	"github.com/rsbin1178/pips/internal/coding/background"
 	"github.com/rsbin1178/pips/internal/coding/changes"
 	"github.com/rsbin1178/pips/internal/coding/changes/git"
 	"github.com/rsbin1178/pips/internal/coding/compaction"
@@ -704,6 +705,9 @@ func (r *Runtime) openInteraction(
 	localOptions := []tools.CatalogOption{
 		tools.WithControlledShell(shell),
 		tools.WithControlledMonitor(monitor),
+		tools.WithKillBackground(func(ctx context.Context, taskID string) (background.Outcome, error) {
+			return r.KillBackgroundTask(ctx, taskID, background.KillModel)
+		}),
 	}
 	if planFile := r.planFileBoundary(); planFile != nil {
 		localOptions = append(localOptions, tools.WithPlanFile(*planFile))
@@ -858,6 +862,10 @@ func (r *Runtime) openInteraction(
 				r.recordHookDiagnostics(ctx, nil, diagnostics)
 			},
 			model: childModel, mode: started.Mode, mcpEntries: childMCPEntries, controls: r.childControls,
+			backgroundTasks: r.backgroundTasks,
+			killBackground: func(ctx context.Context, taskID string) (background.Outcome, error) {
+				return r.KillBackgroundTask(ctx, taskID, background.KillModel)
+			},
 			messages:           r.subagents.MessageCoordinator(),
 			wakeManager:        r.subagents,
 			wakeDispatcher:     func() subagent.Dispatcher { return modelDispatcher },

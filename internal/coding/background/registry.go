@@ -81,6 +81,9 @@ type Completion struct {
 
 // Observer receives one Registry's model-visible output.
 type Observer interface {
+	// BackgroundStarted reports one task registration, so a frontend can list
+	// the task while it runs.
+	BackgroundStarted(Snapshot)
 	// BackgroundEvent delivers one streamed event.
 	BackgroundEvent(Event)
 	// BackgroundCompleted delivers one task's single terminal report.
@@ -231,6 +234,10 @@ func (r *Registry) Launch(parent context.Context, request Request) (Snapshot, er
 	snapshot := entry.snapshotLocked()
 	r.mu.Unlock()
 
+	if r.observer != nil {
+		r.observer.BackgroundStarted(snapshot)
+	}
+
 	go entry.run(ctx, request.Start)
 
 	return snapshot, nil
@@ -320,6 +327,29 @@ func (r *Registry) List() []Snapshot {
 	sortSnapshots(values)
 
 	return values
+}
+
+// Tail returns a bounded, sanitized tail of one task's own output. It is what
+// the tasks pane's inspect action shows; the model's delivery stays the events.
+func (r *Registry) Tail(id string, limit int64) (string, bool) {
+	if r == nil || limit <= 0 {
+		return "", false
+	}
+
+	r.mu.Lock()
+	entry, found := r.tasks[id]
+	path := ""
+
+	if found && entry.output != nil {
+		path = entry.output.path
+	}
+	r.mu.Unlock()
+
+	if !found {
+		return "", false
+	}
+
+	return tailBytes(path, limit), true
 }
 
 // Reap stops every live task and waits for their pipelines to end. Runtime

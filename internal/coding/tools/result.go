@@ -52,6 +52,7 @@ type result struct {
 	Next       ResultNext
 	Execution  *ResultExecution
 	Monitor    *ResultMonitor
+	Kill       *ResultKill
 	Diagnostic *execution.SandboxDiagnostic
 	Body       string
 }
@@ -89,6 +90,13 @@ type ResultMonitor struct {
 	Persistent bool   `json:"persistent"`
 }
 
+// ResultKill is the structured output of one background-task stop: the id the
+// model addressed and the registry's own outcome.
+type ResultKill struct {
+	TaskID  string `json:"task_id"`
+	Outcome string `json:"outcome"`
+}
+
 // ResultHeader is the machine-readable first line of every coding-tool result.
 type ResultHeader struct {
 	Schema     string                       `json:"schema"`
@@ -102,6 +110,7 @@ type ResultHeader struct {
 	Next       ResultNext                   `json:"next,omitzero"`
 	Execution  *ResultExecution             `json:"execution,omitempty"`
 	Monitor    *ResultMonitor               `json:"monitor,omitempty"`
+	Kill       *ResultKill                  `json:"kill,omitempty"`
 	Diagnostic *execution.SandboxDiagnostic `json:"diagnostic,omitempty"`
 }
 
@@ -118,6 +127,7 @@ func (r result) render() string {
 		Next:       r.Next,
 		Execution:  r.Execution,
 		Monitor:    r.Monitor,
+		Kill:       r.Kill,
 		Diagnostic: r.Diagnostic,
 	})
 	if err != nil {
