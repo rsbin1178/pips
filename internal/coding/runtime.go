@@ -26,6 +26,7 @@ import (
 	"github.com/rsbin1178/pips/internal/coding/agentplugin"
 	"github.com/rsbin1178/pips/internal/coding/agentprofile"
 	"github.com/rsbin1178/pips/internal/coding/approval"
+	"github.com/rsbin1178/pips/internal/coding/background"
 	"github.com/rsbin1178/pips/internal/coding/changes/git"
 	"github.com/rsbin1178/pips/internal/coding/config"
 	"github.com/rsbin1178/pips/internal/coding/credential"
@@ -193,6 +194,8 @@ type Runtime struct {
 	subagents             *subagent.Manager
 	childControls         *childControlRegistry
 	notifications         *subagent.NotificationInbox
+	backgroundTasks       *background.Registry
+	backgroundOutput      *backgroundObserver
 	children              map[string]*childProjection
 	agentDrafts           map[string]agentDraftRecord
 	teamGuard             teamCapabilityGuard
@@ -683,6 +686,21 @@ func openRuntime(
 	runtime.childControls = newChildControlRegistry()
 	if !openPolicy.teamWorker() {
 		runtime.teamRecovery, runtime.teamRecoveryErr = runtime.discoverTeamRecovery(ctx)
+	}
+
+	// The background registry is process-local and owns every monitor that
+	// outlives the Tool call that started it. Its output files live in the
+	// session's own terminal directory.
+	runtime.backgroundOutput = newBackgroundObserver(runtime)
+	runtime.backgroundTasks, err = background.NewRegistry(background.Options{
+		OutputDir:    backgroundOutputDir(handle.Dir()),
+		Observer:     runtime.backgroundOutput,
+		KillToolName: background.KillTaskToolName,
+		OutputBytes:  backgroundOutputBytes,
+		TailBytes:    backgroundTailBytes,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("coding runtime: open background registry: %w", err)
 	}
 
 	runtime.controller, err = approval.New(

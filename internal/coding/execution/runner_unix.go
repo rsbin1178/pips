@@ -30,7 +30,16 @@ func (e *Executor) run(ctx context.Context, plan *Plan, sink Sink) (Result, erro
 	result := emptyResult(plan.operation.cwd)
 	startedAt := e.deps.now()
 
-	runCtx, cancel := context.WithTimeout(ctx, plan.operation.timeout)
+	runCtx := ctx
+
+	cancel := func() {}
+
+	// A no-deadline operation runs until it exits or its caller cancels it, so
+	// it gets the caller's context unchanged rather than the operation deadline.
+	if !plan.operation.noDeadline {
+		runCtx, cancel = context.WithTimeout(ctx, plan.operation.timeout)
+	}
+
 	defer cancel()
 
 	pipes, err := openProcessPipes(e.deps)
