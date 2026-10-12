@@ -14,6 +14,7 @@ import (
 	"github.com/rsbin1178/pips/agent/extension"
 	"github.com/rsbin1178/pips/agent/harness"
 	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/internal/coding/background"
 	"github.com/rsbin1178/pips/internal/coding/config"
 	"github.com/rsbin1178/pips/internal/coding/execution"
 	"github.com/rsbin1178/pips/internal/coding/hooks"
@@ -290,6 +291,73 @@ func TestRuntimeStopHookContinuesPrimaryTurn(t *testing.T) {
 	requests := model.Requests()
 	require.Len(t, requests, 2)
 	assert.True(t, requestContainsText(requests[1], "perform one more focused pass"))
+}
+
+func TestRuntimeStopHookListsRunningWatches(t *testing.T) {
+	skipHookRuntimeOnWindows(t)
+	t.Parallel()
+
+	logPath := filepath.Join(t.TempDir(), "stop.json")
+	stop := writeRuntimeHookScript(t, "cat > \"$HOOK_STOP_LOG\"")
+	model := newRuntimeModel(runtimeTextResponse("done"))
+	runtime := openTrustedHookRuntime(t, model, lifecycleHookConfig(t, map[hooks.Event][]string{
+		hooks.EventStop: {stop},
+	}), append(os.Environ(), "HOOK_STOP_LOG="+logPath))
+
+	// A watch that stays alive keeps the Stop payload's list non-empty.
+	snapshot, err := runtime.backgroundTasks.Launch(t.Context(), background.Request{
+		Kind:        background.KindMonitor,
+		Command:     "sleep 30",
+		Description: "watch me",
+		NoDeadline:  true,
+		Start: func(ctx context.Context, _ execution.Sink) (execution.Result, error) {
+			<-ctx.Done()
+
+			return execution.Result{Status: execution.StatusCanceled}, nil
+		},
+	})
+	require.NoError(t, err)
+
+	collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("start a watch")))
+
+	//nolint:gosec // The path is this test's own temporary hook log.
+	content, err := os.ReadFile(logPath)
+	require.NoError(t, err)
+
+	var input struct {
+		BackgroundTasks []struct {
+			ID          string `json:"id"`
+			Type        string `json:"type"`
+			Status      string `json:"status"`
+			Description string `json:"description"`
+			Command     string `json:"command"`
+		} `json:"background_tasks"`
+	}
+	require.NoError(t, json.Unmarshal(content, &input))
+
+	require.Len(t, input.BackgroundTasks, 1)
+	assert.Equal(t, snapshot.ID, input.BackgroundTasks[0].ID)
+	assert.Equal(t, string(background.KindMonitor), input.BackgroundTasks[0].Type)
+	assert.Equal(t, "running", input.BackgroundTasks[0].Status)
+	assert.Equal(t, "sleep 30", input.BackgroundTasks[0].Description)
+	assert.Empty(t, input.BackgroundTasks[0].Command, "command is shell-only in the entry shape")
+}
+
+func TestClipHookTextBoundsAndMarksTheValue(t *testing.T) {
+	t.Parallel()
+
+	short := strings.Repeat("a", hookClipLimit)
+	assert.Equal(t, short, clipHookText(short), "a value at the bound is untouched")
+
+	long := strings.Repeat("a", hookClipLimit+40)
+	clipped := clipHookText(long)
+	assert.Contains(t, clipped, "… [+")
+	assert.LessOrEqual(t, len([]rune(clipped)), hookClipLimit)
+	assert.True(t, strings.HasPrefix(clipped, "aaa"))
+
+	multi := strings.Repeat("é", hookClipLimit+1)
+	assert.LessOrEqual(t, len([]rune(clipHookText(multi))), hookClipLimit)
+	assert.True(t, strings.HasPrefix(clipHookText(multi), "é"))
 }
 
 func TestRuntimeSubagentHooksAddContextAndContinueChild(t *testing.T) {
