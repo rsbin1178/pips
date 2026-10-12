@@ -233,7 +233,7 @@ func TestRouteTabHitResolvesTitlesAndScrolledOutBar(t *testing.T) {
 	hits := routeTabHits{
 		painted: true, columns: 20,
 		line: 1, windowStart: 0, windowRows: 3,
-		tabs: []routeTabHit{{start: 0, end: 6, tab: agentsTabRuns}, {start: 8, end: 15, tab: agentsTabLibrary}},
+		tabs: []routeTabHit{{start: 0, end: 6, tab: agentsTabRuns}, {start: 8, end: 15, tab: agentsTabAgents}},
 	}
 
 	tab, ok := hits.tabAt(1, 0)
@@ -241,7 +241,7 @@ func TestRouteTabHitResolvesTitlesAndScrolledOutBar(t *testing.T) {
 	assert.Equal(t, agentsTabRuns, tab)
 	tab, ok = hits.tabAt(1, 9)
 	require.True(t, ok)
-	assert.Equal(t, agentsTabLibrary, tab)
+	assert.Equal(t, agentsTabAgents, tab)
 	_, ok = hits.tabAt(1, 7)
 	assert.False(t, ok, "the gap between titles answers nothing")
 	_, ok = hits.tabAt(2, 0)

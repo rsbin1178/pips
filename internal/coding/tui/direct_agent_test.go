@@ -26,10 +26,10 @@ func TestAgentLibraryStartsSelectedProfileWithoutParentPrompt(t *testing.T) {
 	require.Equal(t, agentsTabRuns, model.route.agentsTab)
 	require.Len(t, model.route.agentLibrary, 1)
 
-	_, command := model.Update(tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
+	_, command := model.Update(tea.KeyPressMsg{Code: 'a', Mod: tea.ModCtrl})
 	require.Nil(t, command)
 	require.Equal(t, routeAgents, model.route.kind)
-	require.Equal(t, agentsTabLibrary, model.route.agentsTab)
+	require.Equal(t, agentsTabAgents, model.route.agentsTab)
 	require.Len(t, model.filteredAgentLibrary(), 1)
 	_, command = model.Update(key("enter"))
 	require.NoError(t, model.route.err)

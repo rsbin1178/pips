@@ -270,10 +270,10 @@ func TestPTYAgentsTabClick(t *testing.T) {
 	h := routeClickHarness(t, routeClickTabEnv, testName, 24, 100)
 	openRoutePTY(t, h, 100, 24, "/agents", "Agents · Runs")
 	// The Runs tab is the active one, so the bar paints it bracketed and the
-	// footer's "Ctrl+L Library" hint is the only other place "Library" appears.
+	// bar's "Agents" title is the other tab on that line.
 	bar := frameLineWith(h, 100, 24, "[Runs]")
-	require.Contains(t, bar, "Library", "the tab bar paints both titles:\n%s", h.frame(100, 24))
-	column := strings.Index(bar, "Library")
+	require.Contains(t, bar, "Agents", "the tab bar paints both titles:\n%s", h.frame(100, 24))
+	column := strings.Index(bar, "Agents")
 	row := -1
 	for index, line := range strings.Split(h.frame(100, 24), "\n") {
 		if line == bar {
@@ -287,7 +287,7 @@ func TestPTYAgentsTabClick(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		return h.screenMatches(100, 24, func(e *vt.Emulator) bool {
-			return strings.Contains(e.String(), "Agents · Library") &&
+			return strings.Contains(e.String(), "Agents · Definitions") &&
 				strings.Contains(e.String(), "LIB-ALPHA")
 		})
 	}, 30*time.Second, 10*time.Millisecond, "the clicked tab switches the view:\n%s", h.frame(100, 24))

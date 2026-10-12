@@ -132,14 +132,20 @@ type Model struct {
 	transcriptMode       transcriptModeState
 	transcriptHanded     bool // Escape hatch already wrote the rows to the main buffer.
 	frameHit             frameHitMap
-	history              historyState
-	notices              []noticeEntry
-	noticeSequence       uint64
-	scrollback           scrollbackCursor
-	scrollbackOutput     bool
-	streaming            streamProjection
-	renderWait           bool
-	renderDirty          bool
+	// tasksPane is the model-local tasks overlay, and tasksPaneHit is where the
+	// last painted pane sat.
+	tasksPane    tasksPane
+	tasksPaneHit tasksPaneHitMap
+	// subagentFrameHit is where the open child frame painted its close control.
+	subagentFrameHit subagentFrameCloseHit
+	history          historyState
+	notices          []noticeEntry
+	noticeSequence   uint64
+	scrollback       scrollbackCursor
+	scrollbackOutput bool
+	streaming        streamProjection
+	renderWait       bool
+	renderDirty      bool
 	// viewStable marks an update that did not change what the frame renders: a
 	// deferred delta the reader cannot see yet, or a delivery the subscription
 	// already owns and the operation iterator only repeats. View() then reuses the
@@ -453,9 +459,11 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if previousSessionID != m.state.SessionID {
 			m.stopTeamWorkerRouteSubscription()
 			m.resetTeamProjection(m.state.SessionID)
+			m.resetTasksPane()
 		}
 		m.childStates = cloneChildStates(message.observation.Children)
 		m.resetSubagentInteractions()
+		m.syncTasksPane(time.Now())
 		m.syncApprovalPrompt()
 		m.setLayout()
 		commit := m.commitStableTimeline()
@@ -1304,6 +1312,12 @@ func (m *Model) updateReadyKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if command, handled := m.updateTeamPanelKey(message); handled {
 		return m, command
 	}
+	// The tasks pane is an optional layer between the pickers and the reading
+	// surfaces: it is revealed and focused by one chord, and once focused it owns
+	// the frame's keys the way any other focused overlay does.
+	if model, command, handled := m.updateTasksPaneReadyKey(message); handled {
+		return model, command
+	}
 	// The find box owns the ready view's keys while it is open: it is a reading
 	// surface, so the composer, its history and the command picker stay untouched
 	// until it closes.
@@ -1455,6 +1469,14 @@ func (m *Model) readyView() tea.View {
 		}
 		footer = append(footer, activity)
 	}
+	// The tasks pane is a footer band above the prompt and the Composer, so it
+	// takes its rows from the transcript's elastic height instead of moving
+	// either of them.
+	tasksPaneIndex := -1
+	if pane := m.tasksPaneBand(time.Now()); pane != "" {
+		tasksPaneIndex = len(footer)
+		footer = append(footer, pane)
+	}
 	if prompt := m.promptView(); prompt != "" && !m.goalCommandPickerActive() {
 		// The band shares the Composer's text column, so its accent gutter lines
 		// up with the transcript's accented blocks instead of the frame edge.
@@ -1526,6 +1548,10 @@ func (m *Model) readyView() tea.View {
 	}
 	composerIndex := len(parts) + composerFooterIndex
 	bandIndex := len(parts) + bandFooterIndex
+	tasksPaneFrameIndex := -1
+	if tasksPaneIndex >= 0 {
+		tasksPaneFrameIndex = len(parts) + tasksPaneIndex
+	}
 	promptIndex := -1
 	if promptFooterIndex >= 0 {
 		promptIndex = len(parts) + promptFooterIndex
@@ -1555,6 +1581,7 @@ func (m *Model) readyView() tea.View {
 		composerTop:   frameRowOf(parts, composerIndex, dropped),
 		composerRows:  lipgloss.Height(footer[composerFooterIndex]),
 	}
+	m.tasksPaneHit.top = frameRowOf(parts, tasksPaneFrameIndex, dropped)
 	// presentationView installs the pointer handler for every frame, so the ready
 	// view only has to record where its transcript band sat.
 	view.Cursor = m.composer.Cursor()
@@ -1562,6 +1589,7 @@ func (m *Model) readyView() tea.View {
 		view.Cursor = m.search.input.Cursor()
 	}
 	if (m.prompt.kind != promptNone && !m.goalCommandPickerActive()) || m.pickerHidesComposerCursor() || m.teamPanel.isFocused ||
+		m.tasksPane.focused ||
 		(m.teamRouteIsInline() && (m.route.loading || !teamRouteInputStage(m.route.team.stage))) {
 		view.Cursor = nil
 	}
@@ -2456,7 +2484,7 @@ func (m *Model) toggleLatestTool() tea.Cmd {
 	blocks := projectTimeline(m.state)
 	for _, block := range slices.Backward(blocks) {
 		switch block.kind {
-		case blockTool:
+		case blockTool, blockSubagent:
 			if len(block.tools) > 0 && block.tools[0].childSessionID != "" {
 				return m.openSubagentRoute(block.tools[0].childSessionID)
 			}
@@ -2877,7 +2905,12 @@ func (m *Model) reduceStreamBatch(items []streamItem) {
 		m.stopTeamWorkerRouteSubscription()
 		m.resetTeamProjection(m.state.SessionID)
 		m.resetSubagentInteractions()
+		m.resetTasksPane()
 	}
+
+	// The tasks pane observes the projection the batch just advanced, so a child
+	// starting or stopping is what opens and closes it.
+	m.syncTasksPane(time.Now())
 
 	parent := false
 	for _, item := range valid {

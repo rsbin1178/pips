@@ -207,7 +207,8 @@ func (s *transcriptStore) newRecord(id string, entry transcriptEntry) transcript
 	s.renders++
 
 	record := transcriptRecord{id: id, live: entry.live, block: entry.block}
-	if entry.block.kind == blockTool && len(entry.block.tools) > 0 {
+	if (entry.block.kind == blockTool || entry.block.kind == blockSubagent) &&
+		len(entry.block.tools) > 0 {
 		tool := entry.block
 		record.tool = &tool
 	}

@@ -48,7 +48,45 @@ const (
 	activityLabelWaiting      = "Waiting for the model…"
 	activityLabelPaused       = "Paused…"
 	activityLabelInterrupting = "Interrupting…"
+	// activityLabelWaitingSubagent and activityLabelWaitingSubagents are the
+	// parent's own activity while a foreground child runs: the conversation is
+	// blocked on the child, so the row says so instead of restating the child's
+	// role, which the child's own row already carries.
+	activityLabelWaitingSubagent  = "Waiting for subagent…"
+	activityLabelWaitingSubagents = "Waiting for %d subagents…"
+	// activityLabelWaitingActivity is the per-child fallback when a live child
+	// has no semantic activity yet.
+	activityLabelWaitingActivity = "Waiting"
 )
+
+// activitySubjectLimit bounds one live activity subject: the first non-empty
+// line, clamped to forty characters.
+const activitySubjectLimit = 40
+
+// clampActivitySubject reduces free text to the one bounded subject line an
+// activity row may show: the first non-empty trimmed line, clamped to
+// activitySubjectLimit characters. It appends no ellipsis; the label that
+// presents the subject adds its own.
+func clampActivitySubject(value string) string {
+	subject := value
+	for line := range strings.SplitSeq(value, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" {
+			subject = trimmed
+
+			break
+		}
+	}
+
+	subject = strings.TrimSpace(subject)
+	runes := []rune(subject)
+
+	if len(runes) <= activitySubjectLimit {
+		return subject
+	}
+
+	return string(runes[:activitySubjectLimit])
+}
 
 // modelStallThreshold is how long an open turn may go without carrying any
 // model progress before the activity row says so. A gateway that buffers a
@@ -150,18 +188,49 @@ func (i activityIndicator) View(status activityStatus, theme colorTheme, noColor
 }
 
 func (m *Model) activityClockVisible() bool {
-	if m.parentActivitySurfaceVisible() {
-		if _, visible := m.activityStatus(); visible {
-			return true
-		}
+	return m.parentActivityStatusVisible() ||
+		m.routeStatusActivityVisible() || m.pickerBusy() || m.teamActivityVisible()
+}
+
+// parentActivityStatusVisible reports whether the conversation's own activity row
+// has something to show.
+func (m *Model) parentActivityStatusVisible() bool {
+	if !m.parentActivitySurfaceVisible() {
+		return false
 	}
 
+	_, visible := m.activityStatus()
+
+	return visible
+}
+
+// routeStatusActivityVisible groups the reading surfaces that report their own
+// load rather than the conversation's activity.
+func (m *Model) routeStatusActivityVisible() bool {
 	return m.routeActivityVisible() || m.promptActivityVisible() ||
-		m.picker.loading || m.picker.controlling ||
 		m.agentsRouteActivityVisible() || m.childRouteActivityVisible() ||
-		(m.teamPanelSurfaceVisible() && m.teamPanelRetryInFlight()) ||
-		m.teamTimelineActivityVisible() ||
-		(m.teamPanelSurfaceVisible() && m.teamPanelActivityVisible())
+		m.tasksPaneActivityVisible()
+}
+
+// pickerBusy reports whether a picker is loading or applying a control.
+func (m *Model) pickerBusy() bool {
+	return m.picker.loading || m.picker.controlling
+}
+
+// teamActivityVisible reports whether any Team surface is animating.
+func (m *Model) teamActivityVisible() bool {
+	if m.teamTimelineActivityVisible() {
+		return true
+	}
+
+	return m.teamPanelSurfaceVisible() &&
+		(m.teamPanelRetryInFlight() || m.teamPanelActivityVisible())
+}
+
+// tasksPaneActivityVisible reports whether the pane is showing a running child,
+// which is what keeps its spinner animating.
+func (m *Model) tasksPaneActivityVisible() bool {
+	return m.tasksPaneVisible() && m.tasksPaneRunning()
 }
 
 func (m *Model) parentActivitySurfaceVisible() bool {
@@ -462,25 +531,28 @@ func allExplorationActivities(activities []toolActivity) bool {
 	return len(activities) > 0
 }
 
-//nolint:wsl_v5 // Role and semantic detail form one compact live status.
+//nolint:wsl_v5 // The wait label and its one child detail form a compact status.
 func runningSubagentStatus(values []coding.SubagentState) activityStatus {
-	status := activityStatus{kind: activityTool, label: "Running subagent…"}
+	status := activityStatus{kind: activityTool, label: activityLabelWaitingSubagent}
+	foreground := 0
+	detailed := false
 	for _, value := range slices.Backward(values) {
 		if value.State != subagent.StateCreated && value.State != subagent.StateRunning {
 			continue
 		}
-
-		switch value.Role {
-		case subagent.RoleExplore:
-			status.label = activityLabelExploring
-		case subagent.RolePlan:
-			status.label = "Planning…"
-		case subagent.RoleReview:
-			status.label = "Reviewing…"
+		// A background child does not block the conversation; only a foreground
+		// one makes the parent wait, which is what this row reports.
+		if value.Delivery == subagent.DeliveryBackground {
+			continue
 		}
-		status.detail = subagentActivitySummary(value.Activity)
-
-		return status
+		foreground++
+		if !detailed {
+			status.detail = subagentActivitySummary(value.Activity)
+			detailed = true
+		}
+	}
+	if foreground > 1 {
+		status.label = fmt.Sprintf(activityLabelWaitingSubagents, foreground)
 	}
 
 	return status

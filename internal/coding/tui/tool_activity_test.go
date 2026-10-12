@@ -382,7 +382,7 @@ func TestTimelineRendersGenericCallAndBoundedResult(t *testing.T) {
 	assert.Contains(t, rendered, "No search results found.")
 }
 
-func TestTimelineReconstructsDurableSubagentToolActivity(t *testing.T) {
+func TestTimelineReconstructsDurableSubagentLifecycleRow(t *testing.T) {
 	t.Parallel()
 
 	result := ai.ToolResultText(
@@ -405,8 +405,9 @@ func TestTimelineReconstructsDurableSubagentToolActivity(t *testing.T) {
 		themeDark,
 		true,
 	)
-	assert.Contains(t, rendered, "• Explored Audit the Tool presentation paths")
-	assert.Contains(t, rendered, "Completed in 23s · 8 tools · 1.5k tokens")
+	// The durable envelope is the only evidence here, so the row is built from
+	// the recovered child state and the call's own description.
+	assert.Contains(t, rendered, "• Subagent completed in 23s: “audit”")
 	assert.NotContains(t, rendered, subagent.ToolName)
 	assert.NotContains(t, rendered, "child-1")
 }

@@ -30,14 +30,16 @@ const (
 	genericSubagentLabel        = "child Agent"
 )
 
-// agentsRouteTab keeps the definition Library separate from durable child
-// Runs. A definition is declarative metadata; a run is a persisted execution
-// snapshot, so conflating them would make historical authority ambiguous.
+// agentsRouteTab keeps the Agent definition catalog separate from durable
+// child Runs. A definition is declarative metadata; a run is a persisted
+// execution snapshot, so conflating them would make historical authority
+// ambiguous. The definition tab is named "Agents" because that is what it
+// lists; Runs is the run browser the same route also owns.
 type agentsRouteTab uint8
 
 const (
 	agentsTabRuns agentsRouteTab = iota
-	agentsTabLibrary
+	agentsTabAgents
 )
 
 // agentsRouteTabLine is the content line the tab row is drawn on, beneath the
@@ -50,12 +52,12 @@ const (
 )
 
 func agentsRouteTabs() []agentsRouteTab {
-	return []agentsRouteTab{agentsTabRuns, agentsTabLibrary}
+	return []agentsRouteTab{agentsTabRuns, agentsTabAgents}
 }
 
 func (tab agentsRouteTab) title() string {
-	if tab == agentsTabLibrary {
-		return "Library"
+	if tab == agentsTabAgents {
+		return "Agents"
 	}
 
 	return "Runs"
@@ -273,8 +275,8 @@ func (m *Model) updateAgentsRouteKey(message tea.KeyPressMsg) (tea.Model, tea.Cm
 	if m.route.loading {
 		return m, nil
 	}
-	if key := message.String(); key == "ctrl+l" {
-		m.selectAgentsRouteTab(agentsTabLibrary)
+	if key := message.String(); key == "ctrl+a" {
+		m.selectAgentsRouteTab(agentsTabAgents)
 
 		return m, nil
 	} else if key == "ctrl+r" {
@@ -282,7 +284,7 @@ func (m *Model) updateAgentsRouteKey(message tea.KeyPressMsg) (tea.Model, tea.Cm
 
 		return m, nil
 	}
-	if m.route.agentsTab == agentsTabLibrary {
+	if m.route.agentsTab == agentsTabAgents {
 		return m.updateAgentLibraryRouteKey(message)
 	}
 
@@ -454,7 +456,7 @@ func (m *Model) filteredAgentLibrary() []coding.AgentLibraryEntry {
 	return values
 }
 
-// agentsRouteTabBar draws the Runs/Library switch beneath the title line, with the
+// agentsRouteTabBar draws the Runs/Agents switch beneath the title line, with the
 // active tab emphasized. Under NO_COLOR the active tab is bracketed so the
 // selection survives without styling, and the bar is fitted to the width.
 func (m *Model) agentsRouteTabBar(width int) string {
@@ -499,8 +501,8 @@ func (m *Model) agentsRouteContent() string {
 // painted line count, so the pointer map measures the same rows the frame paints.
 func (m *Model) agentsRouteContentWithRows() (string, []int) {
 	title := "Agents · Runs"
-	if m.route.agentsTab == agentsTabLibrary {
-		title = "Agents · Library"
+	if m.route.agentsTab == agentsTabAgents {
+		title = "Agents · Definitions"
 	}
 	lines := []string{
 		title, m.agentsRouteTabBar(max(1, m.width)), "", "Search: " + m.route.query, "",
@@ -508,7 +510,7 @@ func (m *Model) agentsRouteContentWithRows() (string, []int) {
 	if m.route.loading {
 		return strings.Join(append(lines, m.activityNotice("Loading…")), "\n"), nil
 	}
-	if m.route.agentsTab == agentsTabLibrary {
+	if m.route.agentsTab == agentsTabAgents {
 		return m.agentLibraryRouteContent(lines)
 	}
 
@@ -535,7 +537,7 @@ func (m *Model) agentsRouteContentWithRows() (string, []int) {
 		}
 		lines = append(lines, "", m.activityNotice(label))
 	}
-	lines = append(lines, "", wheelHintNavigation+" · type to search · Enter inspect · c interrupt · Ctrl+L Library · Ctrl+R Runs · Ctrl+T/Esc close")
+	lines = append(lines, "", wheelHintNavigation+" · type to search · Enter inspect · c interrupt · Ctrl+A Agents · Ctrl+R Runs · Ctrl+T/Esc close")
 
 	return strings.Join(lines, "\n"), heights
 }
@@ -558,7 +560,7 @@ func (m *Model) agentLibraryRouteContent(lines []string) (string, []int) {
 	lines = append(lines,
 		"",
 		"Declared capabilities are intersected with active session authority at launch.",
-		"↑/↓ choose · "+wheelHintNavigation+" · Enter run · type to search · Ctrl+L Library · Ctrl+R Runs · Ctrl+T/Esc close",
+		"↑/↓ choose · "+wheelHintNavigation+" · Enter run · type to search · Ctrl+A Agents · Ctrl+R Runs · Ctrl+T/Esc close",
 	)
 
 	return strings.Join(lines, "\n"), heights
@@ -1131,47 +1133,98 @@ func (m *Model) agentsRouteTabHitMap(windowStart, windowRows, width int) routeTa
 func (m *Model) updateSubagentRouteKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := message.String()
 
+	// Ctrl+Q is the one chord the child view never owns: it bubbles so the
+	// conversation's own quit handling decides.
+	if key == keyCtrlQ {
+		return m, tea.Quit
+	}
+
+	// The read-only transcript view owns a different key set from the Team
+	// Worker route, which keeps an editable composer.
+	if m.route.childKind != childTeamWorker {
+		if model, command, handled := m.updateChildTranscriptKey(key); handled {
+			return model, command
+		}
+	}
+
 	switch key {
-	case keyCtrlT, keyCtrlC:
+	case keyCtrlT:
+		return m, m.closeRouteToParent()
+	case keyCtrlC:
+		// Only the Team Worker route reaches this; the transcript view answered
+		// above, and a Worker interrupts with Ctrl+X.
 		return m, m.closeRouteToParent()
 	case keyEscape:
-		if m.route.childKind == childTeamWorker {
-			if m.composer.Value() != "" {
-				m.composer.Reset()
-				m.setLayout()
-
-				return m, nil
-			}
-			if len(m.route.children) == 0 {
-				return m, m.closeRouteToParent()
-			}
-		}
-		m.stopTeamWorkerRouteSubscription()
-		if len(m.route.children) > 0 {
-			m.route.kind = routeAgents
-			m.route.loading = false
-			m.route.err = nil
-			m.route.offset = 0
-			m.route.childSessionID = ""
-			m.route.childSummary = childSummary{}
-			m.route.detail = nil
-			m.route.childState = nil
-			m.route.refreshing = false
-			m.route.refreshPending = false
-			m.route.refreshErr = nil
-
-			return m, nil
-		}
-
-		return m, m.openAgentsRoute()
+		return m.updateSubagentRouteEscapeKey()
 	}
 	if m.route.childKind == childTeamWorker {
 		return m.updateTeamWorkerComposerKey(message)
 	}
-	if key == "c" && !m.route.controlling {
-		return m, m.cancelChild(m.route.childSummary)
+	if key == "c" {
+		return m, m.cancelRouteChild()
+	}
+	m.scrollSubagentRoute(key)
+
+	return m, nil
+}
+
+// updateChildTranscriptKey drives the read-only transcript view's own keys: it
+// closes through the one close function, and Ctrl+C interrupts the child, which
+// is the only turn that surface can reach.
+func (m *Model) updateChildTranscriptKey(key string) (tea.Model, tea.Cmd, bool) {
+	switch key {
+	case "q":
+		return m, m.closeRouteToParent(), true
+	case keyCtrlC:
+		return m, m.cancelRouteChild(), true
 	}
 
+	return m, nil, false
+}
+
+// updateSubagentRouteEscapeKey walks the child route's Escape ladder: a Worker
+// clears its draft first, then either kind returns to the Agent list when there
+// is one to return to, and closes to the conversation when there is not.
+func (m *Model) updateSubagentRouteEscapeKey() (tea.Model, tea.Cmd) {
+	if m.route.childKind == childTeamWorker {
+		if m.composer.Value() != "" {
+			m.composer.Reset()
+			m.setLayout()
+
+			return m, nil
+		}
+		if len(m.route.children) == 0 {
+			return m, m.closeRouteToParent()
+		}
+	}
+	m.stopTeamWorkerRouteSubscription()
+	if len(m.route.children) > 0 {
+		m.returnSubagentRouteToAgentList()
+
+		return m, nil
+	}
+
+	return m, m.openAgentsRoute()
+}
+
+// returnSubagentRouteToAgentList hands the frame back to the Agent list while
+// dropping the child view it was showing.
+func (m *Model) returnSubagentRouteToAgentList() {
+	m.route.kind = routeAgents
+	m.route.loading = false
+	m.route.err = nil
+	m.route.offset = 0
+	m.route.childSessionID = ""
+	m.route.childSummary = childSummary{}
+	m.route.detail = nil
+	m.route.childState = nil
+	m.route.refreshing = false
+	m.route.refreshPending = false
+	m.route.refreshErr = nil
+}
+
+// scrollSubagentRoute applies the child transcript's scrolling keys.
+func (m *Model) scrollSubagentRoute(key string) {
 	visible := max(1, m.height-3)
 	maximum := m.subagentRouteMaximumOffset()
 
@@ -1189,8 +1242,6 @@ func (m *Model) updateSubagentRouteKey(message tea.KeyPressMsg) (tea.Model, tea.
 	case keyEnd:
 		m.route.offset = maximum
 	}
-
-	return m, nil
 }
 
 func (m *Model) updateTeamWorkerComposerKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -1284,6 +1335,19 @@ func (m *Model) cancelChild(value childSummary) tea.Cmd {
 	return m.cancelSubagent(value.childSessionID)
 }
 
+// cancelRouteChild interrupts the child the open route is showing. The route
+// owns its child session id, so the interrupt does not depend on a summary
+// surviving the way in.
+func (m *Model) cancelRouteChild() tea.Cmd {
+	if m.route.controlling || m.route.childSessionID == "" {
+		return nil
+	}
+	m.route.controllingChildKind = childSubagent
+	m.route.controllingChildSet = true
+
+	return m.cancelSubagent(m.route.childSessionID)
+}
+
 func (m *Model) cancelSubagent(childSessionID string) tea.Cmd {
 	activityWasVisible := m.activityClockVisible()
 	m.route.controlling = true
@@ -1300,9 +1364,16 @@ func (m *Model) cancelSubagent(childSessionID string) tea.Cmd {
 }
 
 func (m *Model) subagentRouteView() tea.View {
-	width := max(1, m.width)
-	height := max(1, m.height)
+	if m.route.childKind == childTeamWorker {
+		return m.teamWorkerRouteView()
+	}
 
+	return m.subagentTranscriptRouteView()
+}
+
+// subagentRouteBody renders whichever region the open child route shows: its
+// live activity placeholder, its own transcript, or the failure that replaced it.
+func (m *Model) subagentRouteBody() string {
 	body := "Child activity unavailable."
 	switch {
 	case m.route.controlling:
@@ -1324,11 +1395,20 @@ func (m *Model) subagentRouteView() tea.View {
 	if m.route.err != nil {
 		body += "\n\nError: " + m.safeChildRouteError(m.route.err)
 	}
-
 	if m.route.refreshErr != nil {
 		body += "\n\nRefresh: " + m.safeChildRouteError(m.route.refreshErr)
 	}
 
+	return body
+}
+
+// teamWorkerRouteView keeps the Worker route's editable composer: a Worker
+// accepts messages, so it needs the input box and its caret.
+func (m *Model) teamWorkerRouteView() tea.View {
+	width := max(1, m.width)
+	height := max(1, m.height)
+
+	body := m.subagentRouteBody()
 	footer := m.subagentRouteFooter(width)
 	bodyHeight := max(0, height-lipgloss.Height(footer))
 
@@ -1340,7 +1420,7 @@ func (m *Model) subagentRouteView() tea.View {
 	}
 
 	view := m.presentationView(lipgloss.JoinVertical(lipgloss.Left, body, footer))
-	if m.route.childKind == childTeamWorker && !m.route.controlling {
+	if !m.route.controlling {
 		view.Cursor = m.composer.Cursor()
 		if view.Cursor != nil {
 			cursorX, cursorY := m.composerBoxCursorOffset()
@@ -1350,6 +1430,203 @@ func (m *Model) subagentRouteView() tea.View {
 	}
 
 	return view
+}
+
+// subagentTranscriptRouteView draws the read-only child transcript inside a
+// bordered frame. The frame's title row carries the child's identity, its live
+// activity, its elapsed time, and the [✗] close button; the child has no
+// composer, so the frame is the whole surface.
+func (m *Model) subagentTranscriptRouteView() tea.View {
+	width := max(1, m.width)
+	height := max(1, m.height)
+
+	innerWidth := m.subagentTranscriptInnerWidth()
+	innerHeight := max(0, frameInnerHeight(height))
+	bodyHeight := m.subagentTranscriptBodyHeight()
+	footer := m.subagentRouteStatusLine()
+	footer = truncateHeight(footer, min(innerHeight, lipgloss.Height(footer)))
+
+	title := m.subagentFrameTitle(innerWidth)
+	body := renderSubagentRouteBody(
+		m.subagentRouteBody(), innerWidth, bodyHeight, m.route.offset,
+	)
+	if padding := bodyHeight - lipgloss.Height(body); padding > 0 {
+		body += strings.Repeat("\n", padding)
+	}
+
+	inner := lipgloss.JoinVertical(lipgloss.Left, title, body, footer)
+	m.recordSubagentFrameClose(innerWidth)
+
+	return m.presentationView(m.renderFramed(inner, width))
+}
+
+// recordSubagentFrameClose stores where the frame painted its close control, in
+// frame coordinates: the title row sits under the top border, and the interior
+// starts one column in from the left border.
+func (m *Model) recordSubagentFrameClose(innerWidth int) {
+	start, end := subagentFrameCloseSpan(innerWidth)
+	m.subagentFrameHit = subagentFrameCloseHit{
+		painted: true, row: 1, start: 1 + start, end: 1 + end,
+	}
+}
+
+// subagentTranscriptInnerWidth and subagentTranscriptBodyHeight report the
+// interior the bordered child frame leaves for the transcript, so the scroll
+// window measures the same region the frame paints. The frame gives up two
+// columns and two rows to its border, and one row to the title line.
+func (m *Model) subagentTranscriptInnerWidth() int {
+	return max(1, frameInnerWidth(max(1, m.width)))
+}
+
+func (m *Model) subagentTranscriptBodyHeight() int {
+	innerHeight := max(0, frameInnerHeight(max(1, m.height)))
+	footer := m.subagentRouteStatusLine()
+	footer = truncateHeight(footer, min(innerHeight, lipgloss.Height(footer)))
+	title := m.subagentFrameTitle(m.subagentTranscriptInnerWidth())
+
+	return max(0, innerHeight-lipgloss.Height(title)-lipgloss.Height(footer))
+}
+
+// subagentFrameTitle is the frame's first interior row: the child's state glyph,
+// its label, its quoted task, its live activity, and its elapsed time. Parts are
+// dropped from the right as the frame narrows, so the identity survives.
+func (m *Model) subagentFrameTitle(width int) string {
+	width = max(1, width)
+
+	summary := m.subagentRouteSummaryState()
+	label := subagentDisplayName(summary.Identity, summary.Role)
+	parts := []string{m.subagentFrameGlyph(summary.State) + " " + label}
+	if description := oneLineSubagentTask(summary.TaskPreview); description != "" {
+		parts = append(parts, quotedSubagentDescription(description, 48))
+	}
+	if activity := m.childRouteActivityLabel(); activity != "" {
+		parts = append(parts, activity)
+	}
+	if summary.Duration > 0 || isTerminalSubagent(summary.State) {
+		parts = append(parts, formatInteractionDuration(summary.Duration.Milliseconds()))
+	}
+
+	button := subagentFrameClose
+	start, end := subagentFrameCloseSpan(width)
+	available := start
+	text := ""
+	for len(parts) > 0 {
+		candidate := strings.Join(parts, " · ")
+		if ansi.StringWidth(candidate) <= available {
+			text = candidate
+
+			break
+		}
+		parts = parts[:len(parts)-1]
+	}
+	// The frame can be too narrow for anything but the close button; the label
+	// then shares the row and is trimmed to what is left.
+	if text == "" {
+		text = ansi.Truncate(label, available, "…")
+	}
+
+	row := text + strings.Repeat(" ", max(0, available-ansi.StringWidth(text))) + button
+	row += strings.Repeat(" ", max(0, end-ansi.StringWidth(row)))
+
+	return ansi.Truncate(row, width, "…")
+}
+
+// subagentFrameCloseSpan reports the columns the frame's close control occupies
+// inside the interior, so the renderer and the pointer map cannot disagree about
+// where the button is.
+func subagentFrameCloseSpan(innerWidth int) (int, int) {
+	innerWidth = max(1, innerWidth)
+	start := max(0, innerWidth-ansi.StringWidth(subagentFrameClose)-1)
+
+	return start, min(innerWidth, start+ansi.StringWidth(subagentFrameClose))
+}
+
+// subagentFrameCloseHit records the close control the child frame painted, so a
+// click on it closes through the same function the keys use.
+type subagentFrameCloseHit struct {
+	painted bool
+	row     int
+	start   int
+	end     int
+}
+
+// subagentFrameMouse answers a click on the child frame's close control. It owns
+// only that control: every other gesture belongs to the transcript the frame
+// shows.
+func (m *Model) subagentFrameMouse(message tea.MouseMsg) (tea.Cmd, bool) {
+	click, ok := message.(tea.MouseClickMsg)
+	if !ok || click.Button != tea.MouseLeft || !m.subagentFrameHit.painted {
+		return nil, false
+	}
+	if click.Y != m.subagentFrameHit.row ||
+		click.X < m.subagentFrameHit.start || click.X >= m.subagentFrameHit.end {
+		return nil, false
+	}
+
+	return m.closeRouteToParent(), true
+}
+
+// subagentFrameGlyph is the title row's state mark: the animated spinner while
+// the child runs, and a settled mark once it stops.
+func (m *Model) subagentFrameGlyph(state subagent.State) string {
+	switch state {
+	case subagent.StateCreated, subagent.StateRunning:
+		return m.activity.Frame()
+	case subagent.StateSucceeded:
+		return toolActivityGlyph(toolStateSucceeded)
+	case subagent.StateFailed:
+		return toolActivityGlyph(toolStateFailed)
+	case subagent.StateCanceled, subagent.StateInterrupted:
+		return toolActivityGlyph(toolStateInterrupted)
+	}
+
+	return m.activity.Frame()
+}
+
+// childRouteActivityLabel is the open child's own live activity, derived through
+// the same activity model every other surface uses. A settled child reports none.
+func (m *Model) childRouteActivityLabel() string {
+	if m.route.childState == nil || isTerminalSubagent(m.subagentRouteSummaryState().State) {
+		return ""
+	}
+	status, visible := resolveActivity(activityContext{state: *m.route.childState})
+	if !visible {
+		return ""
+	}
+	if status.detail == "" {
+		return status.label
+	}
+
+	return status.label + " " + status.detail
+}
+
+// renderFramed wraps one interior block in the child frame's border. The frame's
+// bounding box is exactly the requested width and the interior's height, which
+// is what keeps the route inside the terminal.
+func (m *Model) renderFramed(inner string, width int) string {
+	border := lipgloss.RoundedBorder()
+	if m.options.NoColor {
+		border = lipgloss.NormalBorder()
+	}
+
+	style := lipgloss.NewStyle().
+		Width(max(1, width)).
+		Border(border, true, true, true, true)
+	if !m.options.NoColor {
+		style = style.BorderForeground(paletteFor(m.theme).separator)
+	}
+
+	return style.Render(inner)
+}
+
+// frameInnerWidth and frameInnerHeight report the interior a full-width frame
+// leaves, so a route sizes its content to the border it will be drawn inside.
+func frameInnerWidth(width int) int {
+	return width - 2
+}
+
+func frameInnerHeight(height int) int {
+	return height - 2
 }
 
 func (m *Model) subagentRouteStatusLine() string {
@@ -1396,10 +1673,11 @@ func (m *Model) subagentRouteStatusLine() string {
 // row on its own.
 func (m *Model) subagentRouteHintLine() string {
 	hints := [][]string{
-		{detailHintScrollFull, subagentHintInterrupt, subagentHintParent, subagentHintAgents},
-		{"↑/↓ scroll", subagentHintInterrupt, subagentHintParent, subagentHintAgents},
-		{"↑/↓", subagentHintInterrupt, subagentHintParent, subagentHintAgents},
-		{subagentHintInterrupt, subagentHintParent, subagentHintAgents},
+		{detailHintScrollFull, subagentHintClose, subagentHintInterrupt, subagentHintParent, subagentHintAgents},
+		{"↑/↓ scroll", subagentHintClose, subagentHintInterrupt, subagentHintParent, subagentHintAgents},
+		{"↑/↓", subagentHintClose, subagentHintInterrupt, subagentHintParent, subagentHintAgents},
+		{subagentHintClose, subagentHintInterrupt, subagentHintParent, subagentHintAgents},
+		{subagentHintClose, subagentHintParent, subagentHintAgents},
 		{subagentHintParent, subagentHintAgents},
 	}
 	if isTerminalSubagent(m.subagentRouteSummaryState().State) {
@@ -1450,9 +1728,12 @@ func (m *Model) subagentRouteSummaryState() subagent.Summary {
 }
 
 const (
-	subagentHintInterrupt = "c interrupt"
+	subagentHintInterrupt = "Ctrl+C interrupt"
+	subagentHintClose     = "q close"
 	subagentHintParent    = "Ctrl+T parent"
 	subagentHintAgents    = "Esc agents"
+	// subagentFrameClose is the close control the frame's title row carries.
+	subagentFrameClose = "[✗]"
 )
 
 func subagentStateLabel(state subagent.State) string {
@@ -1523,6 +1804,7 @@ func (m *Model) activateChildRoute(request routeOpenRequest) tea.Cmd {
 
 func (m *Model) activateSubagentRoute(request routeOpenRequest) tea.Cmd {
 	activityWasVisible := m.activityClockVisible()
+	m.subagentFrameHit = subagentFrameCloseHit{}
 	m.routeSeq++
 	m.route = routeState{
 		kind: routeChild, loading: true, generation: m.routeSeq,
@@ -1646,13 +1928,17 @@ func (m *Model) subagentRouteScrollContent() ([]string, int) {
 		return nil, 1
 	}
 
-	visible := max(1, m.height-lipgloss.Height(m.subagentRouteFooter(m.width)))
-	content := m.subagentRouteContent(*m.route.childState, m.route.detail)
 	if m.route.childKind == childTeamWorker {
-		content = m.teamWorkerRouteContent(*m.route.childState, m.route.childSummary)
+		visible := max(1, m.height-lipgloss.Height(m.subagentRouteFooter(m.width)))
+		content := m.teamWorkerRouteContent(*m.route.childState, m.route.childSummary)
+
+		return wrapPlainLines(content, max(1, m.width)), visible
 	}
 
-	return wrapPlainLines(content, max(1, m.width)), visible
+	// The transcript route wraps inside the bordered frame, so its window is
+	// measured against the interior the frame paints rather than the terminal.
+	return wrapPlainLines(m.subagentRouteBody(), m.subagentTranscriptInnerWidth()),
+		max(1, m.subagentTranscriptBodyHeight())
 }
 
 // renderSubagentRouteBody wraps each body row to the frame width with a

@@ -11,6 +11,7 @@ import (
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding"
 	"github.com/rsbin1178/pips/internal/coding/config"
+	"github.com/rsbin1178/pips/internal/coding/subagent"
 )
 
 // scrollbackCursor separates immutable conversation history from the live
@@ -26,6 +27,13 @@ type scrollbackCursor struct {
 	changes      projectionFingerprint
 	lastError    projectionFingerprint
 	streamError  string
+	// subagentStarted records the description each spawn committed with its
+	// opening row, keyed by child session; subagentTerminal records the children
+	// that already committed a separate terminal row. A background child produces
+	// both rows; a foreground child produces only the terminal one, because its
+	// opening row is held until the child settles.
+	subagentStarted  map[string]string
+	subagentTerminal map[string]struct{}
 }
 
 type projectionFingerprint [sha256.Size]byte
@@ -199,7 +207,9 @@ func (m *Model) takeStableTimelineBlocks() []timelineBlock {
 
 	for _, block := range blocks {
 		m.markToolActivitiesCommitted(block)
+		m.markSubagentLifecycleCommitted(block)
 	}
+	blocks = append(blocks, m.takeSubagentTerminalBlocks()...)
 	blocks = append(blocks, m.takeStableTeamAttemptBlocks()...)
 	for index := m.scrollback.tools; index < stableTools; index++ {
 		m.markToolIDCommitted(m.state.Tools[index].Call.ID)
@@ -410,6 +420,16 @@ func (m *Model) holdCompletedSubagentTool(tool coding.ToolState) bool {
 		if (child.ParentToolCallID != "" && child.ParentToolCallID == tool.Call.ID) ||
 			(child.ParentToolCallID == "" && tool.RunID != "" &&
 				child.ParentRunID == tool.RunID) {
+			// A background child does not hold the parent transcript. Its opening
+			// row commits as soon as the spawn call returns, and the child's
+			// terminal row is appended later as its own line — the two-row shape
+			// the source gives a background spawn. A foreground child holds its
+			// row until it settles so the spawn commits exactly once, in its
+			// terminal form, which is the source's in-place shape.
+			if child.Delivery == subagent.DeliveryBackground {
+				return false
+			}
+
 			return !isTerminalSubagent(child.State)
 		}
 	}
@@ -604,6 +624,78 @@ func (m *Model) markToolIDCommitted(id string) {
 	}
 
 	m.scrollback.toolIDs[id] = struct{}{}
+}
+
+// markSubagentLifecycleCommitted records which half of a spawn's lifecycle the
+// committed row covered, so a background child's terminal row is appended once,
+// with the same description its opening row used.
+func (m *Model) markSubagentLifecycleCommitted(block timelineBlock) {
+	row := block.subagent
+	if row == nil || row.childSessionID == "" {
+		return
+	}
+	if row.started() {
+		if m.scrollback.subagentStarted == nil {
+			m.scrollback.subagentStarted = make(map[string]string)
+		}
+		m.scrollback.subagentStarted[row.childSessionID] = row.description
+
+		return
+	}
+	if m.scrollback.subagentTerminal == nil {
+		m.scrollback.subagentTerminal = make(map[string]struct{})
+	}
+	m.scrollback.subagentTerminal[row.childSessionID] = struct{}{}
+}
+
+// takeSubagentTerminalBlocks appends the separate terminal row a background
+// child's spawn leaves behind. Only a child whose opening row was already
+// committed in this projection qualifies, so replaying a session whose child was
+// already finished renders one row rather than two.
+func (m *Model) takeSubagentTerminalBlocks() []timelineBlock {
+	if visibleDraftText(m.state.Draft) != "" {
+		return nil
+	}
+
+	blocks := make([]timelineBlock, 0, 1)
+	for _, value := range m.state.Subagents {
+		if value.ChildSessionID == "" || value.Delivery != subagent.DeliveryBackground ||
+			!isTerminalSubagent(value.State) {
+			continue
+		}
+		if _, started := m.scrollback.subagentStarted[value.ChildSessionID]; !started {
+			continue
+		}
+		if _, committed := m.scrollback.subagentTerminal[value.ChildSessionID]; committed {
+			continue
+		}
+		if m.scrollback.subagentTerminal == nil {
+			m.scrollback.subagentTerminal = make(map[string]struct{})
+		}
+		m.scrollback.subagentTerminal[value.ChildSessionID] = struct{}{}
+		description := m.scrollback.subagentStarted[value.ChildSessionID]
+		if description == "" {
+			description = oneLineSubagentTask(value.TaskPreview)
+		}
+		row := subagentLifecycleRow{
+			childSessionID: value.ChildSessionID,
+			description:    description,
+			identity:       value.Identity,
+			role:           value.Role,
+			model:          value.Model,
+			state:          value.State,
+			durationMillis: value.DurationMillis,
+			code:           value.Code,
+			background:     true,
+		}
+		blocks = append(blocks, timelineBlock{
+			kind:     blockSubagent,
+			subagent: &row,
+			tools:    []toolActivity{{childSessionID: value.ChildSessionID}},
+		})
+	}
+
+	return blocks
 }
 
 func (m *Model) reconcileScrollback() {

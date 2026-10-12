@@ -85,7 +85,7 @@ Dynamic Subagent 是 Coding Agent 应用层能力：定义发现/编译、child 
 - 分类：实时 Provider、交互终端、默认开启。变更等级：本地持久状态；可能产生费用。
 - 前置条件：两个 custom profiles 分别允许 foreground/background；parent model 能调用相应工具。
 - 隔离夹具：background child 等待一个可控制的测试点，不执行外部副作用。
-- 步骤：要求 parent 前台调用一个 child 并等待结果；再启动 background child；打开 `/agents` 的 Runs，查看进度/详情；对 background child 执行 inspect、wait、follow-up、interrupt/cancel 中适用动作；用 Ctrl+L/Library 直接启动 user-visible profile，再 Ctrl+R 返回 Runs。
+- 步骤：要求 parent 前台调用一个 child 并等待结果；再启动 background child；打开 `/agents` 的 Runs，查看进度/详情；对 background child 执行 inspect、wait、follow-up、interrupt/cancel 中适用动作；用 Ctrl+A/Agents 直接启动 user-visible profile，再 Ctrl+R 返回 Runs。
 - 预期证据：`spawn_subagent` 以 `run_in_background: false` 串行等待并返回结果 envelope 与 `<subagent_meta>` 文本；默认（`run_in_background` 省略或为 `true`）立即返回 stable child id，完成通知 durable 且恰一次；控制明确指向 child，approval/question 只解决该 child；parent/sibling 不受影响；敏感 task/result/reasoning 不进 compact timeline。
 - 通过条件：ownership、delivery、通知与控制作用域均准确，取消后 child 终态稳定。
 - 失败条件：background 阻塞 parent、通知丢失/重复、控制错 child、child prompt 泄露、或 parent 自动批准。

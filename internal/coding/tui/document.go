@@ -78,6 +78,8 @@ func markdownBlock(block timelineBlock) string {
 		return markdownSection(markdownHeading("Team", block.title), block.body)
 	case blockTool:
 		return markdownToolSection(block)
+	case blockSubagent:
+		return markdownSubagentSection(block)
 	case blockChange:
 		return markdownSection("Changes", markdownWorkspaceChange(block))
 	default:
@@ -131,6 +133,27 @@ func markdownToolSection(block timelineBlock) string {
 
 	return markdownSection("Tool", strings.Join(entries, "\n\n"))
 }
+
+// markdownSubagentSection exports one spawn as the lifecycle row the transcript
+// shows, without the glyph styling. It falls back to the ordinary Tool section
+// when the block carries no lifecycle row.
+func markdownSubagentSection(block timelineBlock) string {
+	row := block.subagent
+	if row == nil {
+		return markdownToolSection(block)
+	}
+
+	line := strings.TrimSpace(sanitizeInspectionText(subagentLifecycleText(*row, markdownToolLineWidth)))
+	if line == "" {
+		return ""
+	}
+
+	return markdownSection("Subagent", line)
+}
+
+// markdownToolLineWidth is the nominal width an exported lifecycle row is
+// truncated at; the document has no frame to measure against.
+const markdownToolLineWidth = 200
 
 func markdownToolCall(activity toolActivity) string {
 	invocation := strings.TrimSpace(sanitizeInspectionText(activity.invocation))
