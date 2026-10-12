@@ -351,6 +351,7 @@ func summaryFrom(meta session.Metadata, value record) Summary {
 		ChildSessionID: meta.ID,
 		Ownership:      executionOwnership(value),
 		Delivery:       value.Delivery,
+		Wake:           value.Wake,
 		Identity:       value.Identity,
 		Role:           value.Role,
 		State:          value.State,

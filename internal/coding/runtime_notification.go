@@ -57,6 +57,11 @@ func (r *Runtime) recoverAgentNotifications(ctx context.Context) error {
 			!terminalSubagentState(summary.State) {
 			continue
 		}
+		// A wake's terminal result was never surfaced, so recovery must not
+		// resurrect it as a completion notification after a restart.
+		if summary.Wake {
+			continue
+		}
 
 		known, knownErr := r.notifications.Contains(summary.ChildSessionID)
 		if knownErr != nil {

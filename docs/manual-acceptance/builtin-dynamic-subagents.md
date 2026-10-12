@@ -204,6 +204,43 @@ Dynamic Subagent 是 Coding Agent 应用层能力：定义发现/编译、child 
 - 来源/测试锚点：[load.go](../../internal/coding/config/load.go)、[config.go](../../internal/coding/config/config.go)、[cli/config.go](../../internal/coding/cli/config.go)、[subagents_dispatch.go](../../internal/coding/subagent_dispatch.go)、[dynamic_subagent_test.go](../../internal/coding/dynamic_subagent_test.go)、[load_test.go](../../internal/coding/config/load_test.go)。
 - 结果：`未执行`。
 
+## MA-SUB-013：子代理消息与唤醒（`active_agent_messages`）
+
+- 分类：本地确定性 + 实时 Provider。变更等级：可能产生费用。仅在消息面开启时适用。
+- 前置条件：配置文件或环境打开消息面：
+
+  ```toml
+  active_agent_messages = true
+  ```
+
+- 步骤：
+
+  ```bash
+  pips config show
+  PIPS_ACTIVE_AGENT_MESSAGES=true pips config show
+  ```
+
+  随后在一个会话里依次：(1) 前台委派一个 `general-purpose` 子代理并让它完成，记下它的
+  `subagent_id`；(2) 再委派第二个 `general-purpose` 子代理，让它对该 id 调用
+  `send_subagent_message`（默认 `delivery: steer`）；(3) 由对话本身对第一个子代理的 id 调用
+  `send_subagent_message`；用 `/agents` 的 Runs 页签与任务条观察被唤醒的子代理，并读它自己的
+  transcript。再对一个 `read-only` 子代理确认它拿不到该工具，并让一个子代理尝试给自己发消息。
+- 预期证据：`config show` 逐字段报出 `active_agent_messages` 的值与来源；gate 关闭时模型可见工具集
+  里没有 `send_subagent_message`，调用被拒；子代理发起的唤醒返回
+  `{"outcome":"accepted","disposition":"accepted"}`（而不是 `unsupported`）；被唤醒的子代理在
+  Runs 页签与自己 transcript 里可见，但不出现在对话时间线上；对话本身发起的唤醒出现在对话时间线上；
+  两种唤醒都不再额外抛出一次后台完成通知（对话不会为被唤醒的子代理再收到一条
+  `[Pips background Agent completion]`）；被唤醒的子代理继承源子代理的类型与模型；
+  `read-only` 子代理的工具集里没有 `send_subagent_message`；子代理给自己发消息返回
+  `not_found_or_not_owned`。
+- 通过条件：gate 的开关语义不变；子代理发起的唤醒被接受并落在自己的投影里；唤醒只报一次接受，
+  不重复投递完成通知；其余 outcome 与配额行为与开启前一致。
+- 失败条件：子代理发起的唤醒仍返回 `unsupported`；被唤醒的子代理进入对话时间线导致事件投影不一致；
+  唤醒后又收到一次后台完成通知（重复投递）；`read-only` 子代理拿到消息工具。
+- 清理/回滚：把 `active_agent_messages` 恢复默认（关闭）；确认无新增 child 与 pending 通知。
+- 来源/测试锚点：[message.go](../../internal/coding/subagent/message.go)、[journal.go](../../internal/coding/subagent/journal.go)、[child_control_scope.go](../../internal/coding/child_control_scope.go)、[subagent_message_tool.go](../../internal/coding/subagent_message_tool.go)、[runtime_subagent.go](../../internal/coding/runtime_subagent.go)、[runtime_notification.go](../../internal/coding/runtime_notification.go)、[subagent_message_test.go](../../internal/coding/subagent_message_test.go)、[journal_test.go](../../internal/coding/subagent/journal_test.go)。
+- 结果：`未执行`。
+
 ## 分册判定
 
-Builtin 发布至少通过 `MA-SUB-001`。Custom Alpha 需通过 `002` 至 `008`、`010` 至 `012`；Selected Beta 还需完成 `009` 中的候选 artifact/Telemetry/rollback 条件。GA 只有在真实观察窗口和独立审阅完成后才能通过，仓库测试不能代替运营证据。
+Builtin 发布至少通过 `MA-SUB-001`。Custom Alpha 需通过 `002` 至 `008`、`010` 至 `012`；Selected Beta 还需完成 `009` 中的候选 artifact/Telemetry/rollback 条件。`MA-SUB-013` 覆盖默认关闭的消息面，只在 `active_agent_messages` 开启时适用，因此不进入 Custom Alpha 的必过集；一旦消息面作为发布面提供，它随该面一起验收。GA 只有在真实观察窗口和独立审阅完成后才能通过，仓库测试不能代替运营证据。

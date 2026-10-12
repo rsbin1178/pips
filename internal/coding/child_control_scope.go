@@ -69,6 +69,15 @@ type childScopeFactory struct {
 	// messages is the tree's child messaging coordinator. It is nil while the
 	// messaging gate is closed, which keeps the messaging Tool unoffered.
 	messages *subagent.MessageCoordinator
+	// wakeManager, wakeDispatcher, and wakeObserver let a child sender start
+	// the continuation of a completed sibling. The woken child's lifecycle
+	// belongs to the sender's own Run rather than the conversation's, so
+	// wakeObserver projects it without entering the conversation timeline.
+	// wakeDispatcher is a provider because the dispatcher is built from this
+	// factory.
+	wakeManager    *subagent.Manager
+	wakeDispatcher func() subagent.Dispatcher
+	wakeObserver   subagent.Observer
 	// directoryResources is the child-scoped binding set the constructed scope
 	// takes ownership of. It is nil for a child in the parent workspace.
 	directoryResources *childDirectoryResources
@@ -601,24 +610,52 @@ func (s *childControlScope) messageCatalogEntries() []catalog.Entry {
 	if !planSelectsDescriptor(s.plan, descriptor) {
 		return nil
 	}
-	// A child-initiated wake has no parent Run to attribute the woken child to,
-	// so its wake port is closed: the coordinator refuses that wake rather than
-	// dropping it.
-	tool := newSendMessageTool(s.factory.messages, subagent.NewMessageBinding(
-		subagent.MessageSenderIdentity{
-			SessionID: s.childSessionID,
-			AttemptID: s.childSessionID,
-			Child:     true,
-			Ownership: s.ownership,
-			AgentID:   s.plan.Identity.ID,
-		},
-		nil,
-	))
+	// A child-initiated wake is attributed to this child's own Tool call, not to
+	// the conversation's Run, so the woken child is projected without entering
+	// the conversation timeline.
+	identity := subagent.MessageSenderIdentity{
+		SessionID: s.childSessionID,
+		AttemptID: s.childSessionID,
+		Child:     true,
+		Ownership: s.ownership,
+		AgentID:   s.plan.Identity.ID,
+	}
+	tool := newSendMessageTool(
+		s.factory.messages,
+		subagent.NewMessageBinding(identity, s.childWakePort(identity)),
+	)
 	if tool == nil {
 		return nil
 	}
 
 	return catalog.Local(messageCatalogID, catalog.RiskRead, tool)
+}
+
+// childWakePort starts the continuation of a completed sibling on behalf of
+// this child. A wake's lifecycle must belong to an active Tool call of the Run
+// that asked for it, and a child's own Run is not the conversation's Run, so
+// the woken child is attributed to this child's Tool call and only its own
+// projection is opened. A factory with no wake route keeps the port closed,
+// which refuses the wake rather than dropping it.
+func (s *childControlScope) childWakePort(sender subagent.MessageSenderIdentity) subagent.WakePort {
+	if s == nil || s.factory.wakeManager == nil || s.factory.wakeObserver == nil ||
+		s.factory.wakeDispatcher == nil {
+		return nil
+	}
+
+	return func(ctx context.Context, target subagent.WakeTarget) error {
+		return startSubagentWake(
+			ctx, s.factory.wakeManager, s.factory.wakeDispatcher(), s.factory.wakeObserver,
+			subagent.Ownership{
+				ParentSessionID:     sender.Ownership.ParentSessionID,
+				ParentInteractionID: sender.SessionID,
+				ParentRunID:         target.Call.RunID,
+				ParentToolCallID:    target.Call.ID,
+				RootInteractionID:   sender.Ownership.RootInteractionID,
+			},
+			target,
+		)
+	}
 }
 
 func childHistoryDescriptor(descriptor catalog.Descriptor) bool {
