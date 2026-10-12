@@ -950,6 +950,9 @@ Delivery depends on the target. A live child takes the message at its next turn
 boundary. A child that is still starting is parked until it becomes live. A
 completed child that this session delegated is woken: it continues in the
 background with the message as its prompt, keeping its own agent type and model.
+A wake reports only its acceptance, because the sender already holds that reply;
+the woken child's own result is not surfaced a second time as a background
+completion. It stays visible in the runs list and in its own transcript.
 Every refusal is explicit rather than silent — the result envelope reports
 `not_found_or_not_owned`, `not_active_or_finalizing`, `saturated`,
 `quota_exceeded`, `admission_uncertain`, `not_accepted_before_deadline`,
@@ -960,7 +963,12 @@ with a successful delivery.
 An eligible child also receives the messaging tool, but only when its capability
 mode keeps it: `read-write`, `execute`, and `all` do, and `read-only` does not.
 A child may message a live sibling or the conversation that spawned it; it may
-not message itself.
+not message itself. A child may also wake a completed sibling. Because a child's
+own run is not the conversation's run, a child-initiated wake is attributed to
+that child's own call: the woken child appears in the runs list and in its own
+transcript, and it does not enter the conversation's timeline. A conversation-
+initiated wake is attributed to the conversation's own call and does appear on
+the conversation's timeline.
 
 ### Interactive TUI themes and status line
 

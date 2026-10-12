@@ -41,6 +41,58 @@ func TestRecordLimitsRoundTripUnlimitedDefaultsAndAcceptLegacyOmissions(t *testi
 	assert.Equal(t, DefaultLimits().MaxActivityTools, normalized.MaxActivityTools)
 }
 
+// TestWakeMarkerIsAdditiveAndImmutable pins the wake marker's durability: an
+// ordinary record omits the field, so every record written before it stays
+// byte-identical, a wake record round-trips it, and a lifecycle cannot flip it.
+func TestWakeMarkerIsAdditiveAndImmutable(t *testing.T) {
+	t.Parallel()
+
+	created, err := normalizeRecord(record{
+		Schema: recordSchema, State: StateCreated, Role: RoleExplore,
+		ChildSessionID: "child", ParentSessionID: "parent", Model: "openai/test",
+		Limits: journalLimits(DefaultLimits()), TaskPreview: "inspect", Time: time.Now().UTC(),
+	}, true)
+	require.NoError(t, err)
+
+	data, err := json.Marshal(created)
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), `"wake"`)
+
+	wake := created
+	wake.Wake = true
+	data, err = json.Marshal(wake)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `"wake":true`)
+
+	decoded, err := decodeRecord(data)
+	require.NoError(t, err)
+	assert.True(t, decoded.Wake)
+
+	started := wake
+	started.State = StateRunning
+	started.ChildRunID = "run"
+	started.Time = started.Time.Add(time.Millisecond)
+
+	child, err := harness.NewSession(harness.NewMemoryStore("child"))
+	require.NoError(t, err)
+	require.NoError(t, appendRecord(child, wake))
+	require.NoError(t, appendRecord(child, started))
+	latest, err := latestByChild(child.Entries())
+	require.NoError(t, err)
+	assert.True(t, latest[wake.ChildSessionID].Wake)
+
+	flipped := started
+	flipped.Wake = false
+	flipped.Time = flipped.Time.Add(time.Millisecond)
+
+	drifted, err := harness.NewSession(harness.NewMemoryStore("drifted"))
+	require.NoError(t, err)
+	require.NoError(t, appendRecord(drifted, wake))
+	require.NoError(t, appendRecord(drifted, flipped))
+	_, err = latestByChild(drifted.Entries())
+	require.ErrorIs(t, err, ErrInvalid)
+}
+
 func TestReconcileMarksOrphanRunningInterruptedAndRepairsParent(t *testing.T) {
 	t.Parallel()
 

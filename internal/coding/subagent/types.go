@@ -194,17 +194,21 @@ type Event struct {
 	ParentToolCallID    string
 	RootInteractionID   string
 	Delivery            Delivery
-	ChildRunID          string
-	Model               string
-	TaskPreview         string
-	Activity            ActivitySummary
-	Code                string
-	Stop                agent.StopReason
-	Turns               int
-	ToolCalls           int
-	Usage               ai.Usage
-	Duration            time.Duration
-	Time                time.Time
+	// Wake marks a continuation a message woke from a completed child. The
+	// sender already holds the acceptance reply, so a wake's terminal state is
+	// not surfaced as a second completion.
+	Wake        bool
+	ChildRunID  string
+	Model       string
+	TaskPreview string
+	Activity    ActivitySummary
+	Code        string
+	Stop        agent.StopReason
+	Turns       int
+	ToolCalls   int
+	Usage       ai.Usage
+	Duration    time.Duration
+	Time        time.Time
 	// Result is present only on an in-process terminal callback. It is never
 	// copied into the parent lifecycle event or telemetry projection.
 	Result *Result
@@ -233,11 +237,14 @@ type Summary struct {
 	ChildSessionID string
 	Ownership      Ownership
 	Delivery       Delivery
-	Identity       AgentIdentity
-	Role           Role
-	State          State
-	TaskPreview    string
-	Model          string
+	// Wake reports that this child continues a completed sibling a message
+	// woke, so its terminal result is not surfaced as a completion.
+	Wake        bool
+	Identity    AgentIdentity
+	Role        Role
+	State       State
+	TaskPreview string
+	Model       string
 	// Cwd is the child's effective working directory, empty when it shares the
 	// parent workspace.
 	Cwd string

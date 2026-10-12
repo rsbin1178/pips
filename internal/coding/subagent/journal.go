@@ -41,16 +41,21 @@ type record struct {
 	RootInteractionID   string        `json:"root_interaction_id,omitempty"`
 	Delivery            Delivery      `json:"delivery,omitempty"`
 	ChildRunID          string        `json:"child_run_id,omitempty"`
-	Model               string        `json:"model"`
-	Limits              recordLimits  `json:"limits"`
-	TaskPreview         string        `json:"task_preview,omitempty"`
-	Code                string        `json:"code,omitempty"`
-	Stop                string        `json:"stop,omitempty"`
-	Turns               int           `json:"turns,omitempty"`
-	ToolCalls           int           `json:"tool_calls,omitempty"`
-	Usage               ai.Usage      `json:"usage"`
-	DurationMillis      int64         `json:"duration_millis,omitempty"`
-	ResultBytes         int           `json:"result_bytes,omitempty"`
+	// Wake marks a continuation a message woke from a completed child. A wake
+	// reports its acceptance through the message envelope, so its own terminal
+	// result is not surfaced as a second completion. The marker is omitempty so
+	// every record written before it stays byte-identical.
+	Wake           bool         `json:"wake,omitempty"`
+	Model          string       `json:"model"`
+	Limits         recordLimits `json:"limits"`
+	TaskPreview    string       `json:"task_preview,omitempty"`
+	Code           string       `json:"code,omitempty"`
+	Stop           string       `json:"stop,omitempty"`
+	Turns          int          `json:"turns,omitempty"`
+	ToolCalls      int          `json:"tool_calls,omitempty"`
+	Usage          ai.Usage     `json:"usage"`
+	DurationMillis int64        `json:"duration_millis,omitempty"`
+	ResultBytes    int          `json:"result_bytes,omitempty"`
 	// Cwd is the child's effective working directory. It is recorded on the
 	// terminal record only, because it is resolved once the child binding
 	// opens, and an empty value means the parent workspace.
@@ -480,7 +485,7 @@ func sameExecution(left, right record) bool {
 		left.ParentRunID == right.ParentRunID &&
 		left.ParentToolCallID == right.ParentToolCallID &&
 		left.RootInteractionID == right.RootInteractionID &&
-		left.Delivery == right.Delivery && left.Model == right.Model &&
+		left.Delivery == right.Delivery && left.Wake == right.Wake && left.Model == right.Model &&
 		left.Limits == right.Limits && left.TaskPreview == right.TaskPreview &&
 		sameExecutionPlan(left.Plan, right.Plan)
 }

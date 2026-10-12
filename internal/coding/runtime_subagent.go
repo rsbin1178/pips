@@ -30,7 +30,7 @@ func (r *Runtime) subagentObserver(
 ) subagent.Observer {
 	return func(ctx context.Context, event subagent.Event) error {
 		eventType := subagentEventType(event)
-		nested := event.ParentSessionID != "" && event.ParentSessionID != r.handle.Metadata().ID
+		nested := r.subagentEventIsNested(current, event)
 
 		payload := SubagentLifecycle{
 			Identity: event.Identity, Role: event.Role, State: event.State,
@@ -89,8 +89,10 @@ func (r *Runtime) subagentObserver(
 		if projectionErr != nil {
 			return projectionErr
 		}
+		// A wake reports its acceptance through the message envelope, so the
+		// woken child's terminal result is not surfaced as a second completion.
 		if event.Delivery == subagent.DeliveryBackground &&
-			isTerminalSubagentState(event.State) {
+			isTerminalSubagentState(event.State) && !event.Wake {
 			if err := r.notifications.EnqueueCompletion(event); err != nil {
 				return err
 			}
@@ -99,6 +101,19 @@ func (r *Runtime) subagentObserver(
 
 		return nil
 	}
+}
+
+// subagentEventIsNested reports whether one child lifecycle belongs to a run
+// that is not this conversation's. A deeper descendant and a wake a child
+// started both qualify, and neither has an active Tool call in the
+// conversation's Run to attribute the child to, so the child is projected
+// without entering the conversation timeline.
+func (r *Runtime) subagentEventIsNested(current *interaction, event subagent.Event) bool {
+	if event.ParentSessionID != "" && event.ParentSessionID != r.handle.Metadata().ID {
+		return true
+	}
+
+	return event.ParentInteractionID != "" && event.ParentInteractionID != current.id
 }
 
 func (r *Runtime) openChildProjection(ctx context.Context, event subagent.Event) error {

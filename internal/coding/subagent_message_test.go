@@ -606,6 +606,279 @@ Run the delegated verification and report the result.
 	}
 }
 
+// subagentStateOf returns one child's entry in a parent projection.
+func subagentStateOf(subagents []SubagentState, childSessionID string) (SubagentState, bool) {
+	for _, child := range subagents {
+		if child.ChildSessionID == childSessionID {
+			return child, true
+		}
+	}
+
+	return SubagentState{}, false
+}
+
+// subagentChildIDs lists the child session ids one parent projection carries.
+func subagentChildIDs(subagents []SubagentState) []string {
+	values := make([]string, 0, len(subagents))
+	for _, child := range subagents {
+		values = append(values, child.ChildSessionID)
+	}
+
+	return values
+}
+
+// wokenChild waits for the one child of this tree marked as a wake.
+func wokenChild(t *testing.T, runtime *Runtime) subagent.Summary {
+	t.Helper()
+
+	var woken subagent.Summary
+	require.Eventually(t, func() bool {
+		summaries, err := runtime.ListSubagents(t.Context())
+		if err != nil {
+			return false
+		}
+		for _, summary := range summaries {
+			if summary.Wake {
+				woken = summary
+
+				return true
+			}
+		}
+
+		return false
+	}, 30*time.Second, 10*time.Millisecond)
+
+	return woken
+}
+
+// awaitWokenChild settles the woken child's lifecycle so an assertion about a
+// suppressed completion is a state read rather than a race. The child's
+// projection opens on its `created` event, which the Manager emits after it has
+// registered the execution, so once it exists a wait on the execution either
+// blocks until the terminal observer has run or returns after it already did.
+func awaitWokenChild(t *testing.T, runtime *Runtime, childSessionID string) {
+	t.Helper()
+
+	require.Eventually(t, func() bool {
+		observation, err := runtime.ObserveEvents()
+		if err != nil {
+			return false
+		}
+		_, projected := observation.Children[childSessionID]
+
+		return projected
+	}, 30*time.Second, 10*time.Millisecond)
+
+	_, _ = runtime.WaitSubagent(t.Context(), childSessionID)
+}
+
+// messageToolResultText returns the text of the send_subagent_message result a
+// request carried, whichever conversation received it.
+func messageToolResultText(requests []ai.Request) string {
+	for _, request := range requests {
+		if text := requestToolResultText(request, "message-1"); text != "" {
+			return text
+		}
+	}
+
+	return ""
+}
+
+// TestRuntimeChildInitiatedWakeIsAcceptedAndProjectionOnly drives the real
+// child control scope: a live child wakes a completed sibling. The wake is
+// accepted, and because the sender's own Run is not the conversation's Run, the
+// woken child keeps its own projection without entering the conversation
+// timeline.
+func TestRuntimeChildInitiatedWakeIsAcceptedAndProjectionOnly(t *testing.T) {
+	t.Parallel()
+
+	var completed struct {
+		mu sync.Mutex
+		id string
+	}
+	completedChild := func() string {
+		completed.mu.Lock()
+		defer completed.mu.Unlock()
+
+		return completed.id
+	}
+	rememberCompletedChild := func(id string) {
+		completed.mu.Lock()
+		defer completed.mu.Unlock()
+
+		completed.id = id
+	}
+
+	model := &messagingTestModel{onRequest: func(request ai.Request) *ai.Response {
+		if isChildSystemText(requestSystemText(request)) {
+			switch text := requestAllText(request); {
+			case strings.Contains(text, "task-B"):
+				if requestToolResultText(request, "message-1") != "" {
+					return runtimeTextResponse("child B done")
+				}
+
+				return runtimeToolResponse("message-1", SendMessageToolName,
+					`{"subagent_id":"`+completedChild()+`","text":"wake up"}`)
+			case strings.Contains(text, "wake up"):
+				return runtimeTextResponse("woken child done")
+			default:
+				return runtimeTextResponse("child A done")
+			}
+		}
+		if requestToolResultText(request, "spawn-B") != "" {
+			return runtimeTextResponse("parent done")
+		}
+		if childID := spawnedChildID(request, "spawn-A"); childID != "" {
+			rememberCompletedChild(childID)
+
+			return runtimeToolResponse("spawn-B", subagent.ToolName,
+				`{"prompt":"task-B","description":"second","subagent_type":"general-purpose","run_in_background":false}`)
+		}
+
+		return runtimeToolResponse("spawn-A", subagent.ToolName,
+			`{"prompt":"task-A","description":"first","subagent_type":"general-purpose","run_in_background":false}`)
+	}}
+	runtime := openMessagingTestRuntime(t, t.TempDir(), model, true)
+
+	collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("delegate")))
+
+	// The child's message is accepted rather than refused as unsupported.
+	messageResult := messageToolResultText(model.Requests())
+	require.NotEmpty(t, messageResult)
+	assert.Contains(t, messageResult, `"outcome":"accepted"`)
+
+	woken := wokenChild(t, runtime)
+	assert.NotEqual(t, completedChild(), woken.ChildSessionID,
+		"a wake continues the source in a new child session")
+
+	awaitWokenChild(t, runtime, woken.ChildSessionID)
+
+	observation, err := runtime.ObserveEvents()
+	require.NoError(t, err)
+	_, projected := observation.Children[woken.ChildSessionID]
+	assert.True(t, projected, "the woken child keeps its own projection")
+
+	assert.NotContains(t, subagentChildIDs(runtime.Snapshot().Subagents), woken.ChildSessionID,
+		"a child-initiated wake does not enter the conversation timeline")
+
+	known, err := runtime.notifications.Contains(woken.ChildSessionID)
+	require.NoError(t, err)
+	assert.False(t, known, "a wake reports acceptance, so its result is not surfaced again")
+}
+
+// TestRuntimeWakeDoesNotSurfaceACompletion pins the root-initiated half of the
+// same rule: the woken child stays on the conversation timeline, and its
+// terminal state is still not surfaced a second time as a completion.
+func TestRuntimeWakeDoesNotSurfaceACompletion(t *testing.T) {
+	t.Parallel()
+
+	model := &messagingTestModel{onRequest: func(request ai.Request) *ai.Response {
+		if isChildSystemText(requestSystemText(request)) {
+			return runtimeTextResponse("child turn")
+		}
+		if requestToolResultText(request, "message-1") != "" {
+			return runtimeTextResponse("parent done")
+		}
+		if childID := spawnedChildID(request, "spawn-1"); childID != "" {
+			return runtimeToolResponse("message-1", SendMessageToolName,
+				`{"subagent_id":"`+childID+`","text":"one more fact"}`)
+		}
+
+		return runtimeToolResponse("spawn-1", subagent.ToolName,
+			`{"prompt":"original task","description":"delegate","subagent_type":"general-purpose","run_in_background":false}`)
+	}}
+	runtime := openMessagingTestRuntime(t, t.TempDir(), model, true)
+
+	collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("delegate")))
+
+	woken := wokenChild(t, runtime)
+	awaitWokenChild(t, runtime, woken.ChildSessionID)
+
+	projected, ok := subagentStateOf(runtime.Snapshot().Subagents, woken.ChildSessionID)
+	require.True(t, ok, "a root-initiated wake is attributed to the conversation's own Tool call")
+	assert.True(t, isTerminalSubagentState(projected.State),
+		"the woken child's terminal state reaches the conversation timeline")
+
+	known, err := runtime.notifications.Contains(woken.ChildSessionID)
+	require.NoError(t, err)
+	assert.False(t, known, "a wake reports acceptance, so its result is not surfaced again")
+}
+
+// TestChildWakePortStaysClosedWithoutARoute pins the fail-closed default: a
+// control scope whose factory carries no wake route keeps the port closed, so
+// the coordinator refuses the wake rather than dropping it.
+func TestChildWakePortStaysClosedWithoutARoute(t *testing.T) {
+	t.Parallel()
+
+	closed := &childControlScope{factory: childScopeFactory{}}
+	assert.Nil(t, closed.childWakePort(subagent.MessageSenderIdentity{}))
+
+	open := &childControlScope{factory: childScopeFactory{
+		wakeManager:    &subagent.Manager{},
+		wakeObserver:   func(context.Context, subagent.Event) error { return nil },
+		wakeDispatcher: func() subagent.Dispatcher { return nil },
+	}}
+	assert.NotNil(t, open.childWakePort(subagent.MessageSenderIdentity{}))
+}
+
+// TestRuntimeRecoveryDoesNotResurrectASuppressedWakeCompletion drives the
+// restart path: a wake-marked terminal child must not become a completion
+// notification when a Runtime opens over the session again, while a completion
+// the previous process did persist stays readable.
+func TestRuntimeRecoveryDoesNotResurrectASuppressedWakeCompletion(t *testing.T) {
+	t.Parallel()
+
+	base := t.TempDir()
+	model := &messagingTestModel{onRequest: func(request ai.Request) *ai.Response {
+		if isChildSystemText(requestSystemText(request)) {
+			return runtimeTextResponse("child turn")
+		}
+		if strings.Contains(requestAllText(request), agentNotificationPrefix) {
+			// A persisted completion is delivered as a parent turn of its own.
+			return runtimeTextResponse("parent done")
+		}
+		if requestToolResultText(request, "message-1") != "" {
+			return runtimeTextResponse("parent done")
+		}
+		if childID := spawnedChildID(request, "spawn-1"); childID != "" {
+			return runtimeToolResponse("message-1", SendMessageToolName,
+				`{"subagent_id":"`+childID+`","text":"one more fact"}`)
+		}
+
+		return runtimeToolResponse("spawn-1", subagent.ToolName,
+			`{"prompt":"original task","description":"delegate","subagent_type":"general-purpose","run_in_background":false}`)
+	}}
+	runtime := openMessagingTestRuntime(t, base, model, true)
+	sessionID := runtime.handle.Metadata().ID
+	collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("delegate")))
+
+	parent := lastParentRequest(model.Requests())
+	require.NotNil(t, parent)
+	source := spawnedChildID(*parent, "spawn-1")
+	require.NotEmpty(t, source)
+
+	woken := wokenChild(t, runtime)
+	awaitWokenChild(t, runtime, woken.ChildSessionID)
+
+	// A completion the live process persisted for an ordinary child. Recovery
+	// must still read it, which is what keeps the assertion below from passing
+	// against an inbox that is empty for an unrelated reason.
+	require.NoError(t, runtime.notifications.Enqueue(
+		testAgentNotification(runtime, source, sessionID),
+	))
+	require.NoError(t, runtime.Close(t.Context()))
+
+	reopened := openTestRuntimeAt(t, base, SessionTarget{ID: sessionID}, model)
+
+	control, err := reopened.notifications.Contains(source)
+	require.NoError(t, err)
+	assert.True(t, control, "recovery reads a completion the previous process persisted")
+
+	recovered, err := reopened.notifications.Contains(woken.ChildSessionID)
+	require.NoError(t, err)
+	assert.False(t, recovered, "recovery must not resurrect a suppressed wake completion")
+}
+
 // waitForChildApproval returns the child session id once exactly one child has
 // parked on its own approval. An empty id asks for the child already observed.
 func waitForChildApproval(t *testing.T, runtime *Runtime, want string) string {
