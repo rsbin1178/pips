@@ -886,6 +886,7 @@ func (r *Runtime) openInteraction(
 				subagentPresets{
 					registry:       integration.subagentProfilesSnapshot(),
 					modelOverrides: r.config.Subagent.Models,
+					toggle:         r.config.Subagent.Toggle,
 					onDiagnostic: func(ctx context.Context, code, message string) {
 						r.recordDiagnostic(ctx, IntegrationDiagnostic{
 							Component: componentSubagent, Code: code, Message: message,

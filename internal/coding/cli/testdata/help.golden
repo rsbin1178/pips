@@ -27,6 +27,7 @@ Flags:
   -h, --help                      help for pips
       --mode string               operating mode (agent or plan)
       --model string              model in provider/model form
+      --no-subagents              disable subagents
       --reasoning string          model reasoning level
       --sandbox string            sandbox mode
       --tool-search               enable deferred tool search

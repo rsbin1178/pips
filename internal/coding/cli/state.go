@@ -150,6 +150,9 @@ func parseFlagOverrides(cmd *cobra.Command, flags *rootFlags) (config.Patch, err
 	if isFlagChanged(cmd, "dynamic-subagents") {
 		patch.DynamicSubagents = &flags.dynamicSubagents
 	}
+	if isFlagChanged(cmd, "no-subagents") {
+		patch.NoSubagents = &flags.noSubagents
+	}
 	if isFlagChanged(cmd, "mode") {
 		mode, err := config.ParseOperatingMode(flags.mode)
 		if err != nil {

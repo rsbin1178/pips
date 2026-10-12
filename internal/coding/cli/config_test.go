@@ -118,6 +118,82 @@ model = "anthropic/project-model"
 	require.ErrorContains(t, err, "--tool-search-name")
 }
 
+func TestConfigShowReportsSubagentsSwitchSpellingsAndToggle(t *testing.T) {
+	t.Parallel()
+
+	fixture := newCLIFixture(t)
+	writeCLIFile(t, fixture.layout.ConfigFile(), `
+[subagents]
+enabled = false
+
+[subagents.toggle]
+explore = false
+go-checker = true
+
+[providers.openai.models."env-model"]
+`)
+	dependencies := fixture.dependencies(map[string]string{
+		config.ModelEnv: "openai/env-model",
+	})
+
+	output, err := executeWithDependencies(t, dependencies, "config", "show")
+	require.NoError(t, err)
+	// The table spelling and the top-level spelling are one switch, so both
+	// report the resolved value and the file that decided it.
+	assert.Contains(t, output, `dynamic_subagents = false # source=config_file detail="`)
+	assert.Contains(t, output, `subagents.enabled = false # source=config_file detail="`)
+	assert.Contains(t, output, `subagents.toggle = "explore=false,go-checker=true" # source=config_file detail="`)
+
+	// `--no-subagents` is the second flag spelling and names itself as source.
+	output, err = executeWithDependencies(t, dependencies, "config", "show", "--no-subagents")
+	require.NoError(t, err)
+	assert.Contains(t, output, `dynamic_subagents = false # source=flag detail="--no-subagents"`)
+	assert.Contains(t, output, `subagents.enabled = false # source=flag detail="--no-subagents"`)
+
+	// Two explicit flag spellings may be passed when they agree.
+	output, err = executeWithDependencies(
+		t,
+		dependencies,
+		"config",
+		"show",
+		"--no-subagents",
+		"--dynamic-subagents=false",
+	)
+	require.NoError(t, err)
+	assert.Contains(t, output, `dynamic_subagents = false # source=flag detail="--dynamic-subagents"`)
+
+	// Two explicit flag spellings that disagree are refused.
+	_, err = executeWithDependencies(
+		t,
+		dependencies,
+		"config",
+		"show",
+		"--no-subagents",
+		"--dynamic-subagents=true",
+	)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "--no-subagents")
+	require.ErrorContains(t, err, "--dynamic-subagents")
+}
+
+func TestConfigShowReportsAbsentSubagentToggleAsNone(t *testing.T) {
+	t.Parallel()
+
+	fixture := newCLIFixture(t)
+	writeCLIFile(t, fixture.layout.ConfigFile(), `
+[providers.openai.models."env-model"]
+`)
+	dependencies := fixture.dependencies(map[string]string{
+		config.ModelEnv: "openai/env-model",
+	})
+
+	output, err := executeWithDependencies(t, dependencies, "config", "show")
+	require.NoError(t, err)
+	assert.Contains(t, output, `subagents.toggle = <none> # source=default detail="built-in"`)
+	assert.Contains(t, output, `subagents.enabled = true # source=default detail="built-in"`)
+	assert.Contains(t, output, `dynamic_subagents = true # source=default detail="built-in"`)
+}
+
 func TestConfigPathDoesNotDecodeFiles(t *testing.T) {
 	t.Parallel()
 

@@ -33,6 +33,25 @@ func declaredNames[V any](values map[string]V) string {
 	return strconv.Quote(strings.Join(names, ","))
 }
 
+// declaredToggles renders the sorted per-type enable/disable table with its
+// declared values, so a toggle that names no existing type is still visible.
+func declaredToggles(values map[string]bool) string {
+	if len(values) == 0 {
+		return "<none>"
+	}
+	names := make([]string, 0, len(values))
+	for name := range values {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	declared := make([]string, 0, len(names))
+	for _, name := range names {
+		declared = append(declared, name+"="+strconv.FormatBool(values[name]))
+	}
+
+	return strconv.Quote(strings.Join(declared, ","))
+}
+
 func newConfigCommand(dependencies Dependencies, flags *rootFlags) *cobra.Command {
 	command := &cobra.Command{
 		Use:   "config",
@@ -92,6 +111,9 @@ func newConfigShowCommand(dependencies Dependencies, flags *rootFlags) *cobra.Co
 				config.FieldToolSearch:       strconv.FormatBool(state.config.Config.ToolSearch),
 				config.FieldToolSearchName:   strconv.Quote(state.config.Config.ToolSearchName),
 				config.FieldDynamicSubagents: strconv.FormatBool(state.config.Config.DynamicSubagents),
+				config.FieldSubagentEnabled: strconv.FormatBool(
+					state.config.Config.DynamicSubagents,
+				),
 				config.FieldActiveAgentMessages: strconv.FormatBool(
 					state.config.Config.ActiveAgentMessages,
 				),
@@ -126,6 +148,7 @@ func newConfigShowCommand(dependencies Dependencies, flags *rootFlags) *cobra.Co
 					state.config.Config.Subagent.LimitBehavior,
 				),
 				config.FieldSubagentModels:   declaredNames(state.config.Config.Subagent.Models),
+				config.FieldSubagentToggle:   declaredToggles(state.config.Config.Subagent.Toggle),
 				config.FieldSubagentRoles:    declaredNames(state.config.Config.Subagent.Roles),
 				config.FieldSubagentPersonas: declaredNames(state.config.Config.Subagent.Personas),
 				config.FieldMode:             strconv.Quote(string(state.config.Config.Mode)),

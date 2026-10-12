@@ -51,12 +51,13 @@ type customSubagentDispatcher struct {
 	presets           subagentPresets
 }
 
-// subagentPresets is the immutable role, persona, and per-type model override
-// snapshot one dispatcher resolves against, plus the diagnostic sink used when
-// a selection degrades to the parent model.
+// subagentPresets is the immutable role, persona, per-type model override, and
+// per-type enable/disable snapshot one dispatcher resolves against, plus the
+// diagnostic sink used when a selection degrades to the parent model.
 type subagentPresets struct {
 	registry       subagentprofile.Registry
 	modelOverrides map[string]string
+	toggle         map[string]bool
 	onDiagnostic   func(context.Context, string, string)
 }
 
@@ -129,6 +130,7 @@ func newCustomSubagentDispatcher(
 func cloneSubagentPresets(presets subagentPresets) subagentPresets {
 	presets.registry = presets.registry.Clone()
 	presets.modelOverrides = maps.Clone(presets.modelOverrides)
+	presets.toggle = maps.Clone(presets.toggle)
 
 	return presets
 }
@@ -154,8 +156,9 @@ func (d *customSubagentDispatcher) AgentIDs() []string {
 
 	ids := make([]string, 0, len(d.definitions))
 	for id, definition := range d.definitions {
-		// Builtin types are never advertised as a model-visible enum.
-		if definition.Kind == agentprofile.KindCustom {
+		// Builtin types are never advertised as a model-visible enum, and a
+		// type disabled by configuration is not offered at all.
+		if definition.Kind == agentprofile.KindCustom && config.TypeEnabled(d.presets.toggle, id) {
 			ids = append(ids, id)
 		}
 	}
@@ -165,11 +168,14 @@ func (d *customSubagentDispatcher) AgentIDs() []string {
 }
 
 // typeIDs lists every dispatchable type, builtin included, for an unknown-type
-// error message.
+// error message. A type disabled by configuration is omitted, matching the
+// source's toggle-filtered availability list.
 func (d *customSubagentDispatcher) typeIDs() []string {
 	ids := make([]string, 0, len(d.definitions))
 	for id := range d.definitions {
-		ids = append(ids, id)
+		if config.TypeEnabled(d.presets.toggle, id) {
+			ids = append(ids, id)
+		}
 	}
 	slices.Sort(ids)
 
@@ -248,6 +254,14 @@ func (d *customSubagentDispatcher) Compile(
 		return subagent.ExecutionPlan{}, fmt.Errorf(
 			"%w: unknown subagent type %q; valid types: %s",
 			subagent.ErrInvalid, request.AgentID, strings.Join(d.typeIDs(), ", "),
+		)
+	}
+	// A disabled type stays resolvable so the refusal names the configuration
+	// that disabled it rather than reporting an unknown type.
+	if !config.TypeEnabled(d.presets.toggle, request.AgentID) {
+		return subagent.ExecutionPlan{}, fmt.Errorf(
+			"%w: Subagent '%s' is disabled via [subagents.toggle] in config.toml",
+			subagent.ErrInvalid, request.AgentID,
 		)
 	}
 	if !definitionAllowsDelivery(definition, request.Delivery) {

@@ -291,6 +291,110 @@ Inspect the delegated target.
 	require.Fail(t, "spawn_subagent tool was not declared")
 }
 
+// writeToggleTestAgents writes two custom definitions so the model-visible
+// subagent_type enum still exists when one of them is toggled off.
+func writeToggleTestAgents(t *testing.T, layout paths.Layout) {
+	t.Helper()
+
+	require.NoError(t, os.MkdirAll(layout.AgentsDir(), 0o700))
+	for _, id := range []string{"go-checker", "other-checker"} {
+		require.NoError(t, os.WriteFile(
+			filepath.Join(layout.AgentsDir(), id+".md"),
+			[]byte(`---
+schema: pips.agent/v1alpha1
+name: `+id+`
+description: Check one bounded target.
+tools:
+  allow: ["tool:read"]
+output:
+  format: text
+---
+Inspect the delegated target.
+`),
+			0o600,
+		))
+	}
+}
+
+func TestRuntimeSubagentToggleRefusesDisabledTypesAndHidesThem(t *testing.T) {
+	base := t.TempDir()
+	layout, err := paths.New(filepath.Join(base, "home"))
+	require.NoError(t, err)
+	writeToggleTestAgents(t, layout)
+
+	model := newRuntimeModel(
+		runtimeToolResponse(
+			"parent-delegate",
+			subagent.ToolName,
+			`{"prompt":"Inspect target.","description":"delegate","subagent_type":"go-checker","run_in_background":false}`,
+		),
+		runtimeToolResponse(
+			"parent-unknown",
+			subagent.ToolName,
+			`{"prompt":"Inspect target.","description":"delegate","subagent_type":"nope","run_in_background":false}`,
+		),
+		runtimeTextResponse("both delegations were refused"),
+	)
+	runtime := openDynamicTestRuntimeAt(t, base, SessionTarget{}, model)
+	runtime.config.Subagent.Toggle = map[string]bool{"go-checker": false, "explore": false}
+
+	collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("delegate the checks")))
+	summaries, err := runtime.ListSubagents(t.Context())
+	require.NoError(t, err)
+	assert.Empty(t, summaries)
+
+	requests := model.Requests()
+	require.GreaterOrEqual(t, len(requests), 3)
+	declared := false
+	for _, tool := range requests[0].Tools {
+		if tool.Name != subagent.ToolName {
+			continue
+		}
+		declared = true
+		require.NotNil(t, tool.InputSchema)
+		// A disabled type is not offered to the model at all.
+		assert.NotContains(t, tool.InputSchema.Properties["subagent_type"].Enum, "go-checker")
+		assert.Contains(t, tool.InputSchema.Properties["subagent_type"].Enum, "other-checker")
+	}
+	assert.True(t, declared, "spawn_subagent tool was not declared")
+
+	// A disabled type stays resolvable, so the refusal names the configuration
+	// instead of reporting an unknown type.
+	refused := recordedToolResultText(requests, "parent-delegate")
+	assert.Contains(t, refused, "Subagent 'go-checker' is disabled via [subagents.toggle] in config.toml")
+
+	// The unknown-type message lists only types that may actually be spawned.
+	unknown := recordedToolResultText(requests, "parent-unknown")
+	require.Contains(t, unknown, "unknown subagent type")
+	assert.Contains(t, unknown, "other-checker")
+	assert.Contains(t, unknown, "plan")
+	assert.NotContains(t, unknown, "go-checker")
+	assert.NotContains(t, unknown, "explore")
+
+	// A disabled builtin type is refused through the same gate.
+	_, err = runtime.RunAgent(t.Context(), AgentRunRequest{
+		AgentID: string(subagent.RoleExplore), Task: "Inspect the fixture.",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Subagent 'explore' is disabled via [subagents.toggle] in config.toml")
+
+	// The Agent Library reports the disabled type rather than hiding it.
+	library, err := runtime.ListAgentProfiles(t.Context())
+	require.NoError(t, err)
+	profile, found := agentLibraryEntry(library, "go-checker")
+	require.True(t, found)
+	assert.False(t, profile.Available)
+	assert.Equal(t, "disabled by configuration", profile.Unavailable)
+	builtin, found := agentLibraryEntry(library, "explore")
+	require.True(t, found)
+	assert.False(t, builtin.Available)
+	assert.Equal(t, "disabled by configuration", builtin.Unavailable)
+	other, found := agentLibraryEntry(library, "other-checker")
+	require.True(t, found)
+	assert.True(t, other.Available)
+	assert.Empty(t, other.Unavailable)
+}
+
 func TestRuntimeListAgentProfilesIsContentSafeAndReportsAvailability(t *testing.T) {
 	t.Parallel()
 
