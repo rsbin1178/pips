@@ -284,6 +284,12 @@ func (h *Harness) Steer(msgs ...ai.Message) error {
 	return h.queue(func(s *agent.Session) { s.Steer(msgs...) })
 }
 
+// Interject queues messages ahead of the active run's pending steering (see
+// [agent.Session.Interject]). It fails with [ErrIdle] when no run is active.
+func (h *Harness) Interject(msgs ...ai.Message) error {
+	return h.queue(func(s *agent.Session) { s.Interject(msgs...) })
+}
+
 // FollowUp queues follow-up work into the active run (see
 // [agent.Session.FollowUp]). It fails with [ErrIdle] when no run is active.
 func (h *Harness) FollowUp(msgs ...ai.Message) error {

@@ -766,6 +766,10 @@ func delegableDescriptor(descriptor catalog.Descriptor) bool {
 			return descriptor.Name == "ask_user" || descriptor.Name == "ask_user_text"
 		case "coding.skills":
 			return descriptor.Name == harness.SkillToolName
+		case messageCatalogID:
+			// The messaging Tool is not a delegation Tool: a child receives it
+			// only when its capability mode allows the message kind.
+			return descriptor.Name == SendMessageToolName
 		}
 	}
 
@@ -800,6 +804,11 @@ func capabilityModeAllows(mode agentprofile.CapabilityMode, descriptor catalog.D
 		return descriptor.Name == harness.SkillToolName
 	case "coding.history":
 		return descriptor.Name == tools.HistoryName
+	case messageCatalogID:
+		// The message kind is available to a read-write and an execute child,
+		// and never to a read-only one.
+		return descriptor.Name == SendMessageToolName &&
+			mode != agentprofile.CapabilityReadOnly
 	}
 
 	return false

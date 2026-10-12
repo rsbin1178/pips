@@ -30,6 +30,8 @@ const (
 	ToolSearchEnv       = "PIPS_TOOL_SEARCH"
 	ToolSearchNameEnv   = "PIPS_TOOL_SEARCH_NAME"
 	DynamicSubagentsEnv = "PIPS_DYNAMIC_SUBAGENTS"
+	// ActiveAgentMessagesEnv opens the model-facing child messaging surface.
+	ActiveAgentMessagesEnv = "PIPS_ACTIVE_AGENT_MESSAGES"
 	// SubagentLimitBehaviorEnv overrides [subagents].limit_behavior. It is not
 	// pinnable; an invalid value falls back to queue.
 	SubagentLimitBehaviorEnv = "PIPS_SUBAGENT_LIMIT_BEHAVIOR"
@@ -168,6 +170,7 @@ type fileConfig struct {
 	ToolSearch            *bool                      `toml:"tool_search"`
 	ToolSearchName        *string                    `toml:"tool_search_name"`
 	DynamicSubagents      *bool                      `toml:"dynamic_subagents"`
+	ActiveAgentMessages   *bool                      `toml:"active_agent_messages"`
 	Mode                  *string                    `toml:"mode"`
 	TUI                   *fileTUI                   `toml:"tui"`
 	Sandbox               *string                    `toml:"sandbox"`
@@ -739,6 +742,7 @@ func decodeLayer(value fileConfig) (fileLayer, error) {
 		layer.patch.ToolSearchName = &name
 	}
 	layer.patch.DynamicSubagents = value.DynamicSubagents
+	layer.patch.ActiveAgentMessages = value.ActiveAgentMessages
 	if value.Mode != nil {
 		mode, err := ParseOperatingMode(*value.Mode)
 		if err != nil {
@@ -1170,6 +1174,7 @@ func applyEnvironment(value *Config, lookup LookupEnv) error {
 		{name: ToolSearchEnv, parse: toolSearchPatch},
 		{name: ToolSearchNameEnv, parse: toolSearchNamePatch},
 		{name: DynamicSubagentsEnv, parse: dynamicSubagentsPatch},
+		{name: ActiveAgentMessagesEnv, parse: activeAgentMessagesPatch},
 		{name: SubagentLimitBehaviorEnv, parse: subagentLimitBehaviorPatch},
 		{name: ModeEnv, parse: operatingModePatch},
 		{name: SandboxEnv, parse: sandboxPatch},
@@ -1251,6 +1256,7 @@ func validatePatch(patch Patch) (Patch, error) {
 		result.ToolSearchName = &name
 	}
 	result.DynamicSubagents = patch.DynamicSubagents
+	result.ActiveAgentMessages = patch.ActiveAgentMessages
 	if patch.Mode != nil {
 		mode, err := ParseOperatingMode(string(*patch.Mode))
 		if err != nil {
@@ -1322,6 +1328,15 @@ func dynamicSubagentsPatch(value string) (Patch, error) {
 	}
 
 	return Patch{DynamicSubagents: &enabled}, nil
+}
+
+func activeAgentMessagesPatch(value string) (Patch, error) {
+	enabled, err := parseBoolPatch(value)
+	if err != nil {
+		return Patch{}, err
+	}
+
+	return Patch{ActiveAgentMessages: &enabled}, nil
 }
 
 // subagentLimitBehaviorPatch mirrors the source resolution: an unrecognized

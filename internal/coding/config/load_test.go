@@ -73,6 +73,44 @@ func TestLoadDynamicSubagentsGatePrecedenceAndProvenance(t *testing.T) {
 	assert.Equal(t, "--dynamic-subagents", source.Detail)
 }
 
+func TestLoadActiveAgentMessagesGatePrecedenceAndProvenance(t *testing.T) {
+	t.Parallel()
+
+	// The messaging gate is closed by default.
+	result, err := config.Load(config.LoadOptions{})
+	require.NoError(t, err)
+	assert.False(t, result.Config.ActiveAgentMessages)
+	source, ok := result.Config.Source(config.FieldActiveAgentMessages)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceDefault, source.Kind)
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, "active_agent_messages = true\n")
+	result, err = config.Load(config.LoadOptions{ConfigFile: path})
+	require.NoError(t, err)
+	assert.True(t, result.Config.ActiveAgentMessages)
+	source, ok = result.Config.Source(config.FieldActiveAgentMessages)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceConfigFile, source.Kind)
+	assert.Equal(t, path, source.Detail)
+
+	result, err = config.Load(config.LoadOptions{
+		ConfigFile: path,
+		LookupEnv:  mapLookup(map[string]string{config.ActiveAgentMessagesEnv: "false"}),
+	})
+	require.NoError(t, err)
+	assert.False(t, result.Config.ActiveAgentMessages)
+	source, ok = result.Config.Source(config.FieldActiveAgentMessages)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceEnvironment, source.Kind)
+	assert.Equal(t, config.ActiveAgentMessagesEnv, source.Detail)
+
+	_, err = config.Load(config.LoadOptions{
+		LookupEnv: mapLookup(map[string]string{config.ActiveAgentMessagesEnv: "sometimes"}),
+	})
+	require.ErrorIs(t, err, config.ErrInvalid)
+}
+
 func TestLoadToolSearchNamePrecedenceAndProviderOverride(t *testing.T) {
 	t.Parallel()
 

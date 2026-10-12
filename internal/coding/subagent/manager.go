@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -52,7 +53,15 @@ type sharedManagerState struct {
 
 	admission *admissionBudget
 	active    map[string]*Execution
-	maxDepth  int
+	// spawning holds the child sessions this tree has created but not yet
+	// registered as live executions. It is process-local delivery state: it
+	// lets a message park for a child whose durable session is exclusively
+	// locked by its own spawn.
+	spawning map[string]struct{}
+	maxDepth int
+	// messages is the process-local child messaging coordinator. It is nil
+	// while the messaging gate is closed, and it holds no durable state.
+	messages *MessageCoordinator
 }
 
 // Config contains the application-owned dependencies for one parent Session.
@@ -84,6 +93,11 @@ type Config struct {
 	// AdmissionObserver receives content-free shared-budget decisions. It is
 	// observational only and cannot veto or alter a reservation.
 	AdmissionObserver AdmissionObserver
+	// ActiveMessages opens the child messaging surface. A nil value keeps the
+	// gate closed: no messaging Tool is offered, and every delivery is refused
+	// rather than dropped. Its ports carry the Runtime-owned deliveries the
+	// coordinator cannot build itself.
+	ActiveMessages *MessagePorts
 	// Share joins this Manager to an existing root execution tree. It is
 	// required when Parent is a subagent Session.
 	Share *Manager
@@ -131,6 +145,9 @@ type Execution struct {
 	tracker     *runTracker
 	hookContext string
 	permit      *admissionPermit
+	// finalizing marks that the terminal transition has begun. A finalizing
+	// execution no longer accepts messages.
+	finalizing atomic.Bool
 
 	cancelOnce sync.Once
 	mu         sync.Mutex
@@ -214,6 +231,7 @@ func New(config Config) (*Manager, error) {
 		shared = &sharedManagerState{
 			admission: admission,
 			active:    make(map[string]*Execution),
+			spawning:  make(map[string]struct{}),
 			maxDepth:  config.Options.MaxDepth,
 		}
 	}
@@ -223,7 +241,7 @@ func New(config Config) (*Manager, error) {
 	}
 	lifecycle, cancel := context.WithCancel(context.WithoutCancel(lifecycleBase))
 
-	return &Manager{
+	manager := &Manager{
 		config: config, limits: limits,
 		lifecycle: lifecycle, cancel: cancel,
 		active: make(map[string]*Execution), admission: shared.admission, shared: shared,
@@ -231,7 +249,22 @@ func New(config Config) (*Manager, error) {
 		maxAutoFollowUps: maxAutoFollowUps,
 		foregroundBudget: foregroundBudget,
 		waitDone:         make(chan struct{}),
-	}, nil
+	}
+	manager.bindMessageCoordinator(config)
+
+	return manager, nil
+}
+
+// bindMessageCoordinator attaches the process-local messaging coordinator for
+// a tree-owning Manager. A nested Manager joins the tree's existing
+// coordinator through the shared state instead of creating a second one.
+func (m *Manager) bindMessageCoordinator(config Config) *Manager {
+	if m == nil || config.ActiveMessages == nil || config.Share != nil || m.shared == nil {
+		return m
+	}
+	m.shared.messages = newMessageCoordinator(m, *config.ActiveMessages)
+
+	return m
 }
 
 func inheritManagerConfig(config Config) Config {
@@ -395,6 +428,10 @@ func (m *Manager) start(
 	if err != nil {
 		return nil, err
 	}
+	request, err = m.applyWakeRequest(ctx, request)
+	if err != nil {
+		return nil, err
+	}
 	// A resume is resolved before the plan is compiled, because the source
 	// type and model replace whatever the caller asked for.
 	resume, resumeSource, err := m.resolveResumeSource(ctx, request)
@@ -508,6 +545,9 @@ func (m *Manager) start(
 
 		return nil, errors.Join(err, sourceCloseErr)
 	}
+
+	m.markSpawning(child.Metadata().ID)
+	defer m.unmarkSpawning(child.Metadata().ID)
 
 	created := record{
 		Schema:              recordSchema,
@@ -900,6 +940,30 @@ func (e *Execution) Cancel() {
 	}
 
 	e.cancelOnce.Do(e.cancel)
+}
+
+// isFinalizing reports whether this execution has begun its terminal
+// transition, which is the boundary at which it stops accepting messages.
+func (e *Execution) isFinalizing() bool {
+	if e == nil {
+		return true
+	}
+
+	return e.finalizing.Load()
+}
+
+// messageSink returns the live Runner's message sink. It is nil for an
+// execution whose runner does not accept messages.
+func (e *Execution) messageSink() MessageSink {
+	if e == nil || e.runner == nil {
+		return nil
+	}
+	sink, ok := e.runner.(MessageSink)
+	if !ok {
+		return nil
+	}
+
+	return sink
 }
 
 // Wait waits for one owned child to become terminal. A child that already
@@ -1582,6 +1646,9 @@ func (m *Manager) finishExecution(
 	runErr error,
 ) {
 	execution.Cancel()
+	// The child stops accepting messages at the start of its terminal
+	// transition, before its runner releases the child's pending inbox.
+	execution.finalizing.Store(true)
 	tracker.mu.Lock()
 	trackedErr := tracker.err
 	value := tracker.value
@@ -1655,6 +1722,12 @@ func (m *Manager) finishExecution(
 	runnerCloseErr := error(nil)
 	if execution.runner != nil {
 		runnerCloseErr = execution.runner.Close(context.WithoutCancel(ctx))
+	}
+	// A finalizing child's unconsumed messages are revoked after a bounded
+	// drain. No sender is awaiting them any more, but the tree-wide in-flight
+	// accounting must not leak.
+	if m.shared != nil && m.shared.messages != nil {
+		m.shared.messages.finalizeTarget(terminal.ChildSessionID)
 	}
 	closeErr := child.Close()
 	execution.permit.release()

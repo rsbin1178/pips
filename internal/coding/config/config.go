@@ -28,12 +28,15 @@ type Field string
 
 // Configuration fields.
 const (
-	FieldModel                 Field = "model"
-	FieldVariant               Field = "variant"
-	FieldReasoning             Field = "reasoning"
-	FieldToolSearch            Field = "tool_search"
-	FieldToolSearchName        Field = "tool_search_name"
-	FieldDynamicSubagents      Field = "dynamic_subagents"
+	FieldModel            Field = "model"
+	FieldVariant          Field = "variant"
+	FieldReasoning        Field = "reasoning"
+	FieldToolSearch       Field = "tool_search"
+	FieldToolSearchName   Field = "tool_search_name"
+	FieldDynamicSubagents Field = "dynamic_subagents"
+	// FieldActiveAgentMessages enables model-authored messages to a live or
+	// completed child. It defaults to false.
+	FieldActiveAgentMessages   Field = "active_agent_messages"
 	FieldSubagentMaxDepth      Field = "subagents.max_depth"
 	FieldSubagentMaxConcurrent Field = "subagents.max_concurrent"
 	FieldSubagentMaxSpawned    Field = "subagents.max_spawned_per_root_interaction"
@@ -75,6 +78,7 @@ var fields = []Field{
 	FieldToolSearch,
 	FieldToolSearchName,
 	FieldDynamicSubagents,
+	FieldActiveAgentMessages,
 	FieldSubagentMaxDepth,
 	FieldSubagentMaxConcurrent,
 	FieldSubagentMaxSpawned,
@@ -692,6 +696,10 @@ type Config struct {
 	// It is intentionally disabled by default; profile discovery remains
 	// available for validation and inspection when this gate is off.
 	DynamicSubagents bool
+	// ActiveAgentMessages enables the model-facing child messaging surface. It
+	// is off by default: while the gate is closed no messaging Tool is offered
+	// and every delivery is refused rather than dropped.
+	ActiveAgentMessages bool
 	// Subagent holds the parsed `[subagents]` table.
 	Subagent              SubagentConfig
 	Mode                  OperatingMode
@@ -721,6 +729,9 @@ type Patch struct {
 	ToolSearch       *bool
 	ToolSearchName   *string
 	DynamicSubagents *bool
+	// ActiveAgentMessages opens the child messaging gate. It is env-only and
+	// file-only; no CLI flag selects it.
+	ActiveAgentMessages *bool
 	// SubagentLimitBehavior overrides the concurrent-cap behavior. It is
 	// env-only; an invalid value falls back to queue.
 	SubagentLimitBehavior *string
@@ -1269,6 +1280,10 @@ func apply(value Config, patch Patch, source Source) Config {
 	if patch.DynamicSubagents != nil {
 		value.DynamicSubagents = *patch.DynamicSubagents
 		value.sources[FieldDynamicSubagents] = source
+	}
+	if patch.ActiveAgentMessages != nil {
+		value.ActiveAgentMessages = *patch.ActiveAgentMessages
+		value.sources[FieldActiveAgentMessages] = source
 	}
 	if patch.SubagentLimitBehavior != nil {
 		value.Subagent.LimitBehavior = *patch.SubagentLimitBehavior

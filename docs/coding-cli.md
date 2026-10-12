@@ -889,6 +889,50 @@ Composer. `Ctrl+R` returns to durable Runs. Child approval and question prompts
 identify the exact child and resolve only that child Session; they do not grant
 or answer anything for the parent interaction.
 
+### Child messaging
+
+A running or completed subagent can receive a bounded text message from the
+conversation that owns it. The surface is off by default:
+
+```toml
+# ~/.pips/config.toml (or the file selected by --config)
+active_agent_messages = true
+```
+
+```sh
+PIPS_ACTIVE_AGENT_MESSAGES=true pips
+```
+
+`pips config show` reports the resolved `active_agent_messages` value and its
+source. While the gate is closed no messaging tool is offered and a call to it
+is refused, and no child can send one. The gate changes no authority: a
+recipient is still the same child with the same frozen capability intersection,
+approval scope, and Sandbox.
+
+The model-facing tool is `send_subagent_message`. Its required arguments are
+`subagent_id` and `text`; `delivery` is optional and defaults to `steer`. A
+`delivery` of `steer` joins the target's current run at its next turn boundary,
+`queue` waits for a later turn, and `interject` is a steer that arrives ahead of
+any message already queued to steer. Message text is limited to 32 KiB.
+`subagent_id` names a durable child of this conversation; the literal `parent`
+is available only to a child and targets the conversation that spawned it.
+
+Delivery depends on the target. A live child takes the message at its next turn
+boundary. A child that is still starting is parked until it becomes live. A
+completed child that this session delegated is woken: it continues in the
+background with the message as its prompt, keeping its own agent type and model.
+Every refusal is explicit rather than silent — the result envelope reports
+`not_found_or_not_owned`, `not_active_or_finalizing`, `saturated`,
+`quota_exceeded`, `admission_uncertain`, `not_accepted_before_deadline`,
+`unsupported`, `limit`, `channel_closed`, or `accepted`, together with its
+disposition. A quota or an unresolvable admission is therefore never confused
+with a successful delivery.
+
+An eligible child also receives the messaging tool, but only when its capability
+mode keeps it: `read-write`, `execute`, and `all` do, and `read-only` does not.
+A child may message a live sibling or the conversation that spawned it; it may
+not message itself.
+
 ### Interactive TUI themes and status line
 
 The interactive TUI supports the automatic selection `auto` and these built-in

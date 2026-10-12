@@ -138,7 +138,7 @@ func (r *Runtime) runAgent(
 	r.mu.Lock()
 	manager := r.subagents
 	r.mu.Unlock()
-	directInvocationID := "user-direct-" + current.id
+	directInvocationID := subagent.DirectAgentRunPrefix + current.id
 	if err := startDirectAgentInvocation(emitter, current, directInvocationID); err != nil {
 		return subagent.Result{}, errors.Join(
 			err,
