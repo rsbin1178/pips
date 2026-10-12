@@ -252,6 +252,8 @@ type TelemetryEvent struct {
 	TeamControlState        string                    `json:"team_control_state,omitempty"`
 	IntegrationState        string                    `json:"integration_state,omitempty"`
 	IntegrationVerification string                    `json:"integration_verification,omitempty"`
+	BackgroundKind          string                    `json:"background_kind,omitempty"`
+	BackgroundOutcome       string                    `json:"background_outcome,omitempty"`
 	Tool                    string                    `json:"tool,omitempty"`
 	ToolCalls               int                       `json:"tool_calls,omitempty"`
 	Stop                    agent.StopReason          `json:"stop,omitempty"`
@@ -354,6 +356,11 @@ func Telemetry(event Event) (TelemetryEvent, error) {
 		projected.Agent = "goal"
 		projected.Code = string(value.State.Status)
 		projected.Attempts = value.State.Attempts
+	case BackgroundTaskLifecycle:
+		projected.BackgroundKind = value.Kind
+		projected.BackgroundOutcome = backgroundTaskOutcome(value)
+		projected.DurationMillis = max(0, value.EndedAt.Sub(value.StartedAt).Milliseconds())
+		projected.Failed = projected.BackgroundOutcome == backgroundOutcomeFailed
 	case TeamLifecycle:
 		projectTeamTelemetry(&projected, value)
 	case TeamControlLifecycle:

@@ -773,7 +773,8 @@ func delegableDescriptor(descriptor catalog.Descriptor) bool {
 		switch descriptor.Source.ID {
 		case "coding":
 			switch descriptor.Name {
-			case "read", "ls", "glob", "grep", "apply_patch", "shell":
+			case "read", "ls", "glob", "grep", "apply_patch", "shell",
+				tools.MonitorName, tools.KillBackgroundName:
 				return true
 			}
 		case "coding.question":
@@ -809,7 +810,9 @@ func capabilityModeAllows(mode agentprofile.CapabilityMode, descriptor catalog.D
 			return true
 		case "apply_patch":
 			return mode == agentprofile.CapabilityReadWrite
-		case "shell":
+		case "shell", tools.MonitorName, tools.KillBackgroundName:
+			// A watch starts and stops processes, exactly as shell does, so it
+			// survives the execute mode and nothing else.
 			return mode == agentprofile.CapabilityExecute
 		}
 	case "coding.question":

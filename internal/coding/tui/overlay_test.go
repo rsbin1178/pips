@@ -15,6 +15,7 @@ import (
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding"
 	"github.com/rsbin1178/pips/internal/coding/approval"
+	"github.com/rsbin1178/pips/internal/coding/background"
 	"github.com/rsbin1178/pips/internal/coding/changes"
 	"github.com/rsbin1178/pips/internal/coding/config"
 	"github.com/rsbin1178/pips/internal/coding/modelcatalog"
@@ -481,6 +482,11 @@ type overlayController struct {
 	agentDetail          subagent.Detail
 	agentInspections     []string
 	agentCanceled        []string
+	backgroundKilled     []string
+	backgroundInspected  []string
+	backgroundKillErr    error
+	backgroundInspectErr error
+	backgroundInspection coding.BackgroundTaskInspection
 	skillSnapshot        coding.SkillSnapshot
 	skillErr             error
 	mcpSnapshot          coding.MCPSnapshot
@@ -786,6 +792,30 @@ func (c *overlayController) CancelSubagent(_ context.Context, childSessionID str
 	c.agentCanceled = append(c.agentCanceled, childSessionID)
 
 	return nil
+}
+
+func (c *overlayController) KillBackgroundTask(
+	_ context.Context,
+	taskID string,
+) (background.Outcome, error) {
+	c.backgroundKilled = append(c.backgroundKilled, taskID)
+	if c.backgroundKillErr != nil {
+		return background.OutcomeNotFound, c.backgroundKillErr
+	}
+
+	return background.OutcomeKilled, nil
+}
+
+func (c *overlayController) InspectBackgroundTask(
+	_ context.Context,
+	taskID string,
+) (coding.BackgroundTaskInspection, error) {
+	c.backgroundInspected = append(c.backgroundInspected, taskID)
+	if c.backgroundInspectErr != nil {
+		return coding.BackgroundTaskInspection{}, c.backgroundInspectErr
+	}
+
+	return c.backgroundInspection, nil
 }
 
 func (c *overlayController) Tree(context.Context) (coding.SessionTree, error) {

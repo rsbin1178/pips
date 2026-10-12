@@ -19,6 +19,7 @@ import (
 	"github.com/rsbin1178/pips/agent/team"
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding/approval"
+	"github.com/rsbin1178/pips/internal/coding/background"
 	"github.com/rsbin1178/pips/internal/coding/changes"
 	"github.com/rsbin1178/pips/internal/coding/config"
 	"github.com/rsbin1178/pips/internal/coding/planmode"
@@ -83,6 +84,8 @@ const (
 	EventSubagentFailed           EventType = "subagent.failed"
 	EventSubagentCanceled         EventType = "subagent.canceled"
 	EventSubagentInterrupted      EventType = "subagent.interrupted"
+	EventBackgroundStarted        EventType = "background.started"
+	EventBackgroundCompleted      EventType = "background.completed"
 	EventTeamLifecycle            EventType = "team.lifecycle"
 	EventTeamControlLifecycle     EventType = "team.control"
 	EventTeamIntegrationLifecycle EventType = "team.integration"
@@ -396,6 +399,23 @@ type SubagentLifecycle struct {
 	DurationMillis      int64                    `json:"duration_ms"`
 }
 
+// BackgroundTaskLifecycle is one registered background task's compact
+// projection. It is what the tasks pane lists under Watchers: the id, the kind,
+// the description-preferred text, and the running state. A task's output is
+// never part of it — a monitor's stdout reaches the model as events, not as
+// pane content.
+type BackgroundTaskLifecycle struct {
+	ID          string    `json:"id"`
+	Kind        string    `json:"kind"`
+	Description string    `json:"description,omitempty"`
+	Command     string    `json:"command,omitempty"`
+	StartedAt   time.Time `json:"started_at,omitzero"`
+	EndedAt     time.Time `json:"ended_at,omitzero"`
+	Completed   bool      `json:"completed"`
+	ExitCode    int       `json:"exit_code,omitempty"`
+	Signal      string    `json:"signal,omitempty"`
+}
+
 // TeamLifecycleStatus is the compact parent-visible state of one Team or one
 // exact Task Attempt. Full Worker output remains owned by the child Session.
 type TeamLifecycleStatus string
@@ -639,6 +659,7 @@ func (ToolStarted) eventPayload()              {}
 func (ToolUpdated) eventPayload()              {}
 func (ToolCompleted) eventPayload()            {}
 func (SubagentLifecycle) eventPayload()        {}
+func (BackgroundTaskLifecycle) eventPayload()  {}
 func (TeamLifecycle) eventPayload()            {}
 func (TeamControlLifecycle) eventPayload()     {}
 func (TeamIntegrationLifecycle) eventPayload() {}
@@ -698,7 +719,8 @@ func validateEnvelopeIDs(event Event) error {
 	case EventSessionOpened, EventSessionClosed, EventSessionTreeChanged,
 		EventSessionNavigated, EventSessionForked, EventCompactionStarted,
 		EventCompactionCompleted, EventModeChanged, EventTeamLifecycle,
-		EventTeamControlLifecycle, EventTeamIntegrationLifecycle, EventGoalChanged:
+		EventTeamControlLifecycle, EventTeamIntegrationLifecycle, EventGoalChanged,
+		EventBackgroundStarted, EventBackgroundCompleted:
 		if event.InteractionID != "" || event.RunID != "" {
 			return invalidEvent("session event has interaction or run id")
 		}
@@ -932,6 +954,14 @@ func validatePayload(eventType EventType, payload EventPayload) error {
 		}
 
 		if err := validateGoalChangedPayload(value); err != nil {
+			return payloadInvalid(eventType, payload, err)
+		}
+	case BackgroundTaskLifecycle:
+		if eventType != EventBackgroundStarted && eventType != EventBackgroundCompleted {
+			return payloadMismatch(eventType, payload)
+		}
+
+		if err := validateBackgroundTaskLifecycle(value); err != nil {
 			return payloadInvalid(eventType, payload, err)
 		}
 	case TeamLifecycle:
@@ -1667,6 +1697,34 @@ func validDigest(value string) bool {
 	_, err := hex.DecodeString(value)
 
 	return err == nil
+}
+
+// validateBackgroundTaskLifecycle bounds one background task projection. The
+// pane needs the identity, the description-preferred text, and the running
+// state; output content is not part of the payload at all.
+func validateBackgroundTaskLifecycle(value BackgroundTaskLifecycle) error {
+	if err := validateEventID("background task id", value.ID, true); err != nil {
+		return err
+	}
+
+	if value.Kind != string(background.KindMonitor) {
+		return errors.New("invalid background task kind")
+	}
+
+	if !validBoundedText(value.Description, maxEventTextBytes, true) ||
+		!validBoundedText(value.Command, maxEventTextBytes, true) {
+		return errors.New("invalid background task text")
+	}
+
+	if value.Completed != !value.EndedAt.IsZero() {
+		return errors.New("invalid background task terminal state")
+	}
+
+	if value.Signal != "" && !validIdentifierText(value.Signal, maxEventIDBytes, false) {
+		return errors.New("invalid background task signal")
+	}
+
+	return nil
 }
 
 func validateSubagentLifecycle(eventType EventType, value SubagentLifecycle) error {

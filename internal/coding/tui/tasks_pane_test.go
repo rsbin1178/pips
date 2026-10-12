@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding"
+	"github.com/rsbin1178/pips/internal/coding/background"
 	"github.com/rsbin1178/pips/internal/coding/subagent"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -283,6 +284,129 @@ func TestTasksPaneKeysKillAndInspect(t *testing.T) {
 		assert.Empty(t, controller.agentCanceled, "x is the composer's while the pane is unfocused")
 		assert.Equal(t, "x", model.composer.Value())
 	})
+}
+
+func TestTasksPaneListsWatchesWithTheirTwoActions(t *testing.T) {
+	t.Parallel()
+
+	controller := newOverlayController(readyState())
+	controller.backgroundInspection = coding.BackgroundTaskInspection{
+		Task: background.Snapshot{
+			ID: "monitor-1", Kind: background.KindMonitor,
+			Description: "deploy log", Command: "tail -f deploy.log",
+			Start: tasksPaneNow.Add(-12 * time.Second),
+		},
+		Output: "line one\nline two\n",
+	}
+	model := readyModelWithController(t, controller, true)
+	model.state.BackgroundTasks = []coding.BackgroundTaskLifecycle{{
+		ID: "monitor-1", Kind: string(background.KindMonitor),
+		Description: "deploy log", Command: "tail -f deploy.log",
+		StartedAt: tasksPaneNow.Add(-12 * time.Second),
+	}}
+
+	model.syncTasksPane(tasksPaneNow)
+	require.True(t, model.tasksPane.visible, "a running watch opens the pane")
+
+	content := model.View().Content
+	assert.Contains(t, content, "▾ Watchers 1")
+	assert.Contains(t, content, backgroundTaskTag+" deploy log")
+	assert.Contains(t, content, tasksPaneKillLabel, "a running watch affords the kill control")
+	assert.NotContains(t, content, "▾ Subagents")
+
+	rows := model.tasksPaneRows()
+	require.Len(t, rows, 1)
+	assert.Equal(t, tasksPaneWatchers, tasksPaneGroupOf(rows[0]))
+	assert.Equal(t, "12s", model.tasksPaneRowMeta(rows[0], tasksPaneNow),
+		"a watch shows its own elapsed time")
+
+	model.toggleTasksPane()
+
+	// x stops the watch through the control plane the model's stop Tool uses.
+	_, command := model.Update(key("x"))
+	require.NotNil(t, command)
+	driveModelCommands(t, model, command)
+	assert.Equal(t, []string{"monitor-1"}, controller.backgroundKilled)
+
+	// Enter opens the bounded detail view, because a watch has no transcript.
+	_, command = model.Update(key("enter"))
+	require.NotNil(t, command)
+	driveModelCommands(t, model, command)
+	assert.Equal(t, []string{"monitor-1"}, controller.backgroundInspected)
+	assert.Equal(t, routeToolDetail, model.route.kind)
+	require.NotNil(t, model.route.toolDetail)
+	assert.Equal(t, "Watch details", model.route.toolDetail.title)
+
+	detail := model.toolDetailRouteContent()
+	assert.Contains(t, detail, "deploy log")
+	assert.Contains(t, detail, "running")
+	assert.Contains(t, detail, "line one")
+}
+
+// TestTasksPaneHidesAFinishedWatchUnlessAsked checks the show-done rule applies
+// to a watch the same way it does to a child.
+func TestTasksPaneHidesAFinishedWatchUnlessAsked(t *testing.T) {
+	t.Parallel()
+
+	model, _ := tasksPaneModel(t)
+	model.state.BackgroundTasks = []coding.BackgroundTaskLifecycle{{
+		ID: "monitor-1", Kind: string(background.KindMonitor),
+		Description: "finished watch", Completed: true,
+		StartedAt: tasksPaneNow.Add(-5 * time.Second),
+		EndedAt:   tasksPaneNow,
+	}}
+
+	model.syncTasksPane(tasksPaneNow)
+	assert.Empty(t, model.tasksPaneRows(), "a finished watch is hidden until the reader asks for it")
+
+	model.tasksPane.showDone = true
+	rows := model.tasksPaneRows()
+	require.Len(t, rows, 1)
+	assert.Equal(t, "monitor-1", rows[0].taskID)
+	assert.False(t, rows[0].running)
+	assert.Equal(t, tasksPaneWatchers, tasksPaneGroupOf(rows[0]))
+	assert.Equal(t, "5s", model.tasksPaneRowMeta(rows[0], tasksPaneNow))
+}
+
+// TestTasksPaneSyncsWithALiveWatchFrame drives the whole TUI path for a watch: a
+// background.started event arrives on the session stream, the reducer projects
+// it into the state the pane reads, and the pane paints the Watchers row without
+// the test seeding that state by hand.
+func TestTasksPaneSyncsWithALiveWatchFrame(t *testing.T) {
+	t.Parallel()
+
+	state := readyState()
+	state.Sequence = 3
+	state.Phase = coding.PhaseRunning
+	state.Interaction = coding.InteractionState{ID: "interaction-1", Active: true}
+	state.Runs = []coding.RunState{{ID: "run-1", Active: true, TurnOpen: true, Turn: 1}}
+
+	model := readyModelWithController(t, stubController{state: state}, true)
+	model.runtimeState = false
+	model.observedSequence = 3
+
+	model.reduceStreamBatch([]streamItem{{event: coding.Event{
+		Schema: coding.EventSchema, Sequence: 4, Time: time.Unix(1, 0).UTC(),
+		SessionID: "session-1",
+		Type:      coding.EventBackgroundStarted,
+		Payload: coding.BackgroundTaskLifecycle{
+			ID: "monitor-1", Kind: string(background.KindMonitor),
+			Description: "deploy log", Command: "tail -f deploy.log",
+			StartedAt: time.Unix(1, 0).UTC(),
+		},
+	}}})
+
+	require.NoError(t, model.streamErr)
+	require.Len(t, model.state.BackgroundTasks, 1, "the reducer projects the watch into the pane's state")
+	assert.Equal(t, "monitor-1", model.state.BackgroundTasks[0].ID)
+
+	// The pane reads that projection on the next frame.
+	model.syncTasksPane(tasksPaneNow)
+	assert.True(t, model.tasksPane.visible, "a live watch opens the pane")
+
+	content := model.View().Content
+	assert.Contains(t, content, "▾ Watchers 1")
+	assert.Contains(t, content, backgroundTaskTag+" deploy log")
 }
 
 func TestTasksPaneSyncsWithALiveChildFrame(t *testing.T) {

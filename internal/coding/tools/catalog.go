@@ -34,6 +34,7 @@ type PlanFile struct {
 type catalogConfig struct {
 	shell   agent.Tool
 	monitor agent.Tool
+	kill    KillBackground
 	plan    *PlanFile
 }
 
@@ -96,6 +97,25 @@ func WithControlledMonitor(tool agent.Tool) CatalogOption {
 		}
 
 		cfg.monitor = tool
+
+		return nil
+	}
+}
+
+// WithKillBackground adds the one control operation a background-task stop
+// routes through. A catalog built without it offers no stop Tool, which is what
+// a capability mode that keeps no monitor also keeps no stop for.
+func WithKillBackground(kill KillBackground) CatalogOption {
+	return func(cfg *catalogConfig) error {
+		if kill == nil {
+			return errors.New("coding tools: nil background control")
+		}
+
+		if cfg.kill != nil {
+			return errors.New("coding tools: background control already configured")
+		}
+
+		cfg.kill = kill
 
 		return nil
 	}
@@ -173,6 +193,15 @@ func NewCatalog(
 	if config.monitor != nil {
 		entries = append(entries, localEntry(
 			config.monitor,
+			catalog.RiskPrivileged,
+			"process",
+			"monitor",
+		))
+	}
+
+	if config.kill != nil {
+		entries = append(entries, localEntry(
+			NewKillBackgroundTool(config.kill),
 			catalog.RiskPrivileged,
 			"process",
 			"monitor",

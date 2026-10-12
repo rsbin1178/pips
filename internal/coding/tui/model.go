@@ -624,6 +624,10 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.route.err = message.err
 
 		return m, nil
+	case backgroundKillResultMsg:
+		return m, m.applyBackgroundKillResult(message)
+	case backgroundInspectResultMsg:
+		return m, m.applyBackgroundInspectResult(message)
 	case teamWorkerRouteDataMsg:
 		return m.applyTeamWorkerRouteData(message)
 	case teamWorkerRouteEventMsg:

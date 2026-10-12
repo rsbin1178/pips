@@ -19,6 +19,7 @@ import (
 	"github.com/rsbin1178/pips/internal/coding"
 	"github.com/rsbin1178/pips/internal/coding/approval"
 	"github.com/rsbin1178/pips/internal/coding/attachment"
+	"github.com/rsbin1178/pips/internal/coding/background"
 	"github.com/rsbin1178/pips/internal/coding/changes"
 	"github.com/rsbin1178/pips/internal/coding/config"
 	"github.com/rsbin1178/pips/internal/coding/modelcatalog"
@@ -157,6 +158,8 @@ type Controller interface {
 	SetSkillEnabled(context.Context, coding.SkillID, bool) error
 	WaitSubagent(context.Context, string) (subagent.Result, error)
 	CancelSubagent(context.Context, string) error
+	KillBackgroundTask(context.Context, string) (background.Outcome, error)
+	InspectBackgroundTask(context.Context, string) (coding.BackgroundTaskInspection, error)
 	NewSession(context.Context) error
 	ResumeSession(context.Context, string) error
 	ForkSession(context.Context, string) error

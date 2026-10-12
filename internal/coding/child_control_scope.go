@@ -18,6 +18,7 @@ import (
 	"github.com/rsbin1178/pips/agent/harness"
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding/approval"
+	"github.com/rsbin1178/pips/internal/coding/background"
 	"github.com/rsbin1178/pips/internal/coding/changes/git"
 	"github.com/rsbin1178/pips/internal/coding/compaction"
 	"github.com/rsbin1178/pips/internal/coding/config"
@@ -60,6 +61,14 @@ type childScopeFactory struct {
 	// recovery episode is derived from. Zero leaves the transport default.
 	streamIdleTimeout time.Duration
 	mcpEntries        []catalog.Entry
+	// backgroundTasks is the session's one background-task registry. A child
+	// watch registers on it, so a monitor a child starts is the same kind of
+	// session task the conversation's own watches are, and its events reach the
+	// one conversation the Runtime owns.
+	backgroundTasks *background.Registry
+	// killBackground is the one control operation a background-task stop routes
+	// through, shared with the conversation's own stop Tool.
+	killBackground tools.KillBackground
 	// executorConfig and gitConfig let a child that runs outside the parent
 	// workspace build its own process executor and Git inspector there.
 	executorConfig execution.ExecutorConfig
@@ -336,6 +345,14 @@ func newChildControlScope(
 	}
 	scope.validator = validator
 
+	handlers := []approval.Handler{tools.NewShellHandlerForSandbox(factory.sandbox, factory.network)}
+	if factory.backgroundTasks != nil {
+		handlers = append(handlers, tools.NewMonitorHandlerForSandbox(
+			factory.backgroundTasks,
+			factory.sandbox,
+			factory.network,
+		))
+	}
 	controller, err := approval.New(
 		factory.workspace,
 		scope.child,
@@ -343,7 +360,7 @@ func newChildControlScope(
 		&scope.pending,
 		factory.policy,
 		factory.executor,
-		tools.NewShellHandlerForSandbox(factory.sandbox, factory.network),
+		handlers...,
 	)
 	if err != nil {
 		cancel()
@@ -481,7 +498,18 @@ func (s *childControlScope) buildCatalog(
 	if !found {
 		return nil, nil, nil, fmt.Errorf("%w: child controlled shell is unavailable", subagent.ErrInvalid)
 	}
-	local, err := tools.NewCatalog(s.factory.tree, s.factory.toolLimits, tools.WithControlledShell(shell))
+	localOptions := []tools.CatalogOption{tools.WithControlledShell(shell)}
+	// A child keeps the watch surface exactly when its capability mode does, and
+	// every watch it starts registers on the session's own registry, so its
+	// events land in the one conversation this Runtime owns rather than opening
+	// a second delivery queue.
+	if monitor, ok := s.controller.Tool(tools.MonitorName); ok {
+		localOptions = append(localOptions, tools.WithControlledMonitor(monitor))
+		if s.factory.killBackground != nil {
+			localOptions = append(localOptions, tools.WithKillBackground(s.factory.killBackground))
+		}
+	}
+	local, err := tools.NewCatalog(s.factory.tree, s.factory.toolLimits, localOptions...)
 	if err != nil {
 		return nil, nil, nil, err
 	}

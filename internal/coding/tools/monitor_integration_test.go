@@ -27,6 +27,8 @@ type monitorRecorder struct {
 	completions []background.Completion
 }
 
+func (r *monitorRecorder) BackgroundStarted(background.Snapshot) {}
+
 func (r *monitorRecorder) BackgroundEvent(event background.Event) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
