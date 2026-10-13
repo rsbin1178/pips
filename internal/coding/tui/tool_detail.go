@@ -375,7 +375,7 @@ func taskListChecklistRows(update tasklist.Update) []toolDetailRow {
 	for _, item := range update.Plan {
 		rows = append(rows, toolDetailRow{
 			tone: detailToneTask(item.Status), indent: 1,
-			text: taskListGlyph(item.Status) + " " + oneLineToolText(item.Step),
+			text: taskListGlyph(item.Status) + " " + taskListItemLabel(item),
 		})
 	}
 

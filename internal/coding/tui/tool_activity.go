@@ -874,13 +874,23 @@ func taskListRows(activity toolActivity, maximum int) []string {
 
 	rows := make([]string, 0, len(update.Plan))
 	for _, item := range update.Plan {
-		rows = append(rows, taskListGlyph(item.Status)+" "+oneLineToolText(item.Step))
+		rows = append(rows, taskListGlyph(item.Status)+" "+taskListItemLabel(item))
 	}
 	if maximum > 0 && len(rows) > maximum {
 		rows = rows[:maximum]
 	}
 
 	return rows
+}
+
+// taskListItemLabel names an item by its step, falling back to its id when a
+// status-only merge omits the step, so the row still reads as a step.
+func taskListItemLabel(item tasklist.Item) string {
+	if item.Step == "" {
+		return oneLineToolText(item.ID)
+	}
+
+	return oneLineToolText(item.Step)
 }
 
 func taskListGlyph(status tasklist.Status) string {

@@ -73,7 +73,7 @@ func TestCatalogMetadataAndConcurrency(t *testing.T) {
 func TestTaskCatalogIsBoundedApplicationState(t *testing.T) {
 	t.Parallel()
 
-	value, err := tools.NewTaskCatalog()
+	value, err := tools.NewTaskCatalog(nil)
 	require.NoError(t, err)
 	descriptors, err := value.Search(t.Context(), catalog.AllowAll("test", catalog.RiskRead), "")
 	require.NoError(t, err)
@@ -492,13 +492,14 @@ func temporaryFiles(t *testing.T, root string) []string {
 	return matches
 }
 
-// TestTaskCatalogDescribesCancelledAndMeta pins the tool's declared schema: the
-// status description names cancelled and an item carries an optional bounded
-// meta object, while step and status stay the required fields.
-func TestTaskCatalogDescribesCancelledAndMeta(t *testing.T) {
+// TestTaskCatalogDescribesTheFoldSurface pins the tool's declared schema: the
+// status description names cancelled, an item carries an optional bounded meta
+// object, an item's id and the update's merge are described, and no item field
+// is demanded because the fold decides what each mode needs.
+func TestTaskCatalogDescribesTheFoldSurface(t *testing.T) {
 	t.Parallel()
 
-	value, err := tools.NewTaskCatalog()
+	value, err := tools.NewTaskCatalog(nil)
 	require.NoError(t, err)
 	snapshot, err := value.Snapshot(t.Context(), catalog.AllowAll("test", catalog.RiskRead))
 	require.NoError(t, err)
@@ -511,8 +512,13 @@ func TestTaskCatalogDescribesCancelledAndMeta(t *testing.T) {
 	require.NotNil(t, plan)
 	require.NotNil(t, plan.Items)
 	assert.Contains(t, plan.Items.Properties, "meta", "meta is described on an item")
-	assert.Equal(t, []string{"step", "status"}, plan.Items.Required, "meta stays optional")
+	assert.Contains(t, plan.Items.Properties, "id", "an item's id is described")
+	assert.Empty(t, plan.Items.Required, "the fold decides what each mode needs")
 	assert.Equal(t, []string{"plan"}, schema.Required,
-		"the optional explanation is described but not demanded")
+		"the optional explanation and merge are described but not demanded")
 	assert.Contains(t, plan.Items.Properties["status"].Description, "cancelled")
+
+	merge := schema.Properties["merge"]
+	require.NotNil(t, merge)
+	assert.True(t, merge.Nullable, "an absent merge is distinguishable from false")
 }

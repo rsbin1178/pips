@@ -262,7 +262,11 @@ func tasksFromPath(path []harness.Entry) tasklist.Snapshot {
 			continue
 		}
 		if update, ok := tasklist.FromMessage(entry.Message); ok {
-			snapshot = tasklist.FromUpdate(update)
+			// A call that cannot be folded leaves the plan alone, the way a
+			// malformed call is ignored.
+			if folded, foldErr := tasklist.Apply(snapshot, update); foldErr == nil {
+				snapshot = folded
+			}
 		}
 	}
 
