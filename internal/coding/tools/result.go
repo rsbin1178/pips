@@ -42,19 +42,21 @@ type ResultNext struct {
 }
 
 type result struct {
-	OK         bool
-	Tool       string
-	Code       string
-	Truncated  bool
-	Reason     string
-	Problem    *ResultProblem
-	Counts     ResultCounts
-	Next       ResultNext
-	Execution  *ResultExecution
-	Monitor    *ResultMonitor
-	Kill       *ResultKill
-	Diagnostic *execution.SandboxDiagnostic
-	Body       string
+	OK          bool
+	Tool        string
+	Code        string
+	Truncated   bool
+	Reason      string
+	Problem     *ResultProblem
+	Counts      ResultCounts
+	Next        ResultNext
+	Execution   *ResultExecution
+	Monitor     *ResultMonitor
+	Kill        *ResultKill
+	TaskOutput  *ResultTaskOutput
+	TaskOutputs *ResultTaskOutputs
+	Diagnostic  *execution.SandboxDiagnostic
+	Body        string
 }
 
 // ResultProblem describes a safe correction for a failed tool call.
@@ -97,38 +99,68 @@ type ResultKill struct {
 	Outcome string `json:"outcome"`
 }
 
+// ResultTaskOutput is one background task's structured output record. Its
+// fields are the reference's, so a reader that knows that shape reads this one.
+type ResultTaskOutput struct {
+	TaskID         string  `json:"task_id"`
+	Command        string  `json:"command,omitempty"`
+	Status         string  `json:"status"`
+	ExitCode       *int    `json:"exit_code,omitempty"`
+	Started        string  `json:"started,omitempty"`
+	Ended          string  `json:"ended,omitempty"`
+	DurationSecs   float64 `json:"duration_secs"`
+	Output         string  `json:"output,omitempty"`
+	OutputFile     string  `json:"output_file,omitempty"`
+	Truncated      bool    `json:"truncated,omitempty"`
+	TruncationHint string  `json:"truncation_hint,omitempty"`
+	RawOutputBytes int64   `json:"raw_output_bytes"`
+}
+
+// ResultTaskOutputs is the structured payload of a multi-id read: the mode the
+// read ran under, one record per asked id in order, and the completed-count
+// summary the body ends with.
+type ResultTaskOutputs struct {
+	Mode    string             `json:"mode"`
+	Results []ResultTaskOutput `json:"results"`
+	Summary string             `json:"summary"`
+}
+
 // ResultHeader is the machine-readable first line of every coding-tool result.
 type ResultHeader struct {
-	Schema     string                       `json:"schema"`
-	OK         bool                         `json:"ok"`
-	Tool       string                       `json:"tool"`
-	Code       string                       `json:"code,omitempty"`
-	Truncated  bool                         `json:"truncated,omitempty"`
-	Reason     string                       `json:"reason,omitempty"`
-	Problem    *ResultProblem               `json:"problem,omitempty"`
-	Counts     ResultCounts                 `json:"counts,omitzero"`
-	Next       ResultNext                   `json:"next,omitzero"`
-	Execution  *ResultExecution             `json:"execution,omitempty"`
-	Monitor    *ResultMonitor               `json:"monitor,omitempty"`
-	Kill       *ResultKill                  `json:"kill,omitempty"`
-	Diagnostic *execution.SandboxDiagnostic `json:"diagnostic,omitempty"`
+	Schema      string                       `json:"schema"`
+	OK          bool                         `json:"ok"`
+	Tool        string                       `json:"tool"`
+	Code        string                       `json:"code,omitempty"`
+	Truncated   bool                         `json:"truncated,omitempty"`
+	Reason      string                       `json:"reason,omitempty"`
+	Problem     *ResultProblem               `json:"problem,omitempty"`
+	Counts      ResultCounts                 `json:"counts,omitzero"`
+	Next        ResultNext                   `json:"next,omitzero"`
+	Execution   *ResultExecution             `json:"execution,omitempty"`
+	Monitor     *ResultMonitor               `json:"monitor,omitempty"`
+	Kill        *ResultKill                  `json:"kill,omitempty"`
+	TaskOutput  *ResultTaskOutput            `json:"task_output,omitempty"`
+	TaskOutputs *ResultTaskOutputs           `json:"task_outputs,omitempty"`
+	Diagnostic  *execution.SandboxDiagnostic `json:"diagnostic,omitempty"`
 }
 
 func (r result) render() string {
 	header, err := json.Marshal(ResultHeader{
-		Schema:     resultSchema,
-		OK:         r.OK,
-		Tool:       r.Tool,
-		Code:       r.Code,
-		Truncated:  r.Truncated,
-		Reason:     r.Reason,
-		Problem:    r.Problem,
-		Counts:     r.Counts,
-		Next:       r.Next,
-		Execution:  r.Execution,
-		Monitor:    r.Monitor,
-		Kill:       r.Kill,
-		Diagnostic: r.Diagnostic,
+		Schema:      resultSchema,
+		OK:          r.OK,
+		Tool:        r.Tool,
+		Code:        r.Code,
+		Truncated:   r.Truncated,
+		Reason:      r.Reason,
+		Problem:     r.Problem,
+		Counts:      r.Counts,
+		Next:        r.Next,
+		Execution:   r.Execution,
+		Monitor:     r.Monitor,
+		Kill:        r.Kill,
+		TaskOutput:  r.TaskOutput,
+		TaskOutputs: r.TaskOutputs,
+		Diagnostic:  r.Diagnostic,
 	})
 	if err != nil {
 		panic(fmt.Sprintf("coding tools: render result header: %v", err))

@@ -179,7 +179,12 @@ func TestRegistryStreamsOneBatchEventPerTickAndOneCompletion(t *testing.T) {
 	assert.Equal(t, 0, completion.Snapshot.ExitCode)
 	assert.False(t, completion.Snapshot.End.IsZero())
 	assert.False(t, completion.Killed)
-	assert.Equal(t, "line-1\nline-2", completion.Tail)
+
+	// The log itself is still readable by id: the completion points at the
+	// task-output Tool, and the pane's own read keeps its bounded tail.
+	tail, ok := fixture.registry.Tail(snapshot.ID, 1024)
+	require.True(t, ok)
+	assert.Equal(t, "line-1\nline-2", tail)
 
 	// The projection is stable after the task ends.
 	stored, ok := fixture.registry.Snapshot(snapshot.ID)
@@ -209,7 +214,7 @@ func TestRegistryTaskIDsAreUniqueAcrossRegistries(t *testing.T) {
 	assert.True(t, strings.HasPrefix(one.ID, string(background.KindMonitor)+"-1-"))
 }
 
-func TestRegistryInlinesOnlyABoundedOutputTail(t *testing.T) {
+func TestRegistryTailStaysBoundedForThePane(t *testing.T) {
 	t.Parallel()
 
 	observer := &recorder{}
@@ -220,10 +225,11 @@ func TestRegistryInlinesOnlyABoundedOutputTail(t *testing.T) {
 		lines = append(lines, fmt.Sprintf("line-%02d", index))
 	}
 
-	launchMonitor(t, fixture.registry, writeStart(t, lines...), nil)
+	snapshot := launchMonitor(t, fixture.registry, writeStart(t, lines...), nil)
+	waitForCompletion(t, observer, 1)
 
-	completions := waitForCompletion(t, observer, 1)
-	tail := completions[0].Tail
+	tail, ok := fixture.registry.Tail(snapshot.ID, 24)
+	require.True(t, ok)
 
 	require.LessOrEqual(t, len(tail), 24)
 	assert.Contains(t, tail, "line-39")
@@ -251,15 +257,17 @@ func TestRegistryBoundsTheOutputFileIndependentlyOfTheEvent(t *testing.T) {
 	fixture := newRegistryFixture(t, observer, 64, 1024)
 
 	snapshot := launchMonitor(t, fixture.registry, writeStart(t, strings.Repeat("x", 4096)), nil)
-	completions := waitForCompletion(t, observer, 1)
+	waitForCompletion(t, observer, 1)
 
 	content, err := os.ReadFile(filepath.Join(fixture.dir, snapshot.ID+".log"))
 	require.NoError(t, err)
 	assert.Equal(t, strings.Repeat("x", 64), string(content))
 
 	// The pipeline only ever reads what the bounded file holds, so neither the
-	// event nor the inlined tail can exceed the file bound.
-	assert.Equal(t, strings.Repeat("x", 64), completions[0].Tail)
+	// event nor the pane's tail can exceed the file bound.
+	tail, ok := fixture.registry.Tail(snapshot.ID, 1024)
+	require.True(t, ok)
+	assert.Equal(t, strings.Repeat("x", 64), tail)
 }
 
 func TestRegistryKillVocabularyAndCompletionFlags(t *testing.T) {

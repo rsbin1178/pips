@@ -726,6 +726,11 @@ func (r *Runtime) openInteraction(
 			return r.KillBackgroundTask(ctx, taskID, background.KillModel)
 		}),
 		tools.WithKnownBackgroundIDs(r.KnownBackgroundTaskIDs),
+		tools.WithReadBackgroundTasks(r.readBackgroundTasks),
+		tools.WithTaskLogRead(tools.TaskLogRead{
+			Admit: r.admitBackgroundLogPath,
+			Bytes: backgroundOutputBytes,
+		}),
 	}
 	if planFile := r.planFileBoundary(); planFile != nil {
 		localOptions = append(localOptions, tools.WithPlanFile(*planFile))
@@ -884,7 +889,13 @@ func (r *Runtime) openInteraction(
 			killBackground: func(ctx context.Context, taskID string) (background.Outcome, error) {
 				return r.KillBackgroundTask(ctx, taskID, background.KillModel)
 			},
-			knownBackgroundIDs: r.KnownBackgroundTaskIDs,
+			knownBackgroundIDs:  r.KnownBackgroundTaskIDs,
+			readBackgroundTasks: r.readBackgroundTasks,
+			taskLogRead: tools.TaskLogRead{
+				Admit: r.admitBackgroundLogPath,
+				Bytes: backgroundOutputBytes,
+			},
+			monitorOwner:       r.currentInteractionID,
 			messages:           r.subagents.MessageCoordinator(),
 			wakeManager:        r.subagents,
 			wakeDispatcher:     func() subagent.Dispatcher { return modelDispatcher },
@@ -1638,6 +1649,25 @@ func (r *Runtime) interactionPaused(current *interaction) bool {
 	return r.interaction == current && r.state.Phase == PhasePaused
 }
 
+// currentInteractionID returns the id of the interaction now running, or an
+// empty string when none is. The monitor handler resolves it at detach time,
+// because the approval controller's handler is built once per Runtime while the
+// interaction is per prompt.
+func (r *Runtime) currentInteractionID() string {
+	if r == nil {
+		return ""
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.interaction == nil {
+		return ""
+	}
+
+	return r.interaction.id
+}
+
 //nolint:gocyclo // Completion must collect every cleanup and terminal-event error before returning.
 func (r *Runtime) finishInteraction(
 	ctx context.Context,
@@ -1647,6 +1677,13 @@ func (r *Runtime) finishInteraction(
 ) error {
 	if current == nil {
 		return nil
+	}
+
+	// A cancelled interaction cancels the watches it started, and only those: an
+	// earlier interaction's watches keep running. No turn remains to report
+	// them, so their completions produce no queue record.
+	if outcome == InteractionCanceled && r.backgroundTasks != nil {
+		r.backgroundTasks.CancelOwned(current.id, background.KillPromptEnd)
 	}
 
 	errs := make([]error, 0, 4)

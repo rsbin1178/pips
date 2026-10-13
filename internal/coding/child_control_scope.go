@@ -71,6 +71,14 @@ type childScopeFactory struct {
 	// knownBackgroundIDs is the enumeration a not-found stop names.
 	killBackground     tools.KillBackground
 	knownBackgroundIDs tools.KnownBackgroundIDs
+	// readBackgroundTasks and taskLogRead are the read half of the same
+	// registry: the task-output/wait Tools' one read operation, and the exact
+	// path admission that lets the read Tool open a child's own watch log.
+	readBackgroundTasks tools.ReadBackgroundTasks
+	taskLogRead         tools.TaskLogRead
+	// monitorOwner resolves the interaction a child's watch belongs to, so a
+	// cancelled interaction cancels the watches its children started too.
+	monitorOwner func() string
 	// executorConfig and gitConfig let a child that runs outside the parent
 	// workspace build its own process executor and Git inspector there.
 	executorConfig execution.ExecutorConfig
@@ -349,10 +357,11 @@ func newChildControlScope(
 
 	handlers := []approval.Handler{tools.NewShellHandlerForSandbox(factory.sandbox, factory.network)}
 	if factory.backgroundTasks != nil {
-		handlers = append(handlers, tools.NewMonitorHandlerForSandbox(
+		handlers = append(handlers, tools.NewMonitorHandlerForSandboxWithOwner(
 			factory.backgroundTasks,
 			factory.sandbox,
 			factory.network,
+			factory.monitorOwner,
 		))
 	}
 	controller, err := approval.New(
@@ -516,6 +525,15 @@ func (s *childControlScope) buildCatalog(
 				localOptions,
 				tools.WithKnownBackgroundIDs(s.factory.knownBackgroundIDs),
 			)
+		}
+		if s.factory.readBackgroundTasks != nil {
+			localOptions = append(
+				localOptions,
+				tools.WithReadBackgroundTasks(s.factory.readBackgroundTasks),
+			)
+		}
+		if s.factory.taskLogRead.Admit != nil {
+			localOptions = append(localOptions, tools.WithTaskLogRead(s.factory.taskLogRead))
 		}
 	}
 	local, err := tools.NewCatalog(s.factory.tree, s.factory.toolLimits, localOptions...)

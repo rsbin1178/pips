@@ -10,6 +10,7 @@ import (
 
 	"github.com/rsbin1178/pips/internal/coding/background"
 	"github.com/rsbin1178/pips/internal/coding/subagent"
+	"github.com/rsbin1178/pips/internal/coding/tools"
 )
 
 const (
@@ -209,6 +210,47 @@ func (r *Runtime) KnownBackgroundTaskIDs(ctx context.Context) []string {
 	return ids
 }
 
+// readBackgroundTasks is the one read operation the task-output and
+// blocking-wait Tools route through, so the runtime owns id resolution. A poll
+// takes a snapshot; any other mode waits inside the registry, which is
+// event-driven on each task's own ended channel.
+func (r *Runtime) readBackgroundTasks(
+	ctx context.Context,
+	ids []string,
+	mode string,
+	budget time.Duration,
+) ([]background.TaskOutput, background.WaitOutcome) {
+	if r == nil || r.backgroundTasks == nil {
+		return nil, background.WaitOutcomeCompleted
+	}
+
+	if mode == tools.TaskOutputModePoll || budget <= 0 {
+		return r.backgroundTasks.TaskOutputs(ids), background.WaitOutcomeCompleted
+	}
+
+	return r.backgroundTasks.Wait(ctx, ids, mode == tools.TaskOutputModeWaitAny, budget)
+}
+
+// admitBackgroundLogPath reports whether the requested value is exactly the log
+// path of a task the registry still knows, and returns that path. The match is
+// exact, so no other path, another directory, a traversed spelling, or an
+// unknown id's log is admitted, and the read Tool learns nothing about the
+// session directory.
+func (r *Runtime) admitBackgroundLogPath(requested string) (string, bool) {
+	if r == nil || r.backgroundTasks == nil || requested == "" {
+		return "", false
+	}
+
+	for _, id := range r.KnownBackgroundTaskIDs(context.Background()) {
+		path, ok := r.backgroundTasks.OutputPath(id)
+		if ok && path == requested {
+			return path, true
+		}
+	}
+
+	return "", false
+}
+
 // backgroundTaskOutcome classifies one task's projection into the closed,
 // low-cardinality vocabulary the pane and telemetry share. It is content-free
 // by construction: no command, description, path, output, or id takes part.
@@ -315,8 +357,12 @@ func (o *backgroundObserver) deliverBackground() error {
 
 // backgroundMessages renders one queue record per delivery unit: the surviving
 // events become one batch, and each completion becomes its own record. A
-// completion whose kill outcome a Tool result already delivered produces no
-// record, so the model is never woken twice for one kill.
+// completion produces no record when a Tool result already delivered its kill
+// outcome, when the kill came from the cancelled interaction, or when the
+// registry reports the result already taken by a read. The taken check is live
+// rather than a field captured when the completion was reported, because a
+// waiter registers before it blocks and marks the result when it returns, so
+// the live state covers both orderings and exactly one surface carries a result.
 func (o *backgroundObserver) backgroundMessages(
 	events []background.Event,
 	completions []background.Completion,
@@ -346,7 +392,15 @@ func (o *backgroundObserver) backgroundMessages(
 	}
 
 	for _, completion := range completions {
-		if completion.Killed && completion.KillResultDelivered {
+		if completion.KillResultDelivered {
+			continue
+		}
+
+		if completion.Killed && completion.Source == background.KillPromptEnd {
+			continue
+		}
+
+		if o.resultTaken(completion.Snapshot.ID) {
 			continue
 		}
 
@@ -358,6 +412,15 @@ func (o *backgroundObserver) backgroundMessages(
 	}
 
 	return messages
+}
+
+// resultTaken asks the registry whether a task's result is already the model's.
+func (o *backgroundObserver) resultTaken(taskID string) bool {
+	if o == nil || o.runtime == nil || o.runtime.backgroundTasks == nil {
+		return false
+	}
+
+	return o.runtime.backgroundTasks.ResultTaken(taskID)
 }
 
 // message stamps one rendered body with the queue identity its conversation

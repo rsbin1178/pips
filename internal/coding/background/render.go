@@ -18,8 +18,9 @@ const (
 
 // MonitorCompletionText renders one monitor's single model-visible completion.
 // The identity line prefers the description over the raw command, so the
-// command is never echoed. pips has no task-output Tool, so the reference's
-// pointer line is deliberately replaced by a bounded, already-sanitized tail.
+// command is never echoed. The text points at the task-output Tool instead of
+// inlining the log: the log is read by id, bounded, and the pane keeps its own
+// tail for the watch page.
 func MonitorCompletionText(completion Completion) string {
 	var builder strings.Builder
 
@@ -29,12 +30,11 @@ func MonitorCompletionText(completion Completion) string {
 	builder.WriteString(monitorEndReason(completion))
 	builder.WriteString("].\n")
 	builder.WriteString(monitorIdentityLine(completion.Snapshot))
-	builder.WriteString("\n")
-
-	if completion.Tail != "" {
-		builder.WriteString(completion.Tail)
-		builder.WriteString("\n")
-	}
+	builder.WriteString("\nUse ")
+	builder.WriteString(TaskOutputToolName)
+	builder.WriteString("(\"")
+	builder.WriteString(completion.Snapshot.ID)
+	builder.WriteString("\") for full output.\n")
 
 	if completion.Killed && !completion.KillResultDelivered {
 		builder.WriteString(userKilledNotice)

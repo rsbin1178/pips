@@ -1,6 +1,7 @@
 package coding
 
 import (
+	"context"
 	"strconv"
 	"testing"
 	"time"
@@ -8,6 +9,7 @@ import (
 	"github.com/rsbin1178/pips/agent"
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding/background"
+	"github.com/rsbin1178/pips/internal/coding/execution"
 	"github.com/rsbin1178/pips/internal/coding/subagent"
 	"github.com/rsbin1178/pips/internal/coding/tools"
 	"github.com/stretchr/testify/assert"
@@ -34,10 +36,12 @@ func testParentMessage(runtime *Runtime, id, body string) subagent.ParentMessage
 }
 
 // TestRuntimeDeliversARealMonitorWatchToAnIdleSession drives the whole path with
-// a real process: a real /bin/sh watch writes a line, the pipeline turns it into
-// an event, the coordinator renders it onto the shared queue, and an idle
-// Runtime runs one batched turn that carries it. The record is acknowledged when
-// the transcript commits the message.
+// a real process: a real /bin/sh watch writes a line and exits, the pipeline
+// turns it into an event and one terminal completion, the coordinator renders
+// the completion onto the shared queue, and an idle Runtime runs one batched
+// turn that carries it. The completion points at the task-output Tool instead
+// of inlining the log, and that pointer resolves to the line the watch wrote.
+// The record is acknowledged when the transcript commits the message.
 func TestRuntimeDeliversARealMonitorWatchToAnIdleSession(t *testing.T) {
 	t.Parallel()
 
@@ -64,15 +68,31 @@ func TestRuntimeDeliversARealMonitorWatchToAnIdleSession(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, parts, 1)
 
+	receipt, ok := parts[0].(ai.TextPart)
+	require.True(t, ok)
+
+	header, _, err := tools.ParseResult(receipt.Text)
+	require.NoError(t, err)
+	require.NotNil(t, header.Monitor)
+
 	require.Eventually(t, func() bool {
 		for _, request := range model.Requests() {
-			if requestContainsText(request, "watched-line") {
+			if requestContainsText(request, `Use get_task_output("`+header.Monitor.TaskID+`") for full output.`) {
 				return true
 			}
 		}
 
 		return false
 	}, 30*time.Second, 10*time.Millisecond)
+
+	// The pointer resolves: the read surface returns the line the watch wrote.
+	outputs, outcome := runtime.readBackgroundTasks(
+		t.Context(), []string{header.Monitor.TaskID}, tools.TaskOutputModePoll, 0,
+	)
+	require.Equal(t, background.WaitOutcomeCompleted, outcome)
+	require.Len(t, outputs, 1)
+	assert.True(t, outputs[0].Found)
+	assert.Contains(t, outputs[0].Output, "watched-line")
 
 	require.Eventually(t, func() bool {
 		pending, pendingErr := runtime.notifications.PendingMessages()
@@ -194,7 +214,6 @@ func TestBackgroundObserverRendersQueueRecords(t *testing.T) {
 			Completed: true, Kind: background.KindMonitor,
 			Start: time.Now().Add(-2 * time.Second), End: time.Now(),
 		},
-		Tail: "final line",
 	})
 
 	events, completions := observer.takeBackground()
@@ -211,7 +230,8 @@ func TestBackgroundObserverRendersQueueRecords(t *testing.T) {
 	assert.Equal(t, subagent.MessageKindBackgroundCompletion, messages[1].Kind)
 	assert.Equal(t, "monitor-1", messages[1].TaskID)
 	assert.Contains(t, messages[1].Body, `Monitor "monitor-1" ended: [monitor ended: exited (code 0)].`)
-	assert.Contains(t, messages[1].Body, "final line")
+	assert.Contains(t, messages[1].Body, `Use get_task_output("monitor-1") for full output.`)
+	assert.NotContains(t, messages[1].Body, "final line")
 
 	for _, message := range messages {
 		assert.Equal(t, runtime.handle.Metadata().ID, message.Ownership.ParentSessionID)
@@ -231,9 +251,40 @@ func TestBackgroundObserverRendersQueueRecords(t *testing.T) {
 	// notice still reaches the model.
 	paneKill := suppressed
 	paneKill.KillResultDelivered = false
+	paneKill.Source = background.KillUser
 	delivered := observer.backgroundMessages(nil, []background.Completion{paneKill})
 	require.Len(t, delivered, 1)
 	assert.Contains(t, delivered[0].Body, "killed by the user — do not restart it.")
+
+	// A kill from the cancelled interaction has no turn left to report it, and
+	// a result a read already returned must not wake the model again.
+	promptEnd := paneKill
+	promptEnd.Source = background.KillPromptEnd
+	assert.Empty(t, observer.backgroundMessages(nil, []background.Completion{promptEnd}))
+
+	taken, err := runtime.backgroundTasks.Launch(t.Context(), background.Request{
+		Kind: background.KindMonitor, Command: "watch once", Timeout: time.Minute,
+		Start: func(context.Context, execution.Sink) (execution.Result, error) {
+			return execution.Result{Status: execution.StatusExited, ExitCode: 0}, nil
+		},
+	})
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		stored, ok := runtime.backgroundTasks.Snapshot(taken.ID)
+
+		return ok && stored.Completed
+	}, 30*time.Second, 10*time.Millisecond)
+
+	records := runtime.backgroundTasks.TaskOutputs([]string{taken.ID})
+	require.Len(t, records, 1)
+	require.Equal(t, background.StatusCompleted, records[0].Status)
+
+	takenCompletion := background.Completion{
+		Snapshot: background.Snapshot{ID: taken.ID, Completed: true, ExitCode: 0, Kind: background.KindMonitor},
+	}
+	assert.Empty(t, observer.backgroundMessages(nil, []background.Completion{takenCompletion}),
+		"a result a read already returned must not wake the model again")
 }
 
 // TestBackgroundSelectionConsumesNoAttempt pins the retry budget's owner: a wake

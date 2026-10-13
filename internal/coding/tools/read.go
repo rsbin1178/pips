@@ -6,6 +6,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/fs"
+	"os"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -16,7 +18,7 @@ import (
 const readName = "read"
 
 type readArgs struct {
-	Path   string `json:"path" description:"Workspace-relative file path"`
+	Path   string `json:"path" description:"Workspace-relative file path, or a background task's output_file path"`
 	Offset *int   `json:"offset" description:"Optional 1-based starting line; 0 is treated as line 1"`
 	Limit  *int   `json:"limit" description:"Optional maximum number of lines"`
 }
@@ -36,6 +38,16 @@ func (s *service) read(ctx context.Context, args readArgs) (string, error) {
 		return readLines(ctx, planPath, strings.NewReader(content), offset, limit, s.limits)
 	}
 
+	if logPath, ok := s.admittedTaskLogReadPath(args.Path); ok {
+		file, openErr := openAdmittedRegular(ctx, logPath, s.taskLog.Bytes)
+		if openErr != nil {
+			return "", failure(readName, openErr)
+		}
+		defer func() { _ = file.Close() }()
+
+		return s.readRegularFile(ctx, logPath, file, offset, limit)
+	}
+
 	name, err := workspaceFilePath(args.Path)
 	if err != nil {
 		return "", failure(readName, err)
@@ -47,6 +59,19 @@ func (s *service) read(ctx context.Context, args readArgs) (string, error) {
 	}
 	defer func() { _ = file.Close() }()
 
+	return s.readRegularFile(ctx, name, file, offset, limit)
+}
+
+// readRegularFile samples an already-opened regular file for binary content and
+// then reads its line window. It is the one path the workspace read and the
+// admitted task-log read both take, so a log is read exactly as a workspace
+// file is.
+func (s *service) readRegularFile(
+	ctx context.Context,
+	name string,
+	file *os.File,
+	offset, limit int,
+) (string, error) {
 	sample := make([]byte, 8<<10)
 
 	sampled, sampleErr := file.Read(sample)
@@ -63,6 +88,83 @@ func (s *service) read(ctx context.Context, args readArgs) (string, error) {
 	}
 
 	return readLines(ctx, name, file, offset, limit, s.limits)
+}
+
+// admittedTaskLogReadPath reports the task log path when the requested value
+// names exactly one log this session still owns. A log lives outside the
+// workspace tree, so it is matched by exact path: no prefix, glob, directory
+// listing, or traversed spelling is admitted, and the Tool never learns the
+// session directory.
+func (s *service) admittedTaskLogReadPath(value string) (string, bool) {
+	if s.taskLog == nil || s.taskLog.Admit == nil {
+		return "", false
+	}
+
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return "", false
+	}
+
+	return s.taskLog.Admit(trimmed)
+}
+
+// openAdmittedRegular opens one admitted task log as a regular file, bounded by
+// the registry's own output bound rather than the workspace file bound. It is
+// the read Tool's only opener outside the workspace tree, and the path it
+// receives has already been admitted by exact match.
+//
+// The workspace read never follows a symbolic link, so neither does this one:
+// Lstat sees the link itself, and a swap between it and the open is caught by
+// the same-file check. Otherwise a link placed at a log path would make a
+// model-chosen file readable through the admission.
+func openAdmittedRegular(ctx context.Context, path string, maxBytes int64) (*os.File, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	expected, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+
+	if expected.Mode()&fs.ModeSymlink != 0 {
+		return nil, fmt.Errorf("%w: %q", workspace.ErrSymlink, path)
+	}
+
+	if !expected.Mode().IsRegular() {
+		return nil, fmt.Errorf("%w: %q is not a regular file", workspace.ErrUnsupportedType, path)
+	}
+
+	if expected.Size() > maxBytes {
+		return nil, fmt.Errorf("%w: %q exceeds %d bytes", errFileTooLarge, path, maxBytes)
+	}
+
+	//nolint:gosec // The path is this session's own task log, admitted by exact match.
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+
+	opened, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+
+		return nil, fmt.Errorf("coding tools: inspect admitted log %q: %w", path, err)
+	}
+
+	if !opened.Mode().IsRegular() || !os.SameFile(expected, opened) {
+		_ = file.Close()
+
+		return nil, fmt.Errorf("%w: %q changed while opening", workspace.ErrChanged, path)
+	}
+
+	if opened.Size() > maxBytes {
+		_ = file.Close()
+
+		return nil, fmt.Errorf("%w: %q exceeds %d bytes", errFileTooLarge, path, maxBytes)
+	}
+
+	return file, nil
 }
 
 //nolint:gocyclo // Pagination, UTF-8 validation, and two budgets form one streaming read state machine.

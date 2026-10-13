@@ -63,6 +63,12 @@ type MonitorHandler struct {
 	network     config.SandboxNetworkMode
 	workspace   execution.WorkspaceAccess
 	registry    *background.Registry
+	// owner resolves the interaction that is spawning the task, so a cancelled
+	// interaction can cancel the watches it started. It is a provider rather
+	// than a value because the approval controller's handler is built once per
+	// Runtime while the interaction is per prompt. A nil provider leaves the
+	// task unowned.
+	owner func() string
 }
 
 // NewMonitorHandler constructs the non-registerable monitor operation handler.
@@ -81,6 +87,19 @@ func NewMonitorHandlerForSandbox(
 	sandbox config.SandboxMode,
 	networkMode config.SandboxNetworkMode,
 ) *MonitorHandler {
+	return NewMonitorHandlerForSandboxWithOwner(registry, sandbox, networkMode, nil)
+}
+
+// NewMonitorHandlerForSandboxWithOwner constructs a monitor handler that stamps
+// each task it starts with the spawning interaction's id. The owner provider is
+// read at detach time, so it reports the interaction that is running when the
+// task starts rather than the one that built the handler.
+func NewMonitorHandlerForSandboxWithOwner(
+	registry *background.Registry,
+	sandbox config.SandboxMode,
+	networkMode config.SandboxNetworkMode,
+	owner func() string,
+) *MonitorHandler {
 	workspace := execution.WorkspaceWrite
 	if sandbox == config.SandboxReadOnly {
 		workspace = execution.WorkspaceReadOnly
@@ -90,6 +109,7 @@ func NewMonitorHandlerForSandbox(
 		registry:  registry,
 		network:   networkMode,
 		workspace: workspace,
+		owner:     owner,
 		declaration: ai.Tool{
 			Name:        monitorName,
 			Description: monitorToolDescription(),
@@ -100,6 +120,17 @@ func NewMonitorHandlerForSandbox(
 
 // Decl returns the monitor declaration consumed by the approval Controller.
 func (h *MonitorHandler) Decl() ai.Tool { return h.declaration }
+
+// ownerID resolves the interaction that is spawning the task. An absent
+// provider, or a provider with no running interaction, leaves the task unowned
+// so no interaction boundary cancels it.
+func (h *MonitorHandler) ownerID() string {
+	if h == nil || h.owner == nil {
+		return ""
+	}
+
+	return h.owner()
+}
 
 // monitorToolDescription is the reference's description template with every
 // condition resolved: pips always carries system reminders and always exposes
@@ -465,6 +496,7 @@ func (h *MonitorHandler) Detach(
 		Command:     arguments.Command,
 		Description: strings.TrimSpace(arguments.Description),
 		CWD:         ".",
+		Owner:       h.ownerID(),
 		Timeout:     timeout,
 		NoDeadline:  persistent,
 		Start: func(runCtx context.Context, sink execution.Sink) (execution.Result, error) {
@@ -494,8 +526,8 @@ func (h *MonitorHandler) Detach(
 }
 
 // monitorReceipt is the reference's model-facing start text. It promises the
-// event notifications and the completion wake, and it never points at a task
-// output Tool, which pips does not have.
+// event notifications and the completion wake; the completion is what points at
+// the task-output Tool, so the receipt does not.
 func monitorReceipt(taskID string, timeout time.Duration, persistent bool) string {
 	head := "Monitor started (task " + taskID + ", timeout " +
 		strconv.FormatInt(timeout.Milliseconds(), 10) + "ms)."

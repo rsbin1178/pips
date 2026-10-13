@@ -10,13 +10,13 @@ Workspace 与独立 `PIPS_HOME`；命令不得触及真实仓库、真实凭据�
 - 分类：实时 Provider、安全敏感。变更等级：临时工作区；会产生费用。
 - 前置条件：`workspace-write`；已通过 `MA-WORK-003` 的 Shell 审批基线；Sandbox 允许运行 `sleep` 与 `printf`。
 - 隔离夹具：Workspace 中不放任何真实日志；命令只 `printf` 固定测试行。
-- 步骤：要求模型调用 `monitor`，命令为 `printf 'DONE-a\n'; sleep 20`，`description` 明确；随后立刻要求它继续做一件需要多轮工具调用的事，让回合保持进行。观察事件到达时回合仍在运行。再等该 watch 自然退出，观察完成文本。最后重复一次，但让会话在此之前回到空闲。
+- 步骤：要求模型调用 `monitor`，命令为 `printf 'DONE-a\n'; sleep 20`，`description` 明确；随后立刻要求它继续做一件需要多轮工具调用的事，让回合保持进行。观察事件到达时回合仍在运行。再等该 watch 自然退出，观察完成文本，并要求模型用 `get_task_output` 读回该 task id 的完整输出。最后重复一次，但让会话在此之前回到空闲。
 - 预期证据：进行中的回合里，事件以 hidden 的 `<system-reminder>` 用户消息在该回合的下一个回合边界出现，普通对话区域不把它当作用户发言；空闲场景下事件自成一个批次回合；两种情况下文本形状为单事件
-  `<monitor-event task_id="…">[label] text</monitor-event>`；自然退出只产生一条完成文本，含原因、描述、耗时与有界尾部。
-- 通过条件：事件均可达、批次形状正确、完成恰好一条、命令正文没有被回显。
-- 失败条件：事件丢失、重复投递同一条事件、完成后仍继续产生事件、或把原始命令贴进完成文本。
+  `<monitor-event task_id="…">[label] text</monitor-event>`；自然退出只产生一条完成文本，含原因、描述、耗时与指向该工具的指针行 `Use get_task_output("<id>") for full output.`，且不内联日志正文；`get_task_output` 返回 `status: completed`、退出码、`output`（`DONE-a`）与 `output_file`。
+- 通过条件：事件均可达、批次形状正确、完成恰好一条、完成文本不含日志正文、命令正文没有被回显、按 id 读回的内容与 watch 的输出一致。
+- 失败条件：事件丢失、重复投递同一条事件、完成后仍继续产生事件、把原始命令贴进完成文本、或完成文本仍内联日志尾部。
 - 清理/回滚：结束 watch；确认没有残留子进程；销毁一次性 Workspace。
-- 来源/测试锚点：[monitor.go](../../internal/coding/tools/monitor.go)、[background](../../internal/coding/background)、[runtime_notification.go](../../internal/coding/runtime_notification.go)、[runtime_background.go](../../internal/coding/runtime_background.go)。
+- 来源/测试锚点：[monitor.go](../../internal/coding/tools/monitor.go)、[task_output.go](../../internal/coding/tools/task_output.go)、[background](../../internal/coding/background)、[runtime_notification.go](../../internal/coding/runtime_notification.go)、[runtime_background.go](../../internal/coding/runtime_background.go)。
 - 结果：`未执行`。
 
 ## MA-WATCH-002：行/批上限、限流、追赶提示与自动停止

@@ -1044,8 +1044,10 @@ or `read-write` session is never offered the tool; `execute` and `all` are.
 one batch is truncated at 3000 bytes, and the pipeline polls every 200 ms. Line
 and batch truncation walk back to a rune boundary and append a literal
 `...(truncated)`. Empty lines produce nothing. stderr is not an event source.
-The task's own output file is capped at 10 MiB — the monitor cap — and a
-completion inlines at most a 24 KiB tail of it.
+The task's own output file is capped at 10 MiB — the monitor cap — and the
+tasks pane's inspect read shows at most a 24 KiB tail of it. A model reads the
+log by id instead: `get_task_output` dumps at most 40 000 bytes and points at
+the log's own path for the rest.
 
 **Volume.** A token bucket of 10 events, refilled one every 2 s, decides what is
 delivered. Events beyond it are dropped silently. The first event after a burst
@@ -1068,15 +1070,56 @@ carries no usable label falls back to `event`.
 **Termination.** A natural exit, a timeout, and a kill each produce exactly one
 model-visible completion, and the pipeline itself emits no terminal event. The
 completion names the task, the reason (`exited (code n)`, `killed by signal …`,
-or `ended`), the description and duration, and a bounded tail of the watch's own
-output. A command that cannot report a clean exit code — a kill, an operation
+or `ended`), the description and duration, and then points at the task-output
+Tool — `Use get_task_output("<id>") for full output.` — rather than inlining the
+log. A command that cannot report a clean exit code — a kill, an operation
 deadline, an output limit — is reported as `ended`, because the executor
 classifies a cancelled run by its context before it inspects the wait status. A
 kill that the model itself requested already returned its outcome as a Tool
 result, so that kill's terminal report does not wake the model a second time; a
 kill from the tasks pane, which has no Tool result behind it, adds the notice
-that the task must not be restarted. The start receipt lists any other background
+that the task must not be restarted. A result a read already returned — a
+blocking wait, or a snapshot of a task that had already ended — never wakes the
+model again either, and a kill from the interaction that started the watch
+produces no completion at all. The start receipt lists any other background
 task still running, so a duplicate watch is visible at launch.
+
+**Reading and waiting by id.** Two read-only Tools address a watch by the
+`task_id` a `monitor` call returned. `get_task_output` takes `task_ids` (up to
+20, with `task_id` as the single-id alias) and an optional `timeout_ms`:
+
+- Omit `timeout_ms` or pass `0` for a non-blocking snapshot. A positive value
+  blocks until every listed id resolves, clamped to the one-hour ceiling
+  (3 600 000 ms).
+- The record carries `task_id`, `command`, `status`, `exit_code`, `started`,
+  `ended`, `duration_secs`, `output`, `output_file`, `truncated`,
+  `truncation_hint`, and `raw_output_bytes`. The status words are `running`,
+  `completed`, `failed`, `cancelled`, and `timed_out`, chosen in that order: a
+  kill is `cancelled`, the task's own deadline is `timed_out`, a clean exit is
+  `completed`, and anything else is `failed`.
+- `output` is the log itself while it fits 40 000 bytes. Past that it is the
+  first 2 000 bytes cut at a rune boundary plus
+  `[Output truncated - <N> bytes total. Use read on <path> for full content]`,
+  and `raw_output_bytes` reports the log's real size.
+- A still-running record carries the reference's wait words: a plain poll says
+  `Use timeout_ms to wait for completion.`, an elapsed wait says
+  `Waited the requested <x>.` (or `Waited <x>, the per-call maximum, of the
+  <y> you requested.` when the ask exceeded the ceiling), and each ends with the
+  reminder that the task is still working and the model will be notified.
+
+`wait_tasks` is the blocking alias for a caller that wants `mode: wait_any`:
+`wait_all` shares `get_task_output`'s multi path, while `wait_any` returns at the
+first completion. A wait is the point of that Tool, so an omitted or zero
+`timeout_ms` waits the default 30 s instead of taking a snapshot. A wait is
+event-driven: it registers on each still-running task's own end and wakes on it,
+so nothing polls.
+
+**Reading the rest of a log.** `output_file` is the log's own path under the
+session directory, which is outside the workspace tree. The `read` Tool admits
+exactly that path — a value that is not the exact log path of a task the registry
+still knows is refused as an outside-workspace path — and reads it under the
+registry's own 10 MiB bound rather than the workspace file bound, with the same
+line window, binary check, and output bound as a workspace file.
 
 **Stopping one.** `kill_background_task` takes the `task_id` a `monitor` call
 returned and answers `killed`, `already_exited`, or `not_found`. A `not_found`
@@ -1084,9 +1127,7 @@ answer also names the ids the registry still knows, bounded in count and length,
 so a model that lost an id can recover it. A task id is unique across processes:
 `monitor-<n>-<token>`, where the counter stays readable and a short random token
 keeps a restarted process from reusing an id. The tasks pane's
-kill control calls the same method, so there is one control path. There is no
-task-output tool: the events are the delivery, and a completion inlines its own
-bounded tail instead of promising a poll.
+kill control calls the same method, so there is one control path.
 
 **Tasks pane.** A registered watch is a row under `Watchers`, labelled
 `Monitor`, showing the description (or the command when there is none), the
@@ -1102,7 +1143,10 @@ other detail page. A watch has no transcript to open.
 
 **Lifetime.** The registry is process-local. A watch does not survive a restart,
 matching the session semantics of the reference: a crash cannot reconstruct one.
-Teardown reaps every live watch, so none outlives its session.
+A watch is stamped with the id of the interaction that started it, and an
+interaction that ends cancelled cancels exactly the watches it started — an
+earlier interaction's watches keep running. Teardown reaps every live watch, so
+none outlives its session.
 
 **Telemetry.** One content-free counter, `pips.coding.background.tasks`, records
 each watch's lifecycle with its kind and a closed outcome
