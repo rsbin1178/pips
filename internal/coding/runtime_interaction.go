@@ -743,7 +743,7 @@ func (r *Runtime) openInteraction(
 		tools.WithReadBackgroundTasks(r.readBackgroundTasks),
 		tools.WithTaskLogRead(tools.TaskLogRead{
 			Admit: r.admitBackgroundLogPath,
-			Bytes: backgroundOutputBytes,
+			Bytes: backgroundLogReadBytes,
 		}),
 	}
 	if planFile := r.planFileBoundary(); planFile != nil {
@@ -907,7 +907,7 @@ func (r *Runtime) openInteraction(
 			readBackgroundTasks: r.readBackgroundTasks,
 			taskLogRead: tools.TaskLogRead{
 				Admit: r.admitBackgroundLogPath,
-				Bytes: backgroundOutputBytes,
+				Bytes: backgroundLogReadBytes,
 			},
 			monitorOwner:       r.currentInteractionID,
 			messages:           r.subagents.MessageCoordinator(),

@@ -1177,3 +1177,61 @@ func TestTasksPanePlanRowCarriesNoClock(t *testing.T) {
 	assert.Contains(t, line, "pending")
 	assert.NotContains(t, line, "0s", "a plan row paints no elapsed time")
 }
+
+// TestTasksPaneTagsABackgroundCommandAsACommand pins the kind-derived row tag:
+// a backgrounded command is not read as a watch, and a watch is not read as a
+// command.
+func TestTasksPaneTagsABackgroundCommandAsACommand(t *testing.T) {
+	t.Parallel()
+
+	model, _ := tasksPaneModel(t)
+	model.state.BackgroundTasks = []coding.BackgroundTaskLifecycle{
+		{
+			ID: "shell-1", Kind: string(background.KindShell), Command: "cargo build",
+			StartedAt: tasksPaneNow.Add(-3 * time.Second),
+		},
+		{
+			ID: "monitor-1", Kind: string(background.KindMonitor),
+			Description: "deploy log", StartedAt: tasksPaneNow.Add(-2 * time.Second),
+		},
+	}
+
+	model.syncTasksPane(tasksPaneNow)
+	require.True(t, model.tasksPane.visible, "a running command opens the pane")
+
+	content := model.View().Content
+	assert.Contains(t, content, backgroundCommandTag+" cargo build")
+	assert.Contains(t, content, backgroundTaskTag+" deploy log")
+}
+
+// TestStatusLineStillRunningCueLeadsWithCommands pins the cue's kind split: a
+// running command is counted first, in the reference's order, and a
+// monitor-only session is unchanged.
+func TestStatusLineStillRunningCueLeadsWithCommands(t *testing.T) {
+	t.Parallel()
+
+	model, _ := tasksPaneModel(t)
+	model.state.Phase = coding.PhaseIdle
+	model.state.BackgroundTasks = []coding.BackgroundTaskLifecycle{
+		{ID: "shell-1", Kind: string(background.KindShell), Command: "cargo build"},
+		{ID: "monitor-1", Kind: string(background.KindMonitor), Description: "deploy log"},
+	}
+	assert.Equal(t, "1 command · 1 monitor still running", model.stillRunningCue())
+
+	model.state.BackgroundTasks = append(model.state.BackgroundTasks, coding.BackgroundTaskLifecycle{
+		ID: "shell-2", Kind: string(background.KindShell), Command: "npm test",
+	})
+	assert.Equal(t, "2 commands · 1 monitor still running", model.stillRunningCue())
+
+	// A monitor-only session keeps the cue it had before the shell kind existed.
+	model.state.BackgroundTasks = []coding.BackgroundTaskLifecycle{
+		{ID: "monitor-1", Kind: string(background.KindMonitor), Description: "deploy log"},
+	}
+	assert.Equal(t, "1 monitor still running", model.stillRunningCue())
+
+	// A finished command stops counting.
+	model.state.BackgroundTasks = []coding.BackgroundTaskLifecycle{
+		{ID: "shell-1", Kind: string(background.KindShell), Command: "cargo build", Completed: true},
+	}
+	assert.Empty(t, model.stillRunningCue())
+}

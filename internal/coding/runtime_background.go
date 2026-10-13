@@ -22,11 +22,18 @@ const (
 	// completion. It mirrors the shell's capture bound: the tail is a bounded
 	// projection, not the whole log.
 	backgroundTailBytes = 24 << 10
-	// backgroundOutputBytes bounds one background task's raw output file. The
-	// registry is monitor-only (KindMonitor is its only kind), so this is the
-	// monitor cap, and it is the reference's monitor cap of 10 MiB rather than
-	// the shell's wider output ceiling.
+	// backgroundOutputBytes bounds one background task's raw output file. It is
+	// the default for every kind, and it is the reference's monitor cap of
+	// 10 MiB rather than the shell's wider output ceiling.
 	backgroundOutputBytes = 10 << 20
+	// shellBackgroundOutputBytes bounds a shell task's raw output file. A
+	// backgrounded command's log is the command's whole output, so it keeps the
+	// shell operation's own ceiling rather than the narrower monitor cap.
+	shellBackgroundOutputBytes = tools.ShellMaximumOutput
+	// backgroundLogReadBytes bounds the admitted read of a background task's
+	// log. It is the widest bound any kind writes, so a shell task's larger log
+	// is readable while a monitor's own file still never exceeds its cap.
+	backgroundLogReadBytes = shellBackgroundOutputBytes
 )
 
 // backgroundOutputDir is where background tasks write their raw output. It is
@@ -407,11 +414,22 @@ func (o *backgroundObserver) backgroundMessages(
 		messages = append(messages, o.message(
 			subagent.MessageKindBackgroundCompletion,
 			completion.Snapshot.ID,
-			background.MonitorCompletionText(completion),
+			backgroundCompletionText(completion),
 		))
 	}
 
 	return messages
+}
+
+// backgroundCompletionText renders one task's terminal report in the words its
+// kind uses: a command reports an exit or a signal, a watch reports its
+// monitored condition.
+func backgroundCompletionText(completion background.Completion) string {
+	if completion.Snapshot.Kind == background.KindShell {
+		return background.ShellCompletionText(completion)
+	}
+
+	return background.MonitorCompletionText(completion)
 }
 
 // resultTaken asks the registry whether a task's result is already the model's.

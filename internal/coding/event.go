@@ -1707,7 +1707,7 @@ func validateBackgroundTaskLifecycle(value BackgroundTaskLifecycle) error {
 		return err
 	}
 
-	if value.Kind != string(background.KindMonitor) {
+	if value.Kind != string(background.KindMonitor) && value.Kind != string(background.KindShell) {
 		return errors.New("invalid background task kind")
 	}
 

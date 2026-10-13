@@ -1041,6 +1041,58 @@ Two reminders keep the plan current:
 todo_gate = false   # opt-in: one more turn when a plan still has open steps
 ```
 
+### Background commands (`shell`)
+
+`shell` runs one command and returns its output. Its optional `block_until_ms`
+decides whether the command has to finish before the call returns:
+
+| Value | Meaning |
+| --- | --- |
+| omitted | Block until the command ends or its `timeout_ms` deadline fires. |
+| `0` | Start the command in the background and return its task id at once. |
+| positive N | Wait up to N ms; a command still running at N moves to the background and the call returns its task id. |
+
+An explicit `block_until_ms` always detaches the run from the Tool call, even
+when the command finishes inside a positive wait, so the run is registered as a
+background task either way. The wait never kills the command and never extends
+its deadline: `timeout_ms` keeps its kill meaning, a positive block above the
+shell's 30-minute ceiling is clamped, and a block longer than the deadline ends
+when the kill does. A negative block is refused with the `block_until_ms` field
+named.
+
+**Deadline.** `timeout_ms` is unchanged for a foreground call: 100 to 1 800 000
+ms, default 120 000. A call that backgrounds resolves an omitted `timeout_ms` to
+the shell's 30-minute ceiling instead, because a background task that dies after
+the two-minute foreground default is a trap; an explicit `timeout_ms` is
+honoured as given, and the receipt names the effective deadline.
+
+**Receipt and completion.** A backgrounded command's Tool result names the task
+id, the effective deadline, that the model is notified when it completes, and
+the three id-addressed Tools — `get_task_output`, `wait_tasks`, and
+`kill_background_task` — and lists any other background task still running. Its
+completion is `Background task "<id>" completed (exit code: N).` or
+`(terminated by signal S)`, then `Duration: Xs`, then
+`Use get_task_output("<id>") to see the full output.`, then the user-kill notice
+when the kill never reached the model as a Tool result. The command is never
+echoed.
+
+**Output and events.** A backgrounded command writes both streams into its log
+and emits no events: a command has no event contract, and its completion is the
+single model-visible report. Its log is capped at the shell's own 16 MiB output
+ceiling rather than the monitor's 10 MiB. A command that ends inside a positive
+wait is not reported again: it renders the ordinary shell result — stdout,
+stderr, and the exit code — from the executor's own result, and that result is
+what suppresses its completion.
+
+**Identity and lifetime.** A backgrounded command is stamped with the spawning
+interaction's id and is cancelled by that interaction's cancel, exactly like a
+watch, so a cancelled interaction's kill wakes nobody. Teardown reaps it too.
+
+**Surfaces.** The tasks pane lists a running command under `Watchers` with the
+`Command` tag, and the idle status-line cue counts commands first — for example
+`1 command · 1 monitor still running`. A foreground `shell` call still creates
+no registry entry, no log file, and no pane row.
+
 ### Background watches (`monitor`)
 
 `monitor` starts one long-running shell command and turns each of its stdout
@@ -1111,9 +1163,10 @@ model again either, and a kill from the interaction that started the watch
 produces no completion at all. The start receipt lists any other background
 task still running, so a duplicate watch is visible at launch.
 
-**Reading and waiting by id.** Two read-only Tools address a watch by the
-`task_id` a `monitor` call returned. `get_task_output` takes `task_ids` (up to
-20, with `task_id` as the single-id alias) and an optional `timeout_ms`:
+**Reading and waiting by id.** Two read-only Tools address a background task by
+the `task_id` a `shell` or `monitor` call returned. `get_task_output` takes
+`task_ids` (up to 20, with `task_id` as the single-id alias) and an optional
+`timeout_ms`:
 
 - Omit `timeout_ms` or pass `0` for a non-blocking snapshot. A positive value
   blocks until every listed id resolves, clamped to the one-hour ceiling
@@ -1145,20 +1198,23 @@ so nothing polls.
 session directory, which is outside the workspace tree. The `read` Tool admits
 exactly that path — a value that is not the exact log path of a task the registry
 still knows is refused as an outside-workspace path — and reads it under the
-registry's own 10 MiB bound rather than the workspace file bound, with the same
+registry's own bound for the widest kind (the shell's 16 MiB ceiling, which also
+covers a watch's 10 MiB log) rather than the workspace file bound, with the same
 line window, binary check, and output bound as a workspace file.
 
-**Stopping one.** `kill_background_task` takes the `task_id` a `monitor` call
-returned and answers `killed`, `already_exited`, or `not_found`. A `not_found`
-answer also names the ids the registry still knows, bounded in count and length,
-so a model that lost an id can recover it. A task id is unique across processes:
-`monitor-<n>-<token>`, where the counter stays readable and a short random token
-keeps a restarted process from reusing an id. The tasks pane's
-kill control calls the same method, so there is one control path.
+**Stopping one.** `kill_background_task` takes the `task_id` a `shell` or
+`monitor` call returned and answers `killed`, `already_exited`, or `not_found`.
+A `not_found` answer also names the ids the registry still knows, bounded in
+count and length, so a model that lost an id can recover it. A task id is unique
+across processes: `<kind>-<n>-<token>`, where the kind is `monitor` or `shell`,
+the counter stays readable, and a short random token keeps a restarted process
+from reusing an id. The tasks pane's kill control calls the same method, so
+there is one control path.
 
 **Tasks pane.** A registered watch is a row under `Watchers`, labelled
 `Monitor`, showing the description (or the command when there is none), the
-running state, and its own elapsed time. `x` stops it, and `Enter`/`Ctrl+F` opens
+running state, and its own elapsed time; a backgrounded command is the same row
+labelled `Command`. `x` stops it, and `Enter`/`Ctrl+F` opens
 its page. That page is the same full-width container the Tool detail surface
 uses — a pinned status row rather than a window — and it names the task and its
 state, carries the watch's own `$ command` above the output the way the shell
@@ -1596,9 +1652,10 @@ nothing to list paints nothing at all — there is no empty-state note — and i
 the frame's keys back to the composer, so a keystroke after the last child stops
 belongs to what you are typing. Because the pane is hidden on a short frame (under
 12 rows) and closes itself when the last row stops, the status line also carries a
-count-led ` still running` cue while the session is idle with a child or a watch
-still live — for example `1 monitor · 1 subagent still running` — so running work
-is never invisible.
+count-led ` still running` cue while the session is idle with a child, a
+backgrounded command, or a watch still live — for example
+`1 command · 1 monitor · 1 subagent still running` — so running work is never
+invisible.
 
 A spawn appears in the parent transcript as one lifecycle line: `Subagent
 running: "…"` while a foreground child works, `Subagent started: "…"` for a

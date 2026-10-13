@@ -32,6 +32,16 @@ type DetachedHandler interface {
 	Detach(ctx context.Context, call agent.ToolCall, prepared PreparedExecution) ([]ai.Part, error)
 }
 
+// DetachDecider is implemented by a DetachedHandler that detaches only for some
+// calls. The controller consults it before taking the detached branch; a call
+// it answers false for runs through the synchronous path, on the same prepared
+// execution. A handler that does not implement it always detaches, which is the
+// monitor's contract.
+type DetachDecider interface {
+	// Detaches reports whether this call takes the detached path.
+	Detaches(call agent.ToolCall) bool
+}
+
 // PreparedExecution owns one single-use execution plan. Run consumes and closes
 // it; Close abandons it before Run.
 type PreparedExecution interface {

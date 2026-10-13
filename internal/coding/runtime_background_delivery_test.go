@@ -73,11 +73,11 @@ func TestRuntimeDeliversARealMonitorWatchToAnIdleSession(t *testing.T) {
 
 	header, _, err := tools.ParseResult(receipt.Text)
 	require.NoError(t, err)
-	require.NotNil(t, header.Monitor)
+	require.NotNil(t, header.Background)
 
 	require.Eventually(t, func() bool {
 		for _, request := range model.Requests() {
-			if requestContainsText(request, `Use get_task_output("`+header.Monitor.TaskID+`") for full output.`) {
+			if requestContainsText(request, `Use get_task_output("`+header.Background.TaskID+`") for full output.`) {
 				return true
 			}
 		}
@@ -87,7 +87,7 @@ func TestRuntimeDeliversARealMonitorWatchToAnIdleSession(t *testing.T) {
 
 	// The pointer resolves: the read surface returns the line the watch wrote.
 	outputs, outcome := runtime.readBackgroundTasks(
-		t.Context(), []string{header.Monitor.TaskID}, tools.TaskOutputModePoll, 0,
+		t.Context(), []string{header.Background.TaskID}, tools.TaskOutputModePoll, 0,
 	)
 	require.Equal(t, background.WaitOutcomeCompleted, outcome)
 	require.Len(t, outputs, 1)

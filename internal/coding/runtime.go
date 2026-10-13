@@ -728,16 +728,18 @@ func openRuntime(
 		runtime.teamRecovery, runtime.teamRecoveryErr = runtime.discoverTeamRecovery(ctx)
 	}
 
-	// The background registry is process-local and owns every monitor that
-	// outlives the Tool call that started it. Its output files live in the
-	// session's own terminal directory.
+	// The background registry is process-local and owns every background task
+	// that outlives the Tool call that started it, whether a monitor or a
+	// backgrounded command. Its output files live in the session's own terminal
+	// directory.
 	runtime.backgroundOutput = newBackgroundObserver(runtime)
 	runtime.backgroundTasks, err = background.NewRegistry(background.Options{
-		OutputDir:    backgroundOutputDir(handle.Dir()),
-		Observer:     runtime.backgroundOutput,
-		KillToolName: background.KillTaskToolName,
-		OutputBytes:  backgroundOutputBytes,
-		TailBytes:    backgroundTailBytes,
+		OutputDir:        backgroundOutputDir(handle.Dir()),
+		Observer:         runtime.backgroundOutput,
+		KillToolName:     background.KillTaskToolName,
+		OutputBytes:      backgroundOutputBytes,
+		ShellOutputBytes: shellBackgroundOutputBytes,
+		TailBytes:        backgroundTailBytes,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("coding runtime: open background registry: %w", err)
@@ -750,9 +752,11 @@ func openRuntime(
 		&runtime.pending,
 		policy,
 		executor,
-		tools.NewShellHandlerForSandbox(
+		tools.NewShellHandlerForSandboxWithOwner(
+			runtime.backgroundTasks,
 			options.Config.Sandbox,
 			options.Config.SandboxWorkspaceWrite.Network,
+			runtime.currentInteractionID,
 		),
 		tools.NewMonitorHandlerForSandboxWithOwner(
 			runtime.backgroundTasks,

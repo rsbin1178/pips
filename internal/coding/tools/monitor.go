@@ -121,15 +121,16 @@ func NewMonitorHandlerForSandboxWithOwner(
 // Decl returns the monitor declaration consumed by the approval Controller.
 func (h *MonitorHandler) Decl() ai.Tool { return h.declaration }
 
-// ownerID resolves the interaction that is spawning the task. An absent
-// provider, or a provider with no running interaction, leaves the task unowned
-// so no interaction boundary cancels it.
-func (h *MonitorHandler) ownerID() string {
-	if h == nil || h.owner == nil {
+// resolveBackgroundOwner resolves the interaction that is spawning a
+// background task. An absent provider, or a provider with no running
+// interaction, leaves the task unowned so no interaction boundary cancels it.
+// It is shared by the monitor and shell handlers, which stamp the same owner.
+func resolveBackgroundOwner(owner func() string) string {
+	if owner == nil {
 		return ""
 	}
 
-	return h.owner()
+	return owner()
 }
 
 // monitorToolDescription is the reference's description template with every
@@ -416,7 +417,7 @@ func (h *MonitorHandler) Operation(
 		NoDeadline: true,
 		Output: execution.OutputLimits{
 			CaptureBytes: shellCaptureBytes,
-			MaxBytes:     shellMaximumOutput,
+			MaxBytes:     ShellMaximumOutput,
 			ChunkBytes:   shellChunkBytes,
 			QueueDepth:   shellOutputQueueDepth,
 		},
@@ -496,7 +497,7 @@ func (h *MonitorHandler) Detach(
 		Command:     arguments.Command,
 		Description: strings.TrimSpace(arguments.Description),
 		CWD:         ".",
-		Owner:       h.ownerID(),
+		Owner:       resolveBackgroundOwner(h.owner),
 		Timeout:     timeout,
 		NoDeadline:  persistent,
 		Start: func(runCtx context.Context, sink execution.Sink) (execution.Result, error) {
@@ -512,13 +513,14 @@ func (h *MonitorHandler) Detach(
 	value := result{
 		OK:   true,
 		Tool: monitorName,
-		Monitor: &ResultMonitor{
-			TaskID: snapshot.ID, TimeoutMS: timeout.Milliseconds(), Persistent: persistent,
+		Background: &ResultBackground{
+			TaskID: snapshot.ID, Kind: string(background.KindMonitor),
+			TimeoutMS: timeout.Milliseconds(), Persistent: persistent,
 		},
 		Body: monitorReceipt(snapshot.ID, timeout, persistent),
 	}
 
-	if warning := h.runningWarning(snapshot.ID); warning != "" {
+	if warning := runningBackgroundWarning(h.registry, snapshot.ID); warning != "" {
 		value.Body += "\n\n" + warning
 	}
 
@@ -542,16 +544,17 @@ func monitorReceipt(taskID string, timeout time.Duration, persistent bool) strin
 		"Events may arrive while you are waiting for the user -- an event is not their reply."
 }
 
-// runningWarning lists the other tasks that are still running when a monitor
-// starts, so a duplicate watch is visible at launch.
-func (h *MonitorHandler) runningWarning(taskID string) string {
-	if h.registry == nil {
+// runningBackgroundWarning lists the other background tasks that are still
+// running when one starts, so a duplicate watch or command is visible at
+// launch. It is shared by the monitor and shell handlers.
+func runningBackgroundWarning(registry *background.Registry, taskID string) string {
+	if registry == nil {
 		return ""
 	}
 
 	running := make([]background.Snapshot, 0, 1)
 
-	for _, snapshot := range h.registry.List() {
+	for _, snapshot := range registry.List() {
 		if snapshot.ID != taskID && !snapshot.Completed {
 			running = append(running, snapshot)
 		}

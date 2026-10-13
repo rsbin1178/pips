@@ -59,7 +59,7 @@ type ReadBackgroundTasks func(
 const taskOutputSchema = `{
  "type":"object","additionalProperties":false,
  "properties":{
-  "task_ids":{"type":"array","minItems":1,"maxItems":20,"items":{"type":"string","minLength":1},"description":"The task ids a monitor Tool call returned. Pass one or more; for a single task use a one-element array. Multiple ids with a positive timeout_ms wait until all complete."},
+  "task_ids":{"type":"array","minItems":1,"maxItems":20,"items":{"type":"string","minLength":1},"description":"The task ids a shell or monitor Tool call returned. Pass one or more; for a single task use a one-element array. Multiple ids with a positive timeout_ms wait until all complete."},
   "task_id":{"type":"string","minLength":1,"description":"Alias for a single task id: task_ids with one element."},
   "timeout_ms":{"type":"integer","minimum":0,"maximum":3600000,"description":"Max wait time in milliseconds, up to 3600000 (1 hour). A positive value waits for completion; omit or pass 0 for a non-blocking status snapshot."}
  }
@@ -82,8 +82,8 @@ type taskOutputTool struct {
 func (*taskOutputTool) Decl() ai.Tool {
 	return ai.Tool{
 		Name: TaskOutputName,
-		Description: "Get output and status from a background task started by the monitor tool. " +
-			"Pass task_ids with one or more ids from a monitor call, or the single-id alias task_id. " +
+		Description: "Get output and status from a background task started by the shell or monitor tool. " +
+			"Pass task_ids with one or more ids from a shell or monitor call, or the single-id alias task_id. " +
 			"Multiple ids with a positive timeout_ms wait until all complete. " +
 			"Omit timeout_ms or pass 0 for a non-blocking status snapshot; " +
 			"a positive timeout_ms waits up to that many milliseconds, capped at 3600000. " +

@@ -153,3 +153,49 @@ func TestMonitorRunningWarningListsTheOtherTasks(t *testing.T) {
 
 	assert.Empty(t, MonitorRunningWarning(nil, now, KillTaskToolName))
 }
+
+// TestShellCompletionTextNamesTheExitAndThePointer pins a command's completion:
+// the status, the identity line, and the pointer at the read Tool. The command
+// is never echoed.
+func TestShellCompletionTextNamesTheExitAndThePointer(t *testing.T) {
+	t.Parallel()
+
+	start := time.Date(2026, 10, 12, 10, 0, 0, 0, time.UTC)
+	completion := Completion{
+		Snapshot: Snapshot{
+			ID: "shell-1", Command: "tail -f secret.log",
+			Start: start, End: start.Add(2500 * time.Millisecond), ExitCode: 0,
+		},
+	}
+
+	text := ShellCompletionText(completion)
+	assert.Equal(t,
+		"Background task \"shell-1\" completed (exit code: 0).\n"+
+			"Duration: 2.5s\n"+
+			"Use get_task_output(\"shell-1\") to see the full output.\n", text)
+	assert.NotContains(t, text, "secret.log")
+}
+
+// TestShellCompletionTextNamesASignalAndTheUserKill pins the signal wording and
+// the user-kill notice, which a model kill's own Tool result already carries.
+func TestShellCompletionTextNamesASignalAndTheUserKill(t *testing.T) {
+	t.Parallel()
+
+	start := time.Date(2026, 10, 12, 10, 0, 0, 0, time.UTC)
+	completion := Completion{
+		Snapshot: Snapshot{
+			ID: "shell-2", Start: start, End: start.Add(time.Second),
+			ExitCode: -1, Signal: "term",
+		},
+		Killed: true,
+	}
+
+	assert.Equal(t,
+		"Background task \"shell-2\" completed (terminated by signal term).\n"+
+			"Duration: 1.0s\n"+
+			"Use get_task_output(\"shell-2\") to see the full output.\n"+
+			userKilledNotice, ShellCompletionText(completion))
+
+	completion.KillResultDelivered = true
+	assert.NotContains(t, ShellCompletionText(completion), userKilledNotice)
+}

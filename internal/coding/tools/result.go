@@ -51,7 +51,7 @@ type result struct {
 	Counts      ResultCounts
 	Next        ResultNext
 	Execution   *ResultExecution
-	Monitor     *ResultMonitor
+	Background  *ResultBackground
 	Kill        *ResultKill
 	TaskOutput  *ResultTaskOutput
 	TaskOutputs *ResultTaskOutputs
@@ -83,11 +83,13 @@ type ResultExecutionStream struct {
 	Sanitized bool  `json:"sanitized,omitempty"`
 }
 
-// ResultMonitor is the structured output of one monitor Tool call: the task id
-// the model addresses, the resolved deadline, and whether it is persistent. A
-// persistent monitor resolves its deadline to zero.
-type ResultMonitor struct {
+// ResultBackground is the structured output of one Tool call that started a
+// background task: the task id the model addresses, the kind it registered
+// under, the resolved deadline, and whether it is persistent. A persistent
+// monitor resolves its deadline to zero.
+type ResultBackground struct {
 	TaskID     string `json:"task_id"`
+	Kind       string `json:"kind"`
 	TimeoutMS  int64  `json:"timeout_ms"`
 	Persistent bool   `json:"persistent"`
 }
@@ -137,7 +139,7 @@ type ResultHeader struct {
 	Counts      ResultCounts                 `json:"counts,omitzero"`
 	Next        ResultNext                   `json:"next,omitzero"`
 	Execution   *ResultExecution             `json:"execution,omitempty"`
-	Monitor     *ResultMonitor               `json:"monitor,omitempty"`
+	Background  *ResultBackground            `json:"background,omitempty"`
 	Kill        *ResultKill                  `json:"kill,omitempty"`
 	TaskOutput  *ResultTaskOutput            `json:"task_output,omitempty"`
 	TaskOutputs *ResultTaskOutputs           `json:"task_outputs,omitempty"`
@@ -156,7 +158,7 @@ func (r result) render() string {
 		Counts:      r.Counts,
 		Next:        r.Next,
 		Execution:   r.Execution,
-		Monitor:     r.Monitor,
+		Background:  r.Background,
 		Kill:        r.Kill,
 		TaskOutput:  r.TaskOutput,
 		TaskOutputs: r.TaskOutputs,

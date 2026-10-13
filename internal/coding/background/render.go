@@ -58,6 +58,47 @@ func monitorEndReason(completion Completion) string {
 	return "ended"
 }
 
+// ShellCompletionText renders one shell task's single model-visible completion:
+// the status, the identity line, and the pointer at the task-output Tool. A
+// shell call carries no description, and the command is never echoed.
+func ShellCompletionText(completion Completion) string {
+	var builder strings.Builder
+
+	builder.WriteString("Background task \"")
+	builder.WriteString(completion.Snapshot.ID)
+	builder.WriteString("\" completed (")
+	builder.WriteString(shellEndReason(completion))
+	builder.WriteString(").\n")
+	builder.WriteString("Duration: ")
+	builder.WriteString(formatSeconds(completion.Snapshot.End.Sub(completion.Snapshot.Start)))
+	builder.WriteString("\nUse ")
+	builder.WriteString(TaskOutputToolName)
+	builder.WriteString("(\"")
+	builder.WriteString(completion.Snapshot.ID)
+	builder.WriteString("\") to see the full output.\n")
+
+	if completion.Killed && !completion.KillResultDelivered {
+		builder.WriteString(userKilledNotice)
+	}
+
+	return builder.String()
+}
+
+// shellEndReason classifies how the command stopped: a signaled run names its
+// signal, a run that exited reports its code, and anything else reports the
+// code as unknown.
+func shellEndReason(completion Completion) string {
+	if signal := completion.Snapshot.Signal; signal != "" {
+		return "terminated by signal " + signal
+	}
+
+	if code := completion.Snapshot.ExitCode; code >= 0 {
+		return "exit code: " + strconv.Itoa(code)
+	}
+
+	return "exit code: unknown"
+}
+
 // monitorIdentityLine renders the description-preferred identity line.
 func monitorIdentityLine(snapshot Snapshot) string {
 	duration := formatSeconds(snapshot.End.Sub(snapshot.Start))

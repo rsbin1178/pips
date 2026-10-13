@@ -64,10 +64,22 @@ const (
 
 	tasksPaneHeaderExpanded  = "▾"
 	tasksPaneHeaderCollapsed = "▸"
-	// backgroundTaskTag labels a watch row, so a monitor is never read as a
-	// child.
-	backgroundTaskTag = "Monitor"
+	// backgroundTaskTag labels a watch row and backgroundCommandTag labels a
+	// backgrounded command's row, so neither is read as the other.
+	backgroundTaskTag    = "Monitor"
+	backgroundCommandTag = "Command"
 )
+
+// backgroundTaskTagFor returns the row tag for one background task kind. The
+// tag text lives here alone, so a command and a watch are never read as each
+// other.
+func backgroundTaskTagFor(kind string) string {
+	if kind == string(background.KindShell) {
+		return backgroundCommandTag
+	}
+
+	return backgroundTaskTag
+}
 
 // tasksPaneRow is one selectable line of the pane: a child of the current
 // session, or a background task the session registered. Both are projections
@@ -232,13 +244,19 @@ func formatStillRunning(kinds []stillRunningKind) string {
 }
 
 // runningWorkCounts counts the live kinds the cue and the pane both read:
-// background tasks (pips' Watchers, which are monitors) and running children
-// (Subagents). The reference's cue also lists commands, loops, and workflows;
+// background commands, background watches (pips' Watchers), and running
+// children (Subagents). The reference's cue also lists loops and workflows;
 // pips runs none of those, so they are absent. The child predicate matches the
 // pane's running rows, so the two surfaces cannot disagree about what runs.
-func (m *Model) runningWorkCounts() (monitors, subagents int) {
+func (m *Model) runningWorkCounts() (commands, monitors, subagents int) {
 	for _, task := range m.state.BackgroundTasks {
-		if task.ID != "" && !task.Completed {
+		if task.ID == "" || task.Completed {
+			continue
+		}
+
+		if task.Kind == string(background.KindShell) {
+			commands++
+		} else {
 			monitors++
 		}
 	}
@@ -252,7 +270,7 @@ func (m *Model) runningWorkCounts() (monitors, subagents int) {
 		}
 	}
 
-	return monitors, subagents
+	return commands, monitors, subagents
 }
 
 // stillRunningCue renders the count-led cue the reference shows while its agent
@@ -265,9 +283,10 @@ func (m *Model) stillRunningCue() string {
 	if m.state.Phase != coding.PhaseIdle {
 		return ""
 	}
-	monitors, subagents := m.runningWorkCounts()
+	commands, monitors, subagents := m.runningWorkCounts()
 
 	return formatStillRunning([]stillRunningKind{
+		{count: commands, noun: "command"},
 		{count: monitors, noun: "monitor"},
 		{count: subagents, noun: "subagent"},
 	})
@@ -483,7 +502,7 @@ func tasksPaneBackgroundRow(
 	}
 
 	return tasksPaneRow{
-		taskID: task.ID, tag: backgroundTaskTag,
+		taskID: task.ID, tag: backgroundTaskTagFor(task.Kind),
 		label:     backgroundTaskRowLabel(task),
 		state:     backgroundTaskState(task),
 		running:   running,
