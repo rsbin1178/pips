@@ -182,7 +182,12 @@ func TestMonitorIntegrationStreamsAndEndsNaturally(t *testing.T) {
 	assert.True(t, completion.Snapshot.Completed)
 	assert.Equal(t, 0, completion.Snapshot.ExitCode)
 	assert.Equal(t, "four lines", completion.Snapshot.Description)
-	assert.Contains(t, completion.Tail, "line-4")
+
+	// The completion points at the read Tool; the log itself is still readable
+	// by id through the registry.
+	tail, ok := fixture.registry.Tail(completion.Snapshot.ID, 1024)
+	require.True(t, ok)
+	assert.Contains(t, tail, "line-4")
 
 	// Every line the command printed reaches the model, and no event is a
 	// terminal one: the completion is the only terminal report.

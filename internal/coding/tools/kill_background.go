@@ -97,7 +97,7 @@ func (t *killBackgroundTool) Exec(ctx context.Context, call agent.ToolCall) ([]a
 	value := result{OK: true, Tool: KillBackgroundName, Kill: &ResultKill{
 		TaskID: args.TaskID, Outcome: string(outcome),
 	}}
-	value.Body = killBackgroundBody(args.TaskID, outcome, t.knownIDs(ctx))
+	value.Body = killBackgroundBody(args.TaskID, outcome, boundedKnownIDs(ctx, t.known))
 
 	if outcome == background.OutcomeNotFound {
 		value.OK = false
@@ -107,14 +107,15 @@ func (t *killBackgroundTool) Exec(ctx context.Context, call agent.ToolCall) ([]a
 	return agent.TextResult(value.render()), nil
 }
 
-// knownIDs reads the control surface's known ids, bounded in count. A nil or
-// failing read yields nothing rather than failing the stop.
-func (t *killBackgroundTool) knownIDs(ctx context.Context) []string {
-	if t.known == nil {
+// boundedKnownIDs reads the control surface's known ids, bounded in count. A
+// nil or failing read yields nothing rather than failing the call, so every
+// not-found sentence shares one enumeration.
+func boundedKnownIDs(ctx context.Context, known KnownBackgroundIDs) []string {
+	if known == nil {
 		return nil
 	}
 
-	ids := t.known(ctx)
+	ids := known(ctx)
 	if len(ids) > maxKillKnownIDs {
 		ids = ids[:maxKillKnownIDs]
 	}
@@ -133,13 +134,20 @@ func killBackgroundBody(taskID string, outcome background.Outcome, known []strin
 	case background.OutcomeAlreadyExited:
 		return "Task \"" + taskID + "\" had already completed."
 	default:
-		body := "Task \"" + taskID + "\" not found."
-		if listed := knownIDsText(known); listed != "" {
-			body += " Known task ids: " + listed + "."
-		}
-
-		return body
+		return notFoundSentence(taskID, known)
 	}
+}
+
+// notFoundSentence is the one not-found sentence a background-task Tool
+// reports. It names the ids the registry still knows, bounded in count and
+// length, so a model that lost an id can recover it.
+func notFoundSentence(taskID string, known []string) string {
+	body := "Task \"" + taskID + "\" not found."
+	if listed := knownIDsText(known); listed != "" {
+		body += " Known task ids: " + listed + "."
+	}
+
+	return body
 }
 
 // knownIDsText renders the bounded, comma-separated list of known ids.

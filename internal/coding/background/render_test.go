@@ -95,14 +95,13 @@ func TestMonitorCompletionTextPrefersTheDescription(t *testing.T) {
 			ID: "monitor-1", Command: "tail -f secret.log", Description: "deploy log",
 			Start: start, End: start.Add(2500 * time.Millisecond), ExitCode: 0,
 		},
-		Tail: "last line",
 	}
 
 	text := MonitorCompletionText(completion)
 	assert.Equal(t,
 		"Monitor \"monitor-1\" ended: [monitor ended: exited (code 0)].\n"+
 			"Description: deploy log | Duration: 2.5s\n"+
-			"last line\n", text)
+			"Use get_task_output(\"monitor-1\") for full output.\n", text)
 	assert.NotContains(t, text, "secret.log")
 }
 
@@ -121,6 +120,7 @@ func TestMonitorCompletionTextNamesASignalAndTheUserKill(t *testing.T) {
 	assert.Equal(t,
 		"Monitor \"monitor-2\" ended: [monitor ended: killed by signal term].\n"+
 			"Duration: 1.0s\n"+
+			"Use get_task_output(\"monitor-2\") for full output.\n"+
 			userKilledNotice, MonitorCompletionText(completion))
 
 	// A kill the model already saw as a Tool result carries no notice: that

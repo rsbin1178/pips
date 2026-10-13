@@ -395,7 +395,12 @@ func TestMonitorDetachReturnsAReceiptAndRunsTheProcessInTheBackground(t *testing
 	events, completions := observer.snapshot()
 	require.Len(t, events, 1)
 	assert.Equal(t, "line-1\nline-2", events[0].Text)
-	assert.Equal(t, "line-1\nline-2", completions[0].Tail)
+
+	// The completion no longer inlines the log; the registry still reads it.
+	tail, ok := registry.Tail(header.Monitor.TaskID, 1024)
+	require.True(t, ok)
+	assert.Equal(t, "line-1\nline-2", tail)
+	require.Len(t, completions, 1)
 	assert.False(t, prepared.wasClosed(), "the run owns the prepared execution")
 }
 

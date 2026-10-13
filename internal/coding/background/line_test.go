@@ -193,7 +193,7 @@ func TestSingleMonitorBatchUsesTheSingularNoun(t *testing.T) {
 	assert.True(t, strings.HasPrefix(text, "2 monitor events from 1 monitor (use "), text)
 }
 
-func TestCompletionTextPrefersTheDescriptionAndInlinesTheTail(t *testing.T) {
+func TestCompletionTextPrefersTheDescriptionAndPointsAtTheTool(t *testing.T) {
 	t.Parallel()
 
 	start := time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)
@@ -203,7 +203,6 @@ func TestCompletionTextPrefersTheDescriptionAndInlinesTheTail(t *testing.T) {
 			Start: start, End: start.Add(1500 * time.Millisecond),
 			ExitCode: 0, Completed: true,
 		},
-		Tail: "line-1\nline-2",
 	}
 
 	text := MonitorCompletionText(completion)
@@ -212,7 +211,7 @@ func TestCompletionTextPrefersTheDescriptionAndInlinesTheTail(t *testing.T) {
 		t,
 		"Monitor \"monitor-1\" ended: [monitor ended: exited (code 0)].\n"+
 			"Description: deploy log | Duration: 1.5s\n"+
-			"line-1\nline-2\n",
+			"Use get_task_output(\"monitor-1\") for full output.\n",
 		text,
 	)
 	assert.NotContains(t, text, "deploy --secret")

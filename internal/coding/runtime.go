@@ -754,10 +754,11 @@ func openRuntime(
 			options.Config.Sandbox,
 			options.Config.SandboxWorkspaceWrite.Network,
 		),
-		tools.NewMonitorHandlerForSandbox(
+		tools.NewMonitorHandlerForSandboxWithOwner(
 			runtime.backgroundTasks,
 			options.Config.Sandbox,
 			options.Config.SandboxWorkspaceWrite.Network,
+			runtime.currentInteractionID,
 		),
 	)
 	if err != nil {

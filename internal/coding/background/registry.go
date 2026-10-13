@@ -11,6 +11,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"reflect"
 	"slices"
 	"strconv"
 	"sync"
@@ -41,9 +42,14 @@ const (
 // warning, and the catch-up notice all name it, so it has one definition.
 const KillTaskToolName = "kill_background_task"
 
+// TaskOutputToolName is the model-visible name of the Tool that reads one
+// background task's output by id. The completion text points at it, so it has
+// one definition beside the stop Tool's.
+const TaskOutputToolName = "get_task_output"
+
 // Snapshot is one immutable view of a registered background task. It is the
-// single per-task record every surface reads: the kill Tool, the tasks pane,
-// the Stop hook, and telemetry.
+// single per-task record every surface reads: the kill Tool, the task-output
+// Tool, the tasks pane, the Stop hook, and telemetry.
 type Snapshot struct {
 	ID          string
 	Command     string
@@ -54,8 +60,13 @@ type Snapshot struct {
 	ExitCode    int
 	Signal      string
 	Completed   bool
-	Kind        Kind
-	Owner       string
+	// Killed reports that a kill stopped the task, whatever the source.
+	Killed bool
+	// TimedOut reports that the task's own deadline ended it. A kill wins over
+	// the deadline, so a killed task is never reported as timed out.
+	TimedOut bool
+	Kind     Kind
+	Owner    string
 }
 
 // Event is one model-visible background event.
@@ -72,10 +83,11 @@ type Event struct {
 // Completion is one task's single terminal report.
 type Completion struct {
 	Snapshot Snapshot
-	// Tail is a bounded, sanitized projection of the task's own output.
-	Tail string
 	// Killed reports that a kill stopped the task rather than its own exit.
 	Killed bool
+	// Source names who stopped the task. It is meaningful only when Killed is
+	// set, and it decides whether the terminal report still wakes the model.
+	Source KillSource
 	// KillResultDelivered reports that a Tool result already told the model the
 	// kill outcome, so the terminal completion must not wake the model again.
 	KillResultDelivered bool
@@ -112,15 +124,22 @@ type Request struct {
 	Start      Start
 }
 
-// KillSource identifies who stopped a task. A model kill already produced a
-// Tool result, so its terminal completion must not wake the model again.
+// KillSource identifies who stopped a task, and therefore whether its terminal
+// completion may wake the model.
 type KillSource uint8
 
 const (
-	// KillModel is the model's own stop Tool.
+	// KillModel is the model's own stop Tool. It already produced a Tool
+	// result, so its completion is delivered only when no result reached the
+	// model.
 	KillModel KillSource = iota
-	// KillUser is the tasks-pane control or Runtime teardown.
+	// KillUser is the tasks-pane control or Runtime teardown. No Tool result
+	// carries the outcome, so the completion still wakes the model.
 	KillUser
+	// KillPromptEnd is the cancel of the interaction that spawned the task. No
+	// turn remains to report it and the user just interrupted, so its
+	// completion produces no queue record at all.
+	KillPromptEnd
 )
 
 // Outcome classifies one kill request.
@@ -300,6 +319,7 @@ func (r *Registry) Kill(id string, source KillSource) Outcome {
 
 	if !entry.killed {
 		entry.killed = true
+		entry.source = source
 		entry.delivered = source == KillModel
 	}
 
@@ -309,6 +329,40 @@ func (r *Registry) Kill(id string, source KillSource) Outcome {
 	cancel()
 
 	return OutcomeKilled
+}
+
+// CancelOwned stops every live task whose owner is the given interaction id and
+// reports how many it stopped. An empty owner matches nothing, so a task
+// registered without an owner is never cancelled by an interaction boundary.
+func (r *Registry) CancelOwned(owner string, source KillSource) int {
+	if r == nil || owner == "" {
+		return 0
+	}
+
+	r.mu.Lock()
+
+	cancels := make([]context.CancelFunc, 0, 1)
+
+	for _, entry := range r.tasks {
+		if entry.completed || entry.owner != owner {
+			continue
+		}
+
+		if !entry.killed {
+			entry.killed = true
+			entry.source = source
+			entry.delivered = source == KillModel
+		}
+
+		cancels = append(cancels, entry.cancel)
+	}
+	r.mu.Unlock()
+
+	for _, cancel := range cancels {
+		cancel()
+	}
+
+	return len(cancels)
 }
 
 // Snapshot returns one task's current view. A task that is still running has a
@@ -372,6 +426,215 @@ func (r *Registry) Tail(id string, limit int64) (string, bool) {
 	return tailBytes(path, limit), true
 }
 
+// OutputPath returns the task's own log path, `<dir>/<id>.log`. It is the path
+// the task-output record reports as output_file and the only path the read Tool
+// admits from outside the workspace.
+func (r *Registry) OutputPath(id string) (string, bool) {
+	if r == nil {
+		return "", false
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	entry, ok := r.tasks[id]
+	if !ok || entry.output == nil {
+		return "", false
+	}
+
+	return entry.output.path, true
+}
+
+// ResultTaken reports whether a task's result is already the model's: a read is
+// standing by for it, or a read already returned its terminal record. The
+// delivery path consults it live, so a result is carried by exactly one surface
+// however the two order.
+func (r *Registry) ResultTaken(id string) bool {
+	if r == nil {
+		return false
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	entry, ok := r.tasks[id]
+
+	return ok && (entry.waiters > 0 || entry.taken)
+}
+
+// TaskOutput returns one task's record. An unknown id yields a record with
+// Found == false rather than an error, so a multi read can render the unknown
+// entry beside the known ones. A terminal record is marked taken: the read is
+// now the surface that carries it.
+func (r *Registry) TaskOutput(id string) TaskOutput {
+	if r == nil {
+		return notFoundTaskOutput(id)
+	}
+
+	r.mu.Lock()
+	entry, ok := r.tasks[id]
+
+	var (
+		snapshot Snapshot
+		killed   bool
+		timedOut bool
+		path     string
+	)
+	if ok {
+		snapshot = entry.snapshotLocked()
+		killed = entry.killed
+		timedOut = entry.timedOut
+
+		if entry.output != nil {
+			path = entry.output.path
+		}
+
+		if entry.completed {
+			entry.taken = true
+		}
+	}
+	r.mu.Unlock()
+
+	if !ok {
+		return notFoundTaskOutput(id)
+	}
+
+	return taskOutputFromSnapshot(snapshot, killed, timedOut, path, r.now())
+}
+
+// TaskOutputs returns one record per id, ordered as the ids were asked.
+func (r *Registry) TaskOutputs(ids []string) []TaskOutput {
+	outputs := make([]TaskOutput, 0, len(ids))
+
+	for _, id := range ids {
+		outputs = append(outputs, r.TaskOutput(id))
+	}
+
+	return outputs
+}
+
+// Wait resolves every id immediately, then blocks on the still-running ones
+// until they all end, until any one ends when waitAny is set, or until the
+// budget or ctx elapses. It is event-driven: each still-running task's own ended
+// channel is a select case, so nothing polls.
+//
+// A waiter registers on a still-running task under the registry lock before it
+// blocks, so the delivery path sees ResultTaken while the wait is inside its
+// call. On return the registration is released and every terminal record is
+// marked taken by TaskOutputs, so the delivery path sees ResultTaken after the
+// wait as well. Exactly one surface therefore carries the outcome, whichever of
+// the two the delivery reaches first.
+func (r *Registry) Wait(
+	ctx context.Context,
+	ids []string,
+	waitAny bool,
+	budget time.Duration,
+) ([]TaskOutput, WaitOutcome) {
+	if r == nil {
+		return r.TaskOutputs(ids), WaitOutcomeCompleted
+	}
+
+	r.mu.Lock()
+
+	waiting := make([]*task, 0, len(ids))
+	for _, id := range ids {
+		entry, ok := r.tasks[id]
+		if !ok || entry.completed {
+			continue
+		}
+
+		entry.waiters++
+		waiting = append(waiting, entry)
+	}
+	r.mu.Unlock()
+
+	outcome := WaitOutcomeCompleted
+	if len(waiting) > 0 {
+		// An already-cancelled context never reached await, so the wait did not
+		// happen: report the cancellation rather than a completion no task met.
+		outcome = WaitOutcomeCanceled
+
+		if ctx.Err() == nil {
+			outcome = r.await(ctx, waiting, waitAny, budget)
+		}
+	}
+
+	r.mu.Lock()
+	for _, entry := range waiting {
+		entry.waiters--
+
+		if entry.completed {
+			entry.taken = true
+		}
+	}
+	r.mu.Unlock()
+
+	return r.TaskOutputs(ids), outcome
+}
+
+// await selects over the registered tasks' own ended channels, the context, and
+// the budget. It returns as soon as the wait condition is met.
+func (r *Registry) await(
+	ctx context.Context,
+	waiting []*task,
+	waitAny bool,
+	budget time.Duration,
+) WaitOutcome {
+	if budget <= 0 {
+		return WaitOutcomeDeadline
+	}
+
+	timer := time.NewTimer(budget)
+	defer timer.Stop()
+
+	cases := make([]reflect.SelectCase, 0, len(waiting)+2)
+	cases = append(
+		cases,
+		reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(ctx.Done())},
+		reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(timer.C)},
+	)
+
+	for _, entry := range waiting {
+		cases = append(cases, reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(entry.ended)})
+	}
+
+	for {
+		chosen, _, _ := reflect.Select(cases)
+
+		switch chosen {
+		case 0:
+			return WaitOutcomeCanceled
+		case 1:
+			return WaitOutcomeDeadline
+		}
+
+		if waitAny {
+			return WaitOutcomeCompleted
+		}
+
+		// Disable the fired channel so the next select cannot spin on it.
+		cases[chosen] = reflect.SelectCase{Dir: reflect.SelectRecv}
+
+		if r.allEnded(waiting) {
+			return WaitOutcomeCompleted
+		}
+	}
+}
+
+// allEnded reports whether every registered task has completed.
+func (r *Registry) allEnded(waiting []*task) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	for _, entry := range waiting {
+		if !entry.completed {
+			return false
+		}
+	}
+
+	return true
+}
+
 // Reap stops every live task and waits for their pipelines to end. Runtime
 // teardown calls it, so no task outlives its session.
 func (r *Registry) Reap(ctx context.Context) error {
@@ -389,6 +652,7 @@ func (r *Registry) Reap(ctx context.Context) error {
 		}
 
 		entry.killed = true
+		entry.source = KillUser
 		cancels = append(cancels, entry.cancel)
 	}
 
@@ -431,7 +695,15 @@ type task struct {
 
 	completed bool
 	killed    bool
+	timedOut  bool
 	delivered bool
+	// waiters counts the reads standing by for this task's terminal record, and
+	// taken marks a terminal record a read already returned. The delivery path
+	// consults both live, so exactly one surface carries a result. The count is
+	// what keeps one read's release from clearing another read's registration.
+	waiters int
+	taken   bool
+	source  KillSource
 
 	output *outputFile
 	cancel context.CancelFunc
@@ -552,6 +824,7 @@ func (t *task) finish(result execution.Result) {
 	t.end = t.registry.now()
 	t.exit = result.ExitCode
 	t.sig = result.Signal
+	t.timedOut = result.Status == execution.StatusTimedOut
 	t.registry.mu.Unlock()
 
 	close(t.ended)
@@ -564,16 +837,16 @@ func (t *task) report() {
 		return
 	}
 
-	tail := tailBytes(t.output.path, t.registry.tail)
-
 	t.registry.mu.Lock()
 	snapshot := t.snapshotLocked()
 	killed := t.killed
+	source := t.source
 	delivered := t.delivered
 	t.registry.mu.Unlock()
 
 	observer.BackgroundCompleted(Completion{
-		Snapshot: snapshot, Tail: tail, Killed: killed, KillResultDelivered: delivered,
+		Snapshot: snapshot, Killed: killed, Source: source,
+		KillResultDelivered: delivered,
 	})
 }
 
@@ -582,7 +855,8 @@ func (t *task) snapshotLocked() Snapshot {
 	return Snapshot{
 		ID: t.id, Command: t.command, Description: t.description, CWD: t.cwd,
 		Start: t.start, End: t.end, ExitCode: t.exit, Signal: t.sig,
-		Completed: t.completed, Kind: t.kind, Owner: t.owner,
+		Completed: t.completed, Killed: t.killed, TimedOut: t.timedOut,
+		Kind: t.kind, Owner: t.owner,
 	}
 }
 
