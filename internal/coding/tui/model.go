@@ -598,6 +598,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if message.hasState {
 			state := message.state
 			m.route.childState = &state
+			m.adoptChildState(message.childSessionID, state)
 		}
 		if message.hasDetail {
 			detail := message.detail
@@ -3345,6 +3346,18 @@ func (m *Model) reduceChildEvent(event coding.Event) {
 		child := next.Clone()
 		m.route.childState = &child
 	}
+}
+
+// adoptChildState records the Runtime's authoritative child State as this model's
+// own copy. A child that continued another child's conversation inherits its
+// history, which the child's own event stream does not carry, so keeping the two
+// copies the same is what lets later events extend the inherited transcript
+// instead of replacing it with a shorter one.
+func (m *Model) adoptChildState(childSessionID string, state coding.State) {
+	if childSessionID == "" {
+		return
+	}
+	m.childStates[childSessionID] = state.Clone()
 }
 
 func cloneChildStates(values map[string]coding.State) map[string]coding.State {

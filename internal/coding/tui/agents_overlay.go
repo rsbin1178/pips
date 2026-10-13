@@ -1815,6 +1815,7 @@ func (m *Model) applySubagentRouteRefresh(message subagentRouteDataMsg) (tea.Mod
 		if message.hasState {
 			state := message.state
 			m.route.childState = &state
+			m.adoptChildState(message.childSessionID, state)
 		}
 		if message.hasDetail {
 			detail := message.detail

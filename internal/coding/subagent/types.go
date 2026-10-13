@@ -197,7 +197,12 @@ type Event struct {
 	// Wake marks a continuation a message woke from a completed child. The
 	// sender already holds the acceptance reply, so a wake's terminal state is
 	// not surfaced as a second completion.
-	Wake        bool
+	Wake bool
+	// Inherited reports that this child continues another child's conversation,
+	// so its own session already owns the turns that came before this run. It is
+	// lifecycle metadata, never content: the projection reads the history from the
+	// child's own session when it opens.
+	Inherited   bool
 	ChildRunID  string
 	Model       string
 	TaskPreview string

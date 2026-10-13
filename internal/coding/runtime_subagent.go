@@ -61,7 +61,7 @@ func (r *Runtime) subagentObserver(
 		if nested {
 			switch event.State {
 			case subagent.StateCreated:
-				return r.openChildProjection(ctx, event)
+				return r.openChildProjection(ctx, event, r.inheritedChildHistory(ctx, event))
 			case subagent.StateSucceeded, subagent.StateFailed,
 				subagent.StateCanceled, subagent.StateInterrupted:
 				return r.finishChildProjection(ctx, event)
@@ -85,7 +85,7 @@ func (r *Runtime) subagentObserver(
 		var projectionErr error
 		switch event.State {
 		case subagent.StateCreated:
-			projectionErr = r.openChildProjection(ctx, event)
+			projectionErr = r.openChildProjection(ctx, event, r.inheritedChildHistory(ctx, event))
 		case subagent.StateSucceeded, subagent.StateFailed,
 			subagent.StateCanceled, subagent.StateInterrupted:
 			projectionErr = r.finishChildProjection(ctx, event)
@@ -121,7 +121,29 @@ func (r *Runtime) subagentEventIsNested(current *interaction, event subagent.Eve
 	return event.ParentInteractionID != "" && event.ParentInteractionID != current.id
 }
 
-func (r *Runtime) openChildProjection(ctx context.Context, event subagent.Event) error {
+// inheritedChildHistory reads the conversation a continued child already owns.
+// Its session was forked from the child it continues, so the durable transcript
+// carries those turns before this run produced anything. The read happens before
+// the projection takes the publisher lock, and a child that inherited nothing —
+// or whose session cannot be read — contributes nothing.
+func (r *Runtime) inheritedChildHistory(ctx context.Context, event subagent.Event) []ai.Message {
+	if !event.Inherited || r.subagents == nil || event.ChildSessionID == "" {
+		return nil
+	}
+
+	detail, err := r.subagents.Inspect(ctx, event.ChildSessionID)
+	if err != nil {
+		return nil
+	}
+
+	return detail.Transcript
+}
+
+func (r *Runtime) openChildProjection(
+	ctx context.Context,
+	event subagent.Event,
+	inherited []ai.Message,
+) error {
 	publisher := r.publisher
 	publisher.mu.Lock()
 	defer publisher.mu.Unlock()
@@ -139,6 +161,14 @@ func (r *Runtime) openChildProjection(ctx context.Context, event subagent.Event)
 	}
 	child := &childProjection{
 		writer: writer, projector: projector, interactionID: event.ChildSessionID,
+	}
+	// A continued child owns the conversation it inherited before this run
+	// produces anything, and this live State is what a reader sees while the child
+	// runs. The history is copied in rather than re-published as commits: those
+	// messages were committed in the child this one continues, and a commit
+	// outside an open turn is not a valid projection input.
+	if len(inherited) > 0 {
+		child.state.Transcript = cloneMessages(inherited)
 	}
 	r.children[event.ChildSessionID] = child
 	eventTime := childEventTime(event.Time)
