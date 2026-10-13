@@ -544,6 +544,19 @@ func (h *Harness) finishPrompt(run *promptRun) error {
 	run.recorder.flush(nil) // save-point: whatever the outcome, keep what completed
 	h.exit()
 
+	// A run that never reported completion stopped somewhere between
+	// committing an assistant message and committing its results: the
+	// consumer stopped iterating mid-batch, or the run failed on the way to
+	// the results. The agent loop refuses to start a run whose tail holds
+	// those calls, so answer them here and keep the transcript runnable. A
+	// run that completed, including one that paused for approval, owns its
+	// pending calls and is left alone.
+	if !run.recorder.completed {
+		if _, err := h.SettleDanglingToolCalls(DanglingToolCallUserCancelled); err != nil {
+			run.recorder.err = errors.Join(run.recorder.err, err)
+		}
+	}
+
 	return run.recorder.err
 }
 
@@ -754,7 +767,11 @@ type recorder struct {
 
 	buffer  []ai.Message
 	lastCum ai.Usage
-	err     error
+	// completed records that the run reported its own terminal reason. A
+	// paused run reports completion too, which is what keeps its pending
+	// calls intact for the caller to resolve.
+	completed bool
+	err       error
 }
 
 func (r *recorder) onEvent(ctx context.Context, ev agent.Event) {
@@ -767,6 +784,8 @@ func (r *recorder) onEvent(ctx context.Context, ev agent.Event) {
 		delta := usageDelta(payload.Usage, r.lastCum)
 		r.lastCum = payload.Usage
 		r.flush(&delta)
+	case agent.RunCompleted:
+		r.completed = true
 	default:
 	}
 
