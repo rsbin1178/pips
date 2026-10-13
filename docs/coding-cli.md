@@ -1447,8 +1447,12 @@ groups have rows in this release: `Subagents` projects the session's children an
 `Watchers` projects its registered background watches. `Ctrl+B` focuses the pane
 — revealing it if the automatic rule hid it, and turning the finished rows on
 when nothing is running, so the chord
-always shows what exists — `↑`/`↓` or `j`/`k` move the selection, `Ctrl+H` shows or
-hides finished rows, `x` stops the selected running child or watch, `Enter` (or
+always shows what exists — `↑`/`↓` or `j`/`k` move the selection, `Ctrl+H` shows
+what already ran — a stopped child or a stopped watch — revealing and focusing the
+pane for it and putting it away again on the second press, whether the keys are
+with the conversation or with the pane (a terminal profile that sends Ctrl+H as
+`Backspace` reaches the same toggle while the pane owns the keys), `x` stops the
+selected running child or watch, `Enter` (or
 `Ctrl+F` while the pane is focused) opens the selected row — a child's transcript,
 or a watch's page — `←`/`→` collapse or expand every section, and `Tab` or `Esc`
 gives the keys back to the composer. The wheel over the pane moves its selection

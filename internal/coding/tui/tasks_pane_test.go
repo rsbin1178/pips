@@ -338,27 +338,53 @@ func TestTasksPaneKeysKillAndInspect(t *testing.T) {
 		}
 	})
 
-	t.Run("Ctrl+H toggles the finished rows and a bare h does not", func(t *testing.T) {
+	t.Run("Ctrl+H shows the finished rows from the conversation", func(t *testing.T) {
+		t.Parallel()
+
+		model, _ := tasksPaneModel(t)
+		finished := liveTasksChild("child-1", "fix the login bug")
+		finished.State = subagent.StateSucceeded
+		model.state.Subagents = []coding.SubagentState{finished}
+		model.syncTasksPane(tasksPaneNow)
+		require.False(t, model.tasksPane.visible, "nothing is running, so the pane starts hidden")
+
+		model.Update(tea.KeyPressMsg{Code: 'h', Mod: tea.ModCtrl})
+		assert.True(t, model.tasksPane.showDone, "the chord turns the finished rows on")
+		assert.True(t, model.tasksPaneFocused(), "and focuses the pane that lists them")
+		assert.Contains(t, ansi.Strip(model.View().Content), "fix the login bug")
+
+		model.Update(tea.KeyPressMsg{Code: 'h', Mod: tea.ModCtrl})
+		assert.False(t, model.tasksPane.showDone)
+		assert.False(t, model.tasksPaneFocused(), "the composer takes the keys back")
+		assert.Empty(t, model.tasksPaneBand(tasksPaneNow), "and the pane paints nothing")
+	})
+
+	t.Run("the pane answers Ctrl+H and Backspace while focused, and a bare h never", func(t *testing.T) {
 		t.Parallel()
 
 		model, _ := tasksPaneModel(t)
 		model.state.Subagents = []coding.SubagentState{liveTasksChild("child-1", "fix the login bug")}
 		model.syncTasksPane(tasksPaneNow)
 		model.toggleTasksPane()
+		require.True(t, model.tasksPaneFocused())
 
 		model.Update(tea.KeyPressMsg{Code: 'h', Mod: tea.ModCtrl})
 		assert.True(t, model.tasksPane.showDone)
 		model.Update(tea.KeyPressMsg{Code: 'h', Mod: tea.ModCtrl})
 		assert.False(t, model.tasksPane.showDone)
 
-		// The other spelling a terminal can send for the same key: the byte a
-		// legacy terminal sends for Backspace is Ctrl+H's own code, so the pane
-		// answers it too.
+		// The other spelling a terminal can send for the same key: a profile that
+		// maps Ctrl+H onto Backspace's byte reaches the pane's own keys, where
+		// Backspace has no other job.
+		model.toggleTasksPane()
+		require.True(t, model.tasksPaneFocused())
 		model.Update(tea.KeyPressMsg{Code: tea.KeyBackspace})
 		assert.True(t, model.tasksPane.showDone)
 		model.Update(tea.KeyPressMsg{Code: tea.KeyBackspace})
 		assert.False(t, model.tasksPane.showDone)
 
+		model.toggleTasksPane()
+		require.True(t, model.tasksPaneFocused())
 		model.Update(key("h"))
 		assert.False(t, model.tasksPane.showDone, "a bare h is no longer the toggle")
 	})
