@@ -639,7 +639,7 @@ func (m *Manager) start(
 		// edges so parent Runs views do not retain a phantom created child.
 		// The durable journal remains authoritative if an observer is already
 		// detached.
-		createdObserverErr := emitObserver(runCtx, observer, eventFromRecord(created))
+		createdObserverErr := emitObserver(runCtx, observer, createdEventFrom(created, resume != nil))
 		terminalObserverErr := emitObserver(runCtx, observer, eventFromRecord(terminal))
 
 		return nil, errors.Join(
@@ -689,7 +689,7 @@ func (m *Manager) start(
 	ownershipTransferred = true
 	m.mu.Unlock()
 
-	observerErr := emitObserver(runCtx, observer, eventFromRecord(created))
+	observerErr := emitObserver(runCtx, observer, createdEventFrom(created, resume != nil))
 	if observerErr != nil {
 		execution.Cancel()
 	}
@@ -1866,6 +1866,17 @@ func stateForOutcome(outcome Outcome) State {
 	default:
 		return StateFailed
 	}
+}
+
+// createdEventFrom renders the created lifecycle the Runtime's child observer
+// sees. A child created from a resume source continues another child's
+// conversation, and the flag tells the projection to read the history that child
+// already owns before it projects this run.
+func createdEventFrom(value record, inherited bool) Event {
+	event := eventFromRecord(value)
+	event.Inherited = inherited
+
+	return event
 }
 
 func eventFromRecord(value record) Event {

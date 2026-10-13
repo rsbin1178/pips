@@ -51,6 +51,46 @@ func TestRuntimePublishesAChildTaskOnce(t *testing.T) {
 		"the durable transcript carries the same single prompt")
 }
 
+// TestRuntimeSeedsAContinuedChildProjectionFromItsInheritedTranscript pins the
+// live projection of a child that continued another child's conversation: it
+// starts from the history that child already owns, so a reader sees the whole
+// transcript while it runs instead of only the turns this run produced.
+func TestRuntimeSeedsAContinuedChildProjectionFromItsInheritedTranscript(t *testing.T) {
+	t.Parallel()
+
+	base := t.TempDir()
+	model := &resumeScriptModel{runtimeModel: newRuntimeModel(
+		runtimeToolResponse("parent-delegate", subagent.ToolName,
+			`{"prompt":"First task.","description":"first","run_in_background":false}`),
+		runtimeTextResponse("first child summary"),
+		runtimeTextResponse("second child summary"),
+		runtimeTextResponse("delegation complete"),
+	)}
+	runtime := openFullAccessTestRuntimeConfiguredWithTrust(
+		t, base, SessionTarget{}, model, nil, nil, nil, false,
+	)
+	model.runtime = runtime
+
+	events := collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("delegate the work")))
+	require.Contains(t, eventTypes(events), EventSubagentCompleted)
+
+	summaries, err := runtime.ListSubagents(t.Context())
+	require.NoError(t, err)
+	require.Len(t, summaries, 2)
+	// The listing is newest first, so the continued child leads.
+	resumed := summaries[0]
+
+	live, err := runtime.InspectSubagentState(t.Context(), resumed.ChildSessionID)
+	require.NoError(t, err)
+	detail, err := runtime.InspectSubagent(t.Context(), resumed.ChildSessionID)
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"First task.", "Continue the work."}, userMessageTexts(live.Transcript),
+		"the live projection carries the inherited task and the continuation")
+	assert.Len(t, live.Transcript, len(detail.Transcript),
+		"the live projection matches the durable transcript it was seeded from")
+}
+
 // userMessageTexts returns the text of every user message, in order.
 func userMessageTexts(messages []ai.Message) []string {
 	texts := make([]string, 0, len(messages))

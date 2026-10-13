@@ -2,6 +2,7 @@
 package tui
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"slices"
@@ -538,6 +539,64 @@ func TestSubagentTranscriptRouteFollowsAppendedContent(t *testing.T) {
 	model.Update(key("end"))
 	assert.True(t, model.childScroll.follow)
 	assert.Contains(t, ansi.Strip(model.View().Content), "LINE-998")
+}
+
+// TestSubagentRouteKeepsAnInheritedTranscriptThroughLiveEvents pins what a reader
+// sees for a child that continued another child's conversation: the history it
+// inherited stays on the page while the child's own events extend it, because the
+// event stream alone carries only the turns this run produced.
+func TestSubagentRouteKeepsAnInheritedTranscriptThroughLiveEvents(t *testing.T) {
+	t.Parallel()
+
+	detail := subagent.Detail{
+		Summary: subagent.Summary{
+			ChildSessionID: "child-1", Role: subagent.RoleExplore,
+			State: subagent.StateRunning, Model: "openai/model",
+		},
+		Transcript: []ai.Message{
+			ai.UserText("INHERITED-TASK"),
+			ai.AssistantText("INHERITED-ANSWER"),
+		},
+	}
+	controller := inheritedChildStateController{overlayController: newOverlayController(readyState())}
+	controller.agentDetail = detail
+	model := fullscreenModel(t, controller, true)
+	child := subagentChildSummary(detail.Summary)
+	model.route.children = []childSummary{child}
+
+	driveModelCommands(t, model, model.activateChildRoute(newChildRouteRequest(model.route, child)))
+	require.Contains(t, ansi.Strip(model.View().Content), "INHERITED-TASK",
+		"the page opens on the inherited history")
+
+	for _, event := range childMessageEvents(model.childStates["child-1"], true, "NEW-TURN") {
+		model.reduceChildEvent(event)
+		require.NoError(t, model.streamErr)
+	}
+
+	content := ansi.Strip(model.View().Content)
+	assert.Contains(t, content, "INHERITED-TASK", "the inherited history survives a live event")
+	assert.Contains(t, content, "NEW-TURN", "the live event lands on the inherited history")
+	assert.Contains(t, model.childStates, "child-1",
+		"the Runtime's child State became this model's own copy")
+}
+
+// inheritedChildStateController serves one child's State the way a live child
+// projection does: the child's session is open and its mode is the session's, with
+// the transcript the projection was seeded from.
+type inheritedChildStateController struct {
+	*overlayController
+}
+
+func (c inheritedChildStateController) InspectSubagentState(
+	_ context.Context,
+	_ string,
+) (coding.State, error) {
+	state := testSubagentState(c.agentDetail)
+	state.SessionID = c.agentDetail.Summary.ChildSessionID
+	state.SessionOpen = true
+	state.Mode = coding.ModeAgent
+
+	return state, nil
 }
 
 // childEventTime anchors the child events' clock. The reducer orders by sequence,
