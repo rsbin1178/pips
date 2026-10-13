@@ -43,9 +43,16 @@ type stubRunner struct {
 	// skipTranscript leaves the child Session with no model-visible message,
 	// which is the shape a resume source must not accept.
 	skipTranscript bool
+	// deadlineSeen receives whether the spawn wrapped the run in a deadline.
+	// It is buffered, so recording never blocks the run.
+	deadlineSeen chan bool
 }
 
 func (r *stubRunner) Run(ctx context.Context, task string) (RunnerResult, error) {
+	if r.deadlineSeen != nil {
+		_, seen := ctx.Deadline()
+		r.deadlineSeen <- seen
+	}
 	if r.onStart != nil {
 		r.once.Do(r.onStart)
 	}
@@ -1062,6 +1069,84 @@ func TestManagerInspectUsesPersistedLimitsAndRejectsOtherParent(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, other.Close(context.Background())) })
 	_, err = other.Inspect(t.Context(), result.ChildSessionID)
 	require.ErrorIs(t, err, ErrInvalid)
+}
+
+// TestManagerInstallsSpawnDeadlineOnlyForAnExplicitDuration pins Phase L's
+// wall-clock behaviour: the default child policy carries no MaxDuration, so the
+// spawn installs no deadline, while an explicit duration still does. The
+// deadline is observed inside Run rather than waited on.
+func TestManagerInstallsSpawnDeadlineOnlyForAnExplicitDuration(t *testing.T) {
+	t.Parallel()
+
+	unboundedSeen := make(chan bool, 1)
+	unbounded := newManagerFixtureWithOptions(t, &testModel{}, ExecutionOptions{Limits: DefaultLimits()})
+	unbounded.dispatcher.limits = DefaultLimits()
+	unbounded.dispatcher.newRunner = func() *stubRunner {
+		return &stubRunner{deadlineSeen: unboundedSeen, text: "stub summary", value: "stub summary"}
+	}
+
+	execution, err := unbounded.start(t.Context(), Request{AgentID: "explore", Task: "Inspect."}, nil)
+	require.NoError(t, err)
+	result, err := execution.Wait(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, OutcomeSucceeded, result.Outcome)
+	assert.False(t, <-unboundedSeen, "the default policy installs no wall-clock deadline")
+
+	boundedSeen := make(chan bool, 1)
+	bounded := DefaultLimits()
+	bounded.MaxDuration = time.Minute
+	limited := newManagerFixtureWithOptions(t, &testModel{}, ExecutionOptions{Limits: bounded})
+	limited.dispatcher.limits = bounded
+	limited.dispatcher.newRunner = func() *stubRunner {
+		return &stubRunner{deadlineSeen: boundedSeen, text: "stub summary", value: "stub summary"}
+	}
+
+	execution, err = limited.start(t.Context(), Request{AgentID: "explore", Task: "Inspect."}, nil)
+	require.NoError(t, err)
+	result, err = execution.Wait(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, OutcomeSucceeded, result.Outcome)
+	assert.True(t, <-boundedSeen, "an explicit duration installs a spawn deadline")
+}
+
+// TestManagerTokenBudgetOnlyAppliesWhenThePlanDeclaresOne pins Phase L's
+// cumulative-token behaviour: usage above the old 256,000-token budget no longer
+// fails a child whose policy sets no token cap, while an explicit cap still
+// fails it with the max_tokens code.
+func TestManagerTokenBudgetOnlyAppliesWhenThePlanDeclaresOne(t *testing.T) {
+	t.Parallel()
+
+	run := func(t *testing.T, limits Limits) (Result, error) {
+		t.Helper()
+
+		fixture := newManagerFixtureWithOptions(t, &testModel{}, ExecutionOptions{Limits: limits})
+		fixture.dispatcher.limits = limits
+		fixture.dispatcher.newRunner = func() *stubRunner {
+			return &stubRunner{
+				run: &agent.RunResult{
+					Stop: agent.StopEndTurn, Turns: 1,
+					Usage: ai.Usage{InputTokens: 300_000, OutputTokens: 10_000},
+				},
+				text: "stub summary", value: "stub summary",
+			}
+		}
+		execution, err := fixture.start(t.Context(), Request{AgentID: "explore", Task: "Inspect."}, nil)
+		require.NoError(t, err)
+
+		return execution.Wait(t.Context())
+	}
+
+	unbounded, err := run(t, DefaultLimits())
+	require.NoError(t, err)
+	assert.Equal(t, OutcomeSucceeded, unbounded.Outcome)
+	assert.Equal(t, "ok", unbounded.Code)
+
+	capped := DefaultLimits()
+	capped.MaxTokens = 256_000
+	limited, err := run(t, capped)
+	require.Error(t, err)
+	assert.Equal(t, OutcomeFailed, limited.Outcome)
+	assert.Equal(t, "max_tokens", limited.Code)
 }
 
 func TestManagerFailsMalformedResultWithDurableReference(t *testing.T) {

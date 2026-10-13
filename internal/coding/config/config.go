@@ -46,10 +46,6 @@ const (
 	FieldSubagentMaxConcurrent Field = "subagents.max_concurrent"
 	FieldSubagentMaxSpawned    Field = "subagents.max_spawned_per_root_interaction"
 	FieldSubagentMaxFollowUps  Field = "subagents.max_auto_follow_ups"
-	FieldSubagentMaxTurns      Field = "subagents.max_turns"
-	FieldSubagentMaxTokens     Field = "subagents.max_tokens"
-	FieldSubagentMaxToolCalls  Field = "subagents.max_tool_calls"
-	FieldSubagentMaxDuration   Field = "subagents.max_duration_minutes"
 	// FieldSubagentStructuredResults restores the typed JSON result contract
 	// for builtin agents. It defaults to false: a builtin agent returns its
 	// final text.
@@ -92,10 +88,6 @@ var fields = []Field{
 	FieldSubagentMaxConcurrent,
 	FieldSubagentMaxSpawned,
 	FieldSubagentMaxFollowUps,
-	FieldSubagentMaxTurns,
-	FieldSubagentMaxTokens,
-	FieldSubagentMaxToolCalls,
-	FieldSubagentMaxDuration,
 	FieldSubagentStructuredResults,
 	FieldSubagentLimitBehavior,
 	FieldSubagentModels,
@@ -586,20 +578,18 @@ func DefaultCompactionConfig() CompactionConfig {
 	}
 }
 
-// SubagentConfig contains the user-configurable production admission and
-// execution budgets, parsed from the `[subagents]` table. MaxDepth defaults to
-// one: a child may not spawn another child. Zero is invalid for every other
-// TOML field. The complete programmatic zero value remains a legacy embedding
-// boundary and is normalized by Runtime.
+// SubagentConfig contains the user-configurable production admission budgets,
+// parsed from the `[subagents]` table. MaxDepth defaults to one: a child may not
+// spawn another child. Zero is invalid for every other TOML field. A child's
+// execution is unbounded by default — the reference has no per-child execution
+// budget — and only a subagent definition's `limits` may cap it. The complete
+// programmatic zero value remains a legacy embedding boundary and is normalized
+// by Runtime.
 type SubagentConfig struct {
 	MaxDepth                     int
 	MaxConcurrent                int
 	MaxSpawnedPerRootInteraction int
 	MaxAutoFollowUps             int
-	MaxTurns                     int
-	MaxTokens                    int
-	MaxToolCalls                 int
-	MaxDurationMinutes           int
 	// StructuredResults restores the typed JSON result contract for builtin
 	// agents. The default is a free-text summary.
 	StructuredResults bool
@@ -624,13 +614,12 @@ type SubagentConfig struct {
 // DefaultSubagentConfig. It exists because the maps make the struct
 // non-comparable.
 func (c SubagentConfig) IsZero() bool {
-	return c.budgetsZero() && !c.StructuredResults && c.LimitBehavior == "" && c.presetsEmpty()
+	return c.admissionZero() && !c.StructuredResults && c.LimitBehavior == "" && c.presetsEmpty()
 }
 
-func (c SubagentConfig) budgetsZero() bool {
+func (c SubagentConfig) admissionZero() bool {
 	return c.MaxDepth == 0 && c.MaxConcurrent == 0 && c.MaxSpawnedPerRootInteraction == 0 &&
-		c.MaxAutoFollowUps == 0 && c.MaxTurns == 0 && c.MaxTokens == 0 &&
-		c.MaxToolCalls == 0 && c.MaxDurationMinutes == 0
+		c.MaxAutoFollowUps == 0
 }
 
 func (c SubagentConfig) presetsEmpty() bool {
@@ -651,17 +640,14 @@ func (c SubagentConfig) TypeEnabled(name string) bool {
 	return TypeEnabled(c.Toggle, name)
 }
 
-// DefaultSubagentConfig returns the bounded production policy.
+// DefaultSubagentConfig returns the bounded admission policy. A child's
+// execution carries no default budget; only a definition's `limits` caps it.
 func DefaultSubagentConfig() SubagentConfig {
 	return SubagentConfig{
 		MaxDepth:                     1,
 		MaxConcurrent:                32,
 		MaxSpawnedPerRootInteraction: 8,
 		MaxAutoFollowUps:             4,
-		MaxTurns:                     64,
-		MaxTokens:                    256_000,
-		MaxToolCalls:                 128,
-		MaxDurationMinutes:           30,
 		StructuredResults:            false,
 		LimitBehavior:                LimitBehaviorQueue,
 	}
@@ -1019,10 +1005,6 @@ func validateSubagent(value SubagentConfig) error {
 		{"max_concurrent", value.MaxConcurrent, 1, 32},
 		{"max_spawned_per_root_interaction", value.MaxSpawnedPerRootInteraction, 1, 128},
 		{"max_auto_follow_ups", value.MaxAutoFollowUps, 1, 32},
-		{"max_turns", value.MaxTurns, 2, 1024},
-		{"max_tokens", value.MaxTokens, 16_384, 16_000_000},
-		{"max_tool_calls", value.MaxToolCalls, 1, 4096},
-		{"max_duration_minutes", value.MaxDurationMinutes, 1, 24 * 60},
 	}
 	for _, item := range values {
 		if item.value < item.minimum || item.value > item.maximum {

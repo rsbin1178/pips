@@ -40,16 +40,15 @@ func TestConfiguredSubagentOptionsUseConfigAndPreserveExplicitOverrides(t *testi
 	configured := config.DefaultSubagentConfig()
 	configured.MaxDepth = 2
 	configured.MaxConcurrent = 6
-	configured.MaxTurns = 80
-	configured.MaxDurationMinutes = 45
 	options := configuredSubagentOptions(configured, subagent.ExecutionOptions{})
 	assert.Equal(t, 6, options.MaxConcurrent)
 	assert.Equal(t, 2, options.MaxDepth)
-	assert.Equal(t, 80, options.Limits.MaxTurns)
-	assert.Equal(t, 2, options.Limits.FinalizationTurns)
-	assert.Equal(t, 45*time.Minute, options.Limits.MaxDuration)
+	// Phase L: the [subagents] table carries no execution budget, so the resolved
+	// child policy is the unlimited one with its guards intact.
+	assert.Equal(t, subagent.DefaultLimits(), options.Limits)
 
 	unbounded := subagent.DefaultLimits()
+	unbounded.MaxTurns = 3
 	overridden := configuredSubagentOptions(configured, subagent.ExecutionOptions{
 		Limits: unbounded, MaxDepth: 1, MaxConcurrent: 1,
 	})
@@ -59,7 +58,7 @@ func TestConfiguredSubagentOptionsUseConfigAndPreserveExplicitOverrides(t *testi
 	assert.Equal(t, configured.MaxSpawnedPerRootInteraction, overridden.MaxSpawnedPerRootInteraction)
 	assert.Equal(
 		t,
-		subagent.ProductionLimits(),
+		subagent.DefaultLimits(),
 		configuredSubagentOptions(config.DefaultSubagentConfig(), subagent.ExecutionOptions{}).Limits,
 	)
 }

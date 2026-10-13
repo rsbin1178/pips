@@ -174,7 +174,7 @@ func TestReconcileInterruptsPendingChildInputWithoutReplayingOrResolvingIt(t *te
 				Schema: recordSchema, State: StateCreated, Role: RoleExplore,
 				ChildSessionID: child.Metadata().ID, ParentSessionID: parent.Metadata().ID,
 				ParentRunID: "parent-run", Model: "openai/test", TaskPreview: "pending input",
-				Limits: journalLimits(ProductionLimits()), Time: time.Now().UTC(),
+				Limits: journalLimits(DefaultLimits()), Time: time.Now().UTC(),
 			}
 			require.NoError(t, appendMirrored(child.Session(), parent.Session(), created))
 			started := created
@@ -380,7 +380,7 @@ func TestReconcileRejectsHeaderPlanLineageMismatchWithoutTerminalizing(t *testin
 	created := record{
 		Schema: recordSchema, State: StateCreated, Role: RoleExplore,
 		ChildSessionID: child.Metadata().ID, ParentSessionID: parent.Metadata().ID,
-		Model: "openai/test", Limits: journalLimits(ProductionLimits()), Time: time.Now().UTC(),
+		Model: "openai/test", Limits: journalLimits(DefaultLimits()), Time: time.Now().UTC(),
 	}
 	require.NoError(t, appendMirrored(child.Session(), parent.Session(), created))
 	require.NoError(t, child.Close())
@@ -404,6 +404,75 @@ func legacyBoundedRecordLimits() recordLimits {
 	value.MaxActivityTools = 0
 
 	return value
+}
+
+// oldProductionLimits is the pre-Phase-L production child policy: 64 turns,
+// 256,000 cumulative tokens, 128 Tool calls, and 30 minutes. A record written
+// under it must stay readable after Phase L removed those defaults.
+func oldProductionLimits() Limits {
+	limits := DefaultLimits()
+	limits.MaxTurns = 64
+	limits.FinalizationTurns = 2
+	limits.MaxTokens = 256_000
+	limits.MaxToolCalls = 128
+	limits.MaxDuration = 30 * time.Minute
+
+	return limits
+}
+
+// TestResumeAcceptsAChildRecordedUnderTheOldExecutionBudget pins Phase L's
+// back-compat: a child journal record written under the pre-Phase-L production
+// policy still reads, validates and resumes, because the record's plan limits
+// are reconciled against the record's own limits rather than against the new
+// unlimited defaults.
+func TestResumeAcceptsAChildRecordedUnderTheOldExecutionBudget(t *testing.T) {
+	t.Parallel()
+
+	fixture := newManagerFixtureWithOptions(t, &testModel{}, ExecutionOptions{Limits: oldProductionLimits()})
+	fixture.dispatcher.limits = oldProductionLimits()
+
+	completed, err := fixture.start(t.Context(), Request{AgentID: "explore", Task: "First."}, nil)
+	require.NoError(t, err)
+	source, err := completed.Wait(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, OutcomeSucceeded, source.Outcome)
+
+	// The durable source record carries the old bounded policy.
+	handle, err := fixture.repository.Open(t.Context(), session.OpenOptions{
+		ID:            source.ChildSessionID,
+		WorkspaceID:   fixture.parent.Metadata().WorkspaceID,
+		WorkspacePath: fixture.parent.Metadata().WorkspacePath,
+	})
+	require.NoError(t, err)
+	records, err := authoritativeChildRecords(handle)
+	require.NoError(t, err)
+	require.NotEmpty(t, records)
+	old := records[len(records)-1].Limits
+	assert.Equal(t, 64, old.MaxTurns)
+	assert.Equal(t, 256_000, old.MaxTokens)
+	assert.Equal(t, 128, old.MaxToolCalls)
+	assert.Equal(t, int64(30*time.Minute), old.MaxDurationNanos)
+	require.NoError(t, handle.Close())
+
+	// resolveResumeSource re-reads and re-validates that record; acceptance
+	// proves the old-policy record still reconciles.
+	resume, resumeHandle, err := fixture.manager.resolveResumeSource(t.Context(), Request{
+		AgentID: "explore", Task: "Continue.", ResumeFrom: source.ChildSessionID,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resume)
+	require.NotNil(t, resumeHandle)
+	require.NoError(t, resumeHandle.Close())
+	assert.Equal(t, source.ChildSessionID, resume.ChildSessionID)
+
+	// And the full Manager path resumes it rather than failing closed.
+	resumed, err := fixture.start(t.Context(), Request{
+		AgentID: "explore", Task: "Continue.", ResumeFrom: source.ChildSessionID,
+	}, nil)
+	require.NoError(t, err)
+	result, err := resumed.Wait(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, OutcomeSucceeded, result.Outcome)
 }
 
 func TestReconcileRepairsMissingParentTerminalFromChild(t *testing.T) {

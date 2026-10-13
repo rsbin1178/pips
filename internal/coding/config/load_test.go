@@ -358,17 +358,12 @@ max_depth = 2
 max_concurrent = 6
 max_spawned_per_root_interaction = 12
 max_auto_follow_ups = 5
-max_turns = 80
-max_tokens = 500000
-max_tool_calls = 200
-max_duration_minutes = 45
 `)
 	result, err := config.Load(config.LoadOptions{ConfigFile: path})
 	require.NoError(t, err)
 	assert.Equal(t, config.SubagentConfig{
 		MaxDepth:      2,
 		MaxConcurrent: 6, MaxSpawnedPerRootInteraction: 12, MaxAutoFollowUps: 5,
-		MaxTurns: 80, MaxTokens: 500_000, MaxToolCalls: 200, MaxDurationMinutes: 45,
 		LimitBehavior: config.LimitBehaviorQueue,
 	}, result.Config.Subagent)
 	for _, field := range []config.Field{
@@ -376,15 +371,30 @@ max_duration_minutes = 45
 		config.FieldSubagentMaxConcurrent,
 		config.FieldSubagentMaxSpawned,
 		config.FieldSubagentMaxFollowUps,
-		config.FieldSubagentMaxTurns,
-		config.FieldSubagentMaxTokens,
-		config.FieldSubagentMaxToolCalls,
-		config.FieldSubagentMaxDuration,
 	} {
 		source, ok := result.Config.Source(field)
 		require.True(t, ok)
 		assert.Equal(t, config.SourceConfigFile, source.Kind)
 		assert.Equal(t, path, source.Detail)
+	}
+}
+
+// TestLoadSubagentRemovedExecutionKeysFailWithMigration pins the Phase L
+// migration: the four per-child execution keys no longer exist, so a file that
+// still carries one is named explicitly instead of loading or failing as a
+// generic unknown field.
+func TestLoadSubagentRemovedExecutionKeysFailWithMigration(t *testing.T) {
+	t.Parallel()
+
+	for _, key := range []string{"max_turns", "max_tokens", "max_tool_calls", "max_duration_minutes"} {
+		t.Run(key, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "config.toml")
+			writeFile(t, path, "[subagents]\n"+key+" = 1\n")
+			_, err := config.Load(config.LoadOptions{ConfigFile: path})
+			require.ErrorIs(t, err, config.ErrMigration)
+			assert.Contains(t, err.Error(), key)
+		})
 	}
 }
 
@@ -396,11 +406,11 @@ func TestLoadSubagentPartialTableRetainsDefaultFieldSources(t *testing.T) {
 	result, err := config.Load(config.LoadOptions{ConfigFile: path})
 	require.NoError(t, err)
 	assert.Equal(t, 2, result.Config.Subagent.MaxConcurrent)
-	assert.Equal(t, config.DefaultSubagentConfig().MaxTurns, result.Config.Subagent.MaxTurns)
+	assert.Equal(t, config.DefaultSubagentConfig().MaxAutoFollowUps, result.Config.Subagent.MaxAutoFollowUps)
 	source, ok := result.Config.Source(config.FieldSubagentMaxConcurrent)
 	require.True(t, ok)
 	assert.Equal(t, config.SourceConfigFile, source.Kind)
-	source, ok = result.Config.Source(config.FieldSubagentMaxTurns)
+	source, ok = result.Config.Source(config.FieldSubagentMaxFollowUps)
 	require.True(t, ok)
 	assert.Equal(t, config.SourceDefault, source.Kind)
 }
@@ -488,9 +498,6 @@ func TestLoadSubagentBudgetsRejectInvalidAndUnknownValues(t *testing.T) {
 
 	for _, content := range []string{
 		"[subagents]\nmax_depth = 4\n",
-		"[subagents]\nmax_turns = 1\n",
-		"[subagents]\nmax_tokens = 999999999\n",
-		"[subagents]\nmax_duration_minutes = 0\n",
 		"[subagents]\nunknown = 1\n",
 	} {
 		t.Run(content, func(t *testing.T) {

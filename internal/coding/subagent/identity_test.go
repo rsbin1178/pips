@@ -178,7 +178,7 @@ func testDelegationExecutionPlan(t *testing.T) ExecutionPlan {
 		MaxDelegationDepth: 3,
 		Ancestry:           []string{"root-agent", "middle-agent"},
 		DelegationTargets:  []string{"leaf-agent"},
-		Limits:             NormalizeLimits(ProductionLimits()),
+		Limits:             DefaultLimits(),
 		Output:             output,
 	}
 }

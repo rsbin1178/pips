@@ -228,10 +228,6 @@ type fileSubagent struct {
 	MaxConcurrent                *int                       `toml:"max_concurrent"`
 	MaxSpawnedPerRootInteraction *int                       `toml:"max_spawned_per_root_interaction"`
 	MaxAutoFollowUps             *int                       `toml:"max_auto_follow_ups"`
-	MaxTurns                     *int                       `toml:"max_turns"`
-	MaxTokens                    *int                       `toml:"max_tokens"`
-	MaxToolCalls                 *int                       `toml:"max_tool_calls"`
-	MaxDurationMinutes           *int                       `toml:"max_duration_minutes"`
 	StructuredResults            *bool                      `toml:"structured_results"`
 	LimitBehavior                *string                    `toml:"limit_behavior"`
 	Models                       map[string]string          `toml:"models"`
@@ -488,6 +484,9 @@ func rejectLegacySchema(data []byte) error {
 			ErrMigration,
 		)
 	}
+	if err := rejectLegacySubagentBudget(raw); err != nil {
+		return err
+	}
 
 	providers, ok := raw["providers"].(map[string]any)
 	if !ok {
@@ -495,6 +494,30 @@ func rejectLegacySchema(data []byte) error {
 	}
 
 	return rejectLegacyProviders(providers)
+}
+
+// rejectLegacySubagentBudget names the four removed [subagents] execution keys.
+// A child now runs without a per-child execution budget, so a file that still
+// carries one must not load silently. The strict decoder already rejects the key
+// as unknown; this error says which key to delete and what caps a child instead.
+func rejectLegacySubagentBudget(raw map[string]any) error {
+	subagents, ok := raw["subagents"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	for _, key := range []string{"max_turns", "max_tokens", "max_tool_calls", "max_duration_minutes"} {
+		if _, exists := subagents[key]; !exists {
+			continue
+		}
+
+		return fmt.Errorf(
+			"%w: [subagents] %s was removed; a child runs without a per-child execution budget, and only a subagent definition's limits.max_turns caps its turns",
+			ErrMigration,
+			key,
+		)
+	}
+
+	return nil
 }
 
 func rejectLegacyProviders(providers map[string]any) error {
@@ -666,14 +689,6 @@ func decodeLayer(value fileConfig) (fileLayer, error) {
 			&subagent.MaxSpawnedPerRootInteraction,
 		)
 		setSubagent(FieldSubagentMaxFollowUps, value.Subagent.MaxAutoFollowUps, &subagent.MaxAutoFollowUps)
-		setSubagent(FieldSubagentMaxTurns, value.Subagent.MaxTurns, &subagent.MaxTurns)
-		setSubagent(FieldSubagentMaxTokens, value.Subagent.MaxTokens, &subagent.MaxTokens)
-		setSubagent(FieldSubagentMaxToolCalls, value.Subagent.MaxToolCalls, &subagent.MaxToolCalls)
-		setSubagent(
-			FieldSubagentMaxDuration,
-			value.Subagent.MaxDurationMinutes,
-			&subagent.MaxDurationMinutes,
-		)
 		if value.Subagent.StructuredResults != nil {
 			subagent.StructuredResults = *value.Subagent.StructuredResults
 			layer.subagentFields = append(layer.subagentFields, FieldSubagentStructuredResults)

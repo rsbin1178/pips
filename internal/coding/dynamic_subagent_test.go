@@ -110,6 +110,73 @@ Read only the delegated target and report the verification evidence.
 	assert.Nil(t, requests[1].ResponseFormat)
 }
 
+// TestRuntimeCustomProfileChildLimitsFollowTheDefinitionAndTheDefault pins Phase
+// L's resolved child policy end-to-end: a custom definition with no `limits`
+// block yields a plan with no execution budget, while a declared
+// `limits.max_turns` caps the child and reserves finalization turns below it.
+func TestRuntimeCustomProfileChildLimitsFollowTheDefinitionAndTheDefault(t *testing.T) {
+	t.Parallel()
+
+	inspectPlan := func(t *testing.T, limitsBlock string) subagent.ExecutionPlan {
+		t.Helper()
+
+		base := t.TempDir()
+		layout, err := paths.New(filepath.Join(base, "home"))
+		require.NoError(t, err)
+		require.NoError(t, os.MkdirAll(layout.AgentsDir(), 0o700))
+		require.NoError(t, os.WriteFile(
+			filepath.Join(layout.AgentsDir(), "go-checker.md"),
+			fmt.Appendf(nil, `---
+schema: pips.agent/v1alpha1
+name: Go checker
+description: Read one file and report the result.
+model: openai/runtime-test
+tools:
+  allow: ["tool:read"]
+%soutput:
+  format: text
+---
+Read only the delegated target.
+`, limitsBlock),
+			0o600,
+		))
+
+		model := newRuntimeModel(
+			runtimeToolResponse("parent-delegate", subagent.ToolName, `{"prompt":"Inspect target.txt.","description":"delegate","subagent_type":"go-checker","run_in_background":false}`),
+			runtimeToolResponse("child-read", "read", `{"path":"target.txt"}`),
+			runtimeTextResponse("target read"),
+			runtimeTextResponse("delegation complete"),
+		)
+		runtime := openDynamicTestRuntimeAt(t, base, SessionTarget{}, model)
+		require.NoError(t, os.WriteFile(
+			filepath.Join(runtime.workspace.Root(), "target.txt"), []byte("verified\n"), 0o600,
+		))
+
+		events := collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("delegate the check")))
+		assert.Contains(t, eventTypes(events), EventSubagentCompleted)
+
+		summaries, err := runtime.ListSubagents(t.Context())
+		require.NoError(t, err)
+		require.Len(t, summaries, 1)
+		detail, err := runtime.InspectSubagent(t.Context(), summaries[0].ChildSessionID)
+		require.NoError(t, err)
+
+		return detail.Plan
+	}
+
+	uncapped := inspectPlan(t, "")
+	assert.Zero(t, uncapped.Limits.MaxTurns)
+	assert.Zero(t, uncapped.Limits.MaxTokens)
+	assert.Zero(t, uncapped.Limits.MaxToolCalls)
+	assert.Zero(t, uncapped.Limits.MaxDuration)
+	assert.Zero(t, uncapped.Limits.FinalizationTurns)
+
+	capped := inspectPlan(t, "limits:\n  max_turns: 7\n")
+	assert.Equal(t, 7, capped.Limits.MaxTurns)
+	assert.Positive(t, capped.Limits.FinalizationTurns)
+	assert.Less(t, capped.Limits.FinalizationTurns, capped.Limits.MaxTurns)
+}
+
 func TestRuntimeKeepsAgentPrivateMCPOutOfParentAndBindsItToSelectedChild(t *testing.T) {
 	t.Parallel()
 
@@ -1518,7 +1585,7 @@ func appendInterruptedChildLifecycle(
 ) {
 	t.Helper()
 
-	limits := subagent.ProductionLimits()
+	limits := subagent.DefaultLimits()
 	record := map[string]any{
 		"schema":            "pips.coding.subagent.record/v1alpha1",
 		"state":             string(subagent.StateCreated),

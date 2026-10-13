@@ -28,9 +28,10 @@ type Limits struct {
 	MaxFieldBytes         int
 }
 
-// DefaultLimits returns the legacy embedder policy. Total turns, cumulative
-// tokens, tool calls, and wall time are unlimited; payloads and live
-// projections remain bounded independently.
+// DefaultLimits is the child execution policy: total turns, cumulative tokens,
+// tool calls, and wall time are unlimited, while payloads and live projections
+// remain bounded independently. A caller may still narrow any execution field
+// explicitly; the reference has no per-child execution budget either.
 func DefaultLimits() Limits {
 	return Limits{
 		RepeatedToolCallLimit: 3,
@@ -41,20 +42,6 @@ func DefaultLimits() Limits {
 		MaxResultItems:        128,
 		MaxFieldBytes:         8 << 10,
 	}
-}
-
-// ProductionLimits returns the bounded policy selected by a zero-value Coding
-// Runtime configuration. Embedders that explicitly need unlimited execution
-// can continue to pass DefaultLimits, whose payload fields make it non-zero.
-func ProductionLimits() Limits {
-	limits := DefaultLimits()
-	limits.MaxTurns = 64
-	limits.FinalizationTurns = 2
-	limits.MaxTokens = 256_000
-	limits.MaxToolCalls = 128
-	limits.MaxDuration = 30 * time.Minute
-
-	return limits
 }
 
 func normalizeLimits(limits Limits) Limits {

@@ -199,7 +199,7 @@ func testWorkspaceExecutionPlan(t *testing.T) ExecutionPlan {
 		Model:              "openai/gpt",
 		Instructions:       instructions,
 		InstructionsDigest: InstructionsDigest(instructions),
-		Limits:             NormalizeLimits(ProductionLimits()),
+		Limits:             DefaultLimits(),
 		Output:             output,
 	}
 }

@@ -888,31 +888,52 @@ func compileSelectedSkills(
 	return selected, nil
 }
 
+// resolveSubagentMaxTurns mirrors the reference's child turn-cap precedence:
+// the definition's declared cap wins, otherwise the parent run's cap applies,
+// and zero means uncapped.
+//
+// pips sets no parent-side cap today: the main conversation runs uncapped, and
+// no client flag or parent agent definition sets one. The Goal work loop's turn
+// guard bounds only the parent's own harness and is not a parent cap — the
+// reference installs no turn cap on a goal run either.
+func resolveSubagentMaxTurns(definitionMaxTurns, parentMaxTurns int) int {
+	if definitionMaxTurns > 0 {
+		return definitionMaxTurns
+	}
+
+	return parentMaxTurns
+}
+
+// compileProfileLimits resolves one definition's requested execution limits
+// against the Runtime ceiling. The definition's declared turn cap wins over the
+// inherited parent cap, which is the reference's precedence; every other
+// requested limit may only narrow the ceiling.
 func compileProfileLimits(
 	ceiling subagent.Limits,
 	requested agentprofile.ExecutionLimits,
 ) (subagent.Limits, error) {
 	result := ceiling
-	for _, value := range []struct {
-		name    string
-		parent  int
-		request int
-		set     func(int)
-	}{
-		{"max_turns", ceiling.MaxTurns, requested.MaxTurns, func(value int) { result.MaxTurns = value }},
-		{"max_tool_calls", ceiling.MaxToolCalls, requested.MaxToolCalls, func(value int) { result.MaxToolCalls = value }},
-	} {
-		if value.request == 0 {
-			continue
+	turns := resolveSubagentMaxTurns(requested.MaxTurns, ceiling.MaxTurns)
+	if ceiling.MaxTurns > 0 && turns > ceiling.MaxTurns {
+		return subagent.Limits{}, fmt.Errorf(
+			"%w: profile max_turns exceeds Runtime ceiling", subagent.ErrInvalid,
+		)
+	}
+	result.MaxTurns = turns
+
+	if requested.MaxToolCalls > 0 {
+		if ceiling.MaxToolCalls > 0 && requested.MaxToolCalls > ceiling.MaxToolCalls {
+			return subagent.Limits{}, fmt.Errorf(
+				"%w: profile max_tool_calls exceeds Runtime ceiling", subagent.ErrInvalid,
+			)
 		}
-		if value.parent > 0 && value.request > value.parent {
-			return subagent.Limits{}, fmt.Errorf("%w: profile %s exceeds Runtime ceiling", subagent.ErrInvalid, value.name)
-		}
-		value.set(value.request)
+		result.MaxToolCalls = requested.MaxToolCalls
 	}
 	if requested.MaxDuration > 0 {
 		if ceiling.MaxDuration > 0 && requested.MaxDuration > ceiling.MaxDuration {
-			return subagent.Limits{}, fmt.Errorf("%w: profile max_duration exceeds Runtime ceiling", subagent.ErrInvalid)
+			return subagent.Limits{}, fmt.Errorf(
+				"%w: profile max_duration exceeds Runtime ceiling", subagent.ErrInvalid,
+			)
 		}
 		result.MaxDuration = requested.MaxDuration
 	}
@@ -958,10 +979,14 @@ func compileProfileInstructions(
 	return instructions, nil
 }
 
+// runtimeSubagentLimits resolves the child execution ceiling. A zero value
+// selects the unlimited policy: the reference has no per-child execution
+// budget, and only an explicit definition limit or an embedder override
+// narrows it.
 func runtimeSubagentLimits(options subagent.ExecutionOptions) subagent.Limits {
 	limits := options.Limits
 	if limits == (subagent.Limits{}) {
-		limits = subagent.ProductionLimits()
+		limits = subagent.DefaultLimits()
 	}
 
 	return subagent.NormalizeLimits(limits)
