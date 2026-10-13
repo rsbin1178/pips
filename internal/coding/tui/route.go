@@ -76,6 +76,9 @@ type routeState struct {
 	tree       coding.SessionTree
 	forkMode   bool
 	toolDetail *toolDetailView
+	// watchFollowPending marks a re-read of the open watch page that has not
+	// answered yet, so the activity clock cannot queue a second one.
+	watchFollowPending bool
 
 	statusTab           statusPanelTab
 	helpTab             helpTab
@@ -273,12 +276,15 @@ func (m *Model) activateSnapshotRoute(request routeOpenRequest) tea.Cmd {
 }
 
 // activateToolDetailRoute opens the Ctrl+T detail panel, which owns the screen
-// without taking the Composer's draft.
+// without taking the Composer's draft. A page that shows a running watch starts
+// the activity clock, because that clock is what re-reads its output and keeps
+// its spinner moving.
 func (m *Model) activateToolDetailRoute(request routeOpenRequest) tea.Cmd {
 	if request.toolDetail == nil {
 		return nil
 	}
 
+	activityWasVisible := m.activityClockVisible()
 	detail := *request.toolDetail
 	m.route = routeState{
 		kind: routeToolDetail, toolDetail: &detail,
@@ -287,8 +293,14 @@ func (m *Model) activateToolDetailRoute(request routeOpenRequest) tea.Cmd {
 		hasPreviousComposer: request.hasPreviousComposer,
 	}
 	m.composer.Blur()
+	// A running watch opens on the tail of its output, which is where a reader
+	// who just asked to watch the task is looking. Scrolling up releases the
+	// tail; scrolling back to it follows again.
+	if detail.watchRunning {
+		m.route.offset = m.toolDetailMaximumOffset()
+	}
 
-	return nil
+	return m.startActivityClock(activityWasVisible)
 }
 
 func (m *Model) setRouteComposerSnapshot(request routeOpenRequest) {

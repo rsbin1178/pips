@@ -108,14 +108,6 @@ func (m *Model) handleMouse(message tea.MouseMsg) tea.Cmd {
 		return m.statusRouteMouse(message)
 	}
 
-	// The child frame affords exactly one control of its own; the transcript it
-	// shows keeps every other gesture.
-	if m.route.kind == routeChild && m.route.childKind == childSubagent {
-		if command, handled := m.subagentFrameMouse(message); handled {
-			return command
-		}
-	}
-
 	// A full-area list route owns the whole pointer gesture: it consumes motion,
 	// drag and release so they never reach the transcript, and only a left press
 	// moves its cursor.

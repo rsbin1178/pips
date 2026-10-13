@@ -40,16 +40,22 @@ var tasksPaneGroupLabels = [tasksPaneGroupCount]string{
 }
 
 const (
-	// tasksPaneMaxRows and tasksPaneHeightFraction cap the strip the way the
-	// source caps its overlay, so the pane never takes the frame over.
-	tasksPaneMaxRows        = 8
-	tasksPaneHeightFraction = 0.15
+	// tasksPaneMaxRows caps the rows the pane may paint, and
+	// tasksPaneMaxHeightFraction caps them as a share of the frame. The pane is a
+	// compact strip and the transcript is the frame's only elastic band, so the
+	// cap is tight: a section still names itself, shows its rows and counts the
+	// ones the cap hides, while the conversation keeps most of its rows.
+	tasksPaneMaxRows           = 6
+	tasksPaneMaxHeightFraction = 0.30
 	// tasksPaneMinViewHeight is the frame height below which the pane stays
 	// hidden rather than crowding the conversation out.
 	tasksPaneMinViewHeight = 12
 
-	tasksPaneEmptyRunning = "No running tasks. Press h to show all."
-	tasksPaneEmptyAll     = "No tasks or agents."
+	// tasksPaneMorePrefix and tasksPaneMoreSuffix word the line a squeezed
+	// section spends its last granted row on.
+	tasksPaneMorePrefix = "… +"
+	tasksPaneMoreSuffix = " more"
+
 	// tasksPaneKillLabel and tasksPaneInspectLabel are the row's two controls, in
 	// the order the source paints them: kill for a running row, then inspect.
 	tasksPaneKillLabel    = "[✗]"
@@ -196,14 +202,21 @@ func (m *Model) applyTasksPaneVisibility(running int) {
 		pane.visible = false
 		pane.openedByAuto = false
 	}
+	// A pane with nothing to list owns no keys, and it does not take them back on
+	// its own: the focus is dropped with the rows, so a child starting while the
+	// reader types cannot silently take a keystroke meant for the composer.
+	if pane.focused && !m.tasksPaneHasEntries() {
+		pane.focused = false
+	}
 	pane.prevRunning = running
 }
 
 // toggleTasksPane focuses the pane, revealing it if the automatic rule left it
-// hidden, and unfocuses it on the second press.
+// hidden, and unfocuses it on the second press. A pane that has nothing to list
+// owns no keys, so the chord reveals it again instead of unfocusing it.
 func (m *Model) toggleTasksPane() tea.Cmd {
 	wasVisible := m.activityClockVisible()
-	if m.tasksPane.focused {
+	if m.tasksPaneFocused() {
 		m.tasksPane.focused = false
 
 		return nil
@@ -217,10 +230,21 @@ func (m *Model) toggleTasksPane() tea.Cmd {
 
 // revealTasksPane shows the pane without focusing it and takes it out of the
 // automatic rule's hands, so the reader's own choice is not undone when the last
-// child stops.
+// child stops. Revealing with nothing running turns the finished rows on: the
+// reader asked to see the pane, and an empty strip is not an answer.
 func (m *Model) revealTasksPane() {
+	if !m.tasksPaneRunning() {
+		m.tasksPane.showDone = true
+	}
 	m.tasksPane.visible = true
 	m.tasksPane.openedByAuto = false
+}
+
+// tasksPaneFocused reports whether the pane owns the frame's keys and paints its
+// selection marker. An empty pane owns nothing: it has no rows to move and no
+// control to fire, so the composer keeps the frame's keys.
+func (m *Model) tasksPaneFocused() bool {
+	return m.tasksPane.focused && m.tasksPaneVisible()
 }
 
 // tasksPaneRunning reports whether any listed child is still running, which is
@@ -397,17 +421,39 @@ func tasksPaneEntries(rows []tasksPaneRow, collapsed [tasksPaneGroupCount]bool) 
 	return entries
 }
 
-// tasksPaneCapacity is how many rows the strip may paint at one frame height.
+// tasksPaneRowWidth is the row width the pane paints at: the whole frame, so a
+// row's two controls stay at the right edge where the reader aims at them.
+func (m *Model) tasksPaneRowWidth() int {
+	return max(1, m.width)
+}
+
+// tasksPaneHasEntries reports whether the pane has anything to list. An empty pane
+// has no capacity, so it paints nothing and owns no keys.
+func (m *Model) tasksPaneHasEntries() bool {
+	return len(tasksPaneEntries(m.tasksPaneRows(), m.tasksPane.collapsed)) > 0
+}
+
+// tasksPaneCapacity is how many rows the pane may paint: what its sections need,
+// bounded by the row cap and by the pane's share of the frame, so a crowded list
+// still leaves the conversation most of its rows. No entries means no capacity:
+// a pane with nothing to list paints nothing at all.
 func (m *Model) tasksPaneCapacity() int {
 	if m.height < tasksPaneMinViewHeight {
 		return 0
 	}
-	fraction := int(float64(m.height) * tasksPaneHeightFraction)
 
-	return max(1, min(tasksPaneMaxRows, fraction))
+	needed := len(tasksPaneEntries(m.tasksPaneRows(), m.tasksPane.collapsed))
+	if needed == 0 {
+		return 0
+	}
+	share := max(1, int(float64(m.height)*tasksPaneMaxHeightFraction))
+
+	return max(1, min(min(needed, tasksPaneMaxRows), share))
 }
 
-// tasksPaneVisible reports whether the pane paints in this frame.
+// tasksPaneVisible reports whether the pane paints in this frame. An empty pane
+// has no capacity, so it is not visible: the band contributes no row and the
+// composer keeps the frame's keys.
 func (m *Model) tasksPaneVisible() bool {
 	if !m.tasksPane.visible || m.tasksPaneCapacity() == 0 {
 		return false
@@ -427,8 +473,8 @@ func (m *Model) clampTasksPaneCursor() {
 	m.tasksPane.cursor = 0
 }
 
-// tasksPaneBand renders the pane as the footer band it occupies, or reports an
-// empty band when it is not painted.
+// tasksPaneBand renders the pane as the frame's last band: the rows below the
+// status line, or an empty band when the pane is not painted.
 func (m *Model) tasksPaneBand(now time.Time) string {
 	if !m.tasksPaneVisible() {
 		m.tasksPaneHit = tasksPaneHitMap{}
@@ -442,71 +488,186 @@ func (m *Model) tasksPaneBand(now time.Time) string {
 	return painted
 }
 
-// tasksPanePaint renders the pane window and reports the entry each painted line
-// shows, so the pointer map measures the same rows the frame paints.
-func (m *Model) tasksPanePaint(now time.Time, capacity int) (string, []tasksPaneHitRow) {
-	width := max(1, m.width)
-	entries := tasksPaneEntries(m.tasksPaneRows(), m.tasksPane.collapsed)
-	if len(entries) == 0 {
-		text := tasksPaneEmptyRunning
-		if m.tasksPane.showDone {
-			text = tasksPaneEmptyAll
-		}
+// tasksPaneSection is one group's run of entries: its header and the rows under
+// it, which is the unit the container grants rows to.
+type tasksPaneSection struct {
+	header tasksPaneEntry
+	rows   []tasksPaneEntry
+}
 
-		return m.tasksPaneMuted(text, width), []tasksPaneHitRow{{index: -1, killStart: -1, inspectStart: -1}}
-	}
+// tasksPaneSections splits the painted entries into their sections. A section is
+// always a header with the rows that follow it, which is what lets a squeezed
+// container drop a whole section instead of painting a header over nothing.
+func tasksPaneSections(entries []tasksPaneEntry) []tasksPaneSection {
+	sections := make([]tasksPaneSection, 0, int(tasksPaneGroupCount))
 
-	window, hits := tasksPaneWindow(entries, m.tasksPane.cursor, capacity)
-	lines := make([]string, 0, len(window))
-	for index, entry := range window {
+	for _, entry := range entries {
 		if entry.header {
-			hits[index] = tasksPaneHitRow{
-				header: true, group: entry.group, index: -1,
-				killStart: -1, inspectStart: -1,
-			}
-			lines = append(lines, m.tasksPaneHeaderLine(entry, width))
+			sections = append(sections, tasksPaneSection{header: entry})
 
 			continue
 		}
-		line, hit := m.tasksPaneRowLine(entry, now, width)
-		hits[index] = hit
-		lines = append(lines, line)
+		if len(sections) == 0 {
+			continue
+		}
+
+		last := len(sections) - 1
+		sections[last].rows = append(sections[last].rows, entry)
+	}
+
+	return sections
+}
+
+// tasksPaneGrants hands every section its floor — a header and one row — before
+// any section takes a second row, so a container that cannot hold the whole list
+// still names each section it lists. The remaining rows are shared one at a time
+// in display order, so a long first section cannot starve the ones after it.
+func tasksPaneGrants(sections []tasksPaneSection, capacity int) []int {
+	grants := make([]int, len(sections))
+	remaining := capacity
+
+	for index, section := range sections {
+		needed := 1
+		if len(section.rows) > 0 {
+			needed = 2
+		}
+		if remaining < needed {
+			break
+		}
+
+		grants[index] = needed
+		remaining -= needed
+	}
+
+	for remaining > 0 {
+		shared := false
+
+		for index, section := range sections {
+			if remaining == 0 {
+				break
+			}
+			if grants[index] == 0 || grants[index] > len(section.rows) {
+				continue
+			}
+
+			grants[index]++
+			remaining--
+			shared = true
+		}
+		if !shared {
+			break
+		}
+	}
+
+	return grants
+}
+
+// tasksPaneSectionWindow picks the rows one section paints in the room it was
+// granted, and reports how many it hides. A section that hides rows spends its
+// last granted row on its own overflow line and scrolls the rest, so the row the
+// reader is on stays visible however long the section is.
+func tasksPaneSectionWindow(rows []tasksPaneEntry, cursor, room int) ([]tasksPaneEntry, int) {
+	if room <= 0 {
+		return nil, len(rows)
+	}
+	if len(rows) <= room {
+		return rows, 0
+	}
+
+	painted := max(1, room-1)
+	selected := 0
+
+	for index, row := range rows {
+		if row.index == cursor {
+			selected = index
+
+			break
+		}
+	}
+
+	start := min(max(0, selected-painted+1), len(rows)-painted)
+
+	return rows[start : start+painted], len(rows) - painted
+}
+
+// tasksPaneCursorRow is the entry the cursor addresses, or the first row of the
+// list when it addresses nothing.
+func tasksPaneCursorRow(sections []tasksPaneSection, cursor int) (tasksPaneEntry, bool) {
+	for _, section := range sections {
+		for _, row := range section.rows {
+			if row.index == cursor {
+				return row, true
+			}
+		}
+	}
+
+	for _, section := range sections {
+		if len(section.rows) > 0 {
+			return section.rows[0], true
+		}
+	}
+
+	return tasksPaneEntry{}, false
+}
+
+// tasksPanePaint renders the pane's rows and the pointer row for each painted
+// line. Sections are painted in display order, a header always has at least one
+// of its rows under it, and a section whose rows do not all fit says how many it
+// hides. A pane with no section paints nothing: there is no empty-state note,
+// because an empty pane is not visible at all.
+func (m *Model) tasksPanePaint(now time.Time, capacity int) (string, []tasksPaneHitRow) {
+	width := m.tasksPaneRowWidth()
+	sections := tasksPaneSections(tasksPaneEntries(m.tasksPaneRows(), m.tasksPane.collapsed))
+	if len(sections) == 0 || capacity <= 0 {
+		return "", nil
+	}
+
+	// One row of room goes to the row the reader is on: a header would count rows
+	// that are not painted, and the row is what both actions address.
+	if capacity == 1 {
+		if row, ok := tasksPaneCursorRow(sections, m.tasksPane.cursor); ok {
+			line, hit := m.tasksPaneRowLine(row, now, width)
+
+			return line, []tasksPaneHitRow{hit}
+		}
+	}
+
+	grants := tasksPaneGrants(sections, capacity)
+	lines := make([]string, 0, capacity)
+	hits := make([]tasksPaneHitRow, 0, capacity)
+
+	for index, section := range sections {
+		grant := grants[index]
+		if grant == 0 {
+			continue
+		}
+
+		header := section.header
+		lines = append(lines, m.tasksPaneHeaderLine(header, width))
+		hits = append(hits, tasksPaneHitRow{
+			header: true, group: header.group, index: -1, killStart: -1, inspectStart: -1,
+		})
+
+		painted, hidden := tasksPaneSectionWindow(section.rows, m.tasksPane.cursor, grant-1)
+
+		for _, row := range painted {
+			line, hit := m.tasksPaneRowLine(row, now, width)
+			lines = append(lines, line)
+			hits = append(hits, hit)
+		}
+
+		if hidden > 0 {
+			lines = append(lines, m.tasksPaneMuted(tasksPaneMoreLabel(hidden), width))
+			hits = append(hits, tasksPaneHitRow{index: -1, killStart: -1, inspectStart: -1})
+		}
 	}
 
 	return strings.Join(lines, "\n"), hits
 }
 
-// tasksPaneWindow selects the entries one frame paints and the pointer rows that
-// go with them. The window follows the selection so a long list never hides the
-// row the cursor is on.
-func tasksPaneWindow(
-	entries []tasksPaneEntry,
-	cursor, capacity int,
-) ([]tasksPaneEntry, []tasksPaneHitRow) {
-	window := entries
-	if capacity > 0 && len(entries) > capacity {
-		selected := 0
-		for index, entry := range entries {
-			if !entry.header && entry.index == cursor {
-				selected = index
-
-				break
-			}
-		}
-		start := 0
-		if selected >= capacity {
-			start = selected - capacity + 1
-		}
-		start = min(start, len(entries)-capacity)
-		window = entries[start : start+capacity]
-	}
-
-	hits := make([]tasksPaneHitRow, len(window))
-	for index := range hits {
-		hits[index] = tasksPaneHitRow{index: -1, killStart: -1, inspectStart: -1}
-	}
-
-	return window, hits
+// tasksPaneMoreLabel words how many rows one squeezed section hides.
+func tasksPaneMoreLabel(hidden int) string {
+	return tasksPaneMorePrefix + strconv.Itoa(hidden) + tasksPaneMoreSuffix
 }
 
 func (m *Model) tasksPaneHeaderLine(entry tasksPaneEntry, width int) string {
@@ -538,7 +699,7 @@ func (m *Model) tasksPaneRowLine(
 	hit := tasksPaneHitRow{index: entry.index, killStart: -1, inspectStart: -1}
 
 	marker := "  "
-	if m.tasksPane.focused && entry.index == m.tasksPane.cursor {
+	if m.tasksPaneFocused() && entry.index == m.tasksPane.cursor {
 		marker = "› "
 	}
 	icon := m.tasksPaneRowIcon(entry.row)
@@ -659,12 +820,13 @@ func nonEmpty(parts ...string) []string {
 
 // updateTasksPaneReadyKey gives the pane the ready view's keys it owns: one
 // chord reveals and focuses it, and while focused it owns the frame's keys the
-// way any other focused overlay does.
+// way any other focused overlay does. A pane with nothing to list owns nothing,
+// so its keys fall through to the surfaces behind it.
 func (m *Model) updateTasksPaneReadyKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 	if message.String() == keyCtrlB {
 		return m, m.toggleTasksPane(), true
 	}
-	if m.tasksPane.focused {
+	if m.tasksPaneFocused() {
 		model, command := m.updateTasksPaneKey(message)
 
 		return model, command, true
@@ -688,7 +850,14 @@ func (m *Model) updateTasksPaneKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd)
 		m.moveTasksPaneCursor(1)
 
 		return m, nil
-	case "h":
+	// The history toggle answers Ctrl+H through both spellings a terminal can
+	// send for it. 0x08 is Ctrl+H's own byte and Backspace's, and this program
+	// never asks for the Kitty keyboard protocol, so which name arrives depends on
+	// the terminal: ultraviolet decodes the bare 0x08 as ctrl+h and the 0x7f a
+	// modern Backspace sends as backspace. Backspace has no other job while the
+	// pane is focused — the composer is blurred and the pane consumes every key —
+	// so both spellings toggle the finished rows.
+	case keyCtrlH, keyBackspace:
 		m.tasksPane.showDone = !m.tasksPane.showDone
 		m.clampTasksPaneCursor()
 
@@ -799,6 +968,30 @@ func (m *Model) tasksPaneMouse(message tea.MouseMsg) (tea.Cmd, bool) {
 	return m.tasksPaneHitCommand(hit, click.X)
 }
 
+// tasksPaneOwnsWheel reports whether a wheel notch landed inside the rows the
+// pane painted. The pane is the frame's last band, so a notch above it still
+// belongs to the transcript.
+func (m *Model) tasksPaneOwnsWheel(message tea.MouseWheelMsg) bool {
+	if !m.tasksPaneHit.painted || !m.tasksPaneVisible() {
+		return false
+	}
+
+	return m.tasksPaneOwnsRow(message.Mouse().Y)
+}
+
+// scrollTasksPane moves the pane's selection by one notch through the pane's own
+// key path, so clamping and its section windows stay one path. The gesture does
+// not take the keyboard: a wheel points at the rows the way it points at any other
+// list, while a click is what focuses the pane.
+func (m *Model) scrollTasksPane(message tea.MouseWheelMsg) tea.Cmd {
+	lines, ok := m.wheelLines(message)
+	if !ok {
+		return nil
+	}
+
+	return moveSelection(lines, m.updateTasksPaneKey)
+}
+
 // tasksPaneOwnsRow reports whether a frame row falls inside the painted pane, so
 // a pointer gesture that misses it is left to the transcript underneath.
 func (m *Model) tasksPaneOwnsRow(row int) bool {
@@ -868,10 +1061,13 @@ type backgroundKillResultMsg struct {
 }
 
 // backgroundInspectResultMsg carries one bounded inspection back to the pane.
+// follow marks a re-read the open watch page asked for, so the answer refreshes
+// that page instead of opening a second one.
 type backgroundInspectResultMsg struct {
 	taskID     string
 	inspection coding.BackgroundTaskInspection
 	err        error
+	follow     bool
 }
 
 // killBackgroundTask stops one watch through the same control method the model's
@@ -888,10 +1084,29 @@ func (m *Model) killBackgroundTask(taskID string) tea.Cmd {
 
 // inspectBackgroundTask loads one watch's bounded detail and opens it.
 func (m *Model) inspectBackgroundTask(taskID string) tea.Cmd {
+	return m.fetchBackgroundTask(taskID, false)
+}
+
+// followBackgroundTask re-reads the watch the open page is showing. The page
+// re-reads on the activity clock while the task runs, so the reader watches the
+// output grow instead of a snapshot taken when they opened it.
+func (m *Model) followBackgroundTask(taskID string) tea.Cmd {
+	if m.route.watchFollowPending {
+		return nil
+	}
+
+	m.route.watchFollowPending = true
+
+	return m.fetchBackgroundTask(taskID, true)
+}
+
+func (m *Model) fetchBackgroundTask(taskID string, follow bool) tea.Cmd {
 	fetch := func() tea.Msg {
 		inspection, err := m.controller.InspectBackgroundTask(m.ctx, taskID)
 
-		return backgroundInspectResultMsg{taskID: taskID, inspection: inspection, err: err}
+		return backgroundInspectResultMsg{
+			taskID: taskID, inspection: inspection, err: err, follow: follow,
+		}
 	}
 
 	return fetch
@@ -918,9 +1133,29 @@ func (m *Model) applyBackgroundKillResult(message backgroundKillResultMsg) tea.C
 	return nil
 }
 
-// applyBackgroundInspectResult opens the watch's bounded detail view, or reports
-// why it is unavailable.
+// applyBackgroundInspectResult opens the watch's page, or reports why it is
+// unavailable. A follow only ever refreshes the page that asked for it: a read
+// that lands after the reader left, or after they opened another watch, is
+// dropped rather than reopening a route behind them, and a watch that vanished
+// between reads stops being followed instead of reporting an error nobody asked
+// for.
 func (m *Model) applyBackgroundInspectResult(message backgroundInspectResultMsg) tea.Cmd {
+	if message.follow {
+		m.route.watchFollowPending = false
+
+		if !m.watchPageOpen(message.taskID) {
+			return nil
+		}
+		if message.err != nil {
+			m.route.toolDetail.watchRunning = false
+
+			return nil
+		}
+
+		m.replaceWatchPage(newBackgroundTaskDetailView(message.inspection))
+
+		return nil
+	}
 	if message.err != nil {
 		m.appendNotice("Watch details unavailable: " + safeDetailText(message.err.Error()))
 
@@ -930,28 +1165,77 @@ func (m *Model) applyBackgroundInspectResult(message backgroundInspectResultMsg)
 	return m.openToolDetailRoute(newBackgroundTaskDetailView(message.inspection))
 }
 
-// newBackgroundTaskDetailView renders one watch's bounded detail: its identity,
-// its status and elapsed time, and the sanitized tail of its own output. The
-// tail is the only content, so the view stays bounded whatever the watch
-// printed.
+// watchPageOpen reports whether the detail route is showing this watch.
+func (m *Model) watchPageOpen(taskID string) bool {
+	return m.route.kind == routeToolDetail && m.route.toolDetail != nil &&
+		m.route.toolDetail.watchTaskID == taskID
+}
+
+// replaceWatchPage swaps the open watch page's rows for a fresh read. A reader
+// holding the tail keeps it; a reader who scrolled up keeps their place.
+func (m *Model) replaceWatchPage(view toolDetailView) {
+	maximum := m.toolDetailMaximumOffset()
+	holding := m.route.offset >= maximum
+	m.route.toolDetail = &view
+
+	if holding {
+		m.route.offset = m.toolDetailMaximumOffset()
+
+		return
+	}
+
+	m.route.offset = min(m.route.offset, m.toolDetailMaximumOffset())
+}
+
+// newBackgroundTaskDetailView renders one watch's page: its identity and state,
+// the command it runs, and the tail of its own output. The shape follows the
+// reference's background-task viewer, which shows the task's description and its
+// shell command above the streamed output; the reported task id and running flag
+// are what let the route follow a live watch.
 func newBackgroundTaskDetailView(inspection coding.BackgroundTaskInspection) toolDetailView {
 	task := inspection.Lifecycle()
 	state := subagentToolState(backgroundTaskState(task))
 
-	view := toolDetailView{title: "Watch details", callIDs: nonEmpty(task.ID)}
+	view := toolDetailView{
+		title: "Watch details", callIDs: nonEmpty(task.ID),
+		watchTaskID: task.ID, watchRunning: !task.Completed,
+	}
 	view.rows = append(view.rows, detailHeadingRow(
 		toolActivityGlyph(state), backgroundTaskRowLabel(task), "", state,
 	))
 	view.rows = append(view.rows, detailNoteRow(strings.Join(nonEmpty(
 		task.ID, backgroundTaskStatusText(task), backgroundTaskElapsedText(task, time.Now()),
 	), " · ")))
+	view.rows = append(view.rows, watchCommandRows(task.Command)...)
 
 	if output := strings.TrimSpace(sanitizeToolText(inspection.Output)); output != "" {
 		view.rows = append(view.rows, detailSection(detailOutputLabel))
 		view.rows = append(view.rows, detailCodeRows(
-			"", truncateText(output, maximumToolDetailBytes/2), detailToneBody, 1,
+			"", truncateText(output, maximumToolDetailBytes), detailToneBody, 1,
 		)...)
 	}
 
 	return view
+}
+
+// watchCommandRows renders the command a watch runs the way the shell detail
+// surface renders a script: a `$ ` prompt on its first row and a hanging indent
+// under it, so a multi-line watch reads as one command.
+func watchCommandRows(command string) []toolDetailRow {
+	script := truncateText(sanitizeToolText(command), maximumToolDetailBytes)
+	if script == "" {
+		return nil
+	}
+
+	lines := strings.Split(script, "\n")
+	rows := make([]toolDetailRow, 0, len(lines))
+	for index, line := range lines {
+		key := ""
+		if index == 0 {
+			key = detailShellPrompt
+		}
+		rows = append(rows, toolDetailRow{tone: detailToneCode, indent: 1, key: key, text: line})
+	}
+
+	return rows
 }

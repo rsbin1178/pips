@@ -209,7 +209,25 @@ func (m *Model) parentActivityStatusVisible() bool {
 func (m *Model) routeStatusActivityVisible() bool {
 	return m.routeActivityVisible() || m.promptActivityVisible() ||
 		m.agentsRouteActivityVisible() || m.childRouteActivityVisible() ||
-		m.tasksPaneActivityVisible()
+		m.tasksPaneActivityVisible() || m.watchPageActivityVisible()
+}
+
+// watchPageActivityVisible reports whether the open detail page is following a
+// running watch, which is what keeps both its spinner and its output refreshing.
+func (m *Model) watchPageActivityVisible() bool {
+	return m.route.kind == routeToolDetail && m.route.toolDetail != nil &&
+		m.route.toolDetail.watchRunning
+}
+
+// followOpenWatchPage re-reads the running watch the open page shows, so the
+// reader watches its output grow. It reports no command when no page is
+// following, or when a read is already in flight.
+func (m *Model) followOpenWatchPage() tea.Cmd {
+	if !m.watchPageActivityVisible() {
+		return nil
+	}
+
+	return m.followBackgroundTask(m.route.toolDetail.watchTaskID)
 }
 
 // pickerBusy reports whether a picker is loading or applying a control.

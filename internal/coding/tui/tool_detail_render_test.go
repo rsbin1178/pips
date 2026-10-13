@@ -656,22 +656,21 @@ func TestSubagentRouteWrapsResultsAndKeepsHints(t *testing.T) {
 	}
 
 	content := model.View().Content
-	assert.Contains(t, content, "Ctrl+T parent")
-	assert.Contains(t, content, "Esc agents")
-	// Result prose wraps instead of being cut at the frame edge.
+	assert.Contains(t, content, "review subagent")
+	assert.Contains(t, content, subagentHintClose)
+	// Result prose wraps instead of being cut at the page edge.
 	assert.NotContains(t, content, "…")
 	for line := range strings.SplitSeq(content, "\n") {
 		assert.LessOrEqual(t, ansi.StringWidth(line), 80)
 	}
 
-	// A body taller than the frame scrolls to its final row: at the maximum
-	// offset the frame shows the tail of the result.
+	// A body taller than the page opens on its newest row, so the final row of the
+	// result is what the reader sees without scrolling.
 	model.Update(tea.WindowSizeMsg{Width: 60, Height: 10})
-	maximum := model.subagentRouteMaximumOffset()
-	require.Positive(t, maximum)
-	model.route.offset = maximum
+	_ = model.View() // the page installs its rows and window when it renders
+	require.Positive(t, model.childScroll.maxOffset(), "the fixture must overflow the page")
 	assert.Contains(t, model.View().Content, "ENDMARK",
-		"the final body row is on screen at the maximum offset")
+		"the page opens on its newest row")
 }
 
 // Regression: an untrusted Tool payload could carry ESC in an object key or a

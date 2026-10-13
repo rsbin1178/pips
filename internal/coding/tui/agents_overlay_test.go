@@ -65,7 +65,9 @@ func TestSubagentDetailUsesSemanticToolProjection(t *testing.T) {
 	assert.Contains(t, content, "❯ Inspect the TUI.")
 	assert.Contains(t, content, "I will inspect the TUI projection.")
 	assert.Contains(t, content, "Read model.go")
-	assert.Contains(t, content, "file contents")
+	// The Tool result collapses to its one-line row here, exactly as it does in the
+	// conversation: the payload is the Tool detail route's to show.
+	assert.NotContains(t, content, "file contents")
 	assert.Equal(t, 1, strings.Count(content, "Read model.go"))
 	assert.Contains(t, content, "Located the TUI projection.")
 	assert.Contains(t, content, "agents_overlay.go:1-40")
@@ -80,7 +82,11 @@ func TestSubagentDetailUsesSemanticToolProjection(t *testing.T) {
 	assert.NotContains(t, content, "pips.coding.tool_result")
 }
 
-func TestSubagentDetailExpandsEveryToolResultInChronologicalFlow(t *testing.T) {
+// TestSubagentDetailRendersLikeTheConversation pins the page's renderer: the child
+// page passes the conversation's own options, so for identical messages its rows
+// are the conversation's rows and a Tool result collapses to its one-line row
+// instead of being printed in place.
+func TestSubagentDetailRendersLikeTheConversation(t *testing.T) {
 	t.Parallel()
 
 	transcript := []ai.Message{ai.UserText("Inspect every package.")}
@@ -109,20 +115,22 @@ func TestSubagentDetailExpandsEveryToolResultInChronologicalFlow(t *testing.T) {
 		Transcript: transcript,
 	}
 	model := readyModel(t, true)
+	state := testSubagentState(detail)
 
-	compact := model.renderTimelineBlocks(projectTimeline(testSubagentState(detail)))
-	content := testSubagentRouteContent(model, detail)
+	conversation := model.renderTimelineBlocks(projectTimeline(state))
+	content := model.subagentRouteContent(state, &detail)
 
-	assert.Contains(t, compact, "more actions (ctrl+t for details)")
-	assert.NotContains(t, compact, "package-7/file.go")
+	assert.Equal(t, conversation, content,
+		"the child page is the conversation's renderer, not a second one")
 	assert.Contains(t, content, "List package-0")
-	assert.Contains(t, content, "package-0/file.go")
-	assert.Contains(t, content, "List package-7")
-	assert.Contains(t, content, "package-7/file.go")
-	assert.NotContains(t, content, "more actions (ctrl+t for details)")
+	assert.Contains(t, content, "more actions (ctrl+t for details)")
+	assert.NotContains(t, content, "package-7/file.go",
+		"a collapsed Tool result stays off the page")
 }
 
-func TestSubagentDetailShowsToolFailureOutputInline(t *testing.T) {
+// TestSubagentDetailShowsAToolFailureAsOneRow pins the failure half of the
+// collapsed row: the reason reaches the page, the payload does not.
+func TestSubagentDetailShowsAToolFailureAsOneRow(t *testing.T) {
 	t.Parallel()
 
 	call := ai.ToolCallPart{
@@ -149,11 +157,15 @@ func TestSubagentDetailShowsToolFailureOutputInline(t *testing.T) {
 
 	content := testSubagentRouteContent(readyModel(t, true), detail)
 	assert.Contains(t, content, "Read missing.go · not found")
-	assert.Contains(t, content, "missing.go: no such file")
+	assert.NotContains(t, content, "missing.go: no such file",
+		"the failure payload belongs to the Tool detail route")
 	assert.Contains(t, content, insetExpected("▌ Explore failed\n▌ execution failed"))
 }
 
-func TestSubagentDetailExpandedToolResultIsBoundedAndRedacted(t *testing.T) {
+// TestSubagentDetailCollapsedResultKeepsThePayloadOffThePage pins the page's
+// option set against a secret in a Tool result: the collapsed row carries the
+// call's one-line summary and never the payload.
+func TestSubagentDetailCollapsedResultKeepsThePayloadOffThePage(t *testing.T) {
 	t.Parallel()
 
 	call := ai.ToolCallPart{
@@ -178,16 +190,22 @@ func TestSubagentDetailExpandedToolResultIsBoundedAndRedacted(t *testing.T) {
 	plain := testSubagentRouteContent(plainModel, detail)
 	colored := testSubagentRouteContent(coloredModel, detail)
 
-	assert.Contains(t, plain, "[sensitive")
-	// The placeholder is one phrase, so assert it across the line the inset and
-	// the narrow frame wrapped it onto.
-	assert.Contains(t, strings.Join(strings.Fields(plain), " "), "[sensitive result omitted]")
 	assert.NotContains(t, plain, "must-not-render")
+	assert.NotContains(t, plain, "[sensitive")
 	assert.Equal(t, plain, ansi.Strip(colored))
 	assert.Equal(t, lipgloss.Height(plain), lipgloss.Height(colored))
 	for line := range strings.SplitSeq(plain, "\n") {
 		assert.LessOrEqual(t, ansi.StringWidth(line), 24)
 	}
+
+	// The expanded option the Team Worker page still uses redacts the same payload
+	// in place, so the collapse is not what keeps the secret off the screen.
+	expanded := renderTimelineContentWithOptions(
+		projectTimeline(testSubagentState(detail)), newMarkdownRenderer(8), 40, themeDark, true,
+		timelineRenderOptions{expandToolResults: true},
+	)
+	assert.Contains(t, expanded, "[sensitive result omitted]")
+	assert.NotContains(t, expanded, "must-not-render")
 }
 
 func TestSubagentDetailUsesMainTimelineInformationFlow(t *testing.T) {
@@ -292,7 +310,7 @@ func TestSubagentDetailKeepsEveryChronologicalToolAction(t *testing.T) {
 	assert.Less(t, strings.Index(content, "Next I will search."), strings.Index(content, "Search Second"))
 }
 
-func TestSubagentRouteDrawsFramedChildTranscript(t *testing.T) {
+func TestSubagentRouteDrawsTheChildTranscriptAsAFullWidthPage(t *testing.T) {
 	t.Parallel()
 
 	detail := subagent.Detail{
@@ -316,17 +334,16 @@ func TestSubagentRouteDrawsFramedChildTranscript(t *testing.T) {
 	view := model.View()
 	assert.Contains(t, view.Content, "❯ Review the timeline.")
 	assert.Contains(t, view.Content, "I will inspect it now.")
-	assert.Contains(t, view.Content, "pips  ·  review subagent  ·  openai/model  ·  Running")
-	assert.Contains(t, view.Content, "q close")
-	assert.Contains(t, view.Content, "Ctrl+T parent")
-	// The read-only child transcript is framed: the title row carries the child's
-	// identity and the close control, and a border encloses the whole surface.
-	// This model is NO_COLOR, so the frame uses the plain border the Composer
-	// box also falls back to.
-	assert.Contains(t, view.Content, lipgloss.NormalBorder().TopLeft)
-	assert.Contains(t, view.Content, lipgloss.NormalBorder().BottomLeft)
-	assert.Contains(t, view.Content, subagentFrameClose)
+	// The child page is the conversation's own container, not a window floating
+	// over it: the transcript runs the full width, the status row is pinned under
+	// a separator, and the page draws neither a border nor a close control.
+	assert.Contains(t, view.Content, "review subagent")
+	assert.Contains(t, view.Content, "Running")
 	assert.Contains(t, view.Content, "“Review the timeline”")
+	assert.Contains(t, view.Content, subagentHintClose)
+	assert.NotContains(t, view.Content, "[✗]")
+	assert.NotContains(t, view.Content, lipgloss.RoundedBorder().TopLeft)
+	assert.NotContains(t, view.Content, lipgloss.NormalBorder().TopLeft)
 	assert.NotContains(t, view.Content, "Subagent · review · running")
 	assert.Nil(t, view.Cursor, "the child transcript view is read-only")
 	for line := range strings.SplitSeq(view.Content, "\n") {
@@ -334,10 +351,61 @@ func TestSubagentRouteDrawsFramedChildTranscript(t *testing.T) {
 	}
 }
 
-// TestSubagentTranscriptRouteScrollsToItsLastRow pins the scroll window against
-// the bordered frame: the frame loses rows to its border and title line, so a
-// window measured against the bare terminal would strand the final rows.
-func TestSubagentTranscriptRouteScrollsToItsLastRow(t *testing.T) {
+// TestSubagentPageFooterDropsMetadataBeforeKeys pins the footer ladder: a wide
+// frame names the child, its state, its task, its model and its keys, while a
+// narrow one keeps the way out.
+func TestSubagentPageFooterDropsMetadataBeforeKeys(t *testing.T) {
+	t.Parallel()
+
+	detail := subagent.Detail{Summary: subagent.Summary{
+		Identity: subagent.AgentIdentity{ID: "agent-1", Name: "reviewer"},
+		Role:     subagent.RoleReview,
+		State:    subagent.StateRunning, Model: "openai/model",
+		TaskPreview: "Review the timeline change",
+	}}
+	state := testSubagentState(detail)
+	model := readyModel(t, true)
+	model.route = routeState{
+		kind: routeSubagent, childSessionID: "child-1",
+		detail: &detail, childState: &state,
+	}
+
+	model.Update(tea.WindowSizeMsg{Width: 120, Height: 20})
+	wide := model.View().Content
+	assert.Contains(t, wide, "review subagent")
+	assert.Contains(t, wide, "Running")
+	assert.Contains(t, wide, "“Review the timeline change”")
+	assert.Contains(t, wide, "openai/model")
+	assert.Contains(t, wide, subagentHintInterrupt)
+
+	model.Update(tea.WindowSizeMsg{Width: 20, Height: 20})
+	narrow := model.View().Content
+	assert.Contains(t, narrow, subagentHintClose, "the way out survives the ladder")
+	assert.NotContains(t, narrow, "openai/model")
+	for line := range strings.SplitSeq(narrow, "\n") {
+		assert.LessOrEqual(t, ansi.StringWidth(line), 20)
+	}
+}
+
+// TestSubagentPageNamesAChildWithoutIdentityYet pins the loading page's footer:
+// an unresolved child already reads "child Agent", so the kind is not repeated
+// after it.
+func TestSubagentPageNamesAChildWithoutIdentityYet(t *testing.T) {
+	t.Parallel()
+
+	model := readyModel(t, true)
+	model.route = routeState{kind: routeChild, childSessionID: "child-1"}
+
+	content := model.View().Content
+	assert.Contains(t, content, genericSubagentLabel)
+	assert.NotContains(t, content, genericSubagentLabel+" subagent")
+	assert.Contains(t, content, subagentHintClose)
+}
+
+// TestSubagentTranscriptRouteOpensOnItsNewestRow pins the page's follow rule at
+// the moment it matters most: a reader who just opened a running child sees the
+// newest row, not the beginning of the child's transcript.
+func TestSubagentTranscriptRouteOpensOnItsNewestRow(t *testing.T) {
 	t.Parallel()
 
 	var transcript []ai.Message
@@ -358,65 +426,158 @@ func TestSubagentTranscriptRouteScrollsToItsLastRow(t *testing.T) {
 		kind: routeChild, childSessionID: "child-1", detail: &detail, childState: &state,
 	}
 
+	bottom := ansi.Strip(model.View().Content)
+	assert.Contains(t, bottom, "LINE-059", "the page opens on the newest row:\n%s", bottom)
+	assert.NotContains(t, bottom, "LINE-000")
+	assert.True(t, model.childScroll.follow, "an opened page follows its tail")
+
+	// Home releases the tail, and End returns to it.
+	model.Update(key("home"))
 	top := ansi.Strip(model.View().Content)
-	assert.Contains(t, top, "LINE-000", "the first row is visible before scrolling")
-	assert.NotContains(t, top, "LINE-059")
+	assert.Contains(t, top, "LINE-000", "Home reaches the first row:\n%s", top)
+	assert.False(t, model.childScroll.follow, "scrolling away releases the tail")
 
 	model.Update(key("end"))
-	bottom := ansi.Strip(model.View().Content)
-	assert.Contains(t, bottom, "LINE-059", "End reaches the final row:\n%s", bottom)
-	assert.NotContains(t, bottom, "LINE-000")
+	assert.True(t, model.childScroll.follow, "returning to the bottom resumes following")
+	assert.Contains(t, ansi.Strip(model.View().Content), "LINE-059")
 }
 
-func TestSubagentFrameCloseControlIsClickable(t *testing.T) {
+// TestSubagentTranscriptRouteReopensOnItsNewestRow pins the region's reset when a
+// page is opened again. The scroll region outlives one page, so a reader who
+// scrolled away in an earlier child must still land on the next page's tail
+// instead of inheriting the released reading position.
+func TestSubagentTranscriptRouteReopensOnItsNewestRow(t *testing.T) {
 	t.Parallel()
 
-	newFrameModel := func(t *testing.T) (*Model, *subagent.Detail) {
-		t.Helper()
-
-		detail := &subagent.Detail{Summary: subagent.Summary{
+	var transcript []ai.Message
+	for index := range 60 {
+		transcript = append(transcript, ai.AssistantText(fmt.Sprintf("LINE-%03d", index)))
+	}
+	controller := newOverlayController(readyState())
+	controller.agentDetail = subagent.Detail{
+		Summary: subagent.Summary{
 			ChildSessionID: "child-1", Role: subagent.RoleExplore,
 			State: subagent.StateRunning, Model: "openai/model",
-		}}
-		controller := newOverlayController(readyState())
-		controller.agentDetail = *detail
-		model := fullscreenModel(t, controller, true)
-		state := testSubagentState(*detail)
-		model.route = routeState{
-			kind: routeSubagent, childSessionID: "child-1",
-			detail: detail, childState: &state,
-		}
+		},
+		Transcript: transcript,
+	}
+	model := fullscreenModel(t, controller, true)
+	model.Update(tea.WindowSizeMsg{Width: 60, Height: 20})
 
-		return model, detail
+	driveModelCommands(t, model, model.openSubagentRoute("child-1"))
+	require.Equal(t, routeChild, model.route.kind)
+	require.Contains(t, ansi.Strip(model.View().Content), "LINE-059", "the page opens on its tail")
+
+	// Scrolling away releases the tail, and leaving the page does not re-anchor it.
+	model.Update(key("home"))
+	require.False(t, model.childScroll.follow)
+	model.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	require.Equal(t, routeNone, model.route.kind)
+
+	driveModelCommands(t, model, model.openSubagentRoute("child-1"))
+	require.Equal(t, routeChild, model.route.kind)
+	reopened := ansi.Strip(model.View().Content)
+	assert.Contains(t, reopened, "LINE-059", "a reopened page lands on the tail again")
+	assert.NotContains(t, reopened, "LINE-000")
+	assert.True(t, model.childScroll.follow, "a reopened page follows its tail")
+}
+
+// TestSubagentTranscriptRouteFollowsAppendedContent pins the live half of the
+// follow rule: a child event that appends a row keeps the tail visible while the
+// reader holds it, and a reader who scrolled away keeps their place.
+func TestSubagentTranscriptRouteFollowsAppendedContent(t *testing.T) {
+	t.Parallel()
+
+	var transcript []ai.Message
+	for index := range 40 {
+		transcript = append(transcript, ai.AssistantText(fmt.Sprintf("LINE-%03d", index)))
+	}
+	detail := subagent.Detail{
+		Summary: subagent.Summary{
+			ChildSessionID: "child-1", Role: subagent.RoleExplore,
+			State: subagent.StateRunning, Model: "openai/model",
+		},
+		Transcript: transcript,
+	}
+	state := testSubagentState(detail)
+	state.SessionID = "child-1"
+	state.SessionOpen = true
+	state.Mode = coding.ModeAgent
+	model := fullscreenModel(t, stubController{state: readyState()}, true)
+	model.Update(tea.WindowSizeMsg{Width: 60, Height: 20})
+	model.route = routeState{
+		kind: routeChild, childSessionID: "child-1", detail: &detail, childState: &state,
+	}
+	model.childStates["child-1"] = state
+	require.Contains(t, ansi.Strip(model.View().Content), "LINE-039", "the page opens on the tail")
+
+	apply := func(events []coding.Event) {
+		t.Helper()
+
+		for _, event := range events {
+			model.reduceChildEvent(event)
+			require.NoError(t, model.streamErr)
+		}
 	}
 
-	model, _ := newFrameModel(t)
-	content := model.View().Content
-	require.Contains(t, content, subagentFrameClose)
-	require.True(t, model.subagentFrameHit.painted)
+	// A child event appends a row to the open page, which stays on the tail.
+	apply(childMessageEvents(model.childStates["child-1"], true, "LINE-999"))
+	assert.True(t, model.childScroll.follow, "the reader still holds the tail")
+	assert.Contains(t, ansi.Strip(model.View().Content), "LINE-999",
+		"appended content stays visible while following")
 
-	// The control is where the frame painted it.
-	rows := strings.Split(content, "\n")
-	require.Greater(t, len(rows), model.subagentFrameHit.row)
-	title := []rune(rows[model.subagentFrameHit.row])
-	require.GreaterOrEqual(t, len(title), model.subagentFrameHit.end)
-	assert.Equal(t, subagentFrameClose,
-		string(title[model.subagentFrameHit.start:model.subagentFrameHit.end]))
+	// A reader who scrolled away keeps their place while content arrives.
+	model.Update(key("home"))
+	require.False(t, model.childScroll.follow)
+	apply(childMessageEvents(model.childStates["child-1"], false, "LINE-998"))
+	scrolled := ansi.Strip(model.View().Content)
+	assert.Contains(t, scrolled, "LINE-000", "a scrolled-away reader keeps their place")
+	assert.NotContains(t, scrolled, "LINE-998")
 
-	// A click on it closes through the same function the keys use.
-	model.handleMouse(tea.MouseClickMsg{
-		Button: tea.MouseLeft, X: model.subagentFrameHit.start, Y: model.subagentFrameHit.row,
-	})
-	assert.Equal(t, routeNone, model.route.kind)
+	// Returning to the bottom resumes following, including what arrived meanwhile.
+	model.Update(key("end"))
+	assert.True(t, model.childScroll.follow)
+	assert.Contains(t, ansi.Strip(model.View().Content), "LINE-998")
+}
 
-	// A click elsewhere on the title row leaves the child view open.
-	model, _ = newFrameModel(t)
-	model.View()
-	command := model.handleMouse(tea.MouseClickMsg{
-		Button: tea.MouseLeft, X: 3, Y: model.subagentFrameHit.row,
-	})
-	assert.Nil(t, command)
-	assert.Equal(t, routeSubagent, model.route.kind)
+// childEventTime anchors the child events' clock. The reducer orders by sequence,
+// so the fixture only needs a UTC instant.
+var childEventTime = time.Date(2026, time.August, 2, 10, 0, 0, 0, time.UTC)
+
+// childMessageEvents builds the child events that commit assistant messages to a
+// child run. The opening batch starts the child's interaction, run and first turn;
+// a later batch only commits another message to that same open run.
+func childMessageEvents(state coding.State, open bool, texts ...string) []coding.Event {
+	sequence := state.Sequence
+	next := func(eventType coding.EventType, payload coding.EventPayload) coding.Event {
+		sequence++
+		event := coding.Event{
+			Schema: coding.EventSchema, Sequence: sequence, Time: childEventTime,
+			SessionID: "child-1", InteractionID: "child-interaction",
+			Type: eventType, Payload: payload,
+		}
+		if eventType != coding.EventInteractionStarted {
+			event.RunID = "child-run"
+		}
+
+		return event
+	}
+
+	events := make([]coding.Event, 0, len(texts)+3)
+	if open {
+		events = append(events,
+			next(coding.EventInteractionStarted, coding.InteractionStarted{Mode: coding.ModeAgent}),
+			next(coding.EventRunStarted, coding.RunStarted{Agent: "coding"}),
+			next(coding.EventTurnStarted, coding.TurnStarted{Turn: 1}),
+		)
+	}
+	for _, text := range texts {
+		events = append(events, next(coding.EventMessageCommitted, coding.MessageCommitted{
+			Message: ai.AssistantText(text),
+		}))
+	}
+
+	return events
 }
 
 func TestSubagentTranscriptRouteKeys(t *testing.T) {
@@ -440,6 +601,18 @@ func TestSubagentTranscriptRouteKeys(t *testing.T) {
 
 		return model, controller
 	}
+
+	t.Run("Esc closes to the parent chat", func(t *testing.T) {
+		t.Parallel()
+
+		model, _ := openRoute(t)
+		model.route.children = []childSummary{
+			subagentChildSummary(subagent.Summary{ChildSessionID: "child-1"}),
+		}
+		model.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+		assert.Equal(t, routeNone, model.route.kind,
+			"the page's own key leaves it; the Agent list is a separate route")
+	})
 
 	t.Run("q closes to the parent chat", func(t *testing.T) {
 		t.Parallel()
@@ -695,17 +868,22 @@ func testSubagentState(detail subagent.Detail) coding.State {
 	return state
 }
 
-func TestSubagentRouteEscapeReturnsToAgentList(t *testing.T) {
+// TestSubagentRouteEscapeAlwaysClosesToTheParent pins the one key the child
+// page's footer advertises: Escape leaves the page for the conversation, even
+// when the Agent list that opened it is still behind the route.
+func TestSubagentRouteEscapeAlwaysClosesToTheParent(t *testing.T) {
 	t.Parallel()
 
 	model := readyModel(t, true)
 	model.route = routeState{
 		kind: routeSubagent, childSessionID: "child-1",
+		children: []childSummary{
+			subagentChildSummary(subagent.Summary{ChildSessionID: "child-1"}),
+		},
 	}
 
-	_, command := model.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
-	require.NotNil(t, command)
-	assert.Equal(t, routeAgents, model.route.kind)
+	model.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	assert.Equal(t, routeNone, model.route.kind)
 }
 
 func TestSubagentDetailRefreshIsCoalescedAndRejectsStaleResults(t *testing.T) {

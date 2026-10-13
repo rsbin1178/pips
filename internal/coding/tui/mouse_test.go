@@ -524,7 +524,8 @@ func TestWheelScrollsTheToolDetailPanel(t *testing.T) {
 }
 
 // TestWheelScrollsTheChildSessionPanel covers the other surface Ctrl+T opens: a
-// subagent call opens the child session instead of a Tool document.
+// subagent call opens the child session instead of a Tool document, and the wheel
+// moves that page's own scroll region exactly as its keys do.
 func TestWheelScrollsTheChildSessionPanel(t *testing.T) {
 	t.Parallel()
 
@@ -556,21 +557,24 @@ func TestWheelScrollsTheChildSessionPanel(t *testing.T) {
 		kind: routeChild, childSessionID: "child-1", detail: &detail, childState: &child,
 	}
 
-	maximum := model.subagentRouteMaximumOffset()
-	require.Positive(t, maximum, "the fixture must overflow the panel")
+	_ = model.View() // the page installs its rows and window when it renders
+	maximum := model.childScroll.maxOffset()
+	require.Positive(t, maximum, "the fixture must overflow the page")
+	assert.Equal(t, maximum, model.childScroll.offset, "the page opens on its newest row")
 
-	model.Update(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
-	assert.Equal(t, wheelLinesDefault, model.route.offset)
-
-	for range 100 {
-		model.Update(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
-	}
-	assert.Equal(t, maximum, model.route.offset)
+	model.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	assert.Equal(t, maximum-wheelLinesDefault, model.childScroll.offset)
 
 	for range 100 {
 		model.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
 	}
-	assert.Equal(t, 0, model.route.offset)
+	assert.Equal(t, 0, model.childScroll.offset, "the page stops at its first row")
+
+	for range 100 {
+		model.Update(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
+	}
+	assert.Equal(t, maximum, model.childScroll.offset, "and at its last row")
+	assert.True(t, model.childScroll.follow, "reaching the bottom resumes following")
 }
 
 // TestWheelScrollsTheAgentList pins the list shape the user asked for: the Agent

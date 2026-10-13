@@ -126,18 +126,20 @@ type Model struct {
 	timeline             string
 	transcript           transcriptStore
 	transcriptScroll     scrollRegion
-	selection            selectionState
-	search               searchState
-	mouseCaptureOff      bool
-	transcriptMode       transcriptModeState
-	transcriptHanded     bool // Escape hatch already wrote the rows to the main buffer.
-	frameHit             frameHitMap
+	// childScroll is the read-only child page's reading position. It is the shared
+	// region type, so the page opens on its newest row and follows appended content
+	// exactly as the conversation does.
+	childScroll      scrollRegion
+	selection        selectionState
+	search           searchState
+	mouseCaptureOff  bool
+	transcriptMode   transcriptModeState
+	transcriptHanded bool // Escape hatch already wrote the rows to the main buffer.
+	frameHit         frameHitMap
 	// tasksPane is the model-local tasks overlay, and tasksPaneHit is where the
 	// last painted pane sat.
-	tasksPane    tasksPane
-	tasksPaneHit tasksPaneHitMap
-	// subagentFrameHit is where the open child frame painted its close control.
-	subagentFrameHit subagentFrameCloseHit
+	tasksPane        tasksPane
+	tasksPaneHit     tasksPaneHitMap
 	history          historyState
 	notices          []noticeEntry
 	noticeSequence   uint64
@@ -300,6 +302,7 @@ func newModel(ctx context.Context, options Options) *Model {
 		ctx:              ctx,
 		options:          options,
 		transcriptScroll: newScrollRegion(),
+		childScroll:      newScrollRegion(),
 		lifecycle:        lifecycle,
 		width:            defaultWidth,
 		height:           defaultHeight,
@@ -1068,7 +1071,9 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		return m, m.activity.Update(message)
+		// The clock is also what re-reads a running watch's output, so a page
+		// that is following one asks for the next read on every frame.
+		return m, tea.Batch(m.activity.Update(message), m.followOpenWatchPage())
 	default:
 		if m.lifecycle == lifecycleReady {
 			// The find box has focus while it is open, so its cursor blink and any
@@ -1473,14 +1478,6 @@ func (m *Model) readyView() tea.View {
 		}
 		footer = append(footer, activity)
 	}
-	// The tasks pane is a footer band above the prompt and the Composer, so it
-	// takes its rows from the transcript's elastic height instead of moving
-	// either of them.
-	tasksPaneIndex := -1
-	if pane := m.tasksPaneBand(time.Now()); pane != "" {
-		tasksPaneIndex = len(footer)
-		footer = append(footer, pane)
-	}
 	if prompt := m.promptView(); prompt != "" && !m.goalCommandPickerActive() {
 		// The band shares the Composer's text column, so its accent gutter lines
 		// up with the transcript's accented blocks instead of the frame edge.
@@ -1508,8 +1505,14 @@ func (m *Model) readyView() tea.View {
 	footer = append(footer, m.reservedBand())
 	composerFooterIndex := len(footer)
 	footer = append(footer, m.composerBand())
+	// The pane is the frame's last band, below the status line or below the picker
+	// that replaces it. Its rows are measured here, before the picker sizes itself,
+	// so a picker opened while something is running cannot push the pane out of the
+	// frame.
+	pane := m.tasksPaneBand(time.Now())
 	if m.picker.kind != pickerNone {
-		usedHeight := lipgloss.Height(lipgloss.JoinVertical(lipgloss.Left, footer...))
+		usedHeight := lipgloss.Height(lipgloss.JoinVertical(lipgloss.Left, footer...)) +
+			lipgloss.Height(pane)
 		availableRows := m.pickerBandRows(caps, m.height-usedHeight)
 		switch m.picker.kind {
 		case pickerModel:
@@ -1535,6 +1538,14 @@ func (m *Model) readyView() tea.View {
 		if panel := m.teamPanelView(); panel != "" {
 			footer = append(footer, truncateHeight(panel, max(1, caps.panelRows)))
 		}
+	}
+
+	// The pane is appended last, so the bands above it keep their positions whatever
+	// it lists; its rows come from the transcript's elastic height.
+	tasksPaneIndex := -1
+	if pane != "" {
+		tasksPaneIndex = len(footer)
+		footer = append(footer, pane)
 	}
 
 	parts := make([]string, 0, len(footer)+1)
@@ -1593,7 +1604,7 @@ func (m *Model) readyView() tea.View {
 		view.Cursor = m.search.input.Cursor()
 	}
 	if (m.prompt.kind != promptNone && !m.goalCommandPickerActive()) || m.pickerHidesComposerCursor() || m.teamPanel.isFocused ||
-		m.tasksPane.focused ||
+		m.tasksPaneFocused() ||
 		(m.teamRouteIsInline() && (m.route.loading || !teamRouteInputStage(m.route.team.stage))) {
 		view.Cursor = nil
 	}
@@ -3316,12 +3327,11 @@ func (m *Model) reduceObservedEvent(event coding.Event) {
 
 // reduceChildEvent projects one child-Session event into the TUI's own child
 // state. A parent subscription does not carry child Runtime States, so child
-// projections keep using the shared transition table.
+// projections keep using the shared transition table. The open child page's
+// scroll region re-anchors when the fresh rows are installed, so appending content
+// keeps the tail visible while the reader follows it.
 func (m *Model) reduceChildEvent(event coding.Event) {
 	state := m.childStates[event.SessionID]
-	wasAtBottom := m.route.kind == routeChild && m.route.childKind == childSubagent &&
-		m.route.childSessionID == event.SessionID &&
-		m.route.offset >= m.subagentRouteMaximumOffset()
 	next, err := coding.Reduce(state, event)
 	if err != nil {
 		m.streamErr = fmt.Errorf("coding tui: reduce child %s: %w", event.SessionID, err)
@@ -3334,11 +3344,6 @@ func (m *Model) reduceChildEvent(event coding.Event) {
 		m.route.childSessionID == event.SessionID {
 		child := next.Clone()
 		m.route.childState = &child
-		if wasAtBottom {
-			m.route.offset = m.subagentRouteMaximumOffset()
-		} else {
-			m.route.offset = min(m.route.offset, m.subagentRouteMaximumOffset())
-		}
 	}
 }
 

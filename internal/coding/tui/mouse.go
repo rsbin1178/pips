@@ -21,12 +21,19 @@ const (
 )
 
 // scrollWheel routes one wheel notch to whichever surface owns the pointer: the
-// Composer's own draft when it has rows off screen, the managed transcript, a
-// picker dropdown over the ready view, or a full-area route that has its own
-// scrolling body.
+// Composer's own draft when it has rows off screen, the tasks pane when the notch
+// lands on the rows it painted, the managed transcript, a picker dropdown over the
+// ready view, or a full-area route that has its own scrolling body.
 func (m *Model) scrollWheel(message tea.MouseWheelMsg) tea.Cmd {
 	if m.composerOwnsWheel(message) {
 		return m.scrollComposer(message)
+	}
+
+	// The tasks pane is a control surface of the ready frame, so a notch inside it
+	// moves the pane before the transcript underneath takes the gesture: a wheel
+	// over a strip must not scroll content the pointer is not on.
+	if m.tasksPaneOwnsWheel(message) {
+		return m.scrollTasksPane(message)
 	}
 
 	if m.viewportOwnsPointer() {
@@ -150,7 +157,13 @@ func (m *Model) scrollRoute(lines int) tea.Cmd {
 	case routeToolDetail:
 		m.route.offset = min(max(0, m.route.offset+lines), m.toolDetailMaximumOffset())
 	case routeChild:
-		m.route.offset = min(max(0, m.route.offset+lines), m.subagentRouteMaximumOffset())
+		// The read-only child page moves its own scroll region, which carries the
+		// follow rule; the Team Worker page keeps its private offset.
+		if m.route.childKind != childTeamWorker {
+			m.childScroll.scrollBy(lines)
+		} else {
+			m.route.offset = min(max(0, m.route.offset+lines), m.subagentRouteMaximumOffset())
+		}
 	case routeAgents:
 		m.route.offset = min(
 			max(0, m.route.offset+lines),

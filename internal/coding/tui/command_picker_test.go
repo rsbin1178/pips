@@ -295,7 +295,8 @@ func TestAgentsCommandOpensCurrentSessionListAndDetail(t *testing.T) {
 	assert.NotContains(t, content, "Details")
 
 	model.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
-	assert.Equal(t, routeAgents, model.route.kind)
+	assert.Equal(t, routeNone, model.route.kind,
+		"the child page leaves for the conversation it belongs to")
 }
 
 func TestCtrlTTogglesSubagentDetailFromDurableToolEnvelope(t *testing.T) {

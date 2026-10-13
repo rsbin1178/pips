@@ -1040,9 +1040,15 @@ bounded tail instead of promising a poll.
 
 **Tasks pane.** A registered watch is a row under `Watchers`, labelled
 `Monitor`, showing the description (or the command when there is none), the
-running state, and its own elapsed time. `x` stops it and `Enter`/`Ctrl+F` opens
-a bounded detail view of its description, status, elapsed time, and a bounded
-tail of its own output; a watch has no transcript to open.
+running state, and its own elapsed time. `x` stops it, and `Enter`/`Ctrl+F` opens
+its page. That page is the same full-width container the Tool detail surface
+uses — a pinned status row rather than a window — and it names the task and its
+state, carries the watch's own `$ command` above the output the way the shell
+detail surface carries a script, and shows the tail of the task's own output. A
+running watch opens on that tail and re-reads it on the activity clock, so the
+reader watches the stream grow; scrolling up holds their place, and coming back
+to the tail follows again. `Esc` (or `Ctrl+T`) closes the page, matching every
+other detail page. A watch has no transcript to open.
 
 **Lifetime.** The registry is process-local. A watch does not survive a restart,
 matching the session semantics of the reference: a crash cannot reconstruct one.
@@ -1433,18 +1439,32 @@ wraps with ↑/↓, and a picker never moves the conversation underneath it. The
 `/agents` hint line names the scroll inputs, and a picker's or panel's key hints
 stay authoritative for everything else.
 
-The tasks pane is the compact strip above the composer that shows what the session
-is running. It groups rows into `Workflows`, `Subagents`, `Tasks`, and `Watchers`
-in that order with running rows first, and it opens itself when a child subagent
-starts and closes when the last one stops. Only `Subagents` has rows in this
-release: pips runs no workflows, keeps no list of background commands, and has no
-watcher surface. `Ctrl+B` focuses the pane (revealing it if the automatic rule hid
-it), `↑`/`↓` or `j`/`k` move the selection, `h` shows or hides finished rows, `x`
-cancels the selected running child, `Enter` (or `Ctrl+F` while the pane is focused)
-opens its transcript, `←`/`→` collapse or expand every section, and `Tab` or `Esc`
-gives the keys back to the composer. A row paints a state glyph, the task, the
-elapsed time, the child's live activity and model, and the `[✗]` and `[↗]`
-controls, which are clickable wherever the frame reports mouse events.
+The tasks pane is the compact strip at the bottom of the frame, below the status
+line, that shows what the session is running. It groups rows into `Workflows`,
+`Subagents`, `Tasks`, and `Watchers` in that order with running rows first, and it
+opens itself when a child subagent starts and closes when the last one stops. Two
+groups have rows in this release: `Subagents` projects the session's children and
+`Watchers` projects its registered background watches. `Ctrl+B` focuses the pane
+— revealing it if the automatic rule hid it, and turning the finished rows on
+when nothing is running, so the chord
+always shows what exists — `↑`/`↓` or `j`/`k` move the selection, `Ctrl+H` shows or
+hides finished rows, `x` stops the selected running child or watch, `Enter` (or
+`Ctrl+F` while the pane is focused) opens the selected row — a child's transcript,
+or a watch's page — `←`/`→` collapse or expand every section, and `Tab` or `Esc`
+gives the keys back to the composer. The wheel over the pane moves its selection
+the way the pane's own `↑`/`↓` do, so the rows the cap hides stay reachable, and a
+notch anywhere else still reads the conversation. A child row paints a state glyph,
+the task, the elapsed time, the child's live activity and model, and the `[✗]` and
+`[↗]` controls; a watch row paints the `Monitor` tag, the description or command,
+the running state, and its own elapsed time with the same two controls. The
+controls are clickable wherever the frame reports mouse events.
+
+The pane is a compact strip: it paints at most six rows and never more than 30% of
+the frame, so the conversation keeps most of its rows, and a section with more rows
+than its share ends with `… +N more` and scrolls with the selection. A pane with
+nothing to list paints nothing at all — there is no empty-state note — and it gives
+the frame's keys back to the composer, so a keystroke after the last child stops
+belongs to what you are typing.
 
 A spawn appears in the parent transcript as one lifecycle line: `Subagent
 running: "…"` while a foreground child works, `Subagent started: "…"` for a
@@ -1453,11 +1473,19 @@ background child, and `Subagent completed in …: "…"` (or `failed in …` /
 and commits once in its terminal form; a background child commits its opening line
 straight away and gets a separate terminal line when it finishes.
 
-`Ctrl+T` opens the newest child's transcript in a bordered, read-only frame whose
-title row carries the child's state, identity, task, live activity, elapsed time,
-and `[✗]` close control. `q` and `Ctrl+T` close it back to chat, `Esc` returns to
-`/agents`, and `Ctrl+C` cancels the child rather than the conversation. The frame
-has no composer.
+`Ctrl+T` opens the newest child's transcript. A child page is the conversation's
+own container rather than a window: the child's blocks run the full width through
+the same renderer and the same options the conversation uses, so a Tool result
+collapses to its one-line row here exactly as it does there, and the pinned footer
+carries a separator and one row naming the child's state, identity, task, model,
+live activity and elapsed time, then its keys. There is no border and no close
+control painted on the page, and no composer. The page follows the child's newest
+row: it opens on the tail, keeps the tail visible while new content arrives, and
+`↑`/`↓`, `PgUp`/`PgDn`, the wheel or `Home` release it — `End` returns to the tail
+and resumes following. `Esc` closes it back to the conversation — the footer says
+so — and `q` and `Ctrl+T` do the same; `Ctrl+C` cancels the child rather than the
+conversation. The footer drops metadata from the right as the terminal narrows, so
+the identity, the state and the way out survive a narrow frame.
 
 `/statusline` keeps the existing picker interactions: toggle and reorder items,
 preview the result, press Enter to save, or press Esc to cancel. `/theme` and
