@@ -228,6 +228,28 @@ func (m *Model) toggleTasksPane() tea.Cmd {
 	return m.startActivityClock(wasVisible)
 }
 
+// toggleTasksPaneHistory answers the reader's "show me what has run" gesture: it
+// turns the finished rows on, revealing and focusing the pane for them, and puts
+// them away again on the second press. The pane is usually hidden by then, since
+// the automatic rule closes it when the last child or watch stops — which is
+// exactly when its history is wanted — so the chord is answered from the
+// conversation rather than only from the pane's own keys.
+func (m *Model) toggleTasksPaneHistory() tea.Cmd {
+	wasVisible := m.activityClockVisible()
+	if m.tasksPane.showDone && m.tasksPaneVisible() {
+		m.tasksPane.showDone = false
+		m.tasksPane.focused = false
+
+		return nil
+	}
+	m.tasksPane.showDone = true
+	m.revealTasksPane()
+	m.tasksPane.focused = true
+	m.clampTasksPaneCursor()
+
+	return m.startActivityClock(wasVisible)
+}
+
 // revealTasksPane shows the pane without focusing it and takes it out of the
 // automatic rule's hands, so the reader's own choice is not undone when the last
 // child stops. Revealing with nothing running turns the finished rows on: the
@@ -819,12 +841,16 @@ func nonEmpty(parts ...string) []string {
 }
 
 // updateTasksPaneReadyKey gives the pane the ready view's keys it owns: one
-// chord reveals and focuses it, and while focused it owns the frame's keys the
-// way any other focused overlay does. A pane with nothing to list owns nothing,
-// so its keys fall through to the surfaces behind it.
+// chord reveals and focuses it, one shows the rows that already finished, and
+// while focused it owns the frame's keys the way any other focused overlay does.
+// A pane with nothing to list owns nothing, so its keys fall through to the
+// surfaces behind it.
 func (m *Model) updateTasksPaneReadyKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 	if message.String() == keyCtrlB {
 		return m, m.toggleTasksPane(), true
+	}
+	if message.String() == keyCtrlH {
+		return m, m.toggleTasksPaneHistory(), true
 	}
 	if m.tasksPaneFocused() {
 		model, command := m.updateTasksPaneKey(message)
@@ -850,18 +876,13 @@ func (m *Model) updateTasksPaneKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd)
 		m.moveTasksPaneCursor(1)
 
 		return m, nil
-	// The history toggle answers Ctrl+H through both spellings a terminal can
-	// send for it. 0x08 is Ctrl+H's own byte and Backspace's, and this program
-	// never asks for the Kitty keyboard protocol, so which name arrives depends on
-	// the terminal: ultraviolet decodes the bare 0x08 as ctrl+h and the 0x7f a
-	// modern Backspace sends as backspace. Backspace has no other job while the
-	// pane is focused — the composer is blurred and the pane consumes every key —
-	// so both spellings toggle the finished rows.
-	case keyCtrlH, keyBackspace:
-		m.tasksPane.showDone = !m.tasksPane.showDone
-		m.clampTasksPaneCursor()
-
-		return m, nil
+	// A terminal profile that sends Ctrl+H as Backspace reaches the history
+	// toggle here: the chord itself is answered before the pane's own keys.
+	// ultraviolet decodes the bare 0x08 as ctrl+h and the 0x7f a modern Backspace
+	// sends as backspace, and Backspace has no other job while the pane is focused
+	// — the composer is blurred and the pane consumes every key.
+	case keyBackspace:
+		return m, m.toggleTasksPaneHistory()
 	case keyEnter, keyCtrlF:
 		return m, m.inspectTasksPaneSelection()
 	case "x":

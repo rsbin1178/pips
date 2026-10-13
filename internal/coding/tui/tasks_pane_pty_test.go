@@ -58,6 +58,22 @@ func TestPTYTasksPaneEmptyToggleAndWheel(t *testing.T) {
 	require.NotContains(t, frame, "No running tasks", "the empty-state note is gone")
 	require.Positive(t, highestTranscriptRow(frame), "the fixture conversation is on screen")
 
+	// Ctrl+H from the conversation shows what already ran. The pane is hidden
+	// exactly when its history is wanted, so the chord is answered from the ready
+	// view and not only from the pane's own keys.
+	harness.write("\x08")
+	require.Eventually(t, func() bool {
+		return containsAll(harness.frame(cols, rows),
+			tasksPaneHeaderExpanded+" Subagents 2", tasksPanePTYFirstTask, tasksPanePTYSecondTask)
+	}, 30*time.Second, 10*time.Millisecond,
+		"the history chord reveals the pane:\n%s", harness.frame(cols, rows))
+
+	harness.write("\x08")
+	require.Eventually(t, func() bool {
+		return !strings.Contains(harness.frame(cols, rows), "Subagents")
+	}, 30*time.Second, 10*time.Millisecond,
+		"the second press puts the history away:\n%s", harness.frame(cols, rows))
+
 	// Ctrl+B reveals it with the finished rows, because nothing is running.
 	harness.write("\x02")
 	require.Eventually(t, func() bool {
