@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -374,13 +375,13 @@ func TestMonitorDetachReturnsAReceiptAndRunsTheProcessInTheBackground(t *testing
 	require.NoError(t, err)
 	require.True(t, header.OK)
 	require.NotNil(t, header.Monitor)
-	assert.Equal(t, "monitor-1", header.Monitor.TaskID)
+	assert.True(t, strings.HasPrefix(header.Monitor.TaskID, "monitor-1-"))
 	assert.Equal(t, int64(2500), header.Monitor.TimeoutMS)
 	assert.False(t, header.Monitor.Persistent)
-	assert.Contains(t, body, "Monitor started (task monitor-1, timeout 2500ms).")
+	assert.Contains(t, body, "Monitor started (task "+header.Monitor.TaskID+", timeout 2500ms).")
 
 	// The Tool call has returned, and the run is still owned by the registry.
-	stored, found := registry.Snapshot("monitor-1")
+	stored, found := registry.Snapshot(header.Monitor.TaskID)
 	require.True(t, found)
 	assert.Equal(t, "deploy", stored.Command)
 	assert.Equal(t, "deploy log", stored.Description)
@@ -469,7 +470,8 @@ func TestMonitorDetachPersistentReceiptOmitsTheDeadline(t *testing.T) {
 	assert.Contains(
 		t,
 		body,
-		"Monitor started (task monitor-1, persistent -- runs until kill_background_task or session end).",
+		"Monitor started (task "+header.Monitor.TaskID+
+			", persistent -- runs until kill_background_task or session end).",
 	)
 }
 
@@ -506,7 +508,7 @@ func TestMonitorDetachWarnsAboutOtherRunningTasks(t *testing.T) {
 		return execution.Result{Status: execution.StatusCanceled, ExitCode: -1}, ctx.Err()
 	}
 
-	_, err := registry.Launch(t.Context(), background.Request{
+	first, err := registry.Launch(t.Context(), background.Request{
 		Kind: background.KindMonitor, Command: "watch-a", Description: "first watch",
 		Timeout: time.Minute, Start: blocking,
 	})
@@ -527,8 +529,8 @@ func TestMonitorDetachWarnsAboutOtherRunningTasks(t *testing.T) {
 	_, body, err := ParseResult(text.Text)
 	require.NoError(t, err)
 	assert.Contains(t, body, "Note: 1 other background task is still running:")
-	assert.Contains(t, body, "\"monitor-1\"")
+	assert.Contains(t, body, "\""+first.ID+"\"")
 	assert.Contains(t, body, ": first watch")
 
-	assert.Equal(t, background.OutcomeKilled, registry.Kill("monitor-1", background.KillUser))
+	assert.Equal(t, background.OutcomeKilled, registry.Kill(first.ID, background.KillUser))
 }

@@ -168,10 +168,21 @@ type Runtime struct {
 	// planReminderCount alternates the full and sparse plan reminders across
 	// turns. Entry and compaction reset it so the next reminder is full.
 	planReminderCount uint32
-	policy            execution.Policy
-	executor          *execution.Executor
-	tempRoot          *execution.PrivateTempRoot
-	inspector         *git.Inspector
+	// Todo nudge and gate state. planTurnsWithoutUpdate counts user turns since
+	// the last valid update_plan call, and planTurnsSinceNudge counts user turns
+	// since the last nudge. A plan write resets the first, and compaction
+	// restarts both. planWrittenThisTurn records a valid update_plan call in the
+	// turn now running, planNudgedThisTurn records that the nudge fired for it,
+	// and todoGateFires counts the gate's fires for the current prompt.
+	planTurnsWithoutUpdate uint32
+	planTurnsSinceNudge    uint32
+	planWrittenThisTurn    bool
+	planNudgedThisTurn     bool
+	todoGateFires          uint32
+	policy                 execution.Policy
+	executor               *execution.Executor
+	tempRoot               *execution.PrivateTempRoot
+	inspector              *git.Inspector
 	// nonRepositoryReported latches the "workspace is not a Git repository"
 	// notice. The reference agent warns once, when a session starts outside a
 	// repository, instead of repeating the warning on every turn, so this Runtime
@@ -620,7 +631,10 @@ func openRuntime(
 		telemetry:     newTelemetryObservers(options.TelemetryObservers),
 		admission:     newTeamAdmission(),
 		agentDrafts:   make(map[string]agentDraftRecord),
-		closeDone:     make(chan struct{}),
+		// The nudge interval starts spent, so the first nudge only waits for the
+		// turns-without-a-plan threshold.
+		planTurnsSinceNudge: planNudgeInterval,
+		closeDone:           make(chan struct{}),
 	}
 
 	runtime.journal, err = newInteractionJournal(runtime.session, nil)

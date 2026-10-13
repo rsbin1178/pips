@@ -14,6 +14,7 @@ import (
 	"github.com/rsbin1178/pips/internal/coding"
 	"github.com/rsbin1178/pips/internal/coding/background"
 	"github.com/rsbin1178/pips/internal/coding/subagent"
+	"github.com/rsbin1178/pips/internal/coding/tasklist"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -1028,4 +1029,151 @@ func TestTasksPaneCollapsedSectionKeepsOnlyItsHeader(t *testing.T) {
 	interior, _ := model.tasksPanePaint(tasksPaneNow, model.tasksPaneCapacity())
 	assert.Contains(t, interior, "▸ Subagents 1")
 	assert.NotContains(t, interior, "fix the login bug")
+}
+
+// TestStatusLineStillRunningCue pins the idle cue: while the runtime is idle
+// with work still running it shows the count-led label the reference shows, and
+// it stays empty while a turn runs or nothing is live.
+func TestStatusLineStillRunningCue(t *testing.T) {
+	t.Parallel()
+
+	model, _ := tasksPaneModel(t)
+	model.state.Phase = coding.PhaseIdle
+	model.state.BackgroundTasks = []coding.BackgroundTaskLifecycle{{
+		ID: "monitor-1", Kind: string(background.KindMonitor), Description: "deploy log",
+	}}
+	model.state.Subagents = []coding.SubagentState{liveTasksChild("child-1", "fix the login bug")}
+	assert.Equal(t, "1 monitor · 1 subagent still running", model.stillRunningCue())
+
+	model.state.BackgroundTasks = append(model.state.BackgroundTasks, coding.BackgroundTaskLifecycle{
+		ID: "monitor-2", Kind: string(background.KindMonitor), Description: "ci",
+	})
+	assert.Equal(t, "2 monitors · 1 subagent still running", model.stillRunningCue())
+
+	// A finished task and a finished child stop counting.
+	model.state.BackgroundTasks[0].Completed = true
+	model.state.Subagents[0].State = subagent.StateSucceeded
+	assert.Equal(t, "1 monitor still running", model.stillRunningCue())
+
+	// Idle with nothing live shows no cue.
+	model.state.BackgroundTasks = nil
+	assert.Empty(t, model.stillRunningCue())
+
+	// A turn that runs or waits for the user shows no cue, even with live work.
+	model.state.BackgroundTasks = []coding.BackgroundTaskLifecycle{{
+		ID: "monitor-1", Kind: string(background.KindMonitor),
+	}}
+	model.state.Phase = coding.PhaseRunning
+	assert.Empty(t, model.stillRunningCue())
+	model.state.Phase = coding.PhasePaused
+	assert.Empty(t, model.stillRunningCue())
+}
+
+// TestStatusLineStillRunningCueOutlivesAShortFrame pins the reason the cue
+// exists: on a frame too short for the tasks pane, the status line still names
+// the running work.
+func TestStatusLineStillRunningCueOutlivesAShortFrame(t *testing.T) {
+	t.Parallel()
+
+	model, _ := tasksPaneModel(t)
+	model.height = tasksPaneMinViewHeight - 1
+	model.state.Phase = coding.PhaseIdle
+	model.state.BackgroundTasks = []coding.BackgroundTaskLifecycle{{
+		ID: "monitor-1", Kind: string(background.KindMonitor), Description: "deploy log",
+	}}
+
+	model.syncTasksPane(tasksPaneNow)
+	assert.False(t, model.tasksPaneVisible(), "the pane stays hidden on a short frame")
+	assert.Contains(t, strings.Join(model.statusExtras(), "\n"), "1 monitor still running")
+}
+
+// TestTasksPaneShowsThePlanUnderTasks pins the plan's rows: the Tasks group is
+// populated from the projected snapshot, its header counts the rows it paints,
+// and a finished step follows the same finished-rows rule as the other groups.
+func TestTasksPaneShowsThePlanUnderTasks(t *testing.T) {
+	t.Parallel()
+
+	model, _ := tasksPaneModel(t)
+	model.state.Tasks = tasklist.Snapshot{
+		Items: []tasklist.Item{
+			{Step: "Inspect the log", Status: tasklist.StatusCompleted},
+			{Step: "Patch the handler", Status: tasklist.StatusInProgress},
+			{Step: "Blocked by policy", Status: tasklist.StatusCancelled},
+			{Step: "Verify the fix", Status: tasklist.StatusPending},
+		},
+		Completed: 1, InProgress: 1, Cancelled: 1, Total: 4,
+	}
+	model.tasksPane.visible = true
+	model.tasksPane.showDone = false
+
+	rows := model.tasksPaneRows()
+	require.Len(t, rows, 2, "the finished steps stay hidden until the reader asks")
+	assert.Equal(t, []string{"Patch the handler", "Verify the fix"},
+		[]string{rows[0].label, rows[1].label}, "plan rows keep the plan's own order")
+	assert.True(t, rows[0].plan)
+	assert.Equal(t, tasksPaneTasks, tasksPaneGroupOf(rows[0]))
+	assert.Equal(t, "⊘", model.tasksPaneRowIcon(tasksPaneRow{
+		plan: true, planStatus: tasklist.StatusCancelled,
+	}))
+
+	entries := tasksPaneEntries(rows, model.tasksPane.collapsed)
+	require.Len(t, entries, 3, "one Tasks header plus its two rows")
+	assert.True(t, entries[0].header)
+	assert.Equal(t, tasksPaneTasks, entries[0].group)
+	assert.Equal(t, len(rows), entries[0].count, "the header count is the painted row count")
+
+	// A plan row addresses no action, so neither control is offered.
+	selection, ok := model.tasksPaneSelection()
+	require.True(t, ok)
+	assert.True(t, selection.plan)
+	assert.Nil(t, model.inspectTasksPaneSelection())
+	assert.Nil(t, model.killTasksPaneSelection())
+
+	// Asking for the finished rows adds the two terminal steps.
+	model.tasksPane.showDone = true
+	entries = tasksPaneEntries(model.tasksPaneRows(), model.tasksPane.collapsed)
+	require.Len(t, entries, 5)
+	assert.Equal(t, 4, entries[0].count)
+	assert.Equal(t, "Inspect the log", entries[1].row.label)
+	assert.Equal(t, "⊘", model.tasksPaneRowIcon(entries[3].row))
+}
+
+// TestTasksPaneHidesAFullyFinishedPlan pins the finished-rows rule at the group
+// level: a plan with nothing live leaves no section and no keys.
+func TestTasksPaneHidesAFullyFinishedPlan(t *testing.T) {
+	t.Parallel()
+
+	model, _ := tasksPaneModel(t)
+	model.state.Tasks = tasklist.Snapshot{
+		Items: []tasklist.Item{
+			{Step: "Inspect the log", Status: tasklist.StatusCompleted},
+			{Step: "Blocked by policy", Status: tasklist.StatusCancelled},
+		},
+		Completed: 1, Cancelled: 1, Total: 2,
+	}
+	model.tasksPane.visible = true
+	model.tasksPane.showDone = false
+
+	assert.Empty(t, model.tasksPaneRows(), "a finished plan paints no row by default")
+	assert.False(t, model.tasksPaneHasEntries())
+
+	model.tasksPane.showDone = true
+	assert.Len(t, model.tasksPaneRows(), 2, "the finished rows come back on request")
+}
+
+// TestTasksPanePlanRowCarriesNoClock pins the plan row's meta: a plan step has
+// no clock of its own, so the pane shows its status word instead of an elapsed
+// time.
+func TestTasksPanePlanRowCarriesNoClock(t *testing.T) {
+	t.Parallel()
+
+	model, _ := tasksPaneModel(t)
+	row, ok := tasksPanePlanRow(
+		tasklist.Item{Step: "Verify the fix", Status: tasklist.StatusPending}, false,
+	)
+	require.True(t, ok)
+
+	line, _ := model.tasksPaneRowLine(tasksPaneEntry{index: 0, row: row}, tasksPaneNow, 60)
+	assert.Contains(t, line, "pending")
+	assert.NotContains(t, line, "0s", "a plan row paints no elapsed time")
 }

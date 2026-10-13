@@ -388,6 +388,8 @@ func detailToneTask(status tasklist.Status) toolDetailTone {
 		return detailToneAdded
 	case tasklist.StatusInProgress:
 		return detailToneHeading
+	case tasklist.StatusCancelled:
+		return detailToneMuted
 	case tasklist.StatusPending, "":
 		return detailToneMuted
 	default:

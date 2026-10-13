@@ -117,6 +117,7 @@ func newConfigShowCommand(dependencies Dependencies, flags *rootFlags) *cobra.Co
 				config.FieldActiveAgentMessages: strconv.FormatBool(
 					state.config.Config.ActiveAgentMessages,
 				),
+				config.FieldTodoGate: strconv.FormatBool(state.config.Config.TodoGate),
 				config.FieldSubagentMaxDepth: strconv.Itoa(
 					state.config.Config.Subagent.MaxDepth,
 				),

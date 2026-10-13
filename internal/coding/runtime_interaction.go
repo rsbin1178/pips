@@ -28,6 +28,7 @@ import (
 	"github.com/rsbin1178/pips/internal/coding/planreview"
 	"github.com/rsbin1178/pips/internal/coding/question"
 	"github.com/rsbin1178/pips/internal/coding/subagent"
+	"github.com/rsbin1178/pips/internal/coding/tasklist"
 	"github.com/rsbin1178/pips/internal/coding/teamworktree"
 	"github.com/rsbin1178/pips/internal/coding/tools"
 )
@@ -229,6 +230,11 @@ func (r *Runtime) run(
 			emitter.fail(errors.Join(err, finishErr))
 			return
 		}
+		if kind == operationPrompt {
+			// The gate's per-prompt cap and the turn's plan-write and nudge
+			// marks all start here, with the prompt.
+			r.beginTodoTurn()
+		}
 	case operationContinue:
 		if err = r.activatePendingPlanMode(ctx, emitter); err != nil {
 			emitter.fail(err)
@@ -404,57 +410,68 @@ func (r *Runtime) run(
 			return
 		}
 
-		if outcome, terminal := terminalInteractionOutcome(stop); terminal {
-			hookOutcome, hookErr := r.runStopHook(ctx, stopHookActive, emitter)
-			if hookErr != nil {
-				errorEventErr := r.emitRunError(current, hookErr, InteractionFailed, emitter)
+		outcome, terminal := terminalInteractionOutcome(stop)
+		if !terminal {
+			if err := r.reconcileAndContinue(ctx, current, emitter); err != nil {
 				finishErr := r.finishInteraction(
-					context.WithoutCancel(ctx), current, InteractionFailed, emitter,
+					context.WithoutCancel(ctx),
+					current,
+					InteractionFailed,
+					emitter,
 				)
-				emitter.fail(errors.Join(hookErr, errorEventErr, finishErr))
+				emitter.fail(errors.Join(err, finishErr))
 
 				return
 			}
-			if hookOutcome.Stopped || (hookOutcome.Blocked && stopHookActive && ctx.Value(goalContextKey{}) != nil) {
-				current.requestHookStop()
-			}
-			if hookOutcome.Blocked && !hookOutcome.Stopped && !current.hookStopRequestedNow() {
-				messages = []ai.Message{ai.UserText(hookContinuationReason(hookOutcome.Reason))}
-				stopHookActive = true
 
-				continue
+			if r.interactionPaused(current) {
+				return
 			}
-			if ctx.Value(goalContextKey{}) != nil && current.hookStopRequestedNow() {
-				stop = agent.StopWhen
-				outcome = InteractionIncomplete
-			}
-			current.stop = stop
+
+			continue
+		}
+
+		hookOutcome, hookErr := r.runStopHook(ctx, stopHookActive, emitter)
+		if hookErr != nil {
+			errorEventErr := r.emitRunError(current, hookErr, InteractionFailed, emitter)
 			finishErr := r.finishInteraction(
-				context.WithoutCancel(ctx),
-				current,
-				outcome,
-				emitter,
+				context.WithoutCancel(ctx), current, InteractionFailed, emitter,
 			)
-			emitter.fail(finishErr)
+			emitter.fail(errors.Join(hookErr, errorEventErr, finishErr))
 
 			return
 		}
+		if hookOutcome.Stopped || (hookOutcome.Blocked && stopHookActive && ctx.Value(goalContextKey{}) != nil) {
+			current.requestHookStop()
+		} else if hookOutcome.Blocked && !current.hookStopRequestedNow() {
+			messages = []ai.Message{ai.UserText(hookContinuationReason(hookOutcome.Reason))}
+			stopHookActive = true
 
-		if err := r.reconcileAndContinue(ctx, current, emitter); err != nil {
-			finishErr := r.finishInteraction(
-				context.WithoutCancel(ctx),
-				current,
-				InteractionFailed,
-				emitter,
-			)
-			emitter.fail(errors.Join(err, finishErr))
-
-			return
+			continue
 		}
-
-		if r.interactionPaused(current) {
-			return
+		if ctx.Value(goalContextKey{}) != nil && current.hookStopRequestedNow() {
+			stop = agent.StopWhen
+			outcome = InteractionIncomplete
 		}
+		// The opt-in gate runs one more turn when the run ended on a content-only
+		// assistant message with pending or in-progress plan items. It loops back
+		// to the harness inside this interaction, so the transcript, the
+		// notification claims, and the approval/question invariants are untouched.
+		if reminder, gate := r.todoGateReminder(current, stop); gate {
+			messages = []ai.Message{reminder}
+
+			continue
+		}
+		current.stop = stop
+		finishErr := r.finishInteraction(
+			context.WithoutCancel(ctx),
+			current,
+			outcome,
+			emitter,
+		)
+		emitter.fail(finishErr)
+
+		return
 	}
 }
 
@@ -708,6 +725,7 @@ func (r *Runtime) openInteraction(
 		tools.WithKillBackground(func(ctx context.Context, taskID string) (background.Outcome, error) {
 			return r.KillBackgroundTask(ctx, taskID, background.KillModel)
 		}),
+		tools.WithKnownBackgroundIDs(r.KnownBackgroundTaskIDs),
 	}
 	if planFile := r.planFileBoundary(); planFile != nil {
 		localOptions = append(localOptions, tools.WithPlanFile(*planFile))
@@ -866,6 +884,7 @@ func (r *Runtime) openInteraction(
 			killBackground: func(ctx context.Context, taskID string) (background.Outcome, error) {
 				return r.KillBackgroundTask(ctx, taskID, background.KillModel)
 			},
+			knownBackgroundIDs: r.KnownBackgroundTaskIDs,
 			messages:           r.subagents.MessageCoordinator(),
 			wakeManager:        r.subagents,
 			wakeDispatcher:     func() subagent.Dispatcher { return modelDispatcher },
@@ -1210,6 +1229,10 @@ func (r *Runtime) driveHarness(
 
 	// The turn's runtime context leads the input, so it is committed to the
 	// transcript before the prompt and then rides with the conversation.
+	// A user turn that carries input is the unit the todo nudge counts.
+	if len(messages) > 0 && current.source == InteractionSourceUser {
+		current.planTurn = true
+	}
 	messages = r.turnMessages(current, messages)
 
 	var stop agent.StopReason
@@ -1230,6 +1253,11 @@ func (r *Runtime) driveHarness(
 			if committed, ok := event.Payload().(agent.MessageCommitted); ok {
 				if err := r.acknowledgeNotificationMessage(committed.Message); err != nil {
 					return "", err
+				}
+				// A committed, valid update_plan call is what resets the todo
+				// nudge; a malformed call is not a plan write.
+				if _, planWrite := tasklist.FromMessage(committed.Message); planWrite {
+					r.markPlanWritten()
 				}
 			}
 
@@ -1693,6 +1721,9 @@ func (r *Runtime) finishInteraction(
 	// The search document is derived and rebuildable, so refreshing it once per
 	// completed interaction keeps listing surfaces off the transcript.
 	r.artifacts.writeSearchDoc()
+	// One finished user turn is what the todo nudge counts; a plan write during
+	// it resets the count.
+	r.advancePlanTurn(current)
 
 	return errors.Join(errs...)
 }

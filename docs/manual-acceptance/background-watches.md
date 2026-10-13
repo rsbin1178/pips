@@ -53,7 +53,7 @@ Workspace 与独立 `PIPS_HOME`；命令不得触及真实仓库、真实凭据�
 - 前置条件：一个已信任的 `Stop` handler，把 stdin 原样写入日志文件。
 - 隔离夹具：独立 `PIPS_HOME`；handler 与日志都在其中。
 - 步骤：启动一个 `persistent` watch，触发一次普通回合结束，读取 handler 日志中的 `background_tasks`；再停止该 watch，重复一次。
-- 预期证据：运行中存在 `{"id":"monitor-1","type":"monitor","status":"running","description":"<被监视命令>"}`，且没有 `command` 字段；超过 1000 字符的字段被裁剪并以 `… [+N chars]` 结尾；没有在运行的 watch 时，`background_tasks` 不出现在负载里。
+- 预期证据：运行中存在 `{"id":"monitor-1-<随机 token>","type":"monitor","status":"running","description":"<被监视命令>"}`，且没有 `command` 字段；超过 1000 字符的字段被裁剪并以 `… [+N chars]` 结尾；没有在运行的 watch 时，`background_tasks` 不出现在负载里。
 - 通过条件：条目形状、类型、状态与裁剪标记都与契约一致。
 - 失败条件：携带 `command`、在无运行 watch 时仍出现空数组、或文本未按 1000 字符裁剪。
 - 清理/回滚：停止全部 watch；删除夹具 `PIPS_HOME`。

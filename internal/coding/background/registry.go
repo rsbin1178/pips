@@ -8,6 +8,8 @@ package background
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"slices"
 	"strconv"
@@ -158,10 +160,14 @@ type Registry struct {
 	output   int64
 	tail     int64
 	now      func() time.Time
-	next     uint64
-	tasks    map[string]*task
-	closed   bool
-	wg       sync.WaitGroup
+	// token makes this registry's task ids unique across processes. The counter
+	// alone restarts at 1 with every process and can collide with an id already
+	// named in the transcript.
+	token  string
+	next   uint64
+	tasks  map[string]*task
+	closed bool
+	wg     sync.WaitGroup
 }
 
 // NewRegistry constructs one Runtime's background registry.
@@ -182,8 +188,22 @@ func NewRegistry(options Options) (*Registry, error) {
 		output:   options.OutputBytes,
 		tail:     options.TailBytes,
 		now:      now,
+		token:    newRegistryToken(),
 		tasks:    make(map[string]*task),
 	}, nil
+}
+
+// newRegistryToken returns the short random hex token that separates one
+// registry's ids from another's, in this process or any other. A registry that
+// cannot read the system randomness source falls back to its start time, which
+// still separates two live processes.
+func newRegistryToken() string {
+	var raw [4]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 16)
+	}
+
+	return hex.EncodeToString(raw[:])
 }
 
 // Launch registers one task and starts its process. It returns the task's
@@ -206,7 +226,7 @@ func (r *Registry) Launch(parent context.Context, request Request) (Snapshot, er
 	}
 
 	r.next++
-	id := string(request.Kind) + "-" + strconv.FormatUint(r.next, 10)
+	id := string(request.Kind) + "-" + strconv.FormatUint(r.next, 10) + "-" + r.token
 
 	if !validTaskID(id) {
 		r.mu.Unlock()

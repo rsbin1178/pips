@@ -439,6 +439,34 @@ func TestLoadSubagentStructuredResults(t *testing.T) {
 	assert.Equal(t, config.SourceDefault, source.Kind)
 }
 
+// TestLoadTodoGate pins the opt-in gate's key: it defaults to off, and a config
+// file that sets it wins and reports its own provenance.
+func TestLoadTodoGate(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, "todo_gate = true\n")
+	result, err := config.Load(config.LoadOptions{ConfigFile: path})
+	require.NoError(t, err)
+	assert.True(t, result.Config.TodoGate)
+	source, ok := result.Config.Source(config.FieldTodoGate)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceConfigFile, source.Kind)
+	assert.Equal(t, path, source.Detail)
+
+	// With no key the gate stays off with default provenance.
+	empty := filepath.Join(t.TempDir(), "empty.toml")
+	writeFile(t, empty, "[subagents]\nmax_concurrent = 2\n")
+	kept, err := config.Load(config.LoadOptions{ConfigFile: empty})
+	require.NoError(t, err)
+	assert.False(t, kept.Config.TodoGate)
+	source, ok = kept.Config.Source(config.FieldTodoGate)
+	require.True(t, ok)
+	assert.Equal(t, config.SourceDefault, source.Kind)
+
+	assert.Contains(t, config.Fields(), config.FieldTodoGate)
+}
+
 func TestLoadSubagentLimitBehaviorDefaultsAndSources(t *testing.T) {
 	t.Parallel()
 

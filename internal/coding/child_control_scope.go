@@ -67,8 +67,10 @@ type childScopeFactory struct {
 	// one conversation the Runtime owns.
 	backgroundTasks *background.Registry
 	// killBackground is the one control operation a background-task stop routes
-	// through, shared with the conversation's own stop Tool.
-	killBackground tools.KillBackground
+	// through, shared with the conversation's own stop Tool, and
+	// knownBackgroundIDs is the enumeration a not-found stop names.
+	killBackground     tools.KillBackground
+	knownBackgroundIDs tools.KnownBackgroundIDs
 	// executorConfig and gitConfig let a child that runs outside the parent
 	// workspace build its own process executor and Git inspector there.
 	executorConfig execution.ExecutorConfig
@@ -508,6 +510,12 @@ func (s *childControlScope) buildCatalog(
 		localOptions = append(localOptions, tools.WithControlledMonitor(monitor))
 		if s.factory.killBackground != nil {
 			localOptions = append(localOptions, tools.WithKillBackground(s.factory.killBackground))
+		}
+		if s.factory.knownBackgroundIDs != nil {
+			localOptions = append(
+				localOptions,
+				tools.WithKnownBackgroundIDs(s.factory.knownBackgroundIDs),
+			)
 		}
 	}
 	local, err := tools.NewCatalog(s.factory.tree, s.factory.toolLimits, localOptions...)

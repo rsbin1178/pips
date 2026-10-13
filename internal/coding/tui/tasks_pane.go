@@ -15,6 +15,7 @@ import (
 	"github.com/rsbin1178/pips/internal/coding"
 	"github.com/rsbin1178/pips/internal/coding/background"
 	"github.com/rsbin1178/pips/internal/coding/subagent"
+	"github.com/rsbin1178/pips/internal/coding/tasklist"
 )
 
 // tasksPaneGroup is one collapsible section of the tasks pane. The declaration
@@ -30,11 +31,11 @@ const (
 	tasksPaneGroupCount
 )
 
-// tasksPaneGroupLabels is the section vocabulary in display order. Two groups
-// have a pips source today: Subagents projects the session's children, and
-// Watchers projects its registered background tasks. pips runs no workflows and
-// keeps no list of one-shot background commands, so those contribute no header
-// and no rows.
+// tasksPaneGroupLabels is the section vocabulary in display order. Three groups
+// have a pips source today: Subagents projects the session's children, Tasks
+// projects the task plan, and Watchers projects its registered background tasks.
+// pips runs no workflows and keeps no list of one-shot background commands, so
+// those contribute no header and no rows.
 var tasksPaneGroupLabels = [tasksPaneGroupCount]string{
 	"Workflows", "Subagents", "Tasks", "Watchers",
 }
@@ -76,6 +77,11 @@ type tasksPaneRow struct {
 	// one is set, and it is what the row's two actions address.
 	childID string
 	taskID  string
+	// plan marks a row projected from the task plan rather than a child or a
+	// background task. A plan row addresses no action, and planStatus is the
+	// step's own status.
+	plan       bool
+	planStatus tasklist.Status
 	// tag labels a row whose source is not a child, so a watch is never read as
 	// one.
 	tag        string
@@ -189,6 +195,84 @@ func (m *Model) observeRunningRows(now time.Time) int {
 	return running
 }
 
+// stillRunningKind is one count and its noun in the "… still running" cue.
+type stillRunningKind struct {
+	count int
+	noun  string
+}
+
+// formatStillRunning is the single owner of the cue's format mechanics: only
+// non-zero kinds, plain-`s` plurals, " · " separators, and the " still running"
+// suffix, matching the reference's format_still_running. Keeping the writer in
+// one place is what stops the status line's idle cue and any later surface that
+// shows the same counts from drifting.
+func formatStillRunning(kinds []stillRunningKind) string {
+	var label strings.Builder
+
+	for _, kind := range kinds {
+		if kind.count == 0 {
+			continue
+		}
+		if label.Len() > 0 {
+			label.WriteString(" · ")
+		}
+		label.WriteString(strconv.Itoa(kind.count))
+		label.WriteString(" ")
+		label.WriteString(kind.noun)
+		if kind.count != 1 {
+			label.WriteString("s")
+		}
+	}
+	if label.Len() == 0 {
+		return ""
+	}
+	label.WriteString(" still running")
+
+	return label.String()
+}
+
+// runningWorkCounts counts the live kinds the cue and the pane both read:
+// background tasks (pips' Watchers, which are monitors) and running children
+// (Subagents). The reference's cue also lists commands, loops, and workflows;
+// pips runs none of those, so they are absent. The child predicate matches the
+// pane's running rows, so the two surfaces cannot disagree about what runs.
+func (m *Model) runningWorkCounts() (monitors, subagents int) {
+	for _, task := range m.state.BackgroundTasks {
+		if task.ID != "" && !task.Completed {
+			monitors++
+		}
+	}
+
+	for _, child := range m.state.Subagents {
+		if child.ChildSessionID == "" {
+			continue
+		}
+		if child.State == subagent.StateCreated || child.State == subagent.StateRunning {
+			subagents++
+		}
+	}
+
+	return monitors, subagents
+}
+
+// stillRunningCue renders the count-led cue the reference shows while its agent
+// is idle (or parked on a sendable wait, which pips has none of) and something
+// is still running. It stays empty while a turn runs and while the runtime waits
+// for the user, so the cue never competes with the live status. It is
+// deliberately count-led, so it still reads as unfinished work under a settled
+// transcript.
+func (m *Model) stillRunningCue() string {
+	if m.state.Phase != coding.PhaseIdle {
+		return ""
+	}
+	monitors, subagents := m.runningWorkCounts()
+
+	return formatStillRunning([]stillRunningKind{
+		{count: monitors, noun: "monitor"},
+		{count: subagents, noun: "subagent"},
+	})
+}
+
 // applyTasksPaneVisibility opens the pane when a child starts and closes it with
 // the last one, unless the reader opened it themselves, focused it, or asked for
 // the finished rows.
@@ -281,11 +365,12 @@ func (m *Model) tasksPaneRunning() bool {
 	return false
 }
 
-// tasksPaneRows projects every row the pane can show: the session's children and
-// its background tasks, in the section order, running rows first. A finished row
-// is listed only when the reader asked for finished rows.
+// tasksPaneRows projects every row the pane can show: the session's children,
+// its background tasks, and the projected task plan, in the section order,
+// running rows first. A finished row is listed only when the reader asked for
+// finished rows.
 func (m *Model) tasksPaneRows() []tasksPaneRow {
-	rows := make([]tasksPaneRow, 0, len(m.state.Subagents)+len(m.state.BackgroundTasks))
+	rows := make([]tasksPaneRow, 0, len(m.state.Subagents)+len(m.state.BackgroundTasks)+len(m.state.Tasks.Items))
 	for _, child := range m.state.Subagents {
 		if child.ChildSessionID == "" {
 			continue
@@ -319,7 +404,67 @@ func (m *Model) tasksPaneRows() []tasksPaneRow {
 		return rows[left].label < rows[right].label
 	})
 
+	// Plan rows keep the plan's own order, so they are appended after the sort
+	// rather than alphabetized like the live rows.
+	for _, item := range m.state.Tasks.Items {
+		if row, ok := tasksPanePlanRow(item, m.tasksPane.showDone); ok {
+			rows = append(rows, row)
+		}
+	}
+
 	return rows
+}
+
+// tasksPanePlanRow projects one plan item into a row. A finished step follows
+// the same finished-rows rule as the other groups: it is listed only when the
+// reader asked for finished rows, so a fully finished plan paints no section at
+// all until then.
+func tasksPanePlanRow(item tasklist.Item, showDone bool) (tasksPaneRow, bool) {
+	label := oneLineToolText(item.Step)
+	if label == "" {
+		return tasksPaneRow{}, false
+	}
+	finished := item.Status == tasklist.StatusCompleted || item.Status == tasklist.StatusCancelled
+	if finished && !showDone {
+		return tasksPaneRow{}, false
+	}
+
+	return tasksPaneRow{
+		plan:       true,
+		planStatus: item.Status,
+		label:      label,
+		activity:   planItemStatusText(item.Status),
+		state:      planItemState(item.Status),
+	}, true
+}
+
+// planItemStatusText names one plan item's status for the pane's meta column.
+func planItemStatusText(status tasklist.Status) string {
+	switch status {
+	case tasklist.StatusInProgress:
+		return "in progress"
+	case tasklist.StatusCompleted:
+		return "completed"
+	case tasklist.StatusCancelled:
+		return "cancelled"
+	default:
+		return "pending"
+	}
+}
+
+// planItemState maps a plan status onto the child states the pane already tones
+// rows by, so a plan row reuses the shared palette.
+func planItemState(status tasklist.Status) subagent.State {
+	switch status {
+	case tasklist.StatusInProgress:
+		return subagent.StateRunning
+	case tasklist.StatusCompleted:
+		return subagent.StateSucceeded
+	case tasklist.StatusCancelled:
+		return subagent.StateCanceled
+	default:
+		return subagent.StateSucceeded
+	}
 }
 
 // tasksPaneBackgroundRow projects one registered background task into a row. A
@@ -405,13 +550,17 @@ func tasksPaneRowLabel(child coding.SubagentState) string {
 }
 
 // tasksPaneGroupOf reports the section a row belongs to. A child is a
-// Subagent; a session-registered background task is a Watcher.
+// Subagent, a session-registered background task is a Watcher, and a projected
+// plan item is a Task.
 func tasksPaneGroupOf(row tasksPaneRow) tasksPaneGroup {
-	if row.taskID != "" {
+	switch {
+	case row.plan:
+		return tasksPaneTasks
+	case row.taskID != "":
 		return tasksPaneWatchers
+	default:
+		return tasksPaneSubagents
 	}
-
-	return tasksPaneSubagents
 }
 
 // tasksPaneEntries inserts a header before each non-empty group and numbers the
@@ -729,8 +878,14 @@ func (m *Model) tasksPaneRowLine(
 	if entry.row.running {
 		kill = tasksPaneKillLabel
 	}
+	// A plan row addresses no action, so it carries neither control; the two
+	// controls are what the hit map resolves a click against.
+	inspect := ""
+	if !entry.row.plan {
+		inspect = tasksPaneInspectLabel
+	}
 	meta := strings.TrimSpace(strings.Join(
-		nonEmpty(m.tasksPaneRowMeta(entry.row, now), kill, tasksPaneInspectLabel), "  ",
+		nonEmpty(m.tasksPaneRowMeta(entry.row, now), kill, inspect), "  ",
 	))
 
 	// The label gives up whatever the meta needs, so the two controls always sit
@@ -745,9 +900,9 @@ func (m *Model) tasksPaneRowLine(
 	line := ansi.Truncate(left+padding+meta, width, "…")
 
 	// The controls are only where they appear to be when the row painted whole.
-	if ansi.StringWidth(meta) <= width {
+	if ansi.StringWidth(meta) <= width && inspect != "" {
 		hit.inspectEnd = width
-		hit.inspectStart = max(0, width-ansi.StringWidth(tasksPaneInspectLabel))
+		hit.inspectStart = max(0, width-ansi.StringWidth(inspect))
 		if kill != "" {
 			hit.killEnd = max(0, hit.inspectStart-1)
 			hit.killStart = max(0, hit.killEnd-ansi.StringWidth(tasksPaneKillLabel))
@@ -785,8 +940,13 @@ func (m *Model) tasksPaneRowTone(row tasksPaneRow) color.Color {
 }
 
 // tasksPaneRowIcon is the row's state mark: the shared spinner while the child
-// runs, and a settled mark once it stops.
+// runs, and a settled mark once it stops. A plan row carries the checklist
+// glyph its own status uses, so the pane and the plan card read alike.
 func (m *Model) tasksPaneRowIcon(row tasksPaneRow) string {
+	if row.plan {
+		return taskListGlyph(row.planStatus)
+	}
+
 	switch state := subagentToolState(row.state); state {
 	case toolStateSucceeded, toolStateFailed, toolStateInterrupted:
 		return toolActivityGlyph(state)
@@ -800,6 +960,10 @@ func (m *Model) tasksPaneRowIcon(row tasksPaneRow) string {
 func (m *Model) tasksPaneRowMeta(row tasksPaneRow, now time.Time) string {
 	elapsed := formatInteractionDuration(row.durationMS)
 	switch {
+	case row.plan:
+		// A plan step carries no clock: its meta is its status alone, so the
+		// pane never fabricates an elapsed time for it.
+		elapsed = ""
 	case !row.startedAt.IsZero():
 		// A background task carries its own start, so its clock does not depend
 		// on when this process first observed it.
@@ -939,10 +1103,11 @@ func (m *Model) tasksPaneSelection() (tasksPaneRow, bool) {
 
 // inspectTasksPaneSelection opens the selected row's bounded detail. A child
 // opens its transcript through the one child route; a background task opens the
-// same detail surface a tool call does, because a watch has no transcript.
+// same detail surface a tool call does, because a watch has no transcript; a
+// plan row opens nothing.
 func (m *Model) inspectTasksPaneSelection() tea.Cmd {
 	row, ok := m.tasksPaneSelection()
-	if !ok {
+	if !ok || row.plan {
 		return nil
 	}
 	if row.taskID != "" {
@@ -953,10 +1118,11 @@ func (m *Model) inspectTasksPaneSelection() tea.Cmd {
 }
 
 // killTasksPaneSelection stops the selected row through the one control surface
-// its kind uses. A row that is not running affords nothing.
+// its kind uses. A row that is not running affords nothing, and a plan row
+// affords no stop.
 func (m *Model) killTasksPaneSelection() tea.Cmd {
 	row, ok := m.tasksPaneSelection()
-	if !ok || !row.running || m.route.controlling {
+	if !ok || !row.running || row.plan || m.route.controlling {
 		return nil
 	}
 	if row.taskID != "" {
@@ -1047,6 +1213,14 @@ func (m *Model) tasksPaneHitCommand(hit tasksPaneHitRow, column int) (tea.Cmd, b
 		return nil, false
 	}
 	row := rows[hit.index]
+
+	// A plan row affords neither control, so a click anywhere on it selects it.
+	if row.plan {
+		m.tasksPane.cursor = hit.index
+		m.tasksPane.focused = true
+
+		return redrawFrame(), true
+	}
 
 	if inColumnSpan(column, hit.killStart, hit.killEnd) && row.running {
 		if row.taskID != "" {

@@ -155,7 +155,8 @@ func TestRegistryStreamsOneBatchEventPerTickAndOneCompletion(t *testing.T) {
 	fixture := newRegistryFixture(t, observer, 1<<20, 1024)
 
 	snapshot := launchMonitor(t, fixture.registry, writeStart(t, "line-1", "line-2", ""), nil)
-	assert.Equal(t, "monitor-1", snapshot.ID)
+	assert.True(t, strings.HasPrefix(snapshot.ID, string(background.KindMonitor)+"-1-"))
+	assert.Greater(t, len(snapshot.ID), len(string(background.KindMonitor)+"-1-"), "the id carries a unique suffix")
 	assert.Equal(t, background.KindMonitor, snapshot.Kind)
 	assert.Equal(t, "deploy", snapshot.Command)
 	assert.Equal(t, "deploy log", snapshot.Description)
@@ -166,10 +167,10 @@ func TestRegistryStreamsOneBatchEventPerTickAndOneCompletion(t *testing.T) {
 	events, _ := observer.reported()
 	require.Len(t, events, 1)
 	assert.Equal(t, "line-1\nline-2", events[0].Text)
-	assert.Equal(t, "monitor-1", events[0].TaskID)
+	assert.Equal(t, snapshot.ID, events[0].TaskID)
 	assert.Equal(
 		t,
-		"<monitor-event description=\"deploy log\" task_id=\"monitor-1\">\nline-1\nline-2\n</monitor-event>",
+		"<monitor-event description=\"deploy log\" task_id=\""+snapshot.ID+"\">\nline-1\nline-2\n</monitor-event>",
 		events[0].Wrapped,
 	)
 
@@ -181,10 +182,31 @@ func TestRegistryStreamsOneBatchEventPerTickAndOneCompletion(t *testing.T) {
 	assert.Equal(t, "line-1\nline-2", completion.Tail)
 
 	// The projection is stable after the task ends.
-	stored, ok := fixture.registry.Snapshot("monitor-1")
+	stored, ok := fixture.registry.Snapshot(snapshot.ID)
 	require.True(t, ok)
 	assert.True(t, stored.Completed)
 	assert.Len(t, fixture.registry.List(), 1)
+}
+
+// TestRegistryTaskIDsAreUniqueAcrossRegistries pins the identity fix: the
+// process-local counter alone restarts at 1 in every process, so the registry
+// mints an id with a per-registry token and two registries never collide.
+func TestRegistryTaskIDsAreUniqueAcrossRegistries(t *testing.T) {
+	t.Parallel()
+
+	first := newRegistryFixture(t, &recorder{}, 1<<20, 1024)
+	second := newRegistryFixture(t, &recorder{}, 1<<20, 1024)
+
+	one := launchMonitor(t, first.registry, writeStart(t, "line-1"), nil)
+	two := launchMonitor(t, second.registry, writeStart(t, "line-1"), nil)
+
+	assert.NotEqual(t, one.ID, two.ID, "the same sequence in two registries mints different ids")
+	assert.NotEqual(
+		t,
+		strings.TrimPrefix(one.ID, string(background.KindMonitor)+"-1-"),
+		strings.TrimPrefix(two.ID, string(background.KindMonitor)+"-1-"),
+	)
+	assert.True(t, strings.HasPrefix(one.ID, string(background.KindMonitor)+"-1-"))
 }
 
 func TestRegistryInlinesOnlyABoundedOutputTail(t *testing.T) {
@@ -214,10 +236,10 @@ func TestRegistryWritesTheOutputFileInItsDirectory(t *testing.T) {
 	observer := &recorder{}
 	fixture := newRegistryFixture(t, observer, 1<<20, 1024)
 
-	launchMonitor(t, fixture.registry, writeStart(t, "line-1"), nil)
+	snapshot := launchMonitor(t, fixture.registry, writeStart(t, "line-1"), nil)
 	waitForCompletion(t, observer, 1)
 
-	content, err := os.ReadFile(filepath.Join(fixture.dir, "monitor-1.log"))
+	content, err := os.ReadFile(filepath.Join(fixture.dir, snapshot.ID+".log"))
 	require.NoError(t, err)
 	assert.Equal(t, "line-1\n", string(content))
 }
@@ -228,10 +250,10 @@ func TestRegistryBoundsTheOutputFileIndependentlyOfTheEvent(t *testing.T) {
 	observer := &recorder{}
 	fixture := newRegistryFixture(t, observer, 64, 1024)
 
-	launchMonitor(t, fixture.registry, writeStart(t, strings.Repeat("x", 4096)), nil)
+	snapshot := launchMonitor(t, fixture.registry, writeStart(t, strings.Repeat("x", 4096)), nil)
 	completions := waitForCompletion(t, observer, 1)
 
-	content, err := os.ReadFile(filepath.Join(fixture.dir, "monitor-1.log"))
+	content, err := os.ReadFile(filepath.Join(fixture.dir, snapshot.ID+".log"))
 	require.NoError(t, err)
 	assert.Equal(t, strings.Repeat("x", 64), string(content))
 

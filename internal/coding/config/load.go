@@ -171,6 +171,7 @@ type fileConfig struct {
 	ToolSearchName        *string                    `toml:"tool_search_name"`
 	DynamicSubagents      *bool                      `toml:"dynamic_subagents"`
 	ActiveAgentMessages   *bool                      `toml:"active_agent_messages"`
+	TodoGate              *bool                      `toml:"todo_gate"`
 	Mode                  *string                    `toml:"mode"`
 	TUI                   *fileTUI                   `toml:"tui"`
 	Sandbox               *string                    `toml:"sandbox"`
@@ -775,6 +776,7 @@ func decodeLayer(value fileConfig) (fileLayer, error) {
 	}
 	layer.patch.DynamicSubagents = subagentsEnabled
 	layer.patch.ActiveAgentMessages = value.ActiveAgentMessages
+	layer.patch.TodoGate = value.TodoGate
 
 	if value.Mode != nil {
 		mode, err := ParseOperatingMode(*value.Mode)
@@ -1344,6 +1346,7 @@ func validatePatch(patch Patch) (Patch, error) {
 	}
 	result.DynamicSubagents = subagentsEnabled
 	result.ActiveAgentMessages = patch.ActiveAgentMessages
+	result.TodoGate = patch.TodoGate
 	if patch.Mode != nil {
 		mode, err := ParseOperatingMode(string(*patch.Mode))
 		if err != nil {

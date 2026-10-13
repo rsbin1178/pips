@@ -1949,6 +1949,12 @@ func (m *Model) statusExtras() []string {
 	if m.queued > 0 {
 		extras = append(extras, fmt.Sprintf("%d queued", m.queued))
 	}
+	// While the runtime is idle and something is still running, the cue stands
+	// in for the tasks pane the automatic rule may have closed (or that a short
+	// terminal never paints).
+	if cue := m.stillRunningCue(); cue != "" {
+		extras = append(extras, cue)
+	}
 	if m.exitArmed {
 		extras = append(extras, "press Ctrl+C again to quit")
 	}
