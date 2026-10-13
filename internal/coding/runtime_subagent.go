@@ -21,6 +21,11 @@ type childProjection struct {
 	projector     *agentProjector
 	interactionID string
 	pendingInput  []ai.Message
+	// taskPublished records that the child's own task already reached its
+	// projection as the opening user message. Every child agent event carries the
+	// task, so without this marker a child that runs a second turn would publish
+	// its prompt again at that turn boundary.
+	taskPublished bool
 	finished      bool
 }
 
@@ -193,7 +198,7 @@ func (r *Runtime) observeChildAgentEvent(ctx context.Context, childEvent subagen
 	if !exists || child.finished {
 		return fmt.Errorf("%w: child projection is unavailable", ErrEventProtocol)
 	}
-	if len(child.pendingInput) == 0 && childEvent.Task != "" {
+	if !child.taskPublished && len(child.pendingInput) == 0 && childEvent.Task != "" {
 		child.pendingInput = []ai.Message{ai.UserText(childEvent.Task)}
 	}
 
@@ -221,6 +226,10 @@ func (r *Runtime) observeChildAgentEvent(ctx context.Context, childEvent subagen
 		); err != nil {
 			return err
 		}
+		// The task is the child's opening user message, and this flush is the one
+		// place it is published. Marking it here keeps every later turn boundary
+		// from publishing it again.
+		child.taskPublished = true
 	}
 
 	return nil
