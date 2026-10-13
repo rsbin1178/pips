@@ -491,3 +491,28 @@ func temporaryFiles(t *testing.T, root string) []string {
 
 	return matches
 }
+
+// TestTaskCatalogDescribesCancelledAndMeta pins the tool's declared schema: the
+// status description names cancelled and an item carries an optional bounded
+// meta object, while step and status stay the required fields.
+func TestTaskCatalogDescribesCancelledAndMeta(t *testing.T) {
+	t.Parallel()
+
+	value, err := tools.NewTaskCatalog()
+	require.NoError(t, err)
+	snapshot, err := value.Snapshot(t.Context(), catalog.AllowAll("test", catalog.RiskRead))
+	require.NoError(t, err)
+	require.Len(t, snapshot, 1)
+
+	schema := snapshot[0].Decl().InputSchema
+	require.NotNil(t, schema)
+
+	plan := schema.Properties["plan"]
+	require.NotNil(t, plan)
+	require.NotNil(t, plan.Items)
+	assert.Contains(t, plan.Items.Properties, "meta", "meta is described on an item")
+	assert.Equal(t, []string{"step", "status"}, plan.Items.Required, "meta stays optional")
+	assert.Equal(t, []string{"plan"}, schema.Required,
+		"the optional explanation is described but not demanded")
+	assert.Contains(t, plan.Items.Properties["status"].Description, "cancelled")
+}

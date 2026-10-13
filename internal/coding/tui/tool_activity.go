@@ -889,6 +889,8 @@ func taskListGlyph(status tasklist.Status) string {
 		return "✔"
 	case tasklist.StatusInProgress:
 		return "◐"
+	case tasklist.StatusCancelled:
+		return "⊘"
 	case tasklist.StatusPending:
 		return "□"
 	default:

@@ -21,9 +21,11 @@ const (
 	// completion. It mirrors the shell's capture bound: the tail is a bounded
 	// projection, not the whole log.
 	backgroundTailBytes = 24 << 10
-	// backgroundOutputBytes bounds one background task's raw output file. It
-	// matches the shell's output ceiling rather than widening it.
-	backgroundOutputBytes = 16 << 20
+	// backgroundOutputBytes bounds one background task's raw output file. The
+	// registry is monitor-only (KindMonitor is its only kind), so this is the
+	// monitor cap, and it is the reference's monitor cap of 10 MiB rather than
+	// the shell's wider output ceiling.
+	backgroundOutputBytes = 10 << 20
 )
 
 // backgroundOutputDir is where background tasks write their raw output. It is
@@ -185,6 +187,26 @@ func (r *Runtime) InspectBackgroundTask(
 	output, _ := r.backgroundTasks.Tail(taskID, backgroundTailBytes)
 
 	return BackgroundTaskInspection{Task: snapshot, Output: output}, nil
+}
+
+// KnownBackgroundTaskIDs lists the ids the Runtime's background registry still
+// knows, oldest first. It is what a not-found stop names so the model can
+// recover an id it lost. It reads the same registry the kill itself addresses.
+func (r *Runtime) KnownBackgroundTaskIDs(ctx context.Context) []string {
+	if r == nil || r.backgroundTasks == nil || ctx.Err() != nil {
+		return nil
+	}
+
+	snapshots := r.backgroundTasks.List()
+	ids := make([]string, 0, len(snapshots))
+
+	for _, snapshot := range snapshots {
+		if snapshot.ID != "" {
+			ids = append(ids, snapshot.ID)
+		}
+	}
+
+	return ids
 }
 
 // backgroundTaskOutcome classifies one task's projection into the closed,

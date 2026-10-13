@@ -983,6 +983,37 @@ transcript, and it does not enter the conversation's timeline. A conversation-
 initiated wake is attributed to the conversation's own call and does appear on
 the conversation's timeline.
 
+### Task plan and the todo gate
+
+In Agent mode the model keeps a visible plan with `update_plan`, a complete
+replacement of 1 to 64 steps. Each step is a nonblank text of at most 512 bytes
+with a status of `pending`, `in_progress`, `completed`, or `cancelled`; the
+optional explanation is at most 4096 bytes; the whole input is at most 64 KiB.
+At most one step is `in_progress`. A step may also carry an optional `meta`
+object of at most 1 KiB for free-form bookkeeping, which the tool schema
+describes as an optional field alongside the required `step` and `status`. A
+`cancelled` step is terminal — it is how a genuinely blocked step is recorded —
+and it never counts as in progress. The plan is projected from the transcript, so
+it survives a resume, and the tasks pane shows it live under `Tasks`.
+
+Two reminders keep the plan current:
+
+- The **nudge** is on by default. After three turns with no valid `update_plan`
+  call, and at most once every five turns, the turn's runtime reminder tells the
+  model to record or advance the plan. A valid call resets the count, and a
+  compaction resets it too.
+- The **gate** is opt-in with `todo_gate = true`. When it is on and a run ends
+  on a content-only assistant message while the plan still has pending or
+  in-progress steps, the run takes one more turn carrying a reminder that names
+  the affected steps and tells the model to advance the next pending one or mark
+  a genuinely blocked one `cancelled`. It fires at most twice per prompt, and it
+  never fires while a question, an approval, a plan review, or a goal run owns
+  the turn, nor after a lifecycle hook stopped the run.
+
+```toml
+todo_gate = false   # opt-in: one more turn when a plan still has open steps
+```
+
 ### Background watches (`monitor`)
 
 `monitor` starts one long-running shell command and turns each of its stdout
@@ -1013,6 +1044,8 @@ or `read-write` session is never offered the tool; `execute` and `all` are.
 one batch is truncated at 3000 bytes, and the pipeline polls every 200 ms. Line
 and batch truncation walk back to a rune boundary and append a literal
 `...(truncated)`. Empty lines produce nothing. stderr is not an event source.
+The task's own output file is capped at 10 MiB — the monitor cap — and a
+completion inlines at most a 24 KiB tail of it.
 
 **Volume.** A token bucket of 10 events, refilled one every 2 s, decides what is
 delivered. Events beyond it are dropped silently. The first event after a burst
@@ -1046,7 +1079,11 @@ that the task must not be restarted. The start receipt lists any other backgroun
 task still running, so a duplicate watch is visible at launch.
 
 **Stopping one.** `kill_background_task` takes the `task_id` a `monitor` call
-returned and answers `killed`, `already_exited`, or `not_found`. The tasks pane's
+returned and answers `killed`, `already_exited`, or `not_found`. A `not_found`
+answer also names the ids the registry still knows, bounded in count and length,
+so a model that lost an id can recover it. A task id is unique across processes:
+`monitor-<n>-<token>`, where the counter stays readable and a short random token
+keeps a restarted process from reusing an id. The tasks pane's
 kill control calls the same method, so there is one control path. There is no
 task-output tool: the events are the delivery, and a completion inlines its own
 bounded tail instead of promising a poll.
@@ -1455,9 +1492,14 @@ stay authoritative for everything else.
 The tasks pane is the compact strip at the bottom of the frame, below the status
 line, that shows what the session is running. It groups rows into `Workflows`,
 `Subagents`, `Tasks`, and `Watchers` in that order with running rows first, and it
-opens itself when a child subagent starts and closes when the last one stops. Two
-groups have rows in this release: `Subagents` projects the session's children and
-`Watchers` projects its registered background watches. `Ctrl+B` focuses the pane
+opens itself when a child subagent starts and closes when the last one stops. Three
+groups have rows in this release: `Subagents` projects the session's children,
+`Tasks` projects the session's plan from `update_plan`, and `Watchers` projects
+its registered background watches. A plan row carries the step's own checklist
+glyph and status word in the plan's order, and offers neither control because it
+addresses no action; a finished step follows the same finished-rows rule as the
+other groups, so a fully finished plan paints no `Tasks` section until `Ctrl+H`
+turns the finished rows on. `Ctrl+B` focuses the pane
 — revealing it if the automatic rule hid it, and turning the finished rows on
 when nothing is running, so the chord
 always shows what exists — `↑`/`↓` or `j`/`k` move the selection, `Ctrl+H` shows
@@ -1481,7 +1523,11 @@ the frame, so the conversation keeps most of its rows, and a section with more r
 than its share ends with `… +N more` and scrolls with the selection. A pane with
 nothing to list paints nothing at all — there is no empty-state note — and it gives
 the frame's keys back to the composer, so a keystroke after the last child stops
-belongs to what you are typing.
+belongs to what you are typing. Because the pane is hidden on a short frame (under
+12 rows) and closes itself when the last row stops, the status line also carries a
+count-led ` still running` cue while the session is idle with a child or a watch
+still live — for example `1 monitor · 1 subagent still running` — so running work
+is never invisible.
 
 A spawn appears in the parent transcript as one lifecycle line: `Subagent
 running: "…"` while a foreground child works, `Subagent started: "…"` for a

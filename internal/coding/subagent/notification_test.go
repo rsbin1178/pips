@@ -1,6 +1,7 @@
 package subagent
 
 import (
+	"strconv"
 	"testing"
 	"time"
 
@@ -173,6 +174,73 @@ func testCompletion(childID string) Notification {
 		Role: RoleExplore, Outcome: OutcomeSucceeded, Code: "ok",
 		TaskPreview: "inspect runtime", Result: ai.JSON(`{"summary":"located","evidence":[],"unknowns":[]}`),
 		Usage: ai.Usage{InputTokens: 10, OutputTokens: 3}, TerminalAt: time.Now().UTC(),
+	}
+}
+
+// TestNotificationInboxBoundsTheDurableQueue pins the queue bound: the reference
+// drops the oldest pending notification beyond 50, so the durable queue keeps
+// the same bound and the same drop order.
+func TestNotificationInboxBoundsTheDurableQueue(t *testing.T) {
+	t.Parallel()
+
+	parent, err := harness.NewSession(harness.NewMemoryStore("s-parent"))
+	require.NoError(t, err)
+	inbox, err := NewNotificationInbox(parent, "s-parent", DefaultLimits().MaxResultBytes)
+	require.NoError(t, err)
+
+	base := time.Now().UTC()
+	for index := 1; index <= maxPendingMessages+1; index++ {
+		require.NoError(t, inbox.EnqueueMessage(
+			boundedParentMessage(index, base.Add(time.Duration(index)*time.Millisecond)),
+		))
+	}
+
+	messages, err := inbox.PendingMessages()
+	require.NoError(t, err)
+	require.Len(t, messages, maxPendingMessages)
+	assert.Equal(t, boundedParentMessageID(2), messages[0].ID,
+		"the oldest undelivered message is the one dropped")
+	assert.Equal(t, boundedParentMessageID(maxPendingMessages+1), messages[len(messages)-1].ID)
+
+	// The drop is durable: a reopen replays the same queue, and the dropped id
+	// stays known so it can never be re-queued.
+	reopened, err := NewNotificationInbox(parent, "s-parent", DefaultLimits().MaxResultBytes)
+	require.NoError(t, err)
+	reopenedMessages, err := reopened.PendingMessages()
+	require.NoError(t, err)
+	require.Len(t, reopenedMessages, maxPendingMessages)
+	assert.Equal(t, messages[0].ID, reopenedMessages[0].ID)
+
+	known, err := reopened.Contains(boundedParentMessageID(1))
+	require.NoError(t, err)
+	assert.True(t, known)
+
+	// A delivered message never counts against the cap, so the room it frees is
+	// used without dropping a live message.
+	require.NoError(t, inbox.Acknowledge(boundedParentMessageID(2)))
+	require.NoError(t, inbox.EnqueueMessage(
+		boundedParentMessage(maxPendingMessages+2, base.Add(time.Hour)),
+	))
+
+	messages, err = inbox.PendingMessages()
+	require.NoError(t, err)
+	require.Len(t, messages, maxPendingMessages)
+	assert.Equal(t, boundedParentMessageID(3), messages[0].ID,
+		"a delivered message frees the room instead of costing the next-oldest one")
+}
+
+func boundedParentMessageID(index int) string {
+	return ParentMessagePrefix + "bound-" + strconv.Itoa(index)
+}
+
+func boundedParentMessage(index int, at time.Time) ParentMessage {
+	return ParentMessage{
+		ID:        boundedParentMessageID(index),
+		Ownership: Ownership{ParentSessionID: "s-parent"},
+		Kind:      MessageKindBackgroundEvents,
+		TaskID:    "monitor-1",
+		Body:      "event " + strconv.Itoa(index),
+		At:        at,
 	}
 }
 

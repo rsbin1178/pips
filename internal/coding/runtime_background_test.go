@@ -155,18 +155,32 @@ func TestRuntimeStopsAWatchThroughTheModelStopTool(t *testing.T) {
 			tools.MonitorName,
 			`{"command":"sleep 30","description":"watch me","persistent":true}`,
 		),
-		runtimeToolResponse("call-stop", tools.KillBackgroundName, `{"task_id":"monitor-1"}`),
-		runtimeTextResponse("stopped the watch"),
+		runtimeTextResponse("the watch is running"),
 	)
 	runtime := openTestRuntime(t, model)
 
-	events := collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("watch then stop")))
+	events := collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("start the watch")))
+	require.Contains(t, eventTypes(events), EventInteractionCompleted)
+
+	// A task id is unique across processes now, so the stop call is built from
+	// the id this run actually minted rather than a fixed one.
+	rows := runtime.Snapshot().BackgroundTasks
+	require.Len(t, rows, 1)
+	taskID := rows[0].ID
+	require.NotEmpty(t, taskID)
+
+	setRuntimeResponses(model,
+		runtimeToolResponse("call-stop", tools.KillBackgroundName, `{"task_id":"`+taskID+`"}`),
+		runtimeTextResponse("stopped the watch"),
+	)
+
+	events = collectRuntimeEvents(t, runtime.Prompt(t.Context(), ai.UserText("stop it")))
 	require.Contains(t, eventTypes(events), EventInteractionCompleted)
 
 	requests := model.Requests()
-	require.Len(t, requests, 3)
-	assert.Contains(t, toolResultText(requests[1], "call-monitor"), `"task_id":"monitor-1"`)
-	assert.Contains(t, toolResultText(requests[2], "call-stop"), `"outcome":"killed"`)
+	require.Len(t, requests, 4)
+	assert.Contains(t, toolResultText(requests[1], "call-monitor"), `"task_id":"`+taskID+`"`)
+	assert.Contains(t, toolResultText(requests[3], "call-stop"), `"outcome":"killed"`)
 
 	// The watched command prints nothing, so the one report the observer holds
 	// is the kill's terminal completion.
@@ -174,10 +188,10 @@ func TestRuntimeStopsAWatchThroughTheModelStopTool(t *testing.T) {
 		return runtime.backgroundOutput.observedBackground() >= 1
 	}, 30*time.Second, 10*time.Millisecond)
 
-	stored, found := runtime.backgroundTasks.Snapshot("monitor-1")
+	stored, found := runtime.backgroundTasks.Snapshot(taskID)
 	require.True(t, found)
 	require.Eventually(t, func() bool {
-		current, ok := runtime.backgroundTasks.Snapshot("monitor-1")
+		current, ok := runtime.backgroundTasks.Snapshot(taskID)
 
 		return ok && current.Completed
 	}, 30*time.Second, 10*time.Millisecond)
@@ -189,13 +203,13 @@ func TestRuntimeStopsAWatchThroughTheModelStopTool(t *testing.T) {
 	require.NoError(t, err)
 
 	for _, message := range pending {
-		assert.NotEqual(t, "monitor-1", message.TaskID, "a delivered kill must not wake the model twice")
+		assert.NotEqual(t, taskID, message.TaskID, "a delivered kill must not wake the model twice")
 	}
 
 	// The pane row settles from the same projection the events carry.
 	require.Eventually(t, func() bool {
 		for _, task := range runtime.Snapshot().BackgroundTasks {
-			if task.ID == "monitor-1" {
+			if task.ID == taskID {
 				return task.Completed
 			}
 		}

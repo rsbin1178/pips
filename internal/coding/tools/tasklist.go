@@ -17,10 +17,19 @@ func NewTaskCatalog() (*catalog.Catalog, error) {
 	if err != nil {
 		return nil, fmt.Errorf("coding tools: task schema: %w", err)
 	}
+	// SchemaFor lists every field as required, but the two optional fields are
+	// not: an item's meta, the way the reference's todo meta is, and the
+	// update's own explanation. Both stay described, and the model is demanded
+	// only the fields the contract requires.
+	if plan := schema.Properties["plan"]; plan != nil && plan.Items != nil {
+		plan.Items.Required = []string{"step", "status"}
+	}
+
+	schema.Required = []string{"plan"}
 
 	tool := &taskTool{decl: ai.Tool{
 		Name:        tasklist.ToolName,
-		Description: "Replace the complete task plan and its current progress. Use for non-trivial multi-step work and keep statuses current as work proceeds.",
+		Description: "Replace the complete task plan and its current progress. Use for non-trivial multi-step work and keep statuses current as work proceeds. Mark a genuinely blocked step cancelled instead of leaving it in progress.",
 		InputSchema: schema,
 	}}
 

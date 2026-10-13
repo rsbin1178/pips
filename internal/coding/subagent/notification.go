@@ -52,6 +52,13 @@ const (
 // already bound their own input, so this is the envelope's own ceiling.
 const maxParentMessageBytes = 64 << 10
 
+// maxPendingMessages bounds the durable pending queue of rendered parent
+// messages. The reference drops the oldest beyond MAX_PENDING_NOTIFICATIONS =
+// 50; pips keeps the same bound on its own durable queue. It is the queue's
+// bound only: the in-memory observer buffer keeps its separate bound in
+// runtime_background.go.
+const maxPendingMessages = 50
+
 // ParentMessagePrefix marks every generated parent message id. The prefix keeps
 // the shared queue's id spaces disjoint, so an acknowledgement can tell a
 // completion id from a message id.
@@ -255,11 +262,59 @@ func (i *NotificationInbox) EnqueueMessage(value ParentMessage) error {
 	if _, delivered := state.delivered[value.ID]; delivered {
 		return nil
 	}
+	if err := i.dropOldestPendingLocked(&state); err != nil {
+		return err
+	}
 
 	return i.appendLocked(notificationRecord{
 		Schema: parentMessageSchema, Event: notificationPending, ID: value.ID,
 		Message: &value, Time: time.Now().UTC(),
 	})
+}
+
+// dropOldestPendingLocked makes room for one more pending message by marking the
+// oldest undelivered one delivered, so the queue never exceeds maxPendingMessages.
+// The marker is the queue's own delivered record, written immediately before the
+// append under the same lock and with no new record kind or field, so a reader
+// that observes the new record also observes the drop. The dropped id stays
+// known (and so can never be re-queued), which is what makes the drop
+// observable.
+func (i *NotificationInbox) dropOldestPendingLocked(state *notificationReplay) error {
+	for len(state.pendingMessages) >= maxPendingMessages {
+		oldest, ok := oldestPendingMessage(state.pendingMessages)
+		if !ok {
+			return nil
+		}
+		if err := i.appendLocked(notificationRecord{
+			Schema: parentMessageSchema, Event: notificationDelivered,
+			ID: oldest.ID, Time: time.Now().UTC(),
+		}); err != nil {
+			return err
+		}
+		delete(state.pendingMessages, oldest.ID)
+		delete(state.messages, oldest.ID)
+		state.delivered[oldest.ID] = struct{}{}
+	}
+
+	return nil
+}
+
+// oldestPendingMessage returns the message a bounded queue drops first: the
+// oldest arrival, with the id breaking a tie, matching the order
+// PendingMessages returns.
+func oldestPendingMessage(pending map[string]ParentMessage) (ParentMessage, bool) {
+	var oldest ParentMessage
+
+	found := false
+
+	for _, value := range pending {
+		if !found || value.At.Before(oldest.At) ||
+			(value.At.Equal(oldest.At) && value.ID < oldest.ID) {
+			oldest, found = value, true
+		}
+	}
+
+	return oldest, found
 }
 
 // PendingMessages returns arrival-ordered undelivered parent messages.

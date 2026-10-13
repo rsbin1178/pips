@@ -41,7 +41,12 @@ const (
 	FieldSubagentEnabled Field = "subagents.enabled"
 	// FieldActiveAgentMessages enables model-authored messages to a live or
 	// completed child. It defaults to false.
-	FieldActiveAgentMessages   Field = "active_agent_messages"
+	FieldActiveAgentMessages Field = "active_agent_messages"
+	// FieldTodoGate enables the turn-end todo gate: when a run ends on a
+	// content-only assistant message with pending or in-progress plan items, the
+	// runtime runs one more turn carrying the gate reminder. It defaults to
+	// false, matching the reference's opt-in gate.
+	FieldTodoGate              Field = "todo_gate"
 	FieldSubagentMaxDepth      Field = "subagents.max_depth"
 	FieldSubagentMaxConcurrent Field = "subagents.max_concurrent"
 	// FieldSubagentStructuredResults restores the typed JSON result contract
@@ -82,6 +87,7 @@ var fields = []Field{
 	FieldDynamicSubagents,
 	FieldSubagentEnabled,
 	FieldActiveAgentMessages,
+	FieldTodoGate,
 	FieldSubagentMaxDepth,
 	FieldSubagentMaxConcurrent,
 	FieldSubagentStructuredResults,
@@ -712,7 +718,9 @@ type Config struct {
 	// is off by default: while the gate is closed no messaging Tool is offered
 	// and every delivery is refused rather than dropped.
 	ActiveAgentMessages bool
-	// Subagent holds the parsed `[subagents]` table.
+	// TodoGate enables the turn-end todo gate. It is off by default: the gate
+	// spends an extra inference turn, so it is opt-in, matching the reference.
+	TodoGate              bool
 	Subagent              SubagentConfig
 	Mode                  OperatingMode
 	TUI                   TUIConfig
@@ -750,6 +758,9 @@ type Patch struct {
 	// ActiveAgentMessages opens the child messaging gate. It is env-only and
 	// file-only; no CLI flag selects it.
 	ActiveAgentMessages *bool
+	// TodoGate enables the turn-end todo gate. It is file-only; no CLI flag
+	// selects it.
+	TodoGate *bool
 	// SubagentLimitBehavior overrides the concurrent-cap behavior. It is
 	// env-only; an invalid value falls back to queue.
 	SubagentLimitBehavior *string
@@ -1299,6 +1310,10 @@ func apply(value Config, patch Patch, source Source) Config {
 	if patch.ActiveAgentMessages != nil {
 		value.ActiveAgentMessages = *patch.ActiveAgentMessages
 		value.sources[FieldActiveAgentMessages] = source
+	}
+	if patch.TodoGate != nil {
+		value.TodoGate = *patch.TodoGate
+		value.sources[FieldTodoGate] = source
 	}
 	if patch.SubagentLimitBehavior != nil {
 		value.Subagent.LimitBehavior = *patch.SubagentLimitBehavior

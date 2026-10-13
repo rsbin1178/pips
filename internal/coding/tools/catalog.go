@@ -32,10 +32,11 @@ type PlanFile struct {
 }
 
 type catalogConfig struct {
-	shell   agent.Tool
-	monitor agent.Tool
-	kill    KillBackground
-	plan    *PlanFile
+	shell    agent.Tool
+	monitor  agent.Tool
+	kill     KillBackground
+	knownIDs KnownBackgroundIDs
+	plan     *PlanFile
 }
 
 // WithPlanFile admits the plan-mode file as an additional patch target while
@@ -121,6 +122,26 @@ func WithKillBackground(kill KillBackground) CatalogOption {
 	}
 }
 
+// WithKnownBackgroundIDs adds the enumeration a not-found stop names, so the
+// model can recover an id it lost. A catalog built without it reports a bare
+// not-found sentence, which is what a caller that keeps no id list still
+// wants.
+func WithKnownBackgroundIDs(known KnownBackgroundIDs) CatalogOption {
+	return func(cfg *catalogConfig) error {
+		if known == nil {
+			return errors.New("coding tools: nil background id source")
+		}
+
+		if cfg.knownIDs != nil {
+			return errors.New("coding tools: background id source already configured")
+		}
+
+		cfg.knownIDs = known
+
+		return nil
+	}
+}
+
 // NewCatalog returns the application-owned coding tool catalog.
 func NewCatalog(
 	tree *workspace.Tree,
@@ -201,7 +222,7 @@ func NewCatalog(
 
 	if config.kill != nil {
 		entries = append(entries, localEntry(
-			NewKillBackgroundTool(config.kill),
+			NewKillBackgroundTool(config.kill, config.knownIDs),
 			catalog.RiskPrivileged,
 			"process",
 			"monitor",
