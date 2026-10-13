@@ -31,6 +31,11 @@ type toolDetailView struct {
 	title   string
 	callIDs []string
 	rows    []toolDetailRow
+	// watchTaskID and watchRunning identify a page that shows a background
+	// watch rather than a Tool call. They are what lets the route re-read a
+	// running watch's output and follow its tail while it streams.
+	watchTaskID  string
+	watchRunning bool
 }
 
 // text renders the plain, unwrapped detail body. Tests and NO_COLOR parity

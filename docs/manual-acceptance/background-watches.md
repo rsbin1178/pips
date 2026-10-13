@@ -40,7 +40,7 @@ Workspace 与独立 `PIPS_HOME`；命令不得触及真实仓库、真实凭据�
 - 前置条件：同 MA-WATCH-001；交互终端；终端支持鼠标上报。
 - 隔离夹具：一个 `persistent: true` 的 watch（例如 `sleep 600`），不产生任何输出。
 - 步骤：要求模型启动该 watch，随后要求它调用 `kill_background_task` 并记录结果；再启动第二个 watch，按 `Ctrl+B` 聚焦 tasks pane，确认它出现在 `Watchers` 分组并标着 `Monitor`，按 `x` 停止、按 `Enter` 打开详情。
-- 预期证据：模型侧结果是 `killed`（或对该 id 而言 `already_exited`、`not_found`）；每个 watch 的终止只产生一条模型可见完成，且模型自己 kill 的那次不会再被额外唤醒；tasks pane 行显示描述与自身耗时、运行态有 spinner、两个控制 `[✗]`/`[↗]` 可点；详情视图只含描述、状态、耗时与有界输出尾部。
+- 预期证据：模型侧结果是 `killed`（或对该 id 而言 `already_exited`、`not_found`）；每个 watch 的终止只产生一条模型可见完成，且模型自己 kill 的那次不会再被额外唤醒；tasks pane 行显示描述与自身耗时、运行态有 spinner、两个控制 `[✗]`/`[↗]` 可点；详情页是整宽容器（无边框、无 `[✗]`）：描述与状态、`$ command` 前言、有界输出尾部；运行中的 watch 打开时停在尾部并随新输出刷新，向上滚动后保持阅读位置，`Esc` 关闭返回对话。
 - 通过条件：一条控制路径生效；模型 kill 不产生第二次唤醒；pane 的 kill 与 inspect 都经同一控制方法。
 - 失败条件：模型无法停止 `persistent` watch、出现两条完成、或 pane 走了第二套控制路径。
 - 清理/回滚：确认两组 watch 都已终止；销毁一次性 Workspace。

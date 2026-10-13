@@ -852,10 +852,10 @@ func (m *Model) subagentRouteContent(state coding.State, detail *subagent.Detail
 		}
 	}
 
-	flow := m.renderTimelineBlocksWithOptions(
-		blocks,
-		timelineRenderOptions{expandToolResults: true},
-	)
+	// The page renders through the conversation's own options, so its rows are the
+	// rows the conversation would show for the same blocks: a Tool result collapses
+	// to its one-line row here exactly as it does there.
+	flow := m.renderTimelineBlocksWithOptions(blocks, timelineRenderOptions{})
 	if flow != "" {
 		return flow
 	}
@@ -1182,65 +1182,40 @@ func (m *Model) updateChildTranscriptKey(key string) (tea.Model, tea.Cmd, bool) 
 	return m, nil, false
 }
 
-// updateSubagentRouteEscapeKey walks the child route's Escape ladder: a Worker
-// clears its draft first, then either kind returns to the Agent list when there
-// is one to return to, and closes to the conversation when there is not.
+// updateSubagentRouteEscapeKey closes the child route to the conversation it
+// belongs to, which is the one move the page's own footer advertises. A Worker
+// clears its draft first: Escape is also the composer's own cancel there, and
+// the route is the only place that draft lives.
 func (m *Model) updateSubagentRouteEscapeKey() (tea.Model, tea.Cmd) {
-	if m.route.childKind == childTeamWorker {
-		if m.composer.Value() != "" {
-			m.composer.Reset()
-			m.setLayout()
-
-			return m, nil
-		}
-		if len(m.route.children) == 0 {
-			return m, m.closeRouteToParent()
-		}
-	}
-	m.stopTeamWorkerRouteSubscription()
-	if len(m.route.children) > 0 {
-		m.returnSubagentRouteToAgentList()
+	if m.route.childKind == childTeamWorker && m.composer.Value() != "" {
+		m.composer.Reset()
+		m.setLayout()
 
 		return m, nil
 	}
 
-	return m, m.openAgentsRoute()
+	return m, m.closeRouteToParent()
 }
 
-// returnSubagentRouteToAgentList hands the frame back to the Agent list while
-// dropping the child view it was showing.
-func (m *Model) returnSubagentRouteToAgentList() {
-	m.route.kind = routeAgents
-	m.route.loading = false
-	m.route.err = nil
-	m.route.offset = 0
-	m.route.childSessionID = ""
-	m.route.childSummary = childSummary{}
-	m.route.detail = nil
-	m.route.childState = nil
-	m.route.refreshing = false
-	m.route.refreshPending = false
-	m.route.refreshErr = nil
-}
-
-// scrollSubagentRoute applies the child transcript's scrolling keys.
+// scrollSubagentRoute applies the child transcript's scrolling keys to the page's
+// reading region, so the keys and the wheel share the region's follow rule.
 func (m *Model) scrollSubagentRoute(key string) {
-	visible := max(1, m.height-3)
-	maximum := m.subagentRouteMaximumOffset()
+	visible := max(1, m.subagentTranscriptBodyHeight())
+	region := &m.childScroll
 
 	switch key {
 	case "up", "k":
-		m.route.offset = max(0, m.route.offset-1)
+		region.scrollBy(-1)
 	case keyDown, "j":
-		m.route.offset = min(maximum, m.route.offset+1)
+		region.scrollBy(1)
 	case keyPageUp:
-		m.route.offset = max(0, m.route.offset-visible)
+		region.scrollBy(-visible)
 	case keyPageDown:
-		m.route.offset = min(maximum, m.route.offset+visible)
+		region.scrollBy(visible)
 	case keyHome:
-		m.route.offset = 0
+		region.gotoTop()
 	case keyEnd:
-		m.route.offset = maximum
+		region.gotoBottom()
 	}
 }
 
@@ -1432,72 +1407,95 @@ func (m *Model) teamWorkerRouteView() tea.View {
 	return view
 }
 
-// subagentTranscriptRouteView draws the read-only child transcript inside a
-// bordered frame. The frame's title row carries the child's identity, its live
-// activity, its elapsed time, and the [✗] close button; the child has no
-// composer, so the frame is the whole surface.
+// subagentTranscriptRouteView draws the read-only child transcript as a
+// full-width page in the same shape a Tool detail page uses: the child's own
+// blocks through the conversation's renderer, then the pinned separator and the
+// row that names the child and the keys this page answers. The page keeps no
+// composer and no frame, so it reads as the conversation it belongs to rather
+// than as a window floating over it, and its region follows the child's newest
+// row until the reader scrolls away from the tail.
 func (m *Model) subagentTranscriptRouteView() tea.View {
 	width := max(1, m.width)
 	height := max(1, m.height)
 
-	innerWidth := m.subagentTranscriptInnerWidth()
-	innerHeight := max(0, frameInnerHeight(height))
+	status := m.subagentRouteStatusLine()
+	footer := m.sessionPickerSeparator(width) + "\n" + status
 	bodyHeight := m.subagentTranscriptBodyHeight()
-	footer := m.subagentRouteStatusLine()
-	footer = truncateHeight(footer, min(innerHeight, lipgloss.Height(footer)))
 
-	title := m.subagentFrameTitle(innerWidth)
-	body := renderSubagentRouteBody(
-		m.subagentRouteBody(), innerWidth, bodyHeight, m.route.offset,
-	)
-	if padding := bodyHeight - lipgloss.Height(body); padding > 0 {
-		body += strings.Repeat("\n", padding)
+	// A terminal too short for both keeps the footer: the hint explains the keys,
+	// while the body is recoverable by resizing.
+	content := status
+	if height > 2 {
+		content = padHeight(m.childTranscriptWindow(bodyHeight), bodyHeight) + "\n" + footer
 	}
 
-	inner := lipgloss.JoinVertical(lipgloss.Left, title, body, footer)
-	m.recordSubagentFrameClose(innerWidth)
-
-	return m.presentationView(m.renderFramed(inner, width))
+	return m.presentationView(truncateHeight(content, height))
 }
 
-// recordSubagentFrameClose stores where the frame painted its close control, in
-// frame coordinates: the title row sits under the top border, and the interior
-// starts one column in from the left border.
-func (m *Model) recordSubagentFrameClose(innerWidth int) {
-	start, end := subagentFrameCloseSpan(innerWidth)
-	m.subagentFrameHit = subagentFrameCloseHit{
-		painted: true, row: 1, start: 1 + start, end: 1 + end,
-	}
-}
-
-// subagentTranscriptInnerWidth and subagentTranscriptBodyHeight report the
-// interior the bordered child frame leaves for the transcript, so the scroll
-// window measures the same region the frame paints. The frame gives up two
-// columns and two rows to its border, and one row to the title line.
-func (m *Model) subagentTranscriptInnerWidth() int {
-	return max(1, frameInnerWidth(max(1, m.width)))
-}
-
+// subagentTranscriptBodyHeight reserves the page's pinned footer — the
+// separator row and the status row — so the transcript never pushes it off the
+// frame.
 func (m *Model) subagentTranscriptBodyHeight() int {
-	innerHeight := max(0, frameInnerHeight(max(1, m.height)))
-	footer := m.subagentRouteStatusLine()
-	footer = truncateHeight(footer, min(innerHeight, lipgloss.Height(footer)))
-	title := m.subagentFrameTitle(m.subagentTranscriptInnerWidth())
-
-	return max(0, innerHeight-lipgloss.Height(title)-lipgloss.Height(footer))
+	return max(0, m.height-2)
 }
 
-// subagentFrameTitle is the frame's first interior row: the child's state glyph,
-// its label, its quoted task, its live activity, and its elapsed time. Parts are
-// dropped from the right as the frame narrows, so the identity survives.
-func (m *Model) subagentFrameTitle(width int) string {
-	width = max(1, width)
+// childTranscriptWindow installs the child page's wrapped rows into its reading
+// region and returns the window it shows. Installing the rows is what makes the
+// page follow: the region pins itself to the newest row whenever the content grows
+// while the reader holds the tail, and leaves a reader who scrolled away where
+// they were.
+func (m *Model) childTranscriptWindow(height int) string {
+	region := &m.childScroll
+	region.setRows(wrapPlainLines(m.subagentRouteBody(), max(1, m.width)))
+	region.setHeight(height)
 
+	return region.visible()
+}
+
+// subagentPageStatusCandidates orders the child page's footer row from the most
+// to the least informative: the child's own metadata, then the keys the page
+// answers. Every step down the ladder shortens a key hint before it drops a
+// metadata part, and the last step drops the metadata entirely, so a narrow
+// terminal loses the model and the clock rather than the identity, the state, or
+// the way out.
+func (m *Model) subagentPageStatusCandidates() []string {
+	hintSets := m.subagentPageHintSets()
+	parts := m.subagentPageStatusParts()
+	separator := "  ·  "
+
+	candidates := make([]string, 0, len(hintSets)*(len(parts)+1))
+	for trim := len(parts); trim >= 0; trim-- {
+		head := strings.Join(parts[:trim], separator)
+		for _, hints := range hintSets {
+			hint := strings.Join(hints, separator)
+			switch {
+			case head == "":
+				candidates = append(candidates, hint)
+			case hint == "":
+				candidates = append(candidates, head)
+			default:
+				candidates = append(candidates, head+separator+hint)
+			}
+		}
+	}
+
+	return candidates
+}
+
+// subagentPageStatusParts is the child page's own metadata, most to least
+// protected: the identity, its state, the task it was handed, the model it runs,
+// its live activity, and its elapsed time.
+func (m *Model) subagentPageStatusParts() []string {
 	summary := m.subagentRouteSummaryState()
-	label := subagentDisplayName(summary.Identity, summary.Role)
-	parts := []string{m.subagentFrameGlyph(summary.State) + " " + label}
+	parts := []string{
+		m.subagentRouteGlyph(summary.State) + " " + subagentPageIdentity(summary),
+		subagentStateLabel(summary.State),
+	}
 	if description := oneLineSubagentTask(summary.TaskPreview); description != "" {
 		parts = append(parts, quotedSubagentDescription(description, 48))
+	}
+	if model := safeDetailText(summary.Model); model != "" {
+		parts = append(parts, model)
 	}
 	if activity := m.childRouteActivityLabel(); activity != "" {
 		parts = append(parts, activity)
@@ -1506,69 +1504,46 @@ func (m *Model) subagentFrameTitle(width int) string {
 		parts = append(parts, formatInteractionDuration(summary.Duration.Milliseconds()))
 	}
 
-	button := subagentFrameClose
-	start, end := subagentFrameCloseSpan(width)
-	available := start
-	text := ""
-	for len(parts) > 0 {
-		candidate := strings.Join(parts, " · ")
-		if ansi.StringWidth(candidate) <= available {
-			text = candidate
+	return parts
+}
 
-			break
+// subagentPageIdentity names the child on its own page: the resolved role or
+// identity, then the kind. A child with no identity yet already reads "child
+// Agent", so the kind is not repeated after it.
+func subagentPageIdentity(summary subagent.Summary) string {
+	name := subagentDisplayName(summary.Identity, summary.Role)
+	if name == genericSubagentLabel {
+		return name
+	}
+
+	return name + " subagent"
+}
+
+// subagentPageHintSets lists the child page's key hints, widest first. An
+// interrupt hint only appears while the child can still be interrupted.
+func (m *Model) subagentPageHintSets() [][]string {
+	terminal := isTerminalSubagent(m.subagentRouteSummaryState().State)
+	hints := func(values ...string) []string {
+		if terminal {
+			values = slices.DeleteFunc(slices.Clone(values), func(value string) bool {
+				return value == subagentHintInterrupt
+			})
 		}
-		parts = parts[:len(parts)-1]
-	}
-	// The frame can be too narrow for anything but the close button; the label
-	// then shares the row and is trimmed to what is left.
-	if text == "" {
-		text = ansi.Truncate(label, available, "…")
+
+		return values
 	}
 
-	row := text + strings.Repeat(" ", max(0, available-ansi.StringWidth(text))) + button
-	row += strings.Repeat(" ", max(0, end-ansi.StringWidth(row)))
-
-	return ansi.Truncate(row, width, "…")
-}
-
-// subagentFrameCloseSpan reports the columns the frame's close control occupies
-// inside the interior, so the renderer and the pointer map cannot disagree about
-// where the button is.
-func subagentFrameCloseSpan(innerWidth int) (int, int) {
-	innerWidth = max(1, innerWidth)
-	start := max(0, innerWidth-ansi.StringWidth(subagentFrameClose)-1)
-
-	return start, min(innerWidth, start+ansi.StringWidth(subagentFrameClose))
-}
-
-// subagentFrameCloseHit records the close control the child frame painted, so a
-// click on it closes through the same function the keys use.
-type subagentFrameCloseHit struct {
-	painted bool
-	row     int
-	start   int
-	end     int
-}
-
-// subagentFrameMouse answers a click on the child frame's close control. It owns
-// only that control: every other gesture belongs to the transcript the frame
-// shows.
-func (m *Model) subagentFrameMouse(message tea.MouseMsg) (tea.Cmd, bool) {
-	click, ok := message.(tea.MouseClickMsg)
-	if !ok || click.Button != tea.MouseLeft || !m.subagentFrameHit.painted {
-		return nil, false
+	return [][]string{
+		hints(detailHintScrollFull, subagentHintClose, subagentHintInterrupt),
+		hints("↑/↓ scroll", subagentHintClose, subagentHintInterrupt),
+		hints(subagentHintClose, subagentHintInterrupt),
+		hints(subagentHintClose),
 	}
-	if click.Y != m.subagentFrameHit.row ||
-		click.X < m.subagentFrameHit.start || click.X >= m.subagentFrameHit.end {
-		return nil, false
-	}
-
-	return m.closeRouteToParent(), true
 }
 
-// subagentFrameGlyph is the title row's state mark: the animated spinner while
+// subagentRouteGlyph is the child page's state mark: the animated spinner while
 // the child runs, and a settled mark once it stops.
-func (m *Model) subagentFrameGlyph(state subagent.State) string {
+func (m *Model) subagentRouteGlyph(state subagent.State) string {
 	switch state {
 	case subagent.StateCreated, subagent.StateRunning:
 		return m.activity.Frame()
@@ -1600,107 +1575,49 @@ func (m *Model) childRouteActivityLabel() string {
 	return status.label + " " + status.detail
 }
 
-// renderFramed wraps one interior block in the child frame's border. The frame's
-// bounding box is exactly the requested width and the interior's height, which
-// is what keeps the route inside the terminal.
-func (m *Model) renderFramed(inner string, width int) string {
-	border := lipgloss.RoundedBorder()
-	if m.options.NoColor {
-		border = lipgloss.NormalBorder()
-	}
-
-	style := lipgloss.NewStyle().
-		Width(max(1, width)).
-		Border(border, true, true, true, true)
-	if !m.options.NoColor {
-		style = style.BorderForeground(paletteFor(m.theme).separator)
-	}
-
-	return style.Render(inner)
-}
-
-// frameInnerWidth and frameInnerHeight report the interior a full-width frame
-// leaves, so a route sizes its content to the border it will be drawn inside.
-func frameInnerWidth(width int) int {
-	return width - 2
-}
-
-func frameInnerHeight(height int) int {
-	return height - 2
-}
-
+// subagentRouteStatusLine is the child route's pinned status row. The Team
+// Worker route keeps its own two-row form — its composer and keys are a
+// different vocabulary — while the read-only child page uses the single
+// candidate row a Tool detail page uses.
 func (m *Model) subagentRouteStatusLine() string {
-	values := []string{"pips", genericSubagentLabel, "loading"}
-	worker := m.route.childKind == childTeamWorker
-
-	if worker {
-		values = m.teamWorkerRouteStatusValues()
-		values = append(values, "Enter message", "Ctrl+J newline", "PgUp/PgDn scroll", "Ctrl+X interrupt", "Esc Lead")
-	} else if m.route.detail != nil {
-		summary := m.route.detail.Summary
-		name := subagentDisplayName(summary.Identity, summary.Role) + " subagent"
-		values = []string{"pips", name}
-		if model := safeDetailText(summary.Model); model != "" {
-			values = append(values, model)
-		}
-		values = append(values, subagentStateLabel(summary.State))
+	if m.route.childKind != childTeamWorker {
+		return m.subagentPageStatusLine()
 	}
+
+	values := m.teamWorkerRouteStatusValues()
+	values = append(values, "Enter message", "Ctrl+J newline", "PgUp/PgDn scroll", "Ctrl+X interrupt", "Esc Lead")
 
 	value := strings.Join(values, "  ·  ")
-	hint := ""
-	if !worker {
-		hint = m.subagentRouteHintLine()
-	}
-
 	if !m.options.NoColor {
-		palette := paletteFor(m.theme)
-		value = lipgloss.NewStyle().Foreground(palette.muted).Render(value)
-		if hint != "" {
-			hint = lipgloss.NewStyle().Foreground(paletteFor(m.theme).muted).Render(hint)
-		}
-	}
-	if hint == "" {
-		return ansi.Truncate(value, max(1, m.width), "…")
+		value = lipgloss.NewStyle().Foreground(paletteFor(m.theme).muted).Render(value)
 	}
 
-	// Hints live on their own footer row so a narrow terminal trims metadata
-	// rather than the keys the reader needs.
-	return ansi.Truncate(value, max(1, m.width), "…") + "\n" +
-		ansi.Truncate(hint, max(1, m.width), "…")
+	return ansi.Truncate(value, max(1, m.width), "…")
 }
 
-// subagentRouteHintLine selects the widest key-hint set that fits the footer
-// row on its own.
-func (m *Model) subagentRouteHintLine() string {
-	hints := [][]string{
-		{detailHintScrollFull, subagentHintClose, subagentHintInterrupt, subagentHintParent, subagentHintAgents},
-		{"↑/↓ scroll", subagentHintClose, subagentHintInterrupt, subagentHintParent, subagentHintAgents},
-		{"↑/↓", subagentHintClose, subagentHintInterrupt, subagentHintParent, subagentHintAgents},
-		{subagentHintClose, subagentHintInterrupt, subagentHintParent, subagentHintAgents},
-		{subagentHintClose, subagentHintParent, subagentHintAgents},
-		{subagentHintParent, subagentHintAgents},
-	}
-	if isTerminalSubagent(m.subagentRouteSummaryState().State) {
-		for index := range hints {
-			hints[index] = slices.DeleteFunc(
-				slices.Clone(hints[index]), func(value string) bool { return value == subagentHintInterrupt },
-			)
-		}
-	}
-
-	separator := "  ·  "
-	for _, hint := range hints {
-		candidate := strings.Join(hint, separator)
+// subagentPageStatusLine renders the child page's footer row: the widest
+// candidate that fits, then the muted tone every footer on this surface uses.
+func (m *Model) subagentPageStatusLine() string {
+	candidates := m.subagentPageStatusCandidates()
+	value := candidates[len(candidates)-1]
+	for _, candidate := range candidates {
 		if ansi.StringWidth(candidate) <= m.width {
-			return candidate
+			value = candidate
+
+			break
 		}
 	}
 
-	return ""
+	value = ansi.Truncate(value, max(1, m.width), "…")
+	if m.options.NoColor {
+		return value
+	}
+
+	return lipgloss.NewStyle().Foreground(paletteFor(m.theme).muted).Render(value)
 }
 
-// subagentRouteFooter is the pinned footer of the child route: the separator,
-// an optional Worker composer, the identity status line, and the key hints.
+// subagentRouteFooter is the pinned footer of the Team Worker route: the
+// separator, the Worker's composer, and its identity status line.
 func (m *Model) subagentRouteFooter(width int) string {
 	separator := strings.Repeat("-", max(1, width))
 	if !m.options.NoColor {
@@ -1727,13 +1644,11 @@ func (m *Model) subagentRouteSummaryState() subagent.Summary {
 	return m.route.detail.Summary
 }
 
+// The child page's key hints. The page has no close control of its own — it is
+// the conversation's own container, so Escape is how it leaves.
 const (
 	subagentHintInterrupt = "Ctrl+C interrupt"
-	subagentHintClose     = "q close"
-	subagentHintParent    = "Ctrl+T parent"
-	subagentHintAgents    = "Esc agents"
-	// subagentFrameClose is the close control the frame's title row carries.
-	subagentFrameClose = "[✗]"
+	subagentHintClose     = "Esc close"
 )
 
 func subagentStateLabel(state subagent.State) string {
@@ -1804,7 +1719,6 @@ func (m *Model) activateChildRoute(request routeOpenRequest) tea.Cmd {
 
 func (m *Model) activateSubagentRoute(request routeOpenRequest) tea.Cmd {
 	activityWasVisible := m.activityClockVisible()
-	m.subagentFrameHit = subagentFrameCloseHit{}
 	m.routeSeq++
 	m.route = routeState{
 		kind: routeChild, loading: true, generation: m.routeSeq,
@@ -1812,6 +1726,9 @@ func (m *Model) activateSubagentRoute(request routeOpenRequest) tea.Cmd {
 		childSessionID: request.childSessionID, children: request.children,
 		query: request.query, cursor: request.cursor,
 	}
+	// Opening a page lands on the child's newest row, which is where a reader who
+	// just asked to see a running child is looking.
+	m.childScroll.gotoBottom()
 	if child, ok := m.childStates[request.childSessionID]; ok {
 		state := child.Clone()
 		m.route.childState = &state
@@ -1880,13 +1797,20 @@ func (m *Model) refreshSubagentRoute() tea.Cmd {
 	return tea.Batch(load, m.startActivityClock(activityWasVisible))
 }
 
+// applySubagentRouteRefresh applies a fresh read to the open child route. The
+// read-only page reads through its scroll region, which re-anchors when the fresh
+// rows are installed, so it needs nothing here. The Team Worker page keeps the
+// private offset its composer shares the screen with, so that offset is clamped
+// against the new height.
+//
 //nolint:nestif // Refresh preserves scroll anchoring while applying two independently available views.
 func (m *Model) applySubagentRouteRefresh(message subagentRouteDataMsg) (tea.Model, tea.Cmd) {
 	m.route.refreshing = false
 	if message.err != nil && !message.hasState && !message.hasDetail {
 		m.route.refreshErr = message.err
 	} else if message.hasState || message.hasDetail {
-		wasAtBottom := m.route.offset >= m.subagentRouteMaximumOffset()
+		worker := m.route.childKind == childTeamWorker
+		wasAtBottom := worker && m.route.offset >= m.subagentRouteMaximumOffset()
 		previousOffset := m.route.offset
 		if message.hasState {
 			state := message.state
@@ -1898,11 +1822,13 @@ func (m *Model) applySubagentRouteRefresh(message subagentRouteDataMsg) (tea.Mod
 		}
 		m.route.refreshErr = nil
 
-		maximum := m.subagentRouteMaximumOffset()
-		if wasAtBottom {
-			m.route.offset = maximum
-		} else {
-			m.route.offset = min(previousOffset, maximum)
+		if worker {
+			maximum := m.subagentRouteMaximumOffset()
+			if wasAtBottom {
+				m.route.offset = maximum
+			} else {
+				m.route.offset = min(previousOffset, maximum)
+			}
 		}
 	}
 
@@ -1915,34 +1841,31 @@ func (m *Model) applySubagentRouteRefresh(message subagentRouteDataMsg) (tea.Mod
 	return m, m.refreshSubagentRoute()
 }
 
+// subagentRouteMaximumOffset is the Team Worker page's last scroll position. The
+// read-only child page moves through its scroll region instead.
 func (m *Model) subagentRouteMaximumOffset() int {
 	content, visible := m.subagentRouteScrollContent()
 
 	return max(0, len(content)-visible)
 }
 
-// subagentRouteScrollContent returns the wrapped body rows and the number that
-// fit, so scrolling counts physical rows rather than logical lines.
+// subagentRouteScrollContent returns the Team Worker page's wrapped body rows and
+// the number that fit, so its scrolling counts physical rows rather than logical
+// lines.
 func (m *Model) subagentRouteScrollContent() ([]string, int) {
 	if m.route.childState == nil {
 		return nil, 1
 	}
 
-	if m.route.childKind == childTeamWorker {
-		visible := max(1, m.height-lipgloss.Height(m.subagentRouteFooter(m.width)))
-		content := m.teamWorkerRouteContent(*m.route.childState, m.route.childSummary)
+	visible := max(1, m.height-lipgloss.Height(m.subagentRouteFooter(m.width)))
+	content := m.teamWorkerRouteContent(*m.route.childState, m.route.childSummary)
 
-		return wrapPlainLines(content, max(1, m.width)), visible
-	}
-
-	// The transcript route wraps inside the bordered frame, so its window is
-	// measured against the interior the frame paints rather than the terminal.
-	return wrapPlainLines(m.subagentRouteBody(), m.subagentTranscriptInnerWidth()),
-		max(1, m.subagentTranscriptBodyHeight())
+	return wrapPlainLines(content, max(1, m.width)), visible
 }
 
-// renderSubagentRouteBody wraps each body row to the frame width with a
-// hanging indent, then windows the requested offset.
+// renderSubagentRouteBody wraps each body row to the page width with a hanging
+// indent, then windows the requested offset. It serves the Team Worker page, whose
+// window follows the private offset its composer shares the screen with.
 func renderSubagentRouteBody(body string, width, height, offset int) string {
 	rows := wrapPlainLines(body, max(1, width))
 	if len(rows) == 0 {
