@@ -87,7 +87,11 @@ func BootstrapState(options BootstrapOptions) (BootstrapResult, error) {
 
 			state.Transcript = append(state.Transcript, cloneMessage(entry.Message))
 			if update, ok := tasklist.FromMessage(entry.Message); ok {
-				state.Tasks = tasklist.FromUpdate(update)
+				// A call that cannot be folded leaves the plan alone, the way a
+				// malformed call is ignored.
+				if folded, foldErr := tasklist.Apply(state.Tasks, update); foldErr == nil {
+					state.Tasks = folded
+				}
 			}
 		case harness.KindModelChange:
 			if !validProvider(entry.Provider) ||

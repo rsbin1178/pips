@@ -258,7 +258,7 @@ func writeModeGuidance(prompt *strings.Builder, options systemPromptOptions, too
 	}
 
 	if _, ok := available[tasklist.ToolName]; ok {
-		prompt.WriteString("- Use update_plan for non-trivial multi-step work. Replace the complete list, keep exactly one step in_progress while work remains, update it as work proceeds, and mark work completed only after verification. Skip it for trivial requests.\n")
+		prompt.WriteString("- Use update_plan for non-trivial multi-step work. Omit merge (or set it false) to replace the complete list, or set merge true and send {id, status} to flip one step without resending it. Keep exactly one step in_progress while work remains, update it as work proceeds, and mark work completed only after verification. Skip it for trivial requests.\n")
 	}
 
 	if _, ok := available[options.ToolSearchName]; ok && options.ToolSearchName != "" {

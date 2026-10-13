@@ -619,6 +619,20 @@ func (r *Runtime) endOperation(operation *runtimeOperation) {
 	r.signalNotifications()
 }
 
+// currentTasks returns a detached copy of the runtime's projected plan, the
+// state the update_plan tool folds a merge onto. It is the same projection the
+// todo gate reads, so the tool's reported totals and the gate cannot disagree.
+func (r *Runtime) currentTasks() tasklist.Snapshot {
+	if r == nil {
+		return tasklist.Snapshot{}
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return r.state.Tasks.Clone()
+}
+
 //nolint:gocyclo,funlen // Snapshot construction preserves catalog and lease rollback boundaries.
 func (r *Runtime) openInteraction(
 	ctx context.Context,
@@ -785,7 +799,7 @@ func (r *Runtime) openInteraction(
 
 	composedCatalogs := []*catalog.Catalog{localCatalog, questionCatalog, skillTools}
 	if started.Mode == ModeAgent {
-		taskCatalog, taskErr := tools.NewTaskCatalog()
+		taskCatalog, taskErr := tools.NewTaskCatalog(r.currentTasks)
 		if taskErr != nil {
 			return nil, taskErr
 		}

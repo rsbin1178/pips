@@ -56,6 +56,36 @@ func freshTurnReminder(request ai.Request) string {
 	return text
 }
 
+// TestRuntimeTaskToolReportsTheFoldedPlan pins the provider wiring: the
+// update_plan Tool folds a merge onto the runtime's own projection, so a
+// status-only flip reports the plan's real totals rather than the call's count.
+func TestRuntimeTaskToolReportsTheFoldedPlan(t *testing.T) {
+	t.Parallel()
+
+	model := newRuntimeModel(
+		runtimeToolResponse("call-replace", tasklist.ToolName,
+			`{"plan":[{"step":"Inspect","status":"in_progress"},{"step":"Implement","status":"pending"}]}`),
+		runtimeTextResponse("done"),
+		runtimeToolResponse("call-merge", tasklist.ToolName,
+			`{"merge":true,"plan":[{"id":"Inspect","status":"completed"}]}`),
+		runtimeTextResponse("done again"),
+	)
+	runtime := openTestRuntime(t, model)
+
+	promptCollect(t, runtime, "plan it")
+	promptCollect(t, runtime, "flip it")
+
+	for _, request := range model.Requests() {
+		if text := toolResultText(request, "call-merge"); text != "" {
+			assert.JSONEq(t, `{"updated":true,"completed":1,"total":2}`, text)
+
+			return
+		}
+	}
+
+	t.Fatal("no request carried the merge tool result")
+}
+
 // TestRuntimeTodoNudgeFiresAfterThreeTurnsWithoutAPlanWrite pins the periodic
 // nudge: it appears on the fourth turn with no update_plan call and then not
 // again within five turns.

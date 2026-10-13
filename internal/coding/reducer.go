@@ -756,7 +756,11 @@ func (state *State) apply(event Event) error {
 		}
 		state.Transcript = appendShared(state.Transcript, cloneMessage(payload.Message))
 		if update, ok := tasklist.FromMessage(payload.Message); ok {
-			state.Tasks = tasklist.FromUpdate(update)
+			// A call that cannot be folded leaves the plan alone, the way a
+			// malformed call is ignored.
+			if folded, foldErr := tasklist.Apply(state.Tasks, update); foldErr == nil {
+				state.Tasks = folded
+			}
 		}
 		state.MessageCandidates = appendShared(state.MessageCandidates, candidate)
 		if payload.Synthetic {

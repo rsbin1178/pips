@@ -165,6 +165,30 @@ func TestToolDetailPlanRendersChecklist(t *testing.T) {
 	assert.NotContains(t, detail, `{"updated":true`)
 }
 
+// TestToolDetailPlanLabelsAStepLessMergeByItsID pins the card: a status-only
+// merge omits the step, so the row labels the item by its id instead of
+// painting an empty step.
+func TestToolDetailPlanLabelsAStepLessMergeByItsID(t *testing.T) {
+	t.Parallel()
+
+	state := detailState(coding.ToolState{
+		Call: coding.ToolCall{
+			ID: "call-1", Name: "update_plan",
+			Arguments: ai.JSON(`{"merge":true,"plan":[{"id":"render the checklist","status":"completed"}]}`),
+		},
+		Status: coding.ToolStatusCompleted,
+		Result: ai.ToolResultText("call-1", "update_plan", `{"updated":true,"completed":1,"total":1}`),
+	})
+	blocks := projectTimeline(state)
+	require.Len(t, blocks, 1)
+
+	compact := renderTimeline(blocks, newMarkdownRenderer(8), 100, themeDark, true)
+	assert.Contains(t, compact, "✔ render the checklist")
+
+	detail := newToolDetailView(blocks[0]).text()
+	assert.Contains(t, detail, "Plan\n  ✔ render the checklist")
+}
+
 func TestToolDetailMalformedArgumentsDegrade(t *testing.T) {
 	t.Parallel()
 

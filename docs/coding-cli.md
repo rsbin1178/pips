@@ -985,16 +985,43 @@ the conversation's timeline.
 
 ### Task plan and the todo gate
 
-In Agent mode the model keeps a visible plan with `update_plan`, a complete
-replacement of 1 to 64 steps. Each step is a nonblank text of at most 512 bytes
-with a status of `pending`, `in_progress`, `completed`, or `cancelled`; the
-optional explanation is at most 4096 bytes; the whole input is at most 64 KiB.
-At most one step is `in_progress`. A step may also carry an optional `meta`
-object of at most 1 KiB for free-form bookkeeping, which the tool schema
-describes as an optional field alongside the required `step` and `status`. A
-`cancelled` step is terminal — it is how a genuinely blocked step is recorded —
-and it never counts as in progress. The plan is projected from the transcript, so
-it survives a resume, and the tasks pane shows it live under `Tasks`.
+In Agent mode the model keeps a visible plan with `update_plan`. A call carries
+1 to 64 items. An item's `id` is its stable identifier and defaults to its step
+text, so a plan written without ids stays addressable by its steps; a step is a
+nonblank text of at most 512 bytes with a status of `pending`, `in_progress`,
+`completed`, or `cancelled`. The optional explanation is at most 4096 bytes and
+the whole input is at most 64 KiB. An item may also carry an optional `meta`
+object of at most 1 KiB for free-form bookkeeping. A `cancelled` step is
+terminal — it is how a genuinely blocked step is recorded — and it never counts
+as in progress.
+
+`merge` selects the mode. **Absent means replace**, which is what every
+`update_plan` call written before this field existed meant: the plan becomes
+exactly the call's items, an omitted step falls back to the item's id, and an
+omitted status defaults to `pending`. With `merge = true` the call updates items
+by id instead: an existing item takes a non-empty step, a set status, and a
+present meta, and keeps whatever the call omits, while an unknown id is appended
+with the id as its step fallback. A status flip is therefore one line —
+`{"merge":true,"plan":[{"id":"…","status":"completed"}]}` — and every item's id
+is in front of the model each turn in the `Current task state` reminder.
+
+One safety net matches the reference: when `merge` is absent or `false`, the
+plan already has items, every item carries no step, and every item's id already
+exists, the call is applied as a merge anyway, so a model that forgets the flag
+does not wipe the plan. The consequence is that a replacement naming only ids
+and statuses cannot shrink the plan; a model that wants to drop steps sends the
+items it keeps, with their steps.
+
+The call is validated before it is folded: a duplicate id inside one call is
+refused and named, an item that carries neither an id nor a step is refused, and
+at most one item in the call may be `in_progress`. The folded plan is validated
+too: it must hold 1 to 64 items with the step and meta bounds above and at most
+one `in_progress` overall, so a merge that would leave two steps in progress or
+push the plan past 64 items is refused and the plan is left unchanged. The tool
+result reports the folded plan's own `{updated, completed, total}`.
+
+The plan is projected from the transcript, so it survives a resume, and the
+tasks pane shows it live under `Tasks`.
 
 Two reminders keep the plan current:
 
