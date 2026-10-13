@@ -14,9 +14,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestBackgroundBoundsMatchTheReference pins the monitor output bound. The
-// registry is monitor-only, so the bound is the reference's 10 MiB monitor cap,
-// and the inlined tail and the mid-turn buffer stay as they are.
+// TestBackgroundBoundsMatchTheReference pins the monitor's output bound. The
+// registry carries a shell kind too, which takes the shell's own ceiling, so
+// this is the monitor cap; the pane's tail bound and the mid-turn buffer stay as
+// they are.
 func TestBackgroundBoundsMatchTheReference(t *testing.T) {
 	t.Parallel()
 

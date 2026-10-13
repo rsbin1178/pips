@@ -293,7 +293,7 @@ func TestRuntimeStopHookContinuesPrimaryTurn(t *testing.T) {
 	assert.True(t, requestContainsText(requests[1], "perform one more focused pass"))
 }
 
-func TestRuntimeStopHookListsRunningWatches(t *testing.T) {
+func TestRuntimeStopHookListsRunningBackgroundTasks(t *testing.T) {
 	skipHookRuntimeOnWindows(t)
 	t.Parallel()
 
@@ -310,6 +310,20 @@ func TestRuntimeStopHookListsRunningWatches(t *testing.T) {
 		Command:     "sleep 30",
 		Description: "watch me",
 		NoDeadline:  true,
+		Start: func(ctx context.Context, _ execution.Sink) (execution.Result, error) {
+			<-ctx.Done()
+
+			return execution.Result{Status: execution.StatusCanceled}, nil
+		},
+	})
+	require.NoError(t, err)
+
+	// A backgrounded command is one of them too, and it reports the command line
+	// in the field the reference reserves for it.
+	command, err := runtime.backgroundTasks.Launch(t.Context(), background.Request{
+		Kind:       background.KindShell,
+		Command:    "cargo build --release",
+		NoDeadline: true,
 		Start: func(ctx context.Context, _ execution.Sink) (execution.Result, error) {
 			<-ctx.Done()
 
@@ -335,12 +349,34 @@ func TestRuntimeStopHookListsRunningWatches(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(content, &input))
 
-	require.Len(t, input.BackgroundTasks, 1)
-	assert.Equal(t, snapshot.ID, input.BackgroundTasks[0].ID)
-	assert.Equal(t, string(background.KindMonitor), input.BackgroundTasks[0].Type)
-	assert.Equal(t, "running", input.BackgroundTasks[0].Status)
-	assert.Equal(t, "sleep 30", input.BackgroundTasks[0].Description)
-	assert.Empty(t, input.BackgroundTasks[0].Command, "command is shell-only in the entry shape")
+	require.Len(t, input.BackgroundTasks, 2)
+
+	// The registry orders by start time, which two launches can share, so the
+	// entries are read by id rather than by position.
+	entries := make(map[string]struct {
+		ID          string `json:"id"`
+		Type        string `json:"type"`
+		Status      string `json:"status"`
+		Description string `json:"description"`
+		Command     string `json:"command"`
+	}, len(input.BackgroundTasks))
+	for _, entry := range input.BackgroundTasks {
+		entries[entry.ID] = entry
+	}
+
+	watch, ok := entries[snapshot.ID]
+	require.True(t, ok)
+	assert.Equal(t, string(background.KindMonitor), watch.Type)
+	assert.Equal(t, "running", watch.Status)
+	assert.Equal(t, "sleep 30", watch.Description)
+	assert.Empty(t, watch.Command, "command is shell-only in the entry shape")
+
+	running, ok := entries[command.ID]
+	require.True(t, ok)
+	assert.Equal(t, string(background.KindShell), running.Type)
+	assert.Equal(t, "running", running.Status)
+	assert.Equal(t, "cargo build --release", running.Command)
+	assert.Empty(t, running.Description, "description carries a watch's command")
 }
 
 func TestClipHookTextBoundsAndMarksTheValue(t *testing.T) {

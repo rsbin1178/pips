@@ -76,8 +76,9 @@ type childScopeFactory struct {
 	// path admission that lets the read Tool open a child's own watch log.
 	readBackgroundTasks tools.ReadBackgroundTasks
 	taskLogRead         tools.TaskLogRead
-	// monitorOwner resolves the interaction a child's watch belongs to, so a
-	// cancelled interaction cancels the watches its children started too.
+	// monitorOwner resolves the interaction a child's background task belongs
+	// to, so a cancelled interaction cancels the watches and commands its
+	// children started too.
 	monitorOwner func() string
 	// executorConfig and gitConfig let a child that runs outside the parent
 	// workspace build its own process executor and Git inspector there.
@@ -355,7 +356,12 @@ func newChildControlScope(
 	}
 	scope.validator = validator
 
-	handlers := []approval.Handler{tools.NewShellHandlerForSandbox(factory.sandbox, factory.network)}
+	handlers := []approval.Handler{tools.NewShellHandlerForSandboxWithOwner(
+		factory.backgroundTasks,
+		factory.sandbox,
+		factory.network,
+		factory.monitorOwner,
+	)}
 	if factory.backgroundTasks != nil {
 		handlers = append(handlers, tools.NewMonitorHandlerForSandboxWithOwner(
 			factory.backgroundTasks,

@@ -245,8 +245,8 @@ func TestRuntimeInspectsAWatchThroughTheControlSurface(t *testing.T) {
 
 	startHeader, _, err := tools.ParseResult(text.Text)
 	require.NoError(t, err)
-	require.NotNil(t, startHeader.Monitor)
-	taskID := startHeader.Monitor.TaskID
+	require.NotNil(t, startHeader.Background)
+	taskID := startHeader.Background.TaskID
 
 	require.Eventually(t, func() bool {
 		inspection, inspectErr := runtime.InspectBackgroundTask(t.Context(), taskID)
@@ -292,11 +292,11 @@ func TestRuntimeReapsItsBackgroundTasksOnClose(t *testing.T) {
 	header, body, err := tools.ParseResult(text.Text)
 	require.NoError(t, err)
 	require.True(t, header.OK)
-	require.NotNil(t, header.Monitor)
-	assert.True(t, header.Monitor.Persistent)
+	require.NotNil(t, header.Background)
+	assert.True(t, header.Background.Persistent)
 	assert.Contains(t, body, "persistent -- runs until "+background.KillTaskToolName)
 
-	taskID := header.Monitor.TaskID
+	taskID := header.Background.TaskID
 
 	// The pipeline reads what the command wrote and hands it to the Runtime's
 	// own observer, which is the seam the delivery path renders from.

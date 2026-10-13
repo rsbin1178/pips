@@ -20,7 +20,7 @@ const KillBackgroundName = background.KillTaskToolName
 const killBackgroundSchema = `{
  "type":"object","additionalProperties":false,"required":["task_id"],
  "properties":{
-  "task_id":{"type":"string","minLength":1,"description":"The task_id a monitor Tool call returned."}
+  "task_id":{"type":"string","minLength":1,"description":"The task_id a shell or monitor Tool call returned."}
  }
 }`
 
@@ -58,8 +58,8 @@ type killBackgroundTool struct {
 func (*killBackgroundTool) Decl() ai.Tool {
 	return ai.Tool{
 		Name: KillBackgroundName,
-		Description: "Stop one background task started by the monitor tool. " +
-			"Address it by the task_id the monitor call returned. " +
+		Description: "Stop one background task started by the shell or monitor tool. " +
+			"Address it by the task_id the shell or monitor call returned. " +
 			"The outcome is killed, already_exited, or not_found; " +
 			"a not_found result lists the ids the registry still knows.",
 		InputSchema: &ai.Schema{RawJSON: json.RawMessage(killBackgroundSchema)},

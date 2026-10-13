@@ -249,7 +249,7 @@ func TestMonitorOperationIsUnboundedAndSandboxed(t *testing.T) {
 	assert.Equal(t, []execution.EnvVar{{Name: monitorUnbufferedEnv, Value: "1"}}, spec.Env)
 	assert.Equal(t, execution.OutputLimits{
 		CaptureBytes: shellCaptureBytes,
-		MaxBytes:     shellMaximumOutput,
+		MaxBytes:     ShellMaximumOutput,
 		ChunkBytes:   shellChunkBytes,
 		QueueDepth:   shellOutputQueueDepth,
 	}, spec.Output)
@@ -374,14 +374,15 @@ func TestMonitorDetachReturnsAReceiptAndRunsTheProcessInTheBackground(t *testing
 	header, body, err := ParseResult(text.Text)
 	require.NoError(t, err)
 	require.True(t, header.OK)
-	require.NotNil(t, header.Monitor)
-	assert.True(t, strings.HasPrefix(header.Monitor.TaskID, "monitor-1-"))
-	assert.Equal(t, int64(2500), header.Monitor.TimeoutMS)
-	assert.False(t, header.Monitor.Persistent)
-	assert.Contains(t, body, "Monitor started (task "+header.Monitor.TaskID+", timeout 2500ms).")
+	require.NotNil(t, header.Background)
+	assert.True(t, strings.HasPrefix(header.Background.TaskID, "monitor-1-"))
+	assert.Equal(t, string(background.KindMonitor), header.Background.Kind)
+	assert.Equal(t, int64(2500), header.Background.TimeoutMS)
+	assert.False(t, header.Background.Persistent)
+	assert.Contains(t, body, "Monitor started (task "+header.Background.TaskID+", timeout 2500ms).")
 
 	// The Tool call has returned, and the run is still owned by the registry.
-	stored, found := registry.Snapshot(header.Monitor.TaskID)
+	stored, found := registry.Snapshot(header.Background.TaskID)
 	require.True(t, found)
 	assert.Equal(t, "deploy", stored.Command)
 	assert.Equal(t, "deploy log", stored.Description)
@@ -397,7 +398,7 @@ func TestMonitorDetachReturnsAReceiptAndRunsTheProcessInTheBackground(t *testing
 	assert.Equal(t, "line-1\nline-2", events[0].Text)
 
 	// The completion no longer inlines the log; the registry still reads it.
-	tail, ok := registry.Tail(header.Monitor.TaskID, 1024)
+	tail, ok := registry.Tail(header.Background.TaskID, 1024)
 	require.True(t, ok)
 	assert.Equal(t, "line-1\nline-2", tail)
 	require.Len(t, completions, 1)
@@ -470,12 +471,12 @@ func TestMonitorDetachPersistentReceiptOmitsTheDeadline(t *testing.T) {
 
 	header, body, err := ParseResult(text.Text)
 	require.NoError(t, err)
-	assert.Zero(t, header.Monitor.TimeoutMS)
-	assert.True(t, header.Monitor.Persistent)
+	assert.Zero(t, header.Background.TimeoutMS)
+	assert.True(t, header.Background.Persistent)
 	assert.Contains(
 		t,
 		body,
-		"Monitor started (task "+header.Monitor.TaskID+
+		"Monitor started (task "+header.Background.TaskID+
 			", persistent -- runs until kill_background_task or session end).",
 	)
 }

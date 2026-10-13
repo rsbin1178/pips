@@ -38,7 +38,7 @@ func TestShellSchemaMakesOnlyCommandRequired(t *testing.T) {
 	assert.Equal(t, false, schema.AdditionalProperties)
 	assert.ElementsMatch(
 		t,
-		[]string{"command", "cwd", "timeout_ms", "permissions", "justification"},
+		[]string{"command", "cwd", "timeout_ms", "block_until_ms", "permissions", "justification"},
 		mapKeys(schema.Properties),
 	)
 
@@ -48,6 +48,16 @@ func TestShellSchemaMakesOnlyCommandRequired(t *testing.T) {
 	assert.Equal(t, false, permissions.AdditionalProperties)
 	assert.Empty(t, permissions.Required)
 	assert.True(t, schema.Properties["cwd"].Nullable)
+
+	blockUntil := schema.Properties["block_until_ms"]
+	require.NotNil(t, blockUntil)
+	assert.True(t, blockUntil.Nullable)
+	assert.Equal(t, "integer", blockUntil.Type)
+	assert.JSONEq(t, `0`, string(blockUntil.Extra["minimum"]))
+	assert.JSONEq(t, `1800000`, string(blockUntil.Extra["maximum"]))
+	assert.Contains(t, blockUntil.Description, "Omit to block until the command ends")
+	assert.Contains(t, blockUntil.Description, "0 starts the command in the background immediately")
+	assert.Contains(t, blockUntil.Description, "moves a command that is still running to the background")
 
 	encoded, err := json.Marshal(schema)
 	require.NoError(t, err)
@@ -80,7 +90,108 @@ func TestShellOperationUsesFixedBoundedContract(t *testing.T) {
 	assert.Empty(t, spec.Env)
 	assert.Empty(t, spec.WriteDirs)
 	assert.Equal(t, int64(shellCaptureBytes), spec.Output.CaptureBytes)
-	assert.Equal(t, int64(shellMaximumOutput), spec.Output.MaxBytes)
+	assert.Equal(t, int64(ShellMaximumOutput), spec.Output.MaxBytes)
+}
+
+// TestShellBlockUntilResolvesTheDeadlineAndTheWait pins the knob's three modes
+// and the deadline rule: an omitted block keeps the foreground default, any
+// explicit block takes the shell ceiling unless an explicit timeout says
+// otherwise, and the wait is the clamped block.
+func TestShellBlockUntilResolvesTheDeadlineAndTheWait(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		args           string
+		wantTimeout    time.Duration
+		wantBlock      time.Duration
+		wantBackground bool
+	}{
+		{
+			name:        "omitted block keeps the foreground default",
+			args:        `{"command":"true"}`,
+			wantTimeout: defaultShellTimeout,
+		},
+		{
+			name:           "zero block takes the ceiling deadline",
+			args:           `{"command":"true","block_until_ms":0}`,
+			wantTimeout:    maximumShellTimeout,
+			wantBackground: true,
+		},
+		{
+			name:           "an explicit timeout is honoured with a zero block",
+			args:           `{"command":"true","timeout_ms":1500,"block_until_ms":0}`,
+			wantTimeout:    1500 * time.Millisecond,
+			wantBackground: true,
+		},
+		{
+			name:           "a positive block waits and takes the ceiling deadline",
+			args:           `{"command":"true","block_until_ms":5000}`,
+			wantTimeout:    maximumShellTimeout,
+			wantBlock:      5 * time.Second,
+			wantBackground: true,
+		},
+		{
+			name:           "a positive block above the ceiling is clamped",
+			args:           `{"command":"true","block_until_ms":9000000}`,
+			wantTimeout:    maximumShellTimeout,
+			wantBlock:      maximumShellTimeout,
+			wantBackground: true,
+		},
+		{
+			name:           "an explicit timeout is honoured with a positive block",
+			args:           `{"command":"true","timeout_ms":1500,"block_until_ms":5000}`,
+			wantTimeout:    1500 * time.Millisecond,
+			wantBlock:      5 * time.Second,
+			wantBackground: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			arguments, err := decodeShellArguments(ai.JSON(test.args))
+			require.NoError(t, err)
+
+			timeout, err := resolveShellTimeout(arguments)
+			require.NoError(t, err)
+			assert.Equal(t, test.wantTimeout, timeout)
+			assert.Equal(t, test.wantBlock, arguments.blockBudget())
+			assert.Equal(t, test.wantBackground, arguments.backgrounds())
+		})
+	}
+}
+
+// TestShellOperationBackgroundsWithTheCeilingDeadline pins the deadline on the
+// operation itself, which is what the executor kills the command at.
+func TestShellOperationBackgroundsWithTheCeilingDeadline(t *testing.T) {
+	t.Parallel()
+
+	spec, err := NewShellHandler().Operation(t.Context(), agent.ToolCall{
+		Name: shellName, Args: ai.JSON(`{"command":"sleep 30","block_until_ms":0}`),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, maximumShellTimeout, spec.Timeout)
+}
+
+// TestShellBlockUntilRefusesANegativeBlock pins the one block value the knob
+// cannot represent: a negative wait is refused with a named field, while a
+// positive value above the ceiling is clamped rather than refused.
+func TestShellBlockUntilRefusesANegativeBlock(t *testing.T) {
+	t.Parallel()
+
+	_, err := NewShellHandler().Operation(t.Context(), agent.ToolCall{
+		Name: shellName, Args: ai.JSON(`{"command":"true","block_until_ms":-1}`),
+	})
+	require.Error(t, err)
+
+	header, _, parseErr := ParseResult(err.Error())
+	require.NoError(t, parseErr)
+	assert.Equal(t, "invalid_argument", header.Code)
+	assert.Equal(t, "block_range", header.Reason)
+	require.NotNil(t, header.Problem)
+	assert.Equal(t, "block_until_ms", header.Problem.Field)
 }
 
 func TestShellOperationUsesConfiguredNetwork(t *testing.T) {
@@ -157,6 +268,8 @@ func TestShellOperationStrictlyRejectsUnsafeArguments(t *testing.T) {
 		{name: "short timeout", args: `{"command":"true","timeout_ms":99}`},
 		{name: "long timeout", args: `{"command":"true","timeout_ms":1800001}`},
 		{name: "null timeout", args: `{"command":"true","timeout_ms":null}`},
+		{name: "non-integer block", args: `{"command":"true","block_until_ms":"soon"}`},
+		{name: "null block", args: `{"command":"true","block_until_ms":null}`},
 	}
 
 	for _, test := range tests {

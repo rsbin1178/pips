@@ -206,7 +206,8 @@ model-visible hook context are bounded.
 
 `Stop` also carries the background tasks this session still has running, so a
 handler can decide whether a turn really ended. Each entry names the task, its
-kind, its state, and — for a monitor — the command it watches:
+kind, its state, and the command it runs — a watch reports it in `description`
+and a backgrounded command reports it in `command`:
 
 ```json
 {
@@ -221,13 +222,13 @@ kind, its state, and — for a monitor — the command it watches:
 }
 ```
 
-A monitor is the only type this release registers, so `type` is always
-`monitor` today; a later one-shot background command or child adds its own type
-to the same list. A monitor carries no `command` field: `command` belongs to a
-one-shot shell task, and the watched command travels in `description` instead.
-Every free-text field is clipped to 1000 characters with an in-string
-`… [+N chars]` marker, so a handler can tell a clipped value from a short one,
-and an empty list is omitted from the payload entirely.
+The two types this release registers are `monitor` and `shell`; a later child
+type adds itself to the same list. A monitor carries no `command` field: the
+watched command travels in `description` instead, while a `shell` entry carries
+it in `command` and leaves `description` empty. Every free-text field is clipped
+to 1000 characters with an in-string `… [+N chars]` marker, so a handler can
+tell a clipped value from a short one, and an empty list is omitted from the
+payload entirely.
 
 ## Handler responses
 

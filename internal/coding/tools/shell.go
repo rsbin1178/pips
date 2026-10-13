@@ -14,6 +14,8 @@ import (
 
 	"github.com/rsbin1178/pips/agent"
 	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/internal/coding/approval"
+	"github.com/rsbin1178/pips/internal/coding/background"
 	"github.com/rsbin1178/pips/internal/coding/config"
 	"github.com/rsbin1178/pips/internal/coding/execution"
 	"github.com/rsbin1178/pips/internal/coding/workspace"
@@ -21,17 +23,24 @@ import (
 )
 
 const (
-	shellName             = "shell"
-	defaultShellTimeout   = 2 * time.Minute
-	minimumShellTimeout   = 100 * time.Millisecond
-	maximumShellTimeout   = 30 * time.Minute
-	maximumShellCommand   = 64 << 10
-	shellCaptureBytes     = 24 << 10
-	shellMaximumOutput    = 16 << 20
+	shellName           = "shell"
+	defaultShellTimeout = 2 * time.Minute
+	minimumShellTimeout = 100 * time.Millisecond
+	maximumShellTimeout = 30 * time.Minute
+	maximumShellCommand = 64 << 10
+	shellCaptureBytes   = 24 << 10
+	// ShellMaximumOutput is the shell operation's own output ceiling. A
+	// backgrounded command's log keeps this bound, the same one the foreground
+	// collector uses.
+	ShellMaximumOutput    = 16 << 20
 	shellChunkBytes       = 4 << 10
 	shellOutputQueueDepth = 32
 	shellCommandField     = "command"
 	schemaStringType      = "string"
+	// shellBlockUntilField is the model-facing wait knob. A call that sets it
+	// detaches: zero backgrounds the command at once, a positive value waits
+	// and hands what is still running to the registry.
+	shellBlockUntilField = "block_until_ms"
 )
 
 type shellPermissions struct {
@@ -43,6 +52,7 @@ type shellArguments struct {
 	Command       string
 	CWD           string
 	TimeoutMS     *int64
+	BlockUntilMS  *int64
 	Permissions   *shellPermissions
 	Justification string
 }
@@ -51,6 +61,7 @@ type rawShellArguments struct {
 	Command       json.RawMessage `json:"command"`
 	CWD           json.RawMessage `json:"cwd"`
 	TimeoutMS     json.RawMessage `json:"timeout_ms"`
+	BlockUntilMS  json.RawMessage `json:"block_until_ms"`
 	Permissions   json.RawMessage `json:"permissions"`
 	Justification json.RawMessage `json:"justification"`
 }
@@ -83,6 +94,14 @@ type ShellHandler struct {
 	declaration ai.Tool
 	network     config.SandboxNetworkMode
 	workspace   execution.WorkspaceAccess
+	// registry owns a command that outlives the Tool call. A nil registry
+	// refuses a backgrounding call with a named error rather than panicking.
+	registry *background.Registry
+	// owner resolves the interaction that is spawning the command, so a
+	// cancelled interaction can cancel the commands it started. It is a
+	// provider rather than a value because the handler is built once per
+	// Runtime while the interaction is per prompt.
+	owner func() string
 }
 
 // NewShellHandler constructs the non-registerable shell operation handler.
@@ -104,6 +123,20 @@ func NewShellHandlerForSandbox(
 	sandbox config.SandboxMode,
 	networkMode config.SandboxNetworkMode,
 ) *ShellHandler {
+	return NewShellHandlerForSandboxWithOwner(nil, sandbox, networkMode, nil)
+}
+
+// NewShellHandlerForSandboxWithOwner constructs a Shell handler that can start
+// a command in the background and stamp it with the spawning interaction's id.
+// The owner provider is read at detach time, so it reports the interaction that
+// is running when the command starts rather than the one that built the
+// handler.
+func NewShellHandlerForSandboxWithOwner(
+	registry *background.Registry,
+	sandbox config.SandboxMode,
+	networkMode config.SandboxNetworkMode,
+	owner func() string,
+) *ShellHandler {
 	workspace := execution.WorkspaceWrite
 	if sandbox == config.SandboxReadOnly {
 		workspace = execution.WorkspaceReadOnly
@@ -112,18 +145,23 @@ func NewShellHandlerForSandbox(
 	mode := networkMode
 	description := "Run a bounded non-interactive POSIX shell command in the local OS sandbox. " +
 		"Omit cwd to run at the Workspace root; an absolute cwd is accepted only inside the Workspace. " +
-		"Permissions describe only optional external writes or network access and require explicit approval."
+		"Permissions describe only optional external writes or network access and require explicit approval. " +
+		"Set " + shellBlockUntilField + " to 0 to run the command in the background."
 	if mode == config.SandboxNetworkAllow {
 		description = "Run a bounded non-interactive POSIX shell command in the local OS sandbox. " +
 			"Omit cwd to run at the Workspace root; an absolute cwd is accepted only inside the Workspace. " +
-			"Host network access is enabled by user configuration; external writes still require explicit approval."
+			"Host network access is enabled by user configuration; external writes still require explicit approval. " +
+			"Set " + shellBlockUntilField + " to 0 to run the command in the background."
 	}
 
-	return &ShellHandler{network: mode, workspace: workspace, declaration: ai.Tool{
-		Name:        shellName,
-		Description: description,
-		InputSchema: shellInputSchema(),
-	}}
+	return &ShellHandler{
+		network: mode, workspace: workspace, registry: registry, owner: owner,
+		declaration: ai.Tool{
+			Name:        shellName,
+			Description: description,
+			InputSchema: shellInputSchema(),
+		},
+	}
 }
 
 // Decl returns the shell declaration consumed by the approval Controller.
@@ -149,27 +187,9 @@ func (h *ShellHandler) Operation(
 		return execution.OperationSpec{}, shellFailure(err)
 	}
 
-	timeout := defaultShellTimeout
-
-	if arguments.TimeoutMS != nil {
-		if *arguments.TimeoutMS < minimumShellTimeout.Milliseconds() ||
-			*arguments.TimeoutMS > maximumShellTimeout.Milliseconds() {
-			return execution.OperationSpec{}, shellFailure(newShellArgumentError(
-				"timeout_range",
-				"timeout_ms must be between 100 and 1800000 milliseconds",
-				nil,
-			))
-		}
-
-		timeout = time.Duration(*arguments.TimeoutMS) * time.Millisecond
-	}
-
-	if timeout < minimumShellTimeout || timeout > maximumShellTimeout {
-		return execution.OperationSpec{}, shellFailure(newShellArgumentError(
-			"timeout_range",
-			"timeout_ms must be between 100 and 1800000 milliseconds",
-			nil,
-		))
+	timeout, err := resolveShellTimeout(arguments)
+	if err != nil {
+		return execution.OperationSpec{}, shellFailure(err)
 	}
 
 	cwd := arguments.CWD
@@ -200,7 +220,7 @@ func (h *ShellHandler) Operation(
 		Timeout:    timeout,
 		Output: execution.OutputLimits{
 			CaptureBytes: shellCaptureBytes,
-			MaxBytes:     shellMaximumOutput,
+			MaxBytes:     ShellMaximumOutput,
 			ChunkBytes:   shellChunkBytes,
 			QueueDepth:   shellOutputQueueDepth,
 		},
@@ -233,6 +253,172 @@ func (h *ShellHandler) Render(result execution.Result, runErr error) ([]ai.Part,
 	return agent.TextResult(text), nil
 }
 
+// backgrounds reports whether this call detaches. Any explicit block_until_ms
+// detaches: zero backgrounds the command at once, and a positive value waits
+// before handing what is still running to the registry.
+func (a shellArguments) backgrounds() bool { return a.BlockUntilMS != nil }
+
+// blockBudget is the wait the detached path takes before it returns the
+// receipt: zero for an immediate background, otherwise the requested block
+// clamped to the shell's own ceiling. A block above the ceiling is clamped
+// rather than refused, matching the reference; the block never kills the
+// command or extends its deadline.
+func (a shellArguments) blockBudget() time.Duration {
+	if a.BlockUntilMS == nil || *a.BlockUntilMS <= 0 {
+		return 0
+	}
+
+	return time.Duration(min(*a.BlockUntilMS, maximumShellTimeout.Milliseconds())) * time.Millisecond
+}
+
+// resolveShellTimeout resolves the command's own kill deadline. An explicit
+// timeout_ms is honoured as given. An omitted one is the foreground default,
+// except on a call that backgrounds, where it is the shell ceiling: a
+// background task that dies after the two-minute foreground default is a trap.
+func resolveShellTimeout(arguments shellArguments) (time.Duration, error) {
+	if arguments.TimeoutMS != nil {
+		if *arguments.TimeoutMS < minimumShellTimeout.Milliseconds() ||
+			*arguments.TimeoutMS > maximumShellTimeout.Milliseconds() {
+			return 0, newShellArgumentError(
+				"timeout_range",
+				"timeout_ms must be between 100 and 1800000 milliseconds",
+				nil,
+			)
+		}
+
+		return time.Duration(*arguments.TimeoutMS) * time.Millisecond, nil
+	}
+
+	if arguments.backgrounds() {
+		return maximumShellTimeout, nil
+	}
+
+	return defaultShellTimeout, nil
+}
+
+// Detaches reports whether this call takes the detached path. It decodes the
+// arguments again — the controller decodes them when it builds the operation —
+// because the arguments are bounded at 64 KiB and the decode is pure. A
+// malformed call answers false, so it reaches the same decode error the
+// synchronous path reports.
+func (h *ShellHandler) Detaches(call agent.ToolCall) bool {
+	arguments, err := decodeShellArguments(call.Args)
+	if err != nil {
+		return false
+	}
+
+	return arguments.backgrounds()
+}
+
+// Detach starts the command on the background registry and returns either the
+// model-facing receipt or, when a positive block's wait caught the command's
+// end, the ordinary shell result rendered from the task's own executor result.
+// The run outlives this call: it keeps the Tool call's ambient values through
+// context.WithoutCancel but not its cancellation, and the registry ends it on a
+// kill, its deadline, or Runtime teardown.
+func (h *ShellHandler) Detach(
+	ctx context.Context,
+	call agent.ToolCall,
+	prepared approval.PreparedExecution,
+) ([]ai.Part, error) {
+	arguments, err := decodeShellArguments(call.Args)
+	if err != nil {
+		_ = prepared.Close()
+
+		return nil, shellFailure(err)
+	}
+
+	if !arguments.backgrounds() {
+		_ = prepared.Close()
+
+		return nil, shellFailure(newShellArgumentError(
+			"background_unavailable",
+			shellBlockUntilField+" is required to run a command in the background",
+			nil,
+		))
+	}
+
+	if h.registry == nil {
+		_ = prepared.Close()
+
+		return nil, shellFailure(newShellArgumentError(
+			"background_unavailable",
+			"background tasks are unavailable in this session",
+			nil,
+		))
+	}
+
+	timeout, err := resolveShellTimeout(arguments)
+	if err != nil {
+		_ = prepared.Close()
+
+		return nil, shellFailure(err)
+	}
+
+	cwd := arguments.CWD
+	if cwd == "" {
+		cwd = "."
+	}
+
+	snapshot, err := h.registry.Launch(context.WithoutCancel(ctx), background.Request{
+		Kind:    background.KindShell,
+		Command: arguments.Command,
+		CWD:     cwd,
+		Owner:   resolveBackgroundOwner(h.owner),
+		Timeout: timeout,
+		Start: func(runCtx context.Context, sink execution.Sink) (execution.Result, error) {
+			return prepared.Run(runCtx, sink)
+		},
+	})
+	if err != nil {
+		_ = prepared.Close()
+
+		return nil, failure(shellName, err)
+	}
+
+	// A positive block waits for the command's own end. A command that ends
+	// inside the wait is rendered by the ordinary shell renderer, from the same
+	// result-and-error pair the synchronous path would have handed it, so a
+	// deadline reads the same in both modes; the wait is also what takes the
+	// terminal result, so the task's completion does not wake the model twice.
+	if budget := arguments.blockBudget(); budget > 0 {
+		if _, outcome := h.registry.Wait(ctx, []string{snapshot.ID}, true, budget); outcome == background.WaitOutcomeCompleted {
+			if result, ok, runErr := h.registry.Result(snapshot.ID); ok {
+				return h.Render(result, runErr)
+			}
+		}
+	}
+
+	value := result{
+		OK: true, Tool: shellName,
+		// The receipt carries the same structured shape a monitor's does: the id
+		// the model addresses, the kind it registered under, and the effective
+		// deadline.
+		Background: &ResultBackground{
+			TaskID: snapshot.ID, Kind: string(background.KindShell), TimeoutMS: timeout.Milliseconds(),
+		},
+		Body: shellBackgroundReceipt(snapshot.ID, timeout),
+	}
+
+	if warning := runningBackgroundWarning(h.registry, snapshot.ID); warning != "" {
+		value.Body += "\n\n" + warning
+	}
+
+	return agent.TextResult(value.render()), nil
+}
+
+// shellBackgroundReceipt is the model-facing start text for a backgrounded
+// command: the task id, the effective deadline, the completion notice, and the
+// three id-addressed Tools. The command is never echoed.
+func shellBackgroundReceipt(taskID string, timeout time.Duration) string {
+	return "Command started in the background as task " + taskID +
+		" (timeout " + strconv.FormatInt(timeout.Milliseconds(), 10) + "ms).\n" +
+		"You will be notified when it completes; do not poll or sleep.\n" +
+		"Use " + background.TaskOutputToolName + "(\"" + taskID + "\") to read its output, " +
+		WaitTasksName + " to block until it finishes, or " + background.KillTaskToolName +
+		"(\"" + taskID + "\") to stop it."
+}
+
 func decodeShellArguments(raw ai.JSON) (shellArguments, error) {
 	if len(raw) == 0 {
 		return shellArguments{}, newShellArgumentError(
@@ -244,7 +430,7 @@ func decodeShellArguments(raw ai.JSON) (shellArguments, error) {
 	if err := jsonx.Decode(raw, &wire); err != nil {
 		return shellArguments{}, newShellArgumentError(
 			"arguments_json",
-			"arguments must be one JSON object using only command, cwd, timeout_ms, permissions, and justification",
+			"arguments must be one JSON object using only command, cwd, timeout_ms, block_until_ms, permissions, and justification",
 			err,
 		)
 	}
@@ -266,6 +452,19 @@ func decodeShellArguments(raw ai.JSON) (shellArguments, error) {
 		)
 	}
 
+	blockUntil, err := decodeShellInt64(wire.BlockUntilMS)
+	if err != nil {
+		return shellArguments{}, newShellArgumentError(
+			"block_range", "block_until_ms must be an integer when supplied", err,
+		)
+	}
+
+	if blockUntil != nil && *blockUntil < 0 {
+		return shellArguments{}, newShellArgumentError(
+			"block_range", "block_until_ms must be between 0 and 1800000 milliseconds", nil,
+		)
+	}
+
 	permissions, err := decodeShellPermissions(wire.Permissions)
 	if err != nil {
 		return shellArguments{}, err
@@ -279,7 +478,7 @@ func decodeShellArguments(raw ai.JSON) (shellArguments, error) {
 	}
 
 	return shellArguments{
-		Command: command, CWD: cwd, TimeoutMS: timeout,
+		Command: command, CWD: cwd, TimeoutMS: timeout, BlockUntilMS: blockUntil,
 		Permissions: permissions, Justification: justification,
 	}, nil
 }
@@ -475,6 +674,8 @@ func shellArgumentProblem(argument *shellArgumentError) ResultProblem {
 		field = "cwd"
 	case "timeout_range":
 		field = "timeout_ms"
+	case "block_range", "background_unavailable":
+		field = shellBlockUntilField
 	case "permissions_shape":
 		field = "permissions"
 	case "justification_shape", "justification_required":
@@ -525,6 +726,19 @@ func shellInputSchema() *ai.Schema {
 					"minimum": json.RawMessage("100"),
 					"maximum": json.RawMessage("1800000"),
 				},
+			},
+			shellBlockUntilField: {
+				Type: schemaIntegerType,
+				Description: "Optional wait in milliseconds (0 to 1800000). " +
+					"Omit to block until the command ends or its timeout_ms deadline fires. " +
+					"0 starts the command in the background immediately and returns its task id. " +
+					"A positive value waits that long, then moves a command that is still running to the background and returns its task id. " +
+					"The wait never kills the command and never extends its deadline.",
+				Extra: map[string]json.RawMessage{
+					"minimum": json.RawMessage("0"),
+					"maximum": json.RawMessage("1800000"),
+				},
+				Nullable: true,
 			},
 			"permissions": permissionObject,
 			"justification": {

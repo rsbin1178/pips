@@ -107,22 +107,22 @@ type stopHookInput struct {
 	StopHookActive       bool   `json:"stop_hook_active"`
 	LastAssistantMessage string `json:"last_assistant_message,omitempty"`
 	// BackgroundTasks lists the session-registered background tasks that are
-	// still running. A monitor is one of them, and its entry carries the watch
-	// command in description because command belongs to a one-shot shell task.
+	// still running: a watch and a command alike.
 	BackgroundTasks []stopBackgroundTask `json:"background_tasks,omitempty"`
 }
 
-// stopBackgroundTask is one background-task entry of the Stop payload. pips
-// registers monitors only, so that is the only type it emits today; a later
-// one-shot background command or child would add its own type to the same list.
+// stopBackgroundTask is one background-task entry of the Stop payload. A watch
+// reports its command in description and a command reports it in command, which
+// is the split the reference's entry shape makes.
 type stopBackgroundTask struct {
 	ID   string `json:"id"`
 	Type string `json:"type"`
 	// Status is the running state the reference reports for a live task.
 	Status string `json:"status"`
-	// Description carries the watch command: a monitor has no command field,
-	// which is shell-only in the reference's entry shape.
+	// Description carries a watch's command: a monitor has no command field.
 	Description string `json:"description,omitempty"`
+	// Command carries a background command's own command line.
+	Command string `json:"command,omitempty"`
 }
 
 // hookClipLimit is the bound on one Stop-payload free-text field, measured in
@@ -139,14 +139,18 @@ func (r *Runtime) hookBackgroundTasks() []stopBackgroundTask {
 	tasks := make([]stopBackgroundTask, 0, len(values))
 
 	for _, task := range values {
-		if task.Completed || task.Kind != background.KindMonitor {
+		if task.Completed {
 			continue
 		}
 
-		tasks = append(tasks, stopBackgroundTask{
-			ID: task.ID, Type: string(task.Kind), Status: "running",
-			Description: clipHookText(task.Command),
-		})
+		entry := stopBackgroundTask{ID: task.ID, Type: string(task.Kind), Status: "running"}
+		if task.Kind == background.KindShell {
+			entry.Command = clipHookText(task.Command)
+		} else {
+			entry.Description = clipHookText(task.Command)
+		}
+
+		tasks = append(tasks, entry)
 	}
 
 	return tasks

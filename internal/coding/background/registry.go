@@ -1,6 +1,8 @@
 // Package background owns the process-local registry of background tasks that
-// outlive the Tool call that started them, and the stdout pipeline that turns
-// one such task's output into bounded, model-visible events.
+// outlive the Tool call that started them. A watch's stdout runs through the
+// line pipeline that turns it into bounded, model-visible events; a
+// backgrounded command writes both streams to its log and reports once, when it
+// completes.
 //
 // Registry state is runtime state, never persisted: a running task does not
 // survive a restart, and nothing about it rides the subagent execution plan.
@@ -35,6 +37,10 @@ type Kind string
 const (
 	// KindMonitor watches a long-running script and reports its stdout lines.
 	KindMonitor Kind = "monitor"
+	// KindShell runs one command that outlived the Tool call that started it.
+	// It writes both streams into its log and emits no events: a command has no
+	// event contract, and its completion is the single model-visible report.
+	KindShell Kind = "shell"
 )
 
 // KillTaskToolName is the model-visible name of the Tool that stops one
@@ -162,9 +168,15 @@ type Options struct {
 	// KillToolName is the model-visible name of the Tool that stops a task,
 	// substituted into the catch-up notice.
 	KillToolName string
-	// OutputBytes bounds one task's output file.
+	// OutputBytes bounds one task's output file. It is the default for every
+	// kind.
 	OutputBytes int64
-	// TailBytes bounds the output tail inlined in a completion.
+	// ShellOutputBytes bounds a shell task's output file. A command's log is
+	// the command's whole output, so it takes the shell operation's own ceiling
+	// rather than the narrower monitor cap. Zero uses OutputBytes.
+	ShellOutputBytes int64
+	// TailBytes bounds the output tail the pane's inspect read shows. A
+	// completion inlines no output: it points at the task-output Tool.
 	TailBytes int64
 	// Now returns the current time; nil uses time.Now.
 	Now func() time.Time
@@ -177,6 +189,7 @@ type Registry struct {
 	observer Observer
 	killName string
 	output   int64
+	shellOut int64
 	tail     int64
 	now      func() time.Time
 	// token makes this registry's task ids unique across processes. The counter
@@ -191,7 +204,8 @@ type Registry struct {
 
 // NewRegistry constructs one Runtime's background registry.
 func NewRegistry(options Options) (*Registry, error) {
-	if options.OutputDir == "" || options.OutputBytes <= 0 || options.TailBytes <= 0 {
+	if options.OutputDir == "" || options.OutputBytes <= 0 || options.TailBytes <= 0 ||
+		options.ShellOutputBytes < 0 {
 		return nil, ErrInvalid
 	}
 
@@ -200,11 +214,17 @@ func NewRegistry(options Options) (*Registry, error) {
 		now = time.Now
 	}
 
+	shellOutput := options.ShellOutputBytes
+	if shellOutput == 0 {
+		shellOutput = options.OutputBytes
+	}
+
 	return &Registry{
 		dir:      options.OutputDir,
 		observer: options.Observer,
 		killName: options.KillToolName,
 		output:   options.OutputBytes,
+		shellOut: shellOutput,
 		tail:     options.TailBytes,
 		now:      now,
 		token:    newRegistryToken(),
@@ -223,6 +243,17 @@ func newRegistryToken() string {
 	}
 
 	return hex.EncodeToString(raw[:])
+}
+
+// outputLimit is the output-file bound for one task kind: a shell task's log is
+// the command's whole output and takes the shell ceiling, everything else takes
+// the default.
+func (r *Registry) outputLimit(kind Kind) int64 {
+	if kind == KindShell {
+		return r.shellOut
+	}
+
+	return r.output
 }
 
 // Launch registers one task and starts its process. It returns the task's
@@ -253,7 +284,7 @@ func (r *Registry) Launch(parent context.Context, request Request) (Snapshot, er
 		return Snapshot{}, ErrInvalid
 	}
 
-	output, err := createOutputFile(r.dir, id+".log", r.output)
+	output, err := createOutputFile(r.dir, id+".log", r.outputLimit(request.Kind))
 	if err != nil {
 		r.mu.Unlock()
 
@@ -443,6 +474,25 @@ func (r *Registry) OutputPath(id string) (string, bool) {
 	}
 
 	return entry.output.path, true
+}
+
+// Result returns one finished task's own executor result and its run error,
+// which is what a positive block renders a command that ended inside the wait
+// from. A task that is still running, or an unknown id, reports false.
+func (r *Registry) Result(id string) (execution.Result, bool, error) {
+	if r == nil {
+		return execution.Result{}, false, nil
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	entry, ok := r.tasks[id]
+	if !ok || !entry.completed {
+		return execution.Result{}, false, nil
+	}
+
+	return entry.result, true, entry.runErr
 }
 
 // ResultTaken reports whether a task's result is already the model's: a read is
@@ -705,39 +755,54 @@ type task struct {
 	taken   bool
 	source  KillSource
 
+	// result is the executor's own outcome, kept so a positive block renders a
+	// command that ended inside the wait through the shell's own renderer, and
+	// runErr is the error beside it, which that renderer needs to tell a deadline
+	// apart from a plain non-zero exit.
+	result execution.Result
+	runErr error
+
 	output *outputFile
 	cancel context.CancelFunc
 	ended  chan struct{}
 }
 
-// run owns one task's process and pipeline. The pipeline starts first so no
-// output is lost, then the process runs to completion.
+// run owns one task's process. A monitor's line pipeline starts first so no
+// output is lost, then the process runs to completion; a shell task has no
+// pipeline, because a command's log is its output and its completion is the
+// single model-visible report.
 func (t *task) run(ctx context.Context, start Start) {
 	defer t.registry.wg.Done()
 
 	streamed := make(chan struct{})
+	if t.kind == KindShell {
+		close(streamed)
+	} else {
+		go func() {
+			defer close(streamed)
 
-	go func() {
-		defer close(streamed)
+			t.stream()
+		}()
+	}
 
-		t.stream()
-	}()
-
-	// A run failure is already classified into result.Status by the executor,
-	// so the recorded outcome is the result rather than a second error channel.
-	result, _ := start(ctx, t)
+	// The executor classifies a run failure into result.Status, and the error is
+	// kept beside it because a positive block renders a command that ended inside
+	// the wait through the same renderer the synchronous path uses, and that
+	// renderer tells a deadline apart from a plain non-zero exit by the error.
+	result, runErr := start(ctx, t)
 
 	_ = t.output.close()
-	t.finish(result)
+	t.finish(result, runErr)
 
 	<-streamed
 	t.report()
 }
 
-// WriteOutput implements execution.Sink for one task's stdout. Stderr is not an
-// event source: a monitor reports the lines of the command it watches.
+// WriteOutput implements execution.Sink for one task's log. A monitor's sink
+// keeps stdout alone: it reports the lines of the command it watches. A shell
+// task's log is the command's whole output, so it keeps both streams.
 func (t *task) WriteOutput(_ context.Context, chunk execution.OutputChunk) error {
-	if chunk.Stream != execution.StreamStdout {
+	if chunk.Stream != execution.StreamStdout && t.kind != KindShell {
 		return nil
 	}
 
@@ -818,13 +883,15 @@ func (t *task) emit(text string) {
 // finish records the process outcome. It runs after the executor has drained
 // every output reader and the pipeline has read the file, so the recorded state
 // describes the whole run.
-func (t *task) finish(result execution.Result) {
+func (t *task) finish(result execution.Result, runErr error) {
 	t.registry.mu.Lock()
 	t.completed = true
 	t.end = t.registry.now()
 	t.exit = result.ExitCode
 	t.sig = result.Signal
 	t.timedOut = result.Status == execution.StatusTimedOut
+	t.result = result
+	t.runErr = runErr
 	t.registry.mu.Unlock()
 
 	close(t.ended)

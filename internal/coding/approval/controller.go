@@ -359,7 +359,9 @@ func (c *Controller) executeDirect(
 	// process keeps going after this call returns. The lifecycle stays
 	// started-without-result until the harness persists the receipt, exactly as
 	// it does for a synchronous call, so the volatile marker covers that window.
-	if detached, ok := handler.(DetachedHandler); ok {
+	// A handler that decides per call takes the synchronous path below when it
+	// answers that this call does not background.
+	if detached, ok := handler.(DetachedHandler); ok && detaches(handler, call) {
 		c.volatile[lifecycle.receipt.RequestID] = struct{}{}
 
 		return detached.Detach(ctx, call, prepared)
@@ -369,6 +371,18 @@ func (c *Controller) executeDirect(
 	c.volatile[lifecycle.receipt.RequestID] = struct{}{}
 
 	return handler.Render(result, runErr)
+}
+
+// detaches reports whether this call takes the detached path. A handler that
+// does not implement DetachDecider always detaches; a handler that does decides
+// per call, and the call it refuses keeps the synchronous path's own handling.
+func detaches(handler Handler, call agent.ToolCall) bool {
+	decider, ok := handler.(DetachDecider)
+	if !ok {
+		return true
+	}
+
+	return decider.Detaches(call)
 }
 
 func (c *Controller) issuePermit(call agent.ToolCall, fingerprint execution.Fingerprint) bool {

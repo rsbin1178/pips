@@ -132,9 +132,9 @@ func (f monitorFixture) startMonitor(t *testing.T, args string) (*ai.TextPart, b
 
 	header, _, err := tools.ParseResult(text.Text)
 	require.NoError(t, err)
-	require.NotNil(t, header.Monitor)
+	require.NotNil(t, header.Background)
 
-	snapshot, found := f.registry.Snapshot(header.Monitor.TaskID)
+	snapshot, found := f.registry.Snapshot(header.Background.TaskID)
 	require.True(t, found)
 
 	return &text, snapshot
@@ -170,8 +170,8 @@ func TestMonitorIntegrationStreamsAndEndsNaturally(t *testing.T) {
 			`"description":"four lines"}`,
 	)
 
-	assert.Contains(t, receipt.Text, "Monitor started (task monitor-1, timeout 36000000ms).")
-	assert.Equal(t, "monitor-1", snapshot.ID)
+	assert.True(t, strings.HasPrefix(snapshot.ID, "monitor-1-"), snapshot.ID)
+	assert.Contains(t, receipt.Text, "Monitor started (task "+snapshot.ID+", timeout 36000000ms).")
 	assert.False(t, snapshot.Completed)
 
 	events, completions := fixture.waitForCompletion(t, 1)
