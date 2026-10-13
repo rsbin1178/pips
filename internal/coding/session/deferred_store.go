@@ -109,9 +109,10 @@ func (s *deferredStore) Materialize() error {
 	return s.materializeLocked()
 }
 
-// materializeLocked creates the group, the session directory, the writer lock,
-// the index record, and the transcript, in that order: a transcript never exists
-// without the lock that guards it.
+// materializeLocked creates the group, the session directory, the parent-side
+// child index entry (for a child), the writer lock, the index record, and the
+// transcript, in that order: a transcript never exists without the lock that
+// guards it.
 func (s *deferredStore) materializeLocked() error {
 	if s.store != nil {
 		return nil
@@ -125,6 +126,15 @@ func (s *deferredStore) materializeLocked() error {
 	}
 	if err := ensureSessionDirectory(filepath.Dir(s.metaPath)); err != nil {
 		return err
+	}
+
+	// The child's own directory exists, so its parent's index can name it. The
+	// entry is published before the child's record on purpose: a later failure
+	// leaves an entry for a child whose directory is real, which the reader can
+	// detect and repair. The opposite order would leave a child session nothing
+	// short of a store-wide scan could see.
+	if entry, entryErr := childIndexEntryForRecord(s.record); entryErr == nil {
+		_ = publishChildIndexEntry(s.root.Layout(), s.workspacePath, entry)
 	}
 
 	lock, err := s.acquireLock()

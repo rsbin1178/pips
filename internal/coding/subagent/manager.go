@@ -598,7 +598,7 @@ func (m *Manager) start(
 		stopParent: stopParent,
 		permit:     foregroundPermit,
 	}
-	if err := m.appendMirrored(child.Session(), created); err != nil {
+	if err := m.appendMirrored(child, created); err != nil {
 		cancel()
 		if stopParent != nil {
 			stopParent()
@@ -633,7 +633,7 @@ func (m *Manager) start(
 		terminal.State = StateFailed
 		terminal.Code = "binding_failed"
 		terminal.Time = time.Now().UTC()
-		persistErr := m.appendMirrored(child.Session(), terminal)
+		persistErr := m.appendMirrored(child, terminal)
 		// A binding can fail after the durable child record exists (for
 		// example a required capability disappears). Project both lifecycle
 		// edges so parent Runs views do not retain a phantom created child.
@@ -663,7 +663,7 @@ func (m *Manager) start(
 		terminal.State = StateCanceled
 		terminal.Code = "manager_closed"
 		terminal.Time = time.Now().UTC()
-		persistErr := m.appendMirrored(child.Session(), terminal)
+		persistErr := m.appendMirrored(child, terminal)
 		runnerCloseErr := error(nil)
 		if execution.runner != nil {
 			runnerCloseErr = execution.runner.Close(context.WithoutCancel(startCtx))
@@ -1592,7 +1592,7 @@ func (m *Manager) recordChildStart(
 	started.ChildRunID = event.RunID
 	started.Time = event.Time
 
-	if err := m.appendMirrored(child.Session(), started); err != nil {
+	if err := m.appendMirrored(child, started); err != nil {
 		m.failChildObservation(child.Metadata().ID, tracker, err)
 	}
 
@@ -1719,7 +1719,7 @@ func (m *Manager) finishExecution(
 	terminal.Cwd = cwd
 	terminal.WorktreePath = worktreePath
 	terminal.Time = time.Now().UTC()
-	persistErr := m.appendMirrored(child.Session(), terminal)
+	persistErr := m.appendMirrored(child, terminal)
 	runnerCloseErr := error(nil)
 	if execution.runner != nil {
 		runnerCloseErr = execution.runner.Close(context.WithoutCancel(ctx))

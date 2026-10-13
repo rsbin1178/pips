@@ -32,7 +32,9 @@ rebuildable derived state. The research notes and the full layer table live in
         goal/                     # Goal continuation ledger
       archives/<sha256>.archive   # content-addressed compaction archives
       compaction/<checkpoint>.json
-      subagents/<child-id>/meta.json
+      subagents/
+        index.json                # completeness marker for the parent-side child index
+        <child-id>/entry.json     # parent-side child record (the child session is a sibling)
       terminal/<call-id>.log
       search.json                 # derived search document
       session.lock
@@ -54,7 +56,7 @@ original path.
 | Model input | `model/` | audit snapshot of what the model was sent |
 | Derived state | `state/` | rebuildable; never authoritative for conversation content |
 | Content | `archives/`, `compaction/` | content-addressed, digest-verified |
-| Subagents | `subagents/` | link records; the child sessions live in the normal tree |
+| Subagents | `subagents/` | the parent-side child index; one entry per child session, which stays a sibling in the normal tree |
 | Diagnostics | `terminal/` | bounded tool output logs |
 | Search | `search.json` | derived; rebuild with `pips session index rebuild` |
 
@@ -89,6 +91,34 @@ content a checkpoint can reference.
 The workspace group directory and its `workspace.json` remain once a workspace has
 been used: a group is the store's organizational layer, one per workspace, so it
 does not accumulate per launch.
+
+### Parent-side child index
+
+A parent session answers "which child sessions do I own" from its own directory:
+`subagents/index.json` marks the index complete, and `subagents/<child-id>/entry.json`
+is one minimal record per child. The child session itself stays a sibling of its
+parent in the same workspace group, so this is a lookup layer, not a second home
+for the child's metadata — title, counts, model, and identity still come from the
+child's `session.json` and transcript prefix.
+
+The entry records lineage and existence only (`child_session_id`,
+`parent_session_id`, `parent_run_id`, `agent_id`, `agent_kind`, `created_at`), plus
+a lifecycle `state`/`ended_at` cache. Only the lifecycle mirror writes a state, so
+an entry published at creation or backfilled from a scan carries none rather than
+guessing one.
+
+The write order inside a spawn is child session directory, then the parent's entry,
+then the child's own `session.json`: a later failure leaves a detectable entry
+rather than a child nothing short of a full scan could see. Only a completed scan
+writes `index.json`; a spawn never does, and removing any entry removes the marker.
+
+`ListSubagents` reads the index when the marker is present and every entry is
+readable; otherwise it scans the store and rebuilds the index. An entry whose child
+directory is gone, or whose readable record contradicts it, is dropped and removed;
+a child whose record is present but unreadable is excluded while its entry is left
+alone. Both read paths project through the same code, so the indexed result equals
+the scan. The index versions itself in its own files, so `session.json` and the
+store version are unchanged and an older build simply ignores `subagents/`.
 
 ### Durability
 

@@ -40,8 +40,12 @@ const (
 	ArchiveDirName = "archives"
 	// CompactionDirName holds compaction checkpoints.
 	CompactionDirName = "compaction"
-	// SubagentsDirName holds per-subagent link records.
+	// SubagentsDirName holds the parent-side child index.
 	SubagentsDirName = "subagents"
+	// SubagentIndexFileName is the child index's completeness marker.
+	SubagentIndexFileName = "index.json"
+	// ChildIndexEntryFileName is one child's record inside the parent's index.
+	ChildIndexEntryFileName = "entry.json"
 	// TerminalDirName holds bounded tool output logs.
 	TerminalDirName = "terminal"
 
@@ -165,9 +169,24 @@ func (l StoreLayout) CompactionDir(workspacePath, id string) string {
 	return filepath.Join(l.SessionDir(workspacePath, id), CompactionDirName)
 }
 
-// SubagentsDir returns the subagent link directory.
+// SubagentsDir returns the parent-side child index directory.
 func (l StoreLayout) SubagentsDir(workspacePath, id string) string {
 	return filepath.Join(l.SessionDir(workspacePath, id), SubagentsDirName)
+}
+
+// SubagentIndexFile returns the child index's completeness marker path.
+func (l StoreLayout) SubagentIndexFile(workspacePath, id string) string {
+	return filepath.Join(l.SubagentsDir(workspacePath, id), SubagentIndexFileName)
+}
+
+// ChildIndexEntryDir returns the directory of one indexed child.
+func (l StoreLayout) ChildIndexEntryDir(workspacePath, parentID, childID string) string {
+	return filepath.Join(l.SubagentsDir(workspacePath, parentID), childID)
+}
+
+// ChildIndexEntryFile returns the index entry path of one indexed child.
+func (l StoreLayout) ChildIndexEntryFile(workspacePath, parentID, childID string) string {
+	return filepath.Join(l.ChildIndexEntryDir(workspacePath, parentID, childID), ChildIndexEntryFileName)
 }
 
 // TerminalDir returns the tool output log directory.
