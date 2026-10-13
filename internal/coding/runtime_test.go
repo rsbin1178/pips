@@ -55,7 +55,18 @@ func TestConfiguredSubagentOptionsUseConfigAndPreserveExplicitOverrides(t *testi
 	assert.Equal(t, 1, overridden.MaxConcurrent)
 	assert.Equal(t, 1, overridden.MaxDepth)
 	assert.Equal(t, unbounded, overridden.Limits)
-	assert.Equal(t, configured.MaxSpawnedPerRootInteraction, overridden.MaxSpawnedPerRootInteraction)
+	// Phase M: neither admission count is a [subagents] surface, so the
+	// resolved options leave both at zero, which the SDK reads as unlimited.
+	assert.Zero(t, overridden.MaxSpawnedPerRootInteraction)
+	assert.Zero(t, overridden.MaxAutoFollowUps)
+
+	// The SDK switches survive: an embedder that sets one still reaches the
+	// Manager.
+	explicit := configuredSubagentOptions(configured, subagent.ExecutionOptions{
+		MaxSpawnedPerRootInteraction: 5, MaxAutoFollowUps: 2,
+	})
+	assert.Equal(t, 5, explicit.MaxSpawnedPerRootInteraction)
+	assert.Equal(t, 2, explicit.MaxAutoFollowUps)
 	assert.Equal(
 		t,
 		subagent.DefaultLimits(),
@@ -429,6 +440,24 @@ func TestNextNotificationBatchGroupsOneRoot(t *testing.T) {
 	assert.Equal(t, []string{"s-batch-3"}, notificationIDs(
 		runtime.nextNotificationBatch([]subagent.Notification{other}),
 	))
+}
+
+// TestNotificationBatchCapIsUnlimitedByDefault pins Phase M: MaxAutoFollowUps
+// zero means unlimited, so a root is not refused its 5th batch. The reference's
+// auto-wake is a count-free switch.
+func TestNotificationBatchCapIsUnlimitedByDefault(t *testing.T) {
+	t.Parallel()
+
+	model := newRuntimeModel(runtimeTextResponse("unused"))
+	runtime := openTestRuntime(t, model)
+	require.Zero(t, runtime.subagents.MaxAutoFollowUps())
+
+	for batch := range 6 {
+		notification := testAgentNotification(runtime, fmt.Sprintf("s-batch-%d", batch), "root-a")
+		require.True(t, runtime.claimNotificationBatch(
+			"root-a", fmt.Sprintf("text-%d", batch), []subagent.Notification{notification},
+		), "batch %d", batch)
+	}
 }
 
 func TestRuntimeQueuesAgentNotificationIntoMatchingActiveInteraction(t *testing.T) {

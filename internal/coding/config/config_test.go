@@ -196,8 +196,10 @@ func TestValidateSubagentConfig(t *testing.T) {
 	}{
 		{name: "depth", mutate: func(value *config.SubagentConfig) { value.MaxDepth = 4 }},
 		{name: "concurrent", mutate: func(value *config.SubagentConfig) { value.MaxConcurrent = 33 }},
-		{name: "spawned", mutate: func(value *config.SubagentConfig) { value.MaxSpawnedPerRootInteraction = 0 }},
-		{name: "follow ups", mutate: func(value *config.SubagentConfig) { value.MaxAutoFollowUps = 33 }},
+		// Phase M removed max_spawned_per_root_interaction and
+		// max_auto_follow_ups, so max_concurrent is the only remaining
+		// admission budget that rejects zero.
+		{name: "concurrent below minimum", mutate: func(value *config.SubagentConfig) { value.MaxConcurrent = 0 }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

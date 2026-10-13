@@ -123,12 +123,6 @@ func newConfigShowCommand(dependencies Dependencies, flags *rootFlags) *cobra.Co
 				config.FieldSubagentMaxConcurrent: strconv.Itoa(
 					state.config.Config.Subagent.MaxConcurrent,
 				),
-				config.FieldSubagentMaxSpawned: strconv.Itoa(
-					state.config.Config.Subagent.MaxSpawnedPerRootInteraction,
-				),
-				config.FieldSubagentMaxFollowUps: strconv.Itoa(
-					state.config.Config.Subagent.MaxAutoFollowUps,
-				),
 				config.FieldSubagentStructuredResults: strconv.FormatBool(
 					state.config.Config.Subagent.StructuredResults,
 				),

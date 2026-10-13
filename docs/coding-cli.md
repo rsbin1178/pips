@@ -109,9 +109,10 @@ printf 'the documented acceptance checks pass' | pips exec --goal
 
 `--goal-budget` requires `--goal` and a positive integer. The default work limit
 is 25 bounded execution segments, including explicit approval-resume segments;
-it is not 25 individual tool calls. A token budget includes observed work and
-completion-check usage. It is a cooperative limit, not a billing guarantee:
-one provider call can overshoot an allowance before reporting usage.
+it is not 25 individual tool calls. A work segment installs no turn cap, so it
+is bounded only by the goal's token budget. A token budget includes observed
+work and completion-check usage. It is a cooperative limit, not a billing
+guarantee: one provider call can overshoot an allowance before reporting usage.
 
 A worker saying "done" is not sufficient. An independent evaluator reviews
 recorded evidence, and a completion candidate receives a bounded read-only
@@ -596,8 +597,6 @@ user file:
 [subagents]
 max_concurrent = 32
 limit_behavior = "queue"
-max_spawned_per_root_interaction = 8
-max_auto_follow_ups = 4
 max_depth = 1
 structured_results = false
 
@@ -612,13 +611,24 @@ explore = "anthropic/claude-sonnet-4-5"
 Every admission value is positive and hard-bounded; invalid or unknown fields
 make configuration validation fail before Runtime open. A partial table changes
 only the named values, and `pips config show` reports each effective value and
-source. A child has no default execution budget: turns, cumulative tokens, Tool
-calls, and wall time are unbounded unless a subagent definition declares
-`limits.max_turns`, which caps the child and reserves finalization turns below
-it. `max_turns`, `max_tokens`, `max_tool_calls`, and `max_duration_minutes` are
-no longer `[subagents]` keys, so delete those four lines from an existing file;
-the strict loader rejects a table that still carries one with a migration error
-that names the key and points at the definition-side `limits.max_turns`.
+source. The reference bounds concurrent children only, so neither the spawn
+count per root interaction nor the auto-follow-up count is a `[subagents]` key:
+delete `max_spawned_per_root_interaction` and `max_auto_follow_ups` from an
+existing file. A child has no default execution budget: turns, cumulative
+tokens, Tool calls, and wall time are unbounded unless a subagent definition
+declares `limits.max_turns`, which caps the child and reserves finalization
+turns below it. `max_turns`, `max_tokens`, `max_tool_calls`, and
+`max_duration_minutes` are no longer `[subagents]` keys either, so delete those
+four lines too. The strict loader rejects a table that still carries any of
+these six removed keys with a migration error that names the key; the four
+execution keys point at the definition-side `limits.max_turns`.
+
+Inside a child, an identical Tool call is nudged (denied with a message) at the
+reference's thresholds: the 4th consecutive identical call when every call in
+the run is read risk, the 8th otherwise. The same run hard-stops the child as
+`no_progress` at 8 (read risk) or 12 (otherwise), and a different call resets
+the run. Neither a main interaction nor a Goal run installs a turn cap: a Goal
+is bounded by its own token budget, exactly as in the reference.
 `limit_behavior` is `queue` (default) or `fail`. At the `max_concurrent` cap a
 `queue` spawn waits in arrival order and `fail` rejects it with the model-facing
 `Concurrent subagent limit reached` message; `max_concurrent` clamps to at least

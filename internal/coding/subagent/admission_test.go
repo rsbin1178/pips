@@ -21,7 +21,7 @@ func TestAdmissionBudgetValidatesBounds(t *testing.T) {
 		maxSpawned    int
 	}{
 		{name: "concurrent above hard limit", maxConcurrent: maximumMaxConcurrent + 1, maxSpawned: 1},
-		{name: "zero spawned", maxConcurrent: 1},
+		{name: "negative spawned", maxConcurrent: 1, maxSpawned: -1},
 		{name: "spawned above hard limit", maxConcurrent: 1, maxSpawned: maximumMaxSpawned + 1},
 	}
 	for _, test := range tests {

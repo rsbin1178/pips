@@ -63,11 +63,17 @@ type Runner interface {
 	Close(context.Context) error
 }
 
+// StopCauseNoProgress is the RunnerResult.StopCause a child runner reports when
+// its own progress guard ended the run. The agent runtime can only report
+// [agent.StopWhen] for it, so the Manager maps this to the no_progress code.
+const StopCauseNoProgress = "no_progress"
+
 // RunnerResult is the validated terminal output returned by a child-owned
 // Runner. Run is retained for standard stop/usage accounting; Value and Text
 // have already passed the exact frozen output contract. Cwd and WorktreePath
 // are the effective child directory the binding resolved, and WorktreePath is
-// empty when the child ran in the parent workspace.
+// empty when the child ran in the parent workspace. StopCause is empty for
+// every ordinary terminal run.
 type RunnerResult struct {
 	Run          *agent.RunResult
 	Value        any
@@ -75,6 +81,7 @@ type RunnerResult struct {
 	ToolCalls    int
 	Cwd          string
 	WorktreePath string
+	StopCause    string
 }
 
 func validateDispatchedPlan(request Request, plan ExecutionPlan, ceiling Limits) error {
@@ -117,6 +124,9 @@ func limitsDoNotExpand(ceiling, candidate Limits) bool {
 		within(ceiling.MaxToolCalls, candidate.MaxToolCalls) &&
 		withinDuration(int64(ceiling.MaxDuration), int64(candidate.MaxDuration)) &&
 		candidate.RepeatedToolCallLimit <= ceiling.RepeatedToolCallLimit &&
+		candidate.RepeatedProblematicToolCallLimit <= ceiling.RepeatedProblematicToolCallLimit &&
+		candidate.RepeatedToolCallStopLimit <= ceiling.RepeatedToolCallStopLimit &&
+		candidate.RepeatedProblematicToolCallStopLimit <= ceiling.RepeatedProblematicToolCallStopLimit &&
 		candidate.MaxActivityTools <= ceiling.MaxActivityTools &&
 		candidate.MaxOutputTokens <= ceiling.MaxOutputTokens &&
 		candidate.MaxTaskBytes <= ceiling.MaxTaskBytes &&

@@ -74,7 +74,6 @@ type AdmissionObserver func(context.Context, AdmissionEvent)
 const (
 	defaultMaxConcurrent = 32
 	maximumMaxConcurrent = 32
-	defaultMaxSpawned    = 8
 	maximumMaxSpawned    = 128
 	// DefaultForegroundBudget bounds how long a foreground queued spawn waits
 	// before it is handed off to the background.
@@ -139,7 +138,7 @@ func newAdmissionBudget(maxConcurrent, maxSpawned int, behavior LimitBehavior) (
 	}
 
 	if maxConcurrent > maximumMaxConcurrent ||
-		maxSpawned < 1 || maxSpawned > maximumMaxSpawned {
+		maxSpawned < 0 || maxSpawned > maximumMaxSpawned {
 		return nil, fmt.Errorf("%w: invalid manager concurrency limits", ErrInvalid)
 	}
 
@@ -152,7 +151,9 @@ func newAdmissionBudget(maxConcurrent, maxSpawned int, behavior LimitBehavior) (
 }
 
 // claim reserves the cumulative root budget without taking an active slot. A
-// background spawn claims synchronously and activates later.
+// background spawn claims synchronously and activates later. A zero maxSpawned
+// is unlimited, so the root check and the per-root count are both skipped: the
+// reference bounds concurrency only.
 func (a *admissionBudget) claim(
 	delivery Delivery,
 	root string,
@@ -170,7 +171,10 @@ func (a *admissionBudget) claim(
 	defer a.mu.Unlock()
 
 	permit := &admissionPermit{budget: a}
-	if delivery == DeliveryBackground || countDescendant {
+	if (delivery == DeliveryBackground || countDescendant) && a.maxSpawned > 0 {
+		// An empty root cannot be attributed to a root interaction, so a
+		// counted spawn without one is refused rather than charged to a shared
+		// empty key.
 		if root == "" || a.spawned[root] >= a.maxSpawned {
 			return nil, ErrSpawnLimit
 		}

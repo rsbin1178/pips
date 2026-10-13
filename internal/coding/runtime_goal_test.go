@@ -348,6 +348,35 @@ func TestRuntimeGoalDoesNotStartWork26(t *testing.T) {
 	assert.Len(t, model.Requests(), 50)
 }
 
+// TestRuntimeGoalWorkRunsWithoutATurnCap pins Phase M: a goal work interaction
+// installs no turn cap, so it is bounded only by the goal's token budget, as in
+// the reference. With the old goalWorkMaxTurns = 16 the run stopped at turn 16
+// and never sent its final answer.
+func TestRuntimeGoalWorkRunsWithoutATurnCap(t *testing.T) {
+	t.Parallel()
+
+	const workTurns = 18
+	model := newGoalTestModel()
+	for turn := range workTurns - 1 {
+		model.responses = append(model.responses, runtimeToolResponse(
+			fmt.Sprintf("proof-read-%d", turn), "read", `{"path":"proof.txt"}`,
+		))
+	}
+	model.responses = append(model.responses, runtimeTextResponse("candidate complete"))
+	model.outcomes = []string{"complete"}
+	runtime := openTestRuntime(t, model)
+	require.NoError(t, os.WriteFile(
+		filepath.Join(runtime.workspace.Root(), "proof.txt"), []byte("actual implementation\n"), 0o600,
+	))
+
+	_, err := collectRuntimeResult(runtime.StartGoal(t.Context(), GoalRequest{Condition: "inspect proof.txt"}))
+	require.NoError(t, err)
+
+	// Every work turn ran, including the final answer past the old 16th turn.
+	assert.Len(t, model.Requests(), workTurns)
+	require.True(t, runtime.GoalSnapshot().Completed(), "%+v", runtime.GoalSnapshot())
+}
+
 func TestRuntimeGoalPauseDuringAssessmentStartsNoAdditionalWork(t *testing.T) {
 	t.Parallel()
 	model := newGoalTestModel(runtimeTextResponse("candidate"))

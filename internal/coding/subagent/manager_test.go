@@ -626,6 +626,53 @@ func TestManagerObservesSpawnLimitAndClosedRejections(t *testing.T) {
 	assert.Equal(t, AdmissionReasonClosed, events[2].Reason)
 }
 
+// TestManagerSpawnsBeyondTheOldPerRootDefault pins Phase M: the per-root spawn
+// count is unlimited by default, so one root spawns far more than the old
+// built-in default of 8. An explicit positive cap still refuses.
+func TestManagerSpawnsBeyondTheOldPerRootDefault(t *testing.T) {
+	t.Parallel()
+
+	fixture := newManagerFixture(t, &testModel{})
+	request := Request{
+		AgentID: "explore", Task: "Run.", Delivery: DeliveryBackground,
+		Ownership: Ownership{
+			ParentInteractionID: "root-1", ParentRunID: "parent-run",
+			ParentToolCallID: "parent-call", RootInteractionID: "root-1",
+		},
+	}
+	for index := range 12 {
+		execution, err := fixture.start(t.Context(), request, nil)
+		require.NoError(t, err, "spawn %d", index)
+		_, err = execution.Wait(t.Context())
+		require.NoError(t, err)
+	}
+	_, spawned := fixture.manager.admission.snapshot()
+	assert.Empty(t, spawned, "an unlimited cap keeps no per-root count")
+}
+
+func TestManagerExplicitSpawnCapStillRefuses(t *testing.T) {
+	t.Parallel()
+
+	fixture := newManagerFixtureWithOptions(
+		t, &testModel{}, ExecutionOptions{MaxConcurrent: 1, MaxSpawnedPerRootInteraction: 2},
+	)
+	request := Request{
+		AgentID: "explore", Task: "Run.", Delivery: DeliveryBackground,
+		Ownership: Ownership{
+			ParentInteractionID: "root-1", ParentRunID: "parent-run",
+			ParentToolCallID: "parent-call", RootInteractionID: "root-1",
+		},
+	}
+	for index := range 2 {
+		execution, err := fixture.start(t.Context(), request, nil)
+		require.NoError(t, err, "spawn %d", index)
+		_, err = execution.Wait(t.Context())
+		require.NoError(t, err)
+	}
+	_, err := fixture.start(t.Context(), request, nil)
+	require.ErrorIs(t, err, ErrSpawnLimit)
+}
+
 func TestManagerConcurrentCloseReleasesEveryAdmissionPermit(t *testing.T) {
 	t.Parallel()
 
@@ -1298,4 +1345,51 @@ func TestSpawnToolHandsQueuedForegroundCallerOffToBackground(t *testing.T) {
 	assert.Equal(t, SpawnResultSchema, result.Schema)
 	assert.NotEmpty(t, result.AgentID)
 	assert.Contains(t, partsText(parts), "started in background")
+}
+
+// TestStopCauseFromRunnerMapsTheRepeatStopToNoProgress pins the Phase M
+// classification seam: the child runner can only report [agent.StopWhen], so the
+// repeat guard's own stop cause carries the no_progress code through.
+func TestStopCauseFromRunnerMapsTheRepeatStopToNoProgress(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, runStopNoProgress, stopCauseFromRunner(StopCauseNoProgress))
+	assert.Equal(t, runStopNone, stopCauseFromRunner(""))
+	assert.Equal(t, runStopNone, stopCauseFromRunner("something-else"))
+}
+
+// TestManagerRejectsAnAutoFollowUpBoundAboveTheHardLimit pins the validation that
+// survives Phase M: zero is unlimited, but an explicit bound stays bounded.
+func TestManagerRejectsAnAutoFollowUpBoundAboveTheHardLimit(t *testing.T) {
+	t.Parallel()
+
+	root := filepath.Join(t.TempDir(), "workspace")
+	require.NoError(t, os.Mkdir(root, 0o700))
+	value, err := workspace.Open(root)
+	require.NoError(t, err)
+	tree, err := workspace.OpenTree(value)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, tree.Close()) })
+	repository, err := session.NewRepository(filepath.Join(t.TempDir(), "sessions"))
+	require.NoError(t, err)
+	parent, err := repository.Create(t.Context(), session.CreateOptions{
+		WorkspaceID: value.Identity().Key(), WorkspacePath: value.Root(),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, parent.Close()) })
+	config := Config{Repository: repository, Parent: parent, Tree: tree, Model: &testModel{}}
+
+	manager, err := New(config)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		require.NoError(t, manager.Close(ctx))
+	})
+	assert.Zero(t, manager.MaxAutoFollowUps(), "zero is unlimited")
+
+	config.Options = ExecutionOptions{MaxAutoFollowUps: 33}
+	_, err = New(config)
+	require.ErrorIs(t, err, ErrInvalid)
 }

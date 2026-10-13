@@ -67,34 +67,43 @@ type record struct {
 }
 
 type recordLimits struct {
-	MaxTurns              int   `json:"max_turns"`
-	FinalizationTurns     int   `json:"finalization_turns,omitempty"`
-	RepeatedToolCallLimit int   `json:"repeated_tool_call_limit,omitempty"`
-	MaxTokens             int   `json:"max_tokens"`
-	MaxToolCalls          int   `json:"max_tool_calls"`
-	MaxDurationNanos      int64 `json:"max_duration_nanos"`
-	MaxActivityTools      int   `json:"max_activity_tools,omitempty"`
-	MaxOutputTokens       int   `json:"max_output_tokens"`
-	MaxTaskBytes          int   `json:"max_task_bytes"`
-	MaxResultBytes        int   `json:"max_result_bytes"`
-	MaxResultItems        int   `json:"max_result_items"`
-	MaxFieldBytes         int   `json:"max_field_bytes"`
+	MaxTurns              int `json:"max_turns"`
+	FinalizationTurns     int `json:"finalization_turns,omitempty"`
+	RepeatedToolCallLimit int `json:"repeated_tool_call_limit,omitempty"`
+	// The three reference-aligned repeat thresholds are additive and omitempty:
+	// a record written before them still decodes, and normalizeLimits fills the
+	// inherited defaults for the missing values.
+	RepeatedProblematicToolCallLimit     int   `json:"repeated_problematic_tool_call_limit,omitempty"`
+	RepeatedToolCallStopLimit            int   `json:"repeated_tool_call_stop_limit,omitempty"`
+	RepeatedProblematicToolCallStopLimit int   `json:"repeated_problematic_tool_call_stop_limit,omitempty"`
+	MaxTokens                            int   `json:"max_tokens"`
+	MaxToolCalls                         int   `json:"max_tool_calls"`
+	MaxDurationNanos                     int64 `json:"max_duration_nanos"`
+	MaxActivityTools                     int   `json:"max_activity_tools,omitempty"`
+	MaxOutputTokens                      int   `json:"max_output_tokens"`
+	MaxTaskBytes                         int   `json:"max_task_bytes"`
+	MaxResultBytes                       int   `json:"max_result_bytes"`
+	MaxResultItems                       int   `json:"max_result_items"`
+	MaxFieldBytes                        int   `json:"max_field_bytes"`
 }
 
 func journalLimits(value Limits) recordLimits {
 	return recordLimits{
-		MaxTurns:              value.MaxTurns,
-		FinalizationTurns:     value.FinalizationTurns,
-		RepeatedToolCallLimit: value.RepeatedToolCallLimit,
-		MaxTokens:             value.MaxTokens,
-		MaxToolCalls:          value.MaxToolCalls,
-		MaxDurationNanos:      int64(value.MaxDuration),
-		MaxActivityTools:      value.MaxActivityTools,
-		MaxOutputTokens:       value.MaxOutputTokens,
-		MaxTaskBytes:          value.MaxTaskBytes,
-		MaxResultBytes:        value.MaxResultBytes,
-		MaxResultItems:        value.MaxResultItems,
-		MaxFieldBytes:         value.MaxFieldBytes,
+		MaxTurns:                             value.MaxTurns,
+		FinalizationTurns:                    value.FinalizationTurns,
+		RepeatedToolCallLimit:                value.RepeatedToolCallLimit,
+		RepeatedProblematicToolCallLimit:     value.RepeatedProblematicToolCallLimit,
+		RepeatedToolCallStopLimit:            value.RepeatedToolCallStopLimit,
+		RepeatedProblematicToolCallStopLimit: value.RepeatedProblematicToolCallStopLimit,
+		MaxTokens:                            value.MaxTokens,
+		MaxToolCalls:                         value.MaxToolCalls,
+		MaxDurationNanos:                     int64(value.MaxDuration),
+		MaxActivityTools:                     value.MaxActivityTools,
+		MaxOutputTokens:                      value.MaxOutputTokens,
+		MaxTaskBytes:                         value.MaxTaskBytes,
+		MaxResultBytes:                       value.MaxResultBytes,
+		MaxResultItems:                       value.MaxResultItems,
+		MaxFieldBytes:                        value.MaxFieldBytes,
 	}
 }
 
@@ -104,18 +113,21 @@ func (l recordLimits) validate() error {
 
 func (l recordLimits) limits() Limits {
 	return Limits{
-		MaxTurns:              l.MaxTurns,
-		FinalizationTurns:     l.FinalizationTurns,
-		RepeatedToolCallLimit: l.RepeatedToolCallLimit,
-		MaxTokens:             l.MaxTokens,
-		MaxToolCalls:          l.MaxToolCalls,
-		MaxDuration:           time.Duration(l.MaxDurationNanos),
-		MaxActivityTools:      l.MaxActivityTools,
-		MaxOutputTokens:       l.MaxOutputTokens,
-		MaxTaskBytes:          l.MaxTaskBytes,
-		MaxResultBytes:        l.MaxResultBytes,
-		MaxResultItems:        l.MaxResultItems,
-		MaxFieldBytes:         l.MaxFieldBytes,
+		MaxTurns:                             l.MaxTurns,
+		FinalizationTurns:                    l.FinalizationTurns,
+		RepeatedToolCallLimit:                l.RepeatedToolCallLimit,
+		RepeatedProblematicToolCallLimit:     l.RepeatedProblematicToolCallLimit,
+		RepeatedToolCallStopLimit:            l.RepeatedToolCallStopLimit,
+		RepeatedProblematicToolCallStopLimit: l.RepeatedProblematicToolCallStopLimit,
+		MaxTokens:                            l.MaxTokens,
+		MaxToolCalls:                         l.MaxToolCalls,
+		MaxDuration:                          time.Duration(l.MaxDurationNanos),
+		MaxActivityTools:                     l.MaxActivityTools,
+		MaxOutputTokens:                      l.MaxOutputTokens,
+		MaxTaskBytes:                         l.MaxTaskBytes,
+		MaxResultBytes:                       l.MaxResultBytes,
+		MaxResultItems:                       l.MaxResultItems,
+		MaxFieldBytes:                        l.MaxFieldBytes,
 	}
 }
 
@@ -303,6 +315,9 @@ func normalizeRecord(value record, allowCurrentCompatibility bool) (record, erro
 		}
 		value.Plan = legacyExecutionPlan(value)
 	}
+	// A record written before a Limits field existed omits it from the plan as
+	// well as from the record limits; normalize the plan so the two still agree.
+	value.Plan.Limits = normalizeLimits(value.Plan.Limits)
 
 	return value, nil
 }

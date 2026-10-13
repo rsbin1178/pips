@@ -44,8 +44,6 @@ const (
 	FieldActiveAgentMessages   Field = "active_agent_messages"
 	FieldSubagentMaxDepth      Field = "subagents.max_depth"
 	FieldSubagentMaxConcurrent Field = "subagents.max_concurrent"
-	FieldSubagentMaxSpawned    Field = "subagents.max_spawned_per_root_interaction"
-	FieldSubagentMaxFollowUps  Field = "subagents.max_auto_follow_ups"
 	// FieldSubagentStructuredResults restores the typed JSON result contract
 	// for builtin agents. It defaults to false: a builtin agent returns its
 	// final text.
@@ -86,8 +84,6 @@ var fields = []Field{
 	FieldActiveAgentMessages,
 	FieldSubagentMaxDepth,
 	FieldSubagentMaxConcurrent,
-	FieldSubagentMaxSpawned,
-	FieldSubagentMaxFollowUps,
 	FieldSubagentStructuredResults,
 	FieldSubagentLimitBehavior,
 	FieldSubagentModels,
@@ -580,16 +576,15 @@ func DefaultCompactionConfig() CompactionConfig {
 
 // SubagentConfig contains the user-configurable production admission budgets,
 // parsed from the `[subagents]` table. MaxDepth defaults to one: a child may not
-// spawn another child. Zero is invalid for every other TOML field. A child's
-// execution is unbounded by default — the reference has no per-child execution
-// budget — and only a subagent definition's `limits` may cap it. The complete
-// programmatic zero value remains a legacy embedding boundary and is normalized
-// by Runtime.
+// spawn another child. Zero is invalid for max_concurrent. A child's execution
+// is unbounded by default — the reference has no per-child execution budget —
+// and only a subagent definition's `limits` may cap it. The reference bounds no
+// spawn count per root and no auto-follow-up count either, so neither is a
+// configuration surface. The complete programmatic zero value remains a legacy
+// embedding boundary and is normalized by Runtime.
 type SubagentConfig struct {
-	MaxDepth                     int
-	MaxConcurrent                int
-	MaxSpawnedPerRootInteraction int
-	MaxAutoFollowUps             int
+	MaxDepth      int
+	MaxConcurrent int
 	// StructuredResults restores the typed JSON result contract for builtin
 	// agents. The default is a free-text summary.
 	StructuredResults bool
@@ -618,8 +613,7 @@ func (c SubagentConfig) IsZero() bool {
 }
 
 func (c SubagentConfig) admissionZero() bool {
-	return c.MaxDepth == 0 && c.MaxConcurrent == 0 && c.MaxSpawnedPerRootInteraction == 0 &&
-		c.MaxAutoFollowUps == 0
+	return c.MaxDepth == 0 && c.MaxConcurrent == 0
 }
 
 func (c SubagentConfig) presetsEmpty() bool {
@@ -644,12 +638,10 @@ func (c SubagentConfig) TypeEnabled(name string) bool {
 // execution carries no default budget; only a definition's `limits` caps it.
 func DefaultSubagentConfig() SubagentConfig {
 	return SubagentConfig{
-		MaxDepth:                     1,
-		MaxConcurrent:                32,
-		MaxSpawnedPerRootInteraction: 8,
-		MaxAutoFollowUps:             4,
-		StructuredResults:            false,
-		LimitBehavior:                LimitBehaviorQueue,
+		MaxDepth:          1,
+		MaxConcurrent:     32,
+		StructuredResults: false,
+		LimitBehavior:     LimitBehaviorQueue,
 	}
 }
 
@@ -1003,8 +995,6 @@ func validateSubagent(value SubagentConfig) error {
 	}{
 		{"max_depth", value.MaxDepth, 0, 3},
 		{"max_concurrent", value.MaxConcurrent, 1, 32},
-		{"max_spawned_per_root_interaction", value.MaxSpawnedPerRootInteraction, 1, 128},
-		{"max_auto_follow_ups", value.MaxAutoFollowUps, 1, 32},
 	}
 	for _, item := range values {
 		if item.value < item.minimum || item.value > item.maximum {

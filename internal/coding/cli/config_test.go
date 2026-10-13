@@ -97,13 +97,16 @@ model = "anthropic/project-model"
 	assert.Contains(t, output, `sandbox_workspace_write.network = "allow" # source=config_file detail="`)
 	assert.NotContains(t, output, "model_max_output_tokens")
 	assert.NotContains(t, output, "project-model")
-	// Phase L removed the four per-child execution keys from the table, so
-	// `config show` must not report a row for any of them.
+	// Phase L and Phase M removed the per-child execution keys and the two
+	// admission caps from the table, so `config show` must not report a row for
+	// any of them.
 	for _, removed := range []string{
 		"subagents.max_turns",
 		"subagents.max_tokens",
 		"subagents.max_tool_calls",
 		"subagents.max_duration_minutes",
+		"subagents.max_spawned_per_root_interaction",
+		"subagents.max_auto_follow_ups",
 	} {
 		assert.NotContains(t, output, removed)
 	}

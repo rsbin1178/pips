@@ -356,21 +356,17 @@ func TestLoadSubagentBudgetsAndFieldProvenance(t *testing.T) {
 	writeFile(t, path, `[subagents]
 max_depth = 2
 max_concurrent = 6
-max_spawned_per_root_interaction = 12
-max_auto_follow_ups = 5
 `)
 	result, err := config.Load(config.LoadOptions{ConfigFile: path})
 	require.NoError(t, err)
 	assert.Equal(t, config.SubagentConfig{
 		MaxDepth:      2,
-		MaxConcurrent: 6, MaxSpawnedPerRootInteraction: 12, MaxAutoFollowUps: 5,
+		MaxConcurrent: 6,
 		LimitBehavior: config.LimitBehaviorQueue,
 	}, result.Config.Subagent)
 	for _, field := range []config.Field{
 		config.FieldSubagentMaxDepth,
 		config.FieldSubagentMaxConcurrent,
-		config.FieldSubagentMaxSpawned,
-		config.FieldSubagentMaxFollowUps,
 	} {
 		source, ok := result.Config.Source(field)
 		require.True(t, ok)
@@ -379,14 +375,18 @@ max_auto_follow_ups = 5
 	}
 }
 
-// TestLoadSubagentRemovedExecutionKeysFailWithMigration pins the Phase L
-// migration: the four per-child execution keys no longer exist, so a file that
-// still carries one is named explicitly instead of loading or failing as a
-// generic unknown field.
-func TestLoadSubagentRemovedExecutionKeysFailWithMigration(t *testing.T) {
+// TestLoadSubagentRemovedKeysFailWithMigration pins the Phase L and Phase M
+// migrations: the per-child execution keys and the two admission keys no longer
+// exist, so a file that still carries one is named explicitly instead of
+// loading or failing as a generic unknown field.
+func TestLoadSubagentRemovedKeysFailWithMigration(t *testing.T) {
 	t.Parallel()
 
-	for _, key := range []string{"max_turns", "max_tokens", "max_tool_calls", "max_duration_minutes"} {
+	removed := []string{
+		"max_turns", "max_tokens", "max_tool_calls", "max_duration_minutes",
+		"max_spawned_per_root_interaction", "max_auto_follow_ups",
+	}
+	for _, key := range removed {
 		t.Run(key, func(t *testing.T) {
 			t.Parallel()
 			path := filepath.Join(t.TempDir(), "config.toml")
@@ -402,15 +402,15 @@ func TestLoadSubagentPartialTableRetainsDefaultFieldSources(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "config.toml")
-	writeFile(t, path, "[subagents]\nmax_concurrent = 2\n")
+	writeFile(t, path, "[subagents]\nmax_depth = 2\n")
 	result, err := config.Load(config.LoadOptions{ConfigFile: path})
 	require.NoError(t, err)
-	assert.Equal(t, 2, result.Config.Subagent.MaxConcurrent)
-	assert.Equal(t, config.DefaultSubagentConfig().MaxAutoFollowUps, result.Config.Subagent.MaxAutoFollowUps)
-	source, ok := result.Config.Source(config.FieldSubagentMaxConcurrent)
+	assert.Equal(t, 2, result.Config.Subagent.MaxDepth)
+	assert.Equal(t, config.DefaultSubagentConfig().MaxConcurrent, result.Config.Subagent.MaxConcurrent)
+	source, ok := result.Config.Source(config.FieldSubagentMaxDepth)
 	require.True(t, ok)
 	assert.Equal(t, config.SourceConfigFile, source.Kind)
-	source, ok = result.Config.Source(config.FieldSubagentMaxFollowUps)
+	source, ok = result.Config.Source(config.FieldSubagentMaxConcurrent)
 	require.True(t, ok)
 	assert.Equal(t, config.SourceDefault, source.Kind)
 }

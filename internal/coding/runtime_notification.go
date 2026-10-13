@@ -532,7 +532,10 @@ func (r *Runtime) nextNotificationBatch(
 		}
 		if rootID == "" {
 			rootID = notification.Ownership.RootInteractionID
-			if r.notificationBatches[rootID] >= r.subagents.MaxAutoFollowUps() {
+			// Zero is unlimited: the reference's auto-wake is a count-free
+			// switch, so the batch cap applies only to an explicit bound.
+			if limit := r.subagents.MaxAutoFollowUps(); limit > 0 &&
+				r.notificationBatches[rootID] >= limit {
 				return nil
 			}
 		}
@@ -551,7 +554,8 @@ func (r *Runtime) claimNotificationBatch(
 ) bool {
 	r.notificationMu.Lock()
 	defer r.notificationMu.Unlock()
-	if r.notificationBatches[rootID] >= r.subagents.MaxAutoFollowUps() {
+	if limit := r.subagents.MaxAutoFollowUps(); limit > 0 &&
+		r.notificationBatches[rootID] >= limit {
 		return false
 	}
 	for _, notification := range batch {
