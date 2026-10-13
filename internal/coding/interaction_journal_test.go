@@ -336,6 +336,52 @@ func TestBootstrapStateRecoversOnlyDurablePendingInteraction(t *testing.T) {
 	assert.Equal(t, "interaction_interrupted", interrupted.State.Diagnostics[0].Code)
 }
 
+// TestBootstrapStateReportsOrphanedToolCalls covers the other direction of an
+// interruption: the tail holds calls the journal cannot resume because the
+// terminal record is already written. That is a stopped turn, not corruption,
+// so bootstrap reports it and leaves the session openable.
+func TestBootstrapStateReportsOrphanedToolCalls(t *testing.T) {
+	t.Parallel()
+
+	session, err := harness.NewSession(harness.NewMemoryStore("session-1"))
+	require.NoError(t, err)
+	journal, err := newInteractionJournal(session, func() (string, error) {
+		return "interaction-1", nil
+	})
+	require.NoError(t, err)
+
+	interactionID, err := journal.start()
+	require.NoError(t, err)
+	require.NoError(t, journal.complete(
+		interactionID, InteractionCanceled, "", TokenUsage{}, 0, interactionTally{},
+	))
+
+	_, err = session.AppendMessage(ai.Assistant(
+		ai.ToolCallPart{ID: "call-1", Name: "shell", Args: ai.JSON(`{}`)},
+	), nil)
+	require.NoError(t, err)
+
+	result, err := BootstrapState(BootstrapOptions{
+		SessionID: "session-1", Path: session.Path(), HasPendingToolCalls: true,
+		PlanMode: planmode.StateInactive,
+	})
+	require.NoError(t, err)
+	assert.True(t, result.OrphanedToolCalls)
+	assert.Equal(t, PhaseIdle, result.State.Phase)
+	assert.Empty(t, result.Recovery.PendingID)
+	require.Len(t, result.State.Diagnostics, 1)
+	assert.Equal(t, "interaction_interrupted", result.State.Diagnostics[0].Code)
+
+	// A consistent tail reports nothing to settle.
+	settled, err := BootstrapState(BootstrapOptions{
+		SessionID: "session-1", Path: session.Path(),
+		PlanMode: planmode.StateInactive,
+	})
+	require.NoError(t, err)
+	assert.False(t, settled.OrphanedToolCalls)
+	assert.Empty(t, settled.State.Diagnostics)
+}
+
 func interactionEntry(t *testing.T, id string, record interactionRecord) harness.Entry {
 	t.Helper()
 

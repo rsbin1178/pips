@@ -669,7 +669,7 @@ func openRuntime(
 	if err != nil {
 		return nil, err
 	}
-	bootstrap, err := BootstrapState(BootstrapOptions{
+	bootstrapOptions := BootstrapOptions{
 		SessionID:           handle.Metadata().ID,
 		Provider:            resolved.Ref.Provider,
 		ModelID:             resolved.Ref.Model,
@@ -678,10 +678,33 @@ func openRuntime(
 		Path:                runtime.session.Path(),
 		HasPendingToolCalls: len(pending) > 0,
 		Tree:                treeSnapshot,
-	})
+	}
+	bootstrap, err := BootstrapState(bootstrapOptions)
 	if err != nil {
 		return nil, err
 	}
+	if bootstrap.OrphanedToolCalls {
+		// The previous stop left tool calls the journal cannot resume, so the
+		// Agent would refuse every later prompt. Answer them, then re-derive
+		// state over the settled tail so the transcript carries the results.
+		if _, settleErr := runtime.session.SettleDanglingToolCalls(
+			harness.DanglingToolCallInterrupted,
+		); settleErr != nil {
+			return nil, fmt.Errorf("coding runtime: settle interrupted tool calls: %w", settleErr)
+		}
+
+		interrupted := bootstrap.State.Diagnostics
+		bootstrapOptions.HasPendingToolCalls = false
+		bootstrapOptions.Path = runtime.session.Path()
+
+		bootstrap, err = BootstrapState(bootstrapOptions)
+		if err != nil {
+			return nil, err
+		}
+
+		bootstrap.State.Diagnostics = append(interrupted, bootstrap.State.Diagnostics...)
+	}
+
 	runtime.state = bootstrap.State
 	runtime.recovery = bootstrap.Recovery
 	runtime.publisher = newEventPublisher(runtime)
