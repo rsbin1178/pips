@@ -955,11 +955,6 @@ func configuredSubagentOptions(
 		configured = config.DefaultSubagentConfig()
 	}
 	limits := subagent.DefaultLimits()
-	limits.MaxTurns = configured.MaxTurns
-	limits.FinalizationTurns = min(2, configured.MaxTurns-1)
-	limits.MaxTokens = configured.MaxTokens
-	limits.MaxToolCalls = configured.MaxToolCalls
-	limits.MaxDuration = time.Duration(configured.MaxDurationMinutes) * time.Minute
 	result := subagent.ExecutionOptions{
 		Limits:                       limits,
 		MaxDepth:                     configured.MaxDepth,

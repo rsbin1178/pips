@@ -28,8 +28,6 @@ const (
 	agentDraftAgentName             = "coding/agent-draft-proposal"
 	agentDraftMaxIntentBytes        = 16 << 10
 	agentDraftMaxCount              = 32
-	agentDraftAgentMaxTurns         = 4
-	agentDraftAgentMaxTokens        = 64_000
 	agentDraftAgentMaxOutputTokens  = 32_768
 	agentDraftOpaqueIDBytes         = 16
 	agentDraftDefinitionDescription = "Submit exactly one strict non-executable pips.agent/v1alpha1 Markdown proposal."
@@ -411,8 +409,11 @@ func (r *Runtime) runAgentDraftProposal(
 		harness.WithTools(collector),
 		harness.WithAgentOptions(
 			agent.WithName(agentDraftAgentName),
-			agent.WithMaxTurns(agentDraftAgentMaxTurns),
-			agent.WithMaxTokens(agentDraftAgentMaxTokens),
+			// No turn or cumulative-token budget: this internal Agent is bounded
+			// by its per-request output cap and its stop-when contract, matching
+			// the reference's single-shot structured calls.
+			agent.WithMaxTurns(0),
+			agent.WithMaxTokens(0),
 			streamRecoveryOption(r.resolved.StreamContinuation, r.resolved.StreamIdleTimeout),
 			agent.WithParallelTools(1),
 			agent.WithToolTimeout(r.opts.ToolTimeout),

@@ -425,3 +425,28 @@ func readDirectoryNames(directory string) ([]string, error) {
 
 	return names, nil
 }
+
+// TestTeamProposalRequestPolicyClampsTheOutputBudget pins the internal proposal
+// Agent's only request bound after Phase L removed its turn and cumulative-token
+// budgets: the per-request output clamp still wins over the Runtime request
+// policy, and a smaller requested cap is left alone.
+func TestTeamProposalRequestPolicyClampsTheOutputBudget(t *testing.T) {
+	t.Parallel()
+
+	runtime := &Runtime{requestPolicy: func(request *ai.Request) {
+		request.MaxTokens = ai.Ptr(1_000_000)
+	}}
+
+	over := ai.Request{ResponseFormat: &ai.ResponseFormat{Name: "proposal"}}
+	runtime.teamProposalRequestPolicy(&over)
+	require.NotNil(t, over.MaxTokens)
+	assert.Equal(t, teamProposalAgentMaxOutputTokens, *over.MaxTokens)
+	assert.Nil(t, over.ResponseFormat, "the proposal Agent never requests structured output")
+
+	// A request already below the clamp keeps its own bound. The Runtime policy
+	// runs first, so this case uses a Runtime without one.
+	under := ai.Request{MaxTokens: ai.Ptr(512)}
+	(&Runtime{}).teamProposalRequestPolicy(&under)
+	require.NotNil(t, under.MaxTokens)
+	assert.Equal(t, 512, *under.MaxTokens)
+}

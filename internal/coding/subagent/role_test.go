@@ -117,25 +117,26 @@ func TestLimitsRejectUnsafeOverrides(t *testing.T) {
 	require.ErrorIs(t, validateLimits(limits), ErrInvalid)
 }
 
-func TestProductionLimitsBoundExecutionWithoutChangingEmbedderDefaults(t *testing.T) {
+// TestDefaultLimitsAreUnlimitedAndGuarded pins the Phase L default policy: the
+// package default caps no execution, and only the payload and live-projection
+// guards are positive.
+func TestDefaultLimitsAreUnlimitedAndGuarded(t *testing.T) {
 	t.Parallel()
 
-	embedder := DefaultLimits()
-	assert.Zero(t, embedder.MaxTurns)
-	assert.Zero(t, embedder.MaxTokens)
-	assert.Zero(t, embedder.MaxToolCalls)
-	assert.Zero(t, embedder.MaxDuration)
-	require.NoError(t, validateLimits(embedder))
-
-	production := ProductionLimits()
-	assert.Positive(t, production.MaxTurns)
-	assert.Positive(t, production.FinalizationTurns)
-	assert.Positive(t, production.MaxTokens)
-	assert.Positive(t, production.MaxToolCalls)
-	assert.Positive(t, production.MaxDuration)
-	assert.Equal(t, embedder.MaxOutputTokens, production.MaxOutputTokens)
-	assert.Equal(t, embedder.MaxResultBytes, production.MaxResultBytes)
-	require.NoError(t, validateLimits(production))
+	limits := DefaultLimits()
+	assert.Zero(t, limits.MaxTurns)
+	assert.Zero(t, limits.FinalizationTurns)
+	assert.Zero(t, limits.MaxTokens)
+	assert.Zero(t, limits.MaxToolCalls)
+	assert.Zero(t, limits.MaxDuration)
+	assert.Positive(t, limits.RepeatedToolCallLimit)
+	assert.Positive(t, limits.MaxActivityTools)
+	assert.Positive(t, limits.MaxOutputTokens)
+	assert.Positive(t, limits.MaxTaskBytes)
+	assert.Positive(t, limits.MaxResultBytes)
+	assert.Positive(t, limits.MaxResultItems)
+	assert.Positive(t, limits.MaxFieldBytes)
+	require.NoError(t, validateLimits(limits))
 }
 
 func TestNormalizeLimitsPreservesOlderPolicyRecords(t *testing.T) {

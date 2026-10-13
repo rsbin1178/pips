@@ -21,8 +21,6 @@ import (
 const (
 	teamProposalToolName             = "propose_team"
 	maximumTeamProposalFeedbackBytes = 16 << 10
-	teamProposalAgentMaxTurns        = 12
-	teamProposalAgentMaxTokens       = 96_000
 	teamProposalAgentMaxOutputTokens = 16_384
 	teamProposalAgentCatalogID       = "coding.team.proposal"
 	teamProposalAgentName            = "coding/team-proposal"
@@ -424,8 +422,11 @@ func (r *Runtime) runTeamProposalAgent(
 		harness.WithTools(agentTools...),
 		harness.WithAgentOptions(
 			agent.WithName(teamProposalAgentName),
-			agent.WithMaxTurns(teamProposalAgentMaxTurns),
-			agent.WithMaxTokens(teamProposalAgentMaxTokens),
+			// No turn or cumulative-token budget: this internal Agent is bounded
+			// by its per-request output cap and its stop-when contract, matching
+			// the reference's single-shot structured calls.
+			agent.WithMaxTurns(0),
+			agent.WithMaxTokens(0),
 			streamRecoveryOption(r.resolved.StreamContinuation, r.resolved.StreamIdleTimeout),
 			agent.WithParallelTools(1),
 			agent.WithToolTimeout(r.opts.ToolTimeout),

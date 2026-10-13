@@ -30,7 +30,6 @@ mode = "plan"
 
 [subagents]
 max_concurrent = 6
-max_turns = 80
 structured_results = true
 
 [sandbox_workspace_write]
@@ -82,8 +81,6 @@ model = "anthropic/project-model"
 	assert.Contains(t, output, `resolved.request.logprobs = true`)
 	assert.Contains(t, output, `tool_search = false # source=flag detail="--tool-search"`)
 	assert.Contains(t, output, `subagents.max_concurrent = 6 # source=config_file detail="`)
-	assert.Contains(t, output, `subagents.max_turns = 80 # source=config_file detail="`)
-	assert.Contains(t, output, `subagents.max_tokens = 256000 # source=default detail="built-in"`)
 	assert.Contains(t, output, `subagents.structured_results = true # source=config_file detail="`)
 	assert.Contains(t, output, `subagents.roles = <none> # source=default detail="built-in"`)
 	assert.Contains(t, output, `subagents.personas = <none> # source=default detail="built-in"`)
@@ -100,6 +97,16 @@ model = "anthropic/project-model"
 	assert.Contains(t, output, `sandbox_workspace_write.network = "allow" # source=config_file detail="`)
 	assert.NotContains(t, output, "model_max_output_tokens")
 	assert.NotContains(t, output, "project-model")
+	// Phase L removed the four per-child execution keys from the table, so
+	// `config show` must not report a row for any of them.
+	for _, removed := range []string{
+		"subagents.max_turns",
+		"subagents.max_tokens",
+		"subagents.max_tool_calls",
+		"subagents.max_duration_minutes",
+	} {
+		assert.NotContains(t, output, removed)
+	}
 
 	opened, err := workspace.Open(fixture.workspaceDir)
 	require.NoError(t, err)

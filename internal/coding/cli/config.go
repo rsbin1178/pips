@@ -129,18 +129,6 @@ func newConfigShowCommand(dependencies Dependencies, flags *rootFlags) *cobra.Co
 				config.FieldSubagentMaxFollowUps: strconv.Itoa(
 					state.config.Config.Subagent.MaxAutoFollowUps,
 				),
-				config.FieldSubagentMaxTurns: strconv.Itoa(
-					state.config.Config.Subagent.MaxTurns,
-				),
-				config.FieldSubagentMaxTokens: strconv.Itoa(
-					state.config.Config.Subagent.MaxTokens,
-				),
-				config.FieldSubagentMaxToolCalls: strconv.Itoa(
-					state.config.Config.Subagent.MaxToolCalls,
-				),
-				config.FieldSubagentMaxDuration: strconv.Itoa(
-					state.config.Config.Subagent.MaxDurationMinutes,
-				),
 				config.FieldSubagentStructuredResults: strconv.FormatBool(
 					state.config.Config.Subagent.StructuredResults,
 				),

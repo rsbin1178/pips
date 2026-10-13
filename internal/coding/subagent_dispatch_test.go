@@ -229,7 +229,7 @@ func TestCompileDelegableCapabilitiesRequireFailsClosed(t *testing.T) {
 func TestCompileProfileLimitsOnlyNarrowsCeiling(t *testing.T) {
 	t.Parallel()
 
-	ceiling := subagent.ProductionLimits()
+	ceiling := boundedSubagentLimits()
 
 	tests := []struct {
 		name      string
@@ -284,6 +284,72 @@ func TestCompileProfileLimitsOnlyNarrowsCeiling(t *testing.T) {
 			assert.Equal(t, test.want, got)
 		})
 	}
+}
+
+func boundedSubagentLimits() subagent.Limits {
+	limits := subagent.DefaultLimits()
+	limits.MaxTurns = 64
+	limits.MaxTokens = 256_000
+	limits.MaxToolCalls = 128
+	limits.MaxDuration = 30 * time.Minute
+
+	return limits
+}
+
+// TestRuntimeSubagentLimitsDefaultToUnlimited pins the Phase L default: a zero
+// ExecutionOptions.Limits resolves to the guards-only policy, so a child has no
+// turn, cumulative-token, Tool-call, or wall-clock budget.
+func TestRuntimeSubagentLimitsDefaultToUnlimited(t *testing.T) {
+	t.Parallel()
+
+	limits := runtimeSubagentLimits(subagent.ExecutionOptions{})
+	assert.Zero(t, limits.MaxTurns)
+	assert.Zero(t, limits.MaxTokens)
+	assert.Zero(t, limits.MaxToolCalls)
+	assert.Zero(t, limits.MaxDuration)
+	assert.Zero(t, limits.FinalizationTurns)
+	assert.Equal(t, subagent.DefaultLimits().RepeatedToolCallLimit, limits.RepeatedToolCallLimit)
+	assert.Equal(t, subagent.DefaultLimits().MaxActivityTools, limits.MaxActivityTools)
+	assert.Equal(t, subagent.DefaultLimits().MaxOutputTokens, limits.MaxOutputTokens)
+
+	override := subagent.DefaultLimits()
+	override.MaxTurns = 3
+	assert.Equal(t, 3, runtimeSubagentLimits(subagent.ExecutionOptions{Limits: override}).MaxTurns)
+}
+
+// TestResolveSubagentMaxTurnsDefinitionWinsElseInheritsParent mirrors the
+// reference's subagent_max_turns_definition_wins_else_inherits_parent: the
+// definition's declared cap wins, otherwise the parent's, and zero is uncapped.
+func TestResolveSubagentMaxTurnsDefinitionWinsElseInheritsParent(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, 2, resolveSubagentMaxTurns(2, 5))
+	assert.Equal(t, 5, resolveSubagentMaxTurns(0, 5))
+	assert.Zero(t, resolveSubagentMaxTurns(0, 0))
+
+	// An unbounded ceiling is the default: a definition that declares no cap
+	// leaves the child uncapped, and one that declares a cap sets it.
+	uncapped, err := compileProfileLimits(subagent.DefaultLimits(), agentprofile.ExecutionLimits{})
+	require.NoError(t, err)
+	assert.Zero(t, uncapped.MaxTurns)
+	assert.Zero(t, uncapped.FinalizationTurns)
+
+	defined, err := compileProfileLimits(
+		subagent.DefaultLimits(), agentprofile.ExecutionLimits{MaxTurns: 7},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 7, defined.MaxTurns)
+	assert.Positive(t, defined.FinalizationTurns)
+
+	// A finite parent cap is inherited only when the definition declares none.
+	inherited, err := compileProfileLimits(boundedSubagentLimits(), agentprofile.ExecutionLimits{})
+	require.NoError(t, err)
+	assert.Equal(t, 64, inherited.MaxTurns)
+	downgraded, err := compileProfileLimits(
+		boundedSubagentLimits(), agentprofile.ExecutionLimits{MaxTurns: 7},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 7, downgraded.MaxTurns)
 }
 
 func TestCompilePrivateIntegrationsRequiresExactGenerationBindings(t *testing.T) {

@@ -589,8 +589,8 @@ and custom types alike. Selected-Beta telemetry, staged distribution, rollback
 drill, and GA evidence are defined in the
 [Dynamic Subagent readiness runbook](coding-dynamic-subagents-readiness.md).
 
-Production child admission and execution budgets are configured independently
-in the same selected user file:
+Production child admission is configured independently in the same selected
+user file:
 
 ```toml
 [subagents]
@@ -598,10 +598,6 @@ max_concurrent = 32
 limit_behavior = "queue"
 max_spawned_per_root_interaction = 8
 max_auto_follow_ups = 4
-max_turns = 64
-max_tokens = 256000
-max_tool_calls = 128
-max_duration_minutes = 30
 max_depth = 1
 structured_results = false
 
@@ -613,9 +609,16 @@ explore = false
 explore = "anthropic/claude-sonnet-4-5"
 ```
 
-Every value is positive and hard-bounded; invalid or unknown fields make
-configuration validation fail before Runtime open. A partial table changes only
-the named values, and `pips config show` reports each effective value and source.
+Every admission value is positive and hard-bounded; invalid or unknown fields
+make configuration validation fail before Runtime open. A partial table changes
+only the named values, and `pips config show` reports each effective value and
+source. A child has no default execution budget: turns, cumulative tokens, Tool
+calls, and wall time are unbounded unless a subagent definition declares
+`limits.max_turns`, which caps the child and reserves finalization turns below
+it. `max_turns`, `max_tokens`, `max_tool_calls`, and `max_duration_minutes` are
+no longer `[subagents]` keys, so delete those four lines from an existing file;
+the strict loader rejects a table that still carries one with a migration error
+that names the key and points at the definition-side `limits.max_turns`.
 `limit_behavior` is `queue` (default) or `fail`. At the `max_concurrent` cap a
 `queue` spawn waits in arrival order and `fail` rejects it with the model-facing
 `Concurrent subagent limit reached` message; `max_concurrent` clamps to at least
