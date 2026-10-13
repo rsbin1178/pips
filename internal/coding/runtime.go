@@ -956,13 +956,11 @@ func configuredSubagentOptions(
 	}
 	limits := subagent.DefaultLimits()
 	result := subagent.ExecutionOptions{
-		Limits:                       limits,
-		MaxDepth:                     configured.MaxDepth,
-		MaxConcurrent:                configured.MaxConcurrent,
-		MaxSpawnedPerRootInteraction: configured.MaxSpawnedPerRootInteraction,
-		MaxAutoFollowUps:             configured.MaxAutoFollowUps,
-		LimitBehavior:                subagent.ParseLimitBehavior(configured.LimitBehavior),
-		ForegroundBudget:             subagentForegroundBudget(),
+		Limits:           limits,
+		MaxDepth:         configured.MaxDepth,
+		MaxConcurrent:    configured.MaxConcurrent,
+		LimitBehavior:    subagent.ParseLimitBehavior(configured.LimitBehavior),
+		ForegroundBudget: subagentForegroundBudget(),
 	}
 	if override.Limits != (subagent.Limits{}) {
 		result.Limits = override.Limits
@@ -973,6 +971,9 @@ func configuredSubagentOptions(
 	if override.MaxConcurrent != 0 {
 		result.MaxConcurrent = override.MaxConcurrent
 	}
+	// Neither admission count is a [subagents] surface, so the resolved value is
+	// zero (unlimited) unless the embedder explicitly sets one. The SDK keeps the
+	// switches; the coding agent carries no default.
 	if override.MaxSpawnedPerRootInteraction != 0 {
 		result.MaxSpawnedPerRootInteraction = override.MaxSpawnedPerRootInteraction
 	}

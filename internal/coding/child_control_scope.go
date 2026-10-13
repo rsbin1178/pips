@@ -380,6 +380,7 @@ func newChildControlScope(
 		cancel()
 		return nil, err
 	}
+	scope.guard.risks = childToolRisks(descriptors)
 	scope.changes = newInteractionChangeTracker(factory.inspector, descriptors)
 	policy := catalog.AllowAll(factory.workspace.Identity().Key(), catalog.RiskPrivileged)
 	searchOptions := catalog.ToolSearchOptions{Enabled: scope.plan.ToolSearch}
@@ -1038,6 +1039,7 @@ func (s *childControlScope) finishRun(
 	s.markRunEnded()
 	result.Cwd = s.directoryOverride
 	result.WorktreePath = s.worktreePath
+	result.StopCause = s.guard.stopCause()
 
 	return result, errors.Join(runErr, s.finishChanges(context.WithoutCancel(ctx)))
 }
@@ -1509,11 +1511,19 @@ func (s *childControlScope) Close(ctx context.Context) error {
 }
 
 type childToolGuard struct {
-	mu        sync.Mutex
-	toolCalls int
-	exhausted bool
-	last      [sha256.Size]byte
-	repeats   int
+	mu         sync.Mutex
+	toolCalls  int
+	exhausted  bool
+	noProgress bool
+	last       [sha256.Size]byte
+	repeats    int
+	// problematic reports that every call in the current identical run is
+	// read risk, the reference's ToolKind::Read | ToolKind::Plan tier. A mixed
+	// run falls back to the looser thresholds.
+	problematic bool
+	// risks maps one Tool's wire name to its catalog risk, so the guard can
+	// classify a run without re-reading the child catalog.
+	risks map[string]catalog.Risk
 }
 
 func (g *childToolGuard) before(limits subagent.Limits) func(context.Context, agent.ToolCallInfo) agent.ToolDecision {
@@ -1529,11 +1539,17 @@ func (g *childToolGuard) before(limits subagent.Limits) func(context.Context, ag
 		fingerprint := childToolFingerprint(info.ToolCall)
 		if fingerprint == g.last {
 			g.repeats++
+			g.problematic = g.problematic && g.readRisk(info.Name)
 		} else {
 			g.last = fingerprint
 			g.repeats = 1
+			g.problematic = g.readRisk(info.Name)
 		}
-		if g.repeats >= limits.RepeatedToolCallLimit {
+		nudge, stop := g.thresholds(limits)
+		if g.repeats >= stop {
+			g.noProgress = true
+		}
+		if g.repeats >= nudge {
 			return agent.DenyTool("identical tool call repeated; use existing evidence or choose a different action")
 		}
 
@@ -1541,12 +1557,39 @@ func (g *childToolGuard) before(limits subagent.Limits) func(context.Context, ag
 	}
 }
 
+// thresholds returns the nudge and hard-stop counts for the current run's tier.
+func (g *childToolGuard) thresholds(limits subagent.Limits) (int, int) {
+	if g.problematic {
+		return limits.RepeatedProblematicToolCallLimit, limits.RepeatedProblematicToolCallStopLimit
+	}
+
+	return limits.RepeatedToolCallLimit, limits.RepeatedToolCallStopLimit
+}
+
+func (g *childToolGuard) readRisk(name string) bool {
+	risk, known := g.risks[name]
+
+	return known && risk == catalog.RiskRead
+}
+
 func (g *childToolGuard) stopWhen(_ agent.RunInfo) bool {
 	g.mu.Lock()
-	stop := g.exhausted
+	stop := g.exhausted || g.noProgress
 	g.mu.Unlock()
 
 	return stop
+}
+
+// stopCause names a stop the repeat guard raised, so the Manager can classify
+// it as no_progress rather than an unexpected stop.
+func (g *childToolGuard) stopCause() string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.noProgress {
+		return subagent.StopCauseNoProgress
+	}
+
+	return ""
 }
 
 func (g *childToolGuard) count() int {
@@ -1555,6 +1598,17 @@ func (g *childToolGuard) count() int {
 	g.mu.Unlock()
 
 	return count
+}
+
+// childToolRisks maps each child Tool's wire name to its catalog risk, so the
+// repeat guard can tell a read/plan run from a mixed one.
+func childToolRisks(descriptors []catalog.Descriptor) map[string]catalog.Risk {
+	risks := make(map[string]catalog.Risk, len(descriptors))
+	for _, descriptor := range descriptors {
+		risks[descriptor.Name] = descriptor.Risk
+	}
+
+	return risks
 }
 
 func childToolFingerprint(call agent.ToolCall) [sha256.Size]byte {

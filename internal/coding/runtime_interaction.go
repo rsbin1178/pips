@@ -1033,13 +1033,12 @@ func (r *Runtime) openInteraction(
 	composed.AfterTool = failureGuard.wrapAfterTool(composed.AfterTool)
 	composed = extension.ComposeHooks(composed, extension.Hooks{AfterTool: r.hookAfterTool(emitter)})
 
-	maxTurns := 0
-	if ctx.Value(goalContextKey{}) != nil {
-		maxTurns = goalWorkMaxTurns
-	}
+	// A main interaction installs no turn cap, matching the reference's goal
+	// loop: a goal is bounded by its own token budget (when it carries one) and
+	// its bounded segment count, not by a turn count.
 	agentOptions := append(
 		composed.AgentOptions(),
-		agent.WithMaxTurns(maxTurns),
+		agent.WithMaxTurns(0),
 		streamRecoveryOption(r.resolved.StreamContinuation, r.resolved.StreamIdleTimeout),
 		agent.WithStopWhen(func(info agent.RunInfo) bool {
 			return current.hookStopRequestedNow() || failureGuard.stopWhen(info)

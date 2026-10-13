@@ -41,6 +41,66 @@ func TestRecordLimitsRoundTripUnlimitedDefaultsAndAcceptLegacyOmissions(t *testi
 	assert.Equal(t, DefaultLimits().MaxActivityTools, normalized.MaxActivityTools)
 }
 
+// TestRecordWrittenBeforeTheRepeatStopThresholdsStillDecodes pins the additive
+// journal contract: a record persisted before the stop thresholds existed omits
+// them from both the plan limits and the record limits, and still decodes and
+// validates rather than failing closed on resume.
+func TestRecordWrittenBeforeTheRepeatStopThresholdsStillDecodes(t *testing.T) {
+	t.Parallel()
+
+	for _, nudge := range []int{DefaultLimits().RepeatedToolCallLimit, 16} {
+		created, err := normalizeRecord(record{
+			Schema: recordSchema, State: StateCreated, Role: RoleExplore,
+			ChildSessionID: "child", ParentSessionID: "parent", Model: "openai/test",
+			Limits: journalLimits(DefaultLimits()), TaskPreview: "inspect", Time: time.Now().UTC(),
+		}, true)
+		require.NoError(t, err)
+		created.Limits.RepeatedToolCallLimit = nudge
+		created.Plan.Limits.RepeatedToolCallLimit = nudge
+
+		data, err := json.Marshal(created)
+		require.NoError(t, err)
+
+		decoded, err := decodeRecord(withoutRepeatThresholdFields(t, data))
+		require.NoError(t, err, "nudge %d", nudge)
+		assert.Greater(t, decoded.Plan.Limits.RepeatedToolCallStopLimit, nudge)
+		require.NoError(t, decoded.Limits.validate())
+	}
+}
+
+// withoutRepeatThresholdFields removes the Phase M repeat thresholds from a
+// marshalled record, reproducing what a binary that predates them persisted.
+func withoutRepeatThresholdFields(t *testing.T, data []byte) []byte {
+	t.Helper()
+
+	var document map[string]any
+	require.NoError(t, json.Unmarshal(data, &document))
+	limits, ok := document["limits"].(map[string]any)
+	require.True(t, ok)
+	for _, key := range []string{
+		"repeated_problematic_tool_call_limit",
+		"repeated_tool_call_stop_limit",
+		"repeated_problematic_tool_call_stop_limit",
+	} {
+		delete(limits, key)
+	}
+	plan, ok := document["plan"].(map[string]any)
+	require.True(t, ok)
+	planLimits, ok := plan["limits"].(map[string]any)
+	require.True(t, ok)
+	for _, key := range []string{
+		"RepeatedProblematicToolCallLimit",
+		"RepeatedToolCallStopLimit",
+		"RepeatedProblematicToolCallStopLimit",
+	} {
+		delete(planLimits, key)
+	}
+	stripped, err := json.Marshal(document)
+	require.NoError(t, err)
+
+	return stripped
+}
+
 // TestWakeMarkerIsAdditiveAndImmutable pins the wake marker's durability: an
 // ordinary record omits the field, so every record written before it stays
 // byte-identical, a wake record round-trips it, and a lifecycle cannot flip it.

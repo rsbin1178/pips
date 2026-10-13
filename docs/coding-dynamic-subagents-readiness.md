@@ -147,8 +147,10 @@ operator. A failed drill blocks promotion to the next stage.
 
 Repository-controlled evidence:
 
-- [x] bounded production admission defaults, with each child running under the
-  payload/projection guards only and no shared execution budget;
+- [x] bounded production admission defaults (concurrency and delegation depth
+  only; no per-root spawn count and no auto-follow-up count), with each child
+  running under the payload/projection guards only and no shared execution
+  budget;
 - [x] authority-subset property tests, malicious definition fuzzing, and
   approval/recovery/private-integration red-team coverage;
 - [x] single-level delegation with builtin agent types and capability modes,

@@ -223,17 +223,15 @@ type fileCompaction struct {
 type fileSubagent struct {
 	// Enabled is the `[subagents]` spelling of the master switch. It is merged
 	// with the top-level dynamic_subagents key rather than stacked on it.
-	Enabled                      *bool                      `toml:"enabled"`
-	MaxDepth                     *int                       `toml:"max_depth"`
-	MaxConcurrent                *int                       `toml:"max_concurrent"`
-	MaxSpawnedPerRootInteraction *int                       `toml:"max_spawned_per_root_interaction"`
-	MaxAutoFollowUps             *int                       `toml:"max_auto_follow_ups"`
-	StructuredResults            *bool                      `toml:"structured_results"`
-	LimitBehavior                *string                    `toml:"limit_behavior"`
-	Models                       map[string]string          `toml:"models"`
-	Toggle                       map[string]bool            `toml:"toggle"`
-	Roles                        map[string]SubagentRole    `toml:"roles"`
-	Personas                     map[string]SubagentPersona `toml:"personas"`
+	Enabled           *bool                      `toml:"enabled"`
+	MaxDepth          *int                       `toml:"max_depth"`
+	MaxConcurrent     *int                       `toml:"max_concurrent"`
+	StructuredResults *bool                      `toml:"structured_results"`
+	LimitBehavior     *string                    `toml:"limit_behavior"`
+	Models            map[string]string          `toml:"models"`
+	Toggle            map[string]bool            `toml:"toggle"`
+	Roles             map[string]SubagentRole    `toml:"roles"`
+	Personas          map[string]SubagentPersona `toml:"personas"`
 }
 
 type fileProvider struct {
@@ -496,10 +494,12 @@ func rejectLegacySchema(data []byte) error {
 	return rejectLegacyProviders(providers)
 }
 
-// rejectLegacySubagentBudget names the four removed [subagents] execution keys.
-// A child now runs without a per-child execution budget, so a file that still
-// carries one must not load silently. The strict decoder already rejects the key
-// as unknown; this error says which key to delete and what caps a child instead.
+// rejectLegacySubagentBudget names the removed [subagents] execution and
+// admission keys. A child now runs without a per-child execution budget, and
+// the reference bounds neither the spawn count per root nor the auto-follow-up
+// count, so a file that still carries one must not load silently. The strict
+// decoder already rejects the key as unknown; this error says which key to
+// delete and what caps a child instead.
 func rejectLegacySubagentBudget(raw map[string]any) error {
 	subagents, ok := raw["subagents"].(map[string]any)
 	if !ok {
@@ -512,6 +512,17 @@ func rejectLegacySubagentBudget(raw map[string]any) error {
 
 		return fmt.Errorf(
 			"%w: [subagents] %s was removed; a child runs without a per-child execution budget, and only a subagent definition's limits.max_turns caps its turns",
+			ErrMigration,
+			key,
+		)
+	}
+	for _, key := range []string{"max_spawned_per_root_interaction", "max_auto_follow_ups"} {
+		if _, exists := subagents[key]; !exists {
+			continue
+		}
+
+		return fmt.Errorf(
+			"%w: [subagents] %s was removed; the reference bounds concurrent children only, so delete the line",
 			ErrMigration,
 			key,
 		)
@@ -683,12 +694,6 @@ func decodeLayer(value fileConfig) (fileLayer, error) {
 		}
 		setSubagent(FieldSubagentMaxDepth, value.Subagent.MaxDepth, &subagent.MaxDepth)
 		setSubagent(FieldSubagentMaxConcurrent, value.Subagent.MaxConcurrent, &subagent.MaxConcurrent)
-		setSubagent(
-			FieldSubagentMaxSpawned,
-			value.Subagent.MaxSpawnedPerRootInteraction,
-			&subagent.MaxSpawnedPerRootInteraction,
-		)
-		setSubagent(FieldSubagentMaxFollowUps, value.Subagent.MaxAutoFollowUps, &subagent.MaxAutoFollowUps)
 		if value.Subagent.StructuredResults != nil {
 			subagent.StructuredResults = *value.Subagent.StructuredResults
 			layer.subagentFields = append(layer.subagentFields, FieldSubagentStructuredResults)

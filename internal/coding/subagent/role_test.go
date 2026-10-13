@@ -96,7 +96,22 @@ func TestLimitsRejectUnsafeOverrides(t *testing.T) {
 	limits.FinalizationTurns = 1
 	require.ErrorIs(t, validateLimits(limits), ErrInvalid)
 	limits = DefaultLimits()
-	limits.RepeatedToolCallLimit = 17
+	limits.RepeatedToolCallLimit = maximumRepeatedToolCalls + 1
+	require.ErrorIs(t, validateLimits(limits), ErrInvalid)
+	limits = DefaultLimits()
+	limits.RepeatedProblematicToolCallLimit = maximumRepeatedToolCalls + 1
+	require.ErrorIs(t, validateLimits(limits), ErrInvalid)
+	limits = DefaultLimits()
+	limits.RepeatedToolCallStopLimit = maximumRepeatedToolCalls + 1
+	require.ErrorIs(t, validateLimits(limits), ErrInvalid)
+	limits = DefaultLimits()
+	limits.RepeatedProblematicToolCallStopLimit = maximumRepeatedToolCalls + 1
+	require.ErrorIs(t, validateLimits(limits), ErrInvalid)
+	limits = DefaultLimits()
+	limits.RepeatedToolCallLimit = limits.RepeatedToolCallStopLimit
+	require.ErrorIs(t, validateLimits(limits), ErrInvalid)
+	limits = DefaultLimits()
+	limits.RepeatedProblematicToolCallLimit = limits.RepeatedProblematicToolCallStopLimit
 	require.ErrorIs(t, validateLimits(limits), ErrInvalid)
 	limits = DefaultLimits()
 	limits.MaxActivityTools = 1025
@@ -130,6 +145,9 @@ func TestDefaultLimitsAreUnlimitedAndGuarded(t *testing.T) {
 	assert.Zero(t, limits.MaxToolCalls)
 	assert.Zero(t, limits.MaxDuration)
 	assert.Positive(t, limits.RepeatedToolCallLimit)
+	assert.Positive(t, limits.RepeatedProblematicToolCallLimit)
+	assert.Positive(t, limits.RepeatedToolCallStopLimit)
+	assert.Positive(t, limits.RepeatedProblematicToolCallStopLimit)
 	assert.Positive(t, limits.MaxActivityTools)
 	assert.Positive(t, limits.MaxOutputTokens)
 	assert.Positive(t, limits.MaxTaskBytes)
@@ -157,4 +175,36 @@ func TestNormalizeLimitsPreservesOlderPolicyRecords(t *testing.T) {
 	unlimited := DefaultLimits()
 	unlimited.FinalizationTurns = 0
 	assert.Zero(t, normalizeLimits(unlimited).FinalizationTurns)
+}
+
+// TestLimitsDoNotExpandCoversTheRepeatThresholds pins the authority boundary for
+// the Phase M repeat-guard thresholds: a plan may not raise any of them above the
+// Manager ceiling.
+func TestLimitsDoNotExpandCoversTheRepeatThresholds(t *testing.T) {
+	t.Parallel()
+
+	ceiling := DefaultLimits()
+	assert.True(t, limitsDoNotExpand(ceiling, ceiling))
+
+	for _, test := range []struct {
+		name   string
+		mutate func(*Limits)
+	}{
+		{"nudge", func(value *Limits) { value.RepeatedToolCallLimit = ceiling.RepeatedToolCallLimit + 1 }},
+		{"read nudge", func(value *Limits) {
+			value.RepeatedProblematicToolCallLimit = ceiling.RepeatedProblematicToolCallLimit + 1
+		}},
+		{"stop", func(value *Limits) { value.RepeatedToolCallStopLimit = ceiling.RepeatedToolCallStopLimit + 1 }},
+		{"read stop", func(value *Limits) {
+			value.RepeatedProblematicToolCallStopLimit = ceiling.RepeatedProblematicToolCallStopLimit + 1
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			candidate := DefaultLimits()
+			test.mutate(&candidate)
+			assert.False(t, limitsDoNotExpand(ceiling, candidate))
+		})
+	}
 }

@@ -35,11 +35,17 @@ const (
 // ExecutionOptions provides embedder/test overrides without adding a user
 // configuration protocol in P1. A zero Limits value selects DefaultLimits.
 type ExecutionOptions struct {
-	Limits                       Limits
-	MaxDepth                     int
-	MaxConcurrent                int
+	Limits        Limits
+	MaxDepth      int
+	MaxConcurrent int
+	// MaxSpawnedPerRootInteraction bounds how many children one root
+	// interaction may spawn in total. Zero is unlimited, matching the
+	// reference, which bounds only concurrency.
 	MaxSpawnedPerRootInteraction int
-	MaxAutoFollowUps             int
+	// MaxAutoFollowUps bounds how many notification batches one root may
+	// receive. Zero is unlimited, matching the reference's count-free
+	// auto-wake switch.
+	MaxAutoFollowUps int
 	// LimitBehavior selects queue or fail at the concurrent cap. The empty
 	// value selects queue.
 	LimitBehavior LimitBehavior
@@ -195,14 +201,8 @@ func New(config Config) (*Manager, error) {
 		maxConcurrent = defaultMaxConcurrent
 	}
 	maxSpawned := config.Options.MaxSpawnedPerRootInteraction
-	if maxSpawned == 0 {
-		maxSpawned = defaultMaxSpawned
-	}
 	maxAutoFollowUps := config.Options.MaxAutoFollowUps
-	if maxAutoFollowUps == 0 {
-		maxAutoFollowUps = 4
-	}
-	if maxAutoFollowUps < 1 || maxAutoFollowUps > 32 {
+	if maxAutoFollowUps < 0 || maxAutoFollowUps > 32 {
 		return nil, fmt.Errorf("%w: invalid manager concurrency limits", ErrInvalid)
 	}
 	if config.Options.MaxDepth < 0 || config.Options.MaxDepth > MaxDelegationDepth {
@@ -287,7 +287,8 @@ func inheritManagerConfig(config Config) Config {
 	return config
 }
 
-// MaxAutoFollowUps returns the validated Runtime coordination bound.
+// MaxAutoFollowUps returns the validated Runtime coordination bound. Zero is
+// unlimited, matching the reference's count-free auto-wake switch.
 func (m *Manager) MaxAutoFollowUps() int {
 	if m == nil {
 		return 0
@@ -1206,6 +1207,7 @@ func (m *Manager) run(
 	tracker.toolCalls = output.ToolCalls
 	tracker.cwd = output.Cwd
 	tracker.worktreePath = output.WorktreePath
+	tracker.stopCause = stopCauseFromRunner(output.StopCause)
 	tracker.mu.Unlock()
 	m.finishExecution(
 		ctx,
@@ -1769,6 +1771,17 @@ func (m *Manager) finishExecution(
 	}
 	m.shared.mu.Unlock()
 	close(execution.done)
+}
+
+// stopCauseFromRunner maps a child runner's own stop cause onto the Manager's
+// classification. The repeat guard is the only reporter today, and it ends the
+// run as no_progress.
+func stopCauseFromRunner(cause string) runStopCause {
+	if cause == StopCauseNoProgress {
+		return runStopNoProgress
+	}
+
+	return runStopNone
 }
 
 func (m *Manager) activeExecution(childSessionID string) *Execution {

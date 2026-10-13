@@ -6,7 +6,7 @@ Dynamic Subagent 是 Coding Agent 应用层能力：定义发现/编译、child 
 
 ## 能力与非能力边界
 
-当前可验收：Builtin 前台执行；custom profile 发现/校验、直接调用、model 前台/后台调用；并发/次数/turn/token/tool/duration/depth 上限；精确递归；child 独立审批/问题；配置好的 private MCP/Hook；draft 生成与人工 promotion；role/persona 与 model 优先级；worktree/cwd/resume 隔离与继承；`[subagents]` 配置面与逐类型 toggle；恢复、kill switch 和无内容 Telemetry。
+当前可验收：Builtin 前台执行；custom profile 发现/校验、直接调用、model 前台/后台调用；并发/深度上限、重复调用 guard 与自定义 definition 的 `limits`；精确递归；child 独立审批/问题；配置好的 private MCP/Hook；draft 生成与人工 promotion；role/persona 与 model 优先级；worktree/cwd/resume 隔离与继承；`[subagents]` 配置面与逐类型 toggle；恢复、kill switch 和无内容 Telemetry。
 
 当前没有实现、不得写成能力或验收通过：queue depth、百分比/cohort rollout、第二套 release-stage 配置、本地自动分发参与者、为了准入指标创建的持久化准入事件/占位 Session、`sampling_limit`/`workflow_max_concurrent`、远端 settings 层与 `[features]` 门、`Agent(...)` 形式的 tool allowlist 语法、profile 内 inline MCP/Hook/凭据/命令，以及跨用户共享 draft/草稿协作。Selected Beta/GA 是运营流程，不是另一套 Runtime stage。
 
@@ -94,19 +94,19 @@ Dynamic Subagent 是 Coding Agent 应用层能力：定义发现/编译、child 
 - 来源/测试锚点：[notification.go](../../internal/coding/subagent/notification.go)、[agents_overlay.go](../../internal/coding/tui/agents_overlay.go)、[dynamic_subagent_test.go](../../internal/coding/dynamic_subagent_test.go)。
 - 结果：`未执行`。
 
-## MA-SUB-006：并发、Spawn 与执行预算——queue / fail
+## MA-SUB-006：并发与深度上限——queue / fail
 
 - 分类：本地确定性、默认开启。变更等级：本地持久状态。
 - 前置条件：配置较小但有效的 `[subagents]` limits；scripted model 能保持 child 运行；分别用 `limit_behavior = "queue"` 与 `"fail"` 各跑一轮。
-- 隔离夹具：将 `max_concurrent`、`max_spawned_per_root_interaction`、`max_auto_follow_ups`、turn/token/tool/duration 设为易触发值。
-- 步骤：并发启动直到 capacity；额外再启动；触发 spawn limit、turn/token/tool/duration limit；关闭 Runtime 时仍有 child；运行：
+- 隔离夹具：将 `max_concurrent` 设为易触发值。per-child 的 turn/token/tool/duration 预算、每 root 的 spawn 数与 auto-follow-up 数已不是 `[subagents]` 配置面：`max_turns`/`max_tokens`/`max_tool_calls`/`max_duration_minutes` 与 `max_spawned_per_root_interaction`/`max_auto_follow_ups` 都会被加载器以具名迁移错误拒绝，需要时改用 definition 的 `limits` 或 SDK 选项。
+- 步骤：并发启动直到 capacity；额外再启动；触发 spawn limit 与重复调用 guard 的停止；关闭 Runtime 时仍有 child；运行：
 
   ```bash
   go test ./internal/coding/subagent -run 'Test.*(Admission|Limit|Capacity|Close|Queue)' -count=1 -v
   go test -race ./internal/coding/subagent ./internal/coding -run 'Test.*Dynamic' -count=1
   ```
 
-- 预期证据：foreground 预算在 child 创建前原子保留；`fail` 在 cap 上返回模型可见的 `Concurrent subagent limit reached: {limit} subagents are already running for this session. Do not retry; spawning succeeds again when a running subagent finishes.`；`queue` 按到达顺序排队，slot 释放后启动；background spawn 立即返回 `subagent_id`，其 slot 在 run goroutine 中等待；`max_concurrent` 至少为 1；spawn limit/closed/invalid 仍然同步失败；终态释放 permit 恰一次；`PIPS_SUBAGENT_LIMIT_BEHAVIOR` 覆盖配置，非法值回退 `queue`。
+- 预期证据：foreground 预算在 child 创建前原子保留；`fail` 在 cap 上返回模型可见的 `Concurrent subagent limit reached: {limit} subagents are already running for this session. Do not retry; spawning succeeds again when a running subagent finishes.`；`queue` 按到达顺序排队，slot 释放后启动；background spawn 立即返回 `subagent_id`，其 slot 在 run goroutine 中等待；`max_concurrent` 至少为 1；spawn limit/closed/invalid 仍然同步失败；child 默认没有执行预算，重复调用 guard 按 reference 阈值（读类 4 次 nudge / 8 次停止，其余 8 / 12）在 nudge 时拒绝并在停止阈值结束为 `no_progress`；终态释放 permit 恰一次；`PIPS_SUBAGENT_LIMIT_BEHAVIOR` 覆盖配置，非法值回退 `queue`。
 - 通过条件：所有上限和 race 测试通过；观测到 `queued` outcome 但没有 queue-depth 指标。
 - 失败条件：`fail` 排队、`queue` 丢失请求、permit 泄漏/重复释放、queue-depth 或 task/child 身份进入遥测、或关闭后可新建 child。
 - 清理/回滚：终止 scripted children；恢复 production defaults。
