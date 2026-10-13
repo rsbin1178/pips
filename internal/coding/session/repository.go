@@ -775,6 +775,12 @@ func (r *Repository) ForkSubagent(
 	record.Parent = &ParentRef{SessionID: options.ParentSessionID, RunID: options.ParentRunID}
 	record.Agent = options.Agent
 	record.Subagent = subagentRefFrom(*options.SubagentIdentity)
+	// A resumed child is indexed exactly like a fresh one, and in the same order:
+	// the child's directory exists, then the parent's entry, then the child's own
+	// record.
+	if entry, entryErr := childIndexEntryForRecord(record); entryErr == nil {
+		_ = publishChildIndexEntry(r.layout, source.meta.WorkspacePath, entry)
+	}
 	metaPath := filepath.Join(sessionDir, MetadataFileName)
 	if err := WriteMetadataRecord(metaPath, record); err != nil {
 		return nil, errors.Join(err, lock.Close())
@@ -1065,6 +1071,11 @@ func (r *Repository) Delete(ctx context.Context, id string) (resultErr error) {
 // ListSubagents returns newest-first child metadata for exactly one parent
 // conversation without taking writer locks. The parent's workspace is matched by
 // path or identity, so a volume renumbering does not hide its children.
+//
+// The parent's own index directory answers the read in O(children). An index that
+// is absent, incomplete, or damaged falls back to the store-wide scan and is then
+// rebuilt from what that scan found, so a store whose index cannot be written
+// degrades to the scan — correct, and only slower — instead of failing a listing.
 func (r *Repository) ListSubagents(ctx context.Context, parent Metadata) ([]Metadata, error) {
 	if err := r.validate(); err != nil {
 		return nil, err
@@ -1077,6 +1088,22 @@ func (r *Repository) ListSubagents(ctx context.Context, parent Metadata) ([]Meta
 		return nil, err
 	}
 
+	if metas, indexed := r.indexedSubagents(ctx, parent); indexed {
+		return metas, nil
+	}
+
+	metas, err := r.scanSubagents(ctx, parent)
+	if err != nil {
+		return nil, err
+	}
+	r.backfillChildIndex(ctx, parent, metas)
+
+	return metas, nil
+}
+
+// scanSubagents is the store-wide projection ListSubagents falls back to when no
+// trustworthy index exists.
+func (r *Repository) scanSubagents(ctx context.Context, parent Metadata) ([]Metadata, error) {
 	records, _, err := r.listRecords(ctx)
 	if err != nil && !errors.Is(err, errListCancelled) {
 		return nil, err
@@ -1088,16 +1115,298 @@ func (r *Repository) ListSubagents(ctx context.Context, parent Metadata) ([]Meta
 			metas = append(metas, meta)
 		}
 	}
-
-	slices.SortFunc(metas, func(a, b Metadata) int {
-		if order := b.CreatedAt.Compare(a.CreatedAt); order != 0 {
-			return order
-		}
-
-		return strings.Compare(a.ID, b.ID)
-	})
+	sortMetadata(metas)
 
 	return metas, nil
+}
+
+// childIndexOutcome is how one index entry resolved against the child session it
+// names.
+type childIndexOutcome uint8
+
+const (
+	// childIndexProjected means the entry still describes a real child of this
+	// parent.
+	childIndexProjected childIndexOutcome = iota
+	// childIndexUnreadable means the child directory exists but its record does
+	// not. The child is excluded and the entry is left alone: this is a spawn in
+	// flight or a damaged sidecar, and deleting the entry would race the spawn
+	// that is writing it.
+	childIndexUnreadable
+	// childIndexContradicted means the child's own record disagrees with the
+	// entry, so the entry is dropped and removed.
+	childIndexContradicted
+)
+
+// indexedSubagents lists a parent's children from its own index directory. It
+// reports false when the index cannot be trusted, which makes the caller fall
+// back to the store-wide scan.
+func (r *Repository) indexedSubagents(ctx context.Context, parent Metadata) ([]Metadata, bool) {
+	indexDir := r.layout.SubagentsDir(parent.WorkspacePath, parent.ID)
+	if _, ok := readChildIndexMarker(filepath.Join(indexDir, SubagentIndexFileName)); !ok {
+		return nil, false
+	}
+
+	entries, err := os.ReadDir(indexDir)
+	if err != nil {
+		return nil, false
+	}
+	// The group list is resolved once for the whole read: it is the same for
+	// every child, and re-reading it per child would make the indexed path grow
+	// with the number of workspace groups.
+	groups, err := r.root.Groups()
+	if err != nil {
+		return nil, false
+	}
+
+	metas := make([]Metadata, 0, len(entries))
+	for _, entry := range entries {
+		if ctx.Err() != nil {
+			// A cancelled read returns what it already resolved, exactly as the
+			// store-wide scan does.
+			break
+		}
+		if !entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
+			continue
+		}
+		childID := entry.Name()
+		if validateSessionID(childID) != nil {
+			continue
+		}
+
+		record, readErr := ReadChildIndexEntry(
+			filepath.Join(indexDir, childID, ChildIndexEntryFileName), parent.ID,
+		)
+		if readErr != nil {
+			// One unreadable entry makes the whole index untrusted: the scan can
+			// still derive every child, and the backfill rewrites the index.
+			return nil, false
+		}
+
+		meta, outcome := r.resolveIndexedChild(groups, parent, record)
+		switch outcome {
+		case childIndexProjected:
+			metas = append(metas, meta)
+		case childIndexUnreadable:
+		case childIndexContradicted:
+			removeChildIndexEntry(r.layout, parent.WorkspacePath, parent.ID, record.ChildSessionID)
+		}
+	}
+
+	sortMetadata(metas)
+
+	return metas, true
+}
+
+// resolveIndexedChild resolves one index entry against the child session it
+// names, using the same predicate and projection the store-wide scan uses.
+func (r *Repository) resolveIndexedChild(
+	groups []Group,
+	parent Metadata,
+	entry ChildIndexEntry,
+) (Metadata, childIndexOutcome) {
+	sessionDir, found := resolveChildSessionDir(groups, parent.ID, entry.ChildSessionID)
+	if !found {
+		// The child's session directory is gone, so the entry describes nothing.
+		return Metadata{}, childIndexContradicted
+	}
+
+	record, err := ReadMetadataRecord(filepath.Join(sessionDir, MetadataFileName))
+	if err != nil {
+		return Metadata{}, childIndexUnreadable
+	}
+	if !subagentChildMatches(record, parent) {
+		return Metadata{}, childIndexContradicted
+	}
+
+	meta, ok := projectSubagentChild(record, sessionDir, parent)
+	if !ok {
+		return Metadata{}, childIndexContradicted
+	}
+
+	return meta, childIndexProjected
+}
+
+// resolveChildSessionDir returns the directory holding childID, preferring the
+// group that also holds parentID so a workspace move cannot orphan a child.
+func resolveChildSessionDir(groups []Group, parentID, childID string) (string, bool) {
+	for _, group := range groups {
+		if !hasSessionRecord(filepath.Join(group.Dir, parentID, MetadataFileName)) {
+			continue
+		}
+		if dir, ok := existingSessionDir(group, childID); ok {
+			return dir, true
+		}
+	}
+	for _, group := range groups {
+		if dir, ok := existingSessionDir(group, childID); ok {
+			return dir, true
+		}
+	}
+
+	return "", false
+}
+
+// existingSessionDir reports whether one group holds childID's session directory.
+func existingSessionDir(group Group, childID string) (string, bool) {
+	dir := group.SessionDirOf(childID)
+	info, err := os.Lstat(dir)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return "", false
+	}
+
+	return dir, true
+}
+
+// backfillChildIndex rebuilds one parent's index from a scan result: it adds an
+// entry for every child the scan found and the index does not already carry,
+// removes the entries the scan proved wrong, and publishes the marker last. A
+// failure at any step leaves the marker off, so the parent stays untrusted and
+// the next read re-derives the index instead of trusting an incomplete one.
+func (r *Repository) backfillChildIndex(ctx context.Context, parent Metadata, children []Metadata) {
+	if ctx.Err() != nil {
+		return
+	}
+	if !hasSessionRecord(r.layout.MetadataFile(parent.WorkspacePath, parent.ID)) {
+		return
+	}
+
+	indexDir := r.layout.SubagentsDir(parent.WorkspacePath, parent.ID)
+	existing := readChildIndexEntries(indexDir, parent.ID)
+
+	confirmed := make(map[string]struct{}, len(children))
+	complete := true
+	for _, child := range children {
+		confirmed[child.ID] = struct{}{}
+		if _, ok := existing[child.ID]; ok {
+			continue
+		}
+		entry, entryErr := childIndexEntryForChild(child)
+		if entryErr != nil {
+			complete = false
+
+			continue
+		}
+		if err := writeChildIndexEntry(
+			r.layout.ChildIndexEntryFile(parent.WorkspacePath, parent.ID, child.ID), entry,
+		); err != nil {
+			complete = false
+		}
+	}
+	if !complete {
+		removeChildIndexMarker(r.layout, parent.WorkspacePath, parent.ID)
+
+		return
+	}
+
+	for childID := range existing {
+		if _, ok := confirmed[childID]; ok {
+			continue
+		}
+		if r.childEntryContradicted(parent, childID) {
+			removeChildIndexEntry(r.layout, parent.WorkspacePath, parent.ID, childID)
+		}
+	}
+
+	_ = writeChildIndexMarker(
+		r.layout.SubagentIndexFile(parent.WorkspacePath, parent.ID), time.Now(),
+	)
+}
+
+// childEntryContradicted reports whether an index entry the scan did not confirm
+// is provably wrong: its child directory is gone, or the record inside it
+// disagrees with the entry. An unreadable record proves nothing, so the entry
+// stays for the next read.
+func (r *Repository) childEntryContradicted(parent Metadata, childID string) bool {
+	groups, err := r.root.Groups()
+	if err != nil {
+		return false
+	}
+	sessionDir, found := resolveChildSessionDir(groups, parent.ID, childID)
+	if !found {
+		return true
+	}
+
+	record, err := ReadMetadataRecord(filepath.Join(sessionDir, MetadataFileName))
+	if err != nil {
+		return false
+	}
+
+	return !subagentChildMatches(record, parent)
+}
+
+// readChildIndexEntries returns the readable entries of one index directory,
+// keyed by child session id. An unreadable entry is treated as absent, because
+// the caller rebuilds it from the store.
+func readChildIndexEntries(indexDir, parentID string) map[string]ChildIndexEntry {
+	entries, err := os.ReadDir(indexDir)
+	if err != nil {
+		return nil
+	}
+
+	values := make(map[string]ChildIndexEntry, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
+			continue
+		}
+		childID := entry.Name()
+		if validateSessionID(childID) != nil {
+			continue
+		}
+
+		value, readErr := ReadChildIndexEntry(
+			filepath.Join(indexDir, childID, ChildIndexEntryFileName), parentID,
+		)
+		if readErr != nil {
+			continue
+		}
+		values[childID] = value
+	}
+
+	return values
+}
+
+// UpdateChildIndexState refreshes the parent-side index entry of one child after
+// a lifecycle transition. Like every index write it is best-effort: the child's
+// journal is authoritative, so a missing entry or an unwritable index leaves the
+// caller's lifecycle result unchanged.
+//
+// It is the only writer of an entry's state. An entry published at creation or
+// backfilled from a scan carries none, so a state this build can read always came
+// from a lifecycle transition it observed.
+func (r *Repository) UpdateChildIndexState(
+	child Metadata,
+	state ChildIndexState,
+	at time.Time,
+) error {
+	if err := r.validate(); err != nil {
+		return err
+	}
+	if validateSessionID(child.ID) != nil || validateSessionID(child.ParentSessionID) != nil {
+		return fmt.Errorf("%w: invalid child index owner", ErrInvalid)
+	}
+	if !validChildIndexState(state) {
+		return fmt.Errorf("%w: unknown child index state %q", ErrInvalid, state)
+	}
+
+	path := r.layout.ChildIndexEntryFile(child.WorkspacePath, child.ParentSessionID, child.ID)
+	entry, err := ReadChildIndexEntry(path, child.ParentSessionID)
+	if err != nil {
+		return err
+	}
+
+	endedAt := time.Time{}
+	if state.terminal() {
+		endedAt = at.UTC()
+	}
+	if entry.State == state && entry.EndedAt.Equal(endedAt) {
+		return nil
+	}
+
+	entry.State = state
+	entry.EndedAt = endedAt
+
+	return writeChildIndexEntry(path, entry)
 }
 
 // ListTeamWorkers returns a bounded newest-first projection for exactly one
@@ -1209,19 +1518,32 @@ func newProvisionalHandle(
 	return newHandle(store, sessionDir, workspacePath, workspaceID)
 }
 
-// projectRecord projects one index record into the frontend-safe Metadata.
 // subagentChild projects one stored record into child metadata when it is a
 // child of parent inside parent's workspace.
 func subagentChild(item storedRecord, parent Metadata) (Metadata, bool) {
-	if item.record.Kind != KindSubagent || item.record.Parent == nil ||
-		item.record.Parent.SessionID != parent.ID ||
-		!recordBelongsToWorkspace(item.record, parent.WorkspacePath, parent.WorkspaceID) {
+	return projectSubagentChild(item.record, item.sessionDir(), parent)
+}
+
+// subagentChildMatches reports whether one record describes a child of parent
+// inside parent's workspace. Both child read paths share it, so the store-wide
+// scan and the parent-side index cannot disagree about which records are
+// children.
+func subagentChildMatches(record MetadataRecord, parent Metadata) bool {
+	return record.Kind == KindSubagent && record.Parent != nil &&
+		record.Parent.SessionID == parent.ID &&
+		recordBelongsToWorkspace(record, parent.WorkspacePath, parent.WorkspaceID)
+}
+
+// projectSubagentChild projects one child record from sessionDir, reading the
+// transcript prefix the child listing needs.
+func projectSubagentChild(record MetadataRecord, sessionDir string, parent Metadata) (Metadata, bool) {
+	if !subagentChildMatches(record, parent) {
 		return Metadata{}, false
 	}
 
-	meta := projectRecord(item.record, item.sessionDir())
+	meta := projectRecord(record, sessionDir)
 	prefix, err := harness.ReadJSONLPrefix(
-		filepath.Join(item.sessionDir(), TranscriptFileName),
+		filepath.Join(sessionDir, TranscriptFileName),
 		harness.JSONLPrefixLimits{},
 	)
 	if err != nil {
@@ -1235,6 +1557,7 @@ func subagentChild(item storedRecord, parent Metadata) (Metadata, bool) {
 	return meta, true
 }
 
+// projectRecord projects one index record into the frontend-safe Metadata.
 func projectRecord(record MetadataRecord, sessionDir string) Metadata {
 	meta := Metadata{
 		ID:               record.ID,

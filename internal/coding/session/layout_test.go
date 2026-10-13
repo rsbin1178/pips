@@ -150,6 +150,16 @@ func TestStoreLayoutAccessors(t *testing.T) {
 		assert.Equal(t, filepath.Join(sessionDir, name), dir)
 	}
 
+	// The parent-side child index lives inside the parent's own session
+	// directory: one marker beside one directory per indexed child.
+	indexDir := filepath.Join(sessionDir, SubagentsDirName)
+	assert.Equal(t, filepath.Join(indexDir, SubagentIndexFileName), layout.SubagentIndexFile(workspace, id))
+	assert.Equal(t, filepath.Join(indexDir, "s-child"), layout.ChildIndexEntryDir(workspace, id, "s-child"))
+	assert.Equal(t,
+		filepath.Join(indexDir, "s-child", ChildIndexEntryFileName),
+		layout.ChildIndexEntryFile(workspace, id, "s-child"),
+	)
+
 	// The relative forms are single components, which is what descriptor-relative
 	// callers walk one at a time.
 	assert.Equal(t, []string{url.PathEscape(workspace), id}, layout.SessionRelDir(workspace, id))

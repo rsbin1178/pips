@@ -175,11 +175,54 @@ func appendMirrored(child, parent *harness.Session, value record) error {
 	return nil
 }
 
-func (m *Manager) appendMirrored(child *harness.Session, value record) error {
+func (m *Manager) appendMirrored(child *session.Handle, value record) error {
 	m.journalMu.Lock()
 	defer m.journalMu.Unlock()
 
-	return appendMirrored(child, m.config.Parent.Session(), value)
+	if err := appendMirrored(child.Session(), m.config.Parent.Session(), value); err != nil {
+		return err
+	}
+
+	refreshChildIndexState(m.config.Repository, child, value)
+
+	return nil
+}
+
+// refreshChildIndexState refreshes one child's parent-side index entry after its
+// lifecycle was mirrored into the parent. The write is best-effort: the journal
+// is authoritative, so a store whose index cannot be written still spawns,
+// finishes, and lists children.
+func refreshChildIndexState(repository *session.Repository, child *session.Handle, value record) {
+	if repository == nil || child == nil {
+		return
+	}
+
+	state, ok := childIndexState(value.State)
+	if !ok {
+		return
+	}
+
+	_ = repository.UpdateChildIndexState(child.Metadata(), state, value.Time)
+}
+
+// childIndexState maps a journal lifecycle state onto the parent-side index
+// state. Creation and a live run are one value there: the index records that the
+// child owns its session, not which of the two opening edges it last passed.
+func childIndexState(state State) (session.ChildIndexState, bool) {
+	switch state {
+	case StateCreated, StateRunning:
+		return session.ChildIndexStateRunning, true
+	case StateSucceeded:
+		return session.ChildIndexStateSucceeded, true
+	case StateFailed:
+		return session.ChildIndexStateFailed, true
+	case StateCanceled:
+		return session.ChildIndexStateCanceled, true
+	case StateInterrupted:
+		return session.ChildIndexStateInterrupted, true
+	default:
+		return "", false
+	}
 }
 
 func records(entries []harness.Entry) ([]record, error) {
@@ -642,7 +685,7 @@ func reconcileDescendant(
 		return err
 	}
 
-	return reconcileChild(parent.Session(), child, parentRecords)
+	return reconcileChild(repository, parent.Session(), child, parentRecords)
 }
 
 func recordsByChild(entries []harness.Entry) (map[string][]record, error) {
@@ -664,6 +707,7 @@ func recordsByChild(entries []harness.Entry) (map[string][]record, error) {
 }
 
 func reconcileChild(
+	repository *session.Repository,
 	parent *harness.Session,
 	child *session.Handle,
 	parentRecords []record,
@@ -677,8 +721,16 @@ func reconcileChild(
 	if err != nil {
 		return err
 	}
+	if err := repairParentRecords(parent, parentRecords, childRecords); err != nil {
+		return err
+	}
 
-	return repairParentRecords(parent, parentRecords, childRecords)
+	// Reconciliation can write the child's terminal record itself, which never
+	// passes through the lifecycle mirror, so the parent-side entry is refreshed
+	// here as well.
+	refreshChildIndexState(repository, child, childRecords[len(childRecords)-1])
+
+	return nil
 }
 
 func authoritativeChildRecords(child *session.Handle) ([]record, error) {
