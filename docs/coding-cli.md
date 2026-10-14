@@ -1041,6 +1041,68 @@ Two reminders keep the plan current:
 todo_gate = false   # opt-in: one more turn when a plan still has open steps
 ```
 
+### Scheduled tasks (`scheduler_*`)
+
+In Agent mode, exactly where `update_plan` is offered, the model can schedule a
+prompt to run on an interval, list what is scheduled, and cancel it. Three Tools
+carry it:
+
+| Tool | Input | Answer |
+| --- | --- | --- |
+| `scheduler_create` | `task_id`, `interval`, `prompt`, `durable`, `fire_immediately` | `{id, humanSchedule, updated}` |
+| `scheduler_delete` | `id` | `{success, message}` |
+| `scheduler_list` | — | `{tasks: [{id, prompt, intervalHuman, nextFireAt, createdAt, recurring}]}` |
+
+`interval` and `prompt` are required to create. With `task_id` they are a patch:
+a provided field replaces the stored one, an omitted one stays, the schedule
+keeps its phase, and an unknown id is refused rather than silently creating a
+task. `durable` (default `false`) and `fire_immediately` (default `false`) are
+create-only and are ignored alongside `task_id`. `recurring` is deliberately not
+a model-facing field: every task pips records is recurring and keeps firing until
+it is deleted. `scheduler_delete` answers `success: false` for an id that does
+not exist rather than failing the call.
+
+An interval is `<digits><s|m|h|d>` — `60s`, `5m`, `2h`, `1d` — with surrounding
+whitespace tolerated and a 60-second floor. An empty value, a zero value, an
+unknown suffix, and a product that overflows are refused. The human rendering is
+`every 45 seconds`, `every 5 minutes`, `every 1 hour`, `every 2 days`.
+
+The task list is durable per session. It lives in a private `scheduler/`
+subdirectory of the session's own state directory (mode `0700`, one `0600` file),
+replaced atomically and bounded in size under a versioned schema; a platform that
+cannot provide those guarantees refuses the store. A `durable` task is reloaded
+when the session is reopened; a session-only one is dropped.
+
+Each task fires by starting a background `general-purpose` subagent whose prompt
+is the task's own text framed with the task id and the schedule:
+
+- a fire is skipped while the child the task's previous fire started is still
+  running, and happens once that child ends;
+- a recurring task's next fire is its previous scheduled time plus one interval,
+  so the schedule keeps its phase;
+- a next fire already in the past is skipped forward to the next future
+  occurrence rather than replayed, so an overdue task fires once, not once per
+  missed interval;
+- a task that fires is removed durably when it is not recurring, before the fire
+  is reported;
+- a fire that cannot start a child leaves the task scheduled and reports nothing,
+  and its next fire skips forward to the next future occurrence so the loop never
+  retries the same overdue fire.
+
+The fired child is an ordinary background child: its completion arrives through
+the durable notification path like any other, and `get_task_output`, `wait_tasks`
+and `kill_background_task` address it by the id its fire recorded, and it appears
+in `/agents` on the `Runs` tab with the session's other children. There is no
+separate loop surface — a fired iteration is a background child, so no second
+"loop" noun counts it. The loop's lifecycle mirrors the notification
+coordinator's: it starts when the Runtime opens, stops on close, and fires
+nothing after close.
+
+Not implemented, deliberately: chaining an iteration onto the previous child, the
+reference's full framed prompt (a previous-iteration summary and Tool names), a
+descendant guard, an occurrence journal and `expiresAt`, a `/loop` slash command,
+a separate "loop" cue or pane kind, and re-announcing restored tasks.
+
 ### Background commands (`shell`)
 
 `shell` runs one command and returns its output. Its optional `block_until_ms`

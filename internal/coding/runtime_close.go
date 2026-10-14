@@ -189,6 +189,9 @@ func (r *Runtime) closeResources(ctx context.Context, current *interaction) erro
 	if err := emitter.emit("", "", EventStatusChanged, StatusChanged{Phase: PhaseClosing}); err != nil {
 		errs = append(errs, err)
 	}
+	if err := r.stopSchedulerLoop(ctx); err != nil {
+		errs = append(errs, err)
+	}
 	if err := r.stopNotificationCoordinator(ctx); err != nil {
 		errs = append(errs, err)
 	}

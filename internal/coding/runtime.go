@@ -42,6 +42,7 @@ import (
 	"github.com/rsbin1178/pips/internal/coding/planreview"
 	"github.com/rsbin1178/pips/internal/coding/question"
 	"github.com/rsbin1178/pips/internal/coding/resource"
+	"github.com/rsbin1178/pips/internal/coding/scheduler"
 	"github.com/rsbin1178/pips/internal/coding/session"
 	"github.com/rsbin1178/pips/internal/coding/skillsettings"
 	"github.com/rsbin1178/pips/internal/coding/subagent"
@@ -99,6 +100,10 @@ type ExecutionOptions struct {
 	ToolLimits            tools.Limits
 	GitLimits             git.Limits
 	Subagent              subagent.ExecutionOptions
+	// SchedulerOptions inject the scheduled-task loop's clock and timer. A zero
+	// value uses the real clock; a test advances time and observes a fire
+	// without waiting an interval.
+	SchedulerOptions scheduler.Options
 }
 
 // OpenOptions explicitly bind one Runtime to one Workspace, configuration,
@@ -157,14 +162,23 @@ type Runtime struct {
 	hookDefinitions     []hooks.Definition
 	hookRunner          hooks.Runner
 
-	handle        *session.Handle
-	repository    *session.Repository
-	session       *harness.Session
-	journal       *interactionJournal
-	planStore     *planmode.Store
-	planMode      planmode.State
-	planReturning bool
-	planExited    bool
+	handle     *session.Handle
+	repository *session.Repository
+	session    *harness.Session
+	journal    *interactionJournal
+	planStore  *planmode.Store
+	// scheduler is this session's durable scheduled-task store, and
+	// schedulerOptions is the firing loop's injected clock and timer seam. Both
+	// are immutable after Open.
+	scheduler        *scheduler.Store
+	schedulerOptions scheduler.Options
+	schedulerMu      sync.Mutex
+	schedulerCancel  context.CancelFunc
+	schedulerSignal  chan struct{}
+	schedulerDone    chan struct{}
+	planMode         planmode.State
+	planReturning    bool
+	planExited       bool
 	// planReminderCount alternates the full and sparse plan reminders across
 	// turns. Entry and compaction reset it so the next reminder is full.
 	planReminderCount uint32
@@ -428,6 +442,25 @@ func openRuntime(
 		return nil, err
 	}
 
+	// The scheduled-task store is the plan store's sibling: a private directory
+	// under this session's own state directory. A Team Worker owns no Manager,
+	// so it offers no scheduler at all rather than one that can never fire.
+	var schedulerStore *scheduler.Store
+	if !openPolicy.teamWorker() {
+		schedulerStore, err = scheduler.NewStoreAt(
+			handle.StateDir(),
+			handle.Metadata().ID,
+			options.Execution.SchedulerOptions,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("coding runtime: open scheduler store: %w", err)
+		}
+
+		if err := schedulerStore.Load(ctx); err != nil {
+			return nil, fmt.Errorf("coding runtime: load scheduled tasks: %w", err)
+		}
+	}
+
 	policy, err := newRuntimePolicy(options)
 	if err != nil {
 		return nil, err
@@ -615,26 +648,28 @@ func openRuntime(
 			Environment: slices.Clone(configured.HooksEnvironment),
 			Limits:      hooks.DefaultLimits(),
 		},
-		handle:        handle,
-		repository:    repository,
-		session:       handle.Session(),
-		planStore:     planStore,
-		planMode:      planState,
-		policy:        policy,
-		executor:      executor,
-		tempRoot:      scratchRoot,
-		inspector:     inspector,
-		permissions:   permissions,
-		extensions:    extensionRuntime,
-		compiled:      slices.Clone(options.Extensions),
-		skillSettings: skillSettings,
-		integration:   integration,
-		generationID:  integration.ID(),
-		trusted:       options.Trusted,
-		observers:     newAgentObservers(options.AgentObservers),
-		telemetry:     newTelemetryObservers(options.TelemetryObservers),
-		admission:     newTeamAdmission(),
-		agentDrafts:   make(map[string]agentDraftRecord),
+		handle:           handle,
+		repository:       repository,
+		session:          handle.Session(),
+		planStore:        planStore,
+		scheduler:        schedulerStore,
+		schedulerOptions: options.Execution.SchedulerOptions,
+		planMode:         planState,
+		policy:           policy,
+		executor:         executor,
+		tempRoot:         scratchRoot,
+		inspector:        inspector,
+		permissions:      permissions,
+		extensions:       extensionRuntime,
+		compiled:         slices.Clone(options.Extensions),
+		skillSettings:    skillSettings,
+		integration:      integration,
+		generationID:     integration.ID(),
+		trusted:          options.Trusted,
+		observers:        newAgentObservers(options.AgentObservers),
+		telemetry:        newTelemetryObservers(options.TelemetryObservers),
+		admission:        newTeamAdmission(),
+		agentDrafts:      make(map[string]agentDraftRecord),
 		// The nudge interval starts spent, so the first nudge only waits for the
 		// turns-without-a-plan threshold.
 		planTurnsSinceNudge: planNudgeInterval,
@@ -856,6 +891,7 @@ func openRuntime(
 	runtime.recordAgentPluginDiagnostics(ctx, integration.agentPluginSnapshot())
 	if !openPolicy.teamWorker() {
 		runtime.startNotificationCoordinator(ctx)
+		runtime.startSchedulerLoop(ctx)
 	}
 	stack.values = nil
 
