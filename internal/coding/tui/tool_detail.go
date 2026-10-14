@@ -2,6 +2,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding/tasklist"
 	"github.com/rsbin1178/pips/internal/coding/tools"
 )
@@ -397,6 +399,34 @@ func detailToneTask(status tasklist.Status) toolDetailTone {
 	}
 }
 
+// detailDispatchArguments reports the tool a dispatch call reached and the
+// target's own arguments. The detail document names that target and shows those
+// arguments instead of the wrapper's envelope, so a card reads as the call the
+// model made rather than as an opaque wrapper; the target's own card is never
+// synthesized. It reports false for every other call and for one whose
+// arguments do not carry a target name, so the row keeps its own name and the
+// argument tree degrades the way every other detail renderer does.
+func detailDispatchArguments(activity toolActivity) (string, ai.JSON, bool) {
+	if activity.name != tools.UseToolName {
+		return "", nil, false
+	}
+
+	var envelope struct {
+		ToolName  string  `json:"tool_name"`
+		ToolInput ai.JSON `json:"tool_input"`
+	}
+	if err := json.Unmarshal(activity.arguments, &envelope); err != nil {
+		return "", nil, false
+	}
+
+	target := oneLineToolText(envelope.ToolName)
+	if target == "" {
+		return "", nil, false
+	}
+
+	return target, envelope.ToolInput, true
+}
+
 // detailHeadingRowFor names one call the way the expanded timeline rows do, so
 // the detail route reads as the same projection at more depth.
 func detailHeadingRowFor(index int, activity toolActivity) toolDetailRow {
@@ -407,6 +437,9 @@ func detailHeadingRowFor(index int, activity toolActivity) toolDetailRow {
 		_, verb, subject := toolActivityHeading(activity.class, activity.state, []toolActivity{activity})
 		label = strings.TrimSpace(verb + " " + subject)
 	case toolClassExplore, toolClassGeneric, toolClassPlan, toolClassSubagent:
+		if target, _, ok := detailDispatchArguments(activity); ok {
+			label = target
+		}
 	}
 	if label == "" {
 		label = activity.name
@@ -419,8 +452,14 @@ func detailHeadingRowFor(index int, activity toolActivity) toolDetailRow {
 }
 
 // toolDetailArgumentRows renders the argument tree against a capped share of
-// the document budget, so the Result/Error body always has room of its own.
+// the document budget, so the Result/Error body always has room of its own. A
+// dispatch call renders the target's own argument object, which is the argument
+// tree the call it made carries.
 func toolDetailArgumentRows(activity toolActivity, budget *detailByteBudget) []toolDetailRow {
+	if _, input, ok := detailDispatchArguments(activity); ok && len(input) > 0 {
+		activity.arguments = input
+	}
+
 	fields, ok := detailArgumentFields(activity)
 	if !ok {
 		rows := []toolDetailRow{detailSection("Arguments")}

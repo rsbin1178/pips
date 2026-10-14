@@ -914,3 +914,59 @@ func TestToolDetailRejectsMalformedAndOversizedDocuments(t *testing.T) {
 	detail := newToolDetailView(projectTimeline(state)[0])
 	assert.LessOrEqual(t, len(detail.text()), maximumToolDetailBytes+64)
 }
+
+// TestToolDetailDispatchNamesTheTargetTool is the wrapper's presentation rule:
+// the document reads as the call the model made — the target's name and the
+// target's own arguments — instead of an opaque dispatch.
+func TestToolDetailDispatchNamesTheTargetTool(t *testing.T) {
+	t.Parallel()
+
+	state := detailState(coding.ToolState{
+		Call: coding.ToolCall{
+			ID: "call-1", Name: "use_tool",
+			Arguments: ai.JSON(`{"tool_name":"docs__lookup","tool_input":{"query":"parity","limit":3}}`),
+		},
+		Status: coding.ToolStatusCompleted,
+		Result: ai.ToolResultText("call-1", "use_tool", "echo parity"),
+	})
+
+	detail := newToolDetailView(projectTimeline(state)[0]).text()
+	assert.Contains(t, detail, "docs__lookup")
+	assert.NotContains(t, detail, "use_tool")
+	assert.Contains(t, detail, "query             parity")
+	assert.Contains(t, detail, "limit             3")
+	assert.NotContains(t, detail, "tool_input")
+	assert.Contains(t, detail, "echo parity")
+}
+
+// TestToolDetailDispatchDegradesLikeTheOtherRenderers keeps the two fallbacks:
+// an argument set that names no target keeps the wrapper's own name, and one
+// whose target arguments are not an object degrades to the omitted marker.
+func TestToolDetailDispatchDegradesLikeTheOtherRenderers(t *testing.T) {
+	t.Parallel()
+
+	untargeted := detailState(coding.ToolState{
+		Call: coding.ToolCall{
+			ID: "call-1", Name: "use_tool",
+			Arguments: ai.JSON(`{"tool_input":{"query":"parity"}}`),
+		},
+		Status: coding.ToolStatusCompleted,
+		Result: ai.ToolResultText("call-1", "use_tool", "echo parity"),
+	})
+	detail := newToolDetailView(projectTimeline(untargeted)[0]).text()
+	assert.Contains(t, detail, "use_tool")
+	assert.Contains(t, detail, "tool_input")
+	assert.Contains(t, detail, "query             parity")
+
+	scalar := detailState(coding.ToolState{
+		Call: coding.ToolCall{
+			ID: "call-1", Name: "use_tool",
+			Arguments: ai.JSON(`{"tool_name":"docs__lookup","tool_input":"not an object"}`),
+		},
+		Status: coding.ToolStatusCompleted,
+		Result: ai.ToolResultText("call-1", "use_tool", "failed"),
+	})
+	detail = newToolDetailView(projectTimeline(scalar)[0]).text()
+	assert.Contains(t, detail, "docs__lookup")
+	assert.Contains(t, detail, "[invalid arguments omitted]")
+}

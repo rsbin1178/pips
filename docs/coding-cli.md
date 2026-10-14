@@ -209,6 +209,21 @@ the process exits or the session is replaced), so later prompts can call it
 directly; calling a deferred tool that is not active yet returns an error that
 names the discovery tool.
 
+With search enabled the model is also offered `use_tool`, which calls a tool the
+current snapshot hides by name: `tool_name` is the exact name a search result
+reported, and `tool_input` is that tool's own argument object. The name is
+resolved with the session's own policy, so an unauthorized tool is refused
+exactly as a direct call would be and an unknown name is refused by name. A tool
+that is already visible is refused with a correction telling the model to call
+it as its own tool call, which is also why the wrapper cannot reach a
+permit-gated tool: Shell and Monitor are controlled local tools, and the stop
+tool is a local tool too, so all three are always visible. What it can reach is
+the plain catalog tools — MCP and Extension tools — whose calls need no
+approval. The target's own result is the call's result, unchanged. `use_tool` is
+a second path rather than a replacement: the
+discovery tool and its activation semantics are unchanged, and every visible tool
+is still called directly.
+
 ### Tool calls and MCP read-only tools
 
 A model may request several tool calls in one response. They run as a queue:
