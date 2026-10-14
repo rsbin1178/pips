@@ -804,6 +804,15 @@ func (r *Runtime) openInteraction(
 			return nil, taskErr
 		}
 		composedCatalogs = append(composedCatalogs, taskCatalog)
+		// The scheduler Tools are offered exactly where update_plan is offered.
+		// A runtime without a scheduler store — a Team Worker — offers none.
+		if r.scheduler != nil {
+			schedulerCatalog, schedulerErr := tools.NewSchedulerCatalog(r.schedulerSurface())
+			if schedulerErr != nil {
+				return nil, schedulerErr
+			}
+			composedCatalogs = append(composedCatalogs, schedulerCatalog)
+		}
 	}
 	var (
 		childOwner          subagent.Ownership
