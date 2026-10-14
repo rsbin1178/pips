@@ -400,7 +400,12 @@ func newChildControlScope(
 	scope.guard.risks = childToolRisks(descriptors)
 	scope.changes = newInteractionChangeTracker(factory.inspector, descriptors)
 	policy := catalog.AllowAll(factory.workspace.Identity().Key(), catalog.RiskPrivileged)
-	searchOptions := catalog.ToolSearchOptions{Enabled: scope.plan.ToolSearch}
+	searchOptions := catalog.ToolSearchOptions{
+		Enabled: scope.plan.ToolSearch,
+		// A child whose plan enables the search surface offers the dispatch Tool
+		// too, resolving through the child's own catalog and policy.
+		UseTool: tools.NewUseToolTool,
+	}
 	if factory.toolSearchNameFor != nil {
 		searchOptions.Name = factory.toolSearchNameFor(factory.model.Provider())
 	}
@@ -410,8 +415,11 @@ func newChildControlScope(
 		return nil, fmt.Errorf("%w: tool search: %w", ErrRuntimeInvalid, err)
 	}
 	searchName := ""
+	dispatchName := ""
 	if scope.plan.ToolSearch {
 		searchName = search.Name()
+		// The dispatch Tool is leased on exactly the terms the search surface is.
+		dispatchName = tools.UseToolName
 	}
 	executableTools, err := search.ExecutableTools(ctx)
 	if err != nil {
@@ -433,7 +441,7 @@ func newChildControlScope(
 	composed := extension.ComposeHooks(
 		extension.Hooks{BeforeTool: scope.guard.before(scope.plan.Limits)},
 		extension.Hooks{BeforeTool: scope.hooks.beforeTool},
-		extension.Hooks{BeforeTool: leasedToolGuard(scope.factory.mode, descriptors, searchName, allTools)},
+		extension.Hooks{BeforeTool: leasedToolGuard(scope.factory.mode, descriptors, searchName, dispatchName, allTools)},
 		extension.Hooks{BeforeTool: scope.questions.BeforeTool},
 		extension.Hooks{BeforeTool: scope.changes.beforeTool},
 		extension.Hooks{BeforeTool: scope.controller.BeforeTool},

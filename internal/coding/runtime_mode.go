@@ -22,25 +22,30 @@ func catalogPolicyForMode(mode OperatingMode, tenantID string) (catalog.Policy, 
 }
 
 // leasedToolGuard denies calls outside the interaction's leased toolset.
-// searchName is the deferred discovery tool name when Tool Search is enabled
-// and empty when it is disabled.
+// searchName is the deferred discovery tool name when Tool Search is enabled and
+// empty when it is disabled, and dispatchName is the name of the Tool that calls
+// a hidden tool by name, on the same terms.
 func leasedToolGuard(
 	mode OperatingMode,
 	descriptors []catalog.Descriptor,
-	searchName string,
+	searchName, dispatchName string,
 	known []agent.Tool,
 ) func(context.Context, agent.ToolCallInfo) agent.ToolDecision {
-	authorized := make(map[string]struct{}, len(descriptors)+1)
+	authorized := make(map[string]struct{}, len(descriptors)+2)
 	for _, descriptor := range descriptors {
 		authorized[descriptor.Name] = struct{}{}
 	}
 
-	if searchName != "" {
-		// The discovery tool is synthesized after catalog policy has already
-		// bounded its result set, and it stays callable even while hidden so
-		// a blind call receives the registry hint. Its activation path
-		// re-authorizes every selected tool.
-		authorized[searchName] = struct{}{}
+	// The search surface's own Tools are synthesized after catalog policy has
+	// already bounded what they can reach, and both stay callable even while
+	// hidden so a blind call receives the surface's own answer: the discovery
+	// tool answers with the registry hint, and the dispatch tool answers with a
+	// refusal that names the target. The discovery tool's activation path and
+	// the dispatch tool's resolution each re-authorize every name they reach.
+	for _, name := range []string{searchName, dispatchName} {
+		if name != "" {
+			authorized[name] = struct{}{}
+		}
 	}
 
 	// A name the toolbox has never heard of is a model slip, not a policy

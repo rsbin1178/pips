@@ -1008,6 +1008,11 @@ func (r *Runtime) openInteraction(
 		// Activations outlive the interaction so a tool found once stays
 		// callable for the rest of the session.
 		Activations: r.toolActivations,
+		// The dispatch Tool is built here and offered only while the search
+		// surface is on. It carries that surface's own dispatcher, so a name it
+		// reaches is resolved with this interaction's policy and refused if the
+		// snapshot already shows it.
+		UseTool: tools.NewUseToolTool,
 	})
 	if err != nil {
 		// A name collision or malformed name is a configuration fault, not a
@@ -1015,8 +1020,12 @@ func (r *Runtime) openInteraction(
 		return nil, fmt.Errorf("%w: tool search: %w", ErrRuntimeInvalid, err)
 	}
 	searchName := ""
+	dispatchName := ""
 	if r.config.ToolSearch {
 		searchName = search.Name()
+		// The dispatch Tool is offered on exactly the terms the search surface
+		// is: the lease that admits one admits the other.
+		dispatchName = tools.UseToolName
 	}
 
 	// visibleTools is what the model is told about; executableTools adds the
@@ -1070,7 +1079,7 @@ func (r *Runtime) openInteraction(
 		extension.Hooks{BeforeTool: r.hookBeforeTool(emitter)},
 		extension.Hooks{BeforeTool: r.teamGuard.beforeTool(descriptors)},
 		extension.Hooks{AfterTool: leadCoordinatorAfterTool(leadCoordinator)},
-		extension.Hooks{BeforeTool: leasedToolGuard(started.Mode, descriptors, searchName, allTools)},
+		extension.Hooks{BeforeTool: leasedToolGuard(started.Mode, descriptors, searchName, dispatchName, allTools)},
 		extension.Hooks{BeforeTool: search.BeforeTool},
 		extension.Hooks{BeforeTool: r.planEditGate()},
 		extension.Hooks{BeforeTool: r.planReviews.BeforeTool},

@@ -44,6 +44,10 @@ func ValidateToolSearchName(name string) error {
 // the activating run: every later snapshot of any ToolSearch sharing the set
 // includes them, re-authorized by policy. When nil, an activation lasts only
 // for the run that performed it.
+// UseTool, when non-nil, builds the model-facing dispatch Tool from this
+// surface's own dispatcher (see [ToolSearch.Dispatch]). It is called only when
+// Enabled is true, so a disabled surface, and a surface built without it, offer
+// no dispatch Tool.
 type ToolSearchOptions struct {
 	Enabled         bool
 	Name            string
@@ -52,7 +56,14 @@ type ToolSearchOptions struct {
 	Limit           int
 	MaxRuns         int
 	Activations     *ActivationSet
+	UseTool         func(UseToolDispatch) agent.Tool
 }
+
+// UseToolDispatch runs one call to a tool the current snapshot hides. It is the
+// one dispatcher the dispatch Tool carries: it resolves a target name with the
+// caller's policy, refuses a name the snapshot already shows, and returns the
+// resolved tool's own result.
+type UseToolDispatch func(ctx context.Context, name string, input ai.JSON) ([]ai.Part, error)
 
 // SourceSummary counts the policy-authorized deferred tools registered under
 // one source. It is reported to the model so a miss can be distinguished from
@@ -82,7 +93,8 @@ func FormatSourceSummaries(sources []SourceSummary) string {
 // every declaration on the first model request. Add Tools() when building the
 // agent and use PrepareTurn as its prepare-turn hook. Search results are
 // policy-filtered before they reach the model, then re-authorized when the
-// snapshot is applied.
+// snapshot is applied. An enabled surface may also offer a dispatch Tool that
+// reaches a hidden tool by name ([ToolSearchOptions.UseTool]).
 type ToolSearch struct {
 	catalog  *Catalog
 	policy   Policy
@@ -99,6 +111,9 @@ type ToolSearch struct {
 	// keeps a blind call by name executable when no deferred tool exists, so
 	// the model receives the registry hint instead of an unknown-tool error.
 	hidden agent.Tool
+	// useTool is the model-facing dispatch Tool, present only when the surface
+	// is enabled and its builder was injected.
+	useTool agent.Tool
 
 	mu   sync.Mutex
 	runs map[string]searchRun
@@ -172,7 +187,49 @@ func NewToolSearch(catalog *Catalog, policy Policy, options ToolSearchOptions) (
 	)
 	s.hidden = hiddenTool{tool: s.tool}
 
+	if err := s.acceptUseTool(options.Enabled, options.UseTool); err != nil {
+		return nil, err
+	}
+
 	return s, nil
+}
+
+// acceptUseTool builds and keeps the dispatch Tool when the surface is enabled
+// and a builder was injected. The snapshot cannot carry two tools under one
+// name, so its name must be free of the discovery tool, the initial tools, and
+// every searchable tool.
+func (s *ToolSearch) acceptUseTool(enabled bool, build func(UseToolDispatch) agent.Tool) error {
+	if !enabled || build == nil {
+		return nil
+	}
+
+	tool := build(s.Dispatch)
+	if tool == nil {
+		return errors.New("catalog: use tool builder returned nil")
+	}
+
+	name := tool.Decl().Name
+	if strings.TrimSpace(name) == "" {
+		return errors.New("catalog: use tool has an empty name")
+	}
+
+	if name == s.name {
+		return fmt.Errorf("catalog: %q is reserved for deferred tool discovery", name)
+	}
+
+	if _, exists := s.catalog.byName[name]; exists {
+		return fmt.Errorf("catalog: use tool %q duplicates a searchable tool", name)
+	}
+
+	for _, initial := range s.initial {
+		if initial.Decl().Name == name {
+			return fmt.Errorf("catalog: use tool %q duplicates an initial tool", name)
+		}
+	}
+
+	s.useTool = tool
+
+	return nil
 }
 
 type hiddenTool struct {
@@ -220,7 +277,8 @@ const (
 // direct catalog tools. When deferred search is enabled and at least one
 // authorized deferred tool exists, it additionally returns the discovery
 // tool; when search is disabled it returns every policy-authorized catalog
-// tool. Use it for prompts and visibility decisions.
+// tool. A surface built with a dispatch Tool returns that too. Use it for
+// prompts and visibility decisions.
 func (s *ToolSearch) Tools(ctx context.Context) ([]agent.Tool, error) {
 	tools, _, err := s.tools(ctx)
 
@@ -255,12 +313,18 @@ func (s *ToolSearch) tools(ctx context.Context) ([]agent.Tool, bool, error) {
 		catalogTools, discoverable = s.direct(catalogTools)
 	}
 
-	tools := make([]agent.Tool, 0, len(s.initial)+len(catalogTools)+1)
+	tools := make([]agent.Tool, 0, len(s.initial)+len(catalogTools)+2)
 	tools = append(tools, s.initial...)
 
 	tools = append(tools, catalogTools...)
 	if discoverable {
 		tools = append(tools, s.tool)
+	}
+	// The dispatch Tool stays visible on every snapshot, not only while
+	// something is discoverable: a name it cannot reach is answered with a
+	// refusal, which is the answer a model that guessed needs.
+	if s.useTool != nil {
+		tools = append(tools, s.useTool)
 	}
 
 	return tools, discoverable, nil
@@ -280,6 +344,59 @@ func (s *ToolSearch) DeferredSources(ctx context.Context) ([]SourceSummary, erro
 	}
 
 	return s.summarize(descriptors), nil
+}
+
+// Dispatch runs one call to a tool the current snapshot hides. name is resolved
+// through the catalog with this surface's policy, so an unauthorized tool is
+// refused exactly as a direct call would be and an unknown name is refused by
+// name, which the catalog's own message carries.
+//
+// A name the current snapshot already shows is refused with a correction: the
+// wrapper carries only what the snapshot hides, so a visible tool must be
+// called as its own tool call. That rule is load-bearing rather than cosmetic.
+// Every operation pips gates behind an approval permit — shell and monitor — is
+// a local tool, so it is directly visible, so this refusal stops the call before
+// any dispatch; the stop Tool is local too, so the same refusal covers it. A
+// dispatch that reached one would run its Exec without the permit its BeforeTool
+// gate issues.
+//
+// Every other name runs with the given arguments, and the resolved tool's own
+// result, content or error, is returned unchanged.
+func (s *ToolSearch) Dispatch(ctx context.Context, name string, input ai.JSON) ([]ai.Part, error) {
+	if s == nil || !s.enabled || s.useTool == nil {
+		return nil, errors.New("catalog: tool dispatch requires an enabled search surface that offers one")
+	}
+
+	resolved, err := s.catalog.Tools(ctx, s.policy, name)
+	if err != nil {
+		return nil, err
+	}
+
+	visible, err := s.Tools(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	// A deferred tool the run has activated is part of the current snapshot even
+	// when the surface keeps per-run activation instead of a shared
+	// ActivationSet (a child scope passes none), and Tools does not carry that
+	// run's selection, so the run's own activation is consulted beside it.
+	shown := slices.ContainsFunc(visible, func(tool agent.Tool) bool { return tool.Decl().Name == name }) ||
+		s.active(ctx, name)
+	if shown {
+		return nil, directToolCorrection(s.useTool.Decl().Name, name)
+	}
+
+	return resolved[0].Exec(ctx, agent.ToolCall{Name: name, Args: input})
+}
+
+// directToolCorrection is the sentence a dispatch returns for a tool the current
+// snapshot already shows.
+func directToolCorrection(caller, name string) error {
+	return fmt.Errorf(
+		"tool %q is directly visible in this session; call it as its own tool call instead of routing it through %s",
+		name, caller,
+	)
 }
 
 // AgentOptions builds the options needed to install this configuration. It
