@@ -382,7 +382,8 @@ func TestTaskOutputToolNamesKnownIDsOnNotFound(t *testing.T) {
 	assert.Equal(t, "not_found", header.Code)
 	require.NotNil(t, header.TaskOutput)
 	assert.Equal(t, background.StatusNotFound, header.TaskOutput.Status)
-	assert.Equal(t, `Task "monitor-missing" not found. Known task ids: `+snapshot.ID+`.`, body)
+	assert.Equal(t,
+		`Task or subagent "monitor-missing" not found. Known task ids: `+snapshot.ID+`.`, body)
 }
 
 // TestTaskOutputToolRendersAMultiRead pins the multi shape: the mode, one entry
@@ -497,11 +498,11 @@ func TestTaskOutputToolsNameBothIDSources(t *testing.T) {
 	}
 }
 
-// TestTaskOutputToolsNotFoundSentenceIgnoresTheIDShape pins the enumeration rule
-// for both Tools: an unknown id of either shape reads the same not-found
-// sentence, and that sentence names the registry's ids only, because the stop
-// Tool shares it and cannot stop a child.
-func TestTaskOutputToolsNotFoundSentenceIgnoresTheIDShape(t *testing.T) {
+// TestTaskOutputToolsShareTheNotFoundSentence pins the enumeration rule for both
+// Tools: an unknown id of either shape reads the same not-found sentence, that
+// sentence names both kinds one id can address, and it names the registry's ids
+// only, because the enumeration is the registry's own.
+func TestTaskOutputToolsShareTheNotFoundSentence(t *testing.T) {
 	t.Parallel()
 
 	read := func(
@@ -520,7 +521,7 @@ func TestTaskOutputToolsNotFoundSentenceIgnoresTheIDShape(t *testing.T) {
 		header, body := execTaskOutputTool(t, NewTaskOutputTool(read, known), `{"task_ids":["`+id+`"]}`)
 		assert.False(t, header.OK)
 		assert.Equal(t, string(background.OutcomeNotFound), header.Code)
-		assert.Equal(t, `Task "`+id+`" not found. Known task ids: monitor-1-aaaa.`, body)
+		assert.Equal(t, `Task or subagent "`+id+`" not found. Known task ids: monitor-1-aaaa.`, body)
 
 		_, waitBody := execTaskOutputTool(t, NewWaitTasksTool(read, known),
 			`{"task_ids":["`+id+`"],"mode":"wait_any"}`)

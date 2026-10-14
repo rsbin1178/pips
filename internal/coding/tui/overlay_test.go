@@ -797,13 +797,13 @@ func (c *overlayController) CancelSubagent(_ context.Context, childSessionID str
 func (c *overlayController) KillBackgroundTask(
 	_ context.Context,
 	taskID string,
-) (background.Outcome, error) {
+) (background.Outcome, background.Subject, error) {
 	c.backgroundKilled = append(c.backgroundKilled, taskID)
 	if c.backgroundKillErr != nil {
-		return background.OutcomeNotFound, c.backgroundKillErr
+		return background.OutcomeNotFound, background.SubjectTask, c.backgroundKillErr
 	}
 
-	return background.OutcomeKilled, nil
+	return background.OutcomeKilled, background.SubjectTask, nil
 }
 
 func (c *overlayController) InspectBackgroundTask(

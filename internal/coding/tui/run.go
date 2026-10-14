@@ -158,7 +158,7 @@ type Controller interface {
 	SetSkillEnabled(context.Context, coding.SkillID, bool) error
 	WaitSubagent(context.Context, string) (subagent.Result, error)
 	CancelSubagent(context.Context, string) error
-	KillBackgroundTask(context.Context, string) (background.Outcome, error)
+	KillBackgroundTask(context.Context, string) (background.Outcome, background.Subject, error)
 	InspectBackgroundTask(context.Context, string) (coding.BackgroundTaskInspection, error)
 	NewSession(context.Context) error
 	ResumeSession(context.Context, string) error

@@ -1240,19 +1240,36 @@ covers a watch's 10 MiB log) rather than the workspace file bound, with the same
 line window, binary check, and output bound as a workspace file.
 
 **Stopping one.** `kill_background_task` takes the `task_id` a `shell` or
-`monitor` call returned and answers `killed`, `already_exited`, or `not_found`.
-A `not_found` answer also names the ids the registry still knows, bounded in
-count and length, so a model that lost an id can recover it. That enumeration is
-the registry's own, and a delegated child's `subagent_id` is deliberately not in
-it: the sentence is shared with the task-output Tool, but this Tool cannot stop a
-child, so naming one would offer an id the caller cannot use. A child's
-`subagent_id` therefore answers `not_found` here even though the read Tools
-resolve it; stopping a child needs its own wake rule, so the asymmetry is
-recorded rather than papered over. A task id is unique across processes:
-`<kind>-<n>-<token>`, where the kind is `monitor` or `shell`, the counter stays
-readable, and a short random token keeps a restarted process from reusing an id.
-The tasks pane's kill control calls the same method, so there is one control
-path.
+`monitor` call returned, or the `subagent_id` a `spawn_subagent` call returned,
+and answers `killed`, `already_exited`, or `not_found`. The id resolves against
+the background registry first and then against this session's own children, so
+one id-addressed stop covers all three producers. The sentence differs per
+subject, because the two outcomes are not the same claim: a background task
+answers `Task "<id>" was terminated successfully.` or `Task "<id>" had already
+completed.`, while a child answers `Subagent "<id>" cancellation was initiated.`
+or `Subagent "<id>" had already finished.` A child's cancellation is only
+initiated — the child winds down afterwards — so "terminated successfully" would
+say more than the call knows. A `not_found` answer reads
+`Task or subagent "<id>" not found.` and also names the ids the registry still
+knows, bounded in count and length, so a model that lost an id can recover it.
+That enumeration is the registry's own, and it lists no child id: the reference's
+own list is the known bash task ids and names no subagent either. A task id is
+unique across processes: `<kind>-<n>-<token>`, where the kind is `monitor` or
+`shell`, the counter stays readable, and a short random token keeps a restarted
+process from reusing an id. The tasks pane's kill control calls the same method,
+so there is one control path; its child rows keep their own `CancelSubagent`
+control.
+
+A stop that a Tool result answers marks the child's result taken, so the
+completion the same child produces is dropped from the delivery batch and
+acknowledged rather than waking the model with an outcome it already has. The
+rule follows the source, the same rule the registry applies to a watch: a model
+stop (`KillModel`) and a prompt-end stop (`KillPromptEnd`) mark the result — a
+Tool result already carried the outcome, or no turn is left to report it — while
+a user stop from the tasks pane (`KillUser`) does not, because the model must
+still learn that the pane stopped the child. A stop of a child that had already
+finished marks nothing: the model asked about it, and its completion is the
+surface that carries the result.
 
 **Tasks pane.** A registered watch is a row under `Watchers`, labelled
 `Monitor`, showing the description (or the command when there is none), the

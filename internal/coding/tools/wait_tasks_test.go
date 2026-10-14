@@ -145,5 +145,6 @@ func TestWaitTasksToolRefusesAnInvalidModeAndNamesKnownIDs(t *testing.T) {
 	)
 	assert.False(t, header.OK)
 	assert.Equal(t, "not_found", header.Code)
-	assert.Equal(t, `Task "monitor-missing" not found. Known task ids: `+snapshot.ID+`.`, body)
+	assert.Equal(t,
+		`Task or subagent "monitor-missing" not found. Known task ids: `+snapshot.ID+`.`, body)
 }
