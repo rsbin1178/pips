@@ -767,6 +767,22 @@ func (r *Runtime) openInteraction(
 		return nil, err
 	}
 
+	// update_goal is the model's declaration channel for the Goal harness. It is
+	// offered wherever the Goal harness can run and stays offered outside a Goal
+	// run, so a call there is a refusal sentence rather than an unknown Tool. A
+	// Runtime that owns no Goal control — a Team Worker — offers none.
+	if r.goalControl != nil {
+		goalCatalog, goalErr := tools.NewUpdateGoalCatalog(r.declareGoal)
+		if goalErr != nil {
+			return nil, goalErr
+		}
+
+		localCatalog, err = catalog.Merge(localCatalog, goalCatalog)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	r.mu.Lock()
 	leadCoordinator := r.team
 	leadTeamActive := !r.isTeamWorker() && leadCoordinator != nil && r.teamGuard.active()

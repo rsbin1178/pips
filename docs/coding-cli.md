@@ -122,6 +122,22 @@ rerunning the tests itself. Missing or contradictory evidence produces a gap
 for the next work segment, not success. Model or malformed-protocol failures
 interrupt assessment and can be retried without repeating the work.
 
+The model declares its own progress with the `update_goal` tool. It is offered
+wherever a goal can run and stays offered outside one, so a call there is a
+refusal sentence rather than an unknown tool. Its three optional fields are the
+reference's: `message` records a short progress note and changes nothing else;
+`blocked_reason` is a failure signal, sent only after the same problem has
+defeated three or more attempts, which pauses the goal with that reason for a
+user decision; and `completed` records the model's claim that the condition is
+achieved. A completion claim does not decide completion. It is consumed at the
+goal loop's next decision point, where the verifier runs in place of the
+ordinary continuation step: a verified verdict ends the run, and an unverified
+one returns the auditor's gaps to the model as its next feedback. The verdict
+stays with the auditor, which still reads the workspace and the recorded tool
+results — the worker's declaration is never itself evidence. A declaration with
+no goal run in progress, or a `completed` or `blocked_reason` against a goal that
+is paused or already complete, is refused with a named reason.
+
 Verification is intentionally bounded: the evidence ledger retains up to 32
 latest tool results with 4 KiB per result; an audit has up to four read rounds
 and eight tool calls. Keep checks and captured output focused. Dropped or

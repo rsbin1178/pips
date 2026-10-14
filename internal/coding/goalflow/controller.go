@@ -22,6 +22,29 @@ type Controller struct {
 	KnownFailed func() ai.Usage
 	Invalidated func() bool
 	Phase       func(string) error
+	// Declared reports and consumes the model's completion declaration for the
+	// running Goal. It is consulted once at a decision point: when it reports true
+	// the verifier audits the recorded evidence in place of the ordinary condition
+	// assessment, and a later decision point never sees the same declaration. The
+	// declaration is never evidence — the verifier still reads the workspace and
+	// the recorded tool results.
+	Declared func() bool
+}
+
+// declaredVerificationReason is the decision a model declaration forces. It is
+// never the completion reason: the verifier's own verdict replaces it.
+const declaredVerificationReason = "The model declared the Goal complete; verify the recorded evidence"
+
+// assess answers one decision point. A pending model declaration replaces the
+// ordinary condition assessment: a claim of completion is not evidence, so the
+// question it forces is the verifier's, and the model's confidence decides
+// nothing.
+func (c *Controller) assess(ctx context.Context, evaluation goal.Evaluation) (goal.EvaluationResult, error) {
+	if c.Declared != nil && c.Declared() {
+		return goal.EvaluationResult{Outcome: goal.OutcomeComplete, Reason: declaredVerificationReason}, nil
+	}
+
+	return c.Evaluator.Evaluate(ctx, evaluation)
 }
 
 // Decide preserves Coding gates around the neutral SDK Goal policy.
@@ -87,7 +110,7 @@ func (c *Controller) Decide(ctx context.Context, request continuation.DecisionRe
 	)
 
 	policy, err := goal.NewController(goal.EvaluatorFunc(func(ctx context.Context, evaluation goal.Evaluation) (goal.EvaluationResult, error) {
-		result, err := c.Evaluator.Evaluate(ctx, evaluation)
+		result, err := c.assess(ctx, evaluation)
 		observed.Add(result.Usage)
 
 		if err != nil {
