@@ -284,3 +284,87 @@ func TestRegistryWaitOrdersRecordsAsAsked(t *testing.T) {
 	assert.False(t, records[1].Found)
 	assert.Equal(t, first.ID, records[2].TaskID)
 }
+
+// TestBoundTaskOutputTextKeepsABodyUnderTheBound pins the un-truncated case: the
+// whole body, the body's real length, and no footer.
+func TestBoundTaskOutputTextKeepsABodyUnderTheBound(t *testing.T) {
+	t.Parallel()
+
+	body := strings.Repeat("a", 100)
+
+	output, truncated, raw := background.BoundTaskOutputText(body)
+	assert.Equal(t, body, output)
+	assert.False(t, truncated)
+	assert.Equal(t, int64(len(body)), raw)
+}
+
+// TestBoundTaskOutputTextTruncatesWithThePathFreeFooter pins the bound a
+// delegated child's result takes: the same 40 000 bytes a task log is bounded
+// at, the body's real length, and a footer that names no file, because a child
+// has none.
+func TestBoundTaskOutputTextTruncatesWithThePathFreeFooter(t *testing.T) {
+	t.Parallel()
+
+	body := strings.Repeat("b", 40_001)
+
+	output, truncated, raw := background.BoundTaskOutputText(body)
+	require.True(t, truncated)
+	assert.Equal(t, int64(len(body)), raw)
+	assert.Contains(t, output, "[Output truncated - 40001 bytes total]")
+	assert.NotContains(t, output, "Use read on",
+		"a body with no file behind it must not point at one")
+	assert.Less(t, len(output), len(body))
+}
+
+// TestWaitHintAddressesASubagentInItsOwnWords pins the subject split: the same
+// renderer serves a task and a child, and only a child is told not to be
+// stopped, because a background task has no follow-up channel.
+func TestWaitHintAddressesASubagentInItsOwnWords(t *testing.T) {
+	t.Parallel()
+
+	child := background.TaskOutput{
+		Found: true, Subject: background.SubjectSubagent,
+		TaskID: "s-child", Status: background.StatusRunning, Output: "Subagent is still running.",
+	}
+	hinted := background.ApplyWaitHint(child, background.WaitHintPoll, 0, 0)
+	assert.Contains(t, hinted.Output, "do not kill this subagent and do not tell it to stop")
+	assert.NotContains(t, hinted.Output, "do not kill this task")
+
+	task := child
+	task.Subject = background.SubjectTask
+	hinted = background.ApplyWaitHint(task, background.WaitHintPoll, 0, 0)
+	assert.Contains(t, hinted.Output, "do not kill this task")
+	assert.NotContains(t, hinted.Output, "do not tell it to stop")
+
+	// A terminal record is the whole answer, whatever its subject.
+	terminal := child
+	terminal.Status = background.StatusCompleted
+	assert.NotContains(t, background.ApplyWaitHint(terminal, background.WaitHintPoll, 0, 0).Output,
+		"timeout_ms")
+}
+
+// TestTaskOutputLiveReportsAWorkingSubject pins which records a wait hint and a
+// "(no output yet)" body belong to.
+func TestTaskOutputLiveReportsAWorkingSubject(t *testing.T) {
+	t.Parallel()
+
+	live := map[string]bool{
+		background.StatusInitializing: true,
+		background.StatusRunning:      true,
+		background.StatusCompleted:    false,
+		background.StatusFailed:       false,
+		background.StatusCancelled:    false,
+		background.StatusTimedOut:     false,
+		background.StatusNotFound:     false,
+	}
+	for status, want := range live {
+		assert.Equal(t, want, background.TaskOutput{Status: status}.Live(), status)
+	}
+
+	// An initializing child is still working, so its body says so rather than
+	// reporting a finished subject with no output.
+	body := background.RenderTaskOutputBody(background.TaskOutput{
+		Status: background.StatusInitializing, Subject: background.SubjectSubagent,
+	})
+	assert.Contains(t, body, "(no output yet)")
+}

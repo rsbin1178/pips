@@ -12,14 +12,29 @@ import (
 
 // Task-output status words. They are the reference's closed vocabulary, chosen
 // in this order: a kill, then the task's own deadline, then a clean exit, then
-// anything else.
+// anything else. `initializing` and `cancelled` are the two words a delegated
+// child adds: a child that has a durable lifecycle but no live run is
+// initializing, and a cancelled or interrupted child is cancelled.
 const (
-	StatusRunning   = "running"
-	StatusCompleted = "completed"
-	StatusFailed    = "failed"
-	StatusCancelled = "cancelled"
-	StatusTimedOut  = "timed_out"
-	StatusNotFound  = "not_found"
+	StatusInitializing = "initializing"
+	StatusRunning      = "running"
+	StatusCompleted    = "completed"
+	StatusFailed       = "failed"
+	StatusCancelled    = "cancelled"
+	StatusTimedOut     = "timed_out"
+	StatusNotFound     = "not_found"
+)
+
+// Subject names what one output record describes. A background task and a
+// delegated child share the record shape, so one renderer serves both; the
+// subject is what lets the wait hint address the right thing, because only a
+// child can be told to stop. The zero value reads as a task.
+type Subject string
+
+// Supported output subjects.
+const (
+	SubjectTask     Subject = "task"
+	SubjectSubagent Subject = "subagent"
 )
 
 const (
@@ -66,7 +81,10 @@ const (
 // rides the result header, and its body is the reference's own rendering.
 type TaskOutput struct {
 	// Found is false for an id the registry does not know.
-	Found          bool
+	Found bool
+	// Subject is what the record describes, so the wait hint addresses a task
+	// or a child in its own words. The zero value reads as a task.
+	Subject        Subject
 	TaskID         string
 	Command        string
 	Status         string
@@ -81,10 +99,16 @@ type TaskOutput struct {
 	RawOutputBytes int64
 }
 
-// notFoundTaskOutput is the record an unknown id yields. It carries the
+// Live reports whether the record's subject is still working, so a wait hint
+// belongs on its body and a terminal status word does not.
+func (r TaskOutput) Live() bool {
+	return r.Status == StatusRunning || r.Status == StatusInitializing
+}
+
+// NotFoundTaskOutput is the record an unknown id yields. It carries the
 // reference's `not_found` status and sentence, so a multi read renders the
 // unknown entry beside the known ones instead of an empty one.
-func notFoundTaskOutput(id string) TaskOutput {
+func NotFoundTaskOutput(id string) TaskOutput {
 	return TaskOutput{
 		TaskID: id,
 		Status: StatusNotFound,
@@ -102,6 +126,7 @@ func taskOutputFromSnapshot(
 ) TaskOutput {
 	record := TaskOutput{
 		Found:      true,
+		Subject:    SubjectTask,
 		TaskID:     snapshot.ID,
 		Command:    snapshot.Command,
 		Status:     taskOutputStatus(snapshot, killed, timedOut),
@@ -206,6 +231,36 @@ func truncationFooter(total int64, path string) string {
 		" bytes total. Use " + readToolName + " on " + path + " for full content]"
 }
 
+// BoundTaskOutputText bounds an in-memory body at the same taskOutputBytes a
+// task log is bounded at, so a delegated child's result can never grow a Tool
+// result without limit. Past the bound the dump is the first previewBytes cut at
+// a rune boundary plus the path-free footer: a child's result has no file to
+// point at, and a hint that promised one would be a dead pointer. The returned
+// count is the body's real length, before the bound applied.
+func BoundTaskOutputText(text string) (string, bool, int64) {
+	total := int64(len(text))
+	if total <= taskOutputBytes {
+		return text, false, total
+	}
+
+	preview := runeBoundary([]byte(text)[:previewBytes])
+
+	return string(preview) + "\n\n" + truncationTotalFooter(total), true, total
+}
+
+// truncationTotalFooter is the path-free truncation footer a body without a
+// file behind it carries.
+func truncationTotalFooter(total int64) string {
+	return "[Output truncated - " + strconv.FormatInt(total, 10) + " bytes total]"
+}
+
+// TotalTruncationHint is the short marker a truncated record without a file
+// behind it carries, so its structured hint reports the real length instead of
+// naming a Tool and a path that do not exist.
+func TotalTruncationHint(total int64) string {
+	return "[truncated - " + strconv.FormatInt(total, 10) + " bytes total]"
+}
+
 // truncationHint is the short marker a truncated record carries.
 func truncationHint() string {
 	return "[truncated - use " + readToolName + " on output_file for full content]"
@@ -248,7 +303,7 @@ func RenderTaskOutputBody(record TaskOutput) string {
 	switch {
 	case record.Output != "":
 		lines = append(lines, record.Output)
-	case record.Status == StatusRunning:
+	case record.Live():
 		lines = append(lines, "(no output yet)")
 	default:
 		lines = append(lines, "(no output)")
@@ -288,26 +343,26 @@ func RenderMultiTaskOutputBody(mode string, records []TaskOutput, summary string
 	return strings.Join(lines, "\n")
 }
 
-// ApplyWaitHint appends the reference's wait words to a still-running record.
+// ApplyWaitHint appends the reference's wait words to a still-working record.
 // A terminal record is returned unchanged: its output is the whole answer.
 func ApplyWaitHint(
 	record TaskOutput,
 	hint WaitHint,
 	requested, waited time.Duration,
 ) TaskOutput {
-	if record.Status != StatusRunning {
+	if !record.Live() {
 		return record
 	}
 
-	record.Output += "\n\n" + waitHintText(hint, requested, waited)
+	record.Output += "\n\n" + waitHintText(hint, record.Subject, requested, waited)
 
 	return record
 }
 
-// waitHintText renders the reference's running-task hint.
-func waitHintText(hint WaitHint, requested, waited time.Duration) string {
-	tail := "Unless the user specified, do not kill this task just because this wait " +
-		"returned. It is still working. You will be notified automatically when it " +
+// waitHintText renders the reference's still-running hint for one subject.
+func waitHintText(hint WaitHint, subject Subject, requested, waited time.Duration) string {
+	tail := stillRunningDoNotCancel(subject) + " just because this wait returned. " +
+		"It is still working. You will be notified automatically when it " +
 		"completes. Do other work, or wait again with a longer timeout_ms."
 
 	switch hint {
@@ -324,6 +379,16 @@ func waitHintText(hint WaitHint, requested, waited time.Duration) string {
 	default:
 		return "Use timeout_ms to wait for completion. " + tail
 	}
+}
+
+// stillRunningDoNotCancel is the reference's do-not-cancel clause. A background
+// task has no follow-up channel, so only a child is told not to be stopped.
+func stillRunningDoNotCancel(subject Subject) string {
+	if subject == SubjectSubagent {
+		return "Unless the user specified, do not kill this subagent and do not tell it to stop"
+	}
+
+	return "Unless the user specified, do not kill this task"
 }
 
 // formatWaitedDuration renders one waited duration the way the reference's

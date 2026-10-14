@@ -518,7 +518,7 @@ func (r *Registry) ResultTaken(id string) bool {
 // now the surface that carries it.
 func (r *Registry) TaskOutput(id string) TaskOutput {
 	if r == nil {
-		return notFoundTaskOutput(id)
+		return NotFoundTaskOutput(id)
 	}
 
 	r.mu.Lock()
@@ -546,7 +546,7 @@ func (r *Registry) TaskOutput(id string) TaskOutput {
 	r.mu.Unlock()
 
 	if !ok {
-		return notFoundTaskOutput(id)
+		return NotFoundTaskOutput(id)
 	}
 
 	return taskOutputFromSnapshot(snapshot, killed, timedOut, path, r.now())

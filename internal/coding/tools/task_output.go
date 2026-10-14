@@ -45,10 +45,10 @@ const (
 // maxWaitBlock is the fixed blocking-wait ceiling as a duration.
 const maxWaitBlock = maxWaitBlockMS * time.Millisecond
 
-// ReadBackgroundTasks resolves background tasks by id. mode is one of the
-// TaskOutputMode constants; budget is the effective wait budget, zero for a
-// poll. Records come back ordered as the ids were asked, with an unknown id
-// reported as an unfound record.
+// ReadBackgroundTasks resolves a background task or a delegated child by id.
+// mode is one of the TaskOutputMode constants; budget is the effective wait
+// budget, zero for a poll. Records come back ordered as the ids were asked, with
+// an unknown id reported as an unfound record.
 type ReadBackgroundTasks func(
 	ctx context.Context,
 	ids []string,
@@ -59,17 +59,17 @@ type ReadBackgroundTasks func(
 const taskOutputSchema = `{
  "type":"object","additionalProperties":false,
  "properties":{
-  "task_ids":{"type":"array","minItems":1,"maxItems":20,"items":{"type":"string","minLength":1},"description":"The task ids a shell or monitor Tool call returned. Pass one or more; for a single task use a one-element array. Multiple ids with a positive timeout_ms wait until all complete."},
-  "task_id":{"type":"string","minLength":1,"description":"Alias for a single task id: task_ids with one element."},
+  "task_ids":{"type":"array","minItems":1,"maxItems":20,"items":{"type":"string","minLength":1},"description":"The ids to read: a task id a shell or monitor Tool call returned, or a spawned subagent's subagent_id. Pass one or more; for a single id use a one-element array. Multiple ids with a positive timeout_ms wait until all complete."},
+  "task_id":{"type":"string","minLength":1,"description":"Alias for a single id: task_ids with one element."},
   "timeout_ms":{"type":"integer","minimum":0,"maximum":3600000,"description":"Max wait time in milliseconds, up to 3600000 (1 hour). A positive value waits for completion; omit or pass 0 for a non-blocking status snapshot."}
  }
 }`
 
 // NewTaskOutputTool builds the model-facing task-output Tool. It reads one or
-// more background tasks by id and reports each one's status, output, and exit
-// code; a positive timeout_ms waits instead of taking a snapshot. A not-found
-// id enumerates the ids the registry knows, so a model that lost an id can
-// recover it.
+// more background tasks or delegated subagents by id and reports each one's
+// status, output, and exit code; a positive timeout_ms waits instead of taking a
+// snapshot. A not-found id enumerates the task ids the registry knows, so a
+// model that lost an id can recover it.
 func NewTaskOutputTool(read ReadBackgroundTasks, known KnownBackgroundIDs) agent.Tool {
 	return &taskOutputTool{read: read, known: known}
 }
@@ -82,14 +82,15 @@ type taskOutputTool struct {
 func (*taskOutputTool) Decl() ai.Tool {
 	return ai.Tool{
 		Name: TaskOutputName,
-		Description: "Get output and status from a background task started by the shell or monitor tool. " +
-			"Pass task_ids with one or more ids from a shell or monitor call, or the single-id alias task_id. " +
+		Description: "Get output and status from a background task or a delegated subagent. " +
+			"Pass task_ids with one or more ids: a task id a shell or monitor call returned, " +
+			"or a spawned subagent's subagent_id, or the single-id alias task_id. " +
 			"Multiple ids with a positive timeout_ms wait until all complete. " +
 			"Omit timeout_ms or pass 0 for a non-blocking status snapshot; " +
 			"a positive timeout_ms waits up to that many milliseconds, capped at 3600000. " +
 			"Returns the current output, status, and exit code if completed. " +
-			"If the output is large, use read on the output_file path for the rest. " +
-			"A not_found result lists the ids the registry still knows.",
+			"If a background task's output is large, use read on its output_file path for the rest. " +
+			"A not_found result lists the task ids the registry still knows.",
 		InputSchema: &ai.Schema{RawJSON: json.RawMessage(taskOutputSchema)},
 	}
 }
@@ -192,7 +193,9 @@ func (t *taskOutputTool) renderTaskOutputs(
 
 // taskOutputNotFound is the one not-found result both task-output Tools report:
 // the stop Tool's shape, a not_found code, and the sentence that names the ids
-// the registry still knows.
+// the registry still knows. The enumeration stays the registry's own for both
+// Tools, even though a child id resolves here: the sentence is shared with the
+// stop Tool, which cannot stop a child.
 func taskOutputNotFound(tool, taskID string, known []string) result {
 	return result{
 		OK: false, Tool: tool, Code: string(background.OutcomeNotFound),

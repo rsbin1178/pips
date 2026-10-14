@@ -341,18 +341,26 @@ func encodeForegroundResult(result Result) ([]ai.Part, error) {
 		return nil, fmt.Errorf("coding subagent: encode result: %w", err)
 	}
 
-	return agent.TextResult(string(data) + "\n\n" + formatSubagentCompleted(result)), nil
+	return agent.TextResult(string(data) + "\n\n" + FormatResultText(result)), nil
 }
 
-// formatSubagentCompleted renders the model-facing completion text. It mirrors
-// the source `format_subagent_completed` body.
-func formatSubagentCompleted(result Result) string {
+// FormatResultText renders the model-facing completion text for one child
+// result. It is the one rendering a finished child's answer uses, so the spawn
+// result and a read of the same child through the task-output Tool cannot
+// drift. An interrupted child carries no resume pointer: reconciliation closed
+// it, and the resume path refuses that state, so the line would name a call
+// that cannot succeed.
+func FormatResultText(result Result) string {
 	meta := fmt.Sprintf(
 		"<subagent_meta>id=%s, tool_calls=%d, turns=%d, duration_ms=%d</subagent_meta>",
 		result.ChildSessionID, result.ToolCalls, result.Turns, result.Duration.Milliseconds(),
 	)
 	if result.WorktreePath != "" {
 		meta += fmt.Sprintf("\n<worktree_path>%s</worktree_path>", result.WorktreePath)
+	}
+
+	if result.Outcome == OutcomeInterrupted {
+		return fmt.Sprintf("%s\n\n%s", resultOutputText(result), meta)
 	}
 
 	return fmt.Sprintf(

@@ -207,13 +207,17 @@ type Runtime struct {
 	notifications         *subagent.NotificationInbox
 	backgroundTasks       *background.Registry
 	backgroundOutput      *backgroundObserver
-	children              map[string]*childProjection
-	agentDrafts           map[string]agentDraftRecord
-	teamGuard             teamCapabilityGuard
-	admission             *teamAdmission
-	team                  *teamCoordinator
-	teamRecovery          []TeamRecoveryCandidate
-	teamRecoveryErr       error
+	// childResults is the live predicate over this session's children: which
+	// child's terminal record a Tool read already carries, so a completion that
+	// a read answered does not wake the model a second time.
+	childResults    *childResultLedger
+	children        map[string]*childProjection
+	agentDrafts     map[string]agentDraftRecord
+	teamGuard       teamCapabilityGuard
+	admission       *teamAdmission
+	team            *teamCoordinator
+	teamRecovery    []TeamRecoveryCandidate
+	teamRecoveryErr error
 
 	writer      *eventWriter
 	publisher   *eventPublisher
@@ -724,6 +728,7 @@ func openRuntime(
 	runtime.publisher = newEventPublisher(runtime)
 	runtime.children = make(map[string]*childProjection)
 	runtime.childControls = newChildControlRegistry()
+	runtime.childResults = newChildResultLedger()
 	if !openPolicy.teamWorker() {
 		runtime.teamRecovery, runtime.teamRecoveryErr = runtime.discoverTeamRecovery(ctx)
 	}
