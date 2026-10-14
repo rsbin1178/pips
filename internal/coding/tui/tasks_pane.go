@@ -1285,10 +1285,11 @@ type backgroundInspectResultMsg struct {
 }
 
 // killBackgroundTask stops one watch through the same control method the model's
-// own stop Tool uses.
+// own stop Tool uses. The pane's rows name a watch or a child and both settle
+// from the same projection, so the answer's subject is not the pane's business.
 func (m *Model) killBackgroundTask(taskID string) tea.Cmd {
 	fetch := func() tea.Msg {
-		outcome, err := m.controller.KillBackgroundTask(m.ctx, taskID)
+		outcome, _, err := m.controller.KillBackgroundTask(m.ctx, taskID)
 
 		return backgroundKillResultMsg{taskID: taskID, outcome: outcome, err: err}
 	}

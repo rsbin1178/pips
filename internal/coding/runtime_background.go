@@ -131,29 +131,96 @@ func (r *Runtime) publishBackgroundTaskLifecycle(value BackgroundTaskLifecycle) 
 	_ = emitter.emit("", "", eventType, value)
 }
 
-// KillBackgroundTask stops one registered background task. It is the one
-// control method the model's stop Tool, the tasks pane, and the runtime control
-// plane share, so a watch is stopped through exactly one path. The source
-// decides whether the terminal completion still wakes the model: a model kill
-// already returned its own Tool result and must not wake twice.
+// KillBackgroundTask stops one background task or one of this session's own
+// children. It is the one control method the model's stop Tool, the tasks pane,
+// and the runtime control plane share, so a watch, a backgrounded command, and
+// a delegated child are all stopped through exactly one path. The id resolves
+// against the background registry first and then against this session's
+// children, because the two id spaces cannot collide: a registry id carries a
+// kind prefix and a child id is a session id.
+//
+// The returned Subject names which producer answered, because the outcomes are
+// worded differently: a task is stopped outright, while a child's cancellation
+// is only initiated. The source decides whether the terminal completion still
+// wakes the model: a model kill already returned its own Tool result and must
+// not wake twice.
 func (r *Runtime) KillBackgroundTask(
 	ctx context.Context,
 	taskID string,
 	source background.KillSource,
-) (background.Outcome, error) {
+) (background.Outcome, background.Subject, error) {
 	if r == nil || r.backgroundTasks == nil {
-		return background.OutcomeNotFound, ErrRuntimeClosed
+		return background.OutcomeNotFound, background.SubjectTask, ErrRuntimeClosed
 	}
 
 	if taskID == "" {
-		return background.OutcomeNotFound, ErrRuntimeInvalid
+		return background.OutcomeNotFound, background.SubjectTask, ErrRuntimeInvalid
 	}
 
 	if err := ctx.Err(); err != nil {
-		return background.OutcomeNotFound, err
+		return background.OutcomeNotFound, background.SubjectTask, err
 	}
 
-	return r.backgroundTasks.Kill(taskID, source), nil
+	if outcome := r.backgroundTasks.Kill(taskID, source); outcome != background.OutcomeNotFound {
+		return outcome, background.SubjectTask, nil
+	}
+
+	return r.killChildTask(ctx, taskID, source)
+}
+
+// killChildTask is the second half of the stop's resolution order: one id
+// resolved against this session's own children. An id that is not a child
+// answers the shared not-found outcome; a child that already reached a terminal
+// state answers already_exited; a live child is cancelled through the manager
+// and answers killed. A cancellation the manager refuses returns its error
+// rather than a false outcome, because a stop that never reached the child must
+// not read as one that did.
+func (r *Runtime) killChildTask(
+	ctx context.Context,
+	childSessionID string,
+	source background.KillSource,
+) (background.Outcome, background.Subject, error) {
+	state, found := r.childState(ctx, childSessionID)
+	if !found {
+		return background.OutcomeNotFound, background.SubjectSubagent, nil
+	}
+
+	if terminalSubagentState(state) {
+		// A child that had already finished marks nothing: the model asked
+		// about it, and its completion is the surface that carries the result.
+		return background.OutcomeAlreadyExited, background.SubjectSubagent, nil
+	}
+
+	if err := r.subagents.Cancel(ctx, childSessionID); err != nil {
+		return background.OutcomeNotFound, background.SubjectSubagent, err
+	}
+
+	// A stop that answers the model's own call, or that leaves no turn to
+	// report it, marks the child's result in the ledger the same way the
+	// registry's own source rule marks a task's. A user stop does not, because
+	// the model must still learn that the pane stopped the child.
+	if childStopSuppressesResult(source) {
+		r.childResults.take(childSessionID)
+	}
+
+	return background.OutcomeKilled, background.SubjectSubagent, nil
+}
+
+// childState resolves one id against this session's own children. An id that is
+// not a child of this session reads as absent rather than as an error, exactly
+// as it does in the read resolver, so the stop answers the shared not-found
+// outcome for it.
+func (r *Runtime) childState(ctx context.Context, childSessionID string) (subagent.State, bool) {
+	if r == nil || r.subagents == nil || childSessionID == "" {
+		return "", false
+	}
+
+	detail, err := r.subagents.Inspect(ctx, childSessionID)
+	if err != nil {
+		return "", false
+	}
+
+	return detail.Summary.State, true
 }
 
 // BackgroundTaskInspection is one bounded view of a registered background task:
@@ -201,9 +268,11 @@ func (r *Runtime) InspectBackgroundTask(
 // knows, oldest first. It is what a not-found stop names so the model can
 // recover an id it lost. It reads the same registry the kill itself addresses.
 //
-// A delegated child's session id is deliberately not listed even though the
-// read Tools resolve it: the sentence is shared with the stop Tool, which
-// cannot stop a child, so naming one would offer an id the caller cannot use.
+// The enumeration stays the registry's own even though the read and stop Tools
+// now resolve a child's session id too: the reference's own enumeration is
+// labelled "known bash task IDs" and lists no subagent either, and one list
+// keeps the not-found sentence shared by both Tools from naming an id the
+// registry half of the resolver never returned.
 func (r *Runtime) KnownBackgroundTaskIDs(ctx context.Context) []string {
 	if r == nil || r.backgroundTasks == nil || ctx.Err() != nil {
 		return nil
@@ -416,6 +485,17 @@ func (o *backgroundObserver) deliverBackground() error {
 	}
 
 	return nil
+}
+
+// childStopSuppressesResult reports whether a stop's source already answers the
+// child's completion, so the stop marks the child's result in the Phase R
+// ledger. It follows the registry's own source rule rather than a new one,
+// which is why it sits beside the check that applies it to a task: a model stop
+// already produced a Tool result, and a prompt-end stop leaves no turn to report
+// it, while a user stop must still wake the model with the news that the pane
+// stopped the child.
+func childStopSuppressesResult(source background.KillSource) bool {
+	return source == background.KillModel || source == background.KillPromptEnd
 }
 
 // backgroundMessages renders one queue record per delivery unit: the surviving

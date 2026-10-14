@@ -193,9 +193,10 @@ func (t *taskOutputTool) renderTaskOutputs(
 
 // taskOutputNotFound is the one not-found result both task-output Tools report:
 // the stop Tool's shape, a not_found code, and the sentence that names the ids
-// the registry still knows. The enumeration stays the registry's own for both
-// Tools, even though a child id resolves here: the sentence is shared with the
-// stop Tool, which cannot stop a child.
+// the registry still knows. The enumeration stays the registry's own for every
+// Tool that shares the sentence, even though a child id resolves here: the
+// reference's own enumeration is the known bash task ids and names no subagent
+// either, so one list keeps the shared sentence from drifting per Tool.
 func taskOutputNotFound(tool, taskID string, known []string) result {
 	return result{
 		OK: false, Tool: tool, Code: string(background.OutcomeNotFound),

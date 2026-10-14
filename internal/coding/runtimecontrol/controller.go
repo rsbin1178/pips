@@ -1147,29 +1147,36 @@ func (c *Controller) CancelSubagent(ctx context.Context, childSessionID string) 
 	})
 }
 
-// KillBackgroundTask stops one background task owned by the selected Session.
-// The tasks pane and the model's own stop Tool therefore share one control
-// method, and a stop requested from the pane is a user action.
+// KillBackgroundTask stops one background task or child owned by the selected
+// Session. The tasks pane and the model's own stop Tool therefore share one
+// control method, and a stop requested from the pane is a user action. The
+// subject names which producer answered, so the caller can word its own report.
 func (c *Controller) KillBackgroundTask(
 	ctx context.Context,
 	taskID string,
-) (background.Outcome, error) {
-	var value background.Outcome
+) (background.Outcome, background.Subject, error) {
+	var (
+		outcome background.Outcome
+		subject background.Subject
+	)
+
 	err := c.withRuntime(func(runtime runtimeInstance) error {
 		killer, ok := runtime.(interface {
-			KillBackgroundTask(context.Context, string, background.KillSource) (background.Outcome, error)
+			KillBackgroundTask(
+				context.Context, string, background.KillSource,
+			) (background.Outcome, background.Subject, error)
 		})
 		if !ok {
 			return fmt.Errorf("%w: runtime does not expose background control", ErrInvalid)
 		}
 
 		var err error
-		value, err = killer.KillBackgroundTask(ctx, taskID, background.KillUser)
+		outcome, subject, err = killer.KillBackgroundTask(ctx, taskID, background.KillUser)
 
 		return err
 	})
 
-	return value, err
+	return outcome, subject, err
 }
 
 // InspectBackgroundTask returns the selected Session's bounded view of one

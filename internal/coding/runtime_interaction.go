@@ -736,7 +736,7 @@ func (r *Runtime) openInteraction(
 	localOptions := []tools.CatalogOption{
 		tools.WithControlledShell(shell),
 		tools.WithControlledMonitor(monitor),
-		tools.WithKillBackground(func(ctx context.Context, taskID string) (background.Outcome, error) {
+		tools.WithKillBackground(func(ctx context.Context, taskID string) (background.Outcome, background.Subject, error) {
 			return r.KillBackgroundTask(ctx, taskID, background.KillModel)
 		}),
 		tools.WithKnownBackgroundIDs(r.KnownBackgroundTaskIDs),
@@ -900,7 +900,7 @@ func (r *Runtime) openInteraction(
 			},
 			model: childModel, mode: started.Mode, mcpEntries: childMCPEntries, controls: r.childControls,
 			backgroundTasks: r.backgroundTasks,
-			killBackground: func(ctx context.Context, taskID string) (background.Outcome, error) {
+			killBackground: func(ctx context.Context, taskID string) (background.Outcome, background.Subject, error) {
 				return r.KillBackgroundTask(ctx, taskID, background.KillModel)
 			},
 			knownBackgroundIDs:  r.KnownBackgroundTaskIDs,
