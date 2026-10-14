@@ -985,7 +985,7 @@ func (m *Manager) Wait(ctx context.Context, childSessionID string) (Result, erro
 	if err != nil {
 		return Result{}, err
 	}
-	result := resultFromDetail(detail)
+	result := ResultFromDetail(detail)
 	if result.Outcome == OutcomeSucceeded {
 		return result, nil
 	}
@@ -1037,7 +1037,10 @@ func (m *Manager) CancelRoot(rootInteractionID string) int {
 	return len(values)
 }
 
-func resultFromDetail(detail Detail) Result {
+// ResultFromDetail projects one inspected child into the result the spawn Tool
+// and the task-output Tool both render. The persisted plan decides whether the
+// value is structured, so a legacy builtin plan keeps its own shape.
+func ResultFromDetail(detail Detail) Result {
 	value := detail.Summary
 	result := Result{
 		Identity: value.Identity, Role: value.Role, ChildSessionID: value.ChildSessionID,

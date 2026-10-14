@@ -432,14 +432,16 @@ func TestNextNotificationBatchGroupsOneRoot(t *testing.T) {
 	second := testAgentNotification(runtime, "s-batch-2", "root-a")
 	other := testAgentNotification(runtime, "s-batch-3", "root-b")
 
-	batch := runtime.nextNotificationBatch([]subagent.Notification{first, second, other})
+	batch, taken := runtime.nextNotificationBatch([]subagent.Notification{first, second, other})
 
+	assert.Empty(t, taken)
 	assert.Equal(t, []string{"s-batch-1", "s-batch-2"}, notificationIDs(batch))
 
 	// The other root is claimed on its own once the first batch is delivered.
-	assert.Equal(t, []string{"s-batch-3"}, notificationIDs(
-		runtime.nextNotificationBatch([]subagent.Notification{other}),
-	))
+	batch, taken = runtime.nextNotificationBatch([]subagent.Notification{other})
+
+	assert.Empty(t, taken)
+	assert.Equal(t, []string{"s-batch-3"}, notificationIDs(batch))
 }
 
 // TestNotificationBatchCapIsUnlimitedByDefault pins Phase M: MaxAutoFollowUps

@@ -200,6 +200,10 @@ func (r *Runtime) InspectBackgroundTask(
 // KnownBackgroundTaskIDs lists the ids the Runtime's background registry still
 // knows, oldest first. It is what a not-found stop names so the model can
 // recover an id it lost. It reads the same registry the kill itself addresses.
+//
+// A delegated child's session id is deliberately not listed even though the
+// read Tools resolve it: the sentence is shared with the stop Tool, which
+// cannot stop a child, so naming one would offer an id the caller cannot use.
 func (r *Runtime) KnownBackgroundTaskIDs(ctx context.Context) []string {
 	if r == nil || r.backgroundTasks == nil || ctx.Err() != nil {
 		return nil
@@ -218,24 +222,76 @@ func (r *Runtime) KnownBackgroundTaskIDs(ctx context.Context) []string {
 }
 
 // readBackgroundTasks is the one read operation the task-output and
-// blocking-wait Tools route through, so the runtime owns id resolution. A poll
-// takes a snapshot; any other mode waits inside the registry, which is
-// event-driven on each task's own ended channel.
+// blocking-wait Tools route through, so the runtime owns id resolution. Every
+// id resolves against the background registry first and then against this
+// session's own children, so a watch and a delegated child are readable through
+// one surface. A poll takes a snapshot; any other mode waits inside the
+// producers, which are event-driven on their own terminal signals.
 func (r *Runtime) readBackgroundTasks(
 	ctx context.Context,
 	ids []string,
 	mode string,
 	budget time.Duration,
 ) ([]background.TaskOutput, background.WaitOutcome) {
-	if r == nil || r.backgroundTasks == nil {
+	if r == nil {
 		return nil, background.WaitOutcomeCompleted
 	}
 
 	if mode == tools.TaskOutputModePoll || budget <= 0 {
-		return r.backgroundTasks.TaskOutputs(ids), background.WaitOutcomeCompleted
+		return r.pollTaskOutputs(ctx, ids), background.WaitOutcomeCompleted
 	}
 
-	return r.backgroundTasks.Wait(ctx, ids, mode == tools.TaskOutputModeWaitAny, budget)
+	return r.waitTaskOutputs(ctx, ids, mode, budget)
+}
+
+// pollTaskOutputs resolves one record per asked id, in the asked order.
+func (r *Runtime) pollTaskOutputs(ctx context.Context, ids []string) []background.TaskOutput {
+	records := make([]background.TaskOutput, 0, len(ids))
+
+	for _, id := range ids {
+		records = append(records, r.resolveTaskOutput(ctx, id))
+	}
+
+	return records
+}
+
+// resolveTaskOutput resolves one id against the registry first and then against
+// this session's own children. An id of neither shape yields the same not-found
+// record, so a caller that guessed the id's shape wrong still reads one answer.
+func (r *Runtime) resolveTaskOutput(ctx context.Context, id string) background.TaskOutput {
+	if record := r.registryTaskOutput(id); record.Found {
+		return record
+	}
+
+	if record, ok := r.childTaskOutput(ctx, id); ok {
+		return record
+	}
+
+	return background.NotFoundTaskOutput(id)
+}
+
+// registryTaskOutput reads one id from the background registry. It is the watch
+// half of the resolver, so it stays beside the registry's other read surfaces.
+func (r *Runtime) registryTaskOutput(taskID string) background.TaskOutput {
+	if r == nil || r.backgroundTasks == nil {
+		return background.NotFoundTaskOutput(taskID)
+	}
+
+	return r.backgroundTasks.TaskOutput(taskID)
+}
+
+// registryKnows reports whether the background registry owns an id. It is the
+// first half of the resolution order, and it is how a wait decides which
+// producer an id belongs to. A registry id carries a kind prefix and a child id
+// is a session id, so the two id spaces cannot collide.
+func (r *Runtime) registryKnows(taskID string) bool {
+	if r == nil || r.backgroundTasks == nil {
+		return false
+	}
+
+	_, ok := r.backgroundTasks.Snapshot(taskID)
+
+	return ok
 }
 
 // admitBackgroundLogPath reports whether the requested value is exactly the log

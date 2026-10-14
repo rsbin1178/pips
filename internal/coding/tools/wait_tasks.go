@@ -17,17 +17,17 @@ import (
 const waitTasksSchema = `{
  "type":"object","additionalProperties":false,"required":["task_ids","mode"],
  "properties":{
-  "task_ids":{"type":"array","minItems":1,"maxItems":20,"items":{"type":"string","minLength":1},"description":"The task ids a monitor Tool call returned."},
+  "task_ids":{"type":"array","minItems":1,"maxItems":20,"items":{"type":"string","minLength":1},"description":"The ids to wait on: a task id a shell or monitor Tool call returned, or a spawned subagent's subagent_id."},
   "mode":{"type":"string","enum":["wait_any","wait_all"],"description":"wait_all waits until every id completes; wait_any returns at the first completion."},
   "timeout_ms":{"type":"integer","minimum":0,"maximum":3600000,"description":"Max wait time in milliseconds, up to 3600000 (1 hour). Omit or pass 0 for the 30000ms default: this Tool always waits."}
  }
 }`
 
 // NewWaitTasksTool builds the model-facing blocking-wait Tool. It blocks until
-// the listed tasks complete, or until the budget elapses, and reports the same
-// record the task-output Tool does. It exists because its mode carries the one
-// behaviour the task-output Tool has no place for: wait_any returns at the
-// first completion.
+// the listed background tasks or delegated subagents complete, or until the
+// budget elapses, and reports the same record the task-output Tool does. It
+// exists because its mode carries the one behaviour the task-output Tool has no
+// place for: wait_any returns at the first completion.
 func NewWaitTasksTool(read ReadBackgroundTasks, known KnownBackgroundIDs) agent.Tool {
 	return &waitTasksTool{read: read, known: known}
 }
@@ -40,13 +40,14 @@ type waitTasksTool struct {
 func (*waitTasksTool) Decl() ai.Tool {
 	return ai.Tool{
 		Name: WaitTasksName,
-		Description: "Wait for background tasks started by the monitor tool to complete. " +
-			"Pass task_ids and a mode: wait_all waits until every id completes, " +
+		Description: "Wait for background tasks or delegated subagents to complete. " +
+			"Pass task_ids with task ids a shell or monitor call returned or a spawned subagent's " +
+			"subagent_id, and a mode: wait_all waits until every id completes, " +
 			"wait_any returns at the first completion. " +
 			"Prefer get_task_output with task_ids and a positive timeout_ms; this Tool is the any-mode alias. " +
 			"A wait is always intended here, so an omitted or zero timeout_ms waits 30000ms; " +
 			"the ceiling is 3600000. The result is the same record get_task_output reports. " +
-			"A not_found result lists the ids the registry still knows.",
+			"A not_found result lists the task ids the registry still knows.",
 		InputSchema: &ai.Schema{RawJSON: json.RawMessage(waitTasksSchema)},
 	}
 }

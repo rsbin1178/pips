@@ -1164,7 +1164,10 @@ produces no completion at all. The start receipt lists any other background
 task still running, so a duplicate watch is visible at launch.
 
 **Reading and waiting by id.** Two read-only Tools address a background task by
-the `task_id` a `shell` or `monitor` call returned. `get_task_output` takes
+the `task_id` a `shell` or `monitor` call returned, or a delegated child by the
+`subagent_id` a `spawn_subagent` call returned. Each id resolves against the
+background registry first and then against this session's own children, and an
+id of neither shape reads the same not-found record. `get_task_output` takes
 `task_ids` (up to 20, with `task_id` as the single-id alias) and an optional
 `timeout_ms`:
 
@@ -1173,26 +1176,60 @@ the `task_id` a `shell` or `monitor` call returned. `get_task_output` takes
   (3 600 000 ms).
 - The record carries `task_id`, `command`, `status`, `exit_code`, `started`,
   `ended`, `duration_secs`, `output`, `output_file`, `truncated`,
-  `truncation_hint`, and `raw_output_bytes`. The status words are `running`,
-  `completed`, `failed`, `cancelled`, and `timed_out`, chosen in that order: a
-  kill is `cancelled`, the task's own deadline is `timed_out`, a clean exit is
-  `completed`, and anything else is `failed`.
+  `truncation_hint`, and `raw_output_bytes`. For a background task the status
+  words are `running`, `completed`, `failed`, `cancelled`, and `timed_out`,
+  chosen in that order: a kill is `cancelled`, the task's own deadline is
+  `timed_out`, a clean exit is `completed`, and anything else is `failed`.
 - `output` is the log itself while it fits 40 000 bytes. Past that it is the
   first 2 000 bytes cut at a rune boundary plus
   `[Output truncated - <N> bytes total. Use read on <path> for full content]`,
   and `raw_output_bytes` reports the log's real size.
-- A still-running record carries the reference's wait words: a plain poll says
+- A still-running record carries the wait words: a plain poll says
   `Use timeout_ms to wait for completion.`, an elapsed wait says
   `Waited the requested <x>.` (or `Waited <x>, the per-call maximum, of the
   <y> you requested.` when the ask exceeded the ceiling), and each ends with the
-  reminder that the task is still working and the model will be notified.
+  reminder that the subject is still working and the model will be notified. A
+  child's reminder says `do not kill this subagent and do not tell it to stop`
+  in place of the task's `do not kill this task`, because only a subagent can be
+  told to stop.
 
 `wait_tasks` is the blocking alias for a caller that wants `mode: wait_any`:
 `wait_all` shares `get_task_output`'s multi path, while `wait_any` returns at the
 first completion. A wait is the point of that Tool, so an omitted or zero
 `timeout_ms` waits the default 30 s instead of taking a snapshot. A wait is
 event-driven: it registers on each still-running task's own end and wakes on it,
-so nothing polls.
+so nothing polls. A wait that resolves a child id cancels the waits it left
+behind, so `wait_any` across a watch and a child returns at whichever resolves
+first.
+
+**Reading a delegated child.** A child maps onto the same record, so the Tool
+layer, the multi shape, and the renderer are unchanged. `task_id` is the child's
+session id, `command` is `[subagent:<identity>] <task preview>`, and
+`output_file` is empty: a child has no log file, so `read` has nothing to admit
+for it, and its `truncation_hint` names no path. The status words are the child's
+own closed set: `initializing` (`created`), `running`, `completed` (`succeeded`),
+`failed`, and `cancelled` (`canceled`, and `interrupted` too, with the
+interruption's own code kept in the body). `exit_code` is `0` for a completed
+child and `1` for a failed one, and absent otherwise; the times come from the
+child's creation time and its duration.
+
+A running child's `output` is a progress block — its type, description, elapsed
+time, turn and tool-call counts, tokens and context use, the tools it has used,
+and its error count. A child whose durable lifecycle exists but whose run has not
+started reads `initializing` with a shorter block. A terminal child's `output` is
+the result rendering the spawn result already prints, with the
+`<subagent_meta>` footer, the worktree path when the child kept one, and the
+resume line naming its id. A child's `output` takes the same 40 000-byte bound as
+a task log, with `raw_output_bytes` reporting its real length, the path-free
+footer `[Output truncated - <N> bytes total]`, and a `truncation_hint` that
+reports the same real total instead of naming a file.
+
+A read that returns a child's terminal record is that result's surface: the
+completion the same child produced is dropped from the delivery batch and
+acknowledged, so the model is not woken with a result it already has. A blocking
+wait registers before it blocks and releases the registration when it leaves
+without a terminal record, so a wait that elapses leaves the child's later
+completion to arrive.
 
 **Reading the rest of a log.** `output_file` is the log's own path under the
 session directory, which is outside the workspace tree. The `read` Tool admits
@@ -1205,11 +1242,17 @@ line window, binary check, and output bound as a workspace file.
 **Stopping one.** `kill_background_task` takes the `task_id` a `shell` or
 `monitor` call returned and answers `killed`, `already_exited`, or `not_found`.
 A `not_found` answer also names the ids the registry still knows, bounded in
-count and length, so a model that lost an id can recover it. A task id is unique
-across processes: `<kind>-<n>-<token>`, where the kind is `monitor` or `shell`,
-the counter stays readable, and a short random token keeps a restarted process
-from reusing an id. The tasks pane's kill control calls the same method, so
-there is one control path.
+count and length, so a model that lost an id can recover it. That enumeration is
+the registry's own, and a delegated child's `subagent_id` is deliberately not in
+it: the sentence is shared with the task-output Tool, but this Tool cannot stop a
+child, so naming one would offer an id the caller cannot use. A child's
+`subagent_id` therefore answers `not_found` here even though the read Tools
+resolve it; stopping a child needs its own wake rule, so the asymmetry is
+recorded rather than papered over. A task id is unique across processes:
+`<kind>-<n>-<token>`, where the kind is `monitor` or `shell`, the counter stays
+readable, and a short random token keeps a restarted process from reusing an id.
+The tasks pane's kill control calls the same method, so there is one control
+path.
 
 **Tasks pane.** A registered watch is a row under `Watchers`, labelled
 `Monitor`, showing the description (or the command when there is none), the

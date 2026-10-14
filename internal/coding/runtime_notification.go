@@ -242,7 +242,16 @@ func (r *Runtime) deliverNotificationBatch(ctx context.Context) {
 		return
 	}
 
-	batch := r.nextNotificationBatch(pending)
+	batch, taken := r.nextNotificationBatch(pending)
+	// A completion whose child's result a Tool read already carries is dropped
+	// here and acknowledged beside the batch, in the same place the revoked-goal
+	// case acknowledges its own: the read is the surface that answered it, so a
+	// suppressed completion must not be retried either.
+	if len(taken) > 0 {
+		if err := r.notifications.Acknowledge(notificationIDs(taken)...); err == nil {
+			r.signalNotifications()
+		}
+	}
 	if len(batch) == 0 {
 		return
 	}
@@ -518,16 +527,27 @@ func (r *Runtime) releaseBackground(text string) {
 	}
 }
 
+// nextNotificationBatch selects the completions one delivery carries and
+// separates the ones whose child's result a Tool read already took. A dropped
+// notification is returned beside the batch so the caller can acknowledge it,
+// and the taken check is live rather than a field captured at report time: a
+// child read registers before it blocks and takes the result on its way out, so
+// the live state covers both orderings.
 func (r *Runtime) nextNotificationBatch(
 	pending []subagent.Notification,
-) []subagent.Notification {
+) (batch, taken []subagent.Notification) {
 	r.notificationMu.Lock()
 	defer r.notificationMu.Unlock()
 
 	rootID := ""
-	batch := make([]subagent.Notification, 0, len(pending))
+	batch = make([]subagent.Notification, 0, len(pending))
 	for _, notification := range pending {
 		if _, inflight := r.notificationInflight[notification.ID]; inflight {
+			continue
+		}
+		if r.childResultTaken(notification.AgentID) {
+			taken = append(taken, notification)
+
 			continue
 		}
 		if rootID == "" {
@@ -536,7 +556,7 @@ func (r *Runtime) nextNotificationBatch(
 			// switch, so the batch cap applies only to an explicit bound.
 			if limit := r.subagents.MaxAutoFollowUps(); limit > 0 &&
 				r.notificationBatches[rootID] >= limit {
-				return nil
+				return nil, taken
 			}
 		}
 		if notification.Ownership.RootInteractionID == rootID {
@@ -544,7 +564,7 @@ func (r *Runtime) nextNotificationBatch(
 		}
 	}
 
-	return batch
+	return batch, taken
 }
 
 func (r *Runtime) claimNotificationBatch(

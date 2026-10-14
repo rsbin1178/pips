@@ -478,3 +478,52 @@ func TestTaskOutputToolsAreAbsentWithoutARegistry(t *testing.T) {
 	assert.True(t, names[TaskOutputName], "the task-output Tool must be registered with a read surface")
 	assert.True(t, names[WaitTasksName], "the wait Tool must be registered with a read surface")
 }
+
+// TestTaskOutputToolsNameBothIDSources pins the declaration a model reads: the
+// same two Tools resolve a background task and a delegated subagent, so each
+// declaration has to say where an id comes from.
+func TestTaskOutputToolsNameBothIDSources(t *testing.T) {
+	t.Parallel()
+
+	registry := newTaskOutputRegistry(t)
+
+	for _, tool := range []agent.Tool{
+		NewTaskOutputTool(registryRead(registry), nil),
+		NewWaitTasksTool(registryRead(registry), nil),
+	} {
+		decl := tool.Decl()
+		assert.Contains(t, decl.Description, "subagent", decl.Name)
+		assert.Contains(t, string(decl.InputSchema.RawJSON), "subagent", decl.Name)
+	}
+}
+
+// TestTaskOutputToolsNotFoundSentenceIgnoresTheIDShape pins the enumeration rule
+// for both Tools: an unknown id of either shape reads the same not-found
+// sentence, and that sentence names the registry's ids only, because the stop
+// Tool shares it and cannot stop a child.
+func TestTaskOutputToolsNotFoundSentenceIgnoresTheIDShape(t *testing.T) {
+	t.Parallel()
+
+	read := func(
+		_ context.Context, ids []string, _ string, _ time.Duration,
+	) ([]background.TaskOutput, background.WaitOutcome) {
+		records := make([]background.TaskOutput, 0, len(ids))
+		for _, id := range ids {
+			records = append(records, background.NotFoundTaskOutput(id))
+		}
+
+		return records, background.WaitOutcomeCompleted
+	}
+	known := func(context.Context) []string { return []string{"monitor-1-aaaa"} }
+
+	for _, id := range []string{"monitor-2-bbbb", "s-00000000-0000-4000-8000-000000000000"} {
+		header, body := execTaskOutputTool(t, NewTaskOutputTool(read, known), `{"task_ids":["`+id+`"]}`)
+		assert.False(t, header.OK)
+		assert.Equal(t, string(background.OutcomeNotFound), header.Code)
+		assert.Equal(t, `Task "`+id+`" not found. Known task ids: monitor-1-aaaa.`, body)
+
+		_, waitBody := execTaskOutputTool(t, NewWaitTasksTool(read, known),
+			`{"task_ids":["`+id+`"],"mode":"wait_any"}`)
+		assert.Equal(t, body, waitBody)
+	}
+}
