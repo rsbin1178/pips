@@ -36,6 +36,15 @@ type runtimeGoalControl struct {
 	directory string
 	id        continuation.ID
 	ledger    goalLedger
+	// declaration is the model's pending completion declaration. It lives in the
+	// process, like the run that made it: the Goal loop consumes it at exactly one
+	// decision point, and a restarted Goal has no declaration to consume.
+	declaration bool
+	// blockedReason is the model's own failure reason for the pause it declared.
+	// The pause path's transition wording is what the engine records, so the
+	// paused projection reports this instead while the Goal stays paused. It is
+	// cleared whenever the Goal is created, resumed, or cleared.
+	blockedReason string
 }
 
 var (
@@ -219,9 +228,17 @@ func (c *runtimeGoalControl) project(execution continuation.Execution) (GoalStat
 		status = GoalPaused
 	}
 	failed := c.ledger.FailedUsage.InputTokens + c.ledger.FailedUsage.OutputTokens
+	reason := goalflow.Bound(execution.Reason, 4096)
+	if status == GoalPaused && c.blockedReason != "" {
+		// A Goal the model declared blocked reports the model's own failure reason
+		// while it stays paused, so a user resumes it with the reason the worker
+		// reported rather than the pause transition's own wording.
+		reason = goalflow.Bound(c.blockedReason, 4096)
+	}
+
 	return GoalState{
 		ID: string(execution.ID), Revision: uint64(execution.Revision), Condition: policy.Condition,
-		Status: status, Reason: goalflow.Bound(execution.Reason, 4096), Attempts: execution.Accounting.Attempts,
+		Status: status, Reason: reason, Attempts: execution.Accounting.Attempts,
 		Evaluations: policy.Evaluations, Tokens: execution.Accounting.Tokens() + failed + c.ledger.ChildUsage.InputTokens + c.ledger.ChildUsage.OutputTokens, MaxTokens: execution.Limits.MaxTokens,
 		FailedCheckTokens: failed, Gaps: state.Gaps, References: state.References,
 	}, nil

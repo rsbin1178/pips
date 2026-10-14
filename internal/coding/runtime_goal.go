@@ -13,6 +13,7 @@ import (
 	"github.com/rsbin1178/pips/agent/goal"
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding/goalflow"
+	"github.com/rsbin1178/pips/internal/coding/tools"
 )
 
 type goalContextKey struct{}
@@ -58,13 +59,106 @@ func (r *Runtime) ResumeGoal(ctx context.Context) iter.Seq2[Event, error] {
 }
 
 // PauseGoal revokes automatic activation and cancels an admitted stage.
-func (r *Runtime) PauseGoal(ctx context.Context) error { return r.controlGoal(ctx, false) }
+func (r *Runtime) PauseGoal(ctx context.Context) error {
+	return r.controlGoal(ctx, false, "Goal paused by user")
+}
 
 // ClearGoal cancels the current Goal without deleting its durable audit trail.
-func (r *Runtime) ClearGoal(ctx context.Context) error { return r.controlGoal(ctx, true) }
+func (r *Runtime) ClearGoal(ctx context.Context) error {
+	return r.controlGoal(ctx, true, "Goal cleared by user")
+}
+
+// pauseGoal is the pause half of the runtime's one control path with the
+// caller's own reason, so a model's blocked declaration pauses the Goal through
+// exactly the path an operator pause uses.
+func (r *Runtime) pauseGoal(ctx context.Context, reason string) error {
+	return r.controlGoal(ctx, false, reason)
+}
+
+// declareGoal answers one model declaration against the session's Goal. It is the
+// channel the update_goal Tool carries: the run's own state is read, a completion
+// claim is recorded for the loop's next decision point, and a failure signal
+// pauses the Goal through the runtime's own pause path. The declaration is never
+// evidence — the auditor still reads the workspace and the recorded tool results.
+func (r *Runtime) declareGoal(ctx context.Context, declaration tools.GoalDeclaration) (string, error) {
+	if r == nil || r.goalControl == nil {
+		return "", tools.ErrGoalNotRunning
+	}
+	state := r.GoalSnapshot()
+	if state.ID == "" {
+		return "", tools.ErrGoalNotRunning
+	}
+	if !goalDeclarable(state) && (declaration.Completed || declaration.BlockedReason != "") {
+		return "", fmt.Errorf(
+			"%w: it is %s; start or resume a Goal before declaring completion or blockage",
+			tools.ErrGoalNotActive, state.Status,
+		)
+	}
+
+	switch {
+	case declaration.BlockedReason != "":
+		return r.blockGoal(ctx, declaration.BlockedReason)
+	case declaration.Completed:
+		c := r.goalControl
+		c.mu.Lock()
+		c.declaration = true
+		c.mu.Unlock()
+		summary := "Goal completion declared; the independent evidence audit runs at the Goal loop's next decision point."
+		if declaration.Message != "" {
+			summary = "Goal completion declared: " + declaration.Message +
+				". The independent evidence audit runs at the Goal loop's next decision point."
+		}
+
+		return summary, nil
+	case declaration.Message != "":
+		// A progress note is recorded and echoed; it changes nothing about the run.
+		return declaration.Message, nil
+	default:
+		return "Goal updated.", nil
+	}
+}
+
+// blockGoal pauses the running Goal with the model's own failure reason. The
+// reason is recorded beside the pause so the paused projection reports why, and
+// the pause itself goes through the runtime's one pause path, so a stuck model
+// stops the loop exactly as an operator pause does.
+func (r *Runtime) blockGoal(ctx context.Context, reason string) (string, error) {
+	c := r.goalControl
+	c.mu.Lock()
+	c.blockedReason = reason
+	c.mu.Unlock()
+
+	if err := r.pauseGoal(ctx, reason); err != nil {
+		c.mu.Lock()
+		c.blockedReason = ""
+		c.mu.Unlock()
+
+		return "", err
+	}
+
+	return "Goal paused as blocked: " + reason + ". The user must resume it.", nil
+}
+
+// consumeDeclaration reports and clears the model's pending completion
+// declaration, so the Goal loop verifies it at exactly one decision point.
+func (c *runtimeGoalControl) consumeDeclaration() bool {
+	c.mu.Lock()
+	declared := c.declaration
+	c.declaration = false
+	c.mu.Unlock()
+
+	return declared
+}
+
+// goalDeclarable reports whether a Goal can still take a completion or failure
+// declaration: a run exists and is neither paused nor finished. A progress note
+// is accepted against a paused or finished Goal too, because it changes nothing.
+func goalDeclarable(state GoalState) bool {
+	return state.ID != "" && state.Active() && state.Status != GoalPaused
+}
 
 //nolint:gocyclo // Control races retry CAS, never work or model calls.
-func (r *Runtime) controlGoal(ctx context.Context, clearGoal bool) error {
+func (r *Runtime) controlGoal(ctx context.Context, clearGoal bool, reason string) error {
 	if r == nil || r.goalControl == nil {
 		return ErrGoalMissing
 	}
@@ -85,9 +179,9 @@ func (r *Runtime) controlGoal(ctx context.Context, clearGoal bool) error {
 			break
 		}
 		if clearGoal {
-			_, err = c.engine.Cancel(ctx, c.id, execution.Revision, "Goal cleared by user")
+			_, err = c.engine.Cancel(ctx, c.id, execution.Revision, reason)
 		} else {
-			_, err = c.engine.Pause(ctx, c.id, execution.Revision, "Goal paused by user")
+			_, err = c.engine.Pause(ctx, c.id, execution.Revision, reason)
 		}
 		if !errors.Is(err, continuation.ErrConflict) {
 			break
@@ -96,6 +190,8 @@ func (r *Runtime) controlGoal(ctx context.Context, clearGoal bool) error {
 	if err == nil && clearGoal {
 		c.ledger.Cleared = true
 		err = c.saveLedger()
+		// A Goal that was actually cleared forgets its declaration and pause reason.
+		c.declaration, c.blockedReason = false, ""
 	}
 	roots := slices.Clone(c.ledger.Roots)
 	c.mu.Unlock()
@@ -193,6 +289,7 @@ func (r *Runtime) driveGoal(
 		Evaluator: evaluator, Verifier: verifier, FailedUsage: c.recordFailedUsage, KnownFailed: c.failedUsage,
 		Invalidated: func() bool { c.mu.Lock(); defer c.mu.Unlock(); return c.ledger.Invalidated },
 		Phase:       func(phase string) error { return r.publishGoal(ctx, emitter, GoalStatus(phase)) },
+		Declared:    c.consumeDeclaration,
 	}
 	worker := &runtimeGoalWorker{runtime: r, operation: operation, emitter: emitter}
 	handlers := continuation.Handlers{
@@ -279,6 +376,9 @@ func (r *Runtime) createGoal(ctx context.Context, request GoalRequest) (continua
 	c.id = execution.ID
 	revoked := append(slices.Clone(c.ledger.RevokedRoots), c.ledger.Roots...)
 	c.ledger = goalLedger{Version: 1, ID: execution.ID, RevokedRoots: revoked}
+	// A fresh Goal inherits neither a declaration nor a pause reason.
+	c.declaration, c.blockedReason = false, ""
+
 	return execution, c.saveLedger()
 }
 
@@ -288,6 +388,9 @@ func (r *Runtime) activateGoal(ctx context.Context, operation goalWorkOperation)
 	if c.id == "" || c.ledger.Cleared {
 		return continuation.Execution{}, ErrGoalMissing
 	}
+	// An explicit resume ends the pause the model declared, so a later operator
+	// pause reports its own reason.
+	c.blockedReason = ""
 	execution, err := c.engine.Get(ctx, c.id)
 	if err != nil {
 		return execution, err
