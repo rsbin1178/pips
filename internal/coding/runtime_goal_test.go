@@ -323,22 +323,77 @@ func TestRuntimeGoalWaitUsesNotificationAndCannotRearmPausedGoal(t *testing.T) {
 	assert.Empty(t, pending)
 }
 
-func TestRuntimeGoalDoesNotStartWork26(t *testing.T) {
+// TestRuntimeGoalRunsPastTheOldSegmentCap pins Phase Z: the Goal carries no
+// work-segment cap, so a Goal that keeps producing new evidence runs past the 25
+// segments the continuation default used to allow and stops by its token budget
+// rather than by a segment count.
+func TestRuntimeGoalRunsPastTheOldSegmentCap(t *testing.T) {
 	t.Parallel()
+
+	const segments = 27
+
 	model := newGoalTestModel()
 	runtime := openTestRuntime(t, model)
-	for index := range 25 {
+
+	// Every scripted response reports the same usage, and the goal test model
+	// answers the assessment with one too. A work segment is two work turns plus
+	// that assessment: the turns report their run's cumulative usage (1x and 2x),
+	// so a segment costs four scripted responses' worth of observed tokens and the
+	// budget below pays for exactly `segments` of them.
+	response := runtimeTextResponse("continue")
+	segmentTokens := 4 * (response.Usage.InputTokens + response.Usage.OutputTokens)
+
+	for index := range segments {
 		name := fmt.Sprintf("proof-%d.txt", index)
 		require.NoError(t, os.WriteFile(filepath.Join(runtime.workspace.Root(), name), []byte(name), 0o600))
 		model.responses = append(model.responses, runtimeToolResponse(fmt.Sprintf("call-%d", index), "read", fmt.Sprintf(`{"path":%q}`, name)), runtimeTextResponse("continue"))
 		model.outcomes = append(model.outcomes, "continue")
 	}
-	_, err := collectRuntimeResult(runtime.StartGoal(t.Context(), GoalRequest{Condition: "keep inspecting"}))
+
+	_, err := collectRuntimeResult(runtime.StartGoal(t.Context(), GoalRequest{
+		Condition: "keep inspecting", MaxTokens: segments * segmentTokens,
+	}))
 	require.NoError(t, err)
-	assert.Equal(t, GoalLimited, runtime.GoalSnapshot().Status)
-	assert.Equal(t, 25, runtime.GoalSnapshot().Attempts)
-	assert.Equal(t, 25, runtime.GoalSnapshot().Evaluations)
-	assert.Len(t, model.Requests(), 50)
+
+	state := runtime.GoalSnapshot()
+	assert.Equal(t, GoalLimited, state.Status)
+	// 27 segments ran; the removed default stopped the Goal at 25.
+	assert.Equal(t, segments, state.Attempts)
+	assert.Equal(t, segments, state.Evaluations)
+	assert.Len(t, model.Requests(), segments*2)
+}
+
+// TestRuntimeGoalWorkSegmentIsNotCappedByTheRemainingBudget pins Phase Z: the
+// work interaction installs no cap derived from the Goal's remaining budget, so
+// a work segment reaches its own answer even when the budget cannot pay for it,
+// and the budget keeps its post-hoc check at the loop boundary.
+func TestRuntimeGoalWorkSegmentIsNotCappedByTheRemainingBudget(t *testing.T) {
+	t.Parallel()
+
+	model := newGoalTestModel(
+		runtimeToolResponse("proof-read", "read", `{"path":"proof.txt"}`),
+		runtimeTextResponse("candidate complete"),
+	)
+	model.outcomes = []string{"complete"}
+	runtime := openTestRuntime(t, model)
+	require.NoError(t, os.WriteFile(filepath.Join(runtime.workspace.Root(), "proof.txt"), []byte("actual implementation\n"), 0o600))
+
+	// One scripted response's worth of budget: a per-call cap would have stopped
+	// the work segment after its first turn.
+	response := runtimeTextResponse("continue")
+	_, err := collectRuntimeResult(runtime.StartGoal(t.Context(), GoalRequest{
+		Condition: "inspect proof.txt", MaxTokens: response.Usage.InputTokens + response.Usage.OutputTokens,
+	}))
+	require.NoError(t, err)
+
+	state := runtime.GoalSnapshot()
+	assert.Equal(t, GoalLimited, state.Status)
+	assert.Equal(t, 1, state.Attempts)
+	// Both work turns ran, so the segment ended on the model's own answer instead
+	// of being cut off mid-segment, and the budget stopped the Goal before the
+	// assessment.
+	assert.Len(t, model.Requests(), 2)
+	assert.Equal(t, 0, state.Evaluations)
 }
 
 // TestRuntimeGoalWorkRunsWithoutATurnCap pins Phase M: a goal work interaction

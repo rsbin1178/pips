@@ -138,8 +138,19 @@ func (v *Verifier) Verify(
 			text := PartsText(content)
 
 			header, _, parseErr := tools.ParseResult(text)
-			if parseErr != nil || !header.OK || header.Truncated || len(text) > MaxResultBytes {
+			if parseErr != nil || !header.OK || header.Truncated {
 				return Verdict{}, usage, fmt.Errorf("%w: verifier read is missing or truncated", goal.ErrInvalid)
+			}
+
+			// The auditor's own catalog can return far more than this envelope — its
+			// read tool allows 2,000 lines and 50 KiB — so an over-envelope result is
+			// a read the audit cannot cite, not a failed audit. Completion is simply
+			// not established, exactly as for any other unusable answer.
+			if len(text) > MaxResultBytes {
+				return unverified(fmt.Sprintf(
+					"A verifier read exceeded the auditor's %d-byte evidence envelope; completion is not established",
+					MaxResultBytes,
+				)), usage, nil
 			}
 
 			id := "read:" + call.ID
@@ -294,8 +305,16 @@ func validateProof(verdict Verdict, evidence Evidence, reads map[string]Record) 
 	hasRecord, hasRead := false, false
 
 	for _, id := range verdict.References {
-		if _, ok := records[id]; ok {
+		if record, ok := records[id]; ok {
 			hasRecord = true
+			// A captured file read the verdict cites must still match an independent
+			// read: a stale file record cannot be silently cited. Only cited records
+			// are revalidated, because the auditor may make at most eight calls, so a
+			// ledger with more read records than that must stay verifiable.
+			if record.Tool == readTool && !reReadMatches(reads, record) {
+				return fmt.Errorf("%w: file evidence was not revalidated", goal.ErrInvalid)
+			}
+
 			continue
 		}
 
@@ -312,27 +331,21 @@ func validateProof(verdict Verdict, evidence Evidence, reads map[string]Record) 
 	if !hasRecord || !hasRead {
 		return fmt.Errorf("%w: completion needs actual tool evidence and file reads", goal.ErrInvalid)
 	}
-	// If a captured file read is used as evidence, its exact range must still
-	// match an independent read. A stale file record cannot be silently cited.
-	for _, record := range evidence.Records {
-		if record.Tool != readTool {
-			continue
-		}
 
-		matched := false
+	return nil
+}
 
-		for _, read := range reads {
-			if read.Tool == record.Tool && string(read.Arguments) == string(record.Arguments) && read.Digest == record.Digest {
-				matched = true
-			}
-		}
-
-		if !matched {
-			return fmt.Errorf("%w: file evidence was not revalidated", goal.ErrInvalid)
+// reReadMatches reports whether the auditor re-read one captured record with
+// identical canonical arguments and the same digest, so the cited record's file
+// still holds what the worker observed.
+func reReadMatches(reads map[string]Record, record Record) bool {
+	for _, read := range reads {
+		if read.Tool == record.Tool && string(read.Arguments) == string(record.Arguments) && read.Digest == record.Digest {
+			return true
 		}
 	}
 
-	return nil
+	return false
 }
 
 // checkBudget refuses an auditor call the Goal's token budget can no longer pay
