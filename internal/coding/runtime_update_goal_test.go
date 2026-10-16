@@ -292,6 +292,7 @@ func TestRuntimeUpdateGoalRejectedDeclarationReturnsTheAuditorsGaps(t *testing.T
 		runtimeToolResponse("proof-read", "read", `{"path":"proof.txt"}`),
 		runtimeTextResponse("candidate complete"),
 	)
+	model.verifierVerdicts = []string{goalRefutingVerdict}
 	model.outcomes = []string{"complete"}
 	runtime := openTestRuntime(t, model)
 	require.NoError(t, os.WriteFile(filepath.Join(runtime.workspace.Root(), "proof.txt"), []byte("actual implementation\n"), 0o600))
@@ -299,22 +300,21 @@ func TestRuntimeUpdateGoalRejectedDeclarationReturnsTheAuditorsGaps(t *testing.T
 	_, err := collectRuntimeResult(runtime.StartGoal(t.Context(), GoalRequest{Condition: "inspect proof.txt"}))
 	require.NoError(t, err)
 
-	// The declaration alone did not complete the Goal: the auditor found no
-	// recorded evidence — the declaration itself is not evidence — so the loop
-	// continued with that gap.
+	// The declaration alone did not complete the Goal: the auditor rejected it —
+	// the ledger holds nothing yet, and the declaration itself is not evidence —
+	// so the loop continued with the auditor's own gap. The rejection is the
+	// auditor's verdict now, because the machine no longer refuses an empty
+	// ledger before asking.
 	state := runtime.GoalSnapshot()
 	require.True(t, state.Completed(), "%+v", state)
 	assert.Equal(t, 2, state.Attempts)
-	// The declaration's audit needed no model verdict, because the auditor's own
-	// evidence gate refused it; the ordinary completion at the second attempt is
-	// the one verdict.
-	assert.Equal(t, 1, model.verifications)
+	assert.Equal(t, 2, model.verifications)
 	assert.Equal(t, 1, model.evaluated)
 
 	requests := model.Requests()
 	require.Len(t, requests, 4)
 	assert.True(t, requestContainsText(requests[2], "Independent evidence gaps"))
-	assert.True(t, requestContainsText(requests[2], "No actual tool evidence was recorded"))
+	assert.True(t, requestContainsText(requests[2], "record a check that proves the condition"))
 }
 
 // TestRuntimeUpdateGoalDeclarationIsConsumedOnce pins the consumption: a
@@ -331,6 +331,10 @@ func TestRuntimeUpdateGoalDeclarationIsConsumedOnce(t *testing.T) {
 		runtimeToolResponse("proof-read-2", "read", `{"path":"proof.txt"}`),
 		runtimeTextResponse("candidate complete"),
 	)
+	// The declaration's audit is refuted, so the Goal keeps running and the next
+	// decision point takes the ordinary assessment; the third attempt's audit
+	// takes the default cited verdict.
+	model.verifierVerdicts = []string{goalRefutingVerdict}
 	model.outcomes = []string{"continue", "complete"}
 	runtime := openTestRuntime(t, model)
 	require.NoError(t, os.WriteFile(filepath.Join(runtime.workspace.Root(), "proof.txt"), []byte("actual implementation\n"), 0o600))
@@ -345,7 +349,7 @@ func TestRuntimeUpdateGoalDeclarationIsConsumedOnce(t *testing.T) {
 	// point and completed the Goal at two attempts without assessing anything.
 	assert.Equal(t, 3, state.Attempts)
 	assert.Equal(t, 2, model.evaluated)
-	assert.Equal(t, 1, model.verifications)
+	assert.Equal(t, 2, model.verifications)
 }
 
 // TestRuntimeUpdateGoalRefusesOutsideAGoalRun pins the first refusal: the Tool is

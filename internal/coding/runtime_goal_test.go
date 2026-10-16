@@ -25,16 +25,61 @@ type goalTestModel struct {
 	muGoal            sync.Mutex
 	outcomes          []string
 	evaluationError   bool
-	verifierInvalid   bool
 	blockEvaluation   chan struct{}
 	evaluationStarted chan struct{}
 	evaluated         int
 	verifications     int
+	// verifierVerdicts are the auditor's scripted verdicts, one per verdict call;
+	// once they run out, verifierVerdict answers every further call. With neither,
+	// the auditor returns the default verdict: verified with the recorded evidence
+	// IDs and its own read.
+	verifierVerdicts []string
+	verifierVerdict  string
+	// auditorEvidence is the ledger the auditor's last verdict request carried,
+	// so a test can assert what the audit was actually asked to judge.
+	auditorEvidence goalflow.Evidence
+}
+
+// AuditorEvidence returns the ledger the auditor's last verdict request carried.
+func (m *goalTestModel) AuditorEvidence() goalflow.Evidence {
+	m.muGoal.Lock()
+	defer m.muGoal.Unlock()
+
+	return m.auditorEvidence
+}
+
+// auditorRequestEvidence extracts the ledger the auditor's request carried with
+// the record IDs the default verdict cites. Only the payload message names a
+// condition, so a tool envelope cannot masquerade as the ledger.
+func auditorRequestEvidence(request ai.Request) (goalflow.Evidence, []string) {
+	evidence := goalflow.Evidence{}
+	references := []string{"read:audit-read"}
+
+	for _, message := range request.Messages {
+		var payload struct {
+			Condition string            `json:"condition"`
+			Evidence  goalflow.Evidence `json:"evidence"`
+		}
+		if json.Unmarshal([]byte(runtimeMessageText(message)), &payload) != nil || payload.Condition == "" {
+			continue
+		}
+
+		evidence = payload.Evidence
+		for _, record := range payload.Evidence.Records {
+			references = append(references, record.ID)
+		}
+	}
+
+	return evidence, references
 }
 
 func newGoalTestModel(work ...*ai.Response) *goalTestModel {
 	return &goalTestModel{runtimeModel: newRuntimeModel(work...)}
 }
+
+// goalRefutingVerdict is a scripted auditor rejection: the recorded ledger does
+// not prove the condition, so the loop continues with the auditor's own gap.
+const goalRefutingVerdict = `{"verified":false,"reason":"the recorded evidence does not prove the condition","gaps":["record a check that proves the condition"],"references":[]}`
 
 func (m *goalTestModel) Capabilities() ai.Capabilities {
 	return ai.Capabilities{Text: true, Tools: true, StructuredOutput: true}
@@ -79,24 +124,23 @@ func (m *goalTestModel) Generate(ctx context.Context, request ai.Request) (*ai.R
 			}
 			return runtimeToolResponse("audit-read", "read", `{"path":"proof.txt"}`), nil
 		}
+
+		evidence, references := auditorRequestEvidence(request)
+
 		m.muGoal.Lock()
 		m.verifications++
-		invalid := m.verifierInvalid
+		m.auditorEvidence = evidence
+		scripted := m.verifierVerdict
+		if len(m.verifierVerdicts) > 0 {
+			scripted = m.verifierVerdicts[0]
+			m.verifierVerdicts = m.verifierVerdicts[1:]
+		}
 		m.muGoal.Unlock()
-		if invalid {
-			return runtimeTextResponse(`{"verified":true,"reason":"looks good","gaps":[],"references":[]}`), nil
+
+		if scripted != "" {
+			return runtimeTextResponse(scripted), nil
 		}
-		references := []string{"read:audit-read"}
-		for _, message := range request.Messages {
-			var payload struct {
-				Evidence goalflow.Evidence `json:"evidence"`
-			}
-			if json.Unmarshal([]byte(runtimeMessageText(message)), &payload) == nil {
-				for _, record := range payload.Evidence.Records {
-					references = append(references, record.ID)
-				}
-			}
-		}
+
 		data, _ := json.Marshal(goalflow.Verdict{Verified: true, Reason: "actual file matches captured read", Gaps: []string{}, References: references})
 		return runtimeTextResponse(string(data)), nil
 	}
@@ -196,34 +240,151 @@ func TestRuntimeGoalDecisionRetryDoesNotReplayWork(t *testing.T) {
 	assert.Empty(t, reopenedModel.Requests())
 }
 
-func TestRuntimeGoalRejectsUnprovenCompletion(t *testing.T) {
+// TestRuntimeGoalTakesAVerifiedVerdictAsCompletion pins Phase AA's inverted
+// contract: the machine proof gate is gone, so a verdict that says verified
+// completes the Goal even when the recorded evidence is empty, failed or
+// truncated, or when the verdict cites nothing. The auditor's prompt, not this
+// harness, is what asks for proof now.
+func TestRuntimeGoalTakesAVerifiedVerdictAsCompletion(t *testing.T) {
 	t.Parallel()
-	for _, name := range []string{"self report", "empty verification", "failed evidence", "truncated evidence"} {
-		t.Run(name, func(t *testing.T) {
+
+	tests := []struct {
+		name string
+		// read is the path the worker's read round uses; "" makes the worker claim
+		// completion without touching the workspace.
+		read    string
+		files   map[string]string
+		verdict string
+		// check asserts the ledger the auditor was handed, so no case can pass
+		// without the recorded evidence its name claims.
+		check func(*testing.T, goalflow.Evidence)
+	}{
+		{
+			name: "self report", files: map[string]string{"proof.txt": "proof\n"},
+			check: func(t *testing.T, evidence goalflow.Evidence) {
+				t.Helper()
+
+				assert.Empty(t, evidence.Records)
+			},
+		},
+		{
+			name: "empty verification", read: "proof.txt", files: map[string]string{"proof.txt": "proof\n"},
+			verdict: `{"verified":true,"reason":"looks good","gaps":[],"references":[]}`,
+			check: func(t *testing.T, evidence goalflow.Evidence) {
+				t.Helper()
+
+				require.Len(t, evidence.Records, 1)
+				assert.True(t, evidence.Records[0].OK)
+			},
+		},
+		{
+			// The worker's read fails, so the ledger carries a failed record, while
+			// the auditor's own read of proof.txt still succeeds.
+			name: "failed evidence", read: "missing.txt", files: map[string]string{"proof.txt": "proof\n"},
+			check: func(t *testing.T, evidence goalflow.Evidence) {
+				t.Helper()
+
+				require.Len(t, evidence.Records, 1)
+				assert.False(t, evidence.Records[0].OK, "the read of a missing file must be a failed record")
+			},
+		},
+		{
+			// The worker's read is truncated by the read tool's own line limit, and
+			// the auditor reads the small proof.txt, so the audit itself stays inside
+			// its evidence envelope.
+			name: "truncated evidence", read: "big.txt",
+			files: map[string]string{"proof.txt": "proof\n", "big.txt": strings.Repeat("proof line\n", 2001)},
+			check: func(t *testing.T, evidence goalflow.Evidence) {
+				t.Helper()
+
+				require.Len(t, evidence.Records, 1)
+				assert.True(t, evidence.Records[0].Truncated, "a 2,001-line read must be a truncated record")
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
+
 			work := []*ai.Response{}
 			for attempt := range 4 {
-				if name != "self report" {
-					work = append(work, runtimeToolResponse(fmt.Sprintf("proof-read-%d", attempt), "read", `{"path":"proof.txt"}`))
+				if test.read != "" {
+					work = append(work, runtimeToolResponse(
+						fmt.Sprintf("proof-read-%d", attempt), "read", fmt.Sprintf(`{"path":%q}`, test.read),
+					))
 				}
 				work = append(work, runtimeTextResponse("I claim everything is verified"))
 			}
+
 			model := newGoalTestModel(work...)
-			model.verifierInvalid = name == "empty verification"
+			if test.verdict != "" {
+				model.verifierVerdicts = []string{test.verdict}
+			}
 			runtime := openTestRuntime(t, model)
-			content := "proof\n"
-			if name == "truncated evidence" {
-				content = strings.Repeat("proof line\n", 2000)
+			for path, content := range test.files {
+				require.NoError(t, os.WriteFile(filepath.Join(runtime.workspace.Root(), path), []byte(content), 0o600))
 			}
-			if name != "failed evidence" {
-				require.NoError(t, os.WriteFile(filepath.Join(runtime.workspace.Root(), "proof.txt"), []byte(content), 0o600))
-			}
+
 			_, err := collectRuntimeResult(runtime.StartGoal(t.Context(), GoalRequest{Condition: "prove implementation"}))
 			require.NoError(t, err)
-			assert.False(t, runtime.GoalSnapshot().Completed())
-			assert.Equal(t, GoalPaused, runtime.GoalSnapshot().Status)
-			assert.NotEmpty(t, runtime.GoalSnapshot().Gaps)
-			assert.GreaterOrEqual(t, runtime.GoalSnapshot().Attempts, 3)
+
+			state := runtime.GoalSnapshot()
+			require.True(t, state.Completed(), "%+v", state)
+			assert.Equal(t, GoalCompleted, state.Status)
+			assert.Equal(t, 1, model.verifications)
+			test.check(t, model.AuditorEvidence())
+		})
+	}
+}
+
+// TestRuntimeGoalKeepsRefusingARejectingOrMalformedVerdict pins what still stops
+// the loop after Phase AA: a verdict that says verified:false with gaps keeps the
+// Goal running, and a verdict that is not one JSON object (§6.33) is "not
+// achieved" too. Either way the Goal pauses with the auditor's reason as its gap.
+func TestRuntimeGoalKeepsRefusingARejectingOrMalformedVerdict(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		verdict string
+		wantGap string
+	}{
+		{
+			name:    "refuted verdict",
+			verdict: `{"verified":false,"reason":"the recorded evidence does not show the implementation","gaps":["rerun the failing check"],"references":[]}`,
+			wantGap: "rerun the failing check",
+		},
+		{
+			name:    "malformed verdict",
+			verdict: "not a JSON verdict object",
+			wantGap: "not the required JSON verdict object",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			work := []*ai.Response{}
+			for range 4 {
+				work = append(work, runtimeTextResponse("I claim everything is verified"))
+			}
+
+			model := newGoalTestModel(work...)
+			model.verifierVerdict = test.verdict
+			runtime := openTestRuntime(t, model)
+			require.NoError(t, os.WriteFile(filepath.Join(runtime.workspace.Root(), "proof.txt"), []byte("proof\n"), 0o600))
+
+			_, err := collectRuntimeResult(runtime.StartGoal(t.Context(), GoalRequest{Condition: "prove implementation"}))
+			require.NoError(t, err)
+
+			state := runtime.GoalSnapshot()
+			assert.False(t, state.Completed())
+			assert.Equal(t, GoalPaused, state.Status)
+			require.NotEmpty(t, state.Gaps)
+			assert.Contains(t, strings.Join(state.Gaps, " "), test.wantGap)
+			assert.GreaterOrEqual(t, state.Attempts, 3)
 		})
 	}
 }
