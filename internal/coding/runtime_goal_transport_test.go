@@ -358,33 +358,103 @@ func TestRuntimeGoalTreatsAMalformedPortableVerdictAsNotAchieved(t *testing.T) {
 	assert.Equal(t, []bool{false, false}, verdictFormats)
 }
 
-// TestRuntimeGoalTreatsAMalformedPortableAssessmentAsNotAchieved pins the same
-// rule at the assessment boundary.
-func TestRuntimeGoalTreatsAMalformedPortableAssessmentAsNotAchieved(t *testing.T) {
+// TestRuntimeGoalTreatsAContractBreakingPortableVerdictAsNotAchieved pins the
+// auditor's rule at the audit boundary: a verdict that parses but breaks its own
+// contract is "not achieved", and its reason reaches the next work segment
+// exactly like a verdict that did not parse at all.
+func TestRuntimeGoalTreatsAContractBreakingPortableVerdictAsNotAchieved(t *testing.T) {
+	t.Parallel()
+
+	overBounds := make([]string, goalflow.MaxGaps+1)
+	for index := range overBounds {
+		overBounds[index] = fmt.Sprintf("gap-%d", index)
+	}
+
+	overBoundsVerdict, err := json.Marshal(goalflow.Verdict{
+		Reason: "the recorded read does not cover the migration", Gaps: overBounds, References: []string{},
+	})
+	require.NoError(t, err)
+
+	tests := []struct {
+		name   string
+		answer string
+		gap    string
+	}{
+		{
+			name:   "empty reason",
+			answer: `{"verified":false,"reason":"","gaps":["the recorded read is stale"],"references":[]}`,
+			gap:    "carries no reason",
+		},
+		{
+			name:   "over-bounds gaps",
+			answer: string(overBoundsVerdict),
+			gap:    fmt.Sprintf("carries more than %d gaps", goalflow.MaxGaps),
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			model := newGoalTransportModel()
+			scriptGoalTransportSegments(model, 2)
+			model.assessments = []string{
+				`{"outcome":"complete","reason":"the first candidate looks done"}`,
+				`{"outcome":"complete","reason":"the second candidate looks done"}`,
+			}
+			model.verdicts = []string{test.answer}
+			runtime := openTestRuntime(t, model)
+			writeGoalTransportProof(t, runtime)
+
+			events, err := collectRuntimeResult(runtime.StartGoal(t.Context(), GoalRequest{Condition: "inspect proof.txt"}))
+			require.NoError(t, err)
+
+			// The unusable verdict was not a completion: the Goal projection that
+			// carried its reason stayed open.
+			assert.True(t, goalGapObserved(events, test.gap))
+
+			requests := model.Requests()
+			require.Len(t, requests, 4)
+			assert.True(t, requestContainsText(requests[2], "Independent evidence gaps"))
+			assert.True(t, requestContainsText(requests[2], test.gap))
+
+			// The run then ended deterministically on the second, verified verdict.
+			state := runtime.GoalSnapshot()
+			require.True(t, state.Completed(), "%+v", state)
+			assert.Equal(t, 2, state.Attempts)
+		})
+	}
+}
+
+// TestRuntimeGoalStopsOnAnUnusablePortableAssessment pins the assessment's own
+// rule at the runtime boundary: an unusable answer is retried once and then
+// stops the run, because the harness cannot judge. The Goal is neither completed
+// nor continued on a gap-only assessment.
+func TestRuntimeGoalStopsOnAnUnusablePortableAssessment(t *testing.T) {
 	t.Parallel()
 
 	model := newGoalTransportModel()
-	scriptGoalTransportSegments(model, 2)
-	model.assessments = []string{
-		"not the required assessment object",
-		`{"outcome":"complete","reason":"the second candidate looks done"}`,
-	}
+	scriptGoalTransportSegments(model, 1)
+	model.assessments = []string{"not the required assessment object", "not the required assessment object"}
 	runtime := openTestRuntime(t, model)
 	writeGoalTransportProof(t, runtime)
 
 	events, err := collectRuntimeResult(runtime.StartGoal(t.Context(), GoalRequest{Condition: "inspect proof.txt"}))
-	require.NoError(t, err)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "bounded retry")
+	assert.Contains(t, err.Error(), "stopped rather than treated as complete")
+	assert.Contains(t, err.Error(), "use /goal resume to retry")
 
-	assert.True(t, goalGapObserved(events, "not the required JSON object"))
-
-	requests := model.Requests()
-	require.Len(t, requests, 4)
-	assert.True(t, requestContainsText(requests[2], "Independent evidence gaps"))
-	assert.True(t, requestContainsText(requests[2], "not the required JSON object"))
+	// The old gap-only continuation is gone: no Goal projection carried the
+	// answer as a gap, and the Goal stopped instead of continuing.
+	assert.False(t, goalGapObserved(events, "not the required JSON object"))
 
 	state := runtime.GoalSnapshot()
-	require.True(t, state.Completed(), "%+v", state)
-	assert.Equal(t, 2, state.Attempts)
+	assert.False(t, state.Completed())
+	assert.Equal(t, GoalInterrupted, state.Status)
+
+	assessmentFormats, _, _, _ := model.callFormats()
+	assert.Len(t, assessmentFormats, 2, "the unusable assessment was retried once")
 }
 
 // TestRuntimeUpdateGoalCompletionIsAuditedOverThePortableTransport pins the

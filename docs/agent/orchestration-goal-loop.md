@@ -71,7 +71,7 @@ Evaluator 返回 blocked 时必须携带 `continuation.Block`；应用收集输�
 
 `goal.NewModelEvaluator(model)` 使用一个严格、无工具、temperature 为 0 的类型化模型调用评估证据。模型声明原生结构化输出时，请求走 Provider 的 JSON Schema；未声明时，Schema 写进系统提示词并按一个 JSON 对象解析。两条传输的校验相同。默认**不设输出上限**，交给 Provider 自己的默认值（与参考实现的评估调用一致）；`WithMaxTokens` 是可选收窄，配置后会再按该 execution 的剩余 token 预算收窄，也只在配置了上限时才因预算耗尽而拒绝。
 
-内置 ModelEvaluator 只允许 continue 或 complete，不会自行返回 blocked；需要业务阻塞语义时实现自定义 Evaluator。回答不是一个 JSON 对象时按 continue 处理并把原因作为反馈交回（`ai.ErrMalformedStructuredOutput`）；provider 失败或超限仍是 Decision 错误，按 Continuation 的 `RetryDecision` 恢复。
+内置 ModelEvaluator 只允许 continue 或 complete，不会自行返回 blocked；需要业务阻塞语义时实现自定义 Evaluator。回答不可用时（不是一个 JSON 对象、`outcome` 未知、`reason` 不合法）会重试一次；第二次仍不可用则返回错误，把运行停下交给用户而不是按 continue 猜下去——错误信息说明"已停止而不是当作完成"并提示用 `/goal resume` 重试该次检查，两次调用的 usage 都计入。provider 失败或超限不在这里重试（模型中间件负责），仍是 Decision 错误，按 Continuation 的 `RetryDecision` 恢复。
 
 把 evaluator 模型 Usage 通过 `EvaluationResult.Usage` 纳入 Continuation 累计记账。不要让模型评估器直接执行工具或外部副作用。
 

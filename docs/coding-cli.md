@@ -128,11 +128,14 @@ described in the prompt. The declaration chooses the transport and never relaxes
 the check: the same verdict fields, reference and proof rules, and evidence
 bounds apply either way. Neither check caps the model's output tokens, so a model
 that reasons before answering is not cut off mid-answer; the goal's own token
-budget bounds the run. An answer that is not the required JSON object is
-treated as not achieved — an unverified verdict, or a continue assessment — and
-its reason returns to the model as the next work segment's feedback. A provider
-failure still interrupts assessment and can be retried without repeating the
-work.
+budget bounds the run. An answer the harness cannot use is judged, not fatal, and
+the two checks differ. The verifier treats a verdict it cannot read — not JSON, or
+a contract violation such as an empty reason — as not achieved, and its reason
+returns to the model as the next work segment's feedback. The evaluator cannot
+judge at all, so an unusable assessment is attempted once more and, if the second
+answer is unusable too, the goal stops and says it was stopped rather than treated
+as complete: run `/goal resume` to retry the check. A provider failure still
+interrupts assessment and can be retried without repeating the work.
 
 The model declares its own progress with the `update_goal` tool. It is offered
 wherever a goal can run and stays offered outside one, so a call there is a
