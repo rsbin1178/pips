@@ -127,7 +127,12 @@ Both checks ask for their answer as one JSON object. A model that declares
 any other model is asked through the prompt-only convention, with the schema
 described in the prompt. The declaration chooses the transport and never relaxes
 the check: the same verdict fields, reference and proof rules, and evidence
-bounds apply either way. Neither check caps the model's output tokens, so a model
+bounds apply either way. What decides proof is the auditor's own instructions, as
+it is in the reference: it is told to default to not verified when uncertain, to
+treat prose as non-evidence, to cite a recorded result and its own file read, to
+re-read a file it cites, and to refuse absent, failed, truncated, contradictory or
+stale evidence — so a verification is only as good as the auditor's compliance
+with that contract. Neither check caps the model's output tokens, so a model
 that reasons before answering is not cut off mid-answer; the goal's own token
 budget bounds the run. An answer the harness cannot use is judged, not fatal, and
 the two checks differ. The verifier treats a verdict it cannot read — not JSON, or
@@ -136,7 +141,9 @@ returns to the model as the next work segment's feedback. The evaluator cannot
 judge at all, so an unusable assessment is attempted once more and, if the second
 answer is unusable too, the goal stops and says it was stopped rather than treated
 as complete: run `/goal resume` to retry the check. A provider failure still
-interrupts assessment and can be retried without repeating the work.
+interrupts assessment and can be retried without repeating the work, and a
+verification infrastructure failure stops the run with "Goal verification
+infrastructure failed (…). Run /goal resume to retry."
 
 The model declares its own progress with the `update_goal` tool. It is offered
 wherever a goal can run and stays offered outside one, so a call there is a
