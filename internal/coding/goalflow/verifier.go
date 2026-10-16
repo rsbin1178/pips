@@ -2,6 +2,7 @@ package goalflow
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -64,9 +65,6 @@ func (v *Verifier) Verify(
 	ctx context.Context, condition string, evidence Evidence, limits continuation.Limits, accounting continuation.Accounting,
 ) (Verdict, ai.Usage, error) {
 	usage := ai.Usage{}
-	if !v.model.Capabilities().StructuredOutput {
-		return Verdict{}, usage, fmt.Errorf("%w: Goal verification requires structured output", goal.ErrInvalid)
-	}
 
 	if problem := evidenceProblem(evidence); problem != "" {
 		return unverified(problem), usage, nil
@@ -173,12 +171,19 @@ func (v *Verifier) Verify(
 
 	messages = append(messages, ai.UserText("Return the strict evidence verdict now. Cite exact recorded IDs and read:<call-id> IDs. No more tools."))
 
-	verdict, response, err := ai.GenerateTyped[Verdict](ctx, v.model, ai.Request{
+	verdict, response, err := ai.GenerateTypedAdaptive[Verdict](ctx, v.model, ai.Request{
 		Messages: messages, MaxTokens: &maximum, Temperature: ai.Ptr(0.0),
 		ResponseFormat: &ai.ResponseFormat{Name: "coding_goal_verification", Schema: schema, Strict: true},
 	})
 	if response != nil {
 		usage.Add(response.Usage)
+	}
+
+	// An answer that is not one JSON object is an answer of the wrong shape, not
+	// a failed audit: completion is simply not established, exactly as any other
+	// unverified verdict.
+	if errors.Is(err, ai.ErrMalformedStructuredOutput) {
+		return unverified("The auditor's answer was not the required JSON verdict object; completion is not established"), usage, nil
 	}
 
 	if err != nil {

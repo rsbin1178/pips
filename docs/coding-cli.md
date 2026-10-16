@@ -119,8 +119,18 @@ recorded evidence, and a completion candidate receives a bounded read-only
 verification of workspace files and actual tool results. This verifier cannot
 edit files or execute shell commands; it audits saved test output rather than
 rerunning the tests itself. Missing or contradictory evidence produces a gap
-for the next work segment, not success. Model or malformed-protocol failures
-interrupt assessment and can be retried without repeating the work.
+for the next work segment, not success.
+
+Both checks ask for their answer as one JSON object. A model that declares
+`structured_output` is asked through the provider's own JSON Schema mechanism;
+any other model is asked through the prompt-only convention, with the schema
+described in the prompt. The declaration chooses the transport and never relaxes
+the check: the same verdict fields, reference and proof rules, and evidence
+bounds apply either way. An answer that is not the required JSON object is
+treated as not achieved — an unverified verdict, or a continue assessment — and
+its reason returns to the model as the next work segment's feedback. A provider
+failure still interrupts assessment and can be retried without repeating the
+work.
 
 The model declares its own progress with the `update_goal` tool. It is offered
 wherever a goal can run and stays offered outside one, so a call there is a
@@ -499,11 +509,14 @@ Declarations layer on top of whatever the protocol adapter already reports for
 the bound model, so a third-party model the adapter only knows as plain chat
 can still be declared vision-capable. Two declarations change runtime behavior
 today: `vision` admits image attachments in the composer, and
-`structured_output` selects a native JSON Schema response format for subagents
-that opt into `structured_results = true`, instead of the prompt-only JSON
-fallback. Other declarations are accepted and reported as
-`advisory` by `pips config show` until a consumer reads them. `tools = false`
-is rejected, because Pips requires native tool calling.
+`structured_output` selects a native JSON Schema response format — for subagents
+that opt into `structured_results = true`, and for a goal's completion
+assessment and evidence audit — instead of the prompt-only JSON fallback. It is a
+preference, never a requirement: a model that does not declare it runs those
+paths through the prompt-only convention, and a goal starts either way. Other
+declarations are accepted and reported as `advisory` by `pips config show` until
+a consumer reads them. `tools = false` is rejected, because Pips requires native
+tool calling.
 
 An image is attached whatever the active model declares: the draft is never
 dropped to enforce a capability. A model that does not accept image input says

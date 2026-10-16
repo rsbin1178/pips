@@ -45,6 +45,10 @@ var (
 	// retryable errors: a peer that never starts answering is worth another
 	// attempt, while a deadline the caller set is not.
 	ErrResponseTimeout = errors.New("ai: response timed out")
+	// ErrMalformedStructuredOutput means a schema-constrained answer was not one
+	// JSON object. Callers treat it as an answer of the wrong shape rather than a
+	// transport failure.
+	ErrMalformedStructuredOutput = errors.New("ai: structured output is not one JSON object")
 )
 
 // Error is a structured provider error. Adapters return it (wrapped around a

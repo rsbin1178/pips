@@ -38,7 +38,7 @@ func TestExecGoalUsesRealRuntimeAndReadOnlyVerification(t *testing.T) {
 
 			cfg := config.Defaults()
 			cfg.Model = config.ModelRef{Provider: ai.ProviderOpenAI, Model: "cli-goal"}
-			model := new(cliGoalModel)
+			model := &cliGoalModel{structuredOutput: true}
 			runtime, err := coding.Open(t.Context(), coding.OpenOptions{
 				Workspace: ws, Config: cfg, Paths: layout, Model: model,
 				Execution: coding.ExecutionOptions{SandboxProbe: func(context.Context, *execution.Executor) error { return nil }},
@@ -54,6 +54,11 @@ func TestExecGoalUsesRealRuntimeAndReadOnlyVerification(t *testing.T) {
 			assert.Equal(t, 4, model.workCalls, "two real read-and-answer work segments")
 			assert.Equal(t, 1, model.verifications)
 			assert.ElementsMatch(t, []string{"read", "ls", "glob", "grep"}, model.verifierTools)
+
+			// A declared model keeps the provider's own schema mechanism on both
+			// role calls.
+			assert.Equal(t, []bool{true, true}, model.assessmentFormats)
+			assert.Equal(t, []bool{true}, model.verdictFormats)
 
 			if mode == outputPlain {
 				assert.Equal(t, "The recorded file contains shipped proof.\n", stdout.String())
@@ -79,62 +84,127 @@ func TestExecGoalUsesRealRuntimeAndReadOnlyVerification(t *testing.T) {
 	}
 }
 
+// TestExecGoalCompletesOnAPortableSchemaModel pins the fallback transport
+// end to end through the real Runtime: pips exec --goal completes on a model
+// that declares no structured output, because both the assessment and the audit
+// answer through the prompt-only JSON convention.
+func TestExecGoalCompletesOnAPortableSchemaModel(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(root+"/proof.txt", []byte("shipped proof\n"), 0o600))
+	ws, err := workspace.Open(root)
+	require.NoError(t, err)
+	layout, err := paths.New(t.TempDir() + "/home")
+	require.NoError(t, err)
+
+	cfg := config.Defaults()
+	cfg.Model = config.ModelRef{Provider: ai.ProviderOpenAI, Model: "cli-goal"}
+	model := new(cliGoalModel)
+	runtime, err := coding.Open(t.Context(), coding.OpenOptions{
+		Workspace: ws, Config: cfg, Paths: layout, Model: model,
+		Execution: coding.ExecutionOptions{SandboxProbe: func(context.Context, *execution.Executor) error { return nil }},
+	})
+	require.NoError(t, err)
+
+	stdout, stderr := new(bytes.Buffer), new(bytes.Buffer)
+	presenter := newExecPresenter(outputPlain, stdout, stderr, false)
+	request := coding.GoalRequest{Condition: "proof.txt contains shipped proof", MaxTokens: 10000}
+	require.NoError(t, runExecRequest(t.Context(), runtime, presenter, request.Condition, &request))
+
+	assert.True(t, runtime.Snapshot().Goal.Completed())
+	assert.Equal(t, 2, model.evaluations)
+	assert.Equal(t, 1, model.verifications)
+	assert.Equal(t, "The recorded file contains shipped proof.\n", stdout.String())
+	assert.Contains(t, stderr.String(), "goal completed")
+
+	// Neither role call used the provider's own schema mechanism.
+	assert.Equal(t, []bool{false, false}, model.assessmentFormats)
+	assert.Equal(t, []bool{false}, model.verdictFormats)
+}
+
 type cliGoalModel struct {
 	mu                sync.Mutex
+	structuredOutput  bool
 	workCalls         int
 	evaluations       int
 	verificationReads int
 	verifications     int
 	verifierTools     []string
+	assessmentFormats []bool
+	verdictFormats    []bool
 }
 
+// Generate answers the Goal's assessment and audit calls. Each role is
+// identified by its system text, never by ResponseFormat, because the portable
+// transport omits it on both.
 func (m *cliGoalModel) Generate(_ context.Context, request ai.Request) (*ai.Response, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if request.ResponseFormat != nil {
-		switch request.ResponseFormat.Name {
-		case "goal_evaluation":
-			m.evaluations++
+	system := cliGoalSystemText(request)
 
-			outcome := "continue"
-			if m.evaluations > 1 {
-				outcome = "complete"
-			}
+	switch {
+	case strings.Contains(system, "completion evaluator"):
+		m.evaluations++
+		m.assessmentFormats = append(m.assessmentFormats, request.ResponseFormat != nil)
 
-			return cliGoalResponse(ai.AssistantText(fmt.Sprintf(`{"outcome":%q,"reason":"Inspect the actual recorded file evidence."}`, outcome))), nil
-		case "coding_goal_verification":
-			evidence := cliGoalEvidence(request.Messages)
-			if len(evidence.Records) == 0 {
-				return nil, errors.New("CLI verifier fixture received no actual evidence")
-			}
-
-			m.verifications++
-
-			encoded, err := json.Marshal(goalflow.Verdict{
-				Verified: true, Reason: "The recorded result and independent read agree.", Gaps: []string{},
-				References: []string{evidence.Records[0].ID, "read:verify-file"},
-			})
-			if err != nil {
-				return nil, err
-			}
-
-			return cliGoalResponse(ai.AssistantText(string(encoded))), nil
-		default:
-			return nil, errors.New("unexpected structured request in CLI Goal fixture")
-		}
-	}
-
-	m.verificationReads++
-	if m.verificationReads == 1 {
-		for _, tool := range request.Tools {
-			m.verifierTools = append(m.verifierTools, tool.Name)
+		outcome := "continue"
+		if m.evaluations > 1 {
+			outcome = "complete"
 		}
 
-		return cliGoalResponse(ai.Assistant(ai.ToolCallPart{ID: "verify-file", Name: "read", Args: ai.JSON(`{"path":"proof.txt"}`)})), nil
+		return cliGoalResponse(ai.AssistantText(fmt.Sprintf(`{"outcome":%q,"reason":"Inspect the actual recorded file evidence."}`, outcome))), nil
+	case strings.Contains(system, "independent Coding Goal evidence auditor"):
+		return m.audit(request)
+	default:
+		return nil, errors.New("unexpected structured request in CLI Goal fixture")
+	}
+}
+
+// audit answers the auditor's read rounds and then its final verdict. A read
+// round carries the read-only catalog; the verdict call has no tools at all,
+// which is what distinguishes them when ResponseFormat is absent.
+func (m *cliGoalModel) audit(request ai.Request) (*ai.Response, error) {
+	if len(request.Tools) > 0 {
+		m.verificationReads++
+		if m.verificationReads == 1 {
+			for _, tool := range request.Tools {
+				m.verifierTools = append(m.verifierTools, tool.Name)
+			}
+
+			return cliGoalResponse(ai.Assistant(ai.ToolCallPart{ID: "verify-file", Name: "read", Args: ai.JSON(`{"path":"proof.txt"}`)})), nil
+		}
+
+		return cliGoalResponse(ai.AssistantText("Ready to evaluate the file read.")), nil
 	}
 
-	return cliGoalResponse(ai.AssistantText("Ready to evaluate the file read.")), nil
+	evidence := cliGoalEvidence(request.Messages)
+	if len(evidence.Records) == 0 {
+		return nil, errors.New("CLI verifier fixture received no actual evidence")
+	}
+
+	m.verifications++
+	m.verdictFormats = append(m.verdictFormats, request.ResponseFormat != nil)
+
+	encoded, err := json.Marshal(goalflow.Verdict{
+		Verified: true, Reason: "The recorded result and independent read agree.", Gaps: []string{},
+		References: []string{evidence.Records[0].ID, "read:verify-file"},
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return cliGoalResponse(ai.AssistantText(string(encoded))), nil
+}
+
+func cliGoalSystemText(request ai.Request) string {
+	system, _, err := request.Messages.SplitSystem()
+	if err != nil {
+		return ""
+	}
+
+	return ai.JoinSystemText(system)
 }
 
 func (m *cliGoalModel) Stream(_ context.Context, _ ai.Request) ai.Stream {
@@ -200,6 +270,6 @@ func cliGoalResponse(message ai.AssistantMessage) *ai.Response {
 
 func (*cliGoalModel) Provider() ai.Provider { return ai.ProviderOpenAI }
 func (*cliGoalModel) ModelID() string       { return "cli-goal" }
-func (*cliGoalModel) Capabilities() ai.Capabilities {
-	return ai.Capabilities{Text: true, Tools: true, StructuredOutput: true}
+func (m *cliGoalModel) Capabilities() ai.Capabilities {
+	return ai.Capabilities{Text: true, Tools: true, StructuredOutput: m.structuredOutput}
 }

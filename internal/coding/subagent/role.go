@@ -35,12 +35,6 @@ Return your final answer as plain text. Do not wrap it in JSON.`
 const structuredResultInstructions = `
 Return only the JSON object required by your response schema.`
 
-const portableResultInstructions = `
-Native structured output is unavailable. Return exactly one JSON object that
-matches the JSON Schema below. Include every required property and use [] for
-empty arrays. Do not use Markdown fences or add commentary outside the object.
-JSON Schema: `
-
 // roleSpec is the declarative contract of one builtin agent type. It carries
 // the prompt body and the optional structured result schema; result decoding is
 // the generic output validator's job.
@@ -148,12 +142,12 @@ func (s roleSpec) instructionsFor(nativeStructuredOutput bool) (string, error) {
 		return s.instructions + structuredResultInstructions, nil
 	}
 
-	schema, err := json.Marshal(s.schema)
+	portable, err := ai.PortableSchemaInstructions(s.schema)
 	if err != nil {
 		return "", fmt.Errorf("encode fallback response schema: %w", err)
 	}
 
-	return s.instructions + structuredResultInstructions + portableResultInstructions + string(schema), nil
+	return s.instructions + structuredResultInstructions + portable, nil
 }
 
 // normalizeDispatchRequest validates the canonical agent ID every child
