@@ -29,6 +29,12 @@ type Controller struct {
 	// declaration is never evidence — the verifier still reads the workspace and
 	// the recorded tool results.
 	Declared func() bool
+	// Transcript supplies the assessment's session-derived input: the bounded
+	// rendering of the conversation and the Goal's plan. It is consulted inside
+	// the evaluator wrapper below rather than carried on the durable request,
+	// because a decision retried after an interruption rebuilds that request from
+	// durable state and would carry an empty or stale transcript.
+	Transcript func() (transcript, plan string)
 }
 
 // declaredVerificationReason is the decision a model declaration forces. It is
@@ -110,6 +116,10 @@ func (c *Controller) Decide(ctx context.Context, request continuation.DecisionRe
 	)
 
 	policy, err := goal.NewController(goal.EvaluatorFunc(func(ctx context.Context, evaluation goal.Evaluation) (goal.EvaluationResult, error) {
+		if c.Transcript != nil {
+			evaluation.Transcript, evaluation.Plan = c.Transcript()
+		}
+
 		result, err := c.assess(ctx, evaluation)
 		observed.Add(result.Usage)
 

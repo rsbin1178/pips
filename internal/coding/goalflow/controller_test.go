@@ -49,6 +49,41 @@ func TestControllerDefersPendingAndBackgroundWithoutAssessment(t *testing.T) {
 	}
 }
 
+// TestControllerFillsTheAssessmentInputFromTheSession pins the seam: the wrapper
+// supplies the transcript and the plan on the evaluation the assessment sees, so
+// the request body is a function of the evaluation rather than of anything the
+// durable request carries — which is what makes a retried decision correct.
+func TestControllerFillsTheAssessmentInputFromTheSession(t *testing.T) {
+	t.Parallel()
+
+	state, _, err := Prepare("done")
+	require.NoError(t, err)
+	encoded, err := Encode(state)
+	require.NoError(t, err)
+	evidence, err := Encode(Evidence{})
+	require.NoError(t, err)
+
+	var observed goal.Evaluation
+
+	controller := Controller{
+		Transcript: func() (string, string) { return "[user] inspect proof.txt", "(no plan available)" },
+		Evaluator: goal.EvaluatorFunc(func(_ context.Context, evaluation goal.Evaluation) (goal.EvaluationResult, error) {
+			observed = evaluation
+
+			return goal.EvaluationResult{Outcome: goal.OutcomeContinue, Reason: "still working"}, nil
+		}),
+	}
+
+	_, err = controller.Decide(t.Context(), continuation.DecisionRequest{
+		ControllerState: encoded, Work: continuation.WorkResult{Value: evidence},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "done", observed.Condition, "the objective stays the Goal's condition")
+	assert.Equal(t, "[user] inspect proof.txt", observed.Transcript)
+	assert.Equal(t, "(no plan available)", observed.Plan)
+	assert.NotEmpty(t, observed.Evidence, "the ledger stays on the evaluation; it is the payload that stops carrying it")
+}
+
 func TestControllerInvalidationCannotVerifyOldEvidence(t *testing.T) {
 	t.Parallel()
 
