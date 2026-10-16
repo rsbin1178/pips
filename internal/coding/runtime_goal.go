@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"math"
 	"slices"
 	"strings"
 
@@ -17,6 +18,13 @@ import (
 )
 
 type goalContextKey struct{}
+
+// goalWorkSegmentAllowance is the Goal's work-segment count. The reference caps
+// no round, but the continuation SDK refuses an execution whose limits carry no
+// finite hard value at all, so the Goal declares the largest representable count
+// — no run reaches it — and is bounded instead by its optional token budget, the
+// no-progress guard and its own declarations.
+const goalWorkSegmentAllowance = math.MaxInt
 
 type runtimeGoalDriver struct {
 	cancel context.CancelFunc
@@ -95,11 +103,18 @@ func (r *Runtime) declareGoal(ctx context.Context, declaration tools.GoalDeclara
 		)
 	}
 
-	switch {
-	case declaration.BlockedReason != "":
+	if declaration.BlockedReason != "" {
 		return r.blockGoal(ctx, declaration.BlockedReason)
+	}
+
+	// Any other declaration ends the model's run of blocked declarations.
+	c := r.goalControl
+	c.mu.Lock()
+	c.blockedStreak = 0
+	c.mu.Unlock()
+
+	switch {
 	case declaration.Completed:
-		c := r.goalControl
 		c.mu.Lock()
 		c.declaration = true
 		c.mu.Unlock()
@@ -118,12 +133,30 @@ func (r *Runtime) declareGoal(ctx context.Context, declaration tools.GoalDeclara
 	}
 }
 
-// blockGoal pauses the running Goal with the model's own failure reason. The
-// reason is recorded beside the pause so the paused projection reports why, and
-// the pause itself goes through the runtime's one pause path, so a stuck model
-// stops the loop exactly as an operator pause does.
+// goalBlockedStreak is how many consecutive blocked declarations the Goal needs
+// before it pauses. The update_goal Tool tells the model the same bar, and the
+// first two declarations are accepted with the streak so a stuck model keeps
+// working instead of stopping the run on its first complaint.
+const goalBlockedStreak = 3
+
+// blockGoal records one blocked declaration. Below the streak it answers with
+// the streak and leaves the Goal running; at the streak it records the model's
+// own failure reason and pauses the Goal through the runtime's one pause path,
+// so a stuck model stops the loop exactly as an operator pause does.
 func (r *Runtime) blockGoal(ctx context.Context, reason string) (string, error) {
 	c := r.goalControl
+	c.mu.Lock()
+	c.blockedStreak++
+	streak := c.blockedStreak
+	c.mu.Unlock()
+
+	if streak < goalBlockedStreak {
+		return fmt.Sprintf(
+			"Blocked attempt %d/%d recorded. The Goal pauses only after %d consecutive blocked declarations; continue retrying or refining the approach.",
+			streak, goalBlockedStreak, goalBlockedStreak,
+		), nil
+	}
+
 	c.mu.Lock()
 	c.blockedReason = reason
 	c.mu.Unlock()
@@ -190,8 +223,9 @@ func (r *Runtime) controlGoal(ctx context.Context, clearGoal bool, reason string
 	if err == nil && clearGoal {
 		c.ledger.Cleared = true
 		err = c.saveLedger()
-		// A Goal that was actually cleared forgets its declaration and pause reason.
-		c.declaration, c.blockedReason = false, ""
+		// A Goal that was actually cleared forgets its declaration, its pause
+		// reason and the model's run of blocked declarations.
+		c.declaration, c.blockedReason, c.blockedStreak = false, "", 0
 	}
 	roots := slices.Clone(c.ledger.Roots)
 	c.mu.Unlock()
@@ -365,7 +399,7 @@ func (r *Runtime) createGoal(ctx context.Context, request GoalRequest) (continua
 	execution, err := c.engine.Create(ctx, continuation.CreateRequest{
 		Target: continuation.Target{Kind: "coding.session", ID: r.handle.Metadata().ID},
 		Worker: goalWorkerRef, Controller: goalControllerRef, ControllerState: encoded, Input: input,
-		Limits: continuation.Limits{MaxTokens: request.MaxTokens},
+		Limits: continuation.Limits{MaxTokens: request.MaxTokens, MaxAttempts: goalWorkSegmentAllowance},
 	})
 	if err != nil {
 		return continuation.Execution{}, err
@@ -374,7 +408,7 @@ func (r *Runtime) createGoal(ctx context.Context, request GoalRequest) (continua
 	revoked := append(slices.Clone(c.ledger.RevokedRoots), c.ledger.Roots...)
 	c.ledger = goalLedger{Version: 1, ID: execution.ID, RevokedRoots: revoked}
 	// A fresh Goal inherits neither a declaration nor a pause reason.
-	c.declaration, c.blockedReason = false, ""
+	c.declaration, c.blockedReason, c.blockedStreak = false, "", 0
 
 	return execution, c.saveLedger()
 }
@@ -386,8 +420,9 @@ func (r *Runtime) activateGoal(ctx context.Context, operation goalWorkOperation)
 		return continuation.Execution{}, ErrGoalMissing
 	}
 	// An explicit resume ends the pause the model declared, so a later operator
-	// pause reports its own reason.
-	c.blockedReason = ""
+	// pause reports its own reason, and the model's run of blocked declarations
+	// starts again.
+	c.blockedReason, c.blockedStreak = "", 0
 	execution, err := c.engine.Get(ctx, c.id)
 	if err != nil {
 		return execution, err

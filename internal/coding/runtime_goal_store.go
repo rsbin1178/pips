@@ -45,6 +45,12 @@ type runtimeGoalControl struct {
 	// paused projection reports this instead while the Goal stays paused. It is
 	// cleared whenever the Goal is created, resumed, or cleared.
 	blockedReason string
+	// blockedStreak counts the model's consecutive blocked declarations, so the
+	// Goal pauses at the bar the Tool advertises instead of on the first
+	// complaint. Like the declaration it answers, it is process-local state of the
+	// run that produced it; creating, resuming or clearing the Goal starts the
+	// count again, as does any declaration that is not a blocked one.
+	blockedStreak int
 }
 
 var (

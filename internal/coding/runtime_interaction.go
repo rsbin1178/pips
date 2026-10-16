@@ -1111,9 +1111,11 @@ func (r *Runtime) openInteraction(
 	composed.AfterTool = failureGuard.wrapAfterTool(composed.AfterTool)
 	composed = extension.ComposeHooks(composed, extension.Hooks{AfterTool: r.hookAfterTool(emitter)})
 
-	// A main interaction installs no turn cap, matching the reference's goal
-	// loop: a goal is bounded by its own token budget (when it carries one) and
-	// its bounded segment count, not by a turn count.
+	// A main interaction installs no turn cap and no per-call token cap, matching
+	// the reference's goal loop: a goal is bounded by its own token budget (when
+	// it carries one), checked after each work segment, and by the no-progress
+	// guard and its own declarations — never by a cap on one call, which would cut
+	// a segment short instead of stopping the run.
 	agentOptions := append(
 		composed.AgentOptions(),
 		agent.WithMaxTurns(0),
@@ -1125,12 +1127,6 @@ func (r *Runtime) openInteraction(
 		agent.WithRequest(r.applyContextRequest(current)),
 	)
 
-	if ctx.Value(goalContextKey{}) != nil {
-		goalState := r.GoalSnapshot()
-		if goalState.MaxTokens > 0 {
-			agentOptions = append(agentOptions, agent.WithMaxTokens(max(1, goalState.MaxTokens-goalState.Tokens)))
-		}
-	}
 	harnessOptions := []harness.Option{
 		harness.WithTools(executableTools...),
 		harness.WithSystem(systemPrompt.SharedPrefix),

@@ -19,7 +19,8 @@ var (
 )
 
 // GoalRequest is a session-scoped completion condition and optional cumulative
-// observed token allowance. Zero MaxTokens leaves the 25-Work bound in force.
+// observed token allowance. The Goal carries no work-segment cap: zero MaxTokens
+// leaves it bounded by the no-progress guard and its own declarations.
 type GoalRequest struct {
 	Condition string
 	MaxTokens int

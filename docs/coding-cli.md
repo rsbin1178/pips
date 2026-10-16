@@ -107,12 +107,13 @@ pips exec --goal --goal-budget 100000 "all auth migration tests pass"
 printf 'the documented acceptance checks pass' | pips exec --goal
 ```
 
-`--goal-budget` requires `--goal` and a positive integer. The default work limit
-is 25 bounded execution segments, including explicit approval-resume segments;
-it is not 25 individual tool calls. A work segment installs no turn cap, so it
-is bounded only by the goal's token budget. A token budget includes observed
-work and completion-check usage. It is a cooperative limit, not a billing
-guarantee: one provider call can overshoot an allowance before reporting usage.
+`--goal-budget` requires `--goal` and a positive integer. A goal installs no
+work-segment cap and no turn cap: it runs until its token budget is reached, a
+declaration stops it, or the no-progress guard pauses it. `--goal-budget` is the
+bound you can set; without one, a goal that keeps producing new evidence keeps
+running. A token budget includes observed work and completion-check usage, and it
+is a cooperative limit rather than a billing guarantee: one provider call can
+overshoot an allowance before reporting usage.
 
 A worker saying "done" is not sufficient. An independent evaluator reviews
 recorded evidence, and a completion candidate receives a bounded read-only
@@ -142,16 +143,17 @@ wherever a goal can run and stays offered outside one, so a call there is a
 refusal sentence rather than an unknown tool. Its three optional fields are the
 reference's: `message` records a short progress note and changes nothing else;
 `blocked_reason` is a failure signal, sent only after the same problem has
-defeated three or more attempts, which pauses the goal with that reason for a
-user decision; and `completed` records the model's claim that the condition is
-achieved. A completion claim does not decide completion. It is consumed at the
-goal loop's next decision point, where the verifier runs in place of the
-ordinary continuation step: a verified verdict ends the run, and an unverified
-one returns the auditor's gaps to the model as its next feedback. The verdict
-stays with the auditor, which still reads the workspace and the recorded tool
-results — the worker's declaration is never itself evidence. A declaration with
-no goal run in progress, or a `completed` or `blocked_reason` against a goal that
-is paused or already complete, is refused with a named reason.
+defeated three or more attempts; the runtime counts them, answering the first two
+with the streak so the model keeps working, and pauses the goal with that reason
+for a user decision on the third; and `completed` records the model's claim that
+the condition is achieved. A completion claim does not decide completion. It is
+consumed at the goal loop's next decision point, where the verifier runs in place
+of the ordinary continuation step: a verified verdict ends the run, and an
+unverified one returns the auditor's gaps to the model as its next feedback. The
+verdict stays with the auditor, which still reads the workspace and the recorded
+tool results — the worker's declaration is never itself evidence. A declaration
+with no goal run in progress, or a `completed` or `blocked_reason` against a goal
+that is paused or already complete, is refused with a named reason.
 
 Verification is intentionally bounded: the evidence ledger retains up to 32
 latest tool results with 4 KiB per result; an audit has up to four read rounds
