@@ -126,7 +126,9 @@ Both checks ask for their answer as one JSON object. A model that declares
 any other model is asked through the prompt-only convention, with the schema
 described in the prompt. The declaration chooses the transport and never relaxes
 the check: the same verdict fields, reference and proof rules, and evidence
-bounds apply either way. An answer that is not the required JSON object is
+bounds apply either way. Neither check caps the model's output tokens, so a model
+that reasons before answering is not cut off mid-answer; the goal's own token
+budget bounds the run. An answer that is not the required JSON object is
 treated as not achieved — an unverified verdict, or a continue assessment — and
 its reason returns to the model as the next work segment's feedback. A provider
 failure still interrupts assessment and can be retried without repeating the

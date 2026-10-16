@@ -69,7 +69,7 @@ Evaluator 返回 blocked 时必须携带 `continuation.Block`；应用收集输�
 
 ## ModelEvaluator
 
-`goal.NewModelEvaluator(model)` 使用一个严格、无工具、temperature 为 0 的类型化模型调用评估证据。模型声明原生结构化输出时，请求走 Provider 的 JSON Schema；未声明时，Schema 写进系统提示词并按一个 JSON 对象解析。两条传输的校验相同。`WithMaxTokens` 限制评估输出。
+`goal.NewModelEvaluator(model)` 使用一个严格、无工具、temperature 为 0 的类型化模型调用评估证据。模型声明原生结构化输出时，请求走 Provider 的 JSON Schema；未声明时，Schema 写进系统提示词并按一个 JSON 对象解析。两条传输的校验相同。默认**不设输出上限**，交给 Provider 自己的默认值（与参考实现的评估调用一致）；`WithMaxTokens` 是可选收窄，配置后会再按该 execution 的剩余 token 预算收窄，也只在配置了上限时才因预算耗尽而拒绝。
 
 内置 ModelEvaluator 只允许 continue 或 complete，不会自行返回 blocked；需要业务阻塞语义时实现自定义 Evaluator。回答不是一个 JSON 对象时按 continue 处理并把原因作为反馈交回（`ai.ErrMalformedStructuredOutput`）；provider 失败或超限仍是 Decision 错误，按 Continuation 的 `RetryDecision` 恢复。
 
@@ -172,7 +172,7 @@ execution, err = engine.Signal(ctx, execution.ID, execution.Revision,
 
 ## ModelPlanner
 
-`loop.NewModelPlanner` 用严格、无工具的结构化模型调用产生计划。默认 delay bounds 是 1 分钟到 1 小时，可用 `WithDelayBounds(min,max)` 修改；结果必须是边界内的正整秒，非法值直接失败而不是被静默 clamp。`WithMaxTokens` 限制 planner 输出。
+`loop.NewModelPlanner` 用严格、无工具的结构化模型调用产生计划。默认 delay bounds 是 1 分钟到 1 小时，可用 `WithDelayBounds(min,max)` 修改；结果必须是边界内的正整秒，非法值直接失败而不是被静默 clamp。输出默认同样不设上限，`WithMaxTokens` 是可选收窄。
 
 模型 Planner 的 Usage 会计入 Continuation。由于模型输出会影响唤醒时机，应同时设置 Continuation attempts/deadline/active duration，并让应用对极端时间和信号策略做产品级限制。
 
