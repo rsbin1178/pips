@@ -83,7 +83,12 @@ type modelEvaluationOutput struct {
 	Reason  string  `json:"reason" description:"Concise evidence-based explanation for the decision."`
 }
 
-// Evaluate implements Evaluator.
+// Evaluate implements Evaluator. An answer it cannot use — not one JSON object,
+// an unknown outcome, or an unusable reason — is attempted once more, exactly as
+// the reference's evaluation round is; a second unusable answer is returned as an
+// error so the Goal stops for the user instead of continuing on a guess. A
+// transport failure is not retried here, because the model middleware already
+// owns that.
 func (evaluator *ModelEvaluator) Evaluate(
 	ctx context.Context,
 	evaluation Evaluation,
@@ -115,6 +120,50 @@ func (evaluator *ModelEvaluator) Evaluate(
 		return EvaluationResult{}, err
 	}
 
+	// One shape failure is retried once, exactly as the reference's evaluation
+	// round is. A second unusable answer means the harness cannot judge, so the
+	// run stops rather than guessing. A transport failure is not retried here —
+	// the model middleware already does — and keeps its own path.
+	var (
+		observed ai.Usage
+		result   EvaluationResult
+		unusable bool
+	)
+
+	for range 2 {
+		result, unusable, err = evaluator.assess(ctx, payload, schema, maxTokens)
+		observed.Add(result.Usage)
+
+		if err == nil || !unusable {
+			break
+		}
+	}
+
+	// Both attempts' usage is reported on every path: the controller adds the
+	// returned usage to its own accounting even when the decision fails.
+	result.Usage = observed
+
+	switch {
+	case err == nil:
+		return result, nil
+	case unusable:
+		return result, fmt.Errorf(
+			"goal: the assessment answer was not the required JSON object after a bounded retry; "+
+				"the Goal was stopped rather than treated as complete; use /goal resume to retry: %w",
+			err,
+		)
+	default:
+		return result, fmt.Errorf("goal: generate evaluation: %w", err)
+	}
+}
+
+// assess answers one assessment request. unusable reports an answer that is not
+// a usable assessment: not one JSON object, an unknown outcome, or an invalid
+// reason. A transport failure is not unusable, because the model middleware has
+// already retried it, so the evaluator never retries one.
+func (evaluator *ModelEvaluator) assess(
+	ctx context.Context, payload []byte, schema *ai.Schema, maxTokens *int,
+) (EvaluationResult, bool, error) {
 	output, response, err := ai.GenerateTypedAdaptive[modelEvaluationOutput](ctx, evaluator.model, ai.Request{
 		Messages:    ai.Messages{ai.SystemText(modelEvaluatorSystem), ai.UserText(string(payload))},
 		Temperature: ai.Ptr(0.0), MaxTokens: maxTokens,
@@ -123,40 +172,31 @@ func (evaluator *ModelEvaluator) Evaluate(
 			Schema: schema, Strict: true,
 		},
 	})
-	// An answer that is not one JSON object is an answer of the wrong shape, not
-	// a failed assessment: the condition is simply not established, so the Goal
-	// continues with the reason as its gap.
-	if errors.Is(err, ai.ErrMalformedStructuredOutput) {
-		result := EvaluationResult{
-			Outcome: OutcomeContinue,
-			Reason:  "The assessment answer was not the required JSON object, so the condition is not established",
-		}
-		if response != nil {
-			result.Usage = response.Usage
-		}
 
-		return result, nil
+	result := EvaluationResult{}
+	if response != nil {
+		result.Usage = response.Usage
+	}
+
+	if errors.Is(err, ai.ErrMalformedStructuredOutput) {
+		return result, true, err
 	}
 
 	if err != nil {
-		result := EvaluationResult{}
-		if response != nil {
-			result.Usage = response.Usage
-		}
-
-		return result, fmt.Errorf("goal: generate evaluation: %w", err)
+		return result, false, err
 	}
 
-	result := EvaluationResult{Outcome: output.Outcome, Reason: output.Reason, Usage: response.Usage}
+	result.Outcome, result.Reason = output.Outcome, output.Reason
+
 	if output.Outcome != OutcomeContinue && output.Outcome != OutcomeComplete {
-		return result, fmt.Errorf("%w: model returned outcome %q", ErrInvalid, output.Outcome)
+		return result, true, fmt.Errorf("%w: model returned outcome %q", ErrInvalid, output.Outcome)
 	}
 
 	if err := validateReason(output.Reason, true); err != nil {
-		return result, err
+		return result, true, err
 	}
 
-	return result, nil
+	return result, false, nil
 }
 
 func validateEvaluationRequest(evaluation Evaluation) (string, error) {

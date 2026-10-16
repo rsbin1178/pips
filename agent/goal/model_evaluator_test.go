@@ -14,13 +14,26 @@ import (
 
 type goalModel struct {
 	request          ai.Request
+	requests         []ai.Request
 	response         *ai.Response
+	responses        []*ai.Response
 	err              error
 	structuredOutput bool
 }
 
+// Generate answers the next scripted response when a test scripts a sequence,
+// and the single response otherwise. Every request is recorded so a test can
+// count the attempts.
 func (model *goalModel) Generate(_ context.Context, request ai.Request) (*ai.Response, error) {
 	model.request = request
+	model.requests = append(model.requests, request)
+
+	if len(model.responses) > 0 {
+		response := model.responses[0]
+		model.responses = model.responses[1:]
+
+		return response, model.err
+	}
 
 	return model.response, model.err
 }
@@ -82,6 +95,7 @@ func TestModelEvaluatorRejectsUnsupportedOutcome(t *testing.T) {
 	})
 	require.ErrorIs(t, err, ErrInvalid)
 	assert.Equal(t, OutcomeBlocked, result.Outcome)
+	assert.Len(t, model.requests, 2, "an unsupported outcome is retried once before it stops the run")
 }
 
 // TestModelEvaluatorSendsNoCapByDefault pins the removed default cap: an
@@ -188,35 +202,96 @@ func TestModelEvaluatorUsesPortableTransportWithoutNativeSchema(t *testing.T) {
 	require.Len(t, conversation, 1)
 }
 
-// TestModelEvaluatorTreatsAMalformedAnswerAsContinue pins the wrong-shape rule:
-// an answer that is not one JSON object is not established, on either transport,
-// and it still reports the call's observed usage.
-func TestModelEvaluatorTreatsAMalformedAnswerAsContinue(t *testing.T) {
+// TestModelEvaluatorRetriesAnUnusableAnswerOnceThenStops pins the assessment's
+// own rule: an answer that is not the required document is retried once, and a
+// second unusable answer stops the run rather than guessing. Both attempts'
+// usage is reported because the controller accounts for it.
+func TestModelEvaluatorRetriesAnUnusableAnswerOnceThenStops(t *testing.T) {
 	t.Parallel()
 
-	for _, native := range []bool{false, true} {
-		t.Run(fmt.Sprintf("native=%t", native), func(t *testing.T) {
-			t.Parallel()
-
-			model := &goalModel{
-				structuredOutput: native,
-				response: &ai.Response{
-					Message: ai.AssistantText(`not-json`), Usage: ai.Usage{InputTokens: 8, OutputTokens: 2},
-				},
-			}
-			evaluator, err := NewModelEvaluator(model)
-			require.NoError(t, err)
-
-			result, err := evaluator.Evaluate(t.Context(), Evaluation{
-				Condition: "tests pass", Evidence: ai.JSON(`{}`), Attempt: 1,
-			})
-			require.NoError(t, err)
-			assert.Equal(t, OutcomeContinue, result.Outcome)
-			assert.NotEmpty(t, result.Reason)
-			assert.Contains(t, result.Reason, "JSON object")
-			assert.Equal(t, model.response.Usage, result.Usage)
-		})
+	unusable := []struct {
+		name     string
+		text     string
+		sentinel error
+	}{
+		{name: "not one JSON object", text: "not-json", sentinel: ai.ErrMalformedStructuredOutput},
+		{name: "unknown outcome", text: `{"outcome":"blocked","reason":"cannot inspect files"}`, sentinel: ErrInvalid},
 	}
+
+	for _, native := range []bool{false, true} {
+		for _, test := range unusable {
+			t.Run(fmt.Sprintf("%s/native=%t", test.name, native), func(t *testing.T) {
+				t.Parallel()
+
+				first := &ai.Response{Message: ai.AssistantText(test.text), Usage: ai.Usage{InputTokens: 8, OutputTokens: 2}}
+				second := &ai.Response{Message: ai.AssistantText(test.text), Usage: ai.Usage{InputTokens: 5, OutputTokens: 1}}
+				model := &goalModel{structuredOutput: native, responses: []*ai.Response{first, second}}
+				evaluator, err := NewModelEvaluator(model)
+				require.NoError(t, err)
+
+				result, err := evaluator.Evaluate(t.Context(), Evaluation{
+					Condition: "tests pass", Evidence: ai.JSON(`{}`), Attempt: 1,
+				})
+				require.ErrorIs(t, err, test.sentinel)
+				assert.Contains(t, err.Error(), "bounded retry")
+				assert.Contains(t, err.Error(), "stopped rather than treated as complete")
+				assert.Contains(t, err.Error(), "use /goal resume to retry")
+				assert.Len(t, model.requests, 2)
+
+				expected := first.Usage
+				expected.Add(second.Usage)
+				assert.Equal(t, expected, result.Usage)
+			})
+		}
+	}
+}
+
+// TestModelEvaluatorRetriesAndSucceedsOnASecondAnswer pins the retry's happy
+// path: a model that answers with garbage once and with a usable assessment the
+// second time is not punished for the first answer, and both attempts' usage is
+// reported.
+func TestModelEvaluatorRetriesAndSucceedsOnASecondAnswer(t *testing.T) {
+	t.Parallel()
+
+	first := &ai.Response{Message: ai.AssistantText(`not-json`), Usage: ai.Usage{InputTokens: 8, OutputTokens: 2}}
+	second := &ai.Response{
+		Message: ai.AssistantText(`{"outcome":"continue","reason":"test output is missing"}`),
+		Usage:   ai.Usage{InputTokens: 5, OutputTokens: 1},
+	}
+	model := &goalModel{responses: []*ai.Response{first, second}}
+	evaluator, err := NewModelEvaluator(model)
+	require.NoError(t, err)
+
+	result, err := evaluator.Evaluate(t.Context(), Evaluation{
+		Condition: "tests pass", Evidence: ai.JSON(`{}`), Attempt: 1,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, OutcomeContinue, result.Outcome)
+	assert.Equal(t, "test output is missing", result.Reason)
+	assert.Len(t, model.requests, 2)
+
+	expected := first.Usage
+	expected.Add(second.Usage)
+	assert.Equal(t, expected, result.Usage)
+}
+
+// TestModelEvaluatorDoesNotRetryATransportFailure pins the split between the two
+// failure classes: the model middleware already retries a transport failure, so
+// the evaluator attempts it once and reports that attempt's usage.
+func TestModelEvaluatorDoesNotRetryATransportFailure(t *testing.T) {
+	t.Parallel()
+
+	modelFailure := errors.New("model unavailable")
+	model := &goalModel{err: modelFailure, response: &ai.Response{Usage: ai.Usage{InputTokens: 3, OutputTokens: 1}}}
+	evaluator, err := NewModelEvaluator(model)
+	require.NoError(t, err)
+
+	result, err := evaluator.Evaluate(t.Context(), Evaluation{
+		Condition: "tests pass", Evidence: ai.JSON(`{}`), Attempt: 1,
+	})
+	require.ErrorIs(t, err, modelFailure)
+	assert.Len(t, model.requests, 1)
+	assert.Equal(t, ai.Usage{InputTokens: 3, OutputTokens: 1}, result.Usage)
 }
 
 func TestModelEvaluatorPropagatesModelError(t *testing.T) {

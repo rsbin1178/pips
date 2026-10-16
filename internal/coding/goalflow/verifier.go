@@ -188,14 +188,16 @@ func (v *Verifier) Verify(
 		return Verdict{}, usage, err
 	}
 
-	if !ValidUsage(usage) || strings.TrimSpace(verdict.Reason) == "" || len(verdict.Reason) > 4096 || len(verdict.Gaps) > MaxGaps || len(verdict.References) > MaxRecords {
+	if !ValidUsage(usage) {
 		return Verdict{}, usage, goal.ErrInvalid
 	}
 
-	for _, gap := range verdict.Gaps {
-		if strings.TrimSpace(gap) == "" || len(gap) > 4096 {
-			return Verdict{}, usage, goal.ErrInvalid
-		}
+	// A verdict that parses but breaks its own contract is an unusable audit, not
+	// a failed run: completion is simply not established, and the reason becomes
+	// the gap the model reads next. An unusable verdict can only make the audit
+	// stricter, never fail the Goal.
+	if problem := verdictProblem(verdict); problem != "" {
+		return unverified(problem), usage, nil
 	}
 
 	if verdict.Verified {
@@ -226,6 +228,34 @@ func (v *Verifier) Verify(
 
 func unverified(reason string) Verdict {
 	return Verdict{Reason: reason, Gaps: []string{reason}, References: []string{}}
+}
+
+// verdictProblem reports why a parsed verdict cannot be used, or "" when it can.
+// The bounds are the same ones the verdict always had; only their consequence
+// changed, from a failed Decision to a negative verdict.
+func verdictProblem(verdict Verdict) string {
+	switch {
+	case strings.TrimSpace(verdict.Reason) == "":
+		return "The auditor's verdict carries no reason; completion is not established"
+	case len(verdict.Reason) > 4096:
+		return fmt.Sprintf("The auditor's verdict reason exceeds %d bytes; completion is not established", 4096)
+	case len(verdict.Gaps) > MaxGaps:
+		return fmt.Sprintf("The auditor's verdict carries more than %d gaps; completion is not established", MaxGaps)
+	case len(verdict.References) > MaxRecords:
+		return fmt.Sprintf("The auditor's verdict carries more than %d references; completion is not established", MaxRecords)
+	}
+
+	for _, gap := range verdict.Gaps {
+		if strings.TrimSpace(gap) == "" {
+			return "The auditor's verdict carries a blank gap; completion is not established"
+		}
+
+		if len(gap) > 4096 {
+			return fmt.Sprintf("The auditor's verdict gap exceeds %d bytes; completion is not established", 4096)
+		}
+	}
+
+	return ""
 }
 
 func evidenceProblem(evidence Evidence) string {
