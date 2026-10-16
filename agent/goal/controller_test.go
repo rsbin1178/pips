@@ -3,6 +3,7 @@ package goal
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -12,6 +13,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestControllerDecideMapsOutcomes pins the three outcomes' decisions. Phase AB
+// changed two of them: a completion is now the reference's candidate_complete on
+// the wire, and a blocked evaluation blocks only once the same blocker has been
+// named three times, so the blocked case starts from a state that already counts
+// two declarations.
 func TestControllerDecideMapsOutcomes(t *testing.T) {
 	t.Parallel()
 
@@ -20,6 +26,7 @@ func TestControllerDecideMapsOutcomes(t *testing.T) {
 		result     EvaluationResult
 		action     continuation.Action
 		blockKind  string
+		blockerKey string
 		wantOutput string
 	}{
 		{
@@ -37,17 +44,19 @@ func TestControllerDecideMapsOutcomes(t *testing.T) {
 				Outcome: OutcomeComplete, Reason: "all checks pass",
 			},
 			action:     continuation.ActionComplete,
-			wantOutput: `{"condition":"all tests pass","evaluations":1,"outcome":"complete","reason":"all checks pass"}`,
+			wantOutput: `{"condition":"all tests pass","evaluations":1,"outcome":"candidate_complete","reason":"all checks pass"}`,
 		},
 		{
 			name: "blocked with custom block",
 			result: EvaluationResult{
 				Outcome: OutcomeBlocked, Reason: "credentials required",
-				Feedback: ai.JSON(`{"scope":"deploy"}`),
-				Block:    &continuation.Block{Kind: "credentials", Data: ai.JSON(`{"provider":"ci"}`)},
+				Feedback:   ai.JSON(`{"scope":"deploy"}`),
+				BlockerKey: "deploy_credentials",
+				Block:      &continuation.Block{Kind: "credentials", Data: ai.JSON(`{"provider":"ci"}`)},
 			},
-			action:    continuation.ActionBlock,
-			blockKind: "credentials",
+			action:     continuation.ActionBlock,
+			blockKind:  "credentials",
+			blockerKey: "deploy_credentials",
 		},
 	}
 
@@ -67,9 +76,14 @@ func TestControllerDecideMapsOutcomes(t *testing.T) {
 			}))
 			require.NoError(t, err)
 
+			controllerState := initial.ControllerState
+			if test.blockerKey != "" {
+				controllerState = seededBlockerStreak(t, controllerState, test.blockerKey, blockerStreak-1)
+			}
+
 			decision, err := controller.Decide(t.Context(), continuation.DecisionRequest{
 				Attempt: 1, Work: continuation.WorkResult{Value: ai.JSON(`{"tests":"pending"}`)},
-				ControllerState: initial.ControllerState,
+				ControllerState: controllerState,
 			})
 			require.NoError(t, err)
 			assert.Equal(t, test.action, decision.Action)
@@ -93,6 +107,7 @@ func TestControllerDecideMapsOutcomes(t *testing.T) {
 				require.NotNil(t, decision.Block)
 				assert.Equal(t, test.blockKind, decision.Block.Kind)
 				assert.JSONEq(t, string(test.result.Block.Data), string(decision.Block.Data))
+				assert.Equal(t, blockerStreak, state.BlockerStreak)
 
 				input, decodeErr := DecodeWorkInput(decision.NextInput)
 				require.NoError(t, decodeErr)
@@ -107,23 +122,30 @@ func TestControllerDecideMapsOutcomes(t *testing.T) {
 	}
 }
 
+// TestControllerDefaultBlockCarriesAuditSummary pins the default block the Goal
+// builds when the evaluation names none. Phase AB changed its kind from the
+// generic policy kind to the one the coding side projects as blocked rather than
+// paused, and made a blocked evaluation wait for the streak, so this starts from
+// a state that already counts two declarations of the same blocker.
 func TestControllerDefaultBlockCarriesAuditSummary(t *testing.T) {
 	t.Parallel()
 
 	initial, err := Prepare("deployment is healthy")
 	require.NoError(t, err)
 	controller, err := NewController(EvaluatorFunc(func(context.Context, Evaluation) (EvaluationResult, error) {
-		return EvaluationResult{Outcome: OutcomeBlocked, Reason: "deployment API unavailable"}, nil
+		return EvaluationResult{
+			Outcome: OutcomeBlocked, Reason: "deployment API unavailable", BlockerKey: "deployment_api",
+		}, nil
 	}))
 	require.NoError(t, err)
 
 	decision, err := controller.Decide(t.Context(), continuation.DecisionRequest{
 		Attempt: 1, Work: continuation.WorkResult{Value: ai.JSON(`{}`)},
-		ControllerState: initial.ControllerState,
+		ControllerState: seededBlockerStreak(t, initial.ControllerState, "deployment_api", blockerStreak-1),
 	})
 	require.NoError(t, err)
 	require.NotNil(t, decision.Block)
-	assert.Equal(t, "goal", decision.Block.Kind)
+	assert.Equal(t, "gate", decision.Block.Kind)
 	assert.JSONEq(t,
 		`{"condition":"deployment is healthy","evaluations":1,"outcome":"blocked","reason":"deployment API unavailable"}`,
 		string(decision.Block.Data),
@@ -133,6 +155,194 @@ func TestControllerDefaultBlockCarriesAuditSummary(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "deployment is healthy", input.Condition)
 	assert.Equal(t, "deployment API unavailable", input.Reason)
+}
+
+// TestControllerBlocksOnTheThirdSameBlocker pins Phase AB's keyed streak against
+// the reference: the same blocker counts up, a different one restarts at one, only
+// the third consecutive declaration blocks the Goal, and every round below it
+// continues with the evidence as its reason.
+func TestControllerBlocksOnTheThirdSameBlocker(t *testing.T) {
+	t.Parallel()
+
+	// Each round names its blocker and its evidence, so the test reads the
+	// decision the controller made from the state that round left behind.
+	rounds := []struct {
+		blocker  string
+		evidence string
+		action   continuation.Action
+	}{
+		{blocker: "missing_deploy_key", evidence: "the deploy key is absent", action: continuation.ActionContinue},
+		{blocker: "missing_deploy_key", evidence: "the deploy key is still absent", action: continuation.ActionContinue},
+		{blocker: "missing_deploy_key", evidence: "the deploy key is still absent", action: continuation.ActionBlock},
+		{blocker: "missing_registry_access", evidence: "the registry rejects the push", action: continuation.ActionContinue},
+		{blocker: "missing_registry_access", evidence: "the registry still rejects the push", action: continuation.ActionContinue},
+	}
+
+	initial, err := Prepare("the release is published")
+	require.NoError(t, err)
+
+	var index int
+
+	controller, err := NewController(EvaluatorFunc(func(context.Context, Evaluation) (EvaluationResult, error) {
+		round := rounds[index]
+		index++
+
+		return EvaluationResult{
+			Outcome: OutcomeBlocked, Reason: round.evidence,
+			NextStep: "grant the missing prerequisite", BlockerKey: round.blocker,
+		}, nil
+	}))
+	require.NoError(t, err)
+
+	state := initial.ControllerState
+
+	for position, round := range rounds {
+		decision, err := controller.Decide(t.Context(), continuation.DecisionRequest{
+			Attempt: position + 1, Work: continuation.WorkResult{Value: ai.JSON(`{}`)},
+			ControllerState: state,
+		})
+		require.NoError(t, err)
+		require.Equal(t, round.action, decision.Action, "round %d", position+1)
+
+		decoded, err := DecodeState(decision.State)
+		require.NoError(t, err)
+		assert.Equal(t, round.blocker, decoded.BlockerKey)
+		assert.Equal(t, round.evidence, decoded.Last.Reason)
+
+		if decision.Action == continuation.ActionBlock {
+			assert.Equal(t, blockerStreak, decoded.BlockerStreak)
+			assert.Equal(t, round.evidence+"\nNext user action: grant the missing prerequisite", decision.Reason)
+			require.NotNil(t, decision.Block)
+		} else {
+			assert.Equal(t, round.evidence, decision.Reason, "below the streak the round continues with the evidence")
+			assert.Nil(t, decision.Block)
+			assert.Less(t, decoded.BlockerStreak, blockerStreak)
+		}
+
+		state = decision.State
+	}
+}
+
+// TestControllerClearsTheBlockerStreak pins the clearing rules Phase AB adds: a
+// decision that is not blocked ends the run of blocked evaluations, and a fresh
+// activation — the Goal's creation, a wake, or the resolution of a block — starts
+// the run over, exactly as the reference's own resume resets its evaluator streak.
+func TestControllerClearsTheBlockerStreak(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		result     EvaluationResult
+		activation *continuation.Activation
+	}{
+		{
+			name:   "a continue decision",
+			result: EvaluationResult{Outcome: OutcomeContinue, Reason: "work remains"},
+		},
+		{
+			name:   "a candidate completion",
+			result: EvaluationResult{Outcome: OutcomeComplete, Reason: "it looks done"},
+		},
+		{
+			name: "a fresh activation",
+			result: EvaluationResult{
+				Outcome: OutcomeBlocked, Reason: "the key is absent", BlockerKey: "missing_deploy_key",
+			},
+			activation: &continuation.Activation{Source: continuation.ActivationBlock},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			initial, err := Prepare("the release is published")
+			require.NoError(t, err)
+			controller, err := NewController(EvaluatorFunc(func(context.Context, Evaluation) (EvaluationResult, error) {
+				return test.result, nil
+			}))
+			require.NoError(t, err)
+
+			decision, err := controller.Decide(t.Context(), continuation.DecisionRequest{
+				Attempt: 1, Work: continuation.WorkResult{Value: ai.JSON(`{}`)},
+				Activation:      test.activation,
+				ControllerState: seededBlockerStreak(t, initial.ControllerState, "missing_deploy_key", blockerStreak-1),
+			})
+			require.NoError(t, err)
+
+			decoded, err := DecodeState(decision.State)
+			require.NoError(t, err)
+
+			if test.result.Outcome == OutcomeBlocked {
+				// The activation reset leaves this round at one, so it continues
+				// instead of blocking on a streak the run no longer has.
+				assert.Equal(t, continuation.ActionContinue, decision.Action)
+				assert.Equal(t, 1, decoded.BlockerStreak)
+				assert.Equal(t, "missing_deploy_key", decoded.BlockerKey)
+
+				return
+			}
+
+			assert.Zero(t, decoded.BlockerStreak)
+			assert.Empty(t, decoded.BlockerKey)
+		})
+	}
+}
+
+// TestControllerBlockerStreakIsDurable pins that the streak is part of the state a
+// restart reads back, and that a state written before the fields existed still
+// decodes.
+func TestControllerBlockerStreakIsDurable(t *testing.T) {
+	t.Parallel()
+
+	initial, err := Prepare("the release is published")
+	require.NoError(t, err)
+	controller, err := NewController(EvaluatorFunc(func(context.Context, Evaluation) (EvaluationResult, error) {
+		return EvaluationResult{
+			Outcome: OutcomeBlocked, Reason: "the deploy key is absent",
+			NextStep: "add DEPLOY_KEY", BlockerKey: "missing_deploy_key",
+		}, nil
+	}))
+	require.NoError(t, err)
+
+	decision, err := controller.Decide(t.Context(), continuation.DecisionRequest{
+		Attempt: 1, Work: continuation.WorkResult{Value: ai.JSON(`{}`)},
+		ControllerState: seededBlockerStreak(t, initial.ControllerState, "missing_deploy_key", blockerStreak-1),
+	})
+	require.NoError(t, err)
+	require.Equal(t, continuation.ActionBlock, decision.Action)
+
+	roundTripped, err := DecodeState(decision.State)
+	require.NoError(t, err)
+	assert.Equal(t, "missing_deploy_key", roundTripped.BlockerKey)
+	assert.Equal(t, blockerStreak, roundTripped.BlockerStreak)
+
+	// A state that predates both fields decodes with an empty key and no streak.
+	legacy, err := DecodeState(ai.JSON(
+		`{"version":1,"condition":"the release is published","evaluations":1,` +
+			`"last":{"outcome":"blocked","reason":"the deploy key is absent"}}`,
+	))
+	require.NoError(t, err)
+	assert.Empty(t, legacy.BlockerKey)
+	assert.Zero(t, legacy.BlockerStreak)
+}
+
+// seededBlockerStreak returns a controller state whose blocker streak already
+// counts key, so a test can reach the bar without replaying the rounds that led
+// there. The increments themselves are pinned by
+// TestControllerBlocksOnTheThirdSameBlocker.
+func seededBlockerStreak(t *testing.T, state ai.JSON, key string, streak int) ai.JSON {
+	t.Helper()
+
+	decoded, err := DecodeState(state)
+	require.NoError(t, err)
+
+	decoded.BlockerKey, decoded.BlockerStreak = key, streak
+
+	encoded, err := encodeJSON("controller state", decoded)
+	require.NoError(t, err)
+
+	return encoded
 }
 
 func TestControllerFeedsEvaluationBackIntoContinuationWork(t *testing.T) {
@@ -218,6 +428,14 @@ func TestControllerRejectsInvalidEvaluatorResults(t *testing.T) {
 		{name: "continue output", result: EvaluationResult{Outcome: OutcomeContinue, Reason: "more", Output: ai.JSON(`{}`)}, target: ErrInvalid},
 		{name: "complete feedback", result: EvaluationResult{Outcome: OutcomeComplete, Reason: "done", Feedback: ai.JSON(`{}`)}, target: ErrInvalid},
 		{name: "blocked output", result: EvaluationResult{Outcome: OutcomeBlocked, Reason: "blocked", Output: ai.JSON(`{}`)}, target: ErrInvalid},
+		{
+			name: "blocked message over the bound",
+			result: EvaluationResult{
+				Outcome: OutcomeBlocked, Reason: "blocked", BlockerKey: "missing_access",
+				NextStep: strings.Repeat("x", maxReasonBytes),
+			},
+			target: ErrTooLarge,
+		},
 	}
 
 	for _, test := range tests {

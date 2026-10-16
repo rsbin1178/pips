@@ -22,8 +22,14 @@ import (
 
 type goalTestModel struct {
 	*runtimeModel
-	muGoal            sync.Mutex
-	outcomes          []string
+	muGoal sync.Mutex
+	// decisions are the assessment's scripted decisions, one per assessment call;
+	// once they run out, candidate_complete answers every further call.
+	decisions []string
+	// decisionDocuments are whole scripted assessment answers, one per assessment
+	// call, for a test that needs a field the decision shortcut cannot express — a
+	// blocked decision's blocker key. They take precedence over decisions.
+	decisionDocuments []string
 	evaluationError   bool
 	blockEvaluation   chan struct{}
 	evaluationStarted chan struct{}
@@ -91,10 +97,15 @@ func (m *goalTestModel) Generate(ctx context.Context, request ai.Request) (*ai.R
 		m.muGoal.Lock()
 		m.evaluated++
 		failure := m.evaluationError
-		outcome := "complete"
-		if len(m.outcomes) > 0 {
-			outcome = m.outcomes[0]
-			m.outcomes = m.outcomes[1:]
+		decision := "candidate_complete"
+		if len(m.decisions) > 0 {
+			decision = m.decisions[0]
+			m.decisions = m.decisions[1:]
+		}
+		document := ""
+		if len(m.decisionDocuments) > 0 {
+			document = m.decisionDocuments[0]
+			m.decisionDocuments = m.decisionDocuments[1:]
 		}
 		m.muGoal.Unlock()
 		if m.evaluationStarted != nil {
@@ -113,7 +124,16 @@ func (m *goalTestModel) Generate(ctx context.Context, request ai.Request) (*ai.R
 		if failure {
 			return &ai.Response{Usage: ai.Usage{InputTokens: 5, OutputTokens: 2}}, errors.New("assessment unavailable")
 		}
-		return runtimeTextResponse(`{"outcome":"` + outcome + `","reason":"inspect actual implementation"}`), nil
+		if document != "" {
+			return runtimeTextResponse(document), nil
+		}
+		// Phase AB's assessment document: the reference's four fields. A scripted
+		// decision is always a continue or a candidate completion, so the blocker
+		// key stays empty.
+		return runtimeTextResponse(
+			`{"decision":"` + decision + `","evidence":"inspect actual implementation",` +
+				`"next_step":"inspect the actual implementation","blocker_key":""}`,
+		), nil
 	}
 	if strings.Contains(requestSystemText(request), "independent Coding Goal evidence auditor") {
 		if request.ResponseFormat == nil {
@@ -188,7 +208,7 @@ func TestRuntimeGoalContinuesThenVerifiesActualEvidence(t *testing.T) {
 		runtimeToolResponse("proof-read", "read", `{"path":"proof.txt"}`),
 		runtimeTextResponse("candidate complete"),
 	)
-	model.outcomes = []string{"continue", "complete"}
+	model.decisions = []string{"continue", "candidate_complete"}
 	runtime := openTestRuntime(t, model)
 	require.NoError(t, os.WriteFile(filepath.Join(runtime.workspace.Root(), "proof.txt"), []byte("actual implementation\n"), 0o600))
 	events, err := collectRuntimeResult(runtime.StartGoal(t.Context(), GoalRequest{Condition: "inspect proof.txt"}))
@@ -394,7 +414,7 @@ func TestRuntimeGoalNoProgressAndBudget(t *testing.T) {
 	t.Run("three empty assessments", func(t *testing.T) {
 		t.Parallel()
 		model := newGoalTestModel(runtimeTextResponse("claim1"), runtimeTextResponse("claim2"), runtimeTextResponse("claim3"))
-		model.outcomes = []string{"continue", "continue", "continue"}
+		model.decisions = []string{"continue", "continue", "continue"}
 		runtime := openTestRuntime(t, model)
 		_, err := collectRuntimeResult(runtime.StartGoal(t.Context(), GoalRequest{Condition: "done"}))
 		require.NoError(t, err)
@@ -414,13 +434,41 @@ func TestRuntimeGoalNoProgressAndBudget(t *testing.T) {
 	})
 }
 
+// TestRuntimeGoalBlocksOnTheThirdSameAssessmentBlocker pins the projection the
+// user sees when the assessment declares the same blocker three times running.
+// Phase AB makes that a blocked Goal rather than a paused one — the reference
+// pauses it as `Verification`, whose status is `Blocked` — and hands it the
+// reference's message, the evidence followed by the next user action. The streak's
+// own counting is pinned by the SDK controller's tests.
+func TestRuntimeGoalBlocksOnTheThirdSameAssessmentBlocker(t *testing.T) {
+	t.Parallel()
+
+	const document = `{"decision":"blocked","evidence":"the deploy key is absent",` +
+		`"next_step":"add DEPLOY_KEY to the CI environment","blocker_key":"missing_deploy_key"}`
+
+	model := newGoalTestModel(
+		runtimeTextResponse("claim1"), runtimeTextResponse("claim2"), runtimeTextResponse("claim3"),
+	)
+	model.decisionDocuments = []string{document, document, document}
+	runtime := openTestRuntime(t, model)
+
+	_, err := collectRuntimeResult(runtime.StartGoal(t.Context(), GoalRequest{Condition: "the release is published"}))
+	require.NoError(t, err)
+
+	state := runtime.GoalSnapshot()
+	assert.Equal(t, GoalBlocked, state.Status)
+	assert.Equal(t, 3, state.Evaluations)
+	assert.Equal(t, 3, state.Attempts)
+	assert.Equal(t, "the deploy key is absent\nNext user action: add DEPLOY_KEY to the CI environment", state.Reason)
+}
+
 func TestRuntimeGoalApprovalResolutionKeepsExactPendingCalls(t *testing.T) {
 	t.Parallel()
 	model := newGoalTestModel(
 		runtimeToolResponse("pending-shell", "shell", `{"command":"printf ok","permissions":{"write_paths":[],"network":true},"justification":"test"}`),
 		runtimeTextResponse("denied"), runtimeTextResponse("no evidence"), runtimeTextResponse("still none"), runtimeTextResponse("no new evidence"),
 	)
-	model.outcomes = []string{"continue", "continue", "continue", "continue"}
+	model.decisions = []string{"continue", "continue", "continue", "continue"}
 	runtime := openTestRuntime(t, model)
 	_, err := collectRuntimeResult(runtime.StartGoal(t.Context(), GoalRequest{Condition: "run command"}))
 	require.NoError(t, err)
@@ -508,7 +556,7 @@ func TestRuntimeGoalRunsPastTheOldSegmentCap(t *testing.T) {
 		name := fmt.Sprintf("proof-%d.txt", index)
 		require.NoError(t, os.WriteFile(filepath.Join(runtime.workspace.Root(), name), []byte(name), 0o600))
 		model.responses = append(model.responses, runtimeToolResponse(fmt.Sprintf("call-%d", index), "read", fmt.Sprintf(`{"path":%q}`, name)), runtimeTextResponse("continue"))
-		model.outcomes = append(model.outcomes, "continue")
+		model.decisions = append(model.decisions, "continue")
 	}
 
 	_, err := collectRuntimeResult(runtime.StartGoal(t.Context(), GoalRequest{
@@ -535,7 +583,7 @@ func TestRuntimeGoalWorkSegmentIsNotCappedByTheRemainingBudget(t *testing.T) {
 		runtimeToolResponse("proof-read", "read", `{"path":"proof.txt"}`),
 		runtimeTextResponse("candidate complete"),
 	)
-	model.outcomes = []string{"complete"}
+	model.decisions = []string{"candidate_complete"}
 	runtime := openTestRuntime(t, model)
 	require.NoError(t, os.WriteFile(filepath.Join(runtime.workspace.Root(), "proof.txt"), []byte("actual implementation\n"), 0o600))
 
@@ -572,7 +620,7 @@ func TestRuntimeGoalWorkRunsWithoutATurnCap(t *testing.T) {
 		))
 	}
 	model.responses = append(model.responses, runtimeTextResponse("candidate complete"))
-	model.outcomes = []string{"complete"}
+	model.decisions = []string{"candidate_complete"}
 	runtime := openTestRuntime(t, model)
 	require.NoError(t, os.WriteFile(
 		filepath.Join(runtime.workspace.Root(), "proof.txt"), []byte("actual implementation\n"), 0o600,

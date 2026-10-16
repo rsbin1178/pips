@@ -134,7 +134,11 @@ re-read a file it cites, and to refuse absent, failed, truncated, contradictory 
 stale evidence — so a verification is only as good as the auditor's compliance
 with that contract. Neither check caps the model's output tokens, so a model
 that reasons before answering is not cut off mid-answer; the goal's own token
-budget bounds the run. An answer the harness cannot use is judged, not fatal, and
+budget bounds the run. The evaluator answers with a decision — continue, candidate
+complete, or blocked — and a blocked decision names a stable blocker key: the goal
+keeps working until the same blocker is declared three times running, and then it
+is blocked with the evidence and the next user action the evaluator named. An answer
+the harness cannot use is judged, not fatal, and
 the two checks differ. The verifier treats a verdict it cannot read — not JSON, or
 a contract violation such as an empty reason — as not achieved, and its reason
 returns to the model as the next work segment's feedback. The evaluator cannot

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"reflect"
 	"slices"
 	"strings"
@@ -67,6 +68,23 @@ func GenerateTyped[T any](ctx context.Context, model LanguageModel, req Request)
 	return generateTyped[T](ctx, model, req, false)
 }
 
+// StructuredOption configures one typed structured-output call.
+type StructuredOption func(*structuredConfig)
+
+type structuredConfig struct {
+	disallowUnknownFields bool
+}
+
+// WithDisallowUnknownFields makes the decode reject an answer that carries a
+// field the target type does not declare. Without it the decode keeps
+// encoding/json's lenient rule and ignores such a field, which is what a
+// caller whose model answers with extra keys wants.
+func WithDisallowUnknownFields() StructuredOption {
+	return func(config *structuredConfig) {
+		config.disallowUnknownFields = true
+	}
+}
+
 // GenerateTypedAdaptive asks for the JSON document described by
 // req.ResponseFormat through the transport the model declares: the provider's
 // own schema mechanism when Capabilities().StructuredOutput is true, and the
@@ -76,17 +94,28 @@ func GenerateTyped[T any](ctx context.Context, model LanguageModel, req Request)
 // The portable transport omits ResponseFormat and appends
 // [PortableSchemaInstructions] to the last system message of a clone of
 // req.Messages, so the caller's slice and its messages are never mutated. Both
-// transports decode the answer with one json.Unmarshal; an answer that is not
-// one JSON object is reported as [ErrMalformedStructuredOutput] rather than as a
-// transport failure.
-func GenerateTypedAdaptive[T any](ctx context.Context, model LanguageModel, req Request) (T, *Response, error) {
-	return generateTyped[T](ctx, model, req, true)
+// transports decode the answer with one json.Unmarshal — unless
+// [WithDisallowUnknownFields] was passed, which adds the unknown-field rule — and
+// an answer that is not one JSON object is reported as
+// [ErrMalformedStructuredOutput] rather than as a transport failure.
+func GenerateTypedAdaptive[T any](
+	ctx context.Context, model LanguageModel, req Request, options ...StructuredOption,
+) (T, *Response, error) {
+	return generateTyped[T](ctx, model, req, true, options...)
 }
 
 func generateTyped[T any](
-	ctx context.Context, model LanguageModel, req Request, adaptive bool,
+	ctx context.Context, model LanguageModel, req Request, adaptive bool, options ...StructuredOption,
 ) (T, *Response, error) {
 	var out T
+
+	config := structuredConfig{}
+
+	for _, option := range options {
+		if option != nil {
+			option(&config)
+		}
+	}
 
 	if req.ResponseFormat == nil {
 		schema, err := SchemaFor[T]()
@@ -112,7 +141,7 @@ func generateTyped[T any](
 		return out, resp, err
 	}
 
-	if err := json.Unmarshal([]byte(resp.Text()), &out); err != nil {
+	if err := decodeStructured(resp.Text(), &out, config.disallowUnknownFields); err != nil {
 		if adaptive {
 			return out, resp, fmt.Errorf(
 				"%w: ai: decoding structured output into %T: %w", ErrMalformedStructuredOutput, out, err,
@@ -123,6 +152,28 @@ func generateTyped[T any](
 	}
 
 	return out, resp, nil
+}
+
+// decodeStructured decodes one JSON document, optionally rejecting fields the
+// target type does not declare. Trailing content is rejected either way, which
+// is what json.Unmarshal does for the lenient path.
+func decodeStructured(text string, value any, disallowUnknownFields bool) error {
+	if !disallowUnknownFields {
+		return json.Unmarshal([]byte(text), value)
+	}
+
+	decoder := json.NewDecoder(strings.NewReader(text))
+	decoder.DisallowUnknownFields()
+
+	if err := decoder.Decode(value); err != nil {
+		return err
+	}
+
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		return errors.New("unexpected trailing JSON")
+	}
+
+	return nil
 }
 
 // appendPortableSchemaInstructions returns messages with instructions appended

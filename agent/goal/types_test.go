@@ -69,6 +69,7 @@ func TestDecodeStateRejectsMalformedHistory(t *testing.T) {
 		{name: "count without last", data: ai.JSON(`{"version":1,"condition":"done","evaluations":1}`)},
 		{name: "last without count", data: ai.JSON(`{"version":1,"condition":"done","last":{"outcome":"complete","reason":"done"}}`)},
 		{name: "invalid outcome", data: ai.JSON(`{"version":1,"condition":"done","evaluations":1,"last":{"outcome":"maybe","reason":"unknown"}}`)},
+		{name: "negative blocker streak", data: ai.JSON(`{"version":1,"condition":"done","blocker_streak":-1}`)},
 	}
 
 	for _, test := range tests {
@@ -79,6 +80,36 @@ func TestDecodeStateRejectsMalformedHistory(t *testing.T) {
 			require.ErrorIs(t, err, ErrInvalid)
 		})
 	}
+}
+
+// TestDecodeStateReadsThePrePhaseABCompleteSpelling pins the compatibility rule
+// Phase AB adds: the outcome is durable, so a controller state written before the
+// assessment adopted candidate_complete is read — and normalized — rather than
+// rejected.
+func TestDecodeStateReadsThePrePhaseABCompleteSpelling(t *testing.T) {
+	t.Parallel()
+
+	legacy, err := DecodeState(ai.JSON(
+		`{"version":1,"condition":"done","evaluations":1,"last":{"outcome":"complete","reason":"done"}}`,
+	))
+	require.NoError(t, err)
+	require.NotNil(t, legacy.Last)
+	assert.Equal(t, OutcomeComplete, legacy.Last.Outcome)
+	assert.Equal(t, "done", legacy.Last.Reason)
+	assert.Empty(t, legacy.Last.NextStep)
+	assert.Empty(t, legacy.Last.BlockerKey)
+
+	current, err := DecodeState(ai.JSON(
+		`{"version":1,"condition":"done","evaluations":1,` +
+			`"last":{"outcome":"candidate_complete","reason":"done","next_step":"ship it"},` +
+			`"blocker_key":"missing_access","blocker_streak":2}`,
+	))
+	require.NoError(t, err)
+	require.NotNil(t, current.Last)
+	assert.Equal(t, OutcomeComplete, current.Last.Outcome)
+	assert.Equal(t, "ship it", current.Last.NextStep)
+	assert.Equal(t, "missing_access", current.BlockerKey)
+	assert.Equal(t, 2, current.BlockerStreak)
 }
 
 func TestDecodeInputReturnsDefensiveFeedbackCopy(t *testing.T) {
