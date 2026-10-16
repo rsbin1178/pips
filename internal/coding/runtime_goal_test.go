@@ -44,6 +44,18 @@ type goalTestModel struct {
 	// auditorEvidence is the ledger the auditor's last verdict request carried,
 	// so a test can assert what the audit was actually asked to judge.
 	auditorEvidence goalflow.Evidence
+	// assessments are the assessment requests this scripted model answered. They
+	// are recorded here rather than in the work script, because this model answers
+	// them itself; a test reads them to inspect the request body.
+	assessments []ai.Request
+}
+
+// AssessmentRequests returns the assessment requests this model answered.
+func (m *goalTestModel) AssessmentRequests() []ai.Request {
+	m.muGoal.Lock()
+	defer m.muGoal.Unlock()
+
+	return append([]ai.Request(nil), m.assessments...)
 }
 
 // AuditorEvidence returns the ledger the auditor's last verdict request carried.
@@ -83,6 +95,30 @@ func newGoalTestModel(work ...*ai.Response) *goalTestModel {
 	return &goalTestModel{runtimeModel: newRuntimeModel(work...)}
 }
 
+// goalAssessmentBody is the assessment's request body, which Phase AC made the
+// reference's {objective, transcript, plan}.
+type goalAssessmentBody struct {
+	Objective  string `json:"objective"`
+	Transcript string `json:"transcript"`
+	Plan       string `json:"plan"`
+}
+
+// lastAssessmentBody decodes the body of the newest assessment request.
+func lastAssessmentBody(t *testing.T, requests []ai.Request) goalAssessmentBody {
+	t.Helper()
+
+	require.NotEmpty(t, requests)
+
+	_, conversation, err := requests[len(requests)-1].Messages.SplitSystem()
+	require.NoError(t, err)
+	require.Len(t, conversation, 1)
+
+	body := goalAssessmentBody{}
+	require.NoError(t, json.Unmarshal([]byte(runtimeMessageText(conversation[0])), &body))
+
+	return body
+}
+
 // goalRefutingVerdict is a scripted auditor rejection: the recorded ledger does
 // not prove the condition, so the loop continues with the auditor's own gap.
 const goalRefutingVerdict = `{"verified":false,"reason":"the recorded evidence does not prove the condition","gaps":["record a check that proves the condition"],"references":[]}`
@@ -96,6 +132,7 @@ func (m *goalTestModel) Generate(ctx context.Context, request ai.Request) (*ai.R
 	if request.ResponseFormat != nil && request.ResponseFormat.Name == "goal_evaluation" {
 		m.muGoal.Lock()
 		m.evaluated++
+		m.assessments = append(m.assessments, request)
 		failure := m.evaluationError
 		decision := "candidate_complete"
 		if len(m.decisions) > 0 {
@@ -258,6 +295,51 @@ func TestRuntimeGoalDecisionRetryDoesNotReplayWork(t *testing.T) {
 	require.NotNil(t, after.LastAttempt)
 	assert.Equal(t, attemptID, after.LastAttempt.ID)
 	assert.Empty(t, reopenedModel.Requests())
+}
+
+// TestRuntimeGoalRetriedDecisionCarriesTheTranscript pins the Phase AC seam's
+// decisive property: a decision retried after an interruption rebuilds its request
+// from durable state, so a transcript carried there would be empty; the wrapper
+// reads the session instead, and the retried assessment still receives the
+// conversation the first attempt worked in. It also pins the same-process decision
+// — the one taken straight after the work turn — so the transcript is known to
+// carry that turn at the instant it is read, not merely after a reload.
+func TestRuntimeGoalRetriedDecisionCarriesTheTranscript(t *testing.T) {
+	t.Parallel()
+
+	base := t.TempDir()
+	model := newGoalTestModel(runtimeToolResponse("proof-read", "read", `{"path":"proof.txt"}`), runtimeTextResponse("candidate"))
+	model.evaluationError = true
+	runtime := openTestRuntimeAt(t, base, SessionTarget{}, model)
+	require.NoError(t, os.WriteFile(filepath.Join(runtime.workspace.Root(), "proof.txt"), []byte("proof\n"), 0o600))
+	_, err := collectRuntimeResult(runtime.StartGoal(t.Context(), GoalRequest{Condition: "inspect proof.txt"}))
+	require.Error(t, err)
+	require.Equal(t, GoalInterrupted, runtime.GoalSnapshot().Status)
+
+	// The same-process decision — the one taken straight after the work turn,
+	// before the interruption — already reads that turn, which is the property the
+	// retry below preserves.
+	require.Len(t, model.AssessmentRequests(), 1, "one assessment ran before the interruption")
+	fresh := lastAssessmentBody(t, model.AssessmentRequests())
+	assert.Contains(t, fresh.Transcript, "[user] inspect proof.txt")
+	assert.Contains(t, fresh.Transcript, "[tool]", "the decision reads the tool result of the turn it just ran")
+	assert.True(t, strings.HasSuffix(fresh.Transcript, "[assistant] candidate"),
+		"the turn's own answer is the newest row, so the transcript is read at the decision instant: %q", fresh.Transcript)
+
+	sessionID := runtime.Snapshot().SessionID
+	require.NoError(t, runtime.Close(t.Context()))
+
+	reopened := newGoalTestModel()
+	restored := openTestRuntimeAt(t, base, SessionTarget{ID: sessionID}, reopened)
+	_, err = collectRuntimeResult(restored.ResumeGoal(t.Context()))
+	require.NoError(t, err)
+	require.True(t, restored.GoalSnapshot().Completed())
+
+	body := lastAssessmentBody(t, reopened.AssessmentRequests())
+	assert.Equal(t, "inspect proof.txt", body.Objective)
+	assert.Equal(t, "(no plan available)", body.Plan)
+	assert.Contains(t, body.Transcript, "[user] inspect proof.txt")
+	assert.Contains(t, body.Transcript, "[tool]", "the retried assessment reads the work the first attempt recorded")
 }
 
 // TestRuntimeGoalTakesAVerifiedVerdictAsCompletion pins Phase AA's inverted

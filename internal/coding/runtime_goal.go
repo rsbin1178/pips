@@ -324,6 +324,7 @@ func (r *Runtime) driveGoal(
 		Invalidated: func() bool { c.mu.Lock(); defer c.mu.Unlock(); return c.ledger.Invalidated },
 		Phase:       func(phase string) error { return r.publishGoal(ctx, emitter, GoalStatus(phase)) },
 		Declared:    c.consumeDeclaration,
+		Transcript:  r.goalAssessmentInput,
 	}
 	worker := &runtimeGoalWorker{runtime: r, operation: operation, emitter: emitter}
 	handlers := continuation.Handlers{

@@ -90,8 +90,15 @@ type Setup struct {
 
 // Evaluation is the immutable input to an Evaluator.
 type Evaluation struct {
-	Condition  string
-	Evidence   ai.JSON
+	Condition string
+	Evidence  ai.JSON
+	// Transcript is the bounded rendering of the session conversation the
+	// assessment reads. It is untrusted data, and it is empty when the embedder
+	// supplies none.
+	Transcript string
+	// Plan is the Goal's plan text as the assessment receives it. A Goal with no
+	// plan artifact carries a placeholder rather than nothing.
+	Plan       string
 	Attempt    int
 	Activation *continuation.Activation
 	Limits     continuation.Limits
