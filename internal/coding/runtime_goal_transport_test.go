@@ -69,7 +69,8 @@ func (m *goalTransportModel) assess(request ai.Request, system string) (*ai.Resp
 	m.assessmentSystems = append(m.assessmentSystems, system)
 	m.assessmentCaps = append(m.assessmentCaps, cloneTokenCap(request.MaxTokens))
 
-	answer := `{"outcome":"continue","reason":"the evidence does not prove the condition"}`
+	answer := `{"decision":"continue","evidence":"the evidence does not prove the condition",` +
+		`"next_step":"collect the missing evidence","blocker_key":""}`
 	if len(m.assessments) > 0 {
 		answer, m.assessments = m.assessments[0], m.assessments[1:]
 	}
@@ -225,7 +226,8 @@ func TestRuntimeGoalCompletesOnAPortableSchemaModel(t *testing.T) {
 
 	model := newGoalTransportModel()
 	scriptGoalTransportSegments(model, 1)
-	model.assessments = []string{`{"outcome":"complete","reason":"the recorded read proves the condition"}`}
+	model.assessments = []string{`{"decision":"candidate_complete","evidence":"the recorded read proves the condition",` +
+		`"next_step":"verify the candidate","blocker_key":""}`}
 	runtime := openTestRuntime(t, model)
 	writeGoalTransportProof(t, runtime)
 
@@ -241,7 +243,7 @@ func TestRuntimeGoalCompletesOnAPortableSchemaModel(t *testing.T) {
 	require.Equal(t, []bool{false}, assessmentFormats)
 	require.Equal(t, []bool{false}, verdictFormats)
 	assert.Contains(t, assessmentSystems[0], "Native structured output is unavailable.")
-	assert.Contains(t, assessmentSystems[0], `"outcome"`)
+	assert.Contains(t, assessmentSystems[0], `"decision"`)
 	assert.Contains(t, verdictSystems[0], "Native structured output is unavailable.")
 	assert.Contains(t, verdictSystems[0], `"verified"`)
 
@@ -263,7 +265,8 @@ func TestRuntimeGoalSendsTheNativeSchemaOnADeclaredModel(t *testing.T) {
 	model := newGoalTransportModel()
 	scriptGoalTransportSegments(model, 1)
 	model.structuredOutput = true
-	model.assessments = []string{`{"outcome":"complete","reason":"the recorded read proves the condition"}`}
+	model.assessments = []string{`{"decision":"candidate_complete","evidence":"the recorded read proves the condition",` +
+		`"next_step":"verify the candidate","blocker_key":""}`}
 	runtime := openTestRuntime(t, model)
 	writeGoalTransportProof(t, runtime)
 
@@ -294,8 +297,10 @@ func TestRuntimeGoalCarriesAnUnverifiedPortableVerdictsGapsForward(t *testing.T)
 	model := newGoalTransportModel()
 	scriptGoalTransportSegments(model, 2)
 	model.assessments = []string{
-		`{"outcome":"complete","reason":"the first candidate looks done"}`,
-		`{"outcome":"complete","reason":"the second candidate looks done"}`,
+		`{"decision":"candidate_complete","evidence":"the first candidate looks done",` +
+			`"next_step":"verify the candidate","blocker_key":""}`,
+		`{"decision":"candidate_complete","evidence":"the second candidate looks done",` +
+			`"next_step":"verify the candidate","blocker_key":""}`,
 	}
 	model.verdicts = []string{
 		`{"verified":false,"reason":"the recorded read does not cover the migration","gaps":["` + gap + `"],"references":[]}`,
@@ -330,8 +335,10 @@ func TestRuntimeGoalTreatsAMalformedPortableVerdictAsNotAchieved(t *testing.T) {
 	model := newGoalTransportModel()
 	scriptGoalTransportSegments(model, 2)
 	model.assessments = []string{
-		`{"outcome":"complete","reason":"the first candidate looks done"}`,
-		`{"outcome":"complete","reason":"the second candidate looks done"}`,
+		`{"decision":"candidate_complete","evidence":"the first candidate looks done",` +
+			`"next_step":"verify the candidate","blocker_key":""}`,
+		`{"decision":"candidate_complete","evidence":"the second candidate looks done",` +
+			`"next_step":"verify the candidate","blocker_key":""}`,
 	}
 	model.verdicts = []string{"not the required verdict object"}
 	runtime := openTestRuntime(t, model)
@@ -399,8 +406,10 @@ func TestRuntimeGoalTreatsAContractBreakingPortableVerdictAsNotAchieved(t *testi
 			model := newGoalTransportModel()
 			scriptGoalTransportSegments(model, 2)
 			model.assessments = []string{
-				`{"outcome":"complete","reason":"the first candidate looks done"}`,
-				`{"outcome":"complete","reason":"the second candidate looks done"}`,
+				`{"decision":"candidate_complete","evidence":"the first candidate looks done",` +
+					`"next_step":"verify the candidate","blocker_key":""}`,
+				`{"decision":"candidate_complete","evidence":"the second candidate looks done",` +
+					`"next_step":"verify the candidate","blocker_key":""}`,
 			}
 			model.verdicts = []string{test.answer}
 			runtime := openTestRuntime(t, model)

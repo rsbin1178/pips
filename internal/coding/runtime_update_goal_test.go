@@ -37,7 +37,7 @@ func TestRuntimeUpdateGoalEchoesAProgressNote(t *testing.T) {
 		runtimeToolResponse("proof-read", "read", `{"path":"proof.txt"}`),
 		runtimeTextResponse("candidate complete"),
 	)
-	model.outcomes = []string{"complete"}
+	model.decisions = []string{"candidate_complete"}
 	runtime := openTestRuntime(t, model)
 	require.NoError(t, os.WriteFile(filepath.Join(runtime.workspace.Root(), "proof.txt"), []byte("actual implementation\n"), 0o600))
 
@@ -293,7 +293,7 @@ func TestRuntimeUpdateGoalRejectedDeclarationReturnsTheAuditorsGaps(t *testing.T
 		runtimeTextResponse("candidate complete"),
 	)
 	model.verifierVerdicts = []string{goalRefutingVerdict}
-	model.outcomes = []string{"complete"}
+	model.decisions = []string{"candidate_complete"}
 	runtime := openTestRuntime(t, model)
 	require.NoError(t, os.WriteFile(filepath.Join(runtime.workspace.Root(), "proof.txt"), []byte("actual implementation\n"), 0o600))
 
@@ -335,7 +335,7 @@ func TestRuntimeUpdateGoalDeclarationIsConsumedOnce(t *testing.T) {
 	// decision point takes the ordinary assessment; the third attempt's audit
 	// takes the default cited verdict.
 	model.verifierVerdicts = []string{goalRefutingVerdict}
-	model.outcomes = []string{"continue", "complete"}
+	model.decisions = []string{"continue", "candidate_complete"}
 	runtime := openTestRuntime(t, model)
 	require.NoError(t, os.WriteFile(filepath.Join(runtime.workspace.Root(), "proof.txt"), []byte("actual implementation\n"), 0o600))
 
@@ -390,7 +390,7 @@ func TestRuntimeUpdateGoalRefusesANonActiveGoal(t *testing.T) {
 			runtimeToolResponse("proof-read", "read", `{"path":"proof.txt"}`),
 			runtimeTextResponse("candidate complete"),
 		)
-		model.outcomes = []string{"complete"}
+		model.decisions = []string{"candidate_complete"}
 		runtime := openTestRuntime(t, model)
 		require.NoError(t, os.WriteFile(filepath.Join(runtime.workspace.Root(), "proof.txt"), []byte("actual implementation\n"), 0o600))
 		_, err := collectRuntimeResult(runtime.StartGoal(t.Context(), GoalRequest{Condition: "inspect proof.txt"}))

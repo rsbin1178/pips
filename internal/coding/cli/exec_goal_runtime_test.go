@@ -165,12 +165,17 @@ func (m *cliGoalModel) Generate(_ context.Context, request ai.Request) (*ai.Resp
 		m.assessmentFormats = append(m.assessmentFormats, request.ResponseFormat != nil)
 		m.assessmentCaps = append(m.assessmentCaps, cloneCLITokenCap(request.MaxTokens))
 
-		outcome := "continue"
+		// Phase AB's assessment document: the reference's four fields.
+		decision := "continue"
 		if m.evaluations > 1 {
-			outcome = "complete"
+			decision = "candidate_complete"
 		}
 
-		return cliGoalResponse(ai.AssistantText(fmt.Sprintf(`{"outcome":%q,"reason":"Inspect the actual recorded file evidence."}`, outcome))), nil
+		return cliGoalResponse(ai.AssistantText(fmt.Sprintf(
+			`{"decision":%q,"evidence":"Inspect the actual recorded file evidence.",`+
+				`"next_step":"inspect the recorded file evidence","blocker_key":""}`,
+			decision,
+		))), nil
 	case strings.Contains(system, "independent Coding Goal evidence auditor"):
 		return m.audit(request)
 	default:

@@ -279,6 +279,30 @@ func TestVerifierTakesAVerifiedVerdictWithoutReferences(t *testing.T) {
 	assert.Empty(t, verdict.References)
 }
 
+// TestVerifierAcceptsAVerdictWithAnUnknownField pins the other direction of
+// Phase AB's strict decode. The reference's evaluator struct denies unknown
+// fields while its skeptic's raw struct defaults them, so only the assessment's
+// document is strict; a verdict that carries a field pips does not declare still
+// parses.
+func TestVerifierAcceptsAVerdictWithAnUnknownField(t *testing.T) {
+	t.Parallel()
+
+	verifier := newAuditVerifier(t, `{
+		"verified": true,
+		"reason": "I read the implementation and it holds",
+		"gaps": [],
+		"references": [],
+		"confidence": "high"
+	}`, ai.Usage{InputTokens: 4, OutputTokens: 1})
+
+	verdict, _, err := verifier.Verify(
+		t.Context(), "the migration ran", auditEvidence(), continuation.Limits{}, continuation.Accounting{},
+	)
+	require.NoError(t, err)
+	require.True(t, verdict.Verified, verdict.Reason)
+	assert.Equal(t, "I read the implementation and it holds", verdict.Reason)
+}
+
 // TestVerifierHandsATruncatedReadToTheAudit pins the read loop's other change in
 // Phase AA: a read whose own envelope reports truncation is an ordinary tool
 // result the auditor judges, not an automatic refusal. The auditor's read carries

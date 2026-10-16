@@ -355,6 +355,71 @@ func TestGenerateTypedAdaptiveNativeTransportStillSendsResponseFormat(t *testing
 	assert.Equal(t, "be terse", ai.JoinSystemText(system))
 }
 
+// TestGenerateTypedAdaptiveRejectsUnknownFieldsOnBothTransports pins the
+// strict-decode option Phase AB adds for the Goal assessment: the reference's
+// evaluator struct denies unknown fields, so its answer must too, whichever
+// transport carries it.
+func TestGenerateTypedAdaptiveRejectsUnknownFieldsOnBothTransports(t *testing.T) {
+	t.Parallel()
+
+	type Weather struct {
+		City string `json:"city"`
+	}
+
+	for _, structured := range []bool{false, true} {
+		model := &staticModel{
+			structured: structured,
+			resp:       &ai.Response{Message: ai.AssistantText(`{"city":"Paris","humidity":80}`)},
+		}
+
+		got, _, err := ai.GenerateTypedAdaptive[Weather](t.Context(), model, ai.Request{
+			Messages: ai.Messages{ai.UserText("weather in paris?")},
+		}, ai.WithDisallowUnknownFields())
+		require.ErrorIs(t, err, ai.ErrMalformedStructuredOutput)
+		assert.Contains(t, err.Error(), "unknown field")
+		assert.Equal(t, "Paris", got.City, "the fields before the unknown one are decoded as usual")
+	}
+}
+
+// TestGenerateTypedAdaptiveDefaultsToLenientDecode pins the other direction: the
+// reference's skeptic defaults an unknown field rather than denying it, so a call
+// that does not ask for the strict option keeps encoding/json's lenient rule.
+func TestGenerateTypedAdaptiveDefaultsToLenientDecode(t *testing.T) {
+	t.Parallel()
+
+	type Weather struct {
+		City string `json:"city"`
+	}
+
+	model := &staticModel{resp: &ai.Response{Message: ai.AssistantText(`{"city":"Paris","humidity":80}`)}}
+
+	got, _, err := ai.GenerateTypedAdaptive[Weather](t.Context(), model, ai.Request{
+		Messages: ai.Messages{ai.UserText("weather in paris?")},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, Weather{City: "Paris"}, got)
+}
+
+// TestGenerateTypedAdaptiveRejectsTrailingJSONOnEitherDecode pins that the strict
+// option adds the unknown-field rule without trading away the lenient path's
+// trailing-content rule.
+func TestGenerateTypedAdaptiveRejectsTrailingJSONOnEitherDecode(t *testing.T) {
+	t.Parallel()
+
+	type Weather struct {
+		City string `json:"city"`
+	}
+
+	for _, options := range [][]ai.StructuredOption{nil, {ai.WithDisallowUnknownFields()}} {
+		model := &staticModel{resp: &ai.Response{Message: ai.AssistantText(`{"city":"Paris"} {"city":"Lyon"}`)}}
+
+		_, _, err := ai.GenerateTypedAdaptive[Weather](t.Context(), model, ai.Request{
+			Messages: ai.Messages{ai.UserText("weather in paris?")},
+		}, options...)
+		require.ErrorIs(t, err, ai.ErrMalformedStructuredOutput)
+	}
+}
+
 func TestGenerateTypedAdaptiveClassifiesAMalformedAnswerOnBothTransports(t *testing.T) {
 	t.Parallel()
 
