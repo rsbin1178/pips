@@ -36,9 +36,9 @@ go doc -all github.com/rsbin1178/pips/ai/observability
 | 流式响应 | `Stream`、`StreamEvent`、`StreamEventType`、`Collect` | [`stream.go`](../../ai/stream.go) |
 | Tool | `Tool`、`ToolChoice`、`ToolChoiceMode` | [`tool.go`](../../ai/tool.go) |
 | JSON Schema | `Schema`、`ParseSchema`、`SchemaFor` | [`tool.go`](../../ai/tool.go)、[`structured.go`](../../ai/structured.go) |
-| 类型化输出 | `ResponseFormat`、`GenerateTyped` | [`structured.go`](../../ai/structured.go) |
+| 类型化输出 | `ResponseFormat`、`GenerateTyped`、`GenerateTypedAdaptive`、`PortableSchemaInstructions` | [`structured.go`](../../ai/structured.go) |
 | 推理配置 | `ReasoningConfig`、`ReasoningMode`、`ReasoningEffort` | [`reasoning.go`](../../ai/reasoning.go) |
-| 错误分类 | 五个 `Err*` sentinel、`Error`、`NewError`、`ClassifyStatus`、`IsRetryable` | [`errors.go`](../../ai/errors.go) |
+| 错误分类 | `Err*` sentinel、`Error`、`NewError`、`ClassifyStatus`、`IsRetryable` | [`errors.go`](../../ai/errors.go) |
 | 中间件组合 | `Middleware`、`Chain` | [`middleware.go`](../../ai/middleware.go) |
 | 请求扩展预检 | `ValidateRequestBodyExtension` | [`request_extension.go`](../../ai/request_extension.go) |
 

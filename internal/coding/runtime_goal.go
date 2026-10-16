@@ -349,9 +349,6 @@ func (r *Runtime) createGoal(ctx context.Context, request GoalRequest) (continua
 			return continuation.Execution{}, ErrGoalExists
 		}
 	}
-	if !r.model.Capabilities().StructuredOutput {
-		return continuation.Execution{}, fmt.Errorf("%w: Goal requires structured output", ErrRuntimeInvalid)
-	}
 	state, input, err := goalflow.Prepare(request.Condition)
 	if err != nil {
 		return continuation.Execution{}, err

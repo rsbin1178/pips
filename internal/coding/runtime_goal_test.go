@@ -196,15 +196,8 @@ func TestRuntimeGoalDecisionRetryDoesNotReplayWork(t *testing.T) {
 	assert.Empty(t, reopenedModel.Requests())
 }
 
-func TestRuntimeGoalRejectsUnsupportedAndUnprovenCompletion(t *testing.T) {
+func TestRuntimeGoalRejectsUnprovenCompletion(t *testing.T) {
 	t.Parallel()
-	t.Run("unsupported", func(t *testing.T) {
-		t.Parallel()
-		runtime := openTestRuntime(t, newRuntimeModel(runtimeTextResponse("unused")))
-		_, err := collectRuntimeResult(runtime.StartGoal(t.Context(), GoalRequest{Condition: "done"}))
-		require.Error(t, err)
-		assert.Empty(t, runtime.GoalSnapshot().ID)
-	})
 	for _, name := range []string{"self report", "empty verification", "failed evidence", "truncated evidence"} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()

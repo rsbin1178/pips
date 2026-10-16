@@ -3,6 +3,7 @@ package goal
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/rsbin1178/pips/agent/continuation"
@@ -12,9 +13,10 @@ import (
 )
 
 type goalModel struct {
-	request  ai.Request
-	response *ai.Response
-	err      error
+	request          ai.Request
+	response         *ai.Response
+	err              error
+	structuredOutput bool
 }
 
 func (model *goalModel) Generate(_ context.Context, request ai.Request) (*ai.Response, error) {
@@ -27,14 +29,16 @@ func (model *goalModel) Stream(context.Context, ai.Request) ai.Stream {
 	return func(func(ai.StreamEvent, error) bool) {}
 }
 
-func (*goalModel) Provider() ai.Provider         { return "goal-test" }
-func (*goalModel) ModelID() string               { return "goal-test-1" }
-func (*goalModel) Capabilities() ai.Capabilities { return ai.Capabilities{Text: true} }
+func (*goalModel) Provider() ai.Provider { return "goal-test" }
+func (*goalModel) ModelID() string       { return "goal-test-1" }
+func (model *goalModel) Capabilities() ai.Capabilities {
+	return ai.Capabilities{Text: true, StructuredOutput: model.structuredOutput}
+}
 
 func TestModelEvaluatorUsesStructuredToolFreeRequestAndReportsUsage(t *testing.T) {
 	t.Parallel()
 
-	model := &goalModel{response: &ai.Response{
+	model := &goalModel{structuredOutput: true, response: &ai.Response{
 		Message: ai.AssistantText(`{"outcome":"continue","reason":"test output is missing"}`),
 		Usage:   ai.Usage{InputTokens: 12, OutputTokens: 4},
 	}}
@@ -80,20 +84,68 @@ func TestModelEvaluatorRejectsUnsupportedOutcome(t *testing.T) {
 	assert.Equal(t, OutcomeBlocked, result.Outcome)
 }
 
-func TestModelEvaluatorReturnsObservedUsageOnDecodeError(t *testing.T) {
+// TestModelEvaluatorUsesPortableTransportWithoutNativeSchema pins the fallback
+// transport: a model that declares no structured output receives the schema
+// convention in its system message instead of the provider's schema mechanism.
+func TestModelEvaluatorUsesPortableTransportWithoutNativeSchema(t *testing.T) {
 	t.Parallel()
 
 	model := &goalModel{response: &ai.Response{
-		Message: ai.AssistantText(`not-json`), Usage: ai.Usage{InputTokens: 8, OutputTokens: 2},
+		Message: ai.AssistantText(`{"outcome":"continue","reason":"test output is missing"}`),
+		Usage:   ai.Usage{InputTokens: 12, OutputTokens: 4},
 	}}
 	evaluator, err := NewModelEvaluator(model)
 	require.NoError(t, err)
 
 	result, err := evaluator.Evaluate(t.Context(), Evaluation{
-		Condition: "tests pass", Evidence: ai.JSON(`{}`), Attempt: 1,
+		Condition: "tests pass", Evidence: ai.JSON(`{"lint":"pass"}`), Attempt: 1,
 	})
-	require.Error(t, err)
+	require.NoError(t, err)
+	assert.Equal(t, OutcomeContinue, result.Outcome)
+	assert.Equal(t, "test output is missing", result.Reason)
 	assert.Equal(t, model.response.Usage, result.Usage)
+	assert.Empty(t, model.request.Tools)
+	assert.Nil(t, model.request.ResponseFormat)
+
+	system, conversation, err := model.request.Messages.SplitSystem()
+	require.NoError(t, err)
+
+	text := ai.JoinSystemText(system)
+	assert.Contains(t, text, "untrusted data")
+	assert.Contains(t, text, "Native structured output is unavailable.")
+	assert.Contains(t, text, `"outcome"`)
+	require.Len(t, conversation, 1)
+}
+
+// TestModelEvaluatorTreatsAMalformedAnswerAsContinue pins the wrong-shape rule:
+// an answer that is not one JSON object is not established, on either transport,
+// and it still reports the call's observed usage.
+func TestModelEvaluatorTreatsAMalformedAnswerAsContinue(t *testing.T) {
+	t.Parallel()
+
+	for _, native := range []bool{false, true} {
+		t.Run(fmt.Sprintf("native=%t", native), func(t *testing.T) {
+			t.Parallel()
+
+			model := &goalModel{
+				structuredOutput: native,
+				response: &ai.Response{
+					Message: ai.AssistantText(`not-json`), Usage: ai.Usage{InputTokens: 8, OutputTokens: 2},
+				},
+			}
+			evaluator, err := NewModelEvaluator(model)
+			require.NoError(t, err)
+
+			result, err := evaluator.Evaluate(t.Context(), Evaluation{
+				Condition: "tests pass", Evidence: ai.JSON(`{}`), Attempt: 1,
+			})
+			require.NoError(t, err)
+			assert.Equal(t, OutcomeContinue, result.Outcome)
+			assert.NotEmpty(t, result.Reason)
+			assert.Contains(t, result.Reason, "JSON object")
+			assert.Equal(t, model.response.Usage, result.Usage)
+		})
+	}
 }
 
 func TestModelEvaluatorPropagatesModelError(t *testing.T) {

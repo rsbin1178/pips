@@ -3,6 +3,7 @@ package goal
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/rsbin1178/pips/agent/continuation"
@@ -112,7 +113,7 @@ func (evaluator *ModelEvaluator) Evaluate(
 		return EvaluationResult{}, err
 	}
 
-	output, response, err := ai.GenerateTyped[modelEvaluationOutput](ctx, evaluator.model, ai.Request{
+	output, response, err := ai.GenerateTypedAdaptive[modelEvaluationOutput](ctx, evaluator.model, ai.Request{
 		Messages:    ai.Messages{ai.SystemText(modelEvaluatorSystem), ai.UserText(string(payload))},
 		Temperature: ai.Ptr(0.0), MaxTokens: &maxTokens,
 		ResponseFormat: &ai.ResponseFormat{
@@ -120,6 +121,21 @@ func (evaluator *ModelEvaluator) Evaluate(
 			Schema: schema, Strict: true,
 		},
 	})
+	// An answer that is not one JSON object is an answer of the wrong shape, not
+	// a failed assessment: the condition is simply not established, so the Goal
+	// continues with the reason as its gap.
+	if errors.Is(err, ai.ErrMalformedStructuredOutput) {
+		result := EvaluationResult{
+			Outcome: OutcomeContinue,
+			Reason:  "The assessment answer was not the required JSON object, so the condition is not established",
+		}
+		if response != nil {
+			result.Usage = response.Usage
+		}
+
+		return result, nil
+	}
+
 	if err != nil {
 		result := EvaluationResult{}
 		if response != nil {
