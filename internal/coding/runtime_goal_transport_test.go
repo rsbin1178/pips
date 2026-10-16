@@ -35,6 +35,9 @@ type goalTransportModel struct {
 	verdictFormats    []bool
 	assessmentSystems []string
 	verdictSystems    []string
+	assessmentCaps    []*int
+	readCaps          []*int
+	verdictCaps       []*int
 }
 
 func newGoalTransportModel(responses ...*ai.Response) *goalTransportModel {
@@ -64,6 +67,7 @@ func (m *goalTransportModel) assess(request ai.Request, system string) (*ai.Resp
 
 	m.assessmentFormats = append(m.assessmentFormats, request.ResponseFormat != nil)
 	m.assessmentSystems = append(m.assessmentSystems, system)
+	m.assessmentCaps = append(m.assessmentCaps, cloneTokenCap(request.MaxTokens))
 
 	answer := `{"outcome":"continue","reason":"the evidence does not prove the condition"}`
 	if len(m.assessments) > 0 {
@@ -77,6 +81,10 @@ func (m *goalTransportModel) audit(request ai.Request, system string) (*ai.Respo
 	// A read round carries the bounded read-only catalog; the verdict call has no
 	// tools at all, on either transport.
 	if len(request.Tools) > 0 {
+		m.mu.Lock()
+		m.readCaps = append(m.readCaps, cloneTokenCap(request.MaxTokens))
+		m.mu.Unlock()
+
 		for _, message := range request.Messages {
 			if _, ok := message.(ai.ToolMessage); ok {
 				return runtimeTextResponse("evidence read"), nil
@@ -91,6 +99,7 @@ func (m *goalTransportModel) audit(request ai.Request, system string) (*ai.Respo
 
 	m.verdictFormats = append(m.verdictFormats, request.ResponseFormat != nil)
 	m.verdictSystems = append(m.verdictSystems, system)
+	m.verdictCaps = append(m.verdictCaps, cloneTokenCap(request.MaxTokens))
 
 	if len(m.verdicts) > 0 {
 		answer := m.verdicts[0]
@@ -126,6 +135,25 @@ func (m *goalTransportModel) callFormats() ([]bool, []bool, []string, []string) 
 
 	return slices.Clone(m.assessmentFormats), slices.Clone(m.verdictFormats),
 		slices.Clone(m.assessmentSystems), slices.Clone(m.verdictSystems)
+}
+
+// callCaps reports, per role, the output cap each call carried, nil when it
+// carried none.
+func (m *goalTransportModel) callCaps() ([]*int, []*int, []*int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return slices.Clone(m.assessmentCaps), slices.Clone(m.readCaps), slices.Clone(m.verdictCaps)
+}
+
+// cloneTokenCap copies a request's output cap so the record cannot alias a
+// caller-owned pointer.
+func cloneTokenCap(maxTokens *int) *int {
+	if maxTokens == nil {
+		return nil
+	}
+
+	return ai.Ptr(*maxTokens)
 }
 
 // verifiedGoalTransportVerdict is the default audit answer: it cites the recorded
@@ -216,6 +244,14 @@ func TestRuntimeGoalCompletesOnAPortableSchemaModel(t *testing.T) {
 	assert.Contains(t, assessmentSystems[0], `"outcome"`)
 	assert.Contains(t, verdictSystems[0], "Native structured output is unavailable.")
 	assert.Contains(t, verdictSystems[0], `"verified"`)
+
+	// No role call carried an output cap: the Goal's budget bounds the run, not
+	// one call, so the provider's own default applies. The auditor's read rounds
+	// are pinned separately because they carry tools and the verdict does not.
+	assessmentCaps, readCaps, verdictCaps := model.callCaps()
+	require.Equal(t, []*int{nil}, assessmentCaps)
+	require.Equal(t, []*int{nil, nil}, readCaps)
+	require.Equal(t, []*int{nil}, verdictCaps)
 }
 
 // TestRuntimeGoalSendsTheNativeSchemaOnADeclaredModel is the no-regression half:
@@ -239,6 +275,13 @@ func TestRuntimeGoalSendsTheNativeSchemaOnADeclaredModel(t *testing.T) {
 	require.Equal(t, []bool{true}, assessmentFormats)
 	require.Equal(t, []bool{true}, verdictFormats)
 	assert.NotContains(t, assessmentSystems[0], "Native structured output is unavailable.")
+
+	// The declared transport carries no cap either, on the read rounds or the
+	// verdict.
+	assessmentCaps, readCaps, verdictCaps := model.callCaps()
+	require.Equal(t, []*int{nil}, assessmentCaps)
+	require.Equal(t, []*int{nil, nil}, readCaps)
+	require.Equal(t, []*int{nil}, verdictCaps)
 }
 
 // TestRuntimeGoalCarriesAnUnverifiedPortableVerdictsGapsForward pins the "not

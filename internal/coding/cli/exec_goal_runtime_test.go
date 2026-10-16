@@ -60,6 +60,12 @@ func TestExecGoalUsesRealRuntimeAndReadOnlyVerification(t *testing.T) {
 			assert.Equal(t, []bool{true, true}, model.assessmentFormats)
 			assert.Equal(t, []bool{true}, model.verdictFormats)
 
+			// No role call carried an output cap: the Goal's budget bounds the
+			// run, not one call, so the provider's own default applies.
+			assert.Equal(t, []*int{nil, nil}, model.assessmentCaps)
+			assert.Equal(t, []*int{nil, nil}, model.readCaps)
+			assert.Equal(t, []*int{nil}, model.verdictCaps)
+
 			if mode == outputPlain {
 				assert.Equal(t, "The recorded file contains shipped proof.\n", stdout.String())
 				assert.Contains(t, stderr.String(), "goal completed")
@@ -121,6 +127,12 @@ func TestExecGoalCompletesOnAPortableSchemaModel(t *testing.T) {
 	// Neither role call used the provider's own schema mechanism.
 	assert.Equal(t, []bool{false, false}, model.assessmentFormats)
 	assert.Equal(t, []bool{false}, model.verdictFormats)
+
+	// No role call carried an output cap either, on the read rounds or the
+	// verdict.
+	assert.Equal(t, []*int{nil, nil}, model.assessmentCaps)
+	assert.Equal(t, []*int{nil, nil}, model.readCaps)
+	assert.Equal(t, []*int{nil}, model.verdictCaps)
 }
 
 type cliGoalModel struct {
@@ -133,6 +145,9 @@ type cliGoalModel struct {
 	verifierTools     []string
 	assessmentFormats []bool
 	verdictFormats    []bool
+	assessmentCaps    []*int
+	readCaps          []*int
+	verdictCaps       []*int
 }
 
 // Generate answers the Goal's assessment and audit calls. Each role is
@@ -148,6 +163,7 @@ func (m *cliGoalModel) Generate(_ context.Context, request ai.Request) (*ai.Resp
 	case strings.Contains(system, "completion evaluator"):
 		m.evaluations++
 		m.assessmentFormats = append(m.assessmentFormats, request.ResponseFormat != nil)
+		m.assessmentCaps = append(m.assessmentCaps, cloneCLITokenCap(request.MaxTokens))
 
 		outcome := "continue"
 		if m.evaluations > 1 {
@@ -168,6 +184,8 @@ func (m *cliGoalModel) Generate(_ context.Context, request ai.Request) (*ai.Resp
 func (m *cliGoalModel) audit(request ai.Request) (*ai.Response, error) {
 	if len(request.Tools) > 0 {
 		m.verificationReads++
+		m.readCaps = append(m.readCaps, cloneCLITokenCap(request.MaxTokens))
+
 		if m.verificationReads == 1 {
 			for _, tool := range request.Tools {
 				m.verifierTools = append(m.verifierTools, tool.Name)
@@ -186,6 +204,7 @@ func (m *cliGoalModel) audit(request ai.Request) (*ai.Response, error) {
 
 	m.verifications++
 	m.verdictFormats = append(m.verdictFormats, request.ResponseFormat != nil)
+	m.verdictCaps = append(m.verdictCaps, cloneCLITokenCap(request.MaxTokens))
 
 	encoded, err := json.Marshal(goalflow.Verdict{
 		Verified: true, Reason: "The recorded result and independent read agree.", Gaps: []string{},
@@ -196,6 +215,16 @@ func (m *cliGoalModel) audit(request ai.Request) (*ai.Response, error) {
 	}
 
 	return cliGoalResponse(ai.AssistantText(string(encoded))), nil
+}
+
+// cloneCLITokenCap copies a request's output cap so the record cannot alias a
+// caller-owned pointer.
+func cloneCLITokenCap(maxTokens *int) *int {
+	if maxTokens == nil {
+		return nil
+	}
+
+	return ai.Ptr(*maxTokens)
 }
 
 func cliGoalSystemText(request ai.Request) string {

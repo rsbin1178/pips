@@ -84,6 +84,77 @@ func TestModelEvaluatorRejectsUnsupportedOutcome(t *testing.T) {
 	assert.Equal(t, OutcomeBlocked, result.Outcome)
 }
 
+// TestModelEvaluatorSendsNoCapByDefault pins the removed default cap: an
+// evaluator without WithMaxTokens sends no MaxTokens at all, whatever the
+// evaluation's token limit says, because that limit bounds the run rather than
+// one call.
+func TestModelEvaluatorSendsNoCapByDefault(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		evaluation Evaluation
+	}{
+		{
+			name: "without a budget",
+			evaluation: Evaluation{
+				Condition: "tests pass", Evidence: ai.JSON(`{}`), Attempt: 1,
+			},
+		},
+		{
+			name: "with a budget",
+			evaluation: Evaluation{
+				Condition: "tests pass", Evidence: ai.JSON(`{}`), Attempt: 1,
+				Limits:     continuation.Limits{MaxTokens: 50},
+				Accounting: continuation.Accounting{Usage: ai.Usage{InputTokens: 30}},
+			},
+		},
+		{
+			name: "with a spent budget",
+			evaluation: Evaluation{
+				Condition: "tests pass", Evidence: ai.JSON(`{}`), Attempt: 1,
+				Limits:     continuation.Limits{MaxTokens: 50},
+				Accounting: continuation.Accounting{Usage: ai.Usage{InputTokens: 50}},
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			model := &goalModel{response: &ai.Response{
+				Message: ai.AssistantText(`{"outcome":"continue","reason":"test output is missing"}`),
+			}}
+			evaluator, err := NewModelEvaluator(model)
+			require.NoError(t, err)
+
+			_, err = evaluator.Evaluate(t.Context(), test.evaluation)
+			require.NoError(t, err)
+			assert.Nil(t, model.request.MaxTokens)
+		})
+	}
+}
+
+// TestModelEvaluatorRefusesASpentBudgetUnderAConfiguredCap pins that the opt-in
+// cap keeps its refusal: it cannot be narrowed to a non-positive budget.
+func TestModelEvaluatorRefusesASpentBudgetUnderAConfiguredCap(t *testing.T) {
+	t.Parallel()
+
+	model := &goalModel{}
+	evaluator, err := NewModelEvaluator(model, WithMaxTokens(100))
+	require.NoError(t, err)
+
+	_, err = evaluator.Evaluate(t.Context(), Evaluation{
+		Condition: "tests pass", Evidence: ai.JSON(`{}`), Attempt: 1,
+		Limits:     continuation.Limits{MaxTokens: 50},
+		Accounting: continuation.Accounting{Usage: ai.Usage{InputTokens: 50}},
+	})
+	require.ErrorIs(t, err, ErrInvalid)
+	assert.Contains(t, err.Error(), "no token budget remains for evaluation")
+	assert.Nil(t, model.request.Messages, "the refused call was never sent")
+}
+
 // TestModelEvaluatorUsesPortableTransportWithoutNativeSchema pins the fallback
 // transport: a model that declares no structured output receives the schema
 // convention in its system message instead of the provider's schema mechanism.

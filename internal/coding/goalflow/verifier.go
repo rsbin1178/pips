@@ -91,13 +91,12 @@ func (v *Verifier) Verify(
 	calls := 0
 
 	for range 4 {
-		maximum, budgetErr := responseBudget(limits, accounting, usage)
-		if budgetErr != nil {
-			return Verdict{}, usage, budgetErr
+		if err := checkBudget(limits, accounting, usage); err != nil {
+			return Verdict{}, usage, err
 		}
 
 		response, generateErr := v.model.Generate(ctx, ai.Request{
-			Messages: messages, Tools: declarations, MaxTokens: &maximum, Temperature: ai.Ptr(0.0),
+			Messages: messages, Tools: declarations, Temperature: ai.Ptr(0.0),
 		})
 		if response != nil {
 			usage.Add(response.Usage)
@@ -159,8 +158,7 @@ func (v *Verifier) Verify(
 		messages = append(messages, ai.ToolMessage{Parts: results})
 	}
 
-	maximum, err := responseBudget(limits, accounting, usage)
-	if err != nil {
+	if err := checkBudget(limits, accounting, usage); err != nil {
 		return Verdict{}, usage, err
 	}
 
@@ -172,7 +170,7 @@ func (v *Verifier) Verify(
 	messages = append(messages, ai.UserText("Return the strict evidence verdict now. Cite exact recorded IDs and read:<call-id> IDs. No more tools."))
 
 	verdict, response, err := ai.GenerateTypedAdaptive[Verdict](ctx, v.model, ai.Request{
-		Messages: messages, MaxTokens: &maximum, Temperature: ai.Ptr(0.0),
+		Messages: messages, Temperature: ai.Ptr(0.0),
 		ResponseFormat: &ai.ResponseFormat{Name: "coding_goal_verification", Schema: schema, Strict: true},
 	})
 	if response != nil {
@@ -307,19 +305,20 @@ func validateProof(verdict Verdict, evidence Evidence, reads map[string]Record) 
 	return nil
 }
 
-func responseBudget(limits continuation.Limits, accounting continuation.Accounting, usage ai.Usage) (int, error) {
-	maximum := 1024
-
+// checkBudget refuses an auditor call the Goal's token budget can no longer pay
+// for. The auditor's request carries no output cap of its own — the reference's
+// skeptic is a spawned subagent that runs with no token cap either — so a model
+// that reasons before answering is not cut off, and this guard is the only thing
+// the budget does to an individual call.
+func checkBudget(limits continuation.Limits, accounting continuation.Accounting, usage ai.Usage) error {
 	if limits.MaxTokens > 0 {
 		remaining := limits.MaxTokens - accounting.Tokens() - usage.InputTokens - usage.OutputTokens
 		if remaining <= 0 {
-			return 0, fmt.Errorf("%w: Goal check token budget exhausted", goal.ErrInvalid)
+			return fmt.Errorf("%w: Goal check token budget exhausted", goal.ErrInvalid)
 		}
-
-		maximum = min(maximum, remaining)
 	}
 
-	return maximum, nil
+	return nil
 }
 
 // PartsText extracts the textual channel from an actual tool result.
