@@ -30,6 +30,9 @@ type goalTransportModel struct {
 
 	assessments []string
 	verdicts    []string
+	// verdictCalls counts the panel's verdict calls, so a scripted verdict is
+	// applied to every skeptic of one verification round rather than to one call.
+	verdictCalls int
 
 	assessmentFormats []bool
 	verdictFormats    []bool
@@ -98,15 +101,15 @@ func (m *goalTransportModel) audit(request ai.Request, system string) (*ai.Respo
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	_, total := goalPanelPosition(system)
+
 	m.verdictFormats = append(m.verdictFormats, request.ResponseFormat != nil)
 	m.verdictSystems = append(m.verdictSystems, system)
 	m.verdictCaps = append(m.verdictCaps, cloneTokenCap(request.MaxTokens))
 
-	if len(m.verdicts) > 0 {
-		answer := m.verdicts[0]
-		m.verdicts = m.verdicts[1:]
-
-		return runtimeTextResponse(answer), nil
+	m.verdictCalls++
+	if round := (m.verdictCalls - 1) / max(total, 1); round < len(m.verdicts) {
+		return runtimeTextResponse(m.verdicts[round]), nil
 	}
 
 	return runtimeTextResponse(verifiedGoalTransportVerdict(request.Messages)), nil
@@ -241,7 +244,7 @@ func TestRuntimeGoalCompletesOnAPortableSchemaModel(t *testing.T) {
 
 	assessmentFormats, verdictFormats, assessmentSystems, verdictSystems := model.callFormats()
 	require.Equal(t, []bool{false}, assessmentFormats)
-	require.Equal(t, []bool{false}, verdictFormats)
+	require.Equal(t, panelBools(false, 1), verdictFormats)
 	assert.Contains(t, assessmentSystems[0], "Native structured output is unavailable.")
 	assert.Contains(t, assessmentSystems[0], `"decision"`)
 	assert.Contains(t, verdictSystems[0], "Native structured output is unavailable.")
@@ -252,8 +255,8 @@ func TestRuntimeGoalCompletesOnAPortableSchemaModel(t *testing.T) {
 	// are pinned separately because they carry tools and the verdict does not.
 	assessmentCaps, readCaps, verdictCaps := model.callCaps()
 	require.Equal(t, []*int{nil}, assessmentCaps)
-	require.Equal(t, []*int{nil, nil}, readCaps)
-	require.Equal(t, []*int{nil}, verdictCaps)
+	require.Equal(t, panelReadCaps(1), readCaps)
+	require.Equal(t, panelCaps(1), verdictCaps)
 }
 
 // TestRuntimeGoalSendsTheNativeSchemaOnADeclaredModel is the no-regression half:
@@ -276,15 +279,15 @@ func TestRuntimeGoalSendsTheNativeSchemaOnADeclaredModel(t *testing.T) {
 
 	assessmentFormats, verdictFormats, assessmentSystems, _ := model.callFormats()
 	require.Equal(t, []bool{true}, assessmentFormats)
-	require.Equal(t, []bool{true}, verdictFormats)
+	require.Equal(t, panelBools(true, 1), verdictFormats)
 	assert.NotContains(t, assessmentSystems[0], "Native structured output is unavailable.")
 
 	// The declared transport carries no cap either, on the read rounds or the
 	// verdict.
 	assessmentCaps, readCaps, verdictCaps := model.callCaps()
 	require.Equal(t, []*int{nil}, assessmentCaps)
-	require.Equal(t, []*int{nil, nil}, readCaps)
-	require.Equal(t, []*int{nil}, verdictCaps)
+	require.Equal(t, panelReadCaps(1), readCaps)
+	require.Equal(t, panelCaps(1), verdictCaps)
 }
 
 // TestRuntimeGoalCarriesAnUnverifiedPortableVerdictsGapsForward pins the "not
@@ -323,7 +326,7 @@ func TestRuntimeGoalCarriesAnUnverifiedPortableVerdictsGapsForward(t *testing.T)
 	assert.True(t, requestContainsText(requests[2], gap))
 
 	_, verdictFormats, _, _ := model.callFormats()
-	assert.Equal(t, []bool{false, false}, verdictFormats)
+	assert.Equal(t, panelBools(false, 2), verdictFormats)
 }
 
 // TestRuntimeGoalTreatsAMalformedPortableVerdictAsNotAchieved pins the wrong-shape
@@ -362,7 +365,7 @@ func TestRuntimeGoalTreatsAMalformedPortableVerdictAsNotAchieved(t *testing.T) {
 	assert.Equal(t, 2, state.Attempts)
 
 	_, verdictFormats, _, _ := model.callFormats()
-	assert.Equal(t, []bool{false, false}, verdictFormats)
+	assert.Equal(t, panelBools(false, 2), verdictFormats)
 }
 
 // TestRuntimeGoalTreatsAContractBreakingPortableVerdictAsNotAchieved pins the
@@ -493,6 +496,6 @@ func TestRuntimeUpdateGoalCompletionIsAuditedOverThePortableTransport(t *testing
 
 	assessmentFormats, verdictFormats, _, verdictSystems := model.callFormats()
 	assert.Empty(t, assessmentFormats, "the declaration replaced the assessment")
-	require.Equal(t, []bool{false}, verdictFormats)
+	require.Equal(t, panelBools(false, 1), verdictFormats)
 	assert.Contains(t, verdictSystems[0], "Native structured output is unavailable.")
 }

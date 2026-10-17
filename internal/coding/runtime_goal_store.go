@@ -51,6 +51,11 @@ type runtimeGoalControl struct {
 	// run that produced it; creating, resuming or clearing the Goal starts the
 	// count again, as does any declaration that is not a blocked one.
 	blockedStreak int
+	// resetVerification is set by an explicit resume from a paused Goal and
+	// consumed by the Controller at the next decision point, so the Goal's
+	// verification run count and gap-stall state start again. It is process-local,
+	// like the declaration and the blocked streak.
+	resetVerification bool
 }
 
 var (
@@ -220,19 +225,7 @@ func (c *runtimeGoalControl) project(execution continuation.Execution) (GoalStat
 	if err != nil {
 		return GoalState{}, err
 	}
-	status := GoalStatus(execution.Status)
-	if execution.Status == continuation.StatusFailed && execution.Reason == "Observed Goal token budget exhausted" {
-		status = GoalLimited
-	}
-	if status == "pause_requested" {
-		status = GoalPaused
-	}
-	if status == "cancel_requested" {
-		status = GoalCancelled
-	}
-	if execution.Status == continuation.StatusBlocked && execution.Block != nil && execution.Block.Kind == "no_progress" {
-		status = GoalPaused
-	}
+	status := projectedGoalStatus(execution)
 	failed := c.ledger.FailedUsage.InputTokens + c.ledger.FailedUsage.OutputTokens
 	reason := goalflow.Bound(execution.Reason, 4096)
 	if status == GoalPaused && c.blockedReason != "" {
@@ -248,6 +241,27 @@ func (c *runtimeGoalControl) project(execution continuation.Execution) (GoalStat
 		Evaluations: policy.Evaluations, Tokens: execution.Accounting.Tokens() + failed + c.ledger.ChildUsage.InputTokens + c.ledger.ChildUsage.OutputTokens, MaxTokens: execution.Limits.MaxTokens,
 		FailedCheckTokens: failed, Gaps: state.Gaps, References: state.References,
 	}, nil
+}
+
+// projectedGoalStatus maps the engine's status to the projection's. A verifier
+// infrastructure failure and a stall or run-cap block both pause the Goal; every
+// other block kind stays a block on a user action.
+func projectedGoalStatus(execution continuation.Execution) GoalStatus {
+	status := GoalStatus(execution.Status)
+
+	switch {
+	case execution.Status == continuation.StatusFailed && execution.Reason == "Observed Goal token budget exhausted":
+		status = GoalLimited
+	case status == "pause_requested":
+		status = GoalPaused
+	case status == "cancel_requested":
+		status = GoalCancelled
+	case execution.Status == continuation.StatusBlocked && execution.Block != nil &&
+		(execution.Block.Kind == "no_progress" || execution.Block.Kind == "infra"):
+		status = GoalPaused
+	}
+
+	return status
 }
 
 func (r *Runtime) publishGoal(ctx context.Context, emitter *eventEmitter, phase GoalStatus) error {

@@ -183,6 +183,17 @@ func (c *runtimeGoalControl) consumeDeclaration() bool {
 	return declared
 }
 
+// consumeVerificationReset reports and clears the pending explicit-resume flag,
+// so the Goal's verification counters start again at exactly one decision point.
+func (c *runtimeGoalControl) consumeVerificationReset() bool {
+	c.mu.Lock()
+	reset := c.resetVerification
+	c.resetVerification = false
+	c.mu.Unlock()
+
+	return reset
+}
+
 // goalDeclarable reports whether a Goal can still take a completion or failure
 // declaration: a run exists and is neither paused nor finished. A progress note
 // is accepted against a paused or finished Goal too, because it changes nothing.
@@ -226,6 +237,7 @@ func (r *Runtime) controlGoal(ctx context.Context, clearGoal bool, reason string
 		// A Goal that was actually cleared forgets its declaration, its pause
 		// reason and the model's run of blocked declarations.
 		c.declaration, c.blockedReason, c.blockedStreak = false, "", 0
+		c.resetVerification = false
 	}
 	roots := slices.Clone(c.ledger.Roots)
 	c.mu.Unlock()
@@ -321,10 +333,11 @@ func (r *Runtime) driveGoal(
 	}
 	controller := &goalflow.Controller{
 		Evaluator: evaluator, Verifier: verifier, FailedUsage: c.recordFailedUsage, KnownFailed: c.failedUsage,
-		Invalidated: func() bool { c.mu.Lock(); defer c.mu.Unlock(); return c.ledger.Invalidated },
-		Phase:       func(phase string) error { return r.publishGoal(ctx, emitter, GoalStatus(phase)) },
-		Declared:    c.consumeDeclaration,
-		Transcript:  r.goalAssessmentInput,
+		Invalidated:       func() bool { c.mu.Lock(); defer c.mu.Unlock(); return c.ledger.Invalidated },
+		Phase:             func(phase string) error { return r.publishGoal(ctx, emitter, GoalStatus(phase)) },
+		Declared:          c.consumeDeclaration,
+		Transcript:        r.goalAssessmentInput,
+		ResetVerification: c.consumeVerificationReset,
 	}
 	worker := &runtimeGoalWorker{runtime: r, operation: operation, emitter: emitter}
 	handlers := continuation.Handlers{
@@ -410,6 +423,7 @@ func (r *Runtime) createGoal(ctx context.Context, request GoalRequest) (continua
 	c.ledger = goalLedger{Version: 1, ID: execution.ID, RevokedRoots: revoked}
 	// A fresh Goal inherits neither a declaration nor a pause reason.
 	c.declaration, c.blockedReason, c.blockedStreak = false, "", 0
+	c.resetVerification = false
 
 	return execution, c.saveLedger()
 }
@@ -438,6 +452,9 @@ func (r *Runtime) activateGoal(ctx context.Context, operation goalWorkOperation)
 		return execution, ErrRuntimeBusy
 	}
 	if execution.Status == continuation.StatusPaused {
+		// The explicit resume is the reference's own reset point for the
+		// verification run count and the gap-stall state.
+		c.resetVerification = true
 		execution, err = c.engine.Resume(ctx, c.id, execution.Revision, "Goal explicitly resumed")
 		if errors.Is(err, continuation.ErrRetryRequired) {
 			execution, err = c.engine.RetryWork(ctx, c.id, execution.Revision, "User explicitly retries interrupted Goal work")
@@ -453,6 +470,9 @@ func (r *Runtime) activateGoal(ctx context.Context, operation goalWorkOperation)
 		}
 		return c.engine.RetryWork(ctx, c.id, execution.Revision, "User explicitly retries interrupted Goal work")
 	case continuation.StatusBlocked:
+		// Resolving a block is an explicit user resume too: the stall and run-cap
+		// blocks project as paused, and their counters start again here.
+		c.resetVerification = true
 		r.mu.Lock()
 		parked := r.state.Phase == PhasePaused && r.recovery.PendingID == ""
 		r.mu.Unlock()

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/rsbin1178/pips/agent"
@@ -72,7 +73,7 @@ func newAuditVerifier(t *testing.T, verdict string, usage ai.Usage) *Verifier {
 		{Message: ai.AssistantText(verdict), Usage: usage},
 	}}
 
-	verifier, err := NewVerifier(t.Context(), model, tree)
+	verifier, err := NewVerifier(t.Context(), model, tree, WithSkeptics(1))
 	require.NoError(t, err)
 
 	return verifier
@@ -188,15 +189,6 @@ func TestVerifierInfrastructureFailureNamesTheWayOut(t *testing.T) {
 
 	providerFailure := errors.New("provider unavailable")
 
-	// The auditor may make at most eight calls; a ninth is an infrastructure
-	// failure that names the bound, not a catalog violation.
-	overBound := make([]ai.AssistantPart, 0, 9)
-	for index := range 9 {
-		overBound = append(overBound, ai.ToolCallPart{
-			ID: fmt.Sprintf("audit-call-%d", index), Name: "ls", Args: ai.JSON(`{}`),
-		})
-	}
-
 	tests := []struct {
 		name  string
 		model *auditScriptModel
@@ -217,14 +209,6 @@ func TestVerifierInfrastructureFailureNamesTheWayOut(t *testing.T) {
 			}}},
 			want: "Goal verification infrastructure failed (the auditor called \"shell\", outside its read-only catalog). Run /goal resume to retry.",
 		},
-		{
-			name: "call bound exceeded",
-			model: &auditScriptModel{rounds: []*ai.Response{{
-				Message: ai.Assistant(overBound...),
-				Usage:   ai.Usage{InputTokens: 5, OutputTokens: 1},
-			}}},
-			want: "Goal verification infrastructure failed (the auditor exceeded its eight-call bound). Run /goal resume to retry.",
-		},
 	}
 
 	for _, test := range tests {
@@ -238,7 +222,7 @@ func TestVerifierInfrastructureFailureNamesTheWayOut(t *testing.T) {
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = tree.Close() })
 
-			verifier, err := NewVerifier(t.Context(), test.model, tree)
+			verifier, err := NewVerifier(t.Context(), test.model, tree, WithSkeptics(1))
 			require.NoError(t, err)
 
 			verdict, _, err := verifier.Verify(
@@ -325,7 +309,7 @@ func TestVerifierHandsATruncatedReadToTheAudit(t *testing.T) {
 		},
 	}}
 
-	verifier, err := NewVerifier(t.Context(), model, tree)
+	verifier, err := NewVerifier(t.Context(), model, tree, WithSkeptics(1))
 	require.NoError(t, err)
 
 	verdict, _, err := verifier.Verify(
@@ -422,6 +406,87 @@ func TestVerifierPromptCarriesTheProofRules(t *testing.T) {
 	}
 }
 
+// TestVerifierPromptNamesThePanelPosition pins Phase AD's prompt change: every
+// skeptic's prompt opens with its panel position, and the shared phrase the
+// runtime's scripted models detect the audit by is still present.
+func TestVerifierPromptNamesThePanelPosition(t *testing.T) {
+	t.Parallel()
+
+	first := skepticSystem(0, 3)
+	assert.True(t, strings.HasPrefix(first, "You are skeptic 1 of 3 on an independent Coding Goal evidence auditor panel."), first)
+	assert.Contains(t, first, "independent Coding Goal evidence auditor")
+	assert.Contains(t, first, verifierSystem)
+
+	third := skepticSystem(2, 3)
+	assert.True(t, strings.HasPrefix(third, "You are skeptic 3 of 3 on an independent Coding Goal evidence auditor panel."), third)
+	assert.NotEqual(t, first, third, "each skeptic's prompt names its own position")
+}
+
+// panelScriptModel answers every audit call for a scripted panel. It records
+// each call's system prompt, so a test can pin that the N audits run with
+// independent context and answer by panel position.
+type panelScriptModel struct {
+	mu sync.Mutex
+	// verdicts maps a one-based panel position to the verdict that position
+	// answers; a position outside the map answers verified.
+	verdicts map[int]string
+	// failures maps a one-based panel position to a model failure.
+	failures map[int]error
+	// prompts records every audit system prompt.
+	prompts []string
+	// temperatures records every audit call's requested temperature.
+	temperatures []*float64
+}
+
+func (model *panelScriptModel) Generate(_ context.Context, request ai.Request) (*ai.Response, error) {
+	system, _, err := request.Messages.SplitSystem()
+	if err != nil {
+		return nil, err
+	}
+
+	position, _ := panelPosition(ai.JoinSystemText(system))
+
+	model.mu.Lock()
+	model.prompts = append(model.prompts, ai.JoinSystemText(system))
+	model.temperatures = append(model.temperatures, request.Temperature)
+
+	verdict, scripted := model.verdicts[position]
+	failure := model.failures[position]
+	model.mu.Unlock()
+
+	if failure != nil {
+		return nil, failure
+	}
+
+	if !scripted {
+		verdict = `{"verified":true,"reason":"the recorded evidence is sufficient","gaps":[],"references":[]}`
+	}
+
+	return &ai.Response{Message: ai.AssistantText(verdict), Usage: ai.Usage{InputTokens: 5, OutputTokens: 1}}, nil
+}
+
+func (*panelScriptModel) Stream(context.Context, ai.Request) ai.Stream {
+	return func(func(ai.StreamEvent, error) bool) {}
+}
+
+func (*panelScriptModel) Provider() ai.Provider { return ai.ProviderOpenAI }
+func (*panelScriptModel) ModelID() string       { return "panel-script" }
+func (*panelScriptModel) Capabilities() ai.Capabilities {
+	return ai.Capabilities{Text: true, Tools: true}
+}
+
+// panelPosition parses the panel position and size out of a skeptic's system
+// prompt.
+func panelPosition(system string) (int, int) {
+	var position, total int
+
+	if _, err := fmt.Sscanf(system, "You are skeptic %d of %d ", &position, &total); err != nil {
+		return 0, 0
+	}
+
+	return position, total
+}
+
 // auditWorkspace opens a scratch workspace for the auditor and returns its root
 // path with its tree.
 func auditWorkspace(t *testing.T) (string, *workspace.Tree) {
@@ -487,7 +552,7 @@ func TestVerifierTreatsAnOverEnvelopeReadAsNotAchieved(t *testing.T) {
 	content := strings.Repeat(strings.Repeat("x", 99)+"\n", 300)
 	require.NoError(t, os.WriteFile(filepath.Join(root, "big.txt"), []byte(content), 0o600))
 
-	verifier, err := NewVerifier(t.Context(), auditReadRound(t, "big.txt", `{"verified":true,"reason":"read it","gaps":[],"references":[]}`), tree)
+	verifier, err := NewVerifier(t.Context(), auditReadRound(t, "big.txt", `{"verified":true,"reason":"read it","gaps":[],"references":[]}`), tree, WithSkeptics(1))
 	require.NoError(t, err)
 
 	verdict, _, err := verifier.Verify(
@@ -527,7 +592,7 @@ func TestVerifierTakesACitedRecordAsProofWithoutReReadingIt(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	verifier, err := NewVerifier(t.Context(), auditReadRound(t, "proof.txt", string(encoded)), tree)
+	verifier, err := NewVerifier(t.Context(), auditReadRound(t, "proof.txt", string(encoded)), tree, WithSkeptics(1))
 	require.NoError(t, err)
 
 	verdict, _, err := verifier.Verify(
@@ -535,4 +600,203 @@ func TestVerifierTakesACitedRecordAsProofWithoutReReadingIt(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.True(t, verdict.Verified, verdict.Reason)
+}
+
+// TestVerifierRunsTheDefaultPanelInIsolatedContexts pins Phase AD's topology: a
+// default verifier runs three independent skeptics, each with its own prompt
+// naming its panel position, and the panel's verdict is the aggregate.
+func TestVerifierRunsTheDefaultPanelInIsolatedContexts(t *testing.T) {
+	t.Parallel()
+
+	_, tree := auditWorkspace(t)
+	model := &panelScriptModel{}
+
+	verifier, err := NewVerifier(t.Context(), model, tree)
+	require.NoError(t, err)
+	require.Equal(t, defaultSkeptics, verifier.skeptics)
+
+	verdict, usage, err := verifier.Verify(
+		t.Context(), "the migration ran", auditEvidence(), continuation.Limits{}, continuation.Accounting{},
+	)
+	require.NoError(t, err)
+	require.True(t, verdict.Verified, verdict.Reason)
+	assert.Positive(t, usage.InputTokens)
+
+	positions := map[int]int{}
+
+	for _, prompt := range model.prompts {
+		position, total := panelPosition(prompt)
+		require.Equal(t, defaultSkeptics, total, prompt)
+		assert.Contains(t, prompt, verifierSystem, "every skeptic's prompt carries Phase AA's proof rules")
+
+		positions[position]++
+	}
+
+	assert.Equal(t, map[int]int{1: 2, 2: 2, 3: 2}, positions,
+		"each of the three skeptics answers its own read round and verdict under its own panel position")
+
+	for _, temperature := range model.temperatures {
+		assert.Nil(t, temperature, "the verifier sends no fixed temperature")
+	}
+}
+
+// TestVerifierClampsTheSkepticCount pins the reference's own clamp: the default
+// is three, and a configured count outside one-through-five is clamped.
+func TestVerifierClampsTheSkepticCount(t *testing.T) {
+	t.Parallel()
+
+	_, tree := auditWorkspace(t)
+
+	tests := []struct {
+		name     string
+		options  []VerifierOption
+		skeptics int
+	}{
+		{name: "default", skeptics: defaultSkeptics},
+		{name: "one", options: []VerifierOption{WithSkeptics(1)}, skeptics: 1},
+		{name: "zero clamps to one", options: []VerifierOption{WithSkeptics(0)}, skeptics: 1},
+		{name: "negative clamps to one", options: []VerifierOption{WithSkeptics(-4)}, skeptics: 1},
+		{name: "five", options: []VerifierOption{WithSkeptics(5)}, skeptics: 5},
+		{name: "nine clamps to five", options: []VerifierOption{WithSkeptics(9)}, skeptics: 5},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			verifier, err := NewVerifier(t.Context(), &panelScriptModel{}, tree, test.options...)
+			require.NoError(t, err)
+			assert.Equal(t, test.skeptics, verifier.skeptics)
+		})
+	}
+}
+
+// TestVerifierPanelAggregatesLikeTheReference pins the reference's cold-majority
+// rule directly, including the boundaries the runtime tests cannot reach.
+func TestVerifierPanelAggregatesLikeTheReference(t *testing.T) {
+	t.Parallel()
+
+	verified := func() Verdict {
+		return Verdict{Verified: true, Reason: "the recorded evidence is sufficient", Gaps: []string{}, References: []string{}}
+	}
+	refuted := func() Verdict {
+		return Verdict{Reason: "the recorded evidence does not prove it", Gaps: []string{"collect the missing evidence"}, References: []string{}}
+	}
+
+	tests := []struct {
+		name     string
+		verdicts []Verdict
+		achieved bool
+	}{
+		{name: "no verdicts", verdicts: []Verdict{}, achieved: false},
+		{name: "one verified", verdicts: []Verdict{verified()}, achieved: true},
+		{name: "one refuted", verdicts: []Verdict{refuted()}, achieved: false},
+		{name: "gatekeeper refutes, cold accepts", verdicts: []Verdict{refuted(), verified()}, achieved: true},
+		{name: "gatekeeper accepts, cold refutes", verdicts: []Verdict{verified(), refuted()}, achieved: false},
+		{name: "both refute", verdicts: []Verdict{refuted(), refuted()}, achieved: false},
+		{name: "three accept", verdicts: []Verdict{verified(), verified(), verified()}, achieved: true},
+		{name: "gatekeeper refute cannot veto", verdicts: []Verdict{refuted(), verified(), verified()}, achieved: true},
+		{name: "one cold refute blocks", verdicts: []Verdict{verified(), refuted(), verified()}, achieved: false},
+		{name: "one cold refute is outvoted at five", verdicts: []Verdict{refuted(), verified(), refuted(), verified(), verified()}, achieved: true},
+		{name: "two cold refutes block at five", verdicts: []Verdict{refuted(), verified(), refuted(), verified(), refuted()}, achieved: false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			verdict := aggregateSkepticVerdicts(test.verdicts)
+			assert.Equal(t, test.achieved, verdict.Verified, verdict.Reason)
+
+			if !test.achieved {
+				assert.NotEmpty(t, verdict.Reason)
+				assert.NotEmpty(t, verdict.Gaps)
+			}
+		})
+	}
+}
+
+// TestVerifierPanelRendersTheRefutersGaps pins the not-achieved aggregate: the
+// deduplicated, bounded union of the refuters' gaps, each refuter's reason when
+// it named no gap, and the first non-refuting skeptic's own document on success.
+func TestVerifierPanelRendersTheRefutersGaps(t *testing.T) {
+	t.Parallel()
+
+	first := Verdict{Reason: "the migration is unproven", Gaps: []string{"rerun the failing check"}, References: []string{"record-1"}}
+	second := Verdict{Reason: "the migration is unproven", Gaps: []string{"rerun the failing check", "record the rollback"}, References: []string{"record-1", "record-2"}}
+	third := Verdict{Reason: "the ledger is empty"}
+
+	verdict := aggregateSkepticVerdicts([]Verdict{first, second, third})
+	require.False(t, verdict.Verified)
+	assert.Equal(t, "the migration is unproven", verdict.Reason)
+	assert.Equal(t, []string{"rerun the failing check", "record the rollback", "the ledger is empty"}, verdict.Gaps,
+		"the union is deduplicated, and a refuter with no gap contributes its reason")
+	assert.Equal(t, []string{"record-1", "record-2"}, verdict.References)
+
+	achieved := aggregateSkepticVerdicts([]Verdict{
+		{Reason: "the gatekeeper doubts it", Gaps: []string{"one more check"}},
+		{Verified: true, Reason: "the cold skeptic read the implementation", Gaps: []string{}, References: []string{"read:audit-read"}},
+	})
+	require.True(t, achieved.Verified)
+	assert.Equal(t, "the cold skeptic read the implementation", achieved.Reason,
+		"the achieved verdict is the first non-refuting skeptic's own document")
+}
+
+// TestVerifierReadsUntilTheModelStopsCallingTools pins Phase AD's removed bounds:
+// the old four-round and eight-call caps are gone, so a skeptic that reads eleven
+// times still reaches its verdict.
+func TestVerifierReadsUntilTheModelStopsCallingTools(t *testing.T) {
+	t.Parallel()
+
+	root, tree := auditWorkspace(t)
+	require.NoError(t, os.WriteFile(filepath.Join(root, "proof.txt"), []byte("proof\n"), 0o600))
+
+	rounds := make([]*ai.Response, 0, 12)
+	for index := range 11 {
+		rounds = append(rounds, &ai.Response{
+			Message: ai.Assistant(ai.ToolCallPart{
+				ID: fmt.Sprintf("audit-call-%d", index), Name: readTool, Args: ai.JSON(`{"path":"proof.txt"}`),
+			}),
+			Usage: ai.Usage{InputTokens: 5, OutputTokens: 1},
+		})
+	}
+
+	rounds = append(rounds,
+		&ai.Response{Message: ai.AssistantText("no further reads"), Usage: ai.Usage{InputTokens: 5, OutputTokens: 1}},
+		&ai.Response{
+			Message: ai.AssistantText(`{"verified":true,"reason":"the recorded evidence is sufficient","gaps":[],"references":[]}`),
+			Usage:   ai.Usage{InputTokens: 5, OutputTokens: 1},
+		},
+	)
+
+	verifier, err := NewVerifier(t.Context(), &auditScriptModel{rounds: rounds}, tree, WithSkeptics(1))
+	require.NoError(t, err)
+
+	verdict, _, err := verifier.Verify(
+		t.Context(), "the migration ran", auditEvidence(), continuation.Limits{}, continuation.Accounting{},
+	)
+	require.NoError(t, err)
+	require.True(t, verdict.Verified, verdict.Reason)
+}
+
+// TestVerifierPanelFailureIsInfrastructure pins the fail-closed half of Phase AD:
+// one skeptic's model failure is an infrastructure failure for the whole panel,
+// never a negative vote.
+func TestVerifierPanelFailureIsInfrastructure(t *testing.T) {
+	t.Parallel()
+
+	_, tree := auditWorkspace(t)
+	providerFailure := errors.New("provider unavailable")
+	model := &panelScriptModel{failures: map[int]error{2: providerFailure}}
+
+	verifier, err := NewVerifier(t.Context(), model, tree)
+	require.NoError(t, err)
+
+	verdict, _, err := verifier.Verify(
+		t.Context(), "the migration ran", auditEvidence(), continuation.Limits{}, continuation.Accounting{},
+	)
+	require.ErrorIs(t, err, goal.ErrInvalid)
+	require.ErrorIs(t, err, providerFailure)
+	assert.Contains(t, err.Error(), "Goal verification infrastructure failed (provider unavailable). Run /goal resume to retry.")
+	assert.Empty(t, verdict.Reason)
 }

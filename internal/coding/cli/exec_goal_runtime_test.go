@@ -52,19 +52,19 @@ func TestExecGoalUsesRealRuntimeAndReadOnlyVerification(t *testing.T) {
 			assert.True(t, runtime.Snapshot().Goal.Completed())
 			assert.Equal(t, 2, model.evaluations)
 			assert.Equal(t, 4, model.workCalls, "two real read-and-answer work segments")
-			assert.Equal(t, 1, model.verifications)
+			assert.Equal(t, cliGoalPanelSize, model.verifications, "one default three-skeptic panel")
 			assert.ElementsMatch(t, []string{"read", "ls", "glob", "grep"}, model.verifierTools)
 
 			// A declared model keeps the provider's own schema mechanism on both
 			// role calls.
 			assert.Equal(t, []bool{true, true}, model.assessmentFormats)
-			assert.Equal(t, []bool{true}, model.verdictFormats)
+			assert.Equal(t, cliGoalPanelBools(true), model.verdictFormats)
 
 			// No role call carried an output cap: the Goal's budget bounds the
 			// run, not one call, so the provider's own default applies.
 			assert.Equal(t, []*int{nil, nil}, model.assessmentCaps)
-			assert.Equal(t, []*int{nil, nil}, model.readCaps)
-			assert.Equal(t, []*int{nil}, model.verdictCaps)
+			assert.Equal(t, cliGoalPanelReadCaps(), model.readCaps)
+			assert.Equal(t, cliGoalPanelCaps(), model.verdictCaps)
 
 			if mode == outputPlain {
 				assert.Equal(t, "The recorded file contains shipped proof.\n", stdout.String())
@@ -120,19 +120,54 @@ func TestExecGoalCompletesOnAPortableSchemaModel(t *testing.T) {
 
 	assert.True(t, runtime.Snapshot().Goal.Completed())
 	assert.Equal(t, 2, model.evaluations)
-	assert.Equal(t, 1, model.verifications)
+	assert.Equal(t, cliGoalPanelSize, model.verifications, "one default three-skeptic panel")
 	assert.Equal(t, "The recorded file contains shipped proof.\n", stdout.String())
 	assert.Contains(t, stderr.String(), "goal completed")
 
 	// Neither role call used the provider's own schema mechanism.
 	assert.Equal(t, []bool{false, false}, model.assessmentFormats)
-	assert.Equal(t, []bool{false}, model.verdictFormats)
+	assert.Equal(t, cliGoalPanelBools(false), model.verdictFormats)
 
 	// No role call carried an output cap either, on the read rounds or the
 	// verdict.
 	assert.Equal(t, []*int{nil, nil}, model.assessmentCaps)
-	assert.Equal(t, []*int{nil, nil}, model.readCaps)
-	assert.Equal(t, []*int{nil}, model.verdictCaps)
+	assert.Equal(t, cliGoalPanelReadCaps(), model.readCaps)
+	assert.Equal(t, cliGoalPanelCaps(), model.verdictCaps)
+}
+
+// cliGoalPanelSize is the default verifier panel's size, which the runtime builds
+// for every Goal.
+const cliGoalPanelSize = 3
+
+// cliGoalPanelBools returns one entry per skeptic of the default panel.
+func cliGoalPanelBools(value bool) []bool {
+	values := make([]bool, 0, cliGoalPanelSize)
+	for range cliGoalPanelSize {
+		values = append(values, value)
+	}
+
+	return values
+}
+
+// cliGoalPanelCaps returns the default panel's per-call output caps.
+func cliGoalPanelCaps() []*int {
+	caps := make([]*int, 0, cliGoalPanelSize)
+	for range cliGoalPanelSize {
+		caps = append(caps, nil)
+	}
+
+	return caps
+}
+
+// cliGoalPanelReadCaps returns the default panel's read-round caps: each of the
+// three skeptics makes one tool-carrying round before it stops reading.
+func cliGoalPanelReadCaps() []*int {
+	caps := make([]*int, 0, cliGoalPanelSize*2)
+	for range cliGoalPanelSize * 2 {
+		caps = append(caps, nil)
+	}
+
+	return caps
 }
 
 type cliGoalModel struct {
@@ -191,15 +226,19 @@ func (m *cliGoalModel) audit(request ai.Request) (*ai.Response, error) {
 		m.verificationReads++
 		m.readCaps = append(m.readCaps, cloneCLITokenCap(request.MaxTokens))
 
-		if m.verificationReads == 1 {
+		if m.verifierTools == nil {
 			for _, tool := range request.Tools {
 				m.verifierTools = append(m.verifierTools, tool.Name)
 			}
-
-			return cliGoalResponse(ai.Assistant(ai.ToolCallPart{ID: "verify-file", Name: "read", Args: ai.JSON(`{"path":"proof.txt"}`)})), nil
 		}
 
-		return cliGoalResponse(ai.AssistantText("Ready to evaluate the file read.")), nil
+		for _, message := range request.Messages {
+			if _, ok := message.(ai.ToolMessage); ok {
+				return cliGoalResponse(ai.AssistantText("Ready to evaluate the file read.")), nil
+			}
+		}
+
+		return cliGoalResponse(ai.Assistant(ai.ToolCallPart{ID: "verify-file", Name: "read", Args: ai.JSON(`{"path":"proof.txt"}`)})), nil
 	}
 
 	evidence := cliGoalEvidence(request.Messages)

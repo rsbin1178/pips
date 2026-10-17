@@ -111,11 +111,19 @@ func TestRuntimeGoalClearDropsLateNotificationsWithoutBlockingUnrelatedWork(t *t
 func TestRuntimeGoalForkDoesNotInheritControl(t *testing.T) {
 	t.Parallel()
 	base := t.TempDir()
-	model := newGoalTestModel(runtimeTextResponse("one"), runtimeTextResponse("two"), runtimeTextResponse("three"))
-	model.decisions = []string{"continue", "continue", "continue"}
+	// The Goal blocks on the assessment's own repeated blocked decision, so it
+	// stays active with pending work without relying on the no-progress guard
+	// Phase AD removed.
+	const document = `{"decision":"blocked","evidence":"the deploy key is absent",` +
+		`"next_step":"add DEPLOY_KEY to the CI environment","blocker_key":"missing_deploy_key"}`
+	model := newGoalTestModel(
+		runtimeTextResponse("claim1"), runtimeTextResponse("claim2"), runtimeTextResponse("claim3"),
+	)
+	model.decisionDocuments = []string{document, document, document}
 	runtime := openTestRuntimeAt(t, base, SessionTarget{}, model)
 	_, err := collectRuntimeResult(runtime.StartGoal(t.Context(), GoalRequest{Condition: "pending work"}))
 	require.NoError(t, err)
+	require.Equal(t, GoalBlocked, runtime.GoalSnapshot().Status)
 	id, err := runtime.Fork(t.Context(), runtime.session.LeafID())
 	require.NoError(t, err)
 	forked := openTestRuntimeAt(t, base, SessionTarget{ID: id}, newGoalTestModel())

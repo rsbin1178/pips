@@ -89,7 +89,7 @@ func TestModelEvaluatorUsesStructuredToolFreeRequestAndReportsUsage(t *testing.T
 	assert.Empty(t, result.BlockerKey)
 	assert.Equal(t, model.response.Usage, result.Usage)
 	assert.Empty(t, model.request.Tools)
-	assert.Equal(t, ai.Ptr(0.0), model.request.Temperature)
+	assert.Nil(t, model.request.Temperature, "the assessment sends no fixed temperature")
 	require.NotNil(t, model.request.MaxTokens)
 	assert.Equal(t, 20, *model.request.MaxTokens)
 	require.NotNil(t, model.request.ResponseFormat)
@@ -113,6 +113,7 @@ func TestModelEvaluatorSendsTheReferencesPayload(t *testing.T) {
 
 	model := &goalModel{response: &ai.Response{
 		Message: ai.AssistantText(assessmentDocument("continue", "evidence", "next step", "")),
+		Usage:   ai.Usage{InputTokens: 12, OutputTokens: 4},
 	}}
 	evaluator, err := NewModelEvaluator(model)
 	require.NoError(t, err)
@@ -161,6 +162,7 @@ func TestModelEvaluatorAsksForTheReferencesDocument(t *testing.T) {
 
 	model := &goalModel{structuredOutput: true, response: &ai.Response{
 		Message: ai.AssistantText(assessmentDocument("continue", "evidence", "next step", "")),
+		Usage:   ai.Usage{InputTokens: 12, OutputTokens: 4},
 	}}
 	evaluator, err := NewModelEvaluator(model)
 	require.NoError(t, err)
@@ -237,6 +239,7 @@ func TestModelEvaluatorTakesABlockedDecision(t *testing.T) {
 		Message: ai.AssistantText(assessmentDocument(
 			"blocked", "the deploy key is missing", "add DEPLOY_KEY to the CI environment", "  missing_deploy_key  ",
 		)),
+		Usage: ai.Usage{InputTokens: 12, OutputTokens: 4},
 	}}
 	evaluator, err := NewModelEvaluator(model)
 	require.NoError(t, err)
@@ -289,8 +292,8 @@ func TestModelEvaluatorJudgesTheBlockedDecision(t *testing.T) {
 			t.Parallel()
 
 			model := &goalModel{responses: []*ai.Response{
-				{Message: ai.AssistantText(test.document)},
-				{Message: ai.AssistantText(test.document)},
+				{Message: ai.AssistantText(test.document), Usage: ai.Usage{InputTokens: 8, OutputTokens: 2}},
+				{Message: ai.AssistantText(test.document), Usage: ai.Usage{InputTokens: 5, OutputTokens: 1}},
 			}}
 			evaluator, err := NewModelEvaluator(model)
 			require.NoError(t, err)
@@ -312,6 +315,7 @@ func TestModelEvaluatorTakesAUsableBlockerKey(t *testing.T) {
 	for _, key := range []string{"missing_access", "missing_deploy_key_2", "a1_b2"} {
 		model := &goalModel{response: &ai.Response{
 			Message: ai.AssistantText(assessmentDocument("blocked", "the key is missing", "add it", key)),
+			Usage:   ai.Usage{InputTokens: 12, OutputTokens: 4},
 		}}
 		evaluator, err := NewModelEvaluator(model)
 		require.NoError(t, err)
@@ -367,6 +371,7 @@ func TestModelEvaluatorSendsNoCapByDefault(t *testing.T) {
 
 			model := &goalModel{response: &ai.Response{
 				Message: ai.AssistantText(assessmentDocument("continue", "test output is missing", "run the test", "")),
+				Usage:   ai.Usage{InputTokens: 12, OutputTokens: 4},
 			}}
 			evaluator, err := NewModelEvaluator(model)
 			require.NoError(t, err)
@@ -532,6 +537,55 @@ func TestModelEvaluatorRetriesAndSucceedsOnASecondAnswer(t *testing.T) {
 	expected := first.Usage
 	expected.Add(second.Usage)
 	assert.Equal(t, expected, result.Usage)
+}
+
+// TestModelEvaluatorTreatsAUsageLessAnswerAsUnusable pins Phase AD's third item:
+// the reference's evaluator treats a response with no usage as a failed attempt,
+// so a usage-less answer is retried once and then stops the run, exactly as any
+// other unusable answer. A second answer that carries usage is accepted.
+func TestModelEvaluatorTreatsAUsageLessAnswerAsUnusable(t *testing.T) {
+	t.Parallel()
+
+	usageLess := func() *ai.Response {
+		return &ai.Response{Message: ai.AssistantText(
+			assessmentDocument("continue", "test output is missing", "run the test", ""),
+		)}
+	}
+
+	t.Run("both answers usage-less", func(t *testing.T) {
+		t.Parallel()
+
+		model := &goalModel{responses: []*ai.Response{usageLess(), usageLess()}}
+		evaluator, err := NewModelEvaluator(model)
+		require.NoError(t, err)
+
+		_, err = evaluator.Evaluate(t.Context(), Evaluation{
+			Condition: "tests pass", Evidence: ai.JSON(`{}`), Attempt: 1,
+		})
+		require.ErrorIs(t, err, ErrInvalid)
+		assert.Contains(t, err.Error(), "bounded retry")
+		assert.Contains(t, err.Error(), "stopped rather than treated as complete")
+		assert.Contains(t, err.Error(), "use /goal resume to retry")
+		assert.Len(t, model.requests, 2, "the usage-less answer was retried once")
+	})
+
+	t.Run("second answer carries usage", func(t *testing.T) {
+		t.Parallel()
+
+		second := usageLess()
+		second.Usage = ai.Usage{InputTokens: 5, OutputTokens: 1}
+		model := &goalModel{responses: []*ai.Response{usageLess(), second}}
+		evaluator, err := NewModelEvaluator(model)
+		require.NoError(t, err)
+
+		result, err := evaluator.Evaluate(t.Context(), Evaluation{
+			Condition: "tests pass", Evidence: ai.JSON(`{}`), Attempt: 1,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, OutcomeContinue, result.Outcome)
+		assert.Equal(t, second.Usage, result.Usage)
+		assert.Len(t, model.requests, 2)
+	})
 }
 
 // TestModelEvaluatorDoesNotRetryATransportFailure pins the split between the two
