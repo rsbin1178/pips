@@ -1946,6 +1946,10 @@ func openTestRuntimeConfiguredWithSandboxAndConfig(
 		TelemetryObservers: telemetry,
 		Execution: ExecutionOptions{
 			SandboxProbe: func(context.Context, *execution.Executor) error { return nil },
+			// The scripted models these fixtures install answer the Goal's
+			// assessment and audit calls, not a child agent's, so the panel stays
+			// in-process. A test that exercises the spawned panel flips this off.
+			GoalVerifierInProcess: true,
 		},
 	})
 	require.NoError(t, err)

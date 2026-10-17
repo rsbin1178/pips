@@ -214,7 +214,10 @@ func (c *Controller) Decide(ctx context.Context, request continuation.DecisionRe
 			}
 		}
 
-		verdict, usage, err := c.Verifier.Verify(ctx, evaluation.Condition, evidence, state.VerifyGaps)
+		verdict, usage, err := c.Verifier.Verify(ctx, Packet{
+			Objective: evaluation.Condition, FinalResponse: evidence.Claim,
+			PriorGaps: state.VerifyGaps, PriorSkeptic0: state.Skeptic0Session,
+		}, evidence)
 		observed.Add(usage)
 
 		if err != nil {
@@ -225,6 +228,13 @@ func (c *Controller) Decide(ctx context.Context, request continuation.DecisionRe
 		result.Reason = verdict.Reason
 
 		gaps, references = verdict.Gaps, verdict.References
+
+		// A spawned panel records the first skeptic's child session so the next
+		// verification resumes it. An in-process panel reports none, so a stored
+		// session survives the round it could not be used in.
+		if verdict.Skeptic0Session != "" {
+			state.Skeptic0Session = verdict.Skeptic0Session
+		}
 
 		// A blocked panel cannot be resolved by another work segment: the Goal
 		// blocks for a user decision, rolls back the verification run it spent and

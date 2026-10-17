@@ -41,7 +41,13 @@ func TestExecGoalUsesRealRuntimeAndReadOnlyVerification(t *testing.T) {
 			model := &cliGoalModel{structuredOutput: true}
 			runtime, err := coding.Open(t.Context(), coding.OpenOptions{
 				Workspace: ws, Config: cfg, Paths: layout, Model: model,
-				Execution: coding.ExecutionOptions{SandboxProbe: func(context.Context, *execution.Executor) error { return nil }},
+				Execution: coding.ExecutionOptions{
+					SandboxProbe: func(context.Context, *execution.Executor) error { return nil },
+					// This fixture's model answers the Goal's assessment and audit
+					// calls, not a child agent's, so the panel stays in-process. The
+					// spawned panel is covered by the coding package's own tests.
+					GoalVerifierInProcess: true,
+				},
 			})
 			require.NoError(t, err)
 
@@ -109,7 +115,13 @@ func TestExecGoalCompletesOnAPortableSchemaModel(t *testing.T) {
 	model := new(cliGoalModel)
 	runtime, err := coding.Open(t.Context(), coding.OpenOptions{
 		Workspace: ws, Config: cfg, Paths: layout, Model: model,
-		Execution: coding.ExecutionOptions{SandboxProbe: func(context.Context, *execution.Executor) error { return nil }},
+		Execution: coding.ExecutionOptions{
+			SandboxProbe: func(context.Context, *execution.Executor) error { return nil },
+			// This fixture's model answers the Goal's assessment and audit
+			// calls, not a child agent's, so the panel stays in-process. The
+			// spawned panel is covered by the coding package's own tests.
+			GoalVerifierInProcess: true,
+		},
 	})
 	require.NoError(t, err)
 

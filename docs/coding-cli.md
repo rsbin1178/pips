@@ -117,16 +117,20 @@ overshoot an allowance before reporting usage.
 
 A worker saying "done" is not sufficient. An independent evaluator reviews
 recorded evidence, and a completion candidate is checked by a panel of three
-independent verifiers (clamped to one through five), each reading the workspace
-and the recorded tool results on its own. A verifier cannot edit files or execute
-shell commands; it audits saved test output rather than rerunning the tests
-itself. Each verifier answers an adversarial document: whether it refutes the
-candidate, its evidence, its confidence, an optional blocker class, and concrete
-findings. The panel passes a candidate only when its cold majority does not
-refute it; a high-confidence refute from the first verifier vetoes that majority,
-and a panel whose every refuter names a blocker that iteration cannot resolve
-blocks the goal for a user decision instead of returning more work. Missing or
-contradictory evidence produces a gap for the next work segment, not success.
+independent verifiers (clamped to one through five), each running as its own
+child agent with the general-purpose tool inventory. A verifier can therefore
+read the live tree and run cheap spot-checks; it is instructed not to modify the
+workspace, and the tool policy still gates anything that writes or reaches the
+network. Each verifier is shown the objective, the goal's diff and changed files
+since the goal started, the worker's final response and the previous round's
+gaps; pips has no goal plan artifact, so the plan sections read unavailable. Each
+verifier answers an adversarial document: whether it refutes the candidate, its
+evidence, its confidence, an optional blocker class, and concrete findings. The
+panel passes a candidate only when its cold majority does not refute it; a
+high-confidence refute from the first verifier vetoes that majority, and a panel
+whose every refuter names a blocker that iteration cannot resolve blocks the goal
+for a user decision instead of returning more work. Missing or contradictory
+evidence produces a gap for the next work segment, not success.
 
 Both checks ask for their answer as one JSON object. A model that declares
 `structured_output` is asked through the provider's own JSON Schema mechanism;
@@ -134,9 +138,9 @@ any other model is asked through the prompt-only convention, with the schema
 described in the prompt. The declaration chooses the transport and never relaxes
 the check: the same document fields and proof rules apply either way. What
 decides proof is each verifier's own instructions, as it is in the reference:
-default to refuted when uncertain, treat prose as non-evidence, cite a recorded
-result or a `path:line`, check the previous round's gaps first and raise a new
-objection only for a demonstrable defect or an unmet requirement, and refuse
+default to refuted when uncertain, treat prose as non-evidence, cite a diff hunk,
+a recorded result or a `path:line`, check the previous round's gaps first and
+raise a new objection only for a demonstrable defect or an unmet requirement, and refuse
 ambiguous, absent, failed, truncated or contradictory evidence — so a
 verification is only as good as the panel's compliance with that contract.
 Neither check caps the model's output
@@ -175,18 +179,20 @@ the condition is achieved. A completion claim does not decide completion. It is
 consumed at the goal loop's next decision point, where the verification panel
 runs in place of the ordinary continuation step: a verified verdict ends the run,
 and an unverified one returns the panel's gaps to the model as its next feedback.
-The verdict stays with the panel, which still reads the workspace and the
-recorded tool results — the worker's declaration is never itself evidence. A declaration
+The verdict stays with the panel, which reads the live tree, the goal's diff and
+the recorded tool results — the worker's declaration is never itself evidence. A declaration
 with no goal run in progress, or a `completed` or `blocked_reason` against a goal
 that is paused or already complete, is refused with a named reason.
 
 Verification is bounded in its inputs rather than its reasoning: the evidence
-ledger retains up to 32 latest tool results with 4 KiB per result, a verifier
-reads full files until it stops calling tools, and a goal runs at most ten
-verification panels before it pauses for an explicit resume. The goal's token
-budget, when set, is checked at the loop boundary rather than per call. Dropped or
-truncated essential proof cannot pass verification; split larger objectives
-rather than relying on an unbounded audit.
+ledger retains up to 32 latest tool results with 4 KiB per result, the diff shown
+to the panel is capped at 256 KiB and 300 changed files, a verifier reads full
+files until it stops calling tools, and a goal runs at most ten verification
+panels before it pauses for an explicit resume. The goal's token budget, when
+set, is checked at the loop boundary rather than per call. A diagnostic panel
+report is written under the goal's private state directory; it never decides
+anything. Dropped or truncated essential proof cannot pass verification; split
+larger objectives rather than relying on an unbounded audit.
 
 Goals do not grant trust, bypass tool approval, approve Plan review, or answer
 questions on your behalf. Pending input keeps the goal blocked. In `exec`, a

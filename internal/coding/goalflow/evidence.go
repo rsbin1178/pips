@@ -13,6 +13,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/rsbin1178/pips/agent/goal"
@@ -78,6 +79,10 @@ type State struct {
 	// VerifyGaps is the last verification's aggregate gaps, rendered into the next
 	// panel's PRIOR_GAPS block. It is additive, so an older state decodes.
 	VerifyGaps []string `json:"verify_gaps,omitempty"`
+	// Skeptic0Session is the first skeptic's child session id after a spawned
+	// panel larger than one ran, so the next verification resumes it instead of
+	// judging cold. It is additive, so an older state decodes.
+	Skeptic0Session string `json:"skeptic0_session,omitempty"`
 }
 
 // Prepare wraps the unchanged SDK Goal State V1.
@@ -98,7 +103,8 @@ func Decode(data ai.JSON) (State, error) {
 	}
 
 	if state.Version != 1 || state.EmptyRounds < 0 || len(state.Gaps) > MaxGaps ||
-		len(state.VerifyGaps) > MaxGaps || state.VerifyRuns < 0 || state.GapStalls < 0 {
+		len(state.VerifyGaps) > MaxGaps || state.VerifyRuns < 0 || state.GapStalls < 0 ||
+		!validSkepticSession(state.Skeptic0Session) {
 		return State{}, fmt.Errorf("%w: invalid Coding Goal state", goal.ErrInvalid)
 	}
 
@@ -107,6 +113,33 @@ func Decode(data ai.JSON) (State, error) {
 	}
 
 	return state, nil
+}
+
+// MaxSkepticSessionBytes bounds the resumed child session id the panel stores.
+const MaxSkepticSessionBytes = 128
+
+// validSkepticSession reports whether a stored skeptic session id is a bounded
+// session-name token. It mirrors the session repository's own id rule, so a
+// corrupted state cannot smuggle a path or a control sequence into a resume.
+func validSkepticSession(id string) bool {
+	if id == "" {
+		return true
+	}
+
+	if len(id) > MaxSkepticSessionBytes || !utf8.ValidString(id) || id == "." || id == ".." || id[0] == '.' {
+		return false
+	}
+
+	for _, character := range id {
+		if unicode.IsLetter(character) || unicode.IsDigit(character) ||
+			character == '-' || character == '_' || character == '.' {
+			continue
+		}
+
+		return false
+	}
+
+	return true
 }
 
 // Encode enforces the persisted policy payload bound.
