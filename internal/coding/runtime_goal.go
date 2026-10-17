@@ -306,13 +306,21 @@ func (r *Runtime) driveGoal(
 	emitter := newEventEmitter(ctx, r, yield, true)
 	defer emitter.detachConsumer()
 	c := r.goalControl
+	// The Goal's baseline commit is captured before the control mutex is taken,
+	// so a bounded Git resolve never runs under it. It is only meaningful for a
+	// Goal this call creates.
+	baseline := ""
+	if request != nil {
+		baseline = r.goalBaselineCommit(ctx)
+	}
 	c.mu.Lock()
 	var execution continuation.Execution
 	if request != nil {
-		execution, err = r.createGoal(ctx, *request)
+		execution, err = r.createGoal(ctx, *request, baseline)
 	} else {
 		execution, err = r.activateGoal(ctx, operation)
 	}
+	goalID := string(c.id)
 	c.mu.Unlock()
 	if err != nil {
 		emitter.fail(err)
@@ -321,7 +329,7 @@ func (r *Runtime) driveGoal(
 	if err := r.publishGoal(ctx, emitter, ""); err != nil {
 		return
 	}
-	verifier, err := goalflow.NewVerifier(ctx, r.model, r.tree)
+	verifier, err := r.newGoalVerifier(ctx, goalID)
 	if err != nil {
 		emitter.fail(err)
 		return
@@ -380,7 +388,11 @@ func (r *Runtime) driveGoal(
 }
 
 // createGoal runs under the control mutex but never performs model/tool I/O.
-func (r *Runtime) createGoal(ctx context.Context, request GoalRequest) (continuation.Execution, error) {
+// baseline is the repository commit the caller resolved before taking the
+// mutex; it is empty when the workspace has no repository or the resolve failed.
+func (r *Runtime) createGoal(
+	ctx context.Context, request GoalRequest, baseline string,
+) (continuation.Execution, error) {
 	c := r.goalControl
 	r.mu.Lock()
 	idle := r.state.Phase == PhaseIdle && r.interaction == nil && r.recovery.PendingID == ""
@@ -420,10 +432,14 @@ func (r *Runtime) createGoal(ctx context.Context, request GoalRequest) (continua
 	}
 	c.id = execution.ID
 	revoked := append(slices.Clone(c.ledger.RevokedRoots), c.ledger.Roots...)
-	c.ledger = goalLedger{Version: 1, ID: execution.ID, RevokedRoots: revoked}
-	// A fresh Goal inherits neither a declaration nor a pause reason.
+	c.ledger = goalLedger{
+		Version: 1, ID: execution.ID, RevokedRoots: revoked, BaselineCommit: baseline,
+	}
+	// A fresh Goal inherits neither a declaration nor a pause reason, and has no
+	// resumed skeptic to subtract usage from.
 	c.declaration, c.blockedReason, c.blockedStreak = false, "", 0
 	c.resetVerification = false
+	c.skeptic0Source, c.skeptic0Usage = "", ai.Usage{}
 
 	return execution, c.saveLedger()
 }

@@ -100,6 +100,12 @@ type ExecutionOptions struct {
 	ToolLimits            tools.Limits
 	GitLimits             git.Limits
 	Subagent              subagent.ExecutionOptions
+	// GoalVerifierInProcess keeps the Goal verification panel in-process
+	// instead of spawning foreground general-purpose skeptic children. It is the
+	// seam for a test or an embedder whose model cannot serve a child agent; a
+	// production Runtime leaves it false and spawns the panel whenever it has
+	// subagents.
+	GoalVerifierInProcess bool
 	// SchedulerOptions inject the scheduled-task loop's clock and timer. A zero
 	// value uses the real clock; a test advances time and observes a fire
 	// without waiting an interval.

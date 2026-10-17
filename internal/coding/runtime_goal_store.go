@@ -28,6 +28,10 @@ type goalLedger struct {
 	ChildUsage        ai.Usage        `json:"child_usage"`
 	AccountedChildren []string        `json:"accounted_children,omitempty"`
 	DeliveredChildren []string        `json:"delivered_children,omitempty"`
+	// BaselineCommit is the repository commit the Goal was created at, so a
+	// verification can capture the Goal's whole change set as a diff. It is
+	// empty outside a Git repository or when the best-effort resolve failed.
+	BaselineCommit string `json:"baseline_commit,omitempty"`
 }
 
 type runtimeGoalControl struct {
@@ -56,6 +60,14 @@ type runtimeGoalControl struct {
 	// verification run count and gap-stall state start again. It is process-local,
 	// like the declaration and the blocked streak.
 	resetVerification bool
+	// skeptic0Source and skeptic0Usage are the last verifier-skeptic-zero spawn's
+	// child session and cumulative usage. A resumed child's reported usage is
+	// cumulative over its source session, so the panel subtracts this baseline to
+	// report only what the resumed run spent. Like the declaration they are
+	// process-local state of the run that produced them: a restarted Goal resumes
+	// no child, so it has no baseline to subtract.
+	skeptic0Source string
+	skeptic0Usage  ai.Usage
 }
 
 var (
@@ -150,6 +162,9 @@ func (c *runtimeGoalControl) loadLedger() error {
 		return err
 	}
 	if c.ledger.Version != 1 || c.ledger.ID != c.id || !goalflow.ValidUsage(c.ledger.FailedUsage) || !goalflow.ValidUsage(c.ledger.ChildUsage) {
+		return ErrRuntimeInvalid
+	}
+	if len(c.ledger.BaselineCommit) > 128 {
 		return ErrRuntimeInvalid
 	}
 	return nil

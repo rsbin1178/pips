@@ -237,14 +237,14 @@ func TestVerifierUsesTheTerminalTokenWhenTheVerdictIsMalformed(t *testing.T) {
 
 	refusing := newAuditVerifier(t, "Refuted", ai.Usage{InputTokens: 4, OutputTokens: 1})
 
-	verdict, _, err := refusing.Verify(t.Context(), "the migration ran", auditEvidence(), nil)
+	verdict, _, err := refusing.Verify(t.Context(), Packet{Objective: "the migration ran"}, auditEvidence())
 	require.NoError(t, err)
 	assert.False(t, verdict.Verified)
 	assert.Equal(t, []string{"verdict JSON missing/malformed; used terminal token"}, verdict.Gaps)
 
 	accepting := newAuditVerifier(t, "```\nNot Refuted\n```", ai.Usage{InputTokens: 4, OutputTokens: 1})
 
-	verdict, _, err = accepting.Verify(t.Context(), "the migration ran", auditEvidence(), nil)
+	verdict, _, err = accepting.Verify(t.Context(), Packet{Objective: "the migration ran"}, auditEvidence())
 	require.NoError(t, err)
 	require.True(t, verdict.Verified, verdict.Reason)
 	assert.Equal(t, "verdict JSON missing/malformed; used terminal token", verdict.Reason)
@@ -274,7 +274,7 @@ func TestVerifierKeepsAnImpossibleUsageAnError(t *testing.T) {
 
 	verifier := newAuditVerifier(t, verifiedSkepticDocument, ai.Usage{InputTokens: -1 << 20})
 
-	verdict, usage, err := verifier.Verify(t.Context(), "the migration ran", auditEvidence(), nil)
+	verdict, usage, err := verifier.Verify(t.Context(), Packet{Objective: "the migration ran"}, auditEvidence())
 	require.ErrorIs(t, err, goal.ErrInvalid)
 	assert.Contains(t, err.Error(), "Goal verification infrastructure failed (the auditor's token counter is impossible). Run /goal resume to retry.")
 	assert.Empty(t, verdict.Reason)
@@ -299,7 +299,7 @@ func TestVerifierInfrastructureFailureNamesTheWayOut(t *testing.T) {
 	verifier, err := NewVerifier(t.Context(), &auditScriptModel{failure: providerFailure}, tree, WithSkeptics(1))
 	require.NoError(t, err)
 
-	verdict, _, err := verifier.Verify(t.Context(), "the migration ran", auditEvidence(), nil)
+	verdict, _, err := verifier.Verify(t.Context(), Packet{Objective: "the migration ran"}, auditEvidence())
 	require.ErrorIs(t, err, goal.ErrInvalid)
 	require.ErrorIs(t, err, providerFailure)
 	assert.Contains(t, err.Error(), "Goal verification infrastructure failed (provider unavailable). Run /goal resume to retry.")
@@ -326,7 +326,7 @@ func TestVerifierHandsAToolErrorToTheModel(t *testing.T) {
 	verifier, err := NewVerifier(t.Context(), model, tree, WithSkeptics(1))
 	require.NoError(t, err)
 
-	verdict, _, err := verifier.Verify(t.Context(), "the migration ran", auditEvidence(), nil)
+	verdict, _, err := verifier.Verify(t.Context(), Packet{Objective: "the migration ran"}, auditEvidence())
 	require.NoError(t, err)
 	require.True(t, verdict.Verified, verdict.Reason)
 
@@ -376,7 +376,7 @@ func TestVerifierKeepsTheProtocolSplitOnToolCalls(t *testing.T) {
 		verifier, err := NewVerifier(t.Context(), model, tree, WithSkeptics(1))
 		require.NoError(t, err)
 
-		verdict, _, err := verifier.Verify(t.Context(), "the migration ran", auditEvidence(), nil)
+		verdict, _, err := verifier.Verify(t.Context(), Packet{Objective: "the migration ran"}, auditEvidence())
 		require.NoError(t, err)
 		require.True(t, verdict.Verified, verdict.Reason)
 
@@ -397,7 +397,7 @@ func TestVerifierKeepsTheProtocolSplitOnToolCalls(t *testing.T) {
 		verifier, err := NewVerifier(t.Context(), model, tree, WithSkeptics(1))
 		require.NoError(t, err)
 
-		_, _, err = verifier.Verify(t.Context(), "the migration ran", auditEvidence(), nil)
+		_, _, err = verifier.Verify(t.Context(), Packet{Objective: "the migration ran"}, auditEvidence())
 		require.ErrorIs(t, err, goal.ErrInvalid)
 		assert.Contains(t, err.Error(), "the auditor reused a read call id")
 	})
@@ -411,7 +411,7 @@ func TestVerifierTakesANonRefutingVerdictAsVerified(t *testing.T) {
 
 	verifier := newAuditVerifier(t, verifiedSkepticDocument, ai.Usage{InputTokens: 4, OutputTokens: 1})
 
-	verdict, _, err := verifier.Verify(t.Context(), "the migration ran", auditEvidence(), nil)
+	verdict, _, err := verifier.Verify(t.Context(), Packet{Objective: "the migration ran"}, auditEvidence())
 	require.NoError(t, err)
 	require.True(t, verdict.Verified)
 	assert.Equal(t, "the recorded evidence is sufficient", verdict.Reason)
@@ -436,7 +436,7 @@ func TestVerifierAcceptsAVerdictWithAnUnknownField(t *testing.T) {
 		"references": ["record-1"]
 	}`, ai.Usage{InputTokens: 4, OutputTokens: 1})
 
-	verdict, _, err := verifier.Verify(t.Context(), "the migration ran", auditEvidence(), nil)
+	verdict, _, err := verifier.Verify(t.Context(), Packet{Objective: "the migration ran"}, auditEvidence())
 	require.NoError(t, err)
 	require.True(t, verdict.Verified, verdict.Reason)
 	assert.Equal(t, "I read the implementation and it holds", verdict.Reason)
@@ -463,7 +463,7 @@ func TestVerifierHandsATruncatedReadToTheAudit(t *testing.T) {
 	verifier, err := NewVerifier(t.Context(), model, tree, WithSkeptics(1))
 	require.NoError(t, err)
 
-	verdict, _, err := verifier.Verify(t.Context(), "the migration ran", auditEvidence(), nil)
+	verdict, _, err := verifier.Verify(t.Context(), Packet{Objective: "the migration ran"}, auditEvidence())
 	require.NoError(t, err)
 	require.True(t, verdict.Verified, verdict.Reason)
 }
@@ -495,7 +495,7 @@ func TestVerifierHandsUnusableEvidenceToTheAudit(t *testing.T) {
 
 			verifier := newAuditVerifier(t, verifiedSkepticDocument, ai.Usage{InputTokens: 4, OutputTokens: 1})
 
-			verdict, _, err := verifier.Verify(t.Context(), "the migration ran", test.evidence, nil)
+			verdict, _, err := verifier.Verify(t.Context(), Packet{Objective: "the migration ran"}, test.evidence)
 			require.NoError(t, err)
 			require.True(t, verdict.Verified, verdict.Reason)
 			assert.Equal(t, "the recorded evidence is sufficient", verdict.Reason)
@@ -709,7 +709,7 @@ func TestVerifierReadsAFullFileWithoutAnEnvelopeRefusal(t *testing.T) {
 	verifier, err := NewVerifier(t.Context(), auditReadRound(t, "big.txt", verifiedSkepticDocument), tree, WithSkeptics(1))
 	require.NoError(t, err)
 
-	verdict, _, err := verifier.Verify(t.Context(), "the migration ran", auditEvidence(), nil)
+	verdict, _, err := verifier.Verify(t.Context(), Packet{Objective: "the migration ran"}, auditEvidence())
 	require.NoError(t, err)
 	require.True(t, verdict.Verified, verdict.Reason)
 }
@@ -731,7 +731,7 @@ func TestVerifierRecordsTheLedgerForTheAudit(t *testing.T) {
 	verifier, err := NewVerifier(t.Context(), auditReadRound(t, "proof.txt", verifiedSkepticDocument), tree, WithSkeptics(1))
 	require.NoError(t, err)
 
-	verdict, _, err := verifier.Verify(t.Context(), "the migration ran", Evidence{Records: records}, nil)
+	verdict, _, err := verifier.Verify(t.Context(), Packet{Objective: "the migration ran"}, Evidence{Records: records})
 	require.NoError(t, err)
 	require.True(t, verdict.Verified, verdict.Reason)
 }
@@ -749,7 +749,7 @@ func TestVerifierRunsTheDefaultPanelInIsolatedContexts(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, defaultSkeptics, verifier.skeptics)
 
-	verdict, usage, err := verifier.Verify(t.Context(), "the migration ran", auditEvidence(), nil)
+	verdict, usage, err := verifier.Verify(t.Context(), Packet{Objective: "the migration ran"}, auditEvidence())
 	require.NoError(t, err)
 	require.True(t, verdict.Verified, verdict.Reason)
 	assert.Positive(t, usage.InputTokens)
@@ -1072,7 +1072,7 @@ func TestVerifierReadsUntilTheModelStopsCallingTools(t *testing.T) {
 	verifier, err := NewVerifier(t.Context(), &auditScriptModel{rounds: rounds}, tree, WithSkeptics(1))
 	require.NoError(t, err)
 
-	verdict, _, err := verifier.Verify(t.Context(), "the migration ran", auditEvidence(), nil)
+	verdict, _, err := verifier.Verify(t.Context(), Packet{Objective: "the migration ran"}, auditEvidence())
 	require.NoError(t, err)
 	require.True(t, verdict.Verified, verdict.Reason)
 }
@@ -1090,7 +1090,7 @@ func TestVerifierPanelFailureIsInfrastructure(t *testing.T) {
 	verifier, err := NewVerifier(t.Context(), model, tree)
 	require.NoError(t, err)
 
-	verdict, _, err := verifier.Verify(t.Context(), "the migration ran", auditEvidence(), nil)
+	verdict, _, err := verifier.Verify(t.Context(), Packet{Objective: "the migration ran"}, auditEvidence())
 	require.ErrorIs(t, err, goal.ErrInvalid)
 	require.ErrorIs(t, err, providerFailure)
 	assert.Contains(t, err.Error(), "Goal verification infrastructure failed (provider unavailable). Run /goal resume to retry.")
