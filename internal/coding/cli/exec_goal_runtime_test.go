@@ -250,9 +250,9 @@ func (m *cliGoalModel) audit(request ai.Request) (*ai.Response, error) {
 	m.verdictFormats = append(m.verdictFormats, request.ResponseFormat != nil)
 	m.verdictCaps = append(m.verdictCaps, cloneCLITokenCap(request.MaxTokens))
 
-	encoded, err := json.Marshal(goalflow.Verdict{
-		Verified: true, Reason: "The recorded result and independent read agree.", Gaps: []string{},
-		References: []string{evidence.Records[0].ID, "read:verify-file"},
+	encoded, err := json.Marshal(goalflow.SkepticVerdict{
+		Refuted: false, Evidence: "The recorded result and independent read agree.",
+		Confidence: goalflow.ConfidenceHigh, Blocking: goalflow.BlockingNone,
 	})
 	if err != nil {
 		return nil, err

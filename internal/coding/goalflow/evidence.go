@@ -75,6 +75,9 @@ type State struct {
 	// digest was unchanged; GapDigest is that digest.
 	GapStalls int    `json:"gap_stalls,omitempty"`
 	GapDigest string `json:"gap_digest,omitempty"`
+	// VerifyGaps is the last verification's aggregate gaps, rendered into the next
+	// panel's PRIOR_GAPS block. It is additive, so an older state decodes.
+	VerifyGaps []string `json:"verify_gaps,omitempty"`
 }
 
 // Prepare wraps the unchanged SDK Goal State V1.
@@ -95,7 +98,7 @@ func Decode(data ai.JSON) (State, error) {
 	}
 
 	if state.Version != 1 || state.EmptyRounds < 0 || len(state.Gaps) > MaxGaps ||
-		state.VerifyRuns < 0 || state.GapStalls < 0 {
+		len(state.VerifyGaps) > MaxGaps || state.VerifyRuns < 0 || state.GapStalls < 0 {
 		return State{}, fmt.Errorf("%w: invalid Coding Goal state", goal.ErrInvalid)
 	}
 

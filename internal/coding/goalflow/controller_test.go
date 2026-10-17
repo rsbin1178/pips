@@ -49,6 +49,38 @@ func TestControllerDefersPendingAndBackgroundWithoutAssessment(t *testing.T) {
 	}
 }
 
+// TestStateDecodesVerifyGapsAdditively pins the durable field: VerifyGaps is
+// additive (an older state decodes), it round-trips, and Decode bounds it at
+// MaxGaps like the aggregate gaps.
+func TestStateDecodesVerifyGapsAdditively(t *testing.T) {
+	t.Parallel()
+
+	state, _, err := Prepare("prove the migration ran")
+	require.NoError(t, err)
+
+	encoded, err := Encode(state)
+	require.NoError(t, err)
+
+	restored, err := Decode(encoded)
+	require.NoError(t, err)
+	assert.Empty(t, restored.VerifyGaps)
+
+	state.VerifyGaps = []string{"gap-0", "gap-1"}
+	encoded, err = Encode(state)
+	require.NoError(t, err)
+
+	restored, err = Decode(encoded)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"gap-0", "gap-1"}, restored.VerifyGaps)
+
+	state.VerifyGaps = make([]string, MaxGaps+1)
+	encoded, err = Encode(state)
+	require.NoError(t, err)
+
+	_, err = Decode(encoded)
+	require.ErrorIs(t, err, goal.ErrInvalid)
+}
+
 // TestControllerFillsTheAssessmentInputFromTheSession pins the seam: the wrapper
 // supplies the transcript and the plan on the evaluation the assessment sees, so
 // the request body is a function of the evaluation rather than of anything the
