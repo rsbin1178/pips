@@ -277,7 +277,7 @@ func TestRuntimeUpdateGoalCompletionDeclarationIsAuditedAtTheNextDecisionPoint(t
 	// The declaration replaced the assessment, and the verdict is still the
 	// auditor's.
 	assert.Equal(t, 0, model.evaluated)
-	assert.Equal(t, 1, model.verifications)
+	assert.Equal(t, 3, model.verifications, "one default three-skeptic panel")
 }
 
 // TestRuntimeUpdateGoalRejectedDeclarationReturnsTheAuditorsGaps pins the other
@@ -308,7 +308,7 @@ func TestRuntimeUpdateGoalRejectedDeclarationReturnsTheAuditorsGaps(t *testing.T
 	state := runtime.GoalSnapshot()
 	require.True(t, state.Completed(), "%+v", state)
 	assert.Equal(t, 2, state.Attempts)
-	assert.Equal(t, 2, model.verifications)
+	assert.Equal(t, 6, model.verifications, "two default three-skeptic panels")
 	assert.Equal(t, 1, model.evaluated)
 
 	requests := model.Requests()
@@ -349,7 +349,7 @@ func TestRuntimeUpdateGoalDeclarationIsConsumedOnce(t *testing.T) {
 	// point and completed the Goal at two attempts without assessing anything.
 	assert.Equal(t, 3, state.Attempts)
 	assert.Equal(t, 2, model.evaluated)
-	assert.Equal(t, 2, model.verifications)
+	assert.Equal(t, 6, model.verifications, "two default three-skeptic panels")
 }
 
 // TestRuntimeUpdateGoalRefusesOutsideAGoalRun pins the first refusal: the Tool is

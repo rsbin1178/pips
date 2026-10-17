@@ -35,12 +35,25 @@ type goalTestModel struct {
 	evaluationStarted chan struct{}
 	evaluated         int
 	verifications     int
-	// verifierVerdicts are the auditor's scripted verdicts, one per verdict call;
-	// once they run out, verifierVerdict answers every further call. With neither,
-	// the auditor returns the default verdict: verified with the recorded evidence
-	// IDs and its own read.
+	// verifierVerdicts are the panel's scripted verdicts, one per verification
+	// round applied to every skeptic of that round; once they run out,
+	// verifierVerdict answers every further round. With neither, the panel returns
+	// the default verdict: verified with the recorded evidence IDs and its own read.
 	verifierVerdicts []string
 	verifierVerdict  string
+	// verifierPositionVerdicts overrides the verdict of one panel position — the
+	// one-based position the skeptic's system prompt names — for every round, so a
+	// test can script a split panel.
+	verifierPositionVerdicts map[int]string
+	// verifierFailure is returned by the verdict calls of the first
+	// verifierFailureRounds verification rounds, so a test can pin an
+	// infrastructure failure and then a successful resume.
+	verifierFailure       error
+	verifierFailureRounds int
+	// auditorMessages records, per panel position, the message count of every
+	// audit call that position made, so a test can pin that no skeptic sees
+	// another's history.
+	auditorMessages map[int][]int
 	// auditorEvidence is the ledger the auditor's last verdict request carried,
 	// so a test can assert what the audit was actually asked to judge.
 	auditorEvidence goalflow.Evidence
@@ -66,6 +79,20 @@ func (m *goalTestModel) AuditorEvidence() goalflow.Evidence {
 	return m.auditorEvidence
 }
 
+// AuditorMessages returns the message count of every audit call, per panel
+// position, so a test can pin that the panel's skeptics never share a history.
+func (m *goalTestModel) AuditorMessages() map[int][]int {
+	m.muGoal.Lock()
+	defer m.muGoal.Unlock()
+
+	counts := make(map[int][]int, len(m.auditorMessages))
+	for position, calls := range m.auditorMessages {
+		counts[position] = append([]int(nil), calls...)
+	}
+
+	return counts
+}
+
 // auditorRequestEvidence extracts the ledger the auditor's request carried with
 // the record IDs the default verdict cites. Only the payload message names a
 // condition, so a tool envelope cannot masquerade as the ledger.
@@ -89,6 +116,56 @@ func auditorRequestEvidence(request ai.Request) (goalflow.Evidence, []string) {
 	}
 
 	return evidence, references
+}
+
+// testPanelSize is the default verifier panel's size, which the runtime builds
+// for every Goal.
+const testPanelSize = 3
+
+// panelBools returns one entry per skeptic per verification round, so a test can
+// assert a per-call request shape against the panel without depending on call
+// order inside a round.
+func panelBools(value bool, rounds int) []bool {
+	values := make([]bool, 0, rounds*testPanelSize)
+	for range rounds * testPanelSize {
+		values = append(values, value)
+	}
+
+	return values
+}
+
+// panelCaps returns the per-call output caps of rounds default panels.
+func panelCaps(rounds int) []*int {
+	caps := make([]*int, 0, rounds*testPanelSize)
+	for range rounds * testPanelSize {
+		caps = append(caps, nil)
+	}
+
+	return caps
+}
+
+// panelReadCaps returns the read rounds' caps for rounds default panels: each of
+// the three skeptics makes one tool-carrying round before it stops reading.
+func panelReadCaps(rounds int) []*int {
+	caps := make([]*int, 0, rounds*testPanelSize*2)
+	for range rounds * testPanelSize * 2 {
+		caps = append(caps, nil)
+	}
+
+	return caps
+}
+
+// goalPanelPosition parses the panel position and size out of a skeptic's system
+// prompt, so the scripted model can route a verdict by round and position rather
+// than by call order under the parallel panel.
+func goalPanelPosition(system string) (int, int) {
+	var position, total int
+
+	if _, err := fmt.Sscanf(system, "You are skeptic %d of %d ", &position, &total); err != nil {
+		return 0, 0
+	}
+
+	return position, total
 }
 
 func newGoalTestModel(work ...*ai.Response) *goalTestModel {
@@ -173,6 +250,15 @@ func (m *goalTestModel) Generate(ctx context.Context, request ai.Request) (*ai.R
 		), nil
 	}
 	if strings.Contains(requestSystemText(request), "independent Coding Goal evidence auditor") {
+		position, total := goalPanelPosition(requestSystemText(request))
+
+		m.muGoal.Lock()
+		if m.auditorMessages == nil {
+			m.auditorMessages = map[int][]int{}
+		}
+		m.auditorMessages[position] = append(m.auditorMessages[position], len(request.Messages))
+		m.muGoal.Unlock()
+
 		if request.ResponseFormat == nil {
 			for _, message := range request.Messages {
 				if _, ok := message.(ai.ToolMessage); ok {
@@ -184,15 +270,28 @@ func (m *goalTestModel) Generate(ctx context.Context, request ai.Request) (*ai.R
 
 		evidence, references := auditorRequestEvidence(request)
 
+		// Every skeptic of one verification round answers the same scripted
+		// verdict, keyed by the round index rather than by call order, so the
+		// parallel panel is deterministic.
 		m.muGoal.Lock()
 		m.verifications++
 		m.auditorEvidence = evidence
+		round := (m.verifications - 1) / max(total, 1)
 		scripted := m.verifierVerdict
-		if len(m.verifierVerdicts) > 0 {
-			scripted = m.verifierVerdicts[0]
-			m.verifierVerdicts = m.verifierVerdicts[1:]
+		if verdict, ok := m.verifierPositionVerdicts[position]; ok {
+			scripted = verdict
+		} else if round < len(m.verifierVerdicts) {
+			scripted = m.verifierVerdicts[round]
+		}
+		var failure error
+		if round < m.verifierFailureRounds {
+			failure = m.verifierFailure
 		}
 		m.muGoal.Unlock()
+
+		if failure != nil {
+			return nil, failure
+		}
 
 		if scripted != "" {
 			return runtimeTextResponse(scripted), nil
@@ -255,7 +354,7 @@ func TestRuntimeGoalContinuesThenVerifiesActualEvidence(t *testing.T) {
 	assert.Equal(t, 2, state.Attempts)
 	assert.Equal(t, 2, state.Evaluations)
 	assert.Positive(t, state.Tokens)
-	assert.Equal(t, 1, model.verifications)
+	assert.Equal(t, 3, model.verifications, "one default three-skeptic panel")
 	assertEventSequence(t, events)
 	assert.Contains(t, eventTypes(events), EventGoalChanged)
 	assert.NotEmpty(t, runtime.Snapshot().SyntheticMessages)
@@ -434,7 +533,7 @@ func TestRuntimeGoalTakesAVerifiedVerdictAsCompletion(t *testing.T) {
 			state := runtime.GoalSnapshot()
 			require.True(t, state.Completed(), "%+v", state)
 			assert.Equal(t, GoalCompleted, state.Status)
-			assert.Equal(t, 1, model.verifications)
+			assert.Equal(t, 3, model.verifications, "one default three-skeptic panel")
 			test.check(t, model.AuditorEvidence())
 		})
 	}
@@ -486,23 +585,32 @@ func TestRuntimeGoalKeepsRefusingARejectingOrMalformedVerdict(t *testing.T) {
 			assert.Equal(t, GoalPaused, state.Status)
 			require.NotEmpty(t, state.Gaps)
 			assert.Contains(t, strings.Join(state.Gaps, " "), test.wantGap)
-			assert.GreaterOrEqual(t, state.Attempts, 3)
+			// Phase AD's gap guard pauses the Goal on the second identical
+			// rejection instead of running unbounded.
+			assert.Equal(t, 2, state.Attempts)
 		})
 	}
 }
 
 func TestRuntimeGoalNoProgressAndBudget(t *testing.T) {
 	t.Parallel()
-	t.Run("three empty assessments", func(t *testing.T) {
+	t.Run("two identical rejected verifications", func(t *testing.T) {
 		t.Parallel()
-		model := newGoalTestModel(runtimeTextResponse("claim1"), runtimeTextResponse("claim2"), runtimeTextResponse("claim3"))
-		model.decisions = []string{"continue", "continue", "continue"}
+		// Phase AD replaced the three-unchanged-evidence guard with the
+		// reference's gap guard: the same aggregate gaps on two consecutive
+		// not-achieved verifications pause the Goal.
+		model := newGoalTestModel(runtimeTextResponse("claim1"), runtimeTextResponse("claim2"))
+		model.decisions = []string{"candidate_complete", "candidate_complete"}
+		model.verifierVerdict = goalRefutingVerdict
 		runtime := openTestRuntime(t, model)
+		require.NoError(t, os.WriteFile(filepath.Join(runtime.workspace.Root(), "proof.txt"), []byte("proof\n"), 0o600))
 		_, err := collectRuntimeResult(runtime.StartGoal(t.Context(), GoalRequest{Condition: "done"}))
 		require.NoError(t, err)
-		assert.Equal(t, GoalPaused, runtime.GoalSnapshot().Status)
-		assert.Equal(t, 3, runtime.GoalSnapshot().Evaluations)
-		assert.Equal(t, 3, runtime.GoalSnapshot().Attempts)
+		state := runtime.GoalSnapshot()
+		assert.Equal(t, GoalPaused, state.Status)
+		assert.Equal(t, 2, state.Attempts)
+		assert.Contains(t, state.Reason, "same gaps")
+		assert.Contains(t, state.Reason, "/goal resume")
 	})
 	t.Run("work token overshoot", func(t *testing.T) {
 		t.Parallel()
@@ -514,6 +622,109 @@ func TestRuntimeGoalNoProgressAndBudget(t *testing.T) {
 		assert.Equal(t, 1, runtime.GoalSnapshot().Attempts)
 		assert.Equal(t, 0, model.evaluated)
 	})
+}
+
+// TestRuntimeGoalResumeResetsTheGapStallGuard pins the reset: an explicit resume
+// starts the verification counters again, so the same rejection after a resume is
+// the first of a new run rather than a third identical one.
+func TestRuntimeGoalResumeResetsTheGapStallGuard(t *testing.T) {
+	t.Parallel()
+
+	model := newGoalTestModel(
+		runtimeTextResponse("claim1"), runtimeTextResponse("claim2"),
+		runtimeTextResponse("claim3"), runtimeTextResponse("claim4"),
+	)
+	model.decisions = []string{"candidate_complete", "candidate_complete", "candidate_complete", "candidate_complete"}
+	// The first two rounds reject identically and stall the Goal; after the resume
+	// the third rejection starts the count again and the fourth round verifies.
+	model.verifierVerdicts = []string{goalRefutingVerdict, goalRefutingVerdict, goalRefutingVerdict}
+	runtime := openTestRuntime(t, model)
+	require.NoError(t, os.WriteFile(filepath.Join(runtime.workspace.Root(), "proof.txt"), []byte("proof\n"), 0o600))
+
+	_, err := collectRuntimeResult(runtime.StartGoal(t.Context(), GoalRequest{Condition: "done"}))
+	require.NoError(t, err)
+	require.Equal(t, GoalPaused, runtime.GoalSnapshot().Status)
+
+	_, err = collectRuntimeResult(runtime.ResumeGoal(t.Context()))
+	require.NoError(t, err)
+
+	state := runtime.GoalSnapshot()
+	require.True(t, state.Completed(), "%+v", state)
+	assert.Equal(t, 4, state.Attempts)
+}
+
+// scriptDistinctRejections scripts work segments whose panels reject with a
+// distinct gap each round, so the stall guard cannot fire before the run cap.
+func scriptDistinctRejections(model *goalTestModel, rounds int) {
+	for index := range rounds {
+		model.responses = append(model.responses, runtimeTextResponse(fmt.Sprintf("claim-%d", index)))
+		model.decisions = append(model.decisions, "candidate_complete")
+		model.verifierVerdicts = append(model.verifierVerdicts,
+			fmt.Sprintf(`{"verified":false,"reason":"still unproven","gaps":["gap-%d"],"references":[]}`, index))
+	}
+}
+
+// TestRuntimeGoalPausesAtTheVerificationRunCap pins the reference's per-goal cap:
+// the eleventh candidate completion does not spend another panel; the Goal pauses
+// with a resume sentence. Work segments stay uncapped, so only the panel count
+// reaches the bar.
+func TestRuntimeGoalPausesAtTheVerificationRunCap(t *testing.T) {
+	t.Parallel()
+
+	const runCap = 10
+
+	model := newGoalTestModel()
+	// Ten panels run and reject with distinct gaps; the eleventh candidate
+	// completion blocks before spending another panel.
+	scriptDistinctRejections(model, runCap)
+	model.responses = append(model.responses, runtimeTextResponse("claim-cap"))
+	model.decisions = append(model.decisions, "candidate_complete")
+	runtime := openTestRuntime(t, model)
+	require.NoError(t, os.WriteFile(filepath.Join(runtime.workspace.Root(), "proof.txt"), []byte("proof\n"), 0o600))
+
+	_, err := collectRuntimeResult(runtime.StartGoal(t.Context(), GoalRequest{Condition: "done"}))
+	require.NoError(t, err)
+
+	state := runtime.GoalSnapshot()
+	assert.Equal(t, GoalPaused, state.Status)
+	assert.Contains(t, state.Reason, "verification runs")
+	assert.Contains(t, state.Reason, "/goal resume")
+	assert.Equal(t, runCap*3, model.verifications, "ten panels ran; the eleventh candidate completion blocked instead")
+	assert.Equal(t, runCap+1, state.Attempts, "the work segments themselves are uncapped")
+}
+
+// TestRuntimeGoalResumeResetsTheVerificationRunCap pins the reference's reset: an
+// explicit resume starts the run count again, so the Goal spends another panel
+// instead of blocking immediately.
+func TestRuntimeGoalResumeResetsTheVerificationRunCap(t *testing.T) {
+	t.Parallel()
+
+	const runCap = 10
+
+	model := newGoalTestModel()
+	// Ten panels run and reject with distinct gaps; the eleventh candidate
+	// completion blocks before spending another panel, and the resumed run's one
+	// further candidate completion verifies.
+	scriptDistinctRejections(model, runCap)
+	model.responses = append(model.responses, runtimeTextResponse("claim-cap"))
+	model.decisions = append(model.decisions, "candidate_complete")
+	model.responses = append(model.responses, runtimeTextResponse("candidate"))
+	model.decisions = append(model.decisions, "candidate_complete")
+
+	runtime := openTestRuntime(t, model)
+	require.NoError(t, os.WriteFile(filepath.Join(runtime.workspace.Root(), "proof.txt"), []byte("proof\n"), 0o600))
+
+	_, err := collectRuntimeResult(runtime.StartGoal(t.Context(), GoalRequest{Condition: "done"}))
+	require.NoError(t, err)
+	require.Equal(t, GoalPaused, runtime.GoalSnapshot().Status)
+
+	_, err = collectRuntimeResult(runtime.ResumeGoal(t.Context()))
+	require.NoError(t, err)
+
+	state := runtime.GoalSnapshot()
+	require.True(t, state.Completed(), "%+v", state)
+	assert.Equal(t, runCap*3+3, model.verifications, "the resumed run spent one more panel")
+	assert.Equal(t, runCap+2, state.Attempts)
 }
 
 // TestRuntimeGoalBlocksOnTheThirdSameAssessmentBlocker pins the projection the
@@ -550,8 +761,12 @@ func TestRuntimeGoalApprovalResolutionKeepsExactPendingCalls(t *testing.T) {
 		runtimeToolResponse("pending-shell", "shell", `{"command":"printf ok","permissions":{"write_paths":[],"network":true},"justification":"test"}`),
 		runtimeTextResponse("denied"), runtimeTextResponse("no evidence"), runtimeTextResponse("still none"), runtimeTextResponse("no new evidence"),
 	)
-	model.decisions = []string{"continue", "continue", "continue", "continue"}
+	// Phase AD removed the three-unchanged-evidence guard, so the Goal now stops on
+	// the verification gap guard instead: the scripted panels reject identically and
+	// the Goal pauses on the second identical rejection.
+	model.verifierVerdict = goalRefutingVerdict
 	runtime := openTestRuntime(t, model)
+	require.NoError(t, os.WriteFile(filepath.Join(runtime.workspace.Root(), "proof.txt"), []byte("proof\n"), 0o600))
 	_, err := collectRuntimeResult(runtime.StartGoal(t.Context(), GoalRequest{Condition: "run command"}))
 	require.NoError(t, err)
 	assert.Equal(t, GoalBlocked, runtime.GoalSnapshot().Status)
@@ -567,10 +782,12 @@ func TestRuntimeGoalApprovalResolutionKeepsExactPendingCalls(t *testing.T) {
 	require.Equal(t, GoalBlocked, runtime.GoalSnapshot().Status)
 	_, err = collectRuntimeResult(runtime.Resolve(t.Context(), approval.Resolution{RequestID: paused.Approval.Required.RequestID, Choice: approval.ChoiceDeny}))
 	require.NoError(t, err)
-	assert.Equal(t, GoalPaused, runtime.GoalSnapshot().Status)
-	assert.Equal(t, 5, runtime.GoalSnapshot().Attempts)
+	state := runtime.GoalSnapshot()
+	assert.Equal(t, GoalPaused, state.Status)
+	assert.Contains(t, state.Reason, "same gaps")
+	assert.Equal(t, 3, state.Attempts)
 	requests := model.Requests()
-	require.Len(t, requests, 5)
+	require.Len(t, requests, 3)
 	assert.Equal(t, 1, countUserMessages(requests[1].Messages))
 	results := 0
 	for _, entry := range runtime.session.Entries() {
@@ -735,4 +952,108 @@ func TestRuntimeGoalPauseDuringAssessmentStartsNoAdditionalWork(t *testing.T) {
 	assert.Equal(t, 1, runtime.GoalSnapshot().Attempts)
 	require.NoError(t, runtime.ClearGoal(t.Context()))
 	assert.Empty(t, runtime.GoalSnapshot().ID)
+}
+
+// TestRuntimeGoalPanelColdMajorityAcceptsDespiteTheGatekeeper pins Phase AD's
+// loosest designed case: the gatekeeper's lone refute is one vote, and the two
+// cold skeptics carry the completion.
+func TestRuntimeGoalPanelColdMajorityAcceptsDespiteTheGatekeeper(t *testing.T) {
+	t.Parallel()
+
+	model := newGoalTestModel(
+		runtimeToolResponse("proof-read", "read", `{"path":"proof.txt"}`),
+		runtimeTextResponse("candidate complete"),
+	)
+	model.decisions = []string{"candidate_complete"}
+	// Position one is the gatekeeper, whose non-refute never counts and whose
+	// refute is only one vote.
+	model.verifierPositionVerdicts = map[int]string{1: goalRefutingVerdict}
+	// Three further rounds exist only so a regression that lets the gatekeeper's
+	// refute veto has somewhere to go: the identical rejection then trips the gap
+	// guard and the Goal pauses, so this test's own completion assertion is what
+	// fails rather than its fixture running out of script.
+	model.responses = append(model.responses,
+		runtimeTextResponse("candidate complete"),
+		runtimeTextResponse("candidate complete"),
+		runtimeTextResponse("candidate complete"),
+	)
+	model.decisions = append(model.decisions, "candidate_complete", "candidate_complete", "candidate_complete")
+	runtime := openTestRuntime(t, model)
+	require.NoError(t, os.WriteFile(filepath.Join(runtime.workspace.Root(), "proof.txt"), []byte("actual implementation\n"), 0o600))
+
+	_, err := collectRuntimeResult(runtime.StartGoal(t.Context(), GoalRequest{Condition: "inspect proof.txt"}))
+	require.NoError(t, err)
+
+	state := runtime.GoalSnapshot()
+	require.True(t, state.Completed(), "%+v", state)
+	assert.Equal(t, 1, state.Attempts)
+	assert.Equal(t, 3, model.verifications)
+	assert.Empty(t, state.Gaps, "the achieved panel returns the accepting skeptic's own document")
+}
+
+// TestRuntimeGoalPanelSkepticsDoNotShareContext pins Phase AD's independence: the
+// three skeptics of one round each answer from their own message history, so no
+// call ever sees another skeptic's read or answer. A shared history would grow
+// past the two-read-then-verdict shape every skeptic has.
+func TestRuntimeGoalPanelSkepticsDoNotShareContext(t *testing.T) {
+	t.Parallel()
+
+	model := newGoalTestModel(
+		runtimeToolResponse("proof-read", "read", `{"path":"proof.txt"}`),
+		runtimeTextResponse("candidate complete"),
+	)
+	model.decisions = []string{"candidate_complete"}
+	runtime := openTestRuntime(t, model)
+	require.NoError(t, os.WriteFile(filepath.Join(runtime.workspace.Root(), "proof.txt"), []byte("actual implementation\n"), 0o600))
+
+	_, err := collectRuntimeResult(runtime.StartGoal(t.Context(), GoalRequest{Condition: "inspect proof.txt"}))
+	require.NoError(t, err)
+	require.True(t, runtime.GoalSnapshot().Completed(), "%+v", runtime.GoalSnapshot())
+
+	counts := model.AuditorMessages()
+	require.Len(t, counts, 3, "one history per skeptic")
+
+	for position, calls := range counts {
+		// system+payload, then the tool call and its result, then the skeptic's own
+		// answer, then the verdict prompt: a skeptic that saw another's turn would
+		// carry more.
+		assert.Equal(t, []int{2, 4, 6}, calls, "skeptic %d", position)
+	}
+}
+
+// TestRuntimeGoalVerifierInfrastructureFailurePausesFailClosed pins Phase AD's
+// infrastructure rule: a skeptic model failure pauses the Goal with the
+// reference's sentence instead of failing the Decision, and an explicit resume
+// runs the verification again.
+func TestRuntimeGoalVerifierInfrastructureFailurePausesFailClosed(t *testing.T) {
+	t.Parallel()
+
+	model := newGoalTestModel(
+		runtimeToolResponse("proof-read", "read", `{"path":"proof.txt"}`),
+		runtimeTextResponse("candidate complete"),
+		runtimeToolResponse("proof-read-2", "read", `{"path":"proof.txt"}`),
+		runtimeTextResponse("candidate complete"),
+	)
+	model.verifierFailure = errors.New("provider unavailable")
+	model.verifierFailureRounds = 1
+	runtime := openTestRuntime(t, model)
+	require.NoError(t, os.WriteFile(filepath.Join(runtime.workspace.Root(), "proof.txt"), []byte("actual implementation\n"), 0o600))
+
+	_, err := collectRuntimeResult(runtime.StartGoal(t.Context(), GoalRequest{Condition: "inspect proof.txt"}))
+	require.NoError(t, err)
+
+	state := runtime.GoalSnapshot()
+	require.Equal(t, GoalPaused, state.Status, "%+v", state)
+	assert.False(t, state.Completed())
+	assert.Contains(t, state.Reason,
+		"Goal verification infrastructure failed (provider unavailable). Run /goal resume to retry.")
+
+	// The pause is fail-closed but resumable: the next round's panel verifies.
+	model.muGoal.Lock()
+	model.verifierFailureRounds = 0
+	model.muGoal.Unlock()
+
+	_, err = collectRuntimeResult(runtime.ResumeGoal(t.Context()))
+	require.NoError(t, err)
+	require.True(t, runtime.GoalSnapshot().Completed(), "%+v", runtime.GoalSnapshot())
 }

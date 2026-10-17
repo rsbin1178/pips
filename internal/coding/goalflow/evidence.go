@@ -56,7 +56,10 @@ type Evidence struct {
 	Truncated     bool     `json:"truncated,omitempty"`
 }
 
-// State is the Coding wrapper around the unchanged SDK Goal State V1.
+// State is the Coding wrapper around the unchanged SDK Goal State V1. Digest and
+// EmptyRounds are retained only so a state written before Phase AD still decodes:
+// the three-unchanged-evidence guard they fed is gone, and no decision reads
+// either of them. The verification fields are additive.
 type State struct {
 	Version     int      `json:"version"`
 	Goal        ai.JSON  `json:"goal"`
@@ -65,6 +68,13 @@ type State struct {
 	EmptyRounds int      `json:"empty_rounds"`
 	Gaps        []string `json:"gaps,omitempty"`
 	References  []string `json:"references,omitempty"`
+	// VerifyRuns counts the Goal's verification runs, capped by
+	// goalVerifierMaxRuns and reset by an explicit resume.
+	VerifyRuns int `json:"verify_runs,omitempty"`
+	// GapStalls counts consecutive not-achieved verifications whose aggregate gap
+	// digest was unchanged; GapDigest is that digest.
+	GapStalls int    `json:"gap_stalls,omitempty"`
+	GapDigest string `json:"gap_digest,omitempty"`
 }
 
 // Prepare wraps the unchanged SDK Goal State V1.
@@ -84,7 +94,8 @@ func Decode(data ai.JSON) (State, error) {
 		return State{}, err
 	}
 
-	if state.Version != 1 || state.EmptyRounds < 0 || len(state.Gaps) > MaxGaps {
+	if state.Version != 1 || state.EmptyRounds < 0 || len(state.Gaps) > MaxGaps ||
+		state.VerifyRuns < 0 || state.GapStalls < 0 {
 		return State{}, fmt.Errorf("%w: invalid Coding Goal state", goal.ErrInvalid)
 	}
 

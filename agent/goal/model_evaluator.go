@@ -205,11 +205,11 @@ func validateNextStep(nextStep string) error {
 }
 
 // Evaluate implements Evaluator. An answer it cannot use — not one JSON object,
-// an unknown decision, or a field outside the document's contract — is attempted
-// once more, exactly as the reference's evaluation round is; a second unusable
-// answer is returned as an error so the Goal stops for the user instead of
-// continuing on a guess. A transport failure is not retried here, because the
-// model middleware already owns that.
+// an unknown decision, a field outside the document's contract, or a response
+// with no usage — is attempted once more, exactly as the reference's evaluation
+// round is; a second unusable answer is returned as an error so the Goal stops
+// for the user instead of continuing on a guess. A transport failure is not
+// retried here, because the model middleware already owns that.
 func (evaluator *ModelEvaluator) Evaluate(
 	ctx context.Context,
 	evaluation Evaluation,
@@ -268,7 +268,7 @@ func (evaluator *ModelEvaluator) Evaluate(
 		return result, nil
 	case unusable:
 		return result, fmt.Errorf(
-			"goal: the assessment answer was not the required JSON object after a bounded retry; "+
+			"goal: the assessment answer was unusable after a bounded retry; "+
 				"the Goal was stopped rather than treated as complete; use /goal resume to retry: %w",
 			err,
 		)
@@ -279,18 +279,18 @@ func (evaluator *ModelEvaluator) Evaluate(
 
 // assess answers one assessment request. unusable reports an answer that is not
 // a usable assessment: not one JSON object, an unknown decision, an empty
-// evidence or next step, or a blocker key that does not follow the reference's
-// rule. The document's decode rejects unknown fields, as the reference's own
-// evaluator struct does; the auditor's decode stays lenient. A transport failure
-// is not unusable, because the model middleware has already retried it, so the
-// evaluator never retries one.
+// evidence or next step, a blocker key that does not follow the reference's
+// rule, or a response that carried no usage at all. The document's decode rejects
+// unknown fields, as the reference's own evaluator struct does; the auditor's
+// decode stays lenient. A transport failure is not unusable, because the model
+// middleware has already retried it, so the evaluator never retries one.
 func (evaluator *ModelEvaluator) assess(
 	ctx context.Context, payload []byte, schema *ai.Schema, maxTokens *int,
 ) (EvaluationResult, bool, error) {
 	output, response, err := ai.GenerateTypedAdaptive[modelEvaluationOutput](
 		ctx, evaluator.model, ai.Request{
-			Messages:    ai.Messages{ai.SystemText(modelEvaluatorSystem), ai.UserText(string(payload))},
-			Temperature: ai.Ptr(0.0), MaxTokens: maxTokens,
+			Messages:  ai.Messages{ai.SystemText(modelEvaluatorSystem), ai.UserText(string(payload))},
+			MaxTokens: maxTokens,
 			ResponseFormat: &ai.ResponseFormat{
 				Name: "goal_evaluation", Description: "Evidence-based Goal completion decision.",
 				Schema: schema, Strict: true,
@@ -310,6 +310,13 @@ func (evaluator *ModelEvaluator) assess(
 
 	if err != nil {
 		return result, false, err
+	}
+
+	// The reference's evaluator treats a response with no usage as a failed
+	// attempt: a usage-less answer is not a usable judgment, so it gets the same
+	// bounded retry and then stops the run.
+	if response == nil || response.Usage == (ai.Usage{}) {
+		return result, true, fmt.Errorf("%w: the assessment answer carried no usage", ErrInvalid)
 	}
 
 	result.Outcome, result.Reason = outcomeFor(output.Decision), output.Evidence

@@ -116,41 +116,46 @@ is a cooperative limit rather than a billing guarantee: one provider call can
 overshoot an allowance before reporting usage.
 
 A worker saying "done" is not sufficient. An independent evaluator reviews
-recorded evidence, and a completion candidate receives a bounded read-only
-verification of workspace files and actual tool results. This verifier cannot
-edit files or execute shell commands; it audits saved test output rather than
-rerunning the tests itself. Missing or contradictory evidence produces a gap
-for the next work segment, not success.
+recorded evidence, and a completion candidate is checked by a panel of three
+independent verifiers (clamped to one through five), each reading the workspace
+and the recorded tool results on its own. A verifier cannot edit files or execute
+shell commands; it audits saved test output rather than rerunning the tests
+itself. Missing or contradictory evidence produces a gap for the next work
+segment, not success. The panel passes a candidate only when its cold majority
+does not reject it, so one verifier's objection is one vote rather than an
+automatic rejection.
 
 Both checks ask for their answer as one JSON object. A model that declares
 `structured_output` is asked through the provider's own JSON Schema mechanism;
 any other model is asked through the prompt-only convention, with the schema
 described in the prompt. The declaration chooses the transport and never relaxes
 the check: the same verdict fields, reference and proof rules, and evidence
-bounds apply either way. What decides proof is the auditor's own instructions, as
-it is in the reference: it is told to default to not verified when uncertain, to
-treat prose as non-evidence, to cite a recorded result and its own file read, to
-re-read a file it cites, and to refuse absent, failed, truncated, contradictory or
-stale evidence — so a verification is only as good as the auditor's compliance
-with that contract. Neither check caps the model's output tokens, so a model
-that reasons before answering is not cut off mid-answer; the goal's own token
-budget bounds the run. The evaluator is shown the condition and a bounded
-transcript of the conversation — the last 32 KiB of it, 4 KiB per message — while
-the verifier reads the recorded tool results. The evaluator answers with a
-decision — continue, candidate complete, or blocked — and a blocked decision
-names a stable blocker key: the goal keeps working until the same blocker is
-declared three times running, and then it is blocked with the evidence and the
-next user action the evaluator named. An answer
-the harness cannot use is judged, not fatal, and
-the two checks differ. The verifier treats a verdict it cannot read — not JSON, or
-a contract violation such as an empty reason — as not achieved, and its reason
-returns to the model as the next work segment's feedback. The evaluator cannot
-judge at all, so an unusable assessment is attempted once more and, if the second
-answer is unusable too, the goal stops and says it was stopped rather than treated
-as complete: run `/goal resume` to retry the check. A provider failure still
-interrupts assessment and can be retried without repeating the work, and a
-verification infrastructure failure stops the run with "Goal verification
-infrastructure failed (…). Run /goal resume to retry."
+bounds apply either way. What decides proof is each verifier's own instructions,
+as it is in the reference: it is told to default to not verified when uncertain,
+to treat prose as non-evidence, to cite a recorded result and its own file read,
+to re-read a file it cites, and to refuse absent, failed, truncated,
+contradictory or stale evidence — so a verification is only as good as the
+panel's compliance with that contract. Neither check caps the model's output
+tokens, so a model that reasons before answering is not cut off mid-answer; the
+goal's own token budget bounds the run. Neither check pins a temperature either:
+the provider's own default applies, as it does in the reference. The evaluator is
+shown the condition and a bounded transcript of the conversation — the last
+32 KiB of it, 4 KiB per message — while each verifier reads the recorded tool
+results. The evaluator answers with a decision — continue, candidate complete, or
+blocked — and a blocked decision names a stable blocker key: the goal keeps
+working until the same blocker is declared three times running, and then it is
+blocked with the evidence and the next user action the evaluator named. An answer
+the harness cannot use is judged, not fatal, and the two checks differ. A
+verifier treats a verdict it cannot read — not JSON, or a contract violation such
+as an empty reason — as a rejection vote, and the panel's aggregated gaps return
+to the model as the next work segment's feedback. The evaluator cannot judge at
+all, so an unusable assessment — including one whose answer carries no usage
+accounting — is attempted once more and, if the second answer is unusable too,
+the goal stops and says it was stopped rather than treated as complete: run
+`/goal resume` to retry the check. A provider failure still interrupts assessment
+and can be retried without repeating the work, and a verification infrastructure
+failure pauses the goal with "Goal verification infrastructure failed (…). Run
+/goal resume to retry." — the panel never treats a failure as an approval.
 
 The model declares its own progress with the `update_goal` tool. It is offered
 wherever a goal can run and stays offered outside one, so a call there is a
@@ -161,19 +166,20 @@ defeated three or more attempts; the runtime counts them, answering the first tw
 with the streak so the model keeps working, and pauses the goal with that reason
 for a user decision on the third; and `completed` records the model's claim that
 the condition is achieved. A completion claim does not decide completion. It is
-consumed at the goal loop's next decision point, where the verifier runs in place
-of the ordinary continuation step: a verified verdict ends the run, and an
-unverified one returns the auditor's gaps to the model as its next feedback. The
-verdict stays with the auditor, which still reads the workspace and the recorded
-tool results — the worker's declaration is never itself evidence. A declaration
+consumed at the goal loop's next decision point, where the verification panel
+runs in place of the ordinary continuation step: a verified verdict ends the run,
+and an unverified one returns the panel's gaps to the model as its next feedback.
+The verdict stays with the panel, which still reads the workspace and the
+recorded tool results — the worker's declaration is never itself evidence. A declaration
 with no goal run in progress, or a `completed` or `blocked_reason` against a goal
 that is paused or already complete, is refused with a named reason.
 
-Verification is intentionally bounded: the evidence ledger retains up to 32
-latest tool results with 4 KiB per result; an audit has up to four read rounds
-and eight tool calls. Keep checks and captured output focused. Dropped or
-truncated essential proof cannot pass verification; split larger objectives
-rather than relying on an unbounded transcript audit.
+Verification is bounded in its inputs rather than its reasoning: the evidence
+ledger retains up to 32 latest tool results with 4 KiB per result, and a goal runs
+at most ten verification panels before it pauses for an explicit resume. A
+verifier reads until it stops calling tools, so keep checks and captured output
+focused. Dropped or truncated essential proof cannot pass verification; split
+larger objectives rather than relying on an unbounded audit.
 
 Goals do not grant trust, bypass tool approval, approve Plan review, or answer
 questions on your behalf. Pending input keeps the goal blocked. In `exec`, a

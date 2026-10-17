@@ -35,7 +35,40 @@ type Controller struct {
 	// because a decision retried after an interruption rebuilds that request from
 	// durable state and would carry an empty or stale transcript.
 	Transcript func() (transcript, plan string)
+	// ResetVerification reports and consumes an explicit user resume, so the
+	// per-goal verification run count and the gap-stall state start again. Like
+	// the declaration it is process-local state of the run that produced it, and
+	// the reference's own resume resets the same counters.
+	ResetVerification func() bool
 }
+
+// The verification stage's bounds are the reference's own. goalVerifierMaxRuns is
+// GOAL_CLASSIFIER_MAX_RUNS_DEFAULT, a per-goal cap on verification runs rather
+// than a cap on work segments; goalGapStallThreshold is
+// GOAL_CLASSIFIER_STALL_THRESHOLD, the same aggregate gap digest seen this many
+// consecutive not-achieved verifications.
+const (
+	goalVerifierMaxRuns   = 10
+	goalGapStallThreshold = 2
+)
+
+// The pause sentences the two bounds report. They are built from the bounds, so
+// the message cannot drift from the number it names.
+var (
+	verificationRunCapReason = fmt.Sprintf(
+		"Paused after %d verification runs without a verified completion; run /goal resume to continue",
+		goalVerifierMaxRuns,
+	)
+	gapStallReason = fmt.Sprintf(
+		"Paused after %d verifications reported the same gaps; run /goal resume to continue",
+		goalGapStallThreshold,
+	)
+)
+
+// errVerificationRunCap signals that the Goal's per-goal verification run cap is
+// reached. The evaluator wrapper returns it, and Decide turns it into a
+// no_progress block instead of spending another panel.
+var errVerificationRunCap = errors.New("goal verification run cap reached")
 
 // declaredVerificationReason is the decision a model declaration forces. It is
 // never the completion reason: the verifier's own verdict replaces it.
@@ -67,10 +100,14 @@ func (c *Controller) Decide(ctx context.Context, request continuation.DecisionRe
 		return continuation.Decision{}, err
 	}
 
+	// An explicit user resume starts the verification run count and the gap-stall
+	// state over, exactly as the reference's resume resets its own counters.
+	if c.ResetVerification != nil && c.ResetVerification() {
+		state.VerifyRuns, state.GapStalls, state.GapDigest = 0, 0, ""
+	}
+
 	if c.Invalidated != nil && c.Invalidated() {
 		state.Evidence = Evidence{}
-		state.Digest = ""
-		state.EmptyRounds = 0
 		state.References = nil
 		state.Gaps = []string{"Navigation invalidated prior evidence; collect fresh evidence"}
 		encoded, err := Encode(state)
@@ -133,8 +170,21 @@ func (c *Controller) Decide(ctx context.Context, request continuation.DecisionRe
 
 		if result.Outcome != goal.OutcomeComplete {
 			gaps = []string{result.Reason}
+
+			// A blocked assessment ends the run of identical rejections: the
+			// reference resets its own stall state when a classification blocks.
+			if result.Outcome == goal.OutcomeBlocked {
+				state.GapStalls, state.GapDigest = 0, ""
+			}
+
 			return result, nil
 		}
+
+		if state.VerifyRuns >= goalVerifierMaxRuns {
+			return result, errVerificationRunCap
+		}
+
+		state.VerifyRuns++
 
 		if c.Phase != nil {
 			if err := c.Phase("verifying"); err != nil {
@@ -155,7 +205,20 @@ func (c *Controller) Decide(ctx context.Context, request continuation.DecisionRe
 		result.Reason = verdict.Reason
 
 		gaps, references = verdict.Gaps, verdict.References
-		if !verdict.Verified {
+
+		if verdict.Verified {
+			state.GapStalls, state.GapDigest = 0, ""
+		} else {
+			// The stall guard keys on the aggregate gaps: the same digest on two
+			// consecutive not-achieved verifications pauses the Goal, exactly as the
+			// reference's gap_fingerprint does.
+			digest := gapDigest(verdict.Gaps)
+			if digest != "" && digest == state.GapDigest {
+				state.GapStalls++
+			} else {
+				state.GapStalls, state.GapDigest = 1, digest
+			}
+
 			result.Outcome = goal.OutcomeContinue
 		}
 
@@ -169,6 +232,19 @@ func (c *Controller) Decide(ctx context.Context, request continuation.DecisionRe
 
 	decision, err := policy.Decide(ctx, request)
 	if err != nil {
+		// A reached run cap is a designed stop, not a failure: it blocks as
+		// no_progress rather than spending another panel.
+		if errors.Is(err, errVerificationRunCap) {
+			return blockVerification(state, "no_progress", verificationRunCapReason, observed)
+		}
+
+		// A verifier infrastructure failure pauses the Goal fail-closed instead of
+		// failing the Decision, carrying the reference's own sentence. Everything
+		// else — a budget exhaustion, a payload bound — keeps its own path.
+		if infrastructure, ok := errors.AsType[*verificationInfrastructureError](err); ok {
+			return blockVerification(state, "infra", infrastructure.Error(), observed)
+		}
+
 		if c.FailedUsage != nil && ValidUsage(observed) {
 			err = errors.Join(err, c.FailedUsage(observed))
 		}
@@ -178,28 +254,33 @@ func (c *Controller) Decide(ctx context.Context, request continuation.DecisionRe
 
 	state.Goal, state.Gaps, state.References = decision.State, gaps, references
 
-	fingerprint := evidence.Fingerprint()
-	if fingerprint == "" || fingerprint == state.Digest {
-		state.EmptyRounds++
-	} else {
-		state.EmptyRounds = 0
-	}
-
-	state.Digest = fingerprint
-
 	decision.State, err = Encode(state)
 	if err != nil {
 		return continuation.Decision{}, err
 	}
 
-	if state.EmptyRounds >= 3 && decision.Action == continuation.ActionContinue {
+	if state.GapStalls >= goalGapStallThreshold && decision.Action == continuation.ActionContinue {
 		decision.Action = continuation.ActionBlock
 		decision.Block = &continuation.Block{Kind: "no_progress"}
-		decision.Reason = "Paused after three assessments without substantive new evidence"
+		decision.Reason = gapStallReason
 		decision.Output = nil
 	}
 
 	return decision, nil
+}
+
+// blockVerification encodes the current wrapper state and blocks on it. The
+// observed usage rides the block, so tokens already spent are still accounted.
+func blockVerification(state State, kind, reason string, usage ai.Usage) (continuation.Decision, error) {
+	encoded, err := Encode(state)
+	if err != nil {
+		return continuation.Decision{}, err
+	}
+
+	return continuation.Decision{
+		Action: continuation.ActionBlock, State: encoded, Usage: usage,
+		Block: &continuation.Block{Kind: kind}, Reason: reason,
+	}, nil
 }
 
 func blocked(state State, kind, reason string) (continuation.Decision, error) {
