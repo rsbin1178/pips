@@ -70,6 +70,28 @@ var (
 // no_progress block instead of spending another panel.
 var errVerificationRunCap = errors.New("goal verification run cap reached")
 
+// verificationBlockedError signals that the panel blocked the Goal: at least one
+// refuter exists and every refuter's blocking is non-`none`, so iterating cannot
+// resolve it. The evaluator wrapper returns it, and Decide turns it into a
+// `gate` block with the pause summary it carries.
+type verificationBlockedError struct {
+	reason string
+}
+
+func (blocked *verificationBlockedError) Error() string { return blocked.reason }
+
+// verificationBlockedReason builds the bounded pause summary the blocking route
+// reports, naming the blocking evidence and the way out.
+func verificationBlockedReason(evidence string) string {
+	evidence = strings.TrimSpace(evidence)
+	if evidence == "" {
+		evidence = "the skeptic panel reported a blocker that iteration cannot resolve"
+	}
+
+	return "Goal verification blocked on evidence that iteration cannot resolve: " +
+		Bound(evidence, gapEvidenceMaxChars) + ". Resolve it and run /goal resume."
+}
+
 // declaredVerificationReason is the decision a model declaration forces. It is
 // never the completion reason: the verifier's own verdict replaces it.
 const declaredVerificationReason = "The model declared the Goal complete; verify the recorded evidence"
@@ -192,9 +214,7 @@ func (c *Controller) Decide(ctx context.Context, request continuation.DecisionRe
 			}
 		}
 
-		accounting := evaluation.Accounting
-		accounting.Usage.Add(observed)
-		verdict, usage, err := c.Verifier.Verify(ctx, evaluation.Condition, evidence, evaluation.Limits, accounting)
+		verdict, usage, err := c.Verifier.Verify(ctx, evaluation.Condition, evidence, state.VerifyGaps)
 		observed.Add(usage)
 
 		if err != nil {
@@ -206,12 +226,29 @@ func (c *Controller) Decide(ctx context.Context, request continuation.DecisionRe
 
 		gaps, references = verdict.Gaps, verdict.References
 
+		// A blocked panel cannot be resolved by another work segment: the Goal
+		// blocks for a user decision, rolls back the verification run it spent and
+		// clears the stall state, exactly as the reference's Blocked route does.
+		if verdict.Blocked {
+			if state.VerifyRuns > 0 {
+				state.VerifyRuns--
+			}
+
+			state.GapStalls, state.GapDigest = 0, ""
+
+			return result, &verificationBlockedError{reason: verificationBlockedReason(verdict.Reason)}
+		}
+
 		if verdict.Verified {
+			state.VerifyGaps = nil
 			state.GapStalls, state.GapDigest = 0, ""
 		} else {
-			// The stall guard keys on the aggregate gaps: the same digest on two
+			// The last verification's gaps become the next panel's PRIOR_GAPS, and
+			// the stall guard keys on their digest: the same digest on two
 			// consecutive not-achieved verifications pauses the Goal, exactly as the
 			// reference's gap_fingerprint does.
+			state.VerifyGaps = verdict.Gaps
+
 			digest := gapDigest(verdict.Gaps)
 			if digest != "" && digest == state.GapDigest {
 				state.GapStalls++
@@ -236,6 +273,12 @@ func (c *Controller) Decide(ctx context.Context, request continuation.DecisionRe
 		// no_progress rather than spending another panel.
 		if errors.Is(err, errVerificationRunCap) {
 			return blockVerification(state, "no_progress", verificationRunCapReason, observed)
+		}
+
+		// A blocked panel is a user decision: it blocks the Goal as a gate with
+		// the pause summary naming the blocking evidence.
+		if blocked, ok := errors.AsType[*verificationBlockedError](err); ok {
+			return blockVerification(state, "gate", blocked.reason, observed)
 		}
 
 		// A verifier infrastructure failure pauses the Goal fail-closed instead of

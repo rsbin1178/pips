@@ -1,9 +1,7 @@
-//nolint:wsl_v5 // Each transport fixture keeps its scripted model and assertions adjacent.
 package coding
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,7 +11,6 @@ import (
 	"testing"
 
 	"github.com/rsbin1178/pips/ai"
-	"github.com/rsbin1178/pips/internal/coding/goalflow"
 	"github.com/rsbin1178/pips/internal/coding/tools"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -160,26 +157,10 @@ func cloneTokenCap(maxTokens *int) *int {
 	return ai.Ptr(*maxTokens)
 }
 
-// verifiedGoalTransportVerdict is the default audit answer: it cites the recorded
-// evidence and the auditor's own read, so the proof gate passes.
-func verifiedGoalTransportVerdict(messages ai.Messages) string {
-	references := []string{"read:audit-read"}
-	for _, message := range messages {
-		var payload struct {
-			Evidence goalflow.Evidence `json:"evidence"`
-		}
-		if json.Unmarshal([]byte(runtimeMessageText(message)), &payload) == nil {
-			for _, record := range payload.Evidence.Records {
-				references = append(references, record.ID)
-			}
-		}
-	}
-
-	data, _ := json.Marshal(goalflow.Verdict{
-		Verified: true, Reason: "the recorded read matches the actual file", Gaps: []string{}, References: references,
-	})
-
-	return string(data)
+// verifiedGoalTransportVerdict is the default audit answer: the recorded read
+// matches the actual file, so the skeptic does not refute.
+func verifiedGoalTransportVerdict(ai.Messages) string {
+	return goalVerifiedVerdict
 }
 
 // goalGapObserved reports whether a Goal projection carried a gap containing
@@ -248,7 +229,7 @@ func TestRuntimeGoalCompletesOnAPortableSchemaModel(t *testing.T) {
 	assert.Contains(t, assessmentSystems[0], "Native structured output is unavailable.")
 	assert.Contains(t, assessmentSystems[0], `"decision"`)
 	assert.Contains(t, verdictSystems[0], "Native structured output is unavailable.")
-	assert.Contains(t, verdictSystems[0], `"verified"`)
+	assert.Contains(t, verdictSystems[0], `"refuted"`)
 
 	// No role call carried an output cap: the Goal's budget bounds the run, not
 	// one call, so the provider's own default applies. The auditor's read rounds
@@ -306,7 +287,8 @@ func TestRuntimeGoalCarriesAnUnverifiedPortableVerdictsGapsForward(t *testing.T)
 			`"next_step":"verify the candidate","blocker_key":""}`,
 	}
 	model.verdicts = []string{
-		`{"verified":false,"reason":"the recorded read does not cover the migration","gaps":["` + gap + `"],"references":[]}`,
+		`{"refuted":true,"evidence":"the recorded read does not cover the migration","confidence":"medium","blocking":"none",` +
+			`"findings":[{"kind":"gap","location":"migration","detail":"` + gap + `"}],"details_md":""}`,
 	}
 	runtime := openTestRuntime(t, model)
 	writeGoalTransportProof(t, runtime)
@@ -329,9 +311,10 @@ func TestRuntimeGoalCarriesAnUnverifiedPortableVerdictsGapsForward(t *testing.T)
 	assert.Equal(t, panelBools(false, 2), verdictFormats)
 }
 
-// TestRuntimeGoalTreatsAMalformedPortableVerdictAsNotAchieved pins the wrong-shape
-// rule at the audit boundary: a verdict that is not one JSON object is "not
-// achieved", and its reason reaches the next work segment.
+// TestRuntimeGoalTreatsAMalformedPortableVerdictAsNotAchieved pins the fallback
+// chain at the audit boundary: a verdict that is not one JSON object and carries
+// no terminal token becomes a synthetic refute, whose evidence reaches the next
+// work segment.
 func TestRuntimeGoalTreatsAMalformedPortableVerdictAsNotAchieved(t *testing.T) {
 	t.Parallel()
 
@@ -350,14 +333,15 @@ func TestRuntimeGoalTreatsAMalformedPortableVerdictAsNotAchieved(t *testing.T) {
 	events, err := collectRuntimeResult(runtime.StartGoal(t.Context(), GoalRequest{Condition: "inspect proof.txt"}))
 	require.NoError(t, err)
 
-	// The malformed verdict was not a completion: the Goal projection that carried
-	// its reason stayed open.
-	assert.True(t, goalGapObserved(events, "not the required JSON verdict object"))
+	// The malformed verdict had no terminal token, so the skeptic's synthetic
+	// refute evidence was not a completion: the Goal projection that carried it
+	// stayed open.
+	assert.True(t, goalGapObserved(events, "skeptic failure"))
 
 	requests := model.Requests()
 	require.Len(t, requests, 4)
 	assert.True(t, requestContainsText(requests[2], "Independent evidence gaps"))
-	assert.True(t, requestContainsText(requests[2], "not the required JSON verdict object"))
+	assert.True(t, requestContainsText(requests[2], "skeptic failure"))
 
 	// The run then ended deterministically on the second, verified verdict.
 	state := runtime.GoalSnapshot()
@@ -368,74 +352,32 @@ func TestRuntimeGoalTreatsAMalformedPortableVerdictAsNotAchieved(t *testing.T) {
 	assert.Equal(t, panelBools(false, 2), verdictFormats)
 }
 
-// TestRuntimeGoalTreatsAContractBreakingPortableVerdictAsNotAchieved pins the
-// auditor's rule at the audit boundary: a verdict that parses but breaks its own
-// contract is "not achieved", and its reason reaches the next work segment
-// exactly like a verdict that did not parse at all.
-func TestRuntimeGoalTreatsAContractBreakingPortableVerdictAsNotAchieved(t *testing.T) {
+// TestRuntimeGoalUsesATerminalTokenFallbackOnThePortableTransport pins the
+// fallback's first step at the runtime boundary: a portable model that answers
+// with only the reference's terminal token is understood, so the panel accepts
+// and the Goal completes.
+func TestRuntimeGoalUsesATerminalTokenFallbackOnThePortableTransport(t *testing.T) {
 	t.Parallel()
 
-	overBounds := make([]string, goalflow.MaxGaps+1)
-	for index := range overBounds {
-		overBounds[index] = fmt.Sprintf("gap-%d", index)
+	model := newGoalTransportModel()
+	scriptGoalTransportSegments(model, 1)
+	model.assessments = []string{
+		`{"decision":"candidate_complete","evidence":"the candidate looks done",` +
+			`"next_step":"verify the candidate","blocker_key":""}`,
 	}
+	model.verdicts = []string{"Not Refuted"}
+	runtime := openTestRuntime(t, model)
+	writeGoalTransportProof(t, runtime)
 
-	overBoundsVerdict, err := json.Marshal(goalflow.Verdict{
-		Reason: "the recorded read does not cover the migration", Gaps: overBounds, References: []string{},
-	})
+	_, err := collectRuntimeResult(runtime.StartGoal(t.Context(), GoalRequest{Condition: "inspect proof.txt"}))
 	require.NoError(t, err)
 
-	tests := []struct {
-		name   string
-		answer string
-		gap    string
-	}{
-		{
-			name:   "empty reason",
-			answer: `{"verified":false,"reason":"","gaps":["the recorded read is stale"],"references":[]}`,
-			gap:    "carries no reason",
-		},
-		{
-			name:   "over-bounds gaps",
-			answer: string(overBoundsVerdict),
-			gap:    fmt.Sprintf("carries more than %d gaps", goalflow.MaxGaps),
-		},
-	}
+	state := runtime.GoalSnapshot()
+	require.True(t, state.Completed(), "%+v", state)
+	assert.Equal(t, 1, state.Attempts)
 
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-
-			model := newGoalTransportModel()
-			scriptGoalTransportSegments(model, 2)
-			model.assessments = []string{
-				`{"decision":"candidate_complete","evidence":"the first candidate looks done",` +
-					`"next_step":"verify the candidate","blocker_key":""}`,
-				`{"decision":"candidate_complete","evidence":"the second candidate looks done",` +
-					`"next_step":"verify the candidate","blocker_key":""}`,
-			}
-			model.verdicts = []string{test.answer}
-			runtime := openTestRuntime(t, model)
-			writeGoalTransportProof(t, runtime)
-
-			events, err := collectRuntimeResult(runtime.StartGoal(t.Context(), GoalRequest{Condition: "inspect proof.txt"}))
-			require.NoError(t, err)
-
-			// The unusable verdict was not a completion: the Goal projection that
-			// carried its reason stayed open.
-			assert.True(t, goalGapObserved(events, test.gap))
-
-			requests := model.Requests()
-			require.Len(t, requests, 4)
-			assert.True(t, requestContainsText(requests[2], "Independent evidence gaps"))
-			assert.True(t, requestContainsText(requests[2], test.gap))
-
-			// The run then ended deterministically on the second, verified verdict.
-			state := runtime.GoalSnapshot()
-			require.True(t, state.Completed(), "%+v", state)
-			assert.Equal(t, 2, state.Attempts)
-		})
-	}
+	_, verdictFormats, _, _ := model.callFormats()
+	assert.Equal(t, panelBools(false, 1), verdictFormats)
 }
 
 // TestRuntimeGoalStopsOnAnUnusablePortableAssessment pins the assessment's own

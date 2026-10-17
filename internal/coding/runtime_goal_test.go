@@ -38,7 +38,7 @@ type goalTestModel struct {
 	// verifierVerdicts are the panel's scripted verdicts, one per verification
 	// round applied to every skeptic of that round; once they run out,
 	// verifierVerdict answers every further round. With neither, the panel returns
-	// the default verdict: verified with the recorded evidence IDs and its own read.
+	// goalVerifiedVerdict.
 	verifierVerdicts []string
 	verifierVerdict  string
 	// verifierPositionVerdicts overrides the verdict of one panel position — the
@@ -57,6 +57,9 @@ type goalTestModel struct {
 	// auditorEvidence is the ledger the auditor's last verdict request carried,
 	// so a test can assert what the audit was actually asked to judge.
 	auditorEvidence goalflow.Evidence
+	// auditorSystems records every audit system prompt, so a test can assert what
+	// the panel was told, including the PRIOR_GAPS block.
+	auditorSystems []string
 	// assessments are the assessment requests this scripted model answered. They
 	// are recorded here rather than in the work script, because this model answers
 	// them itself; a test reads them to inspect the request body.
@@ -93,12 +96,19 @@ func (m *goalTestModel) AuditorMessages() map[int][]int {
 	return counts
 }
 
-// auditorRequestEvidence extracts the ledger the auditor's request carried with
-// the record IDs the default verdict cites. Only the payload message names a
-// condition, so a tool envelope cannot masquerade as the ledger.
-func auditorRequestEvidence(request ai.Request) (goalflow.Evidence, []string) {
+// AuditorSystems returns every audit system prompt the panel saw.
+func (m *goalTestModel) AuditorSystems() []string {
+	m.muGoal.Lock()
+	defer m.muGoal.Unlock()
+
+	return append([]string(nil), m.auditorSystems...)
+}
+
+// auditorRequestEvidence extracts the ledger the auditor's request carried.
+// Only the payload message names a condition, so a tool envelope cannot
+// masquerade as the ledger.
+func auditorRequestEvidence(request ai.Request) goalflow.Evidence {
 	evidence := goalflow.Evidence{}
-	references := []string{"read:audit-read"}
 
 	for _, message := range request.Messages {
 		var payload struct {
@@ -110,12 +120,9 @@ func auditorRequestEvidence(request ai.Request) (goalflow.Evidence, []string) {
 		}
 
 		evidence = payload.Evidence
-		for _, record := range payload.Evidence.Records {
-			references = append(references, record.ID)
-		}
 	}
 
-	return evidence, references
+	return evidence
 }
 
 // testPanelSize is the default verifier panel's size, which the runtime builds
@@ -196,9 +203,27 @@ func lastAssessmentBody(t *testing.T, requests []ai.Request) goalAssessmentBody 
 	return body
 }
 
+// goalVerifiedVerdict is the default audit answer: the recorded read matches the
+// actual file, so the skeptic does not refute.
+const goalVerifiedVerdict = `{"refuted":false,"evidence":"actual file matches captured read",` +
+	`"confidence":"high","blocking":"none","findings":[],"details_md":""}`
+
 // goalRefutingVerdict is a scripted auditor rejection: the recorded ledger does
-// not prove the condition, so the loop continues with the auditor's own gap.
-const goalRefutingVerdict = `{"verified":false,"reason":"the recorded evidence does not prove the condition","gaps":["record a check that proves the condition"],"references":[]}`
+// not prove the condition, so the loop continues with the auditor's own finding.
+const goalRefutingVerdict = `{"refuted":true,"evidence":"the recorded evidence does not prove the condition",` +
+	`"confidence":"medium","blocking":"none",` +
+	`"findings":[{"kind":"gap","location":"verification","detail":"record a check that proves the condition"}],"details_md":""}`
+
+// goalBlockingVerdict is a scripted auditor rejection whose blocker is not
+// model-fixable, so the panel blocks the Goal for a user decision.
+const goalBlockingVerdict = `{"refuted":true,"evidence":"the objective contradicts itself",` +
+	`"confidence":"high","blocking":"contradiction",` +
+	`"findings":[{"kind":"gap","location":"objective","detail":"resolve the contradiction with the user"}],"details_md":""}`
+
+// goalHighGatekeeperVerdict is a gatekeeper refute at high confidence, which
+// vetoes the cold quorum.
+const goalHighGatekeeperVerdict = `{"refuted":true,"evidence":"the gatekeeper is certain the work is broken",` +
+	`"confidence":"high","blocking":"none","findings":[],"details_md":""}`
 
 func (m *goalTestModel) Capabilities() ai.Capabilities {
 	return ai.Capabilities{Text: true, Tools: true, StructuredOutput: true}
@@ -257,6 +282,7 @@ func (m *goalTestModel) Generate(ctx context.Context, request ai.Request) (*ai.R
 			m.auditorMessages = map[int][]int{}
 		}
 		m.auditorMessages[position] = append(m.auditorMessages[position], len(request.Messages))
+		m.auditorSystems = append(m.auditorSystems, requestSystemText(request))
 		m.muGoal.Unlock()
 
 		if request.ResponseFormat == nil {
@@ -268,7 +294,7 @@ func (m *goalTestModel) Generate(ctx context.Context, request ai.Request) (*ai.R
 			return runtimeToolResponse("audit-read", "read", `{"path":"proof.txt"}`), nil
 		}
 
-		evidence, references := auditorRequestEvidence(request)
+		evidence := auditorRequestEvidence(request)
 
 		// Every skeptic of one verification round answers the same scripted
 		// verdict, keyed by the round index rather than by call order, so the
@@ -297,8 +323,7 @@ func (m *goalTestModel) Generate(ctx context.Context, request ai.Request) (*ai.R
 			return runtimeTextResponse(scripted), nil
 		}
 
-		data, _ := json.Marshal(goalflow.Verdict{Verified: true, Reason: "actual file matches captured read", Gaps: []string{}, References: references})
-		return runtimeTextResponse(string(data)), nil
+		return runtimeTextResponse(goalVerifiedVerdict), nil
 	}
 	return m.runtimeModel.Generate(ctx, request)
 }
@@ -442,10 +467,9 @@ func TestRuntimeGoalRetriedDecisionCarriesTheTranscript(t *testing.T) {
 }
 
 // TestRuntimeGoalTakesAVerifiedVerdictAsCompletion pins Phase AA's inverted
-// contract: the machine proof gate is gone, so a verdict that says verified
+// contract: the machine proof gate is gone, so a verdict that does not refute
 // completes the Goal even when the recorded evidence is empty, failed or
-// truncated, or when the verdict cites nothing. The auditor's prompt, not this
-// harness, is what asks for proof now.
+// truncated. The skeptic's prompt, not this harness, is what asks for proof now.
 func TestRuntimeGoalTakesAVerifiedVerdictAsCompletion(t *testing.T) {
 	t.Parallel()
 
@@ -470,7 +494,7 @@ func TestRuntimeGoalTakesAVerifiedVerdictAsCompletion(t *testing.T) {
 		},
 		{
 			name: "empty verification", read: "proof.txt", files: map[string]string{"proof.txt": "proof\n"},
-			verdict: `{"verified":true,"reason":"looks good","gaps":[],"references":[]}`,
+			verdict: `{"refuted":false,"evidence":"looks good","confidence":"high","blocking":"none","findings":[],"details_md":""}`,
 			check: func(t *testing.T, evidence goalflow.Evidence) {
 				t.Helper()
 
@@ -540,9 +564,10 @@ func TestRuntimeGoalTakesAVerifiedVerdictAsCompletion(t *testing.T) {
 }
 
 // TestRuntimeGoalKeepsRefusingARejectingOrMalformedVerdict pins what still stops
-// the loop after Phase AA: a verdict that says verified:false with gaps keeps the
-// Goal running, and a verdict that is not one JSON object (§6.33) is "not
-// achieved" too. Either way the Goal pauses with the auditor's reason as its gap.
+// the loop after Phase AE: a refuting verdict with findings keeps the Goal
+// running, and a verdict that is not one JSON object and carries no terminal
+// token becomes a synthetic refute. Either way the Goal pauses with the panel's
+// evidence as its gap.
 func TestRuntimeGoalKeepsRefusingARejectingOrMalformedVerdict(t *testing.T) {
 	t.Parallel()
 
@@ -552,14 +577,18 @@ func TestRuntimeGoalKeepsRefusingARejectingOrMalformedVerdict(t *testing.T) {
 		wantGap string
 	}{
 		{
-			name:    "refuted verdict",
-			verdict: `{"verified":false,"reason":"the recorded evidence does not show the implementation","gaps":["rerun the failing check"],"references":[]}`,
+			name: "refuted verdict",
+			verdict: `{"refuted":true,"evidence":"the recorded evidence does not show the implementation",` +
+				`"confidence":"medium","blocking":"none",` +
+				`"findings":[{"kind":"gap","location":"implementation","detail":"rerun the failing check"}],"details_md":""}`,
 			wantGap: "rerun the failing check",
 		},
 		{
+			// The terminal-token fallback fails too, so the skeptic's synthetic
+			// refute evidence becomes the gap.
 			name:    "malformed verdict",
 			verdict: "not a JSON verdict object",
-			wantGap: "not the required JSON verdict object",
+			wantGap: "skeptic failure",
 		},
 	}
 
@@ -651,6 +680,23 @@ func TestRuntimeGoalResumeResetsTheGapStallGuard(t *testing.T) {
 	state := runtime.GoalSnapshot()
 	require.True(t, state.Completed(), "%+v", state)
 	assert.Equal(t, 4, state.Attempts)
+
+	// The reference's resume resets the run count and the stall state, never the
+	// prior gaps: only the first panel (three skeptics, three audit calls each)
+	// saw the (none) marker, and every later panel saw the last verification's gap.
+	none, gap := 0, 0
+
+	for _, system := range model.AuditorSystems() {
+		switch {
+		case strings.Contains(system, "first round):\n(none)"):
+			none++
+		case strings.Contains(system, "record a check that proves the condition"):
+			gap++
+		}
+	}
+
+	assert.Equal(t, 3*3, none, "only the first panel saw no prior gaps")
+	assert.Positive(t, gap, "the resumed panels saw the last verification's gaps")
 }
 
 // scriptDistinctRejections scripts work segments whose panels reject with a
@@ -660,7 +706,8 @@ func scriptDistinctRejections(model *goalTestModel, rounds int) {
 		model.responses = append(model.responses, runtimeTextResponse(fmt.Sprintf("claim-%d", index)))
 		model.decisions = append(model.decisions, "candidate_complete")
 		model.verifierVerdicts = append(model.verifierVerdicts,
-			fmt.Sprintf(`{"verified":false,"reason":"still unproven","gaps":["gap-%d"],"references":[]}`, index))
+			fmt.Sprintf(`{"refuted":true,"evidence":"still unproven","confidence":"medium","blocking":"none",`+
+				`"findings":[{"kind":"gap","location":"verification","detail":"gap-%d"}],"details_md":""}`, index))
 	}
 }
 
@@ -989,6 +1036,169 @@ func TestRuntimeGoalPanelColdMajorityAcceptsDespiteTheGatekeeper(t *testing.T) {
 	assert.Equal(t, 1, state.Attempts)
 	assert.Equal(t, 3, model.verifications)
 	assert.Empty(t, state.Gaps, "the achieved panel returns the accepting skeptic's own document")
+}
+
+// scriptPanelRounds appends rounds work segments whose panels are keyed by round.
+func scriptPanelRounds(model *goalTestModel, rounds int) {
+	for index := range rounds {
+		model.responses = append(model.responses,
+			runtimeToolResponse(fmt.Sprintf("proof-read-%d", index), "read", `{"path":"proof.txt"}`),
+			runtimeTextResponse("candidate complete"))
+		model.decisions = append(model.decisions, "candidate_complete")
+	}
+}
+
+// TestRuntimeGoalPanelColdRefuteRejects pins the cold majority's other boundary:
+// at three skeptics both cold skeptics must accept, so a single cold refute
+// rejects the candidate even when the gatekeeper accepts.
+func TestRuntimeGoalPanelColdRefuteRejects(t *testing.T) {
+	t.Parallel()
+
+	model := newGoalTestModel()
+	scriptPanelRounds(model, 3)
+	// Position two is cold; the gatekeeper and the other cold skeptic accept.
+	model.verifierPositionVerdicts = map[int]string{2: goalRefutingVerdict}
+	runtime := openTestRuntime(t, model)
+	require.NoError(t, os.WriteFile(filepath.Join(runtime.workspace.Root(), "proof.txt"), []byte("actual implementation\n"), 0o600))
+
+	_, err := collectRuntimeResult(runtime.StartGoal(t.Context(), GoalRequest{Condition: "inspect proof.txt"}))
+	require.NoError(t, err)
+
+	state := runtime.GoalSnapshot()
+	require.False(t, state.Completed(), "%+v", state)
+	require.Equal(t, GoalPaused, state.Status)
+	assert.Contains(t, strings.Join(state.Gaps, " "), "record a check that proves the condition")
+}
+
+// TestRuntimeGoalPanelHighConfidenceGatekeeperRefuteVetoes pins the decisive
+// veto: the gatekeeper's refute at high confidence overrides the cold quorum, so
+// a candidate the cold skeptics accept still does not complete.
+func TestRuntimeGoalPanelHighConfidenceGatekeeperRefuteVetoes(t *testing.T) {
+	t.Parallel()
+
+	model := newGoalTestModel()
+	scriptPanelRounds(model, 3)
+	model.verifierPositionVerdicts = map[int]string{1: goalHighGatekeeperVerdict}
+	runtime := openTestRuntime(t, model)
+	require.NoError(t, os.WriteFile(filepath.Join(runtime.workspace.Root(), "proof.txt"), []byte("actual implementation\n"), 0o600))
+
+	_, err := collectRuntimeResult(runtime.StartGoal(t.Context(), GoalRequest{Condition: "inspect proof.txt"}))
+	require.NoError(t, err)
+
+	state := runtime.GoalSnapshot()
+	require.False(t, state.Completed(), "%+v", state)
+	require.Equal(t, GoalPaused, state.Status)
+	assert.Contains(t, strings.Join(state.Gaps, " "), "the gatekeeper is certain")
+}
+
+// TestRuntimeGoalPanelBlocksOnAnAllBlockingVerdict pins the blocked route: a
+// panel whose every refuter is a non-model-fixable blocker blocks the Goal as a
+// gate with a pause summary instead of returning gaps, and an explicit resume
+// runs the verification again.
+func TestRuntimeGoalPanelBlocksOnAnAllBlockingVerdict(t *testing.T) {
+	t.Parallel()
+
+	model := newGoalTestModel()
+	scriptPanelRounds(model, 2)
+	// The first panel is entirely blocking; the resumed run's panel verifies.
+	model.verifierVerdicts = []string{goalBlockingVerdict, goalVerifiedVerdict}
+	runtime := openTestRuntime(t, model)
+	require.NoError(t, os.WriteFile(filepath.Join(runtime.workspace.Root(), "proof.txt"), []byte("actual implementation\n"), 0o600))
+
+	_, err := collectRuntimeResult(runtime.StartGoal(t.Context(), GoalRequest{Condition: "inspect proof.txt"}))
+	require.NoError(t, err)
+
+	state := runtime.GoalSnapshot()
+	require.Equal(t, GoalBlocked, state.Status, "%+v", state)
+	assert.Contains(t, state.Reason, "Goal verification blocked on evidence that iteration cannot resolve")
+	assert.Contains(t, state.Reason, "the objective contradicts itself")
+	assert.Contains(t, state.Reason, "/goal resume")
+
+	_, err = collectRuntimeResult(runtime.ResumeGoal(t.Context()))
+	require.NoError(t, err)
+	require.True(t, runtime.GoalSnapshot().Completed(), "%+v", runtime.GoalSnapshot())
+}
+
+// TestRuntimeGoalCarriesTheLastVerificationGapsIntoTheNextPanel pins the prior
+// gaps: the first panel sees (none), and after a rejection the next panel's
+// prompt carries the last verification's aggregate gaps.
+func TestRuntimeGoalCarriesTheLastVerificationGapsIntoTheNextPanel(t *testing.T) {
+	t.Parallel()
+
+	model := newGoalTestModel()
+	scriptPanelRounds(model, 2)
+	model.verifierVerdicts = []string{goalRefutingVerdict, goalVerifiedVerdict}
+	runtime := openTestRuntime(t, model)
+	require.NoError(t, os.WriteFile(filepath.Join(runtime.workspace.Root(), "proof.txt"), []byte("actual implementation\n"), 0o600))
+
+	_, err := collectRuntimeResult(runtime.StartGoal(t.Context(), GoalRequest{Condition: "inspect proof.txt"}))
+	require.NoError(t, err)
+	require.True(t, runtime.GoalSnapshot().Completed(), "%+v", runtime.GoalSnapshot())
+
+	systems := model.AuditorSystems()
+	require.NotEmpty(t, systems)
+
+	sawNone, sawGap := false, false
+	for _, system := range systems {
+		if strings.Contains(system, "first round):\n(none)") {
+			sawNone = true
+		}
+		if strings.Contains(system, "record a check that proves the condition") {
+			sawGap = true
+		}
+	}
+
+	assert.True(t, sawNone, "the first panel saw no prior gaps")
+	assert.True(t, sawGap, "the next panel saw the last verification's gap")
+}
+
+// TestRuntimeGoalBoundsTheCitationItsDecisionCarries pins the rendered-report
+// bound at the decision boundary: a model-written evidence line or finding is a
+// bounded report line, never a Decision the continuation store rejects (a reason
+// over 4 KiB) or a Goal projection the event validator rejects (a gap over 4 KiB).
+func TestRuntimeGoalBoundsTheCitationItsDecisionCarries(t *testing.T) {
+	t.Parallel()
+
+	t.Run("an over-long acceptance citation", func(t *testing.T) {
+		t.Parallel()
+
+		model := newGoalTestModel(runtimeTextResponse("I claim everything is verified"))
+		model.verifierVerdict = `{"refuted":false,"evidence":"` + strings.Repeat("y", 5_000) +
+			`","confidence":"high","blocking":"none","findings":[],"details_md":""}`
+		runtime := openTestRuntime(t, model)
+		require.NoError(t, os.WriteFile(filepath.Join(runtime.workspace.Root(), "proof.txt"), []byte("proof\n"), 0o600))
+
+		_, err := collectRuntimeResult(runtime.StartGoal(t.Context(), GoalRequest{Condition: "prove implementation"}))
+		require.NoError(t, err)
+
+		state := runtime.GoalSnapshot()
+		require.True(t, state.Completed(), "%+v", state)
+		assert.LessOrEqual(t, len(state.Reason), goalflow.MaxResultBytes,
+			"the Decision's reason must stay inside the continuation store's bound")
+	})
+
+	t.Run("an over-long finding", func(t *testing.T) {
+		t.Parallel()
+
+		model := newGoalTestModel()
+		scriptPanelRounds(model, 3)
+		model.verifierVerdict = `{"refuted":true,"evidence":"unproven","confidence":"medium","blocking":"none",` +
+			`"findings":[{"kind":"gap","location":"verification","detail":"` + strings.Repeat("z", 5_000) + `"}],"details_md":""}`
+		runtime := openTestRuntime(t, model)
+		require.NoError(t, os.WriteFile(filepath.Join(runtime.workspace.Root(), "proof.txt"), []byte("proof\n"), 0o600))
+
+		_, err := collectRuntimeResult(runtime.StartGoal(t.Context(), GoalRequest{Condition: "prove implementation"}))
+		require.NoError(t, err)
+
+		state := runtime.GoalSnapshot()
+		require.Equal(t, GoalPaused, state.Status, "%+v", state)
+		require.NotEmpty(t, state.Gaps)
+
+		for _, gap := range state.Gaps {
+			assert.LessOrEqual(t, len(gap), goalflow.MaxResultBytes,
+				"a projected gap must stay inside the Goal state's bound")
+		}
+	})
 }
 
 // TestRuntimeGoalPanelSkepticsDoNotShareContext pins Phase AD's independence: the

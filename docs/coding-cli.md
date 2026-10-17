@@ -120,22 +120,26 @@ recorded evidence, and a completion candidate is checked by a panel of three
 independent verifiers (clamped to one through five), each reading the workspace
 and the recorded tool results on its own. A verifier cannot edit files or execute
 shell commands; it audits saved test output rather than rerunning the tests
-itself. Missing or contradictory evidence produces a gap for the next work
-segment, not success. The panel passes a candidate only when its cold majority
-does not reject it, so one verifier's objection is one vote rather than an
-automatic rejection.
+itself. Each verifier answers an adversarial document: whether it refutes the
+candidate, its evidence, its confidence, an optional blocker class, and concrete
+findings. The panel passes a candidate only when its cold majority does not
+refute it; a high-confidence refute from the first verifier vetoes that majority,
+and a panel whose every refuter names a blocker that iteration cannot resolve
+blocks the goal for a user decision instead of returning more work. Missing or
+contradictory evidence produces a gap for the next work segment, not success.
 
 Both checks ask for their answer as one JSON object. A model that declares
 `structured_output` is asked through the provider's own JSON Schema mechanism;
 any other model is asked through the prompt-only convention, with the schema
 described in the prompt. The declaration chooses the transport and never relaxes
-the check: the same verdict fields, reference and proof rules, and evidence
-bounds apply either way. What decides proof is each verifier's own instructions,
-as it is in the reference: it is told to default to not verified when uncertain,
-to treat prose as non-evidence, to cite a recorded result and its own file read,
-to re-read a file it cites, and to refuse absent, failed, truncated,
-contradictory or stale evidence — so a verification is only as good as the
-panel's compliance with that contract. Neither check caps the model's output
+the check: the same document fields and proof rules apply either way. What
+decides proof is each verifier's own instructions, as it is in the reference:
+default to refuted when uncertain, treat prose as non-evidence, cite a recorded
+result or a `path:line`, check the previous round's gaps first and raise a new
+objection only for a demonstrable defect or an unmet requirement, and refuse
+ambiguous, absent, failed, truncated or contradictory evidence — so a
+verification is only as good as the panel's compliance with that contract.
+Neither check caps the model's output
 tokens, so a model that reasons before answering is not cut off mid-answer; the
 goal's own token budget bounds the run. Neither check pins a temperature either:
 the provider's own default applies, as it does in the reference. The evaluator is
@@ -146,9 +150,11 @@ blocked — and a blocked decision names a stable blocker key: the goal keeps
 working until the same blocker is declared three times running, and then it is
 blocked with the evidence and the next user action the evaluator named. An answer
 the harness cannot use is judged, not fatal, and the two checks differ. A
-verifier treats a verdict it cannot read — not JSON, or a contract violation such
-as an empty reason — as a rejection vote, and the panel's aggregated gaps return
-to the model as the next work segment's feedback. The evaluator cannot judge at
+verifier treats an answer it cannot read — not the required JSON document, or one
+missing its evidence — as a rejection vote after first trying the one-line
+`Refuted`/`Not Refuted` terminal token; a wholly unusable answer becomes a refute
+with unknown confidence, which can never be decisive. The panel's aggregated gaps
+return to the model as the next work segment's feedback. The evaluator cannot judge at
 all, so an unusable assessment — including one whose answer carries no usage
 accounting — is attempted once more and, if the second answer is unusable too,
 the goal stops and says it was stopped rather than treated as complete: run
@@ -175,11 +181,12 @@ with no goal run in progress, or a `completed` or `blocked_reason` against a goa
 that is paused or already complete, is refused with a named reason.
 
 Verification is bounded in its inputs rather than its reasoning: the evidence
-ledger retains up to 32 latest tool results with 4 KiB per result, and a goal runs
-at most ten verification panels before it pauses for an explicit resume. A
-verifier reads until it stops calling tools, so keep checks and captured output
-focused. Dropped or truncated essential proof cannot pass verification; split
-larger objectives rather than relying on an unbounded audit.
+ledger retains up to 32 latest tool results with 4 KiB per result, a verifier
+reads full files until it stops calling tools, and a goal runs at most ten
+verification panels before it pauses for an explicit resume. The goal's token
+budget, when set, is checked at the loop boundary rather than per call. Dropped or
+truncated essential proof cannot pass verification; split larger objectives
+rather than relying on an unbounded audit.
 
 Goals do not grant trust, bypass tool approval, approve Plan review, or answer
 questions on your behalf. Pending input keeps the goal blocked. In `exec`, a
