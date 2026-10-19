@@ -43,6 +43,10 @@ const (
 	// one spawn. A spawn is never rendered as a generic Tool card: the lifecycle
 	// row is its only representation, so one spawn commits exactly one row.
 	blockSubagent
+	// blockCompaction marks the boundary where a full context checkpoint
+	// replaced the conversation. It is a divider rather than a message, so the
+	// reader can tell the compacted history from the turns that follow it.
+	blockCompaction
 )
 
 const (
@@ -252,6 +256,18 @@ func appendCommittedMessageBlocks(
 //nolint:gocyclo,cyclop // The already projected Tools merge with messages in durable order.
 func projectCommittedBlocks(state coding.State, activities []toolActivity) committedProjection {
 	blocks := make([]timelineBlock, 0, len(state.Transcript)+len(state.Tools)+4)
+	divider, boundary, hasDivider := projectCompactionDivider(state)
+	dividerInserted := false
+	insertDivider := func() {
+		if !hasDivider || dividerInserted {
+			return
+		}
+		blocks = append(blocks, divider)
+		dividerInserted = true
+	}
+	if boundary == 0 {
+		insertDivider()
+	}
 	syntheticMessages := make(map[int]struct{}, len(state.SyntheticMessages))
 	for _, index := range state.SyntheticMessages {
 		syntheticMessages[index] = struct{}{}
@@ -259,6 +275,9 @@ func projectCommittedBlocks(state coding.State, activities []toolActivity) commi
 	cutoff := 0
 	activityIndex := 0
 	for messageIndex, message := range state.Transcript {
+		if messageIndex == boundary {
+			insertDivider()
+		}
 		position := messageIndex + 1
 		candidateID := ""
 		if messageIndex < len(state.MessageCandidates) {
@@ -279,12 +298,53 @@ func projectCommittedBlocks(state coding.State, activities []toolActivity) commi
 			cutoff = max(cutoff, committed)
 		}
 	}
+	insertDivider()
 
 	return committedProjection{
 		blocks:    groupExploreBlocks(blocks),
 		tailStart: activityIndex,
 		cutoff:    cutoff,
 	}
+}
+
+// projectCompactionDivider turns one completed full checkpoint into the divider
+// that marks where the model context was compacted. Bootstrap and the live event
+// both populate the same CompactionState, so a resumed session and the process
+// that compacted it show the same boundary. The mode is absent after a resume
+// because only the checkpoint entry, not the trigger, survives on disk.
+//
+// The returned index is the transcript position the divider belongs at: the
+// messages before it are the old branch, the messages after it are the context
+// that follows the checkpoint.
+func projectCompactionDivider(state coding.State) (timelineBlock, int, bool) {
+	if state.Compaction.Active || state.Compaction.CheckpointID == "" ||
+		state.Compaction.Strategy != coding.CompactionStrategyFull {
+		return timelineBlock{}, 0, false
+	}
+
+	parts := []string{"Context compacted"}
+	switch state.Compaction.Mode {
+	case coding.CompactionAutomatic:
+		parts = append(parts, "auto")
+	case coding.CompactionManual:
+		parts = append(parts, "manual")
+	}
+	switch {
+	case state.Compaction.TokensBefore > 0 && state.Compaction.TokensAfter > 0:
+		parts = append(parts,
+			compactTokenCount(state.Compaction.TokensBefore)+" → "+
+				compactTokenCount(state.Compaction.TokensAfter)+" tokens",
+		)
+	case state.Compaction.TokensAfter > 0:
+		parts = append(parts, compactTokenCount(state.Compaction.TokensAfter)+" tokens")
+	case state.Compaction.TokensBefore > 0:
+		parts = append(parts, compactTokenCount(state.Compaction.TokensBefore)+" tokens before")
+	}
+
+	return timelineBlock{
+		kind: blockCompaction, id: "compaction:" + state.Compaction.CheckpointID,
+		body: strings.Join(parts, " · "),
+	}, min(max(0, state.Compaction.BoundaryIndex), len(state.Transcript)), true
 }
 
 // projectCommittedRange projects the messages in Transcript[covered:] together
@@ -1823,6 +1883,9 @@ func renderTimelineBlockWithOptions(
 	if block.kind == blockIncomplete {
 		return renderIncompleteReplyBlock(block, width, theme, noColor)
 	}
+	if block.kind == blockCompaction {
+		return renderCompactionDividerBlock(block, width, theme, noColor)
+	}
 
 	return renderRegularTimelineBlock(block, markdown, width, theme, noColor)
 }
@@ -2149,6 +2212,38 @@ func renderUserMessage(body string, width int, theme colorTheme, noColor bool) s
 	return lipgloss.NewStyle().
 		Foreground(paletteFor(theme).workspace).
 		Render(content)
+}
+
+// renderCompactionDividerBlock draws one horizontal rule with its label in the
+// middle. The label stays inside the conversation's text column, so a divider
+// never competes with the frame edge. A frame too narrow for both rules falls
+// back to the label alone rather than dropping the success notice.
+func renderCompactionDividerBlock(block timelineBlock, width int, theme colorTheme, noColor bool) string {
+	width = max(1, width)
+	label := strings.TrimSpace(ansi.Strip(block.body))
+	if label == "" {
+		label = "Context compacted"
+	}
+
+	text := " " + label + " "
+	remaining := width - ansi.StringWidth(text)
+	if remaining < 2 {
+		return ansi.Truncate(label, width, "…")
+	}
+
+	left := remaining / 2
+	right := remaining - left
+	if noColor {
+		return strings.Repeat("─", left) + text + strings.Repeat("─", right)
+	}
+
+	palette := paletteFor(theme)
+	rule := lipgloss.NewStyle().Foreground(palette.separator)
+	value := lipgloss.NewStyle().Foreground(palette.muted)
+
+	return rule.Render(strings.Repeat("─", left)) +
+		value.Render(text) +
+		rule.Render(strings.Repeat("─", right))
 }
 
 func renderErrorBlock(block timelineBlock, width int, theme colorTheme, noColor bool) string {

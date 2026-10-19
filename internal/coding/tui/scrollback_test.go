@@ -69,6 +69,30 @@ func TestScrollbackCommitsStableBlocksOnlyOnce(t *testing.T) {
 	assert.NotContains(t, active, "Read")
 }
 
+func TestScrollbackCommitsCompactionDividerExactlyOnce(t *testing.T) {
+	t.Parallel()
+
+	model := readyModel(t, true)
+	model.width = 400
+	model.state.Transcript = nil
+	model.state.Compaction = coding.CompactionState{
+		Mode: coding.CompactionManual, TokensBefore: 9000, TokensAfter: 1200,
+		CheckpointID: "checkpoint-1", Strategy: coding.CompactionStrategyFull,
+	}
+
+	committed := model.takeStableTimeline()
+	assert.Equal(t, 1, strings.Count(committed, "Context compacted · manual · 9.0k → 1.2k tokens"))
+	assert.Empty(t, model.takeStableTimeline(), "the divider belongs to the first stable projection")
+
+	model.state.Transcript = []ai.Message{ai.UserText("after")}
+	committed = model.takeStableTimeline()
+	assert.Contains(t, committed, "after")
+	assert.NotContains(t, committed, "Context compacted", "a later delta does not repeat the divider")
+
+	active := model.renderTimelineBlocks(model.activeTimelineBlocks())
+	assert.NotContains(t, active, "Context compacted", "the live tail starts below the divider")
+}
+
 func TestScrollbackCommitsPlanModeNoticeExactlyOnce(t *testing.T) {
 	t.Parallel()
 

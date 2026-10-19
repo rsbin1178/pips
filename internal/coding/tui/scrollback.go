@@ -27,6 +27,11 @@ type scrollbackCursor struct {
 	changes      projectionFingerprint
 	lastError    projectionFingerprint
 	streamError  string
+	// compactionShown records that the first stable projection after a compaction
+	// already handed the divider to the terminal. The cursor may still sit at
+	// message zero because a checkpoint replaces the transcript with no visible
+	// message of its own.
+	compactionShown bool
 	// subagentStarted records the description each spawn committed with its
 	// opening row, keyed by child session; subagentTerminal records the children
 	// that already committed a separate terminal row. A background child produces
@@ -52,6 +57,10 @@ func (m *Model) resetScrollback() {
 	m.presentation.heldInspections = nil
 	m.streaming.reset()
 	m.timeline = ""
+	// The managed store is part of the replaced projection. Its position-based
+	// identities can collide with different content after a compaction or a
+	// session switch, so the next frame must render the replacement from scratch.
+	m.transcript.reset()
 }
 
 func (m *Model) commitStableTimeline() tea.Cmd {
@@ -173,6 +182,11 @@ func (m *Model) takeStableTimelineBlocks() []timelineBlock {
 		m.scrollback.messages,
 		stableMessages,
 	)
+	// The divider belongs to the first stable projection after a compaction.
+	// Later deltas start below it, and the terminal already holds the printed row.
+	if m.scrollback.compactionShown {
+		delta.Compaction = coding.CompactionState{}
+	}
 	delta.Draft = coding.StreamDraft{}
 	delta.Tools = delta.Tools[m.scrollback.tools:stableTools]
 
@@ -189,6 +203,9 @@ func (m *Model) takeStableTimelineBlocks() []timelineBlock {
 	}
 
 	blocks := m.projectTimeline(delta, m.scrollback.toolIDs)
+	if _, _, hasDivider := projectCompactionDivider(m.state); hasDivider {
+		m.scrollback.compactionShown = true
+	}
 
 	for _, marker := range m.pendingCompletionMarkers() {
 		if block, ok := projectCompletionMarker(marker); ok {
@@ -257,6 +274,11 @@ func (m *Model) activeTimelineBlocks() []timelineBlock {
 		m.scrollback.messages,
 		len(m.state.Transcript),
 	)
+	// The stable projection already printed the compaction divider. The live tail
+	// starts below it, so it must not paint a second copy.
+	if m.scrollback.compactionShown {
+		active.Compaction = coding.CompactionState{}
+	}
 	active.Tools = active.Tools[m.scrollback.tools:]
 
 	active.Diagnostics = active.Diagnostics[m.scrollback.diagnostics:]

@@ -18,6 +18,106 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestTimelineProjectsACompactionDivider(t *testing.T) {
+	t.Parallel()
+
+	state := coding.State{
+		Transcript: []ai.Message{ai.UserText("after")},
+		Compaction: coding.CompactionState{
+			Mode: coding.CompactionAutomatic, TokensBefore: 9000, TokensAfter: 1200,
+			CheckpointID: "checkpoint-1", Strategy: coding.CompactionStrategyFull,
+		},
+	}
+
+	blocks := projectTimeline(state)
+	require.NotEmpty(t, blocks)
+	assert.Equal(t, blockCompaction, blocks[0].kind)
+	assert.Equal(t, "compaction:checkpoint-1", blocks[0].id)
+
+	rendered := renderTimeline(blocks, newMarkdownRenderer(4), 60, themeDark, true)
+	line := strings.Split(rendered, "\n")[0]
+	assert.Equal(t,
+		"Context compacted · auto · 9.0k → 1.2k tokens",
+		strings.TrimSpace(strings.Trim(strings.TrimSpace(line), "─")),
+	)
+	assert.Equal(t, 60-timelineInset(60), ansi.StringWidth(line),
+		"the divider spans the conversation column")
+	assert.True(t, strings.HasPrefix(strings.TrimSpace(line), "─") && strings.HasSuffix(line, "─"))
+}
+
+func TestCompactionDividerSitsAtTheCheckpointBoundary(t *testing.T) {
+	t.Parallel()
+
+	state := coding.State{
+		Transcript: []ai.Message{
+			ai.UserText("old-1"), ai.UserText("old-2"), ai.UserText("new-1"),
+		},
+		Compaction: coding.CompactionState{
+			Mode: coding.CompactionManual, TokensBefore: 9000, TokensAfter: 1200,
+			CheckpointID: "checkpoint-1", Strategy: coding.CompactionStrategyFull,
+			BoundaryIndex: 2,
+		},
+	}
+
+	blocks := projectTimeline(state)
+	require.Len(t, blocks, 4)
+	assert.Equal(t, "old-1", blocks[0].body)
+	assert.Equal(t, "old-2", blocks[1].body)
+	assert.Equal(t, blockCompaction, blocks[2].kind)
+	assert.Equal(t, "Context compacted · manual · 9.0k → 1.2k tokens", blocks[2].body)
+	assert.Equal(t, "new-1", blocks[3].body)
+}
+
+func TestCompactionDividerSurvivesResumeWithoutTheMode(t *testing.T) {
+	t.Parallel()
+
+	state := coding.State{
+		Transcript: []ai.Message{ai.UserText("after")},
+		Compaction: coding.CompactionState{
+			TokensBefore: 9000, TokensAfter: 1200,
+			CheckpointID: "checkpoint-1", Strategy: coding.CompactionStrategyFull,
+		},
+	}
+
+	blocks := projectTimeline(state)
+	require.Len(t, blocks, 2, "the divider leads the messages after the checkpoint")
+	rendered := renderTimeline(blocks, newMarkdownRenderer(4), 60, themeDark, true)
+	assert.Contains(t, rendered, "Context compacted · 9.0k → 1.2k tokens")
+	assert.NotContains(t, rendered, "manual")
+	assert.NotContains(t, rendered, "auto")
+}
+
+func TestCompactionDividerRequiresACompletedFullCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	states := []coding.CompactionState{
+		{Mode: coding.CompactionManual, TokensBefore: 9000}, // active or in progress
+		{TokensBefore: 9000, CheckpointID: "legacy"},        // legacy retained-tail compaction
+	}
+	for _, state := range states {
+		blocks := projectTimeline(coding.State{Compaction: state})
+		assert.Empty(t, blocks)
+	}
+
+	active := coding.CompactionState{
+		Active: true, Mode: coding.CompactionManual, TokensBefore: 9000,
+		CheckpointID: "checkpoint-1", Strategy: coding.CompactionStrategyFull,
+	}
+	assert.False(t, hasCompactionDivider(projectTimeline(coding.State{
+		Transcript: []ai.Message{ai.UserText("during")}, Compaction: active,
+	})))
+}
+
+func hasCompactionDivider(blocks []timelineBlock) bool {
+	for _, block := range blocks {
+		if block.kind == blockCompaction {
+			return true
+		}
+	}
+
+	return false
+}
+
 func TestTimelineProjectsQuestionResultSemantically(t *testing.T) {
 	t.Parallel()
 

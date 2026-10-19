@@ -309,6 +309,23 @@ func projectionHistoryDigest(history historyState) uint64 {
 	return mixProjectionInt(hash, history.start)
 }
 
+// projectionCompactionDigest covers the checkpoint boundary the committed
+// projection paints above the transcript. A completed compaction changes the
+// divider's label and must invalidate the cached prefix.
+func projectionCompactionDigest(state coding.CompactionState) uint64 {
+	hash := mixProjectionString(projectionHashSeed, string(state.Mode))
+	hash = mixProjectionString(hash, state.CheckpointID)
+	hash = mixProjectionString(hash, state.Strategy)
+	hash = mixProjectionInt(hash, state.TokensBefore)
+	hash = mixProjectionInt(hash, state.TokensAfter)
+	hash = mixProjectionInt(hash, state.BoundaryIndex)
+	if state.Active {
+		return mixProjectionInt(hash, 1)
+	}
+
+	return hash
+}
+
 // projectionStamp fingerprints every input the committed prefix of the managed
 // timeline projection reads. While the stamp is unchanged the prefix is reused
 // verbatim; the volatile tail is rebuilt on every frame regardless.
@@ -326,6 +343,7 @@ type projectionStamp struct {
 	markers      uint64
 	notices      uint64
 	history      uint64
+	compaction   uint64
 }
 
 // projectionStamp reads the committed-prefix inputs. Every component is O(1) or
@@ -345,6 +363,7 @@ func (m *Model) projectionStamp() projectionStamp {
 		markers:      projectionMarkersDigest(m.completionMarkers),
 		notices:      projectionNoticesDigest(m.notices),
 		history:      projectionHistoryDigest(m.history),
+		compaction:   projectionCompactionDigest(m.state.Compaction),
 	}
 }
 
@@ -363,7 +382,8 @@ func (s projectionStamp) extendableFrom(base projectionStamp) bool {
 		s.subagents == base.subagents &&
 		s.markers == base.markers &&
 		s.notices == base.notices &&
-		s.history == base.history
+		s.history == base.history &&
+		s.compaction == base.compaction
 }
 
 // timelineFrameCache is the committed prefix of one managed-viewport frame: the

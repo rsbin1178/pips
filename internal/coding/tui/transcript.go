@@ -124,6 +124,7 @@ type transcriptEntry struct {
 
 // resetRenders clears the render and eviction counters.
 func (s *transcriptStore) resetRenders() {
+
 	s.renders = 0
 	s.evictions = 0
 	s.materializations = 0
@@ -151,6 +152,13 @@ func (s *transcriptStore) setLeading(rows int) {
 // leading entries whose records did not change: the store then keeps those records
 // - and the rows they already rendered - and rebuilds only the tail. Any other
 // combination falls back to a full build.
+// reset drops every cached record. A wholesale transcript replacement can reuse
+// a position-based identity with different content; clearing here makes the next
+// sync render the replacement from scratch instead of keeping the old rows.
+func (s *transcriptStore) reset() {
+	*s = transcriptStore{}
+}
+
 func (s *transcriptStore) sync(
 	width int,
 	theme colorTheme,

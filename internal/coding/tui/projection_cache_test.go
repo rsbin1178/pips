@@ -111,6 +111,15 @@ func TestProjectionCacheMatchesPureProjection(t *testing.T) {
 			},
 		},
 		{
+			name: "compaction completed",
+			mutate: func(_ *testing.T, model *Model) {
+				model.state.Compaction = coding.CompactionState{
+					Mode: coding.CompactionManual, TokensBefore: 9000, TokensAfter: 1200,
+					CheckpointID: "checkpoint-1", Strategy: coding.CompactionStrategyFull,
+				}
+			},
+		},
+		{
 			name: "replace transcript",
 			mutate: func(_ *testing.T, model *Model) {
 				model.state.Transcript = []ai.Message{

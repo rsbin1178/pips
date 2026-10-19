@@ -317,6 +317,7 @@ func validateNestedPayloadJSON(eventType EventType, data []byte) error {
 			Transcript    []json.RawMessage `json:"transcript"`
 			ContextTokens int               `json:"context_tokens"`
 			Tasks         tasklist.Snapshot `json:"tasks"`
+			Compaction    CompactionState   `json:"compaction,omitempty"`
 		}
 		if err := strictDecode(data, &payload); err != nil {
 			return err
