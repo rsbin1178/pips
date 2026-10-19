@@ -272,10 +272,55 @@ func TestTasksPaneCapacityCapsTheStrip(t *testing.T) {
 	assert.Equal(t, 1, strings.Count(band, "Subagents"), "the header is painted once")
 }
 
+// TestTasksPaneNamesEverySourcedSectionAtOnce pins the cap against the group
+// split: a child, a command, and a monitor can all be live in the same frame,
+// and each section still names itself with one of its rows beneath.
+func TestTasksPaneNamesEverySourcedSectionAtOnce(t *testing.T) {
+	t.Parallel()
+
+	model, _ := tasksPaneModel(t)
+	model.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	model.state.Subagents = []coding.SubagentState{liveTasksChild("child-1", "fix the login bug")}
+	model.state.BackgroundTasks = []coding.BackgroundTaskLifecycle{
+		{
+			ID: "shell-1", Kind: string(background.KindShell), Command: "cargo build",
+			StartedAt: tasksPaneNow.Add(-3 * time.Second),
+		},
+		{
+			ID: "monitor-1", Kind: string(background.KindMonitor),
+			Description: "deploy log", StartedAt: tasksPaneNow.Add(-2 * time.Second),
+		},
+	}
+	model.syncTasksPane(tasksPaneNow)
+	require.Equal(t, tasksPaneMaxRows, model.tasksPaneCapacity())
+
+	band, hits := model.tasksPanePaint(tasksPaneNow, model.tasksPaneCapacity())
+	for _, header := range []string{"▾ Subagents 1", "▾ Tasks 1", "▾ Watchers 1"} {
+		assert.Contains(t, band, header)
+	}
+	for _, row := range []string{"fix the login bug", "Command cargo build", "Monitor deploy log"} {
+		assert.Contains(t, band, row)
+	}
+	assert.Len(t, hits, tasksPaneMaxRows)
+}
+
+func TestTasksPaneFocusDoesNotSurviveAFullAreaRoute(t *testing.T) {
+	t.Parallel()
+
+	model, _ := tasksPaneModel(t)
+	model.state.Subagents = []coding.SubagentState{liveTasksChild("child-1", "fix the login bug")}
+	model.syncTasksPane(tasksPaneNow)
+	model.toggleTasksPane()
+	require.True(t, model.tasksPaneFocused())
+
+	_ = model.openHelp()
+	assert.False(t, model.tasksPane.focused, "the route owns the keyboard while it is open")
+}
+
 func TestTasksPaneKeysKillAndInspect(t *testing.T) {
 	t.Parallel()
 
-	t.Run("Ctrl+B focuses the pane and Tab leaves it", func(t *testing.T) {
+	t.Run("Ctrl+B toggles the pane and Tab leaves it", func(t *testing.T) {
 		t.Parallel()
 
 		model, _ := tasksPaneModel(t)
@@ -290,6 +335,12 @@ func TestTasksPaneKeysKillAndInspect(t *testing.T) {
 
 		model.Update(key("tab"))
 		assert.False(t, model.tasksPane.focused)
+
+		model.Update(tea.KeyPressMsg{Code: 'b', Mod: tea.ModCtrl})
+		require.True(t, model.tasksPaneFocused())
+		model.Update(tea.KeyPressMsg{Code: 'b', Mod: tea.ModCtrl})
+		assert.False(t, model.tasksPane.focused, "the second chord releases the keys")
+		assert.False(t, model.tasksPane.visible, "and hides the pane")
 	})
 
 	t.Run("x kills the selected running child", func(t *testing.T) {
@@ -719,20 +770,13 @@ func TestTasksPaneClickSelectsKillsAndInspects(t *testing.T) {
 	assert.True(t, header.header)
 
 	first := model.tasksPaneHit.rows[1]
+	second := model.tasksPaneHit.rows[2]
 	require.Equal(t, 0, first.index)
-
-	// A click on the row body selects it without activating anything.
-	command := model.handleMouse(tea.MouseClickMsg{
-		Button: tea.MouseLeft, X: 1, Y: model.tasksPaneHit.top + 1,
-	})
-	assert.NotNil(t, command)
-	assert.Equal(t, 0, model.tasksPane.cursor)
-	assert.True(t, model.tasksPane.focused)
-	assert.Empty(t, controller.agentCanceled)
+	require.Equal(t, 1, second.index)
 
 	// The kill control cancels the selected running child.
 	require.GreaterOrEqual(t, first.killStart, 0)
-	command = model.handleMouse(tea.MouseClickMsg{
+	command := model.handleMouse(tea.MouseClickMsg{
 		Button: tea.MouseLeft, X: first.killStart, Y: model.tasksPaneHit.top + 1,
 	})
 	require.NotNil(t, command)
@@ -746,6 +790,19 @@ func TestTasksPaneClickSelectsKillsAndInspects(t *testing.T) {
 	require.NotNil(t, command)
 	driveModelCommands(t, model, command)
 	assert.Equal(t, routeSubagent, model.route.kind)
+
+	// A click on a row's body opens the same page rather than only selecting it.
+	model.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	require.Equal(t, routeNone, model.route.kind)
+	model.View()
+	require.True(t, model.tasksPaneHit.painted)
+	command = model.handleMouse(tea.MouseClickMsg{
+		Button: tea.MouseLeft, X: 1, Y: model.tasksPaneHit.top + 2,
+	})
+	require.NotNil(t, command)
+	driveModelCommands(t, model, command)
+	assert.Equal(t, routeSubagent, model.route.kind)
+	assert.Equal(t, 1, model.tasksPane.cursor)
 }
 
 // TestTasksPaneLeavesTheTranscriptDragToTheTranscript pins the pane's pointer
@@ -811,10 +868,11 @@ func TestTasksPaneHitMapTracksThePaintedRow(t *testing.T) {
 	require.GreaterOrEqual(t, painted, 0, "the pane is painted:\n%s", content)
 	assert.Equal(t, painted, model.tasksPaneHit.top, "the hit map matches the painted header row")
 
-	// A click on the child row selects it; a click in the transcript above does
-	// not reach the pane.
-	model.handleMouse(tea.MouseClickMsg{Button: tea.MouseLeft, X: 1, Y: painted + 1})
-	assert.True(t, model.tasksPane.focused, "a click on the painted pane row selects")
+	// A click on the child row opens its page; a click in the transcript above
+	// does not reach the pane.
+	command := model.handleMouse(tea.MouseClickMsg{Button: tea.MouseLeft, X: 1, Y: painted + 1})
+	assert.NotNil(t, command)
+	assert.Equal(t, routeChild, model.route.kind, "a click on the painted pane row opens the row")
 	assert.Empty(t, model.composer.Value(), "the click never reaches the composer")
 }
 
@@ -1087,10 +1145,10 @@ func TestStatusLineStillRunningCueOutlivesAShortFrame(t *testing.T) {
 	assert.Contains(t, strings.Join(model.statusExtras(), "\n"), "1 monitor still running")
 }
 
-// TestTasksPaneShowsThePlanUnderTasks pins the plan's rows: the Tasks group is
-// populated from the projected snapshot, its header counts the rows it paints,
-// and a finished step follows the same finished-rows rule as the other groups.
-func TestTasksPaneShowsThePlanUnderTasks(t *testing.T) {
+// TestTasksPaneDoesNotListPlanItems pins the surface split: the todo_write
+// checklist belongs to the status line and the standalone page, so it never
+// becomes a row or keeps the execution pane alive.
+func TestTasksPaneDoesNotListPlanItems(t *testing.T) {
 	t.Parallel()
 
 	model, _ := tasksPaneModel(t)
@@ -1104,84 +1162,107 @@ func TestTasksPaneShowsThePlanUnderTasks(t *testing.T) {
 		Completed: 1, InProgress: 1, Cancelled: 1, Total: 4,
 	}
 	model.tasksPane.visible = true
-	model.tasksPane.showDone = false
-
-	rows := model.tasksPaneRows()
-	require.Len(t, rows, 2, "the finished steps stay hidden until the reader asks")
-	assert.Equal(t, []string{"Patch the handler", "Verify the fix"},
-		[]string{rows[0].label, rows[1].label}, "plan rows keep the plan's own order")
-	assert.True(t, rows[0].plan)
-	assert.Equal(t, tasksPaneTasks, tasksPaneGroupOf(rows[0]))
-	assert.Equal(t, "⊘", model.tasksPaneRowIcon(tasksPaneRow{
-		plan: true, planStatus: tasklist.StatusCancelled,
-	}))
-
-	entries := tasksPaneEntries(rows, model.tasksPane.collapsed)
-	require.Len(t, entries, 3, "one Tasks header plus its two rows")
-	assert.True(t, entries[0].header)
-	assert.Equal(t, tasksPaneTasks, entries[0].group)
-	assert.Equal(t, len(rows), entries[0].count, "the header count is the painted row count")
-
-	// A plan row addresses no action, so neither control is offered.
-	selection, ok := model.tasksPaneSelection()
-	require.True(t, ok)
-	assert.True(t, selection.plan)
-	assert.Nil(t, model.inspectTasksPaneSelection())
-	assert.Nil(t, model.killTasksPaneSelection())
-
-	// Asking for the finished rows adds the two terminal steps.
 	model.tasksPane.showDone = true
-	entries = tasksPaneEntries(model.tasksPaneRows(), model.tasksPane.collapsed)
-	require.Len(t, entries, 5)
-	assert.Equal(t, 4, entries[0].count)
-	assert.Equal(t, "Inspect the log", entries[1].row.label)
-	assert.Equal(t, "⊘", model.tasksPaneRowIcon(entries[3].row))
+
+	assert.Empty(t, model.tasksPaneRows(), "plan state contributes no execution rows")
+	assert.False(t, model.tasksPaneHasEntries())
+	assert.Zero(t, model.tasksPaneCapacity())
+	assert.NotContains(t, tasksPaneGroupLabels[:], "Plan")
 }
 
-// TestTasksPaneHidesAFullyFinishedPlan pins the finished-rows rule at the group
-// level: a plan with nothing live leaves no section and no keys.
-func TestTasksPaneHidesAFullyFinishedPlan(t *testing.T) {
+// TestTodoChecklistPageRendersEveryStep pins the standalone page: it keeps the
+// plan's own order and includes finished steps that the status line only counts.
+func TestTodoChecklistPageRendersEveryStep(t *testing.T) {
 	t.Parallel()
 
 	model, _ := tasksPaneModel(t)
 	model.state.Tasks = tasklist.Snapshot{
 		Items: []tasklist.Item{
 			{Step: "Inspect the log", Status: tasklist.StatusCompleted},
+			{Step: "Patch the handler", Status: tasklist.StatusInProgress},
 			{Step: "Blocked by policy", Status: tasklist.StatusCancelled},
+			{Step: "Verify the fix", Status: tasklist.StatusPending},
 		},
-		Completed: 1, Cancelled: 1, Total: 2,
+		Completed: 1, InProgress: 1, Cancelled: 1, Total: 4,
 	}
-	model.tasksPane.visible = true
-	model.tasksPane.showDone = false
 
-	assert.Empty(t, model.tasksPaneRows(), "a finished plan paints no row by default")
-	assert.False(t, model.tasksPaneHasEntries())
+	_, command := model.executeCommand(commandDescriptor{name: "todos"})
+	driveModelCommands(t, model, command)
+	require.Equal(t, routeToolDetail, model.route.kind)
+	require.NotNil(t, model.route.toolDetail)
+	assert.Equal(t, "Todo details", model.route.toolDetail.title)
 
-	model.tasksPane.showDone = true
-	assert.Len(t, model.tasksPaneRows(), 2, "the finished rows come back on request")
+	detail := model.toolDetailRouteContent()
+	assert.Contains(t, detail, "1/4 completed · 1 cancelled")
+	assert.Contains(t, detail, "Inspect the log")
+	assert.Contains(t, detail, "Patch the handler")
+	assert.Contains(t, detail, "Blocked by policy")
+	assert.Contains(t, detail, "Verify the fix")
+	assert.Less(t, strings.Index(detail, "Inspect the log"), strings.Index(detail, "Patch the handler"),
+		"the page keeps the plan's own order")
 }
 
-// TestTasksPanePlanRowCarriesNoClock pins the plan row's meta: a plan step has
-// no clock of its own, so the pane shows its status word instead of an elapsed
-// time.
-func TestTasksPanePlanRowCarriesNoClock(t *testing.T) {
+// TestTodoChecklistPageFollowsLiveUpdates pins the page to the same projection
+// the status line reads: an update while the page is open changes its rows.
+func TestTodoChecklistPageFollowsLiveUpdates(t *testing.T) {
 	t.Parallel()
 
 	model, _ := tasksPaneModel(t)
-	row, ok := tasksPanePlanRow(
-		tasklist.Item{Step: "Verify the fix", Status: tasklist.StatusPending}, false,
-	)
-	require.True(t, ok)
+	model.state.Tasks = tasklist.Snapshot{
+		Items:      []tasklist.Item{{Step: "Inspect the log", Status: tasklist.StatusInProgress}},
+		InProgress: 1, Total: 1,
+	}
+	_, command := model.executeCommand(commandDescriptor{name: "todos"})
+	driveModelCommands(t, model, command)
+	require.Equal(t, routeToolDetail, model.route.kind)
+	assert.Contains(t, model.toolDetailRouteContent(), "Inspect the log")
+	assert.NotContains(t, model.toolDetailRouteContent(), "Verify the fix")
 
-	line, _ := model.tasksPaneRowLine(tasksPaneEntry{index: 0, row: row}, tasksPaneNow, 60)
-	assert.Contains(t, line, "pending")
-	assert.NotContains(t, line, "0s", "a plan row paints no elapsed time")
+	model.state.Tasks = tasklist.Snapshot{
+		Items: []tasklist.Item{
+			{Step: "Inspect the log", Status: tasklist.StatusCompleted},
+			{Step: "Verify the fix", Status: tasklist.StatusInProgress},
+		},
+		Completed: 1, InProgress: 1, Total: 2,
+	}
+	detail := model.toolDetailRouteContent()
+	assert.Contains(t, detail, "Verify the fix")
+	assert.Contains(t, detail, "1/2 completed")
 }
 
-// TestTasksPaneTagsABackgroundCommandAsACommand pins the kind-derived row tag:
-// a backgrounded command is not read as a watch, and a watch is not read as a
-// command.
-func TestTasksPaneTagsABackgroundCommandAsACommand(t *testing.T) {
+// TestTodoChecklistShortcutOpensThePage pins the dedicated key: Ctrl+P opens
+// the same page as the command, and an empty plan reports the notice.
+func TestTodoChecklistShortcutOpensThePage(t *testing.T) {
+	t.Parallel()
+
+	model, _ := tasksPaneModel(t)
+	model.state.Tasks = tasklist.Snapshot{
+		Items:      []tasklist.Item{{Step: "Inspect the log", Status: tasklist.StatusInProgress}},
+		InProgress: 1, Total: 1,
+	}
+
+	_, command := model.Update(tea.KeyPressMsg{Code: 'p', Mod: tea.ModCtrl})
+	driveModelCommands(t, model, command)
+	require.Equal(t, routeToolDetail, model.route.kind)
+	assert.Contains(t, model.toolDetailRouteContent(), "Inspect the log")
+}
+
+// TestTodoChecklistPageExplainsAnEmptyTodo pins the command's empty state: it
+// reports that there is nothing to inspect rather than opening an empty route.
+func TestTodoChecklistPageExplainsAnEmptyTodo(t *testing.T) {
+	t.Parallel()
+
+	model, _ := tasksPaneModel(t)
+	_, command := model.executeCommand(commandDescriptor{name: "todos"})
+	assert.Equal(t, routeNone, model.route.kind)
+	assert.Equal(t, "No todo items yet.", model.statusNotice)
+	assert.NotNil(t, command)
+}
+
+// TestTasksPaneSeparatesCommandsFromMonitors pins the group split the reference
+// makes: a one-shot background command is a Task, a monitor is a Watcher, and
+// each row keeps the tag of its own kind.
+func TestTasksPaneSeparatesCommandsFromMonitors(t *testing.T) {
 	t.Parallel()
 
 	model, _ := tasksPaneModel(t)
@@ -1200,8 +1281,18 @@ func TestTasksPaneTagsABackgroundCommandAsACommand(t *testing.T) {
 	require.True(t, model.tasksPane.visible, "a running command opens the pane")
 
 	content := model.View().Content
+	assert.Contains(t, content, "▾ Tasks 1")
 	assert.Contains(t, content, backgroundCommandTag+" cargo build")
+	assert.Contains(t, content, "▾ Watchers 1")
 	assert.Contains(t, content, backgroundTaskTag+" deploy log")
+
+	rows := model.tasksPaneRows()
+	require.Len(t, rows, 2)
+	byID := map[string]tasksPaneRow{rows[0].taskID: rows[0], rows[1].taskID: rows[1]}
+	assert.Equal(t, tasksPaneTasks, tasksPaneGroupOf(byID["shell-1"]))
+	assert.Equal(t, tasksPaneWatchers, tasksPaneGroupOf(byID["monitor-1"]))
+	assert.Equal(t, "Command details", backgroundTaskDetailTitle(model.state.BackgroundTasks[0]))
+	assert.Equal(t, "Watch details", backgroundTaskDetailTitle(model.state.BackgroundTasks[1]))
 }
 
 // TestStatusLineStillRunningCueLeadsWithCommands pins the cue's kind split: a
