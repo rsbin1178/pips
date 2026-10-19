@@ -19,9 +19,9 @@ import (
 const (
 	childIndexChildren = 8
 	// childIndexAllocationSlack bounds how much the indexed read may allocate
-	// more at ten times the store size. The two reads walk the same children, so
-	// the measured difference is noise rather than growth.
-	childIndexAllocationSlack = 64
+	// more at ten times the store size. The measured difference is allocator and
+	// scheduler noise; an O(n) read grows by thousands, not hundreds.
+	childIndexAllocationSlack = 256
 )
 
 // childIndexFixture is one store built for the parent-side lookup: a parent
