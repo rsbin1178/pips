@@ -1094,6 +1094,18 @@ transcript, and it does not enter the conversation's timeline. A conversation-
 initiated wake is attributed to the conversation's own call and does appear on
 the conversation's timeline.
 
+### Context compaction feedback
+
+A successful full checkpoint marks its boundary in the conversation with a
+divider: `──────── Context compacted · manual · 9.0k → 1.2k tokens ────────`.
+The mode (`manual` or `auto`) and the token counts before and after are shown
+when the live event carries them. A resumed session keeps the divider and its
+token counts; the trigger is not persisted, so the mode is omitted there. A full
+checkpoint written by an earlier version also shows the divider on resume. A
+legacy retained-tail compaction has no full checkpoint boundary, so it shows no
+divider. Compaction failure stays an ordinary error or activity row and never
+paints a success divider.
+
 ### Todo list and the todo gate
 
 In Agent mode the model keeps a visible todo list with `todo_write`. A call carries

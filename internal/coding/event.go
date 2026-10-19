@@ -182,6 +182,9 @@ type SessionTreeChanged struct {
 	Transcript    ai.Messages       `json:"transcript"`
 	ContextTokens int               `json:"context_tokens"`
 	Tasks         tasklist.Snapshot `json:"tasks"`
+	// Compaction carries the boundary the bounded transcript belongs to. A zero
+	// value means the active branch has no full checkpoint.
+	Compaction CompactionState `json:"compaction,omitempty"`
 }
 
 // SessionNavigated records one successful same-file leaf change.
@@ -1151,6 +1154,13 @@ func validateSessionTreeChangedPayload(value SessionTreeChanged) error {
 		return errors.New("invalid task snapshot")
 	}
 
+	if err := validateCompactionState(value.Compaction); err != nil {
+		return err
+	}
+	if value.Compaction.BoundaryIndex > len(value.Transcript) {
+		return errors.New("compaction boundary is outside the transcript")
+	}
+
 	for index, message := range value.Transcript {
 		if validateMessage(message) != nil {
 			return fmt.Errorf("invalid transcript message %d", index)
@@ -1187,6 +1197,32 @@ func validateSessionForkedPayload(value SessionForked) error {
 
 	if value.SourceSessionID == value.TargetSessionID {
 		return errors.New("fork source and target sessions are equal")
+	}
+
+	return nil
+}
+
+// validateCompactionState checks the completed checkpoint a tree snapshot
+// carries. An empty value is legal: the active branch has no full checkpoint.
+func validateCompactionState(value CompactionState) error {
+	if value.Active {
+		return errors.New("tree snapshot carries an active compaction")
+	}
+	if value.BoundaryIndex < 0 || value.TokensBefore < 0 || value.TokensAfter < 0 ||
+		value.DurationMillis < 0 {
+		return errors.New("invalid compaction state bounds")
+	}
+	if value.Mode != "" && !validCompactionMode(value.Mode) {
+		return errors.New("invalid compaction mode")
+	}
+	if validateOptionalID(value.CheckpointID) != nil || validateOptionalID(value.FirstKeptID) != nil {
+		return errors.New("invalid compaction identity")
+	}
+	if value.Strategy != "" && value.Strategy != CompactionStrategyFull {
+		return errors.New("invalid compaction strategy")
+	}
+	if validateCompactionPreview(value.Preview, false) != nil {
+		return errors.New("invalid compaction preview")
 	}
 
 	return nil

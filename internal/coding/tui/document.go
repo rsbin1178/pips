@@ -74,6 +74,8 @@ func markdownBlock(block timelineBlock) string {
 		return markdownSection(markdownHeading("Error", block.title), markdownErrorBody(block))
 	case blockCompletion:
 		return markdownSection("Run", block.body)
+	case blockCompaction:
+		return markdownSection("Compaction", block.body)
 	case blockTeam:
 		return markdownSection(markdownHeading("Team", block.title), block.body)
 	case blockTool:

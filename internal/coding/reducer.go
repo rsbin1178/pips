@@ -579,10 +579,16 @@ func (state *State) apply(event Event) error {
 		state.SyntheticMessages = append(state.SyntheticMessages, goalSyntheticMessageIndexes(state.Transcript, state.Goal.ID)...)
 		state.ContextTokens = payload.ContextTokens
 		state.Tasks = payload.Tasks.Clone()
+		state.Compaction = payload.Compaction
 	case SessionNavigated:
 		if !state.SessionOpen || state.Phase != PhaseIdle || state.Interaction.Active {
 			return protocolError("session cannot navigate in its current state")
 		}
+		// Navigation can move the leaf in front of the last checkpoint. The
+		// retained counts then describe a context the active branch no longer
+		// has, so the divider must disappear until a resumed checkpoint rebuilds
+		// the projection.
+		state.Compaction = CompactionState{}
 	case SessionForked:
 		if !state.SessionOpen || state.Phase != PhaseIdle || state.Interaction.Active ||
 			payload.SourceSessionID != state.SessionID {

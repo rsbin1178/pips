@@ -2529,7 +2529,7 @@ func (m *Model) toggleLatestTool() tea.Cmd {
 
 			return m.openToolDetailRoute(detail)
 		case blockUser, blockAssistant, blockDraft, blockPlan, blockQuestion, blockDiagnostic,
-			blockChange, blockError, blockCompletion, blockTeam:
+			blockChange, blockError, blockCompletion, blockTeam, blockCompaction:
 		}
 	}
 	if child, ok := m.latestTeamWorkerChild(); ok {

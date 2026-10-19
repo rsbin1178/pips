@@ -120,6 +120,9 @@ func BootstrapState(options BootstrapOptions) (BootstrapResult, error) {
 	if len(state.Transcript) > maxEventItems {
 		state.Transcript = state.Transcript[len(state.Transcript)-maxEventItems:]
 	}
+	if compaction, ok := fullCompactionStateFromPath(options.Path); ok {
+		state.Compaction = compaction
+	}
 	state.MessageCandidates = make([]CandidateIdentity, len(state.Transcript))
 	state.SyntheticMessages = syntheticMessageIndexes(state.Transcript)
 	state.IncompleteReplies = incompleteReplies

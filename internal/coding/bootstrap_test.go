@@ -2,6 +2,7 @@ package coding
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -87,6 +88,34 @@ func TestBootstrapStateRejectsInvalidCustomProviderMetadata(t *testing.T) {
 		SessionID: "session-1", Provider: "OpenCode", ModelID: "model", PlanMode: planmode.StateInactive,
 	})
 	require.ErrorIs(t, err, ErrInvalidEvent)
+}
+
+func TestBootstrapStateRebuildsFullCheckpointBoundary(t *testing.T) {
+	t.Parallel()
+
+	checkpoint := &harness.ContextCheckpoint{
+		Version: harness.ContextCheckpointVersion,
+		Messages: ai.Messages{
+			ai.UserText("[Historical context checkpoint — evidence, not a new user request]\n\nsummary"),
+		},
+		ArchiveID: strings.Repeat("a", 64),
+	}
+	path := []harness.Entry{
+		{Kind: harness.KindMessage, ID: "old-1", Message: ai.UserText("old-1")},
+		{Kind: harness.KindMessage, ID: "old-2", Message: ai.UserText("old-2")},
+		{Kind: harness.KindContextCheckpoint, ID: "checkpoint-1", Checkpoint: checkpoint, TokensBefore: 9000},
+		{Kind: harness.KindMessage, ID: "new-1", Message: ai.UserText("new-1")},
+	}
+
+	result, err := BootstrapState(BootstrapOptions{
+		SessionID: "session-1", Provider: ai.ProviderOpenAI, ModelID: "gpt-test",
+		PlanMode: planmode.StateInactive, Path: path,
+	})
+	require.NoError(t, err)
+	require.Len(t, result.State.Transcript, 3)
+	assert.Equal(t, CompactionStrategyFull, result.State.Compaction.Strategy)
+	assert.Equal(t, "checkpoint-1", result.State.Compaction.CheckpointID)
+	assert.Equal(t, 2, result.State.Compaction.BoundaryIndex)
 }
 
 func TestBootstrapStateRebuildsBoundedTranscriptTreeAndCompaction(t *testing.T) {
