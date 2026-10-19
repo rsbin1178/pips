@@ -137,16 +137,16 @@ Both checks ask for their answer as one JSON object. A model that declares
 any other model is asked through the prompt-only convention, with the schema
 described in the prompt. The declaration chooses the transport and never relaxes
 the check: the same document fields and proof rules apply either way. What
-decides proof is each verifier's own instructions, as it is in the reference:
-default to refuted when uncertain, treat prose as non-evidence, cite a diff hunk,
-a recorded result or a `path:line`, check the previous round's gaps first and
-raise a new objection only for a demonstrable defect or an unmet requirement, and refuse
-ambiguous, absent, failed, truncated or contradictory evidence — so a
-verification is only as good as the panel's compliance with that contract.
+decides proof is each verifier's own instructions: default to refuted when
+uncertain, treat prose as non-evidence, cite a diff hunk, a recorded result or a
+`path:line`, check the previous round's gaps first and raise a new objection only
+for a demonstrable defect or an unmet requirement, and refuse ambiguous, absent,
+failed, truncated or contradictory evidence — so a verification is only as good
+as the panel's compliance with that contract.
 Neither check caps the model's output
 tokens, so a model that reasons before answering is not cut off mid-answer; the
 goal's own token budget bounds the run. Neither check pins a temperature either:
-the provider's own default applies, as it does in the reference. The evaluator is
+the provider's own default applies. The evaluator is
 shown the condition and a bounded transcript of the conversation — the last
 32 KiB of it, 4 KiB per message — while each verifier reads the recorded tool
 results. The evaluator answers with a decision — continue, candidate complete, or
@@ -169,8 +169,8 @@ failure pauses the goal with "Goal verification infrastructure failed (…). Run
 
 The model declares its own progress with the `update_goal` tool. It is offered
 wherever a goal can run and stays offered outside one, so a call there is a
-refusal sentence rather than an unknown tool. Its three optional fields are the
-reference's: `message` records a short progress note and changes nothing else;
+refusal sentence rather than an unknown tool. Its three optional fields are
+fixed: `message` records a short progress note and changes nothing else;
 `blocked_reason` is a failure signal, sent only after the same problem has
 defeated three or more attempts; the runtime counts them, answering the first two
 with the streak so the model keeps working, and pauses the goal with that reason
@@ -655,9 +655,8 @@ system proxy.
 enables project `.pips` Skills/Bundles/MCP plus shared `.agents/skills` for
 this invocation. It does not enable project configuration, grant a tool or
 Skill-script approval, or enable Full Access. Project MCP servers are enabled
-by workspace trust, matching grok-build's folder-trust boundary; an optional
-user-level deny disables one by server ID. The trust decision is audited on
-stderr.
+by workspace trust; an optional user-level deny disables one by server ID. The
+trust decision is audited on stderr.
 
 Reviewed local lifecycle commands are configured and approved separately from
 Workspace trust. See the [Coding lifecycle hooks guide](coding-hooks.md) for
@@ -735,11 +734,11 @@ these six removed keys with a migration error that names the key; the four
 execution keys point at the definition-side `limits.max_turns`.
 
 Inside a child, an identical Tool call is nudged (denied with a message) at the
-reference's thresholds: the 4th consecutive identical call when every call in
+fixed thresholds: the 4th consecutive identical call when every call in
 the run is read risk, the 8th otherwise. The same run hard-stops the child as
 `no_progress` at 8 (read risk) or 12 (otherwise), and a different call resets
 the run. Neither a main interaction nor a Goal run installs a turn cap: a Goal
-is bounded by its own token budget, exactly as in the reference.
+is bounded by its own token budget.
 `limit_behavior` is `queue` (default) or `fail`. At the `max_concurrent` cap a
 `queue` spawn waits in arrival order and `fail` rejects it with the model-facing
 `Concurrent subagent limit reached` message; `max_concurrent` clamps to at least
@@ -1133,7 +1132,7 @@ Historical `update_plan` calls in old sessions keep their original
 replace-by-default semantics on replay; the transcript reader marks those calls
 so a resumed session cannot drift under the new default.
 
-One safety net matches the reference: when `merge` is `false` (including a
+One safety net applies: when `merge` is `false` (including a
 legacy call's absent default), the list already has items, every item carries no
 step, and every item's id already exists, the call is applied as a merge anyway,
 so a model that forgets the flag does not wipe the list. The consequence is
@@ -1142,7 +1141,7 @@ that wants to drop steps sends the items it keeps, with their steps.
 
 A call with `clear = true` removes the whole checklist. It must carry no items
 and cannot also set `merge = true`. An explicit `merge = false` with an empty
-list also clears it, matching the reference's empty replacement; an empty `plan`
+list also clears it; an empty `plan`
 with `merge` absent or true is still refused.
 
 The call is validated before it is folded: a duplicate id inside one call is
@@ -1237,8 +1236,8 @@ separate loop surface — a fired iteration is a background child, so no second
 coordinator's: it starts when the Runtime opens, stops on close, and fires
 nothing after close.
 
-Not implemented, deliberately: chaining an iteration onto the previous child, the
-reference's full framed prompt (a previous-iteration summary and Tool names), a
+Not implemented, deliberately: chaining an iteration onto the previous child, a
+full framed prompt (a previous-iteration summary and Tool names), a
 descendant guard, an occurrence journal and `expiresAt`, a `/loop` slash command,
 a separate "loop" cue or pane kind, and re-announcing restored tasks.
 
@@ -1453,8 +1452,8 @@ initiated — the child winds down afterwards — so "terminated successfully" w
 say more than the call knows. A `not_found` answer reads
 `Task or subagent "<id>" not found.` and also names the ids the registry still
 knows, bounded in count and length, so a model that lost an id can recover it.
-That enumeration is the registry's own, and it lists no child id: the reference's
-own list is the known bash task ids and names no subagent either. A task id is
+That enumeration is the registry's own and lists no child id: it names the known
+bash task ids and no subagent. A task id is
 unique across processes: `<kind>-<n>-<token>`, where the kind is `monitor` or
 `shell`, the counter stays readable, and a short random token keeps a restarted
 process from reusing an id. The tasks pane's kill control calls the same method,
@@ -1488,11 +1487,10 @@ closes the page, matching every other detail page. A watch has no transcript to
 open.
 
 **Lifetime.** The registry is process-local. A watch does not survive a restart,
-matching the session semantics of the reference: a crash cannot reconstruct one.
-A watch is stamped with the id of the interaction that started it, and an
-interaction that ends cancelled cancels exactly the watches it started — an
-earlier interaction's watches keep running. Teardown reaps every live watch, so
-none outlives its session.
+so a crash cannot reconstruct one. A watch is stamped with the id of the
+interaction that started it, and an interaction that ends cancelled cancels
+exactly the watches it started — an earlier interaction's watches keep running.
+Teardown reaps every live watch, so none outlives its session.
 
 **Telemetry.** One content-free counter, `pips.coding.background.tasks`, records
 each watch's lifecycle with its kind and a closed outcome
@@ -1656,9 +1654,9 @@ total below one unit prints four decimals, so a cheap session does not read as
 configuration with a strict schema, so an older binary rejects a config that
 carries `[cost]` rather than silently ignoring the prices.
 
-`/status` opens the read-only runtime panel, shaped like the reference CLI's
-tabbed settings view: five pages — `Status`, `Config`, `Usage`, `Stats`,
-`Models` — switched with `Tab`/`→` and `Shift+Tab`/`←`.
+`/status` opens the read-only runtime panel, a tabbed settings view: five pages —
+`Status`, `Config`, `Usage`, `Stats`, `Models` — switched with `Tab`/`→` and
+`Shift+Tab`/`←`.
 
 - `Status` names the session, its workspace and kind, the resolved model and
   endpoint, the connected MCP servers (`N connected · /mcp`), the effective

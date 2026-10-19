@@ -76,8 +76,8 @@ func TestPermissionsPersistExplicitDeny(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, codingmcp.StatusDisabled, resolved[0].Status)
 
-	// A user deny is name-based, like grok-build's disabled_mcp_servers, so
-	// changing the definition does not silently re-enable it.
+	// A user deny is name-based, so changing the definition does not silently
+	// re-enable it.
 	changed := fixture.loadDefinitions(t, []string{"--changed"})
 	resolved, err = fixture.permissions.Resolve(t.Context(), changed)
 	require.NoError(t, err)

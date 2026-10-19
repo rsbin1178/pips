@@ -86,8 +86,8 @@ func NewPermissions(options PermissionOptions) (*Permissions, error) {
 
 // Resolve enables every definition. A project definition is trusted by the
 // fact that the workspace trust gate admitted its file; the only override is
-// a user-store deny for that server ID, which matches grok-build's
-// folder-trust boundary without a second per-server approval.
+// a user-store deny for that server ID. That deny survives a definition change
+// without a second per-server approval.
 func (p *Permissions) Resolve(
 	ctx context.Context,
 	definitions Definitions,
@@ -211,8 +211,8 @@ func (p *Permissions) projectStatus(definition Definition) (Status, error) {
 		return "", err
 	}
 
-	// A deny is a personal, name-based switch, like grok-build's
-	// disabled_mcp_servers. It intentionally survives a definition change.
+	// A deny is a personal, name-based switch. It intentionally survives a
+	// definition change.
 	if exists && user.Decision == workspace.PermissionDeny {
 		return StatusDisabled, nil
 	}

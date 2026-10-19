@@ -534,7 +534,7 @@ func rejectLegacySubagentBudget(raw map[string]any) error {
 		}
 
 		return fmt.Errorf(
-			"%w: [subagents] %s was removed; the reference bounds concurrent children only, so delete the line",
+			"%w: [subagents] %s was removed; only the concurrent-child limit remains, so delete the line",
 			ErrMigration,
 			key,
 		)
