@@ -146,6 +146,7 @@ func (c *composerState) ToggleSelectAll() bool {
 
 		return false
 	}
+
 	if c.Value() == "" {
 		return false
 	}
@@ -251,10 +252,12 @@ func (c *composerState) InsertString(value string) {
 func (c composerState) Update(message tea.Msg) (composerState, tea.Cmd) {
 	if c.selectAll {
 		updated, outcome := c.updateSelection(message)
+
 		c = updated
 		if outcome == selectionConsumed {
 			return c, nil
 		}
+
 		if outcome == selectionCollapsed {
 			c.CollapseSelection()
 		}
@@ -333,6 +336,7 @@ func (c *composerState) InsertPaste(content string) (bool, error) {
 	}
 
 	c.snapCursorToElementEdge()
+
 	if c.expandPaste(content) {
 		return false, nil
 	}
@@ -410,6 +414,7 @@ func (c *composerState) expandPaste(content string) bool {
 		if element.kind != composerElementPaste || element.payload != content {
 			continue
 		}
+
 		if cursor < span.start || cursor > span.end {
 			continue
 		}
@@ -420,11 +425,13 @@ func (c *composerState) expandPaste(content string) bool {
 		c.elements = slices.Delete(slices.Clone(c.elements), span.elementIndex, span.elementIndex+1)
 		line, column := composerPositionAtByte(updated, span.start+len(content))
 		setComposerPosition(c, line, column)
+
 		if !c.hasValidElements() {
 			c.applySnapshot(before)
 
 			return false
 		}
+
 		c.exitHistoryOnChange(before.display)
 
 		return true

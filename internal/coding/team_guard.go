@@ -170,6 +170,7 @@ func leadTeamDescriptorAllowed(descriptor catalog.Descriptor) bool {
 	if descriptor.Source.Kind != catalog.SourceLocal {
 		return false
 	}
+
 	if descriptor.Name == subagent.ToolName ||
 		descriptor.Source.ID == tools.PlanCatalogID {
 		return false

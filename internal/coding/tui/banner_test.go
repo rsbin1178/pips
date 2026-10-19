@@ -136,6 +136,7 @@ func TestFullscreenResumeBannerSitsAtTheTopOfHistory(t *testing.T) {
 	for index := range 40 {
 		state.Transcript = append(state.Transcript, ai.UserText("history "+strings.Repeat("x", index+1)))
 	}
+
 	model := fullscreenModel(t, stubController{state: state}, true)
 	model.Update(tea.WindowSizeMsg{Width: 100, Height: 20})
 	model.rerenderTranscript(false)

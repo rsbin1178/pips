@@ -277,6 +277,7 @@ func (m *Model) activateSnapshotRoute(request routeOpenRequest) tea.Cmd {
 	default:
 		return nil
 	}
+
 	m.setRouteComposerSnapshot(request)
 
 	return command
@@ -365,6 +366,7 @@ func (m *Model) closeRouteToParent() tea.Cmd {
 			m.streamErr = err
 		}
 	}
+
 	m.syncTasksPane(time.Now())
 	m.setLayout()
 

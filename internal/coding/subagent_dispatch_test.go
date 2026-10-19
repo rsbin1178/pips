@@ -472,6 +472,7 @@ func TestCompileDelegableCapabilitiesByMode(t *testing.T) {
 
 			capabilities, err := compileDelegableCapabilities(agentprofile.ToolSelection{}, test.mode, ambient)
 			require.NoError(t, err)
+
 			names := make([]string, len(capabilities))
 			for index, capability := range capabilities {
 				names[index] = capability.WireName

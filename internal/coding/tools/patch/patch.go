@@ -268,6 +268,7 @@ func normalizeTarget(rawPath, planPath string, resolve func(string) (string, err
 	if planPath != "" && rawPath == planPath {
 		return planPath, nil
 	}
+
 	if resolve != nil {
 		return resolve(rawPath)
 	}

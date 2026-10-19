@@ -318,6 +318,7 @@ func projectionCompactionDigest(state coding.CompactionState) uint64 {
 	hash = mixProjectionString(hash, state.Strategy)
 	hash = mixProjectionInt(hash, state.TokensBefore)
 	hash = mixProjectionInt(hash, state.TokensAfter)
+
 	hash = mixProjectionInt(hash, state.BoundaryIndex)
 	if state.Active {
 		return mixProjectionInt(hash, 1)

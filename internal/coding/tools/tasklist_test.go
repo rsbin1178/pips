@@ -75,7 +75,7 @@ func TestTaskCatalogAutoUpgradeNetReportsTheFoldedPlan(t *testing.T) {
 	assert.JSONEq(t, `{"updated":true,"completed":1,"total":2}`, text)
 }
 
-// TestTaskCatalogAllowsParallelInProgress pins the Grok Build-style policy: a
+// TestTaskCatalogAllowsParallelInProgress pins the policy: a
 // merge may make a second item active while another is already running.
 func TestTaskCatalogAllowsParallelInProgress(t *testing.T) {
 	t.Parallel()
