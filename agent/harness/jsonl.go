@@ -645,6 +645,12 @@ type ForkOptions struct {
 	// The caller must specify newID and bind the callback to that destination.
 	// A failed or uncertain fork must not delete potentially referenced objects.
 	PrepareArchives func(archiveIDs []string) error
+	// PrepareEntries publishes any non-archive sidecar the retained entries
+	// reference, for example session media. It receives the exact self-contained
+	// path that will be written and runs after the temporary transcript is
+	// synced but before its exclusive publication, so an error leaves the
+	// destination unpublished.
+	PrepareEntries func(entries []Entry) error
 }
 
 // ForkSession failure-atomically copies a validated source path into a new
@@ -736,6 +742,11 @@ func (r Repo) ForkSession(
 	}
 	if err := forked.Close(); err != nil {
 		return nil, err
+	}
+	if len(options) == 1 && options[0].PrepareEntries != nil {
+		if err := options[0].PrepareEntries(path); err != nil {
+			return nil, fmt.Errorf("harness: prepare fork entries: %w", err)
+		}
 	}
 	if prepareArchives != nil {
 		if err := prepareArchives(); err != nil {

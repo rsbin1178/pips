@@ -314,6 +314,14 @@ func (r *Runtime) hookAfterPendingTool(
 	parts []ai.Part,
 	isError bool,
 ) ([]ai.Part, bool) {
+	// A paused call skips the interaction's AfterTool chain, so the media gate
+	// runs here too before the lifecycle hook sees the result.
+	if r.model != nil {
+		if gated, refused := MediaGateForCapabilities(r.model.Capabilities()).Check(call.Name, parts); refused {
+			parts = gated
+		}
+	}
+
 	override := r.applyPostToolHook(ctx, agent.ToolResultInfo{
 		ToolCall: call,
 		Result: ai.ToolResultPart{

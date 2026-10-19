@@ -1281,3 +1281,34 @@ prompt_cache_key = true
 	require.NotNil(t, provider.Compatibility.PromptCacheKey)
 	assert.True(t, *provider.Compatibility.PromptCacheKey)
 }
+
+func TestLoadMediaConfigDefaultsAndOverrides(t *testing.T) {
+	t.Parallel()
+
+	result, err := config.Load(config.LoadOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, config.DefaultMediaConfig(), result.Config.Media)
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, path, "[media]\nmax_request_bytes = 1048576\ncleanup_ttl_days = 7\ngc_grace_hours = 1\n")
+
+	result, err = config.Load(config.LoadOptions{ConfigFile: path})
+	require.NoError(t, err)
+	assert.Equal(t, config.MediaConfig{MaxRequestBytes: 1 << 20, CleanupTTLDays: 7, GCGraceHours: 1}, result.Config.Media)
+
+	// A partial table keeps the other defaults.
+	partial := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, partial, "[media]\ncleanup_ttl_days = 0\n")
+
+	result, err = config.Load(config.LoadOptions{ConfigFile: partial})
+	require.NoError(t, err)
+	assert.Equal(t, 30<<20, result.Config.Media.MaxRequestBytes)
+	assert.Equal(t, 0, result.Config.Media.CleanupTTLDays)
+	assert.Equal(t, 24, result.Config.Media.GCGraceHours)
+
+	invalid := filepath.Join(t.TempDir(), "config.toml")
+	writeFile(t, invalid, "[media]\nmax_request_bytes = -1\n")
+
+	_, err = config.Load(config.LoadOptions{ConfigFile: invalid})
+	require.ErrorIs(t, err, config.ErrInvalid)
+}

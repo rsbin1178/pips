@@ -48,6 +48,11 @@ const (
 	ChildIndexEntryFileName = "entry.json"
 	// TerminalDirName holds bounded tool output logs.
 	TerminalDirName = "terminal"
+	// ImagesDirName holds session media originals (clipboard, Workspace, ACP,
+	// and future generated media).
+	ImagesDirName = "images"
+	// AssetsDirName holds the bounded model-ready copies of session media.
+	AssetsDirName = "assets"
 
 	// UnknownWorkspaceKey groups sessions whose workspace path is unknown.
 	UnknownWorkspaceKey = "_unknown"
@@ -192,6 +197,16 @@ func (l StoreLayout) ChildIndexEntryFile(workspacePath, parentID, childID string
 // TerminalDir returns the tool output log directory.
 func (l StoreLayout) TerminalDir(workspacePath, id string) string {
 	return filepath.Join(l.SessionDir(workspacePath, id), TerminalDirName)
+}
+
+// ImagesDir returns the session media originals directory.
+func (l StoreLayout) ImagesDir(workspacePath, id string) string {
+	return filepath.Join(l.SessionDir(workspacePath, id), ImagesDirName)
+}
+
+// AssetsDir returns the bounded model-ready media copy directory.
+func (l StoreLayout) AssetsDir(workspacePath, id string) string {
+	return filepath.Join(l.SessionDir(workspacePath, id), AssetsDirName)
 }
 
 // SessionRelDir returns the session directory relative to the store root, split

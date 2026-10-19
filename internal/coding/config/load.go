@@ -89,6 +89,7 @@ type fileLayer struct {
 	providers             map[ai.Provider]ProviderConfig
 	models                []ModelConfig
 	compaction            *CompactionConfig
+	media                 *MediaConfig
 	subagent              *SubagentConfig
 	subagentFields        []Field
 	cost                  *CostConfig
@@ -121,6 +122,9 @@ func Load(options LoadOptions) (Result, error) {
 		result.Config.Models = layer.models
 		if layer.compaction != nil {
 			result.Config.Compaction = *layer.compaction
+		}
+		if layer.media != nil {
+			result.Config.Media = *layer.media
 		}
 		if layer.subagent != nil {
 			result.Config.Subagent = *layer.subagent
@@ -178,6 +182,7 @@ type fileConfig struct {
 	SandboxWorkspaceWrite *fileSandboxWorkspaceWrite `toml:"sandbox_workspace_write"`
 	Approval              *string                    `toml:"approval"`
 	Compaction            *fileCompaction            `toml:"compaction"`
+	Media                 *fileMedia                 `toml:"media"`
 	Subagent              *fileSubagent              `toml:"subagents"`
 	Cost                  *fileCost                  `toml:"cost"`
 	MCPReadOnlyTools      map[string][]string        `toml:"mcp_read_only_tools"`
@@ -219,6 +224,12 @@ type fileCompaction struct {
 	AttemptsPerStage  *int  `toml:"attempts_per_stage"`
 	RetryDelaySeconds *int  `toml:"retry_delay_seconds"`
 	TimeoutSeconds    *int  `toml:"timeout_seconds"`
+}
+
+type fileMedia struct {
+	MaxRequestBytes *int `toml:"max_request_bytes"`
+	CleanupTTLDays  *int `toml:"cleanup_ttl_days"`
+	GCGraceHours    *int `toml:"gc_grace_hours"`
 }
 
 type fileSubagent struct {
@@ -682,6 +693,22 @@ func decodeLayer(value fileConfig) (fileLayer, error) {
 			return fileLayer{}, err
 		}
 		layer.compaction = &compaction
+	}
+	if value.Media != nil {
+		media := DefaultMediaConfig()
+		if value.Media.MaxRequestBytes != nil {
+			media.MaxRequestBytes = *value.Media.MaxRequestBytes
+		}
+		if value.Media.CleanupTTLDays != nil {
+			media.CleanupTTLDays = *value.Media.CleanupTTLDays
+		}
+		if value.Media.GCGraceHours != nil {
+			media.GCGraceHours = *value.Media.GCGraceHours
+		}
+		if err := validateMedia(media); err != nil {
+			return fileLayer{}, err
+		}
+		layer.media = &media
 	}
 	if value.Subagent != nil {
 		subagent := DefaultSubagentConfig()

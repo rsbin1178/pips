@@ -465,6 +465,17 @@ func contentBlockFromMedia(source ai.MediaSource, image bool, name string) (acps
 		}
 
 		return acpsdk.ResourceLinkBlock(name, source.URL), true
+	case source.Path != "":
+		// Persisted session media has no inline bytes to replay; the reference
+		// itself is the durable handle a frontend can resolve.
+		uri := "pips://media/" + source.Path
+		if image {
+			return acpsdk.ContentBlock{Image: &acpsdk.ContentBlockImage{
+				Data: "", MimeType: source.MIMEType, Type: "image", Uri: new(uri),
+			}}, true
+		}
+
+		return acpsdk.ResourceLinkBlock(name, uri), true
 	default:
 		return acpsdk.ContentBlock{}, false
 	}

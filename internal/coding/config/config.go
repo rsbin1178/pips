@@ -580,6 +580,28 @@ func DefaultCompactionConfig() CompactionConfig {
 	}
 }
 
+// MediaConfig bounds persisted session media and one provider request body.
+type MediaConfig struct {
+	// MaxRequestBytes caps one provider request body after hydration. Zero
+	// disables the budget check.
+	MaxRequestBytes int
+	// CleanupTTLDays removes idle session directories and prunes expired media
+	// from live sessions. Zero disables automatic deletion.
+	CleanupTTLDays int
+	// GCGraceHours is the minimum media age before orphan collection removes it.
+	GCGraceHours int
+}
+
+// DefaultMediaConfig returns the bounded product policy: a 30 MiB request
+// budget, a 30-day idle TTL, and a 24-hour orphan grace period.
+func DefaultMediaConfig() MediaConfig {
+	return MediaConfig{
+		MaxRequestBytes: 30 << 20,
+		CleanupTTLDays:  30,
+		GCGraceHours:    24,
+	}
+}
+
 // SubagentConfig contains the user-configurable production admission budgets,
 // parsed from the `[subagents]` table. MaxDepth defaults to one: a child may not
 // spawn another child. Zero is invalid for max_concurrent. A child's execution
@@ -729,6 +751,7 @@ type Config struct {
 	SandboxWorkspaceWrite SandboxWorkspaceWriteConfig
 	Approval              ApprovalMode
 	Compaction            CompactionConfig
+	Media                 MediaConfig
 	// MCPReadOnlyTools marks MCP tools, keyed by server ID, as read-only so
 	// they may run concurrently within one model response. Values are remote
 	// tool names or "*" for every tool of the server. It affects execution
@@ -809,6 +832,7 @@ func Defaults() Config {
 		Approval:   ApprovalOnRequest,
 		Compaction: DefaultCompactionConfig(),
 		Subagent:   DefaultSubagentConfig(),
+		Media:      DefaultMediaConfig(),
 		// Custom subagents are on by default. PIPS_DYNAMIC_SUBAGENTS and
 		// --dynamic-subagents keep their precedence, so an operator can still
 		// force them off.
@@ -980,6 +1004,9 @@ func (c Config) ValidateRuntime() error {
 	if err := validateCompaction(c.Compaction); err != nil {
 		return err
 	}
+	if err := validateMedia(c.Media); err != nil {
+		return err
+	}
 	if err := validateSubagent(c.Subagent); err != nil {
 		return err
 	}
@@ -1051,6 +1078,16 @@ func validateCompaction(value CompactionConfig) error {
 		value.TimeoutSeconds < 0 || value.TimeoutSeconds > int(compaction.DefaultTimeout/time.Second) {
 		return fmt.Errorf("%w: compaction threshold, quality or retry limits are out of bounds", ErrInvalid)
 	}
+	return nil
+}
+
+// validateMedia rejects a negative request budget, TTL, or grace period. Zero
+// is legal for each: it disables that behavior rather than meaning "unset".
+func validateMedia(value MediaConfig) error {
+	if value.MaxRequestBytes < 0 || value.CleanupTTLDays < 0 || value.GCGraceHours < 0 {
+		return fmt.Errorf("%w: media budgets and TTL must be nonnegative", ErrInvalid)
+	}
+
 	return nil
 }
 

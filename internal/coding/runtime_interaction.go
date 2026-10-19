@@ -625,7 +625,7 @@ func (r *Runtime) endOperation(operation *runtimeOperation) {
 }
 
 // currentTasks returns a detached copy of the runtime's projected plan, the
-// state the update_plan tool folds a merge onto. It is the same projection the
+// state the todo_write tool folds a merge onto. It is the same projection the
 // todo gate reads, so the tool's reported totals and the gate cannot disagree.
 func (r *Runtime) currentTasks() tasklist.Snapshot {
 	if r == nil {
@@ -827,7 +827,7 @@ func (r *Runtime) openInteraction(
 			return nil, taskErr
 		}
 		composedCatalogs = append(composedCatalogs, taskCatalog)
-		// The scheduler Tools are offered exactly where update_plan is offered.
+		// The scheduler Tools are offered exactly where todo_write is offered.
 		// A runtime without a scheduler store — a Team Worker — offers none.
 		if r.scheduler != nil {
 			schedulerCatalog, schedulerErr := tools.NewSchedulerCatalog(r.schedulerSurface())
@@ -925,7 +925,7 @@ func (r *Runtime) openInteraction(
 			workspace: r.workspace, tree: r.tree, toolLimits: r.opts.ToolLimits,
 			policy: r.policy, executor: r.executor, sandbox: r.config.Sandbox,
 			network:       r.config.SandboxWorkspaceWrite.Network,
-			requestPolicy: r.requestPolicy, toolTimeout: r.opts.ToolTimeout,
+			requestPolicy: r.requestPolicy, mediaBudget: r.config.Media.MaxRequestBytes, toolTimeout: r.opts.ToolTimeout,
 			inspector: r.inspector, hooks: r.hookDefinitions, hookRunner: r.hookRunner,
 			onHookDiagnostics: func(ctx context.Context, diagnostics []hooks.Diagnostic) {
 				r.recordHookDiagnostics(ctx, nil, diagnostics)
@@ -1099,6 +1099,9 @@ func (r *Runtime) openInteraction(
 	controlHooks := extensionHooks
 	controlHooks.Observe = nil
 	composed := extension.ComposeHooks(
+		// The capability gate runs first, so the refusal it writes is what every
+		// later hook observes and what reaches the provider.
+		extension.Hooks{AfterTool: mediaGateAfterTool(snapshot.Model(r.model))},
 		extension.Hooks{BeforeTool: r.hookBeforeTool(emitter)},
 		extension.Hooks{BeforeTool: r.teamGuard.beforeTool(descriptors)},
 		extension.Hooks{AfterTool: leadCoordinatorAfterTool(leadCoordinator)},
@@ -1134,6 +1137,10 @@ func (r *Runtime) openInteraction(
 		agent.WithRequest(r.applyContextRequest(current)),
 	)
 
+	if hydrator := r.mediaHydrator(); hydrator != nil {
+		agentOptions = append(agentOptions, agent.WithTransformContext(hydrator.Hydrate))
+	}
+
 	harnessOptions := []harness.Option{
 		harness.WithTools(executableTools...),
 		harness.WithSystem(systemPrompt.SharedPrefix),
@@ -1156,6 +1163,7 @@ func (r *Runtime) openInteraction(
 	// that one-shot decision intact, but run the lifecycle post-tool hook when
 	// an uncontrolled pending call finally executes through pendingRunner.
 	pendingHooks := extension.ComposeHooks(
+		extension.Hooks{AfterTool: mediaGateAfterTool(snapshot.Model(r.model))},
 		extensionHooks,
 		extension.Hooks{AfterTool: r.hookAfterTool(nil)},
 	)
@@ -1297,6 +1305,19 @@ func (r *Runtime) driveHarness(
 	}
 	messages = r.turnMessages(current, messages)
 
+	// Inline user media becomes a session-relative reference before the prompt
+	// is committed, so the transcript never stores image bytes. Old inline
+	// transcripts and tool-result media are untouched.
+	store, storeErr := r.sessionMediaStore()
+	if storeErr != nil {
+		return "", storeErr
+	}
+
+	messages, err = persistUserMedia(ctx, store, messages)
+	if err != nil {
+		return "", err
+	}
+
 	var stop agent.StopReason
 	inputPending := cloneMessages(messages)
 	for event, streamErr := range current.harness.PromptMessagesStream(ctx, messages...) {
@@ -1316,7 +1337,7 @@ func (r *Runtime) driveHarness(
 				if err := r.acknowledgeNotificationMessage(committed.Message); err != nil {
 					return "", err
 				}
-				// A committed, valid update_plan call is what resets the todo
+				// A committed, valid todo_write call is what resets the todo
 				// nudge; a malformed call is not a plan write.
 				if _, planWrite := tasklist.FromMessage(committed.Message); planWrite {
 					r.markPlanWritten()
@@ -1878,12 +1899,22 @@ func (r *Runtime) Steer(messages ...ai.Message) error {
 		return err
 	}
 
+	messages, err = r.queueUserMedia(messages)
+	if err != nil {
+		return err
+	}
+
 	return current.harness.Steer(cloneMessages(messages)...)
 }
 
 // FollowUp queues messages after the current Agent invocation settles.
 func (r *Runtime) FollowUp(messages ...ai.Message) error {
 	current, err := r.activeHarness("follow up")
+	if err != nil {
+		return err
+	}
+
+	messages, err = r.queueUserMedia(messages)
 	if err != nil {
 		return err
 	}
@@ -1895,6 +1926,11 @@ func (r *Runtime) FollowUp(messages ...ai.Message) error {
 // steering, so they are injected before any message already queued to steer.
 func (r *Runtime) Interject(messages ...ai.Message) error {
 	current, err := r.activeHarness("interject")
+	if err != nil {
+		return err
+	}
+
+	messages, err = r.queueUserMedia(messages)
 	if err != nil {
 		return err
 	}
