@@ -3354,6 +3354,14 @@ func (m *Model) reduceObservedEvent(event coding.Event) {
 // keeps the tail visible while the reader follows it.
 func (m *Model) reduceChildEvent(event coding.Event) {
 	state := m.childStates[event.SessionID]
+	// An authoritative snapshot adopted for an open page can already include
+	// events still queued on the subscription: the snapshot is read after they
+	// were published. Replaying one is a no-op, so its sequence is not a
+	// protocol violation.
+	if state.SessionID == event.SessionID && event.Sequence <= state.Sequence {
+		return
+	}
+
 	next, err := coding.Reduce(state, event)
 	if err != nil {
 		m.streamErr = fmt.Errorf("coding tui: reduce child %s: %w", event.SessionID, err)
