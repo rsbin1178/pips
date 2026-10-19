@@ -51,10 +51,12 @@ func openEventLogSink(path, sessionID string) *eventLogSink {
 	return &eventLogSink{journal: journal}
 }
 
-// Append records one committed Coding event. The journal assigns the sequence
-// itself, so callers never restate it.
+// Append records one committed Coding event. Live projections are dropped
+// here, before serialization; durable records are written at their natural
+// size, so a large message is never silently lost. The journal assigns the
+// sequence itself, so callers never restate it.
 func (s *eventLogSink) Append(event Event) {
-	if s == nil {
+	if s == nil || JournalDurability(event.Type) == EventJournalLiveOnly {
 		return
 	}
 
@@ -183,17 +185,10 @@ func (a *sessionArtifacts) Close() error {
 	return a.journal.Close()
 }
 
-// appendJournalEvent records one committed event in the durable journal.
-//
-// Streaming deltas and model-retry notices are deliberately excluded: they
-// exist only for the live TUI projection, and the message they build is
-// already recorded by the committed-message event and the transcript, so
-// journaling them would duplicate content and bloat the log.
+// appendJournalEvent offers one committed event to the journal. The sink owns
+// the durability policy, so live projections are dropped in one place.
 func (a *sessionArtifacts) appendJournalEvent(event Event) {
 	if a == nil || a.journal == nil {
-		return
-	}
-	if event.Type == EventMessageDelta || event.Type == EventModelRetry {
 		return
 	}
 
