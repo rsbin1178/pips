@@ -10,7 +10,10 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding"
+	"github.com/rsbin1178/pips/internal/coding/config"
+	"github.com/rsbin1178/pips/internal/coding/modelcatalog"
 	"github.com/rsbin1178/pips/internal/coding/paths"
 	"github.com/rsbin1178/pips/internal/coding/statusline"
 	"github.com/rsbin1178/pips/internal/coding/tui"
@@ -192,14 +195,18 @@ theme = "auto"
 			require.NoError(t, bootstrapErr)
 			require.NotNil(t, options.SaveStatusLine)
 			require.NotNil(t, options.SaveTheme)
+			require.NotNil(t, options.SaveSelection)
 			called = true
 
 			require.NoError(t, options.SaveStatusLine(ctx, []statusline.Item{
 				statusline.Model,
 				statusline.Phase,
 			}))
+			require.NoError(t, options.SaveTheme(ctx, "dracula"))
 
-			return options.SaveTheme(ctx, "dracula")
+			return options.SaveSelection(ctx, modelcatalog.Selection{
+				Ref: config.ModelRef{Provider: ai.ProviderOpenAI, Model: "test-model"},
+			})
 		},
 	})
 	require.NoError(t, err)
@@ -211,6 +218,7 @@ theme = "auto"
 	require.NoError(t, err)
 	assert.Contains(t, string(data), `theme = "dracula"`)
 	assert.Contains(t, string(data), `status_line = ["model", "phase"]`)
+	assert.Contains(t, string(data), "[providers.openai.models.\"test-model\"]\ndefault = true")
 	_, err = os.Stat(layout.ConfigFile())
 	assert.ErrorIs(t, err, os.ErrNotExist)
 }
