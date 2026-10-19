@@ -39,7 +39,7 @@ type SchedulerSurface interface {
 }
 
 // NewSchedulerCatalog returns the Agent-mode application catalog of scheduled
-// task Tools. It is offered exactly where update_plan is offered, and a nil
+// task Tools. It is offered exactly where todo_write is offered, and a nil
 // store offers none of them.
 func NewSchedulerCatalog(store SchedulerSurface) (*catalog.Catalog, error) {
 	if store == nil {
