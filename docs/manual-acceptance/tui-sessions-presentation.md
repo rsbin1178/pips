@@ -87,12 +87,12 @@
 - 分类：实时 Provider、交互终端。变更等级：本地持久状态；可能产生费用。
 - 前置条件：配置至少两个本地 catalog models；其中一个请求能保持 streaming 足够久以输入控制消息。
 - 隔离夹具：三个带顺序标记的无秘密 prompt；记录原 Session ID、model 和 transcript 长度。
-- 步骤：idle 时打开 `/model`，先 Esc 取消，再选择另一 model；确认 Session ID 不变并发一轮请求。下一轮 running 时在 Composer 输入 steer 文本并按 Enter；再输入 follow-up 并按 Tab；另起一轮按 Ctrl+C 取消；测试 bracketed multiline paste 与普通输入的边界。
-- 预期证据：model 只来自本地配置 catalog，不请求远端 `/models`，切换原子 reopen 同一 Session，失败时可恢复旧 model；Enter 在 running 时调用 Steer，Tab 只排一个 Follow-up，二者在 Controller 接受后才清草稿；Ctrl+C 终止当前 interaction 但不损坏 Session；粘贴多行不拆成多次提交。
+- 步骤：idle 时打开 `/model`，先 Esc 取消，再选择另一 model；确认 Session ID 不变并发一轮请求。再次打开 `/model`，直接按 Enter 应用并保存为默认，检查当前 config 只保留该 model 的 `default = true` 以及所选 `variant`/`reasoning`；重启后确认选择恢复。下一轮 running 时在 Composer 输入 steer 文本并按 Enter；再输入 follow-up 并按 Tab；另起一轮按 Ctrl+C 取消；测试 bracketed multiline paste 与普通输入的边界。
+- 预期证据：model 只来自本地配置 catalog，不请求远端 `/models`，切换原子 reopen 同一 Session，失败时可恢复旧 model；`Enter` 在切换成功后写入当前 config，保存失败只报告错误且不撤销当前进程选择；`Enter` 在 running 时调用 Steer，Tab 只排一个 Follow-up，二者在 Controller 接受后才清草稿；Ctrl+C 终止当前 interaction 但不损坏 Session；粘贴多行不拆成多次提交。
 - 通过条件：model attribution 按 interaction 固定，控制消息顺序正确、无丢失/重复，取消后可继续使用同一 Session。
 - 失败条件：model switch 新建 Session/改写旧 attribution、失败后旧 Runtime 丢失、Steer/Follow-up 串型、多个 follow-up 无界排队、或取消仍完成原请求。
 - 清理/回滚：等待取消收敛，切回验收默认 model 并正常退出。
-- 来源/测试锚点：[control.go](../../internal/coding/tui/control.go)、[model.go](../../internal/coding/tui/model.go)、[model_test.go](../../internal/coding/tui/model_test.go)。
+- 来源/测试锚点：[control.go](../../internal/coding/tui/control.go)、[model.go](../../internal/coding/tui/model.go)、[model_test.go](../../internal/coding/tui/model_test.go)、[selection_store_test.go](../../internal/coding/config/selection_store_test.go)。
 - 结果：`未执行`。
 
 ## 分册判定

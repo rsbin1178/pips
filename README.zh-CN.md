@@ -170,8 +170,11 @@ default = true
 ```sh
 export API_KEY="sk-..."
 
-# 运行环境诊断（检查沙箱、依赖与模型凭据）
+# 运行环境诊断（检查沙箱、依赖、模型凭据与代理连通性）
 pips doctor
+
+# 诊断已配置的 MCP server
+pips mcp doctor
 
 # 启动交互式终端界面
 pips

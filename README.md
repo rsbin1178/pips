@@ -174,8 +174,11 @@ Configure your API Key, run diagnostics, and launch:
 ```sh
 export API_KEY="sk-..."
 
-# Verify sandbox support, credentials, and workspace status
+# Verify sandbox support, credentials, proxy reachability, and workspace status
 pips doctor
+
+# Diagnose configured MCP servers
+pips mcp doctor
 
 # Start the interactive TUI
 pips
