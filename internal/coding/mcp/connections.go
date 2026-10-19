@@ -18,6 +18,7 @@ import (
 	"github.com/rsbin1178/pips/agent"
 	"github.com/rsbin1178/pips/agent/catalog"
 	agentmcp "github.com/rsbin1178/pips/agent/mcp"
+	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding/execution/mcpstdio"
 	"github.com/rsbin1178/pips/internal/coding/workspace"
 )
@@ -117,13 +118,16 @@ type managedServer struct {
 	connectTimeout time.Duration
 	definition     Definition
 
-	state     ServerState
-	stage     string
-	code      string
-	message   string
-	startedAt time.Time
-	settledAt time.Time
-	reported  bool
+	state       ServerState
+	stage       string
+	code        string
+	message     string
+	startedAt   time.Time
+	settledAt   time.Time
+	reported    bool
+	retryable   bool
+	retryAt     time.Time
+	rapidDeaths int
 
 	client   *agentmcp.Client
 	resource io.Closer
@@ -148,10 +152,45 @@ type Connections struct {
 	closed        bool
 	readOnly      map[string]map[string]struct{}
 
-	cancel    context.CancelFunc
-	wg        sync.WaitGroup
-	closeOnce sync.Once
-	closeErr  error
+	factory           TransportFactory
+	connectionOptions ConnectionOptions
+	//nolint:containedctx // The connection set owns one detached lifecycle context.
+	background context.Context
+	cancel     context.CancelFunc
+	wg         sync.WaitGroup
+	watchWG    sync.WaitGroup
+	recoveryWG sync.WaitGroup
+	closeOnce  sync.Once
+	closeErr   error
+}
+
+const (
+	connectAttempts      = 3
+	recoveryInitialDelay = time.Second
+	recoveryMaxDelay     = 30 * time.Second
+)
+
+// failedRetryCooldown is a variable so tests can shrink the wait without
+// changing production behavior.
+var failedRetryCooldown = 30 * time.Second
+
+// connectRetryDelays is indexed by the attempt that just failed. It leaves a
+// short window for a proxy to fail over while staying inside the existing
+// connect_timeout budget.
+var connectRetryDelays = []time.Duration{500 * time.Millisecond, time.Second}
+
+// recoveryDelays is the bounded ladder used after an established transport
+// closes. The immediate attempt is followed by growing delays, capped at 30s,
+// for a worst-case window of roughly 2.5 minutes.
+var recoveryDelays = []time.Duration{
+	0,
+	recoveryInitialDelay,
+	4 * time.Second,
+	16 * time.Second,
+	recoveryMaxDelay,
+	recoveryMaxDelay,
+	recoveryMaxDelay,
+	recoveryMaxDelay,
 }
 
 // OpenConnections validates options and every enabled definition, installs an
@@ -187,12 +226,15 @@ func OpenConnections(
 
 	background, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	connections := &Connections{
-		servers:  servers,
-		options:  slices.Clone(options.Diagnostics),
-		settled:  make(chan struct{}),
-		cancel:   cancel,
-		snapshot: agentmcp.RegistrySnapshot{Version: 1, UpdatedAt: time.Now().UTC()},
-		readOnly: readOnlySets(options.ReadOnlyTools),
+		servers:           servers,
+		options:           slices.Clone(options.Diagnostics),
+		settled:           make(chan struct{}),
+		factory:           factory,
+		connectionOptions: options,
+		background:        background,
+		cancel:            cancel,
+		snapshot:          agentmcp.RegistrySnapshot{Version: 1, UpdatedAt: time.Now().UTC()},
+		readOnly:          readOnlySets(options.ReadOnlyTools),
 	}
 	connections.signature, err = entriesSignature(nil)
 	if err != nil {
@@ -286,40 +328,66 @@ func (c *Connections) connect(
 
 // attempt connects and lists one server. It returns the release for a
 // connection that did not join the catalog, or nil.
+//
+// A handshake that fails on the path to the server is retried on a fresh
+// transport. The connect context is shared by every attempt, so retries never
+// extend the caller's configured connect budget.
 func (c *Connections) attempt(
 	ctx context.Context,
 	server *managedServer,
 	factory TransportFactory,
 	options ConnectionOptions,
 ) func() error {
-	transport, resource, transportErr := factory(ctx, server.definition)
-	if transportErr != nil {
-		var credential credentialError
-		if errors.As(transportErr, &credential) {
-			c.fail(server, "transport", "credential_unavailable", credential.Error())
+	connectCtx, cancel := context.WithTimeout(ctx, server.connectTimeout)
+	defer cancel()
+
+	var (
+		client       *agentmcp.Client
+		resource     io.Closer
+		lastErr      error
+		lastResource io.Closer
+	)
+
+	for attempt := range connectAttempts {
+		transport, attemptResource, transportErr := factory(connectCtx, server.definition)
+		if transportErr != nil {
+			if credential, ok := errors.AsType[credentialError](transportErr); ok {
+				c.fail(server, "transport", "credential_unavailable", credential.Error(), false)
+
+				return nil
+			}
+			c.fail(server, "transport", "transport_failed", "server transport could not be prepared", false)
 
 			return nil
 		}
-		c.fail(server, "transport", "transport_failed", "server transport could not be prepared")
 
-		return nil
+		client, lastErr = connectMCP(connectCtx, server, transport, options)
+		if lastErr == nil {
+			resource = attemptResource
+
+			break
+		}
+
+		lastResource = attemptResource
+		failedResource := attemptResource
+		if !isTransientConnectError(lastErr) || connectCtx.Err() != nil ||
+			attempt == connectAttempts-1 {
+			break
+		}
+		_ = closeConnection(nil, failedResource)
+		lastResource = nil
+
+		if !waitConnectRetry(connectCtx, connectRetryDelays[attempt]) {
+			break
+		}
 	}
 
-	connectCtx, cancel := context.WithTimeout(ctx, server.connectTimeout)
-	client, connectErr := agentmcp.Connect(
-		connectCtx,
-		options.Implementation,
-		transport,
-		agentmcp.WithToolNamePrefix(server.id),
-		agentmcp.WithMaxTools(options.MaxTools),
-	)
-	cancel()
-	if connectErr != nil {
+	if lastErr != nil {
 		c.fail(server, "connect", "connect_failed", failureMessage(
-			"server connection could not be initialized", connectErr, server, resource,
-		))
+			"server connection could not be initialized", lastErr, server, lastResource,
+		), isRetryableConnectError(lastErr))
 
-		return func() error { return closeConnection(nil, resource) }
+		return func() error { return closeConnection(nil, lastResource) }
 	}
 
 	listCtx, listCancel := context.WithTimeout(ctx, server.connectTimeout)
@@ -328,20 +396,64 @@ func (c *Connections) attempt(
 	if listErr != nil {
 		c.fail(server, "list", "list_failed", failureMessage(
 			"server tools could not be listed", listErr, server, resource,
-		))
+		), isRetryableConnectError(listErr))
 
 		return func() error { return closeConnection(client, resource) }
 	}
 
 	if err := c.install(server, client, resource, tools); err != nil {
 		if !errors.Is(err, errConnectionsClosed) {
-			c.fail(server, "list", "catalog_invalid", "server tools could not join the tool catalog")
+			c.fail(server, "list", "catalog_invalid", "server tools could not join the tool catalog", false)
 		}
 
 		return func() error { return closeConnection(client, resource) }
 	}
 
 	return nil
+}
+
+func waitConnectRetry(ctx context.Context, delay time.Duration) bool {
+	if delay <= 0 {
+		return ctx.Err() == nil
+	}
+
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// recoveringTool starts transport recovery when a tool call observes a
+// transport loss. The failed call is not replayed; the recovered tools join a
+// later interaction. This covers stateless HTTP sessions where no standalone
+// SSE stream exists to report the close on its own.
+type recoveringTool struct {
+	agent.Tool
+	connections *Connections
+	server      *managedServer
+	client      *agentmcp.Client
+}
+
+func (t *recoveringTool) RemoteName() string {
+	if remote, ok := t.Tool.(interface{ RemoteName() string }); ok {
+		return remote.RemoteName()
+	}
+
+	return ""
+}
+
+func (t *recoveringTool) Exec(ctx context.Context, call agent.ToolCall) ([]ai.Part, error) {
+	parts, err := t.Tool.Exec(ctx, call)
+	if err != nil && isTransportLoss(err) {
+		t.connections.handleLost(t.server, t.client)
+	}
+
+	return parts, err
 }
 
 // install publishes one connected server. A client that arrives after Close
@@ -360,7 +472,12 @@ func (c *Connections) install(
 	}
 
 	previousTools, previousState := server.tools, server.state
-	server.tools = slices.Clone(tools)
+	server.tools = make([]agent.Tool, len(tools))
+	for index, tool := range tools {
+		server.tools[index] = &recoveringTool{
+			Tool: tool, connections: c, server: server, client: client,
+		}
+	}
 	server.state = ServerStateConnected
 	if err := c.rebuildLocked(); err != nil {
 		server.tools = previousTools
@@ -370,13 +487,265 @@ func (c *Connections) install(
 	}
 
 	server.settledAt = time.Now().UTC()
+	server.retryable = false
+	server.retryAt = time.Time{}
 	server.client = client
 	server.resource = resource
+	c.watchWG.Add(1)
+	go c.watch(server, client)
 
 	return nil
 }
 
-func (c *Connections) fail(server *managedServer, stage, code, message string) {
+// RetryFailed starts one fresh connect attempt for every transiently failed
+// server whose cooldown has elapsed. The attempt runs on the connection set's
+// detached context so a cancelled prompt cannot leave a server permanently
+// disabled, and at most one attempt per server is in flight.
+func (c *Connections) RetryFailed(ctx context.Context) {
+	if c == nil || ctx.Err() != nil {
+		return
+	}
+
+	now := time.Now().UTC()
+
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+
+		return
+	}
+
+	retry := make([]*managedServer, 0)
+	for _, server := range c.servers {
+		if server.state != ServerStateFailed || !server.retryable || now.Before(server.retryAt) {
+			continue
+		}
+		server.state = ServerStateConnecting
+		server.stage = ""
+		server.code = ""
+		server.message = ""
+		server.startedAt = now
+		server.settledAt = time.Time{}
+		server.reported = false
+		server.retryable = false
+		server.retryAt = time.Time{}
+		c.pending++
+		c.reopenSettledLocked()
+		retry = append(retry, server)
+	}
+	if len(retry) == 0 {
+		c.mu.Unlock()
+
+		return
+	}
+
+	c.recoveryWG.Add(len(retry))
+	c.mu.Unlock()
+
+	for _, server := range retry {
+		go func(server *managedServer) {
+			defer c.recoveryWG.Done()
+
+			release := c.attempt(c.background, server, c.factory, c.connectionOptions)
+			c.settle()
+			if release != nil {
+				_ = release()
+			}
+		}(server)
+	}
+}
+
+// watch reports an unexpected session close once. A client that was already
+// replaced or closed intentionally is ignored.
+func (c *Connections) watch(server *managedServer, client *agentmcp.Client) {
+	defer c.watchWG.Done()
+
+	session := client.Session()
+	if session == nil {
+		return
+	}
+	_ = session.Wait()
+
+	c.handleLost(server, client)
+}
+
+func (c *Connections) handleLost(server *managedServer, client *agentmcp.Client) {
+	c.mu.Lock()
+	if c.closed || server.client != client || server.state != ServerStateConnected {
+		c.mu.Unlock()
+
+		return
+	}
+
+	startIndex := 0
+	if time.Since(server.settledAt) < 2*time.Second {
+		// A stream that dies immediately after connecting must not restart
+		// with zero delay on every death. Escalate along the recovery ladder.
+		server.rapidDeaths = min(server.rapidDeaths+1, len(recoveryDelays)-1)
+		startIndex = server.rapidDeaths
+	} else {
+		server.rapidDeaths = 0
+	}
+
+	resource := server.resource
+	server.state = ServerStateConnecting
+	server.stage = ""
+	server.code = ""
+	server.message = ""
+	server.startedAt = time.Now().UTC()
+	server.settledAt = time.Time{}
+	server.reported = false
+	server.retryable = false
+	server.retryAt = time.Time{}
+	server.client = nil
+	server.resource = nil
+	server.tools = nil
+	c.pending++
+	c.reopenSettledLocked()
+	_ = c.rebuildLocked()
+	c.recoveryWG.Add(1)
+	c.mu.Unlock()
+
+	_ = closeConnection(client, resource)
+
+	go c.recover(server, startIndex)
+}
+
+// recover resets a lost transport in place. It keeps the server row and its
+// identity, rebuilding the session and tool slice from the configured
+// definition.
+//
+//nolint:gocyclo // Each recovery attempt has an independent transport/list/install failure path.
+func (c *Connections) recover(server *managedServer, startIndex int) {
+	defer c.recoveryWG.Done()
+
+	var (
+		lastErr      error
+		lastResource io.Closer
+	)
+
+	for attempt := startIndex; attempt < len(recoveryDelays); attempt++ {
+		delay := recoveryDelays[attempt]
+		if attempt > 0 && !c.waitRecovery(delay) {
+			c.settle()
+			return
+		}
+		if c.background.Err() != nil {
+			c.settle()
+			return
+		}
+
+		transport, resource, transportErr := c.factory(c.background, server.definition)
+		if transportErr != nil {
+			lastErr = transportErr
+			lastResource = resource
+			_ = closeConnection(nil, resource)
+			if !isTransientConnectError(transportErr) {
+				break
+			}
+
+			continue
+		}
+
+		connectCtx, cancel := context.WithTimeout(c.background, server.connectTimeout)
+		client, connectErr := connectMCP(connectCtx, server, transport, c.connectionOptions)
+		cancel()
+		if connectErr != nil {
+			lastErr = connectErr
+			lastResource = resource
+			if !isTransientConnectError(connectErr) {
+				break
+			}
+			_ = closeConnection(nil, resource)
+
+			continue
+		}
+
+		listCtx, listCancel := context.WithTimeout(c.background, server.connectTimeout)
+		tools, listErr := client.Tools(listCtx)
+		listCancel()
+		if listErr != nil {
+			lastErr = listErr
+			lastResource = resource
+			if !isTransientConnectError(listErr) {
+				break
+			}
+			_ = closeConnection(client, resource)
+
+			continue
+		}
+
+		if err := c.install(server, client, resource, tools); err != nil {
+			lastErr = err
+			lastResource = resource
+			_ = closeConnection(client, resource)
+			if errors.Is(err, errConnectionsClosed) {
+				c.settle()
+				return
+			}
+
+			continue
+		}
+
+		c.settle()
+
+		return
+	}
+
+	if c.background.Err() != nil {
+		c.settle()
+
+		return
+	}
+
+	c.fail(server, "connect", "recover_failed", failureMessage(
+		"server connection was lost and could not be re-established", lastErr, server, lastResource,
+	), true)
+	c.settle()
+}
+
+func (c *Connections) waitRecovery(delay time.Duration) bool {
+	if delay <= 0 {
+		return c.background.Err() == nil
+	}
+
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case <-timer.C:
+		return true
+	case <-c.background.Done():
+		return false
+	}
+}
+
+// reopenSettledLocked gives a new wait generation to work that starts after
+// the previous generation settled. Callers hold c.mu.
+func (c *Connections) reopenSettledLocked() {
+	select {
+	case <-c.settled:
+		c.settled = make(chan struct{})
+	default:
+	}
+}
+
+func connectMCP(
+	ctx context.Context,
+	server *managedServer,
+	transport sdk.Transport,
+	options ConnectionOptions,
+) (*agentmcp.Client, error) {
+	return agentmcp.Connect(
+		ctx,
+		options.Implementation,
+		transport,
+		agentmcp.WithToolNamePrefix(server.id),
+		agentmcp.WithMaxTools(options.MaxTools),
+	)
+}
+
+func (c *Connections) fail(server *managedServer, stage, code, message string, retryable bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -386,6 +755,12 @@ func (c *Connections) fail(server *managedServer, stage, code, message string) {
 	server.message = message
 	server.settledAt = time.Now().UTC()
 	server.tools = nil
+	server.retryable = retryable
+	if retryable {
+		server.retryAt = time.Now().UTC().Add(failedRetryCooldown)
+	} else {
+		server.retryAt = time.Time{}
+	}
 }
 
 func (c *Connections) settle() {
@@ -406,11 +781,44 @@ func (c *Connections) Wait(ctx context.Context) error {
 	}
 
 	select {
-	case <-c.settled:
+	case <-c.settledChannel():
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// WaitGrace waits for every pending connection to settle, but returns nil
+// after grace expires so an interaction can proceed with the catalog that is
+// already installed. A cancelled context is still reported.
+func (c *Connections) WaitGrace(ctx context.Context, grace time.Duration) error {
+	if c == nil {
+		return nil
+	}
+
+	settled := c.settledChannel()
+	if grace <= 0 {
+		return nil
+	}
+
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+
+	select {
+	case <-settled:
+		return nil
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (c *Connections) settledChannel() <-chan struct{} {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.settled
 }
 
 // Settled reports whether every enabled server has connected or failed.
@@ -420,7 +828,7 @@ func (c *Connections) Settled() bool {
 	}
 
 	select {
-	case <-c.settled:
+	case <-c.settledChannel():
 		return true
 	default:
 		return false
@@ -831,6 +1239,11 @@ func (c *Connections) Close() error {
 				errs = append(errs, err)
 			}
 		}
+
+		// Closing a connected client unblocks its session watcher. Recovery
+		// attempts observe the cancelled background context.
+		c.watchWG.Wait()
+		c.recoveryWG.Wait()
 
 		c.closeErr = errors.Join(errs...)
 	})

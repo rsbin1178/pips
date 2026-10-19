@@ -1247,45 +1247,7 @@ func mergeAgentPluginDefinitions(
 	plugins codingmcp.Definitions,
 	maximum int,
 ) (codingmcp.Definitions, []codingmcp.ConnectionDiagnostic, error) {
-	values := base.List()
-	seen := make(map[string]struct{}, len(values))
-	for _, definition := range values {
-		seen[definition.ID] = struct{}{}
-	}
-	diagnostics := make([]codingmcp.ConnectionDiagnostic, 0)
-	for _, definition := range plugins.List() {
-		if _, duplicate := seen[definition.ID]; duplicate {
-			diagnostics = append(diagnostics, codingmcp.ConnectionDiagnostic{
-				ServerID: definition.ID, Stage: "configuration", Code: "definition_duplicate",
-				Message: fmt.Sprintf(
-					"Agent Plugin MCP server %q conflicts with another configured server and was ignored",
-					definition.ID,
-				),
-			})
-
-			continue
-		}
-		if len(values) >= maximum {
-			diagnostics = append(diagnostics, codingmcp.ConnectionDiagnostic{
-				ServerID: definition.ID, Stage: "configuration", Code: "definition_limit",
-				Message: fmt.Sprintf(
-					"Agent Plugin MCP server %q exceeds the client-wide server limit and was ignored",
-					definition.ID,
-				),
-			})
-
-			continue
-		}
-		seen[definition.ID] = struct{}{}
-		values = append(values, definition)
-	}
-
-	merged, err := codingmcp.NewDefinitions(values, maximum)
-	if err != nil {
-		return codingmcp.Definitions{}, nil, err
-	}
-
-	return merged, diagnostics, nil
+	return codingmcp.MergeIsolated(base, plugins, maximum)
 }
 
 func openRuntimeMCP(

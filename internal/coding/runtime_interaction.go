@@ -35,7 +35,12 @@ import (
 
 var errConsumerStopped = errors.New("coding runtime: event consumer stopped")
 
-const planInteractionMaxTurns = 32
+const (
+	// mcpStartupGrace bounds how long a new interaction waits for MCP
+	// handshakes before freezing the tool catalog. Servers that are still
+	// connecting keep working in the background and join a later interaction.
+	mcpStartupGrace = 2 * time.Second
+)
 
 type eventEmitter struct {
 	mu        sync.Mutex
@@ -670,10 +675,12 @@ func (r *Runtime) openInteraction(
 
 	connections := integration.connectionsSnapshot()
 	// MCP servers connect in the background after Open and Reload. The
-	// interaction is the safe boundary that freezes the tool catalog, so it
-	// waits (bounded by each server's connect timeout) for the pending
-	// connections to settle and then reports any new failures exactly once.
-	if err := connections.Wait(ctx); err != nil {
+	// interaction is the safe boundary that freezes the tool catalog: retry
+	// transient failures whose cooldown elapsed, give pending connections a
+	// short startup grace, then report any settled failures exactly once.
+	// Servers that are still connecting join a later interaction.
+	connections.RetryFailed(ctx)
+	if err := connections.WaitGrace(ctx, mcpStartupGrace); err != nil {
 		return nil, err
 	}
 	r.recordOpenDiagnostics(ctx, emitter, connections)
