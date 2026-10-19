@@ -580,6 +580,43 @@ func TestSubagentRouteKeepsAnInheritedTranscriptThroughLiveEvents(t *testing.T) 
 		"the Runtime's child State became this model's own copy")
 }
 
+// TestSubagentRouteAcceptsEventsAnAdoptedSnapshotAlreadyApplied pins the race
+// between an authoritative child snapshot and the subscription backlog: the
+// Runtime can read the child after publishing events the TUI has queued but not
+// drained, so those events must be no-ops instead of sequence violations.
+func TestSubagentRouteAcceptsEventsAnAdoptedSnapshotAlreadyApplied(t *testing.T) {
+	t.Parallel()
+
+	state := coding.State{
+		SessionID: "child-1", SessionOpen: true,
+		Provider: ai.ProviderOpenAI, ModelID: "test-model",
+		Mode: coding.ModeAgent, Phase: coding.PhaseRunning,
+	}
+	for _, event := range childMessageEvents(state, true, "FIRST") {
+		next, err := coding.Reduce(state, event)
+		require.NoError(t, err)
+
+		state = next
+	}
+
+	pending := childMessageEvents(state, false, "SECOND")
+	ahead := state
+	for _, event := range pending {
+		next, err := coding.Reduce(ahead, event)
+		require.NoError(t, err)
+
+		ahead = next
+	}
+
+	model := readyModel(t, true)
+	model.childStates["child-1"] = state
+	model.adoptChildState("child-1", ahead)
+
+	model.reduceChildEvent(pending[0])
+	require.NoError(t, model.streamErr, "an event the snapshot already applied is not a violation")
+	assert.Equal(t, ahead.Sequence, model.childStates["child-1"].Sequence)
+}
+
 // inheritedChildStateController serves one child's State the way a live child
 // projection does: the child's session is open and its mode is the session's, with
 // the transcript the projection was seeded from.
