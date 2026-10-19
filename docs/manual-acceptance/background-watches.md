@@ -39,7 +39,7 @@ Workspace 与独立 `PIPS_HOME`；命令不得触及真实仓库、真实凭据�
 - 分类：实时 Provider、安全敏感。变更等级：临时工作区；会产生费用。
 - 前置条件：同 MA-WATCH-001；交互终端；终端支持鼠标上报。
 - 隔离夹具：一个 `persistent: true` 的 watch（例如 `sleep 600`），不产生任何输出。
-- 步骤：要求模型启动该 watch，随后要求它调用 `kill_background_task` 并记录结果；再启动第二个 watch，按 `Ctrl+B` 聚焦 tasks pane，确认它出现在 `Watchers` 分组并标着 `Monitor`，按 `x` 停止、按 `Enter` 打开详情。
+- 步骤：要求模型启动该 watch，随后要求它调用 `kill_background_task` 并记录结果；再启动第二个 watch，按 `Ctrl+B` 聚焦 tasks pane，确认它出现在 `Watchers` 分组并标着 `Monitor`，按 `x` 停止、按 `Enter` 打开详情；确认后台命令出现在 `Tasks` 分组；确认 Todo 进度只出现在状态栏 `task_progress`（`Todo completed/total`），并用 `/todos` 打开完整 Todo 页。
 - 预期证据：模型侧结果是 `killed`（或对该 id 而言 `already_exited`、`not_found`）；每个 watch 的终止只产生一条模型可见完成，且模型自己 kill 的那次不会再被额外唤醒；tasks pane 行显示描述与自身耗时、运行态有 spinner、两个控制 `[✗]`/`[↗]` 可点；详情页是整宽容器（无边框、无 `[✗]`）：描述与状态、`$ command` 前言、有界输出尾部；运行中的 watch 打开时停在尾部并随新输出刷新，向上滚动后保持阅读位置，`Esc` 关闭返回对话。
 - 通过条件：一条控制路径生效；模型 kill 不产生第二次唤醒；pane 的 kill 与 inspect 都经同一控制方法。
 - 失败条件：模型无法停止 `persistent` watch、出现两条完成、或 pane 走了第二套控制路径。
@@ -66,7 +66,7 @@ Workspace 与独立 `PIPS_HOME`；命令不得触及真实仓库、真实凭据�
 - 前置条件：同 MA-WATCH-001；Sandbox 允许运行 `sleep`、`printf`。
 - 隔离夹具：Workspace 中不放任何真实日志；命令只输出固定测试行，stderr 也写固定行。
 - 步骤：分四轮调用 `shell`。(1) `block_until_ms: 0`，命令为 `sleep 30`，观察调用立刻返回回执、命令仍在运行。(2) 省略 `block_until_ms`，命令为 `printf ok`，观察结果仍是普通 shell 结果（stdout/stderr/退出码），且没有 task id。(3) `block_until_ms` 为正数、命令很快结束，观察返回普通 shell 结果；再让命令在等待内不结束，观察返回回执。(4) 用 `get_task_output`、`wait_tasks`、`kill_background_task` 分别按 id 读、等、停一个后台命令。
-- 预期证据：`block_until_ms: 0` 时结果为回执，含 task id（形如 `shell-<n>-<token>`）、有效 deadline（省略 `timeout_ms` 时为 1800000 ms）、完成通知承诺与三个按 id 寻址的工具名；命令继续运行；省略 `block_until_ms` 时行为与旧版逐字节一致（默认 120000 ms 前台阻塞、不注册任务）；正数 block 内结束返回普通结果且无 `monitor` 字段，等待超时返回回执；后台命令的日志同时含 stdout 与 stderr，且不产生任何逐行事件；完成文本为 `Background task "<id>" completed (exit code: N).` 或 `(terminated by signal S)`，随后是 `Duration: Xs` 与 `Use get_task_output("<id>") to see the full output.`，命令正文未被回显；tasks pane 中该行标着 `Command`，空闲状态行的 cue 先数命令（例如 `1 command still running`）。
+- 预期证据：`block_until_ms: 0` 时结果为回执，含 task id（形如 `shell-<n>-<token>`）、有效 deadline（省略 `timeout_ms` 时为 1800000 ms）、完成通知承诺与三个按 id 寻址的工具名；命令继续运行；省略 `block_until_ms` 时行为与旧版逐字节一致（默认 120000 ms 前台阻塞、不注册任务）；正数 block 内结束返回普通结果且无 `monitor` 字段，等待超时返回回执；后台命令的日志同时含 stdout 与 stderr，且不产生任何逐行事件；完成文本为 `Background task "<id>" completed (exit code: N).` 或 `(terminated by signal S)`，随后是 `Duration: Xs` 与 `Use get_task_output("<id>") to see the full output.`，命令正文未被回显；tasks pane 中该行在 `Tasks` 分组下并标着 `Command`，空闲状态行的 cue 先数命令（例如 `1 command still running`）。
 - 通过条件：三种模式与截止时间规则都成立；后台命令可被三个工具按 id 寻址；日志含两路输出、不发事件；完成恰好一条且不回显命令。
 - 失败条件：`block_until_ms: 0` 仍阻塞、省略时行为改变、正数 block 会杀死命令或延长截止时间、后台命令产生逐行事件、完成文本回显命令、或 pane/cue 仍把它当作 watch。
 - 清理/回滚：`kill_background_task` 停掉仍运行的后台命令；确认无残留进程；销毁一次性 Workspace。
