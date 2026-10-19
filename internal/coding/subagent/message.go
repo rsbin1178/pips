@@ -631,7 +631,7 @@ func (c *MessageCoordinator) dispatchMessage(
 	if !isTerminal(target.state) {
 		// The child has a durable record but no live execution yet: park the
 		// message until its execution appears.
-		return c.park(ctx, identity, target, messageID, text, delivery)
+		return c.park(ctx, sender, identity, target, messageID, text, delivery)
 	}
 
 	return c.wake(ctx, sender, target, text)
@@ -697,9 +697,13 @@ func rejectParentDelivery(err error) MessageOutcomeKind {
 	}
 }
 
-// park waits for a spawning child's execution to appear and then admits.
+// park waits for a spawning child's execution to appear and then admits. A
+// child can finish before the parked message observes its live execution; in
+// that case the message wakes the completed child instead of waiting out the
+// spawn deadline.
 func (c *MessageCoordinator) park(
 	ctx context.Context,
+	sender MessageSender,
 	identity MessageSenderIdentity,
 	target messageTarget,
 	messageID string,
@@ -710,6 +714,10 @@ func (c *MessageCoordinator) park(
 	for {
 		if current := c.tree.liveMessageTarget(target.childSessionID); current != nil {
 			return c.admit(ctx, identity, *current, messageID, text, delivery)
+		}
+		if current, err := c.tree.resolveMessageTarget(ctx, target.childSessionID); err == nil &&
+			!current.live && isTerminal(current.state) {
+			return c.wake(ctx, sender, current, text)
 		}
 		if time.Now().After(deadline) {
 			return MessageOutcome{Kind: MessageOutcomeNotAcceptedBeforeDeadline}, nil
