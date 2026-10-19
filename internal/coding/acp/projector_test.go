@@ -203,3 +203,28 @@ func requireMessageID(t *testing.T, update acpsdk.SessionUpdate) string {
 		return ""
 	}
 }
+
+// TestContentBlockFromMediaReplaysPersistedReference pins the ACP replay form:
+// a session media reference becomes a pips://media/<path> handle instead of
+// inline bytes, while an inline image keeps replaying as inline base64.
+func TestContentBlockFromMediaReplaysPersistedReference(t *testing.T) {
+	t.Parallel()
+
+	reference, ok := contentBlockFromMedia(ai.MediaSource{
+		Path:     "assets/image-0123456789abcdef.png",
+		Digest:   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		MIMEType: "image/png",
+	}, true, "")
+	require.True(t, ok)
+	require.NotNil(t, reference.Image)
+	assert.Empty(t, reference.Image.Data)
+	assert.Equal(t, "image/png", reference.Image.MimeType)
+	require.NotNil(t, reference.Image.Uri)
+	assert.Equal(t, "pips://media/assets/image-0123456789abcdef.png", *reference.Image.Uri)
+
+	inline, ok := contentBlockFromMedia(ai.MediaSource{Data: []byte{1, 2, 3}, MIMEType: "image/png"}, true, "")
+	require.True(t, ok)
+	require.NotNil(t, inline.Image)
+	assert.NotEmpty(t, inline.Image.Data)
+	assert.Nil(t, inline.Image.Uri)
+}

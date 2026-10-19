@@ -14,6 +14,7 @@ import (
 
 	"github.com/rsbin1178/pips/agent/harness"
 	"github.com/rsbin1178/pips/ai"
+	"github.com/rsbin1178/pips/internal/coding/config"
 	"github.com/rsbin1178/pips/internal/coding/session"
 	"github.com/spf13/cobra"
 )
@@ -44,6 +45,7 @@ func newSessionCommand(dependencies Dependencies, flags *rootFlags) *cobra.Comma
 		newSessionSearchCommand(dependencies),
 		newSessionPathCommand(dependencies),
 		newSessionDeleteCommand(dependencies),
+		newSessionGCCommand(dependencies, flags),
 		newSessionIndexCommand(dependencies, flags),
 		newSessionMigrateCommand(dependencies),
 	)
@@ -513,6 +515,133 @@ func confirmSessionDelete(cmd *cobra.Command, id string) error {
 		return nil
 	default:
 		return fmt.Errorf("%w: session delete was not confirmed", ErrUsage)
+	}
+}
+
+// newSessionGCCommand sweeps idle sessions and unreferenced session media. It
+// is safe to run while other sessions are open: a locked session is skipped,
+// and a referenced media file is never removed.
+func newSessionGCCommand(dependencies Dependencies, flags *rootFlags) *cobra.Command {
+	var (
+		dryRun  bool
+		ttlDays int
+	)
+
+	command := &cobra.Command{
+		Use:   "gc",
+		Short: "Remove idle sessions and unreferenced session media",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := checkContext(cmd.Context()); err != nil {
+				return err
+			}
+
+			configFile, err := acpConfigFile(dependencies, flags)
+			if err != nil {
+				return err
+			}
+
+			loaded, err := config.Load(config.LoadOptions{
+				ConfigFile: configFile,
+				LookupEnv:  config.LookupEnv(dependencies.LookupEnv),
+			})
+			if err != nil {
+				return err
+			}
+
+			ttl := loaded.Config.Media.CleanupTTLDays
+			if cmd.Flags().Changed("ttl-days") {
+				ttl = ttlDays
+			}
+
+			grace := time.Duration(loaded.Config.Media.GCGraceHours) * time.Hour
+
+			repository, err := session.NewRepository(dependencies.Paths.SessionsDir())
+			if err != nil {
+				return err
+			}
+
+			metas, err := repository.List(cmd.Context())
+			if err != nil {
+				return err
+			}
+
+			out := cmd.OutOrStdout()
+
+			for _, meta := range metas {
+				if err := checkContext(cmd.Context()); err != nil {
+					return err
+				}
+
+				sweepSessionGC(cmd, repository, meta, ttl, grace, dryRun, out)
+			}
+
+			return nil
+		},
+	}
+	command.Flags().BoolVar(&dryRun, "dry-run", false, "print the deletion plan without deleting")
+	command.Flags().IntVar(&ttlDays, "ttl-days", 0, "override the idle TTL in days")
+
+	return command
+}
+
+// sweepSessionGC handles one listed session: an idle conversation past the TTL
+// is removed, and every other session has its unreferenced media pruned. It
+// reports a skipped session rather than failing the sweep, because one locked
+// or unreadable session must not stop the others.
+func sweepSessionGC(
+	cmd *cobra.Command,
+	repository *session.Repository,
+	meta session.Metadata,
+	ttlDays int,
+	grace time.Duration,
+	dryRun bool,
+	out io.Writer,
+) {
+	idle, ok := session.IdleSince(filepath.Dir(meta.Path))
+	expired := ttlDays > 0 && ok &&
+		time.Since(idle) > time.Duration(ttlDays)*24*time.Hour
+
+	if expired && meta.Kind == session.KindConversation {
+		if dryRun {
+			_, _ = fmt.Fprintf(out, "would delete session %s\n", meta.ID)
+
+			return
+		}
+
+		if err := repository.Delete(cmd.Context(), meta.ID); err != nil {
+			_, _ = fmt.Fprintf(out, "skip %s: %v\n", meta.ID, err)
+
+			return
+		}
+
+		_, _ = fmt.Fprintf(out, "deleted session %s\n", meta.ID)
+
+		return
+	}
+
+	// Live-session media is pruned at the TTL, not the shorter orphan grace:
+	// the grace only protects in-flight writes. With the default 30-day TTL and
+	// 24-hour grace, a file unreferenced for a day stays until the TTL; with
+	// the TTL disabled, the grace still lets the manual sweep collect orphans.
+	mediaAge := grace
+	if ttlDays > 0 {
+		mediaAge = max(time.Duration(ttlDays)*24*time.Hour, grace)
+	}
+
+	report, err := repository.PruneMedia(cmd.Context(), meta.ID, mediaAge, dryRun)
+	if err != nil {
+		_, _ = fmt.Fprintf(out, "skip %s: %v\n", meta.ID, err)
+
+		return
+	}
+
+	for _, path := range report.Deleted {
+		if dryRun {
+			_, _ = fmt.Fprintf(out, "would remove %s %s\n", meta.ID, path)
+		} else {
+			_, _ = fmt.Fprintf(out, "removed %s %s\n", meta.ID, path)
+		}
 	}
 }
 

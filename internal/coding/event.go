@@ -25,6 +25,7 @@ import (
 	"github.com/rsbin1178/pips/internal/coding/planmode"
 	"github.com/rsbin1178/pips/internal/coding/planreview"
 	"github.com/rsbin1178/pips/internal/coding/question"
+	"github.com/rsbin1178/pips/internal/coding/session"
 	"github.com/rsbin1178/pips/internal/coding/subagent"
 	"github.com/rsbin1178/pips/internal/coding/tasklist"
 )
@@ -173,7 +174,9 @@ type SessionClosed struct {
 	Reason SessionCloseReason `json:"reason"`
 }
 
-// SessionTreeChanged replaces the reducer's durable bounded tree projection.
+// SessionTreeChanged replaces the reducer's bounded live tree/transcript
+// projection. It is live-only: the transcript is authoritative, so the event
+// is never written to the durable journal.
 type SessionTreeChanged struct {
 	Tree          SessionTree       `json:"tree"`
 	Transcript    ai.Messages       `json:"transcript"`
@@ -2142,19 +2145,29 @@ func validMediaSource(source ai.MediaSource) bool {
 	if len(source.Data) > maxEventTextBytes ||
 		!validBoundedText(source.ID, maxEventTextBytes, true) ||
 		!validBoundedText(source.URL, maxEventTextBytes, true) ||
-		!validIdentifierText(source.MIMEType, maxEventIDBytes, true) {
+		!validIdentifierText(source.MIMEType, maxEventIDBytes, true) ||
+		source.Width < 0 || source.Height < 0 {
 		return false
 	}
 
 	set := 0
 
-	for _, present := range []bool{source.ID != "", source.URL != "", len(source.Data) > 0} {
+	for _, present := range []bool{source.ID != "", source.URL != "", len(source.Data) > 0, source.Path != ""} {
 		if present {
 			set++
 		}
 	}
+	if set != 1 {
+		return false
+	}
+	if len(source.Data) > 0 && source.MIMEType == "" {
+		return false
+	}
+	if source.Path != "" && !session.ValidMediaReference(source.Path, source.Digest) {
+		return false
+	}
 
-	return set == 1 && (len(source.Data) == 0 || source.MIMEType != "")
+	return true
 }
 
 //nolint:gocyclo // StreamEvent variants share bounded fields but have distinct required fields.

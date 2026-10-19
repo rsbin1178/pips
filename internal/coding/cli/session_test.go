@@ -13,6 +13,7 @@ import (
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding/cli"
 	"github.com/rsbin1178/pips/internal/coding/paths"
+	"github.com/rsbin1178/pips/internal/coding/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -140,4 +141,114 @@ func TestSessionCLIMigrateRejectsConflictingFlags(t *testing.T) {
 
 	_, err := executeSession(t, layout, "session", "migrate", "--apply", "--dry-run")
 	require.ErrorIs(t, err, cli.ErrUsage)
+}
+
+func TestSessionCLIGCPrunesUnreferencedMedia(t *testing.T) {
+	t.Parallel()
+
+	layout, err := paths.New(t.TempDir())
+	require.NoError(t, err)
+
+	repository, err := session.NewRepository(layout.SessionsDir())
+	require.NoError(t, err)
+
+	handle, err := repository.Create(t.Context(), session.CreateOptions{
+		WorkspaceID: "ws-cli", WorkspacePath: "/workspace/cli-gc",
+	})
+	require.NoError(t, err)
+
+	_, err = handle.Session().AppendMessage(ai.UserText("keep"), nil)
+	require.NoError(t, err)
+
+	store, err := session.NewMediaStore(handle.Dir())
+	require.NoError(t, err)
+
+	original, err := store.PutOriginal(t.Context(), "image/png", []byte("referenced"))
+	require.NoError(t, err)
+	modelCopy, err := store.PutModelCopy(t.Context(), original, "image/jpeg", []byte("copy"))
+	require.NoError(t, err)
+
+	_, err = handle.Session().AppendMessage(ai.User(ai.ImagePart{Source: ai.MediaSource{
+		Path: modelCopy.Path, Digest: modelCopy.Digest, MIMEType: modelCopy.MIMEType,
+	}}), nil)
+	require.NoError(t, err)
+
+	orphan, err := store.PutOriginal(t.Context(), "image/png", []byte("orphan"))
+	require.NoError(t, err)
+
+	// Live-session media is pruned at the TTL, not the shorter orphan grace.
+	// The default 30-day TTL keeps a 48-hour orphan; lowering the TTL removes it.
+	old := time.Now().Add(-48 * time.Hour)
+	orphanPath := filepath.Join(handle.Dir(), filepath.FromSlash(orphan.Path))
+	require.NoError(t, os.Chtimes(orphanPath, old, old))
+
+	sessionDir := handle.Dir()
+	require.NoError(t, handle.Close())
+
+	defaultDry, err := executeSession(t, layout, "session", "gc", "--dry-run")
+	require.NoError(t, err)
+	assert.NotContains(t, defaultDry, orphan.Path, "the default 30-day TTL keeps a 48-hour orphan")
+
+	dry, err := executeSession(t, layout, "session", "gc", "--dry-run", "--ttl-days", "1")
+	require.NoError(t, err)
+	assert.Contains(t, dry, "would remove")
+	assert.Contains(t, dry, orphan.Path)
+
+	_, statErr := os.Stat(orphanPath)
+	require.NoError(t, statErr, "a dry run never deletes")
+
+	applied, err := executeSession(t, layout, "session", "gc", "--ttl-days", "1")
+	require.NoError(t, err)
+	assert.Contains(t, applied, "removed")
+
+	_, statErr = os.Stat(orphanPath)
+	require.ErrorIs(t, statErr, os.ErrNotExist)
+
+	// The referenced copy and its same-base original survive.
+	_, err = os.Stat(filepath.Join(sessionDir, filepath.FromSlash(modelCopy.Path)))
+	require.NoError(t, err)
+	_, err = os.Stat(filepath.Join(sessionDir, filepath.FromSlash(original.Path)))
+	require.NoError(t, err)
+}
+
+func TestSessionCLIGCDeletesIdleSessionPastTTL(t *testing.T) {
+	t.Parallel()
+
+	layout, err := paths.New(t.TempDir())
+	require.NoError(t, err)
+
+	repository, err := session.NewRepository(layout.SessionsDir())
+	require.NoError(t, err)
+
+	handle, err := repository.Create(t.Context(), session.CreateOptions{
+		WorkspaceID: "ws-cli", WorkspacePath: "/workspace/cli-gc-ttl",
+	})
+	require.NoError(t, err)
+	_, err = handle.Session().AppendMessage(ai.UserText("idle"), nil)
+	require.NoError(t, err)
+
+	sessionDir := handle.Dir()
+	require.NoError(t, handle.Close())
+
+	old := time.Now().Add(-48 * time.Hour)
+
+	require.NoError(t, filepath.WalkDir(sessionDir, func(path string, _ os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		return os.Chtimes(path, old, old) //nolint:gosec // test-owned session tree
+	}))
+
+	dry, err := executeSession(t, layout, "session", "gc", "--dry-run", "--ttl-days", "1")
+	require.NoError(t, err)
+	assert.Contains(t, dry, "would delete session")
+	require.DirExists(t, sessionDir)
+
+	applied, err := executeSession(t, layout, "session", "gc", "--ttl-days", "1")
+	require.NoError(t, err)
+	assert.Contains(t, applied, "deleted session")
+
+	_, statErr := os.Stat(sessionDir)
+	require.ErrorIs(t, statErr, os.ErrNotExist)
 }

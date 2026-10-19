@@ -3,3 +3,5 @@
 package session
 
 func secureSessionFile(string) error { return nil }
+
+func secureMediaFile(string) error { return nil }

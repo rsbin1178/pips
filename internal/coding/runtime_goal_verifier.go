@@ -286,7 +286,7 @@ func (r *Runtime) goalVerifierDispatcher(ctx context.Context) (subagent.Dispatch
 		workspace: r.workspace, tree: r.tree, toolLimits: r.opts.ToolLimits,
 		policy: r.policy, executor: r.executor, sandbox: r.config.Sandbox,
 		network:       r.config.SandboxWorkspaceWrite.Network,
-		requestPolicy: r.requestPolicy, toolTimeout: r.opts.ToolTimeout,
+		requestPolicy: r.requestPolicy, mediaBudget: r.config.Media.MaxRequestBytes, toolTimeout: r.opts.ToolTimeout,
 		inspector: r.inspector, hooks: r.hookDefinitions, hookRunner: r.hookRunner,
 		onHookDiagnostics: func(ctx context.Context, diagnostics []hooks.Diagnostic) {
 			r.recordHookDiagnostics(ctx, nil, diagnostics)

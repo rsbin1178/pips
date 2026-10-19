@@ -189,9 +189,9 @@ type Runtime struct {
 	// turns. Entry and compaction reset it so the next reminder is full.
 	planReminderCount uint32
 	// Todo nudge and gate state. planTurnsWithoutUpdate counts user turns since
-	// the last valid update_plan call, and planTurnsSinceNudge counts user turns
+	// the last valid todo_write call, and planTurnsSinceNudge counts user turns
 	// since the last nudge. A plan write resets the first, and compaction
-	// restarts both. planWrittenThisTurn records a valid update_plan call in the
+	// restarts both. planWrittenThisTurn records a valid todo_write call in the
 	// turn now running, planNudgedThisTurn records that the nudge fired for it,
 	// and todoGateFires counts the gate's fires for the current prompt.
 	planTurnsWithoutUpdate uint32
@@ -693,6 +693,7 @@ func openRuntime(
 	runtime.artifacts = newSessionArtifacts(handle, options.Paths.SessionsDir())
 	stack.add(func(context.Context) error { return runtime.artifacts.Close() })
 	runtime.recordPromptContextSnapshot()
+	runtime.pruneSessionMedia(ctx)
 
 	pending, err := runtime.session.Pending()
 	if err != nil {

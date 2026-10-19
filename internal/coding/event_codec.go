@@ -504,6 +504,10 @@ func validateStrictMediaSourceJSON(data []byte) error {
 		URL      string `json:"url,omitempty"`
 		Data     []byte `json:"data,omitempty"`
 		MIMEType string `json:"mime_type,omitempty"`
+		Path     string `json:"path,omitempty"`
+		Digest   string `json:"digest,omitempty"`
+		Width    int    `json:"width,omitempty"`
+		Height   int    `json:"height,omitempty"`
 	}
 
 	return strictDecode(data, &source)

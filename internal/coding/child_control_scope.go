@@ -36,16 +36,19 @@ import (
 // parent approval controller, parent pending runner, parent harness, or parent
 // interaction pointer.
 type childScopeFactory struct {
-	repository        *session.Repository
-	fullCompaction    *compaction.Policy
-	workspace         workspace.Workspace
-	tree              *workspace.Tree
-	toolLimits        tools.Limits
-	policy            execution.Policy
-	executor          *execution.Executor
-	sandbox           config.SandboxMode
-	network           config.SandboxNetworkMode
-	requestPolicy     func(*ai.Request)
+	repository     *session.Repository
+	fullCompaction *compaction.Policy
+	workspace      workspace.Workspace
+	tree           *workspace.Tree
+	toolLimits     tools.Limits
+	policy         execution.Policy
+	executor       *execution.Executor
+	sandbox        config.SandboxMode
+	network        config.SandboxNetworkMode
+	requestPolicy  func(*ai.Request)
+	// mediaBudget is the parent Runtime's `[media] max_request_bytes`, so a
+	// child's assembled request shares the conversation's byte budget.
+	mediaBudget       int
 	toolTimeout       time.Duration
 	inspector         *git.Inspector
 	hooks             []hooks.Definition
@@ -439,6 +442,9 @@ func newChildControlScope(
 		return nil, err
 	}
 	composed := extension.ComposeHooks(
+		// The capability gate runs first, so the refusal it writes is what every
+		// later hook observes and what reaches the provider.
+		extension.Hooks{AfterTool: mediaGateAfterTool(factory.model)},
 		extension.Hooks{BeforeTool: scope.guard.before(scope.plan.Limits)},
 		extension.Hooks{BeforeTool: scope.hooks.beforeTool},
 		extension.Hooks{BeforeTool: leasedToolGuard(scope.factory.mode, descriptors, searchName, dispatchName, allTools)},
@@ -471,6 +477,9 @@ func newChildControlScope(
 		agent.WithRequest(scope.requestPolicy),
 		agent.WithOutputGuardrail("subagent_result", scope.validateOutput),
 	)
+	if hydrator := childMediaHydrator(scope.childHandle, factory.mediaBudget); hydrator != nil {
+		options = append(options, agent.WithTransformContext(hydrator.Hydrate))
+	}
 	systemSuffix := strings.TrimSpace(input.SystemSuffix)
 	if preloaded != "" {
 		if systemSuffix != "" {
@@ -1497,6 +1506,15 @@ func (s *childControlScope) afterPendingTool(
 	if s == nil {
 		return parts, isError
 	}
+
+	// A paused call skips the child's AfterTool chain, so the media gate runs
+	// here too before the lifecycle hook sees the result.
+	if s.factory.model != nil {
+		if gated, refused := MediaGateForCapabilities(s.factory.model.Capabilities()).Check(call.Name, parts); refused {
+			parts = gated
+		}
+	}
+
 	override := s.hooks.afterTool(ctx, agent.ToolResultInfo{
 		ToolCall: call,
 		Result: ai.ToolResultPart{

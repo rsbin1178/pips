@@ -681,9 +681,14 @@ func (r *Repository) Fork(
 		extraKind:            string(KindConversation),
 		extraParentSessionID: source.meta.ID,
 		extraParentEntryID:   parentEntryID,
-	}, harness.ForkOptions{PrepareArchives: func(archiveIDs []string) error {
-		return r.CopyArchives(ctx, source, id, archiveIDs)
-	}})
+	}, harness.ForkOptions{
+		PrepareArchives: func(archiveIDs []string) error {
+			return r.CopyArchives(ctx, source, id, archiveIDs)
+		},
+		PrepareEntries: func(entries []harness.Entry) error {
+			return CopySessionMedia(ctx, source.sessionDir, sessionDir, entries)
+		},
+	})
 	if err != nil {
 		return nil, errors.Join(err, lock.Close())
 	}
@@ -805,6 +810,9 @@ func (r *Repository) ForkSubagent(
 		Keep: forkSubagentTranscriptEntry,
 		PrepareArchives: func(archiveIDs []string) error {
 			return r.CopyArchives(ctx, source, id, archiveIDs)
+		},
+		PrepareEntries: func(entries []harness.Entry) error {
+			return CopySessionMedia(ctx, source.sessionDir, sessionDir, entries)
 		},
 	})
 	if err != nil {
