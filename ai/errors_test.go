@@ -76,6 +76,31 @@ func TestErrorWithSentinel(t *testing.T) {
 	require.ErrorIs(t, base, ai.ErrInvalidRequest)
 }
 
+func TestUnsupportedMediaErrorNamesProviderAndKind(t *testing.T) {
+	t.Parallel()
+
+	err := ai.NewUnsupportedMediaError(ai.ProviderGemini, ai.ImageData("image/png", nil))
+
+	require.ErrorIs(t, err, ai.ErrUnsupportedMedia)
+	require.ErrorIs(t, err, ai.ErrUnsupported, "it is the same cannot-be-expressed class")
+
+	var mediaErr *ai.UnsupportedMediaError
+	require.ErrorAs(t, err, &mediaErr)
+	assert.Equal(t, ai.ProviderGemini, mediaErr.Provider)
+	assert.Equal(t, "image", mediaErr.Kind)
+	assert.Contains(t, err.Error(), "gemini")
+	assert.Contains(t, err.Error(), "image")
+}
+
+func TestPartKindNamesConcreteKinds(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, "text", ai.PartKind(ai.Text("x")))
+	assert.Equal(t, "image", ai.PartKind(ai.ImageData("image/png", nil)))
+	assert.Equal(t, "file", ai.PartKind(ai.FileData("a.pdf", "application/pdf", nil)))
+	assert.Equal(t, "reasoning", ai.PartKind(ai.ReasoningPart{}))
+}
+
 type timeoutError struct{}
 
 func (timeoutError) Error() string   { return "i/o timeout" }

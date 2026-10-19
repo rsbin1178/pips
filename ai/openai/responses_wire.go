@@ -38,8 +38,9 @@ type responseItem struct {
 	Name      string `json:"name,omitempty"`
 	Arguments string `json:"arguments,omitempty"`
 
-	// function_call_output
-	Output string `json:"output,omitempty"`
+	// function_call_output. Output is a plain string for a text-only result and
+	// a []responseContent array when the result carries media.
+	Output any `json:"output,omitempty"`
 
 	// reasoning
 	// Summary is a pointer because the field is required for reasoning input
