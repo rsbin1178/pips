@@ -34,7 +34,9 @@ func TestSessionStoreLayersExistAfterARealTurn(t *testing.T) {
 	assert.NotEmpty(t, record.Workspace.Path)
 	assert.Positive(t, record.Counts.Entries, "the writer keeps the entry count current")
 
-	// L2: transcript and event journal are both authoritative and both present.
+	// L2: the transcript is authoritative for conversation content; the journal
+	// is authoritative for durable lifecycle facts and stays free of live
+	// projections.
 	assert.FileExists(t, filepath.Join(sessionDir, session.TranscriptFileName))
 	journalPath := filepath.Join(sessionDir, session.JournalFileName)
 	require.FileExists(t, journalPath)
@@ -48,6 +50,8 @@ func TestSessionStoreLayersExistAfterARealTurn(t *testing.T) {
 			"streaming deltas stay ephemeral and never enter the journal")
 		assert.NotEqual(t, string(EventModelRetry), entry.Type,
 			"retry notices stay ephemeral and never enter the journal")
+		assert.NotEqual(t, string(EventSessionTreeChanged), entry.Type,
+			"full tree/transcript snapshots stay live-only and never enter the journal")
 	}
 
 	assert.Equal(t, uint64(len(records)), records[len(records)-1].Seq, "the journal sequence is dense")

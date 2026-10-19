@@ -21,8 +21,11 @@ const (
 	// JournalSchema names the event journal record envelope.
 	JournalSchema = "pips.coding.session.journal/v1"
 
-	maxJournalRecordBytes = 4 << 20
 	maxJournalReadRecords = 1_000_000
+	// maxJournalLineBytes is a corruption guard, not a normal-event budget.
+	// Durable records are written at their natural size; a single unbroken line
+	// this large means the file is damaged rather than a legitimate message.
+	maxJournalLineBytes = 256 << 20
 )
 
 // ErrJournalCorrupt identifies a journal whose interior is unreadable. A
@@ -147,6 +150,7 @@ func (j *Journal) Append(records ...JournalRecord) error {
 	}
 
 	buffer := make([]byte, 0, 512)
+	sequence := j.sequence
 	for _, record := range records {
 		if record.SessionID != "" && record.SessionID != j.sessionID {
 			return fmt.Errorf("%w: journal session changed", ErrJournalCorrupt)
@@ -154,7 +158,7 @@ func (j *Journal) Append(records ...JournalRecord) error {
 
 		record.Schema = JournalSchema
 		record.SessionID = j.sessionID
-		record.Seq = j.sequence + 1
+		record.Seq = sequence + 1
 		if record.Time.IsZero() {
 			record.Time = time.Now().UTC()
 		} else {
@@ -165,18 +169,16 @@ func (j *Journal) Append(records ...JournalRecord) error {
 		if err != nil {
 			return fmt.Errorf("coding session: encode journal record: %w", err)
 		}
-		if len(encoded) > maxJournalRecordBytes {
-			return fmt.Errorf("%w: journal record exceeds %d bytes", ErrJournalCorrupt, maxJournalRecordBytes)
-		}
 
 		buffer = append(buffer, encoded...)
 		buffer = append(buffer, '\n')
-		j.sequence = record.Seq
+		sequence = record.Seq
 	}
 
 	if _, err := j.file.Write(buffer); err != nil {
 		return fmt.Errorf("coding session: append event journal: %w", err)
 	}
+	j.sequence = sequence
 
 	return nil
 }
@@ -219,8 +221,9 @@ func (j *Journal) Sequence() uint64 {
 }
 
 // ReadJournal returns up to limit records from oldest to newest. A zero limit
-// reads every record up to the format bound. A trailing partial line is
-// dropped; a malformed interior line is [ErrJournalCorrupt].
+// reads every record. A trailing partial line is dropped; a malformed interior
+// line is [ErrJournalCorrupt]. Durable records are written at their natural
+// size, so there is no normal per-record byte budget here.
 func ReadJournal(path string, limit int) ([]JournalRecord, error) {
 	file, err := os.Open(path) //nolint:gosec // caller-owned store path
 	if err != nil {
@@ -272,11 +275,11 @@ func readJournalLine(reader *bufio.Reader) ([]byte, bool, error) {
 	for {
 		chunk, err := reader.ReadSlice('\n')
 		line = append(line, chunk...)
-		if len(line) > maxJournalRecordBytes {
+		if len(line) > maxJournalLineBytes {
 			return nil, false, fmt.Errorf(
 				"%w: journal line exceeds %d bytes",
 				ErrJournalCorrupt,
-				maxJournalRecordBytes,
+				maxJournalLineBytes,
 			)
 		}
 		if errors.Is(err, bufio.ErrBufferFull) {

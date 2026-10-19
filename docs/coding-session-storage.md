@@ -52,7 +52,7 @@ original path.
 | Layout | — | `session.StoreLayout` is the only place a session path is built; `session.StoreRoot` is the only place the tree is read or created |
 | Index | `session.json` | authoritative for listing; the writer keeps `counts` current |
 | Conversation | `transcript.jsonl` | authoritative; a harness entry tree |
-| Events | `events.jsonl` | authoritative; one self-contained record per committed event |
+| Events | `events.jsonl` | authoritative for durable lifecycle facts; live projections stay out |
 | Model input | `model/` | audit snapshot of what the model was sent |
 | Derived state | `state/` | rebuildable; never authoritative for conversation content |
 | Content | `archives/`, `compaction/` | content-addressed, digest-verified |
@@ -62,15 +62,20 @@ original path.
 
 ### Event journal policy
 
-The journal records every committed coding event **except** `message.delta` and
-`model.retry`. Those two exist only for the live TUI projection, and the message
-they build is already recorded by `message.committed` and by the transcript, so
-journalling them would duplicate content and grow the log without adding an
-audit signal.
+The journal records every committed coding event **except** `message.delta`,
+`model.retry`, and `session.tree_changed`. The first two exist only for the live
+TUI projection, and the message they build is already recorded by
+`message.committed` and by the transcript. `session.tree_changed` carries a
+full transcript snapshot; the transcript is already authoritative, so
+persisting the snapshot would duplicate content and make one journal record grow
+with the whole conversation. All three stay live-only.
 
-Journal writes are best-effort: a failed append is remembered and reported when
-the session closes, so a slow or full disk never aborts a turn whose transcript
-entry is already durable.
+Journal writes are best-effort: a real I/O failure is remembered and reported
+when the session closes, so a slow or full disk never aborts a turn whose
+transcript entry is already durable. Durable records are written at their
+natural size; a large committed message is never silently dropped. The only
+byte guard is a 256 MiB corruption bound on one unbroken line, far above normal
+event payloads, and exceeding it means the file is damaged.
 
 ### A session with no conversation leaves nothing
 

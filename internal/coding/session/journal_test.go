@@ -90,6 +90,50 @@ func TestJournalRejectsAnotherSessionsRecord(t *testing.T) {
 	assert.Equal(t, uint64(0), journal.Sequence())
 }
 
+func TestJournalRejectsBatchWithoutAdvancingSequence(t *testing.T) {
+	t.Parallel()
+
+	path := journalPath(t)
+	journal, err := OpenJournal(path, "s-journal")
+	require.NoError(t, err)
+
+	err = journal.Append(
+		JournalRecord{Type: "small"},
+		JournalRecord{SessionID: "s-other", Type: "bad"},
+	)
+	require.ErrorIs(t, err, ErrJournalCorrupt)
+	assert.Equal(t, uint64(0), journal.Sequence(), "a refused batch consumes no sequence")
+
+	require.NoError(t, journal.Close())
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	assert.Zero(t, info.Size(), "the refused batch writes nothing")
+}
+
+func TestJournalWritesLargeRecord(t *testing.T) {
+	t.Parallel()
+
+	path := journalPath(t)
+	journal, err := OpenJournal(path, "s-journal")
+	require.NoError(t, err)
+
+	large := JournalRecord{
+		Type:    "large",
+		Payload: json.RawMessage(`{"text":"` + strings.Repeat("x", 5<<20) + `"}`),
+	}
+	require.NoError(t, journal.Append(large, JournalRecord{Type: "after"}))
+	require.NoError(t, journal.Close())
+
+	records, err := ReadJournal(path, 0)
+	require.NoError(t, err)
+	require.Len(t, records, 2)
+	assert.Equal(t, "large", records[0].Type)
+	assert.Greater(t, len(records[0].Payload), 5<<20)
+	assert.Equal(t, "after", records[1].Type)
+	assert.Equal(t, uint64(2), records[1].Seq)
+}
+
 func TestJournalToleratesATornTail(t *testing.T) {
 	t.Parallel()
 
