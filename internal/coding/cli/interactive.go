@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/rsbin1178/pips/internal/coding/config"
+	"github.com/rsbin1178/pips/internal/coding/modelcatalog"
 	"github.com/rsbin1178/pips/internal/coding/statusline"
 	"github.com/rsbin1178/pips/internal/coding/tui"
 	"github.com/rsbin1178/pips/internal/coding/workspace"
@@ -99,6 +100,17 @@ func runInteractiveTarget(
 			return config.SaveThemeWithOptions(
 				resolved.configFile,
 				theme,
+				config.TUIConfigSaveOptions{AllowCreate: allowConfigCreate},
+			)
+		},
+		SaveSelection: func(_ context.Context, selected modelcatalog.Selection) error {
+			return config.SaveSelectionWithOptions(
+				resolved.configFile,
+				config.SelectionPreference{
+					Model:     selected.Ref,
+					Variant:   selected.Variant,
+					Reasoning: selected.ReasoningOverride,
+				},
 				config.TUIConfigSaveOptions{AllowCreate: allowConfigCreate},
 			)
 		},

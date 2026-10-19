@@ -900,6 +900,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.streamErr = nil
 		m.syncApprovalPrompt()
+		notice := m.selectionSaveNotice(message)
 		var commit tea.Cmd
 		switch message.operation {
 		case operationNew:
@@ -909,7 +910,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if replacementControl {
-			commands := []tea.Cmd{m.startSubscription()}
+			commands := []tea.Cmd{m.startSubscription(), notice}
 			if message.operation == operationResume {
 				commands = append(commands, m.probeTeamRecoveryAfterResume())
 			}
@@ -917,7 +918,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.afterScrollback(commit, commands...)
 		}
 
-		return m, m.afterScrollback(commit, m.continueIfPaused())
+		return m, m.afterScrollback(commit, m.continueIfPaused(), notice)
 	case teamRecoveryProbeMsg:
 		if message.err != nil || message.sessionID == "" ||
 			message.sessionID != m.state.SessionID || len(message.values) == 0 ||

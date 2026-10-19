@@ -322,7 +322,7 @@ func (m *Model) pickerView(maxHeight int) string {
 		return ""
 	}
 
-	lines := []string{"Model · current process only · filter: " + m.picker.query}
+	lines := []string{"Model · filter: " + m.picker.query}
 	values := m.filteredPickerModels()
 	for index, entry := range values {
 		prefix := "  "
@@ -352,7 +352,7 @@ func (m *Model) pickerView(maxHeight int) string {
 	if m.picker.err != nil {
 		lines = append(lines, "Error: "+safeError(m.picker.err))
 	}
-	lines = append(lines, "↑/↓ model · type search · v/V variant · r/R reasoning · Enter apply · Esc cancel")
+	lines = append(lines, "↑/↓ model · type search · v/V variant · r/R reasoning · Enter apply & save · Esc cancel")
 
 	for index := range lines {
 		lines[index] = ansi.Truncate(lines[index], max(1, m.width), "…")

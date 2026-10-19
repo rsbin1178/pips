@@ -247,7 +247,7 @@ func TestModelPickerRendersInlineBelowComposerAndOwnsTyping(t *testing.T) {
 	view := model.View()
 	lines := strings.Split(view.Content, "\n")
 	composerLine := lineContaining(lines, inputArrow)
-	pickerLine := lineContaining(lines, "Model · current process only")
+	pickerLine := lineContaining(lines, "Model · filter:")
 	require.GreaterOrEqual(t, composerLine, 0)
 	assert.Greater(t, pickerLine, composerLine)
 	assert.Nil(t, view.Cursor)
@@ -256,6 +256,70 @@ func TestModelPickerRendersInlineBelowComposerAndOwnsTyping(t *testing.T) {
 	model.Update(tea.KeyPressMsg{Text: "next"})
 	assert.Equal(t, "next", model.picker.query)
 	assert.Empty(t, model.composer.Value())
+}
+
+func TestModelPickerEnterSavesTheAppliedSelection(t *testing.T) {
+	t.Parallel()
+
+	controller := newOverlayController(readyState())
+	model := readyModelWithController(t, controller, true)
+	var saved []modelcatalog.Selection
+	model.options.SaveSelection = func(_ context.Context, selection modelcatalog.Selection) error {
+		saved = append(saved, selection)
+
+		return nil
+	}
+	model.openModelPicker()
+	model.picker.query = "next-model"
+	model.Update(key("v"))
+	model.Update(key("r"))
+
+	_, command := model.Update(key("enter"))
+	require.NotNil(t, command)
+	model.Update(commandMessage(t, command))
+	require.Len(t, saved, 1)
+	assert.Equal(t, "next-model", saved[0].Ref.Model)
+	assert.Equal(t, "fast", saved[0].Variant)
+	require.NotNil(t, saved[0].ReasoningOverride)
+	assert.Equal(t, config.ReasoningLevel("low"), *saved[0].ReasoningOverride)
+	assert.Equal(t, "Model selection saved as default", model.statusNotice)
+	assert.False(t, model.statusNoticeErr)
+}
+
+func TestModelPickerReportsASaveFailureWithoutUndoingTheApply(t *testing.T) {
+	t.Parallel()
+
+	controller := newOverlayController(readyState())
+	model := readyModelWithController(t, controller, true)
+	model.options.SaveSelection = func(context.Context, modelcatalog.Selection) error {
+		return config.ErrConflict
+	}
+	model.openModelPicker()
+	model.picker.query = "next-model"
+
+	_, command := model.Update(key("enter"))
+	require.NotNil(t, command)
+	model.Update(commandMessage(t, command))
+	require.Len(t, controller.models, 1, "the process-local apply still happened")
+	assert.True(t, model.statusNoticeErr)
+	assert.Contains(t, model.statusNotice, "configuration changed")
+}
+
+func TestModelPickerReportsAnUnavailableSelectionSaver(t *testing.T) {
+	t.Parallel()
+
+	controller := newOverlayController(readyState())
+	model := readyModelWithController(t, controller, true)
+	model.options.SaveSelection = nil
+	model.openModelPicker()
+	model.picker.query = "next-model"
+
+	_, command := model.Update(key("enter"))
+	require.NotNil(t, command)
+	model.Update(commandMessage(t, command))
+	require.Len(t, controller.models, 1, "the process-local apply still happened")
+	assert.True(t, model.statusNoticeErr)
+	assert.Contains(t, model.statusNotice, "persistence is unavailable")
 }
 
 func TestStatusCommandRefreshesCompactWorktreeSummaryAsynchronously(t *testing.T) {

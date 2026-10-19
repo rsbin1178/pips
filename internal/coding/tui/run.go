@@ -202,6 +202,10 @@ type StatusLineSaver func(context.Context, []statusline.Item) error
 // ThemeSaver persists only the requested theme ID in the active config file.
 type ThemeSaver func(context.Context, string) error
 
+// SelectionSaver persists a complete model/variant/reasoning selection as the
+// default for the active config file.
+type SelectionSaver func(context.Context, modelcatalog.Selection) error
+
 // TextKind names the destination policy for operator-requested text, so one
 // saver can serve both the copy fallback and an export.
 type TextKind string
@@ -284,6 +288,7 @@ type Options struct {
 	StatusLine      []statusline.Item
 	SaveStatusLine  StatusLineSaver
 	SaveTheme       ThemeSaver
+	SaveSelection   SelectionSaver
 	// SaveText persists Ctrl+Y, /copy and /export output. A nil saver keeps the
 	// clipboard path and reports that no file fallback is available.
 	SaveText TextSaver
