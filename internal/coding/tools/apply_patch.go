@@ -19,7 +19,7 @@ import (
 const applyPatchName = "apply_patch"
 
 type applyPatchArgs struct {
-	Patch string `json:"patch" description:"Strict patch enclosed by *** Begin Patch and *** End Patch"`
+	Patch string `json:"patch" description:"Strict patch enclosed by *** Begin Patch and *** End Patch; file paths may be workspace-relative or absolute inside the workspace"`
 }
 
 type plannedChange struct {
@@ -51,6 +51,9 @@ func (s *service) applyPatch(ctx context.Context, args applyPatchArgs) (string, 
 		Bytes:    s.limits.PatchBytes,
 		Files:    s.limits.PatchFiles,
 		PlanPath: planPath,
+		ResolvePath: func(value string) (string, error) {
+			return s.tree.NormalizeUserPath(value, false)
+		},
 	})
 	if err != nil {
 		return "", failure(applyPatchName, err)

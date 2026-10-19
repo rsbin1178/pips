@@ -128,7 +128,7 @@ func inspectTraversalBase(tree *workspace.Tree, name string) (string, error) {
 		name = "."
 	}
 
-	normalized, err := workspace.NormalizePath(name, true)
+	normalized, err := tree.NormalizeUserPath(name, true)
 	if err != nil {
 		return "", err
 	}

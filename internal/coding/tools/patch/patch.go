@@ -62,6 +62,10 @@ type Limits struct {
 	// PlanPath, when non-empty, admits that exact absolute plan-file path as a
 	// patch target in addition to workspace-relative paths.
 	PlanPath string
+	// ResolvePath, when non-nil, normalizes an ordinary patch target. The tool
+	// layer uses it to accept an absolute path inside the workspace. A nil
+	// resolver keeps the package's historical workspace-relative-only grammar.
+	ResolvePath func(string) (string, error)
 }
 
 // Parse validates the complete patch before returning any operation.
@@ -105,7 +109,7 @@ func Parse(value string, limits Limits) (Document, error) {
 			return Document{}, fmt.Errorf("%w: unexpected line %d", ErrInvalid, index+1)
 		}
 
-		name, err := normalizeTarget(strings.TrimSpace(rawPath), limits.PlanPath)
+		name, err := normalizeTarget(strings.TrimSpace(rawPath), limits.PlanPath, limits.ResolvePath)
 		if err != nil {
 			return Document{}, fmt.Errorf("%w: line %d: %w", ErrInvalid, index+1, err)
 		}
@@ -258,10 +262,14 @@ func Apply(original []byte, hunks []Hunk) ([]byte, error) {
 }
 
 // normalizeTarget admits the exact plan-file path when plan mode supplies one
-// and otherwise enforces the workspace-relative grammar.
-func normalizeTarget(rawPath, planPath string) (string, error) {
+// and otherwise applies the caller's resolver, falling back to the historical
+// workspace-relative grammar.
+func normalizeTarget(rawPath, planPath string, resolve func(string) (string, error)) (string, error) {
 	if planPath != "" && rawPath == planPath {
 		return planPath, nil
+	}
+	if resolve != nil {
+		return resolve(rawPath)
 	}
 
 	return workspace.NormalizePath(rawPath, false)

@@ -19,7 +19,7 @@ const grepName = "grep"
 type grepArgs struct {
 	Pattern       string  `json:"pattern" description:"Go RE2 regular expression, or literal text when fixed_strings is true"`
 	FixedStrings  *bool   `json:"fixed_strings" description:"Treat pattern as literal text instead of a regular expression"`
-	Path          *string `json:"path" description:"Optional workspace-relative base directory"`
+	Path          *string `json:"path" description:"Optional workspace base directory (relative, or absolute inside the workspace)"`
 	Glob          *string `json:"glob" description:"Optional slash-separated file glob"`
 	CaseSensitive *bool   `json:"case_sensitive" description:"Whether matching is case-sensitive"`
 	Offset        *int    `json:"offset" description:"Optional zero-based matching-line offset"`
