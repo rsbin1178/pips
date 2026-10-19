@@ -295,10 +295,10 @@ func describeToolActivities(scan *toolScanState, cache *toolProjectionCache) []t
 		record.described = true
 	}
 
-	// Grok Build suppresses todo_write calls from the scrollback and lets the
-	// dedicated todo surface carry the state. pips keeps that behavior: the
-	// transient spinner still comes from runningToolActivities, a completed call
-	// leaves no card, and a failure stays visible as an error card.
+	// The TUI suppresses todo_write calls from the scrollback and lets the
+	// dedicated todo surface carry the state. The transient spinner still comes
+	// from runningToolActivities, a completed call leaves no card, and a failure
+	// stays visible as an error card.
 	activities = slices.DeleteFunc(activities, func(activity toolActivity) bool {
 		return activity.class == toolClassTaskList &&
 			activity.state != toolStateFailed &&

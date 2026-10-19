@@ -21,6 +21,7 @@ func TestEventLogSinkSkipsLiveProjections(t *testing.T) {
 	for range 5 {
 		transcript = append(transcript, ai.UserText(strings.Repeat("x", 1<<20)))
 	}
+
 	sink.Append(Event{
 		Type: EventSessionTreeChanged,
 		Payload: SessionTreeChanged{

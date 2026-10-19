@@ -330,7 +330,7 @@ func TestResolveActivityUsesSemanticToolLabels(t *testing.T) {
 			tool: coding.ToolState{
 				Call: coding.ToolCall{
 					ID: "call-1", Name: "exa.web_search_exa",
-					Arguments: ai.JSON(`{"query":"Codex CLI"}`),
+					Arguments: ai.JSON(`{"query":"example CLI"}`),
 				},
 				Status: coding.ToolStatusRunning,
 			},

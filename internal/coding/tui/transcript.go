@@ -124,7 +124,6 @@ type transcriptEntry struct {
 
 // resetRenders clears the render and eviction counters.
 func (s *transcriptStore) resetRenders() {
-
 	s.renders = 0
 	s.evictions = 0
 	s.materializations = 0

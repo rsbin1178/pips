@@ -17,6 +17,7 @@ func TestRuntimePublishesAChildTaskOnce(t *testing.T) {
 	t.Parallel()
 
 	const task = "Inspect the runtime composition root."
+
 	model := newRuntimeModel(
 		runtimeToolResponse("delegate-1", subagent.ToolName,
 			`{"prompt":"`+task+`","description":"delegate",`+
@@ -98,10 +99,12 @@ func userMessageTexts(messages []ai.Message) []string {
 		if _, ok := message.(ai.UserMessage); !ok {
 			continue
 		}
+
 		parts, err := ai.MessageParts(message)
 		if err != nil {
 			continue
 		}
+
 		for _, part := range parts {
 			if text, ok := part.(ai.TextPart); ok {
 				texts = append(texts, text.Text)

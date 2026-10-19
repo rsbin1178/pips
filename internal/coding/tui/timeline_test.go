@@ -35,7 +35,7 @@ func TestTimelineProjectsACompactionDivider(t *testing.T) {
 	assert.Equal(t, "compaction:checkpoint-1", blocks[0].id)
 
 	rendered := renderTimeline(blocks, newMarkdownRenderer(4), 60, themeDark, true)
-	line := strings.Split(rendered, "\n")[0]
+	line, _, _ := strings.Cut(rendered, "\n")
 	assert.Equal(t,
 		"Context compacted · auto · 9.0k → 1.2k tokens",
 		strings.TrimSpace(strings.Trim(strings.TrimSpace(line), "─")),

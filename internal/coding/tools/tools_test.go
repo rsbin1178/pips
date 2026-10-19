@@ -229,6 +229,7 @@ func TestWorkspaceAbsolutePathsAreAccepted(t *testing.T) {
 	patch := "*** Begin Patch\n*** Add File: " + patchPath + "\n+patched\n*** End Patch"
 	_, err = fixture.exec(t.Context(), "apply_patch", `{"patch":`+strconv.Quote(patch)+`}`)
 	require.NoError(t, err)
+
 	data, readErr := os.ReadFile(patchPath)
 	require.NoError(t, readErr)
 	assert.Equal(t, "patched\n", string(data))
@@ -571,9 +572,10 @@ func TestTaskCatalogDescribesTheFoldSurface(t *testing.T) {
 	assert.Empty(t, plan.Items.Required, "the fold decides what each mode needs")
 	assert.Empty(t, schema.Required, "plan and clear are both optional at the schema layer")
 	assert.Equal(t, "64", string(plan.Extra["maxItems"]))
-	clear := schema.Properties["clear"]
-	require.NotNil(t, clear)
-	assert.Contains(t, clear.Description, "plan must carry no items")
+
+	clearProperty := schema.Properties["clear"]
+	require.NotNil(t, clearProperty)
+	assert.Contains(t, clearProperty.Description, "plan must carry no items")
 	assert.Contains(t, plan.Items.Properties["status"].Description, "cancelled")
 
 	merge := schema.Properties["merge"]

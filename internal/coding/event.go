@@ -184,7 +184,7 @@ type SessionTreeChanged struct {
 	Tasks         tasklist.Snapshot `json:"tasks"`
 	// Compaction carries the boundary the bounded transcript belongs to. A zero
 	// value means the active branch has no full checkpoint.
-	Compaction CompactionState `json:"compaction,omitempty"`
+	Compaction CompactionState `json:"compaction,omitzero"`
 }
 
 // SessionNavigated records one successful same-file leaf change.

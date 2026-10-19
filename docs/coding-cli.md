@@ -721,7 +721,7 @@ explore = "anthropic/claude-sonnet-4-5"
 Every admission value is positive and hard-bounded; invalid or unknown fields
 make configuration validation fail before Runtime open. A partial table changes
 only the named values, and `pips config show` reports each effective value and
-source. The reference bounds concurrent children only, so neither the spawn
+source. Only concurrent children are bounded, so neither the spawn
 count per root interaction nor the auto-follow-up count is a `[subagents]` key:
 delete `max_spawned_per_root_interaction` and `max_auto_follow_ups` from an
 existing file. A child has no default execution budget: turns, cumulative

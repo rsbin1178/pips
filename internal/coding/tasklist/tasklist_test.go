@@ -96,12 +96,13 @@ func TestClearRemovesThePlan(t *testing.T) {
 
 	_, err = tasklist.Decode([]byte(`{"clear":true,"plan":[{"step":"Inspect"}]}`))
 	require.Error(t, err)
+
 	merge := true
 	_, err = tasklist.Apply(current, tasklist.Update{Clear: true, Merge: &merge})
 	require.Error(t, err)
 }
 
-// TestMultipleInProgressAreAccepted pins the Grok Build-style policy: parallel
+// TestMultipleInProgressAreAccepted pins the parallel-work policy: parallel
 // work may have more than one active item; the tool treats the count as a plan
 // choice rather than a validation error.
 func TestMultipleInProgressAreAccepted(t *testing.T) {
@@ -119,9 +120,9 @@ func TestMultipleInProgressAreAccepted(t *testing.T) {
 	assert.Equal(t, 3, folded.InProgress)
 }
 
-// TestExplicitEmptyReplaceClearsThePlan pins the Grok Build-compatible clear
-// path: merge false with no items removes the checklist, while an omitted merge
-// still refuses an empty plan.
+// TestExplicitEmptyReplaceClearsThePlan pins the clear path: merge false with
+// no items removes the checklist, while an omitted merge still refuses an empty
+// plan.
 func TestExplicitEmptyReplaceClearsThePlan(t *testing.T) {
 	t.Parallel()
 
@@ -593,6 +594,7 @@ func TestTodoWriteDefaultsToMerge(t *testing.T) {
 	})
 	update, ok := tasklist.FromMessage(legacy)
 	require.True(t, ok)
+
 	folded, err = tasklist.Apply(base, update)
 	require.NoError(t, err)
 	require.Len(t, folded.Items, 1, "legacy update_plan still replaces by default")

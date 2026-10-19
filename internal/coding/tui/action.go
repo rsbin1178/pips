@@ -148,9 +148,8 @@ var defaultActions = []actionBinding{
 		Label:    "latest details",
 	},
 	{
-		// Ctrl+P opens the standalone todo_write checklist. It is the pips
-		// equivalent of Grok Build's dedicated todo pane, kept as a page so it
-		// never competes with the transient tasks strip.
+		// Ctrl+P opens the standalone todo_write checklist. It stays a page so
+		// it never competes with the transient tasks strip.
 		ID:       actionTodo,
 		Contexts: []actionContext{contextIdle, contextRunning, contextPaused},
 		Keys:     []string{keyCtrlP},
