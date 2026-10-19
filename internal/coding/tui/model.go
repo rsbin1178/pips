@@ -905,6 +905,14 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		switch message.operation {
 		case operationNew:
 			commit = m.commitNewSessionOutput()
+		case operationResume:
+			if m.fullscreen() {
+				// A resumed session starts with the banner as its first managed
+				// record, so scrolling to the top shows the same header a fresh
+				// session shows at startup.
+				m.appendBanner(m.renderBanner())
+			}
+			commit = m.commitStableTimeline()
 		default:
 			commit = m.commitStableTimeline()
 		}
