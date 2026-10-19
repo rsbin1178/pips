@@ -63,7 +63,7 @@ func requestFrom(req ai.Request, provider ai.Provider) (any, error) {
 		return nil, fmt.Errorf("gemini: invalid messages: %w", err)
 	}
 
-	contents, err := contentsFrom(conversation)
+	contents, err := contentsFrom(conversation, provider)
 	if err != nil {
 		return nil, err
 	}
@@ -162,11 +162,11 @@ func systemInstructionFrom(system []ai.SystemMessage) *wireContent {
 // contentsFrom converts the conversation. Gemini has only "user" and "model"
 // roles; system prompts move to systemInstruction and tool results become
 // user turns carrying functionResponse parts.
-func contentsFrom(msgs ai.Messages) ([]wireContent, error) {
+func contentsFrom(msgs ai.Messages, provider ai.Provider) ([]wireContent, error) {
 	out := make([]wireContent, 0, len(msgs))
 
 	for _, msg := range msgs {
-		content, err := contentFrom(msg)
+		content, err := contentFrom(msg, provider)
 		if err != nil {
 			return nil, err
 		}
@@ -179,7 +179,7 @@ func contentsFrom(msgs ai.Messages) ([]wireContent, error) {
 	return out, nil
 }
 
-func contentFrom(msg ai.Message) (*wireContent, error) {
+func contentFrom(msg ai.Message, provider ai.Provider) (*wireContent, error) {
 	switch msg := msg.(type) {
 	case ai.UserMessage:
 		parts, err := userPartsFrom(msg.Parts)
@@ -196,7 +196,7 @@ func contentFrom(msg ai.Message) (*wireContent, error) {
 
 		return &wireContent{Role: roleModel, Parts: parts}, nil
 	case ai.ToolMessage:
-		parts, err := functionResponseParts(msg.Parts)
+		parts, err := functionResponseParts(msg.Parts, provider)
 		if err != nil {
 			return nil, err
 		}
@@ -262,14 +262,20 @@ func modelPartsFrom(parts []ai.AssistantPart) ([]wirePart, error) {
 // functionResponseParts converts tool results. Gemini keys a response by the
 // function name (and, for Gemini 3, the original call id), not a tool_call_id,
 // so the synthesized id is decoded back to name+id here.
-func functionResponseParts(parts []ai.ToolResultPart) ([]wirePart, error) {
+func functionResponseParts(parts []ai.ToolResultPart, provider ai.Provider) ([]wirePart, error) {
 	out := make([]wirePart, 0, len(parts))
 
 	for _, result := range parts {
+		response, media, err := functionResponseValue(result, provider)
+		if err != nil {
+			return nil, err
+		}
+
 		out = append(out, wirePart{FunctionResponse: &wireFunctionResp{
 			ID:       originalCallID(result.ToolCallID),
 			Name:     result.Name,
-			Response: functionResponseValue(result),
+			Response: response,
+			Parts:    media,
 		}})
 	}
 
@@ -278,9 +284,20 @@ func functionResponseParts(parts []ai.ToolResultPart) ([]wirePart, error) {
 
 // functionResponseValue wraps tool output in the object Gemini expects.
 // Structured JSON output is passed through; plain text is wrapped under
-// "output"; errors under "error".
-func functionResponseValue(result ai.ToolResultPart) map[string]any {
-	text := textOf(ai.ProviderParts(result.Content))
+// "output"; errors under "error". Non-text parts are returned separately as
+// the function-response media parts.
+func functionResponseValue(
+	result ai.ToolResultPart,
+	provider ai.Provider,
+) (map[string]any, []wirePart, error) {
+	parts := ai.ProviderParts(result.Content)
+
+	media, err := functionResponseMedia(parts, provider)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	text := textOf(parts)
 
 	key := "output"
 	if result.IsError {
@@ -289,10 +306,41 @@ func functionResponseValue(result ai.ToolResultPart) map[string]any {
 
 	var parsed map[string]any
 	if err := jsonx.Unmarshal([]byte(text), &parsed); err == nil {
-		return parsed
+		return parsed, media, nil
 	}
 
-	return map[string]any{key: text}
+	return map[string]any{key: text}, media, nil
+}
+
+// functionResponseMedia projects non-text tool-result parts into Gemini's
+// documented function-response media form: an inlineData or fileData part
+// beside the text response. A part the shape cannot express, including a
+// provider file ID, returns [ai.ErrUnsupportedMedia] rather than being dropped.
+func functionResponseMedia(parts []ai.Part, provider ai.Provider) ([]wirePart, error) {
+	var out []wirePart
+
+	for _, part := range parts {
+		var source ai.MediaSource
+
+		switch p := part.(type) {
+		case ai.TextPart:
+			continue
+		case ai.ImagePart:
+			source = p.Source
+		case ai.FilePart:
+			source = p.Source
+		default:
+			return nil, ai.NewUnsupportedMediaError(provider, part)
+		}
+
+		if source.IsID() {
+			return nil, ai.NewUnsupportedMediaError(provider, part)
+		}
+
+		out = append(out, mediaPartFrom(source))
+	}
+
+	return out, nil
 }
 
 func mediaPartFrom(src ai.MediaSource) wirePart {

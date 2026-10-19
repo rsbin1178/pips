@@ -57,6 +57,9 @@ type wireFunctionResp struct {
 	ID       string         `json:"id,omitempty"`
 	Name     string         `json:"name"`
 	Response map[string]any `json:"response"`
+	// Parts carries multimodal function responses: inlineData or fileData
+	// entries beside the text response. Omitted for a text-only result.
+	Parts []wirePart `json:"parts,omitempty"`
 }
 
 type wireTool struct {
