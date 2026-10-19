@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding/workspace"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -51,6 +52,23 @@ func newAdmittedFixture(t *testing.T, limits Limits, admittedBytes int64) admitt
 	}
 }
 
+func (f admittedFixture) readText(t *testing.T, args readArgs) (string, error) {
+	t.Helper()
+
+	parts, err := f.service.read(t.Context(), args)
+	if err != nil {
+		return "", err
+	}
+
+	for _, part := range parts {
+		if text, ok := part.(ai.TextPart); ok {
+			return text.Text, nil
+		}
+	}
+
+	return "", nil
+}
+
 func writeFile(t *testing.T, path, content string) {
 	t.Helper()
 
@@ -64,7 +82,7 @@ func TestReadToolAdmitsOneTaskLogByExactPath(t *testing.T) {
 	fixture := newAdmittedFixture(t, DefaultLimits(), 1<<20)
 	writeFile(t, fixture.logPath, "line-1\nline-2\nline-3\n")
 
-	text, err := fixture.service.read(t.Context(), readArgs{Path: fixture.logPath})
+	text, err := fixture.readText(t, readArgs{Path: fixture.logPath})
 	require.NoError(t, err)
 
 	header, body, err := ParseResult(text)
@@ -76,7 +94,7 @@ func TestReadToolAdmitsOneTaskLogByExactPath(t *testing.T) {
 	// The same line window a workspace read supports.
 	offset, limit := 2, 1
 
-	text, err = fixture.service.read(t.Context(), readArgs{
+	text, err = fixture.readText(t, readArgs{
 		Path: fixture.logPath, Offset: &offset, Limit: &limit,
 	})
 	require.NoError(t, err)
@@ -99,7 +117,7 @@ func TestReadToolReadsAnAdmittedLogUnderItsOwnBound(t *testing.T) {
 	fixture := newAdmittedFixture(t, limits, 65)
 	writeFile(t, fixture.logPath, strings.Repeat("x", 64)+"\n")
 
-	text, err := fixture.service.read(t.Context(), readArgs{Path: fixture.logPath})
+	text, err := fixture.readText(t, readArgs{Path: fixture.logPath})
 	require.NoError(t, err)
 
 	header, _, err := ParseResult(text)
@@ -109,7 +127,7 @@ func TestReadToolReadsAnAdmittedLogUnderItsOwnBound(t *testing.T) {
 	workspacePath := filepath.Join(fixture.root, "big.txt")
 	writeFile(t, workspacePath, strings.Repeat("y", 64)+"\n")
 
-	_, err = fixture.service.read(t.Context(), readArgs{Path: "big.txt"})
+	_, err = fixture.readText(t, readArgs{Path: "big.txt"})
 	require.Error(t, err)
 
 	header, _, err = ParseResult(err.Error())
@@ -147,7 +165,7 @@ func TestReadToolRefusesEveryOtherPath(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			_, err := fixture.service.read(t.Context(), readArgs{Path: value})
+			_, err := fixture.readText(t, readArgs{Path: value})
 			require.Error(t, err)
 
 			header, _, parseErr := ParseResult(err.Error())
@@ -159,7 +177,7 @@ func TestReadToolRefusesEveryOtherPath(t *testing.T) {
 	// A workspace file is unaffected by the admission.
 	writeFile(t, filepath.Join(fixture.root, "notes.txt"), "workspace line\n")
 
-	text, err := fixture.service.read(t.Context(), readArgs{Path: "notes.txt"})
+	text, err := fixture.readText(t, readArgs{Path: "notes.txt"})
 	require.NoError(t, err)
 
 	_, body, err := ParseResult(text)
@@ -178,7 +196,7 @@ func TestReadToolWithoutATaskLogBoundaryRefusesTheLog(t *testing.T) {
 
 	fixture.service.taskLog = nil
 
-	_, err := fixture.service.read(t.Context(), readArgs{Path: fixture.logPath})
+	_, err := fixture.readText(t, readArgs{Path: fixture.logPath})
 	require.Error(t, err)
 
 	header, _, parseErr := ParseResult(err.Error())
@@ -201,7 +219,7 @@ func TestReadToolRefusesASymlinkAtTheAdmittedPath(t *testing.T) {
 	require.NoError(t, os.Remove(fixture.logPath))
 	require.NoError(t, os.Symlink(secret, fixture.logPath))
 
-	_, err := fixture.service.read(t.Context(), readArgs{Path: fixture.logPath})
+	_, err := fixture.readText(t, readArgs{Path: fixture.logPath})
 	require.Error(t, err)
 
 	header, body, parseErr := ParseResult(err.Error())
@@ -218,7 +236,7 @@ func TestReadToolRefusesABinaryAdmittedLog(t *testing.T) {
 	fixture := newAdmittedFixture(t, DefaultLimits(), 1<<20)
 	writeFile(t, fixture.logPath, "line-1\n\x00binary\n")
 
-	_, err := fixture.service.read(t.Context(), readArgs{Path: fixture.logPath})
+	_, err := fixture.readText(t, readArgs{Path: fixture.logPath})
 	require.Error(t, err)
 
 	header, _, parseErr := ParseResult(err.Error())
@@ -241,7 +259,7 @@ func TestReadToolRefusesAnAdmittedDirectory(t *testing.T) {
 		Bytes: 1 << 20,
 	}
 
-	_, err := fixture.service.read(t.Context(), readArgs{Path: directory})
+	_, err := fixture.readText(t, readArgs{Path: directory})
 	require.Error(t, err)
 
 	header, _, parseErr := ParseResult(err.Error())
@@ -258,7 +276,7 @@ func TestReadToolAdmitsAWhitespacePaddedExactPath(t *testing.T) {
 	fixture := newAdmittedFixture(t, DefaultLimits(), 1<<20)
 	writeFile(t, fixture.logPath, "line-1\n")
 
-	text, err := fixture.service.read(t.Context(), readArgs{
+	text, err := fixture.readText(t, readArgs{
 		Path: "  " + fixture.logPath + "\n",
 	})
 	require.NoError(t, err)
@@ -279,7 +297,7 @@ func TestReadToolBoundsAnAdmittedLogsOutput(t *testing.T) {
 	fixture := newAdmittedFixture(t, limits, 1<<20)
 	writeFile(t, fixture.logPath, strings.Repeat("x", 40)+"\n"+strings.Repeat("y", 40)+"\n")
 
-	text, err := fixture.service.read(t.Context(), readArgs{Path: fixture.logPath})
+	text, err := fixture.readText(t, readArgs{Path: fixture.logPath})
 	require.NoError(t, err)
 
 	header, body, err := ParseResult(text)

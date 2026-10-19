@@ -231,6 +231,8 @@ func errorCode(err error) string {
 		return "invalid_argument"
 	case errors.Is(err, errInvalidArgument), errors.Is(err, workspace.ErrInvalidPath), errors.Is(err, patchdoc.ErrInvalid):
 		return "invalid_argument"
+	case errors.Is(err, errInvalidNotebook):
+		return "invalid_notebook"
 	case errors.Is(err, workspace.ErrOutsideRoot):
 		return "outside_workspace"
 	case errors.Is(err, workspace.ErrSymlink):
