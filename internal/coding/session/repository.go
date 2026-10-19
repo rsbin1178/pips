@@ -67,10 +67,13 @@ var (
 	ErrUnsupportedPlatform = errors.New("coding session: unsupported platform")
 )
 
-// Repository owns one directory of coding session files and their lock files.
+// Repository owns one layered session store: workspace groups of one directory
+// per session, each holding its own index record, transcript, and sidecars.
 type Repository struct {
-	dir  string
-	repo harness.Repo
+	dir    string
+	layout StoreLayout
+	root   StoreRoot
+	repo   harness.Repo
 }
 
 // Kind identifies the product role of a durable Session.
@@ -102,7 +105,26 @@ func NewRepository(dir string) (*Repository, error) {
 		return nil, err
 	}
 
-	return &Repository{dir: abs, repo: harness.Repo{Dir: abs}}, nil
+	root, err := NewStoreRoot(abs)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Repository{
+		dir:    abs,
+		layout: root.Layout(),
+		root:   root,
+		repo:   harness.Repo{Dir: abs},
+	}, nil
+}
+
+// Layout returns the store layout this repository resolves session paths with.
+func (r *Repository) Layout() StoreLayout {
+	if r == nil {
+		return StoreLayout{}
+	}
+
+	return r.layout
 }
 
 // Dir returns the absolute session repository directory.
@@ -160,6 +182,9 @@ type TeamWorkerLineage struct {
 type OpenOptions struct {
 	ID          string
 	WorkspaceID string
+	// WorkspacePath is the canonical path of the workspace claiming the session.
+	// It is the ownership key; see [Metadata.BelongsToWorkspace].
+	WorkspacePath string
 }
 
 // OpenTeamWorkerOptions identifies a Team Worker and the exact resource
@@ -174,6 +199,7 @@ type OpenTeamWorkerOptions struct {
 type Metadata struct {
 	ID               string
 	CreatedAt        time.Time
+	UpdatedAt        time.Time
 	Path             string
 	WorkspaceID      string
 	WorkspacePath    string
@@ -191,6 +217,52 @@ type Metadata struct {
 	NodeCount        int
 	BranchCount      int
 	Truncated        bool
+	// Title is the session title and TitleManual reports that the user set it,
+	// so automatic titling must leave it alone.
+	Title       string
+	TitleManual bool
+	// Summary, LastTurnSummary, and LastRecap are bounded model-written text kept
+	// in the index so listing surfaces never read the transcript.
+	Summary         string
+	LastTurnSummary string
+	LastRecap       string
+	// Model is the model in use when the index record was last written.
+	Model string
+	// Git records the repository state observed when the index record was written.
+	Git *GitRef
+	// Counts is the writer-maintained size projection.
+	Counts Counts
+}
+
+// BelongsToWorkspace reports whether the session belongs to the workspace
+// identified by workspacePath and workspaceID. Either match is enough.
+//
+// The canonical workspace path is the ownership key. The workspace identity is
+// provenance: it hashes the volume's device number and the directory's inode
+// alongside the path, so a volume renumbering — which changes nothing the user
+// did — would otherwise hide every session created before it. Identity matching
+// stays so a session stored before a path was recorded still resolves.
+func (m Metadata) BelongsToWorkspace(workspacePath, workspaceID string) bool {
+	return recordBelongsToWorkspace(
+		MetadataRecord{Workspace: WorkspaceRef{ID: m.WorkspaceID, Path: m.WorkspacePath}},
+		workspacePath,
+		workspaceID,
+	)
+}
+
+// recordBelongsToWorkspace is the record-level form of
+// [Metadata.BelongsToWorkspace], for callers that hold an index record rather
+// than its projection.
+func recordBelongsToWorkspace(record MetadataRecord, workspacePath, workspaceID string) bool {
+	claimedPath := strings.TrimSpace(workspacePath)
+	storedPath := strings.TrimSpace(record.Workspace.Path)
+	if claimedPath != "" && storedPath != "" && filepath.Clean(claimedPath) == filepath.Clean(storedPath) {
+		return true
+	}
+
+	claimedID := strings.TrimSpace(workspaceID)
+
+	return claimedID != "" && record.Workspace.ID == claimedID
 }
 
 // ForkOptions select the source node copied into a new Session. An empty node
@@ -201,10 +273,12 @@ type ForkOptions struct {
 
 // Handle owns a locked, writable Harness session.
 type Handle struct {
-	store   sessionStore
-	session *harness.Session
-	meta    Metadata
-	lock    sessionLock
+	store          sessionStore
+	session        *harness.Session
+	meta           Metadata
+	sessionDir     string
+	sessionRel     []string
+	transcriptPath string
 
 	closeOnce sync.Once
 	closeErr  error
@@ -225,12 +299,48 @@ func (h *Handle) Metadata() Metadata {
 		return Metadata{}
 	}
 	if h.store != nil {
-		if meta, err := projectMetadata(h.store.Metadata()); err == nil {
-			return meta
-		}
+		return projectRecord(h.store.Record(), h.sessionDir)
 	}
 
 	return h.meta
+}
+
+// Dir returns the absolute directory holding this session's durable files.
+func (h *Handle) Dir() string {
+	if h == nil {
+		return ""
+	}
+
+	return h.sessionDir
+}
+
+// StateDir returns the derived state sidecar directory of this session.
+func (h *Handle) StateDir() string {
+	if h == nil {
+		return ""
+	}
+
+	return filepath.Join(h.sessionDir, StateDirName)
+}
+
+// ModelDir returns the model-input snapshot directory of this session.
+func (h *Handle) ModelDir() string {
+	if h == nil {
+		return ""
+	}
+
+	return filepath.Join(h.sessionDir, ModelDirName)
+}
+
+// UpdateIndex mutates and republishes the durable session index record. It is
+// how higher layers record a title, summary, model, or git provenance without
+// touching the transcript.
+func (h *Handle) UpdateIndex(mutate func(*MetadataRecord) error) error {
+	if h == nil || h.store == nil {
+		return fmt.Errorf("%w: session has no index record", ErrInvalid)
+	}
+
+	return h.store.UpdateIndex(mutate)
 }
 
 // Close closes the writable store before releasing its writer lock. It is
@@ -241,20 +351,58 @@ func (h *Handle) Close() error {
 	}
 
 	h.closeOnce.Do(func() {
-		var storeErr error
-		if h.store != nil {
-			storeErr = h.store.Close()
+		if h.store == nil {
+			return
 		}
 
-		var lockErr error
-		if h.lock != nil {
-			lockErr = h.lock.Close()
-		}
-
-		h.closeErr = errors.Join(storeErr, lockErr)
+		// The store owns the writer lock, so closing it releases everything the
+		// session holds; an empty session can then be removed entirely.
+		h.closeErr = errors.Join(h.store.Close(), h.discardIfEmpty())
 	})
 
 	return h.closeErr
+}
+
+// discardIfEmpty removes a session that never received an entry.
+//
+// A session with no conversation is provisional, so it leaves nothing behind.
+// Bootstrap artifacts do not count as content: the Runtime writes its journal, its
+// model snapshot, and its state sidecars as soon as it starts, so without this a
+// launch that quits before the first prompt would still leave a directory.
+//
+// RetainEmpty is the explicit opt-in for keeping an empty session, and a session
+// holding archive objects is never discarded, because those objects are durable
+// content with a digest a checkpoint can reference.
+func (h *Handle) discardIfEmpty() error {
+	record := h.store.Record()
+	if record.RetainEmpty || record.Counts.Entries > 0 {
+		return nil
+	}
+
+	if _, err := os.Lstat(h.sessionDir); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+
+		return err
+	}
+	if directoryHasEntries(filepath.Join(h.sessionDir, ArchiveDirName)) {
+		return nil
+	}
+
+	return deleteSessionDirectoryAt(
+		context.Background(),
+		filepath.Dir(h.sessionDir),
+		filepath.Base(h.sessionDir),
+		syncRootDirectory,
+	)
+}
+
+// directoryHasEntries reports whether a directory exists and holds anything.
+func directoryHasEntries(path string) bool {
+	entries, err := os.ReadDir(path)
+
+	return err == nil && len(entries) > 0
 }
 
 // Create reserves and locks a new session. By default its JSONL file is
@@ -278,12 +426,66 @@ func (r *Repository) Create(ctx context.Context, options CreateOptions) (*Handle
 		return nil, err
 	}
 
-	lock, err := acquireSessionLock(ctx, r.lockPath(id))
-	if err != nil {
-		return nil, err
+	kind := normalizedKind(options.Kind)
+	record := NewMetadataRecord(
+		id,
+		WorkspaceRef{ID: options.WorkspaceID, Path: options.WorkspacePath},
+		kind,
+		time.Now(),
+	)
+	applyCreateOptions(&record, options, kind)
+
+	// Nothing is written yet. A session with no entries is provisional, so it gets
+	// no directory, no writer lock, and no index record until its first entry; the
+	// paths come from the layout, which is a pure value.
+	sessionDir := r.layout.SessionDir(options.WorkspacePath, id)
+	store := newDeferredStore(
+		r.root,
+		options.WorkspacePath,
+		record,
+		createExtras(options, kind),
+		func() (sessionLock, error) {
+			// The lock belongs to the session's lifetime, not to the request that
+			// reserved it, so a request context that has since been cancelled must
+			// not fail the session's first entry.
+			return acquireSessionLock(context.WithoutCancel(ctx), filepath.Join(sessionDir, LockFileName))
+		},
+	)
+	if options.RetainEmpty {
+		if err := store.Materialize(); err != nil {
+			return nil, err
+		}
 	}
 
-	kind := normalizedKind(options.Kind)
+	return newProvisionalHandle(store, sessionDir, options.WorkspacePath, options.WorkspaceID)
+}
+
+// applyCreateOptions copies the create-time product fields onto a fresh record.
+func applyCreateOptions(record *MetadataRecord, options CreateOptions, kind Kind) {
+	record.RetainEmpty = options.RetainEmpty
+
+	switch kind {
+	case KindConversation:
+	case KindSubagent:
+		record.Parent = &ParentRef{
+			SessionID: options.ParentSessionID,
+			RunID:     options.ParentRunID,
+		}
+		record.Agent = options.Agent
+		// A legacy caller may omit the identity snapshot; the record then carries
+		// the parent and agent without one, which is what those sessions always had.
+		if options.SubagentIdentity != nil {
+			record.Subagent = subagentRefFrom(*options.SubagentIdentity)
+		}
+	case KindTeamWorker:
+		record.Parent = &ParentRef{SessionID: options.TeamWorker.ParentSessionID}
+		record.TeamWorker = teamWorkerRefFrom(*options.TeamWorker)
+	}
+}
+
+// createExtras keeps the transcript header self-describing for readers that
+// only have the transcript, such as a recovery tool or an older build.
+func createExtras(options CreateOptions, kind Kind) map[string]string {
 	extra := map[string]string{
 		extraWorkspaceID:   options.WorkspaceID,
 		extraWorkspacePath: options.WorkspacePath,
@@ -292,6 +494,7 @@ func (r *Repository) Create(ctx context.Context, options CreateOptions) (*Handle
 	if options.RetainEmpty {
 		extra[extraRetainEmpty] = "true"
 	}
+
 	switch kind {
 	case KindConversation:
 	case KindSubagent:
@@ -299,8 +502,7 @@ func (r *Repository) Create(ctx context.Context, options CreateOptions) (*Handle
 		extra[extraParentRunID] = options.ParentRunID
 		extra[extraAgent] = options.Agent
 		if options.SubagentIdentity != nil {
-			identity := *options.SubagentIdentity
-			maps.Copy(extra, subagentIdentityExtras(identity))
+			maps.Copy(extra, subagentIdentityExtras(*options.SubagentIdentity))
 		}
 	case KindTeamWorker:
 		extra[extraParentSessionID] = options.TeamWorker.ParentSessionID
@@ -311,24 +513,7 @@ func (r *Repository) Create(ctx context.Context, options CreateOptions) (*Handle
 		extra[extraContinuationID] = string(options.TeamWorker.ContinuationID)
 	}
 
-	metadata := harness.SessionMetadata{
-		ID:        id,
-		CreatedAt: time.Now().UTC(),
-		Path:      r.sessionPath(id),
-		Extra:     extra,
-	}
-	if options.RetainEmpty {
-		store, createErr := r.repo.Create(id, extra)
-		if createErr != nil {
-			return nil, errors.Join(createErr, lock.Close())
-		}
-
-		return newHandle(store, lock, options.WorkspaceID)
-	}
-
-	store := newDeferredStore(r.repo, metadata)
-
-	return newProvisionalHandle(store, lock, options.WorkspaceID)
+	return extra
 }
 
 // Open locks and opens a stored session after verifying its workspace owner.
@@ -356,27 +541,53 @@ func (r *Repository) open(ctx context.Context, options OpenOptions) (*Handle, er
 		return nil, err
 	}
 
-	if strings.TrimSpace(options.WorkspaceID) == "" {
+	if strings.TrimSpace(options.WorkspaceID) == "" && strings.TrimSpace(options.WorkspacePath) == "" {
 		return nil, fmt.Errorf("%w: empty workspace identity", ErrInvalid)
 	}
 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	lock, err := acquireSessionLock(ctx, r.lockPath(options.ID))
+
+	group, found, err := r.root.FindSession(options.ID)
 	if err != nil {
 		return nil, err
 	}
-	if err := secureSessionFile(r.sessionPath(options.ID)); err != nil {
+	if !found {
+		return nil, fmt.Errorf("%w: session %q is not stored", ErrInvalid, options.ID)
+	}
+
+	sessionDir := group.SessionDirOf(options.ID)
+	record, err := ReadMetadataRecord(filepath.Join(sessionDir, MetadataFileName))
+	if err != nil {
+		return nil, err
+	}
+	// Reject a foreign session before taking its lock, using the same ownership
+	// rule the handle enforces.
+	if !recordBelongsToWorkspace(record, options.WorkspacePath, options.WorkspaceID) {
+		return nil, fmt.Errorf("%w: session %q", ErrWorkspaceMismatch, options.ID)
+	}
+
+	transcriptPath := filepath.Join(sessionDir, TranscriptFileName)
+	// Acquire the writer lock before inspecting the transcript: the lock is the
+	// authoritative gate, so a locked session reports ErrLocked even when its
+	// transcript has not been written yet.
+	lock, err := acquireSessionLock(ctx, filepath.Join(sessionDir, LockFileName))
+	if err != nil {
+		return nil, err
+	}
+	if err := secureSessionFile(transcriptPath); err != nil {
 		return nil, errors.Join(err, lock.Close())
 	}
 
-	store, err := r.repo.Open(options.ID)
+	inner, err := harness.OpenJSONL(transcriptPath)
 	if err != nil {
 		return nil, errors.Join(err, lock.Close())
 	}
 
-	return newHandle(store, lock, options.WorkspaceID)
+	store := newMaterializedStore(inner, filepath.Join(sessionDir, MetadataFileName), record, lock)
+
+	return newHandle(store, sessionDir, options.WorkspacePath, options.WorkspaceID)
 }
 
 // OpenTeamWorker locks and opens one Team Worker only after verifying its real
@@ -426,33 +637,205 @@ func (r *Repository) Fork(
 	if err != nil {
 		return nil, err
 	}
-	lock, err := acquireSessionLock(ctx, r.lockPath(id))
+
+	group, err := r.root.EnsureGroup(source.meta.WorkspacePath)
 	if err != nil {
 		return nil, err
 	}
+
+	sessionDir := group.SessionDirOf(id)
+	if err := ensureSessionDirectory(sessionDir); err != nil {
+		return nil, err
+	}
+
+	lock, err := acquireSessionLock(ctx, filepath.Join(sessionDir, LockFileName))
+	if err != nil {
+		return nil, err
+	}
+
 	parentEntryID := options.AtEntryID
 	if parentEntryID == "" {
 		parentEntryID = source.session.LeafID()
 	}
-	store, err := r.repo.ForkSession(source.session, parentEntryID, id, map[string]string{
+
+	record := NewMetadataRecord(
+		id,
+		WorkspaceRef{ID: source.meta.WorkspaceID, Path: source.meta.WorkspacePath},
+		KindConversation,
+		time.Now(),
+	)
+	record.Parent = &ParentRef{SessionID: source.meta.ID, EntryID: parentEntryID}
+	metaPath := filepath.Join(sessionDir, MetadataFileName)
+	if err := WriteMetadataRecord(metaPath, record); err != nil {
+		return nil, errors.Join(err, lock.Close())
+	}
+
+	transcriptPath := filepath.Join(sessionDir, TranscriptFileName)
+	forkRepo := harness.Repo{
+		Dir:  sessionDir,
+		Path: func(string) (string, error) { return transcriptPath, nil },
+	}
+	inner, err := forkRepo.ForkSession(source.session, parentEntryID, id, map[string]string{
 		extraWorkspaceID:     source.meta.WorkspaceID,
 		extraWorkspacePath:   source.meta.WorkspacePath,
 		extraKind:            string(KindConversation),
 		extraParentSessionID: source.meta.ID,
 		extraParentEntryID:   parentEntryID,
-	}, harness.ForkOptions{PrepareArchives: func(archiveIDs []string) error {
-		return r.CopyArchives(ctx, source, id, archiveIDs)
-	}})
+	}, harness.ForkOptions{
+		PrepareArchives: func(archiveIDs []string) error {
+			return r.CopyArchives(ctx, source, id, archiveIDs)
+		},
+		PrepareEntries: func(entries []harness.Entry) error {
+			return CopySessionMedia(ctx, source.sessionDir, sessionDir, entries)
+		},
+	})
 	if err != nil {
 		return nil, errors.Join(err, lock.Close())
 	}
 
-	return newHandle(store, lock, source.meta.WorkspaceID)
+	store := newMaterializedStore(inner, metaPath, record, lock)
+
+	return newHandle(store, sessionDir, source.meta.WorkspacePath, source.meta.WorkspaceID)
+}
+
+// ForkSubagentOptions identify the source node copied into a new child Session
+// and the lineage the copy belongs to.
+type ForkSubagentOptions struct {
+	// ParentSessionID is the session the new child belongs to. It is the new
+	// child's parent, which for a resume is the parent conversation rather than
+	// the source child.
+	ParentSessionID string
+	ParentRunID     string
+	Agent           string
+	// SubagentIdentity is the new child's frozen identity snapshot. It
+	// replaces any identity carried by the source header.
+	SubagentIdentity *SubagentIdentity
+	// AtEntryID selects the source node copied into the new child. An empty
+	// value selects the source's current leaf.
+	AtEntryID string
+}
+
+// ForkSubagent failure-atomically copies one completed source child Session
+// into a new child Session owned by options.ParentSessionID. The source stays
+// unchanged and readable, so the same source can be resumed more than once.
+// The new child inherits the source transcript, its tool calls and results,
+// and its checkpoint and archive references.
+//
+//nolint:gocyclo // Failure-atomic resource acquisition and cleanup remain in commit order.
+func (r *Repository) ForkSubagent(
+	ctx context.Context,
+	source *Handle,
+	options ForkSubagentOptions,
+) (*Handle, error) {
+	if err := r.validate(); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if options.ParentSessionID == "" || strings.TrimSpace(options.Agent) == "" {
+		return nil, fmt.Errorf("%w: child fork needs a parent and an agent", ErrInvalid)
+	}
+	// A resumed child is always created from a compiled execution plan, so it
+	// never needs the legacy identity-less session the Create path tolerates.
+	if options.SubagentIdentity == nil || options.SubagentIdentity.IsZero() ||
+		validateSubagentIdentity(*options.SubagentIdentity) != nil {
+		return nil, fmt.Errorf("%w: child fork needs a valid subagent identity", ErrInvalid)
+	}
+	if err := r.validateForkSource(source, options.AtEntryID); err != nil {
+		return nil, err
+	}
+
+	id, err := newSessionID()
+	if err != nil {
+		return nil, err
+	}
+
+	group, err := r.root.EnsureGroup(source.meta.WorkspacePath)
+	if err != nil {
+		return nil, err
+	}
+
+	sessionDir := group.SessionDirOf(id)
+	if err := ensureSessionDirectory(sessionDir); err != nil {
+		return nil, err
+	}
+
+	lock, err := acquireSessionLock(ctx, filepath.Join(sessionDir, LockFileName))
+	if err != nil {
+		return nil, err
+	}
+
+	parentEntryID := options.AtEntryID
+	if parentEntryID == "" {
+		parentEntryID = source.session.LeafID()
+	}
+
+	record := NewMetadataRecord(
+		id,
+		WorkspaceRef{ID: source.meta.WorkspaceID, Path: source.meta.WorkspacePath},
+		KindSubagent,
+		time.Now(),
+	)
+	record.Parent = &ParentRef{SessionID: options.ParentSessionID, RunID: options.ParentRunID}
+	record.Agent = options.Agent
+	record.Subagent = subagentRefFrom(*options.SubagentIdentity)
+	// A resumed child is indexed exactly like a fresh one, and in the same order:
+	// the child's directory exists, then the parent's entry, then the child's own
+	// record.
+	if entry, entryErr := childIndexEntryForRecord(record); entryErr == nil {
+		_ = publishChildIndexEntry(r.layout, source.meta.WorkspacePath, entry)
+	}
+	metaPath := filepath.Join(sessionDir, MetadataFileName)
+	if err := WriteMetadataRecord(metaPath, record); err != nil {
+		return nil, errors.Join(err, lock.Close())
+	}
+
+	extra := map[string]string{
+		extraWorkspaceID:     source.meta.WorkspaceID,
+		extraWorkspacePath:   source.meta.WorkspacePath,
+		extraKind:            string(KindSubagent),
+		extraParentSessionID: options.ParentSessionID,
+		extraParentRunID:     options.ParentRunID,
+		extraAgent:           options.Agent,
+	}
+	maps.Copy(extra, subagentIdentityExtras(*options.SubagentIdentity))
+
+	transcriptPath := filepath.Join(sessionDir, TranscriptFileName)
+	forkRepo := harness.Repo{
+		Dir:  sessionDir,
+		Path: func(string) (string, error) { return transcriptPath, nil },
+	}
+	inner, err := forkRepo.ForkSession(source.session, parentEntryID, id, extra, harness.ForkOptions{
+		Keep: forkSubagentTranscriptEntry,
+		PrepareArchives: func(archiveIDs []string) error {
+			return r.CopyArchives(ctx, source, id, archiveIDs)
+		},
+		PrepareEntries: func(entries []harness.Entry) error {
+			return CopySessionMedia(ctx, source.sessionDir, sessionDir, entries)
+		},
+	})
+	if err != nil {
+		return nil, errors.Join(err, lock.Close())
+	}
+
+	store := newMaterializedStore(inner, metaPath, record, lock)
+
+	return newHandle(store, sessionDir, source.meta.WorkspacePath, source.meta.WorkspaceID)
+}
+
+// forkSubagentTranscriptEntry keeps one source child's model-visible
+// transcript and drops its bookkeeping entries. The custom entries in a child
+// Session name that child and describe the changes it already reported, so
+// copying them into the resumed child would make the parent index claim a
+// descendant that does not exist and would re-report the source's work.
+func forkSubagentTranscriptEntry(entry harness.Entry) bool {
+	return entry.Kind != harness.KindCustom
 }
 
 func (r *Repository) validateForkSource(source *Handle, atEntryID string) error {
 	if source == nil || source.session == nil || source.meta.WorkspaceID == "" ||
-		filepath.Dir(source.meta.Path) != r.dir {
+		source.transcriptPath == "" || !strings.HasPrefix(source.sessionDir, r.dir+string(filepath.Separator)) {
 		return fmt.Errorf("%w: source session does not belong to repository", ErrInvalid)
 	}
 	if len(source.session.Entries()) == 0 {
@@ -501,57 +884,93 @@ func (r *Repository) ListMetadata(ctx context.Context) (MetadataListing, error) 
 		return MetadataListing{}, err
 	}
 
-	stored, err := r.repo.List()
-	if err != nil {
+	records, unreadable, err := r.listRecords(ctx)
+	if err != nil && !errors.Is(err, errListCancelled) {
 		return MetadataListing{}, err
 	}
 
-	listing := MetadataListing{}
-	for _, value := range stored {
-		// A pass whose context is cancelled mid-way returns what it already read
-		// instead of failing, so a caller that no longer needs the listing can stop
-		// it without discarding a partial one. The pre-call check above still turns a
-		// read that never started into an error.
-		if err := ctx.Err(); err != nil {
-			listing.Truncated = true
-
-			break
-		}
-		meta, ok, err := projectStoredMetadata(value)
-		if err != nil || !ok {
+	// A pass whose context is cancelled mid-way returns what it already read
+	// instead of failing, so a caller that no longer needs the listing can stop
+	// it without discarding a partial one. The pre-call check still turns a read
+	// that never started into an error.
+	listing := MetadataListing{
+		Unreadable: unreadable,
+		Truncated:  errors.Is(err, errListCancelled),
+	}
+	for _, item := range records {
+		if item.record.Kind != KindConversation {
 			continue
 		}
-		if meta.Kind != KindConversation {
-			continue
-		}
-		if err := secureSessionFile(value.Path); err != nil {
-			listing.Unreadable++
-
-			continue
-		}
-		// One entry is enough to tell a used Session from an abandoned header, and
-		// keeps the read proportional to the Session count instead of its size.
-		prefix, prefixErr := harness.ReadJSONLPrefix(value.Path, harness.JSONLPrefixLimits{
-			MaxBytes: metadataPrefixBytes, MaxEntries: 1,
-		})
-		if prefixErr != nil {
-			listing.Unreadable++
-
-			continue
-		}
-		if len(prefix.Entries) == 0 && !meta.RetainEmpty {
+		// The writer maintains the entry count, so an empty session is known
+		// without opening its transcript.
+		if item.record.Counts.Entries == 0 && !item.record.RetainEmpty {
 			continue
 		}
 
-		listing.Sessions = append(listing.Sessions, meta)
+		listing.Sessions = append(listing.Sessions, projectRecord(item.record, item.sessionDir()))
 	}
 	sortMetadata(listing.Sessions)
 
 	return listing, nil
 }
 
-// metadataPrefixBytes bounds the entry read ListMetadata performs per Session.
-const metadataPrefixBytes = 8 << 10
+// storedRecord is one session index record together with the group holding it.
+type storedRecord struct {
+	group  Group
+	record MetadataRecord
+}
+
+func (s storedRecord) sessionDir() string { return s.group.SessionDirOf(s.record.ID) }
+
+// errListCancelled reports a partial listing rather than a failed one, so a
+// caller can keep the records that were already read.
+var errListCancelled = errors.New("coding session: listing cancelled")
+
+// listRecords reads every session index record in the store. A directory whose
+// record is missing or unreadable is counted, never fatal: one damaged session
+// must not hide the rest. A cancelled context returns the partial result with
+// [errListCancelled].
+func (r *Repository) listRecords(ctx context.Context) ([]storedRecord, int, error) {
+	groups, err := r.root.Groups()
+	if err != nil {
+		return nil, 0, err
+	}
+
+	records := make([]storedRecord, 0, len(groups)*4)
+	unreadable := 0
+	for _, group := range groups {
+		entries, readErr := os.ReadDir(group.Dir)
+		if readErr != nil {
+			if errors.Is(readErr, os.ErrNotExist) {
+				continue
+			}
+
+			return records, unreadable, fmt.Errorf("coding session: list group %q: %w", group.Key, readErr)
+		}
+
+		for _, entry := range entries {
+			if ctx.Err() != nil {
+				return records, unreadable, errListCancelled
+			}
+			if !entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || validateSessionID(entry.Name()) != nil {
+				continue
+			}
+
+			record, recordErr := ReadMetadataRecord(
+				filepath.Join(group.Dir, entry.Name(), MetadataFileName),
+			)
+			if recordErr != nil {
+				unreadable++
+
+				continue
+			}
+
+			records = append(records, storedRecord{group: group, record: record})
+		}
+	}
+
+	return records, unreadable, nil
+}
 
 // sortMetadata orders a listing newest first, then by identifier.
 func sortMetadata(metas []Metadata) {
@@ -573,31 +992,37 @@ func (r *Repository) List(ctx context.Context) ([]Metadata, error) {
 		return nil, err
 	}
 
-	stored, err := r.repo.List()
-	if err != nil {
+	records, _, err := r.listRecords(ctx)
+	if err != nil && !errors.Is(err, errListCancelled) {
 		return nil, err
 	}
 
-	metas := make([]Metadata, 0, len(stored))
-	for _, value := range stored {
-		meta, ok, err := projectStoredMetadata(value)
-		if err != nil {
-			return nil, err
-		}
-		if !ok {
+	metas := make([]Metadata, 0, len(records))
+	for _, item := range records {
+		if item.record.Kind != KindConversation {
 			continue
 		}
-		if meta.Kind != KindConversation {
-			continue
-		}
-		if err := secureSessionFile(value.Path); err != nil {
+
+		meta := projectRecord(item.record, item.sessionDir())
+		transcriptPath := filepath.Join(item.sessionDir(), TranscriptFileName)
+		if err := secureSessionFile(transcriptPath); err != nil {
+			// A session that has not persisted its first entry has no transcript
+			// yet; like the flat store before it, listing simply omits it.
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+
 			return nil, err
 		}
-		prefix, prefixErr := harness.ReadJSONLPrefix(value.Path, harness.JSONLPrefixLimits{})
+
+		// The picker wants the preview, leaf, branch count, and rename, which the
+		// index record deliberately does not carry. One bounded prefix read per
+		// session supplies them.
+		prefix, prefixErr := harness.ReadJSONLPrefix(transcriptPath, harness.JSONLPrefixLimits{})
 		if prefixErr != nil {
 			meta.Truncated = true
 		} else {
-			if len(prefix.Entries) == 0 && !meta.RetainEmpty {
+			if len(prefix.Entries) == 0 && !item.record.RetainEmpty {
 				continue
 			}
 			projectSessionPrefix(&meta, prefix)
@@ -611,10 +1036,9 @@ func (r *Repository) List(ctx context.Context) ([]Metadata, error) {
 	return metas, nil
 }
 
-// Delete permanently removes one durable conversation and only its own history
-// directory. The transcript deletion is synced before removing archives. Missing
-// conversations succeed without cleaning archives that might be referenced by
-// an uncertain write. Child and Team Worker transcripts are never deleted here.
+// Delete permanently removes one durable conversation and its whole session
+// directory, including archives and derived sidecars. Child and Team Worker
+// transcripts are never deleted here.
 func (r *Repository) Delete(ctx context.Context, id string) (resultErr error) {
 	if err := r.validate(); err != nil {
 		return err
@@ -626,114 +1050,371 @@ func (r *Repository) Delete(ctx context.Context, id string) (resultErr error) {
 		return err
 	}
 
-	path := r.sessionPath(id)
-	exists, err := secureStoredSession(path)
+	group, found, err := r.root.FindSession(id)
 	if err != nil {
 		return err
 	}
-	if !exists {
+	if !found {
 		return nil
 	}
 
-	lock, err := acquireSessionLock(ctx, r.lockPath(id))
+	sessionDir := group.SessionDirOf(id)
+	record, err := ReadMetadataRecord(filepath.Join(sessionDir, MetadataFileName))
+	if err != nil {
+		return err
+	}
+	if record.Kind != KindConversation {
+		return fmt.Errorf("%w: session %q is not a conversation", ErrInvalid, id)
+	}
+
+	lock, err := acquireSessionLock(ctx, filepath.Join(sessionDir, LockFileName))
 	if err != nil {
 		return err
 	}
 	defer func() { resultErr = errors.Join(resultErr, lock.Close()) }()
 
-	exists, err = secureStoredSession(path)
-	if err != nil {
-		return err
-	}
-	if !exists {
-		return nil
-	}
-	if err := validateDeletableConversation(path, id); err != nil {
-		return err
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-
-	return r.deleteConversationFiles(ctx, id)
+	return r.deleteSessionDirectory(ctx, group, id)
 }
 
-func secureStoredSession(path string) (bool, error) {
-	err := secureSessionFile(path)
-	switch {
-	case err == nil:
-		return true, nil
-	case errors.Is(err, os.ErrNotExist):
-		return false, nil
-	default:
-		return false, err
-	}
-}
-
-func validateDeletableConversation(path, id string) error {
-	stored, err := harness.ReadJSONLMetadata(path)
-	if err != nil {
-		return err
-	}
-	meta, err := projectMetadata(stored)
-	if err != nil {
-		return err
-	}
-	if meta.Kind != KindConversation {
-		return fmt.Errorf("%w: session %q is not a conversation", ErrInvalid, id)
-	}
-
-	return nil
-}
-
-// ListSubagents returns newest-first child metadata for exactly one Workspace
-// and parent conversation without taking writer locks.
-func (r *Repository) ListSubagents(
-	ctx context.Context,
-	workspaceID string,
-	parentSessionID string,
-) ([]Metadata, error) {
+// ListSubagents returns newest-first child metadata for exactly one parent
+// conversation without taking writer locks. The parent's workspace is matched by
+// path or identity, so a volume renumbering does not hide its children.
+//
+// The parent's own index directory answers the read in O(children). An index that
+// is absent, incomplete, or damaged falls back to the store-wide scan and is then
+// rebuilt from what that scan found, so a store whose index cannot be written
+// degrades to the scan — correct, and only slower — instead of failing a listing.
+func (r *Repository) ListSubagents(ctx context.Context, parent Metadata) ([]Metadata, error) {
 	if err := r.validate(); err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(workspaceID) == "" || validateSessionID(parentSessionID) != nil {
+	if validateSessionID(parent.ID) != nil ||
+		(strings.TrimSpace(parent.WorkspaceID) == "" && strings.TrimSpace(parent.WorkspacePath) == "") {
 		return nil, fmt.Errorf("%w: invalid subagent owner", ErrInvalid)
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
-	stored, err := r.repo.List()
+	if metas, indexed := r.indexedSubagents(ctx, parent); indexed {
+		return metas, nil
+	}
+
+	metas, err := r.scanSubagents(ctx, parent)
 	if err != nil {
+		return nil, err
+	}
+	r.backfillChildIndex(ctx, parent, metas)
+
+	return metas, nil
+}
+
+// scanSubagents is the store-wide projection ListSubagents falls back to when no
+// trustworthy index exists.
+func (r *Repository) scanSubagents(ctx context.Context, parent Metadata) ([]Metadata, error) {
+	records, _, err := r.listRecords(ctx)
+	if err != nil && !errors.Is(err, errListCancelled) {
 		return nil, err
 	}
 
 	metas := make([]Metadata, 0)
-	for _, value := range stored {
-		meta, matches, projectErr := projectSubagentListMetadata(
-			value,
-			workspaceID,
-			parentSessionID,
-		)
-		if projectErr != nil {
-			return nil, projectErr
+	for _, item := range records {
+		if meta, ok := subagentChild(item, parent); ok {
+			metas = append(metas, meta)
 		}
-		if !matches {
+	}
+	sortMetadata(metas)
+
+	return metas, nil
+}
+
+// childIndexOutcome is how one index entry resolved against the child session it
+// names.
+type childIndexOutcome uint8
+
+const (
+	// childIndexProjected means the entry still describes a real child of this
+	// parent.
+	childIndexProjected childIndexOutcome = iota
+	// childIndexUnreadable means the child directory exists but its record does
+	// not. The child is excluded and the entry is left alone: this is a spawn in
+	// flight or a damaged sidecar, and deleting the entry would race the spawn
+	// that is writing it.
+	childIndexUnreadable
+	// childIndexContradicted means the child's own record disagrees with the
+	// entry, so the entry is dropped and removed.
+	childIndexContradicted
+)
+
+// indexedSubagents lists a parent's children from its own index directory. It
+// reports false when the index cannot be trusted, which makes the caller fall
+// back to the store-wide scan.
+func (r *Repository) indexedSubagents(ctx context.Context, parent Metadata) ([]Metadata, bool) {
+	indexDir := r.layout.SubagentsDir(parent.WorkspacePath, parent.ID)
+	if _, ok := readChildIndexMarker(filepath.Join(indexDir, SubagentIndexFileName)); !ok {
+		return nil, false
+	}
+
+	entries, err := os.ReadDir(indexDir)
+	if err != nil {
+		return nil, false
+	}
+	// The group list is resolved once for the whole read: it is the same for
+	// every child, and re-reading it per child would make the indexed path grow
+	// with the number of workspace groups.
+	groups, err := r.root.Groups()
+	if err != nil {
+		return nil, false
+	}
+
+	metas := make([]Metadata, 0, len(entries))
+	for _, entry := range entries {
+		if ctx.Err() != nil {
+			// A cancelled read returns what it already resolved, exactly as the
+			// store-wide scan does.
+			break
+		}
+		if !entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
+			continue
+		}
+		childID := entry.Name()
+		if validateSessionID(childID) != nil {
 			continue
 		}
 
-		metas = append(metas, meta)
-	}
-
-	slices.SortFunc(metas, func(a, b Metadata) int {
-		if order := b.CreatedAt.Compare(a.CreatedAt); order != 0 {
-			return order
+		record, readErr := ReadChildIndexEntry(
+			filepath.Join(indexDir, childID, ChildIndexEntryFileName), parent.ID,
+		)
+		if readErr != nil {
+			// One unreadable entry makes the whole index untrusted: the scan can
+			// still derive every child, and the backfill rewrites the index.
+			return nil, false
 		}
 
-		return strings.Compare(a.ID, b.ID)
-	})
+		meta, outcome := r.resolveIndexedChild(groups, parent, record)
+		switch outcome {
+		case childIndexProjected:
+			metas = append(metas, meta)
+		case childIndexUnreadable:
+		case childIndexContradicted:
+			removeChildIndexEntry(r.layout, parent.WorkspacePath, parent.ID, record.ChildSessionID)
+		}
+	}
 
-	return metas, nil
+	sortMetadata(metas)
+
+	return metas, true
+}
+
+// resolveIndexedChild resolves one index entry against the child session it
+// names, using the same predicate and projection the store-wide scan uses.
+func (r *Repository) resolveIndexedChild(
+	groups []Group,
+	parent Metadata,
+	entry ChildIndexEntry,
+) (Metadata, childIndexOutcome) {
+	sessionDir, found := resolveChildSessionDir(groups, parent.ID, entry.ChildSessionID)
+	if !found {
+		// The child's session directory is gone, so the entry describes nothing.
+		return Metadata{}, childIndexContradicted
+	}
+
+	record, err := ReadMetadataRecord(filepath.Join(sessionDir, MetadataFileName))
+	if err != nil {
+		return Metadata{}, childIndexUnreadable
+	}
+	if !subagentChildMatches(record, parent) {
+		return Metadata{}, childIndexContradicted
+	}
+
+	meta, ok := projectSubagentChild(record, sessionDir, parent)
+	if !ok {
+		return Metadata{}, childIndexContradicted
+	}
+
+	return meta, childIndexProjected
+}
+
+// resolveChildSessionDir returns the directory holding childID, preferring the
+// group that also holds parentID so a workspace move cannot orphan a child.
+func resolveChildSessionDir(groups []Group, parentID, childID string) (string, bool) {
+	for _, group := range groups {
+		if !hasSessionRecord(filepath.Join(group.Dir, parentID, MetadataFileName)) {
+			continue
+		}
+		if dir, ok := existingSessionDir(group, childID); ok {
+			return dir, true
+		}
+	}
+	for _, group := range groups {
+		if dir, ok := existingSessionDir(group, childID); ok {
+			return dir, true
+		}
+	}
+
+	return "", false
+}
+
+// existingSessionDir reports whether one group holds childID's session directory.
+func existingSessionDir(group Group, childID string) (string, bool) {
+	dir := group.SessionDirOf(childID)
+	info, err := os.Lstat(dir)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return "", false
+	}
+
+	return dir, true
+}
+
+// backfillChildIndex rebuilds one parent's index from a scan result: it adds an
+// entry for every child the scan found and the index does not already carry,
+// removes the entries the scan proved wrong, and publishes the marker last. A
+// failure at any step leaves the marker off, so the parent stays untrusted and
+// the next read re-derives the index instead of trusting an incomplete one.
+func (r *Repository) backfillChildIndex(ctx context.Context, parent Metadata, children []Metadata) {
+	if ctx.Err() != nil {
+		return
+	}
+	if !hasSessionRecord(r.layout.MetadataFile(parent.WorkspacePath, parent.ID)) {
+		return
+	}
+
+	indexDir := r.layout.SubagentsDir(parent.WorkspacePath, parent.ID)
+	existing := readChildIndexEntries(indexDir, parent.ID)
+
+	confirmed := make(map[string]struct{}, len(children))
+	complete := true
+	for _, child := range children {
+		confirmed[child.ID] = struct{}{}
+		if _, ok := existing[child.ID]; ok {
+			continue
+		}
+		entry, entryErr := childIndexEntryForChild(child)
+		if entryErr != nil {
+			complete = false
+
+			continue
+		}
+		if err := writeChildIndexEntry(
+			r.layout.ChildIndexEntryFile(parent.WorkspacePath, parent.ID, child.ID), entry,
+		); err != nil {
+			complete = false
+		}
+	}
+	if !complete {
+		removeChildIndexMarker(r.layout, parent.WorkspacePath, parent.ID)
+
+		return
+	}
+
+	for childID := range existing {
+		if _, ok := confirmed[childID]; ok {
+			continue
+		}
+		if r.childEntryContradicted(parent, childID) {
+			removeChildIndexEntry(r.layout, parent.WorkspacePath, parent.ID, childID)
+		}
+	}
+
+	_ = writeChildIndexMarker(
+		r.layout.SubagentIndexFile(parent.WorkspacePath, parent.ID), time.Now(),
+	)
+}
+
+// childEntryContradicted reports whether an index entry the scan did not confirm
+// is provably wrong: its child directory is gone, or the record inside it
+// disagrees with the entry. An unreadable record proves nothing, so the entry
+// stays for the next read.
+func (r *Repository) childEntryContradicted(parent Metadata, childID string) bool {
+	groups, err := r.root.Groups()
+	if err != nil {
+		return false
+	}
+	sessionDir, found := resolveChildSessionDir(groups, parent.ID, childID)
+	if !found {
+		return true
+	}
+
+	record, err := ReadMetadataRecord(filepath.Join(sessionDir, MetadataFileName))
+	if err != nil {
+		return false
+	}
+
+	return !subagentChildMatches(record, parent)
+}
+
+// readChildIndexEntries returns the readable entries of one index directory,
+// keyed by child session id. An unreadable entry is treated as absent, because
+// the caller rebuilds it from the store.
+func readChildIndexEntries(indexDir, parentID string) map[string]ChildIndexEntry {
+	entries, err := os.ReadDir(indexDir)
+	if err != nil {
+		return nil
+	}
+
+	values := make(map[string]ChildIndexEntry, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
+			continue
+		}
+		childID := entry.Name()
+		if validateSessionID(childID) != nil {
+			continue
+		}
+
+		value, readErr := ReadChildIndexEntry(
+			filepath.Join(indexDir, childID, ChildIndexEntryFileName), parentID,
+		)
+		if readErr != nil {
+			continue
+		}
+		values[childID] = value
+	}
+
+	return values
+}
+
+// UpdateChildIndexState refreshes the parent-side index entry of one child after
+// a lifecycle transition. Like every index write it is best-effort: the child's
+// journal is authoritative, so a missing entry or an unwritable index leaves the
+// caller's lifecycle result unchanged.
+//
+// It is the only writer of an entry's state. An entry published at creation or
+// backfilled from a scan carries none, so a state this build can read always came
+// from a lifecycle transition it observed.
+func (r *Repository) UpdateChildIndexState(
+	child Metadata,
+	state ChildIndexState,
+	at time.Time,
+) error {
+	if err := r.validate(); err != nil {
+		return err
+	}
+	if validateSessionID(child.ID) != nil || validateSessionID(child.ParentSessionID) != nil {
+		return fmt.Errorf("%w: invalid child index owner", ErrInvalid)
+	}
+	if !validChildIndexState(state) {
+		return fmt.Errorf("%w: unknown child index state %q", ErrInvalid, state)
+	}
+
+	path := r.layout.ChildIndexEntryFile(child.WorkspacePath, child.ParentSessionID, child.ID)
+	entry, err := ReadChildIndexEntry(path, child.ParentSessionID)
+	if err != nil {
+		return err
+	}
+
+	endedAt := time.Time{}
+	if state.terminal() {
+		endedAt = at.UTC()
+	}
+	if entry.State == state && entry.EndedAt.Equal(endedAt) {
+		return nil
+	}
+
+	entry.State = state
+	entry.EndedAt = endedAt
+
+	return writeChildIndexEntry(path, entry)
 }
 
 // ListTeamWorkers returns a bounded newest-first projection for exactly one
@@ -757,25 +1438,22 @@ func (r *Repository) ListTeamWorkers(
 		return nil, err
 	}
 
-	stored, err := r.repo.List()
-	if err != nil {
+	records, _, err := r.listRecords(ctx)
+	if err != nil && !errors.Is(err, errListCancelled) {
 		return nil, err
 	}
 
-	metas := make([]Metadata, 0, min(limit, len(stored)))
-	for _, value := range stored {
-		meta, projectErr := projectMetadata(value)
-		if projectErr != nil {
-			return nil, projectErr
-		}
+	metas := make([]Metadata, 0, min(limit, len(records)))
+	for _, item := range records {
+		meta := projectRecord(item.record, item.sessionDir())
 		if meta.Kind != KindTeamWorker || meta.TeamWorker.ParentSessionID != parentSessionID ||
 			meta.TeamWorker.TeamID != teamID {
 			continue
 		}
-		if err := secureSessionFile(value.Path); err != nil {
-			return nil, err
-		}
-		prefix, prefixErr := harness.ReadJSONLPrefix(value.Path, harness.JSONLPrefixLimits{})
+		prefix, prefixErr := harness.ReadJSONLPrefix(
+			filepath.Join(item.sessionDir(), TranscriptFileName),
+			harness.JSONLPrefixLimits{},
+		)
 		if prefixErr != nil {
 			meta.Truncated = true
 		} else {
@@ -797,178 +1475,142 @@ func (r *Repository) ListTeamWorkers(
 	return metas, nil
 }
 
-func projectSubagentListMetadata(
-	value harness.SessionMetadata,
-	workspaceID string,
-	parentSessionID string,
-) (Metadata, bool, error) {
-	meta, ok, err := projectStoredMetadata(value)
-	if err != nil {
-		return Metadata{}, false, err
-	}
-	if !ok {
-		return Metadata{}, false, nil
-	}
-	if meta.Kind != KindSubagent || meta.WorkspaceID != workspaceID ||
-		meta.ParentSessionID != parentSessionID {
-		return Metadata{}, false, nil
-	}
-	if err := secureSessionFile(value.Path); err != nil {
-		return Metadata{}, false, err
-	}
-
-	prefix, err := harness.ReadJSONLPrefix(value.Path, harness.JSONLPrefixLimits{})
-	if err != nil {
-		meta.Truncated = true
-	} else {
-		projectSessionPrefix(&meta, prefix)
-	}
-
-	return meta, true, nil
-}
-
 func newHandle(
-	store *harness.JSONLStore,
-	lock sessionLock,
+	store sessionStore,
+	sessionDir string,
+	workspacePath string,
 	workspaceID string,
 ) (*Handle, error) {
-	if err := secureSessionFile(store.Metadata().Path); err != nil {
-		return nil, errors.Join(err, store.Close(), lock.Close())
-	}
-
-	meta, err := projectMetadata(store.Metadata())
-	if err != nil {
-		return nil, errors.Join(err, store.Close(), lock.Close())
-	}
-
-	if meta.WorkspaceID != workspaceID {
+	meta := projectRecord(store.Record(), sessionDir)
+	if !meta.BelongsToWorkspace(workspacePath, workspaceID) {
 		return nil, errors.Join(
 			fmt.Errorf("%w: session %q", ErrWorkspaceMismatch, meta.ID),
 			store.Close(),
-			lock.Close(),
 		)
 	}
 
 	sess, err := harness.NewSession(store)
 	if err != nil {
-		return nil, errors.Join(err, store.Close(), lock.Close())
+		return nil, errors.Join(err, store.Close())
 	}
 
-	return &Handle{store: store, session: sess, meta: meta, lock: lock}, nil
+	handle := &Handle{
+		store:          store,
+		session:        sess,
+		meta:           meta,
+		sessionDir:     sessionDir,
+		sessionRel:     relDirParts(sessionDir),
+		transcriptPath: meta.Path,
+	}
+
+	return handle, nil
 }
 
+// writerLock returns the lock guarding this session's transcript, or nil while the
+// session is provisional and has no transcript to guard.
+func (h *Handle) writerLock() sessionLock {
+	if h == nil || h.store == nil {
+		return nil
+	}
+
+	return h.store.Lock()
+}
+
+// newProvisionalHandle wraps a session whose transcript may not exist yet.
 func newProvisionalHandle(
 	store sessionStore,
-	lock sessionLock,
+	sessionDir string,
+	workspacePath string,
 	workspaceID string,
 ) (*Handle, error) {
-	meta, err := projectMetadata(store.Metadata())
-	if err != nil {
-		return nil, errors.Join(err, store.Close(), lock.Close())
-	}
-	if meta.WorkspaceID != workspaceID {
-		return nil, errors.Join(
-			fmt.Errorf("%w: session %q", ErrWorkspaceMismatch, meta.ID),
-			store.Close(),
-			lock.Close(),
-		)
-	}
-
-	sess, err := harness.NewSession(store)
-	if err != nil {
-		return nil, errors.Join(err, store.Close(), lock.Close())
-	}
-
-	return &Handle{store: store, session: sess, meta: meta, lock: lock}, nil
+	return newHandle(store, sessionDir, workspacePath, workspaceID)
 }
 
-// projectStoredMetadata projects one stored header and ignores records whose
-// coding metadata cannot be interpreted. Legacy or partially written sessions
-// carry no workspace or kind, so they cannot be listed, attributed to a parent
-// lineage, or repaired; they must never break listing or reconciliation.
-func projectStoredMetadata(value harness.SessionMetadata) (Metadata, bool, error) {
-	meta, err := projectMetadata(value)
-	if err != nil {
-		if errors.Is(err, ErrInvalid) {
-			return Metadata{}, false, nil
-		}
-
-		return Metadata{}, false, err
-	}
-
-	return meta, true, nil
+// subagentChild projects one stored record into child metadata when it is a
+// child of parent inside parent's workspace.
+func subagentChild(item storedRecord, parent Metadata) (Metadata, bool) {
+	return projectSubagentChild(item.record, item.sessionDir(), parent)
 }
 
-func projectMetadata(stored harness.SessionMetadata) (Metadata, error) {
-	workspaceID := stored.Extra[extraWorkspaceID]
-	workspacePath := stored.Extra[extraWorkspacePath]
-	if stored.ID == "" || workspaceID == "" || !validWorkspacePath(workspacePath) {
-		return Metadata{}, fmt.Errorf("%w: session %q has incomplete coding metadata", ErrInvalid, stored.ID)
+// subagentChildMatches reports whether one record describes a child of parent
+// inside parent's workspace. Both child read paths share it, so the store-wide
+// scan and the parent-side index cannot disagree about which records are
+// children.
+func subagentChildMatches(record MetadataRecord, parent Metadata) bool {
+	return record.Kind == KindSubagent && record.Parent != nil &&
+		record.Parent.SessionID == parent.ID &&
+		recordBelongsToWorkspace(record, parent.WorkspacePath, parent.WorkspaceID)
+}
+
+// projectSubagentChild projects one child record from sessionDir, reading the
+// transcript prefix the child listing needs.
+func projectSubagentChild(record MetadataRecord, sessionDir string, parent Metadata) (Metadata, bool) {
+	if !subagentChildMatches(record, parent) {
+		return Metadata{}, false
 	}
 
-	kind := normalizedKind(Kind(stored.Extra[extraKind]))
-	if !validKind(kind) {
-		return Metadata{}, fmt.Errorf("%w: session %q has invalid kind", ErrInvalid, stored.ID)
-	}
-	retainEmpty := false
-	switch stored.Extra[extraRetainEmpty] {
-	case "":
-	case "true":
-		retainEmpty = true
-	default:
-		return Metadata{}, fmt.Errorf(
-			"%w: session %q has invalid empty-retention marker",
-			ErrInvalid,
-			stored.ID,
-		)
-	}
-	identity, err := projectSubagentIdentity(stored.Extra)
+	meta := projectRecord(record, sessionDir)
+	prefix, err := harness.ReadJSONLPrefix(
+		filepath.Join(sessionDir, TranscriptFileName),
+		harness.JSONLPrefixLimits{},
+	)
 	if err != nil {
-		return Metadata{}, fmt.Errorf("%w: session %q has invalid subagent identity", ErrInvalid, stored.ID)
-	}
-	switch kind {
-	case KindConversation:
-		if !identity.IsZero() {
-			return Metadata{}, fmt.Errorf("%w: conversation cannot carry subagent identity", ErrInvalid)
-		}
-	case KindSubagent:
-		parentSessionID := stored.Extra[extraParentSessionID]
-		agent := stored.Extra[extraAgent]
-		if validateSessionID(parentSessionID) != nil || strings.TrimSpace(agent) == "" {
-			return Metadata{}, fmt.Errorf("%w: subagent session %q has incomplete lineage", ErrInvalid, stored.ID)
-		}
-		if !identity.IsZero() && identity.AgentID != agent {
-			return Metadata{}, fmt.Errorf("%w: subagent session %q has invalid identity", ErrInvalid, stored.ID)
-		}
-	case KindTeamWorker:
-		if !identity.IsZero() {
-			return Metadata{}, fmt.Errorf("%w: Team Worker cannot carry subagent identity", ErrInvalid)
-		}
-		lineage := teamWorkerLineage(stored.Extra)
-		if err := validateTeamWorkerLineage(lineage); err != nil {
-			return Metadata{}, fmt.Errorf(
-				"%w: Team Worker session %q has incomplete lineage",
-				ErrInvalid,
-				stored.ID,
-			)
-		}
+		meta.Truncated = true
+
+		return meta, true
 	}
 
-	return Metadata{
-		ID:               stored.ID,
-		CreatedAt:        stored.CreatedAt,
-		Path:             stored.Path,
-		WorkspaceID:      workspaceID,
-		WorkspacePath:    workspacePath,
-		RetainEmpty:      retainEmpty,
-		Kind:             kind,
-		ParentSessionID:  stored.Extra[extraParentSessionID],
-		ParentEntryID:    stored.Extra[extraParentEntryID],
-		ParentRunID:      stored.Extra[extraParentRunID],
-		Agent:            stored.Extra[extraAgent],
-		SubagentIdentity: identity,
-		TeamWorker:       teamWorkerLineage(stored.Extra),
-	}, nil
+	projectSessionPrefix(&meta, prefix)
+
+	return meta, true
+}
+
+// projectRecord projects one index record into the frontend-safe Metadata.
+func projectRecord(record MetadataRecord, sessionDir string) Metadata {
+	meta := Metadata{
+		ID:               record.ID,
+		CreatedAt:        record.CreatedAt,
+		UpdatedAt:        record.UpdatedAt,
+		Path:             filepath.Join(sessionDir, TranscriptFileName),
+		WorkspaceID:      record.Workspace.ID,
+		WorkspacePath:    record.Workspace.Path,
+		RetainEmpty:      record.RetainEmpty,
+		Kind:             record.Kind,
+		Agent:            record.Agent,
+		SubagentIdentity: record.Subagent.identity(),
+		TeamWorker:       record.TeamWorker.lineage(),
+		Title:            record.Title.Text,
+		TitleManual:      record.Title.Manual,
+		Summary:          record.Summary,
+		LastTurnSummary:  record.LastTurnSummary,
+		LastRecap:        record.LastRecap,
+		Model:            record.Model,
+		Git:              record.Git,
+		Counts:           record.Counts,
+		NodeCount:        record.Counts.Entries,
+	}
+	if record.Parent != nil {
+		meta.ParentSessionID = record.Parent.SessionID
+		meta.ParentEntryID = record.Parent.EntryID
+		meta.ParentRunID = record.Parent.RunID
+	}
+	if record.TeamWorker != nil && meta.ParentSessionID == "" {
+		meta.ParentSessionID = record.TeamWorker.ParentSessionID
+	}
+
+	return meta
+}
+
+// relDirParts returns the trailing path components of dir below the store root,
+// which is what descriptor-relative archive access walks.
+func relDirParts(dir string) []string {
+	group := filepath.Base(filepath.Dir(dir))
+	id := filepath.Base(dir)
+	if group == "" || group == "." || group == string(filepath.Separator) {
+		return []string{id}
+	}
+
+	return []string{group, id}
 }
 
 // IsZero reports whether the legacy session header carries no identity
@@ -989,53 +1631,6 @@ func subagentIdentityExtras(identity SubagentIdentity) map[string]string {
 		extraGenerationID:           strconv.FormatUint(identity.GenerationID, 10),
 		extraPlanDigest:             identity.PlanDigest,
 	}
-}
-
-func projectSubagentIdentity(extra map[string]string) (SubagentIdentity, error) {
-	if !hasSubagentIdentityExtras(extra) {
-		return SubagentIdentity{}, nil
-	}
-
-	identity := SubagentIdentity{
-		Schema:           extra[extraSubagentIdentitySchema],
-		AgentID:          extra[extraSubagentAgentID],
-		Kind:             extra[extraSubagentKind],
-		Name:             extra[extraSubagentName],
-		DefinitionSchema: extra[extraDefinitionSchema],
-		DefinitionDigest: extra[extraDefinitionDigest],
-		DefinitionSource: extra[extraDefinitionSource],
-		PlanDigest:       extra[extraPlanDigest],
-	}
-	parsedGeneration, err := strconv.ParseUint(extra[extraGenerationID], 10, 64)
-	if err != nil {
-		return SubagentIdentity{}, err
-	}
-	identity.GenerationID = parsedGeneration
-	if err := validateSubagentIdentity(identity); err != nil {
-		return SubagentIdentity{}, err
-	}
-
-	return identity, nil
-}
-
-func hasSubagentIdentityExtras(extra map[string]string) bool {
-	for _, key := range []string{
-		extraSubagentIdentitySchema,
-		extraSubagentAgentID,
-		extraSubagentKind,
-		extraSubagentName,
-		extraDefinitionSchema,
-		extraDefinitionDigest,
-		extraDefinitionSource,
-		extraGenerationID,
-		extraPlanDigest,
-	} {
-		if _, exists := extra[key]; exists {
-			return true
-		}
-	}
-
-	return false
 }
 
 func validateSubagentIdentity(identity SubagentIdentity) error {
@@ -1237,17 +1832,6 @@ func validKind(kind Kind) bool {
 	return kind == KindConversation || kind == KindSubagent || kind == KindTeamWorker
 }
 
-func teamWorkerLineage(extra map[string]string) TeamWorkerLineage {
-	return TeamWorkerLineage{
-		ParentSessionID: extra[extraParentSessionID],
-		TeamID:          team.ID(extra[extraTeamID]),
-		MemberID:        team.MemberID(extra[extraTeamMemberID]),
-		TaskID:          team.TaskID(extra[extraTeamTaskID]),
-		AttemptID:       team.AttemptID(extra[extraTeamAttemptID]),
-		ContinuationID:  continuation.ID(extra[extraContinuationID]),
-	}
-}
-
 func validateTeamWorkerLineage(value TeamWorkerLineage) error {
 	if validateSessionID(value.ParentSessionID) != nil || !validLineageID(string(value.TeamID)) ||
 		!validLineageID(string(value.MemberID)) || !validLineageID(string(value.TaskID)) ||
@@ -1285,14 +1869,6 @@ func (r *Repository) validate() error {
 	}
 
 	return nil
-}
-
-func (r *Repository) lockPath(id string) string {
-	return filepath.Join(r.dir, id+".lock")
-}
-
-func (r *Repository) sessionPath(id string) string {
-	return filepath.Join(r.dir, id+".jsonl")
 }
 
 func newSessionID() (string, error) {

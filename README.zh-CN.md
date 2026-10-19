@@ -170,8 +170,11 @@ default = true
 ```sh
 export API_KEY="sk-..."
 
-# 运行环境诊断（检查沙箱、依赖与模型凭据）
+# 运行环境诊断（检查沙箱、依赖、模型凭据与代理连通性）
 pips doctor
+
+# 诊断已配置的 MCP server
+pips mcp doctor
 
 # 启动交互式终端界面
 pips
@@ -282,6 +285,7 @@ func main() {
 - [Agent 组合与多智能体协作模式](docs/agents.md)
 - [Workflow 引擎 API 参考](https://pkg.go.dev/github.com/rsbin1178/pips/workflow)
 - [Coding CLI 配置与完整命令说明](docs/coding-cli.md)
+- [会话存储分层设计](docs/coding-session-storage.md)
 - [执行安全威胁模型与沙箱机制](docs/coding-security.md)
 - [Agent Client Protocol (ACP) 说明](docs/coding-acp.md)
 - [人工验收测试规范](docs/manual-acceptance/index.md)

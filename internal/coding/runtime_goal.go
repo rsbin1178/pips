@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"math"
 	"slices"
 	"strings"
 
@@ -13,9 +14,17 @@ import (
 	"github.com/rsbin1178/pips/agent/goal"
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding/goalflow"
+	"github.com/rsbin1178/pips/internal/coding/tools"
 )
 
 type goalContextKey struct{}
+
+// goalWorkSegmentAllowance is the Goal's work-segment count. The reference caps
+// no round, but the continuation SDK refuses an execution whose limits carry no
+// finite hard value at all, so the Goal declares the largest representable count
+// — no run reaches it — and is bounded instead by its optional token budget, the
+// no-progress guard and its own declarations.
+const goalWorkSegmentAllowance = math.MaxInt
 
 type runtimeGoalDriver struct {
 	cancel context.CancelFunc
@@ -58,13 +67,142 @@ func (r *Runtime) ResumeGoal(ctx context.Context) iter.Seq2[Event, error] {
 }
 
 // PauseGoal revokes automatic activation and cancels an admitted stage.
-func (r *Runtime) PauseGoal(ctx context.Context) error { return r.controlGoal(ctx, false) }
+func (r *Runtime) PauseGoal(ctx context.Context) error {
+	return r.controlGoal(ctx, false, "Goal paused by user")
+}
 
 // ClearGoal cancels the current Goal without deleting its durable audit trail.
-func (r *Runtime) ClearGoal(ctx context.Context) error { return r.controlGoal(ctx, true) }
+func (r *Runtime) ClearGoal(ctx context.Context) error {
+	return r.controlGoal(ctx, true, "Goal cleared by user")
+}
+
+// pauseGoal is the pause half of the runtime's one control path with the
+// caller's own reason, so a model's blocked declaration pauses the Goal through
+// exactly the path an operator pause uses.
+func (r *Runtime) pauseGoal(ctx context.Context, reason string) error {
+	return r.controlGoal(ctx, false, reason)
+}
+
+// declareGoal answers one model declaration against the session's Goal. It is the
+// channel the update_goal Tool carries: the run's own state is read, a completion
+// claim is recorded for the loop's next decision point, and a failure signal
+// pauses the Goal through the runtime's own pause path. The declaration is never
+// evidence — the auditor still reads the workspace and the recorded tool results.
+func (r *Runtime) declareGoal(ctx context.Context, declaration tools.GoalDeclaration) (string, error) {
+	if r == nil || r.goalControl == nil {
+		return "", tools.ErrGoalNotRunning
+	}
+	state := r.GoalSnapshot()
+	if state.ID == "" {
+		return "", tools.ErrGoalNotRunning
+	}
+	if !goalDeclarable(state) && (declaration.Completed || declaration.BlockedReason != "") {
+		return "", fmt.Errorf(
+			"%w: it is %s; start or resume a Goal before declaring completion or blockage",
+			tools.ErrGoalNotActive, state.Status,
+		)
+	}
+
+	if declaration.BlockedReason != "" {
+		return r.blockGoal(ctx, declaration.BlockedReason)
+	}
+
+	// Any other declaration ends the model's run of blocked declarations.
+	c := r.goalControl
+	c.mu.Lock()
+	c.blockedStreak = 0
+	c.mu.Unlock()
+
+	switch {
+	case declaration.Completed:
+		c.mu.Lock()
+		c.declaration = true
+		c.mu.Unlock()
+		summary := "Goal completion declared; the independent evidence audit runs at the Goal loop's next decision point."
+		if declaration.Message != "" {
+			summary = "Goal completion declared: " + declaration.Message +
+				". The independent evidence audit runs at the Goal loop's next decision point."
+		}
+
+		return summary, nil
+	case declaration.Message != "":
+		// A progress note is recorded and echoed; it changes nothing about the run.
+		return declaration.Message, nil
+	default:
+		return "Goal updated.", nil
+	}
+}
+
+// goalBlockedStreak is how many consecutive blocked declarations the Goal needs
+// before it pauses. The update_goal Tool tells the model the same bar, and the
+// first two declarations are accepted with the streak so a stuck model keeps
+// working instead of stopping the run on its first complaint.
+const goalBlockedStreak = 3
+
+// blockGoal records one blocked declaration. Below the streak it answers with
+// the streak and leaves the Goal running; at the streak it records the model's
+// own failure reason and pauses the Goal through the runtime's one pause path,
+// so a stuck model stops the loop exactly as an operator pause does.
+func (r *Runtime) blockGoal(ctx context.Context, reason string) (string, error) {
+	c := r.goalControl
+	c.mu.Lock()
+	c.blockedStreak++
+	streak := c.blockedStreak
+	c.mu.Unlock()
+
+	if streak < goalBlockedStreak {
+		return fmt.Sprintf(
+			"Blocked attempt %d/%d recorded. The Goal pauses only after %d consecutive blocked declarations; continue retrying or refining the approach.",
+			streak, goalBlockedStreak, goalBlockedStreak,
+		), nil
+	}
+
+	c.mu.Lock()
+	c.blockedReason = reason
+	c.mu.Unlock()
+
+	if err := r.pauseGoal(ctx, reason); err != nil {
+		c.mu.Lock()
+		c.blockedReason = ""
+		c.mu.Unlock()
+
+		return "", err
+	}
+
+	return "Goal paused as blocked: " + reason + ". The user must resume it.", nil
+}
+
+// consumeDeclaration reports and clears the model's pending completion
+// declaration, so the Goal loop verifies it at exactly one decision point.
+func (c *runtimeGoalControl) consumeDeclaration() bool {
+	c.mu.Lock()
+	declared := c.declaration
+	c.declaration = false
+	c.mu.Unlock()
+
+	return declared
+}
+
+// consumeVerificationReset reports and clears the pending explicit-resume flag,
+// so the Goal's verification counters start again at exactly one decision point.
+func (c *runtimeGoalControl) consumeVerificationReset() bool {
+	c.mu.Lock()
+	reset := c.resetVerification
+	c.resetVerification = false
+	c.mu.Unlock()
+
+	return reset
+}
+
+// goalDeclarable reports whether a Goal can still take a completion or failure
+// declaration: a run exists and is neither paused nor finished. A progress note
+// is accepted against a paused or finished Goal too, because it changes nothing.
+func goalDeclarable(state GoalState) bool {
+	return state.ID != "" && state.Active() && state.Status != GoalPaused
+}
 
 //nolint:gocyclo // Control races retry CAS, never work or model calls.
-func (r *Runtime) controlGoal(ctx context.Context, clearGoal bool) error {
+func (r *Runtime) controlGoal(ctx context.Context, clearGoal bool, reason string) error {
 	if r == nil || r.goalControl == nil {
 		return ErrGoalMissing
 	}
@@ -85,9 +223,9 @@ func (r *Runtime) controlGoal(ctx context.Context, clearGoal bool) error {
 			break
 		}
 		if clearGoal {
-			_, err = c.engine.Cancel(ctx, c.id, execution.Revision, "Goal cleared by user")
+			_, err = c.engine.Cancel(ctx, c.id, execution.Revision, reason)
 		} else {
-			_, err = c.engine.Pause(ctx, c.id, execution.Revision, "Goal paused by user")
+			_, err = c.engine.Pause(ctx, c.id, execution.Revision, reason)
 		}
 		if !errors.Is(err, continuation.ErrConflict) {
 			break
@@ -96,6 +234,10 @@ func (r *Runtime) controlGoal(ctx context.Context, clearGoal bool) error {
 	if err == nil && clearGoal {
 		c.ledger.Cleared = true
 		err = c.saveLedger()
+		// A Goal that was actually cleared forgets its declaration, its pause
+		// reason and the model's run of blocked declarations.
+		c.declaration, c.blockedReason, c.blockedStreak = false, "", 0
+		c.resetVerification = false
 	}
 	roots := slices.Clone(c.ledger.Roots)
 	c.mu.Unlock()
@@ -164,13 +306,21 @@ func (r *Runtime) driveGoal(
 	emitter := newEventEmitter(ctx, r, yield, true)
 	defer emitter.detachConsumer()
 	c := r.goalControl
+	// The Goal's baseline commit is captured before the control mutex is taken,
+	// so a bounded Git resolve never runs under it. It is only meaningful for a
+	// Goal this call creates.
+	baseline := ""
+	if request != nil {
+		baseline = r.goalBaselineCommit(ctx)
+	}
 	c.mu.Lock()
 	var execution continuation.Execution
 	if request != nil {
-		execution, err = r.createGoal(ctx, *request)
+		execution, err = r.createGoal(ctx, *request, baseline)
 	} else {
 		execution, err = r.activateGoal(ctx, operation)
 	}
+	goalID := string(c.id)
 	c.mu.Unlock()
 	if err != nil {
 		emitter.fail(err)
@@ -179,7 +329,7 @@ func (r *Runtime) driveGoal(
 	if err := r.publishGoal(ctx, emitter, ""); err != nil {
 		return
 	}
-	verifier, err := goalflow.NewVerifier(ctx, r.model, r.tree)
+	verifier, err := r.newGoalVerifier(ctx, goalID)
 	if err != nil {
 		emitter.fail(err)
 		return
@@ -191,8 +341,11 @@ func (r *Runtime) driveGoal(
 	}
 	controller := &goalflow.Controller{
 		Evaluator: evaluator, Verifier: verifier, FailedUsage: c.recordFailedUsage, KnownFailed: c.failedUsage,
-		Invalidated: func() bool { c.mu.Lock(); defer c.mu.Unlock(); return c.ledger.Invalidated },
-		Phase:       func(phase string) error { return r.publishGoal(ctx, emitter, GoalStatus(phase)) },
+		Invalidated:       func() bool { c.mu.Lock(); defer c.mu.Unlock(); return c.ledger.Invalidated },
+		Phase:             func(phase string) error { return r.publishGoal(ctx, emitter, GoalStatus(phase)) },
+		Declared:          c.consumeDeclaration,
+		Transcript:        r.goalAssessmentInput,
+		ResetVerification: c.consumeVerificationReset,
 	}
 	worker := &runtimeGoalWorker{runtime: r, operation: operation, emitter: emitter}
 	handlers := continuation.Handlers{
@@ -235,7 +388,11 @@ func (r *Runtime) driveGoal(
 }
 
 // createGoal runs under the control mutex but never performs model/tool I/O.
-func (r *Runtime) createGoal(ctx context.Context, request GoalRequest) (continuation.Execution, error) {
+// baseline is the repository commit the caller resolved before taking the
+// mutex; it is empty when the workspace has no repository or the resolve failed.
+func (r *Runtime) createGoal(
+	ctx context.Context, request GoalRequest, baseline string,
+) (continuation.Execution, error) {
 	c := r.goalControl
 	r.mu.Lock()
 	idle := r.state.Phase == PhaseIdle && r.interaction == nil && r.recovery.PendingID == ""
@@ -251,9 +408,6 @@ func (r *Runtime) createGoal(ctx context.Context, request GoalRequest) (continua
 		if !existing.Status.Terminal() {
 			return continuation.Execution{}, ErrGoalExists
 		}
-	}
-	if !r.model.Capabilities().StructuredOutput {
-		return continuation.Execution{}, fmt.Errorf("%w: Goal requires structured output", ErrRuntimeInvalid)
 	}
 	state, input, err := goalflow.Prepare(request.Condition)
 	if err != nil {
@@ -271,14 +425,22 @@ func (r *Runtime) createGoal(ctx context.Context, request GoalRequest) (continua
 	execution, err := c.engine.Create(ctx, continuation.CreateRequest{
 		Target: continuation.Target{Kind: "coding.session", ID: r.handle.Metadata().ID},
 		Worker: goalWorkerRef, Controller: goalControllerRef, ControllerState: encoded, Input: input,
-		Limits: continuation.Limits{MaxTokens: request.MaxTokens},
+		Limits: continuation.Limits{MaxTokens: request.MaxTokens, MaxAttempts: goalWorkSegmentAllowance},
 	})
 	if err != nil {
 		return continuation.Execution{}, err
 	}
 	c.id = execution.ID
 	revoked := append(slices.Clone(c.ledger.RevokedRoots), c.ledger.Roots...)
-	c.ledger = goalLedger{Version: 1, ID: execution.ID, RevokedRoots: revoked}
+	c.ledger = goalLedger{
+		Version: 1, ID: execution.ID, RevokedRoots: revoked, BaselineCommit: baseline,
+	}
+	// A fresh Goal inherits neither a declaration nor a pause reason, and has no
+	// resumed skeptic to subtract usage from.
+	c.declaration, c.blockedReason, c.blockedStreak = false, "", 0
+	c.resetVerification = false
+	c.skeptic0Source, c.skeptic0Usage = "", ai.Usage{}
+
 	return execution, c.saveLedger()
 }
 
@@ -288,6 +450,10 @@ func (r *Runtime) activateGoal(ctx context.Context, operation goalWorkOperation)
 	if c.id == "" || c.ledger.Cleared {
 		return continuation.Execution{}, ErrGoalMissing
 	}
+	// An explicit resume ends the pause the model declared, so a later operator
+	// pause reports its own reason, and the model's run of blocked declarations
+	// starts again.
+	c.blockedReason, c.blockedStreak = "", 0
 	execution, err := c.engine.Get(ctx, c.id)
 	if err != nil {
 		return execution, err
@@ -302,6 +468,9 @@ func (r *Runtime) activateGoal(ctx context.Context, operation goalWorkOperation)
 		return execution, ErrRuntimeBusy
 	}
 	if execution.Status == continuation.StatusPaused {
+		// The explicit resume is the reference's own reset point for the
+		// verification run count and the gap-stall state.
+		c.resetVerification = true
 		execution, err = c.engine.Resume(ctx, c.id, execution.Revision, "Goal explicitly resumed")
 		if errors.Is(err, continuation.ErrRetryRequired) {
 			execution, err = c.engine.RetryWork(ctx, c.id, execution.Revision, "User explicitly retries interrupted Goal work")
@@ -317,6 +486,9 @@ func (r *Runtime) activateGoal(ctx context.Context, operation goalWorkOperation)
 		}
 		return c.engine.RetryWork(ctx, c.id, execution.Revision, "User explicitly retries interrupted Goal work")
 	case continuation.StatusBlocked:
+		// Resolving a block is an explicit user resume too: the stall and run-cap
+		// blocks project as paused, and their counters start again here.
+		c.resetVerification = true
 		r.mu.Lock()
 		parked := r.state.Phase == PhasePaused && r.recovery.PendingID == ""
 		r.mu.Unlock()

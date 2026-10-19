@@ -17,7 +17,7 @@ const (
 	Model        Item = "model"
 	ContextUsed  Item = "context_used"
 	CacheHitRate Item = "cache_hit_rate"
-	TaskProgress Item = "task_progress"
+	TodoProgress Item = "task_progress"
 	Phase        Item = "phase"
 	Mode         Item = "mode"
 	Team         Item = "team"
@@ -29,7 +29,7 @@ var inventory = []Item{
 	Model,
 	ContextUsed,
 	CacheHitRate,
-	TaskProgress,
+	TodoProgress,
 	Phase,
 	Mode,
 	Team,
@@ -75,8 +75,8 @@ func Description(item Item) (string, error) {
 		return "percentage of the model context window used", nil
 	case CacheHitRate:
 		return "share of the last turn's prompt served from the provider cache", nil
-	case TaskProgress:
-		return "completed update_plan tasks", nil
+	case TodoProgress:
+		return "completed todo steps while the list still has open work", nil
 	case Phase:
 		return "current runtime activity phase", nil
 	case Mode:

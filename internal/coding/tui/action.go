@@ -18,15 +18,22 @@ const (
 	keyCtrlR      = "ctrl+r"
 	keyCtrlF      = "ctrl+f"
 	keyCtrlG      = "ctrl+g"
+	keyCtrlH      = "ctrl+h"
 	keyCtrlO      = "ctrl+o"
+	keyCtrlP      = "ctrl+p"
 	keyTab        = "tab"
 	keyCtrlC      = "ctrl+c"
+	keyCtrlQ      = "ctrl+q"
+	keyCtrlB      = "ctrl+b"
 	keyCtrlT      = "ctrl+t"
 	keyCtrlU      = "ctrl+u"
 	keyCtrlV      = "ctrl+v"
 	keyCtrlX      = "ctrl+x"
+	keyCtrlY      = "ctrl+y"
+	keyCtrlA      = "ctrl+a"
 	keyCtrlJ      = "ctrl+j"
 	keyShiftEnter = "shift+enter"
+	keyShiftTab   = "shift+tab"
 	keySpace      = "space"
 	keyEscape     = "esc"
 	keyLeft       = "left"
@@ -60,10 +67,12 @@ const (
 	actionCancel     actionID = "cancel"
 	actionToggleMode actionID = "toggle_mode"
 	actionPasteImage actionID = "paste_image"
+	actionSelectAll  actionID = "select_all"
 	actionTranscript actionID = "transcript"
 	actionCopy       actionID = "copy_reply"
 	actionSearch     actionID = "search"
-	// actionToggleMouseCapture is the Grok-parity Ctrl+R: it releases the terminal's
+	actionTodo       actionID = "todo_checklist"
+	// actionToggleMouseCapture is the Ctrl+R binding: it releases the terminal's
 	// mouse capture so the terminal's own selection, copy and link handling work, and
 	// takes it back again. The choice is per session; `[tui] mouse = false` remains the
 	// persisted opt-out.
@@ -99,7 +108,7 @@ var defaultActions = []actionBinding{
 	{
 		ID:       actionToggleMode,
 		Contexts: []actionContext{contextIdle},
-		Keys:     []string{"shift+tab"},
+		Keys:     []string{keyShiftTab},
 		Label:    "toggle mode",
 	},
 	{
@@ -109,15 +118,27 @@ var defaultActions = []actionBinding{
 		Label:    "paste image",
 	},
 	{
+		// Ctrl+A selects the whole draft, the gesture every other text field uses.
+		// Home and Ctrl+E still move within a line, so the readline muscle memory has
+		// a home.
+		ID:       actionSelectAll,
+		Contexts: []actionContext{contextIdle, contextRunning, contextPaused},
+		Keys:     []string{keyCtrlA},
+		Label:    "select all",
+	},
+	{
 		ID:       actionCommand,
 		Contexts: []actionContext{contextIdle, contextRunning, contextPaused},
 		Keys:     []string{"ctrl+k", "/"},
 		Label:    "commands",
 	},
 	{
+		// Ctrl+X is the shortcuts list, and Ctrl+? is its alternate: a terminal that
+		// swallows one of the two chords still reaches the list, and Ctrl+X always
+		// arrives as a plain control character.
 		ID:       actionHelp,
 		Contexts: []actionContext{contextIdle, contextRunning, contextPaused},
-		Keys:     []string{"ctrl+?"},
+		Keys:     []string{keyCtrlX, "ctrl+?"},
 		Label:    string(actionHelp),
 	},
 	{
@@ -127,18 +148,28 @@ var defaultActions = []actionBinding{
 		Label:    "latest details",
 	},
 	{
+		// Ctrl+P opens the standalone todo_write checklist. It stays a page so
+		// it never competes with the transient tasks strip.
+		ID:       actionTodo,
+		Contexts: []actionContext{contextIdle, contextRunning, contextPaused},
+		Keys:     []string{keyCtrlP},
+		Label:    "todo checklist",
+	},
+	{
 		ID:       actionTranscript,
 		Contexts: []actionContext{contextIdle, contextRunning, contextPaused},
 		Keys:     []string{keyCtrlO},
 		Label:    "transcript",
 	},
 	{
-		// Ctrl+X copies and never mutates conversation state, so it stays
-		// available while a turn runs. The Team worker route claims the same key
-		// for interrupt before this table is consulted.
+		// Ctrl+Y is the yank key, which is what copying a reply is. It moved off
+		// Ctrl+X, which now opens the shortcuts list. The command still copies and
+		// never mutates conversation state, so it stays available while a turn runs.
+		// The Team worker route claims Ctrl+X for interrupt before this table is
+		// consulted.
 		ID:       actionCopy,
 		Contexts: []actionContext{contextIdle, contextRunning, contextPaused},
-		Keys:     []string{keyCtrlX},
+		Keys:     []string{keyCtrlY},
 		Label:    "copy reply",
 	},
 	{
@@ -220,17 +251,4 @@ func actionHints(bindings []actionBinding, context actionContext) string {
 	}
 
 	return strings.Join(items, "  •  ")
-}
-
-func renderActionHelp(bindings []actionBinding, context actionContext) string {
-	items := make([]string, 0, len(bindings))
-	for _, binding := range bindings {
-		if !slices.Contains(binding.Contexts, context) {
-			continue
-		}
-
-		items = append(items, strings.Join(binding.Keys, " / ")+" — "+binding.Label)
-	}
-
-	return strings.Join(items, "\n")
 }

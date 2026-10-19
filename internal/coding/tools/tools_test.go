@@ -4,6 +4,8 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/rsbin1178/pips/agent"
@@ -73,7 +75,7 @@ func TestCatalogMetadataAndConcurrency(t *testing.T) {
 func TestTaskCatalogIsBoundedApplicationState(t *testing.T) {
 	t.Parallel()
 
-	value, err := tools.NewTaskCatalog()
+	value, err := tools.NewTaskCatalog(nil)
 	require.NoError(t, err)
 	descriptors, err := value.Search(t.Context(), catalog.AllowAll("test", catalog.RiskRead), "")
 	require.NoError(t, err)
@@ -84,6 +86,11 @@ func TestTaskCatalogIsBoundedApplicationState(t *testing.T) {
 	snapshot, err := value.Snapshot(t.Context(), catalog.AllowAll("test", catalog.RiskRead))
 	require.NoError(t, err)
 	require.Len(t, snapshot, 1)
+	decl := snapshot[0].Decl()
+	assert.Empty(t, decl.InputSchema.Required, "plan and clear are both optional at the schema layer")
+	require.NotNil(t, decl.InputSchema.Properties["plan"])
+	assert.Equal(t, "64", string(decl.InputSchema.Properties["plan"].Extra["maxItems"]))
+	assert.Contains(t, decl.Description, "clear true")
 	parts, err := snapshot[0].Exec(t.Context(), agent.ToolCall{
 		ID: "task-1", Name: tasklist.ToolName,
 		Args: ai.JSON(`{"plan":[{"step":"Test","status":"completed"}]}`),
@@ -189,6 +196,55 @@ func TestGlobUsesRecursivePatternWithoutFollowingSymlinks(t *testing.T) {
 	header, _, parseErr := tools.ParseResult(err.Error())
 	require.NoError(t, parseErr)
 	assert.Equal(t, "symlink_not_allowed", header.Code)
+}
+
+// TestWorkspaceAbsolutePathsAreAccepted pins the path contract the model sees
+// in its system prompt: an absolute path inside the workspace is equivalent to
+// its relative spelling, while an outside path stays refused.
+func TestWorkspaceAbsolutePathsAreAccepted(t *testing.T) {
+	t.Parallel()
+
+	fixture := newToolFixture(t, tools.DefaultLimits())
+	fixture.write("a.txt", "alpha")
+	root, err := filepath.EvalSymlinks(fixture.root)
+	require.NoError(t, err)
+
+	text, err := fixture.exec(t.Context(), "ls", `{"path":`+strconv.Quote(root)+`}`)
+	require.NoError(t, err)
+	assert.Contains(t, text, "a.txt")
+
+	text, err = fixture.exec(t.Context(), "ls", `{"path":`+strconv.Quote(strings.TrimPrefix(filepath.ToSlash(root), "/"))+`}`)
+	require.NoError(t, err)
+	assert.Contains(t, text, "a.txt", "a workspace absolute path missing its leading slash is accepted")
+
+	text, err = fixture.exec(t.Context(), "read", `{"path":`+strconv.Quote(filepath.Join(root, "a.txt"))+`}`)
+	require.NoError(t, err)
+	assert.Contains(t, text, "alpha")
+
+	text, err = fixture.exec(t.Context(), "read", `{"path":`+strconv.Quote(`"a.txt"`)+`}`)
+	require.NoError(t, err)
+	assert.Contains(t, text, "alpha", "surrounding quotes are cleaned before resolution")
+
+	patchPath := filepath.Join(root, "patched.txt")
+	patch := "*** Begin Patch\n*** Add File: " + patchPath + "\n+patched\n*** End Patch"
+	_, err = fixture.exec(t.Context(), "apply_patch", `{"patch":`+strconv.Quote(patch)+`}`)
+	require.NoError(t, err)
+
+	data, readErr := os.ReadFile(patchPath)
+	require.NoError(t, readErr)
+	assert.Equal(t, "patched\n", string(data))
+
+	outside := filepath.Join(t.TempDir(), "outside")
+	_, err = fixture.exec(t.Context(), "ls", `{"path":`+strconv.Quote(outside)+`}`)
+	require.Error(t, err)
+	header, _, parseErr := tools.ParseResult(err.Error())
+	require.NoError(t, parseErr)
+	assert.Equal(t, "outside_workspace", header.Code)
+
+	outsidePatch := "*** Begin Patch\n*** Add File: " +
+		filepath.Join(t.TempDir(), "outside.txt") + "\n+nope\n*** End Patch"
+	_, err = fixture.exec(t.Context(), "apply_patch", `{"patch":`+strconv.Quote(outsidePatch)+`}`)
+	require.Error(t, err)
 }
 
 func TestGrepSupportsGlobCaseAndContinuation(t *testing.T) {
@@ -490,4 +546,39 @@ func temporaryFiles(t *testing.T, root string) []string {
 	require.NoError(t, err)
 
 	return matches
+}
+
+// TestTaskCatalogDescribesTheFoldSurface pins the tool's declared schema: the
+// status description names cancelled, an item carries an optional bounded meta
+// object, an item's id and the update's merge are described, and no item field
+// is demanded because the fold decides what each mode needs.
+func TestTaskCatalogDescribesTheFoldSurface(t *testing.T) {
+	t.Parallel()
+
+	value, err := tools.NewTaskCatalog(nil)
+	require.NoError(t, err)
+	snapshot, err := value.Snapshot(t.Context(), catalog.AllowAll("test", catalog.RiskRead))
+	require.NoError(t, err)
+	require.Len(t, snapshot, 1)
+
+	schema := snapshot[0].Decl().InputSchema
+	require.NotNil(t, schema)
+
+	plan := schema.Properties["plan"]
+	require.NotNil(t, plan)
+	require.NotNil(t, plan.Items)
+	assert.Contains(t, plan.Items.Properties, "meta", "meta is described on an item")
+	assert.Contains(t, plan.Items.Properties, "id", "an item's id is described")
+	assert.Empty(t, plan.Items.Required, "the fold decides what each mode needs")
+	assert.Empty(t, schema.Required, "plan and clear are both optional at the schema layer")
+	assert.Equal(t, "64", string(plan.Extra["maxItems"]))
+
+	clearProperty := schema.Properties["clear"]
+	require.NotNil(t, clearProperty)
+	assert.Contains(t, clearProperty.Description, "plan must carry no items")
+	assert.Contains(t, plan.Items.Properties["status"].Description, "cancelled")
+
+	merge := schema.Properties["merge"]
+	require.NotNil(t, merge)
+	assert.True(t, merge.Nullable, "an absent merge is distinguishable from false")
 }

@@ -46,7 +46,9 @@ type PermissionOptions struct {
 	Limits    Limits
 }
 
-// Permissions resolves and records dual project/user MCP decisions.
+// Permissions resolves project MCP enablement and records optional user
+// denies. A project definition is enabled by workspace trust; a user-store
+// deny for its server ID disables it.
 type Permissions struct {
 	workspace workspace.Workspace
 	tree      *workspace.Tree
@@ -62,7 +64,8 @@ type ResolvedDefinition struct {
 	Status     Status
 }
 
-// NewPermissions constructs a dual-record permission manager.
+// NewPermissions constructs a permission manager for project enablement and
+// user-level denies.
 func NewPermissions(options PermissionOptions) (*Permissions, error) {
 	if options.Workspace.Root() == "" || options.Workspace.Identity().Key() == "" ||
 		options.Tree == nil || options.Tree.Path() != options.Workspace.Root() ||
@@ -81,8 +84,10 @@ func NewPermissions(options PermissionOptions) (*Permissions, error) {
 	}, nil
 }
 
-// Resolve evaluates user definitions as enabled and project definitions by
-// intersecting the project-local and user workspace-store records.
+// Resolve enables every definition. A project definition is trusted by the
+// fact that the workspace trust gate admitted its file; the only override is
+// a user-store deny for that server ID. That deny survives a definition change
+// without a second per-server approval.
 func (p *Permissions) Resolve(
 	ctx context.Context,
 	definitions Definitions,
@@ -95,25 +100,16 @@ func (p *Permissions) Resolve(
 		return nil, err
 	}
 
-	projectRecords, exists, err := p.loadProject(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	byID := make(map[string]projectPermission, len(projectRecords))
-	if exists {
-		for _, record := range projectRecords {
-			byID[record.ID] = record
-		}
-	}
-
 	values := definitions.List()
 	resolved := make([]ResolvedDefinition, 0, len(values))
 
 	for _, definition := range values {
 		status := StatusEnabled
+
 		if definition.Scope == ScopeProject {
-			status, err = p.projectStatus(definition, byID)
+			var err error
+
+			status, err = p.projectStatus(definition)
 			if err != nil {
 				return nil, err
 			}
@@ -128,10 +124,11 @@ func (p *Permissions) Resolve(
 	return resolved, nil
 }
 
-// Decide writes the project-local record first and user workspace authority
-// second. A crash or error between them leaves a harmless pending state.
+// Decide writes the project-local record first and the user workspace record
+// second. Resolve consults only the user record for a deny, so the project
+// file is an optional local audit rather than an enablement prerequisite.
 //
-//nolint:gocyclo // Dual-record ordering and Git safety each need an explicit fail-closed branch.
+//nolint:gocyclo // Record ordering and Git safety each need an explicit fail-closed branch.
 func (p *Permissions) Decide(
 	ctx context.Context,
 	definition Definition,
@@ -204,15 +201,7 @@ func (p *Permissions) Decide(
 	})
 }
 
-func (p *Permissions) projectStatus(
-	definition Definition,
-	projectRecords map[string]projectPermission,
-) (Status, error) {
-	project, exists := projectRecords[definition.ID]
-	if !exists || project.Fingerprint != definition.Fingerprint() {
-		return StatusPending, nil
-	}
-
+func (p *Permissions) projectStatus(definition Definition) (Status, error) {
 	user, exists, err := p.store.Permission(
 		p.workspace.Identity(),
 		workspace.PermissionMCPServer,
@@ -222,42 +211,13 @@ func (p *Permissions) projectStatus(
 		return "", err
 	}
 
-	projectTime, err := time.Parse(time.RFC3339Nano, project.DecidedAt)
-	if err != nil {
-		return "", fmt.Errorf("%w: invalid project permission timestamp", ErrInvalid)
-	}
-
-	if !exists || user.Fingerprint != project.Fingerprint ||
-		user.Decision != project.Decision || !user.DecidedAt.Equal(projectTime) {
-		return StatusPending, nil
-	}
-
-	switch project.Decision {
-	case workspace.PermissionAllow:
-		return StatusEnabled, nil
-	case workspace.PermissionDeny:
+	// A deny is a personal, name-based switch. It intentionally survives a
+	// definition change.
+	if exists && user.Decision == workspace.PermissionDeny {
 		return StatusDisabled, nil
-	default:
-		return "", fmt.Errorf("%w: invalid project permission decision", ErrInvalid)
-	}
-}
-
-func (p *Permissions) loadProject(ctx context.Context) ([]projectPermission, bool, error) {
-	records, exists, err := p.loadProjectFile()
-	if err != nil || !exists {
-		return nil, exists, err
 	}
 
-	tracked, _, err := p.tracked(ctx)
-	if err != nil {
-		return nil, false, err
-	}
-
-	if tracked {
-		return nil, false, fmt.Errorf("%w: %s is tracked", ErrUnsafeFile, paths.ProjectPermissionsFile())
-	}
-
-	return records, true, nil
+	return StatusEnabled, nil
 }
 
 func (p *Permissions) tracked(ctx context.Context) (bool, bool, error) {

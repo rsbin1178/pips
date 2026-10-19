@@ -21,87 +21,200 @@ type childProjection struct {
 	projector     *agentProjector
 	interactionID string
 	pendingInput  []ai.Message
+	// taskPublished records that the child's own task already reached its
+	// projection as the opening user message. Every child agent event carries the
+	// task, so without this marker a child that runs a second turn would publish
+	// its prompt again at that turn boundary.
+	taskPublished bool
 	finished      bool
 }
 
+// subagentObserver projects one child's lifecycle into the conversation. current
+// is the interaction the child's Run belongs to; a scheduled fire has none, so a
+// nil interaction is the supported case rather than an accident: the child is
+// projected into its own session and its background completion is delivered
+// durably, with no conversation Run to attribute it to.
 func (r *Runtime) subagentObserver(
 	current *interaction,
 	emitter *eventEmitter,
 ) subagent.Observer {
 	return func(ctx context.Context, event subagent.Event) error {
-		eventType := subagentEventType(event)
-		nested := event.ParentSessionID != "" && event.ParentSessionID != r.handle.Metadata().ID
+		err := r.observeSubagent(ctx, current, emitter, event)
 
-		payload := SubagentLifecycle{
-			Identity: event.Identity, Role: event.Role, State: event.State,
-			ChildSessionID:      event.ChildSessionID,
-			ParentInteractionID: event.ParentInteractionID,
-			ParentRunID:         event.ParentRunID,
-			ParentToolCallID:    event.ParentToolCallID,
-			RootInteractionID:   event.RootInteractionID,
-			Delivery:            event.Delivery,
-			ChildRunID:          event.ChildRunID,
-			Model:               event.Model, TaskPreview: event.TaskPreview,
-			Activity: event.Activity, Code: event.Code,
-			Stop: event.Stop, Turns: event.Turns, ToolCalls: event.ToolCalls,
-			Usage:          tokenUsageFromAI(event.Usage),
-			DurationMillis: event.Duration.Milliseconds(),
-		}
-		if isTerminalSubagentState(event.State) && event.Delivery != subagent.DeliveryBackground {
-			current.addSubagentUsage(event.ChildSessionID, payload.Model, payload.Usage)
-		}
-		// Nested lifecycle belongs to its actual parent child run, which is not
-		// an active run in the root conversation reducer. Keep it out of the
-		// root timeline while retaining the ordinary descendant child projection.
-		if nested {
-			switch event.State {
-			case subagent.StateCreated:
-				return r.openChildProjection(ctx, event)
-			case subagent.StateSucceeded, subagent.StateFailed,
-				subagent.StateCanceled, subagent.StateInterrupted:
-				return r.finishChildProjection(ctx, event)
-			case subagent.StateRunning:
-				return nil
-			}
+		// A scheduled fire skipped while its previous child ran resumes on that
+		// child's terminal event, so the firing loop is woken here rather than
+		// polling.
+		if isTerminalSubagentState(event.State) {
+			r.signalScheduler()
 		}
 
-		interactionID := event.ParentInteractionID
-		if interactionID == "" {
-			interactionID = current.id
-		}
-		target := emitter
-		if event.Delivery == subagent.DeliveryBackground {
-			target = newEventEmitter(ctx, r, nil, false)
-		}
-		if err := target.emit(interactionID, event.ParentRunID, eventType, payload); err != nil {
-			return err
-		}
-
-		var projectionErr error
-		switch event.State {
-		case subagent.StateCreated:
-			projectionErr = r.openChildProjection(ctx, event)
-		case subagent.StateSucceeded, subagent.StateFailed,
-			subagent.StateCanceled, subagent.StateInterrupted:
-			projectionErr = r.finishChildProjection(ctx, event)
-		case subagent.StateRunning:
-		}
-		if projectionErr != nil {
-			return projectionErr
-		}
-		if event.Delivery == subagent.DeliveryBackground &&
-			isTerminalSubagentState(event.State) {
-			if err := r.notifications.EnqueueCompletion(event); err != nil {
-				return err
-			}
-			r.signalNotifications()
-		}
-
-		return nil
+		return err
 	}
 }
 
-func (r *Runtime) openChildProjection(ctx context.Context, event subagent.Event) error {
+// observeSubagent commits one child lifecycle. A nil current is a scheduled
+// fire's child: the conversation has no active Run to attribute it to, so the
+// child is projected into its own session and its background completion rides
+// the durable notification path. The conversation's reducer accepts a
+// SubagentLifecycle only against an active interaction, so nothing is emitted
+// for an unattributed child.
+func (r *Runtime) observeSubagent(
+	ctx context.Context,
+	current *interaction,
+	emitter *eventEmitter,
+	event subagent.Event,
+) error {
+	if current == nil {
+		return r.observeUnattributedChild(ctx, event)
+	}
+
+	eventType := subagentEventType(event)
+	nested := r.subagentEventIsNested(current, event)
+
+	payload := SubagentLifecycle{
+		Identity: event.Identity, Role: event.Role, State: event.State,
+		ChildSessionID:      event.ChildSessionID,
+		ParentInteractionID: event.ParentInteractionID,
+		ParentRunID:         event.ParentRunID,
+		ParentToolCallID:    event.ParentToolCallID,
+		RootInteractionID:   event.RootInteractionID,
+		Delivery:            event.Delivery,
+		ChildRunID:          event.ChildRunID,
+		Model:               event.Model, TaskPreview: event.TaskPreview,
+		Activity: event.Activity, Code: event.Code,
+		Stop: event.Stop, Turns: event.Turns, ToolCalls: event.ToolCalls,
+		Usage:          tokenUsageFromAI(event.Usage),
+		DurationMillis: event.Duration.Milliseconds(),
+	}
+	if isTerminalSubagentState(event.State) && event.Delivery != subagent.DeliveryBackground {
+		current.addSubagentUsage(event.ChildSessionID, payload.Model, payload.Usage)
+	}
+	// Nested lifecycle belongs to its actual parent child run, which is not
+	// an active run in the root conversation reducer. Keep it out of the
+	// root timeline while retaining the ordinary descendant child projection.
+	if nested {
+		return r.projectChildLifecycle(ctx, event)
+	}
+
+	interactionID := event.ParentInteractionID
+	if interactionID == "" {
+		interactionID = current.id
+	}
+
+	target := emitter
+	if event.Delivery == subagent.DeliveryBackground {
+		target = newEventEmitter(ctx, r, nil, false)
+	}
+
+	if err := target.emit(interactionID, event.ParentRunID, eventType, payload); err != nil {
+		return err
+	}
+
+	if err := r.projectChildLifecycle(ctx, event); err != nil {
+		return err
+	}
+
+	if isTerminalSubagentState(event.State) {
+		return r.enqueueChildCompletion(event)
+	}
+
+	return nil
+}
+
+// projectChildLifecycle opens or closes the child's own session projection for
+// one lifecycle event. It never touches the conversation's reducer.
+func (r *Runtime) projectChildLifecycle(ctx context.Context, event subagent.Event) error {
+	switch event.State {
+	case subagent.StateCreated:
+		return r.openChildProjection(ctx, event, r.inheritedChildHistory(ctx, event))
+	case subagent.StateSucceeded, subagent.StateFailed,
+		subagent.StateCanceled, subagent.StateInterrupted:
+		return r.finishChildProjection(ctx, event)
+	case subagent.StateRunning:
+	}
+
+	return nil
+}
+
+// enqueueChildCompletion delivers one background child's terminal result on the
+// durable notification path. A wake reports its acceptance through the message
+// envelope, so its terminal result is not surfaced as a second completion, and a
+// foreground result is returned to its caller instead.
+func (r *Runtime) enqueueChildCompletion(event subagent.Event) error {
+	if event.Delivery != subagent.DeliveryBackground || event.Wake {
+		return nil
+	}
+
+	if err := r.notifications.EnqueueCompletion(event); err != nil {
+		return err
+	}
+
+	r.signalNotifications()
+
+	return nil
+}
+
+// observeUnattributedChild commits the lifecycle of a child with no interaction:
+// a scheduled fire's iteration. The child is projected into its own session, and
+// a direct background child's terminal result is enqueued on the durable
+// notification path — the whole of what a fire reports. A deeper descendant,
+// which a depth-1 child cannot have, would stay in its own projection only.
+func (r *Runtime) observeUnattributedChild(ctx context.Context, event subagent.Event) error {
+	if err := r.projectChildLifecycle(ctx, event); err != nil {
+		return err
+	}
+
+	// A deeper descendant is not this conversation's own child, so its terminal
+	// result is not a report for this conversation.
+	if event.ParentSessionID != "" && event.ParentSessionID != r.handle.Metadata().ID {
+		return nil
+	}
+
+	if isTerminalSubagentState(event.State) {
+		return r.enqueueChildCompletion(event)
+	}
+
+	return nil
+}
+
+// subagentEventIsNested reports whether one child lifecycle belongs to a run
+// that is not this conversation's. A deeper descendant and a wake a child
+// started both qualify, and neither has an active Tool call in the
+// conversation's Run to attribute the child to, so the child is projected
+// without entering the conversation timeline. The caller has already routed a
+// scheduled fire's unattributed child to observeUnattributedChild, so current is
+// never nil here.
+func (r *Runtime) subagentEventIsNested(current *interaction, event subagent.Event) bool {
+	if event.ParentSessionID != "" && event.ParentSessionID != r.handle.Metadata().ID {
+		return true
+	}
+
+	return event.ParentInteractionID != "" && event.ParentInteractionID != current.id
+}
+
+// inheritedChildHistory reads the conversation a continued child already owns.
+// Its session was forked from the child it continues, so the durable transcript
+// carries those turns before this run produced anything. The read happens before
+// the projection takes the publisher lock, and a child that inherited nothing —
+// or whose session cannot be read — contributes nothing.
+func (r *Runtime) inheritedChildHistory(ctx context.Context, event subagent.Event) []ai.Message {
+	if !event.Inherited || r.subagents == nil || event.ChildSessionID == "" {
+		return nil
+	}
+
+	detail, err := r.subagents.Inspect(ctx, event.ChildSessionID)
+	if err != nil {
+		return nil
+	}
+
+	return detail.Transcript
+}
+
+func (r *Runtime) openChildProjection(
+	ctx context.Context,
+	event subagent.Event,
+	inherited []ai.Message,
+) error {
 	publisher := r.publisher
 	publisher.mu.Lock()
 	defer publisher.mu.Unlock()
@@ -119,6 +232,14 @@ func (r *Runtime) openChildProjection(ctx context.Context, event subagent.Event)
 	}
 	child := &childProjection{
 		writer: writer, projector: projector, interactionID: event.ChildSessionID,
+	}
+	// A continued child owns the conversation it inherited before this run
+	// produces anything, and this live State is what a reader sees while the child
+	// runs. The history is copied in rather than re-published as commits: those
+	// messages were committed in the child this one continues, and a commit
+	// outside an open turn is not a valid projection input.
+	if len(inherited) > 0 {
+		child.state.Transcript = cloneMessages(inherited)
 	}
 	r.children[event.ChildSessionID] = child
 	eventTime := childEventTime(event.Time)
@@ -178,7 +299,7 @@ func (r *Runtime) observeChildAgentEvent(ctx context.Context, childEvent subagen
 	if !exists || child.finished {
 		return fmt.Errorf("%w: child projection is unavailable", ErrEventProtocol)
 	}
-	if len(child.pendingInput) == 0 && childEvent.Task != "" {
+	if !child.taskPublished && len(child.pendingInput) == 0 && childEvent.Task != "" {
 		child.pendingInput = []ai.Message{ai.UserText(childEvent.Task)}
 	}
 
@@ -206,6 +327,10 @@ func (r *Runtime) observeChildAgentEvent(ctx context.Context, childEvent subagen
 		); err != nil {
 			return err
 		}
+		// The task is the child's opening user message, and this flush is the one
+		// place it is published. Marking it here keeps every later turn boundary
+		// from publishing it again.
+		child.taskPublished = true
 	}
 
 	return nil

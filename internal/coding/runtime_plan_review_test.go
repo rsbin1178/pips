@@ -457,7 +457,7 @@ func planReviewRequest(t *testing.T, runtime *Runtime) planreview.Request {
 	return *request
 }
 
-// TestRuntimePlanReminderRidesTheTurn pins the grok-build placement: the plan
+// TestRuntimePlanReminderRidesTheTurn pins the reminder placement: the plan
 // reminder is a synthetic <system-reminder> user message committed at the start
 // of a turn, so the request prefix before it stays byte-identical from turn to
 // turn and a provider's prompt cache still covers the conversation.
@@ -507,7 +507,7 @@ func TestRuntimePlanReminderRidesTheTurn(t *testing.T) {
 	assert.Contains(t, transcriptText(state.Transcript), "Plan mode is active.")
 }
 
-// TestRuntimePlanReminderAlternatesFullAndSparse pins grok-build's reminder_count:
+// TestRuntimePlanReminderAlternatesFullAndSparse pins the reminder alternation:
 // consecutive turns in plan mode alternate the full reminder with the one-line
 // variant, which bounds how much repeated plan context the conversation keeps.
 func TestRuntimePlanReminderAlternatesFullAndSparse(t *testing.T) {

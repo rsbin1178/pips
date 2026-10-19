@@ -216,6 +216,19 @@ fmt.Println(recipe.Name, resp.Usage.OutputTokens)
 
 返回值中的原始 `*ai.Response` 用于 Usage、Provider 信息和诊断。若模型调用成功但 JSON 解码失败，函数仍返回该响应和解码错误。
 
+## 按模型声明选择传输
+
+`ai.GenerateTypedAdaptive[T]` 与 `GenerateTyped` 的差别只有传输：模型声明
+`Capabilities().StructuredOutput` 时发送请求的 `ResponseFormat`，与 `GenerateTyped`
+完全一致；未声明时省略 `ResponseFormat`，把 `ai.PortableSchemaInstructions(schema)`
+（同一段提示词约定）追加到最后一个 system 消息，再按一个 JSON 对象解析回答。两条传输
+返回同一个 `T`，调用方的校验不变。
+
+调用方的 `req.Messages` 不会被修改：函数克隆切片后只替换那一条 system 消息，因此循环
+里的后续请求不会带上“只回答 JSON”的指令。回答不是一个 JSON 对象时返回
+`ai.ErrMalformedStructuredOutput`，调用方可以据此把“答错形状”当作业务上的否定结果，
+而不是传输失败。`GenerateTyped` 保持只走原生传输，不会静默降级。
+
 ## `SchemaFor` 规则
 
 `SchemaFor[T]` 要求 `T` 是 struct 或 struct 指针，并应用以下规则：
@@ -298,6 +311,7 @@ req.ResponseFormat = &ai.ResponseFormat{
 | 需求 | 选择 |
 | --- | --- |
 | 模型只需返回可解析业务数据 | `GenerateTyped` / `ResponseFormat` |
+| 模型可能没有原生 JSON Schema 支持 | `GenerateTypedAdaptive`（未声明时回退到提示词约定） |
 | 模型要请求应用读取或修改外部世界 | Tool (客户端函数) |
 | 模型需要厂商托管全网搜索或代码沙箱 | 厂商内置工具（如 `gemini.GoogleSearch()`、`openai.WebSearch()`） |
 | Tool 参数需要类型约束 | Tool 的 `InputSchema` |

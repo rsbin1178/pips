@@ -28,31 +28,54 @@ type Field string
 
 // Configuration fields.
 const (
-	FieldModel                 Field = "model"
-	FieldVariant               Field = "variant"
-	FieldReasoning             Field = "reasoning"
-	FieldToolSearch            Field = "tool_search"
-	FieldToolSearchName        Field = "tool_search_name"
-	FieldDynamicSubagents      Field = "dynamic_subagents"
-	FieldSubagentMaxDepth      Field = "subagent.max_depth"
-	FieldSubagentMaxConcurrent Field = "subagent.max_concurrent"
-	FieldSubagentMaxSpawned    Field = "subagent.max_spawned_per_root_interaction"
-	FieldSubagentMaxFollowUps  Field = "subagent.max_auto_follow_ups"
-	FieldSubagentMaxTurns      Field = "subagent.max_turns"
-	FieldSubagentMaxTokens     Field = "subagent.max_tokens" //nolint:gosec // Tokens are an execution budget, not credentials.
-	FieldSubagentMaxToolCalls  Field = "subagent.max_tool_calls"
-	FieldSubagentMaxDuration   Field = "subagent.max_duration_minutes"
-	FieldMode                  Field = "mode"
-	FieldTheme                 Field = "tui.theme"
-	FieldStatusLine            Field = "tui.status_line"
-	FieldScreen                Field = "tui.screen"
-	FieldAltScreen             Field = "tui.alt_screen"
-	FieldMouse                 Field = "tui.mouse"
-	FieldExitOutput            Field = "tui.exit_output"
-	FieldShowThinkingBlocks    Field = "tui.show_thinking_blocks"
-	FieldSandbox               Field = "sandbox"
-	FieldSandboxNetwork        Field = "sandbox_workspace_write.network"
-	FieldApproval              Field = "approval"
+	FieldModel          Field = "model"
+	FieldVariant        Field = "variant"
+	FieldReasoning      Field = "reasoning"
+	FieldToolSearch     Field = "tool_search"
+	FieldToolSearchName Field = "tool_search_name"
+	// FieldDynamicSubagents is the master subagent switch. It defaults to true.
+	FieldDynamicSubagents Field = "dynamic_subagents"
+	// FieldSubagentEnabled is the `[subagents]` spelling of the same master
+	// switch as FieldDynamicSubagents. Both fields report one resolved value,
+	// because the two spellings are one setting rather than two.
+	FieldSubagentEnabled Field = "subagents.enabled"
+	// FieldActiveAgentMessages enables model-authored messages to a live or
+	// completed child. It defaults to false.
+	FieldActiveAgentMessages Field = "active_agent_messages"
+	// FieldTodoGate enables the turn-end todo gate: when a run ends on a
+	// content-only assistant message with pending or in-progress plan items, the
+	// runtime runs one more turn carrying the gate reminder. It defaults to
+	// false, matching the reference's opt-in gate.
+	FieldTodoGate              Field = "todo_gate"
+	FieldSubagentMaxDepth      Field = "subagents.max_depth"
+	FieldSubagentMaxConcurrent Field = "subagents.max_concurrent"
+	// FieldSubagentStructuredResults restores the typed JSON result contract
+	// for builtin agents. It defaults to false: a builtin agent returns its
+	// final text.
+	FieldSubagentStructuredResults Field = "subagents.structured_results"
+	// FieldSubagentLimitBehavior selects what happens when the concurrent
+	// subagent cap is reached: queue (default) or fail.
+	FieldSubagentLimitBehavior Field = "subagents.limit_behavior"
+	// FieldSubagentModels is the per-type model override table.
+	FieldSubagentModels Field = "subagents.models"
+	// FieldSubagentRoles is the inline role declaration table.
+	FieldSubagentRoles Field = "subagents.roles"
+	// FieldSubagentPersonas is the inline persona declaration table.
+	FieldSubagentPersonas Field = "subagents.personas"
+	// FieldSubagentToggle is the per-type enable/disable table. An absent key
+	// means the type stays enabled.
+	FieldSubagentToggle     Field = "subagents.toggle"
+	FieldMode               Field = "mode"
+	FieldTheme              Field = "tui.theme"
+	FieldStatusLine         Field = "tui.status_line"
+	FieldScreen             Field = "tui.screen"
+	FieldAltScreen          Field = "tui.alt_screen"
+	FieldMouse              Field = "tui.mouse"
+	FieldExitOutput         Field = "tui.exit_output"
+	FieldShowThinkingBlocks Field = "tui.show_thinking_blocks"
+	FieldSandbox            Field = "sandbox"
+	FieldSandboxNetwork     Field = "sandbox_workspace_write.network"
+	FieldApproval           Field = "approval"
 )
 
 var fields = []Field{
@@ -62,14 +85,17 @@ var fields = []Field{
 	FieldToolSearch,
 	FieldToolSearchName,
 	FieldDynamicSubagents,
+	FieldSubagentEnabled,
+	FieldActiveAgentMessages,
+	FieldTodoGate,
 	FieldSubagentMaxDepth,
 	FieldSubagentMaxConcurrent,
-	FieldSubagentMaxSpawned,
-	FieldSubagentMaxFollowUps,
-	FieldSubagentMaxTurns,
-	FieldSubagentMaxTokens,
-	FieldSubagentMaxToolCalls,
-	FieldSubagentMaxDuration,
+	FieldSubagentStructuredResults,
+	FieldSubagentLimitBehavior,
+	FieldSubagentModels,
+	FieldSubagentRoles,
+	FieldSubagentPersonas,
+	FieldSubagentToggle,
 	FieldMode,
 	FieldTheme,
 	FieldStatusLine,
@@ -393,6 +419,15 @@ type ProviderConfig struct {
 	// ModelConfig.StreamIdleTimeout. Zero inherits the transport default. It is
 	// local transport policy: it is never sent as a request option.
 	StreamIdleTimeout time.Duration
+	// UserAgentEnabled declares whether this provider's requests carry a
+	// User-Agent header at all. Nil sends the client's own default; a false
+	// declaration sends no header.
+	UserAgentEnabled *bool
+	// UserAgent replaces the User-Agent this provider's requests carry, and is
+	// the default for its models. Nil sends the client's own default, and the
+	// value is trimmed. Like StreamIdleTimeout it is local transport policy: it
+	// is never sent as a request option.
+	UserAgent *string
 }
 
 // Clone returns a fully detached provider definition.
@@ -400,6 +435,8 @@ func (p ProviderConfig) Clone() ProviderConfig {
 	cloned := p
 	cloned.Compatibility = p.Compatibility.Clone()
 	cloned.Capabilities = p.Capabilities.Clone()
+	cloned.UserAgentEnabled = clonePointer(p.UserAgentEnabled)
+	cloned.UserAgent = clonePointer(p.UserAgent)
 
 	return cloned
 }
@@ -503,6 +540,13 @@ type ModelConfig struct {
 	Capabilities          ai.CapabilityOverride
 	Options               ModelOptions
 	Variants              map[string]VariantConfig
+	// UserAgentEnabled declares whether this model's requests carry a
+	// User-Agent header at all, overriding the provider's declaration. Nil
+	// inherits it, and then the client's own default.
+	UserAgentEnabled *bool
+	// UserAgent replaces the User-Agent this model's requests carry, overriding
+	// the provider's value. Nil inherits it, and then the client's own default.
+	UserAgent *string
 }
 
 // CompactionConfig controls context compaction. Capacity comes from the
@@ -536,32 +580,117 @@ func DefaultCompactionConfig() CompactionConfig {
 	}
 }
 
-// SubagentConfig contains the user-configurable production admission and
-// execution budgets. MaxDepth defaults to zero (recursive delegation off);
-// zero is invalid for every other TOML field. The complete programmatic zero
-// value remains a legacy embedding boundary and is normalized by Runtime.
-type SubagentConfig struct {
-	MaxDepth                     int
-	MaxConcurrent                int
-	MaxSpawnedPerRootInteraction int
-	MaxAutoFollowUps             int
-	MaxTurns                     int
-	MaxTokens                    int
-	MaxToolCalls                 int
-	MaxDurationMinutes           int
+// MediaConfig bounds persisted session media and one provider request body.
+type MediaConfig struct {
+	// MaxRequestBytes caps one provider request body after hydration. Zero
+	// disables the budget check.
+	MaxRequestBytes int
+	// CleanupTTLDays removes idle session directories and prunes expired media
+	// from live sessions. Zero disables automatic deletion.
+	CleanupTTLDays int
+	// GCGraceHours is the minimum media age before orphan collection removes it.
+	GCGraceHours int
 }
 
-// DefaultSubagentConfig returns the bounded production policy.
+// DefaultMediaConfig returns the bounded product policy: a 30 MiB request
+// budget, a 30-day idle TTL, and a 24-hour orphan grace period.
+func DefaultMediaConfig() MediaConfig {
+	return MediaConfig{
+		MaxRequestBytes: 30 << 20,
+		CleanupTTLDays:  30,
+		GCGraceHours:    24,
+	}
+}
+
+// SubagentConfig contains the user-configurable production admission budgets,
+// parsed from the `[subagents]` table. MaxDepth defaults to one: a child may not
+// spawn another child. Zero is invalid for max_concurrent. A child's execution
+// is unbounded by default — the reference has no per-child execution budget —
+// and only a subagent definition's `limits` may cap it. The reference bounds no
+// spawn count per root and no auto-follow-up count either, so neither is a
+// configuration surface. The complete programmatic zero value remains a legacy
+// embedding boundary and is normalized by Runtime.
+type SubagentConfig struct {
+	MaxDepth      int
+	MaxConcurrent int
+	// StructuredResults restores the typed JSON result contract for builtin
+	// agents. The default is a free-text summary.
+	StructuredResults bool
+	// LimitBehavior selects what happens at the concurrent subagent cap:
+	// "queue" parks the spawn until a slot frees, "fail" rejects it. The empty
+	// value is the legacy embedding boundary and resolves to "queue".
+	LimitBehavior string
+	// Models overrides the model of one agent type by exact name. An
+	// unresolvable reference falls back to the parent model.
+	Models map[string]string
+	// Toggle disables individual agent types by exact, case-sensitive name. An
+	// absent key leaves the type enabled, so an empty table changes nothing.
+	Toggle map[string]bool
+	// Roles and Personas are inline declarations keyed by exact agent type
+	// name. They take precedence over the same-named file declarations.
+	Roles    map[string]SubagentRole
+	Personas map[string]SubagentPersona
+}
+
+// IsZero reports whether the config is the legacy programmatic zero value.
+// Runtime normalizes that boundary; file loading always starts from
+// DefaultSubagentConfig. It exists because the maps make the struct
+// non-comparable.
+func (c SubagentConfig) IsZero() bool {
+	return c.admissionZero() && !c.StructuredResults && c.LimitBehavior == "" && c.presetsEmpty()
+}
+
+func (c SubagentConfig) admissionZero() bool {
+	return c.MaxDepth == 0 && c.MaxConcurrent == 0
+}
+
+func (c SubagentConfig) presetsEmpty() bool {
+	return len(c.Models) == 0 && len(c.Toggle) == 0 && len(c.Roles) == 0 && len(c.Personas) == 0
+}
+
+// TypeEnabled reports whether one agent type may be dispatched from a
+// per-type toggle table. An absent key means enabled, so an empty table
+// disables nothing. The lookup is exact and case-sensitive.
+func TypeEnabled(toggle map[string]bool, name string) bool {
+	enabled, ok := toggle[name]
+
+	return !ok || enabled
+}
+
+// TypeEnabled reports whether this configuration allows one agent type.
+func (c SubagentConfig) TypeEnabled(name string) bool {
+	return TypeEnabled(c.Toggle, name)
+}
+
+// DefaultSubagentConfig returns the bounded admission policy. A child's
+// execution carries no default budget; only a definition's `limits` caps it.
 func DefaultSubagentConfig() SubagentConfig {
 	return SubagentConfig{
-		MaxDepth:                     0,
-		MaxConcurrent:                4,
-		MaxSpawnedPerRootInteraction: 8,
-		MaxAutoFollowUps:             4,
-		MaxTurns:                     64,
-		MaxTokens:                    256_000,
-		MaxToolCalls:                 128,
-		MaxDurationMinutes:           30,
+		MaxDepth:          1,
+		MaxConcurrent:     32,
+		StructuredResults: false,
+		LimitBehavior:     LimitBehaviorQueue,
+	}
+}
+
+// LimitBehavior values for SubagentConfig.LimitBehavior.
+const (
+	// LimitBehaviorQueue parks a spawn at the cap until a slot frees.
+	LimitBehaviorQueue = "queue"
+	// LimitBehaviorFail rejects a spawn at the cap.
+	LimitBehaviorFail = "fail"
+)
+
+// ParseLimitBehavior accepts the two supported limit behaviors and reports
+// false for anything else.
+func ParseLimitBehavior(value string) (string, bool) {
+	switch value {
+	case LimitBehaviorQueue:
+		return LimitBehaviorQueue, true
+	case LimitBehaviorFail:
+		return LimitBehaviorFail, true
+	default:
+		return "", false
 	}
 }
 
@@ -574,6 +703,8 @@ func (m ModelConfig) Clone() ModelConfig {
 	cloned.DefaultReasoningLevel = clonePointer(m.DefaultReasoningLevel)
 	cloned.ReasoningBudgets = maps.Clone(m.ReasoningBudgets)
 	cloned.Options = m.Options.Clone()
+	cloned.UserAgentEnabled = clonePointer(m.UserAgentEnabled)
+	cloned.UserAgent = clonePointer(m.UserAgent)
 	cloned.Variants = make(map[string]VariantConfig, len(m.Variants))
 	for name, variant := range m.Variants {
 		variant.ReasoningLevel = clonePointer(variant.ReasoningLevel)
@@ -604,7 +735,14 @@ type Config struct {
 	// DynamicSubagents enables the Alpha custom Coding subagent dispatcher.
 	// It is intentionally disabled by default; profile discovery remains
 	// available for validation and inspection when this gate is off.
-	DynamicSubagents      bool
+	DynamicSubagents bool
+	// ActiveAgentMessages enables the model-facing child messaging surface. It
+	// is off by default: while the gate is closed no messaging Tool is offered
+	// and every delivery is refused rather than dropped.
+	ActiveAgentMessages bool
+	// TodoGate enables the turn-end todo gate. It is off by default: the gate
+	// spends an extra inference turn, so it is opt-in, matching the reference.
+	TodoGate              bool
 	Subagent              SubagentConfig
 	Mode                  OperatingMode
 	TUI                   TUIConfig
@@ -613,6 +751,7 @@ type Config struct {
 	SandboxWorkspaceWrite SandboxWorkspaceWriteConfig
 	Approval              ApprovalMode
 	Compaction            CompactionConfig
+	Media                 MediaConfig
 	// MCPReadOnlyTools marks MCP tools, keyed by server ID, as read-only so
 	// they may run concurrently within one model response. Values are remote
 	// tool names or "*" for every tool of the server. It affects execution
@@ -633,15 +772,30 @@ type Patch struct {
 	ToolSearch       *bool
 	ToolSearchName   *string
 	DynamicSubagents *bool
-	Mode             *OperatingMode
-	Theme            *string
-	Screen           *string
-	AltScreen        *string
-	Mouse            *bool
-	ExitOutput       *string
-	ShowThinking     *bool
-	Sandbox          *SandboxMode
-	Approval         *ApprovalMode
+	// NoSubagents is the `--no-subagents` spelling of the master switch. Its
+	// value is the flag's own value, so a passed `--no-subagents` is true and
+	// an explicit `--no-subagents=false` is false. It is CLI-only; it exists so
+	// the two flag spellings can be detected and a contradiction between them
+	// reported instead of one silently winning.
+	NoSubagents *bool
+	// ActiveAgentMessages opens the child messaging gate. It is env-only and
+	// file-only; no CLI flag selects it.
+	ActiveAgentMessages *bool
+	// TodoGate enables the turn-end todo gate. It is file-only; no CLI flag
+	// selects it.
+	TodoGate *bool
+	// SubagentLimitBehavior overrides the concurrent-cap behavior. It is
+	// env-only; an invalid value falls back to queue.
+	SubagentLimitBehavior *string
+	Mode                  *OperatingMode
+	Theme                 *string
+	Screen                *string
+	AltScreen             *string
+	Mouse                 *bool
+	ExitOutput            *string
+	ShowThinking          *bool
+	Sandbox               *SandboxMode
+	Approval              *ApprovalMode
 }
 
 // Defaults returns the built-in application settings. Model is intentionally
@@ -678,7 +832,12 @@ func Defaults() Config {
 		Approval:   ApprovalOnRequest,
 		Compaction: DefaultCompactionConfig(),
 		Subagent:   DefaultSubagentConfig(),
-		sources:    sources,
+		Media:      DefaultMediaConfig(),
+		// Custom subagents are on by default. PIPS_DYNAMIC_SUBAGENTS and
+		// --dynamic-subagents keep their precedence, so an operator can still
+		// force them off.
+		DynamicSubagents: true,
+		sources:          sources,
 	}
 }
 
@@ -845,6 +1004,9 @@ func (c Config) ValidateRuntime() error {
 	if err := validateCompaction(c.Compaction); err != nil {
 		return err
 	}
+	if err := validateMedia(c.Media); err != nil {
+		return err
+	}
 	if err := validateSubagent(c.Subagent); err != nil {
 		return err
 	}
@@ -859,7 +1021,7 @@ func validateSubagent(value SubagentConfig) error {
 	// Preserve the legacy programmatic Config literal boundary. File loading
 	// always starts from DefaultSubagentConfig, so a user cannot select this
 	// compatibility form through TOML.
-	if value == (SubagentConfig{}) {
+	if value.IsZero() {
 		return nil
 	}
 
@@ -871,12 +1033,6 @@ func validateSubagent(value SubagentConfig) error {
 	}{
 		{"max_depth", value.MaxDepth, 0, 3},
 		{"max_concurrent", value.MaxConcurrent, 1, 32},
-		{"max_spawned_per_root_interaction", value.MaxSpawnedPerRootInteraction, 1, 128},
-		{"max_auto_follow_ups", value.MaxAutoFollowUps, 1, 32},
-		{"max_turns", value.MaxTurns, 2, 1024},
-		{"max_tokens", value.MaxTokens, 16_384, 16_000_000},
-		{"max_tool_calls", value.MaxToolCalls, 1, 4096},
-		{"max_duration_minutes", value.MaxDurationMinutes, 1, 24 * 60},
 	}
 	for _, item := range values {
 		if item.value < item.minimum || item.value > item.maximum {
@@ -887,6 +1043,21 @@ func validateSubagent(value SubagentConfig) error {
 				item.minimum,
 				item.maximum,
 			)
+		}
+	}
+	if value.LimitBehavior != "" {
+		if _, ok := ParseLimitBehavior(value.LimitBehavior); !ok {
+			return fmt.Errorf("%w: subagent.limit_behavior must be queue or fail", ErrInvalid)
+		}
+	}
+	for name, role := range value.Roles {
+		if err := ValidateSubagentRole(name, role); err != nil {
+			return err
+		}
+	}
+	for name, persona := range value.Personas {
+		if err := ValidateSubagentPersona(name, persona); err != nil {
+			return err
 		}
 	}
 
@@ -907,6 +1078,16 @@ func validateCompaction(value CompactionConfig) error {
 		value.TimeoutSeconds < 0 || value.TimeoutSeconds > int(compaction.DefaultTimeout/time.Second) {
 		return fmt.Errorf("%w: compaction threshold, quality or retry limits are out of bounds", ErrInvalid)
 	}
+	return nil
+}
+
+// validateMedia rejects a negative request budget, TTL, or grace period. Zero
+// is legal for each: it disables that behavior rather than meaning "unset".
+func validateMedia(value MediaConfig) error {
+	if value.MaxRequestBytes < 0 || value.CleanupTTLDays < 0 || value.GCGraceHours < 0 {
+		return fmt.Errorf("%w: media budgets and TTL must be nonnegative", ErrInvalid)
+	}
+
 	return nil
 }
 
@@ -1159,6 +1340,21 @@ func apply(value Config, patch Patch, source Source) Config {
 	if patch.DynamicSubagents != nil {
 		value.DynamicSubagents = *patch.DynamicSubagents
 		value.sources[FieldDynamicSubagents] = source
+		// The `[subagents]` spelling resolves to the same switch, so it reports
+		// the same value and the same deciding tier.
+		value.sources[FieldSubagentEnabled] = source
+	}
+	if patch.ActiveAgentMessages != nil {
+		value.ActiveAgentMessages = *patch.ActiveAgentMessages
+		value.sources[FieldActiveAgentMessages] = source
+	}
+	if patch.TodoGate != nil {
+		value.TodoGate = *patch.TodoGate
+		value.sources[FieldTodoGate] = source
+	}
+	if patch.SubagentLimitBehavior != nil {
+		value.Subagent.LimitBehavior = *patch.SubagentLimitBehavior
+		value.sources[FieldSubagentLimitBehavior] = source
 	}
 	if patch.Mode != nil {
 		value.Mode = *patch.Mode
@@ -1247,7 +1443,11 @@ func validateProviderDefinition(provider ai.Provider, definition ProviderConfig)
 		}
 	}
 
-	return validateStreamIdleTimeout(definition.StreamIdleTimeout, scope)
+	if err := validateStreamIdleTimeout(definition.StreamIdleTimeout, scope); err != nil {
+		return err
+	}
+
+	return validateUserAgent(definition.UserAgentEnabled, definition.UserAgent, scope)
 }
 
 // validateToolDeclaration rejects an explicit tools = false declaration. pips
@@ -1271,6 +1471,41 @@ const (
 	minStreamIdleTimeout = time.Second
 	maxStreamIdleTimeout = time.Hour
 )
+
+// User-Agent declarations. A declared value is a header value, so it carries no
+// control characters and stays within a header's practical length. An empty
+// declaration is rejected rather than read as "send nothing" — that is what
+// user_agent_enabled is for — and declaring both fields at one layer is a
+// contradiction rather than a precedence rule to guess at.
+const maxUserAgentLength = 256
+
+// validateUserAgent rejects a declaration the transport could not send as
+// written. A layer that declares neither field is valid and inherits.
+func validateUserAgent(enabled *bool, agent *string, scope string) error {
+	if agent == nil {
+		return nil
+	}
+
+	trimmed := strings.TrimSpace(*agent)
+	switch {
+	case trimmed == "":
+		return fmt.Errorf(
+			"%w: %s: user_agent is empty; set user_agent_enabled = false to send no User-Agent",
+			ErrInvalid, scope,
+		)
+	case enabled != nil && !*enabled:
+		return fmt.Errorf(
+			"%w: %s: user_agent is declared while user_agent_enabled is false; declare one of them",
+			ErrInvalid, scope,
+		)
+	}
+
+	if _, err := parseIdentifier("user_agent", trimmed, maxUserAgentLength, true); err != nil {
+		return fmt.Errorf("%w: %s: %w", ErrInvalid, scope, err)
+	}
+
+	return nil
+}
 
 // validateStreamIdleTimeout rejects a declared streaming idle bound outside the
 // range the transport can act on. Zero is always valid and means "not declared".
@@ -1307,6 +1542,13 @@ func validateModel(model ModelConfig) error {
 		return fmt.Errorf("%w: model %q context window cannot be negative", ErrInvalid, model.Ref)
 	}
 	if err := validateStreamIdleTimeout(model.StreamIdleTimeout, "model "+model.Ref.String()); err != nil {
+		return err
+	}
+	if err := validateUserAgent(
+		model.UserAgentEnabled,
+		model.UserAgent,
+		"model "+model.Ref.String(),
+	); err != nil {
 		return err
 	}
 	if err := validateOptions(model.Options, "model "+model.Ref.String()+" request"); err != nil {

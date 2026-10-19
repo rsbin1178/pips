@@ -164,6 +164,7 @@ func (m *Model) statusLinePickerView(maxHeight int) string {
 	return truncateHeight(strings.Join(lines, "\n"), max(1, maxHeight))
 }
 
+//nolint:dupl // Status-line wording mirrors the model-selection error matrix.
 func safeStatusLineError(err error) string {
 	switch {
 	case err == nil:

@@ -14,11 +14,9 @@ import (
 var (
 	// ErrInvalid means configuration, request, or durable data is invalid.
 	ErrInvalid = errors.New("coding subagent: invalid input")
-	// ErrBusy preserves the single-slot compatibility error when a manager is
-	// configured with MaxConcurrent equal to one.
-	ErrBusy = errors.New("coding subagent: busy")
-	// ErrCapacity means the Runtime's concurrent child limit is exhausted.
-	ErrCapacity = errors.New("coding subagent: capacity exhausted")
+	// ErrCapacity means the Runtime's concurrent child limit is exhausted. It
+	// is the compatibility alias of ErrConcurrentLimit.
+	ErrCapacity = ErrConcurrentLimit
 	// ErrSpawnLimit means one root interaction exhausted its child budget.
 	ErrSpawnLimit = errors.New("coding subagent: spawn limit exhausted")
 	// ErrClosed means the manager no longer accepts executions.
@@ -96,9 +94,27 @@ type Ownership struct {
 // alias for explore, plan, and review. Custom definitions are admitted only
 // through a Runtime-compiled ExecutionPlan.
 type Request struct {
-	AgentID   string
-	Role      Role
-	Task      string
+	AgentID string
+	Role    Role
+	Task    string
+	// Model is the model the caller explicitly requested for the child. It is
+	// the first tier of the child model precedence chain; empty means unset.
+	Model string
+	// Isolation is the caller-selected execution environment: empty, "none",
+	// or "worktree". A role or persona default fills it in when it does not
+	// already request a worktree.
+	Isolation string
+	// Cwd is the sanitized caller-supplied child working directory. It is
+	// dropped when the child resumes a sibling.
+	Cwd string
+	// ResumeFrom names the completed sibling child whose transcript, tool
+	// state, and usage this execution inherits. It overrides AgentID and Model
+	// with the source's frozen values.
+	ResumeFrom string
+	// WakeOf names the completed child a message woke. A wake continues the
+	// source in the background with the message as its prompt; it is a distinct
+	// request from ResumeFrom, which a caller declares for a new named child.
+	WakeOf    string
 	Ownership Ownership
 	Delivery  Delivery
 }
@@ -145,14 +161,24 @@ type Result struct {
 	Role           Role
 	ChildSessionID string
 	ChildRunID     string
-	Outcome        Outcome
-	Code           string
-	Stop           agent.StopReason
-	Turns          int
-	ToolCalls      int
-	Usage          ai.Usage
-	Duration       time.Duration
-	Value          any
+	// Persona is the resolved persona name applied to the child, or empty when
+	// the agent type has none.
+	Persona string
+	// WorktreePath is the preserved worktree the child ran in, or empty when
+	// the child ran in the parent workspace.
+	WorktreePath string
+	Outcome      Outcome
+	Code         string
+	Stop         agent.StopReason
+	Turns        int
+	ToolCalls    int
+	Usage        ai.Usage
+	Duration     time.Duration
+	// Structured reports that Value is a typed structured result rather than
+	// the default free-text summary. It selects the clone decoder so a text
+	// result is never re-decoded into a role's typed shape.
+	Structured bool
+	Value      any
 }
 
 // Event is one content-bounded child lifecycle update.
@@ -168,17 +194,26 @@ type Event struct {
 	ParentToolCallID    string
 	RootInteractionID   string
 	Delivery            Delivery
-	ChildRunID          string
-	Model               string
-	TaskPreview         string
-	Activity            ActivitySummary
-	Code                string
-	Stop                agent.StopReason
-	Turns               int
-	ToolCalls           int
-	Usage               ai.Usage
-	Duration            time.Duration
-	Time                time.Time
+	// Wake marks a continuation a message woke from a completed child. The
+	// sender already holds the acceptance reply, so a wake's terminal state is
+	// not surfaced as a second completion.
+	Wake bool
+	// Inherited reports that this child continues another child's conversation,
+	// so its own session already owns the turns that came before this run. It is
+	// lifecycle metadata, never content: the projection reads the history from the
+	// child's own session when it opens.
+	Inherited   bool
+	ChildRunID  string
+	Model       string
+	TaskPreview string
+	Activity    ActivitySummary
+	Code        string
+	Stop        agent.StopReason
+	Turns       int
+	ToolCalls   int
+	Usage       ai.Usage
+	Duration    time.Duration
+	Time        time.Time
 	// Result is present only on an in-process terminal callback. It is never
 	// copied into the parent lifecycle event or telemetry projection.
 	Result *Result
@@ -207,17 +242,25 @@ type Summary struct {
 	ChildSessionID string
 	Ownership      Ownership
 	Delivery       Delivery
-	Identity       AgentIdentity
-	Role           Role
-	State          State
-	TaskPreview    string
-	Model          string
-	CreatedAt      time.Time
-	Duration       time.Duration
-	Turns          int
-	ToolCalls      int
-	Usage          ai.Usage
-	Code           string
+	// Wake reports that this child continues a completed sibling a message
+	// woke, so its terminal result is not surfaced as a completion.
+	Wake        bool
+	Identity    AgentIdentity
+	Role        Role
+	State       State
+	TaskPreview string
+	Model       string
+	// Cwd is the child's effective working directory, empty when it shares the
+	// parent workspace.
+	Cwd string
+	// WorktreePath is the child's preserved worktree, empty when it has none.
+	WorktreePath string
+	CreatedAt    time.Time
+	Duration     time.Duration
+	Turns        int
+	ToolCalls    int
+	Usage        ai.Usage
+	Code         string
 }
 
 // ActivityPhase describes the currently observable child execution phase.

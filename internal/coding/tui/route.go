@@ -27,6 +27,7 @@ const (
 	routeToolDetail
 	routeMCP
 	routeStatus
+	routeHelp
 )
 
 const routeSubagent = routeChild
@@ -75,8 +76,12 @@ type routeState struct {
 	tree       coding.SessionTree
 	forkMode   bool
 	toolDetail *toolDetailView
+	// watchFollowPending marks a re-read of the open watch page that has not
+	// answered yet, so the activity clock cannot queue a second one.
+	watchFollowPending bool
 
 	statusTab           statusPanelTab
+	helpTab             helpTab
 	statusRange         statusStatsRange
 	statusSessions      session.MetadataListing
 	statusProjections   map[string]usageProjectionSnapshot
@@ -188,6 +193,9 @@ func (m *Model) requestRouteOpen(request routeOpenRequest) tea.Cmd {
 	if !request.pending() {
 		return nil
 	}
+	// The route owns the keyboard from the request onward, including the window
+	// where a native scrollback write delays activation.
+	m.tasksPane.focused = false
 	if !request.hasPreviousComposer {
 		if m.route.hasPreviousComposer {
 			request.previousComposer = m.route.previousComposer.clone()
@@ -219,6 +227,10 @@ func (m *Model) requestRouteOpen(request routeOpenRequest) tea.Cmd {
 
 func (m *Model) activateRoute(request routeOpenRequest) tea.Cmd {
 	m.stopTeamWorkerRouteSubscription()
+	// A full-area route owns the keyboard. Leaving tasks-pane focus behind would
+	// make the pane reclaim keys when the route closes, including after the work
+	// that opened it has already stopped.
+	m.tasksPane.focused = false
 
 	switch request.kind {
 	case routeSessions:
@@ -229,53 +241,74 @@ func (m *Model) activateRoute(request routeOpenRequest) tea.Cmd {
 		return m.activateMCPRouteSnapshot(request.previousComposer)
 	case routeStatus:
 		return m.activateStatusRoute(request.previousComposer)
-	case routeAgents:
-		command := m.activateAgentsRoute()
-		m.setRouteComposerSnapshot(request)
-
-		return command
-	case routeChild:
-		command := m.activateChildRoute(request)
-		m.setRouteComposerSnapshot(request)
-
-		return command
-	case routeTeam:
-		if request.teamIntegration && request.teamView != nil {
-			command := m.activateTeamIntegrationRoute(*request.teamView)
-			m.setRouteComposerSnapshot(request)
-
-			return command
-		}
-
-		command := m.activateTeamRoute(request.teamObjective)
-		m.setRouteComposerSnapshot(request)
-
-		return command
-	case routeTree:
-		command := m.activateTreeRoute(request.forkMode)
-		m.setRouteComposerSnapshot(request)
-
-		return command
+	case routeHelp:
+		return m.activateHelpRoute(request.previousComposer)
+	case routeAgents, routeChild, routeTeam, routeTree:
+		return m.activateSnapshotRoute(request)
 	case routeToolDetail:
-		if request.toolDetail == nil {
-			return nil
-		}
-
-		detail := *request.toolDetail
-		m.route = routeState{
-			kind: routeToolDetail, toolDetail: &detail,
-			previousInput:       request.previousInput,
-			previousComposer:    request.previousComposer.clone(),
-			hasPreviousComposer: request.hasPreviousComposer,
-		}
-		m.composer.Blur()
-
-		return nil
+		return m.activateToolDetailRoute(request)
 	case routeNone:
 		return nil
 	default:
 		return nil
 	}
+}
+
+// activateSnapshotRoute opens a route that carries the Composer's draft as its own
+// snapshot, so closing it hands the draft back untouched.
+func (m *Model) activateSnapshotRoute(request routeOpenRequest) tea.Cmd {
+	var command tea.Cmd
+
+	switch request.kind {
+	case routeAgents:
+		command = m.activateAgentsRoute()
+	case routeChild:
+		command = m.activateChildRoute(request)
+	case routeTeam:
+		if request.teamIntegration && request.teamView != nil {
+			command = m.activateTeamIntegrationRoute(*request.teamView)
+
+			break
+		}
+
+		command = m.activateTeamRoute(request.teamObjective)
+	case routeTree:
+		command = m.activateTreeRoute(request.forkMode)
+	default:
+		return nil
+	}
+
+	m.setRouteComposerSnapshot(request)
+
+	return command
+}
+
+// activateToolDetailRoute opens the Ctrl+T detail panel, which owns the screen
+// without taking the Composer's draft. A page that shows a running watch starts
+// the activity clock, because that clock is what re-reads its output and keeps
+// its spinner moving.
+func (m *Model) activateToolDetailRoute(request routeOpenRequest) tea.Cmd {
+	if request.toolDetail == nil {
+		return nil
+	}
+
+	activityWasVisible := m.activityClockVisible()
+	detail := *request.toolDetail
+	m.route = routeState{
+		kind: routeToolDetail, toolDetail: &detail,
+		previousInput:       request.previousInput,
+		previousComposer:    request.previousComposer.clone(),
+		hasPreviousComposer: request.hasPreviousComposer,
+	}
+	m.composer.Blur()
+	// A running watch opens on the tail of its output, which is where a reader
+	// who just asked to watch the task is looking. Scrolling up releases the
+	// tail; scrolling back to it follows again.
+	if detail.watchRunning {
+		m.route.offset = m.toolDetailMaximumOffset()
+	}
+
+	return m.startActivityClock(activityWasVisible)
 }
 
 func (m *Model) setRouteComposerSnapshot(request routeOpenRequest) {
@@ -333,6 +366,8 @@ func (m *Model) closeRouteToParent() tea.Cmd {
 			m.streamErr = err
 		}
 	}
+
+	m.syncTasksPane(time.Now())
 	m.setLayout()
 
 	// Held inspection output follows the catch-up, so the conversation keeps its
@@ -406,6 +441,8 @@ func (m *Model) updateRouteKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.updateMCPRouteKey(message)
 	case routeStatus:
 		return m.updateStatusRouteKey(message)
+	case routeHelp:
+		return m.updateHelpRouteKey(message)
 	case routeAgents:
 		return m.updateAgentsRouteKey(message)
 	case routeChild:
@@ -444,6 +481,8 @@ func (m *Model) routeView() tea.View {
 		return m.mcpRouteView()
 	case routeStatus:
 		return m.statusRouteView()
+	case routeHelp:
+		return m.helpRouteView()
 	case routeAgents:
 		return m.agentsRouteView()
 	case routeChild:
@@ -455,6 +494,9 @@ func (m *Model) routeView() tea.View {
 	case routeToolDetail:
 		return m.toolDetailRouteView()
 	default:
-		return tea.NewView("")
+		// An unrecognized route still draws an empty frame through the
+		// presentation boundary, so it cannot leave the alternate screen by
+		// omission either.
+		return m.presentationView("")
 	}
 }

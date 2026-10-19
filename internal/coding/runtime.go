@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,6 +26,7 @@ import (
 	"github.com/rsbin1178/pips/internal/coding/agentplugin"
 	"github.com/rsbin1178/pips/internal/coding/agentprofile"
 	"github.com/rsbin1178/pips/internal/coding/approval"
+	"github.com/rsbin1178/pips/internal/coding/background"
 	"github.com/rsbin1178/pips/internal/coding/changes/git"
 	"github.com/rsbin1178/pips/internal/coding/config"
 	"github.com/rsbin1178/pips/internal/coding/credential"
@@ -40,9 +42,11 @@ import (
 	"github.com/rsbin1178/pips/internal/coding/planreview"
 	"github.com/rsbin1178/pips/internal/coding/question"
 	"github.com/rsbin1178/pips/internal/coding/resource"
+	"github.com/rsbin1178/pips/internal/coding/scheduler"
 	"github.com/rsbin1178/pips/internal/coding/session"
 	"github.com/rsbin1178/pips/internal/coding/skillsettings"
 	"github.com/rsbin1178/pips/internal/coding/subagent"
+	"github.com/rsbin1178/pips/internal/coding/subagentprofile"
 	"github.com/rsbin1178/pips/internal/coding/tools"
 	"github.com/rsbin1178/pips/internal/coding/workspace"
 )
@@ -57,6 +61,9 @@ const (
 	componentAgentPlugin    = "agent-plugin"
 	componentHook           = "hook"
 	componentIntegration    = "integration"
+	// componentSubagent reports a degraded subagent selection, such as a model
+	// that fell back to the parent.
+	componentSubagent = "subagent"
 )
 
 // SessionTarget selects a new session when ID is empty or a durable session
@@ -86,11 +93,23 @@ type ExecutionOptions struct {
 	ResourceLimits     resource.Limits
 	AgentProfileLimits agentprofile.Limits
 	AgentPluginLimits  agentplugin.Limits
-	MCPLimits          codingmcp.Limits
-	MCPDefinitions     codingmcp.Definitions
-	ToolLimits         tools.Limits
-	GitLimits          git.Limits
-	Subagent           subagent.ExecutionOptions
+	// SubagentProfileLimits bounds role and persona discovery.
+	SubagentProfileLimits subagentprofile.Limits
+	MCPLimits             codingmcp.Limits
+	MCPDefinitions        codingmcp.Definitions
+	ToolLimits            tools.Limits
+	GitLimits             git.Limits
+	Subagent              subagent.ExecutionOptions
+	// GoalVerifierInProcess keeps the Goal verification panel in-process
+	// instead of spawning foreground general-purpose skeptic children. It is the
+	// seam for a test or an embedder whose model cannot serve a child agent; a
+	// production Runtime leaves it false and spawns the panel whenever it has
+	// subagents.
+	GoalVerifierInProcess bool
+	// SchedulerOptions inject the scheduled-task loop's clock and timer. A zero
+	// value uses the real clock; a test advances time and observes a fire
+	// without waiting an interval.
+	SchedulerOptions scheduler.Options
 }
 
 // OpenOptions explicitly bind one Runtime to one Workspace, configuration,
@@ -149,21 +168,41 @@ type Runtime struct {
 	hookDefinitions     []hooks.Definition
 	hookRunner          hooks.Runner
 
-	handle        *session.Handle
-	repository    *session.Repository
-	session       *harness.Session
-	journal       *interactionJournal
-	planStore     *planmode.Store
-	planMode      planmode.State
-	planReturning bool
-	planExited    bool
+	handle     *session.Handle
+	repository *session.Repository
+	session    *harness.Session
+	journal    *interactionJournal
+	planStore  *planmode.Store
+	// scheduler is this session's durable scheduled-task store, and
+	// schedulerOptions is the firing loop's injected clock and timer seam. Both
+	// are immutable after Open.
+	scheduler        *scheduler.Store
+	schedulerOptions scheduler.Options
+	schedulerMu      sync.Mutex
+	schedulerCancel  context.CancelFunc
+	schedulerSignal  chan struct{}
+	schedulerDone    chan struct{}
+	planMode         planmode.State
+	planReturning    bool
+	planExited       bool
 	// planReminderCount alternates the full and sparse plan reminders across
 	// turns. Entry and compaction reset it so the next reminder is full.
 	planReminderCount uint32
-	policy            execution.Policy
-	executor          *execution.Executor
-	tempRoot          *execution.PrivateTempRoot
-	inspector         *git.Inspector
+	// Todo nudge and gate state. planTurnsWithoutUpdate counts user turns since
+	// the last valid todo_write call, and planTurnsSinceNudge counts user turns
+	// since the last nudge. A plan write resets the first, and compaction
+	// restarts both. planWrittenThisTurn records a valid todo_write call in the
+	// turn now running, planNudgedThisTurn records that the nudge fired for it,
+	// and todoGateFires counts the gate's fires for the current prompt.
+	planTurnsWithoutUpdate uint32
+	planTurnsSinceNudge    uint32
+	planWrittenThisTurn    bool
+	planNudgedThisTurn     bool
+	todoGateFires          uint32
+	policy                 execution.Policy
+	executor               *execution.Executor
+	tempRoot               *execution.PrivateTempRoot
+	inspector              *git.Inspector
 	// nonRepositoryReported latches the "workspace is not a Git repository"
 	// notice. The reference agent warns once, when a session starts outside a
 	// repository, instead of repeating the warning on every turn, so this Runtime
@@ -186,16 +225,23 @@ type Runtime struct {
 	subagents             *subagent.Manager
 	childControls         *childControlRegistry
 	notifications         *subagent.NotificationInbox
-	children              map[string]*childProjection
-	agentDrafts           map[string]agentDraftRecord
-	teamGuard             teamCapabilityGuard
-	admission             *teamAdmission
-	team                  *teamCoordinator
-	teamRecovery          []TeamRecoveryCandidate
-	teamRecoveryErr       error
+	backgroundTasks       *background.Registry
+	backgroundOutput      *backgroundObserver
+	// childResults is the live predicate over this session's children: which
+	// child's terminal record a Tool read already carries, so a completion that
+	// a read answered does not wake the model a second time.
+	childResults    *childResultLedger
+	children        map[string]*childProjection
+	agentDrafts     map[string]agentDraftRecord
+	teamGuard       teamCapabilityGuard
+	admission       *teamAdmission
+	team            *teamCoordinator
+	teamRecovery    []TeamRecoveryCandidate
+	teamRecoveryErr error
 
 	writer      *eventWriter
 	publisher   *eventPublisher
+	artifacts   *sessionArtifacts
 	interaction *interaction
 	active      *runtimeOperation
 	recovery    InteractionRecovery
@@ -217,6 +263,9 @@ type Runtime struct {
 	notificationInflight map[string]struct{}
 	notificationMessages map[string][]string
 	notificationBatches  map[string]int
+	// backgroundAttempts bounds how often one parent message is handed to a
+	// turn, so a turn that never commits cannot spin the coordinator.
+	backgroundAttempts map[string]int
 }
 
 type runtimeOperation struct {
@@ -377,8 +426,8 @@ func openRuntime(
 		return nil, err
 	}
 	stack.add(func(context.Context) error { return handle.Close() })
-	planStore, err := planmode.NewStore(
-		options.Paths.SessionsDir(),
+	planStore, err := planmode.NewStoreAt(
+		handle.StateDir(),
 		handle.Metadata().ID,
 		planmode.DefaultLimits(),
 	)
@@ -397,6 +446,25 @@ func openRuntime(
 	}
 	if err := planStore.SaveState(ctx, planState); err != nil {
 		return nil, err
+	}
+
+	// The scheduled-task store is the plan store's sibling: a private directory
+	// under this session's own state directory. A Team Worker owns no Manager,
+	// so it offers no scheduler at all rather than one that can never fire.
+	var schedulerStore *scheduler.Store
+	if !openPolicy.teamWorker() {
+		schedulerStore, err = scheduler.NewStoreAt(
+			handle.StateDir(),
+			handle.Metadata().ID,
+			options.Execution.SchedulerOptions,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("coding runtime: open scheduler store: %w", err)
+		}
+
+		if err := schedulerStore.Load(ctx); err != nil {
+			return nil, fmt.Errorf("coding runtime: load scheduled tasks: %w", err)
+		}
 	}
 
 	policy, err := newRuntimePolicy(options)
@@ -456,6 +524,15 @@ func openRuntime(
 	loadedProfiles, err := agentprofile.Load(ctx, agentprofile.Options{
 		Paths: options.Paths, Tree: tree, ProjectTrusted: options.Trusted,
 		Limits: configured.AgentProfileLimits,
+	})
+	if err != nil {
+		return nil, err
+	}
+	loadedSubagentProfiles, err := subagentprofile.Load(ctx, subagentprofile.Options{
+		Paths: options.Paths, Tree: tree, ProjectTrusted: options.Trusted,
+		InlineRoles:    options.Config.Subagent.Roles,
+		InlinePersonas: options.Config.Subagent.Personas,
+		Limits:         configured.SubagentProfileLimits,
 	})
 	if err != nil {
 		return nil, err
@@ -546,8 +623,8 @@ func openRuntime(
 		return setup.Release(ctx)
 	})
 	integration := newIntegrationGeneration(
-		1, setup, connections, loadedResources, loadedProfiles, skillPolicy,
-		projectInstructions.SystemPrompt(), loadedPlugins, trustedHooks,
+		1, setup, connections, loadedResources, loadedProfiles, loadedSubagentProfiles,
+		skillPolicy, projectInstructions.SystemPrompt(), loadedPlugins, trustedHooks,
 	)
 	connectionsOwnedByStack = false
 	setupOwnedByStack = false
@@ -577,27 +654,32 @@ func openRuntime(
 			Environment: slices.Clone(configured.HooksEnvironment),
 			Limits:      hooks.DefaultLimits(),
 		},
-		handle:        handle,
-		repository:    repository,
-		session:       handle.Session(),
-		planStore:     planStore,
-		planMode:      planState,
-		policy:        policy,
-		executor:      executor,
-		tempRoot:      scratchRoot,
-		inspector:     inspector,
-		permissions:   permissions,
-		extensions:    extensionRuntime,
-		compiled:      slices.Clone(options.Extensions),
-		skillSettings: skillSettings,
-		integration:   integration,
-		generationID:  integration.ID(),
-		trusted:       options.Trusted,
-		observers:     newAgentObservers(options.AgentObservers),
-		telemetry:     newTelemetryObservers(options.TelemetryObservers),
-		admission:     newTeamAdmission(),
-		agentDrafts:   make(map[string]agentDraftRecord),
-		closeDone:     make(chan struct{}),
+		handle:           handle,
+		repository:       repository,
+		session:          handle.Session(),
+		planStore:        planStore,
+		scheduler:        schedulerStore,
+		schedulerOptions: options.Execution.SchedulerOptions,
+		planMode:         planState,
+		policy:           policy,
+		executor:         executor,
+		tempRoot:         scratchRoot,
+		inspector:        inspector,
+		permissions:      permissions,
+		extensions:       extensionRuntime,
+		compiled:         slices.Clone(options.Extensions),
+		skillSettings:    skillSettings,
+		integration:      integration,
+		generationID:     integration.ID(),
+		trusted:          options.Trusted,
+		observers:        newAgentObservers(options.AgentObservers),
+		telemetry:        newTelemetryObservers(options.TelemetryObservers),
+		admission:        newTeamAdmission(),
+		agentDrafts:      make(map[string]agentDraftRecord),
+		// The nudge interval starts spent, so the first nudge only waits for the
+		// turns-without-a-plan threshold.
+		planTurnsSinceNudge: planNudgeInterval,
+		closeDone:           make(chan struct{}),
 	}
 
 	runtime.journal, err = newInteractionJournal(runtime.session, nil)
@@ -608,6 +690,10 @@ func openRuntime(
 	if err != nil {
 		return nil, err
 	}
+	runtime.artifacts = newSessionArtifacts(handle, options.Paths.SessionsDir())
+	stack.add(func(context.Context) error { return runtime.artifacts.Close() })
+	runtime.recordPromptContextSnapshot()
+	runtime.pruneSessionMedia(ctx)
 
 	pending, err := runtime.session.Pending()
 	if err != nil {
@@ -643,7 +729,7 @@ func openRuntime(
 	if err != nil {
 		return nil, err
 	}
-	bootstrap, err := BootstrapState(BootstrapOptions{
+	bootstrapOptions := BootstrapOptions{
 		SessionID:           handle.Metadata().ID,
 		Provider:            resolved.Ref.Provider,
 		ModelID:             resolved.Ref.Model,
@@ -652,17 +738,58 @@ func openRuntime(
 		Path:                runtime.session.Path(),
 		HasPendingToolCalls: len(pending) > 0,
 		Tree:                treeSnapshot,
-	})
+	}
+	bootstrap, err := BootstrapState(bootstrapOptions)
 	if err != nil {
 		return nil, err
 	}
+	if bootstrap.OrphanedToolCalls {
+		// The previous stop left tool calls the journal cannot resume, so the
+		// Agent would refuse every later prompt. Answer them, then re-derive
+		// state over the settled tail so the transcript carries the results.
+		if _, settleErr := runtime.session.SettleDanglingToolCalls(
+			harness.DanglingToolCallInterrupted,
+		); settleErr != nil {
+			return nil, fmt.Errorf("coding runtime: settle interrupted tool calls: %w", settleErr)
+		}
+
+		interrupted := bootstrap.State.Diagnostics
+		bootstrapOptions.HasPendingToolCalls = false
+		bootstrapOptions.Path = runtime.session.Path()
+
+		bootstrap, err = BootstrapState(bootstrapOptions)
+		if err != nil {
+			return nil, err
+		}
+
+		bootstrap.State.Diagnostics = append(interrupted, bootstrap.State.Diagnostics...)
+	}
+
 	runtime.state = bootstrap.State
 	runtime.recovery = bootstrap.Recovery
 	runtime.publisher = newEventPublisher(runtime)
 	runtime.children = make(map[string]*childProjection)
 	runtime.childControls = newChildControlRegistry()
+	runtime.childResults = newChildResultLedger()
 	if !openPolicy.teamWorker() {
 		runtime.teamRecovery, runtime.teamRecoveryErr = runtime.discoverTeamRecovery(ctx)
+	}
+
+	// The background registry is process-local and owns every background task
+	// that outlives the Tool call that started it, whether a monitor or a
+	// backgrounded command. Its output files live in the session's own terminal
+	// directory.
+	runtime.backgroundOutput = newBackgroundObserver(runtime)
+	runtime.backgroundTasks, err = background.NewRegistry(background.Options{
+		OutputDir:        backgroundOutputDir(handle.Dir()),
+		Observer:         runtime.backgroundOutput,
+		KillToolName:     background.KillTaskToolName,
+		OutputBytes:      backgroundOutputBytes,
+		ShellOutputBytes: shellBackgroundOutputBytes,
+		TailBytes:        backgroundTailBytes,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("coding runtime: open background registry: %w", err)
 	}
 
 	runtime.controller, err = approval.New(
@@ -672,9 +799,17 @@ func openRuntime(
 		&runtime.pending,
 		policy,
 		executor,
-		tools.NewShellHandlerForSandbox(
+		tools.NewShellHandlerForSandboxWithOwner(
+			runtime.backgroundTasks,
 			options.Config.Sandbox,
 			options.Config.SandboxWorkspaceWrite.Network,
+			runtime.currentInteractionID,
+		),
+		tools.NewMonitorHandlerForSandboxWithOwner(
+			runtime.backgroundTasks,
+			options.Config.Sandbox,
+			options.Config.SandboxWorkspaceWrite.Network,
+			runtime.currentInteractionID,
 		),
 	)
 	if err != nil {
@@ -709,6 +844,15 @@ func openRuntime(
 				apply:         requestPolicy,
 			}
 		}
+		var activeMessages *subagent.MessagePorts
+		if runtime.config.ActiveAgentMessages {
+			// The messaging gate is a process-local surface with no durable
+			// state: the coordinator lives in the Manager's shared state, and
+			// these ports are the only deliveries it cannot make itself.
+			activeMessages = &subagent.MessagePorts{
+				DeliverParent: runtime.deliverChildMessageToParent,
+			}
+		}
 		runtime.subagents, err = subagent.New(subagent.Config{
 			Context:           ctx,
 			Repository:        repository,
@@ -720,11 +864,13 @@ func openRuntime(
 			Compaction:        childCompaction,
 			FullCompaction:    runtime.fullCompactionPolicy(),
 			RequestPolicy:     requestPolicy,
+			StructuredResults: runtime.config.Subagent.StructuredResults,
 			Lifecycle:         runtime.subagentHookLifecycle(),
 			Options:           configured.Subagent,
 			AgentObservers:    []func(context.Context, agent.Event){runtime.observers.observe},
 			EventObservers:    []subagent.AgentEventObserver{runtime.observeChildAgentEvent},
 			AdmissionObserver: runtime.observeSubagentAdmission,
+			ActiveMessages:    activeMessages,
 		})
 		if err != nil {
 			return nil, err
@@ -752,6 +898,7 @@ func openRuntime(
 	runtime.recordAgentPluginDiagnostics(ctx, integration.agentPluginSnapshot())
 	if !openPolicy.teamWorker() {
 		runtime.startNotificationCoordinator(ctx)
+		runtime.startSchedulerLoop(ctx)
 	}
 	stack.values = nil
 
@@ -845,6 +992,9 @@ func withExecutionDefaults(options ExecutionOptions) ExecutionOptions {
 	if options.AgentProfileLimits.MaxEntries == 0 {
 		options.AgentProfileLimits = agentprofile.DefaultLimits()
 	}
+	if options.SubagentProfileLimits.MaxEntries == 0 {
+		options.SubagentProfileLimits = subagentprofile.DefaultLimits()
+	}
 	if options.AgentPluginLimits.MaxPlugins == 0 {
 		options.AgentPluginLimits = agentplugin.DefaultLimits()
 	}
@@ -868,21 +1018,16 @@ func configuredSubagentOptions(
 	configured config.SubagentConfig,
 	override subagent.ExecutionOptions,
 ) subagent.ExecutionOptions {
-	if configured == (config.SubagentConfig{}) {
+	if configured.IsZero() {
 		configured = config.DefaultSubagentConfig()
 	}
 	limits := subagent.DefaultLimits()
-	limits.MaxTurns = configured.MaxTurns
-	limits.FinalizationTurns = min(2, configured.MaxTurns-1)
-	limits.MaxTokens = configured.MaxTokens
-	limits.MaxToolCalls = configured.MaxToolCalls
-	limits.MaxDuration = time.Duration(configured.MaxDurationMinutes) * time.Minute
 	result := subagent.ExecutionOptions{
-		Limits:                       limits,
-		MaxDepth:                     configured.MaxDepth,
-		MaxConcurrent:                configured.MaxConcurrent,
-		MaxSpawnedPerRootInteraction: configured.MaxSpawnedPerRootInteraction,
-		MaxAutoFollowUps:             configured.MaxAutoFollowUps,
+		Limits:           limits,
+		MaxDepth:         configured.MaxDepth,
+		MaxConcurrent:    configured.MaxConcurrent,
+		LimitBehavior:    subagent.ParseLimitBehavior(configured.LimitBehavior),
+		ForegroundBudget: subagentForegroundBudget(),
 	}
 	if override.Limits != (subagent.Limits{}) {
 		result.Limits = override.Limits
@@ -893,6 +1038,9 @@ func configuredSubagentOptions(
 	if override.MaxConcurrent != 0 {
 		result.MaxConcurrent = override.MaxConcurrent
 	}
+	// Neither admission count is a [subagents] surface, so the resolved value is
+	// zero (unlimited) unless the embedder explicitly sets one. The SDK keeps the
+	// switches; the coding agent carries no default.
 	if override.MaxSpawnedPerRootInteraction != 0 {
 		result.MaxSpawnedPerRootInteraction = override.MaxSpawnedPerRootInteraction
 	}
@@ -901,6 +1049,22 @@ func configuredSubagentOptions(
 	}
 
 	return result
+}
+
+// subagentForegroundBudget resolves the foreground queued-spawn budget. The
+// environment override wins over the default; a non-positive or unparseable
+// value keeps the default.
+func subagentForegroundBudget() time.Duration {
+	raw := strings.TrimSpace(os.Getenv(config.SubagentAwaitBudgetEnv))
+	if raw == "" {
+		return subagent.DefaultForegroundBudget
+	}
+	millis, err := strconv.Atoi(raw)
+	if err != nil || millis <= 0 {
+		return subagent.DefaultForegroundBudget
+	}
+
+	return time.Duration(millis) * time.Millisecond
 }
 
 func newRuntimeScratchRoot(productRoot string) (*execution.PrivateTempRoot, error) {
@@ -1014,7 +1178,9 @@ func openSession(
 	}
 
 	handle, err := repository.Open(ctx, session.OpenOptions{
-		ID: options.Session.ID, WorkspaceID: options.Workspace.Identity().Key(),
+		ID:            options.Session.ID,
+		WorkspaceID:   options.Workspace.Identity().Key(),
+		WorkspacePath: options.Workspace.Root(),
 	})
 	if err != nil {
 		return nil, true, err
@@ -1082,45 +1248,7 @@ func mergeAgentPluginDefinitions(
 	plugins codingmcp.Definitions,
 	maximum int,
 ) (codingmcp.Definitions, []codingmcp.ConnectionDiagnostic, error) {
-	values := base.List()
-	seen := make(map[string]struct{}, len(values))
-	for _, definition := range values {
-		seen[definition.ID] = struct{}{}
-	}
-	diagnostics := make([]codingmcp.ConnectionDiagnostic, 0)
-	for _, definition := range plugins.List() {
-		if _, duplicate := seen[definition.ID]; duplicate {
-			diagnostics = append(diagnostics, codingmcp.ConnectionDiagnostic{
-				ServerID: definition.ID, Stage: "configuration", Code: "definition_duplicate",
-				Message: fmt.Sprintf(
-					"Agent Plugin MCP server %q conflicts with another configured server and was ignored",
-					definition.ID,
-				),
-			})
-
-			continue
-		}
-		if len(values) >= maximum {
-			diagnostics = append(diagnostics, codingmcp.ConnectionDiagnostic{
-				ServerID: definition.ID, Stage: "configuration", Code: "definition_limit",
-				Message: fmt.Sprintf(
-					"Agent Plugin MCP server %q exceeds the client-wide server limit and was ignored",
-					definition.ID,
-				),
-			})
-
-			continue
-		}
-		seen[definition.ID] = struct{}{}
-		values = append(values, definition)
-	}
-
-	merged, err := codingmcp.NewDefinitions(values, maximum)
-	if err != nil {
-		return codingmcp.Definitions{}, nil, err
-	}
-
-	return merged, diagnostics, nil
+	return codingmcp.MergeIsolated(base, plugins, maximum)
 }
 
 func openRuntimeMCP(

@@ -4,7 +4,6 @@ package subagent
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,17 +12,16 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
 
 	"github.com/rsbin1178/pips/agent"
-	"github.com/rsbin1178/pips/agent/catalog"
 	"github.com/rsbin1178/pips/agent/harness"
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding/compaction"
 	"github.com/rsbin1178/pips/internal/coding/session"
-	"github.com/rsbin1178/pips/internal/coding/tools"
 	"github.com/rsbin1178/pips/internal/coding/workspace"
 )
 
@@ -37,11 +35,23 @@ const (
 // ExecutionOptions provides embedder/test overrides without adding a user
 // configuration protocol in P1. A zero Limits value selects DefaultLimits.
 type ExecutionOptions struct {
-	Limits                       Limits
-	MaxDepth                     int
-	MaxConcurrent                int
+	Limits        Limits
+	MaxDepth      int
+	MaxConcurrent int
+	// MaxSpawnedPerRootInteraction bounds how many children one root
+	// interaction may spawn in total. Zero is unlimited, matching the
+	// reference, which bounds only concurrency.
 	MaxSpawnedPerRootInteraction int
-	MaxAutoFollowUps             int
+	// MaxAutoFollowUps bounds how many notification batches one root may
+	// receive. Zero is unlimited, matching the reference's count-free
+	// auto-wake switch.
+	MaxAutoFollowUps int
+	// LimitBehavior selects queue or fail at the concurrent cap. The empty
+	// value selects queue.
+	LimitBehavior LimitBehavior
+	// ForegroundBudget bounds a foreground queued wait before the caller is
+	// handed off to the background. Zero selects DefaultForegroundBudget.
+	ForegroundBudget time.Duration
 }
 
 type sharedManagerState struct {
@@ -49,7 +59,15 @@ type sharedManagerState struct {
 
 	admission *admissionBudget
 	active    map[string]*Execution
-	maxDepth  int
+	// spawning holds the child sessions this tree has created but not yet
+	// registered as live executions. It is process-local delivery state: it
+	// lets a message park for a child whose durable session is exclusively
+	// locked by its own spawn.
+	spawning map[string]struct{}
+	maxDepth int
+	// messages is the process-local child messaging coordinator. It is nil
+	// while the messaging gate is closed, and it holds no durable state.
+	messages *MessageCoordinator
 }
 
 // Config contains the application-owned dependencies for one parent Session.
@@ -71,13 +89,21 @@ type Config struct {
 	// final-output schema. Custom dispatcher runners own their own integration.
 	FullCompaction *compaction.Policy
 	RequestPolicy  func(*ai.Request)
-	Lifecycle      Lifecycle
-	Options        ExecutionOptions
-	AgentObservers []func(context.Context, agent.Event)
-	EventObservers []AgentEventObserver
+	// StructuredResults restores the typed JSON result contract for builtin
+	// agents. The default is a free-text summary.
+	StructuredResults bool
+	Lifecycle         Lifecycle
+	Options           ExecutionOptions
+	AgentObservers    []func(context.Context, agent.Event)
+	EventObservers    []AgentEventObserver
 	// AdmissionObserver receives content-free shared-budget decisions. It is
 	// observational only and cannot veto or alter a reservation.
 	AdmissionObserver AdmissionObserver
+	// ActiveMessages opens the child messaging surface. A nil value keeps the
+	// gate closed: no messaging Tool is offered, and every delivery is refused
+	// rather than dropped. Its ports carry the Runtime-owned deliveries the
+	// coordinator cannot build itself.
+	ActiveMessages *MessagePorts
 	// Share joins this Manager to an existing root execution tree. It is
 	// required when Parent is a subagent Session.
 	Share *Manager
@@ -95,7 +121,6 @@ type Manager struct {
 
 	config           Config
 	limits           Limits
-	tools            []agent.Tool
 	lifecycle        context.Context
 	cancel           context.CancelFunc
 	active           map[string]*Execution
@@ -105,6 +130,7 @@ type Manager struct {
 	shared           *sharedManagerState
 	delegationDepth  int
 	maxAutoFollowUps int
+	foregroundBudget time.Duration
 	runs             sync.WaitGroup
 	waitOnce         sync.Once
 	waitDone         chan struct{}
@@ -125,6 +151,9 @@ type Execution struct {
 	tracker     *runTracker
 	hookContext string
 	permit      *admissionPermit
+	// finalizing marks that the terminal transition has begun. A finalizing
+	// execution no longer accepts messages.
+	finalizing atomic.Bool
 
 	cancelOnce sync.Once
 	mu         sync.Mutex
@@ -155,11 +184,6 @@ func New(config Config) (*Manager, error) {
 		return nil, err
 	}
 
-	readTools, err := buildReadTools(config)
-	if err != nil {
-		return nil, err
-	}
-
 	config.AgentObservers = slices.Clone(config.AgentObservers)
 	config.EventObservers = slices.Clone(config.EventObservers)
 	if config.Compaction != nil {
@@ -177,18 +201,16 @@ func New(config Config) (*Manager, error) {
 		maxConcurrent = defaultMaxConcurrent
 	}
 	maxSpawned := config.Options.MaxSpawnedPerRootInteraction
-	if maxSpawned == 0 {
-		maxSpawned = defaultMaxSpawned
-	}
 	maxAutoFollowUps := config.Options.MaxAutoFollowUps
-	if maxAutoFollowUps == 0 {
-		maxAutoFollowUps = 4
-	}
-	if maxAutoFollowUps < 1 || maxAutoFollowUps > 32 {
+	if maxAutoFollowUps < 0 || maxAutoFollowUps > 32 {
 		return nil, fmt.Errorf("%w: invalid manager concurrency limits", ErrInvalid)
 	}
 	if config.Options.MaxDepth < 0 || config.Options.MaxDepth > MaxDelegationDepth {
 		return nil, fmt.Errorf("%w: invalid manager delegation depth", ErrInvalid)
+	}
+	foregroundBudget := config.Options.ForegroundBudget
+	if foregroundBudget <= 0 {
+		foregroundBudget = DefaultForegroundBudget
 	}
 	var shared *sharedManagerState
 	if config.Share != nil {
@@ -200,13 +222,16 @@ func New(config Config) (*Manager, error) {
 			return nil, fmt.Errorf("%w: shared manager delegation depth mismatch", ErrInvalid)
 		}
 	} else {
-		admission, err := newAdmissionBudget(maxConcurrent, maxSpawned)
+		admission, err := newAdmissionBudget(
+			maxConcurrent, maxSpawned, config.Options.LimitBehavior,
+		)
 		if err != nil {
 			return nil, err
 		}
 		shared = &sharedManagerState{
 			admission: admission,
 			active:    make(map[string]*Execution),
+			spawning:  make(map[string]struct{}),
 			maxDepth:  config.Options.MaxDepth,
 		}
 	}
@@ -216,14 +241,30 @@ func New(config Config) (*Manager, error) {
 	}
 	lifecycle, cancel := context.WithCancel(context.WithoutCancel(lifecycleBase))
 
-	return &Manager{
-		config: config, limits: limits, tools: readTools,
+	manager := &Manager{
+		config: config, limits: limits,
 		lifecycle: lifecycle, cancel: cancel,
 		active: make(map[string]*Execution), admission: shared.admission, shared: shared,
 		delegationDepth:  config.DelegationDepth,
 		maxAutoFollowUps: maxAutoFollowUps,
+		foregroundBudget: foregroundBudget,
 		waitDone:         make(chan struct{}),
-	}, nil
+	}
+	manager.bindMessageCoordinator(config)
+
+	return manager, nil
+}
+
+// bindMessageCoordinator attaches the process-local messaging coordinator for
+// a tree-owning Manager. A nested Manager joins the tree's existing
+// coordinator through the shared state instead of creating a second one.
+func (m *Manager) bindMessageCoordinator(config Config) *Manager {
+	if m == nil || config.ActiveMessages == nil || config.Share != nil || m.shared == nil {
+		return m
+	}
+	m.shared.messages = newMessageCoordinator(m, *config.ActiveMessages)
+
+	return m
 }
 
 func inheritManagerConfig(config Config) Config {
@@ -246,7 +287,8 @@ func inheritManagerConfig(config Config) Config {
 	return config
 }
 
-// MaxAutoFollowUps returns the validated Runtime coordination bound.
+// MaxAutoFollowUps returns the validated Runtime coordination bound. Zero is
+// unlimited, matching the reference's count-free auto-wake switch.
 func (m *Manager) MaxAutoFollowUps() int {
 	if m == nil {
 		return 0
@@ -346,104 +388,6 @@ func validModelIdentity(value string) bool {
 	return value != "" && strings.TrimSpace(value) == value && !strings.ContainsAny(value, " \t\r\n")
 }
 
-func buildReadTools(config Config) ([]agent.Tool, error) {
-	local, err := tools.NewCatalog(config.Tree, tools.DefaultLimits())
-	if err != nil {
-		return nil, err
-	}
-
-	names := []string{readToolName, listToolName, globToolName, searchToolName}
-	if config.FullCompaction != nil {
-		history, err := catalog.New(catalog.Local("session", catalog.RiskRead, tools.NewHistoryTool(nil))...)
-		if err != nil {
-			return nil, err
-		}
-		local, err = catalog.Merge(local, history)
-		if err != nil {
-			return nil, err
-		}
-		names = append(names, tools.HistoryName)
-	}
-	policy := catalog.Policy{
-		TenantID:  config.Parent.Metadata().WorkspaceID,
-		Allowlist: slices.Clone(names),
-		MaxRisk:   catalog.RiskRead,
-	}
-
-	readTools, err := local.Tools(context.TODO(), policy, names...)
-	if err != nil {
-		return nil, err
-	}
-
-	for index, name := range names {
-		if readTools[index].Decl().Name != name {
-			return nil, fmt.Errorf("%w: read-only catalog mismatch", ErrInvalid)
-		}
-	}
-
-	return readTools, nil
-}
-
-func (m *Manager) builtinExecutionPlan(request Request) (ExecutionPlan, error) {
-	identity, err := BuiltinIdentity(request.Role)
-	if err != nil {
-		return ExecutionPlan{}, err
-	}
-	spec, err := specFor(request.Role)
-	if err != nil {
-		return ExecutionPlan{}, err
-	}
-	nativeStructuredOutput := m.config.Model.Capabilities().StructuredOutput
-	instructions, err := spec.instructionsFor(nativeStructuredOutput)
-	if err != nil {
-		return ExecutionPlan{}, err
-	}
-	schema, err := json.Marshal(spec.schema)
-	if err != nil {
-		return ExecutionPlan{}, fmt.Errorf("coding subagent: encode builtin output schema: %w", err)
-	}
-	output := OutputContract{
-		Format: OutputFormatBuiltin,
-		Name:   spec.name,
-		Schema: schema,
-	}
-	output.Digest = digestOutputContract(output)
-
-	capabilities := make([]EffectiveCapability, 0, len(m.tools))
-	for _, tool := range m.tools {
-		if tool == nil {
-			return ExecutionPlan{}, fmt.Errorf("%w: nil builtin tool", ErrInvalid)
-		}
-		source := "builtin:workspace"
-		if tool.Decl().Name == tools.HistoryName {
-			source = "builtin:session"
-		}
-		capabilities = append(capabilities, EffectiveCapability{
-			WireName: tool.Decl().Name,
-			Source:   source,
-			Risk:     readToolName,
-		})
-	}
-	plan := ExecutionPlan{
-		Schema:             ExecutionPlanSchema,
-		Identity:           identity,
-		GenerationID:       m.config.GenerationID,
-		Delivery:           request.Delivery,
-		Model:              modelName(m.config.Model),
-		Instructions:       instructions,
-		InstructionsDigest: digestText(instructions),
-		Capabilities:       capabilities,
-		Skills:             []string{},
-		Limits:             m.limits,
-		Output:             output,
-	}
-	if err := validateExecutionPlan(plan, false); err != nil {
-		return ExecutionPlan{}, err
-	}
-
-	return plan, nil
-}
-
 // Start reserves one execution slot and starts one owned goroutine.
 func (m *Manager) Start(
 	ctx context.Context,
@@ -481,44 +425,87 @@ func (m *Manager) start(
 	}
 
 	var err error
-	request, builtin, err := normalizeDispatchRequest(request)
+	request, err = normalizeDispatchRequest(request)
 	if err != nil {
 		return nil, err
+	}
+	request, err = m.applyWakeRequest(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	// A resume is resolved before the plan is compiled, because the source
+	// type and model replace whatever the caller asked for.
+	resume, resumeSource, err := m.resolveResumeSource(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if resumeSource != nil {
+			// The source is only read from and its transcript is already copied
+			// by the fork, so a close failure cannot change an early return.
+			_ = resumeSource.Close()
+		}
+	}()
+	if resume != nil {
+		request = applyResumeSource(request, resume)
 	}
 	if err := validateDispatchRequest(request, m.limits); err != nil {
 		return nil, err
 	}
 	request = m.normalizeRequest(ctx, request)
-	var plan ExecutionPlan
-	if builtin {
-		if m.config.Parent.Metadata().Kind == session.KindSubagent {
-			return nil, fmt.Errorf("%w: recursive builtin agents are unavailable", ErrInvalid)
+	if dispatcher == nil {
+		return nil, fmt.Errorf("%w: agent dispatcher is unavailable", ErrInvalid)
+	}
+	plan, err := dispatcher.Compile(ctx, request)
+	if err == nil {
+		err = validateDispatchedPlan(request, plan, m.limits)
+	}
+	if err == nil {
+		err = m.validateDelegationPlan(plan)
+	}
+	if err == nil {
+		err = validateResumePlan(resume, plan)
+	}
+	if err != nil {
+		return nil, err
+	}
+	// The durable record and lifecycle events keep the legacy builtin role
+	// projection; custom agents have none.
+	request.Role = plan.Identity.LegacyRole()
+	var (
+		foregroundPermit *admissionPermit
+		backgroundPermit *admissionPermit
+	)
+	if request.Delivery == DeliveryForeground {
+		permit, admitErr := m.reserveStart(ctx, request)
+		if admitErr != nil {
+			return nil, admitErr
 		}
-		if err := validateRequest(request, m.limits); err != nil {
-			return nil, err
-		}
-		plan, err = m.builtinExecutionPlan(request)
+		foregroundPermit = permit
 	} else {
-		if dispatcher == nil {
-			return nil, fmt.Errorf("%w: custom agent dispatcher is unavailable", ErrInvalid)
+		// A background spawn returns its subagent_id before its concurrency
+		// slot is granted, so only the cumulative root budget is claimed here.
+		permit, claimErr := m.admission.claim(
+			request.Delivery,
+			request.Ownership.RootInteractionID,
+			m.config.Parent.Metadata().Kind == session.KindSubagent,
+		)
+		if claimErr != nil {
+			m.observeAdmission(ctx, request, claimErr)
+
+			return nil, claimErr
 		}
-		plan, err = dispatcher.Compile(ctx, request)
-		if err == nil {
-			err = validateDispatchedPlan(request, plan, m.limits)
-		}
-		if err == nil {
-			err = m.validateDelegationPlan(plan)
-		}
-	}
-	if err != nil {
-		return nil, err
-	}
-	permit, err := m.reserveStart(ctx, request)
-	if err != nil {
-		return nil, err
+		backgroundPermit = permit
 	}
 	ownershipTransferred := false
-	defer func() { m.finishStarting(permit, ownershipTransferred) }()
+	defer func() {
+		if foregroundPermit != nil {
+			m.finishStarting(foregroundPermit, ownershipTransferred)
+		}
+		if backgroundPermit != nil && !ownershipTransferred {
+			backgroundPermit.release()
+		}
+	}()
 
 	startCtx, cancelStart := context.WithCancel(ctx)
 	stopLifecycle := context.AfterFunc(m.lifecycle, cancelStart)
@@ -544,18 +531,24 @@ func (m *Manager) start(
 		PlanDigest:       planDigest,
 	}
 
-	child, err := m.config.Repository.Create(startCtx, session.CreateOptions{
-		WorkspaceID:      parentMeta.WorkspaceID,
-		WorkspacePath:    parentMeta.WorkspacePath,
-		Kind:             session.KindSubagent,
-		ParentSessionID:  parentMeta.ID,
-		ParentRunID:      request.Ownership.ParentRunID,
-		Agent:            request.AgentID,
-		SubagentIdentity: &childIdentity,
-	})
-	if err != nil {
-		return nil, err
+	child, err := m.createChildSession(
+		startCtx, parentMeta, request, childIdentity, resume, resumeSource,
+	)
+	var sourceCloseErr error
+	if resumeSource != nil {
+		sourceCloseErr = resumeSource.Close()
+		resumeSource = nil
 	}
+	if err != nil || sourceCloseErr != nil {
+		if child != nil {
+			sourceCloseErr = errors.Join(sourceCloseErr, child.Close())
+		}
+
+		return nil, errors.Join(err, sourceCloseErr)
+	}
+
+	m.markSpawning(child.Metadata().ID)
+	defer m.unmarkSpawning(child.Metadata().ID)
 
 	created := record{
 		Schema:              recordSchema,
@@ -570,6 +563,7 @@ func (m *Manager) start(
 		ParentToolCallID:    request.Ownership.ParentToolCallID,
 		RootInteractionID:   request.Ownership.RootInteractionID,
 		Delivery:            request.Delivery,
+		Wake:                request.WakeOf != "",
 		Model:               plan.Model,
 		Limits:              journalLimits(plan.Limits),
 		TaskPreview:         preview(request.Task),
@@ -589,7 +583,11 @@ func (m *Manager) start(
 		stopParent = context.AfterFunc(ctx, cancel)
 	}
 	tracker := newRunTracker(created.Time, plan.Limits.MaxActivityTools)
-	tracker.task = request.Task
+	if resume != nil {
+		// A resumed child reports the source's usage plus its own, so the
+		// lineage's token accounting stays cumulative.
+		tracker.baselineUsage = resume.Usage
+	}
 	execution := &Execution{
 		manager:    m,
 		request:    request,
@@ -599,51 +597,15 @@ func (m *Manager) start(
 		child:      child,
 		tracker:    tracker,
 		stopParent: stopParent,
-		permit:     permit,
+		permit:     foregroundPermit,
 	}
-	if err := m.appendMirrored(child.Session(), created); err != nil {
+	if err := m.appendMirrored(child, created); err != nil {
 		cancel()
 		if stopParent != nil {
 			stopParent()
 		}
 
 		return nil, errors.Join(err, child.Close())
-	}
-	if !builtin {
-		runner, openErr := dispatcher.Open(runCtx, DispatchInput{
-			Plan: plan, Request: request, Child: child,
-			Observer: observer,
-			OnEvent: func(eventCtx context.Context, event agent.Event) {
-				m.observeChild(eventCtx, child, observer, request, created, tracker, event)
-			},
-		})
-		if openErr != nil {
-			cancel()
-			if stopParent != nil {
-				stopParent()
-			}
-			terminal := created
-			terminal.State = StateFailed
-			terminal.Code = "binding_failed"
-			terminal.Time = time.Now().UTC()
-			persistErr := m.appendMirrored(child.Session(), terminal)
-			// A custom binding can fail after the durable child record exists
-			// (for example a required capability disappears). Project both
-			// lifecycle edges so parent Runs views do not retain a phantom
-			// created child. The durable journal remains authoritative if an
-			// observer is already detached.
-			createdObserverErr := emitObserver(runCtx, observer, eventFromRecord(created))
-			terminalObserverErr := emitObserver(runCtx, observer, eventFromRecord(terminal))
-
-			return nil, errors.Join(
-				openErr,
-				persistErr,
-				createdObserverErr,
-				terminalObserverErr,
-				child.Close(),
-			)
-		}
-		execution.runner = runner
 	}
 	if m.config.Lifecycle.BeforeStart != nil {
 		execution.hookContext = m.config.Lifecycle.BeforeStart(runCtx, LifecycleStart{
@@ -654,6 +616,42 @@ func (m *Manager) start(
 			Ownership:      request.Ownership,
 		})
 	}
+	runner, openErr := dispatcher.Open(runCtx, DispatchInput{
+		Plan: plan, Request: request, Child: child,
+		Observer: observer,
+		OnEvent: func(eventCtx context.Context, event agent.Event) {
+			m.observeChild(eventCtx, child, observer, request, created, tracker, event)
+		},
+		SystemSuffix: execution.hookContext,
+		Resume:       resume,
+	})
+	if openErr != nil {
+		cancel()
+		if stopParent != nil {
+			stopParent()
+		}
+		terminal := created
+		terminal.State = StateFailed
+		terminal.Code = "binding_failed"
+		terminal.Time = time.Now().UTC()
+		persistErr := m.appendMirrored(child, terminal)
+		// A binding can fail after the durable child record exists (for
+		// example a required capability disappears). Project both lifecycle
+		// edges so parent Runs views do not retain a phantom created child.
+		// The durable journal remains authoritative if an observer is already
+		// detached.
+		createdObserverErr := emitObserver(runCtx, observer, createdEventFrom(created, resume != nil))
+		terminalObserverErr := emitObserver(runCtx, observer, eventFromRecord(terminal))
+
+		return nil, errors.Join(
+			openErr,
+			persistErr,
+			createdObserverErr,
+			terminalObserverErr,
+			child.Close(),
+		)
+	}
+	execution.runner = runner
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
@@ -666,7 +664,7 @@ func (m *Manager) start(
 		terminal.State = StateCanceled
 		terminal.Code = "manager_closed"
 		terminal.Time = time.Now().UTC()
-		persistErr := m.appendMirrored(child.Session(), terminal)
+		persistErr := m.appendMirrored(child, terminal)
 		runnerCloseErr := error(nil)
 		if execution.runner != nil {
 			runnerCloseErr = execution.runner.Close(context.WithoutCancel(startCtx))
@@ -686,22 +684,72 @@ func (m *Manager) start(
 		return nil, errors.Join(err, closeRunner(context.WithoutCancel(startCtx), execution.runner), child.Close())
 	}
 	m.runs.Add(1)
-	permit.commit()
+	if foregroundPermit != nil {
+		foregroundPermit.commit()
+	}
 	ownershipTransferred = true
 	m.mu.Unlock()
 
-	observerErr := emitObserver(runCtx, observer, eventFromRecord(created))
+	observerErr := emitObserver(runCtx, observer, createdEventFrom(created, resume != nil))
 	if observerErr != nil {
 		execution.Cancel()
 	}
 
 	go func() {
 		defer m.runs.Done()
+		// A background spawn already returned its subagent_id, so it waits for
+		// a concurrency slot here rather than in the caller.
+		if execution.permit == nil {
+			if admitErr := m.activateBackground(runCtx, request, backgroundPermit); admitErr != nil {
+				backgroundPermit.release()
+				execution.runner = errorRunner{err: admitErr}
+			} else {
+				execution.permit = backgroundPermit
+				m.finishStarting(backgroundPermit, true)
+			}
+		}
+		if execution.permit != nil {
+			execution.permit.commit()
+		}
 		m.run(runCtx, execution, child, observer, created, observerErr)
 	}()
 
 	return execution, nil
 }
+
+// activateBackground waits for the concurrency slot of an already-claimed
+// background permit and marks the Start as in flight.
+func (m *Manager) activateBackground(
+	ctx context.Context,
+	request Request,
+	permit *admissionPermit,
+) error {
+	if err := m.admission.activate(
+		ctx,
+		permit,
+		request.Delivery,
+		0,
+		func() { m.observeAdmissionQueued(ctx, request) },
+	); err != nil {
+		m.observeAdmission(ctx, request, err)
+
+		return err
+	}
+
+	return m.beginStarting(ctx, request)
+}
+
+// errorRunner reports an admission failure through the ordinary runner path so
+// the durable record and lifecycle events match any other failed child.
+type errorRunner struct {
+	err error
+}
+
+func (r errorRunner) Run(context.Context, string) (RunnerResult, error) {
+	return RunnerResult{}, r.err
+}
+
+func (errorRunner) Close(context.Context) error { return nil }
 
 func closeRunner(ctx context.Context, runner Runner) error {
 	if runner == nil {
@@ -715,25 +763,37 @@ func (m *Manager) reserveStart(
 	ctx context.Context,
 	request Request,
 ) (*admissionPermit, error) {
+	permit, err := m.admission.reserve(
+		ctx,
+		request.Delivery,
+		request.Ownership.RootInteractionID,
+		m.config.Parent.Metadata().Kind == session.KindSubagent,
+		m.foregroundBudget,
+		func() { m.observeAdmissionQueued(ctx, request) },
+	)
+	if err != nil {
+		m.observeAdmission(ctx, request, err)
+
+		return nil, err
+	}
+	if err := m.beginStarting(ctx, request); err != nil {
+		permit.release()
+
+		return nil, err
+	}
+
+	return permit, nil
+}
+
+// beginStarting marks one Start as in flight so Close waits for it.
+func (m *Manager) beginStarting(ctx context.Context, request Request) error {
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
 		m.observeAdmission(ctx, request, ErrClosed)
 
-		return nil, ErrClosed
+		return ErrClosed
 	}
-	permit, err := m.admission.reserve(
-		request.Delivery,
-		request.Ownership.RootInteractionID,
-		m.config.Parent.Metadata().Kind == session.KindSubagent,
-	)
-	if err != nil {
-		m.mu.Unlock()
-		m.observeAdmission(ctx, request, err)
-
-		return nil, err
-	}
-
 	if m.starting == 0 {
 		m.startingDone = make(chan struct{})
 	}
@@ -741,7 +801,7 @@ func (m *Manager) reserveStart(
 	m.mu.Unlock()
 	m.observeAdmission(ctx, request, nil)
 
-	return permit, nil
+	return nil
 }
 
 func (m *Manager) observeAdmission(ctx context.Context, request Request, admissionErr error) {
@@ -758,6 +818,22 @@ func (m *Manager) observeAdmission(ctx context.Context, request Request, admissi
 		event.Reason = admissionReason(admissionErr)
 	}
 
+	m.emitAdmission(ctx, event)
+}
+
+// observeAdmissionQueued reports that a spawn joined the arrival-order queue.
+func (m *Manager) observeAdmissionQueued(ctx context.Context, request Request) {
+	if m == nil || m.config.AdmissionObserver == nil {
+		return
+	}
+
+	m.emitAdmission(ctx, AdmissionEvent{
+		Outcome: AdmissionOutcomeQueued, Delivery: request.Delivery,
+		DelegationDepth: m.delegationDepth,
+	})
+}
+
+func (m *Manager) emitAdmission(ctx context.Context, event AdmissionEvent) {
 	func() {
 		defer func() { _ = recover() }()
 		m.config.AdmissionObserver(ctx, event)
@@ -766,10 +842,10 @@ func (m *Manager) observeAdmission(ctx context.Context, request Request, admissi
 
 func admissionReason(err error) AdmissionReason {
 	switch {
-	case errors.Is(err, ErrBusy):
-		return AdmissionReasonBusy
-	case errors.Is(err, ErrCapacity):
+	case errors.Is(err, ErrConcurrentLimit):
 		return AdmissionReasonCapacity
+	case errors.Is(err, ErrQueueTimeout):
+		return AdmissionReasonQueueTimeout
 	case errors.Is(err, ErrSpawnLimit):
 		return AdmissionReasonSpawnLimit
 	case errors.Is(err, ErrClosed):
@@ -868,6 +944,30 @@ func (e *Execution) Cancel() {
 	e.cancelOnce.Do(e.cancel)
 }
 
+// isFinalizing reports whether this execution has begun its terminal
+// transition, which is the boundary at which it stops accepting messages.
+func (e *Execution) isFinalizing() bool {
+	if e == nil {
+		return true
+	}
+
+	return e.finalizing.Load()
+}
+
+// messageSink returns the live Runner's message sink. It is nil for an
+// execution whose runner does not accept messages.
+func (e *Execution) messageSink() MessageSink {
+	if e == nil || e.runner == nil {
+		return nil
+	}
+	sink, ok := e.runner.(MessageSink)
+	if !ok {
+		return nil
+	}
+
+	return sink
+}
+
 // Wait waits for one owned child to become terminal. A child that already
 // completed is reconstructed from its durable journal.
 func (m *Manager) Wait(ctx context.Context, childSessionID string) (Result, error) {
@@ -885,7 +985,7 @@ func (m *Manager) Wait(ctx context.Context, childSessionID string) (Result, erro
 	if err != nil {
 		return Result{}, err
 	}
-	result := resultFromDetail(detail)
+	result := ResultFromDetail(detail)
 	if result.Outcome == OutcomeSucceeded {
 		return result, nil
 	}
@@ -937,12 +1037,17 @@ func (m *Manager) CancelRoot(rootInteractionID string) int {
 	return len(values)
 }
 
-func resultFromDetail(detail Detail) Result {
+// ResultFromDetail projects one inspected child into the result the spawn Tool
+// and the task-output Tool both render. The persisted plan decides whether the
+// value is structured, so a legacy builtin plan keeps its own shape.
+func ResultFromDetail(detail Detail) Result {
 	value := detail.Summary
 	result := Result{
 		Identity: value.Identity, Role: value.Role, ChildSessionID: value.ChildSessionID,
+		Persona: detail.Plan.Persona, WorktreePath: value.WorktreePath,
 		Code: value.Code, Turns: value.Turns, ToolCalls: value.ToolCalls,
 		Usage: value.Usage, Duration: value.Duration, Value: detail.Result,
+		Structured: detail.Plan.Output.Format != OutputFormatText,
 	}
 	switch value.State {
 	case StateSucceeded:
@@ -1006,22 +1111,17 @@ type runTracker struct {
 	stopCause            runStopCause
 	finalizationCause    finalizationCause
 	finalizationInjected bool
-	stopAfterTurn        int
-	lastToolFingerprint  [sha256.Size]byte
-	repeatedToolCalls    int
-	repeatWarningIssued  bool
 	usage                ai.Usage
+	baselineUsage        ai.Usage
 	value                any
 	text                 string
 	err                  error
+	cwd                  string
+	worktreePath         string
 	activity             Activity
 	activitySummary      ActivitySummary
 	toolIndex            map[string]int
 	maxTools             int
-	task                 string
-	fixedTokens          int
-	historyAllowed       bool
-	checkpointErr        error
 }
 
 type runStopCause uint8
@@ -1077,378 +1177,52 @@ func (m *Manager) run(
 	tracker.err = observerErr
 	startedAt := tracker.activity.StartedAt
 	tracker.mu.Unlock()
-	if execution.runner != nil {
-		output, runErr := execution.runner.Run(ctx, execution.request.Task)
-		tracker.mu.Lock()
-		tracker.value = output.Value
-		tracker.text = output.Text
-		tracker.toolCalls = output.ToolCalls
-		tracker.mu.Unlock()
-		m.finishExecution(
-			ctx,
-			execution,
-			child,
-			observer,
-			created,
-			tracker,
-			startedAt,
-			output.Run,
-			runErr,
-		)
 
-		return
-	}
-
-	spec, specErr := specFor(execution.request.Role)
-	if specErr != nil {
-		m.finishExecution(ctx, execution, child, observer, created, tracker, startedAt, nil, specErr)
-		return
-	}
-
-	useNativeResponseFormat := m.config.Model.Capabilities().StructuredOutput
-	instructions := execution.plan.Instructions
-
-	onEvent := func(eventCtx context.Context, event agent.Event) {
-		m.observeChild(
-			eventCtx,
-			child,
-			observer,
-			execution.request,
-			created,
-			tracker,
-			event,
-		)
-	}
-	options := m.agentOptions(execution.plan.Identity, child, tracker, spec, useNativeResponseFormat)
-
-	childHarness, err := harness.New(
-		compaction.GuardModel(m.config.Model, m.config.FullCompaction),
-		child.Session(),
-		harness.WithSystem(instructions),
-		harness.WithSystemSuffix(execution.hookContext),
-		harness.WithTools(m.childTools(child, tracker)...),
-		harness.WithOnEvent(onEvent),
-		harness.WithAgentOptions(options...),
+	task := execution.request.Task
+	stopHookActive := false
+	var (
+		output RunnerResult
+		runErr error
 	)
-	if err == nil {
-		var result *agent.RunResult
-
-		result, err = childHarness.Prompt(ctx, execution.request.Task)
-		stopHookActive := false
-		for err == nil && result != nil && m.config.Lifecycle.BeforeStop != nil {
-			decision := m.config.Lifecycle.BeforeStop(ctx, LifecycleStop{
-				ChildSessionID:       child.Metadata().ID,
-				Identity:             execution.plan.Identity,
-				Role:                 execution.request.Role,
-				Ownership:            execution.request.Ownership,
-				StopHookActive:       stopHookActive,
-				LastAssistantMessage: result.Text(),
-			})
-			reason := strings.TrimSpace(decision.Reason)
-			if !decision.Continue || reason == "" {
-				break
-			}
-
-			stopHookActive = true
-			result, err = childHarness.Prompt(ctx, reason)
+	for {
+		output, runErr = execution.runner.Run(ctx, task)
+		if runErr != nil || m.config.Lifecycle.BeforeStop == nil {
+			break
 		}
-		m.finishExecution(ctx, execution, child, observer, created, tracker, startedAt, result, err)
-
-		return
-	}
-
-	m.finishExecution(ctx, execution, child, observer, created, tracker, startedAt, nil, err)
-}
-
-//nolint:gocyclo,wsl_v5 // Each option keeps its execution boundary beside the policy it enforces.
-func (m *Manager) agentOptions(
-	identity AgentIdentity,
-	child *session.Handle,
-	tracker *runTracker,
-	spec roleSpec,
-	useNativeResponseFormat bool,
-) []agent.Option {
-	return []agent.Option{
-		agent.WithName("subagent/" + identity.ID),
-		agent.WithMaxTurns(m.limits.MaxTurns),
-		agent.WithMaxTokens(m.limits.MaxTokens),
-		agent.WithParallelTools(1),
-		agent.WithBeforeTool(func(_ context.Context, info agent.ToolCallInfo) agent.ToolDecision {
-			tracker.mu.Lock()
-			defer tracker.mu.Unlock()
-
-			if m.limits.MaxToolCalls > 0 && tracker.toolCalls >= m.limits.MaxToolCalls {
-				tracker.stopCause = runStopMaxToolCalls
-				return agent.DenyTool("subagent tool-call budget exhausted")
-			}
-
-			tracker.toolCalls++
-			switch tracker.trackToolFingerprintLocked(
-				info.ToolCall,
-				m.limits.RepeatedToolCallLimit,
-			) {
-			case repeatedToolContinue:
-			case repeatedToolWarn:
-				return agent.DenyTool(
-					"identical tool call repeated; choose a different action or finalize from existing evidence",
-				)
-			case repeatedToolFinalize:
-				if tracker.finalizationCause == finalizationNone {
-					tracker.finalizationCause = finalizationNoProgress
-				}
-
-				return agent.DenyTool(
-					"identical tool call repeated after a no-progress warning; finalize from existing evidence",
-				)
-			}
-
-			return agent.ToolDecision{}
-		}),
-		agent.WithStopWhen(func(info agent.RunInfo) bool {
-			tracker.mu.Lock()
-			defer tracker.mu.Unlock()
-
-			if tracker.stopCause == runStopMaxToolCalls {
-				return true
-			}
-			if tracker.finalizationCause == finalizationNoProgress &&
-				tracker.finalizationInjected && info.Turns >= tracker.stopAfterTurn {
-				tracker.stopCause = runStopNoProgress
-
-				return true
-			}
-
-			return false
-		}),
-		agent.WithPrepareTurn(func(ctx context.Context, info agent.RunInfo) agent.TurnUpdate {
-			return m.prepareChildTurn(ctx, info, child, tracker)
-		}),
-		agent.WithOutputGuardrail("subagent_result", func(
-			_ context.Context,
-			info agent.OutputGuardrailInfo,
-		) error {
-			text := messageText(info.Message)
-
-			value, err := spec.decodeResult(text, m.limits, !useNativeResponseFormat)
-			if err != nil {
-				return err
-			}
-
-			tracker.mu.Lock()
-			tracker.value = value
-			tracker.text = text
-			tracker.mu.Unlock()
-
-			return nil
-		}),
-		agent.WithRequest(func(request *ai.Request) {
-			if m.config.RequestPolicy != nil {
-				m.config.RequestPolicy(request)
-			}
-
-			if request.MaxTokens == nil || *request.MaxTokens > m.limits.MaxOutputTokens {
-				request.MaxTokens = ai.Ptr(m.limits.MaxOutputTokens)
-			}
-
-			if m.config.FullCompaction != nil {
-				tracker.captureCheckpointRequest(request)
-			}
-			request.ResponseFormat = nil
-			if useNativeResponseFormat {
-				request.ResponseFormat = &ai.ResponseFormat{
-					Name: spec.name, Schema: spec.schema, Strict: true,
-				}
-			}
-		}),
-	}
-}
-
-func (m *Manager) prepareChildTurn(
-	ctx context.Context,
-	info agent.RunInfo,
-	child *session.Handle,
-	tracker *runTracker,
-) agent.TurnUpdate {
-	finalization, alreadyInjected, skip := m.childPreparationState(info, tracker)
-	if skip {
-		return agent.TurnUpdate{}
-	}
-
-	// The convergence turn is deliberately terminal. Compacting after it would
-	// add model I/O without giving the child another productive turn.
-	if finalization == finalizationNoProgress && alreadyInjected {
-		return agent.TurnUpdate{}
-	}
-
-	messages, err := m.compactChildAfterToolTurn(ctx, info, child, tracker)
-	if err != nil {
-		return agent.TurnUpdate{Err: err}
-	}
-
-	shouldFinalize, alreadyInjected := m.markChildFinalization(info.Turns, tracker)
-
-	if !shouldFinalize || alreadyInjected {
-		if messages == nil {
-			return agent.TurnUpdate{}
+		decision := m.config.Lifecycle.BeforeStop(ctx, LifecycleStop{
+			ChildSessionID:       child.Metadata().ID,
+			Identity:             execution.plan.Identity,
+			Role:                 execution.request.Role,
+			Ownership:            execution.request.Ownership,
+			StopHookActive:       stopHookActive,
+			LastAssistantMessage: output.Text,
+		})
+		reason := strings.TrimSpace(decision.Reason)
+		if !decision.Continue || reason == "" {
+			break
 		}
-
-		return agent.TurnUpdate{ReplaceMessages: messages}
+		stopHookActive = true
+		task = reason
 	}
-
-	return childFinalizationUpdate(child, messages)
-}
-
-func (m *Manager) childPreparationState(
-	info agent.RunInfo,
-	tracker *runTracker,
-) (finalizationCause, bool, bool) {
 	tracker.mu.Lock()
-	defer tracker.mu.Unlock()
-
-	stopForTokens := m.limits.MaxTokens > 0 &&
-		info.Usage.InputTokens+info.Usage.OutputTokens >= m.limits.MaxTokens
-	skip := tracker.stopCause != runStopNone || stopForTokens
-
-	return tracker.finalizationCause, tracker.finalizationInjected, skip
-}
-
-func (m *Manager) markChildFinalization(turns int, tracker *runTracker) (bool, bool) {
-	tracker.mu.Lock()
-	defer tracker.mu.Unlock()
-
-	if tracker.finalizationCause == finalizationNone && m.limits.MaxTurns > 0 &&
-		m.limits.FinalizationTurns > 0 &&
-		turns >= m.limits.MaxTurns-m.limits.FinalizationTurns {
-		tracker.finalizationCause = finalizationTurnBudget
-	}
-	shouldFinalize := tracker.finalizationCause != finalizationNone
-	alreadyInjected := tracker.finalizationInjected
-	if shouldFinalize && !alreadyInjected {
-		tracker.finalizationInjected = true
-		if tracker.finalizationCause == finalizationNoProgress {
-			tracker.stopAfterTurn = turns + 1
-		}
-	}
-
-	return shouldFinalize, alreadyInjected
-}
-
-func childFinalizationUpdate(
-	child *session.Handle,
-	messages []ai.Message,
-) agent.TurnUpdate {
-	if messages == nil {
-		contextSnapshot, err := child.Session().Context()
-		if err != nil {
-			return agent.TurnUpdate{
-				Err: fmt.Errorf("coding subagent: load finalization context: %w", err),
-			}
-		}
-		messages = slices.Clone(contextSnapshot.Messages)
-	}
-	messages = append(messages, ai.UserText(finalizationInstruction))
-
-	return agent.TurnUpdate{
-		ReplaceMessages: messages,
-		Tools:           []agent.Tool{},
-	}
-}
-
-func (m *Manager) compactChildAfterToolTurn(
-	ctx context.Context,
-	info agent.RunInfo,
-	child *session.Handle,
-	tracker *runTracker,
-) ([]ai.Message, error) {
-	if info.Response == nil || len(info.Response.ToolCalls()) == 0 {
-		return nil, nil
-	}
-	if m.config.FullCompaction != nil {
-		return m.checkpointChildAfterToolTurn(ctx, child, tracker)
-	}
-	if m.config.Compaction == nil {
-		return nil, nil
-	}
-
-	settings := *m.config.Compaction
-	path := child.Session().Path()
-	if !harness.ShouldCompact(harness.EstimateContext(path), settings) ||
-		harness.PlanCompaction(path, settings) == nil {
-		return nil, nil
-	}
-
-	compactor, err := harness.New(
-		m.config.Model,
-		child.Session(),
-		harness.WithCompaction(settings),
-		harness.WithSummaryModel(m.config.SummaryModel),
+	tracker.value = output.Value
+	tracker.text = output.Text
+	tracker.toolCalls = output.ToolCalls
+	tracker.cwd = output.Cwd
+	tracker.worktreePath = output.WorktreePath
+	tracker.stopCause = stopCauseFromRunner(output.StopCause)
+	tracker.mu.Unlock()
+	m.finishExecution(
+		ctx,
+		execution,
+		child,
+		observer,
+		created,
+		tracker,
+		startedAt,
+		output.Run,
+		runErr,
 	)
-	if err == nil {
-		err = compactor.Compact(ctx, "")
-	}
-	if err != nil {
-		return nil, fmt.Errorf("coding subagent: compact child context: %w", err)
-	}
-
-	contextSnapshot, err := child.Session().Context()
-	if err != nil {
-		return nil, fmt.Errorf("coding subagent: reload compacted child context: %w", err)
-	}
-
-	return slices.Clone(contextSnapshot.Messages), nil
-}
-
-const finalizationInstruction = `[System] The evidence-gathering phase is complete and tools are now disabled.
-Return the required final response now using only evidence already collected.
-Do not request more tools or describe unfinished work.`
-
-type repeatedToolAction uint8
-
-const (
-	repeatedToolContinue repeatedToolAction = iota
-	repeatedToolWarn
-	repeatedToolFinalize
-)
-
-func (t *runTracker) trackToolFingerprintLocked(call agent.ToolCall, limit int) repeatedToolAction {
-	fingerprint := toolFingerprint(call)
-	if fingerprint == t.lastToolFingerprint {
-		t.repeatedToolCalls++
-	} else {
-		t.lastToolFingerprint = fingerprint
-		t.repeatedToolCalls = 1
-		t.repeatWarningIssued = false
-	}
-
-	if t.repeatedToolCalls < limit {
-		return repeatedToolContinue
-	}
-
-	if !t.repeatWarningIssued {
-		t.repeatWarningIssued = true
-
-		return repeatedToolWarn
-	}
-
-	return repeatedToolFinalize
-}
-
-func toolFingerprint(call agent.ToolCall) [sha256.Size]byte {
-	arguments := call.Args
-
-	var decoded any
-	if err := json.Unmarshal(call.Args, &decoded); err == nil {
-		if canonical, marshalErr := json.Marshal(decoded); marshalErr == nil {
-			arguments = canonical
-		}
-	}
-
-	input := make([]byte, 0, len(call.Name)+1+len(arguments))
-	input = append(input, call.Name...)
-	input = append(input, 0)
-	input = append(input, arguments...)
-
-	return sha256.Sum256(input)
 }
 
 func (m *Manager) observeChild(
@@ -1500,9 +1274,9 @@ func trackChildEvent(
 
 	switch payload := event.Payload().(type) {
 	case agent.TurnCompleted:
-		tracker.usage = payload.Usage
+		tracker.usage = addUsage(tracker.baselineUsage, payload.Usage)
 	case agent.RunCompleted:
-		tracker.usage = payload.Usage
+		tracker.usage = addUsage(tracker.baselineUsage, payload.Usage)
 	}
 
 	_, runStarted := event.Payload().(agent.RunStarted)
@@ -1823,7 +1597,7 @@ func (m *Manager) recordChildStart(
 	started.ChildRunID = event.RunID
 	started.Time = event.Time
 
-	if err := m.appendMirrored(child.Session(), started); err != nil {
+	if err := m.appendMirrored(child, started); err != nil {
 		m.failChildObservation(child.Metadata().ID, tracker, err)
 	}
 
@@ -1878,6 +1652,9 @@ func (m *Manager) finishExecution(
 	runErr error,
 ) {
 	execution.Cancel()
+	// The child stops accepting messages at the start of its terminal
+	// transition, before its runner releases the child's pending inbox.
+	execution.finalizing.Store(true)
 	tracker.mu.Lock()
 	trackedErr := tracker.err
 	value := tracker.value
@@ -1886,6 +1663,9 @@ func (m *Manager) finishExecution(
 	turns := tracker.turns
 	toolCalls := tracker.toolCalls
 	usage := tracker.usage
+	baselineUsage := tracker.baselineUsage
+	cwd := tracker.cwd
+	worktreePath := tracker.worktreePath
 	stopCause := tracker.stopCause
 	convergenceActive := tracker.finalizationCause == finalizationNoProgress &&
 		tracker.finalizationInjected
@@ -1901,16 +1681,19 @@ func (m *Manager) finishExecution(
 		Role:           execution.request.Role,
 		ChildSessionID: child.Metadata().ID,
 		ChildRunID:     runID,
+		Persona:        execution.plan.Persona,
+		WorktreePath:   worktreePath,
 		Turns:          turns,
 		ToolCalls:      toolCalls,
 		Usage:          usage,
 		Duration:       time.Since(startedAt),
+		Structured:     execution.plan.Output.Format != OutputFormatText,
 		Value:          value,
 	}
 	if runResult != nil {
 		result.Stop = runResult.Stop
 		result.Turns = runResult.Turns
-		result.Usage = runResult.Usage
+		result.Usage = addUsage(baselineUsage, runResult.Usage)
 	}
 
 	tokenExceeded := execution.plan.Limits.MaxTokens > 0 &&
@@ -1938,11 +1721,19 @@ func (m *Manager) finishExecution(
 	terminal.Usage = result.Usage
 	terminal.DurationMillis = result.Duration.Milliseconds()
 	terminal.ResultBytes = len(text)
+	terminal.Cwd = cwd
+	terminal.WorktreePath = worktreePath
 	terminal.Time = time.Now().UTC()
-	persistErr := m.appendMirrored(child.Session(), terminal)
+	persistErr := m.appendMirrored(child, terminal)
 	runnerCloseErr := error(nil)
 	if execution.runner != nil {
 		runnerCloseErr = execution.runner.Close(context.WithoutCancel(ctx))
+	}
+	// A finalizing child's unconsumed messages are revoked after a bounded
+	// drain. No sender is awaiting them any more, but the tree-wide in-flight
+	// accounting must not leak.
+	if m.shared != nil && m.shared.messages != nil {
+		m.shared.messages.finalizeTarget(terminal.ChildSessionID)
 	}
 	closeErr := child.Close()
 	execution.permit.release()
@@ -1983,6 +1774,17 @@ func (m *Manager) finishExecution(
 	}
 	m.shared.mu.Unlock()
 	close(execution.done)
+}
+
+// stopCauseFromRunner maps a child runner's own stop cause onto the Manager's
+// classification. The repeat guard is the only reporter today, and it ends the
+// run as no_progress.
+func stopCauseFromRunner(cause string) runStopCause {
+	if cause == StopCauseNoProgress {
+		return runStopNoProgress
+	}
+
+	return runStopNone
 }
 
 func (m *Manager) activeExecution(childSessionID string) *Execution {
@@ -2082,6 +1884,17 @@ func stateForOutcome(outcome Outcome) State {
 	}
 }
 
+// createdEventFrom renders the created lifecycle the Runtime's child observer
+// sees. A child created from a resume source continues another child's
+// conversation, and the flag tells the projection to read the history that child
+// already owns before it projects this run.
+func createdEventFrom(value record, inherited bool) Event {
+	event := eventFromRecord(value)
+	event.Inherited = inherited
+
+	return event
+}
+
 func eventFromRecord(value record) Event {
 	return Event{
 		State:               value.State,
@@ -2094,6 +1907,7 @@ func eventFromRecord(value record) Event {
 		ParentToolCallID:    value.ParentToolCallID,
 		RootInteractionID:   value.RootInteractionID,
 		Delivery:            value.Delivery,
+		Wake:                value.Wake,
 		ChildRunID:          value.ChildRunID,
 		Model:               value.Model,
 		TaskPreview:         value.TaskPreview,
@@ -2168,8 +1982,11 @@ func messageText(message ai.Message) string {
 	return result.String()
 }
 
-func modelName(model ai.LanguageModel) string {
-	return string(model.Provider()) + "/" + model.ModelID()
+// addUsage returns the cumulative usage of a child lineage.
+func addUsage(base, delta ai.Usage) ai.Usage {
+	base.Add(delta)
+
+	return base
 }
 
 func cloneResult(result Result) Result {
@@ -2183,7 +2000,7 @@ func cloneResult(result Result) Result {
 		return result
 	}
 
-	value, err := decodeClonedValue(result.Identity, result.Role, data)
+	value, err := decodeClonedValue(result.Structured, data)
 	if err != nil {
 		result.Value = nil
 		return result
@@ -2194,44 +2011,27 @@ func cloneResult(result Result) Result {
 	return result
 }
 
-func decodeClonedValue(identity AgentIdentity, role Role, data []byte) (any, error) {
-	if identity.Kind == AgentKindCustom || identity.Kind == AgentKindEphemeral {
-		decoder := json.NewDecoder(bytes.NewReader(data))
-		decoder.UseNumber()
-		var value any
-		if err := decoder.Decode(&value); err != nil {
+// decodeClonedValue detaches a result value across a boundary. Structured
+// results are generic JSON; text results stay strings.
+func decodeClonedValue(structured bool, data []byte) (any, error) {
+	if !structured {
+		var text string
+		if err := json.Unmarshal(data, &text); err != nil {
 			return nil, err
 		}
-		if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-			return nil, errors.New("trailing custom result JSON")
-		}
 
-		return value, nil
+		return text, nil
 	}
 
-	switch role {
-	case RoleExplore:
-		var value ExploreResult
-		if err := json.Unmarshal(data, &value); err != nil {
-			return nil, err
-		}
-
-		return value, nil
-	case RolePlan:
-		var value PlanResult
-		if err := json.Unmarshal(data, &value); err != nil {
-			return nil, err
-		}
-
-		return value, nil
-	case RoleReview:
-		var value ReviewResult
-		if err := json.Unmarshal(data, &value); err != nil {
-			return nil, err
-		}
-
-		return value, nil
-	default:
-		return nil, fmt.Errorf("%w: invalid result role", ErrInvalid)
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, err
 	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return nil, errors.New("trailing structured result JSON")
+	}
+
+	return value, nil
 }

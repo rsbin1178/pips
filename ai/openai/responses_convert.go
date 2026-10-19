@@ -44,7 +44,7 @@ func (m *Model) responsesRequestFrom(req ai.Request, stream bool) (any, []ai.War
 		return nil, nil, fmt.Errorf("%s: invalid messages: %w", m.label(), err)
 	}
 
-	input, err := responseInputFrom(conversation, m.label())
+	input, err := responseInputFrom(conversation, m.provider, m.label())
 	if err != nil {
 		return nil, nil, err
 	}
@@ -123,11 +123,11 @@ func (m *Model) responsesRequestFrom(req ai.Request, stream bool) (any, []ai.War
 	return merged, warnings.slice(), nil
 }
 
-func responseInputFrom(msgs ai.Messages, label string) ([]responseItem, error) {
+func responseInputFrom(msgs ai.Messages, provider ai.Provider, label string) ([]responseItem, error) {
 	var out []responseItem
 
 	for _, msg := range msgs {
-		items, err := responseItemsFrom(msg, label)
+		items, err := responseItemsFrom(msg, provider, label)
 		if err != nil {
 			return nil, err
 		}
@@ -138,7 +138,7 @@ func responseInputFrom(msgs ai.Messages, label string) ([]responseItem, error) {
 	return out, nil
 }
 
-func responseItemsFrom(msg ai.Message, label string) ([]responseItem, error) {
+func responseItemsFrom(msg ai.Message, provider ai.Provider, label string) ([]responseItem, error) {
 	switch msg := msg.(type) {
 	case ai.UserMessage:
 		content, err := responseUserContent(msg.Parts)
@@ -150,7 +150,7 @@ func responseItemsFrom(msg ai.Message, label string) ([]responseItem, error) {
 	case ai.AssistantMessage:
 		return responseAssistantItems(msg.Parts), nil
 	case ai.ToolMessage:
-		return responseToolOutputs(msg.Parts)
+		return responseToolOutputs(msg.Parts, provider)
 	case ai.SystemMessage:
 		return nil, fmt.Errorf("%s: system message was not projected to instructions", label)
 	default:
@@ -162,34 +162,54 @@ func responseUserContent[T ai.Part](parts []T) ([]responseContent, error) {
 	out := make([]responseContent, 0, len(parts))
 
 	for _, part := range parts {
-		switch p := any(part).(type) {
-		case ai.TextPart:
-			out = append(out, responseContent{Type: "input_text", Text: p.Text})
-		case ai.ImagePart:
-			url, err := imageURLFrom(p.Source)
-			if err != nil {
-				return nil, err
-			}
+		content, ok, err := responsePartContent(part)
+		if err != nil {
+			return nil, err
+		}
 
-			out = append(out, responseContent{Type: "input_image", ImageURL: url})
-		case ai.FilePart:
-			if p.Source.IsID() {
-				out = append(out, responseContent{Type: "input_file", FileID: p.Source.ID})
-				continue
-			}
-
-			if p.Source.IsURL() {
-				out = append(out, responseContent{Type: "input_file", FileURL: p.Source.URL})
-				continue
-			}
-
-			out = append(out, responseContent{Type: "input_file", Filename: p.Name, FileData: dataURL(p.Source)})
-		default:
+		if !ok {
 			return nil, fmt.Errorf("openai: part %T not supported in user messages", part)
 		}
+
+		out = append(out, content)
 	}
 
 	return out, nil
+}
+
+// responsePartContent encodes one text, image, or file part into the Responses
+// content shape shared by user messages and function_call_output arrays. ok is
+// false for a part kind the content array cannot express.
+func responsePartContent(part ai.Part) (content responseContent, ok bool, err error) {
+	switch p := part.(type) {
+	case ai.TextPart:
+		return responseContent{Type: "input_text", Text: p.Text}, true, nil
+	case ai.ImagePart:
+		url, err := imageURLFrom(p.Source)
+		if err != nil {
+			return responseContent{}, false, err
+		}
+
+		return responseContent{Type: "input_image", ImageURL: url}, true, nil
+	case ai.FilePart:
+		return responseFileContent(p), true, nil
+	default:
+		return responseContent{}, false, nil
+	}
+}
+
+// responseFileContent renders a file part by reference when it carries a
+// provider file id or URL, and inline otherwise.
+func responseFileContent(p ai.FilePart) responseContent {
+	if p.Source.IsID() {
+		return responseContent{Type: "input_file", FileID: p.Source.ID}
+	}
+
+	if p.Source.IsURL() {
+		return responseContent{Type: "input_file", FileURL: p.Source.URL}
+	}
+
+	return responseContent{Type: "input_file", Filename: p.Name, FileData: dataURL(p.Source)}
 }
 
 // responseAssistantItems renders a prior assistant turn. Text becomes an
@@ -248,17 +268,76 @@ func responseAssistantItems(parts []ai.AssistantPart) []responseItem {
 	return items
 }
 
-func responseToolOutputs(parts []ai.ToolResultPart) ([]responseItem, error) {
-	var out []responseItem
+func responseToolOutputs(parts []ai.ToolResultPart, provider ai.Provider) ([]responseItem, error) {
+	out := make([]responseItem, 0, len(parts))
 
 	for _, result := range parts {
 		callID, _ := decodeResponsesToolCallID(result.ToolCallID)
 
+		output, err := responseToolOutput(ai.ProviderParts(result.Content), provider)
+		if err != nil {
+			return nil, err
+		}
+
 		out = append(out, responseItem{
 			Type:   "function_call_output",
 			CallID: callID,
-			Output: textOf(ai.ProviderParts(result.Content)),
+			Output: output,
 		})
+	}
+
+	return out, nil
+}
+
+// responseToolOutput encodes one tool result for function_call_output. A
+// text-only result keeps the plain string shape; a result carrying media
+// becomes the input content-part array. A part the wire shape cannot express
+// returns [ai.ErrUnsupportedMedia] instead of being dropped.
+func responseToolOutput(parts []ai.Part, provider ai.Provider) (any, error) {
+	textOnly := true
+
+	for _, part := range parts {
+		if _, ok := part.(ai.TextPart); !ok {
+			textOnly = false
+
+			break
+		}
+	}
+
+	if textOnly {
+		// An empty text result stays absent, exactly as the string field's
+		// omitempty made it before media parts were expressible.
+		if text := textOf(parts); text != "" {
+			return text, nil
+		}
+
+		return nil, nil
+	}
+
+	return responseToolContent(parts, provider)
+}
+
+// responseToolContent renders non-text tool-result parts as the Responses
+// content-part array, matching the user-content encoder. Empty text parts are
+// skipped so a media-only result carries no stray input_text entry.
+func responseToolContent(parts []ai.Part, provider ai.Provider) ([]responseContent, error) {
+	out := make([]responseContent, 0, len(parts))
+
+	for _, part := range parts {
+		content, ok, err := responsePartContent(part)
+		if err != nil {
+			return nil, err
+		}
+
+		if !ok {
+			return nil, ai.NewUnsupportedMediaError(provider, part)
+		}
+
+		if content.Type == "input_text" && content.Text == "" {
+			continue
+		}
+
+		out = append(out, content)
 	}
 
 	return out, nil

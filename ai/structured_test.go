@@ -3,6 +3,8 @@ package ai_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -175,12 +177,23 @@ func TestParseSchemaRejectsInvalidRoot(t *testing.T) {
 	}
 }
 
+// systemMessage asserts message is a system message and returns it.
+func systemMessage(t *testing.T, message ai.Message) ai.SystemMessage {
+	t.Helper()
+
+	system, ok := message.(ai.SystemMessage)
+	require.True(t, ok)
+
+	return system
+}
+
 // staticModel is a canned LanguageModel for exercising GenerateTyped and
-// middleware without HTTP.
+// middleware without HTTP. structured selects the native schema transport.
 type staticModel struct {
-	lastReq ai.Request
-	resp    *ai.Response
-	err     error
+	lastReq    ai.Request
+	resp       *ai.Response
+	err        error
+	structured bool
 }
 
 func (m *staticModel) Generate(_ context.Context, req ai.Request) (*ai.Response, error) {
@@ -209,9 +222,11 @@ func (m *staticModel) Stream(_ context.Context, req ai.Request) ai.Stream {
 	}
 }
 
-func (m *staticModel) Provider() ai.Provider         { return "static" }
-func (m *staticModel) ModelID() string               { return "static-1" }
-func (m *staticModel) Capabilities() ai.Capabilities { return ai.Capabilities{Text: true} }
+func (m *staticModel) Provider() ai.Provider { return "static" }
+func (m *staticModel) ModelID() string       { return "static-1" }
+func (m *staticModel) Capabilities() ai.Capabilities {
+	return ai.Capabilities{Text: true, StructuredOutput: m.structured}
+}
 
 func TestGenerateTypedDerivesSchemaAndDecodes(t *testing.T) {
 	t.Parallel()
@@ -251,4 +266,275 @@ func TestGenerateTypedDecodeError(t *testing.T) {
 
 	_, _, err := ai.GenerateTyped[Out](t.Context(), model, ai.Request{})
 	require.ErrorContains(t, err, "structured output")
+}
+
+// TestPortableSchemaInstructionsPinTheConvention pins the prompt-only wording
+// byte for byte, because the Goal fallback and a builtin child's portable
+// result contract both render it.
+func TestPortableSchemaInstructionsPinTheConvention(t *testing.T) {
+	t.Parallel()
+
+	schema := &ai.Schema{
+		Type:                 "object",
+		Properties:           map[string]*ai.Schema{"n": {Type: "integer"}},
+		Required:             []string{"n"},
+		AdditionalProperties: false,
+	}
+
+	instructions, err := ai.PortableSchemaInstructions(schema)
+	require.NoError(t, err)
+
+	const wording = `
+Native structured output is unavailable. Return exactly one JSON object that
+matches the JSON Schema below. Include every required property and use [] for
+empty arrays. Do not use Markdown fences or add commentary outside the object.
+JSON Schema: `
+
+	encoded, err := json.Marshal(schema)
+	require.NoError(t, err)
+	assert.Equal(t, wording+string(encoded), instructions)
+
+	_, err = ai.PortableSchemaInstructions(nil)
+	require.Error(t, err)
+}
+
+func TestGenerateTypedAdaptivePortableTransportDescribesTheSchemaInThePrompt(t *testing.T) {
+	t.Parallel()
+
+	type Weather struct {
+		City string `json:"city"`
+	}
+
+	model := &staticModel{resp: &ai.Response{Message: ai.AssistantText(`{"city":"Paris"}`)}}
+
+	got, response, err := ai.GenerateTypedAdaptive[Weather](t.Context(), model, ai.Request{
+		Messages: ai.Messages{ai.SystemText("be terse"), ai.UserText("weather in paris?")},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, response)
+	assert.Equal(t, Weather{City: "Paris"}, got)
+
+	// The portable transport omits the provider's own schema mechanism.
+	assert.Nil(t, model.lastReq.ResponseFormat)
+
+	system, _, err := model.lastReq.Messages.SplitSystem()
+	require.NoError(t, err)
+	require.Len(t, system, 1)
+
+	text := ai.JoinSystemText(system)
+	assert.Contains(t, text, "be terse")
+	assert.Contains(t, text, "Native structured output is unavailable.")
+	assert.Contains(t, text, `"city"`)
+}
+
+func TestGenerateTypedAdaptiveNativeTransportStillSendsResponseFormat(t *testing.T) {
+	t.Parallel()
+
+	type Weather struct {
+		City string `json:"city"`
+	}
+
+	model := &staticModel{
+		structured: true,
+		resp:       &ai.Response{Message: ai.AssistantText(`{"city":"Paris"}`)},
+	}
+
+	got, _, err := ai.GenerateTypedAdaptive[Weather](t.Context(), model, ai.Request{
+		Messages: ai.Messages{ai.SystemText("be terse"), ai.UserText("weather in paris?")},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, Weather{City: "Paris"}, got)
+
+	require.NotNil(t, model.lastReq.ResponseFormat)
+	require.NotNil(t, model.lastReq.ResponseFormat.Schema)
+	assert.Equal(t, "object", model.lastReq.ResponseFormat.Schema.Type)
+	assert.Contains(t, model.lastReq.ResponseFormat.Schema.Properties, "city")
+
+	system, _, err := model.lastReq.Messages.SplitSystem()
+	require.NoError(t, err)
+	assert.Equal(t, "be terse", ai.JoinSystemText(system))
+}
+
+// TestGenerateTypedAdaptiveRejectsUnknownFieldsOnBothTransports pins the
+// strict-decode option Phase AB adds for the Goal assessment: the reference's
+// evaluator struct denies unknown fields, so its answer must too, whichever
+// transport carries it.
+func TestGenerateTypedAdaptiveRejectsUnknownFieldsOnBothTransports(t *testing.T) {
+	t.Parallel()
+
+	type Weather struct {
+		City string `json:"city"`
+	}
+
+	for _, structured := range []bool{false, true} {
+		model := &staticModel{
+			structured: structured,
+			resp:       &ai.Response{Message: ai.AssistantText(`{"city":"Paris","humidity":80}`)},
+		}
+
+		got, _, err := ai.GenerateTypedAdaptive[Weather](t.Context(), model, ai.Request{
+			Messages: ai.Messages{ai.UserText("weather in paris?")},
+		}, ai.WithDisallowUnknownFields())
+		require.ErrorIs(t, err, ai.ErrMalformedStructuredOutput)
+		assert.Contains(t, err.Error(), "unknown field")
+		assert.Equal(t, "Paris", got.City, "the fields before the unknown one are decoded as usual")
+	}
+}
+
+// TestGenerateTypedAdaptiveDefaultsToLenientDecode pins the other direction: the
+// reference's skeptic defaults an unknown field rather than denying it, so a call
+// that does not ask for the strict option keeps encoding/json's lenient rule.
+func TestGenerateTypedAdaptiveDefaultsToLenientDecode(t *testing.T) {
+	t.Parallel()
+
+	type Weather struct {
+		City string `json:"city"`
+	}
+
+	model := &staticModel{resp: &ai.Response{Message: ai.AssistantText(`{"city":"Paris","humidity":80}`)}}
+
+	got, _, err := ai.GenerateTypedAdaptive[Weather](t.Context(), model, ai.Request{
+		Messages: ai.Messages{ai.UserText("weather in paris?")},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, Weather{City: "Paris"}, got)
+}
+
+// TestGenerateTypedAdaptiveRejectsTrailingJSONOnEitherDecode pins that the strict
+// option adds the unknown-field rule without trading away the lenient path's
+// trailing-content rule.
+func TestGenerateTypedAdaptiveRejectsTrailingJSONOnEitherDecode(t *testing.T) {
+	t.Parallel()
+
+	type Weather struct {
+		City string `json:"city"`
+	}
+
+	for _, options := range [][]ai.StructuredOption{nil, {ai.WithDisallowUnknownFields()}} {
+		model := &staticModel{resp: &ai.Response{Message: ai.AssistantText(`{"city":"Paris"} {"city":"Lyon"}`)}}
+
+		_, _, err := ai.GenerateTypedAdaptive[Weather](t.Context(), model, ai.Request{
+			Messages: ai.Messages{ai.UserText("weather in paris?")},
+		}, options...)
+		require.ErrorIs(t, err, ai.ErrMalformedStructuredOutput)
+	}
+}
+
+func TestGenerateTypedAdaptiveClassifiesAMalformedAnswerOnBothTransports(t *testing.T) {
+	t.Parallel()
+
+	type Out struct {
+		N int `json:"n"`
+	}
+
+	for _, native := range []bool{false, true} {
+		t.Run(fmt.Sprintf("native=%t", native), func(t *testing.T) {
+			t.Parallel()
+
+			model := &staticModel{
+				structured: native,
+				resp:       &ai.Response{Message: ai.AssistantText("not json")},
+			}
+
+			_, response, err := ai.GenerateTypedAdaptive[Out](t.Context(), model, ai.Request{
+				Messages: ai.Messages{ai.SystemText("be terse")},
+			})
+			require.ErrorIs(t, err, ai.ErrMalformedStructuredOutput)
+			require.NotNil(t, response)
+		})
+	}
+}
+
+func TestGenerateTypedAdaptiveLeavesTheCallerMessagesAlone(t *testing.T) {
+	t.Parallel()
+
+	type Out struct {
+		N int `json:"n"`
+	}
+
+	messages := ai.Messages{ai.SystemText("be terse"), ai.UserText("count")}
+	before := append(ai.Messages(nil), messages...)
+	beforeParts := append([]ai.SystemPart(nil), systemMessage(t, messages[0]).Parts...)
+
+	model := &staticModel{resp: &ai.Response{Message: ai.AssistantText(`{"n":1}`)}}
+
+	_, _, err := ai.GenerateTypedAdaptive[Out](t.Context(), model, ai.Request{Messages: messages})
+	require.NoError(t, err)
+
+	assert.Equal(t, before, messages)
+	assert.Equal(t, beforeParts, systemMessage(t, messages[0]).Parts)
+
+	// The instruction travels as an appended system-message text part, and the
+	// user turn is untouched.
+	system, conversation, err := model.lastReq.Messages.SplitSystem()
+	require.NoError(t, err)
+	require.Len(t, system, 1)
+	require.Len(t, system[0].Parts, 2)
+	assert.Equal(t, ai.TextPart{Text: "be terse"}, system[0].Parts[0])
+
+	appended, ok := system[0].Parts[1].(ai.TextPart)
+	require.True(t, ok)
+	assert.True(t, strings.HasPrefix(appended.Text, "\nNative structured output is unavailable."))
+	require.Len(t, conversation, 1)
+	assert.Equal(t, ai.UserText("count"), conversation[0])
+}
+
+// TestGenerateTypedAdaptiveAppendsToTheLastSystemMessage pins the placement the
+// child path uses: the instruction joins the last system message, and an earlier
+// system message keeps its exact text.
+func TestGenerateTypedAdaptiveAppendsToTheLastSystemMessage(t *testing.T) {
+	t.Parallel()
+
+	type Out struct {
+		N int `json:"n"`
+	}
+
+	messages := ai.Messages{
+		ai.SystemText("first system"), ai.SystemText("second system"), ai.UserText("count"),
+	}
+	before := append(ai.Messages(nil), messages...)
+
+	model := &staticModel{resp: &ai.Response{Message: ai.AssistantText(`{"n":1}`)}}
+
+	_, _, err := ai.GenerateTypedAdaptive[Out](t.Context(), model, ai.Request{Messages: messages})
+	require.NoError(t, err)
+
+	system, conversation, err := model.lastReq.Messages.SplitSystem()
+	require.NoError(t, err)
+	require.Len(t, system, 2)
+	require.Len(t, system[0].Parts, 1)
+	assert.Equal(t, ai.TextPart{Text: "first system"}, system[0].Parts[0])
+
+	require.Len(t, system[1].Parts, 2)
+	assert.Equal(t, ai.TextPart{Text: "second system"}, system[1].Parts[0])
+
+	appended, ok := system[1].Parts[1].(ai.TextPart)
+	require.True(t, ok)
+	assert.True(t, strings.HasPrefix(appended.Text, "\nNative structured output is unavailable."))
+
+	require.Len(t, conversation, 1)
+	assert.Equal(t, ai.UserText("count"), conversation[0])
+	assert.Equal(t, before, messages)
+}
+
+func TestGenerateTypedAdaptivePrependsASystemMessageWhenThereIsNone(t *testing.T) {
+	t.Parallel()
+
+	type Out struct {
+		N int `json:"n"`
+	}
+
+	model := &staticModel{resp: &ai.Response{Message: ai.AssistantText(`{"n":1}`)}}
+
+	_, _, err := ai.GenerateTypedAdaptive[Out](t.Context(), model, ai.Request{
+		Messages: ai.Messages{ai.UserText("count")},
+	})
+	require.NoError(t, err)
+
+	system, conversation, err := model.lastReq.Messages.SplitSystem()
+	require.NoError(t, err)
+	require.Len(t, system, 1)
+	assert.Contains(t, ai.JoinSystemText(system), "Native structured output is unavailable.")
+	require.Len(t, conversation, 1)
+	assert.Equal(t, ai.UserText("count"), conversation[0])
 }

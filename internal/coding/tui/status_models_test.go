@@ -17,51 +17,63 @@ import (
 )
 
 // statusModelStore writes a store mixing usable, missing and corrupt projections
-// with per-day data, and returns the directory and the listed Sessions. s-1 and
+// with per-day data, and returns the store root and the listed Sessions. s-1 and
 // s-2 ran today, s-3 ran only 40 days ago, and s-6 ran both 40 days ago and today
 // so its in-range total differs from its all-time total.
 func statusModelStore(t *testing.T) (string, []session.Metadata) {
 	t.Helper()
 
-	directory := t.TempDir()
+	root := t.TempDir()
+	layout, err := session.NewStoreLayout(root)
+	require.NoError(t, err)
+	// Each Session's state directory comes from the store layout, so the sidecar
+	// lands under the Session's own group directory.
+	workspace := "/workspace/models"
+	stateDir := func(id string) string { return layout.StateDir(workspace, id) }
+
 	now := time.Now()
 	today := time.Date(now.Year(), now.Month(), now.Day(), 12, 0, 0, 0, time.Local)
 	old := today.AddDate(0, 0, -40)
 
 	require.True(t, writeUsageProjection(
-		directory, "s-1", "i-1", 60_000,
+		stateDir("s-1"), "s-1", "i-1", 60_000,
 		map[string]coding.TokenUsage{"demo/model": {InputTokens: 100, OutputTokens: 20}},
 		today,
 	).wrote)
 	require.True(t, writeUsageProjection(
-		directory, "s-2", "i-1", 30_000,
+		stateDir("s-2"), "s-2", "i-1", 30_000,
 		map[string]coding.TokenUsage{"small/model": {InputTokens: 10}},
 		today,
 	).wrote)
 	require.True(t, writeUsageProjection(
-		directory, "s-3", "i-1", 10_000,
+		stateDir("s-3"), "s-3", "i-1", 10_000,
 		map[string]coding.TokenUsage{"old/model": {InputTokens: 300}},
 		old,
 	).wrote)
 	require.True(t, writeUsageProjection(
-		directory, "s-6", "i-1", 10_000,
+		stateDir("s-6"), "s-6", "i-1", 10_000,
 		map[string]coding.TokenUsage{"mixed/model": {InputTokens: 200}},
 		old,
 	).wrote)
 	require.True(t, writeUsageProjection(
-		directory, "s-6", "i-2", 5_000,
+		stateDir("s-6"), "s-6", "i-2", 5_000,
 		map[string]coding.TokenUsage{"mixed/model": {InputTokens: 50}},
 		today,
 	).wrote)
 
-	corrupt := filepath.Join(directory, "s-5")
+	corrupt := stateDir("s-5")
 	require.NoError(t, os.MkdirAll(corrupt, 0o700))
 	require.NoError(t, os.WriteFile(
 		filepath.Join(corrupt, usageProjectionFile), []byte("{not json"), 0o600,
 	))
 
-	return directory, []session.Metadata{
-		{ID: "s-1"}, {ID: "s-2"}, {ID: "s-3"}, {ID: "s-4"}, {ID: "s-5"}, {ID: "s-6"},
+	return root, []session.Metadata{
+		{ID: "s-1", WorkspacePath: workspace},
+		{ID: "s-2", WorkspacePath: workspace},
+		{ID: "s-3", WorkspacePath: workspace},
+		{ID: "s-4", WorkspacePath: workspace},
+		{ID: "s-5", WorkspacePath: workspace},
+		{ID: "s-6", WorkspacePath: workspace},
 	}
 }
 

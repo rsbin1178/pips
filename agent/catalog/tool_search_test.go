@@ -175,6 +175,166 @@ func TestToolSearchReportsSourcesAndHints(t *testing.T) {
 	})
 }
 
+func TestToolSearchDispatchReachesHiddenToolsAndRefusesVisibleOnes(t *testing.T) {
+	t.Parallel()
+
+	local := newRecordingCatalogTool("read", "local result")
+	remote := newRecordingCatalogTool("docs__lookup", "remote result")
+	broken := newRecordingCatalogTool("docs__broken", "")
+	broken.failure = errors.New("target failure")
+	c, err := catalog.New(
+		catalog.Local("app", catalog.RiskRead, local)[0],
+		catalog.MCP("docs", catalog.RiskRead, remote)[0],
+		catalog.MCP("docs", catalog.RiskRead, broken)[0],
+	)
+	require.NoError(t, err)
+
+	tool := &testDispatchTool{}
+	search, err := catalog.NewToolSearch(c, catalog.AllowAll("test", catalog.RiskRead), catalog.ToolSearchOptions{
+		Enabled: true, UseTool: dispatchToolBuilder(tool),
+	})
+	require.NoError(t, err)
+
+	// The dispatch Tool is part of every snapshot this surface reports, and the
+	// hidden targets are not.
+	visible, err := search.Tools(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"read", catalog.DefaultToolSearchName, "use_tool"}, toolNames(visible))
+
+	// A deferred tool the snapshot hides is reached with the caller's arguments,
+	// and its own result is what comes back.
+	parts, err := search.Dispatch(t.Context(), "docs__lookup", ai.JSON(`{"query":"parity"}`))
+	require.NoError(t, err)
+	assert.Equal(t, agent.TextResult("remote result"), parts)
+	assert.Equal(t, []string{`{"query":"parity"}`}, remote.calls)
+
+	// A target's own failure is returned as it is, not restated.
+	_, err = search.Dispatch(t.Context(), "docs__broken", ai.JSON(`{}`))
+	require.EqualError(t, err, "target failure")
+
+	// A directly visible tool is refused with the correction and never runs.
+	_, err = search.Dispatch(t.Context(), "read", ai.JSON(`{}`))
+	require.EqualError(t, err,
+		`tool "read" is directly visible in this session; `+
+			"call it as its own tool call instead of routing it through use_tool")
+	assert.Empty(t, local.calls)
+
+	// An activated deferred tool is part of the snapshot too, so the wrapper
+	// refuses it as well: it carries only what the snapshot hides.
+	activations := catalog.NewActivationSet(catalog.DefaultActivationLimit)
+	activated := &testDispatchTool{}
+	activatedSearch, err := catalog.NewToolSearch(c, catalog.AllowAll("test", catalog.RiskRead), catalog.ToolSearchOptions{
+		Enabled: true, UseTool: dispatchToolBuilder(activated), Activations: activations,
+	})
+	require.NoError(t, err)
+
+	activations.Add("docs__lookup")
+
+	_, err = activatedSearch.Dispatch(t.Context(), "docs__lookup", ai.JSON(`{}`))
+	require.ErrorContains(t, err, `tool "docs__lookup" is directly visible`)
+	assert.Len(t, remote.calls, 1, "an activated target is never dispatched")
+}
+
+func TestToolSearchDispatchRefusesUnknownAndUnauthorizedNames(t *testing.T) {
+	t.Parallel()
+
+	remote := newRecordingCatalogTool("docs__lookup", "remote result")
+	c, err := catalog.New(catalog.MCP("docs", catalog.RiskRead, remote)...)
+	require.NoError(t, err)
+
+	tool := &testDispatchTool{}
+	search, err := catalog.NewToolSearch(c, catalog.AllowAll("test", catalog.RiskRead), catalog.ToolSearchOptions{
+		Enabled: true, UseTool: dispatchToolBuilder(tool),
+	})
+	require.NoError(t, err)
+
+	_, err = search.Dispatch(t.Context(), "docs__missing", ai.JSON(`{}`))
+	require.ErrorContains(t, err, `unknown tool "docs__missing"`)
+
+	// The policy that authorizes the target is the caller's, so a denied name is
+	// refused by name instead of being dispatched.
+	denied := &testDispatchTool{}
+	restricted, err := catalog.NewToolSearch(c, catalog.Policy{Allowlist: []string{"other"}, MaxRisk: catalog.RiskRead}, catalog.ToolSearchOptions{
+		Enabled: true, UseTool: dispatchToolBuilder(denied),
+	})
+	require.NoError(t, err)
+
+	_, err = restricted.Dispatch(t.Context(), "docs__lookup", ai.JSON(`{}`))
+	require.ErrorContains(t, err, `tool "docs__lookup" is not authorized`)
+	assert.Empty(t, remote.calls)
+}
+
+func TestToolSearchOffersDispatchToolOnlyWhenEnabledAndBuilt(t *testing.T) {
+	t.Parallel()
+
+	local := newRecordingCatalogTool("read", "local result")
+	c, err := catalog.New(catalog.Local("app", catalog.RiskRead, local)...)
+	require.NoError(t, err)
+
+	policy := catalog.AllowAll("test", catalog.RiskRead)
+
+	// A surface built without a dispatch tool offers none, so a call by name is
+	// refused rather than reaching the catalog.
+	withoutTool, err := catalog.NewToolSearch(c, policy, catalog.ToolSearchOptions{Enabled: true})
+	require.NoError(t, err)
+	visible, err := withoutTool.Tools(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"read"}, toolNames(visible))
+	_, err = withoutTool.Dispatch(t.Context(), "read", ai.JSON(`{}`))
+	require.ErrorContains(t, err, "requires an enabled search surface")
+
+	// A disabled surface never builds one, even when the builder is injected.
+	disabled := &testDispatchTool{}
+	off, err := catalog.NewToolSearch(c, policy, catalog.ToolSearchOptions{
+		Enabled: false, UseTool: dispatchToolBuilder(disabled),
+	})
+	require.NoError(t, err)
+	visible, err = off.Tools(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"read"}, toolNames(visible))
+	assert.Nil(t, disabled.dispatch)
+}
+
+func TestToolSearchRejectsADispatchToolNameCollision(t *testing.T) {
+	t.Parallel()
+
+	local := newRecordingCatalogTool("read", "local result")
+	c, err := catalog.New(catalog.Local("app", catalog.RiskRead, local)...)
+	require.NoError(t, err)
+
+	policy := catalog.AllowAll("test", catalog.RiskRead)
+
+	named := func(name string) func(catalog.UseToolDispatch) agent.Tool {
+		return func(catalog.UseToolDispatch) agent.Tool {
+			return agent.NewTool(name, "", func(context.Context, struct{}) (string, error) { return "", nil })
+		}
+	}
+
+	for _, test := range []struct {
+		name    string
+		builder func(catalog.UseToolDispatch) agent.Tool
+		want    string
+	}{
+		{name: "discovery name", builder: named(catalog.DefaultToolSearchName), want: "reserved for deferred tool discovery"},
+		{name: "searchable name", builder: named("read"), want: `use tool "read" duplicates a searchable tool`},
+		{name: "empty name", builder: named(""), want: "use tool has an empty name"},
+		{
+			name:    "nil tool",
+			builder: func(catalog.UseToolDispatch) agent.Tool { return nil },
+			want:    "use tool builder returned nil",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := catalog.NewToolSearch(c, policy, catalog.ToolSearchOptions{
+				Enabled: true, UseTool: test.builder,
+			})
+			require.ErrorContains(t, err, test.want)
+		})
+	}
+}
+
 // runToolSearch runs one scripted agent turn that calls the discovery tool by
 // name and returns the tool result text the model would see. AgentOptions
 // installs ExecutableTools, so the call succeeds even when the tool is hidden.
@@ -258,4 +418,62 @@ func toolNames(tools []agent.Tool) []string {
 	}
 
 	return names
+}
+
+// recordingCatalogTool is one registered tool that answers with a fixed result
+// and keeps the raw arguments it was called with, so a dispatch can be shown to
+// hand the caller's object over unchanged.
+type recordingCatalogTool struct {
+	name    string
+	result  string
+	failure error
+	calls   []string
+}
+
+func newRecordingCatalogTool(name, result string) *recordingCatalogTool {
+	return &recordingCatalogTool{name: name, result: result}
+}
+
+func (t *recordingCatalogTool) Decl() ai.Tool {
+	return ai.Tool{Name: t.name, Description: t.name}
+}
+
+func (t *recordingCatalogTool) Exec(_ context.Context, call agent.ToolCall) ([]ai.Part, error) {
+	t.calls = append(t.calls, string(call.Args))
+	if t.failure != nil {
+		return nil, t.failure
+	}
+
+	return agent.TextResult(t.result), nil
+}
+
+// testDispatchTool is a minimal dispatch Tool: it forwards the wrapper's two
+// arguments to the surface's own dispatcher.
+type testDispatchTool struct {
+	dispatch catalog.UseToolDispatch
+}
+
+func (t *testDispatchTool) Decl() ai.Tool {
+	return ai.Tool{Name: "use_tool", Description: "Call a hidden tool by name."}
+}
+
+func (t *testDispatchTool) Exec(ctx context.Context, call agent.ToolCall) ([]ai.Part, error) {
+	var args struct {
+		ToolName  string  `json:"tool_name"`
+		ToolInput ai.JSON `json:"tool_input"`
+	}
+	if err := json.Unmarshal(call.Args, &args); err != nil {
+		return nil, err
+	}
+
+	return t.dispatch(ctx, args.ToolName, args.ToolInput)
+}
+
+// dispatchToolBuilder wires the surface's dispatcher into one testDispatchTool.
+func dispatchToolBuilder(tool *testDispatchTool) func(catalog.UseToolDispatch) agent.Tool {
+	return func(dispatch catalog.UseToolDispatch) agent.Tool {
+		tool.dispatch = dispatch
+
+		return tool
+	}
 }

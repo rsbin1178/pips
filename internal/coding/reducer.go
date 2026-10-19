@@ -20,6 +20,7 @@ import (
 
 const (
 	maxRecentSubagents        = 128
+	maxRecentBackgroundTasks  = 128
 	maxRecentTeamLifecycle    = 256
 	maxRecentTeamControls     = 256
 	maxRecentTeamIntegrations = 64
@@ -258,25 +259,28 @@ type State struct {
 	// a broken stream's recovery budget ran out. It is deliberately separate
 	// from Transcript: the text is shown as an explicitly incomplete reply and
 	// must never reach the Harness session or the next model request.
-	IncompleteReplies []IncompleteReply               `json:"incomplete_replies,omitempty"`
-	Draft             StreamDraft                     `json:"draft"`
-	DraftCandidate    CandidateIdentity               `json:"draft_candidate,omitzero"`
-	MessageCandidates []CandidateIdentity             `json:"message_candidates,omitempty"`
-	Runs              []RunState                      `json:"runs"`
-	Tools             []ToolState                     `json:"tools"`
-	Subagents         []SubagentState                 `json:"subagents"`
-	Teams             []TeamLifecycleState            `json:"teams,omitempty"`
-	TeamControls      []TeamControlLifecycleState     `json:"team_controls,omitempty"`
-	TeamIntegrations  []TeamIntegrationLifecycleState `json:"team_integrations,omitempty"`
-	Approval          ApprovalState                   `json:"approval"`
-	Question          QuestionState                   `json:"question"`
-	PlanReview        PlanReviewState                 `json:"plan_review"`
-	PlanMode          planmode.State                  `json:"plan_mode"`
-	Changes           *WorkspaceChanged               `json:"changes,omitempty"`
-	Diagnostics       []IntegrationDiagnostic         `json:"diagnostics"`
-	LastError         *RuntimeError                   `json:"last_error,omitempty"`
-	Tree              SessionTree                     `json:"tree"`
-	Compaction        CompactionState                 `json:"compaction"`
+	IncompleteReplies []IncompleteReply   `json:"incomplete_replies,omitempty"`
+	Draft             StreamDraft         `json:"draft"`
+	DraftCandidate    CandidateIdentity   `json:"draft_candidate,omitzero"`
+	MessageCandidates []CandidateIdentity `json:"message_candidates,omitempty"`
+	Runs              []RunState          `json:"runs"`
+	Tools             []ToolState         `json:"tools"`
+	Subagents         []SubagentState     `json:"subagents"`
+	// BackgroundTasks is the live projection of the Runtime's registered
+	// background tasks. It is what the tasks pane lists under Watchers.
+	BackgroundTasks  []BackgroundTaskLifecycle       `json:"background_tasks,omitempty"`
+	Teams            []TeamLifecycleState            `json:"teams,omitempty"`
+	TeamControls     []TeamControlLifecycleState     `json:"team_controls,omitempty"`
+	TeamIntegrations []TeamIntegrationLifecycleState `json:"team_integrations,omitempty"`
+	Approval         ApprovalState                   `json:"approval"`
+	Question         QuestionState                   `json:"question"`
+	PlanReview       PlanReviewState                 `json:"plan_review"`
+	PlanMode         planmode.State                  `json:"plan_mode"`
+	Changes          *WorkspaceChanged               `json:"changes,omitempty"`
+	Diagnostics      []IntegrationDiagnostic         `json:"diagnostics"`
+	LastError        *RuntimeError                   `json:"last_error,omitempty"`
+	Tree             SessionTree                     `json:"tree"`
+	Compaction       CompactionState                 `json:"compaction"`
 	// Retry is the live retry notice for the run in flight; the next event of
 	// any other kind clears it, because any of them ends the wait.
 	Retry         RetryState        `json:"retry,omitzero"`
@@ -320,6 +324,7 @@ func (state State) Clone() State {
 		cloned.Tools[index] = tool
 	}
 	cloned.Subagents = slices.Clone(state.Subagents)
+	cloned.BackgroundTasks = slices.Clone(state.BackgroundTasks)
 	cloned.Teams = slices.Clone(state.Teams)
 	cloned.TeamControls = slices.Clone(state.TeamControls)
 	cloned.TeamIntegrations = slices.Clone(state.TeamIntegrations)
@@ -574,10 +579,16 @@ func (state *State) apply(event Event) error {
 		state.SyntheticMessages = append(state.SyntheticMessages, goalSyntheticMessageIndexes(state.Transcript, state.Goal.ID)...)
 		state.ContextTokens = payload.ContextTokens
 		state.Tasks = payload.Tasks.Clone()
+		state.Compaction = payload.Compaction
 	case SessionNavigated:
 		if !state.SessionOpen || state.Phase != PhaseIdle || state.Interaction.Active {
 			return protocolError("session cannot navigate in its current state")
 		}
+		// Navigation can move the leaf in front of the last checkpoint. The
+		// retained counts then describe a context the active branch no longer
+		// has, so the divider must disappear until a resumed checkpoint rebuilds
+		// the projection.
+		state.Compaction = CompactionState{}
 	case SessionForked:
 		if !state.SessionOpen || state.Phase != PhaseIdle || state.Interaction.Active ||
 			payload.SourceSessionID != state.SessionID {
@@ -751,7 +762,11 @@ func (state *State) apply(event Event) error {
 		}
 		state.Transcript = appendShared(state.Transcript, cloneMessage(payload.Message))
 		if update, ok := tasklist.FromMessage(payload.Message); ok {
-			state.Tasks = tasklist.FromUpdate(update)
+			// A call that cannot be folded leaves the plan alone, the way a
+			// malformed call is ignored.
+			if folded, foldErr := tasklist.Apply(state.Tasks, update); foldErr == nil {
+				state.Tasks = folded
+			}
 		}
 		state.MessageCandidates = appendShared(state.MessageCandidates, candidate)
 		if payload.Synthetic {
@@ -875,6 +890,10 @@ func (state *State) apply(event Event) error {
 		state.Goal = payload.State.Clone()
 	case TeamLifecycle:
 		if err := state.applyTeamLifecycle(payload); err != nil {
+			return err
+		}
+	case BackgroundTaskLifecycle:
+		if err := state.applyBackgroundTaskLifecycle(payload); err != nil {
 			return err
 		}
 	case TeamControlLifecycle:
@@ -1022,6 +1041,38 @@ func contextTokensFromUsage(usage TokenUsage) int {
 	}
 
 	return usage.InputTokens + usage.OutputTokens
+}
+
+// applyBackgroundTaskLifecycle upserts one background task. A task the
+// projection has not seen yet is created, so a subscriber that joined late
+// still lists a terminal task; a task that already completed never changes
+// again.
+func (state *State) applyBackgroundTaskLifecycle(payload BackgroundTaskLifecycle) error {
+	index := slices.IndexFunc(state.BackgroundTasks, func(value BackgroundTaskLifecycle) bool {
+		return value.ID == payload.ID
+	})
+	if index < 0 {
+		state.BackgroundTasks = appendShared(state.BackgroundTasks, payload)
+		if len(state.BackgroundTasks) > maxRecentBackgroundTasks {
+			state.BackgroundTasks = slices.Clone(
+				state.BackgroundTasks[len(state.BackgroundTasks)-maxRecentBackgroundTasks:],
+			)
+		}
+
+		return nil
+	}
+
+	previous := state.BackgroundTasks[index]
+	if previous.Completed {
+		return protocolError("background task %q changed after it completed", previous.ID)
+	}
+	if previous.Kind != payload.Kind {
+		return protocolError("background task %q changed kind", previous.ID)
+	}
+	state.BackgroundTasks = cloneBeforeWrite(state.BackgroundTasks)
+	state.BackgroundTasks[index] = payload
+
+	return nil
 }
 
 func (state *State) applyTeamLifecycle(payload TeamLifecycle) error {

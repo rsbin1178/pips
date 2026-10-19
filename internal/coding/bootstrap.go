@@ -2,8 +2,6 @@
 package coding
 
 import (
-	"fmt"
-
 	"github.com/rsbin1178/pips/agent/harness"
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding/planmode"
@@ -26,6 +24,12 @@ type BootstrapOptions struct {
 type BootstrapResult struct {
 	State    State
 	Recovery InteractionRecovery
+	// OrphanedToolCalls reports a durable tail of tool calls that have no
+	// results while no interaction is pending. The calls are not corruption:
+	// a stop landed between the assistant message that carries them and its
+	// results, and never wrote the journal's terminal record. The caller
+	// settles them before another operation can run.
+	OrphanedToolCalls bool
 }
 
 // BootstrapState reconstructs durable frontend state without allocating live
@@ -63,13 +67,6 @@ func BootstrapState(options BootstrapOptions) (BootstrapResult, error) {
 		return BootstrapResult{}, err
 	}
 
-	if options.HasPendingToolCalls && recovery.PendingID == "" {
-		return BootstrapResult{}, fmt.Errorf(
-			"%w: pending tool calls have no interaction journal",
-			ErrEventProtocol,
-		)
-	}
-
 	state := State{
 		SessionID: options.SessionID, SessionOpen: true,
 		Provider: options.Provider, ModelID: options.ModelID, ContextWindow: options.ContextWindow,
@@ -90,7 +87,11 @@ func BootstrapState(options BootstrapOptions) (BootstrapResult, error) {
 
 			state.Transcript = append(state.Transcript, cloneMessage(entry.Message))
 			if update, ok := tasklist.FromMessage(entry.Message); ok {
-				state.Tasks = tasklist.FromUpdate(update)
+				// A call that cannot be folded leaves the plan alone, the way a
+				// malformed call is ignored.
+				if folded, foldErr := tasklist.Apply(state.Tasks, update); foldErr == nil {
+					state.Tasks = folded
+				}
 			}
 		case harness.KindModelChange:
 			if !validProvider(entry.Provider) ||
@@ -119,6 +120,9 @@ func BootstrapState(options BootstrapOptions) (BootstrapResult, error) {
 	if len(state.Transcript) > maxEventItems {
 		state.Transcript = state.Transcript[len(state.Transcript)-maxEventItems:]
 	}
+	if compaction, ok := fullCompactionStateFromPath(options.Path); ok {
+		state.Compaction = compaction
+	}
 	state.MessageCandidates = make([]CandidateIdentity, len(state.Transcript))
 	state.SyntheticMessages = syntheticMessageIndexes(state.Transcript)
 	state.IncompleteReplies = incompleteReplies
@@ -131,24 +135,59 @@ func BootstrapState(options BootstrapOptions) (BootstrapResult, error) {
 		}
 	}
 
-	if recovery.PendingID != "" {
-		if options.HasPendingToolCalls {
-			state.Interaction = InteractionState{
-				ID: recovery.PendingID, Active: true, Resumed: true, Mode: mode,
-			}
-			state.Phase = PhasePaused
-		} else {
-			recovery.InterruptedIDs = append(recovery.InterruptedIDs, recovery.PendingID)
-			recovery.PendingID = ""
-
-			state.Diagnostics = append(state.Diagnostics, IntegrationDiagnostic{
-				Component: "runtime",
-				Code:      "interaction_interrupted",
-			})
-		}
-	}
+	orphanedToolCalls := applyJournalRecovery(
+		&state, &recovery, mode, options.HasPendingToolCalls,
+	)
 
 	state.rebuildIndexes()
 
-	return BootstrapResult{State: state.Clone(), Recovery: recovery.Clone()}, nil
+	return BootstrapResult{
+		State:             state.Clone(),
+		Recovery:          recovery.Clone(),
+		OrphanedToolCalls: orphanedToolCalls,
+	}, nil
+}
+
+// applyJournalRecovery folds the replayed interaction journal into the
+// reconstructed state and reports a tail of calls that no interaction can
+// resume. Both directions of an interruption write the same diagnostic; only
+// the unanswered tail asks the caller to settle the calls.
+func applyJournalRecovery(
+	state *State,
+	recovery *InteractionRecovery,
+	mode OperatingMode,
+	hasPendingToolCalls bool,
+) bool {
+	if recovery.PendingID == "" {
+		if !hasPendingToolCalls {
+			return false
+		}
+
+		// A stop landed between the assistant message that carries the calls
+		// and its results, so the journal holds no interaction to resume and
+		// the tail holds calls no one answered.
+		state.Diagnostics = append(state.Diagnostics, interruptedDiagnostic())
+
+		return true
+	}
+
+	if hasPendingToolCalls {
+		state.Interaction = InteractionState{
+			ID: recovery.PendingID, Active: true, Resumed: true, Mode: mode,
+		}
+		state.Phase = PhasePaused
+
+		return false
+	}
+
+	recovery.InterruptedIDs = append(recovery.InterruptedIDs, recovery.PendingID)
+	recovery.PendingID = ""
+
+	state.Diagnostics = append(state.Diagnostics, interruptedDiagnostic())
+
+	return false
+}
+
+func interruptedDiagnostic() IntegrationDiagnostic {
+	return IntegrationDiagnostic{Component: "runtime", Code: "interaction_interrupted"}
 }

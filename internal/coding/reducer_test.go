@@ -336,14 +336,20 @@ func TestReduceSessionTreeAndCompactionLifecycle(t *testing.T) {
 		var err error
 		state, err = Reduce(state, events[index])
 		require.NoError(t, err)
+
+		if index == 3 {
+			assert.False(t, state.Compaction.Active)
+			assert.Equal(t, CompactionManual, state.Compaction.Mode)
+			assert.Equal(t, 3000, state.Compaction.TokensBefore)
+			assert.Equal(t, 900, state.Compaction.TokensAfter)
+			assert.Equal(t, 900, state.ContextTokens)
+		}
 	}
 
 	assert.Equal(t, tree, state.Tree)
 	require.Len(t, state.Transcript, 1)
-	assert.False(t, state.Compaction.Active)
-	assert.Equal(t, CompactionManual, state.Compaction.Mode)
-	assert.Equal(t, 3000, state.Compaction.TokensBefore)
-	assert.Equal(t, 900, state.Compaction.TokensAfter)
+	assert.Equal(t, CompactionState{}, state.Compaction,
+		"navigation can move the leaf before the checkpoint, so it clears the boundary")
 	assert.Equal(t, 900, state.ContextTokens)
 	assert.Equal(t, 1, state.Tasks.InProgress)
 }

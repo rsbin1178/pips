@@ -60,13 +60,18 @@ type ResolvedModel struct {
 	// declared one, so the adapter's own default stands; the retry window is
 	// derived from whichever bound ends up in effect.
 	StreamIdleTimeout time.Duration
-	Compatibility     openai.Compatibility
-	Capabilities      ai.CapabilityOverride
-	Options           config.ModelOptions
-	Variant           string
-	ReasoningLevels   []config.ReasoningLevel
-	ReasoningLevel    *config.ReasoningLevel
-	ReasoningBudgets  map[config.ReasoningLevel]int
+	// UserAgent is the User-Agent the transport sends, after the model's
+	// declaration has overridden the provider's. Nil sends the client's own
+	// default, an empty value sends no User-Agent header at all, and any other
+	// value is sent verbatim.
+	UserAgent        *string
+	Compatibility    openai.Compatibility
+	Capabilities     ai.CapabilityOverride
+	Options          config.ModelOptions
+	Variant          string
+	ReasoningLevels  []config.ReasoningLevel
+	ReasoningLevel   *config.ReasoningLevel
+	ReasoningBudgets map[config.ReasoningLevel]int
 }
 
 // Clone returns a fully detached runtime snapshot.
@@ -135,6 +140,11 @@ type providerDefinition struct {
 	// streamIdleTimeout is the provider-wide streaming idle bound a model
 	// inherits unless it declares its own. Zero selects the transport default.
 	streamIdleTimeout time.Duration
+	// userAgentEnabled and userAgent are the provider-wide User-Agent
+	// declarations a model inherits unless it declares its own; see
+	// ResolvedModel.UserAgent.
+	userAgentEnabled *bool
+	userAgent        *string
 }
 
 // New validates the complete local registry and returns a network-free
@@ -239,6 +249,8 @@ func (r *registry) resolve(selection Selection) (ResolvedModel, error) {
 		streamIdleTimeout = model.StreamIdleTimeout
 	}
 
+	userAgent := userAgentFor(provider, model)
+
 	variantName := selection.Variant
 	if variantName == "" {
 		variantName = model.DefaultVariant
@@ -286,6 +298,7 @@ func (r *registry) resolve(selection Selection) (ResolvedModel, error) {
 		Limits:             Limits{ContextWindow: model.ContextWindow},
 		StreamContinuation: model.StreamContinuation,
 		StreamIdleTimeout:  streamIdleTimeout,
+		UserAgent:          userAgent,
 		Compatibility:      compatibility,
 		Capabilities:       capabilities,
 		Options:            options,
@@ -294,6 +307,29 @@ func (r *registry) resolve(selection Selection) (ResolvedModel, error) {
 		ReasoningLevel:     reasoning,
 		ReasoningBudgets:   maps.Clone(model.ReasoningBudgets),
 	}, nil
+}
+
+// userAgentFor resolves one model's User-Agent declaration over its provider's:
+// each field is inherited unless the model declares its own, and the result is
+// the value the transport applies. A disabled declaration wins over a value
+// declared at either layer, because switching the header off is the more
+// specific instruction.
+func userAgentFor(definition providerDefinition, model config.ModelConfig) *string {
+	enabled := definition.userAgentEnabled
+	if model.UserAgentEnabled != nil {
+		enabled = model.UserAgentEnabled
+	}
+
+	agent := definition.userAgent
+	if model.UserAgent != nil {
+		agent = model.UserAgent
+	}
+
+	if enabled != nil && !*enabled {
+		return new(string)
+	}
+
+	return clonePointer(agent)
 }
 
 // supportedReasoningLevels renders a model's declared ladder so a rejected
@@ -376,6 +412,8 @@ func resolveProviders(overrides map[ai.Provider]config.ProviderConfig) (map[ai.P
 		definition.compatibility = override.Compatibility.Resolve(definition.compatibility)
 		definition.capabilities = definition.capabilities.Overlay(override.Capabilities)
 		definition.streamIdleTimeout = override.StreamIdleTimeout
+		definition.userAgentEnabled = clonePointer(override.UserAgentEnabled)
+		definition.userAgent = clonePointer(override.UserAgent)
 		openAIShaped := config.IsOpenAIProtocol(definition.protocol)
 		if !openAIShaped && !reflect.DeepEqual(override.Compatibility, config.CompatibilityConfig{}) {
 			return nil, fmt.Errorf("%w: provider %q compatibility requires an OpenAI protocol", ErrInvalid, provider)

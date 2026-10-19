@@ -44,10 +44,11 @@
 | Provider、模型、推理、重试、JSONL、Tool Search | [Provider、模型与韧性](providers-models-resilience.md) | `MA-MODEL-*` | 实时 Provider 为条件项 |
 | TUI、会话、树、压缩、主题、状态栏 | [TUI、会话与呈现](tui-sessions-presentation.md) | `MA-TUI-*` | 交互终端 |
 | Workspace 工具、Patch、Shell、Git、附件、图片 | [Workspace、工具、Git 与附件](workspace-tools-git-attachments.md) | `MA-WORK-*` | 写/Shell 用例安全敏感 |
+| 后台监视、事件投递与停止 | [后台监视](background-watches.md) | `MA-WATCH-*` | 会启动长期运行进程；安全敏感 |
 | Sandbox、网络、权限与审批 | [安全、Sandbox、权限与审批](security-sandbox-permissions.md) | `MA-SEC-*` | 平台条件与安全敏感 |
 | Plan Mode、计划文件与计划审批 | [Plan Mode](plan-mode.md) | `MA-PLAN-*` | 交互终端 |
 | Skills、MCP、Extensions、Bundles、Plugins、Hooks | [集成能力](skills-mcp-extensions-plugins-hooks.md) | `MA-INT-*` | 按已配置集成选择 |
-| Builtin 与 Dynamic Subagents | [Subagent](builtin-dynamic-subagents.md) | `MA-SUB-*` | Dynamic 默认关闭 |
+| Builtin 与 Dynamic Subagents | [Subagent](builtin-dynamic-subagents.md) | `MA-SUB-*` | Dynamic 默认开启 |
 | Coding Team | [Coding Team](coding-teams.md) | `MA-TEAM-*` | Git HEAD、交互确认 |
 | Remote SSH 与 ACP | [远程 SSH 与 ACP](remote-ssh-acp.md) | `MA-REMOTE-*` | 外部系统/ACP 客户端 |
 | 事件、Telemetry、恢复与兼容 | [可观测性、恢复与兼容](observability-recovery-compatibility.md) | `MA-OPS-*` | 含自动证据和运营观察 |

@@ -422,14 +422,9 @@ func TestTeamWorkerRouteClosesBridgeOnBackAndParentCatchUp(t *testing.T) {
 	assert.Nil(t, model.commitStableTimeline())
 
 	_, command := model.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
-	assert.Nil(t, command)
 	assert.True(t, closed)
-	assert.Equal(t, routeAgents, model.route.kind)
-	assert.Zero(t, model.scrollback.messages)
-
-	_, command = model.Update(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
-	printed := driveModelCommandsCapture(t, model, command)
 	assert.Equal(t, routeNone, model.route.kind)
+	printed := driveModelCommandsCapture(t, model, command)
 	assert.Contains(t, printed, "parent output while Worker is open")
 	assert.Equal(t, 1, model.scrollback.messages)
 }

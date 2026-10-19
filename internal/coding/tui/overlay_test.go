@@ -15,6 +15,7 @@ import (
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding"
 	"github.com/rsbin1178/pips/internal/coding/approval"
+	"github.com/rsbin1178/pips/internal/coding/background"
 	"github.com/rsbin1178/pips/internal/coding/changes"
 	"github.com/rsbin1178/pips/internal/coding/config"
 	"github.com/rsbin1178/pips/internal/coding/modelcatalog"
@@ -246,7 +247,7 @@ func TestModelPickerRendersInlineBelowComposerAndOwnsTyping(t *testing.T) {
 	view := model.View()
 	lines := strings.Split(view.Content, "\n")
 	composerLine := lineContaining(lines, inputArrow)
-	pickerLine := lineContaining(lines, "Model · current process only")
+	pickerLine := lineContaining(lines, "Model · filter:")
 	require.GreaterOrEqual(t, composerLine, 0)
 	assert.Greater(t, pickerLine, composerLine)
 	assert.Nil(t, view.Cursor)
@@ -255,6 +256,70 @@ func TestModelPickerRendersInlineBelowComposerAndOwnsTyping(t *testing.T) {
 	model.Update(tea.KeyPressMsg{Text: "next"})
 	assert.Equal(t, "next", model.picker.query)
 	assert.Empty(t, model.composer.Value())
+}
+
+func TestModelPickerEnterSavesTheAppliedSelection(t *testing.T) {
+	t.Parallel()
+
+	controller := newOverlayController(readyState())
+	model := readyModelWithController(t, controller, true)
+	var saved []modelcatalog.Selection
+	model.options.SaveSelection = func(_ context.Context, selection modelcatalog.Selection) error {
+		saved = append(saved, selection)
+
+		return nil
+	}
+	model.openModelPicker()
+	model.picker.query = "next-model"
+	model.Update(key("v"))
+	model.Update(key("r"))
+
+	_, command := model.Update(key("enter"))
+	require.NotNil(t, command)
+	model.Update(commandMessage(t, command))
+	require.Len(t, saved, 1)
+	assert.Equal(t, "next-model", saved[0].Ref.Model)
+	assert.Equal(t, "fast", saved[0].Variant)
+	require.NotNil(t, saved[0].ReasoningOverride)
+	assert.Equal(t, config.ReasoningLevel("low"), *saved[0].ReasoningOverride)
+	assert.Equal(t, "Model selection saved as default", model.statusNotice)
+	assert.False(t, model.statusNoticeErr)
+}
+
+func TestModelPickerReportsASaveFailureWithoutUndoingTheApply(t *testing.T) {
+	t.Parallel()
+
+	controller := newOverlayController(readyState())
+	model := readyModelWithController(t, controller, true)
+	model.options.SaveSelection = func(context.Context, modelcatalog.Selection) error {
+		return config.ErrConflict
+	}
+	model.openModelPicker()
+	model.picker.query = "next-model"
+
+	_, command := model.Update(key("enter"))
+	require.NotNil(t, command)
+	model.Update(commandMessage(t, command))
+	require.Len(t, controller.models, 1, "the process-local apply still happened")
+	assert.True(t, model.statusNoticeErr)
+	assert.Contains(t, model.statusNotice, "configuration changed")
+}
+
+func TestModelPickerReportsAnUnavailableSelectionSaver(t *testing.T) {
+	t.Parallel()
+
+	controller := newOverlayController(readyState())
+	model := readyModelWithController(t, controller, true)
+	model.options.SaveSelection = nil
+	model.openModelPicker()
+	model.picker.query = "next-model"
+
+	_, command := model.Update(key("enter"))
+	require.NotNil(t, command)
+	model.Update(commandMessage(t, command))
+	require.Len(t, controller.models, 1, "the process-local apply still happened")
+	assert.True(t, model.statusNoticeErr)
+	assert.Contains(t, model.statusNotice, "persistence is unavailable")
 }
 
 func TestStatusCommandRefreshesCompactWorktreeSummaryAsynchronously(t *testing.T) {
@@ -357,18 +422,16 @@ func TestStatusInspectionShowsOnlyRequestOutputLimit(t *testing.T) {
 	assert.NotContains(t, content, "Model output:")
 }
 
-func TestHelpInspectionExplainsMouseSelectionAndWheelScrolling(t *testing.T) {
+func TestHelpPanelExplainsMouseSelectionAndWheelScrolling(t *testing.T) {
 	t.Parallel()
 
-	model := readyModel(t, true)
-	model.Update(tea.WindowSizeMsg{Width: 180, Height: 30})
-	content := modelCommandOutput(model, model.printHelp())
+	model := fullscreenModel(t, stubController{state: readyState()}, true)
+	model.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	content := helpPageText(model, helpTabShortcuts)
 
-	assert.Contains(t, content, "terminal owns conversation history")
-	assert.Contains(t, content, "drag normally to select and copy text")
-	assert.Contains(t, content, "/team [objective]")
-	assert.Contains(t, content, "Enter resumes only the conversation")
-	assert.NotContains(t, content, "PgUp/PgDown/End")
+	assert.Contains(t, content, "scroll the conversation")
+	assert.Contains(t, content, "wheel over the draft")
+	assert.Contains(t, content, "hold Shift")
 	assert.NotContains(t, content, "/mouse")
 }
 
@@ -483,6 +546,11 @@ type overlayController struct {
 	agentDetail          subagent.Detail
 	agentInspections     []string
 	agentCanceled        []string
+	backgroundKilled     []string
+	backgroundInspected  []string
+	backgroundKillErr    error
+	backgroundInspectErr error
+	backgroundInspection coding.BackgroundTaskInspection
 	skillSnapshot        coding.SkillSnapshot
 	skillErr             error
 	mcpSnapshot          coding.MCPSnapshot
@@ -788,6 +856,30 @@ func (c *overlayController) CancelSubagent(_ context.Context, childSessionID str
 	c.agentCanceled = append(c.agentCanceled, childSessionID)
 
 	return nil
+}
+
+func (c *overlayController) KillBackgroundTask(
+	_ context.Context,
+	taskID string,
+) (background.Outcome, background.Subject, error) {
+	c.backgroundKilled = append(c.backgroundKilled, taskID)
+	if c.backgroundKillErr != nil {
+		return background.OutcomeNotFound, background.SubjectTask, c.backgroundKillErr
+	}
+
+	return background.OutcomeKilled, background.SubjectTask, nil
+}
+
+func (c *overlayController) InspectBackgroundTask(
+	_ context.Context,
+	taskID string,
+) (coding.BackgroundTaskInspection, error) {
+	c.backgroundInspected = append(c.backgroundInspected, taskID)
+	if c.backgroundInspectErr != nil {
+		return coding.BackgroundTaskInspection{}, c.backgroundInspectErr
+	}
+
+	return c.backgroundInspection, nil
 }
 
 func (c *overlayController) Tree(context.Context) (coding.SessionTree, error) {

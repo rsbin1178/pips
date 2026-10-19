@@ -47,6 +47,7 @@ type Observer struct {
 	teamDuration        metric.Int64Histogram
 	teamControls        metric.Int64Counter
 	teamIntegrations    metric.Int64Counter
+	backgroundTasks     metric.Int64Counter
 }
 
 // New constructs an observer using application-owned or global providers.
@@ -180,6 +181,15 @@ func New(config Config) (*Observer, error) {
 		return nil, fmt.Errorf("coding otel Team integrations counter: %w", err)
 	}
 
+	backgroundTasks, err := meter.Int64Counter(
+		"pips.coding.background.tasks",
+		metric.WithDescription("Coding background-task lifecycle events."),
+		metric.WithUnit("{event}"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("coding otel background tasks counter: %w", err)
+	}
+
 	return &Observer{
 		tracer:              tp.Tracer(instrumentationName),
 		sessions:            sessions,
@@ -196,6 +206,7 @@ func New(config Config) (*Observer, error) {
 		teamDuration:        teamDuration,
 		teamControls:        teamControls,
 		teamIntegrations:    teamIntegrations,
+		backgroundTasks:     backgroundTasks,
 	}, nil
 }
 
@@ -273,6 +284,8 @@ func (o *Observer) Observe(ctx context.Context, event coding.TelemetryEvent) err
 		o.observeTeamControl(ctx, event)
 	case coding.EventTeamIntegrationLifecycle:
 		o.observeTeamIntegration(ctx, event)
+	case coding.EventBackgroundStarted, coding.EventBackgroundCompleted:
+		o.observeBackgroundTask(ctx, event)
 	case coding.EventInteractionStarted, coding.EventRunStarted, coding.EventRunCompleted,
 		coding.EventTurnStarted, coding.EventTurnCompleted, coding.EventMessageCommitted,
 		coding.EventMessageDelta, coding.EventMessageDiscarded,
@@ -310,6 +323,21 @@ func (o *Observer) observeTeamIntegration(ctx context.Context, event coding.Tele
 	}
 	o.teamIntegrations.Add(ctx, 1, metric.WithAttributes(metricAttrs...))
 	o.instant(ctx, "coding.team.integration", event, attrs, event.Failed)
+}
+
+// observeBackgroundTask records one registered background task's lifecycle. The
+// projection is deliberately content-free: the kind and the outcome are the only
+// dimensions, so a command, description, path, output, or task id is never
+// exported.
+func (o *Observer) observeBackgroundTask(ctx context.Context, event coding.TelemetryEvent) {
+	attrs := []attribute.KeyValue{
+		attribute.String("coding.background.kind", event.BackgroundKind),
+		attribute.String("coding.background.outcome", event.BackgroundOutcome),
+		attribute.Int64("coding.background.duration_ms", event.DurationMillis),
+	}
+	metricAttrs := attrs[:2]
+	o.backgroundTasks.Add(ctx, 1, metric.WithAttributes(metricAttrs...))
+	o.instant(ctx, "coding."+string(event.Type), event, attrs, event.Failed)
 }
 
 func (o *Observer) observeTeam(ctx context.Context, event coding.TelemetryEvent) {

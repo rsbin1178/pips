@@ -49,6 +49,73 @@ func TestControllerDefersPendingAndBackgroundWithoutAssessment(t *testing.T) {
 	}
 }
 
+// TestStateDecodesVerifyGapsAdditively pins the durable field: VerifyGaps is
+// additive (an older state decodes), it round-trips, and Decode bounds it at
+// MaxGaps like the aggregate gaps.
+func TestStateDecodesVerifyGapsAdditively(t *testing.T) {
+	t.Parallel()
+
+	state, _, err := Prepare("prove the migration ran")
+	require.NoError(t, err)
+
+	encoded, err := Encode(state)
+	require.NoError(t, err)
+
+	restored, err := Decode(encoded)
+	require.NoError(t, err)
+	assert.Empty(t, restored.VerifyGaps)
+
+	state.VerifyGaps = []string{"gap-0", "gap-1"}
+	encoded, err = Encode(state)
+	require.NoError(t, err)
+
+	restored, err = Decode(encoded)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"gap-0", "gap-1"}, restored.VerifyGaps)
+
+	state.VerifyGaps = make([]string, MaxGaps+1)
+	encoded, err = Encode(state)
+	require.NoError(t, err)
+
+	_, err = Decode(encoded)
+	require.ErrorIs(t, err, goal.ErrInvalid)
+}
+
+// TestControllerFillsTheAssessmentInputFromTheSession pins the seam: the wrapper
+// supplies the transcript and the plan on the evaluation the assessment sees, so
+// the request body is a function of the evaluation rather than of anything the
+// durable request carries — which is what makes a retried decision correct.
+func TestControllerFillsTheAssessmentInputFromTheSession(t *testing.T) {
+	t.Parallel()
+
+	state, _, err := Prepare("done")
+	require.NoError(t, err)
+	encoded, err := Encode(state)
+	require.NoError(t, err)
+	evidence, err := Encode(Evidence{})
+	require.NoError(t, err)
+
+	var observed goal.Evaluation
+
+	controller := Controller{
+		Transcript: func() (string, string) { return "[user] inspect proof.txt", "(no plan available)" },
+		Evaluator: goal.EvaluatorFunc(func(_ context.Context, evaluation goal.Evaluation) (goal.EvaluationResult, error) {
+			observed = evaluation
+
+			return goal.EvaluationResult{Outcome: goal.OutcomeContinue, Reason: "still working"}, nil
+		}),
+	}
+
+	_, err = controller.Decide(t.Context(), continuation.DecisionRequest{
+		ControllerState: encoded, Work: continuation.WorkResult{Value: evidence},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "done", observed.Condition, "the objective stays the Goal's condition")
+	assert.Equal(t, "[user] inspect proof.txt", observed.Transcript)
+	assert.Equal(t, "(no plan available)", observed.Plan)
+	assert.NotEmpty(t, observed.Evidence, "the ledger stays on the evaluation; it is the payload that stops carrying it")
+}
+
 func TestControllerInvalidationCannotVerifyOldEvidence(t *testing.T) {
 	t.Parallel()
 
@@ -84,42 +151,4 @@ func TestEvidenceFingerprintIgnoresClaimsAndIdentities(t *testing.T) {
 
 	second.Records[0].Digest = "different content"
 	assert.NotEqual(t, first.Fingerprint(), second.Fingerprint())
-}
-
-func TestProofRequiresCurrentReadsAndSoundRecordedEvidence(t *testing.T) {
-	t.Parallel()
-
-	record := Record{ID: "tool:entry:call", Tool: "read", Arguments: ai.JSON(`{"path":"file"}`), Digest: "current", OK: true}
-	read := Record{ID: "read:audit", Tool: "read", Arguments: record.Arguments, Digest: "current", OK: true}
-	verdict := Verdict{Verified: true, Reason: "actual proof", References: []string{record.ID, read.ID}}
-	valid := Evidence{Records: []Record{record}}
-	require.NoError(t, validateProof(verdict, valid, map[string]Record{read.ID: read}))
-
-	for _, test := range []struct {
-		name   string
-		change func(*Evidence, *Verdict, map[string]Record)
-	}{
-		{name: "self report", change: func(e *Evidence, _ *Verdict, _ map[string]Record) { e.Records = nil; e.Claim = "all verified" }},
-		{name: "failed tool", change: func(e *Evidence, _ *Verdict, _ map[string]Record) { e.Records[0].OK = false }},
-		{name: "truncated result", change: func(e *Evidence, _ *Verdict, _ map[string]Record) { e.Records[0].Truncated = true }},
-		{name: "truncated ledger", change: func(e *Evidence, _ *Verdict, _ map[string]Record) { e.Truncated = true }},
-		{name: "empty findings", change: func(_ *Evidence, v *Verdict, _ map[string]Record) { v.References = nil }},
-		{name: "invented reference", change: func(_ *Evidence, v *Verdict, _ map[string]Record) { v.References = []string{"invented"} }},
-		{name: "stale file", change: func(_ *Evidence, _ *Verdict, reads map[string]Record) {
-			changed := reads[read.ID]
-			changed.Digest = "changed"
-			reads[read.ID] = changed
-		}},
-		{name: "contradictory verdict", change: func(_ *Evidence, v *Verdict, _ map[string]Record) { v.Gaps = []string{"tests not checked"} }},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-
-			evidence := Evidence{Records: []Record{record}}
-			result := verdict
-			reads := map[string]Record{read.ID: read}
-			test.change(&evidence, &result, reads)
-			require.Error(t, validateProof(result, evidence, reads))
-		})
-	}
 }

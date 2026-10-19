@@ -271,7 +271,7 @@ func TestEventPublisherRejectedChildEventDoesNotConsumeSequence(t *testing.T) {
 	runtime := openTestRuntime(t, newRuntimeModel())
 	require.NoError(t, runtime.openChildProjection(t.Context(), subagent.Event{
 		ChildSessionID: "child-sequence", Time: eventTestTime,
-	}))
+	}, nil))
 
 	publisher := runtime.publisher
 	publisher.mu.Lock()

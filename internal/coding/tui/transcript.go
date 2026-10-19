@@ -151,6 +151,13 @@ func (s *transcriptStore) setLeading(rows int) {
 // leading entries whose records did not change: the store then keeps those records
 // - and the rows they already rendered - and rebuilds only the tail. Any other
 // combination falls back to a full build.
+// reset drops every cached record. A wholesale transcript replacement can reuse
+// a position-based identity with different content; clearing here makes the next
+// sync render the replacement from scratch instead of keeping the old rows.
+func (s *transcriptStore) reset() {
+	*s = transcriptStore{}
+}
+
 func (s *transcriptStore) sync(
 	width int,
 	theme colorTheme,
@@ -207,7 +214,8 @@ func (s *transcriptStore) newRecord(id string, entry transcriptEntry) transcript
 	s.renders++
 
 	record := transcriptRecord{id: id, live: entry.live, block: entry.block}
-	if entry.block.kind == blockTool && len(entry.block.tools) > 0 {
+	if (entry.block.kind == blockTool || entry.block.kind == blockSubagent) &&
+		len(entry.block.tools) > 0 {
 		tool := entry.block
 		record.tool = &tool
 	}

@@ -7,9 +7,9 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
-	"github.com/rsbin1178/pips/agent/harness"
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding/session"
 	"github.com/stretchr/testify/assert"
@@ -51,6 +51,7 @@ func TestRepositoryListMetadataSkipsBodiesAndCountsUnreadableSessions(t *testing
 	_, err = used.Session().AppendMessage(ai.UserText("hello"), nil)
 	require.NoError(t, err)
 	usedID := used.Metadata().ID
+	usedPath := used.Metadata().Path
 	require.NoError(t, used.Close())
 
 	abandoned, err := repository.Create(t.Context(), session.CreateOptions{
@@ -65,7 +66,7 @@ func TestRepositoryListMetadataSkipsBodiesAndCountsUnreadableSessions(t *testing
 	require.NoError(t, err)
 	_, err = broken.Session().AppendMessage(ai.UserText("unreadable"), nil)
 	require.NoError(t, err)
-	brokenPath := broken.Metadata().Path
+	brokenMeta := repository.Layout().MetadataFile(testWorkspacePath, broken.Metadata().ID)
 	require.NoError(t, broken.Close())
 
 	listing, err := repository.ListMetadata(t.Context())
@@ -76,12 +77,13 @@ func TestRepositoryListMetadataSkipsBodiesAndCountsUnreadableSessions(t *testing
 	ids := make([]string, 0, len(listing.Sessions))
 	for _, meta := range listing.Sessions {
 		ids = append(ids, meta.ID)
+		assert.Empty(t, meta.Name, "no body is read, so no name is projected")
+		assert.Zero(t, meta.BranchCount, "no body is read, so no branch count is projected")
+		assert.Equal(t, 1, meta.NodeCount, "the entry count comes from the writer-maintained index")
 	}
 	assert.Contains(t, ids, usedID)
-	assert.Empty(t, listing.Sessions[1].Name, "no body is read, so no name is projected")
-	assert.Zero(t, listing.Sessions[1].NodeCount, "transcript counts come from the prefix")
 
-	// The picker reads that prefix and still reports both sessions.
+	// The picker reads the prefix and still reports both sessions.
 	full, err := repository.List(t.Context())
 	require.NoError(t, err)
 	require.Len(t, full, 2)
@@ -91,13 +93,15 @@ func TestRepositoryListMetadataSkipsBodiesAndCountsUnreadableSessions(t *testing
 		}
 	}
 
-	// A file that fails the security check is counted, not fatal.
-	require.NoError(t, os.Chmod(brokenPath, 0o644))
+	// A session index the pass cannot trust lowers a counter, not the listing.
+	require.NoError(t, os.WriteFile(brokenMeta, []byte("{"), 0o600))
 	listing, err = repository.ListMetadata(t.Context())
 	require.NoError(t, err)
 	assert.Len(t, listing.Sessions, 1)
 	assert.Equal(t, 1, listing.Unreadable)
 
+	// A transcript the picker cannot trust still fails loudly.
+	require.NoError(t, os.Chmod(usedPath, 0o644)) //nolint:gosec // Deliberately unsafe permissions exercise rejection.
 	_, err = repository.List(t.Context())
 	require.Error(t, err, "the picker keeps failing loudly")
 }
@@ -113,38 +117,39 @@ func TestRepositoryListMetadataReturnsWhatItReadWhenCancelled(t *testing.T) {
 	repository, err := session.NewRepository(directory)
 	require.NoError(t, err)
 
-	create := func(id string) string {
+	create := func() string {
 		t.Helper()
-		handle, createErr := (harness.Repo{Dir: directory}).Create(id, map[string]string{
-			"pips.coding.workspace_id":   "workspace-key",
-			"pips.coding.workspace_path": testWorkspacePath,
+		handle, createErr := repository.Create(t.Context(), session.CreateOptions{
+			WorkspaceID: "workspace-key", WorkspacePath: testWorkspacePath,
 		})
 		require.NoError(t, createErr)
-		sess, sessErr := harness.NewSession(handle)
-		require.NoError(t, sessErr)
-		_, appendErr := sess.AppendMessage(ai.UserText("hello"), nil)
+		_, appendErr := handle.Session().AppendMessage(ai.UserText("hello"), nil)
 		require.NoError(t, appendErr)
-		path := handle.Metadata().Path
+		id := handle.Metadata().ID
 		require.NoError(t, handle.Close())
 
-		return path
+		return id
 	}
 
-	// Controlled ids keep the store's filename order — and so the pass order —
-	// deterministic: "aaa" is read first, "ccc" last.
-	unreadablePath := create("aaa")
-	create("bbb")
-	create("ccc")
-	require.NoError(t, os.Chmod(unreadablePath, 0o644))
+	// The pass reads session directories in filename order, so sorting the ids
+	// makes that order deterministic: the first is unreadable, the second is read,
+	// and the pass stops before the third.
+	ids := []string{create(), create(), create()}
+	slices.Sort(ids)
+	require.NoError(t, os.WriteFile(
+		repository.Layout().MetadataFile(testWorkspacePath, ids[0]),
+		[]byte("{"),
+		0o600,
+	))
 
-	// The pre-call check plus three per-Session checks pass: "aaa" is counted
-	// unreadable, "bbb" is read, and the pass stops before "ccc".
+	// The pre-call check plus three per-Session checks pass: the first id is
+	// counted unreadable, the second is read, and the pass stops before the third.
 	ctx := &cancelAfterCalls{Context: t.Context(), remaining: 3}
 	listing, err := repository.ListMetadata(ctx)
 	require.NoError(t, err)
 	assert.True(t, listing.Truncated)
 	require.Len(t, listing.Sessions, 1)
-	assert.Equal(t, "bbb", listing.Sessions[0].ID)
+	assert.Equal(t, ids[1], listing.Sessions[0].ID)
 	assert.Equal(t, 1, listing.Unreadable, "the unreadable counter keeps its own meaning")
 
 	// A read that never started is an error, not a partial listing.

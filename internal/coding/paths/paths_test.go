@@ -33,6 +33,8 @@ func TestNew(t *testing.T) {
 	assert.Equal(t, base+"-worktrees", layout.WorktreesRoot())
 	assert.Equal(t, filepath.Join(base, "skills"), layout.SkillsDir())
 	assert.Equal(t, filepath.Join(base, "agents"), layout.AgentsDir())
+	assert.Equal(t, filepath.Join(base, "roles"), layout.RolesDir())
+	assert.Equal(t, filepath.Join(base, "personas"), layout.PersonasDir())
 	assert.Empty(t, layout.AgentSkillsDir())
 	assert.Empty(t, layout.SharedAgentsDir())
 	assert.Equal(t, filepath.Join(base, "bundles"), layout.BundlesDir())

@@ -219,6 +219,14 @@ func (s *JSONLStore) Entries() ([]Entry, error) {
 	return cloneEntries(s.entries), nil
 }
 
+// Len returns the number of stored entries without copying them.
+func (s *JSONLStore) Len() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return len(s.entries)
+}
+
 // Close releases the underlying file. The store is unusable afterwards.
 func (s *JSONLStore) Close() error {
 	s.mu.Lock()
@@ -500,6 +508,11 @@ func readBoundedJSONLLine(
 type Repo struct {
 	// Dir is the directory holding the session files.
 	Dir string
+	// Path overrides the default <Dir>/<id>.jsonl mapping when set. A caller
+	// with its own layout (for example one session per directory) supplies it so
+	// Fork and Delete address the same files this Repo creates. List always
+	// enumerates Dir and therefore requires the default mapping.
+	Path func(id string) (string, error)
 }
 
 // Create starts a new stored session. An empty id gets a generated one.
@@ -621,6 +634,10 @@ func (r Repo) Fork(sourceID, atEntryID, newID string) (*JSONLStore, error) {
 // ForkOptions supplies application-owned resources that generic Harness cannot
 // copy. It does not broaden archive authorization or grant filesystem access.
 type ForkOptions struct {
+	// Keep selects the entries copied into the new Session. It runs before the
+	// selected path is made self-contained, so parent links are rebuilt over
+	// the retained entries. A nil filter copies every selected entry.
+	Keep func(Entry) bool
 	// PrepareArchives publishes and syncs each referenced archive for newID.
 	// IDs are unique and ordered by first occurrence on the selected path.
 	// The callback runs after the temporary transcript is synced but before
@@ -628,6 +645,12 @@ type ForkOptions struct {
 	// The caller must specify newID and bind the callback to that destination.
 	// A failed or uncertain fork must not delete potentially referenced objects.
 	PrepareArchives func(archiveIDs []string) error
+	// PrepareEntries publishes any non-archive sidecar the retained entries
+	// reference, for example session media. It receives the exact self-contained
+	// path that will be written and runs after the temporary transcript is
+	// synced but before its exclusive publication, so an error leaves the
+	// destination unpublished.
+	PrepareEntries func(entries []Entry) error
 }
 
 // ForkSession failure-atomically copies a validated source path into a new
@@ -660,7 +683,7 @@ func (r Repo) ForkSession(
 	if err != nil {
 		return nil, err
 	}
-	path = normalizeForkPath(path)
+	path = normalizeForkPath(applyForkFilter(path, options))
 	if err := validateEntries(path); err != nil {
 		return nil, err
 	}
@@ -676,10 +699,12 @@ func (r Repo) ForkSession(
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(r.Dir, 0o750); err != nil {
+	// Stage beside the target so the publishing link stays within one filesystem.
+	targetDir := filepath.Dir(targetPath)
+	if err := os.MkdirAll(targetDir, 0o750); err != nil {
 		return nil, fmt.Errorf("harness: create session dir: %w", err)
 	}
-	temp, err := os.CreateTemp(r.Dir, ".fork-*.tmp")
+	temp, err := os.CreateTemp(targetDir, ".fork-*.tmp")
 	if err != nil {
 		return nil, err
 	}
@@ -718,6 +743,11 @@ func (r Repo) ForkSession(
 	if err := forked.Close(); err != nil {
 		return nil, err
 	}
+	if len(options) == 1 && options[0].PrepareEntries != nil {
+		if err := options[0].PrepareEntries(path); err != nil {
+			return nil, fmt.Errorf("harness: prepare fork entries: %w", err)
+		}
+	}
 	if prepareArchives != nil {
 		if err := prepareArchives(); err != nil {
 			return nil, fmt.Errorf("harness: prepare fork archives: %w", err)
@@ -734,6 +764,25 @@ func (r Repo) ForkSession(
 	committed = true
 
 	return OpenJSONL(targetPath)
+}
+
+// applyForkFilter drops entries a fork must not copy. It runs before the path
+// is made self-contained, so parent links are rebuilt over the retained
+// entries.
+func applyForkFilter(path []Entry, options []ForkOptions) []Entry {
+	if len(options) != 1 || options[0].Keep == nil {
+		return path
+	}
+
+	keep := options[0].Keep
+	retained := make([]Entry, 0, len(path))
+	for _, entry := range path {
+		if keep(entry) {
+			retained = append(retained, entry)
+		}
+	}
+
+	return retained
 }
 
 // normalizeForkPath makes a selected linear branch self-contained. Labels
@@ -768,6 +817,18 @@ func normalizeForkPath(path []Entry) []Entry {
 func (r Repo) sessionPath(id string) (string, error) {
 	if err := validateSessionID(id); err != nil {
 		return "", err
+	}
+
+	if r.Path != nil {
+		path, err := r.Path(id)
+		if err != nil {
+			return "", err
+		}
+		if path == "" || strings.ContainsRune(path, '\x00') {
+			return "", fmt.Errorf("harness: invalid session path for %q", id)
+		}
+
+		return path, nil
 	}
 
 	return filepath.Join(r.Dir, id+jsonlExt), nil

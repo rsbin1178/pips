@@ -10,6 +10,7 @@ import (
 	"github.com/rsbin1178/pips/internal/coding/config"
 	"github.com/rsbin1178/pips/internal/coding/planmode"
 	"github.com/rsbin1178/pips/internal/coding/planreview"
+	"github.com/rsbin1178/pips/internal/coding/subagent"
 	"github.com/rsbin1178/pips/internal/coding/tasklist"
 	"github.com/rsbin1178/pips/internal/coding/tools"
 	"github.com/stretchr/testify/assert"
@@ -64,14 +65,18 @@ func TestLeasedToolGuardDeniesCallsOutsideSnapshot(t *testing.T) {
 	known := []agent.Tool{
 		agent.NewTool("read", "", func(context.Context, struct{}) (string, error) { return "", nil }),
 		agent.NewTool("apply_patch", "", func(context.Context, struct{}) (string, error) { return "", nil }),
+		agent.NewTool(tools.UseToolName, "", func(context.Context, struct{}) (string, error) { return "", nil }),
 	}
-	guard := leasedToolGuard(ModePlan, []catalog.Descriptor{{Name: "read"}}, catalog.DefaultToolSearchName, known)
+	guard := leasedToolGuard(
+		ModePlan, []catalog.Descriptor{{Name: "read"}}, catalog.DefaultToolSearchName, tools.UseToolName, known,
+	)
 	assert.Equal(t, agent.ToolDecisionAllow, guard(t.Context(), agent.ToolCallInfo{
 		ToolCall: agent.ToolCall{Name: "read"},
 	}).Action)
 	assert.Equal(t, agent.ToolDecisionAllow, guard(t.Context(), agent.ToolCallInfo{
 		ToolCall: agent.ToolCall{Name: catalog.DefaultToolSearchName},
 	}).Action)
+	assert.Equal(t, agent.ToolDecisionAllow, guard(t.Context(), agent.ToolCallInfo{Name: tools.UseToolName}).Action)
 	denied := guard(t.Context(), agent.ToolCallInfo{
 		ToolCall: agent.ToolCall{Name: "apply_patch"},
 	})
@@ -94,13 +99,19 @@ func TestLeasedToolGuardDeniesCallsOutsideSnapshot(t *testing.T) {
 	assert.Equal(t, agent.ToolDecisionDeny, plain.Action)
 	assert.Equal(t, `unknown tool "deploy_kubernetes_cluster"`, plain.Reason)
 
-	// Disabled search never authorizes the discovery name.
-	disabled := leasedToolGuard(ModePlan, []catalog.Descriptor{{Name: "read"}}, "", known)
+	// Disabled search never authorizes the discovery name, and a dispatch Tool
+	// the surface does not offer is not leased either: it is a mode
+	// restriction, not a slip, because the toolbox does hold the name.
+	disabled := leasedToolGuard(ModePlan, []catalog.Descriptor{{Name: "read"}}, "", "", known)
 	hidden := disabled(t.Context(), agent.ToolCallInfo{
 		ToolCall: agent.ToolCall{Name: catalog.DefaultToolSearchName},
 	})
 	assert.Equal(t, agent.ToolDecisionDeny, hidden.Action)
 	assert.Contains(t, hidden.Reason, "unknown tool")
+
+	unleased := disabled(t.Context(), agent.ToolCallInfo{Name: tools.UseToolName})
+	assert.Equal(t, agent.ToolDecisionDeny, unleased.Action)
+	assert.Contains(t, unleased.Reason, "plan mode")
 }
 
 func TestSuggestToolNames(t *testing.T) {
@@ -108,7 +119,7 @@ func TestSuggestToolNames(t *testing.T) {
 
 	known := []string{
 		"apply_patch", "read", "grep", "glob", "ls", "shell", "ask_user",
-		"pips_tool_search", "run_subagent", "spawn_agent", "update_plan",
+		"pips_tool_search", subagent.ToolName, tasklist.ToolName,
 	}
 
 	tests := []struct {

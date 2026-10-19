@@ -87,6 +87,8 @@ func cloneEventPayload(payload EventPayload) EventPayload {
 		return value
 	case SubagentLifecycle:
 		return value
+	case BackgroundTaskLifecycle:
+		return value
 	case GoalChanged:
 		value.State = value.State.Clone()
 		return value

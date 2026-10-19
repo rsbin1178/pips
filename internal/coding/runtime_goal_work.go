@@ -18,7 +18,6 @@ import (
 )
 
 const (
-	goalWorkMaxTurns   = 16
 	goalFeedbackPrefix = "[Pips Goal continuation "
 )
 

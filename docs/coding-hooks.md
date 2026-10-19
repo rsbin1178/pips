@@ -1,10 +1,10 @@
 # Coding lifecycle hooks
 
 Pips supports reviewed command hooks around the Coding Runtime. The lifecycle
-events and their control effects follow the current [Codex Hooks](https://learn.chatgpt.com/docs/hooks)
-model where Pips has the same Runtime boundary. The configuration and command
-response schema are deliberately Pips-native: do not copy `.codex`, Claude
-Code, or Pi configuration into Pips expecting it to run.
+events and their control effects are defined by Pips for its own Runtime
+boundaries. The configuration and command response schema are deliberately
+Pips-native: do not copy configuration from another tool into Pips expecting it
+to run.
 
 A trusted hook is local automation with the authority of the operating-system
 user that starts Pips. It runs outside the Coding Sandbox and model-tool
@@ -142,11 +142,11 @@ The supported events are:
 `matcher` is an RE2 regular expression. Omit it, use `""`, or use `"*"` to
 match every occurrence. `UserPromptSubmit` and `Stop` retain a configured
 matcher for source fidelity but ignore it. Tool hooks match Pips's canonical
-tool name and these Codex-compatible aliases:
+tool name and these compatible aliases:
 
 - `shell` also matches `Bash`;
 - `apply_patch` also matches `Edit` and `Write`;
-- `run_subagent` and `spawn_agent` also match `Agent`.
+- `spawn_subagent` also matches `Agent`.
 
 MCP and other local function tools match their exact Pips tool name. Matching
 groups from user and project files all run. Commands for one event start
@@ -195,12 +195,40 @@ The event-specific fields are:
 | `PostCompact` | `trigger`, `tokens_before`, `tokens_after`, `duration_ms` |
 | `SubagentStart` | `agent_id`, `agent_type`, `task` |
 | `SubagentStop` | `agent_id`, `agent_type`, `stop_hook_active`, `last_assistant_message` |
-| `Stop` | `stop_hook_active`, `last_assistant_message` |
+| `Stop` | `stop_hook_active`, `last_assistant_message`, optional `background_tasks` |
 
 Prompt input excludes attachment bytes and hidden Runtime/model state.
 `tool_response` is a bounded text-only projection with error and truncation
 metadata; non-text parts are omitted. Inputs, stdout, stderr, reasons, and
 model-visible hook context are bounded.
+
+### Stop payload: `background_tasks`
+
+`Stop` also carries the background tasks this session still has running, so a
+handler can decide whether a turn really ended. Each entry names the task, its
+kind, its state, and the command it runs — a watch reports it in `description`
+and a backgrounded command reports it in `command`:
+
+```json
+{
+  "background_tasks": [
+    {
+      "id": "monitor-1",
+      "type": "monitor",
+      "status": "running",
+      "description": "tail -f /var/log/deploy.log"
+    }
+  ]
+}
+```
+
+The two types this release registers are `monitor` and `shell`; a later child
+type adds itself to the same list. A monitor carries no `command` field: the
+watched command travels in `description` instead, while a `shell` entry carries
+it in `command` and leaves `description` empty. Every free-text field is clipped
+to 1000 characters with an in-string `… [+N chars]` marker, so a handler can
+tell a clipped value from a short one, and an empty list is omitted from the
+payload entirely.
 
 ## Handler responses
 

@@ -18,6 +18,106 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestTimelineProjectsACompactionDivider(t *testing.T) {
+	t.Parallel()
+
+	state := coding.State{
+		Transcript: []ai.Message{ai.UserText("after")},
+		Compaction: coding.CompactionState{
+			Mode: coding.CompactionAutomatic, TokensBefore: 9000, TokensAfter: 1200,
+			CheckpointID: "checkpoint-1", Strategy: coding.CompactionStrategyFull,
+		},
+	}
+
+	blocks := projectTimeline(state)
+	require.NotEmpty(t, blocks)
+	assert.Equal(t, blockCompaction, blocks[0].kind)
+	assert.Equal(t, "compaction:checkpoint-1", blocks[0].id)
+
+	rendered := renderTimeline(blocks, newMarkdownRenderer(4), 60, themeDark, true)
+	line, _, _ := strings.Cut(rendered, "\n")
+	assert.Equal(t,
+		"Context compacted · auto · 9.0k → 1.2k tokens",
+		strings.TrimSpace(strings.Trim(strings.TrimSpace(line), "─")),
+	)
+	assert.Equal(t, 60-timelineInset(60), ansi.StringWidth(line),
+		"the divider spans the conversation column")
+	assert.True(t, strings.HasPrefix(strings.TrimSpace(line), "─") && strings.HasSuffix(line, "─"))
+}
+
+func TestCompactionDividerSitsAtTheCheckpointBoundary(t *testing.T) {
+	t.Parallel()
+
+	state := coding.State{
+		Transcript: []ai.Message{
+			ai.UserText("old-1"), ai.UserText("old-2"), ai.UserText("new-1"),
+		},
+		Compaction: coding.CompactionState{
+			Mode: coding.CompactionManual, TokensBefore: 9000, TokensAfter: 1200,
+			CheckpointID: "checkpoint-1", Strategy: coding.CompactionStrategyFull,
+			BoundaryIndex: 2,
+		},
+	}
+
+	blocks := projectTimeline(state)
+	require.Len(t, blocks, 4)
+	assert.Equal(t, "old-1", blocks[0].body)
+	assert.Equal(t, "old-2", blocks[1].body)
+	assert.Equal(t, blockCompaction, blocks[2].kind)
+	assert.Equal(t, "Context compacted · manual · 9.0k → 1.2k tokens", blocks[2].body)
+	assert.Equal(t, "new-1", blocks[3].body)
+}
+
+func TestCompactionDividerSurvivesResumeWithoutTheMode(t *testing.T) {
+	t.Parallel()
+
+	state := coding.State{
+		Transcript: []ai.Message{ai.UserText("after")},
+		Compaction: coding.CompactionState{
+			TokensBefore: 9000, TokensAfter: 1200,
+			CheckpointID: "checkpoint-1", Strategy: coding.CompactionStrategyFull,
+		},
+	}
+
+	blocks := projectTimeline(state)
+	require.Len(t, blocks, 2, "the divider leads the messages after the checkpoint")
+	rendered := renderTimeline(blocks, newMarkdownRenderer(4), 60, themeDark, true)
+	assert.Contains(t, rendered, "Context compacted · 9.0k → 1.2k tokens")
+	assert.NotContains(t, rendered, "manual")
+	assert.NotContains(t, rendered, "auto")
+}
+
+func TestCompactionDividerRequiresACompletedFullCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	states := []coding.CompactionState{
+		{Mode: coding.CompactionManual, TokensBefore: 9000}, // active or in progress
+		{TokensBefore: 9000, CheckpointID: "legacy"},        // legacy retained-tail compaction
+	}
+	for _, state := range states {
+		blocks := projectTimeline(coding.State{Compaction: state})
+		assert.Empty(t, blocks)
+	}
+
+	active := coding.CompactionState{
+		Active: true, Mode: coding.CompactionManual, TokensBefore: 9000,
+		CheckpointID: "checkpoint-1", Strategy: coding.CompactionStrategyFull,
+	}
+	assert.False(t, hasCompactionDivider(projectTimeline(coding.State{
+		Transcript: []ai.Message{ai.UserText("during")}, Compaction: active,
+	})))
+}
+
+func hasCompactionDivider(blocks []timelineBlock) bool {
+	for _, block := range blocks {
+		if block.kind == blockCompaction {
+			return true
+		}
+	}
+
+	return false
+}
+
 func TestTimelineProjectsQuestionResultSemantically(t *testing.T) {
 	t.Parallel()
 
@@ -396,36 +496,35 @@ func TestTimelineProjectsSubagentAsOriginalToolActivity(t *testing.T) {
 	}
 	blocks := projectTimeline(state)
 	require.Len(t, blocks, 1)
-	assert.Equal(t, blockTool, blocks[0].kind)
+	assert.Equal(t, blockSubagent, blocks[0].kind)
 	require.Len(t, blocks[0].tools, 1)
 	assert.Equal(t, "call-1", blocks[0].tools[0].id)
 	assert.Equal(t, "child-1", blocks[0].tools[0].childSessionID)
 	rendered := renderTimeline(blocks, newMarkdownRenderer(4), 80, themeDark, true)
-	assert.Contains(t, rendered, "• Explored Locate the composition root")
-	assert.Contains(t, rendered, "Completed in 12s · 8 tools · 14.2k tokens")
+	assert.Contains(t, rendered, "• Subagent completed in 12s: “Locate the composition root”")
 	assert.NotContains(t, rendered, subagent.ToolName)
 	assert.NotContains(t, rendered, "internal envelope")
 }
 
-func TestTimelineProjectsSpawnAgentInOriginalToolRow(t *testing.T) {
+func TestTimelineProjectsSpawnAgentLifecycleRow(t *testing.T) {
 	t.Parallel()
 
 	state := coding.State{
 		Transcript: []ai.Message{
 			ai.Assistant(ai.ToolCallPart{
-				ID: "spawn-1", Name: subagent.SpawnToolName,
-				Args: ai.JSON(`{"role":"review","task":"Review the runtime"}`),
+				ID: "spawn-1", Name: subagent.ToolName,
+				Args: ai.JSON(`{"prompt":"Review the runtime","description":"review","subagent_type":"review"}`),
 			}),
 			ai.ToolResultText(
-				"spawn-1", subagent.SpawnToolName,
+				"spawn-1", subagent.ToolName,
 				`{"schema":"pips.coding.agent.spawn/v1alpha1","agent_id":"child-1","role":"review","state":"running"}`,
 			),
 		},
 		Tools: []coding.ToolState{{
 			RunID: "run-1",
 			Call: coding.ToolCall{
-				ID: "spawn-1", Name: subagent.SpawnToolName,
-				Arguments: ai.JSON(`{"role":"review","task":"Review the runtime"}`),
+				ID: "spawn-1", Name: subagent.ToolName,
+				Arguments: ai.JSON(`{"prompt":"Review the runtime","description":"review","subagent_type":"review"}`),
 			},
 			Status: coding.ToolStatusCompleted,
 		}},
@@ -442,12 +541,12 @@ func TestTimelineProjectsSpawnAgentInOriginalToolRow(t *testing.T) {
 
 	blocks := projectTimeline(state)
 	require.Len(t, blocks, 1)
-	assert.Equal(t, blockTool, blocks[0].kind)
+	assert.Equal(t, blockSubagent, blocks[0].kind)
 	assert.Equal(t, "spawn-1", blocks[0].id)
 	rendered := renderTimeline(blocks, newMarkdownRenderer(4), 100, themeDark, true)
-	assert.Contains(t, rendered, "✻ Reviewing Review the runtime")
-	assert.Contains(t, rendered, "Read internal/coding/runtime.go · 2 tools")
-	assert.NotContains(t, rendered, subagent.SpawnToolName)
+	assert.Contains(t, rendered, "✻ Subagent running: “review”")
+	assert.Contains(t, rendered, "· Read internal/coding/runtime.go (review)")
+	assert.NotContains(t, rendered, subagent.ToolName)
 	assert.NotContains(t, rendered, "pips.coding.agent.spawn")
 }
 
@@ -774,6 +873,106 @@ func TestTimelineFailureKeepsErrorAndCancellationSuppressesIt(t *testing.T) {
 	}})
 	require.Len(t, canceledBlocks, 1)
 	assert.Equal(t, "▣ openai/test-model · 12s · interrupted", canceledBlocks[0].body)
+}
+
+func TestSubagentLifecycleRowTextFollowsTheSourceContract(t *testing.T) {
+	t.Parallel()
+
+	identity := subagent.AgentIdentity{Name: "explore"}
+	render := func(row subagentLifecycleRow, width int) string {
+		return renderTimeline(
+			[]timelineBlock{{kind: blockSubagent, subagent: &row}},
+			newMarkdownRenderer(4), width, themeDark, true,
+		)
+	}
+
+	tests := []struct {
+		name string
+		row  subagentLifecycleRow
+		want string
+	}{
+		{
+			name: "foreground running keeps the opening verb and the identity meta",
+			row: subagentLifecycleRow{
+				identity: identity, role: subagent.RoleExplore, model: "openai/test",
+				description: "explore the tree", activity: "Read model.go",
+				state: subagent.StateRunning,
+			},
+			want: "✻ Subagent running: “explore the tree” · Read model.go (explore · openai/test)",
+		},
+		{
+			name: "background running says started",
+			row: subagentLifecycleRow{
+				identity: identity, role: subagent.RoleExplore,
+				description: "explore the tree", activity: activityLabelWaitingActivity,
+				state: subagent.StateRunning, background: true,
+			},
+			want: "✻ Subagent started: “explore the tree” · Waiting (explore)",
+		},
+		{
+			name: "a repeated role is dropped from the meta",
+			row: subagentLifecycleRow{
+				identity:    subagent.AgentIdentity{Name: "explore"},
+				role:        subagent.RoleExplore,
+				description: "explore the tree",
+				state:       subagent.StateRunning,
+			},
+			want: "✻ Subagent running: “explore the tree” (explore)",
+		},
+		{
+			name: "completed carries the duration and drops the live activity",
+			row: subagentLifecycleRow{
+				identity: identity, role: subagent.RoleExplore,
+				description: "explore the tree", activity: "Read model.go",
+				state: subagent.StateSucceeded, durationMillis: 2_400,
+			},
+			want: "• Subagent completed in 2s: “explore the tree”",
+		},
+		{
+			name: "failed names the code",
+			row: subagentLifecycleRow{
+				identity: identity, role: subagent.RoleExplore,
+				description: "explore the tree", code: "tool_call_failed",
+				state: subagent.StateFailed, durationMillis: 3_000,
+			},
+			want: "✗ Subagent failed in 3s (tool call failed): “explore the tree”",
+		},
+		{
+			name: "cancelled is its own verb",
+			row: subagentLifecycleRow{
+				identity: identity, role: subagent.RoleExplore,
+				description: "explore the tree",
+				state:       subagent.StateCanceled, durationMillis: 1_000,
+			},
+			want: "! Subagent cancelled in 1s: “explore the tree”",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Contains(t, render(test.row, 120), insetExpected(test.want))
+		})
+	}
+}
+
+func TestSubagentLifecycleRowTruncatesTheDescriptionToTheFrame(t *testing.T) {
+	t.Parallel()
+
+	row := subagentLifecycleRow{
+		identity:    subagent.AgentIdentity{Name: "explore"},
+		description: strings.Repeat("long description ", 8),
+		state:       subagent.StateRunning,
+	}
+	rendered := renderTimeline(
+		[]timelineBlock{{kind: blockSubagent, subagent: &row}},
+		newMarkdownRenderer(4), 60, themeDark, true,
+	)
+
+	for line := range strings.SplitSeq(strings.TrimSpace(rendered), "\n") {
+		assert.LessOrEqual(t, ansi.StringWidth(line), 60)
+	}
+	assert.Contains(t, rendered, "✻ Subagent running: “long description")
 }
 
 // insetExpected shifts a rendered fixture to the transcript's content column, so

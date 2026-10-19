@@ -18,8 +18,7 @@ const bridgeCapacity = 32
 
 // streamBatchMax bounds how many queued records one MVU update consumes before
 // the event loop regains control, so terminal input, approvals and prompts are
-// never starved by a backlog of streamed deltas. It mirrors the drain batch of
-// grok-build's ACP event loop (ACP_DRAIN_BATCH_MAX = 32).
+// never starved by a backlog of streamed deltas. The drain batch is 32.
 const streamBatchMax = 32
 
 // streamBatchBudget bounds the wall time one drain spends collecting records

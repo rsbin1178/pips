@@ -4,9 +4,11 @@ package coding
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 
 	"github.com/rsbin1178/pips/internal/coding/agentprofile"
+	"github.com/rsbin1178/pips/internal/coding/config"
 )
 
 // AgentLibrary is the content-safe, user-facing view of the immutable Agent
@@ -97,6 +99,7 @@ func (r *Runtime) ListAgentProfiles(ctx context.Context) (AgentLibrary, error) {
 		return AgentLibrary{}, err
 	}
 	dynamicEnabled := r.config.DynamicSubagents
+	toggle := maps.Clone(r.config.Subagent.Toggle)
 	resolver, resolverErr := newChildModelResolver(
 		r.modelCatalog,
 		r.resolved,
@@ -111,18 +114,19 @@ func (r *Runtime) ListAgentProfiles(ctx context.Context) (AgentLibrary, error) {
 		return AgentLibrary{}, resolverErr
 	}
 
-	return buildAgentLibrary(integration.agentProfilesSnapshot(), dynamicEnabled, resolver), nil
+	return buildAgentLibrary(integration.agentProfilesSnapshot(), dynamicEnabled, toggle, resolver), nil
 }
 
 func buildAgentLibrary(
 	registry agentprofile.Registry,
 	dynamicEnabled bool,
+	toggle map[string]bool,
 	models childModelResolver,
 ) AgentLibrary {
 	entries := registry.Entries()
 	library := AgentLibrary{Entries: make([]AgentLibraryEntry, 0, len(entries))}
 	for _, entry := range entries {
-		library.Entries = append(library.Entries, buildAgentLibraryEntry(entry, dynamicEnabled, models))
+		library.Entries = append(library.Entries, buildAgentLibraryEntry(entry, dynamicEnabled, toggle, models))
 	}
 
 	return library.Clone()
@@ -131,6 +135,7 @@ func buildAgentLibrary(
 func buildAgentLibraryEntry(
 	entry agentprofile.Entry,
 	dynamicEnabled bool,
+	toggle map[string]bool,
 	models childModelResolver,
 ) AgentLibraryEntry {
 	definition := entry.Definition
@@ -170,6 +175,8 @@ func buildAgentLibraryEntry(
 	switch {
 	case entry.Status != agentprofile.EntryAvailable:
 		value.Unavailable = string(entry.Status)
+	case !config.TypeEnabled(toggle, definition.ID):
+		value.Unavailable = "disabled by configuration"
 	case definition.Kind == agentprofile.KindCustom && !dynamicEnabled:
 		value.Unavailable = "dynamic subagents is disabled"
 	case !definition.Visibility.User:

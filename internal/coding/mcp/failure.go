@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"sync/atomic"
@@ -54,6 +55,7 @@ func failureMessage(base string, err error, server *managedServer, resource any)
 	return base + ": " + cause
 }
 
+//nolint:gocyclo // One closed classification per failure family keeps the order explicit.
 func failureCause(err error, server *managedServer, resource any) string {
 	remote := server.transport == TransportStreamableHTTP
 
@@ -71,13 +73,16 @@ func failureCause(err error, server *managedServer, resource any) string {
 		return message
 	}
 
-	var dns *net.DNSError
-	if errors.As(err, &dns) {
+	if _, ok := errors.AsType[*net.DNSError](err); ok {
 		return "the server host could not be resolved"
 	}
 
 	if errors.Is(err, syscall.ECONNREFUSED) {
 		return "the connection was refused"
+	}
+
+	if isConnectionReset(err) {
+		return "the connection was reset; check the proxy or network"
 	}
 
 	if isTLSFailure(err) {
@@ -100,6 +105,64 @@ func isTimeout(err error) bool {
 	var timeout interface{ Timeout() bool }
 
 	return errors.As(err, &timeout) && timeout.Timeout()
+}
+
+// isConnectionReset reports a peer-side close that carries no protocol
+// meaning. A proxy that drops a fresh CONNECT tunnel during TLS commonly
+// surfaces as io.EOF; an established HTTP/2 stream commonly surfaces as
+// ECONNRESET or EPIPE. These are the failures worth retrying.
+func isConnectionReset(err error) bool {
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNABORTED) ||
+		errors.Is(err, syscall.EPIPE)
+}
+
+// isTransportLoss reports a tool-call failure that means the session's
+// transport is gone. Unlike connect retries, a tool call may also observe
+// ECONNREFUSED when the peer process or listener disappeared.
+func isTransportLoss(err error) bool {
+	return isConnectionReset(err) || errors.Is(err, syscall.ECONNREFUSED)
+}
+
+// isRetryableConnectError decides whether a failed server should be offered to
+// the next interaction. A server that refused the connection is worth another
+// attempt; a refused proxy is a configuration problem the user must fix.
+func isRetryableConnectError(err error) bool {
+	if isTransientConnectError(err) {
+		return true
+	}
+
+	if !errors.Is(err, syscall.ECONNREFUSED) {
+		return false
+	}
+
+	var operation *net.OpError
+	if errors.As(err, &operation) && operation.Op == "proxyconnect" {
+		return false
+	}
+
+	return true
+}
+
+// isTransientConnectError reports whether a failed handshake may succeed on a
+// fresh transport. Authentication, protocol, and configuration failures are
+// deliberately excluded so a retry cannot replay a permanent decision.
+func isTransientConnectError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	if isConnectionReset(err) {
+		return true
+	}
+
+	if errors.Is(err, context.DeadlineExceeded) || isTimeout(err) {
+		return true
+	}
+
+	dns, ok := errors.AsType[*net.DNSError](err)
+
+	return ok && dns.IsTemporary
 }
 
 func isTLSFailure(err error) bool {

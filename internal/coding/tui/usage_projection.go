@@ -254,23 +254,25 @@ type usageProjectionSnapshot struct {
 	read       usageProjectionRead
 }
 
-// readUsageProjection loads one Session's sidecar. A missing, unreadable, corrupt
-// or unknown-schema file is reported as unusable rather than an error: the caller
-// says the Session's history is unknown instead of failing.
-func readUsageProjection(directory, sessionID string) (usageProjection, bool) {
-	projection, read := readUsageProjectionStatus(directory, sessionID)
+// readUsageProjection loads one Session's sidecar from its state directory. A
+// missing, unreadable, corrupt or unknown-schema file is reported as unusable
+// rather than an error: the caller says the Session's history is unknown instead
+// of failing.
+func readUsageProjection(stateDir, sessionID string) (usageProjection, bool) {
+	projection, read := readUsageProjectionStatus(stateDir, sessionID)
 
 	return projection, read == usageProjectionUsable
 }
 
 // readUsageProjectionStatus reads one sidecar and reports why it is unusable, so
 // a caller that counts coverage can tell an absent file from a corrupt one.
-func readUsageProjectionStatus(directory, sessionID string) (usageProjection, usageProjectionRead) {
-	if strings.TrimSpace(directory) == "" || strings.TrimSpace(sessionID) == "" {
+// stateDir is the Session's own state directory; the file lives directly in it.
+func readUsageProjectionStatus(stateDir, sessionID string) (usageProjection, usageProjectionRead) {
+	if strings.TrimSpace(stateDir) == "" || strings.TrimSpace(sessionID) == "" {
 		return usageProjection{}, usageProjectionMissing
 	}
 
-	data, err := os.ReadFile(filepath.Join(directory, sessionID, usageProjectionFile))
+	data, err := os.ReadFile(filepath.Join(stateDir, usageProjectionFile)) //nolint:gosec // session-owned store path
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return usageProjection{}, usageProjectionMissing
@@ -291,11 +293,11 @@ func readUsageProjectionStatus(directory, sessionID string) (usageProjection, us
 }
 
 // writeUsageProjection merges one completed interaction's per-model split into the
-// Session's sidecar and replaces it atomically. An empty split writes nothing: an
-// empty rewrite would erase the Session's history, and a re-emitted completion
-// without a split must not wipe a good file.
+// Session's sidecar under its state directory and replaces it atomically. An empty
+// split writes nothing: an empty rewrite would erase the Session's history, and a
+// re-emitted completion without a split must not wipe a good file.
 func writeUsageProjection(
-	directory, sessionID, interactionID string,
+	stateDir, sessionID, interactionID string,
 	activeMillis int64,
 	models map[string]coding.TokenUsage,
 	now time.Time,
@@ -304,7 +306,7 @@ func writeUsageProjection(
 		return usageProjectionWriteResult{}
 	}
 
-	existing, priorUsable := readUsageProjection(directory, sessionID)
+	existing, priorUsable := readUsageProjection(stateDir, sessionID)
 	next := usageProjection{
 		Schema:         usageProjectionSchema,
 		SessionID:      sessionID,
@@ -333,7 +335,7 @@ func writeUsageProjection(
 		next.Prior.Models = map[string]usageModelTotals{}
 	}
 
-	if err := replaceUsageProjection(directory, sessionID, next); err != nil {
+	if err := replaceUsageProjection(stateDir, next); err != nil {
 		return usageProjectionWriteResult{err: err}
 	}
 
@@ -409,8 +411,8 @@ func mergeUsageDay(base, added usageProjectionDay) usageProjectionDay {
 // pattern: a same-directory temporary file, chmod 0600, encode, sync, close, then
 // rename. A failure before the rename leaves the previous file intact and removes
 // the temporary.
-func replaceUsageProjection(directory, sessionID string, projection usageProjection) error {
-	dir := filepath.Join(directory, sessionID)
+func replaceUsageProjection(stateDir string, projection usageProjection) error {
+	dir := stateDir
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("coding tui: create usage projection directory: %w", err)
 	}
@@ -525,9 +527,13 @@ func (m *Model) reloadUsageProjection() tea.Cmd {
 }
 
 func (m *Model) readUsageProjection() tea.Cmd {
-	directory := strings.TrimSpace(m.options.SessionsDirectory)
 	sessionID := m.state.SessionID
-	if directory == "" || sessionID == "" {
+	if strings.TrimSpace(m.options.SessionsDirectory) == "" || sessionID == "" {
+		return nil
+	}
+
+	stateDir := m.sessionStateDir(m.options.Workspace, sessionID)
+	if stateDir == "" {
 		return nil
 	}
 
@@ -535,7 +541,7 @@ func (m *Model) readUsageProjection() tea.Cmd {
 	m.usageProjection.loading = true
 
 	return func() tea.Msg {
-		projection, usable := readUsageProjection(directory, sessionID)
+		projection, usable := readUsageProjection(stateDir, sessionID)
 
 		return usageProjectionResultMsg{
 			sessionID:  sessionID,
@@ -555,8 +561,8 @@ func (m *Model) usageProjectionWriteCommand() tea.Cmd {
 		return nil
 	}
 
-	directory := strings.TrimSpace(m.options.SessionsDirectory)
-	if directory == "" {
+	stateDir := m.sessionStateDir(m.options.Workspace, request.sessionID)
+	if stateDir == "" {
 		return nil
 	}
 
@@ -564,7 +570,7 @@ func (m *Model) usageProjectionWriteCommand() tea.Cmd {
 
 	return func() tea.Msg {
 		result := writeUsageProjection(
-			directory,
+			stateDir,
 			request.sessionID,
 			request.interactionID,
 			request.activeMillis,

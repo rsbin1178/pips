@@ -8,9 +8,9 @@ import (
 
 // Runtime context a turn needs (Plan mode, Coding Goal, task state) travels as a
 // synthetic user message wrapped in <system-reminder>, not as a system message
-// appended to the prompt. This follows grok-build: the system prefix and the
-// conversation before the reminder stay byte-identical from turn to turn, so a
-// provider's prompt cache still covers them when the reminder text changes. A
+// appended to the prompt. The system prefix and the conversation before the
+// reminder stay byte-identical from turn to turn, so a provider's prompt cache
+// still covers them when the reminder text changes. A
 // system message placed before the conversation would move the cache boundary
 // ahead of the entire transcript.
 const (
@@ -36,7 +36,7 @@ func isSystemReminder(message ai.Message) bool {
 // turnReminder renders the runtime context injected once at the start of a turn,
 // before the user's prompt. It returns "" when the turn adds no runtime context.
 func (r *Runtime) turnReminder(current *interaction) string {
-	parts := make([]string, 0, 3)
+	parts := make([]string, 0, 4)
 	if plan := r.planReminderText(current); plan != "" {
 		parts = append(parts, plan)
 	}
@@ -45,6 +45,12 @@ func (r *Runtime) turnReminder(current *interaction) string {
 	}
 	if tasks := strings.TrimSpace(r.taskSystemContext()); tasks != "" {
 		parts = append(parts, tasks)
+	}
+	// The periodic todo nudge rides the same per-turn reminder, so it costs no
+	// extra request and its text travels with the turn like every other runtime
+	// context.
+	if nudge := r.planNudgeText(current); nudge != "" {
+		parts = append(parts, nudge)
 	}
 
 	return strings.Join(parts, "\n\n")

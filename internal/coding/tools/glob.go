@@ -19,7 +19,7 @@ var errWalkComplete = errors.New("coding tools: walk complete")
 
 type globArgs struct {
 	Pattern string  `json:"pattern" description:"Slash-separated glob pattern; use ** for recursive matching"`
-	Path    *string `json:"path" description:"Optional workspace-relative base directory"`
+	Path    *string `json:"path" description:"Optional workspace base directory (relative, or absolute inside the workspace)"`
 	Offset  *int    `json:"offset" description:"Optional zero-based matching-file offset"`
 	Limit   *int    `json:"limit" description:"Optional maximum number of matching files"`
 }

@@ -235,34 +235,63 @@ func TestParseOneShotUsesTheDiscoveredDefinitionContractWithoutPersistence(t *te
 	require.ErrorIs(t, err, ErrInvalid)
 }
 
-func TestParseOneShotDelegationAllowIsStrictBoundedAndDetached(t *testing.T) {
+func TestParseOneShotCapabilityModeValuesAliasesAndRejection(t *testing.T) {
 	t.Parallel()
 
-	definition, err := ParseOneShot("root-agent", []byte(`---
-schema: pips.agent/v1alpha1
-name: Root
-description: Delegates exact work
-delegation:
-  allow: [go-reviewer, test-runner]
----
-Delegate carefully.
-`), DefaultLimits())
-	require.NoError(t, err)
-	assert.Equal(t, []string{"go-reviewer", "test-runner"}, definition.Delegation.Allow)
+	for _, test := range []struct {
+		value string
+		want  CapabilityMode
+	}{
+		{"read-only", CapabilityReadOnly},
+		{"readonly", CapabilityReadOnly},
+		{"readOnly", CapabilityReadOnly},
+		{"read_only", CapabilityReadOnly},
+		{"ReadOnly", CapabilityReadOnly},
+		{"read-write", CapabilityReadWrite},
+		{"readwrite", CapabilityReadWrite},
+		{"readWrite", CapabilityReadWrite},
+		{"read_write", CapabilityReadWrite},
+		{"ReadWrite", CapabilityReadWrite},
+		{"execute", CapabilityExecute},
+		{"Execute", CapabilityExecute},
+		{"EXECUTE", CapabilityExecute},
+		{"all", CapabilityAll},
+		{"All", CapabilityAll},
+		{"ALL", CapabilityAll},
+	} {
+		t.Run(test.value, func(t *testing.T) {
+			t.Parallel()
 
-	cloned := definition.Clone()
-	cloned.Delegation.Allow[0] = "changed"
-	assert.Equal(t, "go-reviewer", definition.Delegation.Allow[0])
+			data := []byte("---\nschema: pips.agent/v1alpha1\nname: Agent\ndescription: Capability agent\ncapability_mode: " +
+				test.value + "\n---\nbody\n")
+			definition, err := ParseOneShot("capability-agent", data, DefaultLimits())
+			require.NoError(t, err)
+			assert.Equal(t, test.want, definition.CapabilityMode)
+
+			cloned := definition.Clone()
+			assert.Equal(t, test.want, cloned.CapabilityMode)
+		})
+	}
+
+	for _, value := range []string{"write", "read", "", "read-write-only", "1"} {
+		data := []byte("---\nschema: pips.agent/v1alpha1\nname: Agent\ndescription: Capability agent\ncapability_mode: \"" +
+			value + "\"\n---\nbody\n")
+		_, err := ParseOneShot("capability-agent", data, DefaultLimits())
+		require.ErrorIs(t, err, ErrInvalid, value)
+	}
+}
+
+func TestParseOneShotRejectsRetiredDelegationFrontmatter(t *testing.T) {
+	t.Parallel()
 
 	for _, body := range []string{
-		"delegation:\n  allow: [go-reviewer, go-reviewer]",
-		"delegation:\n  allow: [Explore]",
-		"delegation:\n  allow: [../escape]",
-		"delegation:\n  deny: [go-reviewer]",
+		"delegation:\n  allow: [go-reviewer, test-runner]",
+		"delegation:\n  allow: []",
 	} {
 		data := []byte("---\nschema: pips.agent/v1alpha1\nname: Root\ndescription: Delegates exact work\n" + body + "\n---\nbody\n")
 		_, err := ParseOneShot("root-agent", data, DefaultLimits())
 		require.ErrorIs(t, err, ErrInvalid, body)
+		assert.Contains(t, err.Error(), "not supported", body)
 	}
 }
 

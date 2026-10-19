@@ -190,6 +190,7 @@ func TestObserverEmitsContentFreeProductSignals(t *testing.T) {
 		"pips.coding.team.duration",
 		"pips.coding.team.controls",
 		"pips.coding.team.integrations",
+		"pips.coding.background.tasks",
 	}, meterProvider.instrumentNames())
 }
 

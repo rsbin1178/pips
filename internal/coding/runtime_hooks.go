@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/rsbin1178/pips/agent"
 	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding/approval"
+	"github.com/rsbin1178/pips/internal/coding/background"
 	"github.com/rsbin1178/pips/internal/coding/hooks"
 	"github.com/rsbin1178/pips/internal/coding/subagent"
 )
@@ -104,6 +106,83 @@ type stopHookInput struct {
 	lifecycleHookInput
 	StopHookActive       bool   `json:"stop_hook_active"`
 	LastAssistantMessage string `json:"last_assistant_message,omitempty"`
+	// BackgroundTasks lists the session-registered background tasks that are
+	// still running: a watch and a command alike.
+	BackgroundTasks []stopBackgroundTask `json:"background_tasks,omitempty"`
+}
+
+// stopBackgroundTask is one background-task entry of the Stop payload. A watch
+// reports its command in description and a command reports it in command, which
+// is the split the reference's entry shape makes.
+type stopBackgroundTask struct {
+	ID   string `json:"id"`
+	Type string `json:"type"`
+	// Status is the running state the reference reports for a live task.
+	Status string `json:"status"`
+	// Description carries a watch's command: a monitor has no command field.
+	Description string `json:"description,omitempty"`
+	// Command carries a background command's own command line.
+	Command string `json:"command,omitempty"`
+}
+
+// hookClipLimit is the bound on one Stop-payload free-text field, measured in
+// characters with the truncation marker inside the bound.
+const hookClipLimit = 1000
+
+// hookBackgroundTasks lists the background tasks a Stop hook still sees running.
+func (r *Runtime) hookBackgroundTasks() []stopBackgroundTask {
+	if r == nil || r.backgroundTasks == nil {
+		return nil
+	}
+
+	values := r.backgroundTasks.List()
+	tasks := make([]stopBackgroundTask, 0, len(values))
+
+	for _, task := range values {
+		if task.Completed {
+			continue
+		}
+
+		entry := stopBackgroundTask{ID: task.ID, Type: string(task.Kind), Status: "running"}
+		if task.Kind == background.KindShell {
+			entry.Command = clipHookText(task.Command)
+		} else {
+			entry.Description = clipHookText(task.Command)
+		}
+
+		tasks = append(tasks, entry)
+	}
+
+	return tasks
+}
+
+// clipHookText bounds one hook text field with the reference's in-string marker,
+// so a reader can tell a clipped value from a short one. The marker sits inside
+// the bound, and its own width depends on the count it reports, so the pair is
+// settled first: each pass narrows an estimate that could only be too wide.
+func clipHookText(value string) string {
+	runes := []rune(value)
+	if len(runes) <= hookClipLimit {
+		return value
+	}
+
+	keep := hookClipKept(len(runes))
+
+	for range 2 {
+		keep = hookClipKept(len(runes) - keep)
+	}
+
+	return string(runes[:keep]) + hookClipMarker(len(runes)-keep)
+}
+
+// hookClipKept is how many characters survive a clip that reserves room for a
+// marker reporting the given dropped count.
+func hookClipKept(dropped int) int {
+	return max(0, hookClipLimit-len([]rune(hookClipMarker(dropped))))
+}
+
+func hookClipMarker(dropped int) string {
+	return "… [+" + strconv.Itoa(dropped) + " chars]"
 }
 
 func (r *Runtime) hookInput(event hooks.Event) lifecycleHookInput {
@@ -235,6 +314,14 @@ func (r *Runtime) hookAfterPendingTool(
 	parts []ai.Part,
 	isError bool,
 ) ([]ai.Part, bool) {
+	// A paused call skips the interaction's AfterTool chain, so the media gate
+	// runs here too before the lifecycle hook sees the result.
+	if r.model != nil {
+		if gated, refused := MediaGateForCapabilities(r.model.Capabilities()).Check(call.Name, parts); refused {
+			parts = gated
+		}
+	}
+
 	override := r.applyPostToolHook(ctx, agent.ToolResultInfo{
 		ToolCall: call,
 		Result: ai.ToolResultPart{
@@ -325,6 +412,7 @@ func (r *Runtime) runStopHook(
 		lifecycleHookInput:   r.hookInput(hooks.EventStop),
 		StopHookActive:       stopHookActive,
 		LastAssistantMessage: r.lastHookAssistantMessage(),
+		BackgroundTasks:      r.hookBackgroundTasks(),
 	})
 	r.recordHookDiagnostics(ctx, emitter, outcome.Diagnostics)
 	if err != nil {

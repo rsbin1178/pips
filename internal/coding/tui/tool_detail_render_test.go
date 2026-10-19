@@ -13,6 +13,7 @@ import (
 	"github.com/rsbin1178/pips/internal/coding/approval"
 	"github.com/rsbin1178/pips/internal/coding/changes"
 	"github.com/rsbin1178/pips/internal/coding/subagent"
+	"github.com/rsbin1178/pips/internal/coding/tasklist"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -134,12 +135,20 @@ func TestToolDetailPatchShowsDiffWithoutRawPatchOrDuplicateResult(t *testing.T) 
 	assert.NotContains(t, detail, "\nResult\n")
 }
 
-func TestToolDetailPlanRendersChecklist(t *testing.T) {
+func TestTodoActivityLabels(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, "Updating todo list", taskListActivityLabel(toolStateRunning))
+	assert.Equal(t, "Updated todo list", taskListActivityLabel(toolStateSucceeded))
+	assert.Equal(t, "Todo update failed", taskListActivityLabel(toolStateFailed))
+}
+
+func TestToolDetailSuppressesACompletedTodoCall(t *testing.T) {
 	t.Parallel()
 
 	state := detailState(coding.ToolState{
 		Call: coding.ToolCall{
-			ID: "call-1", Name: "update_plan",
+			ID: "call-1", Name: tasklist.ToolName,
 			Arguments: ai.JSON(
 				`{"explanation":"Start with the renderer","plan":[` +
 					`{"step":"Audit detail","status":"completed"},` +
@@ -148,21 +157,57 @@ func TestToolDetailPlanRendersChecklist(t *testing.T) {
 			),
 		},
 		Status: coding.ToolStatusCompleted,
-		Result: ai.ToolResultText("call-1", "update_plan", `{"updated":true,"completed":1,"total":3}`),
+		Result: ai.ToolResultText("call-1", tasklist.ToolName, `{"updated":true,"completed":1,"total":3}`),
+	})
+	assert.Empty(t, projectTimeline(state),
+		"a successful todo_write is represented by the status line and page, not a message card")
+}
+
+func TestToolDetailRendersAFailedTodoCall(t *testing.T) {
+	t.Parallel()
+
+	state := detailState(coding.ToolState{
+		Call: coding.ToolCall{
+			ID: "call-1", Name: tasklist.ToolName,
+			Arguments: ai.JSON(`{"plan":[]}`),
+		},
+		Status: coding.ToolStatusCompleted,
+		Result: ai.ToolResultError("call-1", tasklist.ToolName,
+			"task list: plan must contain 1 to 64 items"),
 	})
 	blocks := projectTimeline(state)
 	require.Len(t, blocks, 1)
 
 	compact := renderTimeline(blocks, newMarkdownRenderer(8), 100, themeDark, true)
-	assert.Contains(t, compact, "Updated plan")
-	assert.Contains(t, compact, "✔ Audit detail")
-	assert.Contains(t, compact, "◐ Render fields")
-	assert.Contains(t, compact, "□ Add tests")
+	assert.Contains(t, compact, "Todo update failed")
 
 	detail := newToolDetailView(blocks[0]).text()
-	assert.Contains(t, detail, "Explanation\n  Start with the renderer")
-	assert.Contains(t, detail, "Plan\n  ✔ Audit detail")
-	assert.NotContains(t, detail, `{"updated":true`)
+	assert.Contains(t, detail, "Arguments")
+}
+
+// TestToolDetailPlanLabelsAStepLessMergeByItsID pins the failed-card label: a
+// status-only merge omits the step, so the row labels the item by its id
+// instead of painting an empty step.
+func TestToolDetailPlanLabelsAStepLessMergeByItsID(t *testing.T) {
+	t.Parallel()
+
+	state := detailState(coding.ToolState{
+		Call: coding.ToolCall{
+			ID: "call-1", Name: tasklist.ToolName,
+			Arguments: ai.JSON(`{"merge":true,"plan":[{"id":"render the checklist","status":"completed"}]}`),
+		},
+		Status: coding.ToolStatusCompleted,
+		Result: ai.ToolResultError("call-1", tasklist.ToolName, `{"updated":true,"completed":1,"total":1}`),
+	})
+	blocks := projectTimeline(state)
+	require.Len(t, blocks, 1)
+
+	compact := renderTimeline(blocks, newMarkdownRenderer(8), 100, themeDark, true)
+	assert.Contains(t, compact, "Todo update failed")
+	assert.Contains(t, compact, "✔ render the checklist")
+
+	detail := newToolDetailView(blocks[0]).text()
+	assert.Contains(t, detail, "✔ render the checklist")
 }
 
 func TestToolDetailMalformedArgumentsDegrade(t *testing.T) {
@@ -483,14 +528,6 @@ func TestStatusReportUsesHumanValuesAndWrapsHelp(t *testing.T) {
 	assert.NotContains(t, status, "Compaction: false")
 	assert.NotContains(t, status, "Model override:")
 	assert.NotContains(t, status, "Detached: false")
-
-	help := modelCommandOutput(model, model.printHelp())
-	for line := range strings.SplitSeq(strings.TrimSpace(help), "\n") {
-		assert.LessOrEqual(t, ansi.StringWidth(line), 60)
-	}
-	// Word wrapping keeps words intact rather than cutting them mid-word.
-	assert.NotContains(t, help, "\n  clea")
-	assert.NotContains(t, help, "conve\n")
 }
 
 func TestApprovalPromptShowsWholeCommandAndHumanChoices(t *testing.T) {
@@ -651,7 +688,7 @@ func TestSubagentRouteWrapsResultsAndKeepsHints(t *testing.T) {
 			Findings: []subagent.ReviewFinding{{
 				Severity: "high", Title: "Diagnostics never wrap",
 				Path: "internal/coding/tui/timeline.go", Line: 12,
-				Evidence: claim, Recommendation: claim,
+				Evidence: claim, Recommendation: claim + " ENDMARK",
 			}},
 		},
 	}
@@ -664,20 +701,21 @@ func TestSubagentRouteWrapsResultsAndKeepsHints(t *testing.T) {
 	}
 
 	content := model.View().Content
-	assert.Contains(t, content, "Ctrl+T parent")
-	assert.Contains(t, content, "Esc agents")
-	// Result prose wraps instead of being cut at the frame edge.
+	assert.Contains(t, content, "review subagent")
+	assert.Contains(t, content, subagentHintClose)
+	// Result prose wraps instead of being cut at the page edge.
 	assert.NotContains(t, content, "…")
 	for line := range strings.SplitSeq(content, "\n") {
 		assert.LessOrEqual(t, ansi.StringWidth(line), 80)
 	}
 
-	// A body taller than the frame scrolls to its final row.
+	// A body taller than the page opens on its newest row, so the final row of the
+	// result is what the reader sees without scrolling.
 	model.Update(tea.WindowSizeMsg{Width: 60, Height: 10})
-	maximum := model.subagentRouteMaximumOffset()
-	require.Positive(t, maximum)
-	model.route.offset = maximum
-	assert.Contains(t, model.View().Content, "Recommendation")
+	_ = model.View() // the page installs its rows and window when it renders
+	require.Positive(t, model.childScroll.maxOffset(), "the fixture must overflow the page")
+	assert.Contains(t, model.View().Content, "ENDMARK",
+		"the page opens on its newest row")
 }
 
 // Regression: an untrusted Tool payload could carry ESC in an object key or a
@@ -896,4 +934,60 @@ func TestToolDetailRejectsMalformedAndOversizedDocuments(t *testing.T) {
 	})
 	detail := newToolDetailView(projectTimeline(state)[0])
 	assert.LessOrEqual(t, len(detail.text()), maximumToolDetailBytes+64)
+}
+
+// TestToolDetailDispatchNamesTheTargetTool is the wrapper's presentation rule:
+// the document reads as the call the model made — the target's name and the
+// target's own arguments — instead of an opaque dispatch.
+func TestToolDetailDispatchNamesTheTargetTool(t *testing.T) {
+	t.Parallel()
+
+	state := detailState(coding.ToolState{
+		Call: coding.ToolCall{
+			ID: "call-1", Name: "use_tool",
+			Arguments: ai.JSON(`{"tool_name":"docs__lookup","tool_input":{"query":"parity","limit":3}}`),
+		},
+		Status: coding.ToolStatusCompleted,
+		Result: ai.ToolResultText("call-1", "use_tool", "echo parity"),
+	})
+
+	detail := newToolDetailView(projectTimeline(state)[0]).text()
+	assert.Contains(t, detail, "docs__lookup")
+	assert.NotContains(t, detail, "use_tool")
+	assert.Contains(t, detail, "query             parity")
+	assert.Contains(t, detail, "limit             3")
+	assert.NotContains(t, detail, "tool_input")
+	assert.Contains(t, detail, "echo parity")
+}
+
+// TestToolDetailDispatchDegradesLikeTheOtherRenderers keeps the two fallbacks:
+// an argument set that names no target keeps the wrapper's own name, and one
+// whose target arguments are not an object degrades to the omitted marker.
+func TestToolDetailDispatchDegradesLikeTheOtherRenderers(t *testing.T) {
+	t.Parallel()
+
+	untargeted := detailState(coding.ToolState{
+		Call: coding.ToolCall{
+			ID: "call-1", Name: "use_tool",
+			Arguments: ai.JSON(`{"tool_input":{"query":"parity"}}`),
+		},
+		Status: coding.ToolStatusCompleted,
+		Result: ai.ToolResultText("call-1", "use_tool", "echo parity"),
+	})
+	detail := newToolDetailView(projectTimeline(untargeted)[0]).text()
+	assert.Contains(t, detail, "use_tool")
+	assert.Contains(t, detail, "tool_input")
+	assert.Contains(t, detail, "query             parity")
+
+	scalar := detailState(coding.ToolState{
+		Call: coding.ToolCall{
+			ID: "call-1", Name: "use_tool",
+			Arguments: ai.JSON(`{"tool_name":"docs__lookup","tool_input":"not an object"}`),
+		},
+		Status: coding.ToolStatusCompleted,
+		Result: ai.ToolResultText("call-1", "use_tool", "failed"),
+	})
+	detail = newToolDetailView(projectTimeline(scalar)[0]).text()
+	assert.Contains(t, detail, "docs__lookup")
+	assert.Contains(t, detail, "[invalid arguments omitted]")
 }

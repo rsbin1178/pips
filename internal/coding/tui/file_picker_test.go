@@ -303,10 +303,12 @@ func TestImageReferenceVisionRefusalPreservesDraft(t *testing.T) {
 	before := model.composer.Snapshot()
 
 	_, command := model.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
-	require.Nil(t, command)
+	require.NotNil(t, command)
 	assert.Equal(t, before, model.composer.Snapshot())
 	require.ErrorIs(t, model.streamErr, errComposerVisionUnsupported)
 	assert.Empty(t, controller.prompts)
+	// The refusal has to reach the terminal, or the draft simply stops sending.
+	assert.Contains(t, ansi.Strip(driveModelCommandsCapture(t, model, command)), "does not accept image input")
 }
 
 func TestComposerResolutionCanBeCanceledWithoutDraftLoss(t *testing.T) {

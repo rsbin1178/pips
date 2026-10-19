@@ -70,6 +70,74 @@ func TestModelPlannerUsesStructuredToolFreeRequestAndReportsUsage(t *testing.T) 
 	require.Len(t, conversation, 1)
 }
 
+// TestModelPlannerSendsNoCapByDefault pins the removed default cap: a planner
+// without WithMaxTokens sends no MaxTokens at all, whatever the request's token
+// limit says, because that limit bounds the run rather than one call.
+func TestModelPlannerSendsNoCapByDefault(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		request PlanRequest
+	}{
+		{
+			name:    "without a budget",
+			request: PlanRequest{Iteration: 1, Evidence: ai.JSON(`{}`)},
+		},
+		{
+			name: "with a budget",
+			request: PlanRequest{
+				Iteration: 1, Evidence: ai.JSON(`{}`),
+				Limits:     continuation.Limits{MaxTokens: 50},
+				Accounting: continuation.Accounting{Usage: ai.Usage{InputTokens: 30}},
+			},
+		},
+		{
+			name: "with a spent budget",
+			request: PlanRequest{
+				Iteration: 1, Evidence: ai.JSON(`{}`),
+				Limits:     continuation.Limits{MaxTokens: 50},
+				Accounting: continuation.Accounting{Usage: ai.Usage{InputTokens: 50}},
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			model := &loopModel{response: &ai.Response{
+				Message: ai.AssistantText(`{"stop":false,"delay_seconds":60,"reason":"still running"}`),
+			}}
+			planner, err := NewModelPlanner(model)
+			require.NoError(t, err)
+
+			_, err = planner.Plan(t.Context(), test.request)
+			require.NoError(t, err)
+			assert.Nil(t, model.request.MaxTokens)
+		})
+	}
+}
+
+// TestModelPlannerRefusesASpentBudgetUnderAConfiguredCap pins that the opt-in
+// cap keeps its refusal: it cannot be narrowed to a non-positive budget.
+func TestModelPlannerRefusesASpentBudgetUnderAConfiguredCap(t *testing.T) {
+	t.Parallel()
+
+	model := &loopModel{}
+	planner, err := NewModelPlanner(model, WithMaxTokens(100))
+	require.NoError(t, err)
+
+	_, err = planner.Plan(t.Context(), PlanRequest{
+		Iteration: 1, Evidence: ai.JSON(`{}`),
+		Limits:     continuation.Limits{MaxTokens: 50},
+		Accounting: continuation.Accounting{Usage: ai.Usage{InputTokens: 50}},
+	})
+	require.ErrorIs(t, err, ErrInvalid)
+	assert.Contains(t, err.Error(), "no token budget remains for planning")
+	assert.Nil(t, model.request.Messages, "the refused call was never sent")
+}
+
 func TestModelPlannerStopsWithZeroDelay(t *testing.T) {
 	t.Parallel()
 

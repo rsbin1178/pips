@@ -710,6 +710,20 @@ func atomicallyReplaceTUI(
 	data []byte,
 	field tuiPreferenceField,
 ) error {
+	durabilityErr := ErrThemeDurability
+	if field == tuiFieldStatusLine {
+		durabilityErr = ErrStatusLineDurability
+	}
+
+	return atomicallyReplaceConfig(path, parent, revision, data, durabilityErr)
+}
+
+func atomicallyReplaceConfig(
+	path, parent string,
+	revision themeRevision,
+	data []byte,
+	durabilityErr error,
+) error {
 	if err := verifyThemeRevision(path, parent, revision); err != nil {
 		return err
 	}
@@ -753,11 +767,6 @@ func atomicallyReplaceTUI(
 	}
 	committed = true
 	if err := syncThemeDirectory(parent); err != nil {
-		durabilityErr := ErrThemeDurability
-		if field == tuiFieldStatusLine {
-			durabilityErr = ErrStatusLineDurability
-		}
-
 		return fmt.Errorf(
 			"%w: %w: config replacement committed but parent directory sync failed: %w",
 			durabilityErr, ErrTUIConfigDurability, err,

@@ -465,6 +465,17 @@ func contentBlockFromMedia(source ai.MediaSource, image bool, name string) (acps
 		}
 
 		return acpsdk.ResourceLinkBlock(name, source.URL), true
+	case source.Path != "":
+		// Persisted session media has no inline bytes to replay; the reference
+		// itself is the durable handle a frontend can resolve.
+		uri := "pips://media/" + source.Path
+		if image {
+			return acpsdk.ContentBlock{Image: &acpsdk.ContentBlockImage{
+				Data: "", MimeType: source.MIMEType, Type: "image", Uri: new(uri),
+			}}, true
+		}
+
+		return acpsdk.ResourceLinkBlock(name, uri), true
 	default:
 		return acpsdk.ContentBlock{}, false
 	}
@@ -565,13 +576,24 @@ func toolTitle(name string) string {
 func planUpdate(snapshot tasklist.Snapshot) acpsdk.SessionUpdate {
 	entries := make([]acpsdk.PlanEntry, len(snapshot.Items))
 	for index, item := range snapshot.Items {
-		status := acpsdk.PlanEntryStatus(item.Status)
 		entries[index] = acpsdk.PlanEntry{
-			Content: item.Step, Priority: acpsdk.PlanEntryPriorityMedium, Status: status,
+			Content: item.Step, Priority: acpsdk.PlanEntryPriorityMedium,
+			Status: acpPlanStatus(item.Status),
 		}
 	}
 
 	return acpsdk.UpdatePlan(entries...)
+}
+
+// acpPlanStatus maps pips' task status onto the ACP plan vocabulary. ACP has no
+// cancelled status, so a cancelled step reports its terminal outcome as
+// completed rather than an unknown enum value a client would reject.
+func acpPlanStatus(status tasklist.Status) acpsdk.PlanEntryStatus {
+	if status == tasklist.StatusCancelled {
+		return acpsdk.PlanEntryStatusCompleted
+	}
+
+	return acpsdk.PlanEntryStatus(status)
 }
 
 func modeUpdate(mode coding.OperatingMode) acpsdk.SessionUpdate {

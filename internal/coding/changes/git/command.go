@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/rsbin1178/pips/internal/coding/execution"
 )
@@ -37,6 +38,18 @@ func (i *Inspector) runGit(
 	outputBytes int64,
 	arguments ...string,
 ) (execution.Result, error) {
+	return i.runGitWithin(ctx, outputBytes, i.limits.GitTimeout, arguments...)
+}
+
+// runGitWithin runs one fixed Git command under its own wall-clock budget. A
+// caller whose capture has a longer reference budget than the Inspector's own
+// passes it here rather than changing the Inspector's limits.
+func (i *Inspector) runGitWithin(
+	ctx context.Context,
+	outputBytes int64,
+	timeout time.Duration,
+	arguments ...string,
+) (execution.Result, error) {
 	args := make([]string, 0, len(gitConfigArguments)+len(arguments))
 	args = append(args, gitConfigArguments...)
 	args = append(args, arguments...)
@@ -48,7 +61,7 @@ func (i *Inspector) runGit(
 		Args:       args,
 		CWD:        ".",
 		Env:        slices.Clone(gitEnvironment),
-		Timeout:    i.limits.GitTimeout,
+		Timeout:    timeout,
 		Output: execution.OutputLimits{
 			CaptureBytes: outputBytes,
 			MaxBytes:     outputBytes,

@@ -41,6 +41,118 @@ func TestRecordLimitsRoundTripUnlimitedDefaultsAndAcceptLegacyOmissions(t *testi
 	assert.Equal(t, DefaultLimits().MaxActivityTools, normalized.MaxActivityTools)
 }
 
+// TestRecordWrittenBeforeTheRepeatStopThresholdsStillDecodes pins the additive
+// journal contract: a record persisted before the stop thresholds existed omits
+// them from both the plan limits and the record limits, and still decodes and
+// validates rather than failing closed on resume.
+func TestRecordWrittenBeforeTheRepeatStopThresholdsStillDecodes(t *testing.T) {
+	t.Parallel()
+
+	for _, nudge := range []int{DefaultLimits().RepeatedToolCallLimit, 16} {
+		created, err := normalizeRecord(record{
+			Schema: recordSchema, State: StateCreated, Role: RoleExplore,
+			ChildSessionID: "child", ParentSessionID: "parent", Model: "openai/test",
+			Limits: journalLimits(DefaultLimits()), TaskPreview: "inspect", Time: time.Now().UTC(),
+		}, true)
+		require.NoError(t, err)
+		created.Limits.RepeatedToolCallLimit = nudge
+		created.Plan.Limits.RepeatedToolCallLimit = nudge
+
+		data, err := json.Marshal(created)
+		require.NoError(t, err)
+
+		decoded, err := decodeRecord(withoutRepeatThresholdFields(t, data))
+		require.NoError(t, err, "nudge %d", nudge)
+		assert.Greater(t, decoded.Plan.Limits.RepeatedToolCallStopLimit, nudge)
+		require.NoError(t, decoded.Limits.validate())
+	}
+}
+
+// withoutRepeatThresholdFields removes the Phase M repeat thresholds from a
+// marshalled record, reproducing what a binary that predates them persisted.
+func withoutRepeatThresholdFields(t *testing.T, data []byte) []byte {
+	t.Helper()
+
+	var document map[string]any
+	require.NoError(t, json.Unmarshal(data, &document))
+	limits, ok := document["limits"].(map[string]any)
+	require.True(t, ok)
+	for _, key := range []string{
+		"repeated_problematic_tool_call_limit",
+		"repeated_tool_call_stop_limit",
+		"repeated_problematic_tool_call_stop_limit",
+	} {
+		delete(limits, key)
+	}
+	plan, ok := document["plan"].(map[string]any)
+	require.True(t, ok)
+	planLimits, ok := plan["limits"].(map[string]any)
+	require.True(t, ok)
+	for _, key := range []string{
+		"RepeatedProblematicToolCallLimit",
+		"RepeatedToolCallStopLimit",
+		"RepeatedProblematicToolCallStopLimit",
+	} {
+		delete(planLimits, key)
+	}
+	stripped, err := json.Marshal(document)
+	require.NoError(t, err)
+
+	return stripped
+}
+
+// TestWakeMarkerIsAdditiveAndImmutable pins the wake marker's durability: an
+// ordinary record omits the field, so every record written before it stays
+// byte-identical, a wake record round-trips it, and a lifecycle cannot flip it.
+func TestWakeMarkerIsAdditiveAndImmutable(t *testing.T) {
+	t.Parallel()
+
+	created, err := normalizeRecord(record{
+		Schema: recordSchema, State: StateCreated, Role: RoleExplore,
+		ChildSessionID: "child", ParentSessionID: "parent", Model: "openai/test",
+		Limits: journalLimits(DefaultLimits()), TaskPreview: "inspect", Time: time.Now().UTC(),
+	}, true)
+	require.NoError(t, err)
+
+	data, err := json.Marshal(created)
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), `"wake"`)
+
+	wake := created
+	wake.Wake = true
+	data, err = json.Marshal(wake)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `"wake":true`)
+
+	decoded, err := decodeRecord(data)
+	require.NoError(t, err)
+	assert.True(t, decoded.Wake)
+
+	started := wake
+	started.State = StateRunning
+	started.ChildRunID = "run"
+	started.Time = started.Time.Add(time.Millisecond)
+
+	child, err := harness.NewSession(harness.NewMemoryStore("child"))
+	require.NoError(t, err)
+	require.NoError(t, appendRecord(child, wake))
+	require.NoError(t, appendRecord(child, started))
+	latest, err := latestByChild(child.Entries())
+	require.NoError(t, err)
+	assert.True(t, latest[wake.ChildSessionID].Wake)
+
+	flipped := started
+	flipped.Wake = false
+	flipped.Time = flipped.Time.Add(time.Millisecond)
+
+	drifted, err := harness.NewSession(harness.NewMemoryStore("drifted"))
+	require.NoError(t, err)
+	require.NoError(t, appendRecord(drifted, wake))
+	require.NoError(t, appendRecord(drifted, flipped))
+	_, err = latestByChild(drifted.Entries())
+	require.ErrorIs(t, err, ErrInvalid)
+}
+
 func TestReconcileMarksOrphanRunningInterruptedAndRepairsParent(t *testing.T) {
 	t.Parallel()
 
@@ -122,7 +234,7 @@ func TestReconcileInterruptsPendingChildInputWithoutReplayingOrResolvingIt(t *te
 				Schema: recordSchema, State: StateCreated, Role: RoleExplore,
 				ChildSessionID: child.Metadata().ID, ParentSessionID: parent.Metadata().ID,
 				ParentRunID: "parent-run", Model: "openai/test", TaskPreview: "pending input",
-				Limits: journalLimits(ProductionLimits()), Time: time.Now().UTC(),
+				Limits: journalLimits(DefaultLimits()), Time: time.Now().UTC(),
 			}
 			require.NoError(t, appendMirrored(child.Session(), parent.Session(), created))
 			started := created
@@ -328,7 +440,7 @@ func TestReconcileRejectsHeaderPlanLineageMismatchWithoutTerminalizing(t *testin
 	created := record{
 		Schema: recordSchema, State: StateCreated, Role: RoleExplore,
 		ChildSessionID: child.Metadata().ID, ParentSessionID: parent.Metadata().ID,
-		Model: "openai/test", Limits: journalLimits(ProductionLimits()), Time: time.Now().UTC(),
+		Model: "openai/test", Limits: journalLimits(DefaultLimits()), Time: time.Now().UTC(),
 	}
 	require.NoError(t, appendMirrored(child.Session(), parent.Session(), created))
 	require.NoError(t, child.Close())
@@ -352,6 +464,75 @@ func legacyBoundedRecordLimits() recordLimits {
 	value.MaxActivityTools = 0
 
 	return value
+}
+
+// oldProductionLimits is the pre-Phase-L production child policy: 64 turns,
+// 256,000 cumulative tokens, 128 Tool calls, and 30 minutes. A record written
+// under it must stay readable after Phase L removed those defaults.
+func oldProductionLimits() Limits {
+	limits := DefaultLimits()
+	limits.MaxTurns = 64
+	limits.FinalizationTurns = 2
+	limits.MaxTokens = 256_000
+	limits.MaxToolCalls = 128
+	limits.MaxDuration = 30 * time.Minute
+
+	return limits
+}
+
+// TestResumeAcceptsAChildRecordedUnderTheOldExecutionBudget pins Phase L's
+// back-compat: a child journal record written under the pre-Phase-L production
+// policy still reads, validates and resumes, because the record's plan limits
+// are reconciled against the record's own limits rather than against the new
+// unlimited defaults.
+func TestResumeAcceptsAChildRecordedUnderTheOldExecutionBudget(t *testing.T) {
+	t.Parallel()
+
+	fixture := newManagerFixtureWithOptions(t, &testModel{}, ExecutionOptions{Limits: oldProductionLimits()})
+	fixture.dispatcher.limits = oldProductionLimits()
+
+	completed, err := fixture.start(t.Context(), Request{AgentID: "explore", Task: "First."}, nil)
+	require.NoError(t, err)
+	source, err := completed.Wait(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, OutcomeSucceeded, source.Outcome)
+
+	// The durable source record carries the old bounded policy.
+	handle, err := fixture.repository.Open(t.Context(), session.OpenOptions{
+		ID:            source.ChildSessionID,
+		WorkspaceID:   fixture.parent.Metadata().WorkspaceID,
+		WorkspacePath: fixture.parent.Metadata().WorkspacePath,
+	})
+	require.NoError(t, err)
+	records, err := authoritativeChildRecords(handle)
+	require.NoError(t, err)
+	require.NotEmpty(t, records)
+	old := records[len(records)-1].Limits
+	assert.Equal(t, 64, old.MaxTurns)
+	assert.Equal(t, 256_000, old.MaxTokens)
+	assert.Equal(t, 128, old.MaxToolCalls)
+	assert.Equal(t, int64(30*time.Minute), old.MaxDurationNanos)
+	require.NoError(t, handle.Close())
+
+	// resolveResumeSource re-reads and re-validates that record; acceptance
+	// proves the old-policy record still reconciles.
+	resume, resumeHandle, err := fixture.manager.resolveResumeSource(t.Context(), Request{
+		AgentID: "explore", Task: "Continue.", ResumeFrom: source.ChildSessionID,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resume)
+	require.NotNil(t, resumeHandle)
+	require.NoError(t, resumeHandle.Close())
+	assert.Equal(t, source.ChildSessionID, resume.ChildSessionID)
+
+	// And the full Manager path resumes it rather than failing closed.
+	resumed, err := fixture.start(t.Context(), Request{
+		AgentID: "explore", Task: "Continue.", ResumeFrom: source.ChildSessionID,
+	}, nil)
+	require.NoError(t, err)
+	result, err := resumed.Wait(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, OutcomeSucceeded, result.Outcome)
 }
 
 func TestReconcileRepairsMissingParentTerminalFromChild(t *testing.T) {

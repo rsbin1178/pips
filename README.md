@@ -174,8 +174,11 @@ Configure your API Key, run diagnostics, and launch:
 ```sh
 export API_KEY="sk-..."
 
-# Verify sandbox support, credentials, and workspace status
+# Verify sandbox support, credentials, proxy reachability, and workspace status
 pips doctor
+
+# Diagnose configured MCP servers
+pips mcp doctor
 
 # Start the interactive TUI
 pips
@@ -286,6 +289,7 @@ For more examples, check the [`examples/`](examples/) directory.
 - [Agent Composition & Patterns](docs/agents.md)
 - [Workflow Engine Go Reference](https://pkg.go.dev/github.com/rsbin1178/pips/workflow)
 - [Coding CLI Guide](docs/coding-cli.md)
+- [Session Storage](docs/coding-session-storage.md)
 - [Execution Security & Sandboxing](docs/coding-security.md)
 - [Agent Client Protocol (ACP) Guide](docs/coding-acp.md)
 - [Manual Acceptance Guidelines](docs/manual-acceptance/index.md)

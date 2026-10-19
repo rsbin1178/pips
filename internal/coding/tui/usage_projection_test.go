@@ -12,14 +12,18 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/rsbin1178/pips/internal/coding"
+	"github.com/rsbin1178/pips/internal/coding/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
+// usageProjectionFixture returns a Session's state directory and its id. The
+// directory is the sidecar's own directory and does not exist yet, so a write
+// creates it: the file lives directly in it.
 func usageProjectionFixture(t *testing.T) (string, string) {
 	t.Helper()
 
-	return t.TempDir(), "session-1"
+	return filepath.Join(t.TempDir(), "state"), "session-1"
 }
 
 // TestUsageProjectionRoundTrips pins the sidecar's format: every token class the
@@ -102,10 +106,9 @@ func TestUsageProjectionRefusesUnusableFiles(t *testing.T) {
 	t.Parallel()
 
 	directory, sessionID := usageProjectionFixture(t)
-	dir := filepath.Join(directory, sessionID)
-	require.NoError(t, os.MkdirAll(dir, 0o700))
+	require.NoError(t, os.MkdirAll(directory, 0o700))
 
-	path := filepath.Join(dir, usageProjectionFile)
+	path := filepath.Join(directory, usageProjectionFile)
 	require.NoError(t, os.WriteFile(path, []byte("{not json"), 0o600))
 	_, usable := readUsageProjection(directory, sessionID)
 	assert.False(t, usable, "corrupt JSON is unusable")
@@ -116,7 +119,7 @@ func TestUsageProjectionRefusesUnusableFiles(t *testing.T) {
 	_, usable = readUsageProjection(directory, sessionID)
 	assert.False(t, usable, "an unknown schema is unusable")
 
-	_, usable = readUsageProjection(directory, "s-missing")
+	_, usable = readUsageProjection(t.TempDir(), "s-missing")
 	assert.False(t, usable, "a missing file is unusable")
 }
 
@@ -130,8 +133,7 @@ func TestUsageProjectionWithoutActiveMillisReadsAsZeroTime(t *testing.T) {
 		t.Parallel()
 
 		directory, sessionID := usageProjectionFixture(t)
-		dir := filepath.Join(directory, sessionID)
-		require.NoError(t, os.MkdirAll(dir, 0o700))
+		require.NoError(t, os.MkdirAll(directory, 0o700))
 
 		// The earlier slice wrote prior as a map of models and no active_millis.
 		legacy, err := json.Marshal(map[string]any{
@@ -144,7 +146,7 @@ func TestUsageProjectionWithoutActiveMillisReadsAsZeroTime(t *testing.T) {
 			},
 		})
 		require.NoError(t, err)
-		require.NoError(t, os.WriteFile(filepath.Join(dir, usageProjectionFile), legacy, 0o600))
+		require.NoError(t, os.WriteFile(filepath.Join(directory, usageProjectionFile), legacy, 0o600))
 
 		read, usable := readUsageProjection(directory, sessionID)
 		require.True(t, usable, "a file without active_millis stays usable")
@@ -156,8 +158,7 @@ func TestUsageProjectionWithoutActiveMillisReadsAsZeroTime(t *testing.T) {
 		t.Parallel()
 
 		directory, sessionID := usageProjectionFixture(t)
-		dir := filepath.Join(directory, sessionID)
-		require.NoError(t, os.MkdirAll(dir, 0o700))
+		require.NoError(t, os.MkdirAll(directory, 0o700))
 
 		current, err := json.Marshal(map[string]any{
 			"schema":     usageProjectionSchema,
@@ -171,7 +172,7 @@ func TestUsageProjectionWithoutActiveMillisReadsAsZeroTime(t *testing.T) {
 			},
 		})
 		require.NoError(t, err)
-		require.NoError(t, os.WriteFile(filepath.Join(dir, usageProjectionFile), current, 0o600))
+		require.NoError(t, os.WriteFile(filepath.Join(directory, usageProjectionFile), current, 0o600))
 
 		read, usable := readUsageProjection(directory, sessionID)
 		require.True(t, usable)
@@ -187,9 +188,8 @@ func TestUsageProjectionReportsIncompleteHistory(t *testing.T) {
 	t.Parallel()
 
 	directory, sessionID := usageProjectionFixture(t)
-	dir := filepath.Join(directory, sessionID)
-	require.NoError(t, os.MkdirAll(dir, 0o700))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, usageProjectionFile), []byte("{not json"), 0o600))
+	require.NoError(t, os.MkdirAll(directory, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(directory, usageProjectionFile), []byte("{not json"), 0o600))
 
 	result := writeUsageProjection(
 		directory, sessionID, "i-1", 1_000,
@@ -215,11 +215,11 @@ func TestUsageProjectionSecuresTheFile(t *testing.T) {
 		time.Now(),
 	).wrote)
 
-	dirInfo, err := os.Stat(filepath.Join(directory, sessionID))
+	dirInfo, err := os.Stat(directory)
 	require.NoError(t, err)
 	assert.Equal(t, fs.FileMode(0o700), dirInfo.Mode().Perm())
 
-	fileInfo, err := os.Stat(filepath.Join(directory, sessionID, usageProjectionFile))
+	fileInfo, err := os.Stat(filepath.Join(directory, usageProjectionFile))
 	require.NoError(t, err)
 	assert.Equal(t, fs.FileMode(0o600), fileInfo.Mode().Perm())
 }
@@ -234,11 +234,10 @@ func TestUsageProjectionCleansUpAFailedWrite(t *testing.T) {
 		t.Parallel()
 
 		directory, sessionID := usageProjectionFixture(t)
-		dir := filepath.Join(directory, sessionID)
 		// The destination is a non-empty directory, so the replace step fails
 		// after the temporary was written.
-		require.NoError(t, os.MkdirAll(filepath.Join(dir, usageProjectionFile), 0o700))
-		require.NoError(t, os.WriteFile(filepath.Join(dir, usageProjectionFile, "keep"), []byte("x"), 0o600))
+		require.NoError(t, os.MkdirAll(filepath.Join(directory, usageProjectionFile), 0o700))
+		require.NoError(t, os.WriteFile(filepath.Join(directory, usageProjectionFile, "keep"), []byte("x"), 0o600))
 
 		result := writeUsageProjection(
 			directory, sessionID, "i-1", 1_000,
@@ -246,7 +245,7 @@ func TestUsageProjectionCleansUpAFailedWrite(t *testing.T) {
 		)
 		require.Error(t, result.err)
 
-		entries, err := os.ReadDir(dir)
+		entries, err := os.ReadDir(directory)
 		require.NoError(t, err)
 		for _, entry := range entries {
 			assert.False(t, strings.HasPrefix(entry.Name(), ".usage-"), "no temporary is left behind")
@@ -266,9 +265,8 @@ func TestUsageProjectionCleansUpAFailedWrite(t *testing.T) {
 			map[string]coding.TokenUsage{"demo/model": {InputTokens: 100}}, time.Now(),
 		).wrote)
 
-		dir := filepath.Join(directory, sessionID)
-		require.NoError(t, os.Chmod(dir, 0o500))
-		t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+		require.NoError(t, os.Chmod(directory, 0o500))       //nolint:gosec // the test owns this directory
+		t.Cleanup(func() { _ = os.Chmod(directory, 0o700) }) //nolint:gosec // the test owns this directory
 
 		result := writeUsageProjection(
 			directory, sessionID, "i-2", 2_000,
@@ -293,7 +291,7 @@ func TestWriteUsageProjectionSkipsAnEmptySplit(t *testing.T) {
 	require.NoError(t, result.err)
 	assert.False(t, result.wrote)
 
-	_, err := os.Stat(filepath.Join(directory, sessionID, usageProjectionFile))
+	_, err := os.Stat(filepath.Join(directory, usageProjectionFile))
 	require.ErrorIs(t, err, fs.ErrNotExist, "an empty split writes nothing")
 }
 
@@ -340,9 +338,9 @@ func TestStatusPanelUsageRendersTheProjectionStates(t *testing.T) {
 	t.Run("usable", func(t *testing.T) {
 		t.Parallel()
 
-		directory, sessionID := usageProjectionFixture(t)
-		require.True(t, writeUsageProjection(directory, sessionID, "i-1", 61_000, models, time.Now()).wrote)
-		model := usageProjectionPageModel(t, directory)
+		root, workspacePath, sessionID, stateDir := usageProjectionStoreFixture(t)
+		require.True(t, writeUsageProjection(stateDir, sessionID, "i-1", 61_000, models, time.Now()).wrote)
+		model := usageProjectionPageModel(t, root, workspacePath)
 
 		driveModelCommands(t, model, model.loadUsageProjection())
 		page := statusPageText(model, statusTabUsage)
@@ -354,7 +352,8 @@ func TestStatusPanelUsageRendersTheProjectionStates(t *testing.T) {
 	t.Run("missing", func(t *testing.T) {
 		t.Parallel()
 
-		model := usageProjectionPageModel(t, t.TempDir())
+		root, workspacePath, _, _ := usageProjectionStoreFixture(t)
+		model := usageProjectionPageModel(t, root, workspacePath)
 
 		driveModelCommands(t, model, model.loadUsageProjection())
 		page := statusPageText(model, statusTabUsage)
@@ -365,11 +364,10 @@ func TestStatusPanelUsageRendersTheProjectionStates(t *testing.T) {
 	t.Run("corrupt", func(t *testing.T) {
 		t.Parallel()
 
-		directory, sessionID := usageProjectionFixture(t)
-		dir := filepath.Join(directory, sessionID)
-		require.NoError(t, os.MkdirAll(dir, 0o700))
-		require.NoError(t, os.WriteFile(filepath.Join(dir, usageProjectionFile), []byte("{not json"), 0o600))
-		model := usageProjectionPageModel(t, directory)
+		root, workspacePath, _, stateDir := usageProjectionStoreFixture(t)
+		require.NoError(t, os.MkdirAll(stateDir, 0o700))
+		require.NoError(t, os.WriteFile(filepath.Join(stateDir, usageProjectionFile), []byte("{not json"), 0o600))
+		model := usageProjectionPageModel(t, root, workspacePath)
 
 		driveModelCommands(t, model, model.loadUsageProjection())
 		page := statusPageText(model, statusTabUsage)
@@ -379,7 +377,8 @@ func TestStatusPanelUsageRendersTheProjectionStates(t *testing.T) {
 	t.Run("incomplete", func(t *testing.T) {
 		t.Parallel()
 
-		model := usageProjectionPageModel(t, t.TempDir())
+		root, workspacePath, _, _ := usageProjectionStoreFixture(t)
+		model := usageProjectionPageModel(t, root, workspacePath)
 		model.usageProjection = usageProjectionView{
 			sessionID:  model.state.SessionID,
 			loaded:     true,
@@ -399,7 +398,8 @@ func TestStatusPanelUsageRendersTheProjectionStates(t *testing.T) {
 func TestStatusPanelUsageKeepsTheInProcessRowsWhenTheProjectionIsMissing(t *testing.T) {
 	t.Parallel()
 
-	model := usageProjectionPageModel(t, t.TempDir())
+	root, workspacePath, _, _ := usageProjectionStoreFixture(t)
+	model := usageProjectionPageModel(t, root, workspacePath)
 
 	// The tally counts what this process watched run, so the interaction has to be
 	// seen active before its usage lands.
@@ -427,8 +427,8 @@ func TestStatusPanelUsageKeepsTheInProcessRowsWhenTheProjectionIsMissing(t *test
 func TestStreamRefreshWritesTheCompletedInteractionSplit(t *testing.T) {
 	t.Parallel()
 
-	directory := t.TempDir()
-	model := usageProjectionPageModel(t, directory)
+	directory, workspacePath, _, _ := usageProjectionStoreFixture(t)
+	model := usageProjectionPageModel(t, directory, workspacePath)
 	state := model.state
 	state.Interaction = coding.InteractionState{
 		ID:             "i-1",
@@ -442,7 +442,13 @@ func TestStreamRefreshWritesTheCompletedInteractionSplit(t *testing.T) {
 	require.NotEmpty(t, refresh)
 	driveModelCommands(t, model, tea.Batch(refresh...))
 
-	read, usable := readUsageProjection(directory, "session-1")
+	// The write lands under the Session's layered state directory, which the
+	// store layout resolves from the model's workspace and Session id.
+	layout, err := session.NewStoreLayout(directory)
+	require.NoError(t, err)
+	stateDir := layout.StateDir(model.options.Workspace, model.state.SessionID)
+
+	read, usable := readUsageProjection(stateDir, "session-1")
 	require.True(t, usable)
 	assert.Equal(t, "i-1", read.LastInteraction.ID)
 	assert.Equal(t, int64(7_000), read.activeMillis(), "the state's duration lands in the file")
@@ -450,12 +456,29 @@ func TestStreamRefreshWritesTheCompletedInteractionSplit(t *testing.T) {
 	assert.True(t, model.usageProjection.usable, "the write result lands on the page cache")
 }
 
-func usageProjectionPageModel(t *testing.T, directory string) *Model {
+// usageProjectionStoreFixture returns a store root, the workspace path, the
+// session id the ready state carries, and that session's state directory, all
+// resolved through the store layout so the test never joins session paths.
+func usageProjectionStoreFixture(t *testing.T) (root, workspacePath, sessionID, stateDir string) {
+	t.Helper()
+
+	root = t.TempDir()
+	workspacePath = "/workspace/usage"
+	sessionID = "session-1"
+
+	layout, err := session.NewStoreLayout(root)
+	require.NoError(t, err)
+
+	return root, workspacePath, sessionID, layout.StateDir(workspacePath, sessionID)
+}
+
+func usageProjectionPageModel(t *testing.T, root, workspacePath string) *Model {
 	t.Helper()
 
 	model := readyModelWithController(t, newOverlayController(readyState()), true)
 	model.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
-	model.options.SessionsDirectory = directory
+	model.options.SessionsDirectory = root
+	model.options.Workspace = workspacePath
 
 	return model
 }
@@ -468,15 +491,14 @@ func TestUsageProjectionReadsAPreSliceFile(t *testing.T) {
 	t.Parallel()
 
 	directory, sessionID := usageProjectionFixture(t)
-	dir := filepath.Join(directory, sessionID)
-	require.NoError(t, os.MkdirAll(dir, 0o700))
+	require.NoError(t, os.MkdirAll(directory, 0o700))
 
 	legacy := `{"schema":"` + usageProjectionSchema + `","session_id":"` + sessionID + `",` +
 		`"updated_at":"2026-10-06T12:00:00Z",` +
 		`"prior":{"demo/model":{"input_tokens":100,"output_tokens":20}},` +
 		`"last_interaction":{"id":"i-1","models":{"demo/model":{"input_tokens":5,"output_tokens":1}}}}`
 	require.NoError(t, os.WriteFile(
-		filepath.Join(dir, usageProjectionFile), []byte(legacy), 0o600,
+		filepath.Join(directory, usageProjectionFile), []byte(legacy), 0o600,
 	))
 
 	projection, usable := readUsageProjection(directory, sessionID)
@@ -560,8 +582,7 @@ func TestUsageProjectionReadsACurrentFileWithDailyBuckets(t *testing.T) {
 	t.Parallel()
 
 	directory, sessionID := usageProjectionFixture(t)
-	dir := filepath.Join(directory, sessionID)
-	require.NoError(t, os.MkdirAll(dir, 0o700))
+	require.NoError(t, os.MkdirAll(directory, 0o700))
 
 	current := `{"schema":"` + usageProjectionSchema + `","session_id":"` + sessionID + `",` +
 		`"prior":{"active_millis":900000,` +
@@ -570,7 +591,7 @@ func TestUsageProjectionReadsACurrentFileWithDailyBuckets(t *testing.T) {
 		`"last_interaction":{"id":"i-1","day":"2026-10-06","active_millis":41000,` +
 		`"models":{"demo/model":{"input_tokens":5}},` +
 		`"daily":{"2026-10-06":{"active_millis":41000,"models":{"demo/model":{"input_tokens":5}}}}}}`
-	require.NoError(t, os.WriteFile(filepath.Join(dir, usageProjectionFile), []byte(current), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(directory, usageProjectionFile), []byte(current), 0o600))
 
 	projection, usable := readUsageProjection(directory, sessionID)
 	require.True(t, usable, "a current file with a daily map stays usable")

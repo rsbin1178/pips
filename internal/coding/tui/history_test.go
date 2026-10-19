@@ -335,7 +335,22 @@ func TestCompactionKeepsThePreCompactionHistoryBrowsable(t *testing.T) {
 	require.NoError(t, model.streamErr)
 
 	model.rerenderTranscript(false)
-	assert.Equal(t, before, model.transcript.flatten(),
+	after := model.transcript.flatten()
+	assert.Contains(t, strings.Join(after, "\n"), "KEEP-00",
 		"a context checkpoint does not clear the browsable history")
+	assert.Contains(t, strings.Join(after, "\n"), "Context compacted · manual · 9.0k → 1.2k tokens",
+		"the compaction boundary is visible immediately")
+
+	// The Runtime publishes the checkpoint transcript in the tree-changed event
+	// that follows compaction.completed. A full checkpoint carries no visible
+	// message of its own, so the divider still leads the replacement.
+	model.resetScrollback()
+	model.state.Transcript = []ai.Message{ai.UserText("after the checkpoint")}
+	model.rerenderTranscript(false)
+	after = model.transcript.flatten()
+	assert.Contains(t, strings.Join(after, "\n"), "Context compacted · manual · 9.0k → 1.2k tokens",
+		"the compaction boundary survives the checkpoint transcript")
+	assert.NotContains(t, strings.Join(after, "\n"), "KEEP-00",
+		"the replaced projection drops the pre-compaction rows")
 	assert.Equal(t, 1200, model.state.ContextTokens, "the model context did shrink")
 }

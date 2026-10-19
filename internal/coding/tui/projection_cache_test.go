@@ -78,7 +78,7 @@ func projectionRunningSubagentTool() coding.ToolState {
 		RunID: "run-1", Turn: 3,
 		Call: coding.ToolCall{
 			ID: "call-sub", Name: subagent.ToolName,
-			Arguments: ai.JSON(`{"role":"explore","task":"Inspect the timeline"}`),
+			Arguments: ai.JSON(`{"prompt":"Inspect the timeline","description":"inspect","subagent_type":"explore"}`),
 		},
 		Status: coding.ToolStatusRunning,
 	}
@@ -108,6 +108,15 @@ func TestProjectionCacheMatchesPureProjection(t *testing.T) {
 					model.state.MessageCandidates,
 					coding.CandidateIdentity{RunID: "run-1", Turn: 3},
 				)
+			},
+		},
+		{
+			name: "compaction completed",
+			mutate: func(_ *testing.T, model *Model) {
+				model.state.Compaction = coding.CompactionState{
+					Mode: coding.CompactionManual, TokensBefore: 9000, TokensAfter: 1200,
+					CheckpointID: "checkpoint-1", Strategy: coding.CompactionStrategyFull,
+				}
 			},
 		},
 		{

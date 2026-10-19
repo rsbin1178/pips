@@ -30,14 +30,16 @@ const (
 	genericSubagentLabel        = "child Agent"
 )
 
-// agentsRouteTab keeps the definition Library separate from durable child
-// Runs. A definition is declarative metadata; a run is a persisted execution
-// snapshot, so conflating them would make historical authority ambiguous.
+// agentsRouteTab keeps the Agent definition catalog separate from durable
+// child Runs. A definition is declarative metadata; a run is a persisted
+// execution snapshot, so conflating them would make historical authority
+// ambiguous. The definition tab is named "Agents" because that is what it
+// lists; Runs is the run browser the same route also owns.
 type agentsRouteTab uint8
 
 const (
 	agentsTabRuns agentsRouteTab = iota
-	agentsTabLibrary
+	agentsTabAgents
 )
 
 // agentsRouteTabLine is the content line the tab row is drawn on, beneath the
@@ -50,12 +52,12 @@ const (
 )
 
 func agentsRouteTabs() []agentsRouteTab {
-	return []agentsRouteTab{agentsTabRuns, agentsTabLibrary}
+	return []agentsRouteTab{agentsTabRuns, agentsTabAgents}
 }
 
 func (tab agentsRouteTab) title() string {
-	if tab == agentsTabLibrary {
-		return "Library"
+	if tab == agentsTabAgents {
+		return "Agents"
 	}
 
 	return "Runs"
@@ -273,8 +275,8 @@ func (m *Model) updateAgentsRouteKey(message tea.KeyPressMsg) (tea.Model, tea.Cm
 	if m.route.loading {
 		return m, nil
 	}
-	if key := message.String(); key == "ctrl+l" {
-		m.selectAgentsRouteTab(agentsTabLibrary)
+	if key := message.String(); key == "ctrl+a" {
+		m.selectAgentsRouteTab(agentsTabAgents)
 
 		return m, nil
 	} else if key == "ctrl+r" {
@@ -282,7 +284,7 @@ func (m *Model) updateAgentsRouteKey(message tea.KeyPressMsg) (tea.Model, tea.Cm
 
 		return m, nil
 	}
-	if m.route.agentsTab == agentsTabLibrary {
+	if m.route.agentsTab == agentsTabAgents {
 		return m.updateAgentLibraryRouteKey(message)
 	}
 
@@ -454,7 +456,7 @@ func (m *Model) filteredAgentLibrary() []coding.AgentLibraryEntry {
 	return values
 }
 
-// agentsRouteTabBar draws the Runs/Library switch beneath the title line, with the
+// agentsRouteTabBar draws the Runs/Agents switch beneath the title line, with the
 // active tab emphasized. Under NO_COLOR the active tab is bracketed so the
 // selection survives without styling, and the bar is fitted to the width.
 func (m *Model) agentsRouteTabBar(width int) string {
@@ -499,8 +501,8 @@ func (m *Model) agentsRouteContent() string {
 // painted line count, so the pointer map measures the same rows the frame paints.
 func (m *Model) agentsRouteContentWithRows() (string, []int) {
 	title := "Agents · Runs"
-	if m.route.agentsTab == agentsTabLibrary {
-		title = "Agents · Library"
+	if m.route.agentsTab == agentsTabAgents {
+		title = "Agents · Definitions"
 	}
 	lines := []string{
 		title, m.agentsRouteTabBar(max(1, m.width)), "", "Search: " + m.route.query, "",
@@ -508,7 +510,7 @@ func (m *Model) agentsRouteContentWithRows() (string, []int) {
 	if m.route.loading {
 		return strings.Join(append(lines, m.activityNotice("Loading…")), "\n"), nil
 	}
-	if m.route.agentsTab == agentsTabLibrary {
+	if m.route.agentsTab == agentsTabAgents {
 		return m.agentLibraryRouteContent(lines)
 	}
 
@@ -535,7 +537,7 @@ func (m *Model) agentsRouteContentWithRows() (string, []int) {
 		}
 		lines = append(lines, "", m.activityNotice(label))
 	}
-	lines = append(lines, "", wheelHintNavigation+" · type to search · Enter inspect · c interrupt · Ctrl+L Library · Ctrl+R Runs · Ctrl+T/Esc close")
+	lines = append(lines, "", wheelHintNavigation+" · type to search · Enter inspect · c interrupt · Ctrl+A Agents · Ctrl+R Runs · Ctrl+T/Esc close")
 
 	return strings.Join(lines, "\n"), heights
 }
@@ -558,7 +560,7 @@ func (m *Model) agentLibraryRouteContent(lines []string) (string, []int) {
 	lines = append(lines,
 		"",
 		"Declared capabilities are intersected with active session authority at launch.",
-		"↑/↓ choose · "+wheelHintNavigation+" · Enter run · type to search · Ctrl+L Library · Ctrl+R Runs · Ctrl+T/Esc close",
+		"↑/↓ choose · "+wheelHintNavigation+" · Enter run · type to search · Ctrl+A Agents · Ctrl+R Runs · Ctrl+T/Esc close",
 	)
 
 	return strings.Join(lines, "\n"), heights
@@ -850,10 +852,10 @@ func (m *Model) subagentRouteContent(state coding.State, detail *subagent.Detail
 		}
 	}
 
-	flow := m.renderTimelineBlocksWithOptions(
-		blocks,
-		timelineRenderOptions{expandToolResults: true},
-	)
+	// The page renders through the conversation's own options, so its rows are the
+	// rows the conversation would show for the same blocks: a Tool result collapses
+	// to its one-line row here exactly as it does there.
+	flow := m.renderTimelineBlocksWithOptions(blocks, timelineRenderOptions{})
 	if flow != "" {
 		return flow
 	}
@@ -931,6 +933,8 @@ func subagentOutcomeText(value subagent.Summary) string {
 
 func renderSubagentResult(value any) []string {
 	switch result := value.(type) {
+	case string:
+		return renderTextResult(result)
 	case subagent.ExploreResult:
 		return renderExploreResult(result)
 	case subagent.PlanResult:
@@ -940,6 +944,23 @@ func renderSubagentResult(value any) []string {
 	default:
 		return []string{"  Validated result is unavailable."}
 	}
+}
+
+// renderTextResult renders the default free-text builtin result, which is the
+// child's final assistant text rather than a typed object.
+func renderTextResult(value string) []string {
+	trimmed := strings.TrimSpace(sanitizeToolText(value))
+	if trimmed == "" {
+		return []string{"  Validated result is unavailable."}
+	}
+
+	lines := strings.Split(trimmed, "\n")
+	rendered := make([]string, 0, len(lines))
+	for _, line := range lines {
+		rendered = append(rendered, "  "+strings.TrimRight(line, " \t"))
+	}
+
+	return rendered
 }
 
 func renderExploreResult(result subagent.ExploreResult) []string {
@@ -1112,66 +1133,90 @@ func (m *Model) agentsRouteTabHitMap(windowStart, windowRows, width int) routeTa
 func (m *Model) updateSubagentRouteKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := message.String()
 
+	// Ctrl+Q is the one chord the child view never owns: it bubbles so the
+	// conversation's own quit handling decides.
+	if key == keyCtrlQ {
+		return m, tea.Quit
+	}
+
+	// The read-only transcript view owns a different key set from the Team
+	// Worker route, which keeps an editable composer.
+	if m.route.childKind != childTeamWorker {
+		if model, command, handled := m.updateChildTranscriptKey(key); handled {
+			return model, command
+		}
+	}
+
 	switch key {
-	case keyCtrlT, keyCtrlC:
+	case keyCtrlT:
+		return m, m.closeRouteToParent()
+	case keyCtrlC:
+		// Only the Team Worker route reaches this; the transcript view answered
+		// above, and a Worker interrupts with Ctrl+X.
 		return m, m.closeRouteToParent()
 	case keyEscape:
-		if m.route.childKind == childTeamWorker {
-			if m.composer.Value() != "" {
-				m.composer.Reset()
-				m.setLayout()
-
-				return m, nil
-			}
-			if len(m.route.children) == 0 {
-				return m, m.closeRouteToParent()
-			}
-		}
-		m.stopTeamWorkerRouteSubscription()
-		if len(m.route.children) > 0 {
-			m.route.kind = routeAgents
-			m.route.loading = false
-			m.route.err = nil
-			m.route.offset = 0
-			m.route.childSessionID = ""
-			m.route.childSummary = childSummary{}
-			m.route.detail = nil
-			m.route.childState = nil
-			m.route.refreshing = false
-			m.route.refreshPending = false
-			m.route.refreshErr = nil
-
-			return m, nil
-		}
-
-		return m, m.openAgentsRoute()
+		return m.updateSubagentRouteEscapeKey()
 	}
 	if m.route.childKind == childTeamWorker {
 		return m.updateTeamWorkerComposerKey(message)
 	}
-	if key == "c" && !m.route.controlling {
-		return m, m.cancelChild(m.route.childSummary)
+	if key == "c" {
+		return m, m.cancelRouteChild()
+	}
+	m.scrollSubagentRoute(key)
+
+	return m, nil
+}
+
+// updateChildTranscriptKey drives the read-only transcript view's own keys: it
+// closes through the one close function, and Ctrl+C interrupts the child, which
+// is the only turn that surface can reach.
+func (m *Model) updateChildTranscriptKey(key string) (tea.Model, tea.Cmd, bool) {
+	switch key {
+	case "q":
+		return m, m.closeRouteToParent(), true
+	case keyCtrlC:
+		return m, m.cancelRouteChild(), true
 	}
 
-	visible := max(1, m.height-3)
-	maximum := m.subagentRouteMaximumOffset()
+	return m, nil, false
+}
+
+// updateSubagentRouteEscapeKey closes the child route to the conversation it
+// belongs to, which is the one move the page's own footer advertises. A Worker
+// clears its draft first: Escape is also the composer's own cancel there, and
+// the route is the only place that draft lives.
+func (m *Model) updateSubagentRouteEscapeKey() (tea.Model, tea.Cmd) {
+	if m.route.childKind == childTeamWorker && m.composer.Value() != "" {
+		m.composer.Reset()
+		m.setLayout()
+
+		return m, nil
+	}
+
+	return m, m.closeRouteToParent()
+}
+
+// scrollSubagentRoute applies the child transcript's scrolling keys to the page's
+// reading region, so the keys and the wheel share the region's follow rule.
+func (m *Model) scrollSubagentRoute(key string) {
+	visible := max(1, m.subagentTranscriptBodyHeight())
+	region := &m.childScroll
 
 	switch key {
 	case "up", "k":
-		m.route.offset = max(0, m.route.offset-1)
+		region.scrollBy(-1)
 	case keyDown, "j":
-		m.route.offset = min(maximum, m.route.offset+1)
+		region.scrollBy(1)
 	case keyPageUp:
-		m.route.offset = max(0, m.route.offset-visible)
+		region.scrollBy(-visible)
 	case keyPageDown:
-		m.route.offset = min(maximum, m.route.offset+visible)
+		region.scrollBy(visible)
 	case keyHome:
-		m.route.offset = 0
+		region.gotoTop()
 	case keyEnd:
-		m.route.offset = maximum
+		region.gotoBottom()
 	}
-
-	return m, nil
 }
 
 func (m *Model) updateTeamWorkerComposerKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -1265,6 +1310,19 @@ func (m *Model) cancelChild(value childSummary) tea.Cmd {
 	return m.cancelSubagent(value.childSessionID)
 }
 
+// cancelRouteChild interrupts the child the open route is showing. The route
+// owns its child session id, so the interrupt does not depend on a summary
+// surviving the way in.
+func (m *Model) cancelRouteChild() tea.Cmd {
+	if m.route.controlling || m.route.childSessionID == "" {
+		return nil
+	}
+	m.route.controllingChildKind = childSubagent
+	m.route.controllingChildSet = true
+
+	return m.cancelSubagent(m.route.childSessionID)
+}
+
 func (m *Model) cancelSubagent(childSessionID string) tea.Cmd {
 	activityWasVisible := m.activityClockVisible()
 	m.route.controlling = true
@@ -1281,9 +1339,16 @@ func (m *Model) cancelSubagent(childSessionID string) tea.Cmd {
 }
 
 func (m *Model) subagentRouteView() tea.View {
-	width := max(1, m.width)
-	height := max(1, m.height)
+	if m.route.childKind == childTeamWorker {
+		return m.teamWorkerRouteView()
+	}
 
+	return m.subagentTranscriptRouteView()
+}
+
+// subagentRouteBody renders whichever region the open child route shows: its
+// live activity placeholder, its own transcript, or the failure that replaced it.
+func (m *Model) subagentRouteBody() string {
 	body := "Child activity unavailable."
 	switch {
 	case m.route.controlling:
@@ -1305,11 +1370,20 @@ func (m *Model) subagentRouteView() tea.View {
 	if m.route.err != nil {
 		body += "\n\nError: " + m.safeChildRouteError(m.route.err)
 	}
-
 	if m.route.refreshErr != nil {
 		body += "\n\nRefresh: " + m.safeChildRouteError(m.route.refreshErr)
 	}
 
+	return body
+}
+
+// teamWorkerRouteView keeps the Worker route's editable composer: a Worker
+// accepts messages, so it needs the input box and its caret.
+func (m *Model) teamWorkerRouteView() tea.View {
+	width := max(1, m.width)
+	height := max(1, m.height)
+
+	body := m.subagentRouteBody()
 	footer := m.subagentRouteFooter(width)
 	bodyHeight := max(0, height-lipgloss.Height(footer))
 
@@ -1321,7 +1395,7 @@ func (m *Model) subagentRouteView() tea.View {
 	}
 
 	view := m.presentationView(lipgloss.JoinVertical(lipgloss.Left, body, footer))
-	if m.route.childKind == childTeamWorker && !m.route.controlling {
+	if !m.route.controlling {
 		view.Cursor = m.composer.Cursor()
 		if view.Cursor != nil {
 			cursorX, cursorY := m.composerBoxCursorOffset()
@@ -1333,77 +1407,217 @@ func (m *Model) subagentRouteView() tea.View {
 	return view
 }
 
-func (m *Model) subagentRouteStatusLine() string {
-	values := []string{"pips", genericSubagentLabel, "loading"}
-	worker := m.route.childKind == childTeamWorker
+// subagentTranscriptRouteView draws the read-only child transcript as a
+// full-width page in the same shape a Tool detail page uses: the child's own
+// blocks through the conversation's renderer, then the pinned separator and the
+// row that names the child and the keys this page answers. The page keeps no
+// composer and no frame, so it reads as the conversation it belongs to rather
+// than as a window floating over it, and its region follows the child's newest
+// row until the reader scrolls away from the tail.
+func (m *Model) subagentTranscriptRouteView() tea.View {
+	width := max(1, m.width)
+	height := max(1, m.height)
 
-	if worker {
-		values = m.teamWorkerRouteStatusValues()
-		values = append(values, "Enter message", "Ctrl+J newline", "PgUp/PgDn scroll", "Ctrl+X interrupt", "Esc Lead")
-	} else if m.route.detail != nil {
-		summary := m.route.detail.Summary
-		name := subagentDisplayName(summary.Identity, summary.Role) + " subagent"
-		values = []string{"pips", name}
-		if model := safeDetailText(summary.Model); model != "" {
-			values = append(values, model)
-		}
-		values = append(values, subagentStateLabel(summary.State))
+	status := m.subagentRouteStatusLine()
+	footer := m.sessionPickerSeparator(width) + "\n" + status
+	bodyHeight := m.subagentTranscriptBodyHeight()
+
+	// A terminal too short for both keeps the footer: the hint explains the keys,
+	// while the body is recoverable by resizing.
+	content := status
+	if height > 2 {
+		content = padHeight(m.childTranscriptWindow(bodyHeight), bodyHeight) + "\n" + footer
 	}
+
+	return m.presentationView(truncateHeight(content, height))
+}
+
+// subagentTranscriptBodyHeight reserves the page's pinned footer — the
+// separator row and the status row — so the transcript never pushes it off the
+// frame.
+func (m *Model) subagentTranscriptBodyHeight() int {
+	return max(0, m.height-2)
+}
+
+// childTranscriptWindow installs the child page's wrapped rows into its reading
+// region and returns the window it shows. Installing the rows is what makes the
+// page follow: the region pins itself to the newest row whenever the content grows
+// while the reader holds the tail, and leaves a reader who scrolled away where
+// they were.
+func (m *Model) childTranscriptWindow(height int) string {
+	region := &m.childScroll
+	region.setRows(wrapPlainLines(m.subagentRouteBody(), max(1, m.width)))
+	region.setHeight(height)
+
+	return region.visible()
+}
+
+// subagentPageStatusCandidates orders the child page's footer row from the most
+// to the least informative: the child's own metadata, then the keys the page
+// answers. Every step down the ladder shortens a key hint before it drops a
+// metadata part, and the last step drops the metadata entirely, so a narrow
+// terminal loses the model and the clock rather than the identity, the state, or
+// the way out.
+func (m *Model) subagentPageStatusCandidates() []string {
+	hintSets := m.subagentPageHintSets()
+	parts := m.subagentPageStatusParts()
+	separator := "  ·  "
+
+	candidates := make([]string, 0, len(hintSets)*(len(parts)+1))
+	for trim := len(parts); trim >= 0; trim-- {
+		head := strings.Join(parts[:trim], separator)
+		for _, hints := range hintSets {
+			hint := strings.Join(hints, separator)
+			switch {
+			case head == "":
+				candidates = append(candidates, hint)
+			case hint == "":
+				candidates = append(candidates, head)
+			default:
+				candidates = append(candidates, head+separator+hint)
+			}
+		}
+	}
+
+	return candidates
+}
+
+// subagentPageStatusParts is the child page's own metadata, most to least
+// protected: the identity, its state, the task it was handed, the model it runs,
+// its live activity, and its elapsed time.
+func (m *Model) subagentPageStatusParts() []string {
+	summary := m.subagentRouteSummaryState()
+	parts := []string{
+		m.subagentRouteGlyph(summary.State) + " " + subagentPageIdentity(summary),
+		subagentStateLabel(summary.State),
+	}
+	if description := oneLineSubagentTask(summary.TaskPreview); description != "" {
+		parts = append(parts, quotedSubagentDescription(description, 48))
+	}
+	if model := safeDetailText(summary.Model); model != "" {
+		parts = append(parts, model)
+	}
+	if activity := m.childRouteActivityLabel(); activity != "" {
+		parts = append(parts, activity)
+	}
+	if summary.Duration > 0 || isTerminalSubagent(summary.State) {
+		parts = append(parts, formatInteractionDuration(summary.Duration.Milliseconds()))
+	}
+
+	return parts
+}
+
+// subagentPageIdentity names the child on its own page: the resolved role or
+// identity, then the kind. A child with no identity yet already reads "child
+// Agent", so the kind is not repeated after it.
+func subagentPageIdentity(summary subagent.Summary) string {
+	name := subagentDisplayName(summary.Identity, summary.Role)
+	if name == genericSubagentLabel {
+		return name
+	}
+
+	return name + " subagent"
+}
+
+// subagentPageHintSets lists the child page's key hints, widest first. An
+// interrupt hint only appears while the child can still be interrupted.
+func (m *Model) subagentPageHintSets() [][]string {
+	terminal := isTerminalSubagent(m.subagentRouteSummaryState().State)
+	hints := func(values ...string) []string {
+		if terminal {
+			values = slices.DeleteFunc(slices.Clone(values), func(value string) bool {
+				return value == subagentHintInterrupt
+			})
+		}
+
+		return values
+	}
+
+	return [][]string{
+		hints(detailHintScrollFull, subagentHintClose, subagentHintInterrupt),
+		hints("↑/↓ scroll", subagentHintClose, subagentHintInterrupt),
+		hints(subagentHintClose, subagentHintInterrupt),
+		hints(subagentHintClose),
+	}
+}
+
+// subagentRouteGlyph is the child page's state mark: the animated spinner while
+// the child runs, and a settled mark once it stops.
+func (m *Model) subagentRouteGlyph(state subagent.State) string {
+	switch state {
+	case subagent.StateCreated, subagent.StateRunning:
+		return m.activity.Frame()
+	case subagent.StateSucceeded:
+		return toolActivityGlyph(toolStateSucceeded)
+	case subagent.StateFailed:
+		return toolActivityGlyph(toolStateFailed)
+	case subagent.StateCanceled, subagent.StateInterrupted:
+		return toolActivityGlyph(toolStateInterrupted)
+	}
+
+	return m.activity.Frame()
+}
+
+// childRouteActivityLabel is the open child's own live activity, derived through
+// the same activity model every other surface uses. A settled child reports none.
+func (m *Model) childRouteActivityLabel() string {
+	if m.route.childState == nil || isTerminalSubagent(m.subagentRouteSummaryState().State) {
+		return ""
+	}
+	status, visible := resolveActivity(activityContext{state: *m.route.childState})
+	if !visible {
+		return ""
+	}
+	if status.detail == "" {
+		return status.label
+	}
+
+	return status.label + " " + status.detail
+}
+
+// subagentRouteStatusLine is the child route's pinned status row. The Team
+// Worker route keeps its own two-row form — its composer and keys are a
+// different vocabulary — while the read-only child page uses the single
+// candidate row a Tool detail page uses.
+func (m *Model) subagentRouteStatusLine() string {
+	if m.route.childKind != childTeamWorker {
+		return m.subagentPageStatusLine()
+	}
+
+	values := m.teamWorkerRouteStatusValues()
+	values = append(values, "Enter message", "Ctrl+J newline", "PgUp/PgDn scroll", "Ctrl+X interrupt", "Esc Lead")
 
 	value := strings.Join(values, "  ·  ")
-	hint := ""
-	if !worker {
-		hint = m.subagentRouteHintLine()
-	}
-
 	if !m.options.NoColor {
-		palette := paletteFor(m.theme)
-		value = lipgloss.NewStyle().Foreground(palette.muted).Render(value)
-		if hint != "" {
-			hint = lipgloss.NewStyle().Foreground(paletteFor(m.theme).muted).Render(hint)
-		}
-	}
-	if hint == "" {
-		return ansi.Truncate(value, max(1, m.width), "…")
+		value = lipgloss.NewStyle().Foreground(paletteFor(m.theme).muted).Render(value)
 	}
 
-	// Hints live on their own footer row so a narrow terminal trims metadata
-	// rather than the keys the reader needs.
-	return ansi.Truncate(value, max(1, m.width), "…") + "\n" +
-		ansi.Truncate(hint, max(1, m.width), "…")
+	return ansi.Truncate(value, max(1, m.width), "…")
 }
 
-// subagentRouteHintLine selects the widest key-hint set that fits the footer
-// row on its own.
-func (m *Model) subagentRouteHintLine() string {
-	hints := [][]string{
-		{detailHintScrollFull, subagentHintInterrupt, subagentHintParent, subagentHintAgents},
-		{"↑/↓ scroll", subagentHintInterrupt, subagentHintParent, subagentHintAgents},
-		{"↑/↓", subagentHintInterrupt, subagentHintParent, subagentHintAgents},
-		{subagentHintInterrupt, subagentHintParent, subagentHintAgents},
-		{subagentHintParent, subagentHintAgents},
-	}
-	if isTerminalSubagent(m.subagentRouteSummaryState().State) {
-		for index := range hints {
-			hints[index] = slices.DeleteFunc(
-				slices.Clone(hints[index]), func(value string) bool { return value == subagentHintInterrupt },
-			)
-		}
-	}
-
-	separator := "  ·  "
-	for _, hint := range hints {
-		candidate := strings.Join(hint, separator)
+// subagentPageStatusLine renders the child page's footer row: the widest
+// candidate that fits, then the muted tone every footer on this surface uses.
+func (m *Model) subagentPageStatusLine() string {
+	candidates := m.subagentPageStatusCandidates()
+	value := candidates[len(candidates)-1]
+	for _, candidate := range candidates {
 		if ansi.StringWidth(candidate) <= m.width {
-			return candidate
+			value = candidate
+
+			break
 		}
 	}
 
-	return ""
+	value = ansi.Truncate(value, max(1, m.width), "…")
+	if m.options.NoColor {
+		return value
+	}
+
+	return lipgloss.NewStyle().Foreground(paletteFor(m.theme).muted).Render(value)
 }
 
-// subagentRouteFooter is the pinned footer of the child route: the separator,
-// an optional Worker composer, the identity status line, and the key hints.
+// subagentRouteFooter is the pinned footer of the Team Worker route: the
+// separator, the Worker's composer, and its identity status line.
 func (m *Model) subagentRouteFooter(width int) string {
 	separator := strings.Repeat("-", max(1, width))
 	if !m.options.NoColor {
@@ -1430,10 +1644,11 @@ func (m *Model) subagentRouteSummaryState() subagent.Summary {
 	return m.route.detail.Summary
 }
 
+// The child page's key hints. The page has no close control of its own — it is
+// the conversation's own container, so Escape is how it leaves.
 const (
-	subagentHintInterrupt = "c interrupt"
-	subagentHintParent    = "Ctrl+T parent"
-	subagentHintAgents    = "Esc agents"
+	subagentHintInterrupt = "Ctrl+C interrupt"
+	subagentHintClose     = "Esc close"
 )
 
 func subagentStateLabel(state subagent.State) string {
@@ -1511,6 +1726,9 @@ func (m *Model) activateSubagentRoute(request routeOpenRequest) tea.Cmd {
 		childSessionID: request.childSessionID, children: request.children,
 		query: request.query, cursor: request.cursor,
 	}
+	// Opening a page lands on the child's newest row, which is where a reader who
+	// just asked to see a running child is looking.
+	m.childScroll.gotoBottom()
 	if child, ok := m.childStates[request.childSessionID]; ok {
 		state := child.Clone()
 		m.route.childState = &state
@@ -1579,17 +1797,25 @@ func (m *Model) refreshSubagentRoute() tea.Cmd {
 	return tea.Batch(load, m.startActivityClock(activityWasVisible))
 }
 
+// applySubagentRouteRefresh applies a fresh read to the open child route. The
+// read-only page reads through its scroll region, which re-anchors when the fresh
+// rows are installed, so it needs nothing here. The Team Worker page keeps the
+// private offset its composer shares the screen with, so that offset is clamped
+// against the new height.
+//
 //nolint:nestif // Refresh preserves scroll anchoring while applying two independently available views.
 func (m *Model) applySubagentRouteRefresh(message subagentRouteDataMsg) (tea.Model, tea.Cmd) {
 	m.route.refreshing = false
 	if message.err != nil && !message.hasState && !message.hasDetail {
 		m.route.refreshErr = message.err
 	} else if message.hasState || message.hasDetail {
-		wasAtBottom := m.route.offset >= m.subagentRouteMaximumOffset()
+		worker := m.route.childKind == childTeamWorker
+		wasAtBottom := worker && m.route.offset >= m.subagentRouteMaximumOffset()
 		previousOffset := m.route.offset
 		if message.hasState {
 			state := message.state
 			m.route.childState = &state
+			m.adoptChildState(message.childSessionID, state)
 		}
 		if message.hasDetail {
 			detail := message.detail
@@ -1597,11 +1823,13 @@ func (m *Model) applySubagentRouteRefresh(message subagentRouteDataMsg) (tea.Mod
 		}
 		m.route.refreshErr = nil
 
-		maximum := m.subagentRouteMaximumOffset()
-		if wasAtBottom {
-			m.route.offset = maximum
-		} else {
-			m.route.offset = min(previousOffset, maximum)
+		if worker {
+			maximum := m.subagentRouteMaximumOffset()
+			if wasAtBottom {
+				m.route.offset = maximum
+			} else {
+				m.route.offset = min(previousOffset, maximum)
+			}
 		}
 	}
 
@@ -1614,30 +1842,31 @@ func (m *Model) applySubagentRouteRefresh(message subagentRouteDataMsg) (tea.Mod
 	return m, m.refreshSubagentRoute()
 }
 
+// subagentRouteMaximumOffset is the Team Worker page's last scroll position. The
+// read-only child page moves through its scroll region instead.
 func (m *Model) subagentRouteMaximumOffset() int {
 	content, visible := m.subagentRouteScrollContent()
 
 	return max(0, len(content)-visible)
 }
 
-// subagentRouteScrollContent returns the wrapped body rows and the number that
-// fit, so scrolling counts physical rows rather than logical lines.
+// subagentRouteScrollContent returns the Team Worker page's wrapped body rows and
+// the number that fit, so its scrolling counts physical rows rather than logical
+// lines.
 func (m *Model) subagentRouteScrollContent() ([]string, int) {
 	if m.route.childState == nil {
 		return nil, 1
 	}
 
 	visible := max(1, m.height-lipgloss.Height(m.subagentRouteFooter(m.width)))
-	content := m.subagentRouteContent(*m.route.childState, m.route.detail)
-	if m.route.childKind == childTeamWorker {
-		content = m.teamWorkerRouteContent(*m.route.childState, m.route.childSummary)
-	}
+	content := m.teamWorkerRouteContent(*m.route.childState, m.route.childSummary)
 
 	return wrapPlainLines(content, max(1, m.width)), visible
 }
 
-// renderSubagentRouteBody wraps each body row to the frame width with a
-// hanging indent, then windows the requested offset.
+// renderSubagentRouteBody wraps each body row to the page width with a hanging
+// indent, then windows the requested offset. It serves the Team Worker page, whose
+// window follows the private offset its composer shares the screen with.
 func renderSubagentRouteBody(body string, width, height, offset int) string {
 	rows := wrapPlainLines(body, max(1, width))
 	if len(rows) == 0 {

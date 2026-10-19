@@ -334,7 +334,9 @@ func TestSearchBindingIsAvailableWithoutConflicts(t *testing.T) {
 		assert.Equal(t, actionSearch, action)
 	}
 
-	assert.Contains(t, renderActionHelp(defaultActions, contextIdle), keyCtrlF+" — find")
+	assert.Contains(t,
+		helpPageText(fullscreenModel(t, stubController{state: readyState()}, true), helpTabShortcuts),
+		keyCtrlF+": find")
 }
 
 // TestSearchFrameStaysInsideTheWindow is the geometry guard for the band swap: the

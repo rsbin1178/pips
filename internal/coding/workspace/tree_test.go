@@ -55,6 +55,68 @@ func TestNormalizePath(t *testing.T) {
 	}
 }
 
+func TestTreeNormalizeUserPathAcceptsAbsoluteInsideRoot(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	opened, err := workspace.Open(root)
+	require.NoError(t, err)
+	tree, err := workspace.OpenTree(opened)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, tree.Close()) })
+
+	child := filepath.Join(opened.Root(), "dir", "file.go")
+	require.NoError(t, os.MkdirAll(filepath.Dir(child), 0o700))
+	require.NoError(t, os.WriteFile(child, []byte("data"), 0o600))
+
+	got, err := tree.NormalizeUserPath(child, false)
+	require.NoError(t, err)
+	assert.Equal(t, "dir/file.go", got)
+
+	got, err = tree.NormalizeUserPath(opened.Root(), true)
+	require.NoError(t, err)
+	assert.Equal(t, ".", got)
+
+	got, err = tree.NormalizeUserPath(strings.TrimPrefix(filepath.ToSlash(opened.Root()), "/")+"/dir/file.go", false)
+	require.NoError(t, err)
+	assert.Equal(t, "dir/file.go", got, "a workspace absolute path missing its leading slash is recognized")
+
+	got, err = tree.NormalizeUserPath(`  "`+child+`\n"  `, false)
+	require.NoError(t, err)
+	assert.Equal(t, "dir/file.go", got, "quotes and a literal trailing newline are cleaned")
+
+	_, err = tree.NormalizeUserPath(opened.Root(), false)
+	require.ErrorIs(t, err, workspace.ErrInvalidPath)
+
+	outside := filepath.Join(t.TempDir(), "outside")
+	_, err = tree.NormalizeUserPath(outside, true)
+	require.ErrorIs(t, err, workspace.ErrOutsideRoot)
+
+	_, err = tree.NormalizeUserPath(filepath.Join(opened.Root(), "..", "outside"), true)
+	require.ErrorIs(t, err, workspace.ErrOutsideRoot)
+}
+
+func TestTreeNormalizeUserPathExpandsHomeTilde(t *testing.T) {
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	t.Setenv("HOME", home)
+
+	root := filepath.Join(home, "workspace")
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "dir"), 0o700))
+	opened, err := workspace.Open(root)
+	require.NoError(t, err)
+	tree, err := workspace.OpenTree(opened)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, tree.Close()) })
+
+	got, err := tree.NormalizeUserPath("~/workspace/dir/file.go", false)
+	require.NoError(t, err)
+	assert.Equal(t, "dir/file.go", got)
+
+	_, err = tree.NormalizeUserPath("~/outside.go", false)
+	require.ErrorIs(t, err, workspace.ErrOutsideRoot)
+}
+
 func TestTreeReadsInternalSymlinkAndRejectsExternalEscape(t *testing.T) {
 	t.Parallel()
 

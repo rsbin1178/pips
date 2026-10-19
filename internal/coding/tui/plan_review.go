@@ -384,7 +384,7 @@ func (m *Model) resolvePlanReviewResolution(
 // queuePlanReviewNotice records the transcript row a review decision prints.
 // Only an approved agent-initiated entry and a closed exit review carry one; a
 // declined entry, a revision request, and a user /plan or Shift+Tab toggle
-// print none, matching grok-build.
+// print none.
 func (m *Model) queuePlanReviewNotice(request planreview.Request, resolution planreview.Resolution) {
 	switch {
 	case request.Kind == planreview.KindEnter && resolution.Decision == planreview.DecisionApprove:

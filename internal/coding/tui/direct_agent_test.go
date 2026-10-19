@@ -26,10 +26,10 @@ func TestAgentLibraryStartsSelectedProfileWithoutParentPrompt(t *testing.T) {
 	require.Equal(t, agentsTabRuns, model.route.agentsTab)
 	require.Len(t, model.route.agentLibrary, 1)
 
-	_, command := model.Update(tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
+	_, command := model.Update(tea.KeyPressMsg{Code: 'a', Mod: tea.ModCtrl})
 	require.Nil(t, command)
 	require.Equal(t, routeAgents, model.route.kind)
-	require.Equal(t, agentsTabLibrary, model.route.agentsTab)
+	require.Equal(t, agentsTabAgents, model.route.agentsTab)
 	require.Len(t, model.filteredAgentLibrary(), 1)
 	_, command = model.Update(key("enter"))
 	require.NoError(t, model.route.err)
@@ -50,6 +50,32 @@ func TestAgentLibraryStartsSelectedProfileWithoutParentPrompt(t *testing.T) {
 	}}, controller.runs)
 	assert.Empty(t, controller.prompts)
 	assert.Nil(t, model.directAgent)
+}
+
+func TestAgentLibraryReportsDisabledTypeAsUnavailable(t *testing.T) {
+	t.Parallel()
+
+	controller := &directAgentTestController{overlayController: newOverlayController(readyState())}
+	controller.agentLibrary = coding.AgentLibrary{Entries: []coding.AgentLibraryEntry{{
+		ID: "explore", Name: "Explore", Kind: "builtin", Scope: "builtin",
+		Source: "builtin:explore", Status: "available", Available: false,
+		Unavailable: "disabled by configuration",
+	}}}
+	model := readyModelWithController(t, controller, true)
+	driveModelCommands(t, model, model.openAgentsRoute())
+	_, command := model.Update(tea.KeyPressMsg{Code: 'a', Mod: tea.ModCtrl})
+	require.Nil(t, command)
+	require.Equal(t, agentsTabAgents, model.route.agentsTab)
+	require.Len(t, model.filteredAgentLibrary(), 1)
+	assert.Contains(t, model.View().Content, "disabled by configuration")
+
+	// A type disabled by configuration cannot be started directly, and the
+	// refusal carries the same reason the tab shows.
+	_, _ = model.Update(key("enter"))
+	require.Error(t, model.route.err)
+	assert.Contains(t, model.route.err.Error(), "disabled by configuration")
+	assert.Nil(t, model.directAgent)
+	assert.Empty(t, controller.runs)
 }
 
 func TestSelectedDirectAgentClearsWithEscapeBeforeExecution(t *testing.T) {

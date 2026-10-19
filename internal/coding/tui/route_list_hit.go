@@ -192,10 +192,13 @@ func (m *Model) selectRouteListRow(index int) {
 		m.route.cursor = clampIndex(index, len(values))
 		m.route.offset = m.treeRouteScrollOffset(values)
 	case routeAgents:
-		if m.route.agentsTab == agentsTabLibrary {
+		if m.route.agentsTab == agentsTabAgents {
 			m.route.cursor = clampIndex(index, len(m.filteredAgentLibrary()))
 		} else {
 			m.route.cursor = clampIndex(index, len(m.filteredChildren()))
 		}
+	case routeNone, routeChild, routeTeam, routeToolDetail, routeStatus, routeHelp:
+		// The remaining routes address no list cursor, so a click on them selects no
+		// row. They are named rather than defaulted so a new route has to decide.
 	}
 }

@@ -101,6 +101,12 @@ type CompactionState struct {
 	DurationMillis int64             `json:"duration_ms"`
 	CheckpointID   string            `json:"checkpoint_id,omitempty"`
 	Strategy       string            `json:"strategy,omitempty"`
+	// BoundaryIndex is where the checkpoint falls in the bounded transcript the
+	// frontend received: the messages before it belong to the old branch and the
+	// messages after it belong to the context that follows the checkpoint. It is
+	// derived from the durable path, so a truncated tree does not hide the
+	// boundary.
+	BoundaryIndex int `json:"boundary_index,omitempty"`
 }
 
 func sessionTreeFromHarness(value harness.TreeSnapshot) (SessionTree, error) {

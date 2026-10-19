@@ -268,6 +268,12 @@ func (l Layout) SkillsDir() string { return l.skillsDir }
 // AgentsDir returns the user Pips Agent definition directory.
 func (l Layout) AgentsDir() string { return l.agentsDir }
 
+// RolesDir returns the user subagent role preset directory.
+func (l Layout) RolesDir() string { return filepath.Join(l.root, "roles") }
+
+// PersonasDir returns the user subagent persona preset directory.
+func (l Layout) PersonasDir() string { return filepath.Join(l.root, "personas") }
+
 // AgentSkillsDir returns the shared user Agent Skills directory. It is empty
 // for layouts built with New unless explicitly configured.
 func (l Layout) AgentSkillsDir() string { return l.agentSkillsDir }

@@ -6,12 +6,15 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"strings"
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/rsbin1178/pips/ai"
 	"github.com/rsbin1178/pips/internal/coding/agentprofile"
+	"github.com/rsbin1178/pips/internal/coding/session"
 )
 
 const (
@@ -30,9 +33,17 @@ const (
 	maxPlanDelegationTargets  = 128
 	maxPlanPrivateBindings    = 128
 	maxOutputSchemaBytes      = 64 << 10
+	// maxPersonaReminderBytes bounds the synthetic user item a persona injects.
+	maxPersonaReminderBytes = 32 << 10
+	// maxPlanCwdBytes bounds a frozen child working directory.
+	maxPlanCwdBytes = 4 << 10
 	// MaxDelegationDepth is the product hard bound for recursive custom Agent
 	// edges below a root child.
 	MaxDelegationDepth = 3
+
+	// IsolationWorktree is the resolved plan isolation value that selects a
+	// child-owned, preserved Git worktree.
+	IsolationWorktree = "worktree"
 )
 
 // AgentKind identifies the durable source class of one child agent.
@@ -277,13 +288,34 @@ func (c OutputContract) Clone() OutputContract {
 // execution. It records the authority intersection computed by Coding, not
 // merely the agent definition's requested capabilities.
 type ExecutionPlan struct {
-	Schema             string                `json:"schema"`
-	Identity           AgentIdentity         `json:"identity"`
-	GenerationID       uint64                `json:"generation_id,omitempty"`
-	Delivery           Delivery              `json:"delivery"`
-	Model              string                `json:"model"`
-	Instructions       string                `json:"instructions"`
-	InstructionsDigest string                `json:"instructions_digest"`
+	Schema             string        `json:"schema"`
+	Identity           AgentIdentity `json:"identity"`
+	GenerationID       uint64        `json:"generation_id,omitempty"`
+	Delivery           Delivery      `json:"delivery"`
+	Model              string        `json:"model"`
+	Instructions       string        `json:"instructions"`
+	InstructionsDigest string        `json:"instructions_digest"`
+	// Persona is the resolved persona name applied to this child. It is empty
+	// when the agent type has no persona.
+	Persona string `json:"persona,omitempty"`
+	// PersonaReminder is the exact synthetic user-item body injected before the
+	// task prompt. It is persisted with the child transcript, and it is not
+	// re-inserted when the transcript already carries it.
+	PersonaReminder string `json:"persona_reminder,omitempty"`
+	// ReasoningEffort is the resolved portable reasoning level. It is empty
+	// when neither the role nor the persona declares one.
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	// Isolation is the resolved child execution environment. It is empty when
+	// the child shares the parent workspace and "worktree" when the child owns
+	// a preserved Git worktree.
+	Isolation string `json:"isolation,omitempty"`
+	// Cwd is the sanitized caller-supplied child working directory. It is
+	// empty when the child inherits the parent workspace, when isolation
+	// selects a worktree, and whenever the child resumes a sibling.
+	Cwd string `json:"cwd,omitempty"`
+	// ResumeFrom names the completed sibling child whose transcript, tool
+	// state, and usage this execution inherits.
+	ResumeFrom         string                `json:"resume_from,omitempty"`
 	Capabilities       []EffectiveCapability `json:"capabilities"`
 	Skills             []string              `json:"skills"`
 	PreloadedSkills    []string              `json:"preloaded_skills"`
@@ -340,6 +372,7 @@ func validateExecutionPlan(plan ExecutionPlan, allowLegacy bool) error {
 		len(plan.DelegationTargets) > maxPlanDelegationTargets ||
 		len(plan.PrivateMCP) > maxPlanPrivateBindings || len(plan.PrivateHooks) > maxPlanPrivateBindings ||
 		!validPlanLimits(plan.Limits) ||
+		!validPlanPersona(plan) || !validPlanWorkspace(plan) ||
 		validateOutputContract(plan.Output) != nil {
 		return fmt.Errorf("%w: invalid execution plan", ErrInvalid)
 	}
@@ -350,7 +383,9 @@ func validateExecutionPlan(plan ExecutionPlan, allowLegacy bool) error {
 			len(plan.PreloadedSkills) != 0 || plan.ToolSearch ||
 			plan.DelegationDepth != 0 || plan.MaxDelegationDepth != 0 ||
 			len(plan.Ancestry) != 0 || len(plan.DelegationTargets) != 0 ||
-			len(plan.PrivateMCP) != 0 || len(plan.PrivateHooks) != 0 {
+			len(plan.PrivateMCP) != 0 || len(plan.PrivateHooks) != 0 ||
+			plan.Persona != "" || plan.PersonaReminder != "" || plan.ReasoningEffort != "" ||
+			plan.Isolation != "" || plan.Cwd != "" || plan.ResumeFrom != "" {
 			return fmt.Errorf("%w: invalid legacy execution plan", ErrInvalid)
 		}
 
@@ -497,6 +532,58 @@ func validPlanInstructions(value string) bool {
 	}
 
 	return true
+}
+
+// validPlanPersona validates the optional persona selection frozen into a plan.
+func validPlanPersona(plan ExecutionPlan) bool {
+	if plan.Persona != "" && !validAgentID(plan.Persona) {
+		return false
+	}
+	if len(plan.PersonaReminder) > maxPersonaReminderBytes || !validPlanInstructions(plan.PersonaReminder) {
+		return false
+	}
+
+	return validReasoningEffort(plan.ReasoningEffort)
+}
+
+// validPlanWorkspace validates the frozen child workspace selection. Isolation
+// and a caller-supplied directory are mutually exclusive, the directory must
+// already be an absolute clean path, and a resume source must name a session.
+func validPlanWorkspace(plan ExecutionPlan) bool {
+	if plan.Isolation != "" && plan.Isolation != IsolationWorktree {
+		return false
+	}
+	if plan.Cwd != "" {
+		if plan.Isolation != "" || !validChildCwd(plan.Cwd) {
+			return false
+		}
+	}
+	if plan.ResumeFrom != "" {
+		if strings.ContainsRune(plan.ResumeFrom, 0) || session.ValidateID(plan.ResumeFrom) != nil {
+			return false
+		}
+	}
+
+	return true
+}
+
+// validChildCwd bounds a frozen child working directory to an absolute,
+// already-canonical path.
+func validChildCwd(value string) bool {
+	return len(value) <= maxPlanCwdBytes && filepath.IsAbs(value) &&
+		filepath.Clean(value) == value && !strings.ContainsRune(value, 0)
+}
+
+// validReasoningEffort accepts the empty level plus the portable levels the
+// child request policy can apply.
+func validReasoningEffort(value string) bool {
+	switch ai.ReasoningEffort(value) {
+	case "", ai.ReasoningNone, ai.ReasoningMinimal, ai.ReasoningLow, ai.ReasoningMedium,
+		ai.ReasoningHigh, ai.ReasoningXHigh, ai.ReasoningMax:
+		return true
+	default:
+		return false
+	}
 }
 
 func validPlanLimits(value Limits) bool {

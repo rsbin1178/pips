@@ -75,3 +75,27 @@ func TestCustomOutputValidator(t *testing.T) {
 		assert.ErrorIs(t, err, ErrInvalidResult)
 	})
 }
+
+// TestDefaultPayloadBoundsAcceptALongReport pins Phase M: the default child
+// policy carries the hard payload ceilings, so a report larger than the old
+// 32 KiB result bound is accepted while a report above the 1 MiB ceiling is
+// still refused.
+func TestDefaultPayloadBoundsAcceptALongReport(t *testing.T) {
+	t.Parallel()
+
+	limits := DefaultLimits()
+	require.Equal(t, 1<<20, limits.MaxResultBytes)
+
+	contract, err := NewOutputContract(OutputFormatText, "summary", nil)
+	require.NoError(t, err)
+	validator, err := NewOutputValidator(contract, limits)
+	require.NoError(t, err)
+
+	long := strings.Repeat("x", 48<<10)
+	value, err := validator.Validate(long)
+	require.NoError(t, err)
+	assert.Equal(t, long, value)
+
+	_, err = validator.Validate(strings.Repeat("x", limits.MaxResultBytes+1))
+	assert.ErrorIs(t, err, ErrInvalidResult)
+}

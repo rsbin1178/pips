@@ -10,51 +10,55 @@ const (
 	maximumTokens    = 16_000_000
 	maximumToolCalls = 4096
 	maximumDuration  = 24 * time.Hour
+	// maximumRepeatedToolCalls bounds every repeat-guard threshold. The
+	// reference's hard stop is 12, so this leaves an embedder room to raise a
+	// threshold without removing the bound.
+	maximumRepeatedToolCalls = 128
 )
 
 // Limits bounds one child execution and its persisted projections.
 type Limits struct {
-	MaxTurns              int
-	FinalizationTurns     int
-	RepeatedToolCallLimit int
-	MaxTokens             int
-	MaxToolCalls          int
-	MaxDuration           time.Duration
-	MaxActivityTools      int
-	MaxOutputTokens       int
-	MaxTaskBytes          int
-	MaxResultBytes        int
-	MaxResultItems        int
-	MaxFieldBytes         int
+	MaxTurns          int
+	FinalizationTurns int
+	// The repeat guard has two tiers, matching the reference. A run whose
+	// every call is read risk is nudged at RepeatedProblematicToolCallLimit
+	// and hard-stopped at RepeatedProblematicToolCallStopLimit; any other
+	// identical run uses the looser RepeatedToolCallLimit and
+	// RepeatedToolCallStopLimit.
+	RepeatedToolCallLimit                int
+	RepeatedProblematicToolCallLimit     int
+	RepeatedToolCallStopLimit            int
+	RepeatedProblematicToolCallStopLimit int
+	MaxTokens                            int
+	MaxToolCalls                         int
+	MaxDuration                          time.Duration
+	MaxActivityTools                     int
+	MaxOutputTokens                      int
+	MaxTaskBytes                         int
+	MaxResultBytes                       int
+	MaxResultItems                       int
+	MaxFieldBytes                        int
 }
 
-// DefaultLimits returns the legacy embedder policy. Total turns, cumulative
-// tokens, tool calls, and wall time are unlimited; payloads and live
-// projections remain bounded independently.
+// DefaultLimits is the child execution policy: total turns, cumulative tokens,
+// tool calls, and wall time are unlimited, while payloads and live projections
+// remain bounded independently. The payload bounds are the hard ceilings
+// validateBoundedLimits enforces, so a long child report is accepted; an
+// embedder may still lower them. A caller may narrow any execution field
+// explicitly too: the reference has no per-child execution budget either.
 func DefaultLimits() Limits {
 	return Limits{
-		RepeatedToolCallLimit: 3,
-		MaxActivityTools:      256,
-		MaxOutputTokens:       16_384,
-		MaxTaskBytes:          64 << 10,
-		MaxResultBytes:        32 << 10,
-		MaxResultItems:        128,
-		MaxFieldBytes:         8 << 10,
+		RepeatedToolCallLimit:                8,
+		RepeatedProblematicToolCallLimit:     4,
+		RepeatedToolCallStopLimit:            12,
+		RepeatedProblematicToolCallStopLimit: 8,
+		MaxActivityTools:                     256,
+		MaxOutputTokens:                      16_384,
+		MaxTaskBytes:                         1 << 20,
+		MaxResultBytes:                       1 << 20,
+		MaxResultItems:                       1024,
+		MaxFieldBytes:                        64 << 10,
 	}
-}
-
-// ProductionLimits returns the bounded policy selected by a zero-value Coding
-// Runtime configuration. Embedders that explicitly need unlimited execution
-// can continue to pass DefaultLimits, whose payload fields make it non-zero.
-func ProductionLimits() Limits {
-	limits := DefaultLimits()
-	limits.MaxTurns = 64
-	limits.FinalizationTurns = 2
-	limits.MaxTokens = 256_000
-	limits.MaxToolCalls = 128
-	limits.MaxDuration = 30 * time.Minute
-
-	return limits
 }
 
 func normalizeLimits(limits Limits) Limits {
@@ -66,6 +70,24 @@ func normalizeLimits(limits Limits) Limits {
 
 	if limits.RepeatedToolCallLimit == 0 {
 		limits.RepeatedToolCallLimit = defaults.RepeatedToolCallLimit
+	}
+
+	if limits.RepeatedProblematicToolCallLimit == 0 {
+		limits.RepeatedProblematicToolCallLimit = defaults.RepeatedProblematicToolCallLimit
+	}
+
+	// A record written before the stop thresholds existed omits them while
+	// carrying its own nudge, so the filled stop must stay above that nudge.
+	if limits.RepeatedToolCallStopLimit == 0 {
+		limits.RepeatedToolCallStopLimit = max(
+			defaults.RepeatedToolCallStopLimit, limits.RepeatedToolCallLimit+1,
+		)
+	}
+
+	if limits.RepeatedProblematicToolCallStopLimit == 0 {
+		limits.RepeatedProblematicToolCallStopLimit = max(
+			defaults.RepeatedProblematicToolCallStopLimit, limits.RepeatedProblematicToolCallLimit+1,
+		)
 	}
 
 	if limits.MaxActivityTools == 0 {
@@ -126,13 +148,16 @@ func validateExecutionLimits(limits Limits) error {
 
 func validateBoundedLimits(limits Limits) error {
 	hard := Limits{
-		RepeatedToolCallLimit: 16,
-		MaxActivityTools:      1024,
-		MaxOutputTokens:       131_072,
-		MaxTaskBytes:          1 << 20,
-		MaxResultBytes:        1 << 20,
-		MaxResultItems:        1024,
-		MaxFieldBytes:         64 << 10,
+		RepeatedToolCallLimit:                maximumRepeatedToolCalls,
+		RepeatedProblematicToolCallLimit:     maximumRepeatedToolCalls,
+		RepeatedToolCallStopLimit:            maximumRepeatedToolCalls,
+		RepeatedProblematicToolCallStopLimit: maximumRepeatedToolCalls,
+		MaxActivityTools:                     1024,
+		MaxOutputTokens:                      131_072,
+		MaxTaskBytes:                         1 << 20,
+		MaxResultBytes:                       1 << 20,
+		MaxResultItems:                       1024,
+		MaxFieldBytes:                        64 << 10,
 	}
 
 	values := []struct {
@@ -141,6 +166,9 @@ func validateBoundedLimits(limits Limits) error {
 		max   int
 	}{
 		{"repeated tool calls", limits.RepeatedToolCallLimit, hard.RepeatedToolCallLimit},
+		{"problematic repeated tool calls", limits.RepeatedProblematicToolCallLimit, hard.RepeatedProblematicToolCallLimit},
+		{"repeated tool call stop", limits.RepeatedToolCallStopLimit, hard.RepeatedToolCallStopLimit},
+		{"problematic repeated tool call stop", limits.RepeatedProblematicToolCallStopLimit, hard.RepeatedProblematicToolCallStopLimit},
 		{"activity tools", limits.MaxActivityTools, hard.MaxActivityTools},
 		{"output tokens", limits.MaxOutputTokens, hard.MaxOutputTokens},
 		{"task bytes", limits.MaxTaskBytes, hard.MaxTaskBytes},
@@ -169,6 +197,17 @@ func validateLimitRelationships(limits Limits) error {
 	if limits.MaxFieldBytes > limits.MaxResultBytes ||
 		limits.MaxTokens > 0 && limits.MaxOutputTokens > limits.MaxTokens {
 		return fmt.Errorf("%w: conflicting result or token limits", ErrInvalid)
+	}
+
+	if limits.RepeatedToolCallLimit >= limits.RepeatedToolCallStopLimit {
+		return fmt.Errorf("%w: the repeat nudge must be below its stop limit", ErrInvalid)
+	}
+
+	if limits.RepeatedProblematicToolCallLimit >= limits.RepeatedProblematicToolCallStopLimit {
+		return fmt.Errorf(
+			"%w: the read/plan repeat nudge must be below its stop limit",
+			ErrInvalid,
+		)
 	}
 
 	return nil

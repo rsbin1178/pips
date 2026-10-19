@@ -21,9 +21,21 @@ const (
 )
 
 // scrollWheel routes one wheel notch to whichever surface owns the pointer: the
-// managed transcript, a picker dropdown over the ready view, or a full-area route
-// that has its own scrolling body.
+// Composer's own draft when it has rows off screen, the tasks pane when the notch
+// lands on the rows it painted, the managed transcript, a picker dropdown over the
+// ready view, or a full-area route that has its own scrolling body.
 func (m *Model) scrollWheel(message tea.MouseWheelMsg) tea.Cmd {
+	if m.composerOwnsWheel(message) {
+		return m.scrollComposer(message)
+	}
+
+	// The tasks pane is a control surface of the ready frame, so a notch inside it
+	// moves the pane before the transcript underneath takes the gesture: a wheel
+	// over a strip must not scroll content the pointer is not on.
+	if m.tasksPaneOwnsWheel(message) {
+		return m.scrollTasksPane(message)
+	}
+
 	if m.viewportOwnsPointer() {
 		return m.scrollViewport(message)
 	}
@@ -44,6 +56,70 @@ func (m *Model) scrollWheel(message tea.MouseWheelMsg) tea.Cmd {
 	}
 
 	return m.scrollRoute(lines)
+}
+
+// composerOwnsWheel reports whether a wheel notch landed on the Composer band of the
+// last painted frame and the draft behind it has rows to move. The draft scrolls
+// inside its own box, so a notch over that box belongs to it: the editor's view only
+// follows the cursor, which leaves a draft taller than the box unreadable. A draft
+// that fits keeps the transcript's notch, so pointing at a one-line input never
+// stops the conversation from scrolling.
+func (m *Model) composerOwnsWheel(message tea.MouseWheelMsg) bool {
+	if !m.readyViewOwnsPointer() || m.frameHit.composerTop < 0 ||
+		m.frameHit.composerRows <= 0 || !m.composer.Focused() {
+		return false
+	}
+
+	if !m.composerDraftOverflows() {
+		return false
+	}
+
+	row := message.Mouse().Y
+
+	return row >= m.frameHit.composerTop && row < m.frameHit.composerTop+m.frameHit.composerRows
+}
+
+// composerDraftOverflows reports whether the draft has rows its box cannot show. The
+// editor's own scroll position cannot answer this: its rendered content always ends
+// with a row of its own, so a one-line draft reports the same "not at the bottom" as
+// a tall one.
+func (m *Model) composerDraftOverflows() bool {
+	rows := m.composer.Height()
+	if m.composer.LineCount() > rows {
+		return true
+	}
+
+	// One logical line can still be taller than the box once it soft-wraps.
+	return m.composer.LineInfo().Height > rows
+}
+
+// scrollComposer moves the draft by one notch. The editor's view follows its caret:
+// every update repositions the view onto the cursor, so a draft taller than its box
+// can only be read by moving the caret. The notch therefore presses the editor's own
+// arrow keys — with their protected-chip and history semantics — exactly the way a
+// wheel notch moves a list's selection elsewhere.
+func (m *Model) scrollComposer(message tea.MouseWheelMsg) tea.Cmd {
+	lines, ok := m.wheelLines(message)
+	if !ok {
+		return nil
+	}
+
+	step := tea.KeyPressMsg{Code: tea.KeyUp}
+	if lines > 0 {
+		step = tea.KeyPressMsg{Code: tea.KeyDown}
+	}
+
+	commands := make([]tea.Cmd, 0, max(lines, -lines))
+	for range max(lines, -lines) {
+		var command tea.Cmd
+
+		m.composer, command = m.composer.Update(step)
+		if command != nil {
+			commands = append(commands, command)
+		}
+	}
+
+	return tea.Batch(commands...)
 }
 
 // scrollViewport moves the managed transcript by one wheel notch. A gesture that
@@ -81,7 +157,13 @@ func (m *Model) scrollRoute(lines int) tea.Cmd {
 	case routeToolDetail:
 		m.route.offset = min(max(0, m.route.offset+lines), m.toolDetailMaximumOffset())
 	case routeChild:
-		m.route.offset = min(max(0, m.route.offset+lines), m.subagentRouteMaximumOffset())
+		// The read-only child page moves its own scroll region, which carries the
+		// follow rule; the Team Worker page keeps its private offset.
+		if m.route.childKind != childTeamWorker {
+			m.childScroll.scrollBy(lines)
+		} else {
+			m.route.offset = min(max(0, m.route.offset+lines), m.subagentRouteMaximumOffset())
+		}
 	case routeAgents:
 		m.route.offset = min(
 			max(0, m.route.offset+lines),
@@ -99,6 +181,8 @@ func (m *Model) scrollRoute(lines int) tea.Cmd {
 		return moveSelection(lines, m.updateRouteKey)
 	case routeStatus:
 		m.scrollStatusRoute(lines)
+	case routeHelp:
+		m.scrollHelpRoute(lines)
 	default:
 	}
 

@@ -55,8 +55,13 @@ func archiveStage(t *testing.T, store *ArchiveStore, entries []harness.Entry) *S
 	return staged
 }
 
+// archiveDirPath is the content-addressed archive directory of one session.
+func archiveDirPath(store *ArchiveStore) string {
+	return filepath.Join(store.dir, filepath.Join(store.rel...), ArchiveDirName)
+}
+
 func archiveObjectPath(store *ArchiveStore, id string) string {
-	return filepath.Join(store.dir, store.sessionID+".history", id+".archive")
+	return filepath.Join(archiveDirPath(store), id+".archive")
 }
 
 func archiveReader(t *testing.T, store *ArchiveStore, ids ...string) *ArchiveReader {
@@ -378,13 +383,13 @@ func TestArchiveConcurrentIdenticalPublication(t *testing.T) {
 
 func TestArchiveSymlinkAndNonprivateStorageRejected(t *testing.T) {
 	t.Parallel()
-	for _, kind := range []string{"history_symlink", "object_symlink", "object_directory", "history_mode", "object_mode"} {
+	for _, kind := range []string{"archives_symlink", "object_symlink", "object_directory", "archives_mode", "object_mode"} {
 		t.Run(kind, func(t *testing.T) {
 			t.Parallel()
 			_, _, store := archiveFixture(t)
-			if kind == "history_symlink" {
+			if kind == "archives_symlink" {
 				target := t.TempDir()
-				require.NoError(t, os.Symlink(target, filepath.Join(store.dir, store.sessionID+".history")))
+				require.NoError(t, os.Symlink(target, archiveDirPath(store)))
 				_, err := store.Stage(t.Context(), ArchiveSource{SessionID: store.sessionID, TipID: "branch"}, archiveEntries("private"))
 				require.Error(t, err)
 				names, err := os.ReadDir(target)
@@ -403,7 +408,7 @@ func TestArchiveSymlinkAndNonprivateStorageRejected(t *testing.T) {
 			case "object_directory":
 				require.NoError(t, os.Remove(path))
 				require.NoError(t, os.Mkdir(path, 0o700))
-			case "history_mode":
+			case "archives_mode":
 				require.NoError(t, os.Chmod(filepath.Dir(path), 0o750)) //nolint:gosec // Deliberately unsafe permissions exercise rejection.
 			case "object_mode":
 				require.NoError(t, os.Chmod(path, 0o640)) //nolint:gosec // Deliberately unsafe permissions exercise rejection.
@@ -509,7 +514,7 @@ func TestArchiveBoundsAndStageFailures(t *testing.T) {
 	require.ErrorIs(t, err, ErrArchiveInvalid)
 	_, err = store.Stage(t.Context(), source, archiveEntries(strings.Repeat("x", ArchiveMaxRecordBytes)))
 	require.ErrorIs(t, err, ErrArchiveLimit)
-	names, err := os.ReadDir(filepath.Join(store.dir, store.sessionID+".history"))
+	names, err := os.ReadDir(archiveDirPath(store))
 	require.NoError(t, err)
 	assert.Empty(t, names, "failed staging does not retain temporary objects")
 	id := strings.Repeat("0", 64)

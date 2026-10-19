@@ -19,6 +19,7 @@ import (
 	"github.com/rsbin1178/pips/internal/coding"
 	"github.com/rsbin1178/pips/internal/coding/approval"
 	"github.com/rsbin1178/pips/internal/coding/attachment"
+	"github.com/rsbin1178/pips/internal/coding/background"
 	"github.com/rsbin1178/pips/internal/coding/changes"
 	"github.com/rsbin1178/pips/internal/coding/config"
 	"github.com/rsbin1178/pips/internal/coding/modelcatalog"
@@ -157,6 +158,8 @@ type Controller interface {
 	SetSkillEnabled(context.Context, coding.SkillID, bool) error
 	WaitSubagent(context.Context, string) (subagent.Result, error)
 	CancelSubagent(context.Context, string) error
+	KillBackgroundTask(context.Context, string) (background.Outcome, background.Subject, error)
+	InspectBackgroundTask(context.Context, string) (coding.BackgroundTaskInspection, error)
 	NewSession(context.Context) error
 	ResumeSession(context.Context, string) error
 	ForkSession(context.Context, string) error
@@ -199,6 +202,10 @@ type StatusLineSaver func(context.Context, []statusline.Item) error
 // ThemeSaver persists only the requested theme ID in the active config file.
 type ThemeSaver func(context.Context, string) error
 
+// SelectionSaver persists a complete model/variant/reasoning selection as the
+// default for the active config file.
+type SelectionSaver func(context.Context, modelcatalog.Selection) error
+
 // TextKind names the destination policy for operator-requested text, so one
 // saver can serve both the copy fallback and an export.
 type TextKind string
@@ -230,7 +237,7 @@ type TextSaver func(context.Context, TextSaveRequest) (string, error)
 // The default is nil, which sends an OSC 52 request through the Program — the
 // only writer allowed to touch the terminal. A caller that owns another route to
 // the clipboard, such as a remote session bridge, supplies its own; it replaces
-// the request for every copy the TUI makes (the drag gesture, Ctrl+X, /copy), and
+// the request for every copy the TUI makes (the drag gesture, Ctrl+Y, /copy), and
 // its error is reported instead of being assumed away. An explicit /copy or
 // /export with a path keeps its saver, which is the durable half of that result.
 type TextClipboard func(content string) error
@@ -281,7 +288,8 @@ type Options struct {
 	StatusLine      []statusline.Item
 	SaveStatusLine  StatusLineSaver
 	SaveTheme       ThemeSaver
-	// SaveText persists Ctrl+X, /copy and /export output. A nil saver keeps the
+	SaveSelection   SelectionSaver
+	// SaveText persists Ctrl+Y, /copy and /export output. A nil saver keeps the
 	// clipboard path and reports that no file fallback is available.
 	SaveText TextSaver
 	// ClipboardWriter overrides the OSC 52 write a copy performs. A nil writer

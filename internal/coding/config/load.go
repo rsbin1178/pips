@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -29,9 +30,17 @@ const (
 	ToolSearchEnv       = "PIPS_TOOL_SEARCH"
 	ToolSearchNameEnv   = "PIPS_TOOL_SEARCH_NAME"
 	DynamicSubagentsEnv = "PIPS_DYNAMIC_SUBAGENTS"
-	ModeEnv             = "PIPS_MODE"
-	SandboxEnv          = "PIPS_SANDBOX"
-	ApprovalEnv         = "PIPS_APPROVAL"
+	// ActiveAgentMessagesEnv opens the model-facing child messaging surface.
+	ActiveAgentMessagesEnv = "PIPS_ACTIVE_AGENT_MESSAGES"
+	// SubagentLimitBehaviorEnv overrides [subagents].limit_behavior. It is not
+	// pinnable; an invalid value falls back to queue.
+	SubagentLimitBehaviorEnv = "PIPS_SUBAGENT_LIMIT_BEHAVIOR"
+	// SubagentAwaitBudgetEnv bounds a foreground queued spawn's wait in
+	// milliseconds before it is handed off to the background.
+	SubagentAwaitBudgetEnv = "PIPS_SUBAGENT_AWAIT_BUDGET_MS"
+	ModeEnv                = "PIPS_MODE"
+	SandboxEnv             = "PIPS_SANDBOX"
+	ApprovalEnv            = "PIPS_APPROVAL"
 )
 
 var (
@@ -80,6 +89,7 @@ type fileLayer struct {
 	providers             map[ai.Provider]ProviderConfig
 	models                []ModelConfig
 	compaction            *CompactionConfig
+	media                 *MediaConfig
 	subagent              *SubagentConfig
 	subagentFields        []Field
 	cost                  *CostConfig
@@ -112,6 +122,9 @@ func Load(options LoadOptions) (Result, error) {
 		result.Config.Models = layer.models
 		if layer.compaction != nil {
 			result.Config.Compaction = *layer.compaction
+		}
+		if layer.media != nil {
+			result.Config.Media = *layer.media
 		}
 		if layer.subagent != nil {
 			result.Config.Subagent = *layer.subagent
@@ -161,13 +174,16 @@ type fileConfig struct {
 	ToolSearch            *bool                      `toml:"tool_search"`
 	ToolSearchName        *string                    `toml:"tool_search_name"`
 	DynamicSubagents      *bool                      `toml:"dynamic_subagents"`
+	ActiveAgentMessages   *bool                      `toml:"active_agent_messages"`
+	TodoGate              *bool                      `toml:"todo_gate"`
 	Mode                  *string                    `toml:"mode"`
 	TUI                   *fileTUI                   `toml:"tui"`
 	Sandbox               *string                    `toml:"sandbox"`
 	SandboxWorkspaceWrite *fileSandboxWorkspaceWrite `toml:"sandbox_workspace_write"`
 	Approval              *string                    `toml:"approval"`
 	Compaction            *fileCompaction            `toml:"compaction"`
-	Subagent              *fileSubagent              `toml:"subagent"`
+	Media                 *fileMedia                 `toml:"media"`
+	Subagent              *fileSubagent              `toml:"subagents"`
 	Cost                  *fileCost                  `toml:"cost"`
 	MCPReadOnlyTools      map[string][]string        `toml:"mcp_read_only_tools"`
 }
@@ -210,15 +226,24 @@ type fileCompaction struct {
 	TimeoutSeconds    *int  `toml:"timeout_seconds"`
 }
 
+type fileMedia struct {
+	MaxRequestBytes *int `toml:"max_request_bytes"`
+	CleanupTTLDays  *int `toml:"cleanup_ttl_days"`
+	GCGraceHours    *int `toml:"gc_grace_hours"`
+}
+
 type fileSubagent struct {
-	MaxDepth                     *int `toml:"max_depth"`
-	MaxConcurrent                *int `toml:"max_concurrent"`
-	MaxSpawnedPerRootInteraction *int `toml:"max_spawned_per_root_interaction"`
-	MaxAutoFollowUps             *int `toml:"max_auto_follow_ups"`
-	MaxTurns                     *int `toml:"max_turns"`
-	MaxTokens                    *int `toml:"max_tokens"`
-	MaxToolCalls                 *int `toml:"max_tool_calls"`
-	MaxDurationMinutes           *int `toml:"max_duration_minutes"`
+	// Enabled is the `[subagents]` spelling of the master switch. It is merged
+	// with the top-level dynamic_subagents key rather than stacked on it.
+	Enabled           *bool                      `toml:"enabled"`
+	MaxDepth          *int                       `toml:"max_depth"`
+	MaxConcurrent     *int                       `toml:"max_concurrent"`
+	StructuredResults *bool                      `toml:"structured_results"`
+	LimitBehavior     *string                    `toml:"limit_behavior"`
+	Models            map[string]string          `toml:"models"`
+	Toggle            map[string]bool            `toml:"toggle"`
+	Roles             map[string]SubagentRole    `toml:"roles"`
+	Personas          map[string]SubagentPersona `toml:"personas"`
 }
 
 type fileProvider struct {
@@ -230,6 +255,8 @@ type fileProvider struct {
 	Capabilities             fileCapabilities     `toml:"capabilities"`
 	ToolSearchName           *string              `toml:"tool_search_name"`
 	StreamIdleTimeoutSeconds *int                 `toml:"stream_idle_timeout_seconds"`
+	UserAgentEnabled         *bool                `toml:"user_agent_enabled"`
+	UserAgent                *string              `toml:"user_agent"`
 	Models                   map[string]fileModel `toml:"models"`
 }
 
@@ -239,6 +266,8 @@ type fileModel struct {
 	ContextWindow            *int                   `toml:"context_window"`
 	StreamContinuation       *bool                  `toml:"stream_continuation"`
 	StreamIdleTimeoutSeconds *int                   `toml:"stream_idle_timeout_seconds"`
+	UserAgentEnabled         *bool                  `toml:"user_agent_enabled"`
+	UserAgent                *string                `toml:"user_agent"`
 	ReasoningLevels          []string               `toml:"reasoning_levels"`
 	DefaultReasoningLevel    *string                `toml:"default_reasoning_level"`
 	ReasoningBudgets         map[string]int         `toml:"reasoning_budgets"`
@@ -459,6 +488,15 @@ func rejectLegacySchema(data []byte) error {
 			ErrMigration,
 		)
 	}
+	if _, exists := raw["subagent"]; exists {
+		return fmt.Errorf(
+			"%w: rename the [subagent] table to [subagents]",
+			ErrMigration,
+		)
+	}
+	if err := rejectLegacySubagentBudget(raw); err != nil {
+		return err
+	}
 
 	providers, ok := raw["providers"].(map[string]any)
 	if !ok {
@@ -466,6 +504,43 @@ func rejectLegacySchema(data []byte) error {
 	}
 
 	return rejectLegacyProviders(providers)
+}
+
+// rejectLegacySubagentBudget names the removed [subagents] execution and
+// admission keys. A child now runs without a per-child execution budget, and
+// the reference bounds neither the spawn count per root nor the auto-follow-up
+// count, so a file that still carries one must not load silently. The strict
+// decoder already rejects the key as unknown; this error says which key to
+// delete and what caps a child instead.
+func rejectLegacySubagentBudget(raw map[string]any) error {
+	subagents, ok := raw["subagents"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	for _, key := range []string{"max_turns", "max_tokens", "max_tool_calls", "max_duration_minutes"} {
+		if _, exists := subagents[key]; !exists {
+			continue
+		}
+
+		return fmt.Errorf(
+			"%w: [subagents] %s was removed; a child runs without a per-child execution budget, and only a subagent definition's limits.max_turns caps its turns",
+			ErrMigration,
+			key,
+		)
+	}
+	for _, key := range []string{"max_spawned_per_root_interaction", "max_auto_follow_ups"} {
+		if _, exists := subagents[key]; !exists {
+			continue
+		}
+
+		return fmt.Errorf(
+			"%w: [subagents] %s was removed; only the concurrent-child limit remains, so delete the line",
+			ErrMigration,
+			key,
+		)
+	}
+
+	return nil
 }
 
 func rejectLegacyProviders(providers map[string]any) error {
@@ -619,6 +694,22 @@ func decodeLayer(value fileConfig) (fileLayer, error) {
 		}
 		layer.compaction = &compaction
 	}
+	if value.Media != nil {
+		media := DefaultMediaConfig()
+		if value.Media.MaxRequestBytes != nil {
+			media.MaxRequestBytes = *value.Media.MaxRequestBytes
+		}
+		if value.Media.CleanupTTLDays != nil {
+			media.CleanupTTLDays = *value.Media.CleanupTTLDays
+		}
+		if value.Media.GCGraceHours != nil {
+			media.GCGraceHours = *value.Media.GCGraceHours
+		}
+		if err := validateMedia(media); err != nil {
+			return fileLayer{}, err
+		}
+		layer.media = &media
+	}
 	if value.Subagent != nil {
 		subagent := DefaultSubagentConfig()
 
@@ -631,20 +722,36 @@ func decodeLayer(value fileConfig) (fileLayer, error) {
 		}
 		setSubagent(FieldSubagentMaxDepth, value.Subagent.MaxDepth, &subagent.MaxDepth)
 		setSubagent(FieldSubagentMaxConcurrent, value.Subagent.MaxConcurrent, &subagent.MaxConcurrent)
-		setSubagent(
-			FieldSubagentMaxSpawned,
-			value.Subagent.MaxSpawnedPerRootInteraction,
-			&subagent.MaxSpawnedPerRootInteraction,
-		)
-		setSubagent(FieldSubagentMaxFollowUps, value.Subagent.MaxAutoFollowUps, &subagent.MaxAutoFollowUps)
-		setSubagent(FieldSubagentMaxTurns, value.Subagent.MaxTurns, &subagent.MaxTurns)
-		setSubagent(FieldSubagentMaxTokens, value.Subagent.MaxTokens, &subagent.MaxTokens)
-		setSubagent(FieldSubagentMaxToolCalls, value.Subagent.MaxToolCalls, &subagent.MaxToolCalls)
-		setSubagent(
-			FieldSubagentMaxDuration,
-			value.Subagent.MaxDurationMinutes,
-			&subagent.MaxDurationMinutes,
-		)
+		if value.Subagent.StructuredResults != nil {
+			subagent.StructuredResults = *value.Subagent.StructuredResults
+			layer.subagentFields = append(layer.subagentFields, FieldSubagentStructuredResults)
+		}
+		if value.Subagent.LimitBehavior != nil {
+			mode, ok := ParseLimitBehavior(*value.Subagent.LimitBehavior)
+			if !ok {
+				return fileLayer{}, fmt.Errorf(
+					"%w: subagent.limit_behavior must be queue or fail", ErrInvalid,
+				)
+			}
+			subagent.LimitBehavior = mode
+			layer.subagentFields = append(layer.subagentFields, FieldSubagentLimitBehavior)
+		}
+		if value.Subagent.Models != nil {
+			subagent.Models = maps.Clone(value.Subagent.Models)
+			layer.subagentFields = append(layer.subagentFields, FieldSubagentModels)
+		}
+		if value.Subagent.Toggle != nil {
+			subagent.Toggle = maps.Clone(value.Subagent.Toggle)
+			layer.subagentFields = append(layer.subagentFields, FieldSubagentToggle)
+		}
+		if value.Subagent.Roles != nil {
+			subagent.Roles = maps.Clone(value.Subagent.Roles)
+			layer.subagentFields = append(layer.subagentFields, FieldSubagentRoles)
+		}
+		if value.Subagent.Personas != nil {
+			subagent.Personas = maps.Clone(value.Subagent.Personas)
+			layer.subagentFields = append(layer.subagentFields, FieldSubagentPersonas)
+		}
 		if err := validateSubagent(subagent); err != nil {
 			return fileLayer{}, err
 		}
@@ -690,7 +797,14 @@ func decodeLayer(value fileConfig) (fileLayer, error) {
 		}
 		layer.patch.ToolSearchName = &name
 	}
-	layer.patch.DynamicSubagents = value.DynamicSubagents
+	subagentsEnabled, err := resolveFileSubagentsEnabled(value.DynamicSubagents, value.Subagent)
+	if err != nil {
+		return fileLayer{}, err
+	}
+	layer.patch.DynamicSubagents = subagentsEnabled
+	layer.patch.ActiveAgentMessages = value.ActiveAgentMessages
+	layer.patch.TodoGate = value.TodoGate
+
 	if value.Mode != nil {
 		mode, err := ParseOperatingMode(*value.Mode)
 		if err != nil {
@@ -843,6 +957,24 @@ func decodeModelPricing(value fileModelPricing) (ModelPricing, error) {
 	return pricing, nil
 }
 
+// decodeUserAgent normalizes and checks a declared User-Agent. A declared value
+// is trimmed because surrounding whitespace is not part of a header value, and
+// an absent key stays nil — "not declared", which sends the client's own
+// default. A value the transport could not send as written is refused here so a
+// typo surfaces when the file is read rather than when a turn starts.
+func decodeUserAgent(enabled *bool, value *string, scope string) (*string, error) {
+	if value == nil {
+		return nil, nil
+	}
+
+	trimmed := strings.TrimSpace(*value)
+	if err := validateUserAgent(enabled, &trimmed, scope); err != nil {
+		return nil, err
+	}
+
+	return &trimmed, nil
+}
+
 // decodeStreamIdleTimeout converts a declared streaming idle bound from seconds.
 // The bound is a transport liveness guard, so a value the transport cannot act
 // on is refused rather than clamped, and an absent key stays zero — "not
@@ -901,6 +1033,11 @@ func decodeProvider(value fileProvider) (ProviderConfig, error) {
 	if err != nil {
 		return ProviderConfig{}, err
 	}
+	result.UserAgentEnabled = clonePointer(value.UserAgentEnabled)
+	result.UserAgent, err = decodeUserAgent(value.UserAgentEnabled, value.UserAgent, "provider")
+	if err != nil {
+		return ProviderConfig{}, err
+	}
 
 	return result, nil
 }
@@ -929,6 +1066,11 @@ func decodeModel(provider ai.Provider, modelID string, value fileModel) (ModelCo
 		result.StreamContinuation = *value.StreamContinuation
 	}
 	result.StreamIdleTimeout, err = decodeStreamIdleTimeout(value.StreamIdleTimeoutSeconds)
+	if err != nil {
+		return ModelConfig{}, false, err
+	}
+	result.UserAgentEnabled = clonePointer(value.UserAgentEnabled)
+	result.UserAgent, err = decodeUserAgent(value.UserAgentEnabled, value.UserAgent, "model "+parsedModelID)
 	if err != nil {
 		return ModelConfig{}, false, err
 	}
@@ -1074,6 +1216,50 @@ func decodeCompatibility(value fileCompatibility) (CompatibilityConfig, error) {
 	return result, nil
 }
 
+// resolveFileSubagentsEnabled merges the two spellings of the master subagent
+// switch. They are one setting in one file layer: agreeing spellings are
+// accepted, and disagreeing ones are refused rather than silently resolved in
+// favour of either.
+func resolveFileSubagentsEnabled(topLevel *bool, table *fileSubagent) (*bool, error) {
+	if table == nil || table.Enabled == nil {
+		return topLevel, nil
+	}
+	if topLevel == nil {
+		return table.Enabled, nil
+	}
+	if *topLevel != *table.Enabled {
+		return nil, fmt.Errorf(
+			"%w: dynamic_subagents and [subagents] enabled are the same switch and disagree; "+
+				"set only one of them",
+			ErrInvalid,
+		)
+	}
+
+	return topLevel, nil
+}
+
+// resolveFlagSubagentsEnabled merges the two CLI spellings of the master
+// subagent switch. Both are explicit when both are passed, so a disagreement is
+// a usage error rather than a silent win for either flag.
+func resolveFlagSubagentsEnabled(dynamic, noSubagents *bool) (*bool, error) {
+	switch {
+	case noSubagents == nil:
+		return dynamic, nil
+	case dynamic == nil:
+		enabled := !*noSubagents
+
+		return &enabled, nil
+	case *dynamic == *noSubagents:
+		return nil, fmt.Errorf(
+			"%w: --dynamic-subagents and --no-subagents are the same switch and disagree; "+
+				"pass only one of them",
+			ErrInvalid,
+		)
+	default:
+		return dynamic, nil
+	}
+}
+
 func applyEnvironment(value *Config, lookup LookupEnv) error {
 	if lookup == nil {
 		return nil
@@ -1094,6 +1280,8 @@ func applyEnvironment(value *Config, lookup LookupEnv) error {
 		{name: ToolSearchEnv, parse: toolSearchPatch},
 		{name: ToolSearchNameEnv, parse: toolSearchNamePatch},
 		{name: DynamicSubagentsEnv, parse: dynamicSubagentsPatch},
+		{name: ActiveAgentMessagesEnv, parse: activeAgentMessagesPatch},
+		{name: SubagentLimitBehaviorEnv, parse: subagentLimitBehaviorPatch},
 		{name: ModeEnv, parse: operatingModePatch},
 		{name: SandboxEnv, parse: sandboxPatch},
 		{name: ApprovalEnv, parse: approvalPatch},
@@ -1118,6 +1306,12 @@ func applyFlagOverrides(value *Config, patch Patch) error {
 	if err != nil {
 		return fmt.Errorf("coding config: flags: %w", err)
 	}
+	// `--no-subagents` is the second spelling of the master switch, so it
+	// reports its own flag name as the source detail.
+	subagentsDetail := "--dynamic-subagents"
+	if validated.DynamicSubagents != nil && patch.NoSubagents != nil && patch.DynamicSubagents == nil {
+		subagentsDetail = "--no-subagents"
+	}
 	overrides := []struct {
 		detail string
 		patch  Patch
@@ -1128,7 +1322,7 @@ func applyFlagOverrides(value *Config, patch Patch) error {
 		{detail: "--reasoning", patch: Patch{Reasoning: validated.Reasoning}, set: validated.Reasoning != nil},
 		{detail: "--tool-search", patch: Patch{ToolSearch: validated.ToolSearch}, set: validated.ToolSearch != nil},
 		{detail: "--tool-search-name", patch: Patch{ToolSearchName: validated.ToolSearchName}, set: validated.ToolSearchName != nil},
-		{detail: "--dynamic-subagents", patch: Patch{DynamicSubagents: validated.DynamicSubagents}, set: validated.DynamicSubagents != nil},
+		{detail: subagentsDetail, patch: Patch{DynamicSubagents: validated.DynamicSubagents}, set: validated.DynamicSubagents != nil},
 		{detail: "--mode", patch: Patch{Mode: validated.Mode}, set: validated.Mode != nil},
 		{detail: "--sandbox", patch: Patch{Sandbox: validated.Sandbox}, set: validated.Sandbox != nil},
 		{detail: "--approval", patch: Patch{Approval: validated.Approval}, set: validated.Approval != nil},
@@ -1173,7 +1367,13 @@ func validatePatch(patch Patch) (Patch, error) {
 		}
 		result.ToolSearchName = &name
 	}
-	result.DynamicSubagents = patch.DynamicSubagents
+	subagentsEnabled, err := resolveFlagSubagentsEnabled(patch.DynamicSubagents, patch.NoSubagents)
+	if err != nil {
+		return Patch{}, err
+	}
+	result.DynamicSubagents = subagentsEnabled
+	result.ActiveAgentMessages = patch.ActiveAgentMessages
+	result.TodoGate = patch.TodoGate
 	if patch.Mode != nil {
 		mode, err := ParseOperatingMode(string(*patch.Mode))
 		if err != nil {
@@ -1245,6 +1445,26 @@ func dynamicSubagentsPatch(value string) (Patch, error) {
 	}
 
 	return Patch{DynamicSubagents: &enabled}, nil
+}
+
+func activeAgentMessagesPatch(value string) (Patch, error) {
+	enabled, err := parseBoolPatch(value)
+	if err != nil {
+		return Patch{}, err
+	}
+
+	return Patch{ActiveAgentMessages: &enabled}, nil
+}
+
+// subagentLimitBehaviorPatch mirrors the source resolution: an unrecognized
+// value is not a configuration error, it falls back to the queue default.
+func subagentLimitBehaviorPatch(value string) (Patch, error) {
+	behavior, ok := ParseLimitBehavior(strings.ToLower(strings.TrimSpace(value)))
+	if !ok {
+		behavior = LimitBehaviorQueue
+	}
+
+	return Patch{SubagentLimitBehavior: &behavior}, nil
 }
 
 func parseBoolPatch(value string) (bool, error) {

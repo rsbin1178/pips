@@ -116,6 +116,118 @@ func NormalizePath(name string, allowRoot bool) (string, error) {
 	return cleaned, nil
 }
 
+// NormalizeUserPath accepts a relative path or an absolute path that resolves
+// lexically inside the tree root, returning the confined relative spelling.
+// It cleans the model-facing path shape first: surrounding quotes and
+// whitespace, trailing literal line escapes, a leading tilde, and a workspace
+// absolute path that lost its leading slash. Absolute paths outside the root
+// and parent traversals remain refused. Callers still open through the Tree, so
+// symlink escapes keep their existing checks.
+func (t *Tree) NormalizeUserPath(name string, allowRoot bool) (string, error) {
+	name = expandUserPath(sanitizeUserPathArgument(name))
+	if name == "" || !filepath.IsAbs(name) {
+		if name != "" && t != nil {
+			if relative, ok := t.absoluteWithoutLeadingSlash(name, allowRoot); ok {
+				return relative, nil
+			}
+		}
+
+		return NormalizePath(name, allowRoot)
+	}
+
+	if t == nil || t.path == "" {
+		return "", ErrClosed
+	}
+
+	return t.relativeAbsolutePath(name, allowRoot)
+}
+
+// absoluteWithoutLeadingSlash accepts the spelling a model produces when it
+// drops the leading slash from a workspace path. The value must name the root
+// or a path below it.
+func (t *Tree) absoluteWithoutLeadingSlash(name string, allowRoot bool) (string, bool) {
+	root := strings.TrimPrefix(filepath.ToSlash(t.path), "/")
+
+	value := filepath.ToSlash(name)
+	if root == "" || (value != root && !strings.HasPrefix(value, root+"/")) {
+		return "", false
+	}
+
+	relative, err := t.relativeAbsolutePath(string(filepath.Separator)+value, allowRoot)
+	if err != nil {
+		return "", false
+	}
+
+	return relative, true
+}
+
+func (t *Tree) relativeAbsolutePath(name string, allowRoot bool) (string, error) {
+	relative, err := filepath.Rel(t.path, filepath.Clean(name))
+	if err != nil {
+		return "", fmt.Errorf("%w: absolute path outside root", ErrOutsideRoot)
+	}
+
+	relative = filepath.ToSlash(relative)
+	if relative == ".." || strings.HasPrefix(relative, "../") {
+		return "", fmt.Errorf("%w: absolute path outside root", ErrOutsideRoot)
+	}
+
+	return NormalizePath(relative, allowRoot)
+}
+
+// sanitizeUserPathArgument cleans model path arguments: trim outer whitespace
+// and quotes, then remove literal newline/tab escapes a model may leave after a
+// quoted block-form argument.
+func sanitizeUserPathArgument(value string) string {
+	trimmed := strings.TrimSpace(value)
+	quoteWrapped := len(trimmed) >= 2 &&
+		(trimmed[0] == '"' || trimmed[0] == '\'') &&
+		(trimmed[len(trimmed)-1] == '"' || trimmed[len(trimmed)-1] == '\'')
+
+	unquoted := strings.TrimSpace(strings.Trim(trimmed, `"'`))
+	if !quoteWrapped {
+		return unquoted
+	}
+
+	for {
+		suffix := ""
+
+		for _, candidate := range []string{`\n`, `\r`, `\t`} {
+			if strings.HasSuffix(unquoted, candidate) {
+				suffix = candidate
+
+				break
+			}
+		}
+
+		if suffix == "" {
+			return unquoted
+		}
+
+		unquoted = strings.TrimSpace(strings.TrimSuffix(unquoted, suffix))
+	}
+}
+
+// expandUserPath expands only the home spellings the resolver accepts: "~" and
+// "~/". A named form such as "~user" stays literal.
+func expandUserPath(value string) string {
+	if value != "~" && !strings.HasPrefix(value, "~/") &&
+		(filepath.Separator != '\\' || !strings.HasPrefix(value, `~\`)) {
+		return value
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return value
+	}
+
+	if value == "~" {
+		return home
+	}
+
+	return filepath.Join(home, value[2:])
+}
+
 // Open opens name through the confined root. Internal symbolic links are
 // allowed only when their targets remain inside the root.
 func (t *Tree) Open(name string) (*os.File, error) {

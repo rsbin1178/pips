@@ -11,6 +11,7 @@ import (
 	codingmcp "github.com/rsbin1178/pips/internal/coding/mcp"
 	"github.com/rsbin1178/pips/internal/coding/resource"
 	"github.com/rsbin1178/pips/internal/coding/skillsettings"
+	"github.com/rsbin1178/pips/internal/coding/subagentprofile"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -50,6 +51,7 @@ func TestIntegrationCandidatePublishTransfersCleanupOwnership(t *testing.T) {
 		nil,
 		resource.Result{},
 		agentprofile.Registry{},
+		subagentprofile.Registry{},
 		skillsettings.Empty(),
 		"",
 		agentplugin.Result{},

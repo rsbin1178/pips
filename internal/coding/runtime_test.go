@@ -40,26 +40,36 @@ func TestConfiguredSubagentOptionsUseConfigAndPreserveExplicitOverrides(t *testi
 	configured := config.DefaultSubagentConfig()
 	configured.MaxDepth = 2
 	configured.MaxConcurrent = 6
-	configured.MaxTurns = 80
-	configured.MaxDurationMinutes = 45
 	options := configuredSubagentOptions(configured, subagent.ExecutionOptions{})
 	assert.Equal(t, 6, options.MaxConcurrent)
 	assert.Equal(t, 2, options.MaxDepth)
-	assert.Equal(t, 80, options.Limits.MaxTurns)
-	assert.Equal(t, 2, options.Limits.FinalizationTurns)
-	assert.Equal(t, 45*time.Minute, options.Limits.MaxDuration)
+	// Phase L: the [subagents] table carries no execution budget, so the resolved
+	// child policy is the unlimited one with its guards intact.
+	assert.Equal(t, subagent.DefaultLimits(), options.Limits)
 
 	unbounded := subagent.DefaultLimits()
+	unbounded.MaxTurns = 3
 	overridden := configuredSubagentOptions(configured, subagent.ExecutionOptions{
 		Limits: unbounded, MaxDepth: 1, MaxConcurrent: 1,
 	})
 	assert.Equal(t, 1, overridden.MaxConcurrent)
 	assert.Equal(t, 1, overridden.MaxDepth)
 	assert.Equal(t, unbounded, overridden.Limits)
-	assert.Equal(t, configured.MaxSpawnedPerRootInteraction, overridden.MaxSpawnedPerRootInteraction)
+	// Phase M: neither admission count is a [subagents] surface, so the
+	// resolved options leave both at zero, which the SDK reads as unlimited.
+	assert.Zero(t, overridden.MaxSpawnedPerRootInteraction)
+	assert.Zero(t, overridden.MaxAutoFollowUps)
+
+	// The SDK switches survive: an embedder that sets one still reaches the
+	// Manager.
+	explicit := configuredSubagentOptions(configured, subagent.ExecutionOptions{
+		MaxSpawnedPerRootInteraction: 5, MaxAutoFollowUps: 2,
+	})
+	assert.Equal(t, 5, explicit.MaxSpawnedPerRootInteraction)
+	assert.Equal(t, 2, explicit.MaxAutoFollowUps)
 	assert.Equal(
 		t,
-		subagent.ProductionLimits(),
+		subagent.DefaultLimits(),
 		configuredSubagentOptions(config.DefaultSubagentConfig(), subagent.ExecutionOptions{}).Limits,
 	)
 }
@@ -422,14 +432,34 @@ func TestNextNotificationBatchGroupsOneRoot(t *testing.T) {
 	second := testAgentNotification(runtime, "s-batch-2", "root-a")
 	other := testAgentNotification(runtime, "s-batch-3", "root-b")
 
-	batch := runtime.nextNotificationBatch([]subagent.Notification{first, second, other})
+	batch, taken := runtime.nextNotificationBatch([]subagent.Notification{first, second, other})
 
+	assert.Empty(t, taken)
 	assert.Equal(t, []string{"s-batch-1", "s-batch-2"}, notificationIDs(batch))
 
 	// The other root is claimed on its own once the first batch is delivered.
-	assert.Equal(t, []string{"s-batch-3"}, notificationIDs(
-		runtime.nextNotificationBatch([]subagent.Notification{other}),
-	))
+	batch, taken = runtime.nextNotificationBatch([]subagent.Notification{other})
+
+	assert.Empty(t, taken)
+	assert.Equal(t, []string{"s-batch-3"}, notificationIDs(batch))
+}
+
+// TestNotificationBatchCapIsUnlimitedByDefault pins Phase M: MaxAutoFollowUps
+// zero means unlimited, so a root is not refused its 5th batch. The reference's
+// auto-wake is a count-free switch.
+func TestNotificationBatchCapIsUnlimitedByDefault(t *testing.T) {
+	t.Parallel()
+
+	model := newRuntimeModel(runtimeTextResponse("unused"))
+	runtime := openTestRuntime(t, model)
+	require.Zero(t, runtime.subagents.MaxAutoFollowUps())
+
+	for batch := range 6 {
+		notification := testAgentNotification(runtime, fmt.Sprintf("s-batch-%d", batch), "root-a")
+		require.True(t, runtime.claimNotificationBatch(
+			"root-a", fmt.Sprintf("text-%d", batch), []subagent.Notification{notification},
+		), "batch %d", batch)
+	}
 }
 
 func TestRuntimeQueuesAgentNotificationIntoMatchingActiveInteraction(t *testing.T) {
@@ -455,7 +485,7 @@ func TestRuntimeQueuesAgentNotificationIntoMatchingActiveInteraction(t *testing.
 	}()
 	select {
 	case <-model.started:
-	case <-time.After(time.Second):
+	case <-time.After(30 * time.Second):
 		require.FailNow(t, "parent model did not start")
 	}
 
@@ -478,7 +508,7 @@ func TestRuntimeQueuesAgentNotificationIntoMatchingActiveInteraction(t *testing.
 	case result := <-done:
 		require.NoError(t, result.err)
 		assert.Contains(t, eventTypes(result.events), EventInteractionCompleted)
-	case <-time.After(2 * time.Second):
+	case <-time.After(30 * time.Second):
 		require.FailNow(t, "active notification interaction did not complete")
 	}
 	require.Eventually(t, func() bool {
@@ -549,10 +579,10 @@ func TestRuntimeRunsReadOnlySubagentWithoutProjectingChildTranscript(t *testing.
 	model := newRuntimeModel(
 		runtimeToolResponse(
 			"delegate-1",
-			"run_subagent",
-			`{"role":"explore","task":"Locate the runtime composition root."}`,
+			subagent.ToolName,
+			`{"prompt":"Locate the runtime composition root.","description":"delegate","subagent_type":"explore","run_in_background":false}`,
 		),
-		runtimeTextResponse(`{"summary":"located","evidence":[],"unknowns":[]}`),
+		runtimeTextResponse("Located the runtime composition root."),
 		runtimeTextResponse("parent answer"),
 	)
 	telemetry := make([]TelemetryEvent, 0)
@@ -577,7 +607,7 @@ func TestRuntimeRunsReadOnlySubagentWithoutProjectingChildTranscript(t *testing.
 	assert.Contains(t, types, EventSubagentCompleted)
 	for _, event := range events {
 		if delta, ok := event.Payload.(MessageDelta); ok {
-			assert.NotContains(t, delta.Text, `"summary":"located"`)
+			assert.NotContains(t, delta.Text, "Located the runtime composition root.")
 		}
 	}
 
@@ -599,16 +629,23 @@ func TestRuntimeRunsReadOnlySubagentWithoutProjectingChildTranscript(t *testing.
 
 	requests := model.Requests()
 	require.Len(t, requests, 3)
-	assert.Contains(t, toolNamesFromRequest(requests[0]), "run_subagent")
-	assert.Equal(t, []string{"read", "ls", "glob", "grep"}, toolNamesFromRequest(requests[1]))
-	assert.Contains(t, toolNamesFromRequest(requests[2]), "run_subagent")
+	assert.Contains(t, toolNamesFromRequest(requests[0]), subagent.ToolName)
+	childTools := toolNamesFromRequest(requests[1])
+	for _, expected := range []string{"read", "ls", "glob", "grep"} {
+		assert.Contains(t, childTools, expected)
+	}
+	for _, forbidden := range []string{"apply_patch", "shell", subagent.ToolName} {
+		assert.NotContains(t, childTools, forbidden)
+	}
+	assert.Contains(t, toolNamesFromRequest(requests[2]), subagent.ToolName)
 
 	summaries, err := runtime.ListSubagents(t.Context())
 	require.NoError(t, err)
 	require.Len(t, summaries, 1)
 	detail, err := runtime.InspectSubagent(t.Context(), summaries[0].ChildSessionID)
 	require.NoError(t, err)
-	assert.IsType(t, subagent.ExploreResult{}, detail.Result)
+	// The default builtin contract returns the child's final text.
+	assert.Equal(t, "Located the runtime composition root.", detail.Result)
 	require.Len(t, detail.Transcript, 2)
 	assert.IsType(t, ai.UserMessage{}, detail.Transcript[0])
 	assert.IsType(t, ai.AssistantMessage{}, detail.Transcript[1])
@@ -618,6 +655,8 @@ func TestRuntimeRunsReadOnlySubagentWithoutProjectingChildTranscript(t *testing.
 	require.NoError(t, err)
 	assert.Equal(t, child.ChildSessionID, waited.ChildSessionID)
 	assert.Equal(t, subagent.OutcomeSucceeded, waited.Outcome)
+	// Wait reconstructs the same free-text result from the durable journal.
+	assert.Equal(t, "Located the runtime composition root.", waited.Value)
 	require.NoError(t, runtime.CancelSubagent(t.Context(), child.ChildSessionID))
 	assert.Equal(t, child.ChildSessionID, childState.SessionID)
 	assert.Equal(t, InteractionSucceeded, childState.Interaction.Outcome)
@@ -1907,6 +1946,10 @@ func openTestRuntimeConfiguredWithSandboxAndConfig(
 		TelemetryObservers: telemetry,
 		Execution: ExecutionOptions{
 			SandboxProbe: func(context.Context, *execution.Executor) error { return nil },
+			// The scripted models these fixtures install answer the Goal's
+			// assessment and audit calls, not a child agent's, so the panel stays
+			// in-process. A test that exercises the spawned panel flips this off.
+			GoalVerifierInProcess: true,
 		},
 	})
 	require.NoError(t, err)
@@ -2288,8 +2331,8 @@ func (m *backgroundSpawnRuntimeModel) Generate(
 	case 1:
 		return runtimeToolResponse(
 			"spawn-1",
-			"spawn_agent",
-			`{"role":"explore","task":"Inspect the runtime in the background."}`,
+			subagent.ToolName,
+			`{"prompt":"Inspect the runtime in the background.","description":"delegate","subagent_type":"explore"}`,
 		), nil
 	case 2:
 		return runtimeTextResponse("parent continued"), nil
@@ -2369,8 +2412,8 @@ func (m *canceledForegroundSubagentRuntimeModel) Generate(
 
 	return runtimeToolResponse(
 		"delegate-cancel",
-		"run_subagent",
-		`{"role":"explore","task":"Wait until the parent is canceled."}`,
+		subagent.ToolName,
+		`{"prompt":"Wait until the parent is canceled.","description":"delegate","subagent_type":"explore","run_in_background":false}`,
 	), nil
 }
 

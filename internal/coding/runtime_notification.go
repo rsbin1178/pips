@@ -19,6 +19,15 @@ import (
 const (
 	agentNotificationSchema = "pips.coding.agent_completion/v1alpha1"
 	agentNotificationPrefix = "[Pips background Agent completion]\n"
+	// backgroundBatchSeparator joins the rendered bodies one background delivery
+	// carries, matching the section separator the reference puts between
+	// notification blocks.
+	backgroundBatchSeparator = "\n\n---\n\n"
+	// maxBackgroundDeliveryAttempts bounds how often one parent message is
+	// handed to a turn. A watch reports many times over its life, so the
+	// completion auto-follow-up budget would be wrong here; a turn that never
+	// commits must instead stop being retried.
+	maxBackgroundDeliveryAttempts = 3
 )
 
 type agentNotificationEnvelope struct {
@@ -57,6 +66,11 @@ func (r *Runtime) recoverAgentNotifications(ctx context.Context) error {
 			!terminalSubagentState(summary.State) {
 			continue
 		}
+		// A wake's terminal result was never surfaced, so recovery must not
+		// resurrect it as a completion notification after a restart.
+		if summary.Wake {
+			continue
+		}
 
 		known, knownErr := r.notifications.Contains(summary.ChildSessionID)
 		if knownErr != nil {
@@ -89,6 +103,14 @@ func terminalSubagentState(state subagent.State) bool {
 }
 
 func (r *Runtime) reconcilePersistedNotificationMessages() error {
+	if r == nil || r.notifications == nil {
+		return nil
+	}
+	// A parent message is acknowledged by the exact text its conversation
+	// committed, so a restart acks what the previous process delivered rather
+	// than waking the model with it a second time.
+	bodies := r.pendingBackgroundBodies()
+
 	for _, entry := range r.session.Path() {
 		if entry.Kind != harness.KindMessage || entry.Message == nil {
 			continue
@@ -97,6 +119,11 @@ func (r *Runtime) reconcilePersistedNotificationMessages() error {
 		ids, ok, err := r.verifiedNotificationMessage(entry.Message)
 		if err != nil {
 			return err
+		}
+		if !ok {
+			if text, isText := singleUserText(entry.Message); isText {
+				ids, ok = bodies[text]
+			}
 		}
 		if ok {
 			if err := r.notifications.Acknowledge(ids...); err != nil {
@@ -108,6 +135,33 @@ func (r *Runtime) reconcilePersistedNotificationMessages() error {
 	return nil
 }
 
+// pendingBackgroundBodies indexes every pending parent message by the exact
+// text its conversation commits: the system reminder both delivery paths send.
+func (r *Runtime) pendingBackgroundBodies() map[string][]string {
+	if r == nil || r.notifications == nil {
+		return nil
+	}
+
+	pending, err := r.notifications.PendingMessages()
+	if err != nil {
+		return nil
+	}
+
+	bodies := make(map[string][]string, len(pending))
+	for _, message := range pending {
+		text := reminderMessageText(message.Body)
+		bodies[text] = append(bodies[text], message.ID)
+	}
+
+	return bodies
+}
+
+func reminderMessageText(content string) string {
+	text, _ := singleUserText(systemReminderMessage(content))
+
+	return text
+}
+
 func (r *Runtime) startNotificationCoordinator(parent context.Context) {
 	ctx, cancel := context.WithCancel(context.WithoutCancel(parent))
 	r.notificationMu.Lock()
@@ -117,6 +171,7 @@ func (r *Runtime) startNotificationCoordinator(parent context.Context) {
 	r.notificationInflight = make(map[string]struct{})
 	r.notificationMessages = make(map[string][]string)
 	r.notificationBatches = make(map[string]int)
+	r.backgroundAttempts = make(map[string]int)
 	done := r.notificationDone
 	r.notificationMu.Unlock()
 
@@ -171,7 +226,11 @@ func (r *Runtime) notificationLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-signal:
+			// Rendering is best effort: a record that cannot be queued leaves
+			// its events buffered, and the next signal retries.
+			_ = r.backgroundOutput.deliverBackground()
 			r.deliverNotificationBatch(ctx)
+			r.deliverBackgroundBatch(ctx)
 		}
 	}
 }
@@ -183,7 +242,16 @@ func (r *Runtime) deliverNotificationBatch(ctx context.Context) {
 		return
 	}
 
-	batch := r.nextNotificationBatch(pending)
+	batch, taken := r.nextNotificationBatch(pending)
+	// A completion whose child's result a Tool read already carries is dropped
+	// here and acknowledged beside the batch, in the same place the revoked-goal
+	// case acknowledges its own: the read is the surface that answered it, so a
+	// suppressed completion must not be retried either.
+	if len(taken) > 0 {
+		if err := r.notifications.Acknowledge(notificationIDs(taken)...); err == nil {
+			r.signalNotifications()
+		}
+	}
 	if len(batch) == 0 {
 		return
 	}
@@ -256,22 +324,239 @@ func (r *Runtime) deliverNotificationBatch(ctx context.Context) {
 	r.signalNotifications()
 }
 
+// deliverBackgroundBatch delivers every pending parent message — a background
+// watch's event batch and its completions — to the one conversation this
+// Runtime owns. It is the same batched-turn path the agent-completion delivery
+// uses, on the same durable queue, with two differences the watch surface
+// needs:
+//
+//   - a running turn receives the batch as one hidden synthetic
+//     <system-reminder> user message queued at the next turn boundary, instead
+//     of a follow-up that only runs at a natural stop;
+//   - the auto-follow-up budget does not apply, because a watch legitimately
+//     reports many times over its life. A turn that never commits is bounded by
+//     maxBackgroundDeliveryAttempts instead, so a broken turn cannot spin.
+//
+// A record is acknowledged only when the transcript commits the message, so a
+// crash between the claim and the commit re-delivers it rather than losing it.
+//
+//nolint:gocyclo // The delivery matrix is intentionally explicit for active/idle/paused/closing.
+func (r *Runtime) deliverBackgroundBatch(ctx context.Context) {
+	if r == nil || r.notifications == nil {
+		return
+	}
+
+	pending, err := r.notifications.PendingMessages()
+	if err != nil || len(pending) == 0 {
+		return
+	}
+
+	batch := r.nextBackgroundBatch(pending)
+	if len(batch) == 0 {
+		return
+	}
+
+	body := backgroundBatchText(batch)
+	// Both paths deliver the batch as one synthetic <system-reminder> user
+	// message: it is the shape the mid-turn boundary injection needs, and the
+	// shape every surface already recognizes as runtime-generated input, so a
+	// restored session renders it as activity rather than as the user's words.
+	reminder := systemReminderMessage(body)
+	text, _ := singleUserText(reminder)
+
+	r.mu.Lock()
+	if r.closed || r.closing {
+		r.mu.Unlock()
+
+		return
+	}
+	current := r.interaction
+	phase := r.state.Phase
+	active := r.active
+	if active != nil && current != nil && phase == PhaseRunning {
+		harness := current.harness
+		if !r.claimBackground(text, batch) {
+			r.mu.Unlock()
+
+			return
+		}
+		r.mu.Unlock()
+
+		if err := harness.Steer(reminder); err != nil {
+			r.releaseBackground(text)
+		}
+
+		return
+	}
+	if active != nil || current != nil || phase != PhaseIdle || r.goalDriver != nil {
+		r.mu.Unlock()
+
+		return
+	}
+	if !r.claimBackground(text, batch) {
+		r.mu.Unlock()
+
+		return
+	}
+	r.mu.Unlock()
+
+	operation := &notificationOperation{
+		rootInteractionID: r.backgroundConversationRoot(),
+		notificationIDs:   backgroundMessageIDs(batch),
+	}
+	for _, runErr := range r.runSequence(
+		ctx,
+		operationAgentNotification,
+		runtimeResolution{},
+		[]ai.Message{reminder},
+		operation,
+	) {
+		if runErr != nil && !errors.Is(runErr, context.Canceled) {
+			break
+		}
+	}
+	r.releaseBackground(text)
+	r.signalNotifications()
+}
+
+// backgroundConversationRoot names the conversation a background delivery
+// belongs to. A watch's events are not owned by the interaction that started
+// them the way a child's completion is — the watch outlives it — so the batch
+// is attributed to the conversation: the running interaction's root, else the
+// most recent one, else the session itself when nothing has run yet.
+func (r *Runtime) backgroundConversationRoot() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.interaction != nil && r.interaction.rootInteractionID != "" {
+		return r.interaction.rootInteractionID
+	}
+	if root := r.state.Interaction.RootInteractionID; root != "" {
+		return root
+	}
+
+	return r.handle.Metadata().ID
+}
+
+// backgroundBatchText joins the bodies one delivery carries. A single record is
+// its own rendered text, so the reference's batch formats reach the model
+// verbatim.
+func backgroundBatchText(batch []subagent.ParentMessage) string {
+	if len(batch) == 1 {
+		return batch[0].Body
+	}
+
+	bodies := make([]string, 0, len(batch))
+	for _, message := range batch {
+		bodies = append(bodies, message.Body)
+	}
+
+	return strings.Join(bodies, backgroundBatchSeparator)
+}
+
+func backgroundMessageIDs(batch []subagent.ParentMessage) []string {
+	ids := make([]string, len(batch))
+	for index, message := range batch {
+		ids[index] = message.ID
+	}
+
+	return ids
+}
+
+// nextBackgroundBatch selects the parent messages one delivery carries, skips
+// the ones already in flight, and retires a record whose delivery has failed
+// maxBackgroundDeliveryAttempts times. Retiring leaves the record pending: the
+// content is never dropped, only the retry stops, so a broken turn cannot spin
+// the coordinator forever. Selection consumes no attempt — only a claim does,
+// so a wake that lands while the conversation is busy cannot spend a record's
+// budget without ever trying to deliver it.
+func (r *Runtime) nextBackgroundBatch(
+	pending []subagent.ParentMessage,
+) []subagent.ParentMessage {
+	r.notificationMu.Lock()
+	defer r.notificationMu.Unlock()
+
+	batch := make([]subagent.ParentMessage, 0, len(pending))
+	for _, message := range pending {
+		if _, inflight := r.notificationInflight[message.ID]; inflight {
+			continue
+		}
+		if r.backgroundAttempts[message.ID] >= maxBackgroundDeliveryAttempts {
+			continue
+		}
+		batch = append(batch, message)
+	}
+
+	return batch
+}
+
+// claimBackground reserves one background delivery under the text its
+// conversation will commit. It shares the inflight and message maps with the
+// completion path — the queue has one claim and acknowledge mechanism — and
+// keeps its own attempt accounting.
+func (r *Runtime) claimBackground(text string, batch []subagent.ParentMessage) bool {
+	r.notificationMu.Lock()
+	defer r.notificationMu.Unlock()
+	for _, message := range batch {
+		if _, exists := r.notificationInflight[message.ID]; exists {
+			return false
+		}
+	}
+	if _, exists := r.notificationMessages[text]; exists {
+		return false
+	}
+
+	ids := backgroundMessageIDs(batch)
+	for _, id := range ids {
+		r.notificationInflight[id] = struct{}{}
+		r.backgroundAttempts[id]++
+	}
+	r.notificationMessages[text] = ids
+
+	return true
+}
+
+func (r *Runtime) releaseBackground(text string) {
+	r.notificationMu.Lock()
+	defer r.notificationMu.Unlock()
+
+	ids := r.notificationMessages[text]
+	delete(r.notificationMessages, text)
+	for _, id := range ids {
+		delete(r.notificationInflight, id)
+	}
+}
+
+// nextNotificationBatch selects the completions one delivery carries and
+// separates the ones whose child's result a Tool read already took. A dropped
+// notification is returned beside the batch so the caller can acknowledge it,
+// and the taken check is live rather than a field captured at report time: a
+// child read registers before it blocks and takes the result on its way out, so
+// the live state covers both orderings.
 func (r *Runtime) nextNotificationBatch(
 	pending []subagent.Notification,
-) []subagent.Notification {
+) (batch, taken []subagent.Notification) {
 	r.notificationMu.Lock()
 	defer r.notificationMu.Unlock()
 
 	rootID := ""
-	batch := make([]subagent.Notification, 0, len(pending))
+	batch = make([]subagent.Notification, 0, len(pending))
 	for _, notification := range pending {
 		if _, inflight := r.notificationInflight[notification.ID]; inflight {
 			continue
 		}
+		if r.childResultTaken(notification.AgentID) {
+			taken = append(taken, notification)
+
+			continue
+		}
 		if rootID == "" {
 			rootID = notification.Ownership.RootInteractionID
-			if r.notificationBatches[rootID] >= r.subagents.MaxAutoFollowUps() {
-				return nil
+			// Zero is unlimited: the reference's auto-wake is a count-free
+			// switch, so the batch cap applies only to an explicit bound.
+			if limit := r.subagents.MaxAutoFollowUps(); limit > 0 &&
+				r.notificationBatches[rootID] >= limit {
+				return nil, taken
 			}
 		}
 		if notification.Ownership.RootInteractionID == rootID {
@@ -279,7 +564,7 @@ func (r *Runtime) nextNotificationBatch(
 		}
 	}
 
-	return batch
+	return batch, taken
 }
 
 func (r *Runtime) claimNotificationBatch(
@@ -289,7 +574,8 @@ func (r *Runtime) claimNotificationBatch(
 ) bool {
 	r.notificationMu.Lock()
 	defer r.notificationMu.Unlock()
-	if r.notificationBatches[rootID] >= r.subagents.MaxAutoFollowUps() {
+	if limit := r.subagents.MaxAutoFollowUps(); limit > 0 &&
+		r.notificationBatches[rootID] >= limit {
 		return false
 	}
 	for _, notification := range batch {
@@ -355,12 +641,39 @@ func (r *Runtime) acknowledgeNotificationMessage(message ai.Message) error {
 	if err := r.notifications.Acknowledge(ids...); err != nil {
 		return err
 	}
-	if err := r.recordGoalNotificationDelivery(ids); err != nil {
+	r.clearBackgroundAttempts(ids)
+	if err := r.recordGoalNotificationDelivery(goalNotificationIDs(ids)); err != nil {
 		return err
 	}
 	r.signalNotifications()
 
 	return nil
+}
+
+// clearBackgroundAttempts forgets the retry budget of a record that reached
+// the transcript, so a later failure of the same kind starts fresh.
+func (r *Runtime) clearBackgroundAttempts(ids []string) {
+	r.notificationMu.Lock()
+	defer r.notificationMu.Unlock()
+
+	for _, id := range ids {
+		delete(r.backgroundAttempts, id)
+	}
+}
+
+// goalNotificationIDs drops the parent-message ids: the Goal ledger tracks
+// background child completions, and a rendered parent message is not a child.
+func goalNotificationIDs(ids []string) []string {
+	kept := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if subagent.IsParentMessageID(id) {
+			continue
+		}
+
+		kept = append(kept, id)
+	}
+
+	return kept
 }
 
 func (r *Runtime) isAgentNotificationMessage(message ai.Message) bool {
