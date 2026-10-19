@@ -318,7 +318,7 @@ func TestGoalVerifierDispatcherCompilesTheGeneralPurposeInventory(t *testing.T) 
 		tools.MonitorName, tools.KillBackgroundName, tools.HistoryName,
 	}, names)
 
-	for _, absent := range []string{"ask_user", "ask_user_text", "update_plan", "enter_plan_mode", "spawn_subagent"} {
+	for _, absent := range []string{"ask_user", "ask_user_text", "todo_write", "update_plan", "enter_plan_mode", "spawn_subagent"} {
 		assert.NotContains(t, names, absent, "a verifier must not ask the user or enter plan review")
 	}
 }

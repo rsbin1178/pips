@@ -1392,6 +1392,8 @@ func (m *Model) updateReadyKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.openSearch("")
 
 			return m, nil
+		case actionTodo:
+			return m, m.openTodoDetailRoute()
 		case actionSubmit:
 			return m, m.submit(context)
 		case actionFollowUp:
@@ -1841,9 +1843,13 @@ func (m *Model) statusLineItem(item statusline.Item, width int) string {
 			value = fmt.Sprintf("%d%% cache", percent)
 			style = style.Foreground(palette.model)
 		}
-	case statusline.TaskProgress:
-		if m.state.Tasks.Total > 0 {
-			value = fmt.Sprintf("Tasks %d/%d", m.state.Tasks.Completed, m.state.Tasks.Total)
+	case statusline.TodoProgress:
+		// The strip is a progress cue, not a completion badge: once every item
+		// is terminal there is no work left to track, so the item disappears.
+		// The full checklist remains available through Ctrl+P and /todos.
+		if m.state.Tasks.Total > 0 &&
+			m.state.Tasks.Completed+m.state.Tasks.Cancelled < m.state.Tasks.Total {
+			value = fmt.Sprintf("Todo %d/%d", m.state.Tasks.Completed, m.state.Tasks.Total)
 			style = style.Foreground(palette.workspace)
 		}
 	case statusline.Phase:

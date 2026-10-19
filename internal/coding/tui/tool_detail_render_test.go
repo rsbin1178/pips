@@ -13,6 +13,7 @@ import (
 	"github.com/rsbin1178/pips/internal/coding/approval"
 	"github.com/rsbin1178/pips/internal/coding/changes"
 	"github.com/rsbin1178/pips/internal/coding/subagent"
+	"github.com/rsbin1178/pips/internal/coding/tasklist"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -134,12 +135,20 @@ func TestToolDetailPatchShowsDiffWithoutRawPatchOrDuplicateResult(t *testing.T) 
 	assert.NotContains(t, detail, "\nResult\n")
 }
 
-func TestToolDetailPlanRendersChecklist(t *testing.T) {
+func TestTodoActivityLabels(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, "Updating todo list", taskListActivityLabel(toolStateRunning))
+	assert.Equal(t, "Updated todo list", taskListActivityLabel(toolStateSucceeded))
+	assert.Equal(t, "Todo update failed", taskListActivityLabel(toolStateFailed))
+}
+
+func TestToolDetailSuppressesACompletedTodoCall(t *testing.T) {
 	t.Parallel()
 
 	state := detailState(coding.ToolState{
 		Call: coding.ToolCall{
-			ID: "call-1", Name: "update_plan",
+			ID: "call-1", Name: tasklist.ToolName,
 			Arguments: ai.JSON(
 				`{"explanation":"Start with the renderer","plan":[` +
 					`{"step":"Audit detail","status":"completed"},` +
@@ -148,45 +157,57 @@ func TestToolDetailPlanRendersChecklist(t *testing.T) {
 			),
 		},
 		Status: coding.ToolStatusCompleted,
-		Result: ai.ToolResultText("call-1", "update_plan", `{"updated":true,"completed":1,"total":3}`),
+		Result: ai.ToolResultText("call-1", tasklist.ToolName, `{"updated":true,"completed":1,"total":3}`),
+	})
+	assert.Empty(t, projectTimeline(state),
+		"a successful todo_write is represented by the status line and page, not a message card")
+}
+
+func TestToolDetailRendersAFailedTodoCall(t *testing.T) {
+	t.Parallel()
+
+	state := detailState(coding.ToolState{
+		Call: coding.ToolCall{
+			ID: "call-1", Name: tasklist.ToolName,
+			Arguments: ai.JSON(`{"plan":[]}`),
+		},
+		Status: coding.ToolStatusCompleted,
+		Result: ai.ToolResultError("call-1", tasklist.ToolName,
+			"task list: plan must contain 1 to 64 items"),
 	})
 	blocks := projectTimeline(state)
 	require.Len(t, blocks, 1)
 
 	compact := renderTimeline(blocks, newMarkdownRenderer(8), 100, themeDark, true)
-	assert.Contains(t, compact, "Updated plan")
-	assert.Contains(t, compact, "✔ Audit detail")
-	assert.Contains(t, compact, "◐ Render fields")
-	assert.Contains(t, compact, "□ Add tests")
+	assert.Contains(t, compact, "Todo update failed")
 
 	detail := newToolDetailView(blocks[0]).text()
-	assert.Contains(t, detail, "Explanation\n  Start with the renderer")
-	assert.Contains(t, detail, "Plan\n  ✔ Audit detail")
-	assert.NotContains(t, detail, `{"updated":true`)
+	assert.Contains(t, detail, "Arguments")
 }
 
-// TestToolDetailPlanLabelsAStepLessMergeByItsID pins the card: a status-only
-// merge omits the step, so the row labels the item by its id instead of
-// painting an empty step.
+// TestToolDetailPlanLabelsAStepLessMergeByItsID pins the failed-card label: a
+// status-only merge omits the step, so the row labels the item by its id
+// instead of painting an empty step.
 func TestToolDetailPlanLabelsAStepLessMergeByItsID(t *testing.T) {
 	t.Parallel()
 
 	state := detailState(coding.ToolState{
 		Call: coding.ToolCall{
-			ID: "call-1", Name: "update_plan",
+			ID: "call-1", Name: tasklist.ToolName,
 			Arguments: ai.JSON(`{"merge":true,"plan":[{"id":"render the checklist","status":"completed"}]}`),
 		},
 		Status: coding.ToolStatusCompleted,
-		Result: ai.ToolResultText("call-1", "update_plan", `{"updated":true,"completed":1,"total":1}`),
+		Result: ai.ToolResultError("call-1", tasklist.ToolName, `{"updated":true,"completed":1,"total":1}`),
 	})
 	blocks := projectTimeline(state)
 	require.Len(t, blocks, 1)
 
 	compact := renderTimeline(blocks, newMarkdownRenderer(8), 100, themeDark, true)
+	assert.Contains(t, compact, "Todo update failed")
 	assert.Contains(t, compact, "✔ render the checklist")
 
 	detail := newToolDetailView(blocks[0]).text()
-	assert.Contains(t, detail, "Plan\n  ✔ render the checklist")
+	assert.Contains(t, detail, "✔ render the checklist")
 }
 
 func TestToolDetailMalformedArgumentsDegrade(t *testing.T) {

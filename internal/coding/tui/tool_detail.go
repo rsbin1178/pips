@@ -38,6 +38,9 @@ type toolDetailView struct {
 	// running watch's output and follow its tail while it streams.
 	watchTaskID  string
 	watchRunning bool
+	// todo marks the standalone todo_write checklist page, whose rows are
+	// rebuilt from the live projection on every render.
+	todo bool
 }
 
 // text renders the plain, unwrapped detail body. Tests and NO_COLOR parity
@@ -150,7 +153,13 @@ func (m *Model) toolDetailRows(width int) ([]string, bool) {
 		return []string{detailTitleDefault, "", detailEmptyBody}, false
 	}
 
-	rows := detailPhysicalRows(m.route.toolDetail.rows, width, m.theme, m.options.NoColor)
+	detail := m.route.toolDetail
+	if detail.todo {
+		fresh := newTodoDetailView(m.state.Tasks)
+		detail = &fresh
+	}
+
+	rows := detailPhysicalRows(detail.rows, width, m.theme, m.options.NoColor)
 	if len(rows) == 0 {
 		rows = []string{detailTitleDefault, "", detailEmptyBody}
 	}
@@ -306,7 +315,7 @@ func toolDetailTitle(block timelineBlock) string {
 	case toolClassSubagent:
 		return "Agent activity details"
 	case toolClassTaskList:
-		return "Plan details"
+		return "Todo details"
 	case toolClassGeneric, toolClassPlan:
 		return "Tool call details"
 	default:

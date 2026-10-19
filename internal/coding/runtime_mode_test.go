@@ -119,7 +119,7 @@ func TestSuggestToolNames(t *testing.T) {
 
 	known := []string{
 		"apply_patch", "read", "grep", "glob", "ls", "shell", "ask_user",
-		"pips_tool_search", subagent.ToolName, "update_plan",
+		"pips_tool_search", subagent.ToolName, tasklist.ToolName,
 	}
 
 	tests := []struct {

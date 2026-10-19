@@ -1,5 +1,6 @@
-// Package tasklist owns the bounded update_plan contract and its durable
-// projection from assistant tool calls.
+// Package tasklist owns the bounded todo_write contract and its durable
+// projection from assistant tool calls. Historical update_plan calls are
+// recognized on replay with their original replace-by-default semantics.
 package tasklist
 
 import (
@@ -16,7 +17,11 @@ import (
 
 const (
 	// ToolName is the application-owned task progress tool.
-	ToolName = "update_plan"
+	ToolName = "todo_write"
+	// LegacyToolName is the pre-rename tool name. It remains readable so a
+	// resumed session replays its historical calls with their original
+	// replace-by-default semantics; the catalog never offers it again.
+	LegacyToolName = "update_plan"
 
 	MaxItems            = 64
 	MaxStepBytes        = 512
@@ -55,10 +60,17 @@ type Item struct {
 // field is distinguishable from false. Absent and false both replace, which is
 // pips' own historical meaning of every update_plan call ever written; the
 // auto-upgrade net of Apply is what makes a status-only flip cheap anyway.
+// Update is one task progress call. Merge is a presence-aware override: the
+// todo_write tool merges by default, while a legacy update_plan call replaces
+// by default. FromMessage records which contract produced the value, so replay
+// keeps the meaning the transcript was written with.
 type Update struct {
 	Explanation string `json:"explanation,omitempty" description:"Optional concise reason for this update"`
-	Merge       *bool  `json:"merge,omitempty" description:"Update items by id instead of replacing the list"`
-	Plan        []Item `json:"plan" description:"Task items to write"`
+	Merge       *bool  `json:"merge,omitempty" description:"Update items by id instead of replacing the list; defaults to true for todo_write and false for legacy update_plan calls"`
+	Clear       bool   `json:"clear,omitempty" description:"Remove the whole plan; plan must carry no items"`
+	Plan        []Item `json:"plan,omitempty" description:"Task items to write; 1-64 items unless clear is true"`
+
+	legacy bool
 }
 
 // Snapshot is the clone-safe task progress projection consumed by frontends.
@@ -95,12 +107,47 @@ func Decode(data []byte) (Update, error) {
 	return cloneUpdate(update), nil
 }
 
-// Validate enforces the bounded call contract: the item count, the explanation,
-// each item's id, step, meta and status, the duplicate-id rule, and the
-// at-most-one-in-progress rule among the items the call carries. A folded state
-// that is still invalid is refused by Apply, not here.
+// Validate enforces the bounded call contract: either an explicit clear with
+// no items, an explicit replace with no items, or the 1-64 item count, the
+// explanation, each item's id, step, meta and status, and the duplicate-id
+// rule among the items the call carries. Multiple items may be in progress:
+// parallel work is a model-level plan choice, so the tool does not count them.
+// A folded state that is still invalid is refused by Apply, not here.
+//
+//nolint:gocyclo // Clear, empty-replace, and bounded replace are explicit branches.
 func Validate(update Update) error {
-	if len(update.Plan) == 0 || len(update.Plan) > MaxItems {
+	if update.Clear {
+		if len(update.Plan) != 0 {
+			return errors.New("task list: clear must not carry plan items")
+		}
+
+		if update.Merge != nil && *update.Merge {
+			return errors.New("task list: clear cannot be merged")
+		}
+
+		if !validText(update.Explanation, MaxExplanationBytes, true) {
+			return errors.New("task list: invalid explanation")
+		}
+
+		return nil
+	}
+
+	if len(update.Plan) == 0 {
+		if update.Merge == nil || *update.Merge {
+			return fmt.Errorf(
+				"task list: plan must contain 1 to %d items; send clear true or merge false with an empty plan to remove the checklist",
+				MaxItems,
+			)
+		}
+
+		if !validText(update.Explanation, MaxExplanationBytes, true) {
+			return errors.New("task list: invalid explanation")
+		}
+
+		return nil
+	}
+
+	if len(update.Plan) > MaxItems {
 		return fmt.Errorf("task list: plan must contain 1 to %d items", MaxItems)
 	}
 
@@ -109,20 +156,11 @@ func Validate(update Update) error {
 	}
 
 	seen := make(map[string]struct{}, len(update.Plan))
-	inProgress := 0
 
 	for index, item := range update.Plan {
 		if err := validateCallItem(item, index, seen); err != nil {
 			return err
 		}
-
-		if item.Status == StatusInProgress {
-			inProgress++
-		}
-	}
-
-	if inProgress > 1 {
-		return errors.New("task list: at most one item may be in progress")
 	}
 
 	return nil
@@ -193,13 +231,19 @@ func validMeta(meta map[string]any) bool {
 // Apply folds one decoded call onto the current plan. It is the only place the
 // plan is derived: the bootstrap replay, the live reducer, and the transcript
 // scan behind the per-turn reminder all call it, so the pane, the reminder, the
-// gate and a resumed session cannot drift. A replace rebuilds the list from the
-// call; a merge updates by id and appends an unknown id. The folded state is
-// validated before it is returned, so the tool refuses a call that would leave
-// two items in progress or push the plan past its item bound.
+// gate and a resumed session cannot drift. A clear or an explicit empty replace
+// empties the projection; a replace rebuilds the list from the call; a merge
+// updates by id and appends an unknown id. todo_write merges by default; a
+// legacy update_plan call replaces by default. The folded state is validated
+// before it is returned, so the tool refuses a call that would push the plan
+// past its item bound.
 func Apply(current Snapshot, update Update) (Snapshot, error) {
 	if err := Validate(update); err != nil {
 		return Snapshot{}, err
+	}
+
+	if update.Clear {
+		return Snapshot{}, nil
 	}
 
 	var items []Item
@@ -209,8 +253,16 @@ func Apply(current Snapshot, update Update) (Snapshot, error) {
 		items = replaceItems(update.Plan)
 	}
 
-	if len(items) == 0 || len(items) > MaxItems {
+	if len(items) == 0 {
+		if update.Merge != nil && !*update.Merge {
+			return Snapshot{}, nil
+		}
+
 		return Snapshot{}, fmt.Errorf("task list: plan must contain 1 to %d items", MaxItems)
+	}
+
+	if len(items) > MaxItems {
+		return Snapshot{}, fmt.Errorf("task list: plan must contain at most %d items", MaxItems)
 	}
 
 	if err := validateItems(items); err != nil {
@@ -221,14 +273,24 @@ func Apply(current Snapshot, update Update) (Snapshot, error) {
 }
 
 // effectiveMerge reports whether the call is applied as a merge: an explicit
-// merge, or the auto-upgrade net. The net fires when the model clearly meant a
-// partial update but omitted the flag — the plan already has items, every item
-// carries no step, and every item's id already exists. Its consequence is
-// recorded rather than hidden: a replacement that names only ids and statuses
-// cannot shrink the plan, because the net reads it as a flip.
+// merge, the todo_write default, or the auto-upgrade net. The net fires when
+// the model clearly meant a partial update but omitted the flag — the plan
+// already has items, every item carries no step, and every item's id already
+// exists. Its consequence is recorded rather than hidden: a replacement that
+// names only ids and statuses cannot shrink the plan, because the net reads it
+// as a flip. A legacy update_plan call defaults to replace, so the net is what
+// preserves its status-only behavior.
 func effectiveMerge(current Snapshot, update Update) bool {
-	if update.Merge != nil && *update.Merge {
+	if update.Merge != nil {
+		if *update.Merge {
+			return true
+		}
+	} else if !update.legacy {
 		return true
+	}
+
+	if len(update.Plan) == 0 {
+		return false
 	}
 
 	if len(current.Items) == 0 {
@@ -322,13 +384,12 @@ func replaceItems(updates []Item) []Item {
 }
 
 // validateItems bounds one folded item list: the item count, every step, every
-// meta, every status, and the at-most-one-in-progress rule.
+// meta, and every status. Multiple items may be in progress; the tool treats
+// the count as a plan choice rather than a schema violation.
 func validateItems(items []Item) error {
 	if len(items) > MaxItems {
 		return fmt.Errorf("task list: plan must contain at most %d items", MaxItems)
 	}
-
-	inProgress := 0
 
 	for index, item := range items {
 		if !validText(item.Step, MaxStepBytes, false) {
@@ -340,16 +401,10 @@ func validateItems(items []Item) error {
 		}
 
 		switch item.Status {
-		case StatusPending, StatusCompleted, StatusCancelled:
-		case StatusInProgress:
-			inProgress++
+		case StatusPending, StatusCompleted, StatusCancelled, StatusInProgress:
 		default:
 			return fmt.Errorf("task list: invalid status for step %d", index+1)
 		}
-	}
-
-	if inProgress > 1 {
-		return errors.New("task list: at most one item may be in progress")
 	}
 
 	return nil
@@ -409,7 +464,7 @@ func ValidateSnapshot(snapshot Snapshot) error {
 // takes.
 func validSnapshotCounts(snapshot Snapshot) bool {
 	return snapshot.Completed >= 0 && snapshot.InProgress >= 0 && snapshot.Cancelled >= 0 &&
-		snapshot.Total >= 0 && snapshot.Total <= MaxItems && snapshot.InProgress <= 1 &&
+		snapshot.Total >= 0 && snapshot.Total <= MaxItems &&
 		snapshot.Completed+snapshot.InProgress+snapshot.Cancelled <= snapshot.Total
 }
 
@@ -420,9 +475,16 @@ func sameSnapshotCounts(expected, actual Snapshot) bool {
 		expected.Cancelled == actual.Cancelled
 }
 
-// Project returns the latest applicable update_plan projection in a transcript.
-// A call that cannot be applied leaves the previous state alone, so a malformed
-// or refused call cannot corrupt the plan.
+// IsToolName reports whether name is the current todo_write tool or the
+// legacy update_plan name kept for transcript replay.
+func IsToolName(name string) bool {
+	return name == ToolName || name == LegacyToolName
+}
+
+// Project returns the latest applicable todo_write projection in a transcript.
+// Historical update_plan calls are folded with their original replace-by-default
+// semantics. A call that cannot be applied leaves the previous state alone, so a
+// malformed or refused call cannot corrupt the plan.
 func Project(messages []ai.Message) Snapshot {
 	var snapshot Snapshot
 
@@ -437,7 +499,9 @@ func Project(messages []ai.Message) Snapshot {
 	return snapshot
 }
 
-// FromMessage returns the last valid update_plan call in one assistant message.
+// FromMessage returns the last valid todo_write or legacy update_plan call in
+// one assistant message. The legacy marker changes only the merge default; an
+// explicit merge value means the same thing in both contracts.
 func FromMessage(message ai.Message) (Update, bool) {
 	assistant, ok := message.(ai.AssistantMessage)
 	if !ok {
@@ -450,12 +514,13 @@ func FromMessage(message ai.Message) (Update, bool) {
 
 	for _, part := range assistant.Parts {
 		call, ok := part.(ai.ToolCallPart)
-		if !ok || call.Name != ToolName {
+		if !ok || !IsToolName(call.Name) {
 			continue
 		}
 
 		update, err := Decode(call.Args)
 		if err == nil {
+			update.legacy = call.Name == LegacyToolName
 			result = update
 			found = true
 		}
@@ -465,9 +530,11 @@ func FromMessage(message ai.Message) (Update, bool) {
 }
 
 func cloneUpdate(update Update) Update {
-	update.Plan = cloneItems(update.Plan)
+	cloned := update
+	cloned.Plan = cloneItems(update.Plan)
+	cloned.legacy = update.legacy
 
-	return update
+	return cloned
 }
 
 // cloneItems detaches an item list, including each item's meta object.

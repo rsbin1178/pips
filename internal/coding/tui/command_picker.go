@@ -45,12 +45,13 @@ var commands = []commandDescriptor{
 	// turn untouched, so those surfaces stay reachable while it streams. The
 	// actions inside them that do change the runtime remain idle-only.
 	{name: "view-plan", aliases: []string{"show-plan", "plan-view"}, description: "preview the saved session plan"},
+	{name: "todos", aliases: []string{"plan-checklist", "checklist"}, description: "review the model's todo checklist"},
 	{name: "mode", description: "switch Agent or Plan operating mode", idleOnly: true},
 	{name: "agents", description: "inspect read-only specialist runs"},
 	{name: commandTeam, description: "propose or inspect a coding Team", idleOnly: true, arguments: true},
 	{name: "skills", description: "enable or disable project Skills"},
 	{name: commandMCP, description: "inspect MCP server connections"},
-	{name: "model", description: "switch the process-local model", idleOnly: true},
+	{name: "model", description: "switch model, variant, and reasoning (saved as default)", idleOnly: true},
 	{name: "copy", description: "copy an assistant reply (default: the latest) to the clipboard and a file", arguments: true},
 	{name: "export", description: "write the loaded conversation to a Markdown file", arguments: true},
 	{name: commandFind, aliases: []string{"search"}, description: "search the managed conversation", arguments: true},
@@ -167,7 +168,7 @@ func (m *Model) updateCommandPickerKey(message tea.KeyPressMsg) (tea.Model, tea.
 	return m, nil
 }
 
-//nolint:gocyclo // The closed command inventory is dispatched in one auditable switch.
+//nolint:funlen,gocyclo // The closed command inventory is dispatched in one auditable switch.
 func (m *Model) executeCommand(command commandDescriptor) (tea.Model, tea.Cmd) {
 	if command.idleOnly && m.actionContext() != contextIdle {
 		m.picker.err = fmt.Errorf("/%s is available only while idle", command.name)
@@ -213,6 +214,12 @@ func (m *Model) executeCommand(command commandDescriptor) (tea.Model, tea.Cmd) {
 		m.restoreCommandComposer(previous)
 
 		return m, m.startPlanView()
+	case "todos":
+		previous := m.picker.previousComposer
+		m.closeCommandPicker(false)
+		m.restoreCommandComposer(previous)
+
+		return m, m.openTodoDetailRoute()
 	case "mode":
 		previous := m.picker.previousComposer
 		m.closeCommandPicker(false)

@@ -20,6 +20,7 @@ const (
 	keyCtrlG      = "ctrl+g"
 	keyCtrlH      = "ctrl+h"
 	keyCtrlO      = "ctrl+o"
+	keyCtrlP      = "ctrl+p"
 	keyTab        = "tab"
 	keyCtrlC      = "ctrl+c"
 	keyCtrlQ      = "ctrl+q"
@@ -70,6 +71,7 @@ const (
 	actionTranscript actionID = "transcript"
 	actionCopy       actionID = "copy_reply"
 	actionSearch     actionID = "search"
+	actionTodo       actionID = "todo_checklist"
 	// actionToggleMouseCapture is the Ctrl+R binding: it releases the terminal's
 	// mouse capture so the terminal's own selection, copy and link handling work, and
 	// takes it back again. The choice is per session; `[tui] mouse = false` remains the
@@ -144,6 +146,15 @@ var defaultActions = []actionBinding{
 		Contexts: []actionContext{contextIdle, contextRunning, contextPaused},
 		Keys:     []string{keyCtrlT},
 		Label:    "latest details",
+	},
+	{
+		// Ctrl+P opens the standalone todo_write checklist. It is the pips
+		// equivalent of Grok Build's dedicated todo pane, kept as a page so it
+		// never competes with the transient tasks strip.
+		ID:       actionTodo,
+		Contexts: []actionContext{contextIdle, contextRunning, contextPaused},
+		Keys:     []string{keyCtrlP},
+		Label:    "todo checklist",
 	},
 	{
 		ID:       actionTranscript,

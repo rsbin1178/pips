@@ -22,17 +22,23 @@ func NewTaskCatalog(plan func() tasklist.Snapshot) (*catalog.Catalog, error) {
 	}
 	// SchemaFor lists every field as required. The fold decides what each mode
 	// needs — a replace requires a step per item, a merge may carry only an id
-	// and a status — so only the plan list itself is demanded, and the item
-	// fields and the update's explanation and merge stay optional.
-	if planSchema := schema.Properties["plan"]; planSchema != nil && planSchema.Items != nil {
-		planSchema.Items.Required = nil
+	// and a status, and a clear carries no items — so no field is demanded
+	// here; validation enforces the chosen mode.
+	if planSchema := schema.Properties["plan"]; planSchema != nil {
+		if planSchema.Items != nil {
+			planSchema.Items.Required = nil
+		}
+
+		planSchema.Extra = map[string]json.RawMessage{
+			"maxItems": json.RawMessage("64"),
+		}
 	}
 
-	schema.Required = []string{"plan"}
+	schema.Required = nil
 
 	tool := &taskTool{plan: plan, decl: ai.Tool{
 		Name:        tasklist.ToolName,
-		Description: "Record the task plan and its current progress. Omit merge (or set it false) to replace the complete list, or set merge true and send {id, status} to update items by id — a status-only flip is just {id, status}. Keep at most one step in_progress and mark a genuinely blocked step cancelled instead of leaving it in progress.",
+		Description: "Create or update the task plan and its current progress. The user sees this list live. Send merge false to replace the complete list with 1-64 items; merge defaults to true, so send {id, status} to update items by id and a status-only flip is just {id, status}. Send clear true with no items, or merge false with an empty plan, to remove the checklist. Prefer one step in_progress when work is serial; multiple may be in progress only while parallel work is genuinely running. Mark a genuinely blocked step cancelled instead of leaving it in progress.",
 		InputSchema: schema,
 	}}
 

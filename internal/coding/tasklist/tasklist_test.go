@@ -41,7 +41,6 @@ func TestDecodeRejectsUnsafeUpdates(t *testing.T) {
 		"unknown":       `{"plan":[{"step":"A","status":"pending"}],"extra":true}`,
 		"duplicate key": `{"plan":[{"step":"A","step":"B","status":"pending"}]}`,
 		"bad status":    `{"plan":[{"step":"A","status":"running"}]}`,
-		"two active":    `{"plan":[{"step":"A","status":"in_progress"},{"step":"B","status":"in_progress"}]}`,
 		"blank step":    `{"plan":[{"step":" ","status":"pending"}]}`,
 		"trailing json": `{"plan":[{"step":"A","status":"pending"}]} {}`,
 	}
@@ -77,6 +76,72 @@ func TestDecodeRejectsUnsafeUpdates(t *testing.T) {
 // TestDecodeAcceptsCancelledAndMeta pins the two additions: a cancelled step is
 // a valid terminal status that never counts as in progress, and an item's meta
 // object round-trips within its bound.
+// TestClearRemovesThePlan pins the explicit clear operation: it is the only
+// way to fold an empty plan, and it rejects items and merge in the same call.
+func TestClearRemovesThePlan(t *testing.T) {
+	t.Parallel()
+
+	current, err := tasklist.Apply(tasklist.Snapshot{}, tasklist.Update{Plan: []tasklist.Item{{
+		Step: "Inspect", Status: tasklist.StatusInProgress,
+	}}})
+	require.NoError(t, err)
+	require.Equal(t, 1, current.Total)
+
+	update, err := tasklist.Decode([]byte(`{"clear":true,"explanation":"done"}`))
+	require.NoError(t, err)
+	folded, err := tasklist.Apply(current, update)
+	require.NoError(t, err)
+	assert.Empty(t, folded.Items)
+	assert.Zero(t, folded.Total)
+
+	_, err = tasklist.Decode([]byte(`{"clear":true,"plan":[{"step":"Inspect"}]}`))
+	require.Error(t, err)
+	merge := true
+	_, err = tasklist.Apply(current, tasklist.Update{Clear: true, Merge: &merge})
+	require.Error(t, err)
+}
+
+// TestMultipleInProgressAreAccepted pins the Grok Build-style policy: parallel
+// work may have more than one active item; the tool treats the count as a plan
+// choice rather than a validation error.
+func TestMultipleInProgressAreAccepted(t *testing.T) {
+	t.Parallel()
+
+	update, err := tasklist.Decode([]byte(`{"plan":[
+		{"step":"Audit A","status":"in_progress"},
+		{"step":"Audit B","status":"in_progress"},
+		{"step":"Audit C","status":"in_progress"}
+	]}`))
+	require.NoError(t, err)
+	folded, err := tasklist.Apply(tasklist.Snapshot{}, update)
+	require.NoError(t, err)
+	assert.Equal(t, 3, folded.Total)
+	assert.Equal(t, 3, folded.InProgress)
+}
+
+// TestExplicitEmptyReplaceClearsThePlan pins the Grok Build-compatible clear
+// path: merge false with no items removes the checklist, while an omitted merge
+// still refuses an empty plan.
+func TestExplicitEmptyReplaceClearsThePlan(t *testing.T) {
+	t.Parallel()
+
+	current, err := tasklist.Apply(tasklist.Snapshot{}, tasklist.Update{Plan: []tasklist.Item{{
+		Step: "Inspect", Status: tasklist.StatusInProgress,
+	}}})
+	require.NoError(t, err)
+
+	update, err := tasklist.Decode([]byte(`{"merge":false,"plan":[]}`))
+	require.NoError(t, err)
+	folded, err := tasklist.Apply(current, update)
+	require.NoError(t, err)
+	assert.Empty(t, folded.Items)
+	assert.Zero(t, folded.Total)
+
+	_, err = tasklist.Decode([]byte(`{"plan":[]}`))
+	require.Error(t, err, "an empty plan without an explicit replace still has a hint")
+	assert.Contains(t, err.Error(), "clear true")
+}
+
 func TestDecodeAcceptsCancelledAndMeta(t *testing.T) {
 	t.Parallel()
 
@@ -298,15 +363,19 @@ func TestApplyMergeKeepsOmittedFields(t *testing.T) {
 func TestApplyReplaceRebuildsAndDefaults(t *testing.T) {
 	t.Parallel()
 
-	current, err := tasklist.Apply(tasklist.Snapshot{}, tasklist.Update{Plan: []tasklist.Item{
-		{Step: "Old", Status: tasklist.StatusCompleted},
-	}})
+	current, err := tasklist.Apply(tasklist.Snapshot{}, tasklist.Update{
+		Merge: new(false),
+		Plan:  []tasklist.Item{{Step: "Old", Status: tasklist.StatusCompleted}},
+	})
 	require.NoError(t, err)
 
-	folded, err := tasklist.Apply(current, tasklist.Update{Plan: []tasklist.Item{
-		{ID: "fresh"},
-		{Step: "Second", Status: tasklist.StatusInProgress},
-	}})
+	folded, err := tasklist.Apply(current, tasklist.Update{
+		Merge: new(false),
+		Plan: []tasklist.Item{
+			{ID: "fresh"},
+			{Step: "Second", Status: tasklist.StatusInProgress},
+		},
+	})
 	require.NoError(t, err)
 
 	require.Len(t, folded.Items, 2)
@@ -352,9 +421,9 @@ func TestApplyRefusesDuplicateIDAndNamesIt(t *testing.T) {
 	assert.Contains(t, err.Error(), `"dup"`)
 }
 
-// TestApplyRefusesAFoldWithTwoInProgress pins the folded-state rule: a merge
-// that would leave two items in progress is refused.
-func TestApplyRefusesAFoldWithTwoInProgress(t *testing.T) {
+// TestApplyAllowsAFoldWithTwoInProgress pins the aligned policy: a merge may
+// leave multiple items active for genuinely parallel work.
+func TestApplyAllowsAFoldWithTwoInProgress(t *testing.T) {
 	t.Parallel()
 
 	current, err := tasklist.Apply(tasklist.Snapshot{}, tasklist.Update{Plan: []tasklist.Item{
@@ -363,11 +432,12 @@ func TestApplyRefusesAFoldWithTwoInProgress(t *testing.T) {
 	}})
 	require.NoError(t, err)
 
-	_, err = tasklist.Apply(current, tasklist.Update{
+	folded, err := tasklist.Apply(current, tasklist.Update{
 		Merge: new(true),
 		Plan:  []tasklist.Item{{ID: "Second", Status: tasklist.StatusInProgress}},
 	})
-	require.Error(t, err)
+	require.NoError(t, err)
+	assert.Equal(t, 2, folded.InProgress)
 }
 
 // TestApplyRefusesTheSixtyFifthItem pins the folded item bound: a merge that
@@ -422,7 +492,7 @@ func TestProjectIgnoresACallThatCannotBeApplied(t *testing.T) {
 	t.Parallel()
 
 	replace := `{"plan":[{"step":"Inspect","status":"in_progress"},{"step":"Implement","status":"pending"}]}`
-	refused := `{"merge":true,"plan":[{"id":"Implement","status":"in_progress"}]}`
+	refused := `{"merge":true,"plan":[{"id":"Implement","status":"running"}]}`
 	messages := []ai.Message{
 		ai.Assistant(ai.ToolCallPart{ID: "1", Name: tasklist.ToolName, Args: ai.JSON(replace)}),
 		ai.Assistant(ai.ToolCallPart{ID: "2", Name: tasklist.ToolName, Args: ai.JSON(refused)}),
@@ -436,35 +506,31 @@ func TestProjectIgnoresACallThatCannotBeApplied(t *testing.T) {
 	assert.Equal(t, "Implement", snapshot.Items[1].Step)
 }
 
-// TestApplyAutoUpgradeNet pins the reference's safety net: a status-only call
-// that omits merge (or sets it false) is applied as a merge, while any call that
-// carries a step, names an unknown id, or runs on an empty plan replaces.
+// TestApplyAutoUpgradeNet pins the reference's safety net: an explicit
+// merge=false status-only call is applied as a merge, while a call that carries
+// a step, names an unknown id, or runs on an empty plan replaces.
 func TestApplyAutoUpgradeNet(t *testing.T) {
 	t.Parallel()
 
-	base, err := tasklist.Apply(tasklist.Snapshot{}, tasklist.Update{Plan: []tasklist.Item{
-		{Step: "Inspect", Status: tasklist.StatusInProgress},
-		{Step: "Implement", Status: tasklist.StatusPending},
-	}})
+	base, err := tasklist.Apply(tasklist.Snapshot{}, tasklist.Update{
+		Merge: new(false),
+		Plan: []tasklist.Item{
+			{Step: "Inspect", Status: tasklist.StatusInProgress},
+			{Step: "Implement", Status: tasklist.StatusPending},
+		},
+	})
 	require.NoError(t, err)
 
 	statusOnly := []tasklist.Item{{ID: "Inspect", Status: tasklist.StatusCompleted}}
-
-	for name, merge := range map[string]*bool{"absent": nil, "false": new(false)} {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-
-			folded, err := tasklist.Apply(base, tasklist.Update{Merge: merge, Plan: statusOnly})
-			require.NoError(t, err)
-			require.Len(t, folded.Items, 2)
-			assert.Equal(t, tasklist.StatusCompleted, folded.Items[0].Status)
-			assert.Equal(t, "Inspect", folded.Items[0].Step)
-			assert.Equal(t, tasklist.StatusPending, folded.Items[1].Status)
-		})
-	}
+	folded, err := tasklist.Apply(base, tasklist.Update{Merge: new(false), Plan: statusOnly})
+	require.NoError(t, err)
+	require.Len(t, folded.Items, 2)
+	assert.Equal(t, tasklist.StatusCompleted, folded.Items[0].Status)
+	assert.Equal(t, "Inspect", folded.Items[0].Step)
+	assert.Equal(t, tasklist.StatusPending, folded.Items[1].Status)
 
 	// Any step in the call means the model wrote a full list, so it replaces.
-	folded, err := tasklist.Apply(base, tasklist.Update{Plan: []tasklist.Item{
+	folded, err = tasklist.Apply(base, tasklist.Update{Merge: new(false), Plan: []tasklist.Item{
 		{ID: "Inspect", Step: "Inspect again", Status: tasklist.StatusCompleted},
 	}})
 	require.NoError(t, err)
@@ -474,7 +540,7 @@ func TestApplyAutoUpgradeNet(t *testing.T) {
 	// One item with a step is enough: the net needs every item step-less, so
 	// this replaces — the omitted status defaults to pending rather than the
 	// stored in_progress being kept.
-	folded, err = tasklist.Apply(base, tasklist.Update{Plan: []tasklist.Item{
+	folded, err = tasklist.Apply(base, tasklist.Update{Merge: new(false), Plan: []tasklist.Item{
 		{ID: "Inspect"},
 		{ID: "Implement", Step: "Implement anew"},
 	}})
@@ -484,7 +550,7 @@ func TestApplyAutoUpgradeNet(t *testing.T) {
 	assert.Equal(t, "Implement anew", folded.Items[1].Step)
 
 	// A status-only call naming an unknown id replaces, which adds that item.
-	folded, err = tasklist.Apply(base, tasklist.Update{Plan: []tasklist.Item{
+	folded, err = tasklist.Apply(base, tasklist.Update{Merge: new(false), Plan: []tasklist.Item{
 		{ID: "unknown", Status: tasklist.StatusPending},
 	}})
 	require.NoError(t, err)
@@ -492,11 +558,43 @@ func TestApplyAutoUpgradeNet(t *testing.T) {
 	assert.Equal(t, "unknown", folded.Items[0].ID)
 
 	// The net never fires on an empty plan.
-	folded, err = tasklist.Apply(tasklist.Snapshot{}, tasklist.Update{Plan: []tasklist.Item{
+	folded, err = tasklist.Apply(tasklist.Snapshot{}, tasklist.Update{Merge: new(false), Plan: []tasklist.Item{
 		{ID: "fresh", Status: tasklist.StatusCompleted},
 	}})
 	require.NoError(t, err)
 	require.Len(t, folded.Items, 1)
 	assert.Equal(t, "fresh", folded.Items[0].Step)
 	assert.Equal(t, tasklist.StatusCompleted, folded.Items[0].Status)
+}
+
+// TestTodoWriteDefaultsToMerge pins the renamed tool's default: a call that
+// omits merge updates by id instead of replacing the whole list. A legacy
+// update_plan call keeps the old replace default.
+func TestTodoWriteDefaultsToMerge(t *testing.T) {
+	t.Parallel()
+
+	base, err := tasklist.Apply(tasklist.Snapshot{}, tasklist.Update{Merge: new(false), Plan: []tasklist.Item{
+		{Step: "Inspect", Status: tasklist.StatusInProgress},
+		{Step: "Implement", Status: tasklist.StatusPending},
+	}})
+	require.NoError(t, err)
+
+	folded, err := tasklist.Apply(base, tasklist.Update{Plan: []tasklist.Item{
+		{ID: "Inspect", Step: "Inspect again", Status: tasklist.StatusCompleted},
+	}})
+	require.NoError(t, err)
+	require.Len(t, folded.Items, 2, "todo_write merges by default")
+	assert.Equal(t, "Inspect again", folded.Items[0].Step)
+	assert.Equal(t, tasklist.StatusPending, folded.Items[1].Status)
+
+	legacy := ai.Assistant(ai.ToolCallPart{
+		ID: "legacy-1", Name: tasklist.LegacyToolName,
+		Args: ai.JSON(`{"plan":[{"step":"Only","status":"pending"}]}`),
+	})
+	update, ok := tasklist.FromMessage(legacy)
+	require.True(t, ok)
+	folded, err = tasklist.Apply(base, update)
+	require.NoError(t, err)
+	require.Len(t, folded.Items, 1, "legacy update_plan still replaces by default")
+	assert.Equal(t, "Only", folded.Items[0].Step)
 }

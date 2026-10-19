@@ -11,7 +11,7 @@ import (
 
 const (
 	// planNudgeTurnsWithoutWrite is the reference's turns_since_todo_write: the
-	// nudge appears after this many turns with no update_plan call.
+	// nudge appears after this many turns with no todo_write call.
 	planNudgeTurnsWithoutWrite = 3
 	// planNudgeInterval is the reference's turns_between_reminders: the nudge
 	// fires at most once per this many turns.
@@ -30,7 +30,7 @@ const todoNudgeText = "You have not updated the task plan recently. " +
 // planNudgeText renders the periodic todo nudge for one turn, or "" when the
 // thresholds are not met. It reads and marks the runtime's own counters, so the
 // turn that carries the nudge is the one that resets the interval, and only that
-// one turn carries it. The nudge is user-turn only and only where update_plan is
+// one turn carries it. The nudge is user-turn only and only where todo_write is
 // offered, so it never names a tool the turn cannot call.
 func (r *Runtime) planNudgeText(current *interaction) string {
 	if r == nil || current == nil || current.source != InteractionSourceUser {
@@ -50,7 +50,7 @@ func (r *Runtime) planNudgeText(current *interaction) string {
 	return todoNudgeText
 }
 
-// markPlanWritten records a valid update_plan call in the turn now running, so
+// markPlanWritten records a valid todo_write call in the turn now running, so
 // the turn's end resets the nudge counters.
 func (r *Runtime) markPlanWritten() {
 	if r == nil {

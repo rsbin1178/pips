@@ -210,7 +210,7 @@ func TestToolCompactProjectionOmitsUnsafePaths(t *testing.T) {
 	)
 	assert.NotContains(t, rendered, "/Users/example")
 	assert.NotContains(t, rendered, "../credentials")
-	assert.Contains(t, rendered, "Read [invalid path]")
+	assert.Contains(t, rendered, "Read …/private.go")
 	assert.Contains(t, rendered, "custom.lookup")
 }
 

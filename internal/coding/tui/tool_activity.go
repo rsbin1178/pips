@@ -295,6 +295,16 @@ func describeToolActivities(scan *toolScanState, cache *toolProjectionCache) []t
 		record.described = true
 	}
 
+	// Grok Build suppresses todo_write calls from the scrollback and lets the
+	// dedicated todo surface carry the state. pips keeps that behavior: the
+	// transient spinner still comes from runningToolActivities, a completed call
+	// leaves no card, and a failure stays visible as an error card.
+	activities = slices.DeleteFunc(activities, func(activity toolActivity) bool {
+		return activity.class == toolClassTaskList &&
+			activity.state != toolStateFailed &&
+			activity.state != toolStateInterrupted
+	})
+
 	sort.SliceStable(activities, func(left, right int) bool {
 		if activities[left].position != activities[right].position {
 			return activities[left].position < activities[right].position
@@ -425,7 +435,7 @@ func describeToolCall(call coding.ToolCall) (toolActivityClass, string, string) 
 		)
 	case toolNamePatch:
 		return toolClassPatch, "Update", workspaceLabel
-	case tasklist.ToolName:
+	case tasklist.ToolName, tasklist.LegacyToolName:
 		return toolClassTaskList, "", ""
 	case harness.SkillToolName:
 		return toolClassGeneric, "Loaded skill", toolArgumentString(arguments, "name")
@@ -459,8 +469,15 @@ func subjectInPath(subject, path string) string {
 func safeWorkspaceToolPath(value string) string {
 	value = oneLineToolText(value)
 	clean := path.Clean(value)
-	if value != "" && (path.IsAbs(value) || filepath.IsAbs(value) ||
-		clean == ".." || strings.HasPrefix(clean, "../")) {
+	if value != "" && (path.IsAbs(value) || filepath.IsAbs(value)) {
+		base := filepath.Base(value)
+		if base == "" || base == "." || base == string(filepath.Separator) {
+			return "[absolute path]"
+		}
+
+		return "…/" + base
+	}
+	if value != "" && (clean == ".." || strings.HasPrefix(clean, "../")) {
 		return "[invalid path]"
 	}
 
@@ -835,19 +852,22 @@ func isShellExecutable(value string) bool {
 	}
 }
 
-// taskListActivityLabel names the update_plan Tool the way the user sees it.
+// taskListActivityLabel names the todo_write Tool the way the user sees it.
+// Legacy update_plan calls render through the same label. The running form is
+// the transient spinner; a completed call is suppressed from the timeline, while
+// a failed or interrupted call stays visible as an error card.
 func taskListActivityLabel(state toolActivityState) string {
 	switch state {
 	case toolStateRunning:
-		return "Updating plan"
+		return "Updating todo list"
 	case toolStateFailed:
-		return "Plan update failed"
+		return "Todo update failed"
 	case toolStateInterrupted:
-		return "Plan update interrupted"
+		return "Todo update interrupted"
 	case toolStateSucceeded:
-		return "Updated plan"
+		return "Updated todo list"
 	default:
-		return "Update plan"
+		return "Update todo list"
 	}
 }
 

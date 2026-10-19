@@ -58,7 +58,7 @@ func freshTurnReminder(request ai.Request) string {
 }
 
 // TestRuntimeTaskToolReportsTheFoldedPlan pins the provider wiring: the
-// update_plan Tool folds a merge onto the runtime's own projection, so a
+// todo_write Tool folds a merge onto the runtime's own projection, so a
 // status-only flip reports the plan's real totals rather than the call's count.
 func TestRuntimeTaskToolReportsTheFoldedPlan(t *testing.T) {
 	t.Parallel()
@@ -88,7 +88,7 @@ func TestRuntimeTaskToolReportsTheFoldedPlan(t *testing.T) {
 }
 
 // TestRuntimeTodoNudgeFiresAfterThreeTurnsWithoutAPlanWrite pins the periodic
-// nudge: it appears on the fourth turn with no update_plan call and then not
+// nudge: it appears on the fourth turn with no todo_write call and then not
 // again within five turns.
 func TestRuntimeTodoNudgeFiresAfterThreeTurnsWithoutAPlanWrite(t *testing.T) {
 	t.Parallel()
@@ -127,7 +127,7 @@ func TestRuntimeTodoNudgeFiresAfterThreeTurnsWithoutAPlanWrite(t *testing.T) {
 	}
 }
 
-// TestRuntimeTodoNudgeResetsOnAPlanWrite pins the reset: a valid update_plan
+// TestRuntimeTodoNudgeResetsOnAPlanWrite pins the reset: a valid todo_write
 // call restarts the count, so the next nudge waits for a full run of turns.
 func TestRuntimeTodoNudgeResetsOnAPlanWrite(t *testing.T) {
 	t.Parallel()

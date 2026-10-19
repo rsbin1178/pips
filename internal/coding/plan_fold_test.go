@@ -115,20 +115,20 @@ func TestLegacyPlanShrinkAndStatusFlipReplaysExactly(t *testing.T) {
 	t.Parallel()
 
 	replace := ai.Assistant(ai.ToolCallPart{
-		ID: "task-1", Name: tasklist.ToolName,
+		ID: "task-1", Name: tasklist.LegacyToolName,
 		Args: ai.JSON(`{"plan":[` +
 			`{"step":"Inspect","status":"in_progress"},` +
 			`{"step":"Implement","status":"pending"},` +
 			`{"step":"Verify","status":"pending"}]}`),
 	})
 	shrink := ai.Assistant(ai.ToolCallPart{
-		ID: "task-2", Name: tasklist.ToolName,
+		ID: "task-2", Name: tasklist.LegacyToolName,
 		Args: ai.JSON(`{"plan":[` +
 			`{"step":"Inspect","status":"completed"},` +
 			`{"step":"Implement","status":"in_progress"}]}`),
 	})
 	statusFlip := ai.Assistant(ai.ToolCallPart{
-		ID: "task-3", Name: tasklist.ToolName,
+		ID: "task-3", Name: tasklist.LegacyToolName,
 		Args: ai.JSON(`{"plan":[` +
 			`{"step":"Inspect","status":"completed"},` +
 			`{"step":"Implement","status":"completed","meta":{"note":"done"}}]}`),
@@ -175,7 +175,7 @@ func TestRefusedPlanCallLeavesEverySiteAlone(t *testing.T) {
 	})
 	refused := ai.Assistant(ai.ToolCallPart{
 		ID: "task-2", Name: tasklist.ToolName,
-		Args: ai.JSON(`{"merge":true,"plan":[{"id":"Implement","status":"in_progress"}]}`),
+		Args: ai.JSON(`{"merge":true,"plan":[{"id":"Implement","status":"running"}]}`),
 	})
 	path := []harness.Entry{
 		{Kind: harness.KindMessage, ID: "entry-1", Message: replace},
