@@ -165,6 +165,7 @@ func (m *Model) claimPromptOwner() {
 	m.stopTeamWorkerRouteSubscription()
 	m.teamPanel.isFocused = false
 	m.teamPanel.isPeeking = false
+	m.tasksPane.focused = false
 	if m.picker.kind == pickerCommand {
 		m.closeCommandPicker(true)
 	}

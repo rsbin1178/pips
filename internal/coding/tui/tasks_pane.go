@@ -15,7 +15,6 @@ import (
 	"github.com/rsbin1178/pips/internal/coding"
 	"github.com/rsbin1178/pips/internal/coding/background"
 	"github.com/rsbin1178/pips/internal/coding/subagent"
-	"github.com/rsbin1178/pips/internal/coding/tasklist"
 )
 
 // tasksPaneGroup is one collapsible section of the tasks pane. The declaration
@@ -33,9 +32,10 @@ const (
 
 // tasksPaneGroupLabels is the section vocabulary in display order. Three groups
 // have a pips source today: Subagents projects the session's children, Tasks
-// projects the task plan, and Watchers projects its registered background tasks.
-// pips runs no workflows and keeps no list of one-shot background commands, so
-// those contribute no header and no rows.
+// projects one-shot background commands, and Watchers projects monitors. pips
+// runs no workflows, so that group contributes nothing. The todo_write
+// checklist lives in the status line and the standalone plan page rather than
+// this execution strip.
 var tasksPaneGroupLabels = [tasksPaneGroupCount]string{
 	"Workflows", "Subagents", "Tasks", "Watchers",
 }
@@ -64,8 +64,9 @@ const (
 
 	tasksPaneHeaderExpanded  = "▾"
 	tasksPaneHeaderCollapsed = "▸"
-	// backgroundTaskTag labels a watch row and backgroundCommandTag labels a
-	// backgrounded command's row, so neither is read as the other.
+	// backgroundTaskTag labels a monitor row under Watchers and
+	// backgroundCommandTag labels a one-shot command row under Tasks, so neither
+	// is read as the other.
 	backgroundTaskTag    = "Monitor"
 	backgroundCommandTag = "Command"
 )
@@ -89,11 +90,10 @@ type tasksPaneRow struct {
 	// one is set, and it is what the row's two actions address.
 	childID string
 	taskID  string
-	// plan marks a row projected from the task plan rather than a child or a
-	// background task. A plan row addresses no action, and planStatus is the
-	// step's own status.
-	plan       bool
-	planStatus tasklist.Status
+	// command marks a one-shot background command. It is what separates the
+	// Tasks section from Watchers: both rows carry a taskID, but only a command
+	// is a Task.
+	command bool
 	// tag labels a row whose source is not a child, so a watch is never read as
 	// one.
 	tag        string
@@ -314,13 +314,16 @@ func (m *Model) applyTasksPaneVisibility(running int) {
 	pane.prevRunning = running
 }
 
-// toggleTasksPane focuses the pane, revealing it if the automatic rule left it
-// hidden, and unfocuses it on the second press. A pane that has nothing to list
-// owns no keys, so the chord reveals it again instead of unfocusing it.
+// toggleTasksPane is the pane's visibility switch. The first press reveals and
+// focuses it; the second hides it and gives the keys back to the composer. Tab
+// and Esc remain focus-release gestures, so a reader can leave the pane visible
+// while typing.
 func (m *Model) toggleTasksPane() tea.Cmd {
 	wasVisible := m.activityClockVisible()
 	if m.tasksPaneFocused() {
 		m.tasksPane.focused = false
+		m.tasksPane.visible = false
+		m.tasksPane.openedByAuto = false
 
 		return nil
 	}
@@ -384,12 +387,13 @@ func (m *Model) tasksPaneRunning() bool {
 	return false
 }
 
-// tasksPaneRows projects every row the pane can show: the session's children,
-// its background tasks, and the projected task plan, in the section order,
-// running rows first. A finished row is listed only when the reader asked for
-// finished rows.
+// tasksPaneRows projects every row the pane can show: the session's children
+// and its background tasks, in the section order, running rows first. A
+// finished row is listed only when the reader asked for finished rows. Plan
+// state belongs to the status line and the standalone plan page, so it never
+// appears here.
 func (m *Model) tasksPaneRows() []tasksPaneRow {
-	rows := make([]tasksPaneRow, 0, len(m.state.Subagents)+len(m.state.BackgroundTasks)+len(m.state.Tasks.Items))
+	rows := make([]tasksPaneRow, 0, len(m.state.Subagents)+len(m.state.BackgroundTasks))
 	for _, child := range m.state.Subagents {
 		if child.ChildSessionID == "" {
 			continue
@@ -423,67 +427,7 @@ func (m *Model) tasksPaneRows() []tasksPaneRow {
 		return rows[left].label < rows[right].label
 	})
 
-	// Plan rows keep the plan's own order, so they are appended after the sort
-	// rather than alphabetized like the live rows.
-	for _, item := range m.state.Tasks.Items {
-		if row, ok := tasksPanePlanRow(item, m.tasksPane.showDone); ok {
-			rows = append(rows, row)
-		}
-	}
-
 	return rows
-}
-
-// tasksPanePlanRow projects one plan item into a row. A finished step follows
-// the same finished-rows rule as the other groups: it is listed only when the
-// reader asked for finished rows, so a fully finished plan paints no section at
-// all until then.
-func tasksPanePlanRow(item tasklist.Item, showDone bool) (tasksPaneRow, bool) {
-	label := oneLineToolText(item.Step)
-	if label == "" {
-		return tasksPaneRow{}, false
-	}
-	finished := item.Status == tasklist.StatusCompleted || item.Status == tasklist.StatusCancelled
-	if finished && !showDone {
-		return tasksPaneRow{}, false
-	}
-
-	return tasksPaneRow{
-		plan:       true,
-		planStatus: item.Status,
-		label:      label,
-		activity:   planItemStatusText(item.Status),
-		state:      planItemState(item.Status),
-	}, true
-}
-
-// planItemStatusText names one plan item's status for the pane's meta column.
-func planItemStatusText(status tasklist.Status) string {
-	switch status {
-	case tasklist.StatusInProgress:
-		return "in progress"
-	case tasklist.StatusCompleted:
-		return "completed"
-	case tasklist.StatusCancelled:
-		return "cancelled"
-	default:
-		return "pending"
-	}
-}
-
-// planItemState maps a plan status onto the child states the pane already tones
-// rows by, so a plan row reuses the shared palette.
-func planItemState(status tasklist.Status) subagent.State {
-	switch status {
-	case tasklist.StatusInProgress:
-		return subagent.StateRunning
-	case tasklist.StatusCompleted:
-		return subagent.StateSucceeded
-	case tasklist.StatusCancelled:
-		return subagent.StateCanceled
-	default:
-		return subagent.StateSucceeded
-	}
 }
 
 // tasksPaneBackgroundRow projects one registered background task into a row. A
@@ -502,7 +446,8 @@ func tasksPaneBackgroundRow(
 	}
 
 	return tasksPaneRow{
-		taskID: task.ID, tag: backgroundTaskTagFor(task.Kind),
+		taskID: task.ID, command: task.Kind == string(background.KindShell),
+		tag:       backgroundTaskTagFor(task.Kind),
 		label:     backgroundTaskRowLabel(task),
 		state:     backgroundTaskState(task),
 		running:   running,
@@ -531,6 +476,16 @@ func backgroundTaskRowLabel(task coding.BackgroundTaskLifecycle) string {
 	}
 
 	return oneLineToolText(task.Command)
+}
+
+// backgroundTaskDetailTitle names the page by the task's own kind, so a
+// one-shot command is not read as a watch.
+func backgroundTaskDetailTitle(task coding.BackgroundTaskLifecycle) string {
+	if task.Kind == string(background.KindShell) {
+		return "Command details"
+	}
+
+	return "Watch details"
 }
 
 // backgroundTaskStatusText names one task's outcome for a detail heading.
@@ -568,12 +523,12 @@ func tasksPaneRowLabel(child coding.SubagentState) string {
 	return subagentDisplayName(child.Identity, child.Role)
 }
 
-// tasksPaneGroupOf reports the section a row belongs to. A child is a
-// Subagent, a session-registered background task is a Watcher, and a projected
-// plan item is a Task.
+// tasksPaneGroupOf reports the section a row belongs to. A one-shot command is
+// a Task, a monitor is a Watcher, and a child is a Subagent. The taskID alone
+// cannot decide the section: both a command and a watch carry one.
 func tasksPaneGroupOf(row tasksPaneRow) tasksPaneGroup {
 	switch {
-	case row.plan:
+	case row.command:
 		return tasksPaneTasks
 	case row.taskID != "":
 		return tasksPaneWatchers
@@ -897,12 +852,10 @@ func (m *Model) tasksPaneRowLine(
 	if entry.row.running {
 		kill = tasksPaneKillLabel
 	}
-	// A plan row addresses no action, so it carries neither control; the two
-	// controls are what the hit map resolves a click against.
-	inspect := ""
-	if !entry.row.plan {
-		inspect = tasksPaneInspectLabel
-	}
+	// Every row opens a detail page, so every row carries the inspect control. A
+	// row that is not running carries no kill control; the controls are what the
+	// hit map resolves a click against.
+	inspect := tasksPaneInspectLabel
 	meta := strings.TrimSpace(strings.Join(
 		nonEmpty(m.tasksPaneRowMeta(entry.row, now), kill, inspect), "  ",
 	))
@@ -959,13 +912,8 @@ func (m *Model) tasksPaneRowTone(row tasksPaneRow) color.Color {
 }
 
 // tasksPaneRowIcon is the row's state mark: the shared spinner while the child
-// runs, and a settled mark once it stops. A plan row carries the checklist
-// glyph its own status uses, so the pane and the plan card read alike.
+// runs, and a settled mark once it stops.
 func (m *Model) tasksPaneRowIcon(row tasksPaneRow) string {
-	if row.plan {
-		return taskListGlyph(row.planStatus)
-	}
-
 	switch state := subagentToolState(row.state); state {
 	case toolStateSucceeded, toolStateFailed, toolStateInterrupted:
 		return toolActivityGlyph(state)
@@ -979,10 +927,6 @@ func (m *Model) tasksPaneRowIcon(row tasksPaneRow) string {
 func (m *Model) tasksPaneRowMeta(row tasksPaneRow, now time.Time) string {
 	elapsed := formatInteractionDuration(row.durationMS)
 	switch {
-	case row.plan:
-		// A plan step carries no clock: its meta is its status alone, so the
-		// pane never fabricates an elapsed time for it.
-		elapsed = ""
 	case !row.startedAt.IsZero():
 		// A background task carries its own start, so its clock does not depend
 		// on when this process first observed it.
@@ -1034,6 +978,9 @@ func (m *Model) updateTasksPaneReadyKey(message tea.KeyPressMsg) (tea.Model, tea
 	}
 	if message.String() == keyCtrlH {
 		return m, m.toggleTasksPaneHistory(), true
+	}
+	if message.String() == keyCtrlP {
+		return m, m.openTodoDetailRoute(), true
 	}
 	if m.tasksPaneFocused() {
 		model, command := m.updateTasksPaneKey(message)
@@ -1122,13 +1069,18 @@ func (m *Model) tasksPaneSelection() (tasksPaneRow, bool) {
 
 // inspectTasksPaneSelection opens the selected row's bounded detail. A child
 // opens its transcript through the one child route; a background task opens the
-// same detail surface a tool call does, because a watch has no transcript; a
-// plan row opens nothing.
+// same detail surface a Tool call does, because a watch has no transcript.
 func (m *Model) inspectTasksPaneSelection() tea.Cmd {
 	row, ok := m.tasksPaneSelection()
-	if !ok || row.plan {
+	if !ok {
 		return nil
 	}
+
+	return m.inspectTasksPaneRow(row)
+}
+
+// inspectTasksPaneRow opens one row's detail through the route its source owns.
+func (m *Model) inspectTasksPaneRow(row tasksPaneRow) tea.Cmd {
 	if row.taskID != "" {
 		return m.inspectBackgroundTask(row.taskID)
 	}
@@ -1137,11 +1089,10 @@ func (m *Model) inspectTasksPaneSelection() tea.Cmd {
 }
 
 // killTasksPaneSelection stops the selected row through the one control surface
-// its kind uses. A row that is not running affords nothing, and a plan row
-// affords no stop.
+// its kind uses. A row that is not running affords nothing.
 func (m *Model) killTasksPaneSelection() tea.Cmd {
 	row, ok := m.tasksPaneSelection()
-	if !ok || !row.running || row.plan || m.route.controlling {
+	if !ok || !row.running || m.route.controlling {
 		return nil
 	}
 	if row.taskID != "" {
@@ -1153,9 +1104,9 @@ func (m *Model) killTasksPaneSelection() tea.Cmd {
 
 // tasksPaneMouse resolves a pointer gesture against the painted pane. It only
 // consumes what it affords: a click on a control fires that control's action, a
-// click on a header toggles its section, and any other click inside the pane
-// selects the row it landed on. A gesture that misses the pane's rows stays the
-// transcript's, so a drag selection is not cut short by the strip.
+// click on a header toggles its section, and a click on a row opens that row's
+// detail. A gesture that misses the pane's rows stays the transcript's, so a
+// drag selection is not cut short by the strip.
 func (m *Model) tasksPaneMouse(message tea.MouseMsg) (tea.Cmd, bool) {
 	if !m.tasksPaneHit.painted || !m.tasksPaneVisible() {
 		return nil, false
@@ -1233,14 +1184,6 @@ func (m *Model) tasksPaneHitCommand(hit tasksPaneHitRow, column int) (tea.Cmd, b
 	}
 	row := rows[hit.index]
 
-	// A plan row affords neither control, so a click anywhere on it selects it.
-	if row.plan {
-		m.tasksPane.cursor = hit.index
-		m.tasksPane.focused = true
-
-		return redrawFrame(), true
-	}
-
 	if inColumnSpan(column, hit.killStart, hit.killEnd) && row.running {
 		if row.taskID != "" {
 			return m.killBackgroundTask(row.taskID), true
@@ -1248,17 +1191,14 @@ func (m *Model) tasksPaneHitCommand(hit tasksPaneHitRow, column int) (tea.Cmd, b
 
 		return m.cancelSubagent(row.childID), true
 	}
-	if inColumnSpan(column, hit.inspectStart, hit.inspectEnd) {
-		if row.taskID != "" {
-			return m.inspectBackgroundTask(row.taskID), true
-		}
 
-		return m.openSubagentRoute(row.childID), true
-	}
+	// A row is a document, not only a selection: a click anywhere else on it
+	// opens the same page its inspect control opens. The cursor still follows the
+	// click, so a reader who closes the page returns to the row they chose.
 	m.tasksPane.cursor = hit.index
 	m.tasksPane.focused = true
 
-	return redrawFrame(), true
+	return m.inspectTasksPaneRow(row), true
 }
 
 // inColumnSpan reports whether a frame column falls inside a painted control.
@@ -1372,7 +1312,7 @@ func (m *Model) applyBackgroundInspectResult(message backgroundInspectResultMsg)
 		return nil
 	}
 	if message.err != nil {
-		m.appendNotice("Watch details unavailable: " + safeDetailText(message.err.Error()))
+		m.appendNotice("Task details unavailable: " + safeDetailText(message.err.Error()))
 
 		return nil
 	}
@@ -1402,17 +1342,17 @@ func (m *Model) replaceWatchPage(view toolDetailView) {
 	m.route.offset = min(m.route.offset, m.toolDetailMaximumOffset())
 }
 
-// newBackgroundTaskDetailView renders one watch's page: its identity and state,
-// the command it runs, and the tail of its own output. The shape follows the
-// reference's background-task viewer, which shows the task's description and its
-// shell command above the streamed output; the reported task id and running flag
-// are what let the route follow a live watch.
+// newBackgroundTaskDetailView renders one background task's page: its identity
+// and state, the command it runs, and the tail of its own output. The shape
+// follows the reference's background-task viewer, which shows the task's
+// description and its shell command above the streamed output; the reported task
+// id and running flag are what let the route follow a live task.
 func newBackgroundTaskDetailView(inspection coding.BackgroundTaskInspection) toolDetailView {
 	task := inspection.Lifecycle()
 	state := subagentToolState(backgroundTaskState(task))
 
 	view := toolDetailView{
-		title: "Watch details", callIDs: nonEmpty(task.ID),
+		title: backgroundTaskDetailTitle(task), callIDs: nonEmpty(task.ID),
 		watchTaskID: task.ID, watchRunning: !task.Completed,
 	}
 	view.rows = append(view.rows, detailHeadingRow(

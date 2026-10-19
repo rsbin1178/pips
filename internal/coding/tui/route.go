@@ -193,6 +193,9 @@ func (m *Model) requestRouteOpen(request routeOpenRequest) tea.Cmd {
 	if !request.pending() {
 		return nil
 	}
+	// The route owns the keyboard from the request onward, including the window
+	// where a native scrollback write delays activation.
+	m.tasksPane.focused = false
 	if !request.hasPreviousComposer {
 		if m.route.hasPreviousComposer {
 			request.previousComposer = m.route.previousComposer.clone()
@@ -224,6 +227,10 @@ func (m *Model) requestRouteOpen(request routeOpenRequest) tea.Cmd {
 
 func (m *Model) activateRoute(request routeOpenRequest) tea.Cmd {
 	m.stopTeamWorkerRouteSubscription()
+	// A full-area route owns the keyboard. Leaving tasks-pane focus behind would
+	// make the pane reclaim keys when the route closes, including after the work
+	// that opened it has already stopped.
+	m.tasksPane.focused = false
 
 	switch request.kind {
 	case routeSessions:
@@ -358,6 +365,7 @@ func (m *Model) closeRouteToParent() tea.Cmd {
 			m.streamErr = err
 		}
 	}
+	m.syncTasksPane(time.Now())
 	m.setLayout()
 
 	// Held inspection output follows the catch-up, so the conversation keeps its

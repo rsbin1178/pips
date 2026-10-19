@@ -181,12 +181,9 @@ func TestPTYChildAndWatchPagesRenderAsContainers(t *testing.T) {
 		return !strings.Contains(harness.frame(cols, rows), "Watch details")
 	}, 30*time.Second, 10*time.Millisecond, "Escape leaves the watch page:\n%s", harness.frame(cols, rows))
 
-	// Esc gave the keys back to the composer, so the command picker answers
-	// again and the helper can leave through it.
-	harness.write("\x1b")
-	require.Eventually(t, func() bool {
-		return !strings.Contains(harness.frame(cols, rows), "› ")
-	}, 30*time.Second, 10*time.Millisecond, "Escape unfocuses the pane:\n%s", harness.frame(cols, rows))
+	// Closing the watch page releases the tasks-pane focus with the route, so
+	// the command picker answers without another Esc.
+	assert.NotContains(t, harness.frame(cols, rows), "› ")
 
 	harness.write("\x0bquit\r")
 	result := harness.waitForExit()
