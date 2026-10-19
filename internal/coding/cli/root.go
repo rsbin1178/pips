@@ -73,6 +73,7 @@ type Dependencies struct {
 	WorkingDir   func() (string, error)
 	SandboxProbe SandboxProbe
 	SystemProxy  SystemProxyProbe
+	ProxyProbe   ProxyProbe
 	Terminal     TerminalDetector
 	RunTUI       TUIRunner
 	RunSSH       SSHRunner
@@ -203,6 +204,10 @@ func defaultProcessDependencies(dependencies Dependencies) Dependencies {
 
 	if dependencies.SystemProxy == nil {
 		dependencies.SystemProxy = systemproxy.Probe
+	}
+
+	if dependencies.ProxyProbe == nil {
+		dependencies.ProxyProbe = nativeProxyProbe
 	}
 
 	if dependencies.Terminal == nil {

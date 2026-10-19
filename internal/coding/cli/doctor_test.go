@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -51,7 +52,7 @@ func TestEnsureDoctorTempRoot(t *testing.T) {
 		t.Parallel()
 
 		path := filepath.Join(t.TempDir(), "tmp")
-		require.NoError(t, os.Mkdir(path, 0o755))
+		require.NoError(t, os.Mkdir(path, 0o755)) //nolint:gosec // The test requires a public directory.
 		require.ErrorContains(t, ensureDoctorTempRoot(path), "owner-only")
 	})
 
@@ -61,6 +62,7 @@ func TestEnsureDoctorTempRoot(t *testing.T) {
 		root := t.TempDir()
 		target := filepath.Join(root, "target")
 		require.NoError(t, os.Mkdir(target, 0o700))
+
 		link := filepath.Join(root, "tmp")
 		require.NoError(t, os.Symlink(target, link))
 		require.ErrorContains(t, ensureDoctorTempRoot(link), "owner-only")
@@ -80,7 +82,9 @@ func TestDoctorProxyStatus(t *testing.T) {
 	}
 
 	status := doctorProxyStatus(t.Context(), Dependencies{
-		LookupEnv:   env(map[string]string{"https_proxy": "http://user:secret@proxy:3128"}),
+		LookupEnv: env(map[string]string{ //nolint:gosec // Test-only URL proves credentials are never printed.
+			"https_proxy": "http://user:secret@proxy:3128",
+		}),
 		SystemProxy: system,
 	})
 	assert.Equal(t, "network ok proxy=environment variable=https_proxy\n", status)
@@ -95,4 +99,25 @@ func TestDoctorProxyStatus(t *testing.T) {
 		LookupEnv: env(nil), SystemProxy: func(context.Context) string { return "" },
 	})
 	assert.Equal(t, "network ok proxy=none\n", status)
+
+	status = doctorProxyStatus(t.Context(), Dependencies{
+		LookupEnv: env(map[string]string{ //nolint:gosec // Test-only URL proves credentials are never printed.
+			"HTTPS_PROXY": "http://user:secret@proxy:3128",
+		}),
+		ProxyProbe: func(context.Context, string) ProxyProbeResult {
+			return ProxyProbeResult{OK: true, Latency: 12 * time.Millisecond}
+		},
+	})
+	assert.Equal(t, "network ok proxy=environment variable=HTTPS_PROXY probe=ok latency=12ms\n", status)
+	assert.NotContains(t, status, "secret")
+	assert.NotContains(t, status, "proxy:3128")
+
+	status = doctorProxyStatus(t.Context(), Dependencies{
+		LookupEnv: env(map[string]string{"https_proxy": "http://127.0.0.1:7890"}),
+		ProxyProbe: func(context.Context, string) ProxyProbeResult {
+			return ProxyProbeResult{Detail: "timeout"}
+		},
+	})
+	assert.Contains(t, status, "network warning proxy=environment variable=https_proxy probe=failed detail=timeout\n")
+	assert.Contains(t, status, "Next steps: check the proxy process")
 }
