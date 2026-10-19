@@ -16,11 +16,12 @@ const (
 )
 
 type service struct {
-	tree       *workspace.Tree
-	limits     Limits
-	patchFault patchFault
-	plan       *PlanFile
-	taskLog    *TaskLogRead
+	tree         *workspace.Tree
+	limits       Limits
+	patchFault   patchFault
+	plan         *PlanFile
+	taskLog      *TaskLogRead
+	sessionMedia *SessionMediaRead
 }
 
 // PlanFile is the injected plan-mode file boundary. The patch tool applies
@@ -46,6 +47,20 @@ type TaskLogRead struct {
 	Bytes int64
 }
 
+// SessionMediaRead is the injected exact-path read boundary for the current
+// session's media files. A session media file lives in the session directory,
+// outside the workspace tree, so the read Tool admits it by exact path and
+// reads it under this boundary's own byte bound. The Tool learns nothing about
+// directories: it asks this boundary whether one requested value is an admitted
+// media file. The runtime owns which paths are admitted.
+type SessionMediaRead struct {
+	// Admit reports the admitted path for one requested value, or false when the
+	// value names no media file this session owns.
+	Admit func(string) (string, bool)
+	// Bytes bounds an admitted media file's size.
+	Bytes int64
+}
+
 type catalogConfig struct {
 	shell          agent.Tool
 	monitor        agent.Tool
@@ -53,6 +68,7 @@ type catalogConfig struct {
 	knownIDs       KnownBackgroundIDs
 	readBackground ReadBackgroundTasks
 	taskLog        *TaskLogRead
+	sessionMedia   *SessionMediaRead
 	plan           *PlanFile
 }
 
@@ -200,6 +216,28 @@ func WithTaskLogRead(read TaskLogRead) CatalogOption {
 	}
 }
 
+// WithSessionMediaRead admits this session's media files to the read Tool. The
+// boundary resolves one exact path; the Tool never learns the session
+// directory, and a value it does not admit is refused as an outside-workspace
+// path. The runtime owns which paths are admitted, so the boundary is the only
+// extension point: a catalog built without it offers no session media read.
+func WithSessionMediaRead(read SessionMediaRead) CatalogOption {
+	return func(cfg *catalogConfig) error {
+		if read.Admit == nil || read.Bytes <= 0 {
+			return errors.New("coding tools: incomplete session media read boundary")
+		}
+
+		if cfg.sessionMedia != nil {
+			return errors.New("coding tools: session media read boundary already configured")
+		}
+
+		cloned := read
+		cfg.sessionMedia = &cloned
+
+		return nil
+	}
+}
+
 // NewCatalog returns the application-owned coding tool catalog.
 func NewCatalog(
 	tree *workspace.Tree,
@@ -226,10 +264,13 @@ func NewCatalog(
 		}
 	}
 
-	service := &service{tree: tree, limits: limits, plan: config.plan, taskLog: config.taskLog}
-	readTool := agent.Parallel(agent.NewTool(
+	service := &service{
+		tree: tree, limits: limits, plan: config.plan,
+		taskLog: config.taskLog, sessionMedia: config.sessionMedia,
+	}
+	readTool := agent.Parallel(agent.NewToolParts(
 		readName,
-		"Read a bounded range of lines from a workspace text file, or from a background task's own log by its output_file path. Use offset to continue truncated output.",
+		"Read a workspace file: text as a bounded range of lines, a PNG/JPEG/GIF image as an inline image, or a Jupyter notebook as bounded cell text. Also reads a background task's own log by its output_file path and a session media file by its admitted path. Use offset to continue truncated output.",
 		service.read,
 	))
 	lsTool := agent.Parallel(agent.NewTool(
@@ -254,7 +295,7 @@ func NewCatalog(
 	)
 
 	entries := []catalog.Entry{
-		localEntry(readTool, catalog.RiskRead, "filesystem"),
+		localEntry(readTool, catalog.RiskRead, "filesystem", "media", "document"),
 		localEntry(lsTool, catalog.RiskRead, "filesystem"),
 		localEntry(globTool, catalog.RiskRead, "filesystem", "search"),
 		localEntry(grepTool, catalog.RiskRead, "filesystem", "search"),
