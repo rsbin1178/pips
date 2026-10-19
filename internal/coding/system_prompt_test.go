@@ -205,13 +205,14 @@ func TestBuildCodingSystemPromptGuidesTaskProgressOnlyWhenAvailable(t *testing.T
 	}
 	prompt, err := buildCodingSystemPrompt(options)
 	require.NoError(t, err)
-	assert.Contains(t, prompt, "Use update_plan for non-trivial multi-step work")
-	assert.Contains(t, prompt, "exactly one step in_progress")
+	assert.Contains(t, prompt, "Use "+tasklist.ToolName+" for non-trivial multi-step work")
+	assert.Contains(t, prompt, "Prefer one step in_progress when work is serial")
+	assert.Contains(t, prompt, "Send clear true with no items")
 
 	options.ToolNames = []string{"read"}
 	prompt, err = buildCodingSystemPrompt(options)
 	require.NoError(t, err)
-	assert.NotContains(t, prompt, "Use update_plan")
+	assert.NotContains(t, prompt, "Use "+tasklist.ToolName)
 }
 
 func TestRuntimeInjectsMainSystemPromptAndProjectInstructions(t *testing.T) {
@@ -245,7 +246,7 @@ func TestRuntimeInjectsMainSystemPromptAndProjectInstructions(t *testing.T) {
 	assert.Contains(t, system, `"workspace_trusted": false`)
 	assert.Contains(t, system, `"apply_patch"`)
 	assert.Contains(t, system, `"spawn_subagent"`)
-	assert.Contains(t, system, `"update_plan"`)
+	assert.Contains(t, system, `"todo_write"`)
 }
 
 func TestRuntimeExplicitUserSkillIsInteractionScoped(t *testing.T) {

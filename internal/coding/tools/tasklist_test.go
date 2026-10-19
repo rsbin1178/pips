@@ -75,9 +75,9 @@ func TestTaskCatalogAutoUpgradeNetReportsTheFoldedPlan(t *testing.T) {
 	assert.JSONEq(t, `{"updated":true,"completed":1,"total":2}`, text)
 }
 
-// TestTaskCatalogRefusesAFoldThatWouldLeaveTwoInProgress pins the refusal: the
-// tool returns the fold error so the model sees it, and the plan is unchanged.
-func TestTaskCatalogRefusesAFoldThatWouldLeaveTwoInProgress(t *testing.T) {
+// TestTaskCatalogAllowsParallelInProgress pins the Grok Build-style policy: a
+// merge may make a second item active while another is already running.
+func TestTaskCatalogAllowsParallelInProgress(t *testing.T) {
 	t.Parallel()
 
 	plan := tasklist.Snapshot{
@@ -90,8 +90,9 @@ func TestTaskCatalogRefusesAFoldThatWouldLeaveTwoInProgress(t *testing.T) {
 	value, err := tools.NewTaskCatalog(func() tasklist.Snapshot { return plan })
 	require.NoError(t, err)
 
-	_, err = taskExec(t, value, `{"merge":true,"plan":[{"id":"Second","status":"in_progress"}]}`)
-	require.Error(t, err)
+	text, err := taskExec(t, value, `{"merge":true,"plan":[{"id":"Second","status":"in_progress"}]}`)
+	require.NoError(t, err)
+	assert.Contains(t, text, `"updated":true`)
 	assert.Equal(t, tasklist.StatusPending, plan.Items[1].Status, "the caller's plan is unchanged")
 }
 
@@ -104,7 +105,7 @@ func TestTaskCatalogReplaceResultIsUnchanged(t *testing.T) {
 	require.NoError(t, err)
 
 	text, err := taskExec(t, value,
-		`{"plan":[{"step":"Inspect","status":"completed"},{"step":"Implement","status":"pending"}]}`)
+		`{"merge":false,"plan":[{"step":"Inspect","status":"completed"},{"step":"Implement","status":"pending"}]}`)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"updated":true,"completed":1,"total":2}`, text)
 }
